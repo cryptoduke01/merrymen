@@ -50,10 +50,13 @@ function ruleFor(selector: string, at: string | null, property?: string): Rule {
   return matches[0]!;
 }
 
-// The compared button selectors contain only classes and a possible `button`
-// type. Include that type so the comparison follows their actual specificity.
+// The compared selectors use classes, attributes and simple pseudo-classes.
+// :where() adds no weight; the only type selectors compared are button/section.
 function specificity(selector: string): number {
-  return (selector.match(/\.[\w-]+/g)?.length ?? 0) * 100 + (/\bbutton\b/.test(selector) ? 1 : 0);
+  const weighted = selector.replace(/:where\([^)]*\)/g, "");
+  const classes = weighted.match(/\.[\w-]+|\[[^\]]+\]|:(?!:)[\w-]+/g)?.length ?? 0;
+  const types = weighted.match(/(?:^|[ >+~])(?:button|section)(?=[.#:\s>+~]|$)/g)?.length ?? 0;
+  return classes * 100 + types;
 }
 
 function wins(winner: Rule, selector: string, loser: Rule, otherSelector: string): void {
@@ -135,5 +138,59 @@ describe("the native search dialog's CSS", () => {
     const focus = ruleFor(".terminal-host .search-dialog-close:focus-visible", null);
     assert.equal(decl(focus, "outline"), "2px solid var(--tx)");
     assert.equal(decl(focus, "outline-offset"), "2px");
+  });
+});
+
+describe("owner connections and trade history remain reachable", () => {
+  const desktop = "@media (min-width: 1100px)";
+
+  it("keeps both named desktop sections visible despite the old positional hiding rules", () => {
+    const hidden = sheet("./terminal.css").filter(rule => decl(rule, "display") === "none")
+      .flatMap(rule => rule.selectors.filter(selector => selector.includes(".desktop-portfolio > section:"))
+        .map(selector => ({ rule, selector })));
+    assert.ok(hidden.some(({ selector }) => selector.includes('[data-screen="you"]')));
+    assert.ok(hidden.some(({ selector }) => selector.includes('[data-screen="agent"]')));
+    for (const section of ["desktop-connections", "desktop-trades-entry"]) {
+      const selector = `.terminal-host .app[data-screen] .desktop-portfolio > section.${section}`;
+      const visible = ruleFor(selector, desktop);
+      assert.equal(decl(visible, "display"), "block");
+      for (const old of hidden) {
+        assert.ok(specificity(selector) > specificity(old.selector), `${section} must remain visible regardless of stylesheet order`);
+      }
+    }
+  });
+
+  it("provides a touch-sized Trades & P&L link on every screen and viewport", () => {
+    const link = ruleFor(".terminal-host .owner-trades-link", null);
+    assert.equal(decl(link, "display"), "flex");
+    assert.equal(decl(link, "min-height"), "48px");
+    assert.equal(decl(link, "width"), "100%");
+    const compact = ruleFor(".terminal-host .desktop-trades-entry .owner-trades-link", desktop);
+    assert.equal(decl(compact, "min-height"), null, "desktop typography must not shrink the link's target");
+  });
+
+  it("styles the existing Telegram primary buttons without reducing their 48px target", () => {
+    const selectors = [
+      ".agent-strip-action > .mm-btn.primary",
+      ".agent-strip-action .tg-one > .mm-btn.primary",
+    ];
+    const terminal = sheet("./terminal.css");
+    for (const suffix of selectors) {
+      const base = terminal.find(rule => rule.at === null && rule.selectors.includes(`:where(.terminal-host) ${suffix}`));
+      assert.ok(base);
+      assert.equal(decl(base, "min-height"), "48px");
+      const polish = ruleFor(`.terminal-host .desktop-connections ${suffix}`, desktop);
+      assert.equal(decl(polish, "min-height"), null);
+      assert.equal(decl(polish, "padding"), null);
+      assert.equal(decl(polish, "display"), null);
+    }
+  });
+
+  it("gives both action links a visible keyboard focus ring", () => {
+    for (const selector of [".terminal-host .owner-trades-link:focus-visible", ".terminal-host .agent-strip-action .mm-btn.primary:focus-visible"]) {
+      const focus = ruleFor(selector, null);
+      assert.equal(decl(focus, "outline"), "2px solid var(--lime)");
+      assert.equal(decl(focus, "outline-offset"), "3px");
+    }
   });
 });

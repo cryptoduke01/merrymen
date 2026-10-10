@@ -1,7 +1,7 @@
 import { Board } from "./Board";
 import { PerformanceChart } from "../DitherChart";
 import { useState } from "react";
-import { MessagesSquare, Search } from "lucide-react";
+import { ArrowUpRight, ChartNoAxesCombined, MessagesSquare, Search } from "lucide-react";
 import { useGroupChatSupported } from "../groupchat";
 import {
   coinPrice,
@@ -17,6 +17,7 @@ import {
 } from "../live";
 import { Coin, Face, MovingFigure, NameBlock, Pill } from "../ui";
 import { AgentStrip } from "../AgentStrip";
+import Link from "../Link";
 import { usd, usdParts } from "@/lib/format";
 import { pausedRecovery } from "../recovery-view";
 
@@ -168,6 +169,11 @@ export function Home({
           </div>
         )}
         <button type="button" className="home-deposit" onClick={onDeposit}>{mine ? "Deposit" : "Set up your agent"}<span aria-hidden="true">↗</span></button>
+        {mine && <Link className="owner-trades-link" href="/agent#trades">
+          <ChartNoAxesCombined size={20} aria-hidden="true"/>
+          <span><strong>Trades &amp; P&amp;L</strong></span>
+          <ArrowUpRight size={18} aria-hidden="true"/>
+        </Link>}
         {mine && (
           <PerformanceChart
             balance values={mine.history ?? []}

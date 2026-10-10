@@ -68,6 +68,8 @@ export function Agent({
   energy,
   account,
   chainId,
+  followTradeLinks = false,
+  routePath,
 }: {
   mine: LiveMine;
   tokens: LiveToken[];
@@ -121,6 +123,10 @@ export function Agent({
   account?: string | null;
   /** The grant's chain: $MERRYMEN sent to the account only counts on Robinhood Chain. */
   chainId?: number | null;
+  /** Only the route's Agent follows #trades; the floating chat stays independent. */
+  followTradeLinks?: boolean;
+  /** The route may change between /chat and /agent without remounting this screen. */
+  routePath?: string;
 }) {
   const ask = chat.draft;
   const setAsk = chat.setDraft;
@@ -138,6 +144,10 @@ export function Agent({
   const running = chat.confirming;
   const [expanded, setExpanded] = useState(false);
   const [view, setView] = useState<"positions" | "trades">("positions");
+  const linkedPortfolio = useRef(false);
+  const portfolioMounted = useRef(false);
+  const portfolioOpener = useRef<HTMLElement | null>(null);
+  const portfolioSummary = useRef<HTMLButtonElement>(null);
   const viewport = useRef<HTMLElement>(null);
   const input = useRef<HTMLTextAreaElement>(null);
   const portfolio = useRef<HTMLDialogElement>(null);
@@ -193,11 +203,64 @@ export function Agent({
     observer.observe(node);
     return () => observer.disconnect();
   }, []);
+  // The owner shortcut opens the existing portfolio, with all of its normal
+  // evidence and export gates. Hash history controls only a linked opening;
+  // browsing to an unrelated anchor must not close a manually opened panel.
+  useEffect(() => {
+    if (!followTradeLinks) return;
+    const syncPortfolio = () => {
+      const requested = ["/agent", "/chat"].includes(window.location.pathname) && window.location.hash === "#trades";
+      if (requested) {
+        linkedPortfolio.current = true;
+        setView("trades");
+        setExpanded(true);
+      } else if (linkedPortfolio.current) {
+        linkedPortfolio.current = false;
+        setExpanded(false);
+      }
+    };
+    syncPortfolio();
+    window.addEventListener("hashchange", syncPortfolio);
+    window.addEventListener("popstate", syncPortfolio);
+    return () => {
+      window.removeEventListener("hashchange", syncPortfolio);
+      window.removeEventListener("popstate", syncPortfolio);
+    };
+  }, [followTradeLinks, routePath]);
+  const closePortfolio = () => {
+    linkedPortfolio.current = false;
+    setExpanded(false);
+    if (followTradeLinks && ["/agent", "/chat"].includes(window.location.pathname) && window.location.hash === "#trades") {
+      // Keep query parameters and Next's history state, and do not add another
+      // Back stop. A later mount must not reopen a panel the owner dismissed.
+      window.history.replaceState(window.history.state, "", window.location.pathname + window.location.search);
+    }
+  };
   useEffect(() => {
     const dialog = portfolio.current;
-    if (expanded && !dialog?.open) dialog?.showModal();
-    if (!expanded && dialog?.open) dialog.close();
+    if (!dialog) return;
+    if (expanded && !dialog.open) {
+      const focused = document.activeElement;
+      portfolioOpener.current = focused instanceof HTMLElement && focused !== document.body && !dialog.contains(focused)
+        ? focused : portfolioSummary.current;
+      dialog.showModal();
+    }
+    if (!expanded) {
+      if (dialog.open) dialog.close();
+      const opener = portfolioOpener.current;
+      portfolioOpener.current = null;
+      if (opener?.isConnected) opener.focus({ preventScroll: true });
+    }
   }, [expanded]);
+  useEffect(() => {
+    portfolioMounted.current = true;
+    const dialog = portfolio.current;
+    return () => {
+      portfolioMounted.current = false;
+      if (dialog?.open) dialog.close();
+      if (portfolioOpener.current?.isConnected) portfolioOpener.current.focus({ preventScroll: true });
+    };
+  }, []);
   // App mounts this screen only after it has a confirmed agent and a readable
   // owner book. Loading and failed account reads remain on AccountEntry; neither
   // is evidence that the owner has no agent.
@@ -667,9 +730,10 @@ export function Agent({
         <button
           type="button"
           className="portfolio-summary"
+          ref={portfolioSummary}
           aria-expanded={expanded}
           aria-controls="agent-portfolio"
-          onClick={() => setExpanded((value) => !value)}
+          onClick={() => expanded ? closePortfolio() : setExpanded(true)}
         >
           <div>
             <span className={recovery ? "account-label recovery-balance-label" : "account-label"}>{recovery ? "Last recorded agent balance" : "Agent balance"}</span>
@@ -705,8 +769,8 @@ export function Agent({
           className="portfolio-dialog"
           id="agent-portfolio"
           aria-labelledby="portfolio-title"
-          onClose={() => setExpanded(false)}
-          onCancel={() => setExpanded(false)}
+          onClose={(event) => { if (portfolioMounted.current && !event.currentTarget.open) closePortfolio(); }}
+          onCancel={(event) => { event.preventDefault(); closePortfolio(); }}
         >
           <header className="portfolio-dialog-header">
             <div>
@@ -718,7 +782,7 @@ export function Agent({
             <button
               type="button"
               aria-label="Close portfolio"
-              onClick={() => setExpanded(false)}
+              onClick={closePortfolio}
             >
               <X size={20} />
             </button>

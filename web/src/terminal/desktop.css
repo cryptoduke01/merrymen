@@ -1048,6 +1048,29 @@
     text-transform: uppercase;
     color: var(--faint);
   }
+  /* Connections and trade history stay reachable when Profile or Chat omits
+     the duplicate balance/limits sections using positional selectors. */
+  .terminal-host .app[data-screen] .desktop-portfolio > section.desktop-connections,
+  .terminal-host .app[data-screen] .desktop-portfolio > section.desktop-trades-entry {
+    display: block;
+  }
+  .terminal-host .desktop-connections .agent-strip-row:first-child {
+    border-top: 0;
+  }
+  .terminal-host .desktop-connections .agent-strip-action > .mm-btn.primary,
+  .terminal-host .desktop-connections .agent-strip-action .tg-one > .mm-btn.primary {
+    border: 1px solid color-mix(in srgb, var(--lime) 32%, var(--line));
+    border-radius: 4px;
+    background: color-mix(in srgb, var(--lime) 10%, var(--bg));
+    color: var(--tx);
+    font-family: var(--font-geist-mono), var(--mono);
+    font-size: 12px;
+    letter-spacing: 0.02em;
+  }
+  .terminal-host .desktop-connections .agent-strip-action > .mm-btn.primary:hover,
+  .terminal-host .desktop-connections .agent-strip-action .tg-one > .mm-btn.primary:hover {
+    border-color: var(--lime);
+  }
 
   /* ── The account-entry states: loading, failed, create ── */
   .terminal-host .desktop-portfolio .hosted-entry h2 {
@@ -1085,6 +1108,70 @@
     color: var(--faint);
     border-bottom-color: var(--line);
     cursor: default;
+  }
+}
+
+/* One entry to the existing owner trade history, on Home, Profile and desktop. */
+.terminal-host .owner-trades-link {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 48px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--lime) 5%, var(--bg));
+  color: var(--tx);
+  font-size: 14px;
+  font-weight: 500;
+  text-decoration: none;
+}
+.terminal-host .owner-trades-link > span {
+  display: grid;
+  flex: 1;
+  min-width: 0;
+  gap: 4px;
+}
+.terminal-host .owner-trades-link strong {
+  font: inherit;
+}
+.terminal-host .owner-trades-link small {
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.4;
+  color: var(--tx-2);
+}
+.terminal-host .owner-trades-link > svg {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  color: var(--tx-2);
+}
+.terminal-host .owner-trades-link > svg:last-child {
+  margin-left: auto;
+}
+.terminal-host .owner-trades-link:hover {
+  border-color: var(--tx-2);
+  background: var(--card);
+}
+.terminal-host .owner-trades-link:focus-visible,
+.terminal-host .agent-strip-action .mm-btn.primary:focus-visible {
+  outline: 2px solid var(--lime);
+  outline-offset: 3px;
+}
+@media (min-width: 1100px) {
+  .terminal-host .desktop-trades-entry .owner-trades-link {
+    border-radius: 4px;
+    font-family: var(--font-geist-mono), var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+  .terminal-host .desktop-trades-entry .owner-trades-link small {
+    letter-spacing: 0;
+    text-transform: none;
   }
 }
 

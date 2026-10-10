@@ -5,7 +5,7 @@ import { strategyName } from "../strategy";
 import { Empty, Face } from "../ui";
 import { BalanceFigure } from "../studio";
 import Link from "../Link";
-import { SlidersHorizontal, Wallet, Settings, ChevronRight, Plug } from "lucide-react";
+import { ChartNoAxesCombined, SlidersHorizontal, Wallet, Settings, ChevronRight, Plug } from "lucide-react";
 import { CONNECT_ASSISTANT_HREF, useConnectAssistantOffered } from "../assistant-connect";
 import { RecoveryNotice } from "../RecoveryNotice";
 import { pausedRecovery } from "../recovery-view";
@@ -109,6 +109,11 @@ export function You({
         <div className="account-section-title">
           <h2>Account</h2>
         </div>
+        <Link className="account-control owner-trades-link" href="/agent#trades">
+          <ChartNoAxesCombined size={24} aria-hidden="true"/>
+          <span><strong>Trades &amp; P&amp;L</strong><small>View results and P&amp;L cards</small></span>
+          <ChevronRight size={18} aria-hidden="true"/>
+        </Link>
         <button type="button" className="account-control" onClick={onLimits}>
           <SlidersHorizontal size={24} aria-hidden="true"/>
           <span>

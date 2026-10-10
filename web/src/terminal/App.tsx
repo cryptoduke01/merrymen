@@ -619,6 +619,8 @@ export function App() {
         )}
         {screen.kind === "tab" && screen.tab === "agent" && mine && (
           <Agent
+            followTradeLinks
+            routePath={pathname}
             mine={mine}
             tokens={live.tokens}
             stopped={stopped}
@@ -851,13 +853,13 @@ export function App() {
       {/* THE UNREAD DOT, ON DESKTOP. The tab bar that carries it is hidden at
           this width, so an answer that landed while the dock was closed would
           otherwise be told to nobody. One tap opens the dock on it. */}
-      {desktop && !chatDocked && mine && chat.unread && (
+      {desktop && !(screen.kind === "tab" && screen.tab === "agent") && !chatDocked && mine && chat.unread && (
         <button type="button" className="chat-unread-pill" onClick={() => setChatDocked(true)}>
           <i className="tab-unread" aria-hidden="true" />
           New from {mine.name}
         </button>
       )}
-      {desktop && chatDocked && mine && (
+      {desktop && !(screen.kind === "tab" && screen.tab === "agent") && chatDocked && mine && (
         <ChatDock title={mine.name} onClose={() => setChatDocked(false)}>
           <Agent
             mine={mine}

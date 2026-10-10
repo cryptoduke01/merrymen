@@ -144,19 +144,67 @@ describe("AgentStrip: the Telegram row carries the next step", () => {
     assert.equal(open.href, "https://t.me/merrymen_testbot?start=code_456");
   });
 
-  it("linked: no button left to press", async () => {
+  it("linked: opens the verified bot directly without carrying a link code or sending anything", async () => {
     respond = async call => {
-      if (path(call) === "/api/telegram") return json(tgStatus({ ownerId: 42 }));
+      if (path(call) === "/api/telegram") return json(tgStatus({ ownerId: 42, botUsername: "Merrymen_TestBot", linkCode: "old_code_123" }));
       if (path(call) === "/api/settings") return settingsFor(OWNER);
       return json({});
     };
     await ui.render(React.createElement(AgentStrip, { hasAgent: true, recovery: null }));
     await drain();
-    assert.equal(primaries().length, 0);
+    const open = primary() as HTMLAnchorElement;
+    assert.equal(open.tagName, "A");
+    assert.ok(open.classList.contains("agent-strip-open-bot"));
+    assert.equal(open.textContent, "Open my bot");
+    assert.equal(open.href, "https://t.me/Merrymen_TestBot");
+    assert.equal(new URL(open.href).search, "");
+    assert.equal(new URL(open.href).hash, "");
+    assert.equal(open.target, "_blank");
+    assert.ok(open.relList.contains("noopener") && open.relList.contains("noreferrer"));
+    assert.match(ui.container.querySelector('a[href="/settings#telegram"]')?.textContent ?? "", /manage/i);
+    assert.ok(!calls.some(c => c.init?.method && c.init.method !== "GET"), "showing the link performs no write or Telegram send");
     const reads = calls.filter(c => path(c) === "/api/telegram").length;
     await advance(20_000);
     assert.equal(calls.filter(c => path(c) === "/api/telegram").length, reads, "nothing to wait for, so no polling");
   });
+
+  for (const botUsername of [null, "", "not_a_bot_name", "@merrymen_testbot", "https://t.me/otherbot", "otherbot?start=payload", "otherbot/path", "a".repeat(30) + "bot"]) {
+    it(`linked with invalid username ${JSON.stringify(botUsername)}: keeps Manage without an external bot link`, async () => {
+      respond = async call => {
+        if (path(call) === "/api/telegram") return json(tgStatus({ ownerId: 42, botUsername }));
+        if (path(call) === "/api/settings") return settingsFor(OWNER);
+        return json({});
+      };
+      await ui.render(React.createElement(AgentStrip, { hasAgent: true, recovery: null }));
+      await drain();
+      assert.equal(ui.container.querySelector(".agent-strip-open-bot"), null);
+      assert.equal(primaries().length, 0);
+      assert.equal(ui.container.querySelector('a[href^="https://t.me/"]'), null);
+      assert.ok(ui.container.querySelector('a[href="/settings#telegram"]'));
+    });
+  }
+
+  for (const [state, over] of [
+    ["switched off", { enabled: false }],
+    ["unverified", { connected: false }],
+    ["revoked", { connected: false, listening: { state: "revoked", lastOkAt: null, reason: "401 Unauthorized" } }],
+    ["not listening", { listening: { state: "not-listening", lastOkAt: null, reason: null } }],
+    ["another poller", { listening: { state: "conflict", lastOkAt: null, reason: null } }],
+    ["trading held", { listening: { state: "held", lastOkAt: null, reason: "restore error" }, tradingHeld: "restore error" }],
+    ["another agent's bot", { botElsewhere: true }],
+  ] as const) {
+    it(`${state}: does not offer the linked bot's primary Open action`, async () => {
+      respond = async call => {
+        if (path(call) === "/api/telegram") return json(tgStatus({ ownerId: 42, ...over }));
+        if (path(call) === "/api/settings") return settingsFor(OWNER);
+        return json({});
+      };
+      await ui.render(React.createElement(AgentStrip, { hasAgent: true, recovery: null }));
+      await drain();
+      assert.equal(ui.container.querySelector(".agent-strip-open-bot"), null);
+      assert.ok(!primaries().some(p => p.textContent === "Open my bot"));
+    });
+  }
 
   it("self-hosted (no signed-in owner): the manual path in Settings", async () => {
     respond = async call => {
@@ -202,6 +250,7 @@ describe("AgentStrip under a recovery hold: setting up a bot is not trading", ()
   it("a working bot: the recovery wording, and no button that would promise trading", async () => {
     await mount({ ownerId: 42, linkCode: "code_1" });
     assert.equal(primaries().length, 0);
+    assert.equal(ui.container.querySelector(".agent-strip-open-bot"), null);
     assert.match(ui.container.textContent ?? "", /Waiting for recovery|Listening for public questions/);
   });
 
@@ -327,4 +376,3 @@ describe("Turn on Telegram waits until it knows whose bot it is", () => {
     });
   }
 });
-

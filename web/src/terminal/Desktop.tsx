@@ -12,6 +12,7 @@ import {
   SlidersHorizontal,
   ArrowDownWideNarrow,
   ChevronDown,
+  ChartNoAxesCombined,
 } from "lucide-react";
 import { Coin, Face, LogoMark, TabIcon, NameBlock, MovingFigure } from "./ui";
 import {
@@ -538,23 +539,18 @@ export function DesktopPortfolio({
             <a href="/grant#resign">{displayedAutonomy.expiresSoon.label}</a>
           </p>
         )}
-        {/* WHAT IS CONNECTED — the same two lines the phone shows on Home.
-
-            Home.tsx only renders below 1100px: above it, App swaps the home
-            and feed tabs for the desktop detail pane, so a desktop owner
-            never saw the strip at all and Telegram went back to being a
-            collapsed drawer eight blocks down the settings form.
-
-            THE SAME COMPONENT, NOT A SECOND COPY. It fetches its own two
-            readings and renders one list; a desktop-shaped duplicate would
-            be a second set of words to drift out of step with the phone's,
-            which is exactly how the settings screen ended up printing
-            "no token" for a fetch that had simply failed.
-
-            `hasAgent` is true by construction here: this component takes a
-            non-nullable `LiveMine`, and App renders it only on `desktop &&
-            mine`. The type is the gate. */}
+      </section>
+      {/* Keep connections visible when Chat/Profile hides the duplicate balance. */}
+      <section className="desktop-connections" aria-label="Agent connections">
+        <div className="desktop-section-heading"><h2>Connections</h2></div>
         <AgentStrip hasAgent recovery={mine.recovery} funds={mine.recoveryFunds} agentDown={mine.agentDown}/>
+      </section>
+      <section className="desktop-trades-entry">
+        <Link className="owner-trades-link" href="/agent#trades">
+          <ChartNoAxesCombined size={20} aria-hidden="true"/>
+          <span><strong>Trades &amp; P&amp;L</strong><small>View results and P&amp;L cards</small></span>
+          <ArrowUpRight size={16} aria-hidden="true"/>
+        </Link>
       </section>
       {selectedToken && (
         <section className="desktop-token-context">
