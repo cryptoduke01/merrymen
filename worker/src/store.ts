@@ -3338,6 +3338,7 @@ export async function addTrade(row: TradeRow): Promise<boolean> {
                     sim_gas = ?, decision_id = ?, fill_side = ?, fill_qty_raw = ?, fill_price_usd = ?,
                     realized_pnl_usdg = ?, basis_source = ?, order_id = ?, settlement_status = ?,
                     gas_wei = ?, sponsored_gas_wei = ?, fill_slippage_bps = ?, fill_cash_usdg = ?, gas_usdg = ?, gas_units = ?,
+                    trade_fee_usdg = ?,
                     fill_symbol = COALESCE(?, fill_symbol),
                     budget_settled_at = CASE WHEN ? IN ('landed', 'reverted') THEN unixepoch() ELSE budget_settled_at END
               WHERE agent_id = ? AND user_op_hash = ? AND status = 'submitted'`,
@@ -3369,6 +3370,10 @@ export async function addTrade(row: TradeRow): Promise<boolean> {
             row.fill_cash_usdg ?? null,
             row.gas_usdg ?? null,
             row.gas_units ?? null,
+            // This is the normal live path: assessment arrives with settlement,
+            // after the submitted placeholder. Missing remains unassessed, not
+            // free, just as on the no-placeholder INSERT path below.
+            row.trade_fee_usdg ?? null,
             // COALESCE: a resolution that knows no name (a stranded op resolved
             // from its receipt) keeps the one the placeholder was written with.
             fillSymbol,

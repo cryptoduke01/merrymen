@@ -4,6 +4,7 @@ import { describe, it } from "node:test";
 import { wrapSqlite } from "./db";
 import { MIRROR_STATE_DDL, mirrorTenant } from "./ledger-mirror";
 import { ENERGY_DAYS_SCHEMA } from "./energy-days";
+import { readOwnOutcomeLearning } from "./own-outcome-learning";
 
 /**
  * THE HOLE THIS FILLS, and why exactly-once is the whole point.
@@ -555,6 +556,116 @@ describe("the ledger mirror", () => {
     assert.equal(second.copied.trades_resolved, undefined, "nothing left to resolve");
     assert.equal(await count(shared, "trades"), 6, "and nothing was duplicated");
   });
+
+  for (const fee of [0.1, 0, null]) {
+    it(`carries recorded trade fee ${fee} on initial copy and submitted resolution`, async () => {
+      const child = mem(SRC), shared = mem(DEST);
+      await child.exec("ALTER TABLE trades ADD COLUMN trade_fee_usdg REAL");
+      await shared.exec("ALTER TABLE trades ADD COLUMN trade_fee_usdg REAL");
+      const now = 1_800_000_000;
+      await child.prepare(`INSERT INTO trades (agent_id, kind, user_op_hash, status, trade_fee_usdg, created_at)
+        VALUES ('0xagent', 'swap', '0xinitial', 'landed', ?, ?)`).run(fee, now);
+      await child.prepare(`INSERT INTO trades (agent_id, kind, user_op_hash, status, created_at)
+        VALUES ('0xagent', 'swap', '0xpending', 'submitted', ?)`).run(now);
+      const first = await mirrorTenant({ tenant: "0xten", child, shared, nowSec: now });
+      assert.equal(first.failed?.trades, undefined);
+      assert.equal((await shared.prepare("SELECT trade_fee_usdg FROM trades WHERE user_op_hash = '0xinitial'").get() as Record<string, unknown>).trade_fee_usdg, fee);
+      await child.prepare("UPDATE trades SET status = 'landed', trade_fee_usdg = ? WHERE user_op_hash = '0xpending'").run(fee);
+      const second = await mirrorTenant({ tenant: "0xten", child, shared, nowSec: now });
+      assert.equal(second.failed?.trades_resolved, undefined);
+      assert.equal(second.copied.trades_resolved, 1);
+      const landed = await shared.prepare("SELECT status, trade_fee_usdg FROM trades WHERE user_op_hash = '0xpending'").get() as Record<string, unknown>;
+      assert.deepEqual({ ...landed }, { status: "landed", trade_fee_usdg: fee });
+      // A later copy is not permission to rewrite a settled operation's costs.
+      await child.prepare("UPDATE trades SET trade_fee_usdg = 99 WHERE user_op_hash = '0xpending'").run();
+      assert.equal((await mirrorTenant({ tenant: "0xten", child, shared, nowSec: now })).copied.trades_resolved, undefined);
+      assert.equal((await shared.prepare("SELECT trade_fee_usdg FROM trades WHERE user_op_hash = '0xpending'").get() as Record<string, unknown>).trade_fee_usdg, fee);
+      assert.equal(await count(shared, "trades"), 2);
+    });
+  }
+
+  it("keeps a known placeholder fee when settlement supplies no new fee evidence", async () => {
+    const child = mem(SRC), shared = mem(DEST);
+    await child.exec("ALTER TABLE trades ADD COLUMN trade_fee_usdg REAL");
+    await shared.exec("ALTER TABLE trades ADD COLUMN trade_fee_usdg REAL");
+    const now = 1_800_000_000;
+    await child.prepare(`INSERT INTO trades (agent_id, kind, user_op_hash, status, trade_fee_usdg, created_at)
+      VALUES ('0xagent', 'swap', '0xpending', 'submitted', 0.2, ?)`).run(now);
+    await mirrorTenant({ tenant: "0xten", child, shared, nowSec: now });
+    await child.prepare("UPDATE trades SET status = 'landed', trade_fee_usdg = NULL").run();
+    const result = await mirrorTenant({ tenant: "0xten", child, shared, nowSec: now });
+    assert.equal(result.copied.trades_resolved, 1);
+    assert.equal((await shared.prepare("SELECT trade_fee_usdg FROM trades").get() as Record<string, unknown>).trade_fee_usdg, 0.2);
+  });
+
+  it("mirrors legacy children without inventing a fee on copy or settlement", async () => {
+    const child = mem(SRC), shared = mem(DEST);
+    await shared.exec("ALTER TABLE trades ADD COLUMN trade_fee_usdg REAL");
+    const now = 1_800_000_000;
+    await child.prepare(`INSERT INTO trades (agent_id, kind, user_op_hash, status, created_at)
+      VALUES ('0xagent', 'swap', '0xlegacy', 'submitted', ?)`).run(now);
+    const first = await mirrorTenant({ tenant: "0xten", child, shared, nowSec: now });
+    assert.equal(first.failed?.trades, undefined);
+    assert.equal((await shared.prepare("SELECT trade_fee_usdg FROM trades").get() as Record<string, unknown>).trade_fee_usdg, null);
+    await child.prepare("UPDATE trades SET status = 'landed'").run();
+    const second = await mirrorTenant({ tenant: "0xten", child, shared, nowSec: now });
+    assert.equal(second.failed?.trades_resolved, undefined);
+    assert.equal(second.copied.trades_resolved, 1);
+    assert.equal((await shared.prepare("SELECT trade_fee_usdg FROM trades").get() as Record<string, unknown>).trade_fee_usdg, null);
+  });
+
+  it("does not advance the trade cursor if the destination cannot retain a supplied fee", async () => {
+    const child = mem(SRC), shared = mem(DEST);
+    await child.exec("ALTER TABLE trades ADD COLUMN trade_fee_usdg REAL");
+    const now = 1_800_000_000;
+    await child.prepare(`INSERT INTO trades (agent_id, kind, user_op_hash, status, trade_fee_usdg, created_at)
+      VALUES ('0xagent', 'swap', '0xfee', 'landed', 0.1, ?)`).run(now);
+    const first = await mirrorTenant({ tenant: "0xten", child, shared, nowSec: now });
+    assert.match(first.failed?.trades ?? "", /trade_fee_usdg/);
+    assert.equal(await count(shared, "trades"), 0);
+    assert.equal(await shared.prepare("SELECT last_id FROM mirror_state WHERE table_name = 'trades'").get(), undefined);
+    await shared.exec("ALTER TABLE trades ADD COLUMN trade_fee_usdg REAL");
+    const retry = await mirrorTenant({ tenant: "0xten", child, shared, nowSec: now });
+    assert.equal(retry.failed?.trades, undefined);
+    assert.equal(retry.copied.trades, 1);
+    assert.equal((await shared.prepare("SELECT trade_fee_usdg FROM trades").get() as Record<string, unknown>).trade_fee_usdg, 0.1);
+  });
+
+  for (const fee of [0.1, 0, null]) {
+    it(`makes a mirrored closed cycle usable by learning only with recorded fee evidence (${fee})`, async () => {
+      const child = mem(SRC), shared = mem(DEST);
+      await child.exec("ALTER TABLE trades ADD COLUMN trade_fee_usdg REAL");
+      await shared.exec("ALTER TABLE trades ADD COLUMN trade_fee_usdg REAL");
+      const account = `0x${"a".repeat(40)}`, token = `0x${"b".repeat(40)}`, cash = `0x${"c".repeat(40)}`;
+      const hash = (n: number) => `0x${n.toString(16).padStart(64, "0")}`;
+      const now = 1_800_000_000;
+      await child.prepare("INSERT INTO agents (smart_account, chain_id, epoch, mode) VALUES (?, 4663, 1, 'live')").run(account);
+      // The entry is already landed on the first mirror. The exit is copied
+      // submitted and then resolved in place, exercising both production paths.
+      await child.prepare(`INSERT INTO trades (agent_id, kind, user_op_hash, tx_hash, status, epoch, created_at,
+        fill_side, buy_token, sell_token, fill_qty_raw, fill_cash_usdg, basis_source, realized_pnl_usdg, gas_wei, gas_usdg, trade_fee_usdg)
+        VALUES (?, 'swap', ?, ?, 'landed', 1, ?, 'buy', ?, ?, '100', 10, 'receipt', 0, '1', 0.1, ?)`)
+        .run(account, hash(1), hash(101), now - 2, token, cash, fee);
+      await child.prepare(`INSERT INTO trades (agent_id, kind, user_op_hash, status, epoch, created_at, sell_token, buy_token)
+        VALUES (?, 'swap', ?, 'submitted', 1, ?, ?, ?)`).run(account, hash(2), now - 1, token, cash);
+      const first = await mirrorTenant({ tenant: account, child, shared, nowSec: now });
+      assert.equal(first.failed?.trades, undefined);
+      assert.equal(first.failed?.snapshots, undefined);
+      assert.equal((await readOwnOutcomeLearning(shared, account, 4663, now)).closed, 0);
+      await child.prepare(`UPDATE trades SET status = 'landed', tx_hash = ?, fill_side = 'sell', fill_qty_raw = '100',
+        fill_cash_usdg = 12, basis_source = 'receipt', realized_pnl_usdg = 2, gas_wei = '1', gas_usdg = 0.1, trade_fee_usdg = ?
+        WHERE user_op_hash = ?`).run(hash(102), fee, hash(2));
+      const second = await mirrorTenant({ tenant: account, child, shared, nowSec: now });
+      assert.equal(second.failed?.trades_resolved, undefined);
+      assert.equal(second.copied.trades_resolved, 1);
+      const learned = await readOwnOutcomeLearning(shared, account, 4663, now);
+      assert.equal(learned.status, "ready");
+      assert.equal(learned.closed, fee === null ? 0 : 1);
+      assert.equal(learned.excluded, fee === null ? 1 : 0);
+      assert.equal(learned.returnPct, fee === null ? null : fee === 0 ? 18 : 16);
+      assert.equal(learned.costDragPct, fee === null ? null : fee === 0 ? 2 : 4);
+    });
+  }
 
   it("mirrors a late settlement with its fresh budget timestamp and original submission time", async () => {
     const child = seedChild();

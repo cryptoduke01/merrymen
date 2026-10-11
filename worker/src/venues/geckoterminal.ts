@@ -35,7 +35,11 @@ import path from "node:path";
 const GECKO_BASE = "https://api.geckoterminal.com/api/v2";
 
 /** Credentials go only to CoinGecko's fixed server-side origin, in headers. */
-export function geckoSource(env: { MERRYMEN_COINGECKO_PRO_API_KEY?: string } = process.env): { id: NonNullable<FeedResult["provider"]>; base: string; headers: Record<string, string> } {
+export function geckoSource(
+  env: { MERRYMEN_COINGECKO_PRO_API_KEY?: string } = {
+    MERRYMEN_COINGECKO_PRO_API_KEY: process.env.MERRYMEN_COINGECKO_PRO_API_KEY,
+  },
+): { id: NonNullable<FeedResult["provider"]>; base: string; headers: Record<string, string> } {
   const key = env.MERRYMEN_COINGECKO_PRO_API_KEY?.trim();
   return key
     ? { id: "coingecko-pro", base: "https://pro-api.coingecko.com/api/v3/onchain", headers: { accept: "application/json", "x-cg-pro-api-key": key } as Record<string, string> }

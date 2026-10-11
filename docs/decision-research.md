@@ -45,6 +45,9 @@ unmatched, incomplete or excessive histories do not become invented outcomes.
 The summary names sample size, cost drag and gross wins consumed by costs.
 It excludes failed-operation gas and account-level performance costs, and is not
 total-account return, a predicted win rate, or an evaluation of skipped trades.
+Recorded trade fees are preserved when submitted operations settle and when the
+local ledger is mirrored. Historical missing assessments stay unknown; this does
+not create fee accruals, collect fees or rewrite already-settled assessments.
 
 Derived counts travel in a separate private `.own-learning.json` file, validated
 against the current account, chain, epoch, grant expiry and five-minute age limit.
