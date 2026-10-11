@@ -354,6 +354,9 @@ const BOOL_FIELDS = [
   // model calls per window instead of one, and the scout consumed a day's
   // shared token allowance on 2026-08-31 doing exactly this kind of loop.
   "deskEnabled",
+  "xPublicWalletIntro",
+  "xTokenAddresses",
+  "xTradeResults",
   "telegramEnabled",
   "telegramControlEnabled",
   "telegramTransferEnabled",
@@ -582,6 +585,28 @@ async function saveSettings(
   }
 
   // ── enums ───────────────────────────────────────────────────────────────
+  if ("agentBrief" in body) {
+    const value = body.agentBrief;
+    if (value === null || value === undefined || value === "") {
+      setOrClear("agentBrief", undefined);
+    } else if (typeof value !== "string" || value.length > 1600 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value)) {
+      errors.push("agentBrief: use plain text, up to 1600 characters");
+    } else {
+      setOrClear("agentBrief", value.trim() || undefined);
+    }
+  }
+  if ("xVoice" in body) {
+    const value = body.xVoice;
+    if (value === null || value === undefined || value === "") setOrClear("xVoice", undefined);
+    else if (value === "default" || value === "dry") setOrClear("xVoice", value);
+    else errors.push("xVoice: choose default or dry");
+  }
+  if ("discoveryFocus" in body) {
+    const value = body.discoveryFocus;
+    if (value === null || value === undefined || value === "") setOrClear("discoveryFocus", undefined);
+    else if (value === "balanced" || value === "new-projects") setOrClear("discoveryFocus", value);
+    else errors.push("discoveryFocus: choose balanced or new-projects");
+  }
   if ("agentName" in body) {
     // The rule, the normalisation and the grandfathering of a stored "007"
     // live in lib/settings-agent-name.ts, where a test runs them. `stored` is

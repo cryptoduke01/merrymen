@@ -296,6 +296,23 @@ describe("energyGate — env only, hosted only", () => {
       assert.equal(mergeSettings(upgrade, {}).energyGate, "off", "nor switch one on for somebody else to be billed");
     });
   });
+
+  it("exemptions come only from hosted operator env, never a tenant's settings", () => {
+    const account = "0x1234567890abcdef1234567890abcdef12345678";
+    const other = "0x2234567890abcdef1234567890abcdef12345678";
+    const file = {
+      energyExemptAccounts: [other],
+      MERRYMEN_ENERGY_EXEMPT_ACCOUNTS: other,
+    } as unknown as Parameters<typeof mergeSettings>[0];
+    withHosted(true, () => {
+      assert.deepEqual(mergeSettings(file, {}).energyExemptAccounts, []);
+      assert.deepEqual(mergeSettings(file, { MERRYMEN_ENERGY_EXEMPT_ACCOUNTS: account }).energyExemptAccounts, [account]);
+      assert.equal(mergeSettings(file, { MERRYMEN_ENERGY_EXEMPT_ACCOUNTS: account, MERRYMEN_ENERGY_GATE: "1" }).energyGate, "enforce", "the fleet gate is unchanged");
+    });
+    withHosted(false, () => {
+      assert.deepEqual(mergeSettings({}, { MERRYMEN_ENERGY_EXEMPT_ACCOUNTS: account }).energyExemptAccounts, []);
+    });
+  });
 });
 
 describe("mergeSettings — Telegram groups (docs/tg-groups.md \"Settings\")", () => {

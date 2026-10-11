@@ -46,7 +46,7 @@ import { STRATEGY_FLAVOUR, STRATEGY_SPOKEN, TRAIT_VOICE } from "./groupchat/temp
 import { MUSINGS, SUBJECTS, TAKES } from "./groupchat/topics";
 import { xAppFromEnv, type FetchLike, type XApp, type XReply } from "./xpost/client";
 import { admitXPost, vocabularyRefusal, type BaseGate, type XGateCtx } from "./xpost/gate";
-import { BUY_COIN_FOLD_MS, GAP_MS, coinOf, hash32, planPosts, replyDueAt, sendDecision, type PlanClock, type PlanIntent } from "./xpost/planner";
+import { BUY_COIN_FOLD_MS, BUY_PER_DAY, GAP_MS, coinOf, hash32, planPosts, replyDueAt, sendDecision, type PlanClock, type PlanIntent } from "./xpost/planner";
 import { APP_PAUSE_KEY, APP_PAUSE_MS, CREDITS_PAUSE_MS, PAUSE_KEY, readReplyComments, sendOne, type SendOutcome } from "./xpost/sender";
 import { isReplyOptOut, replyCandidate } from "./xpost/replies";
 import {
@@ -63,6 +63,7 @@ import {
   postingAccounts,
   postsOfXUser,
   ownerSendTimesSince,
+  tradeSendTimesSince,
   optOutReplies,
   repliesEnabledFor,
   replyConsentAt,
@@ -79,7 +80,12 @@ import {
   writeMeta,
   type XAccount,
 } from "./xpost/store";
-import { buyPrompt, casualPrompt, draft, introPrompt, introTemplate, replyPrompt, xpostModel, xpostModelWarning, type WriterFacts, type XStyle } from "./xpost/writer";
+import { buyPrompt, casualPrompt, draft, introPrompt, introTemplate, replyPrompt, sellPrompt, xpostModel, xpostModelWarning, type WriterFacts, type XStyle } from "./xpost/writer";
+import { appendPublicToken, appendPublicWallet, hasPublicWallet, publicTokenStillAllowed, publicWalletStillAllowed, type PublicWallet } from "./xpost/public-wallet";
+import { readPublicProjectDescription } from "./orchestrator-xpost-project";
+import { PUBLISHABLE_SOURCES } from "./thesis-policy";
+import { readSaleResults } from "./orchestrator-xpost-results";
+import { appendSaleOutcome, hasSaleOutcome } from "./xpost/sale-outcome";
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -261,6 +267,48 @@ export interface XPosterDeps {
    */
   monotonic?: () => number;
   draftTimeoutMs?: number;
+  /** Fresh, minimal projection of owner settings plus the currently running grant identity. */
+  socialProfile?: (tenant: string) => Promise<XSocialProfile | null>;
+  saleResults?: typeof readSaleResults;
+  publicProjectDescription?: typeof readPublicProjectDescription;
+}
+
+export interface XSocialProfile {
+  xVoice?: "default" | "dry";
+  /** Present only with the owner's explicit wallet-intro disclosure consent. */
+  publicWallet?: PublicWallet | null;
+  xTokenAddresses?: boolean;
+  xTradeResults?: boolean;
+  discoveryFocus?: "balanced" | "new-projects";
+  /** Current grant account and chain, never shown to a model. */
+  currentAgent?: PublicWallet | null;
+}
+
+/** Ledger proof for the exact contract of this decision, scoped to its account and chain. */
+export async function publicTokenForDecision(
+  shared: Db,
+  current: PublicWallet,
+  decisionId: string,
+  side: "buy" | "sell",
+): Promise<PublicWallet | null> {
+  if (!/^0x[0-9a-fA-F]{40}$/.test(current.address) || ![4663, 46630].includes(current.chainId)) return null;
+  const row = await shared.prepare(`
+    SELECT t.buy_token, t.sell_token, t.status, t.tx_hash, t.fill_qty_raw, a.chain_id
+    FROM decisions d
+    JOIN trades t ON t.id = (SELECT MAX(t2.id) FROM trades t2 WHERE t2.decision_id = d.id)
+    JOIN agents a ON LOWER(a.smart_account) = LOWER(d.agent_id)
+    WHERE d.id = ? AND LOWER(d.agent_id) = ? AND LOWER(t.agent_id) = LOWER(d.agent_id)
+      AND d.action = ? AND d.source IN (${PUBLISHABLE_SOURCES.map(() => "?").join(",")})
+      AND t.epoch = a.epoch AND t.fill_side = ? AND t.kind IN ('swap', 'curve-trade')
+      AND ((t.status = 'landed' AND t.basis_source = 'receipt') OR (t.status = 'paper' AND t.basis_source = 'paper'))
+  `).get(decisionId, current.address.toLowerCase(), side, ...PUBLISHABLE_SOURCES, side) as
+    { buy_token: unknown; sell_token: unknown; status: unknown; tx_hash: unknown; fill_qty_raw: unknown; chain_id: unknown } | undefined;
+  if (!row || Number(row.chain_id) !== current.chainId) return null;
+  if (!/^\d+$/.test(String(row.fill_qty_raw)) || BigInt(String(row.fill_qty_raw)) <= 0n) return null;
+  if (row.status === "landed" && (typeof row.tx_hash !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(row.tx_hash))) return null;
+  const address = side === "buy" ? row.buy_token : row.sell_token;
+  if (typeof address !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(address) || /^0x0{40}$/i.test(address)) return null;
+  return { address: address.toLowerCase(), chainId: current.chainId };
 }
 
 export interface XPoster {
@@ -760,8 +808,21 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
               continue;
             }
             release.push(() => returnAllowance(shared, ownerDayKey, at()));
-            if (post.kind === "buy" && post.coin) {
-              const foldKey = `fold:${post.xUserId}:${post.coin}`;
+            if (post.kind === "buy" || post.kind === "sell") {
+              const tradeDayKey = `tradeday:${post.xUserId}:${localDayKey}`;
+              // Older deployments have no shared buy/sell counter. Their
+              // durable sends still consume today's slots, across owners.
+              const earlier = await tradeSendTimesSince(shared, post.xUserId, t - 2 * DAY);
+              const initialUsed = earlier.filter((sentAt) => (dayOf ? dayOf(sentAt) : utcDay(sentAt)) === localDayKey).length;
+              if (!(await takeAllowance(shared, tradeDayKey, BUY_PER_DAY, t, initialUsed))) {
+                await giveBack();
+                bump("trade-day-cap");
+                continue;
+              }
+              release.push(() => returnAllowance(shared, tradeDayKey, at()));
+            }
+            if ((post.kind === "buy" || post.kind === "sell") && post.coin) {
+              const foldKey = post.kind === "sell" ? `sell-fold:${post.xUserId}:${post.coin}` : `fold:${post.xUserId}:${post.coin}`;
               const fold = await claimSpan(shared, foldKey, t, BUY_COIN_FOLD_MS);
               if (!fold.ok) {
                 await giveBack();
@@ -782,7 +843,31 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
               continue;
             }
             sends++;
-            const out = await sendOne(shared, o.dek, o.app, post, { fetch: deps.fetch, nowMs: t });
+            const out = await sendOne(shared, o.dek, o.app, post, {
+              fetch: deps.fetch,
+              nowMs: t,
+              validateBeforeSend: async (pending) => {
+                if (!hasPublicWallet(pending.body) && pending.kind !== "sell") return true;
+                const profile = await deps.socialProfile?.(pending.tenant);
+                const current = byTenant.get(pending.tenant);
+                if (pending.kind === "sell") {
+                  const agent = profile?.currentAgent;
+                  if (!profile?.xTradeResults || !agent || !current || current.agentId !== agent.address.toLowerCase()) return false;
+                  const sales = await (deps.saleResults ?? readSaleResults)(shared, agent.address, agent.chainId, Math.floor(at() / 1000));
+                  const sale = sales.find((s) => pending.dedupeKey === `sell:${pending.tenant}:${s.operationKey}` && pending.decisionId === s.decisionId);
+                  if (!sale || pending.coin !== sale.token.toLowerCase() || !hasSaleOutcome(pending.body, sale.outcome)) return false;
+                }
+                if (pending.kind === "buy" || pending.kind === "sell") {
+                  if (!hasPublicWallet(pending.body)) return true;
+                  const agent = profile?.currentAgent;
+                  if (!profile?.xTokenAddresses || !agent || !current || current.agentId !== agent.address.toLowerCase() || !pending.decisionId) return false;
+                  const token = await publicTokenForDecision(shared, agent, pending.decisionId, pending.kind);
+                  return publicTokenStillAllowed(pending, token);
+                }
+                const wallet = profile?.publicWallet;
+                return !!current && !!wallet && current.agentId === wallet.address.toLowerCase() && publicWalletStillAllowed(pending, wallet);
+              },
+            });
             // The app's credentials refused is the one line an operator must act
             // on, so it says what happened rather than an outcome code.
             bump(out === "posted" ? "sent" : out === "app" ? "x-refused-client-credentials" : out);
@@ -933,6 +1018,10 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         // The X ACCOUNT's history, from every owner posting on it: one timeline, one cadence.
         const posts = await postsOfXUser(shared, account.xUserId, planNow - PLAN_HISTORY_MS, 200);
         const intros = await introPostsOf(shared, account.tenant, account.xUserId);
+        const social = await deps.socialProfile?.(account.tenant);
+        const tradeResults = social?.xTradeResults === true && social.currentAgent?.address.toLowerCase() === f.agentId.toLowerCase();
+        const sells = tradeResults && social?.currentAgent
+          ? await (deps.saleResults ?? readSaleResults)(shared, social.currentAgent.address, social.currentAgent.chainId, Math.floor(planNow / 1000)) : [];
         const intents = planPosts({
           tenant: account.tenant,
           account,
@@ -942,6 +1031,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
           intros,
           posts,
           calls: f.calls,
+          tradeResults,
+          sells,
           // Shared server cap and tenant preference are counted separately.
           perDay,
           ownerPerDay: account.prefs.perDay,
@@ -1089,6 +1180,10 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
     if ((await keyStatus(shared, intent.dedupeKey)) !== null) return { outcome: "key-spent", body: null };
     const day = PLAN_CLOCK.localDay(null, nowMs);
     const facts = writerFacts(f, day, recentOwn);
+    const social = await deps.socialProfile?.(account.tenant);
+    if (social?.xVoice === "dry") facts.voice = "dry";
+    const wallet = intent.kind === "intro" && social?.publicWallet && social.publicWallet.address.toLowerCase() === f.agentId.toLowerCase()
+      ? social.publicWallet : null;
     const gate: XGateCtx = {
       kind: intent.kind,
       agentName: f.name,
@@ -1101,6 +1196,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
     let prompt: ReturnType<typeof introPrompt> | null = null;
     let coin: string | null = null;
     let decisionId: string | null = null;
+    let projectDescription: string | null = null;
+    let tokenDisclosure: PublicWallet | null = null;
     if (intent.kind === "intro") {
       prompt = introPrompt(facts);
     } else if (intent.kind === "buy") {
@@ -1115,9 +1212,32 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       gate.seeds = call.ownWords ? [call.ownWords] : [];
       coin = intent.coinKey;
       decisionId = call.decisionId;
+      if (social?.xTokenAddresses === true) {
+        const agent = social.currentAgent;
+        if (!agent || agent.address.toLowerCase() !== f.agentId.toLowerCase()) return { outcome: "token-unverified", body: null };
+        tokenDisclosure = await publicTokenForDecision(shared, agent, call.decisionId, "buy");
+        if (!tokenDisclosure || tokenDisclosure.address !== call.token?.toLowerCase()) return { outcome: "token-unverified", body: null };
+        if (social.discoveryFocus === "new-projects") {
+          const project = await (deps.publicProjectDescription ?? readPublicProjectDescription)(tokenDisclosure.address, tokenDisclosure.chainId).catch(() => null);
+          if (project?.token.toLowerCase() === tokenDisclosure.address && project.chainId === tokenDisclosure.chainId) projectDescription = project.description;
+        }
+      }
       // The gloss dice are the account's and the decision's, so two accounts
       // buying one coin the same hour do not say it the same way.
-      prompt = buyPrompt({ ...facts, coin: intent.coin, paper: call.paper, bands: call.bands, ownWords: call.ownWords, glossSeed: `${account.tenant}|${call.decisionId}` });
+      prompt = buyPrompt({ ...facts, coin: intent.coin, paper: call.paper, bands: call.bands, ownWords: call.ownWords, projectDescription, glossSeed: `${account.tenant}|${call.decisionId}` });
+    } else if (intent.kind === "sell") {
+      const agent = social?.currentAgent;
+      if (!social?.xTradeResults || !agent || agent.address.toLowerCase() !== f.agentId.toLowerCase()) return { outcome: "sale-unverified", body: null };
+      const call = intent.call;
+      gate.mode = "live";
+      gate.coins = coinNames(intent.coin, call);
+      coin = intent.coinKey;
+      decisionId = call.decisionId;
+      if (social.xTokenAddresses === true) {
+        tokenDisclosure = await publicTokenForDecision(shared, agent, call.decisionId, "sell");
+        if (!tokenDisclosure || tokenDisclosure.address !== call.token.toLowerCase()) return { outcome: "token-unverified", body: null };
+      }
+      prompt = sellPrompt({ ...facts, coin: intent.coin, paper: false, outcome: call.outcome });
     } else {
       // A trade-talk day is handed no seed, any other day no coin: neither is
       // offered, or vouched to the gate, on the day it is not about.
@@ -1139,7 +1259,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         if (raw === null) reason = "no-draft";
         else {
           const v = admitXPost(raw, gate, BASE_GATE);
-          if (v.ok) body = v.text;
+          if (v.ok && projectDescription && !/\bproject says\b/i.test(v.text)) reason = "gate:project-attribution";
+          else if (v.ok) body = v.text;
           else reason = `gate:${v.reason}`;
         }
       } else {
@@ -1156,6 +1277,18 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         if (v.ok) body = v.text;
         else reason = `template:${v.reason}`;
       }
+    }
+    if (body && intent.kind === "sell") {
+      body = appendSaleOutcome(body, intent.call.outcome);
+      if (!body) reason = "sale-outcome-invalid";
+    }
+    if (body && wallet) {
+      body = appendPublicWallet(body, wallet);
+      if (!body) reason = "wallet-intro-invalid";
+    }
+    if (body && tokenDisclosure) {
+      body = appendPublicToken(body, tokenDisclosure);
+      if (!body) reason = "token-disclosure-invalid";
     }
     const written = await schedulePost(shared, {
       tenant: account.tenant,

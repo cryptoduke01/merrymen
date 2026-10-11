@@ -54,6 +54,7 @@
 import { REPEAT_LIMIT, similarity } from "../social-post";
 import { xWeightedLength, X_MAX_WEIGHTED } from "./client";
 import type { XPostKind } from "./store";
+import type { SaleOutcome } from "./planner";
 import { withoutReplyOptOut } from "./replies";
 
 /** The longest post, in characters — far under X's own ceiling, because a post is one casual line. */
@@ -76,6 +77,8 @@ export type BaseGate = (raw: string, ctx: BaseGateCtx) => XVerdict;
 
 export interface XGateCtx {
   kind: XPostKind;
+  /** Trusted result is appended after the model's neutral sale line is gated. */
+  sellOutcome?: SaleOutcome;
   /** The agent's own name: stripped as a label, allowed in the text, and never read as shouting. */
   agentName: string;
   /**
@@ -852,8 +855,16 @@ export function admitXPost(raw: unknown, ctx: XGateCtx, baseGate: BaseGate): XVe
   // is a name, not an alert or hype — and "TSLA" is the ticker it bought, not
   // shouting. What is left is the agent's own words, and those are judged.
   const own = withoutNames(text, [agentName, ...coins]);
-  const vocab = vocabularyRefusal(own);
+  // Only the typed sale path admits the receipt-backed past-tense sale verb.
+  // A measured result is appended by trusted code after this prose gate.
+  const saleWords = ctx.kind === "sell" ? own.replace(/\bsold\b/gi, " ") : own;
+  const vocab = vocabularyRefusal(saleWords);
   if (vocab) return refuse(vocab);
+  if (ctx.kind === "sell") {
+    if (!/\bsold\b/i.test(own)) return refuse("sale-unsaid");
+    if (/\b(?:jeet\w*|early|late|afterwards|afterward|since|continued|kept|rallied|pumped|dumped|mooned|timing|timed|won|win\w*|los[st]\w*|flat|break[ -]?even|green|red|victory|relie[fv]\w*|regret\w*|pleased|happy|sad|glad|proud|celebrat\w*|ouch|painful|hurt|finest|mistake|success\w*|paid off|worked|thesis|right|wrong|nice|lucky|luck|fortunately|unfortunately|closed|exited|out|because|due to)\b/i.test(own)) return refuse("sale-result");
+    if (text.length > 90) return refuse("sale-length");
+  }
   const namesCoin = coins.some((c) => mentions(text, c));
   if ((namesCoin || ctx.kind === "reply") && COIN_ADVICE.test(own)) return refuse("hype");
   if (ctx.kind === "reply" && (REPLY_CURRENT_OR_ACTION.test(own) || REPLY_CURRENT_POSITION.test(own))) return refuse("reply-current-or-action");
@@ -865,14 +876,15 @@ export function admitXPost(raw: unknown, ctx: XGateCtx, baseGate: BaseGate): XVe
   // line" is a line of jargon that reads like a signal bot, and a misspelled
   // name ("pudge penguins") is a coin nobody vouched for — the base gate only
   // checks $cashtags.
-  if (ctx.kind === "buy" && !namesCoin) return refuse("coin-unsaid");
+  if ((ctx.kind === "buy" || ctx.kind === "sell") && !namesCoin) return refuse("coin-unsaid");
 
   // PAPER IS SAID, AND SO IS NOTHING FALSE ABOUT THE MONEY. Said as a phrase
   // (saysPaper); a live post is false only when it claims paper OF THE MONEY
   // (claimsPaper) — "on paper a slow day sounds boring" is the idiom.
   const paperCoins = strings(ctx.paperCoins);
-  const aboutPaper = ((ctx.kind === "buy" || ctx.kind === "reply") && ctx.mode === "paper") || paperCoins.some((c) => mentions(text, c));
+  const aboutPaper = ((ctx.kind === "buy" || ctx.kind === "sell" || ctx.kind === "reply") && ctx.mode === "paper") || paperCoins.some((c) => mentions(text, c));
   if (aboutPaper && !saysPaper(text, coins)) return refuse("paper-unsaid");
+  if (ctx.kind === "sell" && ctx.mode === "live" && saysPaper(text, coins)) return refuse("mode-false");
   if (ctx.mode === "live" && claimsPaper(text, coins) && !aboutPaper) return refuse("mode-false");
   if (ctx.mode === "paper" && SAYS_REAL_MONEY.test(text)) return refuse("mode-false");
 

@@ -97,10 +97,21 @@ export interface PlanCall {
   atSec: number;
 }
 
+export type SaleOutcome = "profit" | "loss" | "flat" | "unknown";
+
+/** Receipt-backed completed sale; only the read-only result builder supplies these. */
+export interface PlanSell extends PlanCall {
+  side: "sell";
+  operationKey: string;
+  token: string;
+  outcome: SaleOutcome;
+}
+
 export type PlanIntent =
   /** `attempt` is 0 for the account's first hello, n for the n-th redraft. */
   | { kind: "intro"; dedupeKey: string; dueAtMs: number; attempt: number }
   | { kind: "buy"; dedupeKey: string; dueAtMs: number; call: PlanCall; coin: string; coinKey: string }
+  | { kind: "sell"; dedupeKey: string; dueAtMs: number; call: PlanSell; coin: string; coinKey: string }
   | { kind: "casual"; dedupeKey: string; dueAtMs: number; day: string };
 
 /** An intro row, as introState weighs it. */
@@ -124,6 +135,9 @@ export interface PlanInput {
   posts: readonly XPost[];
   /** The agent's recent calls. Only fresh buys after consent are weighed. */
   calls: readonly PlanCall[];
+  /** Explicit owner opt-in; absent preserves the original buys-only behavior. */
+  tradeResults?: boolean;
+  sells?: readonly PlanSell[];
   /** Posts per owner-local day. */
   perDay?: number;
   /** Optional smaller allowance for this tenant, separate from the shared X account cap. */
@@ -145,6 +159,9 @@ export function introKey(tenant: string, xUserId: string, attempt = 0): string {
 }
 export function buyKey(decisionId: string): string {
   return `buy:${decisionId}`;
+}
+export function sellKey(tenant: string, operationKey: string): string {
+  return `sell:${key(tenant)}:${operationKey.toLowerCase()}`;
 }
 export function casualKey(tenant: string, day: string): string {
   return `casual:${key(tenant)}:${day}`;
@@ -320,6 +337,27 @@ export function planPosts(input: PlanInput): PlanIntent[] {
   const ownerOnDay = (day: string) => slots.filter((s) => s.tenant === key(tenant) && dayOf(s.atMs) === day).length;
   const out: PlanIntent[] = [];
 
+  // Completed sales share the account and owner caps, trade-post allowance,
+  // review window, freshness and gap. A separate explicit opt-in enables them.
+  const sells = input.tradeResults === true ? (input.sells ?? [])
+    .filter((c) => c.side === "sell" && c.paper === false && /^0x[0-9a-f]{64}$/i.test(c.operationKey) && /^0x[0-9a-f]{40}$/i.test(c.token))
+    .filter((c) => Number.isFinite(c.atSec) && c.atSec * 1000 > account.consentAtMs! && c.atSec * 1000 <= now && now - c.atSec * 1000 <= BUY_FRESH_MS)
+    .sort((a, b) => a.atSec - b.atSec) : [];
+  for (const call of sells) {
+    const dedupeKey = sellKey(tenant, call.operationKey);
+    if (used.has(dedupeKey)) continue;
+    const coin = coinOf(call);
+    if (!coin) continue;
+    if (slots.some((s) => s.kind === "sell" && s.coin === call.token.toLowerCase() && s.createdAtMs >= now - BUY_COIN_FOLD_MS)) continue;
+    const due = pushedPast(now + MIN_LEAD_MS, slots);
+    if (due > call.atSec * 1000 + BUY_STALE_MS) continue;
+    const day = dayOf(due);
+    if (onDay(day, "buy") + onDay(day, "sell") >= BUY_PER_DAY || onDay(day) >= perDay || ownerOnDay(day) >= ownerPerDay) continue;
+    out.push({ kind: "sell", dedupeKey, dueAtMs: due, call, coin: coin.label, coinKey: call.token.toLowerCase() });
+    slots.push({ tenant: key(tenant), kind: "sell", atMs: due, coin: call.token.toLowerCase(), createdAtMs: now });
+    used.add(dedupeKey);
+  }
+
   // BUYS: fresh, after consent, one per coin in three days, two a day at most —
   // and none at all when the owner turned them off.
   const buys = input.kinds?.buys === false ? [] : input.calls
@@ -337,7 +375,7 @@ export function planPosts(input: PlanInput): PlanIntent[] {
     const due = pushedPast(Math.max(fillMs + jitter * MIN, now + MIN_LEAD_MS), slots);
     if (due > fillMs + BUY_STALE_MS) continue;
     const day = dayOf(due);
-    if (onDay(day, "buy") >= BUY_PER_DAY || onDay(day) >= perDay || ownerOnDay(day) >= ownerPerDay) continue;
+    if (onDay(day, "buy") + onDay(day, "sell") >= BUY_PER_DAY || onDay(day) >= perDay || ownerOnDay(day) >= ownerPerDay) continue;
     out.push({ kind: "buy", dedupeKey, dueAtMs: due, call, coin: coin.label, coinKey: coin.key });
     slots.push({ tenant: key(tenant), kind: "buy", atMs: due, coin: coin.key, createdAtMs: now });
     used.add(dedupeKey);
@@ -412,7 +450,7 @@ export function sendDecision(
   if ((post.kind === "buy" && account.prefs?.buys === false) || (post.kind === "casual" && account.prefs?.casual === false)) {
     return { action: "cancel", reason: "kind-off" };
   }
-  if (post.kind === "buy" && nowMs - post.createdAtMs > BUY_STALE_MS) return { action: "skip", reason: "stale" };
+  if ((post.kind === "buy" || post.kind === "sell") && nowMs - post.createdAtMs > BUY_STALE_MS) return { action: "skip", reason: "stale" };
   if (post.kind === "reply" && nowMs - post.createdAtMs > REPLY_STALE_MS) return { action: "skip", reason: "stale" };
   if (post.kind === "casual" && post.dueAtMs <= nowMs) {
     if (nowMs - post.dueAtMs > CASUAL_MAX_PUSH_MS) return { action: "skip", reason: "stale" };

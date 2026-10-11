@@ -161,6 +161,30 @@ test("a nominated pool outside the top slice is verified by the same on-chain ch
   assert.deepEqual(withNomination.qualified.slice(0, 20).map(p => p.tokenAddress), plain.qualified.map(p => p.tokenAddress));
 });
 
+test("fresh-project preference chooses from screened pools and still verifies canonical provenance", async (t) => {
+  const prior = process.env.TRENCHER_FACTORY_CODE_HASH;
+  process.env.TRENCHER_FACTORY_CODE_HASH = keccak256("0x6000");
+  t.after(() => { if (prior === undefined) delete process.env.TRENCHER_FACTORY_CODE_HASH; else process.env.TRENCHER_FACTORY_CODE_HASH = prior; });
+  const nowSec = 1_000_000;
+  const tape = ranked(25);
+  const fresh = tape[24]!;
+  fresh.createdAt = nowSec - 1000;
+  const c = chain(new Set(tape.map(p => p.tokenAddress)), []);
+  tape.forEach(p => c.register(p));
+  const plain = await discoverTrencherUniverse(c.client, grant, tape, { nowSec });
+  assert.ok(!plain.qualified.some(p => p.tokenAddress === fresh.tokenAddress));
+  const focused = await discoverTrencherUniverse(c.client, grant, tape, { nowSec, focus: "new-projects" });
+  assert.equal(focused.qualified.length, 20);
+  assert.equal(focused.qualified[0]!.tokenAddress, fresh.tokenAddress);
+  const refused = chain(new Set(tape.filter(p => p !== fresh).map(p => p.tokenAddress)), []);
+  tape.forEach(p => refused.register(p));
+  assert.ok(!(await discoverTrencherUniverse(refused.client, grant, tape, { nowSec, focus: "new-projects" })).qualified.some(p => p.tokenAddress === fresh.tokenAddress));
+  for (const bad of [{ ...fresh, volume24hUsd: 10 }, { ...fresh, sells24h: 0 }, { ...fresh, dex: "uniswap-v4-robinhood" }]) {
+    const result = await discoverTrencherUniverse(c.client, grant, [...tape.slice(0, 24), bad], { nowSec, focus: "new-projects" });
+    assert.ok(!result.qualified.some(p => p.tokenAddress === fresh.tokenAddress));
+  }
+});
+
 test("a nominated pool that fails the canonical factory check is dropped, whoever posted it", async (t) => {
   const prior = process.env.TRENCHER_FACTORY_CODE_HASH;
   process.env.TRENCHER_FACTORY_CODE_HASH = keccak256("0x6000");

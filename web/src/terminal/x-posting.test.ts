@@ -728,7 +728,7 @@ describe("the warning keeps its words", () => {
     for (const said of [
       "Post on X as ${handle}?",
       "Your Merryman will post from whichever X account is connected — right now that's ${handle}.",
-      "It writes its own posts: a hello first, then the odd casual thought and now and then a coin it bought and why. It never posts trade alerts, error messages, prices or amounts.",
+      "It writes its own posts: a hello first, then the odd casual thought and now and then a coin it bought and why. It never posts trade alerts, error messages, prices or amounts. Your saved options can add public wallet or token addresses and completed sale results.",
       "Posts go out on their own, a few a day at most. Each one waits under Coming up for at least ten minutes first, and you can skip it there. Turn this off or disconnect X at any time.",
       "X may label accounts that post automatically, and may ask an account to verify itself the first time it posts about crypto.",
       "Let it post as ${handle}",
@@ -761,7 +761,7 @@ describe("the warning keeps its words", () => {
   it("the caption and the 'on' line both say whichever account is connected", () => {
     assert.ok(SRC.includes("Your Merryman will post from whichever X account you approve there, so check which account you're signed into on X first."));
     assert.ok(SRC.includes("Posting from ${handle} — whichever X account is connected."));
-    assert.ok(SRC.includes("No trade alerts, no error messages, no numbers."));
+    assert.ok(SRC.includes("No trade alerts, error messages or return promises."));
   });
 
   it("is mounted on Settings as its own section, hosted only, with the form's owner", () => {

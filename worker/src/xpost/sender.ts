@@ -50,9 +50,11 @@
  */
 import type { Db } from "../db";
 import { createPost, readMentions, refreshTokens, type FetchLike, type XApp, type XReplyBatch, type XResult } from "./client";
+import { hasPublicWallet } from "./public-wallet";
 import {
   cancelDisabledKind,
   claimPost,
+  getAccount,
   markFailed,
   markPosted,
   markRevoked,
@@ -103,6 +105,8 @@ export interface SendDeps {
   nowMs: number;
   sinceId?: string;
   startTimeMs?: number;
+  /** Fresh grant identity, disclosure consent and receipt proof, checked before each X write. */
+  validateBeforeSend?: (post: XPost) => Promise<boolean>;
 }
 
 type Unsent = "revoked" | "retry" | "app";
@@ -244,10 +248,19 @@ export async function sendOne(db: Db, dek: Buffer, app: XApp, post: XPost, deps:
     if (!first.ok) return settleUnsent(db, post, first.outcome, now);
 
     let tokens = first.tokens;
+    let refusal = "reply-ineligible";
     // Targets are read from storage, never trusted from the in-memory queue.
     // Recheck after refresh too: an owner or recipient may opt out in flight.
     const postNow = async () => {
       if (await cancelDisabledKind(db, post.id, now)) return null;
+      const account = await getAccount(db, post.tenant);
+      const sensitive = hasPublicWallet(post.body) || post.kind === "sell";
+      if (!account?.posting || account.xUserId !== post.xUserId
+        || (sensitive && (account.consentAtMs === null || account.consentAtMs > post.createdAtMs))
+        || !(deps.validateBeforeSend ? await deps.validateBeforeSend(post) : !sensitive)) {
+        refusal = "context-changed";
+        return null;
+      }
       const target = post.kind === "reply" ? await replyTargetFor(db, post) : null;
       if (post.kind === "reply" && !target) return null;
       return createPost(tokens.accessToken, post.body, { fetch: deps.fetch, nowMs: now,
@@ -255,7 +268,7 @@ export async function sendOne(db: Db, dek: Buffer, app: XApp, post: XPost, deps:
     };
     let answer = await postNow();
     if (!answer) {
-      await markFailed(db, post.id, "reply-ineligible", now);
+      await markFailed(db, post.id, refusal, now);
       return "cancelled";
     }
     if (!answer.ok && answer.failure === "auth") {
@@ -265,7 +278,7 @@ export async function sendOne(db: Db, dek: Buffer, app: XApp, post: XPost, deps:
       tokens = again.tokens;
       answer = await postNow();
       if (!answer) {
-        await markFailed(db, post.id, "reply-ineligible", now);
+        await markFailed(db, post.id, refusal, now);
         return "cancelled";
       }
       if (!answer.ok && answer.failure === "auth") {

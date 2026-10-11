@@ -171,6 +171,9 @@ export default function SettingsPage({onFund, slug, onSaved, agentDown = null}:{
   const [virtualsEnabled, setVirtualsEnabled] = useState<boolean | null>(null);
   // Scout mode is a boolean, so it can't ride the string `draft`.
   const [deskEnabled, setDeskEnabled] = useState<boolean | null>(null);
+  const [xPublicWalletIntro, setXPublicWalletIntro] = useState<boolean | null>(null);
+  const [xTokenAddresses, setXTokenAddresses] = useState<boolean | null>(null);
+  const [xTradeResults, setXTradeResults] = useState<boolean | null>(null);
   const [scoutEnabled, setScoutEnabled] = useState<boolean | null>(null);
   const [classSnipe, setClassSnipe] = useState<boolean | null>(null);
   /** The owner's consent to spend real money. Null = untouched this session. */
@@ -430,7 +433,7 @@ export default function SettingsPage({onFund, slug, onSaved, agentDown = null}:{
     return () => { clearTimeout(timer); controller.abort(); };
   }, [view, draft.llmProvider, draft.groqApiKey, draft.anthropicApiKey, draft.llmApiKey, draft.llmBaseUrl]);
 
-  const set = (k: string) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) =>
+  const set = (k: string) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) =>
     setDraft((d) => ({ ...d, [k]: e.target.value }));
 
   /**
@@ -569,6 +572,9 @@ export default function SettingsPage({onFund, slug, onSaved, agentDown = null}:{
     if (tgChattiness !== null) body.telegramGroupsChattiness = tgChattiness;
     if (virtualsEnabled !== null) body.virtualsEnabled = virtualsEnabled;
     if (deskEnabled !== null) body.deskEnabled = deskEnabled;
+    if (xPublicWalletIntro !== null) body.xPublicWalletIntro = xPublicWalletIntro;
+    if (xTokenAddresses !== null) body.xTokenAddresses = xTokenAddresses;
+    if (xTradeResults !== null) body.xTradeResults = xTradeResults;
     if (scoutEnabled !== null) body.scoutEnabled = scoutEnabled;
     if (classSnipe !== null) body.classSnipeEnabled = classSnipe;
     if (liveTrading !== null) body.liveTradingEnabled = liveTrading;
@@ -683,6 +689,9 @@ export default function SettingsPage({onFund, slug, onSaved, agentDown = null}:{
       setLiveTrading(null);
       setAssetMode(null);
       setDeskEnabled(null);
+      setXPublicWalletIntro(null);
+      setXTokenAddresses(null);
+      setXTradeResults(null);
       setClassSnipe(null);
       setOfficialCoins(null);
       void loadTelegram();
@@ -1204,6 +1213,19 @@ export default function SettingsPage({onFund, slug, onSaved, agentDown = null}:{
                 value={draft.agentName ?? ""}
                 onChange={set("agentName")}
               />
+            </Field>
+            <Field
+              label="Research and conversation brief"
+              hint="Used as private chat preferences. Trading research receives fixed evidence guidance and a casual or dry voice, never the text of this brief. This does not change trading limits or model."
+            >
+              <textarea rows={6} maxLength={1600} value={v("agentBrief")} onChange={set("agentBrief")}
+                placeholder="Explain the evidence, the strongest counterargument, costs, and what would change your mind. Keep it casual and admit uncertainty." />
+            </Field>
+            <Field label="Discovery focus" hint="New projects gives fresh qualifying pools priority in the Trencher scanner. Liquidity, contract checks and trading permissions still apply.">
+              <select value={v("discoveryFocus") || "balanced"} onChange={set("discoveryFocus")}>
+                <option value="balanced">Balanced</option>
+                <option value="new-projects">New projects first</option>
+              </select>
             </Field>
             <AgentImageField
               kind="avatar"
@@ -1924,13 +1946,37 @@ export default function SettingsPage({onFund, slug, onSaved, agentDown = null}:{
           </details>
           {/* POSTING ON X — hosted only, and only on a RESOLVED `hosted`, so a
               self-hosted page never flashes a section it cannot use. The whole
-              section is its own component (terminal/XPosting.tsx): it reads
-              and writes /api/x/*, never this form's `draft`, and nothing here
-              is saved by "Save changes". The owner it sends is the one this
+              connection component reads and writes /api/x/* immediately;
+              the editorial and disclosure preferences use this form's save.
+              The owner each path sends is the one this
               form was read for (SettingsView.owner). */}
           {hosted === true && (
             <details className="settings-group" id="x-posting"><summary>Posting on X</summary>
               <XPosting owner={view.owner} hosted={hosted} />
+              <Field label="X writing style" hint="Applies only to this agent's posts. Dry adds occasional light sarcasm while keeping its AI identity clear.">
+                <select value={v("xVoice") || "default"} onChange={set("xVoice")}>
+                  <option value="default">Default</option>
+                  <option value="dry">Casual and dry</option>
+                </select>
+              </Field>
+              <label className="mm-check">
+                <input type="checkbox"
+                  checked={xPublicWalletIntro ?? view.values.xPublicWalletIntro === true}
+                  onChange={(e) => setXPublicWalletIntro(e.target.checked)} />
+                Include my agent's public wallet and network in its X introduction
+              </label>
+              <p className="mm-hint">Anyone reading the post can track this wallet's on-chain activity. Save before enabling posting. This affects a future introduction; it does not repost one already sent or remove an existing public post.</p>
+              <label className="mm-check">
+                <input type="checkbox" checked={xTokenAddresses ?? view.values.xTokenAddresses === true}
+                  onChange={(e) => setXTokenAddresses(e.target.checked)} />
+                Include the verified token contract and network in trade posts
+              </label>
+              <label className="mm-check">
+                <input type="checkbox" checked={xTradeResults ?? view.values.xTradeResults === true}
+                  onChange={(e) => setXTradeResults(e.target.checked)} />
+                Post about completed sales and verified results
+              </label>
+              <p className="mm-hint">Reactions follow confirmed sales. Gross results are labelled before fees and gas; missing cost basis cannot become a claimed win.</p>
             </details>
           )}
 

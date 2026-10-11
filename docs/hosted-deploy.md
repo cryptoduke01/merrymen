@@ -246,6 +246,16 @@ throttle: `worker/src/energy.ts`.
 | variable | value |
 |---|---|
 | `MERRYMEN_ENERGY_GATE` *(optional)* | unset/`0` off · `observe` counts and logs `[energy] observe: enforce would withhold …` but limits nothing · `1` (or `enforce`) enforces. Set it on **both** `orchestrator` (the only thing that throttles) **and** `web` (copy only: the create/settings screens mention energy when it is `1`) |
+| `MERRYMEN_ENERGY_EXEMPT_ACCOUNTS` *(optional)* | On `orchestrator` only: comma-separated, full smart-account addresses from verified grants. Listed accounts use `observe` while the fleet uses `enforce`; an unset, empty or malformed list exempts nobody. Names, owner wallets, prefixes and `all` are not accepted. |
+
+An energy exemption removes only energy pacing and daily energy allowances for
+the listed account. Its actual $MERRYMEN balance and holder standing remain
+unchanged, and durable usage counters keep accumulating. The worker reports
+`mode: observe` and `gated: false` to every status reader. Signed per-trade and
+daily spending caps, drawdown limits, permissions, live-trading consent and all
+execution checks still apply. To revoke, remove the address and restart the
+orchestrator; enforcement resumes against the existing day's counters. This is
+an operator environment setting, never a tenant settings field.
 
 > **Roll out `observe` first**, read the logs for a day, then switch to `1` at
 > **00:00 UTC** — counts taken under `observe` belong to the same UTC day and

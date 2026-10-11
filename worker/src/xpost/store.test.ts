@@ -32,6 +32,7 @@ import {
   markRevoked,
   ownerCancel,
   ownerSendTimesSince,
+  tradeSendTimesSince,
   postingAccounts,
   postsOf,
   postsOfXUser,
@@ -440,6 +441,28 @@ test("an allowance is taken atomically and stops at its limit", async (t) => {
   assert.equal((await readMeta(db, "pause"))?.v, "456");
 });
 
+test("new allowances seed durable history without discarding concurrent reservations", async (t) => {
+  const { db } = await open(t);
+  assert.equal(await takeAllowance(db, "already-spent", 2, 1, 2), false);
+  assert.equal(await readMeta(db, "already-spent"), null);
+  const claims = await Promise.all([
+    takeAllowance(db, "one-left", 2, 2, 1),
+    takeAllowance(db, "one-left", 2, 2, 1),
+  ]);
+  assert.deepEqual(claims.sort(), [false, true]);
+  assert.equal((await readMeta(db, "one-left"))?.n, 2);
+  assert.equal(await takeAllowance(db, "one-left", 2, 3, 0), false, "a stale history read cannot lower reservations");
+  await returnAllowance(db, "one-left", 4);
+  assert.equal((await readMeta(db, "one-left"))?.n, 1, "return only the reservation, keeping history counted");
+  assert.equal(await takeAllowance(db, "one-left", 2, 5, 1), true);
+  assert.equal(await takeAllowance(db, "rising-history", 5, 6), true);
+  assert.equal(await takeAllowance(db, "rising-history", 5, 7, 3), true);
+  assert.equal((await readMeta(db, "rising-history"))?.n, 4);
+  for (const bad of [NaN, Infinity, -1, 0.5, Number.MAX_SAFE_INTEGER + 1]) {
+    assert.equal(await takeAllowance(db, "bad-seed", 5, 8, bad), false);
+  }
+});
+
 // ── what Postgres would receive ─────────────────────────────────────────────
 
 interface Sent {
@@ -504,6 +527,7 @@ test("every statement the store sends translates to Postgres with matching, bind
   await takeAllowance(db, "k", 3.5, 14.5);
   await takeOwnerAllowance(db, OWNER_A, "owner-day", 3.5, 14.5);
   await ownerSendTimesSince(db, OWNER_A, 0.5);
+  await tradeSendTimesSince(db, "222", 0.5);
   const span = await claimSpan(db, "gap:111", 20.5, 10.5);
   await claimSpan(db, "gap:111", 21.5, 10.5);
   if (span.ok) await releaseSpan(db, "gap:111", 20.5, span.prev, 22.5);
@@ -544,7 +568,7 @@ test("every statement the store sends translates to Postgres with matching, bind
       const assignments = pg.split(/DO UPDATE SET/i)[1]!.split(/\bWHERE\b(?![^()]*\))|\bRETURNING\b/i)[0]!;
       for (const part of assignments.split(/,(?![^()]*\))/)) {
         const rhs = part.split("=").slice(1).join("=").trim();
-        assert.ok(/^(excluded\.|CASE WHEN xpost_(?:accounts|reply_accounts)\.|xpost_meta\.)/.test(rhs), `bare right-hand side in an upsert: ${part.trim()}`);
+        assert.ok(/^(excluded\.|CASE WHEN xpost_(?:accounts|reply_accounts|meta)\.|xpost_meta\.)/.test(rhs), `bare right-hand side in an upsert: ${part.trim()}`);
       }
     }
     for (const p of params) {
@@ -886,4 +910,29 @@ test("a new owner counter includes earlier send history, including old drafts se
   await setPrefs(db, OWNER_A, { perDay: 3 }, 2008);
   assert.equal(await takeOwnerAllowance(db, OWNER_A, key, 3, 2009, 99), true, "a later seed never overwrites the live count");
   assert.equal((await readMeta(db, key))?.n, 3);
+});
+
+
+test("trade allowance history counts all owners of an X account without reading queued rows as sends", async (t) => {
+  const { db } = await open(t);
+  const cases = [
+    { kind: "buy", status: "posted", sent: 2001, updated: 3000, reason: null, owner: OWNER_A, x: "111" },
+    { kind: "sell", status: "posted", sent: 2002, updated: 3000, reason: null, owner: OWNER_B, x: "111" },
+    { kind: "buy", status: "sending", sent: null, updated: 2003, reason: null, owner: OWNER_A, x: "111" },
+    { kind: "sell", status: "failed", sent: null, updated: 2004, reason: "uncertain", owner: OWNER_A, x: "111" },
+    { kind: "buy", status: "failed", sent: null, updated: 2005, reason: "interrupted", owner: OWNER_A, x: "111" },
+    { kind: "sell", status: "failed", sent: null, updated: 2006, reason: "fault", owner: OWNER_A, x: "111" },
+    { kind: "sell", status: "failed", sent: null, updated: 2007, reason: "forbidden", owner: OWNER_A, x: "111" },
+    { kind: "buy", status: "scheduled", sent: null, updated: 2008, reason: null, owner: OWNER_A, x: "111" },
+    { kind: "casual", status: "posted", sent: 2009, updated: 3000, reason: null, owner: OWNER_A, x: "111" },
+    { kind: "buy", status: "posted", sent: 999, updated: 3000, reason: null, owner: OWNER_A, x: "111" },
+    { kind: "buy", status: "posted", sent: 2010, updated: 3000, reason: null, owner: OWNER_A, x: "222" },
+  ];
+  for (const [i, row] of cases.entries()) {
+    await db.prepare(`INSERT INTO xpost_posts (tenant,x_user_id,kind,dedupe_key,body,due_at_ms,status,reason,sent_at_ms,created_at_ms,updated_at_ms)
+      VALUES (?,?,?,?,?,0,?,?,?,1,?)`).run(row.owner.toLowerCase(), row.x, row.kind, `trade-history:${i}`, "sold token", row.status, row.reason, row.sent, row.updated);
+  }
+  assert.deepEqual((await tradeSendTimesSince(db, "111", 1000)).sort(), [2001, 2002, 2003, 2004, 2005, 2006]);
+  assert.deepEqual(await tradeSendTimesSince(db, "222", 1000), [2010]);
+  assert.deepEqual(await tradeSendTimesSince(db, "333", 1000), []);
 });
