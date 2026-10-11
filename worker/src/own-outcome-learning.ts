@@ -82,6 +82,12 @@ function cycle(): Cycle {
  */
 function summarize(rows: readonly Record<string, unknown>[], out: OwnOutcomeLearning): OwnOutcomeLearning {
   const positions = new Map<string, Cycle>();
+  // An ordinary cash funding/vault move is not an unresolved trading position.
+  // A transfer of a traded token DOES break its flat/basis proof, including one
+  // that happened before that token's first typed trade in the replay.
+  const tradedTokens = new Set(rows.filter((r) => (r.kind === "swap" || r.kind === "curve-trade") &&
+    (r.fill_side === "buy" || r.fill_side === "sell")).map((r) => r[r.fill_side === "buy" ? "buy_token" : "sell_token"])
+    .filter((v): v is string => typeof v === "string" && ADDRESS.test(v)).map((v) => v.toLowerCase()));
   let spent = 0n, net = 0n, costs = 0n;
   const since = out.at - OWN_LEARNING_WINDOW_SEC;
   for (const row of rows) {
@@ -90,7 +96,7 @@ function summarize(rows: readonly Record<string, unknown>[], out: OwnOutcomeLear
     const side = row.fill_side === "buy" || row.fill_side === "sell" ? row.fill_side : null;
     const trade = row.kind === "swap" || row.kind === "curve-trade";
     const tokens = side && trade ? [row[side === "buy" ? "buy_token" : "sell_token"]] : [row.buy_token, row.sell_token];
-    for (const token of new Set(tokens.filter((v): v is string => typeof v === "string" && ADDRESS.test(v)).map((v) => v.toLowerCase()))) {
+    for (const token of new Set(tokens.filter((v): v is string => typeof v === "string" && ADDRESS.test(v)).map((v) => v.toLowerCase()).filter((v) => tradedTokens.has(v)))) {
       let state = positions.get(token);
       if (!state) { state = cycle(); positions.set(token, state); }
       state.touchedInWindow ||= recent;
@@ -166,6 +172,9 @@ export async function readOwnOutcomeLearning(db: Db, account: string, chainId: n
       WHERE t.status = 'landed' AND t.created_at <= ?
       ORDER BY t.created_at ASC, t.id ASC LIMIT ?`).all(account, nowSec, OWN_LEARNING_ROWS + 1) as Record<string, unknown>[];
     if (rows.length > OWN_LEARNING_ROWS) { out.reason = "history-limit"; return out; }
+    // The shared mirror may publish rows before the agent registration. Never
+    // treat that transient, mixed-period picture as a complete current book.
+    if (rows.some((r) => typeof r.epoch !== "number" || !Number.isSafeInteger(r.epoch) || r.epoch < 0 || r.epoch > out.epoch)) return out;
     const latest = await readAccount();
     if (latest.length !== 1 || latest[0]?.mode !== "live" || Number(latest[0]?.chain_id) !== chainId || Number(latest[0]?.epoch) !== out.epoch) return out;
     return summarize(rows, out);

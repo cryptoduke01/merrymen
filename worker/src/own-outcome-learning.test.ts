@@ -157,6 +157,27 @@ describe("durable owner outcome learning", () => {
     } finally { f.raw.close(); }
   });
 
+  it("cash funding is not an unresolved position, but a transfer of a traded token breaks its basis proof", async () => {
+    for (const transferred of [CASH, TOKEN]) {
+      const f = fixture();
+      try {
+        f.add("buy", 1, { kind: "transfer", fill_side: null, fill_qty_raw: null, buy_token: transferred, sell_token: null });
+        f.add("buy", 10); f.add("sell", 12);
+        const s = await f.read();
+        assert.equal(s.closed, transferred === CASH ? 1 : 0);
+        assert.equal(s.unresolved, transferred === CASH ? 0 : 1);
+      } finally { f.raw.close(); }
+    }
+  });
+
+  it("an ahead-of-registration epoch makes the mirrored book unavailable", async () => {
+    const f = fixture();
+    try {
+      f.add("buy", 10); f.add("sell", 12); f.add("buy", 1, { epoch: 2 });
+      assert.equal((await f.read()).status, "unavailable");
+    } finally { f.raw.close(); }
+  });
+
   it("fails closed for truncated or unreadable history, and a concurrent epoch change", async () => {
     const f = fixture();
     try {
