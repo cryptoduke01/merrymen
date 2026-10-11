@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { beforeEach, afterEach, describe, it } from "node:test";
 import {
   parseGeckoPool,
   screenPools,
@@ -8,8 +11,16 @@ import {
   geckoSource,
   readTokenPools,
   readTokenPoolsResult,
+  resetGeckoFeedsForTest,
+  cachedGeckoDetail,
   type GeckoPool,
 } from "./geckoterminal";
+
+beforeEach(() => {
+  let now = Date.now();
+  resetGeckoFeedsForTest({ now: () => now, sleep: async ms => { now += ms; } });
+});
+afterEach(() => resetGeckoFeedsForTest());
 
 describe("authenticated CoinGecko market source", () => {
   it("uses the public feed with no configured credential", () => {
@@ -486,5 +497,113 @@ describe("readTokenPools", () => {
       await readTokenPools(addr("6"));
     });
     assert.equal(calls, 1);
+  });
+});
+
+describe("bounded public fallback", () => {
+  const realFetch = globalThis.fetch;
+  let oldKey: string | undefined, oldHome: string | undefined;
+  beforeEach(() => {
+    oldKey = process.env.MERRYMEN_COINGECKO_PRO_API_KEY;
+    oldHome = process.env.MERRYMEN_FLEET_HOME;
+    process.env.MERRYMEN_COINGECKO_PRO_API_KEY = "private-pro-key";
+    delete process.env.MERRYMEN_FLEET_HOME;
+  });
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+    if (oldKey === undefined) delete process.env.MERRYMEN_COINGECKO_PRO_API_KEY; else process.env.MERRYMEN_COINGECKO_PRO_API_KEY = oldKey;
+    if (oldHome === undefined) delete process.env.MERRYMEN_FLEET_HOME; else process.env.MERRYMEN_FLEET_HOME = oldHome;
+  });
+
+  it("keeps Pro refusal and public success separate, coalesces cached reads, and never sends the key publicly", async () => {
+    const urls: string[] = [];
+    globalThis.fetch = async (input, init) => {
+      const url = String(input); urls.push(url);
+      assert.equal(init?.redirect, "error");
+      const pro = url.startsWith("https://pro-api.coingecko.com/");
+      assert.equal(new Headers(init?.headers).get("x-cg-pro-api-key"), pro ? "private-pro-key" : null);
+      return pro ? new Response("monthly quota exhausted", { status: 429 }) : Response.json({ data: [CHUMP] });
+    };
+    const first = await fetchGeckoPoolsResult("new_pools");
+    const second = await fetchGeckoPoolsResult("new_pools");
+    assert.equal(first.failed, false);
+    assert.equal(first.provider, "geckoterminal-public");
+    assert.equal(first.primaryFailure, "http-429");
+    assert.equal(first.pools[0]?.buyers24h, 1592);
+    assert.equal(second.observedAt, first.observedAt);
+    assert.equal(urls.length, 2);
+    assert.doesNotMatch(JSON.stringify(first), /private-pro-key|monthly quota/);
+    await fetchGeckoPoolsResult("pools", { page: 2 });
+    assert.equal(urls.length, 3, "a distinct page uses public without another Pro request during cooldown");
+    assert.ok(urls[2]?.startsWith("https://api.geckoterminal.com/"));
+  });
+
+  it("never replaces missing distinct buyers with transaction count on fallback", async () => {
+    const noBuyers = { ...CHUMP, attributes: { ...CHUMP.attributes, transactions: { h24: { buys: 999_999, sells: 999_999 } } } };
+    globalThis.fetch = async input => String(input).includes("pro-api") ? new Response("outage", { status: 503 }) : Response.json({ data: [noBuyers] });
+    const r = await fetchGeckoPoolsResult("pools");
+    assert.equal(r.failed, false);
+    assert.equal(r.pools[0]?.buyers24h, null);
+    const screened = screenPools(r.pools, { minReserveUsd: 1, minVolume24hUsd: 1, minBuyers24h: 1 });
+    assert.equal(screened.kept.length, 0);
+    assert.match(screened.dropped[0]!.why, /unknown buyers/);
+  });
+
+  it("stops after both providers refuse and keeps the public cooldown independent", async () => {
+    let calls = 0;
+    globalThis.fetch = async () => { calls++; return new Response("limited", { status: 429, headers: { "retry-after": "180" } }); };
+    const first = await fetchGeckoPoolsResult("pools");
+    assert.equal(first.failed, true);
+    assert.equal(first.failure, "http-429");
+    assert.equal(first.provider, "geckoterminal-public");
+    const next = await fetchGeckoPoolsResult("new_pools");
+    assert.equal(next.failed, true);
+    assert.equal(next.failure, "provider-cooldown");
+    assert.equal(calls, 2);
+  });
+
+  it("passes only the remaining shared budget to a fallback request", async () => {
+    let now = Date.now();
+    resetGeckoFeedsForTest({ now: () => now, sleep: async ms => { now += ms; } });
+    const budgets: number[] = [];
+    const result = await cachedGeckoDetail("deadline", async (source, remainingMs) => {
+      budgets.push(remainingMs);
+      if (source.id === "coingecko-pro") { now += 29_000; return { failed: true, failure: "timeout" }; }
+      return { failed: false, observedAt: now };
+    }, failure => ({ failed: true, failure }));
+    assert.equal(result.failed, false);
+    assert.deepEqual(budgets, [30_000, 1000]);
+  });
+
+  it("does not consult public for 401/403 or retry a healthy empty market", async () => {
+    for (const status of [401, 403, 200]) {
+      resetGeckoFeedsForTest();
+      let calls = 0;
+      globalThis.fetch = async () => { calls++; return status === 200 ? Response.json({ data: [] }) : new Response("refused", { status }); };
+      const result = await fetchGeckoPoolsResult("pools");
+      assert.equal(result.provider, "coingecko-pro");
+      assert.equal(result.primaryFailure, undefined);
+      assert.equal(result.failed, status !== 200);
+      assert.equal(calls, 1);
+    }
+  });
+
+  it("keys durable lanes by provider and fleet home instead of reusing the first cache", async () => {
+    const home = mkdtempSync(path.join(tmpdir(), "gecko-source-lanes-"));
+    let calls = 0;
+    globalThis.fetch = async input => {
+      calls++;
+      return String(input).includes("pro-api") ? Response.json({ data: [CHUMP] }) : new Response("limited", { status: 429 });
+    };
+    try {
+      process.env.MERRYMEN_FLEET_HOME = path.join(home, "first");
+      delete process.env.MERRYMEN_COINGECKO_PRO_API_KEY;
+      assert.equal((await fetchGeckoPoolsResult("pools")).failure, "http-429");
+      process.env.MERRYMEN_COINGECKO_PRO_API_KEY = "private-pro-key";
+      assert.equal((await fetchGeckoPoolsResult("pools")).failed, false, "public cooldown does not suppress Pro");
+      process.env.MERRYMEN_FLEET_HOME = path.join(home, "second");
+      assert.equal((await fetchGeckoPoolsResult("pools")).failed, false);
+      assert.equal(calls, 3, "another home has its own coordination store");
+    } finally { resetGeckoFeedsForTest(); rmSync(home, { recursive: true, force: true }); }
   });
 });

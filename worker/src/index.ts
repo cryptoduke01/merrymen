@@ -147,6 +147,9 @@ import { MarketReviewClock, quietReviewRow, quietReviewScope } from "./market-re
 import { ChainCoinNames, makeDecisionNamer, warmHeldNames } from "./decision-name";
 import { intentDecisionRow } from "./decision-row";
 import { memoryLines, positionContext, sentimentLine, technicalLine } from "./brain-material";
+import { DECISION_RESEARCH_GUIDANCE, decisionResearchEnabledFor, entryCostEvidence, researchEntrySize } from "./decision-research";
+import { readOwnOutcomeLearningFile } from "./own-outcome-learning-file";
+import { outcomeLearningLines } from "./own-outcome-learning";
 import { readFeedHistory } from "./read-feed-history";
 import { gradeFloor } from "./strategist/floor-grade";
 import { renderLiquidity } from "./research/coin-liquidity";
@@ -1038,6 +1041,7 @@ async function main() {
   let trenchTapeAt = 0;
   let trenchTapeRequestedAt = 0;
   let trenchTapePending = false;
+  let lastTrenchFeedHealth = "";
   let lastTrenchNotice = "";
   function trenchNotice(agentId: string, message: string) {
     if (message === lastTrenchNotice) return;
@@ -1054,6 +1058,11 @@ async function main() {
     trenchTapeRequestedAt = Date.now();
     void trenchTapeReader.refresh().then(result => {
       trenchTapeAt = result.observedAt;
+      const feedHealth = `${result.providers.join(",")}|${result.primaryFailures.join(",")}|${result.pools.length > 0}`;
+      if (feedHealth !== lastTrenchFeedHealth) {
+        lastTrenchFeedHealth = feedHealth;
+        console.log(`[trencher] Market feed source=${result.providers.join(",") || "unavailable"}; primary=${result.primaryFailures.join(",") || (result.providers.length ? "healthy" : "unavailable")}; ${result.pools.length} fresh screened pools.`);
+      }
       if (result.failures.length) console.warn(`[trencher] Market tape pages failed: ${result.failures.join(", ")}; ${result.pools.length} fresh pools retained.`);
       // The coins the tape screen dropped, once per refresh, by the rule each failed.
       for (const s of trenchTapeReader.screenedOut()) funnel.note(s.tokenAddress, null, classifyStage({ kind: "discovery", screen: s.reason }));
@@ -12941,6 +12950,11 @@ async function main() {
               : null;
           const brainPeers = wire.theses;
           const brainOwn = wire.own ?? [];
+          const enhancedResearch = fastTrencher && !paper && decisionResearchEnabledFor(active.grant.smartAccount);
+          const ownLearning = enhancedResearch ? readOwnOutcomeLearningFile(merrymenHome(), {
+            account: active.grant.smartAccount, chainId: active.grant.chainId, expiresAt: active.grant.expiresAt, epoch: epochNow,
+          }, Math.floor(Date.now() / 1000)) : null;
+          const learnedOutcomes = ownLearning ? outcomeLearningLines(ownLearning) : [];
           // THE KEY THE DESK FOR THIS INSTRUMENT ACTUALLY READS.
           //
           // `_lenses_for` gives an equity token `sentiment` and a memecoin
@@ -13221,7 +13235,7 @@ async function main() {
             // peer file rather than the child's `decisions` table because that
             // table is wiped by every redeploy — an agent reading memory from
             // it would permanently be having its first thought.
-            memory: memoryLines(brainOwn, Math.floor(Date.now() / 1000)),
+            memory: [...learnedOutcomes, ...memoryLines(brainOwn, Math.floor(Date.now() / 1000)).slice(0, 6 - learnedOutcomes.length)],
           };
           reviewPreparationMs = Math.max(reviewPreparationMs, Date.now() - tickStartedAt);
           inputs.reviewPreparationMs = reviewPreparationMs;
@@ -13253,7 +13267,21 @@ async function main() {
             const brainConfig = { url: cfg.brainUrl, token: cfg.brainToken, timeoutMs: 25_000 };
             const projectContext = cfg.discoveryFocus === "new-projects"
               ? { client, token: focus.token, chainId: active.grant.chainId, browser: browserCfg() } : null;
+            // Capture read-only inputs before launching: a re-arm must not let a
+            // background review read another grant's state or alter its limits.
+            const researchSize = researchEntrySize([
+              TRENCHER_FAST.perEntryUsdg, active.limits.perTradeUsdg, balances.cashUsdg,
+              active.limits.dailyUsdg > spentToday() ? active.limits.dailyUsdg - spentToday() : 0n,
+              BigInt(Math.max(0, Math.floor(earlyEntryBound(cfg.llmMaxActionUsdg, earlyBook.maxUsdgFor(focus.token), false) * 1e6))),
+            ]);
+            const costContext = enhancedResearch && !focus.held ? {
+              client: mainnetClient(), token: focus.token as `0x${string}`,
+              facts: verifiedPool?.poolAddress ? trenchPoolCache.verified(UNISWAP.v3Factory, verifiedPool.poolAddress) : undefined,
+              sizeUsdg: researchSize, gasPerOperationUsdg: expectedTradeGasMicro, tradeFeeBps: cfg.tradeFeeBps,
+            } : null;
+            if (enhancedResearch) inputs.persona += `\n\n${DECISION_RESEARCH_GUIDANCE}`;
             trenchBrain.launch(trenchContext, inputs, focus.token, async () => {
+              const costRead = costContext ? entryCostEvidence(costContext) : Promise.resolve(null);
               const projectRead = projectContext
                 ? projectPurpose.read(projectContext.client, projectContext.token, projectContext.chainId, projectContext.browser)
                 : Promise.resolve(null);
@@ -13301,6 +13329,13 @@ async function main() {
               }
               const project = await projectRead;
               if (project) inputs.market.signals.builder = [project, inputs.market.signals.builder].filter(Boolean).join("\n\n");
+              const costEvidence = await costRead;
+              if (costEvidence) {
+                inputs.market.signals.liquidity = [costEvidence, inputs.market.signals.liquidity].filter(Boolean).join("\n\n");
+                // Pulse can reserve a slot for project research and omit the
+                // liquidity analyst; the manager still needs the same costs.
+                inputs.memory = [costEvidence, ...(inputs.memory ?? []).slice(0, 5)];
+              }
               // Once the decision is persisted (runShadow writes it before it
               // returns), the nomination book hears what was decided about this
               // token — tgNoteReview never throws into the review's promise.

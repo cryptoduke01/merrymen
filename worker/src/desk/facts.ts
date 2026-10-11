@@ -204,7 +204,7 @@ export function parseFactsInfo(body: unknown, network: FactsNetwork, address: st
 }
 
 /** How one index read went: its body, or why not. */
-export type FactsFetch = (route: string, timeoutMs: number) => Promise<{ ok: true; body: unknown; observedAt: number } | { ok: false; failure: string }>;
+export type FactsFetch = (route: string, timeoutMs: number) => Promise<{ ok: true; body: unknown; observedAt: number } | { ok: false; failure: string; retryAfterMs?: number }>;
 
 interface RawRead extends FeedResult {
   body?: unknown;
@@ -264,15 +264,15 @@ const BARS_LIMIT = 1_000;
  * pool is "not-found".
  */
 export function createCoinFactsReader(o: { fetchJson?: FactsFetch; now?: () => number; limiter?: FactsLimiter } = {}): CoinFactsReader {
-  const fetchJson: FactsFetch = o.fetchJson ?? ((route, timeoutMs) => getJson(route, timeoutMs));
   const now = o.now ?? Date.now;
   const limiter = o.limiter ?? new FactsLimiter({ now });
   const read = (key: string, route: string, timeoutMs: number): Promise<RawRead> =>
     memoized<RawRead>(
       `facts:${key}`,
-      async () => {
-        const r = await fetchJson(route, timeoutMs);
-        return r.ok ? { failed: false, observedAt: r.observedAt, body: r.body } : { failed: true, failure: r.failure };
+      async (source, remainingMs) => {
+        const boundedMs = Math.min(timeoutMs, remainingMs);
+        const r = o.fetchJson ? await o.fetchJson(route, boundedMs) : await getJson(route, boundedMs, undefined, source);
+        return r.ok ? { failed: false, observedAt: r.observedAt, body: r.body } : { failed: true, failure: r.failure, ...(r.retryAfterMs !== undefined ? { retryAfterMs: r.retryAfterMs } : {}) };
       },
       (failure) => ({ failed: true, failure }),
     );

@@ -65,6 +65,16 @@ test("shared feed cache hits cannot renew the tape's observation time", async ()
   assert.equal((await reader.refresh()).pools.length, 0);
 });
 
+test("fallback feed provenance remains visible without admitting unsafe provider diagnostics", async () => {
+  const reader = new TrenchTapeReader(async (feed) => ({ failed: false, pools: [pool()], observedAt: 1000,
+    provider: "geckoterminal-public" as const, primaryFailure: feed === "new_pools" ? "secret provider body" : "http-429" }), () => 1000);
+  const result = await reader.refresh();
+  assert.deepEqual(result.providers, ["geckoterminal-public"]);
+  assert.deepEqual(result.primaryFailures, ["http-429", "unavailable"]);
+  assert.equal(result.pools.length, 1);
+  assert.equal(result.observedAt, 1000);
+});
+
 test("Brain receives short-window momentum and depth in dollars without fabricating missing measurements", () => {
   const p = pool({ reserveUsd: 5_000_000, fdvUsd: 400_000_000 });
   const s = trenchBrainSignals(p, 120_000, 250_000);
