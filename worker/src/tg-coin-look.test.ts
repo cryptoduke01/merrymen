@@ -1269,7 +1269,7 @@ describe("index.ts wires the seams in the order that makes them safe", () => {
   });
 
   it("the nomination only reorders the review, and the Brain's input is any tape coin's", () => {
-    assert.match(CODE, /trenchBrain\.candidate\(trenchEligible\.filter\([^\n]*\), tgBook\.priority\(\)\);/);
+    assert.match(CODE, /trenchBrain\.candidate\(trenchEligible\.filter\([^\n]*\), tgBook\.priority\(\), cfg\.discoveryFocus\);/);
     const inputsAt = CODE.indexOf("const inputs: ShadowInputs = {");
     const launchAt = CODE.indexOf("trenchBrain.launch(trenchContext, inputs");
     assert.ok(inputsAt > 0 && launchAt > inputsAt);
@@ -1299,7 +1299,7 @@ describe("index.ts wires the seams in the order that makes them safe", () => {
     // early path (a follow nomination): the regular autonomous list is built
     // by regularEntryPools, which drops early pools, and the paper list drops
     // verify-only coins. They earn no review slot or ceiling by themselves.
-    assert.match(refresh, /discoverTrencherUniverse\(mainnetClient\(\),\s*current\.grant,\s*freshTrenchTape\(\),\s*\{\s*nominated:\s*new Set\(tgNominated\),\s*cache:\s*poolCache(?:,\s*early:\s*(?:earlyBook\.addresses\(\)|earlyDiscoverySet\(\)))?\s*\}\)/);
+    assert.match(refresh, /discoverTrencherUniverse\(mainnetClient\(\),\s*current\.grant,\s*freshTrenchTape\(\),\s*\{\s*nominated:\s*new Set\(tgNominated\),\s*cache:\s*poolCache(?:,\s*early:\s*(?:earlyBook\.addresses\(\)|earlyDiscoverySet\(\)))?,\s*focus:\s*cfg\.discoveryFocus\s*\}\)/);
     assert.match(refresh, /autoTrenchContext === context && trenchPoolCache === poolCache && active/,
       "a result from an old grant or connection cannot replace the current discovery");
   });
