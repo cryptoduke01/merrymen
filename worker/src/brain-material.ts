@@ -268,7 +268,7 @@ function endingOf(t: PublicThesis): string {
   if (t.outcome !== "landed") return "";
   const pct = t.realizedPct;
   if (t.action === "sell" && typeof pct === "number" && Number.isFinite(pct)) {
-    return `, ${pct >= 0 ? "+" : "-"}${Math.abs(pct).toFixed(1)}% realized`;
+    return `, ${pct >= 0 ? "+" : "-"}${Math.abs(pct).toFixed(1)}% gross realized (before gas and fees)`;
   }
   const entry = t.entryPriceUsd;
   if (t.action === "buy" && typeof entry === "number" && Number.isFinite(entry) && entry > 0) {

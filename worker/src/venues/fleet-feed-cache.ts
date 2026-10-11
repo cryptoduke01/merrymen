@@ -9,6 +9,9 @@ export interface FeedResult {
   failure?: string;
   observedAt?: number;
   retryAfterMs?: number;
+  provider?: "coingecko-pro" | "geckoterminal-public";
+  /** Safe primary diagnostic when a separate public source was consulted. */
+  primaryFailure?: string;
 }
 
 /**
@@ -35,26 +38,39 @@ export interface FeedClock {
   sleep(ms: number): Promise<void>;
 }
 
-const REAL_CLOCK: FeedClock = { now: () => Date.now(), sleep: (ms) => sleep(ms) };
+export const REAL_FEED_CLOCK: FeedClock = { now: () => Date.now(), sleep: (ms) => sleep(ms) };
+
+/** Persistent failures should not spend an exhausted monthly quota every minute. */
+function cooldownDelay(result: FeedResult, failures: number): number {
+  return Math.max(Math.min(900_000, 60_000 * 2 ** Math.min(4, failures)),
+    Number.isFinite(result.retryAfterMs) ? result.retryAfterMs! : 0);
+}
+
+export interface FeedCache {
+  get<T extends FeedResult>(key: string, request: () => Promise<T>, unavailable: (reason: string) => T, deadlineMs?: number): Promise<T>;
+  close(): void;
+}
 
 /** Public market data only. SQLite leases coordinate separate tenant processes;
  * no transaction stays open across a network request. */
-export class FleetFeedCache {
+export class FleetFeedCache implements FeedCache {
   private db: DatabaseSync;
-  constructor(home: string, private spacingMs = 3000, private clock: FeedClock = REAL_CLOCK) {
+  constructor(home: string, private spacingMs = 6500, private clock: FeedClock = REAL_FEED_CLOCK) {
     mkdirSync(home, { recursive: true });
     this.db = new DatabaseSync(path.join(home, "gecko-feed-cache.sqlite"));
     this.db.exec(`PRAGMA busy_timeout=1000;
       CREATE TABLE IF NOT EXISTS pages (key TEXT PRIMARY KEY, payload TEXT, expires REAL NOT NULL DEFAULT 0, lease TEXT, lease_until REAL NOT NULL DEFAULT 0);
       CREATE TABLE IF NOT EXISTS cooldown (id INTEGER PRIMARY KEY, until_ms REAL NOT NULL);
-      INSERT OR IGNORE INTO cooldown VALUES (1,0);
+      INSERT OR IGNORE INTO cooldown(id,until_ms) VALUES (1,0);
+      CREATE TABLE IF NOT EXISTS provider_backoff (id INTEGER PRIMARY KEY, failures INTEGER NOT NULL DEFAULT 0);
+      INSERT OR IGNORE INTO provider_backoff VALUES (1,0);
       CREATE TABLE IF NOT EXISTS pacing (id INTEGER PRIMARY KEY, next_ms REAL NOT NULL);
       INSERT OR IGNORE INTO pacing VALUES (1,0);`);
   }
   close() { this.db.close(); }
 
-  async get<T extends FeedResult>(key: string, request: () => Promise<T>, unavailable: (reason: string) => T): Promise<T> {
-    const deadline = this.clock.now() + 30_000;
+  async get<T extends FeedResult>(key: string, request: () => Promise<T>, unavailable: (reason: string) => T, deadlineMs = this.clock.now() + 30_000): Promise<T> {
+    const deadline = Math.min(deadlineMs, this.clock.now() + 30_000);
     while (this.clock.now() < deadline) {
       const now = this.clock.now();
       const row = this.db.prepare("SELECT * FROM pages WHERE key=?").get(key) as {payload: string | null; expires: number} | undefined;
@@ -65,10 +81,10 @@ export class FleetFeedCache {
       const claimed = this.db.prepare(`INSERT INTO pages(key,lease,lease_until) VALUES(?,?,?)
         ON CONFLICT(key) DO UPDATE SET lease=excluded.lease, lease_until=excluded.lease_until
         WHERE pages.lease_until<=? AND pages.expires<=?`).run(key, lease, now + 45_000, now, now);
-      if (!claimed.changes) { await this.clock.sleep(100); continue; }
+      if (!claimed.changes) { await this.clock.sleep(Math.min(100, deadline - this.clock.now())); continue; }
       try {
-        // Reserve one fleet-wide slot, even for different page keys. The
-        // public budget is 30/min; 3s spacing leaves headroom at 20/min.
+        // One provider-wide slot, even for different page keys. The public
+        // API currently documents ~10/min, so its lane uses 6.5s spacing.
         for (;;) {
           const time = this.clock.now();
           if (time >= deadline) return unavailable("request-budget");
@@ -86,8 +102,11 @@ export class FleetFeedCache {
         const result = await request();
         const at = this.clock.now();
         if (result.failure === "http-429") {
-          const delay = Math.max(60_000, Number.isFinite(result.retryAfterMs) ? result.retryAfterMs! : 0);
-          this.db.prepare("UPDATE cooldown SET until_ms=MAX(until_ms,?) WHERE id=1").run(at + delay);
+          const state = this.db.prepare("UPDATE provider_backoff SET failures=MIN(failures+1,5) WHERE id=1 RETURNING failures").get() as { failures: number };
+          this.db.prepare("UPDATE cooldown SET until_ms=MAX(until_ms,?) WHERE id=1")
+            .run(at + cooldownDelay(result, state.failures - 1));
+        } else if (!result.failed) {
+          this.db.prepare("UPDATE provider_backoff SET failures=0 WHERE id=1 AND (SELECT until_ms FROM cooldown WHERE id=1)<=?").run(at);
         }
         // Never change the observation timestamp on a cache hit.
         this.db.prepare("UPDATE pages SET payload=?,expires=?,lease_until=0 WHERE key=? AND lease=?")
@@ -98,5 +117,45 @@ export class FleetFeedCache {
       }
     }
     return unavailable("timeout");
+  }
+}
+
+/** Self-hosted equivalent; a fleet always uses the durable shared SQLite lane. */
+export class LocalFeedCache implements FeedCache {
+  private pages = new Map<string, { result: FeedResult; expires: number }>();
+  private pending = new Set<string>();
+  private nextMs = 0;
+  private untilMs = 0;
+  private failures = 0;
+  constructor(private spacingMs: number, private clock: FeedClock = REAL_FEED_CLOCK) {}
+  close() { this.pages.clear(); }
+
+  async get<T extends FeedResult>(key: string, request: () => Promise<T>, unavailable: (reason: string) => T, deadlineMs = this.clock.now() + 30_000): Promise<T> {
+    const deadline = Math.min(deadlineMs, this.clock.now() + 30_000);
+    while (this.clock.now() < deadline) {
+      const now = this.clock.now(), hit = this.pages.get(key);
+      if (hit && hit.expires > now) return hit.result as T;
+      if (this.untilMs > now) return unavailable("provider-cooldown");
+      if (this.pending.has(key)) { await this.clock.sleep(Math.min(100, deadline - now)); continue; }
+      this.pending.add(key);
+      try {
+        while (this.nextMs > this.clock.now()) {
+          if (this.clock.now() >= deadline) return unavailable("request-budget");
+          await this.clock.sleep(Math.min(this.nextMs - this.clock.now(), deadline - this.clock.now()));
+        }
+        if (this.clock.now() >= deadline) return unavailable("request-budget");
+        if (this.untilMs > this.clock.now()) return unavailable("provider-cooldown");
+        this.nextMs = this.clock.now() + this.spacingMs;
+        const result = await request(), at = this.clock.now();
+        if (result.failure === "http-429") {
+          this.untilMs = Math.max(this.untilMs, at + cooldownDelay(result, this.failures));
+          this.failures = Math.min(5, this.failures + 1);
+        } else if (!result.failed && this.untilMs <= at) this.failures = 0;
+        if (this.pages.size >= 256) this.pages.delete(this.pages.keys().next().value!);
+        this.pages.set(key, { result, expires: result.failed ? at + 5000 : (result.observedAt ?? now) + 60_000 });
+        return result;
+      } finally { this.pending.delete(key); }
+    }
+    return unavailable("request-budget");
   }
 }

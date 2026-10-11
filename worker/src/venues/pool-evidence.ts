@@ -54,11 +54,11 @@ async function read<T>(key: string, route: string, parse: (body: unknown) => T[]
   if (cached && cached.until > Date.now()) return cached.value;
   if (pending.has(cacheKey)) return pending.get(cacheKey)!;
   const unavailable = (failure: string): EvidenceRead<T> => ({ failed: true, failure, data: [] });
-  const job = cachedGeckoDetail(key, async () => {
+  const job = cachedGeckoDetail(key, async (source, remainingMs) => {
     const observedAt = Date.now();
     try {
       const res = await fetch(`${source.base}/networks/${GECKO_NETWORK}/pools/${route}`, {
-        headers: source.headers, redirect: 'error', signal: AbortSignal.timeout(5000),
+        headers: source.headers, redirect: 'error', signal: AbortSignal.timeout(Math.min(5000, remainingMs)),
       });
       if (!res.ok) {
         const retry = res.headers.get('retry-after');

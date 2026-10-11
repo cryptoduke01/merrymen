@@ -275,6 +275,8 @@ export class TrenchTapeReader {
 
   async refresh() {
     const failures: string[] = [];
+    const providers = new Set<"coingecko-pro" | "geckoterminal-public">();
+    const primaryFailures = new Set<string>();
     await Promise.all([
       ...[1, 2, 3].flatMap(page =>
         // NEW POOLS TOO: the list a coin is on before it trends. Page one only,
@@ -283,6 +285,8 @@ export class TrenchTapeReader {
           const key = `${feed}:${page}`;
           try {
             const r = await this.fetchPage(feed, { page });
+            if (!r.failed && (r.provider === "coingecko-pro" || r.provider === "geckoterminal-public")) providers.add(r.provider);
+            if (r.primaryFailure) primaryFailures.add(pageFailure(r.primaryFailure));
             if (r.failed) failures.push(`${key}=${pageFailure(r.failure)}`);
             else if (key !== "new_pools:2" || this.discoveryFocus === "new-projects") this.pages.set(key, { pools: r.pools, at: r.observedAt ?? this.now() });
           } catch { failures.push(`${key}=unavailable`); }
@@ -293,7 +297,7 @@ export class TrenchTapeReader {
       // Early pages ride the same clock, for the same reason.
       ...this.earlyToRead().map(address => this.readEarly(address, failures)),
     ]);
-    return { ...this.snapshot(), failures };
+    return { ...this.snapshot(), failures, providers: [...providers].sort(), primaryFailures: [...primaryFailures].sort() };
   }
 }
 

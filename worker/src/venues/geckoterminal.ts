@@ -29,17 +29,62 @@
  */
 
 import { readBoundedJson } from "../bounded-read";
-import { FleetFeedCache, type FeedResult } from "./fleet-feed-cache";
+import { FleetFeedCache, LocalFeedCache, REAL_FEED_CLOCK, type FeedCache, type FeedClock, type FeedResult } from "./fleet-feed-cache";
 import path from "node:path";
 
 const GECKO_BASE = "https://api.geckoterminal.com/api/v2";
 
 /** Credentials go only to CoinGecko's fixed server-side origin, in headers. */
-export function geckoSource(env: NodeJS.ProcessEnv = process.env) {
+export function geckoSource(env: NodeJS.ProcessEnv = process.env): { id: NonNullable<FeedResult["provider"]>; base: string; headers: Record<string, string> } {
   const key = env.MERRYMEN_COINGECKO_PRO_API_KEY?.trim();
   return key
     ? { id: "coingecko-pro", base: "https://pro-api.coingecko.com/api/v3/onchain", headers: { accept: "application/json", "x-cg-pro-api-key": key } as Record<string, string> }
     : { id: "geckoterminal-public", base: GECKO_BASE, headers: { accept: "application/json" } as Record<string, string> };
+}
+export type GeckoSource = ReturnType<typeof geckoSource>;
+
+const feedCaches = new Map<string, FeedCache>();
+let feedClock = REAL_FEED_CLOCK;
+
+/** Test seam: real production clocks and persistent cache files are unchanged. */
+export function resetGeckoFeedsForTest(clock: FeedClock = REAL_FEED_CLOCK): void {
+  for (const cache of feedCaches.values()) cache.close();
+  feedCaches.clear(); tokenPoolsMemo.clear(); tokenPoolsPending.clear();
+  feedClock = clock;
+}
+
+function cacheFor(source: GeckoSource): FeedCache {
+  const home = process.env.MERRYMEN_FLEET_HOME?.trim();
+  const key = `${home ? path.resolve(home) : "local"}:${source.id}`;
+  let cache = feedCaches.get(key);
+  if (!cache) {
+    // Public swagger documents approximately 10/min (the older FAQ says 30).
+    // Use the stricter bound. Pro keeps the existing conservative 20/min.
+    const spacing = source.id === "geckoterminal-public" ? 6500 : 3000;
+    cache = home ? new FleetFeedCache(path.join(home, source.id), spacing, feedClock) : new LocalFeedCache(spacing, feedClock);
+    feedCaches.set(key, cache);
+  }
+  return cache;
+}
+
+/** A separately offered public source, never a retry with another credential.
+ * No fallback on rejected authority (401/403), bad requests, or broken cache.
+ * Both sources retain their own pacing, observation age and 429 cooldowns. */
+async function readGecko<T extends FeedResult>(key: string, request: (source: GeckoSource, remainingMs: number) => Promise<T>, unavailable: (reason: string) => T): Promise<T> {
+  const primary = geckoSource(), deadline = feedClock.now() + 30_000;
+  const read = async (source: GeckoSource): Promise<T> => {
+    try {
+      return await cacheFor(source).get(`${GECKO_NETWORK}:${key}`, async () => {
+        const remaining = deadline - feedClock.now();
+        const result = remaining > 0 ? await request(source, remaining) : unavailable("request-budget");
+        return { ...result, provider: source.id };
+      }, failure => ({ ...unavailable(failure), provider: source.id }), deadline);
+    } catch { return { ...unavailable("cache-unavailable"), provider: source.id }; }
+  };
+  const result = await read(primary);
+  if (primary.id !== "coingecko-pro" || !result.failed ||
+    !/^(?:http-(?:429|408|5\d\d)|provider-cooldown|network|timeout|unavailable)$/.test(result.failure ?? "")) return result;
+  return { ...await read(geckoSource({})), primaryFailure: result.failure };
 }
 
 /** The network slug for Robinhood Chain (4663) in GeckoTerminal's namespace. */
@@ -253,7 +298,7 @@ export function parseGeckoPool(raw: unknown): GeckoPool | null {
 }
 
 /** A pool list, and whether the index could actually be asked. */
-export interface GeckoFetch {
+export interface GeckoFetch extends FeedResult {
   pools: GeckoPool[];
   /**
    * True when the request failed — a rate limit, an outage, a changed shape.
@@ -281,34 +326,18 @@ export async function fetchGeckoPoolsResult(
   feed: PoolFeed,
   opts: { timeoutMs?: number; page?: number } = {},
 ): Promise<GeckoFetch> {
-  const home = process.env.MERRYMEN_FLEET_HOME?.trim();
-  if (!home) return requestGeckoPools(feed, opts);
-  try {
-    // Separate quota/cooldown state: the public provider's cooldown must not
-    // suppress a newly configured authenticated subscription.
-    if (!fleetCache) fleetCache = new FleetFeedCache(path.join(home, geckoSource().id));
-    return await fleetCache.get(`${GECKO_NETWORK}:${feed}:${opts.page ?? 1}`,
-      () => requestGeckoPools(feed, opts), failure => ({ pools: [], failed: true, failure }));
-  } catch {
-    // A broken coordination store must not fan out into an unbounded fleet retry.
-    return { pools: [], failed: true, failure: "cache-unavailable" };
-  }
+  return readGecko(`${feed}:${opts.page ?? 1}`,
+    (source, remainingMs) => requestGeckoPools(feed, { ...opts, timeoutMs: Math.min(opts.timeoutMs ?? 10_000, remainingMs) }, source),
+    failure => ({ pools: [], failed: true, failure }));
 }
-let fleetCache: FleetFeedCache | undefined;
 
 /** Detail reads spend the same fleet quota as discovery, including cooldowns. */
-export async function cachedGeckoDetail<T extends FeedResult>(key: string, request: () => Promise<T>, unavailable: (reason: string) => T): Promise<T> {
-  const home = process.env.MERRYMEN_FLEET_HOME?.trim();
-  if (!home) return request();
-  try {
-    if (!fleetCache) fleetCache = new FleetFeedCache(path.join(home, geckoSource().id));
-    return await fleetCache.get(`${GECKO_NETWORK}:detail:${key}`, request, unavailable);
-  } catch { return unavailable("cache-unavailable"); }
+export async function cachedGeckoDetail<T extends FeedResult>(key: string, request: (source: GeckoSource, remainingMs: number) => Promise<T>, unavailable: (reason: string) => T): Promise<T> {
+  return readGecko(`detail:${key}`, request, unavailable);
 }
 
-async function requestGeckoPools(feed: PoolFeed, opts: { timeoutMs?: number; page?: number }): Promise<GeckoFetch> {
+async function requestGeckoPools(feed: PoolFeed, opts: { timeoutMs?: number; page?: number }, source: GeckoSource): Promise<GeckoFetch> {
   const observedAt = Date.now();
-  const source = geckoSource();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? 10_000);
   try {
@@ -371,7 +400,7 @@ async function requestGeckoPools(feed: PoolFeed, opts: { timeoutMs?: number; pag
  * spacing slot and one cooldown for every tenant on the host) and through a
  * small in-process memo on top, so a coin looked at and then kept on the tape
  * costs one request a minute rather than one per caller. Self-hosted has no
- * fleet cache and the memo is the whole of the saving.
+ * fleet cache and uses a process-local pacing/cache lane instead.
  */
 export async function readTokenPoolsResult(address: string, opts: { timeoutMs?: number } = {}): Promise<GeckoFetch> {
   const token = typeof address === "string" ? address.toLowerCase() : "";
@@ -385,7 +414,7 @@ export async function readTokenPoolsResult(address: string, opts: { timeoutMs?: 
   const inFlight = tokenPoolsPending.get(memoKey);
   if (inFlight) return inFlight;
   const unavailable = (failure: string): GeckoFetch => ({ pools: [], failed: true, failure });
-  const job = cachedGeckoDetail(`tokenpools:${token}`, () => requestTokenPools(token, opts), unavailable)
+  const job = cachedGeckoDetail(`tokenpools:${token}`, (source, remainingMs) => requestTokenPools(token, { ...opts, timeoutMs: Math.min(opts.timeoutMs ?? 10_000, remainingMs) }, source), unavailable)
     .catch(() => unavailable("unavailable"))
     .then((value) => {
       if (tokenPoolsMemo.size >= 256) tokenPoolsMemo.delete(tokenPoolsMemo.keys().next().value!);
@@ -409,9 +438,8 @@ export async function readTokenPools(address: string): Promise<GeckoPool[] | nul
 const tokenPoolsMemo = new Map<string, { until: number; value: GeckoFetch }>();
 const tokenPoolsPending = new Map<string, Promise<GeckoFetch>>();
 
-async function requestTokenPools(token: string, opts: { timeoutMs?: number }): Promise<GeckoFetch> {
+async function requestTokenPools(token: string, opts: { timeoutMs?: number }, source: GeckoSource): Promise<GeckoFetch> {
   const observedAt = Date.now();
-  const source = geckoSource();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? 10_000);
   try {

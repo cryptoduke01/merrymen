@@ -13,7 +13,7 @@
  * gets there only as an address someone posted.
  */
 import { readBoundedJson } from "../bounded-read";
-import { cachedGeckoDetail, geckoSource, GECKO_NETWORK, parseGeckoPool, type GeckoFetch, type GeckoPool } from "../venues/geckoterminal";
+import { cachedGeckoDetail, geckoSource, GECKO_NETWORK, parseGeckoPool, resetGeckoFeedsForTest, type GeckoSource, type GeckoFetch, type GeckoPool } from "../venues/geckoterminal";
 import type { FeedResult } from "../venues/fleet-feed-cache";
 import type { Bar } from "./ta";
 import { safeFetchUrl } from "../../../packages/core/src/index";
@@ -25,7 +25,7 @@ const memo = new Map<string, { until: number; value: unknown }>();
 const pending = new Map<string, Promise<unknown>>();
 
 /** One request per key per minute, shared by every caller in this process. */
-export async function memoized<T extends FeedResult>(key: string, run: () => Promise<T>, unavailable: (why: string) => T): Promise<T> {
+export async function memoized<T extends FeedResult>(key: string, run: (source: GeckoSource, remainingMs: number) => Promise<T>, unavailable: (why: string) => T): Promise<T> {
   const k = `${geckoSource().id}:${key}`;
   const hit = memo.get(k);
   if (hit && hit.until > Date.now()) return hit.value as T;
@@ -47,13 +47,16 @@ export async function memoized<T extends FeedResult>(key: string, run: () => Pro
 export function resetDeskReadsForTest(): void {
   memo.clear();
   pending.clear();
+  // Tests that mock providers also need to forget the process-local shared
+  // lane. Advance its clock rather than waiting for real provider spacing.
+  let now = Date.now();
+  resetGeckoFeedsForTest({ now: () => now, sleep: async ms => { now += ms; await Promise.resolve(); } });
 }
 
-export async function getJson(route: string, timeoutMs: number, signal?: AbortSignal): Promise<{ ok: true; body: unknown; observedAt: number } | { ok: false; failure: string; retryAfterMs?: number }> {
+export async function getJson(route: string, timeoutMs: number, signal?: AbortSignal, source: GeckoSource = geckoSource()): Promise<{ ok: true; body: unknown; observedAt: number } | { ok: false; failure: string; retryAfterMs?: number }> {
   // Fleet pacing can outlive an optional caller's read budget. Never begin a
   // request after that caller has already cancelled it.
   if (signal?.aborted || timeoutMs < 1) return { ok: false, failure: "unavailable" };
-  const source = geckoSource();
   const observedAt = Date.now();
   try {
     const timeout = AbortSignal.timeout(timeoutMs);
@@ -137,8 +140,8 @@ export async function readTokenInfo(address: string, timeoutMs = 3000, signal?: 
   if (!/^0x[\da-f]{40}$/.test(token)) return { failed: true, failure: "invalid-token" };
   return memoized<TokenInfoRead>(
     `info:${GECKO_NETWORK}:${token}`,
-    async () => {
-      const r = await getJson(`/networks/${GECKO_NETWORK}/tokens/${token}/info`, timeoutMs, signal);
+    async (source, remainingMs) => {
+      const r = await getJson(`/networks/${GECKO_NETWORK}/tokens/${token}/info`, Math.min(timeoutMs, remainingMs), signal, source);
       if (!r.ok) return { failed: true, failure: r.failure, ...(r.retryAfterMs !== undefined ? { retryAfterMs: r.retryAfterMs } : {}) };
       const info = parseTokenInfo(r.body, token);
       return info ? { failed: false, observedAt: r.observedAt, info } : { failed: true, failure: "invalid-shape" };
@@ -163,8 +166,8 @@ export async function searchPools(query: string, timeoutMs = 8000, signal?: Abor
   if (!q) return { pools: [], failed: true, failure: "invalid-query" };
   return memoized<GeckoFetch>(
     `search:${q.toLowerCase()}`,
-    async () => {
-      const r = await getJson(`/search/pools?query=${encodeURIComponent(q)}&network=${GECKO_NETWORK}&page=1`, timeoutMs, signal);
+    async (source, remainingMs) => {
+      const r = await getJson(`/search/pools?query=${encodeURIComponent(q)}&network=${GECKO_NETWORK}&page=1`, Math.min(timeoutMs, remainingMs), signal, source);
       if (!r.ok) return { pools: [], failed: true, failure: r.failure, ...(r.retryAfterMs !== undefined ? { retryAfterMs: r.retryAfterMs } : {}) };
       const data = (r.body as { data?: unknown })?.data;
       if (!Array.isArray(data)) return { pools: [], failed: true, failure: "invalid-shape" };
@@ -227,8 +230,8 @@ export async function readHourlyBars(poolId: string, token: string, limit = 168,
   const n = Math.max(24, Math.min(168, Math.floor(limit)));
   return memoized<BarsRead>(
     `hour:${pool}:${tok}:${n}`,
-    async () => {
-      const r = await getJson(`/networks/${GECKO_NETWORK}/pools/${pool}/ohlcv/hour?aggregate=1&limit=${n}&currency=usd&token=${tok}`, timeoutMs, signal);
+    async (source, remainingMs) => {
+      const r = await getJson(`/networks/${GECKO_NETWORK}/pools/${pool}/ohlcv/hour?aggregate=1&limit=${n}&currency=usd&token=${tok}`, Math.min(timeoutMs, remainingMs), signal, source);
       if (!r.ok) return { failed: true, failure: r.failure, bars: [], ...(r.retryAfterMs !== undefined ? { retryAfterMs: r.retryAfterMs } : {}) };
       const parsed = parseHourlyBars(r.body, tok);
       return parsed ? { failed: false, observedAt: r.observedAt, ...parsed } : { failed: true, failure: "invalid-shape", bars: [] };

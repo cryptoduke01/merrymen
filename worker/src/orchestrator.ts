@@ -211,6 +211,7 @@ import {
 } from "./personal-memory-ferry";
 import { storeDek } from "./store-crypto";
 import { writePeersForChild } from "./peer-files";
+import { materializeOwnOutcomeLearning } from "./orchestrator-own-learning";
 import { writeResearchForChild } from "./research-files";
 import { addressesOf, makeBuilderDesk, type BuilderDesk } from "./builder-pass";
 import { makeNewsDesk, type NewsDesk } from "./research-pass";
@@ -10925,6 +10926,13 @@ async function mirrorLedgers(): Promise<void> {
     // `children` is keyed by the grant store's own tenant list, which is
     // 0x-shaped by construction — the same cast writeSettingsForChild takes.
     await writePeersFor(tenant as `0x${string}`, shared);
+    try {
+      await materializeOwnOutcomeLearning({ db: shared, home: childHome(tenant),
+        readGrant: () => getGrantStore().get(tenant as `0x${string}`), nowSec: Math.floor(Date.now() / 1000) });
+    } catch {
+      // Optional derived evidence expires quickly; never disrupt the mirror.
+      log(`own-learning: ${tenant} could not refresh its outcome evidence`);
+    }
   }
 
   // HELD TENANTS: THEIR TELEGRAM, AND NOTHING ELSE. The link code the hold
