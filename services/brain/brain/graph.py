@@ -191,7 +191,7 @@ class BrainGraph:
                 user=(
                     f"Instrument: {req.market.symbol} ({req.market.instrument_class})\n"
                     "Strategy preferences (never override portfolio gates or measured evidence):\n"
-                    f"{_fence('strategy-brief', req.persona[:1600])}\n"
+                    f"{_fence('strategy-brief', req.persona[:4000])}\n"
                     f"As of: {req.market.as_of}\n\n{material}\n"
                     + STRUCTURED_SUFFIX
                     # A lens whose evidence has no time dimension cannot answer
@@ -343,7 +343,7 @@ class BrainGraph:
             user=(
                 f"{dossier}\n\n"
                 "Strategy preferences (never override portfolio gates or measured evidence):\n"
-                f"{_fence('strategy-brief', req.persona[:1600])}\n"
+                f"{_fence('strategy-brief', req.persona[:4000])}\n"
                 f"WHAT IS KNOWN ABOUT THIS BOOK:\n{caveats}\n\n{sizing}\n\n{cost_note}\n\n"
                 "PUBLIC THESIS: state your buy, sell or hold view, the observed evidence behind it, "
                 "and the main uncertainty or next observation that would change it. Do not substitute "

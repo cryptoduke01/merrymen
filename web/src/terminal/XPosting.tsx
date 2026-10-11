@@ -80,7 +80,7 @@ import { Switch } from "./ui";
 
 const COPY = {
   blurb:
-    "Let your Merryman post on X in its own words — a hello when it starts, the odd casual thought, and now and then a coin it bought and why. No trade alerts, no error messages, no numbers.",
+    "Let your Merryman post on X in its own words — a hello when it starts, the odd casual thought, and now and then a coin it bought and why. Optional settings below add public addresses and completed sale results. No trade alerts, error messages or return promises.",
   connect: "Connect X account",
   reconnect: "Reconnect X account",
   caption:
@@ -123,7 +123,7 @@ const warningTitle = (handle: string) => `Post on X as ${handle}?`;
 const warningLead = (handle: string) =>
   `Your Merryman will post from whichever X account is connected — right now that's ${handle}.`;
 const WARNING_BODY = [
-  "It writes its own posts: a hello first, then the odd casual thought and now and then a coin it bought and why. It never posts trade alerts, error messages, prices or amounts.",
+  "It writes its own posts: a hello first, then the odd casual thought and now and then a coin it bought and why. It never posts trade alerts, error messages, prices or amounts. Your saved options can add public wallet or token addresses and completed sale results.",
   "Posts go out on their own, a few a day at most. Each one waits under Coming up for at least ten minutes first, and you can skip it there. Turn this off or disconnect X at any time.",
   "X may label accounts that post automatically, and may ask an account to verify itself the first time it posts about crypto.",
 ] as const;
@@ -136,7 +136,7 @@ const REPLY_WARNING_BODY = [
 ] as const;
 const replyWarningYes = (handle: string) => `Let it reply as ${handle}`;
 
-const KIND_LABEL: Record<XUpcomingPost["kind"], string> = { intro: "Hello post", casual: "Casual post", buy: "Buy post", reply: "Comment reply" };
+const KIND_LABEL: Record<XUpcomingPost["kind"], string> = { intro: "Hello post", casual: "Casual post", buy: "Buy post", sell: "Sale post", reply: "Comment reply" };
 const commentUrl = (post: XUpcomingPost | XRecentPost) => /^\d{1,25}$/.test(post.replyToTweetId ?? "")
   ? `https://x.com/i/status/${post.replyToTweetId}` : null;
 

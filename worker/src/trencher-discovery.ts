@@ -5,6 +5,7 @@ import { NOMINATE } from "./trencher-nominate";
 import { EARLY_VENUE, earlyVerifyPools } from "./early-candidates";
 import { verifyTrencherCustody } from "./venues/trencher-vault";
 import type { GeckoPool } from "./venues/geckoterminal";
+import { discoveryPoolOrder, type DiscoveryFocus } from "./discovery-focus";
 
 const POOL = parseAbi(["function token0() view returns (address)","function token1() view returns (address)","function fee() view returns (uint24)"]);
 const FACTORY = parseAbi(["function getPool(address a,address b,uint24 fee) view returns (address)"]);
@@ -53,6 +54,9 @@ export function regularEntryPools(
 }
 
 export interface DiscoveryOptions {
+  /** Ordering of already screened regular pools; no change to early/follow authority. */
+  focus?: DiscoveryFocus;
+  nowSec?: number;
   /**
    * Lowercased token addresses somebody nominated (a coin posted in a Telegram
    * group, docs/tg-groups.md) and the book still holds unresolved.
@@ -210,7 +214,7 @@ export async function discoverTrencherUniverse(client: PublicClient, grant: Stor
   const qualified: QualifiedPool[] = [];
   // Filter supported venues before token deduplication: a larger V2/V4 pool
   // must not erase an otherwise eligible V3 route for the same token.
-  const ranked = highVolumePools(pools.filter(p => p.dex === "uniswap-v3-robinhood"));
+  const ranked = discoveryPoolOrder(highVolumePools(pools.filter(p => p.dex === "uniswap-v3-robinhood")), opts.focus ?? "balanced", opts.nowSec ?? Math.floor(Date.now() / 1000));
   const nominated = new Set([...(opts.nominated ?? [])].map(a => String(a).toLowerCase()));
   const beyond = nominated.size
     ? ranked.slice(DISCOVERY_SLICE).filter(p => nominated.has(p.tokenAddress.toLowerCase())).slice(0, NOMINATED_VERIFY_MAX)

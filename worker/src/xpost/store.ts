@@ -83,7 +83,7 @@ CREATE TABLE IF NOT EXISTS xpost_posts (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   tenant TEXT NOT NULL,
   x_user_id TEXT NOT NULL,                 -- the account it was written for
-  kind TEXT NOT NULL,                      -- intro casual buy or reply
+  kind TEXT NOT NULL,                      -- intro casual buy sell or reply
   dedupe_key TEXT NOT NULL UNIQUE,
   body TEXT NOT NULL,
   coin TEXT,                               -- a buy post coin, for the per coin fold
@@ -749,7 +749,7 @@ export async function markRevoked(db: Db, tenant: string, atVersion: number, now
 
 // ── posts ───────────────────────────────────────────────────────────────────
 
-export type XPostKind = "intro" | "casual" | "buy" | "reply";
+export type XPostKind = "intro" | "casual" | "buy" | "sell" | "reply";
 export type XPostStatus = "scheduled" | "sending" | "posted" | "skipped" | "cancelled" | "failed";
 
 export interface XPost {
@@ -801,7 +801,7 @@ interface PostRow {
   updated_at_ms: unknown;
 }
 
-const KINDS: ReadonlySet<string> = new Set(["intro", "casual", "buy", "reply"]);
+const KINDS: ReadonlySet<string> = new Set(["intro", "casual", "buy", "sell", "reply"]);
 const STATUSES: ReadonlySet<string> = new Set(["scheduled", "sending", "posted", "skipped", "cancelled", "failed"]);
 
 function postOf(r: PostRow): XPost {
@@ -1248,18 +1248,21 @@ export async function replyTargetFor(db: Db, post: Pick<XPost, "id" | "tenant" |
  * TAKE ONE FROM A DAILY ALLOWANCE, atomically: true while the counter under
  * `key` is below `limit` (and it is bumped), false once it is not. The key
  * carries the day, so a new day is a new counter. The conditional DO UPDATE
- * means two replicas cannot both take the last one.
+ * means two replicas cannot both take the last one. Optional durable send history
+ * seeds an introduced counter and can raise, never lower, existing reservations.
  */
-export async function takeAllowance(db: Db, key: string, limit: number, nowMs: number): Promise<boolean> {
-  if (!(limit > 0)) return false;
+export async function takeAllowance(db: Db, key: string, limit: number, nowMs: number, initialUsed = 0): Promise<boolean> {
+  if (!(limit > 0) || !Number.isSafeInteger(initialUsed) || initialUsed < 0 || initialUsed >= int(limit)) return false;
   const row = (await db
     .prepare(
-      `INSERT INTO xpost_meta (k, n, v, updated_at_ms) VALUES (?, 1, NULL, ?)
-       ON CONFLICT (k) DO UPDATE SET n = xpost_meta.n + 1, updated_at_ms = excluded.updated_at_ms
+      `INSERT INTO xpost_meta (k, n, v, updated_at_ms) VALUES (?, ?, NULL, ?)
+       ON CONFLICT (k) DO UPDATE SET
+         n = CASE WHEN xpost_meta.n < excluded.n THEN excluded.n ELSE xpost_meta.n + 1 END,
+         updated_at_ms = excluded.updated_at_ms
        WHERE xpost_meta.n < ?
        RETURNING n`,
     )
-    .get(key, int(nowMs), int(limit))) as { n: unknown } | undefined;
+    .get(key, initialUsed + 1, int(nowMs), int(limit))) as { n: unknown } | undefined;
   return row !== undefined;
 }
 
@@ -1299,6 +1302,16 @@ export async function ownerSendTimesSince(db: Db, tenant: string, sinceMs: numbe
       (status = 'posted' AND sent_at_ms >= ?)
       OR ((status = 'sending' OR (status = 'failed' AND reason IN ('uncertain', 'interrupted', 'fault'))) AND updated_at_ms >= ?)
     )`).all(tenantKey(tenant), int(sinceMs), int(sinceMs)) as { at_ms: unknown }[];
+  return rows.map((row) => num(row.at_ms));
+}
+
+/** Account-wide trade sends, including uncertain attempts, for a new trade counter. */
+export async function tradeSendTimesSince(db: Db, xUserId: string, sinceMs: number): Promise<number[]> {
+  const rows = await db.prepare(`SELECT CASE WHEN status = 'posted' THEN sent_at_ms ELSE updated_at_ms END AS at_ms
+    FROM xpost_posts WHERE x_user_id = ? AND kind IN ('buy', 'sell') AND (
+      (status = 'posted' AND sent_at_ms >= ?)
+      OR ((status = 'sending' OR (status = 'failed' AND reason IN ('uncertain', 'interrupted', 'fault'))) AND updated_at_ms >= ?)
+    )`).all(xUserId, int(sinceMs), int(sinceMs)) as { at_ms: unknown }[];
   return rows.map((row) => num(row.at_ms));
 }
 

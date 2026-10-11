@@ -4,6 +4,7 @@ import type { ShadowInputs, ShadowOutcome } from "./brain-shadow";
 import type { GeckoFetch, GeckoPool } from "./venues/geckoterminal";
 import { fetchGeckoPoolsResult, readTokenPoolsResult } from "./venues/geckoterminal";
 import { NOMINATE } from "./trencher-nominate";
+import { newProjectAge, type DiscoveryFocus } from "./discovery-focus";
 import { EARLY_PAGES_MAX, EARLY_VENUE, earlyScreenReason, type EarlyScreen } from "./early-candidates";
 import { CASH, instrumentClassOf } from "../../packages/core/src/index";
 import { TRENCHER_FAST } from "./strategies/trencher";
@@ -51,6 +52,11 @@ export const PRIORITY_RETRY_MS = 2 * TRENCH_REVIEW_INTERVAL_MS;
 /** Keep each page on its own clock: partial outages must not erase fresh pages
  * or renew the age of old observations. Healthy empty pages replace old data. */
 export class TrenchTapeReader {
+  private discoveryFocus: DiscoveryFocus = "balanced";
+  setDiscoveryFocus(focus: DiscoveryFocus): void {
+    this.discoveryFocus = focus;
+    if (focus !== "new-projects") this.pages.delete("new_pools:2");
+  }
   private pages = new Map<string, { pools: GeckoPool[]; at: number }>();
   /** Lowercased addresses whose own token page rides on the tape. See setNominated. */
   private nominated = new Set<string>();
@@ -273,12 +279,12 @@ export class TrenchTapeReader {
       ...[1, 2, 3].flatMap(page =>
         // NEW POOLS TOO: the list a coin is on before it trends. Page one only,
         // shared fleet-wide by the feed cache like every other page.
-        ([...(["trending_pools", "pools"] as const), ...(page === 1 ? (["new_pools"] as const) : [])]).map(async feed => {
+        ([...(["trending_pools", "pools"] as const), ...(page === 1 || (page === 2 && this.discoveryFocus === "new-projects") ? (["new_pools"] as const) : [])]).map(async feed => {
           const key = `${feed}:${page}`;
           try {
             const r = await this.fetchPage(feed, { page });
             if (r.failed) failures.push(`${key}=${pageFailure(r.failure)}`);
-            else this.pages.set(key, { pools: r.pools, at: r.observedAt ?? this.now() });
+            else if (key !== "new_pools:2" || this.discoveryFocus === "new-projects") this.pages.set(key, { pools: r.pools, at: r.observedAt ?? this.now() });
           } catch { failures.push(`${key}=unavailable`); }
         })),
       // Refreshed WITH the tape, on the tape's clock: a nominated page is
@@ -582,7 +588,7 @@ export class TrenchBrainReview {
    * picked again: a second review would supersede the order it is waiting
    * on. What a review then decides, and what may be bought, is unchanged.
    */
-  candidate<T extends { token: string; volume24hUsd?: number; heat?: number }>(eligible: readonly T[], priority?: ReadonlySet<string>): T | undefined {
+  candidate<T extends { token: string; volume24hUsd?: number; heat?: number; ageSec?: number }>(eligible: readonly T[], priority?: ReadonlySet<string>, focus: DiscoveryFocus = "balanced"): T | undefined {
     const current = new Set(eligible.map(c => c.token.toLowerCase()));
     for (const key of this.reviewed.keys()) if (!current.has(key)) this.reviewed.delete(key);
     const wanted = new Set([...(priority ?? [])].map(a => a.toLowerCase()));
@@ -634,6 +640,10 @@ export class TrenchBrainReview {
     }
     return due.reduce<T | undefined>((best, c) => {
       if (!best) return c;
+      if (focus === "new-projects") {
+        const a = newProjectAge(c.ageSec), b = newProjectAge(best.ageSec);
+        if (a !== b) return a < b ? c : best;
+      }
       if (busy(c) !== busy(best)) return busy(c) > busy(best) ? c : best;
       // Same tape, or both unknown: the older one goes first, so the tiebreak
       // cannot depend on the order discovery happened to return.

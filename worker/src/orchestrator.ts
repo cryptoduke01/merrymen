@@ -49,7 +49,7 @@ import { repairHistoricalFills } from "./history-fill-repair";
 import { makeConductor, type Conductor, type RosterMember } from "./groupchat/conductor";
 import { chatProfileOf, type ChatProfile } from "./groupchat/facts";
 import { describeCreds, groupChatCreds } from "./groupchat/voice";
-import { makeXPoster, xpostSetup, type XPoster, type XPostSetup } from "./orchestrator-xpost";
+import { makeXPoster, xpostSetup, type XPoster, type XPostSetup, type XSocialProfile } from "./orchestrator-xpost";
 // The fleet's default trading model, so the room can say when its own model is
 // the same one (see groupChatModelWarning).
 import { SETTINGS_DEFAULTS as GROUPCHAT_FLEET_DEFAULTS } from "../../packages/core/src/index";
@@ -11226,7 +11226,35 @@ function startXPostPass(): void {
 async function runXPostPass(boot: XPostSetup): Promise<void> {
   try {
     if (!xPoster) {
-      xPoster = makeXPoster({ creds: boot.creds, knobs: boot.knobs, app: boot.app!, dek: boot.dek! });
+      xPoster = makeXPoster({
+        creds: boot.creds, knobs: boot.knobs, app: boot.app!, dek: boot.dek!,
+        deps: {
+          socialProfile: async (tenant) => {
+            try {
+              const key = tenant.toLowerCase() as `0x${string}`;
+              const settings = await getSettingsStore().get(key);
+              const profile: XSocialProfile = {
+                xVoice: settings?.xVoice === "dry" ? "dry" : "default", publicWallet: null, currentAgent: null,
+                xTokenAddresses: settings?.xTokenAddresses === true, xTradeResults: settings?.xTradeResults === true,
+                discoveryFocus: settings?.discoveryFocus === "new-projects" ? "new-projects" : "balanced",
+              };
+              if (!settings?.xPublicWalletIntro && !profile.xTokenAddresses && !profile.xTradeResults) return profile;
+              // Fresh send-time authority, not the child settings snapshot.
+              const grant = await getGrantStore().get(key);
+              const child = children.get(key);
+              const held = leases.get(key);
+              if (grant && child && held?.healthy() && !killRequested(childHome(key)) && grant.smartAccount.toLowerCase() === child.smartAccount.toLowerCase()) {
+                profile.currentAgent = { address: grant.smartAccount, chainId: grant.chainId };
+                if (settings?.xPublicWalletIntro === true) profile.publicWallet = profile.currentAgent;
+              }
+              return profile;
+            } catch {
+              // Store errors can carry connection strings; the public projection never does.
+              throw new Error("X social profile could not be read");
+            }
+          },
+        },
+      });
       log(xPoster.plan().why);
     }
     const shared = await makePgDb(process.env.DATABASE_URL!);

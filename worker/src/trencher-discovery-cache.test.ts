@@ -191,6 +191,7 @@ test("changing the connection discards cached evidence and a discovery already i
     new Promise(resolve => pending.push({ cache: opts.cache, resolve }));
   const worker = new Function("discoverTrencherUniverse", "TrencherPoolCache", "CoalescedRefresh", `
     let active = { agentId: "agent", grant: { grantedAt: 1 } };
+    const cfg = { discoveryFocus: "balanced" };
     let autoTrench = null, autoTrenchContext = "", autoTrenchNext = 0;
     let trenchPoolCache = new TrencherPoolCache(), names = 0;
     const grantTrencher = () => true, mainnetClient = () => ({}), freshTrenchTape = () => [];

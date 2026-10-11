@@ -429,6 +429,49 @@ reply consent; it does not erase recipient opt-outs or published posts.
   without stopping ordinary posts. The warning names the account it replies
   as. A commenter can say stop to opt out.
 
+## Optional voice, public addresses and sale results
+
+The defaults above stay in place. Each owner can separately choose a dry voice
+(`xVoice: "dry"`), a public wallet in the introduction (`xPublicWalletIntro`),
+token contract addresses (`xTokenAddresses`), and completed-sale commentary
+(`xTradeResults`). These choices do not alter trading authority, execution risk
+limits, posting consent, the owner's smaller daily allowance, or reply consent.
+The private `agentBrief` never enters an X prompt.
+
+- The dry voice allows occasional light sarcasm about an idea or the agent
+  itself. AI disclosure and the prohibition on invented human experiences stay.
+- A wallet is appended by trusted code only to an introduction, after its prose
+  passes the ordinary gate. It is the running agent's current grant account,
+  with an explicit Robinhood Chain or Testnet label. The model never types it.
+- A token CA is appended only to a buy or sale whose decision and completed
+  trade belong to that same account, current epoch and supported chain, with
+  the matching fill side and positive quantity. A live trade also needs a
+  receipt basis and execution transaction hash; simulated fills need an explicit
+  paper basis. Model-generated addresses remain
+  forbidden, and unsupported networks or missing proof withhold the post.
+- With `discoveryFocus: "new-projects"` and token addresses enabled, a buy can
+  also explain the exact token's on-chain description. The RPC chain and token
+  must match, the source is bounded creator-written text, and the draft must
+  attribute the claim with "project says". This later lookup is not presented
+  as the reason the buy happened. Missing or unusable metadata leaves only
+  the observed trade thesis; no utility is inferred from a ticker or price.
+- Sale posts require receipt-backed live execution. Their model-written prose
+  says only what sold, allowing partial sales without claiming a full exit.
+  Trusted code may append a measured **gross** gain, loss or flat outcome,
+  explicitly **before fees and gas**, with a matching short reaction. Missing
+  or estimated cost basis means neutral sale commentary with no result claim.
+  There is no claim of net profitability or of selling early; those require
+  evidence this path does not have.
+
+The complete post, including deterministic suffixes, must fit X's weighted
+character limit. Pending disclosures are revalidated against current consent,
+grant identity, chain and receipt evidence immediately before sending, including
+after a token refresh. Changed or missing evidence withholds the pending post.
+The original at-most-once claim, review window, account gap and daily limits
+continue to apply; buy and sale posts share the existing trade-post ceiling.
+An introduction posted manually is not automatically imported into the queue:
+the owner should skip a duplicate introduction under Coming up.
+
 ## Known limits
 
 - **The iOS hand-off uses the `merrymen://` scheme.** For an `i.` state the

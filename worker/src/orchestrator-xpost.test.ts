@@ -38,6 +38,8 @@ import type { LlmCreds } from "./llm";
 import type { FetchLike, XApp } from "./xpost/client";
 import type { XPosterDeps } from "./orchestrator-xpost";
 import type { XGateCtx } from "./xpost/gate";
+import type { PlanSell } from "./xpost/planner";
+import { PUBLISHABLE_SOURCES } from "./thesis-policy";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SRC = readFileSync(path.join(HERE, "orchestrator.ts"), "utf8");
@@ -339,6 +341,9 @@ function poster(
     fetch?: FetchLike;
     member?: XPosterDeps["member"];
     facts?: XPosterDeps["facts"];
+    socialProfile?: XPosterDeps["socialProfile"];
+    saleResults?: XPosterDeps["saleResults"];
+    publicProjectDescription?: XPosterDeps["publicProjectDescription"];
     /** The pass's own clock. Default: held — no time passes inside a pass. */
     monotonic?: () => number;
   } = {},
@@ -357,6 +362,9 @@ function poster(
       facts: over.facts ?? (factsOf(over.calls ?? [], "paper", over.others) as never),
       member: over.member ?? (async () => ({ tz: over.tz ?? null })),
       monotonic: over.monotonic ?? (() => 0),
+      socialProfile: over.socialProfile,
+      saleResults: over.saleResults,
+      publicProjectDescription: over.publicProjectDescription,
       llm: async (_creds, { prompt }) => {
         w.prompts.push(prompt);
         return answer(prompt);
@@ -366,6 +374,166 @@ function poster(
 }
 
 const ROSTER = [{ tenant: TENANT.toUpperCase().replace("0X", "0x"), agentId: AGENT }];
+
+describe("owner-scoped public wallet intros", () => {
+  const T0 = Date.UTC(2026, 8, 28, 8, 0);
+  it("appends the verified account only after gating, keeps the review window, and never gives it to the writer", async (t) => {
+    const w = await world(t, T0);
+    const p = poster(w, { socialProfile: async () => ({ xVoice: "dry", publicWallet: { address: AGENT, chainId: 4663 } }) });
+    await p.step(w.db, ROSTER, new Map(), T0);
+    const [intro] = await rows(w);
+    assert.equal(intro?.body, `${INTRO} Wallet (Robinhood Chain): ${AGENT.toLowerCase()}`);
+    assert.equal(intro?.dueAtMs, T0 + 10 * MIN);
+    assert.equal(w.tweets.length, 0);
+    assert.ok(w.prompts.every((prompt) => !prompt.includes(AGENT)));
+    await p.step(w.db, ROSTER, new Map(), T0 + 10 * MIN);
+    assert.deepEqual(w.tweets, [intro!.body]);
+    await p.step(w.db, ROSTER, new Map(), T0 + 11 * MIN);
+    assert.equal(w.tweets.length, 1);
+  });
+
+  for (const change of ["consent", "account", "chain"] as const) {
+    it(`does not send a pending wallet intro after its ${change} changes`, async (t) => {
+      const w = await world(t, T0);
+      let wallet: { address: string; chainId: number } | null = { address: AGENT, chainId: 4663 };
+      const p = poster(w, { socialProfile: async () => ({ publicWallet: wallet }) });
+      await p.step(w.db, ROSTER, new Map(), T0);
+      wallet = change === "consent" ? null : change === "account" ? { address: `0x${"ef".repeat(20)}`, chainId: 4663 } : { address: AGENT, chainId: 46630 };
+      await p.step(w.db, ROSTER, new Map(), T0 + 10 * MIN);
+      assert.equal(w.tweets.length, 0);
+      assert.equal((await rows(w))[0]?.reason, "context-changed");
+    });
+  }
+});
+
+describe("owner-scoped token contracts", () => {
+  const T0 = Date.UTC(2026, 8, 28, 8, 0);
+  const TOKEN = `0x${"ef".repeat(20)}`;
+  it("adds only the trade's verified CA after gating and rechecks consent before sending", async (t) => {
+    const w = await world(t, T0);
+    await w.db.exec(`
+      CREATE TABLE agents (smart_account TEXT, chain_id INTEGER, epoch INTEGER DEFAULT 1);
+      CREATE TABLE decisions (id TEXT, agent_id TEXT, action TEXT, source TEXT);
+      CREATE TABLE trades (id INTEGER PRIMARY KEY, decision_id TEXT, agent_id TEXT, kind TEXT, status TEXT, tx_hash TEXT, buy_token TEXT, sell_token TEXT, epoch INTEGER DEFAULT 1, basis_source TEXT DEFAULT 'paper', fill_side TEXT DEFAULT 'buy', fill_qty_raw TEXT DEFAULT '1');
+    `);
+    await w.db.prepare("INSERT INTO agents (smart_account, chain_id) VALUES (?, ?)").run(AGENT, 4663);
+    await w.db.prepare("INSERT INTO decisions VALUES (?, ?, ?, ?)").run("ca-buy", AGENT, "buy", PUBLISHABLE_SOURCES[0]!);
+    await w.db.prepare("INSERT INTO trades (id, decision_id, agent_id, kind, status, tx_hash, buy_token, sell_token) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(1, "ca-buy", AGENT, "swap", "paper", null, TOKEN, null);
+    let consent = true;
+    const p = poster(w, {
+      calls: [call({ decisionId: "ca-buy", token: TOKEN, atSec: (T0 + MIN) / 1000 })],
+      socialProfile: async () => ({ xTokenAddresses: consent, currentAgent: { address: AGENT, chainId: 4663 } }),
+    });
+    await p.step(w.db, ROSTER, new Map(), T0);
+    const intro = (await rows(w))[0]!;
+    await store.claimPost(w.db, intro.id, T0 + MIN);
+    await store.markPosted(w.db, intro.id, "12345", T0 + MIN);
+    await p.step(w.db, ROSTER, new Map(), T0 + MIN);
+    const buy = (await rows(w)).find((row) => row.kind === "buy")!;
+    assert.ok(buy);
+    assert.equal(buy.body, `${BUY} CA (Robinhood Chain): ${TOKEN}`);
+    assert.ok(w.prompts.every((prompt) => !prompt.includes(TOKEN)));
+    consent = false;
+    await p.step(w.db, ROSTER, new Map(), buy.dueAtMs);
+    assert.equal(w.tweets.length, 0);
+    assert.equal((await rows(w)).find((row) => row.id === buy.id)?.reason, "context-changed");
+  });
+
+  for (const scenario of ["attributed", "unattributed", "wrong-token", "wrong-chain", "no-source", "balanced"] as const) {
+    it(`public project explanation uses only exact-token claims (${scenario})`, async (t) => {
+      const w = await world(t, T0);
+      await w.db.exec(`
+        CREATE TABLE agents (smart_account TEXT, chain_id INTEGER, epoch INTEGER DEFAULT 1);
+        CREATE TABLE decisions (id TEXT, agent_id TEXT, action TEXT, source TEXT);
+        CREATE TABLE trades (id INTEGER PRIMARY KEY, decision_id TEXT, agent_id TEXT, kind TEXT, status TEXT, tx_hash TEXT, buy_token TEXT, sell_token TEXT, epoch INTEGER DEFAULT 1, basis_source TEXT DEFAULT 'paper', fill_side TEXT DEFAULT 'buy', fill_qty_raw TEXT DEFAULT '1');
+      `);
+      await w.db.prepare("INSERT INTO agents (smart_account, chain_id) VALUES (?, ?)").run(AGENT, 4663);
+      await w.db.prepare("INSERT INTO decisions VALUES (?, ?, ?, ?)").run("project-buy", AGENT, "buy", PUBLISHABLE_SOURCES[0]!);
+      await w.db.prepare("INSERT INTO trades (id, decision_id, agent_id, kind, status, tx_hash, buy_token, sell_token) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(1, "project-buy", AGENT, "swap", "paper", null, TOKEN, null);
+      const intro = await store.schedulePost(w.db, { tenant: TENANT, xUserId: "111", kind: "intro", dedupeKey: `intro:${TENANT}:111`, body: INTRO, dueAtMs: T0 + 10 * MIN, nowMs: T0 });
+      await store.ownerCancel(w.db, TENANT, intro!, T0);
+      let reads = 0;
+      const p = poster(w, {
+        calls: [call({ decisionId: "project-buy", token: TOKEN, atSec: (T0 + MIN) / 1000 })],
+        socialProfile: async () => ({ xTokenAddresses: true, discoveryFocus: scenario === "balanced" ? "balanced" : "new-projects", currentAgent: { address: AGENT, chainId: 4663 } }),
+        publicProjectDescription: async (token, chainId) => {
+          reads++;
+          assert.equal(token, TOKEN);
+          assert.equal(chainId, 4663);
+          return scenario === "no-source" ? null : { token: scenario === "wrong-token" ? AGENT : token, chainId: scenario === "wrong-chain" ? 46630 : chainId, description: "A community tool for sharing local art." };
+        },
+        answer: () => scenario === "attributed" ? "pepe's project says it helps people share art. i bought on paper because the pool was deep." : BUY,
+      });
+      await p.step(w.db, ROSTER, new Map(), T0 + MIN);
+      const post = (await rows(w)).find((r) => r.kind === "buy")!;
+      assert.ok(post);
+      assert.equal(reads, scenario === "balanced" ? 0 : 1);
+      if (scenario === "attributed" || scenario === "unattributed") assert.match(w.prompts.join(" "), /A community tool for sharing local art/);
+      else assert.doesNotMatch(w.prompts.join(" "), /A community tool for sharing local art/);
+      assert.ok(w.prompts.every((prompt) => !prompt.includes(TOKEN)));
+      if (scenario === "unattributed") {
+        assert.equal(post.status, "skipped");
+        assert.equal(post.reason, "gate:project-attribution");
+      } else {
+        assert.equal(post.status, "scheduled");
+        assert.match(post.body, / CA \(Robinhood Chain\): 0x/);
+      }
+    });
+  }
+});
+
+describe("receipt-backed sale posts", () => {
+  const T0 = Date.UTC(2026, 8, 28, 8, 0);
+  const sale: PlanSell = {
+    side: "sell", symbol: "PEPE", name: "Pepe", paper: false, decisionId: "sale-decision",
+    token: `0x${"ef".repeat(20)}`, operationKey: `0x${"12".repeat(32)}`, atSec: (T0 + MIN) / 1000, outcome: "profit",
+  };
+  async function ready(w: World) {
+    const id = await store.schedulePost(w.db, { tenant: TENANT, xUserId: "111", kind: "intro", dedupeKey: `intro:${TENANT}:111`, body: INTRO, nowMs: T0, dueAtMs: T0 + 10 * MIN });
+    await store.ownerCancel(w.db, TENANT, id!, T0);
+  }
+  it("appends the explicitly gross outcome only after the neutral sale passes, then sends once", async (t) => {
+    const w = await world(t, T0);
+    await ready(w);
+    const p = poster(w, {
+      answer: () => "i sold some pepe.", facts: factsOf([], "live"),
+      socialProfile: async () => ({ xTradeResults: true, currentAgent: { address: AGENT, chainId: 4663 } }),
+      saleResults: async () => [sale],
+    });
+    await p.step(w.db, ROSTER, new Map(), T0 + MIN);
+    const post = (await rows(w)).find((r) => r.kind === "sell")!;
+    assert.ok(post);
+    assert.equal(post.body, "i sold some pepe.\ngross gain before fees and gas. pleased with that part.");
+    assert.ok(w.prompts.every((prompt) => !prompt.includes("gross gain")), "the model is not asked to infer profitability");
+    assert.equal(w.tweets.length, 0);
+    await p.step(w.db, ROSTER, new Map(), post.dueAtMs);
+    await p.step(w.db, ROSTER, new Map(), post.dueAtMs + MIN);
+    assert.deepEqual(w.tweets, [post.body]);
+  });
+  for (const changed of ["consent", "result", "proof", "token"] as const) {
+    it(`withholds a pending sale if its ${changed} changes before send`, async (t) => {
+      const w = await world(t, T0);
+      await ready(w);
+      let allowed = true;
+      let evidence: PlanSell[] = [sale];
+      const p = poster(w, {
+        answer: () => "i sold some pepe.", facts: factsOf([], "live"),
+        socialProfile: async () => ({ xTradeResults: allowed, currentAgent: { address: AGENT, chainId: 4663 } }),
+        saleResults: async () => evidence,
+      });
+      await p.step(w.db, ROSTER, new Map(), T0 + MIN);
+      const post = (await rows(w)).find((r) => r.kind === "sell")!;
+      assert.ok(post);
+      if (changed === "consent") allowed = false;
+      if (changed === "result") evidence = [{ ...sale, outcome: "loss" }];
+      if (changed === "proof") evidence = [];
+      if (changed === "token") evidence = [{ ...sale, token: AGENT }];
+      await p.step(w.db, ROSTER, new Map(), post.dueAtMs);
+      assert.equal(w.tweets.length, 0);
+      assert.equal((await rows(w)).find((r) => r.id === post.id)?.reason, "context-changed");
+    });
+  }
+});
 
 async function rows(w: World) {
   return (await store.postsOf(w.db, TENANT, 0, 100)).reverse();
@@ -888,6 +1056,19 @@ describe("fleet guards", () => {
     assert.equal(w.tweets.length, 0, "the earlier recorded send already consumed the owner's slot");
     assert.match(log ?? "", /owner-day-cap 1/);
     assert.equal((await store.readMeta(w.db, "xday:111:2026-09-28"))?.n, 1);
+  });
+
+  it("a new shared trade counter includes buys sent before the buy/sell-cap rollout", async (t) => {
+    const w = await world(t, T0 - 8 * HOUR);
+    await introDealtWith(w);
+    await wentOut(w, "buy:earlier-one", { kind: "buy", coin: "bonk", atMs: T0 - 7 * HOUR });
+    await wentOut(w, "buy:earlier-two", { kind: "buy", coin: "wif", atMs: T0 - 4 * HOUR });
+    await store.schedulePost(w.db, { tenant: TENANT, xUserId: "111", kind: "buy", dedupeKey: "buy:third", body: BUY, coin: "pepe", decisionId: "third", dueAtMs: T0 - MIN, nowMs: T0 - 20 * MIN });
+    const log = (await poster(w).step(w.db, ROSTER, new Map(), T0)).log;
+    assert.equal(w.tweets.length, 0);
+    assert.match(log ?? "", /trade-day-cap 1/);
+    assert.equal(await store.keyStatus(w.db, "buy:third"), "scheduled");
+    assert.equal((await store.readMeta(w.db, "xday:111:2026-09-28"))?.n, 0, "the reserved account unit is returned");
   });
 
   it("an owner can choose fewer posts a day than the server allows, never more", async (t) => {

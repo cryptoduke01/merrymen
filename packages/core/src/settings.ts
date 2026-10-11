@@ -116,6 +116,20 @@ export interface MerrymenSettings {
    * Deliberately NOT a house key: a tenant must be able to name their own agent.
    */
   agentName?: string;
+  /** Private chat preferences. Brain receives only a closed research/style
+   * projection, never this text. Cannot change limits, authority or model. */
+  agentBrief?: string;
+  /** Prefer newly discovered qualifying pools; does not relax eligibility checks. */
+  discoveryFocus?: "balanced" | "new-projects";
+  /** Closed public writing style; private owner context is not a public prompt. */
+  xVoice?: "default" | "dry";
+  /** Explicit opt-in to include this agent's verified public wallet in its X intro.
+   * Does not connect an X account or enable posting. */
+  xPublicWalletIntro?: boolean;
+  /** Include a receipt-verified token contract and network in trade posts. */
+  xTokenAddresses?: boolean;
+  /** Publish completed exits with a reaction supported by measured results. */
+  xTradeResults?: boolean;
   /**
    * The owner's X handle, for a public page to credit them.
    *

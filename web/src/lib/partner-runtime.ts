@@ -9,6 +9,7 @@ import { mintSession, SESSION_COOKIE } from "./auth";
 import { generateAgentReply, type AgentReply } from "./agent-chat";
 import { llmText } from "../../../worker/src/llm";
 import { fitChatState } from "./chat-state";
+import { normalizeAgentBrief } from "../../../worker/src/agent-brief";
 import { ledgerChatReply } from "./chat-ledger-facts";
 import { PartnerError } from "./partner-bridge";
 import type { FeedResponse } from "../app/api/feed/route";
@@ -243,7 +244,7 @@ export function createPartnerRuntime(overrides: Partial<RuntimeDependencies> = {
     if (!fitted) {
       throw new PartnerRuntimeError(503, "runtime_unavailable", "The agent's state could not be prepared for chat.");
     }
-    return { runtime, state: fitted };
+    return { runtime, state: fitted, agentBrief: normalizeAgentBrief(setting("agentBrief")) };
   }
 
   return {
@@ -259,7 +260,7 @@ export function createPartnerRuntime(overrides: Partial<RuntimeDependencies> = {
       if (typeof input.message !== "string" || !input.message.trim() || input.message.length > 2000) {
         throw new PartnerRuntimeError(400, "invalid_message", "Send a message between 1 and 2000 characters.");
       }
-      const { runtime, state } = await snapshot(tenant);
+      const { runtime, state, agentBrief } = await snapshot(tenant);
       let answer: AgentReply;
       try {
         const body = { message: input.message, history: input.history, state };
@@ -276,7 +277,7 @@ export function createPartnerRuntime(overrides: Partial<RuntimeDependencies> = {
         const budget = (input.deadline ?? Infinity) - deps.now();
         if (budget < MIN_MODEL_MS) throw new Error("no time left for the model");
         const signal = AbortSignal.timeout(Math.min(deps.replyTimeoutMs, budget));
-        answer = await deps.reply(body, { surface: "partner", factualReply,
+        answer = await deps.reply(body, { surface: "partner", factualReply, agentBrief,
           complete: (creds, request) => deps.complete(creds, { ...request, signal }) });
       } catch {
         answer = { reply: null, why: "llm-error" };

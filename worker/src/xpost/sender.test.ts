@@ -102,6 +102,35 @@ test("a post somebody else claimed is not sent", async (t) => {
   assert.equal(seen.length, 0, "X is never called for a post this sender did not claim");
 });
 
+test("wallet-bearing posts fail closed without a current disclosure validator", async (t) => {
+  const { db, post } = await setup(t);
+  const seen: Seen[] = [];
+  const pending = { ...post, kind: "intro" as const, body: `hello from alan, an AI trading agent. Wallet (Robinhood Chain): ${OWNER}` };
+  assert.equal(await sendOne(db, DEK, APP, pending, { fetch: scripted([created()], seen), nowMs: NOW }), "cancelled");
+  assert.equal(seen.length, 0);
+});
+
+test("current disclosure and X consent are checked after refresh and before an auth retry", async (t) => {
+  const { db, post } = await setup(t, EXPIRING);
+  const seen: Seen[] = [];
+  let checks = 0;
+  const fetch = scripted([token("access-two", "refresh-two"), { status: 401 }, token("access-three", "refresh-three"), created()], seen);
+  assert.equal(await sendOne(db, DEK, APP, post, { fetch, nowMs: NOW, validateBeforeSend: async () => ++checks === 1 }), "cancelled");
+  assert.equal(checks, 2);
+  assert.equal(seen.filter((call) => call.url.endsWith("/tweets")).length, 1, "no retry after the disclosure was revoked during refresh");
+});
+
+test("turning posting off during token refresh prevents the first post call", async (t) => {
+  const { db, post } = await setup(t, EXPIRING);
+  const seen: Seen[] = [];
+  const fetch = scripted([async () => {
+    await setPosting(db, OWNER, { enabled: false }, NOW);
+    return token("access-two", "refresh-two");
+  }, created()], seen);
+  assert.equal(await sendOne(db, DEK, APP, post, { fetch, nowMs: NOW }), "cancelled");
+  assert.equal(seen.filter((call) => call.url.endsWith("/tweets")).length, 0);
+});
+
 test("a token about to expire is refreshed, and the new pair is stored BEFORE it is used", async (t) => {
   const { db, post } = await setup(t, EXPIRING);
   const seen: Seen[] = [];

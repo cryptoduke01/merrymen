@@ -22,7 +22,9 @@ import {
 import { ensureHome, homePaths } from "./home";
 import { writeFileAtomicSync } from "./atomic-write";
 import { MAX_DECISION_INTERVAL_SEC } from "./decision-cadence";
-import { energyModeOf, type EnergyMode } from "./energy";
+import { normalizeAgentBrief } from "./agent-brief";
+import type { DiscoveryFocus } from "./discovery-focus";
+import { energyExemptAccountsOf, energyModeOf, type EnergyMode } from "./energy";
 
 /**
  * A tenant settings file with every house-key field removed (hosted mode). The
@@ -55,6 +57,9 @@ export interface ResolvedConfig {
   rialtoApiKeyHeader: string;
   breakerAddress: `0x${string}` | undefined;
   agentName: string | undefined;
+  /** Saved per-agent preferences never grant execution authority. */
+  agentBrief: string | undefined;
+  discoveryFocus: DiscoveryFocus;
   xHandle: string | undefined;
   /**
    * Proof that xHandle is theirs, written only by /api/x-proof.
@@ -90,6 +95,8 @@ export interface ResolvedConfig {
    * both unenforceable and against the token's stance.
    */
   energyGate: EnergyMode;
+  /** Operator env only: exact verified smart accounts whose energy is observed, not enforced. */
+  energyExemptAccounts: readonly string[];
   paperStartUsdg: number;
   /** Builtin name, or a user strategy filename (strategies/<name>.ts). */
   strategy: string;
@@ -369,6 +376,8 @@ export function mergeSettings(
     rialtoApiKeyHeader: str(file.rialtoApiKeyHeader, env.MERRYMEN_RIALTO_API_KEY_HEADER, d.rialtoApiKeyHeader)!,
     breakerAddress,
     agentName,
+    agentBrief: normalizeAgentBrief(file.agentBrief),
+    discoveryFocus: oneOf(file.discoveryFocus, undefined, ["balanced", "new-projects"] as const, "balanced"),
     xHandle,
     xProof,
     v4AdapterAddress,
@@ -416,6 +425,7 @@ export function mergeSettings(
     // off self-hosted whatever they say. Reaches hosted children through
     // childEnv; it is not a secret, so CHILD_SECRET_STRIP leaves it alone.
     energyGate: hosted ? energyModeOf(env.MERRYMEN_ENERGY_GATE) : "off",
+    energyExemptAccounts: hosted ? energyExemptAccountsOf(env.MERRYMEN_ENERGY_EXEMPT_ACCOUNTS) : [],
     paperStartUsdg: num(file.paperStartUsdg, env.MERRYMEN_PAPER_START_USDG, d.paperStartUsdg, 1, 10_000_000),
     // Any sane token is a valid strategy name — builtins resolve directly,
     // everything else resolves to strategies/<name>.* (missing file = honest

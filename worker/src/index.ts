@@ -136,6 +136,8 @@ import { recordDecisionRefusal, verifyDecisionOwner, withDecisionOutcome } from 
 import { bookGaps, composeEquityUsdg } from "./equity";
 import { publishesAView, reviewRecord, runShadow, type ShadowInputs, type ShadowOutcome } from "./brain-shadow";
 import { TrenchBrainReview, TrenchTapeReader, highVolumePools, trenchBrainPersona, trenchBrainSignals, trenchHeat, HELD_REVIEW_MAX_GAP_MS, TRENCH_REVIEW_INTERVAL_MS } from "./trencher-brain";
+import { withAgentBrief } from "./agent-brief";
+import { ProjectPurposeReader } from "./research/project-purpose";
 import { getPaperBrainCapital } from "./store";
 import { nextTickDelayMs, tickIntervalMs } from "./decision-cadence";
 import { scheduledInterval, DEFAULT_TRIGGERS } from "./brain-trigger";
@@ -218,6 +220,7 @@ import {
   countsAsEntry,
   energyBuyOf,
   energyLevel,
+  energyModeForAccount,
   energyPlan,
   energyShortfallRaw,
   energyStatus,
@@ -801,6 +804,7 @@ async function main() {
    */
   let lastPrices: Map<string, PriceQuote> = new Map();
   const trenchBrain = new TrenchBrainReview();
+  const projectPurpose = new ProjectPurposeReader();
   /**
    * WHERE EACH COIN STOPPED (decision-funnel.ts). One recorder per process,
    * installed so the Telegram chat tools can answer "why did you skip that
@@ -1007,7 +1011,7 @@ async function main() {
       // or the grant/custody checks that admit one to the trading universe.
       // Early candidates are read beside them, through the same verification,
       // without the volume screen or the top slice (trencher-discovery.ts).
-      const result = await discoverTrencherUniverse(mainnetClient(), current.grant, freshTrenchTape(), { nominated: new Set(tgNominated), cache: poolCache, early: earlyDiscoverySet() });
+      const result = await discoverTrencherUniverse(mainnetClient(), current.grant, freshTrenchTape(), { nominated: new Set(tgNominated), cache: poolCache, early: earlyDiscoverySet(), focus: cfg.discoveryFocus });
       if (autoTrenchContext === context && trenchPoolCache === poolCache && active && `${active.agentId}:${active.grant.grantedAt}` === context) {
         autoTrench = result;
         warmHeldNames(coinNames, result);
@@ -1044,6 +1048,7 @@ async function main() {
     }
   }
   function refreshTrenchTape() {
+    trenchTapeReader.setDiscoveryFocus(cfg.discoveryFocus);
     if (trenchTapePending || Date.now() - trenchTapeRequestedAt < 60_000) return;
     trenchTapePending = true;
     trenchTapeRequestedAt = Date.now();
@@ -5297,7 +5302,7 @@ async function main() {
   ): Promise<void> {
     const now = Math.floor(Date.now() / 1000);
     energyWithheld = false;
-    const mode = cfg.energyGate;
+    const mode = energyModeForAccount(cfg.energyGate, grant.smartAccount, cfg.energyExemptAccounts);
     let reviewsAllowed = 0;
     let estimate: number | null = null;
     if (mode === "off") {
@@ -12844,7 +12849,7 @@ async function main() {
         // A nominated coin (Telegram groups) is looked at first when it is
         // ELIGIBLE here — the same filter every tape coin passes. The hint
         // moves it up the queue, never onto it (trencher-brain.ts candidate).
-        const trenchCandidate = trenchBrain.candidate(trenchEligible.filter(c => trenchReviewable(c)), tgBook.priority());
+        const trenchCandidate = trenchBrain.candidate(trenchEligible.filter(c => trenchReviewable(c)), tgBook.priority(), cfg.discoveryFocus);
         const trenchSymbols = new Set(trenchCandidate ? [trenchCandidate.symbol] : []);
         // Braked, "no pool passes the entry checks" would be a false sentence:
         // none was looked at. The strategy's idle reason says why instead, as
@@ -13211,7 +13216,7 @@ async function main() {
               },
             },
             expectedTradeGasUsdg: expectedTradeGasMicro === null ? null : Number(expectedTradeGasMicro),
-            persona: cfg.agentName ? `You are ${cfg.agentName}, a Merryman.` : "",
+            persona: withAgentBrief(cfg.agentName ? `You are ${cfg.agentName}, a Merryman.` : "", cfg.agentBrief),
             // ITS OWN PUBLISHED THESES, and what came of them. Read from the
             // peer file rather than the child's `decisions` table because that
             // table is wiped by every redeploy — an agent reading memory from
@@ -13236,7 +13241,7 @@ async function main() {
             const freshTape = freshTrenchTape();
             const verifiedPool = autoTrench?.qualified.find(p => p.tokenAddress.toLowerCase() === focus.token.toLowerCase());
             const tape = freshTape.find(p => p.tokenAddress.toLowerCase() === focus.token.toLowerCase() && (!verifiedPool || p.poolAddress === verifiedPool.poolAddress));
-            inputs.persona = trenchBrainPersona(focus.symbol, focus.held);
+            inputs.persona = withAgentBrief(trenchBrainPersona(focus.symbol, focus.held), cfg.agentBrief);
             if (tape) {
               Object.assign(inputs.market.signals, trenchBrainSignals(tape, trenchTapeAt, lastLiquidityUsd.get(focus.token.toLowerCase()) ?? null));
             }
@@ -13246,7 +13251,12 @@ async function main() {
             // No addresses, no vendor name (lens.ts; re-checked in fomo-child.ts).
             fomoChild.attachLens(inputs.market.signals, focus.token, cfg.brainUrl);
             const brainConfig = { url: cfg.brainUrl, token: cfg.brainToken, timeoutMs: 25_000 };
+            const projectContext = cfg.discoveryFocus === "new-projects"
+              ? { client, token: focus.token, chainId: active.grant.chainId, browser: browserCfg() } : null;
             trenchBrain.launch(trenchContext, inputs, focus.token, async () => {
+              const projectRead = projectContext
+                ? projectPurpose.read(projectContext.client, projectContext.token, projectContext.chainId, projectContext.browser)
+                : Promise.resolve(null);
               // Enrichment cannot block the trading tick or mutate a review after its deadline.
               if (tape) {
                 // THE BUDGET IS NOW SPENT PER LEG, INSIDE readPoolEvidence, so
@@ -13289,6 +13299,8 @@ async function main() {
                 // match is the thing to change.
                 console.log(`[${short(agentId)}] [trencher] evidence ${focus.symbol}: none — no fresh tape entry for this pool, so the review has no memecoin signals`);
               }
+              const project = await projectRead;
+              if (project) inputs.market.signals.builder = [project, inputs.market.signals.builder].filter(Boolean).join("\n\n");
               // Once the decision is persisted (runShadow writes it before it
               // returns), the nomination book hears what was decided about this
               // token — tgNoteReview never throws into the review's promise.
