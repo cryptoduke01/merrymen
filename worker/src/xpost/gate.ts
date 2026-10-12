@@ -124,7 +124,8 @@ export interface XGateCtx {
    * THE TAG NAMED A COIN, OR ASKED ABOUT ITS TRADES OR A COIN IN WORDS THAT
    * ARE NOT ONE OF THE PLAIN TRADES QUESTIONS (red-team review, 2026-10-12).
    * Read only with buys "none": then the answer may not say it likes the coin
-   * either (LIKED), as buy-claim.
+   * either (LIKED), answer yes or no, or speak of itself outside a deflection
+   * (namedClaim), as buy-claim.
    */
   named?: boolean;
 }
@@ -1229,6 +1230,34 @@ const LIKED = new RegExp(
   "iu",
 );
 
+/**
+ * OF A NAMED COIN, NO YES OR NO AND NO "I" BUT A DEFLECTION (red-team review,
+ * 2026-10-12). "did you buy $PEPE2?" answered "yep, i did. that one's mine",
+ * "yeah that one was my latest pick", "yes, it's in my book, been riding it",
+ * "sure did": a list of verbs is never whole. An answer about a coin someone
+ * named, told none of its buys, has only these to say: what it looked up
+ * (said of the source, never of itself), that it could not look, that it
+ * keeps single positions to itself, and, on paper, that it is on paper. So
+ * it may not answer yes or no, and it may not speak of itself in the first
+ * person outside those few clauses.
+ */
+const AFFIRM = /(?:^|[,.;:!?—–(]\s*|\b(?:and|but|so|honestly|well|oh|lol|haha|ha)[\s,]+)(?:yes+|yep|yup|yeah|yea|ya|yah|sure|absolutely|definitely|certainly|indeed|correct|totally|you bet|bingo|of course|nope|nah|naw|no(?=\s*[,.;:!?—–]|\s+(?:i|i'?ve|i'?m|never|not|sir|way)\b))\b/iu;
+const SPEAKS_OF_ITSELF = /\b(?:i|i'?m|im|i'?ve|ive|i'?d|i'?ll|me|my|mine|myself|we|we'?re|we'?ve|our|ours|us)\b/iu;
+const DEFLECTIONS: readonly RegExp[] = [
+  /\b(?:i|we)\s+(?:(?:really|just|honestly)\s+)?(?:don'?t|do\s+not|never|won'?t|can'?t|cannot)\s+(?:really\s+)?(?:talk|say|share|discuss|comment|get|go|speak|weigh|chat|name|post)\b(?:\s+(?:about|on|into|in|over))?(?:\s+(?:my|any|individual|single|specific|particular|the|those|these|one-off))*\s+(?:positions?|coins?|tokens?|trades?|buys?|picks?|holdings?|bags?|names?|calls?|ones?)\b(?:\s+(?:here|on\s+here|publicly|in\s+public|on\s+x))?/giu,
+  /\b(?:i|we)\s+keep\s+(?:(?:my|our|individual|single|specific|those|that|the|own)\s+)*(?:positions?|trades?|buys?|picks?|coins?|holdings?|bags?|calls?)\s+to\s+(?:myself|ourselves)(?:\s+here)?/giu,
+  /\b(?:i|we)\s+(?:couldn'?t|could\s+not|can'?t|cannot|wasn'?t\s+able\s+to)\s+(?:look|check|pull|find|get)\s+(?:(?:it|that|this|that\s+one|this\s+one|anything)\s+)?(?:up\b|on\s+it\b)?/giu,
+  /\b(?:i|we)\s+looked\s+(?:(?:it|that|this|that\s+one)\s+)?up\b/giu,
+  /\b(?:i'?m|im|i\s+am|we'?re)\s+(?:(?:still|just|only|strictly|trading|playing)\s+)*on\s+paper\b|\b(?:i|we)\s+(?:only\s+|just\s+)?(?:trade|play)\s+(?:it\s+)?on\s+paper\b/giu,
+  /\b(?:i|we)\s+(?:don'?t|do\s+not|never)\s+(?:give|do|hand\s+out|make|offer)\s+(?:out\s+)?(?:advice|calls|picks|tips|predictions)\b/giu,
+];
+function namedClaim(text: string): boolean {
+  if (AFFIRM.test(text) || LIKED.test(text)) return true;
+  let rest = text;
+  for (const re of DEFLECTIONS) rest = rest.replace(re, " ");
+  return SPEAKS_OF_ITSELF.test(rest);
+}
+
 function buyClaimed(text: string, vouched: readonly string[] | null): boolean {
   if (vouched === null) return BAG.test(text) || new RegExp(ACQUIRED.source, "i").test(text) || OWNED_ACT.test(text) || OWNED_SHAPE.test(text);
   const names = vouched.map((c) => c.trim().toLowerCase().replace(/^\$/, "")).filter((c) => c !== "");
@@ -1394,8 +1423,8 @@ function admitMasked(tidied: string, ctx: XGateCtx, baseGate: BaseGate, agentNam
   if (unsaid.length && namedIn(ctx.kind === "reply" ? withoutReplyOptOut(text) : text, unsaid)) return refuse("bought-named");
   // Nor a buy it was not told of.
   if (ctx.buys !== undefined && buyClaimed(ctx.kind === "reply" ? withoutReplyOptOut(text) : text, ctx.buys === "none" ? null : coins)) return refuse("buy-claim");
-  // Nor, of a coin someone named, that it likes it.
-  if (ctx.buys === "none" && ctx.named === true && LIKED.test(ctx.kind === "reply" ? withoutReplyOptOut(text) : text)) return refuse("buy-claim");
+  // Nor, of a coin someone named, that it likes it, a yes or a no, or itself outside a deflection (namedClaim).
+  if (ctx.buys === "none" && ctx.named === true && namedClaim(ctx.kind === "reply" ? withoutReplyOptOut(text) : text)) return refuse("buy-claim");
 
   if (text.length > XPOST_MAX_CHARS || xWeightedLength(text) > X_MAX_WEIGHTED) return refuse("too-long");
   if (words(text) < XPOST_MIN_WORDS) return refuse("too-short");

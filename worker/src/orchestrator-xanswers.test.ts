@@ -295,7 +295,8 @@ test("an owner the operator did not make active answers no tags", async (t) => {
 
 test("a tag with a figure in it is answered, the figure read as a number and never shown to the model", async (t) => {
   for (const env of [{}, RESEARCH_ON]) {
-    const w = await world(t, { env, research: fakeResearch().research });
+    // A named coin's answer says nothing of itself but a deflection (gate.ts namedClaim).
+    const w = await world(t, { env, research: fakeResearch().research, answer: "no read on that one just now, sorry. Say stop to opt out." });
     w.setInbox([tag({ text: "@pine_stoat is $PEPE legit? saw it on 2 lists" })]);
     await w.step();
     const [prompt] = w.asked();
@@ -629,7 +630,8 @@ test("research off: nothing is looked up, and a tag carrying an address is not a
 
 test("research on: a tagged contract address is looked up and answered in words, and never reaches the model", async (t) => {
   const r = fakeResearch();
-  const w = await world(t, { env: RESEARCH_ON, research: r.research });
+  const COIN_ANSWER = "the public index shows liquidity is thin and holders look concentrated. Say stop to opt out.";
+  const w = await world(t, { env: RESEARCH_ON, research: r.research, answer: COIN_ANSWER });
   w.setInbox([tag({ text: `@pine_stoat thoughts on ${CA}?` })]);
   await w.step();
   assert.deepEqual(r.seen, [{ address: CA }]);
@@ -645,7 +647,7 @@ test("research on: a tagged contract address is looked up and answered in words,
   assert.equal(answer!.replyToTweetId, MENTION);
   w.setInbox([]);
   await w.step(NOW + 30 * MIN);
-  assert.deepEqual(w.sends, [{ text: ANSWER, reply: { in_reply_to_tweet_id: MENTION } }]);
+  assert.deepEqual(w.sends, [{ text: COIN_ANSWER, reply: { in_reply_to_tweet_id: MENTION } }]);
 });
 
 test("research on, the flow lane wired: a tagged contract's onchain flow reaches the draft as bands, never a figure", async (t) => {
@@ -656,7 +658,7 @@ test("research on, the flow lane wired: a tagged contract's onchain flow reaches
       { minutes: 60, buyUsd: 500, sellUsd: 3_000, buys: 6, sells: 20, buyers: 3, sellers: 12 },
     ] } };
   const r = fakeResearch({ flow: reading });
-  const w = await world(t, { env: RESEARCH_ON, research: r.research });
+  const w = await world(t, { env: RESEARCH_ON, research: r.research, answer: "per on-chain data, sells ran well ahead of buys over the last hour. Say stop to opt out." });
   w.setInbox([tag({ text: `@pine_stoat thoughts on ${CA}?` })]);
   await w.step();
   assert.deepEqual(r.flows.map((q) => q.address), [CA]);
@@ -1259,6 +1261,36 @@ test("asking name by name says nothing of which coins it bought: a name it bough
       assert.doesNotMatch(seen[0]!.prompt, /It is just chat|public index/, pair[0]);
     }
   }
+});
+
+test("a coin-named tag is never answered yes, no, or in the first person outside a deflection, research on or off (red-team 2026-10-12)", async (t) => {
+  // A live agent whose only call is a live PEPE buy at 0xabab…ab; the reproduced tags and drafts.
+  const facts: AgentFacts = { ...FACTS, calls: [{ ...CALL, token: `0x${"ab".repeat(20)}` }] };
+  const tags = ["@pine_stoat did you buy $PEPE2?", "@pine_stoat did you buy pepe inu?", "@pine_stoat did you buy $WOJAK?", `@pine_stoat did you buy 0x${"ef".repeat(20)}?`];
+  const drafts = ["yep, i did. that one's mine. say stop to opt out.", "yeah that one was my latest pick, liked the early curve. say stop to opt out.",
+    "yep, i did, the public index shows liquidity is thin. say stop to opt out.", "yes, it's in my book right now, been riding it. say stop to opt out.",
+    "my latest buy was wojak, liked how early it was. say stop to opt out.", "yes, i'm in that one. say stop to opt out.", "yup, took some of that one. say stop to opt out."];
+  for (const env of [{}, RESEARCH_ON]) {
+    for (const text of tags) {
+      if (env !== RESEARCH_ON && text.includes("0x")) continue;
+      for (const answer of drafts) {
+        const w = await world(t, { env, research: fakeResearch().research, facts, answer });
+        w.setInbox([tag({ text })]);
+        await w.step();
+        w.setInbox([]);
+        await w.step(NOW + MIN);
+        assert.deepEqual(w.sends, [], `${text} / ${answer}`);
+        const [row] = await w.answers();
+        assert.equal(row!.status, "skipped", `${text} / ${answer}`);
+        assert.match(row!.reason ?? "", /^gate:(?:buy-claim|bought-named)$/, `${text} / ${answer}`);
+      }
+    }
+  }
+  // A deflection is still answered.
+  const w = await world(t, { facts, answer: "i keep my individual positions to myself here, sorry. say stop to opt out." });
+  w.setInbox([tag({ text: "@pine_stoat did you buy $WOJAK?" })]);
+  await w.step();
+  assert.equal((await w.answers())[0]!.status, "scheduled");
 });
 
 test("a copycat or emoji spelling no matcher finds is never handed its buys, and a draft that names one is refused (red-team 2026-10-12)", async (t) => {

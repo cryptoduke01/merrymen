@@ -84,6 +84,27 @@ describe("an answer says only the buys it was told of (red-team 2026-10-12)", ()
     }
   });
 
+  it("of a named coin: no yes or no, and no first person but a deflection, whatever the verb (red-team 2026-10-12, second round)", () => {
+    // writeAnswer's context at L1593-1598 for a coin-named tag, from a live agent that bought PEPE.
+    const named: Partial<XGateCtx> = { kind: "reply", mode: "live", coins: [], buys: "none", unsaid: ["PEPE", "Pepe"], named: true };
+    // The reproduced drafts, each {ok:true} at 11f7acac.
+    for (const draft of ["yep, i did. that one's mine. say stop to opt out.", "yeah that one was my latest pick, liked the early curve. say stop to opt out.",
+      "yep, i did, the public index shows liquidity is thin. say stop to opt out.", "yes, it's in my book right now, been riding it. say stop to opt out.",
+      "my latest buy was wojak, liked how early it was. say stop to opt out.", "yes, i'm in that one. say stop to opt out.", "yup, took some of that one. say stop to opt out.",
+      "sure did. say stop to opt out.", "yeah, it's a good one, the curve looked early. say stop to opt out.", "nope, never touched that one. say stop to opt out.",
+      "that one's been good to me lately. say stop to opt out."]) {
+      assert.equal(reason(draft, named), "buy-claim", draft);
+    }
+    // What such an answer may say.
+    for (const draft of ["i keep my individual positions to myself here, sorry. say stop to opt out.", "i don't talk about single coins here, sorry. say stop to opt out.",
+      "couldn't look that one up just now, sorry. say stop to opt out.", "i couldn't look it up just now, the index was busy. say stop to opt out.",
+      "the public index shows liquidity is thin and holders look concentrated. say stop to opt out.", "no read on that one just now, sorry. say stop to opt out."]) {
+      assert.equal(reason(draft, named), "ok", draft);
+    }
+    assert.equal(reason("i'm on paper, and i keep single positions to myself here. say stop to opt out.", { ...named, mode: "paper" }), "ok", "a paper agent says paper");
+    assert.equal(reason("yeah, it's a good one, the curve looked early. say stop to opt out.", { ...named, named: false }), "ok", "not a named coin: the strict reading is off");
+  });
+
   it("a live agent's reply never says paper, in any shape, unless it names a paper coin it was told of (red-team 2026-10-12)", () => {
     const general: Partial<XGateCtx> = { kind: "reply", mode: "live", coins: ["Pepe"], buys: "vouched", unsaid: ["Bonk"] };
     // The reproduced draft, scheduled at 11f7acac with BONK in neither unsaid nor coins.
