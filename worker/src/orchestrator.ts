@@ -226,6 +226,7 @@ import { expiredOrderReceipt, type OrderReceipt } from "./order-receipt";
 import { makeMcpBackground } from "./mcp/background";
 import { childProcessBrokerPort, serveBrokerRequests } from "./fomo/broker";
 import { attachFlowBroker, flowFor, flowRuntimeNow as flowRuntimeFor, type FlowRuntime } from "./orchestrator-flow";
+import { FLOW_BROKER_ENV } from "./flow-broker";
 import { budgetConfigFor, describeBudget, fomoBudgetFrom, fomoPlanFrom, FREE_PLAN_CREDITS_PER_MONTH, type FomoBudget, type FomoBudgetConfig } from "./fomo/budget";
 import { writeChildFomoFile } from "./fomo/child-file";
 import { fomoTailsOn, type FomoAccess, type FomoService } from "./fomo/contract";
@@ -1001,7 +1002,7 @@ export { botWillPoll };
  * tenant's home and the hosted flag. Inheriting (rather than allowlisting) keeps
  * the OS essentials and the injected house keys; the strip is what makes it safe.
  */
-export function childEnv(tenant: string, opts: { tgGroupsOff?: boolean } = {}): NodeJS.ProcessEnv {
+export function childEnv(tenant: string, opts: { tgGroupsOff?: boolean; flowBroker?: boolean } = {}): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env };
   for (const k of CHILD_SECRET_STRIP) delete env[k];
   env.MERRYMEN_HOSTED = "1";
@@ -1040,6 +1041,14 @@ export function childEnv(tenant: string, opts: { tgGroupsOff?: boolean } = {}): 
   // and hand out a fresh day's allowances. Never set to "1": an operator's
   // fleet-wide 0 is inherited above and stays.
   if (opts.tgGroupsOff) env.MERRYMEN_TG_GROUPS = "0";
+  // THE FLOW BROKER ANSWERS ON THIS CHILD'S CHANNEL (flow-broker.ts
+  // FLOW_BROKER_ENV): said only when the Bitquery lane is on here and the
+  // child gets the IPC channel, so a child never asks — and never waits — for
+  // a broker nobody attached. Never inherited: it describes this process,
+  // not a fleet-wide choice an operator's variable could make for it. Who may
+  // actually ask is still decided per request, by the research allowlist.
+  delete env[FLOW_BROKER_ENV];
+  if (opts.flowBroker) env[FLOW_BROKER_ENV] = "1";
   /**
    * WHERE THE CHILDREN AGREE WITH EACH OTHER.
    *
@@ -4757,7 +4766,11 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
         // then says "unavailable" at once instead of waiting out a timeout.
         {
           cwd: ROOT,
-          env: childEnv(tenant, { tgGroupsOff: tgGroupsHeld.has(tenant.toLowerCase()) }),
+          env: childEnv(tenant, {
+            tgGroupsOff: tgGroupsHeld.has(tenant.toLowerCase()),
+            // The flow broker below is attached exactly when both hold.
+            flowBroker: !fomoBootNow().off && flowRuntimeNow().service !== null,
+          }),
           stdio: fomoBootNow().off ? ["ignore", "pipe", "pipe"] : ["ignore", "pipe", "pipe", "ipc"],
         },
       );

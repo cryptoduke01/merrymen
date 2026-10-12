@@ -79,6 +79,26 @@ describe("the Trencher review's hold backoff, memory, evidence rule and research
     assert.equal(CODE.split("trenchMomentumBrief(").length - 1, 1, "one call site");
   });
 
+  it("the indexer's flow: research entry reviews with a tape row, asked at launch, bounded by the evidence budget, under its own key", () => {
+    assert.equal(CODE.split("reviewFlowClient(").length - 1, 1, "one client, built once");
+    assert.match(CODE, /const reviewFlow = reviewFlowClient\(\);/);
+    assert.match(CODE, /const flowLensProbe = new BrainCapabilityProbe\(undefined, undefined, undefined, undefined, undefined, "lens_keys"\);/);
+    // The same gate as the plan, plus a tape row; the probe last, so nothing new is read for anyone else.
+    assert.match(CODE, /const flowClient = costContext && tape && reviewFlow && flowLensProbe\.advertises\(cfg\.brainUrl, ONCHAIN_FLOW_LENS\) \? reviewFlow : null;/);
+    assert.ok(CODE.indexOf("const flowClient = ") < LAUNCH);
+    const run = CODE.slice(LAUNCH, PAID);
+    // Started beside the cost quotes, before the evidence legs, on their clock.
+    assert.match(run, /const flowRead = flowClient \? readFlowEvidence\(flowClient, focus\.token, EVIDENCE_BUDGET_MS\) : null;/);
+    assert.ok(run.indexOf("const flowRead = ") < run.indexOf("readPoolEvidence("), "asked before the legs start, not after them");
+    // Its own key: technical (and its 2,400-character cut) is never touched by it.
+    assert.match(run, /const flow = flowRead \? await flowRead : null;\s*if \(flow\) \{\s*if \(flow\.lens\) inputs\.market\.signals\[ONCHAIN_FLOW_LENS\] = flow\.lens;/);
+    assert.equal(CODE.split("signals[ONCHAIN_FLOW_LENS]").length - 1, 1, "set in one place");
+    assert.doesNotMatch(run, /signals\.technical \+= [^;]*flow/);
+    assert.ok(run.indexOf("const flow = flowRead") < run.length, "awaited before the paid call");
+    // An older Brain's 422 on a decide that carried it turns the key off.
+    assert.match(CODE, /\.then\(outcome => \{ if \(flowLensRefused\(Boolean\(flow\?\.lens\), outcome\)\) flowLensProbe\.invalidate\(\);/);
+  });
+
   it("the trusted strategy terms ride on the same costContext as the plan, and are set before the review launches", () => {
     assert.match(CODE, /if \(costContext\) inputs\.strategyTerms = trencherStrategyTerms\(TRENCHER_FAST\);/);
     assert.equal(CODE.split("trencherStrategyTerms(").length - 1, 1, "one call site");

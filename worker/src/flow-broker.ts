@@ -47,6 +47,15 @@ export const FLOW_BROKER_LIMITS = Object.freeze({
   idChars: 64,
 });
 
+/**
+ * SET TO "1" IN A CHILD'S ENVIRONMENT ONLY WHEN SOMEBODY WILL ANSWER: the
+ * orchestrator's flow service is on and the child gets the IPC channel
+ * (orchestrator.ts childEnv). Never inherited from the operator's own
+ * environment. Without it a child does not ask, so it never waits out a
+ * timeout for a broker that was never attached.
+ */
+export const FLOW_BROKER_ENV = "MERRYMEN_FLOW_BROKER";
+
 export interface FlowRequest {
   flow: 1;
   id: string;

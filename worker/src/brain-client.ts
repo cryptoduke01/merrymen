@@ -250,6 +250,10 @@ export const STRATEGY_TERMS_CAPABILITY = "strategy-terms";
  *
  * FREE. /health is Brain's own unauthenticated status endpoint on the private
  * network: no model call, no vendor, nothing metered.
+ *
+ * THE SAME READ ANSWERS FOR A LENS KEY with `list: "lens_keys"`: Brain's
+ * MarketState refuses a signals key it does not know, with the same 422 and
+ * the same lost review (index.ts asks it before sending `onchain-flow`).
  */
 export class BrainCapabilityProbe {
   private url = "";
@@ -266,6 +270,8 @@ export class BrainCapabilityProbe {
     private readonly timeoutMs: number = 3_000,
     /** How soon a read that got no answer is retried. Still never on a review's clock. */
     private readonly retryMs: number = 60_000,
+    /** Which /health list is read: decide fields (`capabilities`) or signals keys (`lens_keys`). */
+    private readonly list: "capabilities" | "lens_keys" = "capabilities",
   ) {}
 
   advertises(brainUrl: string | null | undefined, capability: string): boolean {
@@ -321,7 +327,7 @@ export class BrainCapabilityProbe {
         if (text.length <= 64_000) {
           const j = JSON.parse(text) as unknown;
           if (j !== null && typeof j === "object" && !Array.isArray(j)) {
-            const listed = (j as { capabilities?: unknown }).capabilities;
+            const listed = (j as Record<string, unknown>)[this.list];
             caps = new Set(
               Array.isArray(listed) ? listed.filter((c): c is string => typeof c === "string" && c.length <= 64) : [],
             );

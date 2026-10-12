@@ -1278,7 +1278,8 @@ describe("index.ts wires the seams in the order that makes them safe", () => {
 
   it("every trencher review is reported after it is persisted, and cannot break the review", () => {
     const at = CODE.indexOf("return runShadow(brainConfig, inputs,");
-    assert.match(CODE.slice(at, at + 1600), /admit: claimReview,\n\s+\}\)\.then\(outcome => \{ tgNoteReview\(focus\.token, outcome\); return outcome; \}\); \},/);
+    // (The flow-lens probe hears the outcome first: a pure check and a field write, neither of which throws.)
+    assert.match(CODE.slice(at, at + 1600), /admit: claimReview,\n\s+\}\)\.then\(outcome => \{ if \(flowLensRefused\(Boolean\(flow\?\.lens\), outcome\)\) flowLensProbe\.invalidate\(\); tgNoteReview\(focus\.token, outcome\); return outcome; \}\); \},/);
     const body = CODE.slice(CODE.indexOf("function tgNoteReview("), CODE.indexOf("function tgNoteHeld("));
     assert.match(body, /try \{[\s\S]*\} catch/);
   });

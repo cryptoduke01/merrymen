@@ -135,6 +135,8 @@ import { provenanceOf, type Provenance } from "./provenance";
 import { recordDecisionRefusal, verifyDecisionOwner, withDecisionOutcome } from "./decision-identity";
 import { bookGaps, composeEquityUsdg } from "./equity";
 import { publishesAView, reviewRecord, runShadow, type ShadowInputs, type ShadowOutcome } from "./brain-shadow";
+import { BrainCapabilityProbe } from "./brain-client";
+import { ONCHAIN_FLOW_LENS, flowLensRefused, readFlowEvidence, reviewFlowClient } from "./review-flow";
 import { HoldBackoff, TrenchBrainReview, TrenchNoticeGate, TrenchTapeReader, entryEvidenceBlind, trenchDeskNotice, highVolumePools, trenchBrainPersona, trenchBrainSignals, trenchHeat, trenchMaterial, HELD_REVIEW_MAX_GAP_MS, TRENCH_REVIEW_INTERVAL_MS } from "./trencher-brain";
 import { withAgentBrief } from "./agent-brief";
 import { ProjectPurposeReader } from "./research/project-purpose";
@@ -906,6 +908,15 @@ async function main() {
     log: (line) => console.log(line),
   });
   installFomoChild(fomoChild);
+  /**
+   * THE ORCHESTRATOR'S FLOW LANE, for research accounts' Trencher entry
+   * reviews (review-flow.ts). Null unless the orchestrator said its broker
+   * answers on this channel; then no question is ever sent. The probe asks
+   * Brain's /health whether it accepts `onchain-flow`, and is consulted only
+   * for a review that has a flow question to send.
+   */
+  const reviewFlow = reviewFlowClient();
+  const flowLensProbe = new BrainCapabilityProbe(undefined, undefined, undefined, undefined, undefined, "lens_keys");
   /**
    * THE OWNER'S FOMO TAIL NOTICES (fomo/tail-notifier.ts), asked by the
    * Telegram notifier only past its own gates. Read-only over the child:
@@ -13350,8 +13361,16 @@ async function main() {
             // never disagree; decide() sends them only to a Brain whose /health
             // advertises "strategy-terms", and any other request is today's.
             if (costContext) inputs.strategyTerms = trencherStrategyTerms(TRENCHER_FAST);
+            // THE INDEXER'S FLOW FOR THIS COIN (review-flow.ts), for the same
+            // reviews, only with a fresh tape row (a review without one is never
+            // paid for) and only to a Brain that lists the key. The probe is
+            // asked last, so a review with nothing to send reads nothing new.
+            const flowClient = costContext && tape && reviewFlow && flowLensProbe.advertises(cfg.brainUrl, ONCHAIN_FLOW_LENS) ? reviewFlow : null;
             trenchBrain.launch(trenchContext, inputs, focus.token, async (review) => {
               const costRead = costContext ? entryCostResearch(costContext) : Promise.resolve(null);
+              // Asked now, beside the cost quotes and the candle and trade legs,
+              // and given up at their budget: it never holds the review past it.
+              const flowRead = flowClient ? readFlowEvidence(flowClient, focus.token, EVIDENCE_BUDGET_MS) : null;
               const projectRead = projectContext
                 ? projectPurpose.read(projectContext.client, projectContext.token, projectContext.chainId, projectContext.browser)
                 : Promise.resolve(null);
@@ -13448,6 +13467,14 @@ async function main() {
                 // liquidity analyst; the manager still needs the same costs.
                 inputs.memory = [costEvidence, ...(inputs.memory ?? []).slice(0, 5)];
               }
+              // Its own key, which Brain's manager reads beside the measured
+              // market input: technical's 2,400-character cut is not touched.
+              // No block is no key — a missing reading is never "no flow".
+              const flow = flowRead ? await flowRead : null;
+              if (flow) {
+                if (flow.lens) inputs.market.signals[ONCHAIN_FLOW_LENS] = flow.lens;
+                console.log(`[${short(agentId)}] [trencher] flow ${focus.symbol}: ${flow.status}`);
+              }
               // THE MOMENTUM ENTRY PLAN, for research accounts' entry reviews
               // only (costContext exists exactly then): the mechanical exits
               // from TRENCHER_FAST, the round-trip cost just read (or its gas
@@ -13475,7 +13502,7 @@ async function main() {
                 // A paid review, claimed against today's energy once the
                 // trigger has fired and before it is paid for.
                 admit: claimReview,
-              }).then(outcome => { tgNoteReview(focus.token, outcome); return outcome; }); },
+              }).then(outcome => { if (flowLensRefused(Boolean(flow?.lens), outcome)) flowLensProbe.invalidate(); tgNoteReview(focus.token, outcome); return outcome; }); },
               m => console.log(`[trencher] ${m}`));
           }
           const outcome: ShadowOutcome = fastTrencher ? { ran: false, why: "Trencher Brain review runs off the trading tick", nextReviewAt: Math.floor(Date.now() / 1000) + 60, trigger: { fire: false, reason: null, detail: "background review", candidates: [] } } : await runShadow(

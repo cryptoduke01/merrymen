@@ -379,4 +379,30 @@ describe("BrainCapabilityProbe", () => {
     assert.equal(p.advertises("http://127.0.0.1:1", "strategy-terms"), false, "another Brain is not this one");
     await p.settled();
   });
+
+  it("asked for lens_keys, reads that list and only that list (index.ts, before sending onchain-flow)", async () => {
+    let t = 1_000_000;
+    const h = health({ capabilities: ["onchain-flow"], lens_keys: ["technical"] });
+    const lens = new BrainCapabilityProbe(h.fetchImpl, () => t, 60_000, 1_000, 60_000, "lens_keys");
+    lens.advertises(url, "onchain-flow");
+    await lens.settled();
+    assert.equal(lens.advertises(url, "onchain-flow"), false, "a capability is not a lens key");
+    assert.equal(lens.advertises(url, "technical"), true);
+    t += 60_000;
+    h.set({ capabilities: [], lens_keys: ["onchain-flow", "technical"] });
+    lens.advertises(url, "onchain-flow");
+    await lens.settled();
+    assert.equal(lens.advertises(url, "onchain-flow"), true);
+    // An older build lists no such key: a real no, believed.
+    t += 60_000;
+    h.set({ lens_keys: ["technical"] });
+    lens.advertises(url, "onchain-flow");
+    await lens.settled();
+    assert.equal(lens.advertises(url, "onchain-flow"), false);
+    // And the default probe still reads capabilities alone.
+    const caps = new BrainCapabilityProbe(health({ lens_keys: ["strategy-terms"] }).fetchImpl, () => 0, 60_000, 1_000);
+    caps.advertises(url, "strategy-terms");
+    await caps.settled();
+    assert.equal(caps.advertises(url, "strategy-terms"), false);
+  });
 });

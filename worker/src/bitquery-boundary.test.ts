@@ -55,6 +55,28 @@ describe("no Bitquery credential reaches a child", () => {
   });
 });
 
+describe("the flow broker flag — a child asks only when somebody will answer", () => {
+  const T = "0xABCDef0000000000000000000000000000000001";
+
+  it("is set only on the orchestrator's word, never inherited from its environment", () => {
+    process.env.MERRYMEN_FLOW_BROKER = "1"; // an operator's fleet-wide copy must not reach a child
+    try {
+      assert.equal(childEnv(T).MERRYMEN_FLOW_BROKER, undefined);
+      assert.equal(childEnv(T, { flowBroker: false }).MERRYMEN_FLOW_BROKER, undefined);
+      assert.equal(childEnv(T, { flowBroker: true }).MERRYMEN_FLOW_BROKER, "1");
+      assert.equal(childEnv(T, { flowBroker: true }).MERRYMEN_BITQUERY_API_KEY, undefined, "the flag is not the key");
+    } finally {
+      delete process.env.MERRYMEN_FLOW_BROKER;
+    }
+  });
+
+  it("spawnChild says it exactly when the broker is attached: the lane is on and the child has the channel", () => {
+    const spawn = SRC.slice(SRC.indexOf("async function spawnChild("), SRC.indexOf("attachFlowBroker(flowRuntimeNow().service, tenant, proc, smartAccount, log);"));
+    assert.match(spawn, /flowBroker: !fomoBootNow\(\)\.off && flowRuntimeNow\(\)\.service !== null,/);
+    assert.match(spawn, /stdio: fomoBootNow\(\)\.off \? \["ignore", "pipe", "pipe"\] : \["ignore", "pipe", "pipe", "ipc"\],/);
+  });
+});
+
 describe("gatewayTokenForDiscovery — the side door, closed for the house and open for the owner", () => {
   const house = "mmk_house_brain";
 

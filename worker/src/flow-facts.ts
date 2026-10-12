@@ -4,7 +4,7 @@
  *
  * Pure and vendor-neutral. The orchestrator's Bitquery lane
  * (venues/bitquery-lane.ts) produces these; children receive them over IPC
- * (flow-broker.ts); X answers and, later, a Brain lens read them. None of those
+ * (flow-broker.ts); X answers and research Trencher reviews read them. None of those
  * consumers needs to know which indexer answered, so none of them is told: a
  * brand in a prompt is an invitation to recall whatever the model believes
  * about it, and a brand in a persisted decision is a migration waiting to
@@ -263,7 +263,7 @@ export function flowResultOf(v: unknown): FlowResult | null {
 
 // ── rendering ───────────────────────────────────────────────────────────────
 
-/** The Brain lens key this block is meant to be sent under, once Brain registers it. */
+/** The Brain signals key this block is sent under (services/brain schemas.py LENS_KEYS; the manager reads it). */
 export const ONCHAIN_FLOW_LENS = "onchain-flow";
 
 /** Hard ceiling, matching brain-material.ts, coin-builder.ts and fomo/lens.ts. */
@@ -300,15 +300,16 @@ function launcherJson(c: CreatorFlow): Record<string, unknown> {
 }
 
 /**
- * The block a Brain lens would carry: attribution first, then one compact JSON
+ * The block the Brain is sent: attribution first, then one compact JSON
  * object, then what it is not. Null — never a sentence — when there is nothing
  * honest to say: a failed read, an hour with no indexed trades (absence is not
  * a verdict: it can be an indexer gap as easily as a dead coin), or anything
  * address-shaped in the output.
  *
- * NOT WIRED YET, ON PURPOSE. Brain accepts a lens only once services/brain
- * registers its key (schemas.py LENS_KEYS, analyst.py) and advertises it on
- * /health; see docs/bitquery-lane.md "Where it plugs in".
+ * SENT by research accounts' Trencher entry reviews (review-flow.ts), and
+ * only to a Brain whose /health lists the key in `lens_keys`: an older build
+ * would refuse the whole decision over it. Brain gives it to the manager, not
+ * to an analyst (graph.py ONCHAIN_FLOW); see docs/bitquery-lane.md.
  */
 export function renderFlowLens(r: FlowResult, now: number = Date.now()): string | null {
   if (!r.ok) return null;
