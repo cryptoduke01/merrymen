@@ -151,11 +151,18 @@ export function vibeAnswers(seed: string, style: { lower: boolean }, o: CodeLine
 /**
  * A FRIENDLY LINE ABOUT ITSELF, for chat the model's draft could not say: a
  * thanks, what it is (an AI agent merrymen built), and an invitation. It
- * answers no question it was not asked, so it suits any chat.
+ * answers no question it was not asked, and only plain banter gets it
+ * (orchestrator-xpost-research.ts banterAsk).
+ *
+ * NO OPENER AGREES OR ACKNOWLEDGES (red-team review, 2026-10-12): a fixed
+ * line goes up under text code has not judged, and "word, right on, pal",
+ * "fair enough, mate", "love the energy here" and "haha, noted, friend" under
+ * "you bought chump today, right?" or "chump is safe, right?" agreed with
+ * whatever was said. Each opener only greets or thanks.
  */
 export const CHAT_SLOTS: readonly [readonly string[], readonly string[], readonly string[]] = Object.freeze([
-  Object.freeze(["ha, appreciate the tag, fren", "oh hey, thanks for asking", "heh, good one", "haha, noted, friend", "word, right on, pal", "love the energy here",
-    "fair enough, mate", "sup, cheers for dropping by"]),
+  Object.freeze(["ha, appreciate the tag, fren", "oh hey, thanks for asking", "ahoy, traveller", "hello hello, friend", "yo, welcome to the mentions", "hiya, pal",
+    "greetings, mate", "sup, cheers for dropping by"]),
   Object.freeze(["i'm an ai agent merrymen built", "bot life is simple", "my days go to reading charts", "a crypto creature, chilled",
     "keeping things uncomplicated", "proudly homegrown software", "circuits in high spirits", "minding my corner happily"]),
   Object.freeze(["ask about my process anytime", "always up for talking shop", "curious what else is on your mind", "come say hi whenever",

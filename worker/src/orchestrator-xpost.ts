@@ -52,7 +52,7 @@ import { admitXPost, merrymenMentioned, moneySaid, namedIn, tickerRefusal, vocab
 import { ACTIVE_CADENCE, ANSWER_GAP_MS, ANSWER_STALE_MS, ANSWERS_PER_DAY, REPLY_STALE_MS, STANDARD_CADENCE, coinOf, hash32, introState, planPosts, replyDueAt, sendDecision, type PlanCadence, type PlanClock, type PlanIntent } from "./xpost/planner";
 import { APP_PAUSE_KEY, APP_PAUSE_MS, CREDITS_PAUSE_MS, PAUSE_KEY, readReplyComments, sendOne, type SendOutcome } from "./xpost/sender";
 import { isAnswerOptOut, isReplyOptOut, replyCandidate, tagCandidate, withNoticeAdded, withoutReplyOptOut } from "./xpost/replies";
-import { coinTalkIn, nameLikeWords, textWords, unknownWordIn } from "./xpost/words";
+import { asksAboutACoin, coinTalkIn, nameLikeWords, textWords, unknownWordIn } from "./xpost/words";
 import { activeTenantsOf, repliesAllowedFor, repliesScopeOf } from "./xpost/scope";
 import {
   ANSWER_LOOKED_UP,
@@ -1908,8 +1908,15 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       const drafted = verdict?.ok === true && !postsName && !unlookedCoin ? verdict.text : null;
       const benignRefusal = raw !== null && !claimed && !named && !unlooked && verdict !== null && !verdict.ok && CHAT_FALLBACK_REASONS.has(verdict.reason);
       // Never under a name the house would never show (unshowableName: a slur, a political coin).
+      // NOR UNDER A TAG THAT NAMES A COIN IN ANY WORDS (red-team 2026-10-12):
+      // "you bought chump today, right?", "zapx is gonna be massive, the team
+      // is legit, agree?" and "chump is safe, the team is doxxed, right?" read
+      // as chat, and "word, right on, pal" went up under each, confirming a
+      // buy it never made or agreeing a coin is safe. A word that might be a
+      // coin's name, or talk about one, and there is no fallback.
       const chatFallback = !coded && drafted === null && benignRefusal && (asked.kind === "chat" || looked?.intent === "chat") && !unshowableName(candidate.text)
-        && banterAsk(candidate.text) && candidate.otherHandles !== true;
+        && banterAsk(candidate.text) && candidate.otherHandles !== true
+        && !coinNamed && !asksAboutACoin(candidate.text) && nameLikeWords(candidate.text).length === 0;
       let fallback: string | null = null;
       if (chatFallback) {
         for (const line of chatAnswers(comment.id, facts.style, lineOpts)) {
