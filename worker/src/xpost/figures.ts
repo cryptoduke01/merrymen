@@ -69,10 +69,22 @@ const TICKER_REFUSED = new RegExp([
   "s+h+e*r+w+o*d", "h+e+r+w+o+d", "s+h+e*r+o{2,}d", "sherw", "merry", "merr", "m+e*r+[eiy]*m+[aeiy]*n", "robinhood", "robin", "hood", "alan", "aidale",
   // and the house's products and the sources it names ("$TRENCHER", "$FOMO": red-team 2026-10-12)
   "trench", "fomo", "shogun", "pons", "gecko", "bitquery",
+  // and the chain's and the agent's names however they are shortened ("RBNHD", "ALDALE": red-team 2026-10-12)
+  "r+o*b+[iy]*n+h+o*d", "rbnhd", "aldale", "dale",
+  // the model and provider names a tag may never get code's lines under (orchestrator-xpost-research.ts MODEL_LETTERS)
+  "gpt", "claude", "grok", "gemini", "llama", "qwen", "deepseek", "mistral", "openai", "anthropic", "copilot", "perplexity", "llm",
   // abuse
   "fuck", "fuk", "shit", "cunt", "nigg", "fag", "nazi", "hitler", "rape", "porn", "sex", "nude", "cock", "dick", "puss", "bitch", "whore", "slut", "retard", "kill", "isis", "jihad", "terror",
+  // AND EVERY SLUR AND HATE CODE A DEPLOYER MAY NAME A POOL (red-team 2026-10-12): "$KYS", "$KIKE",
+  // "$CHINK", "$KKK", "$HEIL" were posted as trending coins from the house account.
+  "kys", "kike", "kyke", "chink", "spic", "tranny", "trannie", "gook", "wetback", "coon", "pedo", "paedo", "loli", "shota", "niga", "nigr", "negro",
+  "dyke", "spaz", "beaner", "raghead", "towelhead", "paki", "cuck", "incel", "rapist", "molest", "csam", "hamas", "hezbollah", "taliban", "qaeda",
+  "kkk", "sieg", "heil", "aryan", "whitepower", "wpww", "suicid", "selfharm", "murder", "massacre", "genocide", "holocaust", "bomb", "shooting",
+  "anal", "anus", "tits", "boob", "penis", "vagina", "milf", "hentai", "onlyfans", "xxx", "horny", "nsfw", "jizz", "wank", "twat", "arse", "asshole",
   // politics
   "trump", "melania", "biden", "maga", "kamala", "harris", "obama", "putin", "zelensk", "election", "president", "vote",
+  "barron", "ivanka", "vance", "pelosi", "desantis", "rfk", "kennedy", "milei", "bukele", "jinping", "netanyahu", "bibi", "khamenei", "erdogan",
+  "musk", "elon", "israel", "palestin", "gaza", "ukrain", "russia", "antifa", "woke", "democrat", "republican", "commie", "communis", "fascis",
   // hype and trust words
   "pump", "moon", "gem", "lambo", "scam", "rug", "safe", "legit", "official",
   // AND ADVICE AND HYPE RUN TOGETHER INTO ONE WORD (red-team 2026-10-12):
@@ -84,6 +96,9 @@ const TICKER_REFUSED = new RegExp([
   // money in words: "$MILLION" beside "~$1.2M" reads as a sum code never built
   "million", "billion", "trillion", "thousand", "hundred", "dollar", "bucks", "cents", "usd",
 ].join("|"));
+
+/** Words too short to read inside other tickers, refused only whole: "ASS", "CUM", "JAP", "DIE", "HH", "SS", "WOP". */
+const TICKER_REFUSED_WHOLE: ReadonlySet<string> = new Set("ASS CUM JAP DIE HH SS WOP FAP KMS NAMBLA".split(" "));
 
 /**
  * A PROVIDER'S SYMBOL AS THE LINE MAY SHOW IT, or null. Exactly A-Z and a-z,
@@ -101,7 +116,7 @@ const TICKER_REFUSED = new RegExp([
 export function cleanTicker(raw: unknown): string | null {
   if (typeof raw !== "string" || !/^[A-Za-z]{2,10}$/.test(raw)) return null;
   const t = raw.toUpperCase();
-  return TICKER_REFUSED.test(t.toLowerCase()) ? null : t;
+  return TICKER_REFUSED.test(t.toLowerCase()) || TICKER_REFUSED_WHOLE.has(t) ? null : t;
 }
 
 /** Every ticker a rendered line shows, without its $. */

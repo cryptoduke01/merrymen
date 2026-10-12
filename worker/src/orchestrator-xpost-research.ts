@@ -60,7 +60,7 @@ import { readPeerTheses } from "./peer-theses";
 import { extractCashtags, isInjection, isPrivateAsk } from "./telegram/tg-groups/detect";
 import { publicCoinReason, publicFactRequest } from "./telegram/tg-groups/facts";
 import type { PublicThesis } from "./thesis-policy";
-import { lettersOf, moneySaid, sherwoodMentioned, tickerRefusal, vocabularyRefusal } from "./xpost/gate";
+import { lettersOf, moneySaid, namedIn, sherwoodMentioned, tickerRefusal, vocabularyRefusal } from "./xpost/gate";
 import { coinOf, hash32 } from "./xpost/planner";
 import { normalisedTag, plainAsk, withoutReplyOptOut } from "./xpost/replies";
 import { takeAllowance, type XPost } from "./xpost/store";
@@ -960,7 +960,9 @@ export function showTicker(raw: unknown): string | null {
 /** The base token's symbol as the index names a pool ("CHUMP / WETH 1%" is CHUMP), through the figures line's sanitiser, or null. */
 function poolTicker(name: string): string | null {
   const t = showTicker(/^([^\s/]{1,32}) \/ /.exec(String(name ?? ""))?.[1]);
-  return t && !copycatTicker(t) ? t : null;
+  // Whoever deploys a token names its pool: a chain coin's ticker is three
+  // letters at least, never a two-letter code ("HH", "SS"), red-team 2026-10-12.
+  return t && t.length >= 3 && !copycatTicker(t) ? t : null;
 }
 
 /** A coin "what's hot" may show: its token, its ticker, its pool. */
@@ -1439,7 +1441,9 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
         // the same coin. Every symbol and name on the list, any rank.
         const listed = new Set((trend && !trend.failed ? trend.coins : []).flatMap((c) => [cleanTicker(c?.symbol), cleanTicker(String(c?.name ?? "").replace(/[^A-Za-z]/g, "").slice(0, 10))])
           .filter((t): t is string => t !== null));
-        const kept = screened.filter((s) => !listed.has(s.ticker));
+        // Nor a coin named after the agent itself, whatever it is called (red-team 2026-10-12).
+        const own = [input.facts.name, ...String(input.facts.name ?? "").split(/\s+/).filter((w) => /^\p{L}{3,}$/u.test(w))];
+        const kept = screened.filter((s) => !listed.has(s.ticker) && !namedIn(s.ticker, own));
         if (!kept.length) {
           notes.push("hot-none");
           return { facts: hotPhrases({ changes: [], crowd: 0, trending: 0 }), hot: { coins: 0, lead: null }, lookups, notes };

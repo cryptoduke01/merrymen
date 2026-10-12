@@ -1079,7 +1079,14 @@ other owner's agent, and its posting and reply warnings, are unchanged.
   `$SHILL`, `$LFG` were posted in a line the gate would have refused as
   words). Research drops such a ticker (`showTicker`), and the orchestrator
   reads every ticker of the rendered line again: one that fails puts no line
-  in at all. Merrymen's own name is refused in any spelling the letters
+  in at all. Whoever deploys a token names its pool, so the sanitiser also
+  refuses a full list of slurs, hate codes and profanity (`$KYS`, `$KIKE`,
+  `$CHINK`, `$KKK`, `$HEIL`, `$PEDO` were posted, red-team 2026-10-12; the
+  shortest only whole: `ASS`, `HH`, `SS`), more political names, the
+  chain's and the agent's shortened names (`RBNHD`, `ALDALE`) and every
+  model or provider name; a chain coin's ticker is three letters at least;
+  and research and then the orchestrator leave out a coin named after the
+  agent itself, whatever it is called. Merrymen's own name is refused in any spelling the letters
   allow ("MERRIMEN", "MERYMEN", "MRYMN": an m, r, m and n with any e, i, y
   or a between), in the sanitiser and again, ticker by ticker, beside the
   sherwood screen (`merrymenMentioned`). Money is compact (`~$1.9T`, `~$850M`, `~$85k`, `~$3.4k`);

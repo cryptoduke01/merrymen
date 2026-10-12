@@ -77,6 +77,18 @@ describe("tickers: A-Z, two to ten letters, nothing else", () => {
     for (const ok of ["CHUMP", "FROGGY", "WOJAK", "MEMECOIN", "PEPE", "TAO", "BONK"]) assert.equal(cleanTicker(ok), ok, ok);
   });
 
+  it("never a slur, a hate code, a house, chain, agent or model name in any short form, nor advice: the red team's thirty (red-team 2026-10-12)", () => {
+    // Each accepted by cleanTicker at 34ced01e, and posted as trending from the house account.
+    for (const bad of ["KYS", "HEIL", "KIKE", "CHINK", "SPIC", "TRANNY", "GOOK", "WETBACK", "COON", "PEDO", "LOLI", "HAMAS", "KKK", "SIEG", "HH1488",
+      "MERYMEN", "MERRIMEN", "MRYMN", "RBNHD", "ALDALE", "BUYNOW", "BUYIT", "SENDIT", "APEIN", "100X", "1000X", "FREEMONEY", "RISKFREE", "GUARANTEE", "SELLNOW",
+      "HH", "SS", "ASS", "ROBNHOOD", "CLAUDE", "GROKCOIN", "OPENAI", "CHATGPT", "MELANIA", "ELON"]) {
+      assert.equal(cleanTicker(bad), null, bad);
+    }
+    for (const ok of ["PEPE", "CHUMP", "FROGGY", "WOJAK", "BTC", "ETH", "SOL", "TAO", "BONK", "WIF", "DOGE", "LINK", "AAVE", "NEAR", "BASS", "GALA"]) {
+      assert.equal(cleanTicker(ok), ok, ok);
+    }
+  });
+
   it("never a slur, a political name or a hype word", () => {
     for (const bad of ["NAZI", "FUCK", "TRUMP", "MAGA", "BIDEN", "PUMP", "MOON", "GEM", "SCAM", "SAFE", "LEGIT"]) assert.equal(cleanTicker(bad), null, bad);
   });
