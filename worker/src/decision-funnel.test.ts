@@ -315,6 +315,37 @@ describe("discovery: the screen and the verified slice", () => {
     assert.match(why.get(addr(100))!.detail, /uniswap-v4-robinhood/);
   });
 
+  it("venue-not-supported names its venues in the summary line, busiest first", () => {
+    let t = 1_000_000;
+    const f = new FunnelRecorder({ now: () => t });
+    const on = (n: number, ...dexes: string[]) => dexes.map(dex => pool(addr(n), { dex, poolAddress: `0x${n.toString(16).padStart(2, "0").repeat(20)}` as `0x${string}` }));
+    const tape = [
+      ...on(1, "uniswap-v4-robinhood"), ...on(2, "uniswap-v4-robinhood"), ...on(3, "pons-v2-dex"),
+      ...on(4, "pons-v2", "pons-v2-dex"), ...on(5, "uniswap-v4-robinhood"),
+    ];
+    for (const [token, why] of unqualifiedReasons({ tape, qualified: [], nominated: [], slice: 20 })) f.note(token, null, why);
+    f.note(addr(6), "T6", classifyStage({ kind: "candidate-skip", skip: "no-exit" }));
+    t += 1000;
+    const s = f.summary(0);
+    assert.deepEqual(s.unsupportedVenues, [
+      { dex: "uniswap-v4-robinhood", tokens: 3 }, { dex: "pons-v2-dex", tokens: 2 }, { dex: "pons-v2", tokens: 1 },
+    ], "a coin on two such venues counts under both");
+    assert.match(formatSummary(s, t), /UNSUPPORTED_ROUTE 6 \(venue-not-supported 5: uniswap-v4-robinhood 3, pons-v2-dex 2, pons-v2 1; no-exit 1\)/);
+    // A long venue list is cut at whole names, never mid-name.
+    const many = Array.from({ length: 9 }, (_, i) => `some-long-venue-name-${i}`);
+    const why = unqualifiedReasons({ tape: on(7, ...many), qualified: [], nominated: [], slice: 20 }).get(addr(7))!;
+    const g = new FunnelRecorder({ now: () => t });
+    g.note(addr(7), null, why);
+    const venues = g.summary(0).unsupportedVenues;
+    assert.ok(venues.length >= 1 && venues.every(v => many.includes(v.dex)), "every name counted is a whole one");
+    const line = formatSummary({ ...s, unsupportedVenues: many.map((dex, i) => ({ dex, tokens: 9 - i })) }, t);
+    assert.match(line, /some-long-venue-name-4 5, \+4 more; no-exit 1\)/, "five named, the rest counted");
+    // No venue-not-supported coins: the line is as it was.
+    const plain = new FunnelRecorder({ now: () => t });
+    plain.note(A, "TA", classifyStage({ kind: "candidate-skip", skip: "no-exit" }));
+    assert.match(formatSummary(plain.summary(0), t), /UNSUPPORTED_ROUTE 1 \(no-exit 1\)$/);
+  });
+
   it("entryTokenOf: only a buy out of cash is an entry", () => {
     assert.equal(entryTokenOf({ kind: "swap", sellToken: CASH.USDG, buyToken: A.toUpperCase().replace("0X", "0x") }), A);
     assert.equal(entryTokenOf({ kind: "swap", sellToken: A, buyToken: CASH.USDG }), null, "an exit is not this funnel");
