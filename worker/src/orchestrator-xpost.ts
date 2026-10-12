@@ -46,12 +46,13 @@ import { STRATEGY_FLAVOUR, STRATEGY_SPOKEN, TRAIT_VOICE } from "./groupchat/temp
 import { MUSINGS, SUBJECTS, TAKES } from "./groupchat/topics";
 import { xAppFromEnv, type FetchLike, type XApp, type XReply } from "./xpost/client";
 import { admitXPost, vocabularyRefusal, type BaseGate, type XGateCtx } from "./xpost/gate";
-import { ACTIVE_CADENCE, ANSWER_GAP_MS, ANSWERS_PER_DAY, REPLY_STALE_MS, STANDARD_CADENCE, coinOf, hash32, planPosts, replyDueAt, sendDecision, type PlanCadence, type PlanClock, type PlanIntent } from "./xpost/planner";
+import { ACTIVE_CADENCE, ANSWER_GAP_MS, ANSWER_STALE_MS, ANSWERS_PER_DAY, REPLY_STALE_MS, STANDARD_CADENCE, coinOf, hash32, planPosts, replyDueAt, sendDecision, type PlanCadence, type PlanClock, type PlanIntent } from "./xpost/planner";
 import { APP_PAUSE_KEY, APP_PAUSE_MS, CREDITS_PAUSE_MS, PAUSE_KEY, readReplyComments, sendOne, type SendOutcome } from "./xpost/sender";
 import { isReplyOptOut, replyCandidate, tagCandidate, withoutReplyOptOut } from "./xpost/replies";
 import { activeTenantsOf, repliesAllowedFor, repliesScopeOf } from "./xpost/scope";
 import {
   answerAuthorSpent,
+  answersWaiting,
   cancelPost,
   claimSpan,
   deferPost,
@@ -916,7 +917,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
               const answerDayKey = `answerday:${post.xUserId}:${localDayKey}`;
               if (!(await takeAllowance(shared, answerDayKey, ANSWERS_PER_DAY, t))) {
                 await giveBack();
-                bump("answer-day-cap");
+                // Never left waiting for tomorrow's allowance: it was an answer to now.
+                if (await skipScheduled(shared, post.id, "answer-day-cap", t)) bump("answer-day-cap");
                 continue;
               }
               release.push(() => returnAllowance(shared, answerDayKey, at()));
@@ -1296,7 +1298,9 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
    * (MAX_DRAFTS_PER_PASS, ANSWERS_PER_POLL a batch).
    *
    * NOTHING SPENT ON AN ANSWER THAT CANNOT GO. With the X account's answers
-   * for the day all sent, nothing is drafted; a person already answered
+   * for the day all sent or drafted and waiting, nothing is drafted (and one
+   * that still cannot take the day's allowance at send time is skipped, never
+   * left for the next day's); a person already answered
    * twice in the rolling day is passed over, and the next person's tag is
    * answered instead of the batch stopping at theirs.
    */
@@ -1309,8 +1313,11 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
     const nowMs = at();
     const consentAt = await replyConsentAt(shared, account.tenant, account.xUserId);
     if (consentAt === null) return null;
-    // The send path's own key for the day's answers (its local day, or UTC without a zone).
-    if (((await readMeta(shared, `answerday:${account.xUserId}:${localDay(tz, nowMs)}`))?.n ?? 0) >= ANSWERS_PER_DAY) {
+    // The send path's own key for the day's answers (its local day, or UTC
+    // without a zone), taken at send time — so answers drafted and still
+    // waiting to go out count against it too.
+    const sent = (await readMeta(shared, `answerday:${account.xUserId}:${localDay(tz, nowMs)}`))?.n ?? 0;
+    if (sent + await answersWaiting(shared, account.xUserId, nowMs - ANSWER_STALE_MS) >= ANSWERS_PER_DAY) {
       bump("answer-day-spent");
       return null;
     }

@@ -552,6 +552,45 @@ test("once the day's answers have all gone out, no more are drafted that day", a
   assert.equal((await w.answers()).length, 0);
 });
 
+test("answers drafted and still waiting count against the day: a burst never drafts past the day's last answer", async (t) => {
+  const w = await world(t);
+  // Twenty-three sent today, and three people tag it in one poll: one more can go today, so one is drafted.
+  for (let i = 0; i < 23; i++) assert.equal(await store.takeAllowance(w.db, "answerday:111:2026-09-30", 24, NOW - HOUR), true);
+  w.setInbox([1, 2, 3].map((n) => tag({ id: `10000000000000007${n}`, conversation_id: `10000000000000007${n}`, author_id: `77${n}` })));
+  await w.step();
+  assert.equal(w.asked().length, 1, "no model call on an answer that could not go today");
+  assert.deepEqual((await w.answers()).map((a) => a.status), ["scheduled"]);
+});
+
+test("an answer that cannot take the day's allowance when it is sent is skipped, never left for tomorrow's", async (t) => {
+  const w = await world(t);
+  await w.step();
+  const [drafted] = await w.answers();
+  assert.equal(drafted!.status, "scheduled");
+  // Another owner's answers on the same X account use the day up before this one goes.
+  for (let i = 0; i < 24; i++) assert.equal(await store.takeAllowance(w.db, "answerday:111:2026-09-30", 24, NOW), true);
+  w.setInbox([]);
+  await w.step(NOW + MIN);
+  const [after] = await w.answers();
+  assert.equal(after!.status, "skipped");
+  assert.equal(after!.reason, "answer-day-cap");
+  // After midnight, nothing of yesterday's goes out on the new day's allowance.
+  await w.step(Date.UTC(2026, 9, 1, 0, 1));
+  assert.equal(w.sends.length, 0);
+});
+
+test("an answer held an hour after it was drafted is stale, not sent late", async (t) => {
+  const w = await world(t);
+  await w.step();
+  assert.equal((await w.answers())[0]!.status, "scheduled");
+  w.setInbox([]);
+  await w.step(NOW + HOUR + MIN);
+  const [after] = await w.answers();
+  assert.equal(after!.status, "skipped");
+  assert.equal(after!.reason, "stale");
+  assert.equal(w.sends.length, 0);
+});
+
 test("research gets only what is left of the pass's send budget, and none past it", async (t) => {
   const budgets: (number | undefined)[] = [];
   const research: XResearch = { gather: async (input) => { budgets.push(input.budgetMs); return { facts: [], lookups: 0, notes: [] }; } };

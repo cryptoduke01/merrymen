@@ -16,6 +16,7 @@ import {
   MIN_LEAD_MS,
   REPLY_ROOT_MAX_AGE_MS,
   REPLY_STALE_MS,
+  ANSWER_STALE_MS,
   buyKey,
   sellKey,
   casualKey,
@@ -691,6 +692,14 @@ describe("sendDecision", () => {
     assert.deepEqual(sendDecision({ ...p, createdAtMs: now - BUY_STALE_MS - 1 }, on, now, false), { action: "skip", reason: "stale" });
     assert.deepEqual(sendDecision({ ...p, createdAtMs: now - BUY_STALE_MS }, on, now, false), { action: "send" });
     assert.deepEqual(sendDecision({ ...p, kind: "casual", createdAtMs: now - 20 * HOUR }, on, now, false), { action: "send" });
+  });
+
+  it("skips an answer still waiting an hour after it was drafted; a comment reply only after a day", () => {
+    const answer = { ...p, kind: "answer" as const };
+    assert.deepEqual(sendDecision({ ...answer, createdAtMs: now - ANSWER_STALE_MS }, on, now, false), { action: "send" });
+    assert.deepEqual(sendDecision({ ...answer, createdAtMs: now - ANSWER_STALE_MS - 1 }, on, now, false), { action: "skip", reason: "stale" });
+    assert.deepEqual(sendDecision({ ...p, kind: "reply", createdAtMs: now - ANSWER_STALE_MS - 1 }, on, now, false), { action: "send" });
+    assert.deepEqual(sendDecision({ ...p, kind: "reply", createdAtMs: now - REPLY_STALE_MS - 1 }, on, now, false), { action: "skip", reason: "stale" });
   });
 
   it("skips a casual post held past its owner-local day, or six hours past due; never the intro", () => {

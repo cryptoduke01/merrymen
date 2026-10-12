@@ -968,6 +968,19 @@ export async function answerAuthorSpent(db: Db, xUserId: string, authorId: strin
   return (await answersToAuthor(db, xUserId, authorId, nowMs)) >= ANSWERS_PER_AUTHOR;
 }
 
+/**
+ * ANSWERS DRAFTED AND STILL WAITING TO GO OUT on this X account, drafted
+ * since `sinceMs`. The day's answer allowance is taken at send time, so the
+ * answer path counts these against it too: a draft that could not take the
+ * day's allowance would be one the model was paid for and nobody sees.
+ */
+export async function answersWaiting(db: Db, xUserId: string, sinceMs: number): Promise<number> {
+  const row = await db.prepare(`SELECT COUNT(*) AS n FROM xpost_posts
+    WHERE x_user_id = ? AND created_at_ms >= ? AND kind = 'answer' AND status = 'scheduled'`)
+    .get(xUserId, int(sinceMs)) as { n: unknown };
+  return num(row.n);
+}
+
 /** The xpost_meta row an answer's per-person count is taken under: one per posting X account and author. */
 export function answerAuthorKey(xUserId: string, authorId: string): string {
   return `answer-author:${xUserId}:${authorId}`;

@@ -71,6 +71,13 @@ export const REPLIES_PER_ROOT = 2;
  */
 export const ANSWER_GAP_MS = MIN;
 export const ANSWERS_PER_DAY = 24;
+/**
+ * An answer still waiting this long after it was drafted is no longer one:
+ * the person was told it goes out right away, and a pause, an outage or the
+ * day's allowance that held it this long would otherwise send it at an
+ * arbitrary hour, on another day's allowance.
+ */
+export const ANSWER_STALE_MS = HOUR;
 /** The least time between two posts of one account. The intro is exempt, both ways. */
 export const GAP_MS = 3 * HOUR;
 /** A casual post pushed further than this by the gap waits for another day instead; one held this long past due is stale. */
@@ -522,8 +529,10 @@ export type SendDecision =
  *            owner-local day it was due on, or more than six hours past due
  *            (a fleet pause, the fleet's ceiling, the owner's night, posting
  *            switched off fleet-wide for days), is yesterday's afternoon
- *            thought and would land at an arbitrary hour. The intro never
- *            goes stale: a late hello is still the right first post.
+ *            thought and would land at an arbitrary hour. A reply waiting a
+ *            day is stale, and an answer to a tag an hour after it was
+ *            drafted (ANSWER_STALE_MS). The intro never goes stale: a late
+ *            hello is still the right first post.
  *   wait   — the owner is asleep, or it is not due yet.
  *   send   — otherwise.
  *
@@ -544,7 +553,8 @@ export function sendDecision(
     return { action: "cancel", reason: "kind-off" };
   }
   if ((post.kind === "buy" || post.kind === "sell") && nowMs - post.createdAtMs > BUY_STALE_MS) return { action: "skip", reason: "stale" };
-  if ((post.kind === "reply" || post.kind === "answer") && nowMs - post.createdAtMs > REPLY_STALE_MS) return { action: "skip", reason: "stale" };
+  if (post.kind === "reply" && nowMs - post.createdAtMs > REPLY_STALE_MS) return { action: "skip", reason: "stale" };
+  if (post.kind === "answer" && nowMs - post.createdAtMs > ANSWER_STALE_MS) return { action: "skip", reason: "stale" };
   if (post.kind === "casual" && post.dueAtMs <= nowMs) {
     if (nowMs - post.dueAtMs > CASUAL_MAX_PUSH_MS) return { action: "skip", reason: "stale" };
     if (dayOf && dayOf(nowMs) !== dayOf(post.dueAtMs)) return { action: "skip", reason: "stale" };

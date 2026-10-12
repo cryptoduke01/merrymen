@@ -495,10 +495,14 @@ the mention itself. They go out **right away**:
   pass's posts are not due for planning (the poll's minute and the plan's
   drift apart by a pass). Such a pass drafts answers and comment replies
   only. Up to three tags a batch, ten drafts a pass, as before.
-- **Nothing spent on an answer that cannot go.** Once the X account's 24
-  answers for the day have gone out, no more are drafted that day. A person
-  already answered twice in the rolling day is passed over before any
-  lookup or model call, and the next person in the batch is answered.
+- **Nothing spent on an answer that cannot go.** The day's 24 count the
+  answers already sent and those drafted and still waiting to go out: once
+  they make 24, no more are drafted that day. One that still cannot take the
+  day's allowance when it comes to be sent is skipped (`answer-day-cap`),
+  never left for the next day's allowance, and one still waiting an hour
+  after it was drafted is stale (`ANSWER_STALE_MS`). A person already
+  answered twice in the rolling day is passed over before any lookup or
+  model call, and the next person in the batch is answered.
 - **Research stays inside the pass's send budget.** An answer's lookups get
   their twelve seconds or what is left of the pass's five-minute send
   budget, whichever is less, so they never hold the next pass's sends back.
@@ -541,8 +545,9 @@ the mention itself. They go out **right away**:
   the person (`xpost_meta` `answer-author:<xUserId>:<authorId>`). Two owners
   connected to one X account therefore cannot both write the third answer.
 - **Unchanged:** STOP and other opt-outs, the tag screens, the gate, the
-  fleet ceiling, the credit and app pauses, X's 429 backoff and the
-  twenty-four-hour staleness rule.
+  fleet ceiling, the credit and app pauses, and X's 429 backoff. Comment
+  replies keep the twenty-four-hour staleness rule; an answer is stale an
+  hour after it was drafted.
 - **Comments:** an active owner's comments on its own posts are answered
   through the same path, never as a second reply.
 
