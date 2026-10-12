@@ -170,7 +170,7 @@ test("an answer that carried a coin's research is never restated as what it said
     replyToTweetId: "100000000000000065", replyRootTweetId: "100000000000000065", replyAuthorId: "665" });
   await store.claimPost(w.db, id!, NOW - HOUR);
   await store.markPosted(w.db, id!, "100000000000000066", NOW - HOUR);
-  w.setInbox([tag({ text: "@pine_stoat thoughts on $WIF?" })]);
+  w.setInbox([tag({ text: "@pine_stoat what kind of coins do you trade?" })]);
   await w.step();
   const [prompt] = w.asked();
   assert.ok(prompt);
@@ -319,6 +319,32 @@ test("a copycat ticker beside a coin it bought is never answered as that coin: n
   await w.step();
   assert.deepEqual(await w.answers(), []);
   assert.equal(w.asked().length, 0);
+});
+
+test("a tag that names a coin it bought, however spelled, is never told what it bought, research on or off", async (t) => {
+  // It bought PEPE (FACTS), with real money; each of these names it, or a copycat of it.
+  const texts = ["@pine_stoat did you buy pepe?", "@pine_stoat did you buy pepe inu?", "@pine_stoat did you buy pe\u200bpe?", "@pine_stoat is $PEPE legit?",
+    "@pine_stoat did you buy pepe classic?"];
+  for (const env of [{}, RESEARCH_ON]) {
+    const w = await world(t, { env, research: fakeResearch().research });
+    w.setInbox(texts.map((text, n) => tag({ id: `10000000000000016${n}`, conversation_id: `10000000000000016${n}`, author_id: `16${n}`, text })));
+    await w.step();
+    const asked = w.asked();
+    assert.equal(asked.length, 3, "a batch's three, the oldest first");
+    for (const prompt of asked) {
+      const q = /Untrusted question[^\n]*/.exec(prompt)?.[0] ?? "";
+      assert.doesNotMatch(prompt, /Coins you bought lately|not bought anything|can't name here/, q);
+      assert.doesNotMatch(prompt, /«you bought it|when you bought it:|about your latest buy/, q);
+      assert.match(prompt, /They named a specific coin\. Never say whether you bought it, hold it or like it/, q);
+    }
+    for (const system of w.systems) assert.doesNotMatch(system, /Your recent posts, which you must not repeat/, "nor its recent posts, which carry its buy posts");
+  }
+  // A question that names no coin still sees its buys.
+  const plain = await world(t);
+  plain.setInbox([tag({ text: "@pine_stoat what have you been buying lately?" })]);
+  await plain.step();
+  assert.match(plain.asked()[0]!, /Coins you bought lately: «Pepe»/);
+  assert.match(plain.systems[0]!, /Your recent posts, which you must not repeat/, "and its recent posts");
 });
 
 test("a live agent whose buys all lack a sayable name is never told it bought nothing", async (t) => {

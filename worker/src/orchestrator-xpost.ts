@@ -91,7 +91,7 @@ import {
 import { answerPrompt, answerQuestion, buyPrompt, casualPrompt, draft, introPrompt, introTemplate, modelAnswers, replyPrompt, sellPrompt, sherwoodClaimed, sherwoodNamed, xpostModel, xpostModelWarning, type AnswerIntentKind, type WriterFacts, type XStyle } from "./xpost/writer";
 import { appendPublicToken, appendPublicWallet, hasPublicWallet, publicTokenStillAllowed, publicWalletStillAllowed, type PublicWallet } from "./xpost/public-wallet";
 import { readPublicProjectDescription } from "./orchestrator-xpost-project";
-import { carriesResearch, classifyTag, createXResearch, type ResearchBundle, type XResearch } from "./orchestrator-xpost-research";
+import { boughtNames, carriesResearch, classifyTag, createXResearch, namesACoin, type ResearchBundle, type XResearch } from "./orchestrator-xpost-research";
 import { PUBLISHABLE_SOURCES } from "./thesis-policy";
 import { readSaleResults } from "./orchestrator-xpost-results";
 import { appendSaleOutcome, hasSaleOutcome } from "./xpost/sale-outcome";
@@ -1425,6 +1425,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
     const ordered = [...comments].sort((a, b) => a.createdAtMs - b.createdAtMs || a.id.localeCompare(b.id));
     const buys = recentCoins(f);
     const knownCoins = [...buys.map((c) => c.label), ...posts.filter((p) => p.kind === "buy" && p.coin).map((p) => p.coin!)];
+    // Every name its buys go by, for telling whether a tag names one (namesACoin).
+    const bought = boughtNames(f, posts);
     for (const comment of ordered) {
       if (comment.createdAtMs < consentAt || nowMs - comment.createdAtMs > REPLY_STALE_MS) continue;
       const candidate = tagCandidate(comment, { xUserId: account.xUserId, research: research !== null });
@@ -1457,6 +1459,10 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         bump("answer-author-spent");
         continue;
       }
+      // NEVER CONFIRM A BUY BY NAME: a tag that names a coin in any way gets
+      // no list of its buys and no fact about them, research on or off. Only
+      // the tag's own full contract, bought by its records, may be (exact).
+      const coinNamed = namesACoin({ text: candidate.text, intent: asked, address: candidate.address ?? null, bought });
       const intent = research ? asked : null;
       const templated = asked.kind === "model";
       if (!templated) {
@@ -1476,11 +1482,12 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       const social = templated ? null : await deps.socialProfile?.(account.tenant);
       const walletPublic = !!social?.publicWallet && social.publicWallet.address.toLowerCase() === f.agentId.toLowerCase();
       // ONE BUNDLE, AT MOST, for this answer — and only with research on.
-      let looked: { intent: AnswerIntentKind; research: string[]; creatorClaim?: string } | null = null;
+      let looked: { intent: AnswerIntentKind; research: string[]; creatorClaim?: string; boughtExact?: boolean } | null = null;
       if (research && intent) {
-        const bundle = await research.gather({ shared, intent, tenant: account.tenant, xUserId: account.xUserId, facts: f, posts, fomo: researchFomo, budgetMs: Math.max(0, sendBy - at()) })
+        const bundle = await research.gather({ shared, intent, tenant: account.tenant, xUserId: account.xUserId, facts: f, posts, fomo: researchFomo, coinNamed, budgetMs: Math.max(0, sendBy - at()) })
           .catch((): ResearchBundle => ({ facts: [], lookups: 0, notes: ["fault"] }));
-        looked = { intent: intent.kind, research: bundle.facts, ...(bundle.claim ? { creatorClaim: bundle.claim } : {}) };
+        looked = { intent: intent.kind, research: bundle.facts, ...(bundle.claim ? { creatorClaim: bundle.claim } : {}),
+          ...(bundle.exact === true && candidate.address ? { boughtExact: true } : {}) };
         bump(`answer-intent-${intent.kind}`);
         if (bundle.lookups) bump("answer-lookups", bundle.lookups);
         for (const note of new Set(bundle.notes)) bump(`answer-research-${note}`);
@@ -1492,7 +1499,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       const raw = templated
         ? lines[0]!
         : await draft(creds, answerPrompt({ ...facts, question: candidate.text, recentBuys: buys, boughtLately: boughtKind(f),
-          said: said.map(withoutReplyOptOut), walletPublic, ...(looked ?? {}) }), { call: deps.llm, timeoutMs: deps.draftTimeoutMs });
+          said: said.map(withoutReplyOptOut), walletPublic, coinNamed, ...(looked ?? {}) }), { call: deps.llm, timeoutMs: deps.draftTimeoutMs });
       const mode = f.mode === "idle" ? null : f.mode;
       const gate = (text: string) => admitXPost(text, {
         kind: "reply", agentName: f.name, mode, coins: buys.map((c) => c.label),

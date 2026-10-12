@@ -16,16 +16,17 @@ import type { FomoEnvelope, FomoToolName } from "./fomo/types";
 import type { AgentFacts, CallFact } from "./groupchat/facts";
 import { admitAgentLine } from "./groupchat/policy";
 import {
+  boughtNames,
   capabilityPhrases,
   carriesResearch,
   classifyTag,
   coinFactPhrases,
-  CONFLICT_PHRASE,
   createXResearch,
   creatorClaim,
   flowPhrases,
   fomoActivityPhrases,
   fomoThesesPhrases,
+  namesACoin,
   ONBOARDING_PHRASES,
   ownHistoryPhrases,
   RESEARCH_BUDGET,
@@ -37,7 +38,7 @@ import {
 import type { PublicThesis } from "./thesis-policy";
 import { admitXPost } from "./xpost/gate";
 import { tagCandidate } from "./xpost/replies";
-import { modelAnswer, modelAnswers } from "./xpost/writer";
+import { answerPrompt, modelAnswer, modelAnswers, type AnswerFacts } from "./xpost/writer";
 import { ensureXpostSchema, readMeta, type XPost } from "./xpost/store";
 
 const NOW = Date.UTC(2026, 9, 12, 12);
@@ -373,7 +374,6 @@ describe("words from measurements: digit-free, attributed, and through the X gat
       "fomo traders mostly argue it's still early", "most of the fomo talk is about the team",
       ...[...FLOW_X_GLOSS.values()].flat(),
       ...capabilityPhrases({ fomo: true, flow: true }).slice(1, 2),
-      CONFLICT_PHRASE,
       "the project says it's a meme about a very patient frog",
     ];
     for (const p of built) assert.equal(carriesResearch(`${p}, that's what i found. Say stop to opt out.`), true, p);
@@ -400,27 +400,30 @@ describe("its own history of a coin", () => {
   const thesis = (over: Partial<PublicThesis>): PublicThesis => ({ name: "Alan", slug: null, handle: null, head: "", action: "hold", symbol: "WIF", displayName: null,
     sizeUsdg: null, paper: false, outcome: "view", outcomeText: "", shadow: false, reason: "the curve looked crowded", post: null, said: 1, at: 0, firstAt: 0, ...over });
 
-  it("bought: its own words and its buy post, without the CA suffix, never a sale", () => {
-    const said = ownHistoryPhrases({ coin: { label: "PEPE", address: null }, facts: FACTS, posts: [post()], theses: [] });
+  it("bought: its own words and its buy post, without the CA suffix, never a sale — by the full contract only", () => {
+    const said = ownHistoryPhrases({ address: PEPE_CA, facts: FACTS, posts: [post()], theses: [] });
     assert.deepEqual(said, ["you bought it lately, on paper", "your own words when you bought it: the buying looked steady and real",
       "what you posted on X when you bought it: picked up some pepe on paper, the buying looked real"]);
-    assert.deepEqual(ownHistoryPhrases({ coin: { label: null, address: PEPE_CA }, facts: FACTS, posts: [post()], theses: [] }), said, "by its contract too");
+    assert.deepEqual(ownHistoryPhrases({ address: PEPE_CA.toUpperCase().replace("0X", "0x"), facts: FACTS, posts: [post()], theses: [] }), said, "in any case");
     for (const p of said) assert.doesNotMatch(p, /0x|\p{N}|sold/u);
+    // Never by a name: no address, no history, whatever it bought under that name.
+    assert.deepEqual(ownHistoryPhrases({ address: null, facts: FACTS, posts: [post()], theses: [] }), []);
+    assert.deepEqual(ownHistoryPhrases({ address: "PEPE", facts: FACTS, posts: [post()], theses: [] }), [], "a ticker is not an address");
   });
 
   it("with a contract, by that contract alone: a name never finds a buy of another contract", () => {
     const COPY = `0x${"ee".repeat(20)}`;
-    assert.deepEqual(ownHistoryPhrases({ coin: { label: "PEPE", address: COPY }, facts: FACTS, posts: [post()], theses: [thesis({ action: "buy", outcome: "landed", symbol: "PEPE", displayName: "Pepe" })] }), [],
+    assert.deepEqual(ownHistoryPhrases({ address: COPY, facts: FACTS, posts: [post()], theses: [thesis({ action: "buy", outcome: "landed", symbol: "PEPE", displayName: "Pepe" })] }), [],
       "the real PEPE buy, its post and its thesis are not the copycat's history");
     // A post without a CA counts only through an address-matched buy's decision.
-    assert.deepEqual(ownHistoryPhrases({ coin: { label: null, address: COPY }, facts: FACTS, posts: [post({ body: "picked up some pepe" })], theses: [] }), []);
-    assert.equal(ownHistoryPhrases({ coin: { label: null, address: PEPE_CA }, facts: FACTS, posts: [post({ body: "picked up some pepe" })], theses: [] }).length, 3);
+    assert.deepEqual(ownHistoryPhrases({ address: COPY, facts: FACTS, posts: [post({ body: "picked up some pepe" })], theses: [] }), []);
+    assert.equal(ownHistoryPhrases({ address: PEPE_CA, facts: FACTS, posts: [post({ body: "picked up some pepe" })], theses: [] }).length, 3);
     const derived = `T${CA.slice(-11).toUpperCase()}`;
     const landed = thesis({ symbol: derived, action: "buy", outcome: "landed" });
-    assert.deepEqual(ownHistoryPhrases({ coin: { label: null, address: CA }, facts: FACTS, posts: [], theses: [landed] }), [],
+    assert.deepEqual(ownHistoryPhrases({ address: CA, facts: FACTS, posts: [], theses: [landed] }), [],
       "a landed buy thesis by the derived Trencher ticker alone is eleven hex, never proof it bought this contract");
     const caPost = post({ coin: "Ab", decisionId: "d9", body: `picked up some of this one CA (Robinhood Chain): ${CA}` });
-    assert.deepEqual(ownHistoryPhrases({ coin: { label: null, address: CA }, facts: FACTS, posts: [caPost], theses: [landed] }),
+    assert.deepEqual(ownHistoryPhrases({ address: CA, facts: FACTS, posts: [caPost], theses: [landed] }),
       ["you bought it lately", "what you posted on X when you bought it: picked up some of this one", "your public reason for the buy: the curve looked crowded"],
       "beside its own buy post of the full contract, the derived ticker's thesis is that coin's");
   });
@@ -439,8 +442,7 @@ describe("its own history of a coin", () => {
       ["only its thesis known", { ...FACTS, calls: [] }, []],
     ];
     for (const [what, facts, posts] of cases) {
-      assert.deepEqual(ownHistoryPhrases({ coin: { label: null, address: FAKE }, facts, posts, theses: [landed] }), [], what);
-      assert.deepEqual(ownHistoryPhrases({ coin: { label: "PEPE", address: FAKE }, facts, posts, theses: [landed] }), [], `${what}, with its ticker`);
+      assert.deepEqual(ownHistoryPhrases({ address: FAKE, facts, posts, theses: [landed] }), [], what);
     }
     assert.equal(taggedConflict({ label: "PEPE", address: FAKE, facts: FACTS, posts: [caPost], theses: [landed] }), true, "its suffix copied off a contract it bought");
     assert.equal(taggedConflict({ label: "Pepe", address: FAKE, facts: { ...FACTS, calls: [] }, posts: [], theses: [landed] }), false,
@@ -448,13 +450,13 @@ describe("its own history of a coin", () => {
   });
 
   it("never \"you passed\": a symbol's thesis without a trade is a hold, of a coin it may still own", () => {
-    for (const reason of ["the curve looked crowded", "earnings ahead, staying patient", "keep holding, the position still looks fine"]) {
-      assert.deepEqual(ownHistoryPhrases({ coin: { label: "WIF", address: null }, facts: FACTS, posts: [], theses: [thesis({ reason })] }), [], reason);
-      assert.deepEqual(ownHistoryPhrases({ coin: { label: "NVDA", address: null }, facts: FACTS, posts: [], theses: [thesis({ symbol: "NVDA", reason })] }), [], reason);
-    }
     const derived = `T${CA.slice(-11).toUpperCase()}`;
-    assert.deepEqual(ownHistoryPhrases({ coin: { label: null, address: CA }, facts: FACTS, posts: [], theses: [thesis({ symbol: derived })] }), []);
-    assert.deepEqual(ownHistoryPhrases({ coin: { label: "BONK", address: null }, facts: FACTS, posts: [], theses: [thesis({})] }), []);
+    assert.deepEqual(ownHistoryPhrases({ address: CA, facts: FACTS, posts: [], theses: [thesis({ symbol: derived })] }), []);
+    // Its own contract with a hold thesis beside it: the buy is said, never a pass.
+    for (const reason of ["the curve looked crowded", "earnings ahead, staying patient", "keep holding, the position still looks fine"]) {
+      const said = ownHistoryPhrases({ address: PEPE_CA, facts: FACTS, posts: [], theses: [thesis({ symbol: "PEPE", reason })] });
+      assert.ok(said.every((p) => !/pass|skip|declin/i.test(p)), said.join(" | "));
+    }
   });
 
   it("a ticker it bought beside another contract is a conflict; its own contract, or a name it never pinned, is not", () => {
@@ -468,8 +470,6 @@ describe("its own history of a coin", () => {
     const noToken = { ...FACTS, calls: [{ ...CALL, token: null }] };
     assert.equal(taggedConflict({ ...base, facts: noToken, label: "PEPE", address: COPY }), false, "no contract known for the name");
     assert.equal(taggedConflict({ ...base, facts: noToken, posts: [post()], label: "PEPE", address: COPY }), true, "its buy post's CA pins the name");
-    assert.ok(sayable(CONFLICT_PHRASE));
-    clears(CONFLICT_PHRASE);
   });
 });
 
@@ -583,7 +583,7 @@ describe("one bounded research bundle per answer", () => {
     assert.ok(l.notes.includes("claim-refused"));
   });
 
-  it("a $ticker it bought beside a copycat's contract: looked up for nothing, and said to be a different contract", async () => {
+  it("a $ticker it bought beside a copycat's contract: looked up for nothing, and nothing said about what it bought", async () => {
     const COPY = `0x${"ee".repeat(20)}`;
     for (const text of [`@Alan is $PEPE ${COPY} legit?`, `@Alan did you buy $PEPE ${COPY}?`, `@Alan is $PEPE ${COPY} the one you bought?`, `@Alan thoughts on pepe ${COPY}?`]) {
       const v = tagCandidate({ id: "1", text, authorId: "9", conversationId: "1", inReplyToTweetId: "", createdAtMs: NOW }, { xUserId: "111", research: true });
@@ -593,7 +593,8 @@ describe("one bounded research bundle per answer", () => {
       assert.ok(intent.kind === "coin" || intent.kind === "own-trades", `${text} → ${intent.kind}`);
       const { f, research } = fakes();
       const b = await research.gather(input(intent, { fomo: true, posts: [] }));
-      assert.deepEqual(b.facts, [CONFLICT_PHRASE], text);
+      assert.deepEqual(b.facts, [], text);
+      assert.notEqual(b.exact, true);
       assert.ok(!b.facts.some((p) => /bought it lately/.test(p)), text);
       assert.equal(f.reads.length + f.described.length + f.fomoCalls.length + f.resolved.length, 0, `${text}: nothing looked up for a copycat`);
       assert.ok(b.notes.includes("conflict"));
@@ -602,7 +603,7 @@ describe("one bounded research bundle per answer", () => {
     const { research } = fakes();
     const b = await research.gather(input({ kind: "coin", ticker: "PEPE", address: PEPE_CA }));
     assert.ok(b.facts.includes("you bought it lately, on paper"));
-    assert.ok(!b.facts.includes(CONFLICT_PHRASE));
+    assert.equal(b.exact, true, "the tag's own full contract, which its records bought: the exact path");
   });
 
   it("with the Fomo switch on: token activity and quick theses as a public x-answer, keyed by the X account, nothing else", async () => {
@@ -756,5 +757,104 @@ describe("one bounded research bundle per answer", () => {
     assert.deepEqual((await research.gather(input({ kind: "own-trades", why: true, coin: null, address: PEPE_CA }))).facts.slice(0, 1), ["you bought it lately, on paper"],
       "a tagged contract it bought is found in its own history, for free");
     assert.match((await research.gather(input({ kind: "capabilities" }, { fomo: true }))).facts.join(" "), /fomo traders/);
+  });
+});
+
+// ── never confirm a buy by name ───────────────────────────────────────────
+
+describe("never confirm a buy by name", () => {
+  /** A PEPE it really bought, with real money, whose name is not its ticker, and its buy post. */
+  const PEPE: CallFact = { ...CALL, paper: false, name: "Pepe Coin", ownWords: "the buying looked steady and real" };
+  const facts: AgentFacts = { ...FACTS, mode: "live", calls: [PEPE] };
+  const buyPost: XPost = { id: 1, tenant: TENANT, xUserId: "111", kind: "buy", dedupeKey: "buy:1", coin: "Pepe Coin", decisionId: "d1",
+    body: `picked up some pepe coin, the buying looked real CA (Robinhood Chain): ${PEPE_CA}`, status: "posted", reason: null,
+    createdAtMs: NOW - 3 * HOUR, dueAtMs: NOW - 3 * HOUR, sentAtMs: NOW - 3 * HOUR, tweetId: "9", updatedAtMs: NOW };
+  const bought = boughtNames(facts, [buyPost]);
+  /** Every code-built fact about its own buys, as research words them. */
+  const OWN_BUY_FACT = /«you bought it|you bought it lately|when you bought it:|about your latest buy|reason for the buy/;
+  const writer = (over: Partial<AnswerFacts>): AnswerFacts => ({
+    agentName: "Alan", strategy: "trencher", flavour: null, traits: [], mode: "live", style: { lower: true, emoji: 0, exclaim: 0 },
+    recentOwn: ["picked up some pepe coin, the buying looked real"], question: "", recentBuys: [{ label: "Pepe Coin", paper: false }], boughtLately: "live",
+    said: ["picked up some pepe coin, the buying looked real"], walletPublic: false, ...over,
+  });
+  /** The tag as writeAnswer reads it: screened, classified, looked up (research on) or not, and the prompt it would draft from. */
+  async function promptFor(text: string, research: boolean): Promise<{ prompt: string; named: boolean; exact: boolean }> {
+    const c = tagCandidate({ id: "t1", authorId: "u1", text: `@alan ${text}`, conversationId: "t1", inReplyToTweetId: "t0", createdAtMs: NOW }, { xUserId: "x1", research });
+    assert.ok(c.ok, `${text}: ${c.ok ? "" : c.reason}`);
+    if (!c.ok) throw new Error("unreachable");
+    const intent = classifyTag(c.text, { address: c.address ?? null, knownCoins: ["Pepe Coin", "Pepe Coin"] });
+    assert.notEqual(intent.kind, "unanswered", text);
+    const named = namesACoin({ text: c.text, intent, address: c.address ?? null, bought });
+    let looked: Partial<AnswerFacts> = {};
+    let exact = false;
+    if (research) {
+      const b = await fakes().research.gather(input(intent, { facts, posts: [buyPost], coinNamed: named }));
+      exact = b.exact === true && !!c.address;
+      looked = { intent: intent.kind as AnswerFacts["intent"], research: b.facts, ...(b.claim ? { creatorClaim: b.claim } : {}), ...(exact ? { boughtExact: true } : {}) };
+    }
+    const p = answerPrompt(writer({ question: c.text, coinNamed: named, ...looked }));
+    return { prompt: `${p.system}\n\n${p.prompt}`, named, exact };
+  }
+
+  it("every name its buys go by, for matching: ticker, name, label and buy post coin", () => {
+    assert.deepEqual(bought.sort(), ["PEPE", "Pepe Coin"]);
+  });
+
+  it("a tag that names PEPE however it is spelled never sees its buys, a \"bought\" fact or its own buy post", async () => {
+    const asks = ["did you buy pepe?", "did you buy $PEPE?", "did you buy pepe inu?", "did you buy pepe two?", "did you buy $PEPE2?", "did you buy pepe 2?",
+      "did you buy pe​pe?", "did you buy pepe classic?", "did you buy Pepe Coin?", "did you buy $PEPE inu?", "did you buy pepe ii?", "is pepe inu legit?",
+      "why'd you buy p3pe?", "did you buy ρepe?", "did you buy p e p e?", "did you buy $PEPEINU?", "did you buy pepe–2?", "did you buy pepe v 2?",
+      "is $PEPE 2.0 the one you bought?", "thoughts on pepe classic?", "did you buy $PEPE​2?"];
+    for (const text of asks) {
+      for (const research of [true, false]) {
+        const { prompt, named, exact } = await promptFor(text, research);
+        const what = `${text} (research ${research})`;
+        assert.equal(named, true, what);
+        assert.equal(exact, false, what);
+        assert.doesNotMatch(prompt, /Coins you bought lately|not bought anything|can't name here/, what);
+        assert.doesNotMatch(prompt, OWN_BUY_FACT, what);
+        assert.doesNotMatch(prompt, /picked up some pepe/, `${what}: neither its buy post nor what it said`);
+        if (!/no usable question/.test(prompt)) assert.match(prompt, /They named a specific coin\. Never say whether you bought it, hold it or like it/, what);
+      }
+    }
+  });
+
+  it("the tag's own full contract, which its records bought, is the one way it may say it bought a coin", async () => {
+    const { prompt, named, exact } = await promptFor(`did you buy ${PEPE_CA}?`, true);
+    assert.equal(named, true);
+    assert.equal(exact, true);
+    assert.match(prompt, /What you looked up just now.*«you bought it lately».*«your own words when you bought it: the buying looked steady and real»/s);
+    assert.match(prompt, /«what you posted on X when you bought it: picked up some pepe coin, the buying looked real»/);
+    assert.match(prompt, /They tagged the exact contract your own records show you bought/);
+    assert.doesNotMatch(prompt, /Coins you bought lately/, "still no list of its buys");
+    // Another contract, under its ticker or not: nothing it bought is said.
+    const COPY = `0x${"ee".repeat(20)}`;
+    for (const text of [`did you buy ${COPY}?`, `did you buy $PEPE ${COPY}?`, `is $PEPE ${COPY} legit?`]) {
+      const other = await promptFor(text, true);
+      assert.equal(other.exact, false, text);
+      assert.doesNotMatch(other.prompt, OWN_BUY_FACT, text);
+      assert.doesNotMatch(other.prompt, /Coins you bought lately|not the one you bought/, text);
+    }
+  });
+
+  it("a question that names no coin may still see its buys, by its own labels", async () => {
+    for (const research of [true, false]) {
+      const { prompt, named } = await promptFor("what have you been buying lately?", research);
+      assert.equal(named, false);
+      assert.match(prompt, /Coins you bought lately: «Pepe Coin»/);
+      assert.doesNotMatch(prompt, /They named a specific coin/);
+    }
+    // Research for such a question is its latest buy post, and never for a coin named some other way.
+    const general = await fakes().research.gather(input({ kind: "own-trades", why: false, coin: null, address: null }, { facts, posts: [buyPost] }));
+    assert.deepEqual(general.facts, ["what you posted on X about your latest buy: picked up some pepe coin, the buying looked real"]);
+    const named = await fakes().research.gather(input({ kind: "own-trades", why: false, coin: null, address: null }, { facts, posts: [buyPost], coinNamed: true }));
+    assert.deepEqual(named.facts, []);
+  });
+
+  it("a coin named by research's own ticker resolution is never its history: \"$PEPE\" finding its PEPE buy is a name", async () => {
+    const b = await fakes().research.gather(input({ kind: "coin", ticker: "PEPE", address: null }, { facts, posts: [buyPost] }));
+    assert.ok(b.facts.includes("the public index shows liquidity is thin"), "the coin's public facts are still read");
+    assert.ok(!b.facts.some((p) => OWN_BUY_FACT.test(p)), b.facts.join(" | "));
+    assert.notEqual(b.exact, true);
   });
 });

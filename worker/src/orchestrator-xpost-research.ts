@@ -55,6 +55,7 @@ import { sherwoodMentioned, vocabularyRefusal } from "./xpost/gate";
 import { coinOf, hash32 } from "./xpost/planner";
 import { normalisedTag, withoutReplyOptOut } from "./xpost/replies";
 import { takeAllowance, type XPost } from "./xpost/store";
+import { coinNamedIn } from "./xpost/writer";
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -231,6 +232,35 @@ export function classifyTag(text: string, o: { address?: string | null; knownCoi
   return { kind: "chat" };
 }
 
+/**
+ * EVERY NAME ITS OWN BUYS GO BY: each buy's ticker, its name and the label a
+ * post would use (planner.ts coinOf), and each buy post's coin. What a tag is
+ * matched against to tell whether it names a coin it bought, however the
+ * copycat spells it (writer.ts coinNamedIn): never what an answer says.
+ */
+export function boughtNames(facts: AgentFacts, posts: readonly XPost[]): string[] {
+  const out = new Set<string>();
+  for (const c of facts.calls) {
+    if (c.side !== "buy") continue;
+    for (const n of [c.symbol, c.name, coinOf(c)?.label]) if (typeof n === "string" && n.trim()) out.add(n.trim());
+  }
+  for (const p of posts) if (p.kind === "buy" && typeof p.coin === "string" && p.coin.trim()) out.add(p.coin.trim());
+  return [...out];
+}
+
+/**
+ * DOES THE TAG NAME A SPECIFIC COIN, IN ANY WAY? (fail-closed review,
+ * 2026-10-12) A tagged contract, a coin or ticker classifyTag found, a
+ * $cashtag of any length, or a coin it bought inside the question's letters
+ * (writer.ts coinNamedIn). Then the answer never says whether it bought it:
+ * no buys list, no "you bought it", none of its own buy posts. Errs toward
+ * yes; a wrong yes only costs that answer its list of buys.
+ */
+export function namesACoin(o: { text: string; intent: TagIntent; address: string | null; bought: readonly string[] }): boolean {
+  const i = o.intent;
+  return o.address !== null || i.kind === "coin" || (i.kind === "own-trades" && (i.coin !== null || i.address !== null)) || coinNamedIn(o.text, o.bought);
+}
+
 // ── the budget ──────────────────────────────────────────────────────────────
 
 /**
@@ -319,6 +349,12 @@ export interface ResearchInput {
   /** MERRYMEN_XPOST_FOMO=1: Fomo may be asked. */
   fomo: boolean;
   /**
+   * The tag names a specific coin in any way (namesACoin): nothing about its
+   * own buys is looked up for it, not even its latest buy post, unless the
+   * tag carried the full contract its records bought (the exact path).
+   */
+  coinNamed?: boolean;
+  /**
    * What is left of the caller's own time, in ms, when that is less than the
    * bundle's twelve seconds: an answer drafted late in a pass gets only what
    * remains of the pass's send budget, so research never holds the next sends
@@ -336,6 +372,13 @@ export interface ResearchBundle {
    * unverified claim, never something it looked up and found.
    */
   claim?: string | null;
+  /**
+   * The facts say it bought this coin, and only because the tag carried the
+   * full forty-hex contract its own records bought (fullyBought): the one way
+   * an answer may say it bought a coin someone named (writer.ts
+   * AnswerFacts.boughtExact).
+   */
+  exact?: boolean;
   /** Lookups made (the budget counts these). */
   lookups: number;
   /** What happened, by stable word, for the pass's counts. Never a coin, a person or an address. */
@@ -563,17 +606,15 @@ function fullyBought(address: string, facts: AgentFacts, posts: readonly XPost[]
  * gate) — "you bought it", "your buy post said …". A sale is never said: an
  * answer is only told what it bought.
  *
- * BY THE CONTRACT ALONE WHEN THERE IS ONE. A tagged address is a stranger's
- * key, and a name is not a coin: "is $PEPE <another contract> legit?" must
- * never find its real PEPE buy by the name and say "you bought it" under a
- * copycat's contract. With an address, a buy counts only when its own token
- * is that address, a buy post only when its CA (or its decision) is, and a
- * thesis only when its symbol is an address-matched buy's symbol, or the
- * address's derived id while a buy or buy post of the full contract exists
- * (review, 2026-10-12: the derived id is eleven hex a stranger can match, so
- * on its own it is never "you bought it"). A name is read only when no
- * contract is known at all (a $ticker it could not resolve, "why did you buy
- * pepe").
+ * BY THE FULL CONTRACT ALONE, AND ONLY ONE ITS RECORDS BOUGHT (fail-closed
+ * review, 2026-10-12). A name is not a coin: "did you buy pepe inu?", "pepe
+ * two", "$PEPE2" were each matched to the PEPE it really bought by symbol,
+ * and the answer said "yep". So nothing here is matched by a symbol, a label
+ * or a derived id: only a tagged forty-hex contract that a buy's token or a
+ * buy post's CA is (fullyBought). Then a buy counts when its token is that
+ * contract, a buy post when its CA (or an address-matched buy's decision)
+ * is, and a thesis when its symbol is an address-matched buy's or the
+ * contract's derived id.
  *
  * NEVER "YOU PASSED" (review, 2026-10-12). The only record of a declined look
  * here would be a public thesis, and a symbol's thesis without a trade is a
@@ -583,35 +624,22 @@ function fullyBought(address: string, facts: AgentFacts, posts: readonly XPost[]
  * memo is a child's room state, not read here, so a pass is not said at all.
  */
 export function ownHistoryPhrases(o: {
-  coin: { label: string | null; address: string | null };
+  address: string | null;
   facts: AgentFacts;
   posts: readonly XPost[];
   theses: readonly PublicThesis[];
 }): string[] {
-  const { label } = o.coin;
-  const address = typeof o.coin.address === "string" && CONTRACT.test(o.coin.address) ? o.coin.address.toLowerCase() : null;
-  if (!label && !address) return [];
-  const buys = o.facts.calls.filter((c) => c.side === "buy");
-  const posted = o.posts.filter((p) => p.kind === "buy" && p.status === "posted");
-  let calls: typeof buys, posts: typeof posted, theses: PublicThesis[];
-  if (address) {
-    calls = buys.filter((c) => typeof c.token === "string" && c.token.toLowerCase() === address);
-    const decisions = new Set(calls.map((c) => c.decisionId));
-    posts = posted.filter((p) => {
-      const ca = postContract(p.body);
-      return ca !== null ? ca === address : p.decisionId !== null && decisions.has(p.decisionId);
-    });
-    const full = fullyBought(address, o.facts, o.posts);
-    theses = o.theses.filter((t) => calls.some((c) => sameLabel(t.symbol, c.symbol)) || (full && t.symbol === derivedId(address)));
-  } else {
-    calls = buys.filter((c) => sameLabel(c.symbol, label) || sameLabel(c.name, label));
-    const named = calls.map((c) => coinOf(c)?.label).find((l): l is string => !!l) ?? null;
-    const said = named ?? label;
-    posts = posted.filter((p) => sameLabel(p.coin, said) || sameLabel(p.coin, label));
-    theses = o.theses.filter((t) => sameLabel(t.symbol, label) || sameLabel(t.displayName ?? null, label) || sameLabel(t.symbol, said) || sameLabel(t.displayName ?? null, said));
-  }
+  const address = typeof o.address === "string" && CONTRACT.test(o.address) ? o.address.toLowerCase() : null;
+  if (!address || !fullyBought(address, o.facts, o.posts)) return [];
+  const calls = o.facts.calls.filter((c) => c.side === "buy" && typeof c.token === "string" && c.token.toLowerCase() === address);
+  const decisions = new Set(calls.map((c) => c.decisionId));
+  const posts = o.posts.filter((p) => {
+    if (p.kind !== "buy" || p.status !== "posted") return false;
+    const ca = postContract(p.body);
+    return ca !== null ? ca === address : p.decisionId !== null && decisions.has(p.decisionId);
+  });
+  const theses = o.theses.filter((t) => calls.some((c) => sameLabel(t.symbol, c.symbol)) || t.symbol === derivedId(address));
   const boughtThesis = theses.find((t) => t.action === "buy" && t.outcome === "landed");
-  if (!calls.length && !posts.length && !boughtThesis) return [];
   const out: string[] = [];
   const paper = calls[0]?.paper ?? boughtThesis?.paper ?? false;
   out.push(`you bought it lately${paper ? ", on paper" : ""}`);
@@ -629,9 +657,10 @@ export function ownHistoryPhrases(o: {
  * <copycat>". True when its own records know the contract(s) behind that
  * name — a buy's token, a buy post's CA, a landed buy thesis's derived id —
  * and the tagged address is none of them. Such a tag is looked up for
- * nothing: no history, no index read, no creator text, no Fomo, only that
- * the contract is not the one it bought (CONFLICT_PHRASE). A name it never
- * pinned to a contract is no conflict; the address alone is then the key.
+ * nothing: no history, no index read, no creator text, no Fomo. Not even
+ * that the contract is not the one it bought under that name, which says it
+ * bought that name (NEVER CONFIRM A BUY BY NAME). A name it never pinned to
+ * a contract is no conflict; the address alone is then the key.
  *
  * A DERIVED ID IS NEVER A MATCH. A tagged address that shares a bought
  * contract's last eleven hex but is not that contract is a conflict; one
@@ -667,9 +696,6 @@ export function taggedConflict(o: {
   if ([...contracts].some((c) => derivedId(c) === derivedId(address))) return true;
   return !ids.has(derivedId(address));
 }
-
-/** What a conflicting tag is told: the one thing its records say for certain. */
-export const CONFLICT_PHRASE = "the contract in that tag is not the one you bought under that name";
 
 /**
  * A CREATOR'S DESCRIPTION, AS A CLAIM AND ONLY A CLEAN ONE. The creator of
@@ -779,29 +805,36 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
           case "unanswered":
             return { facts: [], lookups, notes };
           case "own-trades": {
-            // Only what it already made public, and no paid read: its newest buy
-            // post, or, for a coin it names or a tagged contract, that coin's history.
+            // Only what it already made public, and no paid read. A general
+            // question ("what have you been buying?"): its newest buy post.
             if (!i.coin && !i.address) {
+              // A coin named some other way ("did you buy pepe inu?") gets none of its buys.
+              if (input.coinNamed) return { facts: [], lookups, notes };
               const latest = input.posts.filter((p) => p.kind === "buy" && p.status === "posted").sort((a, b) => b.createdAtMs - a.createdAtMs)
                 .map((p) => ownPostProse(p.body)).find(sayable);
               return { facts: latest ? [`what you posted on X about your latest buy: ${latest}`].filter(sayable) : [], lookups, notes };
             }
+            // A COIN NAMED: only the exact path, the tag's own full contract
+            // that its records bought. Never by a name.
+            if (!i.address) return { facts: [], lookups, notes };
             const theses = await ownTheses();
             if (taggedConflict({ label: i.coin, address: i.address, facts: f, posts: input.posts, theses })) {
               notes.push("conflict");
-              return { facts: [CONFLICT_PHRASE].filter(sayable), lookups, notes };
+              return { facts: [], lookups, notes };
             }
-            return { facts: ownHistoryPhrases({ coin: { label: i.coin, address: i.address }, facts: f, posts: input.posts, theses }), lookups, notes };
+            const history = ownHistoryPhrases({ address: i.address, facts: f, posts: input.posts, theses });
+            return { facts: history, ...(history.length ? { exact: true } : {}), lookups, notes };
           }
           case "coin":
             break;
         }
         // ── a coin ──────────────────────────────────────────────────────
-        const theses = await ownTheses();
+        // Its own records are read only for a tagged contract (the exact path).
+        const theses = i.address ? await ownTheses() : [];
         // "$PEPE <another contract>": nothing is looked up for a copycat of a coin it bought.
         if (i.ticker && i.address && taggedConflict({ label: i.ticker, address: i.address, facts: f, posts: input.posts, theses })) {
           notes.push("conflict");
-          return { facts: [CONFLICT_PHRASE].filter(sayable), lookups, notes };
+          return { facts: [], lookups, notes };
         }
         // Its own address first: a coin it bought carries its contract, so a ticker it traded costs no search.
         let address = i.address;
@@ -814,9 +847,11 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
           else address = await look((ms) => resolveTicker(i.ticker!, ms), null);
           if (!address) notes.push("unresolved");
         }
-        // With a contract, its history is matched by that contract alone; without one, by the name asked.
-        const history = ownHistoryPhrases({ coin: { label: address ? null : i.ticker, address }, facts: f, posts: input.posts, theses });
-        if (!address) return { facts: history, lookups, notes };
+        // ITS HISTORY ONLY BY THE CONTRACT THE TAG CARRIED, which its own
+        // records bought: never by the name asked, nor by an address the
+        // name resolved to ("$PEPE" finding its PEPE buy is a name).
+        const history = ownHistoryPhrases({ address: i.address, facts: f, posts: input.posts, theses });
+        if (!address) return { facts: [], lookups, notes };
         const key = address;
         // THE CREATOR'S TEXT ONLY FOR A COIN IT TRADED (creatorClaim), by
         // the full contract: never a stranger's token, nor one that only
@@ -849,7 +884,7 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
         }
         if (flow && !flow.ok) notes.push(`flow-${flow.failure}`);
         out.push(...flowPhrases(flow, `${input.tenant}|${key}`));
-        return { facts: out.filter(sayable).slice(0, BUNDLE_FACTS), claim, lookups, notes };
+        return { facts: out.filter(sayable).slice(0, BUNDLE_FACTS), ...(history.length ? { exact: true } : {}), claim, lookups, notes };
       } catch {
         // Research is an extra: a fault here is an answer without it, never a failed pass.
         notes.push("fault");

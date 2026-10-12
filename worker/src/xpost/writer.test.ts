@@ -20,6 +20,7 @@ import {
   XPOST_GROQ_DEFAULT_MODEL,
   answerPrompt,
   answerQuestion,
+  coinNamedIn,
   SHERWOOD_ON_X,
   buyPrompt,
   casualPrompt,
@@ -772,6 +773,35 @@ describe("an active agent's answers and conversation memory", () => {
     assert.equal(answerQuestion("is wif 2x from here?", ["PEPE"]), "is wif (a number)x from here?");
   });
 
+  it("a question that names a coin, however spelled, is never told what it bought; only the exact contract may be", () => {
+    const names = ["PEPE", "Pepe Coin"];
+    for (const q of ["did you buy pepe?", "did you buy $PEPE?", "pepe inu?", "pepe two?", "$PEPE2?", "pepe 2?", "pe\u200bpe?", "pepe classic?", "Pepe Coin?", "p3pe?", "ρepe?", "p e p e?",
+      "is $WIF legit?", "is $ANYTHINGATALL_X legit?", "thoughts on 0xabcdef12?"]) {
+      assert.equal(coinNamedIn(q, names), true, q);
+    }
+    for (const q of ["what have you been buying lately?", "how do you pick your coins?", "gm, how's your day?", "", null]) assert.equal(coinNamedIn(q, names), false, String(q));
+    assert.equal(coinNamedIn("gm, how are you?", ["GM"]), true, "errs toward a name: a coin called GM");
+    const facts = { ...BASE, mode: "live" as const, recentBuys: [{ label: "Pepe", paper: false }], boughtLately: "live" as const, recentOwn: ["grabbed some pepe, the buying looked real"],
+      said: ["grabbed some pepe, the buying looked real"], walletPublic: false };
+    const research = ["you bought it lately", "your own words when you bought it: the buying looked steady", "what you posted on X about your latest buy: grabbed some pepe", "the public index shows liquidity is thin"];
+    // Named by the question itself, or by the caller: no list, no own words, no buy facts, the public facts kept.
+    for (const named of [answerPrompt({ ...facts, question: "did you buy pepe inu?", intent: "own-trades", research }),
+      answerPrompt({ ...facts, question: "what about that one?", coinNamed: true, intent: "coin", research })]) {
+      const text = all(named);
+      assert.doesNotMatch(text, /Coins you bought lately|not bought anything|can't name here|grabbed some pepe|«you bought it|when you bought it:|your latest buy/);
+      assert.match(text, /They named a specific coin\. Never say whether you bought it, hold it or like it.*or say only what you looked up about it, keeping who said it/s);
+      assert.match(text, /«the public index shows liquidity is thin»/);
+      assert.doesNotMatch(text, /Say what you bought/, "never the own-trades hint");
+    }
+    // The exact contract its records bought: the code-built facts may say so.
+    const exact = all(answerPrompt({ ...facts, question: "did you buy this coin?", coinNamed: true, boughtExact: true, intent: "own-trades", research }));
+    assert.match(exact, /«you bought it lately»/);
+    assert.match(exact, /They tagged the exact contract your own records show you bought/);
+    assert.doesNotMatch(exact, /Coins you bought lately|grabbed some pepe, the buying looked real»\./, "still no list, nor what it said");
+    // boughtExact without a named coin means nothing: the general prompt.
+    assert.match(all(answerPrompt({ ...facts, question: "what have you been buying lately?", boughtExact: true })), /Coins you bought lately: «Pepe»/);
+  });
+
   it("buys it cannot name are never said to be no buys: \"not bought anything\" only when it bought nothing", () => {
     const of = (o: { recentBuys: { label: string; paper: boolean }[]; boughtLately?: boolean }) =>
       answerPrompt({ ...BASE, mode: "live", question: "what have you been buying lately?", said: [], walletPublic: false, ...o }).prompt;
@@ -851,7 +881,7 @@ describe("an active agent's answers and conversation memory", () => {
       assert.doesNotMatch(all(answerPrompt({ ...BASE, question: "what can you do?", recentBuys: [], said: [], walletPublic: false, intent, research: [] })), /from what you looked up/, intent);
     }
     const looked = all(answerPrompt({ ...BASE, question: "thoughts on this coin?", recentBuys: [], said: [], walletPublic: false, intent: "coin", research: ["the public index shows liquidity is thin"] }));
-    assert.match(looked, /Say what you looked up, keeping who said it\. Say you bought it only if what you looked up says you did/);
+    assert.match(looked, /Say what you looked up, keeping who said it\. Never say whether to buy it, and name it without a \$ sign/);
   });
 
   it("a creator's description is the project's unverified claim, apart from what it looked up", () => {
