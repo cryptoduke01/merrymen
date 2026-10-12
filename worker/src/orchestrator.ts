@@ -11275,6 +11275,7 @@ async function runXPostPass(boot: XPostSetup): Promise<void> {
       roster.push({ tenant: key, agentId: child.smartAccount.toLowerCase() });
     }
     const r = await xPoster.step(shared, roster, tenantChatProfile, Date.now());
+    for (const note of r.notes ?? []) log(note);
     if (r.log) log(r.log);
   } catch (e) {
     const text = e instanceof Error ? e.message : String(e);

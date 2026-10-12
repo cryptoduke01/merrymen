@@ -14,6 +14,7 @@ import {
   XPOST_ALTERS,
   XPOST_SCHEMA,
   answerAuthorKey,
+  repliesOffKey,
   cancelPost,
   cancelDisabledKind,
   cancelScheduled,
@@ -543,6 +544,7 @@ test("every statement the store sends translates to Postgres with matching, bind
   await releaseSpan(db, "gap:111", 20.5, 7.5, 22.5);
   await readMeta(db, "k");
   await writeMeta(db, "k", "v", 15.5);
+  await setReplying(db, OWNER_A, true, "222", 15.3, { house: true });
   await setReplying(db, OWNER_A, true, "222", 15.5);
   await repliesEnabledFor(db, OWNER_A, "222");
   const parent = (await schedulePost(db, post({ xUserId: "222", kind: "buy", dedupeKey: "buy:reply-root", nowMs: 20.5 })))!;
@@ -781,6 +783,35 @@ test("reply targets survive queue reads and cannot reference another tenant, acc
   raw.prepare("UPDATE xpost_posts SET tenant = ? WHERE tweet_id = '700'").run(OWNER_B);
   assert.equal(await replyTargetFor(db, loaded), null, "send rechecks ownership of the parent");
   assert.equal(await schedulePost(db, { ...p, dedupeKey: "reply:111:702", replyToTweetId: "702" }), null);
+});
+
+test("an owner's replies off is remembered, and a house consent never overrides it", async (t) => {
+  const { db } = await open(t);
+  await upsertAccount(db, DEK, { tenant: OWNER_A, xUserId: "111", username: "r", tokens: TOKENS, nowMs: 1 });
+  assert.equal(await setReplying(db, OWNER_A, true, "111", 2, { house: true }), false, "posting is off");
+  await setPosting(db, OWNER_A, { enabled: true, xUserId: "111" }, 3);
+  assert.equal(await setReplying(db, OWNER_A, true, "999", 4, { house: true }), false, "only for the X account posting consent names");
+  assert.equal(await setReplying(db, OWNER_A, true, "111", 5, { house: true }), true);
+  assert.equal(await replyConsentAt(db, OWNER_A, "111"), 5);
+  assert.equal(await setReplying(db, OWNER_A, true, "111", 6, { house: true }), false, "recorded once");
+  assert.equal(await replyConsentAt(db, OWNER_A, "111"), 5);
+
+  // The owner turns replies off: the mark stays, and the house consent is refused for good.
+  assert.equal(await setReplying(db, OWNER_A, false, "111", 7), true);
+  assert.deepEqual(await readMeta(db, repliesOffKey(OWNER_A)), { n: 0, v: "owner" });
+  assert.equal(await setReplying(db, OWNER_A, true, "111", 8, { house: true }), false);
+  assert.equal(await repliesEnabledFor(db, OWNER_A, "111"), false);
+  // Posting off and on again, or a reconnect, does not clear it.
+  await setPosting(db, OWNER_A, { enabled: false }, 9);
+  await setPosting(db, OWNER_A, { enabled: true, xUserId: "111" }, 10);
+  assert.equal(await setReplying(db, OWNER_A, true, "111", 11, { house: true }), false);
+  assert.ok(await readMeta(db, repliesOffKey(OWNER_A)));
+
+  // Only the owner's own on clears it.
+  assert.equal(await setReplying(db, OWNER_A, true, "111", 12), true);
+  assert.equal(await readMeta(db, repliesOffKey(OWNER_A)), null);
+  assert.equal(await repliesEnabledFor(db, OWNER_A, "111"), true);
+  assert.equal(await readMeta(db, repliesOffKey(OWNER_B)), null, "the mark is per owner");
 });
 
 test("two owners on one X account answer one person at most twice a day between them, counted under one lock", async (t) => {

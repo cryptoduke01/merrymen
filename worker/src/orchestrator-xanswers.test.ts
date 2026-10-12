@@ -28,7 +28,13 @@ const FACTS: AgentFacts = { tenant: TENANT, agentId: TENANT, slug: null, name: "
 const tag = (over: Record<string, unknown> = {}) => ({ id: MENTION, author_id: "333", conversation_id: MENTION,
   created_at: new Date(NOW - MIN).toISOString(), text: "@pine_stoat what kind of coins do you trade?", ...over });
 
-async function world(t: TestContext, o: { active?: boolean; tz?: string | null; polls?: number } = {}) {
+async function world(t: TestContext, o: {
+  active?: boolean; tz?: string | null; polls?: number;
+  /** The owner's own reply consent, given through the warning before the pass. Default: given. */
+  consent?: boolean;
+  /** MERRYMEN_XPOST_REPLIES_APPROVED as set (null: unset), read as the orchestrator reads it. Default: approved for everyone. */
+  scope?: string | null;
+} = {}) {
   const raw = new DatabaseSync(":memory:");
   t.after(() => raw.close());
   const db = wrapSqlite(raw), dek = randomBytes(32);
@@ -37,7 +43,7 @@ async function world(t: TestContext, o: { active?: boolean; tz?: string | null; 
     tokens: { accessToken: "private-access", refreshToken: "private-refresh", accessExpiresAtMs: NOW + 7 * DAY, scope: "tweet.read tweet.write" },
     nowMs: NOW - 2 * DAY });
   await store.setPosting(db, TENANT, { enabled: true, xUserId: "111" }, NOW - DAY);
-  assert.equal(await store.setReplying(db, TENANT, true, "111", NOW - DAY), true);
+  if (o.consent !== false) assert.equal(await store.setReplying(db, TENANT, true, "111", NOW - DAY), true);
   const intro = await store.schedulePost(db, { tenant: TENANT, xUserId: "111", kind: "intro", dedupeKey: `intro:${TENANT}:111`,
     body: "I am an AI trading agent", nowMs: NOW - DAY, dueAtMs: NOW - DAY });
   await store.claimPost(db, intro!, NOW - DAY);
@@ -58,7 +64,9 @@ async function world(t: TestContext, o: { active?: boolean; tz?: string | null; 
   const poster = makeXPoster({
     app: { clientId: "client", clientSecret: "secret", redirectUri: "https://app.test/connect/x" }, dek,
     creds: { provider: "groq", transport: "openai", model: "test", apiKey: "private-model", baseUrl: "https://model.test/v1", vision: false },
-    knobs: { ...xpostEnv(env), repliesApproved: true, replyPollsPerDay: o.polls },
+    knobs: o.scope === undefined
+      ? { ...xpostEnv(env), repliesApproved: true, replyPollsPerDay: o.polls }
+      : { ...xpostEnv(o.scope === null ? env : { ...env, MERRYMEN_XPOST_REPLIES_APPROVED: o.scope }), replyPollsPerDay: o.polls },
     deps: { dialect: "sqlite", fetch, monotonic: () => 0, member: async () => ({ tz: o.tz ?? null }),
       facts: async () => new Map([[TENANT, FACTS]]),
       // Only the answer prompt gets words back: every other draft passes.
@@ -212,6 +220,55 @@ test("several people tagging in one poll are each answered, a few per poll", asy
     text: n % 2 ? "@pine_stoat how do you pick your coins?" : "@pine_stoat what are you trading lately?" })));
   await w.step();
   assert.equal((await w.answers()).length, 3, "three from this batch, the oldest first");
+});
+
+// ── the operator's own agents' reply consent ────────────────────────────────
+
+test("a house agent's reply consent is recorded once, said once by name, and it answers on that pass", async (t) => {
+  const w = await world(t, { consent: false });
+  assert.equal(await store.replyConsentAt(w.db, TENANT, "111"), null);
+  const first = await w.step();
+  assert.equal(await store.replyConsentAt(w.db, TENANT, "111"), NOW, "recorded when the pass ran");
+  assert.equal(first.notes?.length, 1);
+  assert.match(first.notes![0]!, new RegExp(`house agent ${TENANT}`));
+  assert.doesNotMatch(first.notes![0]!, /private-|pine_stoat/, "no token, nothing but the owner it concerns");
+  assert.equal(w.reads.length, 1, "polled after consent, on the same pass");
+  // The tag came before this consent, so it is not answered: consent never reaches back.
+  assert.equal((await w.answers()).length, 0);
+  const again = await w.step(NOW + MIN);
+  assert.equal(again.notes, undefined, "recorded once");
+  assert.equal(await store.replyConsentAt(w.db, TENANT, "111"), NOW);
+});
+
+test("an owner's replies off is never overridden by the house consent", async (t) => {
+  const w = await world(t, { consent: false });
+  await w.step();
+  assert.equal(await store.setReplying(w.db, TENANT, false, "111", NOW + 30_000), true, "the owner switches replies off in Settings");
+  for (const at of [NOW + MIN, NOW + 2 * MIN, NOW + DAY]) {
+    const r = await w.step(at);
+    assert.equal(r.notes, undefined);
+    assert.equal(await store.replyConsentAt(w.db, TENANT, "111"), null);
+  }
+  assert.equal(w.reads.length, 1, "and it is not polled again");
+});
+
+test("the house consent is only for the agents the operator named, and only while replies are in scope", async (t) => {
+  for (const [what, o] of [
+    ["an owner the operator did not name", { active: false }],
+    ["the scope unset", { scope: null }],
+    ["the scope unreadable", { scope: "yes" }],
+  ] as const) {
+    const w = await world(t, { consent: false, ...o });
+    const r = await w.step();
+    assert.equal(r.notes, undefined, what);
+    assert.equal(await store.replyConsentAt(w.db, TENANT, "111"), null, what);
+    assert.equal(w.reads.length, 0, what);
+  }
+  for (const scope of ["1", "active"]) {
+    const w = await world(t, { consent: false, scope });
+    await w.step();
+    assert.equal(await store.replyConsentAt(w.db, TENANT, "111"), NOW, `scope ${scope}`);
+  }
 });
 
 test("answers go out a minute apart, in their own lane", async (t) => {

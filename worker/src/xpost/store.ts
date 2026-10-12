@@ -438,8 +438,26 @@ export async function firstReplyConsentAt(db: Db, xUserId: string): Promise<numb
   return row?.consent_at_ms === null || row?.consent_at_ms === undefined ? null : num(row.consent_at_ms);
 }
 
-/** Turning replies off leaves ordinary posting on and cancels only waiting replies. */
-export async function setReplying(db: Db, tenant: string, enabled: boolean, seenXUserId: string, nowMs: number): Promise<boolean> {
+/** The durable mark an owner's own "replies off" leaves (xpost_meta), which the house consent never overrides. */
+export function repliesOffKey(tenant: string): string {
+  return `replies-off:${tenantKey(tenant)}`;
+}
+
+/**
+ * Turning replies off leaves ordinary posting on and cancels only waiting replies.
+ *
+ * THE OWNER'S OFF IS REMEMBERED. Turning replies off also writes
+ * repliesOffKey(tenant), and only the owner's own on (the web or the app,
+ * after the reply warning) clears it. `house` is the orchestrator recording
+ * consent for one of the operator's own agents (MERRYMEN_XPOST_ACTIVE_TENANTS,
+ * docs/x-posting.md "Active owners"): it changes nothing — false — while
+ * that mark exists or consent is already recorded, and it leaves the mark
+ * alone. It is decided under the same account row lock as the owner's off,
+ * so the two cannot interleave.
+ */
+export async function setReplying(
+  db: Db, tenant: string, enabled: boolean, seenXUserId: string, nowMs: number, opts: { house?: boolean } = {},
+): Promise<boolean> {
   const key = tenantKey(tenant);
   return db.tx(async (tx) => {
     // Serialize with account replacement, disconnect and posting switches.
@@ -447,16 +465,22 @@ export async function setReplying(db: Db, tenant: string, enabled: boolean, seen
       AND (? = 0 OR (posting_enabled = 1 AND status = 'ok' AND consent_x_user_id = x_user_id))`)
       .run(key, seenXUserId, enabled ? 1 : 0);
     if (current.changes !== 1) return false;
+    if (enabled && opts.house) {
+      if (await readMeta(tx, repliesOffKey(key)) !== null) return false;
+      if (await tx.prepare(`SELECT tenant FROM xpost_reply_accounts WHERE tenant = ?`).get(key) !== undefined) return false;
+    }
     if (enabled) {
       await tx.prepare(`INSERT INTO xpost_reply_accounts (tenant, x_user_id, consent_at_ms) VALUES (?, ?, ?)
         ON CONFLICT (tenant) DO UPDATE SET
           consent_at_ms = CASE WHEN xpost_reply_accounts.x_user_id = excluded.x_user_id THEN xpost_reply_accounts.consent_at_ms ELSE excluded.consent_at_ms END,
           x_user_id = excluded.x_user_id`)
         .run(key, seenXUserId, int(nowMs));
+      if (!opts.house) await tx.prepare(`DELETE FROM xpost_meta WHERE k = ?`).run(repliesOffKey(key));
     } else {
       await tx.prepare(`DELETE FROM xpost_reply_accounts WHERE tenant = ?`).run(key);
       await tx.prepare(`UPDATE xpost_posts SET status = 'cancelled', reason = 'replies-off', updated_at_ms = ?
         WHERE tenant = ? AND kind IN ('reply', 'answer') AND status = 'scheduled'`).run(int(nowMs), key);
+      await writeMeta(tx, repliesOffKey(key), "owner", nowMs);
     }
     return true;
   });

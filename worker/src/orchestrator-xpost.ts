@@ -75,6 +75,7 @@ import {
   releaseSpan,
   returnAllowance,
   schedulePost,
+  setReplying,
   skipScheduled,
   takeAllowance,
   takeOwnerAllowance,
@@ -347,7 +348,13 @@ export async function publicTokenForDecision(
 
 export interface XPoster {
   plan(): { why: string };
-  step(shared: Db, roster: RosterEntry[], profiles: Map<string, ChatProfile>, nowMs: number): Promise<{ log: string | null }>;
+  /**
+   * One pass. `log` is the pass's one summary line, counts only; `notes` are
+   * lines of their own for what an operator must be able to find later, one
+   * per owner it concerns (a house agent's reply consent recorded). Never a
+   * post's text, never a token.
+   */
+  step(shared: Db, roster: RosterEntry[], profiles: Map<string, ChatProfile>, nowMs: number): Promise<{ log: string | null; notes?: string[] }>;
 }
 
 /** The owner-local clock the room runs on, as the planner asks for it. With no zone, UTC. */
@@ -728,6 +735,23 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         // Process opt-outs before sending, even with no model budget. A reply
         // sends only on a pass that successfully refreshed this X account's
         // mentions; a read outage never turns a stale inbox into permission.
+        // THE OPERATOR'S OWN AGENTS' REPLY CONSENT, before they are polled.
+        // MERRYMEN_XPOST_ACTIVE_TENANTS names the operator's own agents: the
+        // operator is their owner, so with posting on (a consent already
+        // given through the posting warning, for this X account) and replies
+        // in scope, their reply consent is recorded once, here. Never over an
+        // owner's own "replies off" (store.setReplying's mark), never for an
+        // owner the operator did not name, and never while the scope is off.
+        const notes: string[] = [];
+        if (repliesApproved) {
+          for (const account of accounts) {
+            if (!active.has(account.tenant.toLowerCase()) || !repliesFor(account.tenant)) continue;
+            if ((await replyConsentAt(shared, account.tenant, account.xUserId)) !== null) continue;
+            if (await setReplying(shared, account.tenant, true, account.xUserId, at(), { house: true })) {
+              notes.push(`xpost: recorded reply consent for house agent ${account.tenant} on its connected X account (MERRYMEN_XPOST_ACTIVE_TENANTS); turning replies off in Settings is never overridden`);
+            }
+          }
+        }
         // Only the owners the operator's scope approves are polled at all.
         const comments = !pause && repliesApproved
           ? await pollComments(shared, accounts.filter((a) => repliesFor(a.tenant)), nowMs, at, bump)
@@ -970,7 +994,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
           await planPass(shared, accounts, byTenant, profiles, nowMs, at, bump, zoneOf, comments);
         }
 
-        return { log: summary(counts, nowMs) };
+        return { log: summary(counts, nowMs), ...(notes.length ? { notes } : {}) };
       } catch (e) {
         const text = (e instanceof Error ? e.message : String(e)).replace(/\s+/g, " ").slice(0, 200);
         if (!lastFail || lastFail.text !== text || nowMs - lastFail.at > 20 * MIN) {
