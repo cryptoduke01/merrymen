@@ -310,8 +310,17 @@ function candleReadOf(r: CandleFetch): CandleRead {
  * the same MERRYMEN_COINGECKO_PRO_SPACING_MS knob and monthly-credit ceiling
  * (20% share for a process-local lane), one 429 cooldown for the whole
  * process, the one-hour plan-refusal latch, and the public fallback the other
- * reads use on a Pro outage. It takes the EVIDENCE row, because somebody is
- * looking at the page — priority within the lane, never extra quota.
+ * reads use on a Pro outage.
+ *
+ * IT TAKES THE DEFAULT ROW, NOT THE EVIDENCE ROW. The token page asks for its
+ * chart and its pool evidence together (app/api/tokens/[address]/route.ts),
+ * chart first. On the evidence row the chart claimed the first slot, so the
+ * two evidence legs started one and two spacings later — at the 3000 ms
+ * default the second began at 6 s, past its 5 s budget, and every cold page
+ * load lost half its activity panel and still paid for it. The chart can wait
+ * where those legs cannot: it has an 8 s budget, a TTL of minutes, and a kept
+ * stale series to draw if it misses. The legs have 5 s and nothing to fall
+ * back on.
  */
 async function fetchCandles(
   poolId: string,
@@ -332,7 +341,7 @@ async function fetchCandles(
       `candles:${poolId.toLowerCase()}:${token.toLowerCase()}:${window}`,
       (lane, remainingMs) => requestCandles(lane, route, token, window, Math.min(READ_BUDGET_MS, remainingMs)),
       (failure) => ({ failed: true, failure }),
-      { lane: "evidence", route, budgetMs: READ_BUDGET_MS },
+      { route, budgetMs: READ_BUDGET_MS },
     ).catch((): CandleFetch => ({ failed: true, failure: "unavailable" })),
   );
 }

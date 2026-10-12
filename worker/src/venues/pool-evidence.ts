@@ -58,7 +58,7 @@ export function parsePriceBars(body: unknown, token: string, now = Date.now()): 
 
 const memo = new Map<string, { until: number; value: EvidenceRead<any> }>();
 const pending = new Map<string, Promise<EvidenceRead<any>>>();
-async function read<T>(key: string, route: string, parse: (body: unknown) => T[] | null): Promise<EvidenceRead<T>> {
+async function read<T>(key: string, route: string, parse: (body: unknown) => T[] | null, budgetMs: number): Promise<EvidenceRead<T>> {
   const source = geckoSource(), cacheKey = `${source.id}:${key}`;
   const cached = memo.get(cacheKey);
   if (cached && cached.until > Date.now()) return cached.value;
@@ -68,11 +68,22 @@ async function read<T>(key: string, route: string, parse: (body: unknown) => T[]
   // THE EVIDENCE ROW: a review is waiting on this leg, so it does not queue
   // behind the tape burst (fleet-feed-cache.ts FeedLane). Priority, not extra
   // quota — each slot it takes pushes the default row back by one.
-  const job = cachedGeckoDetail(key, async (source, remainingMs) => {
+  //
+  // AND THE LEG'S OWN BUDGET, not the cache's 30 s. A leg that cannot get a
+  // slot inside it returns `request-budget` WITHOUT claiming one. Before, a
+  // leg its review had already given up on kept waiting up to 30 s and then
+  // took a slot anyway: one more credit nobody was waiting for, the default
+  // row pushed back once more, and every later review queued behind it. Two
+  // tenants reviewing at once were enough to turn the third's legs into
+  // `candles=budget`, the outcome this row exists to end.
+  const job = cachedGeckoDetail(key, async (source) => {
     const observedAt = Date.now();
     try {
+      // The fetch keeps its own 5 s, not what is left of the budget: a request
+      // that STARTED inside the budget is already paid for, and finishing it
+      // warms the memo for the next review instead of throwing the credit away.
       const res = await fetch(`${source.base}${path}`, {
-        headers: source.headers, redirect: 'error', signal: AbortSignal.timeout(Math.min(5000, remainingMs)),
+        headers: source.headers, redirect: 'error', signal: AbortSignal.timeout(5000),
       });
       if (!res.ok) {
         const refused = await geckoRefusal(res);
@@ -82,7 +93,7 @@ async function read<T>(key: string, route: string, parse: (body: unknown) => T[]
       const data = json.ok ? parse(json.value) : null;
       return data === null ? unavailable('invalid-body') : { failed: false, observedAt, data };
     } catch { return unavailable('unavailable'); }
-  }, unavailable, { lane: 'evidence', route: path }).then(value => {
+  }, unavailable, { lane: 'evidence', route: path, budgetMs }).then(value => {
     if (memo.size >= 256) memo.delete(memo.keys().next().value!);
     memo.set(cacheKey, { until: value.failed ? Date.now() + 5000 : (value.observedAt ?? 0) + 60000, value });
     return value;
@@ -125,9 +136,11 @@ async function read<T>(key: string, route: string, parse: (body: unknown) => T[]
  * ── AND WHAT THIS DELIBERATELY DOES NOT DO ───────────────────────────────
  *
  * It issues no additional requests and shortens no timeout, so the provider
- * quota is untouched. Abandoning a leg does not cancel it: the underlying
- * fetch runs on and fills the memo, so the request already paid for warms the
- * next review rather than being wasted. And a leg that misses its budget is
+ * quota is untouched. Abandoning a leg whose request has STARTED does not
+ * cancel it: the fetch runs on and fills the memo, so the request already paid
+ * for warms the next review rather than being wasted. A leg still waiting for
+ * a pacing slot when its budget ends gives up the wait and spends nothing
+ * (the budget is passed down to the lane). And a leg that misses its budget is
  * recorded as FAILED, never as empty — `observedAt` stays unset, so nothing
  * downstream can mistake it for a reading of no activity.
  */
@@ -167,8 +180,8 @@ export async function readPoolEvidence(
   };
   const candleLeg = legs
     ? legs.candles()
-    : read(`${poolId}:${token}:5m`, `${poolId}/ohlcv/minute?aggregate=5&limit=24&currency=usd&token=${token}`, b => parsePriceBars(b, token));
-  const tradeLeg = legs ? legs.trades() : read(`${poolId}:${token}:trades`, `${poolId}/trades?token=${token}`, b => parseTrades(b, token));
+    : read(`${poolId}:${token}:5m`, `${poolId}/ohlcv/minute?aggregate=5&limit=24&currency=usd&token=${token}`, b => parsePriceBars(b, token), budgetMs);
+  const tradeLeg = legs ? legs.trades() : read(`${poolId}:${token}:trades`, `${poolId}/trades?token=${token}`, b => parseTrades(b, token), budgetMs);
   const [candles, trades] = await Promise.all([within(candleLeg), within(tradeLeg)]);
   return { poolId, token, candles, trades };
 }

@@ -4,7 +4,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
-import { FleetFeedCache, LocalFeedCache, endpointFamily, isPlanRefusal, type FeedCache, type FeedCacheOptions, type FeedClock, type FeedResult } from "./fleet-feed-cache";
+import { DatabaseSync } from "node:sqlite";
+import { FleetFeedCache, LocalFeedCache, credentialFingerprint, endpointFamily, isPlanRefusal, type FeedCache, type FeedCacheOptions, type FeedClock, type FeedResult } from "./fleet-feed-cache";
 
 /**
  * A CLOCK THE TEST DRIVES, because the pace cannot be measured from outside.
@@ -211,7 +212,7 @@ for (const kind of ["fleet", "local"] as const) {
   test(`${kind}: an evidence read skips the default queue and pushes the default row back one slot`, async () => {
     const home = mkdtempSync(path.join(tmpdir(), "gecko-lanes-"));
     const { clock } = stepClock();
-    const cache = make(home, 1000, clock);
+    const cache = make(home, 1000, clock, { priorityRow: true });
     const starts: Record<string, number> = {};
     const unavailable = (failure: string) => ({ failed: true, failure });
     const req = (name: string) => async () => { starts[name] = clock.now(); return { failed: false, observedAt: clock.now() }; };
@@ -235,7 +236,7 @@ for (const kind of ["fleet", "local"] as const) {
     const home = mkdtempSync(path.join(tmpdir(), "gecko-lanes-"));
     const { clock, advance } = stepClock();
     const S = 500;
-    const cache = make(home, S, clock);
+    const cache = make(home, S, clock, { priorityRow: true });
     const starts: number[] = [];
     const unavailable = (failure: string) => ({ failed: true, failure });
     // A deterministic pseudo-random mix of lanes and idle gaps.
@@ -274,7 +275,7 @@ for (const kind of ["fleet", "local"] as const) {
   test(`${kind}: one 429 cooldown covers both rows`, async () => {
     const home = mkdtempSync(path.join(tmpdir(), "gecko-lanes-"));
     const { clock } = stepClock();
-    const cache = make(home, 100, clock);
+    const cache = make(home, 100, clock, { priorityRow: true });
     const unavailable = (failure: string) => ({ failed: true, failure });
     let calls = 0;
     try {
@@ -282,6 +283,45 @@ for (const kind of ["fleet", "local"] as const) {
       const r = await cache.get<FeedResult>("evidence", async () => { calls++; return { failed: false }; }, unavailable, undefined, { lane: "evidence" });
       assert.equal(r.failure, "provider-cooldown");
       assert.equal(calls, 0);
+    } finally { cache.close(); rmSync(home, { recursive: true, force: true }); }
+  });
+
+  /**
+   * THE PUBLIC LANE HAS ONE ROW. Its 6.5 s spacing is what keeps a keyless
+   * worker under the documented ~10/min; a second row let a Brain evidence
+   * leg fire in the same instant as a tape page, eleven requests in a minute,
+   * and the eleventh earns a 429 and a cooldown for every public read. Built
+   * without `priorityRow`, as cacheFor builds the public lane, `evidence` is
+   * just a name: every request is at least one spacing from the last.
+   */
+  test(`${kind}: without priorityRow (the public lane) evidence reads keep the one row's pace`, async () => {
+    const home = mkdtempSync(path.join(tmpdir(), "gecko-lanes-"));
+    const unavailable = (failure: string) => ({ failed: true, failure });
+    const gapsOk = (starts: number[]) => starts.every((s, i) => i === 0 || s - starts[i - 1]! >= 6500);
+    // Fired together, the way a tape page and a review's two legs can be.
+    const driven = fakeClock();
+    const together = make(home, 6500, driven);
+    const burst: number[] = [];
+    const at = (lane: "default" | "evidence", key: string) => together.get<FeedResult>(key, async () => { burst.push(driven.now()); return { failed: false, observedAt: driven.now() }; }, unavailable, undefined, { lane });
+    try {
+      await Promise.all([at("default", "tape"), at("evidence", "candles"), at("evidence", "trades")]);
+      assert.equal(burst.length, 3);
+      assert.deepEqual(burst.map(s => s - burst[0]!), [0, 6500, 13_000]);
+    } finally { together.close(); }
+    // And a long mixed run with idle gaps, one request at a time.
+    const { clock, advance } = stepClock();
+    const cache = make(path.join(home, "mixed"), 6500, clock);
+    const starts: number[] = [];
+    let seed = 11;
+    const rand = () => (seed = (seed * 1103515245 + 12345) % 2 ** 31) / 2 ** 31;
+    try {
+      for (let i = 0; i < 80; i++) {
+        if (rand() < 0.3) advance(Math.floor(rand() * 13_000));
+        const lane = rand() < 0.5 ? "evidence" as const : "default" as const;
+        await cache.get<FeedResult>(`k${i}`, async () => { starts.push(clock.now()); return { failed: false, observedAt: clock.now() }; }, unavailable, undefined, { lane });
+      }
+      assert.equal(starts.length, 80);
+      assert.ok(gapsOk(starts), "two public requests closer than 6.5 s");
     } finally { cache.close(); rmSync(home, { recursive: true, force: true }); }
   });
 
@@ -370,6 +410,70 @@ test("the latch is fleet-wide across connections and said by one of them", async
     finally { c.close(); }
     assert.equal(calls, 2);
   } finally { a.close(); b.close(); rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+
+/**
+ * A LATCH BELONGS TO THE KEY THAT WAS REFUSED.
+ *
+ * The fleet's latches live in a file on the persistent data home, so they
+ * outlive every restart. Keyed by endpoint family alone, a mistyped key
+ * latched each family it touched for an hour, and the operator who fixed the
+ * key and restarted got an hour of `plan-restricted` everywhere — no tape, no
+ * Brain evidence, no public fallback — where the same fix on main recovered on
+ * the next request.
+ */
+test("a latch set under one key is ignored by a cache built for another key on the same file", async () => {
+  const home = mkdtempSync(path.join(tmpdir(), "gecko-latch-key-"));
+  const { clock, advance } = stepClock();
+  const lines: string[] = [];
+  const log = (line: string) => lines.push(line);
+  const unavailable = (failure: string) => ({ failed: true, failure });
+  const route = { route: "/networks/robinhood/trending_pools?page=1" };
+  const mistyped = credentialFingerprint("mistyped-pro-key"), fixed = credentialFingerprint("fixed-pro-key");
+  let calls = 0;
+  const refused = async () => { calls++; return { failed: true, failure: "http-401" }; };
+  const healthy = async () => { calls++; return { failed: false, observedAt: clock.now() }; };
+  try {
+    const a = new FleetFeedCache(home, 100, clock, { latchRefusals: true, credential: mistyped, log });
+    try { assert.equal((await a.get<FeedResult>("p1", refused, unavailable, undefined, route)).failure, "http-401"); } finally { a.close(); }
+    assert.equal(lines.length, 1);
+    // The operator fixes the key and restarts: same file, ten seconds later.
+    advance(10_000);
+    const b = new FleetFeedCache(home, 100, clock, { latchRefusals: true, credential: fixed, log });
+    try { assert.equal((await b.get<FeedResult>("p2", healthy, unavailable, undefined, route)).failed, false); } finally { b.close(); }
+    assert.equal(calls, 2, "the fixed key is asked at once, not an hour later");
+    // The refused key, back inside the hour, is still latched and asks nothing.
+    const c = new FleetFeedCache(home, 100, clock, { latchRefusals: true, credential: mistyped, log });
+    try { assert.equal((await c.get<FeedResult>("p3", refused, unavailable, undefined, route)).failure, "plan-restricted"); } finally { c.close(); }
+    assert.equal(calls, 2);
+    // What the file holds is a fingerprint, never the key; the log holds neither.
+    const db = new DatabaseSync(path.join(home, "gecko-feed-cache.sqlite"));
+    try {
+      const rows = db.prepare("SELECT family, credential FROM plan_refusal").all() as { family: string; credential: string }[];
+      assert.deepEqual(rows.map(r => ({ ...r })), [{ family: "networks/robinhood/trending_pools", credential: mistyped }]);
+    } finally { db.close(); }
+    assert.doesNotMatch(lines.join("\n"), new RegExp(`mistyped-pro-key|${mistyped}`));
+  } finally { rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+
+test("local: a latch is bound to the credential it was built with", async () => {
+  const { clock } = stepClock();
+  const unavailable = (failure: string) => ({ failed: true, failure });
+  const route = { route: "/networks/robinhood/trending_pools?page=1" };
+  const cache = new LocalFeedCache(100, clock, { latchRefusals: true, credential: credentialFingerprint("k"), log: () => {} });
+  let calls = 0;
+  await cache.get<FeedResult>("a", async () => { calls++; return { failed: true, failure: "http-403" }; }, unavailable, undefined, route);
+  assert.equal((await cache.get<FeedResult>("b", async () => { calls++; return { failed: false }; }, unavailable, undefined, route)).failure, "plan-restricted");
+  assert.equal(calls, 1);
+  cache.close();
+});
+
+test("a credential fingerprint is short, stable, distinct per key and not the key", () => {
+  const fp = credentialFingerprint("private-pro-key");
+  assert.match(fp, /^[0-9a-f]{12}$/);
+  assert.equal(credentialFingerprint("private-pro-key"), fp);
+  assert.notEqual(credentialFingerprint("private-pro-key-2"), fp);
+  assert.ok(!fp.includes("private"));
 });
 
 test("endpoint families drop queries and ids, never keep addresses", () => {

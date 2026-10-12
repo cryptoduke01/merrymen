@@ -26,6 +26,8 @@ import { afterEach, beforeEach, describe, it } from "node:test";
 
 import { readCandles, __resetCandleCacheForTest } from "./read-candles";
 import { resetGeckoFeedsForTest } from "../../../worker/src/venues/geckoterminal";
+import { EVIDENCE_BUDGET_MS, readPoolEvidence } from "../../../worker/src/venues/pool-evidence";
+import type { FeedClock } from "../../../worker/src/venues/fleet-feed-cache";
 
 /** One pool, one window, so every case shares a cache key. */
 const POOL = "0xpool";
@@ -175,6 +177,37 @@ describe("chart reads on the Pro key are paced and share one cooldown", () => {
     assert.equal(starts[1]! - starts[0]!, 1200);
   });
 
+  /**
+   * THE TOKEN PAGE ASKS FOR ITS CHART AND ITS POOL EVIDENCE TOGETHER, chart
+   * first (app/api/tokens/[address]/route.ts). When the chart took the
+   * evidence row it claimed the first slot, so the evidence legs began at 3 s
+   * and 6 s, and the second was past its 5 s budget on every cold load. The
+   * chart now waits on the default row; both legs begin inside the budget.
+   */
+  it("a cold token page's chart does not push its evidence legs past their budget", async () => {
+    const vc = virtualClock(now);
+    resetGeckoFeedsForTest(vc.clock);
+    const t0 = vc.now();
+    const asked: { leg: string; at: number }[] = [];
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      assert.equal(url.hostname, "pro-api.coingecko.com");
+      const leg = url.pathname.endsWith("/trades") ? "trades" : url.pathname.includes("/ohlcv/minute") ? "evidence-candles" : "chart";
+      asked.push({ leg, at: vc.now() - t0 });
+      if (leg === "trades") return Response.json({ data: [] });
+      if (leg === "evidence-candles") return Response.json({ data: { attributes: { ohlcv_list: [] } }, meta: { base: { address: TOKEN } } });
+      return Response.json(okBody());
+    }) as typeof fetch;
+    const [chart, evidence] = await vc.run(Promise.all([readCandles(pool("8"), TOKEN, "1h"), readPoolEvidence(pool("8"), TOKEN)]));
+    assert.equal(chart.state, "ok");
+    assert.equal(evidence.candles.failed, false, `evidence candles: ${evidence.candles.failure}`);
+    assert.equal(evidence.trades.failed, false, `evidence trades: ${evidence.trades.failure}`);
+    const legs = asked.filter((r) => r.leg !== "chart");
+    assert.equal(legs.length, 2);
+    assert.ok(legs.every((r) => r.at < EVIDENCE_BUDGET_MS), JSON.stringify(asked));
+    assert.deepEqual(asked.find((r) => r.leg === "chart"), { leg: "chart", at: 0 });
+  });
+
   it("one Pro 429 holds back every pool in the process, not only the one that earned it", async () => {
     const pro: string[] = [];
     globalThis.fetch = (async (input: string | URL | Request) => {
@@ -202,3 +235,32 @@ describe("chart reads on the Pro key are paced and share one cooldown", () => {
     assert.equal(read.candles.length, 1);
   });
 });
+
+/**
+ * VIRTUAL TIME, REAL CONCURRENCY: every sleeper waits for its own instant and
+ * time moves only when nothing else can run, straight to the earliest waiter.
+ * (Same helper as worker/src/venues/pool-evidence-budget.test.ts.)
+ */
+function virtualClock(start: number) {
+  let t = start, seq = 0;
+  const waiters: { at: number; seq: number; wake: () => void }[] = [];
+  const clock: FeedClock = {
+    now: () => t,
+    sleep: (ms) => new Promise<void>((wake) => { waiters.push({ at: t + Math.max(0, ms), seq: seq++, wake }); }),
+  };
+  async function run<T>(work: Promise<T>): Promise<T> {
+    let settled = false;
+    work.then(() => { settled = true; }, () => { settled = true; });
+    for (let spins = 0; !settled; spins++) {
+      assert.ok(spins < 10_000, "the work is waiting on something the virtual clock cannot wake");
+      await new Promise((resolve) => setImmediate(resolve));
+      if (settled || !waiters.length) continue;
+      waiters.sort((a, b) => a.at - b.at || a.seq - b.seq);
+      const next = waiters.shift()!;
+      t = Math.max(t, next.at);
+      next.wake();
+    }
+    return work;
+  }
+  return { clock, run, now: () => t };
+}

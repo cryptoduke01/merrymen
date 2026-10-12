@@ -199,7 +199,11 @@ test('public fallback keeps exact-token evidence and never receives Pro credenti
     return Response.json(url.pathname.endsWith('/trades') ? { data: [] } : { data: { attributes: { ohlcv_list: [[end - 600, 1, 2, 1, 2], [end - 300, 2, 3, 2, 3]] } }, meta: { base: { address: target } } });
   };
   try {
-    const evidence = await readPoolEvidence(pool, target);
+    // A 10 s budget, because the public lane keeps its 6.5 s spacing for every
+    // request (evidence included), so its second leg starts at 6.5 s. At the
+    // default 5 s that leg reports request-budget and spends nothing
+    // (pool-evidence-budget.test.ts); this case is about what the legs carry.
+    const evidence = await readPoolEvidence(pool, target, 10_000);
     assert.equal(evidence.candles.failed, false);
     assert.equal(evidence.trades.failed, false);
     assert.equal(evidence.candles.provider, 'geckoterminal-public');

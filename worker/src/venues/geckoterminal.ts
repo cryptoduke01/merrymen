@@ -29,7 +29,7 @@
  */
 
 import { readBounded, readBoundedJson } from "../bounded-read";
-import { FleetFeedCache, LocalFeedCache, REAL_FEED_CLOCK, type FeedCache, type FeedClock, type FeedLane, type FeedResult } from "./fleet-feed-cache";
+import { FleetFeedCache, LocalFeedCache, REAL_FEED_CLOCK, credentialFingerprint, type FeedCache, type FeedClock, type FeedLane, type FeedResult } from "./fleet-feed-cache";
 import { proPacing } from "./coingecko-pacing";
 import path from "node:path";
 
@@ -85,13 +85,21 @@ export function laneSpacingMs(source: GeckoSource, fleet: boolean, env: Paramete
 
 function cacheFor(source: GeckoSource): FeedCache {
   const home = process.env.MERRYMEN_FLEET_HOME?.trim();
-  const key = `${home ? path.resolve(home) : "local"}:${source.id}`;
+  const pro = source.id === "coingecko-pro";
+  // Which key this lane sends, as a fingerprint only (never the key): a plan
+  // latch belongs to the credential that was refused, so a fixed or rotated
+  // key starts clean — in this process, and in the fleet's persistent file.
+  const credential = pro ? credentialFingerprint(source.headers["x-cg-pro-api-key"] ?? "") : "";
+  const key = `${home ? path.resolve(home) : "local"}:${source.id}:${credential}`;
   let cache = feedCaches.get(key);
   if (!cache) {
     const spacing = laneSpacingMs(source, Boolean(home));
     // Only the credit-metered lane latches plan refusals; the public lane has
-    // no plan, and a 401 there would be a different fact.
-    const options = { latchRefusals: source.id === "coingecko-pro" };
+    // no plan, and a 401 there would be a different fact. And only that lane
+    // has the evidence row: the public lane's 6.5 s spacing is its whole
+    // defence against a ~10/min limit, so every public request, whoever
+    // asked, keeps to it (fleet-feed-cache.ts FeedLane).
+    const options = { latchRefusals: pro, priorityRow: pro, credential };
     cache = home ? new FleetFeedCache(path.join(home, source.id), spacing, feedClock, options) : new LocalFeedCache(spacing, feedClock, options);
     feedCaches.set(key, cache);
   }
@@ -100,7 +108,11 @@ function cacheFor(source: GeckoSource): FeedCache {
 
 /** How one read wants to be queued; every field is optional and defaults to the old behaviour. */
 export interface GeckoReadOptions {
-  /** Pacing row (fleet-feed-cache.ts FeedLane). Omitted: the default row. */
+  /**
+   * Pacing row (fleet-feed-cache.ts FeedLane). Omitted: the default row.
+   * Honoured on the Pro lane only; a public read (keyless, or the fallback
+   * during a Pro outage) always takes the public lane's one row.
+   */
   lane?: FeedLane;
   /**
    * The provider route asked for, path and query, as spliced after the base.
@@ -110,8 +122,9 @@ export interface GeckoReadOptions {
   route?: string;
   /**
    * The whole read's budget across both sources, at most the shared 30 s.
-   * For a caller somebody is waiting on (a page request), so a busy lane
-   * answers "unavailable" rather than holding the page open.
+   * For a caller somebody is waiting on (a page request, a Brain evidence
+   * leg), so a busy lane answers `request-budget` WITHOUT claiming a slot
+   * rather than holding the caller open or spending a credit nobody waits for.
    */
   budgetMs?: number;
 }

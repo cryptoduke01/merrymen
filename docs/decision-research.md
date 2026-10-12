@@ -52,13 +52,17 @@ below the floor is raised to it and said once at startup. An unreadable value
 keeps the default and is named once; the value itself is never printed. Each
 process logs one `[gecko] coingecko-pro ... lane:` line with the pace it settled on.
 
-**Evidence goes first.** The Brain's candle and trade legs, and web's chart
-reads on the Pro key, use a second pacing row so they no longer queue behind
-the sixty-second tape burst. That row is priority, not extra quota: each slot
-it takes pushes the default row (feeds, desk, facts, X) back by one. In any
-stretch of time the two rows together make at most one request more than a
-single row could, so the monthly floor above still holds. One 429 cooldown
-still covers both rows.
+**Evidence goes first.** Pool-evidence candle and trade legs (the Brain's,
+and the token page's activity panel on web) use a second pacing row on the
+Pro lane, so they no longer queue behind the sixty-second tape burst. That
+row is priority, not extra quota: each slot it takes pushes the default row
+(feeds, desk, facts, X, web charts) back by one. In any stretch of time the
+two rows together make at most one request more than a single row could, so
+the monthly floor above still holds. One 429 cooldown still covers both rows.
+Each leg waits for a slot only within its own 5-second budget; a leg that
+cannot get one in time reports `request-budget` and spends nothing. The
+public lane has no second row: without a key, and during a Pro outage
+fallback, every public request stays at least 6.5 seconds from the last.
 
 **Plan refusals are latched.** On the Pro lane, a 401 or 403, or a body with
 CoinGecko error code 10005 ("you may not have access to this endpoint"),
@@ -67,11 +71,15 @@ removed) for one hour, fleet-wide. A latched read reports `plan-restricted`
 and does not fall back to the public API. Each latch is logged once, by
 endpoint family only. 429s and 5xx responses are never latched. A revoked
 or mistyped key latches each family it touches in the same way, so the log
-names every refused endpoint within a few minutes.
+names every refused endpoint within a few minutes. Latches belong to the key
+that was refused (stored as a short sha256 fingerprint, never the key), so
+fixing or rotating `MERRYMEN_COINGECKO_PRO_API_KEY` and restarting asks
+every endpoint again at once. A plan upgrade under the same key takes effect
+when the hour runs out.
 
-Web's chart reads on the Pro key now go through web's shared lane: they are
-paced and respect the 429 cooldown that any other web read set. Without a key,
-charts keep the previous unpaced public behaviour.
+Web's chart reads on the Pro key now go through web's shared lane on its
+default row: they are paced and respect the 429 cooldown that any other web
+read set. Without a key, charts keep the previous unpaced public behaviour.
 
 ## Opt-in decision evidence
 

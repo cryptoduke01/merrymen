@@ -708,6 +708,76 @@ describe("the Pro lane's pace, priority and plan latch", () => {
     } finally { console.warn = warn; }
   });
 
+  /** A Brain-style evidence detail read of one pool's trades, on whichever source the lane picks. */
+  const evidenceRead = (n: string) => {
+    const route = `/networks/robinhood/pools/0x${n.repeat(40)}/trades?token=0x${"3".repeat(40)}`;
+    return cachedGeckoDetail<FeedResult>(`evidence-${n}`, async (source) => {
+      const res = await fetch(`${source.base}${route}`);
+      return res.ok ? { failed: false, observedAt: now } : { failed: true, failure: `http-${res.status}` };
+    }, failure => ({ failed: true, failure }), { lane: "evidence", route });
+  };
+
+  it("WITHOUT A KEY there is no evidence row: every public request stays 6.5 s from the last", async () => {
+    delete process.env.MERRYMEN_COINGECKO_PRO_API_KEY;
+    const starts: number[] = [];
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      assert.ok(String(input).startsWith("https://api.geckoterminal.com/"));
+      starts.push(now);
+      return Response.json({ data: [CHUMP] });
+    }) as typeof globalThis.fetch;
+    await fetchGeckoPoolsResult("trending_pools");
+    await evidenceRead("4");
+    await evidenceRead("5");
+    await fetchGeckoPoolsResult("new_pools");
+    assert.deepEqual(starts.map(s => s - starts[0]!), [0, 6500, 13_000, 19_500]);
+  });
+
+  it("nor during a Pro outage: an evidence read's public fallback waits its 6.5 s turn", async () => {
+    const pub: number[] = [];
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      if (String(input).includes("pro-api")) return new Response("down", { status: 503 });
+      pub.push(now);
+      return Response.json({ data: [CHUMP] });
+    }) as typeof globalThis.fetch;
+    assert.equal((await fetchGeckoPoolsResult("trending_pools")).provider, "geckoterminal-public");
+    const r = await evidenceRead("6");
+    assert.equal(r.provider, "geckoterminal-public");
+    assert.equal(r.primaryFailure, "http-503");
+    assert.deepEqual(pub.map(s => s - pub[0]!), [0, 6500]);
+  });
+
+  it("a plan latch belongs to the key: fixing the key and restarting asks again at once", async () => {
+    const home = mkdtempSync(path.join(tmpdir(), "gecko-latch-key-"));
+    const warn = console.warn;
+    console.warn = () => {};
+    const clock = () => ({ now: () => now, sleep: async (ms: number) => { now += ms; } });
+    let asked = 0;
+    globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+      asked++;
+      return new Headers(init?.headers).get("x-cg-pro-api-key") === "mistyped-pro-key"
+        ? new Response("", { status: 401 })
+        : Response.json({ data: [CHUMP] });
+    }) as typeof globalThis.fetch;
+    try {
+      process.env.MERRYMEN_FLEET_HOME = home;
+      process.env.MERRYMEN_COINGECKO_PRO_API_KEY = "mistyped-pro-key";
+      assert.equal((await fetchGeckoPoolsResult("trending_pools")).failure, "http-401");
+      // The operator fixes the key and restarts: same persistent fleet home.
+      now += 10_000;
+      resetGeckoFeedsForTest(clock());
+      process.env.MERRYMEN_COINGECKO_PRO_API_KEY = "fixed-pro-key";
+      const fixed = await fetchGeckoPoolsResult("trending_pools", { page: 2 });
+      assert.equal(fixed.failed, false, "not an hour of plan-restricted after the fix");
+      assert.equal(asked, 2);
+      // The refused key, back inside the hour, is still latched and asks nothing.
+      now += 10_000;
+      resetGeckoFeedsForTest(clock());
+      process.env.MERRYMEN_COINGECKO_PRO_API_KEY = "mistyped-pro-key";
+      assert.equal((await fetchGeckoPoolsResult("trending_pools", { page: 3 })).failure, "plan-restricted");
+      assert.equal(asked, 2);
+    } finally { console.warn = warn; resetGeckoFeedsForTest(); rmSync(home, { recursive: true, force: true }); }
+  });
+
   it("a 5xx or 429 on Pro is never latched", async () => {
     let pro = 0;
     globalThis.fetch = (async (input: string | URL | Request) => {

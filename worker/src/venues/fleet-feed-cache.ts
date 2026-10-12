@@ -1,7 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 
 export interface FeedResult {
@@ -71,6 +71,13 @@ function cooldownDelay(result: FeedResult, failures: number): number {
  *
  * One 429 cooldown still covers both rows: a rate limit is a fact about the
  * key, not about which caller earned it.
+ *
+ * ONLY A CACHE BUILT WITH `priorityRow` HAS THE SECOND ROW — the Pro lane.
+ * The keyless public lane's 6.5 s spacing is its whole defence against a
+ * documented ~10/min limit, and even a one-request burst there earns a 429
+ * and a cooldown of a minute or more for every public read. So on a cache
+ * without it an `evidence` read simply takes the default row, and every
+ * request, whoever asked, is at least one spacing from the last.
  */
 export type FeedLane = "default" | "evidence";
 
@@ -92,6 +99,24 @@ export interface FeedCacheOptions {
    * and asking again every five seconds is a slot spent on a known answer.
    */
   latchRefusals?: boolean;
+  /**
+   * WHOSE refusal a latch records: a short fingerprint of the credential the
+   * lane sends (credentialFingerprint), never the credential itself.
+   *
+   * A latch is a fact about one key's plan, and the fleet's latches live in a
+   * file on the persistent data home that outlives every restart. Unbound, a
+   * mistyped or expired key latched each family it touched for an hour, and
+   * fixing the key and restarting changed nothing for that hour: every family
+   * still answered `plan-restricted` without asking, with no public fallback,
+   * which is worse than both a working key and no key. Bound, a different key
+   * starts clean and the old key's latches simply expire.
+   */
+  credential?: string;
+  /**
+   * Honour `lane: "evidence"` with its own pacing row (see FeedLane). Off, the
+   * default, every read takes the default row. The Pro lane only.
+   */
+  priorityRow?: boolean;
   /** Where a newly set latch is said. Defaults to console.warn. */
   log?: (line: string) => void;
 }
@@ -107,6 +132,11 @@ export interface FeedCacheOptions {
  *
  * NEVER ON 5xx OR 429. Those are about the provider's moment, not the plan,
  * and they already have their own short cache and the shared cooldown.
+ *
+ * PER KEY. A latch belongs to the credential that was refused
+ * (FeedCacheOptions.credential), so a fixed or rotated key is asked afresh on
+ * its first request. A plan upgrade under the SAME key takes effect when the
+ * hour runs out.
  */
 export const PLAN_LATCH_MS = 3_600_000;
 
@@ -129,6 +159,15 @@ export function endpointFamily(route: string): string {
   return pathOnly.split("/").map(seg => isId(seg) ? "{id}" : seg).join("/").slice(0, 160);
 }
 
+/**
+ * A credential as a latch may record it: the first 12 hex characters of its
+ * sha256. Enough to tell two keys apart, not enough to recover either, and
+ * never logged.
+ */
+export function credentialFingerprint(secret: string): string {
+  return createHash("sha256").update(secret).digest("hex").slice(0, 12);
+}
+
 const latchLine = (family: string, failure: string | undefined) =>
   `[gecko] coingecko-pro refused ${family} (${failure ?? "refused"}); not asking that endpoint again for 1h`;
 
@@ -142,15 +181,20 @@ export interface FeedCache {
 export class FleetFeedCache implements FeedCache {
   private db: DatabaseSync;
   private latchRefusals: boolean;
+  private credential: string;
+  private priorityRow: boolean;
   private log: (line: string) => void;
   constructor(home: string, private spacingMs = 6500, private clock: FeedClock = REAL_FEED_CLOCK, options: FeedCacheOptions = {}) {
     this.latchRefusals = options.latchRefusals === true;
+    this.credential = options.credential ?? "";
+    this.priorityRow = options.priorityRow === true;
     this.log = options.log ?? (line => console.warn(line));
     mkdirSync(home, { recursive: true });
     this.db = new DatabaseSync(path.join(home, "gecko-feed-cache.sqlite"));
     // Row 1 is the default pacing row every existing caller has always used;
     // row 2 is the evidence row (see FeedLane). Additive: an older process on
     // the same file keeps using row 1 and never reads row 2 or the latch.
+    // Latches are keyed by family AND credential (FeedCacheOptions.credential).
     this.db.exec(`PRAGMA busy_timeout=1000;
       CREATE TABLE IF NOT EXISTS pages (key TEXT PRIMARY KEY, payload TEXT, expires REAL NOT NULL DEFAULT 0, lease TEXT, lease_until REAL NOT NULL DEFAULT 0);
       CREATE TABLE IF NOT EXISTS cooldown (id INTEGER PRIMARY KEY, until_ms REAL NOT NULL);
@@ -160,19 +204,19 @@ export class FleetFeedCache implements FeedCache {
       CREATE TABLE IF NOT EXISTS pacing (id INTEGER PRIMARY KEY, next_ms REAL NOT NULL);
       INSERT OR IGNORE INTO pacing VALUES (1,0);
       INSERT OR IGNORE INTO pacing VALUES (2,0);
-      CREATE TABLE IF NOT EXISTS plan_latch (family TEXT PRIMARY KEY, until_ms REAL NOT NULL);`);
+      CREATE TABLE IF NOT EXISTS plan_refusal (family TEXT NOT NULL, credential TEXT NOT NULL, until_ms REAL NOT NULL, PRIMARY KEY (family, credential));`);
   }
   close() { this.db.close(); }
 
   private latched(family: string | undefined, now: number): boolean {
     if (!family) return false;
-    const row = this.db.prepare("SELECT until_ms FROM plan_latch WHERE family=?").get(family) as { until_ms: number } | undefined;
+    const row = this.db.prepare("SELECT until_ms FROM plan_refusal WHERE family=? AND credential=?").get(family, this.credential) as { until_ms: number } | undefined;
     return (row?.until_ms ?? 0) > now;
   }
 
   async get<T extends FeedResult>(key: string, request: () => Promise<T>, unavailable: (reason: string) => T, deadlineMs = this.clock.now() + 30_000, options: FeedGetOptions = {}): Promise<T> {
     const deadline = Math.min(deadlineMs, this.clock.now() + 30_000);
-    const row = options.lane === "evidence" ? 2 : 1;
+    const row = options.lane === "evidence" && this.priorityRow ? 2 : 1;
     const family = this.latchRefusals && options.route ? endpointFamily(options.route) : undefined;
     while (this.clock.now() < deadline) {
       const now = this.clock.now();
@@ -216,8 +260,8 @@ export class FleetFeedCache implements FeedCache {
         if (family && isPlanRefusal(result.failure)) {
           // Set only when no live latch exists, so the process that set it is
           // the one that says so: once per latch, not once per tenant.
-          const set = this.db.prepare(`INSERT INTO plan_latch(family,until_ms) VALUES(?,?)
-            ON CONFLICT(family) DO UPDATE SET until_ms=excluded.until_ms WHERE plan_latch.until_ms<=?`).run(family, at + PLAN_LATCH_MS, at);
+          const set = this.db.prepare(`INSERT INTO plan_refusal(family,credential,until_ms) VALUES(?,?,?)
+            ON CONFLICT(family,credential) DO UPDATE SET until_ms=excluded.until_ms WHERE plan_refusal.until_ms<=?`).run(family, this.credential, at + PLAN_LATCH_MS, at);
           if (set.changes) this.log(latchLine(family, result.failure));
         }
         if (result.failure === "http-429") {
@@ -247,22 +291,27 @@ export class LocalFeedCache implements FeedCache {
   private nextMs: [number, number] = [0, 0];
   private untilMs = 0;
   private failures = 0;
+  /** In memory, so it never outlives the process; `credential` binds it anyway, for parity. */
   private latches = new Map<string, number>();
   private latchRefusals: boolean;
+  private credential: string;
+  private priorityRow: boolean;
   private log: (line: string) => void;
   constructor(private spacingMs: number, private clock: FeedClock = REAL_FEED_CLOCK, options: FeedCacheOptions = {}) {
     this.latchRefusals = options.latchRefusals === true;
+    this.credential = options.credential ?? "";
+    this.priorityRow = options.priorityRow === true;
     this.log = options.log ?? (line => console.warn(line));
   }
   close() { this.pages.clear(); this.latches.clear(); }
 
   private latched(family: string | undefined, now: number): boolean {
-    return family !== undefined && (this.latches.get(family) ?? 0) > now;
+    return family !== undefined && (this.latches.get(`${this.credential}\n${family}`) ?? 0) > now;
   }
 
   async get<T extends FeedResult>(key: string, request: () => Promise<T>, unavailable: (reason: string) => T, deadlineMs = this.clock.now() + 30_000, options: FeedGetOptions = {}): Promise<T> {
     const deadline = Math.min(deadlineMs, this.clock.now() + 30_000);
-    const row = options.lane === "evidence" ? 1 : 0;
+    const row = options.lane === "evidence" && this.priorityRow ? 1 : 0;
     const family = this.latchRefusals && options.route ? endpointFamily(options.route) : undefined;
     while (this.clock.now() < deadline) {
       const now = this.clock.now(), hit = this.pages.get(key);
@@ -286,7 +335,7 @@ export class LocalFeedCache implements FeedCache {
         const result = await request(), at = this.clock.now();
         if (family && isPlanRefusal(result.failure) && !this.latched(family, at)) {
           if (this.latches.size >= 256) this.latches.delete(this.latches.keys().next().value!);
-          this.latches.set(family, at + PLAN_LATCH_MS);
+          this.latches.set(`${this.credential}\n${family}`, at + PLAN_LATCH_MS);
           this.log(latchLine(family, result.failure));
         }
         if (result.failure === "http-429") {
