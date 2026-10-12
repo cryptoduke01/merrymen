@@ -432,3 +432,19 @@ describe("distress is answered by nothing, before the advice flag, on the answer
   });
 });
 
+describe("red-team review of a964a74c: what the answer path answers by nothing (2026-10-12)", () => {
+  const tag = (text: string) => comment(text, { conversationId: "333", inReplyToTweetId: "" });
+  const at = (text: string, research = true) => tagCandidate(tag(`@alanaidale ${text}`), { xUserId: "222", username: "alanaidale", research });
+  it("money someone cannot lose is distress: no decline, no draft, on the answer path and the comment path", () => {
+    // Each POSTED at a964a74c as code's joking decline ("haha, brave soul. …", "… wishing you good luck."); 5f9ec3b2 answered none.
+    for (const text of ["i can't pay my bills, should i buy $PEPE?", "should i put my rent money into $PEPE?", "i'm broke and desperate, should i buy $PEPE?",
+      "i'm in debt, should i ape $PEPE to get out?", "should i put my retirement into $DOGE?", "should i gamble my emergency fund on eth?",
+      "should i put my student loan into $PEPE?", "should i put my kids' college fund into $PEPE?", "should i put my paycheck into $PEPE?", "should i remortgage to buy $PEPE?",
+      "should i put my savings into eth?", "can't afford groceries, should i sell my eth?"]) {
+      for (const research of [true, false]) assert.deepEqual(at(text, research), { ok: false, reason: "distress" }, text);
+      assert.deepEqual(replyCandidate(comment(text.replace(/\$[A-Z]+/g, "this coin")), CTX), { ok: false, reason: "distress" }, text);
+    }
+    assert.ok(advised(at("should i buy pepe?")), "a plain coin's advice is still flagged");
+  });
+});
+

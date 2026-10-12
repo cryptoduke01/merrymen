@@ -117,13 +117,20 @@ function styled(slots: readonly [readonly string[], readonly string[], readonly 
  * "lol, wish i knew" or "ha, gotta love the confidence" under a shill as
  * sharing the hope. Those parts are gone; what is left reacts to the asking,
  * never to the coin.
+ *
+ * NOR A JOKE AT THE ASKER, NOR LUCK WISHED (red-team review of a964a74c,
+ * 2026-10-12): "haha, brave soul", "ooh, spicy ask", "hmm, cheeky fren" and
+ * "heh, nice try" read as mocking under a question about rent or bills, and
+ * "wishing you good luck" as a send-off into the trade. Each is a plain
+ * acknowledgement now ("fair ask", "i hear you"), and the close leaves the
+ * call with the asker without wishing it well.
  */
 export const DECLINE_SLOTS: readonly [readonly string[], readonly string[], readonly string[]] = Object.freeze([
-  Object.freeze(["ah, the classic question", "whoa, straight to it", "heh, nice try", "ha, that old chestnut",
-    "ooh, spicy ask", "haha, brave soul", "hmm, cheeky fren", "ahh, the eternal riddle"]),
+  Object.freeze(["ah, the classic question", "whoa, straight to it", "fair ask", "ha, that old chestnut",
+    "i hear you", "appreciate you asking", "gotcha", "ahh, the eternal riddle"]),
   Object.freeze(["picking winners: not my department", "no calls for strangers, sorry", "the crystal ball's foggy", "above my pay grade",
     "direction from a bot? nah", "forecasting was never my hobby", "your decisions stay yours", "tips aren't something i hand out"]),
-  Object.freeze(["wishing you good luck", "you know your risk better than me", "the timeline has opinions enough", "process talk is welcome",
+  Object.freeze(["your own read matters most", "you know your risk better than me", "the timeline has opinions enough", "process talk is welcome",
     "mum's the word on the rest", "that one stays your call", "staying in my lane over here", "no hard feelings at all"]),
 ]) as unknown as readonly [readonly string[], readonly string[], readonly string[]];
 
