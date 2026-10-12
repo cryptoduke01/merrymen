@@ -260,7 +260,7 @@ export function xpostEnv(env: Record<string, string | undefined> = process.env):
   // has nothing to ride on, and says so rather than seeming on.
   const research = env.MERRYMEN_XPOST_RESEARCH?.trim() === "1";
   const fomoAsked = env.MERRYMEN_XPOST_FOMO?.trim() === "1";
-  if (fomoAsked && !research) notes.push("xpost: MERRYMEN_XPOST_FOMO=1 does nothing without MERRYMEN_XPOST_RESEARCH=1 — answers ask Fomo only while they research");
+  if (fomoAsked && !research) notes.push("xpost: MERRYMEN_XPOST_FOMO=1 does nothing without MERRYMEN_XPOST_RESEARCH=1 — answers ask Fomo only while research is on");
   const perHourRaw = env.MERRYMEN_XPOST_RESEARCH_PER_HOUR?.trim();
   const researchPerHour = perHourRaw ? count(perHourRaw) : null;
   if (perHourRaw && researchPerHour === null) notes.push("xpost: ignoring MERRYMEN_XPOST_RESEARCH_PER_HOUR — it is not a count of lookups; the default applies");
