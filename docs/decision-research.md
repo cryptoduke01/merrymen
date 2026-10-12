@@ -55,6 +55,16 @@ Public peer transport is unchanged. The summary reaches only the same account's
 decision context; no private trade text, counterparty data or credentials are
 passed through it. Legacy published outcomes are labelled gross before fees/gas.
 
+The same entry reviews also get a momentum entry plan appended to the strategy
+brief: the fast Trencher's mechanical exits as configured (stop, take profit,
+time stop and liquidity drain), a minutes-long horizon, the round-trip cost as a
+share of the entry and the move that pays it (from the quotes above, or a gas
+and turnover-fee floor when they are unavailable), and how to estimate edge from
+the odds of reaching the take-profit before the stop rather than inventing one.
+It defines continuation and distribution over short windows and states that
+missing news, fundamentals or social-media data is not on its own a reason to
+hold for this strategy. Every disqualifier and check in the persona still applies.
+
 This opt-in changes research inputs only. It never changes per-trade/day caps,
 operation counts, drawdown checks, signed expiry, execution routes or exit rules.
 

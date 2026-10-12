@@ -147,7 +147,7 @@ import { MarketReviewClock, quietReviewRow, quietReviewScope } from "./market-re
 import { ChainCoinNames, makeDecisionNamer, warmHeldNames } from "./decision-name";
 import { intentDecisionRow } from "./decision-row";
 import { memoryLines, positionContext, sentimentLine, technicalLine } from "./brain-material";
-import { DECISION_RESEARCH_GUIDANCE, decisionResearchEnabledFor, entryCostEvidence, researchEntrySize } from "./decision-research";
+import { DECISION_RESEARCH_GUIDANCE, decisionResearchEnabledFor, entryCostResearch, researchEntrySize, trenchBreakEven, trenchMomentumBrief } from "./decision-research";
 import { readOwnOutcomeLearningFile } from "./own-outcome-learning-file";
 import { outcomeLearningLines } from "./own-outcome-learning";
 import { readFeedHistory } from "./read-feed-history";
@@ -13324,7 +13324,7 @@ async function main() {
             } : null;
             if (enhancedResearch) inputs.persona += `\n\n${DECISION_RESEARCH_GUIDANCE}`;
             trenchBrain.launch(trenchContext, inputs, focus.token, async () => {
-              const costRead = costContext ? entryCostEvidence(costContext) : Promise.resolve(null);
+              const costRead = costContext ? entryCostResearch(costContext) : Promise.resolve(null);
               const projectRead = projectContext
                 ? projectPurpose.read(projectContext.client, projectContext.token, projectContext.chainId, projectContext.browser)
                 : Promise.resolve(null);
@@ -13392,12 +13392,22 @@ async function main() {
               }
               const project = await projectRead;
               if (project) inputs.market.signals.builder = [project, inputs.market.signals.builder].filter(Boolean).join("\n\n");
-              const costEvidence = await costRead;
+              const costResearch = await costRead;
+              const costEvidence = costResearch?.text ?? null;
               if (costEvidence) {
                 inputs.market.signals.liquidity = [costEvidence, inputs.market.signals.liquidity].filter(Boolean).join("\n\n");
                 // Pulse can reserve a slot for project research and omit the
                 // liquidity analyst; the manager still needs the same costs.
                 inputs.memory = [costEvidence, ...(inputs.memory ?? []).slice(0, 5)];
+              }
+              // THE MOMENTUM ENTRY PLAN, for research accounts' entry reviews
+              // only (costContext exists exactly then): the mechanical exits
+              // from TRENCHER_FAST, the round-trip cost just read (or its gas
+              // floor) and the move that pays it, and how to turn odds of
+              // +take before -stop into an edge instead of inventing one.
+              // Research inputs only: no cap, guard, gate or exit changes.
+              if (costContext) {
+                inputs.persona += `\n\n${trenchMomentumBrief(TRENCHER_FAST, trenchBreakEven(costResearch, costContext), costContext.sizeUsdg)}`;
               }
               // Once the decision is persisted (runShadow writes it before it
               // returns), the nomination book hears what was decided about this
