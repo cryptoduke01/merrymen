@@ -7,6 +7,7 @@ import {
   DEFAULT_PRIORITY_SHARES,
   DEFAULT_TENANT_DAILY_CREDITS,
   DEFAULT_TENANT_HOURLY_CREDITS,
+  DEFAULT_X_HOURLY_CREDITS,
   describeBudget,
   fomoBudgetFrom,
   fomoPlanFrom,
@@ -123,6 +124,7 @@ describe("FomoBudget: priority reservations on the shared pool", () => {
     const { budget } = make();
     assert.deepEqual(budget.limitsFor("discovery"), {
       poolAll: 9_000, poolNonProtection: 7_500, poolDiscovery: 3_000, tenantHourly: 750_000_000, tenantDaily: 750_000_000, groupHourly: BIG,
+      xHourly: DEFAULT_X_HOURLY_CREDITS,
     });
     assert.equal(budget.limitsFor("interactive").poolDiscovery, null);
     assert.equal(budget.limitsFor("position-protection").poolNonProtection, null);
@@ -632,7 +634,42 @@ describe("refusalResetAt and the configured caps", () => {
     assert.equal(big.tenantDailyCredits, big.sharedDailyCredits);
     assert.equal(fomoPlanFrom({ MERRYMEN_FOMO_PLAN_CREDITS: "1000000" }), 1_000_000);
     assert.equal(fomoPlanFrom({ MERRYMEN_FOMO_PLAN_CREDITS: "lots" }), undefined);
-    assert.equal(describeBudget(growth), `fomo: research budget ${growth.sharedDailyCredits} credits/day shared; per owner 6000/h and 20000/day; per group 2500/h`);
+    assert.equal(describeBudget(growth), `fomo: research budget ${growth.sharedDailyCredits} credits/day shared; per owner 6000/h and 20000/day; per group 2500/h; per X account 3000/h`);
+  });
+
+  it("an X account's hourly cap has its own variable, default and boot line", () => {
+    assert.equal(DEFAULT_X_HOURLY_CREDITS, 3_000);
+    assert.equal(budgetConfigFor(37_500_000).xHourlyCredits, DEFAULT_X_HOURLY_CREDITS);
+    assert.deepEqual(fomoBudgetFrom({ MERRYMEN_FOMO_X_HOURLY_CREDITS: " 5000 " }), { budget: { xHourlyCredits: 5_000 }, problems: [] });
+    assert.deepEqual(fomoBudgetFrom({ MERRYMEN_FOMO_X_HOURLY_CREDITS: "lots" }).problems, ["fomo: MERRYMEN_FOMO_X_HOURLY_CREDITS is not a whole number of credits; its default applies"]);
+    assert.equal(fomoBudgetFrom({ MERRYMEN_FOMO_X_HOURLY_CREDITS: "1000" }).problems.length, 1, "below one thesis page is said at boot");
+    assert.equal(fomoBudgetFrom({ MERRYMEN_FOMO_X_HOURLY_CREDITS: "0" }).problems.length, 0, "0 is off");
+    assert.equal(budgetConfigFor(FREE_PLAN_CREDITS_PER_MONTH, { xHourlyCredits: 99_999_999 }).xHourlyCredits, budgetConfigFor(FREE_PLAN_CREDITS_PER_MONTH).sharedDailyCredits, "held under the shared pool");
+  });
+});
+
+describe("FomoBudget: the x-answer surface", () => {
+  it("caps one X account per hour on its own counter, never a Telegram group's, and refuses one it cannot name", async () => {
+    const { budget, port } = make({ sharedDailyCredits: BIG, groupHourlyCredits: 250, xHourlyCredits: 500 });
+    const x = { surface: "x-answer" as const, groupId: "111" };
+    assert.deepEqual(await drain(budget, "interactive", x), { n: 2, reason: "x-hourly" });
+    assert.ok(port.keys().includes(`fomo:credits:x:111:h:${Math.floor(NOW / HOUR)}`));
+    assert.ok(!port.keys().some((k) => k.startsWith("fomo:credits:group:")), "an X account never spends a room's hour");
+    assert.equal((await budget.tryCharge(req("interactive", { surface: "telegram-group", groupId: "111" }))).ok, true, "a room with the same id still has its own");
+    assert.equal((await budget.tryCharge(req("interactive", { ...x, groupId: "222" }))).ok, true, "another X account is unaffected");
+    assert.deepEqual(await budget.tryCharge(req("interactive", { surface: "x-answer", groupId: null })), { ok: false, reason: "no-group" });
+    assert.equal(await budget.wouldRefuse(req("interactive", { surface: "x-answer", groupId: null })), "no-group");
+    assert.equal(new Date(refusalResetAt("budget-x-hourly", NOW)!).toISOString(), new Date((Math.floor(NOW / HOUR) + 1) * HOUR).toISOString());
+  });
+
+  it("the owner's caps still apply on top of the X account's", async () => {
+    const { budget } = make({ sharedDailyCredits: BIG, tenantHourlyCredits: 1_000, xHourlyCredits: BIG });
+    assert.deepEqual(await drain(budget, "interactive", { surface: "x-answer", groupId: "111" }), { n: 3, reason: "tenant-hourly" });
+  });
+
+  it("a cap of zero is off: below one read, never a time to wait for", async () => {
+    const { budget } = make({ sharedDailyCredits: BIG, xHourlyCredits: 0 });
+    assert.deepEqual(await budget.tryCharge(req("interactive", { surface: "x-answer", groupId: "111" })), { ok: false, reason: "below-one-read" });
   });
 });
 

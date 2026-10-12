@@ -29,6 +29,15 @@
  * pipeline, so the default policy enables nothing at all; turning a kind on
  * here is a deliberate wiring change that needs Milla's review.
  *
+ * ONE NARROW EXCEPTION LIVES ELSEWHERE, NOT HERE. The owner confirmed
+ * (2026-10-12) that Merrymen holds the provider's Enterprise rights, which
+ * cover redistribution. That covers paraphrased, attributed Fomo facts in an
+ * active agent's ANSWERS to people who tagged it on X — "fomo traders mostly
+ * argue it's still early" — and nothing more: no handles, quotes, P&L or
+ * wallet lists, behind MERRYMEN_XPOST_FOMO=1 (default off), built by code in
+ * orchestrator-xpost-research.ts and gated like every other X answer. Every
+ * kind in this outbox stays policy-blocked exactly as above.
+ *
  * AT MOST ONCE, EVEN ACROSS A CRASH, as on the X path. A draft is written under a
  * UNIQUE dedupe key before anything is sent, and claimed (queued → sending)
  * with a conditional transition before the sender is called. Anything that

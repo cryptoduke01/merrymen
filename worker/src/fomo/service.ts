@@ -883,6 +883,8 @@ function budgetMessage(reason: string | null, now: number): string {
   switch (reason) {
     case "budget-group-hourly":
       return `Fomo research is rationed right now: this group's hourly research allowance is used up${when}.`;
+    case "budget-x-hourly":
+      return `Fomo research is rationed right now: this X account's hourly research allowance is used up${when}.`;
     case "budget-tenant-hourly":
       return `Fomo research is rationed right now: your hourly Fomo research allowance is used up${when}.`;
     case "budget-tenant-daily":
@@ -1220,7 +1222,8 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
     // A ROOM NEVER FORCES A PAID REFRESH (D8), and otherwise reuses the slow
     // classes' copies longer (D7, GROUP_REUSE_MS); the answer carries the
     // copy's age either way. Every other surface reads as it asked.
-    const room = cc.surface === "telegram-group";
+    // A public X answer reads the way a room does: never a forced refresh, the longer reuse windows.
+    const room = cc.surface === "telegram-group" || cc.surface === "x-answer";
     const mode: FreshnessMode = room && asked === "force-refresh" ? "prefer-fresh" : asked;
     const reuseMs = room && asked !== "force-refresh" && cc.noReuse !== true ? GROUP_REUSE_MS[spec.cls] : undefined;
     let entry: store.CacheEntry | null = null;
@@ -3559,7 +3562,7 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
     if (ctx?.retryEmpty === true) ic.cc.retryEmpty = true;
     // A room's "now" is an ordinary read (D8): the answer says what it served, and how old it is.
     const asked = v.args as { freshness?: unknown };
-    if (surface === "telegram-group" && asked && asked.freshness === "force-refresh") {
+    if ((surface === "telegram-group" || surface === "x-answer") && asked && asked.freshness === "force-refresh") {
       asked.freshness = "prefer-fresh";
       ic.cc.noReuse = true;
       // ...and a room's explicit "now" or "recheck" never gets a held "nothing here" again.

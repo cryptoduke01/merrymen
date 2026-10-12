@@ -401,6 +401,8 @@ describe("createDirectBroker", () => {
       { ...DM, priority: "urgent" },
       { ...DM, conversationKey: "x".repeat(201) },
       { surface: "telegram-group", audience: "owner", conversationKey: null, priority: "interactive" },
+      // A public answer on X is never the owner's audience either.
+      { surface: "x-answer", audience: "owner", conversationKey: "x:111", priority: "interactive", groupId: "111" },
     ];
     for (const o of bad) {
       const env = await broker.call("fomo_get_rankings", {}, o as BrokerCallOptions);
@@ -581,19 +583,21 @@ describe("IPC broker round trip", () => {
     pair.inject({ fomo: 1, id: "u7", op: "call", tool: "fomo_get_rankings", args: { blob: "x".repeat(17_000) }, opts: DM });
     pair.inject({ fomo: 1, id: "u8", op: "report", report: "not an object" });
     pair.inject({ fomo: 1, id: "u9", op: "memory-get", conversationKey: "" });
-    await waitFor(() => ["u1", "u2", "u3", "u4", "u5", "u6", "u7", "u8", "u9"].every((id) => pair.replyTo(id)));
+    // An X answer is the orchestrator's own surface: a child claiming it is refused, its audience right or not.
+    pair.inject({ fomo: 1, id: "u10", op: "call", tool: "fomo_get_rankings", args: {}, opts: { surface: "x-answer", audience: "group", conversationKey: "x:111", priority: "interactive", groupId: "111" } });
+    await waitFor(() => ["u1", "u2", "u3", "u4", "u5", "u6", "u7", "u8", "u9", "u10"].every((id) => pair.replyTo(id)));
     await flush();
     const err = (id: string) => pair.replyTo(id)!.error;
     assert.equal(err("u1"), "unknown-op");
     assert.equal(err("u2"), "unknown-tool");
-    for (const id of ["u3", "u4", "u5", "u6", "u9"]) assert.equal(err(id), "invalid-request", id);
+    for (const id of ["u3", "u4", "u5", "u6", "u9", "u10"]) assert.equal(err(id), "invalid-request", id);
     assert.equal(err("u7"), "request-too-large");
     assert.equal(err("u8"), "invalid-report");
-    // Exactly the nine replies above (beside the broker's own configured
+    // Exactly the ten replies above (beside the broker's own configured
     // query): nothing answered the foreign or id-less messages.
     const childIds = new Set(pair.wire.fromChild.map((m) => m.id));
     const injectedReplies = pair.wire.fromParent.filter((m) => !childIds.has(m.id));
-    assert.equal(injectedReplies.length, 9);
+    assert.equal(injectedReplies.length, 10);
     assert.ok(injectedReplies.every((m) => m.ok === false));
     assert.equal(svc.invocations.length, 0);
     assert.equal(svc.memoryCalls.length, 0);

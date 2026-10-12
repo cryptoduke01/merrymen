@@ -612,7 +612,7 @@ const FRESHNESS_CLASSES: Record<FreshnessClass, true> = {
 };
 type AttemptOutcome = NonNullable<Freshness["lastRefreshOutcome"]>;
 const ATTEMPT_OUTCOMES: Record<AttemptOutcome, true> = { ok: true, failed: true, "skipped-budget": true, "skipped-fresh": true };
-const SURFACES: Record<FomoSurface, true> = { "app-chat": true, "telegram-dm": true, "telegram-group": true, mcp: true, background: true };
+const SURFACES: Record<FomoSurface, true> = { "app-chat": true, "telegram-dm": true, "telegram-group": true, mcp: true, background: true, "x-answer": true };
 const RESULT_STATUSES: Record<ResultStatus, true> = {
   ok: true, empty: true, partial: true, capped: true, stale: true, failed: true, unavailable: true, "not-authorized": true,
   "budget-limited": true, "needs-clarification": true, "not-found": true,

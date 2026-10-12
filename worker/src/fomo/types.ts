@@ -591,7 +591,14 @@ export interface FomoEnvelope<T = unknown> {
 
 // ── Trusted call context ─────────────────────────────────────────────────
 
-export type FomoSurface = "app-chat" | "telegram-dm" | "telegram-group" | "mcp" | "background";
+/**
+ * `x-answer` is an active agent answering a public tag on X, asked from the
+ * ORCHESTRATOR's own service (orchestrator-xpost-research.ts), never by a
+ * child (broker.ts CHILD_SURFACES leaves it out). Its audience is a group's —
+ * public data only — and it has its own hourly cap per X account
+ * (budget.ts xHourlyCredits), keyed like a room's by `groupId`.
+ */
+export type FomoSurface = "app-chat" | "telegram-dm" | "telegram-group" | "mcp" | "background" | "x-answer";
 
 /**
  * Who is asking, derived ONLY from trusted server context (session cookie,

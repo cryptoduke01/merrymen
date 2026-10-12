@@ -118,12 +118,17 @@ export function isFomoToolName(v: unknown): v is FomoToolName {
   return typeof v === "string" && Object.hasOwn(TOOL_FRESHNESS, v);
 }
 
-const SURFACES: Record<FomoSurface, true> = { "app-chat": true, "telegram-dm": true, "telegram-group": true, mcp: true, background: true };
+const SURFACES: Record<FomoSurface, true> = { "app-chat": true, "telegram-dm": true, "telegram-group": true, mcp: true, background: true, "x-answer": true };
+
+/** Surfaces whose audience is public: they may never ask as the owner. */
+const PUBLIC_SURFACES: ReadonlySet<FomoSurface> = new Set<FomoSurface>(["telegram-group", "x-answer"]);
 
 /**
  * The surfaces a hosted child actually has. App chat and MCP run in the web
  * process against its own service; a child claiming one is lying about where
- * the question came from, and surface drives budgets and audience rules.
+ * the question came from, and surface drives budgets and audience rules. An
+ * X answer is asked by the orchestrator itself (orchestrator-xpost-research.ts,
+ * through createDirectBroker), so a child claiming it is refused too.
  */
 const CHILD_SURFACES: ReadonlySet<FomoSurface> = new Set<FomoSurface>(["telegram-dm", "telegram-group", "background"]);
 
@@ -405,8 +410,8 @@ function parseCallOptions(v: unknown, surfaces: ReadonlySet<FomoSurface> | null)
   if (!isRecord(v)) return { ok: false, reason: "invalid-request" };
   if (!isIn(SURFACES, v.surface) || (surfaces !== null && !surfaces.has(v.surface))) return { ok: false, reason: "invalid-request" };
   if (!isIn(AUDIENCES, v.audience)) return { ok: false, reason: "invalid-request" };
-  // A group can never be the owner's audience: private research state stays in DMs.
-  if (v.surface === "telegram-group" && v.audience !== "group") return { ok: false, reason: "invalid-request" };
+  // A group, or a public answer on X, can never be the owner's audience: private research state stays in DMs.
+  if (PUBLIC_SURFACES.has(v.surface) && v.audience !== "group") return { ok: false, reason: "invalid-request" };
   if (!isIn(PRIORITIES, v.priority)) return { ok: false, reason: "invalid-request" };
   let conversationKey: string | null = null;
   if (v.conversationKey !== null && v.conversationKey !== undefined) {

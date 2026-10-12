@@ -364,7 +364,7 @@ export function utcDay(nowMs: number): string {
 export function refusalResetAt(reason: string | null | undefined, nowMs: number): number | null {
   if (typeof reason !== "string" || typeof nowMs !== "number" || !Number.isFinite(nowMs)) return null;
   const r = reason.startsWith("budget-") ? reason.slice("budget-".length) : reason;
-  if (r === "group-hourly" || r === "tenant-hourly") return (hourIndex(nowMs) + 1) * HOUR_MS;
+  if (r === "group-hourly" || r === "tenant-hourly" || r === "x-hourly") return (hourIndex(nowMs) + 1) * HOUR_MS;
   if (r === "tenant-daily" || r === "shared-daily" || r === "class-reserve") return Date.parse(`${utcDay(nowMs)}T00:00:00.000Z`) + 24 * HOUR_MS;
   // below-one-read and no-group never reset on a clock, like a job's own allowance.
   return null;
@@ -412,6 +412,14 @@ export interface FomoBudgetConfig {
   tenantDailyCredits: number;
   /** Per Telegram group (or other shared audience), per hour. */
   groupHourlyCredits: number;
+  /**
+   * Per X account answering public tags (the `x-answer` surface), per hour,
+   * in place of the group cap: a public X answer is its own audience, and a
+   * busy mention feed must not spend a room's hour or the other way round.
+   * The owner's own caps and the fleet's pools still apply on top. Optional
+   * so older constructions still type; DEFAULT_X_HOURLY_CREDITS otherwise.
+   */
+  xHourlyCredits?: number;
   /** Reserved fractions of the shared pool, summing to at most 1. */
   shares?: PriorityShares;
   /** Discovery is refused once the shared pool is this full, even inside its own share (default 0.9). */
@@ -427,13 +435,20 @@ export interface FomoBudgetConfig {
  * group included, so no window will ever fit it) and `no-group` (a group
  * request that cannot name its group cannot be capped).
  */
-export type ChargeRefusal = "tenant-hourly" | "tenant-daily" | "group-hourly" | "shared-daily" | "class-reserve" | "below-one-read" | "no-group";
+export type ChargeRefusal = "tenant-hourly" | "tenant-daily" | "group-hourly" | "x-hourly" | "shared-daily" | "class-reserve" | "below-one-read" | "no-group";
+
+/** Surfaces that must name their audience (a group, an X account) to be capped; one that cannot is refused. */
+const CAPPED_AUDIENCE_SURFACES: ReadonlySet<FomoSurface> = new Set<FomoSurface>(["telegram-group", "x-answer"]);
 
 export interface ChargeRequest {
   priority: RetrievalPriority;
   tenant: string;
   surface: FomoSurface;
-  /** Required on the telegram-group surface; a group request without one is refused. */
+  /**
+   * Required on the telegram-group surface (the group) and the x-answer
+   * surface (the X account it answers from); a request on either without one
+   * is refused.
+   */
   groupId?: string | null;
   credits: number;
   now: number;
@@ -494,6 +509,7 @@ export class FomoBudget {
       tenantHourlyCredits: credits("tenantHourlyCredits", c.tenantHourlyCredits),
       tenantDailyCredits: credits("tenantDailyCredits", c.tenantDailyCredits),
       groupHourlyCredits: credits("groupHourlyCredits", c.groupHourlyCredits),
+      xHourlyCredits: credits("xHourlyCredits", c.xHourlyCredits ?? DEFAULT_X_HOURLY_CREDITS),
       shares: Object.freeze({ "position-protection": p, interactive: i, discovery: d }),
       discoveryShedAt: fraction("discoveryShedAt", c.discoveryShedAt, 0.9),
       tenantProtectionReserve: fraction("tenantProtectionReserve", c.tenantProtectionReserve, p),
@@ -512,6 +528,7 @@ export class FomoBudget {
     tenantHourly: number;
     tenantDaily: number;
     groupHourly: number;
+    xHourly: number;
   } {
     const c = this.config;
     const pr = priorityOf(priority);
@@ -525,6 +542,7 @@ export class FomoBudget {
       tenantHourly: protect ? c.tenantHourlyCredits : Math.floor(c.tenantHourlyCredits * keep),
       tenantDaily: protect ? c.tenantDailyCredits : Math.floor(c.tenantDailyCredits * keep),
       groupHourly: c.groupHourlyCredits,
+      xHourly: c.xHourlyCredits,
     };
   }
 
@@ -552,7 +570,10 @@ export class FomoBudget {
     const k = (...parts: string[]): string => [this.prefix, "credits", ...parts].join(":");
     const cap = "below-one-read" as const;
     const hourly: Step<ChargeRefusal>[] = [];
-    if (groupId !== null) hourly.push({ key: k("group", seg(groupId), "h", String(h)), limit: L.groupHourly, reason: "group-hourly", tooBig: cap });
+    // AN X ACCOUNT'S HOUR IN PLACE OF A ROOM'S: its own counter and limit, so
+    // an X account id can never spend (or be spent by) a Telegram group's hour.
+    if (groupId !== null && req.surface === "x-answer") hourly.push({ key: k("x", seg(groupId), "h", String(h)), limit: L.xHourly, reason: "x-hourly", tooBig: cap });
+    else if (groupId !== null) hourly.push({ key: k("group", seg(groupId), "h", String(h)), limit: L.groupHourly, reason: "group-hourly", tooBig: cap });
     if (!protect) hourly.push({ key: k("tenant", t, "np", "h", String(h)), limit: L.tenantHourly, reason: "tenant-hourly", tooBig: cap });
     hourly.push({ key: k("tenant", t, "all", "h", String(h)), limit: c.tenantHourlyCredits, reason: "tenant-hourly", tooBig: cap });
     const daily: Step<ChargeRefusal>[] = [];
@@ -581,7 +602,7 @@ export class FomoBudget {
    * (port.peek); a port without it, or a failed read, keeps the hourly reason.
    */
   private async reportedReason(reason: ChargeRefusal, daily: readonly Step<ChargeRefusal>[], amount: number): Promise<ChargeRefusal> {
-    if (reason !== "group-hourly" && reason !== "tenant-hourly") return reason;
+    if (reason !== "group-hourly" && reason !== "tenant-hourly" && reason !== "x-hourly") return reason;
     const port = this.port;
     if (typeof port.peek !== "function") return reason;
     try {
@@ -599,8 +620,8 @@ export class FomoBudget {
     }
     const amount = Math.ceil(req.credits);
     const groupId = typeof req.groupId === "string" && req.groupId.trim() ? req.groupId : null;
-    // A group question that cannot name its group cannot be capped: refuse it.
-    if (req.surface === "telegram-group" && groupId === null) return { ok: false, reason: "no-group" };
+    // A group question that cannot name its group, or an X answer its account, cannot be capped: refuse it.
+    if (CAPPED_AUDIENCE_SURFACES.has(req.surface) && groupId === null) return { ok: false, reason: "no-group" };
     if (amount === 0) return noopGrant();
 
     const { hourly, daily } = this.stepsFor(req, groupId);
@@ -626,7 +647,7 @@ export class FomoBudget {
     if (typeof req.credits !== "number" || !Number.isFinite(req.credits) || req.credits < 0) return null;
     const amount = Math.ceil(req.credits);
     const groupId = typeof req.groupId === "string" && req.groupId.trim() ? req.groupId : null;
-    if (req.surface === "telegram-group" && groupId === null) return "no-group";
+    if (CAPPED_AUDIENCE_SURFACES.has(req.surface) && groupId === null) return "no-group";
     const port = this.port;
     if (amount === 0 || typeof port.peek !== "function") return null;
     const { hourly, daily } = this.stepsFor(req, groupId);
@@ -655,6 +676,13 @@ export const PLAN_SAFETY_FRACTION = 0.2;
 export const DEFAULT_TENANT_HOURLY_CREDITS = 6_000;
 export const DEFAULT_TENANT_DAILY_CREDITS = 20_000;
 export const DEFAULT_GROUP_HOURLY_CREDITS = 2_500;
+/**
+ * One X account's public answers, per hour: about one coin answered with
+ * Fomo's token activity and a quick thesis page (one 1,250-credit page plus
+ * a couple of 250-credit reads) an hour, before the owner's own caps. An
+ * answer that does not fit says nothing from Fomo; it never waits.
+ */
+export const DEFAULT_X_HOURLY_CREDITS = 3_000;
 
 /** The budget configuration a plan supports, with any construction-time overrides applied and clamped. */
 export function budgetConfigFor(planCreditsPerMonth: number, over: Partial<FomoBudgetConfig> = {}): FomoBudgetConfig {
@@ -668,6 +696,7 @@ export function budgetConfigFor(planCreditsPerMonth: number, over: Partial<FomoB
     tenantHourlyCredits: cap(over.tenantHourlyCredits, DEFAULT_TENANT_HOURLY_CREDITS),
     tenantDailyCredits: cap(over.tenantDailyCredits, DEFAULT_TENANT_DAILY_CREDITS),
     groupHourlyCredits: cap(over.groupHourlyCredits, DEFAULT_GROUP_HOURLY_CREDITS),
+    xHourlyCredits: cap(over.xHourlyCredits, DEFAULT_X_HOURLY_CREDITS),
   };
 }
 
@@ -686,6 +715,8 @@ export const FOMO_CAP_ENV = Object.freeze({
   groupHourlyCredits: "MERRYMEN_FOMO_GROUP_HOURLY_CREDITS",
   tenantHourlyCredits: "MERRYMEN_FOMO_TENANT_HOURLY_CREDITS",
   tenantDailyCredits: "MERRYMEN_FOMO_TENANT_DAILY_CREDITS",
+  /** Read where X answers are asked (the orchestrator); the web never asks on that surface, but agrees on it harmlessly. */
+  xHourlyCredits: "MERRYMEN_FOMO_X_HOURLY_CREDITS",
 } as const);
 
 /** The provider plan's monthly credits (MERRYMEN_FOMO_PLAN_CREDITS): a positive number, else undefined and the default applies. */
@@ -726,6 +757,7 @@ export function fomoBudgetFrom(env: Env): { budget: Partial<FomoBudgetConfig>; p
   const below = (v: number | undefined, share: number, floor: number): boolean => typeof v === "number" && v > 0 && Math.floor(v * share) < floor;
   const low = (v: number | undefined, share: number): boolean => below(v, share, dearest);
   if (below(budget.groupHourlyCredits, 1, roomDearest)) problems.push(`fomo: ${FOMO_CAP_ENV.groupHourlyCredits} is below what one coin's thesis page costs (${roomDearest} credits), so a room can never hear a coin's theses`);
+  if (below(budget.xHourlyCredits, 1, roomDearest)) problems.push(`fomo: ${FOMO_CAP_ENV.xHourlyCredits} is below what one coin's thesis page costs (${roomDearest} credits), so an X answer can never use a coin's theses`);
   if (low(budget.tenantHourlyCredits, keep)) problems.push(`fomo: ${FOMO_CAP_ENV.tenantHourlyCredits} leaves an owner's own research less than one named-trader read (${dearest} credits) an hour`);
   if (low(budget.tenantDailyCredits, keep)) problems.push(`fomo: ${FOMO_CAP_ENV.tenantDailyCredits} leaves an owner's own research less than one named-trader read (${dearest} credits) a day`);
   return { budget, problems };
@@ -733,7 +765,7 @@ export function fomoBudgetFrom(env: Env): { budget: Partial<FomoBudgetConfig>; p
 
 /** One boot line: the limits in force, as budgetConfigFor clamped them. */
 export function describeBudget(c: FomoBudgetConfig): string {
-  return `fomo: research budget ${c.sharedDailyCredits} credits/day shared; per owner ${c.tenantHourlyCredits}/h and ${c.tenantDailyCredits}/day; per group ${c.groupHourlyCredits}/h`;
+  return `fomo: research budget ${c.sharedDailyCredits} credits/day shared; per owner ${c.tenantHourlyCredits}/h and ${c.tenantDailyCredits}/day; per group ${c.groupHourlyCredits}/h; per X account ${c.xHourlyCredits ?? DEFAULT_X_HOURLY_CREDITS}/h`;
 }
 
 // ── Analysis-model budget ────────────────────────────────────────────────
