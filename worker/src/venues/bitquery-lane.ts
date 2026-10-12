@@ -74,12 +74,13 @@ import { BITQUERY_DEFAULT_ENDPOINT, bitqueryAuthHeaders } from "./bitquery";
 
 export const BITQUERY_LANE_DEFAULTS = Object.freeze({
   /**
-   * Points per UTC day. 25,000 x 30 = 750,000 a month. THE GATEWAY SPENDS
-   * FROM THE SAME PLAN: its own fleet-wide counter
-   * (MERRYMEN_GATEWAY_BITQUERY_POINTS_PER_DAY, default 5,000, in
-   * gateway/lib/core.mjs) is another 150,000 a month. Together that is 900,000
-   * of a 1,000,000-point plan, so the estimates below can be wrong by a ninth
-   * before the plan notices. Raise either knob and the other has to come down.
+   * Points per UTC day. 25,000 x 30 = 750,000 a month. THE GATEWAY MAY SPEND
+   * FROM THE SAME PLAN under its own, separate fleet-wide counter
+   * (MERRYMEN_GATEWAY_BITQUERY_POINTS_PER_DAY, default 12,500 a day in
+   * gateway/lib/core.mjs: 10,000 for the public memescope at its 45 s
+   * refresh, 2,500 for holders). Neither counter sees the other's spend, so
+   * the operator sizes both to the plan, leaving room for the estimates below
+   * to be wrong.
    */
   pointsPerDay: 25_000,
   /** Requests started per rolling minute. The plan allows 90. */

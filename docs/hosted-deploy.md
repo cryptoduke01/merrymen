@@ -238,11 +238,13 @@ sold. The orchestrator answers from one budgeted lane, and children on the
 decision-research allowlist ask it over IPC (the channel exists only with
 `MERRYMEN_FOMO_ENABLED=1`). For the rollout steps and the IDE check to run
 before setting the key, see [`docs/bitquery-lane.md`](bitquery-lane.md). The
-gateway spends from the same plan under its own cap,
-`MERRYMEN_GATEWAY_BITQUERY_POINTS_PER_DAY` (default `5000`, set on the gateway
-service; its public memescope spends only its own 2,000 of that, refreshing at
-most every 240 s, and holders the other 3,000, at most 750 each): keep the two knobs' sum under
-the plan.
+gateway spends under its own, separate cap,
+`MERRYMEN_GATEWAY_BITQUERY_POINTS_PER_DAY` (default `12500`, set on the
+gateway service; its public memescope spends only its own 10,000 of that,
+enough to refresh every 45 s all day, and holders the other 2,500, at most 750
+each). Neither cap sees the other's spend: when both keys are on one plan,
+size both to it. Below about 12,000 the memescope runs short of its 45 s day
+and serves its last rows until 00:00 UTC.
 
 | Var | Value |
 |---|---|
@@ -969,7 +971,7 @@ for an account already on `MERRYMEN_DECISION_RESEARCH_ACCOUNTS` (step 1). This t
 | 3 | `MERRYMEN_DECISION_RESEARCH_ACCOUNTS` | orchestrator (children inherit it) | Alan's smart account, from the deploy environment (this repository names no account) | Cost quotes, his own outcomes, the momentum plan, the Trencher terms and indexed flow for his live fast-Trencher entry reviews. Decision log lines end `· terms sent` |
 | 4 | `MERRYMEN_BITQUERY_API_KEY` | **orchestrator only** | the plan's key, after the IDE checks in [`bitquery-lane.md`](bitquery-lane.md) step 1 | Never on web, Brain or a child (stripped). Boot line `bitquery lane: on — 25000 points/UTC day (20000 for child evidence) …`; reviews log `[trencher] flow SYMBOL: lens` |
 | 4 | `MERRYMEN_BITQUERY_LANE`, `MERRYMEN_BITQUERY_POINTS_PER_DAY`, `MERRYMEN_BITQUERY_RPM` | orchestrator | unset (on, `25000`, `60`) | |
-| 4 | `MERRYMEN_GATEWAY_BITQUERY_POINTS_PER_DAY` | gateway | `5000`, set explicitly when its key shares the plan | Lane plus gateway: 30,000 points a day, 900,000 of a 1,000,000-point month. The gateway's 5,000 includes the public memescope's own 2,000 (at most 1,800 used, one refresh per 240 s); holders get the other 3,000, at most 750 a day each |
+| 4 | `MERRYMEN_GATEWAY_BITQUERY_POINTS_PER_DAY` | gateway | `12500`, set explicitly when its key shares the plan | A separate counter from the lane's `25000`: lane plus gateway is 37,500 points a day, sized by the operator to the plan. The gateway's 12,500 includes the public memescope's own 10,000 (at most 9,605 used, one refresh per 45 s, matching the Markets page's own 45 s poll); holders get the other 2,500, at most 750 a day each |
 | 4 | `MERRYMEN_FLOW_BROKER` | none | never set | The orchestrator writes it into each child that may ask, and removes an inherited copy |
 | 5 | `MERRYMEN_XPOST_ACTIVE_TENANTS` | web + orchestrator, same value | Alan's tenant address, from the deploy environment | The active cadence, his reply consent recorded by the orchestrator, and answers to tags sent right away. The web reads it for the reply warning |
 | 5 | `MERRYMEN_XPOST_REPLIES_APPROVED` | web + orchestrator, same value | `active`, **only once X's written approval for AI replies is in hand**; unset until then | Without it there are no comment replies and no answers to tags. No approval has been obtained for this deployment |

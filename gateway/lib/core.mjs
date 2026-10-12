@@ -27,35 +27,41 @@ export const DEFAULTS = {
   // every holder AND the public memescope (MERRYMEN_GATEWAY_BITQUERY_POINTS_PER_DAY).
   // The per-address bucket above bounds one holder; nothing bounded all of
   // them, and each holder polling at the worker's default interval is
-  // roughly 720 points a day — a few dozen holders would take a plan the
-  // orchestrator's Bitquery lane is also spending (worker/src/venues/
-  // bitquery-lane.ts: 25,000 a day there plus 5,000 here is 900,000 of a
-  // 1,000,000-point month). Reserved BEFORE each upstream call; a refusal
-  // costs nothing. Raise it only with the lane's own knob brought down.
-  BITQUERY_POINTS_PER_DAY: 5_000,
+  // roughly 720 points a day. Reserved BEFORE each upstream call; a refusal
+  // costs nothing. The default is 12,500 a day: 10,000 for the memescope at
+  // its 45 s cadence and 2,500 for holders. The orchestrator's Bitquery lane
+  // keeps its own, separate counter (MERRYMEN_BITQUERY_POINTS_PER_DAY in
+  // worker/src/venues/bitquery-lane.ts, default 25,000); neither sees the
+  // other's spend, so the operator sizes both to the plan.
+  BITQUERY_POINTS_PER_DAY: 12_500,
   // THE PUBLIC MEMESCOPE'S OWN SHARE of that day, counted apart
   // (bq-scope-points:<day>); holders reserve against the rest
-  // (bq-points:<day>), which the public page can never spend. At 45 s one open
-  // tab alone cost ~9,600 points a day, so with one shared counter the page
-  // used up the 5,000 by midday UTC and every holder got 503 until midnight.
-  // 0.4 of 5,000 is 2,000 for the page and 3,000 for holders.
-  MEMESCOPE_SHARE: 0.4,
+  // (bq-points:<day>), which the public page can never spend. The page
+  // refreshes all day while anyone has it open, so on one shared counter it
+  // would spend points holders were counting on, and any cap smaller than its
+  // day would leave every holder a 503 until midnight once the page used it up.
+  // 0.8 of 12,500 is 10,000 for the page and 2,500 for holders.
+  MEMESCOPE_SHARE: 0.8,
   // EACH HOLDER'S OWN SHARE of the holders' purse (bq-holder-points:<day>:<addr>),
-  // reserved before the shared one. Without it one holder — a modified client,
-  // or an owner at the settings' one-minute discovery interval (1,440 calls,
-  // 7,200 points a day) — spent all 3,000 by mid-morning UTC and every other
-  // holder got 503 until midnight. 750 covers a holder at the default
-  // ten-minute interval all day (144 calls, 720 points); past it that holder
-  // alone gets 429 until 00:00 UTC. Never above the holders' purse.
+  // reserved together with the purse: both or neither. Without it one holder —
+  // a modified client, or an owner at the settings' one-minute discovery
+  // interval (1,440 calls, 7,200 points a day) — would spend all 2,500 by
+  // about 08:20 UTC and every other holder would get 503 until midnight. 750
+  // covers a holder at the default ten-minute interval all day (144 calls,
+  // 720 points); past it that holder alone gets 429 until 00:00 UTC. The
+  // purse covers three such holders all day; a fourth runs it out in the
+  // evening. Never above the holders' purse.
   BITQUERY_POINTS_PER_HOLDER_PER_DAY: 750,
   // How long the PUBLIC memescope is served from one shared answer. This number
   // is the whole cost model of that route: the upstream is hit at most once per
   // this many seconds no matter how many people are watching, so traffic and
-  // spend are decoupled. SIZED TO ITS SHARE: 86,400 / 240 × 5 = 1,800 points a
-  // day, inside its 2,000, so the page refreshes all day and never freezes.
-  // Lower it and you are buying freshness with the operator's own Bitquery
-  // allowance: past its share the page serves its last rows until 00:00 UTC.
-  MEMESCOPE_TTL_SEC: 240,
+  // spend are decoupled. SIZED TO ITS SHARE: at 45 s that is at most
+  // ceil(86,400 / 45) + 1 = 1,921 refreshes × 5 = 9,605 points a day, inside
+  // its 10,000, so the page refreshes all day and never freezes. It matches
+  // the site's 45 s poll (site/components/MemescopeClient.tsx). Lower it and
+  // you are buying freshness with the operator's own Bitquery allowance: past
+  // its share the page serves its last rows until 00:00 UTC.
+  MEMESCOPE_TTL_SEC: 45,
   // Per-IP cap on the public route. This protects the gateway PROCESS, not the
   // bill — the bill is already bounded by the shared cache above.
   MEMESCOPE_RATE_PER_MIN: 30,
@@ -143,7 +149,11 @@ export function bitqueryAuthHeaders(key) {
     : { "X-API-KEY": key };
 }
 
-/** Above this the daily cap is clamped: the whole plan is about 33,000 a day. */
+/**
+ * Above this the daily cap is clamped, so a stray digit cannot spend days of
+ * the plan in one. A guard, not the plan's size: the operator sizes the cap to
+ * the plan, under this.
+ */
 export const BITQUERY_POINTS_PER_DAY_CEILING = 30_000;
 
 /**

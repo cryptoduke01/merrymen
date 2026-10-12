@@ -62,21 +62,23 @@ meant as a later source for the early book and nothing calls it yet.
    401 for free. Each holder costs roughly 720 points a day at the default
    10-minute interval, and up to ten times that at 1 minute. The gateway caps
    all of them, plus its public memescope, with
-   `MERRYMEN_GATEWAY_BITQUERY_POINTS_PER_DAY` (default `5000`), in two purses:
-   the public memescope spends only its own 40% (2,000 a day; it refreshes at
-   most every 240 s, 1,800 points a day, so it never runs out; a failed
-   refresh waits out the same 240 s, so an outage cannot spend it either), and holders
-   the other 3,000, which the page can never spend, and at most 750 of them
-   for any one holder (enough for the default interval all day; past it that
-   wallet alone gets 429 until 00:00 UTC, so one holder at a 1-minute
-   interval cannot starve the rest). Before this split, one open
-   Markets tab at a 45-second refresh cost about 9,600 points a day on its own,
-   spent the whole cap by midday UTC, and left every holder a 503 until
-   midnight. If the gateway's key is on the same plan as this lane, the two
-   knobs together must stay under the plan: 25,000 + 5,000 a day (the
-   memescope included) is 900,000 of a 1,000,000-point month. Raise one only
-   by lowering the other, or put the gateway on a plan of its own. Deploy the
-   gateway with its cap before, or with, the worker.
+   `MERRYMEN_GATEWAY_BITQUERY_POINTS_PER_DAY` (default `12500`), in two
+   purses: the public memescope spends only its own 80% (10,000 a day; it
+   refreshes at most every 45 s, matching the Markets page's own 45 s poll,
+   which is at most 9,605 points a day, so it never runs out; a failed
+   refresh waits out the same 45 s, so an outage cannot spend it either), and
+   holders the other
+   2,500, which the page can never spend, and at most 750 of them for any one
+   holder (enough for the default interval all day; past it that wallet alone
+   gets 429 until 00:00 UTC, so one holder at a 1-minute interval cannot
+   starve the rest). The holders' purse covers three holders at the default
+   interval all day. A gateway cap below about 12,000 leaves the memescope
+   short of its 45 s day, and the page then serves its last rows until
+   00:00 UTC. The gateway's cap and this lane's `MERRYMEN_BITQUERY_POINTS_PER_DAY`
+   (default 25,000) are separate counters, and neither sees the other's
+   spend: if the gateway's key is on the same plan as this lane, the operator
+   sizes both to the plan, or puts the gateway on a plan of its own. Deploy
+   the gateway with its cap before, or with, the worker.
 4. **Read the boot line.** The orchestrator logs one of the following:
    - `bitquery lane: on — 25000 points/UTC day (20000 for child evidence), 60 requests/min, 3 at once`
    - `bitquery lane: off — …`, with the reason.
@@ -105,7 +107,7 @@ redeploy. Every flow question then answers `unavailable`.
 |---|---|---|
 | `MERRYMEN_BITQUERY_API_KEY` | unset (lane off) | The plan's key. An `ory_at_…` V2 token is sent as `Authorization: Bearer`; anything else is sent as `X-API-KEY`. **Orchestrator only.** |
 | `MERRYMEN_BITQUERY_LANE` | on when a key is set | `0` turns the lane off while keeping the key. |
-| `MERRYMEN_BITQUERY_POINTS_PER_DAY` | `25000` (ceiling `100000`) | Points reserved per UTC day across every caller. 25,000 × 30 = 750,000. With the gateway's default cap of 5,000 a day (150,000 a month, its public memescope's 2,000 included) on the same plan, that is 900,000 of a 1,000,000-point month, leaving a tenth as headroom for estimation error. Child evidence may use at most 80% of it, so X answers are never starved. |
+| `MERRYMEN_BITQUERY_POINTS_PER_DAY` | `25000` (ceiling `100000`) | Points reserved per UTC day across every caller of this lane. 25,000 × 30 = 750,000. The gateway counts its own spend separately under `MERRYMEN_GATEWAY_BITQUERY_POINTS_PER_DAY` (default 12,500 a day: 10,000 for the public memescope at its 45 s refresh, 2,500 for holders); when both keys are on one plan, the operator sizes both to it. Child evidence may use at most 80% of it, so X answers are never starved. |
 | `MERRYMEN_BITQUERY_RPM` | `60` (ceiling `90`) | Requests started per rolling minute. The plan allows 90. |
 
 A knob that is not a positive whole number is logged by its length, never

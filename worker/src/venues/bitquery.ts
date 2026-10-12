@@ -159,7 +159,8 @@ export function bitqueryAuthHeaders(key: string): Record<string, string> {
  * 720 points a holder a day on the default interval. The gateway's per-address
  * bucket bounds one holder and never all of them, so the same change gave the
  * gateway a fleet-wide daily cap (MERRYMEN_GATEWAY_BITQUERY_POINTS_PER_DAY,
- * gateway/lib/core.mjs), counted beside the orchestrator's lane on one plan.
+ * gateway/lib/core.mjs), counted apart from the orchestrator's lane, which
+ * may spend from the same plan.
  */
 export function bitqueryRequestHeaders(creds: Pick<BitqueryCreds, "apiKey" | "viaGateway">): Record<string, string> {
   return creds.viaGateway ? { Authorization: `Bearer ${creds.apiKey}` } : bitqueryAuthHeaders(creds.apiKey);

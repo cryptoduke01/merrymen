@@ -105,7 +105,6 @@ describe("bitqueryLaneSetup — off unless a key is set, and the key is never sa
     assert.equal(s.off, false);
     assert.deepEqual(s.config, { apiKey: "ory_at_secret", pointsPerDay: 25_000, rpm: 60 });
     assert.equal(BITQUERY_LANE_DEFAULTS.maxConcurrency, 3);
-    assert.ok((25_000 + 5_000) * 31 < 1_000_000, "a 31-day month of the lane AND the gateway's default stays under a 1M plan");
     assert.match(s.lines[0]!, /25000 points\/UTC day \(20000 for child evidence\), 60 requests\/min, 3 at once/);
   });
 

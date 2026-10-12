@@ -55,17 +55,25 @@ function gateway(over = {}) {
 }
 
 describe("MERRYMEN_GATEWAY_BITQUERY_POINTS_PER_DAY", () => {
-  it("defaults to 5,000 a day, which with the lane's 25,000 stays under a 1,000,000-point month", () => {
-    assert.equal(DEFAULTS.BITQUERY_POINTS_PER_DAY, 5_000);
-    assert.deepEqual(bitqueryPointsPerDayFrom(undefined), { points: 5_000, note: null });
-    assert.ok((25_000 + DEFAULTS.BITQUERY_POINTS_PER_DAY) * 31 < 1_000_000);
+  it("defaults to 12,500 a day: the memescope's 10,000 plus the holders' 2,500, under the ceiling", () => {
+    assert.equal(DEFAULTS.BITQUERY_POINTS_PER_DAY, 12_500);
+    assert.deepEqual(bitqueryPointsPerDayFrom(undefined), { points: 12_500, note: null });
+    const scope = Math.floor(DEFAULTS.BITQUERY_POINTS_PER_DAY * DEFAULTS.MEMESCOPE_SHARE);
+    const holders = DEFAULTS.BITQUERY_POINTS_PER_DAY - scope;
+    assert.deepEqual([scope, holders], [10_000, 2_500]);
+    assert.equal(scope + holders, DEFAULTS.BITQUERY_POINTS_PER_DAY, "the two purses are the whole day, no more");
+    assert.equal(BITQUERY_POINTS_PER_DAY_CEILING, 30_000);
+    assert.ok(DEFAULTS.BITQUERY_POINTS_PER_DAY <= BITQUERY_POINTS_PER_DAY_CEILING, "the default is not clamped");
   });
 
-  it("the memescope's whole day of refreshes fits its share, so the page never freezes and holders keep the rest", () => {
+  it("the memescope keeps its 45 s refresh, and its whole day of refreshes fits its share, so the page never freezes", () => {
+    assert.equal(DEFAULTS.MEMESCOPE_TTL_SEC, 45, "the public page is not slowed to fit a budget");
     const share = Math.floor(DEFAULTS.BITQUERY_POINTS_PER_DAY * DEFAULTS.MEMESCOPE_SHARE);
     const refreshes = Math.ceil(86_400 / DEFAULTS.MEMESCOPE_TTL_SEC) + 1;
+    assert.equal(refreshes * 5, 9_605);
     assert.ok(refreshes * 5 <= share, `${refreshes} refreshes × 5 points within ${share}`);
-    assert.equal(DEFAULTS.BITQUERY_POINTS_PER_DAY - share, 3_000, "the holders' purse");
+    assert.equal(DEFAULTS.BITQUERY_POINTS_PER_DAY - share, 2_500, "the holders' purse");
+    assert.ok(DEFAULTS.BITQUERY_POINTS_PER_HOLDER_PER_DAY <= DEFAULTS.BITQUERY_POINTS_PER_DAY - share, "one holder's share is never above the holders' purse");
   });
 
   it("takes a positive whole number, clamps at the ceiling, and never echoes a bad value", () => {
@@ -75,7 +83,7 @@ describe("MERRYMEN_GATEWAY_BITQUERY_POINTS_PER_DAY", () => {
     assert.match(high.note, /above the ceiling/);
     for (const bad of ["0", "-5", "1.5", "ory_at_pasted_here"]) {
       const r = bitqueryPointsPerDayFrom(bad);
-      assert.equal(r.points, 5_000, bad);
+      assert.equal(r.points, DEFAULTS.BITQUERY_POINTS_PER_DAY, bad);
       assert.match(r.note, new RegExp(`\\(${bad.length} characters\\)`));
       assert.ok(!r.note.includes(bad) || /^\d$/.test(bad), "the value itself is not in the line");
     }
@@ -173,7 +181,7 @@ describe("one daily allowance, reserved before every upstream call", () => {
     assert.equal((await gw.bitquery({ token, body: { query: "ping" }, ip: "1.1.1.1" })).status, 503, "holders stop at their own 10");
   });
 
-  it("a whole UTC day of one open tab polling every 45 s leaves every holder's share intact", async () => {
+  it("a whole UTC day of one open tab polling every 45 s refreshes on every poll and leaves every holder's share intact", async () => {
     const upstream = stubUpstream();
     const realNow = Date.now;
     const start = Date.parse("2026-10-12T00:00:00Z");
@@ -182,12 +190,18 @@ describe("one daily allowance, reserved before every upstream call", () => {
     try {
       const gw = gateway({ tunables: { MEMESCOPE_TTL_SEC: DEFAULTS.MEMESCOPE_TTL_SEC, MEMESCOPE_SHARE: DEFAULTS.MEMESCOPE_SHARE } });
       let stale = 0;
-      for (; now < start + 86_400_000 - 1_000; now += 45_200) {
+      let polls = 0;
+      let fresh = 0;
+      // The site's own poll (site/components/MemescopeClient.tsx, POLL_MS).
+      for (; now < start + 86_400_000 - 1_000; now += 45_000) {
         const r = await gw.memescope({ ip: "9.9.9.9" });
+        polls++;
         assert.equal(r.status, 200);
         if (r.json.stale) stale++;
+        if (r.json.cached === false) fresh++;
       }
       assert.equal(stale, 0, "the page refreshed all day: it never ran out of its share");
+      assert.equal(fresh, polls, "every 45 s poll got a new refresh: the page is not slowed");
       assert.ok(upstream.calls * 5 <= Math.floor(DEFAULTS.BITQUERY_POINTS_PER_DAY * DEFAULTS.MEMESCOPE_SHARE), `${upstream.calls} refreshes`);
       now = start + 18 * 3_600_000;
       const ping = await gw.bitquery({ token: gw._tokens.issueToken(HOLDER), body: { query: "ping" }, ip: "1.1.1.1" });
@@ -197,7 +211,7 @@ describe("one daily allowance, reserved before every upstream call", () => {
     }
   });
 
-  it("an hour of Bitquery failing while a tab polls every 45 s costs one attempt per TTL, and the page recovers with it", async () => {
+  it("an hour of Bitquery failing while tabs poll every 5 s costs one attempt per TTL, and the page recovers with it", async () => {
     const realNow = Date.now;
     const start = Date.parse("2026-10-12T06:00:00Z");
     let now = start;
@@ -215,17 +229,22 @@ describe("one daily allowance, reserved before every upstream call", () => {
     try {
       const store = createStore();
       const gw = gateway({ store, tunables: { MEMESCOPE_TTL_SEC: DEFAULTS.MEMESCOPE_TTL_SEC, MEMESCOPE_SHARE: DEFAULTS.MEMESCOPE_SHARE } });
-      for (; now < start + 3_600_000; now += 45_000) {
+      // Polls well inside the TTL, as several open tabs make: without the
+      // backoff each one would be a paid attempt (720 in the hour).
+      let polls = 0;
+      for (; now < start + 3_600_000; now += 5_000) {
         const r = await gw.memescope({ ip: "9.9.9.9" });
+        polls++;
         assert.equal(r.status, 502, "nothing cached yet: an honest 502");
       }
       const ttl = DEFAULTS.MEMESCOPE_TTL_SEC * 1000;
+      assert.equal(polls, 720);
       assert.ok(attempts <= Math.ceil(3_600_000 / ttl) + 1, `${attempts} paid attempts in an hour of failures`);
       assert.ok(attempts >= 3_600_000 / ttl - 1, "and it kept trying, once per TTL");
       // Bitquery comes back: within one TTL the page refreshes, its share far from spent.
       down = false;
       let recovered = null;
-      for (const until = now + ttl + 45_000; now <= until && !recovered; now += 45_000) {
+      for (const until = now + ttl + 5_000; now <= until && !recovered; now += 5_000) {
         const r = await gw.memescope({ ip: "9.9.9.9" });
         if (r.status === 200 && !r.json.stale) recovered = r;
       }
@@ -249,22 +268,25 @@ describe("one daily allowance, reserved before every upstream call", () => {
     console.error = () => {};
     try {
       const upstream = stubUpstream();
-      const gw = gateway({ tunables: { MEMESCOPE_TTL_SEC: 240, MEMESCOPE_SHARE: DEFAULTS.MEMESCOPE_SHARE } });
+      const ttl = DEFAULTS.MEMESCOPE_TTL_SEC * 1000;
+      const gw = gateway({ tunables: { MEMESCOPE_TTL_SEC: DEFAULTS.MEMESCOPE_TTL_SEC, MEMESCOPE_SHARE: DEFAULTS.MEMESCOPE_SHARE } });
       assert.equal((await gw.memescope({ ip: "9.9.9.9" })).status, 200);
       const ok = globalThis.fetch;
       globalThis.fetch = async () => { upstream.calls++; throw new Error("network"); };
-      now += 241_000;
+      now += ttl + 1_000;
+      const failedAt = now;
       const failed = await gw.memescope({ ip: "9.9.9.9" });
       assert.equal(failed.json.stale, true);
       for (let i = 1; i <= 5; i++) {
-        now += 45_000;
+        now += 5_000;
         const r = await gw.memescope({ ip: "9.9.9.9" });
         assert.equal(r.status, 200);
         assert.equal(r.json.stale, true);
       }
+      assert.ok(now < failedAt + ttl, "those polls were all inside the TTL");
       assert.equal(upstream.calls, 2, "one refresh, one failed attempt, and nothing more inside its TTL");
       globalThis.fetch = ok;
-      now += 45_000;
+      now = failedAt + ttl;
       const back = await gw.memescope({ ip: "9.9.9.9" });
       assert.equal(back.json.stale, undefined, "the next due attempt refreshes");
       assert.equal(upstream.calls, 3);
