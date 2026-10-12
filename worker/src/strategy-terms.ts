@@ -90,6 +90,27 @@ function duration(sec: number): string {
   return unit(sec, "second");
 }
 
+/**
+ * AN ILLUSTRATIVE REALISED STOP, half again past the trigger and never past a
+ * total loss: the stop is checked on a tick and sold at market on a thin pool,
+ * so the nominal level is where losses start, not where they end. Bps in, bps
+ * out. Exported so the research brief (decision-research.ts
+ * trenchMomentumBrief) works the same `s` as the desk policy, never another.
+ */
+export function realisedStopBps(stopLossBps: number): number {
+  return Math.min(10_000, Math.round((stopLossBps * 3) / 2));
+}
+
+/**
+ * The take-profit rate at which the bracket breaks even, for an average
+ * stop-out loss `s`, a cost `c` paid on every exit and a take-profit `tp`, all
+ * in one unit: p * tp = (1 - p) * s + c, so p = (s + c) / (s + tp). The one
+ * formula both the desk policy and the research brief print.
+ */
+export function breakEvenRate(s: number, c: number, tp: number): number {
+  return (s + c) / (s + tp);
+}
+
 /** The Trencher config fields its terms are rendered from. Numbers only — no string reaches the text. */
 export type TrencherTermsConfig = Pick<
   TrencherConfig,
@@ -128,15 +149,16 @@ export type TrencherTermsConfig = Pick<
  * term, or a stop at or past -100%): the framing would then be false, and no
  * policy is better than a wrong one. The caller sends today's request.
  *
- * INTEGRATION (one line, at the Trencher review, beside the persona — see the
- * call site in worker/src/index.ts that sets `inputs.persona` from
- * `trenchBrainPersona`):
+ * WIRED at the Trencher review in worker/src/index.ts, for research accounts'
+ * entry reviews only (the same `costContext` gate as the momentum plan):
  *
- *     inputs.strategyTerms = trencherStrategyTerms(TRENCHER_FAST);
+ *     if (costContext) inputs.strategyTerms = trencherStrategyTerms(TRENCHER_FAST);
  *
  * runShadow passes it to `decide()`, which sends it only to a Brain whose
- * /health advertises "strategy-terms". Once that ships, the momentum sentences
- * in `trenchBrainPersona` that this restates can leave the persona.
+ * /health advertises "strategy-terms". The momentum plan those reviews also
+ * carry (decision-research.ts trenchMomentumBrief) states the same exits and
+ * prices `s` and `c` the same way, through realisedStopBps and breakEvenRate,
+ * so the trusted terms and the fenced brief never give the manager two bars.
  */
 export function trencherStrategyTerms(cfg: TrencherTermsConfig): StrategyTerms | null {
   const { stopLossBps: sl, takeProfitBps: tp, maxHoldSec: hold } = cfg;
@@ -145,12 +167,9 @@ export function trencherStrategyTerms(cfg: TrencherTermsConfig): StrategyTerms |
   const drain = cfg.liquidityDrainFraction;
   const window = duration(hold);
   // Break-even take-profit rate for an average stop-out loss of `s` bps and a
-  // round-trip drag of `c` bps: p * tp = (1 - p) * s + c, so p = (s + c) / (s + tp).
-  const bar = (s: number, c: number) => Math.round((100 * (s + c)) / (s + tp));
-  // AN ILLUSTRATIVE REALISED STOP, half again past the trigger and never past a
-  // total loss: the stop is checked on a tick and sold at market on a thin pool,
-  // so the nominal level is where losses start, not where they end.
-  const realised = Math.min(10_000, Math.round((sl * 3) / 2));
+  // cost of `c` bps on every exit (breakEvenRate).
+  const bar = (s: number, c: number) => Math.round(100 * breakEvenRate(s, c, tp));
+  const realised = realisedStopBps(sl);
   const cap = (Number(cfg.perEntryUsdg) / 1e6).toFixed(2);
 
   const terms = [
@@ -168,15 +187,15 @@ export function trencherStrategyTerms(cfg: TrencherTermsConfig): StrategyTerms |
     `BREAK-EVEN: if every trade ended at +${pct(tp)}% or -${pct(sl)}%, entries would break even before costs ` +
       `by hitting the take-profit about ${bar(sl, 0)}% of the time. That is a floor: stop-outs fill below ` +
       `-${pct(sl)}%; at an average realised stop of -${pct(realised)}% the bar is about ${bar(realised, 0)}%. ` +
-      `Round-trip drag c (fees, impact, gas both ways) raises it to (s + c) / (s + ${pct(tp)}) of entries, s the ` +
-      "average realised stop-out loss, both as % of entry " +
+      `Costs c beyond your average fill (exit impact, fees, gas both ways) raise it to (s + c) / (s + ${pct(tp)}) of ` +
+      "entries, s the average realised stop-out loss, as % of entry " +
       `(c = 2: about ${bar(sl, 200)}% at s = ${pct(sl)}, ${bar(realised, 200)}% at s = ${pct(realised)}). ` +
       "Time exits fall between and still pay c. Do not state a probability you cannot measure; " +
       "say whether the evidence plausibly clears this bar, and why.",
     "EXPECTED EDGE: expected_edge_usdg is this bracket's worth at this size after costs, not the take-profit " +
       `amount; price its losses at realised stop-outs with a tail to near-total loss, never at -${pct(sl)}%.`,
-    "CONTINUATION: price rising while buying broadens: more distinct buyers, buys outnumbering sells in the latest " +
-      "5 minutes, volume holding or rising, depth steady or growing, dips bought. DISTRIBUTION: price flat or rising " +
+    "CONTINUATION: price rising while buying broadens: more distinct buyers, buys outnumbering sells in the last " +
+      "5 minutes, volume and depth holding or rising, dips bought. DISTRIBUTION: price flat or rising " +
       "while selling grows into it: repeated or large sells into strength, buyers thinning, volume spiking on down " +
       "moves, depth pulled, or a few wallets doing most of the buying. Only continuation supports an entry. " +
       "Distribution, or evidence that cannot tell the two apart, is a HOLD.",

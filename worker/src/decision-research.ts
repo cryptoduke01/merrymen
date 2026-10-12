@@ -1,6 +1,7 @@
 import { CASH } from "../../packages/core/src/index";
 import { tradeFeeUsdg } from "./fees";
 import type { TrencherConfig } from "./strategies/trencher";
+import { breakEvenRate, realisedStopBps } from "./strategy-terms";
 import type { PoolFacts } from "./trencher-discovery";
 import { FEE_TIERS, pickBestQuote, quotePath, quoteTier, type Quote } from "./venues/uniswap";
 import type { Address, PublicClient } from "viem";
@@ -175,6 +176,10 @@ export function trenchMomentumBrief(
   entryUsdg: bigint,
 ): string {
   const stop = cfg.stopLossBps / 100, take = cfg.takeProfitBps / 100;
+  // THE DESK POLICY'S OWN `s` (strategy-terms.ts): the trigger, and a realised
+  // stop half again past it. A stop is a trigger, not a fill, so the trigger's
+  // bar is a floor and the loss side is never priced at it.
+  const realised = realisedStopBps(cfg.stopLossBps) / 100;
   const minutes = Math.round(cfg.maxHoldSec / 60);
   const drain = Math.round((1 - cfg.liquidityDrainFraction) * 100);
   // Fixed decimals with trailing zeros dropped: 10, 3.29, 44 — never "1" for 10.
@@ -184,32 +189,37 @@ export function trenchMomentumBrief(
   };
   const entry = (Number(entryUsdg) / 1e6).toFixed(2);
   // c: what each exit pays beyond the fill, which is also the rise above the
-  // fill that breaks even (trenchBreakEven).
+  // fill that breaks even (trenchBreakEven) — the desk policy's c.
   const cost = be.basis === "quoted"
-    ? `A round trip at ${entry} USDG costs about ${n(be.roundTripPct, 2)}% (quoted). c, each exit's cost beyond the fill and so the break-even rise above it, ` +
-      `is about ${n(be.bracketCostPct, 2)}% (exit leg as half the quoted venue friction, both turnover fees, gas both ways).`
+    ? `A round trip at ${entry} USDG costs about ${n(be.roundTripPct, 2)}% (quoted). c, each exit's cost beyond the fill, ` +
+      `is about ${n(be.bracketCostPct, 2)}% (exit leg's half of the venue friction, both fees, gas both ways).`
     : be.basis === "gas-and-fees"
       ? `A round trip at ${entry} USDG costs at least ${n(be.roundTripPct, 2)}% in gas and turnover fees (venue fee and impact not quoted). ` +
-        "c, each exit's cost beyond the fill and so the break-even rise above it, is at least that."
-      : "The round-trip cost c could not be priced; treat a marginal setup as insufficient.";
+        "c, each exit's cost beyond the fill, is at least that."
+      : "The cost c could not be priced; treat a marginal setup as insufficient.";
   const c = be.basis === "unknown" ? null : be.bracketCostPct;
-  // The odds at which the bracket breaks even. At or past 1, the take-profit
-  // cannot pay the cost at all, and no threshold is printed as if it could.
-  const p = c === null ? null : (stop + c) / (take + stop);
+  // The odds at which the bracket breaks even (breakEvenRate, the desk
+  // policy's formula), at the trigger and at the realised stop. At or past 1
+  // the take-profit cannot pay the cost whatever s is, and no threshold is
+  // printed as if it could.
+  const bar = (s: number) => n(Math.min(99, 100 * breakEvenRate(s, c ?? 0, take)), 0);
+  const at = `${bar(stop)}% at s = ${n(stop, 2)}, ${bar(realised)}% at s = ${n(realised, 2)}`;
+  const p = c === null ? null : breakEvenRate(stop, c, take);
   const odds = p === null
-    ? `positive only when P is clearly above ${n(stop * 100 / (take + stop), 0)}% plus the unknown cost`
+    ? `positive only when P is clearly above ${at}, plus the unknown cost`
     : p >= 1
       ? "and no odds make it positive: the take-profit cannot cover c at this size"
-      : `positive only when P is above ${be.basis === "gas-and-fees" ? "at least " : ""}about ${n(Math.min(99, p * 100), 0)}%`;
-  return `MOMENTUM ENTRY PLAN. Horizon: minutes, not days. Exits are mechanical, per tick (fills can overshoot): ` +
-    `stop -${n(stop, 1)}%, take +${n(take, 1)}%, close at ${minutes} minutes, or early if ${drain}% of entry liquidity drains. ` +
-    "Brackets run from your average fill, which already includes the entry leg's venue cost. " +
-    `${cost} Judge the setup against these brackets, not an invented target: ` +
-    `with P your odds of +${n(take, 1)}% before -${n(stop, 1)}%, the edge is about P x (${n(take, 1)} - c)% - (1 - P) x (${n(stop, 1)} + c)%, ${odds}; ` +
+      : `positive only when P is above ${be.basis === "gas-and-fees" ? "at least " : ""}about ${at}`;
+  return `MOMENTUM ENTRY PLAN. Horizon: minutes, not days. Exits are triggers checked per tick, sold at market: ` +
+    `stop -${n(stop, 2)}%, take +${n(take, 2)}%, close at ${minutes} minutes, or early if ${drain}% of entry liquidity drains. ` +
+    "Brackets run from your average fill, which includes the entry leg's venue cost. " +
+    `${cost} Judge against these brackets, not an invented target: with P your odds of +${n(take, 2)}% before the stop ` +
+    `and s your average realised stop-out loss (${n(stop, 2)} at best, never priced at the trigger), ` +
+    `the edge is about P x (${n(take, 2)} - c)% - (1 - P) x (s + c)%, ${odds}; ` +
     `a time-stopped exit takes the ${minutes}-minute mark, less c. ` +
     "Reason P from flow; give that estimate at entry size as expected_edge_usdg. " +
     "Continuation: buyers and buy share rising from 1h to 5m, higher 5-minute lows, volume expanding with price, liquidity holding. " +
     "Distribution: sellers dominating recent windows, one sender doing most of a material sell flow (may be a router or bundler), lower highs, draining liquidity, overextension after a vertical spike. " +
-    "Missing news, fundamentals or social-media data is not by itself a reason to hold for this strategy; decide on flow, liquidity, cost and these exits. " +
+    "Missing news, fundamentals or social-media data is not by itself a reason to hold here; decide on flow, liquidity, cost and these exits. " +
     "All checks above still apply.";
 }

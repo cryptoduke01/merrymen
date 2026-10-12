@@ -3,7 +3,8 @@ import { test } from "node:test";
 import type { PublicClient } from "viem";
 import { CASH } from "../../packages/core/src/index";
 import { DECISION_RESEARCH_GUIDANCE, decisionResearchEnabledFor, entryCostEvidence, entryCostResearch, researchEntrySize, trenchBreakEven, trenchMomentumBrief, type BreakEven } from "./decision-research";
-import { TRENCHER_FAST } from "./strategies/trencher";
+import { TRENCHER_DEFAULTS, TRENCHER_FAST } from "./strategies/trencher";
+import { trencherStrategyTerms } from "./strategy-terms";
 import { trenchBrainPersona } from "./trencher-brain";
 import { withAgentBrief } from "./agent-brief";
 
@@ -155,24 +156,58 @@ test("the momentum brief reads its exits from the strategy, states where the bra
   const brief = trenchMomentumBrief(TRENCHER_FAST, trenchBreakEven(sane, fallback), 2_500_000n);
   assert.match(brief, /Horizon: minutes, not days/);
   assert.match(brief, /stop -10%, take \+20%, close at 30 minutes, or early if 50% of entry liquidity drains/);
-  assert.match(brief, /Brackets run from your average fill, which already includes the entry leg's venue cost/);
-  assert.match(brief, /A round trip at 2\.50 USDG costs about 3\.(29|3)% \(quoted\)\. c, each exit's cost beyond the fill and so the break-even rise above it, is about 2\.(29|3)% \(exit leg as half the quoted venue friction/);
-  assert.match(brief, /P x \(20 - c\)% - \(1 - P\) x \(10 \+ c\)%, positive only when P is above about 41%/, "(10 + 2.3) / 30");
+  assert.match(brief, /Brackets run from your average fill, which includes the entry leg's venue cost/);
+  assert.match(brief, /A round trip at 2\.50 USDG costs about 3\.(29|3)% \(quoted\)\. c, each exit's cost beyond the fill, is about 2\.(29|3)% \(exit leg's half of the venue friction/);
+  assert.match(brief, /s your average realised stop-out loss \(10 at best, never priced at the trigger\)/);
+  assert.match(brief, /P x \(20 - c\)% - \(1 - P\) x \(s \+ c\)%, positive only when P is above about 41% at s = 10, 49% at s = 15/, "(10 + 2.3) / 30, then (15 + 2.3) / 35");
   assert.match(brief, /a time-stopped exit takes the 30-minute mark, less c/);
   assert.doesNotMatch(brief, /near flat/, "nothing unmeasured about where a time stop lands");
   assert.match(brief, /give that estimate at entry size as expected_edge_usdg/);
   assert.match(brief, /Continuation: buyers and buy share rising/);
   assert.match(brief, /one sender doing most of a material sell flow \(may be a router or bundler\)/);
-  assert.match(brief, /Missing news, fundamentals or social-media data is not by itself a reason to hold for this strategy/);
+  assert.match(brief, /Missing news, fundamentals or social-media data is not by itself a reason to hold here/);
   assert.match(brief, /All checks above still apply\.$/);
   // NOT HARDCODED: another config says other numbers.
   const other = trenchMomentumBrief({ stopLossBps: 1_500, takeProfitBps: 3_000, maxHoldSec: 45 * 60, liquidityDrainFraction: 0.6 }, { basis: "unknown" }, 1_000_000n);
   assert.match(other, /stop -15%, take \+30%, close at 45 minutes, or early if 40% of entry liquidity drains/);
   assert.match(other, /c could not be priced; treat a marginal setup as insufficient/);
-  assert.match(other, /clearly above 33% plus the unknown cost/);
+  assert.match(other, /clearly above 33% at s = 15, 43% at s = 22\.5, plus the unknown cost/);
   const floor = trenchMomentumBrief(TRENCHER_FAST, trenchBreakEven(null, fallback), 2_500_000n);
   assert.match(floor, /costs at least 1\.3% in gas and turnover fees \(venue fee and impact not quoted\)/);
   assert.match(floor, /P is above at least about 38%/, "a floor's threshold is a floor too");
+});
+
+test("the momentum plan and the desk policy state the same exits, the same s and c, and the same bars", () => {
+  // Research accounts' entry reviews carry both: the plan in the fenced
+  // brief, the terms as trusted DESK POLICY (strategy-terms.ts). Two bars, or
+  // a loss priced at the trigger in one and past it in the other, would hand
+  // the manager a choice the code never offers.
+  const num = (t: string, re: RegExp) => Number(re.exec(t)?.[1]);
+  for (const cfg of [TRENCHER_FAST, TRENCHER_DEFAULTS, { ...TRENCHER_FAST, stopLossBps: 1_250, takeProfitBps: 3_000 }]) {
+    const terms = trencherStrategyTerms(cfg)!.terms!;
+    const unknown = trenchMomentumBrief(cfg, { basis: "unknown" }, 2_500_000n);
+    const stop = num(terms, /triggers at -([\d.]+)% \(stop-loss\)/), take = num(terms, /and \+([\d.]+)% \(take-profit\)/);
+    const realised = num(terms, /average realised stop of -([\d.]+)%/);
+    assert.ok(unknown.includes(`stop -${stop}%, take +${take}%`), "the same triggers");
+    // c unknown prints the bracket at c = 0: the terms' floor and realised bar exactly.
+    assert.equal(num(unknown, /clearly above (\d+)% at s = /), num(terms, /take-profit about (\d+)% of the time/), "the same floor");
+    assert.equal(num(unknown, /at s = [\d.]+, (\d+)% at s = /), num(terms, /the bar is about (\d+)%/), "the same realised bar");
+    assert.equal(num(unknown, /, \d+% at s = ([\d.]+)/), realised, "the same realised stop");
+    // Losses are never priced at the trigger, in either.
+    assert.ok(terms.includes(`never at -${stop}%.`));
+    assert.match(unknown, /never priced at the trigger/);
+    assert.ok(!unknown.includes(`(1 - P) x (${stop} + c)`), "no edge formula priced at the nominal stop");
+    // c is each exit's cost past the average fill in both, never a round trip.
+    assert.match(terms, /Costs c beyond your average fill \(exit impact, fees, gas both ways\) raise it to \(s \+ c\) \/ \(s \+ [\d.]+\)/);
+    assert.match(unknown, /\(1 - P\) x \(s \+ c\)%/);
+    assert.doesNotMatch(terms, /Round-trip drag c/);
+  }
+  // With a priced c, the brief's bars are the terms' formula at that c.
+  const be = trenchBreakEven(sane, fallback);
+  if (be.basis !== "quoted") throw new Error("quoted");
+  const brief = trenchMomentumBrief(TRENCHER_FAST, be, 2_500_000n);
+  assert.equal(threshold(brief), Math.round(100 * (10 + be.bracketCostPct) / 30));
+  assert.ok(brief.includes(`, ${Math.round(100 * (15 + be.bracketCostPct) / 35)}% at s = 15;`));
 });
 
 test("when the take-profit cannot cover the cost, no odds threshold is printed; a printed one stays under 100%", () => {

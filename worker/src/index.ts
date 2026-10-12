@@ -148,6 +148,7 @@ import { ChainCoinNames, makeDecisionNamer, warmHeldNames } from "./decision-nam
 import { intentDecisionRow } from "./decision-row";
 import { leadMemory, memoryLines, positionContext, sentimentLine, technicalLine } from "./brain-material";
 import { DECISION_RESEARCH_GUIDANCE, decisionResearchEnabledFor, entryCostResearch, researchEntrySize, trenchBreakEven, trenchMomentumBrief } from "./decision-research";
+import { trencherStrategyTerms } from "./strategy-terms";
 import { readOwnOutcomeLearningFile } from "./own-outcome-learning-file";
 import { outcomeLearningLines } from "./own-outcome-learning";
 import { readFeedHistory } from "./read-feed-history";
@@ -13343,6 +13344,12 @@ async function main() {
               sizeUsdg: researchSize, gasPerOperationUsdg: expectedTradeGasMicro, tradeFeeBps: cfg.tradeFeeBps,
             } : null;
             if (enhancedResearch) inputs.persona += `\n\n${DECISION_RESEARCH_GUIDANCE}`;
+            // THE TRENCHER'S TERMS AS TRUSTED DESK POLICY (strategy-terms.ts),
+            // exactly where the momentum plan goes: research accounts' entry
+            // reviews. They state the plan's own exits, s and c, so the two
+            // never disagree; decide() sends them only to a Brain whose /health
+            // advertises "strategy-terms", and any other request is today's.
+            if (costContext) inputs.strategyTerms = trencherStrategyTerms(TRENCHER_FAST);
             trenchBrain.launch(trenchContext, inputs, focus.token, async (review) => {
               const costRead = costContext ? entryCostResearch(costContext) : Promise.resolve(null);
               const projectRead = projectContext

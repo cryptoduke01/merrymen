@@ -78,4 +78,12 @@ describe("the Trencher review's hold backoff, memory, evidence rule and research
     assert.match(run, /if \(costContext\) \{\s*inputs\.persona \+= `\\n\\n\$\{trenchMomentumBrief\(TRENCHER_FAST, trenchBreakEven\(costResearch, costContext\), costContext\.sizeUsdg\)\}`;\s*\}/);
     assert.equal(CODE.split("trenchMomentumBrief(").length - 1, 1, "one call site");
   });
+
+  it("the trusted strategy terms ride on the same costContext as the plan, and are set before the review launches", () => {
+    assert.match(CODE, /if \(costContext\) inputs\.strategyTerms = trencherStrategyTerms\(TRENCHER_FAST\);/);
+    assert.equal(CODE.split("trencherStrategyTerms(").length - 1, 1, "one call site");
+    assert.equal(CODE.split("inputs.strategyTerms").length - 1, 1, "nothing else sets or clears them");
+    assert.ok(CODE.indexOf("inputs.strategyTerms = ") < LAUNCH, "set on the inputs the launch captures, never after");
+    assert.ok(CODE.indexOf("const costContext = enhancedResearch && !focus.held ? {") < CODE.indexOf("inputs.strategyTerms = "));
+  });
 });

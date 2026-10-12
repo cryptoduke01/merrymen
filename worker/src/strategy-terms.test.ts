@@ -53,6 +53,10 @@ describe("Trencher's terms", () => {
     // realised stop makes it 15 / 35, and two points of drag 12 / 30 and 17 / 35.
     assert.match(t, /if every trade ended at \+20% or -10%, entries would break even before costs by hitting the take-profit about 33% of the time\. That is a floor: stop-outs fill below -10%; at an average realised stop of -15% the bar is about 43%\./);
     assert.match(t, /\(s \+ c\) \/ \(s \+ 20\) of entries, s the average realised stop-out loss/);
+    // c is what each exit pays past the average fill the triggers run from —
+    // the research brief's c (decision-research.ts trenchBreakEven), never a
+    // round trip that would charge the entry leg twice.
+    assert.match(t, /Costs c beyond your average fill \(exit impact, fees, gas both ways\) raise it to/);
     assert.match(t, /c = 2: about 40% at s = 10, 49% at s = 15/);
     assert.match(t, /Time exits fall between and still pay c\./);
     assert.match(t, /Do not state a probability you cannot measure/);
@@ -171,10 +175,14 @@ describe("the wire bounds mirror Brain's", () => {
 describe("code only", () => {
   it("exports no way to turn an arbitrary string into terms", () => {
     // Every export is a constant, the wire check (which returns plain fields,
-    // never StrategyTerms) or a renderer that takes a strategy config.
+    // never StrategyTerms), bracket arithmetic (numbers in, a number out) or a
+    // renderer that takes a strategy config.
     assert.deepEqual(Object.keys(mod).sort(), [
-      "MAX_HORIZON_CHARS", "MAX_STRATEGY_TERMS_CHARS", "strategyTermsWire", "trencherStrategyTerms",
+      "MAX_HORIZON_CHARS", "MAX_STRATEGY_TERMS_CHARS", "breakEvenRate", "realisedStopBps", "strategyTermsWire", "trencherStrategyTerms",
     ]);
+    assert.equal(mod.realisedStopBps(1_000), 1_500);
+    assert.equal(mod.realisedStopBps(9_000), 10_000, "never past a total loss");
+    assert.equal(mod.breakEvenRate(10, 0, 20), 1 / 3);
   });
 
   it("renders from numbers: no string field of the config reaches the text", () => {
