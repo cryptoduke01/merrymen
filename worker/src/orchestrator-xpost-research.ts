@@ -966,12 +966,12 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
           notes.push("conflict");
           return { facts: [], lookups, notes };
         }
-        // Its own address first: a coin it bought carries its contract, so a ticker it traded costs no search.
+        // EVERY TICKER THROUGH THE INDEX'S OWN RESOLVER (red-team review,
+        // 2026-10-12), never its own buys: "$PEPE" was matched by display
+        // name to the PEPEAI it bought (named "Pepe"), and that contract's
+        // red flags were posted as $PEPE's. The resolver takes only an exact,
+        // unambiguous ticker, so the facts are the coin the asker named.
         let address = i.address;
-        if (!address && i.ticker) {
-          const call = f.calls.find((c) => typeof c.token === "string" && CONTRACT.test(c.token) && (sameLabel(c.symbol, i.ticker) || sameLabel(c.name, i.ticker)));
-          address = call?.token?.toLowerCase() ?? null;
-        }
         if (!address && i.ticker) {
           if (!limiter.take(xAccountKey(input.xUserId))) notes.push("index-busy");
           else address = await look((ms) => resolveTicker(i.ticker!, ms), null);

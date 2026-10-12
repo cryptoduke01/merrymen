@@ -722,11 +722,11 @@ describe("one bounded research bundle per answer", () => {
     assert.ok(b.notes.includes("fomo-nothing"));
   });
 
-  it("a ticker it bought costs no search; a ticker it did not is searched once", async () => {
+  it("every ticker is searched once, a ticker it bought too: never matched to its own buy (red-team 2026-10-12)", async () => {
     const own = fakes();
     await own.research.gather(input({ kind: "coin", ticker: "PEPE", address: null }));
-    assert.deepEqual(own.f.resolved, []);
-    assert.equal(own.f.reads[0]!.address, PEPE_CA.toLowerCase());
+    assert.deepEqual(own.f.resolved, ["PEPE"]);
+    assert.equal(own.f.reads[0]!.address, CA, "the index's coin, not the one it bought");
     const other = fakes();
     await other.research.gather(input({ kind: "coin", ticker: "WIF", address: null }));
     assert.deepEqual(other.f.resolved, ["WIF"]);

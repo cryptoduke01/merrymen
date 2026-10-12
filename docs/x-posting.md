@@ -744,7 +744,10 @@ looks things up first, the way Shogun does in a Telegram group
   A tag that names more than one coin (two cashtags, a cashtag and a
   contract, or a coin it bought beside a different cashtag or a contract)
   is looked up for nothing: its facts would be said of an unnamed "it", and
-  the model would pick which coin to hang them on.
+  the model would pick which coin to hang them on. Every `$ticker` is
+  resolved by the index's own resolver (an exact, unambiguous ticker), never
+  matched to a buy of its own by symbol or display name: "$PEPE" is never
+  its PEPEAI named "Pepe".
   A coin it bought counts by name only beside a word about a coin or a trade
   ("is pepe legit?", "the pepe chart"), and never by a label under three
   letters or made of greetings and pronouns alone: a coin called GM or You

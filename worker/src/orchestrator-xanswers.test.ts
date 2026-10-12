@@ -1172,6 +1172,23 @@ test("research on: a tag naming two coins is handed no facts that one coin's rea
   }
 });
 
+test("research on: a $ticker is the index's coin, never its own buy that shares the name (red-team 2026-10-12)", async (t) => {
+  const OWN = `0x${"88".repeat(20)}`, INDEX = `0x${"99".repeat(20)}`;
+  const read: string[] = [], resolved: string[] = [];
+  const research = createXResearch({
+    coinFacts: async (q) => { read.push(q.address); return { ok: false, why: "unavailable" }; },
+    resolveTicker: async (ticker) => { resolved.push(ticker); return INDEX; },
+    projectDescription: async () => null, publicTheses: async () => [],
+  });
+  // Case A, as reproduced: its one buy is symbol PEPEAI, display name "Pepe", at its own contract.
+  const facts: AgentFacts = { ...FACTS, calls: [{ ...CALL, symbol: "PEPEAI", name: "Pepe", token: OWN }] };
+  const w = await world(t, { env: RESEARCH_ON, research, facts });
+  w.setInbox([tag({ text: "@pine_stoat thoughts on $PEPE?" })]);
+  await w.step();
+  assert.deepEqual(resolved, ["PEPE"], "resolved by the index, as any ticker");
+  assert.deepEqual(read, [INDEX], "and read there, never at its own PEPEAI contract");
+});
+
 test("research on: \"did you buy <contract>?\" reaches its own history by the address, end to end", async (t) => {
   const r = fakeResearch();
   const facts: AgentFacts = { ...FACTS, calls: [{ ...CALL, token: CA, ownWords: "the buying looked steady and real" }] };
