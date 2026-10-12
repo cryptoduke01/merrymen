@@ -26,6 +26,7 @@ import {
   type SnapshotPosition,
 } from "../../packages/core/src/index";
 import { decide, type BrainConfig, type BrainDecision, type BrainResult } from "./brain-client";
+import type { StrategyTerms } from "./strategy-terms";
 import {
   afterFiring,
   DEFAULT_TRIGGERS,
@@ -96,6 +97,12 @@ export interface ShadowInputs {
    */
   expectedTradeGasUsdg: number | null;
   persona?: string;
+  /**
+   * The strategy's own terms, as trusted desk policy. Rendered by
+   * strategy-terms.ts from repo code only — never from the owner's brief or
+   * market text; see DecideArgs.strategyTerms. Absent sends today's request.
+   */
+  strategyTerms?: StrategyTerms | null;
   memory?: string[];
   /** Set when a person asked. Bypasses the movement thresholds, not the budget. */
   userRequested?: boolean;
@@ -432,6 +439,7 @@ export async function runShadow(
       expected_trade_gas_usdg: i.expectedTradeGasUsdg,
     },
     persona: i.persona,
+    strategyTerms: i.strategyTerms,
     memory: i.memory,
     tier: options.tier ?? "research",
   });
@@ -592,7 +600,8 @@ export async function persistBrainDecision(
       `delta=${d.suggested_delta_usdg} · depth=${d.depth_used}` +
       (d.escalation_reasons.length ? ` (escalated: ${d.escalation_reasons.join(", ")})` : "") +
       ` · ${d.cost.model_calls} calls ${d.cost.tokens_in + d.cost.tokens_out} tok ` +
-      `$${d.cost.usd.toFixed(4)} ${result.seconds.toFixed(1)}s · decision ${d.decision_id}`,
+      `$${d.cost.usd.toFixed(4)} ${result.seconds.toFixed(1)}s · decision ${d.decision_id}` +
+      (result.strategyTerms ? ` · terms ${result.strategyTerms}` : ""),
   );
   if (lenses) log(`[brain] lenses ${lenses}`);
   // THE GATE, ON ITS OWN LINE, because "the model chose to hold" and "the book
@@ -702,6 +711,11 @@ export async function persistBrainDecision(
       // owner's signals view keeps the first 24 scalars (decisions.ts), and
       // these must not push the fields above out of it.
       ...gate,
+      // WHETHER THE DESK POLICY REACHED BRAIN: "sent", "withheld" (supplied,
+      // but this Brain did not advertise it or it failed the bounds), or null
+      // when none was supplied. After the gate for the same reason the gate is
+      // last. The terms themselves are repo text and are not copied here.
+      strategy_terms: result.strategyTerms ?? null,
     }),
   }).catch((e) => log(`[brain] decision write failed: ${e instanceof Error ? e.message : String(e)}`));
 }
