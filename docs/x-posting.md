@@ -629,7 +629,11 @@ the mention itself. They go out **right away**:
   can't name, never that it bought nothing; only an agent with no buys at
   all is told it bought nothing lately. **Only the money it trades with now**
   is ever said, because the answer is gated with today's mode, which refuses
-  a live agent's "on paper" and a paper agent's "real money". A live agent is
+  a live agent's "on paper" and a paper agent's "real money". The gate also
+  refuses an answer that names a coin bought only with the other money (or
+  one whose buy's money is unknown), wherever the model read of it
+  (`bought-named`), and an idle agent's that names any paper coin it bought
+  without saying paper, not only the three newest. A live agent is
   never told of a paper buy, named or not: an agent switched to live whose
   recent buys were all on paper is told nothing of them, and unnamed buys of
   both kinds are said as real money. A paper agent says paper as before and

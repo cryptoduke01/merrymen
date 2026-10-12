@@ -45,7 +45,7 @@ import { ensureGroupchatSchema, getMember } from "./groupchat/store";
 import { STRATEGY_FLAVOUR, STRATEGY_SPOKEN, TRAIT_VOICE } from "./groupchat/templates";
 import { MUSINGS, SUBJECTS, TAKES } from "./groupchat/topics";
 import { xAppFromEnv, type FetchLike, type XApp, type XReply } from "./xpost/client";
-import { admitXPost, vocabularyRefusal, type BaseGate, type XGateCtx } from "./xpost/gate";
+import { admitXPost, moneySaid, vocabularyRefusal, type BaseGate, type XGateCtx } from "./xpost/gate";
 import { ACTIVE_CADENCE, ANSWER_GAP_MS, ANSWER_STALE_MS, ANSWERS_PER_DAY, REPLY_STALE_MS, STANDARD_CADENCE, coinOf, hash32, introState, planPosts, replyDueAt, sendDecision, type PlanCadence, type PlanClock, type PlanIntent } from "./xpost/planner";
 import { APP_PAUSE_KEY, APP_PAUSE_MS, CREDITS_PAUSE_MS, PAUSE_KEY, readReplyComments, sendOne, type SendOutcome } from "./xpost/sender";
 import { isAnswerOptOut, isReplyOptOut, replyCandidate, tagCandidate, withoutReplyOptOut } from "./xpost/replies";
@@ -656,6 +656,35 @@ function boughtKind(f: AgentFacts): false | "paper" | "live" | "both" {
   if (!buys.length) return false;
   const paper = buys.some((c) => c.paper), live = buys.some((c) => !c.paper);
   return paper && live ? "both" : paper ? "paper" : "live";
+}
+
+/**
+ * EVERY NAME ITS RECENT BUYS GO BY, BY WHICH MONEY (red-team review,
+ * 2026-10-12): each buy call's ticker, name and label, and each buy post's
+ * coin, as paper or live by its call's own flag (a post with no known call
+ * by its own words, and as the other money when they say neither: unknown
+ * is never the money it trades with now). `otherOnly`: the names bought only
+ * with the money it does not trade with now, which an answer never says.
+ */
+function moneyNames(f: AgentFacts, posts: readonly XPost[]): { paper: string[]; live: string[]; otherOnly: string[] } {
+  const paper = new Set<string>(), live = new Set<string>(), unknown = new Set<string>();
+  const put = (set: Set<string>, label: unknown) => { if (typeof label === "string" && label.trim()) set.add(label.trim()); };
+  const calls = new Map<string, boolean>();
+  for (const c of f.calls) {
+    if (c.side !== "buy") continue;
+    calls.set(c.decisionId, c.paper);
+    for (const label of [c.symbol, c.name, coinOf(c)?.label]) put(c.paper ? paper : live, label);
+  }
+  for (const p of posts) {
+    if (p.kind !== "buy" || !p.coin) continue;
+    const known = p.decisionId !== null ? calls.get(p.decisionId) : undefined;
+    const said = known === undefined ? moneySaid(p.body) : known ? "paper" : "live";
+    put(said === "paper" ? paper : said === "live" ? live : unknown, p.coin);
+  }
+  const own = f.mode === "live" ? live : f.mode === "paper" ? paper : new Set([...paper, ...live]);
+  const other = f.mode === "live" ? [...paper, ...unknown] : f.mode === "paper" ? [...live, ...unknown] : [...unknown];
+  const ownKeys = new Set([...own].map((n) => n.toLowerCase()));
+  return { paper: [...paper], live: [...live], otherOnly: [...new Set(other.filter((n) => !ownKeys.has(n.toLowerCase())))] };
 }
 
 /** Every name a buy of this exact contract goes by, with its money: what an exact-path answer may say it bought. */
@@ -1544,12 +1573,16 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       const told = general || exact;
       // ON THE EXACT PATH, only the tagged contract's own names: "yep, bought wif" under it is a buy it never made.
       const vouched = general ? buys : exact ? exactBuys(f, candidate.address ?? null) : [];
+      // NEVER THE OTHER MONEY'S COINS (red-team 2026-10-12): a coin bought only
+      // with the money it does not trade with now (or whose buy's money is
+      // unknown) is never named, and an idle agent that names any paper coin
+      // says paper — not only the three newest the buys list holds.
+      const money = moneyNames(f, posts);
       const gate = (text: string) => admitXPost(text, {
         kind: "reply", agentName: f.name, mode, coins: vouched.map((c) => c.label),
-        paperCoins: vouched.filter((c) => c.paper).map((c) => c.label), recentOwn, recentFleet, emojiOk: facts.style.emoji > 0,
+        paperCoins: [...vouched.filter((c) => c.paper).map((c) => c.label), ...(f.mode === "idle" ? money.paper : [])], recentOwn, recentFleet, emojiOk: facts.style.emoji > 0,
         // A buy it says is one it was told of, or none at all (XGateCtx.buys).
-        ...(templated ? {} : { buys: told ? "vouched" as const : "none" as const }),
-        ...(!told && !templated ? { unsaid: bought } : {}),
+        ...(templated ? {} : { buys: told ? "vouched" as const : "none" as const, unsaid: [...(told ? [] : bought), ...money.otherOnly] }),
       }, BASE_GATE);
       // SHERWOOD DOES NOT RUN IT YET: a draft that says so is refused before
       // the gate, research on or off — and so is a draft that names it at

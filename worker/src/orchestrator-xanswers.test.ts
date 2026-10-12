@@ -1090,6 +1090,50 @@ test("research on: its own contract beside another name never says it bought it 
   }
 });
 
+/** A buy post of this owner's, posted `ago` before NOW. */
+async function postedBuy(db: Parameters<typeof store.schedulePost>[0], decisionId: string, coin: string, body: string, ago: number, tweet: string) {
+  const id = await store.schedulePost(db, { tenant: TENANT, xUserId: "111", kind: "buy", dedupeKey: `buy:${decisionId}`, body, coin, decisionId, nowMs: NOW - ago, dueAtMs: NOW - ago });
+  await store.claimPost(db, id!, NOW - ago);
+  await store.markPosted(db, id!, tweet, NOW - ago);
+}
+
+test("an answer never names a coin bought with the other money, however it learned of it (red-team 2026-10-12)", async (t) => {
+  const stock = (decisionId: string, symbol: string, name: string, paper: boolean, ago: number): CallFact =>
+    ({ ...CALL, decisionId, symbol, name, paper, atSec: (NOW - ago) / 1000 });
+  // State A: live, three newer live buys not yet posted, and an older paper PEPE whose buy post is its only one.
+  const stateA: AgentFacts = { ...FACTS, mode: "live", calls: [stock("fill-tsla", "TSLA", "Tesla", false, HOUR), stock("fill-nvda", "NVDA", "NVIDIA", false, 2 * HOUR),
+    stock("fill-spy", "SPY", "SPY", false, 3 * HOUR), stock("fill-pepe", "PEPE", "Pepe", true, 40 * HOUR)] };
+  // State B: on paper now, its only buy post from its live era.
+  const stateB: AgentFacts = { ...FACTS, mode: "paper", calls: [stock("fill-bonk", "BONK", "Bonk", false, 40 * HOUR)] };
+  const cases: [AgentFacts, string, string, string][] = [
+    [stateA, "fill-pepe", "Pepe", "lately it was pepe, i liked how fresh it felt. Say stop to opt out."],
+    [stateA, "fill-pepe", "Pepe", "my last post was about pepe, bought it when the curve looked early. Say stop to opt out."],
+    [stateB, "fill-bonk", "Bonk", "my latest was bonk on paper, steady buying behind it. Say stop to opt out."],
+  ];
+  for (const env of [{}, RESEARCH_ON]) {
+    for (const [facts, decisionId, coin, answer] of cases) {
+      const w = await world(t, { env, research: fakeResearch().research, facts, answer });
+      const body = coin === "Pepe" ? "picked up pepe on paper, the curve looked early and the buyers looked real" : "picked up bonk, the buying looked steady and real";
+      await postedBuy(w.db, decisionId, coin, body, 39 * HOUR, "100000000000000077");
+      w.setInbox([tag({ text: "@pine_stoat what do you trade?" })]);
+      await w.step();
+      const prompt = w.asked()[0]!;
+      assert.doesNotMatch(/What you looked up[^\n]*/.exec(prompt)?.[0] ?? "", /pepe|bonk/i, `${answer}: never its latest buy post of the other money`);
+      const [row] = await w.answers();
+      assert.equal(row!.status, "skipped", answer);
+      assert.equal(row!.reason, "gate:bought-named", answer);
+      w.setInbox([]);
+      await w.step(NOW + MIN);
+      assert.deepEqual(w.sends, [], answer);
+    }
+  }
+  // An idle agent names a paper coin only saying paper, even one the three newest buys pushed out of its list.
+  const idle = await world(t, { facts: { ...stateA, mode: "idle" }, answer: "lately it was pepe, i liked how fresh it felt. Say stop to opt out." });
+  idle.setInbox([tag({ text: "@pine_stoat what do you trade?" })]);
+  await idle.step();
+  assert.equal((await idle.answers())[0]!.reason, "gate:paper-unsaid");
+});
+
 test("research on: \"did you buy <contract>?\" reaches its own history by the address, end to end", async (t) => {
   const r = fakeResearch();
   const facts: AgentFacts = { ...FACTS, calls: [{ ...CALL, token: CA, ownWords: "the buying looked steady and real" }] };
