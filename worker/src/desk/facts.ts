@@ -275,6 +275,7 @@ export function createCoinFactsReader(o: { fetchJson?: FactsFetch; now?: () => n
         return r.ok ? { failed: false, observedAt: r.observedAt, body: r.body } : { failed: true, failure: r.failure, ...(r.retryAfterMs !== undefined ? { retryAfterMs: r.retryAfterMs } : {}) };
       },
       (failure) => ({ failed: true, failure }),
+      route,
     );
 
   return async (q): Promise<CoinFactsRead> => {
