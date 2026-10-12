@@ -42,6 +42,7 @@ import { SETTINGS_DEFAULTS } from "../../../packages/core/src/index";
 import { llmText, type LlmCreds } from "../llm";
 import { hash32, type SaleOutcome } from "./planner";
 import { namedIn, SHERWOOD_NAME, sherwoodClaimed, sherwoodMentioned, sherwoodNamed, unreadableLetter } from "./gate";
+import { withoutFiguresLine } from "./figures";
 import { REPLY_OPT_OUT, XREPLY_MAX_COMMENT_CHARS } from "./replies";
 import { asksAboutACoin } from "./words";
 
@@ -382,6 +383,18 @@ function clean(text: unknown, max: number): string | null {
 }
 
 /**
+ * ONE OF ITS OWN POSTS AS A PROMPT MAY QUOTE IT, or null. A post that carries
+ * a figures line (figures.ts) is never quoted at all, line or words: it is an
+ * answer that carried something looked up, the caller never hands one on, and
+ * its numbers are figures the model could repeat as its own. clean() alone
+ * would drop it for its digits; this says why, and holds if that ever changes.
+ */
+function ownWords(text: unknown, max: number): string | null {
+  if (typeof text !== "string" || withoutFiguresLine(text) !== text) return null;
+  return clean(text, max);
+}
+
+/**
  * A TAG'S QUESTION AS THE MODEL MAY READ IT, or null when nothing of it is
  * usable. tagCandidate lets digits through, and a memecoin question often
  * carries one ("saw it on 2 lists", "top 3 coins?", "a 100x?", "the 24h
@@ -545,7 +558,7 @@ function usedEmoji(recent: readonly string[]): boolean {
 }
 
 function rules(f: WriterFacts, kind: "intro" | "buy" | "sell" | "casual" | "reply" | "answer"): string {
-  const recent = (f.recentOwn ?? []).map((r) => clean(r, 220)).filter((r): r is string => !!r).slice(0, 6);
+  const recent = (f.recentOwn ?? []).map((r) => ownWords(r, 220)).filter((r): r is string => !!r).slice(0, 6);
   const used = usedEmoji(recent);
   const shown = recent.map((r) => r.replace(EMOJI, "").trim()).filter((r) => r !== "");
   const out = [
@@ -977,7 +990,7 @@ export function answerPrompt(f: AnswerFacts): Prompt {
     .map((c) => ({ label: clean(c.label, 40), paper: c.paper })).filter((c): c is { label: string; paper: boolean } => !!c.label).slice(0, 4);
   const unnamed = f.boughtLately ? unnamedKind(f.mode, f.boughtLately) : null;
   // What it said and its recent posts carry its buy posts ("grabbed pepe…"): none of it but for a plain question about its trades.
-  const said = !shown ? [] : (f.said ?? []).map((r) => clean(r, 220)).filter((r): r is string => !!r).slice(0, 6);
+  const said = !shown ? [] : (f.said ?? []).map((r) => ownWords(r, 220)).filter((r): r is string => !!r).slice(0, 6);
   // Re-cleaned here, whoever built them: a figure in a fact is a figure the model could repeat.
   const research = (f.research ?? []).map((r) => clean(r, 200)).filter((r): r is string => !!r)
     .filter((r) => shown || exact || !OWN_BUY_FACT.test(r)).slice(0, 10);
@@ -1066,7 +1079,7 @@ export function casualPrompt(f: CasualFacts): Prompt {
         ? `Today it is about how you trade (${how.join("; ")}): say it your own way, with no numbers and no predictions.`
         : "Today it is about a coin you bought lately, said your own way, with no numbers and no predictions.",
     );
-    const talked = (f.talked ?? []).map((t) => clean(t, 200)).filter((t): t is string => !!t).slice(0, 3);
+    const talked = (f.talked ?? []).map((t) => ownWords(t, 200)).filter((t): t is string => !!t).slice(0, 3);
     if (talked.length) {
       lines.push(`What you said lately answering people, which you may pick back up as a theme in new words (never quote it, never name or quote anyone): ${talked.map(q).join(" / ")}.`);
     }

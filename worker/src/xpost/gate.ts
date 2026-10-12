@@ -53,6 +53,7 @@
  */
 import { REPEAT_LIMIT, similarity } from "../social-post";
 import { xWeightedLength, X_MAX_WEIGHTED } from "./client";
+import { withoutFiguresLine } from "./figures";
 import type { XPostKind } from "./store";
 import type { SaleOutcome } from "./planner";
 import { withoutReplyOptOut } from "./replies";
@@ -1451,8 +1452,16 @@ function strings(list: unknown): string[] {
  * opt-out-unsaid · reply-current-or-action · sherwood-claim · bought-named · buy-claim ·
  * fleet-repeat · seed-echo — plus whatever the base gate says (has-digits,
  * quantity, repeat, unvouched-ticker, address, secret…).
+ *
+ * WHAT A DRAFT IS WEIGHED AGAINST HAS NO FIGURES LINE (figures.ts). An active
+ * agent's posted answer may carry one, put in by code after this gate; every
+ * earlier post, its own and the fleet's, is read here without it. So two
+ * answers are a repeat when their words are, never because their figures
+ * match (two answers about the same coin an hour apart), and never "new"
+ * because their figures differ.
  */
-export function admitXPost(raw: unknown, ctx: XGateCtx, baseGate: BaseGate): XVerdict {
+export function admitXPost(raw: unknown, given: XGateCtx, baseGate: BaseGate): XVerdict {
+  const ctx: XGateCtx = { ...given, recentOwn: strings(given?.recentOwn).map(withoutFiguresLine), recentFleet: strings(given?.recentFleet).map(withoutFiguresLine) };
   const agentName = String(ctx?.agentName ?? "").trim();
   const tidied = tidyXPost(raw, agentName);
   if (tidied === "") return refuse("empty");

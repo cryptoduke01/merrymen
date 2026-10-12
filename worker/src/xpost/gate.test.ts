@@ -1176,3 +1176,29 @@ describe("sherwood with a symbol written for one of its letters is still sherwoo
     assert.notEqual(reason("mostly fresh launches w/ steady buying", { kind: "casual" }), "charset");
   });
 });
+
+describe("a figures line in an earlier post is never what makes, or unmakes, a repeat (2026-10-12)", () => {
+  /** A stand-in that also refuses a repeat of its own recent posts, as the room's gate does. */
+  const repeating: BaseGate = (raw, c) => {
+    if (/\p{N}/u.test(raw)) return { ok: false, reason: "has-digits" };
+    return c.recentOwn.some((p) => similarity(raw, p) >= REPEAT_LIMIT) ? { ok: false, reason: "repeat" } : { ok: true, text: raw };
+  };
+  const reply: Partial<XGateCtx> = { kind: "reply", mode: "live", coins: [] };
+  const LINE = "geckoterminal robinhood: trending $ABC 24h +4% vol ~$90k; fomo: most bought $ABC; coingecko: trending $PEPE, $WIF.";
+  it("words said before are still a repeat with a line after them, its own or the fleet's", () => {
+    const said = `quiet hour on the robinhood chain index, nothing wild. ${LINE} Say stop to opt out.`;
+    const draft = "quiet hour on the robinhood chain index, nothing wild. Say stop to opt out.";
+    assert.deepEqual(admitXPost(draft, ctx({ ...reply, recentOwn: [said] }), repeating), { ok: false, reason: "repeat" });
+    assert.equal(reason(draft, { ...reply, recentFleet: [said] }), "fleet-repeat");
+  });
+  it("new words beside an earlier answer's same figures are not a repeat, though the line alone would have made them one", () => {
+    const draft = "geckoterminal and coingecko both trending, fomo busy. Say stop to opt out.";
+    const earlier = `a calm one, honestly. ${LINE} Say stop to opt out.`;
+    // Weighed with the line in, the shared source words alone would refuse it.
+    assert.ok(similarity(draft, earlier) >= REPEAT_LIMIT);
+    assert.equal(reason(draft, { ...reply, recentFleet: [earlier] }), "ok");
+    assert.ok(admitXPost(draft, ctx({ ...reply, recentOwn: [earlier] }), repeating).ok);
+    // A casual post is weighed against the fleet's answers the same way.
+    assert.equal(reason("geckoterminal and coingecko both trending, fomo busy", { kind: "casual", recentFleet: [earlier] }), "ok");
+  });
+});

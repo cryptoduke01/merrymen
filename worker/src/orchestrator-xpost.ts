@@ -100,6 +100,7 @@ import { boughtNames, carriesResearch, classifyTag, createXResearch, generalTrad
 import { PUBLISHABLE_SOURCES } from "./thesis-policy";
 import { readSaleResults } from "./orchestrator-xpost-results";
 import { appendSaleOutcome, hasSaleOutcome } from "./xpost/sale-outcome";
+import { admitFiguresLine, withFigures, type FiguresSpec } from "./xpost/figures";
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -1651,13 +1652,19 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       const walletPublic = !!social?.publicWallet && social.publicWallet.address.toLowerCase() === f.agentId.toLowerCase();
       // ONE BUNDLE, AT MOST, for this answer — and only with research on.
       let looked: { intent: AnswerIntentKind; research: string[]; creatorClaim?: string; boughtExact?: boolean } | null = null;
+      // THE FIGURES, KEPT APART FROM WHAT THE WRITER IS HANDED: typed numbers
+      // code renders after the gate (xpost/figures.ts), never in a prompt.
+      // Only beside words it was handed: a line with nothing looked up to
+      // stand on is never put in.
+      let figures: FiguresSpec | null = null;
       if (research && intent) {
         const bundle = await research.gather({ shared, intent, tenant: account.tenant, xUserId: account.xUserId, facts: f, posts, fomo: researchFomo,
           // Under another handle no question is one the exact path reads (ResearchInput.question: absent, never).
           coinNamed: coinNamed || !general, ...(otherHandles ? {} : { question: candidate.text }), budgetMs: Math.max(0, sendBy - at()) })
           .catch((): ResearchBundle => ({ facts: [], lookups: 0, notes: ["fault"] }));
-        looked = { intent: intent.kind, research: bundle.facts, ...(bundle.claim ? { creatorClaim: bundle.claim } : {}),
+        looked = { intent: bundle.intent ?? intent.kind, research: bundle.facts, ...(bundle.claim ? { creatorClaim: bundle.claim } : {}),
           ...(bundle.exact === true && candidate.address && !otherHandles ? { boughtExact: true } : {}) };
+        if (bundle.figures?.length && bundle.facts.length) figures = bundle.figures;
         bump(`answer-intent-${intent.kind}`);
         if (bundle.lookups) bump("answer-lookups", bundle.lookups);
         for (const note of new Set(bundle.notes)) bump(`answer-research-${note}`);
@@ -1734,10 +1741,20 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // AND ON WHAT WOULD BE POSTED: the gate's cleaned text, not the draft it read.
       const postsName = !templated && verdict?.ok === true && (sherwoodNamed(verdict.text) || sherwoodMentioned(verdict.text));
       const finishedAt = at();
-      const body = verdict?.ok && !postsName ? verdict.text : null;
+      const admitted = verdict?.ok && !postsName ? verdict.text : null;
+      // THE FIGURES LINE, CODE'S, AFTER THE GATE (xpost/figures.ts): only an
+      // active owner's answer, only from what research built for this tag,
+      // only a line in the renderer's own grammar (admitFiguresLine, again
+      // here), between the admitted words and the notice, and only while the
+      // whole post fits X; else the answer goes out as the gate admitted it.
+      // Never a code-built model line or a greeting's.
+      const figured = admitted && figures && !templated && active.has(account.tenant.toLowerCase()) ? withFigures(admitted, figures) : null;
+      const lined = figured?.line != null && admitFiguresLine(figured.line) && !sherwoodMentioned(figured.line) ? figured : null;
+      if (figures && admitted) bump(lined ? (lined.dropped > 0 ? "answer-figures-shortened" : "answer-figures") : "answer-figures-left-out");
+      const body = lined ? lined.text : admitted;
       // MARKED BY WHAT IT WAS HANDED, not by what the model wrote: an answer
       // given anything looked up is never handed on (ANSWER_LOOKED_UP).
-      const lookedUp = !!looked && (looked.research.length > 0 || !!looked.creatorClaim);
+      const lookedUp = !!looked && (looked.research.length > 0 || !!looked.creatorClaim || lined !== null);
       const id = await schedulePost(shared, {
         tenant: account.tenant, xUserId: account.xUserId, kind: "answer", dedupeKey, body: body ?? "",
         coin: lookedUp ? ANSWER_LOOKED_UP : null, decisionId: null, dueAtMs: finishedAt, nowMs: finishedAt,

@@ -55,8 +55,9 @@ import { lettersOf, moneySaid, sherwoodMentioned, vocabularyRefusal } from "./xp
 import { coinOf, hash32 } from "./xpost/planner";
 import { normalisedTag, plainAsk, withoutReplyOptOut } from "./xpost/replies";
 import { takeAllowance, type XPost } from "./xpost/store";
-import { coinNamedIn } from "./xpost/writer";
+import { coinNamedIn, type AnswerIntentKind } from "./xpost/writer";
 import { asksAboutACoin, nameLikeWords } from "./xpost/words";
+import type { FiguresSpec } from "./xpost/figures";
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -482,6 +483,20 @@ export interface ResearchBundle {
    * AnswerFacts.boughtExact).
    */
   exact?: boolean;
+  /**
+   * THE FIGURES THE ANSWER MAY CARRY, as typed numbers and provider tickers,
+   * never words (xpost/figures.ts). The model is never shown them: code
+   * renders them into the figures line after the X gate admitted the model's
+   * words, and only for an active owner's answer (orchestrator-xpost.ts
+   * writeAnswer). Absent: no line.
+   */
+  figures?: FiguresSpec;
+  /**
+   * What the answer turned out to be about, when that is not what the tag was
+   * read as: a ticker on the coin list that is no major (a copycat, unranked,
+   * past the rank cap) goes on as a coin of the chain. Absent: the tag's own.
+   */
+  intent?: AnswerIntentKind;
   /** Lookups made (the budget counts these). */
   lookups: number;
   /** What happened, by stable word, for the pass's counts. Never a coin, a person or an address. */
@@ -508,8 +523,13 @@ export function sayable(s: unknown): s is string {
  * facts restated under another). Read by the source words, which survive the
  * model's rephrasing ("keep who said it"), so it errs toward holding a post
  * back; one held back only costs a theme.
+ *
+ * AND THE FIGURES' SOURCES (2026-10-12): coingecko, geckoterminal and
+ * bitquery, which the market phrases and the figures line name. A post that
+ * says one carries research; a draft that cites one with nothing looked up
+ * is refused (orchestrator-xpost.ts, gate:unlooked-source).
  */
-const RESEARCH_SOURCE = /\b(?:index|fomo|on[\s-]?chain|chain data|project|creator|contract)\b/i;
+const RESEARCH_SOURCE = /\b(?:index|fomo|on[\s-]?chain|chain data|project|creator|contract|coin\s?gecko|gecko\s?terminal|bit\s?query)\b/i;
 export function carriesResearch(body: unknown): boolean {
   return typeof body === "string" && RESEARCH_SOURCE.test(body);
 }

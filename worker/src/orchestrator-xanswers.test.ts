@@ -12,12 +12,13 @@ import { test, type TestContext } from "node:test";
 import { wrapSqlite } from "./db";
 import { ACTIVE_REPLY_POLL_MS, ACTIVE_REPLY_POLLS_PER_DAY, makeXPoster, xpostEnv } from "./orchestrator-xpost";
 import { isAsleep } from "./groupchat/clock";
-import { createXResearch, type XResearch } from "./orchestrator-xpost-research";
+import { createXResearch, type ResearchBundle, type XResearch } from "./orchestrator-xpost-research";
 import type { CoinFacts } from "./coin-facts-types";
 import type { FomoBroker } from "./fomo/contract";
 import type { FlowResult } from "./flow-facts";
 import type { AgentFacts, CallFact } from "./groupchat/facts";
-import type { FetchLike } from "./xpost/client";
+import { xWeightedLength, X_MAX_WEIGHTED, type FetchLike } from "./xpost/client";
+import type { FiguresSpec } from "./xpost/figures";
 import { greetingAnswers, modelAnswers } from "./xpost/writer";
 import { ANSWER_GAP_MS } from "./xpost/planner";
 import { PAUSE_KEY } from "./xpost/sender";
@@ -2094,5 +2095,94 @@ test("greetings are answered in other words each time, and once all eight have b
   assert.doesNotMatch(r.log ?? "", /answered-greeting/);
   // The model question's lines are a different set: still answered.
   assert.ok(modelAnswers("1", { lower: false }).every((m) => !greetingAnswers("1", { lower: false }).includes(m)));
+});
+
+// ── the figures line ────────────────────────────────────────────────────────
+
+/** A research stand-in that hands back one bundle to a tag about a coin (the words, and the figures code renders), nothing to any other. */
+function handing(bundle: Partial<ResearchBundle>): XResearch & { asked: number } {
+  const r = {
+    asked: 0,
+    async gather(input: { question?: string }): Promise<ResearchBundle> {
+      r.asked++;
+      if (!/\beth\b|superverse/.test(input.question ?? "")) return { facts: [], lookups: 0, notes: [] };
+      return { facts: ["coingecko shows it up a little today"], lookups: 1, notes: [], ...bundle };
+    },
+  };
+  return r;
+}
+const MAJOR_FIGURES: FiguresSpec = [{ kind: "major", symbol: "eth", rank: 2, priceUsd: 3_412, marketCapUsd: 411e9, volume24hUsd: 18.2e9, change24hPct: 1.24, change7dPct: -3.4 }];
+const MAJOR_LINE = "coingecko: $ETH #2, ~$3.4k, mcap ~$411B, vol ~$18B, 24h +1.2%, 7d -3.4%.";
+const UP_A_LITTLE = "coingecko shows it up a little today, nothing wild, not a call. Say stop to opt out.";
+
+test("an answer handed figures goes out with code's line between the model's words and the notice, marked looked up", async (t) => {
+  const w = await world(t, { env: RESEARCH_ON, research: handing({ figures: MAJOR_FIGURES }), answer: UP_A_LITTLE });
+  w.setInbox([tag({ text: "@pine_stoat how's eth doing?" })]);
+  const r = await w.step();
+  const posted = `coingecko shows it up a little today, nothing wild, not a call. ${MAJOR_LINE} Say stop to opt out.`;
+  assert.deepEqual(w.sends, [{ text: posted, reply: { in_reply_to_tweet_id: MENTION } }]);
+  const [answer] = await w.answers();
+  assert.equal(answer!.body, posted, "stored as posted");
+  assert.equal(answer!.coin, store.ANSWER_LOOKED_UP);
+  assert.match(r.log ?? "", /answer-figures 1/);
+  // The model was never shown a figure, a ticker or the line.
+  for (const p of [...w.asked(), ...w.systems]) assert.doesNotMatch(p, /coingecko:|\$ETH|~\$|3\.4k|411/);
+});
+
+test("the line is never shown to a later prompt, and the gate still weighs the words: the same words again are a repeat, new ones are not", async (t) => {
+  const w = await world(t, { env: RESEARCH_ON, research: handing({ figures: MAJOR_FIGURES }), answer: UP_A_LITTLE });
+  w.setInbox([tag({ text: "@pine_stoat how's eth doing?" })]);
+  await w.step();
+  // Another person asks the same: the model writes the same words, which were said already.
+  w.setInbox([tag({ id: "100000000000000401", conversation_id: "100000000000000401", author_id: "401", text: "@pine_stoat how's eth doing?" })]);
+  await w.step(NOW + MIN);
+  const again = (await w.answers()).find((a) => a.replyToTweetId === "100000000000000401");
+  assert.equal(again?.status, "skipped");
+  assert.match(again?.reason ?? "", /^gate:(?:repeat|fleet-repeat)$/, "its words were said, whatever the figures");
+  // A plain chat later is never shown it, words or line.
+  w.setInbox([tag({ id: "100000000000000402", conversation_id: "100000000000000402", author_id: "402", text: "@pine_stoat gm, how's your day going?" })]);
+  await w.step(NOW + 2 * MIN);
+  const chat = w.asked().at(-1)!;
+  assert.match(chat, /how's your day going/);
+  for (const p of [chat, w.systems.at(-1)!]) assert.doesNotMatch(p, /\$ETH|~\$|up a little today/);
+  // And a draft that cites coingecko with nothing looked up for it is refused, as any unlooked source is.
+  assert.equal((await w.answers()).find((a) => a.replyToTweetId === "100000000000000402")?.reason, "gate:unlooked-source");
+  assert.equal(w.sends.length, 1);
+});
+
+test("figures with nothing looked up beside them, a refused draft, a code line or an owner not active put in no line", async (t) => {
+  // No words were handed: the line has nothing to stand on.
+  const bare = await world(t, { env: RESEARCH_ON, research: handing({ facts: [], figures: MAJOR_FIGURES }), answer: "no read on that one just now. Say stop to opt out." });
+  bare.setInbox([tag({ text: "@pine_stoat how's eth doing?" })]);
+  await bare.step();
+  assert.deepEqual(bare.sends.map((s) => s.text), ["no read on that one just now. Say stop to opt out."]);
+  // A draft the gate refuses is skipped, line and all.
+  const refused = await world(t, { env: RESEARCH_ON, research: handing({ figures: MAJOR_FIGURES }), answer: "it's mooning, you should buy. Say stop to opt out." });
+  refused.setInbox([tag({ text: "@pine_stoat how's eth doing?" })]);
+  await refused.step();
+  assert.equal((await refused.answers())[0]!.status, "skipped");
+  assert.equal((await refused.answers())[0]!.body, "");
+  assert.deepEqual(refused.sends, []);
+  // Code's own greeting line never carries one.
+  const hi = handing({ figures: MAJOR_FIGURES });
+  const greet = await world(t, { env: RESEARCH_ON, research: hi });
+  greet.setInbox([tag({ text: "@pine_stoat gm" })]);
+  await greet.step();
+  assert.equal(hi.asked, 0);
+  assert.doesNotMatch(String(greet.sends[0]?.text ?? ""), /coingecko|\$/);
+});
+
+test("too long for X with its words: the line sheds fields, then goes, and the post always fits", async (t) => {
+  const words = "coingecko shows it down a fair bit today and sharply on the week, trading volume looks heavy for its size, plenty of churn going on over there now. not a call, just what it shows.";
+  assert.ok(`${words} Say stop to opt out.`.length <= 200, "the gate's own limit on the model's words");
+  const wide: FiguresSpec = [{ kind: "major", symbol: "superverse", rank: 188, priceUsd: 1_240, marketCapUsd: 1.21e9, volume24hUsd: 310e6, change24hPct: -12.34, change7dPct: -45.6 }];
+  const w = await world(t, { env: RESEARCH_ON, research: handing({ figures: wide }), answer: `${words} Say stop to opt out.` });
+  w.setInbox([tag({ text: "@pine_stoat thoughts on superverse?" })]);
+  const r = await w.step();
+  const text = String(w.sends[0]?.text ?? "");
+  assert.ok(xWeightedLength(text) <= X_MAX_WEIGHTED, String(xWeightedLength(text)));
+  assert.match(text, /just what it shows\. coingecko: \$SUPERVERSE #188, .*Say stop to opt out\.$/);
+  assert.doesNotMatch(text, /7d/, "the week went first");
+  assert.match(r.log ?? "", /answer-figures-shortened 1/);
 });
 
