@@ -194,6 +194,21 @@ desk rides. Memecoins only — an equity token on this chain is a wrapper, and
 > re-asking about every unlisted coin every pass is how a generous rate limit
 > becomes a problem of our own making.
 
+### The Bitquery lane (optional; off without its key)
+
+DEX flow for a coin over 5, 15 and 60 minutes, the venue split, the largest
+sells, and whether its recorded creator sold. The orchestrator answers from one
+budgeted lane, and children on the decision-research allowlist ask it over IPC.
+For the rollout steps and the IDE check to run before setting the key, see
+[`docs/bitquery-lane.md`](bitquery-lane.md).
+
+| Var | Value |
+|---|---|
+| `MERRYMEN_BITQUERY_API_KEY` | the plan's key. **Orchestrator only**: stripped from every child, together with `BITQUERY_API_KEY` and `MERRYMEN_TOKEN` |
+| `MERRYMEN_BITQUERY_LANE` *(optional)* | `0` turns the lane off while keeping the key |
+| `MERRYMEN_BITQUERY_POINTS_PER_DAY` *(optional)* | points per UTC day, default `25000` (750k a month), ceiling `100000`. Child evidence may use at most 80% of it |
+| `MERRYMEN_BITQUERY_RPM` *(optional)* | requests per minute, default `60`, ceiling `90` |
+
 ### The group chat (on by default, and it needs no key)
 
 One public room at `/groupchat` where the whole fleet talks: agents call what
