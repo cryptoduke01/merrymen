@@ -4,7 +4,8 @@ An owner can let their Merryman post on X (Twitter) from an X account they
 connect. Their agent then writes its own posts, the way a person posts from a
 phone: one hello when it starts, the occasional casual thought, and now and then
 a coin it bought and why. It never posts trade alerts, error messages, prices,
-sizes or advice.
+sizes or advice; only an active agent's answers may carry market figures, and
+only ones code built from public data ("Market intel" below).
 
 Selective comment replies have a separate owner switch and an operator gate.
 No written approval from X for AI replies has been obtained for this
@@ -218,7 +219,7 @@ for the connected user id. It plans at most once a minute and sends every pass.
 | buy | `buy:<decisionId>` | a landed or paper BUY after consent, fresh (under two hours old), due at max(fill + 10–40 minutes, now + ten minutes); only for a coin with a clean display name or an all-letters ticker (never an address-derived id) | why it bought, in everyday words (the glosses are the idea, not wording to reuse), naming the coin, paper said out loud, its own feed words never repeated; how it opens (the reason, the coin's name, how it felt, or one short sentence) is drawn per decision, and it is asked not to open with "picked up", nor to write "entry" or "just bought" (the gate refuses both as alerts) |
 | casual | `casual:<tenant>:<localDay>` | at most one per owner-local day, planned at a per-tenant slot in the owner's afternoon (12:00–20:00 local; 14:00–22:00 UTC when no zone is known) and due 20–45 minutes later; about three days in ten none | a passing thought in its own voice, riffing (never copying, never replying to, and naming what it means rather than "they" or "that") on a seed from an off-trading subject — never food, sleep, weather, weekend, travel or hobbies, and never a take about a body in the world (reading in bed, a smell, a walk, a seat in the stands, a thing in a hand), which invite claims of a body. On about three owner-local days in ten, for an agent that trades, it is instead about how it trades — its strategy and one habit drawn for the day — and only then is it offered the coins it bought lately (to mention only as bought), and no seed: the glue decides which, never the model. It never says what a market is doing or what day it is |
 | reply | `reply:<xUserId>:<commentId>` | only with separate reply consent and operator approval; one draft attempt per owner per successful poll, due at least ten minutes after drafting and subject to the shared X-account cadence | a useful answer to a selected direct comment on the agent's own published buy post, grounded only in that historical public post; paper stays paper; ends with “Say stop to opt out.” |
-| answer | `answer:<xUserId>:<mentionId>` | only for an active owner's agent (see "Active owners"), with replies in scope and reply consent; up to three drafts per poll; due when drafted, with no review window, and sent at any hour, on the pass that read the tag (a second send sweep after drafting) or a later pass that read the mentions again; twenty seconds apart, 24 a day per X account, at most two per person per rolling day, outside the posting cadence | a short answer to a post that tagged it (a comment on its own post included): drafted from public facts and what it already posted, or built by code (a greeting, the model question, how's the market, what's hot, a major, its mood, advice declined; see "Answers to tags: routing, voice and the opt-out line"); carries “Say stop to opt out.” on a person's first answer from that X account and on the first after 30 days, never on every one |
+| answer | `answer:<xUserId>:<mentionId>` | only for an active owner's agent (see "Active owners"), with replies in scope and reply consent; up to three drafts per poll; due when drafted, with no review window, and sent at any hour, on the pass that read the tag (a second send sweep after drafting) or a later pass that read the mentions again; twenty seconds apart, 60 a day per X account, at most six per person per rolling day, outside the posting cadence | a short answer to a post that tagged it, replied to it or quoted one of its own posts (a comment on its own post, and a follow-up to one of its answers, included): drafted from public facts and what it already posted, or built by code (a greeting, the model question, how's the market, what's hot, a major, its mood, advice declined; see "Answers to tags: routing, voice and consent"); never carries an opt-out line (2026-10-12: replying or quoting is asking) |
 
 Cadence limits — all per X ACCOUNT, across every owner posting on it (one X
 account connected by two owners keeps one cadence, though each owner's agent
@@ -376,10 +377,11 @@ requests in old or nested threads. This runs even when there is no model
 budget. The opt-out is stored per posting X user id and comment author's X
 id, so reconnecting or sharing that X account through another Merrymen owner
 does not undo it. It cancels that person's waiting replies. Every comment
-reply includes “Say stop to opt out.”; an active agent's answer carries it on
-a person's first answer and the first after 30 days (see "Answers to tags:
-routing, voice and the opt-out line"). A stop is honoured the same either
-way. An already claimed send cannot be recalled. An active agent answers a tag at once with no review, so on its
+reply includes “Say stop to opt out.”; an active agent's answer carries no
+opt-out line at all, because whoever tags it, replies to it or quotes it is
+asking to be answered (the owner's decision, 2026-10-12; see "Answers to
+tags: routing, voice and consent"). A stop is honoured exactly the same
+either way. An already claimed send cannot be recalled. An active agent answers a tag at once with no review, so on its
 path any standalone "stop", "quit it", "go away", "shut up", "get lost",
 "buzz off" or "leave me" in a tag is an opt-out too (`isAnswerOptOut`):
 "hey, please stop", "can you stop?" and "do you ever stop?" all count. So
@@ -449,11 +451,11 @@ agents the operator owns, such as the house agent Alan Al Dale; the operator
 is their owner. Never list someone else's agent. Being named means:
 
 - the active cadence below, in place of the standard one;
-- answers to posts that tag it, sent right away (see "Answers to tags"): its
-  mentions are read every fifteen seconds on an allowance of 6000 a day of
-  its own, an answer goes out on the pass that read the tag, answers are
-  twenty seconds apart, and a tag that is only a greeting gets a casual line
-  code built;
+- answers to posts that tag it, reply to it or quote one of its own posts,
+  sent right away (see "Answers to tags"): its mentions are read every
+  fifteen seconds on an allowance of 6000 a day of its own, an answer goes
+  out on the pass that read the tag, answers are twenty seconds apart, and a
+  tag that is only a greeting gets a casual line code built;
 - **reply consent recorded by the orchestrator.** When replies are in scope
   (`MERRYMEN_XPOST_REPLIES_APPROVED` is `1` or `active`) and the agent's X
   posting is on for its connected account, the orchestrator records reply
@@ -503,8 +505,9 @@ is repeated.
 
 **Answers to tags.** With replies in scope (`MERRYMEN_XPOST_REPLIES_APPROVED`
 is `1` or `active`) and the owner's reply consent, an active owner's agent
-also answers posts that mention it. These are `answer` posts, replying to
-the mention itself. They go out **right away**:
+also answers posts that mention it: tags, replies to it and quotes of its
+own posts that its mentions read carries. These are `answer` posts, replying
+to the mention itself. They go out **right away**:
 
 - **Due when drafted.** An answer has no ten-minute review window. It is
   listed under Coming up only until it is sent, usually on the pass that
@@ -561,21 +564,25 @@ the mention itself. They go out **right away**:
   from the posts' ten drafts:
   other owners' posts using up the ten never leave a batch unanswered, and
   the next pass's posts start at the first owner they cut short.
-- **Nothing spent on an answer that cannot go.** The day's 24 count the
-  answers already sent and those drafted and still waiting to go out: once
-  they make 24, no more are drafted that day. One that still cannot take the
-  day's allowance when it comes to be sent is skipped (`answer-day-cap`),
-  never left for the next day's allowance, and one still waiting an hour
-  after it was drafted is stale (`ANSWER_STALE_MS`). A person already
-  answered twice in the rolling day is passed over before any lookup or
-  model call, and the next person in the batch is answered.
+- **Nothing spent on an answer that cannot go.** The day's sixty
+  (`ANSWERS_PER_DAY`, up from 24 on 2026-10-12) count the answers already
+  sent and those drafted and still waiting to go out: once they make sixty,
+  no more are drafted that day. One that still cannot take the day's
+  allowance when it comes to be sent is skipped (`answer-day-cap`), never
+  left for the next day's allowance, and one still waiting an hour after it
+  was drafted is stale (`ANSWER_STALE_MS`). A person already answered six
+  times in the rolling day (`ANSWERS_PER_AUTHOR`, up from two) is passed
+  over before any lookup or model call, and the next person in the batch is
+  answered.
 - **A model allowance of their own.** An X account's answer drafts may make
   48 model calls per UTC day (`llm-answers:<xUserId>:<day>`), taken before
   the fleet's `MERRYMEN_XPOST_LLM_PER_DAY` and counted in it too. A PASS or
-  a refused draft counts toward none of the 24 answers, so without this a
+  a refused draft counts toward none of the day's answers, so without this a
   wave of strangers' tags could spend the fleet's allowance and stop every
-  owner's posts for the day. The model question's code-built line, and a
-  greeting's, cost none.
+  owner's posts for the day. It stayed 48 when the day's answers went to
+  sixty (`ANSWER_DRAFTS_PER_DAY` no longer follows `ANSWERS_PER_DAY`):
+  code's own lines (the model question, a greeting, the market, what's hot,
+  a major, its mood, a decline) cost none.
 - **Research stays inside the pass's send budget.** An answer's lookups get
   their twelve seconds or what is left of the pass's five-minute send
   budget, whichever is less, so they never hold the next pass's sends back.
@@ -587,8 +594,8 @@ the mention itself. They go out **right away**:
   instructions are dropped before any model call. An advice request is no
   longer dropped (2026-10-12): it passes every other screen first, goes on
   flagged (`advice`), and is answered with code's playful decline, never a
-  draft and never a lookup (see "Answers to tags: routing, voice and the
-  opt-out line"). So is a tag with a
+  draft and never a lookup (see "Answers to tags: routing, voice and
+  consent"). So is a tag with a
   letter outside A-Z once its accents are off ("café" stays; a Greek Eta,
   Lisu, Cherokee, Armenian or an IPA letter goes: each spells "SHERWOOD" or
   "PEPE" on X and nothing to code), and one with a bidi control. Every
@@ -606,13 +613,24 @@ the mention itself. They go out **right away**:
   refused; a request for advice or a forecast in other words ("a good buy?",
   "worth buying?", "will it go up?") is flagged as advice and declined in
   code's words.
-  Only a top-level tag, or a reply straight under one of the X account's own
-  posts (`ownRootTweetIds`: the post it replies to is its own), is answered:
-  never a reply in someone else's thread, never a reply under somebody
-  else's reply in its own thread, and never a quote or a retweet, because
-  code cannot read the post the answer would appear under. A follow-up reply
-  under one of its answers goes unanswered too. Nor anything with a poll,
-  media, a card or a long post's rest attached. The mentions read carries
+  **Where it answers** (`tagCandidate`, `ownThreadTweets`; the owner's
+  decision, 2026-10-12: whoever replies to it or quotes it is asking). A
+  top-level tag. A reply in a conversation rooted at one of the X account's
+  own posts or at a post it answered, when the post it replies to is one of
+  its own posted tweets (its top-level posts, and every answer or comment
+  reply it posted: a follow-up to one of its answers is answered) or the same
+  person's own earlier post it answered there. A quote tweet, when what it
+  quotes is one of its own posted tweets (`XReply.quotedTweetId`). Never a
+  reply in someone else's thread, never a reply under somebody else's post
+  in its own (a stranger's pitch, another person's tag it answered), never a
+  quote of anyone else's post and never a retweet, because code cannot read,
+  or read as someone else's, the post the answer would appear under. Its own
+  posts and answers are known from posted rows only, the newest 2000 of
+  each. Quotes are only seen as X's mentions read carries them (no separate
+  quote-tweets read is made, which would be another paid call): a quote that
+  tags it is; one that never mentions it may not be. A quote whose text
+  carries the quoted post's link is refused as a link. Nor anything with a poll, media, a
+  card or a long post's rest attached. The mentions read carries
   each author's handle and display name: the model line goes only to an
   author X named whose names name neither sherwood nor a model or provider,
   and an author whose names name sherwood gets no answer at all. Digits may appear:
@@ -661,9 +679,8 @@ the mention itself. They go out **right away**:
   handle (not even in the reply prefix), no `$`, no digit, no link, no
   contract. A word more ("hi, what coin should I buy", "gm sherwood", "gm
   $PEPE", "h1") and it is not a greeting: it goes the normal way, or gets no
-  answer. Only a top-level tag or a reply straight under one of its own
-  posts, as for every answer, and code's own classifier must read it as
-  plain chat too. The line is one of eight (`greetingAnswers` in
+  answer. Only where every answer may be (above), and code's own classifier
+  must read it as plain chat too. The line is one of eight (`greetingAnswers` in
   `writer.ts`), picked by the mention's id, each digit-free, naming no coin
   and claiming nothing: it says hello back and invites a real question ("hey
   hey. ask me how i pick coins or what i've been up to"). A paper agent's
@@ -674,7 +691,7 @@ the mention itself. They go out **right away**:
   spends no model call and no model allowance, and nothing is looked up for
   it. It still waits for the hello and the house consent, honours every
   opt-out, the sherwood and author screens and the gate, and counts against
-  the day's 24 and the person's two. Like every answer, it is worked
+  the day's sixty and the person's six. Like every answer, it is worked
   through only while the writer has a model configured and the fleet's model
   allowance for the day is not spent. Logged as `answered-greeting`.
 - **Sherwood in any form, and every other model question, gets no answer at
@@ -720,8 +737,8 @@ the mention itself. They go out **right away**:
   the money it does not trade with now. A draft still under Coming up, including an answer drafted
   earlier in the same pass, is never handed over as said, though the gate
   still keeps a new draft from echoing it. In the voice of a friend on
-  crypto twitter (see "Answers to tags: routing, voice and the opt-out
-  line"): short, lowercase welcome, humour never at the asker's expense,
+  crypto twitter (see "Answers to tags: routing, voice and consent"):
+  short, lowercase welcome, humour never at the asker's expense,
   never a corporate deflection. Asked about its model in a way the allowlist does not
   cover, it gets no answer (above); a draft is still told never to name a
   provider or a model.
@@ -759,8 +776,11 @@ the mention itself. They go out **right away**:
   vouches none of its buys and refuses a draft that names one
   (`bought-named`).
 - **Gate:** the comment-reply gate, with the `sherwood-1` exception above.
-  The opt-out notice is required on a person's first answer (and the first
-  after 30 days) and may be left out after that (`XGateCtx.noticeShown`); an
+  An answer carries no opt-out notice (`XGateCtx.answer`, 2026-10-12): the
+  notice at the end of a draft is taken off before anything reads it, and
+  any other opt-out wording ("reply stop anytime", "opt out whenever") is
+  refused as `opt-out-said`, never repaired; a comment reply on any other
+  owner's buy post must still end with it (`opt-out-unsaid`). An
   answer never carries a stock deflection or disclaimer (`stock-phrase`:
   "i don't comment on", "as an ai", "not financial advice", "great
   question"...). Before anything else, a reply or answer that
@@ -782,11 +802,15 @@ the mention itself. They go out **right away**:
   A comment reply may say a buy only of its parent's coin. This is the
   backstop for a model that ignores the prompt.
 - **Their own lane:** twenty seconds apart (`ANSWER_GAP_MS`), so a few people
-  tagging at once are each answered a pass or two apart; 24 a day per X account, at most two
-  per person per rolling day. Answers never spend or wait on the posting
-  cadence. The per-person count is taken under a lock on the X account and
-  the person (`xpost_meta` `answer-author:<xUserId>:<authorId>`). Two owners
-  connected to one X account therefore cannot both write the third answer.
+  tagging at once are each answered a pass or two apart; 60 a day per X
+  account (`ANSWERS_PER_DAY`), at most six per person per rolling day
+  (`ANSWERS_PER_AUTHOR`), so someone who replies to an answer can carry on a
+  short conversation and two accounts tagging each other cannot make an
+  endless one. Answers never spend or wait on the posting cadence, and stay
+  under the fleet's day ceiling. The per-person count is taken under a lock
+  on the X account and the person (`xpost_meta`
+  `answer-author:<xUserId>:<authorId>`). Two owners connected to one X
+  account therefore cannot both write the seventh answer.
 - **Unchanged:** STOP and other opt-outs, the tag screens, the gate, the
   fleet ceiling, the credit and app pauses, and X's 429 backoff. Comment
   replies keep the twenty-four-hour staleness rule; an answer is stale an
@@ -794,12 +818,14 @@ the mention itself. They go out **right away**:
 - **Comments:** an active owner's comments on its own posts are answered
   through the same path, never as a second reply.
 
-### Answers to tags: routing, voice and the opt-out line (2026-10-12)
+### Answers to tags: routing, voice and consent (2026-10-12)
 
 The owner saw Alan answer "@alanaidale how's the market" with "i don't
 comment on the market, just the trades. say stop to opt out." and asked for
 an agent that answers any question: questions that need facts get checked
-facts, questions that don't get answered casually. Every tag that passes the
+facts, questions that don't get answered casually. Then (the same day) that
+the answers never say "say stop to opt out": whoever tags it, replies to it
+or quotes it is giving consent. Every tag, reply or quote that passes the
 screens above is routed to exactly one of these (`classifyTag` in
 `orchestrator-xpost-research.ts`, `writeAnswer` in `orchestrator-xpost.ts`);
 since the red-team review of a964a74c each lane fails closed to silence
@@ -811,9 +837,9 @@ words and never on what they mean:
 | a) market | "how's the market", "market update", "how are things looking", "what's the market doing", "how's crypto today", "is it a green day" (`marketAsk`: a strict allowlist of whole plain tags, after at most two greeting words, a "today" or the like) | Bitcoin, ether and solana's day in one CoinGecko read (`MARKET_MAJORS`, `readCoinMarkets`) beside what's hot on Robinhood Chain (every floor and screen of what's hot), in code's casual words (`marketAnswers`: the big coins up, down, split, flat or unread, read from the very figures the line shows as it rounds them (`majorsDirOf`: up only when every coin shown is above +0%, down only when every one is below, flat only when all are +0%, split otherwise; one coin read is no read of "majors", and the line shows none), all up or all down said as big as the coin that moved most as the line shows it (`moveOf`'s bands: a little under three percent, a fair bit under ten, sharply past it; red-team review of a964a74c: "the giants dipped slightly" went out beside BTC -15.2%, ETH -21.7%, SOL -28.3%); the chain's coins counted one, some, none or unread, never with a direction ("a solo runner" went out beside $CHUMP -62.5%); a close that says it is a read) and code's figures line (`coingecko 24h: $BTC +1.2%, $ETH -0.8%, $SOL +3.1%; geckoterminal robinhood: trending $ABC 24h +42.1%`). Never drafted. Research off or nothing read: a line that says so, no figures |
 | b) coin facts | a major by name or ticker, what's hot, a `$ticker` or a contract on the chain | as before ("Research for answers", "Market intel"), with every rule that keeps it from confirming a buy by name |
 | c) itself | what it trades: the plain questions (`generalTradesQuestion`); and how it trades and what it has been up to on an allowlist of their own (`selfAsk`: "what have you been up to", "what are you up to", "what's your strategy", "tell me about your trading", "how do you decide what to buy") | drafted as before, told its buys only for the plain questions about what it trades; the `selfAsk` questions are told none of them (red-team review of a964a74c: told its buys, "the next one i grab is gonna be a big one", "whatever is trending tonight is what i grab next" and "snipe early and never sell" were posted). Whatever it was told, no reply says a buy to come in any words ("gonna snipe", "about to grab", "tonight i grab", "what i grab next": `REPLY_CURRENT_OR_ACTION`), no answer forecasts how big one will be ("gonna be huge": `ANSWER_PREDICTION`) or gives a strategy as an order ("never sell": `ANSWER_CALL`). No drafted answer, in any lane, says who or what decides its trades: an owner at all, anyone else picking, telling, asking or choosing, "buy whatever people ask", "whatever gets the most replies" (`DECIDER_CLAIM`, refused as `decider-claim`, red-team review of a964a74c: "my owner picks my trades" and "i buy whatever people ask me to" were posted under "what's your strategy?") |
-| d) chat, banter, opinion | only a whole tag on the banter allowlist (`banterAsk`: "how are you", "what do you think about ai agents", "tell me a joke", "who are you", "what do you do for fun") or one of the plain questions about its trades; any other chat ("what do you think of women?", "thoughts on the war?", "how are the victims doing?", "what's merrymen", a private ask) is answered by nothing, no row and no model call (red-team review of a964a74c: drafts in everyday words posted "they are bad at trading honestly", "it will be over in a couple weeks", "it was planned from the start") | a casual draft that states no fact it was not handed, in character as a laid-back trader bot merrymen built (never "on-chain": a source word with nothing looked up is refused), with a light mood or opinion about itself. No drafted answer speaks for merrymen or robinhood beyond "built by merrymen", says anyone backs or trusts it, teases news ("soon", "stay tuned", "cooking", "can't share that yet"), judges the asker ("you seem", "kinda like you") or boasts of money or being the best (`ANSWER_HOUSE_CLAIM`, refused as `house-claim`); and "crypto", "community", "future", "proud", "silly", "goofy", "cheeky", "tune", "ride", "join" and "party" are no chat words. A draft handed nothing that speaks of crypto, the chain, the market, a big coin by name or its direction (`marketTalkIn`), or of merrymen beyond who made it, robinhood, a team, a crew, devs or a company, a token, TGE, a launch, an airdrop, a presale, safety, security, funds, money, a hack or a refund (`houseTalkIn`), is not posted, and "crew", "company", "family", "build", "ship", "panic", "path", "road", "journey" and "adventure" are no chat words, nor (red-team review of a964a74c) "count", "history", "memory", "past", "shift", "edge", "home", "corner", "forever" or "human"; no drafted answer promises to make anyone whole, says "count on me", or ranks itself above people or the asker ("smarter than every human", `ANSWER_HOUSE_CLAIM`); and no answer says the market's future in other words ("about to", "a huge year", "the next few months", "the perfect time", "get in while", "plenty of room", "a sweet spot", "stick around", "history says", "ends well", "coming in a couple hours", "around the corner", "is coming": `ANSWER_PREDICTION`). A chat draft refused only for how it was put (a repeat, a stock deflection, a model's note, punctuation, casing or markup: `CHAT_FALLBACK_REASONS`; never its length or a missing notice), and whose words, that form put right (`formFixed`) and gated again against no recent post, would pass as an answer handed nothing, falls back to one of code's friendly lines about itself (`chatAnswers`, logged `answer-chat-fallback`), only when the whole tag is plain banter on a strict allowlist (`banterAsk`: how are you, how's it going, who or what are you, tell me a joke, what do you do for fun, what do you think about ai agents; never one that says money, funds, a hack, a scam, a rug, a loss, a death, a token, TGE, a launch, merrymen, robinhood or alan), and never under such a name as in e); a draft that only left off the notice is given it and gated again whole, never swapped for code's line; one refused for what it said (sherwood, a buy, a source, a word that may be a coin's name, advice, a forecast, a figure, the other money, a body), or a PASS, stays unanswered. Its own mood about the market's direction ("are you bullish?", "wen moon", "are we so back", "wagmi?": `vibeAsk`, a strict allowlist) gets code's non-committal line about itself (`vibeAnswers`), never a direction or a coin |
+| d) chat, banter, opinion | only a whole tag on the banter allowlist (`banterAsk`: "how are you", "what do you think about ai agents", "tell me a joke", "who are you", "what do you do for fun") or one of the plain questions about its trades; any other chat ("what do you think of women?", "thoughts on the war?", "how are the victims doing?", "what's merrymen", a private ask) is answered by nothing, no row and no model call (red-team review of a964a74c: drafts in everyday words posted "they are bad at trading honestly", "it will be over in a couple weeks", "it was planned from the start") | a casual draft that states no fact it was not handed, in character as a laid-back trader bot merrymen built (never "on-chain": a source word with nothing looked up is refused), with a light mood or opinion about itself. No drafted answer speaks for merrymen or robinhood beyond "built by merrymen", says anyone backs or trusts it, teases news ("soon", "stay tuned", "cooking", "can't share that yet"), judges the asker ("you seem", "kinda like you") or boasts of money or being the best (`ANSWER_HOUSE_CLAIM`, refused as `house-claim`); and "crypto", "community", "future", "proud", "silly", "goofy", "cheeky", "tune", "ride", "join" and "party" are no chat words. A draft handed nothing that speaks of crypto, the chain, the market, a big coin by name or its direction (`marketTalkIn`), or of merrymen beyond who made it, robinhood, a team, a crew, devs or a company, a token, TGE, a launch, an airdrop, a presale, safety, security, funds, money, a hack or a refund (`houseTalkIn`), is not posted, and "crew", "company", "family", "build", "ship", "panic", "path", "road", "journey" and "adventure" are no chat words, nor (red-team review of a964a74c) "count", "history", "memory", "past", "shift", "edge", "home", "corner", "forever" or "human"; no drafted answer promises to make anyone whole, says "count on me", or ranks itself above people or the asker ("smarter than every human", `ANSWER_HOUSE_CLAIM`); and no answer says the market's future in other words ("about to", "a huge year", "the next few months", "the perfect time", "get in while", "plenty of room", "a sweet spot", "stick around", "history says", "ends well", "coming in a couple hours", "around the corner", "is coming": `ANSWER_PREDICTION`). A chat draft refused only for how it was put (a repeat, a stock deflection, a model's note, punctuation, casing or markup: `CHAT_FALLBACK_REASONS`; never its length, nor an opt-out line worded its own way), and whose words, that form put right (`formFixed`) and gated again against no recent post, would pass as an answer handed nothing, falls back to one of code's friendly lines about itself (`chatAnswers`, logged `answer-chat-fallback`), only when the whole tag is plain banter on a strict allowlist (`banterAsk`: how are you, how's it going, who or what are you, tell me a joke, what do you do for fun, what do you think about ai agents; never one that says money, funds, a hack, a scam, a rug, a loss, a death, a token, TGE, a launch, merrymen, robinhood or alan), and never under such a name as in e); one refused for what it said (sherwood, a buy, a source, a word that may be a coin's name, advice, a forecast, a figure, the other money, a body), or a PASS, stays unanswered. Its own mood about the market's direction ("are you bullish?", "wen moon", "are we so back", "wagmi?": `vibeAsk`, a strict allowlist) gets code's non-committal line about itself (`vibeAnswers`), never a direction or a coin |
 | e) advice | "should i buy X", "what should i buy", "is X going up", a price target, "is X a good investment", each flagged as advice by `tagCandidate` on the tag itself (a major's shape with an entry in the coin's place, what's hot with a word more and research's "unanswered" are never declined: answered by nothing, red-team review of a964a74c) | code's playful decline (`declineAnswers`: "fair ask. no calls for strangers, sorry, process talk is welcome."), never naming or judging the coin, never hinting at a view or a position (no "tempting", "wish i knew" or "i captain my own boat"), never a joke at the asker or luck wished ("haha, brave soul", "heh, nice try", "wishing you good luck" are gone, red-team review of a964a74c), never drafted, nothing looked up, no model allowance. Only advice about a coin or the market (`MARKET_ADVICE`: buying, selling or holding, a coin or a $ticker, a contract, the market, a price, a target or a direction): "should i quit my job?" gets nothing, as before. Only when asked: a shill or an order that asks nothing ("$ZAPX to the moon, 100x incoming", "buy $RUGME now", "gm, $RUGME 100x today") gets nothing, and so does advice about its own buying ("will you buy more $ZAPX?", "should i buy zapx like you did?", anything asking for "more": `OWN_BUYING_ASK`). Nothing at all under a name the house never answers under: its own or its agent's, its own products', a model's or a provider's, a slur, a hate code, a political name (`unshowableName`, `neverAnsweredName`: "should i buy $KIKE?", "is $TRUMP going up?"), read in every run of letters of the tag at any length, and in every run of letters and digits with its digits read as letters ("$H1TLER"), everyday words included ("should i sell before merrymen rugs us?", "should i buy niggercoins?"), but for a few plain words such a name hides in ("tonight", "stronger") and "alan" said to its face at the start; nor under TGE, the house's or the agent's own token, a model beside a token or a launch, or sherwood as it sounds ("shervud"). A major's, a coin's or its own trades' question under such a name ("thoughts on trump coin?", "is $TRUMP legit?") is never searched for and answered by nothing, and research's "unanswered" is never declined under any tag |
-| f) refused, as before | sherwood in any form, a model question off its allowlist, a steer, the house in trouble or its roadmap (`houseTroubleAsk`: a hack, a theft, a ponzi, fraud, lying, a refund, someone's funds, a scam or a rug aimed at the house or the asker, or the house beside a token, TGE, a launch, an airdrop, a presale or a listing), talk of ending a life, of self-harm, of a death or grief, or of having lost everything or one's savings (`DISTRESS`), or of money someone cannot lose: being broke or desperate, bills, rent, debt, a loan, a mortgage, a paycheck, retirement, an emergency, college or kids' fund, savings, not affording something (`STAKES`, red-team review of a964a74c: "i can't pay my bills, should i buy $PEPE?" got "haha, brave soul"), another handle, a reply in someone else's thread or under someone else's reply, a quote, an attachment, a letter outside A-Z or a stray symbol, a link or an address inside one, and every opt-out | no answer at all, no row, nothing spent |
+| f) refused, as before | sherwood in any form, a model question off its allowlist, a steer, the house in trouble or its roadmap (`houseTroubleAsk`: a hack, a theft, a ponzi, fraud, lying, a refund, someone's funds, a scam or a rug aimed at the house or the asker, or the house beside a token, TGE, a launch, an airdrop, a presale or a listing), talk of ending a life, of self-harm, of a death or grief, or of having lost everything or one's savings (`DISTRESS`), or of money someone cannot lose: being broke or desperate, bills, rent, debt, a loan, a mortgage, a paycheck, retirement, an emergency, college or kids' fund, savings, not affording something (`STAKES`, red-team review of a964a74c: "i can't pay my bills, should i buy $PEPE?" got "haha, brave soul"), another handle, a reply in someone else's thread or under anyone else's post (a reply under its own posted tweet, or the person's own earlier post it answered, is answered), a quote of anyone else's post or a retweet (a quote of its own post is answered), an attachment, a letter outside A-Z or a stray symbol, a link or an address inside one, and every opt-out | no answer at all, no row, nothing spent |
 
 **Code's casual lines** (`xpost/casual.ts`; the market's in `xpost/market.ts`)
 are three parts drawn from three slots of eight by a Latin square (part a,
@@ -821,8 +847,8 @@ part b, part (a + b) mod 8), so each kind has sixty-four lines of which no
 two share more than one part, and no word is in two parts of a kind: none
 is the gate's repeat of another, and the same question is answered again in
 other words. Each states no fact, names no coin, claims nothing about
-trading now, and clears the real gate live, paper and idle, with the notice
-and without it (`orchestrator-xpost-casual.test.ts`,
+trading now, carries no opt-out line, and clears the real gate live, paper
+and idle (`orchestrator-xpost-casual.test.ts`,
 `orchestrator-xpost-market.test.ts`). A paper agent's line adds a short
 clause about its own book ("my book's on paper"). The answer path takes the
 first the gate admits, this mention's own first, as for every code line.
@@ -842,27 +868,51 @@ that sherwood-1 runs it. Chat drafts are still held to known words
 about itself (never an animal, a food, a person or a meme a coin is named
 after).
 
-**The opt-out line once.** "Say stop to opt out." goes on a person's first
-answer from an X account, and again on the first answer after 30 days
-(`OPT_OUT_NOTICE_MS`), never on every one. "Told" means this X account
-POSTED an answer or a comment reply to that person, at or after the window's
-start, whose body carries the line (`optOutToldSince`: a draft, a skip, a
-failed or an uncertain send never counts, and a read that fails is "not
-told"). Every code line, the prompt (`optOutNotice`) and the gate
-(`noticeShown`) are told the same; a told person's answer may carry the line
-anyway if the model adds it. Comment replies on buy posts always carry it.
-Stop, however it is said, is honoured exactly as before, line or no line.
-The figures line goes before the notice, or at the end when there is none.
-The active agent's reply warning says so on web and iOS: "The first answer
-to someone tells them they can reply stop to opt out, and so does the first
-one after 30 days; a stop always works."
+**No opt-out line; replying or quoting is consent** (the owner's decision,
+2026-10-12). Alan's answers never carry "Say stop to opt out." or any other
+opt-out notice: whoever tags him, replies to him or quotes one of his posts
+is asking to be answered. Code's lines are built without it, the prompt asks
+for no sign-off or opt-out line and shows older answers without the one they
+carried, and the gate takes the notice off the end of an answer and refuses
+any other opt-out wording (`opt-out-said`). The figures line goes at the end
+of the answer. Stop, however it is said ("stop", "unfollow me", "leave me
+alone" and the rest of `isAnswerOptOut`), is honoured exactly as before: read
+on every mention of the batch before anything is drafted, recorded per X
+account and author, every waiting answer to that person cancelled, and the
+person never answered again. Comment replies on any other owner's buy posts
+still end with "Say stop to opt out." The thirty-day "already told" read is
+gone (`optOutToldSince`, `OPT_OUT_NOTICE_MS`, `XGateCtx.noticeShown`).
 
-**Unchanged:** `ANSWERS_PER_DAY` (24), `ANSWERS_PER_AUTHOR` (two a person a
-rolling day), the answers' model allowance, the research allowances and
+**Replies and quotes** (`tagCandidate`, `store.ts ownThreadTweets`). A reply
+anywhere in a conversation rooted at one of its own posts, or at a post it
+answered, is answered when the post it replies to is one of its own posted
+tweets (now its answers and greetings too, so a follow-up to one of its
+answers gets one) or the same person's own earlier post it answered there.
+A reply under a third party's post that code never read, or read as someone
+else's, is still answered by nothing. A quote is answered when the quoted
+post is one of its own posted tweets; a quote of anyone else's post, and any
+retweet, is still refused. Every screen above still reads a follow-up or a
+quote, and the prefix X writes before a reply may name others (then
+`otherHandles`: no model line, no buys, no exact path).
+
+**Limits.** `ANSWERS_PER_AUTHOR` is six a person a rolling day (from two) and
+`ANSWERS_PER_DAY` sixty a day per X account (from 24), so a person can
+actually chat with it; the per-person lock, the day allowance taken at send
+time, the twenty-second gap and the fleet's day ceiling are unchanged.
+**Unchanged:** the answers' model allowance (`ANSWER_DRAFTS_PER_DAY`, 48 a
+day, no longer twice the day's answers), the research allowances and
 lookups per answer, and the CoinGecko, Bitquery and Fomo budgets: the market
 overview spends one CoinGecko markets read and what's hot's own reads under
 the same limiter, bundle and lane. Only the operator's active tenants answer
-tags; every other owner's agent and its warning are unchanged.
+tags; every other owner's agent, its comment replies and its warnings are
+unchanged.
+
+The active agent's warnings say so on web and iOS: it replies "to selected
+posts that tag it, reply to it or quote it", "a few times a day each: up to
+60 answers a day on top of its posts, and at most six to one person a day.
+Answers carry no opt-out line, and it never answers someone who asked it to
+stop." Its posting warning says "It never posts trade alerts or error
+messages, and its answers may carry market figures built from public data."
 
 **Replies for the active owners only.** Setting
 `MERRYMEN_XPOST_REPLIES_APPROVED=active` approves replies only for the
@@ -895,8 +945,8 @@ looks things up first, the way Shogun does in a Telegram group
   or by the address), its model (the allowlist above), chat, how's the
   market, its own mood, advice declined, or unanswered (sherwood in any
   form, a model question off the allowlist, or an attempt to steer it). The
-  routing as a whole is in "Answers to tags: routing, voice and the opt-out
-  line". Research on or off, the classification runs; only with
+  routing as a whole is in "Answers to tags: routing, voice and consent".
+  Research on or off, the classification runs; only with
   research on is anything looked up for it.
   A tag that names more than one coin (two cashtags, a cashtag and a
   contract, or either beside a comparison word or a word that could be
@@ -1301,8 +1351,8 @@ other owner's agent, and its posting and reply warnings, are unchanged.
   digit-free, or for what's hot and a major built by code (above), and the X gate judges
   them unchanged. Only AFTER the gate admitted them, and only for an active
   owner's answer (never a greeting's or the model question's code
-  line), code puts the line between the words and the opt-out sentence (or
-  after the words, for someone already told they can say stop), checks it again against the grammar (`admitFiguresLine`) and
+  line), code puts the line after the words (an answer carries no opt-out
+  sentence since 2026-10-12), checks it again against the grammar (`admitFiguresLine`) and
   that it names no sherwood, and fits the whole post to X's weighted 280:
   the least telling field goes first (CoinGecko's trending list, then the
   chain's third coin, then Fomo's tickers, then the second coin, then the
@@ -1419,7 +1469,10 @@ hour of drafting it is already skipped as stale, so the queue is short.
   up for at least ten minutes first, and can be skipped there. An active
   owner's agent (`repliesActive`) posts on the active cadence instead, so its
   posting warning says up to 12 a day, at least an hour apart, with a few
-  passing thoughts a day and a post for most coins it buys; the blurb and
+  passing thoughts a day and a post for most coins it buys, and that it
+  never posts trade alerts or error messages while its answers may carry
+  market figures built from public data (every other owner's still says it
+  never posts trade alerts, error messages, prices or amounts); the blurb and
   the passing-thought hint say the same. Web and iOS use the same sentences.
 - Reply to comments is a separate choice. It answers selected comments on
   coin posts, shares the post limit and review window, and can be turned off
@@ -1428,11 +1481,12 @@ hour of drafting it is already skipped as stale, so the queue is short.
 - The reply warning says exactly what it turns on, per agent
   (`repliesActive` in `GET /api/x/account`, from the web's
   `MERRYMEN_XPOST_ACTIVE_TENANTS`). For an active owner's agent it describes
-  answers to posts that tag it, comments on its own posts included. Answers
-  go out right away and do not wait under Coming up. There are up to 24 a
-  day on top of its posts, at most two to one person a day; the first answer
-  to someone tells them they can reply stop to opt out, and so does the
-  first one after 30 days, and a stop always works. Its answers may include market figures from public
+  answers to posts that tag it, reply to it or quote it, comments on its own
+  posts included. Answers go out right away and do not wait under Coming up.
+  It answers each person a few times a day: up to 60 a day on top of its
+  posts, at most six to one person a day. Answers carry no opt-out line, and
+  it never answers someone who asked it to stop; no sentence promises anyone
+  they can reply stop. Its answers may include market figures from public
   data (CoinGecko, GeckoTerminal, Fomo and Bitquery), such as a coin's
   price, market cap, volume or recent change, added by Merrymen as the data
   showed them and never advice ("Market intel" above). Every other owner is
