@@ -156,6 +156,17 @@ export interface XGateCtx {
    * judged as before.
    */
   answer?: boolean;
+  /**
+   * THIS PERSON WAS ALREADY TOLD THEY CAN SAY STOP (the owner's decision,
+   * 2026-10-12): this X account posted an answer or a comment reply to them
+   * that carried the opt-out notice within the last 30 days (store.ts
+   * optOutToldSince). Read only with `answer` true: then the notice may be
+   * left out, and a later answer reads like a person talking rather than a
+   * form. Absent or false, an answer must carry it as before; a comment reply
+   * on a buy post, and every other kind, always must. A "stop" is honoured
+   * the same whether or not the line was shown (replies.ts isAnswerOptOut).
+   */
+  noticeShown?: boolean;
 }
 
 const refuse = (reason: string): XVerdict => ({ ok: false, reason });
@@ -926,6 +937,30 @@ const ANSWER_PREDICTION = new RegExp(
   "i",
 );
 
+/**
+ * A CORPORATE DEFLECTION OR A STOCK DISCLAIMER, IN AN ANSWER (the owner's
+ * ask, 2026-10-12). Tagged "how's the market", Alan posted "i don't comment
+ * on the market, just the trades": true, harmless, and not how a person on
+ * crypto twitter talks. An answer shrugs in its own words instead; these
+ * stock phrases are refused as `stock-phrase`: "i don't comment", "no
+ * comment", "as an ai", "as a bot", "language model", "not financial
+ * advice", "great question", "happy to help", "feel free to", "please note",
+ * "consult a professional", "do your own research", "hope this helps".
+ * Read only in an active agent's answer (XGateCtx.answer), so every other
+ * owner's replies are judged as before. A draft refused here is never
+ * repaired; a chat answer then falls back to one of code's casual lines
+ * (xpost/casual.ts), the rest are skipped. ("not financial advice" and
+ * "dyor" were refused as hype already; they are named here too.)
+ */
+const STOCK_PHRASE = new RegExp(
+  String.raw`\b(?:(?:i|we)\s+(?:(?:really|just|honestly|usually|generally|simply)\s+)?(?:don'?t|do\s+not|never|won'?t|can'?t|cannot)\s+comment` +
+    String.raw`|no\s+comment|(?:as|being)\s+an?\s+(?:ai|a\.i|bot|robot|llm|language\s+model|automated|ai\s+(?:agent|model|assistant|bot)|(?:ai\s+)?trading\s+(?:agent|bot))` +
+    String.raw`|language\s+model|(?:not|never|isn'?t|no)\s+(?:financial|investment|trading)\s+advice|great\s+question|happy\s+to\s+(?:help|assist)|here\s+to\s+(?:help|assist)` +
+    String.raw`|how\s+(?:can|may)\s+i\s+(?:help|assist)|(?:feel\s+free|don'?t\s+hesitate)\s+to|please\s+(?:note|be\s+aware)|it'?s\s+important\s+to\s+(?:note|remember)` +
+    String.raw`|consult\s+(?:a|an|your)\s+(?:financial|professional|advisor|adviser|expert)|do\s+your\s+own\s+research|(?:i\s+)?hope\s+(?:this|that)\s+helps)\b`,
+  "i",
+);
+
 /** A historical parent cannot establish a current holding or a promised new action. */
 const REPLY_CURRENT_OR_ACTION = /\b(?:i(?:'m| am) (?:still )?holding|i (?:still )?(?:hold|own)|i(?:'m| am) still in|(?:i(?:'ll| will)|i(?:'m| am) going to) (?:buy|sell|trade|hold|add|check)|(?:bought|buying|adding) (?:more|again)|keep holding|hold (?:it|this|that))\b/i;
 const REPLY_CURRENT_POSITION = /\b(?:(?:i|we)\s+(?:(?:still|currently|already|also)\s+)?(?:have|keep|maintain|carry)\s+(?:an?\s+)?(?:(?:open|small|little|long)\s+)?(?:positions?|stakes?|bags?|exposure|holdings)|(?:i(?:'ve| have)|we(?:'ve| have))\s+(?:still\s+|already\s+)?got\s+(?:an?\s+)?(?:positions?|stakes?|bags?|exposure|holdings)|(?:my|our)\s+(?:position|stake|bag|exposure|holding)\s+(?:is|remains|stays))\b/i;
@@ -1606,7 +1641,7 @@ function strings(list: unknown): string[] {
  * Reason codes (stable, operator-only): empty · pass · meta · hidden-chars · charset · too-short · too-long ·
  * handle · link · markup · emoji · exclaim · caps · ops · alert · hype · pnl ·
  * market · human-claim · points-back · coin-unsaid · paper-unsaid · mode-false · undisclosed · intro-no-trading ·
- * opt-out-unsaid · reply-current-or-action · sherwood-claim · bought-named · buy-claim · unlooked-name ·
+ * opt-out-unsaid · reply-current-or-action · sherwood-claim · bought-named · buy-claim · unlooked-name · stock-phrase ·
  * fleet-repeat · seed-echo — plus whatever the base gate says (has-digits,
  * quantity, repeat, unvouched-ticker, address, secret…).
  *
@@ -1675,7 +1710,8 @@ function admitMasked(tidied: string, ctx: XGateCtx, baseGate: BaseGate, agentNam
   if (words(text) < XPOST_MIN_WORDS) return refuse("too-short");
   if (ctx.kind === "reply") {
     const body = withoutReplyOptOut(text);
-    if (body === text) return refuse("opt-out-unsaid");
+    // THE NOTICE ONCE (XGateCtx.noticeShown): only an answer to someone already told may leave it out.
+    if (body === text && !(ctx.answer === true && ctx.noticeShown === true)) return refuse("opt-out-unsaid");
     if (words(body) < XPOST_MIN_WORDS) return refuse("too-short");
     // The full text has passed the base privacy checks above. Compare
     // originality symmetrically without the mandatory notice on either side.
@@ -1708,6 +1744,7 @@ function admitMasked(tidied: string, ctx: XGateCtx, baseGate: BaseGate, agentNam
   if ((namesCoin || ctx.kind === "reply") && COIN_ADVICE.test(own)) return refuse("hype");
   if (ctx.kind === "reply" && REPLY_ADVICE.test(own)) return refuse("hype");
   if (ctx.kind === "reply" && ctx.answer === true && ANSWER_PREDICTION.test(own)) return refuse("hype");
+  if (ctx.kind === "reply" && ctx.answer === true && STOCK_PHRASE.test(own)) return refuse("stock-phrase");
   if (ctx.kind === "reply" && (REPLY_CURRENT_OR_ACTION.test(own) || REPLY_CURRENT_POSITION.test(own))) return refuse("reply-current-or-action");
   // No amount, price or multiple in words the base gate's list misses (AMOUNT_WORDS).
   if (ctx.kind === "reply" && amountSaid(withoutReplyOptOut(own))) return refuse("quantity");
