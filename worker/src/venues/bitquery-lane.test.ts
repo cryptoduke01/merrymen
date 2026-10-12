@@ -105,7 +105,7 @@ describe("bitqueryLaneSetup — off unless a key is set, and the key is never sa
     assert.equal(s.off, false);
     assert.deepEqual(s.config, { apiKey: "ory_at_secret", pointsPerDay: 25_000, rpm: 60 });
     assert.equal(BITQUERY_LANE_DEFAULTS.maxConcurrency, 3);
-    assert.ok(25_000 * 31 < 1_000_000, "a 31-day month stays under a 1M plan at the default");
+    assert.ok((25_000 + 5_000) * 31 < 1_000_000, "a 31-day month of the lane AND the gateway's default stays under a 1M plan");
     assert.match(s.lines[0]!, /25000 points\/UTC day \(20000 for child evidence\), 60 requests\/min, 3 at once/);
   });
 
@@ -159,6 +159,7 @@ describe("named queries, clamped variables — no caller writes GraphQL", () => 
     assert.equal(req.variables.t15, new Date(T0 - 15 * 60_000).toISOString());
     assert.equal(req.variables.t60, new Date(T0 - 60 * 60_000).toISOString());
     assert.equal(req.variables.venueLimit, 8);
+    assert.equal(req.variables.sellLimit, 10, "twice the rows kept, so a duplicated leg costs no slot");
   });
 
   it("addresses go in both spellings, so an index's case choice cannot read as 'no trades'", () => {
@@ -177,9 +178,21 @@ describe("named queries, clamped variables — no caller writes GraphQL", () => 
 
   it("the flow query is the Robinhood Trading cube, reads Side as the trader's side, and selects no wallet", () => {
     assert.match(TOKEN_FLOW_QUERY, /NetworkBid: \{is: "bid:robinhood"\}/);
-    assert.match(TOKEN_FLOW_QUERY, /buys60: count\(if: \{Side: \{is: "Buy"\}, Block: \{Time: \{since: \$t60\}\}\}\)/);
     assert.match(TOKEN_FLOW_QUERY, /buyers5: count\(distinct: Trader_Address, if: \{Side: \{is: "Buy"\}/);
-    assert.doesNotMatch(TOKEN_FLOW_QUERY, /Trader \{|Transaction \{|TransactionHeader/, "no address or hash is selected in a flow reading");
+    assert.doesNotMatch(TOKEN_FLOW_QUERY, /Trader \{|Transaction \{/, "no address is selected in a flow reading");
+    assert.equal(TOKEN_FLOW_QUERY.match(/TransactionHeader \{/g)?.length, 1, "a hash is selected once, by the largest sells, to drop duplicate legs");
+  });
+
+  it("dollars come from the quote leg and trades are counted by transaction, never by row", () => {
+    // Bitquery: AmountsInUsd.Base is a SMOOTHED reference price times the base
+    // amount, and one transaction can produce several rows.
+    for (const q of [TOKEN_FLOW_QUERY, CREATOR_FLOW_QUERY]) assert.doesNotMatch(q, /AmountsInUsd_Base|AmountsInUsd \{ Base/, "no USD figure is built on the smoothed base leg");
+    assert.match(TOKEN_FLOW_QUERY, /buys60: count\(distinct: TransactionHeader_Hash, if: \{Side: \{is: "Buy"\}, Block: \{Time: \{since: \$t60\}\}\}\)/);
+    assert.match(TOKEN_FLOW_QUERY, /buyUsd60: sum\(of: AmountsInUsd_Quote, if: \{Side: \{is: "Buy"\}/);
+    assert.match(TOKEN_FLOW_QUERY, /orderBy: \{descending: AmountsInUsd_Quote\}/);
+    assert.match(TOKEN_FLOW_QUERY, /trades: count\(distinct: TransactionHeader_Hash\)/);
+    assert.match(CREATOR_FLOW_QUERY, /sells: count\(distinct: TransactionHeader_Hash\)\s+sellUsd: sum\(of: AmountsInUsd_Quote\)/);
+    assert.doesNotMatch(TOKEN_FLOW_QUERY, /:\s*count(?!\(distinct)/, "no plain row count is reported as trades");
   });
 });
 
@@ -190,7 +203,8 @@ describe("parsing — third-party JSON on its way to a trading agent", () => {
     assert.deepEqual(r.windows[0], { minutes: 5, buyUsd: 412.5, sellUsd: 120.25, buys: 4, sells: 2, buyers: 3, sellers: 2 });
     assert.equal(r.windows[2]!.buyUsd, 5120.75);
     assert.deepEqual(r.venues.map((v) => [v.protocol, v.family]), [["uniswap_v4", "uniswap"], ["pons_curve", "pons"]]);
-    assert.deepEqual(r.largestSells.map((s) => s.usd), [512.75, 350.2, 240]);
+    assert.deepEqual(r.largestSells.map((s) => s.usd), [512.75, 350.2, 240], "the duplicated leg of the $512.75 sell is one sell, not two");
+    assert.ok(!JSON.stringify(r).includes("0xb2b2"), "the hash used to drop it goes no further than the parser");
     assert.equal(r.largestSells[0]!.at, Date.parse("2026-10-12T01:40:00Z") / 1000);
   });
 
@@ -218,11 +232,16 @@ describe("parsing — third-party JSON on its way to a trading agent", () => {
       Trading: {
         totals: [],
         venues: [{ Pair: { Market: { Protocol: "<script>" } } }, { Pair: { Market: {} } }, "x"],
-        bigSells: [{ AmountsInUsd: { Base: 5 } }, { Block: { Time: "nope" }, AmountsInUsd: { Base: 5 } }, { Block: { Time: "2026-10-12T01:00:00Z" }, AmountsInUsd: { Base: "abc" } }],
+        bigSells: [
+          { AmountsInUsd: { Quote: 5 } },
+          { Block: { Time: "nope" }, AmountsInUsd: { Quote: 5 } },
+          { Block: { Time: "2026-10-12T01:00:00Z" }, AmountsInUsd: { Quote: "abc" } },
+          { Block: { Time: "2026-10-12T01:00:00Z" }, AmountsInUsd: { Base: 900 } },
+        ],
       },
     })!;
     assert.deepEqual(r.venues.map((v) => v.protocol), ["script"], "a slug is reduced to a safe alphabet");
-    assert.deepEqual(r.largestSells, []);
+    assert.deepEqual(r.largestSells, [], "a row priced only on the smoothed base leg is not read as a sell size");
   });
 
   it("creator flow: both halves, or nothing", () => {
@@ -372,6 +391,77 @@ describe("the lane — budget, cache, rate and cooldown", () => {
     assert.deepEqual(await slow.v3Pools(tokens[2]!), { ok: false, failure: "budget" }, "the third in a minute waits, then says so");
     assert.equal(calls.length, 2);
     slow.close();
+  });
+
+  it("a turn is waited for waitMs, not to the deadline, and a late one is refused with nothing reserved or sent", async () => {
+    const clock = fakeClock();
+    const { fetch, calls } = stubFetch(byQuery);
+    const lane = new BitqueryLane({ dir: tmp(), config: config({ rpm: 1 }), fetch, clock });
+    assert.ok((await lane.v3Pools(TOKEN)).ok);
+    const spent = lane.spentToday()!.points;
+    // The rate frees 19 s from here; waitMs is 8 s. The old lane waited the
+    // whole 19 s, reserved the points and sent a request with a 1 s timer.
+    clock.advance(41_000);
+    const asked = clock.now();
+    assert.deepEqual(await lane.v3Pools(TOKEN_B), { ok: false, failure: "budget" });
+    assert.ok(clock.now() - asked <= BITQUERY_LANE_DEFAULTS.waitMs + 1, `waited ${clock.now() - asked} ms, at most waitMs`);
+    assert.equal(calls.length, 1, "nothing was sent");
+    assert.equal(lane.spentToday()!.points, spent, "nothing was reserved");
+    lane.close();
+  });
+
+  it("a caller's deadline that leaves less than the request floor is refused at once, and one that shrinks the wait refuses early", async () => {
+    const clock = fakeClock();
+    const { fetch, calls } = stubFetch(byQuery);
+    const lane = new BitqueryLane({ dir: tmp(), config: config({ rpm: 1 }), fetch, clock });
+    const floor = BITQUERY_LANE_DEFAULTS.minRequestMs;
+    assert.deepEqual(await lane.tokenFlow(TOKEN, { deadline: clock.now() + floor - 1 }), { ok: false, failure: "timeout" });
+    assert.equal(calls.length, 0);
+    assert.equal(lane.spentToday()!.points, 0);
+    assert.ok((await lane.v3Pools(TOKEN)).ok);
+    // A 5 s deadline with the rate taken: the turn could come 4 s from now,
+    // which would leave 1 s for the request. It is refused 2 s from now instead.
+    clock.advance(56_000);
+    const asked = clock.now();
+    assert.deepEqual(await lane.v3Pools(TOKEN_B, { deadline: asked + 5_000 }), { ok: false, failure: "budget" });
+    assert.ok(clock.now() - asked <= 5_000 - floor + 1);
+    assert.equal(calls.length, 1);
+    assert.equal(lane.spentToday()!.points, LANE_POINTS.v3Pools);
+    lane.close();
+  });
+
+  it("an answer never inherits a child-evidence refusal; evidence may still share an answer's request", async () => {
+    let release!: () => void;
+    let gate = new Promise<void>((r) => (release = r));
+    const { fetch, calls } = stubFetch(async (c) => {
+      await gate;
+      return byQuery(c);
+    });
+    // 40 a day, 32 for evidence; 20 already spent on the orchestrator's own answers.
+    const lane = new BitqueryLane({ dir: tmp(), config: config({ pointsPerDay: 40 }), fetch, clock: fakeClock() });
+    release();
+    assert.ok((await lane.tokenFlow(TOKEN)).ok);
+    assert.ok((await lane.v3Pools(TOKEN)).ok);
+    const C = "0x00000000000000000000000000000000000000c3";
+    gate = new Promise<void>((r) => (release = r));
+    const evidence = lane.tokenFlow(C, { purpose: "evidence" });
+    const answer = lane.tokenFlow(C, { purpose: "answer" });
+    await new Promise((r) => setImmediate(r));
+    release();
+    assert.deepEqual(await evidence, { ok: false, failure: "budget" }, "20 + 15 passes the evidence share of 32");
+    assert.ok((await answer).ok, "20 + 15 fits the whole day of 40, so the answer is asked for itself");
+
+    // The other way round: evidence joins an answer already in flight, for free.
+    const D = "0x00000000000000000000000000000000000000c4";
+    const before = calls.length;
+    gate = new Promise<void>((r) => (release = r));
+    const own = lane.v3Pools(D);
+    const joined = lane.v3Pools(D, { purpose: "evidence" });
+    await new Promise((r) => setImmediate(r));
+    release();
+    assert.ok((await own).ok && (await joined).ok);
+    assert.equal(calls.length - before, 1, "one request served both");
+    lane.close();
   });
 
   it("a 429 cools the whole lane, honours Retry-After, and the cooldown outlives a restart", async () => {

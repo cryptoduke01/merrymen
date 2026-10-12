@@ -40,6 +40,16 @@
  * A buy/sell inversion would silently invert the evidence, so the cube with one
  * documented reading of the word was chosen. Run each query in the Bitquery
  * IDE with the plan's key before enabling the lane (docs/bitquery-lane.md).
+ *
+ * DOLLARS FROM THE QUOTE LEG, COUNTS BY TRANSACTION. Bitquery's Trades API page
+ * says `AmountsInUsd.Base` is the base amount times a SMOOTHED reference price,
+ * not the executed one: about a quarter of rows diverge by more than 1%, with
+ * outliers of orders of magnitude in sharp moves — which is a fresh memecoin's
+ * whole first hour. It names `AmountsInUsd.Quote` the sound leg for volume, so
+ * every sum and the largest-sells ordering here use it. The same page says one
+ * transaction can produce several rows (and about 1% are exact duplicates of
+ * one swap leg), so buys and sells are counted as distinct transaction hashes,
+ * not rows, and the largest sells are de-duplicated before they are kept.
  */
 
 import { mkdirSync } from "node:fs";
@@ -64,9 +74,12 @@ import { BITQUERY_DEFAULT_ENDPOINT, bitqueryAuthHeaders } from "./bitquery";
 
 export const BITQUERY_LANE_DEFAULTS = Object.freeze({
   /**
-   * Points per UTC day. 25,000 x 30 = 750,000 a month, a quarter under a
-   * 1,000,000-point plan, so the estimates below can be wrong by a third
-   * before the plan notices.
+   * Points per UTC day. 25,000 x 30 = 750,000 a month. THE GATEWAY SPENDS
+   * FROM THE SAME PLAN: its own fleet-wide counter
+   * (MERRYMEN_GATEWAY_BITQUERY_POINTS_PER_DAY, default 5,000, in
+   * gateway/lib/core.mjs) is another 150,000 a month. Together that is 900,000
+   * of a 1,000,000-point plan, so the estimates below can be wrong by a ninth
+   * before the plan notices. Raise either knob and the other has to come down.
    */
   pointsPerDay: 25_000,
   /** Requests started per rolling minute. The plan allows 90. */
@@ -77,6 +90,13 @@ export const BITQUERY_LANE_DEFAULTS = Object.freeze({
   requestTimeoutMs: 12_000,
   /** How long a caller waits for a slot or a turn before the lane says so. */
   waitMs: 8_000,
+  /**
+   * NO REQUEST IS SENT WITH LESS THAN THIS LEFT. A turn that arrives with a
+   * second to spare would reserve the points, take a rate start and send a
+   * request that almost certainly times out — and may still be billed. Past
+   * this line the caller is answered "timeout" with nothing reserved or sent.
+   */
+  minRequestMs: 3_000,
   /** A failed key is not asked again for this long (cooldowns aside). */
   failureTtlMs: 15_000,
   /**
@@ -156,10 +176,10 @@ const ROBINHOOD_BID = "bid:robinhood";
 function windowAggregates(m: number): string {
   const side = (s: "Buy" | "Sell") => `{Side: {is: "${s}"}, Block: {Time: {since: $t${m}}}}`;
   return [
-    `buys${m}: count(if: ${side("Buy")})`,
-    `sells${m}: count(if: ${side("Sell")})`,
-    `buyUsd${m}: sum(of: AmountsInUsd_Base, if: ${side("Buy")})`,
-    `sellUsd${m}: sum(of: AmountsInUsd_Base, if: ${side("Sell")})`,
+    `buys${m}: count(distinct: TransactionHeader_Hash, if: ${side("Buy")})`,
+    `sells${m}: count(distinct: TransactionHeader_Hash, if: ${side("Sell")})`,
+    `buyUsd${m}: sum(of: AmountsInUsd_Quote, if: ${side("Buy")})`,
+    `sellUsd${m}: sum(of: AmountsInUsd_Quote, if: ${side("Sell")})`,
     `buyers${m}: count(distinct: Trader_Address, if: ${side("Buy")})`,
     `sellers${m}: count(distinct: Trader_Address, if: ${side("Sell")})`,
   ].join("\n      ");
@@ -171,7 +191,9 @@ const TOKEN_WHERE = `Pair: {Market: {NetworkBid: {is: "${ROBINHOOD_BID}"}}, Toke
  * Three cubes in one request: per-window totals, the venue split over the
  * hour, and the largest single sells. No trader address is selected anywhere
  * in it: the reading is about the coin, and a wallet list is not a fact this
- * lane hands out.
+ * lane hands out. The largest sells select their transaction hash for one
+ * purpose — dropping a duplicated swap leg (parseTokenFlow) — and the hash
+ * goes no further than the parser.
  */
 export const TOKEN_FLOW_QUERY = `query MerrymenTokenFlow($tokens: [String!], ${FLOW_WINDOWS.map((m) => `$t${m}: DateTime`).join(", ")}, $sellLimit: Int, $venueLimit: Int) {
   Trading {
@@ -184,38 +206,40 @@ export const TOKEN_FLOW_QUERY = `query MerrymenTokenFlow($tokens: [String!], ${F
       limit: {count: $venueLimit}
     ) {
       Pair { Market { Protocol ProtocolFamily } }
-      trades: count
-      buys: count(if: {Side: {is: "Buy"}})
-      sells: count(if: {Side: {is: "Sell"}})
-      buyUsd: sum(of: AmountsInUsd_Base, if: {Side: {is: "Buy"}})
-      sellUsd: sum(of: AmountsInUsd_Base, if: {Side: {is: "Sell"}})
+      trades: count(distinct: TransactionHeader_Hash)
+      buys: count(distinct: TransactionHeader_Hash, if: {Side: {is: "Buy"}})
+      sells: count(distinct: TransactionHeader_Hash, if: {Side: {is: "Sell"}})
+      buyUsd: sum(of: AmountsInUsd_Quote, if: {Side: {is: "Buy"}})
+      sellUsd: sum(of: AmountsInUsd_Quote, if: {Side: {is: "Sell"}})
     }
     bigSells: Trades(
       where: {${TOKEN_WHERE}, Side: {is: "Sell"}}
-      orderBy: {descending: AmountsInUsd_Base}
+      orderBy: {descending: AmountsInUsd_Quote}
       limit: {count: $sellLimit}
     ) {
       Block { Time }
-      AmountsInUsd { Base }
+      TransactionHeader { Hash }
+      AmountsInUsd { Quote }
       Pair { Market { Protocol } }
     }
   }
 }`;
 
 /**
- * Did the creator's address sell, or move tokens out at all? Two cubes: DEX
+ * Did the launcher's address sell, or move tokens out at all? Two cubes: DEX
  * sells by that address, and every token transfer out of it (which also
- * catches a creator who moves supply to a fresh wallet and sells from there).
- * The creator is resolved by the ORCHESTRATOR from an on-chain source, never
- * supplied by a child (orchestrator-flow.ts).
+ * catches a launcher who moves supply to a fresh wallet and sells from there).
+ * The address is resolved by the ORCHESTRATOR from the launchpad factory's own
+ * launch event, never supplied by a child and never taken from the token's
+ * word about itself (orchestrator-flow.ts).
  */
 export const CREATOR_FLOW_QUERY = `query MerrymenCreatorFlow($tokens: [String!], $creators: [String!], $since: DateTime) {
   Trading {
     creatorSells: Trades(
       where: {Pair: {Market: {NetworkBid: {is: "${ROBINHOOD_BID}"}}, Token: {Address: {in: $tokens}}}, Trader: {Address: {in: $creators}}, Side: {is: "Sell"}, Block: {Time: {since: $since}}}
     ) {
-      sells: count
-      sellUsd: sum(of: AmountsInUsd_Base)
+      sells: count(distinct: TransactionHeader_Hash)
+      sellUsd: sum(of: AmountsInUsd_Quote)
     }
   }
   EVM(network: robinhood) {
@@ -339,7 +363,9 @@ export function clampLaneInput<N extends LaneQueryName>(name: N, input: LaneInpu
 export function buildLaneRequest(c: Clamped, now: number): { query: string; variables: Record<string, unknown> } {
   switch (c.name) {
     case "tokenFlow": {
-      const variables: Record<string, unknown> = { tokens: spellings(c.token), sellLimit: c.sellLimit, venueLimit: FLOW_LIMITS.venues };
+      // TWICE THE ROWS KEPT: a duplicated swap leg must not cost a slot in the
+      // list (parseTokenFlow drops it). The cube's price does not depend on it.
+      const variables: Record<string, unknown> = { tokens: spellings(c.token), sellLimit: 2 * c.sellLimit, venueLimit: FLOW_LIMITS.venues };
       for (const m of FLOW_WINDOWS) variables[`t${m}`] = iso(now - m * 60_000);
       return { query: TOKEN_FLOW_QUERY, variables };
     }
@@ -406,11 +432,23 @@ export function parseTokenFlow(data: unknown, sellLimit = 5): TokenFlowRead | nu
     });
   }
   const largestSells: FlowSell[] = [];
+  // ONE SWAP LEG, ONE ENTRY. The indexer can return the same leg twice; the
+  // pair (transaction, quote-side dollars) names a leg, and a second sighting
+  // of it is dropped rather than ranked as another big sell. A row with no
+  // hash is still kept: it is unconfirmed as a duplicate, not confirmed as one.
+  const legs = new Set<string>();
   for (const s of trading.bigSells) {
-    const usd = flowNumber(at(s, "AmountsInUsd", "Base"));
+    const usd = flowNumber(at(s, "AmountsInUsd", "Quote"));
     const time = at(s, "Block", "Time");
     const sec = typeof time === "string" ? Math.floor(Date.parse(time) / 1000) : NaN;
     if (usd === null || !Number.isSafeInteger(sec) || sec <= 0) continue;
+    const hash = at(s, "TransactionHeader", "Hash");
+    if (typeof hash === "string" && hash !== "") {
+      const leg = `${hash.toLowerCase()}|${usd}`;
+      if (legs.has(leg)) continue;
+      legs.add(leg);
+    }
+    // The hash stops here: a FlowSell is a size, a time and a venue.
     largestSells.push({ usd, at: sec, protocol: flowSlug(at(s, "Pair", "Market", "Protocol")) });
   }
   largestSells.sort((a, b) => b.usd - a.usd);
@@ -512,7 +550,11 @@ export type LanePurpose = "answer" | "evidence";
 
 export interface LaneCallOptions {
   purpose?: LanePurpose;
-  /** Absolute ms by which the caller needs an answer. Clamped to waitMs + requestTimeoutMs from now. */
+  /**
+   * Absolute ms by which the caller needs an answer. Clamped to waitMs +
+   * requestTimeoutMs from now. Less than minRequestMs away and nothing is
+   * asked: the answer is "timeout", with nothing reserved or sent.
+   */
   deadline?: number;
 }
 
@@ -557,6 +599,8 @@ export class BitqueryLane {
   private readonly log: (line: string) => void;
   private readonly requestTimeoutMs: number;
   private readonly waitMs: number;
+  /** Never above the request's own bound, so a lane built with a short one can still ask. */
+  private readonly minRequestMs: number;
   private readonly maxConcurrency: number;
   private inFlight = 0;
   private starts: number[] = [];
@@ -574,6 +618,7 @@ export class BitqueryLane {
     this.log = o.log ?? (() => {});
     this.requestTimeoutMs = o.requestTimeoutMs ?? BITQUERY_LANE_DEFAULTS.requestTimeoutMs;
     this.waitMs = o.waitMs ?? BITQUERY_LANE_DEFAULTS.waitMs;
+    this.minRequestMs = Math.min(BITQUERY_LANE_DEFAULTS.minRequestMs, this.requestTimeoutMs);
     this.maxConcurrency = Math.max(1, Math.min(BITQUERY_LANE_DEFAULTS.maxConcurrency, o.maxConcurrency ?? BITQUERY_LANE_DEFAULTS.maxConcurrency));
     mkdirSync(o.dir, { recursive: true });
     this.db = new DatabaseSync(path.join(o.dir, "lane.sqlite"));
@@ -628,18 +673,29 @@ export class BitqueryLane {
     const c = clampLaneInput(name, input);
     if (!c) return { ok: false, failure: "invalid-request" };
     const key = JSON.stringify(c);
+    const purpose: LanePurpose = opts.purpose ?? "answer";
     const now = this.clock.now();
     const deadline = Math.min(opts.deadline ?? Number.POSITIVE_INFINITY, now + this.waitMs + this.requestTimeoutMs);
 
     const cached = this.cached(key, now);
     if (cached) return cached;
-    const shared = this.pending.get(key);
+    // SHARED BY PURPOSE, ONE WAY. Evidence may join an answer's request: it
+    // spends nothing extra, and an answer's refusal is one evidence would have
+    // had too. An answer never joins evidence's: evidence stops at its share of
+    // the day, and a "budget" earned there must not become the orchestrator's
+    // own answer while the rest of the day is still unspent.
+    const shared = this.pending.get(`answer|${key}`) ?? (purpose === "evidence" ? this.pending.get(`evidence|${key}`) : undefined);
     if (shared) return shared;
     const recent = this.failed.get(key);
     if (recent && recent.until > now) return { ok: false, failure: recent.failure };
+    // TWO BOUNDS, KEPT APART. A turn is waited for at most waitMs, and only
+    // while a request could still get minRequestMs of the caller's deadline.
+    const turnBy = Math.min(now + this.waitMs, deadline - this.minRequestMs);
+    if (turnBy < now) return { ok: false, failure: "timeout" };
 
-    const p = this.live(c, key, opts.purpose ?? "answer", deadline).finally(() => this.pending.delete(key));
-    this.pending.set(key, p);
+    const pendingKey = `${purpose}|${key}`;
+    const p = this.live(c, key, purpose, turnBy, deadline).finally(() => this.pending.delete(pendingKey));
+    this.pending.set(pendingKey, p);
     return p;
   }
 
@@ -663,21 +719,26 @@ export class BitqueryLane {
     }
   }
 
-  /** Wait for a concurrency slot and a rate turn, or say which one ran out. */
-  private async takeTurn(deadline: number): Promise<FlowFailure | null> {
+  /**
+   * Wait for a concurrency slot and a rate turn until `turnBy`, or say which
+   * one ran out. `turnBy` is the earlier of waitMs from the call and the last
+   * moment a request still gets minRequestMs (run()), so a turn that arrives
+   * later is refused here — before a rate start is taken or a point reserved.
+   */
+  private async takeTurn(turnBy: number): Promise<FlowFailure | null> {
     for (;;) {
       const now = this.clock.now();
       while (this.starts.length > 0 && now - this.starts[0]! >= 60_000) this.starts.shift();
       const rateOk = this.starts.length < this.o.config.rpm;
       const slotOk = this.inFlight < this.maxConcurrency;
+      if (now > turnBy) return rateOk ? "timeout" : "budget";
       if (rateOk && slotOk) {
         this.inFlight++;
         this.starts.push(now);
         return null;
       }
-      if (now >= deadline) return rateOk ? "timeout" : "budget";
       const wait = rateOk ? 50 : this.starts[0]! + 60_000 - now;
-      await this.clock.sleep(Math.max(1, Math.min(wait, deadline - now, 250)));
+      await this.clock.sleep(Math.max(1, Math.min(wait, turnBy - now, 250)));
     }
   }
 
@@ -741,22 +802,25 @@ export class BitqueryLane {
     }
   }
 
-  private async live(c: Clamped, key: string, purpose: LanePurpose, deadline: number): Promise<LaneAnswer<unknown>> {
+  private async live(c: Clamped, key: string, purpose: LanePurpose, turnBy: number, deadline: number): Promise<LaneAnswer<unknown>> {
     const cooling = this.coolingUntil();
     if (cooling === null) return { ok: false, failure: "unavailable" };
     if (cooling > this.clock.now()) return { ok: false, failure: "provider-cooldown" };
-    const turn = await this.takeTurn(deadline);
+    const turn = await this.takeTurn(turnBy);
     if (turn) return { ok: false, failure: turn };
     try {
       // Another request may have been refused while this one waited its turn.
       const after = this.coolingUntil();
       if (after === null) return { ok: false, failure: "unavailable" };
       if (after > this.clock.now()) return { ok: false, failure: "provider-cooldown" };
+      // Checked again where it is spent: nothing is reserved for a request
+      // that could not be given its floor.
+      const observedAt = this.clock.now();
+      if (deadline - observedAt < this.minRequestMs) return { ok: false, failure: "timeout" };
       const reserved = this.reserve(LANE_POINTS[c.name], purpose);
       if (reserved === null) return { ok: false, failure: "unavailable" };
       if (!reserved) return { ok: false, failure: "budget" };
-      const observedAt = this.clock.now();
-      const out = await this.request(c, observedAt, Math.max(1, Math.min(this.requestTimeoutMs, deadline - observedAt)));
+      const out = await this.request(c, observedAt, Math.min(this.requestTimeoutMs, deadline - observedAt));
       if (!out.ok) {
         if (out.failure !== "provider-cooldown") this.noteFailure(key, out.failure);
         return out;
