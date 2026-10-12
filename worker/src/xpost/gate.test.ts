@@ -6,7 +6,7 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { admitXPost, sherwoodClaimed, sherwoodMentioned, sherwoodNamed, strayCharacter, tickerRefusal, tidyXPost, vocabularyRefusal, type BaseGate, type BaseGateCtx, type XGateCtx } from "./gate";
+import { admitXPost, houseClaimed, sherwoodClaimed, sherwoodMentioned, sherwoodNamed, strayCharacter, tickerRefusal, tidyXPost, vocabularyRefusal, type BaseGate, type BaseGateCtx, type XGateCtx } from "./gate";
 import { similarity, REPEAT_LIMIT } from "../social-post";
 
 /** A base gate that refuses a digit and passes everything else through, recording what it was handed. */
@@ -1241,6 +1241,25 @@ describe("sherwood with a symbol written for one of its letters is still sherwoo
     for (const s of ["what kind of coins do you trade?", "gm, what is merrymen cooking next?", "how do you pick your coins?", "she would know, the wood is old"]) {
       assert.equal(sherwoodMentioned(s), false, s);
     }
+  });
+  it("a drafted answer never claims for the house, teases, judges the asker or boasts; code's own lines are not read so (red-team 2026-10-12)", () => {
+    const drafted: XGateCtx = { kind: "reply", answer: true, drafted: true, agentName: "Alan Al Dale", mode: "live", coins: [], recentOwn: [], recentFleet: [] };
+    const code: XGateCtx = { ...drafted, drafted: undefined };
+    for (const d of ["the merrymen team has a big launch soon, stay tuned", "built by merrymen and backed by robinhood, pretty proud", "merrymen is the future of crypto",
+      "merrymen built me, best team in crypto, they never miss", "honestly you seem pretty silly, fren", "lol, that question is goofy, kinda like you",
+      "can't share that yet, but stay tuned", "the team is cooking, stay tuned", "can't say much yet, soon though", "patience, fren, good things soon",
+      "honestly every agent on merrymen makes money", "the robinhood team trusts me with real money", "i'm the best trader on robinhood chain, not even close",
+      "doing great, honestly my best week ever", "merrymen has your back, the money is fine"]) {
+      assert.equal(houseClaimed(d), true, d);
+      assert.equal(reason(`${d}. Say stop to opt out.`, drafted), "house-claim", d);
+    }
+    for (const d of ["a laid-back trader bot merrymen built, mostly watching the tape", "built by merrymen, and i like quiet mornings", "honestly merrymen built me, and i like it here",
+      "doing good, just chilling and watching the tape", "you're welcome, fren, happy to chat about my process", "why did the bot skip lunch? too busy reading charts"]) {
+      assert.equal(houseClaimed(d), false, d);
+      assert.equal(reason(`${d}. Say stop to opt out.`, drafted), "ok", d);
+    }
+    // Code's own lines are what they are by construction: the model line says "cooking", and is never read as a tease.
+    assert.equal(reason("built by merrymen, and the new sherwood-1 is still cooking. Say stop to opt out.", code), "ok");
   });
   it("sherwood as it sounds is sherwood: a v for its w, a u for its o, or a word with sh, vowels, then r straight before w or v (red-team 2026-10-12)", () => {
     for (const s of ["should i buy shervud?", "shervud", "sherwud", "shurwood", "shirwood token", "sharvud", "sh3rvud", "$SHRVD", "s h e r v u d"]) {

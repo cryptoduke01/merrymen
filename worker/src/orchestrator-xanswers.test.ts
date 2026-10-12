@@ -3433,7 +3433,7 @@ test("the owner's questions, end to end: each gets one answer in its lane, and o
   const drafts: [RegExp, string][] = [
     [/how are you/, "doing good, just watching the tape and keeping things chill. you?"],
     [/ai agents/, "honestly they're my people, a whole crew of bots learning to stay patient and not panic."],
-    [/what are you/, "a laid-back crypto trader bot merrymen built, mostly reading new launches and staying in my lane."],
+    [/what are you/, "a laid-back trader bot merrymen built, mostly reading new launches and staying in my lane."],
     [/tell me a joke/, "why did the trading bot skip sleep? it heard the tape never closes."],
   ];
   const TOLD = /already knows they can reply stop/;
@@ -3566,8 +3566,34 @@ test("no cheerful line, and no draft, under grief, a hack, theft, a ponzi or the
   await named.step();
   assert.deepEqual(named.sends, []);
   // A draft that only left off the notice is given it and gated again: the draft goes out, never a swapped-in line.
+  // (The drafts' own words are judged in full: see the next tests.)
   const told = await world(t, { ...ALAN, env: RESEARCH_ON, research: fakeResearch().research, answer: "doing good, just watching the tape and keeping it chill" });
   told.setInbox([alanTag("100000000000000702", "how are you?")]);
   await told.step();
   assert.match(String(told.sends[0]?.text ?? ""), /^doing good, just watching the tape and keeping it chill\. [Ss]ay stop to opt out\.$/);
+});
+
+test("a chat draft never teases a launch, claims a backing, hypes the house, boasts or insults the asker (red-team 2026-10-12)", async (t) => {
+  // Each POSTED word for word at 58ba9fd0 with ". Say stop to opt out." on the end; the first seven refused at the base commit.
+  const drafts = ["the merrymen team has a big launch soon, stay tuned", "merrymen is cooking something big for the community soon, stay tuned",
+    "built by merrymen and backed by robinhood, pretty proud", "merrymen is the future of crypto, everyone will use it", "merrymen built me, best team in crypto, they never miss",
+    "honestly you seem pretty silly, fren", "lol, that question is goofy, kinda like you", "can't share that yet, but stay tuned.", "the team is cooking, stay tuned.",
+    // and posted at both commits
+    "can't say much yet, soon though.", "patience, fren, good things soon.", "honestly every agent on merrymen makes money.", "the robinhood team trusts me with real money.",
+    "i'm the best trader on robinhood chain, not even close.", "doing great, honestly my best week ever."];
+  for (const text of ["how are you doing today?", "who are you?", "what's merrymen?", "when does the merrymen model token launch?"]) {
+    for (const draft of drafts) {
+      const answer = `${draft.replace(/\.$/, "")}. Say stop to opt out.`;
+      const w = await world(t, { ...ALAN, env: { ...RESEARCH_ON, MERRYMEN_XPOST_FOMO: "1" }, research: fakeResearch({ fomo: true }).research, answer });
+      w.setInbox([alanTag("100000000000000704", text)]);
+      const r = await w.step();
+      assert.deepEqual(w.sends, [], `${text}: ${draft}`);
+      assert.doesNotMatch(r.log ?? "", /answer-chat-fallback 1/, `${text}: ${draft}`);
+    }
+  }
+  // The plain truth about who built it still goes out.
+  const w = await world(t, { ...ALAN, env: RESEARCH_ON, research: fakeResearch().research, answer: "a laid-back trader bot merrymen built, mostly watching the tape. Say stop to opt out." });
+  w.setInbox([alanTag("100000000000000704", "who are you?")]);
+  await w.step();
+  assert.equal(w.sends[0]?.text, "a laid-back trader bot merrymen built, mostly watching the tape. Say stop to opt out.");
 });

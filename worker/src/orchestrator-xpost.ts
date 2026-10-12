@@ -1830,7 +1830,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         kind: "reply", answer: true, noticeShown: noticeTold, agentName: f.name, mode, coins: vouched.map((c) => c.label),
         paperCoins: [...vouched.filter((c) => c.paper).map((c) => c.label), ...(f.mode === "idle" ? money.paper : [])], recentOwn, recentFleet, emojiOk: facts.style.emoji > 0,
         // A buy it says is one it was told of, or none at all (XGateCtx.buys).
-        ...(asCode ? {} : { buys: told ? "vouched" as const : "none" as const, unsaid: [...(told && !namesNone ? [] : bought), ...money.otherOnly, ...older, ...askerNames],
+        // A model's draft: never a claim for the house, a tease, a judgement of the asker or a boast (XGateCtx.drafted).
+        ...(asCode ? {} : { drafted: true as const, buys: told ? "vouched" as const : "none" as const, unsaid: [...(told && !namesNone ? [] : bought), ...money.otherOnly, ...older, ...askerNames],
           // A coin named, or its trades or a coin asked about off the plain list: not even that it likes it (XGateCtx.named).
           // AND EVERY MARKET ANSWER (red-team 2026-10-12): "what's hot?" names no
           // coin, but an answer to it is about the coins the index shows, and

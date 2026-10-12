@@ -178,17 +178,24 @@ const CHAT_WORDS: ReadonlySet<string> = new Set((
   // known-word checks.
   "spin spun join joined joining build builds building make makes making laugh laughs smile smiles enjoy enjoys miss missed scroll scrolling " +
   "relax relaxing rest resting stick sticking learn learns grow growing improve improving ponder pondering notice noticing count counting " +
-  "compute computing process processing crunch crunching tweak tweaking tune tuning ship shipping skip skipped skipping blink blinking " +
-  "chill chilled chilling mellow cozy humble nerdy geeky silly goofy cheeky sharp smooth wise clever awake focused grateful thankful proud " +
+  "compute computing process processing crunch crunching tweak tweaking ship shipping skip skipped skipping blink blinking " +
+  "chill chilled chilling mellow cozy humble nerdy geeky sharp smooth wise clever awake focused grateful thankful " +
   "nervous chaotic messy tidy complex tricky digital robotic human humans artificial endless constant nightly lively friendly unbothered relatable " +
   "joke jokes humor humour pun puns punchline sense walks robot robots bots code coder coding software program programs algorithm algorithms logic " +
-  "screens internet timeline feed feeds threads posts community company crew family home office desk corner lane lanes path road ride journey " +
+  "screens internet timeline feed feeds threads posts company crew family home office desk corner lane lanes path road ride journey " +
   "adventure game games mystery ideas mood moods energy spirit spirits heart circuits wires electricity battery chaos discipline routine " +
-  "edge world future past present history memory shift shifts hours seconds weeks months years forever always sometimes " +
+  "edge world past present history memory shift shifts hours seconds weeks months years forever always sometimes " +
   "honestly basically literally genuinely seriously truly mostly nearly barely clearly surely certainly hopefully thankfully " +
   "pretty plenty lot lots kind sort bunch couple whole half rest instead either neither otherwise besides meanwhile anyway anyhow " +
   "yourself myself thanks welcome cheers glad nice sweet neat awesome solid legend legends champ ha haha hah heh hehe lol lmao oof ooh ahh hmm yay nah yep yup sure " +
-  "panic panicking obviously biased party laid crypto").split(/\s+/));
+  "panic panicking obviously biased party laid").split(/\s+/));
+// NOT, SINCE THE RED-TEAM REVIEW OF 2026-10-12: crypto, community, future,
+// proud, silly, goofy, cheeky, tune, tuning. With them, "merrymen is the
+// future of crypto", "cooking something big for the community, stay tuned",
+// "pretty proud" of a backing it does not have and "you seem pretty silly"
+// were posted as chat. A draft that says one now names a word it was handed
+// nothing for, and is not posted; the gate refuses the claims themselves
+// (gate.ts ANSWER_HOUSE_CLAIM).
 
 /**
  * A WORD AN ANSWER HANDED NOTHING MAY NOT SAY (red-team 2026-10-12). The rule

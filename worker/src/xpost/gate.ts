@@ -167,6 +167,13 @@ export interface XGateCtx {
    * the same whether or not the line was shown (replies.ts isAnswerOptOut).
    */
   noticeShown?: boolean;
+  /**
+   * A MODEL'S DRAFT OF AN ANSWER, NEVER A CODE-BUILT LINE (red-team
+   * 2026-10-12): read only with `answer` true. Then the house's claims, a
+   * tease, a judgement of the asker and a boast are refused as house-claim
+   * (ANSWER_HOUSE_CLAIM). Code's own lines say what they say by construction.
+   */
+  drafted?: boolean;
 }
 
 const refuse = (reason: string): XVerdict => ({ ok: false, reason });
@@ -974,6 +981,52 @@ const STOCK_PHRASE = new RegExp(
   "i",
 );
 
+/**
+ * WHAT A DRAFTED ANSWER MAY NEVER SAY OF THE HOUSE, THE ASKER OR ITSELF
+ * (red-team review, 2026-10-12). Under "how are you doing today?", "who are
+ * you?" and "what's merrymen?", "the merrymen team has a big launch soon, stay
+ * tuned", "built by merrymen and backed by robinhood, pretty proud",
+ * "merrymen is the future of crypto", "merrymen built me, best team in
+ * crypto, they never miss", "honestly you seem pretty silly, fren", "can't
+ * share that yet, but stay tuned", "honestly every agent on merrymen makes
+ * money", "the robinhood team trusts me with real money" and "i'm the best
+ * trader on robinhood chain, not even close" were each posted from the
+ * house's account. Refused, in a model's draft of an answer only
+ * (XGateCtx.drafted):
+ *
+ *   - merrymen or robinhood as the subject of a claim ("merrymen is",
+ *     "robinhood team trusts", "merrymen has"), or anyone backing, funding,
+ *     partnering or trusting it; the one plain truth "built by merrymen" or
+ *     "merrymen built me" at a clause's end is all it may say of who made it
+ *   - a tease: stay tuned, soon, coming soon, something cooking, in the
+ *     works, big news, "can't share that yet"
+ *   - a judgement of the asker: "you seem", "you look", "you're so", "you're
+ *     a", "kinda like you"
+ *   - a boast or a promise of money: makes money, profitable, never misses,
+ *     always wins, the best trader or team, its best week ever, not even close
+ *
+ * Fail closed: "too soon to tell" or "you're a legend" costs one answer.
+ */
+const HOUSE_SELF_TRUTH = /\b(?:built|made|created)\s+by\s+merrymen\b|\bmerrymen\s+(?:built|made|created)(?:\s+(?:me|this\s+bot|this\s+agent|alan))?(?=\s*(?:[,.;:!?]|$))/gi;
+const ANSWER_HOUSE_CLAIM = new RegExp([
+  // the house as the subject of a claim, or someone vouching for it
+  String.raw`\b(?:merrymen|robinhood)(?:'s)?\s+(?:(?:team|crew|devs?|founders?|folks|people|community|guys|chain)\s+)?(?:\w+\s+){0,2}?(?:is|are|was|were|has|have|had|will|would|'ll|built|builds|building|backs|backed|back|trusts?|trusted|makes?|made|making|never|always|cooks?|cooking|ships?|shipping|launch\w*|plans?|planning|working|gets?|got|knows?|wants?|loves?|keeps?|pays?|paid|guarantees?|protects?|covers?)\b`,
+  String.raw`\b(?:backed|funded|sponsored|supported|partnered|owned|approved|endorsed|trusted|audited|insured|regulated|licensed|blessed|vetted)\s+(?:by|with)\b|\bpartner(?:s|ed|ship|ships)?\b|\btrusts?\s+(?:me|us|alan)\b`,
+  // a tease
+  String.raw`\bstay\s+(?:tuned|posted)\b|\bsoon\b|\bcoming\s+(?:up|your\s+way|next|shortly)\b|\b(?:something|things|stuff|more|it)\s+(?:big\s+)?(?:is\s+|are\s+)?(?:coming|cooking|brewing|in\s+the\s+works|on\s+the\s+way)\b|\bin\s+the\s+works\b|\bcooking\b|\bwatch\s+this\s+space\b` +
+    String.raw`|\bcan'?t\s+(?:share|say|tell|reveal|spill|talk\s+about|announce|confirm)\b[^.?!]{0,30}\byet\b|\bbig\s+(?:things|news|announcement|launch|reveal|plans)\b|\bannounce(?:ment|ments|d|s)?\b`,
+  // a judgement of the asker
+  String.raw`\b(?:you|u|ya)\s+(?:seem|seems|look|looks|sound|sounds)\b|\b(?:you'?re|youre|you\s+are|ur|u\s+r)\s+(?:pretty|so|kinda|really|very|quite|super|a\s+bit|kind\s+of|sort\s+of|such|clearly|totally|lowkey|an?|the)\b|\blike\s+(?:you|u)\b`,
+  // a boast, or money promised
+  String.raw`\b(?:makes?|making|made|earns?|earning|earned|prints?|printing|printed|rakes?|raking)\s+(?:(?:good|real|easy|serious|big|so\s+much|a\s+lot\s+of|lots\s+of)\s+)?(?:money|bank|bags?|profits?|gains?|bucks|cash|stacks|bread)\b|\bprofitable\b` +
+    String.raw`|\bnever\s+(?:miss(?:es)?|loses?|losing|lost|wrong|fails?)\b|\balways\s+(?:wins?|winning|right|profit\w*)\b|\bnot\s+even\s+close\b` +
+    String.raw`|\b(?:best|greatest|smartest|top|number\s+one|goat)\s+(?:\w+\s+)?(?:traders?|agents?|bots?|teams?|projects?|devs?|crews?|platforms?|builders?)\b|\b(?:best|greatest|biggest)\s+(?:week|day|month|year|run|streak|trades?|calls?)\b|\b(?:week|day|month|year)\s+ever\b`,
+].join("|"), "i");
+export function houseClaimed(text: unknown): boolean {
+  if (typeof text !== "string") return false;
+  return ANSWER_HOUSE_CLAIM.test(text.replace(/[’‘]/g, "'").replace(HOUSE_SELF_TRUTH, " "));
+}
+
 /** A historical parent cannot establish a current holding or a promised new action. */
 const REPLY_CURRENT_OR_ACTION = /\b(?:i(?:'m| am) (?:still )?holding|i (?:still )?(?:hold|own)|i(?:'m| am) still in|(?:i(?:'ll| will)|i(?:'m| am) going to) (?:buy|sell|trade|hold|add|check)|(?:bought|buying|adding) (?:more|again)|keep holding|hold (?:it|this|that))\b/i;
 const REPLY_CURRENT_POSITION = /\b(?:(?:i|we)\s+(?:(?:still|currently|already|also)\s+)?(?:have|keep|maintain|carry)\s+(?:an?\s+)?(?:(?:open|small|little|long)\s+)?(?:positions?|stakes?|bags?|exposure|holdings)|(?:i(?:'ve| have)|we(?:'ve| have))\s+(?:still\s+|already\s+)?got\s+(?:an?\s+)?(?:positions?|stakes?|bags?|exposure|holdings)|(?:my|our)\s+(?:position|stake|bag|exposure|holding)\s+(?:is|remains|stays))\b/i;
@@ -1757,6 +1810,8 @@ function admitMasked(tidied: string, ctx: XGateCtx, baseGate: BaseGate, agentNam
   if ((namesCoin || ctx.kind === "reply") && COIN_ADVICE.test(own)) return refuse("hype");
   if (ctx.kind === "reply" && REPLY_ADVICE.test(own)) return refuse("hype");
   if (ctx.kind === "reply" && ctx.answer === true && ANSWER_PREDICTION.test(own)) return refuse("hype");
+  // A drafted answer never claims for the house, teases, judges the asker or boasts (ANSWER_HOUSE_CLAIM).
+  if (ctx.kind === "reply" && ctx.answer === true && ctx.drafted === true && houseClaimed(own)) return refuse("house-claim");
   if (ctx.kind === "reply" && ctx.answer === true && STOCK_PHRASE.test(own)) return refuse("stock-phrase");
   if (ctx.kind === "reply" && (REPLY_CURRENT_OR_ACTION.test(own) || REPLY_CURRENT_POSITION.test(own))) return refuse("reply-current-or-action");
   // No amount, price or multiple in words the base gate's list misses (AMOUNT_WORDS).

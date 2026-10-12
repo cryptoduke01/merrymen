@@ -40,7 +40,7 @@ describe("a coin named in a draft's words", () => {
       "it's where people spin up their own trading agents, i'm one of the crew.", "ha, my circuits are in good spirits, thanks for asking.",
       "a robot with a sense of humour walks into the timeline, that's me.", "heh, the punchline is i never sleep.", "mood is cozy and unbothered, the tape keeps me company.",
       // The persona the prompt hands it, said back in its own words.
-      "just a laid-back crypto trader bot merrymen built, honestly.", "a whole crew of bots learning to stay patient and not panic, i'm biased obviously."]) {
+      "just a laid-back trader bot merrymen built, honestly.", "a whole crew of bots learning to stay patient and not panic, i'm biased obviously."]) {
       assert.equal(unknownWordIn(draft, "Alan Al Dale"), false, draft);
       assert.equal(coinTalkIn(draft, "Alan Al Dale"), false, draft);
     }
@@ -52,6 +52,15 @@ describe("a coin named in a draft's words", () => {
     for (const name of ["pepe", "doge", "shib", "bonk", "wif", "floki", "brett", "popcat", "mog", "trump", "elon", "wojak", "chad", "giga", "cat", "dog", "frog",
       "pizza", "inu", "baby", "pnut", "neiro", "turbo", "pengu", "fartcoin", "moodeng", "hippo", "shark", "monkey", "penguin"]) {
       assert.ok(unknownWordIn(`ha, ${name} vibes all day.`, "Alan Al Dale"), name);
+    }
+  });
+
+  it("the words that let a draft tease a launch, claim a backing, hype the house or insult the asker are no chat words (red-team 2026-10-12)", () => {
+    // Each posted as chat at 58ba9fd0, refused as unlooked-coin at the base commit.
+    for (const draft of ["merrymen is cooking something big for the community soon, stay tuned.", "built by merrymen and backed by robinhood, pretty proud.",
+      "merrymen is the future of crypto, everyone will use it.", "merrymen built me, best team in crypto, they never miss.", "honestly you seem pretty silly, fren.",
+      "lol, that question is goofy, kinda like you.", "hmm, cheeky question."]) {
+      assert.ok(unknownWordIn(draft, "Alan Al Dale"), draft);
     }
   });
 });
