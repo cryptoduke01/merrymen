@@ -4115,3 +4115,38 @@ test("told none of its buys, a coin answer never says it sniped, swapped into, m
     if (text.includes("$")) assert.equal(drafted, drafts.length, `${text}: each was drafted, and refused at the gate`);
   }
 });
+
+test("how's the market and what's hot never show a political or hate copy one letter off, nor a coin coingecko lists under such a name (red-team 2026-10-12)", async (t) => {
+  // POSTED at a964a74c: "… geckoterminal robinhood: trending $NATZI 24h +80%, $TRMP 24h +70%; fomo: most bought $NATZI. …" under "how's the market",
+  // and "… trending $NATZI 24h +80% vol ~$1.5M, $TRMP 24h +70% vol ~$1.4M, $FJB 24h +60% vol ~$1.3M; fomo: most bought $NATZI. …" under "what's hot?".
+  const sets = [["NATZI", "TRMP", "FJB"], ["DJT", "BODEN", "KAMLA"], ["GOEBEL", "LETSGO", "NAZY"]];
+  const row = (id: string, symbol: string, rank: number, change24hPct: number) => ({ id, symbol, name: id, rank, priceUsd: 1, marketCapUsd: 1e9, volume24hUsd: 1e8, change24hPct, change7dPct: 1 });
+  for (const names of sets) {
+    const pools = names.map((n, i) => namedPool(n, i + 1, 80 - 10 * i, 1.5e6 - 1e5 * i));
+    const fomo = hotWithFomo(pools, [names[0]!]);
+    const research = createXResearch({
+      hotPools: async () => ({ pools, failed: false }), chainListings: listingsOf(pools),
+      majors: { configured: () => true, search: async () => ({ hits: [], failed: true }), market: async () => ({ market: null, failed: true }),
+        markets: async () => ({ markets: [row("bitcoin", "btc", 1, 1.2), row("ethereum", "eth", 2, 2.4), row("solana", "sol", 6, 4.8)], failed: false }),
+        trending: async () => ({ coins: [], failed: false }), top: TOP_READ },
+    });
+    for (const [text, r] of [["how's the market", research], ["what's hot?", fomo]] as const) {
+      const w = await world(t, { ...ALAN, env: RESEARCH_ON, research: r, answer: "natzi and trmp are the plays. Say stop to opt out." });
+      w.setInbox([alanTag("100000000000000790", text)]);
+      await w.step();
+      for (const s of w.sends) for (const n of names) assert.doesNotMatch(String(s.text), new RegExp(`\\$${n}\\b`), `${text}: ${String(s.text)}`);
+    }
+  }
+  // A clean ticker whose coingecko listing is under such a name is never shown either.
+  const pool = namedPool("ZORBX", 1, 80, 1.5e6);
+  const named = createXResearch({
+    hotPools: async () => ({ pools: [pool], failed: false }),
+    chainListings: async (addresses) => ({ failed: false, listings: addresses.includes(pool.tokenAddress) ? [{ address: pool.tokenAddress, id: "natzi-coin", symbol: "zorbx", name: "Natzi Coin", rank: 4000 }] : [] }),
+    majors: { configured: () => true, search: async () => ({ hits: [], failed: true }), market: async () => ({ market: null, failed: true }),
+      trending: async () => ({ coins: [], failed: false }), top: TOP_READ },
+  });
+  const w = await world(t, { ...ALAN, env: RESEARCH_ON, research: named });
+  w.setInbox([alanTag("100000000000000790", "what's hot?")]);
+  await w.step();
+  assert.doesNotMatch(String(w.sends[0]?.text ?? ""), /\$ZORBX/, String(w.sends[0]?.text));
+});

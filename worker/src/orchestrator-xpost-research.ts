@@ -579,7 +579,9 @@ const EVERYDAY_HIDING: ReadonlySet<string> = new Set((
   "grape grapes scrape scraped scraping drape egypt melon cocktail peacock canal banal parse sparse raccoon tycoon cuckoo mustard siege awoke " +
   "response responses responsible responsibly sponsor sponsored sponsors benign arsenal therapist torpedo trumpet nibble nibbles nibbling " +
   "cucumber succumb incumbent manuscript tardy magazine auspicious cocoon basement manager managers angry angrier hungry stranger strangers " +
-  "ranger rangers singer singers ginger messenger passenger passengers challenger challengers avenger avengers"
+  "ranger rangers singer singers ginger messenger passenger passengers challenger challengers avenger avengers " +
+  // the political names read one letter off (figures.ts, red-team review of a964a74c) hide in these
+  "goblin goblins gobble gobbled tramp tramps trampoline computer computers"
 ).split(/\s+/));
 /** "alan" said to it at the start, after at most two greeting words, or after a comma at the very end: an address, never a name the tag is about. */
 const ALAN_ADDRESSED = /^(?:(?:gm|gn|yo|hey|hi|hello|ser|fren|bro|sup)[\s,!.]+){0,2}alan\b[\s,!.:-]*|,\s*alan$/;
@@ -1936,9 +1938,17 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
           notes.push(`listings-${failureCode(listings?.failure)}`);
         }
         const listingOf = (token: string): ChainListing | null | undefined => (fresh(token) ? listingMemo.get(token)!.listing : undefined);
+        // AND NEVER A COIN WHOSE LISTED NAME NO LINE OF THE HOUSE'S ANSWERS
+        // UNDER (red-team review of a964a74c, 2026-10-12): the ticker was read,
+        // the name CoinGecko lists it under was not. Every run of its letters,
+        // and all of them run together (neverAnsweredName).
+        const nameRefused = (name: unknown): boolean => {
+          const s = String(name ?? "");
+          return (s.match(/[A-Za-z0-9]+/g) ?? []).some(neverAnsweredName) || neverAnsweredName(s.replace(/[^A-Za-z0-9]/g, ""));
+        };
         const vouched = candidates.filter((s) => {
           const l = listingOf(s.token);
-          return !!l && l.rank !== null && cleanTicker(l.symbol) === s.ticker;
+          return !!l && l.rank !== null && cleanTicker(l.symbol) === s.ticker && !nameRefused(l.name);
         });
         // NOTHING VOUCHED FOR, AND SOME CONTRACT COULD NOT BE ASKED ABOUT: no
         // read at all (code's "no read" line), never a guess, never a name.

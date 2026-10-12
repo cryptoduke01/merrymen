@@ -1167,7 +1167,15 @@ other owner's agent, and its posting and reply warnings, are unchanged.
   that coin must rank it, under the very symbol its pool shows
   (`venues/coingecko-coins.ts` `readChainListings`: `tokens/multi` for up
   to ten contracts, then `/coins/markets?ids=…`; with no Pro key nothing is
-  asked and no chain coin is named). What CoinGecko said of a contract is
+  asked and no chain coin is named), and under a name no line of the house's
+  answers under, read on every run of its letters (red-team review of
+  a964a74c: the listing's name was never read). Political and hate names
+  one letter off and their codes are such names too (`$TRMP`, `$TREMP`,
+  `$BIDN`, `$BODEN`, `$KAMLA`, `$OBUMA`, `$PUTN`, `$NATZI`, `$NAZY`,
+  `$GOEBEL`, `$FJB`, `$LGB`, `$LETSGO`, `$BRANDON`, `$DJT`, `$STALIN`,
+  `$ZIONIST`: `figures.ts` `ABUSE_AND_POLITICS`, red-team review of a964a74c,
+  where "how's the market" posted "trending $NATZI 24h +80%, $TRMP 24h
+  +70%"). What CoinGecko said of a contract is
   kept an hour. Nothing listed is code's nothing-standing-out line; the
   listings unread is code's no-read line; the screens above stay as a second
   layer. **Nor a coin under a name its own buys go by** (red-team

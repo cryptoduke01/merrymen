@@ -415,3 +415,15 @@ describe("never read back as its own words", () => {
     }
   });
 });
+
+describe("red-team review of a964a74c: political and hate copies one letter off, and their codes (2026-10-12)", () => {
+  it("are never shown and never answered under", () => {
+    // Each passed showTicker, cleanTicker, the gate's tickerRefusal and neverAnsweredName at a964a74c.
+    for (const t of ["TRMP", "TRUMMP", "DONALD", "BRANDON", "LETSGO", "FJB", "LGB", "TREMP", "BODEN", "DJT", "KAMLA", "BIDN", "OBUMA", "PUTN", "MELANYA",
+      "NETANYA", "DOLAND", "NAZY", "NATZI", "GOEBEL", "STALIN", "ZIONIST"]) {
+      assert.equal(cleanTicker(t), null, t);
+      assert.equal(neverAnsweredName(t), true, t);
+    }
+    for (const t of ["CHUMP", "ZAPX", "FROGGY", "COINA", "QRTZ", "DUMPR"]) assert.equal(cleanTicker(t), t, t);
+  });
+});

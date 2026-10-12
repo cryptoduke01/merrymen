@@ -118,6 +118,17 @@ const ABUSE_AND_POLITICS: readonly string[] = [
   "trump", "melania", "biden", "maga", "kamala", "harris", "obama", "putin", "zelensk", "election", "president", "vote",
   "barron", "ivanka", "vance", "pelosi", "desantis", "rfk", "kennedy", "milei", "bukele", "jinping", "netanyahu", "bibi", "khamenei", "erdogan",
   "musk", "elon", "israel", "palestin", "gaza", "ukrain", "russia", "antifa", "woke", "democrat", "republican", "commie", "communis", "fascis",
+  // AND THE POLITICAL AND HATE NAMES SPELLED ONE LETTER OFF, AND THEIR NICKNAMES AND
+  // CODES (red-team review of a964a74c, 2026-10-12): "$TRMP", "$TRUMMP", "$TREMP",
+  // "$DONALD", "$DOLAND", "$BIDN", "$BODEN", "$KAMLA", "$OBUMA", "$PUTN", "$MELANYA",
+  // "$NETANYA", "$NATZI", "$NAZY", "$GOEBEL", "$FJB", "$LGB", "$LETSGO", "$BRANDON" and
+  // "$DJT" passed every screen, and code posted "trending $NATZI 24h +80%, $TRMP 24h +70%"
+  // in "how's the market" and "what's hot". Each read on the letters, with the vowels
+  // and the doubled letters a copy plays with left loose.
+  "t+r+[aeiouy]*m+p", "d[aeiou]?n[aeiou]?ld", "d[aeiou]?l[aeiou]?nd", "b[iy]+d[eiy]*n(?!g)", "boden", "k+a+m+a*l+a", "ob[aeiou]m[aeiou]", "pu+t[iy]*n",
+  "m[ae]l[aeiou]n[iy]a", "netany", "n[aeiou]+t?z+[iy]", "go[e]?b+[e]?l", "fjb", "lgb", "letsgo", "brandon", "djt",
+  // and the dictators, movements and groups the first list missed (red-team review of a964a74c: "$ZIONIST", "$STALIN")
+  "zionis", "stalin", "lenin", "zedong", "maotse", "houthi", "intifada", "idf", "mussolini", "pinochet", "kimjong", "jongun",
 ];
 const HYPE_AND_MONEY: readonly string[] = [
   // hype and trust words
