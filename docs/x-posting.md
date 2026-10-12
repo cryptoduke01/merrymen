@@ -705,6 +705,19 @@ and 6 change what is said publicly on X and need Milla's review; step 6's
 answers need step 5's approval first. Nothing in this table is set by
 merging: each value is the operator's to set on the service named.
 
+**Rolling the orchestrator back past this release.** An older orchestrator
+reads an `answer` row as a casual post, with no reply target, and would
+publish a queued answer (a reply to one person, ending "Say stop to opt
+out.") as a standalone post on Alan's timeline the same day. So before
+deploying an older orchestrator, empty the queue first. Either unset
+`MERRYMEN_XPOST_REPLIES_APPROVED` (or take Alan's tenant out of
+`MERRYMEN_XPOST_ACTIVE_TENANTS`) on the orchestrator and let one pass of this
+release run, which cancels every waiting answer as `replies-off`; or cancel
+them directly on the shared database:
+`UPDATE xpost_posts SET status = 'cancelled', reason = 'rollback' WHERE kind = 'answer' AND status = 'scheduled';`
+Then deploy the older build. An answer this release could not send within an
+hour of drafting it is already skipped as stale, so the queue is short.
+
 ## What an owner should know (it is in the warning)
 
 - The agent posts from whichever X account was approved on X's screen, which
