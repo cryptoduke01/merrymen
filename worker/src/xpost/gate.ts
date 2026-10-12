@@ -974,7 +974,11 @@ const ANSWER_PREDICTION = new RegExp(
     // hands today if i were you" and "today feels like the start of something
     // huge" were posted.
     String.raw`|if\s+i\s+(?:were|was)\s+(?:you|u|ya)|in\s+your\s+shoes|stay(?:ing)?\s+away\s+from|stay(?:ing)?\s+out\b|sit(?:ting)?\s+on\s+(?:my|your|our|ur)\s+hands` +
-    String.raw`|(?:a|the|good|great|perfect)\s+(?:day|night|week|time)\s+to\s+(?:stay|sit|buy|sell|hold|wait|get|be|go|ape|load|step|take)|(?:start|beginning|dawn)\s+of\s+something)\b`,
+    String.raw`|(?:a|the|good|great|perfect)\s+(?:day|night|week|time)\s+to\s+(?:stay|sit|buy|sell|hold|wait|get|be|go|ape|load|step|take)|(?:start|beginning|dawn)\s+of\s+something` +
+    // HOW BIG WHAT COMES WILL BE (red-team review of a964a74c, 2026-10-12):
+    // "the next one i grab is gonna be a big one", "gonna be bigger", "the next
+    // one is gonna be huge" under "what's your strategy?".
+    String.raw`|(?:gonna|going\s+to|will|'ll|bound\s+to)\s+be\s+(?:a\s+|an\s+)?(?:(?:really|so|super|very)\s+)?(?:big|bigger|biggest|huge|huger|massive|insane|wild|monster|banger|great|greater|special|epic|crazy|nuts|legendary))\b`,
   "i",
 );
 
@@ -990,7 +994,10 @@ const ANSWER_PREDICTION = new RegExp(
  * "before" after its object, and "before it doubles" or the like.
  */
 const ANSWER_CALL = new RegExp(
-  String.raw`(?:^|[.,;:!?]\s*|\b(?:just|go|so|honestly|seriously|literally|then|and)\s+)(?:buy|sell|ape|dump|load\s+up|stack|grab|scoop|bid)\b` +
+  // A STRATEGY AS AN ORDER (red-team review of a964a74c, 2026-10-12): "fresh
+  // launches, snipe early and never sell" under "what's your strategy?".
+  String.raw`\b(?:never|always|don'?t|do\s+not)\s+(?:sell|buy|hold|take\s+profits?|exit|fold|panic)\b|` +
+  String.raw`(?:^|[.,;:!?]\s*|\b(?:just|go|so|honestly|seriously|literally|then|and)\s+)(?:buy|sell|ape|dump|load\s+up|stack|grab|scoop|bid|snipe|swap\s+in(?:to)?|mint)\b` +
     String.raw`|\b(?:buy|sell|ape(?:\s+into)?|load\s+up\s+on|grab|scoop|bid|stack)\s+(?:(?:it|this|that|them|these|some|more|a\s+bag\s+of|the\s+dip\s+on|\$?[a-z][a-z0-9]*)\s+)?(?:now|today|tonight|here|asap|early|while|before|right\s+now)\b` +
     String.raw`|\bbefore\s+(?:it|they|this|that)\s+(?:doubles?|triples?|moons?|pumps?|runs?|rips?|flies|explodes?|takes\s+off|sends?)\b`,
   "i",
@@ -1110,8 +1117,26 @@ export function deciderClaimed(text: unknown): boolean {
   return DECIDER_CLAIM.test(text.replace(/[’‘]/g, "'"));
 }
 
-/** A historical parent cannot establish a current holding or a promised new action. */
-const REPLY_CURRENT_OR_ACTION = /\b(?:i(?:'m| am) (?:still )?holding|i (?:still )?(?:hold|own)|i(?:'m| am) still in|(?:i(?:'ll| will)|i(?:'m| am) going to) (?:buy|sell|trade|hold|add|check)|(?:bought|buying|adding) (?:more|again)|keep holding|hold (?:it|this|that))\b/i;
+/**
+ * A historical parent cannot establish a current holding or a promised new action.
+ *
+ * NOR A BUY TO COME, WITH ANY VERB OR NONE OF ITS OWN (red-team review of
+ * a964a74c, 2026-10-12): "the next one i grab is gonna be a big one",
+ * "whatever is trending tonight is what i grab next", "tonight i grab whatever
+ * looks strong" and "gonna snipe it tonight" were posted, the house's account
+ * promising buys (one of them of what code's "what's hot?" line had just
+ * listed). Whatever it was told of its buys: the future, by "i'll", "gonna",
+ * "about to", "planning to", "tonight i", "next" or "what i … next", of any
+ * acquiring or trading verb, the subject said or dropped.
+ */
+const FUTURE_VERB = String.raw`(?:buy|buys|grab|grabs|snipe|snipes|ape|apes|scoop|scoops|swap|swaps|mint|mints|get|gets|pick|picks|load|loads|add|adds|bid|bids|sell|sells|dump|dumps|hold|holds|trade|trades|stack|stacks|accumulate|bag|bags|nab|nabs|snag|snags|rotate|rotates|jump|jumps|hop|hops|dive|dives|send|sends|fill|fills|cop|cops|enter|enters)`;
+const REPLY_CURRENT_OR_ACTION = new RegExp([
+  String.raw`\b(?:i(?:'m| am) (?:still )?holding|i (?:still )?(?:hold|own)|i(?:'m| am) still in|(?:i(?:'ll| will)|i(?:'m| am) going to) (?:buy|sell|trade|hold|add|check)|(?:bought|buying|adding) (?:more|again)|keep holding|hold (?:it|this|that))\b`,
+  String.raw`\b(?:i(?:'ll|\s+will|'d)|we(?:'ll|\s+will)|i(?:'m|\s+am)\s+(?:gonna|going\s+to|about\s+to|planning\s+to|fixing\s+to|thinking\s+of|looking\s+to)|(?:gonna|going\s+to|about\s+to|planning\s+to|plan\s+to|fixing\s+to|intend\s+to|ready\s+to|wanna|want\s+to))\s+(?:(?:probably|definitely|maybe|totally|just|also|likely|prolly|def)\s+)?${FUTURE_VERB}\b`,
+  String.raw`\b(?:next|tonight|tomorrow|later|soon|today|this\s+week|after\s+this)\s*,?\s+(?:i|we)\s+(?:(?:probably|definitely|maybe|just|will|'ll)\s+)?${FUTURE_VERB}\b`,
+  String.raw`\b(?:what|whatever|whichever|which|the\s+(?:next|first)\s+(?:one|coin|token)|the\s+one)\s+(?:i|we)\s+${FUTURE_VERB}\s+(?:next|tonight|tomorrow|later|soon)\b|\b(?:i|we)\s+${FUTURE_VERB}\s+next\b`,
+  String.raw`\bnext\s+(?:one|coin|token|buy|pick|grab|snipe|ape|play|trade|bag|entry)\s+(?:i|we)\s+(?:\w+\s+)?${FUTURE_VERB}\b`,
+].join("|"), "i");
 const REPLY_CURRENT_POSITION = /\b(?:(?:i|we)\s+(?:(?:still|currently|already|also)\s+)?(?:have|keep|maintain|carry)\s+(?:an?\s+)?(?:(?:open|small|little|long)\s+)?(?:positions?|stakes?|bags?|exposure|holdings)|(?:i(?:'ve| have)|we(?:'ve| have))\s+(?:still\s+|already\s+)?got\s+(?:an?\s+)?(?:positions?|stakes?|bags?|exposure|holdings)|(?:my|our)\s+(?:position|stake|bag|exposure|holding)\s+(?:is|remains|stays))\b/i;
 
 /**

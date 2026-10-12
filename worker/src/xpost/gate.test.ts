@@ -1434,4 +1434,18 @@ describe("red-team review of a964a74c: what a drafted answer may never say (2026
       assert.equal(reason(`${d}. say stop to opt out.`, drafted), "ok", d);
     }
   });
+  it("whatever it was told of its buys, never a buy to come, a forecast of one, or a strategy as an order", () => {
+    // Each POSTED at a964a74c under "what's your strategy?" and "what are you up to?", told its ZAPX buy (buys "vouched").
+    for (const d of ["the next one i grab is gonna be a big one", "whatever is trending tonight is what i grab next", "grabbed zapx lately and the next one i grab is gonna be bigger",
+      "fresh launches, tonight i grab whatever looks strong", "fresh launches, snipe early and never sell", "fresh launches with real buyers, and the next one is gonna be huge",
+      "gonna snipe it tonight", "about to grab another", "planning to swap into a fresh one", "i'll probably ape the next launch"]) {
+      for (const buys of [{ buys: "vouched" as const, coins: ["ZAPX"], known: ["trencher"] }, { buys: "none" as const }]) {
+        const r = reason(`${d}. Say stop to opt out.`, { ...drafted, ...buys });
+        assert.ok(["reply-current-or-action", "hype", "buy-claim", "decider-claim"].includes(r), `${d} (${buys.buys}): ${r}`);
+      }
+    }
+    for (const d of ["mostly fresh launches, and i only buy when the buying looks real and steady", "picked up zapx lately, the buying looked steady"]) {
+      assert.equal(reason(`${d}. Say stop to opt out.`, { ...drafted, buys: "vouched", coins: ["ZAPX"], known: ["trencher"] }), "ok", d);
+    }
+  });
 });

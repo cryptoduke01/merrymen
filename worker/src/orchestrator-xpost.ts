@@ -98,7 +98,7 @@ import {
 import { answerPrompt, answerQuestion, buyPrompt, casualPrompt, draft, greetingAnswers, introPrompt, introTemplate, modelAnswers, replyPrompt, sellPrompt, sherwoodClaimed, sherwoodMentioned, sherwoodNamed, xpostModel, xpostModelWarning, type AnswerIntentKind, type WriterFacts, type XStyle } from "./xpost/writer";
 import { appendPublicToken, appendPublicWallet, hasPublicWallet, publicTokenStillAllowed, publicWalletStillAllowed, type PublicWallet } from "./xpost/public-wallet";
 import { readPublicProjectDescription } from "./orchestrator-xpost-project";
-import { banterAsk, boughtNames, carriesResearch, classifyTag, createXResearch, generalTradesQuestion, MARKET_MAJORS, modelNamed, namesACoin, ownCoinTicker, unshowableName, type ResearchBundle, type TagIntent, type XResearch } from "./orchestrator-xpost-research";
+import { banterAsk, boughtNames, carriesResearch, classifyTag, createXResearch, generalTradesQuestion, MARKET_MAJORS, modelNamed, namesACoin, ownCoinTicker, selfAsk, unshowableName, type ResearchBundle, type TagIntent, type XResearch } from "./orchestrator-xpost-research";
 import { PUBLISHABLE_SOURCES } from "./thesis-policy";
 import { readSaleResults } from "./orchestrator-xpost-results";
 import { appendSaleOutcome, hasSaleOutcome } from "./xpost/sale-outcome";
@@ -1626,12 +1626,13 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // was planned from the start", "they will be fine, it is not that bad" and
       // "they are coming for everyone next". Only a whole tag on the banter
       // allowlist (banterAsk: how are you, who are you, tell me a joke, what do
-      // you do for fun, what do you think about ai agents), or one of the plain
+      // you do for fun, what do you think about ai agents), one of the plain
       // questions about what it trades (generalTradesQuestion, told its buys),
+      // or about how it trades and what it has been up to (selfAsk, told none),
       // is drafted as chat; any other chat tag, a person, a group or an event
       // among them, is answered by nothing: no row, no model call. A greeting
       // is code's own line and never drafted.
-      const chatAllowed = (text: string): boolean => banterAsk(text) || generalTradesQuestion(text);
+      const chatAllowed = (text: string): boolean => banterAsk(text) || generalTradesQuestion(text) || selfAsk(text);
       const unbanteredChat = classified.kind === "chat" && !greeting && !chatAllowed(candidate.text);
       const asked: TagIntent = sherwoodTagged || authorSherwood || (classified.kind === "model" && (candidate.otherHandles || !namedClean))
         || (greeting && (classified.kind !== "chat" || candidate.otherHandles)) || unreadWord || unflaggedAdvice || unbanteredChat ? { kind: "unanswered" } : classified;

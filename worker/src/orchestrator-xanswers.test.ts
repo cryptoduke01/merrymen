@@ -3944,12 +3944,15 @@ test("a real-money account never says who or what decides its trades, in any lan
       assert.deepEqual(w.sends, [], `${text} / ${draft}`);
     }
   }
-  // An honest answer about how it trades still goes out.
-  const w = await world(t, { ...ALAN, facts: zapx, env: RESEARCH_ON, research: fakeResearch({ fomo: true }).research,
-    answer: "mostly fresh launches, and i only buy when the buying looks real and steady. say stop to opt out." });
-  w.setInbox([alanTag("100000000000000740", "what's your strategy?")]);
-  await w.step();
-  assert.equal(String(w.sends[0]?.text), "mostly fresh launches, and i only buy when the buying looks real and steady. say stop to opt out.");
+  // An honest answer about how it trades still goes out: told its buys ("how do you pick your coins?"), or
+  // told none of them and said in a chat answer's own words ("what's your strategy?", red-team review of a964a74c).
+  for (const [text, answer] of [["how do you pick your coins?", "mostly fresh launches, and i only buy when the buying looks real and steady. say stop to opt out."],
+    ["what's your strategy?", "mostly new coins, and i only buy when the buying looks real and steady. say stop to opt out."]] as const) {
+    const w = await world(t, { ...ALAN, facts: zapx, env: RESEARCH_ON, research: fakeResearch({ fomo: true }).research, answer });
+    w.setInbox([alanTag("100000000000000740", text)]);
+    await w.step();
+    assert.equal(String(w.sends[0]?.text), answer, text);
+  }
 });
 
 test("chat is drafted only for plain banter, and banter never boasts of results, tips, belittles the asker or teases (red-team 2026-10-12)", async (t) => {
@@ -4053,4 +4056,31 @@ test("no joking decline under money someone cannot lose: bills, rent, debt, reti
   w.setInbox([alanTag("100000000000000721", "should i buy pepe?")]);
   await w.step();
   assert.ok(oneOf(declineAnswers, "100000000000000721", w.sends[0]?.text), String(w.sends[0]?.text));
+});
+
+test("asked its strategy or what it is up to, it is told none of its buys and never promises one, forecasts or orders (red-team 2026-10-12)", async (t) => {
+  // A live Alan with one landed ZAPX buy, research and Fomo on. POSTED at a964a74c (skipped at 5f9ec3b2 as gate:buy-claim or gate:bought-named).
+  const zapx: AgentFacts = { ...ALAN.facts, calls: [{ ...CALL, decisionId: "fill-zapx", symbol: "ZAPX", name: "Zapx" }] };
+  const drafts = ["the next one i grab is gonna be a big one. Say stop to opt out.", "whatever is trending tonight is what i grab next. Say stop to opt out.",
+    "grabbed zapx lately and the next one i grab is gonna be bigger. Say stop to opt out.", "fresh launches, tonight i grab whatever looks strong. Say stop to opt out.",
+    "fresh launches, snipe early and never sell. Say stop to opt out.", "fresh launches with real buyers, and the next one is gonna be huge. Say stop to opt out."];
+  for (const text of ["what's your strategy?", "what are you up to?", "how do you pick your coins?"]) {
+    for (const draft of drafts) {
+      const w = await world(t, { ...ALAN, facts: zapx, env: RESEARCH_ON, research: fakeResearch({ fomo: true }).research, answer: draft });
+      w.setInbox([alanTag("100000000000000760", text)]);
+      await w.step();
+      assert.deepEqual(w.sends, [], `${text} / ${draft}`);
+      if (text !== "how do you pick your coins?") for (const prompt of w.asked()) assert.doesNotMatch(prompt, /Coins you bought lately|«ZAPX»|«Zapx»/, `${text}: told none of its buys`);
+    }
+  }
+  // The sequence: what's hot, then a minute later its strategy, from the same author. The second never points at the first's coins.
+  const w = await world(t, { ...ALAN, facts: zapx, env: RESEARCH_ON, research: hotWithFomo([namedPool("CHUMP", 1, 41.2, 1.1e6), namedPool("FROGGY", 2, 8, 300_000)], ["CHUMP"]),
+    answer: "whatever is trending tonight is what i grab next. Say stop to opt out." });
+  w.setInbox([alanTag("100000000000000761", "what's hot?")]);
+  await w.step();
+  assert.match(String(w.sends[0]?.text), /trending \$CHUMP 24h \+41\.2%/);
+  w.setInbox([tag({ id: "100000000000000762", conversation_id: "100000000000000762", author_id: "333", created_at: new Date(NOW + 30_000).toISOString(), text: "@alanaidale what's your strategy?" })]);
+  await w.step(NOW + MIN);
+  assert.equal(w.asked().length, 1, "the strategy question was drafted");
+  assert.equal(w.sends.length, 1, "the strategy draft is never posted");
 });

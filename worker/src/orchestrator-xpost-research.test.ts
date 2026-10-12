@@ -52,6 +52,7 @@ import {
   ownHistoryPhrases,
   RESEARCH_BUDGET,
   sayable,
+  selfAsk,
   showTicker,
   taggedConflict,
   type MajorsReader,
@@ -249,11 +250,17 @@ describe("a tag's intent, read by code", () => {
 
   it("only a plain question about what it trades may see what it bought (red-team 2026-10-12)", () => {
     for (const text of ["what are you trading lately?", "what have you been buying lately?", "what kind of coins do you trade?", "how do you pick your coins?",
-      "what do you trade?", "what did you buy today?", "gm, what are you buying these days?", "any new buys lately?", "what's your latest buy?", "WHAT DO YOU TRADE???",
-      // What it has been up to and how it trades, plainly asked, are about itself too (the owner's routing, 2026-10-12).
-      "what have you been up to lately?", "what are you up to?", "what's your strategy?", "what is your trading strategy", "tell me about your trading", "how do you decide what to buy?"]) {
+      "what do you trade?", "what did you buy today?", "gm, what are you buying these days?", "any new buys lately?", "what's your latest buy?", "WHAT DO YOU TRADE???"]) {
       assert.equal(generalTradesQuestion(text), true, text);
     }
+    // What it has been up to and how it trades, plainly asked, are about itself too (the owner's routing, 2026-10-12),
+    // but never told its buys (red-team review of a964a74c): drafted on their own allowlist (selfAsk), with buys "none".
+    for (const text of ["what have you been up to lately?", "what are you up to?", "what's your strategy?", "what is your trading strategy", "tell me about your trading",
+      "how do you decide what to buy?"]) {
+      assert.equal(generalTradesQuestion(text), false, text);
+      assert.equal(selfAsk(text), true, text);
+    }
+    for (const text of ["what's your strategy for pepe?", "what have you been up to lately with bonk?", "what's your strategy? 🐸", "", null]) assert.equal(selfAsk(text), false, String(text));
     // The reproduced tags (Greek capitals, Lisu, Cherokee, a copycat spelling, an emoji), and anything a word longer than the list.
     for (const text of ["did you buy ΒΟΝΚ?", "did you buy ΒONK?", "did you buy ꓑꓰꓑꓰ?", "did you buy ᏢᎬᏢᎬ?", "you aped bonc too?", "you in on 🐸 too?",
       "what have you been up to lately with bonk?", "what's your strategy for pepe?", "what are you trading lately? 🐸", "what are you trading lately, bonk?", "did you buy pepe?", "what do you trade, sherwood?", "", null]) {
@@ -1749,7 +1756,8 @@ describe("answer anything: every tag past the screens has a lane, and silence on
       ["how's the market? 🚀🚀", "unsafe-text"], ["nice", "low-signal"],
     ];
     for (const [text, lane] of lanes) assert.equal(routed(text), lane, text);
-    for (const text of ["what have you been up to", "what's your strategy", "how do you pick your coins?"]) assert.equal(generalTradesQuestion(text), true, text);
+    for (const text of ["how do you pick your coins?", "what are you trading lately?"]) assert.equal(generalTradesQuestion(text), true, text);
+    for (const text of ["what have you been up to", "what's your strategy"]) assert.equal(selfAsk(text), true, text);
   });
 
   it("the market question is a strict allowlist of whole plain tags: a word more and it is not one", () => {

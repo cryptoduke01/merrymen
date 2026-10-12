@@ -273,19 +273,38 @@ const GENERAL_SHAPES = [
   `(?:bought|buy) anything${LATELY}`,
   // what's your latest buy
   `(?:what's|whats|what is) (?:your|ur) (?:latest|last|newest|most recent) (?:buy|trade|pick)`,
-  // HOW IT TRADES AND WHAT IT HAS BEEN UP TO (2026-10-12): what have you been
-  // up to lately, what are you up to, what's your strategy, tell me about your
-  // trading. The same plain questions about itself, with the same rules.
+];
+const GENERAL_ALLOWED = new RegExp(`^${GREETING}(?:${GENERAL_SHAPES.join("|")})$`, "u");
+export function generalTradesQuestion(text: unknown): boolean {
+  const plain = plainAsk(text);
+  return plain !== null && !sherwoodMentioned(text) && GENERAL_ALLOWED.test(plain);
+}
+
+/**
+ * HOW IT TRADES AND WHAT IT HAS BEEN UP TO (2026-10-12): what have you been
+ * up to lately, what are you up to, what's your strategy, tell me about your
+ * trading, how do you decide what to buy. Drafted, on a strict allowlist of
+ * whole plain tags as for banter, but NEVER TOLD ITS BUYS (red-team review of
+ * a964a74c, 2026-10-12): as general trades questions they were gated with
+ * its buys vouched, the buy-claim and bought-named checks no longer read the
+ * text, and "the next one i grab is gonna be a big one", "whatever is
+ * trending tonight is what i grab next" and "fresh launches, snipe early and
+ * never sell" were posted from the real-money account; a minute after code's
+ * "what's hot?" line, the second one read as the trending list being its next
+ * buys. Off `generalTradesQuestion`, they are drafted as they were at
+ * 5f9ec3b2, told none of its buys (XGateCtx.buys "none"). Exported for tests.
+ */
+const SELF_SHAPES = [
   `what (?:have |did )?${YOU} (?:been )?up to${LATELY}`,
   `what ${ARE} ${YOU} up to${LATELY}`,
   `(?:what's|whats|what is) (?:your|ur) (?:trading )?(?:strategy|approach|style|process|playbook)${LATELY}`,
   `(?:tell me|talk me through) (?:about )?(?:your|ur) (?:trading|strategy|approach|style|process)`,
   `how (?:do|does) ${YOU} (?:decide|choose) what to (?:trade|buy)`,
 ];
-const GENERAL_ALLOWED = new RegExp(`^${GREETING}(?:${GENERAL_SHAPES.join("|")})$`, "u");
-export function generalTradesQuestion(text: unknown): boolean {
+const SELF_ALLOWED = new RegExp(`^${GREETING}(?:${SELF_SHAPES.join("|")})$`, "u");
+export function selfAsk(text: unknown): boolean {
   const plain = plainAsk(text);
-  return plain !== null && !sherwoodMentioned(text) && GENERAL_ALLOWED.test(plain);
+  return plain !== null && !sherwoodMentioned(text) && SELF_ALLOWED.test(plain);
 }
 
 /**
