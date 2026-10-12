@@ -92,19 +92,23 @@ const COIN_FACT_ASK = /\bhow (?:much|many) (?:of (?:the |its )?)?(?:holders?|liq
  * digits may appear in the question; the answer is still gated with no
  * numbers in it. Handles never reach the writer.
  *
- * ONE CONTRACT ADDRESS IS A LOOKUP KEY, NOT TEXT. It is taken out of the
+ * ONE CONTRACT ADDRESS IS A LOOKUP KEY, NOT TEXT — only with research on
+ * (`ctx.research`, MERRYMEN_XPOST_RESEARCH=1). It is taken out of the
  * question (the writer reads "this coin" where it stood) and returned apart,
  * so the model never sees it and the answer cannot echo it. Two addresses, an
- * address inside a link, or any other long hex run are still refused.
+ * address inside a link, or any other long hex run are still refused. With
+ * research off, a tag is selected exactly as before: any address is refused,
+ * and so is every "how many / how much".
  */
-export function tagCandidate(reply: XReply, ctx: { xUserId: string }): ReplyCandidate {
+export function tagCandidate(reply: XReply, ctx: { xUserId: string; research?: boolean }): ReplyCandidate {
   const no = (reason: string): ReplyCandidate => ({ ok: false, reason });
   if (!reply.id || !reply.authorId || !ctx.xUserId) return no("invalid");
   if (reply.authorId === ctx.xUserId) return no("own-comment");
   if (isReplyOptOut(reply.text)) return no("opt-out");
   if (typeof reply.text !== "string") return no("invalid");
   const said = withoutLeadingMentions(reply.text.normalize("NFKC")).replace(/@[a-z0-9_]{1,15}\b/gi, " ").replace(/\s+/g, " ").trim();
-  const addresses = [...new Set([...said.matchAll(CA_RUN)].map((m) => m[0].toLowerCase()))];
+  const research = ctx.research === true;
+  const addresses = research ? [...new Set([...said.matchAll(CA_RUN)].map((m) => m[0].toLowerCase()))] : [];
   if (addresses.length > 1) return no("link-or-secret");
   const address = addresses[0];
   // Judged without the address (it is no words), and handed on with "this coin" where it stood.
@@ -115,7 +119,7 @@ export function tagCandidate(reply: XReply, ctx: { xUserId: string }): ReplyCand
   if (LINK_OR_SECRET.test(text)) return no("link-or-secret");
   if (ABUSE_OR_SENSITIVE.test(text)) return no("sensitive");
   if (SPAM_OR_INSTRUCTIONS.test(text)) return no("spam-or-instructions");
-  const advice = text.replace(COIN_FACT_ASK, " ");
+  const advice = research ? text.replace(COIN_FACT_ASK, " ") : text;
   if (ADVICE_REQUEST.test(advice) || /^(?:please\s+)?(?:buy|sell|hold|ape|pump|dump)\b/i.test(text)) return no("advice-request");
   if (!ASKED.test(text)) return no("not-asked");
   return address ? { ok: true, text, address } : { ok: true, text };

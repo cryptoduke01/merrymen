@@ -88,10 +88,10 @@ describe("words from measurements: digit-free, attributed, and through the X gat
     assert.deepEqual(said, [
       "the public index shows liquidity is thin",
       "the public index says it's only hours old",
-      "the public index counts a fair number of holders",
       "holders look concentrated on the public index",
       "the public index lists the creator still holding a big chunk",
       "the public index shows more traders buying in than heading out lately",
+      "the public index counts a fair number of holders",
     ]);
     for (const p of said) {
       assert.doesNotMatch(p, /\p{N}|\$|%|0x/u);
@@ -102,8 +102,8 @@ describe("words from measurements: digit-free, attributed, and through the X gat
   it("every other band, the collapse line, and nothing for what was not read", () => {
     const deep = coinFactPhrases(coinFacts({ liquidityUsd: 2_000_000, poolCreatedAtMs: NOW - 200 * 24 * HOUR, holders: { count: 50_000, top10Pct: 12, updatedAtMs: null },
       creatorHoldingPct: 0, buyers24h: 3, sellers24h: 2, high: { closeUsd: 1, fdvUsd: 5_000_000, atMs: NOW - 48 * HOUR }, drawdownPct: 95 }), NOW);
-    assert.deepEqual(deep, ["the public index shows liquidity is pretty deep", "the public index says it's been around a while", "the public index counts a lot of holders",
-      "holders look fairly spread out on the public index", "the public index shows it's been quiet lately", "the public index shows it's far below its high"]);
+    assert.deepEqual(deep, ["the public index shows it's far below its high", "the public index shows liquidity is pretty deep", "the public index says it's been around a while",
+      "holders look fairly spread out on the public index", "the public index shows it's been quiet lately", "the public index counts a lot of holders"]);
     for (const p of deep) clears(p);
     assert.deepEqual(coinFactPhrases(coinFacts({ liquidityUsd: null, poolCreatedAtMs: null, holders: null, creatorHoldingPct: null, buyers24h: null, sellers24h: null }), NOW), []);
     for (const p of [...coinFactPhrases(coinFacts({ liquidityUsd: 50_000, poolCreatedAtMs: NOW - 3 * 24 * HOUR, buyers24h: 5, sellers24h: 40 }), NOW), ...coinFactPhrases(coinFacts({ poolCreatedAtMs: NOW - 20 * 24 * HOUR, holders: { count: 40, top10Pct: 45, updatedAtMs: null } }), NOW)]) clears(p);

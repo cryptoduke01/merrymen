@@ -79,10 +79,12 @@ import {
   takeOwnerAllowance,
   writeMeta,
   type XAccount,
+  type XPost,
 } from "./xpost/store";
 import { answerPrompt, buyPrompt, casualPrompt, draft, introPrompt, introTemplate, replyPrompt, sellPrompt, xpostModel, xpostModelWarning, type WriterFacts, type XStyle } from "./xpost/writer";
 import { appendPublicToken, appendPublicWallet, hasPublicWallet, publicTokenStillAllowed, publicWalletStillAllowed, type PublicWallet } from "./xpost/public-wallet";
 import { readPublicProjectDescription } from "./orchestrator-xpost-project";
+import { classifyTag, createXResearch, type XResearch } from "./orchestrator-xpost-research";
 import { PUBLISHABLE_SOURCES } from "./thesis-policy";
 import { readSaleResults } from "./orchestrator-xpost-results";
 import { appendSaleOutcome, hasSaleOutcome } from "./xpost/sale-outcome";
@@ -163,6 +165,16 @@ export interface XPostEnv {
   repliesApproved?: boolean;
   /** Owners (tenant addresses, lowercase) on ACTIVE_CADENCE; absent or empty is nobody. */
   activeTenants?: ReadonlySet<string>;
+  /**
+   * MERRYMEN_XPOST_RESEARCH=1: an active agent's answers look things up first
+   * (orchestrator-xpost-research.ts). Absent: answers are written from what it
+   * already has, and a tag carrying a contract address is not answered.
+   */
+  research?: boolean;
+  /** MERRYMEN_XPOST_FOMO=1, with research on: answers may ask Fomo, paraphrased and attributed. */
+  researchFomo?: boolean;
+  /** MERRYMEN_XPOST_RESEARCH_PER_HOUR: index lookups per hour across X accounts. Absent: the research default. */
+  researchPerHour?: number;
   replyPollsPerDay?: number;
   /** One boot line per value that was set and could not be honoured as written. */
   notes: string[];
@@ -225,9 +237,21 @@ export function xpostEnv(env: Record<string, string | undefined> = process.env):
   const replyRaw = env.MERRYMEN_XPOST_REPLY_POLLS_PER_DAY?.trim();
   const replyPollsPerDay = replyRaw ? count(replyRaw) : null;
   if (replyRaw && replyPollsPerDay === null) notes.push("xpost: unreadable MERRYMEN_XPOST_REPLY_POLLS_PER_DAY — comment polling is off");
+  // RESEARCH FOR ANSWERS, OPT-IN, and Fomo inside it opt-in again: each is
+  // outward-facing, so only an exact "1" turns it on. Fomo without research
+  // has nothing to ride on, and says so rather than seeming on.
+  const research = env.MERRYMEN_XPOST_RESEARCH?.trim() === "1";
+  const fomoAsked = env.MERRYMEN_XPOST_FOMO?.trim() === "1";
+  if (fomoAsked && !research) notes.push("xpost: MERRYMEN_XPOST_FOMO=1 does nothing without MERRYMEN_XPOST_RESEARCH=1 — answers ask Fomo only while they research");
+  const perHourRaw = env.MERRYMEN_XPOST_RESEARCH_PER_HOUR?.trim();
+  const researchPerHour = perHourRaw ? count(perHourRaw) : null;
+  if (perHourRaw && researchPerHour === null) notes.push("xpost: ignoring MERRYMEN_XPOST_RESEARCH_PER_HOUR — it is not a count of lookups; the default applies");
   return { off: null, perDay, fleetPerDay, llmPerDay, notes,
     ...(repliesApproved ? { repliesApproved: true } : {}),
     ...(activeTenants.size ? { activeTenants } : {}),
+    ...(research ? { research: true } : {}),
+    ...(research && fomoAsked ? { researchFomo: true } : {}),
+    ...(researchPerHour !== null ? { researchPerHour } : {}),
     ...(replyRaw ? { replyPollsPerDay: replyPollsPerDay ?? 0 } : {}),
   };
 }
@@ -289,6 +313,13 @@ export interface XPosterDeps {
   socialProfile?: (tenant: string) => Promise<XSocialProfile | null>;
   saleResults?: typeof readSaleResults;
   publicProjectDescription?: typeof readPublicProjectDescription;
+  /**
+   * What an answer looks up, used only with research on (XPostEnv.research).
+   * The orchestrator hands one built on the fleet Gecko lane and its own Fomo
+   * service; absent, one is built here from defaults (this process's lane,
+   * no Fomo).
+   */
+  research?: XResearch;
 }
 
 export interface XSocialProfile {
@@ -620,6 +651,11 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
   const creds = llmPerDay > 0 ? o.creds : null;
   const repliesApproved = o.knobs.repliesApproved === true;
   const replyPollsPerDay = o.knobs.replyPollsPerDay ?? DEFAULT_REPLY_POLLS_PER_DAY;
+  // RESEARCH, ONLY WHEN SWITCHED ON: off, nothing is built and no answer looks anything up.
+  const research: XResearch | null = o.knobs.research === true
+    ? (deps.research ?? createXResearch(o.knobs.researchPerHour !== undefined ? { lookupsPerHour: o.knobs.researchPerHour } : {}))
+    : null;
+  const researchFomo = research !== null && o.knobs.researchFomo === true;
 
   let lastPlanAt = Number.NEGATIVE_INFINITY;
   /** The tenant the last plan pass's draft cap cut it short at; "" when it reached everyone. */
@@ -637,7 +673,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
   const why =
     `xpost: on — at most ${perDay} posts per X account a day, ${fleetPerDay} across the fleet a day; ` +
     (creds ? `up to ${llmPerDay} model calls a day` : "no model, so only intros are posted, from templates") +
-    (active.size ? `; ${active.size} owner(s) on the active cadence, up to ${ACTIVE_CADENCE.perDay} a day` : "");
+    (active.size ? `; ${active.size} owner(s) on the active cadence, up to ${ACTIVE_CADENCE.perDay} a day` : "") +
+    (research ? `; answers look things up first${researchFomo ? ", Fomo included" : ""}` : "");
 
   return {
     plan: () => ({ why }),
@@ -1116,7 +1153,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
           const isActive = active.has(account.tenant.toLowerCase());
           for (let i = 0; i < (isActive ? ANSWERS_PER_POLL : 1) && drafts < MAX_DRAFTS_PER_PASS; i++) {
             const result = isActive
-              ? await writeAnswer(shared, account, f, comments.get(account.xUserId)!, z.tz, at, recentOwn, recentFleet)
+              // Its OWN posts only: another owner posting on the same X account is not its history.
+              ? await writeAnswer(shared, account, f, comments.get(account.xUserId)!, z.tz, at, recentOwn, recentFleet, posts.filter((p) => p.tenant === account.tenant), bump)
               : await writeReply(shared, account, f, comments.get(account.xUserId)!, z.tz, at, recentOwn, recentFleet);
             if (!result) break;
             drafts++;
@@ -1137,10 +1175,18 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
    * public facts (how it trades, coins it bought lately, what it already said),
    * never from the question. Every attempt spends its key, so a PASS or a
    * refused draft is not drafted again.
+   *
+   * WITH RESEARCH ON (MERRYMEN_XPOST_RESEARCH=1), the question is read by
+   * code first and one bounded bundle is looked up for it
+   * (orchestrator-xpost-research.ts): code-built, digit-free, attributed
+   * words the answer may say. A tagged contract address is the bundle's
+   * lookup key only: the model reads "this coin", never the address. The
+   * gate is the same either way. Research off, nothing here changes.
    */
   async function writeAnswer(
     shared: Db, account: XAccount, f: AgentFacts, comments: XReply[], tz: string | null,
-    at: () => number, recentOwn: string[], recentFleet: string[],
+    at: () => number, recentOwn: string[], recentFleet: string[], posts: readonly XPost[] = [],
+    bump: (k: string, n?: number) => void = () => {},
   ): Promise<{ body: string | null } | null> {
     if (!creds) return null;
     const nowMs = at();
@@ -1150,7 +1196,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
     const ordered = [...comments].sort((a, b) => a.createdAtMs - b.createdAtMs || a.id.localeCompare(b.id));
     for (const comment of ordered) {
       if (comment.createdAtMs < consentAt || nowMs - comment.createdAtMs > REPLY_STALE_MS) continue;
-      const candidate = tagCandidate(comment, { xUserId: account.xUserId });
+      const candidate = tagCandidate(comment, { xUserId: account.xUserId, research: research !== null });
       if (!candidate.ok || await repliesOptedOut(shared, account.xUserId, comment.authorId)) continue;
       const dedupeKey = `answer:${account.xUserId}:${comment.id}`;
       if (await keyStatus(shared, dedupeKey) !== null || await keyStatus(shared, `reply:${account.xUserId}:${comment.id}`) !== null) continue;
@@ -1160,7 +1206,19 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       const buys = recentCoins(f);
       const social = await deps.socialProfile?.(account.tenant);
       const walletPublic = !!social?.publicWallet && social.publicWallet.address.toLowerCase() === f.agentId.toLowerCase();
-      const prompt = answerPrompt({ ...facts, question: candidate.text, recentBuys: buys, said: recentOwn.map(withoutReplyOptOut), walletPublic });
+      // ONE BUNDLE, AT MOST, for this answer — and only with research on.
+      let looked: { intent: ReturnType<typeof classifyTag>["kind"]; research: string[] } | null = null;
+      if (research) {
+        const knownCoins = [...buys.map((c) => c.label), ...posts.filter((p) => p.kind === "buy" && p.coin).map((p) => p.coin!)];
+        const intent = classifyTag(candidate.text, { address: candidate.address ?? null, knownCoins });
+        const bundle = await research.gather({ shared, intent, tenant: account.tenant, xUserId: account.xUserId, facts: f, posts, fomo: researchFomo })
+          .catch(() => ({ facts: [] as string[], lookups: 0, notes: ["fault"] }));
+        looked = { intent: intent.kind, research: bundle.facts };
+        bump(`answer-intent-${intent.kind}`);
+        if (bundle.lookups) bump("answer-lookups", bundle.lookups);
+        for (const note of new Set(bundle.notes)) bump(`answer-research-${note}`);
+      }
+      const prompt = answerPrompt({ ...facts, question: candidate.text, recentBuys: buys, said: recentOwn.map(withoutReplyOptOut), walletPublic, ...(looked ?? {}) });
       const raw = await draft(creds, prompt, { call: deps.llm, timeoutMs: deps.draftTimeoutMs });
       const mode = f.mode === "idle" ? null : f.mode;
       const verdict = raw === null ? null : admitXPost(raw, {

@@ -222,6 +222,8 @@ function within<T>(ms: number, p: Promise<T>, fallback: T): Promise<T> {
 /** A coin's index facts, in words. Thresholds are code's; no figure is ever in a phrase. */
 export function coinFactPhrases(f: CoinFacts, nowMs: number): string[] {
   const out: string[] = [];
+  // MOST TELLING FIRST: a bundle keeps only the first INDEX_FACTS of these.
+  if (collapseOf(f)) out.push("the public index shows it's far below its high");
   const liq = f.liquidityUsd;
   if (liq !== null && Number.isFinite(liq)) {
     out.push(liq < 10_000 ? "the public index shows liquidity is thin" : liq < 100_000 ? "the public index shows liquidity is modest" : "the public index shows liquidity is pretty deep");
@@ -232,12 +234,9 @@ export function coinFactPhrases(f: CoinFacts, nowMs: number): string[] {
     out.push(age < DAY ? "the public index says it's only hours old" : age < 7 * DAY ? "the public index says it's only days old" : age < 60 * DAY ? "the public index says it's a few weeks old" : "the public index says it's been around a while");
   }
   const h = f.holders;
-  if (h && Number.isFinite(h.count)) {
-    out.push(h.count < 100 ? "the public index counts only a few holders" : h.count < 1_000 ? "the public index counts a fair number of holders" : "the public index counts a lot of holders");
-    if (h.top10Pct !== null && Number.isFinite(h.top10Pct)) {
-      if (h.top10Pct >= 60) out.push("holders look concentrated on the public index");
-      else if (h.top10Pct <= 30) out.push("holders look fairly spread out on the public index");
-    }
+  if (h && h.top10Pct !== null && Number.isFinite(h.top10Pct)) {
+    if (h.top10Pct >= 60) out.push("holders look concentrated on the public index");
+    else if (h.top10Pct <= 30) out.push("holders look fairly spread out on the public index");
   }
   if (f.creatorHoldingPct !== null && Number.isFinite(f.creatorHoldingPct) && f.creatorHoldingPct >= 5) {
     out.push("the public index lists the creator still holding a big chunk");
@@ -249,9 +248,16 @@ export function coinFactPhrases(f: CoinFacts, nowMs: number): string[] {
     else if (b >= s * 1.5) out.push("the public index shows more traders buying in than heading out lately");
     else if (s >= b * 1.5) out.push("the public index shows more traders heading out than buying in lately");
   }
-  if (collapseOf(f)) out.push("the public index shows it's far below its high");
+  if (h && Number.isFinite(h.count)) {
+    out.push(h.count < 100 ? "the public index counts only a few holders" : h.count < 1_000 ? "the public index counts a fair number of holders" : "the public index counts a lot of holders");
+  }
   return out.filter(sayable);
 }
+
+/** The index's phrases one answer keeps, most telling first: a short answer cannot carry a spec sheet. */
+export const INDEX_FACTS = 5;
+/** Facts one bundle hands the writer, in all. */
+export const BUNDLE_FACTS = 10;
 
 /**
  * FOMO'S TALK ABOUT A COIN, in words: which way the theses lean, what they
@@ -511,7 +517,8 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
           d.flow ? look((ms) => d.flow!({ chainId: CHAIN_ID, address: address!, timeoutMs: ms }), null) : Promise.resolve(null),
         ]);
         const out = [...history];
-        if (read && read.ok) out.push(...coinFactPhrases(read.facts, now()));
+        // Aged as of the index's own read, the time its facts are true at.
+        if (read && read.ok) out.push(...coinFactPhrases(read.facts, Number.isFinite(read.facts.observedAt) ? read.facts.observedAt : now()).slice(0, INDEX_FACTS));
         else notes.push(read ? `index-${read.why}` : "index-unavailable");
         const description = project?.description;
         if (description && sayable(`the project says it's ${description}`)) out.push(`the project says it's ${description.slice(0, 140)}`);
@@ -522,7 +529,7 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
           out.push(...t, ...a);
         }
         out.push(...flowPhrases(flow));
-        return { facts: out.filter(sayable).slice(0, 8), lookups, notes };
+        return { facts: out.filter(sayable).slice(0, BUNDLE_FACTS), lookups, notes };
       } catch {
         // Research is an extra: a fault here is an answer without it, never a failed pass.
         notes.push("fault");

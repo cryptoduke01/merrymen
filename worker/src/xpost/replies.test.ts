@@ -62,30 +62,37 @@ describe("tags an active agent may answer", () => {
   });
 
   const CA = `0x${"ab12".repeat(10)}`;
+  const ON = { xUserId: "222", research: true };
+  it("research off: selected exactly as before — any address, and any how many or how much, is refused", () => {
+    for (const text of [`@Pine thoughts on ${CA}?`, "@Pine how many holders does $pepe have?", "@Pine how much liquidity is in this?"]) {
+      assert.equal(tagCandidate(tag(text), { xUserId: "222" }).ok, false, text);
+      assert.equal(tagCandidate(tag(text), { xUserId: "222", research: false }).ok, false, text);
+    }
+  });
   it("one contract address is a lookup key, taken out of the text the writer reads", () => {
     for (const text of [`@Pine thoughts on ${CA}?`, `@Pine what is ${CA.toUpperCase().replace("0X", "0x")} about?`, `@Pine ${CA} is this one any good?`]) {
-      const v = tagCandidate(tag(text), { xUserId: "222" });
+      const v = tagCandidate(tag(text), ON);
       assert.equal(v.ok, true, text);
       if (!v.ok) continue;
       assert.equal(v.address, CA);
       assert.doesNotMatch(v.text, /0x|[0-9a-f]{8,}/i, "the address never reaches the writer");
       assert.match(v.text, /this coin/);
     }
-    const plain = tagCandidate(tag("@Pine what do you trade?"), { xUserId: "222" });
+    const plain = tagCandidate(tag("@Pine what do you trade?"), ON);
     assert.ok(plain.ok && plain.address === undefined);
   });
   it("two addresses, an address in a link, a hash or a bare address are still refused", () => {
     const hash = `0x${"cd".repeat(32)}`;
     for (const text of [`@Pine ${CA} or 0x${"ef34".repeat(10)}?`, `@Pine dexscreener.com/robinhood/${CA}?`, `@Pine https://x.co/${CA}?`, `@Pine what about ${hash}?`, `@Pine ${CA}?`, `@Pine ${CA}`]) {
-      assert.equal(tagCandidate(tag(text), { xUserId: "222" }).ok, false, text);
+      assert.equal(tagCandidate(tag(text), ON).ok, false, text);
     }
   });
   it("a coin's public facts may be asked how many or how much of, never advice or its own size", () => {
     for (const text of ["@Pine how many holders does $pepe have?", "@Pine how much liquidity is in this?", `@Pine how many holders on ${CA}?`]) {
-      assert.equal(tagCandidate(tag(text), { xUserId: "222" }).ok, true, text);
+      assert.equal(tagCandidate(tag(text), ON).ok, true, text);
     }
     for (const text of ["@Pine how much did you buy?", "@Pine how many holders, should i buy?", "@Pine how much liquidity before it pumps, when to sell?", "@Pine how much will $pepe go up?", "@Pine what's the price target for $pepe?"]) {
-      assert.equal(tagCandidate(tag(text), { xUserId: "222" }).ok, false, text);
+      assert.equal(tagCandidate(tag(text), ON).ok, false, text);
     }
   });
 });

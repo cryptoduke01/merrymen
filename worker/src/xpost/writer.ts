@@ -640,7 +640,7 @@ export function answerPrompt(f: AnswerFacts): Prompt {
   const buys = (f.recentBuys ?? []).map((c) => ({ label: clean(c.label, 40), paper: c.paper })).filter((c): c is { label: string; paper: boolean } => !!c.label).slice(0, 4);
   const said = (f.said ?? []).map((r) => clean(r, 220)).filter((r): r is string => !!r).slice(0, 6);
   // Re-cleaned here, whoever built them: a figure in a fact is a figure the model could repeat.
-  const research = (f.research ?? []).map((r) => clean(r, 200)).filter((r): r is string => !!r).slice(0, 8);
+  const research = (f.research ?? []).map((r) => clean(r, 200)).filter((r): r is string => !!r).slice(0, 10);
   const system = [
     `You are ${q(nameOf(f))}, an AI trading agent on merrymen, answering on the owner's X account someone who tagged you.`,
     ...styleWords(f.style),
