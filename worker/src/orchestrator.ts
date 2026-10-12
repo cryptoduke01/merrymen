@@ -12388,9 +12388,6 @@ export async function runOrchestrator(): Promise<void> {
     : `resume auto-paper: off — a re-signed tenant with history waits for an operator's preview and approval, as before`);
   setTenantLeaseLossHandler(standDownLostLeasesNow);
   log(`starting — home ${merrymenHome()}, worker ${WORKER_ENTRY}`);
-  // Which smart accounts get the extra decision research, said once: the
-  // allowlist is public addresses, and nothing else shows who is on it.
-  log(decisionResearchBootLine());
   // Fomo's switches, decided and said ONCE AT BOOT: under FLEET_HALT nothing
   // spawns and no pass runs, and the operator should still read whether it
   // is on (docs/fomo.md). Reads the environment and logs; nothing else.
@@ -12398,6 +12395,9 @@ export async function runOrchestrator(): Promise<void> {
   // The Bitquery lane's switches, said once for the same reason
   // (docs/bitquery-lane.md). Off without its key: then nothing else happens.
   flowRuntimeNow();
+  // Which smart accounts get the extra decision research, said once: the
+  // allowlist is public addresses, and nothing else shows who is on it.
+  log(decisionResearchBootLine());
   // HOW THE LAST ORCHESTRATOR STOPPED, from the receipt its drain wrote
   // (fleet-drain.ts): said once, and moved aside so that a crash of this run
   // is never read as the clean stop of the last.
