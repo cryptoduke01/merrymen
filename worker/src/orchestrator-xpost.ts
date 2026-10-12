@@ -46,7 +46,7 @@ import { STRATEGY_FLAVOUR, STRATEGY_SPOKEN, TRAIT_VOICE } from "./groupchat/temp
 import { MUSINGS, SUBJECTS, TAKES } from "./groupchat/topics";
 import { xAppFromEnv, type FetchLike, type XApp, type XReply } from "./xpost/client";
 import { admitXPost, vocabularyRefusal, type BaseGate, type XGateCtx } from "./xpost/gate";
-import { BUY_COIN_FOLD_MS, BUY_PER_DAY, GAP_MS, coinOf, hash32, planPosts, replyDueAt, sendDecision, type PlanClock, type PlanIntent } from "./xpost/planner";
+import { ACTIVE_CADENCE, BUY_COIN_FOLD_MS, STANDARD_CADENCE, coinOf, hash32, planPosts, replyDueAt, sendDecision, type PlanCadence, type PlanClock, type PlanIntent } from "./xpost/planner";
 import { APP_PAUSE_KEY, APP_PAUSE_MS, CREDITS_PAUSE_MS, PAUSE_KEY, readReplyComments, sendOne, type SendOutcome } from "./xpost/sender";
 import { isReplyOptOut, replyCandidate } from "./xpost/replies";
 import {
@@ -157,6 +157,8 @@ export interface XPostEnv {
   llmPerDay: number | undefined;
   /** Set only after the operator has X's written approval for AI replies. */
   repliesApproved?: boolean;
+  /** Owners (tenant addresses, lowercase) on ACTIVE_CADENCE; absent or empty is nobody. */
+  activeTenants?: ReadonlySet<string>;
   replyPollsPerDay?: number;
   /** One boot line per value that was set and could not be honoured as written. */
   notes: string[];
@@ -205,11 +207,23 @@ export function xpostEnv(env: Record<string, string | undefined> = process.env):
     }
   }
   const repliesApproved = env.MERRYMEN_XPOST_REPLIES_APPROVED === "1";
+  // ACTIVE OWNERS, by tenant address only: a name or a handle is not an
+  // identity. An entry that is not an address is said by position, never by
+  // value, and dropped; the rest still apply.
+  const activeRaw = env.MERRYMEN_XPOST_ACTIVE_TENANTS?.trim();
+  const activeTenants = new Set<string>();
+  if (activeRaw) {
+    activeRaw.split(",").map((v) => v.trim()).filter(Boolean).forEach((v, i) => {
+      if (/^0x[0-9a-fA-F]{40}$/.test(v)) activeTenants.add(v.toLowerCase());
+      else notes.push(`xpost: ignoring entry ${i + 1} of MERRYMEN_XPOST_ACTIVE_TENANTS — it is not an owner address`);
+    });
+  }
   const replyRaw = env.MERRYMEN_XPOST_REPLY_POLLS_PER_DAY?.trim();
   const replyPollsPerDay = replyRaw ? count(replyRaw) : null;
   if (replyRaw && replyPollsPerDay === null) notes.push("xpost: unreadable MERRYMEN_XPOST_REPLY_POLLS_PER_DAY — comment polling is off");
   return { off: null, perDay, fleetPerDay, llmPerDay, notes,
     ...(repliesApproved ? { repliesApproved: true } : {}),
+    ...(activeTenants.size ? { activeTenants } : {}),
     ...(replyRaw ? { replyPollsPerDay: replyPollsPerDay ?? 0 } : {}),
   };
 }
@@ -521,8 +535,8 @@ const TRADE_TALK_DAYS_IN_TEN = 3;
  * (so two replicas agree), a casual post may be about how the agent trades,
  * and only then is it offered the coins it bought lately. Exported for tests.
  */
-export function tradeTalkDay(tenant: string, day: string): boolean {
-  return hash32(`trade-talk|${tenant}|${day}`) % 10 < TRADE_TALK_DAYS_IN_TEN;
+export function tradeTalkDay(tenant: string, day: string, slot = 0, inTen: number = TRADE_TALK_DAYS_IN_TEN): boolean {
+  return hash32(slot > 0 ? `trade-talk|${tenant}|${day}|${slot}` : `trade-talk|${tenant}|${day}`) % 10 < inTen;
 }
 
 /** Coins the agent bought lately that a post may name, with whether each was on paper. */
@@ -553,16 +567,19 @@ function recentCoins(f: AgentFacts): { label: string; paper: boolean }[] {
 export function casualInputs(
   f: AgentFacts,
   day: string,
-  o: { coins?: boolean } = {},
+  o: { coins?: boolean; slot?: number; tradeTalkInTen?: number } = {},
 ): { subject: string; seed: string; tradeTalk: boolean; recentCoins: { label: string; paper: boolean }[]; habitSeed: string } {
-  const habitSeed = `${f.tenant}|${day}`;
+  // An active day's later slots roll their own dice, so eight posts are not one take eight times.
+  const slot = o.slot ?? 0;
+  const dice = slot > 0 ? `${day}|${slot}` : day;
+  const habitSeed = `${f.tenant}|${dice}`;
   const coins = o.coins === false ? [] : recentCoins(f);
   const own = writerFacts(f, day, []);
   const something = own.strategy !== null || own.flavour !== null || own.traits.length > 0 || coins.length > 0;
-  if (f.mode !== "idle" && something && tradeTalkDay(f.tenant, day)) {
+  if (f.mode !== "idle" && something && tradeTalkDay(f.tenant, day, slot, o.tradeTalkInTen)) {
     return { subject: "how it trades", seed: "", tradeTalk: true, recentCoins: coins, habitSeed };
   }
-  const seed = casualSeed(f.tenant, day);
+  const seed = casualSeed(f.tenant, dice);
   return { subject: seed?.subject ?? "anything", seed: seed?.seed ?? "", tradeTalk: false, recentCoins: [], habitSeed };
 }
 
@@ -590,6 +607,10 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
     });
   const perDay = o.knobs.perDay ?? DEFAULT_PER_DAY;
   const fleetPerDay = o.knobs.fleetPerDay ?? DEFAULT_FLEET_PER_DAY;
+  const active = o.knobs.activeTenants ?? new Set<string>();
+  /** This owner's cadence: the operator's active one, or everyone's under the server's day cap. */
+  const cadenceOf = (tenant: string): Readonly<PlanCadence> =>
+    active.has(tenant.toLowerCase()) ? ACTIVE_CADENCE : { ...STANDARD_CADENCE, perDay };
   // NO CREDS, NO MODEL, whatever the budget says.
   const llmPerDay = o.creds ? (o.knobs.llmPerDay ?? DEFAULT_LLM_PER_DAY) : 0;
   const creds = llmPerDay > 0 ? o.creds : null;
@@ -611,7 +632,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
 
   const why =
     `xpost: on — at most ${perDay} posts per X account a day, ${fleetPerDay} across the fleet a day; ` +
-    (creds ? `up to ${llmPerDay} model calls a day` : "no model, so only intros are posted, from templates");
+    (creds ? `up to ${llmPerDay} model calls a day` : "no model, so only intros are posted, from templates") +
+    (active.size ? `; ${active.size} owner(s) on the active cadence, up to ${ACTIVE_CADENCE.perDay} a day` : "");
 
   return {
     plan: () => ({ why }),
@@ -751,10 +773,11 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
             // three hours after the last that went out, never sent inside the
             // gap; a buy still goes stale on its own clock, a casual post past
             // its day. The hello is exempt, both ways.
+            const cadence = cadenceOf(post.tenant);
             if (post.kind !== "intro") {
               const last = await lastOutOf(post.xUserId);
-              if (last !== null && t - last < GAP_MS) {
-                if (await deferPost(shared, post.id, last + GAP_MS, t)) bump("deferred");
+              if (last !== null && t - last < cadence.gapMs) {
+                if (await deferPost(shared, post.id, last + cadence.gapMs, t)) bump("deferred");
                 continue;
               }
             }
@@ -774,9 +797,9 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
             };
             if (post.kind !== "intro") {
               const gapKey = `gap:${post.xUserId}`;
-              const gap = await claimSpan(shared, gapKey, t, GAP_MS);
+              const gap = await claimSpan(shared, gapKey, t, cadence.gapMs);
               if (!gap.ok) {
-                if (await deferPost(shared, post.id, gap.lastAtMs + GAP_MS, t)) bump("deferred");
+                if (await deferPost(shared, post.id, gap.lastAtMs + cadence.gapMs, t)) bump("deferred");
                 continue;
               }
               release.push(() => releaseSpan(shared, gapKey, t, gap.prev, at()));
@@ -786,7 +809,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
             // cannot spend it. Both count the hello and reply posts too.
             const localDayKey = dayOf ? dayOf(t) : utcDay(t);
             const accountDayKey = `xday:${post.xUserId}:${localDayKey}`;
-            if (!(await takeAllowance(shared, accountDayKey, perDay, t))) {
+            if (!(await takeAllowance(shared, accountDayKey, cadence.perDay, t))) {
               await giveBack();
               bump("account-day-cap");
               continue;
@@ -802,7 +825,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
             }
             // Reads the latest stored choice under the same account row lock
             // as a preference save, then reserves one unit atomically.
-            if (!(await takeOwnerAllowance(shared, post.tenant, ownerDayKey, perDay, t, initialOwnerUsed))) {
+            if (!(await takeOwnerAllowance(shared, post.tenant, ownerDayKey, cadence.perDay, t, initialOwnerUsed))) {
               await giveBack();
               bump("owner-day-cap");
               continue;
@@ -814,7 +837,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
               // durable sends still consume today's slots, across owners.
               const earlier = await tradeSendTimesSince(shared, post.xUserId, t - 2 * DAY);
               const initialUsed = earlier.filter((sentAt) => (dayOf ? dayOf(sentAt) : utcDay(sentAt)) === localDayKey).length;
-              if (!(await takeAllowance(shared, tradeDayKey, BUY_PER_DAY, t, initialUsed))) {
+              if (!(await takeAllowance(shared, tradeDayKey, cadence.tradePerDay, t, initialUsed))) {
                 await giveBack();
                 bump("trade-day-cap");
                 continue;
@@ -1034,8 +1057,9 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
           tradeResults,
           sells,
           // Shared server cap and tenant preference are counted separately.
-          perDay,
+          perDay: cadenceOf(account.tenant).perDay,
           ownerPerDay: account.prefs.perDay,
+          cadence: cadenceOf(account.tenant),
           model,
           kinds: { buys: account.prefs.buys, casual: account.prefs.casual },
         });
@@ -1102,7 +1126,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       const dedupeKey = `reply:${account.xUserId}:${comment.id}`;
       if (await keyStatus(shared, dedupeKey) !== null) continue;
       const dueAtMs = replyDueAt({ parent, authorId: comment.authorId, commentAtMs: comment.createdAtMs,
-        posts, tenant: account.tenant, xUserId: account.xUserId, nowMs, tz, clock: PLAN_CLOCK, perDay, ownerPerDay: account.prefs.perDay });
+        posts, tenant: account.tenant, xUserId: account.xUserId, nowMs, tz, clock: PLAN_CLOCK, perDay: cadenceOf(account.tenant).perDay, ownerPerDay: account.prefs.perDay });
       if (dueAtMs === null) continue;
       if (!(await takeAllowance(shared, `llm:${utcDay(nowMs)}`, llmPerDay, nowMs))) return null;
       const facts = writerFacts(f, localDay(tz, nowMs), recentOwn);
@@ -1117,7 +1141,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // Recheck time-sensitive planning rules in case drafting crossed a limit.
       const finishedAt = at();
       const finalDueAt = replyDueAt({ parent, authorId: comment.authorId, commentAtMs: comment.createdAtMs,
-        posts, tenant: account.tenant, xUserId: account.xUserId, nowMs: finishedAt, tz, clock: PLAN_CLOCK, perDay, ownerPerDay: account.prefs.perDay });
+        posts, tenant: account.tenant, xUserId: account.xUserId, nowMs: finishedAt, tz, clock: PLAN_CLOCK, perDay: cadenceOf(account.tenant).perDay, ownerPerDay: account.prefs.perDay });
       const body = finalDueAt !== null && verdict?.ok ? verdict.text : null;
       const id = await schedulePost(shared, {
         tenant: account.tenant, xUserId: account.xUserId, kind: "reply", dedupeKey, body: body ?? "",
@@ -1241,7 +1265,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
     } else {
       // A trade-talk day is handed no seed, any other day no coin: neither is
       // offered, or vouched to the gate, on the day it is not about.
-      const casual = casualInputs(f, intent.day, { coins: account.prefs.buys });
+      const casual = casualInputs(f, intent.day, { coins: account.prefs.buys, slot: intent.slot, tradeTalkInTen: cadenceOf(account.tenant).tradeTalkInTen });
       gate.coins = casual.recentCoins.map((c) => c.label);
       gate.paperCoins = casual.recentCoins.filter((c) => c.paper).map((c) => c.label);
       gate.seeds = casual.seed ? [casual.seed] : [];
