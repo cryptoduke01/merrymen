@@ -775,6 +775,10 @@ the mention itself. They go out **right away**:
   them (a plain question about its trades, or the exact path, whose coins
   are the tagged contract's own names) may say a buy only of a coin it was
   told of, or of none by name ("bought it", "picked up a few"): `buy-claim`.
+  The trenches' own verbs are buys too ("sniped some earlier", "swapped
+  into a fresh one", "minted", "sent it on", "rotated into", "jumped in":
+  `ACQUIRED`, `OWN_VERB`, red-team review of a964a74c), and no reply ever
+  says a buy to come, told or not (`REPLY_CURRENT_OR_ACTION`).
   A comment reply may say a buy only of its parent's coin. This is the
   backstop for a model that ignores the prompt.
 - **Their own lane:** twenty seconds apart (`ANSWER_GAP_MS`), so a few people

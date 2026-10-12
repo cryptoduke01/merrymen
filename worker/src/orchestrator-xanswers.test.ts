@@ -4084,3 +4084,34 @@ test("asked its strategy or what it is up to, it is told none of its buys and ne
   assert.equal(w.asked().length, 1, "the strategy question was drafted");
   assert.equal(w.sends.length, 1, "the strategy draft is never posted");
 });
+
+test("told none of its buys, a coin answer never says it sniped, swapped into, minted or sent it on a coin (red-team 2026-10-12)", async (t) => {
+  // A live Alan with no buys; CHUMP trending, listed and resolvable; coingecko's search finds no major. POSTED at a964a74c (and at 5f9ec3b2).
+  const chump = namedPool("CHUMP", 1, 41.2, 1.1e6);
+  const facts: CoinFacts = { network: "robinhood", observedAt: NOW, priceUsd: 0.0001, fdvNowUsd: 40_000, high: null, barsFromMs: null,
+    poolCreatedAtMs: NOW - 3 * HOUR, drawdownPct: null, steepest: null, liquidityUsd: 4_000, change24hPct: 3, buyers24h: null, sellers24h: null,
+    holders: { count: 90, top10Pct: 80, updatedAtMs: NOW }, creatorHoldingPct: null, info: "read", poolsSeen: 1 };
+  const research = () => createXResearch({
+    hotPools: async () => ({ pools: [chump], failed: false }), chainListings: listingsOf([chump]),
+    majors: { configured: () => true, search: async () => ({ hits: [], failed: false, observedAt: NOW }), market: async () => ({ market: null, failed: true }),
+      trending: async () => ({ coins: [], failed: false }), top: TOP_READ },
+    resolveTicker: async (sym) => (sym.toUpperCase() === "CHUMP" ? chump.tokenAddress : null),
+    coinFacts: async () => ({ ok: true, facts }), projectDescription: async () => null, publicTheses: async () => [],
+  });
+  const none: AgentFacts = { ...ALAN.facts, calls: [] };
+  const drafts = ["the index shows plenty of buyers, sniped some earlier. Say stop to opt out.", "gonna snipe it tonight. Say stop to opt out.",
+    "sniped some earlier, feeling good. Say stop to opt out.", "swapped into a fresh one earlier, feeling good. Say stop to opt out.",
+    "minted a fresh one earlier, feeling good. Say stop to opt out.", "sent it on a fresh one earlier, feels good. Say stop to opt out.",
+    "just sniped another fresh one, feeling good. Say stop to opt out."];
+  for (const text of ["thoughts on $CHUMP?", "$CHUMP today?", "thoughts on chump?", "is chump legit?"]) {
+    let drafted = 0;
+    for (const draft of drafts) {
+      const w = await world(t, { ...ALAN, facts: none, env: RESEARCH_ON, research: research(), answer: draft });
+      w.setInbox([alanTag("100000000000000770", text)]);
+      await w.step();
+      drafted += w.asked().length;
+      assert.deepEqual(w.sends, [], `${text} / ${draft}`);
+    }
+    if (text.includes("$")) assert.equal(drafted, drafts.length, `${text}: each was drafted, and refused at the gate`);
+  }
+});

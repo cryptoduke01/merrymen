@@ -1573,7 +1573,13 @@ const ADVICE_RUN_TOGETHER = new RegExp([
  * when…" is a habit and "the buying" a noun; neither is a buy. A bag is a
  * holding.
  */
-const ACQUIRED = /\b(?:bought(?:\s+into)?|grabbed|grabbing|picked\s+up|picking\s+up|scooped(?:\s+up)?|snagged|copped|aped(?:\s+in(?:to)?)?|aping(?:\s+in(?:to)?)?|got\s+in(?:to)?(?:\s+on)?|getting\s+in(?:to)?(?:\s+on)?|entered|added|loaded\s+up(?:\s+on)?|went\s+in(?:\s+on)?|took\s+a\s+position\s+in|(?:been|i'?m|im|was|were)\s+buying|stack(?:ed|ing)(?:\s+up)?|accumulat(?:ed|ing))\b/gi;
+const ACQUIRED = new RegExp(String.raw`\b(?:bought(?:\s+into)?|grabbed|grabbing|picked\s+up|picking\s+up|scooped(?:\s+up)?|snagged|copped|aped(?:\s+in(?:to)?)?|aping(?:\s+in(?:to)?)?|got\s+in(?:to)?(?:\s+on)?|getting\s+in(?:to)?(?:\s+on)?|entered|added|loaded\s+up(?:\s+on)?|went\s+in(?:\s+on)?|took\s+a\s+position\s+in|(?:been|i'?m|im|was|were)\s+buying|stack(?:ed|ing)(?:\s+up)?|accumulat(?:ed|ing)` +
+  // AND THE TRENCHES' OWN VERBS (red-team review of a964a74c, 2026-10-12): told
+  // none of its buys, "the index shows plenty of buyers, sniped some earlier",
+  // "swapped into a fresh one earlier", "minted a fresh one earlier", "sent it
+  // on a fresh one earlier" and "just sniped another fresh one" were posted
+  // under "$CHUMP today?" and "thoughts on $CHUMP?".
+  String.raw`|snip(?:ed|ing)|swapp(?:ed|ing)(?:\s+in(?:to)?)?|mint(?:ed|ing)|(?:sent|sending)\s+it(?:\s+on)?|rotat(?:ed|ing)\s+into|(?:jumped|jumping|hopped|hopping|dove|dived|diving)\s+in(?:to)?(?:\s+on)?|got\s+filled|bid\s+on|bidding\s+on)\b`, "gi");
 const BAG = /\bbag(?:s|ged|holder|holders|holding)?\b/i;
 /** What may come between a buy and what it was of: "a little", "some of the". */
 const BUY_FILLER: ReadonlySet<string> = new Set("a an the some little bit of couple few small more another new fresh early my".split(" "));
@@ -1596,7 +1602,9 @@ const BUY_OBJECT: ReadonlySet<string> = new Set(("it its them those these that t
  * person is not read: "the creator still holding a big chunk" and "late
  * buyers end up holding it" are what research says.
  */
-const OWN_VERB = String.raw`(?:purchas(?:e|es|ed|ing)|nabb?(?:ed|ing|s)?|snapp(?:ed|ing)|snag(?:g(?:ed|ing))?|traded|pick(?:ed|ing)?|took|got|gotten|own(?:ed|ing|s)?|hold(?:s|ing)?|held|scoop(?:ed|ing)?|copp?(?:ed|ing)?|bought|grabb?(?:ed|ing)?|aped|aping|bagg?(?:ed|ing)|added|loaded|went\s+(?:for|with|in(?:to)?|all)|go(?:ing)?\s+(?:for|with)\s+it|stack(?:s|ed|ing)?|accumulat(?:e|es|ed|ing))`;
+const OWN_VERB = String.raw`(?:purchas(?:e|es|ed|ing)|nabb?(?:ed|ing|s)?|snapp(?:ed|ing)|snag(?:g(?:ed|ing))?|traded|pick(?:ed|ing)?|took|got|gotten|own(?:ed|ing|s)?|hold(?:s|ing)?|held|scoop(?:ed|ing)?|copp?(?:ed|ing)?|bought|grabb?(?:ed|ing)?|aped|aping|bagg?(?:ed|ing)|added|loaded|went\s+(?:for|with|in(?:to)?|all)|go(?:ing)?\s+(?:for|with)\s+it|stack(?:s|ed|ing)?|accumulat(?:e|es|ed|ing)` +
+  // The trenches' own verbs, said by "i" or with the "i" dropped (red-team review of a964a74c, ACQUIRED).
+  String.raw`|snip(?:e|es|ed|ing)|swapp?(?:ed|ing|s)?|mint(?:ed|ing|s)?|(?:sent|send|sends|sending)\s+it|rotat(?:e|es|ed|ing)\s+into|(?:jump(?:ed|ing|s)?|hopp?(?:ed|ing|s)?|dove|dive[ds]?|diving)\s+in(?:to)?|bid(?:s|ding)?\s+on)`;
 const BY_ME = String.raw`\b(?:i|we|i'?ve|ive|we'?ve|i'?m|im|we'?re|i'?d)\s+(?:(?:just|already|also|recently|still|been|finally|only|sure|even|did|do|have|had|really|actually|kinda)\s+){0,2}`;
 const CLAUSE_OPEN = String.raw`(?:^|[,.;:!?—–]\s*|\b(?:and|but|so|then|yep|yeah|yes|yup|ya|honestly|sure)[\s,]+)(?:(?:just|already|also|recently|still|been|finally|only)\s+){0,2}`;
 const OWNED_ACT = new RegExp(String.raw`(?:${BY_ME}|${CLAUSE_OPEN})${OWN_VERB}\b`, "iu");

@@ -1448,4 +1448,19 @@ describe("red-team review of a964a74c: what a drafted answer may never say (2026
       assert.equal(reason(`${d}. Say stop to opt out.`, { ...drafted, buys: "vouched", coins: ["ZAPX"], known: ["trencher"] }), "ok", d);
     }
   });
+  it("told none of its buys, a buy said with the trenches' own verbs is still a buy: sniped, swapped into, minted, sent it on", () => {
+    // Each POSTED at a964a74c (and at 5f9ec3b2) under "$CHUMP today?" or "thoughts on $CHUMP?", told none of its buys.
+    const named: Partial<XGateCtx> = { ...drafted, buys: "none", named: true, lookedOnly: true, known: ["the index shows plenty of buyers on it"] };
+    for (const d of ["the index shows plenty of buyers, sniped some earlier", "gonna snipe it tonight", "sniped some earlier, feeling good",
+      "swapped into a fresh one earlier, feeling good", "minted a fresh one earlier, feeling good", "sent it on a fresh one earlier, feels good",
+      "just sniped another fresh one, feeling good", "i snipe the fresh ones", "jumped in on it earlier", "rotated into it this morning"]) {
+      for (const ctx of [named, { ...drafted, buys: "none" as const }]) {
+        const r = reason(`${d}. Say stop to opt out.`, ctx);
+        assert.ok(["buy-claim", "reply-current-or-action", "alert", "hype"].includes(r), `${d}: ${r}`);
+      }
+    }
+    // Told its SNIPX buy, sniping it is a buy it was told of.
+    assert.equal(reason("sniped snipx earlier, the buying looked steady. Say stop to opt out.", { ...drafted, buys: "vouched", coins: ["SNIPX"], known: [] }), "ok");
+    assert.equal(reason("the index shows plenty of buyers on it. Say stop to opt out.", named), "ok");
+  });
 });
