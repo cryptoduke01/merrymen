@@ -67,6 +67,8 @@ export const TRENDING_MAX = 3;
 const TICKER_REFUSED = new RegExp([
   // its own house, in any spelling the letters allow ("MERRIMEN", "MERYMEN", "MRYMN": red-team 2026-10-12)
   "s+h+e*r+w+o*d", "h+e+r+w+o+d", "s+h+e*r+o{2,}d", "sherw", "merry", "merr", "m+e*r+[eiy]*m+[aeiy]*n", "robinhood", "robin", "hood", "alan", "aidale",
+  // and the house's products and the sources it names ("$TRENCHER", "$FOMO": red-team 2026-10-12)
+  "trench", "fomo", "shogun", "pons", "gecko", "bitquery",
   // abuse
   "fuck", "fuk", "shit", "cunt", "nigg", "fag", "nazi", "hitler", "rape", "porn", "sex", "nude", "cock", "dick", "puss", "bitch", "whore", "slut", "retard", "kill", "isis", "jihad", "terror",
   // politics

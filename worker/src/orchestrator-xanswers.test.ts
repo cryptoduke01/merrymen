@@ -2432,6 +2432,19 @@ test("what's hot never shows a copycat of the chain's stock tokens, bitcoin, eth
   }
 });
 
+test("what's hot never shows a copycat of a stablecoin, a big memecoin or the house's own products (red-team 2026-10-12)", async (t) => {
+  // Posted at 34ced01e for each SYM: "trending $<SYM> 24h +312% vol ~$1.2M, $COIN2 24h +4% vol ~$300k".
+  for (const sym of ["TSLA", "NVDA", "SPY", "AAPL", "QQQ", "PYUSD", "USDS", "FDUSD", "PEPE", "WIF", "TRENCHER", "FOMO", "BABYPEPE", "EURC"]) {
+    const pools = [{ ...namedPool(sym, 1, 312, 1.2e6), tokenAddress: `0x${"41".repeat(20)}` as `0x${string}` }, hotPool(2, 4, 300_000)];
+    const w = await world(t, { env: RESEARCH_ON, research: hotResearch(pools).research });
+    w.setInbox([tag({ text: "@pine_stoat what's hot today?" })]);
+    await w.step();
+    const text = String(w.sends[0]?.text ?? "");
+    assert.match(text, /geckoterminal robinhood: trending \$COINB 24h \+4% vol ~\$300k\./, `${sym}: ${text}`);
+    assert.ok(!text.includes(`$${sym}`), `${sym}: ${text}`);
+  }
+});
+
 test("what's hot never shows a ticker with a digit, nor one the gate would refuse as a word, in the pools or as fomo's most bought (red-team 2026-10-12)", async (t) => {
   // Posted at 34ced01e: "$100X 24h +55.5% vol ~$1.2M, $1B 24h +21% vol ~$640k, $97K 24h +3.3% vol ~$120k",
   // "$BUY …, $WAGMI …, $SHILL …; fomo: most bought $BUY", "$LFG …, $10M …".

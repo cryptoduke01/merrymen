@@ -999,8 +999,14 @@ other owner's agent, and its posting and reply warnings, are unchanged.
   read as Tesla's stock token up 412%), one that starts or ends with such a
   symbol of three letters or more, or holds its company's name ("TESLA",
   "BABYNVDA"); and never one that starts or ends with bitcoin's, ether's,
-  solana's or the dollar's (`BITCOIN`, `XBT`, `ETH2`, `PYUSD`, `USDC2`).
-  Then, side by side: with Fomo usable for the owner, the
+  solana's or the dollar's (`BITCOIN`, `XBT`, `ETH2`, `PYUSD`, `USDC2`);
+  never a big coin's or big memecoin's ticker or name, a stablecoin's or
+  tokenised gold's (`$PEPE`, `$WIF`, `$USDS`, `$FDUSD`, `$PAXG`), one built
+  on a big memecoin's or a currency's name (`BABYPEPE`, `DOGEAI`, `EURX`),
+  the house's own products and sources (`TRENCHER`, `FOMO`, `SHOGUN`, in
+  the sanitiser), or a symbol or name on CoinGecko's own trending list in
+  the same answer (beside `coingecko: trending $X` a chain `$X` reads as
+  the same coin). Then, side by side: with Fomo usable for the owner, the
   coins Fomo traders bought most in the day (`fomo_get_token_activity` with
   no token, its feed-wide `topTokens`: Fomo's thesis read needs a coin, so
   "what fomo traders are on" is the coins the most distinct Fomo traders

@@ -39,6 +39,7 @@ import {
   ownHistoryPhrases,
   RESEARCH_BUDGET,
   sayable,
+  showTicker,
   taggedConflict,
   type MajorsReader,
   type ResearchInput,
@@ -1371,7 +1372,20 @@ describe("what's hot: the chain's trending coins past the fleet's floors, fomo's
     assert.deepEqual(kept.map((k) => k.ticker), ["CHUMP"]);
     for (const sym of copycats) assert.ok(copycatTicker(sym), sym);
     // Built on an everyday word, and no stock token's: still shown.
-    for (const sym of ["CHUMP", "DOGECOIN", "COINA", "FROGGY", "METAL", "BEAN", "MUSE"]) assert.equal(copycatTicker(sym), false, sym);
+    for (const sym of ["CHUMP", "MEMECOIN", "COINA", "FROGGY", "METAL", "BEAN", "MUSE"]) assert.equal(copycatTicker(sym), false, sym);
+  });
+
+  it("never a big coin's or a stablecoin's ticker or name, a copy built on one, a house name, or a name on coingecko's own list today (red-team 2026-10-12)", async () => {
+    for (const sym of ["PEPE", "WIF", "BONK", "SHIB", "USDS", "FDUSD", "PYUSD", "EURC", "PAXG", "DOGECOIN", "BABYPEPE", "DOGEAI", "SOLANA", "TAO"]) {
+      assert.ok(copycatTicker(sym), sym);
+    }
+    for (const sym of ["TRENCHER", "FOMO", "SHOGUN", "MERRYMEN"]) assert.equal(showTicker(sym), null, sym);
+    // A chain coin named like a coin on coingecko's trending list in the same answer is left out of the line.
+    const h = hotFake({ pools: [pool(1, { name: "ZORA / WETH 1%" }), pool(2), pool(3, { name: "VIRTUALS / WETH 1%" })],
+      trending: [{ id: "zora", symbol: "ZORA", name: "Zora", rank: 120 }, { id: "virtual-protocol", symbol: "VIRTUAL", name: "Virtuals", rank: 60 }] });
+    const b = await h.research.gather(input({ kind: "hot" }));
+    assert.deepEqual(b.figures?.[0], { kind: "pools", coins: [{ symbol: "COINB", change24hPct: 12, volume24hUsd: 400_000 }] });
+    assert.deepEqual(b.hot, { coins: 1, lead: { dir: "up", size: "sharply" } });
   });
 
   it("in words: how many, which way on the day, fomo and coingecko's list; never a name or a figure; through the X gate", () => {

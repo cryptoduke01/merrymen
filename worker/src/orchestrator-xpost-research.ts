@@ -870,7 +870,25 @@ export const HOT_TRENDING = 3;
  * moving forty percent. The pool is still screened; it just never shows.
  */
 const RESERVED_TICKERS: ReadonlySet<string> = new Set(("BTC ETH SOL USDT USDC USDG USDE DAI BNB XRP DOGE ADA TRX TON AVAX LINK DOT LTC BCH XLM SUI HBAR " +
-  "WETH WBTC STETH HYPE").split(" "));
+  "WETH WBTC STETH HYPE " +
+  // NOR ANY BIG COIN'S TICKER OR NAME, OR A STABLECOIN'S (red-team 2026-10-12):
+  // "$PEPE 24h +312%" and "$WIF" from a chain memecoin read as the big coins
+  // moving, and "$USDS", "$FDUSD" as a dollar. CoinGecko's large caps and big
+  // memecoins by symbol and by name, and the stablecoins and tokenised gold.
+  "XMR UNI PEPE AAVE CRO NEAR APT ICP ETC TAO ONDO POL MATIC KAS ARB ALGO ATOM VET RENDER RNDR FIL OP ENA WLD JUP SEI INJ TIA STX IMX GRT " +
+  "BONK WIF FLOKI TRUMP FARTCOIN PENGU SPX POPCAT BRETT MOG NEIRO TURBO MEW BOME DOGS PNUT GOAT MOODENG VIRTUAL FET AR THETA LDO MKR SKY " +
+  "QNT FLOW SAND MANA AXS CHZ APE EGLD XTZ EOS NEO KAIA IOTA ZEC DASH BSV BGB OKB LEO GT KCS FTT PYTH JTO ZRO STRK ZK EIGEN ETHFI PENDLE " +
+  "RAY JASMY GALA CAKE RUNE KAVA CFX CORE BERA KAITO WSTETH CBBTC TBTC SHIB TON XRP " +
+  "BITCOIN ETHEREUM ETHER TETHER RIPPLE BINANCE SOLANA DOGECOIN TRON CARDANO HYPERLIQUID CHAINLINK STELLAR AVALANCHE LITECOIN TONCOIN " +
+  "SHIBA SHIBAINU POLKADOT MONERO UNISWAP CRONOS APTOS BITTENSOR POLYGON KASPA ARBITRUM ALGORAND COSMOS VECHAIN FILECOIN OPTIMISM " +
+  "ETHENA WORLDCOIN JUPITER DOGWIFHAT PUDGY PUDGYPENGU MAKER SANDBOX " +
+  "USDS PYUSD FDUSD TUSD RLUSD FRAX LUSD SUSD GUSD BUSD USDP USDD USDX GHO MIM DOLA CRVUSD EURC EURS EURT EUROC XAUT PAXG").split(/\s+/));
+
+/**
+ * AND NOTHING BUILT ON A BIG MEMECOIN'S OR A STABLECOIN'S NAME (red-team
+ * 2026-10-12): "BABYPEPE", "DOGEAI", "EURX" read as the big coin or a currency.
+ */
+const COPY_ROOTS: readonly string[] = ("PEPE DOGE SHIB BONK FLOKI BRETT POPCAT PENGU FARTCOIN EUR XAU").split(" ");
 
 /**
  * NOR ANYTHING BUILT ON BITCOIN'S, ETHER'S OR THE DOLLAR'S NAME (red-team
@@ -901,6 +919,7 @@ export function copycatTicker(ticker: string): boolean {
   const t = String(ticker ?? "").toUpperCase();
   if (RESERVED_TICKERS.has(t) || STOCK_SYMBOLS.includes(t)) return true;
   if (RESERVED_ROOTS.some((r) => t.startsWith(r) || t.endsWith(r))) return true;
+  if (COPY_ROOTS.some((r) => t.startsWith(r) || t.endsWith(r))) return true;
   if (STOCK_ROOTS.some((s) => t.startsWith(s) || t.endsWith(s))) return true;
   return STOCK_NAMES.some((n) => t.includes(n));
 }
@@ -1387,15 +1406,25 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
           notes.push("hot-none");
           return { facts: hotPhrases({ changes: [], crowd: 0, trending: 0 }), hot: { coins: 0, lead: null }, lookups, notes };
         }
-        const shown = screened.slice(0, HOT_COINS);
         const broker = await fomoFor();
         const cg = !!majors.trending && majors.configured?.() !== false && indexSlot();
         const [crowdEnv, trend] = await Promise.all([
           broker ? look((ms) => broker.call("fomo_get_token_activity", { token: null, chain: "robinhood", window: "24h", limit: 5 }, fomoOpts(ms)), null, false, RESEARCH_BUDGET.fomoMs) : Promise.resolve(null),
           cg ? look((ms) => majors.trending!(ms), null) : Promise.resolve(null),
         ]);
+        // NOR A CHAIN COIN UNDER A NAME COINGECKO'S OWN LIST HAS TODAY (red-team
+        // 2026-10-12): beside "coingecko: trending $X", a chain "$X" reads as
+        // the same coin. Every symbol and name on the list, any rank.
+        const listed = new Set((trend && !trend.failed ? trend.coins : []).flatMap((c) => [cleanTicker(c?.symbol), cleanTicker(String(c?.name ?? "").replace(/[^A-Za-z]/g, "").slice(0, 10))])
+          .filter((t): t is string => t !== null));
+        const kept = screened.filter((s) => !listed.has(s.ticker));
+        if (!kept.length) {
+          notes.push("hot-none");
+          return { facts: hotPhrases({ changes: [], crowd: 0, trending: 0 }), hot: { coins: 0, lead: null }, lookups, notes };
+        }
+        const shown = kept.slice(0, HOT_COINS);
         // Fomo's labels are the provider's: kept only for a coin the same screen kept, by its address, through the sanitiser.
-        const byToken = new Map(screened.map((s) => [s.token, s.ticker] as const));
+        const byToken = new Map(kept.map((s) => [s.token, s.ticker] as const));
         const crowd: string[] = [];
         for (const c of dataOf<TokenActivityData>(crowdEnv)?.topTokens ?? []) {
           const ticker = byToken.get(String(c?.token?.address ?? "").toLowerCase());
