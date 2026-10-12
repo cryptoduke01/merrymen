@@ -248,6 +248,20 @@ describe("a reply never gives advice or a forecast in other words (red-team 2026
     }
   });
 
+  it("an answer to a tag gives no prediction, level or entry in other words, a coin named or not; every other reply as before (red-team 2026-10-12)", () => {
+    // Each posted at fbcf8756 under "is eth cheap", "how's eth looking for a bounce", "thoughts on the dip" or "thoughts on aping eth".
+    const answer: Partial<XGateCtx> = { kind: "reply", answer: true, mode: "live", coins: [] };
+    for (const draft of ["bottom looks in to me.", "a bounce from here wouldn't surprise me.", "looks cheap here to me, not a call.", "i'd wait for a lower spot, not a call.",
+      "plenty of room left to run.", "it could recover soon.", "a pullback is likely first.", "patience pays on this one.", "it should rally from here on."]) {
+      assert.equal(reason(`${draft} Say stop to opt out.`, answer), "hype", draft);
+      assert.notEqual(reason(`${draft} Say stop to opt out.`, { ...answer, buys: "none", named: true }), "ok", draft);
+    }
+    // Code's own lines still pass, and a comment reply of any other owner is judged as it was.
+    assert.equal(reason("geckoterminal's robinhood view can't be pulled up from here. Say stop to opt out.", answer), "ok");
+    assert.equal(reason("it was cheap for me to get in and back out, which i liked. Say stop to opt out.", { kind: "reply", answer: true, mode: "live", coins: [] }), "ok");
+    assert.equal(reason("patience pays on this one. Say stop to opt out.", { kind: "reply", mode: "live", coins: [] }), "ok");
+  });
+
   it("of a named coin, it never says it holds or buys it in the third person, nor recommends holding it (red-team 2026-10-12)", () => {
     const named: Partial<XGateCtx> = { kind: "reply", agentName: "Alan Al Dale", mode: "live", coins: [], buys: "none", named: true, unsaid: ["PEPE", "Pepe"] };
     // Each admitted at 34ced01e beside "coingecko: $ETH #2, …".

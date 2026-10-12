@@ -149,6 +149,13 @@ export interface XGateCtx {
    * looked up to the index; refused as unlooked-name.
    */
   lookedOnly?: boolean;
+  /**
+   * AN ACTIVE AGENT'S ANSWER TO A TAG (red-team 2026-10-12), kind "reply":
+   * then a prediction, a level or an entry in any words is refused too
+   * (ANSWER_PREDICTION), a coin named or not. Absent: every other reply,
+   * judged as before.
+   */
+  answer?: boolean;
 }
 
 const refuse = (reason: string): XVerdict => ({ ok: false, reason });
@@ -900,6 +907,25 @@ const REPLY_ADVICE = new RegExp(
   "i",
 );
 
+/**
+ * AND IN AN ANSWER TO A TAG, A PREDICTION, A LEVEL OR AN ENTRY IN OTHER
+ * WORDS, A COIN NAMED OR NOT (red-team 2026-10-12): under "is eth cheap",
+ * "how's eth looking for a bounce" and "thoughts on the dip", "bottom looks
+ * in to me", "a bounce from here wouldn't surprise me", "looks cheap here to
+ * me", "i'd wait for a lower spot" and "plenty of room left to run" were each
+ * posted. Read only in an active agent's answer (XGateCtx.answer) and on
+ * every ticker of the figures line, so every other owner's replies are
+ * judged as before.
+ */
+const ANSWER_PREDICTION = new RegExp(
+  String.raw`\b(?:bounc(?:e|es|ed|ing)|rebound\w*|bottom(?:s|ed|ing)?|recover(?:s|ed|ing|y)?|pull\s?-?backs?|retrac(?:e|es|ed|ing|ement)` +
+    String.raw`|room\s+(?:left\s+)?to\s+(?:run|grow|go|climb|move|rise|rally)|(?:looks?|looking|is|it'?s|seems?|getting|still)\s+cheap|cheap\s+(?:here|now|right\s+now|at|from|these|again)` +
+    String.raw`|lower\s+(?:spot|entry|entries|price|prices|level|levels)|(?:better|good|nice|great)\s+(?:spot|entry|entries|price|level)|patience\s+pays` +
+    String.raw`|(?:i'?d|i\s+would|better\s+to|just|might|may|i'?ll|i\s+will)\s+wait\b|wait(?:ing)?\s+for\s+(?:a|an|the)\s+(?:lower|better|cheaper|dip|pull\s?back|entry|bounce|drop|retrace|reset|flush|break|breakout)` +
+    String.raw`|(?:bounc\w*|recover\w*|rally\w*|rebound\w*|climb\w*|higher|lower|run|runs|running)\s+from\s+here|from\s+here\s+(?:on|out))\b`,
+  "i",
+);
+
 /** A historical parent cannot establish a current holding or a promised new action. */
 const REPLY_CURRENT_OR_ACTION = /\b(?:i(?:'m| am) (?:still )?holding|i (?:still )?(?:hold|own)|i(?:'m| am) still in|(?:i(?:'ll| will)|i(?:'m| am) going to) (?:buy|sell|trade|hold|add|check)|(?:bought|buying|adding) (?:more|again)|keep holding|hold (?:it|this|that))\b/i;
 const REPLY_CURRENT_POSITION = /\b(?:(?:i|we)\s+(?:(?:still|currently|already|also)\s+)?(?:have|keep|maintain|carry)\s+(?:an?\s+)?(?:(?:open|small|little|long)\s+)?(?:positions?|stakes?|bags?|exposure|holdings)|(?:i(?:'ve| have)|we(?:'ve| have))\s+(?:still\s+|already\s+)?got\s+(?:an?\s+)?(?:positions?|stakes?|bags?|exposure|holdings)|(?:my|our)\s+(?:position|stake|bag|exposure|holding)\s+(?:is|remains|stays))\b/i;
@@ -1287,7 +1313,7 @@ export function tickerRefusal(ticker: unknown): string | null {
   if (ALERT_CAPS.test(upper)) return "alert";
   const vocab = vocabularyRefusal(lower);
   if (vocab) return vocab;
-  if (COIN_ADVICE.test(lower) || REPLY_ADVICE.test(lower) || REPLY_CURRENT_OR_ACTION.test(lower)) return "hype";
+  if (COIN_ADVICE.test(lower) || REPLY_ADVICE.test(lower) || ANSWER_PREDICTION.test(lower) || REPLY_CURRENT_OR_ACTION.test(lower)) return "hype";
   if (ADVICE_RUN_TOGETHER.test(lower)) return "hype";
   if (amountSaid(lower)) return "quantity";
   return null;
@@ -1681,6 +1707,7 @@ function admitMasked(tidied: string, ctx: XGateCtx, baseGate: BaseGate, agentNam
   const namesCoin = coins.some((c) => mentions(text, c));
   if ((namesCoin || ctx.kind === "reply") && COIN_ADVICE.test(own)) return refuse("hype");
   if (ctx.kind === "reply" && REPLY_ADVICE.test(own)) return refuse("hype");
+  if (ctx.kind === "reply" && ctx.answer === true && ANSWER_PREDICTION.test(own)) return refuse("hype");
   if (ctx.kind === "reply" && (REPLY_CURRENT_OR_ACTION.test(own) || REPLY_CURRENT_POSITION.test(own))) return refuse("reply-current-or-action");
   // No amount, price or multiple in words the base gate's list misses (AMOUNT_WORDS).
   if (ctx.kind === "reply" && amountSaid(withoutReplyOptOut(own))) return refuse("quantity");

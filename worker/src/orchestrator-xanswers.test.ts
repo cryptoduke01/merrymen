@@ -2432,6 +2432,35 @@ test("majors: \"it's the play\" and every call without an adjective never stands
   }
 });
 
+test("advice about a major in other words gets nothing, and no answer predicts, named or not (red-team 2026-10-12)", async (t) => {
+  // At fbcf8756, 24 of these 42 pairs were posted: "bottom looks in to me.", "plenty of room left to run." under "thoughts on aping eth", …
+  const tags = ["is eth cheap", "thoughts on aping eth", "thoughts on eth here", "thoughts on eth bottom", "thoughts on eth long", "how's eth looking for a bounce",
+    "thoughts on the dip"];
+  const drafts = ["bottom looks in to me.", "a bounce from here wouldn't surprise me.", "looks cheap here to me, not a call.", "i'd wait for a lower spot, not a call.",
+    "plenty of room left to run.", "zapx and qrtz have been the lively ones lately."];
+  const alan: AgentFacts = { ...FACTS, name: "Alan Al Dale" };
+  for (const text of tags) {
+    for (const draft of drafts) {
+      const w = await world(t, { env: RESEARCH_ON, research: majorsResearch().research, facts: alan, answer: `${draft} Say stop to opt out.` });
+      w.setInbox([tag({ text: `@pine_stoat ${text}` })]);
+      await w.step();
+      assert.deepEqual(w.sends, [], `${text} / ${draft}`);
+      for (const row of await w.answers()) assert.notEqual(row.status, "posted", `${text} / ${draft}`);
+    }
+  }
+  // A coin's place of more than one word that coingecko matched to nothing: no draft, a skipped row, the model allowances back.
+  const w = await world(t, { env: RESEARCH_ON, research: majorsResearch().research, facts: alan, answer: "plenty of room left to run. Say stop to opt out." });
+  w.setInbox([tag({ text: "@pine_stoat thoughts on eth guys" })]);
+  const r = await w.step();
+  assert.deepEqual(w.asked(), []);
+  assert.deepEqual(w.sends, []);
+  const [row] = await w.answers();
+  assert.equal(row?.status, "skipped");
+  assert.equal(row?.reason, "research:unanswered");
+  assert.match(r.log ?? "", /answer-unanswered 1/);
+  assert.equal((await store.readMeta(w.db, `llm-answers:111:2026-09-30`))?.n ?? 0, 0, "the draft allowance went back");
+});
+
 test("majors: a copycat ticker gets no figures, and goes on as a coin of the chain", async (t) => {
   const m = majorsResearch();
   const w = await world(t, { env: RESEARCH_ON, research: m.research, answer: "couldn't look that one up just now, sorry. Say stop to opt out." });

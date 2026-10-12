@@ -1675,6 +1675,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       let hotRead: HotRead | null = null;
       // A MAJOR, AS CODE READ IT from CoinGecko, beside its figures: its words are code's too.
       let majorRead: MajorRead | null = null;
+      // ANSWERED BY NOTHING, AS RESEARCH READ IT (ResearchBundle.unanswered): no draft, a skipped row, the allowances back.
+      let researchUnanswered = false;
       if (research && intent) {
         const bundle = await research.gather({ shared, intent, tenant: account.tenant, xUserId: account.xUserId, facts: f, posts, fomo: researchFomo,
           // Under another handle no question is one the exact path reads (ResearchInput.question: absent, never).
@@ -1685,9 +1687,28 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         if (bundle.figures?.length && bundle.facts.length) figures = bundle.figures;
         if (hotCoded && bundle.hot) hotRead = bundle.hot;
         if (asked.kind === "major" && figures && bundle.major) majorRead = bundle.major;
+        researchUnanswered = bundle.unanswered === true;
         bump(`answer-intent-${intent.kind}`);
         if (bundle.lookups) bump("answer-lookups", bundle.lookups);
         for (const note of new Set(bundle.notes)) bump(`answer-research-${note}`);
+      }
+      // ANSWERED BY NOTHING, AS RESEARCH READ IT (red-team 2026-10-12): a
+      // major's shape whose coin's place held more than a coin and matched
+      // none ("thoughts on aping eth") was drafted as chat, and "plenty of room
+      // left to run" went out. No draft at all; the row is kept as skipped so
+      // the tag is never looked up again, and the allowances go back.
+      if (researchUnanswered) {
+        if (!undrafted) {
+          await returnAllowance(shared, answerKey, at());
+          await returnAllowance(shared, `llm:${utcDay(nowMs)}`, at());
+        }
+        bump("answer-unanswered");
+        const skippedAt = at();
+        const id = await schedulePost(shared, {
+          tenant: account.tenant, xUserId: account.xUserId, kind: "answer", dedupeKey, body: "", coin: null, decisionId: null, dueAtMs: skippedAt, nowMs: skippedAt,
+          replyToTweetId: comment.id, replyRootTweetId: comment.id, replyAuthorId: comment.authorId, status: "skipped", reason: "research:unanswered",
+        });
+        return id === null ? null : { body: null };
       }
       // NO MODEL WORDS BESIDE A LINE OF COINS (red-team 2026-10-12): the gate
       // read a "what's hot?" draft before code put "$CHUMP 24h +41.2%" after
@@ -1766,7 +1787,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // WHAT IT WAS HANDED: research or a creator's claim (an answer handed none cites no source).
       const handed = !!looked && (looked.research.length > 0 || !!looked.creatorClaim);
       const gate = (text: string) => admitXPost(text, {
-        kind: "reply", agentName: f.name, mode, coins: vouched.map((c) => c.label),
+        kind: "reply", answer: true, agentName: f.name, mode, coins: vouched.map((c) => c.label),
         paperCoins: [...vouched.filter((c) => c.paper).map((c) => c.label), ...(f.mode === "idle" ? money.paper : [])], recentOwn, recentFleet, emojiOk: facts.style.emoji > 0,
         // A buy it says is one it was told of, or none at all (XGateCtx.buys).
         ...(coded ? {} : { buys: told ? "vouched" as const : "none" as const, unsaid: [...(told && !namesNone ? [] : bought), ...money.otherOnly, ...older, ...askerNames],

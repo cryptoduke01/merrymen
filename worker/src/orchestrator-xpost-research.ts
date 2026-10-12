@@ -327,19 +327,44 @@ function plainCoinAsk(text: string): string | null {
   return t.toLowerCase().replace(/\s+/g, " ").trim().replace(/^[\s,.!?'-]+/, "").replace(/[\s,.!?'-]+$/, "");
 }
 
-/** The name or ticker a tag asks about, as a safe search (coinQuery), or null when it is no such tag. Exported for tests. */
-export function majorAsk(text: unknown): string | null {
+/** The coin slot of a tag on one of the majors' shapes, as written, or null. */
+function majorSlot(text: unknown): string | null {
   if (typeof text !== "string" || sherwoodMentioned(text)) return null;
   const plain = plainCoinAsk(text);
   if (plain === null) return null;
   for (const re of MAJOR_SHAPES) {
     const coin = re.exec(plain)?.[1];
-    if (!coin) continue;
-    if (modelNamed(coin)) return null;
-    if (!coin.startsWith("$") && coin.split(" ").every(everydayWord)) return null;
-    return coinQuery(coin);
+    if (coin) return coin;
   }
   return null;
+}
+
+/** The name or ticker a tag asks about, as a safe search (coinQuery), or null when it is no such tag. Exported for tests. */
+export function majorAsk(text: unknown): string | null {
+  const coin = majorSlot(text);
+  if (coin === null || modelNamed(coin) || majorAdvice(coin)) return null;
+  if (!coin.startsWith("$") && coin.split(" ").every(everydayWord)) return null;
+  return coinQuery(coin);
+}
+
+/**
+ * A MAJOR'S SHAPE WITH ADVICE IN THE COIN'S PLACE (red-team 2026-10-12):
+ * "thoughts on aping eth", "thoughts on eth here", "thoughts on eth bottom",
+ * "thoughts on eth long" read the coin as "aping eth", "eth long", found no
+ * exact match on CoinGecko, and were drafted as chat: "plenty of room left to
+ * run" went out under each. A coin's place holding an entry, a side, a
+ * level, a dip or a buy word is advice asked for: answered by nothing.
+ */
+const SLOT_ADVICE = new Set(("dip dips entry entries long longs short shorts target targets bottom bottoms top tops here aping ape apes loading load " +
+  "leverage lev levered margin buy buying buys sell selling sells bounce bouncing cheap pump pumping moon mooning breakout swing scalp position " +
+  "bag bags ath support resistance floor ceiling stop stoploss tp sl").split(" "));
+function majorAdvice(coin: string): boolean {
+  return coin.replace(/^\$/, "").split(" ").some((w) => SLOT_ADVICE.has(w));
+}
+/** Is the tag a major's shape with advice in the coin's place? Exported for tests. */
+export function majorAdviceAsk(text: unknown): boolean {
+  const coin = majorSlot(text);
+  return coin !== null && majorAdvice(coin);
 }
 
 /**
@@ -428,6 +453,8 @@ export function classifyTag(text: string, o: { address?: string | null } = {}): 
   if (address === null && hotAsk(t)) return { kind: "hot" };
   // And one with any word more, or beside a contract, is answered by nothing (hotShaped).
   if (hotShaped(t) || (address !== null && hotAsk(t))) return { kind: "unanswered" };
+  // A major's shape with an entry, a side, a level or a buy word in the coin's place: advice asked for (majorAdviceAsk).
+  if (majorAdviceAsk(t)) return { kind: "unanswered" };
   // A COIN BY NAME OR TICKER, ON THE ALLOWLIST'S PLAIN SHAPES (majorAsk): read
   // on CoinGecko's list first. What the tag would otherwise be is kept: a
   // $ticker that turns out to be no major goes on as a coin of the chain,
@@ -720,6 +747,13 @@ export interface ResearchBundle {
    * past the rank cap) goes on as a coin of the chain. Absent: the tag's own.
    */
   intent?: AnswerIntentKind;
+  /**
+   * THE TAG IS ANSWERED BY NOTHING, AS RESEARCH READ IT (red-team
+   * 2026-10-12): a major's shape whose coin's place held more than a coin
+   * ("aping eth", "eth here", "eth long") that CoinGecko matched to none.
+   * The orchestrator drafts nothing and skips the tag.
+   */
+  unanswered?: true;
   /** Lookups made (the budget counts these). */
   lookups: number;
   /** What happened, by stable word, for the pass's counts. Never a coin, a person or an address. */
@@ -1729,6 +1763,13 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
             // chain's own coins (a "$SOL" there is not the Solana asked about).
             if (found.kind === "unread") return { facts: [], lookups, notes };
             // No major by that name or ticker: a $ticker goes on as a coin of the chain, a word as chat.
+            // BUT NEVER A COIN'S PLACE THAT HELD MORE THAN ONE WORD AND MATCHED
+            // NOTHING (red-team 2026-10-12): "thoughts on aping eth" was chat,
+            // and "plenty of room left to run" went out under it. Fail closed.
+            if (!i.fallback && i.query.includes(" ")) {
+              notes.push("major-unmatched");
+              return { facts: [], unanswered: true, lookups, notes };
+            }
             if (!i.fallback) return { facts: [], intent: "chat", lookups, notes };
             break;
           }

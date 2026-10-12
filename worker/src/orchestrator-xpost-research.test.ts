@@ -36,6 +36,7 @@ import {
   topCopyOf,
   hotPhrases,
   hotScreen,
+  majorAdviceAsk,
   majorAsk,
   majorPhrases,
   majorReadOf,
@@ -1168,6 +1169,28 @@ describe("majors: a coin by name or ticker, read on coingecko's list (2026-10-12
       "thoughts on $ eth?", "how's еth doing?", "is eth going to pump?", "how's merrymen doing?", "thoughts on robinhood chain?"]) {
       assert.equal(majorAsk(text), null, text);
     }
+  });
+
+  it("a major's shape with an entry, a side, a level or a buy word in the coin's place is answered by nothing (red-team 2026-10-12)", () => {
+    // Each was read as the major "aping eth", "eth here", …, found no exact match, and was drafted as chat at fbcf8756.
+    for (const text of ["thoughts on aping eth", "thoughts on eth here", "thoughts on eth bottom", "thoughts on eth long", "how's eth dip doing",
+      "thoughts on loading eth", "what about eth entry", "thoughts on eth leverage", "eth bottom price"]) {
+      assert.equal(majorAsk(text), null, text);
+      assert.equal(classifyTag(text).kind, "unanswered", text);
+    }
+    for (const text of ["thoughts on eth?", "how's shiba inu doing?", "how's eth doing today?"]) assert.equal(majorAdviceAsk(text), false, text);
+  });
+
+  it("a coin's place of more than one word that coingecko matched to nothing is answered by nothing, never as chat (red-team 2026-10-12)", async () => {
+    const m = majorsFake();
+    const b = await createXResearch({ majors: m.reader, now: () => Date.now() }).gather(input(classifyTag("thoughts on eth guys")));
+    assert.equal(b.unanswered, true);
+    assert.deepEqual(b.facts, []);
+    assert.ok(b.notes.includes("major-unmatched"));
+    // One word that is no major is still chat, as before.
+    const one = await createXResearch({ majors: majorsFake().reader, now: () => Date.now() }).gather(input({ kind: "major", query: "wojak", fallback: null }));
+    assert.equal(one.unanswered, undefined);
+    assert.equal(one.intent, "chat");
   });
 
   it("is read as a major, keeping what the tag would otherwise be: a $ticker a coin of the chain, a word chat", () => {
