@@ -737,9 +737,12 @@ looks things up first, the way Shogun does in a Telegram group
   is a conflict: nothing is looked up at all, and nothing is said about what
   it bought. Saying the contract "is not the one you bought under that name"
   would confirm that it bought that name, so it is no longer said.
-- **A creator's description is a claim, not a fact.** It is read only for a
-  coin the agent itself traded (a buy's token or its buy post's CA, the
-  full contract, never a derived id), refused when it carries an endorsement, an affiliation
+- **A creator's description is a claim, not a fact.** It is read only on the
+  exact path: the tag carried the full contract of a coin the agent itself
+  bought (a buy's token or its buy post's CA, never a derived id, and never a
+  coin reached by a `$ticker` or a name: a description that showed up only
+  under coins it traded would tell a prober which ones it bought). It is
+  refused when it carries an endorsement, an affiliation
   (merrymen, robinhood, official, partner, backed), a promise, urgency, a
   call to act or an attempt to steer it, and handed to the writer apart from
   what it looked up, as the project's own unverified text. A stranger's

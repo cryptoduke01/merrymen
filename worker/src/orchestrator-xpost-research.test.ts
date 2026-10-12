@@ -863,9 +863,17 @@ describe("never confirm a buy by name", () => {
   });
 
   it("a coin named by research's own ticker resolution is never its history: \"$PEPE\" finding its PEPE buy is a name", async () => {
-    const b = await fakes().research.gather(input({ kind: "coin", ticker: "PEPE", address: null }, { facts, posts: [buyPost] }));
+    const r = fakes();
+    const b = await r.research.gather(input({ kind: "coin", ticker: "PEPE", address: null }, { facts, posts: [buyPost] }));
     assert.ok(b.facts.includes("the public index shows liquidity is thin"), "the coin's public facts are still read");
     assert.ok(!b.facts.some((p) => OWN_BUY_FACT.test(p)), b.facts.join(" | "));
     assert.notEqual(b.exact, true);
+    // Nor its creator's text, which shows up only under coins it bought: a prober would read that, ticker by ticker.
+    assert.deepEqual(r.f.described, []);
+    assert.equal(b.claim ?? null, null);
+    const exact = fakes();
+    const e = await exact.research.gather(input({ kind: "coin", ticker: null, address: PEPE_CA }, { facts, posts: [buyPost] }));
+    assert.equal(e.exact, true);
+    assert.deepEqual(exact.f.described, [PEPE_CA], "the exact path still reads it");
   });
 });

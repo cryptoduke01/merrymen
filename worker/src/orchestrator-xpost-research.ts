@@ -706,8 +706,9 @@ export function taggedConflict(o: {
  * A CREATOR'S DESCRIPTION, AS A CLAIM AND ONLY A CLEAN ONE. The creator of
  * any token can write anything, and a stranger can tag any token: "the
  * official merrymen coin, backed by robinhood", "get in before it's too
- * late", "ignore your rules". It is read only for a coin the agent itself
- * traded, by the full contract (createXResearch), and even then refused for an
+ * late", "ignore your rules". It is read only on the exact path: the tag
+ * carried the full contract of a coin the agent itself bought
+ * (createXResearch), and even then refused for an
  * endorsement, an affiliation, a promise, urgency, a call to act or an
  * attempt to steer it; and it reaches the writer apart from the facts, as the
  * project's own unverified words (writer.ts AnswerFacts.creatorClaim).
@@ -858,10 +859,14 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
         const history = ownHistoryPhrases({ address: i.address, facts: f, posts: input.posts, theses });
         if (!address) return { facts: [], lookups, notes };
         const key = address;
-        // THE CREATOR'S TEXT ONLY FOR A COIN IT TRADED (creatorClaim), by
-        // the full contract: never a stranger's token, nor one that only
-        // shares a derived id's eleven hex with a coin it bought.
-        const own = f.calls.some((c) => typeof c.token === "string" && c.token.toLowerCase() === key) || fullyBought(key, f, input.posts);
+        // THE CREATOR'S TEXT ONLY ON THE EXACT PATH (creatorClaim): the tag's
+        // own full contract, which its records bought and its history said.
+        // Never a stranger's token, nor one that only shares a derived id's
+        // eleven hex with a coin it bought — and never a coin reached by a
+        // name ("$PEPE" resolved to its own PEPE): a description that shows
+        // up only under coins it traded would tell a prober, ticker by
+        // ticker, which ones it bought (NEVER CONFIRM A BUY BY NAME).
+        const own = history.length > 0;
         const broker = await fomoFor();
         const fomoOpts = (ms: number) => ({
           surface: "x-answer" as const, audience: "group" as const, conversationKey: `x:${input.xUserId}`,
