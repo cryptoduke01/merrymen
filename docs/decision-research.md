@@ -61,9 +61,9 @@ process logs one `[gecko] coingecko-pro ... lane:` line with the pace it settled
 and the token page's activity panel on web) use a second pacing row on the
 Pro lane, so they no longer queue behind the sixty-second tape burst. That
 row is priority, not extra quota: each slot it takes pushes the default row
-(feeds, desk, facts, X, web charts) back by one. In any stretch of time the
-two rows together make at most one request more than a single row could, so
-the monthly floor above still holds. One 429 cooldown still covers both rows.
+(feeds, desk, facts, X, and web charts once a pacing variable is set on web)
+back by one. In any stretch of time the two rows together make at most one
+request more than a single row could, so the monthly floor above still holds. One 429 cooldown still covers both rows.
 Each leg waits for a slot only within its own 5-second budget; a leg that
 cannot get one in time reports `request-budget` and spends nothing. The
 public lane has no second row: without a key, and during a Pro outage
@@ -86,9 +86,11 @@ fixing or rotating `MERRYMEN_COINGECKO_PRO_API_KEY` and restarting asks
 every endpoint again at once. A plan upgrade under the same key takes effect
 when the hour runs out.
 
-Web's chart reads on the Pro key now go through web's shared lane on its
-default row: they are paced and respect the 429 cooldown that any other web
-read set. Without a key, charts keep the previous unpaced public behaviour.
+Once either pacing variable is set on web, its chart reads on the Pro key go
+through web's shared lane on its default row: they are paced and respect the
+429 cooldown that any other web read set. With neither set they stay the
+unpaced Pro reads they always were. Without a key, charts keep the previous
+unpaced public behaviour.
 
 ## Opt-in decision evidence
 
