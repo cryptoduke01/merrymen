@@ -173,6 +173,42 @@ export function modelQuestion(text: unknown, address: string | null = null): "mo
   return MODEL_ASK.test(text) || MODEL_ASK.test(n) || MODEL_NAMED.test(n) ? "unanswered" : null;
 }
 
+/**
+ * THE ONLY QUESTIONS THAT SEE WHAT IT BOUGHT (red-team review, 2026-10-12).
+ * A copycat can always be spelled so no matcher finds it ("bonc", "ΒΟΝΚ", a
+ * frog emoji for PEPE), and every such tag was handed its buys, its own buy
+ * posts and "say what you bought", and answered "yep, grabbed bonk". So the
+ * default is inverted, as for the model question: only a whole tag, in plain
+ * ASCII words (replies.ts plainAsk), that is one of these plain questions
+ * about what it trades sees its buys, what it already said and its own
+ * posts. Everything else is answered without them. A word more, and it is
+ * not on the list.
+ */
+const LATELY = String.raw`(?: (?:lately|recently|these days|today|right now|now|this week|so far|usually|mostly))?`;
+const GENERAL_SHAPES = [
+  // what are you trading lately, what r u buying these days
+  `what ${ARE} ${YOU} (?:trading|buying)${LATELY}`,
+  // what have you been buying lately, what have you bought lately, what did you buy today
+  `what (?:have|did) ${YOU} (?:been (?:trading|buying)|bought|traded|buy|trade)${LATELY}`,
+  // what do you trade, what do you usually buy
+  `what (?:do|does) ${YOU}(?: usually| mostly)? (?:trade|buy)${LATELY}`,
+  // what kind of coins do you trade, what coins do you buy
+  `what (?:(?:kind|sort|type)s? of )?(?:coins|tokens|stuff) (?:do|did|are) ${YOU} (?:trade|buy|trading|buying)${LATELY}`,
+  // how do you pick your coins, how do you choose your trades, how do you trade
+  `how (?:do|did) ${YOU} (?:pick|choose|find|select) (?:your |ur )?(?:coins|tokens|trades|buys)`,
+  `how (?:do|does) ${YOU} trade`,
+  // any new buys lately, bought anything today
+  `any (?:new )?(?:buys|trades)${LATELY}`,
+  `(?:bought|buy) anything${LATELY}`,
+  // what's your latest buy
+  `(?:what's|whats|what is) (?:your|ur) (?:latest|last|newest|most recent) (?:buy|trade|pick)`,
+];
+const GENERAL_ALLOWED = new RegExp(`^${GREETING}(?:${GENERAL_SHAPES.join("|")})$`, "u");
+export function generalTradesQuestion(text: unknown): boolean {
+  const plain = plainAsk(text);
+  return plain !== null && !sherwoodMentioned(text) && GENERAL_ALLOWED.test(plain);
+}
+
 /** A word of the line, for matching a coin it traded named without a $ sign. */
 const words = (s: string): Set<string> => new Set((s.toLowerCase().match(/[a-z][a-z0-9'-]*/g) ?? []));
 

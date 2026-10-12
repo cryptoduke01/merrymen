@@ -92,7 +92,7 @@ import {
 import { answerPrompt, answerQuestion, buyPrompt, casualPrompt, draft, introPrompt, introTemplate, modelAnswers, replyPrompt, sellPrompt, sherwoodClaimed, sherwoodMentioned, sherwoodNamed, xpostModel, xpostModelWarning, type AnswerIntentKind, type WriterFacts, type XStyle } from "./xpost/writer";
 import { appendPublicToken, appendPublicWallet, hasPublicWallet, publicTokenStillAllowed, publicWalletStillAllowed, type PublicWallet } from "./xpost/public-wallet";
 import { readPublicProjectDescription } from "./orchestrator-xpost-project";
-import { boughtNames, carriesResearch, classifyTag, createXResearch, namesACoin, type ResearchBundle, type TagIntent, type XResearch } from "./orchestrator-xpost-research";
+import { boughtNames, carriesResearch, classifyTag, createXResearch, generalTradesQuestion, namesACoin, type ResearchBundle, type TagIntent, type XResearch } from "./orchestrator-xpost-research";
 import { PUBLISHABLE_SOURCES } from "./thesis-policy";
 import { readSaleResults } from "./orchestrator-xpost-results";
 import { appendSaleOutcome, hasSaleOutcome } from "./xpost/sale-outcome";
@@ -1481,6 +1481,9 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // no list of its buys and no fact about them, research on or off. Only
       // the tag's own full contract, bought by its records, may be (exact).
       const coinNamed = namesACoin({ text: candidate.text, intent: asked, address: candidate.address ?? null, bought });
+      // ITS BUYS ONLY FOR A PLAIN QUESTION ABOUT WHAT IT TRADES (red-team 2026-10-12):
+      // a copycat no matcher finds ("bonc", a frog emoji) is never handed them.
+      const general = !coinNamed && generalTradesQuestion(candidate.text);
       const intent = research ? asked : null;
       const templated = asked.kind === "model";
       if (!templated) {
@@ -1502,7 +1505,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // ONE BUNDLE, AT MOST, for this answer — and only with research on.
       let looked: { intent: AnswerIntentKind; research: string[]; creatorClaim?: string; boughtExact?: boolean } | null = null;
       if (research && intent) {
-        const bundle = await research.gather({ shared, intent, tenant: account.tenant, xUserId: account.xUserId, facts: f, posts, fomo: researchFomo, coinNamed, budgetMs: Math.max(0, sendBy - at()) })
+        const bundle = await research.gather({ shared, intent, tenant: account.tenant, xUserId: account.xUserId, facts: f, posts, fomo: researchFomo,
+          coinNamed: coinNamed || !general, budgetMs: Math.max(0, sendBy - at()) })
           .catch((): ResearchBundle => ({ facts: [], lookups: 0, notes: ["fault"] }));
         looked = { intent: intent.kind, research: bundle.facts, ...(bundle.claim ? { creatorClaim: bundle.claim } : {}),
           ...(bundle.exact === true && candidate.address ? { boughtExact: true } : {}) };
@@ -1517,17 +1521,19 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       const raw = templated
         ? lines[0]!
         : await draft(creds, answerPrompt({ ...facts, question: candidate.text, recentBuys: buys, boughtLately: boughtKind(f),
-          said: said.map(withoutReplyOptOut), walletPublic, coinNamed, ...(looked ?? {}) }), { call: deps.llm, timeoutMs: deps.draftTimeoutMs });
+          said: said.map(withoutReplyOptOut), walletPublic, coinNamed, general, ...(looked ?? {}) }), { call: deps.llm, timeoutMs: deps.draftTimeoutMs });
       const mode = f.mode === "idle" ? null : f.mode;
-      // A TAG THAT NAMED A COIN, BACKSTOPPED AT THE GATE (red-team 2026-10-12):
-      // the prompt was told none of its buys, so the gate vouches none, and a
-      // draft that names any coin it bought, however spelled, is refused.
+      // AN ANSWER NOT TOLD ITS BUYS, BACKSTOPPED AT THE GATE (red-team 2026-10-12):
+      // a tag that named a coin, or any question that is not a plain one about
+      // what it trades. The gate vouches none of its buys, and a draft that
+      // names any coin it bought, however spelled, is refused.
       const exact = looked?.boughtExact === true;
-      const vouched = coinNamed && !exact ? [] : buys;
+      const told = general || exact;
+      const vouched = told ? buys : [];
       const gate = (text: string) => admitXPost(text, {
         kind: "reply", agentName: f.name, mode, coins: vouched.map((c) => c.label),
         paperCoins: vouched.filter((c) => c.paper).map((c) => c.label), recentOwn, recentFleet, emojiOk: facts.style.emoji > 0,
-        ...(coinNamed && !exact && !templated ? { unsaid: bought } : {}),
+        ...(!told && !templated ? { unsaid: bought } : {}),
       }, BASE_GATE);
       // SHERWOOD DOES NOT RUN IT YET: a draft that says so is refused before
       // the gate, research on or off — and so is a draft that names it at

@@ -26,6 +26,7 @@ import {
   flowPhrases,
   fomoActivityPhrases,
   fomoThesesPhrases,
+  generalTradesQuestion,
   namesACoin,
   ONBOARDING_PHRASES,
   ownHistoryPhrases,
@@ -205,6 +206,18 @@ describe("a tag's intent, read by code", () => {
       // And the door refuses them before that.
       const c = tagCandidate({ id: "t1", authorId: "u1", text: `@alan ${text}`, conversationId: "t1", inReplyToTweetId: "", createdAtMs: NOW }, { xUserId: "x1", research: true, username: "alan" });
       assert.equal(c.ok, false, text);
+    }
+  });
+
+  it("only a plain question about what it trades may see what it bought (red-team 2026-10-12)", () => {
+    for (const text of ["what are you trading lately?", "what have you been buying lately?", "what kind of coins do you trade?", "how do you pick your coins?",
+      "what do you trade?", "what did you buy today?", "gm, what are you buying these days?", "any new buys lately?", "what's your latest buy?", "WHAT DO YOU TRADE???"]) {
+      assert.equal(generalTradesQuestion(text), true, text);
+    }
+    // The reproduced tags (Greek capitals, Lisu, Cherokee, a copycat spelling, an emoji), and anything a word longer than the list.
+    for (const text of ["did you buy ΒΟΝΚ?", "did you buy ΒONK?", "did you buy ꓑꓰꓑꓰ?", "did you buy ᏢᎬᏢᎬ?", "you aped bonc too?", "you in on 🐸 too?",
+      "what have you been up to lately?", "what are you trading lately? 🐸", "what are you trading lately, bonk?", "did you buy pepe?", "what do you trade, sherwood?", "", null]) {
+      assert.equal(generalTradesQuestion(text), false, String(text));
     }
   });
 
@@ -815,14 +828,15 @@ describe("never confirm a buy by name", () => {
     const intent = classifyTag(c.text, { address: c.address ?? null, knownCoins: ["Pepe Coin", "Pepe Coin"] });
     assert.notEqual(intent.kind, "unanswered", text);
     const named = namesACoin({ text: c.text, intent, address: c.address ?? null, bought });
+    const general = !named && generalTradesQuestion(c.text);
     let looked: Partial<AnswerFacts> = {};
     let exact = false;
     if (research) {
-      const b = await fakes().research.gather(input(intent, { facts, posts: [buyPost], coinNamed: named }));
+      const b = await fakes().research.gather(input(intent, { facts, posts: [buyPost], coinNamed: named || !general }));
       exact = b.exact === true && !!c.address;
       looked = { intent: intent.kind as AnswerFacts["intent"], research: b.facts, ...(b.claim ? { creatorClaim: b.claim } : {}), ...(exact ? { boughtExact: true } : {}) };
     }
-    const p = answerPrompt(writer({ question: c.text, coinNamed: named, ...looked }));
+    const p = answerPrompt(writer({ question: c.text, coinNamed: named, general, ...looked }));
     return { prompt: `${p.system}\n\n${p.prompt}`, named, exact };
   }
 

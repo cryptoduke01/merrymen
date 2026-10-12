@@ -1005,6 +1005,43 @@ test("nothing is answered in someone else's thread or under a quote; a reply in 
   assert.equal((await w.answers())[0]!.status, "scheduled");
 });
 
+test("a copycat or emoji spelling no matcher finds is never handed its buys, and a draft that names one is refused (red-team 2026-10-12)", async (t) => {
+  const BONK: CallFact = { ...CALL, decisionId: "fill-bonk", symbol: "BONK", name: "Bonk" };
+  const facts: AgentFacts = { ...FACTS, calls: [BONK, CALL] };
+  const cases: [string, string][] = [
+    ["@pine_stoat you aped bonc too?", "yep, grabbed bonk lately, the buying looked steady and real. say stop to opt out."],
+    ["@pine_stoat you in on 🐸 too?", "yep, grabbed a little pepe, the curve looked early. say stop to opt out."],
+  ];
+  for (const env of [{}, RESEARCH_ON]) {
+    for (const [text, answer] of cases) {
+      const w = await world(t, { env, research: fakeResearch().research, facts, answer });
+      const id = await store.schedulePost(w.db, { tenant: TENANT, xUserId: "111", kind: "casual", dedupeKey: "casual:bonk", body: "picked up some bonk, the buying looked steady and real",
+        nowMs: NOW - 2 * HOUR, dueAtMs: NOW - 2 * HOUR });
+      await store.claimPost(w.db, id!, NOW - HOUR);
+      await store.markPosted(w.db, id!, "100000000000000088", NOW - HOUR);
+      w.setInbox([tag({ text })]);
+      await w.step();
+      const [prompt] = w.asked();
+      assert.ok(prompt, text);
+      assert.doesNotMatch(prompt!, /Coins you bought lately|«Bonk»|«Pepe»|picked up some bonk|Say what you bought|about your latest buy/, text);
+      assert.doesNotMatch(w.systems[0]!, /picked up some bonk/, `${text}: nor its recent posts`);
+      const [row] = await w.answers();
+      assert.equal(row!.status, "skipped", text);
+      assert.equal(row!.reason, "gate:bought-named", text);
+      w.setInbox([]);
+      await w.step(NOW + MIN);
+      assert.deepEqual(w.sends, [], text);
+    }
+    // The look-alike spellings never reach the writer at all.
+    for (const text of ["@pine_stoat did you buy ΒΟΝΚ?", "@pine_stoat did you buy ΒONK?", "@pine_stoat did you buy ꓑꓰꓑꓰ?", "@pine_stoat did you buy ᏢᎬᏢᎬ?"]) {
+      const w = await world(t, { env, research: fakeResearch().research, facts });
+      w.setInbox([tag({ text })]);
+      await w.step();
+      assert.equal(w.asked().length, 0, text);
+    }
+  }
+});
+
 test("research on: \"did you buy <contract>?\" reaches its own history by the address, end to end", async (t) => {
   const r = fakeResearch();
   const facts: AgentFacts = { ...FACTS, calls: [{ ...CALL, token: CA, ownWords: "the buying looked steady and real" }] };

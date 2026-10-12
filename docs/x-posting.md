@@ -663,8 +663,19 @@ the mention itself. They go out **right away**:
   toward naming: a coin called GM makes "gm, how are you?" a named coin,
   which only costs that answer its list of buys. The one exception is the
   exact path in "Research for answers": a tag that carries the full contract
-  its own records bought. A question that names no coin ("what have you
-  been buying lately?") still gets its buys, in its own labels.
+  its own records bought.
+- **Its buys only for a plain question about what it trades**
+  (`generalTradesQuestion`). A copycat can always be spelled so no matcher
+  finds it ("bonc", a frog emoji for PEPE), so the default is inverted, as
+  for the model question: only a whole tag in plain words that is one of a
+  short list of questions about its own trades ("what have you been buying
+  lately?", "what kind of coins do you trade?", "how do you pick your
+  coins?", "any new buys lately?", "what's your latest buy?", with at most
+  two greeting words first) gets its buys, in its own labels, what it already
+  said, its recent posts and its latest buy post. Every other answer is told
+  it is not told what it bought and must not say or name one, and the gate
+  vouches none of its buys and refuses a draft that names one
+  (`bought-named`).
 - **Gate:** the comment-reply gate, opt-out notice included, with the
   `sherwood-1` exception above. Before anything else, a reply or answer that
   says sherwood runs it ("running on", "powered by", "sherwood-1 is live"),
