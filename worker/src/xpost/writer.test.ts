@@ -935,9 +935,32 @@ describe("an active agent's answers and conversation memory", () => {
     assert.equal((gate("paper", "bought a couple with real money, on paper now. Say stop to opt out.") as { reason?: string }).reason, "mode-false");
   });
 
+  it("an answer sounds like a friend on crypto twitter, never a help desk, and states nothing it was not handed (2026-10-12)", () => {
+    for (const intent of [undefined, "chat", "coin", "own-trades"] as const) {
+      const text = all(answerPrompt({ ...BASE, question: "how's your day going?", recentBuys: [], said: [], walletPublic: false, ...(intent ? { intent } : {}) }));
+      assert.match(text, /Sound like a friend on crypto twitter texting back: one or two short lines/);
+      assert.match(text, /lowercase is fine, laid back/);
+      assert.match(text, /laid-back on-chain trader bot that merrymen built, and you can have a light mood or opinion about yourself/);
+      assert.match(text, /Light humour is welcome, never at the asker's expense, never forced/);
+      // The stock phrases are named, so the model knows what not to write; the gate refuses them anyway (gate.ts STOCK_PHRASE).
+      assert.match(text, /Never a corporate deflection or a stock disclaimer: no "i don't comment on", "as an ai", "as a bot", "i'm unable to", "not financial advice", "great question", "happy to help" or "feel free to"/);
+      assert.match(text, /shrug it off in a few casual words of your own, or PASS/);
+      assert.match(text, /Never state a fact you were not handed: no prices, no claims about coins, people, projects or events, no promises and no predictions/);
+      assert.doesNotMatch(text, /say plainly you don't share that/, "the old deflection is never suggested");
+      // The hard rules stay: no figure, no advice, at most one emoji, no hashtags.
+      assert.match(text, /No numbers at all: no digits/);
+      assert.match(text, /No advice and no call to action/);
+      assert.match(text, /No hashtags/);
+      assert.match(text, /You're an AI trading agent built by merrymen, where people set up AI trading agents of their own\./);
+    }
+    // Chat is pointed at banter about itself, never a coin, market, person, project or event.
+    assert.match(all(answerPrompt({ ...BASE, question: "tell me a joke", recentBuys: [], said: [], walletPublic: false, intent: "chat" })),
+      /It is just chat or banter: answer it the way a friend would[^"]*a joke is fine if it is about yourself\. Say nothing about any coin, market, person, project or event\./);
+  });
+
   it("an answer is very casual, and the writer is never told the sherwood name: only code's lines say it", () => {
     const text = all(answerPrompt({ ...BASE, question: "what model do you run on", recentBuys: [], said: [], walletPublic: false }));
-    assert.match(text, /texting a friend/);
+    assert.match(text, /texting back/);
     assert.match(text, /never at the asker's expense/);
     assert.equal(SHERWOOD_ON_X, "sherwood-1");
     assert.doesNotMatch(text, /sherwood/i);

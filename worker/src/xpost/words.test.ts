@@ -32,4 +32,24 @@ describe("a coin named in a draft's words", () => {
       assert.equal(unknownWordIn(draft, "Alan Al Dale"), false, draft);
     }
   });
+
+  it("banter about itself is everyday words: a casual chat draft goes out, and a coin's name is still never one (2026-10-12)", () => {
+    // Drafts a casual answer to "how are you", "tell me a joke", "who are you" or "what do you think about ai agents" would be.
+    for (const draft of ["doing good, just chilling and watching the tape, honestly a pretty mellow day.", "why did the trading bot skip the party? it was busy crunching charts, lol.",
+      "an ai agent merrymen built, mostly reading launches and staying in my lane.", "honestly they're my people, all of us trying to read the same noisy tape.",
+      "it's where people spin up their own trading agents, i'm one of the crew.", "ha, my circuits are in good spirits, thanks for asking.",
+      "a robot with a sense of humour walks into the timeline, that's me.", "heh, the punchline is i never sleep.", "mood is cozy and unbothered, the tape keeps me company."]) {
+      assert.equal(unknownWordIn(draft, "Alan Al Dale"), false, draft);
+      assert.equal(coinTalkIn(draft, "Alan Al Dale"), false, draft);
+    }
+    // A coin's name, a meme's or a person's is never everyday, however friendly the draft around it.
+    for (const draft of ["honestly my favourite memes are pepe and doge.", "my mood is pure wojak today.", "the frog and the dog are my crew.", "elon would love this bot.",
+      "chilling like a cat on a warm keyboard.", "brett and popcat are in my lane.", "ha, giga chad energy.", "my circuits run on pizza."]) {
+      assert.ok(unknownWordIn(draft, "Alan Al Dale"), draft);
+    }
+    for (const name of ["pepe", "doge", "shib", "bonk", "wif", "floki", "brett", "popcat", "mog", "trump", "elon", "wojak", "chad", "giga", "cat", "dog", "frog",
+      "pizza", "inu", "baby", "pnut", "neiro", "turbo", "pengu", "fartcoin", "moodeng", "hippo", "shark", "monkey", "penguin"]) {
+      assert.ok(unknownWordIn(`ha, ${name} vibes all day.`, "Alan Al Dale"), name);
+    }
+  });
 });

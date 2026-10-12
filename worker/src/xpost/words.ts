@@ -166,7 +166,28 @@ const CHAT_WORDS: ReadonlySet<string> = new Set((
   "agent agents bot account owner owners strategy strategies approach style rules rule plan plans habit habits process " +
   "sorry apologies unfortunately luckily anyway though although however because since unless until whether either neither " +
   "also too very really quite pretty fairly rather kinda sorta maybe perhaps probably likely unlikely definitely certainly " +
-  "hello hey hiya howdy greetings bye later cya take care stay safe peace love respect appreciate appreciated").split(/\s+/));
+  "hello hey hiya howdy greetings bye later cya take care stay safe peace love respect appreciate appreciated " +
+  // BANTER ABOUT ITSELF (the owner's ask, 2026-10-12: answer any question, casually).
+  // Asked "how are you", "tell me a joke", "who are you" or "what do you think about
+  // ai agents", a friendly draft about being a bot used words this list never had
+  // ("spin", "skip", "lane", "chill", "robot", "punchline") and was refused as if it
+  // had named a coin. These are everyday verbs, moods and the nouns of a bot's own
+  // life: never an animal, a food, a person, a place, a brand or a meme a coin is
+  // named after (words.test.ts holds the list to that). Still read only for chat
+  // handed nothing (unknownWordIn), beside coinTalkIn, never by the gate's own
+  // known-word checks.
+  "spin spun join joined joining build builds building make makes making laugh laughs smile smiles enjoy enjoys miss missed scroll scrolling " +
+  "relax relaxing rest resting stick sticking learn learns grow growing improve improving ponder pondering notice noticing count counting " +
+  "compute computing process processing crunch crunching tweak tweaking tune tuning ship shipping skip skipped skipping blink blinking " +
+  "chill chilled chilling mellow cozy humble nerdy geeky silly goofy cheeky sharp smooth wise clever awake focused grateful thankful proud " +
+  "nervous chaotic messy tidy complex tricky digital robotic human humans artificial endless constant nightly lively friendly unbothered relatable " +
+  "joke jokes humor humour pun puns punchline sense walks robot robots bots code coder coding software program programs algorithm algorithms logic " +
+  "screens internet timeline feed feeds threads posts community company crew family home office desk corner lane lanes path road ride journey " +
+  "adventure game games mystery ideas mood moods energy spirit spirits heart circuits wires electricity battery chaos discipline routine " +
+  "edge world future past present history memory shift shifts hours seconds weeks months years forever always sometimes " +
+  "honestly basically literally genuinely seriously truly mostly nearly barely clearly surely certainly hopefully thankfully " +
+  "pretty plenty lot lots kind sort bunch couple whole half rest instead either neither otherwise besides meanwhile anyway anyhow " +
+  "yourself myself thanks welcome cheers glad nice sweet neat awesome solid legend legends champ ha haha hah heh hehe lol lmao oof ooh ahh hmm yay nah yep yup sure").split(/\s+/));
 
 /**
  * A WORD AN ANSWER HANDED NOTHING MAY NOT SAY (red-team 2026-10-12). The rule
