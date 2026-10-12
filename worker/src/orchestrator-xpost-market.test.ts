@@ -110,7 +110,8 @@ describe("what's hot in code's words", () => {
   it("how's the market, in code's casual words: every line of every read clears the gate, none repeats another of its read, none names a coin or a figure (2026-10-12)", () => {
     const told = (text: string, mode: "live" | "paper" | null, recentOwn: string[], noticeShown: boolean) => admitXPost(text, { kind: "reply", answer: true, noticeShown,
       agentName: "Alan Al Dale", mode, coins: [], recentOwn, recentFleet: [] }, (r, c) => admitAgentLine(r, c));
-    const majorsReads: MarketRead["majors"][] = [{ dir: "up" }, { dir: "down" }, { dir: "mixed" }, { dir: "flat" }, null];
+    const majorsReads: MarketRead["majors"][] = [...(["up", "down"] as const).flatMap((dir) => (["a little", "a fair bit", "sharply"] as const).map((size) => ({ dir, size }))),
+      { dir: "mixed" }, { dir: "flat" }, null];
     const chainReads: MarketRead["chain"][] = [{ coins: 3, lead: { dir: "up", size: "sharply" } }, { coins: 1, lead: null }, { coins: 0, lead: null }, null];
     for (const majors of majorsReads) {
       for (const chain of chainReads) {
@@ -138,7 +139,7 @@ describe("what's hot in code's words", () => {
       }
     }
     // The words say what was read, and only that.
-    const up = marketAnswers({ majors: { dir: "up" }, chain: { coins: 3, lead: null } }, "1", { lower: true });
+    const up = marketAnswers({ majors: { dir: "up", size: "a little" }, chain: { coins: 3, lead: null } }, "1", { lower: true });
     assert.ok(up.every((l) => /robinhood|chain|onchain|geckoterminal|trenches|index|trending|over there/.test(l)), "it says where the movers are");
     const unread = marketAnswers({ majors: null, chain: null }, "1", { lower: true });
     assert.ok(unread.every((l) => /\bno (?:read|view|glimpse|data|word|signal)\b|can't spot|zilch from/.test(l)), "no read is said as none");
@@ -165,8 +166,33 @@ describe("what's hot in code's words", () => {
     assert.equal(majorsDirOf([0.5]), null);
   });
 
+  it("the big coins' words are as big as the move, and the chain's words count without a direction (red-team review of a964a74c, 2026-10-12)", () => {
+    // POSTED at a964a74c: "the giants dipped slightly ... $BTC -15.2%, $ETH -21.7%, $SOL -28.3%", "the leaders are taking a breather",
+    // "the bellwethers are inching forward ... $BTC +18.4%, $ETH +24.9%, $SOL +31%", and "a solo runner", "several runners",
+    // "a pack running" beside $CHUMP -62.5% and chain coins down by half.
+    assert.deepEqual(majorsDirOf([-15.2, -21.7, -28.3]), { dir: "down", size: "sharply" });
+    assert.deepEqual(majorsDirOf([18.4, 24.9, 31]), { dir: "up", size: "sharply" });
+    assert.deepEqual(majorsDirOf([1.2, 2.4, 4.8]), { dir: "up", size: "a fair bit" });
+    assert.deepEqual(majorsDirOf([-0.6, -1.1, -2.94]), { dir: "down", size: "a little" });
+    assert.deepEqual(majorsDirOf([-0.6, -1.1, -2.96]), { dir: "down", size: "a fair bit" }, "read as the line shows it: -3%");
+    const small = /\b(?:slightly|a touch|gently|inching|a little|a hair|mildly|breather|perky|nudged|tired|easing|softening|drifting|sagging|lean green|edging)\b/;
+    for (const majors of [{ dir: "down", size: "sharply" }, { dir: "up", size: "sharply" }, { dir: "down", size: "a fair bit" }, { dir: "up", size: "a fair bit" }] as const) {
+      for (const chain of [{ coins: 1, lead: { dir: "down", size: "sharply" } }, { coins: 2, lead: { dir: "down", size: "sharply" } }, { coins: 3, lead: { dir: "up", size: "sharply" } }] as const) {
+        for (const id of ["100000000000000775", "100000000000000780", "100000000000000781", "100000000000000770", "100000000000000776"]) {
+          for (const line of marketAnswers({ majors, chain }, id, { lower: true })) {
+            const words = withoutReplyOptOut(line);
+            assert.doesNotMatch(words, small, `${JSON.stringify(majors)}: ${line}`);
+            assert.doesNotMatch(words, /\b(?:runners?|runaway|standout|running|lively|buzz\w*|brewing|busy|moving|movers?|action|heating|hot)\b/, `${JSON.stringify(chain)}: ${line}`);
+            if (majors.dir === "down") assert.doesNotMatch(words, /\b(?:up|higher|climb\w*|green|perky|forward|ahead|surging|soaring)\b/, line);
+            if (majors.dir === "up") assert.doesNotMatch(words, /\b(?:down|lower|dipped|sliding|falling|plunging|tumbling)\b/, line);
+          }
+        }
+      }
+    }
+  });
+
   it("a paper agent's market line closes with a clause about its own book, never one the coins could take (2026-10-12)", () => {
-    for (const line of marketAnswers({ majors: { dir: "up" }, chain: { coins: 2, lead: null } }, "5", { lower: true }, { paper: true })) {
+    for (const line of marketAnswers({ majors: { dir: "up", size: "a fair bit" }, chain: { coins: 2, lead: null } }, "5", { lower: true }, { paper: true })) {
       const clause = /\. ((?:all my|my|every) [^.]*)\. say stop to opt out\.$/.exec(line)?.[1];
       assert.ok(clause, line);
       assert.doesNotMatch(clause!, /\b(?:it|its|it's|them|they|that|this|one|i|i'm|play|plays|playing|hold|holding|buy|buying)\b/, clause);

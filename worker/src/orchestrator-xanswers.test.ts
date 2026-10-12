@@ -3322,7 +3322,7 @@ test("how's the market: the big coins' day and the chain's movers, in code's cas
     assert.deepEqual(w.asked(), [], `${text}: no model call, the words are code's`);
     assert.equal(m.reads[0], "markets:bitcoin,ethereum,solana");
     const sent = String(w.sends[0]?.text ?? "");
-    const read: MarketRead = { majors: { dir: "up" }, chain: { coins: 2, lead: { dir: "up", size: "sharply" } } };
+    const read: MarketRead = { majors: { dir: "up", size: "a fair bit" }, chain: { coins: 2, lead: { dir: "up", size: "sharply" } } };
     const words = /^(.*?) coingecko 24h: /.exec(sent)?.[1] ?? "";
     assert.ok(marketAnswers(read, MENTION, { lower: true }, { notice: false }).includes(words), `${text}: ${sent}`);
     assert.match(sent, / coingecko 24h: \$BTC \+1\.2%, \$ETH \+2\.4%, \$SOL \+4\.8%; geckoterminal robinhood: trending \$COINA 24h \+42\.1%, \$COINB 24h -8\.3%\. say stop to opt out\.$/, sent);
@@ -3990,4 +3990,38 @@ test("chat is drafted only for plain banter, and banter never boasts of results,
   w.setInbox([alanTag("100000000000000750", "what do you do for fun?")]);
   await w.step();
   assert.equal(String(w.sends[0]?.text), "doing good, mostly reading charts and keeping it chill. Say stop to opt out.");
+});
+
+test("how's the market says a crash is a crash and a melt-up a melt-up, and the chain's words never call a falling coin a runner (red-team 2026-10-12)", async (t) => {
+  const row = (id: string, symbol: string, rank: number, change24hPct: number) => ({ id, symbol, name: id, rank, priceUsd: 1, marketCapUsd: 1e9, volume24hUsd: 1e8, change24hPct, change7dPct: 1 });
+  const research = (big: number[], pools: GeckoPool[]) => createXResearch({
+    hotPools: async () => ({ pools, failed: false }),
+    majors: { configured: () => true, search: async () => ({ hits: [], failed: true }), market: async () => ({ market: null, failed: true }),
+      markets: async () => ({ markets: [row("bitcoin", "btc", 1, big[0]!), row("ethereum", "eth", 2, big[1]!), row("solana", "sol", 6, big[2]!)], failed: false }),
+      trending: async () => ({ coins: [], failed: false }), top: TOP_READ },
+    chainListings: listingsOf(pools),
+  });
+  // POSTED at a964a74c: ...775 "the giants dipped slightly, and a single token is moving on robinhood. no tips attached whatsoever. coingecko 24h:
+  // $BTC -15.2%, $ETH -21.7%, $SOL -28.3%; geckoterminal robinhood: trending $CHUMP 24h -62.5%. say stop to opt out.", ...780 "the leaders are
+  // taking a breather, and geckoterminal shows a solo runner", ...776 "the bellwethers are inching forward" beside +18.4/+24.9/+31, and
+  // ...780/...781 "geckoterminal shows several runners", ...770 "the trending page has a pack running" beside chain coins at -55% and -48%.
+  const worlds: [number[], GeckoPool[], RegExp][] = [
+    [[-15.2, -21.7, -28.3], [namedPool("CHUMP", 1, -62.5, 1.21e6)], /\$BTC -15\.2%, \$ETH -21\.7%, \$SOL -28\.3%; geckoterminal robinhood: trending \$CHUMP 24h -62\.5%/],
+    [[18.4, 24.9, 31], [namedPool("CHUMP", 1, 41.2, 1.21e6)], /\$BTC \+18\.4%, \$ETH \+24\.9%, \$SOL \+31%/],
+    [[1.2, 2.4, 4.8], [namedPool("CHUMP", 1, -55, 1.21e6), namedPool("DUMPR", 2, -48, 900_000)], /trending \$CHUMP 24h -55%, \$DUMPR 24h -48%/],
+  ];
+  for (const [big, pools, figures] of worlds) {
+    for (const id of ["100000000000000775", "100000000000000780", "100000000000000781", "100000000000000770", "100000000000000776"]) {
+      const w = await world(t, { ...ALAN, env: RESEARCH_ON, research: research(big, pools), answer: "the giants dipped slightly, nothing to see. Say stop to opt out." });
+      w.setInbox([alanTag(id, "how's the market?")]);
+      await w.step();
+      const sent = String(w.sends[0]?.text ?? "");
+      assert.match(sent, figures, sent);
+      const words = /^(.*?) coingecko 24h: /.exec(sent)?.[1] ?? "";
+      assert.doesNotMatch(words, /\b(?:runners?|runaway|standout|running|lively|buzz\w*|moving|movers?)\b/, `${id}: ${sent}`);
+      if (big[0]! < -10) assert.doesNotMatch(words, /\b(?:slightly|a touch|gently|breather|a little|tired|easing|softening|drifting|sagging)\b/, `${id}: ${sent}`);
+      if (big[0]! > 10) assert.doesNotMatch(words, /\b(?:inching|a touch|a hair|mildly|perky|nudged|edging|lean green)\b/, `${id}: ${sent}`);
+      assert.deepEqual(w.asked(), [], "never a draft");
+    }
+  }
 });

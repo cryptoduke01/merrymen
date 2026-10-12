@@ -276,8 +276,13 @@ export function majorUnreadAnswers(seed: string, style: { lower: boolean }, o: C
  * never in these words.
  */
 export interface MarketRead {
-  /** Which way the big coins went on the day, together: all up, all down, some each way, or all flat. */
-  majors: { dir: "up" | "down" | "mixed" | "flat" } | null;
+  /**
+   * Which way the big coins went on the day, together: all up, all down, some
+   * each way, or all flat; and, all up or all down, how far the one that moved
+   * most went (moveOf's bands on the figures as shown), so the words never say
+   * "slightly" beside a crash (red-team review of a964a74c, 2026-10-12).
+   */
+  majors: { dir: "up" | "down"; size: NonNullable<Move["size"]> } | { dir: "mixed" | "flat" } | null;
   /** The chain's movers past the floors: how many (0: none), and the first one's day. */
   chain: HotRead | null;
 }
@@ -298,7 +303,15 @@ export function majorsDirOf(changes: readonly unknown[]): MarketRead["majors"] {
   const shown = changes.map(signedPercent).filter((s): s is string => s !== null);
   if (shown.length < 2) return null;
   const signs = shown.map((s) => (s === "+0%" ? 0 : s.startsWith("-") ? -1 : 1));
-  return { dir: signs.every((x) => x > 0) ? "up" : signs.every((x) => x < 0) ? "down" : signs.every((x) => x === 0) ? "flat" : "mixed" };
+  const dir = signs.every((x) => x > 0) ? "up" : signs.every((x) => x < 0) ? "down" : signs.every((x) => x === 0) ? "flat" : "mixed";
+  if (dir === "mixed" || dir === "flat") return { dir };
+  // HOW FAR, BY THE COIN THAT MOVED MOST AS THE LINE SHOWS IT (red-team review
+  // of a964a74c, 2026-10-12): "$BTC -15.2%, $ETH -21.7%, $SOL -28.3%" went
+  // out beside "the giants dipped slightly". Read from the very figures shown,
+  // on moveOf's bands, and never a small word past the small band.
+  const most = Math.max(...shown.map((s) => Math.abs(Number.parseFloat(s.replace(/[+%]/g, "")))).filter(Number.isFinite));
+  const size = Number.isFinite(most) && most < 3 ? "a little" : Number.isFinite(most) && most < 10 ? "a fair bit" : "sharply";
+  return { dir, size };
 }
 
 /**
@@ -308,9 +321,30 @@ export function majorsDirOf(changes: readonly unknown[]): MarketRead["majors"] {
  * most one part's words (casual.ts latinLines) and a subject.
  */
 const MAJORS_SUBJECT: readonly string[] = ["majors", "the heavyweights", "blue chips", "big caps", "the giants", "the bellwethers", "the leaders", "the old guard"];
-const MAJORS_SAID: Readonly<Record<NonNullable<MarketRead["majors"]>["dir"] | "unread", readonly string[]>> = Object.freeze({
-  up: ["lean green today", "are climbing steadily", "look perky", "are grinding upward", "are edging skyward", "are inching forward", "are on the front foot", "are pushing ahead"],
-  down: ["are sliding a little", "seem tired", "are softening a touch", "are easing off", "dipped slightly", "are drifting downward", "are taking a breather", "are sagging gently"],
+/**
+ * ALL UP OR ALL DOWN, IN WORDS AS BIG AS THE MOVE (red-team review of
+ * a964a74c, 2026-10-12): "dipped slightly" and "taking a breather" went out
+ * beside BTC -15.2%, ETH -21.7%, SOL -28.3%, and "inching forward" beside
+ * +18.4%, +24.9%, +31%. One band for each of moveOf's: a little (under three
+ * percent), a fair bit (under ten), sharply. No "slightly", "a touch",
+ * "gently" or "inching" past the small band, nothing small in the sharp one.
+ */
+const MAJORS_MOVED: Readonly<Record<"up" | "down", Readonly<Record<NonNullable<Move["size"]>, readonly string[]>>>> = Object.freeze({
+  up: {
+    "a little": ["lean green today", "are inching forward", "look perky", "are edging up", "ticked a touch higher", "are up a hair", "nudged upward", "are mildly firmer"],
+    "a fair bit": ["are climbing steadily", "are grinding upward", "are on the front foot", "are pushing ahead", "gained solid ground", "are up a fair way",
+      "are rising decently", "are noticeably stronger"],
+    sharply: ["are surging", "shot up", "are up sharply", "are racing upward", "leapt dramatically", "are climbing fast", "spiked steeply", "are soaring"],
+  },
+  down: {
+    "a little": ["are sliding a little", "seem tired", "are softening a touch", "are easing off", "dipped slightly", "are drifting downward", "are taking a breather",
+      "are sagging gently"],
+    "a fair bit": ["are falling steadily", "lost solid ground", "are on the back foot", "are retreating", "are grinding lower", "are down a fair way",
+      "are noticeably weaker", "are slipping decently"],
+    sharply: ["are plunging", "dropped heavily", "are down sharply", "are tumbling", "fell steeply", "are sinking fast", "are getting hammered", "took a beating"],
+  },
+});
+const MAJORS_SAID: Readonly<Record<"mixed" | "flat" | "unread", readonly string[]>> = Object.freeze({
   mixed: ["are split down the middle", "disagree today", "are choppy again", "are undecided so far", "are a mixed bag", "are tugging both ways", "can't agree", "are torn"],
   flat: ["barely budged", "are flat as a pancake", "are idling around", "are sitting motionless", "are unchanged overall", "are treading water", "stay calm and steady", "are napping quietly"],
   // No read: the subject after its own lead, never a guess at which way.
@@ -323,12 +357,17 @@ const MAJORS_SAID: Readonly<Record<NonNullable<MarketRead["majors"]>["dir"] | "u
  * word of its own (robinhood, the chain, onchain, geckoterminal, the
  * trenches, the index, the trending page), so two lines of one read never
  * share a place word as well as a part.
+ *
+ * HOW MANY, NEVER WHICH WAY (red-team review of a964a74c, 2026-10-12): "a solo
+ * runner", "several runners", "a pack running" and "the trenches feel lively"
+ * went out beside "$CHUMP 24h -62.5%" and coins down fifty percent. The
+ * chain's words only count what the index lists; the figures say the rest.
  */
 const CHAIN_SAID: Readonly<Record<"one" | "some" | "none" | "unread", readonly string[]>> = Object.freeze({
-  some: ["a few tokens are moving on robinhood", "the chain has a handful of movers", "a couple of coins are busy onchain", "geckoterminal shows several runners",
-    "some action is brewing over there", "the trenches feel lively", "the index is buzzing a bit", "the trending page has a pack running"],
-  one: ["a single token is moving on robinhood", "the chain has a lone mover", "one coin is busy onchain", "geckoterminal shows a solo runner",
-    "a bit of action is brewing over there", "the trenches have a clear standout", "the index has a sole buzzer", "the trending page has a runaway"],
+  some: ["a few tokens appear on robinhood", "the chain lists a handful of names", "a couple of coins register onchain", "geckoterminal shows several tickers",
+    "some activity is visible over there", "the trenches feature a small group", "the index carries a short list", "the trending page has a tight cluster"],
+  one: ["a single token appears on robinhood", "the chain lists one name", "a lone coin registers onchain", "geckoterminal has a sole ticker",
+    "a bit of activity is visible over there", "the trenches feature a lonely listing", "the index carries a solitary item", "the trending page has a solo line"],
   none: ["robinhood is pretty quiet", "the chain is resting easy", "onchain feels sleepy", "geckoterminal shows no standouts",
     "no action brewing anywhere", "the trenches are snoozing hard", "the index is mellow lately", "the trending page is a ghost town"],
   unread: ["robinhood is a blank right now", "couldn't pull up the chain", "onchain didn't load for me", "geckoterminal went quiet on me",
@@ -347,8 +386,10 @@ const MARKET_CLOSE: readonly string[] = ["not a call, purely the tape", "snapsho
  * agent's line adds a clause about its own book (MARKET_PAPER).
  */
 export function marketAnswers(read: MarketRead, seed: string, style: { lower: boolean }, o: CodeLineOptions = {}): string[] {
-  const dir = read?.majors?.dir ?? "unread";
-  const majors = MAJORS_SUBJECT.map((subject, i) => (dir === "unread" ? `${MAJORS_SAID.unread[i]!} ${subject}` : `${subject} ${MAJORS_SAID[dir][i]!}`));
+  const m = read?.majors ?? null;
+  const said = m === null ? null : m.dir === "up" || m.dir === "down" ? MAJORS_MOVED[m.dir][m.size] : MAJORS_SAID[m.dir];
+  // An up or down read with no size the bands know is no read: never a guess at how far.
+  const majors = MAJORS_SUBJECT.map((subject, i) => (said?.[i] === undefined ? `${MAJORS_SAID.unread[i]!} ${subject}` : `${subject} ${said[i]!}`));
   const chain = CHAIN_SAID[!read?.chain ? "unread" : read.chain.coins === 0 ? "none" : read.chain.coins === 1 ? "one" : "some"];
   const notice = noticeFor(style, o);
   const paperOf = new Map(MARKET_CLOSE.map((close, i) => [close, CASUAL_PAPER[i % CASUAL_PAPER.length]!] as const));
