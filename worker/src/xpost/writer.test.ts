@@ -19,6 +19,7 @@ import {
   XPOST_ANTHROPIC_DEFAULT_MODEL,
   XPOST_GROQ_DEFAULT_MODEL,
   answerPrompt,
+  SHERWOOD_ON_X,
   buyPrompt,
   casualPrompt,
   describeXpostCreds,
@@ -731,6 +732,31 @@ describe("an active agent's answers and conversation memory", () => {
     assert.match(text, /Never write the address/);
     assert.doesNotMatch(text, /\bgroq\b|\bqwen\b|\bgpt\b/i);
     assert.match(answerPrompt({ ...BASE, question: "", recentBuys: [], said: [], walletPublic: false }).prompt, /PASS/);
+  });
+
+  it("an answer is very casual and teases the new sherwood one, spelled with no digit, never as what runs it", () => {
+    const text = all(answerPrompt({ ...BASE, question: "what model do you run on", recentBuys: [], said: [], walletPublic: false }));
+    assert.match(text, /texting a friend/);
+    assert.match(text, /never at the asker's expense/);
+    assert.match(text, new RegExp(`new «${SHERWOOD_ON_X}», merrymen's own model, as cooking`));
+    assert.equal(SHERWOOD_ON_X, "sherwood one");
+    assert.doesNotMatch(text, /sherwood-\d|sherwood \d/i, "a post carries no digits, so the model is never shown one in its name");
+    assert.match(text, /never claim sherwood runs you today/i);
+    assert.doesNotMatch(text, /\b(?:groq|qwen|gpt|llama|claude|openai|anthropic)\b/i);
+  });
+
+  it("research facts reach the prompt only when handed, attributed, digit-free, with the answer's own rules", () => {
+    const without = answerPrompt({ ...BASE, question: "thoughts on this coin?", recentBuys: [], said: [], walletPublic: false });
+    assert.doesNotMatch(all(without), /What you looked up/);
+    assert.match(without.system, /About the coin, say only the reason written here/, "no research: the reply rules, as before");
+    const withIt = answerPrompt({ ...BASE, question: "thoughts on this coin?", recentBuys: [], said: [], walletPublic: false, intent: "coin",
+      research: ["the public index shows liquidity is thin", "it had 1200 holders", "fomo traders mostly argue it's still early"] });
+    const text = all(withIt);
+    assert.match(text, /What you looked up just now.*«the public index shows liquidity is thin».*«fomo traders mostly argue it's still early»/s);
+    assert.doesNotMatch(text, /1200/, "a fact with a figure in it never reaches the model");
+    assert.match(withIt.system, /What you looked up \(listed below\) may be said as what its source showed/);
+    assert.doesNotMatch(withIt.system, /About the coin, say only the reason written here/);
+    assert.match(text, /Never say whether to buy it/);
   });
 
   it("a trade-talk casual post may pick up a theme it answered, and only then", () => {
