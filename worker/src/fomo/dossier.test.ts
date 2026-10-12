@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   DOSSIER_SCHEMA,
+  STATS_UNAVAILABLE_UNKNOWN,
   buildDossier,
   compareClaims,
+  dossierStatsOf,
   isContested,
   planThesisFetch,
   readThesisText,
@@ -478,6 +480,35 @@ describe("buildDossier: coverage and unknowns", () => {
     const { dossier } = buildDossier(input());
     assert.deepEqual(dossier.versions, { schema: DOSSIER_SCHEMA, prompt: null, model: null });
     assert.equal(DOSSIER_SCHEMA, "fomo-dossier/1");
+  });
+
+  it("keeps the source's statistics as re-checked numbers; a failed read is null, never zeros", () => {
+    const w = (uniqueBuyers: number | null, uniqueSellers: number | null) => ({
+      buys: 3,
+      sells: 2,
+      uniqueBuyers,
+      uniqueSellers,
+      buyVolumeUsd: 10,
+      sellVolumeUsd: 5,
+      netVolumeUsd: 5,
+      buySellRatio: 1.5,
+    });
+    const stats: TokenStats = { token: TOKEN, holders: 40, top10HoldersPercent: 88.8, windows: { "5m": w(1, 1), "1h": w(4, null), "24h": w(30, 22) } };
+    assert.deepEqual(buildDossier(input({ stats })).dossier.stats, {
+      holders: 40,
+      top10HoldersPercent: 88.8,
+      window1h: { uniqueBuyers: 4, uniqueSellers: null },
+      window24h: { uniqueBuyers: 30, uniqueSellers: 22 },
+    });
+    const failed = buildDossier(input({ stats: null })).dossier;
+    assert.equal(failed.stats, null);
+    assert.ok(failed.coverage.missingSections.includes("token-stats"));
+    assert.ok(failed.unknowns.includes(STATS_UNAVAILABLE_UNKNOWN));
+    assert.deepEqual(
+      dossierStatsOf({ token: TOKEN, holders: 2.5, top10HoldersPercent: 101, windows: { "1h": w(-1, Number.NaN), "24h": w(null, null) } }),
+      { holders: null, top10HoldersPercent: null, window1h: null, window24h: null },
+      "a figure that is not a plain count or a 0-100 share is unknown",
+    );
   });
 });
 

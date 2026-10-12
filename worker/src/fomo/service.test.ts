@@ -1320,6 +1320,23 @@ describe("reports, memory, health", () => {
     assert.deepEqual(await store.heldTokensFor(h.db, OWNER, 0), [PONS_KEY], "and only that tenant's");
   });
 
+  it("review candidates are noted per reporting tenant, bounded, and spend nothing", async () => {
+    const h = await harness();
+    const rh = (n: number) => `eip155:4663:0x${n.toString(16).padStart(2, "0").repeat(20)}`;
+    const many = Array.from({ length: 14 }, (_, i) => rh(i + 1));
+    await h.service.report(OWNER, { kind: "review-candidates", tokenKeys: [PONS_KEY, "not-a-key", `solana:1399811149:${"So1".padEnd(43, "1")}`], atMs: NOW }, NOW);
+    await h.service.report(OWNER, { kind: "review-candidates", tokenKeys: many, atMs: NOW }, NOW + 1_000);
+    const mine = h.service.reviewCandidatesSnapshot(OWNER, NOW + 2_000);
+    assert.equal(mine.length, 10, "ten coins a window, whatever the child sends");
+    assert.ok(mine.some((c) => c.tokenKey === PONS_KEY));
+    assert.ok(!mine.some((c) => !c.tokenKey.startsWith("eip155:4663:0x")), "Robinhood keys only");
+    assert.deepEqual(h.service.reviewCandidatesSnapshot("0xother", NOW + 2_000), [], "another tenant sees none of them");
+    assert.equal(h.service.reviewCandidatesSnapshot(OWNER.toUpperCase().replace("0X", "0x"), NOW + 2_000).length, 10, "the tenant key is canonical");
+    assert.equal(h.calls.length, 0, "noting a candidate reads nothing upstream");
+    // Past keepMs with nothing named again, nothing is carried.
+    assert.deepEqual(h.service.reviewCandidatesSnapshot(OWNER, NOW + 21 * 60_000), []);
+  });
+
   it("subject memory is tenant-scoped", async () => {
     const h = await harness();
     await h.service.memorySet(OWNER, "c1", JSON.stringify({ a: 1 }), NOW);

@@ -6,13 +6,13 @@
  *
  * ── THE RULES, EACH OF WHICH IS A WAY THIS BLOCK COULD LIE ──────────────
  *
- * ABSENCE IS NOT A VERDICT. A dossier with no observed trades, no claims, no
- * inconsistencies and no usable statistics renders NOTHING (null), and Brain
- * answers NO DATA AVAILABLE for the lens. "Nobody on the feed is talking about
- * this coin" is a statement about a feed with a $3,000 floor and patchy
- * coverage, and rendered as a sentence it would be read as a finding about the
- * coin. Statistics that were unavailable are said so inside a lens that has
- * something else to say, and never make one by themselves.
+ * ABSENCE IS NOT A VERDICT. A dossier with no observed trades, no claims and
+ * no inconsistencies renders NOTHING (null), and Brain answers NO DATA
+ * AVAILABLE for the lens. "Nobody on the feed is talking about this coin" is a
+ * statement about a feed with a $3,000 floor and patchy coverage, and rendered
+ * as a sentence it would be read as a finding about the coin. The source's
+ * holder and buyer/seller statistics (or that they were unavailable) ride in a
+ * lens that has something else to say, and never make one by themselves.
  *
  * VENDOR-NEUTRAL. Brain is told "a third-party social-trading platform" and
  * nothing else. It must weigh the KIND of source, not a brand, and a brand in a
@@ -107,9 +107,11 @@ function claimLine(lead: string, c: DossierClaim, ref: string): string {
  * repeated. A side that is unknown is said to be unknown, never zero.
  *
  * "UNAVAILABLE" IS NOT CONTENT. A provider outage (a 503, a refused budget)
- * gives the line below, never a lens of its own: absence is not a verdict.
+ * gives the line below, never a lens of its own (absence is not a verdict),
+ * and it ranks with the coverage line rather than ahead of anything a trader
+ * did or wrote. Figures that were read rank right after the strongest cases.
  */
-const STATS_LEAD = "Across all trade sizes, the same platform's statistics report";
+const STATS_LEAD = "Across all trade sizes, the same platform counts";
 const STATS_UNAVAILABLE = "Holder and unique buyer/seller statistics: unavailable on this read.";
 
 function statsCount(v: unknown): number | null {
@@ -121,8 +123,7 @@ function statsSide(w: DossierStatsWindow | null | undefined, label: string): str
   const b = statsCount(w.uniqueBuyers);
   const s = statsCount(w.uniqueSellers);
   if (b === null && s === null) return null;
-  const side = (n: number | null, one: string, many: string) => (n === null ? `an unknown number of ${many}` : plural(n, one, many));
-  return `${label} ${side(b, "unique buyer", "unique buyers")} vs ${side(s, "unique seller", "unique sellers")}`;
+  return `${label} ${b ?? "unknown"} vs ${s ?? "unknown"}`;
 }
 
 /** The figures as phrases, or [] when none is a usable number. */
@@ -134,20 +135,30 @@ function statsParts(d: CoinDossier): string[] {
   if (holders !== null) parts.push(plural(holders, "holder", "holders"));
   const top = s.top10HoldersPercent;
   if (typeof top === "number" && Number.isFinite(top) && top >= 0 && top <= 100) parts.push(`the top 10 wallets hold ${top.toFixed(1)}%`);
-  for (const p of [statsSide(s.window1h, "last hour"), statsSide(s.window24h, "last 24h")]) if (p) parts.push(p);
+  const sides = [statsSide(s.window1h, "last hour"), statsSide(s.window24h, "last 24h")].filter((p): p is string => p !== null);
+  if (sides.length) parts.push(`unique buyers vs sellers: ${sides.join(", ")}`);
   return parts;
 }
 
-function statsLine(d: CoinDossier): string | null {
+/** The line, and whether it carries figures (true) or says they were unavailable (false); null: nothing to say. */
+function statsLine(d: CoinDossier): { text: string; known: boolean } | null {
   const parts = statsParts(d);
-  if (parts.length) return `${STATS_LEAD} ${parts.join("; ")}.`;
+  if (parts.length) return { text: `${STATS_LEAD} ${parts.join("; ")}.`, known: true };
   if (d.stats === undefined && !d.coverage.missingSections.includes("token-stats")) return null;
-  return STATS_UNAVAILABLE;
+  return { text: STATS_UNAVAILABLE, known: false };
 }
 
+/**
+ * STATISTICS NEVER MAKE A LENS BY THEMSELVES. Brain holds a pulse slot for
+ * this lens whenever it is fed (services/brain PULSE_RESERVED_LENSES) on the
+ * premise that it is fed only when traders were actually seen on the coin;
+ * holder counts exist for nearly every coin, so a statistics-only block would
+ * displace a market analyst on almost every review. They ride along in a lens
+ * that traders' activity or words already justify.
+ */
 function hasUsableContent(d: CoinDossier): boolean {
   const traded = d.flow !== null && (d.flow.distinctBuyers ?? 0) + (d.flow.distinctSellers ?? 0) > 0;
-  return traded || d.claims.length > 0 || d.wordsVsActions.length > 0 || statsParts(d).length > 0;
+  return traded || d.claims.length > 0 || d.wordsVsActions.length > 0;
 }
 
 /** Anything address-shaped or vendor-named anywhere withholds the WHOLE lens. */
@@ -204,13 +215,13 @@ function composeBody(d: CoinDossier): { lines: string[]; citations: LensCitation
       candidates.push({ build: (ref) => claimLine(lead, claim, ref), cite: { section, evidence: claim.evidence } });
     }
   }
-  candidates.push(...written);
-
-  // The statistics after the cases for and against: on a coin with written
-  // theses those are the reading; on one without (most of what a review is
-  // shown), this is. No ref: it cites no item of the dossier's evidence.
+  // FIGURES RIGHT AFTER THE STRONGEST CASES, ahead of the written follow-ups:
+  // holder concentration and who is still buying are often the whole reading
+  // on a coin nobody wrote about (most of what a review is shown), and a risk
+  // to weigh on one they did. No ref: it cites no item of the evidence.
   const stats = statsLine(d);
-  if (stats) candidates.push({ build: () => stats, cite: null });
+  if (stats?.known) candidates.push({ build: () => stats.text, cite: null });
+  candidates.push(...written);
 
   if (!d.strongestOpposition && !d.strongestSupport && d.claims.length) {
     const neutral = d.claims.filter((c) => c.stance === "neutral");
@@ -239,6 +250,7 @@ function composeBody(d: CoinDossier): { lines: string[]; citations: LensCitation
       (capped ? "; the read was capped and the rest are unread." : "."),
     cite: null,
   });
+  if (stats && !stats.known) candidates.push({ build: () => stats.text, cite: null });
   // The stats line already says the statistics were unavailable; not twice.
   const unknowns = stats ? d.unknowns.filter((u) => u !== STATS_UNAVAILABLE_UNKNOWN) : d.unknowns;
   for (const u of unknowns.slice(0, 2)) candidates.push({ build: () => `Unknown: ${u}`, cite: null });
