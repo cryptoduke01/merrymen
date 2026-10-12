@@ -3772,3 +3772,31 @@ test("no draft reassures about a hack or announces a token: the house, a token, 
     }
   }
 });
+
+test("a slur or political coin asked in a major's shape is never searched for nor declined (red-team 2026-10-12)", async (t) => {
+  // CoinGecko's search finds no such coin, so research said "unanswered", and at 58ba9fd0 a friendly decline went up under each.
+  for (const text of ["thoughts on hitler coin?", "thoughts on trump coin?", "thoughts on maga coin?", "thoughts on melania coin?", "thoughts on kkk coin?"]) {
+    const searched: string[] = [];
+    const research = createXResearch({
+      majors: { configured: () => true, search: async (q) => { searched.push(String(q)); return { hits: [], failed: false, observedAt: NOW }; },
+        market: async () => ({ market: null, failed: true }), trending: async () => ({ coins: [], failed: false }), top: TOP_READ },
+      resolveTicker: async () => null, coinFacts: async () => ({ ok: false, why: "unavailable" }), projectDescription: async () => null, publicTheses: async () => [],
+    });
+    const w = await world(t, { ...ALAN, env: RESEARCH_ON, research, answer: "lol, wish i knew, could go anywhere. Say stop to opt out." });
+    w.setInbox([alanTag("100000000000000702", text)]);
+    const r = await w.step();
+    assert.deepEqual(w.sends, [], text);
+    assert.deepEqual(searched, [], `${text}: nothing searched`);
+    assert.doesNotMatch(r.log ?? "", /answer-casual|answer-research-declined/, text);
+  }
+  // A plain coin name that coingecko does not know is still declined in code's words.
+  const research = createXResearch({
+    majors: { configured: () => true, search: async () => ({ hits: [], failed: false, observedAt: NOW }), market: async () => ({ market: null, failed: true }),
+      trending: async () => ({ coins: [], failed: false }), top: TOP_READ },
+    resolveTicker: async () => null, coinFacts: async () => ({ ok: false, why: "unavailable" }), projectDescription: async () => null, publicTheses: async () => [],
+  });
+  const w = await world(t, { ...ALAN, env: RESEARCH_ON, research, answer: "PASS" });
+  w.setInbox([alanTag("100000000000000702", "thoughts on eth guys?")]);
+  await w.step();
+  assert.ok(w.sends.length === 0 || oneOf(declineAnswers, "100000000000000702", w.sends[0]?.text), String(w.sends[0]?.text));
+});

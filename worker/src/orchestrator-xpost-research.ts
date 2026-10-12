@@ -558,8 +558,8 @@ const EVERYDAY_HIDING: ReadonlySet<string> = new Set((
   "cucumber succumb incumbent manuscript tardy magazine auspicious cocoon basement manager managers angry angrier hungry stranger strangers " +
   "ranger rangers singer singers ginger messenger passenger passengers challenger challengers avenger avengers"
 ).split(/\s+/));
-/** "alan" said to it at the start, after at most two greeting words: an address, never a name the tag is about. */
-const ALAN_ADDRESSED = /^(?:(?:gm|gn|yo|hey|hi|hello|ser|fren|bro|sup)[\s,!.]+){0,2}alan\b[\s,!.:-]*/;
+/** "alan" said to it at the start, after at most two greeting words, or after a comma at the very end: an address, never a name the tag is about. */
+const ALAN_ADDRESSED = /^(?:(?:gm|gn|yo|hey|hi|hello|ser|fren|bro|sup)[\s,!.]+){0,2}alan\b[\s,!.:-]*|,\s*alan$/;
 /** TGE anywhere, the house's or the agent's own token, or a model beside a token, a coin, a launch or a presale. */
 const HOUSE_TOKEN_ASK = /\btge\b|\b(?:your|ur|ya|yer|you(?:r|')?\s*guys'?|the\s+house'?s?|house|the\s+team'?s?|the\s+devs?'?)\s+(?:own\s+|new\s+|official\s+)?(?:tokens?|coins?|tge|launch\w*|presale|airdrop|ticker)\b/;
 const MODEL_WORD = /\b(?:models?|llms?)\b/;
@@ -567,7 +567,7 @@ const TOKEN_WORD = /\b(?:tokens?|coins?|tge|launch\w*|presale|airdrop|ticker|min
 export function unshowableName(text: unknown): boolean {
   if (typeof text !== "string") return false;
   if (sherwoodMentioned(text)) return true;
-  const t = normalisedTag(text).replace(/[’‘]/g, "'").replace(ALAN_ADDRESSED, "");
+  const t = normalisedTag(text).replace(/[’‘]/g, "'").replace(new RegExp(ALAN_ADDRESSED.source, "g"), "");
   if (HOUSE_TOKEN_ASK.test(t) || (MODEL_WORD.test(t) && TOKEN_WORD.test(t))) return true;
   const runs = [...extractCashtags(text).map((c) => c.toLowerCase()), ...(t.match(/[a-z]+/g) ?? [])];
   return runs.some((w) => !EVERYDAY_HIDING.has(w) && neverAnsweredName(w));
@@ -699,6 +699,12 @@ export function classifyTag(text: string, o: { address?: string | null; advice?:
   // anything else as chat. Never with a contract, never for a private ask.
   const major = address === null && !isPrivateAsk(t) ? majorAsk(t) : null;
   const rest = classifyRest(t, address, asked);
+  // NEVER LOOKED UP UNDER A NAME THE HOUSE WOULD NEVER SHOW (red-team
+  // 2026-10-12): "thoughts on hitler coin?", "thoughts on trump coin?" read as
+  // majors, found no exact match on CoinGecko, and research's "unanswered" was
+  // declined in a friendly line. Nothing is searched for such a tag, and
+  // nothing is said under it.
+  if ((major !== null || rest.kind === "coin" || rest.kind === "own-trades") && unshowableName(t)) return { kind: "unanswered" };
   if (major && (rest.kind === "coin" || rest.kind === "chat")) return { kind: "major", query: major, fallback: rest.kind === "coin" ? rest : null };
   return rest;
 }

@@ -1743,6 +1743,19 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         await returnAllowance(shared, answerKey, at());
         await returnAllowance(shared, `llm:${utcDay(nowMs)}`, at());
       }
+      // AND NEVER UNDER A NAME THE HOUSE WOULD NEVER SHOW (red-team 2026-10-12):
+      // research's "unanswered" was declined with no unshowableName check, so
+      // "thoughts on trump coin?" got "heh, nice try. your decisions stay
+      // yours". classifyTag answers such a tag by nothing before research now;
+      // this holds it here too, a skipped row as before the decline.
+      if (researchUnanswered && unshowableName(candidate.text)) {
+        bump("answer-research-unshowable");
+        const id = await schedulePost(shared, {
+          tenant: account.tenant, xUserId: account.xUserId, kind: "answer", dedupeKey, body: "", coin: null, decisionId: null, dueAtMs: at(), nowMs: at(),
+          replyToTweetId: comment.id, replyRootTweetId: comment.id, replyAuthorId: comment.authorId, status: "skipped", reason: "research:unanswered",
+        });
+        return id === null ? null : { body: null };
+      }
       if (researchUnanswered) {
         bump("answer-research-declined");
         figures = null;

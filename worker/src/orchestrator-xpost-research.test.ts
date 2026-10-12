@@ -1062,8 +1062,13 @@ describe("never confirm a buy by name", () => {
 
   it("its own contract beside any other name is never the exact path (red-team 2026-10-12)", async () => {
     // The reproduced tags: another ticker, a second ticker, a made-up name, a house name, each beside the contract it really bought.
-    for (const text of [`did you buy $WIF? ca ${PEPE_CA}`, `did you buy $TRUMP or ${PEPE_CA}?`, `is merrycoin ${PEPE_CA} the one you bought?`,
-      `is $MERRYMEN ca ${PEPE_CA} the one you bought?`, `is merrymen coin ${PEPE_CA} the one you bought?`, `did you buy pepe ${PEPE_CA}?`]) {
+    // Beside a house or political name it is answered by nothing at all since the red-team review of 2026-10-12 (unshowableName).
+    for (const text of [`did you buy $TRUMP or ${PEPE_CA}?`, `is merrycoin ${PEPE_CA} the one you bought?`, `is $MERRYMEN ca ${PEPE_CA} the one you bought?`,
+      `is merrymen coin ${PEPE_CA} the one you bought?`]) {
+      const c = tagCandidate({ id: "t1", authorId: "u1", text: `@alan ${text}`, conversationId: "t1", inReplyToTweetId: "", createdAtMs: NOW }, { xUserId: "x1", research: true, username: "alan" });
+      assert.ok(c.ok && classifyTag(c.text, { address: c.address ?? null }).kind === "unanswered", text);
+    }
+    for (const text of [`did you buy $WIF? ca ${PEPE_CA}`, `did you buy pepe ${PEPE_CA}?`]) {
       const read = await promptFor(text, true);
       assert.ok(read, text);
       assert.equal(read!.exact, false, text);
@@ -1792,6 +1797,14 @@ describe("answer anything: every tag past the screens has a lane, and silence on
     }
   });
 
+  it("a major's or a coin's shape under a name the house never answers under is answered by nothing, never searched (red-team 2026-10-12)", () => {
+    for (const text of ["thoughts on hitler coin?", "thoughts on trump coin?", "thoughts on maga coin?", "thoughts on melania coin?", "thoughts on kkk coin?", "is $TRUMP legit?", "how's $KIKE doing?"]) {
+      assert.equal(classifyTag(text).kind, "unanswered", text);
+    }
+    assert.equal(classifyTag("thoughts on doge?").kind, "major");
+    assert.equal(classifyTag("is $wojak legit?").kind, "coin");
+  });
+
   it("every word of a tag is read, the house's own and long runs too, and sherwood as it sounds (red-team 2026-10-12)", () => {
     // Each declined in a friendly line at 58ba9fd0; nothing at the base commit.
     for (const text of ["should i buy the merrymen model token at tge?", "should i buy the merrymen token before it launches?", "should i sell before merrymen rugs us?",
@@ -1803,7 +1816,7 @@ describe("answer anything: every tag past the screens has a lane, and silence on
       assert.equal(classifyTag(text, { advice: true }).kind, "unanswered", text);
     }
     // "alan" said to its face, and the plain words such a name hides in, are no such name.
-    for (const text of ["hey alan, should i buy pepe tonight?", "alan should i buy pepe?", "is eth getting stronger, should i buy?", "should i accumulate eth?",
+    for (const text of ["hey alan, should i buy pepe tonight?", "alan should i buy pepe?", "should i buy pepe, alan?", "is eth getting stronger, should i buy?", "should i accumulate eth?",
       "is the balance of risk good for a buy?", "should i buy the dip on this crisis?", "should i buy pepe"]) {
       assert.equal(unshowableName(text), false, text);
       assert.equal(classifyTag(text, { advice: true }).kind, "advice", text);
