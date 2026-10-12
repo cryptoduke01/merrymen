@@ -39,7 +39,7 @@ import {
 import type { PublicThesis } from "./thesis-policy";
 import { admitXPost } from "./xpost/gate";
 import { tagCandidate } from "./xpost/replies";
-import { answerPrompt, answerQuestion, modelAnswer, modelAnswers, type AnswerFacts } from "./xpost/writer";
+import { answerPrompt, answerQuestion, greetingAnswers, modelAnswer, modelAnswers, type AnswerFacts } from "./xpost/writer";
 import { ensureXpostSchema, readMeta, type XPost } from "./xpost/store";
 
 const NOW = Date.UTC(2026, 9, 12, 12);
@@ -393,6 +393,38 @@ describe("words from measurements: digit-free, attributed, and through the X gat
         const v = admitXPost(line, { kind: "reply", agentName: "Alan", mode, coins: [], recentOwn: others, recentFleet: others }, (r, c) => admitAgentLine(r, c));
         assert.ok(v.ok, `${mode}: ${line} → ${v.ok ? "" : v.reason}`);
         const again = admitXPost(line, { kind: "reply", agentName: "Alan", mode, coins: [], recentOwn: [line], recentFleet: [line] }, (r, c) => admitAgentLine(r, c));
+        assert.equal(again.ok, false, "but never itself again");
+      }
+    }
+  });
+
+  it("every code-built greeting answer clears the X gate as a reply, live, paper and idle, in either case", () => {
+    for (let i = 0; i < 40; i++) {
+      for (const lower of [true, false]) {
+        for (const mode of ["live", "paper", null] as const) {
+          for (const line of greetingAnswers(`1000000000000${i}`, { lower }, { paper: mode === "paper" })) {
+            const v = admitXPost(line, { kind: "reply", agentName: "Alan", mode, coins: [], recentOwn: [], recentFleet: [], emojiOk: false }, (r, c) => admitAgentLine(r, c));
+            assert.deepEqual(v, { ok: true, text: line }, `${mode}: ${line}`);
+          }
+        }
+      }
+    }
+    // Without its clause a paper agent's greeting would be refused: why the clause is there.
+    const plain = greetingAnswers("1", { lower: true })[0]!;
+    const unsaid = admitXPost(plain, { kind: "reply", agentName: "Alan", mode: "paper", coins: [], recentOwn: [], recentFleet: [] }, (r, c) => admitAgentLine(r, c));
+    assert.equal(unsaid.ok ? "ok" : unsaid.reason, "paper-unsaid");
+  });
+
+  it("the greeting answers are not each other, nor the model answers: each clears the gate with all of those already said, never itself", () => {
+    for (const mode of ["live", "paper", null] as const) {
+      const paper = mode === "paper";
+      const lines = greetingAnswers("1", { lower: false }, { paper });
+      assert.equal(lines.length, 8);
+      for (const line of lines) {
+        const others = [...lines.filter((l) => l !== line), ...modelAnswers("1", { lower: false }, { paper })];
+        const v = admitXPost(line, { kind: "reply", agentName: "Alan", mode, coins: [], recentOwn: others, recentFleet: others }, (r, c) => admitAgentLine(r, c));
+        assert.ok(v.ok, `${mode}: ${line} → ${v.ok ? "" : v.reason}`);
+        const again = admitXPost(line, { kind: "reply", agentName: "Alan", mode, coins: [], recentOwn: [line], recentFleet: [] }, (r, c) => admitAgentLine(r, c));
         assert.equal(again.ok, false, "but never itself again");
       }
     }

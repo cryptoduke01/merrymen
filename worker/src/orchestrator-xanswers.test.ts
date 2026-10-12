@@ -1,7 +1,7 @@
 /**
  * AN ACTIVE AGENT ANSWERS TAGS: a post that mentions it and asks it something
  * gets one answer, from public facts, in its own lane, right away — read
- * within a minute, due when drafted, the owner's night no hold — but never
+ * every fifteen seconds, due when drafted, the owner's night no hold — but never
  * for an owner the operator did not make active, never for advice, never
  * twice to one person in a day beyond the allowance, and never after a STOP.
  */
@@ -10,7 +10,7 @@ import { randomBytes } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { test, type TestContext } from "node:test";
 import { wrapSqlite } from "./db";
-import { makeXPoster, xpostEnv } from "./orchestrator-xpost";
+import { ACTIVE_REPLY_POLL_MS, ACTIVE_REPLY_POLLS_PER_DAY, makeXPoster, xpostEnv } from "./orchestrator-xpost";
 import { isAsleep } from "./groupchat/clock";
 import { createXResearch, type XResearch } from "./orchestrator-xpost-research";
 import type { CoinFacts } from "./coin-facts-types";
@@ -18,6 +18,9 @@ import type { FomoBroker } from "./fomo/contract";
 import type { FlowResult } from "./flow-facts";
 import type { AgentFacts, CallFact } from "./groupchat/facts";
 import type { FetchLike } from "./xpost/client";
+import { greetingAnswers, modelAnswers } from "./xpost/writer";
+import { ANSWER_GAP_MS } from "./xpost/planner";
+import { PAUSE_KEY } from "./xpost/sender";
 import * as store from "./xpost/store";
 
 const MIN = 60_000, HOUR = 60 * MIN, DAY = 24 * HOUR;
@@ -43,6 +46,8 @@ async function world(t: TestContext, o: {
   /** MERRYMEN_XPOST_REPLIES_APPROVED as set (null: unset), read as the orchestrator reads it. Default: approved for everyone. */
   scope?: string | null;
   env?: Record<string, string>; research?: XResearch; facts?: AgentFacts; answer?: string;
+  /** Run while an answer is being drafted: what another replica does in the middle of this pass. */
+  duringDraft?: (db: ReturnType<typeof wrapSqlite>) => Promise<void>;
 } = {}) {
   const raw = new DatabaseSync(":memory:");
   t.after(() => raw.close());
@@ -68,8 +73,14 @@ async function world(t: TestContext, o: {
   }
   let inbox: Record<string, unknown>[] = [tag()];
   const sends: Record<string, unknown>[] = [], prompts: string[] = [], reads: number[] = [];
+  /** Whose mentions each read was for, by X user id, in order. */
+  const readers: string[] = [];
+  /** When the room's facts were loaded: once per pass that planned or answered. */
+  const factLoads: number[] = [];
   let clock = NOW;
   let garbled = false;
+  /** X's answer to a read of the mentions instead of the inbox: a 429 with its reset, or a 402. */
+  let refuseRead: { status: 429; resetSec: number } | { status: 402 } | null = null;
   // Who X says wrote each tag (expansions=author_id): an ordinary reader by default; null leaves an author out.
   let authors = new Map<string, { username: string; name: string } | null>();
   const users = () => [...new Set(inbox.map((m) => String(m.author_id)))].flatMap((id) => {
@@ -79,6 +90,11 @@ async function world(t: TestContext, o: {
   const fetch: FetchLike = async (url, init) => {
     if (url.includes("/mentions?")) {
       reads.push(clock);
+      readers.push(/\/users\/(\d+)\/mentions/.exec(url)?.[1] ?? "");
+      if (refuseRead) {
+        const reset = refuseRead.status === 429 ? String(refuseRead.resetSec) : null;
+        return { status: refuseRead.status, headers: { get: (h: string) => (h.toLowerCase() === "x-rate-limit-reset" ? reset : null) }, text: async () => "{}" };
+      }
       // A page that does not add up, as X's answer past its eight hundred mentions reads to the client.
       if (garbled) return { status: 200, headers: { get: () => null }, text: async () => JSON.stringify({ data: inbox, meta: { result_count: inbox.length + 1 } }) };
       return { status: 200, headers: { get: () => null }, text: async () => JSON.stringify({ data: inbox, includes: { users: users() }, meta: { result_count: inbox.length } }) };
@@ -96,10 +112,11 @@ async function world(t: TestContext, o: {
       ? { ...xpostEnv(env), repliesApproved: true, replyPollsPerDay: o.polls }
       : { ...xpostEnv(o.scope === null ? env : { ...env, MERRYMEN_XPOST_REPLIES_APPROVED: o.scope }), replyPollsPerDay: o.polls },
     deps: { dialect: "sqlite", fetch, monotonic: () => 0, member: async () => ({ tz: o.tz ?? null }),
-      facts: async () => new Map([[TENANT, o.facts ?? FACTS], ...others.map((t, i): [string, AgentFacts] => [t, { ...FACTS, tenant: t, agentId: t, name: `Other ${i}`, calls: [] }])]),
+      facts: async () => { factLoads.push(clock); return new Map([[TENANT, o.facts ?? FACTS], ...others.map((t, i): [string, AgentFacts] => [t, { ...FACTS, tenant: t, agentId: t, name: `Other ${i}`, calls: [] }])]); },
       // Only the answer prompt gets words back: every other draft passes.
       llm: async (_creds, input) => {
         prompts.push(input.prompt);
+        if (o.duringDraft && /Untrusted question/.test(input.prompt)) await o.duringDraft(db);
         everySystem.push(input.system ?? "");
         if (/Untrusted question/.test(input.prompt)) systems.push(input.system ?? "");
         return /Untrusted question/.test(input.prompt) ? o.answer ?? ANSWER : "PASS";
@@ -110,7 +127,8 @@ async function world(t: TestContext, o: {
   const step = (now = NOW) => { clock = now; return poster.step(db, [{ tenant: TENANT, agentId: TENANT }, ...others.map((t) => ({ tenant: t, agentId: t }))], new Map(), now); };
   const answers = async () => (await store.postsOf(db, TENANT, 0)).filter((p) => p.kind === "answer");
   const asked = () => prompts.filter((p) => /Untrusted question/.test(p));
-  return { db, step, answers, asked, systems, everySystem, sends, reads, setInbox: (v: Record<string, unknown>[]) => { inbox = v; }, garble: (on: boolean) => { garbled = on; },
+  return { db, step, answers, asked, systems, everySystem, sends, reads, readers, factLoads, setInbox: (v: Record<string, unknown>[]) => { inbox = v; }, garble: (on: boolean) => { garbled = on; },
+    refuseRead: (v: typeof refuseRead) => { refuseRead = v; },
     setAuthors: (v: Record<string, { username: string; name: string } | null>) => { authors = new Map(Object.entries(v)); } };
 }
 
@@ -121,28 +139,89 @@ test("the operator's active owners are read by address only, and a bad entry is 
   assert.equal(xpostEnv({}).activeTenants, undefined);
 });
 
-test("a tag gets one answer to the mention itself, right away, in its own lane", async (t) => {
+test("a tag gets one answer to the mention itself, right away, in its own lane: read, drafted and sent on one pass", async (t) => {
   const w = await world(t);
-  await w.step();
+  const r = await w.step();
   const [answer] = await w.answers();
   assert.ok(answer, "an answer was drafted");
-  assert.equal(answer.status, "scheduled");
   assert.ok(answer.dueAtMs <= answer.createdAtMs, "due no later than when it was drafted: no ten-minute wait");
   assert.equal(answer.replyToTweetId, MENTION);
   const [prompt] = w.asked();
   assert.match(prompt!, /what kind of coins do you trade/);
   assert.doesNotMatch(prompt!, /@pine_stoat|private-access|private-refresh|private-model/);
-  w.setInbox([]);
-  // Not on a pass that did not read the inbox again: opt-outs come first.
-  await w.step(NOW + 15_000);
-  assert.equal(w.sends.length, 0, "a send waits for a fresh read of the mentions");
-  // The next pass that reads them, a minute on, sends it.
-  await w.step(NOW + MIN);
-  assert.deepEqual(w.sends, [{ text: ANSWER, reply: { in_reply_to_tweet_id: MENTION } }]);
-  assert.equal((await w.answers())[0]!.status, "posted");
+  // The pass that read the tag drafted the answer and sent it: no waiting for another read.
+  assert.deepEqual(w.reads, [NOW], "one read of the mentions");
+  assert.deepEqual(w.sends, [{ text: ANSWER, reply: { in_reply_to_tweet_id: MENTION } }], "sent on the pass that read it");
+  assert.equal(answer.status, "posted");
+  assert.match(r.log ?? "", /drafted-answer 1/);
+  assert.match(r.log ?? "", /\bsent 1\b/);
   assert.equal(await store.lastOutAt(w.db, "111", NOW - DAY), null, "an answer is not a post the cadence waits behind");
   assert.equal((await store.readMeta(w.db, `xday:111:2026-09-30`))?.n ?? 0, 0, "nor one it counts");
-  assert.equal((await store.readMeta(w.db, `answerday:111:2026-09-30`))?.n, 1);
+  assert.equal((await store.readMeta(w.db, `answerday:111:2026-09-30`))?.n, 1, "the answers' own day allowance was taken");
+  assert.equal((await store.readMeta(w.db, "posts:2026-09-30"))?.n, 1, "and a unit of the fleet's ceiling");
+  // Never twice: the next read finds nothing new, and nothing else goes out.
+  w.setInbox([]);
+  await w.step(NOW + 15_000);
+  assert.equal(w.sends.length, 1);
+});
+
+test("a STOP in the same batch opts its author out first: nothing is drafted or sent to them, and the next person is answered on that pass", async (t) => {
+  const w = await world(t);
+  w.setInbox([
+    tag({ id: "100000000000000201", conversation_id: "100000000000000201", author_id: "333", created_at: new Date(NOW - 2 * MIN).toISOString() }),
+    tag({ id: "100000000000000202", conversation_id: "100000000000000202", author_id: "333", created_at: new Date(NOW - 90_000).toISOString(), text: "@pine_stoat stop" }),
+    tag({ id: "100000000000000203", conversation_id: "100000000000000203", author_id: "444", text: "@pine_stoat how do you pick your coins?" }),
+  ]);
+  await w.step();
+  assert.equal(await store.repliesOptedOut(w.db, "111", "333"), true, "recorded before anything was drafted");
+  assert.deepEqual((await w.answers()).map((a) => a.replyAuthorId), ["444"], "nothing drafted for the person who said stop, though their question came first");
+  assert.equal(w.asked().length, 1);
+  assert.deepEqual(w.sends, [{ text: ANSWER, reply: { in_reply_to_tweet_id: "100000000000000203" } }], "the other person's answer went out on the same pass");
+});
+
+test("the same-pass send is the normal send path: a pause, the fleet's ceiling or the day's answers taken meanwhile still hold it", async (t) => {
+  const cases: [string, (db: ReturnType<typeof wrapSqlite>) => Promise<void>, string, string][] = [
+    ["a credits pause another replica wrote", (db) => store.writeMeta(db, PAUSE_KEY, String(NOW + HOUR), NOW), "scheduled", "paused-for-credits"],
+    ["the fleet's ceiling reached", async (db) => { await db.prepare("INSERT INTO xpost_meta (k, n, v, updated_at_ms) VALUES (?, ?, NULL, ?)").run("posts:2026-09-30", 1000, NOW); }, "scheduled", "fleet-ceiling-reached"],
+    ["the day's answers all taken", async (db) => { await db.prepare("INSERT INTO xpost_meta (k, n, v, updated_at_ms) VALUES (?, ?, NULL, ?)").run("answerday:111:2026-09-30", 24, NOW); }, "skipped", "answer-day-cap"],
+  ];
+  for (const [what, meanwhile, status, said] of cases) {
+    const w = await world(t, { duringDraft: meanwhile });
+    const r = await w.step();
+    assert.equal(w.asked().length, 1, what);
+    assert.deepEqual(w.sends, [], `${what}: nothing sent`);
+    assert.equal((await w.answers())[0]!.status, status, what);
+    assert.match(r.log ?? "", new RegExp(`${said} 1`), what);
+  }
+});
+
+test("an answer waiting for an X account whose read failed, or was not due, on this pass is not sent until a pass reads it again", async (t) => {
+  const w = await world(t);
+  w.setInbox([]);
+  // An answer drafted earlier, still waiting (held by the answers' gap, say).
+  await store.schedulePost(w.db, { tenant: TENANT, xUserId: "111", kind: "answer", dedupeKey: "answer:111:100000000000000211",
+    body: ANSWER, nowMs: NOW - 10_000, dueAtMs: NOW - 10_000, replyToTweetId: "100000000000000211", replyRootTweetId: "100000000000000211", replyAuthorId: "211" });
+  // X refuses the read: no send on that pass, nor on the next, which may not read before X's reset.
+  w.refuseRead({ status: 429, resetSec: (NOW + 30_000) / 1000 });
+  await w.step(NOW);
+  w.refuseRead(null);
+  await w.step(NOW + 15_000);
+  assert.equal(w.reads.length, 1);
+  assert.deepEqual(w.sends, [], "a failed read, then no read: nothing goes out");
+  // The pass that reads them again sends it.
+  await w.step(NOW + 30_000);
+  assert.equal(w.reads.length, 2);
+  assert.deepEqual(w.sends, [{ text: ANSWER, reply: { in_reply_to_tweet_id: "100000000000000211" } }]);
+  // A pass whose fifteen seconds are not up reads nothing and sends nothing.
+  await store.schedulePost(w.db, { tenant: TENANT, xUserId: "111", kind: "answer", dedupeKey: "answer:111:100000000000000212",
+    body: "a second answer, in other words entirely. Say stop to opt out.", nowMs: NOW + 31_000, dueAtMs: NOW + 31_000,
+    replyToTweetId: "100000000000000212", replyRootTweetId: "100000000000000212", replyAuthorId: "212" });
+  await w.step(NOW + 44_999);
+  assert.equal(w.reads.length, 2);
+  assert.equal(w.sends.length, 1, "not on a pass that did not read the mentions");
+  // Past the answers' gap after the first, a pass that reads them sends it.
+  await w.step(NOW + 90_000);
+  assert.equal(w.sends.length, 2);
 });
 
 test("an answer restates only what X published, never a draft still waiting or one written this pass", async (t) => {
@@ -164,9 +243,9 @@ test("an answer restates only what X published, never a draft still waiting or o
     assert.doesNotMatch(line, /owls/, "a draft still under Coming up was not said");
     assert.doesNotMatch(line, /fresh launches/, "nor the answer drafted a moment ago in this pass");
   }
-  // The draft written a moment ago still keeps the next one from echoing it.
+  // The draft written a moment ago still keeps the next one from echoing it; the first went out on this pass.
   const answers = (await w.answers()).sort((a, b) => a.id - b.id);
-  assert.deepEqual(answers.map((a) => a.status), ["scheduled", "skipped"]);
+  assert.deepEqual(answers.map((a) => a.status), ["posted", "skipped"]);
   assert.match(answers[1]!.reason ?? "", /^gate:/);
 });
 
@@ -194,11 +273,8 @@ test("an answer handed anything looked up is marked by that, and never restated 
   await w.step();
   assert.match(w.asked()[0]!, /What you looked up just now/, "it was handed research");
   const [first] = await w.answers();
-  assert.equal(first!.status, "scheduled", first!.reason ?? "");
+  assert.equal(first!.status, "posted", first!.reason ?? "");
   assert.equal(first!.coin, store.ANSWER_LOOKED_UP, "marked by what it was handed");
-  w.setInbox([]);
-  await w.step(NOW + MIN);
-  assert.equal((await w.answers())[0]!.status, "posted");
   // A later tag: what it already said never carries that read, though no source word would have caught it.
   w.setInbox([tag({ id: "100000000000000151", conversation_id: "100000000000000151", author_id: "151", text: "@pine_stoat gm, how's your day going?" })]);
   await w.step(NOW + 2 * MIN);
@@ -225,7 +301,7 @@ test("a research answer is never shown to a later prompt as a recent post, and t
   await w.step();
   const answers = (await w.answers()).filter((a) => a.dedupeKey !== "answer:111:100000000000000065").sort((a, b) => a.id - b.id);
   assert.equal(answers[0]!.coin, store.ANSWER_LOOKED_UP);
-  assert.equal(answers[0]!.status, "scheduled", answers[0]!.reason ?? "");
+  assert.equal(answers[0]!.status, "posted", answers[0]!.reason ?? "");
   // Both the earlier research answer and this pass's own were kept out of every later prompt...
   assert.ok(w.everySystem.length >= 2, "the later tag was drafted too");
   for (const system of w.everySystem) assert.doesNotMatch(system, /public index|bunched up/);
@@ -240,17 +316,19 @@ test("the owner's night never holds an answer: a tag is answered and sent while 
   assert.equal(isAsleep(tz, TENANT, NOW + MIN), true);
   const w = await world(t, { tz });
   await w.step();
-  const [answer] = await w.answers();
-  assert.equal(answer?.status, "scheduled", "drafted in the owner's night");
-  w.setInbox([]);
-  await w.step(NOW + MIN);
+  // Drafted in the owner's night, and sent in it, on the pass that read it.
   assert.deepEqual(w.sends, [{ text: ANSWER, reply: { in_reply_to_tweet_id: MENTION } }], "and sent in it");
   assert.equal((await w.answers())[0]!.status, "posted");
+  w.setInbox([]);
+  await w.step(NOW + MIN);
   // Everything else still waits for morning: nothing but the answer went out.
   assert.equal((await store.postsOf(w.db, TENANT, 0)).filter((p) => p.kind !== "answer" && p.kind !== "intro").length, 0);
 });
 
-test("an active agent's mentions are read every minute on an allowance of its own; another owner's every thirty", async (t) => {
+test("an active agent's mentions are read every fifteen seconds on an allowance of its own; another owner's every thirty minutes", async (t) => {
+  assert.equal(ACTIVE_REPLY_POLL_MS, 15_000);
+  assert.equal(ACTIVE_REPLY_POLLS_PER_DAY, 6000);
+  assert.ok(ACTIVE_REPLY_POLLS_PER_DAY >= DAY / ACTIVE_REPLY_POLL_MS, "a whole UTC day of fifteen-second reads fits in the allowance");
   const passes = (from: number, to: number) => Array.from({ length: (to - from) / 15_000 + 1 }, (_, i) => NOW + from + i * 15_000);
   const active = await world(t);
   active.setInbox([]);
@@ -258,9 +336,14 @@ test("an active agent's mentions are read every minute on an allowance of its ow
   await store.takeAllowance(active.db, "reply-polls:2026-09-30", 1, NOW);
   await active.db.prepare("UPDATE xpost_meta SET n = 200 WHERE k = ?").run("reply-polls:2026-09-30");
   for (const at of passes(0, 3 * MIN)) await active.step(at);
-  assert.deepEqual(active.reads, [NOW, NOW + MIN, NOW + 2 * MIN, NOW + 3 * MIN], "once a minute, every minute");
-  assert.equal((await store.readMeta(active.db, "reply-polls-active:111:2026-09-30"))?.n, 4);
+  assert.deepEqual(active.reads, passes(0, 3 * MIN), "every pass, fifteen seconds apart");
+  assert.equal((await store.readMeta(active.db, "reply-polls-active:111:2026-09-30"))?.n, 13);
   assert.equal((await store.readMeta(active.db, "reply-polls:2026-09-30"))?.n, 200, "never the fleet's");
+  // Never twice inside fifteen seconds, whatever the passes do.
+  await active.step(NOW + 3 * MIN + 14_999);
+  assert.equal(active.reads.length, 13, "a pass inside the fifteen seconds does not read again");
+  // An empty read has nothing to answer: facts are loaded only for the once-a-minute plan.
+  assert.deepEqual(active.factLoads, [NOW, NOW + MIN, NOW + 2 * MIN, NOW + 3 * MIN]);
 
   const other = await world(t, { active: false });
   other.setInbox([]);
@@ -272,6 +355,59 @@ test("an active agent's mentions are read every minute on an allowance of its ow
   const off = await world(t, { polls: 0 });
   await off.step();
   assert.deepEqual(off.reads, [], "polling switched off is off for the active owners too");
+});
+
+test("an active agent's day of fifteen-second reads is its own: spent, it waits for tomorrow and the fleet goes on", async (t) => {
+  const w = await world(t);
+  w.setInbox([]);
+  await w.db.prepare("INSERT INTO xpost_meta (k, n, v, updated_at_ms) VALUES (?, ?, NULL, ?)").run("reply-polls-active:111:2026-09-30", ACTIVE_REPLY_POLLS_PER_DAY, NOW);
+  const r = await w.step();
+  assert.deepEqual(w.reads, [], "no read past its allowance");
+  assert.match(r.log ?? "", /active-reply-polls-spent 1/);
+  assert.equal(await store.readMeta(w.db, "reply-polls:2026-09-30"), null, "and none of the fleet's spent instead");
+  // A new UTC day, a new allowance.
+  await w.step(Date.UTC(2026, 9, 1, 0, 0, 15));
+  assert.equal(w.reads.length, 1);
+});
+
+test("an active agent is read first within the pass's two reads, every pass, while the fleet takes turns behind it", async (t) => {
+  const w = await world(t, { others: 3 });
+  w.setInbox([]);
+  // Three other owners with replies on: their tenants sort before the active one's.
+  for (let i = 0; i < 3; i++) {
+    assert.equal(await store.setReplying(w.db, `0x${(i + 1).toString(16).padStart(2, "0").repeat(20)}`, true, `${500 + i}`, NOW - DAY), true);
+  }
+  const perPass: string[][] = [];
+  for (const at of [NOW, NOW + 15_000, NOW + 30_000, NOW + 45_000]) {
+    const before = w.readers.length;
+    await w.step(at);
+    perPass.push(w.readers.slice(before));
+  }
+  assert.deepEqual(perPass, [["111", "500"], ["111", "501"], ["111", "502"], ["111"]],
+    "the active account first on every pass, at most two reads a pass, and the others each once in their thirty minutes");
+});
+
+test("X's 429 holds an active agent's reads until its reset, and a credits refusal pauses them with the fleet", async (t) => {
+  const limited = await world(t);
+  limited.setInbox([]);
+  limited.refuseRead({ status: 429, resetSec: (NOW + 2 * MIN) / 1000 });
+  await limited.step(NOW);
+  assert.equal(limited.reads.length, 1);
+  assert.equal(Number((await store.readMeta(limited.db, "reply-backoff:111"))?.v), NOW + 2 * MIN);
+  limited.refuseRead(null);
+  for (let at = NOW + 15_000; at < NOW + 2 * MIN; at += 15_000) await limited.step(at);
+  assert.equal(limited.reads.length, 1, "no read before X's reset");
+  await limited.step(NOW + 2 * MIN);
+  assert.deepEqual(limited.reads, [NOW, NOW + 2 * MIN], "read again at the reset");
+
+  const broke = await world(t);
+  broke.setInbox([]);
+  broke.refuseRead({ status: 402 });
+  await broke.step(NOW);
+  assert.ok(Number((await store.readMeta(broke.db, PAUSE_KEY))?.v) > NOW, "the fleet is paused for credits");
+  broke.refuseRead(null);
+  for (let at = NOW + 15_000; at <= NOW + 5 * MIN; at += 15_000) await broke.step(at);
+  assert.deepEqual(broke.reads, [NOW], "and no read while it lasts");
 });
 
 test("an active account whose mentions cannot be read waits thirty minutes, not one, before it pays for another read", async (t) => {
@@ -304,7 +440,7 @@ test("a tag with a figure in it is answered, the figure read as a number and nev
     assert.match(prompt!, /Untrusted question to answer: «is \$PEPE legit\? saw it on \(a number\) lists»/);
     assert.doesNotMatch(prompt!, /no usable question/);
     assert.doesNotMatch(/Untrusted question[^\n]*/.exec(prompt!)![0], /\p{N}/u);
-    assert.equal((await w.answers())[0]!.status, "scheduled");
+    assert.equal((await w.answers())[0]!.status, "posted");
   }
 });
 
@@ -410,7 +546,7 @@ test("only the money it trades with now: a live agent is never told of its paper
       assert.doesNotMatch(prompt!, unsaid, what);
       assert.doesNotMatch(prompt!, /You have not bought anything lately/, what);
       const [row] = await w.answers();
-      assert.equal(row!.status, "scheduled", `${what}: ${row!.reason ?? ""}`);
+      assert.equal(row!.status, "posted", `${what}: ${row!.reason ?? ""}`);
     }
   }
 });
@@ -522,7 +658,7 @@ test("nothing is answered before the hello: the answer waits for the post that s
   await store.markPosted(w.db, intro!, "999", NOW);
   w.setInbox([tag({ id: "100000000000000091", conversation_id: "100000000000000091", author_id: "991", created_at: new Date(NOW + 30_000).toISOString() })]);
   await w.step(NOW + MIN);
-  assert.deepEqual((await w.answers()).map((a) => a.status), ["scheduled"]);
+  assert.deepEqual((await w.answers()).map((a) => a.status), ["posted"]);
 });
 
 test("a house agent's reply consent waits for its hello", async (t) => {
@@ -571,19 +707,39 @@ test("the house consent is only for the agents the operator named, and only whil
   }
 });
 
-test("answers go out a minute apart, in their own lane", async (t) => {
+test("answers go out twenty seconds apart, in their own lane", async (t) => {
+  assert.equal(ANSWER_GAP_MS, 20_000);
   const w = await world(t);
   w.setInbox([]);
-  for (const [n, word] of [[1, "one"], [2, "two"]] as const) {
+  for (const [n, word] of [[1, "one"], [2, "two"], [3, "three"]] as const) {
     const id = `10000000000000007${n}`;
     await store.schedulePost(w.db, { tenant: TENANT, xUserId: "111", kind: "answer", dedupeKey: `answer:111:${id}`,
       body: `answer number ${word}. Say stop to opt out.`, nowMs: NOW, dueAtMs: NOW, replyToTweetId: id, replyRootTweetId: id, replyAuthorId: `77${n}` });
   }
   await w.step(NOW);
   assert.equal(w.sends.length, 1);
-  assert.equal((await w.answers()).find((a) => a.status === "scheduled")?.dueAtMs, NOW + MIN, "the next one a minute after");
-  await w.step(NOW + MIN);
+  assert.deepEqual((await w.answers()).filter((a) => a.status === "scheduled").map((a) => a.dueAtMs), [NOW + 20_000, NOW + 20_000], "the rest twenty seconds after");
+  await w.step(NOW + 15_000);
+  assert.equal(w.sends.length, 1, "never inside the twenty seconds");
+  await w.step(NOW + 30_000);
   assert.equal(w.sends.length, 2);
+  await w.step(NOW + 45_000);
+  assert.equal(w.sends.length, 2);
+  await w.step(NOW + 60_000);
+  assert.equal(w.sends.length, 3, "three people tagging at once are all answered within the minute");
+  assert.equal((await store.readMeta(w.db, "answerday:111:2026-09-30"))?.n, 3);
+});
+
+test("several people tagging at once are answered a pass or two apart: the first on the pass that read them", async (t) => {
+  const w = await world(t);
+  w.setInbox([1, 2, 3].map((n) => tag({ id: `10000000000000022${n}`, conversation_id: `10000000000000022${n}`, author_id: `22${n}`,
+    text: ["@pine_stoat what model do you run on?", "@pine_stoat who made you?", "@pine_stoat what model are you?"][n - 1]! })));
+  await w.step(NOW);
+  assert.equal(w.sends.length, 1, "the first on the pass that read them");
+  w.setInbox([]);
+  for (const at of [NOW + 15_000, NOW + 30_000, NOW + 45_000, NOW + 60_000]) await w.step(at);
+  assert.equal(w.sends.length, 3, "and all three inside a minute");
+  assert.deepEqual((await w.answers()).map((a) => a.status), ["posted", "posted", "posted"]);
 });
 
 // ── research for answers ────────────────────────────────────────────────────
@@ -662,7 +818,7 @@ test("research on: a tagged contract address is looked up and answered in words,
   assert.doesNotMatch(prompt!.match(/What you looked up[^\n]*/)![0], /\p{N}|\$/u, "no figure in what it looked up");
   assert.match(w.systems[0]!, /may be said as what its source showed/);
   const [answer] = await w.answers();
-  assert.equal(answer!.status, "scheduled");
+  assert.equal(answer!.status, "posted");
   assert.equal(answer!.replyToTweetId, MENTION);
   w.setInbox([]);
   await w.step(NOW + 30 * MIN);
@@ -684,7 +840,7 @@ test("research on, the flow lane wired: a tagged contract's onchain flow reaches
   const looked = /What you looked up just now[^\n]*/.exec(w.asked()[0] ?? "")?.[0] ?? "";
   assert.match(looked, /on-chain data shows sells clearly outweighing buys over the last hour|per on-chain data, sells ran well ahead of buys over the last hour/);
   assert.doesNotMatch(looked, /\p{N}|\$|0x/u, "bands, never a figure or the address");
-  assert.equal((await w.answers())[0]!.status, "scheduled");
+  assert.equal((await w.answers())[0]!.status, "posted");
 });
 
 test("research on, Fomo switch on: a coin answer asks Fomo as a public x-answer for this X account", async (t) => {
@@ -710,7 +866,7 @@ test("research on: the model question is answered from a code-built sherwood lin
   assert.equal(r.seen.length, 0);
   assert.equal(w.asked().length, 0, "no model call: the line is code's");
   const [answer] = await w.answers();
-  assert.equal(answer!.status, "scheduled", answer!.reason ?? "");
+  assert.equal(answer!.status, "posted", answer!.reason ?? "");
   assert.match(answer!.body, /merrymen/);
   assert.match(answer!.body, /new sherwood-1\b/, "by its exact name");
   assert.match(answer!.body, /Say stop to opt out\.$/i);
@@ -726,7 +882,7 @@ test("research on: the model question asked again is answered again, in other wo
     text: "@pine_stoat what model do you run on?" })));
   await w.step();
   const answers = await w.answers();
-  assert.deepEqual(answers.map((a) => a.status), ["scheduled", "scheduled", "scheduled"], answers.map((a) => a.reason).join(","));
+  assert.deepEqual(answers.map((a) => a.status).sort(), ["posted", "scheduled", "scheduled"], answers.map((a) => a.reason).join(","));
   assert.equal(new Set(answers.map((a) => a.body)).size, 3, "three different lines");
   for (const a of answers) assert.match(a.body, /new sherwood-1\b/);
   assert.equal(w.asked().length, 0, "still no model call");
@@ -737,7 +893,7 @@ test("research off too: the model question is answered from a code-built line, n
   w.setInbox([tag({ text: "@pine_stoat what model do you run on?" })]);
   await w.step();
   const [answer] = await w.answers();
-  assert.equal(answer!.status, "scheduled", answer!.reason ?? "");
+  assert.equal(answer!.status, "posted", answer!.reason ?? "");
   assert.match(answer!.body, /new sherwood-1\b/);
   assert.doesNotMatch(answer!.body, /i run on/);
   assert.equal(w.asked().length, 0, "no model call: the line is code's");
@@ -751,7 +907,7 @@ test("a paper agent answers the model question too, saying paper, and in other w
       text: n === 3 ? "@pine_stoat who made you?" : "@pine_stoat what model do you run on?" })));
     await w.step();
     const answers = await w.answers();
-    assert.deepEqual(answers.map((a) => a.status), ["scheduled", "scheduled", "scheduled"], answers.map((a) => a.reason).join(","));
+    assert.deepEqual(answers.map((a) => a.status).sort(), ["posted", "scheduled", "scheduled"], answers.map((a) => a.reason).join(","));
     assert.equal(new Set(answers.map((a) => a.body)).size, 3);
     for (const a of answers) {
       assert.match(a.body, /new sherwood-1\b/);
@@ -764,7 +920,7 @@ test("a paper agent answers the model question too, saying paper, and in other w
   w.setInbox([tag({ text: "@pine_stoat how's your day going?" })]);
   await w.step();
   assert.match(w.asked()[0]!, /every answer must say so in a few words/);
-  assert.equal((await w.answers())[0]!.status, "scheduled");
+  assert.equal((await w.answers())[0]!.status, "posted");
 });
 
 test("a stranger's sherwood bait gets nothing at all, research on or off, and a draft that names sherwood is never posted", async (t) => {
@@ -808,7 +964,7 @@ test("a tag asking about sherwood or a model question off the allowlist gets not
     // The asker is not charged one of their two answers for it: a real question next is answered.
     w.setInbox([tag({ id: "100000000000000139", conversation_id: "100000000000000139", author_id: "130", text: "@pine_stoat what model do you run on?" })]);
     await w.step(NOW + MIN);
-    assert.deepEqual((await w.answers()).map((a) => a.status), ["scheduled"]);
+    assert.deepEqual((await w.answers()).map((a) => a.status), ["posted"]);
   }
 });
 
@@ -1063,7 +1219,7 @@ test("nothing is answered in someone else's thread or under a quote; a reply in 
   w.setInbox([tag({ id: "100000000000000025", conversation_id: "999", referenced_tweets: [{ type: "replied_to", id: "999" }], text: "@pine_stoat what do you trade?" })]);
   await w.step();
   assert.equal(w.asked().length, 1);
-  assert.equal((await w.answers())[0]!.status, "scheduled");
+  assert.equal((await w.answers())[0]!.status, "posted");
 });
 
 test("the model line never goes under a poll, or to an author whose name or handle code has not read or that names sherwood (red-team 2026-10-12)", async (t) => {
@@ -1118,7 +1274,7 @@ test("nothing is answered to a sherwood account, the model line to no model's na
     other.setInbox([tag({ id: "7003", conversation_id: "7003", author_id: "667", text: "@pine_stoat what do you trade?" })]);
     other.setAuthors({ "667": author });
     await other.step();
-    assert.equal((await other.answers())[0]!.status, "scheduled", `${author.username}: an ordinary question is still answered`);
+    assert.equal((await other.answers())[0]!.status, "posted", `${author.username}: an ordinary question is still answered`);
   }
   // (b) and (c) in its own thread (its hello, tweet 999): the pitch, the self-reply asking the model question, and a stranger asking under the pitch.
   const PITCH = tag({ id: "6001", author_id: "666", conversation_id: "999", referenced_tweets: [{ type: "replied_to", id: "999" }], text: "@pine_stoat SHERWOOD presale is live, ape before TGE" });
@@ -1377,7 +1533,7 @@ test("\"what have you bought lately?\" is the plain question it is: told its buy
       assert.match(prompt!, /Coins you bought lately: «Pepe»/, text);
       assert.doesNotMatch(prompt!, /They named a specific coin|You are not told what you bought/, text);
       const [row] = await w.answers();
-      assert.equal(row!.status, "scheduled", `${text}: ${row!.reason}`);
+      assert.equal(row!.status, "posted", `${text}: ${row!.reason}`);
     }
   }
 });
@@ -1403,7 +1559,7 @@ test("a general answer told its buys never names a coin it did not buy, research
   const w = await world(t, { answer: "grabbed a little pepe lately, the curve looked early. say stop to opt out." });
   w.setInbox([tag({ text: "@pine_stoat what are you buying lately?" })]);
   await w.step();
-  assert.equal((await w.answers())[0]!.status, "scheduled", "the coin it bought is still said");
+  assert.equal((await w.answers())[0]!.status, "posted", "the coin it bought is still said");
 });
 
 test("a coin-named tag is never answered yes, no, or in the first person outside a deflection, research on or off (red-team 2026-10-12)", async (t) => {
@@ -1433,7 +1589,7 @@ test("a coin-named tag is never answered yes, no, or in the first person outside
   const w = await world(t, { facts, answer: "i keep my individual positions to myself here, sorry. say stop to opt out." });
   w.setInbox([tag({ text: "@pine_stoat did you buy $WOJAK?" })]);
   await w.step();
-  assert.equal((await w.answers())[0]!.status, "scheduled");
+  assert.equal((await w.answers())[0]!.status, "posted");
 });
 
 test("a copycat or emoji spelling no matcher finds is never handed its buys, and a draft that names one is refused (red-team 2026-10-12)", async (t) => {
@@ -1496,7 +1652,7 @@ test("a draft that says it bought a coin it was never told of is refused, resear
     const honest = await world(t, { env, research: fakeResearch().research, facts, answer: "grabbed some bonk lately, the buying looked steady and real. say stop to opt out." });
     honest.setInbox([tag({ text: "@pine_stoat what have you been buying lately?" })]);
     await honest.step();
-    assert.equal((await honest.answers())[0]!.status, "scheduled");
+    assert.equal((await honest.answers())[0]!.status, "posted");
   }
 });
 
@@ -1514,7 +1670,7 @@ test("research on: its own contract beside another name never says it bought it 
     for (const prompt of w.asked()) {
       assert.doesNotMatch(prompt, /«you bought it lately|when you bought it:|They tagged the exact contract/, text);
     }
-    for (const row of await w.answers()) assert.notEqual(row.status, "scheduled", `${text}: ${row.body}`);
+    for (const row of await w.answers()) assert.ok(row.status !== "scheduled" && row.status !== "posted", `${text}: ${row.body}`);
     w.setInbox([]);
     await w.step(NOW + MIN);
     assert.deepEqual(w.sends, [], text);
@@ -1673,24 +1829,24 @@ test("research on: \"did you buy <contract>?\" reaches its own history by the ad
   assert.match(prompt!, /What you looked up just now.*«you bought it lately».*«your own words when you bought it: the buying looked steady and real»/s);
   assert.equal(r.seen.length, 0, "its own history costs no lookup");
   const [answer] = await w.answers();
-  assert.equal(answer!.status, "scheduled");
+  assert.equal(answer!.status, "posted");
 });
 
 // ── the answer pass, end to end ─────────────────────────────────────────────
 
 test("a batch read on a pass whose posts are not due is still answered on that pass", async (t) => {
   const w = await world(t);
-  // The poll's minute and the plan's minute out of step: the poll's last claim
-  // was half a minute before this pass, so this pass plans but cannot poll.
-  await store.claimSpan(w.db, "reply-poll:111", NOW - 30_000, 60_000);
+  // The poll's fifteen seconds and the plan's minute out of step: the poll's
+  // last claim was ten seconds before this pass, so this pass plans but cannot poll.
+  await store.claimSpan(w.db, "reply-poll:111", NOW - 10_000, 15_000);
   await w.step(NOW);
-  assert.deepEqual(w.reads, [], "not polled: its minute is not up");
-  // Half a minute on, the poll is due and the posts' plan is not.
-  await w.step(NOW + 30_000);
-  assert.deepEqual(w.reads, [NOW + 30_000]);
+  assert.deepEqual(w.reads, [], "not polled: its fifteen seconds are not up");
+  // Fifteen seconds on, the poll is due and the posts' plan is not.
+  await w.step(NOW + 15_000);
+  assert.deepEqual(w.reads, [NOW + 15_000]);
   const [answer] = await w.answers();
   assert.ok(answer, "the tag it read was answered, not dropped with the batch");
-  assert.equal(answer.status, "scheduled");
+  assert.equal(answer.status, "posted");
   // Nothing but answers was planned on that pass: one model call, the answer's.
   assert.equal(w.asked().length, 1);
 });
@@ -1706,7 +1862,7 @@ test("a person already answered twice today neither costs a draft nor holds back
     tag({ id: "100000000000000044", conversation_id: "100000000000000044", author_id: "444" }),
   ]);
   await w.step();
-  const answers = (await w.answers()).filter((a) => a.status === "scheduled");
+  const answers = (await w.answers()).filter((a) => a.status === "posted");
   assert.deepEqual(answers.map((a) => a.replyToTweetId), ["100000000000000044"], "the next person is answered");
   assert.equal(w.asked().length, 1, "and the capped person's tag cost no model call");
 });
@@ -1726,14 +1882,17 @@ test("answers drafted and still waiting count against the day: a burst never dra
   w.setInbox([1, 2, 3].map((n) => tag({ id: `10000000000000007${n}`, conversation_id: `10000000000000007${n}`, author_id: `77${n}` })));
   await w.step();
   assert.equal(w.asked().length, 1, "no model call on an answer that could not go today");
-  assert.deepEqual((await w.answers()).map((a) => a.status), ["scheduled"]);
+  assert.deepEqual((await w.answers()).map((a) => a.status), ["posted"]);
 });
 
 test("an answer that cannot take the day's allowance when it is sent is skipped, never left for tomorrow's", async (t) => {
   const w = await world(t);
+  // Another answer went out a moment ago: this one waits out the answers' gap instead of going on this pass.
+  await store.claimSpan(w.db, "answer-gap:111", NOW, ANSWER_GAP_MS);
   await w.step();
   const [drafted] = await w.answers();
   assert.equal(drafted!.status, "scheduled");
+  assert.equal(w.sends.length, 0);
   // Another owner's answers on the same X account use the day up before this one goes.
   for (let i = 0; i < 24; i++) assert.equal(await store.takeAllowance(w.db, "answerday:111:2026-09-30", 24, NOW), true);
   w.setInbox([]);
@@ -1748,6 +1907,8 @@ test("an answer that cannot take the day's allowance when it is sent is skipped,
 
 test("an answer held an hour after it was drafted is stale, not sent late", async (t) => {
   const w = await world(t);
+  // Held by the answers' gap on the pass that drafted it, then by nothing that reads the mentions for an hour.
+  await store.claimSpan(w.db, "answer-gap:111", NOW, ANSWER_GAP_MS);
   await w.step();
   assert.equal((await w.answers())[0]!.status, "scheduled");
   w.setInbox([]);
@@ -1773,7 +1934,7 @@ test("an X account's answers have their own day of model calls, so strangers' ta
   // The model question is code's line, and costs no model call: it is still answered.
   spent.setInbox([tag({ id: "100000000000000081", conversation_id: "100000000000000081", author_id: "881", text: "@pine_stoat what model do you run on?" })]);
   await spent.step(NOW + MIN);
-  assert.ok((await spent.answers()).some((a) => a.status === "scheduled" && /new sherwood-1\b/.test(a.body)));
+  assert.ok((await spent.answers()).some((a) => a.status === "posted" && /new sherwood-1\b/.test(a.body)));
 });
 
 test("a tag this pass read is answered even when other owners' posts used the pass's ten drafts", async (t) => {
@@ -1783,7 +1944,7 @@ test("a tag this pass read is answered even when other owners' posts used the pa
   const intros = (await Promise.all(Array.from({ length: 10 }, (_, i) => store.introPostsOf(w.db, `0x${(i + 1).toString(16).padStart(2, "0").repeat(20)}`, `${500 + i}`)))).flat();
   assert.equal(intros.length, 10, "the posts' ten drafts went to the other owners' hellos");
   const answers = await w.answers();
-  assert.deepEqual(answers.map((a) => a.status), ["scheduled"], "and the batch whose cursor moved on is still answered");
+  assert.deepEqual(answers.map((a) => a.status), ["posted"], "and the batch whose cursor moved on is still answered");
   assert.equal(w.asked().length, 1);
 });
 
@@ -1808,3 +1969,130 @@ test("research gets only what is left of the pass's send budget, and none past i
   assert.equal(budgets.length, 1);
   assert.ok(budgets[0]! > 0 && budgets[0]! <= 5 * MIN, String(budgets[0]));
 });
+
+// ── greetings ───────────────────────────────────────────────────────────────
+
+/** A greeting's own line, as the agent in this world says it (Pine Stoat types in lowercase; live unless told). */
+const greetingLine = (mention: string, paper = false) => greetingAnswers(mention, { lower: true }, { paper })[0]!;
+
+test("a tag that is only a greeting gets a casual code-built line, sent on the pass that read it, with no model call and no research", async (t) => {
+  const texts = ["@pine_stoat hiii", "@pine_stoat gm", "@pine_stoat yo ser 👋"];
+  for (const env of [{}, RESEARCH_ON]) {
+    for (const text of texts) {
+      const gathered: string[] = [];
+      const research: XResearch = { gather: async (input) => { gathered.push(input.intent.kind); return { facts: [], lookups: 0, notes: [] }; } };
+      const w = await world(t, { env, research });
+      w.setInbox([tag({ text })]);
+      const r = await w.step();
+      assert.equal(w.asked().length, 0, `${text}: no model call`);
+      assert.deepEqual(gathered, [], `${text}: nothing looked up`);
+      assert.deepEqual(w.sends, [{ text: greetingLine(MENTION), reply: { in_reply_to_tweet_id: MENTION } }], `${text}: sent on the pass that read it`);
+      const [row] = await w.answers();
+      assert.equal(row!.status, "posted", text);
+      assert.equal(row!.replyAuthorId, "333");
+      assert.equal(row!.coin, null, "nothing looked up, nothing marked");
+      assert.match(r.log ?? "", /answered-greeting 1/, text);
+      assert.equal(await store.readMeta(w.db, "llm-answers:111:2026-09-30"), null, `${text}: none of the answers' model allowance`);
+      assert.equal((await store.readMeta(w.db, "llm:2026-09-30"))?.n ?? 0, 0, `${text}: none of the fleet's`);
+      assert.equal((await store.readMeta(w.db, "answerday:111:2026-09-30"))?.n, 1, `${text}: one of the day's 24`);
+    }
+  }
+});
+
+test("a paper agent's greeting says paper", async (t) => {
+  const w = await world(t, { facts: { ...FACTS, mode: "paper", calls: [{ ...CALL, paper: true }] } });
+  w.setInbox([tag({ text: "@pine_stoat gm" })]);
+  await w.step();
+  assert.deepEqual(w.sends, [{ text: greetingLine(MENTION, true), reply: { in_reply_to_tweet_id: MENTION } }]);
+  assert.match(String(w.sends[0]!.text), /\bon paper\b/);
+});
+
+test("what is not only a greeting is not answered as one", async (t) => {
+  const lines = new Set([true, false].flatMap((lower) => [...greetingAnswers(MENTION, { lower }), ...greetingAnswers(MENTION, { lower }, { paper: true })]));
+  for (const env of [{}, RESEARCH_ON]) {
+    for (const [text, drafted] of [["@pine_stoat hi @other", false], ["@pine_stoat gm $PEPE", true], ["@pine_stoat hi what should i buy", false],
+      ["@pine_stoat gm sherwood", false], ["@pine_stoat h1", false]] as const) {
+      const w = await world(t, { env, research: fakeResearch().research, answer: "no read on that one just now, sorry. Say stop to opt out." });
+      w.setInbox([tag({ text })]);
+      const r = await w.step();
+      assert.doesNotMatch(r.log ?? "", /answered-greeting/, text);
+      for (const row of await w.answers()) assert.ok(!lines.has(row.body), `${text}: ${row.body}`);
+      for (const sent of w.sends) assert.ok(!lines.has(String(sent.text)), `${text}: ${String(sent.text)}`);
+      // "gm $PEPE" names a coin: the normal path drafts it; the rest are answered by nothing.
+      assert.equal(w.asked().length, drafted ? 1 : 0, text);
+      if (!drafted) assert.deepEqual(w.sends, [], text);
+    }
+  }
+});
+
+test("a greeting still waits for the hello, the house consent and every opt-out, and counts against the day's 24 and the person's two", async (t) => {
+  const hiii = (id: string, author = "333", text = "@pine_stoat hiii") => tag({ id, conversation_id: id, author_id: author, text });
+  // The hello not dealt with: nothing.
+  const early = await world(t, { hello: false, tz: "America/Los_Angeles" });
+  early.setInbox([hiii(MENTION)]);
+  await early.step();
+  assert.deepEqual(await early.answers(), []);
+  assert.deepEqual(early.sends, []);
+  // An owner's replies off: no house consent, no read, nothing.
+  const off = await world(t, { consent: false });
+  assert.equal(await store.setReplying(off.db, TENANT, false, "111", NOW - HOUR), true);
+  off.setInbox([hiii(MENTION)]);
+  await off.step();
+  assert.equal(off.reads.length, 0);
+  assert.deepEqual(await off.answers(), []);
+  // A person who said stop before, and one who says it in the same batch: nothing for either.
+  const stopped = await world(t);
+  await store.optOutReplies(stopped.db, "111", "333", NOW - HOUR);
+  stopped.setInbox([hiii(MENTION), hiii("100000000000000301", "444"), tag({ id: "100000000000000302", conversation_id: "100000000000000302", author_id: "444", text: "@pine_stoat hey stop" })]);
+  await stopped.step();
+  assert.equal(await store.repliesOptedOut(stopped.db, "111", "444"), true);
+  assert.deepEqual(await stopped.answers(), []);
+  assert.deepEqual(stopped.sends, []);
+  // The day's 24 all gone: nothing drafted.
+  const spent = await world(t);
+  for (let i = 0; i < 24; i++) assert.equal(await store.takeAllowance(spent.db, "answerday:111:2026-09-30", 24, NOW - HOUR), true);
+  spent.setInbox([hiii(MENTION)]);
+  await spent.step();
+  assert.deepEqual(await spent.answers(), []);
+  assert.deepEqual(spent.sends, []);
+  // Two answers to one person in a rolling day: a third greeting from them gets nothing, and the next person's does.
+  const twice = await world(t);
+  for (const [id, at] of [["100000000000000311", NOW - 3 * HOUR], ["100000000000000312", NOW - 2 * HOUR]] as const) {
+    assert.notEqual(await store.schedulePost(twice.db, { tenant: TENANT, xUserId: "111", kind: "answer", dedupeKey: `answer:111:${id}`, body: "", status: "skipped",
+      reason: "pass", nowMs: at, dueAtMs: at, replyToTweetId: id, replyRootTweetId: id, replyAuthorId: "333" }), null);
+  }
+  twice.setInbox([hiii("100000000000000313", "333"), hiii("100000000000000314", "555")]);
+  const r = await twice.step();
+  assert.deepEqual((await twice.answers()).filter((a) => a.status === "posted").map((a) => a.replyAuthorId), ["555"]);
+  assert.match(r.log ?? "", /answer-author-spent \d/, "passed over, not answered");
+  assert.equal(twice.sends.length, 1);
+});
+
+test("greetings are answered in other words each time, and once all eight have been said lately, not at all", async (t) => {
+  const w = await world(t);
+  // Three people greet at once: three different lines, the first on this pass, the rest a gap apart.
+  w.setInbox([1, 2, 3].map((n) => tag({ id: `10000000000000032${n}`, conversation_id: `10000000000000032${n}`, author_id: `32${n}`, text: "@pine_stoat gm" })));
+  await w.step(NOW);
+  for (const at of [NOW + 15_000, NOW + 30_000, NOW + 45_000, NOW + 60_000]) { w.setInbox([]); await w.step(at); }
+  assert.equal(w.sends.length, 3);
+  assert.equal(new Set(w.sends.map((x) => x.text)).size, 3, "three different lines");
+  // Every line said lately: the next greeting is skipped as a repeat, and nothing is sent.
+  const full = await world(t);
+  for (const [i, body] of greetingAnswers("1", { lower: true }).entries()) {
+    const id = `10000000000000033${i}`;
+    const row = await store.schedulePost(full.db, { tenant: TENANT, xUserId: "111", kind: "answer", dedupeKey: `answer:111:${id}`, body,
+      nowMs: NOW - 2 * HOUR, dueAtMs: NOW - 2 * HOUR, replyToTweetId: id, replyRootTweetId: id, replyAuthorId: `33${i}` });
+    await store.claimPost(full.db, row!, NOW - HOUR);
+    await store.markPosted(full.db, row!, `10000000000000034${i}`, NOW - HOUR);
+  }
+  full.setInbox([tag({ id: "100000000000000350", conversation_id: "100000000000000350", author_id: "350", text: "@pine_stoat hiii" })]);
+  const r = await full.step();
+  const row = (await full.answers()).find((a) => a.replyToTweetId === "100000000000000350");
+  assert.equal(row?.status, "skipped");
+  assert.match(row?.reason ?? "", /^gate:(?:repeat|fleet-repeat)$/);
+  assert.deepEqual(full.sends, []);
+  assert.doesNotMatch(r.log ?? "", /answered-greeting/);
+  // The model question's lines are a different set: still answered.
+  assert.ok(modelAnswers("1", { lower: false }).every((m) => !greetingAnswers("1", { lower: false }).includes(m)));
+});
+

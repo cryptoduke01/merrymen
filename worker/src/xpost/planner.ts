@@ -66,10 +66,12 @@ export const REPLY_ROOT_MAX_AGE_MS = 72 * HOUR;
 export const REPLIES_PER_ROOT = 2;
 /**
  * An active agent's answers to tags: their own gap and day allowance, never
- * the cadence's. A minute apart: they go out as soon as they are drafted, and
- * mentions are read every minute.
+ * the cadence's. Twenty seconds apart: they go out as soon as they are
+ * drafted, on the pass that read the tag, and mentions are read every fifteen
+ * seconds, so a few people tagging at once are each answered within a pass or
+ * two of each other. The day's 24 and two a person a day are unchanged.
  */
-export const ANSWER_GAP_MS = MIN;
+export const ANSWER_GAP_MS = 20_000;
 export const ANSWERS_PER_DAY = 24;
 /**
  * An answer still waiting this long after it was drafted is no longer one:

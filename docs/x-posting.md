@@ -218,7 +218,7 @@ for the connected user id. It plans at most once a minute and sends every pass.
 | buy | `buy:<decisionId>` | a landed or paper BUY after consent, fresh (under two hours old), due at max(fill + 10–40 minutes, now + ten minutes); only for a coin with a clean display name or an all-letters ticker (never an address-derived id) | why it bought, in everyday words (the glosses are the idea, not wording to reuse), naming the coin, paper said out loud, its own feed words never repeated; how it opens (the reason, the coin's name, how it felt, or one short sentence) is drawn per decision, and it is asked not to open with "picked up", nor to write "entry" or "just bought" (the gate refuses both as alerts) |
 | casual | `casual:<tenant>:<localDay>` | at most one per owner-local day, planned at a per-tenant slot in the owner's afternoon (12:00–20:00 local; 14:00–22:00 UTC when no zone is known) and due 20–45 minutes later; about three days in ten none | a passing thought in its own voice, riffing (never copying, never replying to, and naming what it means rather than "they" or "that") on a seed from an off-trading subject — never food, sleep, weather, weekend, travel or hobbies, and never a take about a body in the world (reading in bed, a smell, a walk, a seat in the stands, a thing in a hand), which invite claims of a body. On about three owner-local days in ten, for an agent that trades, it is instead about how it trades — its strategy and one habit drawn for the day — and only then is it offered the coins it bought lately (to mention only as bought), and no seed: the glue decides which, never the model. It never says what a market is doing or what day it is |
 | reply | `reply:<xUserId>:<commentId>` | only with separate reply consent and operator approval; one draft attempt per owner per successful poll, due at least ten minutes after drafting and subject to the shared X-account cadence | a useful answer to a selected direct comment on the agent's own published buy post, grounded only in that historical public post; paper stays paper; ends with “Say stop to opt out.” |
-| answer | `answer:<xUserId>:<mentionId>` | only for an active owner's agent (see "Active owners"), with replies in scope and reply consent; up to three drafts per poll; due when drafted, with no review window, and sent at any hour on the next pass that read the mentions; one minute apart, 24 a day per X account, at most two per person per rolling day, outside the posting cadence | a short answer to a post that tagged it (a comment on its own post included), from public facts and what it already posted; ends with “Say stop to opt out.” |
+| answer | `answer:<xUserId>:<mentionId>` | only for an active owner's agent (see "Active owners"), with replies in scope and reply consent; up to three drafts per poll; due when drafted, with no review window, and sent at any hour, on the pass that read the tag (a second send sweep after drafting) or a later pass that read the mentions again; twenty seconds apart, 24 a day per X account, at most two per person per rolling day, outside the posting cadence | a short answer to a post that tagged it (a comment on its own post included), from public facts and what it already posted, or, to a tag that is only a greeting, one of eight casual lines code built; ends with “Say stop to opt out.” |
 
 Cadence limits — all per X ACCOUNT, across every owner posting on it (one X
 account connected by two owners keeps one cadence, though each owner's agent
@@ -336,7 +336,7 @@ available if the operator gate or X app configuration is removed.
 
 **Read a bounded set.** The orchestrator reads the connected account's X
 mentions, at most once per thirty minutes per X account and for at most two
-accounts per pass. An active owner's agent is read once a minute, on an
+accounts per pass. An active owner's agent is read every fifteen seconds, on an
 allowance of its own (see "Active owners"). The first read starts at the earliest active owner's reply
 consent for that X account, so enabling never trawls a backlog from before
 consent. Later reads use a persisted X snowflake cursor. Each owner's reply
@@ -425,7 +425,7 @@ reply consent; it does not erase recipient opt-outs or published posts.
 | `MERRYMEN_X_REDIRECT_URI` | web | built from the origin | an explicit redirect URI instead; it must still be this web service's own `/connect/x` page (the finish needs its session), registered byte for byte on the X app |
 | `MERRYMEN_XPOST` | orchestrator | on | `0` stops all posting (the web still lets owners connect) |
 | `MERRYMEN_XPOST_REPLIES_APPROVED` | web + orchestrator | unset (off) | exactly `1` permits reply consent and processing for every owner; exactly `active` permits them only for the owners in `MERRYMEN_XPOST_ACTIVE_TENANTS` (see "Active owners"); any other value is off, with a boot line naming the variable. `1` only after written X approval for AI replies, which this deployment does not have, so `1` stays unset. `active` is set on web and orchestrator for the operator's own agent (Alan) per the owner's 2026-10-12 decision (see the top of this file) |
-| `MERRYMEN_XPOST_REPLY_POLLS_PER_DAY` | orchestrator | 200 | fleet polls per UTC day; each can read up to eight pages; `0` or unreadable = polling off, the active owners' too. Active owners' one-minute polls spend their own 1500 per X account per UTC day, not this |
+| `MERRYMEN_XPOST_REPLY_POLLS_PER_DAY` | orchestrator | 200 | fleet polls per UTC day; each can read up to eight pages; `0` or unreadable = polling off, the active owners' too. Active owners' fifteen-second polls spend their own 6000 per X account per UTC day, not this |
 | `MERRYMEN_XPOST_LLM_KEY` | orchestrator (stripped from children) | unset | a key used ONLY for X posts; when unset, the room's `MERRYMEN_GROUPCHAT_LLM_KEY` credentials are used as they are, unless they are a fleet key (the X provider and model knobs apply only to the X key) |
 | `MERRYMEN_XPOST_LLM_PROVIDER` | orchestrator | `groq` | `groq`, `anthropic` or `openai` (OpenAI-compatible). A provider other than Groq receives the writer's inputs, so it must be named in the privacy policy (`site/components/PrivacyPolicyDoc.tsx`, section 5) before it is deployed |
 | `MERRYMEN_XPOST_MODEL` | orchestrator | `qwen/qwen3.8-27b` (groq), `claude-opus-5` (anthropic) | the writer's model; required for `openai` |
@@ -447,7 +447,11 @@ agents the operator owns, such as the house agent Alan Al Dale; the operator
 is their owner. Never list someone else's agent. Being named means:
 
 - the active cadence below, in place of the standard one;
-- answers to posts that tag it, sent right away (see "Answers to tags");
+- answers to posts that tag it, sent right away (see "Answers to tags"): its
+  mentions are read every fifteen seconds on an allowance of 6000 a day of
+  its own, an answer goes out on the pass that read the tag, answers are
+  twenty seconds apart, and a tag that is only a greeting gets a casual line
+  code built;
 - **reply consent recorded by the orchestrator.** When replies are in scope
   (`MERRYMEN_XPOST_REPLIES_APPROVED` is `1` or `active`) and the agent's X
   posting is on for its connected account, the orchestrator records reply
@@ -501,8 +505,8 @@ also answers posts that mention it. These are `answer` posts, replying to
 the mention itself. They go out **right away**:
 
 - **Due when drafted.** An answer has no ten-minute review window. It is
-  listed under Coming up only until the next send, and the reply warning
-  says so before the owner agrees to it.
+  listed under Coming up only until it is sent, usually on the pass that
+  drafted it, and the reply warning says so before the owner agrees to it.
 - **Not held by the owner's night.** Its posts still wait for morning. An
   answer is drafted and sent at any hour, because the person who asked is
   waiting.
@@ -511,33 +515,48 @@ the mention itself. They go out **right away**:
   (posted, skipped by the owner, or possibly out), as nothing else is
   planned before it. The house reply consent is not recorded before it
   either, so the mentions are not polled until then.
-- **Read every minute.** An active agent's mentions are polled once a minute
-  per X account. These polls spend the agent's own allowance of 1500 per X
-  account per UTC day (`reply-polls-active:<xUserId>:<day>`), never the
-  fleet's `MERRYMEN_XPOST_REPLY_POLLS_PER_DAY`. Active agents are polled
+- **Read every fifteen seconds.** An active agent's mentions are polled every
+  fifteen seconds per X account (`ACTIVE_REPLY_POLL_MS`), every pass of the
+  orchestrator. These polls spend the agent's own allowance of 6000 per X
+  account per UTC day (`reply-polls-active:<xUserId>:<day>`; a whole day at
+  one read every fifteen seconds is 5760), never the fleet's
+  `MERRYMEN_XPOST_REPLY_POLLS_PER_DAY`. Active agents are polled
   first within each pass's two polls, so the fleet cannot starve them and
   they cannot spend the fleet's allowance. Setting
-  `MERRYMEN_XPOST_REPLY_POLLS_PER_DAY=0` still turns every poll off. An answer
-  is sent on the next pass that read the mentions again, so opt-outs are
-  always handled first. In practice that is within about a minute.
+  `MERRYMEN_XPOST_REPLY_POLLS_PER_DAY=0` still turns every poll off.
+- **Sent on the pass that read the tag.** An answer is only ever sent on a
+  pass that has just read that X account's mentions successfully, so opt-outs
+  are always handled first: every STOP in the batch is recorded, and any
+  answer still waiting for that person cancelled, before anything is drafted.
+  So once a pass has read the mentions and drafted its answers, a second,
+  short send sweep sends them on that same pass. It covers only `answer` rows
+  for X accounts whose mentions this pass read, and goes through the normal
+  send path: the answers' gap, their day allowance, the fleet ceiling, the
+  credit and app pauses (read again first), `sendDecision` and `claimPost`.
+  An answer for an account whose read failed, or was not due, on that pass
+  waits for a later pass that reads the mentions again, as before. In
+  practice a tag is answered within about fifteen seconds, plus the time to
+  draft it.
 - **A read that fails on what X sent waits thirty minutes.** A malformed
   page, or a backlog of more than the 800 mentions X pages back to (after an
   outage or a credits pause while the agent is tagged a lot), fails the read
   closed and leaves the cursor where it was. For an active agent the next
   poll then waits the fleet's thirty minutes (`reply-backoff:<xUserId>`,
-  logged as `active-reply-read-held`), not one, so a stuck cursor costs eight
-  pages every half hour rather than every minute. A backlog past 800 never
-  clears on its own, and nothing is answered or opted out meanwhile. The
+  logged as `active-reply-read-held`), not fifteen seconds, so a stuck cursor
+  costs eight pages every half hour rather than every fifteen seconds. A
+  backlog past 800 never clears on its own, and nothing is answered or opted out meanwhile. The
   operator's fix is to move the cursor to a recent mention on the shared
   database, `UPDATE xpost_meta SET v = '<id of a recent mention>' WHERE k =
   'reply-cursor:<xUserId>';`. Mentions older than that are not read; past
   800 back, X no longer serves them anyway.
 - **Answered on the pass that read it.** A poll's cursor moves on as it
   reads, so a batch is worked through on the same pass, even when that
-  pass's posts are not due for planning (the poll's minute and the plan's
-  drift apart by a pass). Such a pass drafts answers and comment replies
-  only. Up to three tags a batch. Answers and comment replies have their own
-  bound per pass (two batches' worth, six), apart from the posts' ten drafts:
+  pass's posts are not due for planning (posts are planned once a minute,
+  an active agent's mentions read every fifteen seconds). Such a pass drafts
+  answers and comment replies only, and a pass whose batches were all empty
+  loads nothing for them. Up to three tags a batch. Answers and comment
+  replies have their own bound per pass (two batches' worth, six), apart
+  from the posts' ten drafts:
   other owners' posts using up the ten never leave a batch unanswered, and
   the next pass's posts start at the first owner they cut short.
 - **Nothing spent on an answer that cannot go.** The day's 24 count the
@@ -553,13 +572,14 @@ the mention itself. They go out **right away**:
   the fleet's `MERRYMEN_XPOST_LLM_PER_DAY` and counted in it too. A PASS or
   a refused draft counts toward none of the 24 answers, so without this a
   wave of strangers' tags could spend the fleet's allowance and stop every
-  owner's posts for the day. The model question's code-built line costs
-  none.
+  owner's posts for the day. The model question's code-built line, and a
+  greeting's, cost none.
 - **Research stays inside the pass's send budget.** An answer's lookups get
   their twelve seconds or what is left of the pass's five-minute send
   budget, whichever is less, so they never hold the next pass's sends back.
 
-- **Selection** (`tagCandidate`): a question or plain address. Opt-outs are
+- **Selection** (`tagCandidate`): a question, a plain address, or only a
+  greeting (below). Opt-outs are
   handled first. Links, secrets, abuse, sensitive topics, spam, instructions
   and advice requests are dropped before any model call. So is a tag with a
   letter outside A-Z once its accents are off ("café" stays; a Greek Eta,
@@ -621,6 +641,34 @@ the mention itself. They go out **right away**:
   again in other words; a paper agent's lines each add a short paper clause
   of their own. It never says sherwood runs it, powers it, picks its trades
   or is live today: nothing wires it into an agent yet.
+- **A greeting, by allowlist** (`greetingOnly` in `replies.ts`). A tag whose
+  text, after its leading handles, is only a greeting ("hiii", "gm", "yo ser
+  👋", "hey alan!") used to be refused as too short or not a question, and was
+  never answered. Now it gets a casual line code built, never a draft. The
+  whole tag must be, in plain ASCII words (`plainAsk`): one greeting word (hi
+  with any number of i, hey, heyy, hello, helloo, yo, yoo, gm, gmgm, gn, sup,
+  wassup, what's up, howdy, hiya, ello, good morning, good evening, good
+  afternoon), then at most two of alan, ser, fren, frens, bro, there,
+  everyone, then at most a short run of "!" or "." and one emoji. No other
+  handle (not even in the reply prefix), no `$`, no digit, no link, no
+  contract. A word more ("hi, what coin should I buy", "gm sherwood", "gm
+  $PEPE", "h1") and it is not a greeting: it goes the normal way, or gets no
+  answer. Only a top-level tag or a reply straight under one of its own
+  posts, as for every answer, and code's own classifier must read it as
+  plain chat too. The line is one of eight (`greetingAnswers` in
+  `writer.ts`), picked by the mention's id, each digit-free, naming no coin
+  and claiming nothing: it says hello back and invites a real question ("hey
+  hey. ask me how i pick coins or what i've been up to"). A paper agent's
+  line adds a short paper clause of its own. Each passes the gate as a reply,
+  live, paper and idle, with the other seven and every model answer already
+  said, so a greeting is answered in other words until all eight are in the
+  gate's memory of its recent posts, and then skipped as a repeat. A greeting
+  spends no model call and no model allowance, and nothing is looked up for
+  it. It still waits for the hello and the house consent, honours every
+  opt-out, the sherwood and author screens and the gate, and counts against
+  the day's 24 and the person's two. Like every answer, it is worked
+  through only while the writer has a model configured and the fleet's model
+  allowance for the day is not spent. Logged as `answered-greeting`.
 - **Sherwood in any form, and every other model question, gets no answer at
   all**: no row, no draft, no allowance (`unanswered`, counted as
   `answer-unanswered`). Sherwood is found on the tag's letters alone
@@ -716,7 +764,8 @@ the mention itself. They go out **right away**:
   told of, or of none by name ("bought it", "picked up a few"): `buy-claim`.
   A comment reply may say a buy only of its parent's coin. This is the
   backstop for a model that ignores the prompt.
-- **Their own lane:** one minute apart, 24 a day per X account, at most two
+- **Their own lane:** twenty seconds apart (`ANSWER_GAP_MS`), so a few people
+  tagging at once are each answered a pass or two apart; 24 a day per X account, at most two
   per person per rolling day. Answers never spend or wait on the posting
   cadence. The per-person count is taken under a lock on the X account and
   the person (`xpost_meta` `answer-author:<xUserId>:<authorId>`). Two owners
@@ -906,7 +955,7 @@ lanes before them. Unset is the default and changes nothing, except for an accou
 | 4 | `MERRYMEN_FLOW_BROKER` | none | never set | The orchestrator writes it into each child that may ask, and removes an inherited copy |
 | 5 | `MERRYMEN_XPOST_ACTIVE_TENANTS` | web + orchestrator, same value | Alan's tenant address, from the deploy environment | The active cadence, his reply consent recorded by the orchestrator, and answers to tags sent right away. The web reads it for the reply warning |
 | 5 | `MERRYMEN_XPOST_REPLIES_APPROVED` | web + orchestrator, same value | `active` (the owner's decision of 2026-10-12, for the operator's own agent only; `1` stays unset until X's written approval) | Without it there are no comment replies and no answers to tags. On 2026-10-12 the owner (Milla) decided to set it to `active` on both services for the operator's own agent only, so Alan answers people who tag him. X's published automation rules ask for written approval for AI reply bots; an X staff answer on the developer forum says replies triggered by a mention do not need it, and Alan's request for clarification is pending. `1` (every owner) stays unset until written approval exists. |
-| 5 | `MERRYMEN_XPOST_REPLY_POLLS_PER_DAY` | orchestrator | unset (`200` for the fleet) | Alan's one-minute polls spend their own 1,500 per X account per UTC day |
+| 5 | `MERRYMEN_XPOST_REPLY_POLLS_PER_DAY` | orchestrator | unset (`200` for the fleet) | Alan's fifteen-second polls spend their own 6,000 per X account per UTC day |
 | 6 | `MERRYMEN_XPOST_RESEARCH` | orchestrator | `1` | Answers look things up first. Boot line `xpost: on — … answers look things up first`; with the Bitquery key also `xpost: answers may read onchain flow — up to 200 readings per UTC day …` |
 | 6 | `MERRYMEN_XPOST_RESEARCH_PER_HOUR` | orchestrator | unset (`120`) | Public-index lookups per hour across X accounts |
 | 6 | `MERRYMEN_XPOST_FOMO` | orchestrator | `1` (Enterprise rights confirmed by the owner on 2026-10-12, [`fomo.md`](fomo.md) "Publication") | Paraphrased, attributed Fomo facts in answers |

@@ -26,6 +26,7 @@ import {
   casualPrompt,
   describeXpostCreds,
   draft,
+  greetingAnswers,
   introPrompt,
   introTemplate,
   modelAnswer,
@@ -1022,6 +1023,36 @@ describe("an active agent's answers and conversation memory", () => {
     const bare = paper.map((l) => l.replace(/\. Say stop to opt out\.$/, ""));
     for (let i = 0; i < bare.length; i++) {
       for (let j = i + 1; j < bare.length; j++) assert.ok(similarity(bare[i]!, bare[j]!) < 0.6, `${bare[i]} / ${bare[j]}`);
+    }
+  });
+
+  it("a greeting's answer is code's: eight casual lines, picked by the mention, digit-free, naming no coin and claiming nothing", () => {
+    const lines = new Set<string>();
+    for (let i = 0; i < 200; i++) lines.add(greetingAnswers(`10000000000000${i}`, { lower: false })[0]!);
+    assert.equal(lines.size, 8, "every line is reachable");
+    const all8 = greetingAnswers("1", { lower: false });
+    assert.equal(new Set(all8).size, 8, "the mention's own line first, then every other line, once");
+    assert.deepEqual(greetingAnswers("1", { lower: false }), all8, "the same mention, the same order");
+    assert.match(greetingAnswers("1", { lower: true })[0]!, /say stop to opt out\.$/);
+    const paper = greetingAnswers("1", { lower: false }, { paper: true });
+    for (const [i, line] of [...all8, ...paper].entries()) {
+      assert.match(line, /Say stop to opt out\.$/);
+      assert.doesNotMatch(line, /\p{N}|\$|@|#|https?:|0x/u, line);
+      assert.doesNotMatch(line, /\b(?:pepe|bonk|wif|doge|shib|btc|eth|sol|bitcoin|solana|sherwood|merrymen|groq|qwen|gpt|claude|llama)\b/i, line);
+      assert.doesNotMatch(line, /\b(?:bought|holding|hold|profit|loss|moon|pump|gem|buy|sell|price)\b/i, `${line}: no claim, no call`);
+      assert.equal(sherwoodNamed(line), false, line);
+      assert.equal(vocabularyRefusal(line), null, line);
+      if (i >= 8) {
+        assert.ok(line.startsWith(all8[i - 8]!.replace(/\. Say stop to opt out\.$/, "")), line);
+        assert.match(line, /\bon paper\b/, "a paper agent's line says paper");
+      } else assert.doesNotMatch(line, /paper|practice/, "a live one's never does");
+    }
+    // Weighed as the gate weighs a reply: without the notice every line ends with.
+    for (const set of [all8, paper]) {
+      const bare = set.map((l) => l.replace(/\. Say stop to opt out\.$/, ""));
+      for (let i = 0; i < bare.length; i++) {
+        for (let j = i + 1; j < bare.length; j++) assert.ok(similarity(bare[i]!, bare[j]!) < 0.6, `${bare[i]} / ${bare[j]}`);
+      }
     }
   });
 
