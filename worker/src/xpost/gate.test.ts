@@ -6,7 +6,7 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { admitXPost, sherwoodClaimed, sherwoodNamed, tidyXPost, vocabularyRefusal, type BaseGate, type BaseGateCtx, type XGateCtx } from "./gate";
+import { admitXPost, sherwoodClaimed, sherwoodMentioned, sherwoodNamed, strayCharacter, tidyXPost, vocabularyRefusal, type BaseGate, type BaseGateCtx, type XGateCtx } from "./gate";
 import { similarity, REPEAT_LIMIT } from "../social-post";
 
 /** A base gate that refuses a digit and passes everything else through, recording what it was handed. */
@@ -976,5 +976,46 @@ describe("sherwood-1: one name with a digit, in an answer only, never as what ru
     // What is posted is judged again: a base gate that cleans a draft into a claim does not get it out.
     const cleaner: BaseGate = (raw) => ({ ok: true, text: raw.replace(/x/g, "") });
     assert.deepEqual(admitXPost("sherxwood picks my trades now. Say stop to opt out.", ctx(reply), cleaner), { ok: false, reason: "sherwood-claim" });
+  });
+});
+
+describe("sherwood with a symbol written for one of its letters is still sherwood, and an answer holds only plain characters (red-team 2026-10-12)", () => {
+  const reply: Partial<XGateCtx> = { kind: "reply", mode: "live" };
+  // The reproduced drafts, each admitted and sent to X at 11f7acac.
+  const DRAFTS = [
+    "sherwoo∂ is merrymen's own, still cooking in their kitchen, launch soon. say stop to opt out.",
+    "§herwood is merrymen's own and it's on the stove, coming soon. say stop to opt out.",
+    "sher₩ood is merrymen's own thing, still in the oven. no peeking yet. say stop to opt out.",
+    "s|-|erwood is merrymen's own, still in their kitchen, launch soon. say stop to opt out.",
+    "sher\\/\\/ood is merrymen's own and it's still cooking, not done yet. say stop to opt out.",
+    "sherwoo|) is merrymen's own, on the stove over there, coming soon. say stop to opt out.",
+    "the sherwoo∂ token is in the oven over at merrymen, launch soon. say stop to opt out.",
+  ];
+  it("every reproduced draft is refused before any sherwood check reads around it, and names sherwood to every one of them", () => {
+    for (const d of DRAFTS) {
+      assert.equal(strayCharacter(d), true, d);
+      assert.equal(reason(d, reply), "charset", d);
+      assert.equal(sherwoodNamed(d), true, d);
+      assert.equal(sherwoodMentioned(d), true, d);
+    }
+  });
+  it("the unit probe's spellings are all sherwood, and so are the controls", () => {
+    for (const s of ["sherwoo∂", "s|-|erwood", "sher\\/\\/ood", "sherwoo|)", "sherwoocl", "she℞wood", "s♄erwood", "sher₩ood", "she|2wood", "she®wood", "§herwood",
+      "sherwood", "sh3rwood", "shervvood", "sherw()()d", "s h e r w o o d"]) {
+      assert.equal(sherwoodMentioned(`is ${s} merrymen's new token? when does it launch?`), true, s);
+    }
+    for (const s of ["what kind of coins do you trade?", "gm, what is merrymen cooking next?", "how do you pick your coins?", "she would know, the wood is old"]) {
+      assert.equal(sherwoodMentioned(s), false, s);
+    }
+  });
+  it("an ordinary answer, with an emoji, a dash or a contraction, still passes; a symbol inside or beside a word does not", () => {
+    for (const d of ["mostly fresh launches, and i only buy when the buying looks real and steady. Say stop to opt out.",
+      "it's early days — thin pools and a quiet tape 🙂 Say stop to opt out.", "built by merrymen, and the new sherwood-1 is still cooking. Say stop to opt out."]) {
+      assert.equal(reason(d, reply), "ok", d);
+    }
+    for (const d of ["mostly fresh launches w/ steady buying. Say stop to opt out.", "mostly fresh launches | steady buying. Say stop to opt out.",
+      "mostly fresh launches, steady buy∫ng. Say stop to opt out."]) assert.equal(reason(d, reply), "charset", d);
+    // Only an answer is held to it: a casual post is the base gate's and the X clauses' as before.
+    assert.notEqual(reason("mostly fresh launches w/ steady buying", { kind: "casual" }), "charset");
   });
 });

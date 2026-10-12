@@ -341,8 +341,30 @@ const LOOKALIKE: Readonly<Record<string, string>> = Object.freeze({
 const LOOKALIKE_UPPER: Readonly<Record<string, string>> = Object.freeze({
   Α: "a", Β: "b", Ε: "e", Ζ: "z", Η: "h", Ι: "i", Κ: "k", Μ: "m", Ν: "n", Ο: "o", Ρ: "p", Τ: "t", Υ: "y", Χ: "x",
 });
-/** Digits and signs written for a letter: "sherw00d", "5herwood", "$herwood". */
-const LEET: Readonly<Record<string, string>> = Object.freeze({ "0": "o", "3": "e", "4": "a", "5": "s", "7": "t", $: "s", "@": "a", "€": "e" });
+/**
+ * Digits and signs written for a letter: "sherw00d", "5herwood", "$herwood".
+ * And the symbols that read as one of sherwood's letters on X (red-team
+ * review, 2026-10-12): "sherwoo∂", "§herwood", "sher₩ood", "she℞wood",
+ * "s♄erwood", "s#erwood". lettersOf dropped each, and the letter with it.
+ */
+const LEET: Readonly<Record<string, string>> = Object.freeze({
+  "0": "o", "3": "e", "4": "a", "5": "s", "7": "t", $: "s", "@": "a", "€": "e",
+  "∂": "d", "§": "s", "₩": "w", "℞": "r", "♄": "h", "#": "h", "®": "r", "©": "c", "°": "o",
+});
+/**
+ * STROKES WRITTEN FOR A LETTER, read as it before lettersOf drops them
+ * (red-team review, 2026-10-12): "s|-|erwood", "sher\/\/ood", "sherwoo|)",
+ * "she|2wood", "sherw()()d". Only for finding sherwood (sherwoodMentioned).
+ */
+const STROKES: readonly (readonly [RegExp, string])[] = [
+  [/\\\/\\\//g, "w"], [/\\\//g, "v"], [/\|-\|/g, "h"], [/\]-\[/g, "h"], [/\}\{/g, "h"],
+  [/\|[)\]>]/g, "d"], [/\[\)/g, "d"], [/\|2/g, "r"], [/\(\)/g, "o"], [/\[\]/g, "o"], [/\|_\|/g, "u"],
+];
+function withStrokes(text: string): string {
+  let t = text.normalize("NFKC");
+  for (const [re, letter] of STROKES) t = t.replace(re, letter);
+  return t;
+}
 
 /**
  * A TEXT'S LETTERS AND NOTHING ELSE, a-z: NFKC, lowercase, accents taken off,
@@ -413,8 +435,23 @@ export function unreadableLetter(text: unknown): boolean {
  * may spell it.
  */
 const SHERWOOD_LETTERS = /s+h+e*r+w+o*d/;
+/**
+ * ONE OF ITS LETTERS GONE (red-team review, 2026-10-12): a symbol no table
+ * knows, written for one letter, takes that letter out of what lettersOf
+ * reads ("sherwoo∂" was "sherwoo", "s|-|erwood" was "serwood"), and the
+ * skeleton above missed it. So sherwood with any one of s, h, r, w or d
+ * missing counts too (with both o's when the w or the d is the one gone):
+ * "herwood", "serwood", "shewood", "sherood", "sherwoo". Errs toward
+ * finding it: "her wood" counts, at the cost of one answer.
+ */
+const SHERWOOD_NEAR = /h+e+r+w+o+d|s+e+r+w+o+d|s+h+e+w+o+d|s+h+e*r+o{2,}d|s+h+e*r+w+o{2,}/;
 export function sherwoodMentioned(text: unknown): boolean {
-  return SHERWOOD_LETTERS.test(lettersOf(text)) || SHERWOOD_LETTERS.test(lettersOf(text, { leet: true })) || unreadableLetter(text);
+  if (typeof text !== "string") return false;
+  const stroked = withStrokes(text);
+  const reads = [lettersOf(text), lettersOf(text, { leet: true }), lettersOf(stroked, { leet: true })];
+  // "cl" written for a d ("sherwoocl"), read only for this.
+  reads.push(reads[2]!.replace(/cl/g, "d"));
+  return reads.some((r) => SHERWOOD_LETTERS.test(r) || SHERWOOD_NEAR.test(r)) || unreadableLetter(text);
 }
 
 /**
@@ -478,6 +515,36 @@ export function hidesCharacters(text: string): boolean {
     .replace(/(?<=\p{Extended_Pictographic}[\u{1F3FB}-\u{1F3FF}]?)\ufe0f/gu, "")
     .replace(/(?<=\p{Extended_Pictographic}[\ufe0f\u{1F3FB}-\u{1F3FF}]?)\u200d(?=\p{Extended_Pictographic})/gu, "");
   return HIDDEN.test(t);
+}
+
+/**
+ * ONLY CHARACTERS THAT ARE WHAT THEY LOOK LIKE, IN A REPLY (red-team review,
+ * 2026-10-12). "sherwoo∂ is merrymen's own, still cooking", "§herwood",
+ * "sher₩ood", "s|-|erwood", "sher\/\/ood" and "sherwoo|)" read as sherwood on
+ * X, and every sherwood check read them as nothing: a symbol written for a
+ * letter is dropped, and the letter with it. A list of look-alikes can never
+ * be whole, so an answer is held to plain characters instead: letters a-z
+ * (accents aside), digits (the base gate still refuses them, bar
+ * "sherwood-1"), spaces, ordinary sentence punctuation, and the characters
+ * the clauses after this refuse by name ($ @ # " < > { } [ ] ` &), plus
+ * emoji, which the emoji clause counts. And between two letters only one
+ * apostrophe, hyphen, dash, stop, comma or colon, or a run with a digit in it
+ * (has-digits refuses that): never "s|-|erwood" or "she®wood".
+ * Anything else refuses the draft whole, before any sherwood check reads it.
+ */
+const REPLY_CHAR = /^[A-Za-z0-9 .,!?':;()\-—–…$"“”@#&<>{}[\]`]$/u;
+const SKIN_TONE = /^[\u{1F3FB}-\u{1F3FF}]$/u;
+const IN_WORD = /(?<=\p{L})[^\p{L}\s]+(?=\p{L})/gu;
+export function strayCharacter(text: unknown): boolean {
+  if (typeof text !== "string") return true;
+  const t = plainDraft(text);
+  let prev = "";
+  for (const ch of t) {
+    const ok = REPLY_CHAR.test(ch) || /\p{Extended_Pictographic}/u.test(ch) || (SKIN_TONE.test(ch) && /\p{Extended_Pictographic}/u.test(prev));
+    if (!ok) return true;
+    prev = ch;
+  }
+  return [...t.matchAll(IN_WORD)].some((m) => !/^['.,:;\-—–]$/.test(m[0]) && !/[0-9]/.test(m[0]));
 }
 
 /** The model's "nothing to say", however it decorated it. */
@@ -1199,7 +1266,7 @@ function strings(list: unknown): string[] {
  * MAY THIS BE POSTED ON X? Tidy, then the base gate, then every X clause.
  * `ok` carries the exact text to store and post.
  *
- * Reason codes (stable, operator-only): empty · pass · meta · hidden-chars · too-short · too-long ·
+ * Reason codes (stable, operator-only): empty · pass · meta · hidden-chars · charset · too-short · too-long ·
  * handle · link · markup · emoji · exclaim · caps · ops · alert · hype · pnl ·
  * market · human-claim · points-back · coin-unsaid · paper-unsaid · mode-false · undisclosed · intro-no-trading ·
  * opt-out-unsaid · reply-current-or-action · sherwood-claim · bought-named · buy-claim ·
@@ -1214,6 +1281,8 @@ export function admitXPost(raw: unknown, ctx: XGateCtx, baseGate: BaseGate): XVe
   if (metaRefusal(raw, tidied, agentName)) return refuse("meta");
   // Nothing invisible: the base gate would take it out after every check here had read around it.
   if (hidesCharacters(tidied)) return refuse("hidden-chars");
+  // Nothing written for a letter, read before any sherwood check (strayCharacter).
+  if (ctx.kind === "reply" && strayCharacter(tidied)) return refuse("charset");
   // A reply never says sherwood runs it, whoever drafted it (see SHERWOOD_NAME).
   if (ctx.kind === "reply" && sherwoodClaimed(tidied)) return refuse("sherwood-claim");
   // In a reply only, "sherwood-1" is a name: masked for every check below, put back after.

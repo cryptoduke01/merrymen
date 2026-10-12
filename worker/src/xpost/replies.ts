@@ -158,6 +158,40 @@ export function plainAsk(text: unknown): string | null {
  */
 const ENCLOSED_LETTER = /[\u{1F130}-\u{1F189}]/u;
 
+/**
+ * ONLY CHARACTERS THAT ARE WHAT THEY LOOK LIKE (red-team review, 2026-10-12).
+ * "is sherwoo∂ merrymen's new token?", "§herwood token from merrymen coming
+ * soon?", "sher₩ood", "s|-|erwood", "sher\/\/ood", "sherwoo|)": a symbol
+ * written for a letter is dropped by code's letter reading, and the letter
+ * with it, so sherwood was never found and the tag was answered. A list of
+ * look-alikes is never whole, so a tag is held to plain characters instead:
+ * letters (the script checks judge those), digits, whitespace, plain
+ * punctuation (the phone's curly quotes, dashes and ellipsis among it), and
+ * one emoji at most. And between two letters only one apostrophe, hyphen,
+ * dash, stop, comma or colon, or digits (masked as "(a number)" for the
+ * writer): never "|-|", "\/\/", "®" or "&" inside a word.
+ * Restated, not imported, from the X gate's own rule for what an answer says
+ * (gate.ts strayCharacter): gate.ts imports this file. Fail closed: a tag
+ * with a symbol in it costs one answer.
+ */
+const TAG_CHAR = /^[A-Za-z0-9 \n\r\t.,!?'"’‘“”:;()\-—–…$%&+*~/]$/u;
+const PICTOGRAPH = /^\p{Extended_Pictographic}$/u;
+const EMOJI_TAIL = /^[️\u{1F3FB}-\u{1F3FF}]$/u;
+const IN_WORD = /(?<=\p{L})[^\p{L}\s]+(?=\p{L})/gu;
+function strayInTag(text: string): boolean {
+  let prev = "";
+  let emoji = 0;
+  for (const ch of text) {
+    if (/^[\p{L}\p{Mn}]$/u.test(ch) || TAG_CHAR.test(ch)) prev = ch;
+    else if (PICTOGRAPH.test(ch)) {
+      emoji++;
+      prev = ch;
+    } else if (!(EMOJI_TAIL.test(ch) && PICTOGRAPH.test(prev))) return true;
+  }
+  if (emoji > 1) return true;
+  return [...text.matchAll(IN_WORD)].some((m) => !/^['’‘.,:;\-—–]$/.test(m[0]) && !/[0-9]/.test(m[0]));
+}
+
 /** A question or a plain address to the agent, after any leading handles. */
 const ASKED = /\?|^(?:what|why|how|which|who|whos|who's|where|are|is|do|does|did|can|could|have|has|tell|explain|thoughts|gm|hey|yo|hi|hello)\b/i;
 
@@ -276,6 +310,8 @@ export function tagCandidate(reply: XReply, ctx: { xUserId: string; research?: b
   if (/[\u0000-\u001f\u007f«»<>#]|\p{Script=Cyrillic}|\p{Script=Han}/u.test(text)) return no("unsafe-text");
   // Only letters code can read, and no text that runs backwards on screen.
   if (BIDI.test(reply.text) || NON_ASCII_LETTER.test(bareLetters(text)) || ENCLOSED_LETTER.test(text)) return no("unsafe-text");
+  // And no symbol written for a letter: only plain characters, one emoji at most (strayInTag).
+  if (strayInTag(text)) return no("unsafe-text");
   if (LINK_OR_SECRET.test(text)) return no("link-or-secret");
   if (ABUSE_OR_SENSITIVE.test(text)) return no("sensitive");
   if (SPAM_OR_INSTRUCTIONS.test(text)) return no("spam-or-instructions");
