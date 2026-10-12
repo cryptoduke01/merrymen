@@ -836,6 +836,22 @@ describe("an active agent's answers and conversation memory", () => {
     assert.deepEqual(gate("🐸 was a fun one lately, the buying looked steady. Say stop to opt out."), { ok: false, reason: "bought-named" });
   });
 
+  it("a short ticker names a coin only as a word, never inside an ordinary one (red-team 2026-10-12)", () => {
+    // The reproduced book: official stock tokens MU (Micron), USO (United States Oil), TSLA, and BE (Bloom Energy).
+    const bought = ["MU", "Micron", "USO", "United States Oil", "TSLA", "Tesla", "tesla"];
+    for (const q of ["gm, u trading today?", "how do you source your coins?", "gm u up?", "what are you buying, you must be busy?", "how much do you trade a day?",
+      "how's the community treating you?", "what do you trade?", "what did you buy today?"]) {
+      assert.equal(coinNamedIn(q, bought), false, q);
+    }
+    for (const q of ["what have you been buying lately?", "how long have you been trading?"]) assert.equal(coinNamedIn(q, ["BE", "Bloom Energy"]), false, q);
+    assert.equal(coinNamedIn("you must be busy?", ["BE"]), true, "the word itself still counts: fail closed");
+    for (const q of ["did you buy mu?", "is $MU legit?", "thoughts on micron?", "did you buy uso?", "tesla?", "did you buy tsla2?", "mu's chart?"]) {
+      assert.equal(coinNamedIn(q, bought), true, q);
+    }
+    // A name of four letters or more is still found inside the letters: every copycat carries it.
+    for (const q of ["did you buy pepe inu?", "pe pe?", "pepecoin?"]) assert.equal(coinNamedIn(q, ["PEPE"]), true, q);
+  });
+
   it("buys it cannot name are never said to be no buys: \"not bought anything\" only when it bought nothing", () => {
     const of = (o: { recentBuys: { label: string; paper: boolean }[]; boughtLately?: boolean }) =>
       answerPrompt({ ...BASE, mode: "live", question: "what have you been buying lately?", said: [], walletPublic: false, ...o }).prompt;

@@ -635,7 +635,10 @@ the mention itself. They go out **right away**:
   any length, or when any coin it bought (each buy's ticker, its name, the
   label a post would use, and each buy post's coin) appears in the
   question's letters, ignoring case, spacing, digits, zero-width characters
-  and look-alike letters. So "did you buy pepe inu?", "pepe two", "$PEPE2",
+  and look-alike letters. A name of fewer than four letters (MU, USO, BE)
+  counts only as a whole word, so "gm, u trading today?" does not name MU,
+  and a name with no Latin letters ("ペペ", an emoji) is matched on its own
+  characters. A letter code cannot read counts as naming one. So "did you buy pepe inu?", "pepe two", "$PEPE2",
   "pepe 2", "pe<zero-width>pe", "pepe classic" and "Pepe Coin" all name the
   PEPE it bought. Such a tag's prompt has no list of its buys, no "you have
   not bought anything", no line about unnamed buys, none of what it already

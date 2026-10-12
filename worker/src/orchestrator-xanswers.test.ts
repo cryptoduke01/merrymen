@@ -898,6 +898,22 @@ test("a buy named without Latin letters is never told to a tag that names it (re
   }
 });
 
+test("a greeting is not a coin because a short ticker it bought hides in its letters (red-team 2026-10-12)", async (t) => {
+  // The reproduced book: official stock tokens MU (Micron), USO (United States Oil) and TSLA.
+  const stock = (decisionId: string, symbol: string, name: string): CallFact => ({ ...CALL, decisionId, symbol, name });
+  const facts: AgentFacts = { ...FACTS, calls: [stock("fill-mu", "MU", "Micron"), stock("fill-uso", "USO", "United States Oil"), stock("fill-tsla", "TSLA", "Tesla")] };
+  for (const env of [{}, RESEARCH_ON]) {
+    for (const text of ["@alanaldale gm, u trading today?", "@alanaldale how do you source your coins?"]) {
+      const w = await world(t, { env, research: fakeResearch().research, facts, answer: "gm, quiet one so far. Say stop to opt out." });
+      w.setInbox([tag({ text })]);
+      await w.step();
+      const [prompt] = w.asked();
+      assert.ok(prompt, text);
+      assert.doesNotMatch(prompt!, /They named a specific coin|don't talk about individual positions/, text);
+    }
+  }
+});
+
 test("research on: \"did you buy <contract>?\" reaches its own history by the address, end to end", async (t) => {
   const r = fakeResearch();
   const facts: AgentFacts = { ...FACTS, calls: [{ ...CALL, token: CA, ownWords: "the buying looked steady and real" }] };

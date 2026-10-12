@@ -399,19 +399,30 @@ export function sherwoodMentioned(text: unknown): boolean {
  * called "ペペ" or "🐸" has no letters to match, so it was never found and
  * the tag that named it was told what it bought. Such a name (fewer than
  * three letters) is also matched on its own characters, NFKC, lowercase,
- * invisible characters out, whitespace collapsed, when it has a letter or a
- * pictograph to match on.
+ * invisible characters out, whitespace collapsed, when it has a character
+ * other than a plain letter or digit to match on.
+ *
+ * A SHORT NAME ONLY AS A WORD (red-team review, 2026-10-12). Inside the
+ * letters of a whole sentence a ticker of two or three letters turns up
+ * everywhere: an agent that bought MU, USO or BE was "named" by "gm, u
+ * trading today?", "how do you source your coins?" and "what have you been
+ * buying?". So a name of fewer than four letters counts only as a whole word
+ * of the text (its letters, as lettersOf reads them, are the word's), and a
+ * longer one anywhere in its letters, which still catches every copycat
+ * that carries the full name ("pepe inu", "pepe2", "pe pe").
  */
 export function namedIn(text: unknown, names: readonly unknown[]): boolean {
   if (typeof text !== "string") return false;
   const read = [lettersOf(text), lettersOf(text, { leet: true })];
   const whole = rawName(text);
+  const words = whole.split(/[^\p{L}\p{N}$@€]+/u).filter(Boolean).map((w) => [lettersOf(w), lettersOf(w, { leet: true })]);
   return names.some((name) => {
     const letters = [lettersOf(name), lettersOf(name, { leet: true })];
-    if (letters.some((n) => n !== "" && read.some((r) => r.includes(n)))) return true;
+    if (letters.some((n) => n.length >= 4 && read.some((r) => r.includes(n)))) return true;
+    if (letters.some((n) => n !== "" && n.length < 4 && words.some((w) => w.includes(n)))) return true;
     if (typeof name !== "string" || letters[0]!.length >= 3) return false;
     const raw = rawName(name);
-    return /[\p{L}\p{Extended_Pictographic}]/u.test(raw) && whole.includes(raw);
+    return /[^a-z0-9\s]/u.test(raw) && /[\p{L}\p{Extended_Pictographic}]/u.test(raw) && whole.includes(raw);
   });
 }
 
