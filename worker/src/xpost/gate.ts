@@ -1451,6 +1451,18 @@ function admitMasked(tidied: string, ctx: XGateCtx, baseGate: BaseGate, agentNam
   // any paper phrase, the idiom too, unless a paper coin it was told of is named.
   if (ctx.kind === "reply" && ctx.mode === "live" && saysPaper(text, coins) && !aboutPaper) return refuse("mode-false");
   if (ctx.mode === "paper" && SAYS_REAL_MONEY.test(text)) return refuse("mode-false");
+  // AN IDLE AGENT'S REPLY, COIN BY COIN (red-team 2026-10-12): "bought pepe and
+  // bonk lately, both on paper" called a live buy paper, and "grabbed bonk and
+  // pepe with real money, nothing on paper" a paper buy real money, because
+  // paper was read for the whole text. With no mode to hold it to, a reply may
+  // not name coins of both moneys, nor say paper beside a real-money coin, nor
+  // real money beside a paper one.
+  if (ctx.kind === "reply" && ctx.mode === null) {
+    const isPaper = (c: string) => paperCoins.some((p) => p.trim().toLowerCase() === c.trim().toLowerCase());
+    const liveNamed = coins.some((c) => !isPaper(c) && mentions(text, c));
+    const paperNamed = paperCoins.some((c) => mentions(text, c));
+    if ((liveNamed && paperNamed) || (liveNamed && saysPaper(text, coins)) || (paperNamed && SAYS_REAL_MONEY.test(text))) return refuse("mode-false");
+  }
 
   if (ctx.kind === "intro") {
     if (!SAYS_AGENT.test(text)) return refuse("undisclosed");

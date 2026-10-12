@@ -93,6 +93,17 @@ describe("an answer says only the buys it was told of (red-team 2026-10-12)", ()
     assert.equal(reason("on paper a slow day sounds boring, but i like it", { kind: "casual", mode: "live", coins: [] }), "ok", "a casual post keeps the idiom");
   });
 
+  it("an idle agent's reply reads paper coin by coin: never both moneys, nor one coin's money said of the other (red-team 2026-10-12)", () => {
+    // writeAnswer's idle context at 11f7acac: PEPE live, BONK on paper, both vouched.
+    const idle: Partial<XGateCtx> = { kind: "reply", mode: null, coins: ["Pepe", "Bonk"], paperCoins: ["Bonk"], buys: "vouched" };
+    for (const draft of ["bought pepe and bonk lately, both on paper. Say stop to opt out.", "grabbed bonk and pepe lately with real money, nothing on paper. Say stop to opt out.",
+      "pepe was on paper, bonk was real money. Say stop to opt out.", "picked up pepe on paper, and bonk on paper too. Say stop to opt out."]) {
+      assert.equal(reason(draft, idle), "mode-false", draft);
+    }
+    assert.equal(reason("grabbed some bonk on paper lately. Say stop to opt out.", idle), "ok", "one paper coin, said as paper");
+    assert.equal(reason("grabbed some pepe with real money lately. Say stop to opt out.", idle), "ok", "one real-money coin, said as such");
+  });
+
   it("told its buys: a buy it says is of one of them, or of no coin by name", () => {
     assert.equal(reason("yep, bought wif lately, the curve looked early. say stop to opt out.", vouched), "buy-claim");
     assert.equal(reason("lately i grabbed a little trump, the buying looked steady. say stop to opt out.", vouched), "buy-claim");

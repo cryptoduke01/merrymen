@@ -1609,7 +1609,10 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       const exact = looked?.boughtExact === true;
       const told = general || exact;
       // ON THE EXACT PATH, only the tagged contract's own names: "yep, bought wif" under it is a buy it never made.
-      const vouched = general ? buys : exact ? exactBuys(f, candidate.address ?? null) : [];
+      // AN IDLE AGENT IS TOLD OF NONE BY NAME (red-team 2026-10-12): its paper
+      // and real-money buys side by side were said each as the other's money.
+      const vouched = general && f.mode !== "idle" ? buys : exact ? exactBuys(f, candidate.address ?? null) : [];
+      const namesNone = told && vouched.length === 0;
       // NEVER THE OTHER MONEY'S COINS (red-team 2026-10-12): a coin bought only
       // with the money it does not trade with now (or whose buy's money is
       // unknown) is never named, and an idle agent that names any paper coin
@@ -1626,7 +1629,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         kind: "reply", agentName: f.name, mode, coins: vouched.map((c) => c.label),
         paperCoins: [...vouched.filter((c) => c.paper).map((c) => c.label), ...(f.mode === "idle" ? money.paper : [])], recentOwn, recentFleet, emojiOk: facts.style.emoji > 0,
         // A buy it says is one it was told of, or none at all (XGateCtx.buys).
-        ...(templated ? {} : { buys: told ? "vouched" as const : "none" as const, unsaid: [...(told ? [] : bought), ...money.otherOnly, ...older],
+        ...(templated ? {} : { buys: told ? "vouched" as const : "none" as const, unsaid: [...(told && !namesNone ? [] : bought), ...money.otherOnly, ...older],
           // A coin named, or its trades or a coin asked about off the plain list: not even that it likes it (XGateCtx.named).
           named: !told && (coinNamed || asked.kind === "own-trades" || asked.kind === "coin") }),
       }, BASE_GATE);

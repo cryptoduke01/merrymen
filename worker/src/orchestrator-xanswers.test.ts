@@ -1338,11 +1338,34 @@ test("an answer never names a coin bought with the other money, however it learn
       assert.deepEqual(w.sends, [], answer);
     }
   }
-  // An idle agent names a paper coin only saying paper, even one the three newest buys pushed out of its list.
+  // An idle agent names none of its buys at all, paper or not (red-team 2026-10-12): even one the three newest pushed out of its list.
   const idle = await world(t, { facts: { ...stateA, mode: "idle" }, answer: "lately it was pepe, i liked how fresh it felt. Say stop to opt out." });
   idle.setInbox([tag({ text: "@pine_stoat what do you trade?" })]);
   await idle.step();
-  assert.equal((await idle.answers())[0]!.reason, "gate:paper-unsaid");
+  assert.equal((await idle.answers())[0]!.reason, "gate:bought-named");
+});
+
+test("an idle agent's answer never says which money a coin was: it names none of its buys, and the gate reads paper coin by coin (red-team 2026-10-12)", async (t) => {
+  // The reproduced book: PEPE live, BONK on paper, and the agent not trading now.
+  const BONK: CallFact = { ...CALL, decisionId: "fill-bonk", symbol: "BONK", name: "Bonk", paper: true };
+  const facts: AgentFacts = { ...FACTS, mode: "idle", calls: [CALL, BONK] };
+  for (const answer of ["bought pepe and bonk lately, both on paper. Say stop to opt out.", "grabbed bonk and pepe lately with real money, nothing on paper. Say stop to opt out.",
+    "pepe was on paper, bonk was real money. Say stop to opt out.", "picked up pepe on paper, and bonk on paper too. Say stop to opt out."]) {
+    for (const env of [{}, RESEARCH_ON]) {
+      const w = await world(t, { env, research: fakeResearch().research, facts, answer });
+      w.setInbox([tag({ text: "@pine_stoat what have you been buying lately?" })]);
+      await w.step();
+      w.setInbox([]);
+      await w.step(NOW + MIN);
+      const [prompt] = w.asked();
+      assert.doesNotMatch(prompt!, /Coins you bought lately|«Pepe»|«Bonk»/, "no buy by name");
+      assert.match(prompt!, /some on paper and some with real money, that you can't name here/);
+      assert.deepEqual(w.sends, [], answer);
+      const [row] = await w.answers();
+      assert.equal(row!.status, "skipped", answer);
+      assert.match(row!.reason ?? "", /^gate:(?:bought-named|mode-false|buy-claim)$/, answer);
+    }
+  }
 });
 
 test("what it already said never carries its buy posts, nor a line of the other money (red-team 2026-10-12)", async (t) => {

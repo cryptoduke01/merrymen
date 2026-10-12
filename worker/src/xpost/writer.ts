@@ -912,7 +912,11 @@ export function answerPrompt(f: AnswerFacts): Prompt {
   // named coin, nor beside one of its buys' names (which only keeps them unshown).
   const shown = !named && f.general === true && !coinNamedIn(f.question, (f.recentBuys ?? []).map((c) => c.label));
   const notice = f.style.lower ? REPLY_OPT_OUT.toLowerCase() : REPLY_OPT_OUT;
-  const buys = !shown ? [] : (f.recentBuys ?? []).filter((c) => ownMoney(f.mode, c.paper === true))
+  // AN AGENT NOT TRADING NAMES NONE OF ITS BUYS (red-team 2026-10-12): told
+  // "«Pepe», «Bonk» (on paper)", its answers said "both on paper" and "all
+  // with real money, nothing on paper", and nothing could tell which coin went
+  // with which money. It is told it bought coins it can't name, as any answer.
+  const buys = !shown || f.mode === "idle" ? [] : (f.recentBuys ?? []).filter((c) => ownMoney(f.mode, c.paper === true))
     .map((c) => ({ label: clean(c.label, 40), paper: c.paper })).filter((c): c is { label: string; paper: boolean } => !!c.label).slice(0, 4);
   const unnamed = f.boughtLately ? unnamedKind(f.mode, f.boughtLately) : null;
   // What it said and its recent posts carry its buy posts ("grabbed pepe…"): none of it but for a plain question about its trades.
