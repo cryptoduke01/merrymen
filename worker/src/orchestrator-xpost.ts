@@ -89,7 +89,7 @@ import {
 import { answerPrompt, answerQuestion, buyPrompt, casualPrompt, draft, introPrompt, introTemplate, modelAnswers, replyPrompt, sellPrompt, sherwoodClaimed, sherwoodNamed, xpostModel, xpostModelWarning, type WriterFacts, type XStyle } from "./xpost/writer";
 import { appendPublicToken, appendPublicWallet, hasPublicWallet, publicTokenStillAllowed, publicWalletStillAllowed, type PublicWallet } from "./xpost/public-wallet";
 import { readPublicProjectDescription } from "./orchestrator-xpost-project";
-import { classifyTag, createXResearch, type ResearchBundle, type XResearch } from "./orchestrator-xpost-research";
+import { carriesResearch, classifyTag, createXResearch, type ResearchBundle, type XResearch } from "./orchestrator-xpost-research";
 import { PUBLISHABLE_SOURCES } from "./thesis-policy";
 import { readSaleResults } from "./orchestrator-xpost-results";
 import { appendSaleOutcome, hasSaleOutcome } from "./xpost/sale-outcome";
@@ -640,6 +640,17 @@ function recentCoins(f: AgentFacts): { label: string; paper: boolean }[] {
     if (out.length >= 3) break;
   }
   return out.map(({ label, paper }) => ({ label, paper }));
+}
+
+/**
+ * ITS OWN CONVERSATIONS, for a casual post to pick back up: the replies and
+ * answers this owner sent, newest first, never anyone else's words — and
+ * never an answer that carried research (carriesResearch). Exported for tests.
+ */
+export function talkedOf(posts: readonly XPost[], tenant: string): string[] {
+  return posts
+    .filter((p) => (p.kind === "reply" || p.kind === "answer") && p.status === "posted" && p.tenant === tenant)
+    .map((p) => withoutReplyOptOut(p.body)).filter((b) => b !== "" && !carriesResearch(b)).slice(0, 3);
 }
 
 /**
@@ -1261,11 +1272,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
           kinds: { buys: account.prefs.buys, casual: account.prefs.casual },
         });
         const recentOwn = await recentBodies(shared, { tenant: account.tenant, sinceMs: planNow - OWN_MEMORY_MS, limit: 200 });
-        // ITS OWN CONVERSATIONS, for a casual post to pick back up: replies and
-        // answers it sent, never anyone else's words.
-        const talked = posts
-          .filter((p) => (p.kind === "reply" || p.kind === "answer") && p.status === "posted" && p.tenant === account.tenant)
-          .map((p) => withoutReplyOptOut(p.body)).filter((b) => b !== "").slice(0, 3);
+        const talked = talkedOf(posts, account.tenant);
         for (const intent of intents) {
           if (drafts >= MAX_DRAFTS_PER_PASS) {
             // Cut short inside this account: the next pass starts here.
@@ -1298,8 +1305,12 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
           // WHAT IT ALREADY SAID is what X published: posted rows only. A
           // draft still under Coming up — this pass's own answers included —
           // may yet be skipped, so it stays in recentOwn (not to be echoed)
-          // and out of what an answer may restate as said.
-          const said = isActive ? await recentBodies(shared, { tenant: account.tenant, sinceMs: at() - OWN_MEMORY_MS, limit: 20, posted: true }) : [];
+          // and out of what an answer may restate as said. Never a post that
+          // carried research (carriesResearch): another coin's read, said
+          // again, would be said of this one.
+          const said = isActive
+            ? (await recentBodies(shared, { tenant: account.tenant, sinceMs: at() - OWN_MEMORY_MS, limit: 20, posted: true })).filter((b) => !carriesResearch(b))
+            : [];
           for (let i = 0; i < (isActive ? ANSWERS_PER_POLL : 1) && answerDrafts < MAX_ANSWER_DRAFTS_PER_PASS; i++) {
             const result = isActive
               // Its OWN posts only: another owner posting on the same X account is not its history.

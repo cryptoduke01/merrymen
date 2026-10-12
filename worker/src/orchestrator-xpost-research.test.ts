@@ -9,7 +9,7 @@ import { DatabaseSync } from "node:sqlite";
 import { describe, it } from "node:test";
 import type { CoinFacts, CoinFactsReader } from "./coin-facts-types";
 import { wrapSqlite, type Db } from "./db";
-import type { FlowResult } from "./flow-facts";
+import { FLOW_X_GLOSS, type FlowResult } from "./flow-facts";
 import type { BrokerCallOptions, FomoBroker } from "./fomo/contract";
 import type { TokenActivityData, TokenThesesData } from "./fomo/tools";
 import type { FomoEnvelope, FomoToolName } from "./fomo/types";
@@ -17,6 +17,7 @@ import type { AgentFacts, CallFact } from "./groupchat/facts";
 import { admitAgentLine } from "./groupchat/policy";
 import {
   capabilityPhrases,
+  carriesResearch,
   classifyTag,
   coinFactPhrases,
   CONFLICT_PHRASE,
@@ -250,6 +251,29 @@ describe("words from measurements: digit-free, attributed, and through the X gat
     for (const kind of ["casual", "buy", "sell", "intro"] as const) {
       const v = gate("pepe and the new sherwood-1 from merrymen, an ai agent trading here", kind);
       assert.equal(v.ok, false, kind);
+    }
+  });
+
+  it("a post that carried research is known by its sources, as built or as the model rephrased them; its own words are not", () => {
+    const built = [
+      ...coinFactPhrases(coinFacts(), NOW),
+      ...coinFactPhrases(coinFacts({ liquidityUsd: 2_000_000, holders: { count: 50_000, top10Pct: 12, updatedAtMs: null }, buyers24h: 3, sellers24h: 2 }), NOW),
+      ...fomoActivityPhrases({ distinctBuyers: 9, distinctSellers: 1 } as TokenActivityData),
+      "fomo traders mostly argue it's still early", "most of the fomo talk is about the team",
+      ...[...FLOW_X_GLOSS.values()].flat(),
+      ...capabilityPhrases({ fomo: true, flow: true }).slice(1, 2),
+      CONFLICT_PHRASE,
+      "the project says it's a meme about a very patient frog",
+    ];
+    for (const p of built) assert.equal(carriesResearch(`${p}, that's what i found. Say stop to opt out.`), true, p);
+    for (const p of ["folks keep asking about frogcoin, on-chain data shows buys clearly outweighing sells over the last hour",
+      "lots of tags about frogcoin lately, fomo traders mostly argue it's still early", "the index has it pretty thin, honestly", "onchain it looked busy",
+      "chain data had buys way ahead", "its creator calls it a frog meme", "that contract isn't the one i bought"]) {
+      assert.equal(carriesResearch(p), true, p);
+    }
+    for (const p of ["mostly fresh launches, and i only buy when the buying looks real and steady. Say stop to opt out.", "quiet tapes suit me fine",
+      "people keep asking how i pick launches, honestly it's mostly patience", ...modelAnswers("1", { lower: true }), ...ONBOARDING_PHRASES, "", null]) {
+      assert.equal(carriesResearch(p), false, String(p));
     }
   });
 

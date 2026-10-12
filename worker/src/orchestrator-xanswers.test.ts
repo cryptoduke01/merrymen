@@ -162,6 +162,22 @@ test("an answer restates only what X published, never a draft still waiting or o
   assert.match(answers[1]!.reason ?? "", /^gate:/);
 });
 
+test("an answer that carried a coin's research is never restated as what it said", async (t) => {
+  const w = await world(t, { env: RESEARCH_ON, research: fakeResearch().research });
+  const id = await store.schedulePost(w.db, { tenant: TENANT, xUserId: "111", kind: "answer", dedupeKey: "answer:111:100000000000000065",
+    body: "the public index shows liquidity is thin, and fomo traders mostly argue it's still early. Say stop to opt out.", nowMs: NOW - 2 * HOUR, dueAtMs: NOW - 2 * HOUR,
+    replyToTweetId: "100000000000000065", replyRootTweetId: "100000000000000065", replyAuthorId: "665" });
+  await store.claimPost(w.db, id!, NOW - HOUR);
+  await store.markPosted(w.db, id!, "100000000000000066", NOW - HOUR);
+  w.setInbox([tag({ text: "@pine_stoat thoughts on $WIF?" })]);
+  await w.step();
+  const [prompt] = w.asked();
+  assert.ok(prompt);
+  const said = /What you already said publicly[^\n]*/.exec(prompt!)?.[0] ?? "";
+  assert.match(said, /I am an AI trading agent/, "its own posts are still what it said");
+  assert.doesNotMatch(said, /public index|fomo/, "another coin's read is not");
+});
+
 test("the owner's night never holds an answer: a tag is answered and sent while the owner sleeps", async (t) => {
   const tz = "America/Los_Angeles";
   assert.equal(isAsleep(tz, TENANT, NOW), true, "02:00 there: the owner is asleep");

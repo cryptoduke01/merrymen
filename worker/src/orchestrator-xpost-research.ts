@@ -259,6 +259,23 @@ export function sayable(s: unknown): s is string {
   return typeof s === "string" && s.trim() !== "" && !/\p{N}/u.test(s) && !/[«»{}\n]/.test(s) && !/0x/i.test(s) && vocabularyRefusal(s) === null;
 }
 
+/**
+ * A POST THAT CARRIED RESEARCH, read by the sources every phrase here names:
+ * the public index, fomo, on-chain data, the project or its creator, a tagged
+ * contract. Such an answer is a read of a coin a stranger tagged, often one it
+ * never bought, true only when it was looked up. It is never handed on: not
+ * to a casual post as a theme to pick back up (an unsolicited, stale market
+ * read on its own timeline, and Fomo's talk republished outside the x-answer
+ * surface), and not to a later answer as what it already said (one coin's
+ * facts restated under another). Read by the source words, which survive the
+ * model's rephrasing ("keep who said it"), so it errs toward holding a post
+ * back; one held back only costs a theme.
+ */
+const RESEARCH_SOURCE = /\b(?:index|fomo|on[\s-]?chain|chain data|project|creator|contract)\b/i;
+export function carriesResearch(body: unknown): boolean {
+  return typeof body === "string" && RESEARCH_SOURCE.test(body);
+}
+
 /** A promise held to `ms`, or `fallback`. Never throws; its timer never holds a shutdown. */
 function within<T>(ms: number, p: Promise<T>, fallback: T): Promise<T> {
   if (!(ms > 0)) return Promise.resolve(fallback);

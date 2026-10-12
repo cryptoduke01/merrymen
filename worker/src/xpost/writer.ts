@@ -119,6 +119,8 @@ export interface CasualFacts extends WriterFacts {
    * What it said lately answering people (its own public replies, newest
    * first, without the opt-out notice). A trade-talk post may pick a theme
    * back up — "people keep asking me…" — in new words, never quoting anyone.
+   * Never an answer that carried research: the glue holds those back
+   * (orchestrator-xpost.ts talkedOf).
    */
   talked?: string[];
   /**
