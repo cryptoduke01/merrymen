@@ -51,6 +51,25 @@ function redisStore() {
         return true; // fail open — a KV blip shouldn't take the gateway down
       }
     },
+    /**
+     * Reserve `points` against a shared allowance of `cap`, BEFORE spending
+     * them. True when they fit; false when they would pass the cap (and are
+     * handed back); null when the store could not be asked. Unlike rateHit,
+     * this FAILS CLOSED: a spend the gateway cannot count is not one it makes.
+     */
+    async reservePoints(key, points, cap, ttlSec) {
+      try {
+        const n = await redis(["INCRBY", `p:${key}`, String(points)]);
+        if (n === points) await redis(["EXPIRE", `p:${key}`, String(ttlSec)]);
+        if (n <= cap) return true;
+        // Over: give the points back so a refused call costs nothing. Two
+        // callers racing past the cap both refuse; the cap is never passed.
+        await redis(["DECRBY", `p:${key}`, String(points)]).catch(() => {});
+        return false;
+      } catch {
+        return null;
+      }
+    },
     async getBal(addr) {
       try {
         const v = await redis(["GET", `b:${addr}`]);
@@ -86,8 +105,18 @@ function memoryStore() {
   const rates = new Map(); // key -> { n, reset }
   const bal = new Map(); // addr -> { ok, at }
   const revocations = new Map(); // token -> expiryMs. Lost on restart: see `durable`.
+  const spends = new Map(); // key -> { points, until }. Lost on restart: see `durable`.
   return {
     durable: false,
+    async reservePoints(key, points, cap, ttlSec) {
+      const now = Date.now();
+      const s = spends.get(key);
+      const spent = s && s.until > now ? s.points : 0;
+      if (spent + points > cap) return false;
+      spends.set(key, { points: spent + points, until: now + ttlSec * 1000 });
+      if (spends.size > 64) for (const [k, v] of spends) if (v.until <= now) spends.delete(k);
+      return true;
+    },
     async spendNonce(token, ttlSec) {
       const now = Date.now();
       const seen = nonces.get(token);

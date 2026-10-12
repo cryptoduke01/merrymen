@@ -224,6 +224,7 @@ import { ORDER_IN_FLIGHT_MS, commandWhereabouts, dropCommandResult, drainCommand
 import { expiredOrderReceipt, type OrderReceipt } from "./order-receipt";
 import { makeMcpBackground } from "./mcp/background";
 import { childProcessBrokerPort, serveBrokerRequests } from "./fomo/broker";
+import { attachFlowBroker, flowFor, flowRuntimeNow as flowRuntimeFor, type FlowRuntime } from "./orchestrator-flow";
 import { budgetConfigFor, describeBudget, fomoBudgetFrom, fomoPlanFrom, FREE_PLAN_CREDITS_PER_MONTH, type FomoBudget, type FomoBudgetConfig } from "./fomo/budget";
 import { writeChildFomoFile } from "./fomo/child-file";
 import { fomoTailsOn, type FomoAccess, type FomoService } from "./fomo/contract";
@@ -942,6 +943,38 @@ const CHILD_SECRET_STRIP = [
    * above.
    */
   "MERRYMEN_OPS_TOKEN",
+  /**
+   * BITQUERY, UNDER EVERY NAME A CHILD COULD READ IT BY, AND THE HOUSE'S MERRY
+   * CIRCLE TOKEN — the published-key reason, and a fan-out reason of their own.
+   *
+   * MERRYMEN_BITQUERY_API_KEY is the fleet lane's key (venues/bitquery-lane.ts):
+   * read here, held by this process, spent under one daily points budget. A
+   * child has no business holding it, for the Marketaux reason above.
+   *
+   * BITQUERY_API_KEY and MERRYMEN_TOKEN are what a CHILD's own discovery reads
+   * (settings.ts `str(file.bitqueryApiKey, env.BITQUERY_API_KEY)` and
+   * `str(file.merrymenToken, env.MERRYMEN_TOKEN)`). Hosted, both fields are
+   * house keys stripped from the tenant's file (HOUSE_KEY_FIELDS), so the env is
+   * the ONLY value a child could ever see — the operator's — and
+   * discoveryEnabled defaults on. Either one set on this process would have
+   * every child poll Bitquery on its own timer: N pollers on the house's paid
+   * plan with no shared budget, or N pollers sharing one holder's per-address
+   * gateway bucket under that holder's identity. Neither is a tenant's to spend.
+   *
+   * CHILDREN NEVER NEED EITHER. Nothing else reads them: settings.ts is the only
+   * reader and it feeds runDiscovery alone; this process reads neither. A
+   * tenant's OWN holder token still reaches discovery through its own brain key
+   * (llmProvider "merrymen", bitquery.ts gatewayTokenForDiscovery), on its own
+   * quota. Flow facts a child wants come from this process over IPC
+   * (flow-broker.ts), never from a key of its own.
+   *
+   * Latent until now, because the gateway header bug (bitqueryRequestHeaders)
+   * made every gateway call a 401. Fixing the header without this strip would
+   * have switched the fan-out on.
+   */
+  "MERRYMEN_BITQUERY_API_KEY",
+  "BITQUERY_API_KEY",
+  "MERRYMEN_TOKEN",
 ] as const;
 
 /** Where a tenant's child keeps its own ~/.merrymen — isolated from every other. */
@@ -4768,6 +4801,9 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
     // Answer its Fomo questions on that channel, until it exits. Before the
     // runtime is built the pass attaches it later (startFomoPass).
     attachFomoBroker(tenant, proc);
+    // And its flow questions on the same channel, as decision evidence, when
+    // the Bitquery lane is on and its account is on the research allowlist.
+    attachFlowBroker(flowRuntimeNow().service, tenant, proc, smartAccount, log);
     const tag = `[${tenant.slice(0, 8)}]`;
     const pipe = (stream: NodeJS.ReadableStream | null, sink: NodeJS.WriteStream) =>
       stream?.on("data", (c: Buffer) =>
@@ -11320,6 +11356,18 @@ interface FomoBoot {
   budget: Partial<FomoBudgetConfig>;
 }
 
+/**
+ * THE BITQUERY LANE (orchestrator-flow.ts), built once, here at boot so its
+ * line carries this process's log prefix. MERRYMEN_BITQUERY_API_KEY is
+ * stripped from every child (CHILD_SECRET_STRIP); off without it. `flowFor`
+ * is the orchestrator's own door to it — X answers import it from
+ * orchestrator-flow.ts directly, which keeps the passes free of a cycle.
+ */
+function flowRuntimeNow(): FlowRuntime {
+  return flowRuntimeFor({ log });
+}
+export { flowFor };
+
 let fomoBoot: FomoBoot | null = null;
 let fomoRuntime: FomoRuntimeHandle | null = null;
 let fomoRuntimeRetryAt = 0;
@@ -12269,6 +12317,9 @@ export async function runOrchestrator(): Promise<void> {
   // spawns and no pass runs, and the operator should still read whether it
   // is on (docs/fomo.md). Reads the environment and logs; nothing else.
   fomoBootNow();
+  // The Bitquery lane's switches, said once for the same reason
+  // (docs/bitquery-lane.md). Off without its key: then nothing else happens.
+  flowRuntimeNow();
   // HOW THE LAST ORCHESTRATOR STOPPED, from the receipt its drain wrote
   // (fleet-drain.ts): said once, and moved aside so that a crash of this run
   // is never read as the clean stop of the last.
