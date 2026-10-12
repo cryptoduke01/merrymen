@@ -46,12 +46,25 @@ final class XPostingTests: XCTestCase {
     /// (web/src/terminal/XPosting.tsx). Paragraph three promises only the
     /// review window the planner keeps: at least ten minutes under Coming up.
     func testWarningNamesTheAccountAndPromisesOnlyTheTenMinuteWindow() {
-        XCTAssertEqual(XPostingAccount.warning("robin_trades"), [
+        XCTAssertEqual(XPostingAccount.warning("robin_trades", active: false), [
             "Your Merryman will post from whichever X account is connected — right now that's @robin_trades.",
             "It writes its own posts: a hello first, then the odd casual thought and now and then a coin it bought and why. It never posts trade alerts, error messages, prices or amounts.",
             "Posts go out on their own, a few a day at most. Each one waits under Coming up for at least ten minutes first, and you can skip it there. Turn this off or disconnect X at any time.",
             "X may label accounts that post automatically, and may ask an account to verify itself the first time it posts about crypto."
         ].joined(separator: "\n\n"))
+    }
+
+    /// An agent the operator made active posts on the active cadence, so its
+    /// warning says how much — word for word as the web's — and never "a few a
+    /// day at most".
+    func testActiveAgentPostingWarningSaysHowMuchItPosts() {
+        XCTAssertEqual(XPostingAccount.warning("robin_trades", active: true), [
+            "Your Merryman will post from whichever X account is connected — right now that's @robin_trades.",
+            "It writes its own posts: a hello first, then a few passing thoughts a day and a post for most coins it buys, and why. It never posts trade alerts, error messages, prices or amounts.",
+            "Posts go out on their own, up to 12 a day and at least an hour apart. Each one waits under Coming up for at least ten minutes first, and you can skip it there. Turn this off or disconnect X at any time.",
+            "X may label accounts that post automatically, and may ask an account to verify itself the first time it posts about crypto."
+        ].joined(separator: "\n\n"))
+        XCTAssertFalse(XPostingAccount.warning("robin_trades", active: true).contains("a few a day at most"))
     }
 
     /// Consent carries the X user id the warning named and the device's zone

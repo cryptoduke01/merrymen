@@ -83,6 +83,9 @@ import { Switch } from "./ui";
 const COPY = {
   blurb:
     "Let your Merryman post on X in its own words — a hello when it starts, the odd casual thought, and now and then a coin it bought and why. Optional settings below add public addresses and completed sale results. No trade alerts, error messages or return promises.",
+  /** The same, for an agent merrymen made active (`repliesActive`): it posts on the active cadence. */
+  blurbActive:
+    "Let your Merryman post on X in its own words — a hello when it starts, a few passing thoughts a day, and most coins it buys and why. Optional settings below add public addresses and completed sale results. No trade alerts, error messages or return promises.",
   connect: "Connect X account",
   reconnect: "Reconnect X account",
   caption:
@@ -109,6 +112,7 @@ const COPY = {
   trencher: "Trencher mode",
   casual: "The odd passing thought",
   casualHint: "A short line in its own words, most days.",
+  casualHintActive: "Short lines in its own words, a few times a day.",
   perDay: "Posts a day, at most",
   perDayUsual: "Usual",
   perDayHint: "The hello counts. Usual is merrymen's own number, and merrymen may allow fewer than you pick.",
@@ -128,6 +132,19 @@ const WARNING_BODY = [
   "It writes its own posts: a hello first, then the odd casual thought and now and then a coin it bought and why. It never posts trade alerts, error messages, prices or amounts. Your saved options can add public wallet or token addresses and completed sale results.",
   "Posts go out on their own, a few a day at most. Each one waits under Coming up for at least ten minutes first, and you can skip it there. Turn this off or disconnect X at any time.",
   "X may label accounts that post automatically, and may ask an account to verify itself the first time it posts about crypto.",
+] as const;
+/**
+ * AN ACTIVE AGENT POSTS MORE, AND ITS WARNING SAYS SO. An agent merrymen made
+ * active (`repliesActive`, MERRYMEN_XPOST_ACTIVE_TENANTS) posts on the active
+ * cadence (worker/src/xpost/planner.ts ACTIVE_CADENCE): up to twelve a day,
+ * passing thoughts through the day and a post for most coins it buys, with
+ * no coin fold, seventy-five minutes apart. "A few a day at most" would
+ * understate that. Pinned by x-posting.test.ts and iOS XPostingTests.
+ */
+const ACTIVE_WARNING_BODY = [
+  "It writes its own posts: a hello first, then a few passing thoughts a day and a post for most coins it buys, and why. It never posts trade alerts, error messages, prices or amounts. Your saved options can add public wallet or token addresses and completed sale results.",
+  "Posts go out on their own, up to 12 a day and at least an hour apart. Each one waits under Coming up for at least ten minutes first, and you can skip it there. Turn this off or disconnect X at any time.",
+  WARNING_BODY[2],
 ] as const;
 const warningYes = (handle: string) => `Let it post as ${handle}`;
 /**
@@ -308,8 +325,8 @@ export function XPosting({
   const [note, setNote] = useState<{ text: string; alert: boolean } | null>(null);
   /**
    * The account the open warning names, captured when the switch was pressed —
-   * and, for replies, which warning it showed (`active`), so the confirm agrees
-   * to the words the owner read.
+   * and which warning it showed (`active`, for posting and for replies), so
+   * the confirm agrees to the words the owner read.
    */
   const [asking, setAsking] = useState<{ xUserId: string; handle: string; owner: string; replies?: boolean; active?: boolean } | null>(null);
   const [confirmingDisconnect, setConfirmingDisconnect] = useState(false);
@@ -461,7 +478,7 @@ export function XPosting({
         return;
       }
       // NOTHING IS SENT HERE. The warning names the account; its button writes.
-      setAsking({ xUserId: account.xUserId, handle, owner });
+      setAsking({ xUserId: account.xUserId, handle, owner, active: account.repliesActive });
       return;
     }
     void (async () => {
@@ -614,7 +631,7 @@ export function XPosting({
     }
     return (
       <div className="xpost" ref={root}>
-        <p className="mm-hint" style={{ marginTop: 0 }}>{COPY.blurb}</p>
+        <p className="mm-hint" style={{ marginTop: 0 }}>{account.repliesActive ? COPY.blurbActive : COPY.blurb}</p>
         {connectButton(COPY.connect)}
         {noteLine}
       </div>
@@ -692,7 +709,7 @@ export function XPosting({
           <div className="xpost-switch">
             <div>
               <strong>{COPY.casual}</strong>
-              <small className="mm-hint">{COPY.casualHint}</small>
+              <small className="mm-hint">{account.repliesActive ? COPY.casualHintActive : COPY.casualHint}</small>
             </div>
             <Switch on={account.prefs.casual} onChange={(next) => void savePrefs({ casual: next })} label={COPY.casual} />
           </div>
@@ -784,7 +801,7 @@ export function XPosting({
             <p id="xpost-warning-lead" ref={lead} tabIndex={-1}>
               <strong>{asking.replies ? replyWarningLead(asking.handle, asking.active === true) : warningLead(asking.handle)}</strong>
             </p>
-            {(asking.replies ? (asking.active ? ANSWER_WARNING_BODY : REPLY_WARNING_BODY) : WARNING_BODY).map((line) => <p key={line}>{line}</p>)}
+            {(asking.replies ? (asking.active ? ANSWER_WARNING_BODY : REPLY_WARNING_BODY) : asking.active ? ACTIVE_WARNING_BODY : WARNING_BODY).map((line) => <p key={line}>{line}</p>)}
             <div className="resign-actions">
               <button type="button" className="mm-btn primary" disabled={busy} onClick={() => void confirmWarning()}>
                 {asking.replies ? replyWarningYes(asking.handle) : warningYes(asking.handle)}

@@ -44,8 +44,8 @@ struct XPostingScreen: View {
     @State private var busy = false
     @State private var connecting = false
     @State private var skipping: Int?
-    /// The account the open warning names; enabling sends exactly this id.
-    @State private var consent: XPostingAccount.Identity?
+    /// The account the open warning names, and which warning it showed (`active`); enabling sends exactly this id.
+    @State private var consent: (identity: XPostingAccount.Identity, active: Bool)?
     /// The reply warning open now, and which one it showed (`active`): the confirm agrees to the words read.
     @State private var replyConsent: (identity: XPostingAccount.Identity, owner: String, active: Bool)?
     @State private var confirmDisconnect = false
@@ -73,10 +73,10 @@ struct XPostingScreen: View {
             } while !Task.isCancelled
         }
         .refreshable { await load() }
-        .alert(Text(verbatim: "Post on X as @\(consent?.handle ?? "")?"), isPresented: Binding(get: { consent != nil }, set: { if !$0 { consent = nil } }), presenting: consent) { identity in
-            Button { enable(identity) } label: { Text(verbatim: "Let it post as @\(identity.handle)") }
+        .alert(Text(verbatim: "Post on X as @\(consent?.identity.handle ?? "")?"), isPresented: Binding(get: { consent != nil }, set: { if !$0 { consent = nil } }), presenting: consent) { consent in
+            Button { enable(consent.identity) } label: { Text(verbatim: "Let it post as @\(consent.identity.handle)") }
             Button("Not now", role: .cancel) {}
-        } message: { identity in Text(verbatim: XPostingAccount.warning(identity.handle)) }
+        } message: { consent in Text(verbatim: XPostingAccount.warning(consent.identity.handle, active: consent.active)) }
         .alert(Text(verbatim: "Reply to comments as @\(replyConsent?.identity.handle ?? "")?"), isPresented: Binding(get: { replyConsent != nil }, set: { if !$0 { replyConsent = nil } }), presenting: replyConsent) { consent in
             Button { write(XPostingAccount.replyFields(consent.identity, enabled: true), confirmedOwner: consent.owner) } label: { Text(verbatim: "Let it reply as @\(consent.identity.handle)") }
             Button("Not now", role: .cancel) {}
@@ -90,7 +90,9 @@ struct XPostingScreen: View {
         if !account.connected {
             Card(hero: true) {
                 Text("Posting on X").font(.title2.bold())
-                Text("Let your Merryman post on X in its own words — a hello when it starts, the odd casual thought, and now and then a coin it bought and why. No trade alerts, no error messages, no numbers.").foregroundStyle(.secondary)
+                Text(account.repliesActive
+                     ? "Let your Merryman post on X in its own words — a hello when it starts, a few passing thoughts a day, and most coins it buys and why. No trade alerts, no error messages, no numbers."
+                     : "Let your Merryman post on X in its own words — a hello when it starts, the odd casual thought, and now and then a coin it bought and why. No trade alerts, no error messages, no numbers.").foregroundStyle(.secondary)
                 if account.available { connectButton("Connect X account") }
                 else { Label("Posting on X isn't available right now.", systemImage: "exclamationmark.circle").font(.subheadline).foregroundStyle(.secondary) }
             }
@@ -109,7 +111,7 @@ struct XPostingScreen: View {
                 Toggle("Let my Merryman post on X", isOn: Binding(get: { account.postingEnabled }, set: { on in
                     guard !busy else { return }
                     // Never a write: turning it on only opens the warning.
-                    if on { consent = account.identity } else { write(["action": .string("disable")]) }
+                    if on { consent = account.identity.map { ($0, account.repliesActive) } } else { write(["action": .string("disable")]) }
                 }))
                 .disabled(busy || (!account.postingEnabled && (account.identity == nil || account.revoked)))
                 if account.postingEnabled, let identity = account.identity {
@@ -310,7 +312,8 @@ struct XPostingAccount: Equatable {
     let postingEnabled: Bool
     let replyEnabled: Bool
     let repliesAvailable: Bool
-    /// The operator made this agent active: with replies on it answers posts
+    /// The operator made this agent active: it posts on the active cadence, so
+    /// the posting warning says how much, and with replies on it answers posts
     /// that tag it right away, and the reply warning says so. An older server
     /// that sends no such field is not active.
     let repliesActive: Bool
@@ -404,11 +407,19 @@ struct XPostingAccount: Equatable {
     /// planner.ts), and this screen re-reads every minute while it is open —
     /// so "at least ten minutes" is a promise the code keeps, where "you'll see
     /// each one" was not: nothing tells the owner to look.
-    static func warning(_ handle: String) -> String {
+    ///
+    /// AN ACTIVE AGENT POSTS MORE, AND ITS WARNING SAYS SO (worker/src/xpost/
+    /// planner.ts ACTIVE_CADENCE): up to twelve a day, a post for most coins
+    /// it buys, at least an hour apart — never "a few a day at most".
+    static func warning(_ handle: String, active: Bool) -> String {
         [
             "Your Merryman will post from whichever X account is connected — right now that's @\(handle).",
-            "It writes its own posts: a hello first, then the odd casual thought and now and then a coin it bought and why. It never posts trade alerts, error messages, prices or amounts.",
-            "Posts go out on their own, a few a day at most. Each one waits under Coming up for at least ten minutes first, and you can skip it there. Turn this off or disconnect X at any time.",
+            active
+                ? "It writes its own posts: a hello first, then a few passing thoughts a day and a post for most coins it buys, and why. It never posts trade alerts, error messages, prices or amounts."
+                : "It writes its own posts: a hello first, then the odd casual thought and now and then a coin it bought and why. It never posts trade alerts, error messages, prices or amounts.",
+            active
+                ? "Posts go out on their own, up to 12 a day and at least an hour apart. Each one waits under Coming up for at least ten minutes first, and you can skip it there. Turn this off or disconnect X at any time."
+                : "Posts go out on their own, a few a day at most. Each one waits under Coming up for at least ten minutes first, and you can skip it there. Turn this off or disconnect X at any time.",
             "X may label accounts that post automatically, and may ask an account to verify itself the first time it posts about crypto."
         ].joined(separator: "\n\n")
     }

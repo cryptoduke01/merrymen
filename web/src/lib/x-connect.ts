@@ -305,7 +305,8 @@ export interface XAccountBody {
   replyEnabled: boolean;
   repliesAvailable: boolean;
   /**
-   * The operator made this owner's agent active (xpostActiveAgent): with
+   * The operator made this owner's agent active (xpostActiveAgent): it posts
+   * on the active cadence, which the posting warning states, and with
    * replies on, it answers posts that tag it — comments on its own posts
    * included — right away, not after ten minutes under Coming up. The reply
    * warning says so; false is comment replies on its coin posts only.

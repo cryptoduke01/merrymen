@@ -21,7 +21,7 @@ import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import { act, createElement } from "react";
 import { X_COPY, type XAccountBody } from "@/lib/x-connect";
-import { ANSWERS_PER_DAY } from "../../../worker/src/xpost/planner";
+import { ACTIVE_CADENCE, ANSWERS_PER_DAY } from "../../../worker/src/xpost/planner";
 import { ANSWERS_PER_AUTHOR } from "../../../worker/src/xpost/store";
 import { json, testDom } from "./test-dom";
 import { XPosting } from "./XPosting";
@@ -264,6 +264,33 @@ describe("the switch and the warning", () => {
     await until(() => theSwitch()?.getAttribute("aria-checked") === "true", "the confirmed state");
     assert.match(text(), /Posting from @merry_poster — whichever X account is connected\./);
     assert.equal(ui.container.querySelector("dialog"), null);
+  });
+
+  it("an active agent's posting warning says how much it posts: up to twelve a day, most coins it buys, never 'a few a day at most'", async () => {
+    routes["GET /api/x/account"] = () => json({ ...CONNECTED, repliesActive: true });
+    routes["POST /api/x/account"] = () => json({ ok: true, postingEnabled: true });
+    await shown();
+    assert.match(text(), /Short lines in its own words, a few times a day\./);
+    assert.doesNotMatch(text(), /most days/);
+    await press(theSwitch(), "the switch");
+    assert.deepEqual(writes(), []);
+    const said = ui.container.querySelector("dialog")?.textContent ?? "";
+    assert.match(said, /a few passing thoughts a day and a post for most coins it buys, and why/);
+    assert.match(said, /Posts go out on their own, up to 12 a day and at least an hour apart\./);
+    assert.match(said, /at least ten minutes first/);
+    assert.doesNotMatch(said, /a few a day at most|now and then/, "it does not understate an active agent's posting");
+    await press(buttons(`Let it post as @${HANDLE}`)[0], "the warning's confirm");
+    assert.deepEqual(writes()[0]?.body, { action: "enable", xUserId: X_ID, owner: OWNER, tz: BROWSER_TZ });
+  });
+
+  it("an agent merrymen did not make active is told a few a day at most", async () => {
+    routes["GET /api/x/account"] = () => json({ ...CONNECTED });
+    await shown();
+    assert.match(text(), /A short line in its own words, most days\./);
+    await press(theSwitch(), "the switch");
+    const said = ui.container.querySelector("dialog")?.textContent ?? "";
+    assert.match(said, /Posts go out on their own, a few a day at most\./);
+    assert.doesNotMatch(said, /up to 12 a day/);
   });
 
   it("THE WARNING OPENS ON ITS LEAD SENTENCE, NOT ITS CONSENT BUTTON: a second Enter on the switch sends nothing", async () => {
@@ -754,9 +781,16 @@ describe("the warning keeps its words", () => {
       "X may label accounts that post automatically, and may ask an account to verify itself the first time it posts about crypto.",
       "Let it post as ${handle}",
       "Not now",
+      // An active agent's, as iOS says them.
+      "It writes its own posts: a hello first, then a few passing thoughts a day and a post for most coins it buys, and why. It never posts trade alerts, error messages, prices or amounts. Your saved options can add public wallet or token addresses and completed sale results.",
+      "Posts go out on their own, up to 12 a day and at least an hour apart. Each one waits under Coming up for at least ten minutes first, and you can skip it there. Turn this off or disconnect X at any time.",
+      "Short lines in its own words, a few times a day.",
     ]) {
       assert.ok(SRC.includes(said), `the warning lost: "${said}"`);
     }
+    // The numbers an active agent's warning promises are the active cadence's own.
+    assert.equal(ACTIVE_CADENCE.perDay, 12, "the warning says up to 12 a day");
+    assert.ok(ACTIVE_CADENCE.gapMs >= 60 * 60_000, "the warning says at least an hour apart");
   });
 
   it("every sentence of both reply warnings is in the source, verbatim, as iOS says them", () => {

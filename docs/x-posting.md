@@ -705,7 +705,11 @@ merging: each value is the operator's to set on the service named.
 - X may label automated posting, and it auto-locks some accounts for
   verification the first time they post about crypto.
 - Posts go out on their own, a few a day at most. Each one waits under Coming
-  up for at least ten minutes first, and can be skipped there.
+  up for at least ten minutes first, and can be skipped there. An active
+  owner's agent (`repliesActive`) posts on the active cadence instead, so its
+  posting warning says up to 12 a day, at least an hour apart, with a few
+  passing thoughts a day and a post for most coins it buys; the blurb and
+  the passing-thought hint say the same. Web and iOS use the same sentences.
 - Reply to comments is a separate choice. It answers selected comments on
   coin posts, shares the post limit and review window, and can be turned off
   without stopping ordinary posts. The warning names the account it replies
