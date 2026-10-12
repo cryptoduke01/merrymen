@@ -999,6 +999,21 @@ const STOCK_ROOTS: readonly string[] = STOCK_SYMBOLS.filter((s) => s.length >= 3
 const STOCK_NAMES: readonly string[] = [...new Set([...STOCK_TOKENS.map((t) => t.name), "Google", "SpaceX", "Nvidia", "iShares", "SPDR", "Invesco"]
   .map((n) => n.replace(/[^A-Za-z]/g, "").toUpperCase()).filter((n) => n.length >= 4 && n !== "META"))];
 
+/**
+ * ONE LETTER FROM A STOCK TOKEN'S SYMBOL (red-team 2026-10-12): "$GOOG 24h
+ * +412%" was posted beside the chain's own GOOGL stock token, and "GOOG"
+ * neither starts nor ends with "GOOGL". A ticker one letter changed, added or
+ * dropped from a stock symbol of four letters or more ("GOOG", "TSLX",
+ * "NVDIA") reads as that stock. COIN and META only exactly, as above.
+ */
+function oneEditFrom(a: string, b: string): boolean {
+  if (a === b || Math.abs(a.length - b.length) > 1) return a === b;
+  if (a.length === b.length) return [...a].filter((ch, i) => ch !== b[i]).length === 1;
+  const [long, short] = a.length > b.length ? [a, b] : [b, a];
+  for (let i = 0; i < long.length; i++) if (long.slice(0, i) + long.slice(i + 1) === short) return true;
+  return false;
+}
+
 /** Would this ticker read as bitcoin, ether, a dollar or one of the chain's stock tokens? */
 export function copycatTicker(ticker: string): boolean {
   const t = String(ticker ?? "").toUpperCase();
@@ -1006,6 +1021,7 @@ export function copycatTicker(ticker: string): boolean {
   if (RESERVED_ROOTS.some((r) => t.startsWith(r) || t.endsWith(r))) return true;
   if (COPY_ROOTS.some((r) => t.startsWith(r) || t.endsWith(r))) return true;
   if (STOCK_ROOTS.some((s) => t.startsWith(s) || t.endsWith(s))) return true;
+  if (STOCK_ROOTS.some((s) => s.length >= 4 && oneEditFrom(t, s))) return true;
   return STOCK_NAMES.some((n) => t.includes(n));
 }
 

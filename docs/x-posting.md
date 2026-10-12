@@ -1031,8 +1031,10 @@ other owner's agent, and its posting and reply warnings, are unchanged.
   USDC never shows) and no copycat (`copycatTicker`, red-team 2026-10-12):
   never a chain stock token's symbol (`STOCK_TOKENS`: `$TSLA` from a memecoin
   read as Tesla's stock token up 412%), one that starts or ends with such a
-  symbol of three letters or more, or holds its company's name ("TESLA",
-  "BABYNVDA"); and never one that starts or ends with bitcoin's, ether's,
+  symbol of three letters or more, holds its company's name ("TESLA",
+  "BABYNVDA"), or is one letter changed, added or dropped from a stock
+  symbol of four letters or more (`$GOOG` beside the chain's GOOGL was
+  posted up 412%, red-team 2026-10-12; COIN and META only exactly); and never one that starts or ends with bitcoin's, ether's,
   solana's or the dollar's (`BITCOIN`, `XBT`, `ETH2`, `PYUSD`, `USDC2`);
   never a big coin's or big memecoin's ticker or name, a stablecoin's or
   tokenised gold's (`$PEPE`, `$WIF`, `$USDS`, `$FDUSD`, `$PAXG`), one built

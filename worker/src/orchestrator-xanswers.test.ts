@@ -2971,6 +2971,21 @@ test("what's hot never shows a copy of a big coin's ticker, a big coin or reserv
   }
 });
 
+test("what's hot never shows a chain coin named after a big coin or one letter from a stock token, in the pools or as fomo's most bought (red-team 2026-10-12)", async (t) => {
+  // At fbcf8756: "... trending $WLFI 24h +412% vol ~$2.3M, $MNT 24h +88.1% vol ~$940k, $CRV 24h -12.2% vol ~$310k; fomo: most bought $WLFI, $MNT.",
+  // "$ASTER 24h +412% …, $LINEA 24h +88.1% …", and "$GOOG 24h +412% vol ~$2.3M" beside the chain's own GOOGL stock token.
+  for (const names of [["WLFI", "MNT", "CRV"], ["ASTER", "LINEA"], ["GOOG"], ["GOGL", "TSLX", "NVDIA"]]) {
+    const pools = [...names.map((n, i) => namedPool(n, i + 1, [412.4, 88.1, -12.2][i]!, [2.31e6, 940_000, 310_000][i]!)), namedPool("CHUMP", 9, 7, 150_000)];
+    const w = await world(t, { env: { ...RESEARCH_ON, MERRYMEN_XPOST_FOMO: "1" }, research: hotWithFomo(pools, names.slice(0, 2)), facts: { ...FACTS, name: "Alan Al Dale", calls: [] } });
+    w.setInbox([tag({ text: "@pine_stoat what's hot?" })]);
+    await w.step();
+    const text = String(w.sends[0]?.text ?? "");
+    assert.match(text, /geckoterminal robinhood: trending \$CHUMP 24h \+7% vol ~\$150k\./, text);
+    for (const n of names) assert.ok(!text.includes(`$${n}`), `${n}: ${text}`);
+    assert.doesNotMatch(text, /fomo: most bought/, text);
+  }
+});
+
 test("what's hot never shows a coin under a name its own buys go by, a copy at another contract or not, nor as fomo's most bought, under its buy post or anywhere (red-team 2026-10-12)", async (t) => {
   // At fbcf8756, under its own ZAPX buy post: "trending on robinhood: a small group out in front, the frontrunner rising hard lately. a snapshot.
   // geckoterminal robinhood: trending $ZAPX 24h +912% vol ~$1.4M, $QRTZ 24h -8.3% vol ~$310k; fomo: most bought $ZAPX. say stop to opt out."

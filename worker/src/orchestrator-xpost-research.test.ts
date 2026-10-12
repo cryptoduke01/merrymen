@@ -1373,6 +1373,12 @@ describe("what's hot: the chain's trending coins past the fleet's floors, fomo's
     assert.equal(namesACoin({ text: "what's hot?", intent: { kind: "hot" }, address: null }), false, "it names no coin");
   });
 
+  it("never one letter from a stock token's symbol: GOOG beside the chain's GOOGL (red-team 2026-10-12)", () => {
+    for (const sym of ["GOOG", "GOOGX", "GOGL", "TSLX", "TSL", "NVDIA", "AAPLE", "MSFTT", "PLTRS", "CRCLE", "SNDX", "BABY"]) assert.ok(copycatTicker(sym), sym);
+    // COIN and META only exactly: the chain builds half its tickers on them.
+    for (const sym of ["COINA", "COINS", "CHUMP", "METAL", "MEME", "QRTZ"]) assert.equal(copycatTicker(sym), false, sym);
+  });
+
   it("a floor under coingecko's list: copies of the big coins' tickers, large caps, reserve coins, gold, silver and currencies (red-team 2026-10-12)", () => {
     for (const sym of ["BABYWIF", "WIFAI", "WIFHAT", "XRPAI", "SUIAI", "HYPEAI", "MOGAI", "PNUTAI", "LINKAI", "ARBAI", "TAOAI", "MNT", "CRV", "SDAI", "USTC", "GOLD",
       "SILVER", "XDC", "MORPHO", "AERO", "WLFI", "NEXO", "SUSDE", "OILCOIN", "JPYC", "GBPT", "CNHT"]) {
