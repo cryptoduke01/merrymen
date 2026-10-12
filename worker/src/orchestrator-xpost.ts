@@ -86,7 +86,7 @@ import {
   type XAccount,
   type XPost,
 } from "./xpost/store";
-import { answerPrompt, buyPrompt, casualPrompt, draft, introPrompt, introTemplate, modelAnswers, replyPrompt, sellPrompt, sherwoodClaimed, sherwoodNamed, xpostModel, xpostModelWarning, type WriterFacts, type XStyle } from "./xpost/writer";
+import { answerPrompt, answerQuestion, buyPrompt, casualPrompt, draft, introPrompt, introTemplate, modelAnswers, replyPrompt, sellPrompt, sherwoodClaimed, sherwoodNamed, xpostModel, xpostModelWarning, type WriterFacts, type XStyle } from "./xpost/writer";
 import { appendPublicToken, appendPublicWallet, hasPublicWallet, publicTokenStillAllowed, publicWalletStillAllowed, type PublicWallet } from "./xpost/public-wallet";
 import { readPublicProjectDescription } from "./orchestrator-xpost-project";
 import { classifyTag, createXResearch, type ResearchBundle, type XResearch } from "./orchestrator-xpost-research";
@@ -1382,6 +1382,12 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       if (comment.createdAtMs < consentAt || nowMs - comment.createdAtMs > REPLY_STALE_MS) continue;
       const candidate = tagCandidate(comment, { xUserId: account.xUserId, research: research !== null });
       if (!candidate.ok || await repliesOptedOut(shared, account.xUserId, comment.authorId)) continue;
+      // DECIDED BEFORE ANYTHING IS SPENT: a question the writer could not read
+      // would buy research and a model call for a prompt that says PASS.
+      if (answerQuestion(candidate.text) === null) {
+        bump("answer-unusable");
+        continue;
+      }
       const dedupeKey = `answer:${account.xUserId}:${comment.id}`;
       if (await keyStatus(shared, dedupeKey) !== null || await keyStatus(shared, `reply:${account.xUserId}:${comment.id}`) !== null) continue;
       if (await answerAuthorSpent(shared, account.xUserId, comment.authorId, nowMs)) {

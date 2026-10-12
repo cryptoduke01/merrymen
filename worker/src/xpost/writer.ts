@@ -253,6 +253,21 @@ function clean(text: unknown, max: number): string | null {
   return s;
 }
 
+/**
+ * A TAG'S QUESTION AS THE MODEL MAY READ IT, or null when nothing of it is
+ * usable. tagCandidate lets digits through, and a memecoin question often
+ * carries one ("saw it on 2 lists", "$PEPE2", "top 3 coins?"); clean() alone
+ * would refuse the whole question, after the answer's research and model
+ * allowances were already spent, for a prompt that can only say PASS. So each
+ * run of digits is read as "(a number)": the question survives and the model
+ * is never handed the figure. The gate still refuses any digit in what goes
+ * out. Exported so the caller decides before it spends anything.
+ */
+export function answerQuestion(text: unknown): string | null {
+  if (typeof text !== "string") return null;
+  return clean(text.replace(/\p{N}+(?:[.,:/]\p{N}+)*/gu, "(a number)"), XREPLY_MAX_COMMENT_CHARS);
+}
+
 /** Quoted as data. The agent's own name may carry a digit ("Agent Seven" or not): it is its name, not a figure. */
 function q(text: string): string {
   return `«${text}»`;
@@ -707,7 +722,7 @@ const NOTHING_LOOKED_UP: Readonly<Partial<Record<AnswerIntentKind, string>>> = {
  * the writer is never told the name, and a draft that names it is refused.
  */
 export function answerPrompt(f: AnswerFacts): Prompt {
-  const question = clean(f.question, XREPLY_MAX_COMMENT_CHARS);
+  const question = answerQuestion(f.question);
   const notice = f.style.lower ? REPLY_OPT_OUT.toLowerCase() : REPLY_OPT_OUT;
   const buys = (f.recentBuys ?? []).map((c) => ({ label: clean(c.label, 40), paper: c.paper })).filter((c): c is { label: string; paper: boolean } => !!c.label).slice(0, 4);
   const said = (f.said ?? []).map((r) => clean(r, 220)).filter((r): r is string => !!r).slice(0, 6);

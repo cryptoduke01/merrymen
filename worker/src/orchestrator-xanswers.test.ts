@@ -221,6 +221,20 @@ test("an owner the operator did not make active answers no tags", async (t) => {
   assert.equal(w.asked().length, 0);
 });
 
+test("a tag with a figure in it is answered, the figure read as a number and never shown to the model", async (t) => {
+  for (const env of [{}, RESEARCH_ON]) {
+    const w = await world(t, { env, research: fakeResearch().research });
+    w.setInbox([tag({ text: "@pine_stoat is $PEPE legit? saw it on 2 lists" })]);
+    await w.step();
+    const [prompt] = w.asked();
+    assert.ok(prompt, "drafted");
+    assert.match(prompt!, /Untrusted question to answer: «is \$PEPE legit\? saw it on \(a number\) lists»/);
+    assert.doesNotMatch(prompt!, /no usable question/);
+    assert.doesNotMatch(/Untrusted question[^\n]*/.exec(prompt!)![0], /\p{N}/u);
+    assert.equal((await w.answers())[0]!.status, "scheduled");
+  }
+});
+
 test("advice requests and plain chatter get no answer and cost no model call", async (t) => {
   for (const text of ["@pine_stoat should i buy pepe now?", "@pine_stoat nice", "@pine_stoat check my presale, link in bio?"]) {
     const w = await world(t);

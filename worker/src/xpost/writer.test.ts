@@ -19,6 +19,7 @@ import {
   XPOST_ANTHROPIC_DEFAULT_MODEL,
   XPOST_GROQ_DEFAULT_MODEL,
   answerPrompt,
+  answerQuestion,
   SHERWOOD_ON_X,
   buyPrompt,
   casualPrompt,
@@ -736,6 +737,22 @@ describe("an active agent's answers and conversation memory", () => {
     assert.match(text, /Never write the address/);
     assert.doesNotMatch(text, /\bgroq\b|\bqwen\b|\bgpt\b/i);
     assert.match(answerPrompt({ ...BASE, question: "", recentBuys: [], said: [], walletPublic: false }).prompt, /PASS/);
+  });
+
+  it("a question with a figure in it is still a question: each run of digits is read as a number, never shown", () => {
+    for (const [question, read] of [
+      ["is $PEPE legit? saw it on 2 lists", "is $PEPE legit? saw it on (a number) lists"],
+      ["is $PEPE2 the real one?", "is $PEPE(a number) the real one?"],
+      ["top 3 coins? and is 1,000 holders a lot or 2.5k", "top (a number) coins? and is (a number) holders a lot or (a number)k"],
+    ] as const) {
+      assert.equal(answerQuestion(question), read);
+      const p = answerPrompt({ ...BASE, question, recentBuys: [], said: [], walletPublic: false });
+      assert.doesNotMatch(p.prompt, /no usable question/, question);
+      assert.equal(/Untrusted question to answer: «([^»]*)»/.exec(p.prompt)?.[1], read);
+      assert.doesNotMatch(all(p), /\p{N}/u, "the figure never reaches the model");
+    }
+    assert.equal(answerQuestion(""), null);
+    assert.equal(answerQuestion(null), null);
   });
 
   it("an answer is very casual, and the writer is never told the sherwood name: only code's lines say it", () => {
