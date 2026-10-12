@@ -21,6 +21,27 @@ export function isReplyOptOut(raw: unknown): boolean {
 }
 
 /**
+ * STOP, HOWEVER IT IS SAID, ON THE ANSWER PATH (red-team review,
+ * 2026-10-12). isReplyOptOut catches "stop" first and "stop replying"; "hey,
+ * please stop", "can you stop?", "yo stop it", "hey, go away" went to the
+ * writer as chat and were answered at once, and the person stayed opted in.
+ * A tag to an active agent is answered right away with no review, so any
+ * standalone "stop", "quit it", "go away", "shut up", "get lost", "buzz off"
+ * or "leave me" in it, handles and invisible characters aside, is an
+ * opt-out: recorded, and never drafted. Fail closed: "do you ever stop?" or
+ * "what's your stop loss?" opts that person out of answers, which costs
+ * answers to someone who can tag it again only to be ignored, never a reply
+ * to someone who asked for none.
+ */
+export function isAnswerOptOut(raw: unknown): boolean {
+  if (isReplyOptOut(raw)) return true;
+  if (typeof raw !== "string") return false;
+  const text = raw.normalize("NFKC").replace(/[\p{Cf}\p{Default_Ignorable_Code_Point}]/gu, "").replace(/[’‘]/g, "'")
+    .replace(/@[a-z0-9_]{1,15}\b/gi, " ").toLowerCase();
+  return /\b(?:stop|stopp+|quit it|go away|shut up|get lost|buzz off|leave me)\b/.test(text);
+}
+
+/**
  * `address` is set only by tagCandidate, and only when the post carried
  * exactly one contract address: a LOOKUP KEY for the answer's research, never
  * part of `text` (the writer's input), never nominated, never traded.
@@ -229,7 +250,7 @@ export function tagCandidate(reply: XReply, ctx: { xUserId: string; research?: b
   const no = (reason: string): ReplyCandidate => ({ ok: false, reason });
   if (!reply.id || !reply.authorId || !ctx.xUserId) return no("invalid");
   if (reply.authorId === ctx.xUserId) return no("own-comment");
-  if (isReplyOptOut(reply.text)) return no("opt-out");
+  if (isAnswerOptOut(reply.text)) return no("opt-out");
   if (typeof reply.text !== "string") return no("invalid");
   if (reply.quoted === true) return no("quoted");
   const topLevel = reply.conversationId === reply.id && reply.inReplyToTweetId === "";

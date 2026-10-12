@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { XReply } from "./client";
-import { isReplyOptOut, plainAsk, replyCandidate, tagCandidate } from "./replies";
+import { isAnswerOptOut, isReplyOptOut, plainAsk, replyCandidate, tagCandidate } from "./replies";
 
 const CTX = { rootTweetId: "111", xUserId: "222", coin: "pepe" };
 const comment = (text: string, over: Partial<XReply> = {}): XReply => ({
@@ -20,6 +20,24 @@ describe("reply opt-outs precede eligibility and sampling", () => {
     const nested = comment("@Pine stop", { inReplyToTweetId: "555" });
     assert.equal(isReplyOptOut(nested.text), true);
     assert.deepEqual(replyCandidate(nested, CTX), { ok: false, reason: "not-direct" });
+  });
+});
+
+describe("on the answer path, any plain stop is an opt-out (red-team 2026-10-12)", () => {
+  // The reproduced tags, every one answered at once and never opted out before.
+  const STOPS = ["hey, please stop", "can you stop?", "hey stop", "yo stop it", "why won't you stop?", "hi, stop please", "pls stop?", "how do i make you stop?",
+    "who asked you? stop", "did i ask? stop.", "do you ever stop?", "hey quit it", "hey, go away", "hey, i didn't ask for this, stop", "s\u200btop it", "shut up bot"];
+  for (const text of STOPS) {
+    it(text, () => {
+      assert.equal(isAnswerOptOut(`@alanaldale ${text}`), true);
+      assert.deepEqual(tagCandidate(comment(`@alanaldale ${text}`, { conversationId: "333", inReplyToTweetId: "" }), { xUserId: "222", username: "alanaldale" }), { ok: false, reason: "opt-out" });
+    });
+  }
+  it("what was already an opt-out still is, and an ordinary question is not", () => {
+    for (const text of ["stop", "please stop", "can you stop replying?", "how do i opt out?"]) assert.equal(isAnswerOptOut(text), true, text);
+    for (const text of ["@alanaldale what do you trade?", "@alanaldale how do you pick coins?", "@alanaldale gm, how's your day?", "@stopwatch_fan what do you trade?", null]) {
+      assert.equal(isAnswerOptOut(text), false, String(text));
+    }
   });
 });
 

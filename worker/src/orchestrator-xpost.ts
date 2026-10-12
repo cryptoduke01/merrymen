@@ -48,7 +48,7 @@ import { xAppFromEnv, type FetchLike, type XApp, type XReply } from "./xpost/cli
 import { admitXPost, vocabularyRefusal, type BaseGate, type XGateCtx } from "./xpost/gate";
 import { ACTIVE_CADENCE, ANSWER_GAP_MS, ANSWER_STALE_MS, ANSWERS_PER_DAY, REPLY_STALE_MS, STANDARD_CADENCE, coinOf, hash32, introState, planPosts, replyDueAt, sendDecision, type PlanCadence, type PlanClock, type PlanIntent } from "./xpost/planner";
 import { APP_PAUSE_KEY, APP_PAUSE_MS, CREDITS_PAUSE_MS, PAUSE_KEY, readReplyComments, sendOne, type SendOutcome } from "./xpost/sender";
-import { isReplyOptOut, replyCandidate, tagCandidate, withoutReplyOptOut } from "./xpost/replies";
+import { isAnswerOptOut, isReplyOptOut, replyCandidate, tagCandidate, withoutReplyOptOut } from "./xpost/replies";
 import { activeTenantsOf, repliesAllowedFor, repliesScopeOf } from "./xpost/scope";
 import {
   ANSWER_LOOKED_UP,
@@ -1192,8 +1192,10 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       }
       // Never sample opt-outs. They can arrive on an old or nested reply,
       // contain a handle, or coexist with a new question from the same person.
+      // An active agent answers at once with no review: any plain "stop" in a tag is one (isAnswerOptOut).
+      const optsOut = isActive(account) ? isAnswerOptOut : isReplyOptOut;
       for (const comment of result.value.replies) {
-        if (comment.authorId !== account.xUserId && isReplyOptOut(comment.text)) {
+        if (comment.authorId !== account.xUserId && optsOut(comment.text)) {
           await optOutReplies(shared, account.xUserId, comment.authorId, at());
           bump("reply-opt-out");
         }

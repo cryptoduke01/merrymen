@@ -425,6 +425,22 @@ test("a STOP opts the person out and nothing is drafted for them again", async (
   assert.equal(w.asked().length, 0);
 });
 
+test("any plain stop in a tag opts the person out of answers, and nothing is drafted for them (red-team 2026-10-12)", async (t) => {
+  for (const text of ["@pine_stoat hey, please stop", "@pine_stoat can you stop?", "@pine_stoat hey, go away", "@pine_stoat yo stop it", "@pine_stoat do you ever stop?"]) {
+    const w = await world(t, { answer: "fair enough, i'll keep it short then. Say stop to opt out." });
+    w.setInbox([tag({ text })]);
+    await w.step();
+    assert.equal(w.asked().length, 0, text);
+    assert.deepEqual(await w.answers(), [], text);
+    assert.equal(await store.repliesOptedOut(w.db, "111", "333"), true, `${text}: recorded`);
+    // Their next tag, ten minutes on, is not answered either.
+    w.setInbox([tag({ id: "100000000000000026", conversation_id: "100000000000000026", created_at: new Date(NOW + 9 * MIN).toISOString(), text: "@pine_stoat what do you trade?" })]);
+    await w.step(NOW + 10 * MIN);
+    assert.equal(w.asked().length, 0, text);
+    assert.deepEqual(w.sends, [], text);
+  }
+});
+
 test("one person gets at most two answers in a rolling day, whatever became of them", async (t) => {
   const w = await world(t);
   const answerTo = (id: string, at: number) => store.schedulePost(w.db, { tenant: TENANT, xUserId: "111", kind: "answer",

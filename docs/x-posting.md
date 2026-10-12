@@ -377,7 +377,10 @@ budget. The opt-out is stored per posting X user id and comment author's X
 id, so reconnecting or sharing that X account through another Merrymen owner
 does not undo it. It cancels that person's waiting replies. Every generated
 reply includes “Say stop to opt out.” An already claimed send cannot be
-recalled.
+recalled. An active agent answers a tag at once with no review, so on its
+path any standalone "stop", "quit it", "go away", "shut up", "get lost",
+"buzz off" or "leave me" in a tag is an opt-out too (`isAnswerOptOut`):
+"hey, please stop", "can you stop?" and "do you ever stop?" all count.
 
 **Keep public comments out of trading.** Incoming comment text is used only
 in memory and is never stored. Only a filtered public comment and the
