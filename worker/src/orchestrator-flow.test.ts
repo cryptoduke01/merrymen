@@ -15,6 +15,9 @@ import { createFlowClient, FLOW_BROKER_LIMITS, type FlowPort } from "./flow-brok
 import { attachFlowBroker, CREATOR_WINDOW_MIN, FLOW_DEADLINE_MS, makeFlowService, ponsLaunchCreatorLookup, startFlowRuntime, type CreatorLookup, type FlowService } from "./orchestrator-flow";
 import { BITQUERY_LANE_DEFAULTS, type BitqueryLane, type LaneAnswer, type CreatorFlowRead, type TokenFlowRead } from "./venues/bitquery-lane";
 import { PONS_LAUNCH_TOPIC, PONS_V2_FACTORY } from "./venues/pons";
+import { FLOW_X_GLOSS, flowXLines } from "./flow-facts";
+import { admitAgentLine } from "./groupchat/policy";
+import { admitXPost, vocabularyRefusal } from "./xpost/gate";
 
 const TOKEN = "0x00000000000000000000000000000000000000c1";
 const CREATOR = "0x00000000000000000000000000000000000000a7";
@@ -184,6 +187,57 @@ describe("ponsLaunchCreatorLookup — the launchpad's record, never the token's 
     assert.deepEqual(await ponsLaunchCreatorLookup(() => ok as never)(TOKEN as `0x${string}`), { state: "known", creator: CREATOR });
     const down = { getBlockNumber: async () => { throw new Error("rpc down"); }, request: async () => [] };
     assert.deepEqual(await ponsLaunchCreatorLookup(() => down as never)(TOKEN as `0x${string}`), { state: "unreadable" });
+  });
+});
+
+/**
+ * HERE, NOT IN flow-facts.test.ts, because only orchestrator files may import
+ * both the room's gate and xpost/ (their boundary tests pin that).
+ */
+describe("flow facts reach X only as glosses the existing writer and gate admit unchanged", () => {
+  const room = { vouchedSymbols: [], rosterNames: [], recentOwn: [], recentRoom: [] };
+
+  it("every gloss passes the room's base gate (no numeral, no quantity word) and every X vocabulary clause", () => {
+    for (const [band, glosses] of FLOW_X_GLOSS) {
+      for (const g of glosses) {
+        assert.deepEqual(admitAgentLine(g, room), { ok: true, text: g }, `${band}: ${g}`);
+        assert.equal(vocabularyRefusal(g), null, `${band}: ${g}`);
+        // The writer's clean(): one line, no guillemets or control characters, no digit.
+        assert.doesNotMatch(g, /[\u0000-\u001f\u007f«»]|\p{N}/u, `${band}: ${g}`);
+      }
+    }
+  });
+
+  it("said as a whole post, a gloss passes the full X gate with the production base gate", () => {
+    for (const [band, glosses] of FLOW_X_GLOSS) {
+      for (const g of glosses) {
+        const v = admitXPost(g, { kind: "casual", agentName: "Pine Stoat", mode: null, coins: [], recentOwn: [], recentFleet: [] }, admitAgentLine);
+        assert.deepEqual(v, { ok: true, text: g }, `${band}: ${g}`);
+      }
+    }
+  });
+
+  it("a live-shaped reading renders only gate-clean lines", () => {
+    const lines = flowXLines(
+      {
+        ok: true,
+        facts: {
+          token: TOKEN,
+          observedAt: 1,
+          windows: [
+            { minutes: 5, buyUsd: 120, sellUsd: 1_500, buys: 2, sells: 9, buyers: 2, sellers: 6 },
+            { minutes: 15, buyUsd: 300, sellUsd: 2_600, buys: 4, sells: 14, buyers: 3, sellers: 9 },
+            { minutes: 60, buyUsd: 410, sellUsd: 3_100, buys: 5, sells: 17, buyers: 3, sellers: 11 },
+          ],
+          venues: [],
+          largestSells: [{ usd: 2_000, at: 1, protocol: "uniswap_v4" }],
+          creator: { state: "read", windowMin: CREATOR_WINDOW_MIN, sells: 3, sellUsd: 2_000, transfersOut: 1, transferOutUsd: 10 },
+        },
+      },
+      "0x00000000000000000000000000000000000000f1|coin",
+    );
+    assert.equal(lines.length, 5);
+    for (const l of lines) assert.equal(admitAgentLine(l, room).ok, true, l);
   });
 });
 

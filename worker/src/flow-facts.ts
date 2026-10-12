@@ -87,16 +87,20 @@ export interface FlowSell {
 }
 
 /**
- * Did the coin's creator sell, as far as the indexer can tell?
+ * Did the coin's launcher sell, as far as the indexer can tell? "Launcher"
+ * means exactly one thing: the address the launchpad factory's own launch
+ * event recorded for this coin — never an address the token reports about
+ * itself, which any contract can forge.
  *
- *   not-derivable  no creator is known for this coin from a trusted on-chain
- *                  source (only Pons-template coins publish one), so nothing
- *                  was asked. Not "the creator did not sell".
- *   unavailable    a creator is known but the read failed.
+ *   not-derivable  no factory launch record for this coin (only Pons
+ *                  launches have one, and only inside the lookback), so
+ *                  nothing was asked. Not "the launcher did not sell".
+ *   unavailable    a launcher is known but the read failed or ran out of time.
  *   read           the indexer answered for the window.
  *
- * The creator's address is never part of a fact: it is resolved and used on
- * the orchestrator and goes no further.
+ * The address is never part of a fact: it is resolved and used on the
+ * orchestrator and goes no further. (The field keeps the name `creator` on
+ * the wire; what it holds is the launch record's creator topic.)
  */
 export type CreatorFlow =
   | { state: "not-derivable" }
@@ -282,9 +286,15 @@ function silentHour(f: FlowFacts): boolean {
 /** Whole dollars from $100 (either sign), cents below: precision a reader can use, not noise. */
 const round = (n: number | null): number | null => (n === null ? null : Math.abs(n) >= 100 ? Math.round(n) : Math.round(n * 100) / 100);
 
-function creatorJson(c: CreatorFlow): Record<string, unknown> {
+/**
+ * Labelled by where the address came from, so a reader of the block never
+ * takes it for "the creator's wallet" in any looser sense than that record.
+ */
+const LAUNCHER_BASIS = "launchpad factory's launch record";
+
+function launcherJson(c: CreatorFlow): Record<string, unknown> {
   if (c.state === "read") {
-    return { state: "read", windowMin: c.windowMin, dexSells: c.sells, dexSellUsd: round(c.sellUsd), transfersOut: c.transfersOut, transferOutUsd: round(c.transferOutUsd) };
+    return { basis: LAUNCHER_BASIS, state: "read", windowMin: c.windowMin, dexSells: c.sells, dexSellUsd: round(c.sellUsd), transfersOut: c.transfersOut, transferOutUsd: round(c.transferOutUsd) };
   }
   return c.state === "unavailable" ? { state: "unknown" } : { state: "not-derivable" };
 }
@@ -321,12 +331,12 @@ export function renderFlowLens(r: FlowResult, now: number = Date.now()): string 
     windows,
     venues60m: f.venues.slice(0, 4).map((v) => ({ venue: v.protocol, buyUsd: round(v.buyUsd), sellUsd: round(v.sellUsd), trades: v.buys === null || v.sells === null ? null : v.buys + v.sells })),
     largestSellsUsd60m: f.largestSells.slice(0, 3).map((s) => round(s.usd)),
-    creator: creatorJson(f.creator),
+    launcher: launcherJson(f.creator),
   };
   let json = JSON.stringify(body);
   const room = LENS_MAX - ATTRIBUTION.length - NOT_LINE.length - 2;
   if (json.length > room) {
-    // Venues go first, then sells: the windows and the creator are the reading.
+    // Venues go first, then sells: the windows and the launcher are the reading.
     body.venues60m = [];
     json = JSON.stringify(body);
     if (json.length > room) {
@@ -339,44 +349,147 @@ export function renderFlowLens(r: FlowResult, now: number = Date.now()): string 
   return text;
 }
 
-function usdText(n: number): string {
-  if (n >= 1_000_000) return `$${(n / 1_000_000).toFixed(1)}m`;
-  if (n >= 10_000) return `$${Math.round(n / 1000)}k`;
-  if (n >= 1_000) return `$${(n / 1000).toFixed(1)}k`;
-  return `$${Math.round(n)}`;
-}
+// ── X: bands, never figures ─────────────────────────────────────────────────
 
 /**
- * Plain facts an X answer may paraphrase, each one short and self-contained,
- * or an empty list when there is nothing honest to say (the lens's rules).
+ * WHAT AN X ANSWER MAY BE TOLD, IN BANDS — never a dollar figure or a count.
  *
- * WHAT NEVER APPEARS: an address, a hash, a wallet list, a tenant's size or
- * P&L — the reading is a public coin's public tape, and that is all it may be.
- * Every line says where it came from, so a writer that keeps one line keeps
- * its attribution with it.
+ * docs/x-posting.md rule 2, as xpost/writer.ts and xpost/gate.ts enforce it:
+ * the X model is never shown a number and a post never carries one. The
+ * writer's clean() drops any fact with a digit, and the gate refuses a post
+ * with a numeral or a quantity word. Numeric flow lines would therefore be
+ * dropped silently — or invite someone to loosen clean() or the gate, which
+ * would put dollar flow, counts and sell sizes about named coins on a
+ * person's X account, one step from a trading signal.
+ *
+ * So X gets a CLOSED VOCABULARY, the way buy posts get BUY_GLOSS: each band
+ * below has fixed glosses written here, with no digit, no quantity word and
+ * none of the gate's refused vocabulary (no "sold", "selling", "wallet",
+ * "dump"…). flow-facts.test.ts runs every gloss through the room's base gate
+ * and the X vocabulary clauses. The writer and the gate are NOT to be
+ * changed to admit flow facts; new wording goes here, through that test.
+ *
+ * WHAT IS NEVER SAID: that nothing happened. An hour with no indexed trades,
+ * a launcher who did not sell, a failed read — each is no line at all,
+ * because absence of evidence is exactly what a forger or an indexer gap
+ * produces. Every gloss carries its attribution ("on-chain data").
  */
-export function flowFactLines(r: FlowResult): string[] {
+export type FlowXBand =
+  | "buys-lead"
+  | "buys-edge"
+  | "even"
+  | "sells-edge"
+  | "sells-lead"
+  | "light"
+  | "pace-up"
+  | "pace-down"
+  | "buyers-narrow"
+  | "buyers-broad"
+  | "one-big-sell"
+  | "launcher-sells"
+  | "launcher-moved";
+
+export const FLOW_X_GLOSS: ReadonlyMap<FlowXBand, readonly string[]> = new Map<FlowXBand, readonly string[]>([
+  // the hour's balance, by quote-side dollars
+  ["buys-lead", ["on-chain data shows buys clearly outweighing sells over the last hour", "per on-chain data, buys ran well ahead of sells over the last hour"]],
+  ["buys-edge", ["on-chain data shows buys a little ahead of sells over the last hour", "per on-chain data, buys edged out sells over the last hour"]],
+  ["even", ["on-chain data shows buys and sells roughly even over the last hour", "per on-chain data, buys and sells were about level over the last hour"]],
+  ["sells-edge", ["on-chain data shows sells a little ahead of buys over the last hour", "per on-chain data, sells edged out buys over the last hour"]],
+  ["sells-lead", ["on-chain data shows sells clearly outweighing buys over the last hour", "per on-chain data, sells ran well ahead of buys over the last hour"]],
+  ["light", ["on-chain data shows only light trading in it over the last hour", "per on-chain data, it barely traded over the last hour"]],
+  // where in the hour the trading fell
+  ["pace-up", ["on-chain data shows most of the last hour's trading came in the last quarter hour", "per on-chain data, trading in it picked up in the last quarter hour"]],
+  ["pace-down", ["on-chain data shows trading in it went quiet in the last quarter hour", "per on-chain data, trading in it slowed right down in the last quarter hour"]],
+  // how many addresses bought — addresses, never claimed to be people
+  ["buyers-narrow", ["on-chain data shows a small group of addresses doing the buying over the last hour", "per on-chain data, the buying over the last hour came from only a small group of addresses"]],
+  ["buyers-broad", ["on-chain data shows the buying spread across lots of different addresses over the last hour", "per on-chain data, lots of different addresses were buying over the last hour"]],
+  // one sell dwarfing the rest
+  ["one-big-sell", ["on-chain data shows one sell made up most of the sells over the last hour", "per on-chain data, a single sell was most of the sells over the last hour"]],
+  // the launch record's address (orchestrator-flow.ts), said as exactly that
+  ["launcher-sells", ["on-chain data shows sells from the address the launchpad recorded as its launcher in the last hour", "per on-chain data, the address that launched it on the launchpad has made sells in the last hour"]],
+  ["launcher-moved", ["on-chain data shows the address the launchpad recorded as its launcher moving tokens out in the last hour", "per on-chain data, the address that launched it on the launchpad moved tokens out in the last hour"]],
+]);
+
+/** Where the bands' edges sit. Internal: none of these numbers leaves this file. */
+export const FLOW_X_EDGES = Object.freeze({
+  /** Below this many quote-side dollars in the hour, the balance is noise: "light". */
+  minHourUsd: 50,
+  /** Buy share of the hour's dollars for "lead" and "edge" (and their mirror for sells). */
+  leadShare: 0.65,
+  edgeShare: 0.55,
+  /** Share of the hour's dollars in the last quarter hour for "pace-up" / "pace-down". */
+  paceUpShare: 0.6,
+  paceDownShare: 0.05,
+  /** Distinct buying addresses in the hour. */
+  narrowBuyers: 3,
+  broadBuyers: 25,
+  /** One sell at least this share of the hour's sell dollars, among at least this many sells. */
+  bigSellShare: 0.5,
+  bigSellMinSells: 3,
+});
+
+/** The bands a reading supports, in a fixed order. Empty when there is nothing honest to say. */
+export function flowXBands(r: FlowResult): FlowXBand[] {
   if (!r.ok) return [];
   const f = r.facts;
   if (silentHour(f)) return [];
-  const lines: string[] = [];
-  for (const w of f.windows) {
-    if (w.minutes === 5) continue;
-    if (w.buyUsd === null || w.sellUsd === null) continue;
-    const who = w.buyers !== null && w.sellers !== null ? ` (${w.buyers} buyers, ${w.sellers} sellers)` : "";
-    lines.push(`on-chain DEX data, last ${w.minutes}m: ${usdText(w.buyUsd)} bought vs ${usdText(w.sellUsd)} sold${who}`);
+  const E = FLOW_X_EDGES;
+  const bands: FlowXBand[] = [];
+  const hour = f.windows.find((w) => w.minutes === 60);
+  const quarter = f.windows.find((w) => w.minutes === 15);
+  const hourUsd = hour && hour.buyUsd !== null && hour.sellUsd !== null ? hour.buyUsd + hour.sellUsd : null;
+  if (hour && hourUsd !== null) {
+    if (hourUsd < E.minHourUsd) bands.push("light");
+    else {
+      const share = hour.buyUsd! / hourUsd;
+      bands.push(share >= E.leadShare ? "buys-lead" : share >= E.edgeShare ? "buys-edge" : share > 1 - E.edgeShare ? "even" : share > 1 - E.leadShare ? "sells-edge" : "sells-lead");
+      if (quarter && quarter.buyUsd !== null && quarter.sellUsd !== null) {
+        const pace = (quarter.buyUsd + quarter.sellUsd) / hourUsd;
+        if (pace >= E.paceUpShare) bands.push("pace-up");
+        else if (pace <= E.paceDownShare) bands.push("pace-down");
+      }
+    }
+  }
+  if (hour && hour.buyers !== null && hour.buys !== null && hour.buys > 0) {
+    if (hour.buyers <= E.narrowBuyers) bands.push("buyers-narrow");
+    else if (hour.buyers >= E.broadBuyers) bands.push("buyers-broad");
   }
   const big = f.largestSells[0];
-  if (big) lines.push(`on-chain DEX data: biggest single sell in the last hour was about ${usdText(big.usd)}`);
-  const c = f.creator;
-  if (c.state === "read" && c.sells !== null && c.transfersOut !== null) {
-    lines.push(
-      c.sells > 0
-        ? `on-chain data: the creator's wallet sold in the last ${c.windowMin}m`
-        : c.transfersOut > 0
-          ? `on-chain data: the creator's wallet moved tokens out in the last ${c.windowMin}m, with no DEX sell indexed`
-          : `on-chain data: no creator-wallet sells or transfers out indexed in the last ${c.windowMin}m`,
-    );
+  if (big && hour && hour.sellUsd !== null && hour.sellUsd > 0 && hour.sells !== null && hour.sells >= E.bigSellMinSells && big.usd >= E.bigSellShare * hour.sellUsd) {
+    bands.push("one-big-sell");
   }
-  return lines.filter((l) => !ADDRESSY.test(l));
+  // Only what the launch record's address DID, and only over the hour the
+  // glosses name. "It did not sell" is never said (see above).
+  const c = f.creator;
+  if (c.state === "read" && c.windowMin === 60) {
+    if (c.sells !== null && c.sells > 0) bands.push("launcher-sells");
+    else if (c.transfersOut !== null && c.transfersOut > 0) bands.push("launcher-moved");
+  }
+  return bands;
+}
+
+/** FNV-1a: which gloss of a band, stable per seed. Not security, just variety. */
+function glossIndex(seed: string, band: string, n: number): number {
+  let h = 0x811c9dc5;
+  for (const ch of `${seed}|${band}`) {
+    h ^= ch.codePointAt(0)!;
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h % n;
+}
+
+/**
+ * The lines an X answer may paraphrase: one fixed gloss per band, chosen by
+ * `seed` (the caller passes something like `${tenant}|${token}`, so two
+ * accounts answering about one coin are not handed the same words — the
+ * gate's fleet-echo clause would drop one of them). Digit-free by
+ * construction, and checked again on the way out.
+ */
+export function flowXLines(r: FlowResult, seed = ""): string[] {
+  return flowXBands(r)
+    .map((band) => {
+      const glosses = FLOW_X_GLOSS.get(band)!;
+      return glosses[glossIndex(seed, band, glosses.length)]!;
+    })
+    .filter((l) => !/\p{N}/u.test(l) && !ADDRESSY.test(l));
 }

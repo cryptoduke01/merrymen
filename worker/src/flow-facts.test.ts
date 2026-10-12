@@ -10,10 +10,13 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
+import * as flowFactsModule from "./flow-facts";
 import {
   FLOW_WINDOWS,
-  flowFactLines,
+  FLOW_X_GLOSS,
   flowFactsOf,
+  flowXBands,
+  flowXLines,
   flowNumber,
   flowResultOf,
   isFlowFailure,
@@ -98,12 +101,13 @@ describe("renderFlowLens — attribution first, labelled, never a verdict from a
     const [first, body, last] = text.split("\n");
     assert.match(first!, /^Source: an on-chain indexer's record of DEX trades.*Indexer data, not a forecast\.$/);
     assert.match(last!, /^WHAT THIS IS NOT:/);
-    const j = JSON.parse(body!) as { ageSec: number; windows: Record<string, { netUsd: number; buyers: number }>; creator: { state: string } };
+    const j = JSON.parse(body!) as { ageSec: number; windows: Record<string, { netUsd: number; buyers: number }>; launcher: { state: string; basis: string } };
     assert.equal(j.ageSec, 12);
     assert.deepEqual(Object.keys(j.windows), FLOW_WINDOWS.map((m) => `${m}m`));
     assert.equal(j.windows["60m"]!.netUsd, 2810, "net flow, whole dollars from $100");
     assert.equal(j.windows["5m"]!.netUsd, 292, "412.50 - 120.25");
-    assert.equal(j.creator.state, "read");
+    assert.equal(j.launcher.state, "read");
+    assert.equal(j.launcher.basis, "launchpad factory's launch record", "labelled by where the address came from, never 'the creator's wallet'");
     assert.ok(text.length <= 1200);
   });
 
@@ -126,43 +130,110 @@ describe("renderFlowLens — attribution first, labelled, never a verdict from a
     assert.equal(j.windows["15m"]!.netUsd, null, "a net of an unknown is unknown");
   });
 
-  it("a creator that cannot be known says so, and is never read as 'did not sell'", () => {
-    const nd = JSON.parse(renderFlowLens({ ok: true, facts: facts({ creator: { state: "not-derivable" } }) }, NOW)!.split("\n")[1]!) as { creator: unknown };
-    assert.deepEqual(nd.creator, { state: "not-derivable" });
-    const un = JSON.parse(renderFlowLens({ ok: true, facts: facts({ creator: { state: "unavailable", failure: "timeout" } }) }, NOW)!.split("\n")[1]!) as { creator: unknown };
-    assert.deepEqual(un.creator, { state: "unknown" });
+  it("a launcher that cannot be known says so, and is never read as 'did not sell'", () => {
+    const nd = JSON.parse(renderFlowLens({ ok: true, facts: facts({ creator: { state: "not-derivable" } }) }, NOW)!.split("\n")[1]!) as { launcher: unknown };
+    assert.deepEqual(nd.launcher, { state: "not-derivable" });
+    const un = JSON.parse(renderFlowLens({ ok: true, facts: facts({ creator: { state: "unavailable", failure: "timeout" } }) }, NOW)!.split("\n")[1]!) as { launcher: unknown };
+    assert.deepEqual(un.launcher, { state: "unknown" });
+    assert.doesNotMatch(renderFlowLens({ ok: true, facts: facts() }, NOW)!, /creator|wallet/i);
   });
 });
 
-describe("flowFactLines — what an X answer may paraphrase", () => {
-  it("short, attributed, and about the coin's public tape only", () => {
-    const lines = flowFactLines({ ok: true, facts: facts() });
-    assert.deepEqual(lines, [
-      "on-chain DEX data, last 15m: $1.4k bought vs $610 sold (8 buyers, 4 sellers)",
-      "on-chain DEX data, last 60m: $5.1k bought vs $2.3k sold (27 buyers, 12 sellers)",
-      "on-chain DEX data: biggest single sell in the last hour was about $513",
-      "on-chain data: no creator-wallet sells or transfers out indexed in the last 60m",
-    ]);
-    for (const l of lines) {
-      assert.match(l, /^on-chain/, "every line keeps its attribution");
-      assert.doesNotMatch(l, /0x|bitquery|pnl|p&l|position/i);
+describe("flowXLines — what an X answer may paraphrase: bands, never figures", () => {
+  const hourOf = (w: Partial<FlowFacts["windows"][number]>, quarter: Partial<FlowFacts["windows"][number]> = {}) =>
+    facts({
+      windows: [
+        { minutes: 5, buyUsd: 10, sellUsd: 10, buys: 1, sells: 1, buyers: 1, sellers: 1 },
+        { minutes: 15, buyUsd: 300, sellUsd: 300, buys: 3, sells: 3, buyers: 3, sellers: 3, ...quarter },
+        { minutes: 60, buyUsd: 1000, sellUsd: 1000, buys: 10, sells: 10, buyers: 10, sellers: 10, ...w },
+      ],
+      largestSells: [],
+    });
+
+  it("every gloss is digit-free, attributed, and names no wallet, address or vendor", () => {
+    assert.ok(FLOW_X_GLOSS.size >= 13);
+    for (const [band, glosses] of FLOW_X_GLOSS) {
+      assert.ok(glosses.length >= 2, `${band} has a second wording, so two accounts are not handed one sentence`);
+      for (const g of glosses) {
+        assert.doesNotMatch(g, /\p{N}/u, `${band}: ${g}`);
+        assert.match(g, /on-chain data/, "every line keeps its attribution");
+        assert.doesNotMatch(g, /0x|wallet|creator|bitquery|indexer|\$|%|sold|selling/i, `${band}: ${g}`);
+        assert.ok(g.length <= 120, `${band} is one short line`);
+      }
     }
   });
 
-  it("a creator who sold, or moved tokens out, is said plainly — and an unknown creator is not mentioned", () => {
-    const sold = flowFactLines({ ok: true, facts: facts({ creator: { state: "read", windowMin: 60, sells: 2, sellUsd: 830, transfersOut: 3, transferOutUsd: 1210 } }) });
-    assert.match(sold.at(-1)!, /creator's wallet sold in the last 60m/);
-    const moved = flowFactLines({ ok: true, facts: facts({ creator: { state: "read", windowMin: 60, sells: 0, sellUsd: 0, transfersOut: 1, transferOutUsd: 50 } }) });
-    assert.match(moved.at(-1)!, /moved tokens out .* no DEX sell indexed/);
-    for (const creator of [{ state: "not-derivable" as const }, { state: "unavailable" as const, failure: "timeout" as const }]) {
-      assert.ok(flowFactLines({ ok: true, facts: facts({ creator }) }).every((l) => !/creator/.test(l)));
+  it("no figure ever leaves: a reading full of numbers renders lines with none", () => {
+    const loud = facts({
+      largestSells: [{ usd: 1_900, at: NOW / 1000 - 60, protocol: "uniswap_v4" }],
+      creator: { state: "read", windowMin: 60, sells: 4, sellUsd: 9_000, transfersOut: 2, transferOutUsd: 100 },
+      windows: [
+        { minutes: 5, buyUsd: 100, sellUsd: 2_000, buys: 1, sells: 9, buyers: 1, sellers: 7 },
+        { minutes: 15, buyUsd: 200, sellUsd: 2_500, buys: 2, sells: 12, buyers: 2, sellers: 9 },
+        { minutes: 60, buyUsd: 300, sellUsd: 3_000, buys: 3, sells: 14, buyers: 2, sellers: 10 },
+      ],
+    });
+    for (const seed of ["", "a|b", "tenant|token", "zz"]) {
+      const lines = flowXLines({ ok: true, facts: loud }, seed);
+      assert.ok(lines.length >= 4);
+      for (const l of lines) assert.doesNotMatch(l, /\p{N}/u, l);
+    }
+    assert.deepEqual(flowXBands({ ok: true, facts: loud }), ["sells-lead", "pace-up", "buyers-narrow", "one-big-sell", "launcher-sells"]);
+  });
+
+  it("the hour's balance falls in one band, by quote-side dollars", () => {
+    const band = (buy: number, sell: number) => flowXBands({ ok: true, facts: hourOf({ buyUsd: buy, sellUsd: sell }) })[0];
+    assert.equal(band(700, 300), "buys-lead");
+    assert.equal(band(600, 400), "buys-edge");
+    assert.equal(band(500, 500), "even");
+    assert.equal(band(400, 600), "sells-edge");
+    assert.equal(band(300, 700), "sells-lead");
+    assert.equal(band(20, 10), "light", "a few dollars either way is not a balance");
+  });
+
+  it("pace, breadth and one big sell are said only past their edges", () => {
+    assert.deepEqual(flowXBands({ ok: true, facts: hourOf({}) }), ["even"]);
+    assert.ok(flowXBands({ ok: true, facts: hourOf({}, { buyUsd: 700, sellUsd: 600 }) }).includes("pace-up"));
+    assert.ok(flowXBands({ ok: true, facts: hourOf({}, { buyUsd: 20, sellUsd: 20 }) }).includes("pace-down"));
+    assert.ok(flowXBands({ ok: true, facts: hourOf({ buyers: 2 }) }).includes("buyers-narrow"));
+    assert.ok(flowXBands({ ok: true, facts: hourOf({ buyers: 40 }) }).includes("buyers-broad"));
+    const big = { ...hourOf({}), largestSells: [{ usd: 600, at: NOW / 1000 - 60, protocol: null }] };
+    assert.ok(flowXBands({ ok: true, facts: big }).includes("one-big-sell"));
+    const alone = { ...hourOf({ sells: 1 }), largestSells: [{ usd: 1000, at: NOW / 1000 - 60, protocol: null }] };
+    assert.ok(!flowXBands({ ok: true, facts: alone }).includes("one-big-sell"), "the only sell is not one sell among many");
+    assert.deepEqual(flowXBands({ ok: true, facts: hourOf({ buyUsd: null }) }), [], "an unknown is not a band");
+  });
+
+  it("what the launch record's address did is said; that it did nothing is never said", () => {
+    const withLauncher = (creator: FlowFacts["creator"]) => flowXBands({ ok: true, facts: { ...hourOf({}), creator } });
+    assert.ok(withLauncher({ state: "read", windowMin: 60, sells: 2, sellUsd: 830, transfersOut: 3, transferOutUsd: 1210 }).includes("launcher-sells"));
+    assert.ok(withLauncher({ state: "read", windowMin: 60, sells: 0, sellUsd: 0, transfersOut: 1, transferOutUsd: 50 }).includes("launcher-moved"));
+    for (const creator of [
+      { state: "read" as const, windowMin: 60, sells: 0, sellUsd: 0, transfersOut: 0, transferOutUsd: 0 },
+      { state: "read" as const, windowMin: 60, sells: null, sellUsd: null, transfersOut: null, transferOutUsd: null },
+      { state: "not-derivable" as const },
+      { state: "unavailable" as const, failure: "timeout" as const },
+    ]) {
+      const lines = flowXLines({ ok: true, facts: { ...hourOf({}), creator } });
+      assert.ok(lines.every((l) => !/launch/.test(l)), JSON.stringify(creator));
     }
   });
 
   it("nothing to say is an empty list, never 'no activity'", () => {
-    assert.deepEqual(flowFactLines({ ok: false, failure: "provider-cooldown" }), []);
+    assert.deepEqual(flowXLines({ ok: false, failure: "provider-cooldown" }), []);
     const silent = facts({ windows: FLOW_WINDOWS.map((minutes) => ({ minutes, buyUsd: 0, sellUsd: 0, buys: 0, sells: 0, buyers: 0, sellers: 0 })) });
-    assert.deepEqual(flowFactLines({ ok: true, facts: silent }), []);
+    assert.deepEqual(flowXLines({ ok: true, facts: silent }), []);
+  });
+
+  it("the wording is drawn by seed: stable for one seed, and varied across them", () => {
+    const r = { ok: true as const, facts: facts() };
+    assert.deepEqual(flowXLines(r, "one|coin"), flowXLines(r, "one|coin"));
+    const seen = new Set(Array.from({ length: 16 }, (_, i) => flowXLines(r, `tenant${String.fromCharCode(97 + i)}|coin`)[0]));
+    assert.equal(seen.size, 2, "both wordings of the band are in use");
+  });
+
+  it("the numeric renderer for X is gone: figures go to the Brain lens only", () => {
+    assert.equal("flowFactLines" in flowFactsModule, false);
   });
 
   it("the lane's parsed fixture renders end to end", async () => {
