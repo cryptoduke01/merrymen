@@ -681,7 +681,7 @@ lanes before them. Unset is the default and changes nothing. This table is the s
 |---|---|---|---|---|
 | 1 | *(deploy)* | Brain service, orchestrator, web; the gateway (its own project) first or with them | this commit | The worker sends the Trencher terms and the flow lens only once Brain's `/health` lists `strategy-terms` and `onchain-flow`, so either order is safe. The worker's Bearer fix starts gateway spending, under the gateway's own cap (below) |
 | 2 | `MERRYMEN_COINGECKO_PRO_SPACING_MS` | orchestrator (children inherit it) | `800` | One `[gecko] coingecko-pro fleet lane: 800 ms` line per child |
-| 2 | `MERRYMEN_COINGECKO_PRO_SPACING_MS` | web | `2600` | One `local lane: 2600 ms` line on web |
+| 2 | `MERRYMEN_COINGECKO_PRO_SPACING_MS` | web | `2600` | One `local lane: 2600 ms` line on web. From here web's chart reads are paced too (unset, they stay unpaced as before), so two cold token pages opened within about 2.6 s may show the second one's chart as unreachable until it is read again |
 | 2 | `MERRYMEN_COINGECKO_MONTHLY_CREDITS` | orchestrator and web | `5000000` | The plan's month; a spacing below the floor it allows is raised to it. `MERRYMEN_COINGECKO_PRO_API_KEY` stays as it is |
 | 3 | `MERRYMEN_FOMO_ENABLED` | web + orchestrator, same value | `1` | Fomo itself, and the IPC channel a child asks the flow lane over |
 | 3 | `MERRYMEN_DECISION_RESEARCH_ACCOUNTS` | orchestrator (children inherit it) | Alan's smart account, from the deploy environment (this repository names no account) | Cost quotes, his own outcomes, the momentum plan, the Trencher terms and indexed flow for his live fast-Trencher entry reviews. Decision log lines end `· terms sent` |

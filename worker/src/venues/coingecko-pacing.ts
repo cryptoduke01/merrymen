@@ -50,6 +50,16 @@ export interface ProPacing {
   notes: string[];
 }
 
+/**
+ * DID THE OPERATOR SET EITHER KNOB AT ALL — whatever the value, readable or
+ * not? A caller that was never on the lane before these knobs existed (web's
+ * chart reads) joins it only then, so that neither set still means exactly
+ * the previous behaviour for it.
+ */
+export function proPacingSet(env: Readonly<Record<string, string | undefined>> = process.env): boolean {
+  return [env.MERRYMEN_COINGECKO_PRO_SPACING_MS, env.MERRYMEN_COINGECKO_MONTHLY_CREDITS].some((v) => typeof v === "string" && v.trim() !== "");
+}
+
 /** A positive whole number, allowing `_` and `,` as digit separators. Null otherwise. */
 function wholeNumber(raw: string | undefined): number | null | undefined {
   const text = raw?.trim();

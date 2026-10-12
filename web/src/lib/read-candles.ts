@@ -1,3 +1,4 @@
+import { proPacingSet } from "../../../worker/src/venues/coingecko-pacing";
 import { cachedGeckoDetail, geckoRefusal, geckoSource, type GeckoSource } from "../../../worker/src/venues/geckoterminal";
 import type { FeedResult } from "../../../worker/src/venues/fleet-feed-cache";
 /**
@@ -312,6 +313,14 @@ function candleReadOf(r: CandleFetch): CandleRead {
  * process, the one-hour plan-refusal latch, and the public fallback the other
  * reads use on a Pro outage.
  *
+ * ONLY ONCE THE OPERATOR SET A PACING KNOB ON WEB (coingecko-pacing.ts
+ * proPacingSet). With neither set the chart read is the unpaced Pro fetch it
+ * always was: at the lane's 3000 ms default, a cold token page claims three
+ * slots (its chart and two evidence legs), and a second cold page opened
+ * within seconds waited past its chart's 8 s budget and showed the chart as
+ * unreachable — on deploy, before anyone had chosen a pace. Setting either
+ * knob is the operator choosing to pace charts too.
+ *
  * IT TAKES THE DEFAULT ROW, NOT THE EVIDENCE ROW. The token page asks for its
  * chart and its pool evidence together (app/api/tokens/[address]/route.ts),
  * chart first. On the evidence row the chart claimed the first slot, so the
@@ -335,7 +344,7 @@ async function fetchCandles(
     `/networks/robinhood/pools/${poolId}/ohlcv/${timeframe}` +
     `?aggregate=${aggregate}&limit=${LIMIT}&currency=usd&token=${token}`;
   const source = geckoSource();
-  if (source.id !== "coingecko-pro") return candleReadOf(await requestCandles(source, route, token, window, READ_BUDGET_MS));
+  if (source.id !== "coingecko-pro" || !proPacingSet()) return candleReadOf(await requestCandles(source, route, token, window, READ_BUDGET_MS));
   return candleReadOf(
     await cachedGeckoDetail<CandleFetch>(
       `candles:${poolId.toLowerCase()}:${token.toLowerCase()}:${window}`,

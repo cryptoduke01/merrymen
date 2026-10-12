@@ -25,7 +25,12 @@ to eligible public data; it does not replenish paid credits or provide Pro throu
 
 Two optional variables set how fast the Pro lane spends. Set them on the
 orchestrator (every tenant child inherits them) and on web; both services read
-the same names. Neither set means exactly the previous behaviour.
+the same names. Neither set means exactly the previous behaviour, web's chart
+reads included: they stay the unpaced Pro reads they always were. Setting
+either one on web also puts its chart reads on web's lane, on the default row
+behind the pool-evidence legs, so at a few seconds' spacing a second cold
+token page opened within that time can show its chart as unreachable until it
+is read again.
 
 | Variable | Meaning |
 | --- | --- |

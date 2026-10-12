@@ -1,9 +1,17 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { CREDIT_MONTH_MS, PRO_DEFAULT_SPACING_MS, PRO_MIN_SPACING_MS, creditFloorMs, proPacing } from "./coingecko-pacing";
+import { CREDIT_MONTH_MS, PRO_DEFAULT_SPACING_MS, PRO_MIN_SPACING_MS, creditFloorMs, proPacing, proPacingSet } from "./coingecko-pacing";
 import { geckoSource, laneSpacingMs } from "./geckoterminal";
 
 describe("CoinGecko Pro pacing knobs", () => {
+  it("says whether the operator set either knob at all, readable or not", () => {
+    assert.equal(proPacingSet({}), false);
+    assert.equal(proPacingSet({ MERRYMEN_COINGECKO_PRO_SPACING_MS: "  " }), false, "blank is unset");
+    assert.equal(proPacingSet({ MERRYMEN_COINGECKO_PRO_SPACING_MS: "2600" }), true);
+    assert.equal(proPacingSet({ MERRYMEN_COINGECKO_MONTHLY_CREDITS: "5000000" }), true);
+    assert.equal(proPacingSet({ MERRYMEN_COINGECKO_PRO_SPACING_MS: "fast" }), true, "an unreadable value is still the operator's choice to pace");
+  });
+
   it("NOTHING SET IS THE OLD PACE, and says nothing", () => {
     const p = proPacing({});
     assert.equal(p.spacingMs, PRO_DEFAULT_SPACING_MS);

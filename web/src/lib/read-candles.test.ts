@@ -139,7 +139,7 @@ describe("a pool with genuinely no history is not an outage", () => {
  * each read is paced by the same knob as every other web Pro read, and one
  * 429 holds the whole process back rather than only the pool that earned it.
  */
-describe("chart reads on the Pro key are paced and share one cooldown", () => {
+describe("chart reads on the Pro key, once a pacing knob is set on web, are paced and share one cooldown", () => {
   const KNOBS = ["MERRYMEN_COINGECKO_PRO_API_KEY", "MERRYMEN_FLEET_HOME", "MERRYMEN_COINGECKO_PRO_SPACING_MS", "MERRYMEN_COINGECKO_MONTHLY_CREDITS"] as const;
   let saved: Record<string, string | undefined> = {};
   let now = 0;
@@ -148,12 +148,28 @@ describe("chart reads on the Pro key are paced and share one cooldown", () => {
     saved = Object.fromEntries(KNOBS.map((k) => [k, process.env[k]]));
     for (const k of KNOBS) delete process.env[k];
     process.env.MERRYMEN_COINGECKO_PRO_API_KEY = "private-web-key";
+    // The operator's choice to pace web's reads: the default pace, written out.
+    process.env.MERRYMEN_COINGECKO_PRO_SPACING_MS = "3000";
     now = 1_000_000;
     resetGeckoFeedsForTest({ now: () => now, sleep: async (ms) => { now += ms; } });
   });
   afterEach(() => {
     resetGeckoFeedsForTest();
     for (const k of KNOBS) if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k];
+  });
+
+  it("with neither knob set, charts are the unpaced Pro reads they were before: two cold pages both chart at once", async () => {
+    delete process.env.MERRYMEN_COINGECKO_PRO_SPACING_MS;
+    const starts: number[] = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      assert.ok(String(input).startsWith("https://pro-api.coingecko.com/api/v3/onchain/networks/robinhood/pools/"));
+      assert.equal(new Headers(init?.headers).get("x-cg-pro-api-key"), "private-web-key");
+      starts.push(now);
+      return Response.json(okBody());
+    }) as typeof fetch;
+    const reads = await Promise.all(["a", "b", "c"].map((n) => readCandles(pool(n), TOKEN, "1h")));
+    assert.deepEqual(reads.map((r) => r.state), ["ok", "ok", "ok"]);
+    assert.deepEqual(starts, [now, now, now], "no slot waited for: nothing changes on deploy");
   });
 
   it("two pools' charts are spaced by the Pro pace (default 3000 ms, or the knob)", async () => {
