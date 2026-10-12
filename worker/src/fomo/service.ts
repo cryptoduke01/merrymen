@@ -3541,6 +3541,17 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
       await audit(env.status, { reason: env.reason });
       return env;
     }
+    // 1b. AN X ANSWER WITH ITS CAP AT ZERO IS OFF, not merely unpaid
+    // (MERRYMEN_FOMO_X_HOURLY_CREDITS=0, the documented off). A cap only
+    // refuses paid reads: a fresh copy an owner's or a room's read paid for
+    // would still be served, and a held one would still stand in when the
+    // charge is refused, and either would reach a public post on X. So the
+    // surface is refused here, before any cache read.
+    if (surface === "x-answer" && !((budget.config?.xHourlyCredits ?? 1) > 0)) {
+      const env = bare(ic, "unavailable", "x-answers-off");
+      await audit(env.status, { reason: env.reason });
+      return env;
+    }
     // 2. Audience: private state and mutations belong to the owner, in a direct conversation.
     const def = FOMO_TOOL_DEFS[tool];
     if ((def.ownerOnly || isMutationTool(tool)) && audience !== "owner") {

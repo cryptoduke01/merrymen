@@ -1045,6 +1045,25 @@ describe("the order of checks", () => {
     assert.equal(noGroup.status, "budget-limited");
   });
 
+  it("an X answer with its hourly cap at zero is off: not even a copy a room or an owner paid for is served", async () => {
+    const raw = new DatabaseSync(":memory:");
+    const db = wrapSqlite(raw);
+    const x = { audience: "group" as const, surface: "x-answer" as const, groupId: "111", conversationKey: "x:111" };
+    // A room's read fills the shared cache.
+    const paid = await harness({ db, raw });
+    assert.equal((await paid.invoke("fomo_get_token_theses", { token: PONS, chain: "robinhood" }, { audience: "group", surface: "telegram-group", groupId: "-100123" })).status, "capped");
+    assert.notEqual((await paid.invoke("fomo_get_token_theses", { token: PONS, chain: "robinhood" }, x)).status, "unavailable", "with a cap, an X answer reads like a room");
+    const off = await harness({ db, raw, budget: { ...GENEROUS, xHourlyCredits: 0 } });
+    for (const tool of ["fomo_get_token_theses", "fomo_get_token_activity"] as const) {
+      const env = await off.invoke(tool, { token: PONS, chain: "robinhood" }, x);
+      assert.equal(env.status, "unavailable", tool);
+      assert.equal(env.reason, "x-answers-off", tool);
+      assert.equal(env.data, null, tool);
+    }
+    assert.equal(off.calls.length, 0);
+    assert.equal((await off.invoke("fomo_get_token_theses", { token: PONS, chain: "robinhood" }, { audience: "group", surface: "telegram-group", groupId: "-100123" })).status, "capped", "a room is unaffected");
+  });
+
   it("invalid arguments fail before anything is read; a tenant argument is just an unknown key", async () => {
     const h = await harness();
     for (const args of [
