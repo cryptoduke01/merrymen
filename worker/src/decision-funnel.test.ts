@@ -144,6 +144,16 @@ describe("classifyStage maps the existing vocabularies, keeping the original rea
     const skip = classifyStage({ kind: "evidence-unavailable" });
     assert.equal(skip.stage, "RESEARCH_INCOMPLETE");
     assert.equal(skip.detail.split(":")[0], "evidence-unavailable");
+    // Filed over an earlier model hold, it is where the coin stops now, and the line counts it by code.
+    let t = 1_000_000;
+    const f = new FunnelRecorder({ now: () => t });
+    f.note(A, "TA", classifyStage({ kind: "brain-decision", action: "hold", holdKind: "MODEL_HOLD" }));
+    f.note(A, "TA", skip);
+    f.note(A, "TA", skip);
+    t += 1000;
+    assert.equal(f.traceFor(A).stage, "RESEARCH_INCOMPLETE");
+    assert.equal(f.traceFor(A).latest?.count, 2, "repeat skips fold");
+    assert.match(formatSummary(f.summary(0), t), /RESEARCH_INCOMPLETE 1 \(evidence-unavailable 1\)/);
   });
 
   it("candidate skips the builder used to make in silence", () => {

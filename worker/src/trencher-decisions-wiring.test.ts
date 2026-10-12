@@ -21,13 +21,39 @@ const codeOf = (src: string) =>
     .join("\n");
 
 const CODE = codeOf(readFileSync(new URL("./index.ts", import.meta.url), "utf8"));
-const LAUNCH = CODE.indexOf("trenchBrain.launch(trenchContext, inputs, focus.token, async () => {");
+const LAUNCH = CODE.indexOf("trenchBrain.launch(trenchContext, inputs, focus.token, async (review) => {");
 const PAID = CODE.indexOf("return runShadow(brainConfig, inputs,", LAUNCH);
 
 describe("the Trencher review's hold backoff, memory, evidence rule and research plan", () => {
-  it("the rotation has its backoff, and an idle rotation is not called a broken screen", () => {
+  it("the rotation has its backoff; an idle rotation is not called a broken screen, and an evidence outage is never hidden", () => {
     assert.match(CODE, /trenchBrain\.holdBackoff = new HoldBackoff\(\(token\) => \{/);
-    assert.match(CODE, /trenchNotice\(agentId, trenchSymbols\.size \|\| entriesBraked \|\| backedOff \? "" :/);
+    const at = CODE.indexOf("const backoff = fastTrencher && !trenchCandidate ? trenchBrain.backedOffBreakdown()");
+    assert.ok(at > 0);
+    const notice = CODE.slice(at, CODE.indexOf("const backoffIdle", at));
+    // The evidence case is asked FIRST, so nothing below it can clear its notice.
+    assert.match(notice, /trenchNotice\(agentId,\s*backoff\.evidence \? "Pool evidence is unavailable[^"]*"\s*: trenchSymbols\.size \|\| entriesBraked \|\| backedOff \? "" :/);
+    const idle = CODE.slice(at, CODE.indexOf("const focusPositions", at));
+    assert.match(idle, /held recently with nothing material moved since/);
+    assert.match(idle, /waiting out an evidence skip/);
+  });
+
+  it("BOTH entry-skip branches — blind legs on a stale row, and no tape row — file evidence-unavailable and return before the paid call", () => {
+    assert.ok(LAUNCH > 0 && PAID > LAUNCH);
+    const run = CODE.slice(LAUNCH, PAID);
+    const helper = run.slice(run.indexOf("const skipBlindEntry = (why: string): ShadowOutcome => {"), run.indexOf("if (tape) {"));
+    assert.match(helper, /trenchBrain\.evidenceSkipped\(focus\.token\)/);
+    assert.match(helper, /funnel\.note\(focus\.token, focus\.symbol, classifyStage\(\{ kind: "evidence-unavailable" \}\)\)/);
+    assert.match(helper, /ran: false,/);
+    assert.doesNotMatch(helper, /runShadow|claimReview/, "nothing paid or claimed on a skip");
+    assert.match(run, /if \(!focus\.held && entryEvidenceBlind\(evidence, tapeAt, Date\.now\(\)\)\) \{[\s\S]{0,300}?return skipBlindEntry\(/);
+    assert.match(run, /if \(!focus\.held\) return skipBlindEntry\("its pool has no fresh tape row/);
+    assert.equal(run.split("return skipBlindEntry(").length - 1, 2, "the two skips, and no other");
+  });
+
+  it("a review that goes ahead without either leg, or without a tape row, is flagged so its HOLD backs nothing off", () => {
+    const run = CODE.slice(LAUNCH, PAID);
+    assert.match(run, /if \(!evidence \|\| \(evidence\.candles\.failed && evidence\.trades\.failed\)\) review\.withoutEvidence\(\);/);
+    assert.match(run, /return skipBlindEntry\("its pool has no fresh tape row[^;]*;\s*review\.withoutEvidence\(\);/);
   });
 
   it("the hold memory line is read for ENTRY reviews only, and never displaces the paper notice", () => {
@@ -36,15 +62,10 @@ describe("the Trencher review's hold backoff, memory, evidence rule and research
     assert.ok(CODE.indexOf("inputs.memory = leadMemory(") > CODE.indexOf('"This is the paper ledger.'), "after the paper notice is added, so it is the last line protected");
   });
 
-  it("the blind-evidence skip guards on an unheld focus and returns BEFORE the paid call", () => {
-    assert.ok(LAUNCH > 0 && PAID > LAUNCH);
+  it("the Brain reads the compact evidence copy, not the full summary", () => {
     const run = CODE.slice(LAUNCH, PAID);
-    const skip = run.indexOf("if (!focus.held && entryEvidenceBlind(evidence, tapeAt, Date.now())) {");
-    assert.ok(skip > 0, "the skip asks about the held flag first");
-    const body = run.slice(skip, run.indexOf("satisfies ShadowOutcome;", skip));
-    assert.match(body, /trenchBrain\.evidenceSkipped\(focus\.token\)/);
-    assert.match(body, /return \{\s*ran: false,/);
-    assert.doesNotMatch(body, /runShadow|claimReview/, "nothing paid or claimed on the skip");
+    assert.match(run, /const detail = evidence \? brainEvidence\(evidence\) :/);
+    assert.doesNotMatch(CODE, /summarizeEvidence\(/);
   });
 
   it("the momentum plan rides only on costContext, which exists only for research accounts' entry reviews", () => {

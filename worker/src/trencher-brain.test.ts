@@ -889,6 +889,69 @@ test("a context change forgets every backoff; a throwing material reader release
     { priceUsd: 0.5, h1VolumeUsd: 5, m5Buyers: 3 });
 });
 
+test("a backed-off regular list does not freeze the early lane: a waiting early coin takes an unreserved slot", async () => {
+  const { review, reviewOf } = backoffRig();
+  const eligible = [{ token: TOKEN, volume24hUsd: 900_000 }, { token: ROUTER, volume24hUsd: 800_000 }, { token: EARLY_COIN, volume24hUsd: 20_000 }];
+  await reviewOf(TOKEN, () => hold());
+  await reviewOf(ROUTER, () => hold());
+  review.earlyLane = () => ({ held: new Set([EARLY_COIN]), waiting: [EARLY_COIN], reserved: false });
+  assert.equal(review.candidate(eligible)?.token, EARLY_COIN, "nothing regular is reviewable, so the lane is 'nothing else eligible'");
+  assert.deepEqual(review.backedOffBreakdown(), { holds: 2, evidence: 0 });
+  // With a regular coin open, an unreserved slot is still the rotation's, as before.
+  const open = [...eligible, { token: SECOND, volume24hUsd: 100 }];
+  assert.equal(review.candidate(open)?.token, SECOND);
+  // And a decided early coin (no longer waiting) does not take it: nothing launches.
+  review.earlyLane = () => ({ held: new Set([EARLY_COIN]), waiting: [], reserved: false });
+  assert.equal(review.candidate(eligible), undefined);
+});
+
+test("the idle breakdown tells a model-hold backoff from an evidence-skip backoff", async () => {
+  const { clock, review, reviewOf } = backoffRig();
+  await reviewOf(TOKEN, () => hold());
+  assert.equal(review.evidenceSkipped(ROUTER), true);
+  assert.equal(review.candidate([{ token: TOKEN }, { token: ROUTER }]), undefined);
+  assert.deepEqual(review.backedOffBreakdown(), { holds: 1, evidence: 1 });
+  assert.equal(review.backedOffCount(), 2);
+  // A skip that outlasts a running hold backoff names the backoff; one inside it does not.
+  clock.now += 4 * MIN;
+  assert.equal(review.evidenceSkipped(TOKEN), true);
+  assert.equal(review.candidate([{ token: TOKEN }]), undefined);
+  assert.deepEqual(review.backedOffBreakdown(), { holds: 0, evidence: 1 }, "the skip's window now runs longest");
+});
+
+test("a HOLD from a review that ran without evidence backs nothing off and seeds no hold memory", async () => {
+  const { clock, review } = backoffRig();
+  review.launch("live", input, TOKEN, async (run) => { run.withoutEvidence(); return hold(); }, () => {});
+  await setImmediate();
+  clock.now += TRENCH_REVIEW_INTERVAL_MS;
+  assert.equal(review.candidate([{ token: TOKEN }])?.token, TOKEN, "no flow was read, so the hold says nothing about the coin");
+  assert.equal(review.holdMemory(TOKEN, "MEME"), null);
+  // The same hold with evidence backs off as before.
+  review.launch("live", input, TOKEN, async () => hold(), () => {});
+  await setImmediate();
+  clock.now += TRENCH_REVIEW_INTERVAL_MS;
+  assert.equal(review.candidate([{ token: TOKEN }]), undefined);
+});
+
+test("all entries backed off: a held position still gets its review — the backoff never touches exits", async () => {
+  const { review, reviewOf } = backoffRig();
+  await reviewOf(TOKEN, () => hold());
+  const cand = review.candidate([{ token: TOKEN }]);
+  assert.equal(cand, undefined, "no entry candidate this slot");
+  // index.ts hands chooseFocus an empty entry universe; the holding takes the slot
+  // whether or not it is overdue, exactly as when nothing is eligible at all.
+  const focus = chooseFocus({
+    agentId: AGENT,
+    positions: [{ symbol: "HELD", token: ROUTER, valueUsdg: 2_500_000, price8: 1_000_000n, priceStale: false, priceSource: "pool" }],
+    universe: [],
+    prices: new Map([["HELD", { price8: 1_000_000n, stale: false, source: "pool" }]]) as never,
+    paused: new Set(),
+    alternate: { lastReviewedAtMs: new Map([["HELD", 1_000_000]]), nowMs: 1_000_000 + 60_000, maxGapMs: HELD_REVIEW_MAX_GAP_MS },
+  });
+  assert.equal(focus?.held, true);
+  assert.equal(focus?.symbol, "HELD");
+});
+
 // ─── Entry evidence: nothing current, nothing paid for ───────────────────
 
 test("an entry review is blind only when BOTH legs failed AND the tape row is stale or gone", () => {
