@@ -675,11 +675,11 @@ looks things up first, the way Shogun does in a Telegram group
 
 How this release is turned on for Alan Al Dale, the operator's own agent,
 every service and value in order: the X steps (5 and 6) rest on the research
-lanes before them. Unset is the default and changes nothing. This table is the same in [`hosted-deploy.md`](hosted-deploy.md) and [`x-posting.md`](x-posting.md); change both together.
+lanes before them. Unset is the default and changes nothing, except for an account already on `MERRYMEN_DECISION_RESEARCH_ACCOUNTS` (step 1). This table is the same in [`hosted-deploy.md`](hosted-deploy.md) and [`x-posting.md`](x-posting.md); change both together.
 
 | Step | Variable | Service | Value for Alan's rollout | What it does, and what to look for |
 |---|---|---|---|---|
-| 1 | *(deploy)* | Brain service, orchestrator, web; the gateway (its own project) first or with them | this commit | The worker sends the Trencher terms and the flow lens only once Brain's `/health` lists `strategy-terms` and `onchain-flow`, so either order is safe. The worker's Bearer fix starts gateway spending, under the gateway's own cap (below) |
+| 1 | *(deploy)* | Brain service, orchestrator, web; the gateway (its own project) first or with them | this commit | The worker sends the Trencher terms and the flow lens only once Brain's `/health` lists `strategy-terms` and `onchain-flow`, so either order is safe. The worker's Bearer fix starts gateway spending, under the gateway's own cap (below). **An account already on `MERRYMEN_DECISION_RESEARCH_ACCOUNTS` changes at deploy, with nothing else set:** its live fast-Trencher entry reviews get the new momentum plan at once, the Trencher terms once Brain lists `strategy-terms`, and, with Fomo already on and the owner's monitoring or follow setting on, Fomo research on its review candidates. To stage those, take the account out of the variable before deploying and put it back at step 3 |
 | 2 | `MERRYMEN_COINGECKO_PRO_SPACING_MS` | orchestrator (children inherit it) | `800` | One `[gecko] coingecko-pro fleet lane: 800 ms` line per child |
 | 2 | `MERRYMEN_COINGECKO_PRO_SPACING_MS` | web | `2600` | One `local lane: 2600 ms` line on web. From here web's chart reads are paced too (unset, they stay unpaced as before), so two cold token pages opened within about 2.6 s may show the second one's chart as unreachable until it is read again |
 | 2 | `MERRYMEN_COINGECKO_MONTHLY_CREDITS` | orchestrator and web | `5000000` | The plan's month; a spacing below the floor it allows is raised to it. `MERRYMEN_COINGECKO_PRO_API_KEY` stays as it is |
