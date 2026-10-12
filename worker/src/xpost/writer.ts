@@ -356,12 +356,23 @@ function clean(text: unknown, max: number): string | null {
  * (coinNamedIn), so masking the digit cannot turn a copycat into a buy.
  */
 const FIGURE = /\p{N}+(?:[.,:/]\p{N}+)*/gu;
+/**
+ * A FIGURE IN WORDS IS A FIGURE TOO (red-team review, 2026-10-12): "is $PEPE
+ * really under a penny now?" handed the model the figure to repeat. Number
+ * words, money units and multiples read as "(a number)" as digits do; "one",
+ * "half" and "double" stay, being pronouns and idioms far more often.
+ */
+const FIGURE_WORDS = new RegExp(
+  "\\b(?:(?:two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|million|billion|trillion|dozen)s?" +
+    "|k|mil|mils|bil|bils|bn|grand|penny|pennies|cents?|bucks?|dimes?|nickels?|quid|sats?|dollars?|usd|(?=[0-9]*[IlLoO])[IlLoO0-9]{2,4}x)\\b",
+  "giu",
+);
 export function answerQuestion(text: unknown): string | null {
   if (typeof text !== "string") return null;
   // SHERWOOD IN ANY FORM IS NEVER A DRAFT'S QUESTION: the classifier answers
   // it with nothing (modelQuestion), and so does the writer, for any caller.
   if (sherwoodMentioned(text)) return null;
-  return clean(text.replace(/\p{Cf}/gu, "").replace(FIGURE, "(a number)"), XREPLY_MAX_COMMENT_CHARS);
+  return clean(text.replace(/\p{Cf}/gu, "").replace(FIGURE_WORDS, "(a number)").replace(FIGURE, "(a number)"), XREPLY_MAX_COMMENT_CHARS);
 }
 
 /**

@@ -126,7 +126,7 @@ describe("an answer says only the buys it was told of (red-team 2026-10-12)", ()
     for (const draft of ["i trade on paper, kidding, it's real dollars on the line. say stop to opt out.", "on paper trades, but the money is real. say stop to opt out.",
       "on paper trades, real sol on the line though. say stop to opt out.", "i trade on paper, but my owner's actual cash is in it too. say stop to opt out.",
       "on paper, though it feels like real stakes. say stop to opt out."]) {
-      assert.equal(reason(draft, paper), "mode-false", draft);
+      assert.match(reason(draft, paper), /^(?:mode-false|quantity)$/, draft);
     }
     // The controls, and what each money may still say.
     assert.equal(reason("i'm on paper so nothing at stake. say stop to opt out.", live), "mode-false");
@@ -186,6 +186,25 @@ describe("a reply never vouches for a coin (red-team 2026-10-12)", () => {
     }
     assert.equal(reason("pepe looks legit to me", { kind: "casual", mode: "live", coins: ["pepe"] }), "hype", "beside a coin");
     assert.equal(reason("can't say much here, the public index shows liquidity is thin. say stop to opt out.", { kind: "reply", mode: "live", coins: [], buys: "none" }), "ok");
+  });
+});
+
+describe("a reply says no amount, price or multiple in words (red-team 2026-10-12)", () => {
+  it("one k, a bil, a fraction of a cent, a couple grand, a quarter of the supply, under a penny, up IOx are refused", () => {
+    const live: Partial<XGateCtx> = { kind: "reply", mode: "live", coins: [], buys: "none" };
+    // The reproduced drafts, each {ok:true} at 11f7acac, and the variants that also passed.
+    for (const draft of ["the public index counts about one k holders on it. say stop to opt out.", "the public index has it at roughly a bil market cap. say stop to opt out.",
+      "it's trading at a fraction of a cent on the public index. say stop to opt out.", "liquidity on the public index is like a couple grand. say stop to opt out.",
+      "the creator holds a quarter of the supply per the index. say stop to opt out.", "the public index shows it's up IOx this week. say stop to opt out.",
+      "the public index shows it's still under a penny, so cheap. say stop to opt out.", "the creator still holds about half of it, a few grand of liquidity. say stop to opt out.",
+      "the public index shows a few k in liquidity. say stop to opt out.", "the index counts a couple k holders. say stop to opt out.", "the index shows it's up IOOx. say stop to opt out.",
+      "the index says it went IOx since launch. say stop to opt out.", "the index shows it's up a ton this week. say stop to opt out.", "the index shows it's up lOOx. say stop to opt out."]) {
+      assert.notEqual(reason(draft, live), "ok", draft);
+    }
+    assert.equal(reason("the public index has it at roughly a bil market cap. say stop to opt out.", live), "quantity");
+    assert.equal(reason("the public index shows it's up IOx this week. say stop to opt out.", live), "quantity");
+    // Words in words, no figure: still fine.
+    assert.equal(reason("the public index shows liquidity is thin and holders look concentrated. say stop to opt out.", live), "ok");
   });
 });
 

@@ -757,6 +757,15 @@ describe("an active agent's answers and conversation memory", () => {
     assert.equal(answerQuestion(null), null);
   });
 
+  it("a figure in words is masked as digits are: under a penny, a couple grand, one k, up IOx (red-team 2026-10-12)", () => {
+    // The reproduced tag, which handed the model the figure to repeat at 11f7acac.
+    assert.equal(answerQuestion("is $PEPE really under a penny now?"), "is $PEPE really under a (a number) now?");
+    assert.equal(answerQuestion("is liquidity a couple grand or fifty k?"), "is liquidity a couple (a number) or (a number) (a number)?");
+    assert.equal(answerQuestion("is it up IOx already?"), "is it up (a number) already?");
+    // "one", "half" and "double" stay: this one, half the time, double check.
+    assert.equal(answerQuestion("is this one legit, or half a rug?"), "is this one legit, or half a rug?");
+  });
+
   it("every digit is masked, glued to letters or not: time units, ordinals and crypto words are still questions", () => {
     for (const [question, read] of [
       ["what's the 24h volume on $BONK looking like?", "what's the (a number)h volume on $BONK looking like?"],

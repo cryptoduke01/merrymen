@@ -945,6 +945,38 @@ const MARKET = new RegExp(
   "i",
 );
 
+/**
+ * AN AMOUNT, A PRICE OR A MULTIPLE IN WORDS THE BASE GATE LETS THROUGH, IN A
+ * REPLY (red-team review, 2026-10-12): "about one k holders", "a bil market
+ * cap", "a fraction of a cent", "a couple grand of liquidity", "a quarter of
+ * the supply", "under a penny", "up IOx" (capital I and O for ten). An answer
+ * is gated with no numbers in it; these are numbers. Refused as quantity.
+ */
+const AMOUNT_WORDS = new RegExp(
+  "\\b(?:" +
+    [
+      "k|ks|bils?|bn|mn",
+      "pennies|penny|cents?|bucks?|dimes?|nickels?|quid|sats?",
+      "dollars?|usd",
+      "(?:a|one|two|few|couple|several|some|like|about|around)\\s+(?:of\\s+)?grand",
+      "grand\\s+(?:of|in|worth)",
+      "(?:a\\s+)?fraction\\s+of",
+      "quarters?\\s+of|thirds?\\s+of|halves\\s+of",
+      "half\\s+(?:of\\s+)?(?:the|its|it|them|all)\\b(?:\\s+(?:supply|liquidity|holders|cap|pool|tokens|coins))?",
+      "(?:about|around|nearly|almost|roughly|over|under)\\s+half",
+      "(?:up|down)\\s+(?:a\\s+ton|tons|a\\s+lot|loads|big|huge)",
+      "a\\s+ton\\s+of|tons\\s+of",
+      "[IlLoO0-9]{2,4}x",
+    ].join("|") +
+    ")\\b",
+  "u",
+);
+/** The amount words read in any case but the multiples, whose capitals are what make them one. */
+const AMOUNT_WORDS_I = new RegExp(AMOUNT_WORDS.source.replace("|[IlLoO0-9]{2,4}x", ""), "iu");
+function amountSaid(text: string): boolean {
+  return AMOUNT_WORDS_I.test(text) || /\b(?!lox\b)[IlLoO0-9]{2,4}x\b/u.test(text);
+}
+
 /** The idioms that share a word with it, taken out first: "i'm sold on soup", "the selling point", "a loss for words". */
 const PNL_IDIOM =
   /\b(?:i'?m|im|i am|totally|completely|fully|pretty|not|never|already|was|wasn'?t)\s+(?:quite\s+|really\s+|so\s+|still\s+)?sold on\b|\bselling points?\b|\b(?:a\s+)?loss for words\b/gi;
@@ -1507,6 +1539,8 @@ function admitMasked(tidied: string, ctx: XGateCtx, baseGate: BaseGate, agentNam
   const namesCoin = coins.some((c) => mentions(text, c));
   if ((namesCoin || ctx.kind === "reply") && COIN_ADVICE.test(own)) return refuse("hype");
   if (ctx.kind === "reply" && (REPLY_CURRENT_OR_ACTION.test(own) || REPLY_CURRENT_POSITION.test(own))) return refuse("reply-current-or-action");
+  // No amount, price or multiple in words the base gate's list misses (AMOUNT_WORDS).
+  if (ctx.kind === "reply" && amountSaid(withoutReplyOptOut(own))) return refuse("quantity");
   if (shouts(own)) return refuse("caps");
   if (ctx.kind !== "reply" && POINTS_BACK.test(own.trim())) return refuse("points-back");
 
