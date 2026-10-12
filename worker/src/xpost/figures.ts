@@ -305,16 +305,19 @@ export function admitFiguresLine(line: unknown): line is string {
 function* shorter(list: Shown[]): Generator<Shown[]> {
   let cur = list.map((s) => (s.kind === "pools" ? { ...s, coins: s.coins.map((c) => ({ ...c })) } : { ...s })) as Shown[];
   const emit = (next: Shown[]) => { cur = next.filter((s) => figuresIn(s) > 0 || s.kind === "crowd" || s.kind === "trending"); return cur; };
-  // CoinGecko's global list first, then Fomo's: the chain's own coins are what was asked.
-  for (const kind of ["trending", "crowd"] as const) {
-    if (cur.some((s) => s.kind === kind) && cur.length > 1) yield emit(cur.filter((s) => s.kind !== kind));
-  }
   const pools = (): Extract<Shown, { kind: "pools" }> | undefined => cur.find((s): s is Extract<Shown, { kind: "pools" }> => s.kind === "pools");
+  const fewerCoins = (down: number) => { const p = pools()!; return emit(cur.map((s) => (s === p ? { ...p, coins: p.coins.slice(0, down) } : s))); };
+  const without = (kind: "trending" | "crowd") => (cur.some((s) => s.kind === kind) && cur.length > 1 ? emit(cur.filter((s) => s.kind !== kind)) : null);
+  // CoinGecko's global list first: the chain's own coins are what was asked.
+  const t = without("trending");
+  if (t) yield t;
+  // Then the chain's third coin, before Fomo's few tickers: what Fomo traders
+  // are on is a signal of its own, and costs a few characters.
+  if ((pools()?.coins.length ?? 0) > 2) yield fewerCoins(2);
+  const c = without("crowd");
+  if (c) yield c;
   // Fewer coins before thinner coins: one coin said whole beats three said halfway.
-  while ((pools()?.coins.length ?? 0) > 1) {
-    const p = pools()!;
-    yield emit(cur.map((s) => (s === p ? { ...p, coins: p.coins.slice(0, -1) } : s)));
-  }
+  while ((pools()?.coins.length ?? 0) > 1) yield fewerCoins(pools()!.coins.length - 1);
   const p = pools();
   if (p && p.coins[0]!.vol && p.coins[0]!.d1) yield emit(cur.map((s) => (s === p ? { ...p, coins: [{ ...p.coins[0]!, vol: null }] } : s)));
   // A coin's line: the week, then volume, market cap, price, and last its rank.

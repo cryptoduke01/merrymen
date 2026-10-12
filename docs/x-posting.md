@@ -1038,12 +1038,12 @@ other owner's agent, and its posting and reply warnings, are unchanged.
   line), code puts the line between the words and the mandatory opt-out
   sentence, checks it again against the grammar (`admitFiguresLine`) and
   that it names no sherwood, and fits the whole post to X's weighted 280:
-  the least telling field goes first (CoinGecko's trending list, then
-  Fomo's, then the chain's coins from the last, then a coin's volume; a
-  major's week, then volume, market cap, price and last its rank), and when
-  no form fits, the answer goes out as the gate admitted it, with no line.
-  A line goes in only beside words that were looked up; figures with no
-  words to stand on are dropped. Counts: `answer-figures`,
+  the least telling field goes first (CoinGecko's trending list, then the
+  chain's third coin, then Fomo's tickers, then the second coin, then the
+  last coin's volume; a major's week, then volume, market cap, price and
+  last its rank), and when no form fits, the answer goes out as the gate
+  admitted it, with no line. A line goes in only beside words that were
+  looked up; figures with no words to stand on are dropped. Counts: `answer-figures`,
   `answer-figures-shortened`, `answer-figures-left-out`.
 - **Never the model's own words:** a posted answer keeps its line (it is
   what X published), but no prompt ever quotes a post that carries one

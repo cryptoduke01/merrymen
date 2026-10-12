@@ -206,13 +206,29 @@ describe("fitting it into the answer", () => {
     assert.equal(none.text, `${longer} ${NOTICE}`, "no form fits: the gate's text as it was");
   });
 
-  it("what's hot sheds coingecko's list, then fomo's, then coins, before the line", () => {
+  it("what's hot sheds coingecko's list, then the third coin, then fomo's, then coins, then volume, before the line", () => {
     const mid = "y".repeat(110) + ", not a call.";
     const r = withFigures(`${mid} ${NOTICE}`, HOT);
     assert.ok(r.line);
     assert.ok(xWeightedLength(r.text) <= X_MAX_WEIGHTED);
     assert.doesNotMatch(r.line!, /coingecko: trending/);
     assert.match(r.line!, /^geckoterminal robinhood: trending \$ABC/);
+    // As the words grow, each shorter form in turn, and every post fits.
+    const seen: (string | null)[] = [];
+    for (let n = 4; n <= 270; n++) {
+      const f = withFigures(`${"z".repeat(n)}. ${NOTICE}`, HOT);
+      if (f.line) assert.ok(xWeightedLength(f.text) <= X_MAX_WEIGHTED, String(n));
+      if (seen.at(-1) !== f.line) seen.push(f.line);
+    }
+    assert.deepEqual(seen, [
+      renderFiguresLine(HOT),
+      "geckoterminal robinhood: trending $ABC 24h +42.1% vol ~$1.2M, $DEF 24h -8.3% vol ~$310k, $GHI 24h +5% vol ~$90k; fomo: most bought $DEF.",
+      "geckoterminal robinhood: trending $ABC 24h +42.1% vol ~$1.2M, $DEF 24h -8.3% vol ~$310k; fomo: most bought $DEF.",
+      "geckoterminal robinhood: trending $ABC 24h +42.1% vol ~$1.2M, $DEF 24h -8.3% vol ~$310k.",
+      "geckoterminal robinhood: trending $ABC 24h +42.1% vol ~$1.2M.",
+      "geckoterminal robinhood: trending $ABC 24h +42.1%.",
+      null,
+    ]);
   });
 
   it("no notice, no words, or nothing showable: unchanged", () => {
