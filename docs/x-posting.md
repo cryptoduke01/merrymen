@@ -994,7 +994,13 @@ other owner's agent, and its posting and reply warnings, are unchanged.
   allows; the on-chain factory and TWAP checks run only in a child, where a
   trade could follow, and nothing here trades), and have a ticker the
   sanitiser keeps that is no big coin's (a chain coin calling itself BTC or
-  USDC never shows). Then, side by side: with Fomo usable for the owner, the
+  USDC never shows) and no copycat (`copycatTicker`, red-team 2026-10-12):
+  never a chain stock token's symbol (`STOCK_TOKENS`: `$TSLA` from a memecoin
+  read as Tesla's stock token up 412%), one that starts or ends with such a
+  symbol of three letters or more, or holds its company's name ("TESLA",
+  "BABYNVDA"); and never one that starts or ends with bitcoin's, ether's,
+  solana's or the dollar's (`BITCOIN`, `XBT`, `ETH2`, `PYUSD`, `USDC2`).
+  Then, side by side: with Fomo usable for the owner, the
   coins Fomo traders bought most in the day (`fomo_get_token_activity` with
   no token, its feed-wide `topTokens`: Fomo's thesis read needs a coin, so
   "what fomo traders are on" is the coins the most distinct Fomo traders

@@ -50,7 +50,7 @@ import { createCoinFactsReader, FactsLimiter } from "./desk/facts";
 import { resolveByName } from "./desk/evidence";
 import { searchPools } from "./desk/gecko";
 import { DISCOVERY_SCREEN, fetchGeckoPoolsResult, geckoSource, screenPools, type GeckoFetch, type GeckoPool } from "./venues/geckoterminal";
-import { CASH, instrumentClassOf } from "../../packages/core/src/index";
+import { CASH, instrumentClassOf, STOCK_TOKENS } from "../../packages/core/src/index";
 import type { FomoBroker } from "./fomo/contract";
 import type { TokenActivityData, TokenThesesData } from "./fomo/tools";
 import type { FomoEnvelope } from "./fomo/types";
@@ -872,10 +872,43 @@ export const HOT_TRENDING = 3;
 const RESERVED_TICKERS: ReadonlySet<string> = new Set(("BTC ETH SOL USDT USDC USDG USDE DAI BNB XRP DOGE ADA TRX TON AVAX LINK DOT LTC BCH XLM SUI HBAR " +
   "WETH WBTC STETH HYPE").split(" "));
 
+/**
+ * NOR ANYTHING BUILT ON BITCOIN'S, ETHER'S OR THE DOLLAR'S NAME (red-team
+ * 2026-10-12): "BITCOIN", "XBT", "ETH2", "USDC2" and "PYUSD" were each posted
+ * as a chain coin trending, which reads as bitcoin, ether or a dollar moving
+ * eighty percent. A ticker that starts or ends with one of these is never shown.
+ */
+const RESERVED_ROOTS: readonly string[] = ("BTC XBT BITCOIN SATOSHI ETH ETHER ETHEREUM WETH WBTC SOL SOLANA USD USDT USDC USDG").split(" ");
+
+/**
+ * THE CHAIN'S OWN STOCK TOKENS, BY NAME AS WELL AS BY ADDRESS (red-team
+ * 2026-10-12). hotScreen leaves the real stock tokens out by their address,
+ * but a memecoin whose pool calls it "TSLA" was posted as "$TSLA 24h +412%":
+ * on Robinhood Chain that is Tesla's stock token up four hundred percent. So
+ * a ticker that is a stock token's symbol (packages/core STOCK_TOKENS), starts
+ * or ends with one of three letters or more ("TSLAX", "BABYNVDA"), or holds
+ * its company's name ("TESLA", "NVIDIA", "BABYTESLA"), is never shown,
+ * whatever its address. "COIN" and "META" are everyday words half the
+ * chain's tickers are built on ("DOGECOIN"): only those exactly.
+ */
+const STOCK_SYMBOLS: readonly string[] = STOCK_TOKENS.map((t) => t.symbol.toUpperCase());
+const STOCK_ROOTS: readonly string[] = STOCK_SYMBOLS.filter((s) => s.length >= 3 && s !== "COIN" && s !== "META");
+const STOCK_NAMES: readonly string[] = [...new Set([...STOCK_TOKENS.map((t) => t.name), "Google", "SpaceX", "Nvidia", "iShares", "SPDR", "Invesco"]
+  .map((n) => n.replace(/[^A-Za-z]/g, "").toUpperCase()).filter((n) => n.length >= 4 && n !== "META"))];
+
+/** Would this ticker read as bitcoin, ether, a dollar or one of the chain's stock tokens? */
+export function copycatTicker(ticker: string): boolean {
+  const t = String(ticker ?? "").toUpperCase();
+  if (RESERVED_TICKERS.has(t) || STOCK_SYMBOLS.includes(t)) return true;
+  if (RESERVED_ROOTS.some((r) => t.startsWith(r) || t.endsWith(r))) return true;
+  if (STOCK_ROOTS.some((s) => t.startsWith(s) || t.endsWith(s))) return true;
+  return STOCK_NAMES.some((n) => t.includes(n));
+}
+
 /** The base token's symbol as the index names a pool ("CHUMP / WETH 1%" is CHUMP), through the figures line's sanitiser, or null. */
 function poolTicker(name: string): string | null {
   const t = cleanTicker(/^([^\s/]{1,32}) \/ /.exec(String(name ?? ""))?.[1]);
-  return t && !RESERVED_TICKERS.has(t) ? t : null;
+  return t && !copycatTicker(t) ? t : null;
 }
 
 /** A coin "what's hot" may show: its token, its ticker, its pool. */

@@ -20,6 +20,7 @@ import {
   capabilityPhrases,
   carriesResearch,
   classifyTag,
+  copycatTicker,
   coinFactPhrases,
   createXResearch,
   creatorClaim,
@@ -1359,6 +1360,16 @@ describe("what's hot: the chain's trending coins past the fleet's floors, fomo's
       pool(1, { poolId: "0x" + "ee".repeat(32), poolAddress: null }), // the same token again
     ]);
     assert.deepEqual(kept.map((k) => k.ticker), ["COIN1", "COIN13"]);
+  });
+
+  it("never a copycat of the chain's stock tokens, bitcoin, ether or a dollar, whatever its address (red-team 2026-10-12)", () => {
+    // The red team's pools: memecoins at addresses that are no stock token's, each past every floor.
+    const copycats = ["TSLA", "BITCOIN", "NVDA", "AAPL", "SPY", "XBT", "USDC2", "PYUSD", "ETH2", "QQQ", "TESLA", "BABYNVDA", "TSLAX", "WBTC", "SOLANA", "MSFT", "COIN", "AMZN"];
+    const kept = hotScreen([...copycats.map((sym, i) => pool(20 + i, { name: `${sym} / WETH 1%` })), pool(1, { name: "CHUMP / WETH 1%" })]);
+    assert.deepEqual(kept.map((k) => k.ticker), ["CHUMP"]);
+    for (const sym of copycats) assert.ok(copycatTicker(sym), sym);
+    // Built on an everyday word, and no stock token's: still shown.
+    for (const sym of ["CHUMP", "DOGECOIN", "COIN1", "FROGGY", "METAL", "BEAN", "MUSE"]) assert.equal(copycatTicker(sym), false, sym);
   });
 
   it("in words: how many, which way on the day, fomo and coingecko's list; never a name or a figure; through the X gate", () => {

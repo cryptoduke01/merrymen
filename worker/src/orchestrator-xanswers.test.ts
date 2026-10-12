@@ -2389,11 +2389,13 @@ test("what's hot: the model's words never stand beside code's coins, so no draft
     "a couple standing out on the robinhood chain index, and i'm long the first. Say stop to opt out.",
     "here's what i've been rotating into lately on the robinhood chain index. Say stop to opt out.",
   ];
-  const sets = [
-    { pools: [namedPool("TSLA", 1, 412.4, 2.31e6), namedPool("BITCOIN", 2, 88.04, 940_000), namedPool("NVDA", 3, -12.2, 310_000)], crowd: ["TSLA"] },
-    { pools: [namedPool("CHUMP", 1, 41.2, 1.1e6), namedPool("FROGGY", 2, 8, 300_000)], crowd: [] },
+  // (The first set's copycats are left out of the line since: CHUMP is what it shows.)
+  const sets: { pools: GeckoPool[]; crowd: string[]; read: HotRead }[] = [
+    { pools: [namedPool("TSLA", 1, 412.4, 2.31e6), namedPool("BITCOIN", 2, 88.04, 940_000), namedPool("NVDA", 3, -12.2, 310_000), namedPool("CHUMP", 4, 41.2, 1.1e6)],
+      crowd: ["TSLA"], read: { coins: 1, lead: { dir: "up", size: "sharply" } } },
+    { pools: [namedPool("CHUMP", 1, 41.2, 1.1e6), namedPool("FROGGY", 2, 8, 300_000)], crowd: [], read: { coins: 2, lead: { dir: "up", size: "sharply" } } },
   ];
-  for (const { pools, crowd } of sets) {
+  for (const { pools, crowd, read } of sets) {
     for (const draft of drafts) {
       const w = await world(t, { env: { ...RESEARCH_ON, MERRYMEN_XPOST_FOMO: "1" }, research: hotWithFomo(pools, crowd), answer: draft,
         facts: { ...FACTS, name: "Alan Al Dale", calls: [] } });
@@ -2403,9 +2405,29 @@ test("what's hot: the model's words never stand beside code's coins, so no draft
       const [row] = await w.answers();
       assert.equal(row!.status, "posted", draft);
       const words = wordsBeforeLine(row!.body);
-      assert.ok(words !== null && hotWords({ coins: pools.length, lead: { dir: "up", size: "sharply" } }).includes(words), row!.body);
+      assert.ok(words !== null && hotWords(read).includes(words), row!.body);
       assert.doesNotMatch(row!.body, /\b(?:i|i'd|i'm|i've|my|favourite|plays?|pick|back|long|rotating|these)\b/i, row!.body);
     }
+  }
+});
+
+test("what's hot never shows a copycat of the chain's stock tokens, bitcoin, ether or a dollar, in the pools or as fomo's most bought (red-team 2026-10-12)", async (t) => {
+  // The red team's posts at 34ced01e: "trending $TSLA 24h +412% vol ~$2.3M, $BITCOIN 24h +88% vol ~$940k,
+  // $NVDA 24h -12.2% vol ~$310k; fomo: most bought $TSLA", each pool a memecoin at no stock token's address.
+  const runs: { ask: string; names: string[] }[] = [
+    { ask: "@pine_stoat what's hot?", names: ["TSLA", "BITCOIN", "NVDA"] },
+    { ask: "@pine_stoat what's trending?", names: ["AAPL", "SPY", "XBT"] },
+    { ask: "@pine_stoat what's hot?", names: ["USDC2", "PYUSD", "ETH2"] },
+  ];
+  for (const { ask, names } of runs) {
+    const pools = [...names.map((n, i) => namedPool(n, i + 1, [412.4, 88.04, -12.2][i]!, [2.31e6, 940_000, 310_000][i]!)), namedPool("CHUMP", 9, 12, 300_000)];
+    const w = await world(t, { env: { ...RESEARCH_ON, MERRYMEN_XPOST_FOMO: "1" }, research: hotWithFomo(pools, [names[0]!]), facts: { ...FACTS, calls: [] } });
+    w.setInbox([tag({ text: ask })]);
+    await w.step();
+    const text = String(w.sends[0]?.text ?? "");
+    assert.match(text, /geckoterminal robinhood: trending \$CHUMP 24h \+12% vol ~\$300k\./, text);
+    for (const n of names) assert.ok(!text.includes(`$${n}`), `${n}: ${text}`);
+    assert.doesNotMatch(text, /fomo: most bought/, "fomo's coin was one the screen left out");
   }
 });
 
