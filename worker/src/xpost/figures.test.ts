@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { xWeightedLength, X_MAX_WEIGHTED } from "./client";
 import {
-  admitFiguresLine, cleanTicker, compactMoney, FIGURES_LINE, FIGURES_MAX, figuresTickers, rankOf, renderFiguresLine, signedPercent,
+  admitFiguresLine, cleanTicker, compactMoney, FIGURES_LINE, FIGURES_MAX, figuresTickers, neverAnsweredName, rankOf, renderFiguresLine, signedPercent,
   withFigures, withoutFiguresLine, type FiguresSpec,
 } from "./figures";
 import { merrymenMentioned, sherwoodMentioned } from "./gate";
@@ -325,6 +325,19 @@ describe("fitting it into the answer", () => {
     assert.equal(withFigures("", BTC).line, null);
     assert.equal(withFigures(`${words} ${NOTICE}`, []).line, null);
     assert.equal(withFigures(`${words} ${NOTICE}`, null).text, `${words} ${NOTICE}`);
+  });
+});
+
+describe("the names no line of the house's answers under (2026-10-12)", () => {
+  it("its own, a model's, a slur, a hate code or a political name: on letters and consonants, as a ticker is read", () => {
+    for (const name of ["MERRYMEN", "merrimen", "sherwood", "ALDALE", "GROK", "claude", "KIKE", "niglet", "kneegrow", "HEIL", "TRUMP", "maga", "elon", "HH", "KKK"]) {
+      assert.equal(neverAnsweredName(name), true, name);
+    }
+    // Hype, a call, a holding, money and the house's sources keep a ticker out of the line, but are no reason to stay silent.
+    for (const name of ["PEPE", "BTC", "moon", "LAMBO", "scam", "buy", "loading", "gainers", "bag", "million", "fomo", "gecko", "trenches", "", "toolongforaticker", "PEPE2", null]) {
+      assert.equal(neverAnsweredName(name), false, String(name));
+    }
+    for (const name of ["moon", "LAMBO", "scam", "fomo"]) assert.equal(cleanTicker(name), null, `${name}: still never in the line`);
   });
 });
 

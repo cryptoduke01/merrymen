@@ -3467,3 +3467,20 @@ test("the owner's questions, end to end: each gets one answer in its lane, and o
     assert.doesNotMatch(words, /\p{N}|pepe/iu, sent);
   }
 });
+
+test("no friendly line goes up under a name the house never answers under: a decline or the chat fallback stays silent (2026-10-12)", async (t) => {
+  // Advice under a slur, a political coin or a model's name: nothing, as before 2026-10-12.
+  for (const text of ["@pine_stoat should i buy $KIKE?", "@pine_stoat is $TRUMP going up?", "@pine_stoat should i buy $GROK?"]) {
+    const w = await world(t);
+    w.setInbox([tag({ text })]);
+    await w.step();
+    assert.deepEqual(w.sends, [], text);
+    assert.deepEqual(await w.answers(), [], text);
+  }
+  // A chat draft refused for its length would fall back to a friendly line: never under such a name.
+  const w = await world(t, { answer: `${"so ".repeat(80)}chill. Say stop to opt out.` });
+  w.setInbox([tag({ text: "@pine_stoat how are you, trump fan?" })]);
+  const r = await w.step();
+  assert.deepEqual(w.sends, []);
+  assert.doesNotMatch(r.log ?? "", /answer-chat-fallback 1/);
+});

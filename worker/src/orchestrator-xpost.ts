@@ -98,7 +98,7 @@ import {
 import { answerPrompt, answerQuestion, buyPrompt, casualPrompt, draft, greetingAnswers, introPrompt, introTemplate, modelAnswers, replyPrompt, sellPrompt, sherwoodClaimed, sherwoodMentioned, sherwoodNamed, xpostModel, xpostModelWarning, type AnswerIntentKind, type WriterFacts, type XStyle } from "./xpost/writer";
 import { appendPublicToken, appendPublicWallet, hasPublicWallet, publicTokenStillAllowed, publicWalletStillAllowed, type PublicWallet } from "./xpost/public-wallet";
 import { readPublicProjectDescription } from "./orchestrator-xpost-project";
-import { boughtNames, carriesResearch, classifyTag, createXResearch, generalTradesQuestion, MARKET_MAJORS, modelNamed, namesACoin, ownCoinTicker, type ResearchBundle, type TagIntent, type XResearch } from "./orchestrator-xpost-research";
+import { boughtNames, carriesResearch, classifyTag, createXResearch, generalTradesQuestion, MARKET_MAJORS, modelNamed, namesACoin, ownCoinTicker, unshowableName, type ResearchBundle, type TagIntent, type XResearch } from "./orchestrator-xpost-research";
 import { PUBLISHABLE_SOURCES } from "./thesis-policy";
 import { readSaleResults } from "./orchestrator-xpost-results";
 import { appendSaleOutcome, hasSaleOutcome } from "./xpost/sale-outcome";
@@ -1894,7 +1894,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // it can do or how to get an agent stay unsaid.
       const drafted = verdict?.ok === true && !postsName && !unlookedCoin ? verdict.text : null;
       const benignRefusal = raw !== null && !claimed && !named && !unlooked && verdict !== null && !verdict.ok && CHAT_FALLBACK_REASONS.has(verdict.reason);
-      const chatFallback = !coded && drafted === null && benignRefusal && (asked.kind === "chat" || looked?.intent === "chat");
+      // Never under a name the house would never show (unshowableName: a slur, a political coin).
+      const chatFallback = !coded && drafted === null && benignRefusal && (asked.kind === "chat" || looked?.intent === "chat") && !unshowableName(candidate.text);
       let fallback: string | null = null;
       if (chatFallback) {
         for (const line of chatAnswers(comment.id, facts.style, lineOpts)) {

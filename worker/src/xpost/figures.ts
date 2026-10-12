@@ -69,18 +69,29 @@ export const TRENDING_MAX = 3;
  * "BUCKS"). Errs toward dropping: "SKILL" holds "kill" and is left out, which
  * costs one ticker in one line.
  */
-const TICKER_REFUSED = new RegExp([
+/**
+ * The names no line of the house's answers under (NEVER_ANSWERED below): its
+ * own, its agent's and its chain's, a model's or a provider's, a slur, a hate
+ * code, a political name. The rest of TICKER_REFUSED (its products and
+ * sources, hype, a call, a holding, money in words) only keeps a ticker out of
+ * the figures line.
+ */
+const HOUSE_NAMES: readonly string[] = [
   // its own house, in any spelling the letters allow ("MERRIMEN", "MERYMEN", "MRYMN": red-team 2026-10-12)
   "s+h+e*r+w+o*d", "h+e+r+w+o+d", "s+h+e*r+o{2,}d", "sherw", "merry", "merr", "m+[aeiouy]*r+[aeiouy]*m+[aeiouy]*n", "robinhood", "robin", "hood", "alan", "aidale",
-  // and the house's products and the sources it names ("$TRENCHER", "$FOMO": red-team 2026-10-12)
-  "trench", "fomo", "shogun", "pons", "gecko", "bitquery",
   // and the chain's and the agent's names however they are shortened ("RBNHD", "ALDALE": red-team 2026-10-12)
   "r+o*b+[iy]*n+h+o*d", "rbnhd", "aldale", "dale",
   // the model and provider names a tag may never get code's lines under (orchestrator-xpost-research.ts MODEL_LETTERS)
   "gpt", "claude", "grok", "gemini", "llama", "qwen", "deepseek", "mistral", "openai", "anthropic", "copilot", "perplexity", "llm",
-  // and the house's own provider and the models a reader knows it by, in any spelling ("$GROQ", "$OPUS", "$TRNCHR": red-team 2026-10-12)
+  // and the house's own provider and the models a reader knows it by, in any spelling ("$GROQ", "$OPUS": red-team 2026-10-12)
   "groq", "opus", "sonnet", "haiku", "kimi", "codex", "mixtral", "cohere", "ollama", "nemotron", "minimax", "gemma", "xai", "openrouter", "cerebras",
+];
+const HOUSE_PRODUCTS: readonly string[] = [
+  // the house's products and the sources it names ("$TRENCHER", "$FOMO", "$TRNCHR": red-team 2026-10-12)
+  "trench", "fomo", "shogun", "pons", "gecko", "bitquery",
   "t+[aeiouy]*r+[aeiouy]*n+[aeiouy]*c+h+[aeiouy]*r", "shgn", "sh+[aeiouy]*g+[aeiouy]*n",
+];
+const ABUSE_AND_POLITICS: readonly string[] = [
   // abuse
   "fuck", "fuk", "shit", "cunt", "nigg", "fag", "nazi", "hitler", "rape", "porn", "sex", "nude", "cock", "dick", "puss", "bitch", "whore", "slut", "retard", "kill", "isis", "jihad", "terror",
   // AND EVERY SLUR AND HATE CODE A DEPLOYER MAY NAME A POOL (red-team 2026-10-12): "$KYS", "$KIKE",
@@ -106,6 +117,8 @@ const TICKER_REFUSED = new RegExp([
   "trump", "melania", "biden", "maga", "kamala", "harris", "obama", "putin", "zelensk", "election", "president", "vote",
   "barron", "ivanka", "vance", "pelosi", "desantis", "rfk", "kennedy", "milei", "bukele", "jinping", "netanyahu", "bibi", "khamenei", "erdogan",
   "musk", "elon", "israel", "palestin", "gaza", "ukrain", "russia", "antifa", "woke", "democrat", "republican", "commie", "communis", "fascis",
+];
+const HYPE_AND_MONEY: readonly string[] = [
   // hype and trust words
   "pump", "moon", "gem", "lambo", "scam", "rug", "safe", "legit", "official",
   // AND ADVICE AND HYPE RUN TOGETHER INTO ONE WORD (red-team 2026-10-12):
@@ -121,7 +134,10 @@ const TICKER_REFUSED = new RegExp([
   "cantlose", "uponly", "onlyup", "goup", "money", "cash", "stack", "surewin", "added",
   // money in words: "$MILLION" beside "~$1.2M" reads as a sum code never built
   "million", "billion", "trillion", "thousand", "hundred", "dollar", "bucks", "cents", "usd",
-].join("|"));
+];
+const TICKER_REFUSED = new RegExp([...HOUSE_NAMES, ...HOUSE_PRODUCTS, ...ABUSE_AND_POLITICS, ...HYPE_AND_MONEY].join("|"));
+/** The house's own names, a model's, a slur, a hate code or a political name: what no line of the house's answers under. */
+const NEVER_ANSWERED = new RegExp([...HOUSE_NAMES, ...ABUSE_AND_POLITICS].join("|"));
 
 /** Words too short to read inside other tickers, refused only whole: "ASS", "CUM", "JAP", "DIE", "HH", "SS", "WOP". */
 const TICKER_REFUSED_WHOLE: ReadonlySet<string> = new Set("ASS CUM JAP DIE HH SS WOP FAP KMS NAMBLA HOE NIP CP".split(" "));
@@ -173,6 +189,22 @@ export function cleanTicker(raw: unknown): string | null {
   const t = raw.toUpperCase();
   const lower = t.toLowerCase();
   return TICKER_REFUSED.test(lower) || TICKER_REFUSED_WHOLE.has(t) || SKELETON_REFUSED.test(skeletonOf(lower)) || firstPerson(lower) ? null : t;
+}
+
+/**
+ * A NAME NO LINE OF THE HOUSE'S ANSWERS UNDER (2026-10-12), read as a ticker
+ * is (two to ten letters a-z, on its letters and its consonants): its own,
+ * its agent's or its chain's, a model's or a provider's, a slur, a hate code,
+ * a political name. Narrower than cleanTicker, which also keeps hype, a call,
+ * a holding and money in words out of the figures line: an advice tag is all
+ * hype words, and is still declined. What orchestrator-xpost-research.ts
+ * unshowableName reads a tag's names with before code's casual lines go up
+ * under it. Errs toward refusing, as cleanTicker does.
+ */
+export function neverAnsweredName(raw: unknown): boolean {
+  if (typeof raw !== "string" || !/^[A-Za-z]{2,10}$/.test(raw)) return false;
+  const lower = raw.toLowerCase();
+  return NEVER_ANSWERED.test(lower) || TICKER_REFUSED_WHOLE.has(lower.toUpperCase()) || SKELETON_REFUSED.test(skeletonOf(lower));
 }
 
 /** Every ticker a rendered line shows, without its $. */

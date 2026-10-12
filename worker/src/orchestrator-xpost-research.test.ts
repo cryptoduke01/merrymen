@@ -40,6 +40,7 @@ import {
   majorAsk,
   marketAsk,
   MARKET_MAJORS,
+  unshowableName,
   vibeAsk,
   majorPhrases,
   majorReadOf,
@@ -1749,6 +1750,22 @@ describe("answer anything: every tag past the screens has a lane, and silence on
       assert.equal(marketAsk(text), false, String(text));
     }
     assert.equal(classifyTag("how's the market?", { address: CA }).kind === "market", false, "never beside a contract");
+  });
+
+  it("no decline under a name the house never answers under: a slur, a hate code, a political coin, a model's, its own (2026-10-12)", () => {
+    for (const text of ["should i buy $KIKE?", "is $TRUMP going up?", "should i buy niglet", "is $HEIL a good buy?", "should i buy $GROK or $CLAUDE?",
+      "thoughts on aping trump", "what's hot? maga coins?", "should i buy $MERRYMEN?", "is $ELON going to pump?"]) {
+      assert.equal(unshowableName(text), true, text);
+      assert.equal(classifyTag(text, { advice: true }).kind, "unanswered", text);
+    }
+    // Hype words are what advice is made of: still declined, never silence.
+    for (const text of ["should i buy pepe", "is $WIF going up?", "what should i buy", "is eth a good investment", "should i buy $BTC or $SOL?",
+      "what should i buy, $MOON or $LAMBO?", "thoughts on loading eth", "top gainers? i'm ready", "is $SCAM a good buy lol"]) {
+      assert.equal(unshowableName(text), false, text);
+      assert.equal(classifyTag(text, { advice: true }).kind, "advice", text);
+    }
+    // Its mood's allowlist is whole known shapes: "wen lambo" is its mood, never refused for "lambo".
+    assert.equal(classifyTag("wen lambo", { advice: false }).kind, "vibe");
   });
 
   it("its own mood is a strict allowlist too: a coin, a word more or another script and it is not one", () => {

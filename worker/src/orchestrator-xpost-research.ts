@@ -66,7 +66,7 @@ import { normalisedTag, plainAsk, withoutReplyOptOut } from "./xpost/replies";
 import { takeAllowance, type XPost } from "./xpost/store";
 import { coinNamedIn, type AnswerIntentKind } from "./xpost/writer";
 import { asksAboutACoin, everydayWord, nameLikeWords } from "./xpost/words";
-import { cleanTicker, type FiguresSection, type FiguresSpec } from "./xpost/figures";
+import { cleanTicker, neverAnsweredName, type FiguresSection, type FiguresSpec } from "./xpost/figures";
 import { majorsDirOf, moveOf, type HotRead, type MajorRead, type MarketRead } from "./xpost/market";
 import { coinQuery, LISTINGS_MAX, MAJORS_MAX_RANK, pickMajor, readChainListings, readCoinMarket, readCoinMarkets, readCoinTrending, readTopCoins, searchCoinList, type ChainListing, type ChainListingsRead, type CoinHit, type CoinMarket, type CoinMarketRead, type CoinMarketsRead, type CoinSearchRead, type CoinTopRead, type CoinTrendingRead } from "./venues/coingecko-coins";
 
@@ -517,6 +517,25 @@ export function vibeAsk(text: unknown): boolean {
   return plain !== null && !sherwoodMentioned(text) && VIBE_ALLOWED.test(plain);
 }
 
+/**
+ * A TAG CARRYING A NAME THE HOUSE WOULD NEVER SHOW (2026-10-12). Code's
+ * casual lines (a decline, the chat fallback) go up under whatever the tag
+ * said, and were silence before: "should i buy $KIKE?" or "is $TRUMP going
+ * up?" declined in a friendly line would read as the house's account chatting
+ * along with a slur or a political coin. So a tag whose $ticker, or a word
+ * of it that might be a coin's name (xpost/words.ts nameLikeWords), is one
+ * no line of the house's answers under (xpost/figures.ts neverAnsweredName:
+ * the house's or its agent's own names, a model's or a provider's, a slur, a
+ * hate code, a political name) gets no such line at all. A hype word is no
+ * such name: an advice tag is made of them, and is still declined. Only names
+ * of two to ten letters are read; anything longer is no ticker. Exported for
+ * tests.
+ */
+export function unshowableName(text: unknown): boolean {
+  if (typeof text !== "string") return false;
+  return [...extractCashtags(text), ...nameLikeWords(text)].some((w) => neverAnsweredName(w));
+}
+
 /** Words that set one coin against another. */
 const COMPARES = /\b(?:vs\.?|versus|or|than|compared?|comparison|comparing|better|worse|safer|riskier|healthier|stronger|weaker|which|either|between|instead)\b/i;
 
@@ -553,8 +572,9 @@ export function classifyTag(text: string, o: { address?: string | null; advice?:
   // advice, and a whole tag on this list asks only how it feels. Never with a contract.
   if (address === null && vibeAsk(t)) return { kind: "vibe" };
   // ADVICE OR A FORECAST, ASKED ANY WAY (tagCandidate's flag, ReplyCandidate.advice):
-  // a playful decline in code's words, never a draft and never a lookup.
-  if (o.advice === true) return { kind: "advice" };
+  // a playful decline in code's words, never a draft and never a lookup; and
+  // nothing at all under a name the house would never show (unshowableName).
+  if (o.advice === true) return unshowableName(t) ? { kind: "unanswered" } : { kind: "advice" };
   const asked = publicFactRequest(t);
   if (asked?.kind === "site" && asked.topic === "capabilities") return { kind: "capabilities" };
   if (asked?.kind === "site" && asked.topic === "onboarding") return { kind: "onboarding" };
@@ -563,11 +583,11 @@ export function classifyTag(text: string, o: { address?: string | null; advice?:
   // "WHAT'S HOT?", ON THE ALLOWLIST'S PLAIN SHAPES (hotAsk): an overview, no coin named.
   if (address === null && hotAsk(t)) return { kind: "hot" };
   // And one with any word more is what to buy in other words: declined, never drafted (hotShaped).
-  if (hotShaped(t)) return { kind: "advice" };
+  if (hotShaped(t)) return unshowableName(t) ? { kind: "unanswered" } : { kind: "advice" };
   // Beside a contract it is answered by nothing, as before.
   if (address !== null && hotAsk(t)) return { kind: "unanswered" };
   // A major's shape with an entry, a side, a level or a buy word in the coin's place: advice asked for, declined (majorAdviceAsk).
-  if (majorAdviceAsk(t)) return { kind: "advice" };
+  if (majorAdviceAsk(t)) return unshowableName(t) ? { kind: "unanswered" } : { kind: "advice" };
   // A COIN BY NAME OR TICKER, ON THE ALLOWLIST'S PLAIN SHAPES (majorAsk): read
   // on CoinGecko's list first. What the tag would otherwise be is kept: a
   // $ticker that turns out to be no major goes on as a coin of the chain,
