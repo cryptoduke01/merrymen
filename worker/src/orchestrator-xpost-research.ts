@@ -1475,8 +1475,16 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
           out.push(...t, ...a);
         }
         if (flow && !flow.ok) notes.push(`flow-${flow.failure}`);
-        out.push(...flowPhrases(flow, `${input.tenant}|${key}`));
-        return { facts: out.filter(sayable).slice(0, BUNDLE_FACTS), ...(history.length ? { exact: true } : {}), ...asCoin, claim, lookups, notes };
+        const flowSaid = flowPhrases(flow, `${input.tenant}|${key}`);
+        out.push(...flowSaid);
+        // THE HOUR'S FLOW AS FIGURES, BESIDE ITS WORDS (2026-10-12): the same
+        // reading's last-hour buys and sells, rendered by code (xpost/figures.ts,
+        // "bitquery: 1h buys ~$12k, sells ~$8.1k"), only when its bands were
+        // said and both sides reach a thousand dollars. No figure of any other
+        // kind is shown for a coin of the chain.
+        const hour = flow?.ok && flowSaid.length ? flow.facts.windows.find((w) => w.minutes === 60) : undefined;
+        const figures: FiguresSpec | undefined = hour ? [{ kind: "flow", buyUsd: hour.buyUsd, sellUsd: hour.sellUsd }] : undefined;
+        return { facts: out.filter(sayable).slice(0, BUNDLE_FACTS), ...(history.length ? { exact: true } : {}), ...asCoin, ...(figures ? { figures } : {}), claim, lookups, notes };
       } catch {
         // Research is an extra: a fault here is an answer without it, never a failed pass.
         notes.push("fault");

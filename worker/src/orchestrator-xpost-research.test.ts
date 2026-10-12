@@ -1430,3 +1430,21 @@ describe("what's hot: the chain's trending coins past the fleet's floors, fomo's
       question: "what's hot?", recentBuys: [], said: [], walletPublic: false, intent: "hot", research: [] }).prompt, /couldn't read the index just now/);
   });
 });
+
+describe("a tagged contract's last hour of onchain flow, as figures beside its words (2026-10-12)", () => {
+  const busyHour = (buyUsd: number, sellUsd: number): FlowResult => ({ ok: true, facts: { ...(READING as Extract<FlowResult, { ok: true }>).facts,
+    windows: [...(READING as Extract<FlowResult, { ok: true }>).facts.windows.filter((w) => w.minutes !== 60), { minutes: 60, buyUsd, sellUsd, buys: 40, sells: 9, buyers: 30, sellers: 7 }] } });
+  it("the reading's hour, buys and sells, handed to code's line; its words still bands", async () => {
+    const { research } = fakes({ flow: busyHour(12_300, 8_100) });
+    const b = await research.gather(input({ kind: "coin", ticker: null, address: CA }));
+    assert.deepEqual(b.figures, [{ kind: "flow", buyUsd: 12_300, sellUsd: 8_100 }]);
+    assert.equal(renderFiguresLine(b.figures!), "bitquery: 1h buys ~$12k, sells ~$8.1k.");
+    assert.ok(b.facts.every((p) => !/\p{N}|\$/u.test(p)));
+  });
+  it("no reading, a failed one, or an hour too thin to show: no figures", async () => {
+    assert.equal((await fakes().research.gather(input({ kind: "coin", ticker: null, address: CA }))).figures, undefined);
+    assert.equal((await fakes({ flow: { ok: false, failure: "timeout" } as FlowResult }).research.gather(input({ kind: "coin", ticker: null, address: CA }))).figures, undefined);
+    const thin = await fakes({ flow: busyHour(500, 300) }).research.gather(input({ kind: "coin", ticker: null, address: CA }));
+    assert.equal(renderFiguresLine(thin.figures ?? []), null, "under a thousand dollars a side, nothing to show");
+  });
+});

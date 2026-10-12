@@ -2268,6 +2268,21 @@ test("majors: a copycat ticker gets no figures, and goes on as a coin of the cha
   assert.doesNotMatch(String(w2.sends[0]?.text ?? ""), /coingecko:|~\$/);
 });
 
+test("a tagged contract with a busy onchain hour goes out with bitquery's buys and sells in code's line", async (t) => {
+  const reading: FlowResult = { ok: true, facts: { token: CA as `0x${string}`, observedAt: NOW, venues: [], largestSells: [], creator: { state: "not-derivable" },
+    windows: [
+      { minutes: 5, buyUsd: 2_000, sellUsd: 400, buys: 6, sells: 2, buyers: 6, sellers: 2 },
+      { minutes: 15, buyUsd: 5_000, sellUsd: 1_200, buys: 12, sells: 4, buyers: 11, sellers: 3 },
+      { minutes: 60, buyUsd: 12_300, sellUsd: 8_100, buys: 40, sells: 19, buyers: 30, sellers: 14 },
+    ] } };
+  const words = "per on-chain data, the buying has had the edge over the last hour, and liquidity is thin on the public index.";
+  const w = await world(t, { env: RESEARCH_ON, research: fakeResearch({ flow: reading }).research, answer: `${words} Say stop to opt out.` });
+  w.setInbox([tag({ text: `@pine_stoat thoughts on ${CA}?` })]);
+  await w.step();
+  assert.doesNotMatch(w.asked()[0]!, /~\$|\$\d|12,?300|8,?100/, "the model never sees the figures");
+  assert.deepEqual(w.sends.map((s) => s.text), [`${words} bitquery: 1h buys ~$12k, sells ~$8.1k. Say stop to opt out.`]);
+});
+
 // ── what's hot, end to end ──────────────────────────────────────────────────
 
 /** A trending pool past every floor: COIN<n> on the chain. */
