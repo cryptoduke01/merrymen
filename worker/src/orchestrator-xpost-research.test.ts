@@ -1768,6 +1768,24 @@ describe("answer anything: every tag past the screens has a lane, and silence on
     assert.equal(classifyTag("wen lambo", { advice: false }).kind, "vibe");
   });
 
+  it("every word of a tag is read, the house's own and long runs too, and sherwood as it sounds (red-team 2026-10-12)", () => {
+    // Each declined in a friendly line at 58ba9fd0; nothing at the base commit.
+    for (const text of ["should i buy the merrymen model token at tge?", "should i buy the merrymen token before it launches?", "should i sell before merrymen rugs us?",
+      "will the robinhood token go up when it launches?", "should i ape alan's own token?", "should i buy shervud?", "should i buy hitlerdidnothingwrong coin?",
+      "should i buy niggercoins?", "should i buy gasthejewsnow?", "is donaldjtrumpcoin going to pump?",
+      // and around them: the house's products, its token by any owner's word, a model's token, TGE alone
+      "should i buy the fomo token?", "is trencher a good buy?", "should i buy your token?", "should i ape the model coin?", "wen tge ser, should i buy?"]) {
+      assert.equal(unshowableName(text), true, text);
+      assert.equal(classifyTag(text, { advice: true }).kind, "unanswered", text);
+    }
+    // "alan" said to its face, and the plain words such a name hides in, are no such name.
+    for (const text of ["hey alan, should i buy pepe tonight?", "alan should i buy pepe?", "is eth getting stronger, should i buy?", "should i accumulate eth?",
+      "is the balance of risk good for a buy?", "should i buy the dip on this crisis?", "should i buy pepe"]) {
+      assert.equal(unshowableName(text), false, text);
+      assert.equal(classifyTag(text, { advice: true }).kind, "advice", text);
+    }
+  });
+
   it("its own mood is a strict allowlist too: a coin, a word more or another script and it is not one", () => {
     for (const text of ["are you bullish", "are u bearish?", "r u bullish or bearish", "are you bullish on crypto today", "bullish?", "you bullish rn?",
       "bearish or bullish", "wen moon", "wen lambo?", "wen bull run", "are we so back", "we're so back", "is it so over?", "its over", "wagmi", "ngmi?",

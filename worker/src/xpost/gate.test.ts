@@ -1242,6 +1242,14 @@ describe("sherwood with a symbol written for one of its letters is still sherwoo
       assert.equal(sherwoodMentioned(s), false, s);
     }
   });
+  it("sherwood as it sounds is sherwood: a v for its w, a u for its o, or a word with sh, vowels, then r straight before w or v (red-team 2026-10-12)", () => {
+    for (const s of ["should i buy shervud?", "shervud", "sherwud", "shurwood", "shirwood token", "sharvud", "sh3rvud", "$SHRVD", "s h e r v u d"]) {
+      assert.equal(sherwoodMentioned(s), true, s);
+    }
+    for (const s of ["should i buy pepe?", "fresh rewards on the chain", "the server would know", "she would know, the wood is old", "usher, very good", "that was a shrewd buy"]) {
+      assert.equal(sherwoodMentioned(s), false, s);
+    }
+  });
   it("an ordinary answer, with an emoji, a dash or a contraction, still passes; a symbol inside or beside a word does not", () => {
     for (const d of ["mostly fresh launches, and i only buy when the buying looks real and steady. Say stop to opt out.",
       "it's early days — thin pools and a quiet tape 🙂 Say stop to opt out.", "built by merrymen, and the new sherwood-1 is still cooking. Say stop to opt out."]) {

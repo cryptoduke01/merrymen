@@ -492,13 +492,26 @@ const SHERWOOD_LETTERS = /s+h+e*r+w+o*d/;
  * finding it: "her wood" counts, at the cost of one answer.
  */
 const SHERWOOD_NEAR = /h+e+r+w+o+d|s+e+r+w+o+d|s+h+e+w+o+d|s+h+e*r+o{2,}d|s+h+e*r+w+o{2,}/;
+/**
+ * AS IT SOUNDS (red-team review, 2026-10-12): "should i buy shervud?" read as
+ * no sherwood, and code's decline went up under it. A v said for its w and a
+ * u for its o ("shervud", "sherwud", "shurwood") are read as sherwood too, and
+ * so is any one word with sh, any vowels, an r straight before a w or a v,
+ * any vowels, then d ("shirwood", "sharvud", "shrvd"). "shrewd", whose r and
+ * w a vowel parts, and "sherwin", with no d, are still no sherwood.
+ */
+const SHERWOOD_SOUNDS = /sh+[aeiouy]*r+[wv]+[aeiouy]*d/;
 export function sherwoodMentioned(text: unknown): boolean {
   if (typeof text !== "string") return false;
   const stroked = withStrokes(text);
   const reads = [lettersOf(text), lettersOf(text, { leet: true }), lettersOf(stroked, { leet: true })];
   // "cl" written for a d ("sherwoocl"), read only for this.
   reads.push(reads[2]!.replace(/cl/g, "d"));
-  return reads.some((r) => SHERWOOD_LETTERS.test(r) || SHERWOOD_NEAR.test(r)) || unreadableLetter(text);
+  reads.push(...reads.map((r) => r.replace(/v/g, "w").replace(/u/g, "o")));
+  if (reads.some((r) => SHERWOOD_LETTERS.test(r) || SHERWOOD_NEAR.test(r))) return true;
+  const words = text.normalize("NFKC").split(/[\s,.;:!?/()"'’‘-]+/u).filter(Boolean);
+  if (words.some((w) => [lettersOf(w), lettersOf(w, { leet: true })].some((r) => SHERWOOD_SOUNDS.test(r)))) return true;
+  return unreadableLetter(text);
 }
 
 /**

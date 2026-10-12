@@ -333,8 +333,12 @@ describe("the names no line of the house's answers under (2026-10-12)", () => {
     for (const name of ["MERRYMEN", "merrimen", "sherwood", "ALDALE", "GROK", "claude", "KIKE", "niglet", "kneegrow", "HEIL", "TRUMP", "maga", "elon", "HH", "KKK"]) {
       assert.equal(neverAnsweredName(name), true, name);
     }
-    // Hype, a call, a holding, money and the house's sources keep a ticker out of the line, but are no reason to stay silent.
-    for (const name of ["PEPE", "BTC", "moon", "LAMBO", "scam", "buy", "loading", "gainers", "bag", "million", "fomo", "gecko", "trenches", "", "toolongforaticker", "PEPE2", null]) {
+    // The house's own products, and a run of any length (red-team 2026-10-12).
+    for (const name of ["fomo", "trencher", "trenches", "TRNCHR", "shogun", "hitlerdidnothingwrong", "niggercoins", "gasthejewsnow", "donaldjtrumpcoin", "MAGAMAGAMAGA"]) {
+      assert.equal(neverAnsweredName(name), true, name);
+    }
+    // Hype, a call, a holding, money and the sources it names keep a ticker out of the line, but are no reason to stay silent.
+    for (const name of ["PEPE", "BTC", "moon", "LAMBO", "scam", "buy", "loading", "gainers", "bag", "million", "gecko", "bitquery", "", "toolongforaticker", "PEPE2", null]) {
       assert.equal(neverAnsweredName(name), false, String(name));
     }
     for (const name of ["moon", "LAMBO", "scam", "fomo"]) assert.equal(cleanTicker(name), null, `${name}: still never in the line`);

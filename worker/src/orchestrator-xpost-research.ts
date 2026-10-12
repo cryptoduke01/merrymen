@@ -527,13 +527,50 @@ export function vibeAsk(text: unknown): boolean {
  * no line of the house's answers under (xpost/figures.ts neverAnsweredName:
  * the house's or its agent's own names, a model's or a provider's, a slur, a
  * hate code, a political name) gets no such line at all. A hype word is no
- * such name: an advice tag is made of them, and is still declined. Only names
- * of two to ten letters are read; anything longer is no ticker. Exported for
- * tests.
+ * such name: an advice tag is made of them, and is still declined. Exported
+ * for tests.
+ *
+ * EVERY WORD, NOT ONLY THE NAME-LIKE ONES (red-team review, 2026-10-12).
+ * nameLikeWords drops every everyday word, and the house's own names are
+ * everyday words to it: "should i buy the merrymen model token at tge?",
+ * "should i sell before merrymen rugs us?", "will the robinhood token go up
+ * when it launches?" and "should i ape alan's own token?" were each declined
+ * in a friendly line, "that one stays your call" reading as the house
+ * confirming a token. Nor were runs longer than ten letters read
+ * ("hitlerdidnothingwrong", "niggercoins", "gasthejewsnow"), nor sherwood as
+ * it sounds ("shervud"). Now every run of letters in the tag and every
+ * $ticker is read, at any length (figures.ts neverAnsweredName, the house's
+ * products among its names), but for the few plain words in which such a name
+ * hides innocently (EVERYDAY_HIDING) and "alan" said to its face at the start
+ * ("hey alan, should i buy pepe?"); and a tag that names sherwood in any form,
+ * TGE, the house's or the agent's own token ("your token"), or a model beside
+ * a token, coin, launch or presale is no tag for code's casual lines either.
+ * Errs toward silence: "is it stronger tonight?" is read clean, "should i buy
+ * on pons?" is not, and costs one answer.
  */
+const EVERYDAY_HIDING: ReadonlySet<string> = new Set((
+  "night nights tonight midnight nightly knight knights skill skills skilled analysis analyst analysts analytics analog accumulate accumulated " +
+  "accumulating accumulation cumulative document documents circumstance circumstances balance balanced balancing advance advanced advances " +
+  "relevance likelihood livelihood neighborhood neighbourhood childhood stronger strongest longer longest younger anger danger dangerous finger " +
+  "fingers hunger linger lingering suspicious suspicion conspicuous crisis unique technique techniques spicy spice computing proven woven " +
+  "grape grapes scrape scraped scraping drape egypt melon cocktail peacock canal banal parse sparse raccoon tycoon cuckoo mustard siege awoke " +
+  "response responses responsible responsibly sponsor sponsored sponsors benign arsenal therapist torpedo trumpet nibble nibbles nibbling " +
+  "cucumber succumb incumbent manuscript tardy magazine auspicious cocoon basement manager managers angry angrier hungry stranger strangers " +
+  "ranger rangers singer singers ginger messenger passenger passengers challenger challengers avenger avengers"
+).split(/\s+/));
+/** "alan" said to it at the start, after at most two greeting words: an address, never a name the tag is about. */
+const ALAN_ADDRESSED = /^(?:(?:gm|gn|yo|hey|hi|hello|ser|fren|bro|sup)[\s,!.]+){0,2}alan\b[\s,!.:-]*/;
+/** TGE anywhere, the house's or the agent's own token, or a model beside a token, a coin, a launch or a presale. */
+const HOUSE_TOKEN_ASK = /\btge\b|\b(?:your|ur|ya|yer|you(?:r|')?\s*guys'?|the\s+house'?s?|house|the\s+team'?s?|the\s+devs?'?)\s+(?:own\s+|new\s+|official\s+)?(?:tokens?|coins?|tge|launch\w*|presale|airdrop|ticker)\b/;
+const MODEL_WORD = /\b(?:models?|llms?)\b/;
+const TOKEN_WORD = /\b(?:tokens?|coins?|tge|launch\w*|presale|airdrop|ticker|mint\w*)\b/;
 export function unshowableName(text: unknown): boolean {
   if (typeof text !== "string") return false;
-  return [...extractCashtags(text), ...nameLikeWords(text)].some((w) => neverAnsweredName(w));
+  if (sherwoodMentioned(text)) return true;
+  const t = normalisedTag(text).replace(/[’‘]/g, "'").replace(ALAN_ADDRESSED, "");
+  if (HOUSE_TOKEN_ASK.test(t) || (MODEL_WORD.test(t) && TOKEN_WORD.test(t))) return true;
+  const runs = [...extractCashtags(text).map((c) => c.toLowerCase()), ...(t.match(/[a-z]+/g) ?? [])];
+  return runs.some((w) => !EVERYDAY_HIDING.has(w) && neverAnsweredName(w));
 }
 
 /** Words that set one coin against another. */

@@ -86,11 +86,12 @@ const HOUSE_NAMES: readonly string[] = [
   // and the house's own provider and the models a reader knows it by, in any spelling ("$GROQ", "$OPUS": red-team 2026-10-12)
   "groq", "opus", "sonnet", "haiku", "kimi", "codex", "mixtral", "cohere", "ollama", "nemotron", "minimax", "gemma", "xai", "openrouter", "cerebras",
 ];
-const HOUSE_PRODUCTS: readonly string[] = [
-  // the house's products and the sources it names ("$TRENCHER", "$FOMO", "$TRNCHR": red-team 2026-10-12)
-  "trench", "fomo", "shogun", "pons", "gecko", "bitquery",
-  "t+[aeiouy]*r+[aeiouy]*n+[aeiouy]*c+h+[aeiouy]*r", "shgn", "sh+[aeiouy]*g+[aeiouy]*n",
+/** The house's own products ("$TRENCHER", "$FOMO", "$TRNCHR": red-team 2026-10-12). */
+const HOUSE_OWN_PRODUCTS: readonly string[] = [
+  "trench", "fomo", "shogun", "t+[aeiouy]*r+[aeiouy]*n+[aeiouy]*c+h+[aeiouy]*r", "shgn", "sh+[aeiouy]*g+[aeiouy]*n",
 ];
+// and the sources it names
+const HOUSE_PRODUCTS: readonly string[] = [...HOUSE_OWN_PRODUCTS, "pons", "gecko", "bitquery"];
 const ABUSE_AND_POLITICS: readonly string[] = [
   // abuse
   "fuck", "fuk", "shit", "cunt", "nigg", "fag", "nazi", "hitler", "rape", "porn", "sex", "nude", "cock", "dick", "puss", "bitch", "whore", "slut", "retard", "kill", "isis", "jihad", "terror",
@@ -136,8 +137,13 @@ const HYPE_AND_MONEY: readonly string[] = [
   "million", "billion", "trillion", "thousand", "hundred", "dollar", "bucks", "cents", "usd",
 ];
 const TICKER_REFUSED = new RegExp([...HOUSE_NAMES, ...HOUSE_PRODUCTS, ...ABUSE_AND_POLITICS, ...HYPE_AND_MONEY].join("|"));
-/** The house's own names, a model's, a slur, a hate code or a political name: what no line of the house's answers under. */
-const NEVER_ANSWERED = new RegExp([...HOUSE_NAMES, ...ABUSE_AND_POLITICS].join("|"));
+/**
+ * The house's own names and its own products' ("fomo", "trencher": red-team
+ * 2026-10-12), a model's, a slur, a hate code or a political name: what no
+ * line of the house's answers under. The sources it names (coingecko,
+ * bitquery, pons) are no such name.
+ */
+const NEVER_ANSWERED = new RegExp([...HOUSE_NAMES, ...HOUSE_OWN_PRODUCTS, ...ABUSE_AND_POLITICS].join("|"));
 
 /** Words too short to read inside other tickers, refused only whole: "ASS", "CUM", "JAP", "DIE", "HH", "SS", "WOP". */
 const TICKER_REFUSED_WHOLE: ReadonlySet<string> = new Set("ASS CUM JAP DIE HH SS WOP FAP KMS NAMBLA HOE NIP CP".split(" "));
@@ -192,17 +198,22 @@ export function cleanTicker(raw: unknown): string | null {
 }
 
 /**
- * A NAME NO LINE OF THE HOUSE'S ANSWERS UNDER (2026-10-12), read as a ticker
- * is (two to ten letters a-z, on its letters and its consonants): its own,
- * its agent's or its chain's, a model's or a provider's, a slur, a hate code,
- * a political name. Narrower than cleanTicker, which also keeps hype, a call,
- * a holding and money in words out of the figures line: an advice tag is all
- * hype words, and is still declined. What orchestrator-xpost-research.ts
- * unshowableName reads a tag's names with before code's casual lines go up
- * under it. Errs toward refusing, as cleanTicker does.
+ * A NAME NO LINE OF THE HOUSE'S ANSWERS UNDER (2026-10-12), read on its
+ * letters and its consonants: its own, its agent's or its chain's, its
+ * products', a model's or a provider's, a slur, a hate code, a political
+ * name. Narrower than cleanTicker, which also keeps hype, a call, a holding
+ * and money in words out of the figures line: an advice tag is all hype
+ * words, and is still declined. What orchestrator-xpost-research.ts
+ * unshowableName reads every word of a tag with before code's casual lines go
+ * up under it. Errs toward refusing, as cleanTicker does.
+ *
+ * ANY LENGTH (red-team review, 2026-10-12): only two to ten letters were read,
+ * so "hitlerdidnothingwrong", "niggercoins", "gasthejewsnow" and
+ * "donaldjtrumpcoin" were no name at all and got code's decline. A run of
+ * letters of any length is searched for every such name inside it.
  */
 export function neverAnsweredName(raw: unknown): boolean {
-  if (typeof raw !== "string" || !/^[A-Za-z]{2,10}$/.test(raw)) return false;
+  if (typeof raw !== "string" || !/^[A-Za-z]{2,}$/.test(raw)) return false;
   const lower = raw.toLowerCase();
   return NEVER_ANSWERED.test(lower) || TICKER_REFUSED_WHOLE.has(lower.toUpperCase()) || SKELETON_REFUSED.test(skeletonOf(lower));
 }
