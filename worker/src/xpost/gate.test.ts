@@ -58,6 +58,32 @@ describe("an answer says only the buys it was told of (red-team 2026-10-12)", ()
       assert.equal(reason(draft, none), "ok", draft);
     }
   });
+  it("told none: any verb or shape of owning it is a buy, and of a named coin so is liking it (red-team 2026-10-12, second round)", () => {
+    // writeAnswer's context for "did you buy $WIF?" from a live agent that bought only PEPE.
+    const named: Partial<XGateCtx> = { kind: "reply", mode: "live", coins: [], buys: "none", unsaid: ["PEPE", "Pepe"], named: true };
+    const notice = (d: string) => (/say stop to opt out\.$/i.test(d) ? d : `${d} Say stop to opt out.`);
+    // The reproduced drafts, each scheduled at 11f7acac.
+    for (const draft of ["yep, i did, with real money too. Say stop to opt out.", "yep, purchased it lately with real money.", "yep, picked some up lately.",
+      "yes, it's one of mine, i like it a lot.", "yep, i'm in on that one with real money.", "yep, traded it lately, real money too.", "yep, nabbed a few lately, real money.",
+      "yep, snapped some up lately with real money.", "yes, my owner had me buy it lately.", "yep, i've got some, real money", "yep, holding it now with real money",
+      "yes i did, real money", "the public index shows liquidity is thin, but i went for it anyway, real money.", "honestly the curve looked early when i went for it.",
+      "i'm on paper, and yep, i did pick some up lately."]) {
+      assert.equal(reason(notice(draft), named), "buy-claim", draft);
+      assert.equal(reason(notice(draft), { ...named, mode: "paper" }), "buy-claim", `paper: ${draft}`);
+    }
+    // Liking a named coin is saying it too; not a comparison.
+    for (const draft of ["i like it, the curve looked early.", "big fan of that one, the buying looked real.", "liked the early curve on that one."]) {
+      assert.equal(reason(notice(draft), named), "buy-claim", draft);
+    }
+    // What a coin-named answer may say still passes: a deflection, what it looked up, that it could not look.
+    for (const draft of ["i keep my individual positions to myself here, sorry.", "i don't talk about single positions here, sorry.",
+      "the public index shows liquidity is thin and holders look concentrated.", "fomo traders worry late buyers end up holding it.",
+      "the public index lists the creator still holding a big chunk.", "couldn't look that one up just now, the index was busy.",
+      "looks like it's only hours old on the public index."]) {
+      assert.equal(reason(notice(draft), named), "ok", draft);
+    }
+  });
+
   it("told its buys: a buy it says is of one of them, or of no coin by name", () => {
     assert.equal(reason("yep, bought wif lately, the curve looked early. say stop to opt out.", vouched), "buy-claim");
     assert.equal(reason("lately i grabbed a little trump, the buying looked steady. say stop to opt out.", vouched), "buy-claim");

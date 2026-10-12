@@ -1600,7 +1600,9 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         kind: "reply", agentName: f.name, mode, coins: vouched.map((c) => c.label),
         paperCoins: [...vouched.filter((c) => c.paper).map((c) => c.label), ...(f.mode === "idle" ? money.paper : [])], recentOwn, recentFleet, emojiOk: facts.style.emoji > 0,
         // A buy it says is one it was told of, or none at all (XGateCtx.buys).
-        ...(templated ? {} : { buys: told ? "vouched" as const : "none" as const, unsaid: [...(told ? [] : bought), ...money.otherOnly] }),
+        ...(templated ? {} : { buys: told ? "vouched" as const : "none" as const, unsaid: [...(told ? [] : bought), ...money.otherOnly],
+          // A coin named, or its trades or a coin asked about off the plain list: not even that it likes it (XGateCtx.named).
+          named: !told && (coinNamed || asked.kind === "own-trades" || asked.kind === "coin") }),
       }, BASE_GATE);
       // SHERWOOD DOES NOT RUN IT YET: a draft that says so is refused before
       // the gate, research on or off — and so is a draft that names it at

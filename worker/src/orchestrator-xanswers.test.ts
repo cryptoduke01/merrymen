@@ -1096,6 +1096,40 @@ test("in its own thread, the model line never goes under a stranger's reply ther
   assert.match((await w.answers())[0]!.body, /new sherwood-1\b/);
 });
 
+test("told none of its buys, an answer about a named coin never says it bought, holds or likes it, in any words, research on or off (red-team 2026-10-12)", async (t) => {
+  // A live agent that bought only PEPE, by its own contract.
+  const facts: AgentFacts = { ...FACTS, calls: [{ ...CALL, token: `0x${"1a".repeat(20)}` }] };
+  const WIF = "@pine_stoat did you buy $WIF?";
+  // The reproduced drafts, each scheduled at 11f7acac.
+  const cases: [string, string, Record<string, string>][] = [
+    ...["yep, i did, with real money too.", "yep, purchased it lately with real money.", "yep, picked some up lately.", "yes, it's one of mine, i like it a lot.",
+      "yep, i'm in on that one with real money.", "yep, traded it lately, real money too.", "yep, nabbed a few lately, real money.", "yep, snapped some up lately with real money.",
+      "yes, my owner had me buy it lately.", "yep, i've got some, real money.", "yep, holding it now with real money."]
+      .flatMap((d): [string, string, Record<string, string>][] => [[WIF, `${d} Say stop to opt out.`, {}], [WIF, `${d} Say stop to opt out.`, RESEARCH_ON]]),
+    ["@pine_stoat thoughts on $WIF?", "the public index shows liquidity is thin, but i went for it anyway, real money. Say stop to opt out.", RESEARCH_ON],
+    ["@pine_stoat why did you buy $WIF?", "honestly the curve looked early when i went for it. Say stop to opt out.", {}],
+  ];
+  for (const [text, answer, env] of cases) {
+    const w = await world(t, { env, research: fakeResearch().research, facts, answer });
+    w.setInbox([tag({ text })]);
+    await w.step();
+    w.setInbox([]);
+    await w.step(NOW + MIN);
+    assert.deepEqual(w.sends, [], `${text} / ${answer}`);
+    const [row] = await w.answers();
+    assert.equal(row!.status, "skipped", answer);
+    assert.equal(row!.reason, "gate:buy-claim", answer);
+  }
+  // A paper agent's.
+  const paper: AgentFacts = { ...FACTS, mode: "paper", calls: [{ ...CALL, paper: true, token: `0x${"1a".repeat(20)}` }] };
+  const w = await world(t, { facts: paper, answer: "i'm on paper, and yep, i did pick some up lately. Say stop to opt out." });
+  w.setInbox([tag({ text: WIF })]);
+  await w.step();
+  const [row] = await w.answers();
+  assert.equal(row!.status, "skipped");
+  assert.equal(row!.reason, "gate:buy-claim");
+});
+
 test("a copycat or emoji spelling no matcher finds is never handed its buys, and a draft that names one is refused (red-team 2026-10-12)", async (t) => {
   const BONK: CallFact = { ...CALL, decisionId: "fill-bonk", symbol: "BONK", name: "Bonk" };
   const facts: AgentFacts = { ...FACTS, calls: [BONK, CALL] };

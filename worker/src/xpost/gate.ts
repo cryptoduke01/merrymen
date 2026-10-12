@@ -120,6 +120,13 @@ export interface XGateCtx {
    * never told of is refused. Either way, as buy-claim.
    */
   buys?: "none" | "vouched";
+  /**
+   * THE TAG NAMED A COIN, OR ASKED ABOUT ITS TRADES OR A COIN IN WORDS THAT
+   * ARE NOT ONE OF THE PLAIN TRADES QUESTIONS (red-team review, 2026-10-12).
+   * Read only with buys "none": then the answer may not say it likes the coin
+   * either (LIKED), as buy-claim.
+   */
+  named?: boolean;
 }
 
 const refuse = (reason: string): XVerdict => ({ ok: false, reason });
@@ -1154,8 +1161,70 @@ const BUY_OBJECT: ReadonlySet<string> = new Set(("it its them those these that t
   "with when because cause cuz on in at for and but or lately recently today yesterday earlier here there back too again after before since while as then now " +
   "from off up into last so just around over what which whatever anything something nothing any i i'm im i've ive").split(" "));
 
+/**
+ * A BUY OR A HOLDING, WHATEVER THE VERB (red-team review, 2026-10-12). Told
+ * none of its buys and asked "did you buy $WIF?", an answer said "yep,
+ * purchased it lately", "picked some up", "traded it lately", "nabbed a few",
+ * "snapped some up", "i'm in on that one", "it's one of mine", "my owner had
+ * me buy it", "i went for it anyway", "i did": none of them ACQUIRED's verbs,
+ * every one a public yes on a real-money account. So, told none: any
+ * acquiring or holding verb said by "i" or "we", or opening a clause with the
+ * "i" dropped ("yep, nabbed a few"); "i did" or "i have" as an answer, and
+ * "i didn't" or "never bought" (a no says just as much); and the shapes of
+ * owning it ("mine", "in my book", "riding it", "my latest pick"). A third
+ * person is not read: "the creator still holding a big chunk" and "late
+ * buyers end up holding it" are what research says.
+ */
+const OWN_VERB = String.raw`(?:purchas(?:e|es|ed|ing)|nabb?(?:ed|ing|s)?|snapp(?:ed|ing)|snag(?:g(?:ed|ing))?|traded|pick(?:ed|ing)?|took|got|gotten|own(?:ed|ing|s)?|hold(?:s|ing)?|held|scoop(?:ed|ing)?|copp?(?:ed|ing)?|bought|grabb?(?:ed|ing)?|aped|aping|bagg?(?:ed|ing)|added|loaded|went\s+(?:for|with|in(?:to)?|all)|go(?:ing)?\s+(?:for|with)\s+it)`;
+const BY_ME = String.raw`\b(?:i|we|i'?ve|ive|we'?ve|i'?m|im|we'?re|i'?d)\s+(?:(?:just|already|also|recently|still|been|finally|only|sure|even|did|do|have|had|really|actually|kinda)\s+){0,2}`;
+const CLAUSE_OPEN = String.raw`(?:^|[,.;:!?—–]\s*|\b(?:and|but|so|then|yep|yeah|yes|yup|ya|honestly|sure)[\s,]+)(?:(?:just|already|also|recently|still|been|finally|only)\s+){0,2}`;
+const OWNED_ACT = new RegExp(String.raw`(?:${BY_ME}|${CLAUSE_OPEN})${OWN_VERB}\b`, "iu");
+const OWNED_SHAPE = new RegExp(
+  "\\b(?:" +
+    [
+      "mine",
+      "one\\s+of\\s+my\\s+(?:buys|picks|coins|bags|positions|trades|plays|calls|bets)",
+      "(?:in|on)\\s+my\\s+(?:book|books|bag|bags|portfolio|wallet|stack|list|holdings|positions?)",
+      "my\\s+(?:latest|last|newest|recent|first|top|fav(?:ou?rite)?|current|new|big|best|own)\\s+(?:pick|buy|play|trade|call|bet|position|coin|token|one|entry|bag)s?",
+      "riding\\s+(?:it|that|this|them|that\\s+one)",
+      "in\\s+on\\s+(?:it|that|this|them|one)",
+      "(?:i'?m|im|i\\s+am|we'?re)\\s+in\\b(?!\\s+(?:the|a|an|no|my|your|for|love|doubt|between)\\b)",
+      "(?:my|the|our)\\s+owner\\s+(?:had|made|got|let|wanted)\\s+(?:me|us)",
+      "sure\\s+did",
+      "(?:i|we)\\s+(?:did|do|have|had)(?=\\s*(?:[,.;:!?—–]|$|\\s+(?:too|some|one|it|that|this|them|a\\s+(?:bit|little|few))\\b))",
+      "(?:i|we)\\s+(?:didn'?t|don'?t|haven'?t|hadn'?t|did\\s+not|do\\s+not|have\\s+not)\\s+(?:buy|bought|touch|touched|trade|traded|own|owned|hold|held|ape|aped|have\\s+(?:it|any|one))",
+      "never\\s+(?:bought|touched|traded|owned|held|aped)",
+    ].join("|") +
+    ")\\b",
+  "iu",
+);
+
+/**
+ * LIKING IT IS SAYING IT TOO (red-team review, 2026-10-12): "yes, it's one of
+ * mine, i like it a lot", "liked the early curve". Asked about a named coin,
+ * an answer told none of its buys may not say it likes, loves or rates it,
+ * that it is a fan of it or into it. Never "looks like it", "feels like
+ * that": those compare, not prefer.
+ */
+const LIKED = new RegExp(
+  "\\b(?:" +
+    [
+      "(?:i|we)\\s+(?:(?:really|kinda|still|do|also|just|totally|actually)\\s+)?(?:like|liked|love|loved|dig|dug|rate|rated|fancy|fancied|prefer|preferred|enjoy|enjoyed|adore|adored)",
+      String.raw`(?:^|(?<=[,.;:!?—–]\s*)|(?<=\b(?:and|but|so|yep|yeah|yes|yup|honestly|really)[\s,]+))(?:like|liked|love|loved|dig|dug|rate|rated|adore|adored)`,
+      String.raw`(?<!\b(?:looks?|looked|seems?|seemed|feels?|felt|sounds?|sounded|just|kinda|more|less|something|nothing|anything|much|is|was|be|it's|that's|not)\s)(?:like|liked|love|loved|dig|rate|rated)\s+(?:it|that|this|them|how|the\s+way)`,
+      "fan\\s+of",
+      "big\\s+fan",
+      "into\\s+(?:it|that|this|them)",
+      "my\\s+(?:kind|type|sort)\\s+of",
+      "(?:a|my|the)\\s+fav(?:ou?rite)?s?",
+      "(?:i'?m|im|i\\s+am|we'?re)\\s+(?:a\\s+(?:big\\s+)?)?(?:fan|into|keen|sold)",
+    ].join("|") +
+    ")\\b",
+  "iu",
+);
+
 function buyClaimed(text: string, vouched: readonly string[] | null): boolean {
-  if (vouched === null) return BAG.test(text) || new RegExp(ACQUIRED.source, "i").test(text);
+  if (vouched === null) return BAG.test(text) || new RegExp(ACQUIRED.source, "i").test(text) || OWNED_ACT.test(text) || OWNED_SHAPE.test(text);
   const names = vouched.map((c) => c.trim().toLowerCase().replace(/^\$/, "")).filter((c) => c !== "");
   for (const m of text.matchAll(ACQUIRED)) {
     const after = text.slice((m.index ?? 0) + m[0].length).split(/[.,!?;:—–]/)[0]!.toLowerCase();
@@ -1319,6 +1388,8 @@ function admitMasked(tidied: string, ctx: XGateCtx, baseGate: BaseGate, agentNam
   if (unsaid.length && namedIn(ctx.kind === "reply" ? withoutReplyOptOut(text) : text, unsaid)) return refuse("bought-named");
   // Nor a buy it was not told of.
   if (ctx.buys !== undefined && buyClaimed(ctx.kind === "reply" ? withoutReplyOptOut(text) : text, ctx.buys === "none" ? null : coins)) return refuse("buy-claim");
+  // Nor, of a coin someone named, that it likes it.
+  if (ctx.buys === "none" && ctx.named === true && LIKED.test(ctx.kind === "reply" ? withoutReplyOptOut(text) : text)) return refuse("buy-claim");
 
   if (text.length > XPOST_MAX_CHARS || xWeightedLength(text) > X_MAX_WEIGHTED) return refuse("too-long");
   if (words(text) < XPOST_MIN_WORDS) return refuse("too-short");
