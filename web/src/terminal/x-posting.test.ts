@@ -22,7 +22,7 @@ import { afterEach, beforeEach, describe, it } from "node:test";
 import { act, createElement } from "react";
 import { X_COPY, type XAccountBody } from "@/lib/x-connect";
 import { ACTIVE_CADENCE, ANSWERS_PER_DAY } from "../../../worker/src/xpost/planner";
-import { ANSWERS_PER_AUTHOR } from "../../../worker/src/xpost/store";
+import { ANSWERS_PER_AUTHOR, OPT_OUT_NOTICE_MS } from "../../../worker/src/xpost/store";
 import { json, testDom } from "./test-dom";
 import { XPosting } from "./XPosting";
 
@@ -170,7 +170,8 @@ describe("comment reply consent", () => {
     assert.match(dialog, new RegExp(`reply as @${HANDLE} to selected posts that tag it, including comments on its own posts\\.`));
     assert.match(dialog, /Answers go out right away: they don’t wait under Coming up/);
     assert.match(dialog, /Up to 24 answers a day on top of its posts, and at most two to one person a day\./);
-    assert.match(dialog, /Anyone can reply stop to opt out\./);
+    assert.match(dialog, /The first answer to someone tells them they can reply stop to opt out, and so does the first one after 30 days; a stop always works\./);
+    assert.doesNotMatch(dialog, /Anyone can reply stop/, "the line is on the first answer, not every one (2026-10-12)");
     assert.match(dialog, /Answers may include market figures from public data \(CoinGecko, GeckoTerminal, Fomo and Bitquery\), such as a coin’s price, market cap, volume or recent change\. Merrymen adds them as the data showed them; they are never advice\./);
     assert.doesNotMatch(dialog, /at least ten minutes|same daily limit/, "it keeps no ten-minute review, so it does not promise one");
     await press(buttons(`Let it reply as @${HANDLE}`)[0], "reply confirm");
@@ -802,7 +803,7 @@ describe("the warning keeps its words", () => {
       "Each reply waits under Coming up for at least ten minutes first, with a link to the comment, and you can skip it there. Turn replies off at any time to cancel waiting replies.",
       "Your Merryman will reply as ${handle} to selected posts that tag it, including comments on its own posts.",
       "It chooses which posts to answer; it won’t answer every one. Answers go out right away: they don’t wait under Coming up, so you can’t skip one first.",
-      "Up to 24 answers a day on top of its posts, and at most two to one person a day. Anyone can reply stop to opt out. Turn replies off at any time to stop answering.",
+      "Up to 24 answers a day on top of its posts, and at most two to one person a day. The first answer to someone tells them they can reply stop to opt out, and so does the first one after 30 days; a stop always works. Turn replies off at any time to stop answering.",
       "Answers may include market figures from public data (CoinGecko, GeckoTerminal, Fomo and Bitquery), such as a coin’s price, market cap, volume or recent change. Merrymen adds them as the data showed them; they are never advice.",
       "Let it reply as ${handle}",
     ]) {
@@ -812,6 +813,7 @@ describe("the warning keeps its words", () => {
     // The numbers it promises are the orchestrator's own lane limits.
     assert.equal(ANSWERS_PER_DAY, 24, "the warning says up to 24 answers a day");
     assert.equal(ANSWERS_PER_AUTHOR, 2, "the warning says at most two to one person a day");
+    assert.equal(OPT_OUT_NOTICE_MS, 30 * 24 * 60 * 60_000, "the warning says the stop line comes again after 30 days");
   });
 
   it("the lead sentence is bold, and the warning is the only place that sends 'enable'", () => {

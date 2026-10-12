@@ -174,7 +174,7 @@ const REPLY_WARNING_BODY = [
  */
 const ANSWER_WARNING_BODY = [
   "It chooses which posts to answer; it won’t answer every one. Answers go out right away: they don’t wait under Coming up, so you can’t skip one first.",
-  "Up to 24 answers a day on top of its posts, and at most two to one person a day. Anyone can reply stop to opt out. Turn replies off at any time to stop answering.",
+  "Up to 24 answers a day on top of its posts, and at most two to one person a day. The first answer to someone tells them they can reply stop to opt out, and so does the first one after 30 days; a stop always works. Turn replies off at any time to stop answering.",
   "Answers may include market figures from public data (CoinGecko, GeckoTerminal, Fomo and Bitquery), such as a coin’s price, market cap, volume or recent change. Merrymen adds them as the data showed them; they are never advice.",
 ] as const;
 const replyWarningYes = (handle: string) => `Let it reply as ${handle}`;
