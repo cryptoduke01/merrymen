@@ -529,6 +529,13 @@ describe("child fomo file: tails", () => {
     assert.deepEqual(f.signals[0]!.reasons, ["tailed"]);
   });
 
+  it("signals may carry the candidate reason (review-candidates.ts), with their dossier and lens", () => {
+    const f = normalizeChildFomoFile(file({ signals: [signal(evm(9), "discovery", { reasons: ["candidate", "bogus" as never], triggers: [] })] }))!.file;
+    assert.deepEqual(f.signals[0]!.reasons, ["candidate"]);
+    assert.ok(f.signals[0]!.dossier, "the dossier is kept");
+    assert.ok(f.signals[0]!.lens, "and the lens");
+  });
+
   it("a signal's tail-only trigger keys: only keys of its own triggers, each once, strings only; none is no field (review 2026-10-07)", () => {
     const t = evm(9);
     const a = event(t, 1);
