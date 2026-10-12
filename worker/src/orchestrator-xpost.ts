@@ -91,7 +91,7 @@ import {
 import { answerPrompt, answerQuestion, buyPrompt, casualPrompt, draft, introPrompt, introTemplate, modelAnswers, replyPrompt, sellPrompt, sherwoodClaimed, sherwoodMentioned, sherwoodNamed, xpostModel, xpostModelWarning, type AnswerIntentKind, type WriterFacts, type XStyle } from "./xpost/writer";
 import { appendPublicToken, appendPublicWallet, hasPublicWallet, publicTokenStillAllowed, publicWalletStillAllowed, type PublicWallet } from "./xpost/public-wallet";
 import { readPublicProjectDescription } from "./orchestrator-xpost-project";
-import { boughtNames, carriesResearch, classifyTag, createXResearch, namesACoin, type ResearchBundle, type XResearch } from "./orchestrator-xpost-research";
+import { boughtNames, carriesResearch, classifyTag, createXResearch, namesACoin, type ResearchBundle, type TagIntent, type XResearch } from "./orchestrator-xpost-research";
 import { PUBLISHABLE_SOURCES } from "./thesis-policy";
 import { readSaleResults } from "./orchestrator-xpost-results";
 import { appendSaleOutcome, hasSaleOutcome } from "./xpost/sale-outcome";
@@ -655,6 +655,13 @@ function boughtKind(f: AgentFacts): false | "paper" | "live" | "both" {
   if (!buys.length) return false;
   const paper = buys.some((c) => c.paper), live = buys.some((c) => !c.paper);
   return paper && live ? "both" : paper ? "paper" : "live";
+}
+
+/** A tag's text with the agent's own handle taken out, every other handle left in. */
+function withoutHandle(text: string, username: string): string {
+  const own = String(username ?? "").trim().replace(/^@/, "");
+  if (!/^[a-z0-9_]{1,15}$/i.test(own)) return text;
+  return text.normalize("NFKC").replace(new RegExp(`@${own}\\b`, "gi"), " ");
 }
 
 /**
@@ -1429,13 +1436,18 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
     const bought = boughtNames(f, posts);
     for (const comment of ordered) {
       if (comment.createdAtMs < consentAt || nowMs - comment.createdAtMs > REPLY_STALE_MS) continue;
-      const candidate = tagCandidate(comment, { xUserId: account.xUserId, research: research !== null });
+      const candidate = tagCandidate(comment, { xUserId: account.xUserId, research: research !== null, username: account.username });
       if (!candidate.ok || await repliesOptedOut(shared, account.xUserId, comment.authorId)) continue;
       // READ BY CODE FIRST, research on or off: the allowlist's plain model
       // question is answered from a code-built line (writer.ts modelAnswers)
       // and spends no model call. Only research gathers anything for what it
       // reads.
-      const asked = classifyTag(candidate.text, { address: candidate.address ?? null, knownCoins });
+      const classified = classifyTag(candidate.text, { address: candidate.address ?? null, knownCoins });
+      // SHERWOOD IN ANY FORM INCLUDES A HANDLE ("@SherwoodToken"), read on the
+      // tag as posted with only its own handle set aside; and the model line
+      // never goes under a reply prefix that names anyone else (red-team 2026-10-12).
+      const sherwoodTagged = sherwoodMentioned(withoutHandle(comment.text, account.username));
+      const asked: TagIntent = sherwoodTagged || (classified.kind === "model" && candidate.otherHandles) ? { kind: "unanswered" } : classified;
       // SHERWOOD IN ANY FORM, OR A MODEL QUESTION OFF THE ALLOWLIST, is
       // answered by nothing: the model line under "sherwood TGE soon?" reads
       // as Merrymen confirming a token, and a draft is never asked about the

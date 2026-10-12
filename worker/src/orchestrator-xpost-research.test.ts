@@ -121,7 +121,7 @@ describe("a tag's intent, read by code", () => {
     // As the orchestrator reads it: the screened candidate, research on or off.
     for (const text of ALLOWED) {
       for (const research of [true, false]) {
-        const c = tagCandidate({ id: "t1", authorId: "u1", text: `@alan ${text}`, conversationId: "t1", inReplyToTweetId: "t0", createdAtMs: NOW }, { xUserId: "x1", research });
+        const c = tagCandidate({ id: "t1", authorId: "u1", text: `@alan ${text}`, conversationId: "t1", inReplyToTweetId: "t0", createdAtMs: NOW }, { xUserId: "x1", research, username: "alan" });
         assert.ok(c.ok, `${text}: ${c.ok ? "" : c.reason}`);
         if (c.ok) assert.equal(classifyTag(c.text).kind, "model", `${text} (research ${research})`);
       }
@@ -184,7 +184,7 @@ describe("a tag's intent, read by code", () => {
       assert.equal(classifyTag(text, { knownCoins: ["Pepe"] }).kind, "unanswered", `${text}, beside a coin it bought`);
       // As the orchestrator reads it: the screened candidate, research on or off, is never the model line.
       for (const research of [true, false]) {
-        const c = tagCandidate({ id: "t1", authorId: "u1", text: `@alan ${text}`, conversationId: "t1", inReplyToTweetId: "t0", createdAtMs: NOW }, { xUserId: "x1", research });
+        const c = tagCandidate({ id: "t1", authorId: "u1", text: `@alan ${text}`, conversationId: "t1", inReplyToTweetId: "t0", createdAtMs: NOW }, { xUserId: "x1", research, username: "alan" });
         if (c.ok) assert.equal(classifyTag(c.text).kind, "unanswered", `${text} (research ${research})`);
       }
     }
@@ -203,7 +203,7 @@ describe("a tag's intent, read by code", () => {
       assert.equal(classifyTag(text).kind, "unanswered", text);
       assert.equal(classifyTag(text, { knownCoins: ["Pepe"] }).kind, "unanswered", text);
       // And the door refuses them before that.
-      const c = tagCandidate({ id: "t1", authorId: "u1", text: `@alan ${text}`, conversationId: "t1", inReplyToTweetId: "", createdAtMs: NOW }, { xUserId: "x1", research: true });
+      const c = tagCandidate({ id: "t1", authorId: "u1", text: `@alan ${text}`, conversationId: "t1", inReplyToTweetId: "", createdAtMs: NOW }, { xUserId: "x1", research: true, username: "alan" });
       assert.equal(c.ok, false, text);
     }
   });
@@ -614,7 +614,7 @@ describe("one bounded research bundle per answer", () => {
   it("a $ticker it bought beside a copycat's contract: looked up for nothing, and nothing said about what it bought", async () => {
     const COPY = `0x${"ee".repeat(20)}`;
     for (const text of [`@Alan is $PEPE ${COPY} legit?`, `@Alan did you buy $PEPE ${COPY}?`, `@Alan is $PEPE ${COPY} the one you bought?`, `@Alan thoughts on pepe ${COPY}?`]) {
-      const v = tagCandidate({ id: "1", text, authorId: "9", conversationId: "1", inReplyToTweetId: "", createdAtMs: NOW }, { xUserId: "111", research: true });
+      const v = tagCandidate({ id: "1", text, authorId: "9", conversationId: "1", inReplyToTweetId: "", createdAtMs: NOW }, { xUserId: "111", research: true, username: "Alan" });
       assert.ok(v.ok && v.address === COPY, text);
       if (!v.ok) continue;
       const intent = classifyTag(v.text, { address: v.address ?? null, knownCoins: ["Pepe"] });
@@ -807,7 +807,7 @@ describe("never confirm a buy by name", () => {
   });
   /** The tag as writeAnswer reads it: screened, classified, looked up (research on) or not, and the prompt it would draft from. */
   async function promptFor(text: string, research: boolean): Promise<{ prompt: string; named: boolean; exact: boolean } | null> {
-    const c = tagCandidate({ id: "t1", authorId: "u1", text: `@alan ${text}`, conversationId: "t1", inReplyToTweetId: "t0", createdAtMs: NOW }, { xUserId: "x1", research });
+    const c = tagCandidate({ id: "t1", authorId: "u1", text: `@alan ${text}`, conversationId: "t1", inReplyToTweetId: "t0", createdAtMs: NOW }, { xUserId: "x1", research, username: "alan" });
     // A letter code cannot read is refused at the door, before any prompt (red-team 2026-10-12): only such a tag may be.
     if (!c.ok && c.reason === "unsafe-text" && /[^\x00-\x7f]/.test(text)) return null;
     assert.ok(c.ok, `${text}: ${c.ok ? "" : c.reason}`);

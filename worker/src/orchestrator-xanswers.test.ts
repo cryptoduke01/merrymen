@@ -837,7 +837,7 @@ test("a tag in letters code cannot read never reaches the writer, research on or
     "@pine_stoat is sherɯood getting a token?", "@pine_stoat is \u202edoowrehs\u202c getting a token?", "@pine_stoat is SΗERWOOD running your trades now?",
     "@pine_stoat is ꓢꓧꓰꓣꓪꓳꓳꓓ legit?", "@pine_stoat is ᏚᎻᎬᎡᎳᎾᎾᎠ getting a token?",
     // I1's reproduced tags (Armenian ho U+0570, hooked h U+0266, fishhook r U+027E): never a "built by merrymen" under them.
-    "@alanaldale ꓢꓧꓰꓣꓪꓳꓳꓓ TGE soon? is it the merrymen token?", "@pine_stoat sherwooɗ TGE soon?", "@pine_stoat is sհerwood merrymen's token?",
+    "@pine_stoat ꓢꓧꓰꓣꓪꓳꓳꓓ TGE soon? is it the merrymen token?", "@pine_stoat sherwooɗ TGE soon?", "@pine_stoat is sհerwood merrymen's token?",
     "@pine_stoat sɦerwood TGE soon?", "@pine_stoat sheɾwood TGE soon?", "@pine_stoat sherɯood TGE soon?"];
   for (const env of [{}, RESEARCH_ON]) {
     for (const text of texts) {
@@ -858,7 +858,7 @@ test("a tag that names a coin it bought gets no draft that names one, and look-a
   for (const env of [{}, RESEARCH_ON]) {
     // The ASCII control: the prompt is told nothing it bought, and the draft that confirms it anyway is refused.
     const w = await world(t, { env, research: fakeResearch().research, facts, answer: "yep, picked up pepe lately. Say stop to opt out." });
-    w.setInbox([tag({ text: "@alanaldale did you buy PEPE INU?" })]);
+    w.setInbox([tag({ text: "@pine_stoat did you buy PEPE INU?" })]);
     await w.step();
     assert.match(w.asked()[0]!, /They named a specific coin/);
     const [row] = await w.answers();
@@ -868,8 +868,8 @@ test("a tag that names a coin it bought gets no draft that names one, and look-a
     await w.step(NOW + MIN);
     assert.deepEqual(w.sends, []);
     // The reproduced look-alikes: Lisu PEPE, Cherokee PEPE, Armenian oh (U+0585), a hooked d (U+0257), a hooked p (U+01A5).
-    for (const text of ["@alanaldale did you buy ꓑꓰꓑꓰ INU?", "@alanaldale did you buy ᏢᎬᏢᎬ?", "@alanaldale did you buy dօge inu?", "@alanaldale did you buy bօnk inu?",
-      "@alanaldale did you buy ɗoge inu?", "@alanaldale did you buy ƥepe inu?"]) {
+    for (const text of ["@pine_stoat did you buy ꓑꓰꓑꓰ INU?", "@pine_stoat did you buy ᏢᎬᏢᎬ?", "@pine_stoat did you buy dօge inu?", "@pine_stoat did you buy bօnk inu?",
+      "@pine_stoat did you buy ɗoge inu?", "@pine_stoat did you buy ƥepe inu?"]) {
       const l = await world(t, { env, research: fakeResearch().research, facts, answer: "yep, picked up pepe lately. Say stop to opt out." });
       l.setInbox([tag({ text })]);
       await l.step();
@@ -884,13 +884,13 @@ test("a buy named without Latin letters is never told to a tag that names it (re
     // The reproduced buy: symbol PEPE, name ペペ (katakana); the tag names it by that name.
     const facts: AgentFacts = { ...FACTS, calls: [{ ...CALL, name: "ペペ" }] };
     const w = await world(t, { env, research: fakeResearch().research, facts, answer: "yep, grabbed a little pepe, the curve looked early. say stop to opt out." });
-    w.setInbox([tag({ text: "@alan did you buy ペペ?" })]);
+    w.setInbox([tag({ text: "@pine_stoat did you buy ペペ?" })]);
     await w.step();
     assert.equal(w.asked().length, 0, "never handed to the writer");
     assert.deepEqual(await w.answers(), []);
     // A buy named with an emoji, asked by it: the coin-named prompt, never the list.
     const frog = await world(t, { env, research: fakeResearch().research, facts: { ...FACTS, calls: [{ ...CALL, symbol: "FROG", name: "🐸" }] } });
-    frog.setInbox([tag({ text: "@alan you in on 🐸 too?" })]);
+    frog.setInbox([tag({ text: "@pine_stoat you in on 🐸 too?" })]);
     await frog.step();
     const [prompt] = frog.asked();
     assert.ok(prompt);
@@ -903,7 +903,7 @@ test("a greeting is not a coin because a short ticker it bought hides in its let
   const stock = (decisionId: string, symbol: string, name: string): CallFact => ({ ...CALL, decisionId, symbol, name });
   const facts: AgentFacts = { ...FACTS, calls: [stock("fill-mu", "MU", "Micron"), stock("fill-uso", "USO", "United States Oil"), stock("fill-tsla", "TSLA", "Tesla")] };
   for (const env of [{}, RESEARCH_ON]) {
-    for (const text of ["@alanaldale gm, u trading today?", "@alanaldale how do you source your coins?"]) {
+    for (const text of ["@pine_stoat gm, u trading today?", "@pine_stoat how do you source your coins?"]) {
       const w = await world(t, { env, research: fakeResearch().research, facts, answer: "gm, quiet one so far. Say stop to opt out." });
       w.setInbox([tag({ text })]);
       await w.step();
@@ -931,6 +931,30 @@ test("an allowlisted model question with enclosed letters, emoji or symbols afte
       assert.equal(r.seen.length, 0, text);
     }
   }
+});
+
+test("a tag naming another account gets nothing, and never the model line, research on or off (red-team 2026-10-12)", async (t) => {
+  // The reproduced tags, and the controls that already got nothing.
+  const texts = ["@pine_stoat what model do you run on @SherwoodToken", "@pine_stoat @SherwoodPresale what model do you run on?", "@pine_stoat what model do you run on? @SherwoodToken",
+    "@pine_stoat who made you @Sherwood_Inu", "@pine_stoat are you chatgpt @SHERWOODTGE", "@pine_stoat what model do you run on $SHERWOOD", "@pine_stoat what model do you run on sherwood"];
+  for (const env of [{}, RESEARCH_ON]) {
+    for (const text of texts) {
+      const r = fakeResearch();
+      const w = await world(t, { env, research: r.research });
+      w.setInbox([tag({ text })]);
+      await w.step();
+      w.setInbox([]);
+      await w.step(NOW + MIN);
+      assert.deepEqual(await w.answers(), [], text);
+      assert.deepEqual(w.sends, [], text);
+      assert.equal(w.asked().length, 0, text);
+    }
+  }
+  // Its own handle is no stranger's: the plain question still gets its line.
+  const w = await world(t);
+  w.setInbox([tag({ text: "@pine_stoat what model do you run on?" })]);
+  await w.step();
+  assert.match((await w.answers())[0]!.body, /new sherwood-1\b/);
 });
 
 test("research on: \"did you buy <contract>?\" reaches its own history by the address, end to end", async (t) => {

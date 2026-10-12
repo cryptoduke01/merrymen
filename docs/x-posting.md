@@ -557,7 +557,11 @@ the mention itself. They go out **right away**:
   and advice requests are dropped before any model call. So is a tag with a
   letter outside A-Z once its accents are off ("café" stays; a Greek Eta,
   Lisu, Cherokee, Armenian or an IPA letter goes: each spells "SHERWOOD" or
-  "PEPE" on X and nothing to code), and one with a bidi control. Digits may appear:
+  "PEPE" on X and nothing to code), and one with a bidi control. Every
+  handle in a tag must be the agent's own: "what model do you run on
+  @SherwoodToken" is refused. The one exception is the prefix X writes before
+  a reply in a thread, which may name others; such a tag never gets the
+  model line. Sherwood is looked for in the tag as posted, handles included. Digits may appear:
   the writer reads every run of digits as "(a number)", glued to letters or
   not (`answerQuestion`: "24h" is "(a number)h", "L2" is "L(a number)", "saw
   it on 2 lists" is "saw it on (a number) lists"), so the figure never

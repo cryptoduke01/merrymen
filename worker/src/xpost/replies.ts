@@ -25,7 +25,14 @@ export function isReplyOptOut(raw: unknown): boolean {
  * exactly one contract address: a LOOKUP KEY for the answer's research, never
  * part of `text` (the writer's input), never nominated, never traded.
  */
-export type ReplyCandidate = { ok: true; text: string; address?: string } | { ok: false; reason: string };
+export type ReplyCandidate =
+  /**
+   * `otherHandles`: set by tagCandidate when the reply prefix X adds to a
+   * reply in a thread names someone other than the agent. Such a tag may be
+   * answered by a draft, never by code's model line (red-team 2026-10-12).
+   */
+  | { ok: true; text: string; address?: string; otherHandles?: true }
+  | { ok: false; reason: string };
 
 const LINK_OR_SECRET = /https?:|www\.|\b[a-z0-9-]+\.(?:com|net|org|io|dev|app|xyz|gg|co|me|ai)\b|0x[a-f0-9]{8,}|\b(?:sk-|gsk_|api[ _-]?key|seed phrase|private key|password|secret)\b/i;
 const ABUSE_OR_SENSITIVE = /\b(?:fuck\w*|shit\w*|bitch\w*|idiot\w*|moron\w*|retard\w*|kill\w*|suicid\w*|rape\w*|porn\w*|sex\w*|nude\w*|terror\w*|nazi\w*|racis\w*|politic\w*|election\w*|president\w*|democrat\w*|republican\w*|religio\w*|christian\w*|muslim\w*|jew\w*|medical\w*|diagnos\w*|cancer|medication\w*|depress\w*)\b/i;
@@ -195,14 +202,32 @@ function standsAlone(t: string, start: number, end: number): boolean {
  * address inside a link, or any other long hex run are still refused. With
  * research off, a tag is selected exactly as before: any address is refused,
  * and so is every "how many / how much".
+ *
+ * NO HANDLE BUT ITS OWN (red-team review, 2026-10-12). Every handle used to
+ * be taken out before anything read the tag, so "what model do you run on
+ * @SherwoodToken" was the plain model question, and code's sherwood-1 line
+ * was posted under a tweet naming a sherwood account. Now a handle anywhere
+ * in a tag must be the agent's own (`ctx.username`; unknown, every handle is
+ * someone else's). The one exception is the prefix X writes before a reply
+ * in a thread, which names whoever is in it: allowed there, and reported as
+ * `otherHandles` so the caller never answers it with the model line. An "@"
+ * left that is no handle at all is refused too.
  */
-export function tagCandidate(reply: XReply, ctx: { xUserId: string; research?: boolean }): ReplyCandidate {
+const HANDLE_AT = /@([a-z0-9_]{1,15})\b/gi;
+export function tagCandidate(reply: XReply, ctx: { xUserId: string; research?: boolean; username?: string }): ReplyCandidate {
   const no = (reason: string): ReplyCandidate => ({ ok: false, reason });
   if (!reply.id || !reply.authorId || !ctx.xUserId) return no("invalid");
   if (reply.authorId === ctx.xUserId) return no("own-comment");
   if (isReplyOptOut(reply.text)) return no("opt-out");
   if (typeof reply.text !== "string") return no("invalid");
-  const said = withoutLeadingMentions(reply.text.normalize("NFKC")).replace(/@[a-z0-9_]{1,15}\b/gi, " ").replace(/\s+/g, " ").trim();
+  const own = String(ctx.username ?? "").trim().replace(/^@/, "").toLowerCase();
+  const raw = reply.text.normalize("NFKC");
+  const lead = /^(?:\s*@[a-z0-9_]{1,15}\b[\s,:-]*)+/i.exec(raw)?.[0] ?? "";
+  const others = (s: string): boolean => [...s.matchAll(HANDLE_AT)].some((m) => own === "" || m[1]!.toLowerCase() !== own);
+  const inThread = reply.conversationId !== reply.id || reply.inReplyToTweetId !== "";
+  if (others(raw.slice(lead.length)) || (others(lead) && !inThread)) return no("handle");
+  const said = withoutLeadingMentions(raw).replace(HANDLE_AT, " ").replace(/\s+/g, " ").trim();
+  if (said.includes("@")) return no("handle");
   const research = ctx.research === true;
   const hits = research ? [...said.matchAll(CA_RUN)] : [];
   const addresses = [...new Set(hits.map((m) => m[0].toLowerCase()))];
@@ -224,5 +249,5 @@ export function tagCandidate(reply: XReply, ctx: { xUserId: string; research?: b
   if (address) advice = advice.replace(OWN_BUY_OF_TAGGED, " ");
   if (ADVICE_REQUEST.test(advice) || /^(?:please\s+)?(?:buy|sell|hold|ape|pump|dump)\b/i.test(text)) return no("advice-request");
   if (!ASKED.test(text)) return no("not-asked");
-  return address ? { ok: true, text, address } : { ok: true, text };
+  return { ok: true, text, ...(address ? { address } : {}), ...(others(lead) ? { otherHandles: true as const } : {}) };
 }
