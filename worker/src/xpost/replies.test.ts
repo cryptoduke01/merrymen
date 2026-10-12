@@ -95,4 +95,25 @@ describe("tags an active agent may answer", () => {
       assert.equal(tagCandidate(tag(text), ON).ok, false, text);
     }
   });
+  it("an address inside a link on any domain is a link, refused before it could be a lookup key", () => {
+    for (const text of [`@Pine what about pons.fun/token/${CA}?`, `@Pine what about robinhood.trade/${CA}?`, `@Pine what is ${CA}?ref=moonboy`, `@Pine what is ${CA}/chart?`, `@Pine what about x/${CA}?`]) {
+      assert.deepEqual(tagCandidate(tag(text), ON), { ok: false, reason: "link-or-secret" }, text);
+    }
+    for (const text of [`@Pine what is (${CA})?`, `@Pine what is this one, ca:${CA}?`, `@Pine thoughts on ${CA}...`, `@Pine "${CA}" what is it?`]) {
+      const v = tagCandidate(tag(text), ON);
+      assert.ok(v.ok && v.address === CA, text);
+    }
+  });
+  it("\"did you buy <contract>?\" asks about its own past buy and is answered; every other buy wording is still advice", () => {
+    for (const text of [`@Pine did you buy ${CA}?`, `@Pine why did you buy ${CA}?`, `@Pine did u ape ${CA}?`, `@Pine have you buy ${CA} lately?`]) {
+      const v = tagCandidate(tag(text), ON);
+      assert.ok(v.ok && v.address === CA, text);
+    }
+    for (const text of [`@Pine should i buy ${CA}?`, `@Pine is it time to buy ${CA}?`, `@Pine would you buy ${CA}?`, `@Pine buy ${CA} or not?`, `@Pine did you buy ${CA}, should i too?`, `@Pine ape ${CA} now?`]) {
+      assert.deepEqual(tagCandidate(tag(text), ON), { ok: false, reason: "advice-request" }, text);
+    }
+    // Without an address, nothing changes: "buy this" is advice, as on the comment path.
+    assert.deepEqual(tagCandidate(tag("@Pine did you buy this coin?"), ON), { ok: false, reason: "advice-request" });
+    assert.equal(tagCandidate(tag(`@Pine did you buy ${CA}?`), { xUserId: "222" }).ok, false, "research off: any address is refused");
+  });
 });

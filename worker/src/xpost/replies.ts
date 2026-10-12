@@ -85,6 +85,33 @@ const CA_RUN = /(?<![0-9a-f])0x[0-9a-f]{40}(?![0-9a-f])/gi;
 const COIN_FACT_ASK = /\bhow (?:much|many) (?:of (?:the |its )?)?(?:holders?|liquidity|liq|volume|buyers?|sellers?|traders?|people (?:hold|holding|own)|wallets? (?:hold|holding))\b/gi;
 
 /**
+ * "DID YOU BUY <contract>?" — a question about its OWN past buy of the tagged
+ * coin, not a request for advice. With the address read as "this coin" the
+ * advice screen would see "buy this" and refuse it, so this one phrasing is
+ * taken out before that screen, and only when the post carried an address.
+ * Anything else about buying it ("should i buy", "time to buy", "would you
+ * buy") still meets the advice screen as before.
+ */
+const OWN_BUY_OF_TAGGED = /\b(?:did|didn'?t|have|why'?d|when'?d)\s+(?:you|u|ya)\s+(?:buy|ape)\s+this coin\b/gi;
+
+/**
+ * THE TEXT AROUND AN ADDRESS, as far as a link written out in the post could
+ * reach (the Telegram CA finder's linkAround, restated: xpost/ may not import
+ * it). An address is a lookup key only when it stands on its own: wrapped in
+ * brackets or quotes, after "ca:", or followed by punctuation. Anything else
+ * around it — "pons.fun/token/", "robinhood.trade/", "?ref=" — is a link,
+ * whatever its domain, and the post is refused as one.
+ */
+const LINK_END = /[\s"'<>()[\]{}|,]/u;
+function standsAlone(t: string, start: number, end: number): boolean {
+  let a = start;
+  while (a > 0 && !LINK_END.test(t.charAt(a - 1))) a--;
+  let b = end;
+  while (b < t.length && !LINK_END.test(t.charAt(b))) b++;
+  return /^(?:ca:|ca=)?$/i.test(t.slice(a, start)) && /^[?!.:;]*$/.test(t.slice(end, b));
+}
+
+/**
  * IS THIS POST THAT TAGGED AN ACTIVE AGENT ONE IT MAY ANSWER? A question or a
  * plain address, in good faith, about the agent itself or a coin. The same
  * screens as a comment reply — opt-outs first, then links, secrets, abuse,
@@ -108,8 +135,11 @@ export function tagCandidate(reply: XReply, ctx: { xUserId: string; research?: b
   if (typeof reply.text !== "string") return no("invalid");
   const said = withoutLeadingMentions(reply.text.normalize("NFKC")).replace(/@[a-z0-9_]{1,15}\b/gi, " ").replace(/\s+/g, " ").trim();
   const research = ctx.research === true;
-  const addresses = research ? [...new Set([...said.matchAll(CA_RUN)].map((m) => m[0].toLowerCase()))] : [];
+  const hits = research ? [...said.matchAll(CA_RUN)] : [];
+  const addresses = [...new Set(hits.map((m) => m[0].toLowerCase()))];
   if (addresses.length > 1) return no("link-or-secret");
+  // An address inside a link is a link, on any domain: refused before it is taken out.
+  if (hits.some((m) => !standsAlone(said, m.index ?? 0, (m.index ?? 0) + m[0].length))) return no("link-or-secret");
   const address = addresses[0];
   // Judged without the address (it is no words), and handed on with "this coin" where it stood.
   const bare = address ? said.replace(CA_RUN, " ").replace(/\s+/g, " ").trim() : said;
@@ -119,7 +149,8 @@ export function tagCandidate(reply: XReply, ctx: { xUserId: string; research?: b
   if (LINK_OR_SECRET.test(text)) return no("link-or-secret");
   if (ABUSE_OR_SENSITIVE.test(text)) return no("sensitive");
   if (SPAM_OR_INSTRUCTIONS.test(text)) return no("spam-or-instructions");
-  const advice = research ? text.replace(COIN_FACT_ASK, " ") : text;
+  let advice = research ? text.replace(COIN_FACT_ASK, " ") : text;
+  if (address) advice = advice.replace(OWN_BUY_OF_TAGGED, " ");
   if (ADVICE_REQUEST.test(advice) || /^(?:please\s+)?(?:buy|sell|hold|ape|pump|dump)\b/i.test(text)) return no("advice-request");
   if (!ASKED.test(text)) return no("not-asked");
   return address ? { ok: true, text, address } : { ok: true, text };

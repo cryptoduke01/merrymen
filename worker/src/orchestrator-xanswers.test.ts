@@ -29,7 +29,7 @@ const FACTS: AgentFacts = { tenant: TENANT, agentId: TENANT, slug: null, name: "
 const tag = (over: Record<string, unknown> = {}) => ({ id: MENTION, author_id: "333", conversation_id: MENTION,
   created_at: new Date(NOW - MIN).toISOString(), text: "@pine_stoat what kind of coins do you trade?", ...over });
 
-async function world(t: TestContext, o: { active?: boolean; env?: Record<string, string>; research?: XResearch } = {}) {
+async function world(t: TestContext, o: { active?: boolean; env?: Record<string, string>; research?: XResearch; facts?: AgentFacts } = {}) {
   const raw = new DatabaseSync(":memory:");
   t.after(() => raw.close());
   const db = wrapSqlite(raw), dek = randomBytes(32);
@@ -60,7 +60,7 @@ async function world(t: TestContext, o: { active?: boolean; env?: Record<string,
     creds: { provider: "groq", transport: "openai", model: "test", apiKey: "private-model", baseUrl: "https://model.test/v1", vision: false },
     knobs: { ...xpostEnv(env), repliesApproved: true },
     deps: { dialect: "sqlite", fetch, monotonic: () => 0, member: async () => ({ tz: null }),
-      facts: async () => new Map([[TENANT, FACTS]]),
+      facts: async () => new Map([[TENANT, o.facts ?? FACTS]]),
       // Only the answer prompt gets words back: every other draft passes.
       llm: async (_creds, input) => {
         prompts.push(input.prompt);
@@ -254,4 +254,20 @@ test("research on: the model question is a sherwood tease, a free intent with no
   assert.match(w.asked()[0]!, /asking what model you run on/);
   assert.match(w.systems[0]!, /tease the new «sherwood one», merrymen's own model/);
   assert.match(w.systems[0]!, /never claim sherwood runs you today/);
+});
+
+test("research on: \"did you buy <contract>?\" reaches its own history by the address, end to end", async (t) => {
+  const r = fakeResearch();
+  const facts: AgentFacts = { ...FACTS, calls: [{ ...CALL, token: CA, ownWords: "the buying looked steady and real" }] };
+  const w = await world(t, { env: RESEARCH_ON, research: r.research, facts });
+  w.setInbox([tag({ text: `@pine_stoat did you buy ${CA}?` })]);
+  await w.step();
+  const [prompt] = w.asked();
+  assert.ok(prompt, "selected and drafted, not refused as advice");
+  assert.match(prompt!, /did you buy this coin/);
+  assert.doesNotMatch(prompt!, /0x|ab12/i);
+  assert.match(prompt!, /What you looked up just now.*«you bought it lately».*«your own words when you bought it: the buying looked steady and real»/s);
+  assert.equal(r.seen.length, 0, "its own history costs no lookup");
+  const [answer] = await w.answers();
+  assert.equal(answer!.status, "scheduled");
 });
