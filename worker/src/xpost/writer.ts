@@ -154,8 +154,16 @@ export interface AnswerFacts extends WriterFacts {
    * a false public statement about a book that is trading. So the answer is
    * told it bought nothing only when this is false; true with no names, that
    * it bought coins it cannot name; absent, nothing either way.
+   *
+   * WHICH MONEY THOSE UNNAMED BUYS WERE (final review, 2026-10-12): "paper",
+   * "live" or "both". A named coin carries "(on paper)"; the unnamed line
+   * said no money at all, beside "You trade with real money", so an agent
+   * switched to live whose recent buys were all paper was steered to call
+   * them real-money buys (and a paper agent's live buys, paper). With the
+   * kind the line says which money, and never the other. `true` is a buy of
+   * no known kind: the line says no money either way.
    */
-  boughtLately?: boolean;
+  boughtLately?: boolean | "paper" | "live" | "both";
   /** Its own recent public posts and answers, newest first: what it has already said, which it may restate. */
   said: string[];
   /** The owner made the agent's wallet public in its introduction. */
@@ -759,6 +767,14 @@ const NOTHING_LOOKED_UP: Readonly<Partial<Record<AnswerIntentKind, string>>> = {
   chat: INTENT_HINT.chat,
 };
 
+/** Buys it cannot name, by which money they were: the line says that money and never the other. */
+const UNNAMED_BUYS: Readonly<Record<"paper" | "live" | "both" | "unknown", string>> = {
+  paper: "You bought coins lately on paper, with practice money, that you can't name here: never name or guess one, never say they were real money, and never say you haven't bought anything.",
+  live: "You bought coins lately with real money that you can't name here: never name or guess one, never say they were on paper, and never say you haven't bought anything.",
+  both: "You bought coins lately, some on paper and some with real money, that you can't name here: never name or guess one, never say which money any of them was, and never say you haven't bought anything.",
+  unknown: "You bought coins lately that you can't name here: never name or guess one, and never say you haven't bought anything.",
+};
+
 /**
  * ANSWERING A TAG, the way the agent answers in a Telegram group: in its own
  * voice, from facts it is handed and what it has already said publicly, never
@@ -803,8 +819,8 @@ export function answerPrompt(f: AnswerFacts): Prompt {
     // never says paper reads as real money, and the gate refuses it.
     f.mode === "live" ? "You trade with real money." : f.mode === "paper" ? "You trade on paper, with practice money: every answer must say so in a few words (that you're on paper), whatever it is about." : "You are not trading right now.",
     buys.length ? `Coins you bought lately: ${buys.map((c) => `${q(c.label)}${c.paper ? " (on paper)" : ""}`).join(", ")}.`
-      : f.boughtLately === true ? "You bought coins lately that you can't name here: never name or guess one, and never say you haven't bought anything."
-      : f.boughtLately === false ? "You have not bought anything lately." : null,
+      : f.boughtLately === false ? "You have not bought anything lately."
+      : f.boughtLately ? UNNAMED_BUYS[f.boughtLately === true ? "unknown" : f.boughtLately] : null,
     f.walletPublic ? "Your wallet is public: it is in your introduction post, so people can follow your trades there. Never write the address." : null,
     said.length ? `What you already said publicly (you may restate it, never copy it): ${said.map(q).join(" / ")}.` : null,
     research.length ? `What you looked up just now for this question (say it your own way, keep who said it, add nothing): ${research.map(q).join(" / ")}.` : null,

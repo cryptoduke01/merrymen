@@ -786,6 +786,26 @@ describe("an active agent's answers and conversation memory", () => {
     assert.doesNotMatch(named, /not bought anything|can't name here/);
   });
 
+  it("buys it cannot name are said with the money they were, never the agent's money today", () => {
+    const of = (mode: "live" | "paper", boughtLately: "paper" | "live" | "both") =>
+      answerPrompt({ ...BASE, mode, question: "what have you been buying lately?", recentBuys: [], boughtLately, said: [], walletPublic: false }).prompt;
+    // Switched to live, its recent buys all on paper: never steered to call them real money.
+    const switched = of("live", "paper");
+    assert.match(switched, /You trade with real money/);
+    assert.match(switched, /You bought coins lately on paper, with practice money, that you can't name here/);
+    assert.match(switched, /never say they were real money/);
+    // On paper now, its recent buys live: never steered to call them paper.
+    const back = of("paper", "live");
+    assert.match(back, /You bought coins lately with real money that you can't name here/);
+    assert.match(back, /never say they were on paper/);
+    // Both: never which.
+    assert.match(of("live", "both"), /some on paper and some with real money.*never say which money any of them was/);
+    for (const p of [switched, back, of("live", "both")]) {
+      assert.match(p, /never say you haven't bought anything/);
+      assert.doesNotMatch(p, /You have not bought anything lately/);
+    }
+  });
+
   it("an answer is very casual, and the writer is never told the sherwood name: only code's lines say it", () => {
     const text = all(answerPrompt({ ...BASE, question: "what model do you run on", recentBuys: [], said: [], walletPublic: false }));
     assert.match(text, /texting a friend/);

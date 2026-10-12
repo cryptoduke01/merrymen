@@ -645,6 +645,19 @@ function recentCoins(f: AgentFacts): { label: string; paper: boolean }[] {
 }
 
 /**
+ * WHETHER IT BOUGHT ANYTHING LATELY, AND WITH WHICH MONEY, by each buy's own
+ * paper flag — never today's mode: an agent switched from paper to live
+ * inside the window bought on paper, whatever it trades with now. What an
+ * answer is told of buys it cannot name (writer.ts AnswerFacts.boughtLately).
+ */
+function boughtKind(f: AgentFacts): false | "paper" | "live" | "both" {
+  const buys = f.calls.filter((c) => c.side === "buy");
+  if (!buys.length) return false;
+  const paper = buys.some((c) => c.paper), live = buys.some((c) => !c.paper);
+  return paper && live ? "both" : paper ? "paper" : "live";
+}
+
+/**
  * ITS OWN CONVERSATIONS, for a casual post to pick back up: the replies and
  * answers this owner sent, newest first, never anyone else's words — and
  * never an answer that carried something looked up: by its row's mark
@@ -1477,7 +1490,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       const lines = templated ? modelAnswers(comment.id, facts.style, { paper: f.mode === "paper" }) : [];
       const raw = templated
         ? lines[0]!
-        : await draft(creds, answerPrompt({ ...facts, question: candidate.text, recentBuys: buys, boughtLately: f.calls.some((c) => c.side === "buy"),
+        : await draft(creds, answerPrompt({ ...facts, question: candidate.text, recentBuys: buys, boughtLately: boughtKind(f),
           said: said.map(withoutReplyOptOut), walletPublic, ...(looked ?? {}) }), { call: deps.llm, timeoutMs: deps.draftTimeoutMs });
       const mode = f.mode === "idle" ? null : f.mode;
       const gate = (text: string) => admitXPost(text, {

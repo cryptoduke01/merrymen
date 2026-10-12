@@ -331,13 +331,30 @@ test("a live agent whose buys all lack a sayable name is never told it bought no
   const [prompt] = w.asked();
   assert.ok(prompt);
   assert.match(prompt!, /You trade with real money/);
-  assert.match(prompt!, /You bought coins lately that you can't name here/);
+  assert.match(prompt!, /You bought coins lately with real money that you can't name here/);
   assert.doesNotMatch(prompt!, /You have not bought anything lately|T7631|Pepe 2/);
   // And an agent that truly bought nothing is told so.
   const idle = await world(t, { facts: { ...FACTS, calls: [] } });
   idle.setInbox([tag({ text: "@pine_stoat what have you been buying lately?" })]);
   await idle.step();
   assert.match(idle.asked()[0]!, /You have not bought anything lately/);
+});
+
+test("a live agent whose unnamed buys were on paper is told they were paper, never real money", async (t) => {
+  // Switched from paper to live inside the window: every recent buy is a paper Trencher buy it cannot name.
+  const paperBuy: CallFact = { ...CALL, decisionId: "fill-derived", symbol: "T7631DACC21B", name: "Pepe 2.0", paper: true };
+  const w = await world(t, { facts: { ...FACTS, mode: "live", calls: [paperBuy] } });
+  w.setInbox([tag({ text: "@pine_stoat what have you been buying lately?" })]);
+  await w.step();
+  const [prompt] = w.asked();
+  assert.match(prompt!, /You trade with real money/);
+  assert.match(prompt!, /You bought coins lately on paper, with practice money, that you can't name here/);
+  assert.match(prompt!, /never say they were real money/);
+  // A live buy beside it: both kinds, and never which.
+  const both = await world(t, { facts: { ...FACTS, mode: "live", calls: [paperBuy, { ...paperBuy, decisionId: "fill-derived-2", symbol: "T8888DACC21B", paper: false }] } });
+  both.setInbox([tag({ text: "@pine_stoat what have you been buying lately?" })]);
+  await both.step();
+  assert.match(both.asked()[0]!, /some on paper and some with real money/);
 });
 
 test("advice requests and plain chatter get no answer and cost no model call", async (t) => {

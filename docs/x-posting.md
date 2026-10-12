@@ -569,7 +569,11 @@ the mention itself. They go out **right away**:
   its intro, and what it already said publicly. Buys with no name a post may
   say (an autonomous Trencher coin's derived id) are said to be coins it
   can't name, never that it bought nothing; only an agent with no buys at
-  all is told it bought nothing lately. A paper agent is told to say paper in
+  all is told it bought nothing lately. Those unnamed buys are said with
+  the money each one was (its own paper flag, not today's mode): an agent
+  switched to live whose recent buys were all on paper is told they were on
+  paper and never to call them real money, a paper agent's earlier live
+  buys are never called paper, and a mix is told never to say which. A paper agent is told to say paper in
   every answer, since the gate refuses a paper reply that does not. "Already said" means its own
   posted rows only. A draft still under Coming up, including an answer
   drafted earlier in the same pass, is never handed over as said, though the
