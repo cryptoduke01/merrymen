@@ -211,10 +211,17 @@ export function cleanTicker(raw: unknown): string | null {
  * so "hitlerdidnothingwrong", "niggercoins", "gasthejewsnow" and
  * "donaldjtrumpcoin" were no name at all and got code's decline. A run of
  * letters of any length is searched for every such name inside it.
+ *
+ * AND WITH ITS DIGITS READ AS THE LETTERS THEY STAND FOR (red-team review,
+ * 2026-10-12): "$H1TLER" was read as "tler", and declined. A run of letters
+ * and digits is read with 0 as o, 1 as i, 3 as e, 4 as a, 5 as s and 7 as t,
+ * any other digit dropped ("$PEPE2" is "pepe").
  */
+const DIGIT_LETTER: Readonly<Record<string, string>> = Object.freeze({ "0": "o", "1": "i", "3": "e", "4": "a", "5": "s", "7": "t" });
 export function neverAnsweredName(raw: unknown): boolean {
-  if (typeof raw !== "string" || !/^[A-Za-z]{2,}$/.test(raw)) return false;
-  const lower = raw.toLowerCase();
+  if (typeof raw !== "string" || !/^[A-Za-z0-9]{2,}$/.test(raw) || !/[A-Za-z]/.test(raw)) return false;
+  const lower = raw.toLowerCase().replace(/[0-9]/g, (d) => DIGIT_LETTER[d] ?? "");
+  if (lower.length < 2) return false;
   return NEVER_ANSWERED.test(lower) || TICKER_REFUSED_WHOLE.has(lower.toUpperCase()) || SKELETON_REFUSED.test(skeletonOf(lower));
 }
 

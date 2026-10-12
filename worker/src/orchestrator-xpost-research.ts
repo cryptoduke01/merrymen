@@ -569,7 +569,8 @@ export function unshowableName(text: unknown): boolean {
   if (sherwoodMentioned(text)) return true;
   const t = normalisedTag(text).replace(/[’‘]/g, "'").replace(new RegExp(ALAN_ADDRESSED.source, "g"), "");
   if (HOUSE_TOKEN_ASK.test(t) || (MODEL_WORD.test(t) && TOKEN_WORD.test(t))) return true;
-  const runs = [...extractCashtags(text).map((c) => c.toLowerCase()), ...(t.match(/[a-z]+/g) ?? [])];
+  // Every run of letters, and every run of letters and digits read as letters (neverAnsweredName: "$H1TLER").
+  const runs = [...extractCashtags(text).map((c) => c.toLowerCase()), ...(t.match(/[a-z]+/g) ?? []), ...(t.match(/[a-z0-9]*[0-9][a-z0-9]*/g) ?? [])];
   return runs.some((w) => !EVERYDAY_HIDING.has(w) && neverAnsweredName(w));
 }
 

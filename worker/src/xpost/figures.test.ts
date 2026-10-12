@@ -337,6 +337,9 @@ describe("the names no line of the house's answers under (2026-10-12)", () => {
     for (const name of ["fomo", "trencher", "trenches", "TRNCHR", "shogun", "hitlerdidnothingwrong", "niggercoins", "gasthejewsnow", "donaldjtrumpcoin", "MAGAMAGAMAGA"]) {
       assert.equal(neverAnsweredName(name), true, name);
     }
+    // And its digits read as the letters they stand for (red-team 2026-10-12).
+    for (const name of ["H1TLER", "h1tl3r", "N1GGERCOINS", "TRUMPMAGACOIN", "K1LL", "5EX", "M3RRYMEN"]) assert.equal(neverAnsweredName(name), true, name);
+    for (const name of ["BTC2", "24h", "100x", "2026", "w1f"]) assert.equal(neverAnsweredName(name), false, name);
     // Hype, a call, a holding, money and the sources it names keep a ticker out of the line, but are no reason to stay silent.
     for (const name of ["PEPE", "BTC", "moon", "LAMBO", "scam", "buy", "loading", "gainers", "bag", "million", "gecko", "bitquery", "", "toolongforaticker", "PEPE2", null]) {
       assert.equal(neverAnsweredName(name), false, String(name));
