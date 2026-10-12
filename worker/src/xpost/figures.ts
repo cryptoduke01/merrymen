@@ -81,6 +81,19 @@ const TICKER_REFUSED = new RegExp([
   "dyke", "spaz", "beaner", "raghead", "towelhead", "paki", "cuck", "incel", "rapist", "molest", "csam", "hamas", "hezbollah", "taliban", "qaeda",
   "kkk", "sieg", "heil", "aryan", "whitepower", "wpww", "suicid", "selfharm", "murder", "massacre", "genocide", "holocaust", "bomb", "shooting",
   "anal", "anus", "tits", "boob", "penis", "vagina", "milf", "hentai", "onlyfans", "xxx", "horny", "nsfw", "jizz", "wank", "twat", "arse", "asshole",
+  // AND THE ONES THAT LIST MISSED (red-team 2026-10-12): "$FUHRER", "$GOYIM", "$NIGLET", "$JIGABOO",
+  // "$HOLOHOAX", "$KNEEGROW", "$NIBBA", "$GASTHEM", "$HAILHTLR", "$ADOLF", "$CUMSHOT" were posted as
+  // trending from the house account. Errs toward dropping: "JEWEL" holds "jew", "SCUM" and
+  // "ACCUM" hold "cum", "KNIGHT" holds "nig"; each costs one ticker in one line.
+  "nig", "niq", "nyg", "nibb", "negr", "kneegr", "jigab", "jiggab", "jigga", "porchmonk", "pickaninn", "golliwog", "sambo", "darkie", "darky",
+  "jew", "goy", "zog", "hymie", "heeb", "yid", "shylock", "holohoax", "hoax", "sixmil", "gasthe", "gaskike", "oven", "zyklon", "auschwitz", "dachau",
+  "fuhrer", "fuehrer", "fhrer", "hitl", "htlr", "hilter", "adolf", "himmler", "goebbel", "mengele", "eichmann", "gestapo", "waffen", "nsdap", "reich",
+  "swastik", "svastik", "lynch", "noose", "klan", "klux", "whitepride", "rahowa", "groyper", "proudboy", "boogaloo", "fourteenwords", "allahu",
+  "wigger", "gypsy", "gyp", "chinaman", "zipperhead", "kaffir", "kafir", "mongoloid", "spastic", "spazz", "tard", "cracker", "honky", "redskin",
+  "squaw", "injun", "gringo", "kraut", "cameljock", "sandnig", "homo", "lesbo", "faggot", "trann", "shemale", "ladyboy",
+  "cum", "dildo", "orgy", "orgasm", "blowjob", "handjob", "boner", "erection", "nipple", "semen", "sperm", "creampie", "bukkake", "gangbang",
+  "threesome", "fetish", "bdsm", "bondage", "stripper", "hooker", "escort", "camgirl", "incest", "bestial", "zoophil", "necrophil", "phuck", "fvck",
+  "fck", "kunt", "biatch", "pussy",
   // politics
   "trump", "melania", "biden", "maga", "kamala", "harris", "obama", "putin", "zelensk", "election", "president", "vote",
   "barron", "ivanka", "vance", "pelosi", "desantis", "rfk", "kennedy", "milei", "bukele", "jinping", "netanyahu", "bibi", "khamenei", "erdogan",
@@ -98,7 +111,17 @@ const TICKER_REFUSED = new RegExp([
 ].join("|"));
 
 /** Words too short to read inside other tickers, refused only whole: "ASS", "CUM", "JAP", "DIE", "HH", "SS", "WOP". */
-const TICKER_REFUSED_WHOLE: ReadonlySet<string> = new Set("ASS CUM JAP DIE HH SS WOP FAP KMS NAMBLA".split(" "));
+const TICKER_REFUSED_WHOLE: ReadonlySet<string> = new Set("ASS CUM JAP DIE HH SS WOP FAP KMS NAMBLA HOE NIP CP".split(" "));
+
+/**
+ * AND ON ITS CONSONANTS (red-team 2026-10-12): a slur spelled without its
+ * vowels, or with other ones, is the same slur to a reader ("KNEEGROW",
+ * "HAILHTLR", "NIBBA", "NIQQA"). A ticker's letters with every vowel and y
+ * taken out are read against the slurs' own consonants. Errs toward
+ * dropping: "ANGER" and "FINGER" carry n-g-r and are left out.
+ */
+const SKELETON_REFUSED = /n+g+r|n+g{2,}|n+q{2,}|n+b{2,}|h+t+l+r|f+h+r+r|g+s+t+h+m|k+k+k/;
+const skeletonOf = (lower: string): string => lower.replace(/[aeiouy]/g, "");
 
 /**
  * A PROVIDER'S SYMBOL AS THE LINE MAY SHOW IT, or null. Exactly A-Z and a-z,
@@ -116,7 +139,8 @@ const TICKER_REFUSED_WHOLE: ReadonlySet<string> = new Set("ASS CUM JAP DIE HH SS
 export function cleanTicker(raw: unknown): string | null {
   if (typeof raw !== "string" || !/^[A-Za-z]{2,10}$/.test(raw)) return null;
   const t = raw.toUpperCase();
-  return TICKER_REFUSED.test(t.toLowerCase()) || TICKER_REFUSED_WHOLE.has(t) ? null : t;
+  const lower = t.toLowerCase();
+  return TICKER_REFUSED.test(lower) || TICKER_REFUSED_WHOLE.has(t) || SKELETON_REFUSED.test(skeletonOf(lower)) ? null : t;
 }
 
 /** Every ticker a rendered line shows, without its $. */

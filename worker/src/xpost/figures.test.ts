@@ -89,6 +89,15 @@ describe("tickers: A-Z, two to ten letters, nothing else", () => {
     }
   });
 
+  it("never the slurs, hate codes and sexual words the first list missed, nor a slur spelled on its consonants (red-team 2026-10-12)", () => {
+    // Each passed cleanTicker at fbcf8756 and was posted as trending, or as fomo's most bought, from the house account.
+    for (const bad of ["JIGABOO", "HOLOHOAX", "KNEEGROW", "NIBBA", "GASTHEM", "HAILHTLR", "NIQQA", "JEWBOY", "GOYIM", "ZOG", "FUHRER", "SWASTIKA", "LYNCH",
+      "WHITEPRIDE", "HITLR", "SHEMALE", "DILDO", "ADOLF", "HIMMLER", "JEW", "JEWS", "NIGLET", "CUMSHOT", "SPASTIC", "NYGGA", "NIGRO", "HTLR", "FUHRR"]) {
+      assert.equal(cleanTicker(bad), null, bad);
+    }
+    for (const ok of ["PEPE", "CHUMP", "FROGGY", "WOJAK", "BONK", "COINA", "ZAPX", "QRTZ", "MOLT", "GALA", "BASS", "MERIT"]) assert.equal(cleanTicker(ok), ok, ok);
+  });
+
   it("never a slur, a political name or a hype word", () => {
     for (const bad of ["NAZI", "FUCK", "TRUMP", "MAGA", "BIDEN", "PUMP", "MOON", "GEM", "SCAM", "SAFE", "LEGIT"]) assert.equal(cleanTicker(bad), null, bad);
   });

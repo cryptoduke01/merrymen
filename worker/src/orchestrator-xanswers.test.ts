@@ -2837,9 +2837,15 @@ test("what's hot names no chain coin coingecko does not list by its contract: a 
     assert.equal(row!.status, "posted", names.join());
     assert.deepEqual(w.sends.map((s) => s.text), [hotNoneAnswers(MENTION, { lower: true })[0]], names.join());
     for (const n of names) assert.ok(!row!.body.includes(`$${n}`), `${n}: ${row!.body}`);
-    assert.ok(urls.some((u) => u.includes("/tokens/multi/")), "the contracts were asked about");
     assert.ok(!urls.some((u) => u.includes("/coins/markets")), "no coin id, no market read");
   }
+  // Names no screen knows, unlisted: asked about by contract, and never shown.
+  const urls = fakeCoinGecko(t, ["ZORBLAT", "QUIXEL", "FENDRO"].map((name, i) => ({ name, ...figures[i]! })), []);
+  const plain = await world(t, { env: RESEARCH_ON, research: createXResearch(), facts: { ...FACTS, name: "Alan Al Dale" } });
+  plain.setInbox([tag({ text: "@pine_stoat what's hot?" })]);
+  await plain.step();
+  assert.deepEqual(plain.sends.map((s) => s.text), [hotNoneAnswers(MENTION, { lower: true })[0]]);
+  assert.ok(urls.some((u) => u.includes("/tokens/multi/")), "the contracts were asked about");
   // A coin CoinGecko lists by its contract, ranked, is shown, and only it: the words are of the coins the line shows.
   fakeCoinGecko(t, [{ name: "FUHRER", ...figures[0]! }, { name: "CHUMP", ...figures[1]! }, { name: "NIGLET", ...figures[2]! }], ["CHUMP"]);
   const w = await world(t, { env: RESEARCH_ON, research: createXResearch(), facts: { ...FACTS, name: "Alan Al Dale" } });
@@ -2849,5 +2855,23 @@ test("what's hot names no chain coin coingecko does not list by its contract: a 
   assert.ok(hotWords({ coins: 1, lead: { dir: "up", size: "sharply" } }).includes(wordsBeforeLine(text) ?? ""), text);
   assert.match(text, / geckoterminal robinhood: trending \$CHUMP 24h \+88% vol ~\$940k\. say stop to opt out\.$/, text);
   assert.doesNotMatch(text, /FUHRER|NIGLET/);
+});
+
+test("what's hot never shows the slurs and hate codes the first list missed, even listed, in the pools or as fomo's most bought (red-team 2026-10-12)", async (t) => {
+  // At fbcf8756: "over on robinhood chain, some tickers top geckoterminal's page, the leading one up substantially over a day. info only.
+  // geckoterminal robinhood: trending $JIGABOO 24h +412% vol ~$2.3M, $HOLOHOAX 24h +88.1% vol ~$940k; fomo: most bought $JIGABOO, $HOLOHOAX. say stop to opt out."
+  // The same with NIBBA/GASTHEM/HAILHTLR and NIQQA/JEWBOY/SWASTIKA. Here coingecko lists every one: the sanitiser is the second layer.
+  for (const names of [["JIGABOO", "HOLOHOAX", "KNEEGROW"], ["NIBBA", "GASTHEM", "HAILHTLR"], ["NIQQA", "JEWBOY", "SWASTIKA"], ["GOYIM", "ZOG", "FUHRER"],
+    ["LYNCH", "WHITEPRIDE", "HITLR"], ["SHEMALE", "DILDO", "ADOLF"]]) {
+    const pools = [...names.map((n, i) => ({ ...namedPool(n, i + 1, [412.4, 88.1, 35][i]!, [2.31e6, 940_000, 300_000][i]!), reserveUsd: 95_000, buyers24h: 220, buys24h: 400, sells24h: 250 })),
+      namedPool("CHUMP", 9, 7, 150_000)];
+    const w = await world(t, { env: { ...RESEARCH_ON, MERRYMEN_XPOST_FOMO: "1" }, research: hotWithFomo(pools, [names[0]!, names[1]!]), facts: { ...FACTS, name: "Alan Al Dale", calls: [] } });
+    w.setInbox([tag({ text: "@pine_stoat what's hot?" })]);
+    await w.step();
+    const text = String(w.sends[0]?.text ?? "");
+    assert.match(text, /geckoterminal robinhood: trending \$CHUMP 24h \+7% vol ~\$150k\./, text);
+    for (const n of names) assert.ok(!text.includes(`$${n}`), `${n}: ${text}`);
+    assert.doesNotMatch(text, /fomo: most bought/, text);
+  }
 });
 

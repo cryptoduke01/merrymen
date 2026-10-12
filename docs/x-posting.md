@@ -1096,7 +1096,10 @@ other owner's agent, and its posting and reply warnings, are unchanged.
   in at all. Whoever deploys a token names its pool, so the sanitiser also
   refuses a full list of slurs, hate codes and profanity (`$KYS`, `$KIKE`,
   `$CHINK`, `$KKK`, `$HEIL`, `$PEDO` were posted, red-team 2026-10-12; the
-  shortest only whole: `ASS`, `HH`, `SS`), more political names, the
+  shortest only whole: `ASS`, `HH`, `SS`; and those it missed, `$FUHRER`,
+  `$GOYIM`, `$NIGLET`, `$JIGABOO`, `$HOLOHOAX`, `$GASTHEM`, `$DILDO`, posted
+  at fbcf8756, with a slur read on its consonants too: `KNEEGROW`,
+  `HAILHTLR`, `NIBBA`, `NIQQA`, at the cost of `ANGER` or `JEWEL`), more political names, the
   chain's and the agent's shortened names (`RBNHD`, `ALDALE`) and every
   model or provider name; a chain coin's ticker is three letters at least;
   and research and then the orchestrator leave out a coin named after the
