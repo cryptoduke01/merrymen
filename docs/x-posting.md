@@ -415,6 +415,10 @@ reply consent; it does not erase recipient opt-outs or published posts.
 | `MERRYMEN_XPOST_PER_DAY` | orchestrator | 3 | posts per X account per local day (at most two of them buy posts); `0` = off; unreadable = the default |
 | `MERRYMEN_XPOST_FLEET_PER_DAY` | orchestrator | 1000 | posts per UTC day across the fleet; `0` or unreadable = off |
 | `MERRYMEN_XPOST_ACTIVE_TENANTS` | orchestrator | unset | comma-separated owner (tenant) addresses on the active cadence; see "Active owners" below; an entry that is not an address is named by position and ignored |
+| `MERRYMEN_XPOST_RESEARCH` | orchestrator | unset (off) | exactly `1`: an active agent's answers look things up first; see "Research for answers" below. Off: nothing is looked up and tags are selected exactly as without it |
+| `MERRYMEN_XPOST_FOMO` | orchestrator | unset (off) | exactly `1`, with research on: answers may use Fomo's token activity and quick theses, paraphrased and attributed. Needs the Fomo pass on (`MERRYMEN_FOMO_ENABLED=1`); set without research it does nothing, and the boot log says so |
+| `MERRYMEN_XPOST_RESEARCH_PER_HOUR` | orchestrator | 120 | public-index lookups (a name search, a coin's facts) per hour across every X account; `0` = none; unreadable = the default. Each X account also has at most eight per ten minutes |
+| `MERRYMEN_FOMO_X_HOURLY_CREDITS` | orchestrator | 3000 | Fomo credits per X account per clock hour for answers (`docs/fomo.md`); `0` = no Fomo in answers |
 
 ## Active owners
 
@@ -444,9 +448,14 @@ These are `answer` posts, replying to the mention itself.
   and advice requests are dropped before any model call.
 - **What it may say** (`answerPrompt`): only public facts — how it trades, the
   coins it bought lately (never that it holds them), whether its wallet is in
-  its intro, and what it already said publicly. Asked about its model, it does
-  not name a provider, and mentions merrymen's own model, sherwood, only as
-  coming.
+  its intro, and what it already said publicly — very casually: short,
+  texting-a-friend answers, lowercase welcome, dry humour never at the
+  asker's expense. Asked about its model, it never names a provider: it is
+  built by merrymen, and the new "sherwood one" (merrymen/sherwood-1, spelled
+  without a digit because a post carries none; `SHERWOOD_ON_X`) is
+  merrymen's own model, cooking. It never says sherwood runs it today: nothing
+  wires it into an agent yet. Change `SHERWOOD_ON_X` and the prompt only once
+  it does.
 - **Gate:** the comment-reply gate, opt-out notice included.
 - **Their own lane:** three minutes apart, 24 a day per X account, at most
   two per person per rolling day. Answers never spend or wait on the posting
@@ -454,6 +463,57 @@ These are `answer` posts, replying to the mention itself.
 - **Polling:** mentions are read every ten minutes for active owners.
 - **Comments:** an active owner's comments on its own posts are answered
   through the same path, never as a second reply.
+
+## Research for answers
+
+With `MERRYMEN_XPOST_RESEARCH=1` (default off), an active agent's answer
+looks things up first, the way Shogun does in a Telegram group
+(`worker/src/orchestrator-xpost-research.ts`). Off, nothing below happens.
+
+- **Selection** (`tagCandidate`, research on): a tag may carry ONE contract
+  address (0x and forty hex). It is taken out of the question — the writer
+  reads "this coin" — and kept apart as a lookup key: never shown to the
+  model, never nominated, never traded. Two addresses, an address in a link,
+  or a longer hex run are still refused. "How many holders" and "how much
+  liquidity" may be asked; should-i, when-to-sell, targets and its own size
+  are still refused.
+- **Intent, by code** (`classifyTag`, with the Telegram groups' readers):
+  what it can do, how to get an agent, its own trades, a coin (by `$ticker`,
+  by a coin it bought named in words, or by the address), its model, or chat.
+  An attempt to steer it and a private ask (wallet, P&L, owner) are chat:
+  nothing is looked up for them.
+- **What a coin is looked up on:** its own history (the buys the room knows,
+  its own buy posts on this X account, its public theses: "you bought it",
+  "you looked at it and passed: <reason>", the reason through the Telegram
+  facts filter that drops figures, addresses and links; a sale is never
+  said); the public index's coin facts on the FLEET Gecko lane (the
+  orchestrator passes its home explicitly; `process.env` is untouched); the
+  creator's own description ("the project says it's …"); with
+  `MERRYMEN_XPOST_FOMO=1`, Fomo's token activity and quick theses; and,
+  once another change wires it, onchain flow (`FlowReader`).
+- **What the model gets:** code-built, digit-free phrases with their source
+  in them — "the public index shows liquidity is thin", "holders look
+  concentrated on the public index", "it's only hours old", "fomo traders
+  mostly argue it's still early", "on fomo, more traders have been buying in
+  than heading out lately". Never a number, price, size, P&L, handle, quote,
+  wallet list or address. A valuation cue (under- or overvalued) is never
+  said. Every phrase is pinned through the real X gate in the tests.
+- **Budget:** one bundle per answer, at most six lookups and nine seconds,
+  each read at most four. Index lookups: eight per X account per ten minutes,
+  `MERRYMEN_XPOST_RESEARCH_PER_HOUR` across X accounts. Fomo: the `x-answer`
+  surface's own hourly cap per X account (`MERRYMEN_FOMO_X_HOURLY_CREDITS`),
+  under the owner's caps and the fleet's pools. A lookup refused, failed or
+  late is simply not a fact; the answer is still written.
+- **The gate is unchanged:** no numbers, no prices, no advice, never that it
+  holds a coin now. A coin it did not trade is named without a `$` sign (an
+  unvouched cashtag is refused).
+- **Fomo on X:** the owner confirmed (2026-10-12) Merrymen holds Fomo's
+  Enterprise rights. They are used for paraphrased, attributed facts in these
+  answers only, behind `MERRYMEN_XPOST_FOMO=1`. Fomo publication drafts stay
+  policy-blocked (`docs/fomo.md`).
+- **Logs:** counts only (`answer-intent-coin`, `answer-lookups`,
+  `answer-research-index-busy` and the like), never a coin, a person or an
+  address.
 
 ## What an owner should know (it is in the warning)
 
