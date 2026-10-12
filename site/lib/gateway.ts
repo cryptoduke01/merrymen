@@ -47,7 +47,7 @@ export async function fetchScope(signal?: AbortSignal): Promise<ScopeOutcome> {
       return { ok: false, kind: "unconfigured", message: "This gateway hasn't been given a Bitquery key, so discovery is off." };
     }
     if (res.status === 429) {
-      return { ok: false, kind: "ratelimit", message: "Slow down — the scope only refreshes every 45 seconds anyway." };
+      return { ok: false, kind: "ratelimit", message: "Slow down — the scope only refreshes every few minutes anyway." };
     }
     if (!res.ok) {
       return { ok: false, kind: "upstream", message: "The chain indexer isn't answering right now." };

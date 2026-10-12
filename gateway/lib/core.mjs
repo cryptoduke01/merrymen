@@ -33,12 +33,21 @@ export const DEFAULTS = {
   // 1,000,000-point month). Reserved BEFORE each upstream call; a refusal
   // costs nothing. Raise it only with the lane's own knob brought down.
   BITQUERY_POINTS_PER_DAY: 5_000,
+  // THE PUBLIC MEMESCOPE'S OWN SHARE of that day, counted apart
+  // (bq-scope-points:<day>); holders reserve against the rest
+  // (bq-points:<day>), which the public page can never spend. At 45 s one open
+  // tab alone cost ~9,600 points a day, so with one shared counter the page
+  // used up the 5,000 by midday UTC and every holder got 503 until midnight.
+  // 0.4 of 5,000 is 2,000 for the page and 3,000 for holders.
+  MEMESCOPE_SHARE: 0.4,
   // How long the PUBLIC memescope is served from one shared answer. This number
   // is the whole cost model of that route: the upstream is hit at most once per
   // this many seconds no matter how many people are watching, so traffic and
-  // spend are decoupled. Lower it and you are buying freshness with the
-  // operator's own Bitquery allowance.
-  MEMESCOPE_TTL_SEC: 45,
+  // spend are decoupled. SIZED TO ITS SHARE: 86,400 / 240 × 5 = 1,800 points a
+  // day, inside its 2,000, so the page refreshes all day and never freezes.
+  // Lower it and you are buying freshness with the operator's own Bitquery
+  // allowance: past its share the page serves its last rows until 00:00 UTC.
+  MEMESCOPE_TTL_SEC: 240,
   // Per-IP cap on the public route. This protects the gateway PROCESS, not the
   // bill — the bill is already bounded by the shared cache above.
   MEMESCOPE_RATE_PER_MIN: 30,
@@ -454,13 +463,21 @@ export function createGateway(cfg) {
    * day, like the provider's usage page). True to proceed; false when the day
    * is spent; null when the store cannot count — refused too, since an
    * uncountable spend is not one this gateway makes.
+   *
+   * TWO PURSES IN ONE DAY. The public memescope (`purse` "scope") spends only
+   * its MEMESCOPE_SHARE of the day, holders only the rest: the two together
+   * never pass BITQUERY_POINTS_PER_DAY, and neither can spend the other's.
    */
-  async function reserveBitqueryPoints(points) {
-    const cap = T.BITQUERY_POINTS_PER_DAY;
-    if (!(cap > 0) || typeof store.reservePoints !== "function") return null;
-    const day = new Date().toISOString().slice(0, 10);
+  async function reserveBitqueryPoints(points, purse = "holders") {
+    const day = T.BITQUERY_POINTS_PER_DAY;
+    if (!(day > 0) || typeof store.reservePoints !== "function") return null;
+    const share = Math.min(1, Math.max(0, Number(T.MEMESCOPE_SHARE) || 0));
+    const scope = Math.floor(day * share);
+    const cap = purse === "scope" ? scope : day - scope;
+    if (!(cap > 0)) return false;
+    const utc = new Date().toISOString().slice(0, 10);
     try {
-      return await store.reservePoints(`bq-points:${day}`, points, cap, 2 * 86_400);
+      return await store.reservePoints(`${purse === "scope" ? "bq-scope-points" : "bq-points"}:${utc}`, points, cap, 2 * 86_400);
     } catch {
       return null;
     }
@@ -555,8 +572,8 @@ export function createGateway(cfg) {
   let scopeBudgetSaid = "";
 
   async function fetchScope() {
-    // Inside the single flight, so one upstream call is one reservation.
-    const reserved = await reserveBitqueryPoints(BITQUERY_QUERIES.recentPools.points);
+    // Inside the single flight, so one upstream call is one reservation — from the page's own share.
+    const reserved = await reserveBitqueryPoints(BITQUERY_QUERIES.recentPools.points, "scope");
     if (reserved !== true) throw Object.assign(new Error(reserved === false ? "the daily discovery allowance is spent" : "the discovery spend cannot be counted"), { budget: true });
     // The LIMIT binds here, not the time window. This chain opens pools fast
     // enough that 40 events covered roughly a minute of activity, which made a
@@ -622,7 +639,7 @@ export function createGateway(cfg) {
       return { status: 503, json: { error: "this gateway has no Bitquery key configured" } };
     }
     if (!(await store.rateHit(`ms:${ip}`, T.MEMESCOPE_RATE_PER_MIN, 60))) {
-      return { status: 429, json: { error: "rate limit — the scope refreshes every 45s, polling faster shows nothing new" } };
+      return { status: 429, json: { error: `rate limit — the scope refreshes every ${T.MEMESCOPE_TTL_SEC}s, polling faster shows nothing new` } };
     }
     const fresh = Date.now() - scope.at < T.MEMESCOPE_TTL_SEC * 1000;
     if (fresh) return { status: 200, json: { pools: scope.rows, cached: true, ttl: T.MEMESCOPE_TTL_SEC } };

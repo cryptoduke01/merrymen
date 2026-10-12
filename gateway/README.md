@@ -55,11 +55,15 @@ curl -s https://ai.merrymen.dev/bitquery \
 - One **fleet-wide daily cap** bounds them all: every holder and the public
   memescope reserve each upstream call's points against
   `MERRYMEN_GATEWAY_BITQUERY_POINTS_PER_DAY` (default 5,000 per UTC day,
-  ceiling 30,000) *before* calling. Past it, `/bitquery` answers 503 and the
-  memescope serves its last rows. If the key shares a plan with the
-  orchestrator's Bitquery lane (`docs/bitquery-lane.md`), the two knobs together
-  must stay under the plan: 25,000 + 5,000 a day is 900,000 of a 1,000,000-point
-  month. With the in-memory store a restart forgets the day's count; set the KV
+  ceiling 30,000) *before* calling, in two purses. The memescope spends only
+  its own share (`MEMESCOPE_SHARE`, 40%: 2,000 a day) and refreshes at most
+  every `MEMESCOPE_TTL_SEC` (240 s: 360 refreshes, 1,800 points), so it fits
+  its share all day; holders spend the other 3,000, which the public page can
+  never touch. Past their purse, `/bitquery` answers 503 and the memescope
+  serves its last rows. If the key shares a plan with the orchestrator's
+  Bitquery lane (`docs/bitquery-lane.md`), the two knobs together must stay
+  under the plan: 25,000 + 5,000 a day (the memescope included) is 900,000 of
+  a 1,000,000-point month. With the in-memory store a restart forgets the day's count; set the KV
   store for a durable one.
 - Upstream error bodies are **not** relayed; they can quote the request, and the
   request carries your key on the way out.

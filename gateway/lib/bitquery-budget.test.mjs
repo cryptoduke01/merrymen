@@ -1,6 +1,7 @@
 /**
  * THE GATEWAY'S FLEET-WIDE BITQUERY CAP — one daily allowance across every
- * holder and the public memescope, reserved before each upstream call.
+ * holder and the public memescope, reserved before each upstream call, in two
+ * purses: the memescope's own share, and the holders' rest.
  *
  * Before the worker sent holders' tokens where the gateway reads them, every
  * holder's discovery call was a 401 and spent nothing. Once it was fixed, each
@@ -48,7 +49,8 @@ function gateway(over = {}) {
     publicClient: { readContract: async ({ functionName }) => (functionName === "symbol" ? "PEPE" : functionName === "decimals" ? 18 : 10_000n * 10n ** 18n) },
     store: createStore(),
     ...over,
-    tunables: { BITQUERY_RATE_PER_MIN: 1_000, MEMESCOPE_RATE_PER_MIN: 1_000, MEMESCOPE_TTL_SEC: 0, ...(over.tunables ?? {}) },
+    // No page share unless a test gives one: the holders' tests count the whole day.
+    tunables: { BITQUERY_RATE_PER_MIN: 1_000, MEMESCOPE_RATE_PER_MIN: 1_000, MEMESCOPE_TTL_SEC: 0, MEMESCOPE_SHARE: 0, ...(over.tunables ?? {}) },
   });
 }
 
@@ -57,6 +59,13 @@ describe("MERRYMEN_GATEWAY_BITQUERY_POINTS_PER_DAY", () => {
     assert.equal(DEFAULTS.BITQUERY_POINTS_PER_DAY, 5_000);
     assert.deepEqual(bitqueryPointsPerDayFrom(undefined), { points: 5_000, note: null });
     assert.ok((25_000 + DEFAULTS.BITQUERY_POINTS_PER_DAY) * 31 < 1_000_000);
+  });
+
+  it("the memescope's whole day of refreshes fits its share, so the page never freezes and holders keep the rest", () => {
+    const share = Math.floor(DEFAULTS.BITQUERY_POINTS_PER_DAY * DEFAULTS.MEMESCOPE_SHARE);
+    const refreshes = Math.ceil(86_400 / DEFAULTS.MEMESCOPE_TTL_SEC) + 1;
+    assert.ok(refreshes * 5 <= share, `${refreshes} refreshes × 5 points within ${share}`);
+    assert.equal(DEFAULTS.BITQUERY_POINTS_PER_DAY - share, 3_000, "the holders' purse");
   });
 
   it("takes a positive whole number, clamps at the ceiling, and never echoes a bad value", () => {
@@ -106,20 +115,51 @@ describe("one daily allowance, reserved before every upstream call", () => {
     assert.equal((await gw.bitquery({ token, body: { query: "ping" }, ip: "1.1.1.1" })).status, 200, "the whole allowance is still there");
   });
 
-  it("the public memescope spends from the same day: stale rows once it is gone, an honest 503 with none", async () => {
+  it("the public memescope spends only its own share: stale rows once it is gone, an honest 503 with none", async () => {
     const upstream = stubUpstream();
     const store = createStore();
-    const gw = gateway({ store, tunables: { BITQUERY_POINTS_PER_DAY: 10 } });
+    // 20 a day: 10 for the page, 10 for holders.
+    const tunables = { BITQUERY_POINTS_PER_DAY: 20, MEMESCOPE_SHARE: 0.5 };
+    const gw = gateway({ store, tunables });
     assert.equal((await gw.memescope({ ip: "9.9.9.1" })).status, 200, "first refresh fits");
-    assert.equal((await gw.bitquery({ token: gw._tokens.issueToken(HOLDER), body: { query: "ping" }, ip: "1.1.1.1" })).status, 200, "a holder takes the rest");
+    assert.equal((await gw.memescope({ ip: "9.9.9.1" })).status, 200, "and the second: the page's 10");
     const stale = await gw.memescope({ ip: "9.9.9.1" });
     assert.equal(stale.status, 200);
     assert.equal(stale.json.stale, true, "the page keeps its rows rather than blanking");
     assert.equal(upstream.calls, 2);
-    const empty = gateway({ tunables: { BITQUERY_POINTS_PER_DAY: 10 }, store });
+    const empty = gateway({ tunables, store });
     const none = await empty.memescope({ ip: "9.9.9.2" });
     assert.equal(none.status, 503);
-    assert.equal(upstream.calls, 2, "no refresh was attempted past the cap");
+    assert.equal(upstream.calls, 2, "no refresh was attempted past its share");
+    // The holders' purse was never touched by the page.
+    const token = gw._tokens.issueToken(HOLDER);
+    assert.equal((await gw.bitquery({ token, body: { query: "ping" }, ip: "1.1.1.1" })).status, 200);
+    assert.equal((await gw.bitquery({ token, body: { query: "ping" }, ip: "1.1.1.1" })).status, 200);
+    assert.equal((await gw.bitquery({ token, body: { query: "ping" }, ip: "1.1.1.1" })).status, 503, "holders stop at their own 10");
+  });
+
+  it("a whole UTC day of one open tab polling every 45 s leaves every holder's share intact", async () => {
+    const upstream = stubUpstream();
+    const realNow = Date.now;
+    const start = Date.parse("2026-10-12T00:00:00Z");
+    let now = start;
+    Date.now = () => now;
+    try {
+      const gw = gateway({ tunables: { MEMESCOPE_TTL_SEC: DEFAULTS.MEMESCOPE_TTL_SEC, MEMESCOPE_SHARE: DEFAULTS.MEMESCOPE_SHARE } });
+      let stale = 0;
+      for (; now < start + 86_400_000 - 1_000; now += 45_200) {
+        const r = await gw.memescope({ ip: "9.9.9.9" });
+        assert.equal(r.status, 200);
+        if (r.json.stale) stale++;
+      }
+      assert.equal(stale, 0, "the page refreshed all day: it never ran out of its share");
+      assert.ok(upstream.calls * 5 <= Math.floor(DEFAULTS.BITQUERY_POINTS_PER_DAY * DEFAULTS.MEMESCOPE_SHARE), `${upstream.calls} refreshes`);
+      now = start + 18 * 3_600_000;
+      const ping = await gw.bitquery({ token: gw._tokens.issueToken(HOLDER), body: { query: "ping" }, ip: "1.1.1.1" });
+      assert.equal(ping.status, 200, "a holder at 18:00 UTC still has discovery");
+    } finally {
+      Date.now = realNow;
+    }
   });
 
   it("a store that cannot count refuses, rather than spending what it cannot count", async () => {
