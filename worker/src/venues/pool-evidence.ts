@@ -192,6 +192,11 @@ export const SELL_CONCENTRATION = { minSells: 3, minSharePctOfFlow: 25 } as cons
  * be a router or bundler, which is why it is a sender and not a holder. Every
  * amount is null when any trade in the window has none: missing is never 0.
  *
+ * `sellFlowMaterial` keeps the two kinds of null concentration apart: false
+ * means the trades were all priced and attributed and the selling was below
+ * the gate (no reading to give); null means the window could not be judged
+ * (an unpriced or unattributed trade), so the concentration is unknown.
+ *
  * `sampleCoversWindow` is false when the index's sample was full and its
  * oldest trade is newer than the window's start: the counts are then the
  * window's latest trades, not all of them.
@@ -220,6 +225,7 @@ function tradeWindow(trades: readonly MarketTrade[], seconds: number, nowSec: nu
     distinctBuyers: distinct(buys), distinctSellers: distinct(sells),
     buyUsd: round(buyUsd, 2), sellUsd: round(sellUsd, 2),
     buySharePct: flowUsd !== null && flowUsd > 0 ? round(buyUsd! / flowUsd * 100, 1) : null,
+    sellFlowMaterial: priced && attributed ? material : null,
     topSellerSharePctOfSellUsd: topSellerUsd === null ? null : round(topSellerUsd / sellUsd! * 100, 1),
     topSellerSharePctOfWindowUsd: topSellerUsd === null ? null : round(topSellerUsd / flowUsd! * 100, 1),
     sampleCoversWindow: !sampleFull || (oldest !== undefined && oldest <= start),
@@ -300,7 +306,7 @@ export const FIVE_MINUTE_EVIDENCE_CAVEAT = 'Latest 300 indexed trades maximum, n
 
 /** Columns of the Brain copy's trade-window rows, in order. */
 const WINDOW_FIELDS = ['trades', 'buys', 'sells', 'distinctBuyers', 'distinctSellers', 'buyUsd', 'sellUsd', 'buySharePct',
-  'topSellerSharePctOfSellUsd', 'topSellerSharePctOfWindowUsd', 'sampleCoversWindow'] as const;
+  'sellFlowMaterial', 'topSellerSharePctOfSellUsd', 'topSellerSharePctOfWindowUsd', 'sampleCoversWindow'] as const;
 
 /**
  * THE SUMMARY AS THE BRAIN READS IT — compact, and decision-critical first.
@@ -331,7 +337,9 @@ export function brainEvidence(e: PoolEvidence, now = Date.now()): string {
       fields: 'open,high,low,close,volumeUsd', newestEnd: newest.end,
       newestFirst: [...s.recentBars].reverse().map(b => [sig4(b.open), sig4(b.high), sig4(b.low), sig4(b.close), b.volumeUsd === null ? null : Math.round(b.volumeUsd)]),
     } : null,
-    caveat: 'Latest 300 indexed trades, not all volume; sampleCoversWindow says whether a window is fully sampled. Senders are transaction senders, possibly routers, not verified owners. Bars are completed 5-minute candles, volume in USD. Missing or stale evidence is unknown, never zero. Not a forecast.',
+    caveat: `Latest ${TRADE_SAMPLE_MAX} indexed trades, not all volume; sampleCoversWindow says whether a window is fully sampled. ` +
+      `sellFlowMaterial false: under ${SELL_CONCENTRATION.minSells} sells or ${SELL_CONCENTRATION.minSharePctOfFlow}% of flow, so no seller share. ` +
+      'Senders are transaction senders, possibly routers, not verified owners. Bars are completed 5-minute candles, volume in USD. Missing or stale evidence is unknown, never zero. Not a forecast.',
     candleVolumeUsd: s.candleVolumeUsd ? { allBars: round(s.candleVolumeUsd.allBars, 0), last15m: round(s.candleVolumeUsd.last15m, 0), prior15m: round(s.candleVolumeUsd.prior15m, 0) } : null,
     measuredReturnPct: round(s.measuredReturnPct, 2), latestFiveMinuteReturnPct: round(s.latestFiveMinuteReturnPct, 2),
     fiveMinuteLogReturnStdDevPct: round(s.fiveMinuteLogReturnStdDevPct, 2),

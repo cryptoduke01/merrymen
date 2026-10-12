@@ -55,11 +55,11 @@ test('trade windows: counts, distinct wallets, buy share and the top seller at 5
   const e = { poolId: quote, token, candles: { failed: true, failure: 'budget', data: [] }, trades: { failed: false, observedAt: now, data: trades } };
   const w = summarizeEvidence(e, now).tradeWindows!;
   assert.deepEqual(w.m5, { trades: 3, buys: 2, sells: 1, distinctBuyers: 2, distinctSellers: 1, buyUsd: 60, sellUsd: 20, buySharePct: 75,
-    topSellerSharePctOfSellUsd: null, topSellerSharePctOfWindowUsd: null, sampleCoversWindow: true }, "one sell is not a sell flow: no concentration");
+    sellFlowMaterial: false, topSellerSharePctOfSellUsd: null, topSellerSharePctOfWindowUsd: null, sampleCoversWindow: true }, "one sell is not a sell flow: no concentration");
   assert.deepEqual(w.m15, { trades: 6, buys: 3, sells: 3, distinctBuyers: 2, distinctSellers: 2, buyUsd: 110, sellUsd: 120, buySharePct: 47.8,
-    topSellerSharePctOfSellUsd: 66.7, topSellerSharePctOfWindowUsd: 34.8, sampleCoversWindow: true });
+    sellFlowMaterial: true, topSellerSharePctOfSellUsd: 66.7, topSellerSharePctOfWindowUsd: 34.8, sampleCoversWindow: true });
   assert.deepEqual(w.h1, { trades: 8, buys: 4, sells: 4, distinctBuyers: 3, distinctSellers: 2, buyUsd: 120, sellUsd: 420, buySharePct: 22.2,
-    topSellerSharePctOfSellUsd: 90.5, topSellerSharePctOfWindowUsd: 70.4, sampleCoversWindow: true });
+    sellFlowMaterial: true, topSellerSharePctOfSellUsd: 90.5, topSellerSharePctOfWindowUsd: 70.4, sampleCoversWindow: true });
   // An unpriced trade makes that window's amounts unknown; an unattributed one, its wallet counts.
   const holes = summarizeEvidence({ ...e, trades: { ...e.trades, data: [flow('x', 30, 'buy', null, W(1)), flow('y', 400, 'sell', 5, null)] } }, now).tradeWindows!;
   assert.equal(holes.m5!.buyUsd, null);
@@ -67,6 +67,8 @@ test('trade windows: counts, distinct wallets, buy share and the top seller at 5
   assert.equal(holes.m5!.distinctBuyers, 1);
   assert.equal(holes.m15!.distinctSellers, null);
   assert.equal(holes.m15!.topSellerSharePctOfSellUsd, null);
+  assert.equal(holes.m15!.sellFlowMaterial, null, "unpriced and unattributed trades: unknown, not immaterial");
+  assert.equal(holes.m5!.sellFlowMaterial, null, "an unpriced trade: unknown, not immaterial");
   // A full sample that does not reach back across a window says so.
   const full = Array.from({ length: 300 }, (_, i) => flow(`f${i}`, 1 + i, 'buy', 1, W(i + 1)));
   const capped = summarizeEvidence({ ...e, trades: { ...e.trades, data: full } }, now).tradeWindows!;
@@ -82,12 +84,18 @@ test('sell concentration is reported only for a material sell flow: enough sells
   const sliver = e([flow('b', 10, 'buy', 1000, W(1)), flow('s1', 20, 'sell', 5, W(9)), flow('s2', 30, 'sell', 5, W(9)), flow('s3', 40, 'sell', 5, W(9))]);
   assert.equal(sliver.topSellerSharePctOfSellUsd, null);
   assert.equal(sliver.topSellerSharePctOfWindowUsd, null);
+  assert.equal(sliver.sellFlowMaterial, false, "judged, and below the gate — not unknown");
   // Two big sells: too few to call a flow.
   assert.equal(e([flow('b', 10, 'buy', 10, W(1)), flow('s1', 20, 'sell', 500, W(9)), flow('s2', 30, 'sell', 500, W(9))]).topSellerSharePctOfSellUsd, null);
   // A material flow, mostly one sender: shares of the selling and of the whole window.
   const heavy = e([flow('b', 10, 'buy', 100, W(1)), flow('s1', 20, 'sell', 300, W(9)), flow('s2', 30, 'sell', 50, W(8)), flow('s3', 40, 'sell', 50, W(9))]);
   assert.equal(heavy.topSellerSharePctOfSellUsd, 87.5);
   assert.equal(heavy.topSellerSharePctOfWindowUsd, 70);
+  assert.equal(heavy.sellFlowMaterial, true);
+  // Priced but one sell unattributed: material or not, the concentration cannot be judged.
+  const anon = e([flow("b", 10, "buy", 10, W(1)), flow("s1", 20, "sell", 50, null), flow("s2", 30, "sell", 50, W(9)), flow("s3", 40, "sell", 50, W(9))]);
+  assert.equal(anon.sellFlowMaterial, null);
+  assert.equal(anon.topSellerSharePctOfSellUsd, null);
   assert.equal(SELL_CONCENTRATION.minSells, 3);
 });
 
