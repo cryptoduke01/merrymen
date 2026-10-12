@@ -294,7 +294,7 @@ const LEET: Readonly<Record<string, string>> = Object.freeze({ "0": "o", "3": "e
  * A TEXT'S LETTERS AND NOTHING ELSE, a-z: NFKC, lowercase, accents taken off,
  * look-alike letters read as the Latin ones, and every other character —
  * spaces, digits, punctuation, zero-width characters — dropped, so "pe pe",
- * "pe​pe", "p.e.p.e" and "ρepe" are all "pepe". With `leet`, the digits
+ * "pe\u200bpe", "p.e.p.e" and "ρepe" are all "pepe". With `leet`, the digits
  * and signs people write for a letter are read as it first ("sherw00d").
  * What code matches a name against, never what anyone reads.
  */
@@ -309,7 +309,7 @@ export function lettersOf(text: unknown, o: { leet?: boolean } = {}): string {
 /**
  * SHERWOOD NAMED IN A TAG, IN ANY FORM (fail-closed review, 2026-10-12):
  * "sherwood", "$SHERWOODINU", "sherwood-1", "sherw00d", "s h e r w o o d",
- * "sher​wood", "ꜱʜᴇʀᴡᴏᴏᴅ", "sherwοod" with a Greek o, "sherwod". Read on
+ * "sher\u200bwood", "ꜱʜᴇʀᴡᴏᴏᴅ", "sherwοod" with a Greek o, "sherwod". Read on
  * the text's letters alone, so spacing, digits, zero-width characters and
  * look-alikes do not hide it. Errs toward finding it ("usher wood" counts):
  * a tag it finds gets no answer at all, which costs one answer, never a

@@ -158,7 +158,7 @@ const MODEL_NAMED = /\b(?:chat\s?gpt|gpt[\w.-]*|openai|anthropic|llms?|language 
 /**
  * THE MODEL QUESTION, BY CODE: "model" only on the allowlist and with no
  * contract tagged; "unanswered" for anything that names sherwood in any form
- * (gate.ts sherwoodMentioned: "$SHERWOODINU", "sherw00d", "sher​wood")
+ * (gate.ts sherwoodMentioned: "$SHERWOODINU", "sherw00d", "sher\u200bwood")
  * and for anything else that looks like a model question; null otherwise.
  * Exported for tests.
  */

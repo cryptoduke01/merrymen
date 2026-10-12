@@ -127,7 +127,7 @@ describe("a tag's intent, read by code", () => {
       }
     }
     // Spelled any way NFKC, case, zero-width characters, curly quotes or a trailing emoji make it: the same question.
-    for (const text of ["WHAT MODEL ARE YOU???", "ｗｈａｔ ｍｏｄｅｌ ａｒｅ ｙｏｕ", "what​ model are you", "what model are   you", "what’s your model?", "what model are you 🤔", "who⁠ made you"]) {
+    for (const text of ["WHAT MODEL ARE YOU???", "ｗｈａｔ ｍｏｄｅｌ ａｒｅ ｙｏｕ", "what\u200b model are you", "what\u00a0model are   you", "what’s your model?", "what model are you 🤔", "who\u2060 made you"]) {
       assert.equal(classifyTag(text).kind, "model", text);
     }
   });
@@ -139,7 +139,7 @@ describe("a tag's intent, read by code", () => {
       // A word more than the allowlist's: a trading question, a token, a second question.
       "what ai do you trade with?", "what ai runs your trading?", "which model powers your trading decisions?",
       "are you gpt or claude? how do you decide what to buy?", "what model are you? is this the official merrymen agent?", "which ai do you use? worth following?",
-      "what ai are you, and is it tradeable?", "what model are you on? is $MERRY your token?", "who made you​$PEPE", "what model are you is $MERRY yours",
+      "what ai are you, and is it tradeable?", "what model are you on? is $MERRY your token?", "who made you\u200b$PEPE", "what model are you\u2028is $MERRY yours",
     ]) {
       assert.equal(classifyTag(text).kind, "unanswered", text);
     }
@@ -168,9 +168,9 @@ describe("a tag's intent, read by code", () => {
     "is sherwood choosing your coins?", "does sherwood one make your calls?", "is sherwood running your trades yet?", "sherwood one live yet?",
     "what model are you sherwood", "gm, is it sherwood?",
     // However it is spelled.
-    "sher​wood TGE soon?", "sher­wood legit?", "sher⁠wood legit?", "ｓｈｅｒｗｏｏｄ soon?", "SHERWOOD!!!", "sherw00d to the moon?", "5herwood legit?",
+    "sher\u200bwood TGE soon?", "sher\u00adwood legit?", "sher\u2060wood legit?", "ｓｈｅｒｗｏｏｄ soon?", "SHERWOOD!!!", "sherw00d to the moon?", "5herwood legit?",
     "is $herwood yours?", "s h e r w o o d live?", "s.h.e.r.w.o.o.d legit?", "sher-wood legit?", "shérwood legit?", "𝐬𝐡𝐞𝐫𝐰𝐨𝐨𝐝 legit?", "ꜱʜᴇʀᴡᴏᴏᴅ legit?",
-    "sherwοod legit?", "sherwod coin?", "sherwoood coin?", "shervvood coin?", "$SHERW00DINU legit?", "is it sherwoodㅤone?",
+    "sherwοod legit?", "sherwod coin?", "sherwoood coin?", "shervvood coin?", "$SHERW00DINU legit?", "is it sherwood\u3164one?",
   ];
 
   it("a tag that names sherwood in any form, or asks about it at all, is answered by nothing", () => {
@@ -813,9 +813,9 @@ describe("never confirm a buy by name", () => {
 
   it("a tag that names PEPE however it is spelled never sees its buys, a \"bought\" fact or its own buy post", async () => {
     const asks = ["did you buy pepe?", "did you buy $PEPE?", "did you buy pepe inu?", "did you buy pepe two?", "did you buy $PEPE2?", "did you buy pepe 2?",
-      "did you buy pe​pe?", "did you buy pepe classic?", "did you buy Pepe Coin?", "did you buy $PEPE inu?", "did you buy pepe ii?", "is pepe inu legit?",
+      "did you buy pe\u200bpe?", "did you buy pepe classic?", "did you buy Pepe Coin?", "did you buy $PEPE inu?", "did you buy pepe ii?", "is pepe inu legit?",
       "why'd you buy p3pe?", "did you buy ρepe?", "did you buy p e p e?", "did you buy $PEPEINU?", "did you buy pepe–2?", "did you buy pepe v 2?",
-      "is $PEPE 2.0 the one you bought?", "thoughts on pepe classic?", "did you buy $PEPE​2?"];
+      "is $PEPE 2.0 the one you bought?", "thoughts on pepe classic?", "did you buy $PEPE\u200b2?"];
     for (const text of asks) {
       for (const research of [true, false]) {
         const { prompt, named, exact } = await promptFor(text, research);

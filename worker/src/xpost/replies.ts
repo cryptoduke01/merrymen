@@ -65,7 +65,7 @@ export function withoutReplyOptOut(text: string): string {
 }
 
 /** Letters to Unicode, blanks on screen (Hangul fillers, the braille blank): read as a space. */
-const BLANK_LETTERS = /[ᅟᅠㅤﾠ⠀]/g;
+const BLANK_LETTERS = /[\u115f\u1160\u3164\uffa0\u2800]/g;
 
 /**
  * A TAG AS CODE COMPARES IT WHOLE (fail-closed review, 2026-10-12): NFKC,
