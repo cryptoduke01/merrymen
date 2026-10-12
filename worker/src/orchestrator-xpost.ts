@@ -1709,7 +1709,9 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // is never said back, unless what it looked up says it; read alike for
       // every name, so a refusal tells nothing of which ones it bought.
       const lookedWords = new Set([...(looked?.research ?? []), looked?.creatorClaim ?? ""].flatMap((r) => textWords(r)));
-      const askerNames = nameLikeWords(candidate.text).filter((w) => !lookedWords.has(w) && !vouchedNames.has(w));
+      // "What's hot?" is a whole question on a strict allowlist (hotAsk): none
+      // of its words ("trending", "gainers", "meta") can be a coin's name.
+      const askerNames = asked.kind === "hot" ? [] : nameLikeWords(candidate.text).filter((w) => !lookedWords.has(w) && !vouchedNames.has(w));
       const gate = (text: string) => admitXPost(text, {
         kind: "reply", agentName: f.name, mode, coins: vouched.map((c) => c.label),
         paperCoins: [...vouched.filter((c) => c.paper).map((c) => c.label), ...(f.mode === "idle" ? money.paper : [])], recentOwn, recentFleet, emojiOk: facts.style.emoji > 0,

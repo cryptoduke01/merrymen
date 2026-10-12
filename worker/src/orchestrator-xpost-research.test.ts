@@ -27,6 +27,10 @@ import {
   fomoActivityPhrases,
   fomoThesesPhrases,
   generalTradesQuestion,
+  HOT_NONE,
+  hotAsk,
+  hotPhrases,
+  hotScreen,
   majorAsk,
   majorPhrases,
   namesACoin,
@@ -40,6 +44,9 @@ import {
   type TagIntent,
 } from "./orchestrator-xpost-research";
 import type { CoinHit, CoinMarket } from "./venues/coingecko-coins";
+import { DISCOVERY_SCREEN, emptyGeckoBuckets, type GeckoPool } from "./venues/geckoterminal";
+import { renderFiguresLine } from "./xpost/figures";
+import { CASH } from "../../packages/core/src/index";
 import type { PublicThesis } from "./thesis-policy";
 import { admitXPost } from "./xpost/gate";
 import { tagCandidate } from "./xpost/replies";
@@ -1266,5 +1273,160 @@ describe("majors: a coin by name or ticker, read on coingecko's list (2026-10-12
     assert.doesNotMatch(p.prompt, /PEPE|grabbed|\p{N}/u, "never its buys, never a figure");
     const nothing = answerPrompt({ ...facts, research: [] });
     assert.match(nothing.prompt, /couldn't look it up just now/);
+  });
+});
+
+// ── what's hot (2026-10-12) ─────────────────────────────────────────────────
+
+const AAPL_TOKEN = "0xaF3D76f1834A1d425780943C99Ea8A608f8a93f9";
+/** A trending pool as the index parses it: past every floor unless told otherwise. */
+function pool(n: number, over: Partial<GeckoPool> = {}): GeckoPool {
+  const token = `0x${n.toString(16).padStart(2, "0").repeat(20)}` as `0x${string}`;
+  return { poolId: token, poolAddress: token, tokenAddress: token, name: `COIN${n} / WETH 1%`, dex: "uniswap-v3-robinhood", priceUsd: 0.01,
+    reserveUsd: 80_000, fdvUsd: 2e6, volume24hUsd: 400_000, change24hPct: 12, change1hPct: 1, buys24h: 300, sells24h: 200, buyers24h: 180,
+    buckets: emptyGeckoBuckets(), createdAt: null, ...over };
+}
+
+function hotFake(o: { pools?: GeckoPool[]; poolsFail?: string; crowd?: { address: string; symbol: string }[]; trending?: CoinHit[]; cgOff?: boolean; fomo?: boolean } = {}) {
+  const asked: string[] = [];
+  const fomoCalls: { tool: string; args: Record<string, unknown>; surface: string }[] = [];
+  const broker: FomoBroker = {
+    async call(tool, args, opts) {
+      fomoCalls.push({ tool, args, surface: opts.surface });
+      return { status: "ok", tool, data: { topTokens: (o.crowd ?? []).map((c) => ({ token: { address: c.address, key: c.address, chain: {} }, label: { symbol: c.symbol, name: null }, buyers: 9, sellers: 2 })) } } as never;
+    },
+    memory: { get: async () => null, set: async () => {}, clear: async () => {} },
+    report: async () => {},
+    configured: () => true,
+  };
+  const research = createXResearch({
+    hotPools: async () => { asked.push("pools"); return o.poolsFail ? { pools: [], failed: true, failure: o.poolsFail } : { pools: o.pools ?? [pool(1), pool(2), pool(3), pool(4)], failed: false }; },
+    majors: {
+      configured: () => o.cgOff !== true,
+      search: async () => ({ hits: [], failed: true, failure: "unused" }),
+      market: async () => ({ market: null, failed: true, failure: "unused" }),
+      trending: async () => { asked.push("trending"); return { coins: o.trending ?? [], failed: false }; },
+    },
+    ...(o.fomo ? { fomo: () => broker } : {}),
+    now: () => Date.now(),
+  });
+  return { research, asked, fomoCalls };
+}
+
+describe("what's hot: the chain's trending coins past the fleet's floors, fomo's most bought, coingecko's list (2026-10-12)", () => {
+  it("only the allowlist's plain questions, with a greeting, a today or an on robinhood chain around them", () => {
+    for (const text of ["what's hot?", "whats trending", "what's moving today?", "what's pumping right now?", "top gainers?", "what are the top gainers today?",
+      "what are people talking about?", "what's the meta?", "gm, what's hot today?", "yo alan what's trending on robinhood chain?", "what's moving on robinhood today",
+      "hey ser, what's the meta rn?"]) {
+      assert.equal(hotAsk(text), true, text);
+      assert.equal(classifyTag(text).kind, "hot", text);
+    }
+    for (const text of ["what's hot to buy?", "what's pumping, should i ape?", "what's hot on solana?", "what's hot 🔥", "what's hot? $PEPE", "what's sherwood trending?",
+      "what's hot in your bag?", "what's trending on fomo?", "what are people talking about sherwood?", "top gainers pls tell me what to buy", "whats h0t?"]) {
+      assert.equal(hotAsk(text), false, text);
+    }
+    assert.equal(classifyTag("what's hot?").kind, "hot");
+    assert.equal(namesACoin({ text: "what's hot?", intent: { kind: "hot" }, address: null }), false, "it names no coin");
+  });
+
+  it("the screen: the discovery floors, a memecoin with flow both ways, a ticker the sanitiser keeps that is no big coin's, one each", () => {
+    assert.deepEqual({ ...DISCOVERY_SCREEN }, { minReserveUsd: 25_000, minVolume24hUsd: 50_000, minBuyers24h: 100 }, "the fleet's own discovery screen");
+    const kept = hotScreen([
+      pool(1),
+      pool(2, { reserveUsd: 24_999 }),                 // under the price floor
+      pool(3, { volume24hUsd: 49_000 }),               // too quiet
+      pool(4, { buyers24h: 99 }),                      // too few buyers
+      pool(5, { sells24h: 0 }),                        // one-sided
+      pool(6, { tokenAddress: CASH.WETH.toLowerCase() as `0x${string}` }),
+      pool(7, { tokenAddress: AAPL_TOKEN.toLowerCase() as `0x${string}`, name: "AAPL / USDG 0.3%" }), // a stock token
+      pool(8, { name: "SHERWOOD / WETH 1%" }),
+      pool(9, { name: "🐸PEPE / WETH 1%" }),
+      pool(10, { name: "BTC / WETH 1%" }),             // a big coin's ticker on the chain
+      pool(11, { name: "COIN1 / USDG 0.3%" }),         // a ticker already shown
+      pool(12, { reserveUsd: null }),                  // unknown depth is refused
+      pool(13),
+      pool(1, { poolId: "0x" + "ee".repeat(32), poolAddress: null }), // the same token again
+    ]);
+    assert.deepEqual(kept.map((k) => k.ticker), ["COIN1", "COIN13"]);
+  });
+
+  it("in words: how many, which way on the day, fomo and coingecko's list; never a name or a figure; through the X gate", () => {
+    const all = [
+      ...hotPhrases({ changes: [12, 4, 30], crowd: 2, trending: 3 }),
+      ...hotPhrases({ changes: [-5, -1], crowd: 1, trending: 1 }),
+      ...hotPhrases({ changes: [3, -2, null], crowd: 0, trending: 0 }),
+      ...hotPhrases({ changes: [0], crowd: 0, trending: 0 }),
+      ...hotPhrases({ changes: [], crowd: 0, trending: 0 }),
+    ];
+    for (const p of ["the robinhood chain index shows a few coins standing out right now", "on the index they're all up on the day",
+      "fomo traders are most active in a couple of coins the index has trending", "coingecko's global trending list has a few big names on it",
+      "the robinhood chain index shows a couple of coins standing out right now", "on the index they're all down on the day",
+      "fomo traders are most active in one coin the index has trending", "coingecko's global trending list has a big name on it",
+      "on the index they're a mix of up and down on the day", "the robinhood chain index shows one coin standing out right now", "on the index it's flat on the day", HOT_NONE]) {
+      assert.ok(all.includes(p), p);
+    }
+    for (const p of all) {
+      assert.doesNotMatch(p, /\p{N}|\$|buy|early|target/iu, p);
+      assert.ok(carriesResearch(p), p);
+      clears(p);
+    }
+  });
+
+  it("a bundle: three coins, fomo's most bought among the screened, coingecko's list inside the rank cap; words and figures, three lookups", async () => {
+    const pools = [pool(1, { change24hPct: 42.07, volume24hUsd: 1.21e6 }), pool(2, { change24hPct: -8.3, volume24hUsd: 310_400 }), pool(3), pool(4, { volume24hUsd: 90_000 })];
+    const h = hotFake({ pools, fomo: true,
+      crowd: [{ address: pools[3]!.tokenAddress, symbol: "IGNORED" }, { address: `0x${"77".repeat(20)}`, symbol: "NOTSCREENED" }, { address: pools[1]!.tokenAddress, symbol: "x" }],
+      trending: [{ id: "pepe", symbol: "PEPE", name: "Pepe", rank: 30 }, { id: "smol", symbol: "SMOL", name: "Smol", rank: 900 }, { id: "tao", symbol: "TAO", name: "Bittensor", rank: 40 }, { id: "x", symbol: "🐸", name: "x", rank: 5 }] });
+    const b = await h.research.gather(input({ kind: "hot" }, { fomo: true }));
+    assert.deepEqual(h.asked.sort(), ["pools", "trending"]);
+    assert.equal(b.lookups, 3);
+    assert.deepEqual(h.fomoCalls.map((c) => [c.tool, c.args.token, c.args.chain, c.surface]), [["fomo_get_token_activity", null, "robinhood", "x-answer"]]);
+    assert.deepEqual(b.figures, [
+      { kind: "pools", coins: [{ symbol: "COIN1", change24hPct: 42.07, volume24hUsd: 1.21e6 }, { symbol: "COIN2", change24hPct: -8.3, volume24hUsd: 310_400 }, { symbol: "COIN3", change24hPct: 12, volume24hUsd: 400_000 }] },
+      { kind: "crowd", symbols: ["COIN4", "COIN2"] },
+      { kind: "trending", symbols: ["PEPE", "TAO"] },
+    ], "fomo's own labels never shown: the screened coin's ticker is");
+    assert.deepEqual(b.facts, hotPhrases({ changes: [42.07, -8.3, 12], crowd: 2, trending: 2 }));
+    assert.equal(renderFiguresLine(b.figures!),
+      "geckoterminal robinhood: trending $COIN1 24h +42.1% vol ~$1.2M, $COIN2 24h -8.3% vol ~$310k, $COIN3 24h +12% vol ~$400k; fomo: most bought $COIN4, $COIN2; coingecko: trending $PEPE, $TAO.");
+  });
+
+  it("nothing past the floors: the plain line and nothing more looked up; the index unread: nothing at all", async () => {
+    const quiet = hotFake({ pools: [pool(1, { reserveUsd: 5_000 })], fomo: true });
+    const q = await quiet.research.gather(input({ kind: "hot" }, { fomo: true }));
+    assert.deepEqual(q.facts, [HOT_NONE]);
+    assert.equal(q.figures, undefined);
+    assert.deepEqual(quiet.asked, ["pools"]);
+    assert.deepEqual(quiet.fomoCalls, []);
+    const down = hotFake({ poolsFail: "http-503" });
+    const d = await down.research.gather(input({ kind: "hot" }));
+    assert.deepEqual(d.facts, []);
+    assert.ok(d.notes.includes("index-http-503"));
+  });
+
+  it("no Pro key: no coingecko list, the chain's coins still; a busy account looks nothing up", async () => {
+    const off = hotFake({ cgOff: true, trending: [{ id: "pepe", symbol: "PEPE", name: "Pepe", rank: 30 }] });
+    const b = await off.research.gather(input({ kind: "hot" }));
+    assert.deepEqual(off.asked, ["pools"]);
+    assert.deepEqual(b.figures?.map((s) => s.kind), ["pools"]);
+    const h = hotFake();
+    for (let n = 0; n < 4; n++) await h.research.gather(input({ kind: "hot" }));
+    assert.equal(h.asked.length, 8);
+    const busy = await h.research.gather(input({ kind: "hot" }));
+    assert.deepEqual(busy.facts, []);
+    assert.ok(busy.notes.includes("index-busy"));
+  });
+
+  it("the writer is told it is what the index shows, not a call, to name no coin and write no number", () => {
+    const p = answerPrompt({ agentName: "Alan", strategy: "trencher", flavour: null, traits: [], mode: "live", style: { lower: true, emoji: 0, exclaim: 0 }, recentOwn: [],
+      question: "what's hot today?", recentBuys: [{ label: "PEPE", paper: false }], boughtLately: "live", said: [], walletPublic: false, intent: "hot",
+      research: hotPhrases({ changes: [12, -3], crowd: 1, trending: 0 }) });
+    assert.match(p.prompt, /what the index shows right now, a read and not a call/);
+    assert.match(p.prompt, /never call a coin early, never a target/);
+    assert.match(p.prompt, /Name no coin and write no number or amount/);
+    assert.match(p.prompt, /You are not told what you bought for this question/);
+    assert.doesNotMatch(p.prompt, /PEPE|COIN|\p{N}/u);
+    assert.match(answerPrompt({ agentName: "Alan", strategy: null, flavour: null, traits: [], mode: "live", style: { lower: true, emoji: 0, exclaim: 0 }, recentOwn: [],
+      question: "what's hot?", recentBuys: [], said: [], walletPublic: false, intent: "hot", research: [] }).prompt, /couldn't read the index just now/);
   });
 });

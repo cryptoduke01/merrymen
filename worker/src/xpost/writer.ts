@@ -222,7 +222,7 @@ export interface AnswerFacts extends WriterFacts {
 }
 
 /** A tag's intent, as code reads it. */
-export type AnswerIntentKind = "capabilities" | "onboarding" | "own-trades" | "coin" | "model" | "chat" | "major";
+export type AnswerIntentKind = "capabilities" | "onboarding" | "own-trades" | "coin" | "model" | "chat" | "major" | "hot";
 
 /**
  * THE MODEL IT IS ASKED ABOUT, AS AN X POST SPELLS IT: "sherwood-1", merrymen's
@@ -881,6 +881,8 @@ const INTENT_HINT: Readonly<Record<AnswerIntentKind, string>> = {
   chat: "It is just chat. Answer like a person would, briefly.",
   // A MAJOR (2026-10-12): code adds the figures after the words, so the words carry none.
   major: "They are asking about a big coin on coingecko's list. Say what you looked up as what coingecko shows right now, a read and not a call: never whether to buy it, never where it's headed. It is not a robinhood chain coin and not one you trade, so keep yourself, your trades and your holdings out of it. The exact figures are added after your words, so write no number or amount yourself.",
+  // WHAT'S HOT (2026-10-12): code adds the coins' names and figures after the words.
+  hot: "They are asking what's moving. Say what you looked up as what the index shows right now, a read and not a call: never tell anyone to buy, never call a coin early, never a target or where anything is headed. Name no coin and write no number or amount: the names and figures are added after your words.",
 };
 
 /**
@@ -897,6 +899,7 @@ const NOTHING_LOOKED_UP: Readonly<Partial<Record<AnswerIntentKind, string>>> = {
   model: INTENT_HINT.model,
   chat: INTENT_HINT.chat,
   major: "They are asking about a coin by name, and you couldn't look it up just now: say so briefly and casually, or PASS. Never guess how it's doing, and keep yourself and your trades out of it.",
+  hot: "They are asking what's moving, and you couldn't read the index just now: say so briefly and casually, or PASS. Never guess what's moving, and name no coin.",
 };
 
 /**

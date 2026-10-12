@@ -42,7 +42,8 @@ import { collapseOf } from "./coin-facts-types";
 import { createCoinFactsReader, FactsLimiter } from "./desk/facts";
 import { resolveByName } from "./desk/evidence";
 import { searchPools } from "./desk/gecko";
-import { geckoSource } from "./venues/geckoterminal";
+import { DISCOVERY_SCREEN, fetchGeckoPoolsResult, geckoSource, screenPools, type GeckoFetch, type GeckoPool } from "./venues/geckoterminal";
+import { CASH, instrumentClassOf } from "../../packages/core/src/index";
 import type { FomoBroker } from "./fomo/contract";
 import type { TokenActivityData, TokenThesesData } from "./fomo/tools";
 import type { FomoEnvelope } from "./fomo/types";
@@ -58,8 +59,8 @@ import { normalisedTag, plainAsk, withoutReplyOptOut } from "./xpost/replies";
 import { takeAllowance, type XPost } from "./xpost/store";
 import { coinNamedIn, type AnswerIntentKind } from "./xpost/writer";
 import { asksAboutACoin, everydayWord, nameLikeWords } from "./xpost/words";
-import type { FiguresSpec } from "./xpost/figures";
-import { coinQuery, MAJORS_MAX_RANK, pickMajor, readCoinMarket, searchCoinList, type CoinMarket, type CoinMarketRead, type CoinSearchRead } from "./venues/coingecko-coins";
+import { cleanTicker, type FiguresSpec } from "./xpost/figures";
+import { coinQuery, MAJORS_MAX_RANK, pickMajor, readCoinMarket, readCoinTrending, searchCoinList, type CoinMarket, type CoinMarketRead, type CoinSearchRead, type CoinTrendingRead } from "./venues/coingecko-coins";
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -92,6 +93,13 @@ export type TagIntent =
    * as chat.
    */
   | { kind: "major"; query: string; fallback: { kind: "coin"; ticker: string | null; address: string | null; many?: true } | null }
+  /**
+   * "What's hot?" on the allowlist's plain shapes (hotAsk, 2026-10-12): an
+   * overview of the Robinhood Chain coins trending on the index past the
+   * fleet's own floors, what Fomo traders trade most, and CoinGecko's
+   * trending list. Names no coin.
+   */
+  | { kind: "hot" }
   /** The allowlist's plain "what model are you" (modelQuestion): code's own line, never a draft. */
   | { kind: "model" }
   | { kind: "chat" }
@@ -326,8 +334,39 @@ export function majorAsk(text: unknown): string | null {
   return null;
 }
 
+/**
+ * "WHAT'S HOT?" (the owner's decision, 2026-10-12: AiXBT-style overviews).
+ * Only a whole tag in plain ASCII words (replies.ts plainAsk) that is one of
+ * these, after at most two greeting words, with at most a "today" or the like
+ * and an "on robinhood chain" around it:
+ *
+ *   what's hot / trending / moving / pumping
+ *   top gainers, what are the top gainers
+ *   what are people talking about
+ *   what's the meta
+ *
+ * A word more ("what's hot to buy?", "what's pumping, should i ape?") and it
+ * is not on the list: it goes the normal way, or gets no answer.
+ */
+const WHEN = String.raw`(?: (?:today|right now|now|rn|tonight|this week|lately))?`;
+const ON_CHAIN = String.raw`(?: on (?:the )?(?:robinhood chain|robinhood|chain))?`;
+const AROUND = `${WHEN}${ON_CHAIN}${WHEN}`;
+const WHATS = String.raw`(?:what's|whats|what is|wats)`;
+const HOT_SHAPES = [
+  `${WHATS} (?:hot|trending|moving|pumping)${AROUND}`,
+  `(?:(?:what|who) (?:are|r) (?:the )?|(?:what's|whats) (?:the )?)?top gainers${AROUND}`,
+  `what (?:are|r) (?:people|folks|ppl) talking about${AROUND}`,
+  `${WHATS} the meta${AROUND}`,
+];
+const HOT_ALLOWED = new RegExp(`^${GREETING}(?:${HOT_SHAPES.join("|")})$`, "u");
+/** Is the whole tag one of the plain "what's hot?" questions? Exported for tests. */
+export function hotAsk(text: unknown): boolean {
+  const plain = plainAsk(text);
+  return plain !== null && !sherwoodMentioned(text) && HOT_ALLOWED.test(plain);
+}
+
 /** Words that set one coin against another. */
-const COMPARES =/\b(?:vs\.?|versus|or|than|compared?|comparison|comparing|better|worse|safer|riskier|healthier|stronger|weaker|which|either|between|instead)\b/i;
+const COMPARES = /\b(?:vs\.?|versus|or|than|compared?|comparison|comparing|better|worse|safer|riskier|healthier|stronger|weaker|which|either|between|instead)\b/i;
 
 /**
  * WHAT THE QUESTION IS, BY CODE. `address` is the one contract address
@@ -360,6 +399,8 @@ export function classifyTag(text: string, o: { address?: string | null } = {}): 
   const asked = publicFactRequest(t);
   if (asked?.kind === "site" && asked.topic === "capabilities") return { kind: "capabilities" };
   if (asked?.kind === "site" && asked.topic === "onboarding") return { kind: "onboarding" };
+  // "WHAT'S HOT?", ON THE ALLOWLIST'S PLAIN SHAPES (hotAsk): an overview, no coin named.
+  if (address === null && hotAsk(t)) return { kind: "hot" };
   // A COIN BY NAME OR TICKER, ON THE ALLOWLIST'S PLAIN SHAPES (majorAsk): read
   // on CoinGecko's list first. What the tag would otherwise be is kept: a
   // $ticker that turns out to be no major goes on as a coin of the chain,
@@ -496,6 +537,8 @@ export interface MajorsReader {
   configured?(): boolean;
   search(query: string, timeoutMs: number): Promise<CoinSearchRead>;
   market(id: string, timeoutMs: number): Promise<CoinMarketRead>;
+  /** CoinGecko's own trending list, for "what's hot". Absent: not asked. */
+  trending?(timeoutMs: number): Promise<CoinTrendingRead>;
 }
 
 export interface XResearchDeps {
@@ -523,6 +566,13 @@ export interface XResearchDeps {
    * `no-pro-key` and nothing is asked.
    */
   majors?: MajorsReader;
+  /**
+   * The index's trending pools on Robinhood Chain, for "what's hot": page one
+   * of GeckoTerminal's trending_pools on the fleet lane (geckoterminal.ts
+   * fetchGeckoPoolsResult), which the Trencher tape reads every minute, so it
+   * is mostly the lane's cache. Default: built from `fleetHome`.
+   */
+  hotPools?: (timeoutMs: number) => Promise<GeckoFetch>;
   /** Onchain flow (Bitquery), only while the lane is configured. */
   flow?: FlowReader;
   /** Flow readings per UTC day across X accounts. Default DEFAULT_X_FLOW_PER_DAY. */
@@ -791,6 +841,82 @@ export function majorPhrases(m: Pick<CoinMarket, "rank" | "marketCapUsd" | "volu
   return out.filter(sayable);
 }
 
+/** Coins one "what's hot" answer shows from the chain's index. */
+export const HOT_COINS = 3;
+/** Fomo's most-bought coins one answer shows, at most. */
+export const HOT_CROWD = 2;
+/** CoinGecko's trending tickers one answer shows, at most. */
+export const HOT_TRENDING = 3;
+
+/**
+ * TICKERS A CHAIN COIN MAY NOT SHOW UNDER, whatever its pool is called: the
+ * big coins, the stables and the chain's own cash. A memecoin calling itself
+ * BTC or USDC on Robinhood Chain, trending, would read as bitcoin or a dollar
+ * moving forty percent. The pool is still screened; it just never shows.
+ */
+const RESERVED_TICKERS: ReadonlySet<string> = new Set(("BTC ETH SOL USDT USDC USDG USDE DAI BNB XRP DOGE ADA TRX TON AVAX LINK DOT LTC BCH XLM SUI HBAR " +
+  "WETH WBTC STETH HYPE").split(" "));
+
+/** The base token's symbol as the index names a pool ("CHUMP / WETH 1%" is CHUMP), through the figures line's sanitiser, or null. */
+function poolTicker(name: string): string | null {
+  const t = cleanTicker(/^([^\s/]{1,32}) \/ /.exec(String(name ?? ""))?.[1]);
+  return t && !RESERVED_TICKERS.has(t) ? t : null;
+}
+
+/** A coin "what's hot" may show: its token, its ticker, its pool. */
+export interface HotCoin { token: string; ticker: string; pool: GeckoPool }
+
+/**
+ * THE CHAIN'S TRENDING COINS PAST THE FLEET'S OWN FLOORS, in the index's
+ * order: the discovery screen (DISCOVERY_SCREEN: $25k in the pool, the
+ * Trencher's price floor; $50k of volume; a hundred distinct buyers), an
+ * identified pool (its own id and its base token both read: parseGeckoPool),
+ * a memecoin (never the chain's cash, a stock token or the like:
+ * instrumentClassOf), both buying and selling in the day (the tape's
+ * one-sided-flow refusal, the manipulation check the index allows; the
+ * on-chain TWAP check runs only where a trade could follow), and a ticker
+ * the sanitiser keeps that is no big coin's. One per token, one per ticker.
+ * Whatever fails is silently left out.
+ */
+export function hotScreen(pools: readonly GeckoPool[]): HotCoin[] {
+  const cash = new Set([CASH.USDG, CASH.WETH].map((a) => a.toLowerCase()));
+  const out: HotCoin[] = [];
+  for (const p of screenPools(pools, DISCOVERY_SCREEN).kept) {
+    const token = p.tokenAddress.toLowerCase();
+    if (cash.has(token) || instrumentClassOf(token) !== "memecoin") continue;
+    if (!((p.buys24h ?? 0) > 0 && (p.sells24h ?? 0) > 0)) continue;
+    const ticker = poolTicker(p.name);
+    if (!ticker || out.some((o) => o.token === token || o.ticker === ticker)) continue;
+    out.push({ token, ticker, pool: p });
+  }
+  return out;
+}
+
+/** Said when the index shows nothing past the floors. */
+export const HOT_NONE = "nothing is standing out on the robinhood chain index right now";
+
+/**
+ * WHAT'S HOT, IN WORDS: how many coins stand out (one, a couple, a few), which
+ * way they went on the day, whether Fomo traders are busiest in some of them,
+ * whether CoinGecko's list has big names on it — never a coin's name, a
+ * figure, a "buy", an "early" or a target. The names and figures go in code's
+ * line (xpost/figures.ts), never to the model.
+ */
+export function hotPhrases(o: { changes: readonly (number | null)[]; crowd: number; trending: number }): string[] {
+  const n = o.changes.length;
+  if (n === 0) return [HOT_NONE].filter(sayable);
+  const out = [`the robinhood chain index shows ${n === 1 ? "one coin" : n === 2 ? "a couple of coins" : "a few coins"} standing out right now`];
+  const known = o.changes.filter((c): c is number => c !== null && Number.isFinite(c));
+  if (known.length) {
+    const up = known.filter((c) => c > 0).length, down = known.filter((c) => c < 0).length;
+    if (n === 1) out.push(up ? "on the index it's up on the day" : down ? "on the index it's down on the day" : "on the index it's flat on the day");
+    else out.push(up === known.length ? "on the index they're all up on the day" : down === known.length ? "on the index they're all down on the day" : "on the index they're a mix of up and down on the day");
+  }
+  if (o.crowd > 0) out.push(`fomo traders are most active in ${o.crowd === 1 ? "one coin" : "a couple of coins"} the index has trending`);
+  if (o.trending > 0) out.push(`coingecko's global trending list has ${o.trending === 1 ? "a big name" : "a few big names"} on it`);
+  return out.filter(sayable);
+}
+
 /** What it can do, said by code: only what is wired, and always that a tag never orders a trade. */
 export function capabilityPhrases(o: { fomo: boolean; flow: boolean }): string[] {
   // Short enough to stand in a whole answer with the opt-out notice (the test says it through the gate).
@@ -1036,7 +1162,10 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
     configured: () => geckoSource().id === "coingecko-pro",
     search: (query, timeoutMs) => searchCoinList(query, { timeoutMs, ...(lane ? { fleet: lane } : {}) }),
     market: (id, timeoutMs) => readCoinMarket(id, { timeoutMs, ...(lane ? { fleet: lane } : {}) }),
+    trending: (timeoutMs) => readCoinTrending({ timeoutMs, ...(lane ? { fleet: lane } : {}) }),
   };
+  // Someone is waiting: the evidence row, the whole read held to the answer's share.
+  const hotPools = d.hotPools ?? ((timeoutMs: number) => fetchGeckoPoolsResult("trending_pools", { timeoutMs, budgetMs: timeoutMs, lane: "evidence", ...(lane ? { fleet: lane } : {}) }));
 
   return {
     async gather(input): Promise<ResearchBundle> {
@@ -1152,6 +1281,68 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
         return { kind: "major", facts, figures: [{ kind: "major", symbol: m.symbol, rank: m.rank, priceUsd: m.priceUsd, marketCapUsd: m.marketCapUsd,
           volume24hUsd: m.volume24hUsd, change24hPct: m.change24hPct, change7dPct: m.change7dPct }] };
       };
+      /** A public x-answer read of Fomo, keyed by this X account (its hourly cap). */
+      const fomoOpts = (ms: number) => ({
+        surface: "x-answer" as const, audience: "group" as const, conversationKey: `x:${input.xUserId}`,
+        priority: "interactive" as const, groupId: input.xUserId, timeoutMs: ms,
+      });
+      /**
+       * WHAT'S HOT (hotAsk): the chain's trending pools on the index, past the
+       * fleet's floors (hotScreen), up to HOT_COINS of them; then, side by side,
+       * the coins Fomo traders bought most in the day, kept only when the same
+       * screen kept them, and CoinGecko's trending list, kept only inside the
+       * majors' rank cap. Each a lookup of the bundle's; the index reads also
+       * take the X account's limiter and the hour's. Nothing past the floors is
+       * said as such, and nothing at all is looked up after it.
+       */
+      const hotBundle = async (): Promise<ResearchBundle> => {
+        const key = xAccountKey(input.xUserId);
+        if (!limiter.take(key)) {
+          notes.push("index-busy");
+          return { facts: [], lookups, notes };
+        }
+        const page = await look((ms) => hotPools(ms), null);
+        if (!page || page.failed) {
+          notes.push(`index-${failureCode(page?.failure)}`);
+          return { facts: [], lookups, notes };
+        }
+        const screened = hotScreen(page.pools);
+        if (!screened.length) {
+          notes.push("hot-none");
+          return { facts: hotPhrases({ changes: [], crowd: 0, trending: 0 }), lookups, notes };
+        }
+        const shown = screened.slice(0, HOT_COINS);
+        const broker = await fomoFor();
+        const cg = majors.trending && majors.configured?.() !== false && limiter.take(key);
+        if (majors.trending && majors.configured?.() !== false && !cg) notes.push("index-busy");
+        const [crowdEnv, trend] = await Promise.all([
+          broker ? look((ms) => broker.call("fomo_get_token_activity", { token: null, chain: "robinhood", window: "24h", limit: 5 }, fomoOpts(ms)), null, false, RESEARCH_BUDGET.fomoMs) : Promise.resolve(null),
+          cg ? look((ms) => majors.trending!(ms), null) : Promise.resolve(null),
+        ]);
+        // Fomo's labels are the provider's: kept only for a coin the same screen kept, by its address, through the sanitiser.
+        const byToken = new Map(screened.map((s) => [s.token, s.ticker] as const));
+        const crowd: string[] = [];
+        for (const c of dataOf<TokenActivityData>(crowdEnv)?.topTokens ?? []) {
+          const ticker = byToken.get(String(c?.token?.address ?? "").toLowerCase());
+          if (ticker && !crowd.includes(ticker)) crowd.push(ticker);
+          if (crowd.length >= HOT_CROWD) break;
+        }
+        if (broker && !crowd.length) notes.push("fomo-nothing");
+        const trending: string[] = [];
+        for (const c of trend && !trend.failed ? trend.coins : []) {
+          const ticker = c.rank !== null && c.rank <= MAJORS_MAX_RANK ? cleanTicker(c.symbol) : null;
+          if (ticker && !trending.includes(ticker)) trending.push(ticker);
+          if (trending.length >= HOT_TRENDING) break;
+        }
+        if (trend?.failed) notes.push(`coins-${failureCode(trend.failure)}`);
+        notes.push("hot");
+        const figures: FiguresSpec = [
+          { kind: "pools", coins: shown.map((s) => ({ symbol: s.ticker, change24hPct: s.pool.change24hPct, volume24hUsd: s.pool.volume24hUsd })) },
+          ...(crowd.length ? [{ kind: "crowd" as const, symbols: crowd }] : []),
+          ...(trending.length ? [{ kind: "trending" as const, symbols: trending }] : []),
+        ];
+        return { facts: hotPhrases({ changes: shown.map((s) => s.pool.change24hPct), crowd: crowd.length, trending: trending.length }), figures, lookups, notes };
+      };
       const i = input.intent;
       const f = input.facts;
       // The exact path only for a plain question about the tagged coin alone (exactAsk).
@@ -1207,6 +1398,8 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
           }
           case "coin":
             break;
+          case "hot":
+            return await hotBundle();
           case "major": {
             const found = await majorBundle(i.query);
             if (found.kind === "major") return { facts: found.facts, figures: found.figures, lookups, notes };
@@ -1261,10 +1454,6 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
         // ticker, which ones it bought (NEVER CONFIRM A BUY BY NAME).
         const own = history.length > 0;
         const broker = await fomoFor();
-        const fomoOpts = (ms: number) => ({
-          surface: "x-answer" as const, audience: "group" as const, conversationKey: `x:${input.xUserId}`,
-          priority: "interactive" as const, groupId: input.xUserId, timeoutMs: ms,
-        });
         // The rest at once, each in its own time box: a slow one costs its fact, never the others.
         const [read, project, activity, talk, flow] = await Promise.all([
           look((ms) => coinFacts({ network: "robinhood", address: key, chatId: xAccountKey(input.xUserId), timeoutMs: ms, withInfo: true }), null),

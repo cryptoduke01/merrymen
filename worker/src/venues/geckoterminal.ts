@@ -466,12 +466,14 @@ export interface GeckoFetch extends FeedResult {
  */
 export async function fetchGeckoPoolsResult(
   feed: PoolFeed,
-  opts: { timeoutMs?: number; page?: number } = {},
+  opts: { timeoutMs?: number; page?: number } & Pick<GeckoReadOptions, "budgetMs" | "fleet" | "lane"> = {},
 ): Promise<GeckoFetch> {
   return readGecko(`${feed}:${opts.page ?? 1}`,
-    (source, remainingMs) => requestGeckoPools(feed, { ...opts, timeoutMs: Math.min(opts.timeoutMs ?? 10_000, remainingMs) }, source),
+    (source, remainingMs) => requestGeckoPools(feed, { timeoutMs: Math.min(opts.timeoutMs ?? 10_000, remainingMs), ...(opts.page !== undefined ? { page: opts.page } : {}) }, source),
     failure => ({ pools: [], failed: true, failure }),
-    { route: poolsRoute(feed, opts.page) });
+    // A caller someone is waiting on (an X answer) names its budget, its row
+    // and the fleet lane; the tape names none and reads as it always did.
+    { route: poolsRoute(feed, opts.page), ...(opts.budgetMs !== undefined ? { budgetMs: opts.budgetMs } : {}), ...(opts.fleet ? { fleet: opts.fleet } : {}), ...(opts.lane ? { lane: opts.lane } : {}) });
 }
 
 const poolsRoute = (feed: PoolFeed, page = 1) => `/networks/${GECKO_NETWORK}/${feed}?page=${page}`;
@@ -656,6 +658,21 @@ export interface ScreenLimits {
    */
   minFdvUsd?: number;
 }
+
+/**
+ * THE DISCOVERY SCREEN: what a trending coin has to clear before the scout is
+ * even asked about it (index.ts discoverTrending) — at least $25k in the pool
+ * (the Trencher's own price floor, strategies/trencher.ts minLiquidityUsd),
+ * $50k of volume and a hundred distinct buyers in a day. Measured against live
+ * data it keeps roughly 32 of 56 distinct pools: a cheapness filter, not a
+ * judgement. Exported so an X answer's "what's hot" shows only coins the
+ * fleet's own discovery would look at (orchestrator-xpost-research.ts).
+ */
+export const DISCOVERY_SCREEN: Readonly<ScreenLimits> = Object.freeze({
+  minReserveUsd: 25_000,
+  minVolume24hUsd: 50_000,
+  minBuyers24h: 100,
+});
 
 /**
  * Drop pools not worth considering, and say why for the ones dropped.

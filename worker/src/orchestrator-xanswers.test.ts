@@ -19,6 +19,7 @@ import type { FlowResult } from "./flow-facts";
 import type { AgentFacts, CallFact } from "./groupchat/facts";
 import { xWeightedLength, X_MAX_WEIGHTED, type FetchLike } from "./xpost/client";
 import type { FiguresSpec } from "./xpost/figures";
+import { emptyGeckoBuckets, type GeckoPool } from "./venues/geckoterminal";
 import { greetingAnswers, modelAnswers } from "./xpost/writer";
 import { ANSWER_GAP_MS } from "./xpost/planner";
 import { PAUSE_KEY } from "./xpost/sender";
@@ -2265,5 +2266,65 @@ test("majors: a copycat ticker gets no figures, and goes on as a coin of the cha
   await w2.step();
   assert.deepEqual(m2.resolved, ["WOJAK"]);
   assert.doesNotMatch(String(w2.sends[0]?.text ?? ""), /coingecko:|~\$/);
+});
+
+// ── what's hot, end to end ──────────────────────────────────────────────────
+
+/** A trending pool past every floor: COIN<n> on the chain. */
+function hotPool(n: number, change24hPct: number, volume24hUsd: number): GeckoPool {
+  const token = `0x${(n + 0x40).toString(16).repeat(20)}` as `0x${string}`;
+  return { poolId: token, poolAddress: token, tokenAddress: token, name: `COIN${n} / WETH 1%`, dex: "uniswap-v3-robinhood", priceUsd: 0.01, reserveUsd: 90_000, fdvUsd: 2e6,
+    volume24hUsd, change24hPct, change1hPct: 1, buys24h: 300, sells24h: 200, buyers24h: 180, buckets: emptyGeckoBuckets(), createdAt: null };
+}
+
+function hotResearch(pools: GeckoPool[], trending: string[] = []) {
+  const reads: string[] = [];
+  const research = createXResearch({
+    hotPools: async () => { reads.push("pools"); return { pools, failed: false }; },
+    majors: { configured: () => true, search: async () => ({ hits: [], failed: true }), market: async () => ({ market: null, failed: true }),
+      trending: async () => { reads.push("trending"); return { coins: trending.map((s, i) => ({ id: s.toLowerCase(), symbol: s, name: s, rank: 20 + i })), failed: false }; } },
+  });
+  return { research, reads };
+}
+
+test("what's hot: an overview from the index past the floors, in words, with code's line of tickers and figures", async (t) => {
+  const h = hotResearch([hotPool(1, 42.07, 1.21e6), hotPool(2, -8.3, 310_400), hotPool(3, 5, 90_000)], ["PEPE", "WIF", "TAO"]);
+  const words = "the robinhood chain index has a few coins standing out, mostly up on the day. what it shows, not a call.";
+  const w = await world(t, { env: RESEARCH_ON, research: h.research, answer: `${words} Say stop to opt out.` });
+  w.setInbox([tag({ text: "@pine_stoat gm, what's hot today?" })]);
+  const r = await w.step();
+  const [prompt] = w.asked();
+  assert.match(prompt!, /the robinhood chain index shows a few coins standing out right now/);
+  assert.match(prompt!, /what the index shows right now, a read and not a call/);
+  assert.doesNotMatch(prompt!, /COIN\d|PEPE|\p{N}|~\$/u, "never a name or a figure");
+  const text = String(w.sends[0]?.text ?? "");
+  assert.ok(xWeightedLength(text) <= X_MAX_WEIGHTED, String(xWeightedLength(text)));
+  assert.match(text, new RegExp(`^${words.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} geckoterminal robinhood: trending \\$COIN1 24h \\+42\\.1% vol ~\\$1\\.2M, `));
+  assert.match(text, /Say stop to opt out\.$/);
+  assert.match(r.log ?? "", /answer-intent-hot 1/);
+  assert.match(r.log ?? "", /answer-figures(?:-shortened)? 1/);
+});
+
+test("what's hot with nothing past the floors: a plain nothing-standing-out answer, no line, nothing more looked up", async (t) => {
+  const h = hotResearch([{ ...hotPool(1, 300, 2e6), reserveUsd: 4_000 }], ["PEPE"]);
+  const words = "nothing's really standing out on the robinhood chain index right now.";
+  const w = await world(t, { env: RESEARCH_ON, research: h.research, answer: `${words} Say stop to opt out.` });
+  w.setInbox([tag({ text: "@pine_stoat what's pumping?" })]);
+  await w.step();
+  assert.deepEqual(h.reads, ["pools"]);
+  assert.match(w.asked()[0]!, /nothing is standing out on the robinhood chain index right now/);
+  assert.deepEqual(w.sends.map((s) => s.text), [`${words} Say stop to opt out.`]);
+});
+
+test("what's hot: a draft that names a coin, says buy or early, or gives a number is refused, line and all", async (t) => {
+  for (const draft of ["coin one is ripping today, get in early. Say stop to opt out.", "a few movers on the index, worth buying a couple. Say stop to opt out.",
+    "the index has three coins up big today. Say stop to opt out.", "$COIN1 is the one on the index right now. Say stop to opt out."]) {
+    const h = hotResearch([hotPool(1, 42, 1.2e6), hotPool(2, 3, 400_000)]);
+    const w = await world(t, { env: RESEARCH_ON, research: h.research, answer: draft });
+    w.setInbox([tag({ text: "@pine_stoat what's trending?" })]);
+    await w.step();
+    assert.equal((await w.answers())[0]!.status, "skipped", draft);
+    assert.deepEqual(w.sends, [], draft);
+  }
 });
 
