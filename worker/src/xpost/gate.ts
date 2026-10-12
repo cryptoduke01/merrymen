@@ -139,8 +139,11 @@ export function tidyXPost(raw: unknown, agentName: string): string {
  *
  * SO THE EXCEPTION IS ONE EXACT TOKEN, IN ONE KIND OF POST. Only in a reply
  * (answers are gated as replies); only "sherwood-1" spelled out, in any case,
- * standing alone as a word: never "sherwood-10", "sherwood-1x",
- * "sherwood-1.5", "$sherwood-1", "@sherwood-1" or one inside a link. Each one
+ * standing alone as a word — after the start, a space or an opening quote or
+ * bracket, and before the end, a space, a closing quote or bracket, or
+ * sentence punctuation that is itself followed by a space or the end: never
+ * "sherwood-10", "sherwood-1x", "sherwood-1.5", "sherwood-1%", "$sherwood-1",
+ * "@sherwood-1" or one inside a link. Each one
  * is masked with a digit-free stand-in before the base gate and the X clauses
  * read the text, and put back as written in the text that is posted. Any
  * other digit beside it ("1 sherwood-1", "$1") is still has-digits. A casual,
@@ -153,7 +156,7 @@ export function tidyXPost(raw: unknown, agentName: string): string {
  * the digit. Change this only once sherwood actually runs the agents.
  */
 export const SHERWOOD_NAME = "sherwood-1";
-const SHERWOOD_TOKEN = /(?<![\p{L}\p{N}_$@#/.:-])sherwood-1(?![\p{L}\p{N}_]|[.,:'’/-][\p{L}\p{N}])/giu;
+const SHERWOOD_TOKEN = /(?<=^|[\s("“'‘])sherwood-1(?=$|[\s)"”]|[.,!?;:'’](?:$|[\s)"”]))/giu;
 /** A digit-free stand-in no draft would say; a draft that does say it gets no exception. */
 const SHERWOOD_STAND_IN = "sherwoodmerrymenname";
 const STAND_IN = new RegExp(SHERWOOD_STAND_IN, "gi");

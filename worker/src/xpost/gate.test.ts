@@ -839,6 +839,18 @@ describe("sherwood-1: one name with a digit, in an answer only, never as what ru
       "built by merrymen, and the new sherwood 1 is still cooking",
       "built by merrymen, and the new sherwood1 is still cooking",
     ]) assert.equal(reason(said(line), reply), "has-digits", line);
+    for (const line of [
+      "built by merrymen, and the new sherwood-1% is still cooking",
+      "built by merrymen, and the new sherwood-1k is still cooking",
+      "built by merrymen, and the new sherwood-1² is still cooking",
+      "built by merrymen, and the new sherwood-1's still cooking",
+      "built by merrymen, and the new #sherwood-1 is still cooking",
+      "built by merrymen, see merrymen.dev/sherwood-1 for it",
+    ]) assert.notEqual(reason(said(line), reply), "ok", line);
+    for (const line of ["the new (sherwood-1) is still cooking, built by merrymen", "built by merrymen. sherwood-1? still cooking",
+      "built by merrymen, and it's sherwood-1, still cooking", "built by merrymen; next up is sherwood-1"]) {
+      assert.equal(reason(said(line), reply), "ok", line);
+    }
   });
 
   it("never says sherwood runs it, with the digit or without", () => {
