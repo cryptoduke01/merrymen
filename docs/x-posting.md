@@ -609,15 +609,20 @@ looks things up first, the way Shogun does in a Telegram group
   digit-free bands ("on-chain data shows buys clearly outweighing sells
   over the last hour"). No lane, no flow and no mention of it in "what can
   you do?".
-- **A contract is matched by the contract alone.** With a tagged address,
-  its history counts a buy only when that buy's token, its buy post's CA or
-  decision, or its thesis's derived id is that address, never by a name. A
+- **A contract is matched by the contract alone, all forty hex.** With a
+  tagged address, its history counts a buy only when that buy's token or its
+  buy post's CA (or decision) is that address, never by a name. A thesis
+  counts under an address-matched buy's symbol, or under the address's
+  derived id (`T` and its last eleven hex) only beside a buy or buy post of
+  the full contract: eleven hex can be copied off its buy post and ground
+  into a stranger's token, so a derived id alone is never "you bought it". A
   `$ticker` it bought beside a different contract ("is $PEPE <copycat>
-  legit?") is a conflict: nothing is looked up, and the only fact is that
-  the contract in the tag is not the one it bought under that name.
+  legit?"), including one that shares the bought contract's last eleven
+  hex, is a conflict: nothing is looked up, and the only fact is that the
+  contract in the tag is not the one it bought under that name.
 - **A creator's description is a claim, not a fact.** It is read only for a
-  coin the agent itself traded or reviewed (a buy's token or its own
-  thesis), refused when it carries an endorsement, an affiliation
+  coin the agent itself traded (a buy's token or its buy post's CA, the
+  full contract, never a derived id), refused when it carries an endorsement, an affiliation
   (merrymen, robinhood, official, partner, backed), a promise, urgency, a
   call to act or an attempt to steer it, and handed to the writer apart from
   what it looked up, as the project's own unverified text. A stranger's

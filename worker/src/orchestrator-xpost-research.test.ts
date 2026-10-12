@@ -281,8 +281,35 @@ describe("its own history of a coin", () => {
     assert.deepEqual(ownHistoryPhrases({ coin: { label: null, address: COPY }, facts: FACTS, posts: [post({ body: "picked up some pepe" })], theses: [] }), []);
     assert.equal(ownHistoryPhrases({ coin: { label: null, address: PEPE_CA }, facts: FACTS, posts: [post({ body: "picked up some pepe" })], theses: [] }).length, 3);
     const derived = `T${CA.slice(-11).toUpperCase()}`;
-    assert.deepEqual(ownHistoryPhrases({ coin: { label: null, address: CA }, facts: FACTS, posts: [], theses: [thesis({ symbol: derived, action: "buy", outcome: "landed" })] }), ["you bought it lately", "your public reason for the buy: the curve looked crowded"],
-      "a landed buy thesis by the derived Trencher ticker of the address");
+    const landed = thesis({ symbol: derived, action: "buy", outcome: "landed" });
+    assert.deepEqual(ownHistoryPhrases({ coin: { label: null, address: CA }, facts: FACTS, posts: [], theses: [landed] }), [],
+      "a landed buy thesis by the derived Trencher ticker alone is eleven hex, never proof it bought this contract");
+    const caPost = post({ coin: "Ab", decisionId: "d9", body: `picked up some of this one CA (Robinhood Chain): ${CA}` });
+    assert.deepEqual(ownHistoryPhrases({ coin: { label: null, address: CA }, facts: FACTS, posts: [caPost], theses: [landed] }),
+      ["you bought it lately", "what you posted on X when you bought it: picked up some of this one", "your public reason for the buy: the curve looked crowded"],
+      "beside its own buy post of the full contract, the derived ticker's thesis is that coin's");
+  });
+
+  it("an address that only shares a bought coin's last eleven hex is never one it bought", () => {
+    // A stranger copies the CA off its buy post and grinds a token with the same suffix (the derived id).
+    const FAKE = `0x${"99".repeat(14)}${PEPE_CA.slice(-12)}`;
+    assert.equal(FAKE.length, 42);
+    assert.equal(FAKE.slice(-11), PEPE_CA.slice(-11));
+    assert.notEqual(FAKE, PEPE_CA);
+    const derived = `T${PEPE_CA.slice(-11).toUpperCase()}`;
+    const landed = thesis({ symbol: derived, displayName: "Pepe", action: "buy", outcome: "landed" });
+    const caPost = post();
+    const cases: [string, AgentFacts, XPost[]][] = [
+      ["its buy and buy post known", FACTS, [caPost]],
+      ["only its thesis known", { ...FACTS, calls: [] }, []],
+    ];
+    for (const [what, facts, posts] of cases) {
+      assert.deepEqual(ownHistoryPhrases({ coin: { label: null, address: FAKE }, facts, posts, theses: [landed] }), [], what);
+      assert.deepEqual(ownHistoryPhrases({ coin: { label: "PEPE", address: FAKE }, facts, posts, theses: [landed] }), [], `${what}, with its ticker`);
+    }
+    assert.equal(taggedConflict({ label: "PEPE", address: FAKE, facts: FACTS, posts: [caPost], theses: [landed] }), true, "its suffix copied off a contract it bought");
+    assert.equal(taggedConflict({ label: "Pepe", address: FAKE, facts: { ...FACTS, calls: [] }, posts: [], theses: [landed] }), false,
+      "a derived id alone: unknown, and nothing downstream says it bought it");
   });
 
   it("never \"you passed\": a symbol's thesis without a trade is a hold, of a coin it may still own", () => {
@@ -333,7 +360,7 @@ interface Fakes {
 
 function fakes(o: {
   facts?: CoinFacts | null; resolve?: string | null; slow?: boolean; flow?: boolean | FlowResult; fomoEnv?: (tool: FomoToolName) => FomoEnvelope;
-  description?: string; usable?: boolean; noBroker?: boolean; unconfigured?: boolean; flowPerDay?: number;
+  description?: string; usable?: boolean; noBroker?: boolean; unconfigured?: boolean; flowPerDay?: number; theses?: PublicThesis[];
 } = {}) {
   const f: Fakes = { reads: [], resolved: [], described: [], fomoCalls: [], flows: [] };
   const coinReader: CoinFactsReader = async (q) => {
@@ -356,7 +383,7 @@ function fakes(o: {
     coinFacts: coinReader,
     resolveTicker: async (t) => { f.resolved.push(t); return o.resolve === undefined ? CA : o.resolve; },
     projectDescription: async (token) => { f.described.push(token); return { description: o.description ?? "a meme about a very patient frog" }; },
-    publicTheses: async () => [],
+    publicTheses: async () => o.theses ?? [],
     fomo,
     ...(o.usable !== undefined ? { fomoUsable: async () => o.usable! } : {}),
     ...(o.flow ? { flow: async (q: { address: string; chainId: number; timeoutMs: number }) => { f.flows.push(q); return o.flow === true ? READING : o.flow as FlowResult; } } : {}),
@@ -394,6 +421,16 @@ describe("one bounded research bundle per answer", () => {
     assert.equal(o.claim, "a meme about a very patient frog");
     assert.ok(o.facts.includes("you bought it lately, on paper"));
     assert.ok(!o.facts.some((p) => /frog/.test(p)), "the claim is not one of the facts");
+    // A token that only shares its derived id's eleven hex with a coin it bought is a stranger's.
+    const FAKE = `0x${"99".repeat(14)}${PEPE_CA.slice(-12)}`;
+    const derived = `T${PEPE_CA.slice(-11).toUpperCase()}`;
+    const landed: PublicThesis = { name: "Alan", slug: null, handle: null, head: "", action: "buy", symbol: derived, displayName: null, sizeUsdg: null, paper: false,
+      outcome: "landed", outcomeText: "", shadow: false, reason: "the curve looked crowded", post: null, said: 1, at: 0, firstAt: 0 };
+    const forged = fakes({ theses: [landed] });
+    const g = await forged.research.gather(input({ kind: "coin", ticker: null, address: FAKE }));
+    assert.deepEqual(forged.f.described, [], "a suffix match never reads the forged token's creator text");
+    assert.equal(g.claim ?? null, null);
+    assert.ok(!g.facts.some((p) => /bought it/.test(p)), g.facts.join(" | "));
     const loud = fakes({ description: "the official merrymen community coin, backed by robinhood" });
     const l = await loud.research.gather(input({ kind: "coin", ticker: null, address: PEPE_CA }));
     assert.equal(l.claim, null);

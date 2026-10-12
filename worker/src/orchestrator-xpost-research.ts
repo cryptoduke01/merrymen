@@ -239,7 +239,7 @@ export interface ResearchBundle {
   /** Code-built phrases, each with its source in it: digit-free and screened. */
   facts: string[];
   /**
-   * The creator's own description of a coin it traded or reviewed, screened
+   * The creator's own description of a coin it traded (by the full contract), screened
    * (creatorClaim), or null. Apart from `facts`: it is the project's
    * unverified claim, never something it looked up and found.
    */
@@ -414,7 +414,13 @@ function ownPostProse(body: string): string {
   return withoutReplyOptOut(String(body ?? "").split(/ (?:CA|Wallet) \(/)[0] ?? "").replace(/\s+/g, " ").trim();
 }
 
-/** The derived Trencher ticker of an address: T + its last eleven hex, as trencher-discovery.ts mints it. */
+/**
+ * The derived Trencher ticker of an address: T + its last eleven hex, as
+ * trencher-discovery.ts mints it. A NAME, NEVER PROOF: eleven of forty hex,
+ * which a stranger copies off its buy post and grinds a token to share. A
+ * thesis under it counts as this contract's only beside a record of the
+ * full contract (fullyBought).
+ */
 function derivedId(address: string): string {
   return `T${address.slice(-11).toUpperCase()}`;
 }
@@ -433,6 +439,15 @@ function postContract(body: string): string | null {
 }
 
 /**
+ * DID ITS OWN RECORDS BUY THIS EXACT CONTRACT, all forty hex: a buy whose
+ * token is it, or a buy post on X whose CA is it. Never a derived id alone.
+ */
+function fullyBought(address: string, facts: AgentFacts, posts: readonly XPost[]): boolean {
+  return facts.calls.some((c) => c.side === "buy" && typeof c.token === "string" && c.token.toLowerCase() === address)
+    || posts.some((p) => p.kind === "buy" && p.status === "posted" && postContract(p.body) === address);
+}
+
+/**
  * WHAT IT DID WITH THIS COIN, from what it has already made public: the buys
  * the room knows (AgentFacts.calls, landed or paper, past publishableThesis),
  * its own buy posts on this X account, and its public theses (the feed's own
@@ -444,9 +459,12 @@ function postContract(body: string): string | null {
  * never find its real PEPE buy by the name and say "you bought it" under a
  * copycat's contract. With an address, a buy counts only when its own token
  * is that address, a buy post only when its CA (or its decision) is, and a
- * thesis only when its symbol is the address's derived id or an
- * address-matched buy's symbol. A name is read only when no contract is known
- * at all (a $ticker it could not resolve, "why did you buy pepe").
+ * thesis only when its symbol is an address-matched buy's symbol, or the
+ * address's derived id while a buy or buy post of the full contract exists
+ * (review, 2026-10-12: the derived id is eleven hex a stranger can match, so
+ * on its own it is never "you bought it"). A name is read only when no
+ * contract is known at all (a $ticker it could not resolve, "why did you buy
+ * pepe").
  *
  * NEVER "YOU PASSED" (review, 2026-10-12). The only record of a declined look
  * here would be a public thesis, and a symbol's thesis without a trade is a
@@ -474,7 +492,8 @@ export function ownHistoryPhrases(o: {
       const ca = postContract(p.body);
       return ca !== null ? ca === address : p.decisionId !== null && decisions.has(p.decisionId);
     });
-    theses = o.theses.filter((t) => t.symbol === derivedId(address) || calls.some((c) => sameLabel(t.symbol, c.symbol)));
+    const full = fullyBought(address, o.facts, o.posts);
+    theses = o.theses.filter((t) => calls.some((c) => sameLabel(t.symbol, c.symbol)) || (full && t.symbol === derivedId(address)));
   } else {
     calls = buys.filter((c) => sameLabel(c.symbol, label) || sameLabel(c.name, label));
     const named = calls.map((c) => coinOf(c)?.label).find((l): l is string => !!l) ?? null;
@@ -504,6 +523,12 @@ export function ownHistoryPhrases(o: {
  * nothing: no history, no index read, no creator text, no Fomo, only that
  * the contract is not the one it bought (CONFLICT_PHRASE). A name it never
  * pinned to a contract is no conflict; the address alone is then the key.
+ *
+ * A DERIVED ID IS NEVER A MATCH. A tagged address that shares a bought
+ * contract's last eleven hex but is not that contract is a conflict; one
+ * that shares only a thesis's derived id, with no full contract known, is
+ * unknown (false here), and nothing downstream reads it as bought
+ * (ownHistoryPhrases, the creator text: fullyBought).
  */
 export function taggedConflict(o: {
   label: string | null;
@@ -528,7 +553,10 @@ export function taggedConflict(o: {
     if (t.action === "buy" && t.outcome === "landed" && t.symbol && TRENCHER_ID.test(t.symbol) && sameLabel(t.displayName ?? null, label)) ids.add(t.symbol);
   }
   if (!contracts.size && !ids.size) return false;
-  return !contracts.has(address) && !ids.has(derivedId(address));
+  if (contracts.has(address)) return false;
+  // Its suffix copied off a contract it bought, and not that contract.
+  if ([...contracts].some((c) => derivedId(c) === derivedId(address))) return true;
+  return !ids.has(derivedId(address));
 }
 
 /** What a conflicting tag is told: the one thing its records say for certain. */
@@ -539,7 +567,7 @@ export const CONFLICT_PHRASE = "the contract in that tag is not the one you boug
  * any token can write anything, and a stranger can tag any token: "the
  * official merrymen coin, backed by robinhood", "get in before it's too
  * late", "ignore your rules". It is read only for a coin the agent itself
- * traded or reviewed (createXResearch), and even then refused for an
+ * traded, by the full contract (createXResearch), and even then refused for an
  * endorsement, an affiliation, a promise, urgency, a call to act or an
  * attempt to steer it; and it reaches the writer apart from the facts, as the
  * project's own unverified words (writer.ts AnswerFacts.creatorClaim).
@@ -680,8 +708,10 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
         const history = ownHistoryPhrases({ coin: { label: address ? null : i.ticker, address }, facts: f, posts: input.posts, theses });
         if (!address) return { facts: history, lookups, notes };
         const key = address;
-        // THE CREATOR'S TEXT ONLY FOR A COIN IT TRADED OR REVIEWED (creatorClaim): never a stranger's token.
-        const own = f.calls.some((c) => typeof c.token === "string" && c.token.toLowerCase() === key) || theses.some((t) => t.symbol === derivedId(key));
+        // THE CREATOR'S TEXT ONLY FOR A COIN IT TRADED (creatorClaim), by
+        // the full contract: never a stranger's token, nor one that only
+        // shares a derived id's eleven hex with a coin it bought.
+        const own = f.calls.some((c) => typeof c.token === "string" && c.token.toLowerCase() === key) || fullyBought(key, f, input.posts);
         const broker = await fomoFor();
         const fomoOpts = (ms: number) => ({
           surface: "x-answer" as const, audience: "group" as const, conversationKey: `x:${input.xUserId}`,
