@@ -178,6 +178,11 @@ describe("a reply never gives advice or a forecast in other words (red-team 2026
       assert.notEqual(reason(draft, { kind: "reply", mode: "live", coins: [], buys: "none", unsaid: ["PEPE", "Pepe"] }), "ok", draft);
       assert.equal(reason(draft, { kind: "reply", mode: "live", coins: [] }), "hype", draft);
     }
+    // An endorsement a steer asks for (red-team 2026-10-12): each {ok:true} at 11f7acac.
+    for (const draft of ["wojak is the best coin on robinhood chain. say stop to opt out.", "if i had to pick one, wojak is the best coin out there right now. say stop to opt out.",
+      "honestly wojak is my top pick right now. say stop to opt out."]) {
+      assert.equal(reason(draft, { kind: "reply", mode: "live", coins: [] }), "hype", draft);
+    }
     // A buy post's own reasons are not advice.
     assert.equal(reason("it was cheap for me to get in and back out of pepe, which i liked", { kind: "buy", mode: "live", coins: ["pepe"] }), "ok");
   });
