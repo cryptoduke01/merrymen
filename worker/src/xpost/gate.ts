@@ -967,7 +967,14 @@ const ANSWER_PREDICTION = new RegExp(
     // "a shift is coming in a couple hours" and "something huge is around the
     // corner" were posted.
     String.raw`|(?:history|memory|the\s+past|experience|the\s+data|my\s+gut)\s+(?:says|said|tells|shows|suggests)|(?:ends?|ending)\s+well` +
-    String.raw`|(?:coming|in|within)\s+(?:a|the)\s+(?:couple|few|next)\s+(?:of\s+)?(?:hours|days|weeks|months)|around\s+the\s+corner|(?:is|are)\s+coming)\b`,
+    String.raw`|(?:coming|in|within)\s+(?:a|the)\s+(?:couple|few|next)\s+(?:of\s+)?(?:hours|days|weeks|months)|around\s+the\s+corner|(?:is|are)\s+coming` +
+    // MARKET TIMING AS A FRIEND'S TIP, AND A START TEASED (red-team review of
+    // a964a74c, 2026-10-12): under "how are you doing today?", "i'd stay away
+    // from the new stuff for now", "today's a day to stay out", "i'd sit on my
+    // hands today if i were you" and "today feels like the start of something
+    // huge" were posted.
+    String.raw`|if\s+i\s+(?:were|was)\s+(?:you|u|ya)|in\s+your\s+shoes|stay(?:ing)?\s+away\s+from|stay(?:ing)?\s+out\b|sit(?:ting)?\s+on\s+(?:my|your|our|ur)\s+hands` +
+    String.raw`|(?:a|the|good|great|perfect)\s+(?:day|night|week|time)\s+to\s+(?:stay|sit|buy|sell|hold|wait|get|be|go|ape|load|step|take)|(?:start|beginning|dawn)\s+of\s+something)\b`,
   "i",
 );
 
@@ -1059,6 +1066,17 @@ const ANSWER_HOUSE_CLAIM = new RegExp([
   // ITSELF RANKED ABOVE PEOPLE OR THE ASKER (red-team review of a964a74c):
   // "smarter than every human, obviously" under "what do you think about ai agents?".
   String.raw`\b(?:smarter|better|sharper|wiser|faster|richer|cleverer|superior|ahead)\s+(?:than|of|to)\s+(?:(?:every|any|all|most|the\s+rest\s+of\s+the|the)\s+)?(?:humans?|people|persons?|traders?|you|u|ya|y'?all|everyone|everybody|anyone|anybody|mankind|humanity|the\s+rest)\b`,
+  // AND THE ASKER PUT BELOW IT, ITS RESULTS, OR ITS RECORD (red-team review of
+  // a964a74c, 2026-10-12): under "how are you doing today?", "who are you?",
+  // "tell me a joke" and "what do you do for fun?", "doing great, which is more
+  // than i can say for you", "had a really good week, the trades worked out",
+  // "everything i touched went up this week" and "i'm right way more often than
+  // wrong" were posted.
+  String.raw`\bmore\s+than\s+(?:i\s+can|can\s+be)\s+said?\s+(?:for|of|about)\s+(?:you|u|ya)\b|\bmore\s+than\s+i\s+can\s+say\s+(?:for|of|about)\s+(?:you|u|ya)\b|\bunlike\s+(?:you|u|ya)\b|\b(?:happier|calmer|luckier|richer|healthier|saner)\s+than\s+(?:you|u|ya|yours)\b`,
+  String.raw`\b(?:trades?|calls?|picks?|bets?|buys?|bags?|positions?|plays?|it\s+all|all\s+of\s+(?:them|it)|everything)\s+(?:i\s+\w+\s+)?(?:have\s+|has\s+)?(?:all\s+)?(?:been\s+)?(?:worked|working|work|paid|paying|played|playing)\s+out\b|\b(?:worked|paid)\s+out\s+(?:great|well|nicely|fine|for\s+me)\b` +
+    String.raw`|\beverything\s+(?:i\s+)?(?:touch(?:ed)?|buy|bought|pick(?:ed)?|grab(?:bed)?|trade[ds]?|bag(?:ged)?)\s+(?:went|goes|turned|turns|is|was)\s+(?:up|green|gold)\b|\bwent\s+(?:up|green)\b` +
+    String.raw`|\b(?:had|having|have\s+had)\s+(?:a\s+|one\s+)?(?:really\s+|very\s+|pretty\s+|super\s+|real\s+)?(?:good|great|solid|strong|nice|big|killer|huge|winning|banger|amazing|profitable)\s+(?:week|day|month|run|stretch|streak|session)\b` +
+    String.raw`|\bright\s+(?:way\s+|much\s+|a\s+lot\s+)?(?:more|most)\s+(?:often\s+)?than\s+(?:wrong|not)\b|\b(?:i'?m|i\s+am|i'?ve\s+been)\s+(?:usually|mostly|always|often)\s+right\b|\b(?:rarely|seldom|hardly\s+ever)\s+wrong\b`,
 ].join("|"), "i");
 export function houseClaimed(text: unknown): boolean {
   if (typeof text !== "string") return false;

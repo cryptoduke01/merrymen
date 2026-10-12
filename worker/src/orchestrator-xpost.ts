@@ -1616,8 +1616,25 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       const unreadWord = classified.kind === "major" && classified.fallback === null && research === null;
       // Advice that tagCandidate did not flag is no decline's (and never a draft's): nothing.
       const unflaggedAdvice = classified.kind === "advice" && candidate.advice !== true;
+      // CHAT IS DRAFTED ONLY FOR PLAIN BANTER (red-team review of a964a74c,
+      // 2026-10-12). A chat draft is handed nothing, and the gate reads its
+      // words, never what they mean: under "what do you think of women?",
+      // "thoughts on the crash today?", "thoughts on the war?", "thoughts on the
+      // ftx collapse?", "how are the victims doing?" and "thoughts on the sec?"
+      // drafts in everyday words posted "they are bad at trading honestly",
+      // "worst is behind us, relax", "it will be over in a couple weeks", "it
+      // was planned from the start", "they will be fine, it is not that bad" and
+      // "they are coming for everyone next". Only a whole tag on the banter
+      // allowlist (banterAsk: how are you, who are you, tell me a joke, what do
+      // you do for fun, what do you think about ai agents), or one of the plain
+      // questions about what it trades (generalTradesQuestion, told its buys),
+      // is drafted as chat; any other chat tag, a person, a group or an event
+      // among them, is answered by nothing: no row, no model call. A greeting
+      // is code's own line and never drafted.
+      const chatAllowed = (text: string): boolean => banterAsk(text) || generalTradesQuestion(text);
+      const unbanteredChat = classified.kind === "chat" && !greeting && !chatAllowed(candidate.text);
       const asked: TagIntent = sherwoodTagged || authorSherwood || (classified.kind === "model" && (candidate.otherHandles || !namedClean))
-        || (greeting && (classified.kind !== "chat" || candidate.otherHandles)) || unreadWord || unflaggedAdvice ? { kind: "unanswered" } : classified;
+        || (greeting && (classified.kind !== "chat" || candidate.otherHandles)) || unreadWord || unflaggedAdvice || unbanteredChat ? { kind: "unanswered" } : classified;
       // SHERWOOD IN ANY FORM, OR A MODEL QUESTION OFF THE ALLOWLIST, is
       // answered by nothing: the model line under "sherwood TGE soon?" reads
       // as Merrymen confirming a token, and a draft is never asked about the
@@ -1737,7 +1754,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         if (hotCoded && bundle.hot) hotRead = bundle.hot;
         if (asked.kind === "major" && figures && bundle.major) majorRead = bundle.major;
         if (marketCoded && bundle.market) marketRead = bundle.market;
-        researchUnanswered = bundle.unanswered === true;
+        // Chat as research read it is held to the banter allowlist too (unbanteredChat above).
+        researchUnanswered = bundle.unanswered === true || (looked.intent === "chat" && !chatAllowed(candidate.text));
         bump(`answer-intent-${intent.kind}`);
         if (bundle.lookups) bump("answer-lookups", bundle.lookups);
         for (const note of new Set(bundle.notes)) bump(`answer-research-${note}`);

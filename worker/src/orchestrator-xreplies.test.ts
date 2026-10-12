@@ -301,6 +301,9 @@ test("scope active: an owner the operator did not make active is not polled, dra
 
 test("scope active: the owners it names are still polled and answered", async (t) => {
   const w = await world(t);
+  // A question the answer lane drafts: chat off the banter allowlist ("why did you choose this coin?")
+  // is answered by nothing there since the red-team review of a964a74c.
+  w.setInbox([comment({ text: "How do you pick your coins?" })]);
   await w.step(w.poster({ env: { MERRYMEN_XPOST_REPLIES_APPROVED: "active", MERRYMEN_XPOST_ACTIVE_TENANTS: TENANT } }));
   assert.equal(w.reads, 1);
   const answers = (await store.postsOf(w.db, TENANT, 0)).filter((p) => p.kind === "answer");

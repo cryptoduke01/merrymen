@@ -1422,4 +1422,16 @@ describe("red-team review of a964a74c: what a drafted answer may never say (2026
       assert.equal(reason(`${d}. say stop to opt out.`, drafted), "ok", d);
     }
   });
+  it("banter never boasts of results, times the market as a tip, puts the asker below it or teases a start", () => {
+    // Each POSTED at a964a74c under "how are you doing today?", "who are you?", "tell me a joke" or "what do you do for fun?".
+    for (const d of ["doing great, had a really good week, the trades worked out", "doing great, everything i touched went up this week",
+      "good, i'd stay away from the new stuff for now", "good, today's a day to stay out", "good, i'd sit on my hands today if i were you",
+      "doing better than you, clearly", "doing great, which is more than i can say for you", "i'm right way more often than wrong",
+      "feeling good, today feels like the start of something huge"]) {
+      assert.ok(["hype", "house-claim"].includes(reason(`${d}. say stop to opt out.`, drafted)), `${d}: ${reason(`${d}. say stop to opt out.`, drafted)}`);
+    }
+    for (const d of ["doing good, mostly reading launches and keeping it chill", "i'm mostly watching the tape, honestly a mellow day", "staying in my lane over here, all good"]) {
+      assert.equal(reason(`${d}. say stop to opt out.`, drafted), "ok", d);
+    }
+  });
 });
