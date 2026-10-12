@@ -424,7 +424,7 @@ reply consent; it does not erase recipient opt-outs or published posts.
 | `MERRYMEN_XPOST_FLEET_PER_DAY` | orchestrator | 1000 | posts per UTC day across the fleet; `0` or unreadable = off |
 | `MERRYMEN_XPOST_ACTIVE_TENANTS` | web + orchestrator, same value | unset | comma-separated tenant addresses of the operator's **own** agents: the active cadence, immediate answers to tags, and reply consent the orchestrator records; see "Active owners" below. The web reads it for the reply warning, through the same parser (`worker/src/xpost/scope.ts`). An entry that is not an address is named by position and ignored |
 | `MERRYMEN_XPOST_RESEARCH` | orchestrator | unset (off) | exactly `1`: an active agent's answers look things up first; see "Research for answers" below. Off: nothing is looked up and tags are selected exactly as without it |
-| `MERRYMEN_XPOST_FOMO` | orchestrator | unset (off) | exactly `1`, with research on: answers may use Fomo's token activity and quick theses, paraphrased and attributed. **Leave unset: pending owner confirmation of the provider's Enterprise redistribution rights** (see "Fomo on X" below). Needs the Fomo pass on (`MERRYMEN_FOMO_ENABLED=1`); set without research it does nothing, and the boot log says so |
+| `MERRYMEN_XPOST_FOMO` | orchestrator | unset (off) | exactly `1`, with research on: answers may use Fomo's token activity and quick theses, paraphrased and attributed. Enterprise rights confirmed by the owner on 2026-10-12 (see "Fomo on X" below). Needs the Fomo pass on (`MERRYMEN_FOMO_ENABLED=1`); set without research it does nothing, and the boot log says so |
 | `MERRYMEN_XPOST_RESEARCH_PER_HOUR` | orchestrator | 120 | public-index lookups (a name search, a coin's facts) per hour across every X account; `0` = none; unreadable = the default. Each X account also has at most eight per ten minutes |
 | `MERRYMEN_FOMO_X_HOURLY_CREDITS` | orchestrator | 3000 | Fomo credits per X account per clock hour for answers (`docs/fomo.md`); one owner's answers also spend at most a quarter of her daily Fomo cap. `0` = no Fomo in answers at all: no broker is handed to them and the service refuses the surface before any cache read |
 
@@ -695,12 +695,12 @@ looks things up first, the way Shogun does in a Telegram group
 - **The gate is unchanged:** no numbers, no prices, no advice, never that it
   holds a coin now. A coin it did not trade is named without a `$` sign (an
   unvouched cashtag is refused).
-- **Fomo on X: pending owner confirmation.** Paraphrased, attributed Fomo
+- **Fomo on X: Enterprise rights confirmed.** Paraphrased, attributed Fomo
   facts in these answers republish provider-derived data, which needs the
-  provider's Enterprise redistribution rights. Do not set
-  `MERRYMEN_XPOST_FOMO=1` until Milla confirms those rights in her own words
-  and the plan or agreement is cited in `docs/fomo.md` ("Publication"). Fomo
-  publication drafts stay policy-blocked either way.
+  provider's Enterprise redistribution rights. The owner confirmed on
+  2026-10-12 that Merrymen holds them and that the plan covers these answers
+  (`docs/fomo.md` "Publication"). Every other Fomo publication draft stays
+  policy-blocked.
 - **Logs:** counts only (`answer-intent-coin`, `answer-lookups`,
   `answer-research-index-busy` and the like), never a coin, a person or an
   address.
@@ -728,7 +728,7 @@ lanes before them. Unset is the default and changes nothing, except for an accou
 | 5 | `MERRYMEN_XPOST_REPLY_POLLS_PER_DAY` | orchestrator | unset (`200` for the fleet) | Alan's one-minute polls spend their own 1,500 per X account per UTC day |
 | 6 | `MERRYMEN_XPOST_RESEARCH` | orchestrator | `1` | Answers look things up first. Boot line `xpost: on — … answers look things up first`; with the Bitquery key also `xpost: answers may read onchain flow — up to 200 readings per UTC day …` |
 | 6 | `MERRYMEN_XPOST_RESEARCH_PER_HOUR` | orchestrator | unset (`120`) | Public-index lookups per hour across X accounts |
-| 6 | `MERRYMEN_XPOST_FOMO` | orchestrator | **unset**; `1` only after Milla confirms Fomo's Enterprise redistribution rights herself and the plan or agreement is cited in [`fomo.md`](fomo.md) "Publication" | Paraphrased, attributed Fomo facts in answers |
+| 6 | `MERRYMEN_XPOST_FOMO` | orchestrator | `1` (Enterprise rights confirmed by the owner on 2026-10-12, [`fomo.md`](fomo.md) "Publication") | Paraphrased, attributed Fomo facts in answers |
 | 6 | `MERRYMEN_FOMO_X_HOURLY_CREDITS` | orchestrator | unset (`3000`) | Per X account per hour, and at most a quarter of the owner's daily Fomo cap |
 
 No migrations: the new state is `xpost_meta` keys only (`answer-author:…`,

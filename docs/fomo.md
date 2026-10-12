@@ -887,15 +887,15 @@ DM or a group, is told "Only my owner can set up a tail." and nothing is called.
   bought. The provider's terms reserve redistribution rights for an Enterprise plan. X's
   automation rules need verifying. Confirmed buys keep flowing through the existing X
   pipeline unchanged. Autonomous replies stay off.
-- **X answers are built as the one exception, a narrow one, and are NOT cleared to switch
-  on.** An active agent's answers to people who tagged it on X can carry code-built,
+- **X answers are the one exception, a narrow one.** An active agent's answers to people who tagged it on X can carry code-built,
   paraphrased and attributed facts ("fomo traders mostly argue it's still early", "on fomo,
   more traders have been buying in than heading out lately"), never a handle, a quote, a like
   count, P&L or a wallet list, behind `MERRYMEN_XPOST_FOMO=1` (default off) on top of
   `MERRYMEN_XPOST_RESEARCH=1`. That republishes provider-derived data, which the provider's
-  terms reserve for an Enterprise plan. **Pending owner confirmation of Enterprise rights: do
-  not set `MERRYMEN_XPOST_FOMO=1` until Milla confirms them in her own words and the plan or
-  agreement is cited here.** It is a policy change for her review either way. The
+  terms reserve for an Enterprise plan. **Enterprise rights confirmed by the owner on
+  2026-10-12: Merrymen holds the Enterprise plan, and it covers paraphrased, attributed facts
+  in X answers (`MERRYMEN_XPOST_FOMO=1`).** Every other Fomo publication draft stays
+  policy-blocked, as above. The
   orchestrator asks its own service (`createDirectBroker`) on the `x-answer` surface: a public
   audience (never the owner's), never a child's surface (a child claiming it is refused), read
   the way a room reads (no forced refresh), token activity and quick theses only (no trader
@@ -1234,10 +1234,10 @@ every open Trencher position's cost instead, which errs toward refusing. So:
 1. **Terms.** The provider licenses use "within your own applications and internal
    operations" and reserves redistribution for Enterprise. fomo.family's own terms forbid
    automated harvesting. Decide on LLM processing and on any public republication before
-   commercial deployment. *Open, 2026-10-12:* paraphrased, attributed Fomo facts in X answers
-   are built behind `MERRYMEN_XPOST_FOMO=1` (default off; see "Publication"), but need
-   Enterprise redistribution rights. Pending your confirmation of those rights, citing the
-   plan or agreement: leave the switch unset until then.
+   commercial deployment. *Decided, 2026-10-12:* the owner confirmed Merrymen holds Fomo
+   Enterprise rights, which cover paraphrased, attributed Fomo facts in X answers behind
+   `MERRYMEN_XPOST_FOMO=1` (default off; see "Publication"). Other Fomo publication drafts
+   stay policy-blocked.
 2. **X publication** of research, watching or considering posts conflicts with X rule 3.
    Keep it off, or change the rule and collect a separate research-post consent. (Answers to
    tags are not publications of this kind: they answer a person who asked about a coin.)
