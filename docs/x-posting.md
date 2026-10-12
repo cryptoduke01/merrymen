@@ -555,58 +555,96 @@ the mention itself. They go out **right away**:
 - **Selection** (`tagCandidate`): a question or plain address. Opt-outs are
   handled first. Links, secrets, abuse, sensitive topics, spam, instructions
   and advice requests are dropped before any model call. Digits may appear:
-  the writer reads a figure that stands alone as "(a number)"
-  (`answerQuestion`), so a question like "saw it on 2 lists" is answered, and
-  the figure never reaches the model; a question it could not read is passed
-  over before anything is spent (`answer-unusable`). A digit that is part of a
-  name is never masked: "$PEPE2", "pepe2" or "v2", or a coin it bought
-  followed by a number ("pepe 2", "pepe v2"), is another coin, and read as
-  "$PEPE(a number)" it would let "did you buy $PEPE2?" be answered as the
-  PEPE it bought, so such a tag is passed over too. The model question's
-  line is code's and never reads the question, so it is not held to this.
+  the writer reads every run of digits as "(a number)", glued to letters or
+  not (`answerQuestion`: "24h" is "(a number)h", "L2" is "L(a number)", "saw
+  it on 2 lists" is "saw it on (a number) lists"), so the figure never
+  reaches the model. A copycat's digit is masked the same way ("$PEPE2" is
+  "$PEPE(a number)"): that is safe because a tag that names a coin is never
+  told what it bought (below). A question it could not read (an empty one,
+  or one that names sherwood) is passed over before anything is spent
+  (`answer-unusable`).
+- **The model question, by allowlist** (`modelQuestion` in
+  `orchestrator-xpost-research.ts`). Code reads the question first, research
+  on or off. The tag is normalised: handles removed, NFKC, zero-width and
+  other format characters removed, lowercase, whitespace collapsed, and the
+  punctuation and emoji at either end taken off. Only when the whole of it is
+  one of a short list of plain shapes is it the model question: "what model
+  are you", "what ai are you", "which model do you run on", "what llm do you
+  use", "what are you built on", "what do you run on", "who made you", "who
+  built you", "are you chatgpt / gpt / claude / grok / gemini / llama / an ai
+  / a bot", "what's your model", "what model powers you", "what model" alone,
+  and "what kind of ai are you" and the like. At
+  most two greeting words may come first (gm, yo, hey, hi, ser, fren, bro,
+  alan), and "for trading" or "to trade" may follow. A tag that carries a
+  contract is never the model question. Such a question is answered with a
+  code-built line, not a draft: built by merrymen, and the new `sherwood-1`
+  (`SHERWOOD_ON_X`, the one name the gate lets an answer write with a digit)
+  is merrymen's own model, cooking. There are eight lines that share too few
+  words to be each other's repeat (`modelAnswers`), the mention's own first,
+  then the next the gate admits, so the question asked again is answered
+  again in other words; a paper agent's lines each add a short paper clause
+  of their own. It never says sherwood runs it, powers it, picks its trades
+  or is live today: nothing wires it into an agent yet.
+- **Sherwood in any form, and every other model question, gets no answer at
+  all**: no row, no draft, no allowance (`unanswered`, counted as
+  `answer-unanswered`). Sherwood is found on the tag's letters alone
+  (`sherwoodMentioned` in `gate.ts`), so "$SHERWOODINU", "sherwood-1",
+  "sherw00d", "s h e r w o o d", "sher<zero-width>wood", small capitals,
+  a Greek "ο" and "sherwod" all count. Anyone can launch `$SHERWOOD`, and
+  the model line under "sherwood TGE soon?" or "is sherwood merrymen's next
+  ICO?" would read as Merrymen confirming a token. Four review rounds found
+  token phrasings that a list of token words missed, so there is no such
+  list: a sherwood question is never answered, whatever else it says. A tag
+  that looks like a model question (the old classifier's reading: "what ai
+  runs your trading?", "you built on claude?", "which model powers your
+  trading decisions?", or an AI provider's name) and is not on the allowlist
+  is unanswered too. It is never handed to the writer model. This fails
+  closed: a plain question a word longer than the allowlist goes unanswered,
+  which costs one answer, never a screenshot. The writer model is never told
+  the name, the writer refuses a question that names it (`answerQuestion`),
+  and a drafted answer or comment reply that names sherwood anyway is
+  refused as `gate:sherwood-drafted`. Change `SHERWOOD_ON_X`, those lines and
+  the prompt only once sherwood runs the agents.
 - **What it may say** (`answerPrompt`): only public facts — how it trades, the
   coins it bought lately (never that it holds them), whether its wallet is in
   its intro, and what it already said publicly. Buys with no name a post may
   say (an autonomous Trencher coin's derived id) are said to be coins it
   can't name, never that it bought nothing; only an agent with no buys at
-  all is told it bought nothing lately. Those unnamed buys are said with
-  the money each one was (its own paper flag, not today's mode): an agent
-  switched to live whose recent buys were all on paper is told they were on
-  paper and never to call them real money, a paper agent's earlier live
-  buys are never called paper, and a mix is told never to say which. A paper agent is told to say paper in
-  every answer, since the gate refuses a paper reply that does not. "Already said" means its own
-  posted rows only. A draft still under Coming up, including an answer
-  drafted earlier in the same pass, is never handed over as said, though the
-  gate still keeps a new draft from echoing it. Very casually: short,
+  all is told it bought nothing lately. **Only the money it trades with now**
+  is ever said, because the answer is gated with today's mode, which refuses
+  a live agent's "on paper" and a paper agent's "real money". A live agent is
+  never told of a paper buy, named or not: an agent switched to live whose
+  recent buys were all on paper is told nothing of them, and unnamed buys of
+  both kinds are said as real money. A paper agent says paper as before and
+  is never told of a live buy. An idle agent is told each buy's money as it
+  was. A paper agent is told to say paper in every answer, since the gate
+  refuses a paper reply that does not. "Already said" means its own posted
+  rows only. A draft still under Coming up, including an answer drafted
+  earlier in the same pass, is never handed over as said, though the gate
+  still keeps a new draft from echoing it. Very casually: short,
   texting-a-friend answers, lowercase welcome, dry humour never at the
-  asker's expense. Asked about its model, it never names a provider: it is
-  built by merrymen, and the new `sherwood-1` (`SHERWOOD_ON_X`, the one name
-  the gate lets an answer write with a digit) is merrymen's own model,
-  cooking. It never says sherwood runs it, powers it, picks its trades or is
-  live today: nothing wires it into an agent yet. Code reads the question
-  first, research on or off: the model question, and any tag that names
-  sherwood at all ("does sherwood-1 pick your trades now?" is bait), is
-  answered with a code-built line, not a draft: eight lines that share too
-  few words to be each other's repeat (`modelAnswers`), the mention's own
-  first, then the next the gate admits, so the question asked again is
-  answered again in other words; a paper agent's lines each add a short
-  paper clause of their own. A sherwood or model question that also asks
-  about a token gets no answer at all, no draft and no post
-  (`answer-token-model`): anyone can launch `$SHERWOOD`, and the model line
-  under "is $SHERWOOD merrymen's new token?" would read as Merrymen
-  confirming it. A token is read wide, because a miss is the screenshot: any
-  `$` before a letter (`$SHERWOODINU`, `$SHERWOOD_AI`), a tagged contract, a
-  name that runs on from sherwood (`sherwoodinu`), a coin, token, contract,
-  CA, launch, presale or airdrop word, trade talk (bought, aped, pumping,
-  bags, holders), price talk (price, worth, mcap, chart, liquidity, 100x),
-  and whether it is real or where it trades (legit, official, rug, scam,
-  dex, Pons, Uniswap, pump.fun). Only its own picking is read past ("does
-  sherwood-1 pick your trades?", "is sherwood choosing your coins?"); "is
-  sherwood one of your coins?" is a token. A model question that uses one of
-  these words fails closed and is not answered. The writer model is never told the name,
-  and a drafted answer or comment reply that names sherwood anyway is
-  refused as `gate:sherwood-drafted`. Change `SHERWOOD_ON_X`, those lines and
-  the prompt only once sherwood runs the agents.
+  asker's expense. Asked about its model in a way the allowlist does not
+  cover, it gets no answer (above); a draft is still told never to name a
+  provider or a model.
+- **Never whether it bought a coin someone named** (`namesACoin`,
+  `coinNamedIn`). A tag names a coin when it carries a contract, when
+  `classifyTag` finds a coin or a ticker in it, when it has a `$cashtag` of
+  any length, or when any coin it bought (each buy's ticker, its name, the
+  label a post would use, and each buy post's coin) appears in the
+  question's letters, ignoring case, spacing, digits, zero-width characters
+  and look-alike letters. So "did you buy pepe inu?", "pepe two", "$PEPE2",
+  "pepe 2", "pe<zero-width>pe", "pepe classic" and "Pepe Coin" all name the
+  PEPE it bought. Such a tag's prompt has no list of its buys, no "you have
+  not bought anything", no line about unnamed buys, none of what it already
+  said and none of its recent posts (they carry its buy posts), and no
+  research fact about its own buys. It is told it may say it doesn't talk
+  about individual positions here, or say only what it looked up. A copycat
+  then has nothing to be matched to, however it is spelled. This errs
+  toward naming: a coin called GM makes "gm, how are you?" a named coin,
+  which only costs that answer its list of buys. The one exception is the
+  exact path in "Research for answers": a tag that carries the full contract
+  its own records bought. A question that names no coin ("what have you
+  been buying lately?") still gets its buys, in its own labels.
 - **Gate:** the comment-reply gate, opt-out notice included, with the
   `sherwood-1` exception above. Before anything else, a reply or answer that
   says sherwood runs it ("running on", "powered by", "sherwood-1 is live"),
@@ -655,19 +693,22 @@ looks things up first, the way Shogun does in a Telegram group
   still refused.
 - **Intent, by code** (`classifyTag`, with the Telegram groups' readers):
   what it can do, how to get an agent, its own trades, a coin (by `$ticker`,
-  by a coin it bought named in words, or by the address), its model, or chat.
+  by a coin it bought named in words, or by the address), its model (the
+  allowlist above), chat, or unanswered (sherwood in any form, or a model
+  question off the allowlist). Research on or off, the classification runs;
+  only with research on is anything looked up for it.
   A coin it bought counts by name only beside a word about a coin or a trade
   ("is pepe legit?", "the pepe chart"), and never by a label under three
   letters or made of greetings and pronouns alone: a coin called GM or You
   must not turn "gm, how are you?" into a paid lookup. An attempt to steer it
   and a private ask (wallet, P&L, owner) are chat: nothing is looked up for
   them.
-- **What a coin is looked up on:** its own history (the buys the room knows,
-  its own buy posts on this X account, its public theses: "you bought it",
-  its own words and its public reason, through the Telegram facts filter
-  that drops figures, addresses and links; a sale is never said, and neither
-  is "you passed": a symbol's thesis without a trade is a hold of a coin it
-  may still own); the public index's coin facts on the FLEET Gecko lane (the
+- **What a coin is looked up on:** its own history, only on the exact path
+  below (the buys the room knows, its own buy posts on this X account, its
+  public theses: "you bought it", its own words and its public reason,
+  through the Telegram facts filter that drops figures, addresses and links;
+  a sale is never said, and neither is "you passed": a symbol's thesis
+  without a trade is a hold of a coin it may still own); the public index's coin facts on the FLEET Gecko lane (the
   orchestrator passes its home explicitly; `process.env` is untouched); with
   `MERRYMEN_XPOST_FOMO=1`, Fomo's token activity and quick theses; and,
   while the Bitquery lane is configured on the orchestrator
@@ -677,17 +718,25 @@ looks things up first, the way Shogun does in a Telegram group
   digit-free bands ("on-chain data shows buys clearly outweighing sells
   over the last hour"). No lane, no flow and no mention of it in "what can
   you do?".
-- **A contract is matched by the contract alone, all forty hex.** With a
-  tagged address, its history counts a buy only when that buy's token or its
-  buy post's CA (or decision) is that address, never by a name. A thesis
-  counts under an address-matched buy's symbol, or under the address's
-  derived id (`T` and its last eleven hex) only beside a buy or buy post of
-  the full contract: eleven hex can be copied off its buy post and ground
-  into a stranger's token, so a derived id alone is never "you bought it". A
+- **Its own history only by the full contract the tag carried: the exact
+  path.** "You bought it" (and its own words, its buy post and its public
+  reason) is said only when the tag carries one forty-hex contract and its
+  own records bought that exact contract: a buy whose token is it, or a buy
+  post on X whose CA is it (`fullyBought`). Never by a symbol, a label or a
+  derived id (`T` and the last eleven hex, which can be copied off its buy
+  post and ground into a stranger's token), and never for an address that a
+  `$ticker` or a name resolved to: "$PEPE" finding its own PEPE buy is a
+  name. A thesis counts only under that exact contract's buy's symbol or its
+  derived id. And only for a buy made with the money it trades with now: a
+  live agent's paper buy, or a paper agent's live one, is not said. That
+  bundle is marked exact, and only then may the answer say it bought the
+  coin (`boughtExact`). A general question about its own trades, which names
+  no coin, may be told its latest buy post; a named coin never is. A
   `$ticker` it bought beside a different contract ("is $PEPE <copycat>
-  legit?"), including one that shares the bought contract's last eleven
-  hex, is a conflict: nothing is looked up, and the only fact is that the
-  contract in the tag is not the one it bought under that name.
+  legit?"), including one that shares the bought contract's last eleven hex,
+  is a conflict: nothing is looked up at all, and nothing is said about what
+  it bought. Saying the contract "is not the one you bought under that name"
+  would confirm that it bought that name, so it is no longer said.
 - **A creator's description is a claim, not a fact.** It is read only for a
   coin the agent itself traded (a buy's token or its buy post's CA, the
   full contract, never a derived id), refused when it carries an endorsement, an affiliation
@@ -724,8 +773,8 @@ looks things up first, the way Shogun does in a Telegram group
   lookup refused, failed or late is simply not a fact; the answer is still
   written.
 - **The gate is unchanged:** no numbers, no prices, no advice, never that it
-  holds a coin now. A coin it did not trade is named without a `$` sign (an
-  unvouched cashtag is refused).
+  holds a coin now. A coin someone named is to be named without a `$` sign
+  (an unvouched cashtag is refused).
 - **Fomo on X: Enterprise rights confirmed.** Paraphrased, attributed Fomo
   facts in these answers republish provider-derived data, which needs the
   provider's Enterprise redistribution rights. The owner confirmed on
