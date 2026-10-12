@@ -30,6 +30,7 @@ import {
   generalTradesQuestion,
   HOT_NONE,
   hotAsk,
+  hotShaped,
   hotPhrases,
   hotScreen,
   majorAsk,
@@ -1360,6 +1361,22 @@ describe("what's hot: the chain's trending coins past the fleet's floors, fomo's
     }
     assert.equal(classifyTag("what's hot?").kind, "hot");
     assert.equal(namesACoin({ text: "what's hot?", intent: { kind: "hot" }, address: null }), false, "it names no coin");
+  });
+
+  it("a what's-hot question with a word more is answered by nothing: what to buy in other words (red-team 2026-10-12)", () => {
+    // Each was chat at fbcf8756, drafted, and a draft naming coins went out.
+    for (const text of ["what's hot? need a new bag", "what's moving? got cash", "what's hot? looking for my next one", "what's trending? looking to rotate",
+      "what's hot? got some dry powder", "what's pumping? bags are empty", "what's moving? i have eth to deploy", "what's hot? wallet's ready",
+      "what's hot? fresh money here", "what's hot? new to this", "got cash, what's hot?", "top gainers? i'm ready", "what's the meta, need a play"]) {
+      assert.equal(hotShaped(text), true, text);
+      assert.equal(classifyTag(text).kind, "unanswered", text);
+    }
+    for (const text of ["what's hot?", "gm, what's hot today?", "what's moving on robinhood today", "what are people talking about?"]) {
+      assert.equal(hotShaped(text), false, text);
+      assert.equal(classifyTag(text).kind, "hot", text);
+    }
+    assert.equal(classifyTag("what's hot?", { address: `0x${"ab".repeat(20)}` }).kind, "unanswered", "nor beside a contract");
+    for (const text of ["how's your day going?", "what kind of coins do you trade?"]) assert.equal(hotShaped(text), false, text);
   });
 
   it("the screen: the discovery floors, a memecoin with flow both ways, a ticker the sanitiser keeps that is no big coin's, one each", () => {

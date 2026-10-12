@@ -1009,7 +1009,14 @@ other owner's agent, and its posting and reply warnings, are unchanged.
   hot right now" went out). Any drafted answer handed nothing and told none
   of its buys that names a coin in any words (a word that may be a coin's
   name beside market talk, `words.ts` `coinTalkIn`) is refused
-  (`gate:unlooked-coin`).
+  (`gate:unlooked-coin`), and so is one that says any word that is not
+  everyday, how an agent talks about its trading, or its own name
+  (`unknownWordIn`, red-team 2026-10-12: "wif has been strong lately, not a
+  call" and "bonk is where the action is lately" named coins with no market
+  word). A tag that holds one of these questions and a word more ("what's
+  hot? need a new bag", "what's moving? got cash", "what's trending?
+  looking to rotate"), or carries a contract beside one, is answered by
+  nothing (`hotShaped`): what to buy, asked in other words.
   Research reads page one of GeckoTerminal's Robinhood Chain
   `trending_pools` on the fleet lane (mostly the Trencher tape's cache) and
   keeps up to three coins (`hotScreen`) that pass the fleet's own discovery

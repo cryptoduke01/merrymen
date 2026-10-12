@@ -373,6 +373,23 @@ export function hotAsk(text: unknown): boolean {
   return plain !== null && !sherwoodMentioned(text) && HOT_ALLOWED.test(plain);
 }
 
+/**
+ * A "WHAT'S HOT?" WITH WORDS MORE (red-team 2026-10-12): "what's hot? need a
+ * new bag", "what's moving? got cash", "what's hot? looking for my next
+ * one", "what's trending? looking to rotate", "what's pumping? bags are
+ * empty", "what's moving? i have eth to deploy" passed the advice screen,
+ * fell off the allowlist and were drafted as chat: what to buy, asked in
+ * other words, and the draft named coins. A tag that holds one of the
+ * allowlist's questions anywhere and is not the whole question is answered by
+ * nothing. Fail closed: "gm, what's moving you to trade today?" costs one
+ * answer. Exported for tests.
+ */
+const HOT_INSIDE = new RegExp(String.raw`\b(?:${WHATS} (?:hot|trending|moving|pumping|the meta)|top gainers|what (?:are|r) (?:people|folks|ppl) talking about)\b`, "u");
+export function hotShaped(text: unknown): boolean {
+  if (typeof text !== "string" || hotAsk(text)) return false;
+  return HOT_INSIDE.test(normalisedTag(text)) || HOT_INSIDE.test(plainAsk(text) ?? "");
+}
+
 /** Words that set one coin against another. */
 const COMPARES = /\b(?:vs\.?|versus|or|than|compared?|comparison|comparing|better|worse|safer|riskier|healthier|stronger|weaker|which|either|between|instead)\b/i;
 
@@ -409,6 +426,8 @@ export function classifyTag(text: string, o: { address?: string | null } = {}): 
   if (asked?.kind === "site" && asked.topic === "onboarding") return { kind: "onboarding" };
   // "WHAT'S HOT?", ON THE ALLOWLIST'S PLAIN SHAPES (hotAsk): an overview, no coin named.
   if (address === null && hotAsk(t)) return { kind: "hot" };
+  // And one with any word more, or beside a contract, is answered by nothing (hotShaped).
+  if (hotShaped(t) || (address !== null && hotAsk(t))) return { kind: "unanswered" };
   // A COIN BY NAME OR TICKER, ON THE ALLOWLIST'S PLAIN SHAPES (majorAsk): read
   // on CoinGecko's list first. What the tag would otherwise be is kept: a
   // $ticker that turns out to be no major goes on as a coin of the chain,

@@ -52,7 +52,7 @@ import { admitXPost, merrymenMentioned, moneySaid, namedIn, tickerRefusal, vocab
 import { ACTIVE_CADENCE, ANSWER_GAP_MS, ANSWER_STALE_MS, ANSWERS_PER_DAY, REPLY_STALE_MS, STANDARD_CADENCE, coinOf, hash32, introState, planPosts, replyDueAt, sendDecision, type PlanCadence, type PlanClock, type PlanIntent } from "./xpost/planner";
 import { APP_PAUSE_KEY, APP_PAUSE_MS, CREDITS_PAUSE_MS, PAUSE_KEY, readReplyComments, sendOne, type SendOutcome } from "./xpost/sender";
 import { isAnswerOptOut, isReplyOptOut, replyCandidate, tagCandidate, withoutReplyOptOut } from "./xpost/replies";
-import { coinTalkIn, nameLikeWords, textWords } from "./xpost/words";
+import { coinTalkIn, nameLikeWords, textWords, unknownWordIn } from "./xpost/words";
 import { activeTenantsOf, repliesAllowedFor, repliesScopeOf } from "./xpost/scope";
 import {
   ANSWER_LOOKED_UP,
@@ -1809,8 +1809,14 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // tag read as chat, "wif and bonk look hot right now" went out word for
       // word. A draft the gate admitted, handed nothing and told none of its
       // buys, that names a coin in any words (a word that may be a coin's name
-      // beside market talk: xpost/words.ts coinTalkIn) is refused.
-      const unlookedCoin = !coded && verdict?.ok === true && !handed && !told && coinTalkIn(withoutReplyOptOut(verdict.text), f.name);
+      // beside market talk: xpost/words.ts coinTalkIn) is refused. AND IT SAYS
+      // ONLY KNOWN WORDS (red-team 2026-10-12), as the gate holds an answer
+      // handed research to (lookedOnly): each word everyday, how an agent talks
+      // about its trading, or its own name (unknownWordIn). Market words or
+      // none: "wif has been strong lately" and "bonk is where the action is"
+      // named coins with none of them.
+      const unlookedCoin = !coded && verdict?.ok === true && !handed && !told
+        && (coinTalkIn(withoutReplyOptOut(verdict.text), f.name) || unknownWordIn(withoutReplyOptOut(verdict.text), f.name));
       const finishedAt = at();
       const admitted = verdict?.ok && !postsName && !unlookedCoin ? verdict.text : null;
       // THE FIGURES LINE, CODE'S, AFTER THE GATE (xpost/figures.ts): only an

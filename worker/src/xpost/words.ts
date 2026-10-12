@@ -140,6 +140,55 @@ export function coinTalkIn(text: unknown, ownName = ""): boolean {
 }
 
 /**
+ * EVERYDAY WORDS OF A CHAT ANSWER, read only by unknownWordIn: how an answer
+ * says hello, sorry, that it cannot look something up, or keeps its
+ * positions to itself. Never read by the gate's own known-word checks
+ * (answerWord), which stay as they were. The parts of a contraction its
+ * reading leaves ("couldn", "didn") are here too.
+ */
+const CHAT_WORDS: ReadonlySet<string> = new Set((
+  "couldn wouldn shouldn didn doesn isn aren wasn weren hasn haven don ain " +
+  "read reading line lines single short long word words public private share sharing myself yourself itself ourselves themselves " +
+  "individual personal detail details specific specifics mention mentioned book books fine okay alright sure glad happy thank thanks welcome " +
+  "cheers enjoy enjoying enjoyed day today tonight weekend morning afternoon evening night sleep sleepy coffee tea lunch breakfast dinner " +
+  "weather sunny rain rainy cloudy warm cold busy calm slow lazy relax relaxed relaxing chilling hanging around chat chatting talk talking " +
+  "asking ask answer answering reply question questions curious wondering wonder interest interested interesting fair point points " +
+  "took take taking went go gone came come coming ran run running tried try trying keep kept holding hold rest rather instead " +
+  "explain explained explaining mean meant usual usually honest honestly simply simple clear clearly easily easy hard tough thing things " +
+  "something anything everything nothing someone anyone everyone nobody somebody somewhere anywhere everywhere elsewhere sometime " +
+  "little bit lot lots plenty enough much many more most less least few several couple handful dozen " +
+  "one two three four five first second third last next previous recent latest early later soon already still yet " +
+  "today yesterday tomorrow week weeks month months year years hour hours minute minutes moment moments while " +
+  "good great nice cool fun funny wild crazy weird strange odd normal ordinary regular typical usual special different same similar " +
+  "big small large tiny huge high low new old young fresh quick fast slow steady careful patient quiet loud " +
+  "feel feeling felt think thinking thought know knowing knew known guess guessing hope hoping wish see seeing saw seen look looking watch " +
+  "learn learning learned figure figuring figured sort sorting work working worked job jobs hobby practice practicing " +
+  "agent agents bot account owner owners strategy strategies approach style rules rule plan plans habit habits process " +
+  "sorry apologies unfortunately luckily anyway though although however because since unless until whether either neither " +
+  "also too very really quite pretty fairly rather kinda sorta maybe perhaps probably likely unlikely definitely certainly " +
+  "hello hey hiya howdy greetings bye later cya take care stay safe peace love respect appreciate appreciated").split(/\s+/));
+
+/**
+ * A WORD AN ANSWER HANDED NOTHING MAY NOT SAY (red-team 2026-10-12). The rule
+ * was a coin's name beside market talk (coinTalkIn), and a list of market
+ * words is never whole: under "what's hot? need a new bag", "wif and bonk
+ * have been the lively ones lately", "wif has been strong lately, not a
+ * call", "bonk is where the action is lately" and "wif and popcat are the
+ * ones people are on" were each posted as chat. So a drafted answer handed no
+ * research and told none of its buys says only known words: each word of
+ * three letters or more is everyday or how an agent talks about its trading
+ * (answerWord, CHAT_WORDS), or a word of the agent's own name. Anything else
+ * might be a coin's name, and the draft is not posted, market words or none.
+ * Read alike for every name; errs toward refusing, which costs one chat
+ * answer. The orchestrator reads it beside coinTalkIn, never instead of it.
+ */
+export function unknownWordIn(text: unknown, ownName = ""): boolean {
+  if (typeof text !== "string") return false;
+  const own = new Set(tagWords(String(ownName ?? "")));
+  return nameLikeWords(text).some((w) => !own.has(w) && !answerWord(w) && !listedIn(CHAT_WORDS, w));
+}
+
+/**
  * TALK ABOUT A COIN BY A NAME (red-team review, 2026-10-12): a word about a
  * coin or a trade beside a word that might be a coin's name, "is pepe
  * legit?", "is bonk legit?", "did you buy pepe inu?". Read alike for every
