@@ -1126,7 +1126,10 @@ other owner's agent, and its posting and reply warnings, are unchanged.
   play, bet, get in, all in, load, grab, jump, no loss, up only, money,
   cash and the like, red-team 2026-10-12) and never starts with the first
   person (`$MYBAG`, `$MYCOIN`: MY or OUR, or I, IM, IAM, IVE, WE before an
-  everyday word or a claim: `$IHOLD`, `$IMIN`, `$IGOTIN`), and clears the X gate's own
+  everyday word or a claim: `$IHOLD`, `$IMIN`, `$IGOTIN`), holds none of
+  the gate's calls and hype with the spaces taken out (`tickerRefusal`:
+  `$TENX`, `$FIVEX`, `$DONTMISS`, `$LASTCHANCE`, `$SUREWIN`, `$DOUBLEUP`,
+  `$FULLPORT`, `$SMARTMONEY` were posted, red-team 2026-10-12), and clears the X gate's own
   vocabulary as a word (`gate.ts` `tickerRefusal`: `$BUY`, `$WAGMI`,
   `$SHILL`, `$LFG` were posted in a line the gate would have refused as
   words). Research drops such a ticker (`showTicker`), and the orchestrator

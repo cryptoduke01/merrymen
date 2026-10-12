@@ -1276,4 +1276,13 @@ describe("a ticker in code's figures line is read as the gate reads words (red-t
     for (const ok of ["BTC", "ETH", "SOL", "PEPE", "WIF", "BONK", "DOGE", "CHUMP", "FROGGY", "TAO", "HYPE"]) assert.equal(tickerRefusal(ok), null, ok);
     for (const bad of ["1B", "100X", "", "B", "PEPE🐸", null]) assert.equal(tickerRefusal(bad), "charset", String(bad));
   });
+
+  it("a call or hype phrase with its spaces taken out is refused too (red-team 2026-10-12)", () => {
+    // Each passed tickerRefusal and showTicker at fbcf8756 and was posted in the house's line.
+    for (const bad of ["GETIN", "ALLIN", "UPONLY", "LOADUP", "NOLOSS", "HOLDIT", "TENX", "FIVEX", "DONTMISS", "LASTCHANCE", "SUREWIN", "DOUBLEUP", "FULLPORT",
+      "SMARTMONEY", "JUMPIN", "EASYMONEY", "CANTLOSE", "NEXTX", "STACKIT", "GRABIT", "HUNDREDX", "NOBRAINER", "SURETHING", "TOTHEMOON"]) {
+      assert.equal(tickerRefusal(bad), "hype", bad);
+    }
+    for (const ok of ["BTC", "PEPE", "CHUMP", "FROGGY", "WOJAK", "QRTZ", "ZAPX", "COINA"]) assert.equal(tickerRefusal(ok), null, ok);
+  });
 });

@@ -1286,9 +1286,28 @@ export function tickerRefusal(ticker: unknown): string | null {
   const vocab = vocabularyRefusal(lower);
   if (vocab) return vocab;
   if (COIN_ADVICE.test(lower) || REPLY_ADVICE.test(lower) || REPLY_CURRENT_OR_ACTION.test(lower)) return "hype";
+  if (ADVICE_RUN_TOGETHER.test(lower)) return "hype";
   if (amountSaid(lower)) return "quantity";
   return null;
 }
+
+/**
+ * THE GATE'S CALLS AND HYPE WITH THE SPACES TAKEN OUT (red-team 2026-10-12):
+ * a ticker is one word, so "get in", "all in", "up only", "no loss", "sure
+ * win", "ten x" and "don't miss" never matched the phrases above inside one,
+ * and "$GETIN", "$ALLIN", "$UPONLY", "$TENX", "$DONTMISS", "$LASTCHANCE",
+ * "$SUREWIN", "$DOUBLEUP", "$FULLPORT" were posted in the house's line. Read
+ * anywhere in a ticker's letters; errs toward refusing.
+ */
+const ADVICE_RUN_TOGETHER = new RegExp([
+  "getin", "gotin", "allin", "apein", "loadup", "loadin", "uponly", "onlyup", "noloss", "nolose", "cantlose", "cannotlose", "holdit", "holdthis", "keepholding",
+  "surewin", "surething", "surebet", "safebet", "easywin", "bigwin", "winbig", "doubleup", "tripleup", "fullport", "allocat", "smartmoney", "easymoney",
+  "freemoney", "jumpin", "stackit", "stackup", "grabit", "grabsome", "getsome", "dontmiss", "donotmiss", "nomiss", "lastchance", "lastcall", "finalcall",
+  "tenbagger", "moonshot", "tothemoon", "nobrainer", "easygain", "quickflip", "flipit", "buydip", "thedip", "sendit", "apenow", "getrich", "richquick",
+  "wenmoon", "notfinancial", "nextbig", "dontfade", "nofade", "trustme", "goingup", "goesup", "gonnarun", "readytorun", "takeoff",
+  // a multiple in words: "$TENX", "$FIVEX", "$NEXTX", "$HUNDREDX"
+  "(?:one|two|three|four|five|six|seven|eight|nine|ten|twenty|fifty|hundred|thousand|million|next|double|triple)x",
+].join("|"));
 
 /**
  * A BUY SAID IN THE FIRST PERSON: bought, grabbed, picked up, scooped,
