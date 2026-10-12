@@ -291,6 +291,10 @@ describe("one bounded research bundle per answer", () => {
     assert.ok(b.facts.includes("onchain, more traders have been buying in than heading out lately"));
   });
 
+  it("the budget is pinned: six lookups, twelve seconds, four per index read and eight per Fomo read", () => {
+    assert.deepEqual({ ...RESEARCH_BUDGET }, { maxLookups: 6, totalMs: 12_000, readMs: 4_000, fomoMs: 8_000 });
+  });
+
   it("never more than the lookups allowed, and never past its time", async () => {
     const all = fakes({ flow: true });
     const b = await all.research.gather(input({ kind: "coin", ticker: "WIF", address: null }, { fomo: true }));

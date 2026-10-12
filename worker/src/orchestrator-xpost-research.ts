@@ -125,9 +125,12 @@ export function classifyTag(text: string, o: { address?: string | null; knownCoi
  * ONE ANSWER'S RESEARCH. Lookups: a name search, the index's coin facts, the
  * creator's description, Fomo's token activity, Fomo's quick theses, onchain
  * flow — six at most, and in practice fewer. The whole bundle, waits
- * included, is over in nine seconds; one read never takes more than four.
+ * included, is over in twelve seconds; an index or chain read never takes
+ * more than four, a Fomo read more than eight (an uncached thesis page is a
+ * slow provider read; cut at four it would be paid for and never heard).
+ * The reads after the address is known run side by side.
  */
-export const RESEARCH_BUDGET = Object.freeze({ maxLookups: 6, totalMs: 9_000, readMs: 4_000 });
+export const RESEARCH_BUDGET = Object.freeze({ maxLookups: 6, totalMs: 12_000, readMs: 4_000, fomoMs: 8_000 });
 
 /**
  * THE INDEX, PER X ACCOUNT: at most this many index lookups (a search, a
@@ -449,12 +452,12 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
        * theses (`own`) is time-boxed the same way but is no lookup: it is the
        * shared database, not a provider.
        */
-      const look = async <T>(run: (ms: number) => Promise<T>, fallback: T, own = false): Promise<T> => {
+      const look = async <T>(run: (ms: number) => Promise<T>, fallback: T, own = false, share: number = RESEARCH_BUDGET.readMs): Promise<T> => {
         if (!own && lookups >= RESEARCH_BUDGET.maxLookups) {
           notes.push("lookups-spent");
           return fallback;
         }
-        const ms = Math.min(RESEARCH_BUDGET.readMs, left());
+        const ms = Math.min(share, left());
         if (ms <= 250) {
           notes.push("late");
           return fallback;
@@ -512,8 +515,8 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
         const [read, project, activity, talk, flow] = await Promise.all([
           look((ms) => coinFacts({ network: "robinhood", address: address!, chatId: xAccountKey(input.xUserId), timeoutMs: ms, withInfo: true }), null),
           look((ms) => projectDescription(address!, CHAIN_ID), null),
-          broker ? look((ms) => broker.call("fomo_get_token_activity", { token: address!, chain: "robinhood", window: "24h", limit: 5 }, fomoOpts(ms)), null) : Promise.resolve(null),
-          broker ? look((ms) => broker.call("fomo_get_token_theses", { token: address!, chain: "robinhood", depth: "quick", limit: 10 }, fomoOpts(ms)), null) : Promise.resolve(null),
+          broker ? look((ms) => broker.call("fomo_get_token_activity", { token: address!, chain: "robinhood", window: "24h", limit: 5 }, fomoOpts(ms)), null, false, RESEARCH_BUDGET.fomoMs) : Promise.resolve(null),
+          broker ? look((ms) => broker.call("fomo_get_token_theses", { token: address!, chain: "robinhood", depth: "quick", limit: 10 }, fomoOpts(ms)), null, false, RESEARCH_BUDGET.fomoMs) : Promise.resolve(null),
           d.flow ? look((ms) => d.flow!({ chainId: CHAIN_ID, address: address!, timeoutMs: ms }), null) : Promise.resolve(null),
         ]);
         const out = [...history];

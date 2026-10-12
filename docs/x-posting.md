@@ -498,8 +498,10 @@ looks things up first, the way Shogun does in a Telegram group
   than heading out lately". Never a number, price, size, P&L, handle, quote,
   wallet list or address. A valuation cue (under- or overvalued) is never
   said. Every phrase is pinned through the real X gate in the tests.
-- **Budget:** one bundle per answer, at most six lookups and nine seconds,
-  each read at most four. Index lookups: eight per X account per ten minutes,
+- **Budget:** one bundle per answer, at most six lookups and twelve seconds;
+  an index or chain read at most four, a Fomo read at most eight (an
+  uncached thesis page is slow, and one cut short is paid for and never
+  heard). Index lookups: eight per X account per ten minutes,
   `MERRYMEN_XPOST_RESEARCH_PER_HOUR` across X accounts. Fomo: the `x-answer`
   surface's own hourly cap per X account (`MERRYMEN_FOMO_X_HOURLY_CREDITS`),
   under the owner's caps and the fleet's pools. A lookup refused, failed or
