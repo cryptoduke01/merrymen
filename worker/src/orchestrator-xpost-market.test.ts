@@ -106,4 +106,25 @@ describe("what's hot in code's words", () => {
     assert.ok(hotAnswers(read, "1", { lower: true }).every((l) => l.endsWith(". say stop to opt out.")));
     assert.deepEqual(hotAnswers({ coins: 0, lead: null }, "1", { lower: false }), []);
   });
+
+  it("for someone already told they can say stop, every frame leaves the notice off and still clears the gate told so (2026-10-12)", () => {
+    const told = (text: string, paper: boolean) => admitXPost(text, { kind: "reply", answer: true, noticeShown: true, agentName: "Alan Al Dale", mode: paper ? "paper" : "live",
+      coins: [], recentOwn: [], recentFleet: [] }, (r, c) => admitAgentLine(r, c));
+    for (const paper of [false, true]) {
+      const sets = [
+        hotAnswers({ coins: 2, lead: { dir: "down", size: "a little" } }, "7", { lower: true }, { paper, notice: false }),
+        hotNoneAnswers("7", { lower: true }, { paper, notice: false }), hotUnreadAnswers("7", { lower: true }, { paper, notice: false }),
+        majorAnswers({ rank: "large", day: { dir: "up", size: "a fair bit" }, week: null, volume: "light" }, "7", { lower: true }, { paper, notice: false }),
+        majorUnreadAnswers("7", { lower: true }, { paper, notice: false }),
+      ];
+      for (const line of sets.flat()) {
+        assert.doesNotMatch(line, /opt out/, line);
+        const v = told(line, paper);
+        assert.ok(v.ok, `${line} → ${v.ok ? "" : v.reason}`);
+        const owed = admitXPost(line, { kind: "reply", answer: true, agentName: "Alan Al Dale", mode: paper ? "paper" : "live", coins: [], recentOwn: [], recentFleet: [] },
+          (r, c) => admitAgentLine(r, c));
+        assert.deepEqual(owed, { ok: false, reason: "opt-out-unsaid" }, "not told: the notice is owed");
+      }
+    }
+  });
 });

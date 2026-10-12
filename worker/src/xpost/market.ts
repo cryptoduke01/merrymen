@@ -26,7 +26,7 @@
  *
  * Pure: no I/O, no model, no provider, no clock.
  */
-import { REPLY_OPT_OUT } from "./replies";
+import { noticeFor, type CodeLineOptions } from "./replies";
 
 /** A day's move as code reads it: which way, and how far, by code's own thresholds. Never a figure. */
 export interface Move {
@@ -111,13 +111,13 @@ const MARKET_PAPER: readonly string[] = Object.freeze([
 ]);
 
 /** The lines, this mention's own frame first (chosen by its id), each with the notice and, on paper, a paper clause. */
-function framed(texts: readonly string[], seed: string, style: { lower: boolean }, o: { paper?: boolean }): string[] {
+function framed(texts: readonly string[], seed: string, style: { lower: boolean }, o: CodeLineOptions): string[] {
   let h = 0;
   for (const ch of String(seed ?? "")) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
-  const notice = style.lower ? REPLY_OPT_OUT.toLowerCase() : REPLY_OPT_OUT;
+  const notice = noticeFor(style, o);
   return texts.map((_, i) => {
     const k = (h + i) % texts.length;
-    return `${texts[k]!}${o.paper === true ? `. ${MARKET_PAPER[k % MARKET_PAPER.length]!}` : ""}. ${notice}`;
+    return `${texts[k]!}${o.paper === true ? `. ${MARKET_PAPER[k % MARKET_PAPER.length]!}` : ""}.${notice}`;
   });
 }
 
@@ -126,7 +126,7 @@ function framed(texts: readonly string[], seed: string, style: { lower: boolean 
  * mention's own (`seed`, its id). Empty for a read with no coin: that is
  * hotNoneAnswers.
  */
-export function hotAnswers(read: HotRead, seed: string, style: { lower: boolean }, o: { paper?: boolean } = {}): string[] {
+export function hotAnswers(read: HotRead, seed: string, style: { lower: boolean }, o: CodeLineOptions = {}): string[] {
   if (!read || !(read.coins >= 1)) return [];
   return framed(HOT_FRAMES.map((f) => f(read.coins > 1, read.lead ?? null)), seed, style, o);
 }
@@ -162,12 +162,12 @@ const HOT_UNREAD_LINES: readonly string[] = Object.freeze([
 ]);
 
 /** What's hot with nothing past the floors: every line, this mention's own first. */
-export function hotNoneAnswers(seed: string, style: { lower: boolean }, o: { paper?: boolean } = {}): string[] {
+export function hotNoneAnswers(seed: string, style: { lower: boolean }, o: CodeLineOptions = {}): string[] {
   return framed(HOT_NONE_LINES, seed, style, o);
 }
 
 /** What's hot with the index unread: every line, this mention's own first. */
-export function hotUnreadAnswers(seed: string, style: { lower: boolean }, o: { paper?: boolean } = {}): string[] {
+export function hotUnreadAnswers(seed: string, style: { lower: boolean }, o: CodeLineOptions = {}): string[] {
   return framed(HOT_UNREAD_LINES, seed, style, o);
 }
 
@@ -240,7 +240,7 @@ function majorText(w: MajorWords, r: MajorRead): string | null {
 }
 
 /** A major, answered by code: every frame for this read, this mention's own first. Empty when the read has nothing to say. */
-export function majorAnswers(read: MajorRead, seed: string, style: { lower: boolean }, o: { paper?: boolean } = {}): string[] {
+export function majorAnswers(read: MajorRead, seed: string, style: { lower: boolean }, o: CodeLineOptions = {}): string[] {
   if (!read) return [];
   const texts = MAJOR_FRAMES.map((w) => majorText(w, read));
   return texts.every((t): t is string => t !== null) ? framed(texts, seed, style, o) : [];
@@ -259,6 +259,6 @@ const MAJOR_UNREAD_LINES: readonly string[] = Object.freeze([
 ]);
 
 /** A major unread: every line, this mention's own first. */
-export function majorUnreadAnswers(seed: string, style: { lower: boolean }, o: { paper?: boolean } = {}): string[] {
+export function majorUnreadAnswers(seed: string, style: { lower: boolean }, o: CodeLineOptions = {}): string[] {
   return framed(MAJOR_UNREAD_LINES, seed, style, o);
 }

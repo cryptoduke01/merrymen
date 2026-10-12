@@ -309,9 +309,20 @@ describe("fitting it into the answer", () => {
     ]);
   });
 
-  it("no notice, no words, or nothing showable: unchanged", () => {
-    assert.equal(withFigures(words, BTC).line, null);
+  it("no notice (someone already told they can say stop): the line goes after the words, and still fits X (2026-10-12)", () => {
+    const r = withFigures(words, BTC);
+    assert.equal(r.text, `${words} coingecko: $BTC #1, ~$97k, mcap ~$1.9T, vol ~$41B, 24h +1.2%, 7d -3.4%.`);
+    assert.equal(withFigures("its up a little today on coingecko", BTC).text.startsWith("its up a little today on coingecko. coingecko: $BTC #1,"), true, "a stop added");
+    assert.equal(withoutFiguresLine(r.text), words, "read back without its line");
+    const long = "x".repeat(200) + " up a little on coingecko today.";
+    const fit = withFigures(long, BTC);
+    assert.ok(fit.line !== null && fit.dropped > 0 && xWeightedLength(fit.text) <= X_MAX_WEIGHTED);
+    assert.equal(withFigures("x".repeat(270) + " today.", BTC).line, null, "no form fits: unchanged");
+  });
+
+  it("no words, or nothing showable: unchanged", () => {
     assert.equal(withFigures(NOTICE, BTC).line, null);
+    assert.equal(withFigures("", BTC).line, null);
     assert.equal(withFigures(`${words} ${NOTICE}`, []).line, null);
     assert.equal(withFigures(`${words} ${NOTICE}`, null).text, `${words} ${NOTICE}`);
   });

@@ -2,6 +2,21 @@
 import type { XReply } from "./client";
 
 export const REPLY_OPT_OUT = "Say stop to opt out.";
+
+/**
+ * WHAT A CODE-BUILT ANSWER IS TOLD (writer.ts and market.ts lines): `paper`,
+ * the agent trades on paper (its line adds a paper clause); `notice`, this
+ * answer must carry the opt-out notice: the person's first answer, or the
+ * first after thirty days (store.ts optOutToldSince, the owner's decision of
+ * 2026-10-12). Absent `notice` is true: the fail-closed side.
+ */
+export interface CodeLineOptions { paper?: boolean; notice?: boolean }
+
+/** The opt-out notice in the agent's casing, with its leading space, or nothing for an answer to someone already told. */
+export function noticeFor(style: { lower: boolean }, o: Pick<CodeLineOptions, "notice">): string {
+  if (o.notice === false) return "";
+  return ` ${style.lower ? REPLY_OPT_OUT.toLowerCase() : REPLY_OPT_OUT}`;
+}
 export const XREPLY_MAX_COMMENT_CHARS = 280;
 
 /** Remove only leading reply mentions; handles are never sent to the writer. */

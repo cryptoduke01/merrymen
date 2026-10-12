@@ -425,18 +425,20 @@ const NOTICE_TAIL = /\s*(say stop to opt out\.)\s*$/i;
 
 /**
  * THE ANSWER WITH ITS FIGURES, OR WITHOUT. `admitted` is the X gate's own
- * text (words and the opt-out notice, already judged). The line goes between
- * the words and the notice; the words gain a full stop if they ended without
- * one. The full line is tried first, then each shorter form (`shorter`), and
- * the first whose whole post fits X_MAX_WEIGHTED is used. None fits, the
- * notice is missing, or nothing in `spec` can be shown: `admitted` unchanged.
+ * text (words and, on someone's first answer, the opt-out notice, already
+ * judged). The line goes between the words and the notice, or after the words
+ * when the answer carries no notice (an answer to someone already told they
+ * can say stop: gate.ts XGateCtx.noticeShown); the words gain a full stop if
+ * they ended without one. The full line is tried first, then each shorter
+ * form (`shorter`), and the first whose whole post fits X_MAX_WEIGHTED is
+ * used. None fits, no words, or nothing in `spec` can be shown: `admitted`
+ * unchanged.
  */
 export function withFigures(admitted: string, spec: FiguresSpec | null | undefined): WithFigures {
   const none: WithFigures = { text: admitted, line: null, dropped: 0 };
   if (typeof admitted !== "string" || !spec) return none;
   const m = NOTICE_TAIL.exec(admitted);
-  if (!m) return none;
-  const words = admitted.slice(0, m.index).trim();
+  const words = (m ? admitted.slice(0, m.index) : admitted).trim();
   if (!words) return none;
   const lead = /[.!?…]$/.test(words) ? words : `${words}.`;
   const full = shownOf(spec);
@@ -446,7 +448,7 @@ export function withFigures(admitted: string, spec: FiguresSpec | null | undefin
   for (const t of tries) {
     const line = renderShown(t);
     if (line === null || !admitFiguresLine(line)) continue;
-    const text = `${lead} ${line} ${m[1]!}`;
+    const text = m ? `${lead} ${line} ${m[1]!}` : `${lead} ${line}`;
     if (xWeightedLength(text) > X_MAX_WEIGHTED) continue;
     const kept = t.reduce((n, s) => n + figuresIn(s) + (s.kind === "crowd" || s.kind === "trending" ? s.tickers.length : 0), 0);
     return { text, line, dropped: total - kept };

@@ -43,7 +43,9 @@ import { llmText, type LlmCreds } from "../llm";
 import { hash32, type SaleOutcome } from "./planner";
 import { namedIn, SHERWOOD_NAME, sherwoodClaimed, sherwoodMentioned, sherwoodNamed, unreadableLetter } from "./gate";
 import { withoutFiguresLine } from "./figures";
-import { REPLY_OPT_OUT, XREPLY_MAX_COMMENT_CHARS } from "./replies";
+import { noticeFor, REPLY_OPT_OUT, XREPLY_MAX_COMMENT_CHARS, type CodeLineOptions } from "./replies";
+
+export type { CodeLineOptions };
 import { asksAboutACoin } from "./words";
 
 export { sherwoodClaimed, sherwoodMentioned, sherwoodNamed };
@@ -294,21 +296,21 @@ const MODEL_PAPER: readonly string[] = Object.freeze([
 
 /**
  * Code's lines, starting from this mention's own (chosen by its id), each with
- * the opt-out notice — and, for an agent trading on paper (`paper`), its
- * line's paper clause.
+ * the opt-out notice when it is owed — and, for an agent trading on paper
+ * (`paper`), its line's paper clause.
  */
-function codeLines(lines: readonly string[], paperClauses: readonly string[], seed: string, style: Pick<XStyle, "lower">, o: { paper?: boolean }): string[] {
+function codeLines(lines: readonly string[], paperClauses: readonly string[], seed: string, style: Pick<XStyle, "lower">, o: CodeLineOptions): string[] {
   let h = 0;
   for (const ch of String(seed ?? "")) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
-  const notice = style.lower ? REPLY_OPT_OUT.toLowerCase() : REPLY_OPT_OUT;
+  const notice = noticeFor(style, o);
   return lines.map((_, i) => {
     const k = (h + i) % lines.length;
-    return `${lines[k]!}${o.paper === true ? `. ${paperClauses[k]!}` : ""}. ${notice}`;
+    return `${lines[k]!}${o.paper === true ? `. ${paperClauses[k]!}` : ""}.${notice}`;
   });
 }
 
 /** Every model answer, starting from this mention's own line (codeLines). */
-export function modelAnswers(seed: string, style: Pick<XStyle, "lower">, o: { paper?: boolean } = {}): string[] {
+export function modelAnswers(seed: string, style: Pick<XStyle, "lower">, o: CodeLineOptions = {}): string[] {
   return codeLines(MODEL_ANSWERS, MODEL_PAPER, seed, style, o);
 }
 
@@ -349,12 +351,12 @@ const GREETING_PAPER: readonly string[] = Object.freeze([
 ]);
 
 /** Every greeting answer, starting from this mention's own line (codeLines). */
-export function greetingAnswers(seed: string, style: Pick<XStyle, "lower">, o: { paper?: boolean } = {}): string[] {
+export function greetingAnswers(seed: string, style: Pick<XStyle, "lower">, o: CodeLineOptions = {}): string[] {
   return codeLines(GREETING_ANSWERS, GREETING_PAPER, seed, style, o);
 }
 
 /** This mention's own model answer: the first of modelAnswers. */
-export function modelAnswer(seed: string, style: Pick<XStyle, "lower">, o: { paper?: boolean } = {}): string {
+export function modelAnswer(seed: string, style: Pick<XStyle, "lower">, o: CodeLineOptions = {}): string {
   return modelAnswers(seed, style, o)[0]!;
 }
 

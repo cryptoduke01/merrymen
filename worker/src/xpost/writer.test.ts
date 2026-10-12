@@ -1056,6 +1056,23 @@ describe("an active agent's answers and conversation memory", () => {
     }
   });
 
+  it("code's lines carry the opt-out line only when it is owed: the same words, ending with a stop, for someone already told (2026-10-12)", () => {
+    for (const make of [modelAnswers, greetingAnswers]) {
+      for (const paper of [false, true]) {
+        for (const lower of [false, true]) {
+          const owed = make("1", { lower }, { paper });
+          const told = make("1", { lower }, { paper, notice: false });
+          assert.deepEqual(make("1", { lower }, { paper, notice: true }), owed, "notice true is the default");
+          for (const [i, line] of told.entries()) {
+            assert.doesNotMatch(line, /opt out/i, line);
+            assert.match(line, /\.$/, line);
+            assert.equal(`${line} ${lower ? "say stop to opt out." : "Say stop to opt out."}`, owed[i], "the same words, the notice off");
+          }
+        }
+      }
+    }
+  });
+
   it("a paper agent's answer is told to say paper whatever the question, not only about its trades", () => {
     const text = all(answerPrompt({ ...BASE, mode: "paper", question: "how's your day going?", recentBuys: [], said: [], walletPublic: false }));
     assert.match(text, /every answer must say so in a few words \(that you're on paper\), whatever it is about/);
