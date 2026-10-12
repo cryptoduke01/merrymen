@@ -98,6 +98,8 @@ export const DEFAULT_REPLY_POLLS_PER_DAY = 200;
 const REPLY_POLL_MS = 30 * MIN;
 /** An active agent's mentions are read more often, so a tag is answered the same hour. */
 const ACTIVE_REPLY_POLL_MS = 10 * MIN;
+/** Tags an active agent may answer from one poll's batch. */
+const ANSWERS_PER_POLL = 3;
 const MAX_REPLY_POLLS_PER_PASS = 2;
 /** Plans are drafted at most this often; sends run every pass. */
 const PLAN_EVERY_MS = MIN;
@@ -1109,11 +1111,14 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
           && await repliesEnabledFor(shared, account.tenant, account.xUserId)) {
           // An active agent answers tags (and comments on any of its posts)
           // through one path, so one post is never answered twice.
+          // A poll's batch is seen once (the cursor moves on), so an active
+          // agent works through a few of its tags, not only the first.
           const isActive = active.has(account.tenant.toLowerCase());
-          const result = isActive
-            ? await writeAnswer(shared, account, f, comments.get(account.xUserId)!, z.tz, at, recentOwn, recentFleet)
-            : await writeReply(shared, account, f, comments.get(account.xUserId)!, z.tz, at, recentOwn, recentFleet);
-          if (result) {
+          for (let i = 0; i < (isActive ? ANSWERS_PER_POLL : 1) && drafts < MAX_DRAFTS_PER_PASS; i++) {
+            const result = isActive
+              ? await writeAnswer(shared, account, f, comments.get(account.xUserId)!, z.tz, at, recentOwn, recentFleet)
+              : await writeReply(shared, account, f, comments.get(account.xUserId)!, z.tz, at, recentOwn, recentFleet);
+            if (!result) break;
             drafts++;
             bump(result.body ? (isActive ? "drafted-answer" : "drafted-reply") : (isActive ? "answer-skipped" : "reply-skipped"));
             if (result.body) { recentOwn.unshift(result.body); recentFleet.unshift(result.body); }

@@ -132,3 +132,11 @@ test("one person gets at most two answers in a rolling day, whatever became of t
     dedupeKey: "answer:111:100000000000000035", body: "x", nowMs: NOW, dueAtMs: NOW,
     replyToTweetId: "100000000000000035", replyRootTweetId: "100000000000000036", replyAuthorId: "444" }), null, "an answer's root is the mention itself");
 });
+
+test("several people tagging in one poll are each answered, a few per poll", async (t) => {
+  const w = await world(t);
+  w.setInbox([1, 2, 3, 4].map((n) => tag({ id: `10000000000000005${n}`, conversation_id: `10000000000000005${n}`, author_id: `55${n}`,
+    text: n % 2 ? "@pine_stoat how do you pick your coins?" : "@pine_stoat what are you trading lately?" })));
+  await w.step();
+  assert.equal((await w.answers()).length, 3, "three from this batch, the oldest first");
+});
