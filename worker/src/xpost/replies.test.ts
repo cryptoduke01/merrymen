@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { XReply } from "./client";
-import { isAnswerOptOut, isReplyOptOut, plainAsk, replyCandidate, tagCandidate } from "./replies";
+import { greetingOnly, isAnswerOptOut, isReplyOptOut, plainAsk, replyCandidate, tagCandidate } from "./replies";
 
 const CTX = { rootTweetId: "111", xUserId: "222", coin: "pepe" };
 const comment = (text: string, over: Partial<XReply> = {}): XReply => ({
@@ -285,3 +285,51 @@ describe("tags an active agent may answer", () => {
     assert.equal(tagCandidate(tag(`@Pine did you buy ${CA}?`), { xUserId: "222", username: "Pine" }).ok, false, "research off: any address is refused");
   });
 });
+
+describe("a tag that is only a greeting (2026-10-12)", () => {
+  const own = { xUserId: "222", username: "pine_stoat", ownRoots: new Set(["999"]) };
+  const top = (text: string, over: Partial<XReply> = {}) => comment(text, { id: "700", conversationId: "700", inReplyToTweetId: "", ...over });
+
+  it("is read on a strict allowlist of whole tags: one greeting word, at most two of the extras, a short ! or . and one emoji", () => {
+    for (const text of ["hi", "hii", "hiii", "hiiiiiiii", "HIII", "hey", "heyy", "hello", "helloo", "yo", "yoo", "gm", "gmgm", "gn", "sup", "wassup", "what's up", "whats up",
+      "what’s up", "howdy", "hiya", "ello", "good morning", "good evening", "good afternoon", "hey alan", "hey, alan", "yo ser", "gm fren", "gm frens", "sup bro", "hi there",
+      "hello everyone", "hi there alan", "gm ser!", "hey alan!!!", "hello.", "yo ser 👋", "gm 👋🏽", "hiii!! 🫡", "ｈｉ"]) {
+      assert.equal(greetingOnly(text), true, text);
+    }
+    for (const text of ["hi @other", "gm $PEPE", "hi what should i buy", "hi, what coin should i buy", "gm sherwood", "h1", "hi 2", "gm2", "hi?", "hey alan?", "gm 👋👋", "👋",
+      "hi\u200b", "hі", "hey hey", "gm gm", "yo yo", "hi alan ser bro", "gm ser, how are you?", "hi https://x.co", "hi www.scam.io", "hi 👋!", "hiya pepe", "hey frog", "good night ser",
+      "gm\nwhat do you trade", "", null, 7]) {
+      assert.equal(greetingOnly(text), false, String(text));
+    }
+  });
+
+  it("a greeting tag is a candidate, marked as one, top level or straight under its own post", () => {
+    for (const text of ["@pine_stoat hiii", "@pine_stoat gm", "@pine_stoat yo ser 👋", "@pine_stoat hey alan!"]) {
+      assert.deepEqual(tagCandidate(top(text), own), { ok: true, text: text.replace("@pine_stoat ", ""), greeting: true }, text);
+    }
+    assert.deepEqual(tagCandidate(top("@pine_stoat gm", { conversationId: "999", inReplyToTweetId: "999" }), own), { ok: true, text: "gm", greeting: true });
+  });
+
+  it("anything else is not a greeting: it goes the normal way, or is refused as before", () => {
+    assert.deepEqual(tagCandidate(top("@pine_stoat hi @other"), own), { ok: false, reason: "handle" });
+    assert.deepEqual(tagCandidate(top("@pine_stoat gm $PEPE"), own), { ok: true, text: "gm $PEPE" }, "a coin: the normal path");
+    assert.deepEqual(tagCandidate(top("@pine_stoat hi what should i buy"), own), { ok: false, reason: "advice-request" });
+    assert.deepEqual(tagCandidate(top("@pine_stoat gm sherwood"), own), { ok: true, text: "gm sherwood" }, "the normal path, where sherwood is answered by nothing");
+    assert.deepEqual(tagCandidate(top("@pine_stoat h1"), own), { ok: false, reason: "low-signal" });
+    // The thread rules are the same: not in someone else's thread, not under a stranger's reply, never a quote or an attachment.
+    assert.deepEqual(tagCandidate(top("@pine_stoat hiii", { conversationId: "5", inReplyToTweetId: "5" }), own), { ok: false, reason: "not-own-thread" });
+    assert.deepEqual(tagCandidate(top("@pine_stoat hiii", { conversationId: "999", inReplyToTweetId: "6001" }), own), { ok: false, reason: "not-own-thread" });
+    assert.deepEqual(tagCandidate(top("@pine_stoat hiii", { quoted: true }), own), { ok: false, reason: "quoted" });
+    assert.deepEqual(tagCandidate(top("@pine_stoat hiii", { attached: true }), own), { ok: false, reason: "attached" });
+    // A reply prefix that names someone else: never code's line, and "hiii" alone is no question.
+    assert.deepEqual(tagCandidate(top("@bob @pine_stoat hiii", { conversationId: "999", inReplyToTweetId: "999" }), own), { ok: false, reason: "low-signal" });
+    assert.deepEqual(tagCandidate(top("@bob @pine_stoat yo ser", { conversationId: "999", inReplyToTweetId: "999" }), own), { ok: true, text: "yo ser", otherHandles: true });
+    // A stop is an opt-out first, however friendly.
+    for (const text of ["@pine_stoat hey stop", "@pine_stoat hi, please stop", "@pine_stoat yo go away"]) assert.deepEqual(tagCandidate(top(text), own), { ok: false, reason: "opt-out" }, text);
+    // An address is never a greeting, research on.
+    const ca = `0x${"ab12".repeat(10)}`;
+    const v = tagCandidate(top(`@pine_stoat gm ${ca}`), { ...own, research: true });
+    assert.ok(!(v.ok && v.greeting === true), JSON.stringify(v));
+  });
+});
+

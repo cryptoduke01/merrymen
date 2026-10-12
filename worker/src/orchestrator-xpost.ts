@@ -93,7 +93,7 @@ import {
   type XAccount,
   type XPost,
 } from "./xpost/store";
-import { answerPrompt, answerQuestion, buyPrompt, casualPrompt, draft, introPrompt, introTemplate, modelAnswers, replyPrompt, sellPrompt, sherwoodClaimed, sherwoodMentioned, sherwoodNamed, xpostModel, xpostModelWarning, type AnswerIntentKind, type WriterFacts, type XStyle } from "./xpost/writer";
+import { answerPrompt, answerQuestion, buyPrompt, casualPrompt, draft, greetingAnswers, introPrompt, introTemplate, modelAnswers, replyPrompt, sellPrompt, sherwoodClaimed, sherwoodMentioned, sherwoodNamed, xpostModel, xpostModelWarning, type AnswerIntentKind, type WriterFacts, type XStyle } from "./xpost/writer";
 import { appendPublicToken, appendPublicWallet, hasPublicWallet, publicTokenStillAllowed, publicWalletStillAllowed, type PublicWallet } from "./xpost/public-wallet";
 import { readPublicProjectDescription } from "./orchestrator-xpost-project";
 import { boughtNames, carriesResearch, classifyTag, createXResearch, generalTradesQuestion, modelNamed, namesACoin, type ResearchBundle, type TagIntent, type XResearch } from "./orchestrator-xpost-research";
@@ -1560,6 +1560,15 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // and spends no model call. Only research gathers anything for what it
       // reads.
       const classified = classifyTag(candidate.text, { address: candidate.address ?? null });
+      // A GREETING AND NOTHING ELSE ("hiii", "gm", "yo ser 👋": replies.ts
+      // greetingOnly) is answered with one of code's casual lines (writer.ts
+      // greetingAnswers): no model call, no research, no model allowance.
+      // Code's own classifier must read it as plain chat too, and its reply
+      // prefix may name nobody else, or it is answered by nothing (fail
+      // closed). Everything else holds as for any answer: the hello first, the
+      // house consent, every opt-out, the day's 24, two a person a day, the
+      // sherwood and author screens below, and the gate.
+      const greeting = candidate.greeting === true;
       // SHERWOOD IN ANY FORM INCLUDES A HANDLE ("@SherwoodToken"), read on the
       // tag as posted with only its own handle set aside; and the model line
       // never goes under a reply prefix that names anyone else (red-team 2026-10-12).
@@ -1575,7 +1584,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       const author = comment.author;
       const authorSherwood = !!author && (sherwoodMentioned(author.username) || sherwoodMentioned(author.name));
       const namedClean = !!author && !authorSherwood && !modelNamed(author.username) && !modelNamed(author.name);
-      const asked: TagIntent = sherwoodTagged || authorSherwood || (classified.kind === "model" && (candidate.otherHandles || !namedClean)) ? { kind: "unanswered" } : classified;
+      const asked: TagIntent = sherwoodTagged || authorSherwood || (classified.kind === "model" && (candidate.otherHandles || !namedClean))
+        || (greeting && (classified.kind !== "chat" || candidate.otherHandles)) ? { kind: "unanswered" } : classified;
       // SHERWOOD IN ANY FORM, OR A MODEL QUESTION OFF THE ALLOWLIST, is
       // answered by nothing: the model line under "sherwood TGE soon?" reads
       // as Merrymen confirming a token, and a draft is never asked about the
@@ -1584,13 +1594,15 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         bump("answer-unanswered");
         continue;
       }
+      // CODE'S OWN LINE, NEVER A DRAFT: the model question's, or a greeting's.
+      const templated = asked.kind === "model" || greeting;
       // DECIDED BEFORE ANYTHING IS SPENT: a question the writer could not read
       // would buy research and a model call for a prompt that says PASS. Its
       // digits are read as "(a number)"; a copycat's ("$PEPE2") is safe to
       // mask because a tag that names a coin never sees what it bought
-      // (coinNamed below). The model question's line is code's and never
-      // reads the question.
-      if (asked.kind !== "model" && answerQuestion(candidate.text) === null) {
+      // (coinNamed below). The model question's line, and a greeting's, is
+      // code's and never reads the question.
+      if (!templated && answerQuestion(candidate.text) === null) {
         bump("answer-unusable");
         continue;
       }
@@ -1614,8 +1626,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // exact path, as it never gets the model line.
       const otherHandles = candidate.otherHandles === true;
       const general = !coinNamed && !otherHandles && generalTradesQuestion(candidate.text);
-      const intent = research ? asked : null;
-      const templated = asked.kind === "model";
+      // Nothing is looked up for a greeting.
+      const intent = research && !greeting ? asked : null;
       if (!templated) {
         const answerKey = `llm-answers:${account.xUserId}:${utcDay(nowMs)}`;
         if (!(await takeAllowance(shared, answerKey, ANSWER_DRAFTS_PER_DAY, nowMs))) {
@@ -1650,10 +1662,12 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         if (bundle.lookups) bump("answer-lookups", bundle.lookups);
         for (const note of new Set(bundle.notes)) bump(`answer-research-${note}`);
       }
-      // THE MODEL QUESTION'S LINES, this mention's own first: one it already
-      // said is a repeat to the gate, so the next is tried rather than none.
+      // CODE'S LINES, the model question's or a greeting's, this mention's own
+      // first: one it already said is a repeat to the gate, so the next is
+      // tried rather than none, and when all have been said lately, none.
       // A paper agent's lines say paper: it is gated as a paper reply.
-      const lines = templated ? modelAnswers(comment.id, facts.style, { paper: f.mode === "paper" }) : [];
+      const lines = greeting ? greetingAnswers(comment.id, facts.style, { paper: f.mode === "paper" })
+        : templated ? modelAnswers(comment.id, facts.style, { paper: f.mode === "paper" }) : [];
       const raw = templated
         ? lines[0]!
         : await draft(creds, answerPrompt({ ...facts, question: candidate.text, recentBuys: buys, boughtLately: boughtKind(f),
@@ -1732,6 +1746,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         reason: body ? null : claimed ? "gate:sherwood-claim" : named || postsName ? "gate:sherwood-drafted" : unlooked ? "gate:unlooked-source"
           : verdict && !verdict.ok ? `gate:${verdict.reason}` : "no-draft",
       });
+      if (id !== null && greeting && body) bump("answered-greeting");
       return id === null ? null : { body, lookedUp };
     }
     return null;

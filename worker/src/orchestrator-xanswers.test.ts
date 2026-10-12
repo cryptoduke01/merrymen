@@ -18,6 +18,7 @@ import type { FomoBroker } from "./fomo/contract";
 import type { FlowResult } from "./flow-facts";
 import type { AgentFacts, CallFact } from "./groupchat/facts";
 import type { FetchLike } from "./xpost/client";
+import { greetingAnswers, modelAnswers } from "./xpost/writer";
 import { ANSWER_GAP_MS } from "./xpost/planner";
 import { PAUSE_KEY } from "./xpost/sender";
 import * as store from "./xpost/store";
@@ -1968,3 +1969,130 @@ test("research gets only what is left of the pass's send budget, and none past i
   assert.equal(budgets.length, 1);
   assert.ok(budgets[0]! > 0 && budgets[0]! <= 5 * MIN, String(budgets[0]));
 });
+
+// ── greetings ───────────────────────────────────────────────────────────────
+
+/** A greeting's own line, as the agent in this world says it (Pine Stoat types in lowercase; live unless told). */
+const greetingLine = (mention: string, paper = false) => greetingAnswers(mention, { lower: true }, { paper })[0]!;
+
+test("a tag that is only a greeting gets a casual code-built line, sent on the pass that read it, with no model call and no research", async (t) => {
+  const texts = ["@pine_stoat hiii", "@pine_stoat gm", "@pine_stoat yo ser 👋"];
+  for (const env of [{}, RESEARCH_ON]) {
+    for (const text of texts) {
+      const gathered: string[] = [];
+      const research: XResearch = { gather: async (input) => { gathered.push(input.intent.kind); return { facts: [], lookups: 0, notes: [] }; } };
+      const w = await world(t, { env, research });
+      w.setInbox([tag({ text })]);
+      const r = await w.step();
+      assert.equal(w.asked().length, 0, `${text}: no model call`);
+      assert.deepEqual(gathered, [], `${text}: nothing looked up`);
+      assert.deepEqual(w.sends, [{ text: greetingLine(MENTION), reply: { in_reply_to_tweet_id: MENTION } }], `${text}: sent on the pass that read it`);
+      const [row] = await w.answers();
+      assert.equal(row!.status, "posted", text);
+      assert.equal(row!.replyAuthorId, "333");
+      assert.equal(row!.coin, null, "nothing looked up, nothing marked");
+      assert.match(r.log ?? "", /answered-greeting 1/, text);
+      assert.equal(await store.readMeta(w.db, "llm-answers:111:2026-09-30"), null, `${text}: none of the answers' model allowance`);
+      assert.equal((await store.readMeta(w.db, "llm:2026-09-30"))?.n ?? 0, 0, `${text}: none of the fleet's`);
+      assert.equal((await store.readMeta(w.db, "answerday:111:2026-09-30"))?.n, 1, `${text}: one of the day's 24`);
+    }
+  }
+});
+
+test("a paper agent's greeting says paper", async (t) => {
+  const w = await world(t, { facts: { ...FACTS, mode: "paper", calls: [{ ...CALL, paper: true }] } });
+  w.setInbox([tag({ text: "@pine_stoat gm" })]);
+  await w.step();
+  assert.deepEqual(w.sends, [{ text: greetingLine(MENTION, true), reply: { in_reply_to_tweet_id: MENTION } }]);
+  assert.match(String(w.sends[0]!.text), /\bon paper\b/);
+});
+
+test("what is not only a greeting is not answered as one", async (t) => {
+  const lines = new Set([true, false].flatMap((lower) => [...greetingAnswers(MENTION, { lower }), ...greetingAnswers(MENTION, { lower }, { paper: true })]));
+  for (const env of [{}, RESEARCH_ON]) {
+    for (const [text, drafted] of [["@pine_stoat hi @other", false], ["@pine_stoat gm $PEPE", true], ["@pine_stoat hi what should i buy", false],
+      ["@pine_stoat gm sherwood", false], ["@pine_stoat h1", false]] as const) {
+      const w = await world(t, { env, research: fakeResearch().research, answer: "no read on that one just now, sorry. Say stop to opt out." });
+      w.setInbox([tag({ text })]);
+      const r = await w.step();
+      assert.doesNotMatch(r.log ?? "", /answered-greeting/, text);
+      for (const row of await w.answers()) assert.ok(!lines.has(row.body), `${text}: ${row.body}`);
+      for (const sent of w.sends) assert.ok(!lines.has(String(sent.text)), `${text}: ${String(sent.text)}`);
+      // "gm $PEPE" names a coin: the normal path drafts it; the rest are answered by nothing.
+      assert.equal(w.asked().length, drafted ? 1 : 0, text);
+      if (!drafted) assert.deepEqual(w.sends, [], text);
+    }
+  }
+});
+
+test("a greeting still waits for the hello, the house consent and every opt-out, and counts against the day's 24 and the person's two", async (t) => {
+  const hiii = (id: string, author = "333", text = "@pine_stoat hiii") => tag({ id, conversation_id: id, author_id: author, text });
+  // The hello not dealt with: nothing.
+  const early = await world(t, { hello: false, tz: "America/Los_Angeles" });
+  early.setInbox([hiii(MENTION)]);
+  await early.step();
+  assert.deepEqual(await early.answers(), []);
+  assert.deepEqual(early.sends, []);
+  // An owner's replies off: no house consent, no read, nothing.
+  const off = await world(t, { consent: false });
+  assert.equal(await store.setReplying(off.db, TENANT, false, "111", NOW - HOUR), true);
+  off.setInbox([hiii(MENTION)]);
+  await off.step();
+  assert.equal(off.reads.length, 0);
+  assert.deepEqual(await off.answers(), []);
+  // A person who said stop before, and one who says it in the same batch: nothing for either.
+  const stopped = await world(t);
+  await store.optOutReplies(stopped.db, "111", "333", NOW - HOUR);
+  stopped.setInbox([hiii(MENTION), hiii("100000000000000301", "444"), tag({ id: "100000000000000302", conversation_id: "100000000000000302", author_id: "444", text: "@pine_stoat hey stop" })]);
+  await stopped.step();
+  assert.equal(await store.repliesOptedOut(stopped.db, "111", "444"), true);
+  assert.deepEqual(await stopped.answers(), []);
+  assert.deepEqual(stopped.sends, []);
+  // The day's 24 all gone: nothing drafted.
+  const spent = await world(t);
+  for (let i = 0; i < 24; i++) assert.equal(await store.takeAllowance(spent.db, "answerday:111:2026-09-30", 24, NOW - HOUR), true);
+  spent.setInbox([hiii(MENTION)]);
+  await spent.step();
+  assert.deepEqual(await spent.answers(), []);
+  assert.deepEqual(spent.sends, []);
+  // Two answers to one person in a rolling day: a third greeting from them gets nothing, and the next person's does.
+  const twice = await world(t);
+  for (const [id, at] of [["100000000000000311", NOW - 3 * HOUR], ["100000000000000312", NOW - 2 * HOUR]] as const) {
+    assert.notEqual(await store.schedulePost(twice.db, { tenant: TENANT, xUserId: "111", kind: "answer", dedupeKey: `answer:111:${id}`, body: "", status: "skipped",
+      reason: "pass", nowMs: at, dueAtMs: at, replyToTweetId: id, replyRootTweetId: id, replyAuthorId: "333" }), null);
+  }
+  twice.setInbox([hiii("100000000000000313", "333"), hiii("100000000000000314", "555")]);
+  const r = await twice.step();
+  assert.deepEqual((await twice.answers()).filter((a) => a.status === "posted").map((a) => a.replyAuthorId), ["555"]);
+  assert.match(r.log ?? "", /answer-author-spent \d/, "passed over, not answered");
+  assert.equal(twice.sends.length, 1);
+});
+
+test("greetings are answered in other words each time, and once all eight have been said lately, not at all", async (t) => {
+  const w = await world(t);
+  // Three people greet at once: three different lines, the first on this pass, the rest a gap apart.
+  w.setInbox([1, 2, 3].map((n) => tag({ id: `10000000000000032${n}`, conversation_id: `10000000000000032${n}`, author_id: `32${n}`, text: "@pine_stoat gm" })));
+  await w.step(NOW);
+  for (const at of [NOW + 15_000, NOW + 30_000, NOW + 45_000, NOW + 60_000]) { w.setInbox([]); await w.step(at); }
+  assert.equal(w.sends.length, 3);
+  assert.equal(new Set(w.sends.map((x) => x.text)).size, 3, "three different lines");
+  // Every line said lately: the next greeting is skipped as a repeat, and nothing is sent.
+  const full = await world(t);
+  for (const [i, body] of greetingAnswers("1", { lower: true }).entries()) {
+    const id = `10000000000000033${i}`;
+    const row = await store.schedulePost(full.db, { tenant: TENANT, xUserId: "111", kind: "answer", dedupeKey: `answer:111:${id}`, body,
+      nowMs: NOW - 2 * HOUR, dueAtMs: NOW - 2 * HOUR, replyToTweetId: id, replyRootTweetId: id, replyAuthorId: `33${i}` });
+    await store.claimPost(full.db, row!, NOW - HOUR);
+    await store.markPosted(full.db, row!, `10000000000000034${i}`, NOW - HOUR);
+  }
+  full.setInbox([tag({ id: "100000000000000350", conversation_id: "100000000000000350", author_id: "350", text: "@pine_stoat hiii" })]);
+  const r = await full.step();
+  const row = (await full.answers()).find((a) => a.replyToTweetId === "100000000000000350");
+  assert.equal(row?.status, "skipped");
+  assert.match(row?.reason ?? "", /^gate:(?:repeat|fleet-repeat)$/);
+  assert.deepEqual(full.sends, []);
+  assert.doesNotMatch(r.log ?? "", /answered-greeting/);
+  // The model question's lines are a different set: still answered.
+  assert.ok(modelAnswers("1", { lower: false }).every((m) => !greetingAnswers("1", { lower: false }).includes(m)));
+});
+
