@@ -13,6 +13,7 @@ import {
   OWNER_PER_DAY_MAX,
   XPOST_ALTERS,
   XPOST_SCHEMA,
+  answerAuthorKey,
   cancelPost,
   cancelDisabledKind,
   cancelScheduled,
@@ -550,6 +551,8 @@ test("every statement the store sends translates to Postgres with matching, bind
   const reply = (await schedulePost(db, post({ xUserId: "222", kind: "reply", dedupeKey: "reply:222:701", nowMs: 23.5,
     replyToTweetId: "701", replyRootTweetId: "700", replyAuthorId: "333" })))!;
   await replyTargetFor(db, { id: reply, tenant: OWNER_A, xUserId: "222" });
+  await schedulePost(db, post({ xUserId: "222", kind: "answer", dedupeKey: "answer:222:801", nowMs: 23.7,
+    replyToTweetId: "801", replyRootTweetId: "801", replyAuthorId: "333" }));
   await replyConsentAt(db, OWNER_A, "222");
   await firstReplyConsentAt(db, "222");
   await repliesOptedOut(db, "222", "333");
@@ -778,6 +781,39 @@ test("reply targets survive queue reads and cannot reference another tenant, acc
   raw.prepare("UPDATE xpost_posts SET tenant = ? WHERE tweet_id = '700'").run(OWNER_B);
   assert.equal(await replyTargetFor(db, loaded), null, "send rechecks ownership of the parent");
   assert.equal(await schedulePost(db, { ...p, dedupeKey: "reply:111:702", replyToTweetId: "702" }), null);
+});
+
+test("two owners on one X account answer one person at most twice a day between them, counted under one lock", async (t) => {
+  const { db: base } = await open(t);
+  for (const tenant of [OWNER_A, OWNER_B]) {
+    await upsertAccount(base, DEK, { tenant, xUserId: "111", username: "r", tokens: TOKENS, nowMs: 1 });
+    await setPosting(base, tenant, { enabled: true, xUserId: "111" }, 2);
+    await setReplying(base, tenant, true, "111", 3);
+  }
+  const answer = (tenant: string, id: string, nowMs = 800): NewPost => post({ tenant, kind: "answer", dedupeKey: `answer:111:${id}`,
+    replyToTweetId: id, replyRootTweetId: id, replyAuthorId: "333", nowMs, dueAtMs: nowMs });
+  const sent: Sent[] = [];
+  const db = recording(base, sent);
+  assert.ok(await schedulePost(db, answer(OWNER_A, "701")));
+
+  // THE ORDER IS THE LOCK: the owner's account row, consent and opt-out, then
+  // the X account and person's row, and only then the count it serialises.
+  const order = sent.map(({ sql }) => sql.replace(/\s+/g, " ").trim().slice(0, 40));
+  const at = (re: RegExp) => order.findIndex((s) => re.test(s));
+  const lock = at(/^INSERT INTO xpost_meta/);
+  assert.ok(at(/^UPDATE xpost_accounts SET updated_at_ms/) >= 0 && at(/^UPDATE xpost_accounts SET updated_at_ms/) < lock, "the owner's row first");
+  assert.ok(lock >= 0 && lock < at(/^SELECT COUNT\(\*\) AS n/), "the author lock before the count");
+  assert.ok(at(/^SELECT COUNT\(\*\) AS n/) < at(/^INSERT INTO xpost_posts/), "the count before the write");
+  const locked = sent.find(({ sql }) => /^\s*INSERT INTO xpost_meta/.test(sql))!;
+  assert.equal(locked.params[0], answerAuthorKey("111", "333"));
+  assert.match(locked.sql, /ON CONFLICT \(k\) DO UPDATE SET updated_at_ms = excluded\.updated_at_ms/, "an upsert that always takes the row");
+  assert.ok(await readMeta(base, answerAuthorKey("111", "333")));
+
+  // Two owners at once, one answer left: one of them writes it.
+  const raced = await Promise.all([schedulePost(base, answer(OWNER_A, "702", 900)), schedulePost(base, answer(OWNER_B, "703", 900))]);
+  assert.equal(raced.filter((id) => id !== null).length, 1, "the X account's second answer to the person, from either owner");
+  assert.equal(await schedulePost(base, answer(OWNER_B, "704", 950)), null, "a third is refused whichever owner writes it");
+  assert.ok(await schedulePost(base, { ...answer(OWNER_B, "705", 960), replyAuthorId: "444" }), "another person is counted on their own");
 });
 
 test("turning replies off cancels only replies and opt-outs are durable across tenants sharing an account", async (t) => {

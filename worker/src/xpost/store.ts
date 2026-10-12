@@ -899,6 +899,15 @@ export async function schedulePost(db: Db, p: NewPost): Promise<number | null> {
           await repliesOptedOut(tx, p.xUserId, p.replyAuthorId!)) return null;
       // ONE PERSON, A FEW ANSWERS A DAY, whatever happened to them: two
       // accounts tagging each other cannot become an endless conversation.
+      // THE COUNT IS TAKEN UNDER A LOCK ON THE X ACCOUNT AND THE PERSON. The
+      // account row above is the owner's: two owners connected to one X
+      // account lock two rows, and could both count one answer and both
+      // write a third. This upsert row-locks one xpost_meta row per X account
+      // and author until commit on Postgres (sqlite has one writer), so the
+      // second waits, then counts the first's answer.
+      await tx.prepare(`INSERT INTO xpost_meta (k, n, v, updated_at_ms) VALUES (?, 0, NULL, ?)
+        ON CONFLICT (k) DO UPDATE SET updated_at_ms = excluded.updated_at_ms`)
+        .run(answerAuthorKey(p.xUserId, p.replyAuthorId!), int(p.nowMs));
       const byAuthor = await tx.prepare(`SELECT COUNT(*) AS n
         FROM xpost_posts sent JOIN xpost_reply_targets r ON r.post_id = sent.id
         WHERE sent.x_user_id = ? AND sent.kind = 'answer' AND r.author_id = ? AND sent.created_at_ms >= ?`)
@@ -918,6 +927,11 @@ export async function schedulePost(db: Db, p: NewPost): Promise<number | null> {
 /** Answers to one person per rolling day, including skips and uncertain sends. */
 export const ANSWERS_PER_AUTHOR = 2;
 const ANSWER_AUTHOR_WINDOW_MS = 24 * 60 * 60_000;
+
+/** The xpost_meta row an answer's per-person count is taken under: one per posting X account and author. */
+export function answerAuthorKey(xUserId: string, authorId: string): string {
+  return `answer-author:${xUserId}:${authorId}`;
+}
 
 async function insertPost(db: Db, p: NewPost): Promise<number | null> {
   const row = (await db
