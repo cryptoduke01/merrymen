@@ -1109,7 +1109,13 @@ other owner's agent, and its posting and reply warnings, are unchanged.
   last coin's volume; a major's week, then volume, market cap, price and
   last its rank), and when no form fits, the answer goes out as the gate
   admitted it, with no line. A line goes in only beside words that were
-  looked up; figures with no words to stand on are dropped. Counts: `answer-figures`,
+  looked up; figures with no words to stand on are dropped. **A coin's name
+  in the line stands only beside code's own words** (red-team 2026-10-12: a
+  drafted "i'm in the top one myself" or "the first one is the play" before
+  `$ZAPX 24h +42.1%` claimed or recommended a coin by name): a drafted
+  answer carries at most the section that names no coin (a tagged
+  contract's onchain hour); the major, pools, Fomo and CoinGecko sections go
+  in only beside what's hot's or a major's code-built words. Counts: `answer-figures`,
   `answer-figures-shortened`, `answer-figures-left-out`.
 - **Never the model's own words:** a posted answer keeps its line (it is
   what X published), but no prompt ever quotes a post that carries one

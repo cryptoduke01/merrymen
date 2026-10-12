@@ -2633,3 +2633,41 @@ test("what's hot never shows merrymen's own name in any spelling, in the pools o
   }
 });
 
+test("what's hot never claims, or recommends, a coin the line names, whatever it holds: its words are code's, and a coin's name in the line stands only beside them (red-team 2026-10-12)", async (t) => {
+  // At 34ced01e the active agent held one live buy, ZAPX, the top trending coin, and each draft went out
+  // before "geckoterminal robinhood: trending $ZAPX 24h +42.1% vol ~$1.2M, $QRTZ …; coingecko: trending $PEPE".
+  const drafts = ["the index shows a few coins standing out, i'm in the top one myself.", "the index shows a few coins standing out, been riding the first one for days.",
+    "the index shows a few coins standing out, the top one is part of my book.", "the index shows a few coins standing out, the top one is a coin i trade.",
+    "the index shows a few coins standing out, the first one is the one i keep.", "the index shows a few coins standing out, the top one on this list is my pick from the index right now.",
+    "the index shows a few coins standing out, the first one is the play.", "the index shows a few coins standing out, the ones to own.",
+    "the index shows a few coins standing out right now. my buy list for today."].map((d) => `${d} Say stop to opt out.`);
+  const pools = [namedPool("ZAPX", 1, 42.1, 1.2e6), namedPool("QRTZ", 2, -8.3, 310_000), namedPool("MOLT", 3, 5, 90_000)];
+  const zapx: CallFact = { decisionId: "fill-zapx", side: "buy", symbol: "ZAPX", name: "Zapx", token: pools[0]!.tokenAddress, paper: false,
+    atSec: (NOW - 2 * HOUR) / 1000, bands: ["curve early"], ownWords: null };
+  const wojak: CallFact = { ...zapx, decisionId: "fill-wojak", symbol: "WOJAK", name: "Wojak", token: `0x${"77".repeat(20)}` };
+  const read: HotRead = { coins: 3, lead: { dir: "up", size: "sharply" } };
+  for (const calls of [[zapx], [wojak], []]) {
+    for (const draft of drafts) {
+      const w = await world(t, { env: RESEARCH_ON, research: hotResearch(pools, ["PEPE"]).research, answer: draft, facts: { ...FACTS, name: "Alan Al Dale", calls } });
+      w.setInbox([tag({ text: "@pine_stoat what's hot?" })]);
+      await w.step();
+      assert.deepEqual(w.asked(), [], draft);
+      const text = String(w.sends[0]?.text ?? "");
+      assert.ok(hotWords(read).includes(wordsBeforeLine(text) ?? ""), text);
+      assert.match(text, /trending \$ZAPX 24h \+42\.1% vol ~\$1\.2M/);
+      assert.doesNotMatch(text, /\b(?:i'm|my|book|keep|play|own|riding|pick|buy list)\b/, text);
+    }
+  }
+  // Whatever research hands a drafted answer, a coin's name in the line never stands beside it: only the
+  // section that names no coin (a contract's onchain hour) goes in, or nothing.
+  const both = await world(t, { env: RESEARCH_ON, answer: UP_A_LITTLE,
+    research: handing({ figures: [{ kind: "pools", coins: [{ symbol: "CHUMP", change24hPct: 41.2, volume24hUsd: 1.1e6 }] }, ...FLOW_FIGURES] }) });
+  both.setInbox([tag({ text: ASK_CA })]);
+  await both.step();
+  assert.deepEqual(both.sends.map((s) => s.text), [UP_A_LITTLE.replace(" Say stop", ` ${FLOW_LINE} Say stop`)]);
+  const major = await world(t, { env: RESEARCH_ON, answer: UP_A_LITTLE, research: handing({ figures: MAJOR_FIGURES }) });
+  major.setInbox([tag({ text: ASK_CA })]);
+  await major.step();
+  assert.deepEqual(major.sends.map((s) => s.text), [UP_A_LITTLE]);
+});
+

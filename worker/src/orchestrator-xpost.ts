@@ -1818,7 +1818,14 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // in the line puts no line in at all. NOR THE HOUSE'S OWN NAME in any
       // spelling ("$MERRIMEN", "$MERYMEN": red-team 2026-10-12), read ticker
       // by ticker beside the sherwood screen.
-      const figured = admitted && figures && !templated && active.has(account.tenant.toLowerCase()) ? withFigures(admitted, figures) : null;
+      // AND A COIN'S NAME IN IT ONLY BESIDE CODE'S WORDS (red-team 2026-10-12):
+      // a drafted "i'm in the top one myself" or "the first one is the play"
+      // before "$ZAPX 24h +42.1%" claims a coin, or recommends it, by name. A
+      // drafted answer carries at most a section that names no coin (a
+      // tagged contract's onchain hour); the major, the chain's coins, Fomo's
+      // and CoinGecko's tickers stand only beside code's own market words.
+      const lineFigures = !figures ? null : market.length > 0 ? figures : figures.filter((s) => s.kind === "flow");
+      const figured = admitted && lineFigures?.length && !templated && active.has(account.tenant.toLowerCase()) ? withFigures(admitted, lineFigures) : null;
       const lined = figured?.line != null && admitFiguresLine(figured.line) && !sherwoodMentioned(figured.line)
         && figuresTickers(figured.line).every((t) => tickerRefusal(t) === null && !merrymenMentioned(t) && !sherwoodMentioned(t)) ? figured : null;
       if (figures && admitted) bump(lined ? (lined.dropped > 0 ? "answer-figures-shortened" : "answer-figures") : "answer-figures-left-out");
