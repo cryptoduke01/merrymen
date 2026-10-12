@@ -49,7 +49,7 @@ import { admitXPost, vocabularyRefusal, type BaseGate, type XGateCtx } from "./x
 import { ACTIVE_CADENCE, ANSWER_GAP_MS, ANSWERS_PER_DAY, MIN_LEAD_MS, REPLY_STALE_MS, STANDARD_CADENCE, coinOf, hash32, planPosts, replyDueAt, sendDecision, type PlanCadence, type PlanClock, type PlanIntent } from "./xpost/planner";
 import { APP_PAUSE_KEY, APP_PAUSE_MS, CREDITS_PAUSE_MS, PAUSE_KEY, readReplyComments, sendOne, type SendOutcome } from "./xpost/sender";
 import { isReplyOptOut, replyCandidate, tagCandidate, withoutReplyOptOut } from "./xpost/replies";
-import { activeTenantsOf } from "./xpost/scope";
+import { activeTenantsOf, repliesAllowedFor, repliesScopeOf } from "./xpost/scope";
 import {
   cancelPost,
   claimSpan,
@@ -162,6 +162,12 @@ export interface XPostEnv {
   llmPerDay: number | undefined;
   /** Set only after the operator has X's written approval for AI replies. */
   repliesApproved?: boolean;
+  /**
+   * MERRYMEN_XPOST_REPLIES_APPROVED=active: replies are approved only for the
+   * owners in activeTenants. Everyone else is not polled, drafts nothing, and
+   * a reply or answer of theirs still waiting is cancelled at send time.
+   */
+  repliesActiveOnly?: boolean;
   /** Owners (tenant addresses, lowercase) on ACTIVE_CADENCE; absent or empty is nobody. */
   activeTenants?: ReadonlySet<string>;
   replyPollsPerDay?: number;
@@ -211,7 +217,12 @@ export function xpostEnv(env: Record<string, string | undefined> = process.env):
       llmPerDay = n;
     }
   }
-  const repliesApproved = env.MERRYMEN_XPOST_REPLIES_APPROVED === "1";
+  // WHO MAY REPLY: "1" everyone who consents, "active" only the active owners
+  // below. Anything else is off, and said by name, never by value.
+  const replies = repliesScopeOf(env.MERRYMEN_XPOST_REPLIES_APPROVED);
+  if (replies.unreadable) {
+    notes.push("xpost: MERRYMEN_XPOST_REPLIES_APPROVED is set but is neither 1 nor active — comment replies and tag answers are off");
+  }
   // ACTIVE OWNERS, by tenant address only: a name or a handle is not an
   // identity. An entry that is not an address is said by position, never by
   // value, and dropped; the rest still apply. The web reads the same variable
@@ -222,7 +233,8 @@ export function xpostEnv(env: Record<string, string | undefined> = process.env):
   const replyPollsPerDay = replyRaw ? count(replyRaw) : null;
   if (replyRaw && replyPollsPerDay === null) notes.push("xpost: unreadable MERRYMEN_XPOST_REPLY_POLLS_PER_DAY — comment polling is off");
   return { off: null, perDay, fleetPerDay, llmPerDay, notes,
-    ...(repliesApproved ? { repliesApproved: true } : {}),
+    ...(replies.scope !== "off" ? { repliesApproved: true } : {}),
+    ...(replies.scope === "active" ? { repliesActiveOnly: true } : {}),
     ...(activeTenants.size ? { activeTenants } : {}),
     ...(replyRaw ? { replyPollsPerDay: replyPollsPerDay ?? 0 } : {}),
   };
@@ -615,6 +627,13 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
   const llmPerDay = o.creds ? (o.knobs.llmPerDay ?? DEFAULT_LLM_PER_DAY) : 0;
   const creds = llmPerDay > 0 ? o.creds : null;
   const repliesApproved = o.knobs.repliesApproved === true;
+  /**
+   * MAY THIS OWNER'S AGENT REPLY OR ANSWER AT ALL: the operator's approval and
+   * its scope (xpost/scope.ts). Its own reply consent is asked separately, and
+   * the web offers the switch to the same owners.
+   */
+  const repliesFor = (tenant: string): boolean =>
+    repliesApproved && repliesAllowedFor(o.knobs.repliesActiveOnly === true ? "active" : "all", active, tenant);
   const replyPollsPerDay = o.knobs.replyPollsPerDay ?? DEFAULT_REPLY_POLLS_PER_DAY;
 
   let lastPlanAt = Number.NEGATIVE_INFINITY;
@@ -633,7 +652,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
   const why =
     `xpost: on — at most ${perDay} posts per X account a day, ${fleetPerDay} across the fleet a day; ` +
     (creds ? `up to ${llmPerDay} model calls a day` : "no model, so only intros are posted, from templates") +
-    (active.size ? `; ${active.size} owner(s) on the active cadence, up to ${ACTIVE_CADENCE.perDay} a day` : "");
+    (active.size ? `; ${active.size} owner(s) on the active cadence, up to ${ACTIVE_CADENCE.perDay} a day` : "") +
+    (repliesApproved ? (o.knobs.repliesActiveOnly ? "; replies for the active owners only" : "; replies for owners who consent") : "");
 
   return {
     plan: () => ({ why }),
@@ -700,8 +720,9 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         // Process opt-outs before sending, even with no model budget. A reply
         // sends only on a pass that successfully refreshed this X account's
         // mentions; a read outage never turns a stale inbox into permission.
+        // Only the owners the operator's scope approves are polled at all.
         const comments = !pause && repliesApproved
-          ? await pollComments(shared, accounts, nowMs, at, bump)
+          ? await pollComments(shared, accounts.filter((a) => repliesFor(a.tenant)), nowMs, at, bump)
           : new Map<string, XReply[]>();
         for (const [key, why] of [[APP_PAUSE_KEY, "paused-client-credentials-refused"], [PAUSE_KEY, "paused-for-credits"]] as const) {
           const until = Number((await readMeta(shared, key))?.v);
@@ -730,7 +751,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
             after = { dueAtMs: post.dueAtMs, id: post.id };
             const t = at();
             if (post.kind === "reply" || post.kind === "answer") {
-              if (!repliesApproved || !(await repliesEnabledFor(shared, post.tenant, post.xUserId))
+              if (!repliesFor(post.tenant) || !(await repliesEnabledFor(shared, post.tenant, post.xUserId))
                 || (post.kind === "answer" && !active.has(post.tenant.toLowerCase()))) {
                 if (await cancelPost(shared, post.id, "replies-off", t)) bump("cancelled");
                 continue;
@@ -1106,7 +1127,9 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
             recentFleet.unshift(r.body);
           }
         }
-        if (model && drafts < MAX_DRAFTS_PER_PASS && comments.has(account.xUserId)
+        // The batch is the X account's: another owner on it may have been
+        // polled, so this owner's own scope is asked again.
+        if (model && drafts < MAX_DRAFTS_PER_PASS && comments.has(account.xUserId) && repliesFor(account.tenant)
           && await repliesEnabledFor(shared, account.tenant, account.xUserId)) {
           // An active agent answers tags (and comments on any of its posts)
           // through one path, so one post is never answered twice.

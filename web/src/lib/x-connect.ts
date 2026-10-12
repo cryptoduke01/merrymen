@@ -35,7 +35,7 @@ import type { Db } from "../../../worker/src/db";
 import { canonicalTz } from "../../../worker/src/groupchat/clock";
 import { storeDek } from "../../../worker/src/store-crypto";
 import { xAppFromEnv, type FetchLike, type XApp } from "../../../worker/src/xpost/client";
-import { activeTenantsOf } from "../../../worker/src/xpost/scope";
+import { activeTenantsOf, repliesAllowedFor, repliesScopeOf } from "../../../worker/src/xpost/scope";
 import {
   DEFAULT_PREFS,
   OWNER_PER_DAY_MAX,
@@ -113,9 +113,18 @@ export function xpostAvailable(hosted: boolean): boolean {
   return app !== null && app.redirectUri !== null;
 }
 
-/** Reply consent is available only after the operator has enabled this feature. */
-export function xpostRepliesAvailable(hosted: boolean): boolean {
-  return xpostAvailable(hosted) && (seam?.env ?? process.env).MERRYMEN_XPOST_REPLIES_APPROVED === "1";
+/**
+ * MAY THIS OWNER TURN REPLIES ON? Only after the operator has enabled the
+ * feature (MERRYMEN_XPOST_REPLIES_APPROVED), and only within its scope: "1" is
+ * every owner, "active" only the owners MERRYMEN_XPOST_ACTIVE_TENANTS names.
+ * Read with the orchestrator's own parser (worker/src/xpost/scope.ts), so the
+ * switch is offered to exactly the owners it will poll and answer for.
+ */
+export function xpostRepliesAvailable(hosted: boolean, tenant: string): boolean {
+  if (!xpostAvailable(hosted)) return false;
+  const env = seam?.env ?? process.env;
+  const { scope } = repliesScopeOf(env.MERRYMEN_XPOST_REPLIES_APPROVED);
+  return repliesAllowedFor(scope, activeTenantsOf(env.MERRYMEN_XPOST_ACTIVE_TENANTS).tenants, tenant);
 }
 
 /**
