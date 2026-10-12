@@ -36,7 +36,16 @@
  * Pure: no clock, no I/O. The child and the service each hold their own window.
  */
 
-export const REVIEW_CANDIDATES = Object.freeze({
+export interface ReviewCandidateLimits {
+  perWindow: number;
+  windowMs: number;
+  keepMs: number;
+  carriedMax: number;
+  refreshEveryMs: number;
+  memoryMax: number;
+}
+
+export const REVIEW_CANDIDATES: Readonly<ReviewCandidateLimits> = Object.freeze({
   /** Distinct coins one child may name per rolling window. */
   perWindow: 10,
   windowMs: 10 * 60_000,
@@ -57,8 +66,6 @@ export const REVIEW_CANDIDATES = Object.freeze({
   /** Coins remembered for fair rotation (least recently admitted first). */
   memoryMax: 200,
 });
-
-export type ReviewCandidateLimits = typeof REVIEW_CANDIDATES;
 
 /** A coin a review named, and when it was last admitted. */
 export interface ReviewCandidate {
