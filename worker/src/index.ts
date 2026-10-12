@@ -13435,8 +13435,9 @@ async function main() {
               // THE MOMENTUM ENTRY PLAN, for research accounts' entry reviews
               // only (costContext exists exactly then): the mechanical exits
               // from TRENCHER_FAST, the round-trip cost just read (or its gas
-              // floor) and the move that pays it, and how to turn odds of
-              // +take before -stop into an edge instead of inventing one.
+              // floor), the cost c each exit still pays beyond the average
+              // fill the brackets run from (trenchBreakEven), and how to turn
+              // odds of +take before -stop into an edge instead of inventing one.
               // Research inputs only: no cap, guard, gate or exit changes.
               if (costContext) {
                 inputs.persona += `\n\n${trenchMomentumBrief(TRENCHER_FAST, trenchBreakEven(costResearch, costContext), costContext.sizeUsdg)}`;
