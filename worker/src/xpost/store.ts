@@ -11,7 +11,8 @@
  *     cancelled or failed. The UNIQUE dedupe_key and the conditional claim are
  *     what make a post at-most-once across crashes and replicas.
  *   xpost_meta     — fleet counters: the model's daily budget, the day's post
- *     allowance, the fleet's pauses and comment polling cursors.
+ *     allowance, the fleet's pauses and comment polling cursors; the
+ *     per-person answer locks and an owner's replies-off mark.
  *   xpost_reply_accounts — separate consent for selected comment replies.
  *   xpost_reply_targets — durable comment, parent and author ids per reply.
  *   xpost_reply_optouts — recipient opt-outs per posting account and author.
@@ -83,7 +84,7 @@ CREATE TABLE IF NOT EXISTS xpost_posts (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   tenant TEXT NOT NULL,
   x_user_id TEXT NOT NULL,                 -- the account it was written for
-  kind TEXT NOT NULL,                      -- intro casual buy sell or reply
+  kind TEXT NOT NULL,                      -- intro casual buy sell reply or answer
   dedupe_key TEXT NOT NULL UNIQUE,
   body TEXT NOT NULL,
   coin TEXT,                               -- a buy post coin, for the per coin fold
@@ -438,8 +439,26 @@ export async function firstReplyConsentAt(db: Db, xUserId: string): Promise<numb
   return row?.consent_at_ms === null || row?.consent_at_ms === undefined ? null : num(row.consent_at_ms);
 }
 
-/** Turning replies off leaves ordinary posting on and cancels only waiting replies. */
-export async function setReplying(db: Db, tenant: string, enabled: boolean, seenXUserId: string, nowMs: number): Promise<boolean> {
+/** The durable mark an owner's own "replies off" leaves (xpost_meta), which the house consent never overrides. */
+export function repliesOffKey(tenant: string): string {
+  return `replies-off:${tenantKey(tenant)}`;
+}
+
+/**
+ * Turning replies off leaves ordinary posting on and cancels only waiting replies.
+ *
+ * THE OWNER'S OFF IS REMEMBERED. Turning replies off also writes
+ * repliesOffKey(tenant), and only the owner's own on (the web or the app,
+ * after the reply warning) clears it. `house` is the orchestrator recording
+ * consent for one of the operator's own agents (MERRYMEN_XPOST_ACTIVE_TENANTS,
+ * docs/x-posting.md "Active owners"): it changes nothing — false — while
+ * that mark exists or consent is already recorded, and it leaves the mark
+ * alone. It is decided under the same account row lock as the owner's off,
+ * so the two cannot interleave.
+ */
+export async function setReplying(
+  db: Db, tenant: string, enabled: boolean, seenXUserId: string, nowMs: number, opts: { house?: boolean } = {},
+): Promise<boolean> {
   const key = tenantKey(tenant);
   return db.tx(async (tx) => {
     // Serialize with account replacement, disconnect and posting switches.
@@ -447,16 +466,22 @@ export async function setReplying(db: Db, tenant: string, enabled: boolean, seen
       AND (? = 0 OR (posting_enabled = 1 AND status = 'ok' AND consent_x_user_id = x_user_id))`)
       .run(key, seenXUserId, enabled ? 1 : 0);
     if (current.changes !== 1) return false;
+    if (enabled && opts.house) {
+      if (await readMeta(tx, repliesOffKey(key)) !== null) return false;
+      if (await tx.prepare(`SELECT tenant FROM xpost_reply_accounts WHERE tenant = ?`).get(key) !== undefined) return false;
+    }
     if (enabled) {
       await tx.prepare(`INSERT INTO xpost_reply_accounts (tenant, x_user_id, consent_at_ms) VALUES (?, ?, ?)
         ON CONFLICT (tenant) DO UPDATE SET
           consent_at_ms = CASE WHEN xpost_reply_accounts.x_user_id = excluded.x_user_id THEN xpost_reply_accounts.consent_at_ms ELSE excluded.consent_at_ms END,
           x_user_id = excluded.x_user_id`)
         .run(key, seenXUserId, int(nowMs));
+      if (!opts.house) await tx.prepare(`DELETE FROM xpost_meta WHERE k = ?`).run(repliesOffKey(key));
     } else {
       await tx.prepare(`DELETE FROM xpost_reply_accounts WHERE tenant = ?`).run(key);
       await tx.prepare(`UPDATE xpost_posts SET status = 'cancelled', reason = 'replies-off', updated_at_ms = ?
-        WHERE tenant = ? AND kind = 'reply' AND status = 'scheduled'`).run(int(nowMs), key);
+        WHERE tenant = ? AND kind IN ('reply', 'answer') AND status = 'scheduled'`).run(int(nowMs), key);
+      await writeMeta(tx, repliesOffKey(key), "owner", nowMs);
     }
     return true;
   });
@@ -474,7 +499,7 @@ export async function optOutReplies(db: Db, xUserId: string, authorId: string, n
     await tx.prepare(`INSERT INTO xpost_reply_optouts (x_user_id, author_id, created_at_ms) VALUES (?, ?, ?)
       ON CONFLICT (x_user_id, author_id) DO NOTHING`).run(xUserId, authorId, int(nowMs));
     await tx.prepare(`UPDATE xpost_posts SET status = 'cancelled', reason = 'recipient-optout', updated_at_ms = ?
-      WHERE x_user_id = ? AND kind = 'reply' AND status = 'scheduled'
+      WHERE x_user_id = ? AND kind IN ('reply', 'answer') AND status = 'scheduled'
         AND EXISTS (SELECT 1 FROM xpost_reply_targets r WHERE r.post_id = xpost_posts.id AND r.author_id = ?)`)
       .run(int(nowMs), xUserId, authorId);
   });
@@ -749,7 +774,12 @@ export async function markRevoked(db: Db, tenant: string, atVersion: number, now
 
 // ── posts ───────────────────────────────────────────────────────────────────
 
-export type XPostKind = "intro" | "casual" | "buy" | "sell" | "reply";
+/**
+ * `answer` is an active agent's reply to a post that tagged it (the mention is
+ * both its target and its root). It has its own short gap and day allowance,
+ * so it neither waits behind nor spends the account's posting cadence.
+ */
+export type XPostKind = "intro" | "casual" | "buy" | "sell" | "reply" | "answer";
 export type XPostStatus = "scheduled" | "sending" | "posted" | "skipped" | "cancelled" | "failed";
 
 export interface XPost {
@@ -801,7 +831,7 @@ interface PostRow {
   updated_at_ms: unknown;
 }
 
-const KINDS: ReadonlySet<string> = new Set(["intro", "casual", "buy", "sell", "reply"]);
+const KINDS: ReadonlySet<string> = new Set(["intro", "casual", "buy", "sell", "reply", "answer"]);
 const STATUSES: ReadonlySet<string> = new Set(["scheduled", "sending", "posted", "skipped", "cancelled", "failed"]);
 
 function postOf(r: PostRow): XPost {
@@ -884,8 +914,48 @@ export async function schedulePost(db: Db, p: NewPost): Promise<number | null> {
       return id;
     });
   }
+  if (p.kind === "answer") {
+    if (!validReplyIds(p) || p.replyToTweetId !== p.replyRootTweetId || p.dedupeKey !== `answer:${p.xUserId}:${p.replyToTweetId}` || p.replyAuthorId === p.xUserId) return null;
+    return db.tx(async (tx) => {
+      const current = await tx.prepare(`UPDATE xpost_accounts SET updated_at_ms = updated_at_ms
+        WHERE tenant = ? AND x_user_id = ? AND posting_enabled = 1 AND status = 'ok' AND consent_x_user_id = x_user_id`)
+        .run(tenantKey(p.tenant), p.xUserId);
+      if (current.changes !== 1 || !(await repliesEnabledFor(tx, p.tenant, p.xUserId)) ||
+          await repliesOptedOut(tx, p.xUserId, p.replyAuthorId!)) return null;
+      // ONE PERSON, A FEW ANSWERS A DAY, whatever happened to them: two
+      // accounts tagging each other cannot become an endless conversation.
+      // THE COUNT IS TAKEN UNDER A LOCK ON THE X ACCOUNT AND THE PERSON. The
+      // account row above is the owner's: two owners connected to one X
+      // account lock two rows, and could both count one answer and both
+      // write a third. This upsert row-locks one xpost_meta row per X account
+      // and author until commit on Postgres (sqlite has one writer), so the
+      // second waits, then counts the first's answer.
+      await tx.prepare(`INSERT INTO xpost_meta (k, n, v, updated_at_ms) VALUES (?, 0, NULL, ?)
+        ON CONFLICT (k) DO UPDATE SET updated_at_ms = excluded.updated_at_ms`)
+        .run(answerAuthorKey(p.xUserId, p.replyAuthorId!), int(p.nowMs));
+      const byAuthor = await tx.prepare(`SELECT COUNT(*) AS n
+        FROM xpost_posts sent JOIN xpost_reply_targets r ON r.post_id = sent.id
+        WHERE sent.x_user_id = ? AND sent.kind = 'answer' AND r.author_id = ? AND sent.created_at_ms >= ?`)
+        .get(p.xUserId, p.replyAuthorId!, int(p.nowMs - ANSWER_AUTHOR_WINDOW_MS)) as { n: unknown };
+      if (num(byAuthor.n) >= ANSWERS_PER_AUTHOR) return null;
+      const id = await insertPost(tx, p);
+      if (id === null) return null;
+      await tx.prepare(`INSERT INTO xpost_reply_targets (post_id, reply_to_tweet_id, root_tweet_id, author_id) VALUES (?, ?, ?, ?)`)
+        .run(id, p.replyToTweetId!, p.replyRootTweetId!, p.replyAuthorId!);
+      return id;
+    });
+  }
   if (p.replyToTweetId || p.replyRootTweetId || p.replyAuthorId) return null;
   return insertPost(db, p);
+}
+
+/** Answers to one person per rolling day, including skips and uncertain sends. */
+export const ANSWERS_PER_AUTHOR = 2;
+const ANSWER_AUTHOR_WINDOW_MS = 24 * 60 * 60_000;
+
+/** The xpost_meta row an answer's per-person count is taken under: one per posting X account and author. */
+export function answerAuthorKey(xUserId: string, authorId: string): string {
+  return `answer-author:${xUserId}:${authorId}`;
 }
 
 async function insertPost(db: Db, p: NewPost): Promise<number | null> {
@@ -996,7 +1066,7 @@ export async function reschedulePost(db: Db, id: number, dueAtMs: number, nowMs:
                  AND (xpost_posts.kind <> 'buy' OR a.post_buys = 1)
                  AND (xpost_posts.kind <> 'casual' OR a.post_casual = 1)
             )
-            AND (kind <> 'reply' OR EXISTS (
+            AND (kind NOT IN ('reply', 'answer') OR EXISTS (
               SELECT 1 FROM xpost_reply_targets r JOIN xpost_reply_accounts c ON c.tenant = xpost_posts.tenant
               WHERE r.post_id = xpost_posts.id AND c.x_user_id = xpost_posts.x_user_id
                 AND c.consent_at_ms <= xpost_posts.created_at_ms
@@ -1144,7 +1214,7 @@ export async function lastOutAt(db: Db, xUserId: string, sinceMs: number): Promi
   const row = (await db
     .prepare(
       `SELECT MAX(CASE WHEN status = 'posted' THEN sent_at_ms ELSE updated_at_ms END) AS at FROM xpost_posts
-        WHERE x_user_id = ? AND created_at_ms >= ? AND kind <> 'intro'
+        WHERE x_user_id = ? AND created_at_ms >= ? AND kind NOT IN ('intro', 'answer')
           AND (status = 'posted' OR (status = 'failed' AND reason IN ('uncertain', 'interrupted', 'fault')))`,
     )
     .get(String(xUserId), int(sinceMs))) as { at: unknown } | undefined;
@@ -1192,21 +1262,26 @@ export async function introPostsOf(db: Db, tenant: string, xUserId: string): Pro
  * every account's when `tenant` is null. What a new draft must not repeat: its
  * own account's history, and the fleet's (X: never "identical or substantially
  * similar content across multiple accounts").
+ *
+ * `posted` narrows it to what X surely published: what an agent may say it
+ * already said. A draft still waiting may yet be skipped by its owner, so it
+ * is something not to echo, never something said.
  */
-export async function recentBodies(db: Db, opts: { tenant: string | null; sinceMs: number; limit: number }): Promise<string[]> {
+export async function recentBodies(db: Db, opts: { tenant: string | null; sinceMs: number; limit: number; posted?: boolean }): Promise<string[]> {
   const lim = int(Math.max(1, Math.min(2000, opts.limit)));
+  const statuses = opts.posted ? "('posted')" : "('scheduled', 'sending', 'posted')";
   const rows = (opts.tenant === null
     ? await db
         .prepare(
           `SELECT body FROM xpost_posts
-            WHERE status IN ('scheduled', 'sending', 'posted') AND created_at_ms >= ?
+            WHERE status IN ${statuses} AND created_at_ms >= ?
             ORDER BY created_at_ms DESC, id DESC LIMIT ?`,
         )
         .all(int(opts.sinceMs), lim)
     : await db
         .prepare(
           `SELECT body FROM xpost_posts
-            WHERE tenant = ? AND status IN ('scheduled', 'sending', 'posted') AND created_at_ms >= ?
+            WHERE tenant = ? AND status IN ${statuses} AND created_at_ms >= ?
             ORDER BY created_at_ms DESC, id DESC LIMIT ?`,
         )
         .all(tenantKey(opts.tenant), int(opts.sinceMs), lim)) as { body: unknown }[];
@@ -1226,14 +1301,16 @@ export async function replyTargetFor(db: Db, post: Pick<XPost, "id" | "tenant" |
     FROM xpost_reply_targets r JOIN xpost_posts p ON p.id = r.post_id
     JOIN xpost_accounts a ON a.tenant = p.tenant
     JOIN xpost_reply_accounts c ON c.tenant = p.tenant
-    WHERE p.id = ? AND p.tenant = ? AND p.x_user_id = ? AND p.kind = 'reply'
+    WHERE p.id = ? AND p.tenant = ? AND p.x_user_id = ? AND p.kind IN ('reply', 'answer')
       AND p.status IN ('scheduled', 'sending') AND a.x_user_id = p.x_user_id
       AND a.posting_enabled = 1 AND a.status = 'ok' AND a.consent_x_user_id = a.x_user_id
       AND a.consent_at_ms <= p.created_at_ms AND c.x_user_id = p.x_user_id AND c.consent_at_ms <= p.created_at_ms
       AND r.author_id <> p.x_user_id
-      AND p.dedupe_key = 'reply:' || p.x_user_id || ':' || r.reply_to_tweet_id
-      AND EXISTS (SELECT 1 FROM xpost_posts parent WHERE parent.tenant = p.tenant AND parent.x_user_id = p.x_user_id
-        AND parent.kind = 'buy' AND parent.status = 'posted' AND parent.tweet_id = r.root_tweet_id)
+      AND ((p.kind = 'reply' AND p.dedupe_key = 'reply:' || p.x_user_id || ':' || r.reply_to_tweet_id
+        AND EXISTS (SELECT 1 FROM xpost_posts parent WHERE parent.tenant = p.tenant AND parent.x_user_id = p.x_user_id
+          AND parent.kind = 'buy' AND parent.status = 'posted' AND parent.tweet_id = r.root_tweet_id))
+        OR (p.kind = 'answer' AND p.dedupe_key = 'answer:' || p.x_user_id || ':' || r.reply_to_tweet_id
+          AND r.root_tweet_id = r.reply_to_tweet_id))
       AND NOT EXISTS (SELECT 1 FROM xpost_reply_optouts o WHERE o.x_user_id = p.x_user_id AND o.author_id = r.author_id)`)
     .get(int(post.id), tenantKey(post.tenant), post.xUserId) as
     { reply_to_tweet_id: string; root_tweet_id: string; author_id: string } | undefined;
@@ -1298,7 +1375,7 @@ export async function takeOwnerAllowance(db: Db, tenant: string, dayKey: string,
  */
 export async function ownerSendTimesSince(db: Db, tenant: string, sinceMs: number): Promise<number[]> {
   const rows = await db.prepare(`SELECT CASE WHEN status = 'posted' THEN sent_at_ms ELSE updated_at_ms END AS at_ms
-    FROM xpost_posts WHERE tenant = ? AND (
+    FROM xpost_posts WHERE tenant = ? AND kind <> 'answer' AND (
       (status = 'posted' AND sent_at_ms >= ?)
       OR ((status = 'sending' OR (status = 'failed' AND reason IN ('uncertain', 'interrupted', 'fault'))) AND updated_at_ms >= ?)
     )`).all(tenantKey(tenant), int(sinceMs), int(sinceMs)) as { at_ms: unknown }[];

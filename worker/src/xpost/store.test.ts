@@ -13,6 +13,8 @@ import {
   OWNER_PER_DAY_MAX,
   XPOST_ALTERS,
   XPOST_SCHEMA,
+  answerAuthorKey,
+  repliesOffKey,
   cancelPost,
   cancelDisabledKind,
   cancelScheduled,
@@ -419,6 +421,13 @@ test("recent bodies: one account's, or the fleet's, never the ones that did not 
   assert.deepEqual(await recentBodies(db, { tenant: OWNER_A, sinceMs: 0, limit: 10 }), ["one"]);
   assert.deepEqual(await recentBodies(db, { tenant: null, sinceMs: 0, limit: 10 }), ["two", "one"]);
   assert.deepEqual(await recentBodies(db, { tenant: null, sinceMs: 15, limit: 10 }), ["two"]);
+  // What it SAID is only what X published: a draft still waiting is not.
+  assert.deepEqual(await recentBodies(db, { tenant: OWNER_A, sinceMs: 0, limit: 10, posted: true }), []);
+  const out = (await schedulePost(db, post({ dedupeKey: "a4", body: "five", nowMs: 42 })))!;
+  await claimPost(db, out, 43);
+  await markPosted(db, out, "900", 44);
+  assert.deepEqual(await recentBodies(db, { tenant: OWNER_A, sinceMs: 0, limit: 10, posted: true }), ["five"]);
+  assert.deepEqual(await recentBodies(db, { tenant: OWNER_A, sinceMs: 0, limit: 10 }), ["five", "one"]);
   assert.equal(await cancelScheduled(db, OWNER_B, 50, "turned-off"), 1);
 });
 
@@ -523,6 +532,7 @@ test("every statement the store sends translates to Postgres with matching, bind
   await deferPost(db, id, 21.5, 21.5);
   await recentBodies(db, { tenant: OWNER_A, sinceMs: 0.5, limit: 5.5 });
   await recentBodies(db, { tenant: null, sinceMs: 0.5, limit: 5.5 });
+  await recentBodies(db, { tenant: OWNER_A, sinceMs: 0.5, limit: 5.5, posted: true });
   await returnAllowance(db, "k", 14.7);
   await takeAllowance(db, "k", 3.5, 14.5);
   await takeOwnerAllowance(db, OWNER_A, "owner-day", 3.5, 14.5);
@@ -534,6 +544,7 @@ test("every statement the store sends translates to Postgres with matching, bind
   await releaseSpan(db, "gap:111", 20.5, 7.5, 22.5);
   await readMeta(db, "k");
   await writeMeta(db, "k", "v", 15.5);
+  await setReplying(db, OWNER_A, true, "222", 15.3, { house: true });
   await setReplying(db, OWNER_A, true, "222", 15.5);
   await repliesEnabledFor(db, OWNER_A, "222");
   const parent = (await schedulePost(db, post({ xUserId: "222", kind: "buy", dedupeKey: "buy:reply-root", nowMs: 20.5 })))!;
@@ -542,6 +553,8 @@ test("every statement the store sends translates to Postgres with matching, bind
   const reply = (await schedulePost(db, post({ xUserId: "222", kind: "reply", dedupeKey: "reply:222:701", nowMs: 23.5,
     replyToTweetId: "701", replyRootTweetId: "700", replyAuthorId: "333" })))!;
   await replyTargetFor(db, { id: reply, tenant: OWNER_A, xUserId: "222" });
+  await schedulePost(db, post({ xUserId: "222", kind: "answer", dedupeKey: "answer:222:801", nowMs: 23.7,
+    replyToTweetId: "801", replyRootTweetId: "801", replyAuthorId: "333" }));
   await replyConsentAt(db, OWNER_A, "222");
   await firstReplyConsentAt(db, "222");
   await repliesOptedOut(db, "222", "333");
@@ -770,6 +783,68 @@ test("reply targets survive queue reads and cannot reference another tenant, acc
   raw.prepare("UPDATE xpost_posts SET tenant = ? WHERE tweet_id = '700'").run(OWNER_B);
   assert.equal(await replyTargetFor(db, loaded), null, "send rechecks ownership of the parent");
   assert.equal(await schedulePost(db, { ...p, dedupeKey: "reply:111:702", replyToTweetId: "702" }), null);
+});
+
+test("an owner's replies off is remembered, and a house consent never overrides it", async (t) => {
+  const { db } = await open(t);
+  await upsertAccount(db, DEK, { tenant: OWNER_A, xUserId: "111", username: "r", tokens: TOKENS, nowMs: 1 });
+  assert.equal(await setReplying(db, OWNER_A, true, "111", 2, { house: true }), false, "posting is off");
+  await setPosting(db, OWNER_A, { enabled: true, xUserId: "111" }, 3);
+  assert.equal(await setReplying(db, OWNER_A, true, "999", 4, { house: true }), false, "only for the X account posting consent names");
+  assert.equal(await setReplying(db, OWNER_A, true, "111", 5, { house: true }), true);
+  assert.equal(await replyConsentAt(db, OWNER_A, "111"), 5);
+  assert.equal(await setReplying(db, OWNER_A, true, "111", 6, { house: true }), false, "recorded once");
+  assert.equal(await replyConsentAt(db, OWNER_A, "111"), 5);
+
+  // The owner turns replies off: the mark stays, and the house consent is refused for good.
+  assert.equal(await setReplying(db, OWNER_A, false, "111", 7), true);
+  assert.deepEqual(await readMeta(db, repliesOffKey(OWNER_A)), { n: 0, v: "owner" });
+  assert.equal(await setReplying(db, OWNER_A, true, "111", 8, { house: true }), false);
+  assert.equal(await repliesEnabledFor(db, OWNER_A, "111"), false);
+  // Posting off and on again, or a reconnect, does not clear it.
+  await setPosting(db, OWNER_A, { enabled: false }, 9);
+  await setPosting(db, OWNER_A, { enabled: true, xUserId: "111" }, 10);
+  assert.equal(await setReplying(db, OWNER_A, true, "111", 11, { house: true }), false);
+  assert.ok(await readMeta(db, repliesOffKey(OWNER_A)));
+
+  // Only the owner's own on clears it.
+  assert.equal(await setReplying(db, OWNER_A, true, "111", 12), true);
+  assert.equal(await readMeta(db, repliesOffKey(OWNER_A)), null);
+  assert.equal(await repliesEnabledFor(db, OWNER_A, "111"), true);
+  assert.equal(await readMeta(db, repliesOffKey(OWNER_B)), null, "the mark is per owner");
+});
+
+test("two owners on one X account answer one person at most twice a day between them, counted under one lock", async (t) => {
+  const { db: base } = await open(t);
+  for (const tenant of [OWNER_A, OWNER_B]) {
+    await upsertAccount(base, DEK, { tenant, xUserId: "111", username: "r", tokens: TOKENS, nowMs: 1 });
+    await setPosting(base, tenant, { enabled: true, xUserId: "111" }, 2);
+    await setReplying(base, tenant, true, "111", 3);
+  }
+  const answer = (tenant: string, id: string, nowMs = 800): NewPost => post({ tenant, kind: "answer", dedupeKey: `answer:111:${id}`,
+    replyToTweetId: id, replyRootTweetId: id, replyAuthorId: "333", nowMs, dueAtMs: nowMs });
+  const sent: Sent[] = [];
+  const db = recording(base, sent);
+  assert.ok(await schedulePost(db, answer(OWNER_A, "701")));
+
+  // THE ORDER IS THE LOCK: the owner's account row, consent and opt-out, then
+  // the X account and person's row, and only then the count it serialises.
+  const order = sent.map(({ sql }) => sql.replace(/\s+/g, " ").trim().slice(0, 40));
+  const at = (re: RegExp) => order.findIndex((s) => re.test(s));
+  const lock = at(/^INSERT INTO xpost_meta/);
+  assert.ok(at(/^UPDATE xpost_accounts SET updated_at_ms/) >= 0 && at(/^UPDATE xpost_accounts SET updated_at_ms/) < lock, "the owner's row first");
+  assert.ok(lock >= 0 && lock < at(/^SELECT COUNT\(\*\) AS n/), "the author lock before the count");
+  assert.ok(at(/^SELECT COUNT\(\*\) AS n/) < at(/^INSERT INTO xpost_posts/), "the count before the write");
+  const locked = sent.find(({ sql }) => /^\s*INSERT INTO xpost_meta/.test(sql))!;
+  assert.equal(locked.params[0], answerAuthorKey("111", "333"));
+  assert.match(locked.sql, /ON CONFLICT \(k\) DO UPDATE SET updated_at_ms = excluded\.updated_at_ms/, "an upsert that always takes the row");
+  assert.ok(await readMeta(base, answerAuthorKey("111", "333")));
+
+  // Two owners at once, one answer left: one of them writes it.
+  const raced = await Promise.all([schedulePost(base, answer(OWNER_A, "702", 900)), schedulePost(base, answer(OWNER_B, "703", 900))]);
+  assert.equal(raced.filter((id) => id !== null).length, 1, "the X account's second answer to the person, from either owner");
+  assert.equal(await schedulePost(base, answer(OWNER_B, "704", 950)), null, "a third is refused whichever owner writes it");
+  assert.ok(await schedulePost(base, { ...answer(OWNER_B, "705", 960), replyAuthorId: "444" }), "another person is counted on their own");
 });
 
 test("turning replies off cancels only replies and opt-outs are durable across tenants sharing an account", async (t) => {

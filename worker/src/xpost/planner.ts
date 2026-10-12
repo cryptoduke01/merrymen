@@ -43,7 +43,9 @@ const HOUR = 60 * MIN;
  * at least ten minutes, and can be skipped there. So no post of any kind is
  * due sooner than this after it is drafted — an intro drafted late, a buy
  * found late, a casual post at its slot — and the intro is due no sooner than
- * this after consent either.
+ * this after consent either. The one exception is not planned here: an active
+ * agent's answer to a post that tagged it is due when drafted, and the reply
+ * warning that turned answers on says so (orchestrator-xpost.ts writeAnswer).
  */
 export const MIN_LEAD_MS = 10 * MIN;
 /** The intro goes out this long after consent, so the owner sees it drafted first. */
@@ -62,6 +64,13 @@ export const BUY_STALE_MS = 8 * HOUR;
 export const REPLY_STALE_MS = 24 * HOUR;
 export const REPLY_ROOT_MAX_AGE_MS = 72 * HOUR;
 export const REPLIES_PER_ROOT = 2;
+/**
+ * An active agent's answers to tags: their own gap and day allowance, never
+ * the cadence's. A minute apart: they go out as soon as they are drafted, and
+ * mentions are read every minute.
+ */
+export const ANSWER_GAP_MS = MIN;
+export const ANSWERS_PER_DAY = 24;
 /** The least time between two posts of one account. The intro is exempt, both ways. */
 export const GAP_MS = 3 * HOUR;
 /** A casual post pushed further than this by the gap waits for another day instead; one held this long past due is stale. */
@@ -75,6 +84,69 @@ export const CASUAL_QUIET_DAYS_IN_TEN = 3;
 export const CASUAL_LEAD_MIN = 20;
 export const CASUAL_LEAD_MAX = 45;
 export const DEFAULT_PER_DAY = 3;
+
+/**
+ * HOW OFTEN ONE ACCOUNT POSTS. STANDARD_CADENCE is every owner's: three a day,
+ * three hours apart, two trade posts and one casual afternoon post on most
+ * days. ACTIVE_CADENCE is the operator's opt-in for named owners
+ * (MERRYMEN_XPOST_ACTIVE_TENANTS): about ten a day, seventy-five minutes
+ * apart, every buy posted, casual posts spread over the waking day and mostly about how it
+ * trades. It never lifts the owner's own smaller choice, the fleet's day
+ * ceiling, the model allowance, the review window, the night, or the gate.
+ */
+export interface PlanCadence {
+  /** Posts per owner-local day, the X account's ceiling for this owner. */
+  perDay: number;
+  /** The least time between two non-intro posts of one X account. */
+  gapMs: number;
+  /** Buy and sale posts per owner-local day, together. */
+  tradePerDay: number;
+  /** Casual posts per owner-local day; their slots split the window evenly. */
+  casualPerDay: number;
+  /** The casual window in local minutes, and the same length in UTC when no zone is known. */
+  casualWindowLocal: readonly [number, number];
+  casualWindowUtc: readonly [number, number];
+  /** Owner-local days in ten with no casual post at all. */
+  casualQuietDaysInTen: number;
+  /** Casual slots in ten handed how it trades rather than a passing thought (orchestrator casualInputs). */
+  tradeTalkInTen: number;
+  /**
+   * One buy post, and one sale post, per coin in this long. 0 is no fold: a
+   * rebuy of the same coin is posted again, still bounded by tradePerDay,
+   * perDay and the gap. Checked when planned and claimed again at send time.
+   */
+  coinFoldMs: number;
+}
+
+export const STANDARD_CADENCE: Readonly<PlanCadence> = Object.freeze({
+  perDay: DEFAULT_PER_DAY,
+  gapMs: GAP_MS,
+  tradePerDay: BUY_PER_DAY,
+  casualPerDay: 1,
+  casualWindowLocal: CASUAL_WINDOW_LOCAL,
+  casualWindowUtc: CASUAL_WINDOW_UTC,
+  casualQuietDaysInTen: CASUAL_QUIET_DAYS_IN_TEN,
+  tradeTalkInTen: 3,
+  coinFoldMs: BUY_COIN_FOLD_MS,
+});
+
+/**
+ * Eight casual slots from 09:00 to 23:30 local, and a post for every buy and
+ * completed sale on top — a rebuy of a coin it posted about yesterday too, so
+ * no coin fold — up to twelve a day: the seventy-five minute gap over a
+ * waking day is the real ceiling.
+ */
+export const ACTIVE_CADENCE: Readonly<PlanCadence> = Object.freeze({
+  perDay: 12,
+  gapMs: 75 * MIN,
+  tradePerDay: 12,
+  casualPerDay: 8,
+  casualWindowLocal: [9 * 60, 23 * 60 + 30] as const,
+  casualWindowUtc: [9 * 60, 23 * 60 + 30] as const,
+  casualQuietDaysInTen: 0,
+  tradeTalkInTen: 7,
+  coinFoldMs: 0,
+});
 
 /** What the planner asks of time. The glue binds it to the owner-local clock the room also uses. */
 export interface PlanClock {
@@ -112,7 +184,8 @@ export type PlanIntent =
   | { kind: "intro"; dedupeKey: string; dueAtMs: number; attempt: number }
   | { kind: "buy"; dedupeKey: string; dueAtMs: number; call: PlanCall; coin: string; coinKey: string }
   | { kind: "sell"; dedupeKey: string; dueAtMs: number; call: PlanSell; coin: string; coinKey: string }
-  | { kind: "casual"; dedupeKey: string; dueAtMs: number; day: string };
+  /** `slot` is 0 for the day's first casual post; ACTIVE_CADENCE has more than one. */
+  | { kind: "casual"; dedupeKey: string; dueAtMs: number; day: string; slot: number };
 
 /** An intro row, as introState weighs it. */
 export type IntroRow = Pick<XPost, "dedupeKey" | "status" | "reason" | "createdAtMs" | "updatedAtMs">;
@@ -146,6 +219,8 @@ export interface PlanInput {
   model?: boolean;
   /** The kinds the owner lets it post (XPostPrefs). Absent, or a field absent, is on. */
   kinds?: Partial<Pick<XPostPrefs, "buys" | "casual">>;
+  /** How often this account posts. Absent is STANDARD_CADENCE; `perDay`, when given, still sets the ceiling. */
+  cadence?: Readonly<PlanCadence>;
 }
 
 // ── keys and dice ───────────────────────────────────────────────────────────
@@ -163,8 +238,9 @@ export function buyKey(decisionId: string): string {
 export function sellKey(tenant: string, operationKey: string): string {
   return `sell:${key(tenant)}:${operationKey.toLowerCase()}`;
 }
-export function casualKey(tenant: string, day: string): string {
-  return `casual:${key(tenant)}:${day}`;
+/** Slot 0 keeps the historic `casual:<tenant>:<day>`; a later slot of an active day adds `:<slot>`. */
+export function casualKey(tenant: string, day: string, slot = 0): string {
+  return slot > 0 ? `casual:${key(tenant)}:${day}:${slot}` : `casual:${key(tenant)}:${day}`;
 }
 
 /** FNV-1a, 32 bits, with a murmur finaliser: the same dice on every replica and after every redeploy. */
@@ -292,19 +368,24 @@ function ownerLimit(perDay: number, ownerPerDay?: number | null): number {
  * three hours. Only ever later: a post is never moved earlier than the rule
  * that put it where it is.
  */
-function pushedPast(due: number, slots: readonly Slot[]): number {
+function pushedPast(due: number, slots: readonly Slot[], gapMs: number = GAP_MS): number {
   const times = slots.filter((s) => s.kind !== "intro").map((s) => s.atMs);
   let at = due;
   for (let moved = true, guard = 0; moved && guard < 64; guard++) {
     moved = false;
     for (const t of times) {
-      if (Math.abs(at - t) < GAP_MS) {
-        at = t + GAP_MS;
+      if (Math.abs(at - t) < gapMs) {
+        at = t + gapMs;
         moved = true;
       }
     }
   }
   return at;
+}
+
+/** A post of this kind about this coin within the cadence's fold, so this one is not planned. A fold of 0 folds nothing. */
+function folded(slots: readonly Slot[], kind: "buy" | "sell", coin: string, now: number, foldMs: number): boolean {
+  return foldMs > 0 && slots.some((s) => s.kind === kind && s.coin === coin && s.createdAtMs >= now - foldMs);
 }
 
 /**
@@ -315,7 +396,9 @@ function pushedPast(due: number, slots: readonly Slot[]): number {
  */
 export function planPosts(input: PlanInput): PlanIntent[] {
   const { tenant, account, tz, nowMs: now, clock } = input;
-  const perDay = Number.isFinite(input.perDay) && (input.perDay ?? 0) >= 1 ? Math.floor(input.perDay!) : DEFAULT_PER_DAY;
+  const cadence = input.cadence ?? STANDARD_CADENCE;
+  const perDay = Number.isFinite(input.perDay) && (input.perDay ?? 0) >= 1 ? Math.floor(input.perDay!) : cadence.perDay;
+  const gap = cadence.gapMs;
   const ownerPerDay = ownerLimit(perDay, input.ownerPerDay);
   if (!account.xUserId || account.consentAtMs === null || account.consentAtMs === undefined) return [];
   // NOTHING IS PLANNED WHILE THE OWNER SLEEPS — the intro included.
@@ -331,7 +414,8 @@ export function planPosts(input: PlanInput): PlanIntent[] {
   if (intro.state !== "done") return [];
   if (input.model === false) return [];
 
-  const slots: Slot[] = input.posts.filter((p) => LIVE_STATUSES.has(p.status)).map(slotOf);
+  // An answer to a tag has its own lane: it neither spends nor waits on the cadence.
+  const slots: Slot[] = input.posts.filter((p) => LIVE_STATUSES.has(p.status) && p.kind !== "answer").map(slotOf);
   const used = new Set(input.posts.map((p) => p.dedupeKey));
   const onDay = (day: string, kind?: XPost["kind"]) => slots.filter((s) => dayOf(s.atMs) === day && (!kind || s.kind === kind)).length;
   const ownerOnDay = (day: string) => slots.filter((s) => s.tenant === key(tenant) && dayOf(s.atMs) === day).length;
@@ -348,18 +432,19 @@ export function planPosts(input: PlanInput): PlanIntent[] {
     if (used.has(dedupeKey)) continue;
     const coin = coinOf(call);
     if (!coin) continue;
-    if (slots.some((s) => s.kind === "sell" && s.coin === call.token.toLowerCase() && s.createdAtMs >= now - BUY_COIN_FOLD_MS)) continue;
-    const due = pushedPast(now + MIN_LEAD_MS, slots);
+    if (folded(slots, "sell", call.token.toLowerCase(), now, cadence.coinFoldMs)) continue;
+    const due = pushedPast(now + MIN_LEAD_MS, slots, gap);
     if (due > call.atSec * 1000 + BUY_STALE_MS) continue;
     const day = dayOf(due);
-    if (onDay(day, "buy") + onDay(day, "sell") >= BUY_PER_DAY || onDay(day) >= perDay || ownerOnDay(day) >= ownerPerDay) continue;
+    if (onDay(day, "buy") + onDay(day, "sell") >= cadence.tradePerDay || onDay(day) >= perDay || ownerOnDay(day) >= ownerPerDay) continue;
     out.push({ kind: "sell", dedupeKey, dueAtMs: due, call, coin: coin.label, coinKey: call.token.toLowerCase() });
     slots.push({ tenant: key(tenant), kind: "sell", atMs: due, coin: call.token.toLowerCase(), createdAtMs: now });
     used.add(dedupeKey);
   }
 
-  // BUYS: fresh, after consent, one per coin in three days, two a day at most —
-  // and none at all when the owner turned them off.
+  // BUYS: fresh, after consent, one per coin in three days (every one on an
+  // active cadence), two a day at most — and none at all when the owner
+  // turned them off.
   const buys = input.kinds?.buys === false ? [] : input.calls
     .filter((c) => c.side === "buy" && Number.isFinite(c.atSec) && typeof c.decisionId === "string" && c.decisionId !== "")
     .filter((c) => c.atSec * 1000 > account.consentAtMs! && now - c.atSec * 1000 <= BUY_FRESH_MS && c.atSec * 1000 <= now)
@@ -369,40 +454,48 @@ export function planPosts(input: PlanInput): PlanIntent[] {
     if (used.has(dedupeKey)) continue;
     const coin = coinOf(call);
     if (!coin) continue;
-    if (slots.some((s) => s.kind === "buy" && s.coin === coin.key && s.createdAtMs >= now - BUY_COIN_FOLD_MS)) continue;
+    if (folded(slots, "buy", coin.key, now, cadence.coinFoldMs)) continue;
     const fillMs = call.atSec * 1000;
     const jitter = BUY_JITTER_MIN + (hash32(`buy|${call.decisionId}`) % (BUY_JITTER_MAX - BUY_JITTER_MIN + 1));
-    const due = pushedPast(Math.max(fillMs + jitter * MIN, now + MIN_LEAD_MS), slots);
+    const due = pushedPast(Math.max(fillMs + jitter * MIN, now + MIN_LEAD_MS), slots, gap);
     if (due > fillMs + BUY_STALE_MS) continue;
     const day = dayOf(due);
-    if (onDay(day, "buy") + onDay(day, "sell") >= BUY_PER_DAY || onDay(day) >= perDay || ownerOnDay(day) >= ownerPerDay) continue;
+    if (onDay(day, "buy") + onDay(day, "sell") >= cadence.tradePerDay || onDay(day) >= perDay || ownerOnDay(day) >= ownerPerDay) continue;
     out.push({ kind: "buy", dedupeKey, dueAtMs: due, call, coin: coin.label, coinKey: coin.key });
     slots.push({ tenant: key(tenant), kind: "buy", atMs: due, coin: coin.key, createdAtMs: now });
     used.add(dedupeKey);
   }
 
-  // ONE CASUAL POST, at the account's own slot in the owner's afternoon, most
-  // days. "One" is counted on the owner's local day as the zone reads NOW, not
-  // only by key: the key carries the day under whatever zone was known when it
-  // was written, so learning or changing the zone could otherwise give one
-  // local day two casual posts under two keys.
+  // CASUAL POSTS, at the account's own slots in the owner's waking window,
+  // most days. STANDARD_CADENCE has one slot in the afternoon; an active
+  // account has several, splitting its window evenly, one planned per pass.
+  // How many went out is counted on the owner's local day as the zone reads
+  // NOW, not only by key: the key carries the day under whatever zone was
+  // known when it was written, so learning or changing the zone could
+  // otherwise give one local day an extra post under another key.
   const today = dayOf(now);
-  const cKey = casualKey(tenant, today);
   const minutes = clock.localMinutes(tz, now);
-  if (input.kinds?.casual !== false && !used.has(cKey) && onDay(today, "casual") === 0 && minutes !== null) {
-    const [start, end] = tz ? CASUAL_WINDOW_LOCAL : CASUAL_WINDOW_UTC;
-    const h = hash32(`casual|${key(tenant)}|${today}`);
-    const quiet = h % 10 < CASUAL_QUIET_DAYS_IN_TEN;
-    // The slot leaves half an hour of window after it, so a pass that lands late still finds it.
-    const slot = start + (Math.floor(h / 10) % (end - start - 30));
-    if (!quiet && minutes >= slot && minutes < end) {
+  const slotsToday = Math.max(1, Math.floor(cadence.casualPerDay));
+  if (input.kinds?.casual !== false && minutes !== null) {
+    const [start, end] = tz ? cadence.casualWindowLocal : cadence.casualWindowUtc;
+    const quiet = hash32(`casual|${key(tenant)}|${today}`) % 10 < cadence.casualQuietDaysInTen;
+    const width = Math.floor((end - start) / slotsToday);
+    for (let i = 0; !quiet && i < slotsToday && width > 30; i++) {
+      const cKey = casualKey(tenant, today, i);
+      if (used.has(cKey) || onDay(today, "casual") > i) continue;
+      // Each slot leaves half an hour of its share after it, so a pass that lands late still finds it.
+      const h = hash32(i === 0 ? `casual|${key(tenant)}|${today}` : `casual|${key(tenant)}|${today}|${i}`);
+      const from = start + i * width;
+      const slot = from + (Math.floor(h / 10) % (width - 30));
+      if (minutes < slot || minutes >= from + width) continue;
       const lead = CASUAL_LEAD_MIN + (hash32(`casual-lead|${cKey}`) % (CASUAL_LEAD_MAX - CASUAL_LEAD_MIN + 1));
-      const due = pushedPast(now + lead * MIN, slots);
+      const due = pushedPast(now + lead * MIN, slots, gap);
       const day = dayOf(due);
       if (due - now <= CASUAL_MAX_PUSH_MS && onDay(day) < perDay && ownerOnDay(day) < ownerPerDay) {
-        out.push({ kind: "casual", dedupeKey: cKey, dueAtMs: due, day: today });
+        out.push({ kind: "casual", dedupeKey: cKey, dueAtMs: due, day: today, slot: i });
         slots.push({ tenant: key(tenant), kind: "casual", atMs: due, coin: null, createdAtMs: now });
       }
+      break;
     }
   }
   return out.sort((a, b) => a.dueAtMs - b.dueAtMs);
@@ -451,7 +544,7 @@ export function sendDecision(
     return { action: "cancel", reason: "kind-off" };
   }
   if ((post.kind === "buy" || post.kind === "sell") && nowMs - post.createdAtMs > BUY_STALE_MS) return { action: "skip", reason: "stale" };
-  if (post.kind === "reply" && nowMs - post.createdAtMs > REPLY_STALE_MS) return { action: "skip", reason: "stale" };
+  if ((post.kind === "reply" || post.kind === "answer") && nowMs - post.createdAtMs > REPLY_STALE_MS) return { action: "skip", reason: "stale" };
   if (post.kind === "casual" && post.dueAtMs <= nowMs) {
     if (nowMs - post.dueAtMs > CASUAL_MAX_PUSH_MS) return { action: "skip", reason: "stale" };
     if (dayOf && dayOf(nowMs) !== dayOf(post.dueAtMs)) return { action: "skip", reason: "stale" };
@@ -484,8 +577,8 @@ export function replyDueAt(input: {
   // or model refusal cannot turn one thread into an unlimited drafting loop.
   const thread = posts.filter((p) => p.kind === "reply" && p.replyRootTweetId === parent.tweetId);
   if (thread.length >= REPLIES_PER_ROOT || thread.some((p) => p.replyAuthorId === input.authorId)) return null;
-  const slots = posts.filter((p) => LIVE_STATUSES.has(p.status)
-    || (p.status === "failed" && ["uncertain", "interrupted", "fault"].includes(p.reason ?? ""))).map(slotOf);
+  const slots = posts.filter((p) => p.kind !== "answer" && (LIVE_STATUSES.has(p.status)
+    || (p.status === "failed" && ["uncertain", "interrupted", "fault"].includes(p.reason ?? "")))).map(slotOf);
   const due = pushedPast(now + MIN_LEAD_MS, slots);
   if (due - input.commentAtMs > REPLY_STALE_MS) return null;
   const day = clock.localDay(tz, due);

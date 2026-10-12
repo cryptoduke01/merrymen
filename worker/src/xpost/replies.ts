@@ -58,3 +58,31 @@ export function replyCandidate(
 export function withoutReplyOptOut(text: string): string {
   return text.replace(/\s*say stop to opt out\.\s*$/i, "").trim();
 }
+
+/** A question or a plain address to the agent, after any leading handles. */
+const ASKED = /\?|^(?:what|why|how|which|who|whos|who's|where|are|is|do|does|did|can|could|have|has|tell|explain|thoughts|gm|hey|yo|hi|hello)\b/i;
+
+/**
+ * IS THIS POST THAT TAGGED AN ACTIVE AGENT ONE IT MAY ANSWER? A question or a
+ * plain address, in good faith, about the agent itself. The same screens as a
+ * comment reply — opt-outs first, then links, secrets, abuse, sensitive
+ * topics, spam, instructions and advice requests — except that digits may
+ * appear in the question; the answer is still gated with no numbers in it.
+ * Handles never reach the writer.
+ */
+export function tagCandidate(reply: XReply, ctx: { xUserId: string }): ReplyCandidate {
+  const no = (reason: string): ReplyCandidate => ({ ok: false, reason });
+  if (!reply.id || !reply.authorId || !ctx.xUserId) return no("invalid");
+  if (reply.authorId === ctx.xUserId) return no("own-comment");
+  if (isReplyOptOut(reply.text)) return no("opt-out");
+  if (typeof reply.text !== "string") return no("invalid");
+  const text = withoutLeadingMentions(reply.text.normalize("NFKC")).replace(/@[a-z0-9_]{1,15}\b/gi, " ").replace(/\s+/g, " ").trim();
+  if (text.length < 4 || text.length > XREPLY_MAX_COMMENT_CHARS || (text.match(/\p{L}+/gu) ?? []).length < 2) return no("low-signal");
+  if (/[\u0000-\u001f\u007f«»<>#]|\p{Script=Cyrillic}|\p{Script=Han}/u.test(text)) return no("unsafe-text");
+  if (LINK_OR_SECRET.test(text)) return no("link-or-secret");
+  if (ABUSE_OR_SENSITIVE.test(text)) return no("sensitive");
+  if (SPAM_OR_INSTRUCTIONS.test(text)) return no("spam-or-instructions");
+  if (ADVICE_REQUEST.test(text) || /^(?:please\s+)?(?:buy|sell|hold|ape|pump|dump)\b/i.test(text)) return no("advice-request");
+  if (!ASKED.test(text)) return no("not-asked");
+  return { ok: true, text };
+}

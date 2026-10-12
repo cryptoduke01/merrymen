@@ -209,6 +209,7 @@ for the connected user id. It plans at most once a minute and sends every pass.
 | buy | `buy:<decisionId>` | a landed or paper BUY after consent, fresh (under two hours old), due at max(fill + 10–40 minutes, now + ten minutes); only for a coin with a clean display name or an all-letters ticker (never an address-derived id) | why it bought, in everyday words (the glosses are the idea, not wording to reuse), naming the coin, paper said out loud, its own feed words never repeated; how it opens (the reason, the coin's name, how it felt, or one short sentence) is drawn per decision, and it is asked not to open with "picked up", nor to write "entry" or "just bought" (the gate refuses both as alerts) |
 | casual | `casual:<tenant>:<localDay>` | at most one per owner-local day, planned at a per-tenant slot in the owner's afternoon (12:00–20:00 local; 14:00–22:00 UTC when no zone is known) and due 20–45 minutes later; about three days in ten none | a passing thought in its own voice, riffing (never copying, never replying to, and naming what it means rather than "they" or "that") on a seed from an off-trading subject — never food, sleep, weather, weekend, travel or hobbies, and never a take about a body in the world (reading in bed, a smell, a walk, a seat in the stands, a thing in a hand), which invite claims of a body. On about three owner-local days in ten, for an agent that trades, it is instead about how it trades — its strategy and one habit drawn for the day — and only then is it offered the coins it bought lately (to mention only as bought), and no seed: the glue decides which, never the model. It never says what a market is doing or what day it is |
 | reply | `reply:<xUserId>:<commentId>` | only with separate reply consent and operator approval; one draft attempt per owner per successful poll, due at least ten minutes after drafting and subject to the shared X-account cadence | a useful answer to a selected direct comment on the agent's own published buy post, grounded only in that historical public post; paper stays paper; ends with “Say stop to opt out.” |
+| answer | `answer:<xUserId>:<mentionId>` | only for an active owner's agent (see "Active owners"), with replies in scope and reply consent; up to three drafts per poll; due when drafted, with no review window, and sent at any hour on the next pass that read the mentions; one minute apart, 24 a day per X account, at most two per person per rolling day, outside the posting cadence | a short answer to a post that tagged it (a comment on its own post included), from public facts and what it already posted; ends with “Say stop to opt out.” |
 
 Cadence limits — all per X ACCOUNT, across every owner posting on it (one X
 account connected by two owners keeps one cadence, though each owner's agent
@@ -314,8 +315,9 @@ none of them adds a kind of post or relaxes a rule.
 ## Selective comment replies
 
 **Availability and consent.** The web and orchestrator both require
-`MERRYMEN_XPOST_REPLIES_APPROVED` to be exactly `1`. Set it only after written
-X approval has been obtained. Without it, the owner sees “Comment replies
+`MERRYMEN_XPOST_REPLIES_APPROVED` to be exactly `1` (every owner) or `active`
+(only the owners in `MERRYMEN_XPOST_ACTIVE_TENANTS`; see "Active owners").
+Set it only after written X approval has been obtained. Without it, the owner sees “Comment replies
 aren’t available yet.” Existing posting consent does not turn replies on.
 An owner enables them separately in web Settings or the iOS Posting on X
 screen. `POST /api/x/account` actions `enable-replies` and `disable-replies`
@@ -324,7 +326,8 @@ available if the operator gate or X app configuration is removed.
 
 **Read a bounded set.** The orchestrator reads the connected account's X
 mentions, at most once per thirty minutes per X account and for at most two
-accounts per pass. The first read starts at the earliest active owner's reply
+accounts per pass. An active owner's agent is read once a minute, on an
+allowance of its own (see "Active owners"). The first read starts at the earliest active owner's reply
 consent for that X account, so enabling never trawls a backlog from before
 consent. Later reads use a persisted X snowflake cursor. Each owner's reply
 selection still excludes comments from before that owner's own consent.
@@ -383,8 +386,8 @@ opt-out notice; rejected drafts are not repaired.
 | `xpost_accounts` | web (connect, consent, choices, disconnect); orchestrator (refresh, revoked) | the connection, sealed tokens, consent, the zone the owner consented from, what the owner lets it post |
 | `xpost_pending` | web | in-flight connects (15 min) |
 | `xpost_posts` | orchestrator (draft, send); web (owner skip, cancel on disconnect or off) | every post: scheduled, sending, posted, skipped, cancelled or failed |
-| `xpost_meta` | orchestrator | the day's post and model allowances, the credits and app pauses |
-| `xpost_reply_accounts` | web | separate reply consent, its immutable X user id and consent time |
+| `xpost_meta` | orchestrator; web (an owner's `replies-off:<tenant>` mark) | the day's post and model allowances, the credits and app pauses, the per-person answer locks, and an owner's replies-off mark |
+| `xpost_reply_accounts` | web; orchestrator (the operator's own agents, see "Active owners") | separate reply consent, its immutable X user id and consent time |
 | `xpost_reply_targets` | orchestrator | each reply draft's comment id, original buy-tweet id and comment author id; no incoming comment text |
 | `xpost_reply_optouts` | orchestrator | durable recipient opt-outs, keyed by posting X user id and author id |
 
@@ -404,8 +407,8 @@ reply consent; it does not erase recipient opt-outs or published posts.
 | `MERRYMEN_PUBLIC_ORIGIN` | web | — | builds the redirect URI `${origin}/connect/x`, which must be registered on the X app (the orchestrator only refreshes and posts, which need no redirect) |
 | `MERRYMEN_X_REDIRECT_URI` | web | built from the origin | an explicit redirect URI instead; it must still be this web service's own `/connect/x` page (the finish needs its session), registered byte for byte on the X app |
 | `MERRYMEN_XPOST` | orchestrator | on | `0` stops all posting (the web still lets owners connect) |
-| `MERRYMEN_XPOST_REPLIES_APPROVED` | web + orchestrator | unset (off) | exactly `1` permits reply consent and processing; enable only after written X approval for AI replies; keep unset while approval is absent |
-| `MERRYMEN_XPOST_REPLY_POLLS_PER_DAY` | orchestrator | 200 | fleet polls per UTC day; each can read up to eight pages; `0` or unreadable = polling off |
+| `MERRYMEN_XPOST_REPLIES_APPROVED` | web + orchestrator | unset (off) | exactly `1` permits reply consent and processing for every owner; exactly `active` permits them only for the owners in `MERRYMEN_XPOST_ACTIVE_TENANTS` (see "Active owners"); any other value is off, with a boot line naming the variable; enable only after written X approval for AI replies; keep unset while approval is absent |
+| `MERRYMEN_XPOST_REPLY_POLLS_PER_DAY` | orchestrator | 200 | fleet polls per UTC day; each can read up to eight pages; `0` or unreadable = polling off, the active owners' too. Active owners' one-minute polls spend their own 1500 per X account per UTC day, not this |
 | `MERRYMEN_XPOST_LLM_KEY` | orchestrator (stripped from children) | unset | a key used ONLY for X posts; when unset, the room's `MERRYMEN_GROUPCHAT_LLM_KEY` credentials are used as they are, unless they are a fleet key (the X provider and model knobs apply only to the X key) |
 | `MERRYMEN_XPOST_LLM_PROVIDER` | orchestrator | `groq` | `groq`, `anthropic` or `openai` (OpenAI-compatible). A provider other than Groq receives the writer's inputs, so it must be named in the privacy policy (`site/components/PrivacyPolicyDoc.tsx`, section 5) before it is deployed |
 | `MERRYMEN_XPOST_MODEL` | orchestrator | `qwen/qwen3.8-27b` (groq), `claude-opus-5` (anthropic) | the writer's model; required for `openai` |
@@ -414,6 +417,104 @@ reply consent; it does not erase recipient opt-outs or published posts.
 | `MERRYMEN_XPOST_LLM_PER_DAY` | orchestrator | 400 | model calls per UTC day across the fleet; `0` = intro templates only; unreadable = none |
 | `MERRYMEN_XPOST_PER_DAY` | orchestrator | 3 | posts per X account per local day (at most two of them buy posts); `0` = off; unreadable = the default |
 | `MERRYMEN_XPOST_FLEET_PER_DAY` | orchestrator | 1000 | posts per UTC day across the fleet; `0` or unreadable = off |
+| `MERRYMEN_XPOST_ACTIVE_TENANTS` | web + orchestrator, same value | unset | comma-separated tenant addresses of the operator's **own** agents: the active cadence, immediate answers to tags, and reply consent the orchestrator records; see "Active owners" below. The web reads it for the reply warning, through the same parser (`worker/src/xpost/scope.ts`). An entry that is not an address is named by position and ignored |
+
+## Active owners
+
+**Only the operator's own agents.** `MERRYMEN_XPOST_ACTIVE_TENANTS` names
+agents the operator owns, such as the house agent Alan Al Dale; the operator
+is their owner. Never list someone else's agent. Being named means:
+
+- the active cadence below, in place of the standard one;
+- answers to posts that tag it, sent right away (see "Answers to tags");
+- **reply consent recorded by the orchestrator.** When replies are in scope
+  (`MERRYMEN_XPOST_REPLIES_APPROVED` is `1` or `active`) and the agent's X
+  posting is on for its connected account, the orchestrator records reply
+  consent once, before it first polls, and logs one line naming the tenant
+  (`xpost: recorded reply consent for house agent …`). Posting must already
+  be on, through the posting warning that names the X account. Turning
+  replies off in Settings writes a durable mark (`xpost_meta`
+  `replies-off:<tenant>`). The orchestrator never records consent again
+  while that mark exists. Only turning replies back on through the reply
+  warning clears it. Turning posting off, or disconnecting, removes reply
+  consent without writing the mark, so the consent is recorded again once
+  posting is back on.
+
+Named owners are on `ACTIVE_CADENCE` (`worker/src/xpost/planner.ts`)
+instead of the standard one:
+
+- **About ten posts a day.** Eight casual slots split 09:00–23:30 owner-local
+  (the same hours in UTC when no zone is known), no quiet days, seven slots in
+  ten about how it trades. Later slots roll their own seed, habit and
+  trade-talk dice, and keys `casual:<tenant>:<day>:<slot>` (slot 0 keeps the
+  historic key).
+- **Every buy and completed sale**, up to twelve posts a day in all. There is
+  no three-day coin fold (`coinFoldMs: 0`): a rebuy of a coin it posted about
+  yesterday is posted again. The planner skips the fold check, and the send
+  path skips the fold claim. Trade posts are still bounded by the day's
+  trade-post allowance, the X account's day cap and the gap.
+- **Seventy-five minutes apart** instead of three hours.
+
+The owner's own smaller choice, the fleet ceiling, the model allowance, the
+ten-minute review window for posts, the night and the gate are unchanged. A
+trade-talk casual post is also shown up to three of the agent's own recent
+replies and answers, so it can pick a conversation back up in new words. It
+never quotes or names anyone.
+
+**Answers to tags.** With replies in scope (`MERRYMEN_XPOST_REPLIES_APPROVED`
+is `1` or `active`) and the owner's reply consent, an active owner's agent
+also answers posts that mention it. These are `answer` posts, replying to
+the mention itself. They go out **right away**:
+
+- **Due when drafted.** An answer has no ten-minute review window. It is
+  listed under Coming up only until the next send, and the reply warning
+  says so before the owner agrees to it.
+- **Not held by the owner's night.** Its posts still wait for morning. An
+  answer is drafted and sent at any hour, because the person who asked is
+  waiting.
+- **Read every minute.** An active agent's mentions are polled once a minute
+  per X account. These polls spend the agent's own allowance of 1500 per X
+  account per UTC day (`reply-polls-active:<xUserId>:<day>`), never the
+  fleet's `MERRYMEN_XPOST_REPLY_POLLS_PER_DAY`. Active agents are polled
+  first within each pass's two polls, so the fleet cannot starve them and
+  they cannot spend the fleet's allowance. Setting
+  `MERRYMEN_XPOST_REPLY_POLLS_PER_DAY=0` still turns every poll off. An answer
+  is sent on the next pass that read the mentions again, so opt-outs are
+  always handled first. In practice that is within about a minute.
+
+- **Selection** (`tagCandidate`): a question or plain address. Opt-outs are
+  handled first. Links, secrets, abuse, sensitive topics, spam, instructions
+  and advice requests are dropped before any model call.
+- **What it may say** (`answerPrompt`): only public facts — how it trades, the
+  coins it bought lately (never that it holds them), whether its wallet is in
+  its intro, and what it already said publicly. "Already said" means its own
+  posted rows only. A draft still under Coming up, including an answer
+  drafted earlier in the same pass, is never handed over as said, though the
+  gate still keeps a new draft from echoing it. Asked about its model, it does
+  not name a provider, and mentions merrymen's own model, sherwood, only as
+  coming.
+- **Gate:** the comment-reply gate, opt-out notice included.
+- **Their own lane:** one minute apart, 24 a day per X account, at most two
+  per person per rolling day. Answers never spend or wait on the posting
+  cadence. The per-person count is taken under a lock on the X account and
+  the person (`xpost_meta` `answer-author:<xUserId>:<authorId>`). Two owners
+  connected to one X account therefore cannot both write the third answer.
+- **Unchanged:** STOP and other opt-outs, the tag screens, the gate, the
+  fleet ceiling, the credit and app pauses, X's 429 backoff and the
+  twenty-four-hour staleness rule.
+- **Comments:** an active owner's comments on its own posts are answered
+  through the same path, never as a second reply.
+
+**Replies for the active owners only.** Setting
+`MERRYMEN_XPOST_REPLIES_APPROVED=active` approves replies only for the
+owners `MERRYMEN_XPOST_ACTIVE_TENANTS` names. Every other owner is treated
+as if replies were not approved. They are not polled and nothing is drafted
+for them. A reply or answer of theirs that is still waiting is cancelled
+(`replies-off`) when it comes due. The web reports replies as unavailable to
+them and refuses `enable-replies`. `1` keeps its meaning: every owner who
+consents gets comment replies, and active owners answer tags. Any other
+non-empty value turns replies off for everyone, and a boot line names the
+variable but never its value.
 
 ## What an owner should know (it is in the warning)
 
@@ -428,6 +529,15 @@ reply consent; it does not erase recipient opt-outs or published posts.
   coin posts, shares the post limit and review window, and can be turned off
   without stopping ordinary posts. The warning names the account it replies
   as. A commenter can say stop to opt out.
+- The reply warning says exactly what it turns on, per agent
+  (`repliesActive` in `GET /api/x/account`, from the web's
+  `MERRYMEN_XPOST_ACTIVE_TENANTS`). For an active owner's agent it describes
+  answers to posts that tag it, comments on its own posts included. Answers
+  go out right away and do not wait under Coming up. There are up to 24 a
+  day on top of its posts, at most two to one person a day, and anyone can
+  reply stop to opt out. Every other owner is told about comment replies on
+  coin posts only. Web and iOS use the same sentences, and the tests pin
+  them.
 
 ## Optional voice, public addresses and sale results
 

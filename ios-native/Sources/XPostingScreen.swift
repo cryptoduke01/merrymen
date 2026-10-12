@@ -46,7 +46,8 @@ struct XPostingScreen: View {
     @State private var skipping: Int?
     /// The account the open warning names; enabling sends exactly this id.
     @State private var consent: XPostingAccount.Identity?
-    @State private var replyConsent: (identity: XPostingAccount.Identity, owner: String)?
+    /// The reply warning open now, and which one it showed (`active`): the confirm agrees to the words read.
+    @State private var replyConsent: (identity: XPostingAccount.Identity, owner: String, active: Bool)?
     @State private var confirmDisconnect = false
     private let policy = NavigationPolicy()
 
@@ -79,7 +80,7 @@ struct XPostingScreen: View {
         .alert(Text(verbatim: "Reply to comments as @\(replyConsent?.identity.handle ?? "")?"), isPresented: Binding(get: { replyConsent != nil }, set: { if !$0 { replyConsent = nil } }), presenting: replyConsent) { consent in
             Button { write(XPostingAccount.replyFields(consent.identity, enabled: true), confirmedOwner: consent.owner) } label: { Text(verbatim: "Let it reply as @\(consent.identity.handle)") }
             Button("Not now", role: .cancel) {}
-        } message: { consent in Text(verbatim: XPostingAccount.replyWarning(consent.identity.handle)) }
+        } message: { consent in Text(verbatim: XPostingAccount.replyWarning(consent.identity.handle, active: consent.active)) }
         .confirmationDialog(Text(verbatim: account?.identity.map { "Disconnect @\($0.handle)?" } ?? "Disconnect X?"), isPresented: $confirmDisconnect, titleVisibility: .visible) {
             Button("Disconnect", role: .destructive) { write([:], method: "DELETE") }
         } message: { Text("Your Merryman stops posting and anything waiting to go out is cancelled.") }
@@ -117,12 +118,12 @@ struct XPostingScreen: View {
                 if account.repliesAvailable || account.replyEnabled {
                     Toggle("Reply to comments", isOn: Binding(get: { account.replyEnabled }, set: { on in
                         guard !busy, let identity = account.identity, let owner = store.owner else { return }
-                        if on { replyConsent = (identity, owner) }
+                        if on { replyConsent = (identity, owner, account.repliesActive) }
                         else { write(XPostingAccount.replyFields(identity, enabled: false)) }
                     }))
                     .disabled(busy || account.identity == nil || (!account.replyEnabled && (!account.repliesAvailable || !account.postingEnabled || account.revoked)))
                     if let identity = account.identity {
-                        Text(verbatim: "Selected comments on your Merryman’s coin posts, answered as @\(identity.handle). Replies share the post limit and ten-minute review window.").font(.caption).foregroundStyle(.secondary)
+                        Text(verbatim: XPostingAccount.replyHint(identity.handle, active: account.repliesActive)).font(.caption).foregroundStyle(.secondary)
                     }
                 }
                 if !account.repliesAvailable { Text("Comment replies aren’t available yet.").font(.caption).foregroundStyle(.secondary) }
@@ -309,6 +310,10 @@ struct XPostingAccount: Equatable {
     let postingEnabled: Bool
     let replyEnabled: Bool
     let repliesAvailable: Bool
+    /// The operator made this agent active: with replies on it answers posts
+    /// that tag it right away, and the reply warning says so. An older server
+    /// that sends no such field is not active.
+    let repliesActive: Bool
     let upcoming: [Post]
     let recent: [Post]
 
@@ -321,6 +326,7 @@ struct XPostingAccount: Equatable {
         postingEnabled = connected && posting == true
         replyEnabled = postingEnabled && v["replyEnabled"].bool == true
         repliesAvailable = v["repliesAvailable"].bool == true
+        repliesActive = v["repliesActive"].bool == true
         revoked = connected && v["status"].string == "revoked"
         if connected, let handle = v["username"].string, handle.wholeMatch(of: #/[A-Za-z0-9_]{1,15}/#) != nil,
            let id = v["xUserId"].string, id.wholeMatch(of: #/[0-9]{1,25}/#) != nil {
@@ -353,12 +359,32 @@ struct XPostingAccount: Equatable {
         ["action": .string(enabled ? "enable-replies" : "disable-replies"), "xUserId": .string(identity.xUserId)]
     }
 
-    static func replyWarning(_ handle: String) -> String {
-        [
+    /// THE REPLY WARNING SAYS EXACTLY WHAT IT TURNS ON, in the web's words
+    /// (web/src/terminal/XPosting.tsx). Most agents reply to comments on their
+    /// coin posts, inside the posting limit and the ten-minute review. An agent
+    /// the operator made active answers posts that tag it instead — comments on
+    /// its own posts arrive the same way — right away, in a lane of its own, so
+    /// its warning promises no review window.
+    static func replyWarning(_ handle: String, active: Bool) -> String {
+        if active {
+            return [
+                "Your Merryman will reply as @\(handle) to selected posts that tag it, including comments on its own posts.",
+                "It chooses which posts to answer; it won’t answer every one. Answers go out right away: they don’t wait under Coming up, so you can’t skip one first.",
+                "Up to 24 answers a day on top of its posts, and at most two to one person a day. Anyone can reply stop to opt out. Turn replies off at any time to stop answering."
+            ].joined(separator: "\n\n")
+        }
+        return [
             "Your Merryman will reply as @\(handle) to selected comments on its coin posts.",
             "It chooses which comments to answer; it won’t reply to every comment. Replies share the same daily limit as posts.",
             "Each reply waits under Coming up for at least ten minutes first, with a link to the comment, and you can skip it there. Turn replies off at any time to cancel waiting replies."
         ].joined(separator: "\n\n")
+    }
+
+    /// The line under the reply switch, in the web's words.
+    static func replyHint(_ handle: String, active: Bool) -> String {
+        active
+            ? "Selected posts that tag your Merryman and comments on its posts, answered as @\(handle) right away, up to 24 a day on top of its posts."
+            : "Selected comments on your Merryman’s coin posts, answered as @\(handle). Replies share the post limit and ten-minute review window."
     }
 
     private static func post(_ row: J, time: String, link: URL?) -> Post? {
@@ -367,7 +393,7 @@ struct XPostingAccount: Equatable {
         let comment = row["replyToTweetId"].string.flatMap { id in
             id.wholeMatch(of: #/[0-9]{1,25}/#) != nil ? URL(string: "https://x.com/i/status/\(id)") : nil
         }
-        return Post(id: Int(id), body: body, at: Date(timeIntervalSince1970: ms / 1000), link: link, isReply: row["kind"].string == "reply", commentLink: comment)
+        return Post(id: Int(id), body: body, at: Date(timeIntervalSince1970: ms / 1000), link: link, isReply: ["reply", "answer"].contains(row["kind"].string ?? ""), commentLink: comment)
     }
 
     /// The warning the owner confirms, in the words the web uses. It names the
