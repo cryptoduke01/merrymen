@@ -1033,7 +1033,19 @@ other owner's agent, and its posting and reply warnings, are unchanged.
   the house's own products and sources (`TRENCHER`, `FOMO`, `SHOGUN`, in
   the sanitiser), or a symbol or name on CoinGecko's own trending list in
   the same answer (beside `coingecko: trending $X` a chain `$X` reads as
-  the same coin). Then, side by side: with Fomo usable for the owner, the
+  the same coin). **And only a chain coin CoinGecko lists by its contract**
+  (red-team 2026-10-12: whoever deploys a token names its pool, so no
+  denylist holds; `$FUHRER`, `$GOYIM`, `$NIGLET`, `$MYPICK`, `$VERIFIED`
+  and `$BLACKROCK` were each posted as trending for about $25k of liquidity
+  and a hundred wallets): GeckoTerminal's token record for each screened
+  contract must name a CoinGecko coin, and CoinGecko's own market row for
+  that coin must rank it, under the very symbol its pool shows
+  (`venues/coingecko-coins.ts` `readChainListings`: `tokens/multi` for up
+  to ten contracts, then `/coins/markets?ids=…`; with no Pro key nothing is
+  asked and no chain coin is named). What CoinGecko said of a contract is
+  kept an hour. Nothing listed is code's nothing-standing-out line; the
+  listings unread is code's no-read line; the screens above stay as a second
+  layer. Then, side by side: with Fomo usable for the owner, the
   coins Fomo traders bought most in the day (`fomo_get_token_activity` with
   no token, its feed-wide `topTokens`: Fomo's thesis read needs a coin, so
   "what fomo traders are on" is the coins the most distinct Fomo traders
@@ -1144,7 +1156,9 @@ other owner's agent, and its posting and reply warnings, are unchanged.
   "fomo traders are piling into brett" credited names nothing looked up to
   a source), exactly as an answer told its buys already was.
 - **Budget:** a major costs two index lookups (search, market), what's hot
-  up to three (the trending page, Fomo, CoinGecko's list), a contract's
+  up to four (the trending page, CoinGecko's listings of the screened
+  contracts, Fomo, CoinGecko's list; the listings' slot taken before the
+  list's, and each contract's listing kept an hour), a contract's
   Bitquery figures none more. Every index read takes a slot (`indexSlot`): a
   lookup left in the bundle's six, time left in its twelve seconds, then
   the X account's eight per ten minutes and

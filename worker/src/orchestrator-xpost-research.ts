@@ -68,7 +68,7 @@ import { coinNamedIn, type AnswerIntentKind } from "./xpost/writer";
 import { asksAboutACoin, everydayWord, nameLikeWords } from "./xpost/words";
 import { cleanTicker, type FiguresSpec } from "./xpost/figures";
 import { moveOf, type HotRead, type MajorRead } from "./xpost/market";
-import { coinQuery, MAJORS_MAX_RANK, pickMajor, readCoinMarket, readCoinTrending, searchCoinList, type CoinMarket, type CoinMarketRead, type CoinSearchRead, type CoinTrendingRead } from "./venues/coingecko-coins";
+import { coinQuery, LISTINGS_MAX, MAJORS_MAX_RANK, pickMajor, readChainListings, readCoinMarket, readCoinTrending, searchCoinList, type ChainListing, type ChainListingsRead, type CoinMarket, type CoinMarketRead, type CoinSearchRead, type CoinTrendingRead } from "./venues/coingecko-coins";
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -581,6 +581,16 @@ export interface XResearchDeps {
    * is mostly the lane's cache. Default: built from `fleetHome`.
    */
   hotPools?: (timeoutMs: number) => Promise<GeckoFetch>;
+  /**
+   * WHO VOUCHES FOR A CHAIN COIN'S TICKER (red-team 2026-10-12): the Robinhood
+   * Chain contracts CoinGecko lists, by address (venues/coingecko-coins.ts
+   * readChainListings: GeckoTerminal's token record names the coin, CoinGecko's
+   * main API its symbol and rank). "What's hot" shows a chain coin only when
+   * its contract is listed here with a rank, under the symbol CoinGecko lists.
+   * Default: built from `fleetHome`; with no Pro key every read is
+   * `no-pro-key` and no chain coin is named.
+   */
+  chainListings?: (addresses: readonly string[], timeoutMs: number) => Promise<ChainListingsRead>;
   /** Onchain flow (Bitquery), only while the lane is configured. */
   flow?: FlowReader;
   /** Flow readings per UTC day across X accounts. Default DEFAULT_X_FLOW_PER_DAY. */
@@ -1268,6 +1278,14 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
   };
   // Someone is waiting: the evidence row, the whole read held to the answer's share.
   const hotPools = d.hotPools ?? ((timeoutMs: number) => fetchGeckoPoolsResult("trending_pools", { timeoutMs, budgetMs: timeoutMs, lane: "evidence", ...(lane ? { fleet: lane } : {}) }));
+  const chainListings = d.chainListings ?? ((addresses: readonly string[], timeoutMs: number) => readChainListings(addresses, { timeoutMs, ...(lane ? { fleet: lane } : {}) }));
+  /**
+   * WHAT COINGECKO SAID OF A CONTRACT, KEPT AN HOUR: its listing, or null for
+   * one it does not list. A coin's listing and rank change slowly, and the
+   * same few trending coins are asked about in answer after answer: read once
+   * an hour each, not once an answer. A read that failed is kept for nothing.
+   */
+  const listingMemo = new Map<string, { listing: ChainListing | null; until: number }>();
 
   return {
     async gather(input): Promise<ResearchBundle> {
@@ -1411,12 +1429,14 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
       });
       /**
        * WHAT'S HOT (hotAsk): the chain's trending pools on the index, past the
-       * fleet's floors (hotScreen), up to HOT_COINS of them; then, side by side,
-       * the coins Fomo traders bought most in the day, kept only when the same
-       * screen kept them, and CoinGecko's trending list, kept only inside the
-       * majors' rank cap. Each a lookup of the bundle's; the index reads also
-       * take the X account's limiter and the hour's. Nothing past the floors is
-       * said as such, and nothing at all is looked up after it.
+       * fleet's floors (hotScreen), up to HOT_COINS of those CoinGecko lists by
+       * contract (chainListings); then, side by side, the coins Fomo traders
+       * bought most in the day, kept only when the same screen kept them, and
+       * CoinGecko's trending list, kept only inside the majors' rank cap. Each
+       * a lookup of the bundle's; the index reads also take the X account's
+       * limiter and the hour's. Nothing past the floors, or nothing listed, is
+       * said as such, and nothing at all is looked up after the first;
+       * listings that could not be read are no read at all.
        */
       const hotBundle = async (): Promise<ResearchBundle> => {
         if (!indexSlot()) return { facts: [], lookups, notes };
@@ -1431,11 +1451,42 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
           return { facts: hotPhrases({ changes: [], crowd: 0, trending: 0 }), hot: { coins: 0, lead: null }, lookups, notes };
         }
         const broker = await fomoFor();
+        // ONLY A CHAIN COIN COINGECKO LISTS, BY ITS CONTRACT (red-team
+        // 2026-10-12). Whoever deploys a token names its pool, so a denylist
+        // of tickers cannot hold: "$FUHRER", "$GOYIM", "$NIGLET", "$MYPICK",
+        // "$VERIFIED" and "$BLACKROCK" were each posted as trending from the
+        // house account, every one past the floors for about $25k of
+        // liquidity and a hundred wallets. A screened coin is shown only when
+        // CoinGecko lists its contract with a rank, under the very symbol its
+        // pool shows (venues/coingecko-coins.ts readChainListings); the
+        // ticker screens above stay as a second layer. What CoinGecko said of
+        // a contract is kept an hour (listingMemo).
+        const candidates = screened.slice(0, LISTINGS_MAX);
+        const fresh = (token: string) => (listingMemo.get(token)?.until ?? 0) > now();
+        const unknown = candidates.filter((s) => !fresh(s.token)).map((s) => s.token);
+        // Its slot before CoinGecko's own list: without it no chain coin is named at all.
+        const vet = unknown.length > 0 && indexSlot();
         const cg = !!majors.trending && majors.configured?.() !== false && indexSlot();
-        const [crowdEnv, trend] = await Promise.all([
+        const [crowdEnv, trend, listings] = await Promise.all([
           broker ? look((ms) => broker.call("fomo_get_token_activity", { token: null, chain: "robinhood", window: "24h", limit: 5 }, fomoOpts(ms)), null, false, RESEARCH_BUDGET.fomoMs) : Promise.resolve(null),
           cg ? look((ms) => majors.trending!(ms), null) : Promise.resolve(null),
+          vet ? look((ms) => chainListings(unknown, ms), null) : Promise.resolve(null),
         ]);
+        if (listings && !listings.failed) {
+          const until = now() + HOUR;
+          for (const token of unknown) listingMemo.set(token, { listing: listings.listings.find((l) => l.address === token) ?? null, until });
+          while (listingMemo.size > 512) listingMemo.delete(listingMemo.keys().next().value!);
+        } else if (unknown.length) {
+          notes.push(`listings-${failureCode(listings?.failure)}`);
+        }
+        const listingOf = (token: string): ChainListing | null | undefined => (fresh(token) ? listingMemo.get(token)!.listing : undefined);
+        const vouched = candidates.filter((s) => {
+          const l = listingOf(s.token);
+          return !!l && l.rank !== null && cleanTicker(l.symbol) === s.ticker;
+        });
+        // NOTHING VOUCHED FOR, AND SOME CONTRACT COULD NOT BE ASKED ABOUT: no
+        // read at all (code's "no read" line), never a guess, never a name.
+        if (!vouched.length && candidates.some((s) => listingOf(s.token) === undefined)) return { facts: [], lookups, notes };
         // NOR A CHAIN COIN UNDER A NAME COINGECKO'S OWN LIST HAS TODAY (red-team
         // 2026-10-12): beside "coingecko: trending $X", a chain "$X" reads as
         // the same coin. Every symbol and name on the list, any rank.
@@ -1443,9 +1494,9 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
           .filter((t): t is string => t !== null));
         // Nor a coin named after the agent itself, whatever it is called (red-team 2026-10-12).
         const own = [input.facts.name, ...String(input.facts.name ?? "").split(/\s+/).filter((w) => /^\p{L}{3,}$/u.test(w))];
-        const kept = screened.filter((s) => !listed.has(s.ticker) && !namedIn(s.ticker, own));
+        const kept = vouched.filter((s) => !listed.has(s.ticker) && !namedIn(s.ticker, own));
         if (!kept.length) {
-          notes.push("hot-none");
+          notes.push(vouched.length ? "hot-none" : "hot-unlisted");
           return { facts: hotPhrases({ changes: [], crowd: 0, trending: 0 }), hot: { coins: 0, lead: null }, lookups, notes };
         }
         const shown = kept.slice(0, HOT_COINS);

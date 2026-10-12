@@ -1306,8 +1306,14 @@ function pool(n: number, over: Partial<GeckoPool> = {}): GeckoPool {
     buckets: emptyGeckoBuckets(), createdAt: null, ...over };
 }
 
-function hotFake(o: { pools?: GeckoPool[]; poolsFail?: string; crowd?: { address: string; symbol: string }[]; trending?: CoinHit[]; cgOff?: boolean; fomo?: boolean } = {}) {
+/** A pool's own symbol, as its name shows it. */
+const poolSymbol = (p: GeckoPool): string => p.name.split(" / ")[0]!;
+
+function hotFake(o: { pools?: GeckoPool[]; poolsFail?: string; crowd?: { address: string; symbol: string }[]; trending?: CoinHit[]; cgOff?: boolean; fomo?: boolean;
+  /** CoinGecko listing each pool's contract under its pool's symbol, ranked, but these symbols; or "fail" the read. Default: every pool listed. */
+  unlisted?: string[]; listings?: "fail"; } = {}) {
   const asked: string[] = [];
+  const listed: string[][] = [];
   const fomoCalls: { tool: string; args: Record<string, unknown>; surface: string }[] = [];
   const broker: FomoBroker = {
     async call(tool, args, opts) {
@@ -1326,10 +1332,18 @@ function hotFake(o: { pools?: GeckoPool[]; poolsFail?: string; crowd?: { address
       market: async () => ({ market: null, failed: true, failure: "unused" }),
       trending: async () => { asked.push("trending"); return { coins: o.trending ?? [], failed: false }; },
     },
+    chainListings: async (addresses) => {
+      asked.push("listings");
+      listed.push([...addresses]);
+      if (o.listings === "fail" || o.cgOff === true) return { listings: [], failed: true, failure: o.cgOff ? "no-pro-key" : "http-503" };
+      const pools = o.pools ?? [pool(1), pool(2), pool(3), pool(4)];
+      return { failed: false, listings: pools.filter((p) => addresses.includes(p.tokenAddress) && !(o.unlisted ?? []).includes(poolSymbol(p)))
+        .map((p) => ({ address: p.tokenAddress, id: poolSymbol(p).toLowerCase(), symbol: poolSymbol(p).toLowerCase(), name: poolSymbol(p), rank: 3000 })) };
+    },
     ...(o.fomo ? { fomo: () => broker } : {}),
     now: () => Date.now(),
   });
-  return { research, asked, fomoCalls };
+  return { research, asked, fomoCalls, listed };
 }
 
 describe("what's hot: the chain's trending coins past the fleet's floors, fomo's most bought, coingecko's list (2026-10-12)", () => {
@@ -1414,14 +1428,15 @@ describe("what's hot: the chain's trending coins past the fleet's floors, fomo's
     }
   });
 
-  it("a bundle: three coins, fomo's most bought among the screened, coingecko's list inside the rank cap; words and figures, three lookups", async () => {
+  it("a bundle: three coins, fomo's most bought among the screened, coingecko's list inside the rank cap; words and figures, four lookups", async () => {
     const pools = [pool(1, { change24hPct: 42.07, volume24hUsd: 1.21e6 }), pool(2, { change24hPct: -8.3, volume24hUsd: 310_400 }), pool(3), pool(4, { volume24hUsd: 90_000 })];
     const h = hotFake({ pools, fomo: true,
       crowd: [{ address: pools[3]!.tokenAddress, symbol: "IGNORED" }, { address: `0x${"77".repeat(20)}`, symbol: "NOTSCREENED" }, { address: pools[1]!.tokenAddress, symbol: "x" }],
       trending: [{ id: "pepe", symbol: "PEPE", name: "Pepe", rank: 30 }, { id: "smol", symbol: "SMOL", name: "Smol", rank: 900 }, { id: "tao", symbol: "TAO", name: "Bittensor", rank: 40 }, { id: "x", symbol: "🐸", name: "x", rank: 5 }] });
     const b = await h.research.gather(input({ kind: "hot" }, { fomo: true }));
-    assert.deepEqual(h.asked.sort(), ["pools", "trending"]);
-    assert.equal(b.lookups, 3);
+    assert.deepEqual(h.asked.sort(), ["listings", "pools", "trending"]);
+    assert.equal(b.lookups, 4);
+    assert.deepEqual(h.listed, [pools.map((p) => p.tokenAddress)], "only the screened coins' contracts are asked about");
     assert.deepEqual(h.fomoCalls.map((c) => [c.tool, c.args.token, c.args.chain, c.surface]), [["fomo_get_token_activity", null, "robinhood", "x-answer"]]);
     assert.deepEqual(b.figures, [
       { kind: "pools", coins: [{ symbol: "COINA", change24hPct: 42.07, volume24hUsd: 1.21e6 }, { symbol: "COINB", change24hPct: -8.3, volume24hUsd: 310_400 }, { symbol: "COINC", change24hPct: 12, volume24hUsd: 400_000 }] },
@@ -1449,17 +1464,54 @@ describe("what's hot: the chain's trending coins past the fleet's floors, fomo's
     assert.ok(d.notes.includes("index-http-503"));
   });
 
-  it("no Pro key: no coingecko list, the chain's coins still; a busy account looks nothing up", async () => {
+  it("no Pro key: no coingecko list, and no chain coin named, since nothing can vouch for one; a busy account looks nothing up", async () => {
     const off = hotFake({ cgOff: true, trending: [{ id: "pepe", symbol: "PEPE", name: "Pepe", rank: 30 }] });
     const b = await off.research.gather(input({ kind: "hot" }));
-    assert.deepEqual(off.asked, ["pools"]);
-    assert.deepEqual(b.figures?.map((s) => s.kind), ["pools"]);
+    assert.deepEqual(off.asked, ["pools", "listings"]);
+    assert.equal(b.figures, undefined);
+    assert.equal(b.hot, undefined, "no read at all: code's no-read line, never a guess");
+    assert.ok(b.notes.includes("listings-no-pro-key"));
+    // What coingecko said of a contract is kept an hour: the next answers ask only the index and coingecko's list.
     const h = hotFake();
     for (let n = 0; n < 4; n++) await h.research.gather(input({ kind: "hot" }));
-    assert.equal(h.asked.length, 8);
+    assert.deepEqual(h.asked.filter((a) => a === "listings").length, 1);
+    assert.equal(h.asked.length, 8, "the account's eight index lookups in ten minutes: the fourth answer's coingecko list was past them");
     const busy = await h.research.gather(input({ kind: "hot" }));
     assert.deepEqual(busy.facts, []);
     assert.ok(busy.notes.includes("index-busy"));
+  });
+
+  it("only a chain coin coingecko lists by its contract, ranked and under its pool's own symbol (red-team 2026-10-12)", async () => {
+    // At fbcf8756 each of these went out from the house account as trending, every pool past the floors.
+    const named = (sym: string, n: number, change24hPct: number, volume24hUsd: number) => pool(n, { name: `${sym} / WETH 1%`, change24hPct, volume24hUsd, reserveUsd: 90_000 });
+    for (const set of [["FUHRER", "GOYIM", "NIGLET"], ["ADOLF", "CUMSHOT", "WLFI"], ["MYPICK", "GETIN", "STILLEARLY"], ["VERIFIED", "AUDITED", "THEPLAY"], ["BLACKROCK", "VITALIK", "HOUSECOIN"]]) {
+      const pools = set.map((s, i) => named(s, i + 1, [412.4, 88.04, -12.2][i]!, [2_310_000, 940_000, 310_000][i]!));
+      const h = hotFake({ pools, unlisted: set });
+      const b = await h.research.gather(input({ kind: "hot" }));
+      assert.equal(b.figures, undefined, set.join());
+      assert.deepEqual(b.hot, { coins: 0, lead: null }, "code's nothing-standing-out line");
+    }
+    const unlisted = await hotFake({ unlisted: ["COINA", "COINB", "COINC", "COIND"] }).research.gather(input({ kind: "hot" }));
+    assert.deepEqual(unlisted.hot, { coins: 0, lead: null });
+    assert.ok(unlisted.notes.includes("hot-unlisted"));
+    // Listed with no rank, or under another symbol than its pool shows: not vouched for either.
+    const pools = [pool(1), pool(2), pool(3)];
+    const research = createXResearch({ hotPools: async () => ({ pools, failed: false }),
+      majors: { configured: () => true, search: async () => ({ hits: [], failed: true }), market: async () => ({ market: null, failed: true }), trending: async () => ({ coins: [], failed: false }) },
+      chainListings: async () => ({ failed: false, listings: [
+        { address: pools[0]!.tokenAddress, id: "coina", symbol: "COINA", name: "Coin A", rank: null },
+        { address: pools[1]!.tokenAddress, id: "other", symbol: "OTHER", name: "Other", rank: 900 },
+        { address: pools[2]!.tokenAddress, id: "coinc", symbol: "coinc", name: "Coin C", rank: 2500 },
+      ] }), now: () => Date.now() });
+    const b = await research.gather(input({ kind: "hot" }));
+    assert.deepEqual(b.figures, [{ kind: "pools", coins: [{ symbol: "COINC", change24hPct: 12, volume24hUsd: 400_000 }] }]);
+    assert.deepEqual(b.hot, { coins: 1, lead: { dir: "up", size: "sharply" } }, "the words are of the coin the line shows");
+    // The listings unread: no read at all, never the unvouched coins.
+    const down = hotFake({ listings: "fail" });
+    const d = await down.research.gather(input({ kind: "hot" }));
+    assert.equal(d.figures, undefined);
+    assert.equal(d.hot, undefined);
+    assert.ok(d.notes.includes("listings-http-503"));
   });
 
   it("the writer is told it is what the index shows, not a call, to name no coin and write no number", () => {
@@ -1503,7 +1555,8 @@ describe("majors and what's hot spend the research allowances, and never wait pa
       market: async (id, ms) => { given.push(["market", ms]); return { market: id === "ethereum" ? ETH_MARKET : null, failed: false }; },
       trending: async (ms) => { given.push(["trending", ms]); return { coins: [], failed: false }; },
     };
-    const research = createXResearch({ majors: reader, hotPools: async (ms) => { given.push(["pools", ms]); return { pools: [pool(1)], failed: false }; }, now: () => Date.now() });
+    const research = createXResearch({ majors: reader, hotPools: async (ms) => { given.push(["pools", ms]); return { pools: [pool(1)], failed: false }; },
+      chainListings: async (_a, ms) => { given.push(["listings", ms]); return { listings: [], failed: false }; }, now: () => Date.now() });
     await research.gather(input({ kind: "major", query: "eth", fallback: null }));
     await research.gather(input({ kind: "hot" }, { xUserId: "222" }));
     await research.gather(input({ kind: "major", query: "eth", fallback: null }, { xUserId: "333", budgetMs: 1_500 }));
@@ -1519,19 +1572,20 @@ describe("majors and what's hot spend the research allowances, and never wait pa
   it("the hour's index lookups across X accounts (MERRYMEN_XPOST_RESEARCH_PER_HOUR) cap majors and what's hot together", async () => {
     const asked: string[] = [];
     const research = createXResearch({
-      lookupsPerHour: 3,
+      lookupsPerHour: 4,
       majors: { configured: () => true, search: async () => { asked.push("search"); return { hits: SEARCH_HITS, failed: false }; },
         market: async () => { asked.push("market"); return { market: ETH_MARKET, failed: false }; }, trending: async () => { asked.push("trending"); return { coins: [], failed: false }; } },
       hotPools: async () => { asked.push("pools"); return { pools: [pool(1)], failed: false }; },
+      chainListings: async () => { asked.push("listings"); return { failed: false, listings: [{ address: pool(1).tokenAddress, id: "coina", symbol: "COINA", name: "Coin A", rank: 3000 }] }; },
       now: () => Date.now(),
     });
     assert.ok((await research.gather(input({ kind: "major", query: "eth", fallback: null }, { xUserId: "1" }))).figures);
     const hot = await research.gather(input({ kind: "hot" }, { xUserId: "2" }));
-    assert.deepEqual(asked, ["search", "market", "pools"], "the third lookup was the hour's last: no coingecko list");
+    assert.deepEqual(asked, ["search", "market", "pools", "listings"], "the fourth lookup was the hour's last: no coingecko list");
     assert.deepEqual(hot.figures?.map((s) => s.kind), ["pools"]);
     assert.ok(hot.notes.includes("index-busy"));
     const after = await research.gather(input({ kind: "major", query: "eth", fallback: null }, { xUserId: "3" }));
     assert.deepEqual(after.facts, []);
-    assert.equal(asked.length, 3, "nothing more this hour");
+    assert.equal(asked.length, 4, "nothing more this hour");
   });
 });

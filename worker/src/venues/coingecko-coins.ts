@@ -23,7 +23,7 @@
  */
 import { readBoundedJson } from "../bounded-read";
 import type { FeedResult } from "./fleet-feed-cache";
-import { cachedCoinGecko, geckoRefusal, type GeckoLane } from "./geckoterminal";
+import { cachedCoinGecko, cachedGeckoDetail, GECKO_NETWORK, geckoRefusal, geckoSource, type GeckoLane } from "./geckoterminal";
 
 /** The worst market-cap rank a coin may hold and still be answered as a major. */
 export const MAJORS_MAX_RANK = 200;
@@ -178,4 +178,113 @@ export async function readCoinTrending(o: CoinReadOptions): Promise<CoinTrending
     const r = await getMain(base, headers, route, Math.min(o.timeoutMs, remainingMs));
     return r.ok ? { coins: parseCoinTrending(r.body), failed: false, observedAt: r.observedAt } : { coins: [], failed: true, failure: r.failure, ...(r.retryAfterMs ? { retryAfterMs: r.retryAfterMs } : {}) };
   }, (failure) => ({ coins: [], failed: true, failure }), { lane: LANE, route, budgetMs: o.timeoutMs, ...(o.fleet ? { fleet: o.fleet } : {}) });
+}
+
+// ── a chain coin CoinGecko lists, by its address ────────────────────────────
+
+/**
+ * ONE ROBINHOOD CHAIN TOKEN COINGECKO LISTS, BY ITS ADDRESS (red-team
+ * 2026-10-12): the coin GeckoTerminal's own token record names for that
+ * contract (`coingecko_coin_id`), with that coin's symbol, name and
+ * market-cap rank as CoinGecko's main API lists them (rank null: listed,
+ * not ranked). What vouches for a chain coin's ticker before "what's hot"
+ * shows it: whoever deploys a token names its pool, so a pool's own name is
+ * never enough.
+ */
+export interface ChainListing {
+  /** The token's contract, lowercase. */
+  address: string;
+  id: string;
+  symbol: string;
+  name: string;
+  rank: number | null;
+}
+export interface ChainListingsRead extends FeedResult { listings: ChainListing[] }
+
+/** At most this many contracts in one read. */
+export const LISTINGS_MAX = 10;
+
+const CONTRACT = /^0x[0-9a-f]{40}$/;
+
+/**
+ * GeckoTerminal's tokens page: each asked contract's CoinGecko coin id, only
+ * for a record that is that exact contract on this chain. A token with no
+ * coin id, another network's, another address's or an id that is no lookup
+ * key is left out: not listed.
+ */
+export function parseTokenCoinIds(body: unknown, asked: readonly string[]): Map<string, string> {
+  const want = new Set(asked.map((a) => String(a).toLowerCase()));
+  const out = new Map<string, string>();
+  const data = (body as { data?: unknown } | null)?.data;
+  if (!Array.isArray(data)) return out;
+  for (const raw of data.slice(0, 50)) {
+    const d = raw as { id?: unknown; type?: unknown; attributes?: Record<string, unknown> } | null;
+    if (!d || d.type !== "token" || typeof d.id !== "string" || !d.attributes || typeof d.attributes !== "object") continue;
+    const address = typeof d.attributes.address === "string" ? d.attributes.address.toLowerCase() : "";
+    if (!CONTRACT.test(address) || !want.has(address) || d.id.toLowerCase() !== `${GECKO_NETWORK}_${address}`) continue;
+    const id = d.attributes.coingecko_coin_id;
+    if (typeof id === "string" && COIN_ID.test(id)) out.set(address, id);
+  }
+  return out;
+}
+
+type TokenIdsRead = FeedResult & { ids: [string, string][] };
+
+/** The onchain tokens page for these contracts, on the fleet lane (the index's detail quota). */
+async function readTokenCoinIds(list: readonly string[], o: CoinReadOptions): Promise<TokenIdsRead> {
+  const route = `/networks/${GECKO_NETWORK}/tokens/multi/${list.join(",")}`;
+  return cachedGeckoDetail<TokenIdsRead>(`tokensmulti:${list.join(",")}`, async (source, remainingMs) => {
+    const observedAt = Date.now();
+    try {
+      const res = await fetch(`${source.base}${route}`, { headers: { ...source.headers }, redirect: "error", signal: AbortSignal.timeout(Math.max(1, Math.min(o.timeoutMs, remainingMs))) });
+      if (!res.ok) return { ids: [], failed: true, ...await geckoRefusal(res) };
+      const read = await readBoundedJson(res);
+      if (!read.ok) return { ids: [], failed: true, failure: "invalid-body" };
+      if (!Array.isArray((read.value as { data?: unknown } | null)?.data)) return { ids: [], failed: true, failure: "invalid-shape" };
+      return { ids: [...parseTokenCoinIds(read.value, list)], failed: false, observedAt };
+    } catch {
+      return { ids: [], failed: true, failure: "unavailable" };
+    }
+  }, (failure) => ({ ids: [], failed: true, failure }), { lane: LANE, route, budgetMs: o.timeoutMs, ...(o.fleet ? { fleet: o.fleet } : {}) });
+}
+
+/**
+ * THE CHAIN COINS COINGECKO LISTS, OF THESE CONTRACTS: GeckoTerminal's token
+ * record for each (one read for up to LISTINGS_MAX), then CoinGecko's own
+ * market row for every coin id found (one read), each on the fleet's lane
+ * and inside `timeoutMs` in all. Only with a Pro key (the main API has no
+ * public source): keyless is `no-pro-key` and nothing is asked. A contract
+ * with no coin id, or whose coin has no market row, is simply not in the
+ * list: not listed. Either read failing is a failure, never an empty list.
+ */
+export async function readChainListings(addresses: readonly string[], o: CoinReadOptions): Promise<ChainListingsRead> {
+  const list = [...new Set(addresses.map((a) => String(a ?? "").toLowerCase()))].filter((a) => CONTRACT.test(a)).sort().slice(0, LISTINGS_MAX);
+  if (!list.length) return { listings: [], failed: false };
+  if (geckoSource().id !== "coingecko-pro") return { listings: [], failed: true, failure: "no-pro-key" };
+  const started = Date.now();
+  const tokens = await readTokenCoinIds(list, o);
+  if (tokens.failed) return { listings: [], failed: true, failure: tokens.failure ?? "failed" };
+  const byId = new Map<string, string[]>();
+  for (const [address, id] of tokens.ids) byId.set(id, [...(byId.get(id) ?? []), address]);
+  if (!byId.size) return { listings: [], failed: false, observedAt: tokens.observedAt ?? started };
+  const ids = [...byId.keys()].sort();
+  const left = o.timeoutMs - (Date.now() - started);
+  if (left <= 0) return { listings: [], failed: true, failure: "request-budget" };
+  const route = `/coins/markets?vs_currency=usd&ids=${ids.join(",")}`;
+  const markets = await cachedCoinGecko<FeedResult & { rows: CoinHit[] }>(`listings:${ids.join(",")}`, async (headers, base, remainingMs) => {
+    const r = await getMain(base, headers, route, Math.min(left, remainingMs));
+    if (!r.ok) return { rows: [], failed: true, failure: r.failure, ...(r.retryAfterMs ? { retryAfterMs: r.retryAfterMs } : {}) };
+    if (!Array.isArray(r.body)) return { rows: [], failed: true, failure: "invalid-shape" };
+    return { rows: r.body.slice(0, 50).map(hitOf).filter((h): h is CoinHit => h !== null), failed: false, observedAt: r.observedAt };
+  }, (failure) => ({ rows: [], failed: true, failure }), { lane: LANE, route, budgetMs: left, ...(o.fleet ? { fleet: o.fleet } : {}) });
+  if (markets.failed) return { listings: [], failed: true, failure: markets.failure ?? "failed" };
+  const listings: ChainListing[] = [];
+  const seen = new Set<string>();
+  for (const row of markets.rows) {
+    // One row per coin: a second row for the same id is not a second listing.
+    if (seen.has(row.id)) continue;
+    seen.add(row.id);
+    for (const address of byId.get(row.id) ?? []) listings.push({ address, id: row.id, symbol: row.symbol, name: row.name, rank: row.rank });
+  }
+  return { listings, failed: false, observedAt: markets.observedAt ?? started };
 }

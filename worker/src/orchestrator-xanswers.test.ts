@@ -19,7 +19,7 @@ import type { FlowResult } from "./flow-facts";
 import type { AgentFacts, CallFact } from "./groupchat/facts";
 import { xWeightedLength, X_MAX_WEIGHTED, type FetchLike } from "./xpost/client";
 import type { FiguresSpec } from "./xpost/figures";
-import { emptyGeckoBuckets, type GeckoPool } from "./venues/geckoterminal";
+import { emptyGeckoBuckets, resetGeckoFeedsForTest, type GeckoPool } from "./venues/geckoterminal";
 import { greetingAnswers, modelAnswers } from "./xpost/writer";
 import { hotAnswers, hotNoneAnswers, hotUnreadAnswers, majorAnswers, majorUnreadAnswers, type HotRead, type MajorRead } from "./xpost/market";
 import { withoutReplyOptOut } from "./xpost/replies";
@@ -2431,12 +2431,27 @@ function hotPool(n: number, change24hPct: number, volume24hUsd: number): GeckoPo
     volume24hUsd, change24hPct, change1hPct: 1, buys24h: 300, sells24h: 200, buyers24h: 180, buckets: emptyGeckoBuckets(), createdAt: null };
 }
 
-function hotResearch(pools: GeckoPool[], trending: string[] = []) {
+/** A pool's own symbol, as its name shows it ("CHUMP / WETH 1%" is CHUMP). */
+const poolSymbol = (p: GeckoPool): string => p.name.split(" / ")[0]!;
+/**
+ * CoinGecko listing these pools' contracts, each under its pool's own symbol
+ * and ranked, but for the symbols in `unlisted`: what vouches for a chain
+ * coin's ticker (red-team 2026-10-12). Every test before that one stands for a
+ * chain whose coins CoinGecko lists, so its other screens are what it tests.
+ */
+function listingsOf(pools: GeckoPool[], unlisted: readonly string[] = []) {
+  return async (addresses: readonly string[]) => ({ failed: false, listings: pools
+    .filter((p) => addresses.includes(p.tokenAddress) && !unlisted.includes(poolSymbol(p)))
+    .map((p) => ({ address: p.tokenAddress, id: `${poolSymbol(p).toLowerCase()}-robinhood`, symbol: poolSymbol(p).toLowerCase(), name: poolSymbol(p), rank: 4000 })) });
+}
+
+function hotResearch(pools: GeckoPool[], trending: string[] = [], o: { unlisted?: string[] } = {}) {
   const reads: string[] = [];
   const research = createXResearch({
     hotPools: async () => { reads.push("pools"); return { pools, failed: false }; },
     majors: { configured: () => true, search: async () => ({ hits: [], failed: true }), market: async () => ({ market: null, failed: true }),
       trending: async () => { reads.push("trending"); return { coins: trending.map((s, i) => ({ id: s.toLowerCase(), symbol: s, name: s, rank: 20 + i })), failed: false }; } },
+    chainListings: listingsOf(pools, o.unlisted),
   });
   return { research, reads };
 }
@@ -2509,6 +2524,7 @@ function hotWithFomo(pools: GeckoPool[], crowd: string[] = []) {
     hotPools: async () => ({ pools, failed: false }),
     majors: { configured: () => true, search: async () => ({ hits: [], failed: true }), market: async () => ({ market: null, failed: true }),
       trending: async () => ({ coins: [], failed: false }) },
+    chainListings: listingsOf(pools),
     fomo: () => broker,
   });
 }
@@ -2757,5 +2773,81 @@ test("what's hot never shows a slur, a hate code, a house or chain name's short 
     assert.deepEqual(w.sends.map((s) => s.text), [hotAnswers(read, MENTION, { lower: true })[0]], symbol);
     assert.match(r.log ?? "", /answer-figures-left-out 1/, symbol);
   }
+});
+
+// ── a chain coin's ticker, vouched for by CoinGecko (red-team 2026-10-12) ──
+
+/**
+ * CoinGecko's Pro origin, faked as the red team ran it at fbcf8756: the
+ * onchain trending page (each pool past the discovery floors), an empty
+ * global trending list, GeckoTerminal's token records (a coin id only for
+ * the `listed` symbols) and CoinGecko's market rows for those coins. The real
+ * readers, lane and parsers do the rest. Returns the URLs asked.
+ */
+function fakeCoinGecko(t: TestContext, pools: { name: string; change: number; vol: number }[], listed: readonly string[]): string[] {
+  const keep = { key: process.env.MERRYMEN_COINGECKO_PRO_API_KEY, spacing: process.env.MERRYMEN_COINGECKO_PRO_SPACING_MS, home: process.env.MERRYMEN_FLEET_HOME, fetch: globalThis.fetch };
+  const put = (k: string, v: string | undefined) => { if (v === undefined) delete process.env[k]; else process.env[k] = v; };
+  t.after(() => {
+    globalThis.fetch = keep.fetch;
+    put("MERRYMEN_COINGECKO_PRO_API_KEY", keep.key); put("MERRYMEN_COINGECKO_PRO_SPACING_MS", keep.spacing); put("MERRYMEN_FLEET_HOME", keep.home);
+    resetGeckoFeedsForTest();
+  });
+  process.env.MERRYMEN_COINGECKO_PRO_API_KEY = "fake-pro-key";
+  process.env.MERRYMEN_COINGECKO_PRO_SPACING_MS = "60";
+  delete process.env.MERRYMEN_FLEET_HOME;
+  resetGeckoFeedsForTest();
+  const token = (i: number) => `0x${String(i + 1).repeat(40)}`;
+  const urls: string[] = [];
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url = String(input);
+    urls.push(url);
+    assert.ok(url.startsWith("https://pro-api.coingecko.com/api/v3/"), url);
+    if (url.includes("/onchain/networks/robinhood/trending_pools")) {
+      return Response.json({ data: pools.map((p, i) => ({ id: `robinhood_0x${"ab".repeat(19)}0${i}`, type: "pool",
+        attributes: { address: `0x${"ab".repeat(19)}0${i}`, name: `${p.name} / WETH 1%`, base_token_price_usd: "0.01", reserve_in_usd: "90000",
+          volume_usd: { h24: String(p.vol) }, price_change_percentage: { h24: String(p.change) }, transactions: { h24: { buys: 300, sells: 200, buyers: 180, sellers: 120 } } },
+        relationships: { base_token: { data: { id: `robinhood_${token(i)}` } }, dex: { data: { id: "uniswap-v3-robinhood" } } } })) });
+    }
+    if (url.endsWith("/search/trending")) return Response.json({ coins: [] });
+    if (url.includes("/onchain/networks/robinhood/tokens/multi/")) {
+      return Response.json({ data: pools.map((p, i) => ({ id: `robinhood_${token(i)}`, type: "token",
+        attributes: { address: token(i), name: p.name, symbol: p.name, coingecko_coin_id: listed.includes(p.name) ? `${p.name.toLowerCase()}-robinhood` : null } })) });
+    }
+    if (url.includes("/coins/markets")) return Response.json(listed.map((name) => ({ id: `${name.toLowerCase()}-robinhood`, symbol: name.toLowerCase(), name, market_cap_rank: 3100 })));
+    throw new Error(`not faked: ${url}`);
+  }) as typeof globalThis.fetch;
+  return urls;
+}
+
+test("what's hot names no chain coin coingecko does not list by its contract: a pool's own name is never enough (red-team 2026-10-12)", async (t) => {
+  // At fbcf8756, with the real readers and these pages, "what's hot?" posted "robinhood chain's trending list has a cluster of busy coins,
+  // the first far firmer for the day. descriptive only. geckoterminal robinhood: trending $FUHRER 24h +412% vol ~$2.3M, $GOYIM 24h +88% vol ~$940k,
+  // $NIGLET 24h -12.2% vol ~$310k. say stop to opt out." The same for ADOLF/CUMSHOT/WLFI, MYPICK/GETIN/STILLEARLY, VERIFIED/AUDITED/THEPLAY,
+  // BLACKROCK/VITALIK/HOUSECOIN and ADOLF/TENX/HOLD.
+  const figures = [{ change: 412.4, vol: 2_310_000 }, { change: 88.04, vol: 940_000 }, { change: -12.2, vol: 310_000 }];
+  const sets = [["FUHRER", "GOYIM", "NIGLET"], ["ADOLF", "CUMSHOT", "WLFI"], ["MYPICK", "GETIN", "STILLEARLY"], ["VERIFIED", "AUDITED", "THEPLAY"],
+    ["BLACKROCK", "VITALIK", "HOUSECOIN"], ["ADOLF", "TENX", "HOLD"]];
+  for (const names of sets) {
+    const urls = fakeCoinGecko(t, names.map((name, i) => ({ name, ...figures[i]! })), []);
+    const w = await world(t, { env: RESEARCH_ON, research: createXResearch(), facts: { ...FACTS, name: "Alan Al Dale" }, answer: "the first one is the play, get in. Say stop to opt out." });
+    w.setInbox([tag({ text: "@pine_stoat what's hot?" })]);
+    await w.step();
+    assert.deepEqual(w.asked(), [], "never drafted");
+    const [row] = await w.answers();
+    assert.equal(row!.status, "posted", names.join());
+    assert.deepEqual(w.sends.map((s) => s.text), [hotNoneAnswers(MENTION, { lower: true })[0]], names.join());
+    for (const n of names) assert.ok(!row!.body.includes(`$${n}`), `${n}: ${row!.body}`);
+    assert.ok(urls.some((u) => u.includes("/tokens/multi/")), "the contracts were asked about");
+    assert.ok(!urls.some((u) => u.includes("/coins/markets")), "no coin id, no market read");
+  }
+  // A coin CoinGecko lists by its contract, ranked, is shown, and only it: the words are of the coins the line shows.
+  fakeCoinGecko(t, [{ name: "FUHRER", ...figures[0]! }, { name: "CHUMP", ...figures[1]! }, { name: "NIGLET", ...figures[2]! }], ["CHUMP"]);
+  const w = await world(t, { env: RESEARCH_ON, research: createXResearch(), facts: { ...FACTS, name: "Alan Al Dale" } });
+  w.setInbox([tag({ text: "@pine_stoat what's hot?" })]);
+  await w.step();
+  const text = String(w.sends[0]?.text ?? "");
+  assert.ok(hotWords({ coins: 1, lead: { dir: "up", size: "sharply" } }).includes(wordsBeforeLine(text) ?? ""), text);
+  assert.match(text, / geckoterminal robinhood: trending \$CHUMP 24h \+88% vol ~\$940k\. say stop to opt out\.$/, text);
+  assert.doesNotMatch(text, /FUHRER|NIGLET/);
 });
 

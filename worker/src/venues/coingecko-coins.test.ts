@@ -6,7 +6,8 @@
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import {
-  MAJORS_MAX_RANK, coinQuery, parseCoinMarket, parseCoinSearch, parseCoinTrending, pickMajor, readCoinMarket, readCoinTrending, searchCoinList, type CoinHit,
+  MAJORS_MAX_RANK, coinQuery, parseCoinMarket, parseCoinSearch, parseCoinTrending, parseTokenCoinIds, pickMajor, readChainListings, readCoinMarket, readCoinTrending,
+  searchCoinList, type CoinHit,
 } from "./coingecko-coins";
 import { resetGeckoFeedsForTest } from "./geckoterminal";
 
@@ -163,6 +164,40 @@ describe("read on the fleet's CoinGecko Pro lane, and only with its key", () => 
     resetGeckoFeedsForTest({ now: () => now, sleep: async (ms) => { now += ms; } });
     globalThis.fetch = (async () => Response.json({ unexpected: true })) as typeof globalThis.fetch;
     assert.equal((await readCoinMarket("bitcoin", { timeoutMs: 4000 })).failure, "invalid-shape");
+  });
+
+  it("a chain coin's listing: GeckoTerminal's token record names its coin id by the exact contract, then coingecko's own row its symbol and rank (red-team 2026-10-12)", async () => {
+    const A = `0x${"a1".repeat(20)}`, B = `0x${"b2".repeat(20)}`, C = `0x${"c3".repeat(20)}`;
+    const urls: string[] = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      urls.push(String(input));
+      assert.equal(new Headers(init?.headers).get("x-cg-pro-api-key"), "private-pro-key");
+      assert.equal(init?.redirect, "error");
+      if (String(input).includes("/tokens/multi/")) return Response.json({ data: [
+        { id: `robinhood_${A}`, type: "token", attributes: { address: A, symbol: "CHUMP", coingecko_coin_id: "chump-robinhood" } },
+        { id: `robinhood_${B}`, type: "token", attributes: { address: B, symbol: "FUHRER", coingecko_coin_id: null } },
+        // Another network's record, or another address's, never names this contract's coin.
+        { id: `base_${C}`, type: "token", attributes: { address: C, symbol: "WLFI", coingecko_coin_id: "world-liberty-financial" } },
+      ] });
+      return Response.json([{ id: "chump-robinhood", symbol: "chump", name: "Chump", market_cap_rank: 3100 }, { id: "chump-robinhood", symbol: "x", name: "x", market_cap_rank: 1 }]);
+    }) as typeof globalThis.fetch;
+    const r = await readChainListings([B, A, C, "not-an-address"], { timeoutMs: 4000 });
+    assert.equal(r.failed, false);
+    assert.deepEqual(r.listings, [{ address: A, id: "chump-robinhood", symbol: "chump", name: "Chump", rank: 3100 }]);
+    assert.deepEqual(urls, [
+      `https://pro-api.coingecko.com/api/v3/onchain/networks/robinhood/tokens/multi/${A},${B},${C}`,
+      "https://pro-api.coingecko.com/api/v3/coins/markets?vs_currency=usd&ids=chump-robinhood",
+    ]);
+    assert.deepEqual([...parseTokenCoinIds({ data: [{ id: `robinhood_${A}`, type: "token", attributes: { address: A, coingecko_coin_id: "../x" } }] }, [A])], [], "an id that is no lookup key");
+    // No key: nothing asked. A refused read is a failure, never "not listed".
+    delete process.env.MERRYMEN_COINGECKO_PRO_API_KEY;
+    assert.equal((await readChainListings([A], { timeoutMs: 4000 })).failure, "no-pro-key");
+    process.env.MERRYMEN_COINGECKO_PRO_API_KEY = "private-pro-key";
+    resetGeckoFeedsForTest({ now: () => now, sleep: async (ms) => { now += ms; } });
+    globalThis.fetch = (async () => new Response("nope", { status: 401 })) as typeof globalThis.fetch;
+    const refused = await readChainListings([A], { timeoutMs: 4000 });
+    assert.equal(refused.failed, true);
+    assert.deepEqual(refused.listings, []);
   });
 
   it("only a query or a key that is one ever reaches the URL", async () => {
