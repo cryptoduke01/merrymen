@@ -43,6 +43,7 @@ import { llmText, type LlmCreds } from "../llm";
 import { hash32, type SaleOutcome } from "./planner";
 import { namedIn, SHERWOOD_NAME, sherwoodClaimed, sherwoodMentioned, sherwoodNamed, unreadableLetter } from "./gate";
 import { REPLY_OPT_OUT, XREPLY_MAX_COMMENT_CHARS } from "./replies";
+import { asksAboutACoin } from "./words";
 
 export { sherwoodClaimed, sherwoodMentioned, sherwoodNamed };
 
@@ -902,10 +903,14 @@ function unnamedKind(mode: WriterFacts["mode"], kind: true | "paper" | "live" | 
 export function answerPrompt(f: AnswerFacts): Prompt {
   const question = answerQuestion(f.question);
   // NEVER CONFIRM A BUY BY NAME: the caller's reading, and the question's own.
-  const named = f.coinNamed === true || coinNamedIn(f.question, (f.recentBuys ?? []).map((c) => c.label));
+  // NEVER BY WHAT IT BOUGHT (red-team 2026-10-12): which prompt a question
+  // gets never turns on whether a name in it is one of its buys, or asking
+  // name by name would say which ones it bought.
+  const named = f.coinNamed === true || coinNamedIn(f.question, []) || asksAboutACoin(f.question);
   const exact = named && f.boughtExact === true;
-  // ITS BUYS ONLY FOR A PLAIN QUESTION ABOUT WHAT IT TRADES, and never beside a named coin.
-  const shown = !named && f.general === true;
+  // ITS BUYS ONLY FOR A PLAIN QUESTION ABOUT WHAT IT TRADES, and never beside a
+  // named coin, nor beside one of its buys' names (which only keeps them unshown).
+  const shown = !named && f.general === true && !coinNamedIn(f.question, (f.recentBuys ?? []).map((c) => c.label));
   const notice = f.style.lower ? REPLY_OPT_OUT.toLowerCase() : REPLY_OPT_OUT;
   const buys = !shown ? [] : (f.recentBuys ?? []).filter((c) => ownMoney(f.mode, c.paper === true))
     .map((c) => ({ label: clean(c.label, 40), paper: c.paper })).filter((c): c is { label: string; paper: boolean } => !!c.label).slice(0, 4);
@@ -950,7 +955,7 @@ export function answerPrompt(f: AnswerFacts): Prompt {
       : !named ? [BUYS_UNSAID, f.intent === "own-trades" ? null : hint].filter((h) => h !== null).join(" ")
       // Its own trades' hint says "say what you bought": never beside a named coin. Nor
       // its name: the gate refuses a draft that names a coin it bought (XGateCtx.unsaid).
-      : [`${COIN_NAMED}${research.length ? COIN_NAMED_LOOKED : ""}. ${NAMED_UNSAID}`, f.intent === "own-trades" ? null : hint?.replace(NAME_IT, ".") ?? null]
+      : [`${COIN_NAMED}${research.length ? COIN_NAMED_LOOKED : ""}. ${NAMED_UNSAID}`, f.intent === "own-trades" || f.intent === "chat" ? null : hint?.replace(NAME_IT, ".") ?? null]
         .filter((h) => h !== null).join(" "),
   ].filter((x): x is string => x !== null);
   return {

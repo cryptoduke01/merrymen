@@ -1490,8 +1490,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
     // The threads a reply may be answered in: rooted at this X account's own posts (tagCandidate).
     const ownRoots = ordered.some((c) => c.conversationId !== c.id || c.inReplyToTweetId !== "") ? await ownRootTweetIds(shared, account.xUserId) : new Set<string>();
     const buys = recentCoins(f);
-    const knownCoins = [...buys.map((c) => c.label), ...posts.filter((p) => p.kind === "buy" && p.coin).map((p) => p.coin!)];
-    // Every name its buys go by, for telling whether a tag names one (namesACoin).
+    // Every name its buys go by: what an answer not shown them may never say (XGateCtx.unsaid).
     const bought = boughtNames(f, posts);
     for (const comment of ordered) {
       if (comment.createdAtMs < consentAt || nowMs - comment.createdAtMs > REPLY_STALE_MS) continue;
@@ -1501,7 +1500,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // question is answered from a code-built line (writer.ts modelAnswers)
       // and spends no model call. Only research gathers anything for what it
       // reads.
-      const classified = classifyTag(candidate.text, { address: candidate.address ?? null, knownCoins });
+      const classified = classifyTag(candidate.text, { address: candidate.address ?? null });
       // SHERWOOD IN ANY FORM INCLUDES A HANDLE ("@SherwoodToken"), read on the
       // tag as posted with only its own handle set aside; and the model line
       // never goes under a reply prefix that names anyone else (red-team 2026-10-12).
@@ -1540,7 +1539,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // NEVER CONFIRM A BUY BY NAME: a tag that names a coin in any way gets
       // no list of its buys and no fact about them, research on or off. Only
       // the tag's own full contract, bought by its records, may be (exact).
-      const coinNamed = namesACoin({ text: candidate.text, intent: asked, address: candidate.address ?? null, bought });
+      const coinNamed = namesACoin({ text: candidate.text, intent: asked, address: candidate.address ?? null });
       // ITS BUYS ONLY FOR A PLAIN QUESTION ABOUT WHAT IT TRADES (red-team 2026-10-12):
       // a copycat no matcher finds ("bonc", a frog emoji) is never handed them.
       const general = !coinNamed && generalTradesQuestion(candidate.text);

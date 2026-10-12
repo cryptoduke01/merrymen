@@ -56,6 +56,7 @@ import { coinOf, hash32 } from "./xpost/planner";
 import { normalisedTag, plainAsk, withoutReplyOptOut } from "./xpost/replies";
 import { takeAllowance, type XPost } from "./xpost/store";
 import { coinNamedIn } from "./xpost/writer";
+import { asksAboutACoin, nameLikeWords } from "./xpost/words";
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -240,39 +241,21 @@ export function exactAsk(text: unknown): boolean {
   return plain !== null && EXACT_ALLOWED.test(plain);
 }
 
-/** A word of the line, for matching a coin it traded named without a $ sign. */
-const words = (s: string): Set<string> => new Set((s.toLowerCase().match(/[a-z][a-z0-9'-]*/g) ?? []));
-
-/**
- * A COIN IT BOUGHT, NAMED WITHOUT A $, ONLY IN TALK ABOUT A COIN (review,
- * 2026-10-12). A coin can be called GM, You, Moon or The Weekend, and every
- * word of such a label turns up in ordinary chat: "gm, how are you doing
- * today?" was read as a question about GM, paid for an index read, Fomo
- * credits and a flow reading, and answered with a memecoin's facts. So a
- * label counts only beside a word about a coin or a trade that is not the
- * label's own, and never when it is shorter than three letters or made of
- * greetings, pronouns and other common words alone.
- */
-const COIN_TALK: ReadonlySet<string> = new Set(("coin coins token tokens ticker chart charts buy buys bought buying ape aped apes aping " +
-  "sell sells sold selling trade trades traded trading holder holders liquidity liq volume mcap marketcap pump pumping pumped " +
-  "dump dumped rug rugged legit bag bags entry position ca contract launch launched curve pool").split(" "));
-const COMMON: ReadonlySet<string> = new Set(("gm gn hi hey yo hello sup thanks thx lol ok okay yes no you u ya me i we us they them it its this that " +
-  "the a an and or of on in to at for is are was do does did what how why who which when where good morning night day today").split(" "));
-function knownCoinAsked(label: string, said: ReadonlySet<string>): boolean {
-  const own = label.toLowerCase().split(/\s+/).filter(Boolean);
-  if (!own.length || !own.every((w) => said.has(w))) return false;
-  if (own.join("").replace(/[^a-z]/g, "").length < 3 || own.every((w) => COMMON.has(w))) return false;
-  return [...said].some((w) => COIN_TALK.has(w) && !own.includes(w));
-}
-
 /**
  * WHAT THE QUESTION IS, BY CODE. `address` is the one contract address
- * tagCandidate took out of the text; `knownCoins` are the labels of coins it
- * bought lately, so "why'd you buy pepe" and "is pepe legit" find their coin
- * without a $ sign — only in talk about a coin (knownCoinAsked). Never a
- * model call, never a network read.
+ * tagCandidate took out of the text. Never a model call, never a network
+ * read.
+ *
+ * NEVER BY ITS OWN BUYS (red-team review, 2026-10-12). A coin it bought used
+ * to be found without a $ ("is pepe legit?" was a coin, looked up on the
+ * index by its own label, and told it named a coin), and one it never bought
+ * was chat ("is bonk legit?": no lookup, "it is just chat"). Walking names
+ * through one by one told anyone which coins it bought, and "is pepe inu
+ * legit?" posted PEPE's index facts. So what it bought decides nothing here:
+ * a coin is a $ticker or a contract the asker wrote, or the word after
+ * "buy" in a question about its trades, the same for every name.
  */
-export function classifyTag(text: string, o: { address?: string | null; knownCoins?: readonly string[] } = {}): TagIntent {
+export function classifyTag(text: string, o: { address?: string | null } = {}): TagIntent {
   const t = typeof text === "string" ? text : "";
   const address = typeof o.address === "string" && /^0x[0-9a-f]{40}$/.test(o.address) ? o.address : null;
   if (!t.trim()) return { kind: "chat" };
@@ -289,23 +272,23 @@ export function classifyTag(text: string, o: { address?: string | null; knownCoi
   if (asked?.kind === "site" && asked.topic === "onboarding") return { kind: "onboarding" };
   const tickers = extractCashtags(t);
   const ticker = tickers[0] ?? null;
-  const said = words(t);
-  const known = (o.knownCoins ?? []).find((c) => c.trim() && knownCoinAsked(c, said)) ?? null;
   // MORE THAN ONE COIN IN ONE TAG (red-team review, 2026-10-12): "$SAFU vs
   // $WOJAK", "$WOJAK or <contract>", "pepe <contract>". Only the first was
   // ever looked up, and its facts, said of an unnamed "it", were posted of
-  // the other. Two cashtags, a cashtag and a contract, or a coin it bought
-  // beside a different cashtag or a contract: nothing is looked up at all.
-  const many = tickers.length > 1 || (ticker !== null && address !== null) || (known !== null && (address !== null || (ticker !== null && !sameLabel(known, ticker))));
+  // the other. Two cashtags, a cashtag and a contract, or either beside a
+  // word that could be another coin's name (nameLikeWords, the same for every
+  // name, never by its own buys): nothing is looked up at all.
+  const other = nameLikeWords(t).some((w) => !tickers.some((k) => sameLabel(k, w)));
+  const many = tickers.length > 1 || (ticker !== null && address !== null) || ((ticker !== null || address !== null) && other);
   // ITS OWN TRADES, the Telegram groups' reading of them: what it traded, why.
   if (asked?.kind === "trades" || (asked?.kind === "site" && (asked.topic === "attempts" || asked.topic === "trades"))) {
     const why = asked.kind === "trades" ? asked.why : asked.topic === "attempts";
-    const coin = asked.kind === "trades" && asked.symbol ? asked.symbol : ticker ?? known;
+    const coin = asked.kind === "trades" && asked.symbol ? asked.symbol : ticker;
     return { kind: "own-trades", why, coin: coin ?? null, address, ...(many ? { many: true as const } : {}) };
   }
   // Its wallet, balance, P&L, owner: deflected by the prompt, never looked up.
   if (isPrivateAsk(t)) return { kind: "chat" };
-  if (address || ticker || known) return { kind: "coin", ticker: ticker ?? known, address, ...(many ? { many: true as const } : {}) };
+  if (address || ticker) return { kind: "coin", ticker, address, ...(many ? { many: true as const } : {}) };
   return { kind: "chat" };
 }
 
@@ -328,14 +311,25 @@ export function boughtNames(facts: AgentFacts, posts: readonly XPost[]): string[
 /**
  * DOES THE TAG NAME A SPECIFIC COIN, IN ANY WAY? (fail-closed review,
  * 2026-10-12) A tagged contract, a coin or ticker classifyTag found, a
- * $cashtag of any length, or a coin it bought inside the question's letters
- * (writer.ts coinNamedIn). Then the answer never says whether it bought it:
- * no buys list, no "you bought it", none of its own buy posts. Errs toward
- * yes; a wrong yes only costs that answer its list of buys.
+ * $cashtag of any length, or a letter code cannot read (writer.ts
+ * coinNamedIn). Then the answer never says whether it bought it: no buys
+ * list, no "you bought it", none of its own buy posts. Errs toward yes; a
+ * wrong yes only costs that answer its list of buys.
+ *
+ * NEVER BY WHAT IT BOUGHT (red-team review, 2026-10-12): a coin it bought,
+ * named without a $, made the answer "a named coin" and one it never bought
+ * "just chat", and that difference, named by name, said which it bought. Now
+ * talk about a coin by any name ("is pepe legit?", "is bonk legit?":
+ * xpost/words.ts asksAboutACoin) is a named coin, the same for every name.
+ * Only a plain question about its trades (generalTradesQuestion, a whole
+ * question with no word of the asker's own) is ever shown its buys, so its
+ * buys need not be looked for here; the gate still refuses any of their
+ * names in an answer not shown them (XGateCtx.unsaid).
  */
-export function namesACoin(o: { text: string; intent: TagIntent; address: string | null; bought: readonly string[] }): boolean {
+export function namesACoin(o: { text: string; intent: TagIntent; address: string | null }): boolean {
   const i = o.intent;
-  return o.address !== null || i.kind === "coin" || (i.kind === "own-trades" && (i.coin !== null || i.address !== null)) || coinNamedIn(o.text, o.bought);
+  return o.address !== null || i.kind === "coin" || (i.kind === "own-trades" && (i.coin !== null || i.address !== null))
+    || coinNamedIn(o.text, []) || asksAboutACoin(o.text);
 }
 
 // ── the budget ──────────────────────────────────────────────────────────────

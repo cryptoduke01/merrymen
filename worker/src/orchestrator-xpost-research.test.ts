@@ -182,7 +182,7 @@ describe("a tag's intent, read by code", () => {
   it("a tag that names sherwood in any form, or asks about it at all, is answered by nothing", () => {
     for (const text of SHERWOOD_ASKS) {
       assert.equal(classifyTag(text).kind, "unanswered", text);
-      assert.equal(classifyTag(text, { knownCoins: ["Pepe"] }).kind, "unanswered", `${text}, beside a coin it bought`);
+      assert.equal(classifyTag(text, { address: null }).kind, "unanswered", `${text}, read again`);
       // As the orchestrator reads it: the screened candidate, research on or off, is never the model line.
       for (const research of [true, false]) {
         const c = tagCandidate({ id: "t1", authorId: "u1", text: `@alan ${text}`, conversationId: "t1", inReplyToTweetId: "", createdAtMs: NOW }, { xUserId: "x1", research, username: "alan" });
@@ -202,7 +202,7 @@ describe("a tag's intent, read by code", () => {
     for (const text of ["ꓢꓧꓰꓣꓪꓳꓳꓓ TGE soon? is it the merrymen token?", "sherwooɗ TGE soon?", "is sհerwood merrymen's token?", "sɦerwood TGE soon?",
       "sheɾwood TGE soon?", "sherɯood TGE soon?", "is SΗERWOOD getting a token?", "what model do you run on? ꓢꓧꓰꓣꓪꓳꓳꓓ"]) {
       assert.equal(classifyTag(text).kind, "unanswered", text);
-      assert.equal(classifyTag(text, { knownCoins: ["Pepe"] }).kind, "unanswered", text);
+      assert.equal(classifyTag(text, { address: null }).kind, "unanswered", text);
       // And the door refuses them before that.
       const c = tagCandidate({ id: "t1", authorId: "u1", text: `@alan ${text}`, conversationId: "t1", inReplyToTweetId: "", createdAtMs: NOW }, { xUserId: "x1", research: true, username: "alan" });
       assert.equal(c.ok, false, text);
@@ -232,34 +232,46 @@ describe("a tag's intent, read by code", () => {
     }
   });
 
-  it("one contract address is a coin, by its key only; a coin it bought is found without a $", () => {
+  it("a coin is a $ticker or a contract the asker wrote, or the word after buy in a question about its trades; never a name it bought", () => {
     assert.deepEqual(classifyTag("what about this coin?", { address: CA }), { kind: "coin", ticker: null, address: CA });
-    assert.deepEqual(classifyTag("is pepe legit?", { knownCoins: ["Pepe"] }), { kind: "coin", ticker: "Pepe", address: null });
-    assert.deepEqual(classifyTag("thoughts on the pepe chart?", { knownCoins: ["Pepe"] }), { kind: "coin", ticker: "Pepe", address: null });
-    assert.deepEqual(classifyTag("why did you buy pepe?", { knownCoins: ["Pepe"] }), { kind: "own-trades", why: true, coin: "pepe", address: null });
+    assert.deepEqual(classifyTag("is $pepe legit?"), { kind: "coin", ticker: "PEPE", address: null });
+    assert.deepEqual(classifyTag("why did you buy pepe?"), { kind: "own-trades", why: true, coin: "pepe", address: null });
     assert.deepEqual(classifyTag("did you buy this coin?", { address: CA }), { kind: "own-trades", why: false, coin: null, address: CA }, "its own history, by the contract");
     assert.equal(classifyTag("what about this coin?", { address: "0xnot-an-address" }).kind, "chat");
+    // A name without a $ is no coin, whatever it bought: chat, the same for every name.
+    for (const text of ["is pepe legit?", "thoughts on the pepe chart?", "is bonk legit?", "thoughts on the bonk chart?", "gm, how are you doing today?", "thoughts on the weekend coin?"]) {
+      assert.deepEqual(classifyTag(text), { kind: "chat" }, text);
+    }
   });
 
-  it("a coin it bought named with a common word is never found in ordinary chat", () => {
-    for (const [text, knownCoins] of [
-      ["gm, how are you doing today?", ["GM"]],
-      ["how are you?", ["You"]],
-      ["what do you think about the weekend?", ["The Weekend"]],
-      ["my cat is asleep on the keyboard, cute right?", ["Cat"]],
-      ["how's the moon looking tonight?", ["Moon"]],
-      ["hey what's up?", ["Up"]],
-      ["how's trading today?", ["Trading"]],
-      ["gm, what coins are you buying?", ["GM"]],
-      ["thoughts on pepe?", ["Pepe"]],
-    ] as const) {
-      const intent = classifyTag(text, { knownCoins });
-      assert.ok(intent.kind !== "coin" && !(intent.kind === "own-trades" && intent.coin !== null), `${text} → ${JSON.stringify(intent)}`);
+  it("which coins it bought never changes what a question is, what is looked up or which prompt it gets (red-team 2026-10-12)", async () => {
+    // The reproduced pairs: a live agent that bought PEPE ("Pepe"); "pepe" and "bonk" asked the same way, research on and off.
+    const facts: AgentFacts = { ...FACTS, mode: "live", calls: [{ ...CALL, paper: false, symbol: "PEPE", name: "Pepe" }] };
+    const read = async (text: string, research: boolean) => {
+      const c = tagCandidate({ id: "t1", authorId: "u1", text: `@alanaldale ${text}`, conversationId: "t1", inReplyToTweetId: "", createdAtMs: NOW }, { xUserId: "x1", research, username: "alanaldale" });
+      assert.ok(c.ok, text);
+      if (!c.ok) throw new Error("unreachable");
+      const intent = classifyTag(c.text, { address: c.address ?? null });
+      const named = namesACoin({ text: c.text, intent, address: c.address ?? null });
+      const general = !named && generalTradesQuestion(c.text);
+      const { f, research: r } = fakes();
+      const b = research ? await r.gather(input(intent, { facts, posts: [], coinNamed: named || !general, question: c.text })) : { facts: [] as string[] };
+      const p = answerPrompt({ agentName: "Alan", strategy: "trencher", flavour: null, traits: [], mode: "live", style: { lower: true, emoji: 0, exclaim: 0 },
+        recentOwn: [], question: c.text, recentBuys: [{ label: "Pepe", paper: false }], boughtLately: "live", said: [], walletPublic: false,
+        coinNamed: named, general, ...(research ? { intent: intent.kind as AnswerFacts["intent"], research: b.facts } : {}) });
+      return { intent, named, resolved: f.resolved.length, reads: f.reads.length, prompt: `${p.system}\n${p.prompt}`.replace(/pepe|bonk|wojak/gi, "<name>") };
+    };
+    for (const research of [true, false]) {
+      for (const [mine, other] of [["is pepe legit?", "is bonk legit?"], ["thoughts on the pepe chart?", "thoughts on the bonk chart?"], ["is pepe legit?", "is wojak legit?"],
+        ["is pepe inu legit?", "is bonk inu legit?"]]) {
+        const a = await read(mine!, research), b = await read(other!, research);
+        assert.deepEqual(a.intent, b.intent, `${mine} / ${other}`);
+        assert.equal(a.named, b.named, `${mine} / ${other}`);
+        assert.equal(a.resolved + a.reads, 0, `${mine}: nothing looked up for a name without a $`);
+        assert.equal(b.resolved + b.reads, 0, `${other}: nothing looked up`);
+        assert.equal(a.prompt, b.prompt, `${mine} / ${other}: the same prompt, research ${research}`);
+      }
     }
-    // In talk about a coin, the same labels are its coins.
-    const weekend = classifyTag("thoughts on the weekend coin?", { knownCoins: ["The Weekend"] });
-    assert.deepEqual(weekend, { kind: "coin", ticker: "The Weekend", address: null });
-    assert.deepEqual(classifyTag("is the cat token legit?", { knownCoins: ["Cat"] }), { kind: "coin", ticker: "Cat", address: null });
   });
 });
 
@@ -489,7 +501,7 @@ describe("its own history of a coin", () => {
     const v = tagCandidate({ id: "1", text: `@alan did you buy ${PEPE_CA}?`, authorId: "9", conversationId: "1", inReplyToTweetId: "", createdAtMs: NOW }, { xUserId: "111", research: true, username: "alan" });
     assert.ok(v.ok);
     if (!v.ok) return;
-    const intent = classifyTag(v.text, { address: v.address ?? null, knownCoins: ["Wif"] });
+    const intent = classifyTag(v.text, { address: v.address ?? null });
     const b = await fakes().research.gather(input(intent, { facts: live, posts: [paperPost], question: v.text, coinNamed: true }));
     assert.ok(!b.facts.some((p) => /bought it|when you bought it/.test(p)), b.facts.join(" | "));
     assert.notEqual(b.exact, true);
@@ -682,7 +694,7 @@ describe("one bounded research bundle per answer", () => {
       const v = tagCandidate({ id: "1", text, authorId: "9", conversationId: "1", inReplyToTweetId: "", createdAtMs: NOW }, { xUserId: "111", research: true, username: "Alan" });
       assert.ok(v.ok && v.address === COPY, text);
       if (!v.ok) continue;
-      const intent = classifyTag(v.text, { address: v.address ?? null, knownCoins: ["Pepe"] });
+      const intent = classifyTag(v.text, { address: v.address ?? null });
       assert.ok(intent.kind === "coin" || intent.kind === "own-trades", `${text} → ${intent.kind}`);
       const { f, research } = fakes();
       const b = await research.gather(input(intent, { fomo: true, posts: [] }));
@@ -704,13 +716,13 @@ describe("one bounded research bundle per answer", () => {
 
   it("a tag that names more than one coin is looked up for nothing (red-team 2026-10-12)", async () => {
     const WOJAK_CA = `0x${"9abc".repeat(10)}`;
-    // The reproduced tags: two cashtags, a cashtag and a contract; then a coin it bought beside a contract, or beside another ticker.
-    for (const [text, knownCoins] of [["@Alan $SAFU vs $WOJAK, which one looks healthier?", []], [`@Alan is $WOJAK legit or is ${WOJAK_CA} the real one?`, []],
-      [`@Alan is pepe ${WOJAK_CA} legit?`, ["Pepe"]], ["@Alan is pepe or $WIF the better chart?", ["Pepe"]]] as const) {
+    // The reproduced tags: two cashtags, a cashtag and a contract; then a name beside a contract, or beside another ticker (whatever it bought).
+    for (const text of ["@Alan $SAFU vs $WOJAK, which one looks healthier?", `@Alan is $WOJAK legit or is ${WOJAK_CA} the real one?`,
+      `@Alan is pepe ${WOJAK_CA} legit?`, "@Alan is pepe or $WIF the better chart?"]) {
       const v = tagCandidate({ id: "1", text, authorId: "9", conversationId: "1", inReplyToTweetId: "", createdAtMs: NOW }, { xUserId: "111", research: true, username: "Alan" });
       assert.ok(v.ok, text);
       if (!v.ok) continue;
-      const intent = classifyTag(v.text, { address: v.address ?? null, knownCoins });
+      const intent = classifyTag(v.text, { address: v.address ?? null });
       assert.ok((intent.kind === "coin" || intent.kind === "own-trades") && intent.many === true, `${text} → ${JSON.stringify(intent)}`);
       const { f, research } = fakes({ flow: true });
       const b = await research.gather(input(intent, { fomo: true, question: v.text }));
@@ -719,7 +731,7 @@ describe("one bounded research bundle per answer", () => {
       assert.ok(b.notes.includes("many"), b.notes.join(","));
     }
     // One coin, however it is named, is still one coin.
-    assert.equal((classifyTag("thoughts on $PEPE and the pepe chart?", { knownCoins: ["Pepe"] }) as { many?: true }).many, undefined);
+    assert.equal((classifyTag("thoughts on $PEPE and the pepe chart?") as { many?: true }).many, undefined);
     assert.equal((classifyTag("thoughts on $WOJAK?") as { many?: true }).many, undefined);
   });
 
@@ -901,9 +913,9 @@ describe("never confirm a buy by name", () => {
     if (!c.ok && c.reason === "unsafe-text" && /[^\x00-\x7f]/.test(text)) return null;
     assert.ok(c.ok, `${text}: ${c.ok ? "" : c.reason}`);
     if (!c.ok) throw new Error("unreachable");
-    const intent = classifyTag(c.text, { address: c.address ?? null, knownCoins: ["Pepe Coin", "Pepe Coin"] });
+    const intent = classifyTag(c.text, { address: c.address ?? null });
     assert.notEqual(intent.kind, "unanswered", text);
-    const named = namesACoin({ text: c.text, intent, address: c.address ?? null, bought });
+    const named = namesACoin({ text: c.text, intent, address: c.address ?? null });
     const general = !named && generalTradesQuestion(c.text);
     let looked: Partial<AnswerFacts> = {};
     let exact = false;
@@ -931,12 +943,14 @@ describe("never confirm a buy by name", () => {
         if (read === null) continue;
         const { prompt, named, exact } = read;
         const what = `${text} (research ${research})`;
-        assert.equal(named, true, what);
         assert.equal(exact, false, what);
         assert.doesNotMatch(prompt, /Coins you bought lately|not bought anything|can't name here/, what);
         assert.doesNotMatch(prompt, OWN_BUY_FACT, what);
         assert.doesNotMatch(prompt, /picked up some pepe/, `${what}: neither its buy post nor what it said`);
-        if (!/no usable question/.test(prompt)) assert.match(prompt, /They named a specific coin\. Never say whether you bought it, hold it or like it/, what);
+        // Told it named a coin, or told it is not told what it bought: never which, by what it bought (red-team 2026-10-12).
+        if (!/no usable question/.test(prompt)) {
+          assert.match(prompt, named ? /They named a specific coin\. Never say whether you bought it, hold it or like it/ : /You are not told what you bought for this question/, what);
+        }
       }
     }
   });

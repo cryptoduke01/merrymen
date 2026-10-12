@@ -1130,6 +1130,28 @@ test("told none of its buys, an answer about a named coin never says it bought, 
   assert.equal(row!.reason, "gate:buy-claim");
 });
 
+test("asking name by name says nothing of which coins it bought: a name it bought and one it never did are read alike, research on or off (red-team 2026-10-12)", async (t) => {
+  // The reproduced pairs, from a live agent that bought only PEPE ("Pepe").
+  const pairs = [["@pine_stoat is pepe legit?", "@pine_stoat is bonk legit?"], ["@pine_stoat is pepe legit?", "@pine_stoat is wojak legit?"],
+    ["@pine_stoat thoughts on the pepe chart?", "@pine_stoat thoughts on the bonk chart?"], ["@pine_stoat is pepe inu legit?", "@pine_stoat is bonk inu legit?"]];
+  for (const env of [{}, RESEARCH_ON]) {
+    for (const pair of pairs) {
+      const seen: { reads: number; prompt: string; system: string }[] = [];
+      for (const text of pair) {
+        const r = fakeResearch();
+        const w = await world(t, { env, research: r.research });
+        w.setInbox([tag({ text })]);
+        await w.step();
+        const mask = (s: string) => s.replace(/pepe|bonk|wojak/gi, "<name>");
+        seen.push({ reads: r.seen.length, prompt: mask(w.asked()[0] ?? ""), system: mask(w.systems[0] ?? "") });
+      }
+      assert.equal(seen[0]!.reads, 0, `${pair[0]}: nothing looked up for a name without a $`);
+      assert.deepEqual(seen[0], seen[1], `${pair.join(" / ")}: the same reads and the same prompt`);
+      assert.doesNotMatch(seen[0]!.prompt, /It is just chat|public index/, pair[0]);
+    }
+  }
+});
+
 test("a copycat or emoji spelling no matcher finds is never handed its buys, and a draft that names one is refused (red-team 2026-10-12)", async (t) => {
   const BONK: CallFact = { ...CALL, decisionId: "fill-bonk", symbol: "BONK", name: "Bonk" };
   const facts: AgentFacts = { ...FACTS, calls: [BONK, CALL] };

@@ -861,7 +861,7 @@ describe("an active agent's answers and conversation memory", () => {
       for (const intent of ["own-trades", "chat"] as const) {
         const p = all(answerPrompt({ ...facts, question, intent }));
         assert.doesNotMatch(p, /Coins you bought lately|«Bonk»|«Pepe»|picked up some bonk|grabbed a little pepe|Say what you bought|can't name here|not bought anything/, `${question} (${intent})`);
-        assert.match(p, /You are not told what you bought for this question/, question);
+        assert.match(p, /You are not told what you bought for this question|They named a specific coin/, question);
       }
     }
     const told = all(answerPrompt({ ...facts, question: "what have you been buying lately?", intent: "own-trades", general: true }));
