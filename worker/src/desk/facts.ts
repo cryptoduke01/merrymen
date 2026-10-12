@@ -27,7 +27,7 @@
  * machinery, and this file never touches it.
  */
 import { collapseOf, type CoinFacts, type CoinFactsRead, type CoinFactsReader, type FactsNetwork } from "../coin-facts-types";
-import { GECKO_NETWORK } from "../venues/geckoterminal";
+import { GECKO_NETWORK, type GeckoLane } from "../venues/geckoterminal";
 import type { FeedResult } from "../venues/fleet-feed-cache";
 import { getJson, memoized, parseHourlyBars } from "./gecko";
 import type { Bar } from "./ta";
@@ -262,8 +262,12 @@ const BARS_LIMIT = 1_000;
  * cover, is "unsupported" before anything is fetched; the limiter's "no" is
  * "busy"; a read that failed or ran out of time is "unavailable"; no credible
  * pool is "not-found".
+ *
+ * `lane`: the fleet Gecko lane, named explicitly by a reader that runs in the
+ * orchestrator (an X answer's coin facts), whose own environment does not
+ * carry the children's MERRYMEN_FLEET_HOME (geckoterminal.ts GeckoLane).
  */
-export function createCoinFactsReader(o: { fetchJson?: FactsFetch; now?: () => number; limiter?: FactsLimiter } = {}): CoinFactsReader {
+export function createCoinFactsReader(o: { fetchJson?: FactsFetch; now?: () => number; limiter?: FactsLimiter; lane?: GeckoLane } = {}): CoinFactsReader {
   const now = o.now ?? Date.now;
   const limiter = o.limiter ?? new FactsLimiter({ now });
   const read = (key: string, route: string, timeoutMs: number): Promise<RawRead> =>
@@ -275,6 +279,7 @@ export function createCoinFactsReader(o: { fetchJson?: FactsFetch; now?: () => n
         return r.ok ? { failed: false, observedAt: r.observedAt, body: r.body } : { failed: true, failure: r.failure, ...(r.retryAfterMs !== undefined ? { retryAfterMs: r.retryAfterMs } : {}) };
       },
       (failure) => ({ failed: true, failure }),
+      o.lane,
     );
 
   return async (q): Promise<CoinFactsRead> => {

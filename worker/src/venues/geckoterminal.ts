@@ -57,8 +57,20 @@ export function resetGeckoFeedsForTest(clock: FeedClock = REAL_FEED_CLOCK): void
   feedClock = clock;
 }
 
-function cacheFor(source: GeckoSource): FeedCache {
-  const home = process.env.MERRYMEN_FLEET_HOME?.trim();
+/**
+ * WHICH LANE A READ SPENDS: the fleet's, named explicitly. A child inherits
+ * MERRYMEN_FLEET_HOME from the orchestrator, which never sets it on itself
+ * (the variable is the children's). So a read made IN the orchestrator — an
+ * X answer's coin facts — passes the fleet home here and shares the
+ * children's spacing slot and cooldowns, instead of a private lane that
+ * would coordinate with nobody. Absent: the environment's, as before.
+ */
+export interface GeckoLane {
+  fleetHome?: string;
+}
+
+function cacheFor(source: GeckoSource, lane?: GeckoLane): FeedCache {
+  const home = (lane?.fleetHome ?? process.env.MERRYMEN_FLEET_HOME)?.trim();
   const key = `${home ? path.resolve(home) : "local"}:${source.id}`;
   let cache = feedCaches.get(key);
   if (!cache) {
@@ -74,11 +86,11 @@ function cacheFor(source: GeckoSource): FeedCache {
 /** A separately offered public source, never a retry with another credential.
  * No fallback on rejected authority (401/403), bad requests, or broken cache.
  * Both sources retain their own pacing, observation age and 429 cooldowns. */
-async function readGecko<T extends FeedResult>(key: string, request: (source: GeckoSource, remainingMs: number) => Promise<T>, unavailable: (reason: string) => T): Promise<T> {
+async function readGecko<T extends FeedResult>(key: string, request: (source: GeckoSource, remainingMs: number) => Promise<T>, unavailable: (reason: string) => T, lane?: GeckoLane): Promise<T> {
   const primary = geckoSource(), deadline = feedClock.now() + 30_000;
   const read = async (source: GeckoSource): Promise<T> => {
     try {
-      return await cacheFor(source).get(`${GECKO_NETWORK}:${key}`, async () => {
+      return await cacheFor(source, lane).get(`${GECKO_NETWORK}:${key}`, async () => {
         const remaining = deadline - feedClock.now();
         const result = remaining > 0 ? await request(source, remaining) : unavailable("request-budget");
         return { ...result, provider: source.id };
@@ -336,8 +348,8 @@ export async function fetchGeckoPoolsResult(
 }
 
 /** Detail reads spend the same fleet quota as discovery, including cooldowns. */
-export async function cachedGeckoDetail<T extends FeedResult>(key: string, request: (source: GeckoSource, remainingMs: number) => Promise<T>, unavailable: (reason: string) => T): Promise<T> {
-  return readGecko(`detail:${key}`, request, unavailable);
+export async function cachedGeckoDetail<T extends FeedResult>(key: string, request: (source: GeckoSource, remainingMs: number) => Promise<T>, unavailable: (reason: string) => T, lane?: GeckoLane): Promise<T> {
+  return readGecko(`detail:${key}`, request, unavailable, lane);
 }
 
 async function requestGeckoPools(feed: PoolFeed, opts: { timeoutMs?: number; page?: number }, source: GeckoSource): Promise<GeckoFetch> {

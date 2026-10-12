@@ -13,7 +13,7 @@
  * gets there only as an address someone posted.
  */
 import { readBoundedJson } from "../bounded-read";
-import { cachedGeckoDetail, geckoSource, GECKO_NETWORK, parseGeckoPool, resetGeckoFeedsForTest, type GeckoSource, type GeckoFetch, type GeckoPool } from "../venues/geckoterminal";
+import { cachedGeckoDetail, geckoSource, GECKO_NETWORK, parseGeckoPool, resetGeckoFeedsForTest, type GeckoLane, type GeckoSource, type GeckoFetch, type GeckoPool } from "../venues/geckoterminal";
 import type { FeedResult } from "../venues/fleet-feed-cache";
 import type { Bar } from "./ta";
 import { safeFetchUrl } from "../../../packages/core/src/index";
@@ -24,14 +24,18 @@ const FAIL_MEMO_MS = 5_000;
 const memo = new Map<string, { until: number; value: unknown }>();
 const pending = new Map<string, Promise<unknown>>();
 
-/** One request per key per minute, shared by every caller in this process. */
-export async function memoized<T extends FeedResult>(key: string, run: (source: GeckoSource, remainingMs: number) => Promise<T>, unavailable: (why: string) => T): Promise<T> {
+/**
+ * One request per key per minute, shared by every caller in this process.
+ * `lane` names the fleet lane a read spends (geckoterminal.ts GeckoLane): the
+ * orchestrator passes its fleet home; a child's environment already has it.
+ */
+export async function memoized<T extends FeedResult>(key: string, run: (source: GeckoSource, remainingMs: number) => Promise<T>, unavailable: (why: string) => T, lane?: GeckoLane): Promise<T> {
   const k = `${geckoSource().id}:${key}`;
   const hit = memo.get(k);
   if (hit && hit.until > Date.now()) return hit.value as T;
   const inFlight = pending.get(k);
   if (inFlight) return inFlight as Promise<T>;
-  const job = cachedGeckoDetail(`desk:${key}`, run, unavailable)
+  const job = cachedGeckoDetail(`desk:${key}`, run, unavailable, lane)
     .catch(() => unavailable("unavailable"))
     .then((value) => {
       if (memo.size >= 256) memo.delete(memo.keys().next().value!);
@@ -135,7 +139,7 @@ export function parseTokenInfo(body: unknown, token: string): IndexedTokenInfo |
 }
 
 /** Metadata spends the existing fleet detail quota; the fixed origin keeps keys private. */
-export async function readTokenInfo(address: string, timeoutMs = 3000, signal?: AbortSignal): Promise<TokenInfoRead> {
+export async function readTokenInfo(address: string, timeoutMs = 3000, signal?: AbortSignal, lane?: GeckoLane): Promise<TokenInfoRead> {
   const token = typeof address === "string" ? address.toLowerCase() : "";
   if (!/^0x[\da-f]{40}$/.test(token)) return { failed: true, failure: "invalid-token" };
   return memoized<TokenInfoRead>(
@@ -147,6 +151,7 @@ export async function readTokenInfo(address: string, timeoutMs = 3000, signal?: 
       return info ? { failed: false, observedAt: r.observedAt, info } : { failed: true, failure: "invalid-shape" };
     },
     (failure) => ({ failed: true, failure }),
+    lane,
   );
 }
 
@@ -161,7 +166,7 @@ export function searchable(query: string): string | null {
 }
 
 /** GeckoTerminal's pool search, on Robinhood Chain only. Pools are parsed like every other feed. */
-export async function searchPools(query: string, timeoutMs = 8000, signal?: AbortSignal): Promise<GeckoFetch> {
+export async function searchPools(query: string, timeoutMs = 8000, signal?: AbortSignal, lane?: GeckoLane): Promise<GeckoFetch> {
   const q = searchable(query);
   if (!q) return { pools: [], failed: true, failure: "invalid-query" };
   return memoized<GeckoFetch>(
@@ -174,6 +179,7 @@ export async function searchPools(query: string, timeoutMs = 8000, signal?: Abor
       return { pools: data.map(parseGeckoPool).filter((p): p is GeckoPool => p !== null), failed: false, observedAt: r.observedAt };
     },
     (failure) => ({ pools: [], failed: true, failure }),
+    lane,
   );
 }
 
