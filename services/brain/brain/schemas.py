@@ -65,6 +65,13 @@ LENS_KEYS = frozenset(
         # a brand in a prompt invites the model to recall whatever it believes
         # about that brand instead.
         "trader-flow",
+        # AN INDEXER'S COUNT OF THE DEX TRADES IN THIS COIN: buys and sells over
+        # 5/15/60 minutes, distinct addresses, the largest sells, whether the
+        # launch record's address sold. Not an analyst's lens — no desk asks for
+        # it, so it costs no model call and displaces no market analyst. The
+        # manager reads it directly (graph.py ONCHAIN_FLOW), beside the measured
+        # market input, as the same trades counted by another indexer.
+        "onchain-flow",
         "peg",
         "reserve",
     }

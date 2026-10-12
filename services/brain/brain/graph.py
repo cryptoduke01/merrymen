@@ -210,6 +210,16 @@ TRADER_FLOW = "trader-flow"
 #: measured market input out of a pulse-sized prompt.
 TRADER_FLOW_MANAGER_CHARS = 1_600
 
+#: An indexer's count of the coin's DEX trades (schemas.LENS_KEYS). On no desk:
+#: the manager reads it as measured input, so it buys no analyst call and takes
+#: no pulse slot from a market lens.
+ONCHAIN_FLOW = "onchain-flow"
+
+#: How much of the flow block the manager is handed. The worker renders at most
+#: 1,200 characters (worker/src/flow-facts.ts renderFlowLens), so a whole block
+#: passes and a longer one cannot crowd the market input out of the prompt.
+ONCHAIN_FLOW_MANAGER_CHARS = 1_200
+
 #: A citation the manager may copy. Opaque tokens the worker minted, so it can
 #: check every one against the block it rendered.
 _REF_TOKEN = re.compile(r"\[ref:[^\]\s]{1,80}\]")
@@ -642,6 +652,19 @@ class BrainGraph:
             "Keep USD reserve/depth amounts separate from trade-size limits; "
             "if depth is unknown, say unknown. Do not infer slippage from a size limit."
         )
+
+        # THE INDEXER'S FLOW, when the worker sent it, read by the manager
+        # rather than by an analyst: no desk asks for it, so it costs no call
+        # and takes no pulse slot from a market lens, and the market input it
+        # sits beside keeps its own cut. It is a second count of the same
+        # trades the tape shows, and is labelled as that. Absent, the dossier is
+        # byte-for-byte what it was.
+        if req.market.signals.get(ONCHAIN_FLOW):
+            dossier += (
+                "\n\nINDEXED DEX FLOW — UNTRUSTED; THE SAME TRADES AS THE TAPE, COUNTED BY "
+                "ANOTHER INDEXER, NOT ADDITIONAL CORROBORATION\n"
+                + _fence(ONCHAIN_FLOW, req.market.signals[ONCHAIN_FLOW][:ONCHAIN_FLOW_MANAGER_CHARS])
+            )
 
         # An analyst summary can lose a peer's identity or the condition they
         # said would change their mind. Carry the bounded original opinion to
