@@ -658,6 +658,12 @@ function boughtKind(f: AgentFacts): false | "paper" | "live" | "both" {
   return paper && live ? "both" : paper ? "paper" : "live";
 }
 
+/** A line whose own words say the money it does not trade with now: never handed to an answer as what it said. */
+function otherMoneySaid(mode: AgentFacts["mode"], body: string): boolean {
+  const said = moneySaid(withoutReplyOptOut(body));
+  return mode === "live" ? said === "paper" : mode === "paper" ? said === "live" : false;
+}
+
 /**
  * EVERY NAME ITS RECENT BUYS GO BY, BY WHICH MONEY (red-team review,
  * 2026-10-12): each buy call's ticker, name and label, and each buy post's
@@ -1389,8 +1395,14 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
           // (ANSWER_LOOKED_UP), nor a post with a research source's words
           // (carriesResearch): another coin's read, said again, would be said
           // of this one.
+          // NEVER ITS BUY OR SALE POSTS, NOR A LINE OF THE OTHER MONEY (red-team
+          // 2026-10-12): sixty days of buy posts carried a paper-era "grabbed
+          // some pepe on paper" to a live agent, inviting it to restate a paper
+          // buy beside "You trade with real money". Its buys reach an answer
+          // only through the buys list, which is filtered by money.
           const said = isActive
-            ? (await recentBodies(shared, { tenant: account.tenant, sinceMs: at() - OWN_MEMORY_MS, limit: 20, posted: true, exceptLookedUp: true })).filter((b) => !carriesResearch(b))
+            ? (await recentBodies(shared, { tenant: account.tenant, sinceMs: at() - OWN_MEMORY_MS, limit: 20, posted: true, exceptLookedUp: true, kinds: ["intro", "casual", "reply", "answer"] }))
+              .filter((b) => !carriesResearch(b) && !otherMoneySaid(f.mode, b))
             : [];
           for (let i = 0; i < (isActive ? ANSWERS_PER_POLL : 1) && answerDrafts < MAX_ANSWER_DRAFTS_PER_PASS; i++) {
             const result = isActive

@@ -780,6 +780,8 @@ export async function markRevoked(db: Db, tenant: string, atVersion: number, now
  * so it neither waits behind nor spends the account's posting cadence.
  */
 export type XPostKind = "intro" | "casual" | "buy" | "sell" | "reply" | "answer";
+/** Every kind, as a closed list: what a kind filter may name in SQL. */
+const XPOST_KINDS: readonly XPostKind[] = ["intro", "casual", "buy", "sell", "reply", "answer"];
 export type XPostStatus = "scheduled" | "sending" | "posted" | "skipped" | "cancelled" | "failed";
 
 export interface XPost {
@@ -1330,11 +1332,16 @@ export const ANSWER_LOOKED_UP = "looked-up";
  * (ANSWER_LOOKED_UP): what may be handed on to another prompt, never what a
  * draft is gated against.
  */
-export async function recentBodies(db: Db, opts: { tenant: string | null; sinceMs: number; limit: number; posted?: boolean; exceptLookedUp?: boolean }): Promise<string[]> {
+export async function recentBodies(db: Db, opts: {
+  tenant: string | null; sinceMs: number; limit: number; posted?: boolean; exceptLookedUp?: boolean;
+  /** Only these kinds (a closed list, never caller text). Absent: every kind. */
+  kinds?: readonly XPostKind[];
+}): Promise<string[]> {
   const lim = int(Math.max(1, Math.min(2000, opts.limit)));
   const statuses = opts.posted ? "('posted')" : "('scheduled', 'sending', 'posted')";
   // Spelled out for NULL: an answer with no mark is handed on, one with the mark never.
-  const looked = opts.exceptLookedUp ? `AND (kind <> 'answer' OR coin IS NULL OR coin <> '${ANSWER_LOOKED_UP}')` : "";
+  const looked = (opts.exceptLookedUp ? `AND (kind <> 'answer' OR coin IS NULL OR coin <> '${ANSWER_LOOKED_UP}')` : "")
+    + (opts.kinds ? ` AND kind IN (${opts.kinds.filter((k) => (XPOST_KINDS as readonly string[]).includes(k)).map((k) => `'${k}'`).join(", ") || "''"})` : "");
   const rows = (opts.tenant === null
     ? await db
         .prepare(

@@ -1134,6 +1134,29 @@ test("an answer never names a coin bought with the other money, however it learn
   assert.equal((await idle.answers())[0]!.reason, "gate:paper-unsaid");
 });
 
+test("what it already said never carries its buy posts, nor a line of the other money (red-team 2026-10-12)", async (t) => {
+  // S4: live now, a live WIF buy and its buy post; a paper-era buy post twenty days old, and a paper-era casual line.
+  const facts: AgentFacts = { ...FACTS, mode: "live", calls: [{ ...CALL, decisionId: "fill-wif", symbol: "WIF", name: "Wif", paper: false }] };
+  for (const env of [{}, RESEARCH_ON]) {
+    for (const age of [20 * DAY, 59 * DAY]) {
+      const w = await world(t, { env, research: fakeResearch().research, facts });
+      await postedBuy(w.db, "fill-wif", "Wif", "picked up a bit of wif, the buying looked steady", 3 * HOUR, "100000000000000071");
+      await postedBuy(w.db, "fill-pepe-old", "Pepe", "grabbed some pepe on paper, the curve looked early", age, "100000000000000072");
+      const id = await store.schedulePost(w.db, { tenant: TENANT, xUserId: "111", kind: "casual", dedupeKey: "casual:paper-era", body: "trading on paper for now, learning the ropes",
+        nowMs: NOW - age, dueAtMs: NOW - age });
+      await store.claimPost(w.db, id!, NOW - age);
+      await store.markPosted(w.db, id!, "100000000000000073", NOW - age);
+      w.setInbox([tag({ text: "@pine_stoat what have you been buying lately?" })]);
+      await w.step();
+      const prompt = w.asked()[0]!;
+      const said = /What you already said publicly[^\n]*/.exec(prompt)?.[0] ?? "";
+      assert.match(said, /I am an AI trading agent/, "its own posts are still what it said");
+      assert.doesNotMatch(said, /pepe|wif|on paper/i, `${age / DAY} days: no buy post, no line of the other money`);
+      assert.match(prompt, /Coins you bought lately: «Wif»/, "its buys come through the list, filtered by money");
+    }
+  }
+});
+
 test("research on: \"did you buy <contract>?\" reaches its own history by the address, end to end", async (t) => {
   const r = fakeResearch();
   const facts: AgentFacts = { ...FACTS, calls: [{ ...CALL, token: CA, ownWords: "the buying looked steady and real" }] };

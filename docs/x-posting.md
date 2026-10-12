@@ -640,7 +640,9 @@ the mention itself. They go out **right away**:
   is never told of a live buy. An idle agent is told each buy's money as it
   was. A paper agent is told to say paper in every answer, since the gate
   refuses a paper reply that does not. "Already said" means its own posted
-  rows only. A draft still under Coming up, including an answer drafted
+  rows only, and never its buy or sale posts (its buys reach an answer only
+  through the buys list, filtered by money) nor a line whose own words say
+  the money it does not trade with now. A draft still under Coming up, including an answer drafted
   earlier in the same pass, is never handed over as said, though the gate
   still keeps a new draft from echoing it. Very casually: short,
   texting-a-friend answers, lowercase welcome, dry humour never at the
