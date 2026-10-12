@@ -2504,13 +2504,13 @@ const TOP_COINS_FAKE = ([["BTC", "Bitcoin"], ["ETH", "Ethereum"], ["USDT", "Teth
   .map(([symbol, name], i) => ({ id: name.toLowerCase().replace(/\s+/g, "-"), symbol: symbol.toLowerCase(), name, rank: i + 1 }));
 const TOP_READ = async () => ({ coins: TOP_COINS_FAKE, failed: false });
 
-function hotResearch(pools: GeckoPool[], trending: string[] = [], o: { unlisted?: string[]; top?: "fail" } = {}) {
+function hotResearch(pools: GeckoPool[], trending: string[] = [], o: { unlisted?: string[]; top?: "fail" | typeof TOP_COINS_FAKE } = {}) {
   const reads: string[] = [];
   const research = createXResearch({
     hotPools: async () => { reads.push("pools"); return { pools, failed: false }; },
     majors: { configured: () => true, search: async () => ({ hits: [], failed: true }), market: async () => ({ market: null, failed: true }),
       trending: async () => { reads.push("trending"); return { coins: trending.map((s, i) => ({ id: s.toLowerCase(), symbol: s, name: s, rank: 20 + i })), failed: false }; },
-      top: o.top === "fail" ? async () => ({ coins: [], failed: true, failure: "http-503" }) : TOP_READ },
+      top: o.top === "fail" ? async () => ({ coins: [], failed: true, failure: "http-503" }) : Array.isArray(o.top) ? async () => ({ coins: o.top as typeof TOP_COINS_FAKE, failed: false }) : TOP_READ },
     chainListings: listingsOf(pools, o.unlisted),
   });
   return { research, reads };
@@ -2953,6 +2953,22 @@ test("what's hot never shows a chain coin under a big coin's ticker or name, rea
   w.setInbox([tag({ text: "@pine_stoat what's hot?" })]);
   await w.step();
   assert.deepEqual(w.sends.map((s) => s.text), [hotUnreadAnswers(MENTION, { lower: true })[0]]);
+});
+
+test("what's hot never shows a copy of a big coin's ticker, a big coin or reserve ticker, gold, silver or a currency, even where coingecko's top list misses it (red-team 2026-10-12)", async (t) => {
+  // At fbcf8756, "what's hot today?" posted "... trending $BABYWIF 24h +312% vol ~$1.2M, $QRTZ 24h +4% vol ~$300k.", and each of the rest the same way.
+  const syms = ["BABYWIF", "WIFAI", "WIFHAT", "XRPAI", "SUIAI", "HYPEAI", "MOGAI", "PNUTAI", "LINKAI", "ARBAI", "TAOAI", "MNT", "CRV", "SDAI", "USTC", "GOLD",
+    "SILVER", "XDC", "MORPHO", "AERO", "WLFI", "NEXO", "SUSDE"];
+  // CoinGecko's top list read, but with none of these on it: the floor under it holds alone.
+  const bare = TOP_COINS_FAKE.filter((c) => c.symbol === "btc" || c.symbol === "eth");
+  for (const sym of syms) {
+    const w = await world(t, { env: RESEARCH_ON, research: hotResearch([namedPool(sym, 1, 312, 1.2e6), hotPool(2, 4, 300_000)], [], { top: bare }).research });
+    w.setInbox([tag({ text: "@pine_stoat what's hot today?" })]);
+    await w.step();
+    const text = String(w.sends[0]?.text ?? "");
+    assert.match(text, /geckoterminal robinhood: trending \$COINB 24h \+4% vol ~\$300k\./, `${sym}: ${text}`);
+    assert.ok(!text.includes(`$${sym}`), `${sym}: ${text}`);
+  }
 });
 
 test("what's hot never shows a coin under a name its own buys go by, a copy at another contract or not, nor as fomo's most bought, under its buy post or anywhere (red-team 2026-10-12)", async (t) => {

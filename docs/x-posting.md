@@ -1070,7 +1070,12 @@ other owner's agent, and its posting and reply warnings, are unchanged.
   more but generic ones like "token", "network", "finance"); a ticker that
   is one, or starts or ends with one of three letters or more, never shows
   (`topCopycat`). With that list unread, no chain coin is named: code's
-  no-read line. Then, side by side: with Fomo usable for the owner, the
+  no-read line. The hand list stays as a floor under it, now with the big
+  coins' tickers as roots (`$BABYWIF`, `$WIFAI`, `$XRPAI`, `$HYPEAI`,
+  `$PNUTAI`, `$MOGAI`, `$TAOAI` were posted), the large caps and reserve
+  coins it missed (`MNT`, `CRV`, `SDAI`, `USTC`, `WLFI`, `NEXO`, `XDC`,
+  `MORPHO`, `AERO`), and gold, silver, oil and the currencies (`GOLD`,
+  `SILVER`, `OIL`, `JPY`, `GBP`, `CNH`, `UST` and the like) as roots. Then, side by side: with Fomo usable for the owner, the
   coins Fomo traders bought most in the day (`fomo_get_token_activity` with
   no token, its feed-wide `topTokens`: Fomo's thesis read needs a coin, so
   "what fomo traders are on" is the coins the most distinct Fomo traders

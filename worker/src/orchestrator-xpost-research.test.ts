@@ -1373,6 +1373,14 @@ describe("what's hot: the chain's trending coins past the fleet's floors, fomo's
     assert.equal(namesACoin({ text: "what's hot?", intent: { kind: "hot" }, address: null }), false, "it names no coin");
   });
 
+  it("a floor under coingecko's list: copies of the big coins' tickers, large caps, reserve coins, gold, silver and currencies (red-team 2026-10-12)", () => {
+    for (const sym of ["BABYWIF", "WIFAI", "WIFHAT", "XRPAI", "SUIAI", "HYPEAI", "MOGAI", "PNUTAI", "LINKAI", "ARBAI", "TAOAI", "MNT", "CRV", "SDAI", "USTC", "GOLD",
+      "SILVER", "XDC", "MORPHO", "AERO", "WLFI", "NEXO", "SUSDE", "OILCOIN", "JPYC", "GBPT", "CNHT"]) {
+      assert.ok(copycatTicker(sym), sym);
+    }
+    for (const sym of ["CHUMP", "COINA", "FROGGY", "QRTZ", "ZAPX", "MOLT"]) assert.equal(copycatTicker(sym), false, sym);
+  });
+
   it("never a big coin's ticker or name, or one built on it, read off coingecko's own biggest coins; and none without them (red-team 2026-10-12)", async () => {
     const top = topCopyOf(TOP);
     for (const t of ["WLFI", "MNT", "SONIC", "LIDO", "MANTLE", "ASTER", "HYPEX", "XRPAI", "WIFX", "CURVE", "LINEA", "BABYWIF", "SOLANAX", "BITTENSOR", "WORLDCAT", "S"]) {
