@@ -104,6 +104,41 @@ describe("one daily allowance, reserved before every upstream call", () => {
     assert.equal(upstream.calls, 1);
   });
 
+  it("one holder polling flat out stops at its own share, and a second holder's first call still goes through", async () => {
+    const upstream = stubUpstream();
+    const gw = gateway({ tunables: { MEMESCOPE_SHARE: DEFAULTS.MEMESCOPE_SHARE } });
+    const greedy = gw._tokens.issueToken(HOLDER);
+    let calls = 0;
+    let refused;
+    for (; calls < 1_440; calls++) {
+      const r = await gw.bitquery({ token: greedy, body: { query: "recentPools" }, ip: "1.1.1.1" });
+      if (r.status !== 200) { refused = r; break; }
+    }
+    assert.equal(calls, DEFAULTS.BITQUERY_POINTS_PER_HOLDER_PER_DAY / 5, "a one-minute poller stops at its own 750 points");
+    assert.equal(refused.status, 429);
+    assert.match(refused.json.error, /this wallet's own share of today's discovery is spent/);
+    assert.equal(upstream.calls, calls, "the refused call was never sent");
+    const other = await gw.bitquery({ token: gw._tokens.issueToken("0x2222222222222222222222222222222222222222"), body: { query: "recentPools" }, ip: "2.2.2.2" });
+    assert.equal(other.status, 200, "another holder is not starved");
+    assert.ok(DEFAULTS.BITQUERY_POINTS_PER_HOLDER_PER_DAY >= 144 * 5, "the default ten-minute interval fits a holder's share all day");
+  });
+
+  it("a call refused by a holder's own share hands the purse's points back", async () => {
+    const upstream = stubUpstream();
+    const gw = gateway({ tunables: { BITQUERY_POINTS_PER_DAY: 20, BITQUERY_POINTS_PER_HOLDER_PER_DAY: 10 } });
+    const a = gw._tokens.issueToken(HOLDER);
+    const b = gw._tokens.issueToken("0x2222222222222222222222222222222222222222");
+    assert.equal((await gw.bitquery({ token: a, body: { query: "ping" }, ip: "1.1.1.1" })).status, 200);
+    assert.equal((await gw.bitquery({ token: a, body: { query: "ping" }, ip: "1.1.1.1" })).status, 200);
+    for (let i = 0; i < 5; i++) assert.equal((await gw.bitquery({ token: a, body: { query: "ping" }, ip: "1.1.1.1" })).status, 429);
+    // The purse still has its other 10 for b, not 10 minus what a was refused.
+    assert.equal((await gw.bitquery({ token: b, body: { query: "ping" }, ip: "2.2.2.2" })).status, 200);
+    assert.equal((await gw.bitquery({ token: b, body: { query: "ping" }, ip: "2.2.2.2" })).status, 200);
+    const spent = await gw.bitquery({ token: b, body: { query: "ping" }, ip: "2.2.2.2" });
+    assert.equal(spent.status, 503, "then the purse is spent for everyone");
+    assert.equal(upstream.calls, 4);
+  });
+
   it("a bad token, a non-holder or an unknown query spends none of it", async () => {
     stubUpstream();
     const gw = gateway({ tunables: { BITQUERY_POINTS_PER_DAY: 5 } });
@@ -183,5 +218,10 @@ describe("one daily allowance, reserved before every upstream call", () => {
     assert.equal(await s.reservePoints("d1", 5, 8, 60), false);
     assert.equal(await s.reservePoints("d1", 3, 8, 60), true, "the refused 5 were not counted");
     assert.equal(await s.reservePoints("d2", 5, 8, 60), true, "another day is another allowance");
+    await s.releasePoints("d2", 5);
+    assert.equal(await s.reservePoints("d2", 8, 8, 60), true, "points handed back are free again");
+    await s.releasePoints("d3", 5);
+    assert.equal(await s.reservePoints("d3", 8, 8, 60), true, "a release never makes room past the cap");
+    assert.equal(await s.reservePoints("d3", 1, 8, 60), false);
   });
 });

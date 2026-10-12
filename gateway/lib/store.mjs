@@ -70,6 +70,18 @@ function redisStore() {
         return null;
       }
     },
+    /**
+     * Hand back points reserved under `key` for a call that was never made
+     * (a later purse refused it). Best effort: a failed release leaves them
+     * counted, which only ever errs toward spending less.
+     */
+    async releasePoints(key, points) {
+      try {
+        await redis(["DECRBY", `p:${key}`, String(points)]);
+      } catch {
+        /* still counted: the safe side */
+      }
+    },
     async getBal(addr) {
       try {
         const v = await redis(["GET", `b:${addr}`]);
@@ -116,6 +128,10 @@ function memoryStore() {
       spends.set(key, { points: spent + points, until: now + ttlSec * 1000 });
       if (spends.size > 64) for (const [k, v] of spends) if (v.until <= now) spends.delete(k);
       return true;
+    },
+    async releasePoints(key, points) {
+      const s = spends.get(key);
+      if (s && s.until > Date.now()) s.points = Math.max(0, s.points - points);
     },
     async spendNonce(token, ttlSec) {
       const now = Date.now();

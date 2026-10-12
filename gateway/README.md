@@ -59,7 +59,11 @@ curl -s https://ai.merrymen.dev/bitquery \
   its own share (`MEMESCOPE_SHARE`, 40%: 2,000 a day) and refreshes at most
   every `MEMESCOPE_TTL_SEC` (240 s: 360 refreshes, 1,800 points), so it fits
   its share all day; holders spend the other 3,000, which the public page can
-  never touch. Past their purse, `/bitquery` answers 503 and the memescope
+  never touch. Each holder may spend at most 750 of those a day
+  (`BITQUERY_POINTS_PER_HOLDER_PER_DAY`, enough for the worker's default
+  ten-minute discovery all day); past it that wallet alone gets 429 until
+  00:00 UTC, so one holder polling every minute cannot starve the rest.
+  Past their purse, `/bitquery` answers 503 and the memescope
   serves its last rows. If the key shares a plan with the orchestrator's
   Bitquery lane (`docs/bitquery-lane.md`), the two knobs together must stay
   under the plan: 25,000 + 5,000 a day (the memescope included) is 900,000 of

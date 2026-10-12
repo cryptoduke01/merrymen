@@ -40,6 +40,14 @@ export const DEFAULTS = {
   // used up the 5,000 by midday UTC and every holder got 503 until midnight.
   // 0.4 of 5,000 is 2,000 for the page and 3,000 for holders.
   MEMESCOPE_SHARE: 0.4,
+  // EACH HOLDER'S OWN SHARE of the holders' purse (bq-holder-points:<day>:<addr>),
+  // reserved before the shared one. Without it one holder — a modified client,
+  // or an owner at the settings' one-minute discovery interval (1,440 calls,
+  // 7,200 points a day) — spent all 3,000 by mid-morning UTC and every other
+  // holder got 503 until midnight. 750 covers a holder at the default
+  // ten-minute interval all day (144 calls, 720 points); past it that holder
+  // alone gets 429 until 00:00 UTC. Never above the holders' purse.
+  BITQUERY_POINTS_PER_HOLDER_PER_DAY: 750,
   // How long the PUBLIC memescope is served from one shared answer. This number
   // is the whole cost model of that route: the upstream is hit at most once per
   // this many seconds no matter how many people are watching, so traffic and
@@ -468,24 +476,56 @@ export function createGateway(cfg) {
    * its MEMESCOPE_SHARE of the day, holders only the rest: the two together
    * never pass BITQUERY_POINTS_PER_DAY, and neither can spend the other's.
    */
-  async function reserveBitqueryPoints(points, purse = "holders") {
+  async function reserveBitqueryPoints(points, purse = "holders", utc = new Date().toISOString().slice(0, 10)) {
     const day = T.BITQUERY_POINTS_PER_DAY;
     if (!(day > 0) || typeof store.reservePoints !== "function") return null;
-    const share = Math.min(1, Math.max(0, Number(T.MEMESCOPE_SHARE) || 0));
-    const scope = Math.floor(day * share);
-    const cap = purse === "scope" ? scope : day - scope;
+    const cap = purseCap(purse);
     if (!(cap > 0)) return false;
-    const utc = new Date().toISOString().slice(0, 10);
     try {
       return await store.reservePoints(`${purse === "scope" ? "bq-scope-points" : "bq-points"}:${utc}`, points, cap, 2 * 86_400);
     } catch {
       return null;
     }
   }
+  /** A purse's points for the day: the memescope's share, or the holders' rest. */
+  function purseCap(purse) {
+    const day = T.BITQUERY_POINTS_PER_DAY;
+    const share = Math.min(1, Math.max(0, Number(T.MEMESCOPE_SHARE) || 0));
+    const scope = Math.floor(day * share);
+    return purse === "scope" ? scope : day - scope;
+  }
+
+  /**
+   * ONE HOLDER'S CALL: the holders' purse, and this holder's own share of it
+   * (BITQUERY_POINTS_PER_HOLDER_PER_DAY). True to proceed; false when the
+   * purse is spent; "holder" when only this holder's own day is; null when
+   * the store cannot count. Both or neither: a call one of them refuses
+   * hands the other's reservation back, so a holder past its share never
+   * keeps points from the rest.
+   */
+  async function reserveHolderPoints(addr, points) {
+    const utc = new Date().toISOString().slice(0, 10);
+    const shared = await reserveBitqueryPoints(points, "holders", utc);
+    if (shared !== true) return shared;
+    const own = Math.min(Math.floor(Number(T.BITQUERY_POINTS_PER_HOLDER_PER_DAY)), purseCap("holders"));
+    let mine = false;
+    if (own > 0) {
+      try {
+        mine = await store.reservePoints(`bq-holder-points:${utc}:${addr}`, points, own, 2 * 86_400);
+      } catch {
+        mine = null;
+      }
+    }
+    if (mine === true) return true;
+    if (typeof store.releasePoints === "function") await store.releasePoints(`bq-points:${utc}`, points);
+    return mine === false ? "holder" : null;
+  }
   const unspendable = (r) =>
-    r === false
-      ? { status: 503, json: { error: "this gateway's daily discovery allowance is spent — it resets at 00:00 UTC" } }
-      : { status: 503, json: { error: "this gateway cannot count its discovery spend right now, so it is not spending" } };
+    r === "holder"
+      ? { status: 429, json: { error: "this wallet's own share of today's discovery is spent — it resets at 00:00 UTC" } }
+      : r === false
+        ? { status: 503, json: { error: "this gateway's daily discovery allowance is spent — it resets at 00:00 UTC" } }
+        : { status: 503, json: { error: "this gateway cannot count its discovery spend right now, so it is not spending" } };
 
   async function bitquery({ token, body, ip }) {
     if (!bitqueryKey) {
@@ -521,7 +561,7 @@ export function createGateway(cfg) {
     }
     const built = entry.build(body.variables && typeof body.variables === "object" ? body.variables : {});
     // LAST, so a refused token, a non-holder or an unknown query spends nothing.
-    const reserved = await reserveBitqueryPoints(entry.points);
+    const reserved = await reserveHolderPoints(addr, entry.points);
     if (reserved !== true) return unspendable(reserved);
     try {
       const upstream = await fetch(bitqueryUrl, {

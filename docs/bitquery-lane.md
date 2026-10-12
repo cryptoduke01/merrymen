@@ -65,7 +65,10 @@ meant as a later source for the early book and nothing calls it yet.
    `MERRYMEN_GATEWAY_BITQUERY_POINTS_PER_DAY` (default `5000`), in two purses:
    the public memescope spends only its own 40% (2,000 a day; it refreshes at
    most every 240 s, 1,800 points a day, so it never runs out), and holders
-   the other 3,000, which the page can never spend. Before this split, one open
+   the other 3,000, which the page can never spend, and at most 750 of them
+   for any one holder (enough for the default interval all day; past it that
+   wallet alone gets 429 until 00:00 UTC, so one holder at a 1-minute
+   interval cannot starve the rest). Before this split, one open
    Markets tab at a 45-second refresh cost about 9,600 points a day on its own,
    spent the whole cap by midday UTC, and left every holder a 503 until
    midnight. If the gateway's key is on the same plan as this lane, the two
