@@ -14,6 +14,20 @@ export function decisionResearchEnabledFor(account: string, env: NodeJS.ProcessE
     .some(value => address.test(value) && value.toLowerCase() === account.toLowerCase());
 }
 
+/**
+ * The allowlist, said once at boot. Smart-account addresses are public; an
+ * entry that is not one is counted by position, never echoed.
+ */
+export function decisionResearchBootLine(env: NodeJS.ProcessEnv = process.env): string {
+  const address = /^0x[0-9a-f]{40}$/i;
+  const values = (env.MERRYMEN_DECISION_RESEARCH_ACCOUNTS ?? "").split(/[\s,]+/).filter(Boolean);
+  const accounts = values.filter(v => address.test(v) && !/^0x0{40}$/i.test(v));
+  const ignored = values.length - accounts.length;
+  if (!accounts.length) return `decision research: nobody${ignored ? ` (${ignored} entr${ignored === 1 ? "y is" : "ies are"} not an address)` : ""}`;
+  return `decision research: ${accounts.length} account(s) — ${accounts.join(", ")}` +
+    (ignored ? `; ${ignored} entr${ignored === 1 ? "y is" : "ies are"} not an address` : "");
+}
+
 /** Quote the existing strategy ceiling, including any smaller signed or early-entry bound. */
 export function researchEntrySize(bounds: readonly bigint[]): bigint {
   const size = bounds.length ? bounds.reduce((a, b) => a < b ? a : b) : 0n;

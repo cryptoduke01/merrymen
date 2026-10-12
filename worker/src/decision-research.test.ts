@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { PublicClient } from "viem";
 import { CASH } from "../../packages/core/src/index";
-import { DECISION_RESEARCH_GUIDANCE, decisionResearchEnabledFor, entryCostEvidence, entryCostResearch, researchEntrySize, trenchBreakEven, trenchMomentumBrief, type BreakEven } from "./decision-research";
+import { DECISION_RESEARCH_GUIDANCE, decisionResearchBootLine, decisionResearchEnabledFor, entryCostEvidence, entryCostResearch, researchEntrySize, trenchBreakEven, trenchMomentumBrief, type BreakEven } from "./decision-research";
 import { TRENCHER_DEFAULTS, TRENCHER_FAST } from "./strategies/trencher";
 import { trencherStrategyTerms } from "./strategy-terms";
 import { trenchBrainPersona } from "./trencher-brain";
@@ -25,6 +25,14 @@ test("research opt-in binds exact account addresses and accepts no wildcard or p
   const env = { MERRYMEN_DECISION_RESEARCH_ACCOUNTS: `${OTHER},\n${TOKEN.toUpperCase().replace("0X", "0x")}` };
   assert.equal(decisionResearchEnabledFor(TOKEN, env), true);
   assert.equal(decisionResearchEnabledFor(`0x${"c".repeat(40)}`, env), false);
+});
+
+test("the boot line names the allowlisted accounts and only counts what is not an address", () => {
+  assert.equal(decisionResearchBootLine({}), "decision research: nobody");
+  assert.equal(decisionResearchBootLine({ MERRYMEN_DECISION_RESEARCH_ACCOUNTS: "secret-ish, *" }), "decision research: nobody (2 entries are not an address)");
+  const line = decisionResearchBootLine({ MERRYMEN_DECISION_RESEARCH_ACCOUNTS: `${TOKEN}, alan ,0x${"0".repeat(40)}` });
+  assert.equal(line, `decision research: 1 account(s) — ${TOKEN}; 2 entries are not an address`);
+  assert.doesNotMatch(line, /alan/);
 });
 
 test("research sizing cannot exceed the strategy, signed cap, remaining daily spend, cash or early bound", () => {

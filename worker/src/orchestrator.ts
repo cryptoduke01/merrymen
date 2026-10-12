@@ -213,7 +213,7 @@ import {
 import { storeDek } from "./store-crypto";
 import { writePeersForChild } from "./peer-files";
 import { materializeOwnOutcomeLearning } from "./orchestrator-own-learning";
-import { decisionResearchEnabledFor } from "./decision-research";
+import { decisionResearchBootLine, decisionResearchEnabledFor } from "./decision-research";
 import { writeResearchForChild } from "./research-files";
 import { addressesOf, makeBuilderDesk, type BuilderDesk } from "./builder-pass";
 import { makeNewsDesk, type NewsDesk } from "./research-pass";
@@ -12388,6 +12388,9 @@ export async function runOrchestrator(): Promise<void> {
     : `resume auto-paper: off — a re-signed tenant with history waits for an operator's preview and approval, as before`);
   setTenantLeaseLossHandler(standDownLostLeasesNow);
   log(`starting — home ${merrymenHome()}, worker ${WORKER_ENTRY}`);
+  // Which smart accounts get the extra decision research, said once: the
+  // allowlist is public addresses, and nothing else shows who is on it.
+  log(decisionResearchBootLine());
   // Fomo's switches, decided and said ONCE AT BOOT: under FLEET_HALT nothing
   // spawns and no pass runs, and the operator should still read whether it
   // is on (docs/fomo.md). Reads the environment and logs; nothing else.
