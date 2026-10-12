@@ -90,16 +90,24 @@ const HOT_FRAMES: readonly ((many: boolean, lead: Move | null) => string)[] = [
 /**
  * A paper agent's market answer says paper: the gate refuses a paper reply
  * that never does. One clause per frame, each in words of its own.
+ *
+ * ABOUT ITS OWN TRADING, NEVER THE COIN (red-team 2026-10-12): "coingecko's
+ * view: a heavyweight, rising solidly lately … a snapshot. i play it on
+ * paper. coingecko: $ETH #2, …" read as the agent trading ETH, a coin it
+ * never trades, and "i trade on paper", "i'm trading on paper" right after a
+ * coin's words read the same way. Each clause is a fixed sentence about its
+ * own book, with no pronoun or verb a reader could attach to the coin just
+ * described.
  */
 const MARKET_PAPER: readonly string[] = Object.freeze([
-  "i'm on paper myself",
-  "i trade on paper for now",
-  "i'm on paper these days",
-  "i play it on paper",
-  "i'm strictly on paper",
-  "i'm trading on paper",
-  "i'm on paper so far",
-  "i'm on paper at the moment",
+  "all my trading is on paper",
+  "my book is a paper book",
+  "my desk runs in paper mode",
+  "every trade of mine is a paper trade",
+  "my money here is practice money",
+  "my account is a practice account",
+  "my side of things is practice mode",
+  "my bets are paper bets",
 ]);
 
 /** The lines, this mention's own frame first (chosen by its id), each with the notice and, on paper, a paper clause. */

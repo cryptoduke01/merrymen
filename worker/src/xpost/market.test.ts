@@ -32,7 +32,7 @@ function judged(lines: string[], paper: boolean): void {
     for (const other of lines.slice(i + 1)) {
       assert.ok(similarity(withoutReplyOptOut(line), withoutReplyOptOut(other)) < REPEAT_LIMIT, `${line}\n${other}`);
     }
-    const words = withoutReplyOptOut(line).replace(/\. i(?:'m| trade| play)[^.]*\.$/, ".");
+    const words = withoutReplyOptOut(line).replace(/\. (?:all my|my|every) [^.]*\.$/, ".");
     assert.doesNotMatch(words, /\b(?:i|i'?m|i'?d|i'?ve|me|my|mine|we|our|buy|buying|bought|sell|early|pick|play|own|hold|holding|long|target|should|worth)\b/i, words);
   }
 }
@@ -78,6 +78,23 @@ describe("what's hot in code's words", () => {
     }
     assert.deepEqual(majorAnswers({ rank: null, day: null, week: null, volume: null }, "1", { lower: false }), [], "nothing to say: no answer");
     for (const line of majorAnswers({ rank: "top", day: moves[0]!, week: moves[0]!, volume: "heavy" }, "1", { lower: false })) assert.match(line, /coingecko/);
+  });
+
+  it("a paper agent's clause is about its own trading, never a pronoun or a verb the coin just described could take (red-team 2026-10-12)", () => {
+    // At fbcf8756: "coingecko's view: a heavyweight, rising solidly lately, … a snapshot. i play it on paper. coingecko: $ETH #2, …".
+    const lines = [
+      ...majorAnswers({ rank: "top", day: { dir: "up", size: "a fair bit" }, week: { dir: "up", size: "a little" }, volume: "ordinary" }, "1000000000000000903", { lower: true }, { paper: true }),
+      ...majorUnreadAnswers("1000000000000000903", { lower: true }, { paper: true }),
+      ...hotAnswers({ coins: 3, lead: { dir: "up", size: "sharply" } }, "1000000000000000903", { lower: true }, { paper: true }),
+    ];
+    for (const line of lines) {
+      const clause = /\. ((?:all my|my|every) [^.]*)\. say stop to opt out\.$/.exec(line)?.[1];
+      assert.ok(clause, line);
+      // Its own book is the subject: no pronoun the coin could be, and no verb it could be the object of.
+      assert.doesNotMatch(clause!, /\b(?:it|its|it's|them|they|that|this|one|i|i'm|play|plays|playing|hold|holding|buy|buying)\b/, clause);
+      assert.match(clause!, /\b(?:paper|practice)\b/);
+    }
+    assert.ok(lines.every((l) => !/i play it on paper|i trade on paper|i'm trading on paper/.test(l)));
   });
 
   it("this mention's own frame first, every frame once, the notice in the agent's case; no coin, no answer", () => {

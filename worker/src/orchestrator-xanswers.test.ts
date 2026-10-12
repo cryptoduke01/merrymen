@@ -2432,6 +2432,27 @@ test("majors: \"it's the play\" and every call without an adjective never stands
   }
 });
 
+test("a paper agent's market answer says paper of its own trading, never with a pronoun the coin it just described could take (red-team 2026-10-12)", async (t) => {
+  // At fbcf8756, mention ...903 (frame 3): "coingecko's view: a heavyweight, rising solidly lately, rising mildly week over week, average volume.
+  // a snapshot. i play it on paper. coingecko: $ETH #2, ~$3.4k, mcap ~$411B, vol ~$18B, 24h +4.2%, 7d +1.1%. say stop to opt out."
+  const id = "100000000000000903";
+  const paper: AgentFacts = { ...FACTS, name: "Alan Al Dale", mode: "paper", calls: [] };
+  const runs: { env: Record<string, string>; research?: XResearch; text: string }[] = [
+    { env: RESEARCH_ON, research: majorsResearch({ change24hPct: 4.2, change7dPct: 1.1 }).research, text: "how's eth doing?" },
+    { env: {}, text: "how's eth doing?" },
+    { env: RESEARCH_ON, research: hotResearch([namedPool("ZXCVBNMQWE", 1, 12.3, 310_000)]).research, text: "what's hot?" },
+  ];
+  for (const run of runs) {
+    const w = await world(t, { env: run.env, ...(run.research ? { research: run.research } : {}), facts: paper });
+    w.setInbox([tag({ id, conversation_id: id, text: `@pine_stoat ${run.text}` })]);
+    await w.step();
+    const text = String(w.sends[0]?.text ?? "");
+    assert.ok(text, run.text);
+    assert.doesNotMatch(text, /\bi play it on paper\b|\bi(?:'m)? trad(?:e|ing) on paper\b/, text);
+    assert.match(text, /\. every trade of mine is a paper trade\. /, text);
+  }
+});
+
 test("advice about a major in other words gets nothing, and no answer predicts, named or not (red-team 2026-10-12)", async (t) => {
   // At fbcf8756, 24 of these 42 pairs were posted: "bottom looks in to me.", "plenty of room left to run." under "thoughts on aping eth", …
   const tags = ["is eth cheap", "thoughts on aping eth", "thoughts on eth here", "thoughts on eth bottom", "thoughts on eth long", "how's eth looking for a bounce",

@@ -1109,7 +1109,12 @@ other owner's agent, and its posting and reply warnings, are unchanged.
   not a call"), none of which names a coin, says "i", "buy", "early", "pick"
   or a target, and no two of which repeat each other at the gate's limit.
   Each is gated like any answer, this mention's own frame first, and the
-  line goes in after it. **What's hot is never drafted at all** (red-team 2026-10-12: a draft
+  line goes in after it. A paper agent's market line (what's hot or a
+  major, read or not) adds one fixed clause about its own trading ("my
+  book is a paper book", "every trade of mine is a paper trade"), never a
+  pronoun or a verb the coin just described could take (red-team
+  2026-10-12: "a snapshot. i play it on paper. coingecko: $ETH #2, …" read
+  as the agent trading ETH). **What's hot is never drafted at all** (red-team 2026-10-12: a draft
   named coins the index never showed it, "chump is the one standing out",
   "wif and bonk are the ones", credited to the index): nothing past the
   floors is one of code's eight "nothing is standing out on the robinhood
