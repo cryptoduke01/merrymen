@@ -235,6 +235,17 @@ test("a model PASS spends the comment's decision once", async (t) => {
   assert.equal(w.sends.length, 0);
 });
 
+test("a comment an active owner on the same X account already answered gets no second reply", async (t) => {
+  const w = await world(t);
+  // Owner A, active, answered this comment on owner B's buy post first (planPass visits A first in tenant order).
+  assert.notEqual(await store.schedulePost(w.db, { tenant: TENANT, xUserId: "111", kind: "answer", dedupeKey: `answer:111:${COMMENT}`,
+    body: "the early curve caught my eye on paper. Say stop to opt out.", nowMs: NOW - 30_000, dueAtMs: NOW - 30_000,
+    replyToTweetId: COMMENT, replyRootTweetId: COMMENT, replyAuthorId: "222" }), null);
+  await w.step(w.poster());
+  assert.equal(w.prompts.length, 0, "no draft for a comment already answered");
+  assert.equal((await w.replies()).length, 0);
+});
+
 test("a drafted comment reply that names sherwood is never posted, however it puts it", async (t) => {
   for (const answer of ["sherwood-1 picks my coins on paper now. Say stop to opt out.", "the new sherwood-1 is still cooking, i bought this one on paper. Say stop to opt out."]) {
     const w = await world(t);

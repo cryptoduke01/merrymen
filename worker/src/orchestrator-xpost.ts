@@ -1455,7 +1455,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       const candidate = replyCandidate(comment, { rootTweetId: parent.tweetId!, xUserId: account.xUserId, coin: coin.label });
       if (!candidate.ok || await repliesOptedOut(shared, account.xUserId, comment.authorId)) continue;
       const dedupeKey = `reply:${account.xUserId}:${comment.id}`;
-      if (await keyStatus(shared, dedupeKey) !== null) continue;
+      // Nor one an active owner on the same X account already answered: one comment, one reply.
+      if (await keyStatus(shared, dedupeKey) !== null || await keyStatus(shared, `answer:${account.xUserId}:${comment.id}`) !== null) continue;
       const dueAtMs = replyDueAt({ parent, authorId: comment.authorId, commentAtMs: comment.createdAtMs,
         posts, tenant: account.tenant, xUserId: account.xUserId, nowMs, tz, clock: PLAN_CLOCK, perDay: cadenceOf(account.tenant).perDay, ownerPerDay: account.prefs.perDay });
       if (dueAtMs === null) continue;
