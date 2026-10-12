@@ -171,6 +171,32 @@ export async function readCoinMarket(id: string, o: CoinReadOptions): Promise<Co
   }, (failure) => ({ market: null, failed: true, failure }), { lane: LANE, route, budgetMs: o.timeoutMs, ...(o.fleet ? { fleet: o.fleet } : {}) });
 }
 
+/** Several coins' markets, in the asked order: only rows whose id was asked, one each. */
+export interface CoinMarketsRead extends FeedResult { markets: CoinMarket[] }
+
+/** At most this many coins in one markets read. */
+export const MARKETS_MAX = 5;
+
+/**
+ * SEVERAL COINS' MARKETS IN ONE READ (2026-10-12): what "how's the market?"
+ * reads for the big coins (bitcoin, ethereum, solana), one /coins/markets
+ * page on the fleet's CoinGecko Pro lane instead of one read per coin. Ids
+ * that are no lookup key, past MARKETS_MAX, or repeated are dropped before
+ * anything is asked; a row for an id not asked is never read as one asked.
+ * A page with none of the asked rows is a failure, never an empty market.
+ */
+export async function readCoinMarkets(ids: readonly string[], o: CoinReadOptions): Promise<CoinMarketsRead> {
+  const want = [...new Set(ids.filter((id) => typeof id === "string" && COIN_ID.test(id)))].slice(0, MARKETS_MAX);
+  if (!want.length) return { markets: [], failed: true, failure: "invalid-id" };
+  const route = `/coins/markets?vs_currency=usd&ids=${want.join(",")}&price_change_percentage=24h,7d`;
+  return cachedCoinGecko<CoinMarketsRead>(`markets:${want.join(",")}`, async (headers, base, remainingMs) => {
+    const r = await getMain(base, headers, route, Math.min(o.timeoutMs, remainingMs));
+    if (!r.ok) return { markets: [], failed: true, failure: r.failure, ...(r.retryAfterMs ? { retryAfterMs: r.retryAfterMs } : {}) };
+    const markets = want.map((id) => parseCoinMarket(r.body, id)).filter((m): m is CoinMarket => m !== null);
+    return markets.length ? { markets, failed: false, observedAt: r.observedAt } : { markets: [], failed: true, failure: "invalid-shape" };
+  }, (failure) => ({ markets: [], failed: true, failure }), { lane: LANE, route, budgetMs: o.timeoutMs, ...(o.fleet ? { fleet: o.fleet } : {}) });
+}
+
 /** CoinGecko's trending coins, in its order. */
 export async function readCoinTrending(o: CoinReadOptions): Promise<CoinTrendingRead> {
   const route = "/search/trending";

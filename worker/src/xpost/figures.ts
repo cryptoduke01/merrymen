@@ -27,7 +27,9 @@
  *            number, then %: +1.2%, -38%, +0%.
  *   rank     #1 to #999.
  *   sections "coingecko:" (one coin's rank, price, market cap, 24h volume,
- *            24h and 7d change), "geckoterminal robinhood: trending" (up to
+ *            24h and 7d change), "coingecko 24h:" (up to three big coins,
+ *            each its day's change: the market overview, 2026-10-12),
+ *            "geckoterminal robinhood: trending" (up to
  *            three coins, each its 24h change and volume), "fomo: most bought"
  *            (up to two tickers), "coingecko: trending" (up to three
  *            tickers), "bitquery: 1h" (buys and sells in money), joined by
@@ -55,6 +57,8 @@ import { answerWord } from "./words";
 export const FIGURES_MAX = 6;
 /** Coins one trending section shows, Fomo's tickers, CoinGecko's trending tickers. */
 export const POOLS_MAX = 3;
+/** The big coins one market overview shows, each by its day's change: bitcoin, ether, solana. */
+export const MAJORS_MAX = 3;
 export const CROWD_MAX = 2;
 export const TRENDING_MAX = 3;
 
@@ -233,6 +237,8 @@ export function rankOf(v: unknown): string | null {
 export type FiguresSection =
   /** A coin by name or ticker, from CoinGecko's markets: "coingecko: $BTC #1, ~$97k, mcap …". */
   | { kind: "major"; symbol: string; rank?: number | null; priceUsd?: number | null; marketCapUsd?: number | null; volume24hUsd?: number | null; change24hPct?: number | null; change7dPct?: number | null }
+  /** The big coins' day, from CoinGecko's markets: "coingecko 24h: $BTC +1.2%, $ETH -0.8%, $SOL +3.1%" (the market overview). */
+  | { kind: "majors"; coins: { symbol: string; change24hPct?: number | null }[] }
   /** Robinhood Chain coins trending on GeckoTerminal that cleared the fleet's floors. */
   | { kind: "pools"; coins: { symbol: string; change24hPct?: number | null; volume24hUsd?: number | null }[] }
   /** The coins most Fomo traders bought in the window, by ticker only. */
@@ -258,6 +264,7 @@ function tickers(list: readonly unknown[], max: number): string[] {
 /** The figures a section can actually show, in its own order, after every rule above. */
 type Shown =
   | { kind: "major"; ticker: string; rank: string | null; price: string | null; mcap: string | null; vol: string | null; d1: string | null; d7: string | null }
+  | { kind: "majors"; coins: { ticker: string; d1: string }[] }
   | { kind: "pools"; coins: { ticker: string; d1: string | null; vol: string | null }[] }
   | { kind: "crowd"; tickers: string[] }
   | { kind: "trending"; tickers: string[] }
@@ -274,6 +281,16 @@ function shownOf(spec: FiguresSpec): Shown[] {
       const m: Shown = { kind: "major", ticker, rank: rankOf(s.rank), price: compactMoney(s.priceUsd), mcap: compactMoney(s.marketCapUsd),
         vol: compactMoney(s.volume24hUsd), d1: signedPercent(s.change24hPct), d7: signedPercent(s.change7dPct) };
       if (m.rank || m.price || m.mcap || m.vol || m.d1 || m.d7) out.push(m);
+    } else if (s.kind === "majors") {
+      // Each coin by its day's change, or not at all: a ticker with no figure is never shown.
+      const coins: { ticker: string; d1: string }[] = [];
+      for (const c of Array.isArray(s.coins) ? s.coins : []) {
+        const ticker = cleanTicker(c?.symbol), d1 = signedPercent(c?.change24hPct);
+        if (!ticker || !d1 || coins.some((x) => x.ticker === ticker)) continue;
+        coins.push({ ticker, d1 });
+        if (coins.length >= MAJORS_MAX) break;
+      }
+      if (coins.length) out.push({ kind: "majors", coins });
     } else if (s.kind === "pools") {
       const coins: { ticker: string; d1: string | null; vol: string | null }[] = [];
       for (const c of Array.isArray(s.coins) ? s.coins : []) {
@@ -299,6 +316,7 @@ function shownOf(spec: FiguresSpec): Shown[] {
 function figuresIn(s: Shown): number {
   switch (s.kind) {
     case "major": return [s.rank, s.price, s.mcap, s.vol, s.d1, s.d7].filter((x) => x !== null).length;
+    case "majors": return s.coins.length;
     case "pools": return s.coins.reduce((n, c) => n + (c.d1 ? 1 : 0) + (c.vol ? 1 : 0), 0);
     case "flow": return 2;
     default: return 0;
@@ -325,6 +343,8 @@ function renderSection(s: Shown): string {
       const rest = [s.price, s.mcap ? `mcap ${s.mcap}` : null, s.vol ? `vol ${s.vol}` : null, s.d1 ? `24h ${s.d1}` : null, s.d7 ? `7d ${s.d7}` : null].filter((x): x is string => x !== null);
       return [head, ...rest].join(", ");
     }
+    case "majors":
+      return `coingecko 24h: ${s.coins.map((c) => `$${c.ticker} ${c.d1}`).join(", ")}`;
     case "pools":
       return `geckoterminal robinhood: trending ${s.coins.map((c) => [`$${c.ticker}`, c.d1 ? `24h ${c.d1}` : null, c.vol ? `vol ${c.vol}` : null].filter((x): x is string => x !== null).join(" ")).join(", ")}`;
     case "crowd":
@@ -355,12 +375,13 @@ const RANK = String.raw`#[1-9]\d{0,2}`;
 // A coin with no figure is never rendered, so the grammar refuses one: after
 // the ticker a field must follow (the lookahead), whichever it is.
 const MAJOR = String.raw`coingecko: ${T}(?=[ ,])(?: ${RANK})?(?:, ${MONEY})?(?:, mcap ${MONEY})?(?:, vol ${MONEY})?(?:, 24h ${PCT})?(?:, 7d ${PCT})?`;
+const MAJORS = String.raw`coingecko 24h: ${T} ${PCT}(?:, ${T} ${PCT}){0,${MAJORS_MAX - 1}}`;
 const POOL = String.raw`${T}(?= )(?: 24h ${PCT})?(?: vol ${MONEY})?`;
 const POOLS = String.raw`geckoterminal robinhood: trending ${POOL}(?:, ${POOL}){0,${POOLS_MAX - 1}}`;
 const CROWD = String.raw`fomo: most bought ${T}(?:, ${T}){0,${CROWD_MAX - 1}}`;
 const TRENDING = String.raw`coingecko: trending ${T}(?:, ${T}){0,${TRENDING_MAX - 1}}`;
 const FLOW = String.raw`bitquery: 1h buys ${MONEY}, sells ${MONEY}`;
-const SECTION = `(?:${MAJOR}|${POOLS}|${CROWD}|${TRENDING}|${FLOW})`;
+const SECTION = `(?:${MAJOR}|${MAJORS}|${POOLS}|${CROWD}|${TRENDING}|${FLOW})`;
 /** The line, whole: one to five sections joined by "; ", ending with a full stop. Nothing else. */
 const LINE = String.raw`${SECTION}(?:; ${SECTION}){0,4}\.`;
 export const FIGURES_LINE = new RegExp(`^${LINE}$`);
@@ -386,7 +407,7 @@ export function admitFiguresLine(line: unknown): line is string {
 
 /** Each shorter form of a section list, least telling field first, down to one field; never the empty list. */
 function* shorter(list: Shown[]): Generator<Shown[]> {
-  let cur = list.map((s) => (s.kind === "pools" ? { ...s, coins: s.coins.map((c) => ({ ...c })) } : { ...s })) as Shown[];
+  let cur = list.map((s) => (s.kind === "pools" || s.kind === "majors" ? { ...s, coins: s.coins.map((c) => ({ ...c })) } : { ...s })) as Shown[];
   const emit = (next: Shown[]) => { cur = next.filter((s) => figuresIn(s) > 0 || s.kind === "crowd" || s.kind === "trending"); return cur; };
   const pools = (): Extract<Shown, { kind: "pools" }> | undefined => cur.find((s): s is Extract<Shown, { kind: "pools" }> => s.kind === "pools");
   const fewerCoins = (down: number) => { const p = pools()!; return emit(cur.map((s) => (s === p ? { ...p, coins: p.coins.slice(0, down) } : s))); };
@@ -408,6 +429,15 @@ function* shorter(list: Shown[]): Generator<Shown[]> {
     const m = cur.find((s): s is Extract<Shown, { kind: "major" }> => s.kind === "major");
     if (!m || m[field] === null || figuresIn(m) <= 1) continue;
     yield emit(cur.map((s) => (s === m ? { ...m, [field]: null } : s)));
+  }
+  // The market overview: the chain's coins went above; then the big coins, the last named first to go.
+  const majors = (): Extract<Shown, { kind: "majors" }> | undefined => cur.find((s): s is Extract<Shown, { kind: "majors" }> => s.kind === "majors");
+  // Beside the big coins, the chain's last coin goes whole before any big coin does.
+  const lastPools = pools();
+  if (majors() && lastPools) yield emit(cur.filter((s) => s !== lastPools));
+  while ((majors()?.coins.length ?? 0) > 1) {
+    const m = majors()!;
+    yield emit(cur.map((s) => (s === m ? { ...m, coins: m.coins.slice(0, -1) } : s)));
   }
 }
 

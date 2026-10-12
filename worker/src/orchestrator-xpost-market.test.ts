@@ -10,7 +10,7 @@ import { describe, it } from "node:test";
 import { admitAgentLine } from "./groupchat/policy";
 import { REPEAT_LIMIT, similarity } from "./social-post";
 import { admitXPost } from "./xpost/gate";
-import { hotAnswers, hotNoneAnswers, hotUnreadAnswers, majorAnswers, majorUnreadAnswers, moveOf, type HotRead, type MajorRead, type Move } from "./xpost/market";
+import { hotAnswers, hotNoneAnswers, hotUnreadAnswers, majorAnswers, majorsDirOf, majorUnreadAnswers, marketAnswers, moveOf, type HotRead, type MajorRead, type MarketRead, type Move } from "./xpost/market";
 import { withoutReplyOptOut } from "./xpost/replies";
 
 const MOVES: (Move | null)[] = [null, { dir: "flat", size: null },
@@ -105,6 +105,56 @@ describe("what's hot in code's words", () => {
     assert.ok(a.every((l) => l.endsWith(". Say stop to opt out.")));
     assert.ok(hotAnswers(read, "1", { lower: true }).every((l) => l.endsWith(". say stop to opt out.")));
     assert.deepEqual(hotAnswers({ coins: 0, lead: null }, "1", { lower: false }), []);
+  });
+
+  it("how's the market, in code's casual words: every line of every read clears the gate, none repeats another of its read, none names a coin or a figure (2026-10-12)", () => {
+    const told = (text: string, mode: "live" | "paper" | null, recentOwn: string[], noticeShown: boolean) => admitXPost(text, { kind: "reply", answer: true, noticeShown,
+      agentName: "Alan Al Dale", mode, coins: [], recentOwn, recentFleet: [] }, (r, c) => admitAgentLine(r, c));
+    const majorsReads: MarketRead["majors"][] = [{ dir: "up" }, { dir: "down" }, { dir: "mixed" }, { dir: "flat" }, null];
+    const chainReads: MarketRead["chain"][] = [{ coins: 3, lead: { dir: "up", size: "sharply" } }, { coins: 1, lead: null }, { coins: 0, lead: null }, null];
+    for (const majors of majorsReads) {
+      for (const chain of chainReads) {
+        for (const mode of ["live", "paper", null] as const) {
+          const lines = marketAnswers({ majors, chain }, "1000000000000000777", { lower: true }, { paper: mode === "paper" });
+          assert.equal(lines.length, 64);
+          assert.equal(new Set(lines).size, 64);
+          const said: string[] = [];
+          for (const line of lines) {
+            const words = withoutReplyOptOut(line);
+            assert.doesNotMatch(words, /\p{N}|\$|@|#|https?:|0x/u, line);
+            assert.doesNotMatch(words, /\b(?:btc|eth|sol|bitcoin|ether|ethereum|solana|pepe|bonk|wif|doge)\b/i, line);
+            assert.doesNotMatch(words, /\b(?:buy|buying|bought|sell|hold|holding|entry|target|bullish|bearish|moon|pump|bounce|bottom|recover\w*|cheap|from here)\b/i, line);
+            const v = told(line, mode, said, false);
+            assert.ok(v.ok, `${JSON.stringify(majors)} ${JSON.stringify(chain)} ${mode}: ${line} → ${v.ok ? "" : v.reason}`);
+            said.unshift(line);
+          }
+          // Told already: the same words, no notice, still admitted.
+          for (const line of marketAnswers({ majors, chain }, "9", { lower: false }, { paper: mode === "paper", notice: false })) {
+            assert.doesNotMatch(line, /opt out/i);
+            const v = told(line, mode, [], true);
+            assert.ok(v.ok, `${line} → ${v.ok ? "" : v.reason}`);
+          }
+        }
+      }
+    }
+    // The words say what was read, and only that.
+    const up = marketAnswers({ majors: { dir: "up" }, chain: { coins: 3, lead: null } }, "1", { lower: true });
+    assert.ok(up.every((l) => /robinhood|chain|onchain|geckoterminal|trenches|index|trending|over there/.test(l)), "it says where the movers are");
+    const unread = marketAnswers({ majors: null, chain: null }, "1", { lower: true });
+    assert.ok(unread.every((l) => /\bno (?:read|view|glimpse|data|word|signal)\b|can't spot|zilch from/.test(l)), "no read is said as none");
+    assert.equal(majorsDirOf([moveOf(1.2), moveOf(3.4), moveOf(0.6)])?.dir, "up");
+    assert.equal(majorsDirOf([moveOf(-1.2), moveOf(0.1), moveOf(-4)])?.dir, "down");
+    assert.equal(majorsDirOf([moveOf(1.2), moveOf(-3.4), null])?.dir, "mixed");
+    assert.equal(majorsDirOf([moveOf(0.2), moveOf(-0.3), null])?.dir, "flat");
+    assert.equal(majorsDirOf([null, null]), null);
+  });
+
+  it("a paper agent's market line closes with a clause about its own book, never one the coins could take (2026-10-12)", () => {
+    for (const line of marketAnswers({ majors: { dir: "up" }, chain: { coins: 2, lead: null } }, "5", { lower: true }, { paper: true })) {
+      const clause = /\. ((?:all my|my|every) [^.]*)\. say stop to opt out\.$/.exec(line)?.[1];
+      assert.ok(clause, line);
+      assert.doesNotMatch(clause!, /\b(?:it|its|it's|them|they|that|this|one|i|i'm|play|plays|playing|hold|holding|buy|buying)\b/, clause);
+    }
   });
 
   it("for someone already told they can say stop, every frame leaves the notice off and still clears the gate told so (2026-10-12)", () => {

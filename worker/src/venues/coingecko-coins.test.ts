@@ -6,7 +6,7 @@
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import {
-  MAJORS_MAX_RANK, coinQuery, parseCoinMarket, parseCoinSearch, parseCoinTrending, parseTokenCoinIds, pickMajor, readChainListings, readCoinMarket, readCoinTrending, readTopCoins,
+  MAJORS_MAX_RANK, coinQuery, parseCoinMarket, parseCoinSearch, parseCoinTrending, parseTokenCoinIds, pickMajor, readChainListings, readCoinMarket, readCoinMarkets, readCoinTrending, readTopCoins,
   searchCoinList, type CoinHit,
 } from "./coingecko-coins";
 import { resetGeckoFeedsForTest } from "./geckoterminal";
@@ -222,6 +222,36 @@ describe("read on the fleet's CoinGecko Pro lane, and only with its key", () => 
     globalThis.fetch = (async () => { calls++; return Response.json(SEARCH); }) as typeof globalThis.fetch;
     assert.equal((await searchCoinList("btc&vs=1", { timeoutMs: 4000 })).failure, "invalid-query");
     assert.equal((await readCoinMarket("../simple/price", { timeoutMs: 4000 })).failure, "invalid-id");
+    assert.equal((await readCoinMarkets(["../simple/price", "BTC!"], { timeoutMs: 4000 })).failure, "invalid-id");
     assert.equal(calls, 0);
+  });
+
+  it("several coins' markets in one read, for how's the market: only the rows asked, in the order asked (2026-10-12)", async () => {
+    const urls: string[] = [];
+    const rows = [
+      { id: "solana", symbol: "sol", name: "Solana", current_price: 182.4, market_cap: 85e9, market_cap_rank: 6, total_volume: 4e9, price_change_percentage_24h_in_currency: 3.1 },
+      { id: "bitcoin", symbol: "btc", name: "Bitcoin", current_price: 97_400, market_cap: 1.9e12, market_cap_rank: 1, total_volume: 41e9, price_change_percentage_24h_in_currency: 1.2 },
+      { id: "bitcoin-inu", symbol: "btc", name: "Bitcoin Inu", current_price: 0.001, market_cap: 1e6, market_cap_rank: 3000 },
+      ...MARKETS,
+    ];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      urls.push(String(input));
+      assert.equal(new Headers(init?.headers).get("x-cg-pro-api-key"), "private-pro-key");
+      return Response.json(rows);
+    }) as typeof globalThis.fetch;
+    const r = await readCoinMarkets(["bitcoin", "ethereum", "solana", "bitcoin"], { timeoutMs: 4000 });
+    assert.equal(r.failed, false);
+    assert.deepEqual(r.markets.map((m) => [m.id, m.symbol, m.rank, m.change24hPct]), [["bitcoin", "btc", 1, 1.2], ["ethereum", "eth", 2, 1.24], ["solana", "sol", 6, 3.1]]);
+    assert.deepEqual(urls, ["https://pro-api.coingecko.com/api/v3/coins/markets?vs_currency=usd&ids=bitcoin,ethereum,solana&price_change_percentage=24h,7d"], "one read, each id once");
+    // Inside the minute: the lane's cache.
+    now += 30_000;
+    await readCoinMarkets(["bitcoin", "ethereum", "solana"], { timeoutMs: 4000 });
+    assert.equal(urls.length, 1);
+    // A page with none of the asked rows is a failure, never an empty market; no key, nothing asked.
+    resetGeckoFeedsForTest({ now: () => now, sleep: async (ms) => { now += ms; } });
+    globalThis.fetch = (async () => Response.json([{ id: "dogecoin", symbol: "doge", name: "Dogecoin", market_cap_rank: 8 }])) as typeof globalThis.fetch;
+    assert.equal((await readCoinMarkets(["bitcoin"], { timeoutMs: 4000 })).failure, "invalid-shape");
+    delete process.env.MERRYMEN_COINGECKO_PRO_API_KEY;
+    assert.equal((await readCoinMarkets(["bitcoin"], { timeoutMs: 4000 })).failure, "no-pro-key");
   });
 });

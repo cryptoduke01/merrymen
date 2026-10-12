@@ -328,6 +328,51 @@ describe("fitting it into the answer", () => {
   });
 });
 
+describe("how's the market: the big coins' day beside the chain's movers (2026-10-12)", () => {
+  const MARKET: FiguresSpec = [
+    { kind: "majors", coins: [{ symbol: "btc", change24hPct: 1.234 }, { symbol: "eth", change24hPct: -0.84 }, { symbol: "sol", change24hPct: 3.08 }] },
+    { kind: "pools", coins: [{ symbol: "ABC", change24hPct: 42.07 }, { symbol: "DEF", change24hPct: -8.3 }, { symbol: "GHI", change24hPct: 5 }] },
+    { kind: "crowd", symbols: ["DEF"] },
+  ];
+  it("renders in its own grammar, each big coin by its day's change only, within the handful of figures", () => {
+    const line = renderFiguresLine(MARKET)!;
+    assert.equal(line, "coingecko 24h: $BTC +1.2%, $ETH -0.8%, $SOL +3.1%; geckoterminal robinhood: trending $ABC 24h +42.1%, $DEF 24h -8.3%, $GHI 24h +5%; fomo: most bought $DEF.");
+    assert.ok(admitFiguresLine(line));
+    assert.match(line, FIGURES_LINE);
+    assert.deepEqual(figuresTickers(line), ["BTC", "ETH", "SOL", "ABC", "DEF", "GHI", "DEF"]);
+    assert.ok((line.match(/[+-]\d/g) ?? []).length <= FIGURES_MAX);
+  });
+  it("a big coin with no change, a dirty ticker or one past three is left out, never shown bare; none at all is no section", () => {
+    assert.equal(renderFiguresLine([{ kind: "majors", coins: [{ symbol: "btc", change24hPct: null }, { symbol: "e.th", change24hPct: 1 }, { symbol: "sol", change24hPct: -2 },
+      { symbol: "bnb", change24hPct: 1 }, { symbol: "xrp", change24hPct: 1 }, { symbol: "ada", change24hPct: 1 }] }]), "coingecko 24h: $SOL -2%, $BNB +1%, $XRP +1%.");
+    assert.equal(renderFiguresLine([{ kind: "majors", coins: [{ symbol: "btc" }, { symbol: "pump", change24hPct: 9 }] }]), null);
+    for (const bad of ["coingecko 24h: $BTC.", "coingecko 24h: $BTC +1.2%, $ETH -0.8%, $SOL +3.1%, $BNB +1%.", "coingecko 24h: $BTC ~$97k.", "coingecko 24h: $BTC +1.2% buy."]) {
+      assert.equal(admitFiguresLine(bad), false, bad);
+    }
+  });
+  it("too long for X: the third chain coin, fomo's, then the chain's coins go before any big coin, and the big coins last of all", () => {
+    const seen: (string | null)[] = [];
+    for (let n = 4; n <= 270; n++) {
+      const f = withFigures(`${"z".repeat(n)}. ${NOTICE}`, MARKET);
+      if (f.line) assert.ok(xWeightedLength(f.text) <= X_MAX_WEIGHTED, String(n));
+      if (seen.at(-1) !== f.line) seen.push(f.line);
+    }
+    assert.deepEqual(seen, [
+      renderFiguresLine(MARKET),
+      "coingecko 24h: $BTC +1.2%, $ETH -0.8%, $SOL +3.1%; geckoterminal robinhood: trending $ABC 24h +42.1%, $DEF 24h -8.3%; fomo: most bought $DEF.",
+      "coingecko 24h: $BTC +1.2%, $ETH -0.8%, $SOL +3.1%; geckoterminal robinhood: trending $ABC 24h +42.1%, $DEF 24h -8.3%.",
+      "coingecko 24h: $BTC +1.2%, $ETH -0.8%, $SOL +3.1%; geckoterminal robinhood: trending $ABC 24h +42.1%.",
+      "coingecko 24h: $BTC +1.2%, $ETH -0.8%, $SOL +3.1%.",
+      "coingecko 24h: $BTC +1.2%, $ETH -0.8%.",
+      "coingecko 24h: $BTC +1.2%.",
+      null,
+    ]);
+    // Read back without its line, notice or none.
+    const posted = withFigures("big caps look perky, and the trenches feel lively. not a call, purely the tape.", MARKET).text;
+    assert.equal(withoutFiguresLine(posted), "big caps look perky, and the trenches feel lively. not a call, purely the tape.");
+  });
+});
+
 describe("never read back as its own words", () => {
   it("a posted answer without its line, the notice where it was", () => {
     const posted = withFigures(`its up a little today on coingecko. ${NOTICE}`, BTC).text;

@@ -85,7 +85,7 @@ function coprimeStride(m: number): number {
  * first part, so two lines that share a paper clause already share that part
  * and nothing more.
  */
-const CASUAL_PAPER: readonly string[] = Object.freeze([
+export const CASUAL_PAPER: readonly string[] = Object.freeze([
   "my book's on paper",
   "my trades are paper trades",
   "my money is practice money",

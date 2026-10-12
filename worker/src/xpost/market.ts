@@ -26,6 +26,7 @@
  *
  * Pure: no I/O, no model, no provider, no clock.
  */
+import { CASUAL_PAPER, latinLines } from "./casual";
 import { noticeFor, type CodeLineOptions } from "./replies";
 
 /** A day's move as code reads it: which way, and how far, by code's own thresholds. Never a figure. */
@@ -261,4 +262,83 @@ const MAJOR_UNREAD_LINES: readonly string[] = Object.freeze([
 /** A major unread: every line, this mention's own first. */
 export function majorUnreadAnswers(seed: string, style: { lower: boolean }, o: CodeLineOptions = {}): string[] {
   return framed(MAJOR_UNREAD_LINES, seed, style, o);
+}
+
+// ── how's the market ───────────────────────────────────────────────────────
+
+/**
+ * "HOW'S THE MARKET?" AS CODE READ IT (the owner's decision, 2026-10-12):
+ * the big coins' day on CoinGecko (bitcoin, ether, solana) and the Robinhood
+ * Chain coins past the fleet's floors on the index, each by code's own
+ * thresholds. Null where a source was not read. The figures themselves go in
+ * code's line (figures.ts "coingecko 24h:" and "geckoterminal robinhood:"),
+ * never in these words.
+ */
+export interface MarketRead {
+  /** Which way the big coins went on the day, together: all up, all down, some each way, or all flat. */
+  majors: { dir: "up" | "down" | "mixed" | "flat" } | null;
+  /** The chain's movers past the floors: how many (0: none), and the first one's day. */
+  chain: HotRead | null;
+}
+
+/** The big coins' day, read together from their moves (moveOf): null when no move is known. */
+export function majorsDirOf(moves: readonly (Move | null)[]): MarketRead["majors"] {
+  const known = moves.filter((m): m is Move => m !== null);
+  if (!known.length) return null;
+  const up = known.some((m) => m.dir === "up"), down = known.some((m) => m.dir === "down");
+  return { dir: up && down ? "mixed" : up ? "up" : down ? "down" : "flat" };
+}
+
+/**
+ * THE BIG COINS, IN CASUAL WORDS: eight subjects, each with a predicate of
+ * its own for each read. A subject is shared across reads at its own index
+ * only, and every predicate's words are its own, so two market lines share at
+ * most one part's words (casual.ts latinLines) and a subject.
+ */
+const MAJORS_SUBJECT: readonly string[] = ["majors", "the heavyweights", "blue chips", "big caps", "the giants", "the bellwethers", "the leaders", "the old guard"];
+const MAJORS_SAID: Readonly<Record<NonNullable<MarketRead["majors"]>["dir"] | "unread", readonly string[]>> = Object.freeze({
+  up: ["lean green today", "are climbing steadily", "look perky", "are grinding upward", "are edging skyward", "are inching forward", "are on the front foot", "are pushing ahead"],
+  down: ["are sliding a little", "seem tired", "are softening a touch", "are easing off", "dipped slightly", "are drifting downward", "are taking a breather", "are sagging gently"],
+  mixed: ["are split down the middle", "disagree today", "are choppy again", "are undecided so far", "are a mixed bag", "are tugging both ways", "can't agree", "are torn"],
+  flat: ["barely budged", "are flat as a pancake", "are idling around", "are sitting motionless", "are unchanged overall", "are treading water", "stay calm and steady", "are napping quietly"],
+  // No read: the subject after its own lead, never a guess at which way.
+  unread: ["no read on", "can't spot", "no view of", "no glimpse of", "no data on", "zilch from", "no word yet on", "no signal from"],
+});
+
+/**
+ * The chain's movers, in casual words: one, a few, none, or no read. Never a
+ * name: the line after the words shows the coins. Each index says where in a
+ * word of its own (robinhood, the chain, onchain, geckoterminal, the
+ * trenches, the index, the trending page), so two lines of one read never
+ * share a place word as well as a part.
+ */
+const CHAIN_SAID: Readonly<Record<"one" | "some" | "none" | "unread", readonly string[]>> = Object.freeze({
+  some: ["a few tokens are moving on robinhood", "the chain has a handful of movers", "a couple of coins are busy onchain", "geckoterminal shows several runners",
+    "some action is brewing over there", "the trenches feel lively", "the index is buzzing a bit", "the trending page has a pack running"],
+  one: ["a single token is moving on robinhood", "the chain has a lone mover", "one coin is busy onchain", "geckoterminal shows a solo runner",
+    "a bit of action is brewing over there", "the trenches have a clear standout", "the index has a sole buzzer", "the trending page has a runaway"],
+  none: ["robinhood is pretty quiet", "the chain is resting easy", "onchain feels sleepy", "geckoterminal shows no standouts",
+    "no action brewing anywhere", "the trenches are snoozing hard", "the index is mellow lately", "the trending page is a ghost town"],
+  unread: ["robinhood is a blank right now", "couldn't pull up the chain", "onchain didn't load for me", "geckoterminal went quiet on me",
+    "no peek at any action yet", "the trenches are hidden from sight", "the index stayed unread", "the trending page is dark"],
+});
+
+/** How a market line closes: a read, never a call, each in words of its own. */
+const MARKET_CLOSE: readonly string[] = ["not a call, purely the tape", "snapshot only, nothing implied", "make of it whatever you like", "just reporting, never recommending",
+  "no tips attached whatsoever", "a glance, nothing deeper", "for what it's worth, cheers", "observations only, not a plan"];
+
+/**
+ * HOW'S THE MARKET, ANSWERED BY CODE: the big coins in casual words, the
+ * chain's movers, and a close that says it is a read — every line for this
+ * read, this mention's own first, sixty-four of them (casual.ts latinLines).
+ * Nothing read at all: still answered, as a read it could not make. A paper
+ * agent's line adds a clause about its own book (MARKET_PAPER).
+ */
+export function marketAnswers(read: MarketRead, seed: string, style: { lower: boolean }, o: CodeLineOptions = {}): string[] {
+  const dir = read?.majors?.dir ?? "unread";
+  const majors = MAJORS_SUBJECT.map((subject, i) => (dir === "unread" ? `${MAJORS_SAID.unread[i]!} ${subject}` : `${subject} ${MAJORS_SAID[dir][i]!}`));
+  const chain = CHAIN_SAID[!read?.chain ? "unread" : read.chain.coins === 0 ? "none" : read.chain.coins === 1 ? "one" : "some"];
+  const notice = noticeFor(style, o);
+  const paperOf = new Map(MARKET_CLOSE.map((close, i) => [close, CASUAL_PAPER[i % CASUAL_PAPER.length]!] as const));
+  return latinLines([majors, chain, MARKET_CLOSE], seed, (a, b, c) => `${a}, and ${b}. ${c}${o.paper === true ? `. ${paperOf.get(c)!}` : ""}.${notice}`);
 }
