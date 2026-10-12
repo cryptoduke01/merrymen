@@ -116,7 +116,30 @@ const ABUSE_OR_SENSITIVE = /\b(?:fuck\w*|shit\w*|bitch\w*|idiot\w*|moron\w*|reta
 const DISTRESS = new RegExp(
   String.raw`\b(?:(?:end|ends|ending|ended)\s+(?:(?:my|his|her|their|our|your|me)\s+)?(?:own\s+)?li(?:fe|ves)|(?:end|ending|ended)\s+it(?:\s+all)?\b|(?:off|offing)\s+(?:my|him|her|them|your|our)sel(?:f|ves)` +
     String.raw`|jump(?:s|ed|ing)?\s+(?:off|from|in\s+front)|(?:take|takes|taking|took|taken)\s+(?:my|his|her|their|our|your)\s+own\s+li(?:fe|ves)|not\s+worth\s+living` +
-    String.raw`|lost\s+(?:it\s+)?(?:all|everything)|losing\s+(?:it\s+)?(?:all|everything)|passed\s+away)\b`,
+    String.raw`|lost\s+(?:it\s+)?(?:all|everything)|losing\s+(?:it\s+)?(?:all|everything)|passed\s+away` +
+    // AND DESPAIR AND GRIEF IN OTHER WORDS (red-team 2026-10-12): "lost my
+    // savings, should i give up on life?" and "should i hurt myself after
+    // losing everything?" got a joking decline too.
+    String.raw`|give\s+up\s+on\s+(?:life|living|everything|myself)|(?:want|wanna|going|gonna|ready|deserve|wish\s+i\s+could)\s+to\s+die|\bkms|unalive\w*|hurt(?:ing)?\s+(?:my|him|her|them|your)sel(?:f|ves)` +
+    String.raw`|(?:lost|losing)\s+(?:all\s+)?(?:my|our|his|her|their)\s+(?:life\s+)?savings|no\s+reason\s+to\s+live|can'?t\s+go\s+on|how\s+(?:do|can|will)\s+i\s+go\s+on` +
+    String.raw`|died|death|funeral|grief|griev\w*)\b`,
+  "i",
+);
+
+/**
+ * ADVICE CODE DECLINES IS ADVICE ABOUT A COIN OR THE MARKET (red-team review,
+ * 2026-10-12). "should i" was enough to be flagged, so a "should i" about a
+ * life, a job or a relationship got code's playful decline. Only a tag that
+ * names buying, selling or holding, a coin or a $ticker, a contract, the
+ * market or crypto, a price, a target or a direction is flagged for a
+ * decline; any other advice asked for is answered by nothing, as before the
+ * decline (advice-request).
+ */
+const MARKET_ADVICE = new RegExp(
+  String.raw`\$[a-z]|\b(?:buy\w*|bought|sell\w*|sold|ape|apes|aped|aping|hold|holds|holding|hodl\w*|trade|trades|trading|invest\w*|coins?|tokens?|crypto\w*|markets?|charts?|prices?` +
+    String.raw`|pump\w*|dump\w*|moon\w*|bags?|entry|entries|exit|exits|targets?|bull\w*|bear\w*|gems?|memecoins?|alts?|altcoins?|eth|btc|sol|bitcoin|ether|ethereum|solana|defi|dip|dips|ath` +
+    String.raw`|leverage|long|short|positions?|portfolio|profits?|gains?|liquidity|ticker|contract|ca|rug\w*|undervalued|overvalued|\d+\s*x|ten\s*x|hundred\s*x` +
+    String.raw`|(?:go|goes|going|gonna|headed|heading)\s+(?:up|down|higher|lower)|to\s+zero|(?:what'?s|whats|what\s+is)\s+(?:hot|trending|moving|pumping))\b`,
   "i",
 );
 const SPAM_OR_INSTRUCTIONS = new RegExp(
@@ -511,6 +534,8 @@ export function tagCandidate(reply: XReply, ctx: { xUserId: string; research?: b
   // A shill, however it starts, is no question; nor is advice about what it buys itself (ADVICE_ASKED, OWN_BUYING_ASK).
   if (asksAdvice && !ADVICE_ASKED.test(text)) return no("advice-statement");
   if (asksAdvice && OWN_BUYING_ASK.test(advice)) return no("advice-own-buying");
+  // Advice about anything but a coin or the market is none of code's to decline (MARKET_ADVICE): nothing, as before.
+  if (asksAdvice && !address && !MARKET_ADVICE.test(advice)) return no("advice-request");
   return { ok: true, text, ...(address ? { address } : {}), ...(others(lead) ? { otherHandles: true as const } : {}), ...(greeting ? { greeting: true as const } : {}),
     ...(asksAdvice ? { advice: true as const } : {}) };
 }
