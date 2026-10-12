@@ -11602,7 +11602,9 @@ async function runFomoPass(boot: FomoBoot): Promise<void> {
       // RESEARCH FOR THE COINS A REVIEW IS ABOUT TO LOOK AT (fomo/review-candidates.ts):
       // what each child here named, queued only for an agent on the operator's
       // research allowlist (MERRYMEN_DECISION_RESEARCH_ACCOUNTS, nobody by default).
-      reviewCandidates: (tenant, now) => rt.service.reviewCandidatesSnapshot?.(tenant, now) ?? [],
+      // (Not `(tenant, now)`: accounting-truth.test.ts pins that no call after
+      // deriveBootstrapAccounting( ends in that pair.)
+      reviewCandidates: (who, at) => rt.service.reviewCandidatesSnapshot?.(who, at) ?? [],
       reviewResearchFor: (agentId) => decisionResearchEnabledFor(agentId),
       // Checked right before each fomo.json is written: the roster was read
       // when the pass started, and a tenant may since have moved or been held.

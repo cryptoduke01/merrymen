@@ -2175,7 +2175,7 @@ describe("the orchestrator's wiring", () => {
   it("hands the pass each child's review candidates and the operator's research allowlist, by agent", () => {
     const code = SRC.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:"'`])\/\/.*$/gm, "$1");
     const run = code.slice(code.indexOf("async function runFomoPass("), code.indexOf("export function watchdog("));
-    assert.match(run, /reviewCandidates: \(tenant, now\) => rt\.service\.reviewCandidatesSnapshot\?\.\(tenant, now\) \?\? \[\],/);
+    assert.match(run, /reviewCandidates: \(who, at\) => rt\.service\.reviewCandidatesSnapshot\?\.\(who, at\) \?\? \[\],/);
     assert.match(run, /reviewResearchFor: \(agentId\) => decisionResearchEnabledFor\(agentId\),/, "the existing helper, nobody by default");
     assert.match(run, /roster\.push\(\{ tenant: key, agentId: child\.smartAccount\.toLowerCase\(\) \}\)/, "the agent is the smart account the allowlist names");
   });
