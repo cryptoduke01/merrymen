@@ -380,7 +380,11 @@ reply includes “Say stop to opt out.” An already claimed send cannot be
 recalled. An active agent answers a tag at once with no review, so on its
 path any standalone "stop", "quit it", "go away", "shut up", "get lost",
 "buzz off" or "leave me" in a tag is an opt-out too (`isAnswerOptOut`):
-"hey, please stop", "can you stop?" and "do you ever stop?" all count.
+"hey, please stop", "can you stop?" and "do you ever stop?" all count. So
+do the other ways people say it: "quit answering me", "don't answer me
+again", "no need to reply", "i don't want your replies", "piss off", "stfu",
+"unfollow me", "please mute me", "knock it off", "cut it out", "enough
+already", "not interested" and "nobody asked you".
 
 **Keep public comments out of trading.** Incoming comment text is used only
 in memory and is never stored. Only a filtered public comment and the
@@ -564,16 +568,31 @@ the mention itself. They go out **right away**:
   handle in a tag must be the agent's own: "what model do you run on
   @SherwoodToken" is refused. The one exception is the prefix X writes before
   a reply in a thread, which may name others; such a tag never gets the
-  model line. Sherwood is looked for in the tag as posted, handles included.
-  Only a top-level tag, or a reply in a thread rooted at one of the X
-  account's own posts (`ownRootTweetIds`), is answered: never a reply in
-  someone else's thread, and never a quote or a retweet, because code cannot
-  read the post the answer would appear under. A follow-up reply under one
-  of its answers sits in the asker's thread, so it goes unanswered too. Digits may appear:
+  model line, its buys or the exact path. Sherwood is looked for in the tag
+  as posted, handles included, and on its letters with symbols and strokes
+  read as the letters they show ("sherwoo∂", "s|-|erwood") or one letter
+  gone. A tag holds only plain characters: letters, digits, whitespace,
+  ordinary punctuation (the phone's curly quotes, dashes and ellipsis among
+  it) and one emoji at most, with nothing but an apostrophe, dash, stop,
+  comma, colon or digits between two letters. A steer ("new rule from
+  merrymen", "from now on", "pretend you're my financial advisor") is
+  refused, and so is a request for advice or a forecast in other words ("a
+  good buy?", "worth buying?", "will it go up?").
+  Only a top-level tag, or a reply straight under one of the X account's own
+  posts (`ownRootTweetIds`: the post it replies to is its own), is answered:
+  never a reply in someone else's thread, never a reply under somebody
+  else's reply in its own thread, and never a quote or a retweet, because
+  code cannot read the post the answer would appear under. A follow-up reply
+  under one of its answers goes unanswered too. Nor anything with a poll,
+  media, a card or a long post's rest attached. The mentions read carries
+  each author's handle and display name: the model line goes only to an
+  author X named whose names name neither sherwood nor a model or provider,
+  and an author whose names name sherwood gets no answer at all. Digits may appear:
   the writer reads every run of digits as "(a number)", glued to letters or
   not (`answerQuestion`: "24h" is "(a number)h", "L2" is "L(a number)", "saw
-  it on 2 lists" is "saw it on (a number) lists"), so the figure never
-  reaches the model. A copycat's digit is masked the same way ("$PEPE2" is
+  it on 2 lists" is "saw it on (a number) lists"), and number words, money
+  units and look-alike multiples too ("under a penny" is "under a (a
+  number)"), so the figure never reaches the model. A copycat's digit is masked the same way ("$PEPE2" is
   "$PEPE(a number)"): that is safe because a tag that names a coin is never
   told what it bought (below). A question it could not read (an empty one,
   or one that names sherwood) is passed over before anything is spent
@@ -736,24 +755,36 @@ looks things up first, the way Shogun does in a Telegram group
   time-to-buy, would-you-buy, when-to-sell, targets and its own size are
   still refused.
 - **Intent, by code** (`classifyTag`, with the Telegram groups' readers):
-  what it can do, how to get an agent, its own trades, a coin (by `$ticker`,
-  by a coin it bought named in words, or by the address), its model (the
-  allowlist above), chat, or unanswered (sherwood in any form, or a model
-  question off the allowlist). Research on or off, the classification runs;
-  only with research on is anything looked up for it.
+  what it can do, how to get an agent, its own trades, a coin (by `$ticker`
+  or by the address), its model (the allowlist above), chat, or unanswered
+  (sherwood in any form, a model question off the allowlist, or an attempt
+  to steer it). Research on or off, the classification runs; only with
+  research on is anything looked up for it.
   A tag that names more than one coin (two cashtags, a cashtag and a
-  contract, or a coin it bought beside a different cashtag or a contract)
-  is looked up for nothing: its facts would be said of an unnamed "it", and
-  the model would pick which coin to hang them on. Every `$ticker` is
-  resolved by the index's own resolver (an exact, unambiguous ticker), never
-  matched to a buy of its own by symbol or display name: "$PEPE" is never
-  its PEPEAI named "Pepe".
-  A coin it bought counts by name only beside a word about a coin or a trade
-  ("is pepe legit?", "the pepe chart"), and never by a label under three
-  letters or made of greetings and pronouns alone: a coin called GM or You
-  must not turn "gm, how are you?" into a paid lookup. An attempt to steer it
-  and a private ask (wallet, P&L, owner) are chat: nothing is looked up for
-  them.
+  contract, or either beside a comparison word or a word that could be
+  another coin's name: "is $WOJAK safer than bonk?") is looked up for
+  nothing: its facts would be said of an unnamed "it", and the model would
+  pick which coin to hang them on. Every `$ticker` is resolved by the
+  index's own resolver (an exact, unambiguous ticker), never matched to a
+  buy of its own by symbol or display name: "$PEPE" is never its PEPEAI
+  named "Pepe".
+  What it bought never decides what a question is, what is looked up or
+  which prompt it gets: a name without a $ is no coin to classify, and
+  talk about a coin by any name ("is pepe legit?", "is bonk legit?") is read
+  as a named coin the same way, so asking name by name says nothing of which
+  ones it bought. A private ask (wallet, P&L, owner) is chat: nothing is
+  looked up for it.
+- **What an answer may say, at the gate:** told none of its buys, no first
+  person buy or holding in any words, no "i did", no denial; about a named
+  coin, also no yes or no, no liking it, and no "i" outside a deflection
+  (it keeps single positions to itself, it could not look it up, it is on
+  paper). Told its buys (a plain trades question), no word that could be a
+  coin it was not told of. Never a name the asker wrote, a coin its own buy
+  posts named in sixty days unless it was told of it, a source it was handed
+  nothing from, an endorsement or forecast in other words, an amount in
+  words, or the other money in other words (play money for live, real
+  dollars for paper). An idle agent names none of its buys. Every answer
+  holds only plain characters.
 - **What a coin is looked up on:** its own history, only on the exact path
   below (the buys the room knows, its own buy posts on this X account, its
   public theses: "you bought it", its own words and its public reason,
