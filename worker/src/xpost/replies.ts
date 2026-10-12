@@ -295,10 +295,12 @@ function strayInTag(text: string): boolean {
 /**
  * A question or a plain address to the agent, after any leading handles. And
  * a request for the market's read, or the timeline's in-jokes (2026-10-12):
- * "market update", "crypto check", "wen lambo", "any market news", "give me
- * a rundown", "quick market recap".
+ * "market update", "quick crypto check", "wen lambo", "any new buys lately",
+ * "give me a market update", "vibe check". Only those request forms: a
+ * statement that merely starts with "market" or "crypto" ("crypto is cooked")
+ * still asks nothing.
  */
-const ASKED = /\?|^(?:what|why|how|which|who|whos|who's|where|are|is|do|does|did|can|could|have|has|tell|explain|thoughts|gm|hey|yo|hi|hello|wen|when|any|give|gimme|show|quick|market|crypto|vibe)\b/i;
+const ASKED = /\?|^(?:what|why|how|which|who|whos|who's|where|are|is|do|does|did|can|could|have|has|tell|explain|thoughts|gm|hey|yo|hi|hello|wen|when|any|give|gimme|vibe check)\b|^(?:quick |a )?(?:market|crypto) (?:update|updates|check|recap|rundown)\b/i;
 
 /**
  * ONE CONTRACT ADDRESS: 0x + exactly forty hex, not a slice of a longer hex

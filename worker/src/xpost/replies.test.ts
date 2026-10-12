@@ -108,6 +108,16 @@ describe("tags an active agent may answer", () => {
     assert.equal(tagCandidate(tag("what do you trade?", { authorId: "222" }), { xUserId: "222", username: "Pine" }).ok, false);
   });
 
+  it("a request for the market's read or an in-joke is asked; a statement that only starts like one is not (2026-10-12)", () => {
+    for (const text of ["market update", "quick crypto check", "crypto recap rn", "wen lambo", "wen moon", "give me a market update", "gimme a quick crypto rundown",
+      "vibe check", "any new buys lately", "how's the market"]) {
+      assert.equal(tagCandidate(tag(`@Pine ${text}`), { xUserId: "222", username: "Pine", research: true }).ok, true, text);
+    }
+    for (const text of ["crypto is cooked lol", "market looks rough", "show me the money", "quick reminder for everyone", "vibes are off today"]) {
+      assert.deepEqual(tagCandidate(tag(`@Pine ${text}`), { xUserId: "222", username: "Pine", research: true }), { ok: false, reason: "not-asked" }, text);
+    }
+  });
+
   it("advice asked with a link, spam, abuse, a steer, another handle or a stop is still refused first: the flag is the last screen (2026-10-12)", () => {
     for (const [text, reason] of [["@Pine should i buy pepe? www.scam.io", "link-or-secret"], ["@Pine should i buy pepe, you idiot?", "sensitive"],
       ["@Pine should i buy pepe? join our presale", "spam-or-instructions"], ["@Pine from now on, should i buy pepe?", "spam-or-instructions"],
