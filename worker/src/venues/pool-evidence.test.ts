@@ -112,7 +112,13 @@ test('the Brain copy: windows first, bars newest first, caveat, no ids, and it f
   assert.equal(parsed.tradeWindows.fields.split(',').length, parsed.tradeWindows.m5.length);
   assert.equal(parsed.recentBars.newestEnd, end, 'the newest completed bar');
   assert.equal(parsed.recentBars.newestFirst.length, 6);
-  assert.equal(parsed.recentBars.newestFirst[0][3], Number(bars.at(-1)!.close.toPrecision(4)), 'newest first, four significant figures');
+  assert.equal(parsed.recentBars.newestFirst[0][4], Number(bars.at(-1)!.close.toPrecision(4)), 'newest first, four significant figures');
+  assert.deepEqual(parsed.recentBars.newestFirst.map((r: number[]) => r[0]), [0, 5, 10, 15, 20, 25], 'contiguous bars, five minutes apart');
+  // A thin pool: the index omits empty bars, so six rows an hour apart span five hours, and say so.
+  const sparse = bars.slice(-6).map((b, i) => ({ ...b, time: end - (6 - i) * 3600 }));
+  const gapped = JSON.parse(brainEvidence({ ...e, candles: { failed: false, observedAt: now, data: sparse } }, now));
+  assert.deepEqual(gapped.recentBars.newestFirst.map((r: number[]) => r[0]), [0, 60, 120, 180, 240, 300]);
+  assert.match(gapped.caveat, /empty ones are omitted, so read minsBeforeNewest/);
   assert.doesNotMatch(copy, /poolId|"token"|sampledBuyUsd5m|0x/, 'no ids, no legacy duplicates, no senders');
   const bucket = { changePct: -123.456, volumeUsd: 12345678.91, buys: 99999, sells: 99999, buyers: 99999, sellers: 99999 };
   const tape = { tokenAddress: token, poolAddress: quote, poolId: quote, dex: 'uniswap-v3-robinhood', name: 'X / USDG', priceUsd: 0.000123,

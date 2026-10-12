@@ -316,7 +316,8 @@ const WINDOW_FIELDS = ['trades', 'buys', 'sells', 'distinctBuyers', 'distinctSel
  * this. The full summary had grown past that cut with its trade windows and
  * bars, so whatever came last — the caveat, the bars — was silently dropped
  * for the one reader that decides. So: trade windows first, as rows under one
- * header; the last bars newest first, as rows of four significant figures;
+ * header; the last bars newest first, each with its minutes before the
+ * newest bar (the index omits empty bars) and four significant figures;
  * then the caveat; then the candle figures, rounded. The pool and token ids
  * are left out because the tape JSON already carries the pool, and the
  * legacy five-minute fields because `tradeWindows.m5` is the same window.
@@ -333,13 +334,16 @@ export function brainEvidence(e: PoolEvidence, now = Date.now()): string {
   const newest = s.recentBars.at(-1);
   return JSON.stringify({
     tradeWindows: w ? { fields: WINDOW_FIELDS.join(','), m5: row(w.m5), m15: row(w.m15), h1: row(w.h1) } : null,
+    // EACH ROW SAYS WHEN IT ENDED, as minutes before the newest bar: the
+    // index leaves out empty bars, so on a thin pool six rows can span hours,
+    // and rows without times would read as the last half hour.
     recentBars: newest ? {
-      fields: 'open,high,low,close,volumeUsd', newestEnd: newest.end,
-      newestFirst: [...s.recentBars].reverse().map(b => [sig4(b.open), sig4(b.high), sig4(b.low), sig4(b.close), b.volumeUsd === null ? null : Math.round(b.volumeUsd)]),
+      fields: 'minsBeforeNewest,open,high,low,close,volumeUsd', newestEnd: newest.end,
+      newestFirst: [...s.recentBars].reverse().map(b => [Math.round((newest.end - b.end) / 60), sig4(b.open), sig4(b.high), sig4(b.low), sig4(b.close), b.volumeUsd === null ? null : Math.round(b.volumeUsd)]),
     } : null,
     caveat: `Latest ${TRADE_SAMPLE_MAX} indexed trades, not all volume; sampleCoversWindow says whether a window is fully sampled. ` +
       `sellFlowMaterial false: under ${SELL_CONCENTRATION.minSells} sells or ${SELL_CONCENTRATION.minSharePctOfFlow}% of flow, so no seller share. ` +
-      'Senders are transaction senders, possibly routers, not verified owners. Bars are completed 5-minute candles, volume in USD. Missing or stale evidence is unknown, never zero. Not a forecast.',
+      'Senders may be routers, not verified owners. Bars: completed 5-minute candles, USD volume; empty ones are omitted, so read minsBeforeNewest. Missing or stale evidence is unknown, never zero. Not a forecast.',
     candleVolumeUsd: s.candleVolumeUsd ? { allBars: round(s.candleVolumeUsd.allBars, 0), last15m: round(s.candleVolumeUsd.last15m, 0), prior15m: round(s.candleVolumeUsd.prior15m, 0) } : null,
     measuredReturnPct: round(s.measuredReturnPct, 2), latestFiveMinuteReturnPct: round(s.latestFiveMinuteReturnPct, 2),
     fiveMinuteLogReturnStdDevPct: round(s.fiveMinuteLogReturnStdDevPct, 2),
