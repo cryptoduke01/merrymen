@@ -125,6 +125,26 @@ describe("an answer says only the buys it was told of (red-team 2026-10-12)", ()
     assert.equal(reason("grabbed some pepe with real money lately. Say stop to opt out.", idle), "ok", "one real-money coin, said as such");
   });
 
+  it("told its buys, an answer names no other coin, after a verb, a comma or none at all (red-team 2026-10-12, second round)", () => {
+    // writeAnswer's general context at 11f7acac for "what are you buying lately?" from a live agent that bought only PEPE.
+    const general: Partial<XGateCtx> = { kind: "reply", mode: "live", coins: ["Pepe"], buys: "vouched", known: ["trencher"] };
+    // The reproduced drafts, each {ok:true} at 11f7acac.
+    for (const draft of ["grabbed some coins lately, mostly wojak and bonk. say stop to opt out.", "been buying it all lately, wojak, bonk, whatever looks early. say stop to opt out.",
+      "picked up a few this week, wojak and bonk mostly. say stop to opt out.", "bought some coins lately like wojak and bonk. say stop to opt out.",
+      "grabbed some coins, wojak was one. say stop to opt out.", "grabbed pepe lately, plus wif, real money. say stop to opt out.", "mostly pepe and wif lately. say stop to opt out."]) {
+      assert.equal(reason(draft, general), "buy-claim", draft);
+    }
+    // The exact path, its own contract's names vouched.
+    assert.equal(reason("yep, bought it lately, and wif too, real money. say stop to opt out.", { ...general, coins: ["PEPE", "Pepe"] }), "buy-claim");
+    // What a general answer says still passes.
+    for (const draft of ["grabbed a little pepe lately, the curve looked early. say stop to opt out.", "picked up a few with real money lately, can't name them here. say stop to opt out.",
+      "mostly fresh launches, and i only buy when the buying looks real and steady. say stop to opt out.", "trencher life, mostly fresh launches with steady buying. say stop to opt out."]) {
+      assert.equal(reason(draft, general), "ok", draft);
+    }
+    // A comment reply on a buy post (no `known`) is held only to the verbs, as before.
+    assert.equal(reason("the early curve was the part that caught my attention. say stop to opt out.", { ...general, known: undefined }), "ok");
+  });
+
   it("told its buys: a buy it says is of one of them, or of no coin by name", () => {
     assert.equal(reason("yep, bought wif lately, the curve looked early. say stop to opt out.", vouched), "buy-claim");
     assert.equal(reason("lately i grabbed a little trump, the buying looked steady. say stop to opt out.", vouched), "buy-claim");

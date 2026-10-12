@@ -1263,6 +1263,30 @@ test("asking name by name says nothing of which coins it bought: a name it bough
   }
 });
 
+test("a general answer told its buys never names a coin it did not buy, research on or off (red-team 2026-10-12)", async (t) => {
+  // A live agent that bought only PEPE; the reproduced drafts for "what are you buying lately?".
+  for (const env of [{}, RESEARCH_ON]) {
+    for (const answer of ["grabbed some coins lately, mostly wojak and bonk. say stop to opt out.", "been buying it all lately, wojak, bonk, whatever looks early. say stop to opt out.",
+      "picked up a few this week, wojak and bonk mostly. say stop to opt out.", "bought some coins lately like wojak and bonk. say stop to opt out.",
+      "grabbed some coins, wojak was one. say stop to opt out.", "grabbed pepe lately, plus wif, real money. say stop to opt out."]) {
+      const w = await world(t, { env, research: fakeResearch().research, answer });
+      w.setInbox([tag({ text: "@pine_stoat what are you buying lately?" })]);
+      await w.step();
+      w.setInbox([]);
+      await w.step(NOW + MIN);
+      assert.match(w.asked()[0]!, /Coins you bought lately: «Pepe»/, "the general path");
+      assert.deepEqual(w.sends, [], answer);
+      const [row] = await w.answers();
+      assert.equal(row!.status, "skipped", answer);
+      assert.equal(row!.reason, "gate:buy-claim", answer);
+    }
+  }
+  const w = await world(t, { answer: "grabbed a little pepe lately, the curve looked early. say stop to opt out." });
+  w.setInbox([tag({ text: "@pine_stoat what are you buying lately?" })]);
+  await w.step();
+  assert.equal((await w.answers())[0]!.status, "scheduled", "the coin it bought is still said");
+});
+
 test("a coin-named tag is never answered yes, no, or in the first person outside a deflection, research on or off (red-team 2026-10-12)", async (t) => {
   // A live agent whose only call is a live PEPE buy at 0xabab…ab; the reproduced tags and drafts.
   const facts: AgentFacts = { ...FACTS, calls: [{ ...CALL, token: `0x${"ab".repeat(20)}` }] };

@@ -56,6 +56,7 @@ import { xWeightedLength, X_MAX_WEIGHTED } from "./client";
 import type { XPostKind } from "./store";
 import type { SaleOutcome } from "./planner";
 import { withoutReplyOptOut } from "./replies";
+import { answerWord, textWords } from "./words";
 
 /** The longest post, in characters — far under X's own ceiling, because a post is one casual line. */
 export const XPOST_MAX_CHARS = 200;
@@ -128,6 +129,16 @@ export interface XGateCtx {
    * (namedClaim), as buy-claim.
    */
   named?: boolean;
+  /**
+   * WORDS AN ANSWER TOLD ITS BUYS WAS HANDED BESIDE THEM (red-team review,
+   * 2026-10-12): its strategy's name, what it looked up. Read only when set, with buys
+   * "vouched": then every word of the answer is an everyday one (xpost/words.ts
+   * answerWord), one of these, or a word of a coin in `coins`. "grabbed some
+   * coins lately, mostly wojak and bonk" named two coins it never bought, and
+   * no verb list sees a name: a word that is none of those is refused, as
+   * buy-claim.
+   */
+  known?: string[];
 }
 
 const refuse = (reason: string): XVerdict => ({ ok: false, reason });
@@ -1258,6 +1269,17 @@ function namedClaim(text: string): boolean {
   return SPEAKS_OF_ITSELF.test(rest);
 }
 
+/**
+ * A WORD THAT COULD BE A COIN IT WAS NEVER TOLD OF, in an answer told its
+ * buys: one of three letters or more that is not everyday (answerWord), not a
+ * word of a coin it was told of, and not one it was handed (`known`).
+ */
+function unvouchedWord(text: string, coins: readonly string[], known: readonly string[]): boolean {
+  const ok = new Set<string>();
+  for (const n of [...coins, ...known]) for (const w of textWords(n)) ok.add(w);
+  return textWords(text).some((w) => /^[a-z]{3,}$/.test(w) && !ok.has(w) && !BUY_FILLER.has(w) && !BUY_OBJECT.has(w) && !answerWord(w));
+}
+
 function buyClaimed(text: string, vouched: readonly string[] | null): boolean {
   if (vouched === null) return BAG.test(text) || new RegExp(ACQUIRED.source, "i").test(text) || OWNED_ACT.test(text) || OWNED_SHAPE.test(text);
   const names = vouched.map((c) => c.trim().toLowerCase().replace(/^\$/, "")).filter((c) => c !== "");
@@ -1423,6 +1445,8 @@ function admitMasked(tidied: string, ctx: XGateCtx, baseGate: BaseGate, agentNam
   if (unsaid.length && namedIn(ctx.kind === "reply" ? withoutReplyOptOut(text) : text, unsaid)) return refuse("bought-named");
   // Nor a buy it was not told of.
   if (ctx.buys !== undefined && buyClaimed(ctx.kind === "reply" ? withoutReplyOptOut(text) : text, ctx.buys === "none" ? null : coins)) return refuse("buy-claim");
+  // Told its buys: no word that could be another coin's name (XGateCtx.known).
+  if (ctx.buys === "vouched" && ctx.known !== undefined && unvouchedWord(withoutNames(ctx.kind === "reply" ? withoutReplyOptOut(text) : text, [agentName]), coins, strings(ctx.known))) return refuse("buy-claim");
   // Nor, of a coin someone named, that it likes it, a yes or a no, or itself outside a deflection (namedClaim).
   if (ctx.buys === "none" && ctx.named === true && namedClaim(ctx.kind === "reply" ? withoutReplyOptOut(text) : text)) return refuse("buy-claim");
 

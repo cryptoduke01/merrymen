@@ -46,14 +46,49 @@ const TAG_WORDS: ReadonlySet<string> = new Set((
   "source scout hunt spot research decide filter screen scan grab snipe usual"
 ).split(/\s+/));
 
-/** A word as TAG_WORDS lists it: an ending people add taken off, if what is left is listed. */
-function tagWord(w: string): boolean {
-  if (TAG_WORDS.has(w)) return true;
-  for (const end of ["s", "es", "ed", "d", "ing", "er", "est", "ly", "y"]) {
-    const stem = w.endsWith(end) ? w.slice(0, -end.length) : "";
-    if (stem.length >= 2 && (TAG_WORDS.has(stem) || TAG_WORDS.has(`${stem}e`))) return true;
+/**
+ * AND HOW AN AGENT TALKS ABOUT ITS OWN TRADING, in an answer told its buys:
+ * the reasons it is handed for a buy (writer.ts BUY_GLOSS), its strategies'
+ * names, and the everyday words of a casual line about how it trades. What
+ * such an answer may say beside the coins it was told of (answerWords).
+ */
+const ANSWER_WORDS: ReadonlySet<string> = new Set((
+  "pool behind sitting comfortably room plenty cheap wrong cost costs expensive barely started building nowhere caught getting along built " +
+  "steady stable pace stream noticed busier busy crowd hands group hardly nudged touch pushed stood others looked feel felt fun nice reason " +
+  "reasons because cause cuz since while liked enjoyed basket weekend gap even keel hunter trencher launches launch fresh shallow mood calm " +
+  "boring exciting excited curious careful picky choosy patient patience chase chasing mostly mainly usually often sometimes rarely always " +
+  "lately recently earlier couple handful bunch few some plenty enough lots names plays picks things stuff memecoins memes coins tokens " +
+  "practice paper real money cash honestly vibes vibe quiet noise noisy loud slow slowly fast quick quickly small smaller bigger little " +
+  "piece bite bits nibble moved moves move price prices thing guess anyway also too either though tho kinda sorta pretty really very just " +
+  "only still yet again back around about over under into onto across through toward towards without within beside besides plus mix mixed " +
+  "spot spots style approach rules rule habit habits plan way ways usual typical type kinds sort sorts variety diverse spread careful lucky " +
+  "favourite favorite lean leaning tend tends tended prefer preferred like likes find finding found catch catching look looking watch " +
+  "watching wait waiting patient sit sitting stay staying keep keeping hold holding hands slower faster quieter louder newer older earliest"
+).split(/\s+/));
+
+/** A word as a list has it: an ending people add taken off, if what is left is listed. */
+function listedIn(list: ReadonlySet<string>, w: string): boolean {
+  if (list.has(w)) return true;
+  for (const end of ["s", "es", "ies", "ed", "d", "ing", "er", "est", "ly", "y"]) {
+    if (!w.endsWith(end)) continue;
+    const stem = w.slice(0, -end.length);
+    if (stem.length < 2) continue;
+    if (list.has(stem) || list.has(`${stem}e`) || (end === "ies" && list.has(`${stem}y`))) return true;
+    // A doubled last letter: "grabbing" is "grab", "snipped" is "snip".
+    if (stem.length >= 3 && stem.at(-1) === stem.at(-2) && list.has(stem.slice(0, -1))) return true;
   }
   return false;
+}
+const tagWord = (w: string): boolean => listedIn(TAG_WORDS, w);
+
+/** A word an answer told its buys may say beside the coins it was told of: everyday, or how it talks about its trading. */
+export function answerWord(w: string): boolean {
+  return tagWord(w) || listedIn(ANSWER_WORDS, w);
+}
+
+/** A text's words, lowercase, with the endings of contractions taken off: "what's" is "what", "wif's" is "wif". */
+export function textWords(text: string): string[] {
+  return tagWords(text);
 }
 
 /** A tag's words, lowercase, with the endings of contractions taken off: "what's" is "what", "wif's" is "wif". */
