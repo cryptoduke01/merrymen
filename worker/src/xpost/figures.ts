@@ -75,6 +75,12 @@ const TICKER_REFUSED = new RegExp([
   "trump", "melania", "biden", "maga", "kamala", "harris", "obama", "putin", "zelensk", "election", "president", "vote",
   // hype and trust words
   "pump", "moon", "gem", "lambo", "scam", "rug", "safe", "legit", "official",
+  // AND ADVICE AND HYPE RUN TOGETHER INTO ONE WORD (red-team 2026-10-12):
+  // "$BUYNOW", "$SENDIT", "$APEIN", "$GOBUY", "$SAFU" read as a call in the
+  // house's own line; the gate's word screen never sees inside one token.
+  "buy", "sell", "send", "ape", "lfg", "wagmi", "ngmi", "nfa", "dyor", "bull", "bear", "rich", "safu", "hodl", "yolo", "long", "short",
+  "alert", "signal", "entry", "target", "profit", "gain", "rekt", "shill", "free", "risk", "guarant", "winner", "winning", "invest",
+  "airdrop", "presale", "giveaway", "bonus", "claim", "rocket", "dip",
   // money in words: "$MILLION" beside "~$1.2M" reads as a sum code never built
   "million", "billion", "trillion", "thousand", "hundred", "dollar", "bucks", "cents", "usd",
 ].join("|"));

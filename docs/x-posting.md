@@ -1046,7 +1046,10 @@ other owner's agent, and its posting and reply warnings, are unchanged.
   (anything else is dropped, never repaired or echoed: `$1B`, `$97K` and
   `$100X` read as sums and a multiple no code built, red-team 2026-10-12),
   spells no sherwood, merrymen, robinhood, the agent, slur, political name,
-  hype word or sum in words ("MILLION", "BUCKS"), and clears the X gate's own
+  hype word or sum in words ("MILLION", "BUCKS"), holds no advice or hype run
+  together into one word (`BUYNOW`, `SENDIT`, `APEIN`, `GOBUY`, `SAFU`,
+  `RISKFREE`: buy, sell, send, ape, bull, bear, rich, free, risk, long,
+  short and the like anywhere in its letters), and clears the X gate's own
   vocabulary as a word (`gate.ts` `tickerRefusal`: `$BUY`, `$WAGMI`,
   `$SHILL`, `$LFG` were posted in a line the gate would have refused as
   words). Research drops such a ticker (`showTicker`), and the orchestrator

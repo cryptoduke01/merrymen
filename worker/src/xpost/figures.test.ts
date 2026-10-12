@@ -68,6 +68,15 @@ describe("tickers: A-Z, two to ten letters, nothing else", () => {
     }
   });
 
+  it("never advice or hype run together into one word (red-team 2026-10-12)", () => {
+    // Posted at 34ced01e, each as "trending $<SYM> 24h +312% vol ~$1.2M".
+    for (const bad of ["BUYNOW", "BUYIT", "SENDIT", "APEIN", "GOBUY", "APENOW", "SAFU", "SELLNOW", "FREEMONEY", "RISKFREE", "GUARANTEE", "BULLRUN",
+      "HODL", "YOLO", "LONGIT", "SHORTIT", "BEARISH", "GETRICH", "PROFITS", "AIRDROP", "PRESALE", "ROCKET", "BUYTHEDIP"]) {
+      assert.equal(cleanTicker(bad), null, bad);
+    }
+    for (const ok of ["CHUMP", "FROGGY", "WOJAK", "MEMECOIN", "PEPE", "TAO", "BONK"]) assert.equal(cleanTicker(ok), ok, ok);
+  });
+
   it("never a slur, a political name or a hype word", () => {
     for (const bad of ["NAZI", "FUCK", "TRUMP", "MAGA", "BIDEN", "PUMP", "MOON", "GEM", "SCAM", "SAFE", "LEGIT"]) assert.equal(cleanTicker(bad), null, bad);
   });
