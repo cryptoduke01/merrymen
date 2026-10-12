@@ -79,6 +79,32 @@ LENS_KEYS = frozenset(
 MAX_LENS_CHARS = 8_000
 MAX_SIGNALS_CHARS = 24_000
 
+#: Ceilings on the desk-policy channel (`DecideRequest.strategy_terms` and
+#: `.horizon`), in characters.
+#:
+#: 2,500 is ~625 tokens, and the terms go to every analyst AND the manager, so a
+#: pulse run pays for them four times out of a 30,000-token allowance. Sized for
+#: a strategy's horizon, exits and definitions — not for a second persona.
+MAX_STRATEGY_TERMS_CHARS = 2_500
+#: A horizon is a phrase ("up to 30 minutes", "3-5 days"), not a paragraph. It is
+#: also interpolated into the manager's JSON example, so it is held to a closed
+#: alphabet: no quote, brace, angle bracket or newline can reach that template.
+MAX_HORIZON_CHARS = 40
+_HORIZON = re.compile(r"[A-Za-z0-9][A-Za-z0-9 .,()/+-]*")
+
+#: OPTIONAL DECIDE FIELDS THIS BUILD UNDERSTANDS, by capability name, as /health
+#: advertises them. `DecideRequest` forbids unknown keys, so a worker that sends
+#: `strategy_terms` to an older build gets a 422 and loses the whole decision;
+#: it reads this first, exactly as it reads `lens_keys` before a new lens.
+#: A test pins every name here to fields the request model actually accepts.
+DECIDE_CAPABILITIES: dict[str, tuple[str, ...]] = {
+    "strategy-terms": ("strategy_terms", "horizon"),
+}
+#: Either half of a fence tag. Trusted text is rendered OUTSIDE every fence, so
+#: text able to open or close one could make untrusted material read as policy
+#: or policy read as untrusted.
+_FENCE_TAG = re.compile(r"<\s*/?\s*untrusted", re.IGNORECASE)
+
 # An 0x-prefixed 20-byte address, in any case. Deliberately broad: the point is
 # to catch anything address-SHAPED, not to validate a real address.
 _ADDRESS = re.compile(r"0x[0-9a-fA-F]{40}")
@@ -510,6 +536,35 @@ class DecideRequest(BaseModel):
     persona: str = ""
     risk_appetite: Literal["conservative", "balanced", "aggressive"] = "balanced"
 
+    # ── DESK POLICY: the operator's terms, the one TRUSTED strategy text ───
+    #
+    # WHY A SECOND CHANNEL. `persona` is fenced as an untrusted strategy brief,
+    # rightly: it is the slot owner-adjacent text travels in, and HOUSE_RULES
+    # tell every node never to obey fenced material. But a strategy's own
+    # mechanics — a minutes-long horizon, exits code enforces at -10%/+20%/30
+    # minutes, what "continuation" means on this desk — then arrive with the
+    # authority of a stranger's opinion, beside an equity example and a JSON
+    # template that says "3-5 days". The manager reasons about a book it is not
+    # running.
+    #
+    # WHAT "TRUSTED" MEANS HERE. A contract with the worker, not something this
+    # service can verify: the worker fills these from repo code only
+    # (worker/src/desk-policy.ts), never from owner or market text. What this
+    # side CAN enforce is below — bounded, no fence tags, no addresses, and a
+    # horizon from a closed alphabet.
+    #
+    # WHAT IT CANNOT DO. It is rendered as policy about how this desk trades. It
+    # does not reach the gate, the sizing clamps, escalation, budgets or the
+    # economics verdict — none of those read it — and the prompt says it never
+    # obliges a trade.
+    #
+    # ABSENT IS TODAY. None (or blank) renders every prompt byte-for-byte as it
+    # was before the field existed; tests/test_prompt_snapshot.py holds that.
+    strategy_terms: str | None = Field(default=None, max_length=MAX_STRATEGY_TERMS_CHARS)
+    #: The decision horizon in a few words ("up to 30 minutes"). Also becomes the
+    #: manager's `time_horizon` example, replacing "3-5 days".
+    horizon: str | None = Field(default=None, max_length=MAX_HORIZON_CHARS)
+
     # Prior theses with realised outcomes, for continuity and reflection.
     memory: list[str] = Field(default_factory=list)
 
@@ -525,6 +580,34 @@ class DecideRequest(BaseModel):
     # the situation gives an adversarial pass something to work with. The three
     # fixed depths remain, for ablation.
     stages: Literal["adaptive", "analysts", "analysts+debate", "full"] = "adaptive"
+
+    @field_validator("strategy_terms", "horizon", mode="before")
+    @classmethod
+    def _blank_is_absent(cls, v: object) -> object:
+        # BLANK IS ABSENT, so "" cannot render an empty DESK POLICY heading and
+        # break the byte-for-byte promise for a caller that sent nothing.
+        if isinstance(v, str):
+            v = v.strip()
+            return v or None
+        return v
+
+    @field_validator("strategy_terms")
+    @classmethod
+    def _terms_stay_outside_fences(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        if _FENCE_TAG.search(v):
+            raise ValueError("strategy_terms may not contain an <untrusted> fence tag")
+        return _reject_executable(v, "strategy_terms")
+
+    @field_validator("horizon")
+    @classmethod
+    def _horizon_is_a_phrase(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        if not _HORIZON.fullmatch(v):
+            raise ValueError("horizon must be a short phrase of letters, digits, spaces and .,()/+-")
+        return _reject_executable(v, "horizon")
 
 
 class Refusal(BaseModel):
