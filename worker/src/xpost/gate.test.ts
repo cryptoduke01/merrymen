@@ -43,6 +43,33 @@ describe("an answer to a tag that named a coin never names one it bought (red-te
   });
 });
 
+describe("an answer says only the buys it was told of (red-team 2026-10-12)", () => {
+  const none: Partial<XGateCtx> = { kind: "reply", mode: "live", coins: [], buys: "none" };
+  const vouched: Partial<XGateCtx> = { kind: "reply", mode: "live", coins: ["Bonk", "Pepe"], buys: "vouched" };
+  it("told none of its buys: no first-person buy at all, whatever the model did with the prompt", () => {
+    // The reproduced drafts, each admitted before for "did you buy BONK?".
+    for (const draft of ["yep, grabbed bonk lately, the buying looked steady and real. say stop to opt out.", "yep, grabbed a little pepe lately, the curve looked early. say stop to opt out.",
+      "yes i bought bonk with real money last week, it looked steady. say stop to opt out.", "yep, bought wif lately, the curve looked early. say stop to opt out.",
+      "yep, grabbed some pepe inu lately, the curve looked early. say stop to opt out.", "yep, bought $BONK lately, the buying looked real. say stop to opt out.",
+      "yep, it's in my bag, the buying looked real. say stop to opt out.", "been buying it all week, the buying looked real. say stop to opt out."]) {
+      assert.equal(reason(draft, none), "buy-claim", draft);
+    }
+    for (const draft of ["i don't talk about single positions here, sorry. say stop to opt out.", "mostly fresh launches, and i only buy when the buying looks real and steady. say stop to opt out."]) {
+      assert.equal(reason(draft, none), "ok", draft);
+    }
+  });
+  it("told its buys: a buy it says is of one of them, or of no coin by name", () => {
+    assert.equal(reason("yep, bought wif lately, the curve looked early. say stop to opt out.", vouched), "buy-claim");
+    assert.equal(reason("lately i grabbed a little trump, the buying looked steady. say stop to opt out.", vouched), "buy-claim");
+    for (const draft of ["yep, grabbed bonk lately, the buying looked steady and real. say stop to opt out.", "grabbed a little pepe, the curve looked early. say stop to opt out.",
+      "picked up a few with real money lately, can't name them here. say stop to opt out.", "yep, bought it lately, the curve looked early. say stop to opt out.",
+      "can't really get into what i've been buying here. say stop to opt out.", "picked up some coins when the buying looked real. say stop to opt out."]) {
+      assert.equal(reason(draft, vouched), "ok", draft);
+    }
+    assert.equal(reason("yep, bought wif lately, the curve looked early. say stop to opt out.", { kind: "reply", mode: "live", coins: [] }), "ok", "unset: not checked");
+  });
+});
+
 describe("public replies preserve the X safeguards and require an opt-out", () => {
   const reply: Partial<XGateCtx> = { kind: "reply", mode: "live", coins: ["pepe"] };
   it("allows a conversational reference back only in an actual reply", () => {

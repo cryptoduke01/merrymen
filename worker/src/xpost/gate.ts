@@ -109,6 +109,17 @@ export interface XGateCtx {
    * the model did with the prompt (red-team 2026-10-12).
    */
   unsaid?: string[];
+  /**
+   * WHAT AN ANSWER MAY SAY IT BOUGHT (red-team review, 2026-10-12), checked
+   * only when set. "none": an answer that was told none of its buys — a tag
+   * that named a coin, or anything but a plain question about its trades —
+   * says no first-person buy at all ("yep, grabbed bonk", "bought it", "in
+   * my bag"): the prompt said so, and this is the backstop when the model
+   * does not listen. "vouched": a buy it says is of a coin in `coins`, or of
+   * "it", "a few", "some coins"; "yep, bought wif lately" for a coin it was
+   * never told of is refused. Either way, as buy-claim.
+   */
+  buys?: "none" | "vouched";
 }
 
 const refuse = (reason: string): XVerdict => ({ ok: false, reason });
@@ -1048,6 +1059,37 @@ export function vocabularyRefusal(text: string): string | null {
   return null;
 }
 
+/**
+ * A BUY SAID IN THE FIRST PERSON: bought, grabbed, picked up, scooped,
+ * snagged, aped, got in on, entered, added, loaded up on, went in on, been
+ * buying — with or without the "i" people drop ("yep, grabbed bonk"). "i buy
+ * when…" is a habit and "the buying" a noun; neither is a buy. A bag is a
+ * holding.
+ */
+const ACQUIRED = /\b(?:bought(?:\s+into)?|grabbed|grabbing|picked\s+up|picking\s+up|scooped(?:\s+up)?|snagged|copped|aped(?:\s+in(?:to)?)?|aping(?:\s+in(?:to)?)?|got\s+in(?:to)?(?:\s+on)?|getting\s+in(?:to)?(?:\s+on)?|entered|added|loaded\s+up(?:\s+on)?|went\s+in(?:\s+on)?|took\s+a\s+position\s+in|(?:been|i'?m|im|was|were)\s+buying)\b/gi;
+const BAG = /\bbag(?:s|ged|holder|holders|holding)?\b/i;
+/** What may come between a buy and what it was of: "a little", "some of the". */
+const BUY_FILLER: ReadonlySet<string> = new Set("a an the some little bit of couple few small more another new fresh early my".split(" "));
+/** What a buy may be of without naming a coin, or the clause going on: "bought it", "picked up a few with real money", "grabbed some coins lately". */
+const BUY_OBJECT: ReadonlySet<string> = new Set(("it its them those these that this one ones coins coin tokens token memecoins memes launches stuff things names plays " +
+  "with when because cause cuz on in at for and but or lately recently today yesterday earlier here there back too again after before since while as then now " +
+  "from off up into last so just around over what which whatever anything something nothing any i i'm im i've ive").split(" "));
+
+function buyClaimed(text: string, vouched: readonly string[] | null): boolean {
+  if (vouched === null) return BAG.test(text) || new RegExp(ACQUIRED.source, "i").test(text);
+  const names = vouched.map((c) => c.trim().toLowerCase().replace(/^\$/, "")).filter((c) => c !== "");
+  for (const m of text.matchAll(ACQUIRED)) {
+    const after = text.slice((m.index ?? 0) + m[0].length).split(/[.,!?;:—–]/)[0]!.toLowerCase();
+    const rest = after.trim().replace(/^\$/, "");
+    if (names.some((n) => rest === n || rest.startsWith(`${n} `) || rest.startsWith(`${n}'`))) continue;
+    const word = after.split(/\s+/).filter(Boolean).find((w) => !BUY_FILLER.has(w)) ?? "";
+    const bare = word.replace(/^\$/, "").replace(/'s$/, "");
+    if (word === "" || BUY_OBJECT.has(bare) || names.some((n) => n === bare || n.split(/\s+/)[0] === bare)) continue;
+    return true;
+  }
+  return false;
+}
+
 /** A name as a whole word, with or without a cashtag's $. */
 function namePattern(name: string, flags: string): RegExp | null {
   const n = name.trim();
@@ -1148,7 +1190,7 @@ function strings(list: unknown): string[] {
  * Reason codes (stable, operator-only): empty · pass · meta · hidden-chars · too-short · too-long ·
  * handle · link · markup · emoji · exclaim · caps · ops · alert · hype · pnl ·
  * market · human-claim · points-back · coin-unsaid · paper-unsaid · mode-false · undisclosed · intro-no-trading ·
- * opt-out-unsaid · reply-current-or-action · sherwood-claim · bought-named ·
+ * opt-out-unsaid · reply-current-or-action · sherwood-claim · bought-named · buy-claim ·
  * fleet-repeat · seed-echo — plus whatever the base gate says (has-digits,
  * quantity, repeat, unvouched-ticker, address, secret…).
  */
@@ -1194,6 +1236,8 @@ function admitMasked(tidied: string, ctx: XGateCtx, baseGate: BaseGate, agentNam
   // Never a coin it bought, in an answer that was never told what it bought.
   const unsaid = strings(ctx.unsaid);
   if (unsaid.length && namedIn(ctx.kind === "reply" ? withoutReplyOptOut(text) : text, unsaid)) return refuse("bought-named");
+  // Nor a buy it was not told of.
+  if (ctx.buys !== undefined && buyClaimed(ctx.kind === "reply" ? withoutReplyOptOut(text) : text, ctx.buys === "none" ? null : coins)) return refuse("buy-claim");
 
   if (text.length > XPOST_MAX_CHARS || xWeightedLength(text) > X_MAX_WEIGHTED) return refuse("too-long");
   if (words(text) < XPOST_MIN_WORDS) return refuse("too-short");

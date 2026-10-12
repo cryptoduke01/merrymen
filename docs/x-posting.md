@@ -684,6 +684,13 @@ the mention itself. They go out **right away**:
   (cooking, in the oven, in the works, merrymen's own…) or with a word about
   trading, deciding, what it does or who it is ("picks", "trades", "calls",
   "my", "me", "behind", "now"…): an allowlist, not only a list of verbs.
+  An answer that was told none of its buys may say no first-person buy at
+  all ("yep, grabbed bonk", "bought it", "in my bag"), and one that was told
+  them (a plain question about its trades, or the exact path, whose coins
+  are the tagged contract's own names) may say a buy only of a coin it was
+  told of, or of none by name ("bought it", "picked up a few"): `buy-claim`.
+  A comment reply may say a buy only of its parent's coin. This is the
+  backstop for a model that ignores the prompt.
 - **Their own lane:** one minute apart, 24 a day per X account, at most two
   per person per rolling day. Answers never spend or wait on the posting
   cadence. The per-person count is taken under a lock on the X account and

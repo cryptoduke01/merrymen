@@ -658,6 +658,19 @@ function boughtKind(f: AgentFacts): false | "paper" | "live" | "both" {
   return paper && live ? "both" : paper ? "paper" : "live";
 }
 
+/** Every name a buy of this exact contract goes by, with its money: what an exact-path answer may say it bought. */
+function exactBuys(f: AgentFacts, address: string | null): { label: string; paper: boolean }[] {
+  if (!address) return [];
+  const out = new Map<string, { label: string; paper: boolean }>();
+  for (const c of f.calls) {
+    if (c.side !== "buy" || typeof c.token !== "string" || c.token.toLowerCase() !== address.toLowerCase()) continue;
+    for (const label of [c.symbol, c.name, coinOf(c)?.label]) {
+      if (typeof label === "string" && label.trim() && !out.has(label.trim().toLowerCase())) out.set(label.trim().toLowerCase(), { label: label.trim(), paper: c.paper });
+    }
+  }
+  return [...out.values()];
+}
+
 /** A tag's text with the agent's own handle taken out, every other handle left in. */
 function withoutHandle(text: string, username: string): string {
   const own = String(username ?? "").trim().replace(/^@/, "");
@@ -1529,10 +1542,13 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // names any coin it bought, however spelled, is refused.
       const exact = looked?.boughtExact === true;
       const told = general || exact;
-      const vouched = told ? buys : [];
+      // ON THE EXACT PATH, only the tagged contract's own names: "yep, bought wif" under it is a buy it never made.
+      const vouched = general ? buys : exact ? exactBuys(f, candidate.address ?? null) : [];
       const gate = (text: string) => admitXPost(text, {
         kind: "reply", agentName: f.name, mode, coins: vouched.map((c) => c.label),
         paperCoins: vouched.filter((c) => c.paper).map((c) => c.label), recentOwn, recentFleet, emojiOk: facts.style.emoji > 0,
+        // A buy it says is one it was told of, or none at all (XGateCtx.buys).
+        ...(templated ? {} : { buys: told ? "vouched" as const : "none" as const }),
         ...(!told && !templated ? { unsaid: bought } : {}),
       }, BASE_GATE);
       // SHERWOOD DOES NOT RUN IT YET: a draft that says so is refused before
@@ -1606,6 +1622,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       const admitted = raw === null || named ? null : admitXPost(raw, {
         kind: "reply", agentName: f.name, mode: paper ? "paper" : "live", coins: [coin.label],
         paperCoins: paper ? [coin.label] : [], recentOwn, recentFleet, emojiOk: facts.style.emoji > 0,
+        // A buy it says is the parent's coin, never another (red-team 2026-10-12).
+        buys: "vouched",
       }, BASE_GATE);
       const postsName = admitted?.ok === true && (sherwoodNamed(admitted.text) || sherwoodMentioned(admitted.text));
       const verdict = postsName ? null : admitted;

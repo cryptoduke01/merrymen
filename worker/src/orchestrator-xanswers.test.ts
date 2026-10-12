@@ -1042,6 +1042,33 @@ test("a copycat or emoji spelling no matcher finds is never handed its buys, and
   }
 });
 
+test("a draft that says it bought a coin it was never told of is refused, research on or off (red-team 2026-10-12)", async (t) => {
+  const BONK: CallFact = { ...CALL, decisionId: "fill-bonk", symbol: "BONK", name: "Bonk" };
+  const facts: AgentFacts = { ...FACTS, calls: [BONK, CALL] };
+  for (const env of [{}, RESEARCH_ON]) {
+    // The reproduced control tag, and drafts the gate admitted for it.
+    for (const answer of ["yep, grabbed bonk lately, the buying looked steady and real. say stop to opt out.", "yep, grabbed a little pepe lately. say stop to opt out.",
+      "yes i bought bonk with real money last week. say stop to opt out.", "yep, bought wif lately, the curve looked early. say stop to opt out.",
+      "yep, bought $BONK lately, the buying looked real. say stop to opt out."]) {
+      const w = await world(t, { env, research: fakeResearch().research, facts, answer });
+      w.setInbox([tag({ text: "@pine_stoat did you buy BONK?" })]);
+      await w.step();
+      const [row] = await w.answers();
+      assert.equal(row!.status, "skipped", answer);
+      assert.match(row!.reason ?? "", /^gate:(?:buy-claim|bought-named|unvouched-ticker)$/, answer);
+    }
+    // A plain question about its trades may say a buy it was told of, never another.
+    const told = await world(t, { env, research: fakeResearch().research, facts, answer: "yep, bought wif lately, the curve looked early. say stop to opt out." });
+    told.setInbox([tag({ text: "@pine_stoat what have you been buying lately?" })]);
+    await told.step();
+    assert.equal((await told.answers())[0]!.reason, "gate:buy-claim");
+    const honest = await world(t, { env, research: fakeResearch().research, facts, answer: "grabbed some bonk lately, the buying looked steady and real. say stop to opt out." });
+    honest.setInbox([tag({ text: "@pine_stoat what have you been buying lately?" })]);
+    await honest.step();
+    assert.equal((await honest.answers())[0]!.status, "scheduled");
+  }
+});
+
 test("research on: \"did you buy <contract>?\" reaches its own history by the address, end to end", async (t) => {
   const r = fakeResearch();
   const facts: AgentFacts = { ...FACTS, calls: [{ ...CALL, token: CA, ownWords: "the buying looked steady and real" }] };
