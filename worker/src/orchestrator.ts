@@ -224,8 +224,7 @@ import { ORDER_IN_FLIGHT_MS, commandWhereabouts, dropCommandResult, drainCommand
 import { expiredOrderReceipt, type OrderReceipt } from "./order-receipt";
 import { makeMcpBackground } from "./mcp/background";
 import { childProcessBrokerPort, serveBrokerRequests } from "./fomo/broker";
-import type { FlowResult } from "./flow-facts";
-import { attachFlowBroker, startFlowRuntime, type FlowRuntime } from "./orchestrator-flow";
+import { attachFlowBroker, flowFor, flowRuntimeNow as flowRuntimeFor, type FlowRuntime } from "./orchestrator-flow";
 import { budgetConfigFor, describeBudget, fomoBudgetFrom, fomoPlanFrom, FREE_PLAN_CREDITS_PER_MONTH, type FomoBudget, type FomoBudgetConfig } from "./fomo/budget";
 import { writeChildFomoFile } from "./fomo/child-file";
 import { fomoTailsOn, type FomoAccess, type FomoService } from "./fomo/contract";
@@ -11358,34 +11357,16 @@ interface FomoBoot {
 }
 
 /**
- * THE BITQUERY LANE, built once on first use (orchestrator-flow.ts). The key,
- * MERRYMEN_BITQUERY_API_KEY, is read here and nowhere else in the worker, and
- * stripped from every child (CHILD_SECRET_STRIP). Off without it.
+ * THE BITQUERY LANE (orchestrator-flow.ts), built once, here at boot so its
+ * line carries this process's log prefix. MERRYMEN_BITQUERY_API_KEY is
+ * stripped from every child (CHILD_SECRET_STRIP); off without it. `flowFor`
+ * is the orchestrator's own door to it — X answers import it from
+ * orchestrator-flow.ts directly, which keeps the passes free of a cycle.
  */
-let flowRuntime: FlowRuntime | null = null;
 function flowRuntimeNow(): FlowRuntime {
-  flowRuntime ??= startFlowRuntime({
-    env: process.env,
-    home: merrymenHome(),
-    // The same default every other read in this process uses.
-    rpcUrl: process.env.MERRYMEN_RPC_MAINNET ?? "https://rpc.mainnet.chain.robinhood.com",
-    log,
-  });
-  return flowRuntime;
+  return flowRuntimeFor({ log });
 }
-
-/**
- * FLOW FACTS FOR A TOKEN, for this process's own answers (X replies): DEX buys
- * and sells over 5/15/60 minutes, the venue split, the largest sells, and
- * whether the coin's recorded creator sold — or the word for why not
- * (flow-facts.ts). Spends from the lane's whole day; never throws, never
- * stalls a pass. flowFactLines() turns a result into lines a writer may
- * paraphrase; renderFlowLens() into a labelled block for a Brain lens.
- */
-export async function flowFor(token: string): Promise<FlowResult> {
-  const service = flowRuntimeNow().service;
-  return service ? service.flowFor(token, { purpose: "answer" }) : { ok: false, failure: "unavailable" };
-}
+export { flowFor };
 
 let fomoBoot: FomoBoot | null = null;
 let fomoRuntime: FomoRuntimeHandle | null = null;

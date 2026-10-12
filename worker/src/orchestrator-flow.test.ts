@@ -220,8 +220,24 @@ describe("the orchestrator's wiring", () => {
     assert.match(boot, /fomoBootNow\(\);\s*\/\/[^\n]*\n\s*\/\/[^\n]*\n\s*flowRuntimeNow\(\);/);
   });
 
-  it("exports flowFor for the orchestrator's own answers, on the whole day's budget", () => {
-    assert.match(SRC, /export async function flowFor\(token: string\): Promise<FlowResult> \{[\s\S]{0,200}purpose: "answer"/);
+  it("exports flowFor for the orchestrator's own answers, on the whole day's budget, importable without a cycle", () => {
+    const flow = readFileSync(path.join(HERE, "orchestrator-flow.ts"), "utf8");
+    assert.match(flow, /export async function flowFor\(token: string\): Promise<FlowResult> \{[\s\S]{0,200}purpose: "answer"/);
+    assert.doesNotMatch(flow, /from "\.\/orchestrator"/, "orchestrator-flow.ts never imports orchestrator.ts, so a pass can import it");
+    assert.match(SRC, /export \{ flowFor \};/, "and orchestrator.ts re-exports it");
+  });
+
+  it("flowFor answers 'unavailable' when the lane is off, without building anything", async () => {
+    const { flowFor, resetFlowRuntimeForTest } = await import("./orchestrator-flow");
+    const saved = process.env.MERRYMEN_BITQUERY_API_KEY;
+    delete process.env.MERRYMEN_BITQUERY_API_KEY;
+    resetFlowRuntimeForTest();
+    try {
+      assert.deepEqual(await flowFor(TOKEN), { ok: false, failure: "unavailable" });
+    } finally {
+      if (saved !== undefined) process.env.MERRYMEN_BITQUERY_API_KEY = saved;
+      resetFlowRuntimeForTest();
+    }
   });
 
   it("MERRYMEN_BITQUERY_API_KEY is read by the orchestrator's setup alone — never by a child's code", () => {

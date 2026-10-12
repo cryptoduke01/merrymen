@@ -29,6 +29,7 @@ import { createPublicClient, http, type PublicClient } from "viem";
 import { decisionResearchEnabledFor } from "./decision-research";
 import { childProcessFlowPort, serveFlowRequests } from "./flow-broker";
 import type { CreatorFlow, FlowResult } from "./flow-facts";
+import { merrymenHome } from "./home";
 import { BitqueryLane, bitqueryLaneSetup, type BitqueryLaneSetup, type LanePurpose } from "./venues/bitquery-lane";
 import { readTokenDeployer } from "./venues/pons-meta";
 
@@ -133,6 +134,51 @@ export function startFlowRuntime(o: { env: Record<string, string | undefined>; h
     o.log(`bitquery lane: off — its store could not be opened (${e instanceof Error ? e.name : "error"})`);
     return { setup, service: null };
   }
+}
+
+/**
+ * THE PROCESS'S ONE RUNTIME, held here rather than in orchestrator.ts so the
+ * passes that answer on X (orchestrator-xpost.ts and its kin, which
+ * orchestrator.ts imports) can import `flowFor` from this file without a
+ * cycle. Built on first use; the orchestrator builds it at boot so its line
+ * lands in the boot log, with the orchestrator's own log prefix.
+ *
+ * Reads process.env, which is safe for the reason CHILD_SECRET_STRIP exists:
+ * in a child the key is gone, so the lane is off and every answer is
+ * "unavailable". A child has no reason to import this file, and
+ * orchestrator-flow.test.ts pins that index.ts does not.
+ */
+let runtime: FlowRuntime | null = null;
+
+export const DEFAULT_RPC_MAINNET = "https://rpc.mainnet.chain.robinhood.com";
+
+export function flowRuntimeNow(o: { log?: (line: string) => void } = {}): FlowRuntime {
+  runtime ??= startFlowRuntime({
+    env: process.env,
+    home: merrymenHome(),
+    // The same default every other read in the orchestrator uses.
+    rpcUrl: process.env.MERRYMEN_RPC_MAINNET ?? DEFAULT_RPC_MAINNET,
+    log: o.log ?? ((line) => console.log(`[orchestrator] ${line}`)),
+  });
+  return runtime;
+}
+
+/** Test seam: forget the runtime so the next use reads the environment again. */
+export function resetFlowRuntimeForTest(): void {
+  runtime = null;
+}
+
+/**
+ * FLOW FACTS FOR A TOKEN, for the orchestrator's own answers (X replies): DEX
+ * buys and sells over 5/15/60 minutes, the venue split, the largest sells, and
+ * whether the coin's recorded creator sold — or the word for why not
+ * (flow-facts.ts). Spends from the lane's whole day; never throws, never
+ * stalls a pass. flowFactLines() turns a result into lines a writer may
+ * paraphrase; renderFlowLens() into a labelled block for a Brain lens.
+ */
+export async function flowFor(token: string): Promise<FlowResult> {
+  const service = flowRuntimeNow().service;
+  return service ? service.flowFor(token, { purpose: "answer" }) : { ok: false, failure: "unavailable" };
 }
 
 /**

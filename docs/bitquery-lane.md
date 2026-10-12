@@ -113,8 +113,10 @@ for the gateway and the IDE.
 
 ## Who can ask what
 
-- **The orchestrator's own answers** call `flowFor(token)`, exported from
-  `worker/src/orchestrator.ts`, and spend from the whole day. For X replies,
+- **The orchestrator's own answers** call `flowFor(token)` and spend from the
+  whole day. It lives in `worker/src/orchestrator-flow.ts`, and
+  `orchestrator.ts` re-exports it. A pass such as `orchestrator-xpost.ts`
+  should import it from `orchestrator-flow.ts`, which avoids an import cycle. For X replies,
   `flowFactLines(result)` (`worker/src/flow-facts.ts`) returns short lines that
   are already attributed ("on-chain DEX data, last 15m: $1.4k bought vs $610
   sold (8 buyers, 4 sellers)"). A writer may paraphrase them. The lines never
