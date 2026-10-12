@@ -367,7 +367,7 @@ struct XPostingAccount: Equatable {
         let comment = row["replyToTweetId"].string.flatMap { id in
             id.wholeMatch(of: #/[0-9]{1,25}/#) != nil ? URL(string: "https://x.com/i/status/\(id)") : nil
         }
-        return Post(id: Int(id), body: body, at: Date(timeIntervalSince1970: ms / 1000), link: link, isReply: row["kind"].string == "reply", commentLink: comment)
+        return Post(id: Int(id), body: body, at: Date(timeIntervalSince1970: ms / 1000), link: link, isReply: ["reply", "answer"].contains(row["kind"].string ?? ""), commentLink: comment)
     }
 
     /// The warning the owner confirms, in the words the web uses. It names the
