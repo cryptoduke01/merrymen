@@ -187,7 +187,8 @@ const CHAT_WORDS: ReadonlySet<string> = new Set((
   "edge world future past present history memory shift shifts hours seconds weeks months years forever always sometimes " +
   "honestly basically literally genuinely seriously truly mostly nearly barely clearly surely certainly hopefully thankfully " +
   "pretty plenty lot lots kind sort bunch couple whole half rest instead either neither otherwise besides meanwhile anyway anyhow " +
-  "yourself myself thanks welcome cheers glad nice sweet neat awesome solid legend legends champ ha haha hah heh hehe lol lmao oof ooh ahh hmm yay nah yep yup sure").split(/\s+/));
+  "yourself myself thanks welcome cheers glad nice sweet neat awesome solid legend legends champ ha haha hah heh hehe lol lmao oof ooh ahh hmm yay nah yep yup sure " +
+  "panic panicking obviously biased party laid crypto").split(/\s+/));
 
 /**
  * A WORD AN ANSWER HANDED NOTHING MAY NOT SAY (red-team 2026-10-12). The rule

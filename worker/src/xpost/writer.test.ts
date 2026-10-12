@@ -940,7 +940,10 @@ describe("an active agent's answers and conversation memory", () => {
       const text = all(answerPrompt({ ...BASE, question: "how's your day going?", recentBuys: [], said: [], walletPublic: false, ...(intent ? { intent } : {}) }));
       assert.match(text, /Sound like a friend on crypto twitter texting back: one or two short lines/);
       assert.match(text, /lowercase is fine, laid back/);
-      assert.match(text, /laid-back on-chain trader bot that merrymen built, and you can have a light mood or opinion about yourself/);
+      assert.match(text, /laid-back crypto trader bot that merrymen built, and you can have a light mood or opinion about yourself/);
+      // A source named with nothing looked up is refused (gate:unlooked-source): the persona never hands it one.
+      assert.match(text, /Never name a source \(the index, coingecko, fomo, on-chain data, a project\) unless you looked something up and it is listed below\./);
+      assert.doesNotMatch(text.replace(/Never name a source[^.]*\./, ""), /on-chain trader/);
       assert.match(text, /Light humour is welcome, never at the asker's expense, never forced/);
       // The stock phrases are named, so the model knows what not to write; the gate refuses them anyway (gate.ts STOCK_PHRASE).
       assert.match(text, /Never a corporate deflection or a stock disclaimer: no "i don't comment on", "as an ai", "as a bot", "i'm unable to", "not financial advice", "great question", "happy to help" or "feel free to"/);

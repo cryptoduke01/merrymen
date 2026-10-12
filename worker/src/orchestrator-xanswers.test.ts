@@ -3411,3 +3411,59 @@ test("how's the market keeps bitcoin, ether and solana in its line whatever its 
   assert.ok(w2.sends.length === 1);
   assert.doesNotMatch(String(w2.sends[0]?.text ?? ""), /\$COINA/);
 });
+
+test("the owner's questions, end to end: each gets one answer in its lane, and only a person's first carries the stop line (2026-10-12)", async (t) => {
+  const pools = [hotPool(1, 42.07, 1.21e6), hotPool(2, -8.3, 310_400), hotPool(3, 5.2, 290_000)];
+  const row = (id: string, symbol: string, rank: number, change24hPct: number) => ({ id, symbol, name: id, rank, priceUsd: 1, marketCapUsd: 1e9, volume24hUsd: 1e8, change24hPct, change7dPct: 1 });
+  const research = createXResearch({
+    hotPools: async () => ({ pools, failed: false }),
+    majors: { configured: () => true,
+      search: async () => ({ failed: false, observedAt: NOW, hits: [{ id: "ethereum", symbol: "ETH", name: "Ethereum", rank: 2 }] }),
+      market: async (id) => id === "ethereum"
+        ? { failed: false, observedAt: NOW, market: { id, symbol: "eth", name: "Ethereum", rank: 2, priceUsd: 3412.5, marketCapUsd: 411e9, volume24hUsd: 18.2e9, change24hPct: 1.24, change7dPct: -3.4 } }
+        : { failed: true, failure: "invalid-shape", market: null },
+      markets: async () => ({ failed: false, markets: [row("bitcoin", "btc", 1, 1.21), row("ethereum", "eth", 2, -0.84), row("solana", "sol", 6, 3.08)] }),
+      trending: async () => ({ coins: [], failed: false }), top: TOP_READ },
+    chainListings: listingsOf(pools),
+    resolveTicker: async () => null, coinFacts: async () => ({ ok: false, why: "unavailable" }), projectDescription: async () => null, publicTheses: async () => [],
+  });
+  // What a casual model drafts for the chat lanes; everything else is never drafted.
+  const drafts: [RegExp, string][] = [
+    [/how are you/, "doing good, just watching the tape and keeping things chill. you?"],
+    [/ai agents/, "honestly they're my people, a whole crew of bots learning to stay patient and not panic."],
+    [/what are you/, "a laid-back crypto trader bot merrymen built, mostly reading new launches and staying in my lane."],
+    [/tell me a joke/, "why did the trading bot skip sleep? it heard the tape never closes."],
+  ];
+  const TOLD = /already knows they can reply stop/;
+  const w = await world(t, { env: RESEARCH_ON, research, facts: { ...FACTS, name: "Alan Al Dale" },
+    answer: ({ prompt, system }) => { const d = drafts.find(([re]) => re.test(prompt))?.[1] ?? "PASS"; return TOLD.test(system) ? d : `${d} say stop to opt out.`; } });
+  const asks: [string, string, string][] = [
+    ["how's the market", "401", "market"], ["how's eth doing", "402", "major"], ["how are you", "333", "chat"], ["what do you think about ai agents", "404", "chat"],
+    ["wen moon", "405", "vibe"], ["should i buy pepe", "406", "advice"], ["are you bullish", "407", "vibe"], ["what are you", "408", "chat"],
+    // The same person as "how are you", later: told already, so no stop line.
+    ["tell me a joke", "333", "chat"],
+  ];
+  for (const [k, [text, author, lane]] of asks.entries()) {
+    const id = `1000000000000009${String(k + 1).padStart(2, "0")}`;
+    const at = NOW + (k + 1) * 2 * MIN;
+    w.setInbox([tag({ id, conversation_id: id, author_id: author, created_at: new Date(at - 10_000).toISOString(), text: `@pine_stoat ${text}` })]);
+    await w.step(at);
+    const sent = String(w.sends.find((s) => (s.reply as { in_reply_to_tweet_id: string }).in_reply_to_tweet_id === id)?.text ?? "");
+    assert.ok(sent, `${text}: answered`);
+    assert.ok(xWeightedLength(sent) <= X_MAX_WEIGHTED, text);
+    const first = k < asks.length - 1;
+    assert.equal(/say stop to opt out\.$/.test(sent), first, `${text}: the stop line only on a person's first answer`);
+    const words = withoutReplyOptOut(sent).replace(/ (?:coingecko|geckoterminal robinhood)(?: 24h)?: .*$/, "");
+    if (lane === "vibe") assert.ok(oneOf(vibeAnswers, id, sent), `${text}: ${sent}`);
+    if (lane === "advice") assert.ok(oneOf(declineAnswers, id, sent), `${text}: ${sent}`);
+    if (lane === "market") {
+      assert.ok(marketAnswers({ majors: { dir: "mixed" }, chain: { coins: 3, lead: { dir: "up", size: "sharply" } } }, id, { lower: true }, { notice: false }).includes(words), sent);
+      assert.match(sent, /coingecko 24h: \$BTC \+1\.2%, \$ETH -0\.8%, \$SOL \+3\.1%; geckoterminal robinhood: trending \$COINA 24h \+42\.1%/);
+    }
+    if (lane === "major") assert.match(sent, /coingecko: \$ETH #2, ~\$3\.4k, mcap ~\$411B, vol ~\$18B, 24h \+1\.2%, 7d -3\.4%\. say stop to opt out\.$/);
+    if (lane === "chat") assert.ok(drafts.some(([, d]) => sent.startsWith(d)), `${text}: the draft went out: ${sent}`);
+    // Never a corporate deflection, never the coin asked about, never a figure in the words.
+    assert.doesNotMatch(sent, /i don'?t comment|as an ai|not financial advice|great question/i, sent);
+    assert.doesNotMatch(words, /\p{N}|pepe/iu, sent);
+  }
+});

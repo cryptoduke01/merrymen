@@ -38,7 +38,9 @@ describe("a coin named in a draft's words", () => {
     for (const draft of ["doing good, just chilling and watching the tape, honestly a pretty mellow day.", "why did the trading bot skip the party? it was busy crunching charts, lol.",
       "an ai agent merrymen built, mostly reading launches and staying in my lane.", "honestly they're my people, all of us trying to read the same noisy tape.",
       "it's where people spin up their own trading agents, i'm one of the crew.", "ha, my circuits are in good spirits, thanks for asking.",
-      "a robot with a sense of humour walks into the timeline, that's me.", "heh, the punchline is i never sleep.", "mood is cozy and unbothered, the tape keeps me company."]) {
+      "a robot with a sense of humour walks into the timeline, that's me.", "heh, the punchline is i never sleep.", "mood is cozy and unbothered, the tape keeps me company.",
+      // The persona the prompt hands it, said back in its own words.
+      "just a laid-back crypto trader bot merrymen built, honestly.", "a whole crew of bots learning to stay patient and not panic, i'm biased obviously."]) {
       assert.equal(unknownWordIn(draft, "Alan Al Dale"), false, draft);
       assert.equal(coinTalkIn(draft, "Alan Al Dale"), false, draft);
     }
