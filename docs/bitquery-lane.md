@@ -64,7 +64,8 @@ meant as a later source for the early book and nothing calls it yet.
    all of them, plus its public memescope, with
    `MERRYMEN_GATEWAY_BITQUERY_POINTS_PER_DAY` (default `5000`), in two purses:
    the public memescope spends only its own 40% (2,000 a day; it refreshes at
-   most every 240 s, 1,800 points a day, so it never runs out), and holders
+   most every 240 s, 1,800 points a day, so it never runs out; a failed
+   refresh waits out the same 240 s, so an outage cannot spend it either), and holders
    the other 3,000, which the page can never spend, and at most 750 of them
    for any one holder (enough for the default interval all day; past it that
    wallet alone gets 429 until 00:00 UTC, so one holder at a 1-minute

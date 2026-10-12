@@ -58,7 +58,9 @@ curl -s https://ai.merrymen.dev/bitquery \
   ceiling 30,000) *before* calling, in two purses. The memescope spends only
   its own share (`MEMESCOPE_SHARE`, 40%: 2,000 a day) and refreshes at most
   every `MEMESCOPE_TTL_SEC` (240 s: 360 refreshes, 1,800 points), so it fits
-  its share all day; holders spend the other 3,000, which the public page can
+  its share all day. A failed refresh waits out the same 240 s before the next
+  attempt, serving its last rows meanwhile, so a Bitquery outage costs no more
+  than a day of refreshes and the page catches up once Bitquery is back; holders spend the other 3,000, which the public page can
   never touch. Each holder may spend at most 750 of those a day
   (`BITQUERY_POINTS_PER_HOLDER_PER_DAY`, enough for the worker's default
   ten-minute discovery all day); past it that wallet alone gets 429 until

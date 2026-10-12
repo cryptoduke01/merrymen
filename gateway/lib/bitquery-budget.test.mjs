@@ -197,6 +197,83 @@ describe("one daily allowance, reserved before every upstream call", () => {
     }
   });
 
+  it("an hour of Bitquery failing while a tab polls every 45 s costs one attempt per TTL, and the page recovers with it", async () => {
+    const realNow = Date.now;
+    const start = Date.parse("2026-10-12T06:00:00Z");
+    let now = start;
+    Date.now = () => now;
+    const error = console.error;
+    console.error = () => {};
+    let attempts = 0;
+    let down = true;
+    globalThis.fetch = async () => {
+      attempts++;
+      if (down) return { ok: false, status: 502, text: async () => "", json: async () => ({}) };
+      const body = { data: { EVM: { Events: [{ Block: { Time: "2026-10-12T00:00:00Z" }, Transaction: { Hash: "0xbeef" }, Arguments: [{ Value: { address: USDG } }, { Value: { address: MEME } }] }] } } };
+      return { ok: true, status: 200, text: async () => JSON.stringify(body), json: async () => body };
+    };
+    try {
+      const store = createStore();
+      const gw = gateway({ store, tunables: { MEMESCOPE_TTL_SEC: DEFAULTS.MEMESCOPE_TTL_SEC, MEMESCOPE_SHARE: DEFAULTS.MEMESCOPE_SHARE } });
+      for (; now < start + 3_600_000; now += 45_000) {
+        const r = await gw.memescope({ ip: "9.9.9.9" });
+        assert.equal(r.status, 502, "nothing cached yet: an honest 502");
+      }
+      const ttl = DEFAULTS.MEMESCOPE_TTL_SEC * 1000;
+      assert.ok(attempts <= Math.ceil(3_600_000 / ttl) + 1, `${attempts} paid attempts in an hour of failures`);
+      assert.ok(attempts >= 3_600_000 / ttl - 1, "and it kept trying, once per TTL");
+      // Bitquery comes back: within one TTL the page refreshes, its share far from spent.
+      down = false;
+      let recovered = null;
+      for (const until = now + ttl + 45_000; now <= until && !recovered; now += 45_000) {
+        const r = await gw.memescope({ ip: "9.9.9.9" });
+        if (r.status === 200 && !r.json.stale) recovered = r;
+      }
+      assert.ok(recovered, "a fresh refresh once the upstream is back");
+      assert.equal(recovered.json.pools.length, 1);
+      const share = Math.floor(DEFAULTS.BITQUERY_POINTS_PER_DAY * DEFAULTS.MEMESCOPE_SHARE);
+      // Every attempt, failed or not, was exactly one reservation: the rest of the share is still there.
+      assert.equal(await store.reservePoints("bq-scope-points:2026-10-12", share - attempts * 5, share, 60), true);
+      assert.equal(await store.reservePoints("bq-scope-points:2026-10-12", 1, share, 60), false);
+    } finally {
+      Date.now = realNow;
+      console.error = error;
+    }
+  });
+
+  it("with rows cached, a failed refresh serves them stale until the next attempt is due", async () => {
+    const realNow = Date.now;
+    let now = Date.parse("2026-10-12T06:00:00Z");
+    Date.now = () => now;
+    const error = console.error;
+    console.error = () => {};
+    try {
+      const upstream = stubUpstream();
+      const gw = gateway({ tunables: { MEMESCOPE_TTL_SEC: 240, MEMESCOPE_SHARE: DEFAULTS.MEMESCOPE_SHARE } });
+      assert.equal((await gw.memescope({ ip: "9.9.9.9" })).status, 200);
+      const ok = globalThis.fetch;
+      globalThis.fetch = async () => { upstream.calls++; throw new Error("network"); };
+      now += 241_000;
+      const failed = await gw.memescope({ ip: "9.9.9.9" });
+      assert.equal(failed.json.stale, true);
+      for (let i = 1; i <= 5; i++) {
+        now += 45_000;
+        const r = await gw.memescope({ ip: "9.9.9.9" });
+        assert.equal(r.status, 200);
+        assert.equal(r.json.stale, true);
+      }
+      assert.equal(upstream.calls, 2, "one refresh, one failed attempt, and nothing more inside its TTL");
+      globalThis.fetch = ok;
+      now += 45_000;
+      const back = await gw.memescope({ ip: "9.9.9.9" });
+      assert.equal(back.json.stale, undefined, "the next due attempt refreshes");
+      assert.equal(upstream.calls, 3);
+    } finally {
+      Date.now = realNow;
+      console.error = error;
+    }
+  });
+
   it("a store that cannot count refuses, rather than spending what it cannot count", async () => {
     const upstream = stubUpstream();
     const base = createStore();

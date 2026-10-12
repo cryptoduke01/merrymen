@@ -607,7 +607,7 @@ export function createGateway(cfg) {
    * but no longer one. Don't deploy this route to a fleet without moving the
    * cache into `store`.
    */
-  let scope = { at: 0, rows: [], inflight: null };
+  let scope = { at: 0, rows: [], inflight: null, retryAt: 0 };
   /** The UTC day the memescope last said its allowance was spent: said once a day, not once a request. */
   let scopeBudgetSaid = "";
 
@@ -684,14 +684,28 @@ export function createGateway(cfg) {
     const fresh = Date.now() - scope.at < T.MEMESCOPE_TTL_SEC * 1000;
     if (fresh) return { status: 200, json: { pools: scope.rows, cached: true, ttl: T.MEMESCOPE_TTL_SEC } };
 
+    // A FAILED REFRESH WAITS OUT A TTL TOO (review, 2026-10-12). Each attempt
+    // reserves its points from the page's share before it calls, and a failed
+    // one never gives them back; with only successes held to the TTL, every
+    // open tab's 45-second poll during a Bitquery outage was another paid
+    // attempt, and a short outage spent the page's whole day. Then the page
+    // stayed frozen until 00:00 UTC even after Bitquery came back. Now at most
+    // one attempt per TTL, success or failure; in between, the last rows
+    // (or the same 502). A refusal by the budget costs nothing and is not held.
+    if (!scope.inflight && Date.now() < scope.retryAt) {
+      if (scope.rows.length) return { status: 200, json: { pools: scope.rows, cached: true, stale: true, ttl: T.MEMESCOPE_TTL_SEC } };
+      return { status: 502, json: { error: "bitquery unavailable" } };
+    }
+
     if (!scope.inflight) {
       scope.inflight = fetchScope()
         .then((rows) => {
-          scope = { at: Date.now(), rows, inflight: null };
+          scope = { at: Date.now(), rows, inflight: null, retryAt: 0 };
           return rows;
         })
         .catch((err) => {
           scope.inflight = null;
+          if (!err?.budget) scope.retryAt = Date.now() + T.MEMESCOPE_TTL_SEC * 1000;
           throw err;
         });
     }
