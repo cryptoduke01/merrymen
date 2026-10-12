@@ -58,6 +58,8 @@ import {
   ANSWER_LOOKED_UP,
   answerAuthorSpent,
   answersWaiting,
+  OPT_OUT_NOTICE_MS,
+  optOutToldSince,
   cancelPost,
   claimSpan,
   deferPost,
@@ -1626,6 +1628,15 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         bump("answer-author-spent");
         continue;
       }
+      // THE OPT-OUT LINE ONCE (the owner's decision, 2026-10-12): "Say stop to
+      // opt out." goes on this person's first answer from this X account, and
+      // on the first after thirty days, never on every one. Told means a
+      // POSTED answer or comment reply to them carried it (store.ts
+      // optOutToldSince); a read that fails is "not told", so the line goes
+      // on. Every code line, the prompt and the gate are told the same. A
+      // stop is honoured exactly as before, line or no line (isAnswerOptOut).
+      const noticeTold = await optOutToldSince(shared, account.xUserId, comment.authorId, nowMs - OPT_OUT_NOTICE_MS).catch(() => false);
+      const lineOpts = { paper: f.mode === "paper", notice: !noticeTold };
       // NEVER CONFIRM A BUY BY NAME: a tag that names a coin in any way gets
       // no list of its buys and no fact about them, research on or off. Only
       // the tag's own full contract, bought by its records, may be (exact).
@@ -1727,14 +1738,13 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // eight frames, or, coingecko unread or research off, a line that says
       // there is no read. The model allowances taken for a draft go back.
       const stillMajor = asked.kind === "major" && (looked === null || looked.intent === "major");
-      const paperLines = { paper: f.mode === "paper" };
-      const majorLines = stillMajor && majorRead ? majorAnswers(majorRead, comment.id, facts.style, paperLines) : [];
+      const majorLines = stillMajor && majorRead ? majorAnswers(majorRead, comment.id, facts.style, lineOpts) : [];
       // Figures only beside the words that read them: never beside "no read".
       if (stillMajor && !majorLines.length) figures = null;
       const market = hotCoded
-        ? hotRead && hotRead.coins >= 1 ? hotAnswers(hotRead, comment.id, facts.style, paperLines)
-          : hotRead ? hotNoneAnswers(comment.id, facts.style, paperLines) : hotUnreadAnswers(comment.id, facts.style, paperLines)
-        : stillMajor ? majorLines.length ? majorLines : majorUnreadAnswers(comment.id, facts.style, paperLines) : [];
+        ? hotRead && hotRead.coins >= 1 ? hotAnswers(hotRead, comment.id, facts.style, lineOpts)
+          : hotRead ? hotNoneAnswers(comment.id, facts.style, lineOpts) : hotUnreadAnswers(comment.id, facts.style, lineOpts)
+        : stillMajor ? majorLines.length ? majorLines : majorUnreadAnswers(comment.id, facts.style, lineOpts) : [];
       if (market.length && !undrafted) {
         await returnAllowance(shared, answerKey, at());
         await returnAllowance(shared, `llm:${utcDay(nowMs)}`, at());
@@ -1745,12 +1755,12 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // this mention's own first: one it already said is a repeat to the gate,
       // so the next is tried rather than none, and when all have been said
       // lately, none. A paper agent's lines say paper: it is gated as a paper reply.
-      const lines = greeting ? greetingAnswers(comment.id, facts.style, { paper: f.mode === "paper" })
-        : templated ? modelAnswers(comment.id, facts.style, { paper: f.mode === "paper" }) : market;
+      const lines = greeting ? greetingAnswers(comment.id, facts.style, lineOpts)
+        : templated ? modelAnswers(comment.id, facts.style, lineOpts) : market;
       const raw = coded
         ? lines[0]!
         : await draft(creds, answerPrompt({ ...facts, question: candidate.text, recentBuys: buys, boughtLately: boughtKind(f),
-          said: said.map(withoutReplyOptOut), walletPublic, coinNamed, general, ...(looked ?? {}) }), { call: deps.llm, timeoutMs: deps.draftTimeoutMs });
+          said: said.map(withoutReplyOptOut), walletPublic, coinNamed, general, optOutNotice: !noticeTold, ...(looked ?? {}) }), { call: deps.llm, timeoutMs: deps.draftTimeoutMs });
       const mode = f.mode === "idle" ? null : f.mode;
       // AN ANSWER NOT TOLD ITS BUYS, BACKSTOPPED AT THE GATE (red-team 2026-10-12):
       // a tag that named a coin, or any question that is not a plain one about
@@ -1787,7 +1797,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // WHAT IT WAS HANDED: research or a creator's claim (an answer handed none cites no source).
       const handed = !!looked && (looked.research.length > 0 || !!looked.creatorClaim);
       const gate = (text: string) => admitXPost(text, {
-        kind: "reply", answer: true, agentName: f.name, mode, coins: vouched.map((c) => c.label),
+        kind: "reply", answer: true, noticeShown: noticeTold, agentName: f.name, mode, coins: vouched.map((c) => c.label),
         paperCoins: [...vouched.filter((c) => c.paper).map((c) => c.label), ...(f.mode === "idle" ? money.paper : [])], recentOwn, recentFleet, emojiOk: facts.style.emoji > 0,
         // A buy it says is one it was told of, or none at all (XGateCtx.buys).
         ...(coded ? {} : { buys: told ? "vouched" as const : "none" as const, unsaid: [...(told && !namesNone ? [] : bought), ...money.otherOnly, ...older, ...askerNames],

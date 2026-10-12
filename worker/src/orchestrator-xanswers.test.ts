@@ -49,7 +49,9 @@ async function world(t: TestContext, o: {
   others?: number;
   /** MERRYMEN_XPOST_REPLIES_APPROVED as set (null: unset), read as the orchestrator reads it. Default: approved for everyone. */
   scope?: string | null;
-  env?: Record<string, string>; research?: XResearch; facts?: AgentFacts; answer?: string;
+  env?: Record<string, string>; research?: XResearch; facts?: AgentFacts;
+  /** What the model drafts for an answer prompt: one text, or one per prompt. Default ANSWER. */
+  answer?: string | ((input: { prompt: string; system: string }) => string);
   /** Run while an answer is being drafted: what another replica does in the middle of this pass. */
   duringDraft?: (db: ReturnType<typeof wrapSqlite>) => Promise<void>;
 } = {}) {
@@ -123,7 +125,8 @@ async function world(t: TestContext, o: {
         if (o.duringDraft && /Untrusted question/.test(input.prompt)) await o.duringDraft(db);
         everySystem.push(input.system ?? "");
         if (/Untrusted question/.test(input.prompt)) systems.push(input.system ?? "");
-        return /Untrusted question/.test(input.prompt) ? o.answer ?? ANSWER : "PASS";
+        if (!/Untrusted question/.test(input.prompt)) return "PASS";
+        return typeof o.answer === "function" ? o.answer({ prompt: input.prompt, system: input.system ?? "" }) : o.answer ?? ANSWER;
       },
       ...(o.research ? { research: o.research } : {}),
     },
@@ -167,6 +170,87 @@ test("a tag gets one answer to the mention itself, right away, in its own lane: 
   w.setInbox([]);
   await w.step(NOW + 15_000);
   assert.equal(w.sends.length, 1);
+});
+
+test("the opt-out line once: a person's first answer carries it, later ones do not, another person's first does, and stop always works (2026-10-12)", async (t) => {
+  const NOTICE_RULE = /Every answer must end with «say stop to opt out\.» exactly/i;
+  const TOLD_RULE = /already knows they can reply stop to opt out: add no opt-out line/;
+  // The model follows its prompt: the line when it is told to end with it, none when told the person knows.
+  const words = (prompt: string) => /how's your day/.test(prompt) ? "doing good, just watching the tape and keeping it chill"
+    : /ai agents/.test(prompt) ? "honestly they're my people, all of us trying to read the same noisy tape"
+    : /new with you/.test(prompt) ? "not much, same patient habit of reading launches quietly"
+    : "mostly fresh launches, and i only buy when the buying looks real and steady";
+  const w = await world(t, { answer: ({ prompt, system }) => TOLD_RULE.test(system) ? `${words(prompt)}.` : `${words(prompt)}. Say stop to opt out.` });
+  const at = (id: string, ms: number, text: string, author = "333") => tag({ id, conversation_id: id, author_id: author, created_at: new Date(ms - 10_000).toISOString(), text });
+
+  // First answer: owed, asked for, and posted with it.
+  w.setInbox([at("100000000000000501", NOW, "@pine_stoat how's your day going?")]);
+  await w.step(NOW);
+  assert.match(w.systems.at(-1)!, NOTICE_RULE);
+  assert.doesNotMatch(w.systems.at(-1)!, TOLD_RULE);
+  assert.equal(w.sends.at(-1)!.text, "doing good, just watching the tape and keeping it chill. Say stop to opt out.");
+  assert.equal(await store.optOutToldSince(w.db, "111", "333", NOW - DAY), true, "posted with the line: told");
+
+  // The same person again, two minutes later: told, so no line, and the gate admits it without one.
+  w.setInbox([at("100000000000000502", NOW + 2 * MIN, "@pine_stoat what do you think about ai agents?")]);
+  await w.step(NOW + 2 * MIN);
+  assert.match(w.systems.at(-1)!, TOLD_RULE);
+  assert.doesNotMatch(w.systems.at(-1)!, NOTICE_RULE);
+  assert.equal(w.sends.at(-1)!.text, "honestly they're my people, all of us trying to read the same noisy tape.");
+  // A different person, the same minute: their first, so the line.
+  w.setInbox([at("100000000000000503", NOW + 3 * MIN, "@pine_stoat how do you pick your coins?", "444")]);
+  await w.step(NOW + 3 * MIN);
+  assert.match(w.systems.at(-1)!, NOTICE_RULE);
+  assert.equal(w.sends.at(-1)!.text, "mostly fresh launches, and i only buy when the buying looks real and steady. Say stop to opt out.");
+
+  // A day later, a greeting from the first person: code's line, without the notice.
+  w.setInbox([at("100000000000000504", NOW + DAY + 5 * MIN, "@pine_stoat gm")]);
+  await w.step(NOW + DAY + 5 * MIN);
+  const greeted = w.sends.at(-1)!.text as string;
+  assert.ok(greetingAnswers("100000000000000504", { lower: false }, { notice: false }).includes(greeted), greeted);
+  assert.doesNotMatch(greeted, /opt out/i);
+
+  // And a stop, whether or not the line was on the last answer, is honoured as always.
+  const sent = w.sends.length;
+  w.setInbox([at("100000000000000506", NOW + DAY + 10 * MIN, "@pine_stoat hey stop")]);
+  await w.step(NOW + DAY + 10 * MIN);
+  assert.equal(await store.repliesOptedOut(w.db, "111", "333"), true);
+  w.setInbox([at("100000000000000508", NOW + DAY + 20 * MIN, "@pine_stoat what's new with you?")]);
+  await w.step(NOW + DAY + 20 * MIN);
+  assert.ok(w.sends.slice(sent).every((s) => (s.reply as { in_reply_to_tweet_id: string }).in_reply_to_tweet_id !== "100000000000000508"), "nothing to someone who said stop");
+});
+
+test("told means a posted answer carried the line in the last thirty days: older than that, or never posted, the line is owed again (2026-10-12)", async (t) => {
+  const TOLD_RULE = /already knows they can reply stop/;
+  for (const [what, sentAgo, posted, told] of [["posted twenty-nine days ago", 29 * DAY, true, true], ["posted thirty-one days ago", 31 * DAY, true, false],
+    ["drafted with the line and skipped, never posted", HOUR, false, false]] as const) {
+    const w = await world(t, { answer: ({ system }) => TOLD_RULE.test(system) ? "doing good, keeping it chill." : "doing good, keeping it chill. Say stop to opt out." });
+    const id = await store.schedulePost(w.db, { tenant: TENANT, xUserId: "111", kind: "answer", dedupeKey: "answer:111:100000000000000530",
+      body: "an older answer in other words entirely. Say stop to opt out.", nowMs: NOW - sentAgo, dueAtMs: NOW - sentAgo,
+      replyToTweetId: "100000000000000530", replyRootTweetId: "100000000000000530", replyAuthorId: "333", ...(posted ? {} : { status: "skipped" as const, reason: "gate:repeat" }) });
+    if (posted) {
+      await store.claimPost(w.db, id!, NOW - sentAgo);
+      await store.markPosted(w.db, id!, "100000000000000531", NOW - sentAgo);
+    }
+    w.setInbox([tag({ text: "@pine_stoat how's your day going?" })]);
+    await w.step();
+    assert.equal(TOLD_RULE.test(w.systems[0]!), told, what);
+    assert.equal(w.sends.at(-1)!.text, told ? "doing good, keeping it chill." : "doing good, keeping it chill. Say stop to opt out.", what);
+  }
+});
+
+test("a told person's answer may still carry the line when the model adds it anyway: the gate admits it as written (2026-10-12)", async (t) => {
+  // The model ignores "add no opt-out line" and adds it anyway: the gate admits it as written.
+  const w = await world(t, { answer: "doing good, just watching the tape and keeping it chill. Say stop to opt out." });
+  const id = await store.schedulePost(w.db, { tenant: TENANT, xUserId: "111", kind: "answer", dedupeKey: "answer:111:100000000000000520",
+    body: "an older answer in other words entirely. Say stop to opt out.", nowMs: NOW - 2 * HOUR, dueAtMs: NOW - 2 * HOUR,
+    replyToTweetId: "100000000000000520", replyRootTweetId: "100000000000000520", replyAuthorId: "333" });
+  await store.claimPost(w.db, id!, NOW - 2 * HOUR);
+  await store.markPosted(w.db, id!, "100000000000000521", NOW - 2 * HOUR);
+  w.setInbox([tag({ text: "@pine_stoat how's your day going?" })]);
+  await w.step();
+  assert.match(w.systems[0]!, /already knows they can reply stop/);
+  assert.equal(w.sends[0]!.text, "doing good, just watching the tape and keeping it chill. Say stop to opt out.");
 });
 
 test("a STOP in the same batch opts its author out first: nothing is drafted or sent to them, and the next person is answered on that pass", async (t) => {

@@ -221,6 +221,14 @@ export interface AnswerFacts extends WriterFacts {
    * handed the list and answered "yep").
    */
   general?: boolean;
+  /**
+   * THIS ANSWER CARRIES "SAY STOP TO OPT OUT." (the owner's decision,
+   * 2026-10-12): the person's first answer from this X account, or the first
+   * after thirty days (store.ts optOutToldSince). False: they were told
+   * already, and the prompt says to add no opt-out line; the gate is told the
+   * same (XGateCtx.noticeShown). Absent is true: the fail-closed side.
+   */
+  optOutNotice?: boolean;
 }
 
 /** A tag's intent, as code reads it. */
@@ -1017,7 +1025,9 @@ export function answerPrompt(f: AnswerFacts): Prompt {
       ? "Never say you hold, still hold, will buy, will sell or will do anything next."
       : "Never say you hold, still hold, will buy, will sell or will do anything next. Coins you bought lately are past events: say you bought them, never that you hold them now.",
     "If asked what model or AI you run on, or about any model by name: say only that you're built by merrymen. Never name a provider or a model, not even merrymen's own, and never say what runs you, powers you or picks your trades.",
-    `Every answer must end with ${q(notice)} exactly. Leave room for it inside the character limit. A notice alone is not an answer: if there is nothing useful to say, output exactly PASS.`,
+    f.optOutNotice === false
+      ? "This person already knows they can reply stop to opt out: add no opt-out line, notice or sign-off of any kind."
+      : `Every answer must end with ${q(notice)} exactly. Leave room for it inside the character limit. A notice alone is not an answer: if there is nothing useful to say, output exactly PASS.`,
   ].join("\n\n");
   if (!question) return { system, prompt: "There is no usable question. Output exactly PASS." };
   const hint = f.intent ? (research.length ? INTENT_HINT[f.intent] : NOTHING_LOOKED_UP[f.intent] ?? null) : null;
