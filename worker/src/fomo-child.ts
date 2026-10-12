@@ -55,6 +55,7 @@ import { writeFileAtomicSync } from "./atomic-write";
 import { tradeConsumesSnapshot } from "./brain-live";
 import type { ShadowOutcome } from "./brain-shadow";
 import { entryTokenOf, type Classified } from "./decision-funnel";
+import { decisionResearchEnabledFor } from "./decision-research";
 import type { EarlyOffer, EarlyOfferResult } from "./early-candidates";
 import { createDirectBroker, createIpcBroker, type BrokerPort } from "./fomo/broker";
 import { readChildFomoFile, type ChildFomoRead, type ChildFomoReadReason } from "./fomo/child-file";
@@ -78,6 +79,7 @@ import { executionAvailabilityOf, isRobinhoodToken, keyOf, robinhoodChain } from
 import { TRADER_FLOW_LENS } from "./fomo/lens";
 import { dossierStrength, objectionStrengthened, reviewHeldPosition, thesisStrengthened, type DossierStrength, type HeldReview } from "./fomo/lifecycle";
 import { openLocalFomoDb } from "./fomo/local-db";
+import { REVIEW_CANDIDATES, ReviewCandidateWindow } from "./fomo/review-candidates";
 import type { FomoBudgetConfig } from "./fomo/budget";
 import { createFomoRuntime } from "./fomo/runtime";
 import { AUTONOMOUS_ENTRY_CAP_6, ExplorationReservations, entryCeiling, microUsdgFloor, type EntryCeiling, type ReservationSnapshot } from "./fomo/sizing";
@@ -1965,6 +1967,8 @@ export class FomoChild {
   private heldReviewSent = new Map<string, { sig: string; at: number }>();
   private funnelSent = new Map<string, { sig: string; at: number }>();
   private heldTokensAt = Number.NEGATIVE_INFINITY;
+  /** The coins this child named for research, per rolling window (reportReviewCandidates). */
+  private readonly reviewCandidates = new ReviewCandidateWindow();
   private verify: string[] = [];
   private lensSent = new Map<string, { at: number; refs: string[]; dossierRevision: { dossierId: string; revision: number } | null }>();
   private traces: LensTrace[] = [];
@@ -2198,6 +2202,11 @@ export class FomoChild {
     const follow = this.followAllowed(live);
     const mode = this.mode(live);
     for (const s of file.signals.slice(0, 40)) {
+      // ONLY A REVIEW CANDIDATE (reportReviewCandidates): in the file for its
+      // dossier and lens, which attachLens reads. Never assessed, so it can
+      // never become a nomination, a verification ask, an assessment row or
+      // a publication draft: naming a coin for research widens nothing.
+      if (s.reasons.length > 0 && s.reasons.every((r) => r === "candidate")) continue;
       try {
         const address = lower(s.token.address);
         const robinhood = isRobinhoodToken(s.token);
@@ -2911,6 +2920,48 @@ export class FomoChild {
   }
 
   // ── Brain review hooks ─────────────────────────────────────────────────
+
+  /**
+   * THE ENTRY CANDIDATES THIS REVIEW ROTATES THROUGH, ASKED OF SHARED
+   * RESEARCH (fomo/review-candidates.ts). index.ts calls this once per
+   * review with the coins that passed the review's own filters; the
+   * orchestrator queues their dossiers, and the NEXT review of each carries
+   * the trader-flow lens (attachLens, from the file's `candidate` signal).
+   *
+   * Sent only when every one of these holds, each read now:
+   *   - Fomo is on in this process and a broker exists;
+   *   - this agent's account is on the operator's research allowlist
+   *     (decision-research.ts decisionResearchEnabledFor — the same opt-in as
+   *     the review's cost evidence), on the LIVE rail of a fast Trencher;
+   *   - the owner has research on: data access, and monitoring or follow.
+   * Only Robinhood memecoins this agent does not hold (a held coin is already
+   * researched as held), at most REVIEW_CANDIDATES.perWindow new coins per
+   * window; a coin named again inside its window is not sent again.
+   *
+   * Research only: nothing here is a nomination, a gate or a size. Never
+   * awaited, never throws. Returns how many coins were sent (tests, logs).
+   */
+  reportReviewCandidates(tokens: readonly string[], env: NodeJS.ProcessEnv = process.env): number {
+    if (this.isOff()) return 0;
+    try {
+      const live = this.deps.live();
+      const s = live.settings;
+      if (live.rail !== "live" || s.strategy !== "trencher" || s.trencherFast !== true) return 0;
+      if (typeof live.agentId !== "string" || !decisionResearchEnabledFor(live.agentId, env)) return 0;
+      if (s.dataAccess !== true || !(s.monitoring === true || s.follow === true)) return 0;
+      const broker = this.deps.broker();
+      if (!broker) return 0;
+      const now = this.now();
+      const offered = (Array.isArray(tokens) ? tokens : []).map(lower).filter((a) => tradableCoin(a) && !this.held.has(a));
+      const fresh = this.reviewCandidates.admit([...new Set(offered)].map(robinhoodKey), now).slice(0, REVIEW_CANDIDATES.perWindow);
+      if (fresh.length === 0) return 0;
+      void broker.report({ kind: "review-candidates", tokenKeys: fresh, atMs: now }).catch(() => {});
+      return fresh.length;
+    } catch (e) {
+      this.once(`review-candidates:${e instanceof Error ? e.name : "error"}`, `[fomo] review candidates not reported (${e instanceof Error ? e.name : "error"})`);
+      return 0;
+    }
+  }
 
   /**
    * THE TRADER-FLOW LENS, when there is one to send and Brain accepts it.
