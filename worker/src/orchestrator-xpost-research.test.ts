@@ -5,9 +5,11 @@
  * per answer. No network: every reader is a fake.
  */
 import assert from "node:assert/strict";
+import { DatabaseSync } from "node:sqlite";
 import { describe, it } from "node:test";
 import type { CoinFacts, CoinFactsReader } from "./coin-facts-types";
-import type { Db } from "./db";
+import { wrapSqlite, type Db } from "./db";
+import type { FlowResult } from "./flow-facts";
 import type { BrokerCallOptions, FomoBroker } from "./fomo/contract";
 import type { TokenActivityData, TokenThesesData } from "./fomo/tools";
 import type { FomoEnvelope, FomoToolName } from "./fomo/types";
@@ -35,7 +37,7 @@ import type { PublicThesis } from "./thesis-policy";
 import { admitXPost } from "./xpost/gate";
 import { tagCandidate } from "./xpost/replies";
 import { modelAnswer } from "./xpost/writer";
-import type { XPost } from "./xpost/store";
+import { ensureXpostSchema, readMeta, type XPost } from "./xpost/store";
 
 const NOW = Date.UTC(2026, 9, 12, 12);
 const HOUR = 3_600_000;
@@ -45,7 +47,23 @@ const TENANT = `0x${"ab".repeat(20)}`;
 const CALL: CallFact = { decisionId: "d1", side: "buy", symbol: "PEPE", name: "Pepe", token: PEPE_CA, paper: true,
   atSec: (NOW - 4 * HOUR) / 1000, bands: [], ownWords: "the buying looked steady and real" };
 const FACTS: AgentFacts = { tenant: TENANT, agentId: TENANT, slug: null, name: "Alan", mode: "live", ageDays: 9, strategy: "trencher", traits: [], calls: [CALL] };
-const SHARED = {} as Db;
+/** The shared database a bundle counts its daily flow readings in: in memory, with the X tables. */
+async function freshDb(): Promise<Db> {
+  const db = wrapSqlite(new DatabaseSync(":memory:"));
+  await ensureXpostSchema(db, "sqlite");
+  return db;
+}
+const SHARED = await freshDb();
+
+/** A busy hour in which buys clearly lead, from many addresses: what the lane's reading looks like. */
+const READING: FlowResult = { ok: true, facts: { token: CA as `0x${string}`, observedAt: NOW, venues: [], largestSells: [], creator: { state: "not-derivable" },
+  windows: [
+    { minutes: 5, buyUsd: 400, sellUsd: 100, buys: 6, sells: 2, buyers: 6, sellers: 2 },
+    { minutes: 15, buyUsd: 900, sellUsd: 300, buys: 12, sells: 4, buyers: 11, sellers: 3 },
+    { minutes: 60, buyUsd: 4_000, sellUsd: 900, buys: 40, sells: 9, buyers: 30, sellers: 7 },
+  ] } };
+/** Either wording of a band the reading above supports. */
+const BUYS_LEAD = /on-chain data shows buys clearly outweighing sells over the last hour|per on-chain data, buys ran well ahead of sells over the last hour/;
 
 const coinFacts = (over: Partial<CoinFacts> = {}): CoinFacts => ({
   network: "robinhood", observedAt: NOW, priceUsd: 0.000123, fdvNowUsd: 45_000, high: null, barsFromMs: null,
@@ -159,16 +177,24 @@ describe("words from measurements: digit-free, attributed, and through the X gat
     assert.equal(said.length, 3);
     assert.deepEqual(fomoActivityPhrases(act(1, 1)), []);
     assert.deepEqual(fomoActivityPhrases(act(null, 4)), []);
-    const flow = [...flowPhrases({ window: "24h", buyers: 30, sellers: 5 }), ...flowPhrases({ window: "1h", buyers: 3, sellers: 30 })];
-    assert.equal(flow.length, 2);
-    assert.deepEqual(flowPhrases(null), []);
-    assert.deepEqual(flowPhrases({ window: "24h", buyers: 10, sellers: 9 }), []);
+    const flow = flowPhrases(READING, `${TENANT}|${CA}`);
+    assert.ok(flow.length >= 2, flow.join(" | "));
+    assert.ok(flow.some((p) => BUYS_LEAD.test(p)), flow.join(" | "));
+    assert.ok(flow.every((p) => sayable(p) && !/\p{N}|\$|0x/u.test(p)), "bands, never a figure or an address");
+    assert.deepEqual(flowPhrases(READING, `${TENANT}|${CA}`), flow, "one owner says one coin's bands one way");
+    assert.deepEqual(flowPhrases(null, "s"), []);
+    assert.deepEqual(flowPhrases({ ok: false, failure: "budget" }, "s"), []);
+    const quiet: FlowResult = { ok: true, facts: { ...READING.facts, windows: READING.facts.windows.map((w) => ({ ...w, buyUsd: 0, sellUsd: 0, buys: 0, sells: 0, buyers: 0, sellers: 0 })) } };
+    assert.deepEqual(flowPhrases(quiet, "s"), [], "a silent hour is no line, never \"nothing happened\"");
     for (const p of [...said, ...flow]) clears(p);
   });
 
   it("what it can do and how to get an agent are said by code, and clear the gate", () => {
     assert.match(capabilityPhrases({ fomo: true, flow: false }).join(" "), /fomo traders/);
-    assert.doesNotMatch(capabilityPhrases({ fomo: false, flow: false }).join(" "), /fomo/);
+    assert.doesNotMatch(capabilityPhrases({ fomo: false, flow: false }).join(" "), /fomo|on-chain/);
+    assert.match(capabilityPhrases({ fomo: false, flow: true }).join(" "), /what the public index and on-chain data show, in words/);
+    assert.match(capabilityPhrases({ fomo: true, flow: true }).join(" "), /what the public index and on-chain data show, and what fomo traders say, in words/);
+    for (const p of capabilityPhrases({ fomo: false, flow: true })) clears(p);
     for (const p of [...capabilityPhrases({ fomo: true, flow: true }), ...ONBOARDING_PHRASES]) {
       assert.ok(sayable(p), p);
       clears(p);
@@ -260,12 +286,12 @@ interface Fakes {
   resolved: string[];
   described: string[];
   fomoCalls: { tool: FomoToolName; args: Record<string, unknown>; opts: BrokerCallOptions; tenant: string }[];
-  flows: string[];
+  flows: { address: string; chainId: number; timeoutMs: number }[];
 }
 
 function fakes(o: {
-  facts?: CoinFacts | null; resolve?: string | null; slow?: boolean; flow?: boolean; fomoEnv?: (tool: FomoToolName) => FomoEnvelope;
-  description?: string; usable?: boolean; noBroker?: boolean; unconfigured?: boolean;
+  facts?: CoinFacts | null; resolve?: string | null; slow?: boolean; flow?: boolean | FlowResult; fomoEnv?: (tool: FomoToolName) => FomoEnvelope;
+  description?: string; usable?: boolean; noBroker?: boolean; unconfigured?: boolean; flowPerDay?: number;
 } = {}) {
   const f: Fakes = { reads: [], resolved: [], described: [], fomoCalls: [], flows: [] };
   const coinReader: CoinFactsReader = async (q) => {
@@ -291,7 +317,8 @@ function fakes(o: {
     publicTheses: async () => [],
     fomo,
     ...(o.usable !== undefined ? { fomoUsable: async () => o.usable! } : {}),
-    ...(o.flow ? { flow: async (q: { address: string }) => { f.flows.push(q.address); return { window: "24h" as const, buyers: 20, sellers: 2 }; } } : {}),
+    ...(o.flow ? { flow: async (q: { address: string; chainId: number; timeoutMs: number }) => { f.flows.push(q); return o.flow === true ? READING : o.flow as FlowResult; } } : {}),
+    ...(o.flowPerDay !== undefined ? { flowPerDay: o.flowPerDay } : {}),
     now: () => Date.now(),
   });
   return { f, research };
@@ -393,15 +420,61 @@ describe("one bounded research bundle per answer", () => {
 
   it("the flow hook is used when present and ignored when absent", async () => {
     const off = fakes();
-    assert.ok(!(await off.research.gather(input({ kind: "coin", ticker: null, address: CA }))).facts.some((p) => /onchain/.test(p)));
+    assert.ok(!(await off.research.gather(input({ kind: "coin", ticker: null, address: CA }))).facts.some((p) => /on-chain/.test(p)));
     const on = fakes({ flow: true });
     const b = await on.research.gather(input({ kind: "coin", ticker: null, address: CA }));
-    assert.deepEqual(on.f.flows, [CA]);
-    assert.ok(b.facts.includes("onchain, more traders have been buying in than heading out lately"));
+    assert.deepEqual(on.f.flows.map((q) => [q.address, q.chainId]), [[CA, 4663]]);
+    assert.ok(on.f.flows[0]!.timeoutMs <= RESEARCH_BUDGET.flowMs, "the reading is asked to finish inside its share");
+    assert.ok(b.facts.some((p) => BUYS_LEAD.test(p)), b.facts.join(" | "));
+    assert.ok(b.facts.every((p) => !/0x|ab12|\p{N}/iu.test(p)), b.facts.join(" | "));
+    // Its own trades, and a coin whose contract is not known, read no flow.
+    const own = fakes({ flow: true, resolve: null });
+    await own.research.gather(input({ kind: "own-trades", why: false, coin: null, address: null }));
+    await own.research.gather(input({ kind: "coin", ticker: "WIF", address: null }));
+    assert.deepEqual(own.f.flows, [], "only once a contract is known");
   });
 
-  it("the budget is pinned: six lookups, twelve seconds, four per index read and eight per Fomo read", () => {
-    assert.deepEqual({ ...RESEARCH_BUDGET }, { maxLookups: 6, totalMs: 12_000, readMs: 4_000, fomoMs: 8_000 });
+  it("a failed flow reading is no fact and a stable note, never a figure or a provider's words", async () => {
+    const r = fakes({ flow: { ok: false, failure: "budget" } });
+    const b = await r.research.gather(input({ kind: "coin", ticker: null, address: CA }));
+    assert.ok(!b.facts.some((p) => /on-chain/.test(p)));
+    assert.ok(b.notes.includes("flow-budget"), b.notes.join(","));
+    assert.ok(b.facts.includes("the public index shows liquidity is thin"), "the other reads still count");
+  });
+
+  it("X answers' flow readings stop at their own count per UTC day, before the lane is asked", async () => {
+    const shared = await freshDb();
+    const r = fakes({ flow: true, flowPerDay: 2 });
+    for (let i = 0; i < 2; i++) await r.research.gather(input({ kind: "coin", ticker: null, address: CA }, { shared }));
+    const last = await r.research.gather(input({ kind: "coin", ticker: null, address: CA }, { shared }));
+    assert.equal(r.f.flows.length, 2, "the third reading of the day is never sent");
+    const day = new Date().toISOString().slice(0, 10);
+    assert.equal((await readMeta(shared, `x-answer-flow:${day}`))?.n, 2);
+    assert.ok(last.notes.includes("flow-day-spent"), last.notes.join(","));
+    assert.ok(!last.facts.some((p) => /on-chain/.test(p)));
+    assert.ok(last.facts.includes("the public index shows liquidity is thin"), "the answer is still written from the rest");
+    const none = fakes({ flow: true, flowPerDay: 0 });
+    await none.research.gather(input({ kind: "coin", ticker: null, address: CA }, { shared: await freshDb() }));
+    assert.equal(none.f.flows.length, 0, "zero is none");
+  });
+
+  it("the budget is pinned: six lookups, twelve seconds, four per index read, eight per Fomo read and per flow reading", () => {
+    assert.deepEqual({ ...RESEARCH_BUDGET }, { maxLookups: 6, totalMs: 12_000, readMs: 4_000, fomoMs: 8_000, flowMs: 8_000 });
+  });
+
+  it("a caller with less time left gets a bundle cut to it, and none at all with nothing left", async () => {
+    const slow = fakes({ slow: true, flow: true });
+    const t0 = Date.now();
+    const s = await slow.research.gather(input({ kind: "coin", ticker: null, address: CA }, { budgetMs: 1_000 }));
+    assert.ok(Date.now() - t0 < 1_000 + 500, `${Date.now() - t0} ms`);
+    assert.ok(slow.f.reads.every((q) => q.timeoutMs <= 1_000), "every read asked to finish inside what is left");
+    assert.ok(slow.f.flows.every((q) => q.timeoutMs <= 1_000));
+    assert.ok(s.facts.some((p) => BUYS_LEAD.test(p)), "a read that made it still counts");
+    const spent = fakes({ flow: true });
+    const n = await spent.research.gather(input({ kind: "coin", ticker: null, address: CA }, { budgetMs: 0 }));
+    assert.equal(spent.f.reads.length + spent.f.flows.length + spent.f.fomoCalls.length, 0, "nothing is asked");
+    assert.equal(n.lookups, 0);
+    assert.ok(n.notes.includes("late"), n.notes.join(","));
   });
 
   it("never more than the lookups allowed, and never past its time", async () => {
@@ -413,7 +486,7 @@ describe("one bounded research bundle per answer", () => {
     const s = await slow.research.gather(input({ kind: "coin", ticker: null, address: CA }));
     assert.ok(Date.now() - t0 < RESEARCH_BUDGET.readMs + 1_000, "one slow read is cut at its share");
     assert.ok(!s.facts.some((p) => /public index shows/.test(p)), "a late read is no fact");
-    assert.ok(s.facts.includes("onchain, more traders have been buying in than heading out lately"), "the others still count");
+    assert.ok(s.facts.some((p) => BUYS_LEAD.test(p)), "the others still count");
   });
 
   it("the X account's index limiter: a busy account searches nothing", async () => {

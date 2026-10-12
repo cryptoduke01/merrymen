@@ -217,7 +217,19 @@ for the gateway and the IDE.
     orchestrator never passes on a copy from its own environment.
   - Each review logs `[trencher] flow SYMBOL: lens`, `no-block` (read, nothing
     to render) or the failure word.
-- **X answers** (not wired here): `flowXLines`, as described above.
+- **X answers**, with research on (`MERRYMEN_XPOST_RESEARCH=1`, an active
+  owner's answers; [`x-posting.md`](x-posting.md) "Research for answers"):
+  `orchestrator.ts` hands the research `flowFor` only while the lane is on,
+  for a Robinhood Chain contract a tag carried or a coin resolved to. The
+  reading's deadline is the answer's eight-second share
+  (`flowFor(token, { timeoutMs })`), and it is said only through
+  `flowXLines(result, "<tenant>|<token>")`. Answers spend from the whole day,
+  so they have their own count per UTC day, taken before the read:
+  `answerReadingsPerDay`, the points child evidence cannot spend divided by a
+  whole reading (15 + 10 points), which is 200 with the defaults. Even if
+  answers spend all of it first, evidence keeps its 20,000. The orchestrator
+  logs `xpost: answers may read onchain flow — up to N readings per UTC day`
+  once, when the X poster is built.
 - **Early book.** `BitqueryLane.v3Pools(token)` returns PoolCreated
   candidates from the pinned Uniswap v3 factory. Each one still has to be
   confirmed with the factory's `getPool` and pass the existing depth, TWAP and

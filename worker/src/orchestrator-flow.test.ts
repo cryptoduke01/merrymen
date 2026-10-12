@@ -12,8 +12,8 @@ import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import type { ChildProcess } from "node:child_process";
 import { createFlowClient, FLOW_BROKER_LIMITS, type FlowPort } from "./flow-broker";
-import { attachFlowBroker, CREATOR_WINDOW_MIN, FLOW_DEADLINE_MS, makeFlowService, ponsLaunchCreatorLookup, startFlowRuntime, type CreatorLookup, type FlowService } from "./orchestrator-flow";
-import { BITQUERY_LANE_DEFAULTS, type BitqueryLane, type LaneAnswer, type CreatorFlowRead, type TokenFlowRead } from "./venues/bitquery-lane";
+import { answerReadingsPerDay, attachFlowBroker, CREATOR_WINDOW_MIN, FLOW_DEADLINE_MS, makeFlowService, ponsLaunchCreatorLookup, startFlowRuntime, type CreatorLookup, type FlowService } from "./orchestrator-flow";
+import { BITQUERY_LANE_DEFAULTS, LANE_POINTS, bitqueryLaneSetup, type BitqueryLane, type LaneAnswer, type CreatorFlowRead, type TokenFlowRead } from "./venues/bitquery-lane";
 import { PONS_LAUNCH_TOPIC, PONS_V2_FACTORY } from "./venues/pons";
 import { FLOW_X_GLOSS, flowXLines } from "./flow-facts";
 import { admitAgentLine } from "./groupchat/policy";
@@ -119,6 +119,20 @@ describe("makeFlowService — one reading, assembled on the orchestrator", () =>
     const t = 5_000_000;
     await makeFlowService({ lane, now: () => t, creatorOf: async () => ({ state: "known", creator: CREATOR }) }).flowFor(TOKEN);
     assert.deepEqual(calls.map((c) => (c.args.at(-1) as { deadline: number }).deadline), [t + FLOW_DEADLINE_MS, t + FLOW_DEADLINE_MS]);
+  });
+
+  it("a caller waiting on less shortens the reading's deadline, never lengthens it", async () => {
+    const t = 5_000_000;
+    const deadlines = async (timeoutMs?: number) => {
+      const { lane, calls } = fakeLane();
+      await makeFlowService({ lane, now: () => t, creatorOf: async () => ({ state: "known", creator: CREATOR }) })
+        .flowFor(TOKEN, timeoutMs === undefined ? {} : { timeoutMs });
+      return calls.map((c) => (c.args.at(-1) as { deadline: number }).deadline);
+    };
+    assert.deepEqual(await deadlines(8_000), [t + 8_000, t + 8_000], "an X answer's share");
+    assert.deepEqual(await deadlines(60_000), [t + FLOW_DEADLINE_MS, t + FLOW_DEADLINE_MS], "never past the reading's own deadline");
+    assert.deepEqual(await deadlines(0), [t + FLOW_DEADLINE_MS, t + FLOW_DEADLINE_MS], "a nonsense wait is no wait");
+    assert.deepEqual(await deadlines(), [t + FLOW_DEADLINE_MS, t + FLOW_DEADLINE_MS]);
   });
 
   it("a slow launcher lookup gives back the flow facts in time, launcher unavailable, and no launcher query is started", async () => {
@@ -241,6 +255,23 @@ describe("flow facts reach X only as glosses the existing writer and gate admit 
   });
 });
 
+describe("answerReadingsPerDay — X answers stay out of the evidence share", () => {
+  it("is the day's points evidence cannot spend, at a whole reading's price", () => {
+    const reading = LANE_POINTS.tokenFlow + LANE_POINTS.creatorFlow;
+    const on = bitqueryLaneSetup({ MERRYMEN_BITQUERY_API_KEY: "ory_at_test" });
+    assert.equal(answerReadingsPerDay(on), 200, "the defaults: 25,000 x 0.2 / 25");
+    const small = bitqueryLaneSetup({ MERRYMEN_BITQUERY_API_KEY: "ory_at_test", MERRYMEN_BITQUERY_POINTS_PER_DAY: "5000" });
+    assert.equal(answerReadingsPerDay(small), 40);
+    // Even if every one of them were spent before any review asked, evidence keeps its whole share.
+    for (const setup of [on, small]) {
+      const day = setup.config!.pointsPerDay;
+      assert.ok(answerReadingsPerDay(setup) * reading <= day - Math.floor(day * BITQUERY_LANE_DEFAULTS.evidenceShare));
+    }
+    assert.equal(answerReadingsPerDay(bitqueryLaneSetup({})), 0, "no lane, no readings");
+    assert.equal(answerReadingsPerDay(bitqueryLaneSetup({ MERRYMEN_BITQUERY_API_KEY: "ory_at_test", MERRYMEN_BITQUERY_LANE: "0" })), 0);
+  });
+});
+
 describe("startFlowRuntime — off without a key, and nothing built while off", () => {
   it("no key: no service, no store, a line saying so", () => {
     const lines: string[] = [];
@@ -347,9 +378,18 @@ describe("the orchestrator's wiring", () => {
 
   it("exports flowFor for the orchestrator's own answers, on the whole day's budget, importable without a cycle", () => {
     const flow = readFileSync(path.join(HERE, "orchestrator-flow.ts"), "utf8");
-    assert.match(flow, /export async function flowFor\(token: string\): Promise<FlowResult> \{[\s\S]{0,200}purpose: "answer"/);
+    assert.match(flow, /export async function flowFor\(token: string, opts: \{ timeoutMs\?: number \} = \{\}\): Promise<FlowResult> \{[\s\S]{0,200}purpose: "answer"/);
     assert.doesNotMatch(flow, /from "\.\/orchestrator"/, "orchestrator-flow.ts never imports orchestrator.ts, so a pass can import it");
     assert.match(SRC, /export \{ flowFor \};/, "and orchestrator.ts re-exports it");
+  });
+
+  it("X answers read flow only with the lane on, through flowFor, on Robinhood Chain, with their own day's count", () => {
+    const fn = SRC.slice(SRC.indexOf("function xAnswerFlow("), SRC.indexOf("function xAnswerFlow(") + 900);
+    assert.match(fn, /const rt = flowRuntimeNow\(\);\s*if \(!rt\.service\) return \{\};/, "nothing at all with the lane off");
+    assert.match(fn, /const flowPerDay = answerReadingsPerDay\(rt\.setup\);/);
+    assert.match(fn, /q\.chainId === 4663 \? flowFor\(q\.address, \{ timeoutMs: q\.timeoutMs \}\)/);
+    const research = SRC.slice(SRC.indexOf("research: createXResearch({"), SRC.indexOf("research: createXResearch({") + 900);
+    assert.match(research, /\.\.\.xAnswerFlow\(\),/, "handed to the research, which runs only with MERRYMEN_XPOST_RESEARCH=1");
   });
 
   it("flowFor answers 'unavailable' when the lane is off, without building anything", async () => {

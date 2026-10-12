@@ -41,14 +41,18 @@ import { decisionResearchEnabledFor } from "./decision-research";
 import { childProcessFlowPort, serveFlowRequests } from "./flow-broker";
 import type { CreatorFlow, FlowResult } from "./flow-facts";
 import { merrymenHome } from "./home";
-import { BITQUERY_LANE_DEFAULTS, BitqueryLane, bitqueryLaneSetup, type BitqueryLaneSetup, type LanePurpose } from "./venues/bitquery-lane";
+import { BITQUERY_LANE_DEFAULTS, BitqueryLane, LANE_POINTS, bitqueryLaneSetup, type BitqueryLaneSetup, type LanePurpose } from "./venues/bitquery-lane";
 import { readLaunchCreator, type LaunchCreator } from "./venues/pons";
 
 export type CreatorLookup = LaunchCreator;
 
 export interface FlowService {
-  /** Flow facts for a token, or the word for why not. Never throws; done within FLOW_DEADLINE_MS. */
-  flowFor(token: string, opts?: { purpose?: LanePurpose }): Promise<FlowResult>;
+  /**
+   * Flow facts for a token, or the word for why not. Never throws; done within
+   * FLOW_DEADLINE_MS, or within `timeoutMs` when a caller that is waiting on
+   * less (an X answer's research share) says so. Never longer.
+   */
+  flowFor(token: string, opts?: { purpose?: LanePurpose; timeoutMs?: number }): Promise<FlowResult>;
 }
 
 /** The window the creator question covers, in minutes: the widest flow window. */
@@ -121,7 +125,11 @@ export function makeFlowService(deps: {
         if (typeof raw !== "string" || !ADDRESS.test(raw) || /^0x0{40}$/i.test(raw)) return { ok: false, failure: "invalid-request" };
         const token = raw.toLowerCase() as `0x${string}`;
         const purpose = opts.purpose ?? "answer";
-        const deadline = now() + deadlineMs;
+        // A caller's own, shorter wait shortens the reading: the lane then sends
+        // nothing it could not finish in time (minRequestMs), and nothing is
+        // still spending after that caller has moved on.
+        const budget = typeof opts.timeoutMs === "number" && opts.timeoutMs > 0 ? Math.min(deadlineMs, opts.timeoutMs) : deadlineMs;
+        const deadline = now() + budget;
         // The chain read runs beside the flow query; the launcher's own query
         // waits for the flow to succeed, so a failed reading spends no more.
         const creatorP = creatorOf(token);
@@ -227,13 +235,30 @@ export function resetFlowRuntimeForTest(): void {
  * buys and sells over 5/15/60 minutes, the venue split, the largest sells, and
  * whether the address the launchpad recorded as launching the coin sold — or
  * the word for why not (flow-facts.ts). Spends from the lane's whole day;
- * never throws, and answers within FLOW_DEADLINE_MS. For X, flowXLines() turns
- * a result into digit-free banded lines that pass the writer's clean() and
- * the X gate unchanged; renderFlowLens() keeps the numbers, for a Brain lens.
+ * never throws, and answers within FLOW_DEADLINE_MS, or `timeoutMs` when that
+ * is shorter. For X, flowXLines() turns a result into digit-free banded lines
+ * that pass the writer's clean() and the X gate unchanged; renderFlowLens()
+ * keeps the numbers, for a Brain lens.
  */
-export async function flowFor(token: string): Promise<FlowResult> {
+export async function flowFor(token: string, opts: { timeoutMs?: number } = {}): Promise<FlowResult> {
   const service = flowRuntimeNow().service;
-  return service ? service.flowFor(token, { purpose: "answer" }) : { ok: false, failure: "unavailable" };
+  return service ? service.flowFor(token, { purpose: "answer", ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}) }) : { ok: false, failure: "unavailable" };
+}
+
+/**
+ * HOW MANY READINGS X ANSWERS MAY ASK FOR IN A UTC DAY: the part of the lane's
+ * day that child evidence can never spend (1 − evidenceShare), at a whole
+ * reading's price (the flow query and the launcher's). Answers spend from the
+ * whole day, so without this a run of strangers' tags — public, and polled
+ * every minute — could eat into the share the trading reviews rely on. With
+ * the defaults, 25,000 × 0.2 / 25 = 200 readings a day. Zero with the lane off.
+ */
+export function answerReadingsPerDay(setup: BitqueryLaneSetup): number {
+  if (setup.off || !setup.config) return 0;
+  const reading = LANE_POINTS.tokenFlow + LANE_POINTS.creatorFlow;
+  // The evidence cap exactly as the lane computes it (bitquery-lane.ts reserve).
+  const day = setup.config.pointsPerDay;
+  return Math.max(0, Math.floor((day - Math.floor(day * BITQUERY_LANE_DEFAULTS.evidenceShare)) / reading));
 }
 
 /**

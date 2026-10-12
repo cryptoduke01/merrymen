@@ -15,6 +15,7 @@ import { isAsleep } from "./groupchat/clock";
 import { createXResearch, type XResearch } from "./orchestrator-xpost-research";
 import type { CoinFacts } from "./coin-facts-types";
 import type { FomoBroker } from "./fomo/contract";
+import type { FlowResult } from "./flow-facts";
 import type { AgentFacts, CallFact } from "./groupchat/facts";
 import type { FetchLike } from "./xpost/client";
 import * as store from "./xpost/store";
@@ -302,8 +303,9 @@ const CA = `0x${"ab12".repeat(10)}`;
 const RESEARCH_ON = { MERRYMEN_XPOST_RESEARCH: "1" };
 
 /** The real research, every reader faked: what it was asked, and the facts it builds. */
-function fakeResearch(o: { fomo?: boolean } = {}) {
+function fakeResearch(o: { fomo?: boolean; flow?: FlowResult } = {}) {
   const seen: { address: string }[] = [];
+  const flows: { address: string; timeoutMs: number }[] = [];
   const fomoCalls: { tool: string; surface: string; groupId: string | null | undefined }[] = [];
   const facts: CoinFacts = { network: "robinhood", observedAt: NOW, priceUsd: 0.0001, fdvNowUsd: 40_000, high: null, barsFromMs: null,
     poolCreatedAtMs: NOW - 3 * HOUR, drawdownPct: null, steepest: null, liquidityUsd: 4_000, change24hPct: 3, buyers24h: null, sellers24h: null,
@@ -323,8 +325,9 @@ function fakeResearch(o: { fomo?: boolean } = {}) {
     projectDescription: async () => null,
     publicTheses: async () => [],
     ...(o.fomo ? { fomo: () => broker } : {}),
+    ...(o.flow ? { flow: async (q: { address: string; timeoutMs: number }) => { flows.push({ address: q.address, timeoutMs: q.timeoutMs }); return o.flow!; } } : {}),
   });
-  return { research, seen, fomoCalls };
+  return { research, seen, fomoCalls, flows };
 }
 
 test("the research switches are read exactly, Fomo only inside research, and said when they cannot apply", () => {
@@ -374,6 +377,24 @@ test("research on: a tagged contract address is looked up and answered in words,
   w.setInbox([]);
   await w.step(NOW + 30 * MIN);
   assert.deepEqual(w.sends, [{ text: ANSWER, reply: { in_reply_to_tweet_id: MENTION } }]);
+});
+
+test("research on, the flow lane wired: a tagged contract's onchain flow reaches the draft as bands, never a figure", async (t) => {
+  const reading: FlowResult = { ok: true, facts: { token: CA as `0x${string}`, observedAt: NOW, venues: [], largestSells: [], creator: { state: "not-derivable" },
+    windows: [
+      { minutes: 5, buyUsd: 120, sellUsd: 900, buys: 2, sells: 8, buyers: 2, sellers: 6 },
+      { minutes: 15, buyUsd: 300, sellUsd: 2_000, buys: 4, sells: 12, buyers: 3, sellers: 8 },
+      { minutes: 60, buyUsd: 500, sellUsd: 3_000, buys: 6, sells: 20, buyers: 3, sellers: 12 },
+    ] } };
+  const r = fakeResearch({ flow: reading });
+  const w = await world(t, { env: RESEARCH_ON, research: r.research });
+  w.setInbox([tag({ text: `@pine_stoat thoughts on ${CA}?` })]);
+  await w.step();
+  assert.deepEqual(r.flows.map((q) => q.address), [CA]);
+  const looked = /What you looked up just now[^\n]*/.exec(w.asked()[0] ?? "")?.[0] ?? "";
+  assert.match(looked, /on-chain data shows sells clearly outweighing buys over the last hour|per on-chain data, sells ran well ahead of buys over the last hour/);
+  assert.doesNotMatch(looked, /\p{N}|\$|0x/u, "bands, never a figure or the address");
+  assert.equal((await w.answers())[0]!.status, "scheduled");
 });
 
 test("research on, Fomo switch on: a coin answer asks Fomo as a public x-answer for this X account", async (t) => {

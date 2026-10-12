@@ -50,7 +50,7 @@ import { makeConductor, type Conductor, type RosterMember } from "./groupchat/co
 import { chatProfileOf, type ChatProfile } from "./groupchat/facts";
 import { describeCreds, groupChatCreds } from "./groupchat/voice";
 import { makeXPoster, xpostSetup, type XPoster, type XPostSetup, type XSocialProfile } from "./orchestrator-xpost";
-import { createXResearch } from "./orchestrator-xpost-research";
+import { createXResearch, type FlowReader } from "./orchestrator-xpost-research";
 // The fleet's default trading model, so the room can say when its own model is
 // the same one (see groupChatModelWarning).
 import { SETTINGS_DEFAULTS as GROUPCHAT_FLEET_DEFAULTS } from "../../packages/core/src/index";
@@ -226,7 +226,7 @@ import { ORDER_IN_FLIGHT_MS, commandWhereabouts, dropCommandResult, drainCommand
 import { expiredOrderReceipt, type OrderReceipt } from "./order-receipt";
 import { makeMcpBackground } from "./mcp/background";
 import { childProcessBrokerPort, createDirectBroker, serveBrokerRequests } from "./fomo/broker";
-import { attachFlowBroker, flowFor, flowRuntimeNow as flowRuntimeFor, type FlowRuntime } from "./orchestrator-flow";
+import { answerReadingsPerDay, attachFlowBroker, flowFor, flowRuntimeNow as flowRuntimeFor, type FlowRuntime } from "./orchestrator-flow";
 import { FLOW_BROKER_ENV } from "./flow-broker";
 import { budgetConfigFor, describeBudget, fomoBudgetFrom, fomoPlanFrom, FREE_PLAN_CREDITS_PER_MONTH, type FomoBudget, type FomoBudgetConfig } from "./fomo/budget";
 import { writeChildFomoFile } from "./fomo/child-file";
@@ -11324,6 +11324,11 @@ async function runXPostPass(boot: XPostSetup): Promise<void> {
           // can answer for THIS owner (her own data access, the x-answer cap
           // above zero) is asked per answer, so "what can you do?" never
           // promises Fomo that a coin answer would then not deliver.
+          // Onchain flow, only while the Bitquery lane is configured here
+          // (MERRYMEN_BITQUERY_API_KEY on this service): this process's own
+          // flowFor, inside the answer's time share, said only through
+          // flowXLines' digit-free bands, and at most the readings a day that
+          // child evidence's share leaves (answerReadingsPerDay).
           ...(boot.knobs.research ? {
             research: createXResearch({
               fleetHome: merrymenHome(),
@@ -11331,6 +11336,7 @@ async function runXPostPass(boot: XPostSetup): Promise<void> {
               // The runtime exists only once the switched-on Fomo pass built it (fomoRuntimeNow).
               fomo: (tenant) => (fomoRuntime && !xAnswerFomoCapped() ? createDirectBroker(fomoRuntime.service, tenant.toLowerCase(), { log }) : null),
               fomoUsable: async (tenant) => !!fomoRuntime && !xAnswerFomoCapped() && (await fomoAccessFor(tenant)).dataAccess === true,
+              ...xAnswerFlow(),
             }),
           } : {}),
         },
@@ -11407,6 +11413,20 @@ function flowRuntimeNow(): FlowRuntime {
   return flowRuntimeFor({ log });
 }
 export { flowFor };
+
+/**
+ * WHAT AN X ANSWER'S RESEARCH GETS OF THE LANE: nothing with the lane off;
+ * on, `flowFor` for a Robinhood Chain contract, bounded by the answer's own
+ * time share, and a daily count that keeps public tags out of the evidence
+ * share. Said once, when the X poster is built.
+ */
+function xAnswerFlow(): { flow?: FlowReader; flowPerDay?: number } {
+  const rt = flowRuntimeNow();
+  if (!rt.service) return {};
+  const flowPerDay = answerReadingsPerDay(rt.setup);
+  log(`xpost: answers may read onchain flow — up to ${flowPerDay} readings per UTC day across X accounts, said only in bands`);
+  return { flow: (q) => (q.chainId === 4663 ? flowFor(q.address, { timeoutMs: q.timeoutMs }) : Promise.resolve(null)), flowPerDay };
+}
 
 let fomoBoot: FomoBoot | null = null;
 let fomoRuntime: FomoRuntimeHandle | null = null;

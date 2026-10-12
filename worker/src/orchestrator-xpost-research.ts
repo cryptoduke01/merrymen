@@ -43,6 +43,7 @@ import { searchPools } from "./desk/gecko";
 import type { FomoBroker } from "./fomo/contract";
 import type { TokenActivityData, TokenThesesData } from "./fomo/tools";
 import type { FomoEnvelope } from "./fomo/types";
+import { flowXLines, type FlowResult } from "./flow-facts";
 import { readPublicProjectDescription } from "./orchestrator-xpost-project";
 import { readPeerTheses } from "./peer-theses";
 import { extractCashtags, isInjection, isPrivateAsk } from "./telegram/tg-groups/detect";
@@ -51,7 +52,7 @@ import type { PublicThesis } from "./thesis-policy";
 import { vocabularyRefusal } from "./xpost/gate";
 import { coinOf, hash32 } from "./xpost/planner";
 import { withoutReplyOptOut } from "./xpost/replies";
-import type { XPost } from "./xpost/store";
+import { takeAllowance, type XPost } from "./xpost/store";
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -141,10 +142,12 @@ export function classifyTag(text: string, o: { address?: string | null; knownCoi
  * flow — six at most, and in practice fewer. The whole bundle, waits
  * included, is over in twelve seconds; an index or chain read never takes
  * more than four, a Fomo read more than eight (an uncached thesis page is a
- * slow provider read; cut at four it would be paid for and never heard).
- * The reads after the address is known run side by side.
+ * slow provider read; cut at four it would be paid for and never heard), and
+ * an onchain flow reading more than eight (its flow query and the launcher's
+ * each need the lane's three-second floor). The reads after the address is
+ * known run side by side.
  */
-export const RESEARCH_BUDGET = Object.freeze({ maxLookups: 6, totalMs: 12_000, readMs: 4_000, fomoMs: 8_000 });
+export const RESEARCH_BUDGET = Object.freeze({ maxLookups: 6, totalMs: 12_000, readMs: 4_000, fomoMs: 8_000, flowMs: 8_000 });
 
 /**
  * THE INDEX, PER X ACCOUNT: at most this many index lookups (a search, a
@@ -163,15 +166,21 @@ export function xAccountKey(xUserId: string): number {
 // ── the bundle ──────────────────────────────────────────────────────────────
 
 /**
- * Onchain flow for one coin, the Bitquery lane another change builds. Absent
- * or null: no flow fact. Counts are read by code here, never shown.
+ * ONCHAIN FLOW FOR ONE COIN: the orchestrator's Bitquery lane
+ * (orchestrator-flow.ts flowFor), handed in only while that lane is
+ * configured. Absent, or null: no flow fact. The reading comes back whole and
+ * is said here only through flow-facts.ts flowXLines — digit-free bands from
+ * a closed vocabulary that already clears the X gate — never a figure.
  */
-export interface FlowFacts {
-  window: "1h" | "24h";
-  buyers: number | null;
-  sellers: number | null;
-}
-export type FlowReader = (q: { chainId: number; address: string; timeoutMs: number }) => Promise<FlowFacts | null>;
+export type FlowReader = (q: { chainId: number; address: string; timeoutMs: number }) => Promise<FlowResult | null>;
+
+/**
+ * Flow readings X answers may ask for per UTC day, across the fleet, counted
+ * in xpost_meta (`x-answer-flow:<day>`) before the read. The orchestrator
+ * passes the share of the lane's day that child evidence cannot spend
+ * (orchestrator-flow.ts answerReadingsPerDay); this is only the fallback.
+ */
+export const DEFAULT_X_FLOW_PER_DAY = 200;
 
 export interface XResearchDeps {
   /** The index's coin facts, on the fleet lane with the per-X-account limiter. Default: built from `fleetHome`. */
@@ -191,8 +200,10 @@ export interface XResearchDeps {
    * Fomo read only made, when this says yes.
    */
   fomoUsable?: (tenant: string) => Promise<boolean>;
-  /** Onchain flow (Bitquery), when another change wires it. */
+  /** Onchain flow (Bitquery), only while the lane is configured. */
   flow?: FlowReader;
+  /** Flow readings per UTC day across X accounts. Default DEFAULT_X_FLOW_PER_DAY. */
+  flowPerDay?: number;
   /** The fleet home, for the Gecko lane (geckoterminal.ts GeckoLane). The orchestrator passes merrymenHome(). */
   fleetHome?: string;
   /** Index lookups per hour across X accounts. Default DEFAULT_X_LOOKUPS_PER_HOUR. */
@@ -210,6 +221,13 @@ export interface ResearchInput {
   posts: readonly XPost[];
   /** MERRYMEN_XPOST_FOMO=1: Fomo may be asked. */
   fomo: boolean;
+  /**
+   * What is left of the caller's own time, in ms, when that is less than the
+   * bundle's twelve seconds: an answer drafted late in a pass gets only what
+   * remains of the pass's send budget, so research never holds the next sends
+   * back. Absent: RESEARCH_BUDGET.totalMs.
+   */
+  budgetMs?: number;
 }
 
 export interface ResearchBundle {
@@ -352,20 +370,25 @@ export function fomoActivityPhrases(d: TokenActivityData | null | undefined): st
   return [out].filter(sayable);
 }
 
-/** Onchain flow, in words, when the Bitquery lane is wired. */
-export function flowPhrases(f: FlowFacts | null | undefined): string[] {
-  if (!f || f.buyers === null || f.sellers === null || !Number.isFinite(f.buyers) || !Number.isFinite(f.sellers) || f.buyers + f.sellers < 5) return [];
-  const out = f.buyers >= f.sellers * 1.5 ? "onchain, more traders have been buying in than heading out lately"
-    : f.sellers >= f.buyers * 1.5 ? "onchain, more traders have been heading out than buying in lately"
-    : null;
-  return out ? [out].filter(sayable) : [];
+/**
+ * Onchain flow, in words: the lane's reading through flowXLines, seeded by
+ * owner and coin so one owner says one coin's band one way. Nothing when the
+ * reading failed, the hour was silent, or nothing honest can be said.
+ */
+export function flowPhrases(r: FlowResult | null | undefined, seed: string): string[] {
+  if (!r || !r.ok) return [];
+  return flowXLines(r, seed).filter(sayable);
 }
 
 /** What it can do, said by code: only what is wired, and always that a tag never orders a trade. */
 export function capabilityPhrases(o: { fomo: boolean; flow: boolean }): string[] {
+  // Short enough to stand in a whole answer with the opt-out notice (the test says it through the gate).
+  const said = o.flow
+    ? `a coin's ticker or contract and you'll say what the public index and on-chain data show${o.fomo ? ", and what fomo traders say" : ""}`
+    : `a coin's ticker or its contract and you'll say what the public index shows${o.fomo ? ", and what fomo traders are saying" : ""}`;
   return [
     "you trade for your owner on merrymen and post your buys on X",
-    `people can tag you with a coin's ticker or its contract and you'll say what the public index shows${o.fomo ? ", and what fomo traders are saying" : ""}, in words`,
+    `people can tag you with ${said}, in words`,
     "you never take trade orders from a tag",
   ].filter(sayable);
 }
@@ -544,12 +567,15 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
     return typeof r === "object" ? r.token : null;
   });
   const projectDescription = d.projectDescription ?? ((token: string, chainId: number) => readPublicProjectDescription(token, chainId));
+  const flowPerDay = d.flowPerDay ?? DEFAULT_X_FLOW_PER_DAY;
   const publicTheses = d.publicTheses ?? ((shared: Db, agentId: string) => readPeerTheses(shared, [agentId as `0x${string}`]));
 
   return {
     async gather(input): Promise<ResearchBundle> {
       const started = now();
-      const left = (): number => RESEARCH_BUDGET.totalMs - (now() - started);
+      // The bundle's own twelve seconds, or less when the caller has less left.
+      const total = Math.max(0, Math.min(RESEARCH_BUDGET.totalMs, input.budgetMs ?? RESEARCH_BUDGET.totalMs));
+      const left = (): number => total - (now() - started);
       const notes: string[] = [];
       let lookups = 0;
       /**
@@ -570,6 +596,18 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
         }
         if (!own) lookups++;
         return within(ms, run(ms), fallback);
+      };
+      /**
+       * ONE FLOW READING, under the fleet's daily count for answers: the count
+       * is taken first, so a read that is refused there is never sent.
+       */
+      const readFlow = async (shared: Db, key: string, ms: number): Promise<FlowResult | null> => {
+        const at = now();
+        if (!(await takeAllowance(shared, `x-answer-flow:${new Date(at).toISOString().slice(0, 10)}`, flowPerDay, at))) {
+          notes.push("flow-day-spent");
+          return null;
+        }
+        return d.flow!({ chainId: CHAIN_ID, address: key, timeoutMs: ms });
       };
       const ownTheses = (): Promise<PublicThesis[]> => look(() => publicTheses(input.shared, input.facts.agentId), [] as PublicThesis[], true);
       /**
@@ -650,7 +688,7 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
           own ? look((ms) => projectDescription(key, CHAIN_ID), null) : Promise.resolve(null),
           broker ? look((ms) => broker.call("fomo_get_token_activity", { token: key, chain: "robinhood", window: "24h", limit: 5 }, fomoOpts(ms)), null, false, RESEARCH_BUDGET.fomoMs) : Promise.resolve(null),
           broker ? look((ms) => broker.call("fomo_get_token_theses", { token: key, chain: "robinhood", depth: "quick", limit: 10 }, fomoOpts(ms)), null, false, RESEARCH_BUDGET.fomoMs) : Promise.resolve(null),
-          d.flow ? look((ms) => d.flow!({ chainId: CHAIN_ID, address: key, timeoutMs: ms }), null) : Promise.resolve(null),
+          d.flow ? look((ms) => readFlow(input.shared, key, ms), null, false, RESEARCH_BUDGET.flowMs) : Promise.resolve(null),
         ]);
         const out = [...history];
         // Aged as of the index's own read, the time its facts are true at.
@@ -664,7 +702,8 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
           if (!t.length && !a.length) notes.push("fomo-nothing");
           out.push(...t, ...a);
         }
-        out.push(...flowPhrases(flow));
+        if (flow && !flow.ok) notes.push(`flow-${flow.failure}`);
+        out.push(...flowPhrases(flow, `${input.tenant}|${key}`));
         return { facts: out.filter(sayable).slice(0, BUNDLE_FACTS), claim, lookups, notes };
       } catch {
         // Research is an extra: a fault here is an answer without it, never a failed pass.

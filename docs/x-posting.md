@@ -557,7 +557,13 @@ looks things up first, the way Shogun does in a Telegram group
   may still own); the public index's coin facts on the FLEET Gecko lane (the
   orchestrator passes its home explicitly; `process.env` is untouched); with
   `MERRYMEN_XPOST_FOMO=1`, Fomo's token activity and quick theses; and,
-  once another change wires it, onchain flow (`FlowReader`).
+  while the Bitquery lane is configured on the orchestrator
+  (`MERRYMEN_BITQUERY_API_KEY`, [`bitquery-lane.md`](bitquery-lane.md)),
+  onchain flow for a known contract: the orchestrator's own `flowFor`,
+  said only through `flowXLines(result, "<tenant>|<token>")`, the closed,
+  digit-free bands ("on-chain data shows buys clearly outweighing sells
+  over the last hour"). No lane, no flow and no mention of it in "what can
+  you do?".
 - **A contract is matched by the contract alone.** With a tagged address,
   its history counts a buy only when that buy's token, its buy post's CA or
   decision, or its thesis's derived id is that address, never by a name. A
@@ -575,7 +581,9 @@ looks things up first, the way Shogun does in a Telegram group
   in them — "the public index shows liquidity is thin", "holders look
   concentrated on the public index", "it's only hours old", "fomo traders
   mostly argue it's still early", "on fomo, more traders have been buying in
-  than heading out lately". Never a number, price, size, P&L, handle, quote,
+  than heading out lately", "per on-chain data, the buying over the last hour
+  came from only a small group of addresses". Never a number, price, size,
+  P&L, handle, quote,
   wallet list or address. A valuation cue (under- or overvalued) is never
   said. Every phrase is pinned through the real X gate in the tests. When
   nothing could be looked up for a coin, the writer is told so and to say so
@@ -583,7 +591,13 @@ looks things up first, the way Shogun does in a Telegram group
 - **Budget:** one bundle per answer, at most six lookups and twelve seconds;
   an index or chain read at most four, a Fomo read at most eight (an
   uncached thesis page is slow, and one cut short is paid for and never
-  heard). Index lookups: eight per X account per ten minutes,
+  heard), a flow reading at most eight (the lane needs three seconds for
+  each of its two queries, and the reading's own deadline is shortened to
+  that share). Flow readings: at most the part of the lane's day that child
+  evidence cannot spend, per UTC day across X accounts (200 with the lane's
+  defaults, `xpost_meta` `x-answer-flow:<day>`), taken before the read, so
+  strangers' tags never eat into the trading reviews' share. Index lookups:
+  eight per X account per ten minutes,
   `MERRYMEN_XPOST_RESEARCH_PER_HOUR` across X accounts. Fomo: the `x-answer`
   surface's own hourly cap per X account (`MERRYMEN_FOMO_X_HOURLY_CREDITS`)
   and at most a quarter of the owner's daily Fomo cap per day across her X
