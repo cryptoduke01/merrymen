@@ -50,19 +50,21 @@ function cooldownDelay(result: FeedResult, failures: number): number {
  * WHICH PACING ROW A READ TAKES.
  *
  * `default` is every caller there has ever been: the tape feeds, the desk, the
- * facts and the X lines. `evidence` is a read a decision is WAITING on — the
- * Brain's candle and trade legs — under a five-second budget per leg.
+ * facts and the X lines. `evidence` is a read something is WAITING on — the
+ * Brain's candle and trade legs under a five-second budget per leg, and on
+ * web a chart somebody has open.
  *
  * On one shared row those legs queued behind the sixty-second tape burst
  * (seven or eight page requests), so `candles=budget` was the normal outcome,
  * not a fault. A second row lets them skip that queue.
  *
  * IT IS PRIORITY, NOT EXTRA QUOTA. Every evidence slot taken also pushes the
- * default row back by one slot, so the two rows together never exceed one
- * request per `spacingMs` over any stretch longer than a slot — the pace the
- * operator configured and the monthly ceiling was computed for. The only cost
+ * default row back by one slot, so in any stretch of time the two rows make
+ * at most ONE request more than a single row at `spacingMs` could — the pace
+ * the operator configured and the monthly ceiling was computed for. That one
  * is a burst of two when both rows fire in the same instant, far inside the
- * provider's per-minute limit. Under sustained evidence demand the default
+ * provider's per-minute limit (fleet-feed-cache.test.ts checks the bound over
+ * every window of a long mixed run). Under sustained evidence demand the default
  * row waits: the tape goes stale and says so ("request-budget"); no extra
  * credit is spent. Evidence demand is bounded by the review cadence and a
  * one-minute memo per pool, so in practice it takes a few slots a minute.

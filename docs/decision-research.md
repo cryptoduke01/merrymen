@@ -6,7 +6,8 @@ public API. Credentials are never sent to the public origin. Authentication
 refusals, malformed data and a failed coordination store do not trigger fallback.
 
 Each provider has its own shared cache, pacing and cooldown. Public requests are
-spaced at least 6.5 seconds apart; Pro retains the existing 3-second spacing.
+spaced at least 6.5 seconds apart; Pro defaults to the existing 3-second spacing
+and can be tuned to the plan (see [CoinGecko Pro pacing](#coingecko-pro-pacing)).
 Repeated 429s back off up to 15 minutes, or longer when Retry-After requires it.
 Non-fleet processes use a bounded process-local equivalent. Cache hits preserve
 the original observation time, and the existing 120-second trading-tape freshness
@@ -19,6 +20,58 @@ and approximately 10 requests/minute in its [API reference](https://api.geckoter
 [CoinGecko's rate-limit guidance](https://docs.coingecko.com/docs/errors-and-rate-limits)
 notes that failed requests consume rate capacity too. A fallback restores access
 to eligible public data; it does not replenish paid credits or provide Pro throughput.
+
+## CoinGecko Pro pacing
+
+Two optional variables set how fast the Pro lane spends. Set them on the
+orchestrator (every tenant child inherits them) and on web; both services read
+the same names. Neither set means exactly the previous behaviour.
+
+| Variable | Meaning |
+| --- | --- |
+| `MERRYMEN_COINGECKO_PRO_SPACING_MS` | Milliseconds between Pro requests on one lane. Default `3000` (20/min). Never below `60` (the plan's 1,000/min). |
+| `MERRYMEN_COINGECKO_MONTHLY_CREDITS` | The plan's monthly credits. When set, the spacing is raised to a floor at which the lane, running flat out for a 30-day month, spends at most its share. |
+
+The shares are 70% for the fleet worker lane (every tenant child, coordinated
+through one SQLite file) and 20% for a process-local lane (the web service, or
+a self-hosted worker). The last 10% is headroom, because failed requests are
+counted too and the two services are configured separately. The floor is
+`ceil(2,592,000,000 / (credits x share))` ms. It bounds the worst case; a lane
+that idles spends less.
+
+Recommended values for the current plan (about 5,000,000 credits a month,
+1,000 requests a minute):
+
+| Service | `..._PRO_SPACING_MS` | `..._MONTHLY_CREDITS` | Floor | Flat-out requests per 30 days |
+| --- | --- | --- | --- | --- |
+| Orchestrator (fleet lane) | `800` | `5000000` | 741 ms | 3,240,000 (64.8%) |
+| Web | `2600` | `5000000` | 2,592 ms | 996,923 (19.9%) |
+
+Both together stay under 85% of the month even if neither ever idles. A value
+below the floor is raised to it and said once at startup. An unreadable value
+keeps the default and is named once; the value itself is never printed. Each
+process logs one `[gecko] coingecko-pro ... lane:` line with the pace it settled on.
+
+**Evidence goes first.** The Brain's candle and trade legs, and web's chart
+reads on the Pro key, use a second pacing row so they no longer queue behind
+the sixty-second tape burst. That row is priority, not extra quota: each slot
+it takes pushes the default row (feeds, desk, facts, X) back by one. In any
+stretch of time the two rows together make at most one request more than a
+single row could, so the monthly floor above still holds. One 429 cooldown
+still covers both rows.
+
+**Plan refusals are latched.** On the Pro lane, a 401 or 403, or a body with
+CoinGecko error code 10005 ("you may not have access to this endpoint"),
+stops requests to that endpoint family (the path with ids and the query
+removed) for one hour, fleet-wide. A latched read reports `plan-restricted`
+and does not fall back to the public API. Each latch is logged once, by
+endpoint family only. 429s and 5xx responses are never latched. A revoked
+or mistyped key latches each family it touches in the same way, so the log
+names every refused endpoint within a few minutes.
+
+Web's chart reads on the Pro key now go through web's shared lane: they are
+paced and respect the 429 cooldown that any other web read set. Without a key,
+charts keep the previous unpaced public behaviour.
 
 ## Opt-in decision evidence
 
