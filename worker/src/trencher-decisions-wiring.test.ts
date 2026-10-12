@@ -30,8 +30,10 @@ describe("the Trencher review's hold backoff, memory, evidence rule and research
     assert.match(CODE, /trenchNotice\(agentId, trenchSymbols\.size \|\| entriesBraked \|\| backedOff \? "" :/);
   });
 
-  it("the hold memory line is read for ENTRY reviews only", () => {
+  it("the hold memory line is read for ENTRY reviews only, and never displaces the paper notice", () => {
     assert.match(CODE, /const holdLine = focus\.held \? null : trenchBrain\.holdMemory\(focus\.token, focus\.symbol\);/);
+    assert.match(CODE, /if \(holdLine\) inputs\.memory = leadMemory\(inputs\.memory \?\? \[\], holdLine, paper\);/);
+    assert.ok(CODE.indexOf("inputs.memory = leadMemory(") > CODE.indexOf('"This is the paper ledger.'), "after the paper notice is added, so it is the last line protected");
   });
 
   it("the blind-evidence skip guards on an unheld focus and returns BEFORE the paid call", () => {

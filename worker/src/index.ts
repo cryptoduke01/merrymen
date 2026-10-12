@@ -146,7 +146,7 @@ import { recoverReceiptBasis } from "./receipt-basis-recovery";
 import { MarketReviewClock, quietReviewRow, quietReviewScope } from "./market-review";
 import { ChainCoinNames, makeDecisionNamer, warmHeldNames } from "./decision-name";
 import { intentDecisionRow } from "./decision-row";
-import { memoryLines, positionContext, sentimentLine, technicalLine } from "./brain-material";
+import { leadMemory, memoryLines, positionContext, sentimentLine, technicalLine } from "./brain-material";
 import { DECISION_RESEARCH_GUIDANCE, decisionResearchEnabledFor, entryCostResearch, researchEntrySize, trenchBreakEven, trenchMomentumBrief } from "./decision-research";
 import { readOwnOutcomeLearningFile } from "./own-outcome-learning-file";
 import { outcomeLearningLines } from "./own-outcome-learning";
@@ -13296,9 +13296,10 @@ async function main() {
             // memoryLines); this one line is the exception that carries a
             // comparison rather than a repetition: when it held this coin, a
             // short safe reason, and the price, hour volume and five-minute
-            // buyers then and now. First, so the six-line memory cap keeps it.
+            // buyers then and now. First, within the six lines the Brain reads
+            // (graph.py memory[:6]) — and never at the paper notice's expense.
             const holdLine = focus.held ? null : trenchBrain.holdMemory(focus.token, focus.symbol);
-            if (holdLine) inputs.memory = [holdLine, ...(inputs.memory ?? [])];
+            if (holdLine) inputs.memory = leadMemory(inputs.memory ?? [], holdLine, paper);
             if (tape) {
               Object.assign(inputs.market.signals, trenchBrainSignals(tape, trenchTapeAt, lastLiquidityUsd.get(focus.token.toLowerCase()) ?? null));
             }
