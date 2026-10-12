@@ -198,6 +198,12 @@ test("Postgres: the fomo store", { skip: !url, timeout: 120_000 }, async (t) => 
       assert.equal((await S.eventsForToken(db, TOKEN.key, 0, 1))[0]?.text, "untrusted \u0000 text", "NUL survives inside JSON text");
       assert.equal((await S.unprocessedEvents(db, 500)).length, 60);
       assert.equal(await S.markEventsProcessed(db, ["ev:001", "ev:002"], T0), 2);
+      // Both reads: the window scan, and per chunk of traders with every filter.
+      const active = [{ tokenKey: TOKEN.key, events: 59, distinctTraders: 1, newestAt: T0 }];
+      assert.deepEqual(await S.recentActiveTokens(db, 0, 10), active, "the retracted event is not counted");
+      assert.deepEqual(await S.recentActiveTokens(db, 0, 10, { userIds: ["u-1"], kinds: ["buy"], tokenKeyPrefix: "eip155:4663:" }), active);
+      assert.deepEqual(await S.recentActiveTokens(db, 0, 10, { userIds: ["nobody"] }), []);
+      assert.deepEqual(await S.recentActiveTokens(db, T0 + 1, 10), []);
       // checkpoints, gaps, dead letters
       assert.equal(await S.setCheckpoint(db, "alerts", "c1", null, T0), true);
       assert.equal(await S.setCheckpoint(db, "alerts", "c2", 100, T0), true);
@@ -206,6 +212,8 @@ test("Postgres: the fomo store", { skip: !url, timeout: 120_000 }, async (t) => 
       assert.deepEqual(await S.getCheckpoint(db, "alerts"), { stream: "alerts", cursor: "c2", newestTsMs: 100, updatedAtMs: T0 });
       const gap = (await S.listOpenGaps(db, "alerts", 10))[0]!;
       assert.equal((await S.listOpenGaps(db, null, 10)).length, 1);
+      assert.deepEqual((await S.listOpenGapsOverlapping(db, "alerts", 0, 10, 10)).map((g) => g.id), [gap.id]);
+      assert.deepEqual(await S.listOpenGapsOverlapping(db, null, 3, 10, 10), [], "a gap that ended before the window does not overlap it");
       assert.equal(await S.markGapRecovered(db, gap.id, T0), true);
       await S.deadLetter(db, "alerts", "raw \u0000 frame", "bad json", T0);
       assert.equal((await S.listDeadLetters(db, 10, "alerts"))[0]?.payload, "raw � frame", "Postgres TEXT refuses NUL; it is replaced");
@@ -218,6 +226,14 @@ test("Postgres: the fomo store", { skip: !url, timeout: 120_000 }, async (t) => 
       assert.equal((await S.traderByHandle(db, "alice"))?.handleIsCurrent, false);
       assert.deepEqual((await S.traderById(db, "u-1"))?.verified, true);
       assert.deepEqual((await S.handleHistory(db, "u-1")).map((h) => h.handle), ["alicia", "alice"]);
+      const evidence: store.StoredTraderEvidence = {
+        userId: "u-1", measuredAtMs: T0, sampleSize: 12, chainActivity: { robinhoodShare: 0.5, sampleSize: 12 },
+        holding: { averageHoldSeconds: 3_600, sampleSize: 10 }, exits: { closedWithGain: 3, closedWithLoss: 2, heldUnderwater: 1 },
+        concentration: { topPositionShare: 0.25 }, executionCapacity: { medianPositionUsd: 125.5 },
+      };
+      assert.equal(await S.putTraderEvidence(db, evidence), true);
+      assert.equal(await S.putTraderEvidence(two, { ...evidence, measuredAtMs: T0 - 1, sampleSize: 1 }), false, "an older measurement never replaces a newer one");
+      assert.deepEqual(await S.traderEvidence(db, ["u-1", "u-1", "never-measured"]), new Map([["u-1", evidence]]));
       const members = Array.from({ length: 120 }, (_, i) => member(`m-${i}`, 1 - i / 1000));
       assert.equal(await S.insertCohortVersion(db, { version: 1, createdAt: T0, target: 150, members, shortfallReason: "short", changes: [{ userId: "m-0", change: "added", reason: "r" }] }, { k: 1 }), true);
       assert.equal(await S.insertCohortVersion(two, { version: 1, createdAt: T0, target: 150, members, shortfallReason: null, changes: [] }), false);
@@ -272,6 +288,11 @@ test("Postgres: the fomo store", { skip: !url, timeout: 120_000 }, async (t) => 
       assert.equal(owners.size, 3);
       assert.deepEqual(owners.get(tailed[0]!.userId), [a]);
       assert.deepEqual(await S.recentlyEndedTails(db, A, T0 + 3 * HOUR - MIN, T0 + 3 * HOUR).then((r) => r.length), 3);
+      const longer = await S.extendTail(db, { tenant: A, userId: tailed[0]!.userId, addMs: HOUR, nowMs: T0 });
+      assert.deepEqual(longer.ok && [longer.previousExpiresAtMs, longer.tail.expiresAtMs, longer.capped], [T0 + 3 * HOUR, T0 + 4 * HOUR, false]);
+      const capped = await S.extendTail(two, { tenant: a, userId: tailed[0]!.userId, addMs: DAY, nowMs: T0 });
+      assert.deepEqual(capped.ok && [capped.tail.expiresAtMs, capped.capped], [T0 + S.FOMO_LIMITS.tailMaxMs, true], "never past the tail limit");
+      assert.deepEqual(await S.extendTail(db, { tenant: A, userId: "never-tailed", addMs: HOUR, nowMs: T0 }), { ok: false, reason: "not-active" });
       assert.equal(await S.removeTail(db, A, tailed[0]!.userId), true);
       assert.equal(await S.removeAllTails(db, A, T0), 2);
       assert.equal(await S.setTenantRoute(db, A, { dataAccess: true, monitoring: true, follow: false }, T0), true);
@@ -279,6 +300,16 @@ test("Postgres: the fomo store", { skip: !url, timeout: 120_000 }, async (t) => 
       assert.deepEqual(await S.routedTenants(db, "follow"), []);
       assert.deepEqual(await S.routedTenants(db, "data-access"), [a]);
       assert.equal((await S.getTenantRoute(db, A))?.monitoring, true);
+      // held tokens
+      const b = B.toLowerCase();
+      assert.equal(await S.setHeldTokens(db, A, [TOKEN.key, "k:held", TOKEN.key], T0), true);
+      assert.equal(await S.setHeldTokens(two, B, ["k:held"], T0), true);
+      assert.equal(await S.setHeldTokens(db, a, ["k:sold"], T0 - 1), false, "a slower writer never brings back a sold coin");
+      assert.deepEqual(await S.heldTokensFor(db, a, 0), [TOKEN.key, "k:held"]);
+      assert.deepEqual(await S.heldTokensFor(db, a, T0 + 1), []);
+      assert.deepEqual(await S.heldTokensFleet(db, 0), new Map([[TOKEN.key, [a]], ["k:held", [a, b]]]));
+      assert.equal(await S.setHeldTokens(two, B, [], T0 + 1), true, "an empty list clears the set");
+      assert.deepEqual(await S.heldTokensFleet(db, 0), new Map([[TOKEN.key, [a]], ["k:held", [a]]]));
       // assessments, outcomes, dependencies
       assert.equal(await S.insertAssessment(db, assessment("as-1", A, T0)), true);
       assert.equal((await S.latestAssessment(db, A, TOKEN.key))?.sizeCeilingUsdg6, "1000000");
