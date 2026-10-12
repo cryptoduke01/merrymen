@@ -12,7 +12,8 @@
  *   - a 422 while carrying them: the capability is dropped at once.
  *
  * And the probe that answers "does this Brain advertise it?", which must never
- * put a /health read on a review's clock.
+ * put a /health read on a review's clock, and must never mistake a read that
+ * failed (a restart window, a timeout) for a Brain saying no.
  */
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
@@ -238,33 +239,131 @@ describe("BrainCapabilityProbe", () => {
     assert.equal(p.advertises(url, "strategy-terms"), true, "a fresh read that says yes brings it back");
   });
 
-  it("anything but a well-formed advert is a no", async () => {
-    const cases: [unknown, { status?: number; raw?: string }][] = [
-      [{ capabilities: "strategy-terms" }, {}],
-      [{ capabilities: [{ name: "strategy-terms" }] }, {}],
-      [{ lens_keys: ["technical"] }, {}],
-      [null, { raw: "not json" }],
-      [null, { raw: JSON.stringify({ capabilities: ["strategy-terms"], pad: "x".repeat(64_001) }) }],
-      [{ capabilities: ["strategy-terms"] }, { status: 503 }],
-      [new Error("ECONNREFUSED"), {}],
+  /** Answers a Brain gives that say nothing about its capabilities. */
+  const NO_ANSWER: [string, unknown, { status?: number; raw?: string }][] = [
+    ["a 503", { capabilities: ["strategy-terms"] }, { status: 503 }],
+    ["a refused connection", new Error("ECONNREFUSED"), {}],
+    ["a body that is not JSON", null, { raw: "not json" }],
+    ["an oversized body", null, { raw: JSON.stringify({ capabilities: ["strategy-terms"], pad: "x".repeat(64_001) }) }],
+    ["JSON that is not an object", null, { raw: "[\"strategy-terms\"]" }],
+  ];
+
+  it("a parsed /health that does not advertise it is a no, even after a yes", async () => {
+    const cases: unknown[] = [
+      { capabilities: "strategy-terms" },
+      { capabilities: [{ name: "strategy-terms" }] },
+      { ok: true, lens_keys: ["technical"] }, // an older build: no capabilities at all
+      { capabilities: [] },
     ];
-    for (const [body, init] of cases) {
-      const h = health(body, init);
-      const p = new BrainCapabilityProbe(h.fetchImpl, () => 0, 60_000, 1_000);
+    for (const body of cases) {
+      let t = 1_000_000;
+      const h = health({ capabilities: ["strategy-terms"] });
+      const p = new BrainCapabilityProbe(h.fetchImpl, () => t, 60_000, 1_000);
       p.advertises(url, "strategy-terms");
       await p.settled();
-      assert.equal(p.advertises(url, "strategy-terms"), false, JSON.stringify(init.raw?.slice(0, 40) ?? body));
+      assert.equal(p.advertises(url, "strategy-terms"), true);
+      h.set(body);
+      t += 60_000;
+      p.advertises(url, "strategy-terms");
+      await p.settled();
+      assert.equal(p.advertises(url, "strategy-terms"), false, JSON.stringify(body));
     }
   });
 
-  it("a stalled /health is cut at its own timeout", async () => {
-    const fetchImpl = ((_input: unknown, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
-      init?.signal?.addEventListener("abort", () => reject(new Error("aborted")));
-    })) as typeof fetch;
-    const p = new BrainCapabilityProbe(fetchImpl, () => 0, 60_000, 20);
+  it("a failed read is not an answer: the last yes stands, and it asks again within a minute", async () => {
+    for (const [what, body, init] of NO_ANSWER) {
+      let t = 1_000_000;
+      const h = health({ capabilities: ["strategy-terms"] });
+      const p = new BrainCapabilityProbe(h.fetchImpl, () => t, 3_600_000, 1_000, 60_000);
+      p.advertises(url, "strategy-terms");
+      await p.settled();
+      assert.equal(p.advertises(url, "strategy-terms"), true, what);
+
+      // The hourly read lands in a restart window.
+      h.set(body, init);
+      t += 3_600_000;
+      p.advertises(url, "strategy-terms");
+      await p.settled();
+      assert.equal(h.reads.length, 2, what);
+      assert.equal(p.advertises(url, "strategy-terms"), true, `${what}: the earlier yes stands`);
+
+      // Early recheck, not an hour: nothing before a minute, a read at one.
+      h.set({ capabilities: ["strategy-terms"] });
+      t += 59_999;
+      p.advertises(url, "strategy-terms");
+      assert.equal(h.reads.length, 2, `${what}: not before the retry delay`);
+      t += 1;
+      p.advertises(url, "strategy-terms");
+      await p.settled();
+      assert.equal(h.reads.length, 3, `${what}: retried after a minute`);
+      assert.equal(p.advertises(url, "strategy-terms"), true, what);
+
+      // A good answer puts it back on the hourly schedule.
+      t += 60_000;
+      p.advertises(url, "strategy-terms");
+      assert.equal(h.reads.length, 3, `${what}: hourly again after a good read`);
+    }
+  });
+
+  it("before any answer, a failed read is still a no, retried early rather than in an hour", async () => {
+    for (const [what, body, init] of NO_ANSWER) {
+      let t = 1_000_000;
+      const h = health(body, init);
+      const p = new BrainCapabilityProbe(h.fetchImpl, () => t, 3_600_000, 1_000, 60_000);
+      p.advertises(url, "strategy-terms");
+      await p.settled();
+      assert.equal(p.advertises(url, "strategy-terms"), false, `${what}: false until known`);
+      h.set({ capabilities: ["strategy-terms"] });
+      t += 60_000;
+      p.advertises(url, "strategy-terms");
+      await p.settled();
+      assert.equal(h.reads.length, 2, what);
+      assert.equal(p.advertises(url, "strategy-terms"), true, what);
+    }
+  });
+
+  it("a failed read cannot undo an invalidate", async () => {
+    let t = 1_000_000;
+    const h = health({ capabilities: ["strategy-terms"] });
+    const p = new BrainCapabilityProbe(h.fetchImpl, () => t, 3_600_000, 1_000, 60_000);
     p.advertises(url, "strategy-terms");
     await p.settled();
+    p.invalidate(10_000);
     assert.equal(p.advertises(url, "strategy-terms"), false);
+    h.set(new Error("ECONNREFUSED"));
+    t += 10_000;
+    p.advertises(url, "strategy-terms");
+    await p.settled();
+    assert.equal(h.reads.length, 2);
+    assert.equal(p.advertises(url, "strategy-terms"), false, "a 422 said no; a failed read does not say yes");
+  });
+
+  it("a stalled /health is cut at its own timeout, and the timeout is not an answer", async () => {
+    let stall = false;
+    let reads = 0;
+    const fetchImpl = ((_input: unknown, init?: RequestInit) => {
+      reads++;
+      if (!stall) return Promise.resolve(new Response(JSON.stringify({ capabilities: ["strategy-terms"] })));
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+      });
+    }) as typeof fetch;
+    let t = 1_000_000;
+    const p = new BrainCapabilityProbe(fetchImpl, () => t, 3_600_000, 20, 60_000);
+    p.advertises(url, "strategy-terms");
+    await p.settled();
+    assert.equal(p.advertises(url, "strategy-terms"), true);
+    stall = true;
+    t += 3_600_000;
+    p.advertises(url, "strategy-terms");
+    await p.settled();
+    assert.equal(reads, 2, "the stalled read finished, by timeout");
+    assert.equal(p.advertises(url, "strategy-terms"), true, "a timeout keeps the last answer");
+    t += 60_000;
+    stall = false;
+    p.advertises(url, "strategy-terms");
+    await p.settled();
+    assert.equal(reads, 3, "and is retried early");
   });
 
   it("a changed or unusable URL starts over, and nothing is read for a bad one", async () => {

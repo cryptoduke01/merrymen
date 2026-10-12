@@ -238,6 +238,16 @@ export const STRATEGY_TERMS_CAPABILITY = "strategy-terms";
  * turns them off at once, because /health and /v1/decide can be served by
  * different builds during a rollback.
  *
+ * A FAILED READ IS NOT AN ANSWER. Only a 2xx whose body parses as a JSON
+ * object replaces what is cached, and then it is believed either way: an
+ * older build's /health that lists no capabilities is a real "no". A network
+ * error, a timeout, a non-2xx or an unparseable body keeps the last answer and
+ * asks again after `retryMs` instead of the full hour. A read that lands in a
+ * restart window, as one will on the deploy this channel needs, would
+ * otherwise withhold every review's terms for an hour and fill the ledger with
+ * "withheld" for a Brain that supports them. Real skew does not depend on this
+ * path: it shows up as a 422 on decide, and that calls `invalidate`.
+ *
  * FREE. /health is Brain's own unauthenticated status endpoint on the private
  * network: no model call, no vendor, nothing metered.
  */
@@ -254,6 +264,8 @@ export class BrainCapabilityProbe {
     private readonly now: () => number = Date.now,
     private readonly everyMs: number = 60 * 60_000,
     private readonly timeoutMs: number = 3_000,
+    /** How soon a read that got no answer is retried. Still never on a review's clock. */
+    private readonly retryMs: number = 60_000,
   ) {}
 
   advertises(brainUrl: string | null | undefined, capability: string): boolean {
@@ -292,7 +304,9 @@ export class BrainCapabilityProbe {
 
   private async probe(u: string): Promise<void> {
     const generation = this.generation;
-    let caps: ReadonlySet<string> = new Set();
+    // NULL IS "NO ANSWER", which is not the same as an empty advert: see the
+    // class header. Only a parsed object below sets it.
+    let caps: ReadonlySet<string> | null = null;
     const ctl = new AbortController();
     const timer = setTimeout(() => ctl.abort(), this.timeoutMs);
     (timer as { unref?: () => void }).unref?.();
@@ -305,18 +319,30 @@ export class BrainCapabilityProbe {
       if (res.ok) {
         const text = await res.text();
         if (text.length <= 64_000) {
-          const j = JSON.parse(text) as { capabilities?: unknown };
-          if (Array.isArray(j?.capabilities)) {
-            caps = new Set(j.capabilities.filter((c): c is string => typeof c === "string" && c.length <= 64));
+          const j = JSON.parse(text) as unknown;
+          if (j !== null && typeof j === "object" && !Array.isArray(j)) {
+            const listed = (j as { capabilities?: unknown }).capabilities;
+            caps = new Set(
+              Array.isArray(listed) ? listed.filter((c): c is string => typeof c === "string" && c.length <= 64) : [],
+            );
           }
         }
+      } else {
+        void res.body?.cancel().catch(() => {});
       }
     } catch {
-      caps = new Set();
+      caps = null;
     } finally {
       clearTimeout(timer);
     }
-    if (this.url === u && this.generation === generation) this.value = caps;
+    if (this.url !== u || this.generation !== generation) return;
+    if (caps) {
+      this.value = caps;
+      return;
+    }
+    // KEEP THE LAST ANSWER, ASK AGAIN SOON. Never later than the hourly read
+    // already due, so a short `everyMs` is not stretched by the retry.
+    this.checkedAt = Math.min(this.checkedAt, this.now() - this.everyMs + Math.max(0, this.retryMs));
   }
 }
 
