@@ -205,7 +205,12 @@ for the gateway and the IDE.
   with a fresh tape row, since a review without one is never paid for. It asks
   when the review starts, beside the cost quotes and the candle and trade
   legs, with the same 5-second evidence budget as the request's deadline, so
-  it cannot hold the review past what it already waited. The budget travels
+  it cannot hold the review past what it already waited — but only when the
+  tape row will still be current once the legs are done
+  (`entryMayGoBlind`), so the review cannot then be skipped as blind with the
+  reading spent and thrown away. Otherwise it asks right after the blind
+  check passes, on what is left of the budget, and not at all when none is
+  left. The budget travels
   on the request, so the orchestrator stops the reading when the review stops
   waiting: on a slow lane the flow facts come back with the launcher
   `unavailable`, and no launcher query is sent after the review gave up.

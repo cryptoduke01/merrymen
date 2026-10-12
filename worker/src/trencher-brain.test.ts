@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { setImmediate } from "node:timers/promises";
-import { TrenchBrainReview, TrenchTapeReader, brainNoDecisionNote, fetchTrenchTape, type TrenchBrainOrder, highVolumePools, trenchBrainPersona, trenchScreenReason, trenchBrainSignals, trenchHeat, TRENCH_H1_VOLUME_MIN, HELD_REVIEW_MAX_GAP_MS, NOMINATED_PAGES_MAX, PRIORITY_RETRY_MS, TRENCH_REVIEW_INTERVAL_MS, HoldBackoff, HOLD_BACKOFF, holdReason, isModelHold, materialChange, trenchMaterial, type TrenchMaterial, entryEvidenceBlind, TRENCH_EVIDENCE_STALE_MS, TRENCH_TAPE_MAX_AGE_MS, TrenchNoticeGate, TRENCH_NOTICE_REPEAT_MS, TRENCH_FEED_OUTAGE_NOTICE, TRENCH_NOTHING_PASSES_NOTICE, trenchDeskNotice, type EarlyLane } from "./trencher-brain";
+import { TrenchBrainReview, TrenchTapeReader, brainNoDecisionNote, fetchTrenchTape, type TrenchBrainOrder, highVolumePools, trenchBrainPersona, trenchScreenReason, trenchBrainSignals, trenchHeat, TRENCH_H1_VOLUME_MIN, HELD_REVIEW_MAX_GAP_MS, NOMINATED_PAGES_MAX, PRIORITY_RETRY_MS, TRENCH_REVIEW_INTERVAL_MS, HoldBackoff, HOLD_BACKOFF, holdReason, isModelHold, materialChange, trenchMaterial, type TrenchMaterial, entryEvidenceBlind, entryMayGoBlind, TRENCH_EVIDENCE_STALE_MS, TRENCH_TAPE_MAX_AGE_MS, TrenchNoticeGate, TRENCH_NOTICE_REPEAT_MS, TRENCH_FEED_OUTAGE_NOTICE, TRENCH_NOTHING_PASSES_NOTICE, trenchDeskNotice, type EarlyLane } from "./trencher-brain";
 import { classifyReview } from "./decision-funnel";
 import { chooseFocus } from "./brain-focus";
 import { emptyGeckoBuckets, type GeckoPool } from "./venues/geckoterminal";
@@ -1052,6 +1052,19 @@ test("an entry review is blind only when BOTH legs failed AND the tape row is st
   assert.equal(entryEvidenceBlind({ candles: landed, trades: failed }, stale, now), false, "candles landed");
   assert.equal(entryEvidenceBlind({ candles: failed, trades: landed }, null, now), false, "trades landed");
   assert.ok(TRENCH_EVIDENCE_STALE_MS < TRENCH_TAPE_MAX_AGE_MS, "stale for a review is still on the tape: it never removes a pool");
+});
+
+test("a review may go blind within a span unless its tape row is still current at the end of it", () => {
+  const now = 10_000_000, legs = 8_000;
+  assert.equal(entryMayGoBlind(now - (TRENCH_EVIDENCE_STALE_MS - legs), now, legs), false, "current to the last moment");
+  assert.equal(entryMayGoBlind(now - (TRENCH_EVIDENCE_STALE_MS - legs) - 1, now, legs), true, "stale a moment before the check");
+  assert.equal(entryMayGoBlind(now - 1_000, now, legs), false);
+  assert.equal(entryMayGoBlind(null, now, legs), true, "no tape row at all");
+  assert.equal(entryMayGoBlind(Number.NaN, now, legs), true);
+  // Agrees with entryEvidenceBlind: never blind at any check inside the span when it says no.
+  const failed = { candles: { failed: true }, trades: { failed: true } };
+  const at = now - (TRENCH_EVIDENCE_STALE_MS - legs);
+  for (const t of [now, now + legs / 2, now + legs]) assert.equal(entryEvidenceBlind(failed, at, t), false);
 });
 
 test("observedAtOf: each pool's newest fresh observation, not the snapshot's oldest page", async () => {

@@ -137,7 +137,7 @@ import { bookGaps, composeEquityUsdg } from "./equity";
 import { publishesAView, reviewRecord, runShadow, type ShadowInputs, type ShadowOutcome } from "./brain-shadow";
 import { BrainCapabilityProbe } from "./brain-client";
 import { ONCHAIN_FLOW_LENS, flowLensRefused, readFlowEvidence, reviewFlowClient } from "./review-flow";
-import { HoldBackoff, TrenchBrainReview, TrenchNoticeGate, TrenchTapeReader, entryEvidenceBlind, trenchDeskNotice, highVolumePools, trenchBrainPersona, trenchBrainSignals, trenchHeat, trenchMaterial, HELD_REVIEW_MAX_GAP_MS, TRENCH_REVIEW_INTERVAL_MS } from "./trencher-brain";
+import { HoldBackoff, TrenchBrainReview, TrenchNoticeGate, TrenchTapeReader, entryEvidenceBlind, entryMayGoBlind, trenchDeskNotice, highVolumePools, trenchBrainPersona, trenchBrainSignals, trenchHeat, trenchMaterial, HELD_REVIEW_MAX_GAP_MS, TRENCH_REVIEW_INTERVAL_MS } from "./trencher-brain";
 import { withAgentBrief } from "./agent-brief";
 import { ProjectPurposeReader } from "./research/project-purpose";
 import { getPaperBrainCapital } from "./store";
@@ -13367,10 +13367,17 @@ async function main() {
             // asked last, so a review with nothing to send reads nothing new.
             const flowClient = costContext && tape && reviewFlow && flowLensProbe.advertises(cfg.brainUrl, ONCHAIN_FLOW_LENS) ? reviewFlow : null;
             trenchBrain.launch(trenchContext, inputs, focus.token, async (review) => {
+              const reviewStartedAt = Date.now();
               const costRead = costContext ? entryCostResearch(costContext) : Promise.resolve(null);
+              // The legs' hard backstop below, and a second's slack for the clock.
+              const legsMaxMs = EVIDENCE_BUDGET_MS + 2000;
               // Asked now, beside the cost quotes and the candle and trade legs,
               // and given up at their budget: it never holds the review past it.
-              const flowRead = flowClient ? readFlowEvidence(flowClient, focus.token, EVIDENCE_BUDGET_MS) : null;
+              // Only while the tape row is sure to be current when the legs are
+              // done, so the review cannot then be skipped as blind and the
+              // reading thrown away unpaid; otherwise asked after that check.
+              let flowRead = flowClient && tape && !entryMayGoBlind(trenchTapeReader.observedAtOf(tape), reviewStartedAt, legsMaxMs + 1000)
+                ? readFlowEvidence(flowClient, focus.token, EVIDENCE_BUDGET_MS) : null;
               const projectRead = projectContext
                 ? projectPurpose.read(projectContext.client, projectContext.token, projectContext.chainId, projectContext.browser)
                 : Promise.resolve(null);
@@ -13402,7 +13409,7 @@ async function main() {
                 let timer: ReturnType<typeof setTimeout> | undefined;
                 const evidence = await Promise.race([
                   readPoolEvidence(tape.poolId, focus.token, EVIDENCE_BUDGET_MS).catch(() => null),
-                  new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), EVIDENCE_BUDGET_MS + 2000); }),
+                  new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), legsMaxMs); }),
                 ]).finally(() => { if (timer) clearTimeout(timer); });
                 // The compact copy (pool-evidence.ts brainEvidence): the manager
                 // reads only technical[:2400], tape JSON first, then this.
@@ -13424,6 +13431,10 @@ async function main() {
                   const age = tapeAt === null ? "gone from the fresh tape" : `${Math.round((Date.now() - tapeAt) / 1000)}s old`;
                   return skipBlindEntry("blind", `candles and trades both unavailable and its tape row is ${age}`);
                 }
+                // Past the blind check, the flow not yet asked is asked now, on
+                // what is left of the same budget (none left: nothing is sent).
+                const flowLeftMs = EVIDENCE_BUDGET_MS - (Date.now() - reviewStartedAt);
+                if (flowClient && !flowRead && flowLeftMs > 0) flowRead = readFlowEvidence(flowClient, focus.token, flowLeftMs);
                 // A review that goes ahead without either leg (a current tape
                 // row, or a held position) holds on missing flow, not on the
                 // coin: an entry HOLD from it gets one evidence window, never

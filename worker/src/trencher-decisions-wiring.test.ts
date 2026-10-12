@@ -87,9 +87,16 @@ describe("the Trencher review's hold backoff, memory, evidence rule and research
     assert.match(CODE, /const flowClient = costContext && tape && reviewFlow && flowLensProbe\.advertises\(cfg\.brainUrl, ONCHAIN_FLOW_LENS\) \? reviewFlow : null;/);
     assert.ok(CODE.indexOf("const flowClient = ") < LAUNCH);
     const run = CODE.slice(LAUNCH, PAID);
-    // Started beside the cost quotes, before the evidence legs, on their clock.
-    assert.match(run, /const flowRead = flowClient \? readFlowEvidence\(flowClient, focus\.token, EVIDENCE_BUDGET_MS\) : null;/);
-    assert.ok(run.indexOf("const flowRead = ") < run.indexOf("readPoolEvidence("), "asked before the legs start, not after them");
+    // Started beside the cost quotes, before the evidence legs, on their clock —
+    // only while the review cannot then be skipped as blind (its tape row current past the legs).
+    assert.match(run, /let flowRead = flowClient && tape && !entryMayGoBlind\(trenchTapeReader\.observedAtOf\(tape\), reviewStartedAt, legsMaxMs \+ 1000\)\s*\? readFlowEvidence\(flowClient, focus\.token, EVIDENCE_BUDGET_MS\) : null;/);
+    assert.ok(run.indexOf("let flowRead = ") < run.indexOf("readPoolEvidence("), "asked before the legs start, not after them");
+    assert.match(run, /new Promise<null>\(resolve => \{ timer = setTimeout\(\(\) => resolve\(null\), legsMaxMs\); \}\)/, "the same backstop the check counts on");
+    // Otherwise asked only once the blind check passed, on what is left of the budget.
+    const blind = run.indexOf('return skipBlindEntry("blind"');
+    const late = run.indexOf("if (flowClient && !flowRead && flowLeftMs > 0) flowRead = readFlowEvidence(flowClient, focus.token, flowLeftMs);");
+    assert.ok(blind > 0 && late > blind, "never before a blind skip");
+    assert.match(run, /const flowLeftMs = EVIDENCE_BUDGET_MS - \(Date\.now\(\) - reviewStartedAt\);/);
     // Its own key: technical (and its 2,400-character cut) is never touched by it.
     assert.match(run, /const flow = flowRead \? await flowRead : null;\s*if \(flow\) \{\s*if \(flow\.lens\) inputs\.market\.signals\[ONCHAIN_FLOW_LENS\] = flow\.lens;/);
     assert.equal(CODE.split("signals[ONCHAIN_FLOW_LENS]").length - 1, 1, "set in one place");
