@@ -924,7 +924,8 @@ looks things up first, the way Shogun does in a Telegram group
   written.
 - **The gate is unchanged:** no numbers, no prices, no advice, never that it
   holds a coin now. A coin someone named is to be named without a `$` sign
-  (an unvouched cashtag is refused).
+  (an unvouched cashtag is refused). The model's words never carry a digit;
+  the only figures an answer may carry are code's figures line, below.
 - **Fomo on X: Enterprise rights confirmed.** Paraphrased, attributed Fomo
   facts in these answers republish provider-derived data, which needs the
   provider's Enterprise redistribution rights. The owner confirmed on
@@ -934,6 +935,151 @@ looks things up first, the way Shogun does in a Telegram group
 - **Logs:** counts only (`answer-intent-coin`, `answer-lookups`,
   `answer-research-index-busy` and the like), never a coin, a person or an
   address.
+
+### Market intel: majors, what's hot and the figures line (2026-10-12)
+
+The owner (Milla) decided on 2026-10-12 that Alan should answer like AiXBT or
+better: a coin by name or ticker gets market-level facts, and "what's hot"
+gets an overview, with figures allowed ONLY when built by code from
+CoinGecko, GeckoTerminal, Fomo or Bitquery data. Everything in the list
+above still holds; this adds three things, all inside research
+(`MERRYMEN_XPOST_RESEARCH=1`) and all for active owners only
+(`MERRYMEN_XPOST_ACTIVE_TENANTS`): only an active owner answers tags at all,
+and code puts a figures line only into an active owner's answer. Every
+other owner's agent, and its posting and reply warnings, are unchanged.
+
+- **Majors** (`majorAsk`, `orchestrator-xpost-research.ts`): a whole tag in
+  plain words, on a strict allowlist of shapes, after at most two greeting
+  words and before at most one "today" or the like: `$SOL today?`, "how's
+  eth doing / looking?", "thoughts on doge?", "what do you think of
+  solana?", "what's up with bitcoin?", "what about / tell me about <coin>",
+  "is btc up?", "<coin> price / update / stats?", "where's sol at?". The
+  coin is a cashtag, or one to three words of which at least one is no
+  everyday word ("how's the market doing", "thoughts on your trades", "tell
+  me about yourself" are no coin). Never with a contract, a private ask, a
+  second coin, a comparison, a model's or provider's name, or sherwood in
+  any form. CoinGecko decides whether it is a major: the Pro main API's
+  `/search`, then an EXACT symbol or name match (case aside) whose
+  market-cap rank is at most 200 (`MAJORS_MAX_RANK`), the best rank on a
+  tie; then `/coins/markets?ids=…&price_change_percentage=24h,7d`, whose own
+  row must still rank inside the cap. A copycat (`$BTC2`, "bitcoin inu"),
+  an unranked coin or one past #200 is no major and gets no figures: a
+  `$ticker` then goes on as a coin of the chain (the index's own resolver,
+  exactly as before majors), a word as chat. CoinGecko unreadable this time
+  is nothing at all, never a guess on the chain (a `$SOL` there is not the
+  Solana asked about). With no CoinGecko Pro key, majors are off and nothing
+  is asked; a tag goes on exactly as before. A named major is a named coin
+  for the never-confirm-a-buy rule: no buys list, no first person, never its
+  name in the words, and the writer is told it is not a Robinhood Chain coin
+  and not one Alan trades. The model gets words only ("coingecko ranks it
+  among the very biggest coins", "coingecko shows it up a little today",
+  "down a fair bit on the week", "trading volume looks heavy on coingecko"),
+  and code's line gets the figures: rank, price (from a thousand dollars),
+  market cap, 24h volume, 24h and 7d change.
+- **What's hot** (`hotAsk`): only these whole questions, with at most two
+  greeting words and a "today" / "right now" / "on robinhood chain" around
+  them: "what's hot / trending / moving / pumping", "top gainers", "what
+  are (the) top gainers", "what are people talking about", "what's the
+  meta". A word more ("what's hot to buy?") and it is not on the list.
+  Research reads page one of GeckoTerminal's Robinhood Chain
+  `trending_pools` on the fleet lane (mostly the Trencher tape's cache) and
+  keeps up to three coins (`hotScreen`) that pass the fleet's own discovery
+  screen (`DISCOVERY_SCREEN`, shared with `index.ts`: at least $25k in the
+  pool, the Trencher's price floor; $50k of 24h volume; a hundred distinct
+  buyers), sit in an identified pool (its id and base token both read), are
+  memecoins (never the chain's cash or a stock token), trade both ways in the
+  day (the tape's one-sided-flow refusal, the manipulation check the index
+  allows; the on-chain factory and TWAP checks run only in a child, where a
+  trade could follow, and nothing here trades), and have a ticker the
+  sanitiser keeps that is no big coin's (a chain coin calling itself BTC or
+  USDC never shows). Then, side by side: with Fomo usable for the owner, the
+  coins Fomo traders bought most in the day (`fomo_get_token_activity` with
+  no token, its feed-wide `topTokens`: Fomo's thesis read needs a coin, so
+  "what fomo traders are on" is the coins the most distinct Fomo traders
+  bought), kept only when the same screen kept them and shown by the
+  screened ticker, never Fomo's label, at most two; with a Pro key,
+  CoinGecko's `/search/trending`, kept only inside the majors' rank cap, at
+  most three. The model gets words only ("the robinhood chain index shows a
+  few coins standing out right now", "on the index they're a mix of up and
+  down on the day", "fomo traders are most active in one coin the index has
+  trending") and is told it is what the index shows, not a call: never buy,
+  never early, never a target, no coin's name, no number. Nothing past the
+  floors: "nothing is standing out on the robinhood chain index right now",
+  no line, and nothing more looked up.
+- **A tagged contract's onchain hour:** the Bitquery reading the coin path
+  already makes; its last hour's buys and sells go to code's line beside
+  their bands, only when both sides reach a thousand dollars.
+- **The figures line** (`worker/src/xpost/figures.ts`): built by code from
+  typed numbers and provider tickers only, never from a provider's text. A
+  ticker is shown only if it is A-Z and 0-9, two to ten characters, with at
+  least one letter (anything else is dropped, never repaired or echoed), and
+  spells no sherwood, merrymen, robinhood, the agent, slur, political name
+  or hype word. Money is compact (`~$1.9T`, `~$850M`, `~$85k`, `~$3.4k`);
+  under a thousand dollars is left out. A change has an explicit sign and at
+  most one decimal (`+1.2%`, `-38%`, `+0%`). A rank is `#N`. At most six
+  figures in a line. Each section names its source, and the grammar is
+  exactly:
+
+  ```
+  coingecko: $TICKER #N, ~$P, mcap ~$M, vol ~$V, 24h ±X%, 7d ±Y%
+  geckoterminal robinhood: trending $A 24h ±X% vol ~$V[, $B …][, $C …]
+  fomo: most bought $A[, $B]
+  coingecko: trending $A[, $B][, $C]
+  bitquery: 1h buys ~$B, sells ~$S
+  ```
+
+  (every field of a coin optional but at least one; sections joined by
+  `; `; the line ends with a full stop). For example:
+  `coingecko: $ETH #2, ~$3.4k, mcap ~$411B, vol ~$18B, 24h +1.2%, 7d -3.4%.`
+- **Composition** (`withFigures`, in `writeAnswer`): the model writes its
+  casual words exactly as before, digit-free, and the X gate judges them
+  unchanged. Only AFTER the gate admitted them, and only for an active
+  owner's drafted answer (never a greeting's or the model question's code
+  line), code puts the line between the words and the mandatory opt-out
+  sentence, checks it again against the grammar (`admitFiguresLine`) and
+  that it names no sherwood, and fits the whole post to X's weighted 280:
+  the least telling field goes first (CoinGecko's trending list, then
+  Fomo's, then the chain's coins from the last, then a coin's volume; a
+  major's week, then volume, market cap, price and last its rank), and when
+  no form fits, the answer goes out as the gate admitted it, with no line.
+  A line goes in only beside words that were looked up; figures with no
+  words to stand on are dropped. Counts: `answer-figures`,
+  `answer-figures-shortened`, `answer-figures-left-out`.
+- **Never the model's own words:** a posted answer keeps its line (it is
+  what X published), but no prompt ever quotes a post that carries one
+  (writer.ts `ownWords`), and such an answer is marked looked up
+  (`ANSWER_LOOKED_UP`) and never handed on. The X gate weighs every earlier
+  post without its line (`withoutFiguresLine`), its own and the fleet's: the
+  same words are still a repeat whatever the figures, and two answers whose
+  figures match are not a fleet repeat for that. `coingecko`,
+  `geckoterminal` and `bitquery` are research sources: a draft citing one
+  with nothing looked up is refused (`gate:unlooked-source`).
+- **Budget:** a major costs two index lookups (search, market), what's hot
+  up to three (the trending page, Fomo, CoinGecko's list), a contract's
+  Bitquery figures none more. Every index read takes a slot (`indexSlot`): a
+  lookup left in the bundle's six, time left in its twelve seconds, then
+  the X account's eight per ten minutes and
+  `MERRYMEN_XPOST_RESEARCH_PER_HOUR` across X accounts. Each read is handed
+  at most four seconds and passes that to the fleet lane as its budget, so
+  a CoinGecko slot that does not come in time is skipped (no request, no
+  credit), never waited on. CoinGecko's main API rides the fleet's Pro lane
+  (`cachedCoinGecko`, `venues/coingecko-coins.ts`): the same spacing
+  (`MERRYMEN_COINGECKO_PRO_SPACING_MS`, its evidence row), 429 cooldown,
+  plan-refusal latch (the `search`, `coins/markets` and `search/trending`
+  families, per key) and monthly credit ceiling
+  (`MERRYMEN_COINGECKO_MONTHLY_CREDITS`) as every onchain read, with a
+  minute's cache per coin; the Pro key goes only to its fixed origin, in a
+  header, and there is no public fallback. Fomo stays under the `x-answer`
+  surface's own caps, and every drafted answer under the answer model
+  allowance.
+- **The reply warning says so**, for an active owner only (web and iOS, the
+  same words): answers may include market figures from public data
+  (CoinGecko, GeckoTerminal, Fomo and Bitquery), added by Merrymen as the
+  data showed them, never advice.
+- **No new knob.** Majors and CoinGecko's trending list need
+  `MERRYMEN_COINGECKO_PRO_API_KEY` on the orchestrator, which already holds
+  it: its children inherit it from there, and an answer's coin facts already
+  read it on the same fleet lane.
 
 ## Rollout for the operator's own agent
 
@@ -956,7 +1102,7 @@ lanes before them. Unset is the default and changes nothing, except for an accou
 | 5 | `MERRYMEN_XPOST_ACTIVE_TENANTS` | web + orchestrator, same value | Alan's tenant address, from the deploy environment | The active cadence, his reply consent recorded by the orchestrator, and answers to tags sent right away. The web reads it for the reply warning |
 | 5 | `MERRYMEN_XPOST_REPLIES_APPROVED` | web + orchestrator, same value | `active` (the owner's decision of 2026-10-12, for the operator's own agent only; `1` stays unset until X's written approval) | Without it there are no comment replies and no answers to tags. On 2026-10-12 the owner (Milla) decided to set it to `active` on both services for the operator's own agent only, so Alan answers people who tag him. X's published automation rules ask for written approval for AI reply bots; an X staff answer on the developer forum says replies triggered by a mention do not need it, and Alan's request for clarification is pending. `1` (every owner) stays unset until written approval exists. |
 | 5 | `MERRYMEN_XPOST_REPLY_POLLS_PER_DAY` | orchestrator | unset (`200` for the fleet) | Alan's fifteen-second polls spend their own 6,000 per X account per UTC day |
-| 6 | `MERRYMEN_XPOST_RESEARCH` | orchestrator | `1` | Answers look things up first. Boot line `xpost: on — … answers look things up first`; with the Bitquery key also `xpost: answers may read onchain flow — up to 200 readings per UTC day …` |
+| 6 | `MERRYMEN_XPOST_RESEARCH` | orchestrator | `1` | Answers look things up first. Boot line `xpost: on — … answers look things up first`; with the Bitquery key also `xpost: answers may read onchain flow — up to 200 readings per UTC day …`. With the CoinGecko Pro key the orchestrator already holds, a coin asked by name or ticker (a major, ranked in CoinGecko's top 200) and "what's hot?" are answered too, with code's figures line after the words (x-posting.md "Market intel"); counts `answer-intent-major`, `answer-intent-hot`, `answer-figures` |
 | 6 | `MERRYMEN_XPOST_RESEARCH_PER_HOUR` | orchestrator | unset (`120`) | Public-index lookups per hour across X accounts |
 | 6 | `MERRYMEN_XPOST_FOMO` | orchestrator | `1` (Enterprise rights confirmed by the owner on 2026-10-12, [`fomo.md`](fomo.md) "Publication") | Paraphrased, attributed Fomo facts in answers |
 | 6 | `MERRYMEN_FOMO_X_HOURLY_CREDITS` | orchestrator | unset (`3000`) | Per X account per hour, and at most a quarter of the owner's daily Fomo cap |
@@ -1005,9 +1151,12 @@ hour of drafting it is already skipped as stale, so the queue is short.
   answers to posts that tag it, comments on its own posts included. Answers
   go out right away and do not wait under Coming up. There are up to 24 a
   day on top of its posts, at most two to one person a day, and anyone can
-  reply stop to opt out. Every other owner is told about comment replies on
-  coin posts only. Web and iOS use the same sentences, and the tests pin
-  them.
+  reply stop to opt out. Its answers may include market figures from public
+  data (CoinGecko, GeckoTerminal, Fomo and Bitquery), such as a coin's
+  price, market cap, volume or recent change, added by Merrymen as the data
+  showed them and never advice ("Market intel" above). Every other owner is
+  told about comment replies on coin posts only, and nothing about figures.
+  Web and iOS use the same sentences, and the tests pin them.
 
 ## Optional voice, public addresses and sale results
 

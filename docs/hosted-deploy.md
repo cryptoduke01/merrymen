@@ -197,7 +197,9 @@ desk rides. Memecoins only — an equity token on this chain is a wrapper, and
 ### CoinGecko Pro pacing (optional; unset keeps the old 3-second pace)
 
 How fast the Pro key (`MERRYMEN_COINGECKO_PRO_API_KEY`, read by the
-orchestrator's children and by web) may spend. Both services read the same two
+orchestrator's children, by the orchestrator itself for X answers' research,
+whose CoinGecko and index reads share the children's fleet lane, and by web)
+may spend. Both services read the same two
 names; set them on each. With a monthly figure set, a spacing below the floor
 that figure allows is raised to it (fleet lane 70% of the month, web 20%, 10%
 headroom), and said once at startup. On web, setting either one also paces
@@ -979,7 +981,7 @@ for an account already on `MERRYMEN_DECISION_RESEARCH_ACCOUNTS` (step 1). This t
 | 5 | `MERRYMEN_XPOST_ACTIVE_TENANTS` | web + orchestrator, same value | Alan's tenant address, from the deploy environment | The active cadence, his reply consent recorded by the orchestrator, and answers to tags sent right away. The web reads it for the reply warning |
 | 5 | `MERRYMEN_XPOST_REPLIES_APPROVED` | web + orchestrator, same value | `active` (the owner's decision of 2026-10-12, for the operator's own agent only; `1` stays unset until X's written approval) | Without it there are no comment replies and no answers to tags. On 2026-10-12 the owner (Milla) decided to set it to `active` on both services for the operator's own agent only, so Alan answers people who tag him. X's published automation rules ask for written approval for AI reply bots; an X staff answer on the developer forum says replies triggered by a mention do not need it, and Alan's request for clarification is pending. `1` (every owner) stays unset until written approval exists. |
 | 5 | `MERRYMEN_XPOST_REPLY_POLLS_PER_DAY` | orchestrator | unset (`200` for the fleet) | Alan's fifteen-second polls spend their own 6,000 per X account per UTC day |
-| 6 | `MERRYMEN_XPOST_RESEARCH` | orchestrator | `1` | Answers look things up first. Boot line `xpost: on — … answers look things up first`; with the Bitquery key also `xpost: answers may read onchain flow — up to 200 readings per UTC day …` |
+| 6 | `MERRYMEN_XPOST_RESEARCH` | orchestrator | `1` | Answers look things up first. Boot line `xpost: on — … answers look things up first`; with the Bitquery key also `xpost: answers may read onchain flow — up to 200 readings per UTC day …`. With the CoinGecko Pro key the orchestrator already holds, a coin asked by name or ticker (a major, ranked in CoinGecko's top 200) and "what's hot?" are answered too, with code's figures line after the words (x-posting.md "Market intel"); counts `answer-intent-major`, `answer-intent-hot`, `answer-figures` |
 | 6 | `MERRYMEN_XPOST_RESEARCH_PER_HOUR` | orchestrator | unset (`120`) | Public-index lookups per hour across X accounts |
 | 6 | `MERRYMEN_XPOST_FOMO` | orchestrator | `1` (Enterprise rights confirmed by the owner on 2026-10-12, [`fomo.md`](fomo.md) "Publication") | Paraphrased, attributed Fomo facts in answers |
 | 6 | `MERRYMEN_FOMO_X_HOURLY_CREDITS` | orchestrator | unset (`3000`) | Per X account per hour, and at most a quarter of the owner's daily Fomo cap |

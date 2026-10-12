@@ -11,24 +11,31 @@
  *
  * CLASSIFIED BY CODE, NEVER BY THE MODEL. `classifyTag` reads the screened
  * question with the Telegram groups' own readers (publicFactRequest,
- * extractCashtags, isInjection, isPrivateAsk) into one of seven intents:
- * capabilities, onboarding, own trades, a coin, the model (a strict
- * allowlist of whole questions), chat, or unanswered (sherwood in any form,
- * or a model question off the allowlist). Only a coin costs a paid lookup;
- * own trades read what it already has.
+ * extractCashtags, isInjection, isPrivateAsk) into one of nine intents:
+ * capabilities, onboarding, own trades, a coin, a major (a coin by name or
+ * ticker on CoinGecko's list), what's hot, the model (each of the last three
+ * a strict allowlist of whole questions), chat, or unanswered (sherwood in
+ * any form, or a model question off the allowlist). A coin, a major and
+ * what's hot cost paid lookups; own trades read what it already has.
  *
  * ONE BUNDLE PER ANSWER, BOUNDED. At most RESEARCH_BUDGET.maxLookups lookups
  * and RESEARCH_BUDGET.totalMs in all, every read time-boxed; a lookup that
  * fails, is refused by a limiter or a budget, or runs late is simply not a
  * fact. Never a stalled pass, never a retry.
  *
- * WHAT COMES OUT IS WORDS, BUILT BY CODE. Every fact is a fixed phrase picked
- * from a measurement — "the public index shows liquidity is thin", "holders
- * look concentrated", "fomo traders mostly argue it's still early" — with its
- * source in it, screened for digits and the X gate's vocabulary before the
- * model sees it. No number, price, size, P&L, handle, quote, wallet list or
- * address ever leaves this file. The X gate is unchanged and still judges the
- * draft.
+ * WHAT THE MODEL GETS IS WORDS, BUILT BY CODE. Every fact is a fixed phrase
+ * picked from a measurement — "the public index shows liquidity is thin",
+ * "holders look concentrated", "fomo traders mostly argue it's still early",
+ * "coingecko shows it up a little today" — with its source in it, screened
+ * for digits and the X gate's vocabulary before the model sees it. No number,
+ * price, size, P&L, handle, quote, wallet list or address ever reaches the
+ * model from here. The X gate is unchanged and still judges the draft.
+ *
+ * FIGURES GO TO CODE, NEVER TO THE MODEL (2026-10-12). A major, what's hot
+ * and a tagged contract's onchain hour also hand back `figures`: the
+ * provider's numbers and tickers as typed data, which orchestrator-xpost.ts
+ * renders into a figures line (xpost/figures.ts) after the gate admitted the
+ * words, for an active owner's answer only.
  *
  * THE ADDRESS IS A LOOKUP KEY ONLY. A contract address someone tagged is read
  * on the public index and asked of Fomo; it is never shown to the model,

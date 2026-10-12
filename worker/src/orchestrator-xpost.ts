@@ -1501,7 +1501,10 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
    * (orchestrator-xpost-research.ts): code-built, digit-free, attributed
    * words the answer may say. A tagged contract address is the bundle's
    * lookup key only: the model reads "this coin", never the address. The
-   * gate is the same either way. Research off, nothing here changes.
+   * gate is the same either way. Research off, nothing here changes. A
+   * bundle may also carry figures (a major's market, what's hot, a tagged
+   * contract's onchain hour): never shown to the model, they are rendered by
+   * code into a figures line put in after the gate (xpost/figures.ts).
    *
    * NEVER PAST THE PASS'S SEND BUDGET. Research runs inside the pass, after
    * its sends and before the next pass's, so its twelve seconds shrink to
