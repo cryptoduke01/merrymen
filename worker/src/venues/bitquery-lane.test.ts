@@ -358,6 +358,53 @@ describe("the lane — budget, cache, rate and cooldown", () => {
     lane.close();
   });
 
+  it("evidence keeps its whole share even when answers spend all of theirs first", async () => {
+    const { fetch } = stubFetch(byQuery);
+    // 1,000 a day, 800 for evidence; answers keep to the other 200 (orchestrator-flow.ts answerReadingsPerDay).
+    const clock = fakeClock();
+    const lane = new BitqueryLane({ dir: tmp(), config: config({ pointsPerDay: 1_000 }), fetch, clock });
+    const token = (n: number) => `0x${n.toString(16).padStart(40, "0")}`;
+    let n = 1;
+    // A second apart, inside the rate; the same UTC day throughout.
+    const next = () => { clock.advance(1_000); return token(n++); };
+    for (let spent = 0; spent + LANE_POINTS.tokenFlow <= 200; spent += LANE_POINTS.tokenFlow) assert.ok((await lane.tokenFlow(next())).ok);
+    const answers = lane.spentToday()!.points;
+    assert.ok(answers > 180 && answers <= 200, String(answers));
+    let evidence = 0;
+    for (;;) {
+      const r = await lane.v3Pools(next(), { purpose: "evidence" });
+      if (!r.ok) {
+        assert.equal(r.failure, "budget");
+        break;
+      }
+      evidence += LANE_POINTS.v3Pools;
+    }
+    assert.equal(evidence, 800, "the whole share, not 800 less what answers spent");
+    assert.equal(lane.spentToday()!.points, answers + 800);
+    // And the day's own total still binds: an answer has only what is left.
+    assert.ok((await lane.v3Pools(next())).ok);
+    lane.close();
+  });
+
+  it("a lane file from before evidence was counted apart counts its day as evidence, never less", async () => {
+    const dir = tmp();
+    const clock = fakeClock();
+    const { DatabaseSync } = await import("node:sqlite");
+    const old = new DatabaseSync(path.join(dir, "lane.sqlite"));
+    old.exec(`CREATE TABLE spend (day TEXT PRIMARY KEY, points INTEGER NOT NULL DEFAULT 0, calls INTEGER NOT NULL DEFAULT 0, refused INTEGER NOT NULL DEFAULT 0);
+      INSERT INTO spend(day, points, calls, refused) VALUES ('2026-10-12', 15, 1, 0);`);
+    old.close();
+    const { fetch } = stubFetch(byQuery);
+    const lane = new BitqueryLane({ dir, config: config({ pointsPerDay: 25 }), fetch, clock });
+    assert.deepEqual(await lane.creatorFlow(TOKEN, CREATOR, { purpose: "evidence" }), { ok: false, failure: "budget" }, "15 of the share of 20 already counted as evidence");
+    assert.ok((await lane.creatorFlow(TOKEN, CREATOR)).ok, "an answer has the day's last 10");
+    lane.close();
+    // Opening it again is a no-op.
+    const again = new BitqueryLane({ dir, config: config({ pointsPerDay: 25 }), fetch, clock });
+    assert.equal(again.spentToday()!.points, 25);
+    again.close();
+  });
+
   it("never more than three at once, and never more than the rate allows", async () => {
     const releases: (() => void)[] = [];
     let open = 0;
@@ -437,11 +484,11 @@ describe("the lane — budget, cache, rate and cooldown", () => {
       await gate;
       return byQuery(c);
     });
-    // 40 a day, 32 for evidence; 20 already spent on the orchestrator's own answers.
+    // 40 a day, 32 for evidence; 20 already spent on child evidence.
     const lane = new BitqueryLane({ dir: tmp(), config: config({ pointsPerDay: 40 }), fetch, clock: fakeClock() });
     release();
-    assert.ok((await lane.tokenFlow(TOKEN)).ok);
-    assert.ok((await lane.v3Pools(TOKEN)).ok);
+    assert.ok((await lane.tokenFlow(TOKEN, { purpose: "evidence" })).ok);
+    assert.ok((await lane.v3Pools(TOKEN, { purpose: "evidence" })).ok);
     const C = "0x00000000000000000000000000000000000000c3";
     gate = new Promise<void>((r) => (release = r));
     const evidence = lane.tokenFlow(C, { purpose: "evidence" });

@@ -102,7 +102,9 @@ export const BITQUERY_LANE_DEFAULTS = Object.freeze({
   /**
    * Requests made as decision EVIDENCE for a child stop at this share of the
    * day's points, so a busy review can never starve the orchestrator's own
-   * answers of the rest.
+   * answers of the rest. Counted on evidence's own spend, not the day's: what
+   * answers spend never comes out of it (orchestrator-flow.ts
+   * answerReadingsPerDay keeps answers inside the rest).
    */
   evidenceShare: 0.8,
 });
@@ -627,6 +629,31 @@ export class BitqueryLane {
       CREATE TABLE IF NOT EXISTS spend (day TEXT PRIMARY KEY, points INTEGER NOT NULL DEFAULT 0, calls INTEGER NOT NULL DEFAULT 0, refused INTEGER NOT NULL DEFAULT 0);
       CREATE TABLE IF NOT EXISTS cooldown (id INTEGER PRIMARY KEY CHECK (id = 1), until_ms REAL NOT NULL DEFAULT 0, failures INTEGER NOT NULL DEFAULT 0);
       INSERT OR IGNORE INTO cooldown(id, until_ms, failures) VALUES (1, 0, 0);`);
+    this.ensureEvidenceColumn();
+  }
+
+  /**
+   * EVIDENCE'S OWN SPEND, beside the day's (`spend.evidence_points`). A lane
+   * file from before it counts all of each day it kept as evidence: that
+   * overstates evidence's spend for the rest of today, never understates it.
+   */
+  private ensureEvidenceColumn(): void {
+    const has = () => (this.db.prepare("PRAGMA table_info(spend)").all() as { name: string }[]).some((c) => c.name === "evidence_points");
+    if (has()) return;
+    try {
+      this.db.exec(`BEGIN IMMEDIATE;
+        ALTER TABLE spend ADD COLUMN evidence_points INTEGER NOT NULL DEFAULT 0;
+        UPDATE spend SET evidence_points = points;
+        COMMIT;`);
+    } catch (e) {
+      try {
+        this.db.exec("ROLLBACK");
+      } catch {
+        // Nothing was open to roll back.
+      }
+      // Another lane on the same directory added it first.
+      if (!has()) throw e;
+    }
   }
 
   close(): void {
@@ -746,16 +773,28 @@ export class BitqueryLane {
    * Reserve the query's points against today, atomically, or refuse. False on
    * a full day; null when the counter itself could not be used — and an
    * uncountable spend is refused too.
+   *
+   * EVIDENCE IS WEIGHED ON ITS OWN SPEND. Evidence fits when what evidence
+   * spent today stays inside its share AND the day's total inside the day;
+   * an answer only the second. So points answers spend never count toward
+   * evidence's share: answers first, then evidence, and evidence still gets
+   * its whole share as long as answers kept to the rest.
    */
   private reserve(points: number, purpose: LanePurpose): boolean | null {
-    const cap = purpose === "evidence" ? Math.floor(this.o.config.pointsPerDay * BITQUERY_LANE_DEFAULTS.evidenceShare) : this.o.config.pointsPerDay;
+    const dayCap = this.o.config.pointsPerDay;
+    const share = Math.floor(dayCap * BITQUERY_LANE_DEFAULTS.evidenceShare);
     try {
       const day = utcDay(this.clock.now());
       this.db.prepare("INSERT OR IGNORE INTO spend(day, points, calls, refused) VALUES (?, 0, 0, 0)").run(day);
-      const r = this.db.prepare("UPDATE spend SET points = points + ?, calls = calls + 1 WHERE day = ? AND points + ? <= ?").run(points, day, points, cap);
+      const r = purpose === "evidence"
+        ? this.db.prepare(`UPDATE spend SET points = points + ?, evidence_points = evidence_points + ?, calls = calls + 1
+            WHERE day = ? AND evidence_points + ? <= ? AND points + ? <= ?`).run(points, points, day, points, share, points, dayCap)
+        : this.db.prepare("UPDATE spend SET points = points + ?, calls = calls + 1 WHERE day = ? AND points + ? <= ?").run(points, day, points, dayCap);
       if (Number(r.changes) > 0) return true;
       this.db.prepare("UPDATE spend SET refused = refused + 1 WHERE day = ?").run(day);
-      this.sayOnce(`budget:${day}:${purpose}`, `the day's ${purpose === "evidence" ? "evidence share" : "points"} (${cap}) is spent; answering "budget" until ${day} ends (UTC)`);
+      this.sayOnce(`budget:${day}:${purpose}`, purpose === "evidence"
+        ? `the day's evidence share (${share}) or points (${dayCap}) are spent; answering evidence "budget" until ${day} ends (UTC)`
+        : `the day's points (${dayCap}) are spent; answering "budget" until ${day} ends (UTC)`);
       return false;
     } catch {
       this.sayOnce("counter", "the points counter could not be used; refusing to spend what it cannot count");

@@ -115,6 +115,13 @@ for the gateway and the IDE.
   SQLite under the fleet home, against the UTC day. A crash between the
   reservation and the request can overstate spend but never understate it.
   When the counter cannot be read or written, the call is refused.
+- **Evidence is counted on its own spend.** The day keeps two counts: every
+  point (`spend.points`) and child evidence's (`spend.evidence_points`).
+  Evidence fits only while its own count stays inside its 80% share and the
+  day's total inside the day; an answer only the second. So what answers
+  spend never comes out of evidence's share. A lane file from before this
+  column counts all of each day it kept as evidence, which overstates that
+  day's evidence and never understates it.
 - **Failed requests keep their reservation**, because the provider may bill
   them. Bitquery documents realtime queries at a flat 5 points per cube. The
   Trading cube's price is not documented, so it is assumed to be the same.
@@ -227,7 +234,8 @@ for the gateway and the IDE.
   so they have their own count per UTC day, taken before the read:
   `answerReadingsPerDay`, the points child evidence cannot spend divided by a
   whole reading (15 + 10 points), which is 200 with the defaults. Even if
-  answers spend all of it first, evidence keeps its 20,000. The orchestrator
+  answers spend all of it first, evidence keeps its 20,000: the lane weighs
+  evidence against its own count, not the day's. The orchestrator
   logs `xpost: answers may read onchain flow — up to N readings per UTC day`
   once, when the X poster is built.
 - **Early book.** `BitqueryLane.v3Pools(token)` returns PoolCreated

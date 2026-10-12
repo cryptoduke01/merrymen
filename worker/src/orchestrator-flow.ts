@@ -250,8 +250,10 @@ export async function flowFor(token: string, opts: { timeoutMs?: number } = {}):
  * day that child evidence can never spend (1 − evidenceShare), at a whole
  * reading's price (the flow query and the launcher's). Answers spend from the
  * whole day, so without this a run of strangers' tags — public, and polled
- * every minute — could eat into the share the trading reviews rely on. With
- * the defaults, 25,000 × 0.2 / 25 = 200 readings a day. Zero with the lane off.
+ * every minute — could eat into the share the trading reviews rely on: the
+ * lane weighs evidence against its own spend and the day's total, so answers
+ * kept to the rest leave evidence its whole share. With the defaults,
+ * 25,000 × 0.2 / 25 = 200 readings a day. Zero with the lane off.
  */
 export function answerReadingsPerDay(setup: BitqueryLaneSetup): number {
   if (setup.off || !setup.config) return 0;
