@@ -97,8 +97,10 @@ export type TagIntent =
    * shapes ("how's eth doing?", "thoughts on doge?", "$SOL today?": majorAsk),
    * read on CoinGecko's list first (2026-10-12). `query` is the name or
    * ticker, already a safe search (coinQuery). `fallback`: what the tag is if
-   * that coin is no major — a $ticker goes on as a coin of the chain; a word,
-   * as chat.
+   * that coin is no major — a $ticker goes on as a coin of the chain; a word
+   * is answered by nothing, unmatched or unread (red-team 2026-10-12: a word
+   * is no coin until CoinGecko matched it). Null exactly when the coin's
+   * place held a word, not a $ticker.
    */
   | { kind: "major"; query: string; fallback: { kind: "coin"; ticker: string | null; address: string | null; many?: true } | null }
   /**
@@ -124,10 +126,12 @@ export type TagIntent =
   | { kind: "vibe" }
   /**
    * Advice or a forecast asked for, however put ("should i buy pepe", "is X
-   * going up", "what should i buy", a price target, a major's shape with an
-   * entry in the coin's place, what's hot with a word more): a playful decline
-   * in code's casual words (xpost/casual.ts declineAnswers), naming and
-   * judging nothing. Never drafted, nothing looked up.
+   * going up", "what should i buy", a price target), and flagged so by
+   * tagCandidate (ReplyCandidate.advice): a playful decline in code's casual
+   * words (xpost/casual.ts declineAnswers), naming and judging nothing. Never
+   * drafted, nothing looked up. A major's shape with an entry in the coin's
+   * place, or what's hot with a word more, is never this kind: it is
+   * answered by nothing (red-team 2026-10-12).
    */
   | { kind: "advice" }
   /** The allowlist's plain "what model are you" (modelQuestion): code's own line, never a draft. */
@@ -688,12 +692,15 @@ export function classifyTag(text: string, o: { address?: string | null; advice?:
   if (address === null && marketAsk(t)) return { kind: "market" };
   // "WHAT'S HOT?", ON THE ALLOWLIST'S PLAIN SHAPES (hotAsk): an overview, no coin named.
   if (address === null && hotAsk(t)) return { kind: "hot" };
-  // And one with any word more is what to buy in other words: declined, never drafted (hotShaped).
-  if (hotShaped(t)) return unshowableName(t) ? { kind: "unanswered" } : { kind: "advice" };
-  // Beside a contract it is answered by nothing, as before.
-  if (address !== null && hotAsk(t)) return { kind: "unanswered" };
-  // A major's shape with an entry, a side, a level or a buy word in the coin's place: advice asked for, declined (majorAdviceAsk).
-  if (majorAdviceAsk(t)) return unshowableName(t) ? { kind: "unanswered" } : { kind: "advice" };
+  // And one with any word more is what to buy in other words, or beside a
+  // contract: answered by nothing, never drafted (hotShaped). NEVER CODE'S
+  // DECLINE (red-team review, 2026-10-12): only a tag tagCandidate flagged as
+  // advice is declined, and "what's hot with black people?", "what's trending
+  // for gay people?" got "haha, brave soul. direction from a bot? nah" here.
+  if (hotShaped(t) || (address !== null && hotAsk(t))) return { kind: "unanswered" };
+  // A major's shape with an entry, a side, a level or a buy word in the coin's
+  // place: advice asked for, answered by nothing for the same reason (majorAdviceAsk).
+  if (majorAdviceAsk(t)) return { kind: "unanswered" };
   // A COIN BY NAME OR TICKER, ON THE ALLOWLIST'S PLAIN SHAPES (majorAsk): read
   // on CoinGecko's list first. What the tag would otherwise be is kept: a
   // $ticker that turns out to be no major goes on as a coin of the chain,
@@ -2078,18 +2085,27 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
           case "major": {
             const found = await majorBundle(i.query);
             if (found.kind === "major") return { facts: found.facts, figures: found.figures, major: found.read, lookups, notes };
-            // CoinGecko could not be read: nothing at all, never a guess on the
-            // chain's own coins (a "$SOL" there is not the Solana asked about).
-            if (found.kind === "unread") return { facts: [], lookups, notes };
-            // No major by that name or ticker: a $ticker goes on as a coin of the chain, a word as chat.
-            // BUT NEVER A COIN'S PLACE THAT HELD MORE THAN ONE WORD AND MATCHED
-            // NOTHING (red-team 2026-10-12): "thoughts on aping eth" was chat,
-            // and "plenty of room left to run" went out under it. Fail closed.
-            if (!i.fallback && i.query.includes(" ")) {
+            // A WORD IS NO COIN UNTIL COINGECKO MATCHED IT (red-team review,
+            // 2026-10-12). "what do you think of black people?", "thoughts on gay
+            // marriage?", "thoughts on trans kids?" are a major's shape with a
+            // phrase in the coin's place: with coingecko unread, code's "coingecko
+            // is unavailable for that coin" went up under each, calling a group of
+            // people a coin. Only a $ticker is a coin unread (its no-read line);
+            // a word, unmatched or unread, is answered by nothing.
+            if (found.kind === "unread") {
+              if (i.fallback) return { facts: [], lookups, notes };
+              notes.push("major-unread-word");
+              return { facts: [], unanswered: true, lookups, notes };
+            }
+            // No major by that name or ticker: a $ticker goes on as a coin of the chain.
+            // NEVER A WORD THAT MATCHED NOTHING (red-team 2026-10-12): "thoughts
+            // on aping eth" was chat, and "plenty of room left to run" went out
+            // under it; "what do you think of immigrants?" was chat too, and "they
+            // should go back home" went out. Not a coin, not chat: nothing.
+            if (!i.fallback) {
               notes.push("major-unmatched");
               return { facts: [], unanswered: true, lookups, notes };
             }
-            if (!i.fallback) return { facts: [], intent: "chat", lookups, notes };
             break;
           }
         }

@@ -1608,8 +1608,16 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       const author = comment.author;
       const authorSherwood = !!author && (sherwoodMentioned(author.username) || sherwoodMentioned(author.name));
       const namedClean = !!author && !authorSherwood && !modelNamed(author.username) && !modelNamed(author.name);
+      // A WORD IN A MAJOR'S PLACE, WITH NOTHING TO READ IT ON (red-team review,
+      // 2026-10-12): research off, "what do you think of black people?" got
+      // "coingecko is unavailable for that coin", a group of people called a
+      // coin. A word is no coin until CoinGecko matched it; only a $ticker
+      // (its fallback) gets the no-read line.
+      const unreadWord = classified.kind === "major" && classified.fallback === null && research === null;
+      // Advice that tagCandidate did not flag is no decline's (and never a draft's): nothing.
+      const unflaggedAdvice = classified.kind === "advice" && candidate.advice !== true;
       const asked: TagIntent = sherwoodTagged || authorSherwood || (classified.kind === "model" && (candidate.otherHandles || !namedClean))
-        || (greeting && (classified.kind !== "chat" || candidate.otherHandles)) ? { kind: "unanswered" } : classified;
+        || (greeting && (classified.kind !== "chat" || candidate.otherHandles)) || unreadWord || unflaggedAdvice ? { kind: "unanswered" } : classified;
       // SHERWOOD IN ANY FORM, OR A MODEL QUESTION OFF THE ALLOWLIST, is
       // answered by nothing: the model line under "sherwood TGE soon?" reads
       // as Merrymen confirming a token, and a draft is never asked about the
@@ -1737,31 +1745,30 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // NEVER DRAFTED, AS RESEARCH READ IT (red-team 2026-10-12): a major's
       // shape whose coin's place held more than a coin and matched none
       // ("thoughts on eth guys") was drafted as chat, and "plenty of room left
-      // to run" went out. It is declined in code's words now (2026-10-12),
-      // never drafted, and the allowances taken for a draft go back.
-      if (researchUnanswered && !undrafted) {
-        await returnAllowance(shared, answerKey, at());
-        await returnAllowance(shared, `llm:${utcDay(nowMs)}`, at());
-      }
-      // AND NEVER UNDER A NAME THE HOUSE WOULD NEVER SHOW (red-team 2026-10-12):
-      // research's "unanswered" was declined with no unshowableName check, so
-      // "thoughts on trump coin?" got "heh, nice try. your decisions stay
-      // yours". classifyTag answers such a tag by nothing before research now;
-      // this holds it here too, a skipped row as before the decline.
-      if (researchUnanswered && unshowableName(candidate.text)) {
-        bump("answer-research-unshowable");
+      // to run" went out. NOR DECLINED (red-team review, 2026-10-12): code's
+      // playful decline here put "haha, brave soul. direction from a bot? nah"
+      // under "what do you think of black people?", "thoughts on gay
+      // marriage?" and "thoughts on trans kids?", with no model call at all.
+      // A skipped row, as before the decline, and the allowances taken for a
+      // draft go back.
+      if (researchUnanswered) {
+        if (!undrafted) {
+          await returnAllowance(shared, answerKey, at());
+          await returnAllowance(shared, `llm:${utcDay(nowMs)}`, at());
+        }
+        bump("answer-unanswered");
+        const skippedAt = at();
         const id = await schedulePost(shared, {
-          tenant: account.tenant, xUserId: account.xUserId, kind: "answer", dedupeKey, body: "", coin: null, decisionId: null, dueAtMs: at(), nowMs: at(),
+          tenant: account.tenant, xUserId: account.xUserId, kind: "answer", dedupeKey, body: "", coin: null, decisionId: null, dueAtMs: skippedAt, nowMs: skippedAt,
           replyToTweetId: comment.id, replyRootTweetId: comment.id, replyAuthorId: comment.authorId, status: "skipped", reason: "research:unanswered",
         });
         return id === null ? null : { body: null };
       }
-      if (researchUnanswered) {
-        bump("answer-research-declined");
-        figures = null;
-      }
+      // CODE'S DECLINE ONLY UNDER WHAT TAGCANDIDATE FLAGGED AS ADVICE (red-team
+      // review, 2026-10-12): the advice screens read the tag itself; any other
+      // way to the decline put a joke under a question about people.
       const casualLines = casualKind === "vibe" ? vibeAnswers(comment.id, facts.style, lineOpts)
-        : casualKind === "advice" || researchUnanswered ? declineAnswers(comment.id, facts.style, lineOpts) : [];
+        : casualKind === "advice" && candidate.advice === true ? declineAnswers(comment.id, facts.style, lineOpts) : [];
       if (casualLines.length) bump(`answer-casual-${casualKind ?? "advice"}`);
       // NO MODEL WORDS BESIDE A LINE OF COINS (red-team 2026-10-12): the gate
       // read a "what's hot?" draft before code put "$CHUMP 24h +41.2%" after

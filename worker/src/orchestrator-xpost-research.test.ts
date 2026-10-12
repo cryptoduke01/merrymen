@@ -1184,13 +1184,14 @@ describe("majors: a coin by name or ticker, read on coingecko's list (2026-10-12
     }
   });
 
-  it("a major's shape with an entry, a side, a level or a buy word in the coin's place is never drafted or looked up: declined in code's words (red-team 2026-10-12)", () => {
+  it("a major's shape with an entry, a side, a level or a buy word in the coin's place is never drafted, looked up or declined: answered by nothing (red-team 2026-10-12)", () => {
     // Each was read as the major "aping eth", "eth here", …, found no exact match, and was drafted as chat at fbcf8756.
-    // Answered by nothing until 2026-10-12; now advice, answered by code's decline (xpost/casual.ts), never a draft.
+    // Declined in code's words at a964a74c, a way to the decline that put a joke under questions about people
+    // (red-team 2026-10-12): only a tag tagCandidate flagged as advice is declined; these get nothing, as at 5f9ec3b2.
     for (const text of ["thoughts on aping eth", "thoughts on eth here", "thoughts on eth bottom", "thoughts on eth long", "how's eth dip doing",
       "thoughts on loading eth", "what about eth entry", "thoughts on eth leverage", "eth bottom price"]) {
       assert.equal(majorAsk(text), null, text);
-      assert.equal(classifyTag(text).kind, "advice", text);
+      assert.equal(classifyTag(text).kind, "unanswered", text);
     }
     for (const text of ["thoughts on eth?", "how's shiba inu doing?", "how's eth doing today?"]) assert.equal(majorAdviceAsk(text), false, text);
   });
@@ -1201,10 +1202,11 @@ describe("majors: a coin by name or ticker, read on coingecko's list (2026-10-12
     assert.equal(b.unanswered, true);
     assert.deepEqual(b.facts, []);
     assert.ok(b.notes.includes("major-unmatched"));
-    // One word that is no major is still chat, as before.
+    // Nor one word that is no major (red-team 2026-10-12): "what do you think of immigrants?" was chat, and "they should go back home" went out.
     const one = await createXResearch({ majors: majorsFake().reader, now: () => Date.now() }).gather(input({ kind: "major", query: "wojak", fallback: null }));
-    assert.equal(one.unanswered, undefined);
-    assert.equal(one.intent, "chat");
+    assert.equal(one.unanswered, true);
+    assert.equal(one.intent, undefined);
+    assert.ok(one.notes.includes("major-unmatched"));
   });
 
   it("is read as a major, keeping what the tag would otherwise be: a $ticker a coin of the chain, a word chat", () => {
@@ -1247,7 +1249,7 @@ describe("majors: a coin by name or ticker, read on coingecko's list (2026-10-12
     assert.ok(b.notes.includes("major"));
   });
 
-  it("a copycat, the unranked or a coin past the cap is no major: a $ticker goes on as a coin of the chain, a word as chat", async () => {
+  it("a copycat, the unranked or a coin past the cap is no major: a $ticker goes on as a coin of the chain, a word gets nothing", async () => {
     // "$WOJAK": #1450 on coingecko, no major — the chain's own resolver takes it, as before.
     const resolved: string[] = [];
     const w = majorsFake();
@@ -1257,10 +1259,10 @@ describe("majors: a coin by name or ticker, read on coingecko's list (2026-10-12
     assert.deepEqual(resolved, ["WOJAK"]);
     assert.equal(wojak.intent, "coin");
     assert.equal(wojak.figures, undefined);
-    // "how's btc2 doing": no major by that name, and no ticker: chat, nothing more looked up.
+    // "how's btc2 doing": no major by that name, and no ticker: a word is no coin until coingecko matched it, so nothing at all (red-team 2026-10-12).
     const c = majorsFake();
     const btc2 = await createXResearch({ majors: c.reader, now: () => Date.now() }).gather(input({ kind: "major", query: "btc2", fallback: null }));
-    assert.deepEqual(btc2, { facts: [], intent: "chat", lookups: 1, notes: ["major-none"] });
+    assert.deepEqual(btc2, { facts: [], unanswered: true, lookups: 1, notes: ["major-none", "major-unmatched"] });
     // A market that no longer ranks inside the cap, or is another coin's row: no major either.
     for (const market of [{ ...ETH_MARKET, rank: 201 }, { ...ETH_MARKET, rank: null }, { ...ETH_MARKET, id: "ethereum-classic" }]) {
       const late = majorsFake({ markets: { ethereum: market } });
@@ -1464,14 +1466,14 @@ describe("what's hot: the chain's trending coins past the fleet's floors, fomo's
     assert.equal(ownCoinTicker("ZAPX", []), false);
   });
 
-  it("a what's-hot question with a word more is never drafted or looked up: what to buy in other words, declined in code's words (red-team 2026-10-12)", () => {
+  it("a what's-hot question with a word more is never drafted, looked up or declined: answered by nothing (red-team 2026-10-12)", () => {
     // Each was chat at fbcf8756, drafted, and a draft naming coins went out.
-    // Answered by nothing until 2026-10-12; now advice, answered by code's decline (xpost/casual.ts), never a draft.
+    // Declined at a964a74c, which put "haha, brave soul" under "what's hot with black people?" (red-team 2026-10-12): nothing, as at 5f9ec3b2.
     for (const text of ["what's hot? need a new bag", "what's moving? got cash", "what's hot? looking for my next one", "what's trending? looking to rotate",
       "what's hot? got some dry powder", "what's pumping? bags are empty", "what's moving? i have eth to deploy", "what's hot? wallet's ready",
       "what's hot? fresh money here", "what's hot? new to this", "got cash, what's hot?", "top gainers? i'm ready", "what's the meta, need a play"]) {
       assert.equal(hotShaped(text), true, text);
-      assert.equal(classifyTag(text).kind, "advice", text);
+      assert.equal(classifyTag(text).kind, "unanswered", text);
     }
     for (const text of ["what's hot?", "gm, what's hot today?", "what's moving on robinhood today", "what are people talking about?"]) {
       assert.equal(hotShaped(text), false, text);
@@ -1735,7 +1737,9 @@ describe("answer anything: every tag past the screens has a lane, and silence on
       // e) advice or a forecast, however asked: code's playful decline.
       ["should i buy pepe", "advice"], ["what should i buy", "advice"], ["is pepe going up", "advice"], ["pepe price target?", "advice"], ["is pepe a good investment", "advice"],
       ["will eth pump", "advice"], ["are you bullish on pepe?", "advice"], ["wen moon for $WIF", "advice"], ["is $pepe going to moon?", "advice"],
-      ["thoughts on aping eth", "advice"], ["what's hot? need a new bag", "advice"], ["how's the market, should i buy?", "advice"],
+      ["how's the market, should i buy?", "advice"],
+      // ...never a tag tagCandidate did not flag (red-team 2026-10-12): an entry in a major's place, what's hot with a word more.
+      ["thoughts on aping eth", "unanswered"], ["what's hot? need a new bag", "unanswered"], ["what's hot with black people?", "unanswered"],
       // ...but a shill or an order asks nothing, and advice about its own buying is no decline's (red-team 2026-10-12).
       ["buy pepe now", "not-asked"], ["$pepe to the moon, 100x incoming", "not-asked"], ["will you buy more pepe?", "advice-own-buying"],
       // f) still refused, exactly as before: sherwood, the model question off its list, a steer, another handle, a stop, another script, a link.
