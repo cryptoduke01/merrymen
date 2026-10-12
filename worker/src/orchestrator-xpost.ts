@@ -52,7 +52,7 @@ import { admitXPost, merrymenMentioned, moneySaid, namedIn, tickerRefusal, vocab
 import { ACTIVE_CADENCE, ANSWER_GAP_MS, ANSWER_STALE_MS, ANSWERS_PER_DAY, REPLY_STALE_MS, STANDARD_CADENCE, coinOf, hash32, introState, planPosts, replyDueAt, sendDecision, type PlanCadence, type PlanClock, type PlanIntent } from "./xpost/planner";
 import { APP_PAUSE_KEY, APP_PAUSE_MS, CREDITS_PAUSE_MS, PAUSE_KEY, readReplyComments, sendOne, type SendOutcome } from "./xpost/sender";
 import { isAnswerOptOut, isReplyOptOut, replyCandidate, tagCandidate, withNoticeAdded, withoutReplyOptOut } from "./xpost/replies";
-import { asksAboutACoin, coinTalkIn, nameLikeWords, textWords, unknownWordIn } from "./xpost/words";
+import { asksAboutACoin, coinTalkIn, marketTalkIn, nameLikeWords, textWords, unknownWordIn } from "./xpost/words";
 import { activeTenantsOf, repliesAllowedFor, repliesScopeOf } from "./xpost/scope";
 import {
   ANSWER_LOOKED_UP,
@@ -1881,8 +1881,11 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // about its trading, or its own name (unknownWordIn). Market words or
       // none: "wif has been strong lately" and "bonk is where the action is"
       // named coins with none of them.
+      // NOR THE MARKET AT ALL (red-team 2026-10-12): "crypto is the future, get in
+      // while it's early" and "the chain is about to get busy" were posted as
+      // chat, handed nothing (xpost/words.ts marketTalkIn).
       const unlookedCoin = !coded && verdict?.ok === true && !handed && !told
-        && (coinTalkIn(withoutReplyOptOut(verdict.text), f.name) || unknownWordIn(withoutReplyOptOut(verdict.text), f.name));
+        && (coinTalkIn(withoutReplyOptOut(verdict.text), f.name) || unknownWordIn(withoutReplyOptOut(verdict.text), f.name) || marketTalkIn(withoutReplyOptOut(verdict.text)));
       // CHAT IS NEVER SILENCE BY DEFAULT (the owner's ask, 2026-10-12): a chat
       // draft refused only for how it was put (CHAT_FALLBACK_REASONS: a
       // repeat, its length, a stock deflection, a model's note, its

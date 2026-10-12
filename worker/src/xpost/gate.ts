@@ -953,7 +953,14 @@ const ANSWER_PREDICTION = new RegExp(
     String.raw`|room\s+(?:left\s+)?to\s+(?:run|grow|go|climb|move|rise|rally)|(?:looks?|looking|is|it'?s|seems?|getting|still)\s+cheap|cheap\s+(?:here|now|right\s+now|at|from|these|again)` +
     String.raw`|lower\s+(?:spot|entry|entries|price|prices|level|levels)|(?:better|good|nice|great)\s+(?:spot|entry|entries|price|level)|patience\s+pays` +
     String.raw`|(?:i'?d|i\s+would|better\s+to|just|might|may|i'?ll|i\s+will)\s+wait\b|wait(?:ing)?\s+for\s+(?:a|an|the)\s+(?:lower|better|cheaper|dip|pull\s?back|entry|bounce|drop|retrace|reset|flush|break|breakout)` +
-    String.raw`|(?:bounc\w*|recover\w*|rally\w*|rebound\w*|climb\w*|higher|lower|run|runs|running)\s+from\s+here|from\s+here\s+(?:on|out))\b`,
+    String.raw`|(?:bounc\w*|recover\w*|rally\w*|rebound\w*|climb\w*|higher|lower|run|runs|running)\s+from\s+here|from\s+here\s+(?:on|out)` +
+    // THE MARKET'S FUTURE IN OTHER WORDS (red-team 2026-10-12): under "how are
+    // you feeling today?", "crypto is the future, get in while it's early",
+    // "the next few months will be huge for crypto", "crypto is about to have a
+    // huge year", "plenty of room left", "the perfect time to be in crypto",
+    // "the best is yet to come, stick around" and "in a sweet spot" were posted.
+    String.raw`|about\s+to|huge\s+(?:year|month|week|run|cycle)|next\s+(?:few|couple(?:\s+of)?)\s+(?:days|weeks|months|years)|best\s+is\s+yet\s+to\s+come|plenty\s+of\s+room` +
+    String.raw`|perfect\s+(?:time|moment)|get\s+in\s+(?:while|before|early|now)|sweet\s+spot|stick\s+around)\b`,
   "i",
 );
 

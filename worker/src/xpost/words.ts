@@ -176,26 +176,28 @@ const CHAT_WORDS: ReadonlySet<string> = new Set((
   // named after (words.test.ts holds the list to that). Still read only for chat
   // handed nothing (unknownWordIn), beside coinTalkIn, never by the gate's own
   // known-word checks.
-  "spin spun join joined joining build builds building make makes making laugh laughs smile smiles enjoy enjoys miss missed scroll scrolling " +
+  "spin spun build builds building make makes making laugh laughs smile smiles enjoy enjoys miss missed scroll scrolling " +
   "relax relaxing rest resting stick sticking learn learns grow growing improve improving ponder pondering notice noticing count counting " +
   "compute computing process processing crunch crunching tweak tweaking ship shipping skip skipped skipping blink blinking " +
   "chill chilled chilling mellow cozy humble nerdy geeky sharp smooth wise clever awake focused grateful thankful " +
   "nervous chaotic messy tidy complex tricky digital robotic human humans artificial endless constant nightly lively friendly unbothered relatable " +
   "joke jokes humor humour pun puns punchline sense walks robot robots bots code coder coding software program programs algorithm algorithms logic " +
-  "screens internet timeline feed feeds threads posts company crew family home office desk corner lane lanes path road ride journey " +
+  "screens internet timeline feed feeds threads posts company crew family home office desk corner lane lanes path road journey " +
   "adventure game games mystery ideas mood moods energy spirit spirits heart circuits wires electricity battery chaos discipline routine " +
   "edge world past present history memory shift shifts hours seconds weeks months years forever always sometimes " +
   "honestly basically literally genuinely seriously truly mostly nearly barely clearly surely certainly hopefully thankfully " +
   "pretty plenty lot lots kind sort bunch couple whole half rest instead either neither otherwise besides meanwhile anyway anyhow " +
   "yourself myself thanks welcome cheers glad nice sweet neat awesome solid legend legends champ ha haha hah heh hehe lol lmao oof ooh ahh hmm yay nah yep yup sure " +
-  "panic panicking obviously biased party laid").split(/\s+/));
+  "panic panicking obviously biased laid").split(/\s+/));
 // NOT, SINCE THE RED-TEAM REVIEW OF 2026-10-12: crypto, community, future,
 // proud, silly, goofy, cheeky, tune, tuning. With them, "merrymen is the
 // future of crypto", "cooking something big for the community, stay tuned",
 // "pretty proud" of a backing it does not have and "you seem pretty silly"
 // were posted as chat. A draft that says one now names a word it was handed
 // nothing for, and is not posted; the gate refuses the claims themselves
-// (gate.ts ANSWER_HOUSE_CLAIM).
+// (gate.ts ANSWER_HOUSE_CLAIM). Nor ride, join, joined, joining or party:
+// "the chain is about to get busy, perfect time to join" and "the smart crew
+// is joining" were posted as chat.
 
 /**
  * A WORD AN ANSWER HANDED NOTHING MAY NOT SAY (red-team 2026-10-12). The rule
@@ -215,6 +217,27 @@ export function unknownWordIn(text: unknown, ownName = ""): boolean {
   if (typeof text !== "string") return false;
   const own = new Set(tagWords(String(ownName ?? "")));
   return nameLikeWords(text).some((w) => !own.has(w) && !answerWord(w) && !listedIn(CHAT_WORDS, w));
+}
+
+/**
+ * THE MARKET, IN AN ANSWER HANDED NOTHING (red-team review, 2026-10-12).
+ * Under "how are you feeling today?" and "how do you feel about crypto right
+ * now?", "crypto is the future, get in while it's early", "the next few months
+ * will be huge for crypto" and "the chain is about to get busy, perfect time
+ * to join" were posted: a read of the market nobody made, and a call to buy.
+ * Chat has nothing looked up to say about the market, so a drafted answer
+ * handed no research and told none of its buys that speaks of crypto, the
+ * chain, the market, a big coin by name or its direction is not posted, in
+ * any words around it. The orchestrator reads it beside coinTalkIn and
+ * unknownWordIn. Fail closed: "crypto twitter is wild today" costs one chat
+ * answer.
+ */
+const MARKET_MENTION: ReadonlySet<string> = new Set(("crypto cryptos chain chains onchain blockchain blockchains market markets marketcap mcap " +
+  "bitcoin btc eth ether ethereum sol solana alt alts altcoin altcoins altseason defi nft nfts web memecoin memecoins bull bulls bear bears " +
+  "bullish bearish rally rallies pump pumps pumping dump dumps dumping moon mooning dip dips ath cycle cycles price prices").split(" "));
+export function marketTalkIn(text: unknown): boolean {
+  if (typeof text !== "string") return false;
+  return tagWords(text).some((w) => MARKET_MENTION.has(w));
 }
 
 /**

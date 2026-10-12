@@ -1242,6 +1242,15 @@ describe("sherwood with a symbol written for one of its letters is still sherwoo
       assert.equal(sherwoodMentioned(s), false, s);
     }
   });
+  it("an answer never forecasts the market in other words: about to, a huge year, the next few months, the perfect time, get in while, stick around (red-team 2026-10-12)", () => {
+    const answer: Partial<XGateCtx> = { kind: "reply", answer: true, agentName: "Alan Al Dale", mode: "live" };
+    for (const d of ["crypto is the future, get in while it's early", "i'd stay patient, crypto has plenty of room left", "honestly it's the perfect time to be in crypto",
+      "honestly the best is yet to come for crypto, stick around", "the next few months will be huge for crypto", "crypto is about to have a huge year honestly",
+      "the chain is about to get busy, perfect time to join", "crypto is in a sweet spot honestly, i'd stick around", "feeling good, the next few weeks look solid for crypto"]) {
+      assert.equal(reason(`${d}. Say stop to opt out.`, answer), "hype", d);
+    }
+    assert.equal(reason("doing good, just watching the tape and keeping it chill. Say stop to opt out.", answer), "ok");
+  });
   it("a drafted answer never claims for the house, teases, judges the asker or boasts; code's own lines are not read so (red-team 2026-10-12)", () => {
     const drafted: XGateCtx = { kind: "reply", answer: true, drafted: true, agentName: "Alan Al Dale", mode: "live", coins: [], recentOwn: [], recentFleet: [] };
     const code: XGateCtx = { ...drafted, drafted: undefined };

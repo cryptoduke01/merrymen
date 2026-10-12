@@ -3655,3 +3655,24 @@ test("no friendly line under a tag that claims Alan bought a coin or shills one,
   // Every opener only greets or thanks.
   for (const opener of CHAT_SLOTS[0]) assert.doesNotMatch(opener, /\b(?:right on|fair enough|noted|agree|true|love|word|good one|energy)\b/, opener);
 });
+
+test("a chat draft handed nothing never forecasts the market or tells anyone to get in, in any words, research on or off (red-team 2026-10-12)", async (t) => {
+  // Each POSTED word for word at 58ba9fd0; each refused (gate:unlooked-coin) at the base commit.
+  const feeling = ["crypto is the future, get in while it's early.", "i'd stay patient, crypto has plenty of room left.", "honestly it's the perfect time to be in crypto.",
+    "honestly the best is yet to come for crypto, stick around.", "the next few months will be huge for crypto.", "crypto is about to have a huge year honestly.",
+    "the chain is about to get busy, perfect time to join.", "crypto is in a sweet spot honestly, i'd stick around.", "feeling good, the next few weeks look solid for crypto.",
+    "the timeline is panicking but the smart crew is joining."];
+  const cases: [string, string[]][] = [["how are you feeling today?", feeling],
+    ["how do you feel about crypto right now?", ["the chain is about to get busy, perfect time to join.", "the timeline is panicking but the smart crew is joining."]]];
+  for (const on of [false, true]) {
+    for (const [text, drafts] of cases) {
+      for (const draft of drafts) {
+        const w = await world(t, { ...ALAN, ...(on ? { env: RESEARCH_ON, research: fakeResearch().research } : {}), answer: `${draft} Say stop to opt out.` });
+        w.setInbox([alanTag("100000000000000702", text)]);
+        const r = await w.step();
+        assert.deepEqual(w.sends, [], `${text}: ${draft}`);
+        assert.doesNotMatch(r.log ?? "", /answer-chat-fallback 1/, `${text}: ${draft}`);
+      }
+    }
+  }
+});

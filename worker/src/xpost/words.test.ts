@@ -4,7 +4,7 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { coinTalkIn, unknownWordIn } from "./words";
+import { coinTalkIn, marketTalkIn, unknownWordIn } from "./words";
 
 describe("a coin named in a draft's words", () => {
   it("a name-like word beside market talk is a coin named; everyday chat and the agent's own name are not", () => {
@@ -61,6 +61,19 @@ describe("a coin named in a draft's words", () => {
       "merrymen is the future of crypto, everyone will use it.", "merrymen built me, best team in crypto, they never miss.", "honestly you seem pretty silly, fren.",
       "lol, that question is goofy, kinda like you.", "hmm, cheeky question."]) {
       assert.ok(unknownWordIn(draft, "Alan Al Dale"), draft);
+    }
+  });
+
+  it("chat handed nothing never speaks of the market: crypto, the chain, the market, a big coin or its direction (red-team 2026-10-12)", () => {
+    for (const draft of ["crypto is the future, get in while it's early.", "the chain is about to get busy, perfect time to join.", "the market looks sleepy today.",
+      "bitcoin feels strong.", "honestly feeling bullish.", "the timeline is panicking but the smart crew is joining."]) {
+      assert.ok(marketTalkIn(draft) || unknownWordIn(draft, "Alan Al Dale"), draft);
+    }
+    for (const draft of ["crypto is the future, get in while it's early.", "the chain is about to get busy.", "the market looks sleepy today.", "bitcoin feels strong."]) {
+      assert.equal(marketTalkIn(draft), true, draft);
+    }
+    for (const draft of ["doing good, just chilling and watching the tape, honestly a pretty mellow day.", "heh, the punchline is i never sleep.", "", null]) {
+      assert.equal(marketTalkIn(draft), false, String(draft));
     }
   });
 });
