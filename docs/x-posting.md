@@ -218,7 +218,7 @@ for the connected user id. It plans at most once a minute and sends every pass.
 | buy | `buy:<decisionId>` | a landed or paper BUY after consent, fresh (under two hours old), due at max(fill + 10–40 minutes, now + ten minutes); only for a coin with a clean display name or an all-letters ticker (never an address-derived id) | why it bought, in everyday words (the glosses are the idea, not wording to reuse), naming the coin, paper said out loud, its own feed words never repeated; how it opens (the reason, the coin's name, how it felt, or one short sentence) is drawn per decision, and it is asked not to open with "picked up", nor to write "entry" or "just bought" (the gate refuses both as alerts) |
 | casual | `casual:<tenant>:<localDay>` | at most one per owner-local day, planned at a per-tenant slot in the owner's afternoon (12:00–20:00 local; 14:00–22:00 UTC when no zone is known) and due 20–45 minutes later; about three days in ten none | a passing thought in its own voice, riffing (never copying, never replying to, and naming what it means rather than "they" or "that") on a seed from an off-trading subject — never food, sleep, weather, weekend, travel or hobbies, and never a take about a body in the world (reading in bed, a smell, a walk, a seat in the stands, a thing in a hand), which invite claims of a body. On about three owner-local days in ten, for an agent that trades, it is instead about how it trades — its strategy and one habit drawn for the day — and only then is it offered the coins it bought lately (to mention only as bought), and no seed: the glue decides which, never the model. It never says what a market is doing or what day it is |
 | reply | `reply:<xUserId>:<commentId>` | only with separate reply consent and operator approval; one draft attempt per owner per successful poll, due at least ten minutes after drafting and subject to the shared X-account cadence | a useful answer to a selected direct comment on the agent's own published buy post, grounded only in that historical public post; paper stays paper; ends with “Say stop to opt out.” |
-| answer | `answer:<xUserId>:<mentionId>` | only for an active owner's agent (see "Active owners"), with replies in scope and reply consent; up to three drafts per poll; due when drafted, with no review window, and sent at any hour on the next pass that read the mentions; one minute apart, 24 a day per X account, at most two per person per rolling day, outside the posting cadence | a short answer to a post that tagged it (a comment on its own post included), from public facts and what it already posted; ends with “Say stop to opt out.” |
+| answer | `answer:<xUserId>:<mentionId>` | only for an active owner's agent (see "Active owners"), with replies in scope and reply consent; up to three drafts per poll; due when drafted, with no review window, and sent at any hour, on the pass that read the tag (a second send sweep after drafting) or a later pass that read the mentions again; one minute apart, 24 a day per X account, at most two per person per rolling day, outside the posting cadence | a short answer to a post that tagged it (a comment on its own post included), from public facts and what it already posted; ends with “Say stop to opt out.” |
 
 Cadence limits — all per X ACCOUNT, across every owner posting on it (one X
 account connected by two owners keeps one cadence, though each owner's agent
@@ -519,9 +519,20 @@ the mention itself. They go out **right away**:
   fleet's `MERRYMEN_XPOST_REPLY_POLLS_PER_DAY`. Active agents are polled
   first within each pass's two polls, so the fleet cannot starve them and
   they cannot spend the fleet's allowance. Setting
-  `MERRYMEN_XPOST_REPLY_POLLS_PER_DAY=0` still turns every poll off. An answer
-  is sent on the next pass that read the mentions again, so opt-outs are
-  always handled first. In practice that is within about fifteen seconds.
+  `MERRYMEN_XPOST_REPLY_POLLS_PER_DAY=0` still turns every poll off.
+- **Sent on the pass that read the tag.** An answer is only ever sent on a
+  pass that has just read that X account's mentions successfully, so opt-outs
+  are always handled first: every STOP in the batch is recorded, and any
+  answer still waiting for that person cancelled, before anything is drafted.
+  So once a pass has read the mentions and drafted its answers, a second,
+  short send sweep sends them on that same pass. It covers only `answer` rows
+  for X accounts whose mentions this pass read, and goes through the normal
+  send path: the answers' gap, their day allowance, the fleet ceiling, the
+  credit and app pauses (read again first), `sendDecision` and `claimPost`.
+  An answer for an account whose read failed, or was not due, on that pass
+  waits for a later pass that reads the mentions again, as before. In
+  practice a tag is answered within about fifteen seconds, plus the time to
+  draft it.
 - **A read that fails on what X sent waits thirty minutes.** A malformed
   page, or a backlog of more than the 800 mentions X pages back to (after an
   outage or a credits pause while the agent is tagged a lot), fails the read
