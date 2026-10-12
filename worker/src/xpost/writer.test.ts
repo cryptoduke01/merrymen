@@ -997,6 +997,18 @@ describe("an active agent's answers and conversation memory", () => {
     }
   });
 
+  it("sherwood spelled in letters code cannot read is still sherwood: Lisu, Armenian, IPA, a Greek capital (red-team 2026-10-12)", () => {
+    // The reproduced spellings: Lisu (U+A4E2…), a hooked d (U+0257), Armenian ho (U+0570), a hooked h (U+0266),
+    // a fishhook r (U+027E), a turned m (U+026F), and the Greek capital Eta (U+0397) that lowercased to "n".
+    for (const asked of ["ꓢꓧꓰꓣꓪꓳꓳꓓ TGE soon? is it the merrymen token?", "sherwooɗ TGE soon?", "is sհerwood merrymen's token?", "sɦerwood", "sheɾwood", "sherɯood",
+      "is SΗERWOOD getting a token?", "is SΗΕRWΟΟD getting a token?", "is ᏚᎻᎬᎡᎳᎾᎾᎠ getting a token?"]) {
+      assert.equal(sherwoodMentioned(asked), true, asked);
+      assert.equal(answerQuestion(asked), null, `${asked}: never a draft's question`);
+    }
+    // Plain English, the room's shrug and an accent are still read as what they are.
+    for (const plain of ["what model are you", "café talk, how's your day?", "meh ¯\\_(ツ)_/¯"]) assert.equal(sherwoodMentioned(plain), false, plain);
+  });
+
   it("a trade-talk casual post may pick up a theme it answered, and only then", () => {
     const talked = ["people keep asking how i pick launches, honestly it's mostly patience"];
     assert.match(all(casualPrompt({ ...CASUAL, tradeTalk: true, talked })), /answering people/);

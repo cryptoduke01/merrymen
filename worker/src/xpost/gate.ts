@@ -307,7 +307,20 @@ const LOOKALIKE: Readonly<Record<string, string>> = Object.freeze({
   α: "a", δ: "d", ε: "e", η: "n", ι: "i", κ: "k", ν: "v", ο: "o", ρ: "p", ς: "s", τ: "t", υ: "u", χ: "x", ω: "w",
   а: "a", в: "b", е: "e", к: "k", м: "m", н: "h", о: "o", р: "p", с: "c", т: "t", у: "y", х: "x", ѕ: "s", і: "i", ј: "j", һ: "h", ԁ: "d", ԝ: "w",
   ᴀ: "a", ʙ: "b", ᴄ: "c", ᴅ: "d", ᴇ: "e", ɢ: "g", ʜ: "h", ɪ: "i", ᴊ: "j", ᴋ: "k", ʟ: "l", ᴍ: "m", ɴ: "n", ᴏ: "o", ᴘ: "p", ʀ: "r", ꜱ: "s", ᴛ: "t", ᴜ: "u", ᴠ: "v", ᴡ: "w", ʏ: "y", ᴢ: "z",
-  ø: "o", ł: "l", đ: "d", ð: "d", ħ: "h", ı: "i", ɑ: "a", ɡ: "g",
+  ø: "o", ł: "l", đ: "d", ð: "d", ħ: "h", ı: "i", ɑ: "a", ɡ: "g", ȷ: "j",
+  // Hooked and turned IPA letters, and Armenian ones, that read as Latin on X (red-team 2026-10-12).
+  ɗ: "d", ɖ: "d", ɓ: "b", ɦ: "h", ɾ: "r", ɯ: "w", ƥ: "p", օ: "o", հ: "h", ս: "u",
+});
+/**
+ * CAPITALS THAT LOWERCASE INTO ANOTHER LOOK-ALIKE (red-team review,
+ * 2026-10-12): a Greek capital Eta reads as H on X, but lowercased it is an
+ * eta, which the table above reads as n ("SHERWOOD" with an Eta was
+ * "snerwood"); a capital Nu reads as N, its small nu as v; a capital Beta was
+ * dropped. So a Greek capital is read as the Latin capital it shows, before
+ * anything is lowercased.
+ */
+const LOOKALIKE_UPPER: Readonly<Record<string, string>> = Object.freeze({
+  Α: "a", Β: "b", Ε: "e", Ζ: "z", Η: "h", Ι: "i", Κ: "k", Μ: "m", Ν: "n", Ο: "o", Ρ: "p", Τ: "t", Υ: "y", Χ: "x",
 });
 /** Digits and signs written for a letter: "sherw00d", "5herwood", "$herwood". */
 const LEET: Readonly<Record<string, string>> = Object.freeze({ "0": "o", "3": "e", "4": "a", "5": "s", "7": "t", $: "s", "@": "a", "€": "e" });
@@ -322,10 +335,32 @@ const LEET: Readonly<Record<string, string>> = Object.freeze({ "0": "o", "3": "e
  */
 export function lettersOf(text: unknown, o: { leet?: boolean } = {}): string {
   if (typeof text !== "string") return "";
-  const s = text.normalize("NFKC").toLowerCase().normalize("NFD").replace(/\p{M}/gu, "");
   let out = "";
-  for (const ch of s) out += LOOKALIKE[ch] ?? (o.leet ? LEET[ch] ?? ch : ch);
+  for (const ch of asLatin(text)) out += LOOKALIKE[ch] ?? (o.leet ? LEET[ch] ?? ch : ch);
   return (o.leet ? out.replace(/vv/g, "w") : out).replace(/[^a-z]/g, "");
+}
+
+/** NFKC, Greek capitals read as the Latin ones they show, lowercase, accents off: what lettersOf maps a character at a time. */
+function asLatin(text: string): string {
+  let up = "";
+  for (const ch of text.normalize("NFKC")) up += LOOKALIKE_UPPER[ch] ?? ch;
+  return up.toLowerCase().normalize("NFD").replace(/\p{M}/gu, "");
+}
+
+/**
+ * A LETTER lettersOf CANNOT READ (red-team review, 2026-10-12): one that is
+ * neither a-z nor a look-alike it knows, so lettersOf would drop it and a
+ * name spelled with it would read as nothing ("ꓢꓧꓰꓣꓪꓳꓳꓓ" in Lisu is
+ * "SHERWOOD" on X and "" to code). Whoever asks whether a text names
+ * something treats one as a yes: fail closed. The shrug's ツ is the room
+ * gate's own exception, and reads as nothing.
+ */
+export function unreadableLetter(text: unknown): boolean {
+  if (typeof text !== "string") return false;
+  for (const ch of asLatin(text)) {
+    if (ch !== "ツ" && /\p{L}/u.test(ch) && !/^[a-z]$/.test(LOOKALIKE[ch] ?? ch)) return true;
+  }
+  return false;
 }
 
 /**
@@ -335,11 +370,14 @@ export function lettersOf(text: unknown, o: { leet?: boolean } = {}): string {
  * the text's letters alone, so spacing, digits, zero-width characters and
  * look-alikes do not hide it. Errs toward finding it ("usher wood" counts):
  * a tag it finds gets no answer at all, which costs one answer, never a
- * screenshot of Merrymen's account confirming somebody's token.
+ * screenshot of Merrymen's account confirming somebody's token. A letter it
+ * cannot read at all (unreadableLetter: Lisu, Cherokee, Armenian, an IPA
+ * letter it has no mapping for) counts as finding it: what code cannot read
+ * may spell it.
  */
 const SHERWOOD_LETTERS = /s+h+e*r+w+o*d/;
 export function sherwoodMentioned(text: unknown): boolean {
-  return SHERWOOD_LETTERS.test(lettersOf(text)) || SHERWOOD_LETTERS.test(lettersOf(text, { leet: true }));
+  return SHERWOOD_LETTERS.test(lettersOf(text)) || SHERWOOD_LETTERS.test(lettersOf(text, { leet: true })) || unreadableLetter(text);
 }
 
 // ── the X clauses ───────────────────────────────────────────────────────────

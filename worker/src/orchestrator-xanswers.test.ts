@@ -835,7 +835,10 @@ test("a tag in letters code cannot read never reaches the writer, research on or
   // Greek capital Eta (U+0397), Lisu, a hooked d (U+0257), a turned m (U+026F), a right-to-left override (U+202E), Cherokee.
   const texts = ["@pine_stoat is SΗERWOOD getting a token?", "@pine_stoat is ꓢꓧꓰꓣꓪꓳꓳꓓ getting a token?", "@pine_stoat is sherwooɗ getting a token?",
     "@pine_stoat is sherɯood getting a token?", "@pine_stoat is \u202edoowrehs\u202c getting a token?", "@pine_stoat is SΗERWOOD running your trades now?",
-    "@pine_stoat is ꓢꓧꓰꓣꓪꓳꓳꓓ legit?", "@pine_stoat is ᏚᎻᎬᎡᎳᎾᎾᎠ getting a token?"];
+    "@pine_stoat is ꓢꓧꓰꓣꓪꓳꓳꓓ legit?", "@pine_stoat is ᏚᎻᎬᎡᎳᎾᎾᎠ getting a token?",
+    // I1's reproduced tags (Armenian ho U+0570, hooked h U+0266, fishhook r U+027E): never a "built by merrymen" under them.
+    "@alanaldale ꓢꓧꓰꓣꓪꓳꓳꓓ TGE soon? is it the merrymen token?", "@pine_stoat sherwooɗ TGE soon?", "@pine_stoat is sհerwood merrymen's token?",
+    "@pine_stoat sɦerwood TGE soon?", "@pine_stoat sheɾwood TGE soon?", "@pine_stoat sherɯood TGE soon?"];
   for (const env of [{}, RESEARCH_ON]) {
     for (const text of texts) {
       const r = fakeResearch();
