@@ -757,8 +757,9 @@ describe("review candidates", () => {
     const x1 = candidates.find((s) => s.token.key === X1)!;
     assert.equal(x1.dossier?.revision, 1, "the shared dossier rides along");
     assert.ok(x1.lens, "and its trader-flow lens");
-    assert.match(x1.lens!, /321 holders; the top 10 wallets hold 52\.5%; unique buyers vs sellers: last hour 7 vs 3, last 24h 90 vs 61/);
+    assert.equal(x1.dossier?.stats?.holders, 321, "with the source's statistics, which the lens adds only in the room its caveats leave (lens.test.ts)");
     assert.match(x1.lens!, /WHAT THIS IS NOT/);
+    assert.match(x1.lens!, /Would change the reading:/, "a thin candidate lens keeps its caveats");
     assert.doesNotMatch(x1.lens!, /fomo|0x[0-9a-f]{6}/i);
     assert.equal(candidates.find((s) => s.token.key === Y1)!.lens, null, "no dossier yet, no lens: unavailable, never a stalled review");
     assert.ok(!r.last(T2).signals.some((s) => s.reasons.includes("candidate")), "not on the allowlist");

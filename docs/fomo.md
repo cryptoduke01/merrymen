@@ -411,12 +411,20 @@ hour 9 vs 14, last 24h 220 vs 198."
 - **Re-checked numbers only.** The dossier keeps them as `CoinDossier.stats`, built by
   `dossier.ts dossierStatsOf`. A value that is not a plain count, or a share outside
   0–100, counts as unknown. An unknown side reads "unknown", never zero.
-- **Ranking.** The line comes right after the strongest cases for and against, so it
-  ranks ahead of the written follow-ups.
+- **Only the room left over.** Every other line is fitted first, exactly as it would be
+  without statistics. The statistics line goes in only if it still fits, so it never
+  replaces the coverage line, an `Unknown:` or `Would change the reading:` caveat, or a
+  written case. A buyers-outnumber-sellers figure in place of the invalidation condition
+  would leave the lens more one-sided toward buying. When it fits, it is shown right
+  after the strongest cases for and against. It cites nothing, so it never renumbers a
+  ref. The cost of this rule: a thin lens (one trader, one thesis) usually fills its
+  1,050-character body with caveats, and then carries no figures.
 - **A failed read.** If the read failed, or a budget refused it (a 503, an outage), the
-  line says "Holder and unique buyer/seller statistics: unavailable on this read." That
-  line ranks with coverage. The dossier's own "Token statistics were not available"
-  unknown is then left out, so the outage is not said twice. Nothing waits for the read.
+  dossier's own "Token statistics were not available" unknown is said in its place as
+  "Holder and unique buyer/seller statistics: unavailable on this read.", when that
+  longer wording still fits. If that unknown is not among the two shown, the sentence
+  goes after coverage only if there is room. Either way it is said at most once, and
+  nothing waits for the read.
 - **Never a lens on their own.** Brain gives this lens a pulse slot whenever it is fed
   (`PULSE_RESERVED_LENSES`). That works only because the lens is fed when traders were
   actually seen on the coin. Holder counts exist for nearly every coin, so a lens of

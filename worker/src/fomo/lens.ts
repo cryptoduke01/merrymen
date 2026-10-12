@@ -12,7 +12,8 @@
  * statement about a feed with a $3,000 floor and patchy coverage, and rendered
  * as a sentence it would be read as a finding about the coin. The source's
  * holder and buyer/seller statistics (or that they were unavailable) ride in a
- * lens that has something else to say, and never make one by themselves.
+ * lens that has something else to say, in the room its other lines leave, and
+ * never make one by themselves.
  *
  * VENDOR-NEUTRAL. Brain is told "a third-party social-trading platform" and
  * nothing else. It must weigh the KIND of source, not a brand, and a brand in a
@@ -107,9 +108,17 @@ function claimLine(lead: string, c: DossierClaim, ref: string): string {
  * repeated. A side that is unknown is said to be unknown, never zero.
  *
  * "UNAVAILABLE" IS NOT CONTENT. A provider outage (a 503, a refused budget)
- * gives the line below, never a lens of its own (absence is not a verdict),
- * and it ranks with the coverage line rather than ahead of anything a trader
- * did or wrote. Figures that were read rank right after the strongest cases.
+ * gives the line below, never a lens of its own (absence is not a verdict).
+ * It says the dossier's own "statistics were not available" unknown in other
+ * words, in that unknown's place.
+ *
+ * ONLY THE ROOM LEFT OVER (composeBody). Every other line is fitted first,
+ * exactly as it would be without statistics, and this line goes in only if it
+ * still fits. Figures that were read are SHOWN right after the strongest
+ * cases, but they never take the budget of the coverage line, an `Unknown:`
+ * or `Would change the reading:` caveat, or a written case: a buyers-
+ * outnumber-sellers figure in place of the invalidation condition would leave
+ * the lens more one-sided toward buying than it was without figures at all.
  */
 const STATS_LEAD = "Across all trade sizes, the same platform counts";
 const STATS_UNAVAILABLE = "Holder and unique buyer/seller statistics: unavailable on this read.";
@@ -215,12 +224,14 @@ function composeBody(d: CoinDossier): { lines: string[]; citations: LensCitation
       candidates.push({ build: (ref) => claimLine(lead, claim, ref), cite: { section, evidence: claim.evidence } });
     }
   }
-  // FIGURES RIGHT AFTER THE STRONGEST CASES, ahead of the written follow-ups:
-  // holder concentration and who is still buying are often the whole reading
-  // on a coin nobody wrote about (most of what a review is shown), and a risk
-  // to weigh on one they did. No ref: it cites no item of the evidence.
+  // FIGURES ARE SHOWN RIGHT AFTER THE STRONGEST CASES, ahead of the written
+  // follow-ups: holder concentration and who is still buying are often the
+  // whole reading on a coin nobody wrote about (most of what a review is
+  // shown), and a risk to weigh on one they did. Only shown there: the line
+  // is fitted last, into the room every other line left (below). No ref: it
+  // cites no item of the evidence, so adding it never renumbers one.
   const stats = statsLine(d);
-  if (stats?.known) candidates.push({ build: () => stats.text, cite: null });
+  const statsSlot = candidates.length;
   candidates.push(...written);
 
   if (!d.strongestOpposition && !d.strongestSupport && d.claims.length) {
@@ -250,17 +261,20 @@ function composeBody(d: CoinDossier): { lines: string[]; citations: LensCitation
       (capped ? "; the read was capped and the rest are unread." : "."),
     cite: null,
   });
-  if (stats && !stats.known) candidates.push({ build: () => stats.text, cite: null });
-  // The stats line already says the statistics were unavailable; not twice.
-  const unknowns = stats ? d.unknowns.filter((u) => u !== STATS_UNAVAILABLE_UNKNOWN) : d.unknowns;
-  for (const u of unknowns.slice(0, 2)) candidates.push({ build: () => `Unknown: ${u}`, cite: null });
+  const coverageSlot = candidates.length;
+  // The caveats, exactly as a lens without statistics carries them.
+  const shownUnknowns = d.unknowns.slice(0, 2);
+  const firstUnknown = candidates.length;
+  for (const u of shownUnknowns) candidates.push({ build: () => `Unknown: ${u}`, cite: null });
   for (const cc of d.changeConditions.slice(0, 2)) candidates.push({ build: () => `Would change the reading: ${cc}`, cite: null });
 
   const lines = [ATTRIBUTION, NOT_LINE];
   const citations: LensCitation[] = [];
+  /** For each body line lines[2 + i], the candidate it was built from. */
+  const from: number[] = [];
   let used = ATTRIBUTION.length + 1 + NOT_LINE.length;
   const budget = LENS_MAX - STALENESS_RESERVE;
-  for (const cand of candidates) {
+  for (const [i, cand] of candidates.entries()) {
     const ref = cand.cite ? `[ref:${tag}c${citations.length + 1}]` : "";
     const text = sanitizeText(cand.build(ref), 400);
     if (!text) continue;
@@ -269,10 +283,33 @@ function composeBody(d: CoinDossier): { lines: string[]; citations: LensCitation
     if (leaks(text)) return null;
     if (used + 1 + text.length > budget) continue;
     lines.push(text);
+    from.push(i);
     used += 1 + text.length;
     if (cand.cite) citations.push({ ref, ...cand.cite });
   }
+  // Statistics never make a lens: one with nothing else to say ends here.
   if (lines.length === 2) return null;
+
+  // THE STATISTICS, INTO THE ROOM LEFT, never in place of a line that fitted
+  // without them (the stats-line comment above says why).
+  const statsText = stats ? sanitizeText(stats.text, 400) : "";
+  if (statsText && leaks(statsText)) return null;
+  if (stats && statsText) {
+    /** Where a line that belongs before candidate `slot` goes among the lines emitted. */
+    const lineAt = (slot: number): number => 2 + from.filter((i) => i < slot).length;
+    const k = shownUnknowns.indexOf(STATS_UNAVAILABLE_UNKNOWN);
+    const unknownLine = k < 0 ? -1 : from.indexOf(firstUnknown + k);
+    if (stats.known) {
+      if (used + 1 + statsText.length <= budget) lines.splice(lineAt(statsSlot), 0, statsText);
+    } else if (unknownLine >= 0) {
+      // The dossier's own "not available" unknown, said once, in the stats
+      // line's words when the longer wording still fits; otherwise as it was.
+      const old = lines[2 + unknownLine]!;
+      if (used - old.length + statsText.length <= budget) lines[2 + unknownLine] = statsText;
+    } else if (used + 1 + statsText.length <= budget) {
+      lines.splice(lineAt(coverageSlot), 0, statsText);
+    }
+  }
   if (leaks(lines.join(" "))) return null;
   return { lines, citations };
 }
