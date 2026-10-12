@@ -67,6 +67,12 @@ export interface TailNotifierDeps {
    * recorded. A mark without a price is never made.
    */
   quoteMark?(chainSlug: string, address: string): Promise<{ price8: string; atMs: number; pool: string } | null>;
+  /**
+   * The scout budget in micro-USD, for scout-cut ghost sizing. Absent or
+   * throwing: ghost entries size nothing off the budget (flat and custom
+   * still paper). Read at tell time, beside the entry price.
+   */
+  scoutBudgetMicro?(): number | null;
   now?(): number;
   log?(line: string): void;
   /** The durable key (default FOMO_STATE_KEYS.tailNotified). */
@@ -87,6 +93,15 @@ export interface TailNoticeToSend {
   mark?: { eventId: string; traderUserId: string; handle: string | null; tokenId: string; entryPrice8: string; entryAtMs: number; entryPool: string };
   /** Record the mark above through the owner-only tool. Never throws. */
   recordMark?(): Promise<boolean>;
+  /**
+   * The ghost paper entry for the same told buy: opened AFTER the send
+   * lands (beside the mark), never before. Absent on anything unsent or
+   * unpriced. The tool itself decides: ghost off, unsizable, or capped
+   * opens nothing.
+   */
+  ghost?: { eventId: string; traderUserId: string; handle: string | null; tokenId: string; entryPrice8: string; scoutBudgetMicro: number | null };
+  /** Open the ghost above through the owner-only tool. Never throws. */
+  recordGhost?(): Promise<boolean>;
   /** Stop and +1h (`ftl:stop:<userId>`, `ftl:ext:<userId>`); empty for an end summary. */
   keyboard: TailKeyboard;
   kind: TailNotice["kind"];
@@ -242,6 +257,28 @@ export function createTailNotifier(deps: TailNotifierDeps): TailNotifier {
                       surface: "background", audience: "owner", conversationKey: null, priority: "discovery",
                     });
                     return (env.data as { recorded?: unknown } | null)?.recorded === true;
+                  } catch {
+                    return false;
+                  }
+                };
+                // A ghost opens only for a priced told buy, beside its mark:
+                // the tool checks prefs, size and cap itself.
+                let budget: number | null = null;
+                try {
+                  budget = deps.scoutBudgetMicro ? deps.scoutBudgetMicro() : null;
+                } catch {
+                  budget = null;
+                }
+                const ghost = { eventId: mark.eventId, traderUserId: mark.traderUserId, handle: mark.handle, tokenId: mark.tokenId, entryPrice8: mark.entryPrice8, scoutBudgetMicro: budget };
+                send.ghost = ghost;
+                send.recordGhost = async () => {
+                  try {
+                    const b = deps.broker();
+                    if (!b) return false;
+                    const env = await b.call("fomo_ghost_enter", { ...ghost }, {
+                      surface: "background", audience: "owner", conversationKey: null, priority: "discovery",
+                    });
+                    return (env.data as { entered?: unknown } | null)?.entered === true;
                   } catch {
                     return false;
                   }

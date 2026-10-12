@@ -155,6 +155,8 @@ import {
   setCheckpoint,
   setHeldTokens,
   settleTailMark,
+  settleGhostPosition,
+  ghostPosition,
   setTenantRoute,
   subjectPublicationCount,
   sweepJobs,
@@ -180,6 +182,7 @@ import { AlertStream, type ClockPort, type SocketLike, type StreamState, type St
 import { readTokenPools, solanaMarkPrice } from "./venues/geckoterminal";
 import { capabilityFromStream, mergeCapability, type StreamProbe } from "./fomo/capabilities";
 import { dueHorizons, rowToMark, tallyMarks, toPrice8 } from "./fomo/tail-marks";
+import { ghostPnlMicro } from "./fomo/ghost";
 import type {
   CoinDossier,
   CohortVersion,
@@ -2249,7 +2252,17 @@ export function makeFomoPass(deps: FomoPassDeps): FomoPass {
           now,
         );
         for (const h of horizons) {
-          await settleTailMark(dbConn, { tenant, eventKey: m.eventKey, horizon: h, price8: price.price8, atMs: price.atMs }).catch(() => false);
+          const settled = await settleTailMark(dbConn, { tenant, eventKey: m.eventKey, horizon: h, price8: price.price8, atMs: price.atMs }).catch(() => false);
+          // A settled mark settles its ghost too: same horizon, same price, size times the move.
+          if (settled) {
+            const g = await ghostPosition(dbConn, tenant, m.eventKey).catch(() => null);
+            if (g) {
+              const pnl = ghostPnlMicro(g.sizeUsdMicro, Number(g.entryPrice8), Number(price.price8));
+              if (pnl !== null) {
+                await settleGhostPosition(dbConn, { tenant, eventKey: m.eventKey, horizon: h, pnlMicro: pnl, atMs: price.atMs }).catch(() => false);
+              }
+            }
+          }
         }
       }
     }

@@ -342,6 +342,32 @@ CREATE TABLE IF NOT EXISTS fomo_tail_marks (
   PRIMARY KEY (tenant, event_key)
 );
 CREATE INDEX IF NOT EXISTS fomo_tail_marks_trader ON fomo_tail_marks (tenant, trader_user_id, created_at_ms);
+CREATE TABLE IF NOT EXISTS fomo_ghost_prefs (
+  tenant TEXT NOT NULL,
+  trader_user_id TEXT NOT NULL,            -- the provider user id, never a handle
+  enabled INTEGER NOT NULL,                -- 1: told buys of this trader open ghost positions
+  mode TEXT NOT NULL,                      -- scout-cut | flat | custom
+  custom_usd_micro INTEGER NOT NULL,       -- only meaningful when mode is custom
+  cap_usd_micro INTEGER NOT NULL,          -- tenant cap on open ghost exposure, 0 = uncapped
+  updated_at_ms INTEGER NOT NULL,
+  PRIMARY KEY (tenant, trader_user_id)
+);
+CREATE TABLE IF NOT EXISTS fomo_ghost_positions (
+  tenant TEXT NOT NULL,
+  event_key TEXT NOT NULL,                 -- the tail buy notice event key: one ghost per told buy, like marks
+  trader_user_id TEXT NOT NULL,
+  handle TEXT,                             -- display only, at entry time
+  token_key TEXT NOT NULL,
+  entry_price_8 TEXT NOT NULL,             -- usd, 8dp decimal string, copied from the mark
+  size_usd_micro INTEGER NOT NULL,         -- ghost size, resolved at entry
+  h1_pnl_micro INTEGER,                    -- null until the +1h settle lands
+  h1_at_ms INTEGER,
+  h24_pnl_micro INTEGER,                   -- null until the +24h settle lands
+  h24_at_ms INTEGER,
+  created_at_ms INTEGER NOT NULL,
+  PRIMARY KEY (tenant, event_key)
+);
+CREATE INDEX IF NOT EXISTS fomo_ghost_positions_trader ON fomo_ghost_positions (tenant, trader_user_id, created_at_ms);
 CREATE INDEX IF NOT EXISTS fomo_tail_marks_due ON fomo_tail_marks (entry_at_ms);
 CREATE TABLE IF NOT EXISTS fomo_tenant_routes (
   tenant TEXT NOT NULL PRIMARY KEY,
@@ -3059,6 +3085,187 @@ export async function markTenants(db: Db, nowMs: number, limit: number): Promise
     )
     .all(now - 3_600_000, now - 86_400_000, Math.min(n, 25))) as Row[];
   return rows.flatMap((r) => (typeof r.tenant === "string" ? [r.tenant] : []));
+}
+
+
+// ── ghost paper ─────────────────────────────────────────────────────────────
+// Fake-money follows of her tail calls. Positions open only for told buys
+// that already have a mark (no mark, no ghost) and settle PnL off the mark's
+// horizon re-quotes. Nothing here touches the real paper book: this ledger
+// is ghost-only, wiped by resetGhosts, and every read is tenant-scoped.
+
+export interface GhostPrefsRow {
+  traderUserId: string;
+  enabled: boolean;
+  mode: string;
+  customUsdMicro: number;
+  capUsdMicro: number;
+  updatedAtMs: number;
+}
+
+export interface GhostPositionRow {
+  eventKey: string;
+  traderUserId: string;
+  handle: string | null;
+  tokenKey: string;
+  entryPrice8: string;
+  sizeUsdMicro: number;
+  h1PnlMicro: number | null;
+  h1AtMs: number | null;
+  h24PnlMicro: number | null;
+  h24AtMs: number | null;
+  createdAtMs: number;
+}
+
+const GHOST_MODES = ["scout-cut", "flat", "custom"] as const;
+
+function ghostModeOf(v: unknown): string {
+  if (v === "scout-cut" || v === "flat" || v === "custom") return v;
+  throw new TypeError("fomo store: ghost mode must be scout-cut, flat or custom");
+}
+
+function microOf(v: unknown, what: string): number {
+  if (typeof v !== "number" || !Number.isSafeInteger(v) || v < 0) throw new TypeError(`fomo store: ${what} must be a non-negative safe integer`);
+  return v;
+}
+
+/** An owner's ghost prefs for one trader, or null when ghosting was never configured. */
+export async function getGhostPrefs(db: Db, tenant: string, traderUserId: string): Promise<GhostPrefsRow | null> {
+  const rows = (await db
+    .prepare(`SELECT trader_user_id, enabled, mode, custom_usd_micro, cap_usd_micro, updated_at_ms FROM fomo_ghost_prefs WHERE tenant = ? AND trader_user_id = ?`)
+    .all(tenantOf(tenant), keyOf(traderUserId, "traderUserId", 128))) as Row[];
+  const r = rows[0];
+  if (!r || typeof r.trader_user_id !== "string") return null;
+  const custom = num(r.custom_usd_micro);
+  const cap = num(r.cap_usd_micro);
+  const updated = num(r.updated_at_ms);
+  if (custom === null || cap === null || updated === null) return null;
+  return {
+    traderUserId: r.trader_user_id, enabled: flag(r.enabled) === true,
+    mode: typeof r.mode === "string" ? r.mode : "scout-cut",
+    customUsdMicro: custom, capUsdMicro: cap, updatedAtMs: updated,
+  };
+}
+
+/** Create or replace an owner's ghost prefs for one trader. */
+export async function setGhostPrefs(
+  db: Db,
+  p: { tenant: string; traderUserId: string; enabled: boolean; mode: string; customUsdMicro: number; capUsdMicro: number; nowMs: number },
+): Promise<void> {
+  await db
+    .prepare(
+      `INSERT INTO fomo_ghost_prefs (tenant, trader_user_id, enabled, mode, custom_usd_micro, cap_usd_micro, updated_at_ms)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (tenant, trader_user_id) DO UPDATE SET enabled = excluded.enabled, mode = excluded.mode,
+         custom_usd_micro = excluded.custom_usd_micro, cap_usd_micro = excluded.cap_usd_micro, updated_at_ms = excluded.updated_at_ms`,
+    )
+    .run(
+      tenantOf(p.tenant), keyOf(p.traderUserId, "traderUserId", 128), p.enabled ? 1 : 0, ghostModeOf(p.mode),
+      microOf(p.customUsdMicro, "customUsdMicro"), microOf(p.capUsdMicro, "capUsdMicro"), intOf(p.nowMs, "nowMs"),
+    );
+}
+
+/** The kill switch: disable ghosting for every trader of a tenant. Returns traders switched off. */
+export async function disableAllGhosts(db: Db, tenant: string, nowMs: number): Promise<number> {
+  const r = await db
+    .prepare(`UPDATE fomo_ghost_prefs SET enabled = 0, updated_at_ms = ? WHERE tenant = ? AND enabled != 0`)
+    .run(intOf(nowMs, "nowMs"), tenantOf(tenant));
+  return r.changes;
+}
+
+/**
+ * Open one ghost position for a told buy. False when the position already
+ * exists (a retried tell never double-papers). The caller checks prefs,
+ * sizes and caps first: this only writes.
+ */
+export async function enterGhostPosition(
+  db: Db,
+  g: { tenant: string; eventKey: string; traderUserId: string; handle: string | null; tokenKey: string; entryPrice8: string; sizeUsdMicro: number; nowMs: number },
+): Promise<boolean> {
+  const r = await db
+    .prepare(
+      `INSERT INTO fomo_ghost_positions (tenant, event_key, trader_user_id, handle, token_key, entry_price_8, size_usd_micro, created_at_ms)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (tenant, event_key) DO NOTHING`,
+    )
+    .run(
+      tenantOf(g.tenant), keyOf(g.eventKey, "eventKey", 128), keyOf(g.traderUserId, "traderUserId", 128),
+      typeof g.handle === "string" ? textOf(g.handle.trim().replace(/^@+/, ""), FOMO_LIMITS.handleChars) || null : null,
+      keyOf(g.tokenKey, "tokenKey"), price8Of(g.entryPrice8, "entryPrice8"),
+      microOf(g.sizeUsdMicro, "sizeUsdMicro"), intOf(g.nowMs, "nowMs"),
+    );
+  return r.changes > 0;
+}
+
+/** Open ghost exposure in micro-USD: sizes of positions with no +24h settle yet. What the cap reads. */
+export async function openGhostExposure(db: Db, tenant: string): Promise<number> {
+  const rows = (await db
+    .prepare(`SELECT COALESCE(SUM(size_usd_micro), 0) AS open_micro FROM fomo_ghost_positions WHERE tenant = ? AND h24_pnl_micro IS NULL`)
+    .all(tenantOf(tenant))) as Row[];
+  const open = num(rows[0]?.open_micro);
+  return open === null ? 0 : open;
+}
+
+/**
+ * Land one horizon PnL. False when the position is missing, belongs to
+ * another tenant, or the horizon already settled (first write wins).
+ */
+export async function settleGhostPosition(
+  db: Db,
+  s: { tenant: string; eventKey: string; horizon: "h1" | "h24"; pnlMicro: number; atMs: number },
+): Promise<boolean> {
+  if (s.horizon !== "h1" && s.horizon !== "h24") throw new TypeError("fomo store: horizon must be h1 or h24");
+  if (typeof s.pnlMicro !== "number" || !Number.isSafeInteger(s.pnlMicro)) throw new TypeError("fomo store: pnlMicro must be a safe integer");
+  const col = s.horizon === "h1" ? "h1_pnl_micro" : "h24_pnl_micro";
+  const at = s.horizon === "h1" ? "h1_at_ms" : "h24_at_ms";
+  const r = await db
+    .prepare(`UPDATE fomo_ghost_positions SET ${col} = ?, ${at} = ? WHERE tenant = ? AND event_key = ? AND ${col} IS NULL`)
+    .run(s.pnlMicro, intOf(s.atMs, "atMs"), tenantOf(s.tenant), keyOf(s.eventKey, "eventKey", 128));
+  return r.changes > 0;
+}
+
+const GHOST_COLUMNS =
+  "event_key, trader_user_id, handle, token_key, entry_price_8, size_usd_micro, h1_pnl_micro, h1_at_ms, h24_pnl_micro, h24_at_ms, created_at_ms";
+
+function ghostOf(r: Row): GhostPositionRow | null {
+  const size = num(r.size_usd_micro);
+  const created = num(r.created_at_ms);
+  if (
+    typeof r.event_key !== "string" || typeof r.trader_user_id !== "string" || typeof r.token_key !== "string" ||
+    typeof r.entry_price_8 !== "string" || !PRICE8.test(r.entry_price_8) || size === null || created === null
+  ) {
+    return null;
+  }
+  const h1 = num(r.h1_pnl_micro);
+  const h24 = num(r.h24_pnl_micro);
+  return {
+    eventKey: r.event_key, traderUserId: r.trader_user_id, handle: str(r.handle), tokenKey: r.token_key,
+    entryPrice8: r.entry_price_8, sizeUsdMicro: size,
+    h1PnlMicro: h1, h1AtMs: optInt(r.h1_at_ms), h24PnlMicro: h24, h24AtMs: optInt(r.h24_at_ms),
+    createdAtMs: created,
+  };
+}
+
+/** One ghost position by event key, or null. What the settle pass reads before landing horizon PnL. */
+export async function ghostPosition(db: Db, tenant: string, eventKey: string): Promise<GhostPositionRow | null> {
+  const rows = (await db
+    .prepare(`SELECT ${GHOST_COLUMNS} FROM fomo_ghost_positions WHERE tenant = ? AND event_key = ?`)
+    .all(tenantOf(tenant), keyOf(eventKey, "eventKey", 128))) as Row[];
+  const r = rows[0];
+  return r ? ghostOf(r) : null;
+}
+
+/** An owner's ghost positions since `sinceMs`, newest first: what /ghost pnl reads. */
+export async function ghostPositions(db: Db, tenant: string, sinceMs: number): Promise<GhostPositionRow[]> {
+  const rows = (await db
+    .prepare(`SELECT ${GHOST_COLUMNS} FROM fomo_ghost_positions WHERE tenant = ? AND created_at_ms >= ? ORDER BY created_at_ms DESC, event_key`)
+    .all(tenantOf(tenant), intOf(sinceMs, "sinceMs"))) as Row[];
+  return rows.flatMap((r) => ghostOf(r) ?? []);
+}
+
+/** Wipe an owner's ghost ledger (positions only, prefs survive). Returns rows deleted. */
+export async function resetGhosts(db: Db, tenant: string): Promise<number> {
+  const r = await db.prepare(`DELETE FROM fomo_ghost_positions WHERE tenant = ?`).run(tenantOf(tenant));
+  return r.changes;
 }
 
 /** An owner's marks for one trader since `sinceMs`, newest entry first: what a leaderboard tally reads. */

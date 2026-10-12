@@ -936,6 +936,16 @@ async function main() {
     holds: (tokenKey) => fomoChild.holds(tokenKey),
     enabled: () => !fomoOff && fomoTailsOn(),
     log: (line) => console.log(line),
+    // The scout budget in micro-USD at tell time, for scout-cut ghost
+    // sizing. Null when unset: flat and custom ghosts paper anyway.
+    scoutBudgetMicro: () => {
+      try {
+        const micro = Number(usdg(cfg.scoutBudgetUsdg));
+        return Number.isSafeInteger(micro) && micro > 0 ? micro : null;
+      } catch {
+        return null;
+      }
+    },
     // A told buy's entry price at tell time: Solana mints from GeckoTerminal's
     // solana pools, Robinhood Chain from its pools read, deepest priced pool.
     // Null when no pool quotes it: the notice is told without a mark, never mis-marked.

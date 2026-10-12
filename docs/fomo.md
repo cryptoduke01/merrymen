@@ -671,6 +671,18 @@ group line, `tg-groups/handler.ts` (below, "Asking for a tail").
   math). A tail's end summary says the trader's settled record so far (+1h average over
   settled calls, hit rate, sample size); nothing settled, nothing said. Hers only: every
   tally reads her own tails' marks, never the fleet's.
+- **Ghost paper follows her tails with fake money.** `/ghost on <trader>` papers that
+  trader's told buys from then on; each ghost opens beside its mark after the buy
+  notice lands (`fomo_ghost_enter`), sized by mode — ten percent of the scout budget
+  (`scout-cut`, the default), $100 flat (`flat`), or a custom amount (`/ghost size
+  <trader> <amount>`, $1 to $10,000, capped at the scout budget). A ghost opens only
+  for a priced told buy with ghosting on, inside an optional per-trader open-exposure
+  cap (`/ghost cap <trader> <amount>`); the worker settle pass lands +1h/+24h PnL off
+  the mark's re-quotes, first write wins. `/ghost pnl` reads the paper record with
+  sample sizes; `/ghost off <trader>` stops new ghosts, `/ghost stop` halts everything,
+  `/ghost reset` wipes the ledger (prefs survive). Nothing here touches the real paper
+  book: the ghost ledger (`fomo_ghost_positions`, `fomo_ghost_prefs`; `ghost.ts` owns
+  the math) is fake money only, owner-only, DM-only. Hers only, like the leaderboard.
 - **Tailing again soon after the end continues the tail.** There is one row per owner
   and trader, and an ended tail's row is what its end summary is read from for 15
   minutes. Tailing the same trader again inside those 15 minutes continues that tail
