@@ -47,6 +47,8 @@ import type {
   CoinDossier,
   DossierClaim,
   DossierCoverage,
+  DossierStats,
+  DossierStatsWindow,
   EvidenceKind,
   EvidenceRef,
   FlowSummary,
@@ -440,6 +442,37 @@ function stableStringify(v: unknown): string {
 function statsSignature(s: TokenStats | null): string {
   if (!s) return "none";
   return stableStringify({ token: s.token?.key ?? null, holders: s.holders, top10: s.top10HoldersPercent, windows: s.windows });
+}
+
+/** The unknown a dossier records when the token statistics could not be read (lens.ts says it once, as its stats line). */
+export const STATS_UNAVAILABLE_UNKNOWN = "Token statistics were not available.";
+
+function statCount(v: unknown): number | null {
+  return typeof v === "number" && Number.isSafeInteger(v) && v >= 0 ? v : null;
+}
+
+function statsWindowOf(w: { uniqueBuyers?: unknown; uniqueSellers?: unknown } | null | undefined): DossierStatsWindow | null {
+  if (!w || typeof w !== "object") return null;
+  const uniqueBuyers = statCount(w.uniqueBuyers);
+  const uniqueSellers = statCount(w.uniqueSellers);
+  return uniqueBuyers === null && uniqueSellers === null ? null : { uniqueBuyers, uniqueSellers };
+}
+
+/**
+ * THE STATISTICS A DOSSIER KEEPS: numbers only, each re-checked (a count is a
+ * safe non-negative integer, a share is 0–100), so a malformed provider
+ * figure is unknown rather than a number a lens would repeat. Null in, null
+ * out: a failed read stays a failed read.
+ */
+export function dossierStatsOf(s: TokenStats | null): DossierStats | null {
+  if (!s) return null;
+  const top = s.top10HoldersPercent;
+  return {
+    holders: statCount(s.holders),
+    top10HoldersPercent: typeof top === "number" && Number.isFinite(top) && top >= 0 && top <= 100 ? top : null,
+    window1h: statsWindowOf(s.windows?.["1h"]),
+    window24h: statsWindowOf(s.windows?.["24h"]),
+  };
 }
 
 // ── Claims ───────────────────────────────────────────────────────────────
@@ -1158,7 +1191,7 @@ export function buildDossier(input: BuildDossierInput): { dossier: CoinDossier; 
   const SECTION_WORDS: Record<string, string> = {
     theses: "Written theses could not be read.",
     activity: "Trader activity could not be read.",
-    "token-stats": "Token statistics were not available.",
+    "token-stats": STATS_UNAVAILABLE_UNKNOWN,
     "market-context": "No market measurement of Merrymen's own was supplied.",
     "route-context": "No route measurement was supplied, so whether Merrymen could trade a useful size is unknown.",
   };
@@ -1273,6 +1306,8 @@ export function buildDossier(input: BuildDossierInput): { dossier: CoinDossier; 
     ...(carried as Pick<CoinDossier, DossierSection>),
     versions: { schema: DOSSIER_SCHEMA, prompt: null, model: null },
     refreshedSections,
+    // Already in the inputs hash (statsSignature): new figures are a new revision.
+    stats: dossierStatsOf(input.stats),
   };
   return { dossier, changed: true };
 }

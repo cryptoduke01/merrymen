@@ -6,11 +6,13 @@
  *
  * ── THE RULES, EACH OF WHICH IS A WAY THIS BLOCK COULD LIE ──────────────
  *
- * ABSENCE IS NOT A VERDICT. A dossier with no observed trades, no claims and
- * no inconsistencies renders NOTHING (null), and Brain answers NO DATA
- * AVAILABLE for the lens. "Nobody on the feed is talking about this coin" is a
- * statement about a feed with a $3,000 floor and patchy coverage, and rendered
- * as a sentence it would be read as a finding about the coin.
+ * ABSENCE IS NOT A VERDICT. A dossier with no observed trades, no claims, no
+ * inconsistencies and no usable statistics renders NOTHING (null), and Brain
+ * answers NO DATA AVAILABLE for the lens. "Nobody on the feed is talking about
+ * this coin" is a statement about a feed with a $3,000 floor and patchy
+ * coverage, and rendered as a sentence it would be read as a finding about the
+ * coin. Statistics that were unavailable are said so inside a lens that has
+ * something else to say, and never make one by themselves.
  *
  * VENDOR-NEUTRAL. Brain is told "a third-party social-trading platform" and
  * nothing else. It must weigh the KIND of source, not a brand, and a brand in a
@@ -39,8 +41,8 @@
 
 import { createHash } from "node:crypto";
 import { sanitizeText } from "../research/news";
-import { STALE_SNAPSHOT_PREFIX, TOPIC_LABEL, agoText, type DossierClaimDetail } from "./dossier";
-import type { CoinDossier, DossierClaim, EvidenceRef } from "./types";
+import { STALE_SNAPSHOT_PREFIX, STATS_UNAVAILABLE_UNKNOWN, TOPIC_LABEL, agoText, type DossierClaimDetail } from "./dossier";
+import type { CoinDossier, DossierClaim, DossierStatsWindow, EvidenceRef } from "./types";
 
 /** The Brain lens key this block is sent under. */
 export const TRADER_FLOW_LENS = "trader-flow";
@@ -94,9 +96,58 @@ function claimLine(lead: string, c: DossierClaim, ref: string): string {
   return `${lead}, from ${SUPPORT_WORDS[c.support]}: ${sanitizeText(c.summary, 240).replace(/\.+$/, "")}. ${ref}`;
 }
 
+/**
+ * THE STATS LINE: one sentence of the source's own all-size statistics
+ * (holders, the top ten's share, unique buyers against unique sellers over the
+ * last hour and day), or that they were unavailable on this read, or nothing
+ * for a revision built before they were kept.
+ *
+ * NUMBERS ONLY, RE-CHECKED HERE: the dossier came back from storage, and a
+ * figure that is not a plain count (or a 0–100 share) is unknown, never
+ * repeated. A side that is unknown is said to be unknown, never zero.
+ *
+ * "UNAVAILABLE" IS NOT CONTENT. A provider outage (a 503, a refused budget)
+ * gives the line below, never a lens of its own: absence is not a verdict.
+ */
+const STATS_LEAD = "Across all trade sizes, the same platform's statistics report";
+const STATS_UNAVAILABLE = "Holder and unique buyer/seller statistics: unavailable on this read.";
+
+function statsCount(v: unknown): number | null {
+  return typeof v === "number" && Number.isSafeInteger(v) && v >= 0 ? v : null;
+}
+
+function statsSide(w: DossierStatsWindow | null | undefined, label: string): string | null {
+  if (!w || typeof w !== "object") return null;
+  const b = statsCount(w.uniqueBuyers);
+  const s = statsCount(w.uniqueSellers);
+  if (b === null && s === null) return null;
+  const side = (n: number | null, one: string, many: string) => (n === null ? `an unknown number of ${many}` : plural(n, one, many));
+  return `${label} ${side(b, "unique buyer", "unique buyers")} vs ${side(s, "unique seller", "unique sellers")}`;
+}
+
+/** The figures as phrases, or [] when none is a usable number. */
+function statsParts(d: CoinDossier): string[] {
+  const s = d.stats;
+  if (!s || typeof s !== "object") return [];
+  const parts: string[] = [];
+  const holders = statsCount(s.holders);
+  if (holders !== null) parts.push(plural(holders, "holder", "holders"));
+  const top = s.top10HoldersPercent;
+  if (typeof top === "number" && Number.isFinite(top) && top >= 0 && top <= 100) parts.push(`the top 10 wallets hold ${top.toFixed(1)}%`);
+  for (const p of [statsSide(s.window1h, "last hour"), statsSide(s.window24h, "last 24h")]) if (p) parts.push(p);
+  return parts;
+}
+
+function statsLine(d: CoinDossier): string | null {
+  const parts = statsParts(d);
+  if (parts.length) return `${STATS_LEAD} ${parts.join("; ")}.`;
+  if (d.stats === undefined && !d.coverage.missingSections.includes("token-stats")) return null;
+  return STATS_UNAVAILABLE;
+}
+
 function hasUsableContent(d: CoinDossier): boolean {
   const traded = d.flow !== null && (d.flow.distinctBuyers ?? 0) + (d.flow.distinctSellers ?? 0) > 0;
-  return traded || d.claims.length > 0 || d.wordsVsActions.length > 0;
+  return traded || d.claims.length > 0 || d.wordsVsActions.length > 0 || statsParts(d).length > 0;
 }
 
 /** Anything address-shaped or vendor-named anywhere withholds the WHOLE lens. */
@@ -155,6 +206,12 @@ function composeBody(d: CoinDossier): { lines: string[]; citations: LensCitation
   }
   candidates.push(...written);
 
+  // The statistics after the cases for and against: on a coin with written
+  // theses those are the reading; on one without (most of what a review is
+  // shown), this is. No ref: it cites no item of the dossier's evidence.
+  const stats = statsLine(d);
+  if (stats) candidates.push({ build: () => stats, cite: null });
+
   if (!d.strongestOpposition && !d.strongestSupport && d.claims.length) {
     const neutral = d.claims.filter((c) => c.stance === "neutral");
     const families = neutral.reduce((s, c) => s + c.familyCount, 0);
@@ -182,7 +239,9 @@ function composeBody(d: CoinDossier): { lines: string[]; citations: LensCitation
       (capped ? "; the read was capped and the rest are unread." : "."),
     cite: null,
   });
-  for (const u of d.unknowns.slice(0, 2)) candidates.push({ build: () => `Unknown: ${u}`, cite: null });
+  // The stats line already says the statistics were unavailable; not twice.
+  const unknowns = stats ? d.unknowns.filter((u) => u !== STATS_UNAVAILABLE_UNKNOWN) : d.unknowns;
+  for (const u of unknowns.slice(0, 2)) candidates.push({ build: () => `Unknown: ${u}`, cite: null });
   for (const cc of d.changeConditions.slice(0, 2)) candidates.push({ build: () => `Would change the reading: ${cc}`, cite: null });
 
   const lines = [ATTRIBUTION, NOT_LINE];
