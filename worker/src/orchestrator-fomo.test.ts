@@ -24,6 +24,7 @@ import {
   heldTokensFrom,
   ingestStoreOver,
   makeFomoPass,
+  MAX_CHILD_SIGNALS,
   mergeHeldTokens,
   normalizeAlertFrame,
   publicationStoreOver,
@@ -775,20 +776,23 @@ describe("review candidates", () => {
     r.pass.stop();
   });
 
-  it("never crowd out what traders are doing, and a candidate brings no triggers of its own", async () => {
+  it("a candidate brings no triggers of its own, and naming a coin is not activity", async () => {
     const db = await freshDb();
     const C1 = rh("44");
+    const TH = rh("55");
     await seedCohort(db, [member(KALEO, "CryptoKaleo")]);
     await store.insertEvents(db, [
       event(1, KALEO, C1, T0 - 5 * MIN), // the cohort buying a coin the review also named
       event(2, KALEO, X1, T0 - 20 * MIN), // older cohort activity elsewhere
       event(3, STAR, Y1, T0 - 2 * MIN), // a stranger on a coin only the review named
+      event(4, STAR, TH, T0 - 25 * MIN, "thesis"), // an older thesis on a coin the review also named
     ]);
     const r = await rig({
       db,
       serve: {},
       access: { [T1]: ACCESS.monitoring },
-      reviewCandidates: () => [cand(Y1, T0 - 1_000), cand(C1, T0 - 1_000)],
+      // Named a second ago: far newer than any trade here.
+      reviewCandidates: () => [cand(Y1, T0 - 1_000), cand(C1, T0 - 1_000), cand(TH, T0 - 1_000)],
       reviewResearchFor: () => true,
     });
     await r.run([T1]);
@@ -796,14 +800,89 @@ describe("review candidates", () => {
     assert.deepEqual(
       f.signals.map((s) => [s.token.key, s.reasons]),
       [
+        [Y1, ["candidate"]],
         [C1, ["candidate", "cohort"]],
         [X1, ["cohort"]],
-        [Y1, ["candidate"]],
+        [TH, ["candidate", "robinhood-thesis"]],
       ],
-      "a coin that is only a candidate sorts after every other discovery coin, however recent",
+      "candidate-only coins in their reserved places, then the rest by their own activity: the review's admission never lifts a thesis coin above fresher cohort buying",
     );
-    assert.deepEqual(f.signals[0]!.triggers.map((e) => e.trader.userId), [KALEO], "the cohort's triggers stand");
-    assert.deepEqual(f.signals[2]!.triggers, [], "nothing on a candidate-only coin counts as breadth");
+    const at = (k: string) => f.signals.findIndex((s) => s.token.key === k);
+    assert.ok(at(X1) < at(TH), "cohort buying 20 minutes ago outranks a 25-minute-old thesis, however recently the review named that coin");
+    assert.deepEqual(f.signals[1]!.triggers.map((e) => e.trader.userId), [KALEO], "the cohort's triggers stand");
+    assert.deepEqual(f.signals[0]!.triggers, [], "nothing on a candidate-only coin counts as breadth");
+    r.pass.stop();
+  });
+
+  it("a full file keeps places for candidates by leaving out the cohort's oldest coins, and pays for no candidate it turned away", async () => {
+    const coinN = (n: number) => `eip155:4663:0x${n.toString(16).padStart(40, "0")}`;
+    const db = await freshDb();
+    await seedCohort(db, [member(KALEO, "CryptoKaleo")]);
+    // 45 cohort coins inside the breadth window, one every 30 s: more than a file holds on their own.
+    await store.insertEvents(db, Array.from({ length: 45 }, (_, i) => event(100 + i, KALEO, coinN(1_000 + i), T0 - (i + 1) * 30_000)));
+    const named = [cand(X1, T0 - 3_000), cand(Y1, T0 - 2_000), cand(X2, T0 - 1_000)];
+    const HELD = coinN(9_999);
+    const r = await rig({
+      db,
+      serve: {},
+      access: { [T1]: ACCESS.monitoring },
+      held: new Map([[HELD, [T1]]]),
+      reviewCandidates: () => named,
+      reviewResearchFor: () => true,
+    });
+    await r.run([T1]);
+    const f = r.last(T1);
+    assert.equal(f.signals.length, MAX_CHILD_SIGNALS);
+    assert.deepEqual(
+      f.signals.slice(0, 4).map((s) => [s.token.key, s.reasons]),
+      [
+        [HELD, ["held"]],
+        [X2, ["candidate"]],
+        [Y1, ["candidate"]],
+        [X1, ["candidate"]],
+      ],
+      "held first, then the candidates, newest named first: the 2 MB fit cuts from the end",
+    );
+    const cohort = f.signals.slice(4).map((s) => s.token.key);
+    assert.deepEqual(cohort, Array.from({ length: 36 }, (_, i) => coinN(1_000 + i)), "the 36 newest cohort coins; the 9 oldest make way");
+    assert.deepEqual((await researchRows(db)).map((x) => x.token_key).sort(), [X1, X2, Y1].sort(), "research for exactly the candidates the file carried");
+    assert.equal(r.pass.health().reviewCandidates.leftOut, 0);
+    assert.equal(r.pass.health().reviewCandidates.queued, 3);
+    r.pass.stop();
+
+    // Held coins and watches are never left out for a candidate: one that finds no place is counted, and costs nothing.
+    const db2 = await freshDb();
+    const held = new Map(Array.from({ length: MAX_CHILD_SIGNALS - 2 }, (_, i) => [coinN(5_000 + i), [T1]] as [string, string[]]));
+    const r2 = await rig({ db: db2, serve: {}, access: { [T1]: ACCESS.monitoring }, held, reviewCandidates: () => named, reviewResearchFor: () => true });
+    await r2.run([T1]);
+    const f2 = r2.last(T1);
+    assert.equal(f2.signals.filter((s) => s.reasons.includes("held")).length, MAX_CHILD_SIGNALS - 2, "every held coin");
+    assert.deepEqual(f2.signals.filter((s) => s.reasons.includes("candidate")).map((s) => s.token.key), [X2, Y1], "room for two, newest named first");
+    assert.deepEqual((await researchRows(db2)).map((x) => x.token_key).sort(), [X2, Y1].sort(), "nothing paid for the one turned away");
+    assert.equal(r2.pass.health().reviewCandidates.leftOut, 1);
+    r2.pass.stop();
+  });
+
+  it("queue a coin's research at most once per refresh interval, even across a clock bucket's edge", async () => {
+    const db = await freshDb();
+    const every = REVIEW_CANDIDATES.refreshEveryMs;
+    const edge = Math.ceil(T0 / every) * every + every;
+    let named: ReviewCandidate[] = [cand(X1, edge - 10_000)];
+    const r = await rig({ db, serve: {}, access: { [T1]: ACCESS.monitoring }, reviewCandidates: () => named, reviewResearchFor: () => true });
+    const revs = async () => ((await db.prepare("SELECT evidence_rev FROM fomo_research_queue WHERE token_key = ?").all(X1)) as { evidence_rev: string }[]).map((x) => x.evidence_rev);
+    await r.run([T1], edge - 5_000);
+    assert.equal((await revs()).length, 1);
+    // Named again just past the edge of a 30-minute bucket: not queued again.
+    named = [cand(X1, edge + 1_000)];
+    await r.run([T1], edge + 5_000);
+    await r.run([T1], edge + 2 * MIN);
+    assert.equal((await revs()).length, 1, "seconds later, in a new bucket: still the one item");
+    // A full interval after it was queued, a fresh read (a new revision).
+    named = [cand(X1, edge - 5_000 + every)];
+    await r.run([T1], edge - 5_000 + every);
+    const after = await revs();
+    assert.equal(after.length, 2);
+    assert.equal(new Set(after).size, 2, "a new evidence revision, so a fresh read rather than a finished row");
     r.pass.stop();
   });
 

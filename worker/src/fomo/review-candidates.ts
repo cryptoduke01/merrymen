@@ -13,10 +13,13 @@
  *
  * WHO MAY ASK. Only an account on the operator's research allowlist
  * (MERRYMEN_DECISION_RESEARCH_ACCOUNTS, decision-research.ts), only while its
- * owner has research on (data access, and monitoring or follow). The child
- * checks both before it sends; the orchestrator checks both again before it
- * queues anything (orchestrator-fomo.ts syncReviewCandidates), so a child can
- * never widen either.
+ * owner has research on (data access, and monitoring or follow), and only on
+ * the live rail of a fast Trencher. The child checks all three before it
+ * sends. The orchestrator checks the allowlist and the owner's switches again
+ * before it carries or queues anything (orchestrator-fomo.ts
+ * syncReviewCandidates), so a child can never widen either; it cannot see the
+ * rail or the strategy, so those are the child's check alone, and coins named
+ * before an agent left them stay carried until keepMs runs out.
  *
  * HOW MUCH. At most `perWindow` distinct coins per rolling `windowMs`, on BOTH
  * sides of the IPC channel: the child sends no more, and the orchestrator keeps
@@ -24,8 +27,9 @@
  * duplicate, never a second coin. Research is queued at DISCOVERY priority, so
  * it is paid from the discovery share under the background research cap
  * (service.ts BACKGROUND_RESEARCH_CAP), waits behind held coins, watches and a
- * due cohort refresh, and is queued again for one coin no more often than
- * `refreshEveryMs`. A refused budget or a provider outage leaves the coin with
+ * due cohort refresh, is queued only for a coin the owner's file actually
+ * carried, and is queued again for one coin no more often than
+ * `refreshEveryMs` on one replica. A refused budget or a provider outage leaves the coin with
  * no lens or a lens that says "unavailable"; no review ever waits for it.
  *
  * WHAT IT NEVER IS. Not a buy signal, a nomination or breadth. A candidate
@@ -58,9 +62,10 @@ export const REVIEW_CANDIDATES: Readonly<ReviewCandidateLimits> = Object.freeze(
   /** Candidates carried per tenant at once, newest first. */
   carriedMax: 10,
   /**
-   * One coin's candidate research is queued again no sooner than this: the
-   * thesis class's own freshness (freshness.ts, 30 minutes), so a sooner
-   * refresh would mostly be served from cache anyway.
+   * One coin's candidate research is queued again no sooner than this after
+   * it was last queued (on one replica; orchestrator-fomo.ts
+   * queueCandidateResearch): the thesis class's own freshness (freshness.ts,
+   * 30 minutes), so a sooner refresh would mostly be served from cache anyway.
    */
   refreshEveryMs: 30 * 60_000,
   /** Coins remembered for fair rotation (least recently admitted first). */

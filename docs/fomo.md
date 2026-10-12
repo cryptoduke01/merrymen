@@ -436,7 +436,7 @@ hour 9 vs 14, last 24h 220 vs 198."
 ## Research for review candidates
 
 `worker/src/fomo/review-candidates.ts`, `fomo-child.ts reportReviewCandidates` and
-`orchestrator-fomo.ts syncReviewCandidates`.
+`orchestrator-fomo.ts syncReviewCandidates` / `queueCandidateResearch`.
 
 Shared research follows the cohort. Before this change, a coin no watched trader touched
 got no dossier and no lens. The fast Trencher's tape coins are mostly such coins, so the
@@ -444,8 +444,8 @@ Brain reviewed nearly all of them with no trader-flow lens. Now an opted-in agen
 entry candidates its review rotates through. The orchestrator queues research for exactly
 those coins, and the next review of each coin carries its dossier and lens.
 
-**Who.** Three conditions must all hold, and the child and the orchestrator each check
-them:
+**Who.** Three conditions must all hold. The child checks all three before it sends
+anything:
 
 - The agent's smart account is listed in `MERRYMEN_DECISION_RESEARCH_ACCOUNTS`
   (`decision-research.ts decisionResearchEnabledFor`). This is the same operator opt-in
@@ -454,8 +454,12 @@ them:
 - The owner has research on: `fomoDataAccess`, plus `fomoMonitoringEnabled` (research
   only) or `fomoFollowEnabled`.
 
-The orchestrator gets the allowlist from `orchestrator.ts`, keyed by the roster's agent. A
-child cannot widen it. Owner settings are read, never changed.
+The orchestrator checks the first and the third again before it carries or researches
+anything. It gets the allowlist from `orchestrator.ts`, keyed by the roster's agent, so a
+child cannot widen it. It cannot see the rail or the strategy, so the second is the
+child's check alone: an agent that switches to paper or off the fast Trencher sends
+nothing new, and the coins it already named stay carried, and researched, until they age
+out after 20 minutes. That is research only. Owner settings are read, never changed.
 
 **What is sent.** Once per review, right after the review picks its coin, the child calls
 `reportReviewCandidates`. It passes the entry candidates that cleared that review's own
@@ -473,27 +477,42 @@ accepted the report (`FomoBroker.report` resolves `true`). If the report is refu
 rate-limited on the store lane, times out, or gets no answer (a child spawned before the
 orchestrator's Fomo runtime attached), its coins are given back and the next review sends
 them again. While a report is in flight its coins keep their place, so they are not sent
-twice. The broker refuses a whole report if it names any
-non-Robinhood key, names more than 10 coins, or names none. The orchestrator records the
-coins under the reporting child's own tenant, in memory. That is enough because a child
-reports to the replica that spawned it, and that replica writes its file. After a lease
-moves, the child reports again within 10 minutes.
+twice. The broker refuses a whole report if it names any non-Robinhood key, names more
+than 10 coins, or names none. The orchestrator records the coins under the reporting
+child's own tenant, in memory. That is enough because a child reports to the replica that
+spawned it, and that replica writes its file. After a lease moves, the child reports again
+within 10 minutes.
 
 **What the orchestrator does.** On each pass, for each allowlisted roster agent whose
 owner has research on:
 
-- **A research item.** Each carried coin (at most 10, each named in the last 20 minutes)
-  becomes a research item at discovery priority. That happens at most once per coin per
-  30 minutes, which is the thesis class's own freshness. The evidence revision is the
-  time bucket, so every replica and owner asking in one bucket coalesces into one row. No
-  tenant is written on the row. The leader's queue pays for it like any other discovery
-  item: from the discovery share, under the background research cap
+- **A `candidate` signal.** Each carried coin (at most 10, each named in the last 20
+  minutes) goes into that owner's own `fomo.json` as a `candidate` signal at discovery
+  priority, with the latest shared dossier and lens. A coin that is only a candidate has
+  no triggers. Naming a coin is not activity: a coin that is a candidate and also, say, a
+  thesis coin ranks by its thesis, never by when the review named it, so it cannot jump
+  ahead of fresher cohort buying.
+- **Reserved places.** A file holds 40 signals, and cohort activity alone can fill them.
+  Coins that are only candidates therefore get up to 10 places
+  (`CANDIDATE_SIGNAL_RESERVE`, the most one owner can carry), taken from the
+  lowest-ranked discovery coins, which are the cohort's oldest. Held coins and watches
+  are never left out for a candidate. In the file the candidates come right after held
+  coins and watches, so the 2 MB fit (`child-file.ts fitToLimit`, which cuts from the end)
+  reaches every other discovery coin first. A candidate that still finds no place (held
+  coins and watches fill the file) is counted in the pass health
+  (`reviewCandidates.leftOut`) and gets no research.
+- **A research item, only for what the file carried.** After the files are written, each
+  candidate the owner's last file carried becomes a research item at discovery priority.
+  On one replica that happens at most once per coin per 30 minutes (the thesis class's own
+  freshness), measured from when that replica last queued it, not by a clock bucket, so a
+  coin named just before a half-hour boundary is not queued again just after it. The
+  evidence revision is the 30-minute bucket the item is queued in: replicas and owners
+  asking in one bucket coalesce into one row, and a coin queued again is always a fresh
+  read. No tenant is written on the row. The leader's queue pays for it like any other
+  discovery item: from the discovery share, under the background research cap
   (`BACKGROUND_RESEARCH_CAP`), behind held coins, watches and a due cohort refresh.
-  Without a key, nothing is queued.
-- **A `candidate` signal.** The coin goes into that owner's own `fomo.json` as a
-  `candidate` signal at discovery priority, with the latest shared dossier and lens. It
-  sorts after every other discovery coin, so it never crowds out what the cohort is
-  buying. A coin that is only a candidate has no triggers.
+  Without a key, nothing is queued. The pass health counts what was queued
+  (`reviewCandidates.queued`).
 
 **What it never is.** A coin that is only a candidate is never put through the follow
 machine. It cannot become a nomination, a verification ask, an assessment row or a
@@ -503,7 +522,7 @@ policy changes. A refused budget or a provider outage leaves the coin with no le
 with a lens whose statistics line says "unavailable". A review never waits for it.
 
 **Cost.** Each coin costs about 1,625 credits per refresh (one thesis page, the feed and
-stats), at most once per 30 minutes. A cache hit costs nothing. A review that keeps
+stats), at most once per 30 minutes on each replica. A cache hit costs nothing. A review that keeps
 rotating through the same 10 coins costs at most 20 refreshes an hour (about 32,500
 credits). The absolute worst case is 10 new coins every 10 minutes: 60 refreshes, or
 about 97,500 credits, an hour per agent. Either way it stays inside the discovery share,
@@ -904,7 +923,7 @@ Free 250k, Starter 2.5M, Builder 12.5M, Growth 37.5M, Scale 112.5M.
 | Stream | 0 | free on every plan |
 | Recovery after a reconnect | 125–1,250 | at most 10 pages |
 | Quick dossier refresh | ≈ 1,625 | 1 thesis page + alerts + stats |
-| Review candidates (allowlisted agents only) | ≈ 1,625 per coin per 30 min at most; ≤ 10 new coins per 10 min per agent | discovery class, under the background research cap; "Research for review candidates" |
+| Review candidates (allowlisted agents only) | ≈ 1,625 per coin per 30 min at most on each replica, only for coins the agent's file carried; ≤ 10 new coins per 10 min per agent | discovery class, under the background research cap; "Research for review candidates" |
 | Holdings question | 250 | |
 | Theses question | 1,250 per page | |
 | A tail | 0–250 to resolve the trader, at most 2 × 1,250 thesis reads | alerts come from the stored feed: 0 |
