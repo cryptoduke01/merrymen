@@ -967,8 +967,10 @@ other owner's agent, and its posting and reply warnings, are unchanged.
   `$ticker` then goes on as a coin of the chain (the index's own resolver,
   exactly as before majors), a word as chat. CoinGecko unreadable this time
   is nothing at all, never a guess on the chain (a `$SOL` there is not the
-  Solana asked about). With no CoinGecko Pro key, majors are off and nothing
-  is asked; a tag goes on exactly as before. A named major is a named coin
+  Solana asked about), and so is a ranked coin whose ticker the figures
+  line's sanitiser refuses (a political name, a hype word). With no
+  CoinGecko Pro key, majors are off and nothing is asked; a tag goes on
+  exactly as before. A named major is a named coin
   for the never-confirm-a-buy rule: no buys list, no first person, never its
   name in the words, and the writer is told it is not a Robinhood Chain coin
   and not one Alan trades. The model gets words only ("coingecko ranks it

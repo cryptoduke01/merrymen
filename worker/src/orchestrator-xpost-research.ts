@@ -1293,6 +1293,13 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
           notes.push("major-none");
           return { kind: "none" };
         }
+        // A ticker the figures line would never show (a political name, a hype
+        // word, sherwood's or merrymen's: xpost/figures.ts cleanTicker) gets no
+        // market words either: nothing at all is said of it, as if unread.
+        if (!cleanTicker(m.symbol)) {
+          notes.push("major-refused");
+          return { kind: "unread" };
+        }
         const facts = majorPhrases(m);
         if (!facts.length) {
           notes.push("major-unsaid");

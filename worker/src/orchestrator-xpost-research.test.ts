@@ -1221,6 +1221,17 @@ describe("majors: a coin by name or ticker, read on coingecko's list (2026-10-12
       assert.equal(r.figures, undefined, JSON.stringify(market));
       assert.deepEqual(r.facts, []);
     }
+    // A ranked coin whose ticker the line would never show (a political name, a hype word): no words either, nothing more looked up.
+    for (const symbol of ["trump", "pump", "SH3RWOOD"]) {
+      const refused = majorsFake({ markets: { ethereum: { ...ETH_MARKET, symbol } } });
+      const resolvedHere: string[] = [];
+      const r = await createXResearch({ majors: refused.reader, resolveTicker: async (t) => { resolvedHere.push(t); return CA; }, now: () => Date.now() })
+        .gather(input({ kind: "major", query: "eth", fallback: { kind: "coin", ticker: "ETH", address: null } }));
+      assert.deepEqual(r.facts, [], symbol);
+      assert.equal(r.figures, undefined, symbol);
+      assert.ok(r.notes.includes("major-refused"), symbol);
+      assert.deepEqual(resolvedHere, [], symbol);
+    }
   });
 
   it("coingecko unread is nothing at all, never a guess on the chain's coins; with no Pro key majors are off and the tag goes on as before", async () => {
