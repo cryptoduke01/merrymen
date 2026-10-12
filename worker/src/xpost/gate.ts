@@ -394,11 +394,30 @@ export function sherwoodMentioned(text: unknown): boolean {
  * look-alikes ignored), plain or as leet. What a tag is matched against to
  * tell whether it names a coin it bought (writer.ts coinNamedIn), and what a
  * coin-named answer may not say (XGateCtx.unsaid). Errs toward yes.
+ *
+ * A NAME WITH NEXT TO NO LETTERS a-z (red-team review, 2026-10-12): a buy
+ * called "ペペ" or "🐸" has no letters to match, so it was never found and
+ * the tag that named it was told what it bought. Such a name (fewer than
+ * three letters) is also matched on its own characters, NFKC, lowercase,
+ * invisible characters out, whitespace collapsed, when it has a letter or a
+ * pictograph to match on.
  */
 export function namedIn(text: unknown, names: readonly unknown[]): boolean {
   if (typeof text !== "string") return false;
   const read = [lettersOf(text), lettersOf(text, { leet: true })];
-  return names.some((name) => [lettersOf(name), lettersOf(name, { leet: true })].some((n) => n !== "" && read.some((r) => r.includes(n))));
+  const whole = rawName(text);
+  return names.some((name) => {
+    const letters = [lettersOf(name), lettersOf(name, { leet: true })];
+    if (letters.some((n) => n !== "" && read.some((r) => r.includes(n)))) return true;
+    if (typeof name !== "string" || letters[0]!.length >= 3) return false;
+    const raw = rawName(name);
+    return /[\p{L}\p{Extended_Pictographic}]/u.test(raw) && whole.includes(raw);
+  });
+}
+
+/** A name or a text as its own characters: NFKC, invisible characters out, lowercase, whitespace collapsed. */
+function rawName(s: string): string {
+  return s.normalize("NFKC").replace(/[\p{Cf}\p{Default_Ignorable_Code_Point}]/gu, "").toLowerCase().replace(/\s+/g, " ").trim();
 }
 
 // ── the X clauses ───────────────────────────────────────────────────────────

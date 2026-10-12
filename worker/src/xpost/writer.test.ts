@@ -822,6 +822,20 @@ describe("an active agent's answers and conversation memory", () => {
     }
   });
 
+  it("a buy whose name has no Latin letters is found by its own characters (red-team 2026-10-12)", () => {
+    // The reproduced buy: symbol PEPE, name ペペ (katakana); and a name that is an emoji.
+    assert.equal(coinNamedIn("did you buy ペペ?", ["PEPE", "ペペ"]), true);
+    assert.equal(coinNamedIn("you in on 🐸 too?", ["🐸"]), true);
+    assert.equal(coinNamedIn("you in on the frog emoji coin too?", ["🐸"]), false, "not by a word that is not its name");
+    for (const [q, buys] of [["did you buy ペペ?", [{ label: "ペペ", paper: false }]], ["you in on 🐸 too?", [{ label: "🐸", paper: false }]]] as const) {
+      const p = all(answerPrompt({ ...BASE, mode: "live", question: q, recentBuys: [...buys], boughtLately: "live", said: [], walletPublic: false }));
+      assert.doesNotMatch(p, /Coins you bought lately/, q);
+    }
+    // And a coin-named answer may not say it.
+    const gate = (text: string) => admitXPost(text, { kind: "reply", agentName: "Pine Stoat", mode: "live", coins: [], unsaid: ["PEPE", "🐸"], recentOwn: [], recentFleet: [] }, digitsOnly);
+    assert.deepEqual(gate("🐸 was a fun one lately, the buying looked steady. Say stop to opt out."), { ok: false, reason: "bought-named" });
+  });
+
   it("buys it cannot name are never said to be no buys: \"not bought anything\" only when it bought nothing", () => {
     const of = (o: { recentBuys: { label: string; paper: boolean }[]; boughtLately?: boolean }) =>
       answerPrompt({ ...BASE, mode: "live", question: "what have you been buying lately?", said: [], walletPublic: false, ...o }).prompt;

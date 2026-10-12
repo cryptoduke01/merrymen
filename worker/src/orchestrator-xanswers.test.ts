@@ -879,6 +879,25 @@ test("a tag that names a coin it bought gets no draft that names one, and look-a
   }
 });
 
+test("a buy named without Latin letters is never told to a tag that names it (red-team 2026-10-12)", async (t) => {
+  for (const env of [{}, RESEARCH_ON]) {
+    // The reproduced buy: symbol PEPE, name ペペ (katakana); the tag names it by that name.
+    const facts: AgentFacts = { ...FACTS, calls: [{ ...CALL, name: "ペペ" }] };
+    const w = await world(t, { env, research: fakeResearch().research, facts, answer: "yep, grabbed a little pepe, the curve looked early. say stop to opt out." });
+    w.setInbox([tag({ text: "@alan did you buy ペペ?" })]);
+    await w.step();
+    assert.equal(w.asked().length, 0, "never handed to the writer");
+    assert.deepEqual(await w.answers(), []);
+    // A buy named with an emoji, asked by it: the coin-named prompt, never the list.
+    const frog = await world(t, { env, research: fakeResearch().research, facts: { ...FACTS, calls: [{ ...CALL, symbol: "FROG", name: "🐸" }] } });
+    frog.setInbox([tag({ text: "@alan you in on 🐸 too?" })]);
+    await frog.step();
+    const [prompt] = frog.asked();
+    assert.ok(prompt);
+    assert.doesNotMatch(prompt!, /Coins you bought lately/);
+  }
+});
+
 test("research on: \"did you buy <contract>?\" reaches its own history by the address, end to end", async (t) => {
   const r = fakeResearch();
   const facts: AgentFacts = { ...FACTS, calls: [{ ...CALL, token: CA, ownWords: "the buying looked steady and real" }] };
