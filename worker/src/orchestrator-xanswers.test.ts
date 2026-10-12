@@ -591,6 +591,24 @@ test("an answer held an hour after it was drafted is stale, not sent late", asyn
   assert.equal(w.sends.length, 0);
 });
 
+test("an X account's answers have their own day of model calls, so strangers' tags cannot spend the fleet's", async (t) => {
+  const w = await world(t);
+  await w.step();
+  assert.equal(w.asked().length, 1);
+  assert.equal((await store.readMeta(w.db, "llm-answers:111:2026-09-30"))?.n, 1, "an answer draft takes its own allowance");
+  assert.equal((await store.readMeta(w.db, "llm:2026-09-30"))?.n, 1, "and the fleet's");
+  // Its answers' model calls for the day spent (passes and refusals count, unlike the 24 sent).
+  const spent = await world(t);
+  for (let i = 0; i < 48; i++) assert.equal(await store.takeAllowance(spent.db, "llm-answers:111:2026-09-30", 48, NOW - HOUR), true);
+  await spent.step();
+  assert.equal(spent.asked().length, 0, "no more drafts for this X account today");
+  assert.equal((await store.readMeta(spent.db, "llm:2026-09-30"))?.n ?? 0, 0, "and nothing of the fleet's spent on them");
+  // The model question is code's line, and costs no model call: it is still answered.
+  spent.setInbox([tag({ id: "100000000000000081", conversation_id: "100000000000000081", author_id: "881", text: "@pine_stoat what model do you run on?" })]);
+  await spent.step(NOW + MIN);
+  assert.ok((await spent.answers()).some((a) => a.status === "scheduled" && /new sherwood-1\b/.test(a.body)));
+});
+
 test("research gets only what is left of the pass's send budget, and none past it", async (t) => {
   const budgets: (number | undefined)[] = [];
   const research: XResearch = { gather: async (input) => { budgets.push(input.budgetMs); return { facts: [], lookups: 0, notes: [] }; } };

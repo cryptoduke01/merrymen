@@ -115,6 +115,14 @@ const ACTIVE_REPLY_POLL_MS = MIN;
 export const ACTIVE_REPLY_POLLS_PER_DAY = 1500;
 /** Tags an active agent may answer from one poll's batch. */
 const ANSWERS_PER_POLL = 3;
+/**
+ * MODEL CALLS AN X ACCOUNT'S ANSWERS MAY SPEND PER UTC DAY
+ * (`llm-answers:<xUserId>:<day>`), taken before the fleet's `llm:<day>` and
+ * counted in it too. A draft the model PASSes or the gate refuses counts
+ * toward none of the day's 24 answers, so without this a wave of strangers'
+ * tags could spend the whole fleet's allowance and stop every owner's posts.
+ */
+export const ANSWER_DRAFTS_PER_DAY = 2 * ANSWERS_PER_DAY;
 const MAX_REPLY_POLLS_PER_PASS = 2;
 /** Plans are drafted at most this often; sends run every pass. */
 const PLAN_EVERY_MS = MIN;
@@ -1341,7 +1349,17 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       const asked = classifyTag(candidate.text, { address: candidate.address ?? null, knownCoins });
       const intent = research ? asked : null;
       const templated = asked.kind === "model";
-      if (!templated && !(await takeAllowance(shared, `llm:${utcDay(nowMs)}`, llmPerDay, nowMs))) return null;
+      if (!templated) {
+        const answerKey = `llm-answers:${account.xUserId}:${utcDay(nowMs)}`;
+        if (!(await takeAllowance(shared, answerKey, ANSWER_DRAFTS_PER_DAY, nowMs))) {
+          bump("answer-drafts-spent");
+          return null;
+        }
+        if (!(await takeAllowance(shared, `llm:${utcDay(nowMs)}`, llmPerDay, nowMs))) {
+          await returnAllowance(shared, answerKey, at());
+          return null;
+        }
+      }
       const day = localDay(tz, nowMs);
       const facts = writerFacts(f, day, recentOwn);
       const social = templated ? null : await deps.socialProfile?.(account.tenant);

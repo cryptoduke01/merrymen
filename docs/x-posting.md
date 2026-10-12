@@ -419,7 +419,7 @@ reply consent; it does not erase recipient opt-outs or published posts.
 | `MERRYMEN_XPOST_MODEL` | orchestrator | `qwen/qwen3.8-27b` (groq), `claude-opus-5` (anthropic) | the writer's model; required for `openai` |
 | `MERRYMEN_XPOST_LLM_BASE_URL` | orchestrator | — | the https `…/v1` base, required for `openai` |
 | `MERRYMEN_XPOST_SHARE_HOUSE_KEY` | orchestrator | unset | `1` lets the writer use a fleet key, its own or the room's; otherwise a fleet key is refused |
-| `MERRYMEN_XPOST_LLM_PER_DAY` | orchestrator | 400 | model calls per UTC day across the fleet; `0` = intro templates only; unreadable = none |
+| `MERRYMEN_XPOST_LLM_PER_DAY` | orchestrator | 400 | model calls per UTC day across the fleet; `0` = intro templates only; unreadable = none. An active owner's answers also stop at 48 a day per X account |
 | `MERRYMEN_XPOST_PER_DAY` | orchestrator | 3 | posts per X account per local day (at most two of them buy posts); `0` = off; unreadable = the default |
 | `MERRYMEN_XPOST_FLEET_PER_DAY` | orchestrator | 1000 | posts per UTC day across the fleet; `0` or unreadable = off |
 | `MERRYMEN_XPOST_ACTIVE_TENANTS` | web + orchestrator, same value | unset | comma-separated tenant addresses of the operator's **own** agents: the active cadence, immediate answers to tags, and reply consent the orchestrator records; see "Active owners" below. The web reads it for the reply warning, through the same parser (`worker/src/xpost/scope.ts`). An entry that is not an address is named by position and ignored |
@@ -503,6 +503,13 @@ the mention itself. They go out **right away**:
   after it was drafted is stale (`ANSWER_STALE_MS`). A person already
   answered twice in the rolling day is passed over before any lookup or
   model call, and the next person in the batch is answered.
+- **A model allowance of their own.** An X account's answer drafts may make
+  48 model calls per UTC day (`llm-answers:<xUserId>:<day>`), taken before
+  the fleet's `MERRYMEN_XPOST_LLM_PER_DAY` and counted in it too. A PASS or
+  a refused draft counts toward none of the 24 answers, so without this a
+  wave of strangers' tags could spend the fleet's allowance and stop every
+  owner's posts for the day. The model question's code-built line costs
+  none.
 - **Research stays inside the pass's send budget.** An answer's lookups get
   their twelve seconds or what is left of the pass's five-minute send
   budget, whichever is less, so they never hold the next pass's sends back.
