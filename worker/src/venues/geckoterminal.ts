@@ -162,7 +162,8 @@ export async function geckoRefusal(res: Pick<Response, "status"> & Partial<Pick<
       if (peek.ok && /"error_code"\s*:\s*10005\b/.test(peek.text)) failure = "plan-restricted";
     } catch { /* unreadable is not a plan refusal */ }
   }
-  await res.body?.cancel().catch(() => {});
+  // Already drained by the peek, or a test double without a stream: either way nothing to release.
+  try { await res.body?.cancel(); } catch { /* released or never there */ }
   return { failure, retryAfterMs };
 }
 
