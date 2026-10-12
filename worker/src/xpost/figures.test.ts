@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { xWeightedLength, X_MAX_WEIGHTED } from "./client";
 import {
-  admitFiguresLine, cleanTicker, compactMoney, FIGURES_LINE, FIGURES_MAX, rankOf, renderFiguresLine, signedPercent,
+  admitFiguresLine, cleanTicker, compactMoney, FIGURES_LINE, FIGURES_MAX, figuresTickers, rankOf, renderFiguresLine, signedPercent,
   withFigures, withoutFiguresLine, type FiguresSpec,
 } from "./figures";
 import { sherwoodMentioned } from "./gate";
@@ -20,11 +20,10 @@ const HOT: FiguresSpec = [
 ];
 const NOTICE = "Say stop to opt out.";
 
-describe("tickers: A-Z and 0-9, two to ten, a letter, nothing else", () => {
+describe("tickers: A-Z, two to ten letters, nothing else", () => {
   it("a clean symbol is upper-cased and kept", () => {
     assert.equal(cleanTicker("btc"), "BTC");
     assert.equal(cleanTicker("SOL"), "SOL");
-    assert.equal(cleanTicker("1INCH"), "1INCH");
     assert.equal(cleanTicker("ABCDEFGHIJ"), "ABCDEFGHIJ");
   });
 
@@ -32,6 +31,19 @@ describe("tickers: A-Z and 0-9, two to ten, a letter, nothing else", () => {
     for (const bad of ["B", "ABCDEFGHIJK", "123", "$BTC", "BTC.X", "BTC 2", " BTC", "BTC​", "ΒΤC", "ВТС", "ıNCH", "straße", "🐸", "PEPE🐸", "B-TC", "", null, undefined, 42, { s: "BTC" }]) {
       assert.equal(cleanTicker(bad), null, String(bad));
     }
+  });
+
+  it("never a digit: a sum, a multiple or a copy that no code built (red-team 2026-10-12)", () => {
+    // The red team's posts: "trending $100X 24h +55.5% vol ~$1.2M, $1B 24h +21% vol ~$640k, $97K 24h +3.3% vol ~$120k".
+    for (const bad of ["100X", "1B", "97K", "10M", "1000X", "1INCH", "PEPE2", "USDC2", "ETH2", "S0L", "HH1488"]) assert.equal(cleanTicker(bad), null, bad);
+    assert.equal(renderFiguresLine([{ kind: "pools", coins: ["100X", "1B", "97K"].map((symbol) => ({ symbol, change24hPct: 21, volume24hUsd: 640_000 })) }]), null);
+    assert.equal(admitFiguresLine("geckoterminal robinhood: trending $1B 24h +21% vol ~$640k."), false, "nor does the grammar take one");
+    for (const bad of ["MILLION", "BILLIONS", "BUCKS", "DOLLAR", "MELANIA"]) assert.equal(cleanTicker(bad), null, bad);
+  });
+
+  it("every ticker a line shows, read off it", () => {
+    assert.deepEqual(figuresTickers(renderFiguresLine(HOT)), ["ABC", "DEF", "GHI", "DEF", "PEPE", "WIF", "TAO"]);
+    assert.deepEqual(figuresTickers("bitquery: 1h buys ~$12k, sells ~$8.1k."), []);
   });
 
   it("never a sherwood, merrymen, robinhood or agent name, however its digits spell it", () => {
@@ -103,8 +115,8 @@ describe("the line, rendered from typed data", () => {
 
   it("an unclean ticker takes its coin with it; nothing showable is no line", () => {
     assert.equal(renderFiguresLine([{ kind: "major", symbol: "B T C", rank: 1, priceUsd: 97_000 }]), null);
-    assert.equal(renderFiguresLine([{ kind: "pools", coins: [{ symbol: "SHERWOOD", change24hPct: 900, volume24hUsd: 5e6 }, { symbol: "OK1", change24hPct: 2, volume24hUsd: 60_000 }] }]),
-      "geckoterminal robinhood: trending $OK1 24h +2% vol ~$60k.");
+    assert.equal(renderFiguresLine([{ kind: "pools", coins: [{ symbol: "SHERWOOD", change24hPct: 900, volume24hUsd: 5e6 }, { symbol: "OKAY", change24hPct: 2, volume24hUsd: 60_000 }] }]),
+      "geckoterminal robinhood: trending $OKAY 24h +2% vol ~$60k.");
     assert.equal(renderFiguresLine([{ kind: "major", symbol: "BTC", rank: null, priceUsd: 900 }]), null, "a coin with no figure is no line");
     assert.equal(renderFiguresLine([{ kind: "crowd", symbols: ["🐸", "a b"] }]), null);
     assert.equal(renderFiguresLine([]), null);
@@ -114,10 +126,10 @@ describe("the line, rendered from typed data", () => {
     const line = renderFiguresLine([
       { kind: "pools", coins: ["AA", "BB", "CC", "DD"].map((symbol) => ({ symbol, change24hPct: 1, volume24hUsd: 50_000 })) },
       { kind: "crowd", symbols: ["AA", "BB", "CC"] },
-      { kind: "trending", symbols: ["X1", "X2", "X3", "X4"] },
+      { kind: "trending", symbols: ["XA", "XB", "XC", "XD"] },
       { kind: "flow", buyUsd: 5_000, sellUsd: 5_000 },
     ])!;
-    assert.doesNotMatch(line, /\$DD|\$CC, \$|X4/);
+    assert.doesNotMatch(line, /\$DD|\$CC, \$|XD/);
     assert.doesNotMatch(line, /bitquery/, "a section past six figures is left out whole");
     assert.ok((line.match(/~\$|[+-]\d/g) ?? []).length <= FIGURES_MAX);
   });

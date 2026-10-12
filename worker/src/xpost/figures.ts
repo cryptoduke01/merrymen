@@ -11,8 +11,8 @@
  *   geckoterminal robinhood: trending $ABC 24h +42.1% vol ~$1.2M; fomo: most bought $ABC.
  *
  * WHAT GOES IN IS TYPED DATA, NEVER TEXT. A provider's numbers, and of its
- * words only a ticker that passes `cleanTicker`: A-Z and 0-9, two to ten
- * characters, at least one letter, nothing else. Anything else is dropped,
+ * words only a ticker that passes `cleanTicker`: A-Z, two to ten letters,
+ * never a digit, nothing else. Anything else is dropped,
  * never echoed, never repaired: a symbol with a space, a dot, an emoji, a
  * lowercase look-alike from another alphabet or eleven characters is not
  * shown at all. A ticker that spells sherwood, merrymen, robinhood or the
@@ -58,11 +58,11 @@ export const CROWD_MAX = 2;
 export const TRENDING_MAX = 3;
 
 /**
- * WORDS A TICKER MAY NOT SPELL, read on its letters (digits read as the letters
- * they stand in for: "SH3RW00D" is sherwood). Merrymen's own names and its
- * model's, the agent's, the chain's and its stock token's; slurs and
- * profanity; political names; hype. Errs toward dropping: "SKILL" holds
- * "kill" and is left out, which costs one ticker in one line.
+ * WORDS A TICKER MAY NOT SPELL, read on its letters. Merrymen's own names and
+ * its model's, the agent's, the chain's and its stock token's; slurs and
+ * profanity; political names; hype; a sum of money in words ("MILLION",
+ * "BUCKS"). Errs toward dropping: "SKILL" holds "kill" and is left out, which
+ * costs one ticker in one line.
  */
 const TICKER_REFUSED = new RegExp([
   // its own house, in any spelling the letters allow
@@ -70,27 +70,35 @@ const TICKER_REFUSED = new RegExp([
   // abuse
   "fuck", "fuk", "shit", "cunt", "nigg", "fag", "nazi", "hitler", "rape", "porn", "sex", "nude", "cock", "dick", "puss", "bitch", "whore", "slut", "retard", "kill", "isis", "jihad", "terror",
   // politics
-  "trump", "biden", "maga", "kamala", "harris", "obama", "putin", "zelensk", "election", "president", "vote",
+  "trump", "melania", "biden", "maga", "kamala", "harris", "obama", "putin", "zelensk", "election", "president", "vote",
   // hype and trust words
   "pump", "moon", "gem", "lambo", "scam", "rug", "safe", "legit", "official",
+  // money in words: "$MILLION" beside "~$1.2M" reads as a sum code never built
+  "million", "billion", "trillion", "thousand", "hundred", "dollar", "bucks", "cents", "usd",
 ].join("|"));
 
-/** A ticker's letters as a reader sees them: lowercase, digits read as the letters they stand in for. */
-function tickerLetters(t: string): string {
-  return t.toLowerCase().replace(/0/g, "o").replace(/1/g, "i").replace(/3/g, "e").replace(/4/g, "a").replace(/5/g, "s").replace(/7/g, "t").replace(/8/g, "b");
-}
-
 /**
- * A PROVIDER'S SYMBOL AS THE LINE MAY SHOW IT, or null. Exactly A-Z, a-z and
- * 0-9, two to ten of them, at least one letter, read before anything is
- * changed (a Turkish dotless i or a German sharp s never becomes a capital by
- * upper-casing): then upper-cased. Nothing else is trimmed, folded or
- * repaired, and a refused word (TICKER_REFUSED) is null too.
+ * A PROVIDER'S SYMBOL AS THE LINE MAY SHOW IT, or null. Exactly A-Z and a-z,
+ * two to ten of them, read before anything is changed (a Turkish dotless i or
+ * a German sharp s never becomes a capital by upper-casing): then upper-cased.
+ * Nothing else is trimmed, folded or repaired, and a refused word
+ * (TICKER_REFUSED) is null too.
+ *
+ * NO DIGIT AT ALL (red-team 2026-10-12): "$1B", "$97K" and "$100X" were posted
+ * as trending coins, reading as sums and a multiple that no code built and
+ * the FIGURE count never saw; "$USDC2" as a dollar. A ticker with a digit is
+ * never shown, nor one the X gate would refuse as a word (gate.ts
+ * tickerRefusal, which the orchestrator runs on every ticker of the line).
  */
 export function cleanTicker(raw: unknown): string | null {
-  if (typeof raw !== "string" || !/^[A-Za-z0-9]{2,10}$/.test(raw) || !/[A-Za-z]/.test(raw)) return null;
+  if (typeof raw !== "string" || !/^[A-Za-z]{2,10}$/.test(raw)) return null;
   const t = raw.toUpperCase();
-  return TICKER_REFUSED.test(tickerLetters(t)) ? null : t;
+  return TICKER_REFUSED.test(t.toLowerCase()) ? null : t;
+}
+
+/** Every ticker a rendered line shows, without its $. */
+export function figuresTickers(line: unknown): string[] {
+  return typeof line === "string" ? [...line.matchAll(/(?<![~\w])\$([A-Z]{2,10})\b/g)].map((m) => m[1]!) : [];
 }
 
 const UNITS: readonly [number, string][] = [[1e3, "k"], [1e6, "M"], [1e9, "B"], [1e12, "T"]];
@@ -265,7 +273,7 @@ export function renderFiguresLine(spec: FiguresSpec): string | null {
 
 // ── the grammar ─────────────────────────────────────────────────────────────
 
-const T = String.raw`\$(?=[A-Z0-9]*[A-Z])[A-Z0-9]{2,10}`;
+const T = String.raw`\$[A-Z]{2,10}`;
 const MONEY = String.raw`~\$(?:[1-9]\.[1-9]|[1-9]\d{0,2})[kMBT]`;
 const PCT = String.raw`[+-](?:0|[1-9]\d{0,4})(?:\.[1-9])?%`;
 const RANK = String.raw`#[1-9]\d{0,2}`;

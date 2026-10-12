@@ -6,7 +6,7 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { admitXPost, sherwoodClaimed, sherwoodMentioned, sherwoodNamed, strayCharacter, tidyXPost, vocabularyRefusal, type BaseGate, type BaseGateCtx, type XGateCtx } from "./gate";
+import { admitXPost, sherwoodClaimed, sherwoodMentioned, sherwoodNamed, strayCharacter, tickerRefusal, tidyXPost, vocabularyRefusal, type BaseGate, type BaseGateCtx, type XGateCtx } from "./gate";
 import { similarity, REPEAT_LIMIT } from "../social-post";
 
 /** A base gate that refuses a digit and passes everything else through, recording what it was handed. */
@@ -1200,5 +1200,17 @@ describe("a figures line in an earlier post is never what makes, or unmakes, a r
     assert.ok(admitXPost(draft, ctx({ ...reply, recentOwn: [earlier] }), repeating).ok);
     // A casual post is weighed against the fleet's answers the same way.
     assert.equal(reason("geckoterminal and coingecko both trending, fomo busy", { kind: "casual", recentFleet: [earlier] }), "ok");
+  });
+});
+
+describe("a ticker in code's figures line is read as the gate reads words (red-team 2026-10-12)", () => {
+  it("an alert, hype, advice, a result or an amount in a ticker is refused; a coin's plain ticker is not", () => {
+    // Posted at 34ced01e: "trending $BUY …, $WAGMI …, $SHILL …; fomo: most bought $BUY", "$LFG", "$BULLISH".
+    for (const bad of ["BUY", "SELL", "LONG", "SHORT", "ENTRY", "ALERT", "WAGMI", "SHILL", "LFG", "NGMI", "BULLISH", "BEARISH", "REKT", "GEMS", "WEN",
+      "TARGET", "PNL", "ROI", "PROFIT", "USD", "BUCKS", "DOLLARS", "OFFICIAL"]) {
+      assert.notEqual(tickerRefusal(bad), null, bad);
+    }
+    for (const ok of ["BTC", "ETH", "SOL", "PEPE", "WIF", "BONK", "DOGE", "CHUMP", "FROGGY", "TAO", "HYPE"]) assert.equal(tickerRefusal(ok), null, ok);
+    for (const bad of ["1B", "100X", "", "B", "PEPE🐸", null]) assert.equal(tickerRefusal(bad), "charset", String(bad));
   });
 });

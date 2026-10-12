@@ -2287,10 +2287,12 @@ test("a tagged contract with a busy onchain hour goes out with bitquery's buys a
 
 // ── what's hot, end to end ──────────────────────────────────────────────────
 
-/** A trending pool past every floor: COIN<n> on the chain. */
+/** A ticker's letters for coin n (1 is A): a ticker shown never carries a digit. */
+const coinTag = (n: number): string => (n > 26 ? coinTag(Math.floor((n - 1) / 26)) : "") + String.fromCharCode(65 + ((n - 1) % 26));
+/** A trending pool past every floor: COINA for 1, on the chain. */
 function hotPool(n: number, change24hPct: number, volume24hUsd: number): GeckoPool {
   const token = `0x${(n + 0x40).toString(16).repeat(20)}` as `0x${string}`;
-  return { poolId: token, poolAddress: token, tokenAddress: token, name: `COIN${n} / WETH 1%`, dex: "uniswap-v3-robinhood", priceUsd: 0.01, reserveUsd: 90_000, fdvUsd: 2e6,
+  return { poolId: token, poolAddress: token, tokenAddress: token, name: `COIN${coinTag(n)} / WETH 1%`, dex: "uniswap-v3-robinhood", priceUsd: 0.01, reserveUsd: 90_000, fdvUsd: 2e6,
     volume24hUsd, change24hPct, change1hPct: 1, buys24h: 300, sells24h: 200, buyers24h: 180, buckets: emptyGeckoBuckets(), createdAt: null };
 }
 
@@ -2319,7 +2321,7 @@ test("what's hot: an overview from the index past the floors, in code's words, w
   const text = String(w.sends[0]?.text ?? "");
   assert.ok(xWeightedLength(text) <= X_MAX_WEIGHTED, String(xWeightedLength(text)));
   assert.ok(hotWords({ coins: 3, lead: { dir: "up", size: "sharply" } }).includes(wordsBeforeLine(text) ?? ""), text);
-  assert.match(text, / geckoterminal robinhood: trending \$COIN1 24h \+42\.1% vol ~\$1\.2M, /);
+  assert.match(text, / geckoterminal robinhood: trending \$COINA 24h \+42\.1% vol ~\$1\.2M, /);
   assert.match(text, /say stop to opt out\.$/i);
   assert.match(r.log ?? "", /answer-intent-hot 1/);
   assert.match(r.log ?? "", /answer-code-words 1/);
@@ -2429,5 +2431,33 @@ test("what's hot never shows a copycat of the chain's stock tokens, bitcoin, eth
     for (const n of names) assert.ok(!text.includes(`$${n}`), `${n}: ${text}`);
     assert.doesNotMatch(text, /fomo: most bought/, "fomo's coin was one the screen left out");
   }
+});
+
+test("what's hot never shows a ticker with a digit, nor one the gate would refuse as a word, in the pools or as fomo's most bought (red-team 2026-10-12)", async (t) => {
+  // Posted at 34ced01e: "$100X 24h +55.5% vol ~$1.2M, $1B 24h +21% vol ~$640k, $97K 24h +3.3% vol ~$120k",
+  // "$BUY …, $WAGMI …, $SHILL …; fomo: most bought $BUY", "$LFG …, $10M …".
+  const runs: { ask: string; names: string[] }[] = [
+    { ask: "@pine_stoat what's trending today?", names: ["100X", "1B", "97K"] },
+    { ask: "@pine_stoat what's trending?", names: ["BUY", "WAGMI", "SHILL"] },
+    { ask: "@pine_stoat what's hot?", names: ["BUY", "WAGMI", "SHILL"] },
+    { ask: "@pine_stoat what's hot?", names: ["LFG", "10M", "BULLISH"] },
+  ];
+  for (const { ask, names } of runs) {
+    const pools = [...names.map((n, i) => namedPool(n, i + 1, [55.5, 21, 3.3][i]!, [1.2e6, 640_000, 120_000][i]!)), namedPool("CHUMP", 9, 12, 300_000)];
+    const w = await world(t, { env: { ...RESEARCH_ON, MERRYMEN_XPOST_FOMO: "1" }, research: hotWithFomo(pools, [names[0]!]), facts: { ...FACTS, calls: [] } });
+    w.setInbox([tag({ text: ask })]);
+    await w.step();
+    const text = String(w.sends[0]?.text ?? "");
+    assert.match(text, /geckoterminal robinhood: trending \$CHUMP 24h \+12% vol ~\$300k\./, text);
+    for (const n of names) assert.ok(!text.includes(`$${n}`), `${n}: ${text}`);
+    assert.doesNotMatch(text, /fomo: most bought/);
+  }
+  // And whatever research hands it, a line with such a ticker is never put in: the orchestrator reads every ticker again.
+  const w = await world(t, { env: RESEARCH_ON, research: handing({ figures: [{ kind: "pools", coins: [{ symbol: "BUY", change24hPct: 33.1, volume24hUsd: 800_000 }] }] }),
+    answer: UP_A_LITTLE });
+  w.setInbox([tag({ text: "@pine_stoat how's eth doing?" })]);
+  const r = await w.step();
+  assert.deepEqual(w.sends.map((s) => s.text), [UP_A_LITTLE]);
+  assert.match(r.log ?? "", /answer-figures-left-out 1/);
 });
 

@@ -1027,10 +1027,16 @@ other owner's agent, and its posting and reply warnings, are unchanged.
   their bands, only when both sides reach a thousand dollars.
 - **The figures line** (`worker/src/xpost/figures.ts`): built by code from
   typed numbers and provider tickers only, never from a provider's text. A
-  ticker is shown only if it is A-Z and 0-9, two to ten characters, with at
-  least one letter (anything else is dropped, never repaired or echoed), and
-  spells no sherwood, merrymen, robinhood, the agent, slur, political name
-  or hype word. Money is compact (`~$1.9T`, `~$850M`, `~$85k`, `~$3.4k`);
+  ticker is shown only if it is A-Z, two to ten letters, never a digit
+  (anything else is dropped, never repaired or echoed: `$1B`, `$97K` and
+  `$100X` read as sums and a multiple no code built, red-team 2026-10-12),
+  spells no sherwood, merrymen, robinhood, the agent, slur, political name,
+  hype word or sum in words ("MILLION", "BUCKS"), and clears the X gate's own
+  vocabulary as a word (`gate.ts` `tickerRefusal`: `$BUY`, `$WAGMI`,
+  `$SHILL`, `$LFG` were posted in a line the gate would have refused as
+  words). Research drops such a ticker (`showTicker`), and the orchestrator
+  reads every ticker of the rendered line again: one that fails puts no line
+  in at all. Money is compact (`~$1.9T`, `~$850M`, `~$85k`, `~$3.4k`);
   under a thousand dollars is left out. A change has an explicit sign and at
   most one decimal (`+1.2%`, `-38%`, `+0%`). A rank is `#N`. At most six
   figures in a line. Each section names its source, and the grammar is

@@ -1218,6 +1218,26 @@ export function vocabularyRefusal(text: string): string | null {
 }
 
 /**
+ * A TICKER IN CODE'S FIGURES LINE, READ AS THIS GATE READS WORDS (red-team
+ * 2026-10-12). The line is put in after the gate, so a provider's symbol in
+ * it was never judged: "$BUY", "$WAGMI", "$SHILL" and "$LFG" were posted
+ * from the house account in a line the gate would have refused as words. So
+ * every ticker the line shows must clear the same vocabulary as a draft
+ * (vocabularyRefusal, the all-caps alert words, advice beside a coin, an
+ * amount in words), read lowercase and as written. Null when it does.
+ */
+export function tickerRefusal(ticker: unknown): string | null {
+  if (typeof ticker !== "string" || !/^[A-Za-z]{2,10}$/.test(ticker)) return "charset";
+  const upper = ticker.toUpperCase(), lower = ticker.toLowerCase();
+  if (ALERT_CAPS.test(upper)) return "alert";
+  const vocab = vocabularyRefusal(lower);
+  if (vocab) return vocab;
+  if (COIN_ADVICE.test(lower) || REPLY_CURRENT_OR_ACTION.test(lower)) return "hype";
+  if (amountSaid(lower)) return "quantity";
+  return null;
+}
+
+/**
  * A BUY SAID IN THE FIRST PERSON: bought, grabbed, picked up, scooped,
  * snagged, aped, got in on, entered, added, loaded up on, went in on, been
  * buying — with or without the "i" people drop ("yep, grabbed bonk"). "i buy

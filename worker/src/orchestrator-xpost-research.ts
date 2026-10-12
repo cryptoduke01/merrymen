@@ -60,7 +60,7 @@ import { readPeerTheses } from "./peer-theses";
 import { extractCashtags, isInjection, isPrivateAsk } from "./telegram/tg-groups/detect";
 import { publicCoinReason, publicFactRequest } from "./telegram/tg-groups/facts";
 import type { PublicThesis } from "./thesis-policy";
-import { lettersOf, moneySaid, sherwoodMentioned, vocabularyRefusal } from "./xpost/gate";
+import { lettersOf, moneySaid, sherwoodMentioned, tickerRefusal, vocabularyRefusal } from "./xpost/gate";
 import { coinOf, hash32 } from "./xpost/planner";
 import { normalisedTag, plainAsk, withoutReplyOptOut } from "./xpost/replies";
 import { takeAllowance, type XPost } from "./xpost/store";
@@ -905,9 +905,20 @@ export function copycatTicker(ticker: string): boolean {
   return STOCK_NAMES.some((n) => t.includes(n));
 }
 
+/**
+ * A PROVIDER'S SYMBOL THE LINE MAY SHOW, or null: the figures line's sanitiser
+ * (no digit, no refused word) and then the X gate's own vocabulary
+ * (tickerRefusal), so the line is never laxer than the gate it is put in
+ * after (red-team 2026-10-12: "$BUY", "$WAGMI", "$1B" were posted).
+ */
+export function showTicker(raw: unknown): string | null {
+  const t = cleanTicker(raw);
+  return t && tickerRefusal(t) === null ? t : null;
+}
+
 /** The base token's symbol as the index names a pool ("CHUMP / WETH 1%" is CHUMP), through the figures line's sanitiser, or null. */
 function poolTicker(name: string): string | null {
-  const t = cleanTicker(/^([^\s/]{1,32}) \/ /.exec(String(name ?? ""))?.[1]);
+  const t = showTicker(/^([^\s/]{1,32}) \/ /.exec(String(name ?? ""))?.[1]);
   return t && !copycatTicker(t) ? t : null;
 }
 
@@ -1337,7 +1348,7 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
         // A ticker the figures line would never show (a political name, a hype
         // word, sherwood's or merrymen's: xpost/figures.ts cleanTicker) gets no
         // market words either: nothing at all is said of it, as if unread.
-        if (!cleanTicker(m.symbol)) {
+        if (!showTicker(m.symbol)) {
           notes.push("major-refused");
           return { kind: "unread" };
         }
@@ -1394,7 +1405,7 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
         if (broker && !crowd.length) notes.push("fomo-nothing");
         const trending: string[] = [];
         for (const c of trend && !trend.failed ? trend.coins : []) {
-          const ticker = c.rank !== null && c.rank <= MAJORS_MAX_RANK ? cleanTicker(c.symbol) : null;
+          const ticker = c.rank !== null && c.rank <= MAJORS_MAX_RANK ? showTicker(c.symbol) : null;
           if (ticker && !trending.includes(ticker)) trending.push(ticker);
           if (trending.length >= HOT_TRENDING) break;
         }

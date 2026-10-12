@@ -1291,10 +1291,12 @@ describe("majors: a coin by name or ticker, read on coingecko's list (2026-10-12
 // ── what's hot (2026-10-12) ─────────────────────────────────────────────────
 
 const AAPL_TOKEN = "0xaF3D76f1834A1d425780943C99Ea8A608f8a93f9";
-/** A trending pool as the index parses it: past every floor unless told otherwise. */
+/** A ticker's letters for coin n (1 is A, 13 is M): a ticker shown never carries a digit. */
+const coinTag = (n: number): string => (n > 26 ? coinTag(Math.floor((n - 1) / 26)) : "") + String.fromCharCode(65 + ((n - 1) % 26));
+/** A trending pool as the index parses it, COINA for 1: past every floor unless told otherwise. */
 function pool(n: number, over: Partial<GeckoPool> = {}): GeckoPool {
   const token = `0x${n.toString(16).padStart(2, "0").repeat(20)}` as `0x${string}`;
-  return { poolId: token, poolAddress: token, tokenAddress: token, name: `COIN${n} / WETH 1%`, dex: "uniswap-v3-robinhood", priceUsd: 0.01,
+  return { poolId: token, poolAddress: token, tokenAddress: token, name: `COIN${coinTag(n)} / WETH 1%`, dex: "uniswap-v3-robinhood", priceUsd: 0.01,
     reserveUsd: 80_000, fdvUsd: 2e6, volume24hUsd: 400_000, change24hPct: 12, change1hPct: 1, buys24h: 300, sells24h: 200, buyers24h: 180,
     buckets: emptyGeckoBuckets(), createdAt: null, ...over };
 }
@@ -1354,12 +1356,12 @@ describe("what's hot: the chain's trending coins past the fleet's floors, fomo's
       pool(8, { name: "SHERWOOD / WETH 1%" }),
       pool(9, { name: "🐸PEPE / WETH 1%" }),
       pool(10, { name: "BTC / WETH 1%" }),             // a big coin's ticker on the chain
-      pool(11, { name: "COIN1 / USDG 0.3%" }),         // a ticker already shown
+      pool(11, { name: "COINA / USDG 0.3%" }),         // a ticker already shown
       pool(12, { reserveUsd: null }),                  // unknown depth is refused
       pool(13),
       pool(1, { poolId: "0x" + "ee".repeat(32), poolAddress: null }), // the same token again
     ]);
-    assert.deepEqual(kept.map((k) => k.ticker), ["COIN1", "COIN13"]);
+    assert.deepEqual(kept.map((k) => k.ticker), ["COINA", "COINM"]);
   });
 
   it("never a copycat of the chain's stock tokens, bitcoin, ether or a dollar, whatever its address (red-team 2026-10-12)", () => {
@@ -1369,7 +1371,7 @@ describe("what's hot: the chain's trending coins past the fleet's floors, fomo's
     assert.deepEqual(kept.map((k) => k.ticker), ["CHUMP"]);
     for (const sym of copycats) assert.ok(copycatTicker(sym), sym);
     // Built on an everyday word, and no stock token's: still shown.
-    for (const sym of ["CHUMP", "DOGECOIN", "COIN1", "FROGGY", "METAL", "BEAN", "MUSE"]) assert.equal(copycatTicker(sym), false, sym);
+    for (const sym of ["CHUMP", "DOGECOIN", "COINA", "FROGGY", "METAL", "BEAN", "MUSE"]) assert.equal(copycatTicker(sym), false, sym);
   });
 
   it("in words: how many, which way on the day, fomo and coingecko's list; never a name or a figure; through the X gate", () => {
@@ -1404,14 +1406,14 @@ describe("what's hot: the chain's trending coins past the fleet's floors, fomo's
     assert.equal(b.lookups, 3);
     assert.deepEqual(h.fomoCalls.map((c) => [c.tool, c.args.token, c.args.chain, c.surface]), [["fomo_get_token_activity", null, "robinhood", "x-answer"]]);
     assert.deepEqual(b.figures, [
-      { kind: "pools", coins: [{ symbol: "COIN1", change24hPct: 42.07, volume24hUsd: 1.21e6 }, { symbol: "COIN2", change24hPct: -8.3, volume24hUsd: 310_400 }, { symbol: "COIN3", change24hPct: 12, volume24hUsd: 400_000 }] },
-      { kind: "crowd", symbols: ["COIN4", "COIN2"] },
+      { kind: "pools", coins: [{ symbol: "COINA", change24hPct: 42.07, volume24hUsd: 1.21e6 }, { symbol: "COINB", change24hPct: -8.3, volume24hUsd: 310_400 }, { symbol: "COINC", change24hPct: 12, volume24hUsd: 400_000 }] },
+      { kind: "crowd", symbols: ["COIND", "COINB"] },
       { kind: "trending", symbols: ["PEPE", "TAO"] },
     ], "fomo's own labels never shown: the screened coin's ticker is");
     assert.deepEqual(b.facts, hotPhrases({ changes: [42.07, -8.3, 12], crowd: 2, trending: 2 }));
     assert.deepEqual(b.hot, { coins: 3, lead: { dir: "up", size: "sharply" } }, "code's own words are built from this read, never a draft");
     assert.equal(renderFiguresLine(b.figures!),
-      "geckoterminal robinhood: trending $COIN1 24h +42.1% vol ~$1.2M, $COIN2 24h -8.3% vol ~$310k, $COIN3 24h +12% vol ~$400k; fomo: most bought $COIN4, $COIN2; coingecko: trending $PEPE, $TAO.");
+      "geckoterminal robinhood: trending $COINA 24h +42.1% vol ~$1.2M, $COINB 24h -8.3% vol ~$310k, $COINC 24h +12% vol ~$400k; fomo: most bought $COIND, $COINB; coingecko: trending $PEPE, $TAO.");
   });
 
   it("nothing past the floors: the plain line and nothing more looked up; the index unread: nothing at all", async () => {
