@@ -48,7 +48,8 @@ const PEPE_CA = `0x${"cd34".repeat(10)}`;
 const TENANT = `0x${"ab".repeat(20)}`;
 const CALL: CallFact = { decisionId: "d1", side: "buy", symbol: "PEPE", name: "Pepe", token: PEPE_CA, paper: true,
   atSec: (NOW - 4 * HOUR) / 1000, bands: [], ownWords: "the buying looked steady and real" };
-const FACTS: AgentFacts = { tenant: TENANT, agentId: TENANT, slug: null, name: "Alan", mode: "live", ageDays: 9, strategy: "trencher", traits: [], calls: [CALL] };
+/** On paper, as its one buy (CALL) was: its own history is said only for the money it trades with now. */
+const FACTS: AgentFacts = { tenant: TENANT, agentId: TENANT, slug: null, name: "Alan", mode: "paper", ageDays: 9, strategy: "trencher", traits: [], calls: [CALL] };
 /** The shared database a bundle counts its daily flow readings in: in memory, with the X tables. */
 async function freshDb(): Promise<Db> {
   const db = wrapSqlite(new DatabaseSync(":memory:"));
@@ -423,9 +424,19 @@ describe("its own history of a coin", () => {
     assert.deepEqual(ownHistoryPhrases({ address: CA, facts: FACTS, posts: [], theses: [landed] }), [],
       "a landed buy thesis by the derived Trencher ticker alone is eleven hex, never proof it bought this contract");
     const caPost = post({ coin: "Ab", decisionId: "d9", body: `picked up some of this one CA (Robinhood Chain): ${CA}` });
-    assert.deepEqual(ownHistoryPhrases({ address: CA, facts: FACTS, posts: [caPost], theses: [landed] }),
+    assert.deepEqual(ownHistoryPhrases({ address: CA, facts: { ...FACTS, mode: "live" }, posts: [caPost], theses: [landed] }),
       ["you bought it lately", "what you posted on X when you bought it: picked up some of this one", "your public reason for the buy: the curve looked crowded"],
       "beside its own buy post of the full contract, the derived ticker's thesis is that coin's");
+  });
+
+  it("only a buy made with the money it trades with now: a live agent's paper buy is never said, nor a paper agent's live one", () => {
+    const paperBuy = ownHistoryPhrases({ address: PEPE_CA, facts: { ...FACTS, mode: "paper" }, posts: [post()], theses: [] });
+    assert.equal(paperBuy[0], "you bought it lately, on paper");
+    assert.deepEqual(ownHistoryPhrases({ address: PEPE_CA, facts: { ...FACTS, mode: "live" }, posts: [post()], theses: [] }), [], "switched to live: its paper buy is not said");
+    const live = { ...FACTS, calls: [{ ...CALL, paper: false }] };
+    assert.equal(ownHistoryPhrases({ address: PEPE_CA, facts: { ...live, mode: "live" }, posts: [post()], theses: [] })[0], "you bought it lately");
+    assert.deepEqual(ownHistoryPhrases({ address: PEPE_CA, facts: { ...live, mode: "paper" }, posts: [post()], theses: [] }), [], "switched to paper: its live buy is not said");
+    assert.equal(ownHistoryPhrases({ address: PEPE_CA, facts: { ...FACTS, mode: "idle" }, posts: [post()], theses: [] })[0], "you bought it lately, on paper", "idle: as it was");
   });
 
   it("an address that only shares a bought coin's last eleven hex is never one it bought", () => {

@@ -378,21 +378,33 @@ test("a live agent whose buys all lack a sayable name is never told it bought no
   assert.match(idle.asked()[0]!, /You have not bought anything lately/);
 });
 
-test("a live agent whose unnamed buys were on paper is told they were paper, never real money", async (t) => {
+test("only the money it trades with now: a live agent is never told of its paper buys, and an honest answer in either mode is posted", async (t) => {
   // Switched from paper to live inside the window: every recent buy is a paper Trencher buy it cannot name.
   const paperBuy: CallFact = { ...CALL, decisionId: "fill-derived", symbol: "T7631DACC21B", name: "Pepe 2.0", paper: true };
-  const w = await world(t, { facts: { ...FACTS, mode: "live", calls: [paperBuy] } });
-  w.setInbox([tag({ text: "@pine_stoat what have you been buying lately?" })]);
-  await w.step();
-  const [prompt] = w.asked();
-  assert.match(prompt!, /You trade with real money/);
-  assert.match(prompt!, /You bought coins lately on paper, with practice money, that you can't name here/);
-  assert.match(prompt!, /never say they were real money/);
-  // A live buy beside it: both kinds, and never which.
-  const both = await world(t, { facts: { ...FACTS, mode: "live", calls: [paperBuy, { ...paperBuy, decisionId: "fill-derived-2", symbol: "T8888DACC21B", paper: false }] } });
-  both.setInbox([tag({ text: "@pine_stoat what have you been buying lately?" })]);
-  await both.step();
-  assert.match(both.asked()[0]!, /some on paper and some with real money/);
+  const liveBuy: CallFact = { ...paperBuy, decisionId: "fill-derived-2", symbol: "T8888DACC21B", paper: false };
+  const cases: [string, AgentFacts, string, RegExp | null, RegExp][] = [
+    ["live, its buys all on paper", { ...FACTS, mode: "live", calls: [paperBuy] }, "can't really get into what i've been buying here. Say stop to opt out.", null, /paper|practice|can't name here/i],
+    ["live, its buys of both kinds", { ...FACTS, mode: "live", calls: [paperBuy, liveBuy] }, "picked up a few with real money lately, can't name them here. Say stop to opt out.",
+      /You bought coins lately with real money that you can't name here/, /some on paper|practice/i],
+    ["live, a paper coin it may name", { ...FACTS, mode: "live", calls: [{ ...CALL, paper: true }] }, "can't really get into what i've been buying here. Say stop to opt out.", null, /Pepe|paper|practice/i],
+    ["paper, its buys on paper", { ...FACTS, mode: "paper", calls: [paperBuy] }, "grabbed a few on paper lately, can't name them here. Say stop to opt out.",
+      /You bought coins lately on paper, with practice money, that you can't name here/, /real money that you can't name/i],
+    ["paper, its buys all live", { ...FACTS, mode: "paper", calls: [liveBuy] }, "i'm on paper, and i can't name what i've been buying here. Say stop to opt out.", null, /real money|can't name here/i],
+  ];
+  for (const env of [{}, RESEARCH_ON]) {
+    for (const [what, facts, answer, said, unsaid] of cases) {
+      const w = await world(t, { env, research: fakeResearch().research, facts, answer });
+      w.setInbox([tag({ text: "@pine_stoat what have you been buying lately?" })]);
+      await w.step();
+      const [prompt] = w.asked();
+      assert.ok(prompt, what);
+      if (said) assert.match(prompt!, said, what);
+      assert.doesNotMatch(prompt!, unsaid, what);
+      assert.doesNotMatch(prompt!, /You have not bought anything lately/, what);
+      const [row] = await w.answers();
+      assert.equal(row!.status, "scheduled", `${what}: ${row!.reason ?? ""}`);
+    }
+  }
 });
 
 test("advice requests and plain chatter get no answer and cost no model call", async (t) => {

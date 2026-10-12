@@ -827,24 +827,44 @@ describe("an active agent's answers and conversation memory", () => {
     assert.doesNotMatch(named, /not bought anything|can't name here/);
   });
 
-  it("buys it cannot name are said with the money they were, never the agent's money today", () => {
-    const of = (mode: "live" | "paper", boughtLately: "paper" | "live" | "both") =>
-      answerPrompt({ ...BASE, mode, question: "what have you been buying lately?", recentBuys: [], boughtLately, said: [], walletPublic: false }).prompt;
-    // Switched to live, its recent buys all on paper: never steered to call them real money.
-    const switched = of("live", "paper");
-    assert.match(switched, /You trade with real money/);
-    assert.match(switched, /You bought coins lately on paper, with practice money, that you can't name here/);
-    assert.match(switched, /never say they were real money/);
-    // On paper now, its recent buys live: never steered to call them paper.
-    const back = of("paper", "live");
-    assert.match(back, /You bought coins lately with real money that you can't name here/);
-    assert.match(back, /never say they were on paper/);
-    // Both: never which.
-    assert.match(of("live", "both"), /some on paper and some with real money.*never say which money any of them was/);
-    for (const p of [switched, back, of("live", "both")]) {
-      assert.match(p, /never say you haven't bought anything/);
-      assert.doesNotMatch(p, /You have not bought anything lately/);
+  it("only the money it trades with now is ever said: a live agent is never told of a paper buy, a paper agent never of a live one", () => {
+    const of = (mode: "live" | "paper", o: { recentBuys?: { label: string; paper: boolean }[]; boughtLately?: true | "paper" | "live" | "both" }) =>
+      answerPrompt({ ...BASE, mode, question: "what have you been buying lately?", recentBuys: [], said: [], walletPublic: false, ...o });
+    // Switched to live, its recent buys all on paper: nothing about them at all, named or not.
+    for (const p of [of("live", { boughtLately: "paper" }), of("live", { recentBuys: [{ label: "Pepe", paper: true }], boughtLately: "paper" })]) {
+      const text = all(p);
+      assert.match(text, /You trade with real money/);
+      assert.doesNotMatch(text, /paper|practice/i, "never a paper buy in a live agent's prompt");
+      assert.doesNotMatch(text, /You have not bought anything lately|can't name here|Pepe/);
     }
+    // A live agent's unnamed buys of both kinds: said as real money, which some were; its live coin named, its paper one not.
+    const both = all(of("live", { boughtLately: "both" }));
+    assert.match(both, /You bought coins lately with real money that you can't name here: never name or guess one, never say they were on paper/);
+    assert.doesNotMatch(both, /some on paper|\(on paper\)|practice/i, "never that any were paper");
+    const mixed = all(of("live", { recentBuys: [{ label: "Pepe", paper: true }, { label: "Wif", paper: false }], boughtLately: "both" }));
+    assert.match(mixed, /Coins you bought lately: «Wif»\./);
+    assert.doesNotMatch(mixed, /Pepe|paper|practice/i);
+    // On paper: paper said, as before; its earlier live buys never.
+    const paper = all(of("paper", { boughtLately: "paper" }));
+    assert.match(paper, /You bought coins lately on paper, with practice money, that you can't name here/);
+    assert.match(all(of("paper", { boughtLately: "both" })), /You bought coins lately on paper/);
+    for (const p of [of("paper", { boughtLately: "live" }), of("paper", { recentBuys: [{ label: "Wif", paper: false }], boughtLately: "live" })]) {
+      const text = all(p);
+      assert.doesNotMatch(text, /real money|can't name here|Wif/);
+      assert.match(text, /every answer must say so in a few words \(that you're on paper\)/);
+    }
+    // The drafts those prompts invite clear the gate in the agent's mode today.
+    const gate = (mode: "live" | "paper", text: string) => admitXPost(text, { kind: "reply", agentName: "Pine Stoat", mode, coins: [], recentOwn: [], recentFleet: [] }, digitsOnly);
+    for (const text of ["picked up a couple lately, can't name em here tho. Say stop to opt out.", "bought a few with real money lately, can't name them here. Say stop to opt out.",
+      "can't really get into what i've been buying here. Say stop to opt out."]) {
+      assert.deepEqual(gate("live", text), { ok: true, text }, text);
+    }
+    for (const text of ["grabbed a few on paper lately, can't name them here. Say stop to opt out.", "i'm on paper, and i can't name what i've been buying here. Say stop to opt out."]) {
+      assert.deepEqual(gate("paper", text), { ok: true, text }, text);
+    }
+    // What the old prompt invited, refused in that mode: why it is no longer said.
+    assert.equal((gate("live", "grabbed a few coins on paper lately, can't name them here. Say stop to opt out.") as { reason?: string }).reason, "mode-false");
+    assert.equal((gate("paper", "bought a couple with real money, on paper now. Say stop to opt out.") as { reason?: string }).reason, "mode-false");
   });
 
   it("an answer is very casual, and the writer is never told the sherwood name: only code's lines say it", () => {

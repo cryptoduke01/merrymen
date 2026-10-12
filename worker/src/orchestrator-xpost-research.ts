@@ -614,7 +614,9 @@ function fullyBought(address: string, facts: AgentFacts, posts: readonly XPost[]
  * buy post's CA is (fullyBought). Then a buy counts when its token is that
  * contract, a buy post when its CA (or an address-matched buy's decision)
  * is, and a thesis when its symbol is an address-matched buy's or the
- * contract's derived id.
+ * contract's derived id. And only a buy made with the money it trades with
+ * now: a live agent's paper buy is never said, nor a paper agent's live one
+ * (writer.ts ownMoney: the gate refuses either).
  *
  * NEVER "YOU PASSED" (review, 2026-10-12). The only record of a declined look
  * here would be a public thesis, and a symbol's thesis without a trade is a
@@ -642,6 +644,9 @@ export function ownHistoryPhrases(o: {
   const boughtThesis = theses.find((t) => t.action === "buy" && t.outcome === "landed");
   const out: string[] = [];
   const paper = calls[0]?.paper ?? boughtThesis?.paper ?? false;
+  // ONLY THE MONEY IT TRADES WITH NOW: the answer is gated with today's mode,
+  // which refuses a live agent's "on paper" and a paper agent's "real money".
+  if ((o.facts.mode === "live" && paper) || (o.facts.mode === "paper" && !paper)) return [];
   out.push(`you bought it lately${paper ? ", on paper" : ""}`);
   const own = calls.map((c) => c.ownWords).find((w): w is string => sayable(w));
   if (own) out.push(`your own words when you bought it: ${own}`);

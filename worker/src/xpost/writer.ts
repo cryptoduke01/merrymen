@@ -161,7 +161,10 @@ export interface AnswerFacts extends WriterFacts {
    * switched to live whose recent buys were all paper was steered to call
    * them real-money buys (and a paper agent's live buys, paper). With the
    * kind the line says which money, and never the other. `true` is a buy of
-   * no known kind: the line says no money either way.
+   * no known kind: the line says no money either way. Only the money it
+   * trades with now is ever said (ownMoney): a live agent whose unnamed buys
+   * were all paper is told nothing of them, since the gate refuses its "on
+   * paper" (fail-closed review, 2026-10-12).
    */
   boughtLately?: boolean | "paper" | "live" | "both";
   /** Its own recent public posts and answers, newest first: what it has already said, which it may restate. */
@@ -827,12 +830,34 @@ const COIN_BOUGHT_EXACT = "They tagged the exact contract your own records show 
 const OWN_BUY_FACT = /\b(?:you bought|bought it|the buy|your latest buy)\b/i;
 
 /** Buys it cannot name, by which money they were: the line says that money and never the other. */
-const UNNAMED_BUYS: Readonly<Record<"paper" | "live" | "both" | "unknown", string>> = {
+type UnnamedKind = "paper" | "live" | "both" | "unknown";
+const UNNAMED_BUYS: Readonly<Record<UnnamedKind, string>> = {
   paper: "You bought coins lately on paper, with practice money, that you can't name here: never name or guess one, never say they were real money, and never say you haven't bought anything.",
   live: "You bought coins lately with real money that you can't name here: never name or guess one, never say they were on paper, and never say you haven't bought anything.",
   both: "You bought coins lately, some on paper and some with real money, that you can't name here: never name or guess one, never say which money any of them was, and never say you haven't bought anything.",
   unknown: "You bought coins lately that you can't name here: never name or guess one, and never say you haven't bought anything.",
 };
+
+/**
+ * ONLY THE MONEY IT TRADES WITH NOW (fail-closed review, 2026-10-12). An
+ * answer is gated with the agent's mode today: a live agent's answer that
+ * says "on paper" is refused (mode-false), and a paper agent's that says
+ * "real money" too. Told of buys made with the other money, the more honest
+ * the draft, the surer its refusal, after a model call and an answer's
+ * allowance were spent. So a live agent is never told of a paper buy, named
+ * or not, and a paper agent never of a live one; an idle agent is told each
+ * buy's money as it was. Unnamed buys of both kinds are said as the money it
+ * trades with now, which some of them were.
+ */
+function ownMoney(mode: WriterFacts["mode"], paper: boolean): boolean {
+  return mode === "live" ? !paper : mode === "paper" ? paper : true;
+}
+function unnamedKind(mode: WriterFacts["mode"], kind: true | "paper" | "live" | "both"): UnnamedKind | null {
+  if (kind === true) return "unknown";
+  if (mode === "live") return kind === "paper" ? null : "live";
+  if (mode === "paper") return kind === "live" ? null : "paper";
+  return kind;
+}
 
 /**
  * ANSWERING A TAG, the way the agent answers in a Telegram group: in its own
@@ -864,7 +889,9 @@ export function answerPrompt(f: AnswerFacts): Prompt {
   const named = f.coinNamed === true || coinNamedIn(f.question, (f.recentBuys ?? []).map((c) => c.label));
   const exact = named && f.boughtExact === true;
   const notice = f.style.lower ? REPLY_OPT_OUT.toLowerCase() : REPLY_OPT_OUT;
-  const buys = named ? [] : (f.recentBuys ?? []).map((c) => ({ label: clean(c.label, 40), paper: c.paper })).filter((c): c is { label: string; paper: boolean } => !!c.label).slice(0, 4);
+  const buys = named ? [] : (f.recentBuys ?? []).filter((c) => ownMoney(f.mode, c.paper === true))
+    .map((c) => ({ label: clean(c.label, 40), paper: c.paper })).filter((c): c is { label: string; paper: boolean } => !!c.label).slice(0, 4);
+  const unnamed = f.boughtLately ? unnamedKind(f.mode, f.boughtLately) : null;
   // What it said and its recent posts carry its buy posts ("grabbed pepe…"): none of it beside a named coin.
   const said = named ? [] : (f.said ?? []).map((r) => clean(r, 220)).filter((r): r is string => !!r).slice(0, 6);
   // Re-cleaned here, whoever built them: a figure in a fact is a figure the model could repeat.
@@ -894,7 +921,7 @@ export function answerPrompt(f: AnswerFacts): Prompt {
     named ? null
       : buys.length ? `Coins you bought lately: ${buys.map((c) => `${q(c.label)}${c.paper ? " (on paper)" : ""}`).join(", ")}.`
       : f.boughtLately === false ? "You have not bought anything lately."
-      : f.boughtLately ? UNNAMED_BUYS[f.boughtLately === true ? "unknown" : f.boughtLately] : null,
+      : unnamed ? UNNAMED_BUYS[unnamed] : null,
     f.walletPublic ? "Your wallet is public: it is in your introduction post, so people can follow your trades there. Never write the address." : null,
     said.length ? `What you already said publicly (you may restate it, never copy it): ${said.map(q).join(" / ")}.` : null,
     research.length ? `What you looked up just now for this question (say it your own way, keep who said it, add nothing): ${research.map(q).join(" / ")}.` : null,
