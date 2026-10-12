@@ -365,7 +365,7 @@ export function refusalResetAt(reason: string | null | undefined, nowMs: number)
   if (typeof reason !== "string" || typeof nowMs !== "number" || !Number.isFinite(nowMs)) return null;
   const r = reason.startsWith("budget-") ? reason.slice("budget-".length) : reason;
   if (r === "group-hourly" || r === "tenant-hourly" || r === "x-hourly") return (hourIndex(nowMs) + 1) * HOUR_MS;
-  if (r === "tenant-daily" || r === "shared-daily" || r === "class-reserve") return Date.parse(`${utcDay(nowMs)}T00:00:00.000Z`) + 24 * HOUR_MS;
+  if (r === "tenant-daily" || r === "x-daily" || r === "shared-daily" || r === "class-reserve") return Date.parse(`${utcDay(nowMs)}T00:00:00.000Z`) + 24 * HOUR_MS;
   // below-one-read and no-group never reset on a clock, like a job's own allowance.
   return null;
 }
@@ -435,7 +435,7 @@ export interface FomoBudgetConfig {
  * group included, so no window will ever fit it) and `no-group` (a group
  * request that cannot name its group cannot be capped).
  */
-export type ChargeRefusal = "tenant-hourly" | "tenant-daily" | "group-hourly" | "x-hourly" | "shared-daily" | "class-reserve" | "below-one-read" | "no-group";
+export type ChargeRefusal = "tenant-hourly" | "tenant-daily" | "group-hourly" | "x-hourly" | "x-daily" | "shared-daily" | "class-reserve" | "below-one-read" | "no-group";
 
 /** Surfaces that must name their audience (a group, an X account) to be capped; one that cannot is refused. */
 const CAPPED_AUDIENCE_SURFACES: ReadonlySet<FomoSurface> = new Set<FomoSurface>(["telegram-group", "x-answer"]);
@@ -529,6 +529,7 @@ export class FomoBudget {
     tenantDaily: number;
     groupHourly: number;
     xHourly: number;
+    xDaily: number;
   } {
     const c = this.config;
     const pr = priorityOf(priority);
@@ -543,6 +544,7 @@ export class FomoBudget {
       tenantDaily: protect ? c.tenantDailyCredits : Math.floor(c.tenantDailyCredits * keep),
       groupHourly: c.groupHourlyCredits,
       xHourly: c.xHourlyCredits,
+      xDaily: Math.floor(c.tenantDailyCredits * X_DAILY_SHARE_OF_TENANT),
     };
   }
 
@@ -577,6 +579,11 @@ export class FomoBudget {
     if (!protect) hourly.push({ key: k("tenant", t, "np", "h", String(h)), limit: L.tenantHourly, reason: "tenant-hourly", tooBig: cap });
     hourly.push({ key: k("tenant", t, "all", "h", String(h)), limit: c.tenantHourlyCredits, reason: "tenant-hourly", tooBig: cap });
     const daily: Step<ChargeRefusal>[] = [];
+    // PUBLIC TAGS SPEND ONLY A SLICE OF THE OWNER'S DAY: every X account she
+    // answers from, together, at most X_DAILY_SHARE_OF_TENANT of her daily
+    // cap, so strangers tagging contracts all day can never leave her own
+    // DM, app-chat and room research rationed until midnight.
+    if (req.surface === "x-answer") daily.push({ key: k("x", "tenant", t, "d", day), limit: L.xDaily, reason: "x-daily", tooBig: cap });
     if (!protect) daily.push({ key: k("tenant", t, "np", "d", day), limit: L.tenantDaily, reason: "tenant-daily", tooBig: cap });
     daily.push({ key: k("tenant", t, "all", "d", day), limit: c.tenantDailyCredits, reason: "tenant-daily", tooBig: cap });
     if (L.poolDiscovery !== null) daily.push({ key: k("pool", "discovery", "d", day), limit: L.poolDiscovery, reason: "class-reserve" });
@@ -683,6 +690,16 @@ export const DEFAULT_GROUP_HOURLY_CREDITS = 2_500;
  * answer that does not fit says nothing from Fomo; it never waits.
  */
 export const DEFAULT_X_HOURLY_CREDITS = 3_000;
+/**
+ * The share of an owner's DAILY cap her public X answers may spend, across
+ * every X account she answers from (the `x-answer` surface's daily counter,
+ * keyed by owner). An hourly cap alone let a busy mention feed spend all of
+ * her non-protection day — a few strangers tagging contracts every hour —
+ * and her own asks were then rationed until 00:00 UTC. A quarter of the
+ * default 20,000 is 5,000 a day, three or so coin answers with Fomo, and
+ * leaves her two thirds of her own interactive share.
+ */
+export const X_DAILY_SHARE_OF_TENANT = 0.25;
 
 /** The budget configuration a plan supports, with any construction-time overrides applied and clamped. */
 export function budgetConfigFor(planCreditsPerMonth: number, over: Partial<FomoBudgetConfig> = {}): FomoBudgetConfig {
@@ -765,7 +782,7 @@ export function fomoBudgetFrom(env: Env): { budget: Partial<FomoBudgetConfig>; p
 
 /** One boot line: the limits in force, as budgetConfigFor clamped them. */
 export function describeBudget(c: FomoBudgetConfig): string {
-  return `fomo: research budget ${c.sharedDailyCredits} credits/day shared; per owner ${c.tenantHourlyCredits}/h and ${c.tenantDailyCredits}/day; per group ${c.groupHourlyCredits}/h; per X account ${c.xHourlyCredits ?? DEFAULT_X_HOURLY_CREDITS}/h`;
+  return `fomo: research budget ${c.sharedDailyCredits} credits/day shared; per owner ${c.tenantHourlyCredits}/h and ${c.tenantDailyCredits}/day; per group ${c.groupHourlyCredits}/h; per X account ${c.xHourlyCredits ?? DEFAULT_X_HOURLY_CREDITS}/h, X answers at most ${Math.floor(c.tenantDailyCredits * X_DAILY_SHARE_OF_TENANT)}/day per owner`;
 }
 
 // ── Analysis-model budget ────────────────────────────────────────────────

@@ -22,6 +22,7 @@ import {
   deriveDailyCredits,
   estimateCredits,
   utcDay,
+  X_DAILY_SHARE_OF_TENANT,
   type AllowancePort,
   type ChargeRequest,
   type FomoBudgetConfig,
@@ -124,7 +125,7 @@ describe("FomoBudget: priority reservations on the shared pool", () => {
     const { budget } = make();
     assert.deepEqual(budget.limitsFor("discovery"), {
       poolAll: 9_000, poolNonProtection: 7_500, poolDiscovery: 3_000, tenantHourly: 750_000_000, tenantDaily: 750_000_000, groupHourly: BIG,
-      xHourly: DEFAULT_X_HOURLY_CREDITS,
+      xHourly: DEFAULT_X_HOURLY_CREDITS, xDaily: Math.floor(BIG * X_DAILY_SHARE_OF_TENANT),
     });
     assert.equal(budget.limitsFor("interactive").poolDiscovery, null);
     assert.equal(budget.limitsFor("position-protection").poolNonProtection, null);
@@ -634,7 +635,7 @@ describe("refusalResetAt and the configured caps", () => {
     assert.equal(big.tenantDailyCredits, big.sharedDailyCredits);
     assert.equal(fomoPlanFrom({ MERRYMEN_FOMO_PLAN_CREDITS: "1000000" }), 1_000_000);
     assert.equal(fomoPlanFrom({ MERRYMEN_FOMO_PLAN_CREDITS: "lots" }), undefined);
-    assert.equal(describeBudget(growth), `fomo: research budget ${growth.sharedDailyCredits} credits/day shared; per owner 6000/h and 20000/day; per group 2500/h; per X account 3000/h`);
+    assert.equal(describeBudget(growth), `fomo: research budget ${growth.sharedDailyCredits} credits/day shared; per owner 6000/h and 20000/day; per group 2500/h; per X account 3000/h, X answers at most 5000/day per owner`);
   });
 
   it("an X account's hourly cap has its own variable, default and boot line", () => {
@@ -665,6 +666,51 @@ describe("FomoBudget: the x-answer surface", () => {
   it("the owner's caps still apply on top of the X account's", async () => {
     const { budget } = make({ sharedDailyCredits: BIG, tenantHourlyCredits: 1_000, xHourlyCredits: BIG });
     assert.deepEqual(await drain(budget, "interactive", { surface: "x-answer", groupId: "111" }), { n: 3, reason: "tenant-hourly" });
+  });
+
+  it("a day of public tags at the hourly maximum leaves the owner's own interactive day usable", async () => {
+    const { budget, port } = make(budgetConfigFor(37_500_000));
+    const day0 = Date.parse(`${utcDay(NOW)}T00:00:00.000Z`);
+    const answer = (h: number, n: number, groupId = "111") => budget.tryCharge(req("interactive", { surface: "x-answer", groupId, credits: 1_500, now: day0 + h * HOUR + n * 60_000 }));
+    let spentX = 0;
+    let last: string | null = null;
+    // Every hour of the UTC day, two X accounts of one owner try a coin answer with Fomo a minute apart.
+    for (let h = 0; h < 24; h++) {
+      for (let n = 0; n < 6; n++) {
+        for (const x of ["111", "222"]) {
+          const r = await answer(h, n, x);
+          if (r.ok) spentX += 1_500;
+          else last = r.reason;
+        }
+      }
+    }
+    const xDay = Math.floor(DEFAULT_TENANT_DAILY_CREDITS * X_DAILY_SHARE_OF_TENANT);
+    assert.equal(xDay, 5_000);
+    assert.ok(spentX <= xDay, `${spentX} spent by public tags`);
+    assert.equal(last, "x-daily");
+    assert.ok(port.keys().includes(`fomo:credits:x:tenant:t1:d:${utcDay(NOW)}`), "one daily counter per owner, across her X accounts");
+    assert.equal(new Date(refusalResetAt("budget-x-daily", day0 + 5 * HOUR)!).toISOString(), new Date(day0 + DAY).toISOString());
+    // Her own asks, late in the day, still have the rest of her interactive share.
+    let own = 0;
+    for (let h = 20; h < 24; h++) {
+      for (let n = 0; n < 40; n++) {
+        const r = await budget.tryCharge(req("interactive", { surface: "app-chat", credits: 250, now: day0 + h * HOUR + n * 60_000 }));
+        if (r.ok) own += 250;
+      }
+    }
+    const interactiveDay = Math.floor(DEFAULT_TENANT_DAILY_CREDITS * (1 - DEFAULT_PRIORITY_SHARES["position-protection"]));
+    assert.equal(own, interactiveDay - spentX, "everything public tags did not spend");
+    assert.ok(own >= 10_000, `${own} left for the owner`);
+  });
+
+  it("only an X answer spends the X answers' daily counter", async () => {
+    const { budget, port } = make({ sharedDailyCredits: BIG, tenantDailyCredits: 4_000 });
+    assert.equal((await budget.tryCharge(req("interactive", { surface: "telegram-group", groupId: "-1", credits: 1_000 }))).ok, true);
+    assert.equal((await budget.tryCharge(req("interactive", { surface: "app-chat", credits: 1_000 }))).ok, true);
+    assert.ok(!port.keys().some((k) => k.startsWith("fomo:credits:x:")), "a room or the owner never touches it");
+    assert.equal((await budget.tryCharge(req("interactive", { surface: "x-answer", groupId: "111", credits: 1_000 }))).ok, true);
+    assert.deepEqual(await budget.tryCharge(req("interactive", { surface: "x-answer", groupId: "111", credits: 250 })), { ok: false, reason: "x-daily" }, "a quarter of four thousand");
+    assert.equal(await budget.wouldRefuse(req("interactive", { surface: "x-answer", groupId: "222", credits: 250 })), "x-daily", "across her X accounts");
   });
 
   it("a cap of zero is off: below one read, never a time to wait for", async () => {

@@ -885,6 +885,8 @@ function budgetMessage(reason: string | null, now: number): string {
       return `Fomo research is rationed right now: this group's hourly research allowance is used up${when}.`;
     case "budget-x-hourly":
       return `Fomo research is rationed right now: this X account's hourly research allowance is used up${when}.`;
+    case "budget-x-daily":
+      return `Fomo research is rationed right now: today's research allowance for X answers is used up${when}.`;
     case "budget-tenant-hourly":
       return `Fomo research is rationed right now: your hourly Fomo research allowance is used up${when}.`;
     case "budget-tenant-daily":
