@@ -115,6 +115,11 @@ def _house_rules(req: DecideRequest) -> str:
     The variant only ADDS: name the window and the baseline, the example is not
     a fact, and specific evidence still has to meet the desk's terms. Nothing
     in it makes acting easier to justify.
+
+    NEVER WITHOUT THE TERMS. The variant points at "the desk's terms", so every
+    node that gets it also gets `_desk_policy` in the same system message: a
+    voice told to judge against terms it cannot see argues about a different
+    book. tests/test_strategy_terms.py holds that pairing for every node.
     """
     if not _has_desk_policy(req):
         return HOUSE_RULES
@@ -138,6 +143,11 @@ def _house_rules(req: DecideRequest) -> str:
 #
 # WHY THE SYSTEM MESSAGE. Beside the house rules, for the reason SELECTIVE_FOLLOWING
 # sits there: it is ours. The material it governs stays in `user`, fenced.
+#
+# WHO GETS IT. Every node: the analysts and the manager, and on a run that
+# escalates, both debaters and the three risk voices. A risk voice shown a
+# 30-minute, code-bracketed plan without the bracket or the horizon argues
+# multi-day and no-stop risk into the dossier the manager then reads.
 #
 # WHAT IT IS NOT. The preamble says it in the prompt, and the code agrees: the
 # gate, the clamps, escalation, budgets and economics never read these fields.
@@ -344,6 +354,7 @@ class BrainGraph:
         )
 
     async def _debater(self, req: DecideRequest, budget: RunBudget, side: str, reports: str, opposing: str) -> NodeOutput:
+        policy = _desk_policy(req)
         text = await self.llm.complete(
             node=f"debate:{side}",
             budget=budget,
@@ -353,6 +364,9 @@ class BrainGraph:
                 f"honestly allows — and if the evidence does not support your side, say that plainly "
                 f"rather than inventing support. A debate where both sides always find material is "
                 f"a debate that decides nothing."
+                # The rules above hold evidence to the desk's terms; a debater
+                # argues the case for THIS book only if it can read them.
+                + (f"\n\n{policy}" if policy else "")
             ),
             user=(
                 f"{reports}\n\n"
@@ -363,10 +377,16 @@ class BrainGraph:
         return NodeOutput(f"debate:{side}", text)
 
     async def _risk(self, req: DecideRequest, budget: RunBudget, stance: str, plan: str) -> NodeOutput:
+        policy = _desk_policy(req)
         text = await self.llm.complete(
             node=f"risk:{stance}",
             budget=budget,
-            system=f"{_house_rules(req)}\n\nYou are the {stance} member of the risk committee.",
+            system=(
+                f"{_house_rules(req)}\n\nYou are the {stance} member of the risk committee."
+                # The exits and the horizon ARE the plan's risk shape: without
+                # them a risk voice reviews a trade the desk is not making.
+                + (f"\n\n{policy}" if policy else "")
+            ),
             user=(
                 f"The proposed plan:\n{plan}\n\n"
                 f"Cash available: {req.portfolio.cash_usdg / 1e6:.6f} USDG. "

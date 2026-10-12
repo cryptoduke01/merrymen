@@ -23,11 +23,13 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from pathlib import Path
 
 import httpx
 import pytest
 from pydantic import ValidationError
 
+from brain import schemas as brain_schemas
 from brain import server
 from brain.graph import (
     DESK_POLICY_PREAMBLE,
@@ -224,14 +226,42 @@ class TestTheRendering:
         following = manager["system"].index("THIRD-PARTY TRADER ACTIVITY IS IN THIS DOSSIER")
         assert following < manager["system"].index(DESK_POLICY_PREAMBLE)
 
-    def test_debate_and_risk_get_the_rules_but_not_the_terms(self):
-        # The channel is for the voices that read the strategy brief: the
-        # analysts and the manager. The committee argues over the dossier.
+    def test_debate_and_risk_get_the_terms_too(self):
+        # Their house rules say evidence must meet "the desk's terms". A risk
+        # voice reviewing a 30-minute bracketed plan without the bracket or the
+        # horizon argues a multi-day, no-stop book into the manager's dossier.
         prompts, _ = record(_policy(full_equity_shut_gate))
+        committee = [p for p in prompts if p["node"].startswith(("debate:", "risk:"))]
+        assert sorted(p["node"] for p in committee) == [
+            "debate:bear", "debate:bull", "risk:aggressive", "risk:conservative", "risk:neutral",
+        ]
+        for p in committee:
+            assert p["system"].endswith(f"\n\n{DESK_POLICY_PREAMBLE}\nDecision horizon: {HORIZON}.\n{TERMS}"), p["node"]
+            assert _outside_every_fence(p["system"], TERMS), p["node"]
+            assert TERMS not in p["user"], p["node"]
+            assert HOLD_RULE in p["system"], p["node"]
+
+    @pytest.mark.parametrize("build", [pulse_memecoin, full_equity_shut_gate, following_memecoin])
+    def test_no_node_is_pointed_at_terms_it_cannot_see(self, build):
+        # The pairing, for EVERY node a request reaches: whoever is told to hold
+        # evidence to the desk's terms is shown them in the same system message.
+        prompts, _ = record(_policy(build))
+        assert prompts
         for p in prompts:
+            if "meets the desk's terms" in p["system"]:
+                assert DESK_POLICY_PREAMBLE in p["system"], p["node"]
+                assert TERMS in p["system"], p["node"]
+        # And with only a horizon, still the block (preamble and horizon).
+        for p in record(_policy(build, strategy_terms=None))[0]:
+            if "meets the desk's terms" in p["system"]:
+                assert f"{DESK_POLICY_PREAMBLE}\nDecision horizon: {HORIZON}." in p["system"], p["node"]
+
+    def test_without_policy_the_committee_prompts_are_unchanged(self):
+        # Belt to test_prompt_snapshot's braces: no block, no variant rules.
+        for p in record(full_equity_shut_gate())[0]:
             if p["node"].startswith(("debate:", "risk:")):
-                assert TERMS not in p["system"] + p["user"], p["node"]
-                assert HOLD_RULE in p["system"], p["node"]
+                assert DESK_POLICY_PREAMBLE not in p["system"], p["node"]
+                assert p["system"].startswith(ORIGINAL_HOUSE_RULES + "\n\n"), p["node"]
 
 
 class TestTheHouseRules:
@@ -321,6 +351,21 @@ class TestItChangesNoEnforcement:
         plain, _ = record(pulse_memecoin())
         policy, _ = record(_policy())
         assert [p["node"] for p in plain] == [p["node"] for p in policy]
+
+
+# ── the trust contract ─────────────────────────────────────────────────────
+
+
+def test_the_trust_contract_names_worker_files_that_exist():
+    # "Trusted" rests on which worker code fills the fields, and Brain cannot
+    # check that. The comment saying so is the reviewer's only pointer; a dead
+    # path there sends them nowhere.
+    schemas = Path(brain_schemas.__file__).read_text(encoding="utf-8")
+    repo = Path(__file__).resolve().parents[3]
+    named = set(re.findall(r"worker/src/[\w./-]+\.ts", schemas))
+    assert "worker/src/strategy-terms.ts" in named
+    for rel in sorted(named):
+        assert (repo / rel).is_file(), rel
 
 
 # ── the advert ─────────────────────────────────────────────────────────────

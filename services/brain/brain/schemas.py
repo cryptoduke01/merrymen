@@ -82,9 +82,10 @@ MAX_SIGNALS_CHARS = 24_000
 #: Ceilings on the desk-policy channel (`DecideRequest.strategy_terms` and
 #: `.horizon`), in characters.
 #:
-#: 2,500 is ~625 tokens, and the terms go to every analyst AND the manager, so a
-#: pulse run pays for them four times out of a 30,000-token allowance. Sized for
-#: a strategy's horizon, exits and definitions — not for a second persona.
+#: 2,500 is ~625 tokens, and the terms go to every node, so a pulse run (three
+#: analysts and the manager) pays for them four times out of a 30,000-token
+#: allowance, and a full committee five times more. Sized for a strategy's
+#: horizon, exits and definitions — not for a second persona.
 MAX_STRATEGY_TERMS_CHARS = 2_500
 #: A horizon is a phrase ("up to 30 minutes", "3-5 days"), not a paragraph. It is
 #: also interpolated into the manager's JSON example, so it is held to a closed
@@ -549,7 +550,7 @@ class DecideRequest(BaseModel):
     #
     # WHAT "TRUSTED" MEANS HERE. A contract with the worker, not something this
     # service can verify: the worker fills these from repo code only
-    # (worker/src/desk-policy.ts), never from owner or market text. What this
+    # (worker/src/strategy-terms.ts), never from owner or market text. What this
     # side CAN enforce is below — bounded, no fence tags, no addresses, and a
     # horizon from a closed alphabet.
     #
