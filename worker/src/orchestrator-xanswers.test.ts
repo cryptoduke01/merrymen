@@ -36,6 +36,8 @@ async function world(t: TestContext, o: {
   active?: boolean; tz?: string | null; polls?: number;
   /** The owner's own reply consent, given through the warning before the pass. Default: given. */
   consent?: boolean;
+  /** The owner's hello on this X account, already posted before the pass. Default: posted. */
+  hello?: boolean;
   /** MERRYMEN_XPOST_REPLIES_APPROVED as set (null: unset), read as the orchestrator reads it. Default: approved for everyone. */
   scope?: string | null;
   env?: Record<string, string>; research?: XResearch; facts?: AgentFacts; answer?: string;
@@ -49,10 +51,12 @@ async function world(t: TestContext, o: {
     nowMs: NOW - 2 * DAY });
   await store.setPosting(db, TENANT, { enabled: true, xUserId: "111" }, NOW - DAY);
   if (o.consent !== false) assert.equal(await store.setReplying(db, TENANT, true, "111", NOW - DAY), true);
-  const intro = await store.schedulePost(db, { tenant: TENANT, xUserId: "111", kind: "intro", dedupeKey: `intro:${TENANT}:111`,
-    body: "I am an AI trading agent", nowMs: NOW - DAY, dueAtMs: NOW - DAY });
-  await store.claimPost(db, intro!, NOW - DAY);
-  await store.markPosted(db, intro!, "999", NOW - DAY);
+  if (o.hello !== false) {
+    const intro = await store.schedulePost(db, { tenant: TENANT, xUserId: "111", kind: "intro", dedupeKey: `intro:${TENANT}:111`,
+      body: "I am an AI trading agent", nowMs: NOW - DAY, dueAtMs: NOW - DAY });
+    await store.claimPost(db, intro!, NOW - DAY);
+    await store.markPosted(db, intro!, "999", NOW - DAY);
+  }
   let inbox: Record<string, unknown>[] = [tag()];
   const sends: Record<string, unknown>[] = [], prompts: string[] = [], reads: number[] = [];
   let clock = NOW;
@@ -249,6 +253,38 @@ test("a house agent's reply consent is recorded once, said once by name, and it 
   const again = await w.step(NOW + MIN);
   assert.equal(again.notes, undefined, "recorded once");
   assert.equal(await store.replyConsentAt(w.db, TENANT, "111"), NOW);
+});
+
+test("nothing is answered before the hello: the answer waits for the post that says an AI agent posts here", async (t) => {
+  // The owner's night: the hello waits for morning, and so does every answer.
+  const tz = "America/Los_Angeles";
+  const w = await world(t, { hello: false, tz });
+  await w.step();
+  assert.equal((await w.answers()).length, 0);
+  assert.equal(w.asked().length, 0, "and no model call on one");
+  // The hello goes out; the next tag is answered.
+  const intro = await store.schedulePost(w.db, { tenant: TENANT, xUserId: "111", kind: "intro", dedupeKey: `intro:${TENANT}:111`,
+    body: "I am an AI trading agent", nowMs: NOW, dueAtMs: NOW });
+  await store.claimPost(w.db, intro!, NOW);
+  await store.markPosted(w.db, intro!, "999", NOW);
+  w.setInbox([tag({ id: "100000000000000091", conversation_id: "100000000000000091", author_id: "991", created_at: new Date(NOW + 30_000).toISOString() })]);
+  await w.step(NOW + MIN);
+  assert.deepEqual((await w.answers()).map((a) => a.status), ["scheduled"]);
+});
+
+test("a house agent's reply consent waits for its hello", async (t) => {
+  const tz = "America/Los_Angeles";
+  const w = await world(t, { consent: false, hello: false, tz });
+  const r = await w.step();
+  assert.equal(r.notes, undefined);
+  assert.equal(await store.replyConsentAt(w.db, TENANT, "111"), null, "not recorded while the hello is not out");
+  assert.equal(w.reads.length, 0, "and not polled");
+  const intro = await store.schedulePost(w.db, { tenant: TENANT, xUserId: "111", kind: "intro", dedupeKey: `intro:${TENANT}:111`,
+    body: "I am an AI trading agent", nowMs: NOW, dueAtMs: NOW });
+  await store.claimPost(w.db, intro!, NOW);
+  await store.markPosted(w.db, intro!, "999", NOW);
+  await w.step(NOW + MIN);
+  assert.equal(await store.replyConsentAt(w.db, TENANT, "111"), NOW + MIN);
 });
 
 test("an owner's replies off is never overridden by the house consent", async (t) => {

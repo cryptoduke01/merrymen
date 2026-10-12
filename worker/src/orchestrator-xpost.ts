@@ -46,7 +46,7 @@ import { STRATEGY_FLAVOUR, STRATEGY_SPOKEN, TRAIT_VOICE } from "./groupchat/temp
 import { MUSINGS, SUBJECTS, TAKES } from "./groupchat/topics";
 import { xAppFromEnv, type FetchLike, type XApp, type XReply } from "./xpost/client";
 import { admitXPost, vocabularyRefusal, type BaseGate, type XGateCtx } from "./xpost/gate";
-import { ACTIVE_CADENCE, ANSWER_GAP_MS, ANSWER_STALE_MS, ANSWERS_PER_DAY, REPLY_STALE_MS, STANDARD_CADENCE, coinOf, hash32, planPosts, replyDueAt, sendDecision, type PlanCadence, type PlanClock, type PlanIntent } from "./xpost/planner";
+import { ACTIVE_CADENCE, ANSWER_GAP_MS, ANSWER_STALE_MS, ANSWERS_PER_DAY, REPLY_STALE_MS, STANDARD_CADENCE, coinOf, hash32, introState, planPosts, replyDueAt, sendDecision, type PlanCadence, type PlanClock, type PlanIntent } from "./xpost/planner";
 import { APP_PAUSE_KEY, APP_PAUSE_MS, CREDITS_PAUSE_MS, PAUSE_KEY, readReplyComments, sendOne, type SendOutcome } from "./xpost/sender";
 import { isReplyOptOut, replyCandidate, tagCandidate, withoutReplyOptOut } from "./xpost/replies";
 import { activeTenantsOf, repliesAllowedFor, repliesScopeOf } from "./xpost/scope";
@@ -431,6 +431,19 @@ function utcDay(ms: number): string {
 }
 
 /** The mode a post may state: the agent's own, or none for an agent that is not trading. */
+/**
+ * THE HELLO FIRST. Whether this owner's hello on this X account — the post
+ * that tells readers an AI agent posts here — is dealt with: posted, skipped
+ * by the owner, or may already be out. Nothing answers anyone before it, as
+ * nothing else is planned before it (planner.ts planPosts). "Done" never
+ * depends on the day; a day only decides when a hello not dealt with is
+ * drafted again.
+ */
+async function helloDone(shared: Db, account: XAccount, nowMs: number): Promise<boolean> {
+  const intros = await introPostsOf(shared, account.tenant, account.xUserId);
+  return introState({ tenant: account.tenant, account, intros, nowMs, dayOf: utcDay }).state === "done";
+}
+
 function modeOf(f: AgentFacts): "paper" | "live" | null {
   return f.mode === "idle" ? null : f.mode;
 }
@@ -786,7 +799,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         // given through the posting warning, for this X account) and replies
         // in scope, their reply consent is recorded once, here. Never over an
         // owner's own "replies off" (store.setReplying's mark), never for an
-        // owner the operator did not name, and never while the scope is off.
+        // owner the operator did not name, never while the scope is off, and
+        // never before its hello is dealt with.
         const notes: string[] = [];
         if (repliesApproved) {
           for (const account of accounts) {
@@ -795,6 +809,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
             // A cheap read first, so an owner's standing "off" costs no locked
             // write every pass; setReplying decides it again under the lock.
             if ((await readMeta(shared, repliesOffKey(account.tenant))) !== null) continue;
+            // Not before its hello: the posting warning promised that first.
+            if (!(await helloDone(shared, account, nowMs))) continue;
             if (await setReplying(shared, account.tenant, true, account.xUserId, at(), { house: true })) {
               notes.push(`xpost: recorded reply consent for house agent ${account.tenant} on its connected X account (MERRYMEN_XPOST_ACTIVE_TENANTS); turning replies off in Settings is never overridden`);
             }
@@ -1321,6 +1337,11 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
     const nowMs = at();
     const consentAt = await replyConsentAt(shared, account.tenant, account.xUserId);
     if (consentAt === null) return null;
+    // THE HELLO FIRST: no answer goes out before the post that says an AI agent posts here.
+    if (!(await helloDone(shared, account, nowMs))) {
+      bump("answer-before-hello");
+      return null;
+    }
     // The send path's own key for the day's answers (its local day, or UTC
     // without a zone), taken at send time — so answers drafted and still
     // waiting to go out count against it too.
