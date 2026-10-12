@@ -41,6 +41,8 @@ import {
   marketAsk,
   MARKET_MAJORS,
   unshowableName,
+  banterAsk,
+  houseTroubleAsk,
   vibeAsk,
   majorPhrases,
   majorReadOf,
@@ -1766,6 +1768,26 @@ describe("answer anything: every tag past the screens has a lane, and silence on
     }
     // Its mood's allowlist is whole known shapes: "wen lambo" is its mood, never refused for "lambo".
     assert.equal(classifyTag("wen lambo", { advice: false }).kind, "vibe");
+  });
+
+  it("the house in trouble or its roadmap is answered by nothing; code's friendly line is for plain banter only (red-team 2026-10-12)", () => {
+    for (const text of ["did merrymen get hacked? are my funds gone?", "did you get hacked? where did my funds go?", "why did you guys steal my money?", "is this whole thing a ponzi?",
+      "why does your team keep lying to us?", "is merrymen launching a token for its model soon?", "when does the merrymen model token launch?", "wen tge for the merrymen model?",
+      "did you guys rug us?", "is robinhood doing an airdrop?"]) {
+      assert.equal(houseTroubleAsk(text), true, text);
+      assert.equal(classifyTag(text).kind, "unanswered", text);
+    }
+    for (const text of ["how are you?", "what's merrymen?", "did the dev rug this coin?", "what do you trade?", "is $PEPE legit?"]) {
+      assert.equal(houseTroubleAsk(text), false, text);
+    }
+    for (const text of ["how are you?", "hey, how are you doing today?", "who are you", "what are you exactly?", "tell me a joke", "gm, how's it going?",
+      "what do you think about ai agents?", "what do you do for fun?"]) {
+      assert.equal(banterAsk(text), true, text);
+    }
+    for (const text of ["hey alan, how are you?", "how are you, trump fan?", "my dad just died, any words for me?", "what's merrymen?", "how are you? lost everything today",
+      "tell me a joke about merrymen", "how are you 🚀", "you bought chump today, right?", "", null]) {
+      assert.equal(banterAsk(text), false, String(text));
+    }
   });
 
   it("every word of a tag is read, the house's own and long runs too, and sherwood as it sounds (red-team 2026-10-12)", () => {

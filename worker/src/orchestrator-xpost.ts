@@ -51,7 +51,7 @@ import { xAppFromEnv, type FetchLike, type XApp, type XReply } from "./xpost/cli
 import { admitXPost, merrymenMentioned, moneySaid, namedIn, tickerRefusal, vocabularyRefusal, type BaseGate, type XGateCtx } from "./xpost/gate";
 import { ACTIVE_CADENCE, ANSWER_GAP_MS, ANSWER_STALE_MS, ANSWERS_PER_DAY, REPLY_STALE_MS, STANDARD_CADENCE, coinOf, hash32, introState, planPosts, replyDueAt, sendDecision, type PlanCadence, type PlanClock, type PlanIntent } from "./xpost/planner";
 import { APP_PAUSE_KEY, APP_PAUSE_MS, CREDITS_PAUSE_MS, PAUSE_KEY, readReplyComments, sendOne, type SendOutcome } from "./xpost/sender";
-import { isAnswerOptOut, isReplyOptOut, replyCandidate, tagCandidate, withoutReplyOptOut } from "./xpost/replies";
+import { isAnswerOptOut, isReplyOptOut, replyCandidate, tagCandidate, withNoticeAdded, withoutReplyOptOut } from "./xpost/replies";
 import { coinTalkIn, nameLikeWords, textWords, unknownWordIn } from "./xpost/words";
 import { activeTenantsOf, repliesAllowedFor, repliesScopeOf } from "./xpost/scope";
 import {
@@ -98,7 +98,7 @@ import {
 import { answerPrompt, answerQuestion, buyPrompt, casualPrompt, draft, greetingAnswers, introPrompt, introTemplate, modelAnswers, replyPrompt, sellPrompt, sherwoodClaimed, sherwoodMentioned, sherwoodNamed, xpostModel, xpostModelWarning, type AnswerIntentKind, type WriterFacts, type XStyle } from "./xpost/writer";
 import { appendPublicToken, appendPublicWallet, hasPublicWallet, publicTokenStillAllowed, publicWalletStillAllowed, type PublicWallet } from "./xpost/public-wallet";
 import { readPublicProjectDescription } from "./orchestrator-xpost-project";
-import { boughtNames, carriesResearch, classifyTag, createXResearch, generalTradesQuestion, MARKET_MAJORS, modelNamed, namesACoin, ownCoinTicker, unshowableName, type ResearchBundle, type TagIntent, type XResearch } from "./orchestrator-xpost-research";
+import { banterAsk, boughtNames, carriesResearch, classifyTag, createXResearch, generalTradesQuestion, MARKET_MAJORS, modelNamed, namesACoin, ownCoinTicker, unshowableName, type ResearchBundle, type TagIntent, type XResearch } from "./orchestrator-xpost-research";
 import { PUBLISHABLE_SOURCES } from "./thesis-policy";
 import { readSaleResults } from "./orchestrator-xpost-results";
 import { appendSaleOutcome, hasSaleOutcome } from "./xpost/sale-outcome";
@@ -1860,6 +1860,10 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // data, the project or creator) is refused.
       const unlooked = !coded && raw !== null && !handed && carriesResearch(raw);
       let verdict = raw === null || claimed || named || unlooked ? null : gate(raw);
+      // A DRAFT THAT ONLY LEFT OFF THE NOTICE IS GIVEN IT, AND GATED AGAIN WHOLE
+      // (red-team 2026-10-12): a missing notice used to be permission to post
+      // code's cheerful line in the draft's place, under whatever was asked.
+      if (!coded && raw !== null && verdict !== null && !verdict.ok && verdict.reason === "opt-out-unsaid") verdict = gate(withNoticeAdded(raw, facts.style));
       for (const line of lines.slice(1)) {
         if (verdict?.ok) break;
         verdict = gate(line);
@@ -1892,10 +1896,19 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // honest to say, or could not be asked), so a sensitive tag is never
       // answered with a cheerful line. Only chat: a coin, its own trades, what
       // it can do or how to get an agent stay unsaid.
+      // AND ONLY PLAIN BANTER (red-team 2026-10-12): under "did merrymen get
+      // hacked?", "why did you guys steal my money?" or "wen tge for the
+      // merrymen model?" a teasing or sympathetic draft that merely left off
+      // the notice put "ha, appreciate the tag, fren" up instead. The fallback
+      // is for a strict allowlist of whole banter tags (banterAsk: how are you,
+      // who are you, tell me a joke), never one that names money, a loss, a
+      // death, a token, a launch or the house, nor under a reply prefix that
+      // names anyone else.
       const drafted = verdict?.ok === true && !postsName && !unlookedCoin ? verdict.text : null;
       const benignRefusal = raw !== null && !claimed && !named && !unlooked && verdict !== null && !verdict.ok && CHAT_FALLBACK_REASONS.has(verdict.reason);
       // Never under a name the house would never show (unshowableName: a slur, a political coin).
-      const chatFallback = !coded && drafted === null && benignRefusal && (asked.kind === "chat" || looked?.intent === "chat") && !unshowableName(candidate.text);
+      const chatFallback = !coded && drafted === null && benignRefusal && (asked.kind === "chat" || looked?.intent === "chat") && !unshowableName(candidate.text)
+        && banterAsk(candidate.text) && candidate.otherHandles !== true;
       let fallback: string | null = null;
       if (chatFallback) {
         for (const line of chatAnswers(comment.id, facts.style, lineOpts)) {

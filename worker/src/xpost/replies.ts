@@ -17,6 +17,15 @@ export function noticeFor(style: { lower: boolean }, o: Pick<CodeLineOptions, "n
   if (o.notice === false) return "";
   return ` ${style.lower ? REPLY_OPT_OUT.toLowerCase() : REPLY_OPT_OUT}`;
 }
+/**
+ * A DRAFT THAT LEFT THE NOTICE OFF, WITH IT PUT ON (red-team review,
+ * 2026-10-12): its own last stop kept, or one added, then the notice in the
+ * agent's casing. Gated again whole by the caller, never posted as is.
+ */
+export function withNoticeAdded(text: string, style: { lower: boolean }): string {
+  const body = String(text ?? "").trim();
+  return `${body}${/[.!?…]$/.test(body) ? "" : "."}${noticeFor(style, { notice: true })}`;
+}
 export const XREPLY_MAX_COMMENT_CHARS = 280;
 
 /** Remove only leading reply mentions; handles are never sent to the writer. */
