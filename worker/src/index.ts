@@ -1,4 +1,4 @@
-import { EVIDENCE_BUDGET_MS, readPoolEvidence, summarizeEvidence } from "./venues/pool-evidence";
+import { EVIDENCE_BUDGET_MS, brainEvidence, readPoolEvidence } from "./venues/pool-evidence";
 import { upsertRefusal, type RefusalRow } from "./venues/refusal-rows";
 /**
  * merrymen worker — the 24/7 loop.
@@ -135,7 +135,7 @@ import { provenanceOf, type Provenance } from "./provenance";
 import { recordDecisionRefusal, verifyDecisionOwner, withDecisionOutcome } from "./decision-identity";
 import { bookGaps, composeEquityUsdg } from "./equity";
 import { publishesAView, reviewRecord, runShadow, type ShadowInputs, type ShadowOutcome } from "./brain-shadow";
-import { TrenchBrainReview, TrenchTapeReader, highVolumePools, trenchBrainPersona, trenchBrainSignals, trenchHeat, HELD_REVIEW_MAX_GAP_MS, TRENCH_REVIEW_INTERVAL_MS } from "./trencher-brain";
+import { HoldBackoff, TrenchBrainReview, TrenchNoticeGate, TrenchTapeReader, entryEvidenceBlind, trenchDeskNotice, highVolumePools, trenchBrainPersona, trenchBrainSignals, trenchHeat, trenchMaterial, HELD_REVIEW_MAX_GAP_MS, TRENCH_REVIEW_INTERVAL_MS } from "./trencher-brain";
 import { withAgentBrief } from "./agent-brief";
 import { ProjectPurposeReader } from "./research/project-purpose";
 import { getPaperBrainCapital } from "./store";
@@ -146,8 +146,8 @@ import { recoverReceiptBasis } from "./receipt-basis-recovery";
 import { MarketReviewClock, quietReviewRow, quietReviewScope } from "./market-review";
 import { ChainCoinNames, makeDecisionNamer, warmHeldNames } from "./decision-name";
 import { intentDecisionRow } from "./decision-row";
-import { memoryLines, positionContext, sentimentLine, technicalLine } from "./brain-material";
-import { DECISION_RESEARCH_GUIDANCE, decisionResearchEnabledFor, entryCostEvidence, researchEntrySize } from "./decision-research";
+import { leadMemory, memoryLines, positionContext, sentimentLine, technicalLine } from "./brain-material";
+import { DECISION_RESEARCH_GUIDANCE, decisionResearchEnabledFor, entryCostResearch, researchEntrySize, trenchBreakEven, trenchMomentumBrief } from "./decision-research";
 import { readOwnOutcomeLearningFile } from "./own-outcome-learning-file";
 import { outcomeLearningLines } from "./own-outcome-learning";
 import { readFeedHistory } from "./read-feed-history";
@@ -1042,14 +1042,14 @@ async function main() {
   let trenchTapeRequestedAt = 0;
   let trenchTapePending = false;
   let lastTrenchFeedHealth = "";
-  let lastTrenchNotice = "";
+  // A notice is written on CHANGE, and a notice that cleared and came back
+  // within half an hour is the same notice, not a new event (TrenchNoticeGate):
+  // an outage flickering the desk notice must not fill the events table.
+  const trenchNoticeGate = new TrenchNoticeGate();
   function trenchNotice(agentId: string, message: string) {
-    if (message === lastTrenchNotice) return;
-    lastTrenchNotice = message;
-    if (message) {
-      console.warn(`[trencher] ${message}`);
-      void addEvent(agentId, "warn", `Trencher: ${message}`).catch(() => {});
-    }
+    if (!trenchNoticeGate.say(message)) return;
+    console.warn(`[trencher] ${message}`);
+    void addEvent(agentId, "warn", `Trencher: ${message}`).catch(() => {});
   }
   function refreshTrenchTape() {
     trenchTapeReader.setDiscoveryFocus(cfg.discoveryFocus);
@@ -1081,6 +1081,30 @@ async function main() {
     trenchTapeAt = snapshot.observedAt;
     return snapshot.pools;
   };
+  /**
+   * The tape row a review of this coin reads: its discovery-verified pool
+   * when there is one, else its first pool on the tape. One helper, so the
+   * review and the hold backoff below can never be reading different pools.
+   */
+  function trenchTapeRow(token: string, tape: readonly GeckoPool[]): GeckoPool | undefined {
+    const key = token.toLowerCase();
+    const verifiedPool = autoTrench?.qualified.find(p => p.tokenAddress.toLowerCase() === key);
+    return tape.find(p => p.tokenAddress.toLowerCase() === key && (!verifiedPool || p.poolAddress === verifiedPool.poolAddress));
+  }
+  /**
+   * THE HOLD BACKOFF'S VIEW OF A COIN (trencher-brain.ts HoldBackoff): the
+   * tick's own quote — the mark a review is handed — and the fresh tape's
+   * hour volume and five-minute buyers. Read-only; it never fetches. A coin
+   * with neither reads as unknown throughout, and unknown releases nothing.
+   */
+  trenchBrain.holdBackoff = new HoldBackoff((token) => {
+    const t = watchTokens.find((w) => w.address.toLowerCase() === token);
+    const q = t ? lastPrices.get(t.symbol) : undefined;
+    const price = q && !q.stale && q.price8 > 0n ? Number(q.price8) / 1e8 : null;
+    return trenchMaterial(trenchTapeRow(token, trenchTapeReader.snapshot().pools), price);
+  });
+  /** The entry-rotation idle line, said on change and never per flicker (TrenchNoticeGate). */
+  const backoffIdleGate = new TrenchNoticeGate();
   /**
    * What discovery's early path did, filed ON CHANGE only: every pass would
    * otherwise re-file "early-verified" over the later stage (an entry screen,
@@ -12864,7 +12888,28 @@ async function main() {
         // none was looked at. The strategy's idle reason says why instead, as
         // a WARNING written after this one, so it is the notice the desk shows
         // (idle-notice.ts) — not a second Trencher line saying the same thing.
-        if (fastTrencher) trenchNotice(agentId, trenchSymbols.size || entriesBraked ? "" : "No permitted, freshly priced high-volume pool passes the entry checks. Discovery will retry; automatic exits remain active.");
+        //
+        // NOR WHEN EVERY ELIGIBLE COIN IS BACKED OFF (trencher-brain.ts
+        // HoldBackoff): coins did pass the entry checks. Three causes, said
+        // apart. A coin the Brain HELD recently, with nothing material moved
+        // since, is the rotation working and needs no notice; nor does a coin
+        // whose pool had no tape row, where nothing was read. A coin waiting
+        // out FAILED CANDLE AND TRADE READS is a feed outage, and the desk is
+        // told so while ANY coin is in that window — whatever this slot
+        // picked, so a review of an early coin or of the coins outside the
+        // outage does not clear it. The notice and the idle line go through
+        // TrenchNoticeGate: said on change, never per flicker.
+        const backoff = fastTrencher ? trenchBrain.backedOffBreakdown() : { holds: 0, blind: 0, noTape: 0 };
+        const backedOff = trenchCandidate ? 0 : backoff.holds + backoff.blind + backoff.noTape;
+        if (fastTrencher) trenchNotice(agentId, trenchDeskNotice({ picked: trenchSymbols.size > 0, braked: entriesBraked, backoff }));
+        const parts = [
+          backoff.holds ? `${backoff.holds} held recently with nothing material moved since` : "",
+          backoff.blind ? `${backoff.blind} waiting out failed candle and trade reads` : "",
+          backoff.noTape ? `${backoff.noTape} waiting out a missing tape row for their pool` : "",
+        ].filter(Boolean).join("; ");
+        if (backoffIdleGate.say(backedOff ? `Entry rotation idle: all ${backedOff} eligible coin(s) backed off — ${parts}. No entry review until one moves or its window passes.` : "")) {
+          console.log(`[trencher] Entry rotation idle: all ${backedOff} eligible coin(s) backed off — ${parts}. No entry review until one moves or its window passes.`);
+        }
         const focusPositions = positions.filter(p => !fastTrencher || trenchHeld.has(p.token.toLowerCase())).map((p) => ({
           symbol: p.symbol,
           token: p.token,
@@ -13254,8 +13299,17 @@ async function main() {
             }
             const freshTape = freshTrenchTape();
             const verifiedPool = autoTrench?.qualified.find(p => p.tokenAddress.toLowerCase() === focus.token.toLowerCase());
-            const tape = freshTape.find(p => p.tokenAddress.toLowerCase() === focus.token.toLowerCase() && (!verifiedPool || p.poolAddress === verifiedPool.poolAddress));
+            const tape = trenchTapeRow(focus.token, freshTape);
             inputs.persona = withAgentBrief(trenchBrainPersona(focus.symbol, focus.held), cfg.agentBrief);
+            // WHAT IT SAID LAST TIME, AND WHAT MOVED SINCE — entry reviews only.
+            // Holds stay out of the published-memory lines (brain-material.ts
+            // memoryLines); this one line is the exception that carries a
+            // comparison rather than a repetition: when it held this coin, a
+            // short safe reason, and the price, hour volume and five-minute
+            // buyers then and now. First, within the six lines the Brain reads
+            // (graph.py memory[:6]) — and never at the paper notice's expense.
+            const holdLine = focus.held ? null : trenchBrain.holdMemory(focus.token, focus.symbol);
+            if (holdLine) inputs.memory = leadMemory(inputs.memory ?? [], holdLine, paper);
             if (tape) {
               Object.assign(inputs.market.signals, trenchBrainSignals(tape, trenchTapeAt, lastLiquidityUsd.get(focus.token.toLowerCase()) ?? null));
             }
@@ -13280,11 +13334,27 @@ async function main() {
               sizeUsdg: researchSize, gasPerOperationUsdg: expectedTradeGasMicro, tradeFeeBps: cfg.tradeFeeBps,
             } : null;
             if (enhancedResearch) inputs.persona += `\n\n${DECISION_RESEARCH_GUIDANCE}`;
-            trenchBrain.launch(trenchContext, inputs, focus.token, async () => {
-              const costRead = costContext ? entryCostEvidence(costContext) : Promise.resolve(null);
+            trenchBrain.launch(trenchContext, inputs, focus.token, async (review) => {
+              const costRead = costContext ? entryCostResearch(costContext) : Promise.resolve(null);
               const projectRead = projectContext
                 ? projectPurpose.read(projectContext.client, projectContext.token, projectContext.chainId, projectContext.browser)
                 : Promise.resolve(null);
+              // NOTHING CURRENT TO JUDGE, SO NOTHING IS PAID FOR — an ENTRY
+              // review only; a held position is reviewed whatever the evidence.
+              // The Brain would be billed to read no flow at all and could only
+              // come back HOLD. The coin waits one backoff window unless it
+              // moves, the skip is said once per coin per window, and the
+              // funnel files it as evidence-unavailable.
+              const skipBlindEntry = (cause: "blind" | "no-tape", words: string): ShadowOutcome => {
+                const say = trenchBrain.evidenceSkipped(focus.token, cause);
+                funnel.note(focus.token, focus.symbol, classifyStage({ kind: "evidence-unavailable", why: cause }));
+                return {
+                  ran: false,
+                  why: say ? `Entry review of ${focus.symbol} not paid for: ${words}; it waits a backoff window unless it moves.` : "",
+                  nextReviewAt: null,
+                  trigger: { fire: false, reason: null, detail: "entry evidence unavailable", candidates: [] },
+                };
+              };
               // Enrichment cannot block the trading tick or mutate a review after its deadline.
               if (tape) {
                 // THE BUDGET IS NOW SPENT PER LEG, INSIDE readPoolEvidence, so
@@ -13299,7 +13369,9 @@ async function main() {
                   readPoolEvidence(tape.poolId, focus.token, EVIDENCE_BUDGET_MS).catch(() => null),
                   new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), EVIDENCE_BUDGET_MS + 2000); }),
                 ]).finally(() => { if (timer) clearTimeout(timer); });
-                const detail = evidence ? JSON.stringify(summarizeEvidence(evidence)) : 'Detailed candles and trade sample unavailable within the review budget; do not infer zero activity.';
+                // The compact copy (pool-evidence.ts brainEvidence): the manager
+                // reads only technical[:2400], tape JSON first, then this.
+                const detail = evidence ? brainEvidence(evidence) :'Detailed candles and trade sample unavailable within the review budget; do not infer zero activity.';
                 inputs.market.signals.technical += `\n${detail}`;
                 // EACH HALF PRINTS ITS OWN OUTCOME. Both halves used to be
                 // driven off one nullable, so `candles=23 trades=budget` was
@@ -13309,6 +13381,19 @@ async function main() {
                 const half = (r: { failure?: string; data: unknown[] } | undefined) =>
                   r === undefined ? "no-read" : r.failure ?? r.data.length;
                 console.log(`[${short(agentId)}] [trencher] evidence ${focus.symbol}: candles=${half(evidence?.candles)} trades=${half(evidence?.trades)}`);
+                // Both legs failed (a provider cooldown or the request budget,
+                // in practice) on a tape row past one refresh: a stale summary
+                // with no flow behind it (trencher-brain.ts entryEvidenceBlind).
+                const tapeAt = trenchTapeReader.observedAtOf(tape);
+                if (!focus.held && entryEvidenceBlind(evidence, tapeAt, Date.now())) {
+                  const age = tapeAt === null ? "gone from the fresh tape" : `${Math.round((Date.now() - tapeAt) / 1000)}s old`;
+                  return skipBlindEntry("blind", `candles and trades both unavailable and its tape row is ${age}`);
+                }
+                // A review that goes ahead without either leg (a current tape
+                // row, or a held position) holds on missing flow, not on the
+                // coin: an entry HOLD from it gets one evidence window, never
+                // a run of holds or hold memory (trencher-brain.ts launch).
+                if (!evidence || (evidence.candles.failed && evidence.trades.failed)) review.withoutEvidence();
               } else {
                 // A REVIEW WITH NO TAPE ENTRY IS NOT A REVIEW WITH NO EVIDENCE
                 // LINE, and until now those were the same thing to anyone
@@ -13325,16 +13410,37 @@ async function main() {
                 // This does not fix the gap — it makes it countable, which is
                 // the prerequisite for deciding whether the window or the pool
                 // match is the thing to change.
+                //
+                // AND AN ENTRY REVIEW IN THAT STATE IS NOT PAID FOR: no tape
+                // row means no memecoin signals and no pool evidence at all,
+                // strictly less than the blind case above. It is filed as
+                // `no-tape`, not as a feed outage — no read was made — and said
+                // once per coin per window by the skip itself. A held position
+                // is still reviewed, flagged like any review without evidence
+                // (a held review never touches the backoff either way).
+                if (!focus.held) return skipBlindEntry("no-tape", "its pool has no fresh tape row, so there are no memecoin signals or pool evidence");
                 console.log(`[${short(agentId)}] [trencher] evidence ${focus.symbol}: none — no fresh tape entry for this pool, so the review has no memecoin signals`);
+                review.withoutEvidence();
               }
               const project = await projectRead;
               if (project) inputs.market.signals.builder = [project, inputs.market.signals.builder].filter(Boolean).join("\n\n");
-              const costEvidence = await costRead;
+              const costResearch = await costRead;
+              const costEvidence = costResearch?.text ?? null;
               if (costEvidence) {
                 inputs.market.signals.liquidity = [costEvidence, inputs.market.signals.liquidity].filter(Boolean).join("\n\n");
                 // Pulse can reserve a slot for project research and omit the
                 // liquidity analyst; the manager still needs the same costs.
                 inputs.memory = [costEvidence, ...(inputs.memory ?? []).slice(0, 5)];
+              }
+              // THE MOMENTUM ENTRY PLAN, for research accounts' entry reviews
+              // only (costContext exists exactly then): the mechanical exits
+              // from TRENCHER_FAST, the round-trip cost just read (or its gas
+              // floor), the cost c each exit still pays beyond the average
+              // fill the brackets run from (trenchBreakEven), and how to turn
+              // odds of +take before -stop into an edge instead of inventing one.
+              // Research inputs only: no cap, guard, gate or exit changes.
+              if (costContext) {
+                inputs.persona += `\n\n${trenchMomentumBrief(TRENCHER_FAST, trenchBreakEven(costResearch, costContext), costContext.sizeUsdg)}`;
               }
               // Once the decision is persisted (runShadow writes it before it
               // returns), the nomination book hears what was decided about this
