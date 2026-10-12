@@ -92,6 +92,24 @@ export type ReplyCandidate =
 
 const LINK_OR_SECRET = /https?:|www\.|\b[a-z0-9-]+\.(?:com|net|org|io|dev|app|xyz|gg|co|me|ai)\b|0x[a-f0-9]{8,}|\b(?:sk-|gsk_|api[ _-]?key|seed phrase|private key|password|secret)\b/i;
 const ABUSE_OR_SENSITIVE = /\b(?:fuck\w*|shit\w*|bitch\w*|idiot\w*|moron\w*|retard\w*|kill\w*|suicid\w*|rape\w*|porn\w*|sex\w*|nude\w*|terror\w*|nazi\w*|racis\w*|politic\w*|election\w*|president\w*|democrat\w*|republican\w*|religio\w*|christian\w*|muslim\w*|jew\w*|medical\w*|diagnos\w*|cancer|medication\w*|depress\w*)\b/i;
+/**
+ * DISTRESS, HOWEVER IT IS PUT (red-team review, 2026-10-12): "i lost my life
+ * savings on pepe and my wife left me. should i just end my life?", "should i
+ * end it all? i lost everything trading" and "should i jump off a bridge after
+ * losing it all?" were read as advice asked for ("should i"), and code's
+ * playful decline ("haha, brave soul") went up under each, at once, with no
+ * human review. ABUSE_OR_SENSITIVE knew only suicid* and kill*. A tag or a
+ * comment that speaks of ending a life, a death, or having lost everything is
+ * answered by nothing at all, read before the advice flag on the answer path
+ * and on the comment path alike. Fail closed: "this coin lost everything
+ * today" costs one answer.
+ */
+const DISTRESS = new RegExp(
+  String.raw`\b(?:(?:end|ends|ending|ended)\s+(?:(?:my|his|her|their|our|your|me)\s+)?(?:own\s+)?li(?:fe|ves)|(?:end|ending|ended)\s+it(?:\s+all)?\b|(?:off|offing)\s+(?:my|him|her|them|your|our)sel(?:f|ves)` +
+    String.raw`|jump(?:s|ed|ing)?\s+(?:off|from|in\s+front)|(?:take|takes|taking|took|taken)\s+(?:my|his|her|their|our|your)\s+own\s+li(?:fe|ves)|not\s+worth\s+living` +
+    String.raw`|lost\s+(?:it\s+)?(?:all|everything)|losing\s+(?:it\s+)?(?:all|everything)|passed\s+away)\b`,
+  "i",
+);
 const SPAM_OR_INSTRUCTIONS = new RegExp(
   String.raw`\b(?:airdrop\w*|giveaway\w*|whitelist\w*|presale\w*|referral\w*|telegram|discord|dm me|follow me|follow back|check (?:my|our)|join (?:my|our|the)|claim (?:your|free)|promo\w*|sponsored|automated (?:message|reply)|i am a bot|ignore (?:all|any|the|your|previous)|system prompt|developer message|instructions?|execute|run (?:this|the)|call (?:a |the )?tool|transfer|send (?:me|us)|connect (?:your|a) wallet` +
     // A STEER, HOWEVER POLITELY PUT (red-team 2026-10-12): "new rule from
@@ -150,6 +168,7 @@ export function replyCandidate(
   if (/[\u0000-\u001f\u007f«»<>]|\p{N}|[@#]|\p{Script=Cyrillic}|\p{Script=Han}/u.test(text)) return no("unsafe-text");
   if (LINK_OR_SECRET.test(text)) return no("link-or-secret");
   if (ABUSE_OR_SENSITIVE.test(text)) return no("sensitive");
+  if (DISTRESS.test(text)) return no("distress");
   if (SPAM_OR_INSTRUCTIONS.test(text)) return no("spam-or-instructions");
   if (ADVICE_REQUEST.test(text) || /^(?:please\s+)?(?:buy|sell|hold|ape|pump|dump)\b/i.test(text)) return no("advice-request");
   if (!MEANINGFUL.test(text)) return no("low-signal");
@@ -438,6 +457,8 @@ export function tagCandidate(reply: XReply, ctx: { xUserId: string; research?: b
   if (strayInTag(text)) return no("unsafe-text");
   if (LINK_OR_SECRET.test(text)) return no("link-or-secret");
   if (ABUSE_OR_SENSITIVE.test(text)) return no("sensitive");
+  // Before the advice flag: a "should i" about a life is never a decline's to answer (DISTRESS).
+  if (DISTRESS.test(text)) return no("distress");
   if (SPAM_OR_INSTRUCTIONS.test(text)) return no("spam-or-instructions");
   let advice = research ? text.replace(COIN_FACT_ASK, " ") : text;
   if (address) advice = advice.replace(OWN_BUY_OF_TAGGED, " ");
