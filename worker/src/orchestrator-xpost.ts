@@ -1741,7 +1741,13 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         // A buy it says is one it was told of, or none at all (XGateCtx.buys).
         ...(coded ? {} : { buys: told ? "vouched" as const : "none" as const, unsaid: [...(told && !namesNone ? [] : bought), ...money.otherOnly, ...older, ...askerNames],
           // A coin named, or its trades or a coin asked about off the plain list: not even that it likes it (XGateCtx.named).
-          named: !told && (coinNamed || asked.kind === "own-trades" || asked.kind === "coin"),
+          // AND EVERY MARKET ANSWER (red-team 2026-10-12): "what's hot?" names no
+          // coin, but an answer to it is about the coins the index shows, and
+          // gated as unnamed it posted "these are my picks", "i might buy one
+          // later" and "the ones i like are below". A what's-hot or a major
+          // answer drafted at all is gated as of a named coin: no first person
+          // but a deflection, no liking, no yes or no.
+          named: !told && (coinNamed || asked.kind === "own-trades" || asked.kind === "coin" || asked.kind === "hot" || asked.kind === "major"),
           // Told its buys, every other word is everyday or one it was handed (XGateCtx.known).
           known: [facts.strategy ?? "", ...(looked?.research ?? []), looked?.creatorClaim ?? ""].filter((k) => k !== "") }),
       }, BASE_GATE);

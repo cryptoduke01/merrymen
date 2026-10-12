@@ -1021,7 +1021,11 @@ other owner's agent, and its posting and reply warnings, are unchanged.
   Each is gated like any answer, this mention's own frame first, and the
   line goes in after it; the model allowances a draft would have taken go
   back. Nothing past the floors: "nothing is standing out on the robinhood
-  chain index right now", no line, and nothing more looked up.
+  chain index right now", no line, and nothing more looked up. A what's-hot
+  or a major answer that is drafted at all is gated as of a named coin
+  (`XGateCtx.named`): no first person but a deflection, no liking, no yes
+  or no ("these are my picks", "i might buy one later" were posted when it
+  was gated as unnamed).
 - **A tagged contract's onchain hour:** the Bitquery reading the coin path
   already makes; its last hour's buys and sells go to code's line beside
   their bands, only when both sides reach a thousand dollars.

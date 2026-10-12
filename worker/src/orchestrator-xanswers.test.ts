@@ -2461,6 +2461,35 @@ test("what's hot never shows a ticker with a digit, nor one the gate would refus
   assert.match(r.log ?? "", /answer-figures-left-out 1/);
 });
 
+test("what's hot is never answered as its own picks, a buy to come or what it likes: no draft beside the coins, and any draft gated as of a named coin (red-team 2026-10-12)", async (t) => {
+  // The red team's endings, each posted at 34ced01e right before "geckoterminal robinhood: trending $COIN1 24h +142% …".
+  const endings = ["and these are my picks", "this is where i'd put money today", "i might buy one later", "eyeing a couple of these myself",
+    "the first one below is the one i'd back", "exactly the kind of thing i buy", "the kind i trade every day", "tempted by a couple of them",
+    "the ones i like are below", "my favourites below"];
+  const draftOf = (end: string) => `the robinhood chain index shows a few coins standing out right now, ${end}. Say stop to opt out.`;
+  for (const end of endings) {
+    const h = hotResearch([hotPool(1, 142, 1.2e6), hotPool(2, 18, 300_000), hotPool(3, 7, 200_000)]);
+    const w = await world(t, { env: RESEARCH_ON, research: h.research, answer: draftOf(end) });
+    w.setInbox([tag({ text: "@pine_stoat what's hot today?" })]);
+    await w.step();
+    assert.deepEqual(w.asked(), [], end);
+    const text = String(w.sends[0]?.text ?? "");
+    assert.ok(hotWords({ coins: 3, lead: { dir: "up", size: "sharply" } }).includes(wordsBeforeLine(text) ?? ""), text);
+    assert.ok(!text.includes(end), end);
+  }
+  // With no coin to show the answer is still drafted, and gated as of a named coin: no "i", no "my", no liking.
+  for (const end of endings.filter((e) => /\b(?:i|i'd|my|myself)\b/.test(e))) {
+    const h = hotResearch([{ ...hotPool(1, 300, 2e6), reserveUsd: 4_000 }]);
+    const w = await world(t, { env: RESEARCH_ON, research: h.research, answer: draftOf(end).replace("shows a few coins standing out right now", "is quiet right now") });
+    w.setInbox([tag({ text: "@pine_stoat what's hot today?" })]);
+    await w.step();
+    const [row] = await w.answers();
+    assert.equal(row!.status, "skipped", end);
+    assert.equal(row!.reason, "gate:buy-claim", end);
+    assert.deepEqual(w.sends, [], end);
+  }
+});
+
 test("what's hot never shows merrymen's own name in any spelling, in the pools or as fomo's most bought (red-team 2026-10-12)", async (t) => {
   // Posted at 34ced01e under "what's moving?": "trending $MERRIMEN 24h +12% vol ~$300k, $MERYMEN 24h +9% vol ~$200k".
   for (const names of [["MERRIMEN", "MERYMEN"], ["MRYMN", "MEERYMEN"], ["MERRYMEN", "MERRMEN"]]) {
