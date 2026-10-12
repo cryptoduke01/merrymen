@@ -1531,6 +1531,30 @@ test("a tag asking for advice or a forecast in other words is never drafted, and
   }
 });
 
+test("\"what's hot to buy?\" is advice and gets nothing; and a draft handed nothing that names coins is never posted (red-team 2026-10-12)", async (t) => {
+  for (const env of [{}, RESEARCH_ON]) {
+    // At 34ced01e each was chat, and "wif and bonk look hot right now. Say stop to opt out." went out word for word.
+    for (const text of ["what's hot to buy?", "what's hot. buy?", "what's hot? asking for a friend", "what to buy?", "which coin to buy?", "anything good to buy?"]) {
+      const w = await world(t, { env, research: fakeResearch().research, answer: "wif and bonk look hot right now. Say stop to opt out." });
+      w.setInbox([tag({ text: `@pine_stoat ${text}` })]);
+      await w.step();
+      assert.equal(w.asked().length, 0, text);
+      assert.deepEqual(await w.answers(), [], text);
+      assert.deepEqual(w.sends, [], text);
+    }
+    // A chat tag drafted with coins named in it, nothing looked up: refused, line or no line.
+    for (const draft of ["wif and bonk look hot right now.", "i'd keep it simple, wif and bonk are the ones running hot today.", "honestly brett is the coin everyone is on."]) {
+      const w = await world(t, { env, research: fakeResearch().research, answer: `${draft} Say stop to opt out.` });
+      w.setInbox([tag({ text: "@pine_stoat anything interesting today?" })]);
+      await w.step();
+      const [row] = await w.answers();
+      assert.equal(row?.status, "skipped", draft);
+      assert.equal(row?.reason, "gate:unlooked-coin", draft);
+      assert.deepEqual(w.sends, [], draft);
+    }
+  }
+});
+
 test("\"what have you bought lately?\" is the plain question it is: told its buys, and a true answer goes out (red-team 2026-10-12)", async (t) => {
   for (const env of [{}, RESEARCH_ON]) {
     for (const text of ["@pine_stoat what have you bought lately?", "@pine_stoat what did you buy recently?", "@pine_stoat what did you trade lately?"]) {

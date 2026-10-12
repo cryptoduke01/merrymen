@@ -120,6 +120,26 @@ const COIN_TALK: ReadonlySet<string> = new Set(("coin coins token tokens ticker 
   "dump dumped rug rugged legit scam safe safer risky riskier bag bags entry position ca contract launch launched curve pool dev devs").split(" "));
 
 /**
+ * HOW A DRAFT TALKS ABOUT A COIN'S MARKET (red-team 2026-10-12): "wif and
+ * bonk look hot right now" went out as chat, handed nothing. Beside a word
+ * that might be a coin's name, any of these is a coin named.
+ */
+const MARKET_TALK: ReadonlySet<string> = new Set(("coin coins token tokens memecoin memecoins buy buys buying bought ape aped aping pump pumping pumped " +
+  "moon mooning gem gems hot trending ripping rally rallying surging bag bags bullish bearish play plays pick picks mover movers runner runners").split(" "));
+
+/**
+ * DOES A DRAFT NAME A COIN, BY ANY NAME? A word that might be a coin's name
+ * (nameLikeWords: not an everyday word, not a word of the agent's own name)
+ * beside market talk (MARKET_TALK). Read alike for every name; errs toward
+ * yes: an answer handed nothing that it finds is not posted.
+ */
+export function coinTalkIn(text: unknown, ownName = ""): boolean {
+  if (typeof text !== "string") return false;
+  const own = new Set(tagWords(String(ownName ?? "")));
+  return nameLikeWords(text).some((w) => !own.has(w) && !answerWord(w)) && tagWords(text).some((w) => MARKET_TALK.has(w));
+}
+
+/**
  * TALK ABOUT A COIN BY A NAME (red-team review, 2026-10-12): a word about a
  * coin or a trade beside a word that might be a coin's name, "is pepe
  * legit?", "is bonk legit?", "did you buy pepe inu?". Read alike for every

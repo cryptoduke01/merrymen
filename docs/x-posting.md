@@ -997,7 +997,15 @@ other owner's agent, and its posting and reply warnings, are unchanged.
   greeting words and a "today" / "right now" / "on robinhood chain" around
   them: "what's hot / trending / moving / pumping", "top gainers", "what
   are (the) top gainers", "what are people talking about", "what's the
-  meta". A word more ("what's hot to buy?") and it is not on the list.
+  meta". A word more ("what's hot to buy?") and it is not on the list; and
+  a tag asking what to buy in any words ("what's hot to buy?", "what's hot.
+  buy?", "asking for a friend", "which coin to buy?", "anything good to
+  buy?") is an advice request, answered by nothing (`replies.ts`
+  `WHAT_TO_BUY`, red-team 2026-10-12: they were chat, and "wif and bonk look
+  hot right now" went out). Any drafted answer handed nothing and told none
+  of its buys that names a coin in any words (a word that may be a coin's
+  name beside market talk, `words.ts` `coinTalkIn`) is refused
+  (`gate:unlooked-coin`).
   Research reads page one of GeckoTerminal's Robinhood Chain
   `trending_pools` on the fleet lane (mostly the Trencher tape's cache) and
   keeps up to three coins (`hotScreen`) that pass the fleet's own discovery

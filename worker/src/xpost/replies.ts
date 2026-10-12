@@ -95,6 +95,17 @@ const ADVICE_REQUEST = new RegExp(
     String.raw`|(?:going|go|goes|headed|heading)\s+(?:up|higher|lower|down|to\s+zero)|undervalued|overvalued|bullish|bearish|moon(?:ing)?|(?:\d+|ten|hundred)\s*x)\b`,
   "i",
 );
+/**
+ * WHAT TO BUY, ASKED WITHOUT "SHOULD I" (red-team 2026-10-12): "what's hot to
+ * buy?", "what's hot. buy?", "what's hot? asking for a friend", "what to
+ * buy?", "which coin to buy?", "anything good to buy?" were read as chat, and
+ * a draft naming coins ("wif and bonk look hot right now") was posted at once.
+ * An active agent's tag (tagCandidate) that asks what to buy, ape or get into,
+ * ends on a bare "buy?", or winks "asking for a friend", is an advice request:
+ * answered by nothing. Fail closed: "how do you decide what to buy?" costs one
+ * answer. Comment replies on buy posts keep their own screen.
+ */
+const WHAT_TO_BUY = /\bto\s+(?:buy|ape|grab|get\s+in(?:to)?|pick\s+up|load\s+up|invest(?:\s+in)?|scoop)\b|(?<!\b(?:you|u|ya|i|we)\s+)\b(?:buy|ape|sell)\s*\?|\basking\s+for\s+a\s+friend\b|\bworth\s+(?:a\s+)?(?:buy|ape|punt|shot|bet|bag)\b|\b(?:good|safe|best|top)\s+(?:ones?|coins?|tokens?|plays?|picks?)\s+(?:to|for)\b/i;
 const MEANINGFUL = /\b(?:reason\w*|liquidity|pool|curve|buyers?|activity|risk\w*|paper|practice|approach|choice|agree|disagree|makes sense|fair (?:enough|point))\b|\b(?:why|what|how|which)\b[^.!]{0,70}\b(?:this|that|it|coin|buy|bought)\b/i;
 
 /**
@@ -404,6 +415,7 @@ export function tagCandidate(reply: XReply, ctx: { xUserId: string; research?: b
   let advice = research ? text.replace(COIN_FACT_ASK, " ") : text;
   if (address) advice = advice.replace(OWN_BUY_OF_TAGGED, " ");
   if (ADVICE_REQUEST.test(advice) || /^(?:please\s+)?(?:buy|sell|hold|ape|pump|dump)\b/i.test(text)) return no("advice-request");
+  if (WHAT_TO_BUY.test(advice)) return no("advice-request");
   if (!greeting && !ASKED.test(text)) return no("not-asked");
   return { ok: true, text, ...(address ? { address } : {}), ...(others(lead) ? { otherHandles: true as const } : {}), ...(greeting ? { greeting: true as const } : {}) };
 }

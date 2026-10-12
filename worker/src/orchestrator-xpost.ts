@@ -52,7 +52,7 @@ import { admitXPost, merrymenMentioned, moneySaid, tickerRefusal, vocabularyRefu
 import { ACTIVE_CADENCE, ANSWER_GAP_MS, ANSWER_STALE_MS, ANSWERS_PER_DAY, REPLY_STALE_MS, STANDARD_CADENCE, coinOf, hash32, introState, planPosts, replyDueAt, sendDecision, type PlanCadence, type PlanClock, type PlanIntent } from "./xpost/planner";
 import { APP_PAUSE_KEY, APP_PAUSE_MS, CREDITS_PAUSE_MS, PAUSE_KEY, readReplyComments, sendOne, type SendOutcome } from "./xpost/sender";
 import { isAnswerOptOut, isReplyOptOut, replyCandidate, tagCandidate, withoutReplyOptOut } from "./xpost/replies";
-import { nameLikeWords, textWords } from "./xpost/words";
+import { coinTalkIn, nameLikeWords, textWords } from "./xpost/words";
 import { activeTenantsOf, repliesAllowedFor, repliesScopeOf } from "./xpost/scope";
 import {
   ANSWER_LOOKED_UP,
@@ -1799,8 +1799,14 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       }
       // AND ON WHAT WOULD BE POSTED: the gate's cleaned text, not the draft it read.
       const postsName = !templated && verdict?.ok === true && (sherwoodNamed(verdict.text) || sherwoodMentioned(verdict.text));
+      // NOR A COIN NOTHING WAS LOOKED UP FOR (red-team 2026-10-12): under a
+      // tag read as chat, "wif and bonk look hot right now" went out word for
+      // word. A draft the gate admitted, handed nothing and told none of its
+      // buys, that names a coin in any words (a word that may be a coin's name
+      // beside market talk: xpost/words.ts coinTalkIn) is refused.
+      const unlookedCoin = !coded && verdict?.ok === true && !handed && !told && coinTalkIn(withoutReplyOptOut(verdict.text), f.name);
       const finishedAt = at();
-      const admitted = verdict?.ok && !postsName ? verdict.text : null;
+      const admitted = verdict?.ok && !postsName && !unlookedCoin ? verdict.text : null;
       // THE FIGURES LINE, CODE'S, AFTER THE GATE (xpost/figures.ts): only an
       // active owner's answer, only from what research built for this tag,
       // only a line in the renderer's own grammar (admitFiguresLine, again
@@ -1826,7 +1832,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         replyToTweetId: comment.id, replyRootTweetId: comment.id, replyAuthorId: comment.authorId,
         status: body ? "scheduled" : "skipped",
         reason: body ? null : claimed ? "gate:sherwood-claim" : named || postsName ? "gate:sherwood-drafted" : unlooked ? "gate:unlooked-source"
-          : verdict && !verdict.ok ? `gate:${verdict.reason}` : "no-draft",
+          : unlookedCoin ? "gate:unlooked-coin" : verdict && !verdict.ok ? `gate:${verdict.reason}` : "no-draft",
       });
       if (id !== null && greeting && body) bump("answered-greeting");
       return id === null ? null : { body, lookedUp };
