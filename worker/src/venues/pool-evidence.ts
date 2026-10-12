@@ -176,11 +176,21 @@ const round = (v: number | null, dp: number) => v === null ? null : Math.round(v
 const sig = (v: number) => Number(v.toPrecision(6));
 
 /**
+ * WHEN SELLING IS MATERIAL ENOUGH FOR ITS CONCENTRATION TO MEAN ANYTHING: at
+ * least this many sells, making at least this share of the window's USD flow.
+ * One sender doing "100% of the selling" is a single $3 sell in a buying
+ * window, and reading that as distribution would be wrong.
+ */
+export const SELL_CONCENTRATION = { minSells: 3, minSharePctOfFlow: 25 } as const;
+
+/**
  * ONE WINDOW OF THE TRADE SAMPLE, counted every way a short-horizon read needs:
- * how many trades each side, how many DISTINCT wallets, the buy share of USD
- * flow, and how much of the selling one wallet did. A single seller doing
- * most of it is distribution; many small buyers is demand. Every amount is
- * null when any trade in the window has none — a missing amount is never 0.
+ * how many trades each side, how many DISTINCT senders, the buy share of USD
+ * flow, and — when the selling is material (SELL_CONCENTRATION) — how much of
+ * it one sender did, as a share of the selling and of the whole window. One
+ * sender doing most of a material sell flow can be distribution; it can also
+ * be a router or bundler, which is why it is a sender and not a holder. Every
+ * amount is null when any trade in the window has none: missing is never 0.
  *
  * `sampleCoversWindow` is false when the index's sample was full and its
  * oldest trade is newer than the window's start: the counts are then the
@@ -193,21 +203,25 @@ function tradeWindow(trades: readonly MarketTrade[], seconds: number, nowSec: nu
   const priced = inWindow.every(t => t.usd !== null);
   const usd = (ts: readonly MarketTrade[]) => priced ? ts.reduce((s, t) => s + t.usd!, 0) : null;
   const buyUsd = usd(buys), sellUsd = usd(sells);
+  const flowUsd = buyUsd !== null && sellUsd !== null ? buyUsd + sellUsd : null;
   const attributed = inWindow.every(t => typeof t.wallet === 'string');
   const distinct = (ts: readonly MarketTrade[]) => attributed ? new Set(ts.map(t => t.wallet)).size : null;
-  let topSeller: number | null = null;
-  if (attributed && sellUsd !== null && sellUsd > 0) {
+  const material = sells.length >= SELL_CONCENTRATION.minSells && sellUsd !== null && flowUsd !== null && flowUsd > 0 &&
+    sellUsd * 100 >= flowUsd * SELL_CONCENTRATION.minSharePctOfFlow;
+  let topSellerUsd: number | null = null;
+  if (attributed && material) {
     const bySeller = new Map<string, number>();
     for (const t of sells) bySeller.set(t.wallet!, (bySeller.get(t.wallet!) ?? 0) + t.usd!);
-    topSeller = Math.max(...bySeller.values()) / sellUsd * 100;
+    topSellerUsd = Math.max(...bySeller.values());
   }
   const oldest = trades.length ? Math.min(...trades.map(t => t.time)) : undefined;
   return {
     trades: inWindow.length, buys: buys.length, sells: sells.length,
     distinctBuyers: distinct(buys), distinctSellers: distinct(sells),
     buyUsd: round(buyUsd, 2), sellUsd: round(sellUsd, 2),
-    buySharePct: buyUsd !== null && sellUsd !== null && buyUsd + sellUsd > 0 ? round(buyUsd / (buyUsd + sellUsd) * 100, 1) : null,
-    topSellerSharePctOfSellUsd: round(topSeller, 1),
+    buySharePct: flowUsd !== null && flowUsd > 0 ? round(buyUsd! / flowUsd * 100, 1) : null,
+    topSellerSharePctOfSellUsd: topSellerUsd === null ? null : round(topSellerUsd / sellUsd! * 100, 1),
+    topSellerSharePctOfWindowUsd: topSellerUsd === null ? null : round(topSellerUsd / flowUsd! * 100, 1),
     sampleCoversWindow: !sampleFull || (oldest !== undefined && oldest <= start),
   };
 }
@@ -275,4 +289,64 @@ export function summarizeEvidence(e: PoolEvidence, now = Date.now()) {
     sampledTrades5m: fresh(e.trades) ? trades.length : null, sampledBuyUsd5m: buy, sampledSellUsd5m: sell,
     sampledBuySharePct5m: buy !== null && sell !== null && buy + sell > 0 ? buy / (buy + sell) * 100 : null,
     poolId: e.poolId, token: e.token };
+}
+
+/**
+ * The caveat for a reader that shows only the legacy five-minute view — no
+ * trade windows, no candle volume (web market-intel poolActivity). The full
+ * summary's own caveat describes fields that view does not carry.
+ */
+export const FIVE_MINUTE_EVIDENCE_CAVEAT = 'Latest 300 indexed trades maximum, not exhaustive volume. Missing or stale evidence is unknown. Volatility is not annualized. Completed candles only; no candle volume is used. Measurements are not a forecast or permission to trade.';
+
+/** Columns of the Brain copy's trade-window rows, in order. */
+const WINDOW_FIELDS = ['trades', 'buys', 'sells', 'distinctBuyers', 'distinctSellers', 'buyUsd', 'sellUsd', 'buySharePct',
+  'topSellerSharePctOfSellUsd', 'topSellerSharePctOfWindowUsd', 'sampleCoversWindow'] as const;
+
+/**
+ * THE SUMMARY AS THE BRAIN READS IT — compact, and decision-critical first.
+ *
+ * WHY A SEPARATE COPY. The manager is handed `signals.technical[:2400]`
+ * (graph.py): the tape JSON (trenchBrainSignals, ~700 characters) and then
+ * this. The full summary had grown past that cut with its trade windows and
+ * bars, so whatever came last — the caveat, the bars — was silently dropped
+ * for the one reader that decides. So: trade windows first, as rows under one
+ * header; the last bars newest first, as rows of four significant figures;
+ * then the caveat; then the candle figures, rounded. The pool and token ids
+ * are left out because the tape JSON already carries the pool, and the
+ * legacy five-minute fields because `tradeWindows.m5` is the same window.
+ * Nothing is added that the full summary does not hold.
+ */
+export function brainEvidence(e: PoolEvidence, now = Date.now()): string {
+  const s = summarizeEvidence(e, now);
+  const w = s.tradeWindows;
+  const row = (x: Record<string, unknown> | undefined) => x ? WINDOW_FIELDS.map(f => {
+    const v = x[f];
+    return (f === 'buyUsd' || f === 'sellUsd') && typeof v === 'number' ? Math.round(v) : v;
+  }) : null;
+  const sig4 = (v: number) => Number(v.toPrecision(4));
+  const newest = s.recentBars.at(-1);
+  return JSON.stringify({
+    tradeWindows: w ? { fields: WINDOW_FIELDS.join(','), m5: row(w.m5), m15: row(w.m15), h1: row(w.h1) } : null,
+    recentBars: newest ? {
+      fields: 'open,high,low,close,volumeUsd', newestEnd: newest.end,
+      newestFirst: [...s.recentBars].reverse().map(b => [sig4(b.open), sig4(b.high), sig4(b.low), sig4(b.close), b.volumeUsd === null ? null : Math.round(b.volumeUsd)]),
+    } : null,
+    caveat: 'Latest 300 indexed trades, not all volume; sampleCoversWindow says whether a window is fully sampled. Senders are transaction senders, possibly routers, not verified owners. Bars are completed 5-minute candles, volume in USD. Missing or stale evidence is unknown, never zero. Not a forecast.',
+    candleVolumeUsd: s.candleVolumeUsd ? { allBars: round(s.candleVolumeUsd.allBars, 0), last15m: round(s.candleVolumeUsd.last15m, 0), prior15m: round(s.candleVolumeUsd.prior15m, 0) } : null,
+    measuredReturnPct: round(s.measuredReturnPct, 2), latestFiveMinuteReturnPct: round(s.latestFiveMinuteReturnPct, 2),
+    fiveMinuteLogReturnStdDevPct: round(s.fiveMinuteLogReturnStdDevPct, 2),
+    completedFiveMinuteBars: s.completedFiveMinuteBars, contiguous: s.contiguous, start: s.start, end: s.end,
+    candleFailure: s.candleFailure, tradeFailure: s.tradeFailure, candleObservedAt: s.candleObservedAt, tradeObservedAt: s.tradeObservedAt,
+    source: s.source,
+  });
+}
+
+/**
+ * EVIDENCE FIT FOR A CLIENT: the same reads with every trade's sender wallet
+ * removed. Senders are kept in this process only to be COUNTED (distinct
+ * buyers and sellers); a list of addresses has no business on the wire to a
+ * browser or a phone (web /api/tokens/[address]). Everything else is as read.
+ */
+export function publicEvidence(e: PoolEvidence): PoolEvidence {
+  return { ...e, trades: { ...e.trades, data: e.trades.data.map(({ wallet: _wallet, ...t }) => t) } };
 }
