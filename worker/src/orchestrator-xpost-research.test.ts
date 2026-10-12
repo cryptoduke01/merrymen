@@ -412,7 +412,7 @@ describe("words from measurements: digit-free, attributed, and through the X gat
     for (let i = 0; i < 40; i++) {
       for (const lower of [true, false]) {
         const line = modelAnswer(`1000000000000${i}`, { lower });
-        const v = admitXPost(line, { kind: "reply", agentName: "Alan", mode: "live", coins: [], recentOwn: [], recentFleet: [] }, (r, c) => admitAgentLine(r, c));
+        const v = admitXPost(line, { kind: "reply", answer: true, agentName: "Alan", mode: "live", coins: [], recentOwn: [], recentFleet: [] }, (r, c) => admitAgentLine(r, c));
         assert.deepEqual(v, { ok: true, text: line }, line);
         assert.match(line, /new sherwood-1\b/);
       }
@@ -425,9 +425,9 @@ describe("words from measurements: digit-free, attributed, and through the X gat
       assert.equal(lines.length, 8);
       for (const line of lines) {
         const others = lines.filter((l) => l !== line);
-        const v = admitXPost(line, { kind: "reply", agentName: "Alan", mode, coins: [], recentOwn: others, recentFleet: others }, (r, c) => admitAgentLine(r, c));
+        const v = admitXPost(line, { kind: "reply", answer: true, agentName: "Alan", mode, coins: [], recentOwn: others, recentFleet: others }, (r, c) => admitAgentLine(r, c));
         assert.ok(v.ok, `${mode}: ${line} → ${v.ok ? "" : v.reason}`);
-        const again = admitXPost(line, { kind: "reply", agentName: "Alan", mode, coins: [], recentOwn: [line], recentFleet: [line] }, (r, c) => admitAgentLine(r, c));
+        const again = admitXPost(line, { kind: "reply", answer: true, agentName: "Alan", mode, coins: [], recentOwn: [line], recentFleet: [line] }, (r, c) => admitAgentLine(r, c));
         assert.equal(again.ok, false, "but never itself again");
       }
     }
@@ -438,7 +438,7 @@ describe("words from measurements: digit-free, attributed, and through the X gat
       for (const lower of [true, false]) {
         for (const mode of ["live", "paper", null] as const) {
           for (const line of greetingAnswers(`1000000000000${i}`, { lower }, { paper: mode === "paper" })) {
-            const v = admitXPost(line, { kind: "reply", agentName: "Alan", mode, coins: [], recentOwn: [], recentFleet: [], emojiOk: false }, (r, c) => admitAgentLine(r, c));
+            const v = admitXPost(line, { kind: "reply", answer: true, agentName: "Alan", mode, coins: [], recentOwn: [], recentFleet: [], emojiOk: false }, (r, c) => admitAgentLine(r, c));
             assert.deepEqual(v, { ok: true, text: line }, `${mode}: ${line}`);
           }
         }
@@ -446,7 +446,7 @@ describe("words from measurements: digit-free, attributed, and through the X gat
     }
     // Without its clause a paper agent's greeting would be refused: why the clause is there.
     const plain = greetingAnswers("1", { lower: true })[0]!;
-    const unsaid = admitXPost(plain, { kind: "reply", agentName: "Alan", mode: "paper", coins: [], recentOwn: [], recentFleet: [] }, (r, c) => admitAgentLine(r, c));
+    const unsaid = admitXPost(plain, { kind: "reply", answer: true, agentName: "Alan", mode: "paper", coins: [], recentOwn: [], recentFleet: [] }, (r, c) => admitAgentLine(r, c));
     assert.equal(unsaid.ok ? "ok" : unsaid.reason, "paper-unsaid");
   });
 
@@ -457,9 +457,9 @@ describe("words from measurements: digit-free, attributed, and through the X gat
       assert.equal(lines.length, 8);
       for (const line of lines) {
         const others = [...lines.filter((l) => l !== line), ...modelAnswers("1", { lower: false }, { paper })];
-        const v = admitXPost(line, { kind: "reply", agentName: "Alan", mode, coins: [], recentOwn: others, recentFleet: others }, (r, c) => admitAgentLine(r, c));
+        const v = admitXPost(line, { kind: "reply", answer: true, agentName: "Alan", mode, coins: [], recentOwn: others, recentFleet: others }, (r, c) => admitAgentLine(r, c));
         assert.ok(v.ok, `${mode}: ${line} → ${v.ok ? "" : v.reason}`);
-        const again = admitXPost(line, { kind: "reply", agentName: "Alan", mode, coins: [], recentOwn: [line], recentFleet: [] }, (r, c) => admitAgentLine(r, c));
+        const again = admitXPost(line, { kind: "reply", answer: true, agentName: "Alan", mode, coins: [], recentOwn: [line], recentFleet: [] }, (r, c) => admitAgentLine(r, c));
         assert.equal(again.ok, false, "but never itself again");
       }
     }
@@ -471,10 +471,10 @@ describe("words from measurements: digit-free, attributed, and through the X gat
         const paper = modelAnswer(`1000000000000${i}`, { lower }, { paper: true });
         assert.match(paper, /\bon paper\b/);
         assert.match(paper, /new sherwood-1\b/);
-        assert.deepEqual(admitXPost(paper, { kind: "reply", agentName: "Alan", mode: "paper", coins: [], recentOwn: [], recentFleet: [] }, (r, c) => admitAgentLine(r, c)), { ok: true, text: paper }, paper);
+        assert.deepEqual(admitXPost(paper, { kind: "reply", answer: true, agentName: "Alan", mode: "paper", coins: [], recentOwn: [], recentFleet: [] }, (r, c) => admitAgentLine(r, c)), { ok: true, text: paper }, paper);
         const plain = modelAnswer(`1000000000000${i}`, { lower });
         assert.doesNotMatch(plain, /paper|practice/);
-        const unsaid = admitXPost(plain, { kind: "reply", agentName: "Alan", mode: "paper", coins: [], recentOwn: [], recentFleet: [] }, (r, c) => admitAgentLine(r, c));
+        const unsaid = admitXPost(plain, { kind: "reply", answer: true, agentName: "Alan", mode: "paper", coins: [], recentOwn: [], recentFleet: [] }, (r, c) => admitAgentLine(r, c));
         assert.equal(unsaid.ok ? "ok" : unsaid.reason, "paper-unsaid", "why a paper agent needs its clause");
       }
     }

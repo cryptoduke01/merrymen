@@ -51,15 +51,13 @@ import { xAppFromEnv, type FetchLike, type XApp, type XReply } from "./xpost/cli
 import { admitXPost, formFixed, merrymenMentioned, moneySaid, namedIn, tickerRefusal, vocabularyRefusal, type BaseGate, type XGateCtx } from "./xpost/gate";
 import { ACTIVE_CADENCE, ANSWER_GAP_MS, ANSWER_STALE_MS, ANSWERS_PER_DAY, REPLY_STALE_MS, STANDARD_CADENCE, coinOf, hash32, introState, planPosts, replyDueAt, sendDecision, type PlanCadence, type PlanClock, type PlanIntent } from "./xpost/planner";
 import { APP_PAUSE_KEY, APP_PAUSE_MS, CREDITS_PAUSE_MS, PAUSE_KEY, readReplyComments, sendOne, type SendOutcome } from "./xpost/sender";
-import { isAnswerOptOut, isReplyOptOut, replyCandidate, tagCandidate, withNoticeAdded, withoutReplyOptOut } from "./xpost/replies";
+import { isAnswerOptOut, isReplyOptOut, replyCandidate, tagCandidate, withoutReplyOptOut } from "./xpost/replies";
 import { asksAboutACoin, coinTalkIn, houseTalkIn, marketTalkIn, nameLikeWords, textWords, unknownWordIn } from "./xpost/words";
 import { activeTenantsOf, repliesAllowedFor, repliesScopeOf } from "./xpost/scope";
 import {
   ANSWER_LOOKED_UP,
   answerAuthorSpent,
   answersWaiting,
-  OPT_OUT_NOTICE_MS,
-  optOutToldSince,
   cancelPost,
   claimSpan,
   deferPost,
@@ -187,10 +185,11 @@ const MAY_BE_ON_X: ReadonlySet<SendOutcome> = new Set<SendOutcome>(["posted", "u
  * writeAnswer). Anything else — a figure or an amount, sherwood, a buy, a
  * source, a word that may be a coin's name, advice, a forecast, the other
  * money, a body it does not have, a hidden or stray character — leaves the
- * tag unanswered, as before. NOT ITS LENGTH NOR A MISSING NOTICE (red-team
- * 2026-10-12): an over-long condolence and a draft that forgot the notice
- * each put a cheerful line up under "my dad just died"; a missing notice is
- * put on and the draft gated again, and an over-long draft is not answered.
+ * tag unanswered, as before. NOT ITS LENGTH (red-team 2026-10-12): an
+ * over-long condolence put a cheerful line up under "my dad just died"; an
+ * over-long draft is not answered. Nor an opt-out line (opt-out-said): an
+ * answer carries none (the owner's decision, 2026-10-12), and a draft that
+ * words one its own way is not answered either.
  */
 const CHAT_FALLBACK_REASONS: ReadonlySet<string> = new Set(["repeat", "fleet-repeat", "too-short", "stock-phrase", "meta", "emoji", "exclaim",
   "caps", "markup"]);
@@ -1682,15 +1681,15 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         bump("answer-author-spent");
         continue;
       }
-      // THE OPT-OUT LINE ONCE (the owner's decision, 2026-10-12): "Say stop to
-      // opt out." goes on this person's first answer from this X account, and
-      // on the first after thirty days, never on every one. Told means a
-      // POSTED answer or comment reply to them carried it (store.ts
-      // optOutToldSince); a read that fails is "not told", so the line goes
-      // on. Every code line, the prompt and the gate are told the same. A
-      // stop is honoured exactly as before, line or no line (isAnswerOptOut).
-      const noticeTold = await optOutToldSince(shared, account.xUserId, comment.authorId, nowMs - OPT_OUT_NOTICE_MS).catch(() => false);
-      const lineOpts = { paper: f.mode === "paper", notice: !noticeTold };
+      // NO OPT-OUT LINE (the owner's decision, 2026-10-12): whoever tagged it,
+      // replied to it or quoted it asked to be answered, and that is their
+      // consent, so no answer, code's line or draft, carries "Say stop to opt
+      // out." (the gate takes the notice off and refuses any other wording of
+      // one: XGateCtx.answer). A stop is honoured exactly as before: read on
+      // every tag of the batch (isAnswerOptOut), recorded and every waiting
+      // answer to that person cancelled, before this ran; repliesOptedOut
+      // above passes them over, and schedulePost refuses them again.
+      const lineOpts = { paper: f.mode === "paper" };
       // NEVER CONFIRM A BUY BY NAME: a tag that names a coin in any way gets
       // no list of its buys and no fact about them, research on or off. Only
       // the tag's own full contract, bought by its records, may be (exact).
@@ -1832,7 +1831,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       const raw = coded
         ? lines[0]!
         : await draft(creds, answerPrompt({ ...facts, question: candidate.text, recentBuys: buys, boughtLately: boughtKind(f),
-          said: said.map(withoutReplyOptOut), walletPublic, coinNamed, general, optOutNotice: !noticeTold, ...(looked ?? {}) }), { call: deps.llm, timeoutMs: deps.draftTimeoutMs });
+          said: said.map(withoutReplyOptOut), walletPublic, coinNamed, general, ...(looked ?? {}) }), { call: deps.llm, timeoutMs: deps.draftTimeoutMs });
       const mode = f.mode === "idle" ? null : f.mode;
       // AN ANSWER NOT TOLD ITS BUYS, BACKSTOPPED AT THE GATE (red-team 2026-10-12):
       // a tag that named a coin, or any question that is not a plain one about
@@ -1871,7 +1870,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // A code line is gated as one (asCode): the draft-only clauses below never read it.
       // `fresh`: weighed against no recent post, to read what a draft says apart from whether it repeats (saidPasses below).
       const gate = (text: string, asCode = coded, fresh = false) => admitXPost(text, {
-        kind: "reply", answer: true, noticeShown: noticeTold, agentName: f.name, mode, coins: vouched.map((c) => c.label),
+        kind: "reply", answer: true, agentName: f.name, mode, coins: vouched.map((c) => c.label),
         paperCoins: [...vouched.filter((c) => c.paper).map((c) => c.label), ...(f.mode === "idle" ? money.paper : [])],
         recentOwn: fresh ? [] : recentOwn, recentFleet: fresh ? [] : recentFleet, emojiOk: facts.style.emoji > 0,
         // A buy it says is one it was told of, or none at all (XGateCtx.buys).
@@ -1906,10 +1905,6 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // data, the project or creator) is refused.
       const unlooked = !coded && raw !== null && !handed && carriesResearch(raw);
       let verdict = raw === null || claimed || named || unlooked ? null : gate(raw);
-      // A DRAFT THAT ONLY LEFT OFF THE NOTICE IS GIVEN IT, AND GATED AGAIN WHOLE
-      // (red-team 2026-10-12): a missing notice used to be permission to post
-      // code's cheerful line in the draft's place, under whatever was asked.
-      if (!coded && raw !== null && verdict !== null && !verdict.ok && verdict.reason === "opt-out-unsaid") verdict = gate(withNoticeAdded(raw, facts.style));
       for (const line of lines.slice(1)) {
         if (verdict?.ok) break;
         verdict = gate(line);
@@ -1938,7 +1933,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // CHAT IS NEVER SILENCE BY DEFAULT (the owner's ask, 2026-10-12): a chat
       // draft refused only for how it was put (CHAT_FALLBACK_REASONS: a
       // repeat, its length, a stock deflection, a model's note, its
-      // punctuation, casing or markup, a missing notice) falls back to one of
+      // punctuation, casing or markup) falls back to one of
       // code's friendly lines about itself (xpost/casual.ts chatAnswers),
       // gated as a code line, this mention's own first. NEVER AFTER A DRAFT
       // REFUSED FOR WHAT IT SAID, NOR A PASS: one that named or claimed
@@ -1951,8 +1946,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // it can do or how to get an agent stay unsaid.
       // AND ONLY PLAIN BANTER (red-team 2026-10-12): under "did merrymen get
       // hacked?", "why did you guys steal my money?" or "wen tge for the
-      // merrymen model?" a teasing or sympathetic draft that merely left off
-      // the notice put "ha, appreciate the tag, fren" up instead. The fallback
+      // merrymen model?" a teasing or sympathetic draft refused for its form
+      // put "ha, appreciate the tag, fren" up instead. The fallback
       // is for a strict allowlist of whole banter tags (banterAsk: how are you,
       // who are you, tell me a joke), never one that names money, a loss, a
       // death, a token, a launch or the house, nor under a reply prefix that
@@ -1962,13 +1957,13 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // come before what a draft says, so "doing great, buy zapx now before it
       // doubles!!" was refused only as exclaim and read as harmless. The draft,
       // its note, stock phrase, emoji, "!", markup and shouting put right
-      // (gate.ts formFixed) and the notice put on, is gated again against no
+      // (gate.ts formFixed), is gated again against no
       // recent post, and read as an answer handed nothing is; only if all of
       // it passes was the refusal only for how it was put.
       const saidPasses = (text: string): boolean => {
         const body = withoutReplyOptOut(formFixed(text));
         if (!body) return false;
-        const v = gate(noticeTold ? body : withNoticeAdded(body, facts.style), false, true);
+        const v = gate(body, false, true);
         if (!v.ok || sherwoodNamed(v.text) || sherwoodMentioned(v.text)) return false;
         const words = withoutReplyOptOut(v.text);
         return handed || told || (!coinTalkIn(words, f.name) && !unknownWordIn(words, f.name) && !marketTalkIn(words) && !houseTalkIn(words));
@@ -1998,7 +1993,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // THE FIGURES LINE, CODE'S, AFTER THE GATE (xpost/figures.ts): only an
       // active owner's answer, only from what research built for this tag,
       // only a line in the renderer's own grammar (admitFiguresLine, again
-      // here), between the admitted words and the notice, and only while the
+      // here), after the admitted words, and only while the
       // whole post fits X; else the answer goes out as the gate admitted it.
       // Never a code-built model line or a greeting's. AND NEVER LAXER THAN THE
       // GATE (red-team 2026-10-12): every ticker it shows must clear the

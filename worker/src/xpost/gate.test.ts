@@ -1372,27 +1372,45 @@ describe("an answer sounds like a person: no corporate deflection or stock discl
   });
 });
 
-describe("the opt-out line once: only an answer to someone already told may leave it out (2026-10-12)", () => {
+describe("no opt-out line on an answer: replying, quoting or tagging it is consent (the owner's decision, 2026-10-12)", () => {
   const answer: Partial<XGateCtx> = { kind: "reply", answer: true, mode: "live", coins: [] };
-  it("an answer to someone already told passes with the line or without it", () => {
-    assert.equal(reason("doing good, just watching the tape and keeping it chill.", { ...answer, noticeShown: true }), "ok");
-    assert.equal(reason("doing good, just watching the tape and keeping it chill. Say stop to opt out.", { ...answer, noticeShown: true }), "ok");
-    const v = admit("doing good, just watching the tape and keeping it chill.", { ...answer, noticeShown: true });
-    assert.ok(v.ok && v.text === "doing good, just watching the tape and keeping it chill.");
+  it("an answer passes without the notice, and one that carries it at the end has it taken off", () => {
+    assert.equal(reason("doing good, just watching the tape and keeping it chill.", answer), "ok");
+    for (const [draft, posted] of [
+      ["doing good, just watching the tape and keeping it chill. Say stop to opt out.", "doing good, just watching the tape and keeping it chill."],
+      ["doing good, just watching the tape and keeping it chill. say stop to opt out.", "doing good, just watching the tape and keeping it chill."],
+      ["doing good, just watching the tape and keeping it chill, say stop to opt out", "doing good, just watching the tape and keeping it chill"],
+      ["doing good, just watching the tape and keeping it chill — reply stop to opt-out!", "doing good, just watching the tape and keeping it chill"],
+      ["doing good, just watching the tape and keeping it chill. Say stop to opt out", "doing good, just watching the tape and keeping it chill."],
+    ] as const) {
+      const v = admit(draft, answer);
+      assert.ok(v.ok, draft);
+      assert.equal(v.text, posted, draft);
+      assert.doesNotMatch(v.text, /opt|stop/i, draft);
+    }
+    // A notice and nothing else is no answer.
+    assert.equal(reason("Say stop to opt out.", answer), "empty");
   });
-  it("a first answer, a comment reply and every other kind still need it, told or not", () => {
-    assert.equal(reason("doing good, just watching the tape and keeping it chill.", answer), "opt-out-unsaid");
-    assert.equal(reason("doing good, just watching the tape and keeping it chill.", { ...answer, noticeShown: false }), "opt-out-unsaid");
-    assert.equal(reason("the pool behind it was big enough for me back then.", { kind: "reply", mode: "live", coins: [], noticeShown: true }), "opt-out-unsaid",
-      "a comment reply on a buy post always carries it");
+  it("any other opt-out wording in an answer is refused, never repaired", () => {
+    for (const d of ["doing good, reply stop anytime and i'll leave you be.", "keeping it chill, type stop if you want me gone.", "all good here, you can opt out whenever.",
+      "doing good, dm stop to unsubscribe from me.", "chilling, and opt-out is always open.", "doing fine, just text stop and i'm gone."]) {
+      assert.equal(reason(d, answer), "opt-out-said", d);
+    }
+    // "stop" said any other way is no notice.
+    assert.equal(reason("can't stop watching the tape today, it's a calm one.", answer), "ok");
+  });
+  it("a comment reply on any other owner's buy post still needs the notice, as before", () => {
+    assert.equal(reason("the pool behind it was big enough for me back then.", { kind: "reply", mode: "live", coins: [] }), "opt-out-unsaid");
+    assert.equal(reason("the pool behind it was big enough for me back then. Say stop to opt out.", { kind: "reply", mode: "live", coins: [] }), "ok");
   });
   it("leaving the line out loosens nothing else: the words are judged the same", () => {
-    const told: Partial<XGateCtx> = { ...answer, noticeShown: true };
-    assert.equal(reason("bottom looks in to me.", told), "hype");
-    assert.equal(reason("i don't comment on the market, just the trades.", told), "stock-phrase");
-    assert.equal(reason("it's up 4 today, nice and chill.", told), "has-digits");
-    assert.equal(reason("yep, grabbed bonk lately.", { ...told, buys: "none" }), "buy-claim");
-    assert.equal(reason("ok then.", told), "too-short");
+    assert.equal(reason("bottom looks in to me.", answer), "hype");
+    assert.equal(reason("i don't comment on the market, just the trades.", answer), "stock-phrase");
+    assert.equal(reason("i don't comment on the market, just the trades. say stop to opt out.", answer), "stock-phrase");
+    assert.equal(reason("it's up 4 today, nice and chill.", answer), "has-digits");
+    assert.equal(reason("yep, grabbed bonk lately.", { ...answer, buys: "none" }), "buy-claim");
+    assert.equal(reason("ok then.", answer), "too-short");
+    assert.equal(reason("ok then. Say stop to opt out.", answer), "too-short");
   });
 });
 

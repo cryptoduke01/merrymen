@@ -739,6 +739,11 @@ describe("an active agent's answers and conversation memory", () => {
     assert.match(text, /on paper/);
     assert.match(text, /Never write the address/);
     assert.doesNotMatch(text, /\bgroq\b|\bqwen\b|\bgpt\b/i);
+    // NO OPT-OUT LINE (2026-10-12): not asked for, said not to add one, and what it said is shown without the one older answers carried.
+    assert.match(text, /mostly fresh launches for me/);
+    assert.doesNotMatch(text, /say stop to opt out|must end with/i);
+    assert.match(p.system, /no sign-off, no disclaimer and no opt-out line or notice of any kind/);
+    assert.match(p.system, /someone who tagged you, replied to you or quoted you/);
     assert.match(answerPrompt({ ...BASE, question: "", recentBuys: [], said: [], walletPublic: false }).prompt, /PASS/);
   });
 
@@ -1027,13 +1032,14 @@ describe("an active agent's answers and conversation memory", () => {
     for (const line of lines) {
       assert.match(line, /merrymen/);
       assert.match(line, new RegExp(`new ${SHERWOOD_ON_X}\\b`));
-      assert.match(line, /Say stop to opt out\.$/);
+      assert.match(line, /\.$/);
+      assert.doesNotMatch(line, /opt out|\bstop\b/i, "no opt-out line on an answer (2026-10-12)");
       assert.doesNotMatch(line.replace(/\bsherwood-1\b/, ""), /\p{N}/u, "sherwood-1 is the only digit");
       assert.doesNotMatch(line, /\b(?:groq|qwen|gpt|llama|claude|openai|anthropic)\b/i);
       assert.equal(sherwoodClaimed(line), false, line);
       assert.equal(vocabularyRefusal(line), null, line);
     }
-    assert.match(modelAnswer("1", { lower: true }), /say stop to opt out\.$/);
+    assert.equal(modelAnswer("1", { lower: true }), modelAnswer("1", { lower: false }), "no notice, so nothing in a line turns on its casing");
     assert.equal(modelAnswer("1", { lower: true }), modelAnswer("1", { lower: true }), "the same mention, the same line");
     const all8 = modelAnswers("1", { lower: false });
     assert.equal(all8[0], modelAnswer("1", { lower: false }), "the mention's own line first");
@@ -1042,15 +1048,15 @@ describe("an active agent's answers and conversation memory", () => {
     const paper = modelAnswers("1", { lower: false }, { paper: true });
     assert.equal(new Set(paper).size, 8);
     for (const [i, line] of paper.entries()) {
-      assert.ok(line.startsWith(all8[i]!.replace(/\. Say stop to opt out\.$/, "")), line);
+      assert.ok(line.startsWith(all8[i]!.replace(/\.$/, "")), line);
       assert.match(line, /\bon paper\b/);
-      assert.match(line, /Say stop to opt out\.$/);
+      assert.doesNotMatch(line, /opt out/i);
       assert.doesNotMatch(line.replace(/\bsherwood-1\b/, ""), /\p{N}/u);
       assert.equal(sherwoodClaimed(line), false, line);
       assert.equal(vocabularyRefusal(line), null, line);
     }
-    // Weighed as the gate weighs a reply: without the notice every line ends with.
-    const bare = paper.map((l) => l.replace(/\. Say stop to opt out\.$/, ""));
+    // Weighed as the gate weighs a reply.
+    const bare = paper;
     for (let i = 0; i < bare.length; i++) {
       for (let j = i + 1; j < bare.length; j++) assert.ok(similarity(bare[i]!, bare[j]!) < 0.6, `${bare[i]} / ${bare[j]}`);
     }
@@ -1063,41 +1069,38 @@ describe("an active agent's answers and conversation memory", () => {
     const all8 = greetingAnswers("1", { lower: false });
     assert.equal(new Set(all8).size, 8, "the mention's own line first, then every other line, once");
     assert.deepEqual(greetingAnswers("1", { lower: false }), all8, "the same mention, the same order");
-    assert.match(greetingAnswers("1", { lower: true })[0]!, /say stop to opt out\.$/);
+    assert.equal(greetingAnswers("1", { lower: true })[0], all8[0], "no notice, so nothing in a line turns on its casing");
     const paper = greetingAnswers("1", { lower: false }, { paper: true });
     for (const [i, line] of [...all8, ...paper].entries()) {
-      assert.match(line, /Say stop to opt out\.$/);
+      assert.match(line, /\.$/);
+      assert.doesNotMatch(line, /opt out|\bstop\b/i, "no opt-out line on an answer (2026-10-12)");
       assert.doesNotMatch(line, /\p{N}|\$|@|#|https?:|0x/u, line);
       assert.doesNotMatch(line, /\b(?:pepe|bonk|wif|doge|shib|btc|eth|sol|bitcoin|solana|sherwood|merrymen|groq|qwen|gpt|claude|llama)\b/i, line);
       assert.doesNotMatch(line, /\b(?:bought|holding|hold|profit|loss|moon|pump|gem|buy|sell|price)\b/i, `${line}: no claim, no call`);
       assert.equal(sherwoodNamed(line), false, line);
       assert.equal(vocabularyRefusal(line), null, line);
       if (i >= 8) {
-        assert.ok(line.startsWith(all8[i - 8]!.replace(/\. Say stop to opt out\.$/, "")), line);
+        assert.ok(line.startsWith(all8[i - 8]!.replace(/\.$/, "")), line);
         assert.match(line, /\bon paper\b/, "a paper agent's line says paper");
       } else assert.doesNotMatch(line, /paper|practice/, "a live one's never does");
     }
-    // Weighed as the gate weighs a reply: without the notice every line ends with.
+    // Weighed as the gate weighs a reply.
     for (const set of [all8, paper]) {
-      const bare = set.map((l) => l.replace(/\. Say stop to opt out\.$/, ""));
+      const bare = set;
       for (let i = 0; i < bare.length; i++) {
         for (let j = i + 1; j < bare.length; j++) assert.ok(similarity(bare[i]!, bare[j]!) < 0.6, `${bare[i]} / ${bare[j]}`);
       }
     }
   });
 
-  it("code's lines carry the opt-out line only when it is owed: the same words, ending with a stop, for someone already told (2026-10-12)", () => {
+  it("code's lines never carry an opt-out line, in either casing, live or on paper (the owner's decision, 2026-10-12)", () => {
     for (const make of [modelAnswers, greetingAnswers]) {
       for (const paper of [false, true]) {
-        for (const lower of [false, true]) {
-          const owed = make("1", { lower }, { paper });
-          const told = make("1", { lower }, { paper, notice: false });
-          assert.deepEqual(make("1", { lower }, { paper, notice: true }), owed, "notice true is the default");
-          for (const [i, line] of told.entries()) {
-            assert.doesNotMatch(line, /opt out/i, line);
-            assert.match(line, /\.$/, line);
-            assert.equal(`${line} ${lower ? "say stop to opt out." : "Say stop to opt out."}`, owed[i], "the same words, the notice off");
-          }
+        const lines = make("1", { lower: false }, { paper });
+        assert.deepEqual(make("1", { lower: true }, { paper }), lines, "casing changes nothing");
+        for (const line of lines) {
+          assert.doesNotMatch(line, /opt out|\bstop\b|unsubscribe/i, line);
+          assert.match(line, /\.$/, line);
         }
       }
     }

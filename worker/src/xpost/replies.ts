@@ -4,28 +4,20 @@ import type { XReply } from "./client";
 export const REPLY_OPT_OUT = "Say stop to opt out.";
 
 /**
- * WHAT A CODE-BUILT ANSWER IS TOLD (writer.ts and market.ts lines): `paper`,
- * the agent trades on paper (its line adds a paper clause); `notice`, this
- * answer must carry the opt-out notice: the person's first answer, or the
- * first after thirty days (store.ts optOutToldSince, the owner's decision of
- * 2026-10-12). Absent `notice` is true: the fail-closed side.
+ * WHAT A CODE-BUILT ANSWER IS TOLD (writer.ts, market.ts and casual.ts
+ * lines): `paper`, the agent trades on paper, so its line adds a paper clause.
+ *
+ * NO OPT-OUT LINE ON AN ANSWER (the owner's decision, 2026-10-12): an active
+ * agent answers only someone who tagged it, replied to it or quoted it, and
+ * that is their consent, so "Say stop to opt out." is on none of its answers,
+ * code's lines or drafts (gate.ts takes the notice off an answer and refuses
+ * any other opt-out wording: opt-out-said). A stop is still honoured exactly
+ * as before: isAnswerOptOut reads every tag, and the person is recorded and
+ * never answered again, before anything is drafted. A comment reply on any
+ * other owner's buy post still ends with the notice (writer.ts replyPrompt,
+ * gate.ts opt-out-unsaid).
  */
-export interface CodeLineOptions { paper?: boolean; notice?: boolean }
-
-/** The opt-out notice in the agent's casing, with its leading space, or nothing for an answer to someone already told. */
-export function noticeFor(style: { lower: boolean }, o: Pick<CodeLineOptions, "notice">): string {
-  if (o.notice === false) return "";
-  return ` ${style.lower ? REPLY_OPT_OUT.toLowerCase() : REPLY_OPT_OUT}`;
-}
-/**
- * A DRAFT THAT LEFT THE NOTICE OFF, WITH IT PUT ON (red-team review,
- * 2026-10-12): its own last stop kept, or one added, then the notice in the
- * agent's casing. Gated again whole by the caller, never posted as is.
- */
-export function withNoticeAdded(text: string, style: { lower: boolean }): string {
-  const body = String(text ?? "").trim();
-  return `${body}${/[.!?…]$/.test(body) ? "" : "."}${noticeFor(style, { notice: true })}`;
-}
+export interface CodeLineOptions { paper?: boolean }
 export const XREPLY_MAX_COMMENT_CHARS = 280;
 
 /** Remove only leading reply mentions; handles are never sent to the writer. */

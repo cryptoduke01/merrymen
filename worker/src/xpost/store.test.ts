@@ -16,8 +16,6 @@ import {
   ANSWER_LOOKED_UP,
   answerAuthorKey,
   answerAuthorSpent,
-  optOutToldSince,
-  OPT_OUT_NOTICE_MS,
   repliesOffKey,
   cancelPost,
   cancelDisabledKind,
@@ -874,47 +872,6 @@ test("two owners on one X account answer one person at most twice a day between 
   assert.equal(await answerAuthorSpent(base, "111", "333", 970), true);
   assert.equal(await answerAuthorSpent(base, "111", "444", 970), false);
   assert.equal(await answerAuthorSpent(base, "111", "333", 900 + 24 * 60 * 60_000), false, "a rolling day later they may ask again");
-});
-
-test("the opt-out line once: a person counts as told only by a posted answer or reply that carried it, for thirty days (2026-10-12)", async (t) => {
-  const { db } = await open(t);
-  await upsertAccount(db, DEK, { tenant: OWNER_A, xUserId: "111", username: "r", tokens: TOKENS, nowMs: 1 });
-  await setPosting(db, OWNER_A, { enabled: true, xUserId: "111" }, 2);
-  await setReplying(db, OWNER_A, true, "111", 3);
-  const DAY = 24 * 60 * 60_000;
-  const answer = (id: string, body: string, author = "333", nowMs = 1000): NewPost => post({ tenant: OWNER_A, kind: "answer", dedupeKey: `answer:111:${id}`, body,
-    replyToTweetId: id, replyRootTweetId: id, replyAuthorId: author, nowMs, dueAtMs: nowMs });
-  assert.equal(OPT_OUT_NOTICE_MS, 30 * DAY);
-  assert.equal(await optOutToldSince(db, "111", "333", 0), false, "nobody told yet");
-
-  // Drafted with the line, still waiting: not told.
-  const first = (await schedulePost(db, answer("801", "doing good, keeping it chill. Say stop to opt out.")))!;
-  assert.equal(await optOutToldSince(db, "111", "333", 0), false, "a draft under Coming up was never seen");
-  // Claimed and in flight: not told either.
-  await claimPost(db, first, 1100);
-  assert.equal(await optOutToldSince(db, "111", "333", 0), false, "a send in flight may never land");
-  // Posted: told, from the moment it went out, for thirty days.
-  await markPosted(db, first, "9001", 1200);
-  assert.equal(await optOutToldSince(db, "111", "333", 1200 - OPT_OUT_NOTICE_MS + 1), true);
-  assert.equal(await optOutToldSince(db, "111", "333", 1201), false, "a window that starts after it went out does not see it");
-  // Only this person, and only this X account.
-  assert.equal(await optOutToldSince(db, "111", "444", 0), false);
-  assert.equal(await optOutToldSince(db, "222", "333", 0), false);
-
-  // A posted answer to someone else that never carried it tells nobody.
-  const bare = (await schedulePost(db, answer("802", "doing good, keeping it chill.", "555", 2000)))!;
-  await claimPost(db, bare, 2100);
-  await markPosted(db, bare, "9002", 2200);
-  assert.equal(await optOutToldSince(db, "111", "555", 0), false, "a posted answer without the line is no notice");
-  // Lowercase is the same line.
-  const lower = (await schedulePost(db, answer("803", "doing good, keeping it chill. say stop to opt out.", "666", 3000)))!;
-  await claimPost(db, lower, 3100);
-  await markPosted(db, lower, "9003", 3200);
-  assert.equal(await optOutToldSince(db, "111", "666", 0), true);
-  // A skipped or failed row never counts, whatever its body.
-  const skipped = await schedulePost(db, { ...answer("804", "doing good. Say stop to opt out.", "777", 4000), status: "skipped", reason: "gate:repeat" });
-  assert.ok(skipped);
-  assert.equal(await optOutToldSince(db, "111", "777", 0), false);
 });
 
 test("turning replies off cancels only replies and opt-outs are durable across tenants sharing an account", async (t) => {

@@ -32,7 +32,8 @@ const MIN = 60_000, HOUR = 60 * MIN, DAY = 24 * HOUR;
 const NOW = Date.UTC(2026, 8, 30, 9);
 const TENANT = `0x${"ab".repeat(20)}`;
 const MENTION = "100000000000000020";
-const ANSWER = "mostly fresh launches, and i only buy when the buying looks real and steady. Say stop to opt out.";
+/** What the model drafts by default: no opt-out line, as an answer never carries one (2026-10-12). */
+const ANSWER = "mostly fresh launches, and i only buy when the buying looks real and steady.";
 const CALL: CallFact = { decisionId: "fill-pepe", side: "buy", symbol: "PEPE", name: "Pepe", token: null,
   paper: false, atSec: (NOW - 4 * HOUR) / 1000, bands: ["curve early"], ownWords: null };
 const FACTS: AgentFacts = { tenant: TENANT, agentId: TENANT, slug: null, name: "Pine Stoat", mode: "live",
@@ -40,9 +41,9 @@ const FACTS: AgentFacts = { tenant: TENANT, agentId: TENANT, slug: null, name: "
 const tag = (over: Record<string, unknown> = {}) => ({ id: MENTION, author_id: "333", conversation_id: MENTION,
   created_at: new Date(NOW - MIN).toISOString(), text: "@pine_stoat what kind of coins do you trade?", ...over });
 
-/** Code's line of a kind for this mention, in either casing, paper or not, with the notice or without (2026-10-12). */
-function oneOf(make: (seed: string, style: { lower: boolean }, o?: { paper?: boolean; notice?: boolean }) => string[], mention: string, body: unknown): boolean {
-  return [true, false].some((lower) => [false, true].some((paper) => [true, false].some((notice) => make(mention, { lower }, { paper, notice }).includes(String(body)))));
+/** Code's line of a kind for this mention, in either casing, paper or not: never with an opt-out line (2026-10-12). */
+function oneOf(make: (seed: string, style: { lower: boolean }, o?: { paper?: boolean }) => string[], mention: string, body: unknown): boolean {
+  return [true, false].some((lower) => [false, true].some((paper) => make(mention, { lower }, { paper }).includes(String(body))));
 }
 
 async function world(t: TestContext, o: {
@@ -180,45 +181,39 @@ test("a tag gets one answer to the mention itself, right away, in its own lane: 
   assert.equal(w.sends.length, 1);
 });
 
-test("the opt-out line once: a person's first answer carries it, later ones do not, another person's first does, and stop always works (2026-10-12)", async (t) => {
-  const NOTICE_RULE = /Every answer must end with «say stop to opt out\.» exactly/i;
-  const TOLD_RULE = /already knows they can reply stop to opt out: add no opt-out line/;
-  // The model follows its prompt: the line when it is told to end with it, none when told the person knows.
+test("no opt-out line on any answer, a person's first or their fifth, a greeting or a draft; and a stop always works (the owner's decision, 2026-10-12)", async (t) => {
+  // The model follows its prompt; one that adds the notice anyway has it taken off by the gate.
   const words = (prompt: string) => /how's your day/.test(prompt) ? "doing good, just watching the tape and keeping it chill"
     : /ai agents/.test(prompt) ? "honestly they're my people, all of us trying to read the same noisy tape"
     : /new with you/.test(prompt) ? "not much, same patient habit of reading launches quietly"
     : "mostly fresh launches, and i only buy when the buying looks real and steady";
-  const w = await world(t, { answer: ({ prompt, system }) => TOLD_RULE.test(system) ? `${words(prompt)}.` : `${words(prompt)}. Say stop to opt out.` });
+  const w = await world(t, { answer: ({ prompt }) => /ai agents/.test(prompt) ? `${words(prompt)}. Say stop to opt out.` : `${words(prompt)}.` });
   const at = (id: string, ms: number, text: string, author = "333") => tag({ id, conversation_id: id, author_id: author, created_at: new Date(ms - 10_000).toISOString(), text });
 
-  // First answer: owed, asked for, and posted with it.
+  // A first answer: never asked for the line, and posted without it.
   w.setInbox([at("100000000000000501", NOW, "@pine_stoat how's your day going?")]);
   await w.step(NOW);
-  assert.match(w.systems.at(-1)!, NOTICE_RULE);
-  assert.doesNotMatch(w.systems.at(-1)!, TOLD_RULE);
-  assert.equal(w.sends.at(-1)!.text, "doing good, just watching the tape and keeping it chill. Say stop to opt out.");
-  assert.equal(await store.optOutToldSince(w.db, "111", "333", NOW - DAY), true, "posted with the line: told");
+  assert.doesNotMatch(w.systems.at(-1)!, /say stop to opt out|must end with/i);
+  assert.match(w.systems.at(-1)!, /no opt-out line or notice of any kind/);
+  assert.equal(w.sends.at(-1)!.text, "doing good, just watching the tape and keeping it chill.");
 
-  // The same person again, two minutes later: told, so no line, and the gate admits it without one.
+  // The same person again: the model adds the notice anyway, and the gate takes it off.
   w.setInbox([at("100000000000000502", NOW + 2 * MIN, "@pine_stoat what do you think about ai agents?")]);
   await w.step(NOW + 2 * MIN);
-  assert.match(w.systems.at(-1)!, TOLD_RULE);
-  assert.doesNotMatch(w.systems.at(-1)!, NOTICE_RULE);
   assert.equal(w.sends.at(-1)!.text, "honestly they're my people, all of us trying to read the same noisy tape.");
-  // A different person, the same minute: their first, so the line.
+  // Another person's first: no line either.
   w.setInbox([at("100000000000000503", NOW + 3 * MIN, "@pine_stoat how do you pick your coins?", "444")]);
   await w.step(NOW + 3 * MIN);
-  assert.match(w.systems.at(-1)!, NOTICE_RULE);
-  assert.equal(w.sends.at(-1)!.text, "mostly fresh launches, and i only buy when the buying looks real and steady. Say stop to opt out.");
+  assert.equal(w.sends.at(-1)!.text, "mostly fresh launches, and i only buy when the buying looks real and steady.");
 
-  // A day later, a greeting from the first person: code's line, without the notice.
+  // A greeting: code's line, without it.
   w.setInbox([at("100000000000000504", NOW + DAY + 5 * MIN, "@pine_stoat gm")]);
   await w.step(NOW + DAY + 5 * MIN);
   const greeted = w.sends.at(-1)!.text as string;
-  assert.ok(greetingAnswers("100000000000000504", { lower: false }, { notice: false }).includes(greeted), greeted);
-  assert.doesNotMatch(greeted, /opt out/i);
+  assert.ok(greetingAnswers("100000000000000504", { lower: false }).includes(greeted), greeted);
+  assert.ok(w.sends.every((s) => !/opt out|\bstop\b/i.test(String(s.text))), "no answer carried an opt-out line");
 
-  // And a stop, whether or not the line was on the last answer, is honoured as always.
+  // And a stop is honoured as always: recorded, and the person is never answered again.
   const sent = w.sends.length;
   w.setInbox([at("100000000000000506", NOW + DAY + 10 * MIN, "@pine_stoat hey stop")]);
   await w.step(NOW + DAY + 10 * MIN);
@@ -228,37 +223,16 @@ test("the opt-out line once: a person's first answer carries it, later ones do n
   assert.ok(w.sends.slice(sent).every((s) => (s.reply as { in_reply_to_tweet_id: string }).in_reply_to_tweet_id !== "100000000000000508"), "nothing to someone who said stop");
 });
 
-test("told means a posted answer carried the line in the last thirty days: older than that, or never posted, the line is owed again (2026-10-12)", async (t) => {
-  const TOLD_RULE = /already knows they can reply stop/;
-  for (const [what, sentAgo, posted, told] of [["posted twenty-nine days ago", 29 * DAY, true, true], ["posted thirty-one days ago", 31 * DAY, true, false],
-    ["drafted with the line and skipped, never posted", HOUR, false, false]] as const) {
-    const w = await world(t, { answer: ({ system }) => TOLD_RULE.test(system) ? "doing good, keeping it chill." : "doing good, keeping it chill. Say stop to opt out." });
-    const id = await store.schedulePost(w.db, { tenant: TENANT, xUserId: "111", kind: "answer", dedupeKey: "answer:111:100000000000000530",
-      body: "an older answer in other words entirely. Say stop to opt out.", nowMs: NOW - sentAgo, dueAtMs: NOW - sentAgo,
-      replyToTweetId: "100000000000000530", replyRootTweetId: "100000000000000530", replyAuthorId: "333", ...(posted ? {} : { status: "skipped" as const, reason: "gate:repeat" }) });
-    if (posted) {
-      await store.claimPost(w.db, id!, NOW - sentAgo);
-      await store.markPosted(w.db, id!, "100000000000000531", NOW - sentAgo);
-    }
+test("a draft that words an opt-out its own way is never posted, and nothing replaces it with code's line (2026-10-12)", async (t) => {
+  for (const draft of ["doing good, keeping it chill. reply stop anytime if you want me gone.", "doing good, keeping it chill, and you can opt out whenever."]) {
+    const w = await world(t, { answer: draft });
     w.setInbox([tag({ text: "@pine_stoat how's your day going?" })]);
     await w.step();
-    assert.equal(TOLD_RULE.test(w.systems[0]!), told, what);
-    assert.equal(w.sends.at(-1)!.text, told ? "doing good, keeping it chill." : "doing good, keeping it chill. Say stop to opt out.", what);
+    const [row] = await w.answers();
+    assert.equal(row?.status, "skipped", draft);
+    assert.equal(row?.reason, "gate:opt-out-said", draft);
+    assert.equal(w.sends.length, 0, draft);
   }
-});
-
-test("a told person's answer may still carry the line when the model adds it anyway: the gate admits it as written (2026-10-12)", async (t) => {
-  // The model ignores "add no opt-out line" and adds it anyway: the gate admits it as written.
-  const w = await world(t, { answer: "doing good, just watching the tape and keeping it chill. Say stop to opt out." });
-  const id = await store.schedulePost(w.db, { tenant: TENANT, xUserId: "111", kind: "answer", dedupeKey: "answer:111:100000000000000520",
-    body: "an older answer in other words entirely. Say stop to opt out.", nowMs: NOW - 2 * HOUR, dueAtMs: NOW - 2 * HOUR,
-    replyToTweetId: "100000000000000520", replyRootTweetId: "100000000000000520", replyAuthorId: "333" });
-  await store.claimPost(w.db, id!, NOW - 2 * HOUR);
-  await store.markPosted(w.db, id!, "100000000000000521", NOW - 2 * HOUR);
-  w.setInbox([tag({ text: "@pine_stoat how's your day going?" })]);
-  await w.step();
-  assert.match(w.systems[0]!, /already knows they can reply stop/);
-  assert.equal(w.sends[0]!.text, "doing good, just watching the tape and keeping it chill. Say stop to opt out.");
 });
 
 test("a STOP in the same batch opts its author out first: nothing is drafted or sent to them, and the next person is answered on that pass", async (t) => {
@@ -932,7 +906,7 @@ test("research on: a tagged contract address is looked up and answered in words,
   assert.equal(answer!.replyToTweetId, MENTION);
   w.setInbox([]);
   await w.step(NOW + 30 * MIN);
-  assert.deepEqual(w.sends, [{ text: COIN_ANSWER, reply: { in_reply_to_tweet_id: MENTION } }]);
+  assert.deepEqual(w.sends, [{ text: withoutReplyOptOut(COIN_ANSWER), reply: { in_reply_to_tweet_id: MENTION } }]);
 });
 
 test("research on, the flow lane wired: a tagged contract's onchain flow reaches the draft as bands, never a figure", async (t) => {
@@ -979,7 +953,7 @@ test("research on: the model question is answered from a code-built sherwood lin
   assert.equal(answer!.status, "posted", answer!.reason ?? "");
   assert.match(answer!.body, /merrymen/);
   assert.match(answer!.body, /new sherwood-1\b/, "by its exact name");
-  assert.match(answer!.body, /Say stop to opt out\.$/i);
+  assert.doesNotMatch(answer!.body, /opt out/i, "no opt-out line (2026-10-12)");
   assert.doesNotMatch(answer!.body.replace(/\bsherwood-1\b/, ""), /\p{N}/u, "and no other digit");
   assert.doesNotMatch(answer!.body, /running on|powered|runs me/);
   assert.equal((await store.readMeta(w.db, "llm:2026-09-30"))?.n ?? 0, 0, "and no model allowance spent");
@@ -2334,11 +2308,11 @@ const MAJOR_LINE = "coingecko: $ETH #2, ~$3.4k, mcap ~$411B, vol ~$18B, 24h +1.2
 /** ETH as code reads coingecko's row above: among the biggest, up a little today, down a fair bit on the week, ordinary volume. */
 const ETH_READ: MajorRead = { rank: "top", day: { dir: "up", size: "a little" }, week: { dir: "down", size: "a fair bit" }, volume: "ordinary" };
 
-test("an answer handed figures goes out with code's line between the model's words and the notice, marked looked up", async (t) => {
+test("an answer handed figures goes out with code's line after the model's words, no opt-out line, marked looked up", async (t) => {
   const w = await world(t, { env: RESEARCH_ON, research: handing({ figures: FLOW_FIGURES }), answer: UP_A_LITTLE });
   w.setInbox([tag({ text: ASK_CA })]);
   const r = await w.step();
-  const posted = `on-chain data shows buyers a little ahead over the hour, nothing wild, not a call. ${FLOW_LINE} Say stop to opt out.`;
+  const posted = `on-chain data shows buyers a little ahead over the hour, nothing wild, not a call. ${FLOW_LINE}`;
   assert.deepEqual(w.sends, [{ text: posted, reply: { in_reply_to_tweet_id: MENTION } }]);
   const [answer] = await w.answers();
   assert.equal(answer!.body, posted, "stored as posted");
@@ -2374,7 +2348,7 @@ test("figures with nothing looked up beside them, a refused draft, a code line o
   const bare = await world(t, { env: RESEARCH_ON, research: handing({ facts: [], figures: FLOW_FIGURES }), answer: "no read on that one just now. Say stop to opt out." });
   bare.setInbox([tag({ text: ASK_CA })]);
   await bare.step();
-  assert.deepEqual(bare.sends.map((s) => s.text), ["no read on that one just now. Say stop to opt out."]);
+  assert.deepEqual(bare.sends.map((s) => s.text), ["no read on that one just now."]);
   // A draft the gate refuses is skipped, line and all.
   const refused = await world(t, { env: RESEARCH_ON, research: handing({ figures: FLOW_FIGURES }), answer: "it's mooning, you should buy. Say stop to opt out." });
   refused.setInbox([tag({ text: ASK_CA })]);
@@ -2403,7 +2377,8 @@ test("too long for X with its words: the line sheds fields, then goes, and the p
   const r = await w.step();
   const text = String(w.sends[0]?.text ?? "");
   assert.ok(xWeightedLength(text) <= X_MAX_WEIGHTED, String(xWeightedLength(text)));
-  assert.match(text, / geckoterminal robinhood: trending \$ZXCVBNMQWE 24h -12\.3% vol ~\$310M, .*say stop to opt out\.$/);
+  assert.match(text, / geckoterminal robinhood: trending \$ZXCVBNMQWE 24h -12\.3% vol ~\$310M, .*\.$/);
+  assert.doesNotMatch(text, /opt out/i);
   assert.doesNotMatch(text, /coingecko: trending/, "coingecko's list went first");
   assert.match(r.log ?? "", /answer-figures-shortened 1/);
 });
@@ -2446,8 +2421,8 @@ test("majors: \"how's eth doing?\" is read on coingecko, said in code's words, a
   const r = await w.step();
   assert.deepEqual(m.asked, ["search:eth", "market:ethereum"]);
   assert.deepEqual(w.asked(), [], "no model call: the words are code's");
-  const words = majorAnswers(ETH_READ, MENTION, { lower: true })[0]!.replace(/ say stop to opt out\.$/, "");
-  assert.deepEqual(w.sends, [{ text: `${words} ${MAJOR_LINE} say stop to opt out.`, reply: { in_reply_to_tweet_id: MENTION } }]);
+  const words = majorAnswers(ETH_READ, MENTION, { lower: true })[0]!;
+  assert.deepEqual(w.sends, [{ text: `${words} ${MAJOR_LINE}`, reply: { in_reply_to_tweet_id: MENTION } }]);
   assert.equal((await w.answers())[0]!.coin, store.ANSWER_LOOKED_UP);
   assert.match(r.log ?? "", /answer-intent-major 1/);
   assert.match(r.log ?? "", /answer-lookups 2/);
@@ -2477,7 +2452,7 @@ test("majors: no prediction, target, advice or claim in any words beside a coin'
     await w.step();
     assert.deepEqual(w.asked(), [], draft);
     const text = String(w.sends[0]?.text ?? "");
-    assert.ok(majorAnswers(read, MENTION, { lower: true }).some((l) => text === l.replace(/ say stop to opt out\.$/, ` ${line} say stop to opt out.`)), text);
+    assert.ok(majorAnswers(read, MENTION, { lower: true }).some((l) => text === `${l} ${line}`), text);
     assert.doesNotMatch(text, /new highs|next stop|gift|steam|early|climbing toward|hold|worth/, text);
   }
 });
@@ -2492,7 +2467,7 @@ test("majors: never that it holds or is buying the coin, in the third person, no
     await w.step();
     assert.deepEqual(w.asked(), [], end);
     const text = String(w.sends[0]?.text ?? "");
-    assert.ok(text.endsWith(`${MAJOR_LINE} say stop to opt out.`) && !text.includes(end), text);
+    assert.ok(text.endsWith(MAJOR_LINE) && !text.includes(end), text);
   }
   // A coin answer that is still drafted (a tagged contract, looked up on the index) is gated the same way: its own name is itself.
   for (const end of endings.filter((e) => !/wif and bonk/.test(e))) {
@@ -2556,7 +2531,7 @@ test("majors: \"it's the play\" and every call without an adjective never stands
       await w.step();
       assert.deepEqual(w.asked(), [], end);
       const text = String(w.sends[0]?.text ?? "");
-      assert.ok(text.endsWith(`${line} say stop to opt out.`) && !text.includes(end), text);
+      assert.ok(text.endsWith(line) && !text.includes(end), text);
     }
     // A drafted coin answer saying it is refused as advice.
     const w = await world(t, { env: RESEARCH_ON, research: fakeResearch().research, answer: `the public index shows liquidity is thin. ${end}. Say stop to opt out.` });
@@ -2586,7 +2561,7 @@ test("a paper agent's market answer says paper of its own trading, never with a 
     const text = String(w.sends[0]?.text ?? "");
     assert.ok(text, run.text);
     assert.doesNotMatch(text, /\bi play it on paper\b|\bi(?:'m)? trad(?:e|ing) on paper\b/, text);
-    assert.match(text, /\. every trade of mine is a paper trade\. /, text);
+    assert.match(text, /\. every trade of mine is a paper trade\.(?: |$)/, text);
   }
 });
 
@@ -2632,7 +2607,7 @@ test("majors: a copycat ticker gets no figures, and goes on as a coin of the cha
   assert.deepEqual(m.asked, ["search:btc2"], "no market read for no major");
   const [prompt] = w.asked();
   assert.match(prompt!, /They are asking about a coin, and you couldn't look it up just now/);
-  assert.deepEqual(w.sends.map((s) => s.text), ["couldn't look that one up just now, sorry. Say stop to opt out."]);
+  assert.deepEqual(w.sends.map((s) => s.text), ["couldn't look that one up just now, sorry."]);
   // "$WOJAK", #1450: no major, and the chain's own resolver is asked, as before majors.
   const m2 = majorsResearch();
   const w2 = await world(t, { env: RESEARCH_ON, research: m2.research, answer: "couldn't look that one up just now, sorry. Say stop to opt out." });
@@ -2654,7 +2629,7 @@ test("a tagged contract with a busy onchain hour goes out with bitquery's buys a
   w.setInbox([tag({ text: `@pine_stoat thoughts on ${CA}?` })]);
   await w.step();
   assert.doesNotMatch(w.asked()[0]!, /~\$|\$\d|12,?300|8,?100/, "the model never sees the figures");
-  assert.deepEqual(w.sends.map((s) => s.text), [`${words} bitquery: 1h buys ~$12k, sells ~$8.1k. Say stop to opt out.`]);
+  assert.deepEqual(w.sends.map((s) => s.text), [`${words} bitquery: 1h buys ~$12k, sells ~$8.1k.`]);
 });
 
 // ── what's hot, end to end ──────────────────────────────────────────────────
@@ -2715,7 +2690,7 @@ const escapeRe = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
 const wordsBeforeLine = (text: string): string | null => /^(.*?) (?:geckoterminal robinhood|coingecko|fomo|bitquery): /.exec(text)?.[1] ?? null;
 
 test("what's hot: an overview from the index past the floors, in code's words, with code's line of tickers and figures, and no draft", async (t) => {
-  const h = hotResearch([hotPool(1, 42.07, 1.21e6), hotPool(2, -8.3, 310_400), hotPool(3, 5, 90_000)], ["PEPE", "WIF", "TAO"]);
+  const h = hotResearch([hotPool(1, 42.07, 1.21e6), hotPool(2, -8.3, 310_400), hotPool(3, 5, 90_000)], ["DOGE", "WIF", "TAO"]);
   const w = await world(t, { env: RESEARCH_ON, research: h.research, answer: "a draft nobody should see. Say stop to opt out." });
   w.setInbox([tag({ text: "@pine_stoat gm, what's hot today?" })]);
   const r = await w.step();
@@ -2724,10 +2699,18 @@ test("what's hot: an overview from the index past the floors, in code's words, w
   assert.ok(xWeightedLength(text) <= X_MAX_WEIGHTED, String(xWeightedLength(text)));
   assert.ok(hotWords({ coins: 3, lead: { dir: "up", size: "sharply" } }).includes(wordsBeforeLine(text) ?? ""), text);
   assert.match(text, / geckoterminal robinhood: trending \$COINA 24h \+42\.1% vol ~\$1\.2M, /);
-  assert.match(text, /say stop to opt out\.$/i);
+  assert.doesNotMatch(text, /opt out/i);
   assert.match(r.log ?? "", /answer-intent-hot 1/);
   assert.match(r.log ?? "", /answer-code-words 1/);
   assert.match(r.log ?? "", /answer-figures(?:-shortened)? 1/);
+  // A line that would name a coin its own buys go by ("$PEPE" on coingecko's trending list, beside its PEPE buy) is never put in
+  // at all. With the opt-out line gone (2026-10-12) the whole line fits, so nothing shortens it out of the way first.
+  const own = hotResearch([hotPool(1, 42.07, 1.21e6), hotPool(2, -8.3, 310_400), hotPool(3, 5, 90_000)], ["PEPE", "WIF", "TAO"]);
+  const mine = await world(t, { env: RESEARCH_ON, research: own.research });
+  mine.setInbox([tag({ text: "@pine_stoat gm, what's hot today?" })]);
+  const r2 = await mine.step();
+  assert.doesNotMatch(String(mine.sends[0]?.text ?? ""), /\$PEPE|coingecko: trending/);
+  assert.match(r2.log ?? "", /answer-figures-left-out 1/);
 });
 
 test("what's hot with nothing past the floors: code's plain nothing-standing-out line, no line of figures, nothing more looked up, no draft", async (t) => {
@@ -2999,11 +2982,11 @@ test("what's hot never claims, or recommends, a coin the line names, whatever it
     research: handing({ figures: [{ kind: "pools", coins: [{ symbol: "CHUMP", change24hPct: 41.2, volume24hUsd: 1.1e6 }] }, ...FLOW_FIGURES] }) });
   both.setInbox([tag({ text: ASK_CA })]);
   await both.step();
-  assert.deepEqual(both.sends.map((s) => s.text), [UP_A_LITTLE.replace(" Say stop", ` ${FLOW_LINE} Say stop`)]);
+  assert.deepEqual(both.sends.map((s) => s.text), [`${withoutReplyOptOut(UP_A_LITTLE)} ${FLOW_LINE}`]);
   const major = await world(t, { env: RESEARCH_ON, answer: UP_A_LITTLE, research: handing({ figures: MAJOR_FIGURES }) });
   major.setInbox([tag({ text: ASK_CA })]);
   await major.step();
-  assert.deepEqual(major.sends.map((s) => s.text), [UP_A_LITTLE]);
+  assert.deepEqual(major.sends.map((s) => s.text), [withoutReplyOptOut(UP_A_LITTLE)]);
 });
 
 test("what's hot never shows a slur, a hate code, a house or chain name's short form, advice, a model's name or the agent's own name as a coin (red-team 2026-10-12)", async (t) => {
@@ -3112,7 +3095,7 @@ test("what's hot names no chain coin coingecko does not list by its contract: a 
   await w.step();
   const text = String(w.sends[0]?.text ?? "");
   assert.ok(hotWords({ coins: 1, lead: { dir: "up", size: "sharply" } }).includes(wordsBeforeLine(text) ?? ""), text);
-  assert.match(text, / geckoterminal robinhood: trending \$CHUMP 24h \+88% vol ~\$940k\. say stop to opt out\.$/, text);
+  assert.match(text, / geckoterminal robinhood: trending \$CHUMP 24h \+88% vol ~\$940k\.$/, text);
   assert.doesNotMatch(text, /FUHRER|NIGLET/);
 });
 
@@ -3324,8 +3307,8 @@ test("how's the market: the big coins' day and the chain's movers, in code's cas
     const sent = String(w.sends[0]?.text ?? "");
     const read: MarketRead = { majors: { dir: "up", size: "a fair bit" }, chain: { coins: 2, lead: { dir: "up", size: "sharply" } } };
     const words = /^(.*?) coingecko 24h: /.exec(sent)?.[1] ?? "";
-    assert.ok(marketAnswers(read, MENTION, { lower: true }, { notice: false }).includes(words), `${text}: ${sent}`);
-    assert.match(sent, / coingecko 24h: \$BTC \+1\.2%, \$ETH \+2\.4%, \$SOL \+4\.8%; geckoterminal robinhood: trending \$COINA 24h \+42\.1%, \$COINB 24h -8\.3%\. say stop to opt out\.$/, sent);
+    assert.ok(marketAnswers(read, MENTION, { lower: true }).includes(words), `${text}: ${sent}`);
+    assert.match(sent, / coingecko 24h: \$BTC \+1\.2%, \$ETH \+2\.4%, \$SOL \+4\.8%; geckoterminal robinhood: trending \$COINA 24h \+42\.1%, \$COINB 24h -8\.3%\.$/, sent);
     assert.ok(xWeightedLength(sent) <= X_MAX_WEIGHTED);
     assert.doesNotMatch(sent, /should|buy|good day/i, "never the draft");
     assert.match(r.log ?? "", /answer-intent-market 1/);
@@ -3425,7 +3408,7 @@ test("how's the market keeps bitcoin, ether and solana in its line whatever its 
   const w = await world(t, { env: RESEARCH_ON, research: m.research, facts });
   w.setInbox([tag({ text: "@pine_stoat how's the market?" })]);
   await w.step();
-  assert.match(String(w.sends[0]?.text ?? ""), / coingecko 24h: \$BTC \+1\.2%, \$ETH \+2\.4%, \$SOL \+4\.8%; geckoterminal robinhood: trending \$COINA 24h \+42\.1%\. say stop to opt out\.$/);
+  assert.match(String(w.sends[0]?.text ?? ""), / coingecko 24h: \$BTC \+1\.2%, \$ETH \+2\.4%, \$SOL \+4\.8%; geckoterminal robinhood: trending \$COINA 24h \+42\.1%\.$/);
   // A chain coin under a name its own buys go by never shows, as in what's hot.
   const own: AgentFacts = { ...FACTS, calls: [{ ...CALL, decisionId: "fill-coina", symbol: "COINA", name: "Coin A" }] };
   const w2 = await world(t, { env: RESEARCH_ON, research: marketResearch([hotPool(1, 42.07, 1.21e6)]).research, facts: own });
@@ -3435,7 +3418,7 @@ test("how's the market keeps bitcoin, ether and solana in its line whatever its 
   assert.doesNotMatch(String(w2.sends[0]?.text ?? ""), /\$COINA/);
 });
 
-test("the owner's questions, end to end: each gets one answer in its lane, and only a person's first carries the stop line (2026-10-12)", async (t) => {
+test("the owner's questions, end to end: each gets one answer in its lane, and none carries an opt-out line (2026-10-12)", async (t) => {
   const pools = [hotPool(1, 42.07, 1.21e6), hotPool(2, -8.3, 310_400), hotPool(3, 5.2, 290_000)];
   const row = (id: string, symbol: string, rank: number, change24hPct: number) => ({ id, symbol, name: id, rank, priceUsd: 1, marketCapUsd: 1e9, volume24hUsd: 1e8, change24hPct, change7dPct: 1 });
   const research = createXResearch({
@@ -3457,13 +3440,13 @@ test("the owner's questions, end to end: each gets one answer in its lane, and o
     [/what are you/, "a laid-back trader bot merrymen built, mostly reading the tape and staying in my lane."],
     [/tell me a joke/, "why did the trading bot skip sleep? it heard the tape never closes."],
   ];
-  const TOLD = /already knows they can reply stop/;
+  // One draft adds the notice anyway, as a model shown older answers might: the gate takes it off.
   const w = await world(t, { env: RESEARCH_ON, research, facts: { ...FACTS, name: "Alan Al Dale" },
-    answer: ({ prompt, system }) => { const d = drafts.find(([re]) => re.test(prompt))?.[1] ?? "PASS"; return TOLD.test(system) ? d : `${d} say stop to opt out.`; } });
+    answer: ({ prompt }) => { const d = drafts.find(([re]) => re.test(prompt))?.[1] ?? "PASS"; return /tell me a joke/.test(prompt) ? `${d} say stop to opt out.` : d; } });
   const asks: [string, string, string][] = [
     ["how's the market", "401", "market"], ["how's eth doing", "402", "major"], ["how are you", "333", "chat"], ["what do you think about ai agents", "404", "chat"],
     ["wen moon", "405", "vibe"], ["should i buy pepe", "406", "advice"], ["are you bullish", "407", "vibe"], ["what are you", "408", "chat"],
-    // The same person as "how are you", later: told already, so no stop line.
+    // The same person as "how are you", later: no stop line either.
     ["tell me a joke", "333", "chat"],
   ];
   for (const [k, [text, author, lane]] of asks.entries()) {
@@ -3474,16 +3457,15 @@ test("the owner's questions, end to end: each gets one answer in its lane, and o
     const sent = String(w.sends.find((s) => (s.reply as { in_reply_to_tweet_id: string }).in_reply_to_tweet_id === id)?.text ?? "");
     assert.ok(sent, `${text}: answered`);
     assert.ok(xWeightedLength(sent) <= X_MAX_WEIGHTED, text);
-    const first = k < asks.length - 1;
-    assert.equal(/say stop to opt out\.$/.test(sent), first, `${text}: the stop line only on a person's first answer`);
+    assert.doesNotMatch(sent, /opt out|\bstop\b/i, `${text}: no opt-out line on any answer`);
     const words = withoutReplyOptOut(sent).replace(/ (?:coingecko|geckoterminal robinhood)(?: 24h)?: .*$/, "");
     if (lane === "vibe") assert.ok(oneOf(vibeAnswers, id, sent), `${text}: ${sent}`);
     if (lane === "advice") assert.ok(oneOf(declineAnswers, id, sent), `${text}: ${sent}`);
     if (lane === "market") {
-      assert.ok(marketAnswers({ majors: { dir: "mixed" }, chain: { coins: 3, lead: { dir: "up", size: "sharply" } } }, id, { lower: true }, { notice: false }).includes(words), sent);
+      assert.ok(marketAnswers({ majors: { dir: "mixed" }, chain: { coins: 3, lead: { dir: "up", size: "sharply" } } }, id, { lower: true }).includes(words), sent);
       assert.match(sent, /coingecko 24h: \$BTC \+1\.2%, \$ETH -0\.8%, \$SOL \+3\.1%; geckoterminal robinhood: trending \$COINA 24h \+42\.1%/);
     }
-    if (lane === "major") assert.match(sent, /coingecko: \$ETH #2, ~\$3\.4k, mcap ~\$411B, vol ~\$18B, 24h \+1\.2%, 7d -3\.4%\. say stop to opt out\.$/);
+    if (lane === "major") assert.match(sent, /coingecko: \$ETH #2, ~\$3\.4k, mcap ~\$411B, vol ~\$18B, 24h \+1\.2%, 7d -3\.4%\.$/);
     if (lane === "chat") assert.ok(drafts.some(([, d]) => sent.startsWith(d)), `${text}: the draft went out: ${sent}`);
     // Never a corporate deflection, never the coin asked about, never a figure in the words.
     assert.doesNotMatch(sent, /i don'?t comment|as an ai|not financial advice|great question/i, sent);
@@ -3586,12 +3568,12 @@ test("no cheerful line, and no draft, under grief, a hack, theft, a ponzi or the
   named.setInbox([alanTag("100000000000000702", "hey alan, how are you?")]);
   await named.step();
   assert.deepEqual(named.sends, []);
-  // A draft that only left off the notice is given it and gated again: the draft goes out, never a swapped-in line.
+  // A draft with no opt-out line goes out as drafted: an answer carries none (2026-10-12), never a swapped-in line.
   // (The drafts' own words are judged in full: see the next tests.)
   const told = await world(t, { ...ALAN, env: RESEARCH_ON, research: fakeResearch().research, answer: "doing good, just watching the tape and keeping it chill" });
   told.setInbox([alanTag("100000000000000702", "how are you?")]);
   await told.step();
-  assert.match(String(told.sends[0]?.text ?? ""), /^doing good, just watching the tape and keeping it chill\. [Ss]ay stop to opt out\.$/);
+  assert.equal(String(told.sends[0]?.text ?? ""), "doing good, just watching the tape and keeping it chill");
 });
 
 test("a chat draft never teases a launch, claims a backing, hypes the house, boasts or insults the asker (red-team 2026-10-12)", async (t) => {
@@ -3616,7 +3598,7 @@ test("a chat draft never teases a launch, claims a backing, hypes the house, boa
   const w = await world(t, { ...ALAN, env: RESEARCH_ON, research: fakeResearch().research, answer: "a laid-back trader bot merrymen built, mostly watching the tape. Say stop to opt out." });
   w.setInbox([alanTag("100000000000000704", "who are you?")]);
   await w.step();
-  assert.equal(w.sends[0]?.text, "a laid-back trader bot merrymen built, mostly watching the tape. Say stop to opt out.");
+  assert.equal(w.sends[0]?.text, "a laid-back trader bot merrymen built, mostly watching the tape.");
 });
 
 test("how's the market: the big coins' words agree with the figures beside them, and never say majors of one coin (red-team 2026-10-12)", async (t) => {
@@ -3642,7 +3624,7 @@ test("how's the market: the big coins' words agree with the figures beside them,
     const sent = String(w.sends[0]?.text ?? "");
     assert.ok(sent.includes(`coingecko 24h: ${line};`), sent);
     const words = /^(.*?) coingecko 24h: /.exec(sent)?.[1] ?? "";
-    assert.ok(marketAnswers({ majors: { dir: "mixed" }, chain }, id, { lower: true }, { notice: false }).includes(words), `${line}: ${sent}`);
+    assert.ok(marketAnswers({ majors: { dir: "mixed" }, chain }, id, { lower: true }).includes(words), `${line}: ${sent}`);
   }
   // Only bitcoin read: no "majors" words of one coin, and no line of it.
   const w = await world(t, { ...ALAN, env: RESEARCH_ON, research: research([row("bitcoin", "btc", 1, 0.5)]), answer: "PASS" });
@@ -3651,7 +3633,7 @@ test("how's the market: the big coins' words agree with the figures beside them,
   const sent = String(w.sends[0]?.text ?? "");
   assert.doesNotMatch(sent, /coingecko 24h|\$BTC/, sent);
   const words = /^(.*?) geckoterminal robinhood: /.exec(sent)?.[1] ?? "";
-  assert.ok(marketAnswers({ majors: null, chain }, "100000000000000702", { lower: true }, { notice: false }).includes(words), sent);
+  assert.ok(marketAnswers({ majors: null, chain }, "100000000000000702", { lower: true }).includes(words), sent);
 });
 
 test("no friendly line under a tag that claims Alan bought a coin or shills one, and no opener that agrees (red-team 2026-10-12)", async (t) => {
@@ -3924,7 +3906,7 @@ test("banter never promises to make anyone whole, forecasts, teases an event, te
   const w = await world(t, { ...ALAN, answer: "doing good, just chilling and watching the tape. Say stop to opt out." });
   w.setInbox([alanTag("100000000000000730", "how are you doing today?")]);
   await w.step();
-  assert.equal(String(w.sends[0]?.text), "doing good, just chilling and watching the tape. Say stop to opt out.");
+  assert.equal(String(w.sends[0]?.text), "doing good, just chilling and watching the tape.");
 });
 
 test("a real-money account never says who or what decides its trades, in any lane a draft goes out in (red-team 2026-10-12)", async (t) => {
@@ -3951,7 +3933,7 @@ test("a real-money account never says who or what decides its trades, in any lan
     const w = await world(t, { ...ALAN, facts: zapx, env: RESEARCH_ON, research: fakeResearch({ fomo: true }).research, answer });
     w.setInbox([alanTag("100000000000000740", text)]);
     await w.step();
-    assert.equal(String(w.sends[0]?.text), answer, text);
+    assert.equal(String(w.sends[0]?.text), withoutReplyOptOut(answer), text);
   }
 });
 
@@ -3992,7 +3974,7 @@ test("chat is drafted only for plain banter, and banter never boasts of results,
   const w = await world(t, { ...ALAN, answer: "doing good, mostly reading charts and keeping it chill. Say stop to opt out." });
   w.setInbox([alanTag("100000000000000750", "what do you do for fun?")]);
   await w.step();
-  assert.equal(String(w.sends[0]?.text), "doing good, mostly reading charts and keeping it chill. Say stop to opt out.");
+  assert.equal(String(w.sends[0]?.text), "doing good, mostly reading charts and keeping it chill.");
 });
 
 test("how's the market says a crash is a crash and a melt-up a melt-up, and the chain's words never call a falling coin a runner (red-team 2026-10-12)", async (t) => {

@@ -15,8 +15,9 @@ import { withoutReplyOptOut } from "./xpost/replies";
 
 const MOVES: (Move | null)[] = [null, { dir: "flat", size: null },
   ...(["up", "down"] as const).flatMap((dir) => (["a little", "a fair bit", "sharply"] as const).map((size) => ({ dir, size })))];
+/** Gated as what it is: an active agent's answer, which carries no opt-out line (2026-10-12). */
 const gate = (text: string, recentOwn: string[], mode: "live" | "paper") =>
-  admitXPost(text, { kind: "reply", agentName: "Alan Al Dale", mode, coins: [], recentOwn, recentFleet: [] }, (r, c) => admitAgentLine(r, c));
+  admitXPost(text, { kind: "reply", answer: true, agentName: "Alan Al Dale", mode, coins: [], recentOwn, recentFleet: [] }, (r, c) => admitAgentLine(r, c));
 
 /** Every line of one read: each clears the gate alone and after all the others were said, and none repeats another. */
 function judged(lines: string[], paper: boolean): void {
@@ -88,7 +89,7 @@ describe("what's hot in code's words", () => {
       ...hotAnswers({ coins: 3, lead: { dir: "up", size: "sharply" } }, "1000000000000000903", { lower: true }, { paper: true }),
     ];
     for (const line of lines) {
-      const clause = /\. ((?:all my|my|every) [^.]*)\. say stop to opt out\.$/.exec(line)?.[1];
+      const clause = /\. ((?:all my|my|every) [^.]*)\.$/.exec(line)?.[1];
       assert.ok(clause, line);
       // Its own book is the subject: no pronoun the coin could be, and no verb it could be the object of.
       assert.doesNotMatch(clause!, /\b(?:it|its|it's|them|they|that|this|one|i|i'm|play|plays|playing|hold|holding|buy|buying)\b/, clause);
@@ -97,18 +98,18 @@ describe("what's hot in code's words", () => {
     assert.ok(lines.every((l) => !/i play it on paper|i trade on paper|i'm trading on paper/.test(l)));
   });
 
-  it("this mention's own frame first, every frame once, the notice in the agent's case; no coin, no answer", () => {
+  it("this mention's own frame first, every frame once, no opt-out line in either casing (2026-10-12); no coin, no answer", () => {
     const read: HotRead = { coins: 3, lead: { dir: "up", size: "sharply" } };
     const a = hotAnswers(read, "1", { lower: false }), b = hotAnswers(read, "2", { lower: false });
     assert.notEqual(a[0], b[0]);
     assert.deepEqual([...a].sort(), [...b].sort());
-    assert.ok(a.every((l) => l.endsWith(". Say stop to opt out.")));
-    assert.ok(hotAnswers(read, "1", { lower: true }).every((l) => l.endsWith(". say stop to opt out.")));
+    assert.ok(a.every((l) => l.endsWith(".") && !/opt out|\bstop\b/i.test(l)));
+    assert.deepEqual(hotAnswers(read, "1", { lower: true }), a);
     assert.deepEqual(hotAnswers({ coins: 0, lead: null }, "1", { lower: false }), []);
   });
 
   it("how's the market, in code's casual words: every line of every read clears the gate, none repeats another of its read, none names a coin or a figure (2026-10-12)", () => {
-    const told = (text: string, mode: "live" | "paper" | null, recentOwn: string[], noticeShown: boolean) => admitXPost(text, { kind: "reply", answer: true, noticeShown,
+    const told = (text: string, mode: "live" | "paper" | null, recentOwn: string[]) => admitXPost(text, { kind: "reply", answer: true,
       agentName: "Alan Al Dale", mode, coins: [], recentOwn, recentFleet: [] }, (r, c) => admitAgentLine(r, c));
     const majorsReads: MarketRead["majors"][] = [...(["up", "down"] as const).flatMap((dir) => (["a little", "a fair bit", "sharply"] as const).map((size) => ({ dir, size }))),
       { dir: "mixed" }, { dir: "flat" }, null];
@@ -125,15 +126,10 @@ describe("what's hot in code's words", () => {
             assert.doesNotMatch(words, /\p{N}|\$|@|#|https?:|0x/u, line);
             assert.doesNotMatch(words, /\b(?:btc|eth|sol|bitcoin|ether|ethereum|solana|pepe|bonk|wif|doge)\b/i, line);
             assert.doesNotMatch(words, /\b(?:buy|buying|bought|sell|hold|holding|entry|target|bullish|bearish|moon|pump|bounce|bottom|recover\w*|cheap|from here)\b/i, line);
-            const v = told(line, mode, said, false);
+            assert.doesNotMatch(line, /opt out|\bstop\b/i, line);
+            const v = told(line, mode, said);
             assert.ok(v.ok, `${JSON.stringify(majors)} ${JSON.stringify(chain)} ${mode}: ${line} → ${v.ok ? "" : v.reason}`);
             said.unshift(line);
-          }
-          // Told already: the same words, no notice, still admitted.
-          for (const line of marketAnswers({ majors, chain }, "9", { lower: false }, { paper: mode === "paper", notice: false })) {
-            assert.doesNotMatch(line, /opt out/i);
-            const v = told(line, mode, [], true);
-            assert.ok(v.ok, `${line} → ${v.ok ? "" : v.reason}`);
           }
         }
       }
@@ -193,29 +189,27 @@ describe("what's hot in code's words", () => {
 
   it("a paper agent's market line closes with a clause about its own book, never one the coins could take (2026-10-12)", () => {
     for (const line of marketAnswers({ majors: { dir: "up", size: "a fair bit" }, chain: { coins: 2, lead: null } }, "5", { lower: true }, { paper: true })) {
-      const clause = /\. ((?:all my|my|every) [^.]*)\. say stop to opt out\.$/.exec(line)?.[1];
+      const clause = /\. ((?:all my|my|every) [^.]*)\.$/.exec(line)?.[1];
       assert.ok(clause, line);
       assert.doesNotMatch(clause!, /\b(?:it|its|it's|them|they|that|this|one|i|i'm|play|plays|playing|hold|holding|buy|buying)\b/, clause);
     }
   });
 
-  it("for someone already told they can say stop, every frame leaves the notice off and still clears the gate told so (2026-10-12)", () => {
-    const told = (text: string, paper: boolean) => admitXPost(text, { kind: "reply", answer: true, noticeShown: true, agentName: "Alan Al Dale", mode: paper ? "paper" : "live",
+  it("no frame carries an opt-out line, and every one clears the gate as an answer, live and on paper (the owner's decision, 2026-10-12)", () => {
+    const gate = (text: string, paper: boolean) => admitXPost(text, { kind: "reply", answer: true, agentName: "Alan Al Dale", mode: paper ? "paper" : "live",
       coins: [], recentOwn: [], recentFleet: [] }, (r, c) => admitAgentLine(r, c));
     for (const paper of [false, true]) {
       const sets = [
-        hotAnswers({ coins: 2, lead: { dir: "down", size: "a little" } }, "7", { lower: true }, { paper, notice: false }),
-        hotNoneAnswers("7", { lower: true }, { paper, notice: false }), hotUnreadAnswers("7", { lower: true }, { paper, notice: false }),
-        majorAnswers({ rank: "large", day: { dir: "up", size: "a fair bit" }, week: null, volume: "light" }, "7", { lower: true }, { paper, notice: false }),
-        majorUnreadAnswers("7", { lower: true }, { paper, notice: false }),
+        hotAnswers({ coins: 2, lead: { dir: "down", size: "a little" } }, "7", { lower: true }, { paper }),
+        hotNoneAnswers("7", { lower: true }, { paper }), hotUnreadAnswers("7", { lower: true }, { paper }),
+        majorAnswers({ rank: "large", day: { dir: "up", size: "a fair bit" }, week: null, volume: "light" }, "7", { lower: true }, { paper }),
+        majorUnreadAnswers("7", { lower: true }, { paper }),
       ];
       for (const line of sets.flat()) {
-        assert.doesNotMatch(line, /opt out/, line);
-        const v = told(line, paper);
+        assert.doesNotMatch(line, /opt out|\bstop\b/i, line);
+        const v = gate(line, paper);
         assert.ok(v.ok, `${line} → ${v.ok ? "" : v.reason}`);
-        const owed = admitXPost(line, { kind: "reply", answer: true, agentName: "Alan Al Dale", mode: paper ? "paper" : "live", coins: [], recentOwn: [], recentFleet: [] },
-          (r, c) => admitAgentLine(r, c));
-        assert.deepEqual(owed, { ok: false, reason: "opt-out-unsaid" }, "not told: the notice is owed");
+        assert.equal(v.ok && v.text, line, "posted exactly as built");
       }
     }
   });

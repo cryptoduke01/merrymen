@@ -28,7 +28,7 @@
  */
 import { CASUAL_PAPER, latinLines } from "./casual";
 import { signedPercent } from "./figures";
-import { noticeFor, type CodeLineOptions } from "./replies";
+import type { CodeLineOptions } from "./replies";
 
 /** A day's move as code reads it: which way, and how far, by code's own thresholds. Never a figure. */
 export interface Move {
@@ -112,14 +112,17 @@ const MARKET_PAPER: readonly string[] = Object.freeze([
   "my bets are paper bets",
 ]);
 
-/** The lines, this mention's own frame first (chosen by its id), each with the notice and, on paper, a paper clause. */
-function framed(texts: readonly string[], seed: string, style: { lower: boolean }, o: CodeLineOptions): string[] {
+/**
+ * The lines, this mention's own frame first (chosen by its id), each with, on
+ * paper, a paper clause, and never an opt-out notice (replies.ts
+ * CodeLineOptions: the owner's decision, 2026-10-12).
+ */
+function framed(texts: readonly string[], seed: string, o: CodeLineOptions): string[] {
   let h = 0;
   for (const ch of String(seed ?? "")) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
-  const notice = noticeFor(style, o);
   return texts.map((_, i) => {
     const k = (h + i) % texts.length;
-    return `${texts[k]!}${o.paper === true ? `. ${MARKET_PAPER[k % MARKET_PAPER.length]!}` : ""}.${notice}`;
+    return `${texts[k]!}${o.paper === true ? `. ${MARKET_PAPER[k % MARKET_PAPER.length]!}` : ""}.`;
   });
 }
 
@@ -130,7 +133,7 @@ function framed(texts: readonly string[], seed: string, style: { lower: boolean 
  */
 export function hotAnswers(read: HotRead, seed: string, style: { lower: boolean }, o: CodeLineOptions = {}): string[] {
   if (!read || !(read.coins >= 1)) return [];
-  return framed(HOT_FRAMES.map((f) => f(read.coins > 1, read.lead ?? null)), seed, style, o);
+  return framed(HOT_FRAMES.map((f) => f(read.coins > 1, read.lead ?? null)), seed, o);
 }
 
 /**
@@ -165,12 +168,12 @@ const HOT_UNREAD_LINES: readonly string[] = Object.freeze([
 
 /** What's hot with nothing past the floors: every line, this mention's own first. */
 export function hotNoneAnswers(seed: string, style: { lower: boolean }, o: CodeLineOptions = {}): string[] {
-  return framed(HOT_NONE_LINES, seed, style, o);
+  return framed(HOT_NONE_LINES, seed, o);
 }
 
 /** What's hot with the index unread: every line, this mention's own first. */
 export function hotUnreadAnswers(seed: string, style: { lower: boolean }, o: CodeLineOptions = {}): string[] {
-  return framed(HOT_UNREAD_LINES, seed, style, o);
+  return framed(HOT_UNREAD_LINES, seed, o);
 }
 
 // ── a major ────────────────────────────────────────────────────────────────
@@ -245,7 +248,7 @@ function majorText(w: MajorWords, r: MajorRead): string | null {
 export function majorAnswers(read: MajorRead, seed: string, style: { lower: boolean }, o: CodeLineOptions = {}): string[] {
   if (!read) return [];
   const texts = MAJOR_FRAMES.map((w) => majorText(w, read));
-  return texts.every((t): t is string => t !== null) ? framed(texts, seed, style, o) : [];
+  return texts.every((t): t is string => t !== null) ? framed(texts, seed, o) : [];
 }
 
 /** A coin asked by name that coingecko could not be read for (or research off): never a guess at how it is doing, never its name. */
@@ -262,7 +265,7 @@ const MAJOR_UNREAD_LINES: readonly string[] = Object.freeze([
 
 /** A major unread: every line, this mention's own first. */
 export function majorUnreadAnswers(seed: string, style: { lower: boolean }, o: CodeLineOptions = {}): string[] {
-  return framed(MAJOR_UNREAD_LINES, seed, style, o);
+  return framed(MAJOR_UNREAD_LINES, seed, o);
 }
 
 // ── how's the market ───────────────────────────────────────────────────────
@@ -391,7 +394,6 @@ export function marketAnswers(read: MarketRead, seed: string, style: { lower: bo
   // An up or down read with no size the bands know is no read: never a guess at how far.
   const majors = MAJORS_SUBJECT.map((subject, i) => (said?.[i] === undefined ? `${MAJORS_SAID.unread[i]!} ${subject}` : `${subject} ${said[i]!}`));
   const chain = CHAIN_SAID[!read?.chain ? "unread" : read.chain.coins === 0 ? "none" : read.chain.coins === 1 ? "one" : "some"];
-  const notice = noticeFor(style, o);
   const paperOf = new Map(MARKET_CLOSE.map((close, i) => [close, CASUAL_PAPER[i % CASUAL_PAPER.length]!] as const));
-  return latinLines([majors, chain, MARKET_CLOSE], seed, (a, b, c) => `${a}, and ${b}. ${c}${o.paper === true ? `. ${paperOf.get(c)!}` : ""}.${notice}`);
+  return latinLines([majors, chain, MARKET_CLOSE], seed, (a, b, c) => `${a}, and ${b}. ${c}${o.paper === true ? `. ${paperOf.get(c)!}` : ""}.`);
 }

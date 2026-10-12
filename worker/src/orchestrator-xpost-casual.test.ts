@@ -2,8 +2,8 @@
  * CODE'S CASUAL ANSWERS CLEAR THE REAL GATE (2026-10-12): a playful decline,
  * its own mood and a friendly fallback for chat, sixty-four lines a kind.
  * Every line clears the X gate with the room's base gate composed in, live,
- * paper and idle, with the opt-out notice and, for someone already told,
- * without it, and still clears it after every other line of every kind was
+ * paper and idle, with no opt-out notice (the owner's decision, 2026-10-12),
+ * and still clears it after every other line of every kind was
  * said; none repeats another; none names a coin, a figure, a direction or a
  * buy. Here, beside the orchestrator, because only orchestrator* files may
  * import the room's gate.
@@ -18,7 +18,7 @@ import { withoutReplyOptOut } from "./xpost/replies";
 import { greetingAnswers, modelAnswers } from "./xpost/writer";
 
 type Mode = "live" | "paper" | null;
-const gate = (text: string, mode: Mode, recentOwn: string[] = [], told = false) => admitXPost(text, { kind: "reply", answer: true, noticeShown: told, agentName: "Alan Al Dale",
+const gate = (text: string, mode: Mode, recentOwn: string[] = []) => admitXPost(text, { kind: "reply", answer: true, agentName: "Alan Al Dale",
   mode, coins: [], recentOwn, recentFleet: [] }, (r, c) => admitAgentLine(r, c));
 
 const KINDS = [["decline", declineAnswers, DECLINE_SLOTS], ["vibe", vibeAnswers, VIBE_SLOTS], ["chat", chatAnswers, CHAT_SLOTS]] as const;
@@ -59,18 +59,15 @@ describe("code's casual answers", () => {
     }
   });
 
-  it("every line clears the real gate as an answer, live, paper and idle, with the notice owed and without it for someone already told", () => {
+  it("every line clears the real gate as an answer, live, paper and idle, and none carries an opt-out line (2026-10-12)", () => {
     for (const [kind, make] of KINDS) {
       for (const mode of ["live", "paper", null] as const) {
         for (const lower of [true, false]) {
-          for (const told of [false, true]) {
-            for (const line of make("7", { lower }, { paper: mode === "paper", notice: !told })) {
-              const v = gate(line, mode, [], told);
-              assert.ok(v.ok, `${kind} ${mode} ${lower} ${told}: ${line} → ${v.ok ? "" : v.reason}`);
-              assert.equal(v.ok && v.text, line, "posted exactly as built");
-              if (!told) assert.match(line, /[Ss]ay stop to opt out\.$/);
-              else assert.doesNotMatch(line, /opt out/i);
-            }
+          for (const line of make("7", { lower }, { paper: mode === "paper" })) {
+            const v = gate(line, mode, []);
+            assert.ok(v.ok, `${kind} ${mode} ${lower}: ${line} → ${v.ok ? "" : v.reason}`);
+            assert.equal(v.ok && v.text, line, "posted exactly as built");
+            assert.doesNotMatch(line, /opt out|\bstop\b|unsubscribe/i);
           }
         }
       }
@@ -107,7 +104,7 @@ describe("code's casual answers", () => {
   it("a paper agent's clause is about its own book: no pronoun or verb the tag's coin could take", () => {
     for (const [kind, make] of KINDS) {
       for (const line of make("11", { lower: true }, { paper: true })) {
-        const clause = /\. ((?:my|all of my|this agent's) [^.]*)\. say stop to opt out\.$/.exec(line)?.[1];
+        const clause = /\. ((?:my|all of my|this agent's) [^.]*)\.$/.exec(line)?.[1];
         assert.ok(clause, `${kind}: ${line}`);
         assert.doesNotMatch(clause!, /\b(?:it|its|it's|them|they|that|this one|one|i|i'm|play|plays|playing|hold|holding|buy|buying)\b/, clause);
         assert.match(clause!, /\b(?:paper|practice)\b/);

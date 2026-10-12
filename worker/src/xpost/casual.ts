@@ -32,13 +32,14 @@
  * b, and part (a + b) mod 8. Any two of its sixty-four lines share at most one
  * part, and no word is in two parts of a kind, so no two are a repeat
  * (orchestrator-xpost-casual.test.ts pins that, and that
- * every line clears the real gate, live, paper and idle, with the notice and
- * without it). The answer path takes the first the gate admits, starting from
+ * every line clears the real gate, live, paper and idle). No line carries an
+ * opt-out notice (replies.ts CodeLineOptions: the owner's decision,
+ * 2026-10-12). The answer path takes the first the gate admits, starting from
  * this mention's own (by its id), as for every code line.
  *
  * Pure: no I/O, no model, no clock.
  */
-import { noticeFor, type CodeLineOptions } from "./replies";
+import type { CodeLineOptions } from "./replies";
 
 /** Lines a three-slot kind can make: slots of eight, so sixty-four. */
 export const SLOT = 8;
@@ -96,12 +97,11 @@ export const CASUAL_PAPER: readonly string[] = Object.freeze([
   "my journal is on paper",
 ]);
 
-/** One kind's lines, styled: each part joined, a paper clause when on paper, the notice when owed. */
-function styled(slots: readonly [readonly string[], readonly string[], readonly string[]], seed: string, style: { lower: boolean }, o: CodeLineOptions,
+/** One kind's lines: each part joined, a paper clause when on paper, a full stop. Never an opt-out notice. */
+function styled(slots: readonly [readonly string[], readonly string[], readonly string[]], seed: string, o: CodeLineOptions,
   compose: (a: string, b: string, c: string) => string): string[] {
-  const notice = noticeFor(style, o);
   const paperOf = new Map(slots[0].map((part, i) => [part, CASUAL_PAPER[i % CASUAL_PAPER.length]!] as const));
-  return latinLines(slots, seed, (a, b, c) => `${compose(a, b, c)}${o.paper === true ? `. ${paperOf.get(a)!}` : ""}.${notice}`);
+  return latinLines(slots, seed, (a, b, c) => `${compose(a, b, c)}${o.paper === true ? `. ${paperOf.get(a)!}` : ""}.`);
 }
 
 // ── advice, declined ─────────────────────────────────────────────────────────
@@ -136,7 +136,7 @@ export const DECLINE_SLOTS: readonly [readonly string[], readonly string[], read
 
 /** Advice or a forecast asked for: every decline, this mention's own first. */
 export function declineAnswers(seed: string, style: { lower: boolean }, o: CodeLineOptions = {}): string[] {
-  return styled(DECLINE_SLOTS, seed, style, o, (a, b, c) => `${a}. ${b}, ${c}`);
+  return styled(DECLINE_SLOTS, seed, o, (a, b, c) => `${a}. ${b}, ${c}`);
 }
 
 // ── its own mood ─────────────────────────────────────────────────────────────
@@ -157,7 +157,7 @@ export const VIBE_SLOTS: readonly [readonly string[], readonly string[], readonl
 
 /** Its own mood, asked: every vibe line, this mention's own first. */
 export function vibeAnswers(seed: string, style: { lower: boolean }, o: CodeLineOptions = {}): string[] {
-  return styled(VIBE_SLOTS, seed, style, o, (a, b, c) => `${a}. ${b}, ${c}`);
+  return styled(VIBE_SLOTS, seed, o, (a, b, c) => `${a}. ${b}, ${c}`);
 }
 
 // ── chat the writer could not answer ─────────────────────────────────────────
@@ -185,5 +185,5 @@ export const CHAT_SLOTS: readonly [readonly string[], readonly string[], readonl
 
 /** Chat the writer's draft could not say: every friendly line, this mention's own first. */
 export function chatAnswers(seed: string, style: { lower: boolean }, o: CodeLineOptions = {}): string[] {
-  return styled(CHAT_SLOTS, seed, style, o, (a, b, c) => `${a}. ${b}, ${c}`);
+  return styled(CHAT_SLOTS, seed, o, (a, b, c) => `${a}. ${b}, ${c}`);
 }

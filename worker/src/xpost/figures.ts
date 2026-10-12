@@ -3,9 +3,10 @@
  * active agent's answer may carry market figures, AiXBT-style, but only ones
  * code built from a provider's typed numbers. The model still writes no
  * digit at all (the X gate's has-digits rule does not move); this line is
- * put in AFTER the gate admitted the model's words, between them and the
- * opt-out notice, and it is held to its own grammar here, so nothing but what
- * these functions render can ever stand where it stands.
+ * put in AFTER the gate admitted the words, at the end of the answer (an
+ * answer carries no opt-out notice: the owner's decision, 2026-10-12), and it
+ * is held to its own grammar here, so nothing but what these functions render
+ * can ever stand where it stands.
  *
  *   coingecko: $BTC #1, ~$97k, mcap ~$1.9T, vol ~$41B, 24h +1.2%, 7d -3.4%.
  *   geckoterminal robinhood: trending $ABC 24h +42.1% vol ~$1.2M; fomo: most bought $ABC.
@@ -37,7 +38,7 @@
  *
  * TOO LONG FOR X, FIELDS GO FIRST, THEN THE LINE (`withFigures`): the least
  * telling field is dropped, then the next, and when no form of the line fits
- * X's weighted 280 with the words and the notice, the answer goes out as the
+ * X's weighted 280 with the words, the answer goes out as the
  * gate admitted it, with no line.
  *
  * NEVER WHAT THE MODEL READS AS ITS OWN WORDS. A posted answer keeps its line
@@ -503,24 +504,23 @@ function* shorter(list: Shown[]): Generator<Shown[]> {
 }
 
 export interface WithFigures {
-  /** What to post: the gate's text with the line before its notice, or the gate's text as it was. */
+  /** What to post: the gate's text with the line after its words, or the gate's text as it was. */
   text: string;
-  /** The line put in, or null when none was (nothing to show, no notice to put it before, or no form of it fit). */
+  /** The line put in, or null when none was (nothing to show, no words, or no form of it fit). */
   line: string | null;
   /** Fields dropped to make it fit (0 when the whole line fit). */
   dropped: number;
 }
 
-/** The opt-out notice at the very end of an answer, as the gate admitted it. */
+/** The opt-out notice at the very end of a text, as older answers carried it: the line stays before it there. */
 const NOTICE_TAIL = /\s*(say stop to opt out\.)\s*$/i;
 
 /**
  * THE ANSWER WITH ITS FIGURES, OR WITHOUT. `admitted` is the X gate's own
- * text (words and, on someone's first answer, the opt-out notice, already
- * judged). The line goes between the words and the notice, or after the words
- * when the answer carries no notice (an answer to someone already told they
- * can say stop: gate.ts XGateCtx.noticeShown); the words gain a full stop if
- * they ended without one. The full line is tried first, then each shorter
+ * text, already judged: an answer's words, with no opt-out notice (gate.ts
+ * XGateCtx.answer). The line goes after the words (before a notice, were one
+ * ever handed in); the words gain a full stop if they ended without one. The
+ * full line is tried first, then each shorter
  * form (`shorter`), and the first whose whole post fits X_MAX_WEIGHTED is
  * used. None fits, no words, or nothing in `spec` can be shown: `admitted`
  * unchanged.

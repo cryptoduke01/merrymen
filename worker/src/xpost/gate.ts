@@ -154,19 +154,17 @@ export interface XGateCtx {
    * then a prediction, a level or an entry in any words is refused too
    * (ANSWER_PREDICTION), a coin named or not. Absent: every other reply,
    * judged as before.
+   *
+   * AND NO OPT-OUT LINE (the owner's decision, 2026-10-12): whoever tagged
+   * the agent, replied to it or quoted it asked to be answered, so an answer
+   * never carries "Say stop to opt out." The notice at the very end of a
+   * draft is taken off before anything else reads it (ANSWER_NOTICE_TAIL),
+   * and any other opt-out wording is refused as opt-out-said (OPT_OUT_SAID).
+   * A stop is honoured exactly as before (replies.ts isAnswerOptOut). Every
+   * other reply — a comment reply on any other owner's buy post — must still
+   * end with the notice (opt-out-unsaid).
    */
   answer?: boolean;
-  /**
-   * THIS PERSON WAS ALREADY TOLD THEY CAN SAY STOP (the owner's decision,
-   * 2026-10-12): this X account posted an answer or a comment reply to them
-   * that carried the opt-out notice within the last 30 days (store.ts
-   * optOutToldSince). Read only with `answer` true: then the notice may be
-   * left out, and a later answer reads like a person talking rather than a
-   * form. Absent or false, an answer must carry it as before; a comment reply
-   * on a buy post, and every other kind, always must. A "stop" is honoured
-   * the same whether or not the line was shown (replies.ts isAnswerOptOut).
-   */
-  noticeShown?: boolean;
   /**
    * A MODEL'S DRAFT OF AN ANSWER, NEVER A CODE-BUILT LINE (red-team
    * 2026-10-12): read only with `answer` true. Then the house's claims, a
@@ -1837,13 +1835,28 @@ function strings(list: unknown): string[] {
 }
 
 /**
+ * THE NOTICE AT THE END OF AN ANSWER, HOWEVER IT IS CLOSED: "say stop to opt
+ * out.", "Reply stop to opt-out!", after a comma or a dash. Taken off an
+ * active agent's answer before anything reads it (XGateCtx.answer): its
+ * answers carry none (the owner's decision, 2026-10-12), and a model shown
+ * older answers that did may copy it.
+ */
+const ANSWER_NOTICE_TAIL = /[\s,;:—–-]*\b(?:say|reply)\s+stop\s+to\s+opt[\s-]?out[.!]?\s*$/i;
+/**
+ * ANY OTHER OPT-OUT WORDING IN AN ANSWER: "reply stop anytime", "type stop",
+ * "dm stop", "opt out", "opt-out", "unsubscribe". Refused as opt-out-said:
+ * never repaired, since what is left around it may lean on it.
+ */
+export const OPT_OUT_SAID = /\b(?:say|reply|replying|type|send|text|dm|tweet|write|respond(?:ing)?\s+with)\s+["'“”‘’]?stop\b|\bopt[\s-]?outs?\b|\bunsubscrib\w*/i;
+
+/**
  * MAY THIS BE POSTED ON X? Tidy, then the base gate, then every X clause.
  * `ok` carries the exact text to store and post.
  *
  * Reason codes (stable, operator-only): empty · pass · meta · hidden-chars · charset · too-short · too-long ·
  * handle · link · markup · emoji · exclaim · caps · ops · alert · hype · pnl ·
  * market · human-claim · points-back · coin-unsaid · paper-unsaid · mode-false · undisclosed · intro-no-trading ·
- * opt-out-unsaid · reply-current-or-action · sherwood-claim · bought-named · buy-claim · unlooked-name · stock-phrase ·
+ * opt-out-unsaid · opt-out-said · reply-current-or-action · sherwood-claim · bought-named · buy-claim · unlooked-name · stock-phrase ·
  * fleet-repeat · seed-echo — plus whatever the base gate says (has-digits,
  * quantity, repeat, unvouched-ticker, address, secret…).
  *
@@ -1857,7 +1870,8 @@ function strings(list: unknown): string[] {
 export function admitXPost(raw: unknown, given: XGateCtx, baseGate: BaseGate): XVerdict {
   const ctx: XGateCtx = { ...given, recentOwn: strings(given?.recentOwn).map(withoutFiguresLine), recentFleet: strings(given?.recentFleet).map(withoutFiguresLine) };
   const agentName = String(ctx?.agentName ?? "").trim();
-  const tidied = tidyXPost(raw, agentName);
+  // AN ANSWER CARRIES NO OPT-OUT LINE (XGateCtx.answer): the notice at its end is taken off first.
+  const tidied = ctx.kind === "reply" && ctx.answer === true ? tidyXPost(raw, agentName).replace(ANSWER_NOTICE_TAIL, "").trim() : tidyXPost(raw, agentName);
   if (tidied === "") return refuse("empty");
   if (PASS.test(tidied)) return refuse("pass");
   if (metaRefusal(raw, tidied, agentName)) return refuse("meta");
@@ -1912,8 +1926,8 @@ function admitMasked(tidied: string, ctx: XGateCtx, baseGate: BaseGate, agentNam
   if (words(text) < XPOST_MIN_WORDS) return refuse("too-short");
   if (ctx.kind === "reply") {
     const body = withoutReplyOptOut(text);
-    // THE NOTICE ONCE (XGateCtx.noticeShown): only an answer to someone already told may leave it out.
-    if (body === text && !(ctx.answer === true && ctx.noticeShown === true)) return refuse("opt-out-unsaid");
+    // A COMMENT REPLY ENDS WITH THE NOTICE; AN ANSWER NEVER CARRIES ONE (XGateCtx.answer, the owner's decision of 2026-10-12).
+    if (ctx.answer === true ? OPT_OUT_SAID.test(text) : body === text) return refuse(ctx.answer === true ? "opt-out-said" : "opt-out-unsaid");
     if (words(body) < XPOST_MIN_WORDS) return refuse("too-short");
     // The full text has passed the base privacy checks above. Compare
     // originality symmetrically without the mandatory notice on either side.

@@ -22,7 +22,7 @@ import { afterEach, beforeEach, describe, it } from "node:test";
 import { act, createElement } from "react";
 import { X_COPY, type XAccountBody } from "@/lib/x-connect";
 import { ACTIVE_CADENCE, ANSWERS_PER_DAY } from "../../../worker/src/xpost/planner";
-import { ANSWERS_PER_AUTHOR, OPT_OUT_NOTICE_MS } from "../../../worker/src/xpost/store";
+import { ANSWERS_PER_AUTHOR } from "../../../worker/src/xpost/store";
 import { json, testDom } from "./test-dom";
 import { XPosting } from "./XPosting";
 
@@ -813,7 +813,6 @@ describe("the warning keeps its words", () => {
     // The numbers it promises are the orchestrator's own lane limits.
     assert.equal(ANSWERS_PER_DAY, 24, "the warning says up to 24 answers a day");
     assert.equal(ANSWERS_PER_AUTHOR, 2, "the warning says at most two to one person a day");
-    assert.equal(OPT_OUT_NOTICE_MS, 30 * 24 * 60 * 60_000, "the warning says the stop line comes again after 30 days");
   });
 
   it("the lead sentence is bold, and the warning is the only place that sends 'enable'", () => {
