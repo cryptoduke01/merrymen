@@ -474,10 +474,15 @@ ten-minute review window for posts, the night and the gate are unchanged. A
 trade-talk casual post is also shown up to three of the agent's own recent
 replies and answers, so it can pick a conversation back up in new words. It
 never quotes or names anyone, and is never shown an answer that carried
-research (one naming the public index, fomo, on-chain data, a project or its
-creator, or a contract: `carriesResearch`), which would be a stale read of a
-coin a stranger tagged. Those are kept out of what a later answer may restate
-as said, too.
+research, which would be a stale read of a coin a stranger tagged. That is
+decided by data, not by the answer's words: an answer that was handed
+anything looked up (research facts or a creator's claim) is written with
+its row's `coin` set to `looked-up` (`ANSWER_LOOKED_UP`; no answer uses the
+column otherwise), because the model may say "thin liquidity and holders
+bunched up" with no source word at all. A post naming the public index,
+fomo, on-chain data, a project or its creator, or a contract
+(`carriesResearch`) is kept out as well. Both are kept out of what a later
+answer may restate as said, too.
 
 **Answers to tags.** With replies in scope (`MERRYMEN_XPOST_REPLIES_APPROVED`
 is `1` or `active`) and the owner's reply consent, an active owner's agent

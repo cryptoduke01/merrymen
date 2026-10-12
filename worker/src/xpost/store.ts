@@ -1286,6 +1286,17 @@ export async function introPostsOf(db: Db, tenant: string, xUserId: string): Pro
 }
 
 /**
+ * AN ANSWER THAT CARRIED SOMETHING LOOKED UP, by data and not by its words
+ * (final review, 2026-10-12): its row's `coin`, which no answer otherwise
+ * uses. Research for a tag a stranger asked (an index read, Fomo's talk, a
+ * flow band, a creator's claim) is true only of that coin and that moment;
+ * the model may say it without any source word ("thin liquidity and holders
+ * bunched up"), so it is never handed on — not as what it already said, and
+ * not as a casual post's theme.
+ */
+export const ANSWER_LOOKED_UP = "looked-up";
+
+/**
  * Bodies that went out, or are about to, since `sinceMs`, newest first —
  * every account's when `tenant` is null. What a new draft must not repeat: its
  * own account's history, and the fleet's (X: never "identical or substantially
@@ -1294,22 +1305,28 @@ export async function introPostsOf(db: Db, tenant: string, xUserId: string): Pro
  * `posted` narrows it to what X surely published: what an agent may say it
  * already said. A draft still waiting may yet be skipped by its owner, so it
  * is something not to echo, never something said.
+ *
+ * `exceptLookedUp` leaves out every answer that carried something looked up
+ * (ANSWER_LOOKED_UP): what may be handed on to another prompt, never what a
+ * draft is gated against.
  */
-export async function recentBodies(db: Db, opts: { tenant: string | null; sinceMs: number; limit: number; posted?: boolean }): Promise<string[]> {
+export async function recentBodies(db: Db, opts: { tenant: string | null; sinceMs: number; limit: number; posted?: boolean; exceptLookedUp?: boolean }): Promise<string[]> {
   const lim = int(Math.max(1, Math.min(2000, opts.limit)));
   const statuses = opts.posted ? "('posted')" : "('scheduled', 'sending', 'posted')";
+  // Spelled out for NULL: an answer with no mark is handed on, one with the mark never.
+  const looked = opts.exceptLookedUp ? `AND (kind <> 'answer' OR coin IS NULL OR coin <> '${ANSWER_LOOKED_UP}')` : "";
   const rows = (opts.tenant === null
     ? await db
         .prepare(
           `SELECT body FROM xpost_posts
-            WHERE status IN ${statuses} AND created_at_ms >= ?
+            WHERE status IN ${statuses} AND created_at_ms >= ? ${looked}
             ORDER BY created_at_ms DESC, id DESC LIMIT ?`,
         )
         .all(int(opts.sinceMs), lim)
     : await db
         .prepare(
           `SELECT body FROM xpost_posts
-            WHERE tenant = ? AND status IN ${statuses} AND created_at_ms >= ?
+            WHERE tenant = ? AND status IN ${statuses} AND created_at_ms >= ? ${looked}
             ORDER BY created_at_ms DESC, id DESC LIMIT ?`,
         )
         .all(tenantKey(opts.tenant), int(opts.sinceMs), lim)) as { body: unknown }[];

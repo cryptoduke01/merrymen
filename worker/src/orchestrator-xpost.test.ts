@@ -1481,6 +1481,13 @@ describe("what a casual post starts from", () => {
       post(9, "answer", "i keep it simple. Say stop to opt out."),
     ] as never, TENANT);
     assert.deepEqual(talked, ["mostly fresh launches, i like the buying to look real.", "the pool looked deep enough to me at the time.", "quiet tapes suit me fine."]);
+    // Marked by what it was handed: research the model said without a source word is still never a theme.
+    const marked = talkedOf([
+      post(1, "answer", "thin liquidity and holders bunched up at the top, spicy one. Say stop to opt out.", { coin: store.ANSWER_LOOKED_UP }),
+      post(2, "answer", "traders reckon it's still early, wild one. Say stop to opt out.", { coin: store.ANSWER_LOOKED_UP }),
+      post(3, "answer", "quiet tapes suit me fine. Say stop to opt out."),
+    ] as never, TENANT);
+    assert.deepEqual(marked, ["quiet tapes suit me fine."]);
   });
 
   it("a buy post's gloss dice are the account's and the decision's", () => {

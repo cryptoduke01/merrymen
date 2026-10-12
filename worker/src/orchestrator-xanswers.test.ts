@@ -178,6 +178,30 @@ test("an answer that carried a coin's research is never restated as what it said
   assert.doesNotMatch(said, /public index|fomo/, "another coin's read is not");
 });
 
+test("an answer handed anything looked up is marked by that, and never restated as said, whatever words the model chose", async (t) => {
+  // The model drops every source word: nothing in the posted body says index, fomo or on-chain.
+  const bare = "thin liquidity and holders bunched up at the top, spicy one. Say stop to opt out.";
+  const w = await world(t, { env: RESEARCH_ON, research: fakeResearch().research, answer: bare });
+  w.setInbox([tag({ text: `@pine_stoat thoughts on ${CA}?` })]);
+  await w.step();
+  assert.match(w.asked()[0]!, /What you looked up just now/, "it was handed research");
+  const [first] = await w.answers();
+  assert.equal(first!.status, "scheduled", first!.reason ?? "");
+  assert.equal(first!.coin, store.ANSWER_LOOKED_UP, "marked by what it was handed");
+  w.setInbox([]);
+  await w.step(NOW + MIN);
+  assert.equal((await w.answers())[0]!.status, "posted");
+  // A later tag: what it already said never carries that read, though no source word would have caught it.
+  w.setInbox([tag({ id: "100000000000000151", conversation_id: "100000000000000151", author_id: "151", text: "@pine_stoat gm, how's your day going?" })]);
+  await w.step(NOW + 2 * MIN);
+  const later = w.asked().at(-1)!;
+  assert.match(later, /how's your day going/);
+  assert.doesNotMatch(/What you already said publicly[^\n]*/.exec(later)?.[0] ?? "", /bunched up/);
+  // An answer handed nothing looked up is not marked.
+  const chat = (await w.answers()).find((a) => a.replyToTweetId === "100000000000000151");
+  assert.equal(chat?.coin, null);
+});
+
 test("the owner's night never holds an answer: a tag is answered and sent while the owner sleeps", async (t) => {
   const tz = "America/Los_Angeles";
   assert.equal(isAsleep(tz, TENANT, NOW), true, "02:00 there: the owner is asleep");

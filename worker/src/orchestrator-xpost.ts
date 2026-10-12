@@ -51,6 +51,7 @@ import { APP_PAUSE_KEY, APP_PAUSE_MS, CREDITS_PAUSE_MS, PAUSE_KEY, readReplyComm
 import { isReplyOptOut, replyCandidate, tagCandidate, withoutReplyOptOut } from "./xpost/replies";
 import { activeTenantsOf, repliesAllowedFor, repliesScopeOf } from "./xpost/scope";
 import {
+  ANSWER_LOOKED_UP,
   answerAuthorSpent,
   answersWaiting,
   cancelPost,
@@ -645,11 +646,14 @@ function recentCoins(f: AgentFacts): { label: string; paper: boolean }[] {
 /**
  * ITS OWN CONVERSATIONS, for a casual post to pick back up: the replies and
  * answers this owner sent, newest first, never anyone else's words — and
- * never an answer that carried research (carriesResearch). Exported for tests.
+ * never an answer that carried something looked up: by its row's mark
+ * (ANSWER_LOOKED_UP), whatever words the model chose, and by its source words
+ * besides (carriesResearch). Exported for tests.
  */
 export function talkedOf(posts: readonly XPost[], tenant: string): string[] {
   return posts
     .filter((p) => (p.kind === "reply" || p.kind === "answer") && p.status === "posted" && p.tenant === tenant)
+    .filter((p) => !(p.kind === "answer" && p.coin === ANSWER_LOOKED_UP))
     .map((p) => withoutReplyOptOut(p.body)).filter((b) => b !== "" && !carriesResearch(b)).slice(0, 3);
 }
 
@@ -1305,11 +1309,13 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
           // WHAT IT ALREADY SAID is what X published: posted rows only. A
           // draft still under Coming up — this pass's own answers included —
           // may yet be skipped, so it stays in recentOwn (not to be echoed)
-          // and out of what an answer may restate as said. Never a post that
-          // carried research (carriesResearch): another coin's read, said
-          // again, would be said of this one.
+          // and out of what an answer may restate as said. Never an answer
+          // that carried something looked up, by its row's mark
+          // (ANSWER_LOOKED_UP), nor a post with a research source's words
+          // (carriesResearch): another coin's read, said again, would be said
+          // of this one.
           const said = isActive
-            ? (await recentBodies(shared, { tenant: account.tenant, sinceMs: at() - OWN_MEMORY_MS, limit: 20, posted: true })).filter((b) => !carriesResearch(b))
+            ? (await recentBodies(shared, { tenant: account.tenant, sinceMs: at() - OWN_MEMORY_MS, limit: 20, posted: true, exceptLookedUp: true })).filter((b) => !carriesResearch(b))
             : [];
           for (let i = 0; i < (isActive ? ANSWERS_PER_POLL : 1) && answerDrafts < MAX_ANSWER_DRAFTS_PER_PASS; i++) {
             const result = isActive
@@ -1474,9 +1480,12 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       }
       const finishedAt = at();
       const body = verdict?.ok ? verdict.text : null;
+      // MARKED BY WHAT IT WAS HANDED, not by what the model wrote: an answer
+      // given anything looked up is never handed on (ANSWER_LOOKED_UP).
+      const lookedUp = !!looked && (looked.research.length > 0 || !!looked.creatorClaim);
       const id = await schedulePost(shared, {
         tenant: account.tenant, xUserId: account.xUserId, kind: "answer", dedupeKey, body: body ?? "",
-        coin: null, decisionId: null, dueAtMs: finishedAt, nowMs: finishedAt,
+        coin: lookedUp ? ANSWER_LOOKED_UP : null, decisionId: null, dueAtMs: finishedAt, nowMs: finishedAt,
         replyToTweetId: comment.id, replyRootTweetId: comment.id, replyAuthorId: comment.authorId,
         status: body ? "scheduled" : "skipped",
         reason: body ? null : claimed ? "gate:sherwood-claim" : named ? "gate:sherwood-drafted" : verdict && !verdict.ok ? `gate:${verdict.reason}` : "no-draft",
