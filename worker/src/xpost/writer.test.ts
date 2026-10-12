@@ -755,6 +755,21 @@ describe("an active agent's answers and conversation memory", () => {
     assert.equal(answerQuestion(null), null);
   });
 
+  it("buys it cannot name are never said to be no buys: \"not bought anything\" only when it bought nothing", () => {
+    const of = (o: { recentBuys: { label: string; paper: boolean }[]; boughtLately?: boolean }) =>
+      answerPrompt({ ...BASE, mode: "live", question: "what have you been buying lately?", said: [], walletPublic: false, ...o }).prompt;
+    const unnamed = of({ recentBuys: [], boughtLately: true });
+    assert.match(unnamed, /You bought coins lately that you can't name here/);
+    assert.match(unnamed, /never say you haven't bought anything/);
+    assert.doesNotMatch(unnamed, /You have not bought anything lately/);
+    assert.match(of({ recentBuys: [], boughtLately: false }), /You have not bought anything lately/);
+    const unknown = of({ recentBuys: [] });
+    assert.doesNotMatch(unknown, /You have not bought anything lately|can't name here/, "a caller that did not say is told nothing either way");
+    const named = of({ recentBuys: [{ label: "Pepe", paper: false }], boughtLately: true });
+    assert.match(named, /Coins you bought lately: «Pepe»/);
+    assert.doesNotMatch(named, /not bought anything|can't name here/);
+  });
+
   it("an answer is very casual, and the writer is never told the sherwood name: only code's lines say it", () => {
     const text = all(answerPrompt({ ...BASE, question: "what model do you run on", recentBuys: [], said: [], walletPublic: false }));
     assert.match(text, /texting a friend/);

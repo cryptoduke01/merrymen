@@ -1433,7 +1433,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       const lines = templated ? modelAnswers(comment.id, facts.style) : [];
       const raw = templated
         ? lines[0]!
-        : await draft(creds, answerPrompt({ ...facts, question: candidate.text, recentBuys: buys, said: said.map(withoutReplyOptOut), walletPublic, ...(looked ?? {}) }), { call: deps.llm, timeoutMs: deps.draftTimeoutMs });
+        : await draft(creds, answerPrompt({ ...facts, question: candidate.text, recentBuys: buys, boughtLately: f.calls.some((c) => c.side === "buy"),
+          said: said.map(withoutReplyOptOut), walletPublic, ...(looked ?? {}) }), { call: deps.llm, timeoutMs: deps.draftTimeoutMs });
       const mode = f.mode === "idle" ? null : f.mode;
       const gate = (text: string) => admitXPost(text, {
         kind: "reply", agentName: f.name, mode, coins: buys.map((c) => c.label),

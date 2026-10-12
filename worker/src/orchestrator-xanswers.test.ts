@@ -235,6 +235,24 @@ test("a tag with a figure in it is answered, the figure read as a number and nev
   }
 });
 
+test("a live agent whose buys all lack a sayable name is never told it bought nothing", async (t) => {
+  // An autonomous Trencher buy: its symbol is the derived id, and its name has a digit.
+  const derived: CallFact = { ...CALL, decisionId: "fill-derived", symbol: "T7631DACC21B", name: "Pepe 2.0" };
+  const w = await world(t, { facts: { ...FACTS, calls: [derived] } });
+  w.setInbox([tag({ text: "@pine_stoat what have you been buying lately?" })]);
+  await w.step();
+  const [prompt] = w.asked();
+  assert.ok(prompt);
+  assert.match(prompt!, /You trade with real money/);
+  assert.match(prompt!, /You bought coins lately that you can't name here/);
+  assert.doesNotMatch(prompt!, /You have not bought anything lately|T7631|Pepe 2/);
+  // And an agent that truly bought nothing is told so.
+  const idle = await world(t, { facts: { ...FACTS, calls: [] } });
+  idle.setInbox([tag({ text: "@pine_stoat what have you been buying lately?" })]);
+  await idle.step();
+  assert.match(idle.asked()[0]!, /You have not bought anything lately/);
+});
+
 test("advice requests and plain chatter get no answer and cost no model call", async (t) => {
   for (const text of ["@pine_stoat should i buy pepe now?", "@pine_stoat nice", "@pine_stoat check my presale, link in bio?"]) {
     const w = await world(t);

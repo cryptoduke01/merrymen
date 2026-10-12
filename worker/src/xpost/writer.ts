@@ -143,6 +143,17 @@ export interface AnswerFacts extends WriterFacts {
   question: string;
   /** Coins it bought lately, as a public trade feed shows them: no size, price or reason. */
   recentBuys: { label: string; paper: boolean }[];
+  /**
+   * WHETHER IT BOUGHT ANYTHING AT ALL LATELY, named or not. `recentBuys` holds
+   * only coins with a name a post may say: an autonomous Trencher buy carries
+   * its derived id ("T7631DACC21B"), and a name with a digit, an emoji or a $
+   * is left out too. An active agent whose buys all lack such a name was told
+   * "You have not bought anything lately" beside "You trade with real money":
+   * a false public statement about a book that is trading. So the answer is
+   * told it bought nothing only when this is false; true with no names, that
+   * it bought coins it cannot name; absent, nothing either way.
+   */
+  boughtLately?: boolean;
   /** Its own recent public posts and answers, newest first: what it has already said, which it may restate. */
   said: string[];
   /** The owner made the agent's wallet public in its introduction. */
@@ -744,7 +755,9 @@ export function answerPrompt(f: AnswerFacts): Prompt {
   const facts = [
     f.strategy ? `How you trade: ${q(f.strategy)}.` : null,
     f.mode === "live" ? "You trade with real money." : f.mode === "paper" ? "You trade on paper, with practice money: say so if you talk about your trades." : "You are not trading right now.",
-    buys.length ? `Coins you bought lately: ${buys.map((c) => `${q(c.label)}${c.paper ? " (on paper)" : ""}`).join(", ")}.` : "You have not bought anything lately.",
+    buys.length ? `Coins you bought lately: ${buys.map((c) => `${q(c.label)}${c.paper ? " (on paper)" : ""}`).join(", ")}.`
+      : f.boughtLately === true ? "You bought coins lately that you can't name here: never name or guess one, and never say you haven't bought anything."
+      : f.boughtLately === false ? "You have not bought anything lately." : null,
     f.walletPublic ? "Your wallet is public: it is in your introduction post, so people can follow your trades there. Never write the address." : null,
     said.length ? `What you already said publicly (you may restate it, never copy it): ${said.map(q).join(" / ")}.` : null,
     research.length ? `What you looked up just now for this question (say it your own way, keep who said it, add nothing): ${research.map(q).join(" / ")}.` : null,
