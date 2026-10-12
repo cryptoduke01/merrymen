@@ -103,7 +103,8 @@ import { PUBLISHABLE_SOURCES } from "./thesis-policy";
 import { readSaleResults } from "./orchestrator-xpost-results";
 import { appendSaleOutcome, hasSaleOutcome } from "./xpost/sale-outcome";
 import { admitFiguresLine, figuresTickers, withFigures, type FiguresSpec } from "./xpost/figures";
-import { hotAnswers, hotNoneAnswers, hotUnreadAnswers, majorAnswers, majorUnreadAnswers, type HotRead, type MajorRead } from "./xpost/market";
+import { hotAnswers, hotNoneAnswers, hotUnreadAnswers, majorAnswers, majorUnreadAnswers, marketAnswers, type HotRead, type MajorRead, type MarketRead } from "./xpost/market";
+import { chatAnswers, declineAnswers, vibeAnswers } from "./xpost/casual";
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -178,6 +179,17 @@ const GAP_HISTORY_MS = 2 * DAY;
 const TEMPLATE_TRIES = 8;
 /** Send outcomes after which the post may exist on X: they keep their unit of the fleet's ceiling. */
 const MAY_BE_ON_X: ReadonlySet<SendOutcome> = new Set<SendOutcome>(["posted", "uncertain", "fault"]);
+/**
+ * WHAT A CHAT DRAFT MAY BE REFUSED FOR AND STILL GET CODE'S FRIENDLY LINE
+ * (2026-10-12): how it was put, never what it tried to say. A repeat, its
+ * length, a stock deflection, a model's note, an emoji or "!" too many,
+ * shouting or markup, a missing notice. Anything else — a figure or an
+ * amount, sherwood, a buy, a source, a word that may be a coin's name,
+ * advice, a forecast, the other money, a body it does not have, a hidden or
+ * stray character — leaves the tag unanswered, as before.
+ */
+const CHAT_FALLBACK_REASONS: ReadonlySet<string> = new Set(["repeat", "fleet-repeat", "too-long", "too-short", "stock-phrase", "meta", "emoji", "exclaim",
+  "caps", "markup", "opt-out-unsaid"]);
 /** Log counters that describe a standing condition rather than something that happened. */
 const CONDITIONS: ReadonlySet<string> = new Set(["no-model-budget", "zone-unreadable", "owner-failed", "active-reply-polls-spent"]);
 
@@ -1566,7 +1578,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // question is answered from a code-built line (writer.ts modelAnswers)
       // and spends no model call. Only research gathers anything for what it
       // reads.
-      const classified = classifyTag(candidate.text, { address: candidate.address ?? null });
+      // ADVICE ASKED FOR (tagCandidate's flag) is no longer silence: code reads it, as its own mood or as a decline.
+      const classified = classifyTag(candidate.text, { address: candidate.address ?? null, advice: candidate.advice === true });
       // A GREETING AND NOTHING ELSE ("hiii", "gm", "yo ser 👋": replies.ts
       // greetingOnly) is answered with one of code's casual lines (writer.ts
       // greetingAnswers): no model call, no research, no model allowance.
@@ -1610,8 +1623,19 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // (xpost/market.ts), from what research read: the coins, nothing past
       // the floors, or nothing read at all (research off included).
       const hotCoded = asked.kind === "hot";
+      // HOW'S THE MARKET IS NEVER DRAFTED EITHER (the owner's decision,
+      // 2026-10-12): the big coins' day and the chain's movers, in code's
+      // casual words (xpost/market.ts marketAnswers) and code's figures, read
+      // or not; the same reasons as what's hot.
+      const marketCoded = asked.kind === "market";
+      // ITS OWN MOOD, AND ADVICE DECLINED (2026-10-12): "are you bullish?",
+      // "wen moon" get a non-committal line about itself, and "should i buy
+      // pepe", "is it going up", "what should i buy" a playful decline, both
+      // in code's words (xpost/casual.ts): never a draft, never a lookup,
+      // never the coin.
+      const casualKind = asked.kind === "vibe" || asked.kind === "advice" ? asked.kind : null;
       // No model call at all for these: no allowance, no question read.
-      const undrafted = templated || hotCoded;
+      const undrafted = templated || hotCoded || marketCoded || casualKind !== null;
       // DECIDED BEFORE ANYTHING IS SPENT: a question the writer could not read
       // would buy research and a model call for a prompt that says PASS. Its
       // digits are read as "(a number)"; a copycat's ("$PEPE2") is safe to
@@ -1651,8 +1675,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // exact path, as it never gets the model line.
       const otherHandles = candidate.otherHandles === true;
       const general = !coinNamed && !otherHandles && generalTradesQuestion(candidate.text);
-      // Nothing is looked up for a greeting.
-      const intent = research && !greeting ? asked : null;
+      // Nothing is looked up for a greeting, its own mood or advice declined.
+      const intent = research && !greeting && casualKind === null ? asked : null;
       const answerKey = `llm-answers:${account.xUserId}:${utcDay(nowMs)}`;
       if (!undrafted) {
         if (!(await takeAllowance(shared, answerKey, ANSWER_DRAFTS_PER_DAY, nowMs))) {
@@ -1686,6 +1710,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       let hotRead: HotRead | null = null;
       // A MAJOR, AS CODE READ IT from CoinGecko, beside its figures: its words are code's too.
       let majorRead: MajorRead | null = null;
+      // HOW'S THE MARKET, AS CODE READ IT: the big coins' day and the chain's movers, each null unread.
+      let marketRead: MarketRead = { majors: null, chain: null };
       // ANSWERED BY NOTHING, AS RESEARCH READ IT (ResearchBundle.unanswered): no draft, a skipped row, the allowances back.
       let researchUnanswered = false;
       if (research && intent) {
@@ -1698,29 +1724,28 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         if (bundle.figures?.length && bundle.facts.length) figures = bundle.figures;
         if (hotCoded && bundle.hot) hotRead = bundle.hot;
         if (asked.kind === "major" && figures && bundle.major) majorRead = bundle.major;
+        if (marketCoded && bundle.market) marketRead = bundle.market;
         researchUnanswered = bundle.unanswered === true;
         bump(`answer-intent-${intent.kind}`);
         if (bundle.lookups) bump("answer-lookups", bundle.lookups);
         for (const note of new Set(bundle.notes)) bump(`answer-research-${note}`);
       }
-      // ANSWERED BY NOTHING, AS RESEARCH READ IT (red-team 2026-10-12): a
-      // major's shape whose coin's place held more than a coin and matched
-      // none ("thoughts on aping eth") was drafted as chat, and "plenty of room
-      // left to run" went out. No draft at all; the row is kept as skipped so
-      // the tag is never looked up again, and the allowances go back.
-      if (researchUnanswered) {
-        if (!undrafted) {
-          await returnAllowance(shared, answerKey, at());
-          await returnAllowance(shared, `llm:${utcDay(nowMs)}`, at());
-        }
-        bump("answer-unanswered");
-        const skippedAt = at();
-        const id = await schedulePost(shared, {
-          tenant: account.tenant, xUserId: account.xUserId, kind: "answer", dedupeKey, body: "", coin: null, decisionId: null, dueAtMs: skippedAt, nowMs: skippedAt,
-          replyToTweetId: comment.id, replyRootTweetId: comment.id, replyAuthorId: comment.authorId, status: "skipped", reason: "research:unanswered",
-        });
-        return id === null ? null : { body: null };
+      // NEVER DRAFTED, AS RESEARCH READ IT (red-team 2026-10-12): a major's
+      // shape whose coin's place held more than a coin and matched none
+      // ("thoughts on eth guys") was drafted as chat, and "plenty of room left
+      // to run" went out. It is declined in code's words now (2026-10-12),
+      // never drafted, and the allowances taken for a draft go back.
+      if (researchUnanswered && !undrafted) {
+        await returnAllowance(shared, answerKey, at());
+        await returnAllowance(shared, `llm:${utcDay(nowMs)}`, at());
       }
+      if (researchUnanswered) {
+        bump("answer-research-declined");
+        figures = null;
+      }
+      const casualLines = casualKind === "vibe" ? vibeAnswers(comment.id, facts.style, lineOpts)
+        : casualKind === "advice" || researchUnanswered ? declineAnswers(comment.id, facts.style, lineOpts) : [];
+      if (casualLines.length) bump(`answer-casual-${casualKind ?? "advice"}`);
       // NO MODEL WORDS BESIDE A LINE OF COINS (red-team 2026-10-12): the gate
       // read a "what's hot?" draft before code put "$CHUMP 24h +41.2%" after
       // it, so "if i had to pick one it'd be the first", "these are my plays"
@@ -1741,22 +1766,26 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       const majorLines = stillMajor && majorRead ? majorAnswers(majorRead, comment.id, facts.style, lineOpts) : [];
       // Figures only beside the words that read them: never beside "no read".
       if (stillMajor && !majorLines.length) figures = null;
-      const market = hotCoded
+      const market = casualLines.length ? [] : hotCoded
         ? hotRead && hotRead.coins >= 1 ? hotAnswers(hotRead, comment.id, facts.style, lineOpts)
           : hotRead ? hotNoneAnswers(comment.id, facts.style, lineOpts) : hotUnreadAnswers(comment.id, facts.style, lineOpts)
+        : marketCoded ? marketAnswers(marketRead, comment.id, facts.style, lineOpts)
         : stillMajor ? majorLines.length ? majorLines : majorUnreadAnswers(comment.id, facts.style, lineOpts) : [];
+      // Figures only beside the words that read them: a market answer with nothing read says so, with no line.
+      if (marketCoded && !marketRead.majors && !marketRead.chain) figures = null;
       if (market.length && !undrafted) {
         await returnAllowance(shared, answerKey, at());
         await returnAllowance(shared, `llm:${utcDay(nowMs)}`, at());
       }
       if (market.length) bump("answer-code-words");
-      const coded = templated || market.length > 0;
-      // CODE'S LINES, the model question's, a greeting's or a market answer's,
-      // this mention's own first: one it already said is a repeat to the gate,
-      // so the next is tried rather than none, and when all have been said
-      // lately, none. A paper agent's lines say paper: it is gated as a paper reply.
+      const coded = templated || market.length > 0 || casualLines.length > 0;
+      // CODE'S LINES, the model question's, a greeting's, a market answer's,
+      // its mood or a decline, this mention's own first: one it already said is
+      // a repeat to the gate, so the next is tried rather than none, and when
+      // all have been said lately, none. A paper agent's lines say paper: it is
+      // gated as a paper reply.
       const lines = greeting ? greetingAnswers(comment.id, facts.style, lineOpts)
-        : templated ? modelAnswers(comment.id, facts.style, lineOpts) : market;
+        : templated ? modelAnswers(comment.id, facts.style, lineOpts) : casualLines.length ? casualLines : market;
       const raw = coded
         ? lines[0]!
         : await draft(creds, answerPrompt({ ...facts, question: candidate.text, recentBuys: buys, boughtLately: boughtKind(f),
@@ -1796,11 +1825,12 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       const askerNames = asked.kind === "hot" ? [] : nameLikeWords(candidate.text).filter((w) => !lookedWords.has(w) && !vouchedNames.has(w));
       // WHAT IT WAS HANDED: research or a creator's claim (an answer handed none cites no source).
       const handed = !!looked && (looked.research.length > 0 || !!looked.creatorClaim);
-      const gate = (text: string) => admitXPost(text, {
+      // A code line is gated as one (asCode): the draft-only clauses below never read it.
+      const gate = (text: string, asCode = coded) => admitXPost(text, {
         kind: "reply", answer: true, noticeShown: noticeTold, agentName: f.name, mode, coins: vouched.map((c) => c.label),
         paperCoins: [...vouched.filter((c) => c.paper).map((c) => c.label), ...(f.mode === "idle" ? money.paper : [])], recentOwn, recentFleet, emojiOk: facts.style.emoji > 0,
         // A buy it says is one it was told of, or none at all (XGateCtx.buys).
-        ...(coded ? {} : { buys: told ? "vouched" as const : "none" as const, unsaid: [...(told && !namesNone ? [] : bought), ...money.otherOnly, ...older, ...askerNames],
+        ...(asCode ? {} : { buys: told ? "vouched" as const : "none" as const, unsaid: [...(told && !namesNone ? [] : bought), ...money.otherOnly, ...older, ...askerNames],
           // A coin named, or its trades or a coin asked about off the plain list: not even that it likes it (XGateCtx.named).
           // AND EVERY MARKET ANSWER (red-team 2026-10-12): "what's hot?" names no
           // coin, but an answer to it is about the coins the index shows, and
@@ -1848,8 +1878,33 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // named coins with none of them.
       const unlookedCoin = !coded && verdict?.ok === true && !handed && !told
         && (coinTalkIn(withoutReplyOptOut(verdict.text), f.name) || unknownWordIn(withoutReplyOptOut(verdict.text), f.name));
+      // CHAT IS NEVER SILENCE BY DEFAULT (the owner's ask, 2026-10-12): a chat
+      // draft refused only for how it was put (CHAT_FALLBACK_REASONS: a
+      // repeat, its length, a stock deflection, a model's note, its
+      // punctuation, casing or markup, a missing notice) falls back to one of
+      // code's friendly lines about itself (xpost/casual.ts chatAnswers),
+      // gated as a code line, this mention's own first. NEVER AFTER A DRAFT
+      // REFUSED FOR WHAT IT SAID, NOR A PASS: one that named or claimed
+      // sherwood, claimed or named a buy, cited a source nothing was looked
+      // up in, said a word that may be a coin's name, gave advice, a forecast
+      // or a figure, or said the other money stays unanswered, as before; and
+      // so does a PASS or no draft at all (the model judged it had nothing
+      // honest to say, or could not be asked), so a sensitive tag is never
+      // answered with a cheerful line. Only chat: a coin, its own trades, what
+      // it can do or how to get an agent stay unsaid.
+      const drafted = verdict?.ok === true && !postsName && !unlookedCoin ? verdict.text : null;
+      const benignRefusal = raw !== null && !claimed && !named && !unlooked && verdict !== null && !verdict.ok && CHAT_FALLBACK_REASONS.has(verdict.reason);
+      const chatFallback = !coded && drafted === null && benignRefusal && (asked.kind === "chat" || looked?.intent === "chat");
+      let fallback: string | null = null;
+      if (chatFallback) {
+        for (const line of chatAnswers(comment.id, facts.style, lineOpts)) {
+          const v = gate(line, true);
+          if (v.ok) { fallback = v.text; break; }
+        }
+        bump(fallback ? "answer-chat-fallback" : "answer-chat-fallback-spent");
+      }
       const finishedAt = at();
-      const admitted = verdict?.ok && !postsName && !unlookedCoin ? verdict.text : null;
+      const admitted = drafted ?? fallback;
       // THE FIGURES LINE, CODE'S, AFTER THE GATE (xpost/figures.ts): only an
       // active owner's answer, only from what research built for this tag,
       // only a line in the renderer's own grammar (admitFiguresLine, again
@@ -1878,7 +1933,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // buy posts' coins, read again here as research reads them
       // (ownCoinTicker). Never for a major: the asker named that coin, and a
       // line that came or went by its name would say which names it bought.
-      const ownCoins = hotCoded ? [...bought, ...olderBought] : [];
+      const ownCoins = hotCoded || marketCoded ? [...bought, ...olderBought] : [];
       const figured = admitted && lineFigures?.length && !templated && active.has(account.tenant.toLowerCase()) ? withFigures(admitted, lineFigures) : null;
       const lined = figured?.line != null && admitFiguresLine(figured.line) && !sherwoodMentioned(figured.line)
         && figuresTickers(figured.line).every((t) => tickerRefusal(t) === null && !merrymenMentioned(t) && !sherwoodMentioned(t) && !namedIn(t, ownNames) && !modelNamed(t)

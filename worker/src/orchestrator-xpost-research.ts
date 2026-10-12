@@ -66,9 +66,9 @@ import { normalisedTag, plainAsk, withoutReplyOptOut } from "./xpost/replies";
 import { takeAllowance, type XPost } from "./xpost/store";
 import { coinNamedIn, type AnswerIntentKind } from "./xpost/writer";
 import { asksAboutACoin, everydayWord, nameLikeWords } from "./xpost/words";
-import { cleanTicker, type FiguresSpec } from "./xpost/figures";
-import { moveOf, type HotRead, type MajorRead } from "./xpost/market";
-import { coinQuery, LISTINGS_MAX, MAJORS_MAX_RANK, pickMajor, readChainListings, readCoinMarket, readCoinTrending, readTopCoins, searchCoinList, type ChainListing, type ChainListingsRead, type CoinHit, type CoinMarket, type CoinMarketRead, type CoinSearchRead, type CoinTopRead, type CoinTrendingRead } from "./venues/coingecko-coins";
+import { cleanTicker, type FiguresSection, type FiguresSpec } from "./xpost/figures";
+import { majorsDirOf, moveOf, type HotRead, type MajorRead, type MarketRead } from "./xpost/market";
+import { coinQuery, LISTINGS_MAX, MAJORS_MAX_RANK, pickMajor, readChainListings, readCoinMarket, readCoinMarkets, readCoinTrending, readTopCoins, searchCoinList, type ChainListing, type ChainListingsRead, type CoinHit, type CoinMarket, type CoinMarketRead, type CoinMarketsRead, type CoinSearchRead, type CoinTopRead, type CoinTrendingRead } from "./venues/coingecko-coins";
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -108,6 +108,28 @@ export type TagIntent =
    * trending list. Names no coin.
    */
   | { kind: "hot" }
+  /**
+   * "How's the market?" on the allowlist's plain shapes (marketAsk, the
+   * owner's decision of 2026-10-12): an overview of the big coins' day on
+   * CoinGecko (bitcoin, ether, solana) and what is moving on Robinhood Chain.
+   * Never drafted: its words and its figures are code's (xpost/market.ts
+   * marketAnswers, xpost/figures.ts).
+   */
+  | { kind: "market" }
+  /**
+   * "Are you bullish?", "wen moon", "are we so back" on the allowlist's plain
+   * shapes (vibeAsk): its own mood, non-committal, in code's casual words
+   * (xpost/casual.ts vibeAnswers). Never a draft, never a prediction.
+   */
+  | { kind: "vibe" }
+  /**
+   * Advice or a forecast asked for, however put ("should i buy pepe", "is X
+   * going up", "what should i buy", a price target, a major's shape with an
+   * entry in the coin's place, what's hot with a word more): a playful decline
+   * in code's casual words (xpost/casual.ts declineAnswers), naming and
+   * judging nothing. Never drafted, nothing looked up.
+   */
+  | { kind: "advice" }
   /** The allowlist's plain "what model are you" (modelQuestion): code's own line, never a draft. */
   | { kind: "model" }
   | { kind: "chat" }
@@ -247,6 +269,14 @@ const GENERAL_SHAPES = [
   `(?:bought|buy) anything${LATELY}`,
   // what's your latest buy
   `(?:what's|whats|what is) (?:your|ur) (?:latest|last|newest|most recent) (?:buy|trade|pick)`,
+  // HOW IT TRADES AND WHAT IT HAS BEEN UP TO (2026-10-12): what have you been
+  // up to lately, what are you up to, what's your strategy, tell me about your
+  // trading. The same plain questions about itself, with the same rules.
+  `what (?:have |did )?${YOU} (?:been )?up to${LATELY}`,
+  `what ${ARE} ${YOU} up to${LATELY}`,
+  `(?:what's|whats|what is) (?:your|ur) (?:trading )?(?:strategy|approach|style|process|playbook)${LATELY}`,
+  `(?:tell me|talk me through) (?:about )?(?:your|ur) (?:trading|strategy|approach|style|process)`,
+  `how (?:do|does) ${YOU} (?:decide|choose) what to (?:trade|buy)`,
 ];
 const GENERAL_ALLOWED = new RegExp(`^${GREETING}(?:${GENERAL_SHAPES.join("|")})$`, "u");
 export function generalTradesQuestion(text: unknown): boolean {
@@ -415,6 +445,78 @@ export function hotShaped(text: unknown): boolean {
   return HOT_INSIDE.test(normalisedTag(text)) || HOT_INSIDE.test(plainAsk(text) ?? "");
 }
 
+/**
+ * "HOW'S THE MARKET?" (the owner's decision, 2026-10-12: answer like AiXBT).
+ * Only a whole tag in plain ASCII words (replies.ts plainAsk) that is one of
+ * these, after at most two greeting words, with at most a "today" or the like:
+ *
+ *   how's the market / crypto (doing / looking / today)
+ *   market update / check / recap / rundown, any market update, give me a market update
+ *   how are things looking (out there)
+ *   what's the market doing, what's the market like, what's going on in the market / crypto
+ *   is it a green day / red day, green or red today, are we green / up today, is the market up
+ *
+ * Answered with the big coins' day on CoinGecko and what is moving on
+ * Robinhood Chain, in code's words and code's figures: no draft. A word more
+ * ("how's the market, should i buy?", "how's the market for pepe") and it is
+ * not on the list: it goes the normal way, or is declined.
+ */
+const MARKET_NOUN = String.raw`(?:the market|the markets|markets|market|crypto|the crypto market|crypto markets|the crypto markets)`;
+const MARKET_SHAPES = [
+  `how(?:'s| is|s| are) ${MARKET_NOUN}(?: (?:doing|looking|holding up|treating (?:you|u|ya)))?${WHEN}`,
+  `(?:quick |any |a )?(?:market|crypto) (?:update|updates|check|recap|rundown|vibe check)${WHEN}`,
+  `(?:give me|gimme|got) (?:a |any )?(?:quick )?(?:market|crypto) (?:update|check|recap|rundown)${WHEN}`,
+  `how (?:are|r) things(?: looking)?(?: out there)?${WHEN}`,
+  `how(?:'s| is|s) (?:it|everything) looking out there${WHEN}`,
+  `${WHATS} ${MARKET_NOUN} (?:doing|like)${WHEN}`,
+  `${WHATS} (?:going on|happening) (?:in|with) ${MARKET_NOUN}${WHEN}`,
+  `(?:is it|is today) a (?:green|red) day${WHEN}`,
+  `(?:green|red) (?:or|vs) (?:green|red)${WHEN}`,
+  `(?:are we|r we) (?:green|red|up|down)${WHEN}`,
+  `(?:is|are) ${MARKET_NOUN} (?:up|down|green|red)${WHEN}`,
+];
+const MARKET_ALLOWED = new RegExp(`^${GREETING}(?:${MARKET_SHAPES.join("|")})$`, "u");
+/** Is the whole tag one of the plain "how's the market?" questions? Exported for tests. */
+export function marketAsk(text: unknown): boolean {
+  const plain = plainAsk(text);
+  return plain !== null && !sherwoodMentioned(text) && MARKET_ALLOWED.test(plain);
+}
+
+/**
+ * "ARE YOU BULLISH?" AND ITS COUSINS (2026-10-12): a question about its own
+ * mood or the timeline's in-jokes, never about a coin. Only a whole tag in
+ * plain ASCII words that is one of these, after at most two greeting words:
+ *
+ *   are you bullish / bearish (or the other) (on the market / crypto / things) (today)
+ *   you bullish?, bullish or bearish?, bullish?
+ *   wen moon / lambo / pump / bull run / alt season
+ *   are we so back, we're so back, is it so over, it's so over
+ *   wagmi?, ngmi?, are we gonna make it
+ *   vibe check, what's the vibe, how's the mood
+ *
+ * Answered with one of code's casual, non-committal lines about itself
+ * (xpost/casual.ts vibeAnswers): never a prediction, never a coin. A coin, a
+ * word more ("are you bullish on pepe", "wen moon for $WIF") and it is not on
+ * the list: what is left of it is advice, declined.
+ */
+const SIDE = String.raw`(?:bullish|bearish)`;
+const ON_WHAT = String.raw`(?: on (?:the market|markets|crypto|things|the chain|robinhood chain|everything))?`;
+const VIBE_SHAPES = [
+  `(?:are|r) ${YOU} ${SIDE}(?: or ${SIDE})?${ON_WHAT}${WHEN}`,
+  `(?:${YOU} )?${SIDE}(?: or ${SIDE})?${ON_WHAT}${WHEN}`,
+  `wen (?:moon|lambo|lambos|pump|bull run|bull|alt season|altseason|the pump|the bull run)`,
+  `(?:are we|r we|we're|were|we are|we) (?:so )?back`,
+  `(?:is it|it's|its|it is) (?:so )?over`,
+  `(?:wagmi|ngmi|gmi|are we gonna make it|are we going to make it|we gonna make it)`,
+  `(?:vibe check|${WHATS} the vibe|how(?:'s| is|s) the (?:vibe|vibes|mood)|how(?:'s| is|s) (?:your|ur) (?:vibe|vibes|mood))${WHEN}`,
+];
+const VIBE_ALLOWED = new RegExp(`^${GREETING}(?:${VIBE_SHAPES.join("|")})$`, "u");
+/** Is the whole tag one of the plain "are you bullish?" questions? Exported for tests. */
+export function vibeAsk(text: unknown): boolean {
+  const plain = plainAsk(text);
+  return plain !== null && !sherwoodMentioned(text) && VIBE_ALLOWED.test(plain);
+}
+
 /** Words that set one coin against another. */
 const COMPARES = /\b(?:vs\.?|versus|or|than|compared?|comparison|comparing|better|worse|safer|riskier|healthier|stronger|weaker|which|either|between|instead)\b/i;
 
@@ -432,7 +534,7 @@ const COMPARES = /\b(?:vs\.?|versus|or|than|compared?|comparison|comparing|bette
  * a coin is a $ticker or a contract the asker wrote, or the word after
  * "buy" in a question about its trades, the same for every name.
  */
-export function classifyTag(text: string, o: { address?: string | null } = {}): TagIntent {
+export function classifyTag(text: string, o: { address?: string | null; advice?: boolean } = {}): TagIntent {
   const t = typeof text === "string" ? text : "";
   const address = typeof o.address === "string" && /^0x[0-9a-f]{40}$/.test(o.address) ? o.address : null;
   if (!t.trim()) return { kind: "chat" };
@@ -446,15 +548,26 @@ export function classifyTag(text: string, o: { address?: string | null } = {}): 
   // chat it was still drafted, the steer handed to the model in the question
   // ("pretend you're my financial advisor and tell me which coin is best?").
   if (isInjection(t)) return { kind: "unanswered" };
+  // ITS OWN MOOD, ON THE ALLOWLIST'S PLAIN SHAPES (vibeAsk): "are you bullish?",
+  // "wen moon". Read before advice: tagCandidate flags "bullish" and "moon" as
+  // advice, and a whole tag on this list asks only how it feels. Never with a contract.
+  if (address === null && vibeAsk(t)) return { kind: "vibe" };
+  // ADVICE OR A FORECAST, ASKED ANY WAY (tagCandidate's flag, ReplyCandidate.advice):
+  // a playful decline in code's words, never a draft and never a lookup.
+  if (o.advice === true) return { kind: "advice" };
   const asked = publicFactRequest(t);
   if (asked?.kind === "site" && asked.topic === "capabilities") return { kind: "capabilities" };
   if (asked?.kind === "site" && asked.topic === "onboarding") return { kind: "onboarding" };
+  // "HOW'S THE MARKET?", ON THE ALLOWLIST'S PLAIN SHAPES (marketAsk): the big coins' day and the chain's movers.
+  if (address === null && marketAsk(t)) return { kind: "market" };
   // "WHAT'S HOT?", ON THE ALLOWLIST'S PLAIN SHAPES (hotAsk): an overview, no coin named.
   if (address === null && hotAsk(t)) return { kind: "hot" };
-  // And one with any word more, or beside a contract, is answered by nothing (hotShaped).
-  if (hotShaped(t) || (address !== null && hotAsk(t))) return { kind: "unanswered" };
-  // A major's shape with an entry, a side, a level or a buy word in the coin's place: advice asked for (majorAdviceAsk).
-  if (majorAdviceAsk(t)) return { kind: "unanswered" };
+  // And one with any word more is what to buy in other words: declined, never drafted (hotShaped).
+  if (hotShaped(t)) return { kind: "advice" };
+  // Beside a contract it is answered by nothing, as before.
+  if (address !== null && hotAsk(t)) return { kind: "unanswered" };
+  // A major's shape with an entry, a side, a level or a buy word in the coin's place: advice asked for, declined (majorAdviceAsk).
+  if (majorAdviceAsk(t)) return { kind: "advice" };
   // A COIN BY NAME OR TICKER, ON THE ALLOWLIST'S PLAIN SHAPES (majorAsk): read
   // on CoinGecko's list first. What the tag would otherwise be is kept: a
   // $ticker that turns out to be no major goes on as a coin of the chain,
@@ -606,6 +719,12 @@ export interface MajorsReader {
   /** CoinGecko's own trending list, for "what's hot". Absent: not asked. */
   trending?(timeoutMs: number): Promise<CoinTrendingRead>;
   /**
+   * Several coins' markets in one read (venues/coingecko-coins.ts
+   * readCoinMarkets), for "how's the market?": the big coins' day. Absent:
+   * not asked, and the overview says it has no read on them.
+   */
+  markets?(ids: readonly string[], timeoutMs: number): Promise<CoinMarketsRead>;
+  /**
    * CoinGecko's biggest coins by market cap (venues/coingecko-coins.ts
    * readTopCoins), read at most once a day: the names no chain coin in what's
    * hot may go by (TopCopy). Absent or unread: no chain coin is named.
@@ -741,6 +860,13 @@ export interface ResearchBundle {
    * answer is never drafted (red-team 2026-10-12).
    */
   major?: MajorRead;
+  /**
+   * "HOW'S THE MARKET?" AS CODE READ IT (xpost/market.ts MarketRead): the big
+   * coins' day together, and the chain's movers past the floors; each null
+   * when its source was not read. Set for every market answer, read or not:
+   * its words are always code's (marketAnswers), never a draft.
+   */
+  market?: MarketRead;
   /**
    * What the answer turned out to be about, when that is not what the tag was
    * read as: a ticker on the coin list that is no major (a copycat, unranked,
@@ -964,6 +1090,15 @@ export function majorReadOf(m: Pick<CoinMarket, "rank" | "marketCapUsd" | "volum
     volume: turnover === null ? null : turnover >= 0.1 ? "heavy" : turnover <= 0.02 ? "light" : "ordinary",
   };
 }
+
+/**
+ * THE BIG COINS "HOW'S THE MARKET?" READS ON COINGECKO (2026-10-12), by
+ * lookup key and the symbol CoinGecko lists them under, in the order the
+ * figures line shows them. A row under any other symbol is no read of it.
+ */
+export const MARKET_MAJORS: readonly { id: string; symbol: string }[] = Object.freeze([
+  { id: "bitcoin", symbol: "btc" }, { id: "ethereum", symbol: "eth" }, { id: "solana", symbol: "sol" },
+]);
 
 /** Coins one "what's hot" answer shows from the chain's index. */
 export const HOT_COINS = 3;
@@ -1427,6 +1562,7 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
     search: (query, timeoutMs) => searchCoinList(query, { timeoutMs, ...(lane ? { fleet: lane } : {}) }),
     market: (id, timeoutMs) => readCoinMarket(id, { timeoutMs, ...(lane ? { fleet: lane } : {}) }),
     trending: (timeoutMs) => readCoinTrending({ timeoutMs, ...(lane ? { fleet: lane } : {}) }),
+    markets: (ids, timeoutMs) => readCoinMarkets(ids, { timeoutMs, ...(lane ? { fleet: lane } : {}) }),
     top: (timeoutMs) => readTopCoins({ timeoutMs, ...(lane ? { fleet: lane } : {}) }),
   };
   /** CoinGecko's biggest coins as the copycat screen reads them, kept a day from their read (TopCopy). */
@@ -1699,6 +1835,52 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
         return { facts: hotPhrases({ changes: shown.map((s) => s.pool.change24hPct), crowd: crowd.length, trending: trending.length }), figures,
           hot: { coins: shown.length, lead: moveOf(shown[0]!.pool.change24hPct) }, lookups, notes };
       };
+      /**
+       * HOW'S THE MARKET (marketAsk, the owner's decision of 2026-10-12): the
+       * big coins' day on CoinGecko (MARKET_MAJORS, one markets read, its
+       * slot taken first so a busy limiter costs the chain's movers, never
+       * bitcoin's day) beside what's hot on Robinhood Chain (hotBundle, with
+       * every one of its floors and screens). Figures: the big coins' day
+       * changes, and the chain's movers by their day's change only, with
+       * Fomo's most bought when it read; never CoinGecko's global trending
+       * list. Words: always code's, from the typed read (MarketRead).
+       */
+      const marketBundle = async (): Promise<ResearchBundle> => {
+        const bigRead = (async (): Promise<CoinMarket[] | null> => {
+          if (!majors.markets || majors.configured?.() === false) {
+            notes.push("majors-off");
+            return null;
+          }
+          if (!indexSlot()) return null;
+          const r = await look((ms) => majors.markets!(MARKET_MAJORS.map((m) => m.id), ms), null);
+          if (!r || r.failed) {
+            notes.push(`coins-${failureCode(r?.failure)}`);
+            return null;
+          }
+          // Only the coin asked, under its own symbol, ranked as a major: a row of any other is no read of it.
+          const rows = MARKET_MAJORS.map((want) => r.markets.find((m) => m.id === want.id && m.symbol.toLowerCase() === want.symbol
+            && m.rank !== null && m.rank <= MAJORS_MAX_RANK && showTicker(m.symbol) !== null) ?? null).filter((m): m is CoinMarket => m !== null);
+          return rows.length ? rows : null;
+        })();
+        const chain = hotBundle();
+        const [big, hot] = await Promise.all([bigRead, chain]);
+        const majorsRead = big ? majorsDirOf(big.map((m) => moveOf(m.change24hPct))) : null;
+        const chainRead: HotRead | null = hot.hot ?? null;
+        const read: MarketRead = { majors: majorsRead, chain: chainRead };
+        const facts = [
+          ...(majorsRead ? [`coingecko shows the big coins ${majorsRead.dir === "up" ? "mostly up" : majorsRead.dir === "down" ? "mostly down" : majorsRead.dir === "mixed" ? "split" : "flat"} today`] : []),
+          ...hot.facts,
+        ].filter(sayable);
+        const pools = hot.figures?.find((x): x is Extract<FiguresSection, { kind: "pools" }> => x.kind === "pools");
+        const crowd = hot.figures?.find((x): x is Extract<FiguresSection, { kind: "crowd" }> => x.kind === "crowd");
+        const figures: FiguresSpec = [
+          ...(big && majorsRead ? [{ kind: "majors" as const, coins: big.map((m) => ({ symbol: m.symbol, change24hPct: m.change24hPct })) }] : []),
+          ...(pools ? [{ kind: "pools" as const, coins: pools.coins.map((c) => ({ symbol: c.symbol, change24hPct: c.change24hPct })) }] : []),
+          ...(crowd ? [crowd] : []),
+        ];
+        notes.push("market");
+        return { facts, ...(figures.length ? { figures } : {}), market: read, ...(hot.hot ? { hot: hot.hot } : {}), lookups, notes };
+      };
       const i = input.intent;
       const f = input.facts;
       // The exact path only for a plain question about the tagged coin alone (exactAsk).
@@ -1711,6 +1893,8 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
             return { facts: ONBOARDING_PHRASES.filter(sayable), lookups, notes };
           case "model":
           case "chat":
+          case "vibe":
+          case "advice":
           case "unanswered":
             return { facts: [], lookups, notes };
           case "own-trades": {
@@ -1756,6 +1940,8 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
             break;
           case "hot":
             return await hotBundle();
+          case "market":
+            return await marketBundle();
           case "major": {
             const found = await majorBundle(i.query);
             if (found.kind === "major") return { facts: found.facts, figures: found.figures, major: found.read, lookups, notes };

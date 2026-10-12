@@ -231,8 +231,13 @@ export interface AnswerFacts extends WriterFacts {
   optOutNotice?: boolean;
 }
 
-/** A tag's intent, as code reads it. */
-export type AnswerIntentKind = "capabilities" | "onboarding" | "own-trades" | "coin" | "model" | "chat" | "major" | "hot";
+/**
+ * A tag's intent, as code reads it. "market", "vibe" and "advice" (2026-10-12)
+ * are answered in code's words only (xpost/market.ts marketAnswers,
+ * xpost/casual.ts): never drafted. Their hints below say what a draft would
+ * be held to, should a caller ever ask for one.
+ */
+export type AnswerIntentKind = "capabilities" | "onboarding" | "own-trades" | "coin" | "model" | "chat" | "major" | "hot" | "market" | "vibe" | "advice";
 
 /**
  * THE MODEL IT IS ASKED ABOUT, AS AN X POST SPELLS IT: "sherwood-1", merrymen's
@@ -896,6 +901,9 @@ const INTENT_HINT: Readonly<Record<AnswerIntentKind, string>> = {
   // coins, the words are code's (xpost/market.ts). Never told a list follows:
   // "added after your words" invited words that point at it (red-team 2026-10-12).
   hot: "They are asking what's moving. Say what you looked up as what the index shows right now, a read and not a call: never tell anyone to buy, never call a coin early, never a target or where anything is headed. Name no coin and write no number or amount.",
+  market: "They are asking how the market is doing. Say what you looked up as what its source shows right now, a read and not a call: never where anything is headed, never a target, and never what to buy. Name no coin and write no number or amount.",
+  vibe: "They are asking how you feel about things. Answer with a light mood about yourself, never a direction, a forecast or a coin.",
+  advice: "They are asking for advice or a forecast. Shrug it off playfully in your own words: never name or judge a coin, and never hint at a view either way.",
 };
 
 /**
@@ -913,6 +921,9 @@ const NOTHING_LOOKED_UP: Readonly<Partial<Record<AnswerIntentKind, string>>> = {
   chat: INTENT_HINT.chat,
   major: "They are asking about a coin by name, and you couldn't look it up just now: say so briefly and casually, or PASS. Never guess how it's doing, and keep yourself and your trades out of it.",
   hot: "They are asking what's moving, and you couldn't read the index just now: say so briefly and casually, or PASS. Never guess what's moving, and name no coin.",
+  market: "They are asking how the market is doing, and you couldn't read it just now: say so briefly and casually, or PASS. Never guess how anything is doing, and name no coin.",
+  vibe: "They are asking how you feel about things. Answer with a light mood about yourself, never a direction, a forecast or a coin.",
+  advice: "They are asking for advice or a forecast. Shrug it off playfully in your own words: never name or judge a coin, and never hint at a view either way.",
 };
 
 /**

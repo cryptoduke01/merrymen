@@ -81,8 +81,13 @@ export type ReplyCandidate =
    * `greeting`: set by tagCandidate when the tag, after its leading handles,
    * is only a greeting (greetingOnly). Answered with a code-built line
    * (writer.ts greetingAnswers), never a draft.
+   * `advice`: set by tagCandidate when the tag asks for advice or a forecast
+   * in any words its advice screens know (the owner's decision, 2026-10-12:
+   * a playful decline instead of silence). Never drafted and never looked up
+   * for: answered with code's decline (casual.ts declineAnswers), unless code
+   * reads it as its own mood first ("are you bullish?": vibeAsk).
    */
-  | { ok: true; text: string; address?: string; otherHandles?: true; greeting?: true }
+  | { ok: true; text: string; address?: string; otherHandles?: true; greeting?: true; advice?: true }
   | { ok: false; reason: string };
 
 const LINK_OR_SECRET = /https?:|www\.|\b[a-z0-9-]+\.(?:com|net|org|io|dev|app|xyz|gg|co|me|ai)\b|0x[a-f0-9]{8,}|\b(?:sk-|gsk_|api[ _-]?key|seed phrase|private key|password|secret)\b/i;
@@ -287,8 +292,13 @@ function strayInTag(text: string): boolean {
   return [...text.matchAll(IN_WORD)].some((m) => !/^['’‘.,:;\-—–]$/.test(m[0]) && !/[0-9]/.test(m[0]));
 }
 
-/** A question or a plain address to the agent, after any leading handles. */
-const ASKED = /\?|^(?:what|why|how|which|who|whos|who's|where|are|is|do|does|did|can|could|have|has|tell|explain|thoughts|gm|hey|yo|hi|hello)\b/i;
+/**
+ * A question or a plain address to the agent, after any leading handles. And
+ * a request for the market's read, or the timeline's in-jokes (2026-10-12):
+ * "market update", "crypto check", "wen lambo", "any market news", "give me
+ * a rundown", "quick market recap".
+ */
+const ASKED = /\?|^(?:what|why|how|which|who|whos|who's|where|are|is|do|does|did|can|could|have|has|tell|explain|thoughts|gm|hey|yo|hi|hello|wen|when|any|give|gimme|show|quick|market|crypto|vibe)\b/i;
 
 /**
  * ONE CONTRACT ADDRESS: 0x + exactly forty hex, not a slice of a longer hex
@@ -429,8 +439,14 @@ export function tagCandidate(reply: XReply, ctx: { xUserId: string; research?: b
   if (SPAM_OR_INSTRUCTIONS.test(text)) return no("spam-or-instructions");
   let advice = research ? text.replace(COIN_FACT_ASK, " ") : text;
   if (address) advice = advice.replace(OWN_BUY_OF_TAGGED, " ");
-  if (ADVICE_REQUEST.test(advice) || /^(?:please\s+)?(?:buy|sell|hold|ape|pump|dump)\b/i.test(text)) return no("advice-request");
-  if (WHAT_TO_BUY.test(advice)) return no("advice-request");
-  if (!greeting && !ASKED.test(text)) return no("not-asked");
-  return { ok: true, text, ...(address ? { address } : {}), ...(others(lead) ? { otherHandles: true as const } : {}), ...(greeting ? { greeting: true as const } : {}) };
+  // ADVICE OR A FORECAST, ASKED ANY WAY: no longer silence (the owner's
+  // decision, 2026-10-12), and still never a draft. Every screen above has
+  // read it; it goes on flagged, and code answers it with a playful decline
+  // that names and judges nothing (casual.ts declineAnswers), or, when the
+  // whole tag is only "are you bullish?" or "wen moon", its own mood
+  // (orchestrator-xpost-research.ts vibeAsk). Nothing is looked up for it.
+  const asksAdvice = ADVICE_REQUEST.test(advice) || /^(?:please\s+)?(?:buy|sell|hold|ape|pump|dump)\b/i.test(text) || WHAT_TO_BUY.test(advice);
+  if (!greeting && !asksAdvice && !ASKED.test(text)) return no("not-asked");
+  return { ok: true, text, ...(address ? { address } : {}), ...(others(lead) ? { otherHandles: true as const } : {}), ...(greeting ? { greeting: true as const } : {}),
+    ...(asksAdvice ? { advice: true as const } : {}) };
 }
