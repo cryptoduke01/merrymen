@@ -116,50 +116,83 @@ test("cost research returns the figures its sentence states, and none when the s
   assert.equal(await entryCostEvidence(args, deps), quoted.text, "the text API is the same sentence");
 });
 
-test("break-even: quoted drag and the move that pays it; a gas-and-fees floor; otherwise unknown", () => {
-  const fallback = { sizeUsdg: 2_500_000n, gasPerOperationUsdg: 10_000n, tradeFeeBps: 25 };
-  const q = trenchBreakEven({ sizeUsdg: 2_500_000n, backUsdg: 2_450_000n, dragUsdg: 82_375n }, fallback);
+const fallback = { sizeUsdg: 2_500_000n, gasPerOperationUsdg: 10_000n, tradeFeeBps: 25 };
+/** The quoted round trip of the cost tests above: 50,000 venue friction, 12,375 turnover fees, 20,000 gas. */
+const sane = { sizeUsdg: 2_500_000n, backUsdg: 2_450_000n, dragUsdg: 82_375n };
+/** The odds threshold a brief prints, as a number. */
+const threshold = (brief: string) => Number(/P is above (?:at least )?about (\d+)%/.exec(brief)?.[1]);
+
+test("break-even: brackets run from the fill, so each exit pays the exit leg, both turnover fees and gas — never the entry leg twice", () => {
+  const q = trenchBreakEven(sane, fallback);
   assert.equal(q.basis, "quoted");
   if (q.basis !== "quoted") return;
-  assert.ok(Math.abs(q.roundTripPct - 3.295) < 1e-9);
-  assert.ok(Math.abs(q.movePct - 82_375 / 2_450_000 * 100) < 1e-9, "the rise that turns the quoted exit back into entry plus costs");
-  const floor = trenchBreakEven({ sizeUsdg: 2_500_000n, backUsdg: 2_450_000n, dragUsdg: null }, fallback);
+  assert.ok(Math.abs(q.roundTripPct - 3.295) < 1e-9, "the whole round trip over the entry");
+  assert.ok(Math.abs(q.bracketCostPct - 2.295) < 1e-9, "less the entry leg's half of the venue friction, which the fill price already carries");
+  const floor = trenchBreakEven({ ...sane, dragUsdg: null }, fallback);
   assert.equal(floor.basis, "gas-and-fees", "no gas in the quote: fall back to the floor");
   if (floor.basis !== "gas-and-fees") return;
   assert.ok(Math.abs(floor.roundTripPct - 1.3) < 1e-9, "two gas operations and two turnover fees over the entry");
+  assert.equal(floor.bracketCostPct, floor.roundTripPct, "the floor has no venue friction to split");
   assert.deepEqual(trenchBreakEven(null, { ...fallback, gasPerOperationUsdg: null }), { basis: "unknown" });
   assert.deepEqual(trenchBreakEven(null, { ...fallback, sizeUsdg: 0n }), { basis: "unknown" });
 });
 
-test("the momentum brief reads its exits from the strategy, computes the odds it needs, and keeps every check", () => {
-  const fallback = { sizeUsdg: 2_500_000n, gasPerOperationUsdg: 10_000n, tradeFeeBps: 25 };
-  const brief = trenchMomentumBrief(TRENCHER_FAST, trenchBreakEven({ sizeUsdg: 2_500_000n, backUsdg: 2_450_000n, dragUsdg: 82_375n }, fallback), 2_500_000n);
-  assert.match(brief, /Horizon: minutes, not days; a position lives at most 30 minutes/);
-  assert.match(brief, /stop at -10% from entry, take profit at \+20%, close at 30 minutes whatever the price, and early if 50% of entry liquidity drains/);
-  assert.match(brief, /A round trip at the 2\.50 USDG entry costs about 3\.(29|3)% \(quoted entry and exit, gas and fees\), so price must rise about 3\.36% to break even/);
-  assert.match(brief, /positive only when P is above about 44%/, "(10 + 3.3) / 30");
-  assert.match(brief, /expected_edge_usdg \(a bracket estimate, not an invented return\)/);
-  assert.match(brief, /Continuation: distinct buyers and buy share rising/);
-  assert.match(brief, /Distribution: sellers dominating/);
+test("an anomalous quote is not a cost: more back than went in, or a drag under the gas-and-fee floor, falls back — never negative", () => {
+  for (const anomaly of [
+    { sizeUsdg: 2_500_000n, backUsdg: 2_600_000n, dragUsdg: -67_625n },
+    { sizeUsdg: 2_500_000n, backUsdg: 2_500_000n, dragUsdg: 1_000n },
+  ]) {
+    const be = trenchBreakEven(anomaly, fallback);
+    assert.equal(be.basis, "gas-and-fees");
+    assert.ok(be.roundTripPct >= 0 && be.bracketCostPct >= 0);
+    const brief = trenchMomentumBrief(TRENCHER_FAST, be, 2_500_000n);
+    assert.doesNotMatch(brief, /-\d+(\.\d+)?% in gas|about -|least -/, "no negative cost printed");
+    assert.ok(threshold(brief) >= 100 * 1_000 / (1_000 + 2_000), "never below stop / (take + stop)");
+  }
+});
+
+test("the momentum brief reads its exits from the strategy, states where the brackets run from, and keeps every check", () => {
+  const brief = trenchMomentumBrief(TRENCHER_FAST, trenchBreakEven(sane, fallback), 2_500_000n);
+  assert.match(brief, /Horizon: minutes, not days/);
+  assert.match(brief, /stop -10%, take \+20%, close at 30 minutes, or early if 50% of entry liquidity drains/);
+  assert.match(brief, /Brackets run from your average fill, which already includes the entry leg's venue cost/);
+  assert.match(brief, /A round trip at 2\.50 USDG costs about 3\.(29|3)% \(quoted\)\. c, what each exit pays beyond the fill and the rise above it that breaks even, is about 2\.(29|3)%/);
+  assert.match(brief, /P x \(20 - c\)% - \(1 - P\) x \(10 \+ c\)%, positive only when P is above about 41%/, "(10 + 2.3) / 30");
+  assert.match(brief, /a time-stopped exit takes the 30-minute mark, less c/);
+  assert.doesNotMatch(brief, /near flat/, "nothing unmeasured about where a time stop lands");
+  assert.match(brief, /bracket estimate at entry size as expected_edge_usdg/);
+  assert.match(brief, /Continuation: buyers and buy share rising/);
+  assert.match(brief, /one sender doing most of a material sell flow \(may be a router or bundler\)/);
   assert.match(brief, /Missing news, fundamentals or social-media data is not by itself a reason to hold for this strategy/);
-  assert.match(brief, /Every disqualifier, limit and check above still applies\.$/);
+  assert.match(brief, /All checks above still apply\.$/);
   // NOT HARDCODED: another config says other numbers.
   const other = trenchMomentumBrief({ stopLossBps: 1_500, takeProfitBps: 3_000, maxHoldSec: 45 * 60, liquidityDrainFraction: 0.6 }, { basis: "unknown" }, 1_000_000n);
-  assert.match(other, /stop at -15% from entry, take profit at \+30%, close at 45 minutes whatever the price, and early if 40% of entry liquidity drains/);
-  assert.match(other, /could not be priced; treat a marginal setup as insufficient/);
+  assert.match(other, /stop -15%, take \+30%, close at 45 minutes, or early if 40% of entry liquidity drains/);
+  assert.match(other, /c could not be priced; treat a marginal setup as insufficient/);
   assert.match(other, /clearly above 33% plus the unknown cost/);
   const floor = trenchMomentumBrief(TRENCHER_FAST, trenchBreakEven(null, fallback), 2_500_000n);
-  assert.match(floor, /costs at least 1\.3% \(gas and fees only; venue fee and price impact were not quoted\)/);
-  assert.match(floor, /above about 38%/);
+  assert.match(floor, /costs at least 1\.3% in gas and turnover fees \(venue fee and impact not quoted\)/);
+  assert.match(floor, /P is above at least about 38%/, "a floor's threshold is a floor too");
+});
+
+test("when the take-profit cannot cover the cost, no odds threshold is printed; a printed one stays under 100%", () => {
+  const dear = trenchBreakEven(null, { ...fallback, gasPerOperationUsdg: 400_000n });
+  assert.equal(dear.basis, "gas-and-fees");
+  const brief = trenchMomentumBrief(TRENCHER_FAST, dear, 2_500_000n);
+  assert.match(brief, /no odds make it positive: the take-profit cannot cover this cost at this size/);
+  assert.doesNotMatch(brief, /P is above/);
+  const edge = trenchMomentumBrief(TRENCHER_FAST, { basis: "quoted", roundTripPct: 20, bracketCostPct: 19.85 }, 2_500_000n);
+  assert.equal(threshold(edge), 99, "99.5% prints as 99, never 100");
 });
 
 test("the whole research persona fits inside the Brain's 4000-character strategy brief", () => {
   // graph.py fences `req.persona[:4000]`: anything past it is cut, and the
-  // momentum plan is last. Longest case: a long symbol, an owner brief with a
-  // voice line, the research guidance and the longest cost sentence.
-  const persona = withAgentBrief(trenchBrainPersona("X".repeat(32), false), "dry sarcastic casual") +
+  // momentum plan is last. Longest case: the longest symbol a token may carry
+  // (16, packages/core tokens.ts), an owner brief with a voice line, the
+  // research guidance and a three-digit cost.
+  const persona = withAgentBrief(trenchBrainPersona("X".repeat(16), false), "dry sarcastic casual") +
     `\n\n${DECISION_RESEARCH_GUIDANCE}\n\n` +
-    trenchMomentumBrief(TRENCHER_FAST, { basis: "gas-and-fees", roundTripPct: 123.456, movePct: 123.456 }, 2_500_000n);
+    trenchMomentumBrief(TRENCHER_FAST, { basis: "gas-and-fees", roundTripPct: 123.456, bracketCostPct: 123.456 }, 2_500_000n);
   assert.ok(persona.length <= 3900, `${persona.length} characters leaves too little room under 4000`);
   // And the fleet persona is untouched: the plan is added by index.ts, research accounts only.
   assert.doesNotMatch(trenchBrainPersona("MEME", false), /MOMENTUM ENTRY PLAN/);

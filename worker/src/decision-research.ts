@@ -107,31 +107,45 @@ export async function entryCostResearch(args: CostArgs, deps: CostDeps = {}): Pr
 }
 
 /**
- * WHAT A ROUND TRIP COSTS AS A SHARE OF THE ENTRY, and the move that pays it.
+ * WHAT A ROUND TRIP COSTS, AND WHAT EACH BRACKET OUTCOME STILL PAYS.
  *
- * Quoted when the entry/exit research priced both legs and gas: the drag over
- * the entry, and the rise that turns the quoted exit back into entry plus
- * costs (drag over what the exit returned). Otherwise, when gas is known, a
- * FLOOR — gas for two operations and both turnover fees only, because venue
- * fees and price impact were not quoted. Otherwise unknown, and said so.
+ * The Trencher's brackets are measured from the AVERAGE FILL PRICE (cost over
+ * tokens received, index.ts trenchOpen), which already carries the entry
+ * leg's venue fee and price impact. What an exit pays beyond the move is the
+ * rest: the exit leg's venue fee and impact, both turnover fees (accrued on
+ * notional, outside the cost basis: fees.ts) and gas for both operations.
+ *
+ * `roundTripPct` is the whole round trip over the entry; `bracketCostPct` is
+ * that remainder, which is also the rise above the fill that breaks even.
+ *
+ * QUOTED only when the quotes are sane: no more USDG back than went in, and a
+ * drag at least the gas-and-fee floor. Otherwise (an anomalous quote, or no
+ * gas in it) the FLOOR when gas is known: gas and turnover fees only, venue
+ * friction not quoted. Otherwise unknown. Two quotes cannot tell the legs'
+ * venue friction apart, so the exit leg is taken as half of it — an
+ * assumption the brief states. Never negative.
  */
 export type BreakEven =
-  | { basis: "quoted"; roundTripPct: number; movePct: number }
-  | { basis: "gas-and-fees"; roundTripPct: number; movePct: number }
+  | { basis: "quoted"; roundTripPct: number; bracketCostPct: number }
+  | { basis: "gas-and-fees"; roundTripPct: number; bracketCostPct: number }
   | { basis: "unknown" };
 
 export function trenchBreakEven(
   cost: Pick<EntryCostResearch, "sizeUsdg" | "backUsdg" | "dragUsdg"> | null,
   fallback: { sizeUsdg: bigint; gasPerOperationUsdg: bigint | null; tradeFeeBps: number },
 ): BreakEven {
-  const pct = (n: bigint, d: bigint) => Number(n) / Number(d) * 100;
-  if (cost && cost.sizeUsdg > 0n && cost.backUsdg !== null && cost.backUsdg > 0n && cost.dragUsdg !== null) {
-    return { basis: "quoted", roundTripPct: pct(cost.dragUsdg, cost.sizeUsdg), movePct: pct(cost.dragUsdg, cost.backUsdg) };
+  const pct = (n: bigint, d: bigint) => Math.max(0, Number(n) / Number(d) * 100);
+  const { gasPerOperationUsdg: gas, tradeFeeBps: bps } = fallback;
+  if (gas === null || gas < 0n || !Number.isInteger(bps) || bps < 0 || bps >= 10_000) return { basis: "unknown" };
+  const floorOf = (size: bigint) => gas * 2n + tradeFeeUsdg(size, bps) * 2n;
+  if (cost && cost.sizeUsdg > 0n && cost.backUsdg !== null && cost.backUsdg > 0n && cost.dragUsdg !== null &&
+      cost.backUsdg <= cost.sizeUsdg && cost.dragUsdg >= floorOf(cost.sizeUsdg)) {
+    const entryLeg = (cost.sizeUsdg - cost.backUsdg) / 2n;
+    return { basis: "quoted", roundTripPct: pct(cost.dragUsdg, cost.sizeUsdg), bracketCostPct: pct(cost.dragUsdg - entryLeg, cost.sizeUsdg) };
   }
-  const { sizeUsdg: size, gasPerOperationUsdg: gas, tradeFeeBps: bps } = fallback;
-  if (size > 0n && gas !== null && gas >= 0n && Number.isInteger(bps) && bps >= 0 && bps < 10_000) {
-    const floor = pct(gas * 2n + tradeFeeUsdg(size, bps) * 2n, size);
-    return { basis: "gas-and-fees", roundTripPct: floor, movePct: floor };
+  if (fallback.sizeUsdg > 0n) {
+    const floor = pct(floorOf(fallback.sizeUsdg), fallback.sizeUsdg);
+    return { basis: "gas-and-fees", roundTripPct: floor, bracketCostPct: floor };
   }
   return { basis: "unknown" };
 }
@@ -146,9 +160,10 @@ export function trenchBreakEven(
  * return, and then made to state one (`expected_edge_usdg`). HOLD was the
  * only answer that did not require a number from nowhere. This gives it the
  * number's ingredients instead: the mechanical exits (read from the strategy
- * config, never restated by hand), the round-trip cost and the move that pays
- * it, the bracket arithmetic that turns odds into edge, and what continuation
- * and distribution look like over minutes.
+ * config, never restated by hand), what each exit pays beyond the move
+ * (trenchBreakEven), the bracket arithmetic that turns odds into edge, and
+ * what continuation and distribution look like over minutes. It claims
+ * nothing about where a time-stopped exit usually lands: that is unmeasured.
  *
  * WHAT IT DOES NOT DO. It changes no cap, floor, guard, gate or exit; the
  * persona's disqualifiers and every check after the review are untouched,
@@ -168,24 +183,33 @@ export function trenchMomentumBrief(
     return s.includes(".") ? s.replace(/0+$/, "").replace(/\.$/, "") : s;
   };
   const entry = (Number(entryUsdg) / 1e6).toFixed(2);
+  // c: what each exit pays beyond the fill, which is also the rise above the
+  // fill that breaks even (trenchBreakEven).
   const cost = be.basis === "quoted"
-    ? `A round trip at the ${entry} USDG entry costs about ${n(be.roundTripPct, 2)}% (quoted entry and exit, gas and fees), so price must rise about ${n(be.movePct, 2)}% to break even.`
+    ? `A round trip at ${entry} USDG costs about ${n(be.roundTripPct, 2)}% (quoted). c, what each exit pays beyond the fill and the rise above it that breaks even, ` +
+      `is about ${n(be.bracketCostPct, 2)}% (half the quoted venue friction as the exit leg, both turnover fees, gas for both legs).`
     : be.basis === "gas-and-fees"
-      ? `A round trip at the ${entry} USDG entry costs at least ${n(be.roundTripPct, 2)}% (gas and fees only; venue fee and price impact were not quoted), so price must rise more than that to break even.`
-      : "The round-trip cost could not be priced; treat a marginal setup as insufficient.";
-  const c = be.basis === "unknown" ? null : be.roundTripPct;
-  const odds = c === null
+      ? `A round trip at ${entry} USDG costs at least ${n(be.roundTripPct, 2)}% in gas and turnover fees (venue fee and impact not quoted). ` +
+        "c, what each exit pays beyond the fill and the rise above it that breaks even, is at least that."
+      : "The round-trip cost c could not be priced; treat a marginal setup as insufficient.";
+  const c = be.basis === "unknown" ? null : be.bracketCostPct;
+  // The odds at which the bracket breaks even. At or past 1, the take-profit
+  // cannot pay the cost at all, and no threshold is printed as if it could.
+  const p = c === null ? null : (stop + c) / (take + stop);
+  const odds = p === null
     ? `positive only when P is clearly above ${n(stop * 100 / (take + stop), 0)}% plus the unknown cost`
-    : `positive only when P is above about ${n((stop + c) * 100 / (take + stop), 0)}%`;
-  return `MOMENTUM ENTRY PLAN. Horizon: minutes, not days; a position lives at most ${minutes} minutes. ` +
-    `Exits are mechanical, checked each tick (fills can overshoot): stop at -${n(stop, 1)}% from entry, ` +
-    `take profit at +${n(take, 1)}%, close at ${minutes} minutes whatever the price, and early if ${drain}% of entry liquidity drains. ` +
-    `${cost} ` +
-    `Judge the setup against these brackets instead of inventing a target. With P your odds of +${n(take, 1)}% before -${n(stop, 1)}%, ` +
-    `edge per entry is about P x (${n(take, 1)} - cost)% - (1 - P) x (${n(stop, 1)} + cost)%, ${odds}; the time stop usually exits near flat, less cost. ` +
-    "Reason P from flow; state that edge at the entry size as expected_edge_usdg (a bracket estimate, not an invented return). " +
-    "Continuation: distinct buyers and buy share rising from 1h to 5m, higher 5-minute lows, volume expanding with price, liquidity holding. " +
-    "Distribution: sellers dominating recent windows or one wallet doing most selling, lower highs, liquidity draining, or overextension after a vertical spike. " +
-    "Missing news, fundamentals or social-media data is not by itself a reason to hold for this strategy; the decision rests on flow, liquidity, cost and the exit plan. " +
-    "Every disqualifier, limit and check above still applies.";
+    : p >= 1
+      ? "and no odds make it positive: the take-profit cannot cover this cost at this size"
+      : `positive only when P is above ${be.basis === "gas-and-fees" ? "at least " : ""}about ${n(Math.min(99, p * 100), 0)}%`;
+  return `MOMENTUM ENTRY PLAN. Horizon: minutes, not days. Exits are mechanical, per tick (fills can overshoot): ` +
+    `stop -${n(stop, 1)}%, take +${n(take, 1)}%, close at ${minutes} minutes, or early if ${drain}% of entry liquidity drains. ` +
+    "Brackets run from your average fill, which already includes the entry leg's venue cost. " +
+    `${cost} Judge the setup against these brackets, not an invented target: ` +
+    `with P your odds of +${n(take, 1)}% before -${n(stop, 1)}%, edge per entry is about P x (${n(take, 1)} - c)% - (1 - P) x (${n(stop, 1)} + c)%, ${odds}; ` +
+    `a time-stopped exit takes the ${minutes}-minute mark, less c. ` +
+    "Reason P from flow; give that bracket estimate at entry size as expected_edge_usdg. " +
+    "Continuation: buyers and buy share rising from 1h to 5m, higher 5-minute lows, volume expanding with price, liquidity holding. " +
+    "Distribution: sellers dominating recent windows, one sender doing most of a material sell flow (may be a router or bundler), lower highs, draining liquidity, overextension after a vertical spike. " +
+    "Missing news, fundamentals or social-media data is not by itself a reason to hold for this strategy; decide on flow, liquidity, cost and these exits. " +
+    "All checks above still apply.";
 }
