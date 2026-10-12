@@ -1079,6 +1079,19 @@ const ON_PAPER_CLAIM =
 /** Real money claimed — not denied: the buy prompt itself says "practice money, not real money", and a paper post may echo it. */
 const SAYS_REAL_MONEY = /(?<!\b(?:not|no|never|isn'?t|wasn'?t|aren'?t)\s+(?:with\s+|using\s+|any\s+)?)\breal (?:money|cash)\b/i;
 
+/**
+ * THE OTHER MONEY IN OTHER WORDS, IN A REPLY (red-team review, 2026-10-12): a
+ * live agent answered "honestly it's all play money for me, nothing at stake",
+ * "it's monopoly money", "this is a simulation, none of it is real"; a paper
+ * agent "i trade on paper, kidding, it's real dollars on the line", "on paper
+ * trades, but the money is real". The paper and real-money phrases read only
+ * their own words. In a reply, fail closed on what either money is called.
+ */
+const PLAY_MONEY =
+  /\b(?:play|fake|pretend|test|demo|simulated|sim|monopoly|imaginary|virtual|toy|funny|make[\s-]?believe)\s+(?:money|funds|cash|dollars|bucks|coins|sol|usd|trades?|trading|account|mode|portfolio)\b|\bnothing\s+(?:real\s+)?(?:at\s+stake|on\s+the\s+line)\b|\bno\s+(?:real\s+)?(?:stakes|risk|skin\s+in\s+the\s+game)\b|\bsimulat\w+|\bdemo\s+mode\b|\b(?:none|nothing)\s+of\s+it(?:'s|\s+is)\s+real\b|\bnothing\s+real\b|\bnot\s+real\b/i;
+const REAL_IN_OTHER_WORDS =
+  /\b(?:real|actual|live|hard)\s+(?:dollars|funds|stakes|usd|sol|eth|cash|capital|bucks)\b|\b(?:the\s+)?money(?:'s|\s+is|\s+was)\s+(?:real|actual|live)\b|(?<!\b(?:nothing|no|not)\b[\w\s']{0,24})\b(?:on\s+the\s+line|skin\s+in\s+the\s+game)\b|\bfeels?\s+like\s+real\b|\b(?:kidding|jk|j\/k|not\s+really|just\s+joking|joking)\b/i;
+
 function paperOfCoin(text: string, coins: readonly string[]): boolean {
   return coins.some((c) => c.trim() !== "" && new RegExp(`\\bpaper[\\s-]+\\$?${escapeRe(c.trim())}(?![\\p{L}\\p{N}_])`, "iu").test(text));
 }
@@ -1517,6 +1530,9 @@ function admitMasked(tidied: string, ctx: XGateCtx, baseGate: BaseGate, agentNam
   // money", and claimsPaper reads only its shapes. In a reply, fail closed:
   // any paper phrase, the idiom too, unless a paper coin it was told of is named.
   if (ctx.kind === "reply" && ctx.mode === "live" && saysPaper(text, coins) && !aboutPaper) return refuse("mode-false");
+  // And either money in other words: play money for a live reply, real dollars (or "kidding") for a paper one.
+  if (ctx.kind === "reply" && ctx.mode === "live" && PLAY_MONEY.test(text) && !aboutPaper) return refuse("mode-false");
+  if (ctx.kind === "reply" && ctx.mode === "paper" && REAL_IN_OTHER_WORDS.test(text)) return refuse("mode-false");
   if (ctx.mode === "paper" && SAYS_REAL_MONEY.test(text)) return refuse("mode-false");
   // AN IDLE AGENT'S REPLY, COIN BY COIN (red-team 2026-10-12): "bought pepe and
   // bonk lately, both on paper" called a live buy paper, and "grabbed bonk and

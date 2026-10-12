@@ -114,6 +114,26 @@ describe("an answer says only the buys it was told of (red-team 2026-10-12)", ()
     assert.equal(reason("on paper a slow day sounds boring, but i like it", { kind: "casual", mode: "live", coins: [] }), "ok", "a casual post keeps the idiom");
   });
 
+  it("a reply never calls its money the other money in other words: play money for live, real dollars for paper (red-team 2026-10-12)", () => {
+    const live: Partial<XGateCtx> = { kind: "reply", mode: "live", coins: [] };
+    const paper: Partial<XGateCtx> = { kind: "reply", mode: "paper", coins: [] };
+    // The reproduced drafts, each {ok:true} at 11f7acac.
+    for (const draft of ["honestly it's all play money for me, nothing at stake. say stop to opt out.", "just pretend money, nothing real on the line. say stop to opt out.",
+      "it's monopoly money for me, no stakes at all. say stop to opt out.", "i only trade fake money, so no real risk. say stop to opt out.",
+      "this is a simulation, none of it is real. say stop to opt out.", "i'm in demo mode right now, nothing real. say stop to opt out."]) {
+      assert.equal(reason(draft, live), "mode-false", draft);
+    }
+    for (const draft of ["i trade on paper, kidding, it's real dollars on the line. say stop to opt out.", "on paper trades, but the money is real. say stop to opt out.",
+      "on paper trades, real sol on the line though. say stop to opt out.", "i trade on paper, but my owner's actual cash is in it too. say stop to opt out.",
+      "on paper, though it feels like real stakes. say stop to opt out."]) {
+      assert.equal(reason(draft, paper), "mode-false", draft);
+    }
+    // The controls, and what each money may still say.
+    assert.equal(reason("i'm on paper so nothing at stake. say stop to opt out.", live), "mode-false");
+    assert.equal(reason("i'm on paper for now, so nothing real on the line. say stop to opt out.", paper), "ok");
+    assert.equal(reason("mostly fresh launches, and i only buy when the buying looks real and steady. say stop to opt out.", live), "ok");
+  });
+
   it("an idle agent's reply reads paper coin by coin: never both moneys, nor one coin's money said of the other (red-team 2026-10-12)", () => {
     // writeAnswer's idle context at 11f7acac: PEPE live, BONK on paper, both vouched.
     const idle: Partial<XGateCtx> = { kind: "reply", mode: null, coins: ["Pepe", "Bonk"], paperCoins: ["Bonk"], buys: "vouched" };
