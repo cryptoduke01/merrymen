@@ -134,10 +134,11 @@ function standsAlone(t: string, start: number, end: number): boolean {
  * plain address, in good faith, about the agent itself or a coin. The same
  * screens as a comment reply — opt-outs first, then links, secrets, abuse,
  * sensitive topics, spam, instructions and advice requests — except that
- * digits may appear in the question: the writer reads a figure that stands
- * alone as "(a number)" (writer.ts answerQuestion; a digit in a name, such as
- * "$PEPE2", leaves the question unusable), and the answer is still gated with
- * no numbers in it. Handles never reach the writer.
+ * digits may appear in the question: the writer reads every run of digits as
+ * "(a number)" (writer.ts answerQuestion: "24h" is "(a number)h"), a question
+ * that names a coin is never told what it bought (writer.ts coinNamedIn), and
+ * the answer is still gated with no numbers in it. Handles never reach the
+ * writer.
  *
  * ONE CONTRACT ADDRESS IS A LOOKUP KEY, NOT TEXT — only with research on
  * (`ctx.research`, MERRYMEN_XPOST_RESEARCH=1). It is taken out of the

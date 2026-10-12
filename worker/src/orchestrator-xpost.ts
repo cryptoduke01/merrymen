@@ -1445,11 +1445,12 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         continue;
       }
       // DECIDED BEFORE ANYTHING IS SPENT: a question the writer could not read
-      // would buy research and a model call for a prompt that says PASS. A
-      // digit in a name ("$PEPE2", "pepe 2" beside a PEPE it bought) is
-      // another coin, never masked into one it bought: unusable too. The
-      // model question's line is code's and never reads the question.
-      if (asked.kind !== "model" && answerQuestion(candidate.text, knownCoins) === null) {
+      // would buy research and a model call for a prompt that says PASS. Its
+      // digits are read as "(a number)"; a copycat's ("$PEPE2") is safe to
+      // mask because a tag that names a coin never sees what it bought
+      // (coinNamed below). The model question's line is code's and never
+      // reads the question.
+      if (asked.kind !== "model" && answerQuestion(candidate.text) === null) {
         bump("answer-unusable");
         continue;
       }

@@ -757,20 +757,30 @@ describe("an active agent's answers and conversation memory", () => {
     assert.equal(answerQuestion(null), null);
   });
 
-  it("a digit that is part of a name is never masked: a copycat ticker never reads as the coin it bought", () => {
-    // Glued to a letter or an underscore: another coin's name, never "$PEPE(a number)".
-    for (const question of ["did you buy $PEPE2?", "is $PEPE2 the real one?", "why did you buy pepe2?", "is $2PEPE legit?", "is pepe_2 yours?", "pepe v2 out?"]) {
-      assert.equal(answerQuestion(question), null, question);
-    }
-    // A coin it bought, followed by a number, with a space or a dash: another coin too.
-    for (const question of ["did you buy pepe 2?", "did you buy PEPE-2.0?", "is pepe v2 the real one?", "did you buy $pepe 2?"]) {
-      assert.equal(answerQuestion(question, ["PEPE"]), null, question);
+  it("every digit is masked, glued to letters or not: time units, ordinals and crypto words are still questions", () => {
+    for (const [question, read] of [
+      ["what's the 24h volume on $BONK looking like?", "what's the (a number)h volume on $BONK looking like?"],
+      ["what did you buy in the last 24h?", "what did you buy in the last (a number)h?"],
+      ["which L2 do you trade on?", "which L(a number) do you trade on?"],
+      ["is web3 gaming dead?", "is web(a number) gaming dead?"],
+      ["is this your 1st trade today?", "is this your (a number)st trade today?"],
+      ["how did your trades do in Q3?", "how did your trades do in Q(a number)?"],
+      ["bought $PEPE at 10am, you?", "bought $PEPE at (a number)am, you?"],
+      ["will pepe 10x from here?", "will pepe (a number)x from here?"],
+      ["pepe 2 weeks in, still holding?", "pepe (a number) weeks in, still holding?"],
+      // A copycat's digit too: the question is usable, and a coin named in it never sees what it bought.
+      ["did you buy $PEPE2?", "did you buy $PEPE(a number)?"],
+      ["did you buy pepe 2?", "did you buy pepe (a number)?"],
+      ["did you buy PEPE-2.0?", "did you buy PEPE-(a number)?"],
+      ["did you buy $PEPE\u200b2?", "did you buy $PEPE(a number)?"],
+    ] as const) {
+      assert.equal(answerQuestion(question), read, question);
       const p = answerPrompt({ ...BASE, question, recentBuys: [{ label: "PEPE", paper: false }], boughtLately: true, said: [], walletPublic: false });
-      assert.match(p.prompt, /no usable question/, question);
+      assert.doesNotMatch(p.prompt, /no usable question/, question);
+      assert.equal(/Untrusted question to answer: «([^»]*)»/.exec(p.prompt)?.[1], read, question);
+      assert.doesNotMatch(all(p), /\p{N}/u, `${question}: the figure never reaches the model`);
+      if (/pepe/i.test(question)) assert.doesNotMatch(p.prompt, /Coins you bought lately|can't name here/, `${question}: a coin named, never its buys`);
     }
-    // A figure beside another coin, or a coin it bought with no number after it, is still a question.
-    assert.equal(answerQuestion("did you buy pepe? saw it on 2 lists", ["PEPE"]), "did you buy pepe? saw it on (a number) lists");
-    assert.equal(answerQuestion("is wif 2x from here?", ["PEPE"]), "is wif (a number)x from here?");
   });
 
   it("a question that names a coin, however spelled, is never told what it bought; only the exact contract may be", () => {

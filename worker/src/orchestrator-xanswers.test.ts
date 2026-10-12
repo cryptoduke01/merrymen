@@ -300,18 +300,31 @@ test("a tag with a figure in it is answered, the figure read as a number and nev
   }
 });
 
-test("a copycat ticker beside a coin it bought is never answered as that coin: nothing drafted, nothing spent", async (t) => {
+test("a copycat ticker beside a coin it bought is answered with its digit masked, and never told what it bought", async (t) => {
   for (const env of [{}, RESEARCH_ON]) {
-    const r = fakeResearch();
     // It bought PEPE (FACTS); each of these names another coin.
-    const texts = ["@pine_stoat did you buy $PEPE2?", "@pine_stoat why did you buy pepe2?", "@pine_stoat is $PEPE2 the real one?", "@pine_stoat did you buy pepe 2?"];
-    const w = await world(t, { env, research: r.research, answer: "yep, grabbed pepe lately. Say stop to opt out." });
+    const texts = ["@pine_stoat did you buy $PEPE2?", "@pine_stoat why did you buy pepe2?", "@pine_stoat did you buy pepe 2?"];
+    const w = await world(t, { env, research: fakeResearch().research });
     w.setInbox(texts.map((text, n) => tag({ id: `10000000000000014${n}`, conversation_id: `10000000000000014${n}`, author_id: `14${n}`, text })));
     await w.step();
-    assert.deepEqual(await w.answers(), [], "no answer row, no post");
-    assert.equal(w.asked().length, 0, "no draft");
-    assert.equal(r.seen.length, 0, "nothing looked up");
-    assert.equal((await store.readMeta(w.db, "llm-answers:111:2026-09-30"))?.n ?? 0, 0, "and no allowance spent");
+    const asked = w.asked();
+    assert.equal(asked.length, 3, "each is a usable question");
+    for (const prompt of asked) {
+      const q = /Untrusted question to answer: «([^»]*)»/.exec(prompt)?.[1] ?? "";
+      assert.match(q, /\(a number\)/);
+      assert.doesNotMatch(q, /\p{N}/u);
+      assert.doesNotMatch(prompt, /Coins you bought lately|can't name here|«you bought it/, q);
+      assert.match(prompt, /They named a specific coin/, q);
+    }
+  }
+  // Ordinary digits glued to letters are questions too, research on or off.
+  for (const env of [{}, RESEARCH_ON]) {
+    const w = await world(t, { env, research: fakeResearch().research });
+    const texts = ["@pine_stoat what's the 24h volume on $BONK looking like?", "@pine_stoat which L2 do you trade on?", "@pine_stoat is web3 gaming dead?"];
+    w.setInbox(texts.map((text, n) => tag({ id: `10000000000000017${n}`, conversation_id: `10000000000000017${n}`, author_id: `17${n}`, text })));
+    await w.step();
+    assert.deepEqual(w.asked().map((p) => /Untrusted question to answer: «([^»]*)»/.exec(p)?.[1]),
+      ["what's the (a number)h volume on $BONK looking like?", "which L(a number) do you trade on?", "is web(a number) gaming dead?"]);
   }
   // A tag that names sherwood, with a digit or without, is answered by nothing at all.
   const w = await world(t);

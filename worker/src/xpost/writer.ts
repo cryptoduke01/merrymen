@@ -324,34 +324,30 @@ function clean(text: unknown, max: number): string | null {
 /**
  * A TAG'S QUESTION AS THE MODEL MAY READ IT, or null when nothing of it is
  * usable. tagCandidate lets digits through, and a memecoin question often
- * carries one ("saw it on 2 lists", "top 3 coins?", "a 100x?"); clean() alone
- * would refuse the whole question, after the answer's research and model
- * allowances were already spent, for a prompt that can only say PASS. So a
- * figure that stands alone (a unit after it at most: k, m, b, bn, x) is read
- * as "(a number)": the question survives and the model is never handed the
- * figure. The gate still refuses any digit in what goes out. Exported so the
- * caller decides before it spends anything.
+ * carries one ("saw it on 2 lists", "top 3 coins?", "a 100x?", "the 24h
+ * volume", "which L2", "web3"); clean() alone would refuse the whole
+ * question, after the answer's research and model allowances were already
+ * spent, for a prompt that can only say PASS. So every run of digits, glued
+ * to letters or not, is read as "(a number)" ("24h" is "(a number)h", "L2"
+ * is "L(a number)"): the question survives and the model is never handed the
+ * figure. The gate still refuses any digit in what goes out. Zero-width and
+ * other format characters are taken out first. Exported so the caller
+ * decides before it spends anything.
  *
- * A DIGIT THAT IS PART OF A NAME IS NEVER MASKED (final review, 2026-10-12).
- * Read as "$PEPE(a number)", a copycat's "$PEPE2" became the coin it bought,
- * and "did you buy $PEPE2?" could be answered "yep, grabbed pepe". So a digit
- * glued to a letter or an underscore ("$PEPE2", "pepe2", "v2", "2pepe")
- * leaves the question unusable (null), and so does a coin it
- * bought followed by a number ("pepe 2", "pepe v2", "pepe-2.0") when `coins`
- * names it: the caller passes the tag over before anything is spent.
+ * A COPYCAT'S DIGIT NEEDS NO REFUSAL HERE (fail-closed review, 2026-10-12).
+ * Read as "$PEPE(a number)", "$PEPE2" once let "did you buy $PEPE2?" be
+ * answered "yep, grabbed pepe"; refusing every digit glued to a letter
+ * instead left "24h", "L2", "10am" and "web3" unanswered. Now a question
+ * that names a coin, with a digit or without, is never told what it bought
+ * (coinNamedIn), so masking the digit cannot turn a copycat into a buy.
  */
-const STANDALONE_FIGURE = /(?<![\p{L}\p{N}_])\p{N}+(?:[.,:/]\p{N}+)*(?=(?:k|m|b|bn|x)?(?![\p{L}\p{N}_]))/giu;
-const escapeRe = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-export function answerQuestion(text: unknown, coins: readonly string[] = []): string | null {
+const FIGURE = /\p{N}+(?:[.,:/]\p{N}+)*/gu;
+export function answerQuestion(text: unknown): string | null {
   if (typeof text !== "string") return null;
   // SHERWOOD IN ANY FORM IS NEVER A DRAFT'S QUESTION: the classifier answers
   // it with nothing (modelQuestion), and so does the writer, for any caller.
   if (sherwoodMentioned(text)) return null;
-  for (const coin of coins) {
-    const label = typeof coin === "string" ? coin.trim() : "";
-    if (label && new RegExp(String.raw`(?<![\p{L}\p{N}_])\$?${escapeRe(label)}[\s_-]*v?\p{N}`, "iu").test(text)) return null;
-  }
-  return clean(text.replace(STANDALONE_FIGURE, "(a number)"), XREPLY_MAX_COMMENT_CHARS);
+  return clean(text.replace(/\p{Cf}/gu, "").replace(FIGURE, "(a number)"), XREPLY_MAX_COMMENT_CHARS);
 }
 
 /**
@@ -863,8 +859,7 @@ const UNNAMED_BUYS: Readonly<Record<"paper" | "live" | "both" | "unknown", strin
  * writer is never told the name, and a draft that names it is refused.
  */
 export function answerPrompt(f: AnswerFacts): Prompt {
-  // A coin it bought, followed by a number, is another coin: no usable question.
-  const question = answerQuestion(f.question, (f.recentBuys ?? []).map((c) => c.label));
+  const question = answerQuestion(f.question);
   // NEVER CONFIRM A BUY BY NAME: the caller's reading, and the question's own.
   const named = f.coinNamed === true || coinNamedIn(f.question, (f.recentBuys ?? []).map((c) => c.label));
   const exact = named && f.boughtExact === true;
