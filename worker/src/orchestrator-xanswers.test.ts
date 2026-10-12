@@ -2275,6 +2275,31 @@ test("majors: no prediction, target, advice or claim in any words beside a coin'
   }
 });
 
+test("majors: never that it holds or is buying the coin, in the third person, nor another coin set against it; and no drafted coin answer says so either (red-team 2026-10-12)", async (t) => {
+  // Posted at 34ced01e by the active "Alan Al Dale", live, whose only call is a PEPE buy, each with "coingecko: $ETH #2, …" after it.
+  const endings = ["alan has been stacking it all week", "wif and bonk are doing even better", "a nice one to have in the book", "alan is long it", "alan is buying it"];
+  const alan: AgentFacts = { ...FACTS, name: "Alan Al Dale" };
+  for (const end of endings) {
+    const w = await world(t, { env: RESEARCH_ON, research: majorsResearch().research, facts: alan, answer: `coingecko shows it up sharply today, ${end}. Say stop to opt out.` });
+    w.setInbox([tag({ text: "@pine_stoat how's eth doing?" })]);
+    await w.step();
+    assert.deepEqual(w.asked(), [], end);
+    const text = String(w.sends[0]?.text ?? "");
+    assert.ok(text.endsWith(`${MAJOR_LINE} say stop to opt out.`) && !text.includes(end), text);
+  }
+  // A coin answer that is still drafted (a tagged contract, looked up on the index) is gated the same way: its own name is itself.
+  for (const end of endings.filter((e) => !/wif and bonk/.test(e))) {
+    const w = await world(t, { env: RESEARCH_ON, research: fakeResearch().research, facts: alan,
+      answer: `the public index shows liquidity is thin, ${end}. Say stop to opt out.` });
+    w.setInbox([tag({ text: ASK_CA })]);
+    await w.step();
+    const [row] = await w.answers();
+    assert.equal(row!.status, "skipped", end);
+    assert.match(row!.reason ?? "", /^gate:(?:buy-claim|hype)$/, end);
+    assert.deepEqual(w.sends, [], end);
+  }
+});
+
 test("majors: a copycat ticker gets no figures, and goes on as a coin of the chain", async (t) => {
   const m = majorsResearch();
   const w = await world(t, { env: RESEARCH_ON, research: m.research, answer: "couldn't look that one up just now, sorry. Say stop to opt out." });

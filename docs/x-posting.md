@@ -971,7 +971,10 @@ other owner's agent, and its posting and reply warnings, are unchanged.
   line's sanitiser refuses (a political name, a hype word). With no
   CoinGecko Pro key, majors are off and nothing is asked; a tag goes on
   exactly as before. A named major is a named coin
-  for the never-confirm-a-buy rule: no buys list, no first person, never its
+  for the never-confirm-a-buy rule: no buys list, no first person (nor the
+  third: any drafted answer about a named coin that names the agent itself,
+  "alan", "the agent", "this account", or says stacking or accumulating, is
+  refused as a buy claim, red-team 2026-10-12), never its
   name in the words. **A major's words are code's, never a draft**
   (red-team 2026-10-12: beside `coingecko: $ETH #2, …` drafts said "looks
   set to keep climbing toward new highs", "a dip from here would be a gift",

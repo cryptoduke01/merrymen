@@ -242,6 +242,19 @@ describe("a reply never gives advice or a forecast in other words (red-team 2026
       assert.equal(reason(`${ok} Say stop to opt out.`, { kind: "reply", mode: "live", coins: [] }), "ok", ok);
     }
   });
+
+  it("of a named coin, it never says it holds or buys it in the third person, nor recommends holding it (red-team 2026-10-12)", () => {
+    const named: Partial<XGateCtx> = { kind: "reply", agentName: "Alan Al Dale", mode: "live", coins: [], buys: "none", named: true, unsaid: ["PEPE", "Pepe"] };
+    // Each admitted at 34ced01e beside "coingecko: $ETH #2, …".
+    for (const end of ["alan has been stacking it all week", "alan is long it", "alan is buying it", "a nice one to have in the book",
+      "alan al dale holds a bag of it", "the agent here bought more", "this account has been accumulating it", "dale's been stacking"]) {
+      assert.notEqual(reason(`coingecko shows it up sharply today, ${end}. Say stop to opt out.`, named), "ok", end);
+    }
+    // Stacking is a buy said without "i", whatever else the answer was told.
+    assert.equal(reason("the public index shows thin liquidity, been stacking it lately. Say stop to opt out.", { kind: "reply", mode: "live", coins: [], buys: "none" }), "buy-claim");
+    // A read of the coin, with no word about itself, still passes.
+    assert.equal(reason("coingecko shows it up sharply today, volume ordinary. not a call. Say stop to opt out.", named), "ok");
+  });
 });
 
 describe("public replies preserve the X safeguards and require an opt-out", () => {

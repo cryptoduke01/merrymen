@@ -867,7 +867,9 @@ const COIN_ADVICE = new RegExp(
     String.raw`|set\s+to\s+(?:keep\s+)?(?:climb|run|rise|rally|go|break|move|pop|fly|soar|continue|pump)|keep\s+(?:on\s+)?(?:climbing|going|running|rising|pumping|ripping|rallying|flying|soaring)` +
     String.raw`|could\s+keep|(?:steam|gas|juice|fuel)\s+left|steam\s+in\s+(?:it|this|these|them)|(?:has|have|got)\s+(?:more\s+|some\s+)?legs|legs\s+(?:left|to\s+run)` +
     String.raw`|still\s+early\s+(?:on|in|for)\s+(?:this|the|it|all|these|them)|(?:would|will|'d)\s+be\s+a\s+gift|a\s+gift\s+(?:here|at|from)|dips?\s+(?:to\s+buy|would\s+be|is\s+a|here)` +
-    String.raw`|more\s+to\s+come|up\s+only|only\s+(?:goes|going)\s+up)\b`,
+    String.raw`|more\s+to\s+come|up\s+only|only\s+(?:goes|going)\s+up` +
+    // A HOLDING RECOMMENDED WITHOUT A VERB OF ITS OWN (red-team 2026-10-12): "a nice one to have in the book".
+    String.raw`|(?:nice|good|great|solid|fine|safe)\s+one\s+to\s+(?:have|own|hold|keep)|to\s+have\s+in\s+(?:the|a|your|my|any)\s+(?:book|bag|portfolio|stack))\b`,
   "i",
 );
 
@@ -1270,7 +1272,7 @@ export function tickerRefusal(ticker: unknown): string | null {
  * when…" is a habit and "the buying" a noun; neither is a buy. A bag is a
  * holding.
  */
-const ACQUIRED = /\b(?:bought(?:\s+into)?|grabbed|grabbing|picked\s+up|picking\s+up|scooped(?:\s+up)?|snagged|copped|aped(?:\s+in(?:to)?)?|aping(?:\s+in(?:to)?)?|got\s+in(?:to)?(?:\s+on)?|getting\s+in(?:to)?(?:\s+on)?|entered|added|loaded\s+up(?:\s+on)?|went\s+in(?:\s+on)?|took\s+a\s+position\s+in|(?:been|i'?m|im|was|were)\s+buying)\b/gi;
+const ACQUIRED = /\b(?:bought(?:\s+into)?|grabbed|grabbing|picked\s+up|picking\s+up|scooped(?:\s+up)?|snagged|copped|aped(?:\s+in(?:to)?)?|aping(?:\s+in(?:to)?)?|got\s+in(?:to)?(?:\s+on)?|getting\s+in(?:to)?(?:\s+on)?|entered|added|loaded\s+up(?:\s+on)?|went\s+in(?:\s+on)?|took\s+a\s+position\s+in|(?:been|i'?m|im|was|were)\s+buying|stack(?:ed|ing)(?:\s+up)?|accumulat(?:ed|ing))\b/gi;
 const BAG = /\bbag(?:s|ged|holder|holders|holding)?\b/i;
 /** What may come between a buy and what it was of: "a little", "some of the". */
 const BUY_FILLER: ReadonlySet<string> = new Set("a an the some little bit of couple few small more another new fresh early my".split(" "));
@@ -1293,7 +1295,7 @@ const BUY_OBJECT: ReadonlySet<string> = new Set(("it its them those these that t
  * person is not read: "the creator still holding a big chunk" and "late
  * buyers end up holding it" are what research says.
  */
-const OWN_VERB = String.raw`(?:purchas(?:e|es|ed|ing)|nabb?(?:ed|ing|s)?|snapp(?:ed|ing)|snag(?:g(?:ed|ing))?|traded|pick(?:ed|ing)?|took|got|gotten|own(?:ed|ing|s)?|hold(?:s|ing)?|held|scoop(?:ed|ing)?|copp?(?:ed|ing)?|bought|grabb?(?:ed|ing)?|aped|aping|bagg?(?:ed|ing)|added|loaded|went\s+(?:for|with|in(?:to)?|all)|go(?:ing)?\s+(?:for|with)\s+it)`;
+const OWN_VERB = String.raw`(?:purchas(?:e|es|ed|ing)|nabb?(?:ed|ing|s)?|snapp(?:ed|ing)|snag(?:g(?:ed|ing))?|traded|pick(?:ed|ing)?|took|got|gotten|own(?:ed|ing|s)?|hold(?:s|ing)?|held|scoop(?:ed|ing)?|copp?(?:ed|ing)?|bought|grabb?(?:ed|ing)?|aped|aping|bagg?(?:ed|ing)|added|loaded|went\s+(?:for|with|in(?:to)?|all)|go(?:ing)?\s+(?:for|with)\s+it|stack(?:s|ed|ing)?|accumulat(?:e|es|ed|ing))`;
 const BY_ME = String.raw`\b(?:i|we|i'?ve|ive|we'?ve|i'?m|im|we'?re|i'?d)\s+(?:(?:just|already|also|recently|still|been|finally|only|sure|even|did|do|have|had|really|actually|kinda)\s+){0,2}`;
 const CLAUSE_OPEN = String.raw`(?:^|[,.;:!?—–]\s*|\b(?:and|but|so|then|yep|yeah|yes|yup|ya|honestly|sure)[\s,]+)(?:(?:just|already|also|recently|still|been|finally|only)\s+){0,2}`;
 const OWNED_ACT = new RegExp(String.raw`(?:${BY_ME}|${CLAUSE_OPEN})${OWN_VERB}\b`, "iu");
@@ -1362,11 +1364,24 @@ const DEFLECTIONS: readonly RegExp[] = [
   /\b(?:i'?m|im|i\s+am|we'?re)\s+(?:(?:still|just|only|strictly|trading|playing)\s+)*on\s+paper\b|\b(?:i|we)\s+(?:only\s+|just\s+)?(?:trade|play)\s+(?:it\s+)?on\s+paper\b/giu,
   /\b(?:i|we)\s+(?:don'?t|do\s+not|never)\s+(?:give|do|hand\s+out|make|offer)\s+(?:out\s+)?(?:advice|calls|picks|tips|predictions)\b/giu,
 ];
-function namedClaim(text: string): boolean {
+/**
+ * AND NOT IN THE THIRD PERSON EITHER (red-team 2026-10-12): beside a coin's
+ * figures, "alan has been stacking it all week", "alan is long it" and "alan
+ * is buying it" were admitted, since only "i", "my" and "we" were read. Its
+ * own name (whole, or any word of it of three letters or more: "alan",
+ * "dale"), "this account", "the agent", "the bot" or its owner is itself.
+ */
+const SPEAKS_OF_ITSELF_AS_ANOTHER = /\b(?:this\s+(?:account|agent|bot|page|profile)|the\s+(?:agent|bot|account)\s+here|the\s+agent|(?:the|its|their)\s+owner|merrymen'?s?\s+(?:agent|bot|account))\b/iu;
+function selfNamed(text: string, agentName: string): boolean {
+  const name = agentName.trim();
+  if (!name) return false;
+  return [name, ...name.split(/\s+/).filter((w) => /^\p{L}{3,}$/u.test(w))].some((n) => mentions(text, n));
+}
+function namedClaim(text: string, agentName = ""): boolean {
   if (AFFIRM.test(text) || LIKED.test(text)) return true;
   let rest = text;
   for (const re of DEFLECTIONS) rest = rest.replace(re, " ");
-  return SPEAKS_OF_ITSELF.test(rest);
+  return SPEAKS_OF_ITSELF.test(rest) || SPEAKS_OF_ITSELF_AS_ANOTHER.test(rest) || selfNamed(rest, agentName);
 }
 
 /**
@@ -1556,7 +1571,7 @@ function admitMasked(tidied: string, ctx: XGateCtx, baseGate: BaseGate, agentNam
   // Told its buys: no word that could be another coin's name (XGateCtx.known).
   if (ctx.buys === "vouched" && ctx.known !== undefined && unvouchedWord(withoutNames(ctx.kind === "reply" ? withoutReplyOptOut(text) : text, [agentName]), coins, strings(ctx.known))) return refuse("buy-claim");
   // Nor, of a coin someone named, that it likes it, a yes or a no, or itself outside a deflection (namedClaim).
-  if (ctx.buys === "none" && ctx.named === true && namedClaim(ctx.kind === "reply" ? withoutReplyOptOut(text) : text)) return refuse("buy-claim");
+  if (ctx.buys === "none" && ctx.named === true && namedClaim(ctx.kind === "reply" ? withoutReplyOptOut(text) : text, agentName)) return refuse("buy-claim");
 
   if (text.length > XPOST_MAX_CHARS || xWeightedLength(text) > X_MAX_WEIGHTED) return refuse("too-long");
   if (words(text) < XPOST_MIN_WORDS) return refuse("too-short");
