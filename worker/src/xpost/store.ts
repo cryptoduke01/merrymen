@@ -11,7 +11,8 @@
  *     cancelled or failed. The UNIQUE dedupe_key and the conditional claim are
  *     what make a post at-most-once across crashes and replicas.
  *   xpost_meta     — fleet counters: the model's daily budget, the day's post
- *     allowance, the fleet's pauses and comment polling cursors.
+ *     allowance, the fleet's pauses and comment polling cursors; the
+ *     per-person answer locks and an owner's replies-off mark.
  *   xpost_reply_accounts — separate consent for selected comment replies.
  *   xpost_reply_targets — durable comment, parent and author ids per reply.
  *   xpost_reply_optouts — recipient opt-outs per posting account and author.

@@ -69,6 +69,7 @@ import {
   repliesEnabledFor,
   replyConsentAt,
   firstReplyConsentAt,
+  repliesOffKey,
   repliesOptedOut,
   readMeta,
   recentBodies,
@@ -732,9 +733,6 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         // after the call) keeps its unit, while a send X certainly refused gives
         // its unit back. Read here only to skip planning while it is reached.
         let ceiling = ((await readMeta(shared, `posts:${utcDay(nowMs)}`))?.n ?? 0) >= fleetPerDay;
-        // Process opt-outs before sending, even with no model budget. A reply
-        // sends only on a pass that successfully refreshed this X account's
-        // mentions; a read outage never turns a stale inbox into permission.
         // THE OPERATOR'S OWN AGENTS' REPLY CONSENT, before they are polled.
         // MERRYMEN_XPOST_ACTIVE_TENANTS names the operator's own agents: the
         // operator is their owner, so with posting on (a consent already
@@ -747,11 +745,17 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
           for (const account of accounts) {
             if (!active.has(account.tenant.toLowerCase()) || !repliesFor(account.tenant)) continue;
             if ((await replyConsentAt(shared, account.tenant, account.xUserId)) !== null) continue;
+            // A cheap read first, so an owner's standing "off" costs no locked
+            // write every pass; setReplying decides it again under the lock.
+            if ((await readMeta(shared, repliesOffKey(account.tenant))) !== null) continue;
             if (await setReplying(shared, account.tenant, true, account.xUserId, at(), { house: true })) {
               notes.push(`xpost: recorded reply consent for house agent ${account.tenant} on its connected X account (MERRYMEN_XPOST_ACTIVE_TENANTS); turning replies off in Settings is never overridden`);
             }
           }
         }
+        // Process opt-outs before sending, even with no model budget. A reply
+        // sends only on a pass that successfully refreshed this X account's
+        // mentions; a read outage never turns a stale inbox into permission.
         // Only the owners the operator's scope approves are polled at all.
         const comments = !pause && repliesApproved
           ? await pollComments(shared, accounts.filter((a) => repliesFor(a.tenant)), nowMs, at, bump)
