@@ -949,6 +949,28 @@ describe("never confirm a buy by name", () => {
     assert.deepEqual(named.facts, []);
   });
 
+  it("its latest buy post is one of the money it trades with now, never the other (red-team 2026-10-12)", async () => {
+    const PAPER_PEPE: CallFact = { ...CALL, decisionId: "d-pepe", paper: true, atSec: (NOW - 40 * HOUR) / 1000 };
+    const pepePost: XPost = { ...buyPost, id: 2, decisionId: "d-pepe", coin: "Pepe", body: `grabbed some pepe on paper, the curve looked early CA (Robinhood Chain): ${PEPE_CA}`,
+      createdAtMs: NOW - 39 * HOUR };
+    const general = { kind: "own-trades", why: false, coin: null, address: null } as const;
+    // S5a: live, its one recent buy a paper PEPE whose buy post is its latest.
+    const s5a = await fakes().research.gather(input(general, { facts: { ...FACTS, mode: "live", calls: [PAPER_PEPE] }, posts: [pepePost] }));
+    assert.deepEqual(s5a.facts, []);
+    // S5b: three live buys since, none posted; the latest posted buy is still the paper PEPE.
+    const live = (decisionId: string, symbol: string, name: string): CallFact => ({ ...CALL, decisionId, symbol, name, token: null, paper: false, atSec: (NOW - 3 * HOUR) / 1000 });
+    const s5b = await fakes().research.gather(input(general, { facts: { ...FACTS, mode: "live", calls: [live("d-wif", "WIF", "Wif"), live("d-bonk", "BONK", "Bonk"), live("d-mog", "MOG", "Mog"), PAPER_PEPE] },
+      posts: [pepePost] }));
+    assert.deepEqual(s5b.facts, []);
+    // A live buy post of a live buy is still its latest; one of no known buy, or whose words say paper, never.
+    const wifPost: XPost = { ...buyPost, id: 3, decisionId: "d-wif", coin: "Wif", body: "picked up a bit of wif, the buying looked steady", createdAtMs: NOW - 2 * HOUR };
+    const facts5 = { ...FACTS, mode: "live" as const, calls: [live("d-wif", "WIF", "Wif"), PAPER_PEPE] };
+    assert.deepEqual((await fakes().research.gather(input(general, { facts: facts5, posts: [pepePost, wifPost] }))).facts,
+      ["what you posted on X about your latest buy: picked up a bit of wif, the buying looked steady"]);
+    assert.deepEqual((await fakes().research.gather(input(general, { facts: facts5, posts: [{ ...wifPost, decisionId: "d-gone" }] }))).facts, []);
+    assert.deepEqual((await fakes().research.gather(input(general, { facts: facts5, posts: [{ ...wifPost, body: "picked up a bit of wif on paper, the buying looked steady" }] }))).facts, []);
+  });
+
   it("a coin named by research's own ticker resolution is never its history: \"$PEPE\" finding its PEPE buy is a name", async () => {
     const r = fakes();
     const b = await r.research.gather(input({ kind: "coin", ticker: "PEPE", address: null }, { facts, posts: [buyPost] }));

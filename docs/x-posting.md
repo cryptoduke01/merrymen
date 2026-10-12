@@ -776,8 +776,11 @@ looks things up first, the way Shogun does in a Telegram group
   ca <its PEPE contract>" or "is merrycoin <contract> the one you bought?"
   carries another name, which no matcher can rule out, so it never reads its
   history or the creator's text. That bundle is marked exact, and only then
-  may the answer say it bought the coin (`boughtExact`). A general question about its own trades, which names
-  no coin, may be told its latest buy post; a named coin never is. A
+  may the answer say it bought the coin (`boughtExact`). A general question
+  about its own trades, which names no coin, may be told its latest buy
+  post; a named coin never is. That post is the newest one of a known buy
+  made with the money it trades with now, whose own words do not say the
+  other money: a live agent is never handed "grabbed some pepe on paper". A
   `$ticker` it bought beside a different contract ("is $PEPE <copycat>
   legit?"), including one that shares the bought contract's last eleven hex,
   is a conflict: nothing is looked up at all, and nothing is said about what

@@ -906,8 +906,18 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
             if (!i.coin && !i.address) {
               // A coin named some other way ("did you buy pepe inu?") gets none of its buys.
               if (input.coinNamed) return { facts: [], lookups, notes };
-              const latest = input.posts.filter((p) => p.kind === "buy" && p.status === "posted").sort((a, b) => b.createdAtMs - a.createdAtMs)
-                .map((p) => ownPostProse(p.body)).find(sayable);
+              // ONLY A BUY POST OF THE MONEY IT TRADES WITH NOW (red-team review,
+              // 2026-10-12): its newest buy post was handed over whatever its
+              // buy's money, so a live agent was told "grabbed some pepe on
+              // paper" beside "You trade with real money". A post whose buy is
+              // not a known call, or whose own words say the other money, is
+              // never the one.
+              const money = new Map(f.calls.filter((c) => c.side === "buy").map((c) => [c.decisionId, c.paper] as const));
+              const latest = input.posts.filter((p) => p.kind === "buy" && p.status === "posted" && p.decisionId !== null && money.has(p.decisionId)
+                && ownMoney(f.mode, money.get(p.decisionId)!)).sort((a, b) => b.createdAtMs - a.createdAtMs)
+                .map((p) => ({ prose: ownPostProse(p.body), paper: money.get(p.decisionId!)! }))
+                .filter(({ prose, paper }) => { const said = moneySaid(prose); return said === null || said === (paper ? "paper" : "live"); })
+                .map(({ prose }) => prose).find(sayable);
               return { facts: latest ? [`what you posted on X about your latest buy: ${latest}`].filter(sayable) : [], lookups, notes };
             }
             // A COIN NAMED: only the exact path, the tag's own full contract
