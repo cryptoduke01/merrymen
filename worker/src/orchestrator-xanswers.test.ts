@@ -82,7 +82,7 @@ async function world(t: TestContext, o: {
     return { status: 201, headers: { get: () => null }, text: async () => JSON.stringify({ data: { id: `1000000000000001${sends.length}0` } }) };
   };
   const env = { ...(o.active === false ? {} : { MERRYMEN_XPOST_ACTIVE_TENANTS: TENANT }), ...o.env };
-  const systems: string[] = [];
+  const systems: string[] = [], everySystem: string[] = [];
   const poster = makeXPoster({
     app: { clientId: "client", clientSecret: "secret", redirectUri: "https://app.test/connect/x" }, dek,
     creds: { provider: "groq", transport: "openai", model: "test", apiKey: "private-model", baseUrl: "https://model.test/v1", vision: false },
@@ -94,6 +94,7 @@ async function world(t: TestContext, o: {
       // Only the answer prompt gets words back: every other draft passes.
       llm: async (_creds, input) => {
         prompts.push(input.prompt);
+        everySystem.push(input.system ?? "");
         if (/Untrusted question/.test(input.prompt)) systems.push(input.system ?? "");
         return /Untrusted question/.test(input.prompt) ? o.answer ?? ANSWER : "PASS";
       },
@@ -103,7 +104,7 @@ async function world(t: TestContext, o: {
   const step = (now = NOW) => { clock = now; return poster.step(db, [{ tenant: TENANT, agentId: TENANT }, ...others.map((t) => ({ tenant: t, agentId: t }))], new Map(), now); };
   const answers = async () => (await store.postsOf(db, TENANT, 0)).filter((p) => p.kind === "answer");
   const asked = () => prompts.filter((p) => /Untrusted question/.test(p));
-  return { db, step, answers, asked, systems, sends, reads, setInbox: (v: Record<string, unknown>[]) => { inbox = v; }, garble: (on: boolean) => { garbled = on; } };
+  return { db, step, answers, asked, systems, everySystem, sends, reads, setInbox: (v: Record<string, unknown>[]) => { inbox = v; }, garble: (on: boolean) => { garbled = on; } };
 }
 
 test("the operator's active owners are read by address only, and a bad entry is named by position", () => {
@@ -200,6 +201,30 @@ test("an answer handed anything looked up is marked by that, and never restated 
   // An answer handed nothing looked up is not marked.
   const chat = (await w.answers()).find((a) => a.replyToTweetId === "100000000000000151");
   assert.equal(chat?.coin, null);
+});
+
+test("a research answer is never shown to a later prompt as a recent post, and the gate still keeps a draft from repeating it", async (t) => {
+  const read = "the public index shows liquidity is thin, and fomo traders mostly argue it's still early. Say stop to opt out.";
+  const bare = "thin liquidity and holders bunched up at the top, spicy one. Say stop to opt out.";
+  const w = await world(t, { env: RESEARCH_ON, research: fakeResearch().research, answer: bare });
+  // One posted earlier with its sources in its words, one marked by what it was handed.
+  const id = await store.schedulePost(w.db, { tenant: TENANT, xUserId: "111", kind: "answer", dedupeKey: "answer:111:100000000000000065",
+    body: read, nowMs: NOW - 2 * HOUR, dueAtMs: NOW - 2 * HOUR,
+    replyToTweetId: "100000000000000065", replyRootTweetId: "100000000000000065", replyAuthorId: "665" });
+  await store.claimPost(w.db, id!, NOW - HOUR);
+  await store.markPosted(w.db, id!, "100000000000000066", NOW - HOUR);
+  w.setInbox([tag({ text: `@pine_stoat thoughts on ${CA}?` }),
+    tag({ id: "100000000000000152", conversation_id: "100000000000000152", author_id: "152", created_at: new Date(NOW - MIN + 1).toISOString(), text: "@pine_stoat gm, how's your day going?" })]);
+  await w.step();
+  const answers = (await w.answers()).filter((a) => a.dedupeKey !== "answer:111:100000000000000065").sort((a, b) => a.id - b.id);
+  assert.equal(answers[0]!.coin, store.ANSWER_LOOKED_UP);
+  assert.equal(answers[0]!.status, "scheduled", answers[0]!.reason ?? "");
+  // Both the earlier research answer and this pass's own were kept out of every later prompt...
+  assert.ok(w.everySystem.length >= 2, "the later tag was drafted too");
+  for (const system of w.everySystem) assert.doesNotMatch(system, /public index|bunched up/);
+  // ...and the gate still saw this pass's: the same words for the next tag are a repeat.
+  assert.equal(answers[1]!.status, "skipped");
+  assert.match(answers[1]!.reason ?? "", /^gate:/);
 });
 
 test("the owner's night never holds an answer: a tag is answered and sent while the owner sleeps", async (t) => {

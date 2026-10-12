@@ -1291,8 +1291,9 @@ export async function introPostsOf(db: Db, tenant: string, xUserId: string): Pro
  * uses. Research for a tag a stranger asked (an index read, Fomo's talk, a
  * flow band, a creator's claim) is true only of that coin and that moment;
  * the model may say it without any source word ("thin liquidity and holders
- * bunched up"), so it is never handed on — not as what it already said, and
- * not as a casual post's theme.
+ * bunched up"), so it is never handed on — not as what it already said, not
+ * as a casual post's theme, and not as a recent post a prompt is shown
+ * (ownRecentBodies). The gate still sees it, so nothing repeats it.
  */
 export const ANSWER_LOOKED_UP = "looked-up";
 
@@ -1331,6 +1332,32 @@ export async function recentBodies(db: Db, opts: { tenant: string | null; sinceM
         )
         .all(tenantKey(opts.tenant), int(opts.sinceMs), lim)) as { body: unknown }[];
   return rows.map((r) => String(r.body ?? "")).filter((b) => b !== "");
+}
+
+/**
+ * ONE OWNER'S RECENT BODIES, read once, twice over: `all` (recentBodies,
+ * scheduled, sending or posted), what each draft is gated against so it never
+ * repeats one; and `shown`, the same less every answer that carried
+ * something looked up (ANSWER_LOOKED_UP), what a prompt may be shown as its
+ * recent posts. Newest first.
+ */
+export async function ownRecentBodies(db: Db, opts: { tenant: string; sinceMs: number; limit: number }): Promise<{ all: string[]; shown: string[] }> {
+  const lim = int(Math.max(1, Math.min(2000, opts.limit)));
+  const rows = (await db
+    .prepare(
+      `SELECT body, kind, coin FROM xpost_posts
+        WHERE tenant = ? AND status IN ('scheduled', 'sending', 'posted') AND created_at_ms >= ?
+        ORDER BY created_at_ms DESC, id DESC LIMIT ?`,
+    )
+    .all(tenantKey(opts.tenant), int(opts.sinceMs), lim)) as { body: unknown; kind: unknown; coin: unknown }[];
+  const all: string[] = [], shown: string[] = [];
+  for (const r of rows) {
+    const body = String(r.body ?? "");
+    if (body === "") continue;
+    all.push(body);
+    if (!(r.kind === "answer" && r.coin === ANSWER_LOOKED_UP)) shown.push(body);
+  }
+  return { all, shown };
 }
 
 const X_ID = /^\d{1,25}$/;

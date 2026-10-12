@@ -482,7 +482,11 @@ column otherwise), because the model may say "thin liquidity and holders
 bunched up" with no source word at all. A post naming the public index,
 fomo, on-chain data, a project or its creator, or a contract
 (`carriesResearch`) is kept out as well. Both are kept out of what a later
-answer may restate as said, too.
+answer may restate as said, too, and out of the recent posts every prompt
+is shown so it does not echo them (casual, buy, sell, intro, answer and
+comment-reply prompts alike: `ownRecentBodies`). The gate still checks each
+draft against all of its recent posts, research answers included, so none
+is repeated.
 
 **Answers to tags.** With replies in scope (`MERRYMEN_XPOST_REPLIES_APPROVED`
 is `1` or `active`) and the owner's reply consent, an active owner's agent

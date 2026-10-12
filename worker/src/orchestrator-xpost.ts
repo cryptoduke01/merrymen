@@ -74,6 +74,7 @@ import {
   firstReplyConsentAt,
   repliesOffKey,
   repliesOptedOut,
+  ownRecentBodies,
   readMeta,
   recentBodies,
   releaseSpan,
@@ -1275,7 +1276,15 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
           model,
           kinds: { buys: account.prefs.buys, casual: account.prefs.casual },
         });
-        const recentOwn = await recentBodies(shared, { tenant: account.tenant, sinceMs: planNow - OWN_MEMORY_MS, limit: 200 });
+        // ITS RECENT POSTS, TWICE: `recentOwn`, everything, what each draft is
+        // gated against; `shownOwn`, what a prompt is shown as its recent
+        // posts, never an answer that carried research (by its row's mark,
+        // ANSWER_LOOKED_UP, and by its source words, carriesResearch). A
+        // stranger's coin read is never put in front of a casual post or the
+        // next answer, and the gate still keeps either from repeating it.
+        const own = await ownRecentBodies(shared, { tenant: account.tenant, sinceMs: planNow - OWN_MEMORY_MS, limit: 200 });
+        const recentOwn = own.all;
+        const shownOwn = own.shown.filter((b) => !carriesResearch(b));
         const talked = talkedOf(posts, account.tenant);
         for (const intent of intents) {
           if (drafts >= MAX_DRAFTS_PER_PASS) {
@@ -1284,7 +1293,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
             cut = true;
             break;
           }
-          const r = await writeIntent(shared, account, f, intent, planNow, recentOwn, recentFleet, talked);
+          const r = await writeIntent(shared, account, f, intent, planNow, recentOwn, shownOwn, recentFleet, talked);
           if (r.outcome === "key-spent") continue;
           bump(r.outcome);
           if (r.outcome === "no-model-budget") {
@@ -1294,6 +1303,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
           if (r.outcome !== "call-gone") drafts++;
           if (r.body) {
             recentOwn.unshift(r.body);
+            if (!carriesResearch(r.body)) shownOwn.unshift(r.body);
             recentFleet.unshift(r.body);
           }
         }
@@ -1320,12 +1330,17 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
           for (let i = 0; i < (isActive ? ANSWERS_PER_POLL : 1) && answerDrafts < MAX_ANSWER_DRAFTS_PER_PASS; i++) {
             const result = isActive
               // Its OWN posts only: another owner posting on the same X account is not its history.
-              ? await writeAnswer(shared, account, f, comments.get(account.xUserId)!, z.tz, at, recentOwn, recentFleet, said, posts.filter((p) => p.tenant === account.tenant), bump, nowMs + SEND_BUDGET_MS)
-              : await writeReply(shared, account, f, comments.get(account.xUserId)!, z.tz, at, recentOwn, recentFleet);
+              ? await writeAnswer(shared, account, f, comments.get(account.xUserId)!, z.tz, at, recentOwn, shownOwn, recentFleet, said, posts.filter((p) => p.tenant === account.tenant), bump, nowMs + SEND_BUDGET_MS)
+              : await writeReply(shared, account, f, comments.get(account.xUserId)!, z.tz, at, recentOwn, shownOwn, recentFleet);
             if (!result) break;
             answerDrafts++;
             bump(result.body ? (isActive ? "drafted-answer" : "drafted-reply") : (isActive ? "answer-skipped" : "reply-skipped"));
-            if (result.body) { recentOwn.unshift(result.body); recentFleet.unshift(result.body); }
+            if (result.body) {
+              recentOwn.unshift(result.body);
+              // This pass's own research answer is never shown to the next prompt either.
+              if (!result.lookedUp && !carriesResearch(result.body)) shownOwn.unshift(result.body);
+              recentFleet.unshift(result.body);
+            }
           }
         }
       } catch (e) {
@@ -1374,9 +1389,9 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
    */
   async function writeAnswer(
     shared: Db, account: XAccount, f: AgentFacts, comments: XReply[], tz: string | null,
-    at: () => number, recentOwn: string[], recentFleet: string[], said: string[], posts: readonly XPost[] = [],
+    at: () => number, recentOwn: string[], shownOwn: string[], recentFleet: string[], said: string[], posts: readonly XPost[] = [],
     bump: (k: string, n?: number) => void = () => {}, sendBy = Number.POSITIVE_INFINITY,
-  ): Promise<{ body: string | null } | null> {
+  ): Promise<{ body: string | null; lookedUp?: boolean } | null> {
     if (!creds) return null;
     const nowMs = at();
     const consentAt = await replyConsentAt(shared, account.tenant, account.xUserId);
@@ -1442,7 +1457,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         }
       }
       const day = localDay(tz, nowMs);
-      const facts = writerFacts(f, day, recentOwn);
+      // Shown its recent posts without a research answer; gated against them all.
+      const facts = writerFacts(f, day, shownOwn);
       const social = templated ? null : await deps.socialProfile?.(account.tenant);
       const walletPublic = !!social?.publicWallet && social.publicWallet.address.toLowerCase() === f.agentId.toLowerCase();
       // ONE BUNDLE, AT MOST, for this answer — and only with research on.
@@ -1490,15 +1506,15 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         status: body ? "scheduled" : "skipped",
         reason: body ? null : claimed ? "gate:sherwood-claim" : named ? "gate:sherwood-drafted" : verdict && !verdict.ok ? `gate:${verdict.reason}` : "no-draft",
       });
-      return id === null ? null : { body };
+      return id === null ? null : { body, lookedUp };
     }
     return null;
   }
 
   async function writeReply(
     shared: Db, account: XAccount, f: AgentFacts, comments: XReply[], tz: string | null,
-    at: () => number, recentOwn: string[], recentFleet: string[],
-  ): Promise<{ body: string | null } | null> {
+    at: () => number, recentOwn: string[], shownOwn: string[], recentFleet: string[],
+  ): Promise<{ body: string | null; lookedUp?: boolean } | null> {
     if (!creds) return null;
     const nowMs = at();
     const consentAt = await replyConsentAt(shared, account.tenant, account.xUserId);
@@ -1526,7 +1542,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         posts, tenant: account.tenant, xUserId: account.xUserId, nowMs, tz, clock: PLAN_CLOCK, perDay: cadenceOf(account.tenant).perDay, ownerPerDay: account.prefs.perDay });
       if (dueAtMs === null) continue;
       if (!(await takeAllowance(shared, `llm:${utcDay(nowMs)}`, llmPerDay, nowMs))) return null;
-      const facts = writerFacts(f, localDay(tz, nowMs), recentOwn);
+      const facts = writerFacts(f, localDay(tz, nowMs), shownOwn);
       const paper = fill.paper;
       const prompt = replyPrompt({ ...facts, parentBody: parent.body, comment: candidate.text, coin: coin.label, paper });
       const raw = await draft(creds, prompt, { call: deps.llm, timeoutMs: deps.draftTimeoutMs });
@@ -1593,6 +1609,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
     intent: PlanIntent,
     nowMs: number,
     recentOwn: string[],
+    shownOwn: string[],
     recentFleet: string[],
     talked: string[] = [],
   ): Promise<{ outcome: string; body: string | null }> {
@@ -1603,7 +1620,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
     // UNIQUE key refuses. Nothing is done, and nothing is said.
     if ((await keyStatus(shared, intent.dedupeKey)) !== null) return { outcome: "key-spent", body: null };
     const day = PLAN_CLOCK.localDay(null, nowMs);
-    const facts = writerFacts(f, day, recentOwn);
+    // Shown its recent posts without a research answer; gated against them all.
+    const facts = writerFacts(f, day, shownOwn);
     const social = await deps.socialProfile?.(account.tenant);
     if (social?.xVoice === "dry") facts.voice = "dry";
     const wallet = intent.kind === "intro" && social?.publicWallet && social.publicWallet.address.toLowerCase() === f.agentId.toLowerCase()

@@ -13,6 +13,7 @@ import {
   OWNER_PER_DAY_MAX,
   XPOST_ALTERS,
   XPOST_SCHEMA,
+  ANSWER_LOOKED_UP,
   answerAuthorKey,
   answerAuthorSpent,
   repliesOffKey,
@@ -34,6 +35,7 @@ import {
   markPosted,
   markRevoked,
   ownerCancel,
+  ownRecentBodies,
   ownerSendTimesSince,
   tradeSendTimesSince,
   postingAccounts,
@@ -430,6 +432,26 @@ test("recent bodies: one account's, or the fleet's, never the ones that did not 
   assert.deepEqual(await recentBodies(db, { tenant: OWNER_A, sinceMs: 0, limit: 10, posted: true }), ["five"]);
   assert.deepEqual(await recentBodies(db, { tenant: OWNER_A, sinceMs: 0, limit: 10 }), ["five", "one"]);
   assert.equal(await cancelScheduled(db, OWNER_B, 50, "turned-off"), 1);
+});
+
+test("an answer marked as handed research is never handed on, only gated against", async (t) => {
+  const { db } = await open(t);
+  await upsertAccount(db, DEK, { tenant: OWNER_A, xUserId: "111", username: "r", tokens: TOKENS, nowMs: 1 });
+  await setPosting(db, OWNER_A, { enabled: true, xUserId: "111" }, 2);
+  await setReplying(db, OWNER_A, true, "111", 3);
+  const answer = (id: string, body: string, nowMs: number, coin: string | null): NewPost => post({ kind: "answer", dedupeKey: `answer:111:${id}`, body, coin,
+    replyToTweetId: id, replyRootTweetId: id, replyAuthorId: `9${id}`, nowMs, dueAtMs: nowMs });
+  await schedulePost(db, post({ dedupeKey: "casual:a", body: "soup weather", nowMs: 10 }));
+  await schedulePost(db, answer("701", "thin liquidity and holders bunched up", 20, ANSWER_LOOKED_UP));
+  await schedulePost(db, answer("702", "patience mostly", 30, null));
+  // The mark is an answer's: any other kind with a coin is a coin post, handed on as ever.
+  await schedulePost(db, post({ kind: "buy", dedupeKey: "buy:x", body: "grabbed some frog", coin: ANSWER_LOOKED_UP, nowMs: 40 }));
+  assert.deepEqual(await ownRecentBodies(db, { tenant: OWNER_A, sinceMs: 0, limit: 10 }), {
+    all: ["grabbed some frog", "patience mostly", "thin liquidity and holders bunched up", "soup weather"],
+    shown: ["grabbed some frog", "patience mostly", "soup weather"],
+  });
+  assert.deepEqual(await recentBodies(db, { tenant: OWNER_A, sinceMs: 0, limit: 10, exceptLookedUp: true }), ["grabbed some frog", "patience mostly", "soup weather"]);
+  assert.deepEqual(await recentBodies(db, { tenant: OWNER_A, sinceMs: 0, limit: 10 }), ["grabbed some frog", "patience mostly", "thin liquidity and holders bunched up", "soup weather"]);
 });
 
 test("an allowance is taken atomically and stops at its limit", async (t) => {
