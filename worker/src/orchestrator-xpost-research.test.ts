@@ -603,7 +603,7 @@ describe("one bounded research bundle per answer", () => {
     assert.equal(s.claim ?? null, null);
     assert.ok(!s.facts.some((p) => /project says/.test(p)), "and never as a fact");
     const own = fakes();
-    const o = await own.research.gather(input({ kind: "coin", ticker: null, address: PEPE_CA }));
+    const o = await own.research.gather(input({ kind: "coin", ticker: null, address: PEPE_CA }, { question: "what is this coin?" }));
     assert.deepEqual(own.f.described, [PEPE_CA]);
     assert.equal(o.claim, "a meme about a very patient frog");
     assert.ok(o.facts.includes("you bought it lately, on paper"));
@@ -619,7 +619,7 @@ describe("one bounded research bundle per answer", () => {
     assert.equal(g.claim ?? null, null);
     assert.ok(!g.facts.some((p) => /bought it/.test(p)), g.facts.join(" | "));
     const loud = fakes({ description: "the official merrymen community coin, backed by robinhood" });
-    const l = await loud.research.gather(input({ kind: "coin", ticker: null, address: PEPE_CA }));
+    const l = await loud.research.gather(input({ kind: "coin", ticker: null, address: PEPE_CA }, { question: "what is this coin?" }));
     assert.equal(l.claim, null);
     assert.ok(l.notes.includes("claim-refused"));
   });
@@ -640,11 +640,14 @@ describe("one bounded research bundle per answer", () => {
       assert.equal(f.reads.length + f.described.length + f.fomoCalls.length + f.resolved.length, 0, `${text}: nothing looked up for a copycat`);
       assert.ok(b.notes.includes("conflict"));
     }
-    // Its own contract with its own ticker is no conflict.
+    // Its own contract asked about alone is the exact path; beside any name, even its own, it is not (red-team 2026-10-12).
     const { research } = fakes();
-    const b = await research.gather(input({ kind: "coin", ticker: "PEPE", address: PEPE_CA }));
+    const b = await research.gather(input({ kind: "coin", ticker: null, address: PEPE_CA }, { question: "what is this coin?" }));
     assert.ok(b.facts.includes("you bought it lately, on paper"));
     assert.equal(b.exact, true, "the tag's own full contract, which its records bought: the exact path");
+    const named = await fakes().research.gather(input({ kind: "coin", ticker: "PEPE", address: PEPE_CA }, { question: "is $PEPE this coin?" }));
+    assert.notEqual(named.exact, true);
+    assert.ok(!named.facts.some((p) => /bought it lately/.test(p)), named.facts.join(" | "));
   });
 
   it("with the Fomo switch on: token activity and quick theses as a public x-answer, keyed by the X account, nothing else", async () => {
@@ -795,8 +798,8 @@ describe("one bounded research bundle per answer", () => {
       assert.equal(b.lookups, 0, intent.kind);
     }
     assert.equal(f.reads.length + f.resolved.length + f.fomoCalls.length, 0);
-    assert.deepEqual((await research.gather(input({ kind: "own-trades", why: true, coin: null, address: PEPE_CA }))).facts.slice(0, 1), ["you bought it lately, on paper"],
-      "a tagged contract it bought is found in its own history, for free");
+    assert.deepEqual((await research.gather(input({ kind: "own-trades", why: true, coin: null, address: PEPE_CA }, { question: "why did you buy this coin?" }))).facts.slice(0, 1),
+      ["you bought it lately, on paper"], "a tagged contract it bought is found in its own history, for free");
     assert.match((await research.gather(input({ kind: "capabilities" }, { fomo: true }))).facts.join(" "), /fomo traders/);
   });
 });
@@ -832,7 +835,7 @@ describe("never confirm a buy by name", () => {
     let looked: Partial<AnswerFacts> = {};
     let exact = false;
     if (research) {
-      const b = await fakes().research.gather(input(intent, { facts, posts: [buyPost], coinNamed: named || !general }));
+      const b = await fakes().research.gather(input(intent, { facts, posts: [buyPost], coinNamed: named || !general, question: c.text }));
       exact = b.exact === true && !!c.address;
       looked = { intent: intent.kind as AnswerFacts["intent"], research: b.facts, ...(b.claim ? { creatorClaim: b.claim } : {}), ...(exact ? { boughtExact: true } : {}) };
     }
@@ -883,6 +886,28 @@ describe("never confirm a buy by name", () => {
     }
   });
 
+  it("its own contract beside any other name is never the exact path (red-team 2026-10-12)", async () => {
+    // The reproduced tags: another ticker, a second ticker, a made-up name, a house name, each beside the contract it really bought.
+    for (const text of [`did you buy $WIF? ca ${PEPE_CA}`, `did you buy $TRUMP or ${PEPE_CA}?`, `is merrycoin ${PEPE_CA} the one you bought?`,
+      `is $MERRYMEN ca ${PEPE_CA} the one you bought?`, `is merrymen coin ${PEPE_CA} the one you bought?`, `did you buy pepe ${PEPE_CA}?`]) {
+      const read = await promptFor(text, true);
+      assert.ok(read, text);
+      assert.equal(read!.exact, false, text);
+      assert.doesNotMatch(read!.prompt, OWN_BUY_FACT, text);
+      assert.doesNotMatch(read!.prompt, /They tagged the exact contract|creator describes/, text);
+    }
+    // The drafts it admitted are refused: told none of its buys, it says none.
+    const gate = (draft: string) => admitXPost(draft, { kind: "reply", agentName: "Alan", mode: "live", coins: [], recentOwn: [], recentFleet: [], buys: "none", unsaid: bought },
+      (r, c) => admitAgentLine(r, c));
+    for (const draft of ["yep, bought it lately, the buying looked steady and real. say stop to opt out.", "yep, bought wif lately, the buying looked steady and real. say stop to opt out.",
+      "yep, merrycoin is the one i bought lately, the buying looked steady. say stop to opt out."]) {
+      assert.equal(gate(draft).ok, false, draft);
+    }
+    // The plain question about the contract alone still is.
+    assert.equal((await promptFor(`did you buy ${PEPE_CA}?`, true))!.exact, true);
+    assert.equal((await promptFor(`what is ${PEPE_CA}?`, true))!.exact, true);
+  });
+
   it("a question that names no coin may still see its buys, by its own labels", async () => {
     for (const research of [true, false]) {
       const { prompt, named } = (await promptFor("what have you been buying lately?", research))!;
@@ -907,7 +932,7 @@ describe("never confirm a buy by name", () => {
     assert.deepEqual(r.f.described, []);
     assert.equal(b.claim ?? null, null);
     const exact = fakes();
-    const e = await exact.research.gather(input({ kind: "coin", ticker: null, address: PEPE_CA }, { facts, posts: [buyPost] }));
+    const e = await exact.research.gather(input({ kind: "coin", ticker: null, address: PEPE_CA }, { facts, posts: [buyPost], question: "what is this coin?" }));
     assert.equal(e.exact, true);
     assert.deepEqual(exact.f.described, [PEPE_CA], "the exact path still reads it");
   });

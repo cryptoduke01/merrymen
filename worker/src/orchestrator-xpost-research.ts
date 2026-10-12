@@ -209,6 +209,33 @@ export function generalTradesQuestion(text: unknown): boolean {
   return plain !== null && !sherwoodMentioned(text) && GENERAL_ALLOWED.test(plain);
 }
 
+/**
+ * THE ONLY QUESTIONS THE EXACT PATH ANSWERS (red-team review, 2026-10-12).
+ * "did you buy $WIF? ca <its PEPE contract>", "$TRUMP or <contract>?", "is
+ * merrycoin <contract> the one you bought?" each carried the full contract
+ * its records bought, so "you bought it lately" and its own buy post were
+ * handed over under another coin's name, and "yep, bought wif lately" was
+ * admitted. A name beside the contract can be any word at all, so no
+ * matcher can tell whether one is there: the exact path is taken only when
+ * the whole tag, the contract read as "this coin" (tagCandidate), is one of
+ * these plain questions about that coin alone. Anything else carrying a
+ * contract may still be looked up on the index, never in its own history.
+ */
+const THIS_COIN = String.raw`(?:ca:? )?this coin`;
+const EXACT_SHAPES = [
+  `(?:did|have|why did|why'd|when did|when'd) ${YOU} (?:buy|ape|bought|aped|trade|traded)(?: into| in)? ${THIS_COIN}${LATELY}`,
+  `(?:what is|what's|whats) ${THIS_COIN}(?: about)?`,
+  `(?:thoughts|thought|any thoughts) on ${THIS_COIN}`,
+  `(?:is|was) ${THIS_COIN} (?:legit|any good|yours|one of yours|the one you bought|one you bought)`,
+  `(?:what about|tell me about|how about) ${THIS_COIN}`,
+  THIS_COIN,
+];
+const EXACT_ALLOWED = new RegExp(`^${GREETING}(?:${EXACT_SHAPES.join("|")})$`, "u");
+export function exactAsk(text: unknown): boolean {
+  const plain = plainAsk(text);
+  return plain !== null && EXACT_ALLOWED.test(plain);
+}
+
 /** A word of the line, for matching a coin it traded named without a $ sign. */
 const words = (s: string): Set<string> => new Set((s.toLowerCase().match(/[a-z][a-z0-9'-]*/g) ?? []));
 
@@ -393,6 +420,13 @@ export interface ResearchInput {
    * tag carried the full contract its records bought (the exact path).
    */
   coinNamed?: boolean;
+  /**
+   * The screened question, the contract read as "this coin" (tagCandidate).
+   * Its own history of a tagged contract (the exact path) is read only when
+   * this is one of the plain questions about that coin alone (exactAsk);
+   * absent, never.
+   */
+  question?: string;
   /**
    * What is left of the caller's own time, in ms, when that is less than the
    * bundle's twelve seconds: an answer drafted late in a pass gets only what
@@ -839,6 +873,8 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
       };
       const i = input.intent;
       const f = input.facts;
+      // The exact path only for a plain question about the tagged coin alone (exactAsk).
+      const plainExact = exactAsk(input.question);
       try {
         switch (i.kind) {
           case "capabilities":
@@ -860,11 +896,15 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
               return { facts: latest ? [`what you posted on X about your latest buy: ${latest}`].filter(sayable) : [], lookups, notes };
             }
             // A COIN NAMED: only the exact path, the tag's own full contract
-            // that its records bought. Never by a name.
+            // that its records bought, asked about alone. Never by a name.
             if (!i.address) return { facts: [], lookups, notes };
             const theses = await ownTheses();
             if (taggedConflict({ label: i.coin, address: i.address, facts: f, posts: input.posts, theses })) {
               notes.push("conflict");
+              return { facts: [], lookups, notes };
+            }
+            if (!plainExact) {
+              notes.push("not-plain");
               return { facts: [], lookups, notes };
             }
             const history = ownHistoryPhrases({ address: i.address, facts: f, posts: input.posts, theses });
@@ -893,9 +933,11 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
           if (!address) notes.push("unresolved");
         }
         // ITS HISTORY ONLY BY THE CONTRACT THE TAG CARRIED, which its own
-        // records bought: never by the name asked, nor by an address the
-        // name resolved to ("$PEPE" finding its PEPE buy is a name).
-        const history = ownHistoryPhrases({ address: i.address, facts: f, posts: input.posts, theses });
+        // records bought, asked about alone: never by the name asked, nor by
+        // an address the name resolved to ("$PEPE" finding its PEPE buy is a
+        // name), nor beside another name ("$WIF <its PEPE contract>").
+        if (i.address && !plainExact) notes.push("not-plain");
+        const history = plainExact ? ownHistoryPhrases({ address: i.address, facts: f, posts: input.posts, theses }) : [];
         if (!address) return { facts: [], lookups, notes };
         const key = address;
         // THE CREATOR'S TEXT ONLY ON THE EXACT PATH (creatorClaim): the tag's

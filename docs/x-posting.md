@@ -766,9 +766,14 @@ looks things up first, the way Shogun does in a Telegram group
   `$ticker` or a name resolved to: "$PEPE" finding its own PEPE buy is a
   name. A thesis counts only under that exact contract's buy's symbol or its
   derived id. And only for a buy made with the money it trades with now: a
-  live agent's paper buy, or a paper agent's live one, is not said. That
-  bundle is marked exact, and only then may the answer say it bought the
-  coin (`boughtExact`). A general question about its own trades, which names
+  live agent's paper buy, or a paper agent's live one, is not said. And only
+  when the whole tag, the contract read as "this coin", is a plain question
+  about that coin alone (`exactAsk`: "did you buy this coin?", "what is this
+  coin?", "thoughts on this coin?", "is this coin legit?"): "did you buy $WIF?
+  ca <its PEPE contract>" or "is merrycoin <contract> the one you bought?"
+  carries another name, which no matcher can rule out, so it never reads its
+  history or the creator's text. That bundle is marked exact, and only then
+  may the answer say it bought the coin (`boughtExact`). A general question about its own trades, which names
   no coin, may be told its latest buy post; a named coin never is. A
   `$ticker` it bought beside a different contract ("is $PEPE <copycat>
   legit?"), including one that shares the bought contract's last eleven hex,

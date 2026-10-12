@@ -1069,6 +1069,27 @@ test("a draft that says it bought a coin it was never told of is refused, resear
   }
 });
 
+test("research on: its own contract beside another name never says it bought it (red-team 2026-10-12)", async (t) => {
+  // Live, it bought PEPE at the contract; its buy post carries the CA.
+  const facts: AgentFacts = { ...FACTS, calls: [{ ...CALL, token: CA, ownWords: "the buying looked steady and real" }] };
+  for (const text of [`@pine_stoat did you buy $WIF? ca ${CA}`, `@pine_stoat did you buy $TRUMP or ${CA}?`, `@pine_stoat is merrycoin ${CA} the one you bought?`]) {
+    const w = await world(t, { env: RESEARCH_ON, research: fakeResearch().research, facts, answer: "yep, bought it lately, the buying looked steady and real. say stop to opt out." });
+    const id = await store.schedulePost(w.db, { tenant: TENANT, xUserId: "111", kind: "casual", dedupeKey: "casual:pepe", body: `grabbed a little pepe, the curve looked early CA (Robinhood Chain): ${CA}`,
+      nowMs: NOW - 2 * HOUR, dueAtMs: NOW - 2 * HOUR });
+    await store.claimPost(w.db, id!, NOW - HOUR);
+    await store.markPosted(w.db, id!, "100000000000000088", NOW - HOUR);
+    w.setInbox([tag({ text })]);
+    await w.step();
+    for (const prompt of w.asked()) {
+      assert.doesNotMatch(prompt, /«you bought it lately|when you bought it:|They tagged the exact contract/, text);
+    }
+    for (const row of await w.answers()) assert.notEqual(row.status, "scheduled", `${text}: ${row.body}`);
+    w.setInbox([]);
+    await w.step(NOW + MIN);
+    assert.deepEqual(w.sends, [], text);
+  }
+});
+
 test("research on: \"did you buy <contract>?\" reaches its own history by the address, end to end", async (t) => {
   const r = fakeResearch();
   const facts: AgentFacts = { ...FACTS, calls: [{ ...CALL, token: CA, ownWords: "the buying looked steady and real" }] };

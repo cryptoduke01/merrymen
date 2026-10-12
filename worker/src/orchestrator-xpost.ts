@@ -1519,7 +1519,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       let looked: { intent: AnswerIntentKind; research: string[]; creatorClaim?: string; boughtExact?: boolean } | null = null;
       if (research && intent) {
         const bundle = await research.gather({ shared, intent, tenant: account.tenant, xUserId: account.xUserId, facts: f, posts, fomo: researchFomo,
-          coinNamed: coinNamed || !general, budgetMs: Math.max(0, sendBy - at()) })
+          coinNamed: coinNamed || !general, question: candidate.text, budgetMs: Math.max(0, sendBy - at()) })
           .catch((): ResearchBundle => ({ facts: [], lookups: 0, notes: ["fault"] }));
         looked = { intent: intent.kind, research: bundle.facts, ...(bundle.claim ? { creatorClaim: bundle.claim } : {}),
           ...(bundle.exact === true && candidate.address ? { boughtExact: true } : {}) };
