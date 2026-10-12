@@ -894,6 +894,10 @@ function budgetMessage(reason: string | null, now: number): string {
   switch (reason) {
     case "budget-group-hourly":
       return `Fomo research is rationed right now: this group's hourly research allowance is used up${when}.`;
+    case "budget-x-hourly":
+      return `Fomo research is rationed right now: this X account's hourly research allowance is used up${when}.`;
+    case "budget-x-daily":
+      return `Fomo research is rationed right now: today's research allowance for X answers is used up${when}.`;
     case "budget-tenant-hourly":
       return `Fomo research is rationed right now: your hourly Fomo research allowance is used up${when}.`;
     case "budget-tenant-daily":
@@ -1233,7 +1237,8 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
     // A ROOM NEVER FORCES A PAID REFRESH (D8), and otherwise reuses the slow
     // classes' copies longer (D7, GROUP_REUSE_MS); the answer carries the
     // copy's age either way. Every other surface reads as it asked.
-    const room = cc.surface === "telegram-group";
+    // A public X answer reads the way a room does: never a forced refresh, the longer reuse windows.
+    const room = cc.surface === "telegram-group" || cc.surface === "x-answer";
     const mode: FreshnessMode = room && asked === "force-refresh" ? "prefer-fresh" : asked;
     const reuseMs = room && asked !== "force-refresh" && cc.noReuse !== true ? GROUP_REUSE_MS[spec.cls] : undefined;
     let entry: store.CacheEntry | null = null;
@@ -3551,6 +3556,17 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
       await audit(env.status, { reason: env.reason });
       return env;
     }
+    // 1b. AN X ANSWER WITH ITS CAP AT ZERO IS OFF, not merely unpaid
+    // (MERRYMEN_FOMO_X_HOURLY_CREDITS=0, the documented off). A cap only
+    // refuses paid reads: a fresh copy an owner's or a room's read paid for
+    // would still be served, and a held one would still stand in when the
+    // charge is refused, and either would reach a public post on X. So the
+    // surface is refused here, before any cache read.
+    if (surface === "x-answer" && !((budget.config?.xHourlyCredits ?? 1) > 0)) {
+      const env = bare(ic, "unavailable", "x-answers-off");
+      await audit(env.status, { reason: env.reason });
+      return env;
+    }
     // 2. Audience: private state and mutations belong to the owner, in a direct conversation.
     const def = FOMO_TOOL_DEFS[tool];
     if ((def.ownerOnly || isMutationTool(tool)) && audience !== "owner") {
@@ -3572,7 +3588,7 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
     if (ctx?.retryEmpty === true) ic.cc.retryEmpty = true;
     // A room's "now" is an ordinary read (D8): the answer says what it served, and how old it is.
     const asked = v.args as { freshness?: unknown };
-    if (surface === "telegram-group" && asked && asked.freshness === "force-refresh") {
+    if ((surface === "telegram-group" || surface === "x-answer") && asked && asked.freshness === "force-refresh") {
       asked.freshness = "prefer-fresh";
       ic.cc.noReuse = true;
       // ...and a room's explicit "now" or "recheck" never gets a held "nothing here" again.

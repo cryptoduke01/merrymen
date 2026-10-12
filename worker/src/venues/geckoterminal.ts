@@ -83,8 +83,20 @@ export function laneSpacingMs(source: GeckoSource, fleet: boolean, env: Paramete
   return pacing.spacingMs;
 }
 
-function cacheFor(source: GeckoSource): FeedCache {
-  const home = process.env.MERRYMEN_FLEET_HOME?.trim();
+/**
+ * WHICH LANE A READ SPENDS: the fleet's, named explicitly. A child inherits
+ * MERRYMEN_FLEET_HOME from the orchestrator, which never sets it on itself
+ * (the variable is the children's). So a read made IN the orchestrator — an
+ * X answer's coin facts — passes the fleet home here and shares the
+ * children's spacing slot, cooldowns and plan latch, instead of a private
+ * lane that would coordinate with nobody. Absent: the environment's, as before.
+ */
+export interface GeckoLane {
+  fleetHome?: string;
+}
+
+function cacheFor(source: GeckoSource, lane?: GeckoLane): FeedCache {
+  const home = (lane?.fleetHome ?? process.env.MERRYMEN_FLEET_HOME)?.trim();
   const pro = source.id === "coingecko-pro";
   // Which key this lane sends, as a fingerprint only (never the key): a plan
   // latch belongs to the credential that was refused, so a fixed or rotated
@@ -127,6 +139,8 @@ export interface GeckoReadOptions {
    * rather than holding the caller open or spending a credit nobody waits for.
    */
   budgetMs?: number;
+  /** The fleet lane named explicitly (GeckoLane); omitted, the environment's. */
+  fleet?: GeckoLane;
 }
 
 /** A separately offered public source, never a retry with another credential.
@@ -138,7 +152,7 @@ async function readGecko<T extends FeedResult>(key: string, request: (source: Ge
   const primary = geckoSource(), deadline = feedClock.now() + budget;
   const read = async (source: GeckoSource): Promise<T> => {
     try {
-      return await cacheFor(source).get(`${GECKO_NETWORK}:${key}`, async () => {
+      return await cacheFor(source, opts.fleet).get(`${GECKO_NETWORK}:${key}`, async () => {
         const remaining = deadline - feedClock.now();
         const result = remaining > 0 ? await request(source, remaining) : unavailable("request-budget");
         return { ...result, provider: source.id };

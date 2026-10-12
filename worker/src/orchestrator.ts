@@ -50,6 +50,7 @@ import { makeConductor, type Conductor, type RosterMember } from "./groupchat/co
 import { chatProfileOf, type ChatProfile } from "./groupchat/facts";
 import { describeCreds, groupChatCreds } from "./groupchat/voice";
 import { makeXPoster, xpostSetup, type XPoster, type XPostSetup, type XSocialProfile } from "./orchestrator-xpost";
+import { createXResearch } from "./orchestrator-xpost-research";
 // The fleet's default trading model, so the room can say when its own model is
 // the same one (see groupChatModelWarning).
 import { SETTINGS_DEFAULTS as GROUPCHAT_FLEET_DEFAULTS } from "../../packages/core/src/index";
@@ -224,7 +225,7 @@ import { budgetUnrestored, seedBudget } from "./budget-seed";
 import { ORDER_IN_FLIGHT_MS, commandWhereabouts, dropCommandResult, drainCommandResults, writeCommand, type FileCommandResult } from "./command-files";
 import { expiredOrderReceipt, type OrderReceipt } from "./order-receipt";
 import { makeMcpBackground } from "./mcp/background";
-import { childProcessBrokerPort, serveBrokerRequests } from "./fomo/broker";
+import { childProcessBrokerPort, createDirectBroker, serveBrokerRequests } from "./fomo/broker";
 import { attachFlowBroker, flowFor, flowRuntimeNow as flowRuntimeFor, type FlowRuntime } from "./orchestrator-flow";
 import { FLOW_BROKER_ENV } from "./flow-broker";
 import { budgetConfigFor, describeBudget, fomoBudgetFrom, fomoPlanFrom, FREE_PLAN_CREDITS_PER_MONTH, type FomoBudget, type FomoBudgetConfig } from "./fomo/budget";
@@ -11312,6 +11313,26 @@ async function runXPostPass(boot: XPostSetup): Promise<void> {
               throw new Error("X social profile could not be read");
             }
           },
+          // WHAT AN ANSWER LOOKS UP, only with MERRYMEN_XPOST_RESEARCH=1
+          // (orchestrator-xpost-research.ts). Index reads spend the FLEET's
+          // Gecko lane — this process's home is the children's
+          // MERRYMEN_FLEET_HOME (childEnv), passed explicitly, never set on
+          // process.env. Fomo, only with MERRYMEN_XPOST_FOMO=1 as well, asks
+          // THIS process's own service for the answering tenant, as a public
+          // x-answer; with the Fomo pass off or its runtime not built yet,
+          // there is no broker and the answer goes without it. Whether Fomo
+          // can answer for THIS owner (her own data access, the x-answer cap
+          // above zero) is asked per answer, so "what can you do?" never
+          // promises Fomo that a coin answer would then not deliver.
+          ...(boot.knobs.research ? {
+            research: createXResearch({
+              fleetHome: merrymenHome(),
+              ...(boot.knobs.researchPerHour !== undefined ? { lookupsPerHour: boot.knobs.researchPerHour } : {}),
+              // The runtime exists only once the switched-on Fomo pass built it (fomoRuntimeNow).
+              fomo: (tenant) => (fomoRuntime && !xAnswerFomoCapped() ? createDirectBroker(fomoRuntime.service, tenant.toLowerCase(), { log }) : null),
+              fomoUsable: async (tenant) => !!fomoRuntime && !xAnswerFomoCapped() && (await fomoAccessFor(tenant)).dataAccess === true,
+            }),
+          } : {}),
         },
       });
       log(xPoster.plan().why);
@@ -11457,6 +11478,14 @@ export function fomoSetup(env: Record<string, string | undefined> = process.env)
   const caps = fomoBudgetFrom(env);
   lines.push(...caps.problems, describeBudget(budgetConfigFor(planCredits ?? FREE_PLAN_CREDITS_PER_MONTH, caps.budget)));
   return { off: false, lines, apiKey, planCredits, budget: caps.budget };
+}
+
+/**
+ * MERRYMEN_FOMO_X_HOURLY_CREDITS=0, the operator's off for Fomo in X answers:
+ * no broker is handed to them, and the service refuses the surface too.
+ */
+function xAnswerFomoCapped(): boolean {
+  return fomoBoot?.budget.xHourlyCredits === 0;
 }
 
 /** The switches, decided and said once, on first use: the first spawn or the first pass, whichever comes first. */

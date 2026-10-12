@@ -60,4 +60,60 @@ describe("tags an active agent may answer", () => {
     }
     assert.equal(tagCandidate(tag("what do you trade?", { authorId: "222" }), { xUserId: "222" }).ok, false);
   });
+
+  const CA = `0x${"ab12".repeat(10)}`;
+  const ON = { xUserId: "222", research: true };
+  it("research off: selected exactly as before — any address, and any how many or how much, is refused", () => {
+    for (const text of [`@Pine thoughts on ${CA}?`, "@Pine how many holders does $pepe have?", "@Pine how much liquidity is in this?"]) {
+      assert.equal(tagCandidate(tag(text), { xUserId: "222" }).ok, false, text);
+      assert.equal(tagCandidate(tag(text), { xUserId: "222", research: false }).ok, false, text);
+    }
+  });
+  it("one contract address is a lookup key, taken out of the text the writer reads", () => {
+    for (const text of [`@Pine thoughts on ${CA}?`, `@Pine what is ${CA.toUpperCase().replace("0X", "0x")} about?`, `@Pine ${CA} is this one any good?`]) {
+      const v = tagCandidate(tag(text), ON);
+      assert.equal(v.ok, true, text);
+      if (!v.ok) continue;
+      assert.equal(v.address, CA);
+      assert.doesNotMatch(v.text, /0x|[0-9a-f]{8,}/i, "the address never reaches the writer");
+      assert.match(v.text, /this coin/);
+    }
+    const plain = tagCandidate(tag("@Pine what do you trade?"), ON);
+    assert.ok(plain.ok && plain.address === undefined);
+  });
+  it("two addresses, an address in a link, a hash or a bare address are still refused", () => {
+    const hash = `0x${"cd".repeat(32)}`;
+    for (const text of [`@Pine ${CA} or 0x${"ef34".repeat(10)}?`, `@Pine dexscreener.com/robinhood/${CA}?`, `@Pine https://x.co/${CA}?`, `@Pine what about ${hash}?`, `@Pine ${CA}?`, `@Pine ${CA}`]) {
+      assert.equal(tagCandidate(tag(text), ON).ok, false, text);
+    }
+  });
+  it("a coin's public facts may be asked how many or how much of, never advice or its own size", () => {
+    for (const text of ["@Pine how many holders does $pepe have?", "@Pine how much liquidity is in this?", `@Pine how many holders on ${CA}?`]) {
+      assert.equal(tagCandidate(tag(text), ON).ok, true, text);
+    }
+    for (const text of ["@Pine how much did you buy?", "@Pine how many holders, should i buy?", "@Pine how much liquidity before it pumps, when to sell?", "@Pine how much will $pepe go up?", "@Pine what's the price target for $pepe?"]) {
+      assert.equal(tagCandidate(tag(text), ON).ok, false, text);
+    }
+  });
+  it("an address inside a link on any domain is a link, refused before it could be a lookup key", () => {
+    for (const text of [`@Pine what about pons.fun/token/${CA}?`, `@Pine what about robinhood.trade/${CA}?`, `@Pine what is ${CA}?ref=moonboy`, `@Pine what is ${CA}/chart?`, `@Pine what about x/${CA}?`]) {
+      assert.deepEqual(tagCandidate(tag(text), ON), { ok: false, reason: "link-or-secret" }, text);
+    }
+    for (const text of [`@Pine what is (${CA})?`, `@Pine what is this one, ca:${CA}?`, `@Pine thoughts on ${CA}...`, `@Pine "${CA}" what is it?`]) {
+      const v = tagCandidate(tag(text), ON);
+      assert.ok(v.ok && v.address === CA, text);
+    }
+  });
+  it("\"did you buy <contract>?\" asks about its own past buy and is answered; every other buy wording is still advice", () => {
+    for (const text of [`@Pine did you buy ${CA}?`, `@Pine why did you buy ${CA}?`, `@Pine did u ape ${CA}?`, `@Pine have you buy ${CA} lately?`]) {
+      const v = tagCandidate(tag(text), ON);
+      assert.ok(v.ok && v.address === CA, text);
+    }
+    for (const text of [`@Pine should i buy ${CA}?`, `@Pine is it time to buy ${CA}?`, `@Pine would you buy ${CA}?`, `@Pine buy ${CA} or not?`, `@Pine did you buy ${CA}, should i too?`, `@Pine ape ${CA} now?`]) {
+      assert.deepEqual(tagCandidate(tag(text), ON), { ok: false, reason: "advice-request" }, text);
+    }
+    // Without an address, nothing changes: "buy this" is advice, as on the comment path.
+    assert.deepEqual(tagCandidate(tag("@Pine did you buy this coin?"), ON), { ok: false, reason: "advice-request" });
+    assert.equal(tagCandidate(tag(`@Pine did you buy ${CA}?`), { xUserId: "222" }).ok, false, "research off: any address is refused");
+  });
 });

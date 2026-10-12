@@ -20,7 +20,12 @@ export function isReplyOptOut(raw: unknown): boolean {
     || /\bleave me alone\b|\bno more (?:replies|responses|messages|mentions)\b|\bremove me\b/.test(text);
 }
 
-export type ReplyCandidate = { ok: true; text: string } | { ok: false; reason: string };
+/**
+ * `address` is set only by tagCandidate, and only when the post carried
+ * exactly one contract address: a LOOKUP KEY for the answer's research, never
+ * part of `text` (the writer's input), never nominated, never traded.
+ */
+export type ReplyCandidate = { ok: true; text: string; address?: string } | { ok: false; reason: string };
 
 const LINK_OR_SECRET = /https?:|www\.|\b[a-z0-9-]+\.(?:com|net|org|io|dev|app|xyz|gg|co|me|ai)\b|0x[a-f0-9]{8,}|\b(?:sk-|gsk_|api[ _-]?key|seed phrase|private key|password|secret)\b/i;
 const ABUSE_OR_SENSITIVE = /\b(?:fuck\w*|shit\w*|bitch\w*|idiot\w*|moron\w*|retard\w*|kill\w*|suicid\w*|rape\w*|porn\w*|sex\w*|nude\w*|terror\w*|nazi\w*|racis\w*|politic\w*|election\w*|president\w*|democrat\w*|republican\w*|religio\w*|christian\w*|muslim\w*|jew\w*|medical\w*|diagnos\w*|cancer|medication\w*|depress\w*)\b/i;
@@ -63,26 +68,90 @@ export function withoutReplyOptOut(text: string): string {
 const ASKED = /\?|^(?:what|why|how|which|who|whos|who's|where|are|is|do|does|did|can|could|have|has|tell|explain|thoughts|gm|hey|yo|hi|hello)\b/i;
 
 /**
- * IS THIS POST THAT TAGGED AN ACTIVE AGENT ONE IT MAY ANSWER? A question or a
- * plain address, in good faith, about the agent itself. The same screens as a
- * comment reply — opt-outs first, then links, secrets, abuse, sensitive
- * topics, spam, instructions and advice requests — except that digits may
- * appear in the question; the answer is still gated with no numbers in it.
- * Handles never reach the writer.
+ * ONE CONTRACT ADDRESS: 0x + exactly forty hex, not a slice of a longer hex
+ * run on either side (a sixty-four-hex transaction hash or key is never read
+ * as one) — the same rule as the Telegram groups' CA finder, restated here
+ * because xpost/ may not import it (boundary.test.ts).
  */
-export function tagCandidate(reply: XReply, ctx: { xUserId: string }): ReplyCandidate {
+const CA_RUN = /(?<![0-9a-f])0x[0-9a-f]{40}(?![0-9a-f])/gi;
+
+/**
+ * "HOW MANY HOLDERS", "HOW MUCH LIQUIDITY": a question about a coin's public
+ * facts, which an answer may take up in words (never a figure: the answer is
+ * gated with no numbers in it). Taken out before the advice screen so its
+ * "how much / how many" is not read as one; anything else in the post
+ * (should i, when to sell, a target, its own size) is still refused.
+ */
+const COIN_FACT_ASK = /\bhow (?:much|many) (?:of (?:the |its )?)?(?:holders?|liquidity|liq|volume|buyers?|sellers?|traders?|people (?:hold|holding|own)|wallets? (?:hold|holding))\b/gi;
+
+/**
+ * "DID YOU BUY <contract>?" — a question about its OWN past buy of the tagged
+ * coin, not a request for advice. With the address read as "this coin" the
+ * advice screen would see "buy this" and refuse it, so this one phrasing is
+ * taken out before that screen, and only when the post carried an address.
+ * Anything else about buying it ("should i buy", "time to buy", "would you
+ * buy") still meets the advice screen as before.
+ */
+const OWN_BUY_OF_TAGGED = /\b(?:did|didn'?t|have|why'?d|when'?d)\s+(?:you|u|ya)\s+(?:buy|ape)\s+this coin\b/gi;
+
+/**
+ * THE TEXT AROUND AN ADDRESS, as far as a link written out in the post could
+ * reach (the Telegram CA finder's linkAround, restated: xpost/ may not import
+ * it). An address is a lookup key only when it stands on its own: wrapped in
+ * brackets or quotes, after "ca:", or followed by punctuation. Anything else
+ * around it — "pons.fun/token/", "robinhood.trade/", "?ref=" — is a link,
+ * whatever its domain, and the post is refused as one.
+ */
+const LINK_END = /[\s"'<>()[\]{}|,]/u;
+function standsAlone(t: string, start: number, end: number): boolean {
+  let a = start;
+  while (a > 0 && !LINK_END.test(t.charAt(a - 1))) a--;
+  let b = end;
+  while (b < t.length && !LINK_END.test(t.charAt(b))) b++;
+  return /^(?:ca:|ca=)?$/i.test(t.slice(a, start)) && /^[?!.:;]*$/.test(t.slice(end, b));
+}
+
+/**
+ * IS THIS POST THAT TAGGED AN ACTIVE AGENT ONE IT MAY ANSWER? A question or a
+ * plain address, in good faith, about the agent itself or a coin. The same
+ * screens as a comment reply — opt-outs first, then links, secrets, abuse,
+ * sensitive topics, spam, instructions and advice requests — except that
+ * digits may appear in the question; the answer is still gated with no
+ * numbers in it. Handles never reach the writer.
+ *
+ * ONE CONTRACT ADDRESS IS A LOOKUP KEY, NOT TEXT — only with research on
+ * (`ctx.research`, MERRYMEN_XPOST_RESEARCH=1). It is taken out of the
+ * question (the writer reads "this coin" where it stood) and returned apart,
+ * so the model never sees it and the answer cannot echo it. Two addresses, an
+ * address inside a link, or any other long hex run are still refused. With
+ * research off, a tag is selected exactly as before: any address is refused,
+ * and so is every "how many / how much".
+ */
+export function tagCandidate(reply: XReply, ctx: { xUserId: string; research?: boolean }): ReplyCandidate {
   const no = (reason: string): ReplyCandidate => ({ ok: false, reason });
   if (!reply.id || !reply.authorId || !ctx.xUserId) return no("invalid");
   if (reply.authorId === ctx.xUserId) return no("own-comment");
   if (isReplyOptOut(reply.text)) return no("opt-out");
   if (typeof reply.text !== "string") return no("invalid");
-  const text = withoutLeadingMentions(reply.text.normalize("NFKC")).replace(/@[a-z0-9_]{1,15}\b/gi, " ").replace(/\s+/g, " ").trim();
-  if (text.length < 4 || text.length > XREPLY_MAX_COMMENT_CHARS || (text.match(/\p{L}+/gu) ?? []).length < 2) return no("low-signal");
+  const said = withoutLeadingMentions(reply.text.normalize("NFKC")).replace(/@[a-z0-9_]{1,15}\b/gi, " ").replace(/\s+/g, " ").trim();
+  const research = ctx.research === true;
+  const hits = research ? [...said.matchAll(CA_RUN)] : [];
+  const addresses = [...new Set(hits.map((m) => m[0].toLowerCase()))];
+  if (addresses.length > 1) return no("link-or-secret");
+  // An address inside a link is a link, on any domain: refused before it is taken out.
+  if (hits.some((m) => !standsAlone(said, m.index ?? 0, (m.index ?? 0) + m[0].length))) return no("link-or-secret");
+  const address = addresses[0];
+  // Judged without the address (it is no words), and handed on with "this coin" where it stood.
+  const bare = address ? said.replace(CA_RUN, " ").replace(/\s+/g, " ").trim() : said;
+  const text = address ? said.replace(CA_RUN, "this coin").replace(/\s+/g, " ").trim() : said;
+  if (bare.length < 4 || text.length > XREPLY_MAX_COMMENT_CHARS || (bare.match(/\p{L}+/gu) ?? []).length < 2) return no("low-signal");
   if (/[\u0000-\u001f\u007f«»<>#]|\p{Script=Cyrillic}|\p{Script=Han}/u.test(text)) return no("unsafe-text");
   if (LINK_OR_SECRET.test(text)) return no("link-or-secret");
   if (ABUSE_OR_SENSITIVE.test(text)) return no("sensitive");
   if (SPAM_OR_INSTRUCTIONS.test(text)) return no("spam-or-instructions");
-  if (ADVICE_REQUEST.test(text) || /^(?:please\s+)?(?:buy|sell|hold|ape|pump|dump)\b/i.test(text)) return no("advice-request");
+  let advice = research ? text.replace(COIN_FACT_ASK, " ") : text;
+  if (address) advice = advice.replace(OWN_BUY_OF_TAGGED, " ");
+  if (ADVICE_REQUEST.test(advice) || /^(?:please\s+)?(?:buy|sell|hold|ape|pump|dump)\b/i.test(text)) return no("advice-request");
   if (!ASKED.test(text)) return no("not-asked");
-  return { ok: true, text };
+  return address ? { ok: true, text, address } : { ok: true, text };
 }

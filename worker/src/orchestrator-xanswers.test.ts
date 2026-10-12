@@ -12,6 +12,9 @@ import { test, type TestContext } from "node:test";
 import { wrapSqlite } from "./db";
 import { makeXPoster, xpostEnv } from "./orchestrator-xpost";
 import { isAsleep } from "./groupchat/clock";
+import { createXResearch, type XResearch } from "./orchestrator-xpost-research";
+import type { CoinFacts } from "./coin-facts-types";
+import type { FomoBroker } from "./fomo/contract";
 import type { AgentFacts, CallFact } from "./groupchat/facts";
 import type { FetchLike } from "./xpost/client";
 import * as store from "./xpost/store";
@@ -34,6 +37,7 @@ async function world(t: TestContext, o: {
   consent?: boolean;
   /** MERRYMEN_XPOST_REPLIES_APPROVED as set (null: unset), read as the orchestrator reads it. Default: approved for everyone. */
   scope?: string | null;
+  env?: Record<string, string>; research?: XResearch; facts?: AgentFacts; answer?: string;
 } = {}) {
   const raw = new DatabaseSync(":memory:");
   t.after(() => raw.close());
@@ -60,7 +64,8 @@ async function world(t: TestContext, o: {
     sends.push(JSON.parse(init.body ?? "{}"));
     return { status: 201, headers: { get: () => null }, text: async () => JSON.stringify({ data: { id: `1000000000000001${sends.length}0` } }) };
   };
-  const env = o.active === false ? {} : { MERRYMEN_XPOST_ACTIVE_TENANTS: TENANT };
+  const env = { ...(o.active === false ? {} : { MERRYMEN_XPOST_ACTIVE_TENANTS: TENANT }), ...o.env };
+  const systems: string[] = [];
   const poster = makeXPoster({
     app: { clientId: "client", clientSecret: "secret", redirectUri: "https://app.test/connect/x" }, dek,
     creds: { provider: "groq", transport: "openai", model: "test", apiKey: "private-model", baseUrl: "https://model.test/v1", vision: false },
@@ -68,15 +73,20 @@ async function world(t: TestContext, o: {
       ? { ...xpostEnv(env), repliesApproved: true, replyPollsPerDay: o.polls }
       : { ...xpostEnv(o.scope === null ? env : { ...env, MERRYMEN_XPOST_REPLIES_APPROVED: o.scope }), replyPollsPerDay: o.polls },
     deps: { dialect: "sqlite", fetch, monotonic: () => 0, member: async () => ({ tz: o.tz ?? null }),
-      facts: async () => new Map([[TENANT, FACTS]]),
+      facts: async () => new Map([[TENANT, o.facts ?? FACTS]]),
       // Only the answer prompt gets words back: every other draft passes.
-      llm: async (_creds, input) => { prompts.push(input.prompt); return /Untrusted question/.test(input.prompt) ? ANSWER : "PASS"; },
+      llm: async (_creds, input) => {
+        prompts.push(input.prompt);
+        if (/Untrusted question/.test(input.prompt)) systems.push(input.system ?? "");
+        return /Untrusted question/.test(input.prompt) ? o.answer ?? ANSWER : "PASS";
+      },
+      ...(o.research ? { research: o.research } : {}),
     },
   });
   const step = (now = NOW) => { clock = now; return poster.step(db, [{ tenant: TENANT, agentId: TENANT }], new Map(), now); };
   const answers = async () => (await store.postsOf(db, TENANT, 0)).filter((p) => p.kind === "answer");
   const asked = () => prompts.filter((p) => /Untrusted question/.test(p));
-  return { db, step, answers, asked, sends, reads, setInbox: (v: Record<string, unknown>[]) => { inbox = v; } };
+  return { db, step, answers, asked, systems, sends, reads, setInbox: (v: Record<string, unknown>[]) => { inbox = v; } };
 }
 
 test("the operator's active owners are read by address only, and a bad entry is named by position", () => {
@@ -284,4 +294,146 @@ test("answers go out a minute apart, in their own lane", async (t) => {
   assert.equal((await w.answers()).find((a) => a.status === "scheduled")?.dueAtMs, NOW + MIN, "the next one a minute after");
   await w.step(NOW + MIN);
   assert.equal(w.sends.length, 2);
+});
+
+// ── research for answers ────────────────────────────────────────────────────
+
+const CA = `0x${"ab12".repeat(10)}`;
+const RESEARCH_ON = { MERRYMEN_XPOST_RESEARCH: "1" };
+
+/** The real research, every reader faked: what it was asked, and the facts it builds. */
+function fakeResearch(o: { fomo?: boolean } = {}) {
+  const seen: { address: string }[] = [];
+  const fomoCalls: { tool: string; surface: string; groupId: string | null | undefined }[] = [];
+  const facts: CoinFacts = { network: "robinhood", observedAt: NOW, priceUsd: 0.0001, fdvNowUsd: 40_000, high: null, barsFromMs: null,
+    poolCreatedAtMs: NOW - 3 * HOUR, drawdownPct: null, steepest: null, liquidityUsd: 4_000, change24hPct: 3, buyers24h: null, sellers24h: null,
+    holders: { count: 90, top10Pct: 80, updatedAtMs: NOW }, creatorHoldingPct: null, info: "read", poolsSeen: 1 };
+  const broker: FomoBroker = {
+    async call(tool, _args, opts) {
+      fomoCalls.push({ tool, surface: opts.surface, groupId: opts.groupId });
+      return { status: "ok", tool, data: tool === "fomo_get_token_activity" ? { distinctBuyers: 9, distinctSellers: 1 } : null } as never;
+    },
+    memory: { get: async () => null, set: async () => {}, clear: async () => {} },
+    report: async () => {},
+    configured: () => true,
+  };
+  const research = createXResearch({
+    coinFacts: async (q) => { seen.push({ address: q.address }); return { ok: true, facts }; },
+    resolveTicker: async () => null,
+    projectDescription: async () => null,
+    publicTheses: async () => [],
+    ...(o.fomo ? { fomo: () => broker } : {}),
+  });
+  return { research, seen, fomoCalls };
+}
+
+test("the research switches are read exactly, Fomo only inside research, and said when they cannot apply", () => {
+  assert.equal(xpostEnv({}).research, undefined);
+  assert.equal(xpostEnv({ MERRYMEN_XPOST_RESEARCH: "true" }).research, undefined, "only an exact 1");
+  assert.equal(xpostEnv(RESEARCH_ON).research, true);
+  assert.equal(xpostEnv({ ...RESEARCH_ON, MERRYMEN_XPOST_FOMO: "1" }).researchFomo, true);
+  const alone = xpostEnv({ MERRYMEN_XPOST_FOMO: "1" });
+  assert.equal(alone.researchFomo, undefined);
+  assert.ok(alone.notes.some((n) => /MERRYMEN_XPOST_FOMO=1 does nothing without MERRYMEN_XPOST_RESEARCH=1/.test(n)));
+  assert.equal(xpostEnv({ ...RESEARCH_ON, MERRYMEN_XPOST_RESEARCH_PER_HOUR: "30" }).researchPerHour, 30);
+  assert.ok(xpostEnv({ MERRYMEN_XPOST_RESEARCH_PER_HOUR: "lots" }).notes.some((n) => /MERRYMEN_XPOST_RESEARCH_PER_HOUR/.test(n) && !/lots/.test(n)));
+});
+
+test("research off: nothing is looked up, and a tag carrying an address is not answered, as before", async (t) => {
+  const r = fakeResearch();
+  const w = await world(t, { research: r.research });
+  w.setInbox([tag({ text: `@pine_stoat thoughts on ${CA}?` })]);
+  await w.step();
+  assert.equal((await w.answers()).length, 0);
+  assert.equal(w.asked().length, 0);
+  const plain = await world(t, { research: r.research });
+  await plain.step();
+  const [prompt] = plain.asked();
+  assert.ok(prompt, "an ordinary tag is still answered");
+  assert.doesNotMatch(prompt!, /What you looked up/);
+  assert.doesNotMatch(plain.systems[0]!, /may be said as what its source showed/, "the reply rules, as before");
+  assert.equal(r.seen.length, 0, "the research is never asked while it is off");
+});
+
+test("research on: a tagged contract address is looked up and answered in words, and never reaches the model", async (t) => {
+  const r = fakeResearch();
+  const w = await world(t, { env: RESEARCH_ON, research: r.research });
+  w.setInbox([tag({ text: `@pine_stoat thoughts on ${CA}?` })]);
+  await w.step();
+  assert.deepEqual(r.seen, [{ address: CA }]);
+  const [prompt] = w.asked();
+  assert.ok(prompt, "an answer was drafted");
+  assert.doesNotMatch(prompt!, /0x|ab12/i, "the address is a lookup key only");
+  assert.match(prompt!, /thoughts on this coin/);
+  assert.match(prompt!, /What you looked up just now.*«the public index shows liquidity is thin».*«the public index says it's only hours old».*«holders look concentrated on the public index»/s);
+  assert.doesNotMatch(prompt!.match(/What you looked up[^\n]*/)![0], /\p{N}|\$/u, "no figure in what it looked up");
+  assert.match(w.systems[0]!, /may be said as what its source showed/);
+  const [answer] = await w.answers();
+  assert.equal(answer!.status, "scheduled");
+  assert.equal(answer!.replyToTweetId, MENTION);
+  w.setInbox([]);
+  await w.step(NOW + 30 * MIN);
+  assert.deepEqual(w.sends, [{ text: ANSWER, reply: { in_reply_to_tweet_id: MENTION } }]);
+});
+
+test("research on, Fomo switch on: a coin answer asks Fomo as a public x-answer for this X account", async (t) => {
+  const off = fakeResearch({ fomo: true });
+  const w0 = await world(t, { env: RESEARCH_ON, research: off.research });
+  w0.setInbox([tag({ text: `@pine_stoat thoughts on ${CA}?` })]);
+  await w0.step();
+  assert.equal(off.fomoCalls.length, 0, "the Fomo switch is off");
+  const on = fakeResearch({ fomo: true });
+  const w = await world(t, { env: { ...RESEARCH_ON, MERRYMEN_XPOST_FOMO: "1" }, research: on.research });
+  w.setInbox([tag({ text: `@pine_stoat thoughts on ${CA}?` })]);
+  await w.step();
+  assert.deepEqual(on.fomoCalls.map((c) => c.tool).sort(), ["fomo_get_token_activity", "fomo_get_token_theses"]);
+  assert.ok(on.fomoCalls.every((c) => c.surface === "x-answer" && c.groupId === "111"));
+  assert.match(w.asked()[0]!, /on fomo, more traders have been buying in than heading out lately/);
+});
+
+test("research on: the model question is answered from a code-built sherwood line, with no lookup and no draft", async (t) => {
+  const r = fakeResearch();
+  const w = await world(t, { env: RESEARCH_ON, research: r.research });
+  w.setInbox([tag({ text: "@pine_stoat what model do you run on?" })]);
+  await w.step();
+  assert.equal(r.seen.length, 0);
+  assert.equal(w.asked().length, 0, "no model call: the line is code's");
+  const [answer] = await w.answers();
+  assert.equal(answer!.status, "scheduled", answer!.reason ?? "");
+  assert.match(answer!.body, /merrymen/);
+  assert.match(answer!.body, /the new sherwood one/);
+  assert.match(answer!.body, /cooking|oven/);
+  assert.match(answer!.body, /Say stop to opt out\.$/i);
+  assert.doesNotMatch(answer!.body, /\p{N}|running on|powered|runs me/u);
+  assert.equal((await store.readMeta(w.db, "llm:2026-09-30"))?.n ?? 0, 0, "and no model allowance spent");
+});
+
+test("a draft that says sherwood runs it is refused, research on or off", async (t) => {
+  for (const env of [{}, RESEARCH_ON]) {
+    for (const answer of ["running on the new sherwood one, built by merrymen. Say stop to opt out.", "built by merrymen, powered by sherwood one now. Say stop to opt out.",
+      "sherwood one is what runs me these days. Say stop to opt out."]) {
+      const w = await world(t, { env, research: fakeResearch().research, answer });
+      w.setInbox([tag({ text: "@pine_stoat how do you pick your coins?" })]);
+      await w.step();
+      const [skipped] = await w.answers();
+      assert.equal(skipped!.status, "skipped", answer);
+      assert.equal(skipped!.reason, "gate:sherwood-claim", answer);
+    }
+  }
+});
+
+test("research on: \"did you buy <contract>?\" reaches its own history by the address, end to end", async (t) => {
+  const r = fakeResearch();
+  const facts: AgentFacts = { ...FACTS, calls: [{ ...CALL, token: CA, ownWords: "the buying looked steady and real" }] };
+  const w = await world(t, { env: RESEARCH_ON, research: r.research, facts });
+  w.setInbox([tag({ text: `@pine_stoat did you buy ${CA}?` })]);
+  await w.step();
+  const [prompt] = w.asked();
+  assert.ok(prompt, "selected and drafted, not refused as advice");
+  assert.match(prompt!, /did you buy this coin/);
+  assert.doesNotMatch(prompt!, /0x|ab12/i);
+  assert.match(prompt!, /What you looked up just now.*«you bought it lately».*«your own words when you bought it: the buying looked steady and real»/s);
+  assert.equal(r.seen.length, 0, "its own history costs no lookup");
+  const [answer] = await w.answers();
+  assert.equal(answer!.status, "scheduled");
 });

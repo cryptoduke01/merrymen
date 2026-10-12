@@ -63,7 +63,7 @@ export interface BrokerCallOptions {
   audience: "owner" | "group";
   conversationKey: string | null;
   priority: RetrievalPriority;
-  /** Telegram group id for per-group budgets (group surface only). */
+  /** Telegram group id for per-group budgets (group surface), or the X account an `x-answer` speaks from (its hourly cap). */
   groupId?: string | null;
   /** Upper bound for the whole call, including IPC. */
   timeoutMs?: number;

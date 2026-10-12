@@ -6,7 +6,9 @@
  * read is refused, bounded or fails. No network: the fetch is a fake.
  */
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { beforeEach, describe, it } from "node:test";
 
 import { COLLAPSE_DRAWDOWN_PCT, collapseOf, type CoinFacts } from "../coin-facts-types";
@@ -147,6 +149,23 @@ describe("AUTON, measured (live probe 2026-10-09 01:15 UTC)", () => {
     const agent = new FactsLimiter({ now: () => t });
     for (let i = 0; i < 20; i++) assert.equal(agent.take(1_000 + i), true);
     assert.equal(agent.take(9_999), false, "twenty an hour for the agent, whichever rooms ask");
+  });
+
+  it("a reader handed the fleet home spends the fleet's shared lane, and never touches the environment", async () => {
+    const home = mkdtempSync(path.join(tmpdir(), "facts-lane-"));
+    const before = process.env.MERRYMEN_FLEET_HOME;
+    try {
+      const idx = fakeIndex();
+      const read = createCoinFactsReader({ fetchJson: idx.fetch, now: () => NOW, lane: { fleetHome: home } });
+      assert.ok((await read({ network: "solana", address: MINT, chatId: 9, timeoutMs: 10_000, withInfo: false })).ok);
+      const lanes = readdirSync(home);
+      assert.equal(lanes.length, 1, "one provider lane under the fleet home");
+      assert.ok(existsSync(path.join(home, lanes[0]!, "gecko-feed-cache.sqlite")), "the children's shared pacing file");
+      assert.equal(process.env.MERRYMEN_FLEET_HOME, before);
+    } finally {
+      resetDeskReadsForTest();
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 
   it("a read that outlives its time is unavailable, and the parsers never throw on junk", async () => {
