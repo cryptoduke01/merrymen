@@ -197,10 +197,13 @@ desk rides. Memecoins only — an equity token on this chain is a wrapper, and
 ### The Bitquery lane (optional; off without its key)
 
 DEX flow for a coin over 5, 15 and 60 minutes, the venue split, the largest
-sells, and whether its recorded creator sold. The orchestrator answers from one
-budgeted lane, and children on the decision-research allowlist ask it over IPC.
-For the rollout steps and the IDE check to run before setting the key, see
-[`docs/bitquery-lane.md`](bitquery-lane.md).
+sells, and whether its launcher (as the launchpad's launch record names it)
+sold. The orchestrator answers from one budgeted lane, and children on the
+decision-research allowlist ask it over IPC. For the rollout steps and the IDE
+check to run before setting the key, see
+[`docs/bitquery-lane.md`](bitquery-lane.md). The gateway spends from the same
+plan under its own cap, `MERRYMEN_GATEWAY_BITQUERY_POINTS_PER_DAY` (default
+`5000`, set on the gateway service): keep the two knobs' sum under the plan.
 
 | Var | Value |
 |---|---|

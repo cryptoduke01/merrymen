@@ -8,13 +8,15 @@ facts asks the orchestrator over IPC.
 A reading covers one coin:
 
 - DEX buys and sells over the trailing 5, 15 and 60 minutes: USD in each
-  direction, trade counts, and distinct buying and selling addresses.
+  direction (from the quote leg of each trade), the number of transactions
+  with a buy or a sell, and distinct buying and selling addresses.
 - The venue (protocol) split over the hour.
 - The largest single sells in the hour, as sizes and times only. No wallet or
   hash is included.
-- Whether the coin's recorded creator sold on a DEX, or moved tokens out at
-  all, in the last hour. This is `not-derivable` when the coin records no
-  creator.
+- Whether the coin's launcher sold on a DEX, or moved tokens out at all, in
+  the last hour. "Launcher" is the address the Pons factory's own launch event
+  recorded for the coin. This is `not-derivable` when the factory has no
+  launch record for it.
 
 A reading is an indexer's record. It is not a price, a forecast or a reason to
 trade. It never reaches equity, P&L, sizing, a cap, a guard or a grant.
@@ -32,9 +34,17 @@ meant as a later source for the early book and nothing calls it yet.
    Robinhood Chain and Trading API documentation and have only been tested
    against recorded-shape fixtures. Run each one in the Bitquery IDE with the
    plan's key, using a busy Robinhood token and a 60-minute window, and
-   confirm three things:
+   confirm these things:
    - the `Trading` cube accepts `count(distinct: …, if: …)` and a
-     `Block.Time` condition inside `if:`;
+     `Block.Time` condition inside `if:`, for both `Trader_Address` and
+     `TransactionHeader_Hash`;
+   - `sum(of: AmountsInUsd_Quote, …)` and
+     `orderBy: {descending: AmountsInUsd_Quote}` are accepted, and one
+     largest sell's quote-side USD matches the explorer's swap to within a few
+     percent. Bitquery documents `AmountsInUsd_Base` as riding a smoothed
+     reference price, so no figure here uses it;
+   - a buy count is a count of transactions, not rows: pick a transaction
+     with a multi-hop swap and check it counts once;
    - `Side: "Buy"` really is a trader buying the coin (compare one trade with
      the explorer);
    - the two-root creator query (`Trading` plus `EVM`) is accepted.
@@ -46,20 +56,34 @@ meant as a later source for the early book and nothing calls it yet.
    on `web`, on the Brain service, or under the names `BITQUERY_API_KEY` or
    `MERRYMEN_TOKEN`. `CHILD_SECRET_STRIP` removes all three names from every
    child. A copy on any other service is an extra credential for no purpose.
-3. **Read the boot line.** The orchestrator logs one of the following:
+3. **Know that the gateway now spends too, and set its cap.** The same change
+   fixed the worker's gateway header (below), so holders' discovery polls now
+   reach the gateway's `MERRYMEN_GATEWAY_BITQUERY_KEY` instead of failing with
+   401 for free. Each holder costs roughly 720 points a day at the default
+   10-minute interval, and up to ten times that at 1 minute. The gateway caps
+   all of them, plus its public memescope, with
+   `MERRYMEN_GATEWAY_BITQUERY_POINTS_PER_DAY` (default `5000`). If the
+   gateway's key is on the same plan as this lane, the two knobs together must
+   stay under the plan: 25,000 + 5,000 a day is 900,000 of a 1,000,000-point
+   month. Raise one only by lowering the other, or put the gateway on a plan of
+   its own. Deploy the gateway with its cap before, or with, the worker.
+4. **Read the boot line.** The orchestrator logs one of the following:
    - `bitquery lane: on — 25000 points/UTC day (20000 for child evidence), 60 requests/min, 3 at once`
    - `bitquery lane: off — …`, with the reason.
-4. **Turn on child evidence by account.** Children may ask only if their smart
+5. **Turn on child evidence by account.** Children may ask only if their smart
    account is listed in `MERRYMEN_DECISION_RESEARCH_ACCOUNTS`, the same
    allowlist that decision research already uses (see
-   [`decision-research.md`](decision-research.md)). Alan's account,
-   `0x7Ac219f42F2303630646e09aa6507B0349bc5523`, is already on it. The allowlist
-   is checked on every request, so a change applies without a respawn.
-5. **Reconcile after a day.** Compare Bitquery's usage page with the lane's
-   own counter: table `spend` in `<fleet home>/bitquery-lane/lane.sqlite`, with
-   columns `points`, `calls` and `refused` per UTC day. If the real cost per
-   call is higher than estimated, lower `MERRYMEN_BITQUERY_POINTS_PER_DAY`. Do
-   not raise the per-query estimates in place of that.
+   [`decision-research.md`](decision-research.md)). Add an account to it in the
+   orchestrator's deploy environment, never in this repository: which agent's
+   smart account is on the list is operator configuration, not documentation.
+   The allowlist is checked on every request, so a change applies without a
+   respawn.
+6. **Reconcile after a day.** Compare Bitquery's usage page with the lane's
+   own counter (table `spend` in `<fleet home>/bitquery-lane/lane.sqlite`, with
+   columns `points`, `calls` and `refused` per UTC day) plus the gateway's.
+   If the real cost per call is higher than estimated, lower
+   `MERRYMEN_BITQUERY_POINTS_PER_DAY` or the gateway's cap. Do not raise the
+   per-query estimates in place of that.
 
 To stop spending without removing the key, set `MERRYMEN_BITQUERY_LANE=0` and
 redeploy. Every flow question then answers `unavailable`.
@@ -70,7 +94,7 @@ redeploy. Every flow question then answers `unavailable`.
 |---|---|---|
 | `MERRYMEN_BITQUERY_API_KEY` | unset (lane off) | The plan's key. An `ory_at_…` V2 token is sent as `Authorization: Bearer`; anything else is sent as `X-API-KEY`. **Orchestrator only.** |
 | `MERRYMEN_BITQUERY_LANE` | on when a key is set | `0` turns the lane off while keeping the key. |
-| `MERRYMEN_BITQUERY_POINTS_PER_DAY` | `25000` (ceiling `100000`) | Points reserved per UTC day across every caller. 25,000 × 30 = 750,000, which leaves a quarter of a 1,000,000-point month as headroom for estimation error. Child evidence may use at most 80% of it, so X answers are never starved. |
+| `MERRYMEN_BITQUERY_POINTS_PER_DAY` | `25000` (ceiling `100000`) | Points reserved per UTC day across every caller. 25,000 × 30 = 750,000. With the gateway's default cap of 5,000 a day (150,000 a month) on the same plan, that is 900,000 of a 1,000,000-point month, leaving a tenth as headroom for estimation error. Child evidence may use at most 80% of it, so X answers are never starved. |
 | `MERRYMEN_BITQUERY_RPM` | `60` (ceiling `90`) | Requests started per rolling minute. The plan allows 90. |
 
 A knob that is not a positive whole number is logged by its length, never
@@ -95,7 +119,17 @@ for the gateway and the IDE.
   Trading cube's price is not documented, so it is assumed to be the same.
 - **One cache serves the fleet**, keyed by query and token. A cache hit keeps
   the time the answer was observed. Concurrent identical questions share one
-  request.
+  request, one way only: child evidence may join a request made for the
+  orchestrator's own answer, but an answer never joins an evidence request, so
+  a refusal at the evidence share never becomes an answer's refusal.
+- **No request goes out without time to answer.** A caller waits at most 8 s
+  for a rate turn or a slot, and only while the request would still get 3 s of
+  its deadline. Otherwise it is answered `timeout` or `budget` with nothing
+  reserved and nothing sent.
+- **One reading has one deadline.** `flowFor` gives the flow query, the
+  launcher lookup and the launcher's query 18 s together, under the broker's
+  22 s ceiling. Short of time, the flow facts come back with the launcher
+  `unavailable` rather than late.
 - **Provider refusals back off the whole lane:**
   - `429` backs off on a ladder from 1 to 15 minutes, or for `Retry-After` if
     that is longer. `402` holds off for an hour. Both are persisted, so a
@@ -116,12 +150,21 @@ for the gateway and the IDE.
 - **The orchestrator's own answers** call `flowFor(token)` and spend from the
   whole day. It lives in `worker/src/orchestrator-flow.ts`, and
   `orchestrator.ts` re-exports it. A pass such as `orchestrator-xpost.ts`
-  should import it from `orchestrator-flow.ts`, which avoids an import cycle. For X replies,
-  `flowFactLines(result)` (`worker/src/flow-facts.ts`) returns short lines that
-  are already attributed ("on-chain DEX data, last 15m: $1.4k bought vs $610
-  sold (8 buyers, 4 sellers)"). A writer may paraphrase them. The lines never
-  contain an address, a wallet list, a size or P&L. When there is nothing
-  honest to say, the list is empty, never "no activity".
+  should import it from `orchestrator-flow.ts`, which avoids an import cycle.
+- **Flow facts reach X only as bands, never as figures.** An X post carries no
+  number ([`x-posting.md`](x-posting.md) rule 2): the writer's `clean()` drops
+  any fact with a digit, and the gate refuses a numeral or a quantity word. So
+  for X replies, `flowXLines(result, seed)` (`worker/src/flow-facts.ts`)
+  returns fixed, attributed glosses from a closed vocabulary, such as "on-chain
+  data shows sells clearly outweighing buys over the last hour" or "per
+  on-chain data, the buying over the last hour came from only a small group of
+  addresses". Pass a seed such as `${tenant}|${token}` so two accounts are not
+  handed the same words. Every gloss is pinned to pass the existing writer and
+  X gate unchanged (`orchestrator-flow.test.ts`). **Do not change the writer
+  or the gate to admit flow figures**; new wording goes into `FLOW_X_GLOSS`,
+  through that test. The dollar figures and counts stay in the Brain lens.
+  Nothing is said when there is nothing honest to say: no line for an hour
+  with no indexed trades, and no line for a launcher who did not sell.
 - **A child** uses `createFlowClient(processFlowPort())`
   (`worker/src/flow-broker.ts`) and may ask for one thing: the reading for a
   token address. It cannot choose a query, a window, a limit or a creator. It
@@ -129,11 +172,16 @@ for the gateway and the IDE.
   The broker shares Fomo's IPC channel. That channel exists only while
   `MERRYMEN_FOMO_ENABLED=1`, and without it the client answers `unavailable`
   immediately.
-- **The creator is resolved on the orchestrator**, from the deployer the token
-  records on chain (`readTokenDeployer`, Pons-template tokens only). The
-  address is used as a query variable and appears in no fact, log line or
-  reply. A coin that records no creator is `not-derivable`. A failed chain read
-  is `unavailable`. Neither is ever reported as "did not sell".
+- **The launcher is resolved on the orchestrator**, from the Pons factory's own
+  launch event (`readLaunchCreator` in `worker/src/venues/pons.ts`), filtered
+  by emitter at the node and checked again. The deployer a token reports about
+  itself through the template's metadata getter is never used: any contract
+  can answer that selector with a decoy address. The lookback is about 8
+  hours (`MAX_LOOKBACK_BLOCKS`), so a coin launched earlier, or not launched
+  through Pons, is `not-derivable`. A failed chain read is `unavailable`.
+  Neither is ever reported as "did not sell". The address is used as a query
+  variable and appears in no fact, log line or reply, and every rendering
+  labels it by its source, the launchpad's launch record.
 
 ## Where it plugs in (not wired yet)
 
@@ -171,7 +219,8 @@ branch is changing that code. When it does:
   holder's discovery call failed with 401 and was reported as an expired token.
   Gateway calls now send the token as Bearer, and the hint names the actual
   cause: a 401 is the token, a 403 is the holdings, and a 503 is the gateway's
-  own state.
+  own state. **This starts gateway spending**, so the gateway gained a
+  fleet-wide daily cap in the same change (rollout step 3).
 - **No discovery fan-out.** `BITQUERY_API_KEY` and `MERRYMEN_TOKEN` are
   stripped from children. In hosted mode both are house keys that a child can
   only read from the environment, and discovery defaults on, so either one on
