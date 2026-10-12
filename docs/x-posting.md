@@ -625,8 +625,12 @@ looks things up first, the way Shogun does in a Telegram group
 - **Intent, by code** (`classifyTag`, with the Telegram groups' readers):
   what it can do, how to get an agent, its own trades, a coin (by `$ticker`,
   by a coin it bought named in words, or by the address), its model, or chat.
-  An attempt to steer it and a private ask (wallet, P&L, owner) are chat:
-  nothing is looked up for them.
+  A coin it bought counts by name only beside a word about a coin or a trade
+  ("is pepe legit?", "the pepe chart"), and never by a label under three
+  letters or made of greetings and pronouns alone: a coin called GM or You
+  must not turn "gm, how are you?" into a paid lookup. An attempt to steer it
+  and a private ask (wallet, P&L, owner) are chat: nothing is looked up for
+  them.
 - **What a coin is looked up on:** its own history (the buys the room knows,
   its own buy posts on this X account, its public theses: "you bought it",
   its own words and its public reason, through the Telegram facts filter
