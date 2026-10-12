@@ -31,6 +31,7 @@ import {
   modelAnswers,
   replyPrompt,
   sherwoodClaimed,
+  sherwoodMentioned,
   sherwoodNamed,
   xpostCreds,
   xpostModel,
@@ -814,8 +815,13 @@ describe("an active agent's answers and conversation memory", () => {
     assert.doesNotMatch(text, /sherwood/i);
     assert.match(text, /Never name a provider or a model, not even merrymen's own, and never say what runs you, powers you or picks your trades/);
     assert.doesNotMatch(text, /\b(?:groq|qwen|gpt|llama|claude|openai|anthropic)\b/i);
-    // A question that names it is still handed over as the screened question, quoted and untrusted.
-    assert.match(all(answerPrompt({ ...BASE, question: "is sherwood any good", recentBuys: [], said: [], walletPublic: false })), /Untrusted question to answer: «is sherwood any good»/);
+    // A question that names it, in any form, is never handed to the writer at all: there is nothing to answer.
+    for (const question of ["is sherwood any good", "sherwood TGE soon?", "sher\u200bwood to $1?", "is $SHERW00DINU legit?", "ꜱʜᴇʀᴡᴏᴏᴅ legit?"]) {
+      assert.equal(answerQuestion(question), null, question);
+      const p = answerPrompt({ ...BASE, question, recentBuys: [], said: [], walletPublic: false });
+      assert.match(p.prompt, /no usable question/, question);
+      assert.doesNotMatch(p.prompt, /Untrusted question/, question);
+    }
   });
 
   it("research facts reach the prompt only when handed, attributed, digit-free, with the answer's own rules", () => {
@@ -919,6 +925,16 @@ describe("an active agent's answers and conversation memory", () => {
     // Named at all, however spelled: what refuses a drafted mention (only code's lines may).
     for (const named of ["the new sherwood-1 is cooking", "Sherwood One", "sherwood1", "SHERWOOD", "a walk in sherwood forest"]) assert.equal(sherwoodNamed(named), true, named);
     for (const unnamed of ["built by merrymen", "", null]) assert.equal(sherwoodNamed(unnamed), false, String(unnamed));
+  });
+
+  it("sherwood in a tag is found on its letters alone: spacing, digits, zero-width characters and look-alikes do not hide it", () => {
+    for (const asked of ["sherwood", "$SHERWOODINU", "sherwood-1", "sherw00d", "5herwood", "$herwood", "s h e r w o o d", "s.h.e.r.w.o.o.d", "sher\u200bwood", "sher\u00adwood",
+      "ｓｈｅｒｗｏｏｄ", "𝐬𝐡𝐞𝐫𝐰𝐨𝐨𝐝", "ꜱʜᴇʀᴡᴏᴏᴅ", "sherwοod", "shérwood", "sherwod", "shervvood", "sher-wood"]) {
+      assert.equal(sherwoodMentioned(asked), true, asked);
+    }
+    for (const plain of ["what model are you", "that was a shrewd buy", "show me the chart", "sherwin williams", "how's your day going?", "", null]) {
+      assert.equal(sherwoodMentioned(plain), false, String(plain));
+    }
   });
 
   it("a trade-talk casual post may pick up a theme it answered, and only then", () => {

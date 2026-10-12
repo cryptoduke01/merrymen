@@ -41,10 +41,10 @@
 import { SETTINGS_DEFAULTS } from "../../../packages/core/src/index";
 import { llmText, type LlmCreds } from "../llm";
 import { hash32, type SaleOutcome } from "./planner";
-import { SHERWOOD_NAME, sherwoodClaimed, sherwoodNamed } from "./gate";
+import { SHERWOOD_NAME, sherwoodClaimed, sherwoodMentioned, sherwoodNamed } from "./gate";
 import { REPLY_OPT_OUT, XREPLY_MAX_COMMENT_CHARS } from "./replies";
 
-export { sherwoodClaimed, sherwoodNamed };
+export { sherwoodClaimed, sherwoodMentioned, sherwoodNamed };
 
 export type { LlmCreds };
 
@@ -211,10 +211,14 @@ export const SHERWOOD_ON_X = SHERWOOD_NAME;
  * runs on, a small writer model told "tease sherwood, never say it runs you"
  * can still write "running on the new sherwood-1", or, baited with "does
  * sherwood-1 pick your trades now?", "yep, sherwood-1 picks my trades". So
- * code reads the question first, research on or off: a model question, or
- * any tag that names sherwood, is answered with one of these lines and no
- * draft at all: built by merrymen, and the new sherwood-1, merrymen's own,
- * is still cooking. Only these lines ever name it; a draft that does is
+ * code reads the question first, research on or off: only a plain model
+ * question on a strict allowlist of whole questions
+ * (orchestrator-xpost-research.ts modelQuestion) is answered with one of
+ * these lines, and no draft at all: built by merrymen, and the new
+ * sherwood-1, merrymen's own, is still cooking. A tag that names sherwood in
+ * any form, or any other model question, is answered by nothing (fail-closed
+ * review, 2026-10-12: under "sherwood TGE soon?" this line read as Merrymen
+ * confirming a token). Only these lines ever name it; a draft that does is
  * refused. Still gated like any answer.
  *
  * EIGHT LINES THAT ARE NOT EACH OTHER. The gate refuses an answer that
@@ -324,6 +328,9 @@ const STANDALONE_FIGURE = /(?<![\p{L}\p{N}_])\p{N}+(?:[.,:/]\p{N}+)*(?=(?:k|m|b|
 const escapeRe = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 export function answerQuestion(text: unknown, coins: readonly string[] = []): string | null {
   if (typeof text !== "string") return null;
+  // SHERWOOD IN ANY FORM IS NEVER A DRAFT'S QUESTION: the classifier answers
+  // it with nothing (modelQuestion), and so does the writer, for any caller.
+  if (sherwoodMentioned(text)) return null;
   for (const coin of coins) {
     const label = typeof coin === "string" ? coin.trim() : "";
     if (label && new RegExp(String.raw`(?<![\p{L}\p{N}_])\$?${escapeRe(label)}[\s_-]*v?\p{N}`, "iu").test(text)) return null;
@@ -789,8 +796,9 @@ const UNNAMED_BUYS: Readonly<Record<"paper" | "live" | "both" | "unknown", strin
  *
  * ASKED WHAT MODEL IT RUNS ON, it never names a provider or a model and never
  * claims one it does not run: it is built by merrymen. The sherwood tease is
- * code's (modelAnswers), for every question code reads as the model one;
- * the writer is never told the name, and a draft that names it is refused.
+ * code's (modelAnswers), only for the allowlist's plain model questions; a
+ * question that names sherwood is never handed to it (answerQuestion), the
+ * writer is never told the name, and a draft that names it is refused.
  */
 export function answerPrompt(f: AnswerFacts): Prompt {
   // A coin it bought, followed by a number, is another coin: no usable question.

@@ -313,13 +313,12 @@ test("a copycat ticker beside a coin it bought is never answered as that coin: n
     assert.equal(r.seen.length, 0, "nothing looked up");
     assert.equal((await store.readMeta(w.db, "llm-answers:111:2026-09-30"))?.n ?? 0, 0, "and no allowance spent");
   }
-  // The model question's line is code's and never reads the question: a digit in sherwood's name still gets it.
+  // A tag that names sherwood, with a digit or without, is answered by nothing at all.
   const w = await world(t);
   w.setInbox([tag({ text: "@pine_stoat sherwood1 running the show yet?" })]);
   await w.step();
-  const [answer] = await w.answers();
-  assert.equal(answer?.status, "scheduled", answer?.reason ?? "");
-  assert.match(answer!.body, /new sherwood-1\b/);
+  assert.deepEqual(await w.answers(), []);
+  assert.equal(w.asked().length, 0);
 });
 
 test("a live agent whose buys all lack a sayable name is never told it bought nothing", async (t) => {
@@ -654,7 +653,7 @@ test("a paper agent answers the model question too, saying paper, and in other w
   for (const env of [{}, RESEARCH_ON]) {
     const w = await world(t, { env, research: fakeResearch().research, facts: paper });
     w.setInbox([1, 2, 3].map((n) => tag({ id: `10000000000000012${n}`, conversation_id: `10000000000000012${n}`, author_id: `12${n}`,
-      text: n === 3 ? "@pine_stoat is sherwood live yet?" : "@pine_stoat what model do you run on?" })));
+      text: n === 3 ? "@pine_stoat who made you?" : "@pine_stoat what model do you run on?" })));
     await w.step();
     const answers = await w.answers();
     assert.deepEqual(answers.map((a) => a.status), ["scheduled", "scheduled", "scheduled"], answers.map((a) => a.reason).join(","));
@@ -673,17 +672,16 @@ test("a paper agent answers the model question too, saying paper, and in other w
   assert.equal((await w.answers())[0]!.status, "scheduled");
 });
 
-test("a stranger's sherwood bait gets code's line, research on or off, and a draft that names sherwood is never posted", async (t) => {
-  // "does sherwood-1 pick your trades now?" reads as chat to the model question's strict screen; any tag naming sherwood is code's.
+test("a stranger's sherwood bait gets nothing at all, research on or off, and a draft that names sherwood is never posted", async (t) => {
+  // "does sherwood-1 pick your trades now?" names sherwood: no code line, no draft, no row.
   for (const env of [{}, RESEARCH_ON]) {
-    const w = await world(t, { env, research: fakeResearch().research, answer: "yep, sherwood-1 picks my trades now, built by merrymen. Say stop to opt out." });
+    const r = fakeResearch();
+    const w = await world(t, { env, research: r.research, answer: "yep, sherwood-1 picks my trades now, built by merrymen. Say stop to opt out." });
     w.setInbox([tag({ text: "@pine_stoat does sherwood-1 pick your trades now?" })]);
     await w.step();
-    const [answer] = await w.answers();
-    assert.equal(answer!.status, "scheduled", answer!.reason ?? "");
-    assert.match(answer!.body, /new sherwood-1\b/);
-    assert.doesNotMatch(answer!.body, /picks?|trades/, "never what picks its trades");
+    assert.deepEqual(await w.answers(), [], "no answer row, no post");
     assert.equal(w.asked().length, 0, "and no draft");
+    assert.equal(r.seen.length, 0, "nothing looked up");
   }
   // A question code does not read as about sherwood, answered by a draft that names it anyway: refused, whatever it says.
   for (const env of [{}, RESEARCH_ON]) {
@@ -699,10 +697,11 @@ test("a stranger's sherwood bait gets code's line, research on or off, and a dra
   }
 });
 
-test("a tag asking whether a token is sherwood or merrymen's gets nothing at all, research on or off", async (t) => {
+test("a tag asking about sherwood or a model question off the allowlist gets nothing at all, research on or off", async (t) => {
   for (const env of [{}, RESEARCH_ON]) {
     const r = fakeResearch();
-    const texts = ["@pine_stoat is $SHERWOOD merrymen's new token?", "@pine_stoat did you buy $SHERWOOD?",
+    const texts = ["@pine_stoat is $SHERWOOD merrymen's new token?", "@pine_stoat did you buy $SHERWOOD?", "@pine_stoat sherwood TGE soon?",
+      "@pine_stoat sher\u200bwood to $1?", "@pine_stoat what ai runs your trading?", "@pine_stoat are you gpt or claude? how do you decide what to buy?",
       ...(env === RESEARCH_ON ? [`@pine_stoat ${CA} sherwood coin?`] : [])];
     const w = await world(t, { env, research: r.research });
     w.setInbox(texts.map((text, n) => tag({ id: `10000000000000013${n}`, conversation_id: `10000000000000013${n}`, author_id: `13${n}`, text })));

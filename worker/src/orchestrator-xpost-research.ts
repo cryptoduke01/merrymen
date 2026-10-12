@@ -11,9 +11,11 @@
  *
  * CLASSIFIED BY CODE, NEVER BY THE MODEL. `classifyTag` reads the screened
  * question with the Telegram groups' own readers (publicFactRequest,
- * extractCashtags, isInjection, isPrivateAsk) into one of six intents:
- * capabilities, onboarding, own trades, a coin, the model, or chat. Only a
- * coin costs a paid lookup; own trades read what it already has.
+ * extractCashtags, isInjection, isPrivateAsk) into one of seven intents:
+ * capabilities, onboarding, own trades, a coin, the model (a strict
+ * allowlist of whole questions), chat, or unanswered (sherwood in any form,
+ * or a model question off the allowlist). Only a coin costs a paid lookup;
+ * own trades read what it already has.
  *
  * ONE BUNDLE PER ANSWER, BOUNDED. At most RESEARCH_BUDGET.maxLookups lookups
  * and RESEARCH_BUDGET.totalMs in all, every read time-boxed; a lookup that
@@ -49,9 +51,9 @@ import { readPeerTheses } from "./peer-theses";
 import { extractCashtags, isInjection, isPrivateAsk } from "./telegram/tg-groups/detect";
 import { publicCoinReason, publicFactRequest } from "./telegram/tg-groups/facts";
 import type { PublicThesis } from "./thesis-policy";
-import { vocabularyRefusal } from "./xpost/gate";
+import { sherwoodMentioned, vocabularyRefusal } from "./xpost/gate";
 import { coinOf, hash32 } from "./xpost/planner";
-import { withoutReplyOptOut } from "./xpost/replies";
+import { normalisedTag, withoutReplyOptOut } from "./xpost/replies";
 import { takeAllowance, type XPost } from "./xpost/store";
 
 const MIN = 60_000;
@@ -72,28 +74,73 @@ export type TagIntent =
   | { kind: "own-trades"; why: boolean; coin: string | null; address: string | null }
   /** A coin by $ticker, by a coin it traded named in words, or by ONE contract address (a lookup key only). */
   | { kind: "coin"; ticker: string | null; address: string | null }
+  /** The allowlist's plain "what model are you" (modelQuestion): code's own line, never a draft. */
   | { kind: "model" }
   | { kind: "chat" }
   /**
-   * A tag that asks about sherwood or the model AND about a token: answered
-   * by nothing at all, no draft and no post (TOKEN_ASK).
+   * Answered by nothing at all: no row, no draft, no allowance. A tag that
+   * names sherwood in any form, and any other model question that is not on
+   * the allowlist (modelQuestion). Fail closed.
    */
   | { kind: "unanswered" };
 
 /**
- * "WHAT MODEL ARE YOU ON", "are you chatgpt", "what ai runs you". Read before
- * the private-ask screen, which deflects model questions in a Telegram room;
- * on X the answer is the sherwood tease (writer.ts SHERWOOD_ON_X).
+ * WHAT CODE ANSWERS WITH ITS OWN MODEL LINE (fail-closed review, 2026-10-12):
+ * the whole tag, normalised (replies.ts normalisedTag), is one of a short list
+ * of plain "what are you / what model do you run" shapes, after at most two
+ * greeting words and before an optional "for trading" / "to trade". Nothing
+ * else is ever the model question. Four review rounds each found a phrasing
+ * that a deny-list of token words missed ("sherwood TGE soon?", "sherwood to
+ * $1?", "can i own a piece?"), and each one got code's line ("merrymen made
+ * me. the new sherwood-1 is cooking") under a stranger's token. An allowlist
+ * of whole questions cannot be added to by the asker: a word more, and it is
+ * not on it.
+ */
+const YOU = String.raw`(?:you|u|ya)`;
+const ARE = String.raw`(?:are|r)`;
+const WHICH = String.raw`(?:what|which|wat)(?: kind of| sort of| type of)?`;
+const NOUN_OK = String.raw`(?:model|ai|llm|language model)`;
+const NAME_OK = String.raw`(?:chat ?gpt|gpt(?:-?\d+(?:\.\d+)?o?)?|claude|grok|gemini|llama|an ai|ai|an a\.i|a bot|an llm|a robot)`;
+const MODEL_SHAPES = [
+  // what model / which llm
+  `${WHICH} ${NOUN_OK}`,
+  // what model are you, what ai are you running on, what llm are you using
+  `${WHICH} ${NOUN_OK} ${ARE} ${YOU}(?: (?:running|running on|using|on|built on|based on))?`,
+  // which model do you run on, what llm do you use
+  `${WHICH} ${NOUN_OK} (?:do|does) ${YOU} (?:run|run on|use)`,
+  // what model powers you
+  `${WHICH} ${NOUN_OK} (?:powers|runs|drives) ${YOU}`,
+  // what are you built on, what do you run on
+  `what ${ARE} ${YOU} (?:built on|built with|running on|based on|powered by)`,
+  `what (?:do|does) ${YOU} run on`,
+  // who made you, who built you
+  `who (?:made|built|created|makes|builds) ${YOU}`,
+  // are you chatgpt, are you an ai, are you a bot
+  `${ARE} ${YOU} ${NAME_OK}`,
+  // what's your model
+  `(?:what's|whats|what is) (?:your|ur) (?:model|ai|llm)`,
+];
+const GREETING = String.raw`(?:(?:gm|yo|hey|hi|ser|fren|bro|alan)[\s,!.]+){0,2}`;
+const FOR_TRADING = String.raw`(?:,? (?:for trading|to trade))?`;
+const MODEL_ALLOWED = new RegExp(`^${GREETING}(?:${MODEL_SHAPES.join("|")})${FOR_TRADING}$`, "u");
+
+/**
+ * WHAT THE OLD CLASSIFIER CALLED THE MODEL QUESTION, read now only to refuse
+ * it: a tag that looks like one ("what ai runs your trading?", "you built on
+ * claude?", "which model powers your trading decisions?") and is not on the
+ * allowlist above is answered by nothing, never handed to the writer model.
+ * Read before the private-ask screen, which deflects model questions in a
+ * Telegram room.
  *
- * STRICT, BECAUSE IT IS READ FIRST and its answer is the tease and nothing
- * else: the model noun must end the phrase or be followed by a verb or a
- * pronoun ("what ai are you", "which model runs you", "what llm?"), never by
- * another noun ("what ai coins do you like" is a coin question); and "running
- * on" must be followed by a model or provider word, or end the question
- * ("are you running on paper or live" is about its trades).
+ * The model noun must end the phrase or be followed by a verb or a pronoun
+ * ("what ai are you", "which model runs you", "what llm?"), never by another
+ * noun ("what ai coins do you like" is a coin question); and "running on"
+ * must be followed by a model or provider word, or end the question ("are you
+ * running on paper or live" is about its trades). An AI provider's or model's
+ * own name anywhere (MODEL_NAMED) counts too.
  */
 const MODEL_NOUN = String.raw`(?:model|llm|ai|a\.i\.?|language model|brain|engine)`;
-const MODEL_NAMES = String.raw`(?:gpt|chat\s?gpt|claude|grok|gemini|llama|qwen|deepseek|mistral|openai|anthropic|sherwood)`;
+const MODEL_NAMES = String.raw`(?:gpt|chat\s?gpt|claude|grok|gemini|llama|qwen|deepseek|mistral|openai|anthropic)`;
 const MODEL_ASK = new RegExp(
   [
     String.raw`\b(?:what|which|wat|whats|what's)\s+(?:kind\s+of\s+|sort\s+of\s+|type\s+of\s+)?${MODEL_NOUN}(?=\s*(?:$|[?!.,]|(?:are|r|do|does|is|runs?|powers?|drives?|you|u|ya|behind|under|inside|in\s+you)\b))`,
@@ -105,55 +152,21 @@ const MODEL_ASK = new RegExp(
   ].join("|"),
   "iu",
 );
-
-/** Sherwood named at all, however it is spelled: only code's own lines answer it (writer.ts modelAnswers). */
-const SHERWOOD_ASK = /\bsherwood/i;
+const MODEL_NAMED = /\b(?:chat\s?gpt|gpt[\w.-]*|openai|anthropic|llms?|language models?|deepseek|qwen)\b/iu;
 
 /**
- * A TOKEN IN A SHERWOOD OR MODEL QUESTION (review, 2026-10-12): a $ticker, a
- * tagged contract, or a word for a coin, a token or its launch. Anyone can
- * launch $SHERWOOD and tag the official account with "is $SHERWOOD
- * merrymen's new token?"; code's model line under it ("merrymen made me. the
- * new sherwood-1 is what they've got in the oven") reads as Merrymen
- * confirming that token, ready to screenshot. So such a tag gets no answer
- * at all: not the model line, and not a draft (which may not name sherwood
- * anyway).
- *
- * READ WIDE, BECAUSE A MISS IS THE SCREENSHOT (final review, 2026-10-12).
- * Any "$" before a letter is a ticker, however long and with an underscore
- * ("$SHERWOODINU", "$SHERWOOD_AI"), not only the 2-10 letter cashtag the
- * Telegram reader takes. Trade, price and venue talk is token talk: "just
- * aped sherwood", "is sherwood pumping?", "sherwood mcap", "is sherwood on
- * pons yet?", "is sherwood legit?". A name that runs on from sherwood
- * ("sherwoodinu", "sherwood_ai") is a token's name, never the model's
- * (sherwood-1, sherwood one). A model question that happens to use one of
- * these words fails closed: it is not answered.
- *
- * ITS OWN TRADING IS READ PAST, and only that: "does sherwood-1 pick your
- * trades now?", "is sherwood choosing your coins?" — a word for picking or
- * running, then "your coins / trades / buys". "Is sherwood one of your
- * coins?" and "one of their coins" are a token.
+ * THE MODEL QUESTION, BY CODE: "model" only on the allowlist and with no
+ * contract tagged; "unanswered" for anything that names sherwood in any form
+ * (gate.ts sherwoodMentioned: "$SHERWOODINU", "sherw00d", "sher​wood")
+ * and for anything else that looks like a model question; null otherwise.
+ * Exported for tests.
  */
-const TOKEN_WORDS = new RegExp(
-  [
-    String.raw`\b(?:coins?|tokens?|contracts?|ca|launch\w*|presales?|airdrops?|tickers?|mint\w*|memecoins?|listings?|listed|cashtags?)\b`,
-    // Trading it, and what a trader reads off a coin.
-    String.raw`\b(?:buy\w*|bought|ap(?:e|ed|es|ing)|sell\w*|sold|trad(?:e|es|ed|ing)|swap\w*|pump\w*|dump\w*|moon\w*|send(?:ing)?\s+it|bags?|bagholders?|hold(?:s|ing|ers?)?|entry|entries|exit\w*|stak\w*|invest\w*)\b`,
-    String.raw`\b(?:price\w*|worth|charts?|candles?|mcap|marketcap|market\s*caps?|fdv|ath|supply|liq|liquidity|volume|pools?|curve|gem|degen\w*|\d+x|x\d+)\b`,
-    // Whether it is real, and where it trades.
-    String.raw`\b(?:legit|official|fake|scam\w*|rug\w*|honeypot|dex\w*|uniswap|pons|pump\.?fun|robinhood\s+chain)\b`,
-  ].join("|"),
-  "i",
-);
-/** "$" before a letter or an underscore, however long the tag: "$SHERWOODINU", "$sherwood_ai". */
-const ANY_TICKER = /\$\s*[\p{L}_]/u;
-/** A name that runs on from sherwood, other than its model: "sherwoodinu", "sherwood_ai", "sherwoodcoin". */
-const SHERWOOD_COMPOUND = /\bsherwood(?!one\b)[\p{L}_]/iu;
-/** Its own trading, after a word for picking or running it: read past, and nothing else is. */
-const OWN_TRADING = /\b(?:pick\w*|choos\w*|chose\w*|select\w*|decid\w*|mak(?:e|es|ing)|run(?:s|ning)?|driv\w*|call(?:s|ing)?|power\w*|handl\w*|manag\w*|plac\w*|plan\w*|do|does|doing)\s+(?:all\s+)?(?:of\s+)?(?:your|ur|yr|my)\s+(?:coins?|trades?|buys?|sells?|picks?|calls?)\b/gi;
-function tokenAsked(t: string, address: string | null): boolean {
-  return address !== null || ANY_TICKER.test(t) || extractCashtags(t).length > 0 || SHERWOOD_COMPOUND.test(t)
-    || TOKEN_WORDS.test(t.replace(OWN_TRADING, " "));
+export function modelQuestion(text: unknown, address: string | null = null): "model" | "unanswered" | null {
+  if (typeof text !== "string") return null;
+  if (sherwoodMentioned(text)) return "unanswered";
+  const n = normalisedTag(text);
+  if (MODEL_ALLOWED.test(n)) return address ? "unanswered" : "model";
+  return MODEL_ASK.test(text) || MODEL_ASK.test(n) || MODEL_NAMED.test(n) ? "unanswered" : null;
 }
 
 /** A word of the line, for matching a coin it traded named without a $ sign. */
@@ -191,12 +204,15 @@ function knownCoinAsked(label: string, said: ReadonlySet<string>): boolean {
 export function classifyTag(text: string, o: { address?: string | null; knownCoins?: readonly string[] } = {}): TagIntent {
   const t = typeof text === "string" ? text : "";
   const address = typeof o.address === "string" && /^0x[0-9a-f]{40}$/.test(o.address) ? o.address : null;
+  if (!t.trim()) return { kind: "chat" };
+  // SHERWOOD IN ANY FORM, AND THE MODEL QUESTION, FIRST: code's own line for
+  // the allowlist's plain questions, nothing at all for the rest — never a
+  // draft. Before the injection screen, so a steer that names sherwood or
+  // asks about the model is answered by nothing rather than as chat.
+  const model = modelQuestion(t, address);
+  if (model) return { kind: model };
   // An attempt to steer it is answered as chat: nothing is looked up for it.
-  if (!t.trim() || isInjection(t)) return { kind: "chat" };
-  // ANY TAG THAT NAMES SHERWOOD gets code's own line: "does sherwood-1 pick
-  // your trades now?" is bait for "yep, sherwood-1 picks my trades". Unless
-  // it also asks about a token: then nothing answers it (TOKEN_WORDS).
-  if (MODEL_ASK.test(t) || SHERWOOD_ASK.test(t)) return tokenAsked(t, address) ? { kind: "unanswered" } : { kind: "model" };
+  if (isInjection(t)) return { kind: "chat" };
   const asked = publicFactRequest(t);
   if (asked?.kind === "site" && asked.topic === "capabilities") return { kind: "capabilities" };
   if (asked?.kind === "site" && asked.topic === "onboarding") return { kind: "onboarding" };

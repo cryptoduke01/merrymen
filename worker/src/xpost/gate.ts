@@ -275,6 +275,51 @@ export function sherwoodNamed(draft: unknown): boolean {
   return typeof draft === "string" && SHERWOOD_SAID.test(draft.normalize("NFKC"));
 }
 
+/**
+ * LETTERS THAT READ AS LATIN ONES: Greek, Cyrillic, small capitals and a few
+ * stroked letters that a tag can swap in for a plain letter and still read
+ * the same on X. NFKC folds the fullwidth and mathematical alphabets
+ * already; these it leaves alone.
+ */
+const LOOKALIKE: Readonly<Record<string, string>> = Object.freeze({
+  α: "a", δ: "d", ε: "e", η: "n", ι: "i", κ: "k", ν: "v", ο: "o", ρ: "p", ς: "s", τ: "t", υ: "u", χ: "x", ω: "w",
+  а: "a", в: "b", е: "e", к: "k", м: "m", н: "h", о: "o", р: "p", с: "c", т: "t", у: "y", х: "x", ѕ: "s", і: "i", ј: "j", һ: "h", ԁ: "d", ԝ: "w",
+  ᴀ: "a", ʙ: "b", ᴄ: "c", ᴅ: "d", ᴇ: "e", ɢ: "g", ʜ: "h", ɪ: "i", ᴊ: "j", ᴋ: "k", ʟ: "l", ᴍ: "m", ɴ: "n", ᴏ: "o", ᴘ: "p", ʀ: "r", ꜱ: "s", ᴛ: "t", ᴜ: "u", ᴠ: "v", ᴡ: "w", ʏ: "y", ᴢ: "z",
+  ø: "o", ł: "l", đ: "d", ð: "d", ħ: "h", ı: "i", ɑ: "a", ɡ: "g",
+});
+/** Digits and signs written for a letter: "sherw00d", "5herwood", "$herwood". */
+const LEET: Readonly<Record<string, string>> = Object.freeze({ "0": "o", "3": "e", "4": "a", "5": "s", "7": "t", $: "s", "@": "a", "€": "e" });
+
+/**
+ * A TEXT'S LETTERS AND NOTHING ELSE, a-z: NFKC, lowercase, accents taken off,
+ * look-alike letters read as the Latin ones, and every other character —
+ * spaces, digits, punctuation, zero-width characters — dropped, so "pe pe",
+ * "pe​pe", "p.e.p.e" and "ρepe" are all "pepe". With `leet`, the digits
+ * and signs people write for a letter are read as it first ("sherw00d").
+ * What code matches a name against, never what anyone reads.
+ */
+export function lettersOf(text: unknown, o: { leet?: boolean } = {}): string {
+  if (typeof text !== "string") return "";
+  const s = text.normalize("NFKC").toLowerCase().normalize("NFD").replace(/\p{M}/gu, "");
+  let out = "";
+  for (const ch of s) out += LOOKALIKE[ch] ?? (o.leet ? LEET[ch] ?? ch : ch);
+  return (o.leet ? out.replace(/vv/g, "w") : out).replace(/[^a-z]/g, "");
+}
+
+/**
+ * SHERWOOD NAMED IN A TAG, IN ANY FORM (fail-closed review, 2026-10-12):
+ * "sherwood", "$SHERWOODINU", "sherwood-1", "sherw00d", "s h e r w o o d",
+ * "sher​wood", "ꜱʜᴇʀᴡᴏᴏᴅ", "sherwοod" with a Greek o, "sherwod". Read on
+ * the text's letters alone, so spacing, digits, zero-width characters and
+ * look-alikes do not hide it. Errs toward finding it ("usher wood" counts):
+ * a tag it finds gets no answer at all, which costs one answer, never a
+ * screenshot of Merrymen's account confirming somebody's token.
+ */
+const SHERWOOD_LETTERS = /s+h+e*r+w+o*d/;
+export function sherwoodMentioned(text: unknown): boolean {
+  return SHERWOOD_LETTERS.test(lettersOf(text)) || SHERWOOD_LETTERS.test(lettersOf(text, { leet: true }));
+}
+
 // ── the X clauses ───────────────────────────────────────────────────────────
 
 /** The model's "nothing to say", however it decorated it. */

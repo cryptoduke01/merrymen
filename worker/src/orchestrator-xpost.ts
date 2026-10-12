@@ -1429,11 +1429,19 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       if (comment.createdAtMs < consentAt || nowMs - comment.createdAtMs > REPLY_STALE_MS) continue;
       const candidate = tagCandidate(comment, { xUserId: account.xUserId, research: research !== null });
       if (!candidate.ok || await repliesOptedOut(shared, account.xUserId, comment.authorId)) continue;
-      // READ BY CODE FIRST, research on or off: the model question, and any
-      // tag that names sherwood, is answered from a code-built line
-      // (writer.ts modelAnswers) and spends no model call. Only research
-      // gathers anything for what it reads.
+      // READ BY CODE FIRST, research on or off: the allowlist's plain model
+      // question is answered from a code-built line (writer.ts modelAnswers)
+      // and spends no model call. Only research gathers anything for what it
+      // reads.
       const asked = classifyTag(candidate.text, { address: candidate.address ?? null, knownCoins });
+      // SHERWOOD IN ANY FORM, OR A MODEL QUESTION OFF THE ALLOWLIST, is
+      // answered by nothing: the model line under "sherwood TGE soon?" reads
+      // as Merrymen confirming a token, and a draft is never asked about the
+      // model. No row, no draft, nothing spent. Fail closed.
+      if (asked.kind === "unanswered") {
+        bump("answer-unanswered");
+        continue;
+      }
       // DECIDED BEFORE ANYTHING IS SPENT: a question the writer could not read
       // would buy research and a model call for a prompt that says PASS. A
       // digit in a name ("$PEPE2", "pepe 2" beside a PEPE it bought) is
@@ -1447,13 +1455,6 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       if (await keyStatus(shared, dedupeKey) !== null || await keyStatus(shared, `reply:${account.xUserId}:${comment.id}`) !== null) continue;
       if (await answerAuthorSpent(shared, account.xUserId, comment.authorId, nowMs)) {
         bump("answer-author-spent");
-        continue;
-      }
-      // A TOKEN ASKED ABOUT BESIDE SHERWOOD OR THE MODEL is answered by
-      // nothing: the model line under "is $SHERWOOD merrymen's token?" reads
-      // as Merrymen confirming it. No draft, no post, nothing spent.
-      if (asked.kind === "unanswered") {
-        bump("answer-token-model");
         continue;
       }
       const intent = research ? asked : null;

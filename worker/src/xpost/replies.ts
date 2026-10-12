@@ -64,6 +64,24 @@ export function withoutReplyOptOut(text: string): string {
   return text.replace(/\s*say stop to opt out\.\s*$/i, "").trim();
 }
 
+/** Letters to Unicode, blanks on screen (Hangul fillers, the braille blank): read as a space. */
+const BLANK_LETTERS = /[ᅟᅠㅤﾠ⠀]/g;
+
+/**
+ * A TAG AS CODE COMPARES IT WHOLE (fail-closed review, 2026-10-12): NFKC,
+ * zero-width and other format characters (\p{Cf}) removed, invisible filler
+ * letters read as spaces, curly quotes straightened, handles removed,
+ * lowercase, whitespace collapsed, and the punctuation (and emoji) at either
+ * end taken off. What an allowlist matches against, never what the writer
+ * reads.
+ */
+export function normalisedTag(text: unknown): string {
+  if (typeof text !== "string") return "";
+  return text.normalize("NFKC").replace(/\p{Cf}/gu, "").replace(BLANK_LETTERS, " ").replace(/[’‘ʼ`´]/g, "'")
+    .replace(/@[a-z0-9_]{1,15}\b/gi, " ").toLowerCase().replace(/\s+/g, " ").trim()
+    .replace(/^[\s\p{P}]+/u, "").replace(/[\s\p{P}\p{S}]+$/u, "");
+}
+
 /** A question or a plain address to the agent, after any leading handles. */
 const ASKED = /\?|^(?:what|why|how|which|who|whos|who's|where|are|is|do|does|did|can|could|have|has|tell|explain|thoughts|gm|hey|yo|hi|hello)\b/i;
 
