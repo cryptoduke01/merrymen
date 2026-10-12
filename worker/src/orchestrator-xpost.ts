@@ -101,7 +101,7 @@ import { PUBLISHABLE_SOURCES } from "./thesis-policy";
 import { readSaleResults } from "./orchestrator-xpost-results";
 import { appendSaleOutcome, hasSaleOutcome } from "./xpost/sale-outcome";
 import { admitFiguresLine, figuresTickers, withFigures, type FiguresSpec } from "./xpost/figures";
-import { hotAnswers, type HotRead } from "./xpost/market";
+import { hotAnswers, hotNoneAnswers, hotUnreadAnswers, type HotRead } from "./xpost/market";
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -1601,13 +1601,22 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       }
       // CODE'S OWN LINE, NEVER A DRAFT: the model question's, or a greeting's.
       const templated = asked.kind === "model" || greeting;
+      // WHAT'S HOT IS NEVER DRAFTED (red-team 2026-10-12): a draft named coins
+      // the index never showed it ("chump is the one standing out", "wif and
+      // bonk are the ones"), credited to the index, and with coins to show
+      // pointed at them as its picks. Its words are always code's
+      // (xpost/market.ts), from what research read: the coins, nothing past
+      // the floors, or nothing read at all (research off included).
+      const hotCoded = asked.kind === "hot";
+      // No model call at all for these: no allowance, no question read.
+      const undrafted = templated || hotCoded;
       // DECIDED BEFORE ANYTHING IS SPENT: a question the writer could not read
       // would buy research and a model call for a prompt that says PASS. Its
       // digits are read as "(a number)"; a copycat's ("$PEPE2") is safe to
       // mask because a tag that names a coin never sees what it bought
       // (coinNamed below). The model question's line, and a greeting's, is
       // code's and never reads the question.
-      if (!templated && answerQuestion(candidate.text) === null) {
+      if (!undrafted && answerQuestion(candidate.text) === null) {
         bump("answer-unusable");
         continue;
       }
@@ -1634,7 +1643,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // Nothing is looked up for a greeting.
       const intent = research && !greeting ? asked : null;
       const answerKey = `llm-answers:${account.xUserId}:${utcDay(nowMs)}`;
-      if (!templated) {
+      if (!undrafted) {
         if (!(await takeAllowance(shared, answerKey, ANSWER_DRAFTS_PER_DAY, nowMs))) {
           bump("answer-drafts-spent");
           return null;
@@ -1652,7 +1661,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // recent posts", beside "You trade with real money". It is shown what it
       // already said (`said`, filtered by money and kind), as its recent posts too.
       const facts = writerFacts(f, day, said);
-      const social = templated ? null : await deps.socialProfile?.(account.tenant);
+      const social = undrafted ? null : await deps.socialProfile?.(account.tenant);
       const walletPublic = !!social?.publicWallet && social.publicWallet.address.toLowerCase() === f.agentId.toLowerCase();
       // ONE BUNDLE, AT MOST, for this answer — and only with research on.
       let looked: { intent: AnswerIntentKind; research: string[]; creatorClaim?: string; boughtExact?: boolean } | null = null;
@@ -1661,8 +1670,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // Only beside words it was handed: a line with nothing looked up to
       // stand on is never put in.
       let figures: FiguresSpec | null = null;
-      // WHAT'S HOT, AS CODE READ IT: set only beside a line of coins, and then
-      // the answer's words are code's own (xpost/market.ts), never a draft.
+      // WHAT'S HOT, AS CODE READ IT (zero coins: nothing past the floors), for
+      // code's own words (xpost/market.ts). Null: the index was not read.
       let hotRead: HotRead | null = null;
       if (research && intent) {
         const bundle = await research.gather({ shared, intent, tenant: account.tenant, xUserId: account.xUserId, facts: f, posts, fomo: researchFomo,
@@ -1672,7 +1681,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         looked = { intent: bundle.intent ?? intent.kind, research: bundle.facts, ...(bundle.claim ? { creatorClaim: bundle.claim } : {}),
           ...(bundle.exact === true && candidate.address && !otherHandles ? { boughtExact: true } : {}) };
         if (bundle.figures?.length && bundle.facts.length) figures = bundle.figures;
-        if (asked.kind === "hot" && figures && bundle.hot && bundle.hot.coins >= 1) hotRead = bundle.hot;
+        if (hotCoded && bundle.hot) hotRead = bundle.hot;
         bump(`answer-intent-${intent.kind}`);
         if (bundle.lookups) bump("answer-lookups", bundle.lookups);
         for (const note of new Set(bundle.notes)) bump(`answer-research-${note}`);
@@ -1681,16 +1690,15 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // read a "what's hot?" draft before code put "$CHUMP 24h +41.2%" after
       // it, so "if i had to pick one it'd be the first", "these are my plays"
       // and "i'm in the top one myself" were each admitted and posted as a
-      // pick, or a holding, of a named coin. With coins to show, the words
-      // are code's (xpost/market.ts hotAnswers): how many stand out, and which
-      // way the first went, in one of eight frames. Nothing is drafted, so the
-      // model allowances taken for a draft go back.
-      const market = !templated && hotRead ? hotAnswers(hotRead, comment.id, facts.style, { paper: f.mode === "paper" }) : [];
-      if (market.length) {
-        await returnAllowance(shared, answerKey, at());
-        await returnAllowance(shared, `llm:${utcDay(nowMs)}`, at());
-        bump("answer-code-words");
-      }
+      // pick, or a holding, of a named coin. The words are code's
+      // (xpost/market.ts): with coins to show, how many stand out and which
+      // way the first went, in one of eight frames; with nothing past the
+      // floors, or nothing read, a line that says so.
+      const paperLines = { paper: f.mode === "paper" };
+      const market = !hotCoded ? []
+        : hotRead && hotRead.coins >= 1 ? hotAnswers(hotRead, comment.id, facts.style, paperLines)
+        : hotRead ? hotNoneAnswers(comment.id, facts.style, paperLines) : hotUnreadAnswers(comment.id, facts.style, paperLines);
+      if (market.length) bump("answer-code-words");
       const coded = templated || market.length > 0;
       // CODE'S LINES, the model question's, a greeting's or a market answer's,
       // this mention's own first: one it already said is a repeat to the gate,

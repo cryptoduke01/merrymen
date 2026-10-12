@@ -1421,12 +1421,13 @@ describe("what's hot: the chain's trending coins past the fleet's floors, fomo's
     const q = await quiet.research.gather(input({ kind: "hot" }, { fomo: true }));
     assert.deepEqual(q.facts, [HOT_NONE]);
     assert.equal(q.figures, undefined);
-    assert.equal(q.hot, undefined);
+    assert.deepEqual(q.hot, { coins: 0, lead: null }, "said by code: nothing past the floors");
     assert.deepEqual(quiet.asked, ["pools"]);
     assert.deepEqual(quiet.fomoCalls, []);
     const down = hotFake({ poolsFail: "http-503" });
     const d = await down.research.gather(input({ kind: "hot" }));
     assert.deepEqual(d.facts, []);
+    assert.equal(d.hot, undefined, "the index unread: no read at all");
     assert.ok(d.notes.includes("index-http-503"));
   });
 

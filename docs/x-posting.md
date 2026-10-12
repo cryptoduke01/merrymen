@@ -1019,9 +1019,14 @@ other owner's agent, and its posting and reply warnings, are unchanged.
   not a call"), none of which names a coin, says "i", "buy", "early", "pick"
   or a target, and no two of which repeat each other at the gate's limit.
   Each is gated like any answer, this mention's own frame first, and the
-  line goes in after it; the model allowances a draft would have taken go
-  back. Nothing past the floors: "nothing is standing out on the robinhood
-  chain index right now", no line, and nothing more looked up. A what's-hot
+  line goes in after it. **What's hot is never drafted at all** (red-team 2026-10-12: a draft
+  named coins the index never showed it, "chump is the one standing out",
+  "wif and bonk are the ones", credited to the index): nothing past the
+  floors is one of code's eight "nothing is standing out on the robinhood
+  chain index right now" lines (`hotNoneAnswers`), no line of figures, and
+  nothing more looked up; the index unread, or research off, one of code's
+  eight "no read on the robinhood chain index available right now" lines
+  (`hotUnreadAnswers`), never a guess. No model call, no model allowance. A what's-hot
   or a major answer that is drafted at all is gated as of a named coin
   (`XGateCtx.named`): no first person but a deflection, no liking, no yes
   or no ("these are my picks", "i might buy one later" were posted when it

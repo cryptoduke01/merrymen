@@ -113,10 +113,50 @@ function framed(texts: readonly string[], seed: string, style: { lower: boolean 
 
 /**
  * WHAT'S HOT, ANSWERED BY CODE: every frame for this read, starting from this
- * mention's own (`seed`, its id). Empty for a read with no coin: that is not
- * this answer.
+ * mention's own (`seed`, its id). Empty for a read with no coin: that is
+ * hotNoneAnswers.
  */
 export function hotAnswers(read: HotRead, seed: string, style: { lower: boolean }, o: { paper?: boolean } = {}): string[] {
   if (!read || !(read.coins >= 1)) return [];
   return framed(HOT_FRAMES.map((f) => f(read.coins > 1, read.lead ?? null)), seed, style, o);
+}
+
+/**
+ * NOTHING PAST THE FLOORS, SAID BY CODE (red-team 2026-10-12): a drafted
+ * "what's hot?" answer named coins the index never showed it ("chump is the
+ * one standing out", "wif and bonk are the ones") right before code's line,
+ * and a draft with nothing to show could still do so with no line at all. So
+ * what's hot is never drafted: with nothing to show, one of these.
+ */
+const HOT_NONE_LINES: readonly string[] = Object.freeze([
+  "nothing is standing out on the robinhood chain index right now",
+  "quiet on geckoterminal for robinhood, no coin clears the bar today",
+  "per the chain's index, no name is pulling away from the pack",
+  "trending on robinhood looks flat, nobody out in front lately",
+  "index movers over there: none that stand apart",
+  "robinhood chain's trending list is sleepy, nothing busy enough to mention",
+  "the index flags nothing heating up at the moment",
+  "over on robinhood chain, geckoterminal's page has no clear leader",
+]);
+
+/** And with the index unread (busy, down, late, or research off): never a guess at what is moving. */
+const HOT_UNREAD_LINES: readonly string[] = Object.freeze([
+  "no read on the robinhood chain index available right now",
+  "geckoterminal's robinhood view can't be pulled up from here",
+  "the chain's index is out of reach just now, so no rundown",
+  "what's trending on robinhood can't be checked this time",
+  "index movers over there aren't visible currently",
+  "robinhood chain's trending list is unavailable for the moment",
+  "the index is a blank on this end for now",
+  "the movers board for robinhood chain is dark today",
+]);
+
+/** What's hot with nothing past the floors: every line, this mention's own first. */
+export function hotNoneAnswers(seed: string, style: { lower: boolean }, o: { paper?: boolean } = {}): string[] {
+  return framed(HOT_NONE_LINES, seed, style, o);
+}
+
+/** What's hot with the index unread: every line, this mention's own first. */
+export function hotUnreadAnswers(seed: string, style: { lower: boolean }, o: { paper?: boolean } = {}): string[] {
+  return framed(HOT_UNREAD_LINES, seed, style, o);
 }

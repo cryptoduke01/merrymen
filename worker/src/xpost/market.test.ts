@@ -10,7 +10,7 @@ import { describe, it } from "node:test";
 import { admitAgentLine } from "../groupchat/policy";
 import { REPEAT_LIMIT, similarity } from "../social-post";
 import { admitXPost } from "./gate";
-import { hotAnswers, moveOf, type HotRead, type Move } from "./market";
+import { hotAnswers, hotNoneAnswers, hotUnreadAnswers, moveOf, type HotRead, type Move } from "./market";
 import { withoutReplyOptOut } from "./replies";
 
 const MOVES: (Move | null)[] = [null, { dir: "flat", size: null },
@@ -51,6 +51,13 @@ describe("what's hot in code's words", () => {
       for (const coins of [1, 2, 3]) {
         for (const lead of MOVES) judged(hotAnswers({ coins, lead }, "1000000000000000123", { lower: false }, { paper }), paper);
       }
+    }
+  });
+
+  it("nothing past the floors, and nothing read: eight lines each, never a draft, never a guess (red-team 2026-10-12)", () => {
+    for (const paper of [false, true]) {
+      judged(hotNoneAnswers("1000000000000000123", { lower: false }, { paper }), paper);
+      judged(hotUnreadAnswers("1000000000000000123", { lower: false }, { paper }), paper);
     }
   });
 

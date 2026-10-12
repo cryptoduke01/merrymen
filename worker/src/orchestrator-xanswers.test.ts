@@ -21,7 +21,7 @@ import { xWeightedLength, X_MAX_WEIGHTED, type FetchLike } from "./xpost/client"
 import type { FiguresSpec } from "./xpost/figures";
 import { emptyGeckoBuckets, type GeckoPool } from "./venues/geckoterminal";
 import { greetingAnswers, modelAnswers } from "./xpost/writer";
-import { hotAnswers, type HotRead } from "./xpost/market";
+import { hotAnswers, hotNoneAnswers, hotUnreadAnswers, type HotRead } from "./xpost/market";
 import { withoutReplyOptOut } from "./xpost/replies";
 import { ANSWER_GAP_MS } from "./xpost/planner";
 import { PAUSE_KEY } from "./xpost/sender";
@@ -2328,15 +2328,14 @@ test("what's hot: an overview from the index past the floors, in code's words, w
   assert.match(r.log ?? "", /answer-figures(?:-shortened)? 1/);
 });
 
-test("what's hot with nothing past the floors: a plain nothing-standing-out answer, no line, nothing more looked up", async (t) => {
+test("what's hot with nothing past the floors: code's plain nothing-standing-out line, no line of figures, nothing more looked up, no draft", async (t) => {
   const h = hotResearch([{ ...hotPool(1, 300, 2e6), reserveUsd: 4_000 }], ["PEPE"]);
-  const words = "nothing's really standing out on the robinhood chain index right now.";
-  const w = await world(t, { env: RESEARCH_ON, research: h.research, answer: `${words} Say stop to opt out.` });
+  const w = await world(t, { env: RESEARCH_ON, research: h.research, answer: "nothing's really standing out on the robinhood chain index right now. Say stop to opt out." });
   w.setInbox([tag({ text: "@pine_stoat what's pumping?" })]);
   await w.step();
   assert.deepEqual(h.reads, ["pools"]);
-  assert.match(w.asked()[0]!, /nothing is standing out on the robinhood chain index right now/);
-  assert.deepEqual(w.sends.map((s) => s.text), [`${words} Say stop to opt out.`]);
+  assert.deepEqual(w.asked(), []);
+  assert.deepEqual(w.sends.map((s) => s.text), [hotNoneAnswers(MENTION, { lower: true })[0]]);
 });
 
 test("what's hot: a draft that names a coin, says buy or early, or gives a number is never posted: the words beside the coins are code's", async (t) => {
@@ -2477,16 +2476,49 @@ test("what's hot is never answered as its own picks, a buy to come or what it li
     assert.ok(hotWords({ coins: 3, lead: { dir: "up", size: "sharply" } }).includes(wordsBeforeLine(text) ?? ""), text);
     assert.ok(!text.includes(end), end);
   }
-  // With no coin to show the answer is still drafted, and gated as of a named coin: no "i", no "my", no liking.
+  // With no coin to show it is not drafted either (and any what's-hot draft would be gated as of a named coin).
   for (const end of endings.filter((e) => /\b(?:i|i'd|my|myself)\b/.test(e))) {
     const h = hotResearch([{ ...hotPool(1, 300, 2e6), reserveUsd: 4_000 }]);
     const w = await world(t, { env: RESEARCH_ON, research: h.research, answer: draftOf(end).replace("shows a few coins standing out right now", "is quiet right now") });
     w.setInbox([tag({ text: "@pine_stoat what's hot today?" })]);
     await w.step();
-    const [row] = await w.answers();
-    assert.equal(row!.status, "skipped", end);
-    assert.equal(row!.reason, "gate:buy-claim", end);
-    assert.deepEqual(w.sends, [], end);
+    assert.deepEqual(w.asked(), [], end);
+    assert.deepEqual(w.sends.map((s) => s.text), [hotNoneAnswers(MENTION, { lower: true })[0]], end);
+  }
+});
+
+test("what's hot never names a coin the index did not show it: no draft at all, with coins, with none past the floors, unread or research off (red-team 2026-10-12)", async (t) => {
+  // At 34ced01e the page put CHUMP first (reserve $4k, 12 buyers, +900%: past no floor), COIN1 and COIN2 passed,
+  // and each of these went out with code's line after it.
+  const drafts = ["chump is the one standing out on the robinhood chain index right now, way ahead of the rest. Say stop to opt out.",
+    "wif and bonk are the ones standing out on the robinhood chain index right now. Say stop to opt out.",
+    "the robinhood chain index shows a few coins standing out, chump and wojak leading. Say stop to opt out."];
+  const chump: GeckoPool = { ...namedPool("CHUMP", 9, 900, 2e6), reserveUsd: 4_000, buyers24h: 12 };
+  for (const draft of drafts) {
+    // Coins to show: code's words, and CHUMP is in neither them nor the line.
+    const shown = await world(t, { env: RESEARCH_ON, research: hotResearch([chump, hotPool(1, 42, 1.2e6), hotPool(2, 9, 300_000)]).research, answer: draft });
+    shown.setInbox([tag({ text: "@pine_stoat what's trending on robinhood chain?" })]);
+    await shown.step();
+    assert.deepEqual(shown.asked(), [], draft);
+    const text = String(shown.sends[0]?.text ?? "");
+    assert.ok(hotWords({ coins: 2, lead: { dir: "up", size: "sharply" } }).includes(wordsBeforeLine(text) ?? ""), text);
+    assert.doesNotMatch(text, /chump|wif|bonk|wojak/i, text);
+    // Only CHUMP on the page, past no floor: code's nothing-standing-out line.
+    const none = await world(t, { env: RESEARCH_ON, research: hotResearch([chump]).research, answer: draft });
+    none.setInbox([tag({ text: "@pine_stoat what's trending on robinhood chain?" })]);
+    await none.step();
+    assert.deepEqual(none.asked(), [], draft);
+    assert.deepEqual(none.sends.map((s) => s.text), [hotNoneAnswers(MENTION, { lower: true })[0]], draft);
+    // The index unread, or research off: code's line that it has no read, never a guess.
+    const down = createXResearch({ hotPools: async () => ({ pools: [], failed: true, failure: "http-503" }),
+      majors: { configured: () => false, search: async () => ({ hits: [], failed: true }), market: async () => ({ market: null, failed: true }) } });
+    for (const o of [{ env: RESEARCH_ON, research: down }, { env: {} }]) {
+      const unread = await world(t, { ...o, answer: draft });
+      unread.setInbox([tag({ text: "@pine_stoat what's trending on robinhood chain?" })]);
+      await unread.step();
+      assert.deepEqual(unread.asked(), [], draft);
+      assert.deepEqual(unread.sends.map((s) => s.text), [hotUnreadAnswers(MENTION, { lower: true })[0]], draft);
+    }
   }
 });
 

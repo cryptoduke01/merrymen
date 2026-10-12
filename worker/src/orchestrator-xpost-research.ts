@@ -649,10 +649,10 @@ export interface ResearchBundle {
    */
   figures?: FiguresSpec;
   /**
-   * WHAT'S HOT AS CODE READ IT, for code's own words (xpost/market.ts
-   * hotAnswers): how many coins the line shows and which way the first went
-   * on the day. Set only beside a line of coins: the answer's words are then
-   * code's, never a draft (red-team 2026-10-12).
+   * WHAT'S HOT AS CODE READ IT, for code's own words (xpost/market.ts): how
+   * many coins the line shows and which way the first went on the day; zero
+   * coins when nothing is past the floors. Absent: the index was not read.
+   * What's hot is never drafted (red-team 2026-10-12).
    */
   hot?: HotRead;
   /**
@@ -1385,7 +1385,7 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
         const screened = hotScreen(page.pools);
         if (!screened.length) {
           notes.push("hot-none");
-          return { facts: hotPhrases({ changes: [], crowd: 0, trending: 0 }), lookups, notes };
+          return { facts: hotPhrases({ changes: [], crowd: 0, trending: 0 }), hot: { coins: 0, lead: null }, lookups, notes };
         }
         const shown = screened.slice(0, HOT_COINS);
         const broker = await fomoFor();
