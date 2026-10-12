@@ -200,6 +200,56 @@ describe("tags an active agent may answer", () => {
       { ok: false, reason: "not-own-thread" }, "no roots known: no thread is its own");
   });
 
+  it("whoever replies to it or quotes it is asking: a follow-up to its answer, a reply in a thread it answered, a quote of its own post (2026-10-12)", () => {
+    // Its hello (999) and a buy post (998) are its roots; it answered 333's top-level tag 500 with 501, and 444's reply 600 under its buy post with 601.
+    const own = { xUserId: "222", username: "pine_stoat", ownRoots: new Set(["999", "998"]), ownPosts: new Set(["999", "998", "501", "601"]),
+      answered: new Map([["500", "333"], ["600", "444"]]) };
+    const ok = (over: Partial<XReply>, text = "@pine_stoat what do you trade?") => tagCandidate(comment(text, over), own);
+    // A follow-up to its answer, in the conversation the person's tag began: answered.
+    assert.equal(ok({ id: "502", authorId: "333", conversationId: "500", inReplyToTweetId: "501" }).ok, true);
+    // Anyone else replying to that answer: answered too (replying to it is asking), the prefix's other handle said.
+    const other = ok({ id: "503", authorId: "777", conversationId: "500", inReplyToTweetId: "501" }, "@pine_stoat @reader_333 how do you pick your coins?");
+    assert.ok(other.ok && other.otherHandles === true);
+    // A follow-up to its answer under its own buy post.
+    assert.equal(ok({ id: "602", authorId: "444", conversationId: "998", inReplyToTweetId: "601" }).ok, true);
+    // The person's reply to their own earlier tag it answered: answered.
+    assert.equal(ok({ id: "504", authorId: "333", conversationId: "500", inReplyToTweetId: "500" }).ok, true);
+    assert.equal(ok({ id: "603", authorId: "444", conversationId: "998", inReplyToTweetId: "600" }).ok, true);
+    // Someone else's reply to that person's tag: a third party's post code read as someone else's.
+    assert.deepEqual(ok({ id: "505", authorId: "777", conversationId: "500", inReplyToTweetId: "500" }), { ok: false, reason: "not-own-thread" });
+    assert.deepEqual(ok({ id: "604", authorId: "777", conversationId: "998", inReplyToTweetId: "600" }), { ok: false, reason: "not-own-thread" });
+    // A reply under a post nobody here answered or wrote, in its own thread or out of it: still nothing.
+    assert.deepEqual(ok({ id: "506", authorId: "333", conversationId: "500", inReplyToTweetId: "5050" }), { ok: false, reason: "not-own-thread" });
+    assert.deepEqual(ok({ id: "507", authorId: "333", conversationId: "998", inReplyToTweetId: "9980" }), { ok: false, reason: "not-own-thread" });
+    // Its own answer's id as a parent, but in a conversation it is not in: X never sends that; refused all the same.
+    assert.deepEqual(ok({ id: "508", authorId: "333", conversationId: "4000", inReplyToTweetId: "501" }), { ok: false, reason: "not-own-thread" });
+    // A conversation it answered in, but no parent: no reply at all, never its own thread.
+    assert.deepEqual(ok({ id: "509", authorId: "333", conversationId: "500", inReplyToTweetId: "" }), { ok: false, reason: "not-own-thread" });
+    // Without the answered set, a follow-up to an answer in the person's own conversation is not known to be its own.
+    assert.deepEqual(tagCandidate(comment("@pine_stoat what do you trade?", { id: "510", authorId: "333", conversationId: "500", inReplyToTweetId: "501" }),
+      { ...own, answered: undefined }), { ok: false, reason: "not-own-thread" });
+
+    // QUOTES: of its own posted tweet, a root or an answer, answered; of anyone else's, and a retweet, never.
+    for (const quoted of ["998", "999", "501"]) {
+      assert.equal(ok({ id: `70${quoted.length}${quoted}`, authorId: "333", conversationId: `70${quoted.length}${quoted}`, inReplyToTweetId: "", quoted: true, quotedTweetId: quoted },
+        "@pine_stoat why did you pick this one?").ok, true, quoted);
+    }
+    assert.deepEqual(ok({ id: "710", conversationId: "710", inReplyToTweetId: "", quoted: true, quotedTweetId: "123456" }), { ok: false, reason: "quoted" }, "someone else's post");
+    assert.deepEqual(ok({ id: "711", conversationId: "711", inReplyToTweetId: "", quoted: true }), { ok: false, reason: "quoted" }, "a retweet, or a quote of what code cannot name");
+    assert.deepEqual(ok({ id: "712", conversationId: "712", inReplyToTweetId: "", quoted: true, quotedTweetId: "500" }), { ok: false, reason: "quoted" },
+      "a quote of the person's tag it answered is a quote of their words, not its own");
+    // A quote of its own post that is also a reply is held to the reply's rule too.
+    assert.equal(ok({ id: "713", authorId: "333", conversationId: "500", inReplyToTweetId: "501", quoted: true, quotedTweetId: "998" }).ok, true);
+    assert.deepEqual(ok({ id: "714", authorId: "777", conversationId: "500", inReplyToTweetId: "500", quoted: true, quotedTweetId: "998" }), { ok: false, reason: "not-own-thread" });
+    // A quote naming someone else in its own words is still refused for it.
+    assert.deepEqual(ok({ id: "715", conversationId: "715", inReplyToTweetId: "", quoted: true, quotedTweetId: "998" }, "@pine_stoat @sherwood_tge what do you trade?"),
+      { ok: false, reason: "handle" });
+    // Every other screen still reads a follow-up or a quote: a stop, a link, advice flagged, sherwood left to the caller.
+    assert.deepEqual(ok({ id: "716", authorId: "333", conversationId: "500", inReplyToTweetId: "501" }, "@pine_stoat stop"), { ok: false, reason: "opt-out" });
+    assert.deepEqual(ok({ id: "717", authorId: "333", conversationId: "500", inReplyToTweetId: "501" }, "@pine_stoat is www.example.com yours?"), { ok: false, reason: "link-or-secret" });
+    assert.ok(advised(ok({ id: "718", authorId: "333", conversationId: "500", inReplyToTweetId: "501" }, "@pine_stoat should i buy pepe?")));
+  });
+
   it("a poll, media, a card or a long post's rest is never answered under: code reads none of it (red-team 2026-10-12)", () => {
     const own = { xUserId: "111", username: "pine_stoat", ownRoots: new Set(["999"]) };
     const poll = comment("@pine_stoat what model are you?", { id: "100000000000000040", authorId: "888", conversationId: "100000000000000040", inReplyToTweetId: "", attached: true });

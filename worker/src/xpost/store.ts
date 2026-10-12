@@ -1289,6 +1289,52 @@ export async function ownRootTweetIds(db: Db, xUserId: string, limit = 2000): Pr
 }
 
 /**
+ * THE CONVERSATIONS THIS X ACCOUNT IS IN, AND WHO IT ANSWERED THERE (the
+ * owner's decision, 2026-10-12: whoever replies to it or quotes it is giving
+ * consent). What tagCandidate (replies.ts) answers a reply or a quote by:
+ *
+ *   - `roots`: its own posted top-level posts (ownRootTweetIds);
+ *   - `posts`: those, and every answer or comment reply it posted (kind
+ *     answer or reply, status posted, with a tweet id): its own words, which
+ *     a follow-up or a quote may sit under;
+ *   - `answered`: each tag or comment one of those posted answers replied
+ *     to, by its author: the person's own earlier post that this account
+ *     read, judged answerable and answered. A conversation rooted at one is
+ *     one it is in; a person's reply to their own such post is a follow-up.
+ *
+ * Only what X surely published counts (posted rows): a draft, a skip, a
+ * failed or uncertain send was never seen under anyone's post. Bounded like
+ * ownRootTweetIds: at most `limit` top-level posts and `limit` answers and
+ * replies, newest first; a reply under an older one is no reply this account
+ * can vouch for, and goes unanswered.
+ */
+export interface OwnThreads {
+  roots: Set<string>;
+  posts: Set<string>;
+  answered: Map<string, string>;
+}
+export async function ownThreadTweets(db: Db, xUserId: string, limit = 2000): Promise<OwnThreads> {
+  const roots = await ownRootTweetIds(db, xUserId, limit);
+  const rows = (await db
+    .prepare(
+      `SELECT p.tweet_id AS tweet_id, r.reply_to_tweet_id AS reply_to_tweet_id, r.author_id AS author_id
+        FROM xpost_posts p JOIN xpost_reply_targets r ON r.post_id = p.id
+        WHERE p.x_user_id = ? AND p.status = 'posted' AND p.tweet_id IS NOT NULL AND p.kind IN ('answer', 'reply')
+        ORDER BY p.created_at_ms DESC, p.id DESC
+        LIMIT ?`,
+    )
+    .all(String(xUserId), int(Math.max(1, Math.min(5000, limit))))) as { tweet_id: unknown; reply_to_tweet_id: unknown; author_id: unknown }[];
+  const posts = new Set(roots);
+  const answered = new Map<string, string>();
+  for (const r of rows) {
+    const tweet = String(r.tweet_id ?? ""), to = String(r.reply_to_tweet_id ?? ""), author = String(r.author_id ?? "");
+    if (tweet !== "") posts.add(tweet);
+    if (to !== "" && author !== "" && !answered.has(to)) answered.set(to, author);
+  }
+  return { roots, posts, answered };
+}
+
+/**
  * EVERY INTRO ONE OWNER EVER WROTE FOR ONE X ACCOUNT, oldest first, any status
  * and any age — the first hello's key and each redraft's. Whether the hello
  * has been dealt with is a fact about the account's whole history, not about

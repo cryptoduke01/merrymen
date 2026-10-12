@@ -36,6 +36,7 @@ import {
   markRevoked,
   ownerCancel,
   ownRecentBodies,
+  ownThreadTweets,
   ownerSendTimesSince,
   tradeSendTimesSince,
   postingAccounts,
@@ -872,6 +873,43 @@ test("two owners on one X account answer one person at most twice a day between 
   assert.equal(await answerAuthorSpent(base, "111", "333", 970), true);
   assert.equal(await answerAuthorSpent(base, "111", "444", 970), false);
   assert.equal(await answerAuthorSpent(base, "111", "333", 900 + 24 * 60 * 60_000), false, "a rolling day later they may ask again");
+});
+
+test("the conversations an X account is in: its posted top-level posts and answers, and who each answer replied to, posted rows only, newest first (2026-10-12)", async (t) => {
+  const { db } = await open(t);
+  await upsertAccount(db, DEK, { tenant: OWNER_A, xUserId: "111", username: "r", tokens: TOKENS, nowMs: 1 });
+  await setPosting(db, OWNER_A, { enabled: true, xUserId: "111" }, 2);
+  await setReplying(db, OWNER_A, true, "111", 3);
+  const sent = async (p: NewPost, tweet: string) => {
+    const id = (await schedulePost(db, p))!;
+    assert.ok(id, p.dedupeKey);
+    await claimPost(db, id, p.nowMs + 1);
+    await markPosted(db, id, tweet, p.nowMs + 2);
+  };
+  const answer = (tag: string, author: string, nowMs: number, over: Partial<NewPost> = {}): NewPost => post({ kind: "answer", dedupeKey: `answer:111:${tag}`,
+    body: `an answer to ${tag}`, replyToTweetId: tag, replyRootTweetId: tag, replyAuthorId: author, nowMs, dueAtMs: nowMs, ...over });
+  assert.deepEqual(await ownThreadTweets(db, "111"), { roots: new Set(), posts: new Set(), answered: new Map() }, "nothing posted yet");
+
+  await sent(post({ kind: "intro", dedupeKey: "intro:a:111", body: "hello", nowMs: 10, dueAtMs: 10 }), "9001");
+  await sent(answer("500", "333", 20), "9501");
+  await sent(answer("510", "444", 30), "9511");
+  // Never posted: drafted and waiting, skipped, or failed. None of them is under anyone's post.
+  assert.ok(await schedulePost(db, answer("520", "555", 40)));
+  assert.ok(await schedulePost(db, answer("530", "666", 50, { status: "skipped", reason: "gate:hype" })));
+  const failed = (await schedulePost(db, answer("540", "777", 60)))!;
+  await claimPost(db, failed, 61);
+  await markFailed(db, failed, "uncertain", 62);
+
+  const own = await ownThreadTweets(db, "111");
+  assert.deepEqual([...own.roots], ["9001"], "its own top-level posts");
+  assert.deepEqual([...own.posts].sort(), ["9001", "9501", "9511"], "and its posted answers");
+  assert.deepEqual([...own.answered.entries()].sort(), [["500", "333"], ["510", "444"]], "each answered post, by its author");
+  // Another X account's are not its own.
+  assert.deepEqual(await ownThreadTweets(db, "222"), { roots: new Set(), posts: new Set(), answered: new Map() });
+  // Bounded, newest first: with room for one answer, only the newest is known.
+  const one = await ownThreadTweets(db, "111", 1);
+  assert.deepEqual([...one.posts].sort(), ["9001", "9511"]);
+  assert.deepEqual([...one.answered.keys()], ["510"]);
 });
 
 test("turning replies off cancels only replies and opt-outs are durable across tenants sharing an account", async (t) => {

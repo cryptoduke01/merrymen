@@ -1321,6 +1321,63 @@ test("nothing is answered in someone else's thread or under a quote; a reply in 
   assert.equal((await w.answers())[0]!.status, "posted");
 });
 
+test("whoever replies to it or quotes it is asking: a follow-up to its answer, a reply to the person's own answered tag, a quote of its own post (2026-10-12)", async (t) => {
+  const drafts: [RegExp, string][] = [
+    [/how are you/, "doing good, just watching the tape and keeping things chill. you?"],
+    [/tell me a joke/, "why did the trading bot skip sleep? it heard the tape never closes."],
+    [/what are you/, "a laid-back trader bot merrymen built, mostly reading the tape and staying in my lane."],
+    [/ai agents/, "honestly they're my people, a whole bunch of bots learning to stay patient and calm."],
+    [/for fun/, "honestly reading charts all day is the fun part for a bot like me."],
+    [/pick your coins/, "mostly fresh launches, and i only buy when the buying looks real and steady."],
+  ];
+  const w = await world(t, { answer: ({ prompt }) => drafts.find(([re]) => re.test(prompt))?.[1] ?? "PASS" });
+  // Its own buy post, already on X as tweet 9100.
+  await postedBuy(w.db, "fill-pepe", "pepe", "grabbed some pepe, the curve looked early", 3 * HOUR, "9100");
+  let clock = NOW;
+  const pass = async (mentions: Record<string, unknown>[]) => { clock += MIN; w.setInbox(mentions); await w.step(clock); };
+  const msg = (id: string, author: string, text: string, over: Record<string, unknown> = {}) =>
+    tag({ id, author_id: author, conversation_id: id, created_at: new Date(clock).toISOString(), text, ...over });
+  const reply = (id: string, author: string, conversation: string, parent: string, text: string) =>
+    msg(id, author, text, { conversation_id: conversation, referenced_tweets: [{ type: "replied_to", id: parent }] });
+  const sentTo = (id: string) => w.sends.find((s) => (s.reply as { in_reply_to_tweet_id: string }).in_reply_to_tweet_id === id)?.text;
+  const tweetOf = async (mention: string) => (await w.answers()).find((a) => a.replyToTweetId === mention && a.status === "posted")?.tweetId;
+
+  // 333 tags it, and it answers.
+  await pass([msg("100000000000000301", "333", "@pine_stoat how are you?")]);
+  const a1 = (await tweetOf("100000000000000301"))!;
+  assert.ok(a1, "the tag was answered");
+  // 333 replies to that answer: a follow-up, answered.
+  await pass([reply("100000000000000302", "333", "100000000000000301", a1, "@pine_stoat tell me a joke")]);
+  assert.equal(sentTo("100000000000000302"), "why did the trading bot skip sleep? it heard the tape never closes.");
+  // Someone else replies to that answer too, X's prefix naming 333: answered (replying to it is asking).
+  await pass([reply("100000000000000303", "444", "100000000000000301", a1, "@pine_stoat @reader_333 what are you?")]);
+  assert.equal(sentTo("100000000000000303"), "a laid-back trader bot merrymen built, mostly reading the tape and staying in my lane.");
+  // 445 tags it, then replies to their own tag: the person's own earlier post it answered, so answered.
+  await pass([msg("100000000000000304", "445", "@pine_stoat what do you think about ai agents?")]);
+  assert.ok(sentTo("100000000000000304"));
+  await pass([reply("100000000000000305", "445", "100000000000000304", "100000000000000304", "@pine_stoat what do you do for fun?")]);
+  assert.equal(sentTo("100000000000000305"), "honestly reading charts all day is the fun part for a bot like me.");
+  // A stranger replying to 445's tag: a third party's post as far as it goes, so nothing.
+  await pass([reply("100000000000000306", "556", "100000000000000304", "100000000000000304", "@pine_stoat @reader_445 how are you?")]);
+  assert.equal(sentTo("100000000000000306"), undefined);
+  // A quote of its own buy post is answered; a quote of anyone else's post is not.
+  await pass([msg("100000000000000307", "777", "@pine_stoat how do you pick your coins?", { referenced_tweets: [{ type: "quoted", id: "9100" }] })]);
+  assert.equal(sentTo("100000000000000307"), "mostly fresh launches, and i only buy when the buying looks real and steady.");
+  await pass([msg("100000000000000308", "778", "@pine_stoat how do you pick your coins?", { referenced_tweets: [{ type: "quoted", id: "123456" }] })]);
+  assert.equal(sentTo("100000000000000308"), undefined);
+  // A retweet of its own post is never answered.
+  await pass([msg("100000000000000309", "779", "RT @pine_stoat: grabbed some pepe", { referenced_tweets: [{ type: "retweeted", id: "9100" }] })]);
+  assert.equal(sentTo("100000000000000309"), undefined);
+  // A stop in a follow-up is honoured: recorded, and that person is never answered again, in the thread or out of it.
+  await pass([reply("100000000000000310", "444", "100000000000000301", a1, "@pine_stoat stop")]);
+  assert.equal(await store.repliesOptedOut(w.db, "111", "444"), true);
+  await pass([reply("100000000000000311", "444", "100000000000000301", a1, "@pine_stoat how are you?")]);
+  assert.equal(sentTo("100000000000000311"), undefined);
+  // None of them carried an opt-out line.
+  assert.equal(w.sends.length, 6);
+  assert.ok(w.sends.every((s) => !/opt out|\bstop\b/i.test(String(s.text))));
+});
+
 test("the model line never goes under a poll, or to an author whose name or handle code has not read or that names sherwood (red-team 2026-10-12)", async (t) => {
   // The reproduced tag: top level, author 888, the plain model question with a poll attached.
   const POLL = tag({ id: "100000000000000040", conversation_id: "100000000000000040", author_id: "888", text: "@pine_stoat what model are you?",

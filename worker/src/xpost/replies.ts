@@ -489,18 +489,44 @@ const HANDLE_AT = /@([a-z0-9_]{1,15})\b/gi;
  * Merrymen confirming the launch. The post a reply answers is text code never
  * reads, the same reason a quote is refused. So a reply is answered only when
  * the post it replies to is itself one of this account's own posts.
+ *
+ * WHOEVER REPLIES TO IT OR QUOTES IT IS ASKING (the owner's decision,
+ * 2026-10-12). A conversation is its own when it is rooted at one of its own
+ * top-level posts (`ctx.ownRoots`) or at a post it answered (`ctx.answered`,
+ * store.ts ownThreadTweets: its first answer there was to that very post).
+ * In one, a reply is answered when the post it replies to is one of its own
+ * posted tweets (`ctx.ownPosts`: its top-level posts, and every answer or
+ * comment reply it posted, so a follow-up to one of its answers is answered),
+ * or the same person's own earlier post that it answered there (`answered`,
+ * by that post's author). A reply under anyone else's post — a stranger's
+ * pitch in its own thread, someone else's tag it answered — is still answered
+ * by nothing: code never read it, or read it as someone else's. And a quote
+ * is answered only when what it quotes is one of its own posted tweets
+ * (XReply.quotedTweetId); a quote of anyone else's post, and any retweet, is
+ * still refused. Absent these sets, nothing but a top-level tag is its own.
  */
-export function tagCandidate(reply: XReply, ctx: { xUserId: string; research?: boolean; username?: string; ownRoots?: ReadonlySet<string> }): ReplyCandidate {
+export function tagCandidate(reply: XReply, ctx: {
+  xUserId: string; research?: boolean; username?: string; ownRoots?: ReadonlySet<string>;
+  /** Every tweet this X account posted that a reply or a quote may sit under: ownRoots, and its posted answers and comment replies. */
+  ownPosts?: ReadonlySet<string>;
+  /** Each post one of its posted answers replied to, by that post's author (store.ts ownThreadTweets). */
+  answered?: ReadonlyMap<string, string>;
+}): ReplyCandidate {
   const no = (reason: string): ReplyCandidate => ({ ok: false, reason });
   if (!reply.id || !reply.authorId || !ctx.xUserId) return no("invalid");
   if (reply.authorId === ctx.xUserId) return no("own-comment");
   if (isAnswerOptOut(reply.text)) return no("opt-out");
   if (typeof reply.text !== "string") return no("invalid");
-  if (reply.quoted === true) return no("quoted");
+  const ownPost = (id: string): boolean => id !== "" && (ctx.ownRoots?.has(id) === true || ctx.ownPosts?.has(id) === true);
+  // A quote only of its own posted tweet: what the card shows is its own words (XReply.quotedTweetId).
+  if (reply.quoted === true && !(typeof reply.quotedTweetId === "string" && ownPost(reply.quotedTweetId))) return no("quoted");
   // A poll, media, a card or a long post's rest: shown with the tag, read by nobody here (XReply.attached).
   if (reply.attached === true) return no("attached");
   const topLevel = reply.conversationId === reply.id && reply.inReplyToTweetId === "";
-  const underOwn = ctx.ownRoots?.has(reply.conversationId) === true && ctx.ownRoots.has(reply.inReplyToTweetId);
+  const parent = reply.inReplyToTweetId;
+  const ownConversation = ctx.ownRoots?.has(reply.conversationId) === true || ctx.answered?.has(reply.conversationId) === true;
+  // Under one of its own posted tweets, or the same person's own earlier post it answered there.
+  const underOwn = !topLevel && parent !== "" && ownConversation && (ownPost(parent) || ctx.answered?.get(parent) === reply.authorId);
   if (!topLevel && !underOwn) return no("not-own-thread");
   const own = String(ctx.username ?? "").trim().replace(/^@/, "").toLowerCase();
   const raw = reply.text.normalize("NFKC");

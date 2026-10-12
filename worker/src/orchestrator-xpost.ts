@@ -73,7 +73,7 @@ import {
   ownerSendTimesSince,
   tradeSendTimesSince,
   optOutReplies,
-  ownRootTweetIds,
+  ownThreadTweets,
   repliesEnabledFor,
   replyConsentAt,
   firstReplyConsentAt,
@@ -1561,8 +1561,14 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       return null;
     }
     const ordered = [...comments].sort((a, b) => a.createdAtMs - b.createdAtMs || a.id.localeCompare(b.id));
-    // The threads a reply may be answered in: rooted at this X account's own posts (tagCandidate).
-    const ownRoots = ordered.some((c) => c.conversationId !== c.id || c.inReplyToTweetId !== "") ? await ownRootTweetIds(shared, account.xUserId) : new Set<string>();
+    // WHERE A REPLY OR A QUOTE MAY BE ANSWERED (the owner's decision, 2026-10-12:
+    // whoever replies to it or quotes it is asking): a conversation rooted at
+    // one of this X account's own posts or at a post it answered, under one of
+    // its own posted tweets or the person's own earlier post it answered; a
+    // quote of one of its own posted tweets (store.ts ownThreadTweets,
+    // replies.ts tagCandidate). Read only when the batch holds one.
+    const threads = ordered.some((c) => c.conversationId !== c.id || c.inReplyToTweetId !== "" || c.quoted === true)
+      ? await ownThreadTweets(shared, account.xUserId) : { roots: new Set<string>(), posts: new Set<string>(), answered: new Map<string, string>() };
     const buys = recentCoins(f);
     // Every name its buys go by: what an answer not shown them may never say (XGateCtx.unsaid).
     const bought = boughtNames(f, posts);
@@ -1575,7 +1581,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       .filter((p) => p.tenant === account.tenant && p.kind === "buy" && typeof p.coin === "string" && p.coin.trim() !== "").map((p) => p.coin!.trim());
     for (const comment of ordered) {
       if (comment.createdAtMs < consentAt || nowMs - comment.createdAtMs > REPLY_STALE_MS) continue;
-      const candidate = tagCandidate(comment, { xUserId: account.xUserId, research: research !== null, username: account.username, ownRoots });
+      const candidate = tagCandidate(comment, { xUserId: account.xUserId, research: research !== null, username: account.username,
+        ownRoots: threads.roots, ownPosts: threads.posts, answered: threads.answered });
       if (!candidate.ok || await repliesOptedOut(shared, account.xUserId, comment.authorId)) continue;
       // READ BY CODE FIRST, research on or off: the allowlist's plain model
       // question is answered from a code-built line (writer.ts modelAnswers)

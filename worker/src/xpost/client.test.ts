@@ -272,6 +272,25 @@ test("a quote or a retweet is marked, so nothing is ever answered under a post c
   if (!r.ok) return;
   assert.deepEqual(r.value.replies.map((x) => [x.id, x.quoted ?? false]), [["300", true], ["299", true], ["298", true], ["297", false], ["296", false]]);
   assert.ok(!("quoted" in r.value.replies[3]!), "absent, not false, on a plain reply");
+  // WHICH POST A QUOTE QUOTES (2026-10-12): a quote of one of its own posts may be answered; a retweet never says what it quotes.
+  assert.deepEqual(r.value.replies.map((x) => [x.id, x.quotedTweetId ?? null]), [["300", "100000000000000006"], ["299", "7"], ["298", null], ["297", null], ["296", null]]);
+});
+
+test("a quote names the post it quotes only when that is all it refers to besides its parent, by an id X could have sent (2026-10-12)", async () => {
+  const body = { data: [
+    mention("300", { conversation_id: "300", referenced_tweets: [{ type: "quoted", id: "100000000000000006" }, { type: "retweeted", id: "8" }] }),
+    mention("299", { conversation_id: "299", referenced_tweets: [{ type: "quoted", id: "6" }, { type: "quoted", id: "7" }] }),
+    mention("298", { conversation_id: "298", referenced_tweets: [{ type: "quoted", id: "not-an-id" }] }),
+    mention("297", { conversation_id: "297", referenced_tweets: [{ type: "quoted" }] }),
+    mention("296", { conversation_id: "296", referenced_tweets: [null] }),
+  ], meta: { result_count: 5 } };
+  const r = await readMentions("token", "111", { nowMs: MENTION_NOW, fetch: scripted(200, body) });
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  for (const x of r.value.replies) {
+    assert.equal(x.quoted, true, x.id);
+    assert.equal(x.quotedTweetId, undefined, x.id);
+  }
 });
 
 test("a poll, media, a card or a long post's rest is marked, and the author X expanded is read (red-team 2026-10-12)", async () => {
