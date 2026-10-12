@@ -43,7 +43,9 @@ const HOUR = 60 * MIN;
  * at least ten minutes, and can be skipped there. So no post of any kind is
  * due sooner than this after it is drafted — an intro drafted late, a buy
  * found late, a casual post at its slot — and the intro is due no sooner than
- * this after consent either.
+ * this after consent either. The one exception is not planned here: an active
+ * agent's answer to a post that tagged it is due when drafted, and the reply
+ * warning that turned answers on says so (orchestrator-xpost.ts writeAnswer).
  */
 export const MIN_LEAD_MS = 10 * MIN;
 /** The intro goes out this long after consent, so the owner sees it drafted first. */
@@ -62,8 +64,12 @@ export const BUY_STALE_MS = 8 * HOUR;
 export const REPLY_STALE_MS = 24 * HOUR;
 export const REPLY_ROOT_MAX_AGE_MS = 72 * HOUR;
 export const REPLIES_PER_ROOT = 2;
-/** An active agent's answers to tags: their own gap and day allowance, never the cadence's. */
-export const ANSWER_GAP_MS = 3 * MIN;
+/**
+ * An active agent's answers to tags: their own gap and day allowance, never
+ * the cadence's. A minute apart: they go out as soon as they are drafted, and
+ * mentions are read every minute.
+ */
+export const ANSWER_GAP_MS = MIN;
 export const ANSWERS_PER_DAY = 24;
 /** The least time between two posts of one account. The intro is exempt, both ways. */
 export const GAP_MS = 3 * HOUR;

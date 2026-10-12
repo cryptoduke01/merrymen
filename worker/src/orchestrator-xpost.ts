@@ -46,7 +46,7 @@ import { STRATEGY_FLAVOUR, STRATEGY_SPOKEN, TRAIT_VOICE } from "./groupchat/temp
 import { MUSINGS, SUBJECTS, TAKES } from "./groupchat/topics";
 import { xAppFromEnv, type FetchLike, type XApp, type XReply } from "./xpost/client";
 import { admitXPost, vocabularyRefusal, type BaseGate, type XGateCtx } from "./xpost/gate";
-import { ACTIVE_CADENCE, ANSWER_GAP_MS, ANSWERS_PER_DAY, MIN_LEAD_MS, REPLY_STALE_MS, STANDARD_CADENCE, coinOf, hash32, planPosts, replyDueAt, sendDecision, type PlanCadence, type PlanClock, type PlanIntent } from "./xpost/planner";
+import { ACTIVE_CADENCE, ANSWER_GAP_MS, ANSWERS_PER_DAY, REPLY_STALE_MS, STANDARD_CADENCE, coinOf, hash32, planPosts, replyDueAt, sendDecision, type PlanCadence, type PlanClock, type PlanIntent } from "./xpost/planner";
 import { APP_PAUSE_KEY, APP_PAUSE_MS, CREDITS_PAUSE_MS, PAUSE_KEY, readReplyComments, sendOne, type SendOutcome } from "./xpost/sender";
 import { isReplyOptOut, replyCandidate, tagCandidate, withoutReplyOptOut } from "./xpost/replies";
 import { activeTenantsOf, repliesAllowedFor, repliesScopeOf } from "./xpost/scope";
@@ -97,8 +97,16 @@ export const DEFAULT_FLEET_PER_DAY = 1000;
 export const DEFAULT_LLM_PER_DAY = 400;
 export const DEFAULT_REPLY_POLLS_PER_DAY = 200;
 const REPLY_POLL_MS = 30 * MIN;
-/** An active agent's mentions are read more often, so a tag is answered the same hour. */
-const ACTIVE_REPLY_POLL_MS = 10 * MIN;
+/**
+ * AN ACTIVE AGENT'S MENTIONS ARE READ EVERY MINUTE, so a tag is answered within
+ * a minute or two: its answers go out as soon as they are drafted. Those
+ * polls spend an allowance of their own, per X account and UTC day
+ * (`reply-polls-active:<xUserId>:<day>`), never the fleet's
+ * (`reply-polls:<day>`): the fleet's polls cannot starve it, nor it theirs.
+ * MERRYMEN_XPOST_REPLY_POLLS_PER_DAY=0 still turns every poll off.
+ */
+const ACTIVE_REPLY_POLL_MS = MIN;
+export const ACTIVE_REPLY_POLLS_PER_DAY = 1500;
 /** Tags an active agent may answer from one poll's batch. */
 const ANSWERS_PER_POLL = 3;
 const MAX_REPLY_POLLS_PER_PASS = 2;
@@ -133,7 +141,7 @@ const TEMPLATE_TRIES = 8;
 /** Send outcomes after which the post may exist on X: they keep their unit of the fleet's ceiling. */
 const MAY_BE_ON_X: ReadonlySet<SendOutcome> = new Set<SendOutcome>(["posted", "uncertain", "fault"]);
 /** Log counters that describe a standing condition rather than something that happened. */
-const CONDITIONS: ReadonlySet<string> = new Set(["no-model-budget", "zone-unreadable", "owner-failed"]);
+const CONDITIONS: ReadonlySet<string> = new Set(["no-model-budget", "zone-unreadable", "owner-failed", "active-reply-polls-spent"]);
 
 // ── the knobs ───────────────────────────────────────────────────────────────
 
@@ -764,7 +772,11 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
             let dayOf: ((ms: number) => string) | undefined;
             if (account?.posting && account.xUserId === post.xUserId) {
               const z = await zoneOf(post.tenant, account.tz);
-              asleep = !z.ok || isAsleep(z.tz, post.tenant, t);
+              // THE OWNER'S NIGHT NEVER HOLDS AN ANSWER. Someone who tagged an
+              // active agent at 3am the owner's time is answered then: the
+              // night keeps the owner's own timeline quiet, not a reply to a
+              // person who asked. Every other post waits for morning.
+              asleep = post.kind !== "answer" && (!z.ok || isAsleep(z.tz, post.tenant, t));
               if (z.ok) dayOf = (ms) => localDay(z.tz, ms);
             }
             const d = sendDecision(post, account, t, asleep, dayOf);
@@ -977,21 +989,36 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
     bump: (k: string, n?: number) => void,
   ): Promise<Map<string, XReply[]>> {
     const batches = new Map<string, XReply[]>();
-    const ordered = [...accounts].sort((a, b) => a.tenant.localeCompare(b.tenant));
+    // POLLING OFF IS OFF FOR EVERYONE, the active owners included.
+    if (!(replyPollsPerDay > 0)) return batches;
+    const isActive = (a: XAccount) => active.has(a.tenant.toLowerCase());
+    const byTenant = (a: XAccount, b: XAccount) => a.tenant.localeCompare(b.tenant);
+    // THE ACTIVE OWNERS FIRST, then the rest from where the last pass left
+    // off: an active agent due its minute's poll is never behind the fleet's
+    // turn, and the rotation is the fleet's alone.
+    const ordered = accounts.filter((a) => !isActive(a)).sort(byTenant);
     const from = ordered.findIndex((a) => a.tenant >= replyResumeAt);
-    const turn = from > 0 ? [...ordered.slice(from), ...ordered.slice(0, from)] : ordered;
+    const rest = from > 0 ? [...ordered.slice(from), ...ordered.slice(0, from)] : ordered;
+    const turn = [...accounts.filter(isActive).sort(byTenant), ...rest];
+    const resume = replyResumeAt;
     replyResumeAt = "";
     let polls = 0;
     for (const account of turn) {
-      if (polls >= MAX_REPLY_POLLS_PER_PASS || at() - nowMs > SEND_BUDGET_MS) { replyResumeAt = account.tenant; break; }
+      if (polls >= MAX_REPLY_POLLS_PER_PASS || at() - nowMs > SEND_BUDGET_MS) { replyResumeAt = isActive(account) ? resume : account.tenant; break; }
       if (batches.has(account.xUserId)) continue;
       const consentAt = await replyConsentAt(shared, account.tenant, account.xUserId);
       if (consentAt === null) continue;
       const t = at();
       const backoff = Number((await readMeta(shared, `reply-backoff:${account.xUserId}`))?.v ?? 0);
-      const every = active.has(account.tenant.toLowerCase()) ? ACTIVE_REPLY_POLL_MS : REPLY_POLL_MS;
+      const every = isActive(account) ? ACTIVE_REPLY_POLL_MS : REPLY_POLL_MS;
       if (backoff > t || !(await claimSpan(shared, `reply-poll:${account.xUserId}`, t, every)).ok) continue;
-      if (!(await takeAllowance(shared, `reply-polls:${utcDay(t)}`, replyPollsPerDay, t))) break;
+      if (isActive(account)) {
+        // Its own allowance: spent, it waits for tomorrow; the fleet goes on.
+        if (!(await takeAllowance(shared, `reply-polls-active:${account.xUserId}:${utcDay(t)}`, ACTIVE_REPLY_POLLS_PER_DAY, t))) {
+          bump("active-reply-polls-spent");
+          continue;
+        }
+      } else if (!(await takeAllowance(shared, `reply-polls:${utcDay(t)}`, replyPollsPerDay, t))) break;
       polls++;
       const storedCursor = (await readMeta(shared, `reply-cursor:${account.xUserId}`))?.v;
       const sinceId = storedCursor && /^\d{1,25}$/.test(storedCursor) ? storedCursor : undefined;
@@ -1165,6 +1192,14 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
    * — `said`, its posted rows only), never from the question. `recentOwn`,
    * drafts included, is only what the gate keeps it from echoing. Every
    * attempt spends its key, so a PASS or a refused draft is not drafted again.
+   *
+   * RIGHT AWAY. An active agent is the operator's own (docs/x-posting.md
+   * "Active owners"), and someone who tagged it is waiting: the answer is due
+   * the moment it is drafted, with no ten-minute review window, and the
+   * owner's night does not hold it (the send path never treats an answer as
+   * asleep). The reply warning that turned this on says both. Everything else
+   * still holds: STOP, two a person a day, 24 a day, the tag screens, the
+   * gate, the fleet's ceiling, the pauses and the 429 backoff.
    */
   async function writeAnswer(
     shared: Db, account: XAccount, f: AgentFacts, comments: XReply[], tz: string | null,
@@ -1172,7 +1207,6 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
   ): Promise<{ body: string | null } | null> {
     if (!creds) return null;
     const nowMs = at();
-    if (PLAN_CLOCK.isAsleep(tz, account.tenant, nowMs)) return null;
     const consentAt = await replyConsentAt(shared, account.tenant, account.xUserId);
     if (consentAt === null) return null;
     const ordered = [...comments].sort((a, b) => a.createdAtMs - b.createdAtMs || a.id.localeCompare(b.id));
@@ -1199,7 +1233,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       const body = verdict?.ok ? verdict.text : null;
       const id = await schedulePost(shared, {
         tenant: account.tenant, xUserId: account.xUserId, kind: "answer", dedupeKey, body: body ?? "",
-        coin: null, decisionId: null, dueAtMs: finishedAt + MIN_LEAD_MS, nowMs: finishedAt,
+        coin: null, decisionId: null, dueAtMs: finishedAt, nowMs: finishedAt,
         replyToTweetId: comment.id, replyRootTweetId: comment.id, replyAuthorId: comment.authorId,
         status: body ? "scheduled" : "skipped", reason: body ? null : verdict && !verdict.ok ? `gate:${verdict.reason}` : "no-draft",
       });
