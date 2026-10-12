@@ -49,6 +49,7 @@ import { admitXPost, vocabularyRefusal, type BaseGate, type XGateCtx } from "./x
 import { ACTIVE_CADENCE, ANSWER_GAP_MS, ANSWERS_PER_DAY, BUY_COIN_FOLD_MS, MIN_LEAD_MS, REPLY_STALE_MS, STANDARD_CADENCE, coinOf, hash32, planPosts, replyDueAt, sendDecision, type PlanCadence, type PlanClock, type PlanIntent } from "./xpost/planner";
 import { APP_PAUSE_KEY, APP_PAUSE_MS, CREDITS_PAUSE_MS, PAUSE_KEY, readReplyComments, sendOne, type SendOutcome } from "./xpost/sender";
 import { isReplyOptOut, replyCandidate, tagCandidate, withoutReplyOptOut } from "./xpost/replies";
+import { activeTenantsOf } from "./xpost/scope";
 import {
   cancelPost,
   claimSpan,
@@ -213,15 +214,10 @@ export function xpostEnv(env: Record<string, string | undefined> = process.env):
   const repliesApproved = env.MERRYMEN_XPOST_REPLIES_APPROVED === "1";
   // ACTIVE OWNERS, by tenant address only: a name or a handle is not an
   // identity. An entry that is not an address is said by position, never by
-  // value, and dropped; the rest still apply.
-  const activeRaw = env.MERRYMEN_XPOST_ACTIVE_TENANTS?.trim();
-  const activeTenants = new Set<string>();
-  if (activeRaw) {
-    activeRaw.split(",").map((v) => v.trim()).filter(Boolean).forEach((v, i) => {
-      if (/^0x[0-9a-fA-F]{40}$/.test(v)) activeTenants.add(v.toLowerCase());
-      else notes.push(`xpost: ignoring entry ${i + 1} of MERRYMEN_XPOST_ACTIVE_TENANTS — it is not an owner address`);
-    });
-  }
+  // value, and dropped; the rest still apply. The web reads the same variable
+  // with the same parser (xpost/scope.ts), for the reply warning.
+  const { tenants: activeTenants, badEntries } = activeTenantsOf(env.MERRYMEN_XPOST_ACTIVE_TENANTS);
+  for (const i of badEntries) notes.push(`xpost: ignoring entry ${i} of MERRYMEN_XPOST_ACTIVE_TENANTS — it is not an owner address`);
   const replyRaw = env.MERRYMEN_XPOST_REPLY_POLLS_PER_DAY?.trim();
   const replyPollsPerDay = replyRaw ? count(replyRaw) : null;
   if (replyRaw && replyPollsPerDay === null) notes.push("xpost: unreadable MERRYMEN_XPOST_REPLY_POLLS_PER_DAY — comment polling is off");

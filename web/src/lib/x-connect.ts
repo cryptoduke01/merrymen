@@ -35,6 +35,7 @@ import type { Db } from "../../../worker/src/db";
 import { canonicalTz } from "../../../worker/src/groupchat/clock";
 import { storeDek } from "../../../worker/src/store-crypto";
 import { xAppFromEnv, type FetchLike, type XApp } from "../../../worker/src/xpost/client";
+import { activeTenantsOf } from "../../../worker/src/xpost/scope";
 import {
   DEFAULT_PREFS,
   OWNER_PER_DAY_MAX,
@@ -115,6 +116,18 @@ export function xpostAvailable(hosted: boolean): boolean {
 /** Reply consent is available only after the operator has enabled this feature. */
 export function xpostRepliesAvailable(hosted: boolean): boolean {
   return xpostAvailable(hosted) && (seam?.env ?? process.env).MERRYMEN_XPOST_REPLIES_APPROVED === "1";
+}
+
+/**
+ * IS THIS OWNER'S AGENT ONE THE OPERATOR MADE ACTIVE (MERRYMEN_XPOST_ACTIVE_TENANTS)?
+ * Read with the orchestrator's own parser (worker/src/xpost/scope.ts), because
+ * the reply warning must say what the orchestrator will do: an active agent
+ * also answers posts that tag it, right away, in a lane of its own. The
+ * variable has to be set on the web too, with the same value, or the warning
+ * describes comment replies only.
+ */
+export function xpostActiveAgent(tenant: string): boolean {
+  return activeTenantsOf((seam?.env ?? process.env).MERRYMEN_XPOST_ACTIVE_TENANTS).tenants.has(String(tenant).trim().toLowerCase());
 }
 
 /**
@@ -282,6 +295,13 @@ export interface XAccountBody {
   perDayMax: number;
   replyEnabled: boolean;
   repliesAvailable: boolean;
+  /**
+   * The operator made this owner's agent active (xpostActiveAgent): with
+   * replies on, it answers posts that tag it — comments on its own posts
+   * included — right away, not after ten minutes under Coming up. The reply
+   * warning says so; false is comment replies on its coin posts only.
+   */
+  repliesActive: boolean;
   upcoming: XUpcomingPost[];
   recent: XRecentPost[];
 }
@@ -305,7 +325,12 @@ const TWEET_ID = /^\d{1,25}$/;
  * stop); "Posted" is only `posted` with an id X gave, linked through a handle
  * that passes X's own rule — anything else is left out rather than linked.
  */
-export function accountBody(available: boolean, account: XAccount | null, posts: readonly XPost[], replies: { enabled: boolean; available: boolean } = { enabled: false, available: false }): XAccountBody {
+export function accountBody(
+  available: boolean,
+  account: XAccount | null,
+  posts: readonly XPost[],
+  replies: { enabled: boolean; available: boolean; active?: boolean } = { enabled: false, available: false },
+): XAccountBody {
   if (!account) {
     return {
       available,
@@ -318,6 +343,7 @@ export function accountBody(available: boolean, account: XAccount | null, posts:
       perDayMax: OWNER_PER_DAY_MAX,
       replyEnabled: false,
       repliesAvailable: replies.available,
+      repliesActive: replies.active === true,
       upcoming: [],
       recent: [],
     };
@@ -358,6 +384,7 @@ export function accountBody(available: boolean, account: XAccount | null, posts:
     perDayMax: OWNER_PER_DAY_MAX,
     replyEnabled: account.posting && replies.enabled,
     repliesAvailable: replies.available,
+    repliesActive: replies.active === true,
     upcoming,
     recent,
   };

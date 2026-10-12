@@ -7,10 +7,25 @@ final class XPostingTests: XCTestCase {
         let identity = XPostingAccount.Identity(handle: "robin_trades", xUserId: "2244994945")
         XCTAssertEqual(XPostingAccount.replyFields(identity, enabled: true), ["action": .string("enable-replies"), "xUserId": .string("2244994945")])
         XCTAssertEqual(XPostingAccount.replyFields(identity, enabled: false)["action"], .string("disable-replies"))
-        let warning = XPostingAccount.replyWarning(identity.handle)
-        XCTAssertTrue(warning.contains("reply as @robin_trades to selected comments"))
+        let warning = XPostingAccount.replyWarning(identity.handle, active: false)
+        XCTAssertTrue(warning.contains("reply as @robin_trades to selected comments on its coin posts."))
         XCTAssertTrue(warning.contains("same daily limit as posts"))
         XCTAssertTrue(warning.contains("at least ten minutes"))
+        XCTAssertFalse(warning.contains("tag it"))
+    }
+
+    /// An agent the operator made active answers tags right away, so its warning
+    /// says so and promises no review window — word for word as the web's.
+    func testActiveAgentReplyWarningDisclosesImmediateTagAnswers() throws {
+        XCTAssertEqual(XPostingAccount.replyWarning("robin_trades", active: true), [
+            "Your Merryman will reply as @robin_trades to selected posts that tag it, including comments on its own posts.",
+            "It chooses which posts to answer; it won’t answer every one. Answers go out right away: they don’t wait under Coming up, so you can’t skip one first.",
+            "Up to 24 answers a day on top of its posts, and at most two to one person a day. Anyone can reply stop to opt out. Turn replies off at any time to stop answering."
+        ].joined(separator: "\n\n"))
+        XCTAssertTrue(XPostingAccount.replyHint("robin_trades", active: true).contains("right away"))
+        XCTAssertTrue(XPostingAccount.replyHint("robin_trades", active: false).contains("ten-minute review window"))
+        let active = try JSONDecoder().decode(J.self, from: Data(#"{"available":true,"connected":true,"postingEnabled":true,"repliesAvailable":true,"repliesActive":true,"username":"robin_trades","xUserId":"123","upcoming":[],"recent":[]}"#.utf8))
+        XCTAssertTrue(try XCTUnwrap(XPostingAccount(active)).repliesActive)
     }
 
     func testOlderAccountRepliesDefaultOffAndCommentLinksAreValidated() throws {
@@ -18,6 +33,7 @@ final class XPostingTests: XCTestCase {
         let account = try XCTUnwrap(XPostingAccount(old))
         XCTAssertFalse(account.replyEnabled)
         XCTAssertFalse(account.repliesAvailable)
+        XCTAssertFalse(account.repliesActive)
         let current = try JSONDecoder().decode(J.self, from: Data(#"{"available":true,"connected":true,"postingEnabled":true,"replyEnabled":true,"repliesAvailable":true,"username":"robin_trades","xUserId":"123","upcoming":[{"id":1,"kind":"reply","body":"An answer","dueAt":1800000000000,"replyToTweetId":"456"},{"id":2,"kind":"reply","body":"Another answer","dueAt":1800000000000,"replyToTweetId":"javascript:alert(1)"}],"recent":[]}"#.utf8))
         let updated = try XCTUnwrap(XPostingAccount(current))
         XCTAssertTrue(updated.replyEnabled)

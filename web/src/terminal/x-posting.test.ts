@@ -21,6 +21,8 @@ import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import { act, createElement } from "react";
 import { X_COPY, type XAccountBody } from "@/lib/x-connect";
+import { ANSWERS_PER_DAY } from "../../../worker/src/xpost/planner";
+import { ANSWERS_PER_AUTHOR } from "../../../worker/src/xpost/store";
 import { json, testDom } from "./test-dom";
 import { XPosting } from "./XPosting";
 
@@ -48,6 +50,7 @@ const CONNECTED: XAccountBody = {
   perDayMax: 3,
   replyEnabled: false,
   repliesAvailable: false,
+  repliesActive: false,
   upcoming: [],
   recent: [],
 };
@@ -147,12 +150,30 @@ describe("comment reply consent", () => {
     await press(replySwitch(), "reply switch");
     assert.equal(writes().length, 0);
     assert.match(text(), new RegExp(`Reply to comments as @${HANDLE}`));
-    assert.match(text(), /selected comments on its coin posts/);
+    assert.match(text(), new RegExp(`reply as @${HANDLE} to selected comments on its coin posts\\.`));
     assert.match(text(), /same daily limit/);
     assert.match(text(), /at least ten minutes/);
+    assert.doesNotMatch(text(), /tag it|right away|24 answers/, "an owner merrymen did not make active is told of comment replies only");
     await press(buttons(`Let it reply as @${HANDLE}`)[0], "reply confirm");
     assert.deepEqual(writes()[0]?.body, { action: "enable-replies", owner: OWNER, xUserId: X_ID });
     assert.equal(replySwitch()?.getAttribute("aria-checked"), "true");
+  });
+
+  it("an active agent's warning says it answers tags right away, on top of its posts, and promises no review window", async () => {
+    routes["GET /api/x/account"] = () => json({ ...CONNECTED, postingEnabled: true, repliesAvailable: true, repliesActive: true });
+    routes["POST /api/x/account"] = () => json({ ok: true, replyEnabled: true });
+    await shown();
+    assert.match(text(), /Selected posts that tag your Merryman and comments on its posts, answered as @merry_poster right away/);
+    await press(replySwitch(), "reply switch");
+    assert.equal(writes().length, 0);
+    const dialog = ui.container.querySelector("dialog")?.textContent ?? "";
+    assert.match(dialog, new RegExp(`reply as @${HANDLE} to selected posts that tag it, including comments on its own posts\\.`));
+    assert.match(dialog, /Answers go out right away: they don’t wait under Coming up/);
+    assert.match(dialog, /Up to 24 answers a day on top of its posts, and at most two to one person a day\./);
+    assert.match(dialog, /Anyone can reply stop to opt out\./);
+    assert.doesNotMatch(dialog, /at least ten minutes|same daily limit/, "it keeps no ten-minute review, so it does not promise one");
+    await press(buttons(`Let it reply as @${HANDLE}`)[0], "reply confirm");
+    assert.deepEqual(writes()[0]?.body, { action: "enable-replies", owner: OWNER, xUserId: X_ID });
   });
 
   it("keeps replies off when the server refuses the named account", async () => {
@@ -738,8 +759,27 @@ describe("the warning keeps its words", () => {
     }
   });
 
+  it("every sentence of both reply warnings is in the source, verbatim, as iOS says them", () => {
+    for (const said of [
+      "Reply to comments as ${handle}?",
+      "Your Merryman will reply as ${handle} to selected comments on its coin posts.",
+      "It chooses which comments to answer; it won’t reply to every comment. Replies share the same daily limit as posts.",
+      "Each reply waits under Coming up for at least ten minutes first, with a link to the comment, and you can skip it there. Turn replies off at any time to cancel waiting replies.",
+      "Your Merryman will reply as ${handle} to selected posts that tag it, including comments on its own posts.",
+      "It chooses which posts to answer; it won’t answer every one. Answers go out right away: they don’t wait under Coming up, so you can’t skip one first.",
+      "Up to 24 answers a day on top of its posts, and at most two to one person a day. Anyone can reply stop to opt out. Turn replies off at any time to stop answering.",
+      "Let it reply as ${handle}",
+    ]) {
+      assert.ok(SRC.includes(said), `the reply warning lost: "${said}"`);
+    }
+    assert.doesNotMatch(SRC, /if merrymen has made it an active poster/, "the warning says which it is, never 'if'");
+    // The numbers it promises are the orchestrator's own lane limits.
+    assert.equal(ANSWERS_PER_DAY, 24, "the warning says up to 24 answers a day");
+    assert.equal(ANSWERS_PER_AUTHOR, 2, "the warning says at most two to one person a day");
+  });
+
   it("the lead sentence is bold, and the warning is the only place that sends 'enable'", () => {
-    assert.match(SRC, /<strong>\{asking\.replies \? replyWarningLead\(asking\.handle\) : warningLead\(asking\.handle\)\}<\/strong>/);
+    assert.match(SRC, /<strong>\{asking\.replies \? replyWarningLead\(asking\.handle, asking\.active === true\) : warningLead\(asking\.handle\)\}<\/strong>/);
     assert.equal(SRC.split('action: "enable"').length - 1, 1, "one write turns posting on");
     const at = SRC.indexOf('action: "enable"');
     // Bounded by the next declaration at the component's own indentation, so

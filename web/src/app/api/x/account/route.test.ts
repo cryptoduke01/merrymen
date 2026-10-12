@@ -131,6 +131,7 @@ describe("GET", () => {
       perDayMax: 3,
       replyEnabled: false,
       repliesAvailable: false,
+      repliesActive: false,
       upcoming: [],
       recent: [],
     });
@@ -441,6 +442,18 @@ describe("comment reply consent", () => {
     assert.equal(await repliesEnabledFor(w.db, OWNER_A, X_USER.id), false);
     assert.equal(statusOf(waiting), "cancelled");
     assert.equal(statusOf(ordinary), "scheduled");
+  });
+
+  it("says when the operator made this owner's agent active, read by address the way the orchestrator reads it", async () => {
+    await connect(OWNER_A);
+    await postingOn();
+    w.env.MERRYMEN_XPOST_REPLIES_APPROVED = "1";
+    assert.equal((await read<XAccountBody>(await get(OWNER_A))).repliesActive, false, "unset is nobody");
+    w.env.MERRYMEN_XPOST_ACTIVE_TENANTS = ` alan , ${OWNER_A.toUpperCase().replace("0X", "0x")} `;
+    assert.equal((await read<XAccountBody>(await get(OWNER_A))).repliesActive, true);
+    assert.equal((await read<XAccountBody>(await get(OWNER_B))).repliesActive, false, "only the owners it names");
+    w.env.MERRYMEN_XPOST_ACTIVE_TENANTS = "alan";
+    assert.equal((await read<XAccountBody>(await get(OWNER_A))).repliesActive, false, "a name is not an identity");
   });
 
   it("returns validated comment context for upcoming and posted replies", async () => {
