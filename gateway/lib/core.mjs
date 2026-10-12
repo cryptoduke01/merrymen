@@ -23,6 +23,16 @@ export const DEFAULTS = {
   // it gets its OWN tighter bucket. Sharing the chat allowance would let a
   // background poll quietly starve the brain the same holder is paying for.
   BITQUERY_RATE_PER_MIN: 6,
+  // THE FLEET-WIDE DAILY CAP on Bitquery points this gateway spends, across
+  // every holder AND the public memescope (MERRYMEN_GATEWAY_BITQUERY_POINTS_PER_DAY).
+  // The per-address bucket above bounds one holder; nothing bounded all of
+  // them, and each holder polling at the worker's default interval is
+  // roughly 720 points a day — a few dozen holders would take a plan the
+  // orchestrator's Bitquery lane is also spending (worker/src/venues/
+  // bitquery-lane.ts: 25,000 a day there plus 5,000 here is 900,000 of a
+  // 1,000,000-point month). Reserved BEFORE each upstream call; a refusal
+  // costs nothing. Raise it only with the lane's own knob brought down.
+  BITQUERY_POINTS_PER_DAY: 5_000,
   // How long the PUBLIC memescope is served from one shared answer. This number
   // is the whole cost model of that route: the upstream is hit at most once per
   // this many seconds no matter how many people are watching, so traffic and
@@ -114,6 +124,29 @@ export function bitqueryAuthHeaders(key) {
   return String(key).startsWith("ory_at_")
     ? { authorization: `Bearer ${key}` }
     : { "X-API-KEY": key };
+}
+
+/** Above this the daily cap is clamped: the whole plan is about 33,000 a day. */
+export const BITQUERY_POINTS_PER_DAY_CEILING = 30_000;
+
+/**
+ * MERRYMEN_GATEWAY_BITQUERY_POINTS_PER_DAY as a number: a positive whole number
+ * up to the ceiling, or the default. Returns the line to log beside it, which
+ * describes a bad value by its length and never echoes it — a key pasted into
+ * the wrong variable must not reach the log through this.
+ */
+export function bitqueryPointsPerDayFrom(raw) {
+  const fallback = DEFAULTS.BITQUERY_POINTS_PER_DAY;
+  if (raw === undefined || raw === null || String(raw).trim() === "") return { points: fallback, note: null };
+  const s = String(raw).trim();
+  if (!/^\d+$/.test(s) || Number(s) < 1) {
+    return { points: fallback, note: `MERRYMEN_GATEWAY_BITQUERY_POINTS_PER_DAY is not a positive whole number (${s.length} characters); ${fallback} applies` };
+  }
+  const n = Number(s);
+  if (n > BITQUERY_POINTS_PER_DAY_CEILING) {
+    return { points: BITQUERY_POINTS_PER_DAY_CEILING, note: `MERRYMEN_GATEWAY_BITQUERY_POINTS_PER_DAY=${n} is above the ceiling of ${BITQUERY_POINTS_PER_DAY_CEILING}; ${BITQUERY_POINTS_PER_DAY_CEILING} applies` };
+  }
+  return { points: n, note: null };
 }
 
 export function createGateway(cfg) {
@@ -380,7 +413,10 @@ export function createGateway(cfg) {
   const BITQUERY_QUERIES = {
     /** Pools initialized recently — v3 factories and the v4 PoolManager alike. */
     recentPools: {
-      cost: 2,
+      // Points reserved per call against BITQUERY_POINTS_PER_DAY. Bitquery
+      // documents its realtime data at a flat 5 points per cube, whatever
+      // the record count; one cube here.
+      points: 5,
       build: (v) => ({
         query: `query ($since: DateTime, $limit: Int) {
           EVM(network: robinhood) {
@@ -405,13 +441,34 @@ export function createGateway(cfg) {
     },
     /** Chain height — the cheapest possible liveness/credential check. */
     ping: {
-      cost: 1,
+      points: 5,
       build: () => ({
         query: `{ EVM(network: robinhood) { Blocks(limit: {count: 1}, orderBy: {descending: Block_Number}) { Block { Number } } } }`,
         variables: {},
       }),
     },
   };
+
+  /**
+   * Reserve one upstream call's points against today's fleet-wide cap (UTC
+   * day, like the provider's usage page). True to proceed; false when the day
+   * is spent; null when the store cannot count — refused too, since an
+   * uncountable spend is not one this gateway makes.
+   */
+  async function reserveBitqueryPoints(points) {
+    const cap = T.BITQUERY_POINTS_PER_DAY;
+    if (!(cap > 0) || typeof store.reservePoints !== "function") return null;
+    const day = new Date().toISOString().slice(0, 10);
+    try {
+      return await store.reservePoints(`bq-points:${day}`, points, cap, 2 * 86_400);
+    } catch {
+      return null;
+    }
+  }
+  const unspendable = (r) =>
+    r === false
+      ? { status: 503, json: { error: "this gateway's daily discovery allowance is spent — it resets at 00:00 UTC" } }
+      : { status: 503, json: { error: "this gateway cannot count its discovery spend right now, so it is not spending" } };
 
   async function bitquery({ token, body, ip }) {
     if (!bitqueryKey) {
@@ -446,6 +503,9 @@ export function createGateway(cfg) {
       };
     }
     const built = entry.build(body.variables && typeof body.variables === "object" ? body.variables : {});
+    // LAST, so a refused token, a non-holder or an unknown query spends nothing.
+    const reserved = await reserveBitqueryPoints(entry.points);
+    if (reserved !== true) return unspendable(reserved);
     try {
       const upstream = await fetch(bitqueryUrl, {
         method: "POST",
@@ -491,8 +551,13 @@ export function createGateway(cfg) {
    * cache into `store`.
    */
   let scope = { at: 0, rows: [], inflight: null };
+  /** The UTC day the memescope last said its allowance was spent: said once a day, not once a request. */
+  let scopeBudgetSaid = "";
 
   async function fetchScope() {
+    // Inside the single flight, so one upstream call is one reservation.
+    const reserved = await reserveBitqueryPoints(BITQUERY_QUERIES.recentPools.points);
+    if (reserved !== true) throw Object.assign(new Error(reserved === false ? "the daily discovery allowance is spent" : "the discovery spend cannot be counted"), { budget: true });
     // The LIMIT binds here, not the time window. This chain opens pools fast
     // enough that 40 events covered roughly a minute of activity, which made a
     // "last 12 hours" window meaningless — it was really "the most recent 40".
@@ -581,12 +646,18 @@ export function createGateway(cfg) {
       // operator guess between a bad key, a plan limit, a rejected query and a
       // network blip — all of which look identical from outside. The message is
       // safe to print; the key only ever travels in a request header.
-      console.error(`[gateway] memescope upstream failed: ${err instanceof Error ? err.message : String(err)}`);
+      const day = new Date().toISOString().slice(0, 10);
+      if (!err?.budget) console.error(`[gateway] memescope upstream failed: ${err instanceof Error ? err.message : String(err)}`);
+      else if (scopeBudgetSaid !== day) {
+        scopeBudgetSaid = day;
+        console.error(`[gateway] memescope not refreshing: ${err.message} (MERRYMEN_GATEWAY_BITQUERY_POINTS_PER_DAY)`);
+      }
       // Serve stale rather than nothing: a scope that briefly stops updating is
       // far better than a page that breaks because a data provider blinked.
       if (scope.rows.length) {
         return { status: 200, json: { pools: scope.rows, cached: true, stale: true, ttl: T.MEMESCOPE_TTL_SEC } };
       }
+      if (err?.budget) return { status: 503, json: { error: "the scope's daily discovery allowance is spent — it resets at 00:00 UTC" } };
       return { status: 502, json: { error: "bitquery unavailable" } };
     }
   }

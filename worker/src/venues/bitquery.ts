@@ -153,6 +153,13 @@ export function bitqueryAuthHeaders(key: string): Record<string, string> {
  * Bitquery directly, nothing changes — a V1 key still goes in `X-API-KEY` and
  * a V2 token in Bearer, as gateway/selftest.mjs pins for the gateway's own
  * upstream call.
+ *
+ * FIXING THIS STARTS THE GATEWAY SPENDING. Every holder's poll used to die at
+ * the 401 for free; now each one reaches the gateway's Bitquery key, at about
+ * 720 points a holder a day on the default interval. The gateway's per-address
+ * bucket bounds one holder and never all of them, so the same change gave the
+ * gateway a fleet-wide daily cap (MERRYMEN_GATEWAY_BITQUERY_POINTS_PER_DAY,
+ * gateway/lib/core.mjs), counted beside the orchestrator's lane on one plan.
  */
 export function bitqueryRequestHeaders(creds: Pick<BitqueryCreds, "apiKey" | "viaGateway">): Record<string, string> {
   return creds.viaGateway ? { Authorization: `Bearer ${creds.apiKey}` } : bitqueryAuthHeaders(creds.apiKey);
@@ -165,14 +172,15 @@ export function bitqueryRequestHeaders(creds: Pick<BitqueryCreds, "apiKey" | "vi
  * hint is how a header bug read as an expired token: 401 and 403 mean
  * different things at the gateway (lib/core.mjs bitquery()), and only one of
  * them is about the wallet. A 503 there is the gateway's own state — no key
- * configured, or a balance it could not read — and never the owner's token.
+ * configured, its fleet-wide daily points allowance spent, or a balance it
+ * could not read — and never the owner's token.
  */
 export function bitqueryHttpHint(status: number, viaGateway: boolean | undefined): string {
   if (viaGateway) {
     if (status === 401) return " — the gateway did not accept your Merry Circle token (unsigned, malformed or past its week); claim a fresh one";
     if (status === 403) return " — the wallet behind your Merry Circle token no longer holds enough $MERRYMEN for the Circle";
     if (status === 429) return " — the shared holder quota is per-wallet; add your own Bitquery key in /settings to lift it";
-    if (status === 503) return " — the gateway's discovery is unavailable right now (no Bitquery key there, or a balance it could not read); this is not your token";
+    if (status === 503) return " — the gateway's discovery is unavailable right now (no Bitquery key there, its shared daily allowance spent, or a balance it could not read); this is not your token";
     return "";
   }
   if (status === 401 || status === 403) return " — check the API key in /settings";

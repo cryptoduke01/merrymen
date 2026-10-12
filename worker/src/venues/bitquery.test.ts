@@ -286,6 +286,7 @@ describe("bitqueryHttpHint — a refusal tells the owner what is actually wrong"
     assert.match(bitqueryHttpHint(403, true), /no longer holds enough \$MERRYMEN/);
     assert.doesNotMatch(bitqueryHttpHint(403, true), /expired|claim a fresh/, "a 403 is not a token problem");
     assert.match(bitqueryHttpHint(503, true), /this is not your token/);
+    assert.match(bitqueryHttpHint(503, true), /daily allowance/, "the gateway's fleet-wide cap is one of the 503s");
     assert.match(bitqueryHttpHint(429, true), /per-wallet/);
   });
 
