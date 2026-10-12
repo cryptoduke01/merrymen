@@ -1448,3 +1448,45 @@ describe("a tagged contract's last hour of onchain flow, as figures beside its w
     assert.equal(renderFiguresLine(thin.figures ?? []), null, "under a thousand dollars a side, nothing to show");
   });
 });
+
+describe("majors and what's hot spend the research allowances, and never wait past their share (2026-10-12)", () => {
+  it("each read is handed at most an index read's share and what is left of the bundle, and a read past it is skipped", async () => {
+    const given: [string, number][] = [];
+    const reader: MajorsReader = {
+      configured: () => true,
+      search: async (_q, ms) => { given.push(["search", ms]); return { hits: SEARCH_HITS, failed: false }; },
+      market: async (id, ms) => { given.push(["market", ms]); return { market: id === "ethereum" ? ETH_MARKET : null, failed: false }; },
+      trending: async (ms) => { given.push(["trending", ms]); return { coins: [], failed: false }; },
+    };
+    const research = createXResearch({ majors: reader, hotPools: async (ms) => { given.push(["pools", ms]); return { pools: [pool(1)], failed: false }; }, now: () => Date.now() });
+    await research.gather(input({ kind: "major", query: "eth", fallback: null }));
+    await research.gather(input({ kind: "hot" }, { xUserId: "222" }));
+    await research.gather(input({ kind: "major", query: "eth", fallback: null }, { xUserId: "333", budgetMs: 1_500 }));
+    for (const [what, ms] of given) assert.ok(ms > 0 && ms <= RESEARCH_BUDGET.readMs, `${what} ${ms}`);
+    assert.ok(given.filter(([w]) => w === "search").at(-1)![1] <= 1_500, "a caller with less time left gets less");
+    // Past the bundle: nothing is asked at all.
+    given.length = 0;
+    const none = await research.gather(input({ kind: "hot" }, { xUserId: "444", budgetMs: 0 }));
+    assert.deepEqual(given, []);
+    assert.deepEqual(none.facts, []);
+  });
+
+  it("the hour's index lookups across X accounts (MERRYMEN_XPOST_RESEARCH_PER_HOUR) cap majors and what's hot together", async () => {
+    const asked: string[] = [];
+    const research = createXResearch({
+      lookupsPerHour: 3,
+      majors: { configured: () => true, search: async () => { asked.push("search"); return { hits: SEARCH_HITS, failed: false }; },
+        market: async () => { asked.push("market"); return { market: ETH_MARKET, failed: false }; }, trending: async () => { asked.push("trending"); return { coins: [], failed: false }; } },
+      hotPools: async () => { asked.push("pools"); return { pools: [pool(1)], failed: false }; },
+      now: () => Date.now(),
+    });
+    assert.ok((await research.gather(input({ kind: "major", query: "eth", fallback: null }, { xUserId: "1" }))).figures);
+    const hot = await research.gather(input({ kind: "hot" }, { xUserId: "2" }));
+    assert.deepEqual(asked, ["search", "market", "pools"], "the third lookup was the hour's last: no coingecko list");
+    assert.deepEqual(hot.figures?.map((s) => s.kind), ["pools"]);
+    assert.ok(hot.notes.includes("index-busy"));
+    const after = await research.gather(input({ kind: "major", query: "eth", fallback: null }, { xUserId: "3" }));
+    assert.deepEqual(after.facts, []);
+    assert.equal(asked.length, 3, "nothing more this hour");
+  });
+});

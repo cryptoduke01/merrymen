@@ -1222,6 +1222,27 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
         return usable === true ? broker : null;
       };
       /**
+       * ONE INDEX READ'S SLOT, for majors and what's hot: a lookup left in the
+       * bundle, time left for it, then the X account's limiter and the hour's
+       * (MERRYMEN_XPOST_RESEARCH_PER_HOUR). Checked in that order, so a read
+       * the bundle could not make never spends the limiter.
+       */
+      const indexSlot = (): boolean => {
+        if (lookups >= RESEARCH_BUDGET.maxLookups) {
+          notes.push("lookups-spent");
+          return false;
+        }
+        if (left() <= 250) {
+          notes.push("late");
+          return false;
+        }
+        if (!limiter.take(xAccountKey(input.xUserId))) {
+          notes.push("index-busy");
+          return false;
+        }
+        return true;
+      };
+      /**
        * A COIN BY NAME OR TICKER ON COINGECKO'S LIST (majorAsk): a search,
        * then that coin's market, each one lookup under the X account's
        * limiter and the hour's, on the fleet's CoinGecko Pro lane, each held
@@ -1238,11 +1259,7 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
           notes.push("majors-off");
           return { kind: "none" };
         }
-        const key = xAccountKey(input.xUserId);
-        if (!limiter.take(key)) {
-          notes.push("index-busy");
-          return { kind: "unread" };
-        }
+        if (!indexSlot()) return { kind: "unread" };
         const found = await look((ms) => majors.search(query, ms), null);
         if (found?.failure === "no-pro-key") {
           notes.push("majors-off");
@@ -1257,10 +1274,7 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
           notes.push("major-none");
           return { kind: "none" };
         }
-        if (!limiter.take(key)) {
-          notes.push("index-busy");
-          return { kind: "unread" };
-        }
+        if (!indexSlot()) return { kind: "unread" };
         const read = await look((ms) => majors.market(pick.id, ms), null);
         const m = read && !read.failed ? read.market : null;
         if (!m) {
@@ -1296,11 +1310,7 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
        * said as such, and nothing at all is looked up after it.
        */
       const hotBundle = async (): Promise<ResearchBundle> => {
-        const key = xAccountKey(input.xUserId);
-        if (!limiter.take(key)) {
-          notes.push("index-busy");
-          return { facts: [], lookups, notes };
-        }
+        if (!indexSlot()) return { facts: [], lookups, notes };
         const page = await look((ms) => hotPools(ms), null);
         if (!page || page.failed) {
           notes.push(`index-${failureCode(page?.failure)}`);
@@ -1313,8 +1323,7 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
         }
         const shown = screened.slice(0, HOT_COINS);
         const broker = await fomoFor();
-        const cg = majors.trending && majors.configured?.() !== false && limiter.take(key);
-        if (majors.trending && majors.configured?.() !== false && !cg) notes.push("index-busy");
+        const cg = !!majors.trending && majors.configured?.() !== false && indexSlot();
         const [crowdEnv, trend] = await Promise.all([
           broker ? look((ms) => broker.call("fomo_get_token_activity", { token: null, chain: "robinhood", window: "24h", limit: 5 }, fomoOpts(ms)), null, false, RESEARCH_BUDGET.fomoMs) : Promise.resolve(null),
           cg ? look((ms) => majors.trending!(ms), null) : Promise.resolve(null),
