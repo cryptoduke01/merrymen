@@ -103,6 +103,51 @@ export function bitqueryAuthHeaders(key: string): Record<string, string> {
     : { "X-API-KEY": key };
 }
 
+/**
+ * The auth header for one request, chosen by WHO is on the other end — not
+ * only by what the credential looks like.
+ *
+ * THE GATEWAY WAS NEVER SENT ITS TOKEN. A Merry Circle token (`mmk_…`) is not
+ * an `ory_at_` value, so bitqueryAuthHeaders put it in `X-API-KEY` — the right
+ * header for a V1 Bitquery key and the wrong one for the gateway, whose
+ * /bitquery route reads `Authorization: Bearer` and nothing else
+ * (gateway/server.mjs). Every holder's discovery call therefore arrived with
+ * no token, earned a 401, and the hint below told them their token had expired
+ * or their wallet no longer qualified: a correct, freshly claimed token sent
+ * the owner to re-claim and to check a balance that was fine. Discovery via
+ * the Circle has returned nothing for as long as the two halves have existed.
+ *
+ * So: talking to the gateway, the token goes in Bearer and ONLY there (one
+ * header, for the same reason bitqueryAuthHeaders sends one). Talking to
+ * Bitquery directly, nothing changes — a V1 key still goes in `X-API-KEY` and
+ * a V2 token in Bearer, as gateway/selftest.mjs pins for the gateway's own
+ * upstream call.
+ */
+export function bitqueryRequestHeaders(creds: Pick<BitqueryCreds, "apiKey" | "viaGateway">): Record<string, string> {
+  return creds.viaGateway ? { Authorization: `Bearer ${creds.apiKey}` } : bitqueryAuthHeaders(creds.apiKey);
+}
+
+/**
+ * The owner-facing hint after a refused request, by status and by who refused.
+ *
+ * Kept apart from the fetch so each answer is testable, because the old single
+ * hint is how a header bug read as an expired token: 401 and 403 mean
+ * different things at the gateway (lib/core.mjs bitquery()), and only one of
+ * them is about the wallet. A 503 there is the gateway's own state — no key
+ * configured, or a balance it could not read — and never the owner's token.
+ */
+export function bitqueryHttpHint(status: number, viaGateway: boolean | undefined): string {
+  if (viaGateway) {
+    if (status === 401) return " — the gateway did not accept your Merry Circle token (unsigned, malformed or past its week); claim a fresh one";
+    if (status === 403) return " — the wallet behind your Merry Circle token no longer holds enough $MERRYMEN for the Circle";
+    if (status === 429) return " — the shared holder quota is per-wallet; add your own Bitquery key in /settings to lift it";
+    if (status === 503) return " — the gateway's discovery is unavailable right now (no Bitquery key there, or a balance it could not read); this is not your token";
+    return "";
+  }
+  if (status === 401 || status === 403) return " — check the API key in /settings";
+  return "";
+}
+
 export interface BitqueryResult<T> {
   ok: boolean;
   data?: T;
@@ -138,22 +183,16 @@ export async function bitqueryQuery<T = unknown>(
         // this the hard way ("the opaque 402 we spent a deploy chasing") and
         // ships bitqueryAuthHeaders; the worker never got the same fix, so
         // discovery could be returning nothing on a perfectly good V2 key.
-        ...bitqueryAuthHeaders(creds.apiKey),
+        // And the gateway takes its token in Bearer whatever it looks like
+        // (bitqueryRequestHeaders).
+        ...bitqueryRequestHeaders(creds),
       },
       body: JSON.stringify({ query, variables }),
       signal: controller.signal,
     });
     if (!res.ok) {
       // Deliberately not echoing the body — an auth error can quote the request.
-      const hint =
-        res.status === 401 || res.status === 403
-          ? creds.viaGateway
-            ? " — your Merry Circle token expired or your wallet no longer qualifies; re-claim it"
-            : " — check the API key in /settings"
-          : res.status === 429 && creds.viaGateway
-            ? " — the shared holder quota is per-wallet; add your own Bitquery key in /settings to lift it"
-            : "";
-      return { ok: false, error: `bitquery HTTP ${res.status}${hint}` };
+      return { ok: false, error: `bitquery HTTP ${res.status}${bitqueryHttpHint(res.status, creds.viaGateway)}` };
     }
     // Bounded — see bounded-read.ts. An over-long answer is reported as an
     // unusable response, which is what it is; it is never read as no data.
