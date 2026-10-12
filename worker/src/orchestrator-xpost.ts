@@ -1502,9 +1502,15 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         : await draft(creds, answerPrompt({ ...facts, question: candidate.text, recentBuys: buys, boughtLately: boughtKind(f),
           said: said.map(withoutReplyOptOut), walletPublic, coinNamed, ...(looked ?? {}) }), { call: deps.llm, timeoutMs: deps.draftTimeoutMs });
       const mode = f.mode === "idle" ? null : f.mode;
+      // A TAG THAT NAMED A COIN, BACKSTOPPED AT THE GATE (red-team 2026-10-12):
+      // the prompt was told none of its buys, so the gate vouches none, and a
+      // draft that names any coin it bought, however spelled, is refused.
+      const exact = looked?.boughtExact === true;
+      const vouched = coinNamed && !exact ? [] : buys;
       const gate = (text: string) => admitXPost(text, {
-        kind: "reply", agentName: f.name, mode, coins: buys.map((c) => c.label),
-        paperCoins: buys.filter((c) => c.paper).map((c) => c.label), recentOwn, recentFleet, emojiOk: facts.style.emoji > 0,
+        kind: "reply", agentName: f.name, mode, coins: vouched.map((c) => c.label),
+        paperCoins: vouched.filter((c) => c.paper).map((c) => c.label), recentOwn, recentFleet, emojiOk: facts.style.emoji > 0,
+        ...(coinNamed && !exact && !templated ? { unsaid: bought } : {}),
       }, BASE_GATE);
       // SHERWOOD DOES NOT RUN IT YET: a draft that says so is refused before
       // the gate, research on or off — and so is a draft that names it at

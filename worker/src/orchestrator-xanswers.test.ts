@@ -852,6 +852,33 @@ test("a tag in letters code cannot read never reaches the writer, research on or
   }
 });
 
+test("a tag that names a coin it bought gets no draft that names one, and look-alike spellings never reach the writer (red-team 2026-10-12)", async (t) => {
+  const BONK: CallFact = { ...CALL, decisionId: "fill-bonk", symbol: "BONK", name: "Bonk" };
+  const facts: AgentFacts = { ...FACTS, calls: [CALL, BONK] };
+  for (const env of [{}, RESEARCH_ON]) {
+    // The ASCII control: the prompt is told nothing it bought, and the draft that confirms it anyway is refused.
+    const w = await world(t, { env, research: fakeResearch().research, facts, answer: "yep, picked up pepe lately. Say stop to opt out." });
+    w.setInbox([tag({ text: "@alanaldale did you buy PEPE INU?" })]);
+    await w.step();
+    assert.match(w.asked()[0]!, /They named a specific coin/);
+    const [row] = await w.answers();
+    assert.equal(row!.status, "skipped");
+    assert.equal(row!.reason, "gate:bought-named");
+    w.setInbox([]);
+    await w.step(NOW + MIN);
+    assert.deepEqual(w.sends, []);
+    // The reproduced look-alikes: Lisu PEPE, Cherokee PEPE, Armenian oh (U+0585), a hooked d (U+0257), a hooked p (U+01A5).
+    for (const text of ["@alanaldale did you buy ꓑꓰꓑꓰ INU?", "@alanaldale did you buy ᏢᎬᏢᎬ?", "@alanaldale did you buy dօge inu?", "@alanaldale did you buy bօnk inu?",
+      "@alanaldale did you buy ɗoge inu?", "@alanaldale did you buy ƥepe inu?"]) {
+      const l = await world(t, { env, research: fakeResearch().research, facts, answer: "yep, picked up pepe lately. Say stop to opt out." });
+      l.setInbox([tag({ text })]);
+      await l.step();
+      assert.equal(l.asked().length, 0, text);
+      assert.deepEqual(await l.answers(), [], text);
+    }
+  }
+});
+
 test("research on: \"did you buy <contract>?\" reaches its own history by the address, end to end", async (t) => {
   const r = fakeResearch();
   const facts: AgentFacts = { ...FACTS, calls: [{ ...CALL, token: CA, ownWords: "the buying looked steady and real" }] };

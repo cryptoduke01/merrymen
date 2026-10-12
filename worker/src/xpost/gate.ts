@@ -101,6 +101,14 @@ export interface XGateCtx {
   seeds?: string[];
   /** The agent's style never uses emoji: a draft with one is not in its voice. Default: allowed (at most one). */
   emojiOk?: boolean;
+  /**
+   * NAMES THIS POST MAY NOT SAY AT ALL, however spelled (namedIn). An answer
+   * to a tag that named a coin is handed every name its own buys go by: it
+   * was never told what it bought, so a draft that names one anyway confirms
+   * a buy by name ("yep, picked up pepe") — refused as bought-named, whatever
+   * the model did with the prompt (red-team 2026-10-12).
+   */
+  unsaid?: string[];
 }
 
 const refuse = (reason: string): XVerdict => ({ ok: false, reason });
@@ -378,6 +386,19 @@ export function unreadableLetter(text: unknown): boolean {
 const SHERWOOD_LETTERS = /s+h+e*r+w+o*d/;
 export function sherwoodMentioned(text: unknown): boolean {
   return SHERWOOD_LETTERS.test(lettersOf(text)) || SHERWOOD_LETTERS.test(lettersOf(text, { leet: true })) || unreadableLetter(text);
+}
+
+/**
+ * DOES A TEXT NAME ANY OF THESE, ON ITS LETTERS? Each name's letters inside
+ * the text's (lettersOf: case, spacing, digits, invisible characters and
+ * look-alikes ignored), plain or as leet. What a tag is matched against to
+ * tell whether it names a coin it bought (writer.ts coinNamedIn), and what a
+ * coin-named answer may not say (XGateCtx.unsaid). Errs toward yes.
+ */
+export function namedIn(text: unknown, names: readonly unknown[]): boolean {
+  if (typeof text !== "string") return false;
+  const read = [lettersOf(text), lettersOf(text, { leet: true })];
+  return names.some((name) => [lettersOf(name), lettersOf(name, { leet: true })].some((n) => n !== "" && read.some((r) => r.includes(n))));
 }
 
 // ── the X clauses ───────────────────────────────────────────────────────────
@@ -1079,7 +1100,7 @@ function strings(list: unknown): string[] {
  * Reason codes (stable, operator-only): empty · pass · meta · hidden-chars · too-short · too-long ·
  * handle · link · markup · emoji · exclaim · caps · ops · alert · hype · pnl ·
  * market · human-claim · points-back · coin-unsaid · paper-unsaid · mode-false · undisclosed · intro-no-trading ·
- * opt-out-unsaid · reply-current-or-action · sherwood-claim ·
+ * opt-out-unsaid · reply-current-or-action · sherwood-claim · bought-named ·
  * fleet-repeat · seed-echo — plus whatever the base gate says (has-digits,
  * quantity, repeat, unvouched-ticker, address, secret…).
  */
@@ -1122,6 +1143,9 @@ function admitMasked(tidied: string, ctx: XGateCtx, baseGate: BaseGate, agentNam
   const base = baseGate(tidied, baseCtx);
   if (!base.ok) return base;
   const text = base.text;
+  // Never a coin it bought, in an answer that was never told what it bought.
+  const unsaid = strings(ctx.unsaid);
+  if (unsaid.length && namedIn(ctx.kind === "reply" ? withoutReplyOptOut(text) : text, unsaid)) return refuse("bought-named");
 
   if (text.length > XPOST_MAX_CHARS || xWeightedLength(text) > X_MAX_WEIGHTED) return refuse("too-long");
   if (words(text) < XPOST_MIN_WORDS) return refuse("too-short");

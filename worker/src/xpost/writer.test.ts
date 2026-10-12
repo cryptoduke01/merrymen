@@ -812,6 +812,16 @@ describe("an active agent's answers and conversation memory", () => {
     assert.match(all(answerPrompt({ ...facts, question: "what have you been buying lately?", boughtExact: true })), /Coins you bought lately: «Pepe»/);
   });
 
+  it("a coin name in letters code cannot read names a coin (red-team 2026-10-12)", () => {
+    // The reproduced tags: Lisu PEPE (U+A4D1 U+A4F0), Cherokee PEPE (U+13E2 U+13AC), Armenian oh (U+0585), a hooked d (U+0257), a hooked p (U+01A5).
+    const bought = ["PEPE", "Pepe", "BONK", "Bonk", "DOGE", "Doge"];
+    for (const q of ["did you buy ꓑꓰꓑꓰ INU?", "did you buy ᏢᎬᏢᎬ?", "did you buy dօge inu?", "did you buy bօnk inu?", "did you buy ɗoge inu?", "did you buy ƥepe inu?"]) {
+      assert.equal(coinNamedIn(q, bought), true, q);
+      const p = all(answerPrompt({ ...BASE, mode: "live", question: q, recentBuys: [{ label: "Pepe", paper: false }, { label: "Bonk", paper: false }, { label: "Doge", paper: false }], boughtLately: "live", said: [], walletPublic: false }));
+      assert.doesNotMatch(p, /Coins you bought lately|«Pepe»|«Bonk»|«Doge»/, q);
+    }
+  });
+
   it("buys it cannot name are never said to be no buys: \"not bought anything\" only when it bought nothing", () => {
     const of = (o: { recentBuys: { label: string; paper: boolean }[]; boughtLately?: boolean }) =>
       answerPrompt({ ...BASE, mode: "live", question: "what have you been buying lately?", said: [], walletPublic: false, ...o }).prompt;

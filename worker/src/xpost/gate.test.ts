@@ -28,6 +28,21 @@ const reason = (text: string, over: Partial<XGateCtx> = {}) => {
   return v.ok ? "ok" : v.reason;
 };
 
+describe("an answer to a tag that named a coin never names one it bought (red-team 2026-10-12)", () => {
+  const reply: Partial<XGateCtx> = { kind: "reply", mode: "live", coins: [], unsaid: ["PEPE", "Pepe", "BONK", "Bonk"] };
+  it("a draft that names a coin it bought, however spelled, is refused; one that names none passes", () => {
+    for (const draft of ["yep, picked up pepe lately. Say stop to opt out.", "yep, grabbed some pepe inu lately, the curve looked early. Say stop to opt out.",
+      "yes i bought bonk with real money last week. Say stop to opt out.", "pe pe is one i liked, the buying looked steady. Say stop to opt out.",
+      "Pepe? it's been a good one for me. Say stop to opt out."]) {
+      assert.equal(reason(draft, reply), "bought-named", draft);
+    }
+    assert.equal(reason("i don't talk about single positions here, sorry. Say stop to opt out.", reply), "ok");
+    assert.equal(reason("i don't talk about single positions here, sorry. Say stop to opt out.", { ...reply, unsaid: [] }), "ok");
+    // The opt-out notice is no name ("Say stop to opt out." holds "top" and "opt").
+    assert.equal(reason("can't get into single coins here, sorry. Say stop to opt out.", { ...reply, unsaid: ["TOP", "OPT"] }), "ok");
+  });
+});
+
 describe("public replies preserve the X safeguards and require an opt-out", () => {
   const reply: Partial<XGateCtx> = { kind: "reply", mode: "live", coins: ["pepe"] };
   it("allows a conversational reference back only in an actual reply", () => {
