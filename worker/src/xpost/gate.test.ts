@@ -847,7 +847,7 @@ describe("sherwood-1: one name with a digit, in an answer only, never as what ru
       "built by merrymen, and the new #sherwood-1 is still cooking",
       "built by merrymen, see merrymen.dev/sherwood-1 for it",
     ]) assert.notEqual(reason(said(line), reply), "ok", line);
-    for (const line of ["the new (sherwood-1) is still cooking, built by merrymen", "built by merrymen. sherwood-1? still cooking",
+    for (const line of ["the new (sherwood-1) is still cooking, built by merrymen", "built by merrymen. still in the oven, sherwood-1? not done yet",
       "built by merrymen, and it's sherwood-1, still cooking", "built by merrymen; next up is sherwood-1"]) {
       assert.equal(reason(said(line), reply), "ok", line);
     }
@@ -858,6 +858,34 @@ describe("sherwood-1: one name with a digit, in an answer only, never as what ru
       "built by merrymen and sherwood-1 is live now", "i'm on sherwood these days, built by merrymen"]) {
       assert.equal(reason(said(line), reply), "sherwood-claim", line);
     }
+  });
+
+  it("a stranger's bait is never answered as what picks its trades: every sentence that names it is a tease, and only that", () => {
+    // "does sherwood-1 pick your trades now?" invites these; the verbs above name none of them.
+    for (const line of [
+      "yep, sherwood-1 picks my trades now, built by merrymen",
+      "sherwood-1 picks my coins now, built by merrymen",
+      "sherwood-1 trades for me, built by merrymen",
+      "my trades come from sherwood-1, built by merrymen",
+      "sherwood-1 handles my trading now, built by merrymen",
+      "the new sherwood-1 is what i trade with, built by merrymen",
+      "sherwood-1 is the model behind this account, built by merrymen",
+      "sherwood-1 makes the calls here, built by merrymen",
+      "the new sherwood-1 decides my entries",
+      "sherwood-1 chooses what we buy",
+      "sherwood-1 is merrymen's own model and it picks the coins",
+      "the new sherwood-1 is cooking, and it already picks my coins",
+      "built by merrymen. sherwood-1 is here",
+      "built by merrymen. sherwood-1",
+      "built by merrymen. sherwood one does it all",
+    ]) assert.equal(reason(said(line), reply), "sherwood-claim", line);
+    for (const line of [
+      "built by merrymen. their own model, the new sherwood-1, is still cooking",
+      "merrymen made me. the new sherwood-1 is what they've got in the oven",
+      "the merrymen crew put me together. the new sherwood-1 is theirs, and it isn't done yet",
+      "a merrymen original. the new sherwood-1 is their house model, still in the works",
+      "built by merrymen; next up is sherwood-1",
+    ]) assert.equal(reason(said(line), reply), "ok", line);
   });
 
   it("is refused in every post that is not a reply", () => {

@@ -30,6 +30,7 @@ import {
   modelAnswers,
   replyPrompt,
   sherwoodClaimed,
+  sherwoodNamed,
   xpostCreds,
   xpostModel,
   xpostModelWarning,
@@ -728,8 +729,8 @@ describe("an active agent's answers and conversation memory", () => {
       said: ["mostly fresh launches for me. Say stop to opt out."], walletPublic: true });
     const text = all(p);
     assert.match(text, /what model are you running on/);
-    assert.match(text, /sherwood-1/);
-    assert.match(text, /never claim sherwood runs you, powers you or is live today/i);
+    assert.match(text, /say only that you're built by merrymen/);
+    assert.doesNotMatch(text, /sherwood/i, "the name is code's to say, never the writer's");
     assert.match(text, /Pepe/);
     assert.match(text, /on paper/);
     assert.match(text, /Never write the address/);
@@ -737,15 +738,16 @@ describe("an active agent's answers and conversation memory", () => {
     assert.match(answerPrompt({ ...BASE, question: "", recentBuys: [], said: [], walletPublic: false }).prompt, /PASS/);
   });
 
-  it("an answer is very casual and teases the new sherwood-1 by its exact name, never as what runs it", () => {
+  it("an answer is very casual, and the writer is never told the sherwood name: only code's lines say it", () => {
     const text = all(answerPrompt({ ...BASE, question: "what model do you run on", recentBuys: [], said: [], walletPublic: false }));
     assert.match(text, /texting a friend/);
     assert.match(text, /never at the asker's expense/);
-    assert.match(text, new RegExp(`new «${SHERWOOD_ON_X}», merrymen's own model, as cooking`));
     assert.equal(SHERWOOD_ON_X, "sherwood-1");
-    assert.match(text, /Write it exactly «sherwood-1», lowercase with the hyphen: it is a name, the only one you may write with a digit, and no other figure goes beside it/);
-    assert.match(text, /never claim sherwood runs you, powers you or is live today/i);
+    assert.doesNotMatch(text, /sherwood/i);
+    assert.match(text, /Never name a provider or a model, not even merrymen's own, and never say what runs you, powers you or picks your trades/);
     assert.doesNotMatch(text, /\b(?:groq|qwen|gpt|llama|claude|openai|anthropic)\b/i);
+    // A question that names it is still handed over as the screened question, quoted and untrusted.
+    assert.match(all(answerPrompt({ ...BASE, question: "is sherwood any good", recentBuys: [], said: [], walletPublic: false })), /Untrusted question to answer: «is sherwood any good»/);
   });
 
   it("research facts reach the prompt only when handed, attributed, digit-free, with the answer's own rules", () => {
@@ -813,11 +815,20 @@ describe("an active agent's answers and conversation memory", () => {
       assert.equal(sherwoodClaimed(claim), true, claim);
     }
     for (const claim of ["sherwood-1 runs me", "i run on sherwood-1", "the new sherwood-1 is live"]) assert.equal(sherwoodClaimed(claim), true, claim);
-    for (const tease of ["built by merrymen. the new sherwood one, merrymen's own model, is still cooking", "merrymen is working on sherwood one, not served yet",
+    // The bait "does sherwood-1 pick your trades now?" invites claims no verb above names.
+    for (const claim of ["yep, sherwood-1 picks my trades now", "sherwood-1 picks my coins now, built by merrymen", "sherwood-1 trades for me",
+      "my trades come from sherwood-1", "sherwood-1 handles my trading now", "the new sherwood-1 is what i trade with", "sherwood-1 is the model behind this account",
+      "the new sherwood one is cooking and already makes the calls", "built by merrymen. sherwood one"]) {
+      assert.equal(sherwoodClaimed(claim), true, claim);
+    }
+    for (const tease of [...modelAnswers("1", { lower: true }), "built by merrymen. the new sherwood one, merrymen's own model, is still cooking", "merrymen is working on sherwood one, not served yet",
       "built by merrymen. their own model, the new sherwood-1, is still cooking",
       "sherwood one is coming, it's merrymen's own model", "mostly fresh launches, i like real buying", null]) {
       assert.equal(sherwoodClaimed(tease), false, String(tease));
     }
+    // Named at all, however spelled: what refuses a drafted mention (only code's lines may).
+    for (const named of ["the new sherwood-1 is cooking", "Sherwood One", "sherwood1", "SHERWOOD", "a walk in sherwood forest"]) assert.equal(sherwoodNamed(named), true, named);
+    for (const unnamed of ["built by merrymen", "", null]) assert.equal(sherwoodNamed(unnamed), false, String(unnamed));
   });
 
   it("a trade-talk casual post may pick up a theme it answered, and only then", () => {

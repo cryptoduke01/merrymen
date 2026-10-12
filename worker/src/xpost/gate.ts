@@ -197,10 +197,82 @@ function unmaskSherwood(text: string, said: string[]): XVerdict {
  */
 const SHERWOOD_BEFORE = /\b(?:run(?:s|ning)?\s+(?:on|me|with)|ran\s+on|powered|powering|powers|built\s+on|based\s+on|i'?m\s+on|im\s+on|i\s+am\s+on|now\s+on|using|uses|i\s+use|under\s+the\s+hood|my\s+brain|my\s+model|behind\s+me|switched\s+to|upgraded\s+to|moved\s+to)\b[^.!?\n]{0,30}?\bsherwood\b/i;
 const SHERWOOD_AFTER = /\bsherwood\b[^.!?\n]{0,40}?\b(?:runs|running|ran|powers|powering|powered|drives|driving|under\s+the\s+hood|is\s+my\s+(?:brain|model)|what\s+i\s+(?:run|use)|behind\s+me|in\s+charge|is\s+live|went\s+live|live\s+now|is\s+out|out\s+now|launched|shipped)\b/i;
+
+/**
+ * AN ALLOWLIST, NOT ONLY A LIST OF VERBS (review, 2026-10-12). A stranger who
+ * asks "does sherwood-1 pick your trades now?" invites "yep, sherwood-1
+ * picks my trades now", "my trades come from sherwood-1", "sherwood-1 is the
+ * model behind this account" — none of which the verbs above name. So every
+ * sentence that names sherwood must also tease it (cooking, in the oven, in
+ * the works, coming, merrymen's own or house model…) and must say nothing
+ * about trading, deciding, what it does or who it is: no pick, trade, call,
+ * decide, choose, handle, buy, sell, entry, coin, no me, my, i, we, you, no
+ * account, agent, brain or behind, and nothing about now. A sentence that
+ * does either is a claim.
+ */
+const SHERWOOD_SAID = /\bsherwood/i;
+const SHERWOOD_TEASE = /\b(?:cook(?:s|ed|ing)?|oven|bak(?:e|es|ed|ing)|in\s+the\s+works|in\s+the\s+making|coming(?:\s+soon)?|soon|simmer(?:s|ed|ing)?|stove|kitchen|brew(?:s|ed|ing)?|workshop|working\s+on|merrymen'?s\s+own|their\s+own|own\s+model|house\s+model|homegrown|not\s+(?:done|ready|served|out)|isn'?t\s+(?:done|ready|out)|(?:done|ready)\s+yet|not\s+yet|next\s+up|give\s+it\s+time|no\s+peeking|in\s+progress|on\s+the\s+way|under\s+wraps)\b/i;
+const SHERWOOD_AGENCY = new RegExp(
+  "\\b(?:" +
+    [
+      "pick(?:s|ed|ing|er)?",
+      "trad(?:e|es|ed|er|ers|ing)",
+      "call(?:s|ed|ing)?",
+      "decid(?:e|es|ed|ing)",
+      "decisions?",
+      "choos(?:e|es|ing)",
+      "chose|chosen|choices?",
+      "handl(?:e|es|ed|ing)",
+      "buy(?:s|ing)?|bought",
+      "sell(?:s|ing)?|sold",
+      "entr(?:y|ies)",
+      "exits?",
+      "coins?",
+      "tokens?",
+      "positions?",
+      "signals?",
+      "portfolio",
+      "money",
+      "wallets?",
+      "i|me|my|mine|myself|im|ive|i'm|i've|i'd|i'll",
+      "we|us|our|ours|we're|we've",
+      "you|your|yours|ya|u|you're",
+      "accounts?",
+      "agents?",
+      "brain",
+      "engine",
+      "behind",
+      "run(?:s|ning)?|ran",
+      "power(?:s|ed|ing)?",
+      "driv(?:e|es|ing)|drove",
+      "us(?:e|es|ed|ing)",
+      "answer(?:s|ed|ing)?",
+      "repl(?:y|ies|ied|ying)",
+      "writ(?:e|es|ing)|wrote",
+      "talk(?:s|ed|ing)?",
+      "speak(?:s|ing)?",
+      "posts?|posting",
+      "now|today|already|currently|live",
+    ].join("|") +
+    ")\\b",
+  "i",
+);
+
+/** Each sentence that names sherwood, as the screen reads it: a stop ends one only before a space or the end ("sherwood-1.5" is one word). */
+function sherwoodSentences(t: string): string[] {
+  return t.split(/[.!?]+(?=\s|$)|\n+/).filter((s) => SHERWOOD_SAID.test(s));
+}
+
 export function sherwoodClaimed(draft: unknown): boolean {
   if (typeof draft !== "string") return false;
   const t = draft.normalize("NFKC").replace(/[’‘]/g, "'");
-  return SHERWOOD_BEFORE.test(t) || SHERWOOD_AFTER.test(t);
+  if (SHERWOOD_BEFORE.test(t) || SHERWOOD_AFTER.test(t)) return true;
+  return sherwoodSentences(t).some((s) => !SHERWOOD_TEASE.test(s) || SHERWOOD_AGENCY.test(s));
+}
+
+/** Whether a draft names sherwood at all, however it spells it: only a code-built line may (writer.ts modelAnswers). */
+export function sherwoodNamed(draft: unknown): boolean {
+  return typeof draft === "string" && SHERWOOD_SAID.test(draft.normalize("NFKC"));
 }
 
 // ── the X clauses ───────────────────────────────────────────────────────────

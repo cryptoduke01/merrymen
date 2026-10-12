@@ -235,6 +235,16 @@ test("a model PASS spends the comment's decision once", async (t) => {
   assert.equal(w.sends.length, 0);
 });
 
+test("a drafted comment reply that names sherwood is never posted, however it puts it", async (t) => {
+  for (const answer of ["sherwood-1 picks my coins on paper now. Say stop to opt out.", "the new sherwood-1 is still cooking, i bought this one on paper. Say stop to opt out."]) {
+    const w = await world(t);
+    await w.step(w.poster({ answer }));
+    const [reply] = await w.replies();
+    assert.equal(reply!.status, "skipped", answer);
+    assert.equal(reply!.reason, "gate:sherwood-drafted", answer);
+  }
+});
+
 test("approval is explicit and unreadable polling budgets fail closed", () => {
   assert.equal(xpostEnv({}).repliesApproved, undefined);
   assert.equal(xpostEnv({ MERRYMEN_XPOST_REPLIES_APPROVED: "true" }).repliesApproved, undefined);

@@ -442,20 +442,40 @@ test("research on: the model question asked again is answered again, in other wo
   assert.equal(w.asked().length, 0, "still no model call");
 });
 
-test("research off: a drafted model answer may say sherwood-1, and one that says it runs on it is refused", async (t) => {
-  const tease = await world(t, { answer: "built by merrymen, and the new sherwood-1 is still cooking. Say stop to opt out." });
-  tease.setInbox([tag({ text: "@pine_stoat what model do you run on?" })]);
-  await tease.step();
-  const [ok] = await tease.answers();
-  assert.equal(ok!.status, "scheduled", ok!.reason ?? "");
-  assert.equal(ok!.body, "built by merrymen, and the new sherwood-1 is still cooking. Say stop to opt out.");
-  for (const answer of ["i run on sherwood-1, built by merrymen. Say stop to opt out.", "built by merrymen, and sherwood-2 is still cooking. Say stop to opt out."]) {
-    const w = await world(t, { answer });
-    w.setInbox([tag({ text: "@pine_stoat what model do you run on?" })]);
+test("research off too: the model question is answered from a code-built line, never a draft", async (t) => {
+  const w = await world(t, { answer: "i run on sherwood-1, built by merrymen. Say stop to opt out." });
+  w.setInbox([tag({ text: "@pine_stoat what model do you run on?" })]);
+  await w.step();
+  const [answer] = await w.answers();
+  assert.equal(answer!.status, "scheduled", answer!.reason ?? "");
+  assert.match(answer!.body, /new sherwood-1\b/);
+  assert.doesNotMatch(answer!.body, /i run on/);
+  assert.equal(w.asked().length, 0, "no model call: the line is code's");
+});
+
+test("a stranger's sherwood bait gets code's line, research on or off, and a draft that names sherwood is never posted", async (t) => {
+  // "does sherwood-1 pick your trades now?" reads as chat to the model question's strict screen; any tag naming sherwood is code's.
+  for (const env of [{}, RESEARCH_ON]) {
+    const w = await world(t, { env, research: fakeResearch().research, answer: "yep, sherwood-1 picks my trades now, built by merrymen. Say stop to opt out." });
+    w.setInbox([tag({ text: "@pine_stoat does sherwood-1 pick your trades now?" })]);
     await w.step();
-    const [skipped] = await w.answers();
-    assert.equal(skipped!.status, "skipped", answer);
-    assert.match(skipped!.reason ?? "", /^gate:(?:sherwood-claim|has-digits)$/, answer);
+    const [answer] = await w.answers();
+    assert.equal(answer!.status, "scheduled", answer!.reason ?? "");
+    assert.match(answer!.body, /new sherwood-1\b/);
+    assert.doesNotMatch(answer!.body, /picks?|trades/, "never what picks its trades");
+    assert.equal(w.asked().length, 0, "and no draft");
+  }
+  // A question code does not read as about sherwood, answered by a draft that names it anyway: refused, whatever it says.
+  for (const env of [{}, RESEARCH_ON]) {
+    for (const answer of ["yep, sherwood-1 picks my trades now, built by merrymen. Say stop to opt out.",
+      "built by merrymen, and the new sherwood-1 is still cooking. Say stop to opt out.", "the new sherwood one is cooking over there. Say stop to opt out."]) {
+      const w = await world(t, { env, research: fakeResearch().research, answer });
+      w.setInbox([tag({ text: "@pine_stoat how do you pick your coins?" })]);
+      await w.step();
+      const [skipped] = await w.answers();
+      assert.equal(skipped!.status, "skipped", answer);
+      assert.match(skipped!.reason ?? "", /^gate:sherwood-(?:claim|drafted)$/, answer);
+    }
   }
 });
 

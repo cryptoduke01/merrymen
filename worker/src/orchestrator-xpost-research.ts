@@ -101,6 +101,9 @@ const MODEL_ASK = new RegExp(
   "iu",
 );
 
+/** Sherwood named at all, however it is spelled: only code's own lines answer it (writer.ts modelAnswers). */
+const SHERWOOD_ASK = /\bsherwood/i;
+
 /** A word of the line, for matching a coin it traded named without a $ sign. */
 const words = (s: string): Set<string> => new Set((s.toLowerCase().match(/[a-z][a-z0-9'-]*/g) ?? []));
 
@@ -115,7 +118,9 @@ export function classifyTag(text: string, o: { address?: string | null; knownCoi
   const address = typeof o.address === "string" && /^0x[0-9a-f]{40}$/.test(o.address) ? o.address : null;
   // An attempt to steer it is answered as chat: nothing is looked up for it.
   if (!t.trim() || isInjection(t)) return { kind: "chat" };
-  if (MODEL_ASK.test(t)) return { kind: "model" };
+  // ANY TAG THAT NAMES SHERWOOD gets code's own line: "does sherwood-1 pick
+  // your trades now?" is bait for "yep, sherwood-1 picks my trades".
+  if (MODEL_ASK.test(t) || SHERWOOD_ASK.test(t)) return { kind: "model" };
   const asked = publicFactRequest(t);
   if (asked?.kind === "site" && asked.topic === "capabilities") return { kind: "capabilities" };
   if (asked?.kind === "site" && asked.topic === "onboarding") return { kind: "onboarding" };

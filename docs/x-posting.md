@@ -516,19 +516,25 @@ the mention itself. They go out **right away**:
   asker's expense. Asked about its model, it never names a provider: it is
   built by merrymen, and the new `sherwood-1` (`SHERWOOD_ON_X`, the one name
   the gate lets an answer write with a digit) is merrymen's own model,
-  cooking. It never says sherwood runs it, powers it or is live today:
-  nothing wires it into an agent yet. With research on, code knows the
-  question is the model one and the answer is a code-built line, not a
-  draft: eight lines that share too few words to be each other's repeat
-  (`modelAnswers`), the mention's own first, then the next the gate admits,
-  so the question asked again is answered again in other words. Change
-  `SHERWOOD_ON_X`, those lines and the prompt only once sherwood runs the
-  agents.
+  cooking. It never says sherwood runs it, powers it, picks its trades or is
+  live today: nothing wires it into an agent yet. Code reads the question
+  first, research on or off: the model question, and any tag that names
+  sherwood at all ("does sherwood-1 pick your trades now?" is bait), is
+  answered with a code-built line, not a draft: eight lines that share too
+  few words to be each other's repeat (`modelAnswers`), the mention's own
+  first, then the next the gate admits, so the question asked again is
+  answered again in other words. The writer model is never told the name,
+  and a drafted answer or comment reply that names sherwood anyway is
+  refused as `gate:sherwood-drafted`. Change `SHERWOOD_ON_X`, those lines and
+  the prompt only once sherwood runs the agents.
 - **Gate:** the comment-reply gate, opt-out notice included, with the
   `sherwood-1` exception above. Before anything else, a reply or answer that
   says sherwood runs it ("running on", "powered by", "sherwood-1 is live"),
   with the digit or without, is refused as `gate:sherwood-claim`, research on
-  or off.
+  or off. So is one with any sentence that names sherwood without teasing it
+  (cooking, in the oven, in the works, merrymen's own…) or with a word about
+  trading, deciding, what it does or who it is ("picks", "trades", "calls",
+  "my", "me", "behind", "now"…): an allowlist, not only a list of verbs.
 - **Their own lane:** one minute apart, 24 a day per X account, at most two
   per person per rolling day. Answers never spend or wait on the posting
   cadence. The per-person count is taken under a lock on the X account and

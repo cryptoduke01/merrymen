@@ -85,7 +85,7 @@ import {
   type XAccount,
   type XPost,
 } from "./xpost/store";
-import { answerPrompt, buyPrompt, casualPrompt, draft, introPrompt, introTemplate, modelAnswers, replyPrompt, sellPrompt, sherwoodClaimed, xpostModel, xpostModelWarning, type WriterFacts, type XStyle } from "./xpost/writer";
+import { answerPrompt, buyPrompt, casualPrompt, draft, introPrompt, introTemplate, modelAnswers, replyPrompt, sellPrompt, sherwoodClaimed, sherwoodNamed, xpostModel, xpostModelWarning, type WriterFacts, type XStyle } from "./xpost/writer";
 import { appendPublicToken, appendPublicWallet, hasPublicWallet, publicTokenStillAllowed, publicWalletStillAllowed, type PublicWallet } from "./xpost/public-wallet";
 import { readPublicProjectDescription } from "./orchestrator-xpost-project";
 import { classifyTag, createXResearch, type ResearchBundle, type XResearch } from "./orchestrator-xpost-research";
@@ -1326,11 +1326,14 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         continue;
       }
       const buys = recentCoins(f);
-      // READ BY CODE FIRST, with research on: the model question is answered
-      // from a code-built line (writer.ts modelAnswers) and spends no model call.
+      // READ BY CODE FIRST, research on or off: the model question, and any
+      // tag that names sherwood, is answered from a code-built line
+      // (writer.ts modelAnswers) and spends no model call. Only research
+      // gathers anything for what it reads.
       const knownCoins = [...buys.map((c) => c.label), ...posts.filter((p) => p.kind === "buy" && p.coin).map((p) => p.coin!)];
-      const intent = research ? classifyTag(candidate.text, { address: candidate.address ?? null, knownCoins }) : null;
-      const templated = intent?.kind === "model";
+      const asked = classifyTag(candidate.text, { address: candidate.address ?? null, knownCoins });
+      const intent = research ? asked : null;
+      const templated = asked.kind === "model";
       if (!templated && !(await takeAllowance(shared, `llm:${utcDay(nowMs)}`, llmPerDay, nowMs))) return null;
       const day = localDay(tz, nowMs);
       const facts = writerFacts(f, day, recentOwn);
@@ -1357,9 +1360,12 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         kind: "reply", agentName: f.name, mode, coins: buys.map((c) => c.label),
         paperCoins: buys.filter((c) => c.paper).map((c) => c.label), recentOwn, recentFleet, emojiOk: facts.style.emoji > 0,
       }, BASE_GATE);
-      // SHERWOOD DOES NOT RUN IT YET: a draft that says so is refused before the gate, research on or off.
+      // SHERWOOD DOES NOT RUN IT YET: a draft that says so is refused before
+      // the gate, research on or off — and so is a draft that names it at
+      // all. Only code's own lines name it.
       const claimed = raw !== null && sherwoodClaimed(raw);
-      let verdict = raw === null || claimed ? null : gate(raw);
+      const named = !templated && raw !== null && sherwoodNamed(raw);
+      let verdict = raw === null || claimed || named ? null : gate(raw);
       for (const line of lines.slice(1)) {
         if (verdict?.ok) break;
         verdict = gate(line);
@@ -1371,7 +1377,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         coin: null, decisionId: null, dueAtMs: finishedAt, nowMs: finishedAt,
         replyToTweetId: comment.id, replyRootTweetId: comment.id, replyAuthorId: comment.authorId,
         status: body ? "scheduled" : "skipped",
-        reason: body ? null : claimed ? "gate:sherwood-claim" : verdict && !verdict.ok ? `gate:${verdict.reason}` : "no-draft",
+        reason: body ? null : claimed ? "gate:sherwood-claim" : named ? "gate:sherwood-drafted" : verdict && !verdict.ok ? `gate:${verdict.reason}` : "no-draft",
       });
       return id === null ? null : { body };
     }
@@ -1412,7 +1418,9 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       const paper = fill.paper;
       const prompt = replyPrompt({ ...facts, parentBody: parent.body, comment: candidate.text, coin: coin.label, paper });
       const raw = await draft(creds, prompt, { call: deps.llm, timeoutMs: deps.draftTimeoutMs });
-      const verdict = raw === null ? null : admitXPost(raw, {
+      // A drafted reply never names sherwood: only an answer's code-built line does.
+      const named = raw !== null && sherwoodNamed(raw);
+      const verdict = raw === null || named ? null : admitXPost(raw, {
         kind: "reply", agentName: f.name, mode: paper ? "paper" : "live", coins: [coin.label],
         paperCoins: paper ? [coin.label] : [], recentOwn, recentFleet, emojiOk: facts.style.emoji > 0,
       }, BASE_GATE);
@@ -1426,7 +1434,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         tenant: account.tenant, xUserId: account.xUserId, kind: "reply", dedupeKey, body: body ?? "",
         coin: parent.coin, decisionId: parent.decisionId, dueAtMs: finalDueAt ?? dueAtMs, nowMs: finishedAt,
         replyToTweetId: comment.id, replyRootTweetId: parent.tweetId!, replyAuthorId: comment.authorId,
-        status: body ? "scheduled" : "skipped", reason: body ? null : finalDueAt === null ? "stale" : verdict && !verdict.ok ? `gate:${verdict.reason}` : "no-draft",
+        status: body ? "scheduled" : "skipped", reason: body ? null : finalDueAt === null ? "stale" : named ? "gate:sherwood-drafted" : verdict && !verdict.ok ? `gate:${verdict.reason}` : "no-draft",
       });
       return id === null ? null : { body };
     }

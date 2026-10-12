@@ -41,10 +41,10 @@
 import { SETTINGS_DEFAULTS } from "../../../packages/core/src/index";
 import { llmText, type LlmCreds } from "../llm";
 import { hash32, type SaleOutcome } from "./planner";
-import { SHERWOOD_NAME, sherwoodClaimed } from "./gate";
+import { SHERWOOD_NAME, sherwoodClaimed, sherwoodNamed } from "./gate";
 import { REPLY_OPT_OUT, XREPLY_MAX_COMMENT_CHARS } from "./replies";
 
-export { sherwoodClaimed };
+export { sherwoodClaimed, sherwoodNamed };
 
 export type { LlmCreds };
 
@@ -179,19 +179,22 @@ export type AnswerIntentKind = "capabilities" | "onboarding" | "own-trades" | "c
  * token only). It is merrymen's own model in the making: an answer teases it
  * as new and cooking, and NEVER says it runs the agent today — nothing wires
  * it into an agent yet, and saying so on a real-money trading account would
- * be false advertising. Change the wording here only once it actually runs
- * the agents.
+ * be false advertising. Only code's own lines (modelAnswers) name it: the
+ * writer model is never told the name, and a draft that names it anyway is
+ * refused. Change the wording here only once it actually runs the agents.
  */
 export const SHERWOOD_ON_X = SHERWOOD_NAME;
 
 /**
  * THE MODEL ANSWER, BUILT BY CODE (review, 2026-10-12). Asked what model it
  * runs on, a small writer model told "tease sherwood, never say it runs you"
- * can still write "running on the new sherwood-1", and the X gate admits
- * it. So with research on, where code knows the question is the model one,
- * the answer is one of these lines and no draft at all: built by merrymen,
- * and the new sherwood-1, merrymen's own, is still cooking. Still gated like
- * any answer.
+ * can still write "running on the new sherwood-1", or, baited with "does
+ * sherwood-1 pick your trades now?", "yep, sherwood-1 picks my trades". So
+ * code reads the question first, research on or off: a model question, or
+ * any tag that names sherwood, is answered with one of these lines and no
+ * draft at all: built by merrymen, and the new sherwood-1, merrymen's own,
+ * is still cooking. Only these lines ever name it; a draft that does is
+ * refused. Still gated like any answer.
  *
  * EIGHT LINES THAT ARE NOT EACH OTHER. The gate refuses an answer that
  * repeats one it said (60 days of its own posts, 14 of the fleet's): with
@@ -204,7 +207,7 @@ export const SHERWOOD_ON_X = SHERWOOD_NAME;
  */
 const MODEL_ANSWERS: readonly string[] = Object.freeze([
   `built by merrymen. their own model, the new ${SHERWOOD_ON_X}, is still cooking`,
-  `merrymen made me, and the new ${SHERWOOD_ON_X} is what they've got in the oven`,
+  `merrymen made me. the new ${SHERWOOD_ON_X} is what they've got in the oven`,
   `i'm a merrymen build. the new ${SHERWOOD_ON_X} is homegrown and still simmering`,
   `the merrymen crew put me together. the new ${SHERWOOD_ON_X} is theirs, and it isn't done yet`,
   `a merrymen original. the new ${SHERWOOD_ON_X} is their house model, still in the works`,
@@ -698,9 +701,10 @@ const NOTHING_LOOKED_UP: Readonly<Partial<Record<AnswerIntentKind, string>>> = {
  * VERY CASUAL (the owner's ask, 2026-10-12): texting-a-friend short, lowercase
  * welcome, dry humour about itself or the idea, never at the asker's expense.
  *
- * ASKED WHAT MODEL IT RUNS ON, it never names a provider and never claims one
- * it does not run: it is built by merrymen, and the new sherwood-1 —
- * merrymen's own model, SHERWOOD_ON_X — is cooking. Never that it runs it today.
+ * ASKED WHAT MODEL IT RUNS ON, it never names a provider or a model and never
+ * claims one it does not run: it is built by merrymen. The sherwood tease is
+ * code's (modelAnswers), for every question code reads as the model one;
+ * the writer is never told the name, and a draft that names it is refused.
  */
 export function answerPrompt(f: AnswerFacts): Prompt {
   const question = clean(f.question, XREPLY_MAX_COMMENT_CHARS);
@@ -718,7 +722,7 @@ export function answerPrompt(f: AnswerFacts): Prompt {
     "Sound like you're texting a friend back: very casual, one or two quick sentences, plain everyday words, lowercase is fine. Dry humour about yourself or the idea is welcome, never at the asker's expense, never forced. No corporate tone, no lists, no \"great question\".",
     "Answer what you can from the facts below and from what you already said publicly. If the question asks for advice, a prediction, a price, a target, a size, a result, private information, news, or anything not covered below, either say plainly you don't share that or output exactly PASS. Asked for a count or an amount, answer in words only (thin, deep, spread out, concentrated, young), never a figure.",
     "Never say you hold, still hold, will buy, will sell or will do anything next. Coins you bought lately are past events: say you bought them, never that you hold them now.",
-    `If asked what model or AI you run on: say you're built by merrymen, and tease the new ${q(SHERWOOD_ON_X)}, merrymen's own model, as cooking or coming soon. Write it exactly ${q(SHERWOOD_ON_X)}, lowercase with the hyphen: it is a name, the only one you may write with a digit, and no other figure goes beside it. Never name another provider or model, never claim sherwood runs you, powers you or is live today.`,
+    "If asked what model or AI you run on, or about any model by name: say only that you're built by merrymen. Never name a provider or a model, not even merrymen's own, and never say what runs you, powers you or picks your trades.",
     `Every answer must end with ${q(notice)} exactly. Leave room for it inside the character limit. A notice alone is not an answer: if there is nothing useful to say, output exactly PASS.`,
   ].join("\n\n");
   if (!question) return { system, prompt: "There is no usable question. Output exactly PASS." };
