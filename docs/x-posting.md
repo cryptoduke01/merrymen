@@ -640,6 +640,40 @@ looks things up first, the way Shogun does in a Telegram group
   `answer-research-index-busy` and the like), never a coin, a person or an
   address.
 
+## Rollout for the operator's own agent
+
+How this release is turned on for Alan Al Dale, the operator's own agent,
+every service and value in order: the X steps (5 and 6) rest on the research
+lanes before them. Unset is the default and changes nothing. This table is the same in [`hosted-deploy.md`](hosted-deploy.md) and [`x-posting.md`](x-posting.md); change both together.
+
+| Step | Variable | Service | Value for Alan's rollout | What it does, and what to look for |
+|---|---|---|---|---|
+| 1 | *(deploy)* | Brain service, orchestrator, web; the gateway (its own project) first or with them | this commit | The worker sends the Trencher terms and the flow lens only once Brain's `/health` lists `strategy-terms` and `onchain-flow`, so either order is safe. The worker's Bearer fix starts gateway spending, under the gateway's own cap (below) |
+| 2 | `MERRYMEN_COINGECKO_PRO_SPACING_MS` | orchestrator (children inherit it) | `800` | One `[gecko] coingecko-pro fleet lane: 800 ms` line per child |
+| 2 | `MERRYMEN_COINGECKO_PRO_SPACING_MS` | web | `2600` | One `local lane: 2600 ms` line on web |
+| 2 | `MERRYMEN_COINGECKO_MONTHLY_CREDITS` | orchestrator and web | `5000000` | The plan's month; a spacing below the floor it allows is raised to it. `MERRYMEN_COINGECKO_PRO_API_KEY` stays as it is |
+| 3 | `MERRYMEN_FOMO_ENABLED` | web + orchestrator, same value | `1` | Fomo itself, and the IPC channel a child asks the flow lane over |
+| 3 | `MERRYMEN_DECISION_RESEARCH_ACCOUNTS` | orchestrator (children inherit it) | Alan's smart account, from the deploy environment (this repository names no account) | Cost quotes, his own outcomes, the momentum plan, the Trencher terms and indexed flow for his live fast-Trencher entry reviews. Decision log lines end `· terms sent` |
+| 4 | `MERRYMEN_BITQUERY_API_KEY` | **orchestrator only** | the plan's key, after the IDE checks in [`bitquery-lane.md`](bitquery-lane.md) step 1 | Never on web, Brain or a child (stripped). Boot line `bitquery lane: on — 25000 points/UTC day (20000 for child evidence) …`; reviews log `[trencher] flow SYMBOL: lens` |
+| 4 | `MERRYMEN_BITQUERY_LANE`, `MERRYMEN_BITQUERY_POINTS_PER_DAY`, `MERRYMEN_BITQUERY_RPM` | orchestrator | unset (on, `25000`, `60`) | |
+| 4 | `MERRYMEN_GATEWAY_BITQUERY_POINTS_PER_DAY` | gateway | `5000`, set explicitly when its key shares the plan | Lane plus gateway: 30,000 points a day, 900,000 of a 1,000,000-point month |
+| 4 | `MERRYMEN_FLOW_BROKER` | none | never set | The orchestrator writes it into each child that may ask, and removes an inherited copy |
+| 5 | `MERRYMEN_XPOST_ACTIVE_TENANTS` | web + orchestrator, same value | Alan's tenant address, from the deploy environment | The active cadence, his reply consent recorded by the orchestrator, and answers to tags sent right away. The web reads it for the reply warning |
+| 5 | `MERRYMEN_XPOST_REPLIES_APPROVED` | web + orchestrator, same value | `active`, **only once X's written approval for AI replies is in hand**; unset until then | Without it there are no comment replies and no answers to tags. No approval has been obtained for this deployment |
+| 5 | `MERRYMEN_XPOST_REPLY_POLLS_PER_DAY` | orchestrator | unset (`200` for the fleet) | Alan's one-minute polls spend their own 1,500 per X account per UTC day |
+| 6 | `MERRYMEN_XPOST_RESEARCH` | orchestrator | `1` | Answers look things up first. Boot line `xpost: on — … answers look things up first`; with the Bitquery key also `xpost: answers may read onchain flow — up to 200 readings per UTC day …` |
+| 6 | `MERRYMEN_XPOST_RESEARCH_PER_HOUR` | orchestrator | unset (`120`) | Public-index lookups per hour across X accounts |
+| 6 | `MERRYMEN_XPOST_FOMO` | orchestrator | **unset**; `1` only after Milla confirms Fomo's Enterprise redistribution rights herself and the plan or agreement is cited in [`fomo.md`](fomo.md) "Publication" | Paraphrased, attributed Fomo facts in answers |
+| 6 | `MERRYMEN_FOMO_X_HOURLY_CREDITS` | orchestrator | unset (`3000`) | Per X account per hour, and at most a quarter of the owner's daily Fomo cap |
+
+No migrations: the new state is `xpost_meta` keys only (`answer-author:…`,
+`replies-off:…`, `reply-polls-active:…`, `x-answer-flow:…`). No trading cap,
+risk limit, grant, wallet authority or authentication check changes. The X
+gate gains one narrow exception, the name `sherwood-1` in an answer. Steps 5
+and 6 change what is said publicly on X and need Milla's review; step 6's
+answers need step 5's approval first. Nothing in this table is set by
+merging: each value is the operator's to set on the service named.
+
 ## What an owner should know (it is in the warning)
 
 - The agent posts from whichever X account was approved on X's screen, which
