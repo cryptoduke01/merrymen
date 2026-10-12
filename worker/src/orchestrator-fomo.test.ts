@@ -886,6 +886,33 @@ describe("review candidates", () => {
     r.pass.stop();
   });
 
+  it("re-checks the allowlist and the owner's switches every pass (the rail and the fast Trencher are the child's to check)", async () => {
+    const db = await freshDb();
+    let listed = true;
+    const r = await rig({
+      db,
+      serve: {},
+      access: { [T1]: ACCESS.monitoring },
+      reviewCandidates: () => [cand(X1)],
+      reviewResearchFor: () => listed,
+    });
+    await r.run([T1]);
+    assert.ok(r.last(T1).signals.some((s) => s.reasons.includes("candidate")));
+    assert.equal((await researchRows(db)).length, 1);
+    // Taken off the allowlist while its candidates are still carried: gone from the next file, nothing more queued.
+    listed = false;
+    await r.run([T1], T0 + REVIEW_CANDIDATES.refreshEveryMs + 61_000);
+    assert.ok(!r.last(T1).signals.some((s) => s.reasons.includes("candidate")), "the allowlist, re-read by agent");
+    assert.equal((await researchRows(db)).length, 1);
+    // Back on the list, but the owner turned research off: no signals at all, nothing queued.
+    listed = true;
+    r.access.set(T1, ACCESS.lookupsOnly);
+    await r.run([T1], T0 + 2 * REVIEW_CANDIDATES.refreshEveryMs + 2 * 61_000);
+    assert.deepEqual(r.last(T1).signals, [], "the owner's switches, re-read");
+    assert.equal((await researchRows(db)).length, 1);
+    r.pass.stop();
+  });
+
   it("without the allowlist hook, with a failing hook or without a key, nothing is queued", async () => {
     for (const o of [
       { reviewResearchFor: undefined, configured: true },
