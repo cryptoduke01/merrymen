@@ -63,8 +63,11 @@ export type ReplyCandidate =
    * `otherHandles`: set by tagCandidate when the reply prefix X adds to a
    * reply in a thread names someone other than the agent. Such a tag may be
    * answered by a draft, never by code's model line (red-team 2026-10-12).
+   * `greeting`: set by tagCandidate when the tag, after its leading handles,
+   * is only a greeting (greetingOnly). Answered with a code-built line
+   * (writer.ts greetingAnswers), never a draft.
    */
-  | { ok: true; text: string; address?: string; otherHandles?: true }
+  | { ok: true; text: string; address?: string; otherHandles?: true; greeting?: true }
   | { ok: false; reason: string };
 
 const LINK_OR_SECRET = /https?:|www\.|\b[a-z0-9-]+\.(?:com|net|org|io|dev|app|xyz|gg|co|me|ai)\b|0x[a-f0-9]{8,}|\b(?:sk-|gsk_|api[ _-]?key|seed phrase|private key|password|secret)\b/i;
@@ -183,6 +186,37 @@ export function plainAsk(text: unknown): string | null {
   const t = text.normalize("NFKC").replace(/[’‘]/g, "'");
   if (/[^A-Za-z0-9\s',.!?-]/.test(t)) return null;
   return t.toLowerCase().replace(/\s+/g, " ").trim().replace(/^[\s,.!?'-]+/, "").replace(/[\s,.!?'-]+$/, "");
+}
+
+/**
+ * A TAG THAT IS ONLY A GREETING (2026-10-12): "hiii", "gm", "yo ser 👋",
+ * "hey alan!". The owner tagged Alan "hiii" and wanted the hello back as fast
+ * as Telegram's; such a tag was refused as too short or not asked, and never
+ * answered. Now it is answered with a casual line code built (writer.ts
+ * greetingAnswers), never a draft, so a strict allowlist of whole tags decides
+ * it, as for the model question: one greeting word — hi (any number of i),
+ * hey, heyy, hello, helloo, yo, yoo, gm, gmgm, gn, sup, wassup, what's up,
+ * howdy, hiya, ello, good morning / evening / afternoon — then at most two of
+ * alan, ser, fren, frens, bro, there, everyone, then at most a short run of
+ * "!" or "." and one emoji. The words are plain ASCII (plainAsk: no symbol,
+ * no invisible character, no other alphabet, no second emoji), and nothing
+ * else at all: no other handle, no $, no digit, no link. A word more ("hi,
+ * what coin should i buy", "gm sherwood") and it is not a greeting: it goes
+ * the normal way, or gets no answer. Fail closed: "hey hey alan sir" costs one
+ * hello. The text handed in is the tag after its leading handles
+ * (tagCandidate); an "@" left anywhere refuses it too.
+ */
+const GREETING_WORD = String.raw`(?:hi+|heyy?|helloo?|yoo?|gm(?:gm)?|gn|sup|wass?up|what'?s up|howdy|hiya|ello|good (?:morning|evening|afternoon))`;
+const GREETING_EXTRA = String.raw`(?:alan|ser|fren|frens|bro|there|everyone)`;
+const GREETING_ONLY = new RegExp(`^${GREETING_WORD}(?:,? ${GREETING_EXTRA}){0,2}(?:!{1,3}|\\.{1,3})?$`);
+/** One emoji at the very end, with its presentation selector or skin tone: taken off before the words are read. */
+const GREETING_EMOJI = /\s?\p{Extended_Pictographic}[\u{FE0F}\u{1F3FB}-\u{1F3FF}]{0,2}$/u;
+export function greetingOnly(text: unknown): boolean {
+  if (typeof text !== "string") return false;
+  const t = text.normalize("NFKC").replace(/[’‘]/g, "'").replace(/\s+/g, " ").trim().replace(GREETING_EMOJI, "").trim();
+  // Plain ASCII, the allowlists' own rule: anything else is a word more.
+  if (t === "" || plainAsk(t) === null) return false;
+  return GREETING_ONLY.test(t.toLowerCase());
 }
 
 /**
@@ -353,7 +387,12 @@ export function tagCandidate(reply: XReply, ctx: { xUserId: string; research?: b
   // Judged without the address (it is no words), and handed on with "this coin" where it stood.
   const bare = address ? said.replace(CA_RUN, " ").replace(/\s+/g, " ").trim() : said;
   const text = address ? said.replace(CA_RUN, "this coin").replace(/\s+/g, " ").trim() : said;
-  if (bare.length < 4 || text.length > XREPLY_MAX_COMMENT_CHARS || (bare.match(/\p{L}+/gu) ?? []).length < 2) return no("low-signal");
+  // ONLY A GREETING (greetingOnly), and only where the model line could go:
+  // no address, no other handle in the reply prefix. Too short for the
+  // signal screen and asking nothing, it is answered by code's own line;
+  // every other screen below still reads it.
+  const greeting = !address && !others(lead) && greetingOnly(text);
+  if (!greeting && (bare.length < 4 || text.length > XREPLY_MAX_COMMENT_CHARS || (bare.match(/\p{L}+/gu) ?? []).length < 2)) return no("low-signal");
   if (/[\u0000-\u001f\u007f«»<>#]|\p{Script=Cyrillic}|\p{Script=Han}/u.test(text)) return no("unsafe-text");
   // Only letters code can read, and no text that runs backwards on screen.
   if (BIDI.test(reply.text) || NON_ASCII_LETTER.test(bareLetters(text)) || ENCLOSED_LETTER.test(text)) return no("unsafe-text");
@@ -365,6 +404,6 @@ export function tagCandidate(reply: XReply, ctx: { xUserId: string; research?: b
   let advice = research ? text.replace(COIN_FACT_ASK, " ") : text;
   if (address) advice = advice.replace(OWN_BUY_OF_TAGGED, " ");
   if (ADVICE_REQUEST.test(advice) || /^(?:please\s+)?(?:buy|sell|hold|ape|pump|dump)\b/i.test(text)) return no("advice-request");
-  if (!ASKED.test(text)) return no("not-asked");
-  return { ok: true, text, ...(address ? { address } : {}), ...(others(lead) ? { otherHandles: true as const } : {}) };
+  if (!greeting && !ASKED.test(text)) return no("not-asked");
+  return { ok: true, text, ...(address ? { address } : {}), ...(others(lead) ? { otherHandles: true as const } : {}), ...(greeting ? { greeting: true as const } : {}) };
 }
