@@ -365,17 +365,20 @@ struct XPostingAccount: Equatable {
     /// THE REPLY WARNING SAYS EXACTLY WHAT IT TURNS ON, in the web's words
     /// (web/src/terminal/XPosting.tsx). Most agents reply to comments on their
     /// coin posts, inside the posting limit and the ten-minute review. An agent
-    /// the operator made active answers posts that tag it instead — comments on
-    /// its own posts arrive the same way — right away, in a lane of its own, so
-    /// its warning promises no review window. Its answers may carry market
-    /// figures Merrymen renders from public data (worker/src/xpost/figures.ts),
-    /// and its warning says that too; every other owner's is unchanged.
+    /// the operator made active answers posts that tag it, reply to it or quote
+    /// it instead — comments on its own posts arrive the same way — right away,
+    /// in a lane of its own, so its warning promises no review window. Replying
+    /// or quoting is asking (2026-10-12): its answers carry no opt-out line, and
+    /// it never answers someone who asked it to stop. Its answers may carry
+    /// market figures Merrymen renders from public data (worker/src/xpost/
+    /// figures.ts), and its warning says that too; every other owner's is
+    /// unchanged.
     static func replyWarning(_ handle: String, active: Bool) -> String {
         if active {
             return [
-                "Your Merryman will reply as @\(handle) to selected posts that tag it, including comments on its own posts.",
+                "Your Merryman will reply as @\(handle) to selected posts that tag it, reply to it or quote it.",
                 "It chooses which posts to answer; it won’t answer every one. Answers go out right away: they don’t wait under Coming up, so you can’t skip one first.",
-                "Up to 60 answers a day on top of its posts, and at most six to one person a day. The first answer to someone tells them they can reply stop to opt out, and so does the first one after 30 days; a stop always works. Turn replies off at any time to stop answering.",
+                "It answers people who tag it, reply to it or quote it, a few times a day each: up to 60 answers a day on top of its posts, and at most six to one person a day. Answers carry no opt-out line, and it never answers someone who asked it to stop. Turn replies off at any time to stop answering.",
                 "Answers may include market figures from public data (CoinGecko, GeckoTerminal, Fomo and Bitquery), such as a coin’s price, market cap, volume or recent change. Merrymen adds them as the data showed them; they are never advice."
             ].joined(separator: "\n\n")
         }
@@ -389,7 +392,7 @@ struct XPostingAccount: Equatable {
     /// The line under the reply switch, in the web's words.
     static func replyHint(_ handle: String, active: Bool) -> String {
         active
-            ? "Selected posts that tag your Merryman and comments on its posts, answered as @\(handle) right away, up to 60 a day on top of its posts."
+            ? "Selected posts that tag your Merryman, reply to it or quote it, answered as @\(handle) right away, up to 60 a day on top of its posts."
             : "Selected comments on your Merryman’s coin posts, answered as @\(handle). Replies share the post limit and ten-minute review window."
     }
 
@@ -413,12 +416,14 @@ struct XPostingAccount: Equatable {
     ///
     /// AN ACTIVE AGENT POSTS MORE, AND ITS WARNING SAYS SO (worker/src/xpost/
     /// planner.ts ACTIVE_CADENCE): up to twelve a day, a post for most coins
-    /// it buys, at least an hour apart — never "a few a day at most".
+    /// it buys, at least an hour apart — never "a few a day at most"; and its
+    /// answers may carry market figures built from public data, so never "no
+    /// prices or amounts" (2026-10-12).
     static func warning(_ handle: String, active: Bool) -> String {
         [
             "Your Merryman will post from whichever X account is connected — right now that's @\(handle).",
             active
-                ? "It writes its own posts: a hello first, then a few passing thoughts a day and a post for most coins it buys, and why. It never posts trade alerts, error messages, prices or amounts."
+                ? "It writes its own posts: a hello first, then a few passing thoughts a day and a post for most coins it buys, and why. It never posts trade alerts or error messages, and its answers may carry market figures built from public data."
                 : "It writes its own posts: a hello first, then the odd casual thought and now and then a coin it bought and why. It never posts trade alerts, error messages, prices or amounts.",
             active
                 ? "Posts go out on their own, up to 12 a day and at least an hour apart. Each one waits under Coming up for at least ten minutes first, and you can skip it there. Turn this off or disconnect X at any time."
