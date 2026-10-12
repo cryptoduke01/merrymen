@@ -69,12 +69,16 @@ cannot get one in time reports `request-budget` and spends nothing. The
 public lane has no second row: without a key, and during a Pro outage
 fallback, every public request stays at least 6.5 seconds from the last.
 
-**Plan refusals are latched.** On the Pro lane, a 401 or 403, or a body with
-CoinGecko error code 10005 ("you may not have access to this endpoint"),
-stops requests to that endpoint family (the path with ids and the query
-removed) for one hour, fleet-wide. A latched read reports `plan-restricted`
-and does not fall back to the public API. Each latch is logged once, by
-endpoint family only. 429s and 5xx responses are never latched. A revoked
+**Plan refusals are latched.** On the Pro lane, a 401, or a client error
+whose body carries CoinGecko error code 10005 ("you may not have access to
+this endpoint"), stops requests to that endpoint family (the path with ids
+and the query removed) for one hour, fleet-wide. A latched read reports
+`plan-restricted` and does not fall back to the public API. Each latch is
+logged once, by endpoint family only. 429s and 5xx responses are never
+latched, and neither is a 403 without that body: CoinGecko also answers 403
+when its server blocks access for a moment (a firewall rule, a shared egress
+address), so a bare 403 is cached for five seconds like any other failure
+and asked again. A revoked
 or mistyped key latches each family it touches in the same way, so the log
 names every refused endpoint within a few minutes. Latches belong to the key
 that was refused (stored as a short sha256 fingerprint, never the key), so

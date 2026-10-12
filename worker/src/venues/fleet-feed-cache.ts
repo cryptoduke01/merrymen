@@ -124,14 +124,22 @@ export interface FeedCacheOptions {
 /**
  * HOW LONG A PLAN REFUSAL IS BELIEVED, fleet-wide: one hour.
  *
- * A 401/403 (or CoinGecko's body code 10005, "you may not have access to this
- * endpoint") from the Pro lane was cached for five seconds like any other
- * failure, so an endpoint the plan does not include burned a pacing slot
- * every five seconds, all day, for an answer that could not change. Latched,
- * it costs one request an hour.
+ * A 401 (or CoinGecko's body code 10005, "you may not have access to this
+ * endpoint", on any client error) from the Pro lane was cached for five
+ * seconds like any other failure, so an endpoint the plan does not include
+ * burned a pacing slot every five seconds, all day, for an answer that could
+ * not change. Latched, it costs one request an hour.
  *
  * NEVER ON 5xx OR 429. Those are about the provider's moment, not the plan,
  * and they already have their own short cache and the shared cooldown.
+ *
+ * NOR ON A BARE 403 (review, 2026-10-12). CoinGecko documents 403 as access
+ * blocked by its server, which a firewall rule or a shared egress address
+ * can set off for a moment; only the 10005 body says it is the plan. Latched,
+ * one such 403 on a trades, candles or tape page shut that endpoint family
+ * off for every agent for an hour with no public fallback: Trencher reviews
+ * went blind and the tape went empty. A bare 403 is now the five-second
+ * failure it always was.
  *
  * PER KEY. A latch belongs to the credential that was refused
  * (FeedCacheOptions.credential), so a fixed or rotated key is asked afresh on
@@ -140,9 +148,9 @@ export interface FeedCacheOptions {
  */
 export const PLAN_LATCH_MS = 3_600_000;
 
-/** A refusal that says the plan does not cover this endpoint (or the key is refused). */
+/** A refusal that says the plan does not cover this endpoint (10005), or that the key is refused (401). Never a bare 403. */
 export function isPlanRefusal(failure: string | undefined): boolean {
-  return failure === "http-401" || failure === "http-403" || failure === "plan-restricted";
+  return failure === "http-401" || failure === "plan-restricted";
 }
 
 /**

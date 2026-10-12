@@ -362,6 +362,35 @@ for (const kind of ["fleet", "local"] as const) {
     } finally { cache.close(); rmSync(home, { recursive: true, force: true }); }
   });
 
+  test(`${kind}: a bare 403 is the five-second failure, never a latch; only CoinGecko's 10005 body latches a 403`, async () => {
+    const home = mkdtempSync(path.join(tmpdir(), "gecko-latch-"));
+    const { clock, advance } = stepClock();
+    const lines: string[] = [];
+    const cache = make(home, 100, clock, { latchRefusals: true, log: line => lines.push(line) });
+    const unavailable = (failure: string) => ({ failed: true, failure });
+    const addr = (n: string) => `0x${n.repeat(40)}`;
+    const trades = (n: string) => ({ route: `/networks/robinhood/pools/${addr(n)}/trades?token=${addr("9")}`, lane: "evidence" as const });
+    let calls = 0;
+    try {
+      // A firewall's or a shared egress address's moment: refused, then fine.
+      assert.equal((await cache.get<FeedResult>("a", async () => { calls++; return { failed: true, failure: "http-403" }; }, unavailable, undefined, trades("1"))).failure, "http-403");
+      assert.deepEqual(lines, [], "nothing latched, nothing said");
+      // Another pool of the same family is asked at once, not an hour later.
+      const other = await cache.get<FeedResult>("b", async () => { calls++; return { failed: false, observedAt: clock.now() }; }, unavailable, undefined, trades("2"));
+      assert.equal(other.failed, false);
+      // And the refused page itself, once its five seconds are up.
+      advance(5_001);
+      const again = await cache.get<FeedResult>("a", async () => { calls++; return { failed: false, observedAt: clock.now() }; }, unavailable, undefined, trades("1"));
+      assert.equal(again.failed, false);
+      assert.equal(calls, 3);
+      // A 403 that carries the plan's 10005 body arrives as plan-restricted, and that latches.
+      await cache.get<FeedResult>("c", async () => { calls++; return { failed: true, failure: "plan-restricted" }; }, unavailable, undefined, trades("3"));
+      assert.equal((await cache.get<FeedResult>("d", async () => { calls++; return { failed: false }; }, unavailable, undefined, trades("4"))).failure, "plan-restricted");
+      assert.equal(calls, 4);
+      assert.equal(lines.length, 1);
+    } finally { cache.close(); rmSync(home, { recursive: true, force: true }); }
+  });
+
   test(`${kind}: 429 and 5xx never latch, and a lane without latching ignores routes`, async () => {
     const home = mkdtempSync(path.join(tmpdir(), "gecko-latch-"));
     const { clock, advance } = stepClock();
@@ -462,7 +491,7 @@ test("local: a latch is bound to the credential it was built with", async () => 
   const route = { route: "/networks/robinhood/trending_pools?page=1" };
   const cache = new LocalFeedCache(100, clock, { latchRefusals: true, credential: credentialFingerprint("k"), log: () => {} });
   let calls = 0;
-  await cache.get<FeedResult>("a", async () => { calls++; return { failed: true, failure: "http-403" }; }, unavailable, undefined, route);
+  await cache.get<FeedResult>("a", async () => { calls++; return { failed: true, failure: "http-401" }; }, unavailable, undefined, route);
   assert.equal((await cache.get<FeedResult>("b", async () => { calls++; return { failed: false }; }, unavailable, undefined, route)).failure, "plan-restricted");
   assert.equal(calls, 1);
   cache.close();
@@ -481,5 +510,5 @@ test("endpoint families drop queries and ids, never keep addresses", () => {
   assert.equal(endpointFamily("/search/pools?query=chump&network=robinhood"), "search/pools");
   assert.equal(endpointFamily("/networks/solana/tokens/EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v/pools?page=1"), "networks/solana/tokens/{id}/pools");
   assert.equal(endpointFamily("/networks/robinhood/trending_pools?page=2"), "networks/robinhood/trending_pools");
-  assert.deepEqual(["http-401", "http-403", "plan-restricted", "http-429", "http-500", "http-404", undefined].map(isPlanRefusal), [true, true, true, false, false, false, false]);
+  assert.deepEqual(["http-401", "http-403", "plan-restricted", "http-429", "http-500", "http-404", undefined].map(isPlanRefusal), [true, false, true, false, false, false, false]);
 });
