@@ -515,6 +515,23 @@ describe("parseBrokerRequest and validateBrokerReport", () => {
     assert.equal(validateBrokerReport({ kind: "position-dependency", userId: "3f2a9c1e-5b6d-4e7f-8a9b-0c1d2e3f4a5b", tokenKey: RH_KEY, reason: "held", expiresAtMs: NOW + 1 }, ORCH_TENANT).ok, true);
     assert.equal(validateBrokerReport({ kind: "order", tokenKey: RH_KEY }, ORCH_TENANT).ok, false);
   });
+
+  it("takes review candidates as Robinhood keys only, at most ten, refusing the whole report on one bad key", () => {
+    const rh = (n: number) => `eip155:4663:0x${n.toString(16).padStart(2, "0").repeat(20)}`;
+    assert.deepEqual(validateBrokerReport({ kind: "review-candidates", tokenKeys: [RH_KEY, rh(2), RH_KEY], atMs: NOW, tenant: "0xevil" }, ORCH_TENANT), {
+      ok: true,
+      report: { kind: "review-candidates", tokenKeys: [RH_KEY, rh(2)], atMs: NOW },
+    });
+    const ten = Array.from({ length: 10 }, (_, i) => rh(i + 1));
+    assert.equal(validateBrokerReport({ kind: "review-candidates", tokenKeys: ten, atMs: NOW }, ORCH_TENANT).ok, true);
+    assert.equal(validateBrokerReport({ kind: "review-candidates", tokenKeys: [...ten, rh(11)], atMs: NOW }, ORCH_TENANT).ok, false, "more than ten");
+    assert.equal(validateBrokerReport({ kind: "review-candidates", tokenKeys: [], atMs: NOW }, ORCH_TENANT).ok, false, "an empty report says nothing");
+    assert.equal(validateBrokerReport({ kind: "review-candidates", tokenKeys: [RH_KEY, SOL_KEY], atMs: NOW }, ORCH_TENANT).ok, false, "not a chain a review acts on");
+    assert.equal(validateBrokerReport({ kind: "review-candidates", tokenKeys: [`eip155:4663:0x${"A1".repeat(20)}`], atMs: NOW }, ORCH_TENANT).ok, false, "not canonical");
+    assert.equal(validateBrokerReport({ kind: "review-candidates", tokenKeys: [`eip155:1:${A}`], atMs: NOW }, ORCH_TENANT).ok, false, "another network");
+    assert.equal(validateBrokerReport({ kind: "review-candidates", tokenKeys: [RH_KEY] }, ORCH_TENANT).ok, false, "no time");
+    assert.equal(validateBrokerReport({ kind: "review-candidates", tokenKeys: RH_KEY, atMs: NOW }, ORCH_TENANT).ok, false);
+  });
 });
 
 // ── IPC ─────────────────────────────────────────────────────────────────────
@@ -702,6 +719,11 @@ describe("IPC broker round trip", () => {
     assert.equal(svc.reports[0]!.tenant, ORCH_TENANT);
     await broker.report({ kind: "held-tokens", tokenKeys: [RH_KEY, "eip155:4663:not-an-address"], atMs: NOW });
     assert.equal(svc.reports.length, 1, "a held-tokens report with a forged key is refused whole");
+    await broker.report({ kind: "review-candidates", tokenKeys: [RH_KEY, SOL_KEY], atMs: NOW });
+    assert.equal(svc.reports.length, 1, "a review-candidates report naming another chain is refused whole");
+    await broker.report({ kind: "review-candidates", tokenKeys: [RH_KEY], atMs: NOW });
+    assert.equal(svc.reports.length, 2);
+    assert.equal(svc.reports[1]!.tenant, ORCH_TENANT, "stamped with the child's own tenant");
   });
 
   it("fails fast as unavailable when disconnected, and on disconnect mid-request", async () => {

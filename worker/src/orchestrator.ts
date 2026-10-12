@@ -212,6 +212,7 @@ import {
 import { storeDek } from "./store-crypto";
 import { writePeersForChild } from "./peer-files";
 import { materializeOwnOutcomeLearning } from "./orchestrator-own-learning";
+import { decisionResearchEnabledFor } from "./decision-research";
 import { writeResearchForChild } from "./research-files";
 import { addressesOf, makeBuilderDesk, type BuilderDesk } from "./builder-pass";
 import { makeNewsDesk, type NewsDesk } from "./research-pass";
@@ -229,6 +230,7 @@ import { budgetConfigFor, describeBudget, fomoBudgetFrom, fomoPlanFrom, FREE_PLA
 import { writeChildFomoFile } from "./fomo/child-file";
 import { fomoTailsOn, type FomoAccess, type FomoService } from "./fomo/contract";
 import type { FomoClient } from "./fomo/provider";
+import type { ReviewCandidate } from "./fomo/review-candidates";
 import { SYSTEM_TIMERS } from "./fomo/stream";
 import {
   FOMO_FLEET_LEASE,
@@ -11336,7 +11338,10 @@ async function runXPostPass(boot: XPostSetup): Promise<void> {
 /** What this file uses of fomo/runtime.ts, stated here so a change there fails the typecheck, not the boot. */
 interface FomoRuntimeHandle {
   db: Db;
-  service: FomoService & { heldTokensSnapshot?(now?: number): Map<string, string[]> };
+  service: FomoService & {
+    heldTokensSnapshot?(now?: number): Map<string, string[]>;
+    reviewCandidatesSnapshot?(tenant: string, now?: number): ReviewCandidate[];
+  };
   client: FomoClient | null;
   /**
    * The budget fleet reads are charged to: the shared pool and its class
@@ -11594,6 +11599,11 @@ async function runFomoPass(boot: FomoBoot): Promise<void> {
       // Read, and read from a child still running here: a reading left behind
       // by a child that moved or stood down is not this tenant's book now.
       holdingsKnown: (tenant) => tenantHeldCoins.has(tenant.toLowerCase()) && fomoStillOurs(tenant),
+      // RESEARCH FOR THE COINS A REVIEW IS ABOUT TO LOOK AT (fomo/review-candidates.ts):
+      // what each child here named, queued only for an agent on the operator's
+      // research allowlist (MERRYMEN_DECISION_RESEARCH_ACCOUNTS, nobody by default).
+      reviewCandidates: (tenant, now) => rt.service.reviewCandidatesSnapshot?.(tenant, now) ?? [],
+      reviewResearchFor: (agentId) => decisionResearchEnabledFor(agentId),
       // Checked right before each fomo.json is written: the roster was read
       // when the pass started, and a tenant may since have moved or been held.
       stillOurs: fomoStillOurs,

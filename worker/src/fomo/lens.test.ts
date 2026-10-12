@@ -3,7 +3,7 @@ import { describe, it } from "node:test";
 import { buildDossier, type BuildDossierInput } from "./dossier";
 import { chainFromProvider, robinhoodChain, tokenIdentity } from "./identity";
 import { TRADER_FLOW_LENS, lensCitations, lensRefs, renderTraderFlowLens } from "./lens";
-import type { CoinDossier, Thesis, TraderEvent } from "./types";
+import type { CoinDossier, Thesis, TokenStats, TraderEvent } from "./types";
 
 const NOW = 1_790_000_000_000;
 const HOUR = 3_600_000;
@@ -190,6 +190,92 @@ describe("renderTraderFlowLens", () => {
     assert.equal(renderTraderFlowLens(unfitted, NOW), null, "a leak is caught even in a line that would not fit");
     const vendor: CoinDossier = { ...d, unknowns: ["The FOMO feed was down."] };
     assert.equal(renderTraderFlowLens(vendor, NOW), null);
+  });
+
+  describe("the statistics line", () => {
+    const win = (uniqueBuyers: number | null, uniqueSellers: number | null) => ({
+      buys: null,
+      sells: null,
+      uniqueBuyers,
+      uniqueSellers,
+      buyVolumeUsd: null,
+      sellVolumeUsd: null,
+      netVolumeUsd: null,
+      buySellRatio: null,
+    });
+    const STATS: TokenStats = { token: TOKEN, holders: 1234, top10HoldersPercent: 45.25, windows: { "1h": win(12, 8), "24h": win(140, null) } };
+    const statsLines = (t: string) => t.match(/Across all trade sizes|statistics: unavailable/g) ?? [];
+
+    it("says holders, the top ten's share and unique buyers against sellers, vendor-neutral and once", () => {
+      const d = richDossier({ stats: STATS });
+      assert.deepEqual(d.stats, {
+        holders: 1234,
+        top10HoldersPercent: 45.25,
+        window1h: { uniqueBuyers: 12, uniqueSellers: 8 },
+        window24h: { uniqueBuyers: 140, uniqueSellers: null },
+      });
+      const text = renderTraderFlowLens(d, NOW)!;
+      assert.match(
+        text,
+        /Across all trade sizes, the same platform counts 1234 holders; the top 10 wallets hold 45\.3%; unique buyers vs sellers: last hour 12 vs 8, last 24h 140 vs unknown\./,
+      );
+      assert.equal(statsLines(text).length, 1);
+      assert.ok(text.indexOf("Strongest objection") < text.indexOf("Across all trade sizes"), "after the cases for and against");
+      assert.ok(text.indexOf("Strongest support is the observed buying") < text.indexOf("Across all trade sizes"));
+      assert.ok(text.startsWith("Source:"));
+      assert.match(text, /WHAT THIS IS NOT: independent market evidence\. Trader activity is a reason to investigate, not a reason to buy/);
+      assert.doesNotMatch(text, /fomo/i);
+      assert.doesNotMatch(text, ADDRESS_HEX);
+      assert.ok(text.length <= 1200);
+      // The line cites nothing, so the refs are exactly what the render emits.
+      assert.deepEqual(lensRefs(d), [...text.matchAll(/\[ref:d[0-9a-f]{6}r\d+c\d+\]/g)].map((m) => m[0]));
+    });
+
+    it("never makes a lens of statistics alone: Brain reserves a slot for this lens on the premise that traders were seen", () => {
+      const d = buildDossier(input({ stats: STATS, activityRead: true })).dossier;
+      assert.equal(d.stats?.holders, 1234, "the dossier keeps them");
+      assert.equal(renderTraderFlowLens(d, NOW), null);
+      assert.deepEqual(lensRefs(d), []);
+      // One observed trader is enough for a lens, and the figures ride along.
+      const one = buildDossier(input({ stats: STATS, events: [event("b1", "buy", "a")] })).dossier;
+      const text = renderTraderFlowLens(one, NOW)!;
+      assert.match(text, /Activity over 24h: 1 distinct buyer/);
+      assert.match(text, /1234 holders/);
+    });
+
+    /** One buyer and one thesis: room for every line, so what is left out was left out on purpose. */
+    const light = (over: Partial<BuildDossierInput> = {}) =>
+      buildDossier(input({ theses: [thesis("e1", "early, strong community")], events: [event("b1", "buy", "a")], ...over })).dossier;
+
+    it("degrades to 'unavailable' when the read failed, and never makes a lens out of that alone", () => {
+      const text = renderTraderFlowLens(light({ stats: null }), NOW)!;
+      assert.match(text, /Holder and unique buyer\/seller statistics: unavailable on this read\./);
+      assert.equal(statsLines(text).length, 1);
+      assert.ok(text.indexOf("Coverage:") < text.indexOf("unavailable on this read"), "ranked with coverage, after what traders did and wrote");
+      assert.doesNotMatch(text, /Token statistics were not available/, "said once, not again as an unknown");
+      assert.equal(renderTraderFlowLens(buildDossier(input({ stats: null, activityRead: true })).dossier, NOW), null);
+      const noUsable: TokenStats = { token: TOKEN, holders: null, top10HoldersPercent: null, windows: {} };
+      assert.equal(renderTraderFlowLens(buildDossier(input({ stats: noUsable, activityRead: true })).dossier, NOW), null);
+      assert.match(renderTraderFlowLens(light({ stats: noUsable }), NOW)!, /statistics: unavailable on this read/);
+      // A full lens keeps what traders did and wrote ahead of an outage notice.
+      const full = renderTraderFlowLens(richDossier({ stats: null }), NOW)!;
+      assert.match(full, /Strongest support in writing/);
+    });
+
+    it("re-checks stored figures and says nothing for a revision built before they were kept", () => {
+      const d = light({ stats: STATS });
+      const tampered: CoinDossier = {
+        ...d,
+        stats: { holders: -3, top10HoldersPercent: 250, window1h: { uniqueBuyers: 1.5, uniqueSellers: "9" as unknown as number }, window24h: null },
+      };
+      const text = renderTraderFlowLens(tampered, NOW)!;
+      assert.match(text, /statistics: unavailable on this read/, "no figure survives the re-check");
+      assert.doesNotMatch(text, /250|-3 |1\.5|holders/);
+      const { stats: _gone, ...older } = d;
+      const before = renderTraderFlowLens(older as CoinDossier, NOW)!;
+      assert.equal(statsLines(before).length, 0, "an older revision is not called unavailable");
+      assert.ok(before);
+    });
   });
 
   it("stays within 1200 characters on a large corpus", () => {

@@ -710,6 +710,24 @@ export interface FlowSummary {
   notes: string[];
 }
 
+/** Unique wallets on each side over one window, at every trade size. Unknown is null, never 0. */
+export interface DossierStatsWindow {
+  uniqueBuyers: number | null;
+  uniqueSellers: number | null;
+}
+
+/**
+ * The source's own token statistics at build time, numbers only: unlike the
+ * feed, they count trades of every size. Wallet counts, not proven people.
+ */
+export interface DossierStats {
+  holders: number | null;
+  /** 0–100. */
+  top10HoldersPercent: number | null;
+  window1h: DossierStatsWindow | null;
+  window24h: DossierStatsWindow | null;
+}
+
 export interface CoinDossier {
   dossierId: string;
   revision: number;
@@ -733,6 +751,13 @@ export interface CoinDossier {
   evidence: EvidenceRef[];
   /** Sections refreshed in this revision; the rest carried from the previous one. */
   refreshedSections: string[];
+  /**
+   * The source's token statistics this revision was built with. Null: the
+   * read failed or was refused (coverage.missingSections says "token-stats"),
+   * which the lens says as "unavailable". Absent: a revision built before this
+   * field existed, about which nothing is said.
+   */
+  stats?: DossierStats | null;
 }
 
 // ── Selective following ──────────────────────────────────────────────────

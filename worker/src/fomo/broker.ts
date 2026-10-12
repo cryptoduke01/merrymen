@@ -31,7 +31,8 @@ import type { ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { sanitizeText } from "../research/news";
 import type { BrokerCallOptions, BrokerReport, BrokerRequest, BrokerResponse, FomoBroker, FomoService, MemoryRead } from "./contract";
-import { tokenFromKey } from "./identity";
+import { isRobinhoodToken, tokenFromKey } from "./identity";
+import { REVIEW_CANDIDATES } from "./review-candidates";
 import { followAssessmentOf, tenantKey } from "./store";
 import type {
   FomoCallContext,
@@ -79,6 +80,8 @@ export const BROKER_LIMITS = Object.freeze({
   /** store.ts FOMO_LIMITS.subjectJsonChars. */
   memoryJsonChars: 16_384,
   heldTokens: 200,
+  /** Coins one "review-candidates" report may name (review-candidates.ts REVIEW_CANDIDATES.perWindow). */
+  reviewCandidates: REVIEW_CANDIDATES.perWindow,
   reportTextChars: 500,
   reportIdChars: 128,
 });
@@ -565,6 +568,21 @@ export function validateBrokerReport(v: unknown, tenant: string): ReportCheck {
         if (!keys.includes(key)) keys.push(key);
       }
       return { ok: true, report: { kind: "held-tokens", tokenKeys: keys, atMs } };
+    }
+    case "review-candidates": {
+      const atMs = timeOf(v.atMs);
+      if (atMs === null || !Array.isArray(v.tokenKeys) || v.tokenKeys.length === 0 || v.tokenKeys.length > BROKER_LIMITS.reviewCandidates) return invalid;
+      const keys: string[] = [];
+      for (const k of v.tokenKeys) {
+        // ROBINHOOD CHAIN ONLY, the one chain a review can act on; and one bad
+        // key refuses the whole report, so a child sending garbage is visible
+        // in the log rather than quietly half-served.
+        const key = tokenKeyOf(k);
+        const token = key ? tokenFromKey(key) : null;
+        if (!key || !token || !isRobinhoodToken(token)) return invalid;
+        if (!keys.includes(key)) keys.push(key);
+      }
+      return { ok: true, report: { kind: "review-candidates", tokenKeys: keys, atMs } };
     }
     default:
       return invalid;

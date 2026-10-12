@@ -12890,6 +12890,8 @@ async function main() {
         // ELIGIBLE here — the same filter every tape coin passes. The hint
         // moves it up the queue, never onto it (trencher-brain.ts candidate).
         const trenchCandidate = trenchBrain.candidate(trenchEligible.filter(c => trenchReviewable(c)), tgBook.priority(), cfg.discoveryFocus);
+        // Fomo research for these entry candidates' next review (fomo-child.ts reportReviewCandidates): research only, never awaited, never a gate.
+        fomoChild.reportReviewCandidates(trenchEligible.filter(c => !market.pausedTokens.has(c.token.toLowerCase()) && shouldEnter(c, TRENCHER_FAST, Math.floor(Date.now() / 1000)).enter).map(c => c.token));
         const trenchSymbols = new Set(trenchCandidate ? [trenchCandidate.symbol] : []);
         // Braked, "no pool passes the entry checks" would be a false sentence:
         // none was looked at. The strategy's idle reason says why instead, as

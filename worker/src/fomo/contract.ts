@@ -88,7 +88,15 @@ export type BrokerReport =
   | { kind: "position-dependency"; userId: string; tokenKey: string; reason: string; expiresAtMs: number }
   | { kind: "outcome"; assessmentId: string; horizonLabel: string; observedAtMs: number; price8: string | null; note: string | null }
   /** The coins this tenant holds now, so ingestion can prioritise position protection. */
-  | { kind: "held-tokens"; tokenKeys: string[]; atMs: number };
+  | { kind: "held-tokens"; tokenKeys: string[]; atMs: number }
+  /**
+   * The Robinhood Chain coins this tenant's Trencher review is about to look
+   * at (review-candidates.ts): at most 10 per report, and 10 distinct per 10
+   * minutes on both sides. Research only, for an account on the operator's
+   * research allowlist; the orchestrator re-checks that and the owner's own
+   * research switches before it queues anything.
+   */
+  | { kind: "review-candidates"; tokenKeys: string[]; atMs: number };
 
 /**
  * A STRICT memory read: what the store itself answered, or that it did not
@@ -241,7 +249,13 @@ export interface ChildSignal {
   token: TokenIdentity;
   label: TokenLabel;
   priority: RetrievalPriority;
-  reasons: ("held" | "watched" | "cohort" | "dependency" | "early-discovery" | "robinhood-thesis" | "tailed")[];
+  /**
+   * Why the coin is in the file. `candidate`: this owner's own review named it
+   * (BrokerReport "review-candidates"); it carries the coin's dossier and lens
+   * for that review, no triggers of its own, and is never assessed for
+   * following.
+   */
+  reasons: ("held" | "watched" | "cohort" | "dependency" | "early-discovery" | "robinhood-thesis" | "tailed" | "candidate")[];
   /**
    * Cohort (and dependency) trader events for this token inside the breadth
    * window, newest first, ≤ 25; plus a tailed trader's BUYS, only for a tail

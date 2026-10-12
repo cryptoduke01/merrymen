@@ -45,6 +45,7 @@ import { buildDossier } from "./fomo/dossier";
 import { tokenFromKey } from "./fomo/identity";
 import { isUnrecoverableGap, type IngestConfig } from "./fomo/ingest";
 import { createFomoClient, type FomoClient } from "./fomo/provider";
+import { REVIEW_CANDIDATES, type ReviewCandidate } from "./fomo/review-candidates";
 import { draftPublication, type PublicationDraft } from "./fomo/publish";
 import * as store from "./fomo/store";
 import { RESEARCH_PRIORITY } from "./fomo/store";
@@ -320,6 +321,8 @@ async function rig(o: {
   ingestConfig?: Partial<IngestConfig>;
   calls?: string[];
   budget?: FomoBudgetPort;
+  reviewCandidates?: (tenant: string, now: number) => readonly ReviewCandidate[];
+  reviewResearchFor?: (agentId: string) => boolean;
 } = {}): Promise<Rig> {
   const db = o.db ?? (await freshDb());
   const time = o.time ?? new ManualTime();
@@ -355,6 +358,8 @@ async function rig(o: {
     heldTokens: () => held,
     holdingsKnown: o.holdingsKnown ?? (() => true),
     ...(o.stillOurs ? { stillOurs: o.stillOurs } : {}),
+    ...(o.reviewCandidates ? { reviewCandidates: o.reviewCandidates } : {}),
+    ...(o.reviewResearchFor ? { reviewResearchFor: o.reviewResearchFor } : {}),
     childHome: (t) => `/homes/${t}`,
     writeChildFile: (home, file) => {
       // The child's own reader must accept every file the pass writes.
@@ -676,6 +681,152 @@ describe("child files", () => {
     await r.run([T1, T2], T0 + 61_000);
     assert.equal(r.files.get(`/homes/${T2}`)?.length, 1, "and written once it is ours again");
     r.pass.stop();
+  });
+});
+
+describe("review candidates", () => {
+  const cand = (tokenKey: string, admittedAt = T0 - MIN): ReviewCandidate => ({ tokenKey, admittedAt });
+
+  /** A shared dossier one feed trader and the source's statistics stand behind, so its lens renders. */
+  async function seedTradedDossier(db: Db, key: string, at: number) {
+    const w = (uniqueBuyers: number, uniqueSellers: number) => ({
+      buys: null,
+      sells: null,
+      uniqueBuyers,
+      uniqueSellers,
+      buyVolumeUsd: null,
+      sellVolumeUsd: null,
+      netVolumeUsd: null,
+      buySellRatio: null,
+    });
+    const built = buildDossier({
+      token: tok(key),
+      label: { symbol: "CAND", name: null },
+      theses: [],
+      thesisCoverage: { pagesRequested: 1, pagesReturned: 1, providerTotal: 0, capped: false, stale: false, ageSeconds: null, chainFilterHonoured: true },
+      events: [event(90, STAR, key, at - 10 * MIN)],
+      cohortUserIds: new Set(),
+      stats: { token: tok(key), holders: 321, top10HoldersPercent: 52.5, windows: { "1h": w(7, 3), "24h": w(90, 61) } },
+      marketContext: [],
+      routeContext: [],
+      ownFamilies: new Set(),
+      selfNames: [],
+      previous: null,
+      now: at,
+      window: "24h",
+      activityRead: true,
+    });
+    return store.insertDossierRevision(db, key, built.dossier.inputsHash, built.dossier, at);
+  }
+
+  it("queue discovery research and ride in the owner's own file only for an allowlisted agent whose owner has research on", async () => {
+    const db = await freshDb();
+    await seedTradedDossier(db, X1, T0 - 5 * MIN);
+    const named: Record<string, ReviewCandidate[]> = { [T1]: [cand(X1), cand(Y1)], [T2]: [cand(X2)], [T3]: [cand(rh("77"))] };
+    const asked: string[] = [];
+    const r = await rig({
+      db,
+      serve: {},
+      access: { [T1]: ACCESS.monitoring, [T2]: ACCESS.monitoring, [T3]: ACCESS.lookupsOnly },
+      reviewCandidates: (t) => named[t] ?? [],
+      // T1 and T3 are on the operator's allowlist; T2 is not.
+      reviewResearchFor: (agentId) => {
+        asked.push(agentId);
+        return agentId === T1 || agentId === T3;
+      },
+    });
+    await r.run([T1, T2, T3]);
+    assert.deepEqual(asked.sort(), [T1, T2, T3].sort(), "asked by agent, from the roster");
+
+    const rows = await researchRows(db);
+    assert.deepEqual(
+      rows.map((x) => [x.token_key, x.priority, x.tenants_json]),
+      [
+        [X1, RESEARCH_PRIORITY.discovery, "[]"],
+        [Y1, RESEARCH_PRIORITY.discovery, "[]"],
+      ].sort((a, b) => (String(a[0]) < String(b[0]) ? -1 : 1)),
+      "discovery priority, no tenant on the row, nothing for T2 (not listed) or T3 (research off)",
+    );
+
+    const f1 = r.last(T1);
+    const candidates = f1.signals.filter((s) => s.reasons.includes("candidate"));
+    assert.deepEqual(candidates.map((s) => [s.token.key, s.reasons, s.priority, s.triggers.length]).sort(), [
+      [X1, ["candidate"], "discovery", 0],
+      [Y1, ["candidate"], "discovery", 0],
+    ].sort());
+    const x1 = candidates.find((s) => s.token.key === X1)!;
+    assert.equal(x1.dossier?.revision, 1, "the shared dossier rides along");
+    assert.ok(x1.lens, "and its trader-flow lens");
+    assert.match(x1.lens!, /321 holders; the top 10 wallets hold 52\.5%; unique buyers vs sellers: last hour 7 vs 3, last 24h 90 vs 61/);
+    assert.match(x1.lens!, /WHAT THIS IS NOT/);
+    assert.doesNotMatch(x1.lens!, /fomo|0x[0-9a-f]{6}/i);
+    assert.equal(candidates.find((s) => s.token.key === Y1)!.lens, null, "no dossier yet, no lens: unavailable, never a stalled review");
+    assert.ok(!r.last(T2).signals.some((s) => s.reasons.includes("candidate")), "not on the allowlist");
+    assert.deepEqual(r.last(T3).signals, [], "research off: no signals at all");
+    const s1 = JSON.stringify(f1);
+    assert.ok(!s1.includes(addressOf(X2)) && !s1.includes("77".repeat(20)), "another owner's candidates never reach this file");
+
+    // The same bucket queues nothing again; the next one asks for a fresh read.
+    await r.run([T1, T2, T3], T0 + 61_000);
+    assert.equal((await researchRows(db)).length, 2);
+    await r.run([T1, T2, T3], T0 + REVIEW_CANDIDATES.refreshEveryMs + 61_000);
+    assert.equal((await researchRows(db)).length, 4, "one new item per candidate per refresh bucket");
+    r.pass.stop();
+  });
+
+  it("never crowd out what traders are doing, and a candidate brings no triggers of its own", async () => {
+    const db = await freshDb();
+    const C1 = rh("44");
+    await seedCohort(db, [member(KALEO, "CryptoKaleo")]);
+    await store.insertEvents(db, [
+      event(1, KALEO, C1, T0 - 5 * MIN), // the cohort buying a coin the review also named
+      event(2, KALEO, X1, T0 - 20 * MIN), // older cohort activity elsewhere
+      event(3, STAR, Y1, T0 - 2 * MIN), // a stranger on a coin only the review named
+    ]);
+    const r = await rig({
+      db,
+      serve: {},
+      access: { [T1]: ACCESS.monitoring },
+      reviewCandidates: () => [cand(Y1, T0 - 1_000), cand(C1, T0 - 1_000)],
+      reviewResearchFor: () => true,
+    });
+    await r.run([T1]);
+    const f = r.last(T1);
+    assert.deepEqual(
+      f.signals.map((s) => [s.token.key, s.reasons]),
+      [
+        [C1, ["candidate", "cohort"]],
+        [X1, ["cohort"]],
+        [Y1, ["candidate"]],
+      ],
+      "a coin that is only a candidate sorts after every other discovery coin, however recent",
+    );
+    assert.deepEqual(f.signals[0]!.triggers.map((e) => e.trader.userId), [KALEO], "the cohort's triggers stand");
+    assert.deepEqual(f.signals[2]!.triggers, [], "nothing on a candidate-only coin counts as breadth");
+    r.pass.stop();
+  });
+
+  it("without the allowlist hook, with a failing hook or without a key, nothing is queued", async () => {
+    for (const o of [
+      { reviewResearchFor: undefined, configured: true },
+      { reviewResearchFor: () => { throw new Error("allowlist unreadable"); }, configured: true },
+      { reviewResearchFor: () => true, configured: false },
+    ]) {
+      const db = await freshDb();
+      const r = await rig({
+        db,
+        serve: {},
+        configured: o.configured,
+        access: { [T1]: ACCESS.monitoring },
+        reviewCandidates: () => [cand(X1)],
+        ...(o.reviewResearchFor ? { reviewResearchFor: o.reviewResearchFor } : {}),
+      });
+      await r.run([T1]);
+      assert.deepEqual(await researchRows(db), []);
+      const carried = r.last(T1).signals.some((s) => s.reasons.includes("candidate"));
+      assert.equal(carried, o.reviewResearchFor !== undefined && o.configured === false, "carried only when listed (the queue just waits for a key)");
+      r.pass.stop();
+    }
   });
 });
 
@@ -1912,6 +2063,14 @@ describe("the orchestrator's wiring", () => {
     for (const f of ["fomo/broker.ts", "fomo/service.ts", "orchestrator-fomo.ts"]) assert.ok(!/MERRYMEN_TENANT/.test(code(f)), `${f} reads the child's tenant variable`);
     const uses = code("orchestrator.ts").match(/MERRYMEN_TENANT/g) ?? [];
     assert.equal(uses.length, 1, "set once, in childEnv, and read nowhere in the orchestrator");
+  });
+
+  it("hands the pass each child's review candidates and the operator's research allowlist, by agent", () => {
+    const code = SRC.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:"'`])\/\/.*$/gm, "$1");
+    const run = code.slice(code.indexOf("async function runFomoPass("), code.indexOf("export function watchdog("));
+    assert.match(run, /reviewCandidates: \(tenant, now\) => rt\.service\.reviewCandidatesSnapshot\?\.\(tenant, now\) \?\? \[\],/);
+    assert.match(run, /reviewResearchFor: \(agentId\) => decisionResearchEnabledFor\(agentId\),/, "the existing helper, nobody by default");
+    assert.match(run, /roster\.push\(\{ tenant: key, agentId: child\.smartAccount\.toLowerCase\(\) \}\)/, "the agent is the smart account the allowlist names");
   });
 
   it("the pass itself reads no environment and never names the key", () => {

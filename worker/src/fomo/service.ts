@@ -71,6 +71,7 @@ import { chronologicalOrder, dedupeEvents } from "./events";
 import { changeSummary, earlyDiscovery, participationBreadth } from "./features";
 import { GROUP_REUSE_MS, SingleFlight, buildFreshness, decideRead, policyFor, type CacheEntryState } from "./freshness";
 import { chainFromUserText, executionAvailabilityOf, isRobinhoodToken, ROBINHOOD_NETWORK_ID, tokenFromKey, tokenIdentity } from "./identity";
+import { REVIEW_CANDIDATES, ReviewCandidateWindow, type ReviewCandidate } from "./review-candidates";
 import {
   MIN_ATTEMPT_MS,
   ROUTE_COST,
@@ -252,6 +253,14 @@ export interface RefreshOutcome {
 export interface FomoServiceExt extends FomoService {
   /** Tenants that reported holding each token recently (position-protection routing for the orchestrator pass). */
   heldTokensSnapshot(now?: number): Map<string, string[]>;
+  /**
+   * The coins ONE tenant's review named recently (BrokerReport
+   * "review-candidates"), newest first, at most REVIEW_CANDIDATES.carriedMax.
+   * In-process only: the child reports to the replica that spawned it, which
+   * is the replica that writes its file. Nothing here checks the research
+   * allowlist or spends anything; the orchestrator pass does both.
+   */
+  reviewCandidatesSnapshot(tenant: string, now?: number): ReviewCandidate[];
   /**
    * One owner's health, in the states the owner can act on: their own data
    * access and monitoring switches, the shared feed's freshness and open
@@ -437,6 +446,8 @@ const FEED_FRESH_MS = 10 * MIN;
 /** A budget refusal colours health for this long. */
 const BUDGET_HEALTH_MS = 15 * MIN;
 const HELD_TTL_MS = 6 * HOUR;
+/** Tenants whose review-candidate windows one process keeps (a replica holds far fewer children). */
+const REVIEW_CANDIDATE_TENANTS_MAX = 500;
 const FIRST_SEEN_LOOKBACK_MS = 7 * DAY;
 /** Provider pages are fetched at a fixed size so every caller shares one cached copy. */
 const BOARD_LIMIT = 100;
@@ -993,6 +1004,8 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
   let capabilityPrior: Map<string, CapabilityRecord> | null = null;
   const capabilityWrittenAt = new Map<string, { at: number; status: string }>();
   const held = new Map<string, { keys: string[]; at: number }>();
+  /** Each tenant's own window of review candidates (review-candidates.ts), bounded per tenant and in tenants. */
+  const reviewCandidates = new Map<string, ReviewCandidateWindow>();
   let cohortMemo: { at: number; value: CohortSnap } | null = null;
 
   interface CohortSnap {
@@ -3728,6 +3741,24 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
             await store.setHeldTokens(db, t, keys, at);
             return;
           }
+          case "review-candidates": {
+            // NOTED, NEVER SPENT ON HERE: the reporting tenant's own window,
+            // Robinhood keys only, at most REVIEW_CANDIDATES.perWindow distinct
+            // coins per window whatever the child sends, on this process's
+            // clock. Whether research is queued for them is the pass's call
+            // (allowlist, owner switches, the discovery budget).
+            const keys = Array.isArray(r.tokenKeys)
+              ? [...new Set(r.tokenKeys.filter((k) => typeof k === "string" && tokenFromKey(k)?.key === k && isRobinhoodToken(tokenFromKey(k))))]
+              : [];
+            let w = reviewCandidates.get(t);
+            if (!w) {
+              if (reviewCandidates.size >= REVIEW_CANDIDATE_TENANTS_MAX) reviewCandidates.delete(reviewCandidates.keys().next().value as string);
+              w = new ReviewCandidateWindow();
+              reviewCandidates.set(t, w);
+            }
+            w.admit(keys.slice(0, REVIEW_CANDIDATES.perWindow), nowMs);
+            return;
+          }
           default:
             return;
         }
@@ -3775,6 +3806,12 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
       }
       for (const list of out.values()) list.sort();
       return out;
+    },
+
+    reviewCandidatesSnapshot(tenant: string, now?: number) {
+      const t = store.tenantKey(tenant);
+      if (!t) return [];
+      return reviewCandidates.get(t)?.carried(finite(now) ? now : clock()) ?? [];
     },
   };
   return service;
