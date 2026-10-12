@@ -1157,6 +1157,21 @@ test("what it already said never carries its buy posts, nor a line of the other 
   }
 });
 
+test("research on: a tag naming two coins is handed no facts that one coin's read could lend the other (red-team 2026-10-12)", async (t) => {
+  for (const text of ["@pine_stoat $SAFU vs $WOJAK, which one looks healthier?", `@pine_stoat is $WOJAK legit or is ${CA} the real one?`]) {
+    const r = fakeResearch();
+    const w = await world(t, { env: RESEARCH_ON, research: r.research,
+      answer: "the public index shows wojak with thin liquidity, concentrated holders and the creator still holding a big chunk. Say stop to opt out." });
+    w.setInbox([tag({ text })]);
+    await w.step();
+    assert.equal(r.seen.length, 0, `${text}: nothing read`);
+    const [prompt] = w.asked();
+    assert.ok(prompt, text);
+    assert.doesNotMatch(prompt!, /What you looked up|liquidity is thin|holders look concentrated/, text);
+    assert.match(prompt!, /couldn't look it up just now/, text);
+  }
+});
+
 test("research on: \"did you buy <contract>?\" reaches its own history by the address, end to end", async (t) => {
   const r = fakeResearch();
   const facts: AgentFacts = { ...FACTS, calls: [{ ...CALL, token: CA, ownWords: "the buying looked steady and real" }] };

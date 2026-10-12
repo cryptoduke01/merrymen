@@ -665,7 +665,7 @@ describe("one bounded research bundle per answer", () => {
       assert.notEqual(b.exact, true);
       assert.ok(!b.facts.some((p) => /bought it lately/.test(p)), text);
       assert.equal(f.reads.length + f.described.length + f.fomoCalls.length + f.resolved.length, 0, `${text}: nothing looked up for a copycat`);
-      assert.ok(b.notes.includes("conflict"));
+      assert.ok(b.notes.includes("conflict") || b.notes.includes("many"), b.notes.join(","));
     }
     // Its own contract asked about alone is the exact path; beside any name, even its own, it is not (red-team 2026-10-12).
     const { research } = fakes();
@@ -675,6 +675,27 @@ describe("one bounded research bundle per answer", () => {
     const named = await fakes().research.gather(input({ kind: "coin", ticker: "PEPE", address: PEPE_CA }, { question: "is $PEPE this coin?" }));
     assert.notEqual(named.exact, true);
     assert.ok(!named.facts.some((p) => /bought it lately/.test(p)), named.facts.join(" | "));
+  });
+
+  it("a tag that names more than one coin is looked up for nothing (red-team 2026-10-12)", async () => {
+    const WOJAK_CA = `0x${"9abc".repeat(10)}`;
+    // The reproduced tags: two cashtags, a cashtag and a contract; then a coin it bought beside a contract, or beside another ticker.
+    for (const [text, knownCoins] of [["@Alan $SAFU vs $WOJAK, which one looks healthier?", []], [`@Alan is $WOJAK legit or is ${WOJAK_CA} the real one?`, []],
+      [`@Alan is pepe ${WOJAK_CA} legit?`, ["Pepe"]], ["@Alan is pepe or $WIF the better chart?", ["Pepe"]]] as const) {
+      const v = tagCandidate({ id: "1", text, authorId: "9", conversationId: "1", inReplyToTweetId: "", createdAtMs: NOW }, { xUserId: "111", research: true, username: "Alan" });
+      assert.ok(v.ok, text);
+      if (!v.ok) continue;
+      const intent = classifyTag(v.text, { address: v.address ?? null, knownCoins });
+      assert.ok((intent.kind === "coin" || intent.kind === "own-trades") && intent.many === true, `${text} → ${JSON.stringify(intent)}`);
+      const { f, research } = fakes({ flow: true });
+      const b = await research.gather(input(intent, { fomo: true, question: v.text }));
+      assert.deepEqual(b.facts, [], text);
+      assert.equal(f.reads.length + f.resolved.length + f.fomoCalls.length + f.flows.length + f.described.length, 0, `${text}: nothing looked up`);
+      assert.ok(b.notes.includes("many"), b.notes.join(","));
+    }
+    // One coin, however it is named, is still one coin.
+    assert.equal((classifyTag("thoughts on $PEPE and the pepe chart?", { knownCoins: ["Pepe"] }) as { many?: true }).many, undefined);
+    assert.equal((classifyTag("thoughts on $WOJAK?") as { many?: true }).many, undefined);
   });
 
   it("with the Fomo switch on: token activity and quick theses as a public x-answer, keyed by the X account, nothing else", async () => {

@@ -72,9 +72,13 @@ export type TagIntent =
    * its own calls and posts. `coin` is the label asked about, `address` the
    * tagged contract (a lookup key into its own history only), if any.
    */
-  | { kind: "own-trades"; why: boolean; coin: string | null; address: string | null }
-  /** A coin by $ticker, by a coin it traded named in words, or by ONE contract address (a lookup key only). */
-  | { kind: "coin"; ticker: string | null; address: string | null }
+  | { kind: "own-trades"; why: boolean; coin: string | null; address: string | null; many?: true }
+  /**
+   * A coin by $ticker, by a coin it traded named in words, or by ONE contract
+   * address (a lookup key only). `many`: the tag names more than one coin
+   * (classifyTag), and nothing is looked up for it at all.
+   */
+  | { kind: "coin"; ticker: string | null; address: string | null; many?: true }
   /** The allowlist's plain "what model are you" (modelQuestion): code's own line, never a draft. */
   | { kind: "model" }
   | { kind: "chat" }
@@ -283,18 +287,25 @@ export function classifyTag(text: string, o: { address?: string | null; knownCoi
   const asked = publicFactRequest(t);
   if (asked?.kind === "site" && asked.topic === "capabilities") return { kind: "capabilities" };
   if (asked?.kind === "site" && asked.topic === "onboarding") return { kind: "onboarding" };
-  const ticker = extractCashtags(t)[0] ?? null;
+  const tickers = extractCashtags(t);
+  const ticker = tickers[0] ?? null;
   const said = words(t);
   const known = (o.knownCoins ?? []).find((c) => c.trim() && knownCoinAsked(c, said)) ?? null;
+  // MORE THAN ONE COIN IN ONE TAG (red-team review, 2026-10-12): "$SAFU vs
+  // $WOJAK", "$WOJAK or <contract>", "pepe <contract>". Only the first was
+  // ever looked up, and its facts, said of an unnamed "it", were posted of
+  // the other. Two cashtags, a cashtag and a contract, or a coin it bought
+  // beside a different cashtag or a contract: nothing is looked up at all.
+  const many = tickers.length > 1 || (ticker !== null && address !== null) || (known !== null && (address !== null || (ticker !== null && !sameLabel(known, ticker))));
   // ITS OWN TRADES, the Telegram groups' reading of them: what it traded, why.
   if (asked?.kind === "trades" || (asked?.kind === "site" && (asked.topic === "attempts" || asked.topic === "trades"))) {
     const why = asked.kind === "trades" ? asked.why : asked.topic === "attempts";
     const coin = asked.kind === "trades" && asked.symbol ? asked.symbol : ticker ?? known;
-    return { kind: "own-trades", why, coin: coin ?? null, address };
+    return { kind: "own-trades", why, coin: coin ?? null, address, ...(many ? { many: true as const } : {}) };
   }
   // Its wallet, balance, P&L, owner: deflected by the prompt, never looked up.
   if (isPrivateAsk(t)) return { kind: "chat" };
-  if (address || ticker || known) return { kind: "coin", ticker: ticker ?? known, address };
+  if (address || ticker || known) return { kind: "coin", ticker: ticker ?? known, address, ...(many ? { many: true as const } : {}) };
   return { kind: "chat" };
 }
 
@@ -901,6 +912,10 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
           case "unanswered":
             return { facts: [], lookups, notes };
           case "own-trades": {
+            if (i.many) {
+              notes.push("many");
+              return { facts: [], lookups, notes };
+            }
             // Only what it already made public, and no paid read. A general
             // question ("what have you been buying?"): its newest buy post.
             if (!i.coin && !i.address) {
@@ -936,6 +951,11 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
             return { facts: history, ...(history.length ? { exact: true } : {}), lookups, notes };
           }
           case "coin":
+            // Facts of one coin said of another: nothing for a tag that names more than one.
+            if (i.many) {
+              notes.push("many");
+              return { facts: [], lookups, notes };
+            }
             break;
         }
         // ── a coin ──────────────────────────────────────────────────────
