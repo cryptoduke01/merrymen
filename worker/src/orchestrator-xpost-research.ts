@@ -67,7 +67,7 @@ import { takeAllowance, type XPost } from "./xpost/store";
 import { coinNamedIn, type AnswerIntentKind } from "./xpost/writer";
 import { asksAboutACoin, everydayWord, nameLikeWords } from "./xpost/words";
 import { cleanTicker, type FiguresSpec } from "./xpost/figures";
-import { moveOf, type HotRead } from "./xpost/market";
+import { moveOf, type HotRead, type MajorRead } from "./xpost/market";
 import { coinQuery, MAJORS_MAX_RANK, pickMajor, readCoinMarket, readCoinTrending, searchCoinList, type CoinMarket, type CoinMarketRead, type CoinSearchRead, type CoinTrendingRead } from "./venues/coingecko-coins";
 
 const MIN = 60_000;
@@ -656,6 +656,12 @@ export interface ResearchBundle {
    */
   hot?: HotRead;
   /**
+   * A MAJOR AS CODE READ IT from CoinGecko, for code's own words
+   * (xpost/market.ts majorAnswers): set beside the major's figures. A major's
+   * answer is never drafted (red-team 2026-10-12).
+   */
+  major?: MajorRead;
+  /**
    * What the answer turned out to be about, when that is not what the tag was
    * read as: a ticker on the coin list that is no major (a copycat, unranked,
    * past the rank cap) goes on as a coin of the chain. Absent: the tag's own.
@@ -854,6 +860,22 @@ export function majorPhrases(m: Pick<CoinMarket, "rank" | "marketCapUsd" | "volu
     out.push(turnover >= 0.1 ? "trading volume looks heavy on coingecko" : turnover <= 0.02 ? "trading volume looks light on coingecko" : "trading volume looks ordinary on coingecko");
   }
   return out.filter(sayable);
+}
+
+/**
+ * A MAJOR'S MARKET AS A TYPED READ, for code's own words (xpost/market.ts
+ * majorAnswers): the same thresholds as majorPhrases, never a figure. A
+ * major's answer is never drafted (red-team 2026-10-12).
+ */
+export function majorReadOf(m: Pick<CoinMarket, "rank" | "marketCapUsd" | "volume24hUsd" | "change24hPct" | "change7dPct">): MajorRead {
+  const vol = m.volume24hUsd, cap = m.marketCapUsd;
+  const turnover = vol !== null && cap !== null && Number.isFinite(vol) && Number.isFinite(cap) && cap > 0 && vol >= 0 ? vol / cap : null;
+  return {
+    rank: m.rank === null || !Number.isFinite(m.rank) ? null : m.rank <= 10 ? "top" : m.rank <= 50 ? "large" : "mid",
+    day: moveOf(m.change24hPct),
+    week: moveOf(m.change7dPct),
+    volume: turnover === null ? null : turnover >= 0.1 ? "heavy" : turnover <= 0.02 ? "light" : "ordinary",
+  };
 }
 
 /** Coins one "what's hot" answer shows from the chain's index. */
@@ -1332,7 +1354,7 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
        * simply off and a tag goes on exactly as it did before them. "unread":
        * it could not be asked this time, or did not answer.
        */
-      const majorBundle = async (query: string): Promise<{ kind: "major"; facts: string[]; figures: FiguresSpec } | { kind: "none" } | { kind: "unread" }> => {
+      const majorBundle = async (query: string): Promise<{ kind: "major"; facts: string[]; figures: FiguresSpec; read: MajorRead } | { kind: "none" } | { kind: "unread" }> => {
         if (majors.configured?.() === false) {
           notes.push("majors-off");
           return { kind: "none" };
@@ -1377,7 +1399,7 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
           return { kind: "unread" };
         }
         notes.push("major");
-        return { kind: "major", facts, figures: [{ kind: "major", symbol: m.symbol, rank: m.rank, priceUsd: m.priceUsd, marketCapUsd: m.marketCapUsd,
+        return { kind: "major", facts, read: majorReadOf(m), figures: [{ kind: "major", symbol: m.symbol, rank: m.rank, priceUsd: m.priceUsd, marketCapUsd: m.marketCapUsd,
           volume24hUsd: m.volume24hUsd, change24hPct: m.change24hPct, change7dPct: m.change7dPct }] };
       };
       /** A public x-answer read of Fomo, keyed by this X account (its hourly cap). */
@@ -1507,7 +1529,7 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
             return await hotBundle();
           case "major": {
             const found = await majorBundle(i.query);
-            if (found.kind === "major") return { facts: found.facts, figures: found.figures, lookups, notes };
+            if (found.kind === "major") return { facts: found.facts, figures: found.figures, major: found.read, lookups, notes };
             // CoinGecko could not be read: nothing at all, never a guess on the
             // chain's own coins (a "$SOL" there is not the Solana asked about).
             if (found.kind === "unread") return { facts: [], lookups, notes };

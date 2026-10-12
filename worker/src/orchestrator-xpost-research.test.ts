@@ -34,6 +34,7 @@ import {
   hotScreen,
   majorAsk,
   majorPhrases,
+  majorReadOf,
   namesACoin,
   ONBOARDING_PHRASES,
   ownHistoryPhrases,
@@ -1198,6 +1199,8 @@ describe("majors: a coin by name or ticker, read on coingecko's list (2026-10-12
     assert.equal(b.lookups, 2);
     assert.deepEqual(b.facts, majorPhrases(ETH_MARKET));
     assert.deepEqual(b.figures, [{ kind: "major", symbol: "eth", rank: 2, priceUsd: 3412.5, marketCapUsd: 411e9, volume24hUsd: 18.2e9, change24hPct: 1.24, change7dPct: -3.4 }]);
+    assert.deepEqual(b.major, { rank: "top", day: { dir: "up", size: "a little" }, week: { dir: "down", size: "a fair bit" }, volume: "ordinary" }, "code's own words are built from this read, never a draft");
+    assert.deepEqual(majorReadOf({ rank: 150, marketCapUsd: 1e9, volume24hUsd: 1e7, change24hPct: 0.2, change7dPct: null }), { rank: "mid", day: { dir: "flat", size: null }, week: null, volume: "light" });
     assert.equal(b.intent, undefined, "answered as the major it is");
     assert.ok(b.notes.includes("major"));
   });
@@ -1281,7 +1284,8 @@ describe("majors: a coin by name or ticker, read on coingecko's list (2026-10-12
     const p = answerPrompt(facts);
     assert.match(p.prompt, /big coin on coingecko's list/);
     assert.match(p.prompt, /not a robinhood chain coin and not one you trade/);
-    assert.match(p.prompt, /exact figures are added after your words/);
+    assert.match(p.prompt, /Write no number or amount/);
+    assert.doesNotMatch(p.prompt, /added after your words/, "never told a line follows its words");
     assert.match(p.prompt, /They named a specific coin/);
     assert.doesNotMatch(p.prompt, /PEPE|grabbed|\p{N}/u, "never its buys, never a figure");
     const nothing = answerPrompt({ ...facts, research: [] });

@@ -857,7 +857,17 @@ const COIN_ADVICE = new RegExp(
     String.raw`|worth\s+(?:buying|getting|grabbing|a\s+buy|an?\s+ape|it|holding|the\s+risk)|(?:a\s+)?(?:solid|good|great|safe|smart|easy|strong|decent)\s+(?:buy|bet|pick|entry|play|hold)` +
     String.raw`|get\s+some\b|(?:goes|going|go|gone|heading|headed|head)\s+(?:way\s+|much\s+|a\s+lot\s+)?(?:up|higher|lower)|(?:way|much|a\s+lot)\s+higher|higher\s+from\s+here` +
     String.raw`|(?:could|will|might|should|gonna|going\s+to|bound\s+to|about\s+to)\s+(?:easily\s+|definitely\s+|probably\s+|totally\s+|still\s+)?(?:double|triple|go\s+up|run|pump|moon|rip|fly|explode|rise|recover|bounce|climb|take\s+off)` +
-    String.raw`|(?:best|top)\s+(?:coin|token|buy|pick|play|bet|memecoin)s?|(?:my|a)\s+top\s+pick|the\s+one\s+to\s+(?:buy|get|hold|watch|grab|ape))\b`,
+    String.raw`|(?:best|top)\s+(?:coin|token|buy|pick|play|bet|memecoin)s?|(?:my|a)\s+top\s+pick|the\s+one\s+to\s+(?:buy|get|hold|watch|grab|ape)` +
+    // A FORECAST OR A TARGET IN OTHER WORDS (red-team 2026-10-12): beside a
+    // coin's figures, "looks set to keep climbing toward new highs", "the old
+    // high is the next stop", "a dip from here would be a gift", "plenty of
+    // steam left in it", "it's still early on this move" and "they could keep
+    // climbing" were each admitted.
+    String.raw`|new\s+highs?|all[\s-]?time\s+highs?|\baths?|(?:old|previous|prior|last)\s+highs?|next\s+stop|(?:looks?|seems?|is|it'?s|they'?re)\s+set\s+to` +
+    String.raw`|set\s+to\s+(?:keep\s+)?(?:climb|run|rise|rally|go|break|move|pop|fly|soar|continue|pump)|keep\s+(?:on\s+)?(?:climbing|going|running|rising|pumping|ripping|rallying|flying|soaring)` +
+    String.raw`|could\s+keep|(?:steam|gas|juice|fuel)\s+left|steam\s+in\s+(?:it|this|these|them)|(?:has|have|got)\s+(?:more\s+|some\s+)?legs|legs\s+(?:left|to\s+run)` +
+    String.raw`|still\s+early\s+(?:on|in|for)\s+(?:this|the|it|all|these|them)|(?:would|will|'d)\s+be\s+a\s+gift|a\s+gift\s+(?:here|at|from)|dips?\s+(?:to\s+buy|would\s+be|is\s+a|here)` +
+    String.raw`|more\s+to\s+come|up\s+only|only\s+(?:goes|going)\s+up)\b`,
   "i",
 );
 

@@ -20,7 +20,9 @@
  * not share their words (the gate's repeat limit, pinned in market.test.ts),
  * so the same read is said again in other words, and when every frame has
  * been said lately, not at all: the same rule as code's model and greeting
- * lines (writer.ts codeLines).
+ * lines (writer.ts codeLines). A major (a coin by name on CoinGecko's list)
+ * is the same: its words are code's (`MajorRead`, majorAnswers), never a
+ * draft beside its figures.
  *
  * Pure: no I/O, no model, no provider, no clock.
  */
@@ -159,4 +161,96 @@ export function hotNoneAnswers(seed: string, style: { lower: boolean }, o: { pap
 /** What's hot with the index unread: every line, this mention's own first. */
 export function hotUnreadAnswers(seed: string, style: { lower: boolean }, o: { paper?: boolean } = {}): string[] {
   return framed(HOT_UNREAD_LINES, seed, style, o);
+}
+
+// ── a major ────────────────────────────────────────────────────────────────
+
+/**
+ * A MAJOR, AS CODE READ IT FROM COINGECKO (red-team 2026-10-12): where it
+ * ranks, how its day and its week went, how busy its trading is against its
+ * size, each by code's own thresholds. A major's answer carried the model's
+ * words right before "coingecko: $ETH #2, ~$3.4k, …", and "looks set to keep
+ * climbing toward new highs", "it's the play", "alan has been stacking it all
+ * week" and "wif and bonk are doing even better" were each admitted and
+ * posted beside the coin's figures. So a major's words are code's too.
+ */
+export interface MajorRead {
+  rank: "top" | "large" | "mid" | null;
+  day: Move | null;
+  week: Move | null;
+  volume: "heavy" | "light" | "ordinary" | null;
+}
+
+/** One frame's own words for a major: how it opens and closes, and how it says a rank, a move and a volume. */
+interface MajorWords {
+  open: string;
+  close: string;
+  rank: { top: string; large: string; mid: string };
+  move: MoveWords;
+  day: string;
+  week: string;
+  volume: { heavy: string; light: string; ordinary: string };
+}
+
+/** EIGHT FRAMES THAT ARE NOT EACH OTHER, each naming coingecko, never the coin, a figure, "i", "buy", "early" or where it is headed. */
+const MAJOR_FRAMES: readonly MajorWords[] = [
+  { open: "coingecko has it", close: "not a call", rank: { top: "among the very biggest", large: "a large cap", mid: "a mid cap" },
+    move: { little: ["up a little", "down a little"], fair: ["up a fair bit", "down a fair bit"], sharp: ["up sharply", "down sharply"], flat: "flat" },
+    day: "today", week: "on the week", volume: { heavy: "volume heavy", light: "volume light", ordinary: "volume ordinary" } },
+  { open: "per coingecko it's", close: "just data", rank: { top: "one of the largest", large: "big by value", mid: "mid-sized" },
+    move: { little: ["slightly higher", "slightly lower"], fair: ["noticeably higher", "noticeably lower"], sharp: ["steeply higher", "steeply lower"], flat: "unchanged" },
+    day: "since yesterday", week: "over the week", volume: { heavy: "turnover high", light: "turnover low", ordinary: "turnover normal" } },
+  { open: "on coingecko it sits", close: "observation only", rank: { top: "near the top", large: "ranked high", mid: "mid-ranked" },
+    move: { little: ["gaining a touch", "slipping a touch"], fair: ["gaining moderately", "slipping moderately"], sharp: ["gaining strongly", "slipping strongly"], flat: "level" },
+    day: "this session", week: "across the week", volume: { heavy: "busy trading", light: "thin trading", ordinary: "normal trading" } },
+  { open: "coingecko's view:", close: "a snapshot", rank: { top: "a heavyweight", large: "a big name", mid: "a mid-tier name" },
+    move: { little: ["rising mildly", "falling mildly"], fair: ["rising solidly", "falling solidly"], sharp: ["rising hard", "falling hard"], flat: "sideways" },
+    day: "lately", week: "week over week", volume: { heavy: "lots of volume", light: "little volume", ordinary: "average volume" } },
+  { open: "by coingecko's numbers it's", close: "for reference", rank: { top: "top tier", large: "upper tier", mid: "middle tier" },
+    move: { little: ["up marginally", "down marginally"], fair: ["up meaningfully", "down meaningfully"], sharp: ["up dramatically", "down dramatically"], flat: "barely changed" },
+    day: "for the day", week: "for the week", volume: { heavy: "volume elevated", light: "volume subdued", ordinary: "volume typical" } },
+  { open: "coingecko shows it as", close: "descriptive only", rank: { top: "one of the giants", large: "a sizeable coin", mid: "a mid-weight coin" },
+    move: { little: ["a bit firmer", "a bit softer"], fair: ["clearly firmer", "clearly softer"], sharp: ["far firmer", "far softer"], flat: "steady" },
+    day: "on the day", week: "on the week", volume: { heavy: "brisk turnover", light: "slow turnover", ordinary: "steady turnover" } },
+  { open: "the coingecko page lists it", close: "no recommendation", rank: { top: "elite by valuation", large: "sizeable by valuation", mid: "modest by valuation" },
+    move: { little: ["edging up", "edging down"], fair: ["climbing", "sliding"], sharp: ["racing up", "plunging"], flat: "idle" },
+    day: "in a day", week: "over a week", volume: { heavy: "packed order flow", light: "sparse order flow", ordinary: "usual order flow" } },
+  { open: "over on coingecko it's", close: "info only", rank: { top: "top of the table", large: "well up the table", mid: "mid-table" },
+    move: { little: ["up mildly", "off mildly"], fair: ["up notably", "off notably"], sharp: ["up strongly", "off heavily"], flat: "about level" },
+    day: "past day", week: "through the week", volume: { heavy: "active trade", light: "quiet trade", ordinary: "routine trade" } },
+];
+
+/** One frame said of one read, or null when the read has nothing in it to say. */
+function majorText(w: MajorWords, r: MajorRead): string | null {
+  const parts = [
+    r.rank ? w.rank[r.rank] : null,
+    r.day ? `${said(r.day, w.move)} ${w.day}` : null,
+    r.week ? `${said(r.week, w.move)} ${w.week}` : null,
+    r.volume ? w.volume[r.volume] : null,
+  ].filter((p): p is string => p !== null);
+  return parts.length ? `${w.open} ${parts.join(", ")}. ${w.close}` : null;
+}
+
+/** A major, answered by code: every frame for this read, this mention's own first. Empty when the read has nothing to say. */
+export function majorAnswers(read: MajorRead, seed: string, style: { lower: boolean }, o: { paper?: boolean } = {}): string[] {
+  if (!read) return [];
+  const texts = MAJOR_FRAMES.map((w) => majorText(w, read));
+  return texts.every((t): t is string => t !== null) ? framed(texts, seed, style, o) : [];
+}
+
+/** A coin asked by name that coingecko could not be read for (or research off): never a guess at how it is doing, never its name. */
+const MAJOR_UNREAD_LINES: readonly string[] = Object.freeze([
+  "no coingecko read on that one available right now",
+  "coingecko can't be pulled up from here for that coin",
+  "that one is out of reach on coingecko just now, so no rundown",
+  "can't check that coin's coingecko page this time",
+  "the coingecko numbers for that one aren't visible currently",
+  "coingecko is unavailable for that coin at the moment",
+  "that coin's market page is a blank on this end for now",
+  "the market board for that coin is dark today",
+]);
+
+/** A major unread: every line, this mention's own first. */
+export function majorUnreadAnswers(seed: string, style: { lower: boolean }, o: { paper?: boolean } = {}): string[] {
+  return framed(MAJOR_UNREAD_LINES, seed, style, o);
 }

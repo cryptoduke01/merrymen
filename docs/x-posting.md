@@ -972,12 +972,24 @@ other owner's agent, and its posting and reply warnings, are unchanged.
   CoinGecko Pro key, majors are off and nothing is asked; a tag goes on
   exactly as before. A named major is a named coin
   for the never-confirm-a-buy rule: no buys list, no first person, never its
-  name in the words, and the writer is told it is not a Robinhood Chain coin
-  and not one Alan trades. The model gets words only ("coingecko ranks it
-  among the very biggest coins", "coingecko shows it up a little today",
-  "down a fair bit on the week", "trading volume looks heavy on coingecko"),
-  and code's line gets the figures: rank, price (from a thousand dollars),
-  market cap, 24h volume, 24h and 7d change.
+  name in the words. **A major's words are code's, never a draft**
+  (red-team 2026-10-12: beside `coingecko: $ETH #2, …` drafts said "looks
+  set to keep climbing toward new highs", "a dip from here would be a gift",
+  "it's still early on this move", "it's the play"): research hands a typed
+  read (`MajorRead`: rank band, the day's and the week's move, volume against
+  size, by the same thresholds as the words), and `xpost/market.ts`
+  `majorAnswers` says it in one of eight frames ("coingecko has it among the
+  very biggest, up a little today, down a fair bit on the week, volume
+  ordinary. not a call"), never the coin's name, "i", "buy", "early" or where
+  it is headed; code's line gets the figures: rank, price (from a thousand
+  dollars), market cap, 24h volume, 24h and 7d change. CoinGecko unread, or
+  research off, is one of eight code lines saying there is no read
+  (`majorUnreadAnswers`), with no figures. No model call; the draft
+  allowances go back. A tag that turns out to be no major goes on as a coin
+  of the chain or as chat, drafted as before, and the gate refuses a
+  forecast or a target in other words in any drafted answer (new highs, the
+  next stop, set to, keep climbing, steam or legs left, still early on it, a
+  gift, more to come, up only).
 - **What's hot** (`hotAsk`): only these whole questions, with at most two
   greeting words and a "today" / "right now" / "on robinhood chain" around
   them: "what's hot / trending / moving / pumping", "top gainers", "what
@@ -1075,7 +1087,7 @@ other owner's agent, and its posting and reply warnings, are unchanged.
   `; `; the line ends with a full stop). For example:
   `coingecko: $ETH #2, ~$3.4k, mcap ~$411B, vol ~$18B, 24h +1.2%, 7d -3.4%.`
 - **Composition** (`withFigures`, in `writeAnswer`): the words are drafted
-  digit-free, or for what's hot built by code (above), and the X gate judges
+  digit-free, or for what's hot and a major built by code (above), and the X gate judges
   them unchanged. Only AFTER the gate admitted them, and only for an active
   owner's answer (never a greeting's or the model question's code
   line), code puts the line between the words and the mandatory opt-out

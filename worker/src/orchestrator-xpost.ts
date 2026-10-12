@@ -101,7 +101,7 @@ import { PUBLISHABLE_SOURCES } from "./thesis-policy";
 import { readSaleResults } from "./orchestrator-xpost-results";
 import { appendSaleOutcome, hasSaleOutcome } from "./xpost/sale-outcome";
 import { admitFiguresLine, figuresTickers, withFigures, type FiguresSpec } from "./xpost/figures";
-import { hotAnswers, hotNoneAnswers, hotUnreadAnswers, type HotRead } from "./xpost/market";
+import { hotAnswers, hotNoneAnswers, hotUnreadAnswers, majorAnswers, majorUnreadAnswers, type HotRead, type MajorRead } from "./xpost/market";
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -1673,6 +1673,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // WHAT'S HOT, AS CODE READ IT (zero coins: nothing past the floors), for
       // code's own words (xpost/market.ts). Null: the index was not read.
       let hotRead: HotRead | null = null;
+      // A MAJOR, AS CODE READ IT from CoinGecko, beside its figures: its words are code's too.
+      let majorRead: MajorRead | null = null;
       if (research && intent) {
         const bundle = await research.gather({ shared, intent, tenant: account.tenant, xUserId: account.xUserId, facts: f, posts, fomo: researchFomo,
           // Under another handle no question is one the exact path reads (ResearchInput.question: absent, never).
@@ -1682,6 +1684,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
           ...(bundle.exact === true && candidate.address && !otherHandles ? { boughtExact: true } : {}) };
         if (bundle.figures?.length && bundle.facts.length) figures = bundle.figures;
         if (hotCoded && bundle.hot) hotRead = bundle.hot;
+        if (asked.kind === "major" && figures && bundle.major) majorRead = bundle.major;
         bump(`answer-intent-${intent.kind}`);
         if (bundle.lookups) bump("answer-lookups", bundle.lookups);
         for (const note of new Set(bundle.notes)) bump(`answer-research-${note}`);
@@ -1694,10 +1697,27 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // (xpost/market.ts): with coins to show, how many stand out and which
       // way the first went, in one of eight frames; with nothing past the
       // floors, or nothing read, a line that says so.
+      // A MAJOR TOO (red-team 2026-10-12): drafted words stood right before
+      // "coingecko: $ETH #2, ~$3.4k, …", and "looks set to keep climbing
+      // toward new highs", "a dip from here would be a gift" and "it's still
+      // early on this move" were posted beside the coin's figures. A tag still
+      // a major after research (not gone on as a coin of the chain or as
+      // chat) is answered in code's words: what coingecko showed, in one of
+      // eight frames, or, coingecko unread or research off, a line that says
+      // there is no read. The model allowances taken for a draft go back.
+      const stillMajor = asked.kind === "major" && (looked === null || looked.intent === "major");
       const paperLines = { paper: f.mode === "paper" };
-      const market = !hotCoded ? []
-        : hotRead && hotRead.coins >= 1 ? hotAnswers(hotRead, comment.id, facts.style, paperLines)
-        : hotRead ? hotNoneAnswers(comment.id, facts.style, paperLines) : hotUnreadAnswers(comment.id, facts.style, paperLines);
+      const majorLines = stillMajor && majorRead ? majorAnswers(majorRead, comment.id, facts.style, paperLines) : [];
+      // Figures only beside the words that read them: never beside "no read".
+      if (stillMajor && !majorLines.length) figures = null;
+      const market = hotCoded
+        ? hotRead && hotRead.coins >= 1 ? hotAnswers(hotRead, comment.id, facts.style, paperLines)
+          : hotRead ? hotNoneAnswers(comment.id, facts.style, paperLines) : hotUnreadAnswers(comment.id, facts.style, paperLines)
+        : stillMajor ? majorLines.length ? majorLines : majorUnreadAnswers(comment.id, facts.style, paperLines) : [];
+      if (market.length && !undrafted) {
+        await returnAllowance(shared, answerKey, at());
+        await returnAllowance(shared, `llm:${utcDay(nowMs)}`, at());
+      }
       if (market.length) bump("answer-code-words");
       const coded = templated || market.length > 0;
       // CODE'S LINES, the model question's, a greeting's or a market answer's,

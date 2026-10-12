@@ -879,8 +879,9 @@ const INTENT_HINT: Readonly<Record<AnswerIntentKind, string>> = {
   coin: "They are asking about a coin. Say what you looked up, keeping who said it. Never say whether to buy it, and name it without a $ sign.",
   model: "They are asking what model you run on. Answer only with the model line in the rules.",
   chat: "It is just chat. Answer like a person would, briefly.",
-  // A MAJOR (2026-10-12): code adds the figures after the words, so the words carry none.
-  major: "They are asking about a big coin on coingecko's list. Say what you looked up as what coingecko shows right now, a read and not a call: never whether to buy it, never where it's headed. It is not a robinhood chain coin and not one you trade, so keep yourself, your trades and your holdings out of it. The exact figures are added after your words, so write no number or amount yourself.",
+  // A MAJOR (2026-10-12): its words are code's (xpost/market.ts) whenever coingecko
+  // was read; never told figures follow (red-team 2026-10-12).
+  major: "They are asking about a big coin on coingecko's list. Say what you looked up as what coingecko shows right now, a read and not a call: never whether to buy it, never where it's headed. It is not a robinhood chain coin and not one you trade, so keep yourself, your trades and your holdings out of it. Write no number or amount.",
   // WHAT'S HOT (2026-10-12): drafted only when there is no coin to show; with
   // coins, the words are code's (xpost/market.ts). Never told a list follows:
   // "added after your words" invited words that point at it (red-team 2026-10-12).

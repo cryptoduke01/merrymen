@@ -21,7 +21,7 @@ import { xWeightedLength, X_MAX_WEIGHTED, type FetchLike } from "./xpost/client"
 import type { FiguresSpec } from "./xpost/figures";
 import { emptyGeckoBuckets, type GeckoPool } from "./venues/geckoterminal";
 import { greetingAnswers, modelAnswers } from "./xpost/writer";
-import { hotAnswers, hotNoneAnswers, hotUnreadAnswers, type HotRead } from "./xpost/market";
+import { hotAnswers, hotNoneAnswers, hotUnreadAnswers, majorAnswers, majorUnreadAnswers, type HotRead, type MajorRead } from "./xpost/market";
 import { withoutReplyOptOut } from "./xpost/replies";
 import { ANSWER_GAP_MS } from "./xpost/planner";
 import { PAUSE_KEY } from "./xpost/sender";
@@ -1519,11 +1519,15 @@ test("a tag asking for advice or a forecast in other words is never drafted, and
       assert.equal(w.asked().length, 0, text);
       assert.deepEqual(await w.answers(), [], text);
     }
-    // A coin question that is not one, drafted as advice anyway: refused.
+    // A coin question that is not one, drafted as advice anyway: refused. (Research
+    // off, a coin asked by name is never drafted at all: code's line says it has no read.)
     const w = await world(t, { env, research: fakeResearch().research, answer: "honestly i'd buy it, the public index shows liquidity is pretty deep. say stop to opt out." });
     w.setInbox([tag({ text: "@pine_stoat thoughts on $WOJAK?" })]);
     await w.step();
-    assert.equal((await w.answers())[0]!.status, "skipped");
+    const [row] = await w.answers();
+    if (env === RESEARCH_ON) assert.equal(row!.status, "skipped");
+    else assert.deepEqual([w.asked().length, row!.body], [0, majorUnreadAnswers(MENTION, { lower: true })[0]]);
+    assert.ok(w.sends.every((s) => !/buy/.test(String(s.text))));
   }
 });
 
@@ -2022,8 +2026,9 @@ test("what is not only a greeting is not answered as one", async (t) => {
       assert.doesNotMatch(r.log ?? "", /answered-greeting/, text);
       for (const row of await w.answers()) assert.ok(!lines.has(row.body), `${text}: ${row.body}`);
       for (const sent of w.sends) assert.ok(!lines.has(String(sent.text)), `${text}: ${String(sent.text)}`);
-      // "gm $PEPE" names a coin: the normal path drafts it; the rest are answered by nothing.
-      assert.equal(w.asked().length, drafted ? 1 : 0, text);
+      // "gm $PEPE" names a coin: the normal path drafts it (research off, code's no-read line
+      // answers it: a coin asked by name is never drafted then); the rest are answered by nothing.
+      assert.equal(w.asked().length, drafted && env === RESEARCH_ON ? 1 : 0, text);
       if (!drafted) assert.deepEqual(w.sends, [], text);
     }
   }
@@ -2102,42 +2107,48 @@ test("greetings are answered in other words each time, and once all eight have b
 
 // ── the figures line ────────────────────────────────────────────────────────
 
-/** A research stand-in that hands back one bundle to a tag about a coin (the words, and the figures code renders), nothing to any other. */
-function handing(bundle: Partial<ResearchBundle>): XResearch & { asked: number } {
+/** A research stand-in that hands back one bundle to a tag whose question matches (the words, and the figures code renders), nothing to any other. */
+function handing(bundle: Partial<ResearchBundle>, match: RegExp = /this coin/): XResearch & { asked: number } {
   const r = {
     asked: 0,
     async gather(input: { question?: string }): Promise<ResearchBundle> {
       r.asked++;
-      if (!/\beth\b|superverse/.test(input.question ?? "")) return { facts: [], lookups: 0, notes: [] };
-      return { facts: ["coingecko shows it up a little today"], lookups: 1, notes: [], ...bundle };
+      if (!match.test(input.question ?? "")) return { facts: [], lookups: 0, notes: [] };
+      return { facts: ["per on-chain data, the buying has had the edge over the last hour"], lookups: 1, notes: [], ...bundle };
     },
   };
   return r;
 }
+/** A tagged contract's onchain hour: the one line a drafted answer may carry, it names no coin. */
+const FLOW_FIGURES: FiguresSpec = [{ kind: "flow", buyUsd: 12_300, sellUsd: 8_100 }];
+const FLOW_LINE = "bitquery: 1h buys ~$12k, sells ~$8.1k.";
+const UP_A_LITTLE = "on-chain data shows buyers a little ahead over the hour, nothing wild, not a call. Say stop to opt out.";
+const ASK_CA = `@pine_stoat thoughts on ${CA}?`;
 const MAJOR_FIGURES: FiguresSpec = [{ kind: "major", symbol: "eth", rank: 2, priceUsd: 3_412, marketCapUsd: 411e9, volume24hUsd: 18.2e9, change24hPct: 1.24, change7dPct: -3.4 }];
 const MAJOR_LINE = "coingecko: $ETH #2, ~$3.4k, mcap ~$411B, vol ~$18B, 24h +1.2%, 7d -3.4%.";
-const UP_A_LITTLE = "coingecko shows it up a little today, nothing wild, not a call. Say stop to opt out.";
+/** ETH as code reads coingecko's row above: among the biggest, up a little today, down a fair bit on the week, ordinary volume. */
+const ETH_READ: MajorRead = { rank: "top", day: { dir: "up", size: "a little" }, week: { dir: "down", size: "a fair bit" }, volume: "ordinary" };
 
 test("an answer handed figures goes out with code's line between the model's words and the notice, marked looked up", async (t) => {
-  const w = await world(t, { env: RESEARCH_ON, research: handing({ figures: MAJOR_FIGURES }), answer: UP_A_LITTLE });
-  w.setInbox([tag({ text: "@pine_stoat how's eth doing?" })]);
+  const w = await world(t, { env: RESEARCH_ON, research: handing({ figures: FLOW_FIGURES }), answer: UP_A_LITTLE });
+  w.setInbox([tag({ text: ASK_CA })]);
   const r = await w.step();
-  const posted = `coingecko shows it up a little today, nothing wild, not a call. ${MAJOR_LINE} Say stop to opt out.`;
+  const posted = `on-chain data shows buyers a little ahead over the hour, nothing wild, not a call. ${FLOW_LINE} Say stop to opt out.`;
   assert.deepEqual(w.sends, [{ text: posted, reply: { in_reply_to_tweet_id: MENTION } }]);
   const [answer] = await w.answers();
   assert.equal(answer!.body, posted, "stored as posted");
   assert.equal(answer!.coin, store.ANSWER_LOOKED_UP);
   assert.match(r.log ?? "", /answer-figures 1/);
-  // The model was never shown a figure, a ticker or the line.
-  for (const p of [...w.asked(), ...w.systems]) assert.doesNotMatch(p, /coingecko:|\$ETH|~\$|3\.4k|411/);
+  // The model was never shown a figure or the line.
+  for (const p of [...w.asked(), ...w.systems]) assert.doesNotMatch(p, /bitquery:|~\$|12k|8\.1k/);
 });
 
 test("the line is never shown to a later prompt, and the gate still weighs the words: the same words again are a repeat, new ones are not", async (t) => {
-  const w = await world(t, { env: RESEARCH_ON, research: handing({ figures: MAJOR_FIGURES }), answer: UP_A_LITTLE });
-  w.setInbox([tag({ text: "@pine_stoat how's eth doing?" })]);
+  const w = await world(t, { env: RESEARCH_ON, research: handing({ figures: FLOW_FIGURES }), answer: UP_A_LITTLE });
+  w.setInbox([tag({ text: ASK_CA })]);
   await w.step();
   // Another person asks the same: the model writes the same words, which were said already.
-  w.setInbox([tag({ id: "100000000000000401", conversation_id: "100000000000000401", author_id: "401", text: "@pine_stoat how's eth doing?" })]);
+  w.setInbox([tag({ id: "100000000000000401", conversation_id: "100000000000000401", author_id: "401", text: ASK_CA })]);
   await w.step(NOW + MIN);
   const again = (await w.answers()).find((a) => a.replyToTweetId === "100000000000000401");
   assert.equal(again?.status, "skipped");
@@ -2147,52 +2158,55 @@ test("the line is never shown to a later prompt, and the gate still weighs the w
   await w.step(NOW + 2 * MIN);
   const chat = w.asked().at(-1)!;
   assert.match(chat, /how's your day going/);
-  for (const p of [chat, w.systems.at(-1)!]) assert.doesNotMatch(p, /\$ETH|~\$|up a little today/);
-  // And a draft that cites coingecko with nothing looked up for it is refused, as any unlooked source is.
+  for (const p of [chat, w.systems.at(-1)!]) assert.doesNotMatch(p, /bitquery|~\$|buyers a little ahead/);
+  // And a draft that cites on-chain data with nothing looked up for it is refused, as any unlooked source is.
   assert.equal((await w.answers()).find((a) => a.replyToTweetId === "100000000000000402")?.reason, "gate:unlooked-source");
   assert.equal(w.sends.length, 1);
 });
 
 test("figures with nothing looked up beside them, a refused draft, a code line or an owner not active put in no line", async (t) => {
   // No words were handed: the line has nothing to stand on.
-  const bare = await world(t, { env: RESEARCH_ON, research: handing({ facts: [], figures: MAJOR_FIGURES }), answer: "no read on that one just now. Say stop to opt out." });
-  bare.setInbox([tag({ text: "@pine_stoat how's eth doing?" })]);
+  const bare = await world(t, { env: RESEARCH_ON, research: handing({ facts: [], figures: FLOW_FIGURES }), answer: "no read on that one just now. Say stop to opt out." });
+  bare.setInbox([tag({ text: ASK_CA })]);
   await bare.step();
   assert.deepEqual(bare.sends.map((s) => s.text), ["no read on that one just now. Say stop to opt out."]);
   // A draft the gate refuses is skipped, line and all.
-  const refused = await world(t, { env: RESEARCH_ON, research: handing({ figures: MAJOR_FIGURES }), answer: "it's mooning, you should buy. Say stop to opt out." });
-  refused.setInbox([tag({ text: "@pine_stoat how's eth doing?" })]);
+  const refused = await world(t, { env: RESEARCH_ON, research: handing({ figures: FLOW_FIGURES }), answer: "it's mooning, you should buy. Say stop to opt out." });
+  refused.setInbox([tag({ text: ASK_CA })]);
   await refused.step();
   assert.equal((await refused.answers())[0]!.status, "skipped");
   assert.equal((await refused.answers())[0]!.body, "");
   assert.deepEqual(refused.sends, []);
   // Code's own greeting line never carries one.
-  const hi = handing({ figures: MAJOR_FIGURES });
+  const hi = handing({ figures: MAJOR_FIGURES }, /./);
   const greet = await world(t, { env: RESEARCH_ON, research: hi });
   greet.setInbox([tag({ text: "@pine_stoat gm" })]);
   await greet.step();
   assert.equal(hi.asked, 0);
   assert.doesNotMatch(String(greet.sends[0]?.text ?? ""), /coingecko|\$/);
+  // Nor does code's line that coingecko could not be read, though figures came back.
+  const unread = await world(t, { env: RESEARCH_ON, research: handing({ figures: MAJOR_FIGURES }, /\beth\b/) });
+  unread.setInbox([tag({ text: "@pine_stoat how's eth doing?" })]);
+  await unread.step();
+  assert.deepEqual(unread.sends.map((s) => s.text), [majorUnreadAnswers(MENTION, { lower: true })[0]]);
 });
 
 test("too long for X with its words: the line sheds fields, then goes, and the post always fits", async (t) => {
-  const words = "coingecko shows it down a fair bit today and sharply on the week, trading volume looks heavy for its size, plenty of churn going on over there now. not a call, just what it shows.";
-  assert.ok(`${words} Say stop to opt out.`.length <= 200, "the gate's own limit on the model's words");
-  const wide: FiguresSpec = [{ kind: "major", symbol: "superverse", rank: 188, priceUsd: 1_240, marketCapUsd: 1.21e9, volume24hUsd: 310e6, change24hPct: -12.34, change7dPct: -45.6 }];
-  const w = await world(t, { env: RESEARCH_ON, research: handing({ figures: wide }), answer: `${words} Say stop to opt out.` });
-  w.setInbox([tag({ text: "@pine_stoat thoughts on superverse?" })]);
+  const pools = ["ZXCVBNMQWE", "PLOKIJUHYG", "MNBVCXZASD"].map((n, i) => namedPool(n, i + 1, [-12.34, 45.6, -7.7][i]!, [310e6, 12e6, 2.2e6][i]!));
+  const w = await world(t, { env: RESEARCH_ON, research: hotResearch(pools, ["PEPE", "TAO", "WIF"]).research });
+  w.setInbox([tag({ text: "@pine_stoat what's hot?" })]);
   const r = await w.step();
   const text = String(w.sends[0]?.text ?? "");
   assert.ok(xWeightedLength(text) <= X_MAX_WEIGHTED, String(xWeightedLength(text)));
-  assert.match(text, /just what it shows\. coingecko: \$SUPERVERSE #188, .*Say stop to opt out\.$/);
-  assert.doesNotMatch(text, /7d/, "the week went first");
+  assert.match(text, / geckoterminal robinhood: trending \$ZXCVBNMQWE 24h -12\.3% vol ~\$310M, .*say stop to opt out\.$/);
+  assert.doesNotMatch(text, /coingecko: trending/, "coingecko's list went first");
   assert.match(r.log ?? "", /answer-figures-shortened 1/);
 });
 
 // ── majors, end to end ──────────────────────────────────────────────────────
 
 /** The real research with CoinGecko faked: ETH is #2, $BTC2 an unranked copycat, $WOJAK #1450. */
-function majorsResearch() {
+function majorsResearch(eth: { change24hPct?: number; change7dPct?: number } = {}) {
   const asked: string[] = [], resolved: string[] = [];
   const research = createXResearch({
     majors: {
@@ -2207,7 +2221,7 @@ function majorsResearch() {
       async market(id) {
         asked.push(`market:${id}`);
         return id === "ethereum"
-          ? { failed: false, observedAt: NOW, market: { id, symbol: "eth", name: "Ethereum", rank: 2, priceUsd: 3412.5, marketCapUsd: 411e9, volume24hUsd: 18.2e9, change24hPct: 1.24, change7dPct: -3.4 } }
+          ? { failed: false, observedAt: NOW, market: { id, symbol: "eth", name: "Ethereum", rank: 2, priceUsd: 3412.5, marketCapUsd: 411e9, volume24hUsd: 18.2e9, change24hPct: 1.24, change7dPct: -3.4, ...eth } }
           : { failed: true, failure: "invalid-shape", market: null };
       },
     },
@@ -2218,37 +2232,46 @@ function majorsResearch() {
   return { research, asked, resolved };
 }
 
-test("majors: \"how's eth doing?\" is read on coingecko, said in words, and posted with code's figures line", async (t) => {
+test("majors: \"how's eth doing?\" is read on coingecko, said in code's words, and posted with code's figures line, no draft", async (t) => {
   const m = majorsResearch();
-  const words = "coingecko shows it up a little today and a fair bit softer on the week, volume ordinary. a read, not a call.";
-  const w = await world(t, { env: RESEARCH_ON, research: m.research, answer: `${words} Say stop to opt out.` });
+  const w = await world(t, { env: RESEARCH_ON, research: m.research, answer: "a draft nobody should see. Say stop to opt out." });
   w.setInbox([tag({ text: "@pine_stoat how's eth doing?" })]);
   const r = await w.step();
   assert.deepEqual(m.asked, ["search:eth", "market:ethereum"]);
-  const [prompt] = w.asked();
-  assert.match(prompt!, /What you looked up just now.*«coingecko shows it up a little today».*«coingecko shows it down a fair bit on the week»/s);
-  assert.match(prompt!, /big coin on coingecko's list/);
-  assert.doesNotMatch(prompt!, /Coins you bought lately|PEPE|\p{N}|\$ETH|~\$/u, "never its buys, never a figure");
-  assert.deepEqual(w.sends, [{ text: `${words} ${MAJOR_LINE} Say stop to opt out.`, reply: { in_reply_to_tweet_id: MENTION } }]);
+  assert.deepEqual(w.asked(), [], "no model call: the words are code's");
+  const words = majorAnswers(ETH_READ, MENTION, { lower: true })[0]!.replace(/ say stop to opt out\.$/, "");
+  assert.deepEqual(w.sends, [{ text: `${words} ${MAJOR_LINE} say stop to opt out.`, reply: { in_reply_to_tweet_id: MENTION } }]);
+  assert.equal((await w.answers())[0]!.coin, store.ANSWER_LOOKED_UP);
   assert.match(r.log ?? "", /answer-intent-major 1/);
   assert.match(r.log ?? "", /answer-lookups 2/);
+  assert.match(r.log ?? "", /answer-code-words 1/);
   assert.match(r.log ?? "", /answer-figures 1/);
 });
 
-test("majors: a draft that names the coin, says it bought or holds it, or tells anyone to buy is refused, line and all", async (t) => {
-  for (const [draft, why] of [
-    ["eth is up a little today on coingecko, not a call. Say stop to opt out.", /gate:bought-named/],
-    ["coingecko shows it up a little today, i hold some myself. Say stop to opt out.", /gate:/],
-    ["coingecko shows it up a little today, worth buying here. Say stop to opt out.", /gate:/],
-    ["coingecko shows it up three percent today. Say stop to opt out.", /gate:/],
-  ] as const) {
-    const w = await world(t, { env: RESEARCH_ON, research: majorsResearch().research, answer: draft });
+test("majors: no prediction, target, advice or claim in any words beside a coin's figures, however a draft would put it (red-team 2026-10-12)", async (t) => {
+  // Posted at 34ced01e with "coingecko: $ETH #2, ~$3.4k, mcap ~$411B, vol ~$18B, 24h +11.8%, 7d +24.5%." after each.
+  const drafts = [
+    "coingecko shows it up sharply today and on the week, looks set to keep climbing toward new highs.",
+    "coingecko shows it up sharply today, and new highs look close. a read, not a call.",
+    "coingecko shows it up sharply today, the old high is the next stop.",
+    "coingecko shows it up sharply today, a dip from here would be a gift.",
+    "coingecko shows it up sharply today, plenty of steam left in it.",
+    "coingecko shows it up sharply today, it's still early on this move.",
+    // The earlier refusals, still never posted.
+    "eth is up a little today on coingecko, not a call.", "coingecko shows it up a little today, i hold some myself.",
+    "coingecko shows it up a little today, worth buying here.",
+  ].map((d) => `${d} Say stop to opt out.`);
+  const line = "coingecko: $ETH #2, ~$3.4k, mcap ~$411B, vol ~$18B, 24h +11.8%, 7d +24.5%.";
+  const read: MajorRead = { rank: "top", day: { dir: "up", size: "sharply" }, week: { dir: "up", size: "sharply" }, volume: "ordinary" };
+  for (const draft of drafts) {
+    const m = majorsResearch({ change24hPct: 11.8, change7dPct: 24.5 });
+    const w = await world(t, { env: RESEARCH_ON, research: m.research, answer: draft });
     w.setInbox([tag({ text: "@pine_stoat how's eth doing?" })]);
     await w.step();
-    const [row] = await w.answers();
-    assert.equal(row!.status, "skipped", draft);
-    assert.match(row!.reason ?? "", why, draft);
-    assert.deepEqual(w.sends, [], draft);
+    assert.deepEqual(w.asked(), [], draft);
+    const text = String(w.sends[0]?.text ?? "");
+    assert.ok(majorAnswers(read, MENTION, { lower: true }).some((l) => text === l.replace(/ say stop to opt out\.$/, ` ${line} say stop to opt out.`)), text);
+    assert.doesNotMatch(text, /new highs|next stop|gift|steam|early|climbing toward|hold|worth/, text);
   }
 });
 
@@ -2477,11 +2500,12 @@ test("what's hot never shows a ticker with a digit, nor one the gate would refus
     assert.doesNotMatch(text, /fomo: most bought/);
   }
   // And whatever research hands it, a line with such a ticker is never put in: the orchestrator reads every ticker again.
-  const w = await world(t, { env: RESEARCH_ON, research: handing({ figures: [{ kind: "pools", coins: [{ symbol: "BUY", change24hPct: 33.1, volume24hUsd: 800_000 }] }] }),
-    answer: UP_A_LITTLE });
-  w.setInbox([tag({ text: "@pine_stoat how's eth doing?" })]);
+  const read: HotRead = { coins: 1, lead: { dir: "up", size: "sharply" } };
+  const w = await world(t, { env: RESEARCH_ON,
+    research: handing({ figures: [{ kind: "pools", coins: [{ symbol: "BUY", change24hPct: 33.1, volume24hUsd: 800_000 }] }], hot: read }, /what's hot/) });
+  w.setInbox([tag({ text: "@pine_stoat what's hot?" })]);
   const r = await w.step();
-  assert.deepEqual(w.sends.map((s) => s.text), [UP_A_LITTLE]);
+  assert.deepEqual(w.sends.map((s) => s.text), [hotAnswers(read, MENTION, { lower: true })[0]]);
   assert.match(r.log ?? "", /answer-figures-left-out 1/);
 });
 

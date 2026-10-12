@@ -10,7 +10,7 @@ import { describe, it } from "node:test";
 import { admitAgentLine } from "../groupchat/policy";
 import { REPEAT_LIMIT, similarity } from "../social-post";
 import { admitXPost } from "./gate";
-import { hotAnswers, hotNoneAnswers, hotUnreadAnswers, moveOf, type HotRead, type Move } from "./market";
+import { hotAnswers, hotNoneAnswers, hotUnreadAnswers, majorAnswers, majorUnreadAnswers, moveOf, type HotRead, type MajorRead, type Move } from "./market";
 import { withoutReplyOptOut } from "./replies";
 
 const MOVES: (Move | null)[] = [null, { dir: "flat", size: null },
@@ -59,6 +59,25 @@ describe("what's hot in code's words", () => {
       judged(hotNoneAnswers("1000000000000000123", { lower: false }, { paper }), paper);
       judged(hotUnreadAnswers("1000000000000000123", { lower: false }, { paper }), paper);
     }
+  });
+
+  it("a major: eight frames for every whole read, live or on paper, none repeating another; a partial read still clears the gate (red-team 2026-10-12)", () => {
+    const moves = MOVES.filter((m): m is Move => m !== null);
+    for (const paper of [false, true]) {
+      for (const rank of ["top", "large", "mid"] as const) {
+        for (const day of moves) {
+          for (const week of [moves[1]!, moves[4]!, moves[7]!]) {
+            for (const volume of ["heavy", "light", "ordinary"] as const) judged(majorAnswers({ rank, day, week, volume }, "1000000000000000123", { lower: false }, { paper }), paper);
+          }
+        }
+      }
+      for (const read of [{ rank: null, day: moves[2]!, week: null, volume: null }, { rank: "mid", day: null, week: null, volume: "light" }] as MajorRead[]) {
+        for (const line of majorAnswers(read, "7", { lower: false }, { paper })) assert.ok(gate(line, [], paper ? "paper" : "live").ok, line);
+      }
+      judged(majorUnreadAnswers("1000000000000000123", { lower: false }, { paper }), paper);
+    }
+    assert.deepEqual(majorAnswers({ rank: null, day: null, week: null, volume: null }, "1", { lower: false }), [], "nothing to say: no answer");
+    for (const line of majorAnswers({ rank: "top", day: moves[0]!, week: moves[0]!, volume: "heavy" }, "1", { lower: false })) assert.match(line, /coingecko/);
   });
 
   it("this mention's own frame first, every frame once, the notice in the agent's case; no coin, no answer", () => {

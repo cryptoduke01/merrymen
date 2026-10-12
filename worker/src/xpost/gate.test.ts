@@ -225,6 +225,23 @@ describe("a reply never gives advice or a forecast in other words (red-team 2026
     // A buy post's own reasons are not advice.
     assert.equal(reason("it was cheap for me to get in and back out of pepe, which i liked", { kind: "buy", mode: "live", coins: ["pepe"] }), "ok");
   });
+
+  it("a forecast or a target in other words is refused: new highs, the next stop, a gift, steam left, still early on it (red-team 2026-10-12)", () => {
+    // Each admitted at 34ced01e and posted beside a coin's figures.
+    for (const draft of ["coingecko shows it up sharply today and on the week, looks set to keep climbing toward new highs.",
+      "coingecko shows it up sharply today, and new highs look close. a read, not a call.", "coingecko shows it up sharply today, the old high is the next stop.",
+      "coingecko shows it up sharply today, a dip from here would be a gift.", "coingecko shows it up sharply today, plenty of steam left in it.",
+      "coingecko shows it up sharply today, it's still early on this move.", "a few coins standing out on the index, and they could keep climbing.",
+      "a few coins standing out on the index, still early on all of them.", "a few coins standing out on the index, plenty of steam left in these.",
+      "a few coins standing out on the index, new highs look close for the top one.", "it has legs, the index shows buyers piling in.", "up only from here."]) {
+      assert.equal(reason(`${draft} Say stop to opt out.`, { kind: "reply", mode: "live", coins: [] }), "hype", draft);
+      assert.notEqual(reason(`${draft} Say stop to opt out.`, { kind: "reply", mode: "live", coins: [], buys: "none", named: true }), "ok", draft);
+    }
+    // What the research phrases say still passes: fomo's own cue, a move on the day.
+    for (const ok of ["fomo traders mostly argue it's still early, the public index shows liquidity is thin.", "coingecko shows it up sharply today, volume ordinary. not a call."]) {
+      assert.equal(reason(`${ok} Say stop to opt out.`, { kind: "reply", mode: "live", coins: [] }), "ok", ok);
+    }
+  });
 });
 
 describe("public replies preserve the X safeguards and require an opt-out", () => {
