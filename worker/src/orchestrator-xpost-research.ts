@@ -42,6 +42,7 @@ import { collapseOf } from "./coin-facts-types";
 import { createCoinFactsReader, FactsLimiter } from "./desk/facts";
 import { resolveByName } from "./desk/evidence";
 import { searchPools } from "./desk/gecko";
+import { geckoSource } from "./venues/geckoterminal";
 import type { FomoBroker } from "./fomo/contract";
 import type { TokenActivityData, TokenThesesData } from "./fomo/tools";
 import type { FomoEnvelope } from "./fomo/types";
@@ -56,8 +57,9 @@ import { coinOf, hash32 } from "./xpost/planner";
 import { normalisedTag, plainAsk, withoutReplyOptOut } from "./xpost/replies";
 import { takeAllowance, type XPost } from "./xpost/store";
 import { coinNamedIn, type AnswerIntentKind } from "./xpost/writer";
-import { asksAboutACoin, nameLikeWords } from "./xpost/words";
+import { asksAboutACoin, everydayWord, nameLikeWords } from "./xpost/words";
 import type { FiguresSpec } from "./xpost/figures";
+import { coinQuery, MAJORS_MAX_RANK, pickMajor, readCoinMarket, searchCoinList, type CoinMarket, type CoinMarketRead, type CoinSearchRead } from "./venues/coingecko-coins";
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -81,6 +83,15 @@ export type TagIntent =
    * (classifyTag), and nothing is looked up for it at all.
    */
   | { kind: "coin"; ticker: string | null; address: string | null; many?: true }
+  /**
+   * A coin asked about by name or ticker in one of the allowlist's plain
+   * shapes ("how's eth doing?", "thoughts on doge?", "$SOL today?": majorAsk),
+   * read on CoinGecko's list first (2026-10-12). `query` is the name or
+   * ticker, already a safe search (coinQuery). `fallback`: what the tag is if
+   * that coin is no major — a $ticker goes on as a coin of the chain; a word,
+   * as chat.
+   */
+  | { kind: "major"; query: string; fallback: { kind: "coin"; ticker: string | null; address: string | null; many?: true } | null }
   /** The allowlist's plain "what model are you" (modelQuestion): code's own line, never a draft. */
   | { kind: "model" }
   | { kind: "chat" }
@@ -254,8 +265,69 @@ export function exactAsk(text: unknown): boolean {
   return plain !== null && EXACT_ALLOWED.test(plain);
 }
 
+/**
+ * A COIN BY NAME OR TICKER (the owner's decision, 2026-10-12: majors, AiXBT
+ * style). Only a whole tag in plain words that is one of these shapes, after
+ * at most two greeting words, before at most one "today" or the like:
+ *
+ *   $SOL today?                      a cashtag alone
+ *   how's eth doing? / looking?      how is <coin> doing
+ *   thoughts on doge?                (any) thoughts on <coin>
+ *   what do you think of solana?     what do you think of / about <coin>
+ *   what's up with bitcoin?          what's up / happening / going on with <coin>
+ *   what about / tell me about <coin>, is <coin> up / down, <coin> price / update / stats,
+ *   where's <coin> at / trading
+ *
+ * The coin is a cashtag, or one to three words of letters and digits of
+ * which at least one is no everyday word (xpost/words.ts everydayWord):
+ * "how's the market doing", "thoughts on your trades", "what about
+ * yourself" are no coin. Nothing here decides it is a major: CoinGecko's
+ * list does, by an exact match that ranks (venues/coingecko-coins.ts
+ * pickMajor). A word more, a second coin, a contract, a handle, an emoji: it
+ * is not on the list.
+ */
+const NOWISH = String.raw`(?: (?:today|right now|now|rn|lately|this week|these days|tonight))?`;
+/** Words that are never a coin's, so a shape never takes one for its coin. */
+const NOT_A_COIN = String.raw`(?!(?:today|tomorrow|now|right|lately|rn|tonight|this|these|that|those|and|or|vs|versus|with|than|the|a|an|it|its|your|ur|my|our|their|his|her|you|u|ya|me|myself|yourself|yourselves|him|them|us|everyone|everything|anything|something|nothing|crypto|alts?|altcoins?|defi|nfts?|web)\b)`;
+const COIN_WORD = String.raw`${NOT_A_COIN}[a-z][a-z0-9]{1,14}`;
+const CASHTAG_COIN = String.raw`(\$[a-z][a-z0-9]{1,9})`;
+const ANY_COIN = String.raw`(\$[a-z][a-z0-9]{1,9}|${COIN_WORD}(?: ${COIN_WORD}){0,2})`;
+const MAJOR_SHAPES: readonly RegExp[] = [
+  `${CASHTAG_COIN}${NOWISH}`,
+  `how(?:'s| is|s) ${ANY_COIN} (?:doing|looking|holding up)${NOWISH}`,
+  `(?:any )?thoughts on ${ANY_COIN}${NOWISH}`,
+  `what do (?:you|u|ya) think (?:of|about) ${ANY_COIN}${NOWISH}`,
+  `(?:what's|whats|what is) (?:up|happening|going on) with ${ANY_COIN}${NOWISH}`,
+  `(?:what about|how about|tell me about) ${ANY_COIN}${NOWISH}`,
+  `(?:is|was) ${ANY_COIN} (?:up|down)${NOWISH}`,
+  `${ANY_COIN} (?:update|stats|price|check)${NOWISH}`,
+  `where(?:'s| is|s) ${ANY_COIN} (?:at|trading)${NOWISH}`,
+].map((s) => new RegExp(`^${GREETING}${s}$`, "u"));
+
+/** A tag in plain ASCII words (replies.ts plainAsk) where a $ may stand only right before a letter; null otherwise. */
+function plainCoinAsk(text: string): string | null {
+  const t = text.normalize("NFKC").replace(/[’‘]/g, "'");
+  if (/[^A-Za-z0-9\s',.!?$-]/.test(t) || /\$(?![A-Za-z])/.test(t)) return null;
+  return t.toLowerCase().replace(/\s+/g, " ").trim().replace(/^[\s,.!?'-]+/, "").replace(/[\s,.!?'-]+$/, "");
+}
+
+/** The name or ticker a tag asks about, as a safe search (coinQuery), or null when it is no such tag. Exported for tests. */
+export function majorAsk(text: unknown): string | null {
+  if (typeof text !== "string" || sherwoodMentioned(text)) return null;
+  const plain = plainCoinAsk(text);
+  if (plain === null) return null;
+  for (const re of MAJOR_SHAPES) {
+    const coin = re.exec(plain)?.[1];
+    if (!coin) continue;
+    if (modelNamed(coin)) return null;
+    if (!coin.startsWith("$") && coin.split(" ").every(everydayWord)) return null;
+    return coinQuery(coin);
+  }
+  return null;
+}
+
 /** Words that set one coin against another. */
-const COMPARES = /\b(?:vs\.?|versus|or|than|compared?|comparison|comparing|better|worse|safer|riskier|healthier|stronger|weaker|which|either|between|instead)\b/i;
+const COMPARES =/\b(?:vs\.?|versus|or|than|compared?|comparison|comparing|better|worse|safer|riskier|healthier|stronger|weaker|which|either|between|instead)\b/i;
 
 /**
  * WHAT THE QUESTION IS, BY CODE. `address` is the one contract address
@@ -288,6 +360,18 @@ export function classifyTag(text: string, o: { address?: string | null } = {}): 
   const asked = publicFactRequest(t);
   if (asked?.kind === "site" && asked.topic === "capabilities") return { kind: "capabilities" };
   if (asked?.kind === "site" && asked.topic === "onboarding") return { kind: "onboarding" };
+  // A COIN BY NAME OR TICKER, ON THE ALLOWLIST'S PLAIN SHAPES (majorAsk): read
+  // on CoinGecko's list first. What the tag would otherwise be is kept: a
+  // $ticker that turns out to be no major goes on as a coin of the chain,
+  // anything else as chat. Never with a contract, never for a private ask.
+  const major = address === null && !isPrivateAsk(t) ? majorAsk(t) : null;
+  const rest = classifyRest(t, address, asked);
+  if (major && (rest.kind === "coin" || rest.kind === "chat")) return { kind: "major", query: major, fallback: rest.kind === "coin" ? rest : null };
+  return rest;
+}
+
+/** classifyTag past the model, steer, capabilities and onboarding readings: its own trades, a coin, or chat. */
+function classifyRest(t: string, address: string | null, asked: ReturnType<typeof publicFactRequest>): TagIntent {
   const tickers = extractCashtags(t);
   const ticker = tickers[0] ?? null;
   // MORE THAN ONE COIN IN ONE TAG (red-team review, 2026-10-12): "$SAFU vs
@@ -354,7 +438,7 @@ export function boughtNames(facts: AgentFacts, posts: readonly XPost[]): string[
  */
 export function namesACoin(o: { text: string; intent: TagIntent; address: string | null }): boolean {
   const i = o.intent;
-  return o.address !== null || i.kind === "coin" || (i.kind === "own-trades" && (i.coin !== null || i.address !== null))
+  return o.address !== null || i.kind === "coin" || i.kind === "major" || (i.kind === "own-trades" && (i.coin !== null || i.address !== null))
     || coinNamedIn(o.text, []) || asksAboutACoin(o.text);
 }
 
@@ -406,6 +490,14 @@ export type FlowReader = (q: { chainId: number; address: string; timeoutMs: numb
  */
 export const DEFAULT_X_FLOW_PER_DAY = 200;
 
+/** The two CoinGecko reads a major costs, each held to `timeoutMs` (slot wait included). */
+export interface MajorsReader {
+  /** False when CoinGecko's main API cannot be asked at all (no Pro key): majors are off, nothing is spent. Absent: asked. */
+  configured?(): boolean;
+  search(query: string, timeoutMs: number): Promise<CoinSearchRead>;
+  market(id: string, timeoutMs: number): Promise<CoinMarketRead>;
+}
+
 export interface XResearchDeps {
   /** The index's coin facts, on the fleet lane with the per-X-account limiter. Default: built from `fleetHome`. */
   coinFacts?: CoinFactsReader;
@@ -424,6 +516,13 @@ export interface XResearchDeps {
    * Fomo read only made, when this says yes.
    */
   fomoUsable?: (tenant: string) => Promise<boolean>;
+  /**
+   * CoinGecko's main API for a coin by name or ticker: a search and one
+   * coin's market (venues/coingecko-coins.ts), on the fleet's CoinGecko Pro
+   * lane. Default: built from `fleetHome`. Without a Pro key every read is
+   * `no-pro-key` and nothing is asked.
+   */
+  majors?: MajorsReader;
   /** Onchain flow (Bitquery), only while the lane is configured. */
   flow?: FlowReader;
   /** Flow readings per UTC day across X accounts. Default DEFAULT_X_FLOW_PER_DAY. */
@@ -660,6 +759,38 @@ export function flowPhrases(r: FlowResult | null | undefined, seed: string): str
   return flowXLines(r, seed).filter(sayable);
 }
 
+/** A move in words: flat, a little, a fair bit, sharply. Thresholds are code's; never a figure. */
+function moveWords(pct: number | null, when: string): string | null {
+  if (pct === null || !Number.isFinite(pct)) return null;
+  const a = Math.abs(pct);
+  if (a < 0.5) return `flat ${when}`;
+  const how = a < 3 ? "a little" : a < 10 ? "a fair bit" : "sharply";
+  return `${pct > 0 ? "up" : "down"} ${how} ${when}`;
+}
+
+/**
+ * A MAJOR'S MARKET, IN WORDS (2026-10-12): where it ranks, how the day and the
+ * week went, how busy its trading is against its size, each from CoinGecko's
+ * numbers by code's own thresholds and with "coingecko" in it. Never a
+ * figure, never its name (the asker named it; the answer calls it "it"), and
+ * nothing about whether to buy it. The figures themselves go in code's line
+ * (xpost/figures.ts), never to the model.
+ */
+export function majorPhrases(m: Pick<CoinMarket, "rank" | "marketCapUsd" | "volume24hUsd" | "change24hPct" | "change7dPct">): string[] {
+  const out: string[] = [];
+  if (m.rank !== null) out.push(m.rank <= 10 ? "coingecko ranks it among the very biggest coins" : m.rank <= 50 ? "coingecko ranks it a large cap" : "coingecko ranks it a mid cap");
+  const day = moveWords(m.change24hPct, "today");
+  if (day) out.push(`coingecko shows it ${day}`);
+  const week = moveWords(m.change7dPct, "on the week");
+  if (week) out.push(`coingecko shows it ${week}`);
+  const vol = m.volume24hUsd, cap = m.marketCapUsd;
+  if (vol !== null && cap !== null && Number.isFinite(vol) && Number.isFinite(cap) && cap > 0 && vol >= 0) {
+    const turnover = vol / cap;
+    out.push(turnover >= 0.1 ? "trading volume looks heavy on coingecko" : turnover <= 0.02 ? "trading volume looks light on coingecko" : "trading volume looks ordinary on coingecko");
+  }
+  return out.filter(sayable);
+}
+
 /** What it can do, said by code: only what is wired, and always that a tag never orders a trade. */
 export function capabilityPhrases(o: { fomo: boolean; flow: boolean }): string[] {
   // Short enough to stand in a whole answer with the opt-out notice (the test says it through the gate).
@@ -876,6 +1007,11 @@ export function creatorClaim(description: unknown): string | null {
 
 // ── the gatherer ────────────────────────────────────────────────────────────
 
+/** A provider read's failure as a note may carry it: our own stable code, or "failed". Never provider text. */
+function failureCode(failure: unknown): string {
+  return typeof failure === "string" && /^[a-z0-9-]{1,32}$/.test(failure) ? failure : "failed";
+}
+
 /** Fomo's envelope data, when the read stood: a refusal, failure or unknown is nothing. */
 function dataOf<T>(env: FomoEnvelope | null | undefined): T | null {
   if (!env || !["ok", "partial", "capped", "stale", "empty"].includes(env.status)) return null;
@@ -896,6 +1032,11 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
   const projectDescription = d.projectDescription ?? ((token: string, chainId: number) => readPublicProjectDescription(token, chainId));
   const flowPerDay = d.flowPerDay ?? DEFAULT_X_FLOW_PER_DAY;
   const publicTheses = d.publicTheses ?? ((shared: Db, agentId: string) => readPeerTheses(shared, [agentId as `0x${string}`]));
+  const majors: MajorsReader = d.majors ?? {
+    configured: () => geckoSource().id === "coingecko-pro",
+    search: (query, timeoutMs) => searchCoinList(query, { timeoutMs, ...(lane ? { fleet: lane } : {}) }),
+    market: (id, timeoutMs) => readCoinMarket(id, { timeoutMs, ...(lane ? { fleet: lane } : {}) }),
+  };
 
   return {
     async gather(input): Promise<ResearchBundle> {
@@ -951,6 +1092,66 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
         const usable = await look(() => d.fomoUsable!(input.tenant), false, true);
         return usable === true ? broker : null;
       };
+      /**
+       * A COIN BY NAME OR TICKER ON COINGECKO'S LIST (majorAsk): a search,
+       * then that coin's market, each one lookup under the X account's
+       * limiter and the hour's, on the fleet's CoinGecko Pro lane, each held
+       * to its share of the bundle (a slot that does not come in time is
+       * skipped, never waited on). "major": an exact match ranked at most
+       * MAJORS_MAX_RANK, said in words and handed to code's figures line.
+       * "none": CoinGecko answered, and no coin by that name or ticker is a
+       * major — and so is a fleet with no CoinGecko Pro key, where majors are
+       * simply off and a tag goes on exactly as it did before them. "unread":
+       * it could not be asked this time, or did not answer.
+       */
+      const majorBundle = async (query: string): Promise<{ kind: "major"; facts: string[]; figures: FiguresSpec } | { kind: "none" } | { kind: "unread" }> => {
+        if (majors.configured?.() === false) {
+          notes.push("majors-off");
+          return { kind: "none" };
+        }
+        const key = xAccountKey(input.xUserId);
+        if (!limiter.take(key)) {
+          notes.push("index-busy");
+          return { kind: "unread" };
+        }
+        const found = await look((ms) => majors.search(query, ms), null);
+        if (found?.failure === "no-pro-key") {
+          notes.push("majors-off");
+          return { kind: "none" };
+        }
+        if (!found || found.failed) {
+          notes.push(`coins-${failureCode(found?.failure)}`);
+          return { kind: "unread" };
+        }
+        const pick = pickMajor(query, found.hits);
+        if (!pick) {
+          notes.push("major-none");
+          return { kind: "none" };
+        }
+        if (!limiter.take(key)) {
+          notes.push("index-busy");
+          return { kind: "unread" };
+        }
+        const read = await look((ms) => majors.market(pick.id, ms), null);
+        const m = read && !read.failed ? read.market : null;
+        if (!m) {
+          notes.push(`coins-${failureCode(read?.failure)}`);
+          return { kind: "unread" };
+        }
+        // Its own market must still say it ranks, as that coin: the search's word is not enough.
+        if (m.id !== pick.id || m.rank === null || m.rank > MAJORS_MAX_RANK) {
+          notes.push("major-none");
+          return { kind: "none" };
+        }
+        const facts = majorPhrases(m);
+        if (!facts.length) {
+          notes.push("major-unsaid");
+          return { kind: "unread" };
+        }
+        notes.push("major");
+        return { kind: "major", facts, figures: [{ kind: "major", symbol: m.symbol, rank: m.rank, priceUsd: m.priceUsd, marketCapUsd: m.marketCapUsd,
+          volume24hUsd: m.volume24hUsd, change24hPct: m.change24hPct, change7dPct: m.change7dPct }] };
+      };
       const i = input.intent;
       const f = input.facts;
       // The exact path only for a plain question about the tagged coin alone (exactAsk).
@@ -1005,39 +1206,51 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
             return { facts: history, ...(history.length ? { exact: true } : {}), lookups, notes };
           }
           case "coin":
-            // Facts of one coin said of another: nothing for a tag that names more than one.
-            if (i.many) {
-              notes.push("many");
-              return { facts: [], lookups, notes };
-            }
             break;
+          case "major": {
+            const found = await majorBundle(i.query);
+            if (found.kind === "major") return { facts: found.facts, figures: found.figures, lookups, notes };
+            // CoinGecko could not be read: nothing at all, never a guess on the
+            // chain's own coins (a "$SOL" there is not the Solana asked about).
+            if (found.kind === "unread") return { facts: [], lookups, notes };
+            // No major by that name or ticker: a $ticker goes on as a coin of the chain, a word as chat.
+            if (!i.fallback) return { facts: [], intent: "chat", lookups, notes };
+            break;
+          }
         }
         // ── a coin ──────────────────────────────────────────────────────
+        const c = i.kind === "major" ? i.fallback! : i as Extract<TagIntent, { kind: "coin" }>;
+        const asCoin = i.kind === "major" ? { intent: "coin" as const } : {};
+        // Facts of one coin said of another: nothing for a tag that names more than one.
+        if (c.many) {
+          notes.push("many");
+          return { facts: [], ...asCoin, lookups, notes };
+        }
         // Its own records are read only for a tagged contract (the exact path).
-        const theses = i.address ? await ownTheses() : [];
+        const theses = c.address ? await ownTheses() : [];
         // "$PEPE <another contract>": nothing is looked up for a copycat of a coin it bought.
-        if (i.ticker && i.address && taggedConflict({ label: i.ticker, address: i.address, facts: f, posts: input.posts, theses })) {
+        if (c.ticker && c.address && taggedConflict({ label: c.ticker, address: c.address, facts: f, posts: input.posts, theses })) {
           notes.push("conflict");
-          return { facts: [], lookups, notes };
+          return { facts: [], ...asCoin, lookups, notes };
         }
         // EVERY TICKER THROUGH THE INDEX'S OWN RESOLVER (red-team review,
         // 2026-10-12), never its own buys: "$PEPE" was matched by display
         // name to the PEPEAI it bought (named "Pepe"), and that contract's
         // red flags were posted as $PEPE's. The resolver takes only an exact,
         // unambiguous ticker, so the facts are the coin the asker named.
-        let address = i.address;
-        if (!address && i.ticker) {
+        let address = c.address;
+        if (!address && c.ticker) {
           if (!limiter.take(xAccountKey(input.xUserId))) notes.push("index-busy");
-          else address = await look((ms) => resolveTicker(i.ticker!, ms), null);
+          else address = await look((ms) => resolveTicker(c.ticker!, ms), null);
           if (!address) notes.push("unresolved");
         }
         // ITS HISTORY ONLY BY THE CONTRACT THE TAG CARRIED, which its own
         // records bought, asked about alone: never by the name asked, nor by
         // an address the name resolved to ("$PEPE" finding its PEPE buy is a
         // name), nor beside another name ("$WIF <its PEPE contract>").
-        if (i.address && !plainExact) notes.push("not-plain");
-        const history = plainExact ? ownHistoryPhrases({ address: i.address, facts: f, posts: input.posts, theses }) : [];
-        if (!address) return { facts: [], lookups, notes };
+        if (c.address && !plainExact) notes.push("not-plain");
+        const history = plainExact ? ownHistoryPhrases({ address: c.address, facts: f, posts: input.posts, theses }) : [];
+        if (!address) return { facts: [], ...asCoin, lookups, notes };
         const key = address;
         // THE CREATOR'S TEXT ONLY ON THE EXACT PATH (creatorClaim): the tag's
         // own full contract, which its records bought and its history said.
@@ -1074,7 +1287,7 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
         }
         if (flow && !flow.ok) notes.push(`flow-${flow.failure}`);
         out.push(...flowPhrases(flow, `${input.tenant}|${key}`));
-        return { facts: out.filter(sayable).slice(0, BUNDLE_FACTS), ...(history.length ? { exact: true } : {}), claim, lookups, notes };
+        return { facts: out.filter(sayable).slice(0, BUNDLE_FACTS), ...(history.length ? { exact: true } : {}), ...asCoin, claim, lookups, notes };
       } catch {
         // Research is an extra: a fault here is an answer without it, never a failed pass.
         notes.push("fault");

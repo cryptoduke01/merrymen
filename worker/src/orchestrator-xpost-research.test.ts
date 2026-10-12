@@ -27,15 +27,19 @@ import {
   fomoActivityPhrases,
   fomoThesesPhrases,
   generalTradesQuestion,
+  majorAsk,
+  majorPhrases,
   namesACoin,
   ONBOARDING_PHRASES,
   ownHistoryPhrases,
   RESEARCH_BUDGET,
   sayable,
   taggedConflict,
+  type MajorsReader,
   type ResearchInput,
   type TagIntent,
 } from "./orchestrator-xpost-research";
+import type { CoinHit, CoinMarket } from "./venues/coingecko-coins";
 import type { PublicThesis } from "./thesis-policy";
 import { admitXPost } from "./xpost/gate";
 import { tagCandidate } from "./xpost/replies";
@@ -95,7 +99,7 @@ describe("a tag's intent, read by code", () => {
     ["what kind of ai are you", "model"],
     ["what ai runs your trading?", "unanswered"],
     ["sherwood TGE soon?", "unanswered"],
-    ["thoughts on $WIF?", "coin"],
+    ["thoughts on $WIF?", "major"],
     ["how many holders does $WIF have?", "coin"],
     ["gm, how's your day going?", "chat"],
     ["what's your pnl?", "chat"],
@@ -1103,5 +1107,164 @@ describe("never confirm a buy by name", () => {
     const e = await exact.research.gather(input({ kind: "coin", ticker: null, address: PEPE_CA }, { facts, posts: [buyPost], question: "what is this coin?" }));
     assert.equal(e.exact, true);
     assert.deepEqual(exact.f.described, [PEPE_CA], "the exact path still reads it");
+  });
+});
+
+// ── majors: a coin by name or ticker, on CoinGecko's list (2026-10-12) ─────────
+
+const ETH_MARKET: CoinMarket = { id: "ethereum", symbol: "eth", name: "Ethereum", rank: 2, priceUsd: 3412.5, marketCapUsd: 411e9, volume24hUsd: 18.2e9, change24hPct: 1.24, change7dPct: -3.4 };
+const SEARCH_HITS: CoinHit[] = [
+  { id: "ethereum", symbol: "ETH", name: "Ethereum", rank: 2 },
+  { id: "ethereum-2", symbol: "ETH2", name: "Ethereum 2", rank: null },
+  { id: "wojak", symbol: "WOJAK", name: "Wojak", rank: 1450 },
+  { id: "bitcoin", symbol: "BTC", name: "Bitcoin", rank: 1 },
+  { id: "bitcoin-2", symbol: "BTC2", name: "Bitcoin 2", rank: null },
+];
+
+/** CoinGecko faked: what it was asked, a search over SEARCH_HITS, and one market per id. */
+function majorsFake(o: { markets?: Record<string, CoinMarket | null>; searchFails?: string; off?: boolean } = {}) {
+  const asked: string[] = [];
+  const reader: MajorsReader = {
+    configured: () => o.off !== true,
+    async search(query, timeoutMs) {
+      asked.push(`search:${query}:${timeoutMs > 0 ? "ok" : "late"}`);
+      return o.searchFails ? { hits: [], failed: true, failure: o.searchFails } : { hits: SEARCH_HITS, failed: false, observedAt: NOW };
+    },
+    async market(id) {
+      asked.push(`market:${id}`);
+      const m = o.markets && Object.hasOwn(o.markets, id) ? o.markets[id]! : id === "ethereum" ? ETH_MARKET : null;
+      return m ? { market: m, failed: false, observedAt: NOW } : { market: null, failed: true, failure: "invalid-shape" };
+    },
+  };
+  return { reader, asked };
+}
+
+describe("majors: a coin by name or ticker, read on coingecko's list (2026-10-12)", () => {
+  it("only the allowlist's plain shapes ask about a coin by name or ticker", () => {
+    const yes: [string, string][] = [
+      ["how's eth doing?", "eth"], ["thoughts on doge?", "doge"], ["$SOL today?", "sol"], ["how's bitcoin doing today?", "bitcoin"],
+      ["what do you think about solana?", "solana"], ["is btc up today?", "btc"], ["btc price?", "btc"], ["what's up with eth?", "eth"],
+      ["how's shiba inu doing?", "shiba inu"], ["gm, how's eth looking?", "eth"], ["thoughts on $BTC2?", "btc2"], ["yo alan, where's sol at?", "sol"],
+    ];
+    for (const [text, query] of yes) assert.equal(majorAsk(text), query, text);
+    for (const text of ["how's the market doing?", "thoughts on your trades?", "tell me about yourself", "cool pfp?", "thoughts on crypto?",
+      "how's sherwood doing?", "how's sherw00d doing?", "thoughts on claude?", "did you buy eth?", "what's hot?", "eth vs sol?", "thoughts on eth and sol?",
+      "how's your wallet doing?", "what about tomorrow?", "how's it going?", "how's life?", "thoughts on eth? 🚀", "how's eth doing? should i buy",
+      "thoughts on $ eth?", "how's еth doing?", "is eth going to pump?", "how's merrymen doing?", "thoughts on robinhood chain?"]) {
+      assert.equal(majorAsk(text), null, text);
+    }
+  });
+
+  it("is read as a major, keeping what the tag would otherwise be: a $ticker a coin of the chain, a word chat", () => {
+    assert.deepEqual(classifyTag("how's eth doing?"), { kind: "major", query: "eth", fallback: null });
+    assert.deepEqual(classifyTag("thoughts on $WOJAK?"), { kind: "major", query: "wojak", fallback: { kind: "coin", ticker: "WOJAK", address: null } });
+    assert.equal(classifyTag("thoughts on this coin?", { address: CA }).kind, "coin", "never with a contract");
+    assert.equal(classifyTag("how's sherwood doing?").kind, "unanswered");
+    assert.ok(namesACoin({ text: "how's eth doing?", intent: classifyTag("how's eth doing?"), address: null }), "a named major is a named coin");
+  });
+
+  it("its market in words: rank, the day, the week, volume against size, each with coingecko in it, through the X gate", () => {
+    const said = majorPhrases(ETH_MARKET);
+    assert.deepEqual(said, ["coingecko ranks it among the very biggest coins", "coingecko shows it up a little today", "coingecko shows it down a fair bit on the week",
+      "trading volume looks ordinary on coingecko"]);
+    const bands = [
+      ...majorPhrases({ rank: 30, marketCapUsd: 1e9, volume24hUsd: 2e8, change24hPct: -15, change7dPct: 0.2 }),
+      ...majorPhrases({ rank: 150, marketCapUsd: 1e9, volume24hUsd: 1e7, change24hPct: 7, change7dPct: -0.3 }),
+    ];
+    for (const p of ["coingecko ranks it a large cap", "coingecko shows it down sharply today", "coingecko shows it flat on the week", "trading volume looks heavy on coingecko",
+      "coingecko ranks it a mid cap", "coingecko shows it up a fair bit today", "trading volume looks light on coingecko"]) assert.ok(bands.includes(p), p);
+    for (const p of [...said, ...bands]) {
+      assert.ok(sayable(p), p);
+      assert.doesNotMatch(p, /\p{N}|eth|ethereum|buy|\$/iu, p);
+      assert.ok(carriesResearch(p), `${p} is research by its source`);
+      clears(p);
+    }
+    assert.deepEqual(majorPhrases({ rank: null, marketCapUsd: null, volume24hUsd: null, change24hPct: null, change7dPct: null }), []);
+  });
+
+  it("an exact major: a search and its market, two lookups, the words and the figures code renders", async () => {
+    const m = majorsFake();
+    const b = await createXResearch({ majors: m.reader, now: () => Date.now() }).gather(input({ kind: "major", query: "eth", fallback: null }));
+    assert.deepEqual(m.asked, ["search:eth:ok", "market:ethereum"]);
+    assert.equal(b.lookups, 2);
+    assert.deepEqual(b.facts, majorPhrases(ETH_MARKET));
+    assert.deepEqual(b.figures, [{ kind: "major", symbol: "eth", rank: 2, priceUsd: 3412.5, marketCapUsd: 411e9, volume24hUsd: 18.2e9, change24hPct: 1.24, change7dPct: -3.4 }]);
+    assert.equal(b.intent, undefined, "answered as the major it is");
+    assert.ok(b.notes.includes("major"));
+  });
+
+  it("a copycat, the unranked or a coin past the cap is no major: a $ticker goes on as a coin of the chain, a word as chat", async () => {
+    // "$WOJAK": #1450 on coingecko, no major — the chain's own resolver takes it, as before.
+    const resolved: string[] = [];
+    const w = majorsFake();
+    const wojak = await createXResearch({ majors: w.reader, resolveTicker: async (t) => { resolved.push(t); return null; }, coinFacts: async () => ({ ok: false, why: "unavailable" }), now: () => Date.now() })
+      .gather(input({ kind: "major", query: "wojak", fallback: { kind: "coin", ticker: "WOJAK", address: null } }));
+    assert.deepEqual(w.asked, ["search:wojak:ok"], "no market read for no major");
+    assert.deepEqual(resolved, ["WOJAK"]);
+    assert.equal(wojak.intent, "coin");
+    assert.equal(wojak.figures, undefined);
+    // "how's btc2 doing": no major by that name, and no ticker: chat, nothing more looked up.
+    const c = majorsFake();
+    const btc2 = await createXResearch({ majors: c.reader, now: () => Date.now() }).gather(input({ kind: "major", query: "btc2", fallback: null }));
+    assert.deepEqual(btc2, { facts: [], intent: "chat", lookups: 1, notes: ["major-none"] });
+    // A market that no longer ranks inside the cap, or is another coin's row: no major either.
+    for (const market of [{ ...ETH_MARKET, rank: 201 }, { ...ETH_MARKET, rank: null }, { ...ETH_MARKET, id: "ethereum-classic" }]) {
+      const late = majorsFake({ markets: { ethereum: market } });
+      const r = await createXResearch({ majors: late.reader, now: () => Date.now() }).gather(input({ kind: "major", query: "eth", fallback: null }));
+      assert.equal(r.figures, undefined, JSON.stringify(market));
+      assert.deepEqual(r.facts, []);
+    }
+  });
+
+  it("coingecko unread is nothing at all, never a guess on the chain's coins; with no Pro key majors are off and the tag goes on as before", async () => {
+    const resolved: string[] = [];
+    const down = majorsFake({ searchFails: "http-429" });
+    const r = await createXResearch({ majors: down.reader, resolveTicker: async (t) => { resolved.push(t); return CA; }, now: () => Date.now() })
+      .gather(input({ kind: "major", query: "sol", fallback: { kind: "coin", ticker: "SOL", address: null } }));
+    assert.deepEqual(r.facts, []);
+    assert.deepEqual(resolved, [], "a $SOL on the chain is not the solana asked about");
+    assert.ok(r.notes.includes("coins-http-429"));
+    assert.equal(r.intent, undefined, "told it couldn't look it up");
+    const off = majorsFake({ off: true });
+    const asIfBefore: string[] = [];
+    const before = await createXResearch({ majors: off.reader, resolveTicker: async (t) => { asIfBefore.push(t); return null; }, now: () => Date.now() })
+      .gather(input({ kind: "major", query: "sol", fallback: { kind: "coin", ticker: "SOL", address: null } }));
+    assert.deepEqual(off.asked, [], "nothing asked, nothing spent");
+    assert.deepEqual(asIfBefore, ["SOL"]);
+    assert.equal(before.intent, "coin");
+  });
+
+  it("each read spends the X account's limiter and the bundle's time: a busy account or a late bundle asks nothing", async () => {
+    const m = majorsFake();
+    const research = createXResearch({ majors: m.reader, now: () => Date.now() });
+    for (let n = 0; n < 4; n++) await research.gather(input({ kind: "major", query: "eth", fallback: null }));
+    assert.equal(m.asked.length, 8, "eight reads, the X account's ten minutes");
+    const busy = await research.gather(input({ kind: "major", query: "eth", fallback: null }));
+    assert.deepEqual(busy.facts, []);
+    assert.ok(busy.notes.includes("index-busy"));
+    assert.equal(m.asked.length, 8);
+    const hourly = majorsFake();
+    const capped = createXResearch({ majors: hourly.reader, lookupsPerHour: 1, now: () => Date.now() });
+    const one = await capped.gather(input({ kind: "major", query: "eth", fallback: null }, { xUserId: "222" }));
+    assert.deepEqual(one.facts, [], "the hour's lookups across X accounts: the market read was refused");
+    assert.deepEqual(hourly.asked, ["search:eth:ok"]);
+    const late = majorsFake();
+    const lateB = await createXResearch({ majors: late.reader, now: () => Date.now() }).gather(input({ kind: "major", query: "eth", fallback: null }, { budgetMs: 100 }));
+    assert.deepEqual(late.asked, []);
+    assert.ok(lateB.notes.includes("late"));
+  });
+
+  it("the writer is told it is a big coin on coingecko's list, not a robinhood chain coin it trades, with no figure and no name", () => {
+    const facts: AnswerFacts = { agentName: "Alan", strategy: "trencher", flavour: null, traits: [], mode: "live", style: { lower: true, emoji: 0, exclaim: 0 }, recentOwn: [],
+      question: "how's eth doing?", recentBuys: [{ label: "PEPE", paper: false }], boughtLately: "live", said: ["grabbed some pepe"], walletPublic: false, coinNamed: true,
+      intent: "major", research: majorPhrases(ETH_MARKET) };
+    const p = answerPrompt(facts);
+    assert.match(p.prompt, /big coin on coingecko's list/);
+    assert.match(p.prompt, /not a robinhood chain coin and not one you trade/);
+    assert.match(p.prompt, /exact figures are added after your words/);
+    assert.match(p.prompt, /They named a specific coin/);
+    assert.doesNotMatch(p.prompt, /PEPE|grabbed|\p{N}/u, "never its buys, never a figure");
+    const nothing = answerPrompt({ ...facts, research: [] });
+    assert.match(nothing.prompt, /couldn't look it up just now/);
   });
 });

@@ -222,7 +222,7 @@ export interface AnswerFacts extends WriterFacts {
 }
 
 /** A tag's intent, as code reads it. */
-export type AnswerIntentKind = "capabilities" | "onboarding" | "own-trades" | "coin" | "model" | "chat";
+export type AnswerIntentKind = "capabilities" | "onboarding" | "own-trades" | "coin" | "model" | "chat" | "major";
 
 /**
  * THE MODEL IT IS ASKED ABOUT, AS AN X POST SPELLS IT: "sherwood-1", merrymen's
@@ -879,6 +879,8 @@ const INTENT_HINT: Readonly<Record<AnswerIntentKind, string>> = {
   coin: "They are asking about a coin. Say what you looked up, keeping who said it. Never say whether to buy it, and name it without a $ sign.",
   model: "They are asking what model you run on. Answer only with the model line in the rules.",
   chat: "It is just chat. Answer like a person would, briefly.",
+  // A MAJOR (2026-10-12): code adds the figures after the words, so the words carry none.
+  major: "They are asking about a big coin on coingecko's list. Say what you looked up as what coingecko shows right now, a read and not a call: never whether to buy it, never where it's headed. It is not a robinhood chain coin and not one you trade, so keep yourself, your trades and your holdings out of it. The exact figures are added after your words, so write no number or amount yourself.",
 };
 
 /**
@@ -894,6 +896,7 @@ const NOTHING_LOOKED_UP: Readonly<Partial<Record<AnswerIntentKind, string>>> = {
   "own-trades": "They are asking about your own trades, and you have nothing more on it than the facts above: answer only from those, or say you don't have that to hand, or PASS. Never a size, a price, a result or that you still hold it.",
   model: INTENT_HINT.model,
   chat: INTENT_HINT.chat,
+  major: "They are asking about a coin by name, and you couldn't look it up just now: say so briefly and casually, or PASS. Never guess how it's doing, and keep yourself and your trades out of it.",
 };
 
 /**

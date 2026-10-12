@@ -81,6 +81,11 @@ function listedIn(list: ReadonlySet<string>, w: string): boolean {
 }
 const tagWord = (w: string): boolean => listedIn(TAG_WORDS, w);
 
+/** An everyday word of a tag (TAG_WORDS, endings people add taken off): never a coin's name to look up. */
+export function everydayWord(w: string): boolean {
+  return typeof w === "string" && tagWord(w.toLowerCase());
+}
+
 /** A word an answer told its buys may say beside the coins it was told of: everyday, or how it talks about its trading. */
 export function answerWord(w: string): boolean {
   return tagWord(w) || listedIn(ANSWER_WORDS, w);

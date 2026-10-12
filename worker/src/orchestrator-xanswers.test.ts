@@ -2186,3 +2186,84 @@ test("too long for X with its words: the line sheds fields, then goes, and the p
   assert.match(r.log ?? "", /answer-figures-shortened 1/);
 });
 
+// ── majors, end to end ──────────────────────────────────────────────────────
+
+/** The real research with CoinGecko faked: ETH is #2, $BTC2 an unranked copycat, $WOJAK #1450. */
+function majorsResearch() {
+  const asked: string[] = [], resolved: string[] = [];
+  const research = createXResearch({
+    majors: {
+      configured: () => true,
+      async search(query) {
+        asked.push(`search:${query}`);
+        return { failed: false, observedAt: NOW, hits: [
+          { id: "ethereum", symbol: "ETH", name: "Ethereum", rank: 2 }, { id: "bitcoin-2", symbol: "BTC2", name: "Bitcoin 2", rank: null },
+          { id: "wojak", symbol: "WOJAK", name: "Wojak", rank: 1450 },
+        ] };
+      },
+      async market(id) {
+        asked.push(`market:${id}`);
+        return id === "ethereum"
+          ? { failed: false, observedAt: NOW, market: { id, symbol: "eth", name: "Ethereum", rank: 2, priceUsd: 3412.5, marketCapUsd: 411e9, volume24hUsd: 18.2e9, change24hPct: 1.24, change7dPct: -3.4 } }
+          : { failed: true, failure: "invalid-shape", market: null };
+      },
+    },
+    resolveTicker: async (t) => { resolved.push(t); return null; },
+    coinFacts: async () => ({ ok: false, why: "unavailable" }),
+    projectDescription: async () => null, publicTheses: async () => [],
+  });
+  return { research, asked, resolved };
+}
+
+test("majors: \"how's eth doing?\" is read on coingecko, said in words, and posted with code's figures line", async (t) => {
+  const m = majorsResearch();
+  const words = "coingecko shows it up a little today and a fair bit softer on the week, volume ordinary. a read, not a call.";
+  const w = await world(t, { env: RESEARCH_ON, research: m.research, answer: `${words} Say stop to opt out.` });
+  w.setInbox([tag({ text: "@pine_stoat how's eth doing?" })]);
+  const r = await w.step();
+  assert.deepEqual(m.asked, ["search:eth", "market:ethereum"]);
+  const [prompt] = w.asked();
+  assert.match(prompt!, /What you looked up just now.*«coingecko shows it up a little today».*«coingecko shows it down a fair bit on the week»/s);
+  assert.match(prompt!, /big coin on coingecko's list/);
+  assert.doesNotMatch(prompt!, /Coins you bought lately|PEPE|\p{N}|\$ETH|~\$/u, "never its buys, never a figure");
+  assert.deepEqual(w.sends, [{ text: `${words} ${MAJOR_LINE} Say stop to opt out.`, reply: { in_reply_to_tweet_id: MENTION } }]);
+  assert.match(r.log ?? "", /answer-intent-major 1/);
+  assert.match(r.log ?? "", /answer-lookups 2/);
+  assert.match(r.log ?? "", /answer-figures 1/);
+});
+
+test("majors: a draft that names the coin, says it bought or holds it, or tells anyone to buy is refused, line and all", async (t) => {
+  for (const [draft, why] of [
+    ["eth is up a little today on coingecko, not a call. Say stop to opt out.", /gate:bought-named/],
+    ["coingecko shows it up a little today, i hold some myself. Say stop to opt out.", /gate:/],
+    ["coingecko shows it up a little today, worth buying here. Say stop to opt out.", /gate:/],
+    ["coingecko shows it up three percent today. Say stop to opt out.", /gate:/],
+  ] as const) {
+    const w = await world(t, { env: RESEARCH_ON, research: majorsResearch().research, answer: draft });
+    w.setInbox([tag({ text: "@pine_stoat how's eth doing?" })]);
+    await w.step();
+    const [row] = await w.answers();
+    assert.equal(row!.status, "skipped", draft);
+    assert.match(row!.reason ?? "", why, draft);
+    assert.deepEqual(w.sends, [], draft);
+  }
+});
+
+test("majors: a copycat ticker gets no figures, and goes on as a coin of the chain", async (t) => {
+  const m = majorsResearch();
+  const w = await world(t, { env: RESEARCH_ON, research: m.research, answer: "couldn't look that one up just now, sorry. Say stop to opt out." });
+  w.setInbox([tag({ text: "@pine_stoat thoughts on $BTC2?" })]);
+  await w.step();
+  assert.deepEqual(m.asked, ["search:btc2"], "no market read for no major");
+  const [prompt] = w.asked();
+  assert.match(prompt!, /They are asking about a coin, and you couldn't look it up just now/);
+  assert.deepEqual(w.sends.map((s) => s.text), ["couldn't look that one up just now, sorry. Say stop to opt out."]);
+  // "$WOJAK", #1450: no major, and the chain's own resolver is asked, as before majors.
+  const m2 = majorsResearch();
+  const w2 = await world(t, { env: RESEARCH_ON, research: m2.research, answer: "couldn't look that one up just now, sorry. Say stop to opt out." });
+  w2.setInbox([tag({ text: "@pine_stoat thoughts on $WOJAK?" })]);
+  await w2.step();
+  assert.deepEqual(m2.resolved, ["WOJAK"]);
+  assert.doesNotMatch(String(w2.sends[0]?.text ?? ""), /coingecko:|~\$/);
+});
+
