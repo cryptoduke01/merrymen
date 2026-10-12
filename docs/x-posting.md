@@ -416,9 +416,9 @@ reply consent; it does not erase recipient opt-outs or published posts.
 | `MERRYMEN_XPOST_FLEET_PER_DAY` | orchestrator | 1000 | posts per UTC day across the fleet; `0` or unreadable = off |
 | `MERRYMEN_XPOST_ACTIVE_TENANTS` | orchestrator | unset | comma-separated owner (tenant) addresses on the active cadence; see "Active owners" below; an entry that is not an address is named by position and ignored |
 | `MERRYMEN_XPOST_RESEARCH` | orchestrator | unset (off) | exactly `1`: an active agent's answers look things up first; see "Research for answers" below. Off: nothing is looked up and tags are selected exactly as without it |
-| `MERRYMEN_XPOST_FOMO` | orchestrator | unset (off) | exactly `1`, with research on: answers may use Fomo's token activity and quick theses, paraphrased and attributed. Needs the Fomo pass on (`MERRYMEN_FOMO_ENABLED=1`); set without research it does nothing, and the boot log says so |
+| `MERRYMEN_XPOST_FOMO` | orchestrator | unset (off) | exactly `1`, with research on: answers may use Fomo's token activity and quick theses, paraphrased and attributed. **Leave unset: pending owner confirmation of the provider's Enterprise redistribution rights** (see "Fomo on X" below). Needs the Fomo pass on (`MERRYMEN_FOMO_ENABLED=1`); set without research it does nothing, and the boot log says so |
 | `MERRYMEN_XPOST_RESEARCH_PER_HOUR` | orchestrator | 120 | public-index lookups (a name search, a coin's facts) per hour across every X account; `0` = none; unreadable = the default. Each X account also has at most eight per ten minutes |
-| `MERRYMEN_FOMO_X_HOURLY_CREDITS` | orchestrator | 3000 | Fomo credits per X account per clock hour for answers (`docs/fomo.md`); `0` = no Fomo in answers |
+| `MERRYMEN_FOMO_X_HOURLY_CREDITS` | orchestrator | 3000 | Fomo credits per X account per clock hour for answers (`docs/fomo.md`); one owner's answers also spend at most a quarter of her daily Fomo cap. `0` = no Fomo in answers at all: no broker is handed to them and the service refuses the surface before any cache read |
 
 ## Active owners
 
@@ -454,9 +454,13 @@ These are `answer` posts, replying to the mention itself.
   built by merrymen, and the new "sherwood one" (merrymen/sherwood-1, spelled
   without a digit because a post carries none; `SHERWOOD_ON_X`) is
   merrymen's own model, cooking. It never says sherwood runs it today: nothing
-  wires it into an agent yet. Change `SHERWOOD_ON_X` and the prompt only once
-  it does.
-- **Gate:** the comment-reply gate, opt-out notice included.
+  wires it into an agent yet. With research on, code knows the question is
+  the model one and the answer is a code-built line (`modelAnswer`), not a
+  draft. Change `SHERWOOD_ON_X`, those lines and the prompt only once it does.
+- **Gate:** the comment-reply gate, opt-out notice included. Before it, any
+  answer draft that says sherwood runs it ("running on", "powered by",
+  "sherwood one is live") is refused as `gate:sherwood-claim`, research on or
+  off.
 - **Their own lane:** three minutes apart, 24 a day per X account, at most
   two per person per rolling day. Answers never spend or wait on the posting
   cadence.
@@ -473,10 +477,12 @@ looks things up first, the way Shogun does in a Telegram group
 - **Selection** (`tagCandidate`, research on): a tag may carry ONE contract
   address (0x and forty hex). It is taken out of the question — the writer
   reads "this coin" — and kept apart as a lookup key: never shown to the
-  model, never nominated, never traded. Two addresses, an address in a link,
-  or a longer hex run are still refused. "How many holders" and "how much
-  liquidity" may be asked; should-i, when-to-sell, targets and its own size
-  are still refused.
+  model, never nominated, never traded. Two addresses, an address inside a
+  link on any domain (`pons.fun/token/0x…`, `?ref=`), or a longer hex run
+  are still refused. "How many holders" and "how much liquidity" may be
+  asked, and so may "did you buy <contract>?" (its own past buy); should-i,
+  time-to-buy, would-you-buy, when-to-sell, targets and its own size are
+  still refused.
 - **Intent, by code** (`classifyTag`, with the Telegram groups' readers):
   what it can do, how to get an agent, its own trades, a coin (by `$ticker`,
   by a coin it bought named in words, or by the address), its model, or chat.
@@ -484,35 +490,55 @@ looks things up first, the way Shogun does in a Telegram group
   nothing is looked up for them.
 - **What a coin is looked up on:** its own history (the buys the room knows,
   its own buy posts on this X account, its public theses: "you bought it",
-  "you looked at it and passed: <reason>", the reason through the Telegram
-  facts filter that drops figures, addresses and links; a sale is never
-  said); the public index's coin facts on the FLEET Gecko lane (the
-  orchestrator passes its home explicitly; `process.env` is untouched); the
-  creator's own description ("the project says it's …"); with
+  its own words and its public reason, through the Telegram facts filter
+  that drops figures, addresses and links; a sale is never said, and neither
+  is "you passed": a symbol's thesis without a trade is a hold of a coin it
+  may still own); the public index's coin facts on the FLEET Gecko lane (the
+  orchestrator passes its home explicitly; `process.env` is untouched); with
   `MERRYMEN_XPOST_FOMO=1`, Fomo's token activity and quick theses; and,
   once another change wires it, onchain flow (`FlowReader`).
+- **A contract is matched by the contract alone.** With a tagged address,
+  its history counts a buy only when that buy's token, its buy post's CA or
+  decision, or its thesis's derived id is that address, never by a name. A
+  `$ticker` it bought beside a different contract ("is $PEPE <copycat>
+  legit?") is a conflict: nothing is looked up, and the only fact is that
+  the contract in the tag is not the one it bought under that name.
+- **A creator's description is a claim, not a fact.** It is read only for a
+  coin the agent itself traded or reviewed (a buy's token or its own
+  thesis), refused when it carries an endorsement, an affiliation
+  (merrymen, robinhood, official, partner, backed), a promise, urgency, a
+  call to act or an attempt to steer it, and handed to the writer apart from
+  what it looked up, as the project's own unverified text. A stranger's
+  token's description is never read.
 - **What the model gets:** code-built, digit-free phrases with their source
   in them — "the public index shows liquidity is thin", "holders look
   concentrated on the public index", "it's only hours old", "fomo traders
   mostly argue it's still early", "on fomo, more traders have been buying in
   than heading out lately". Never a number, price, size, P&L, handle, quote,
   wallet list or address. A valuation cue (under- or overvalued) is never
-  said. Every phrase is pinned through the real X gate in the tests.
+  said. Every phrase is pinned through the real X gate in the tests. When
+  nothing could be looked up for a coin, the writer is told so and to say so
+  briefly, or pass, never "say what you looked up".
 - **Budget:** one bundle per answer, at most six lookups and twelve seconds;
   an index or chain read at most four, a Fomo read at most eight (an
   uncached thesis page is slow, and one cut short is paid for and never
   heard). Index lookups: eight per X account per ten minutes,
   `MERRYMEN_XPOST_RESEARCH_PER_HOUR` across X accounts. Fomo: the `x-answer`
-  surface's own hourly cap per X account (`MERRYMEN_FOMO_X_HOURLY_CREDITS`),
-  under the owner's caps and the fleet's pools. A lookup refused, failed or
-  late is simply not a fact; the answer is still written.
+  surface's own hourly cap per X account (`MERRYMEN_FOMO_X_HOURLY_CREDITS`)
+  and at most a quarter of the owner's daily Fomo cap per day across her X
+  accounts, under her caps and the fleet's pools; Fomo is advertised in
+  "what can you do?" and asked only for an owner whose data access is on. A
+  lookup refused, failed or late is simply not a fact; the answer is still
+  written.
 - **The gate is unchanged:** no numbers, no prices, no advice, never that it
   holds a coin now. A coin it did not trade is named without a `$` sign (an
   unvouched cashtag is refused).
-- **Fomo on X:** the owner confirmed (2026-10-12) Merrymen holds Fomo's
-  Enterprise rights. They are used for paraphrased, attributed facts in these
-  answers only, behind `MERRYMEN_XPOST_FOMO=1`. Fomo publication drafts stay
-  policy-blocked (`docs/fomo.md`).
+- **Fomo on X: pending owner confirmation.** Paraphrased, attributed Fomo
+  facts in these answers republish provider-derived data, which needs the
+  provider's Enterprise redistribution rights. Do not set
+  `MERRYMEN_XPOST_FOMO=1` until Milla confirms those rights in her own words
+  and the plan or agreement is cited in `docs/fomo.md` ("Publication"). Fomo
+  publication drafts stay policy-blocked either way.
 - **Logs:** counts only (`answer-intent-coin`, `answer-lookups`,
   `answer-research-index-busy` and the like), never a coin, a person or an
   address.

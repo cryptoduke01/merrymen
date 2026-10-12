@@ -737,17 +737,23 @@ DM or a group, is told "Only my owner can set up a tail." and nothing is called.
   bought. The provider's terms reserve redistribution rights for an Enterprise plan. X's
   automation rules need verifying. Confirmed buys keep flowing through the existing X
   pipeline unchanged. Autonomous replies stay off.
-- **X answers are the one exception, and a narrow one.** The owner confirmed (2026-10-12)
-  that Merrymen holds the provider's Enterprise rights. They are used for an active agent's
-  answers to people who tagged it on X, and only there: code-built, paraphrased and attributed
-  facts ("fomo traders mostly argue it's still early", "on fomo, more traders have been buying
-  in than heading out lately"), never a handle, a quote, a like count, P&L or a wallet list,
-  behind `MERRYMEN_XPOST_FOMO=1` (default off) on top of `MERRYMEN_XPOST_RESEARCH=1`. The
+- **X answers are built as the one exception, a narrow one, and are NOT cleared to switch
+  on.** An active agent's answers to people who tagged it on X can carry code-built,
+  paraphrased and attributed facts ("fomo traders mostly argue it's still early", "on fomo,
+  more traders have been buying in than heading out lately"), never a handle, a quote, a like
+  count, P&L or a wallet list, behind `MERRYMEN_XPOST_FOMO=1` (default off) on top of
+  `MERRYMEN_XPOST_RESEARCH=1`. That republishes provider-derived data, which the provider's
+  terms reserve for an Enterprise plan. **Pending owner confirmation of Enterprise rights: do
+  not set `MERRYMEN_XPOST_FOMO=1` until Milla confirms them in her own words and the plan or
+  agreement is cited here.** It is a policy change for her review either way. The
   orchestrator asks its own service (`createDirectBroker`) on the `x-answer` surface: a public
   audience (never the owner's), never a child's surface (a child claiming it is refused), read
   the way a room reads (no forced refresh), token activity and quick theses only (no trader
-  lanes), under `MERRYMEN_FOMO_X_HOURLY_CREDITS` per X account. The publication outbox above
-  is unchanged.
+  lanes), under `MERRYMEN_FOMO_X_HOURLY_CREDITS` per X account per hour and at most a quarter
+  of the owner's daily cap per day across her X accounts (`X_DAILY_SHARE_OF_TENANT`, refused
+  as `x-daily`), so strangers tagging her agent can never use up her own day. Fomo is
+  advertised and asked only for an owner whose data access is on. The publication outbox
+  above is unchanged.
 
 ## Security and isolation
 
@@ -834,7 +840,7 @@ answers use one call on the existing house model.
 | `MERRYMEN_FOMO_GROUP_HOURLY_CREDITS` | web and orchestrator, same value; redeploy both | credits per Telegram group per clock hour. Default 2,500. `0` turns group research off (a room hears "Fomo research isn't available here right now."); a nonzero cap below 1,250 (one coin's thesis page, the dearest read a room needs: a room never reads the 2,500-credit profile route) can never answer a thesis ask, while trader and board asks still answer (250 per read), and the boot log says so. A cap below 2,500 or 3,750 only drops the optional wider thesis read; the room keeps page one. An owner cap whose own share (three quarters) falls below 2,500 (her deep trader read) is said at boot too |
 | `MERRYMEN_FOMO_TENANT_HOURLY_CREDITS` | web and orchestrator, same value; redeploy both | credits per owner per clock hour, the owner's groups included. Default 6,000 |
 | `MERRYMEN_FOMO_TENANT_DAILY_CREDITS` | web and orchestrator, same value; redeploy both | credits per owner per UTC day. Default 20,000. The three caps are whole numbers only (`budget.ts fomoBudgetFrom`, the one reader for orchestrator, web and a self-hosted worker); a bad value is logged by name, never echoed, and its default applies; each cap is held under the shared pool, and the boot line states the limits in force. Research-credit caps only, never a trading limit. Keep a group's cap at most three quarters of the owner's hourly one |
-| `MERRYMEN_FOMO_X_HOURLY_CREDITS` | orchestrator (the web reads it harmlessly) | credits per X account per clock hour on the `x-answer` surface, in place of a room's hour. Default 3,000 (about one coin answered with token activity and a quick thesis page an hour). The owner's own caps and the fleet's pools still apply on top. `0` = no Fomo in X answers; a nonzero cap below 1,250 is said at boot. Used only with `MERRYMEN_XPOST_RESEARCH=1` and `MERRYMEN_XPOST_FOMO=1` (docs/x-posting.md "Research for answers") |
+| `MERRYMEN_FOMO_X_HOURLY_CREDITS` | orchestrator (the web reads it harmlessly) | credits per X account per clock hour on the `x-answer` surface, in place of a room's hour. Default 3,000 (about one coin answered with token activity and a quick thesis page an hour). The owner's own caps and the fleet's pools still apply on top. Answers from all of one owner's X accounts together also spend at most a quarter of her daily cap (5,000 of the default 20,000), so her own research is never rationed by strangers' tags. `0` = no Fomo in X answers at all: the orchestrator hands them no broker and the service refuses the `x-answer` surface (`x-answers-off`) before any cache read, so not even a copy a room or an owner paid for reaches X; a nonzero cap below 1,250 is said at boot. Used only with `MERRYMEN_XPOST_RESEARCH=1` and `MERRYMEN_XPOST_FOMO=1` (docs/x-posting.md "Research for answers") |
 | `MERRYMEN_TG_THESES_MODEL=1` | worker children | turns ON the group model's paraphrase of a coin's theses (off by default, Milla 2026-10-08); unset, rooms hear the code-written digest only |
 | `MERRYMEN_FOMO_ENABLED=1` | web and orchestrator, same value | **hosted Fomo is opt-in: off unless exactly `1`.** Off, the orchestrator opens no Fomo pool, runs no `fomo_*` DDL, writes no `fomo.json` and spawns children without IPC; a hosted child is Fomo-on only with both the channel and this value, and off it runs no Fomo code (no Telegram research lane or classifier entries, nothing charged to the scout budget). The web builds no runtime, its chat answers as before, Settings shows no Fomo section and MCP lists no Fomo tool. Self-hosted: on unless `0` (worker and web alike); a self-hosted install never owes the scout budget anything for Fomo |
 | `MERRYMEN_FOMO_FOLLOW_LIVE` | worker children | allowlist of agents whose follow nominations may execute live (default nobody) |
@@ -1076,9 +1082,10 @@ every open Trencher position's cost instead, which errs toward refusing. So:
 1. **Terms.** The provider licenses use "within your own applications and internal
    operations" and reserves redistribution for Enterprise. fomo.family's own terms forbid
    automated harvesting. Decide on LLM processing and on any public republication before
-   commercial deployment. *Update 2026-10-12:* the owner confirmed Enterprise rights; they are
-   applied only to paraphrased, attributed facts in X answers, behind `MERRYMEN_XPOST_FOMO=1`
-   (see "Publication").
+   commercial deployment. *Open, 2026-10-12:* paraphrased, attributed Fomo facts in X answers
+   are built behind `MERRYMEN_XPOST_FOMO=1` (default off; see "Publication"), but need
+   Enterprise redistribution rights. Pending your confirmation of those rights, citing the
+   plan or agreement: leave the switch unset until then.
 2. **X publication** of research, watching or considering posts conflicts with X rule 3.
    Keep it off, or change the rule and collect a separate research-post consent. (Answers to
    tags are not publications of this kind: they answer a person who asked about a coin.)
