@@ -990,7 +990,9 @@ other owner's agent, and its posting and reply warnings, are unchanged.
   (`majorUnreadAnswers`), with no figures. No model call; the draft
   allowances go back. A tag that turns out to be no major goes on as a coin
   of the chain or as chat, drafted as before, and the gate refuses a
-  forecast or a target in other words in any drafted answer (new highs, the
+  forecast or a target in other words in any reply or drafted answer
+  (`REPLY_ADVICE`, read only in a reply and on the line's tickers, so every
+  owner's buy and casual posts are judged as before: new highs, the
   next stop, set to, keep climbing, steam or legs left, still early on it, a
   gift, more to come, up only), or a call with no adjective ("it's the
   play", "it's a buy", "it's the move", "looks like the trade", "the ones to

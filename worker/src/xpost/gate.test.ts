@@ -237,6 +237,11 @@ describe("a reply never gives advice or a forecast in other words (red-team 2026
       assert.equal(reason(`${draft} Say stop to opt out.`, { kind: "reply", mode: "live", coins: [] }), "hype", draft);
       assert.notEqual(reason(`${draft} Say stop to opt out.`, { kind: "reply", mode: "live", coins: [], buys: "none", named: true }), "ok", draft);
     }
+    // Read only in a reply: every owner's buy and casual posts are judged exactly as before.
+    for (const post of ["picked up pepe on a dip here, the pool looked deep", "pepe has legs, the buying looked steady", "bought pepe, it's the move of the week for me"]) {
+      assert.equal(reason(post, { kind: "buy", mode: "live", coins: ["pepe"] }), "ok", post);
+      assert.equal(reason(`${post}. Say stop to opt out.`, { kind: "reply", mode: "live", coins: ["pepe"] }), "hype", post);
+    }
     // What the research phrases say still passes: fomo's own cue, a move on the day.
     for (const ok of ["fomo traders mostly argue it's still early, the public index shows liquidity is thin.", "coingecko shows it up sharply today, volume ordinary. not a call."]) {
       assert.equal(reason(`${ok} Say stop to opt out.`, { kind: "reply", mode: "live", coins: [] }), "ok", ok);

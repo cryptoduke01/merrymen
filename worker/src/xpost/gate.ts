@@ -866,13 +866,24 @@ const COIN_ADVICE = new RegExp(
     String.raw`|worth\s+(?:buying|getting|grabbing|a\s+buy|an?\s+ape|it|holding|the\s+risk)|(?:a\s+)?(?:solid|good|great|safe|smart|easy|strong|decent)\s+(?:buy|bet|pick|entry|play|hold)` +
     String.raw`|get\s+some\b|(?:goes|going|go|gone|heading|headed|head)\s+(?:way\s+|much\s+|a\s+lot\s+)?(?:up|higher|lower)|(?:way|much|a\s+lot)\s+higher|higher\s+from\s+here` +
     String.raw`|(?:could|will|might|should|gonna|going\s+to|bound\s+to|about\s+to)\s+(?:easily\s+|definitely\s+|probably\s+|totally\s+|still\s+)?(?:double|triple|go\s+up|run|pump|moon|rip|fly|explode|rise|recover|bounce|climb|take\s+off)` +
-    String.raw`|(?:best|top)\s+(?:coin|token|buy|pick|play|bet|memecoin)s?|(?:my|a)\s+top\s+pick|the\s+one\s+to\s+(?:buy|get|hold|watch|grab|ape)` +
+    String.raw`|(?:best|top)\s+(?:coin|token|buy|pick|play|bet|memecoin)s?|(?:my|a)\s+top\s+pick|the\s+one\s+to\s+(?:buy|get|hold|watch|grab|ape))\b`,
+  "i",
+);
+
+/**
+ * AND IN A REPLY OR AN ANSWER, A FORECAST, A TARGET OR A CALL IN OTHER WORDS
+ * (red-team 2026-10-12). Read only in a reply (kind "reply": an answer to a
+ * tag, or a comment reply), so every owner's buy and casual posts are judged
+ * exactly as before; and on every ticker of code's figures line.
+ */
+const REPLY_ADVICE = new RegExp(
+  String.raw`\b(?:` +
     // A FORECAST OR A TARGET IN OTHER WORDS (red-team 2026-10-12): beside a
     // coin's figures, "looks set to keep climbing toward new highs", "the old
     // high is the next stop", "a dip from here would be a gift", "plenty of
     // steam left in it", "it's still early on this move" and "they could keep
     // climbing" were each admitted.
-    String.raw`|new\s+highs?|all[\s-]?time\s+highs?|\baths?|(?:old|previous|prior|last)\s+highs?|next\s+stop|(?:looks?|seems?|is|it'?s|they'?re)\s+set\s+to` +
+    String.raw`new\s+highs?|all[\s-]?time\s+highs?|\baths?|(?:old|previous|prior|last)\s+highs?|next\s+stop|(?:looks?|seems?|is|it'?s|they'?re)\s+set\s+to` +
     String.raw`|set\s+to\s+(?:keep\s+)?(?:climb|run|rise|rally|go|break|move|pop|fly|soar|continue|pump)|keep\s+(?:on\s+)?(?:climbing|going|running|rising|pumping|ripping|rallying|flying|soaring)` +
     String.raw`|could\s+keep|(?:steam|gas|juice|fuel)\s+left|steam\s+in\s+(?:it|this|these|them)|(?:has|have|got)\s+(?:more\s+|some\s+)?legs|legs\s+(?:left|to\s+run)` +
     String.raw`|still\s+early\s+(?:on|in|for)\s+(?:this|the|it|all|these|them)|(?:would|will|'d)\s+be\s+a\s+gift|a\s+gift\s+(?:here|at|from)|dips?\s+(?:to\s+buy|would\s+be|is\s+a|here)` +
@@ -1274,7 +1285,7 @@ export function tickerRefusal(ticker: unknown): string | null {
   if (ALERT_CAPS.test(upper)) return "alert";
   const vocab = vocabularyRefusal(lower);
   if (vocab) return vocab;
-  if (COIN_ADVICE.test(lower) || REPLY_CURRENT_OR_ACTION.test(lower)) return "hype";
+  if (COIN_ADVICE.test(lower) || REPLY_ADVICE.test(lower) || REPLY_CURRENT_OR_ACTION.test(lower)) return "hype";
   if (amountSaid(lower)) return "quantity";
   return null;
 }
@@ -1648,6 +1659,7 @@ function admitMasked(tidied: string, ctx: XGateCtx, baseGate: BaseGate, agentNam
   }
   const namesCoin = coins.some((c) => mentions(text, c));
   if ((namesCoin || ctx.kind === "reply") && COIN_ADVICE.test(own)) return refuse("hype");
+  if (ctx.kind === "reply" && REPLY_ADVICE.test(own)) return refuse("hype");
   if (ctx.kind === "reply" && (REPLY_CURRENT_OR_ACTION.test(own) || REPLY_CURRENT_POSITION.test(own))) return refuse("reply-current-or-action");
   // No amount, price or multiple in words the base gate's list misses (AMOUNT_WORDS).
   if (ctx.kind === "reply" && amountSaid(withoutReplyOptOut(own))) return refuse("quantity");
