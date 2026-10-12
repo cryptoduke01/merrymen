@@ -766,7 +766,10 @@ looks things up first, the way Shogun does in a Telegram group
   `$ticker` or a name resolved to: "$PEPE" finding its own PEPE buy is a
   name. A thesis counts only under that exact contract's buy's symbol or its
   derived id. And only for a buy made with the money it trades with now: a
-  live agent's paper buy, or a paper agent's live one, is not said. And only
+  live agent's paper buy, or a paper agent's live one, is not said. A buy
+  whose money is unknown (its fill outside the calls' window, known only by
+  its buy post's CA) is never said, and a buy post is quoted only when its
+  buy's money is known and its own words do not say the other money. And only
   when the whole tag, the contract read as "this coin", is a plain question
   about that coin alone (`exactAsk`: "did you buy this coin?", "what is this
   coin?", "thoughts on this coin?", "is this coin legit?"): "did you buy $WIF?

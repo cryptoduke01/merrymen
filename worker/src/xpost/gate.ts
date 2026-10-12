@@ -989,6 +989,18 @@ function saysPaper(text: string, coins: readonly string[]): boolean {
   return PAPER_PHRASE.test(t) || ON_PAPER.test(t) || paperOfCoin(t, coins);
 }
 
+/**
+ * WHICH MONEY A POST'S OWN WORDS SAY, as the gate reads them: "paper" when
+ * they say paper as a phrase about the money (saysPaper), "live" when they
+ * claim real money, null when neither. What research reads an old buy post
+ * with before quoting it to an answer (red-team review, 2026-10-12).
+ */
+export function moneySaid(text: unknown): "paper" | "live" | null {
+  if (typeof text !== "string") return null;
+  if (saysPaper(text, [])) return "paper";
+  return SAYS_REAL_MONEY.test(text) ? "live" : null;
+}
+
 /** Paper claimed of the money, by a live post that must not claim it. */
 function claimsPaper(text: string, coins: readonly string[]): boolean {
   const t = text.replace(PAPER_HANDS, " ");

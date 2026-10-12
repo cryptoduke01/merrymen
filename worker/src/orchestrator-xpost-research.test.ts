@@ -455,8 +455,8 @@ describe("its own history of a coin", () => {
       "a landed buy thesis by the derived Trencher ticker alone is eleven hex, never proof it bought this contract");
     const caPost = post({ coin: "Ab", decisionId: "d9", body: `picked up some of this one CA (Robinhood Chain): ${CA}` });
     assert.deepEqual(ownHistoryPhrases({ address: CA, facts: { ...FACTS, mode: "live" }, posts: [caPost], theses: [landed] }),
-      ["you bought it lately", "what you posted on X when you bought it: picked up some of this one", "your public reason for the buy: the curve looked crowded"],
-      "beside its own buy post of the full contract, the derived ticker's thesis is that coin's");
+      ["you bought it lately", "your public reason for the buy: the curve looked crowded"],
+      "beside its own buy post of the full contract, the derived ticker's thesis is that coin's; the post, of no buy whose money is known, is never quoted");
   });
 
   it("only a buy made with the money it trades with now: a live agent's paper buy is never said, nor a paper agent's live one", () => {
@@ -467,6 +467,33 @@ describe("its own history of a coin", () => {
     assert.equal(ownHistoryPhrases({ address: PEPE_CA, facts: { ...live, mode: "live" }, posts: [post()], theses: [] })[0], "you bought it lately");
     assert.deepEqual(ownHistoryPhrases({ address: PEPE_CA, facts: { ...live, mode: "paper" }, posts: [post()], theses: [] }), [], "switched to paper: its live buy is not said");
     assert.equal(ownHistoryPhrases({ address: PEPE_CA, facts: { ...FACTS, mode: "idle" }, posts: [post()], theses: [] })[0], "you bought it lately, on paper", "idle: as it was");
+  });
+
+  it("a buy whose money is unknown is never said, and a buy post's own words decide which money it was (red-team 2026-10-12)", async () => {
+    // S6, as reproduced: live now; the paper PEPE buy at the contract fell out of the calls' window, its buy post did not.
+    const WIF: CallFact = { ...CALL, decisionId: "d-wif", symbol: "WIF", name: "Wif", token: `0x${"ef".repeat(20)}`, paper: false };
+    const live: AgentFacts = { ...FACTS, mode: "live", calls: [WIF] };
+    const paperPost = post({ decisionId: "d-pepe", createdAtMs: NOW - 92 * HOUR, body: `grabbed some pepe on paper, the curve looked early CA (Robinhood Chain): ${PEPE_CA}` });
+    assert.deepEqual(ownHistoryPhrases({ address: PEPE_CA, facts: live, posts: [paperPost], theses: [] }), []);
+    const v = tagCandidate({ id: "1", text: `@alan did you buy ${PEPE_CA}?`, authorId: "9", conversationId: "1", inReplyToTweetId: "", createdAtMs: NOW }, { xUserId: "111", research: true, username: "alan" });
+    assert.ok(v.ok);
+    if (!v.ok) return;
+    const intent = classifyTag(v.text, { address: v.address ?? null, knownCoins: ["Wif"] });
+    const b = await fakes().research.gather(input(intent, { facts: live, posts: [paperPost], question: v.text, coinNamed: true }));
+    assert.ok(!b.facts.some((p) => /bought it|when you bought it/.test(p)), b.facts.join(" | "));
+    assert.notEqual(b.exact, true);
+    // The drafts it admitted are refused.
+    const gate = (draft: string) => admitXPost(draft, { kind: "reply", agentName: "Alan", mode: "live", coins: [], recentOwn: [], recentFleet: [], buys: "none" }, (r, c) => admitAgentLine(r, c));
+    for (const draft of ["yep, bought it lately with real money, the curve looked early. say stop to opt out.", "yep, bought it lately, the curve looked early. say stop to opt out."]) {
+      assert.equal(gate(draft).ok, false, draft);
+    }
+    // The control: the paper decision still inside the window is a paper buy, never said to a live agent.
+    assert.deepEqual(ownHistoryPhrases({ address: PEPE_CA, facts: { ...live, calls: [WIF, { ...CALL, decisionId: "d-pepe", paper: true }] }, posts: [paperPost], theses: [] }), []);
+    // A live buy at the contract whose buy post says paper: the buy is said, the post that says the other money is not quoted.
+    const liveBuy: AgentFacts = { ...live, calls: [{ ...CALL, decisionId: "d-pepe", paper: false }] };
+    const said = ownHistoryPhrases({ address: PEPE_CA, facts: liveBuy, posts: [paperPost], theses: [] });
+    assert.equal(said[0], "you bought it lately");
+    assert.ok(!said.some((p) => /on paper|posted on X/.test(p)), said.join(" | "));
   });
 
   it("an address that only shares a bought coin's last eleven hex is never one it bought", () => {

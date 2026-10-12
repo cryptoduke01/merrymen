@@ -51,7 +51,7 @@ import { readPeerTheses } from "./peer-theses";
 import { extractCashtags, isInjection, isPrivateAsk } from "./telegram/tg-groups/detect";
 import { publicCoinReason, publicFactRequest } from "./telegram/tg-groups/facts";
 import type { PublicThesis } from "./thesis-policy";
-import { sherwoodMentioned, vocabularyRefusal } from "./xpost/gate";
+import { moneySaid, sherwoodMentioned, vocabularyRefusal } from "./xpost/gate";
 import { coinOf, hash32 } from "./xpost/planner";
 import { normalisedTag, plainAsk, withoutReplyOptOut } from "./xpost/replies";
 import { takeAllowance, type XPost } from "./xpost/store";
@@ -634,6 +634,11 @@ export const ONBOARDING_PHRASES: readonly string[] = Object.freeze([
 
 // ── its own history of a coin ───────────────────────────────────────────────
 
+/** The writer's rule (writer.ts ownMoney), restated: a live agent's paper buy, or a paper agent's live one, is never said; an idle agent's either. */
+function ownMoney(mode: AgentFacts["mode"], paper: boolean): boolean {
+  return mode === "live" ? !paper : mode === "paper" ? paper : true;
+}
+
 /** A buy post as the model may read it: its prose, without the CA or wallet suffix and the opt-out. */
 function ownPostProse(body: string): string {
   return withoutReplyOptOut(String(body ?? "").split(/ (?:CA|Wallet) \(/)[0] ?? "").replace(/\s+/g, " ").trim();
@@ -707,21 +712,31 @@ export function ownHistoryPhrases(o: {
   const address = typeof o.address === "string" && CONTRACT.test(o.address) ? o.address.toLowerCase() : null;
   if (!address || !fullyBought(address, o.facts, o.posts)) return [];
   const calls = o.facts.calls.filter((c) => c.side === "buy" && typeof c.token === "string" && c.token.toLowerCase() === address);
-  const decisions = new Set(calls.map((c) => c.decisionId));
-  const posts = o.posts.filter((p) => {
-    if (p.kind !== "buy" || p.status !== "posted") return false;
-    const ca = postContract(p.body);
-    return ca !== null ? ca === address : p.decisionId !== null && decisions.has(p.decisionId);
-  });
   const theses = o.theses.filter((t) => calls.some((c) => sameLabel(t.symbol, c.symbol)) || t.symbol === derivedId(address));
   const boughtThesis = theses.find((t) => t.action === "buy" && t.outcome === "landed");
-  const out: string[] = [];
-  const paper = calls[0]?.paper ?? boughtThesis?.paper ?? false;
   // ONLY THE MONEY IT TRADES WITH NOW: the answer is gated with today's mode,
   // which refuses a live agent's "on paper" and a paper agent's "real money".
-  if ((o.facts.mode === "live" && paper) || (o.facts.mode === "paper" && !paper)) return [];
+  // AND ONLY MONEY IT KNOWS (red-team review, 2026-10-12): a buy whose fill is
+  // out of the calls' window, known only by its buy post's CA, was read as
+  // real money ("?? false") and a live agent was told a paper buy was "you
+  // bought it lately". A buy of unknown money is never said.
+  const mine = (paper: unknown): paper is boolean => typeof paper === "boolean" && ownMoney(o.facts.mode, paper);
+  const ownCalls = calls.filter((c) => mine(c.paper));
+  const paper = ownCalls[0]?.paper ?? (boughtThesis && mine(boughtThesis.paper) ? boughtThesis.paper : null);
+  if (paper === null) return [];
+  // Its buy posts, only those of a buy of known money it trades with now, and
+  // never one whose own words say the other money.
+  const decisions = new Set(ownCalls.map((c) => c.decisionId));
+  const posts = o.posts.filter((p) => {
+    if (p.kind !== "buy" || p.status !== "posted" || p.decisionId === null || !decisions.has(p.decisionId)) return false;
+    const ca = postContract(p.body);
+    if (ca !== null && ca !== address) return false;
+    const said = moneySaid(ownPostProse(p.body));
+    return said === null || said === (paper ? "paper" : "live");
+  });
+  const out: string[] = [];
   out.push(`you bought it lately${paper ? ", on paper" : ""}`);
-  const own = calls.map((c) => c.ownWords).find((w): w is string => sayable(w));
+  const own = ownCalls.map((c) => c.ownWords).find((w): w is string => sayable(w));
   if (own) out.push(`your own words when you bought it: ${own}`);
   const post = posts.map((p) => ownPostProse(p.body)).find(sayable);
   if (post) out.push(`what you posted on X when you bought it: ${post}`);
