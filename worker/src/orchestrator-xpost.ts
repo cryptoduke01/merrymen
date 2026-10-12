@@ -88,7 +88,7 @@ import {
   type XAccount,
   type XPost,
 } from "./xpost/store";
-import { answerPrompt, answerQuestion, buyPrompt, casualPrompt, draft, introPrompt, introTemplate, modelAnswers, replyPrompt, sellPrompt, sherwoodClaimed, sherwoodNamed, xpostModel, xpostModelWarning, type AnswerIntentKind, type WriterFacts, type XStyle } from "./xpost/writer";
+import { answerPrompt, answerQuestion, buyPrompt, casualPrompt, draft, introPrompt, introTemplate, modelAnswers, replyPrompt, sellPrompt, sherwoodClaimed, sherwoodMentioned, sherwoodNamed, xpostModel, xpostModelWarning, type AnswerIntentKind, type WriterFacts, type XStyle } from "./xpost/writer";
 import { appendPublicToken, appendPublicWallet, hasPublicWallet, publicTokenStillAllowed, publicWalletStillAllowed, type PublicWallet } from "./xpost/public-wallet";
 import { readPublicProjectDescription } from "./orchestrator-xpost-project";
 import { boughtNames, carriesResearch, classifyTag, createXResearch, namesACoin, type ResearchBundle, type XResearch } from "./orchestrator-xpost-research";
@@ -1510,14 +1510,17 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // the gate, research on or off — and so is a draft that names it at
       // all. Only code's own lines name it.
       const claimed = raw !== null && sherwoodClaimed(raw);
-      const named = !templated && raw !== null && sherwoodNamed(raw);
+      // ON ITS LETTERS, NOT A WORD: "sher\u00adwood" is sherwood to a reader.
+      const named = !templated && raw !== null && (sherwoodNamed(raw) || sherwoodMentioned(raw));
       let verdict = raw === null || claimed || named ? null : gate(raw);
       for (const line of lines.slice(1)) {
         if (verdict?.ok) break;
         verdict = gate(line);
       }
+      // AND ON WHAT WOULD BE POSTED: the gate's cleaned text, not the draft it read.
+      const postsName = !templated && verdict?.ok === true && (sherwoodNamed(verdict.text) || sherwoodMentioned(verdict.text));
       const finishedAt = at();
-      const body = verdict?.ok ? verdict.text : null;
+      const body = verdict?.ok && !postsName ? verdict.text : null;
       // MARKED BY WHAT IT WAS HANDED, not by what the model wrote: an answer
       // given anything looked up is never handed on (ANSWER_LOOKED_UP).
       const lookedUp = !!looked && (looked.research.length > 0 || !!looked.creatorClaim);
@@ -1526,7 +1529,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         coin: lookedUp ? ANSWER_LOOKED_UP : null, decisionId: null, dueAtMs: finishedAt, nowMs: finishedAt,
         replyToTweetId: comment.id, replyRootTweetId: comment.id, replyAuthorId: comment.authorId,
         status: body ? "scheduled" : "skipped",
-        reason: body ? null : claimed ? "gate:sherwood-claim" : named ? "gate:sherwood-drafted" : verdict && !verdict.ok ? `gate:${verdict.reason}` : "no-draft",
+        reason: body ? null : claimed ? "gate:sherwood-claim" : named || postsName ? "gate:sherwood-drafted" : verdict && !verdict.ok ? `gate:${verdict.reason}` : "no-draft",
       });
       return id === null ? null : { body, lookedUp };
     }
@@ -1568,12 +1571,15 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       const paper = fill.paper;
       const prompt = replyPrompt({ ...facts, parentBody: parent.body, comment: candidate.text, coin: coin.label, paper });
       const raw = await draft(creds, prompt, { call: deps.llm, timeoutMs: deps.draftTimeoutMs });
-      // A drafted reply never names sherwood: only an answer's code-built line does.
-      const named = raw !== null && sherwoodNamed(raw);
-      const verdict = raw === null || named ? null : admitXPost(raw, {
+      // A drafted reply never names sherwood: only an answer's code-built line
+      // does. Read on its letters, in the draft and in what would be posted.
+      const named = raw !== null && (sherwoodNamed(raw) || sherwoodMentioned(raw));
+      const admitted = raw === null || named ? null : admitXPost(raw, {
         kind: "reply", agentName: f.name, mode: paper ? "paper" : "live", coins: [coin.label],
         paperCoins: paper ? [coin.label] : [], recentOwn, recentFleet, emojiOk: facts.style.emoji > 0,
       }, BASE_GATE);
+      const postsName = admitted?.ok === true && (sherwoodNamed(admitted.text) || sherwoodMentioned(admitted.text));
+      const verdict = postsName ? null : admitted;
       // Start the owner's full preview window only after the model finishes.
       // Recheck time-sensitive planning rules in case drafting crossed a limit.
       const finishedAt = at();
@@ -1584,7 +1590,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         tenant: account.tenant, xUserId: account.xUserId, kind: "reply", dedupeKey, body: body ?? "",
         coin: parent.coin, decisionId: parent.decisionId, dueAtMs: finalDueAt ?? dueAtMs, nowMs: finishedAt,
         replyToTweetId: comment.id, replyRootTweetId: parent.tweetId!, replyAuthorId: comment.authorId,
-        status: body ? "scheduled" : "skipped", reason: body ? null : finalDueAt === null ? "stale" : named ? "gate:sherwood-drafted" : verdict && !verdict.ok ? `gate:${verdict.reason}` : "no-draft",
+        status: body ? "scheduled" : "skipped", reason: body ? null : finalDueAt === null ? "stale" : named || postsName ? "gate:sherwood-drafted" : verdict && !verdict.ok ? `gate:${verdict.reason}` : "no-draft",
       });
       return id === null ? null : { body };
     }

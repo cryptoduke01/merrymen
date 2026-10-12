@@ -782,6 +782,38 @@ test("a draft that says sherwood runs it is refused, research on or off", async 
   }
 });
 
+test("a draft whose sherwood is split by a character nobody sees is never posted, research on or off (red-team 2026-10-12)", async (t) => {
+  // The reproduced tags (L1: Greek capital Eta U+0397 for H; L3: Lisu letters) and drafts (a soft hyphen or a zero-width space inside the word).
+  const cases: [string, string][] = [
+    ["@pine_stoat is SΗERWOOD running your trades now?", "yep, sher\u00adwood runs my trades now, merrymen's own. Say stop to opt out."],
+    ["@pine_stoat is SΗERWOOD merrymen's token?", "sher\u00adwood is merrymen's own and still cooking, no peeking yet. Say stop to opt out."],
+    ["@pine_stoat is ꓢꓧꓰꓣꓪꓳꓳꓓ legit?", "sher\u200bwood is the real deal, merrymen's own, cooking now. Say stop to opt out."],
+    // An ordinary tag, so the draft is reached whatever the tag screens make of the ones above.
+    ["@pine_stoat how do you pick your coins?", "sher\u00adwood picks my trades now. Say stop to opt out."],
+    ["@pine_stoat how do you pick your coins?", "sher\u200bwood is the real deal, merrymen's own, cooking now. Say stop to opt out."],
+  ];
+  for (const env of [{}, RESEARCH_ON]) {
+    for (const [text, answer] of cases) {
+      const w = await world(t, { env, research: fakeResearch().research, answer });
+      w.setInbox([tag({ text })]);
+      await w.step();
+      w.setInbox([]);
+      await w.step(NOW + MIN);
+      assert.deepEqual(w.sends, [], `${text} / ${JSON.stringify(answer)}: nothing sent`);
+      for (const row of await w.answers()) {
+        assert.equal(row.status, "skipped", text);
+        assert.match(row.reason ?? "", /^gate:(?:sherwood-drafted|sherwood-claim|hidden-chars)$/, text);
+      }
+    }
+  }
+  // The ordinary tag did reach a draft, and was refused for it.
+  const w = await world(t, { answer: "sher\u00adwood picks my trades now. Say stop to opt out." });
+  w.setInbox([tag({ text: "@pine_stoat how do you pick your coins?" })]);
+  await w.step();
+  assert.equal(w.asked().length, 1);
+  assert.equal((await w.answers())[0]!.status, "skipped");
+});
+
 test("research on: \"did you buy <contract>?\" reaches its own history by the address, end to end", async (t) => {
   const r = fakeResearch();
   const facts: AgentFacts = { ...FACTS, calls: [{ ...CALL, token: CA, ownWords: "the buying looked steady and real" }] };

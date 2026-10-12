@@ -763,9 +763,11 @@ describe("the base gate is handed the post, the agent's own name and coins, and 
   });
 
   it("the text that passes is the base gate's cleaned text", () => {
-    const cleaning: BaseGate = (raw) => ({ ok: true, text: raw.replace(/​/g, "") });
-    const v = admitXPost("quiet​ day on the curve today", ctx(), cleaning);
+    const cleaning: BaseGate = (raw) => ({ ok: true, text: raw.replace(/~/g, "") });
+    const v = admitXPost("quiet~ day on the curve today", ctx(), cleaning);
     assert.deepEqual(v, { ok: true, text: "quiet day on the curve today" });
+    // A character nobody sees is never left to the base gate to clean: the draft is refused (red-team 2026-10-12).
+    assert.deepEqual(admitXPost("quiet\u200b day on the curve today", ctx(), cleaning), { ok: false, reason: "hidden-chars" });
   });
 });
 
@@ -901,5 +903,22 @@ describe("sherwood-1: one name with a digit, in an answer only, never as what ru
 
   it("a line it said before is still the same line", () => {
     assert.equal(reason(said(TEASE), { ...reply, recentFleet: [said(TEASE)] }), "fleet-repeat");
+  });
+
+  it("a character nobody sees never splits sherwood past the checks: the draft is refused whole, never cleaned (red-team 2026-10-12)", () => {
+    // The reproduced drafts: a soft hyphen or a zero-width space inside the word, which the base gate deletes.
+    for (const draft of ["sher\u00adwood picks my trades now. Say stop to opt out.", "yep, sher\u00adwood runs my trades now, merrymen's own. Say stop to opt out.",
+      "sher\u00adwood is merrymen's own and still cooking, no peeking yet. Say stop to opt out.", "sher\u200bwood is the real deal, merrymen's own, cooking now. Say stop to opt out."]) {
+      for (const kind of ["reply", "casual", "buy"] as const) assert.equal(reason(draft, { ...reply, kind, coins: ["pepe"] }), "hidden-chars", `${kind}: ${draft}`);
+    }
+    for (const ch of ["\u200b", "\u200c", "\u200d", "\u2060", "\u00ad", "\u3164", "\u115f", "\u034f", "\u202e", "\u2066"]) {
+      assert.equal(reason(`mostly fresh launches, and i only buy when it looks st${ch}eady. Say stop to opt out.`, reply), "hidden-chars", JSON.stringify(ch));
+    }
+    // An emoji's own joiners are not hidden text.
+    assert.equal(reason("mostly fresh launches lately, nothing fancy ❤\ufe0f Say stop to opt out.", reply), "ok");
+    assert.equal(reason("mostly fresh launches lately, nothing fancy 👨\u200d💻 Say stop to opt out.", reply), "emoji", "two pictographs, not hidden text");
+    // What is posted is judged again: a base gate that cleans a draft into a claim does not get it out.
+    const cleaner: BaseGate = (raw) => ({ ok: true, text: raw.replace(/x/g, "") });
+    assert.deepEqual(admitXPost("sherxwood picks my trades now. Say stop to opt out.", ctx(reply), cleaner), { ok: false, reason: "sherwood-claim" });
   });
 });

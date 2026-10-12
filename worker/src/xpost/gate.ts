@@ -322,6 +322,24 @@ export function sherwoodMentioned(text: unknown): boolean {
 
 // ── the X clauses ───────────────────────────────────────────────────────────
 
+/**
+ * A CHARACTER NOBODY SEES, IN A DRAFT (red-team review, 2026-10-12). The base
+ * gate takes every format and default-ignorable character out of what it
+ * posts, so "sher\u00adwood runs my trades" (a soft hyphen, a zero-width
+ * space) passed every sherwood check that read the draft and was posted as
+ * "sherwood runs my trades". A model has no reason to write one: a draft
+ * that carries one is refused whole, never cleaned. The only exceptions are
+ * the base gate's own, inside an emoji: U+FE0F straight after a pictograph
+ * (or its skin tone), and a zero-width joiner between two pictographs.
+ */
+const HIDDEN = /[\p{Cf}\p{Default_Ignorable_Code_Point}]/u;
+export function hidesCharacters(text: string): boolean {
+  const t = text
+    .replace(/(?<=\p{Extended_Pictographic}[\u{1F3FB}-\u{1F3FF}]?)\ufe0f/gu, "")
+    .replace(/(?<=\p{Extended_Pictographic}[\ufe0f\u{1F3FB}-\u{1F3FF}]?)\u200d(?=\p{Extended_Pictographic})/gu, "");
+  return HIDDEN.test(t);
+}
+
 /** The model's "nothing to say", however it decorated it. */
 const PASS = /^[^\p{L}\p{N}]*pass(?![\p{L}\p{N}_])/iu;
 
@@ -998,7 +1016,7 @@ function strings(list: unknown): string[] {
  * MAY THIS BE POSTED ON X? Tidy, then the base gate, then every X clause.
  * `ok` carries the exact text to store and post.
  *
- * Reason codes (stable, operator-only): empty · pass · meta · too-short · too-long ·
+ * Reason codes (stable, operator-only): empty · pass · meta · hidden-chars · too-short · too-long ·
  * handle · link · markup · emoji · exclaim · caps · ops · alert · hype · pnl ·
  * market · human-claim · points-back · coin-unsaid · paper-unsaid · mode-false · undisclosed · intro-no-trading ·
  * opt-out-unsaid · reply-current-or-action · sherwood-claim ·
@@ -1011,6 +1029,8 @@ export function admitXPost(raw: unknown, ctx: XGateCtx, baseGate: BaseGate): XVe
   if (tidied === "") return refuse("empty");
   if (PASS.test(tidied)) return refuse("pass");
   if (metaRefusal(raw, tidied, agentName)) return refuse("meta");
+  // Nothing invisible: the base gate would take it out after every check here had read around it.
+  if (hidesCharacters(tidied)) return refuse("hidden-chars");
   // A reply never says sherwood runs it, whoever drafted it (see SHERWOOD_NAME).
   if (ctx.kind === "reply" && sherwoodClaimed(tidied)) return refuse("sherwood-claim");
   // In a reply only, "sherwood-1" is a name: masked for every check below, put back after.
@@ -1021,8 +1041,12 @@ export function admitXPost(raw: unknown, ctx: XGateCtx, baseGate: BaseGate): XVe
     ? { ...ctx, recentOwn: strings(ctx.recentOwn).map(withStandIn), recentFleet: strings(ctx.recentFleet).map(withStandIn), seeds: strings(ctx.seeds).map(withStandIn) }
     : ctx;
   const verdict = admitMasked(named.text, against, baseGate, agentName);
-  if (!verdict.ok || named.said.length === 0) return verdict;
-  return unmaskSherwood(verdict.text, named.said);
+  if (!verdict.ok) return verdict;
+  const out = named.said.length === 0 ? verdict : unmaskSherwood(verdict.text, named.said);
+  // WHAT IS POSTED, JUDGED AGAIN: the base gate hands back its own cleaned
+  // text, and a claim it put together is still a claim.
+  if (out.ok && ctx.kind === "reply" && sherwoodClaimed(out.text)) return refuse("sherwood-claim");
+  return out;
 }
 
 function admitMasked(tidied: string, ctx: XGateCtx, baseGate: BaseGate, agentName: string): XVerdict {
