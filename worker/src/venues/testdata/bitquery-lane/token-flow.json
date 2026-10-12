@@ -1,0 +1,64 @@
+{
+  "_note": "Recorded-SHAPE fixture, written from Bitquery's documented Trading.Trades response shapes (aggregates arrive as strings or numbers; aliases as named in TOKEN_FLOW_QUERY). Not captured from the live API.",
+  "data": {
+    "Trading": {
+      "totals": [
+        {
+          "buys5": "4",
+          "sells5": "2",
+          "buyUsd5": 412.5,
+          "sellUsd5": "120.25",
+          "buyers5": "3",
+          "sellers5": "2",
+          "buys15": "11",
+          "sells15": "5",
+          "buyUsd15": "1388.9",
+          "sellUsd15": 610,
+          "buyers15": "8",
+          "sellers15": "4",
+          "buys60": "40",
+          "sells60": "18",
+          "buyUsd60": "5120.75",
+          "sellUsd60": "2310.4",
+          "buyers60": "27",
+          "sellers60": "12"
+        }
+      ],
+      "venues": [
+        {
+          "Pair": { "Market": { "Protocol": "uniswap_v4", "ProtocolFamily": "Uniswap" } },
+          "trades": "44",
+          "buys": "31",
+          "sells": "13",
+          "buyUsd": 4020.5,
+          "sellUsd": "1800.4"
+        },
+        {
+          "Pair": { "Market": { "Protocol": "pons_curve", "ProtocolFamily": "Pons" } },
+          "trades": "14",
+          "buys": "9",
+          "sells": "5",
+          "buyUsd": "1100.25",
+          "sellUsd": 510
+        }
+      ],
+      "bigSells": [
+        {
+          "Block": { "Time": "2026-10-12T01:20:00Z" },
+          "AmountsInUsd": { "Base": 350.2 },
+          "Pair": { "Market": { "Protocol": "uniswap_v4" } }
+        },
+        {
+          "Block": { "Time": "2026-10-12T01:40:00Z" },
+          "AmountsInUsd": { "Base": "512.75" },
+          "Pair": { "Market": { "Protocol": "uniswap_v4" } }
+        },
+        {
+          "Block": { "Time": "2026-10-12T01:05:00Z" },
+          "AmountsInUsd": { "Base": "240" },
+          "Pair": { "Market": { "Protocol": "pons_curve" } }
+        }
+      ]
+    }
+  }
+}
