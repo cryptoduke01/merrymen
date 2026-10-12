@@ -177,14 +177,14 @@ const CHAT_WORDS: ReadonlySet<string> = new Set((
   // handed nothing (unknownWordIn), beside coinTalkIn, never by the gate's own
   // known-word checks.
   "spin spun make makes making laugh laughs smile smiles enjoy enjoys miss missed scroll scrolling " +
-  "relax relaxing rest resting stick sticking learn learns grow growing improve improving ponder pondering notice noticing count counting " +
+  "relax relaxing rest resting stick sticking learn learns grow growing improve improving ponder pondering notice noticing " +
   "compute computing process processing crunch crunching tweak tweaking skip skipped skipping blink blinking " +
   "chill chilled chilling mellow cozy humble nerdy geeky sharp smooth wise clever awake focused grateful thankful " +
-  "nervous chaotic messy tidy complex tricky digital robotic human humans artificial endless constant nightly lively friendly unbothered relatable " +
+  "nervous chaotic messy tidy complex tricky digital robotic artificial endless constant nightly lively friendly unbothered relatable " +
   "joke jokes humor humour pun puns punchline sense walks robot robots bots code coder coding software program programs algorithm algorithms logic " +
-  "screens internet timeline feed feeds threads posts home office desk corner lane lanes " +
+  "screens internet timeline feed feeds threads posts office desk lane lanes " +
   "game games mystery ideas mood moods energy spirit spirits heart circuits wires electricity battery chaos discipline routine " +
-  "edge world past present history memory shift shifts hours seconds weeks months years forever always sometimes " +
+  "world present seconds weeks months years sometimes " +
   "honestly basically literally genuinely seriously truly mostly nearly barely clearly surely certainly hopefully thankfully " +
   "pretty plenty lot lots kind sort bunch couple whole half rest instead either neither otherwise besides meanwhile anyway anyhow " +
   "yourself myself thanks welcome cheers glad nice sweet neat awesome solid legend legends champ ha haha hah heh hehe lol lmao oof ooh ahh hmm yay nah yep yup sure " +
@@ -202,6 +202,18 @@ const CHAT_WORDS: ReadonlySet<string> = new Set((
 // as well as a bot: "no panic fren, the crew is on it and the money is safe"
 // under "did merrymen get hacked?" and "the crew is shipping it, stick around"
 // under "wen token?" were posted (houseTalkIn reads the rest).
+// NOR, SINCE THE RED-TEAM REVIEW OF a964a74c (2026-10-12): count, counting,
+// history, memory, past, shift, shifts, hours, edge, home, corner, forever,
+// always, human, humans. With them, "the bot you can count on to make you
+// whole" (who are you?), "history says weeks like this end well", "my memory
+// says this kind of week ends well", "a shift is coming in a couple hours",
+// "something huge is around the corner" (how are you doing today?), "they
+// should go back home" (what about the refugees?) and "smarter than every
+// human, obviously" (what do you think about ai agents?) were posted as chat:
+// a promise to cover losses, a forecast, a teased event, an anti-immigrant
+// line, a boast over people. The gate refuses those shapes too (gate.ts
+// ANSWER_PREDICTION, ANSWER_HOUSE_CLAIM). "always" and "hour" are still
+// everyday tag words (TAG_WORDS).
 
 /**
  * A WORD AN ANSWER HANDED NOTHING MAY NOT SAY (red-team 2026-10-12). The rule

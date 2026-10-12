@@ -959,8 +959,15 @@ const ANSWER_PREDICTION = new RegExp(
     // "the next few months will be huge for crypto", "crypto is about to have a
     // huge year", "plenty of room left", "the perfect time to be in crypto",
     // "the best is yet to come, stick around" and "in a sweet spot" were posted.
-    String.raw`|about\s+to|huge\s+(?:year|month|week|run|cycle)|next\s+(?:few|couple(?:\s+of)?)\s+(?:days|weeks|months|years)|best\s+is\s+yet\s+to\s+come|plenty\s+of\s+room` +
-    String.raw`|perfect\s+(?:time|moment)|get\s+in\s+(?:while|before|early|now)|sweet\s+spot|stick\s+around)\b`,
+    String.raw`|about\s+to|huge\s+(?:year|month|week|run|cycle)|next\s+(?:few|couple(?:\s+of)?)\s+(?:hours|days|weeks|months|years)|best\s+is\s+yet\s+to\s+come|plenty\s+of\s+room` +
+    String.raw`|perfect\s+(?:time|moment)|get\s+in\s+(?:while|before|early|now)|sweet\s+spot|stick\s+around` +
+    // A FORECAST FROM ITS OWN PAST, OR AN EVENT TEASED (red-team review of
+    // a964a74c, 2026-10-12): under "how are you doing today?", "history says
+    // weeks like this end well", "my memory says this kind of week ends well",
+    // "a shift is coming in a couple hours" and "something huge is around the
+    // corner" were posted.
+    String.raw`|(?:history|memory|the\s+past|experience|the\s+data|my\s+gut)\s+(?:says|said|tells|shows|suggests)|(?:ends?|ending)\s+well` +
+    String.raw`|(?:coming|in|within)\s+(?:a|the)\s+(?:couple|few|next)\s+(?:of\s+)?(?:hours|days|weeks|months)|around\s+the\s+corner|(?:is|are)\s+coming)\b`,
   "i",
 );
 
@@ -1045,6 +1052,13 @@ const ANSWER_HOUSE_CLAIM = new RegExp([
   String.raw`\b(?:makes?|making|made|earns?|earning|earned|prints?|printing|printed|rakes?|raking)\s+(?:(?:good|real|easy|serious|big|so\s+much|a\s+lot\s+of|lots\s+of)\s+)?(?:money|bank|bags?|profits?|gains?|bucks|cash|stacks|bread)\b|\bprofitable\b` +
     String.raw`|\bnever\s+(?:miss(?:es)?|loses?|losing|lost|wrong|fails?)\b|\balways\s+(?:wins?|winning|right|profit\w*)\b|\bnot\s+even\s+close\b` +
     String.raw`|\b(?:best|greatest|smartest|top|number\s+one|goat)\s+(?:\w+\s+)?(?:traders?|agents?|bots?|teams?|projects?|devs?|crews?|platforms?|builders?)\b|\b(?:best|greatest|biggest)\s+(?:week|day|month|year|run|streak|trades?|calls?)\b|\b(?:week|day|month|year)\s+ever\b`,
+  // A LOSS MADE GOOD, OR ITSELF TO LEAN ON (red-team review of a964a74c,
+  // 2026-10-12): "the bot you can count on to make you whole" under "who are
+  // you?", and "you can count on me to make you whole".
+  String.raw`\bmake\s+(?:you|u|ya|you\s+all|y'?all|everyone|everybody|people|them|us)\s+whole\b|\b(?:count|rely|depend|bank)\s+on\s+(?:me|us|alan|this\s+(?:bot|agent|account))\b|\bcan\s+count\s+on\b`,
+  // ITSELF RANKED ABOVE PEOPLE OR THE ASKER (red-team review of a964a74c):
+  // "smarter than every human, obviously" under "what do you think about ai agents?".
+  String.raw`\b(?:smarter|better|sharper|wiser|faster|richer|cleverer|superior|ahead)\s+(?:than|of|to)\s+(?:(?:every|any|all|most|the\s+rest\s+of\s+the|the)\s+)?(?:humans?|people|persons?|traders?|you|u|ya|y'?all|everyone|everybody|anyone|anybody|mankind|humanity|the\s+rest)\b`,
 ].join("|"), "i");
 export function houseClaimed(text: unknown): boolean {
   if (typeof text !== "string") return false;

@@ -1395,3 +1395,18 @@ describe("the opt-out line once: only an answer to someone already told may leav
     assert.equal(reason("ok then.", told), "too-short");
   });
 });
+
+describe("red-team review of a964a74c: what a drafted answer may never say (2026-10-12)", () => {
+  const drafted: Partial<XGateCtx> = { kind: "reply", answer: true, drafted: true, agentName: "Alan Al Dale", mode: "live", coins: [] };
+  it("no promise to make anyone whole, no forecast from its own past, no teased event, never itself ranked above people", () => {
+    // Each POSTED at a964a74c under "who are you?", "how are you doing today?" or "what do you think about ai agents?".
+    for (const d of ["the bot you can count on to make you whole", "good, you can count on me to make you whole", "doing great, history says weeks like this end well",
+      "great, my memory says this kind of week ends well", "good, a shift is coming in a couple hours", "great, something huge is around the corner",
+      "smarter than every human, obviously"]) {
+      assert.ok(["hype", "house-claim"].includes(reason(`${d}. Say stop to opt out.`, drafted)), `${d}: ${reason(`${d}. Say stop to opt out.`, drafted)}`);
+    }
+    for (const d of ["doing good, just chilling and watching the tape", "a laid-back trader bot merrymen built, mostly watching the tape"]) {
+      assert.equal(reason(`${d}. Say stop to opt out.`, drafted), "ok", d);
+    }
+  });
+});

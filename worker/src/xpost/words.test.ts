@@ -91,4 +91,15 @@ describe("a coin named in a draft's words", () => {
       assert.equal(marketTalkIn(draft), false, String(draft));
     }
   });
+
+  it("the words that let banter promise to cover losses, forecast, tease an event, tell people to go home or rank itself above people are no chat words (red-team review of a964a74c, 2026-10-12)", () => {
+    // Each POSTED as chat at a964a74c and refused as gate:unlooked-coin at 5f9ec3b2.
+    for (const draft of ["the bot you can count on to make you whole.", "doing great, history says weeks like this end well.", "great, my memory says this kind of week ends well.",
+      "good, a shift is coming in a couple hours.", "great, something huge is around the corner", "they should go back home.", "smarter than every human, obviously."]) {
+      assert.ok(unknownWordIn(draft, "Alan Al Dale"), draft);
+    }
+    for (const word of ["count", "counting", "history", "memory", "past", "shift", "shifts", "edge", "home", "corner", "forever", "human", "humans"]) {
+      assert.ok(unknownWordIn(`ha, ${word} vibes all day.`, "Alan Al Dale"), word);
+    }
+  });
 });
