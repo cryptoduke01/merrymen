@@ -7,9 +7,13 @@ a coin it bought and why. It never posts trade alerts, error messages, prices,
 sizes or advice.
 
 Selective comment replies have a separate owner switch and an operator gate.
-They remain unavailable until Merrymen has written approval from X for AI
-replies. No such approval has been obtained for this deployment; keep
-`MERRYMEN_XPOST_REPLIES_APPROVED` unset on both services.
+No written approval from X for AI replies has been obtained for this
+deployment, so `MERRYMEN_XPOST_REPLIES_APPROVED=1` (every owner) stays unset.
+On 2026-10-12 the owner decided to set it to `active` on both services, for
+the operator's own agent only: Alan answers people who tag him. X's published
+automation rules ask for written approval for AI reply bots; an X staff answer
+on the developer forum says replies triggered by a mention do not need it, and
+Alan's request for clarification is pending.
 
 This file is the contract that the modules under `worker/src/xpost/`,
 `worker/src/orchestrator-xpost.ts`, the web routes under `web/src/app/api/x/`,
@@ -322,7 +326,8 @@ none of them adds a kind of post or relaxes a rule.
 **Availability and consent.** The web and orchestrator both require
 `MERRYMEN_XPOST_REPLIES_APPROVED` to be exactly `1` (every owner) or `active`
 (only the owners in `MERRYMEN_XPOST_ACTIVE_TENANTS`; see "Active owners").
-Set it only after written X approval has been obtained. Without it, the owner sees “Comment replies
+`1` is for use only after written X approval; `active` is the owner's 2026-10-12
+decision for the operator's own agent (see the top of this file). Without it, the owner sees “Comment replies
 aren’t available yet.” Existing posting consent does not turn replies on.
 An owner enables them separately in web Settings or the iOS Posting on X
 screen. `POST /api/x/account` actions `enable-replies` and `disable-replies`
@@ -724,7 +729,7 @@ lanes before them. Unset is the default and changes nothing, except for an accou
 | 4 | `MERRYMEN_GATEWAY_BITQUERY_POINTS_PER_DAY` | gateway | `12500`, set explicitly when its key shares the plan | A separate counter from the lane's `25000`: lane plus gateway is 37,500 points a day, sized by the operator to the plan. The gateway's 12,500 includes the public memescope's own 10,000 (at most 9,605 used, one refresh per 45 s, matching the Markets page's own 45 s poll); holders get the other 2,500, at most 750 a day each |
 | 4 | `MERRYMEN_FLOW_BROKER` | none | never set | The orchestrator writes it into each child that may ask, and removes an inherited copy |
 | 5 | `MERRYMEN_XPOST_ACTIVE_TENANTS` | web + orchestrator, same value | Alan's tenant address, from the deploy environment | The active cadence, his reply consent recorded by the orchestrator, and answers to tags sent right away. The web reads it for the reply warning |
-| 5 | `MERRYMEN_XPOST_REPLIES_APPROVED` | web + orchestrator, same value | `active`, **only once X's written approval for AI replies is in hand**; unset until then | Without it there are no comment replies and no answers to tags. No approval has been obtained for this deployment |
+| 5 | `MERRYMEN_XPOST_REPLIES_APPROVED` | web + orchestrator, same value | `active` (the owner's decision of 2026-10-12, for the operator's own agent only; `1` stays unset until X's written approval) | Without it there are no comment replies and no answers to tags. On 2026-10-12 the owner (Milla) decided to set it to `active` on both services for the operator's own agent only, so Alan answers people who tag him. X's published automation rules ask for written approval for AI reply bots; an X staff answer on the developer forum says replies triggered by a mention do not need it, and Alan's request for clarification is pending. `1` (every owner) stays unset until written approval exists. |
 | 5 | `MERRYMEN_XPOST_REPLY_POLLS_PER_DAY` | orchestrator | unset (`200` for the fleet) | Alan's one-minute polls spend their own 1,500 per X account per UTC day |
 | 6 | `MERRYMEN_XPOST_RESEARCH` | orchestrator | `1` | Answers look things up first. Boot line `xpost: on — … answers look things up first`; with the Bitquery key also `xpost: answers may read onchain flow — up to 200 readings per UTC day …` |
 | 6 | `MERRYMEN_XPOST_RESEARCH_PER_HOUR` | orchestrator | unset (`120`) | Public-index lookups per hour across X accounts |
@@ -845,7 +850,9 @@ the owner should skip a duplicate introduction under Coming up.
   out at any local hour until the web or the app reports a zone.
 - **Without a model, only template intros go out**, and the pool saturates on
   a large fleet (see rule 7).
-- **AI replies remain disabled pending written X approval.** This deployment
-  has no approval as of September 30, 2026. Shipping this code does not enable
-  the feature, and owner consent cannot bypass the operator gate. Every intro
+- **AI replies for every owner remain disabled pending written X approval.**
+  This deployment has no approval as of October 12, 2026. Shipping this code
+  does not enable the feature, and owner consent cannot bypass the operator
+  gate. The one exception is the owner's 2026-10-12 decision to set `active`
+  for the operator's own agent, so Alan answers tags (see the top of this file). Every intro
   identifies the agent as AI, and no post or reply may claim a human life.
