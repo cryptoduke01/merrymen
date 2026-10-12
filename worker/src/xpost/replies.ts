@@ -20,7 +20,12 @@ export function isReplyOptOut(raw: unknown): boolean {
     || /\bleave me alone\b|\bno more (?:replies|responses|messages|mentions)\b|\bremove me\b/.test(text);
 }
 
-export type ReplyCandidate = { ok: true; text: string } | { ok: false; reason: string };
+/**
+ * `address` is set only by tagCandidate, and only when the post carried
+ * exactly one contract address: a LOOKUP KEY for the answer's research, never
+ * part of `text` (the writer's input), never nominated, never traded.
+ */
+export type ReplyCandidate = { ok: true; text: string; address?: string } | { ok: false; reason: string };
 
 const LINK_OR_SECRET = /https?:|www\.|\b[a-z0-9-]+\.(?:com|net|org|io|dev|app|xyz|gg|co|me|ai)\b|0x[a-f0-9]{8,}|\b(?:sk-|gsk_|api[ _-]?key|seed phrase|private key|password|secret)\b/i;
 const ABUSE_OR_SENSITIVE = /\b(?:fuck\w*|shit\w*|bitch\w*|idiot\w*|moron\w*|retard\w*|kill\w*|suicid\w*|rape\w*|porn\w*|sex\w*|nude\w*|terror\w*|nazi\w*|racis\w*|politic\w*|election\w*|president\w*|democrat\w*|republican\w*|religio\w*|christian\w*|muslim\w*|jew\w*|medical\w*|diagnos\w*|cancer|medication\w*|depress\w*)\b/i;
@@ -63,12 +68,34 @@ export function withoutReplyOptOut(text: string): string {
 const ASKED = /\?|^(?:what|why|how|which|who|whos|who's|where|are|is|do|does|did|can|could|have|has|tell|explain|thoughts|gm|hey|yo|hi|hello)\b/i;
 
 /**
+ * ONE CONTRACT ADDRESS: 0x + exactly forty hex, not a slice of a longer hex
+ * run on either side (a sixty-four-hex transaction hash or key is never read
+ * as one) — the same rule as the Telegram groups' CA finder, restated here
+ * because xpost/ may not import it (boundary.test.ts).
+ */
+const CA_RUN = /(?<![0-9a-f])0x[0-9a-f]{40}(?![0-9a-f])/gi;
+
+/**
+ * "HOW MANY HOLDERS", "HOW MUCH LIQUIDITY": a question about a coin's public
+ * facts, which an answer may take up in words (never a figure: the answer is
+ * gated with no numbers in it). Taken out before the advice screen so its
+ * "how much / how many" is not read as one; anything else in the post
+ * (should i, when to sell, a target, its own size) is still refused.
+ */
+const COIN_FACT_ASK = /\bhow (?:much|many) (?:of (?:the |its )?)?(?:holders?|liquidity|liq|volume|buyers?|sellers?|traders?|people (?:hold|holding|own)|wallets? (?:hold|holding))\b/gi;
+
+/**
  * IS THIS POST THAT TAGGED AN ACTIVE AGENT ONE IT MAY ANSWER? A question or a
- * plain address, in good faith, about the agent itself. The same screens as a
- * comment reply — opt-outs first, then links, secrets, abuse, sensitive
- * topics, spam, instructions and advice requests — except that digits may
- * appear in the question; the answer is still gated with no numbers in it.
- * Handles never reach the writer.
+ * plain address, in good faith, about the agent itself or a coin. The same
+ * screens as a comment reply — opt-outs first, then links, secrets, abuse,
+ * sensitive topics, spam, instructions and advice requests — except that
+ * digits may appear in the question; the answer is still gated with no
+ * numbers in it. Handles never reach the writer.
+ *
+ * ONE CONTRACT ADDRESS IS A LOOKUP KEY, NOT TEXT. It is taken out of the
+ * question (the writer reads "this coin" where it stood) and returned apart,
+ * so the model never sees it and the answer cannot echo it. Two addresses, an
+ * address inside a link, or any other long hex run are still refused.
  */
 export function tagCandidate(reply: XReply, ctx: { xUserId: string }): ReplyCandidate {
   const no = (reason: string): ReplyCandidate => ({ ok: false, reason });
@@ -76,13 +103,20 @@ export function tagCandidate(reply: XReply, ctx: { xUserId: string }): ReplyCand
   if (reply.authorId === ctx.xUserId) return no("own-comment");
   if (isReplyOptOut(reply.text)) return no("opt-out");
   if (typeof reply.text !== "string") return no("invalid");
-  const text = withoutLeadingMentions(reply.text.normalize("NFKC")).replace(/@[a-z0-9_]{1,15}\b/gi, " ").replace(/\s+/g, " ").trim();
-  if (text.length < 4 || text.length > XREPLY_MAX_COMMENT_CHARS || (text.match(/\p{L}+/gu) ?? []).length < 2) return no("low-signal");
+  const said = withoutLeadingMentions(reply.text.normalize("NFKC")).replace(/@[a-z0-9_]{1,15}\b/gi, " ").replace(/\s+/g, " ").trim();
+  const addresses = [...new Set([...said.matchAll(CA_RUN)].map((m) => m[0].toLowerCase()))];
+  if (addresses.length > 1) return no("link-or-secret");
+  const address = addresses[0];
+  // Judged without the address (it is no words), and handed on with "this coin" where it stood.
+  const bare = address ? said.replace(CA_RUN, " ").replace(/\s+/g, " ").trim() : said;
+  const text = address ? said.replace(CA_RUN, "this coin").replace(/\s+/g, " ").trim() : said;
+  if (bare.length < 4 || text.length > XREPLY_MAX_COMMENT_CHARS || (bare.match(/\p{L}+/gu) ?? []).length < 2) return no("low-signal");
   if (/[\u0000-\u001f\u007f«»<>#]|\p{Script=Cyrillic}|\p{Script=Han}/u.test(text)) return no("unsafe-text");
   if (LINK_OR_SECRET.test(text)) return no("link-or-secret");
   if (ABUSE_OR_SENSITIVE.test(text)) return no("sensitive");
   if (SPAM_OR_INSTRUCTIONS.test(text)) return no("spam-or-instructions");
-  if (ADVICE_REQUEST.test(text) || /^(?:please\s+)?(?:buy|sell|hold|ape|pump|dump)\b/i.test(text)) return no("advice-request");
+  const advice = text.replace(COIN_FACT_ASK, " ");
+  if (ADVICE_REQUEST.test(advice) || /^(?:please\s+)?(?:buy|sell|hold|ape|pump|dump)\b/i.test(text)) return no("advice-request");
   if (!ASKED.test(text)) return no("not-asked");
-  return { ok: true, text };
+  return address ? { ok: true, text, address } : { ok: true, text };
 }
