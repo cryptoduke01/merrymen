@@ -70,12 +70,18 @@ async function world(t: TestContext, o: {
   const sends: Record<string, unknown>[] = [], prompts: string[] = [], reads: number[] = [];
   let clock = NOW;
   let garbled = false;
+  // Who X says wrote each tag (expansions=author_id): an ordinary reader by default; null leaves an author out.
+  let authors = new Map<string, { username: string; name: string } | null>();
+  const users = () => [...new Set(inbox.map((m) => String(m.author_id)))].flatMap((id) => {
+    const a = authors.has(id) ? authors.get(id) : { username: `reader_${id}`, name: "A Reader" };
+    return a ? [{ id, ...a }] : [];
+  });
   const fetch: FetchLike = async (url, init) => {
     if (url.includes("/mentions?")) {
       reads.push(clock);
       // A page that does not add up, as X's answer past its eight hundred mentions reads to the client.
       if (garbled) return { status: 200, headers: { get: () => null }, text: async () => JSON.stringify({ data: inbox, meta: { result_count: inbox.length + 1 } }) };
-      return { status: 200, headers: { get: () => null }, text: async () => JSON.stringify({ data: inbox, meta: { result_count: inbox.length } }) };
+      return { status: 200, headers: { get: () => null }, text: async () => JSON.stringify({ data: inbox, includes: { users: users() }, meta: { result_count: inbox.length } }) };
     }
     assert.equal(url, "https://api.x.com/2/tweets");
     sends.push(JSON.parse(init.body ?? "{}"));
@@ -104,7 +110,8 @@ async function world(t: TestContext, o: {
   const step = (now = NOW) => { clock = now; return poster.step(db, [{ tenant: TENANT, agentId: TENANT }, ...others.map((t) => ({ tenant: t, agentId: t }))], new Map(), now); };
   const answers = async () => (await store.postsOf(db, TENANT, 0)).filter((p) => p.kind === "answer");
   const asked = () => prompts.filter((p) => /Untrusted question/.test(p));
-  return { db, step, answers, asked, systems, everySystem, sends, reads, setInbox: (v: Record<string, unknown>[]) => { inbox = v; }, garble: (on: boolean) => { garbled = on; } };
+  return { db, step, answers, asked, systems, everySystem, sends, reads, setInbox: (v: Record<string, unknown>[]) => { inbox = v; }, garble: (on: boolean) => { garbled = on; },
+    setAuthors: (v: Record<string, { username: string; name: string } | null>) => { authors = new Map(Object.entries(v)); } };
 }
 
 test("the operator's active owners are read by address only, and a bad entry is named by position", () => {
@@ -1036,6 +1043,33 @@ test("nothing is answered in someone else's thread or under a quote; a reply in 
   await w.step();
   assert.equal(w.asked().length, 1);
   assert.equal((await w.answers())[0]!.status, "scheduled");
+});
+
+test("the model line never goes under a poll, or to an author whose name or handle code has not read or that names sherwood (red-team 2026-10-12)", async (t) => {
+  // The reproduced tag: top level, author 888, the plain model question with a poll attached.
+  const POLL = tag({ id: "100000000000000040", conversation_id: "100000000000000040", author_id: "888", text: "@pine_stoat what model are you?",
+    attachments: { poll_ids: ["1199786642468413448"] } });
+  const PLAIN = tag({ id: "100000000000000041", conversation_id: "100000000000000041", author_id: "888", text: "@pine_stoat what model are you?" });
+  const SCAM = { username: "Sherwood1Token", name: "SHERWOOD-1 presale LIVE" };
+  for (const env of [{}, RESEARCH_ON]) {
+    for (const [inbox, author] of [[POLL, SCAM], [POLL, { username: "reader_888", name: "A Reader" }], [PLAIN, SCAM], [PLAIN, null],
+      [PLAIN, { username: "plain_reader", name: "ꓢꓧꓰꓣꓪꓳꓳꓓ fan" }], [PLAIN, { username: "sherwoo_d", name: "A Reader" }]] as const) {
+      const w = await world(t, { env, research: fakeResearch().research });
+      w.setInbox([inbox]);
+      w.setAuthors({ "888": author });
+      await w.step();
+      w.setInbox([]);
+      await w.step(NOW + MIN);
+      assert.deepEqual(w.sends, [], JSON.stringify(author));
+      assert.ok((await w.answers()).every((a) => !/sherwood/i.test(a.body)), JSON.stringify(author));
+    }
+  }
+  // An ordinary reader asking the plain question, with nothing attached, still gets it.
+  const w = await world(t);
+  w.setInbox([PLAIN]);
+  w.setAuthors({ "888": { username: "plain_reader", name: "A Reader" } });
+  await w.step();
+  assert.match((await w.answers())[0]!.body, /new sherwood-1\b/);
 });
 
 test("in its own thread, the model line never goes under a stranger's reply there, the asker's own pitch included (red-team 2026-10-12)", async (t) => {

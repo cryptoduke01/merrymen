@@ -140,6 +140,15 @@ describe("tags an active agent may answer", () => {
       { ok: false, reason: "not-own-thread" }, "no roots known: no thread is its own");
   });
 
+  it("a poll, media, a card or a long post's rest is never answered under: code reads none of it (red-team 2026-10-12)", () => {
+    const own = { xUserId: "111", username: "pine_stoat", ownRoots: new Set(["999"]) };
+    const poll = comment("@pine_stoat what model are you?", { id: "100000000000000040", authorId: "888", conversationId: "100000000000000040", inReplyToTweetId: "", attached: true });
+    for (const research of [false, true]) assert.deepEqual(tagCandidate(poll, { ...own, research }), { ok: false, reason: "attached" });
+    assert.equal(tagCandidate({ ...poll, attached: undefined }, own).ok, true, "the same tag with nothing attached");
+    // A comment on a buy post too.
+    assert.deepEqual(replyCandidate(comment("Why did you pick this coin?", { attached: true }), CTX), { ok: false, reason: "attached" });
+  });
+
   it("in its own thread, only a reply straight under its own post: never one under somebody else's reply there (red-team 2026-10-12)", () => {
     const own = { xUserId: "111", username: "pine_stoat", ownRoots: new Set(["999"]) };
     // The reproduced pair: C1, a pitch replying to its hello (999), refused as spam; C2, the same author's reply to C1.

@@ -1506,7 +1506,13 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // tag as posted with only its own handle set aside; and the model line
       // never goes under a reply prefix that names anyone else (red-team 2026-10-12).
       const sherwoodTagged = sherwoodMentioned(withoutHandle(comment.text, account.username));
-      const asked: TagIntent = sherwoodTagged || (classified.kind === "model" && candidate.otherHandles) ? { kind: "unanswered" } : classified;
+      // AND NEVER UNDER A NAME CODE HAS NOT READ (red-team 2026-10-12): the
+      // line goes up as said to whoever asked, and "@Sherwood1Token ·
+      // SHERWOOD-1 presale LIVE" asking the plain question got it. Only to an
+      // author X named, whose handle and display name name no sherwood.
+      const author = comment.author;
+      const namedClean = !!author && !sherwoodMentioned(author.username) && !sherwoodMentioned(author.name);
+      const asked: TagIntent = sherwoodTagged || (classified.kind === "model" && (candidate.otherHandles || !namedClean)) ? { kind: "unanswered" } : classified;
       // SHERWOOD IN ANY FORM, OR A MODEL QUESTION OFF THE ALLOWLIST, is
       // answered by nothing: the model line under "sherwood TGE soon?" reads
       // as Merrymen confirming a token, and a draft is never asked about the

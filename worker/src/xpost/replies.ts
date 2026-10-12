@@ -76,6 +76,8 @@ export function replyCandidate(
   if (reply.conversationId !== ctx.rootTweetId || reply.inReplyToTweetId !== ctx.rootTweetId) return no("not-direct");
   if (isReplyOptOut(reply.text)) return no("opt-out");
   if (typeof reply.text !== "string") return no("invalid");
+  // What is shown with it and never read here: a quote, a poll, media, a card (red-team 2026-10-12).
+  if (reply.quoted === true || reply.attached === true) return no("attached");
   const text = withoutLeadingMentions(reply.text.normalize("NFKC")).replace(/\s+/g, " ").trim();
   if (text.length < 8 || text.length > XREPLY_MAX_COMMENT_CHARS || (text.match(/\p{L}+/gu) ?? []).length < 3) return no("low-signal");
   if (/[\u0000-\u001f\u007f«»<>]|\p{N}|[@#]|\p{Script=Cyrillic}|\p{Script=Han}/u.test(text)) return no("unsafe-text");
@@ -296,6 +298,8 @@ export function tagCandidate(reply: XReply, ctx: { xUserId: string; research?: b
   if (isAnswerOptOut(reply.text)) return no("opt-out");
   if (typeof reply.text !== "string") return no("invalid");
   if (reply.quoted === true) return no("quoted");
+  // A poll, media, a card or a long post's rest: shown with the tag, read by nobody here (XReply.attached).
+  if (reply.attached === true) return no("attached");
   const topLevel = reply.conversationId === reply.id && reply.inReplyToTweetId === "";
   const underOwn = ctx.ownRoots?.has(reply.conversationId) === true && ctx.ownRoots.has(reply.inReplyToTweetId);
   if (!topLevel && !underOwn) return no("not-own-thread");
