@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { PublicClient } from "viem";
 import { CASH } from "../../packages/core/src/index";
-import { DECISION_RESEARCH_GUIDANCE, decisionResearchEnabledFor, entryCostEvidence, entryCostResearch, researchEntrySize, trenchBreakEven, trenchMomentumBrief } from "./decision-research";
+import { DECISION_RESEARCH_GUIDANCE, decisionResearchEnabledFor, entryCostEvidence, entryCostResearch, researchEntrySize, trenchBreakEven, trenchMomentumBrief, type BreakEven } from "./decision-research";
 import { TRENCHER_FAST } from "./strategies/trencher";
 import { trenchBrainPersona } from "./trencher-brain";
 import { withAgentBrief } from "./agent-brief";
@@ -156,11 +156,11 @@ test("the momentum brief reads its exits from the strategy, states where the bra
   assert.match(brief, /Horizon: minutes, not days/);
   assert.match(brief, /stop -10%, take \+20%, close at 30 minutes, or early if 50% of entry liquidity drains/);
   assert.match(brief, /Brackets run from your average fill, which already includes the entry leg's venue cost/);
-  assert.match(brief, /A round trip at 2\.50 USDG costs about 3\.(29|3)% \(quoted\)\. c, what each exit pays beyond the fill and the rise above it that breaks even, is about 2\.(29|3)%/);
+  assert.match(brief, /A round trip at 2\.50 USDG costs about 3\.(29|3)% \(quoted\)\. c, each exit's cost beyond the fill and so the break-even rise above it, is about 2\.(29|3)% \(exit leg as half the quoted venue friction/);
   assert.match(brief, /P x \(20 - c\)% - \(1 - P\) x \(10 \+ c\)%, positive only when P is above about 41%/, "(10 + 2.3) / 30");
   assert.match(brief, /a time-stopped exit takes the 30-minute mark, less c/);
   assert.doesNotMatch(brief, /near flat/, "nothing unmeasured about where a time stop lands");
-  assert.match(brief, /bracket estimate at entry size as expected_edge_usdg/);
+  assert.match(brief, /give that estimate at entry size as expected_edge_usdg/);
   assert.match(brief, /Continuation: buyers and buy share rising/);
   assert.match(brief, /one sender doing most of a material sell flow \(may be a router or bundler\)/);
   assert.match(brief, /Missing news, fundamentals or social-media data is not by itself a reason to hold for this strategy/);
@@ -179,7 +179,7 @@ test("when the take-profit cannot cover the cost, no odds threshold is printed; 
   const dear = trenchBreakEven(null, { ...fallback, gasPerOperationUsdg: 400_000n });
   assert.equal(dear.basis, "gas-and-fees");
   const brief = trenchMomentumBrief(TRENCHER_FAST, dear, 2_500_000n);
-  assert.match(brief, /no odds make it positive: the take-profit cannot cover this cost at this size/);
+  assert.match(brief, /no odds make it positive: the take-profit cannot cover c at this size/);
   assert.doesNotMatch(brief, /P is above/);
   const edge = trenchMomentumBrief(TRENCHER_FAST, { basis: "quoted", roundTripPct: 20, bracketCostPct: 19.85 }, 2_500_000n);
   assert.equal(threshold(edge), 99, "99.5% prints as 99, never 100");
@@ -187,13 +187,23 @@ test("when the take-profit cannot cover the cost, no odds threshold is printed; 
 
 test("the whole research persona fits inside the Brain's 4000-character strategy brief", () => {
   // graph.py fences `req.persona[:4000]`: anything past it is cut, and the
-  // momentum plan is last. Longest case: the longest symbol a token may carry
-  // (16, packages/core tokens.ts), an owner brief with a voice line, the
-  // research guidance and a three-digit cost.
-  const persona = withAgentBrief(trenchBrainPersona("X".repeat(16), false), "dry sarcastic casual") +
-    `\n\n${DECISION_RESEARCH_GUIDANCE}\n\n` +
-    trenchMomentumBrief(TRENCHER_FAST, { basis: "gas-and-fees", roundTripPct: 123.456, bracketCostPct: 123.456 }, 2_500_000n);
-  assert.ok(persona.length <= 3900, `${persona.length} characters leaves too little room under 4000`);
+  // momentum plan is last. EVERY BRANCH, at its longest: the longest symbol a
+  // token may carry (16, packages/core tokens.ts), an owner brief with a voice
+  // line, the research guidance, three-digit costs — which on the quoted and
+  // floor bases also take the long "no odds" clause — and a threshold branch.
+  const branches: BreakEven[] = [
+    { basis: "quoted", roundTripPct: 123.456, bracketCostPct: 123.456 },
+    { basis: "gas-and-fees", roundTripPct: 123.456, bracketCostPct: 123.456 },
+    { basis: "quoted", roundTripPct: 12.345, bracketCostPct: 9.876 },
+    { basis: "gas-and-fees", roundTripPct: 12.345, bracketCostPct: 9.876 },
+    { basis: "unknown" },
+  ];
+  for (const be of branches) {
+    const persona = withAgentBrief(trenchBrainPersona("X".repeat(16), false), "dry sarcastic casual") +
+      `\n\n${DECISION_RESEARCH_GUIDANCE}\n\n` + trenchMomentumBrief(TRENCHER_FAST, be, 2_500_000n);
+    assert.ok(persona.length <= 3900, `${JSON.stringify(be)}: ${persona.length} characters leaves too little room under 4000`);
+    assert.match(persona, /All checks above still apply\.$/, "the last check sentence is inside the cut");
+  }
   // And the fleet persona is untouched: the plan is added by index.ts, research accounts only.
   assert.doesNotMatch(trenchBrainPersona("MEME", false), /MOMENTUM ENTRY PLAN/);
 });

@@ -186,11 +186,11 @@ export function trenchMomentumBrief(
   // c: what each exit pays beyond the fill, which is also the rise above the
   // fill that breaks even (trenchBreakEven).
   const cost = be.basis === "quoted"
-    ? `A round trip at ${entry} USDG costs about ${n(be.roundTripPct, 2)}% (quoted). c, what each exit pays beyond the fill and the rise above it that breaks even, ` +
-      `is about ${n(be.bracketCostPct, 2)}% (half the quoted venue friction as the exit leg, both turnover fees, gas for both legs).`
+    ? `A round trip at ${entry} USDG costs about ${n(be.roundTripPct, 2)}% (quoted). c, each exit's cost beyond the fill and so the break-even rise above it, ` +
+      `is about ${n(be.bracketCostPct, 2)}% (exit leg as half the quoted venue friction, both turnover fees, gas both ways).`
     : be.basis === "gas-and-fees"
       ? `A round trip at ${entry} USDG costs at least ${n(be.roundTripPct, 2)}% in gas and turnover fees (venue fee and impact not quoted). ` +
-        "c, what each exit pays beyond the fill and the rise above it that breaks even, is at least that."
+        "c, each exit's cost beyond the fill and so the break-even rise above it, is at least that."
       : "The round-trip cost c could not be priced; treat a marginal setup as insufficient.";
   const c = be.basis === "unknown" ? null : be.bracketCostPct;
   // The odds at which the bracket breaks even. At or past 1, the take-profit
@@ -199,15 +199,15 @@ export function trenchMomentumBrief(
   const odds = p === null
     ? `positive only when P is clearly above ${n(stop * 100 / (take + stop), 0)}% plus the unknown cost`
     : p >= 1
-      ? "and no odds make it positive: the take-profit cannot cover this cost at this size"
+      ? "and no odds make it positive: the take-profit cannot cover c at this size"
       : `positive only when P is above ${be.basis === "gas-and-fees" ? "at least " : ""}about ${n(Math.min(99, p * 100), 0)}%`;
   return `MOMENTUM ENTRY PLAN. Horizon: minutes, not days. Exits are mechanical, per tick (fills can overshoot): ` +
     `stop -${n(stop, 1)}%, take +${n(take, 1)}%, close at ${minutes} minutes, or early if ${drain}% of entry liquidity drains. ` +
     "Brackets run from your average fill, which already includes the entry leg's venue cost. " +
     `${cost} Judge the setup against these brackets, not an invented target: ` +
-    `with P your odds of +${n(take, 1)}% before -${n(stop, 1)}%, edge per entry is about P x (${n(take, 1)} - c)% - (1 - P) x (${n(stop, 1)} + c)%, ${odds}; ` +
+    `with P your odds of +${n(take, 1)}% before -${n(stop, 1)}%, the edge is about P x (${n(take, 1)} - c)% - (1 - P) x (${n(stop, 1)} + c)%, ${odds}; ` +
     `a time-stopped exit takes the ${minutes}-minute mark, less c. ` +
-    "Reason P from flow; give that bracket estimate at entry size as expected_edge_usdg. " +
+    "Reason P from flow; give that estimate at entry size as expected_edge_usdg. " +
     "Continuation: buyers and buy share rising from 1h to 5m, higher 5-minute lows, volume expanding with price, liquidity holding. " +
     "Distribution: sellers dominating recent windows, one sender doing most of a material sell flow (may be a router or bundler), lower highs, draining liquidity, overextension after a vertical spike. " +
     "Missing news, fundamentals or social-media data is not by itself a reason to hold for this strategy; decide on flow, liquidity, cost and these exits. " +
