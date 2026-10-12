@@ -69,9 +69,12 @@ async function world(t: TestContext, o: {
   let inbox: Record<string, unknown>[] = [tag()];
   const sends: Record<string, unknown>[] = [], prompts: string[] = [], reads: number[] = [];
   let clock = NOW;
+  let garbled = false;
   const fetch: FetchLike = async (url, init) => {
     if (url.includes("/mentions?")) {
       reads.push(clock);
+      // A page that does not add up, as X's answer past its eight hundred mentions reads to the client.
+      if (garbled) return { status: 200, headers: { get: () => null }, text: async () => JSON.stringify({ data: inbox, meta: { result_count: inbox.length + 1 } }) };
       return { status: 200, headers: { get: () => null }, text: async () => JSON.stringify({ data: inbox, meta: { result_count: inbox.length } }) };
     }
     assert.equal(url, "https://api.x.com/2/tweets");
@@ -100,7 +103,7 @@ async function world(t: TestContext, o: {
   const step = (now = NOW) => { clock = now; return poster.step(db, [{ tenant: TENANT, agentId: TENANT }, ...others.map((t) => ({ tenant: t, agentId: t }))], new Map(), now); };
   const answers = async () => (await store.postsOf(db, TENANT, 0)).filter((p) => p.kind === "answer");
   const asked = () => prompts.filter((p) => /Untrusted question/.test(p));
-  return { db, step, answers, asked, systems, sends, reads, setInbox: (v: Record<string, unknown>[]) => { inbox = v; } };
+  return { db, step, answers, asked, systems, sends, reads, setInbox: (v: Record<string, unknown>[]) => { inbox = v; }, garble: (on: boolean) => { garbled = on; } };
 }
 
 test("the operator's active owners are read by address only, and a bad entry is named by position", () => {
@@ -197,6 +200,18 @@ test("an active agent's mentions are read every minute on an allowance of its ow
   const off = await world(t, { polls: 0 });
   await off.step();
   assert.deepEqual(off.reads, [], "polling switched off is off for the active owners too");
+});
+
+test("an active account whose mentions cannot be read waits thirty minutes, not one, before it pays for another read", async (t) => {
+  const w = await world(t);
+  w.garble(true);
+  for (const at of [NOW, NOW + MIN, NOW + 2 * MIN, NOW + 29 * MIN]) await w.step(at);
+  assert.deepEqual(w.reads, [NOW], "one failed read, then held");
+  assert.ok(Number((await store.readMeta(w.db, "reply-backoff:111"))?.v) >= NOW + 30 * MIN);
+  w.garble(false);
+  await w.step(NOW + 30 * MIN + 15_000);
+  assert.equal(w.reads.length, 2, "read again at the fleet's pace");
+  assert.equal(w.reads.at(-1), NOW + 30 * MIN + 15_000);
 });
 
 test("an owner the operator did not make active answers no tags", async (t) => {

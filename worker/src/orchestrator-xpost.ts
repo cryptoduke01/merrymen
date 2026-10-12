@@ -1137,6 +1137,15 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       if (!result.ok) {
         bump(`reply-read-${result.failure}`);
         if (result.resetAtMs) await writeMeta(shared, `reply-backoff:${account.xUserId}`, String(result.resetAtMs), at());
+        // A READ THAT FAILS ON WHAT X SENT waits the fleet's thirty minutes,
+        // not an active account's one. A backlog past the eight hundred
+        // mentions X pages back to fails this way on every poll until the
+        // cursor is moved (docs/x-posting.md "Active owners"), and a minute's
+        // poll would buy eight billable pages and nothing else.
+        else if (result.failure === "invalid" && isActive(account)) {
+          await writeMeta(shared, `reply-backoff:${account.xUserId}`, String(t + REPLY_POLL_MS), at());
+          bump("active-reply-read-held");
+        }
         if (result.failure === "credits" || result.failure === "app") {
           await writeMeta(shared, result.failure === "credits" ? PAUSE_KEY : APP_PAUSE_KEY,
             String(at() + (result.failure === "credits" ? CREDITS_PAUSE_MS : APP_PAUSE_MS)), at());

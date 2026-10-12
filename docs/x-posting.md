@@ -495,6 +495,18 @@ the mention itself. They go out **right away**:
   `MERRYMEN_XPOST_REPLY_POLLS_PER_DAY=0` still turns every poll off. An answer
   is sent on the next pass that read the mentions again, so opt-outs are
   always handled first. In practice that is within about a minute.
+- **A read that fails on what X sent waits thirty minutes.** A malformed
+  page, or a backlog of more than the 800 mentions X pages back to (after an
+  outage or a credits pause while the agent is tagged a lot), fails the read
+  closed and leaves the cursor where it was. For an active agent the next
+  poll then waits the fleet's thirty minutes (`reply-backoff:<xUserId>`,
+  logged as `active-reply-read-held`), not one, so a stuck cursor costs eight
+  pages every half hour rather than every minute. A backlog past 800 never
+  clears on its own, and nothing is answered or opted out meanwhile. The
+  operator's fix is to move the cursor to a recent mention on the shared
+  database, `UPDATE xpost_meta SET v = '<id of a recent mention>' WHERE k =
+  'reply-cursor:<xUserId>';`. Mentions older than that are not read; past
+  800 back, X no longer serves them anyway.
 - **Answered on the pass that read it.** A poll's cursor moves on as it
   reads, so a batch is worked through on the same pass, even when that
   pass's posts are not due for planning (the poll's minute and the plan's
