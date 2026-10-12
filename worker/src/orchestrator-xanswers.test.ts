@@ -29,7 +29,7 @@ const FACTS: AgentFacts = { tenant: TENANT, agentId: TENANT, slug: null, name: "
 const tag = (over: Record<string, unknown> = {}) => ({ id: MENTION, author_id: "333", conversation_id: MENTION,
   created_at: new Date(NOW - MIN).toISOString(), text: "@pine_stoat what kind of coins do you trade?", ...over });
 
-async function world(t: TestContext, o: { active?: boolean; env?: Record<string, string>; research?: XResearch; facts?: AgentFacts } = {}) {
+async function world(t: TestContext, o: { active?: boolean; env?: Record<string, string>; research?: XResearch; facts?: AgentFacts; answer?: string } = {}) {
   const raw = new DatabaseSync(":memory:");
   t.after(() => raw.close());
   const db = wrapSqlite(raw), dek = randomBytes(32);
@@ -65,7 +65,7 @@ async function world(t: TestContext, o: { active?: boolean; env?: Record<string,
       llm: async (_creds, input) => {
         prompts.push(input.prompt);
         if (/Untrusted question/.test(input.prompt)) systems.push(input.system ?? "");
-        return /Untrusted question/.test(input.prompt) ? ANSWER : "PASS";
+        return /Untrusted question/.test(input.prompt) ? o.answer ?? ANSWER : "PASS";
       },
       ...(o.research ? { research: o.research } : {}),
     },
@@ -245,15 +245,35 @@ test("research on, Fomo switch on: a coin answer asks Fomo as a public x-answer 
   assert.match(w.asked()[0]!, /on fomo, more traders have been buying in than heading out lately/);
 });
 
-test("research on: the model question is a sherwood tease, a free intent with no lookup", async (t) => {
+test("research on: the model question is answered from a code-built sherwood line, with no lookup and no draft", async (t) => {
   const r = fakeResearch();
   const w = await world(t, { env: RESEARCH_ON, research: r.research });
   w.setInbox([tag({ text: "@pine_stoat what model do you run on?" })]);
   await w.step();
   assert.equal(r.seen.length, 0);
-  assert.match(w.asked()[0]!, /asking what model you run on/);
-  assert.match(w.systems[0]!, /tease the new «sherwood one», merrymen's own model/);
-  assert.match(w.systems[0]!, /never claim sherwood runs you today/);
+  assert.equal(w.asked().length, 0, "no model call: the line is code's");
+  const [answer] = await w.answers();
+  assert.equal(answer!.status, "scheduled", answer!.reason ?? "");
+  assert.match(answer!.body, /merrymen/);
+  assert.match(answer!.body, /the new sherwood one/);
+  assert.match(answer!.body, /cooking|oven/);
+  assert.match(answer!.body, /Say stop to opt out\.$/i);
+  assert.doesNotMatch(answer!.body, /\p{N}|running on|powered|runs me/u);
+  assert.equal((await store.readMeta(w.db, "llm:2026-09-30"))?.n ?? 0, 0, "and no model allowance spent");
+});
+
+test("a draft that says sherwood runs it is refused, research on or off", async (t) => {
+  for (const env of [{}, RESEARCH_ON]) {
+    for (const answer of ["running on the new sherwood one, built by merrymen. Say stop to opt out.", "built by merrymen, powered by sherwood one now. Say stop to opt out.",
+      "sherwood one is what runs me these days. Say stop to opt out."]) {
+      const w = await world(t, { env, research: fakeResearch().research, answer });
+      w.setInbox([tag({ text: "@pine_stoat how do you pick your coins?" })]);
+      await w.step();
+      const [skipped] = await w.answers();
+      assert.equal(skipped!.status, "skipped", answer);
+      assert.equal(skipped!.reason, "gate:sherwood-claim", answer);
+    }
+  }
 });
 
 test("research on: \"did you buy <contract>?\" reaches its own history by the address, end to end", async (t) => {

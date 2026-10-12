@@ -78,14 +78,24 @@ export type TagIntent =
  * "WHAT MODEL ARE YOU ON", "are you chatgpt", "what ai runs you". Read before
  * the private-ask screen, which deflects model questions in a Telegram room;
  * on X the answer is the sherwood tease (writer.ts SHERWOOD_ON_X).
+ *
+ * STRICT, BECAUSE IT IS READ FIRST and its answer is the tease and nothing
+ * else: the model noun must end the phrase or be followed by a verb or a
+ * pronoun ("what ai are you", "which model runs you", "what llm?"), never by
+ * another noun ("what ai coins do you like" is a coin question); and "running
+ * on" must be followed by a model or provider word, or end the question
+ * ("are you running on paper or live" is about its trades).
  */
+const MODEL_NOUN = String.raw`(?:model|llm|ai|a\.i\.?|language model|brain|engine)`;
+const MODEL_NAMES = String.raw`(?:gpt|chat\s?gpt|claude|grok|gemini|llama|qwen|deepseek|mistral|openai|anthropic|sherwood)`;
 const MODEL_ASK = new RegExp(
   [
-    String.raw`\b(?:what|which|wat|whats|what's)\s+(?:kind\s+of\s+|sort\s+of\s+|type\s+of\s+)?(?:model|llm|ai|a\.i\.?|language model|brain|engine)\b`,
+    String.raw`\b(?:what|which|wat|whats|what's)\s+(?:kind\s+of\s+|sort\s+of\s+|type\s+of\s+)?${MODEL_NOUN}(?=\s*(?:$|[?!.,]|(?:are|r|do|does|is|runs?|powers?|drives?|you|u|ya|behind|under|inside|in\s+you)\b))`,
     String.raw`\b(?:model|llm|ai|brain)\s+(?:are|r|do|is)\s+(?:you|u|ya)\b`,
-    String.raw`\b(?:you|u|ya)\s+(?:run(?:ning)?|built|powered|trained|based)\s+on\b`,
-    String.raw`\b(?:runs|powers|built)\s+(?:you|u)\b`,
-    String.raw`\b(?:are|r)\s+(?:you|u)\s+(?:a\s+)?(?:gpt|chat\s?gpt|claude|grok|gemini|llama|qwen|deepseek|mistral)\b`,
+    String.raw`\b(?:you|u|ya)\s+(?:run(?:ning)?|built|powered|trained|based)\s+(?:on|by)\s+(?:(?:what|which|a|an|the|some)\s+)?(?:${MODEL_NOUN}|${MODEL_NAMES})\b`,
+    String.raw`\bwhat\s+(?:do|does|are)\s+(?:you|u|ya)\s+(?:run(?:ning)?|built|powered|trained|based)\s+on\s*(?:$|[?!.])`,
+    String.raw`\b(?:what|who|which\s+${MODEL_NOUN})\s+(?:runs|powers|built|made|trained|drives)\s+(?:you|u|ya)\b`,
+    String.raw`\b(?:are|r)\s+(?:you|u)\s+(?:a\s+)?${MODEL_NAMES}\b`,
   ].join("|"),
   "iu",
 );
@@ -174,6 +184,13 @@ export interface XResearchDeps {
   publicTheses?: (shared: Db, agentId: string) => Promise<PublicThesis[]>;
   /** The orchestrator's own Fomo service as a broker for one tenant, or null when Fomo is off. Consulted only with the Fomo switch on. */
   fomo?: (tenant: string) => FomoBroker | null;
+  /**
+   * Whether Fomo can answer for this owner at all: the owner's own data
+   * access on, and the x-answer cap above zero. Absent: a broker that says it
+   * is configured is taken as usable. A capability is only claimed, and a
+   * Fomo read only made, when this says yes.
+   */
+  fomoUsable?: (tenant: string) => Promise<boolean>;
   /** Onchain flow (Bitquery), when another change wires it. */
   flow?: FlowReader;
   /** The fleet home, for the Gecko lane (geckoterminal.ts GeckoLane). The orchestrator passes merrymenHome(). */
@@ -198,6 +215,12 @@ export interface ResearchInput {
 export interface ResearchBundle {
   /** Code-built phrases, each with its source in it: digit-free and screened. */
   facts: string[];
+  /**
+   * The creator's own description of a coin it traded or reviewed, screened
+   * (creatorClaim), or null. Apart from `facts`: it is the project's
+   * unverified claim, never something it looked up and found.
+   */
+  claim?: string | null;
   /** Lookups made (the budget counts these). */
   lookups: number;
   /** What happened, by stable word, for the pass's counts. Never a coin, a person or an address. */
@@ -371,17 +394,38 @@ function derivedId(address: string): string {
 const sameLabel = (a: string | null | undefined, b: string | null | undefined): boolean =>
   !!a && !!b && a.trim().toLowerCase().replace(/^\$/, "") === b.trim().toLowerCase().replace(/^\$/, "");
 
-/** A pass's reason that talks about keeping a position is no pass at all: it may be holding. */
-const HOLDING_WORDS = /\b(?:hold(?:s|ing)?|keep(?:s|ing)?|kept|position|still in|stay(?:ing)? in|bag)\b/i;
+const CONTRACT = /^0x[0-9a-fA-F]{40}$/;
+/** An autonomous Trencher coin's thesis symbol: derived from its address (derivedId). */
+const TRENCHER_ID = /^T[0-9A-F]{11}$/;
+
+/** A buy post's own contract, from the CA suffix the pipeline adds (public-wallet.ts appendPublicToken), or null. */
+function postContract(body: string): string | null {
+  const m = / CA \([^)]*\): (0x[0-9a-fA-F]{40})\b/.exec(String(body ?? ""));
+  return m ? m[1]!.toLowerCase() : null;
+}
 
 /**
  * WHAT IT DID WITH THIS COIN, from what it has already made public: the buys
  * the room knows (AgentFacts.calls, landed or paper, past publishableThesis),
  * its own buy posts on this X account, and its public theses (the feed's own
- * gate) — "you bought it", "your buy post said …", "you looked at it and
- * passed: <reason>". A pass is said only when nothing shows a buy, and only
- * with a reason the Telegram facts filter keeps (no figure, address, link or
- * handle), or none. A sale is never said: an answer is only told what it bought.
+ * gate) — "you bought it", "your buy post said …". A sale is never said: an
+ * answer is only told what it bought.
+ *
+ * BY THE CONTRACT ALONE WHEN THERE IS ONE. A tagged address is a stranger's
+ * key, and a name is not a coin: "is $PEPE <another contract> legit?" must
+ * never find its real PEPE buy by the name and say "you bought it" under a
+ * copycat's contract. With an address, a buy counts only when its own token
+ * is that address, a buy post only when its CA (or its decision) is, and a
+ * thesis only when its symbol is the address's derived id or an
+ * address-matched buy's symbol. A name is read only when no contract is known
+ * at all (a $ticker it could not resolve, "why did you buy pepe").
+ *
+ * NEVER "YOU PASSED" (review, 2026-10-12). The only record of a declined look
+ * here would be a public thesis, and a symbol's thesis without a trade is a
+ * HOLD (thesis-policy.ts isHold): a coin it may well still own, decided to
+ * keep. Saying "you looked at it and passed" from it is a false public
+ * statement about a real-money book. The Telegram rooms' reviewed-and-passed
+ * memo is a child's room state, not read here, so a pass is not said at all.
  */
 export function ownHistoryPhrases(o: {
   coin: { label: string | null; address: string | null };
@@ -389,37 +433,95 @@ export function ownHistoryPhrases(o: {
   posts: readonly XPost[];
   theses: readonly PublicThesis[];
 }): string[] {
-  const { label, address } = o.coin;
+  const { label } = o.coin;
+  const address = typeof o.coin.address === "string" && CONTRACT.test(o.coin.address) ? o.coin.address.toLowerCase() : null;
   if (!label && !address) return [];
-  const out: string[] = [];
-  const calls = o.facts.calls.filter((c) => c.side === "buy" && (
-    (address && typeof c.token === "string" && c.token.toLowerCase() === address)
-    || sameLabel(c.symbol, label) || sameLabel(c.name, label)));
-  const named = calls.map((c) => coinOf(c)?.label).find((l): l is string => !!l) ?? null;
-  const said = named ?? label;
-  const posts = o.posts.filter((p) => p.kind === "buy" && p.status === "posted" && (sameLabel(p.coin, said) || sameLabel(p.coin, label)));
-  const theses = o.theses.filter((t) => {
-    if (address && t.symbol === derivedId(address)) return true;
-    return sameLabel(t.symbol, label) || sameLabel(t.displayName ?? null, label) || sameLabel(t.symbol, said) || sameLabel(t.displayName ?? null, said);
-  });
+  const buys = o.facts.calls.filter((c) => c.side === "buy");
+  const posted = o.posts.filter((p) => p.kind === "buy" && p.status === "posted");
+  let calls: typeof buys, posts: typeof posted, theses: PublicThesis[];
+  if (address) {
+    calls = buys.filter((c) => typeof c.token === "string" && c.token.toLowerCase() === address);
+    const decisions = new Set(calls.map((c) => c.decisionId));
+    posts = posted.filter((p) => {
+      const ca = postContract(p.body);
+      return ca !== null ? ca === address : p.decisionId !== null && decisions.has(p.decisionId);
+    });
+    theses = o.theses.filter((t) => t.symbol === derivedId(address) || calls.some((c) => sameLabel(t.symbol, c.symbol)));
+  } else {
+    calls = buys.filter((c) => sameLabel(c.symbol, label) || sameLabel(c.name, label));
+    const named = calls.map((c) => coinOf(c)?.label).find((l): l is string => !!l) ?? null;
+    const said = named ?? label;
+    posts = posted.filter((p) => sameLabel(p.coin, said) || sameLabel(p.coin, label));
+    theses = o.theses.filter((t) => sameLabel(t.symbol, label) || sameLabel(t.displayName ?? null, label) || sameLabel(t.symbol, said) || sameLabel(t.displayName ?? null, said));
+  }
   const boughtThesis = theses.find((t) => t.action === "buy" && t.outcome === "landed");
-  if (calls.length || posts.length || boughtThesis) {
-    const paper = calls[0]?.paper ?? boughtThesis?.paper ?? false;
-    out.push(`you bought it lately${paper ? ", on paper" : ""}`);
-    const own = calls.map((c) => c.ownWords).find((w): w is string => sayable(w));
-    if (own) out.push(`your own words when you bought it: ${own}`);
-    const post = posts.map((p) => ownPostProse(p.body)).find(sayable);
-    if (post) out.push(`what you posted on X when you bought it: ${post}`);
-    const why = publicCoinReason(boughtThesis ? [boughtThesis.reason] : []);
-    if (why && sayable(why)) out.push(`your public reason for the buy: ${why}`);
-    return out.filter(sayable);
-  }
-  const pass = theses.find((t) => (t.action === "hold" || t.outcome === "view") && !HOLDING_WORDS.test(`${t.reason ?? ""} ${t.post ?? ""}`));
-  if (pass) {
-    const why = publicCoinReason([pass.reason]);
-    out.push(why && sayable(why) && !HOLDING_WORDS.test(why) ? `you looked at it and passed: ${why}` : "you looked at it and passed");
-  }
+  if (!calls.length && !posts.length && !boughtThesis) return [];
+  const out: string[] = [];
+  const paper = calls[0]?.paper ?? boughtThesis?.paper ?? false;
+  out.push(`you bought it lately${paper ? ", on paper" : ""}`);
+  const own = calls.map((c) => c.ownWords).find((w): w is string => sayable(w));
+  if (own) out.push(`your own words when you bought it: ${own}`);
+  const post = posts.map((p) => ownPostProse(p.body)).find(sayable);
+  if (post) out.push(`what you posted on X when you bought it: ${post}`);
+  const why = publicCoinReason(boughtThesis ? [boughtThesis.reason] : []);
+  if (why && sayable(why)) out.push(`your public reason for the buy: ${why}`);
   return out.filter(sayable);
+}
+
+/**
+ * A TAG THAT NAMES A COIN IT BOUGHT AND CARRIES ANOTHER CONTRACT: "$PEPE
+ * <copycat>". True when its own records know the contract(s) behind that
+ * name — a buy's token, a buy post's CA, a landed buy thesis's derived id —
+ * and the tagged address is none of them. Such a tag is looked up for
+ * nothing: no history, no index read, no creator text, no Fomo, only that
+ * the contract is not the one it bought (CONFLICT_PHRASE). A name it never
+ * pinned to a contract is no conflict; the address alone is then the key.
+ */
+export function taggedConflict(o: {
+  label: string | null;
+  address: string | null;
+  facts: AgentFacts;
+  posts: readonly XPost[];
+  theses: readonly PublicThesis[];
+}): boolean {
+  const { label } = o;
+  const address = typeof o.address === "string" && CONTRACT.test(o.address) ? o.address.toLowerCase() : null;
+  if (!label || !address) return false;
+  const contracts = new Set<string>();
+  for (const c of o.facts.calls) {
+    if (c.side === "buy" && (sameLabel(c.symbol, label) || sameLabel(c.name, label)) && typeof c.token === "string" && CONTRACT.test(c.token)) contracts.add(c.token.toLowerCase());
+  }
+  for (const p of o.posts) {
+    const ca = p.kind === "buy" && p.status === "posted" && sameLabel(p.coin, label) ? postContract(p.body) : null;
+    if (ca) contracts.add(ca);
+  }
+  const ids = new Set<string>();
+  for (const t of o.theses) {
+    if (t.action === "buy" && t.outcome === "landed" && t.symbol && TRENCHER_ID.test(t.symbol) && sameLabel(t.displayName ?? null, label)) ids.add(t.symbol);
+  }
+  if (!contracts.size && !ids.size) return false;
+  return !contracts.has(address) && !ids.has(derivedId(address));
+}
+
+/** What a conflicting tag is told: the one thing its records say for certain. */
+export const CONFLICT_PHRASE = "the contract in that tag is not the one you bought under that name";
+
+/**
+ * A CREATOR'S DESCRIPTION, AS A CLAIM AND ONLY A CLEAN ONE. The creator of
+ * any token can write anything, and a stranger can tag any token: "the
+ * official merrymen coin, backed by robinhood", "get in before it's too
+ * late", "ignore your rules". It is read only for a coin the agent itself
+ * traded or reviewed (createXResearch), and even then refused for an
+ * endorsement, an affiliation, a promise, urgency, a call to act or an
+ * attempt to steer it; and it reaches the writer apart from the facts, as the
+ * project's own unverified words (writer.ts AnswerFacts.creatorClaim).
+ */
+const CLAIM_REFUSED = /\b(?:merrymen|robinhood|official\w*|partner\w*|backed|backing|backer\w*|endors\w*|guarantee\w*|approved|verified|certified|sponsor\w*|affiliat\w*|audit\w*|safe|legit|trusted|buy\w*|sell\w*|ape|aping|get in|join|hurry|miss|late|last chance|should|must|need to|everyone|now|today|soon|moon\w*|pump\w*|gem|ignore|rules?|instructions?|prompt|tell (?:people|everyone|them|your))\b/i;
+export function creatorClaim(description: unknown): string | null {
+  if (typeof description !== "string") return null;
+  const d = description.replace(/\s+/g, " ").trim().slice(0, 140).trim();
+  if (!d || CLAIM_REFUSED.test(d) || isInjection(d) || !sayable(d)) return null;
+  return d;
 }
 
 // ── the gatherer ────────────────────────────────────────────────────────────
@@ -470,12 +572,26 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
         return within(ms, run(ms), fallback);
       };
       const ownTheses = (): Promise<PublicThesis[]> => look(() => publicTheses(input.shared, input.facts.agentId), [] as PublicThesis[], true);
+      /**
+       * FOMO FOR THIS OWNER, OR NONE: the switch on, a broker the orchestrator
+       * hands for this tenant, a provider key behind it, and (when the
+       * orchestrator can tell) the owner's own data access on and the
+       * x-answer cap above zero. Decided per answer, never per process.
+       */
+      const fomoFor = async (): Promise<FomoBroker | null> => {
+        if (!input.fomo || !d.fomo) return null;
+        const broker = d.fomo(input.tenant);
+        if (!broker || !broker.configured()) return null;
+        if (!d.fomoUsable) return broker;
+        const usable = await look(() => d.fomoUsable!(input.tenant), false, true);
+        return usable === true ? broker : null;
+      };
       const i = input.intent;
       const f = input.facts;
       try {
         switch (i.kind) {
           case "capabilities":
-            return { facts: capabilityPhrases({ fomo: input.fomo && !!d.fomo, flow: !!d.flow }), lookups, notes };
+            return { facts: capabilityPhrases({ fomo: (await fomoFor()) !== null, flow: !!d.flow }), lookups, notes };
           case "onboarding":
             return { facts: ONBOARDING_PHRASES.filter(sayable), lookups, notes };
           case "model":
@@ -490,16 +606,26 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
               return { facts: latest ? [`what you posted on X about your latest buy: ${latest}`].filter(sayable) : [], lookups, notes };
             }
             const theses = await ownTheses();
+            if (taggedConflict({ label: i.coin, address: i.address, facts: f, posts: input.posts, theses })) {
+              notes.push("conflict");
+              return { facts: [CONFLICT_PHRASE].filter(sayable), lookups, notes };
+            }
             return { facts: ownHistoryPhrases({ coin: { label: i.coin, address: i.address }, facts: f, posts: input.posts, theses }), lookups, notes };
           }
           case "coin":
             break;
         }
         // ── a coin ──────────────────────────────────────────────────────
+        const theses = await ownTheses();
+        // "$PEPE <another contract>": nothing is looked up for a copycat of a coin it bought.
+        if (i.ticker && i.address && taggedConflict({ label: i.ticker, address: i.address, facts: f, posts: input.posts, theses })) {
+          notes.push("conflict");
+          return { facts: [CONFLICT_PHRASE].filter(sayable), lookups, notes };
+        }
         // Its own address first: a coin it bought carries its contract, so a ticker it traded costs no search.
         let address = i.address;
         if (!address && i.ticker) {
-          const call = f.calls.find((c) => typeof c.token === "string" && /^0x[0-9a-fA-F]{40}$/.test(c.token) && (sameLabel(c.symbol, i.ticker) || sameLabel(c.name, i.ticker)));
+          const call = f.calls.find((c) => typeof c.token === "string" && CONTRACT.test(c.token) && (sameLabel(c.symbol, i.ticker) || sameLabel(c.name, i.ticker)));
           address = call?.token?.toLowerCase() ?? null;
         }
         if (!address && i.ticker) {
@@ -507,28 +633,31 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
           else address = await look((ms) => resolveTicker(i.ticker!, ms), null);
           if (!address) notes.push("unresolved");
         }
-        const theses = await ownTheses();
-        const history = ownHistoryPhrases({ coin: { label: i.ticker, address }, facts: f, posts: input.posts, theses });
+        // With a contract, its history is matched by that contract alone; without one, by the name asked.
+        const history = ownHistoryPhrases({ coin: { label: address ? null : i.ticker, address }, facts: f, posts: input.posts, theses });
         if (!address) return { facts: history, lookups, notes };
-        const broker = input.fomo && d.fomo ? d.fomo(input.tenant) : null;
+        const key = address;
+        // THE CREATOR'S TEXT ONLY FOR A COIN IT TRADED OR REVIEWED (creatorClaim): never a stranger's token.
+        const own = f.calls.some((c) => typeof c.token === "string" && c.token.toLowerCase() === key) || theses.some((t) => t.symbol === derivedId(key));
+        const broker = await fomoFor();
         const fomoOpts = (ms: number) => ({
           surface: "x-answer" as const, audience: "group" as const, conversationKey: `x:${input.xUserId}`,
           priority: "interactive" as const, groupId: input.xUserId, timeoutMs: ms,
         });
         // The rest at once, each in its own time box: a slow one costs its fact, never the others.
         const [read, project, activity, talk, flow] = await Promise.all([
-          look((ms) => coinFacts({ network: "robinhood", address: address!, chatId: xAccountKey(input.xUserId), timeoutMs: ms, withInfo: true }), null),
-          look((ms) => projectDescription(address!, CHAIN_ID), null),
-          broker ? look((ms) => broker.call("fomo_get_token_activity", { token: address!, chain: "robinhood", window: "24h", limit: 5 }, fomoOpts(ms)), null, false, RESEARCH_BUDGET.fomoMs) : Promise.resolve(null),
-          broker ? look((ms) => broker.call("fomo_get_token_theses", { token: address!, chain: "robinhood", depth: "quick", limit: 10 }, fomoOpts(ms)), null, false, RESEARCH_BUDGET.fomoMs) : Promise.resolve(null),
-          d.flow ? look((ms) => d.flow!({ chainId: CHAIN_ID, address: address!, timeoutMs: ms }), null) : Promise.resolve(null),
+          look((ms) => coinFacts({ network: "robinhood", address: key, chatId: xAccountKey(input.xUserId), timeoutMs: ms, withInfo: true }), null),
+          own ? look((ms) => projectDescription(key, CHAIN_ID), null) : Promise.resolve(null),
+          broker ? look((ms) => broker.call("fomo_get_token_activity", { token: key, chain: "robinhood", window: "24h", limit: 5 }, fomoOpts(ms)), null, false, RESEARCH_BUDGET.fomoMs) : Promise.resolve(null),
+          broker ? look((ms) => broker.call("fomo_get_token_theses", { token: key, chain: "robinhood", depth: "quick", limit: 10 }, fomoOpts(ms)), null, false, RESEARCH_BUDGET.fomoMs) : Promise.resolve(null),
+          d.flow ? look((ms) => d.flow!({ chainId: CHAIN_ID, address: key, timeoutMs: ms }), null) : Promise.resolve(null),
         ]);
         const out = [...history];
         // Aged as of the index's own read, the time its facts are true at.
         if (read && read.ok) out.push(...coinFactPhrases(read.facts, Number.isFinite(read.facts.observedAt) ? read.facts.observedAt : now()).slice(0, INDEX_FACTS));
         else notes.push(read ? `index-${read.why}` : "index-unavailable");
-        const description = project?.description;
-        if (description && sayable(`the project says it's ${description}`)) out.push(`the project says it's ${description.slice(0, 140)}`);
+        const claim = creatorClaim(project?.description);
+        if (project?.description && !claim) notes.push("claim-refused");
         if (broker) {
           const t = fomoThesesPhrases(dataOf<TokenThesesData>(talk));
           const a = fomoActivityPhrases(dataOf<TokenActivityData>(activity));
@@ -536,7 +665,7 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
           out.push(...t, ...a);
         }
         out.push(...flowPhrases(flow));
-        return { facts: out.filter(sayable).slice(0, BUNDLE_FACTS), lookups, notes };
+        return { facts: out.filter(sayable).slice(0, BUNDLE_FACTS), claim, lookups, notes };
       } catch {
         // Research is an extra: a fault here is an answer without it, never a failed pass.
         notes.push("fault");

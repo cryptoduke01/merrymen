@@ -11269,13 +11269,17 @@ async function runXPostPass(boot: XPostSetup): Promise<void> {
           // process.env. Fomo, only with MERRYMEN_XPOST_FOMO=1 as well, asks
           // THIS process's own service for the answering tenant, as a public
           // x-answer; with the Fomo pass off or its runtime not built yet,
-          // there is no broker and the answer goes without it.
+          // there is no broker and the answer goes without it. Whether Fomo
+          // can answer for THIS owner (her own data access, the x-answer cap
+          // above zero) is asked per answer, so "what can you do?" never
+          // promises Fomo that a coin answer would then not deliver.
           ...(boot.knobs.research ? {
             research: createXResearch({
               fleetHome: merrymenHome(),
               ...(boot.knobs.researchPerHour !== undefined ? { lookupsPerHour: boot.knobs.researchPerHour } : {}),
               // The runtime exists only once the switched-on Fomo pass built it (fomoRuntimeNow).
-              fomo: (tenant) => (fomoRuntime ? createDirectBroker(fomoRuntime.service, tenant.toLowerCase(), { log }) : null),
+              fomo: (tenant) => (fomoRuntime && !xAnswerFomoCapped() ? createDirectBroker(fomoRuntime.service, tenant.toLowerCase(), { log }) : null),
+              fomoUsable: async (tenant) => !!fomoRuntime && !xAnswerFomoCapped() && (await fomoAccessFor(tenant)).dataAccess === true,
             }),
           } : {}),
         },
@@ -11407,6 +11411,14 @@ export function fomoSetup(env: Record<string, string | undefined> = process.env)
   const caps = fomoBudgetFrom(env);
   lines.push(...caps.problems, describeBudget(budgetConfigFor(planCredits ?? FREE_PLAN_CREDITS_PER_MONTH, caps.budget)));
   return { off: false, lines, apiKey, planCredits, budget: caps.budget };
+}
+
+/**
+ * MERRYMEN_FOMO_X_HOURLY_CREDITS=0, the operator's off for Fomo in X answers:
+ * no broker is handed to them, and the service refuses the surface too.
+ */
+function xAnswerFomoCapped(): boolean {
+  return fomoBoot?.budget.xHourlyCredits === 0;
 }
 
 /** The switches, decided and said once, on first use: the first spawn or the first pass, whichever comes first. */
