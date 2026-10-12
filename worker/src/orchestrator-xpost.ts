@@ -24,7 +24,10 @@
  * pass), then PLANS (at most once a minute): drafts each intent with the
  * model, gates it, and writes it scheduled — or writes it skipped, so a buy
  * the gate refused or the model passed on is not drafted again every minute
- * on the model's allowance. Everything is caught; a failure is one log line,
+ * on the model's allowance. An active agent's answers drafted on a pass that
+ * has just read its mentions (and recorded every opt-out in them) are then
+ * sent by a second, short sweep through the same send path, on that pass.
+ * Everything is caught; a failure is one log line,
  * deduplicated like the room's. The pass runs un-awaited behind a latch in
  * orchestrator.ts, so a slow X or a slow model costs a post, never a
  * reconcile (rule 6).
@@ -90,7 +93,7 @@ import {
   type XAccount,
   type XPost,
 } from "./xpost/store";
-import { answerPrompt, answerQuestion, buyPrompt, casualPrompt, draft, introPrompt, introTemplate, modelAnswers, replyPrompt, sellPrompt, sherwoodClaimed, sherwoodMentioned, sherwoodNamed, xpostModel, xpostModelWarning, type AnswerIntentKind, type WriterFacts, type XStyle } from "./xpost/writer";
+import { answerPrompt, answerQuestion, buyPrompt, casualPrompt, draft, greetingAnswers, introPrompt, introTemplate, modelAnswers, replyPrompt, sellPrompt, sherwoodClaimed, sherwoodMentioned, sherwoodNamed, xpostModel, xpostModelWarning, type AnswerIntentKind, type WriterFacts, type XStyle } from "./xpost/writer";
 import { appendPublicToken, appendPublicWallet, hasPublicWallet, publicTokenStillAllowed, publicWalletStillAllowed, type PublicWallet } from "./xpost/public-wallet";
 import { readPublicProjectDescription } from "./orchestrator-xpost-project";
 import { boughtNames, carriesResearch, classifyTag, createXResearch, generalTradesQuestion, modelNamed, namesACoin, type ResearchBundle, type TagIntent, type XResearch } from "./orchestrator-xpost-research";
@@ -108,15 +111,20 @@ export const DEFAULT_LLM_PER_DAY = 400;
 export const DEFAULT_REPLY_POLLS_PER_DAY = 200;
 const REPLY_POLL_MS = 30 * MIN;
 /**
- * AN ACTIVE AGENT'S MENTIONS ARE READ EVERY MINUTE, so a tag is answered within
- * a minute or two: its answers go out as soon as they are drafted. Those
- * polls spend an allowance of their own, per X account and UTC day
- * (`reply-polls-active:<xUserId>:<day>`), never the fleet's
- * (`reply-polls:<day>`): the fleet's polls cannot starve it, nor it theirs.
+ * AN ACTIVE AGENT'S MENTIONS ARE READ EVERY FIFTEEN SECONDS — every pass, as
+ * the orchestrator runs one every RECONCILE_MS (orchestrator.ts) — so a tag is
+ * answered within seconds, about as fast as a Telegram group answers: its
+ * answers go out as soon as they are drafted. Those polls spend an allowance
+ * of their own, per X account and UTC day (`reply-polls-active:<xUserId>:<day>`),
+ * never the fleet's (`reply-polls:<day>`): the fleet's polls cannot starve it,
+ * nor it theirs. 6000 covers a whole day at one read every fifteen seconds
+ * (5760); spent, the account waits for tomorrow's. Active accounts are still
+ * read first within the pass's MAX_REPLY_POLLS_PER_PASS, and X's 429 backoff
+ * and the credits and app pauses hold them like everyone else.
  * MERRYMEN_XPOST_REPLY_POLLS_PER_DAY=0 still turns every poll off.
  */
-const ACTIVE_REPLY_POLL_MS = MIN;
-export const ACTIVE_REPLY_POLLS_PER_DAY = 1500;
+export const ACTIVE_REPLY_POLL_MS = 15_000;
+export const ACTIVE_REPLY_POLLS_PER_DAY = 6000;
 /** Tags an active agent may answer from one poll's batch. */
 const ANSWERS_PER_POLL = 3;
 /**
@@ -929,223 +937,235 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
           return lastOut.get(xUserId) ?? null;
         };
         let sends = 0;
-        // PAGE PAST WHAT ONLY WAITS. The oldest due posts are the ones whose
-        // owners sleep (or whose zone cannot be read this pass): they stay at
-        // the head of the queue all night. One page of the fifty oldest would
-        // hide every newer due post behind them — an awake owner's buy would
-        // wait for the sleepers to wake, and go stale. So the loop pages on,
-        // bounded by MAX_SCAN rows a pass.
-        let scanned = 0;
-        let after: { dueAtMs: number; id: number } | null = null;
-        send: for (;;) {
-          if (at() - nowMs > SEND_BUDGET_MS) break;
-          const page = await duePosts(shared, tenants, nowMs, MAX_DUE, after);
-          for (const post of page) {
-            after = { dueAtMs: post.dueAtMs, id: post.id };
-            const t = at();
-            if (post.kind === "reply" || post.kind === "answer") {
-              if (!repliesFor(post.tenant) || !(await repliesEnabledFor(shared, post.tenant, post.xUserId))
-                || (post.kind === "answer" && !active.has(post.tenant.toLowerCase()))) {
-                if (await cancelPost(shared, post.id, "replies-off", t)) bump("cancelled");
-                continue;
-              }
-            }
-            // A pass can spend minutes polling or sending. Use the current
-            // consent and kinds, not the planning snapshot from its start.
-            const account: XAccount | null = await getAccount(shared, post.tenant);
-            let asleep = false;
-            let dayOf: ((ms: number) => string) | undefined;
-            if (account?.posting && account.xUserId === post.xUserId) {
-              const z = await zoneOf(post.tenant, account.tz);
-              // THE OWNER'S NIGHT NEVER HOLDS AN ANSWER. Someone who tagged an
-              // active agent at 3am the owner's time is answered then: the
-              // night keeps the owner's own timeline quiet, not a reply to a
-              // person who asked. Every other post waits for morning.
-              asleep = post.kind !== "answer" && (!z.ok || isAsleep(z.tz, post.tenant, t));
-              if (z.ok) dayOf = (ms) => localDay(z.tz, ms);
-            }
-            const d = sendDecision(post, account, t, asleep, dayOf);
-            if (d.action === "cancel") {
-              if (await cancelPost(shared, post.id, d.reason, t)) bump("cancelled");
-              continue;
-            }
-            if (d.action === "skip") {
-              if (await skipScheduled(shared, post.id, d.reason, t)) bump("stale");
-              continue;
-            }
-            if (d.action === "wait") {
-              bump("waiting");
-              continue;
-            }
-            if ((post.kind === "reply" || post.kind === "answer") && !comments.has(post.xUserId)) continue;
-            if (pause) {
-              if (pauseSaidUntil < pause.until) {
-                pauseSaidUntil = pause.until;
-                bump(pause.why);
-              }
-              continue;
-            }
-            // THE GAP, AGAIN, AT SEND TIME — per X ACCOUNT. The planner spaced
-            // posts three hours apart when it drafted them, but a hold (a pause,
-            // the ceiling, a 429's reset) or a second owner on the same X
-            // account can bring two due together. The later one is moved to
-            // three hours after the last that went out, never sent inside the
-            // gap; a buy still goes stale on its own clock, a casual post past
-            // its day. The hello is exempt, both ways.
-            const cadence = cadenceOf(post.tenant);
-            const answer = post.kind === "answer";
-            if (post.kind !== "intro" && !answer) {
-              const last = await lastOutOf(post.xUserId);
-              if (last !== null && t - last < cadence.gapMs) {
-                if (await deferPost(shared, post.id, last + cadence.gapMs, t)) bump("deferred");
-                continue;
-              }
-            }
-            if (sends >= MAX_SENDS_PER_PASS || t - nowMs > SEND_BUDGET_MS) break send;
-            // THE X ACCOUNT'S CADENCE, RESERVED ATOMICALLY, ACROSS REPLICAS.
-            // Everything above is a read, and a read then a send is not a lock:
-            // two orchestrators holding two owners who connected the same X
-            // account could both read "nothing in three hours" and both post.
-            // So the gap, the account's day cap and a buy's coin fold are each
-            // taken as a conditional write that only one claimant can win
-            // (xpost/store claimSpan, takeAllowance), in that order, right
-            // before X is called — and every one is handed back when X surely
-            // made nothing, exactly like the fleet's unit below.
-            const release: (() => Promise<void>)[] = [];
-            const giveBack = async () => {
-              for (const r of release.reverse()) await r();
-            };
-            if (post.kind !== "intro") {
-              // AN ANSWER'S OWN LANE: a few minutes apart and a day allowance
-              // of its own, so a tag is answered without holding a post back.
-              const gapKey = answer ? `answer-gap:${post.xUserId}` : `gap:${post.xUserId}`;
-              const span = answer ? ANSWER_GAP_MS : cadence.gapMs;
-              const gap = await claimSpan(shared, gapKey, t, span);
-              if (!gap.ok) {
-                if (await deferPost(shared, post.id, gap.lastAtMs + span, t)) bump("deferred");
-                continue;
-              }
-              release.push(() => releaseSpan(shared, gapKey, t, gap.prev, at()));
-            }
-            // All owners share the server's X-account ceiling. The owner's
-            // smaller choice has its own counter, so someone else's post
-            // cannot spend it. Both count the hello and reply posts too.
-            const localDayKey = dayOf ? dayOf(t) : utcDay(t);
-            if (answer) {
-              const answerDayKey = `answerday:${post.xUserId}:${localDayKey}`;
-              if (!(await takeAllowance(shared, answerDayKey, ANSWERS_PER_DAY, t))) {
-                await giveBack();
-                // Never left waiting for tomorrow's allowance: it was an answer to now.
-                if (await skipScheduled(shared, post.id, "answer-day-cap", t)) bump("answer-day-cap");
-                continue;
-              }
-              release.push(() => returnAllowance(shared, answerDayKey, at()));
-            }
-            const accountDayKey = `xday:${post.xUserId}:${localDayKey}`;
-            if (!answer && !(await takeAllowance(shared, accountDayKey, cadence.perDay, t))) {
-              await giveBack();
-              bump("account-day-cap");
-              continue;
-            }
-            if (!answer) release.push(() => returnAllowance(shared, accountDayKey, at()));
-            const ownerDayKey = `xownerday:${post.tenant}:${localDayKey}`;
-            // On rollout this counter does not exist yet, but earlier sends
-            // today still count. Include uncertain claims as possible sends.
-            let initialOwnerUsed = 0;
-            if ((await readMeta(shared, ownerDayKey)) === null) {
-              const earlier = await ownerSendTimesSince(shared, post.tenant, t - 2 * DAY);
-              initialOwnerUsed = earlier.filter((sentAt) => (dayOf ? dayOf(sentAt) : utcDay(sentAt)) === localDayKey).length;
-            }
-            // Reads the latest stored choice under the same account row lock
-            // as a preference save, then reserves one unit atomically.
-            if (!answer && !(await takeOwnerAllowance(shared, post.tenant, ownerDayKey, cadence.perDay, t, initialOwnerUsed))) {
-              await giveBack();
-              bump("owner-day-cap");
-              continue;
-            }
-            if (!answer) release.push(() => returnAllowance(shared, ownerDayKey, at()));
-            if (post.kind === "buy" || post.kind === "sell") {
-              const tradeDayKey = `tradeday:${post.xUserId}:${localDayKey}`;
-              // Older deployments have no shared buy/sell counter. Their
-              // durable sends still consume today's slots, across owners.
-              const earlier = await tradeSendTimesSince(shared, post.xUserId, t - 2 * DAY);
-              const initialUsed = earlier.filter((sentAt) => (dayOf ? dayOf(sentAt) : utcDay(sentAt)) === localDayKey).length;
-              if (!(await takeAllowance(shared, tradeDayKey, cadence.tradePerDay, t, initialUsed))) {
-                await giveBack();
-                bump("trade-day-cap");
-                continue;
-              }
-              release.push(() => returnAllowance(shared, tradeDayKey, at()));
-            }
-            // The coin fold is the owner's cadence's: none on an active one,
-            // which posts every buy and sale (still under the trade and day
-            // allowances above, and the gap).
-            if ((post.kind === "buy" || post.kind === "sell") && post.coin && cadence.coinFoldMs > 0) {
-              const foldKey = post.kind === "sell" ? `sell-fold:${post.xUserId}:${post.coin}` : `fold:${post.xUserId}:${post.coin}`;
-              const fold = await claimSpan(shared, foldKey, t, cadence.coinFoldMs);
-              if (!fold.ok) {
-                await giveBack();
-                if (await skipScheduled(shared, post.id, "folded", t)) bump("folded");
-                continue;
-              }
-              release.push(() => releaseSpan(shared, foldKey, t, fold.prev, at()));
-            }
-            const dayKey = `posts:${utcDay(t)}`;
-            if (!(await takeAllowance(shared, dayKey, fleetPerDay, t))) {
-              await giveBack();
-              ceiling = true;
-              if (capNoted !== utcDay(t)) {
-                capNoted = utcDay(t);
-                bump("fleet-ceiling-reached");
-              }
-              // Not a break: a later post may still be one to cancel or skip.
-              continue;
-            }
-            sends++;
-            const out = await sendOne(shared, o.dek, o.app, post, {
-              fetch: deps.fetch,
-              nowMs: t,
-              validateBeforeSend: async (pending) => {
-                if (!hasPublicWallet(pending.body) && pending.kind !== "sell") return true;
-                const profile = await deps.socialProfile?.(pending.tenant);
-                const current = byTenant.get(pending.tenant);
-                if (pending.kind === "sell") {
-                  const agent = profile?.currentAgent;
-                  if (!profile?.xTradeResults || !agent || !current || current.agentId !== agent.address.toLowerCase()) return false;
-                  const sales = await (deps.saleResults ?? readSaleResults)(shared, agent.address, agent.chainId, Math.floor(at() / 1000));
-                  const sale = sales.find((s) => pending.dedupeKey === `sell:${pending.tenant}:${s.operationKey}` && pending.decisionId === s.decisionId);
-                  if (!sale || pending.coin !== sale.token.toLowerCase() || !hasSaleOutcome(pending.body, sale.outcome)) return false;
+        /**
+         * ONE SEND SWEEP: the scheduled posts due by `dueBy`, through every
+         * check below — the cancellations, sendDecision, the fresh-inbox rule
+         * for replies and answers, the pauses, the gaps, every day allowance,
+         * the fleet's ceiling and claimPost (in sendOne). `only` narrows which
+         * rows this sweep may send; it never widens what the checks allow.
+         *
+         * PAGE PAST WHAT ONLY WAITS. The oldest due posts are the ones whose
+         * owners sleep (or whose zone cannot be read this pass): they stay at
+         * the head of the queue all night. One page of the fifty oldest would
+         * hide every newer due post behind them — an awake owner's buy would
+         * wait for the sleepers to wake, and go stale. So the loop pages on,
+         * bounded by MAX_SCAN rows a sweep.
+         */
+        const sweep = async (dueBy: number, only?: (post: XPost) => boolean): Promise<void> => {
+          let scanned = 0;
+          let after: { dueAtMs: number; id: number } | null = null;
+          send: for (;;) {
+            if (at() - nowMs > SEND_BUDGET_MS) break;
+            const page = await duePosts(shared, tenants, dueBy, MAX_DUE, after);
+            for (const post of page) {
+              after = { dueAtMs: post.dueAtMs, id: post.id };
+              if (only && !only(post)) continue;
+              const t = at();
+              if (post.kind === "reply" || post.kind === "answer") {
+                if (!repliesFor(post.tenant) || !(await repliesEnabledFor(shared, post.tenant, post.xUserId))
+                  || (post.kind === "answer" && !active.has(post.tenant.toLowerCase()))) {
+                  if (await cancelPost(shared, post.id, "replies-off", t)) bump("cancelled");
+                  continue;
                 }
-                if (pending.kind === "buy" || pending.kind === "sell") {
-                  if (!hasPublicWallet(pending.body)) return true;
-                  const agent = profile?.currentAgent;
-                  if (!profile?.xTokenAddresses || !agent || !current || current.agentId !== agent.address.toLowerCase() || !pending.decisionId) return false;
-                  const token = await publicTokenForDecision(shared, agent, pending.decisionId, pending.kind);
-                  return publicTokenStillAllowed(pending, token);
+              }
+              // A pass can spend minutes polling or sending. Use the current
+              // consent and kinds, not the planning snapshot from its start.
+              const account: XAccount | null = await getAccount(shared, post.tenant);
+              let asleep = false;
+              let dayOf: ((ms: number) => string) | undefined;
+              if (account?.posting && account.xUserId === post.xUserId) {
+                const z = await zoneOf(post.tenant, account.tz);
+                // THE OWNER'S NIGHT NEVER HOLDS AN ANSWER. Someone who tagged an
+                // active agent at 3am the owner's time is answered then: the
+                // night keeps the owner's own timeline quiet, not a reply to a
+                // person who asked. Every other post waits for morning.
+                asleep = post.kind !== "answer" && (!z.ok || isAsleep(z.tz, post.tenant, t));
+                if (z.ok) dayOf = (ms) => localDay(z.tz, ms);
+              }
+              const d = sendDecision(post, account, t, asleep, dayOf);
+              if (d.action === "cancel") {
+                if (await cancelPost(shared, post.id, d.reason, t)) bump("cancelled");
+                continue;
+              }
+              if (d.action === "skip") {
+                if (await skipScheduled(shared, post.id, d.reason, t)) bump("stale");
+                continue;
+              }
+              if (d.action === "wait") {
+                bump("waiting");
+                continue;
+              }
+              if ((post.kind === "reply" || post.kind === "answer") && !comments.has(post.xUserId)) continue;
+              if (pause) {
+                if (pauseSaidUntil < pause.until) {
+                  pauseSaidUntil = pause.until;
+                  bump(pause.why);
                 }
-                const wallet = profile?.publicWallet;
-                return !!current && !!wallet && current.agentId === wallet.address.toLowerCase() && publicWalletStillAllowed(pending, wallet);
-              },
-            });
-            // The app's credentials refused is the one line an operator must act
-            // on, so it says what happened rather than an outcome code.
-            bump(out === "posted" ? "sent" : out === "app" ? "x-refused-client-credentials" : out);
-            // What may exist on X keeps its units — the fleet's, and the
-            // account's gap, day and fold — not only what surely does.
-            if (!MAY_BE_ON_X.has(out)) {
-              await returnAllowance(shared, dayKey, at());
-              await giveBack();
-            } else if (post.kind !== "intro" && !answer) lastOut.set(post.xUserId, t);
-            // The sender wrote the pause; this pass honours it at once, and the
-            // event just said is the pause's line, so later passes stay quiet.
-            if (out === "credits" || out === "app") {
-              pause = out === "credits" ? { why: "paused-for-credits", until: t + CREDITS_PAUSE_MS } : { why: "paused-client-credentials-refused", until: t + APP_PAUSE_MS };
-              pauseSaidUntil = Math.max(pauseSaidUntil, pause.until);
+                continue;
+              }
+              // THE GAP, AGAIN, AT SEND TIME — per X ACCOUNT. The planner spaced
+              // posts three hours apart when it drafted them, but a hold (a pause,
+              // the ceiling, a 429's reset) or a second owner on the same X
+              // account can bring two due together. The later one is moved to
+              // three hours after the last that went out, never sent inside the
+              // gap; a buy still goes stale on its own clock, a casual post past
+              // its day. The hello is exempt, both ways.
+              const cadence = cadenceOf(post.tenant);
+              const answer = post.kind === "answer";
+              if (post.kind !== "intro" && !answer) {
+                const last = await lastOutOf(post.xUserId);
+                if (last !== null && t - last < cadence.gapMs) {
+                  if (await deferPost(shared, post.id, last + cadence.gapMs, t)) bump("deferred");
+                  continue;
+                }
+              }
+              if (sends >= MAX_SENDS_PER_PASS || t - nowMs > SEND_BUDGET_MS) break send;
+              // THE X ACCOUNT'S CADENCE, RESERVED ATOMICALLY, ACROSS REPLICAS.
+              // Everything above is a read, and a read then a send is not a lock:
+              // two orchestrators holding two owners who connected the same X
+              // account could both read "nothing in three hours" and both post.
+              // So the gap, the account's day cap and a buy's coin fold are each
+              // taken as a conditional write that only one claimant can win
+              // (xpost/store claimSpan, takeAllowance), in that order, right
+              // before X is called — and every one is handed back when X surely
+              // made nothing, exactly like the fleet's unit below.
+              const release: (() => Promise<void>)[] = [];
+              const giveBack = async () => {
+                for (const r of release.reverse()) await r();
+              };
+              if (post.kind !== "intro") {
+                // AN ANSWER'S OWN LANE: twenty seconds apart (ANSWER_GAP_MS) and a
+                // day allowance of its own, so a tag is answered without holding a post back.
+                const gapKey = answer ? `answer-gap:${post.xUserId}` : `gap:${post.xUserId}`;
+                const span = answer ? ANSWER_GAP_MS : cadence.gapMs;
+                const gap = await claimSpan(shared, gapKey, t, span);
+                if (!gap.ok) {
+                  if (await deferPost(shared, post.id, gap.lastAtMs + span, t)) bump("deferred");
+                  continue;
+                }
+                release.push(() => releaseSpan(shared, gapKey, t, gap.prev, at()));
+              }
+              // All owners share the server's X-account ceiling. The owner's
+              // smaller choice has its own counter, so someone else's post
+              // cannot spend it. Both count the hello and reply posts too.
+              const localDayKey = dayOf ? dayOf(t) : utcDay(t);
+              if (answer) {
+                const answerDayKey = `answerday:${post.xUserId}:${localDayKey}`;
+                if (!(await takeAllowance(shared, answerDayKey, ANSWERS_PER_DAY, t))) {
+                  await giveBack();
+                  // Never left waiting for tomorrow's allowance: it was an answer to now.
+                  if (await skipScheduled(shared, post.id, "answer-day-cap", t)) bump("answer-day-cap");
+                  continue;
+                }
+                release.push(() => returnAllowance(shared, answerDayKey, at()));
+              }
+              const accountDayKey = `xday:${post.xUserId}:${localDayKey}`;
+              if (!answer && !(await takeAllowance(shared, accountDayKey, cadence.perDay, t))) {
+                await giveBack();
+                bump("account-day-cap");
+                continue;
+              }
+              if (!answer) release.push(() => returnAllowance(shared, accountDayKey, at()));
+              const ownerDayKey = `xownerday:${post.tenant}:${localDayKey}`;
+              // On rollout this counter does not exist yet, but earlier sends
+              // today still count. Include uncertain claims as possible sends.
+              let initialOwnerUsed = 0;
+              if ((await readMeta(shared, ownerDayKey)) === null) {
+                const earlier = await ownerSendTimesSince(shared, post.tenant, t - 2 * DAY);
+                initialOwnerUsed = earlier.filter((sentAt) => (dayOf ? dayOf(sentAt) : utcDay(sentAt)) === localDayKey).length;
+              }
+              // Reads the latest stored choice under the same account row lock
+              // as a preference save, then reserves one unit atomically.
+              if (!answer && !(await takeOwnerAllowance(shared, post.tenant, ownerDayKey, cadence.perDay, t, initialOwnerUsed))) {
+                await giveBack();
+                bump("owner-day-cap");
+                continue;
+              }
+              if (!answer) release.push(() => returnAllowance(shared, ownerDayKey, at()));
+              if (post.kind === "buy" || post.kind === "sell") {
+                const tradeDayKey = `tradeday:${post.xUserId}:${localDayKey}`;
+                // Older deployments have no shared buy/sell counter. Their
+                // durable sends still consume today's slots, across owners.
+                const earlier = await tradeSendTimesSince(shared, post.xUserId, t - 2 * DAY);
+                const initialUsed = earlier.filter((sentAt) => (dayOf ? dayOf(sentAt) : utcDay(sentAt)) === localDayKey).length;
+                if (!(await takeAllowance(shared, tradeDayKey, cadence.tradePerDay, t, initialUsed))) {
+                  await giveBack();
+                  bump("trade-day-cap");
+                  continue;
+                }
+                release.push(() => returnAllowance(shared, tradeDayKey, at()));
+              }
+              // The coin fold is the owner's cadence's: none on an active one,
+              // which posts every buy and sale (still under the trade and day
+              // allowances above, and the gap).
+              if ((post.kind === "buy" || post.kind === "sell") && post.coin && cadence.coinFoldMs > 0) {
+                const foldKey = post.kind === "sell" ? `sell-fold:${post.xUserId}:${post.coin}` : `fold:${post.xUserId}:${post.coin}`;
+                const fold = await claimSpan(shared, foldKey, t, cadence.coinFoldMs);
+                if (!fold.ok) {
+                  await giveBack();
+                  if (await skipScheduled(shared, post.id, "folded", t)) bump("folded");
+                  continue;
+                }
+                release.push(() => releaseSpan(shared, foldKey, t, fold.prev, at()));
+              }
+              const dayKey = `posts:${utcDay(t)}`;
+              if (!(await takeAllowance(shared, dayKey, fleetPerDay, t))) {
+                await giveBack();
+                ceiling = true;
+                if (capNoted !== utcDay(t)) {
+                  capNoted = utcDay(t);
+                  bump("fleet-ceiling-reached");
+                }
+                // Not a break: a later post may still be one to cancel or skip.
+                continue;
+              }
+              sends++;
+              const out = await sendOne(shared, o.dek, o.app, post, {
+                fetch: deps.fetch,
+                nowMs: t,
+                validateBeforeSend: async (pending) => {
+                  if (!hasPublicWallet(pending.body) && pending.kind !== "sell") return true;
+                  const profile = await deps.socialProfile?.(pending.tenant);
+                  const current = byTenant.get(pending.tenant);
+                  if (pending.kind === "sell") {
+                    const agent = profile?.currentAgent;
+                    if (!profile?.xTradeResults || !agent || !current || current.agentId !== agent.address.toLowerCase()) return false;
+                    const sales = await (deps.saleResults ?? readSaleResults)(shared, agent.address, agent.chainId, Math.floor(at() / 1000));
+                    const sale = sales.find((s) => pending.dedupeKey === `sell:${pending.tenant}:${s.operationKey}` && pending.decisionId === s.decisionId);
+                    if (!sale || pending.coin !== sale.token.toLowerCase() || !hasSaleOutcome(pending.body, sale.outcome)) return false;
+                  }
+                  if (pending.kind === "buy" || pending.kind === "sell") {
+                    if (!hasPublicWallet(pending.body)) return true;
+                    const agent = profile?.currentAgent;
+                    if (!profile?.xTokenAddresses || !agent || !current || current.agentId !== agent.address.toLowerCase() || !pending.decisionId) return false;
+                    const token = await publicTokenForDecision(shared, agent, pending.decisionId, pending.kind);
+                    return publicTokenStillAllowed(pending, token);
+                  }
+                  const wallet = profile?.publicWallet;
+                  return !!current && !!wallet && current.agentId === wallet.address.toLowerCase() && publicWalletStillAllowed(pending, wallet);
+                },
+              });
+              // The app's credentials refused is the one line an operator must act
+              // on, so it says what happened rather than an outcome code.
+              bump(out === "posted" ? "sent" : out === "app" ? "x-refused-client-credentials" : out);
+              // What may exist on X keeps its units — the fleet's, and the
+              // account's gap, day and fold — not only what surely does.
+              if (!MAY_BE_ON_X.has(out)) {
+                await returnAllowance(shared, dayKey, at());
+                await giveBack();
+              } else if (post.kind !== "intro" && !answer) lastOut.set(post.xUserId, t);
+              // The sender wrote the pause; this pass honours it at once, and the
+              // event just said is the pause's line, so later passes stay quiet.
+              if (out === "credits" || out === "app") {
+                pause = out === "credits" ? { why: "paused-for-credits", until: t + CREDITS_PAUSE_MS } : { why: "paused-client-credentials-refused", until: t + APP_PAUSE_MS };
+                pauseSaidUntil = Math.max(pauseSaidUntil, pause.until);
+              }
             }
+            scanned += page.length;
+            if (page.length < MAX_DUE || scanned >= MAX_SCAN) break;
           }
-          scanned += page.length;
-          if (page.length < MAX_DUE || scanned >= MAX_SCAN) break;
-        }
+        };
+        await sweep(nowMs);
 
         // ── plan, at most once a minute ───────────────────────────────────
         // Not while the fleet is paused or at its day's ceiling: a draft that
@@ -1154,14 +1174,39 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         //
         // A BATCH READ IS WORKED THROUGH ON THE PASS THAT READ IT. Its cursor
         // has already moved on, so a batch no pass drafts from is lost for
-        // good, and the poll's minute (claimed when the read starts) and the
-        // plan's (when the pass starts) drift apart by a pass: an active
-        // agent's every poll could land on a pass whose plan is not due. So a
-        // pass that read one answers from it even then, and plans no posts.
+        // good, and an active agent is read every fifteen seconds while posts
+        // are planned once a minute: most of its polls land on a pass whose
+        // plan is not due. So a pass that read one answers from it even then,
+        // and plans no posts. A batch with nothing in it has nothing to
+        // answer, so a pass that read only empty ones loads no facts for them.
         const planDue = nowMs - lastPlanAt >= PLAN_EVERY_MS;
-        if (!pause && !ceiling && accounts.length > 0 && (planDue || comments.size > 0)) {
+        const tagged = [...comments.values()].some((batch) => batch.length > 0);
+        let drafted = new Set<string>();
+        if (!pause && !ceiling && accounts.length > 0 && (planDue || tagged)) {
           if (planDue) lastPlanAt = nowMs;
-          await planPass(shared, accounts, byTenant, profiles, nowMs, at, bump, zoneOf, comments, !planDue);
+          drafted = await planPass(shared, accounts, byTenant, profiles, nowMs, at, bump, zoneOf, comments, !planDue);
+        }
+
+        // ── answers drafted on this pass, sent on this pass ─────────────────
+        // AS FAST AS A TELEGRAM GROUP. An answer used to wait for the next
+        // pass that read the mentions again, so opt-outs were always processed
+        // before it went out. This pass has just done exactly that for every X
+        // account in `comments`: its read succeeded, and every opt-out in it was
+        // recorded (and every waiting answer to that person cancelled) before
+        // anything was drafted. So an answer drafted on this pass, for one of
+        // those accounts, is sent now, by a second, short sweep through the
+        // same send path: the gap, the answers' day allowance, the fleet's
+        // ceiling, the pauses (read again first), sendDecision and claimPost
+        // all apply. Due by now, not by the pass's start: the draft was written
+        // a moment ago. Only answers, only for an inbox this pass refreshed;
+        // every other row, and an answer for an account whose read failed or
+        // was not due, waits for a later pass exactly as before.
+        if (drafted.size > 0) {
+          for (const [key, why] of [[APP_PAUSE_KEY, "paused-client-credentials-refused"], [PAUSE_KEY, "paused-for-credits"]] as const) {
+            const until = Number((await readMeta(shared, key))?.v);
+            if (until > at() && until >= (pause?.until ?? 0)) pause = { why, until };
+          }
+          await sweep(at(), (post) => post.kind === "answer" && comments.has(post.xUserId) && drafted.has(post.xUserId));
         }
 
         return { log: summary(counts, nowMs), ...(notes.length ? { notes } : {}) };
@@ -1188,8 +1233,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
     const isActive = (a: XAccount) => active.has(a.tenant.toLowerCase());
     const byTenant = (a: XAccount, b: XAccount) => a.tenant.localeCompare(b.tenant);
     // THE ACTIVE OWNERS FIRST, then the rest from where the last pass left
-    // off: an active agent due its minute's poll is never behind the fleet's
-    // turn, and the rotation is the fleet's alone.
+    // off: an active agent due its fifteen-second poll is never behind the
+    // fleet's turn, and the rotation is the fleet's alone.
     const ordered = accounts.filter((a) => !isActive(a)).sort(byTenant);
     const from = ordered.findIndex((a) => a.tenant >= replyResumeAt);
     const rest = from > 0 ? [...ordered.slice(from), ...ordered.slice(0, from)] : ordered;
@@ -1224,10 +1269,10 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         bump(`reply-read-${result.failure}`);
         if (result.resetAtMs) await writeMeta(shared, `reply-backoff:${account.xUserId}`, String(result.resetAtMs), at());
         // A READ THAT FAILS ON WHAT X SENT waits the fleet's thirty minutes,
-        // not an active account's one. A backlog past the eight hundred
-        // mentions X pages back to fails this way on every poll until the
-        // cursor is moved (docs/x-posting.md "Active owners"), and a minute's
-        // poll would buy eight billable pages and nothing else.
+        // not an active account's fifteen seconds. A backlog past the eight
+        // hundred mentions X pages back to fails this way on every poll until
+        // the cursor is moved (docs/x-posting.md "Active owners"), and a poll
+        // every fifteen seconds would buy eight billable pages and nothing else.
         else if (result.failure === "invalid" && isActive(account)) {
           await writeMeta(shared, `reply-backoff:${account.xUserId}`, String(t + REPLY_POLL_MS), at());
           bump("active-reply-read-held");
@@ -1272,9 +1317,11 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
     comments: Map<string, XReply[]>,
     /** Only the answers to this pass's batches: its posts' plan is not due (see the step). */
     answersOnly = false,
-  ): Promise<void> {
-    if (answersOnly) accounts = accounts.filter((a) => comments.has(a.xUserId));
-    if (accounts.length === 0) return;
+  ): Promise<Set<string>> {
+    /** The X accounts an active agent's answer was drafted for on this pass, ready to go: the step's second sweep sends them. */
+    const answered = new Set<string>();
+    if (answersOnly) accounts = accounts.filter((a) => (comments.get(a.xUserId)?.length ?? 0) > 0);
+    if (accounts.length === 0) return answered;
     const roster = accounts.map((a) => byTenant.get(a.tenant)!);
     const facts = await factsOf(shared, roster, profiles, Math.floor(nowMs / 1000), {
       dialect, ...(comments.size ? { callWindowSec: PLAN_HISTORY_MS / 1000 } : {}),
@@ -1414,6 +1461,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
             answerDrafts++;
             bump(result.body ? (isActive ? "drafted-answer" : "drafted-reply") : (isActive ? "answer-skipped" : "reply-skipped"));
             if (result.body) {
+              if (isActive) answered.add(account.xUserId);
               recentOwn.unshift(result.body);
               // This pass's own research answer is never shown to the next prompt either.
               if (!result.lookedUp && !carriesResearch(result.body)) shownOwn.unshift(result.body);
@@ -1426,6 +1474,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         if (!ownerFailure) ownerFailure = (e instanceof Error ? e.message : String(e)).replace(/\s+/g, " ").slice(0, 160);
       }
     }
+    return answered;
   }
 
   /**
@@ -1440,9 +1489,11 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
    * "Active owners"), and someone who tagged it is waiting: the answer is due
    * the moment it is drafted, with no ten-minute review window, and the
    * owner's night does not hold it (the send path never treats an answer as
-   * asleep). The reply warning that turned this on says both. Everything else
-   * still holds: STOP, two a person a day, 24 a day, the tag screens, the
-   * gate, the fleet's ceiling, the pauses and the 429 backoff.
+   * asleep). It goes out on the pass that read the tag, by the step's second
+   * sweep: that pass's read succeeded and its opt-outs were all recorded
+   * before this ran. The reply warning that turned this on says both.
+   * Everything else still holds: STOP, two a person a day, 24 a day, the tag
+   * screens, the gate, the fleet's ceiling, the pauses and the 429 backoff.
    *
    * WITH RESEARCH ON (MERRYMEN_XPOST_RESEARCH=1), the question is read by
    * code first and one bounded bundle is looked up for it
@@ -1509,6 +1560,15 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // and spends no model call. Only research gathers anything for what it
       // reads.
       const classified = classifyTag(candidate.text, { address: candidate.address ?? null });
+      // A GREETING AND NOTHING ELSE ("hiii", "gm", "yo ser 👋": replies.ts
+      // greetingOnly) is answered with one of code's casual lines (writer.ts
+      // greetingAnswers): no model call, no research, no model allowance.
+      // Code's own classifier must read it as plain chat too, and its reply
+      // prefix may name nobody else, or it is answered by nothing (fail
+      // closed). Everything else holds as for any answer: the hello first, the
+      // house consent, every opt-out, the day's 24, two a person a day, the
+      // sherwood and author screens below, and the gate.
+      const greeting = candidate.greeting === true;
       // SHERWOOD IN ANY FORM INCLUDES A HANDLE ("@SherwoodToken"), read on the
       // tag as posted with only its own handle set aside; and the model line
       // never goes under a reply prefix that names anyone else (red-team 2026-10-12).
@@ -1524,7 +1584,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       const author = comment.author;
       const authorSherwood = !!author && (sherwoodMentioned(author.username) || sherwoodMentioned(author.name));
       const namedClean = !!author && !authorSherwood && !modelNamed(author.username) && !modelNamed(author.name);
-      const asked: TagIntent = sherwoodTagged || authorSherwood || (classified.kind === "model" && (candidate.otherHandles || !namedClean)) ? { kind: "unanswered" } : classified;
+      const asked: TagIntent = sherwoodTagged || authorSherwood || (classified.kind === "model" && (candidate.otherHandles || !namedClean))
+        || (greeting && (classified.kind !== "chat" || candidate.otherHandles)) ? { kind: "unanswered" } : classified;
       // SHERWOOD IN ANY FORM, OR A MODEL QUESTION OFF THE ALLOWLIST, is
       // answered by nothing: the model line under "sherwood TGE soon?" reads
       // as Merrymen confirming a token, and a draft is never asked about the
@@ -1533,13 +1594,15 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         bump("answer-unanswered");
         continue;
       }
+      // CODE'S OWN LINE, NEVER A DRAFT: the model question's, or a greeting's.
+      const templated = asked.kind === "model" || greeting;
       // DECIDED BEFORE ANYTHING IS SPENT: a question the writer could not read
       // would buy research and a model call for a prompt that says PASS. Its
       // digits are read as "(a number)"; a copycat's ("$PEPE2") is safe to
       // mask because a tag that names a coin never sees what it bought
-      // (coinNamed below). The model question's line is code's and never
-      // reads the question.
-      if (asked.kind !== "model" && answerQuestion(candidate.text) === null) {
+      // (coinNamed below). The model question's line, and a greeting's, is
+      // code's and never reads the question.
+      if (!templated && answerQuestion(candidate.text) === null) {
         bump("answer-unusable");
         continue;
       }
@@ -1563,8 +1626,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // exact path, as it never gets the model line.
       const otherHandles = candidate.otherHandles === true;
       const general = !coinNamed && !otherHandles && generalTradesQuestion(candidate.text);
-      const intent = research ? asked : null;
-      const templated = asked.kind === "model";
+      // Nothing is looked up for a greeting.
+      const intent = research && !greeting ? asked : null;
       if (!templated) {
         const answerKey = `llm-answers:${account.xUserId}:${utcDay(nowMs)}`;
         if (!(await takeAllowance(shared, answerKey, ANSWER_DRAFTS_PER_DAY, nowMs))) {
@@ -1599,10 +1662,12 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         if (bundle.lookups) bump("answer-lookups", bundle.lookups);
         for (const note of new Set(bundle.notes)) bump(`answer-research-${note}`);
       }
-      // THE MODEL QUESTION'S LINES, this mention's own first: one it already
-      // said is a repeat to the gate, so the next is tried rather than none.
+      // CODE'S LINES, the model question's or a greeting's, this mention's own
+      // first: one it already said is a repeat to the gate, so the next is
+      // tried rather than none, and when all have been said lately, none.
       // A paper agent's lines say paper: it is gated as a paper reply.
-      const lines = templated ? modelAnswers(comment.id, facts.style, { paper: f.mode === "paper" }) : [];
+      const lines = greeting ? greetingAnswers(comment.id, facts.style, { paper: f.mode === "paper" })
+        : templated ? modelAnswers(comment.id, facts.style, { paper: f.mode === "paper" }) : [];
       const raw = templated
         ? lines[0]!
         : await draft(creds, answerPrompt({ ...facts, question: candidate.text, recentBuys: buys, boughtLately: boughtKind(f),
@@ -1681,6 +1746,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         reason: body ? null : claimed ? "gate:sherwood-claim" : named || postsName ? "gate:sherwood-drafted" : unlooked ? "gate:unlooked-source"
           : verdict && !verdict.ok ? `gate:${verdict.reason}` : "no-draft",
       });
+      if (id !== null && greeting && body) bump("answered-greeting");
       return id === null ? null : { body, lookedUp };
     }
     return null;
