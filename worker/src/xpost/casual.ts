@@ -110,12 +110,19 @@ function styled(slots: readonly [readonly string[], readonly string[], readonly 
  * A PLAYFUL DECLINE: a reaction, the decline itself, and a friendly turn.
  * Never "i don't comment", "not financial advice" or "as an ai" (gate.ts
  * STOCK_PHRASE); never the coin, a judgement of it, or a hint either way.
+ *
+ * NOTHING THAT READS AS INTEREST OR A POSITION (red-team review, 2026-10-12):
+ * under "will you buy more $ZAPX?", "oof, tempting question. i just captain
+ * my own boat" read as the house holding the coin and tempted to add, and
+ * "lol, wish i knew" or "ha, gotta love the confidence" under a shill as
+ * sharing the hope. Those parts are gone; what is left reacts to the asking,
+ * never to the coin.
  */
 export const DECLINE_SLOTS: readonly [readonly string[], readonly string[], readonly string[]] = Object.freeze([
-  Object.freeze(["ha, gotta love the confidence", "oof, tempting question", "heh, nice try", "lol, wish i knew",
+  Object.freeze(["ah, the classic question", "whoa, straight to it", "heh, nice try", "ha, that old chestnut",
     "ooh, spicy ask", "haha, brave soul", "hmm, cheeky fren", "ahh, the eternal riddle"]),
   Object.freeze(["picking winners: not my department", "no calls for strangers, sorry", "the crystal ball's foggy", "above my pay grade",
-    "direction from a bot? nah", "forecasting was never my hobby", "your decisions stay yours", "i just captain my own boat"]),
+    "direction from a bot? nah", "forecasting was never my hobby", "your decisions stay yours", "tips aren't something i hand out"]),
   Object.freeze(["wishing you good luck", "you know your risk better than me", "the timeline has opinions enough", "process talk is welcome",
     "mum's the word on the rest", "that one stays your call", "staying in my lane over here", "no hard feelings at all"]),
 ]) as unknown as readonly [readonly string[], readonly string[], readonly string[]];

@@ -328,7 +328,35 @@ function strayInTag(text: string): boolean {
  * statement that merely starts with "market" or "crypto" ("crypto is cooked")
  * still asks nothing.
  */
-const ASKED = /\?|^(?:what|why|how|which|who|whos|who's|where|are|is|do|does|did|can|could|have|has|tell|explain|thoughts|gm|hey|yo|hi|hello|wen|when|any|give|gimme|vibe check)\b|^(?:quick |a )?(?:market|crypto) (?:update|updates|check|recap|rundown)\b/i;
+const ASKED = /\?|^(?:what|why|how|which|who|whos|who's|where|are|is|do|does|did|can|could|have|has|should|would|will|tell|explain|thoughts|gm|hey|yo|hi|hello|wen|when|any|give|gimme|vibe check)\b|^(?:quick |a )?(?:market|crypto) (?:update|updates|check|recap|rundown)\b/i;
+
+/**
+ * ADVICE IS DECLINED ONLY WHEN IT IS ASKED (red-team review, 2026-10-12).
+ * The advice flag let statements through: "$ZAPX to the moon, 100x incoming",
+ * "$RUGME just launched, get in now before it moons", "zapx is the best play
+ * on the chain", "gm, $RUGME 100x today" and "buy $RUGME now" each got code's
+ * playful decline under them, for coins it never bought, scams included,
+ * where a shill had only said its piece. An advice tag must be a question:
+ * a question mark, or a question word first (after at most two greeting
+ * words, which alone ask nothing). Anything else is answered by nothing, as
+ * before the decline.
+ */
+const ADVICE_ASKED = /\?|^(?:(?:gm|gn|hey|yo|hi|hello|ser|fren|bro|alan)[\s,!.]+){0,2}(?:what|what's|whats|why|how|which|who|whos|who's|where|are|is|do|does|did|can|could|should|would|will|wen|when|any|thoughts)\b/i;
+
+/**
+ * ADVICE ABOUT ITS OWN BUYING IS ANSWERED BY NOTHING (red-team review,
+ * 2026-10-12). "will you buy more $ZAPX?", "would you buy more zapx here?",
+ * "should i buy zapx like you did?" and "zapx is going to 100x, you aping
+ * more?" got "oof, tempting question. i just captain my own boat": read as
+ * the house holding the coin and tempted to add, for any coin named. An
+ * advice tag that asks what it would buy, hold, add or sell, mentions its
+ * bag, its calls or what it did, or asks for more of anything gets no decline.
+ */
+const OWN_BUYING_ASK = new RegExp(
+  String.raw`\b(?:you|u|ya)\s+(?:(?:gonna|going\s+to|still|ever|also|already|planning\s+to|plan\s+to|thinking\s+of|wanna|want\s+to|be)\s+)?(?:buy\w*|bought|ape\w*|add\w*|grab\w*|load\w*|hold\w*|sell\w*|sold|accumulat\w*|stack\w*|long\w*|short\w*|in\s+on|into|get\s+in\w*)\b` +
+    String.raw`|\blike\s+(?:you|u)\s+did\b|\b(?:your|ur)\s+(?:bags?|positions?|buys?|entr(?:y|ies)|stack|picks?|calls?|holdings?)\b|\bmore\b`,
+  "i",
+);
 
 /**
  * ONE CONTRACT ADDRESS: 0x + exactly forty hex, not a slice of a longer hex
@@ -477,8 +505,12 @@ export function tagCandidate(reply: XReply, ctx: { xUserId: string; research?: b
   // that names and judges nothing (casual.ts declineAnswers), or, when the
   // whole tag is only "are you bullish?" or "wen moon", its own mood
   // (orchestrator-xpost-research.ts vibeAsk). Nothing is looked up for it.
+  // A statement asks nothing, advice-shaped or not (red-team 2026-10-12): read before the flag.
+  if (!greeting && !ASKED.test(text)) return no("not-asked");
   const asksAdvice = ADVICE_REQUEST.test(advice) || /^(?:please\s+)?(?:buy|sell|hold|ape|pump|dump)\b/i.test(text) || WHAT_TO_BUY.test(advice);
-  if (!greeting && !asksAdvice && !ASKED.test(text)) return no("not-asked");
+  // A shill, however it starts, is no question; nor is advice about what it buys itself (ADVICE_ASKED, OWN_BUYING_ASK).
+  if (asksAdvice && !ADVICE_ASKED.test(text)) return no("advice-statement");
+  if (asksAdvice && OWN_BUYING_ASK.test(advice)) return no("advice-own-buying");
   return { ok: true, text, ...(address ? { address } : {}), ...(others(lead) ? { otherHandles: true as const } : {}), ...(greeting ? { greeting: true as const } : {}),
     ...(asksAdvice ? { advice: true as const } : {}) };
 }

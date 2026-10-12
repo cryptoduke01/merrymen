@@ -1616,8 +1616,9 @@ test("a tag naming two coins is looked up for nothing, and its answer neither na
 
 test("a tag asking for advice or a forecast in other words is never drafted, and such a draft is never posted (red-team 2026-10-12)", async (t) => {
   for (const env of [{}, RESEARCH_ON]) {
+    // "would you buy $WOJAK here?" asks what it would buy itself: nothing at all since the red-team review of 2026-10-12 (replies.ts OWN_BUYING_ASK).
     for (const text of ["@pine_stoat is $WOJAK a good buy?", "@pine_stoat is $WOJAK worth buying?", "@pine_stoat do you think $WOJAK will go up?",
-      "@pine_stoat would you buy $WOJAK here?", "@pine_stoat is $WOJAK going to pump?"]) {
+      "@pine_stoat is $WOJAK going to pump?"]) {
       const r = fakeResearch();
       const w = await world(t, { env, research: r.research });
       w.setInbox([tag({ text })]);
@@ -3674,5 +3675,30 @@ test("a chat draft handed nothing never forecasts the market or tells anyone to 
         assert.doesNotMatch(r.log ?? "", /answer-chat-fallback 1/, `${text}: ${draft}`);
       }
     }
+  }
+});
+
+test("no decline under a shill that asks nothing, nor under advice about its own buying; and no decline reads as interest or a position (red-team 2026-10-12)", async (t) => {
+  const facts: AgentFacts = { ...ALAN.facts, calls: [{ ...CALL, decisionId: "fill-zapx", symbol: "ZAPX", name: "Zapx" }] };
+  // Each POSTED at 58ba9fd0 with the mention id beside it.
+  const cases: [string, string][] = [
+    ["100000000000000020", "$ZAPX to the moon, 100x incoming"],
+    ["1846100000001084903", "will you buy more $ZAPX?"], ["1846100000001084903", "would you buy more zapx here?"], ["1846100000001084903", "should i buy zapx like you did?"],
+    ["1846100000001409582", "will you buy more $ZAPX?"], ["1846100000000000000", "zapx is going to 100x, you aping more?"],
+    ...["$RUGME to the moon", "$SCAMX to the moon, 100x incoming", "$RUGME just launched, get in now before it moons", "zapx is the best play on the chain", "rugme bullish af",
+      "$RUGME is undervalued, loading up", "gm, $RUGME 100x today", "buy $RUGME now"].map((text): [string, string] => ["100000000000000020", text]),
+  ];
+  for (const on of [false, true]) {
+    for (const [id, text] of cases) {
+      const w = await world(t, { ...ALAN, facts, ...(on ? { env: RESEARCH_ON, research: fakeResearch().research } : {}), answer: "buy it now. Say stop to opt out." });
+      w.setInbox([alanTag(id, text)]);
+      await w.step();
+      assert.deepEqual(w.sends, [], `${id} ${text}`);
+      assert.deepEqual(w.asked(), [], `${id} ${text}`);
+    }
+  }
+  // No decline says it is tempted, wishes it knew, loves the confidence or captains its own boat.
+  for (const id of ["1846100000001084903", "1846100000001409582", "1846100000000000000", "100000000000000020"]) {
+    for (const line of declineAnswers(id, { lower: true })) assert.doesNotMatch(line, /tempting|wish i knew|love the confidence|captain my own boat/, line);
   }
 });

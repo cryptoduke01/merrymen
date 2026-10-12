@@ -285,7 +285,8 @@ describe("tags an active agent may answer", () => {
 
   it("advice or a prediction asked for without \"should i\" is flagged at the door, never drafted (red-team 2026-10-12)", () => {
     // The reproduced tags, each passing tagCandidate with classifyTag coin WOJAK at 11f7acac.
-    for (const text of ["is $WOJAK a good buy?", "is $WOJAK worth buying?", "do you think $WOJAK will go up?", "would you buy $WOJAK here?", "is $WOJAK going to pump?",
+    // "would you buy $WOJAK here?" asks what it buys itself: answered by nothing since the red-team review of 2026-10-12 (below).
+    for (const text of ["is $WOJAK a good buy?", "is $WOJAK worth buying?", "do you think $WOJAK will go up?", "is $WOJAK going to pump?",
       "is $WOJAK a buy?", "$WOJAK going higher?", "is $WOJAK bullish?", "will $WOJAK moon?", "is it too late to get into $WOJAK?", "is $WOJAK undervalued?",
       "do you think $pepe will go up?", "what model are you on? 100x?", "what's the best coin to buy?"]) {
       for (const research of [true, false]) {
@@ -302,9 +303,11 @@ describe("tags an active agent may answer", () => {
     for (const text of ["@Pine how many holders does $pepe have?", "@Pine how much liquidity is in this?", `@Pine how many holders on ${CA}?`]) {
       assert.equal(tagCandidate(tag(text), ON).ok, true, text);
     }
-    for (const text of ["@Pine how much did you buy?", "@Pine how many holders, should i buy?", "@Pine how much liquidity before it pumps, when to sell?", "@Pine how much will $pepe go up?", "@Pine what's the price target for $pepe?"]) {
+    for (const text of ["@Pine how many holders, should i buy?", "@Pine how much liquidity before it pumps, when to sell?", "@Pine how much will $pepe go up?", "@Pine what's the price target for $pepe?"]) {
       assert.ok(advised(tagCandidate(tag(text), ON)), text);
     }
+    // Its own size is no decline's either: nothing at all (red-team 2026-10-12).
+    assert.deepEqual(tagCandidate(tag("@Pine how much did you buy?"), ON), { ok: false, reason: "advice-own-buying" });
   });
   it("an address inside a link on any domain is a link, refused before it could be a lookup key", () => {
     for (const text of [`@Pine what about pons.fun/token/${CA}?`, `@Pine what about robinhood.trade/${CA}?`, `@Pine what is ${CA}?ref=moonboy`, `@Pine what is ${CA}/chart?`, `@Pine what about x/${CA}?`]) {
@@ -320,11 +323,13 @@ describe("tags an active agent may answer", () => {
       const v = tagCandidate(tag(text), ON);
       assert.ok(v.ok && v.address === CA, text);
     }
-    for (const text of [`@Pine should i buy ${CA}?`, `@Pine is it time to buy ${CA}?`, `@Pine would you buy ${CA}?`, `@Pine buy ${CA} or not?`, `@Pine did you buy ${CA}, should i too?`, `@Pine ape ${CA} now?`]) {
+    for (const text of [`@Pine should i buy ${CA}?`, `@Pine is it time to buy ${CA}?`, `@Pine buy ${CA} or not?`, `@Pine did you buy ${CA}, should i too?`, `@Pine ape ${CA} now?`]) {
       assert.ok(advised(tagCandidate(tag(text), ON)), text);
     }
-    // Without an address, nothing changes: "buy this" is advice, as on the comment path.
-    assert.ok(advised(tagCandidate(tag("@Pine did you buy this coin?"), ON)));
+    // What it would buy itself is no decline's: nothing at all (red-team 2026-10-12).
+    assert.deepEqual(tagCandidate(tag(`@Pine would you buy ${CA}?`), ON), { ok: false, reason: "advice-own-buying" });
+    // Without an address, "buy this" is advice, as on the comment path, and about its own buying: nothing.
+    assert.deepEqual(tagCandidate(tag("@Pine did you buy this coin?"), ON), { ok: false, reason: "advice-own-buying" });
     assert.equal(tagCandidate(tag(`@Pine did you buy ${CA}?`), { xUserId: "222", username: "Pine" }).ok, false, "research off: any address is refused");
   });
 });
@@ -373,6 +378,26 @@ describe("a tag that is only a greeting (2026-10-12)", () => {
     const ca = `0x${"ab12".repeat(10)}`;
     const v = tagCandidate(top(`@pine_stoat gm ${ca}`), { ...own, research: true });
     assert.ok(!(v.ok && v.greeting === true), JSON.stringify(v));
+  });
+});
+
+describe("advice is declined only when asked, and never about its own buying (red-team 2026-10-12)", () => {
+  const tag = (text: string) => comment(text, { conversationId: "333", inReplyToTweetId: "" });
+  const ON = { xUserId: "222", username: "alanaidale", research: true };
+  it("a shill or an order is no question: nothing at all", () => {
+    for (const text of ["$ZAPX to the moon, 100x incoming", "$RUGME to the moon", "$SCAMX to the moon, 100x incoming", "$RUGME just launched, get in now before it moons",
+      "zapx is the best play on the chain", "rugme bullish af", "$RUGME is undervalued, loading up", "gm, $RUGME 100x today", "buy $RUGME now"]) {
+      const v = tagCandidate(tag(`@alanaidale ${text}`), ON);
+      assert.ok(!v.ok && (v.reason === "not-asked" || v.reason === "advice-statement"), `${text}: ${JSON.stringify(v)}`);
+    }
+  });
+  it("what it would buy, add or hold, like it did, or more of anything: nothing at all", () => {
+    for (const text of ["will you buy more $ZAPX?", "would you buy more zapx here?", "should i buy zapx like you did?", "zapx is going to 100x, you aping more?",
+      "would you ape $ZAPX here?", "should i buy more pepe?", "what's in your bag, should i copy it?"]) {
+      assert.deepEqual(tagCandidate(tag(`@alanaidale ${text}`), ON), { ok: false, reason: "advice-own-buying" }, text);
+    }
+    // Asked, and about the asker's own choice: still declined in code's words.
+    for (const text of ["should i buy pepe?", "gm, should i buy pepe", "is $WOJAK a good buy?", "what should i buy"]) assert.ok(advised(tagCandidate(tag(`@alanaidale ${text}`), ON)), text);
   });
 });
 
