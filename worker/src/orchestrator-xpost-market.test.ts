@@ -7,11 +7,11 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { admitAgentLine } from "../groupchat/policy";
-import { REPEAT_LIMIT, similarity } from "../social-post";
-import { admitXPost } from "./gate";
-import { hotAnswers, hotNoneAnswers, hotUnreadAnswers, majorAnswers, majorUnreadAnswers, moveOf, type HotRead, type MajorRead, type Move } from "./market";
-import { withoutReplyOptOut } from "./replies";
+import { admitAgentLine } from "./groupchat/policy";
+import { REPEAT_LIMIT, similarity } from "./social-post";
+import { admitXPost } from "./xpost/gate";
+import { hotAnswers, hotNoneAnswers, hotUnreadAnswers, majorAnswers, majorUnreadAnswers, moveOf, type HotRead, type MajorRead, type Move } from "./xpost/market";
+import { withoutReplyOptOut } from "./xpost/replies";
 
 const MOVES: (Move | null)[] = [null, { dir: "flat", size: null },
   ...(["up", "down"] as const).flatMap((dir) => (["a little", "a fair bit", "sharply"] as const).map((size) => ({ dir, size })))];
