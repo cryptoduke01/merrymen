@@ -249,3 +249,30 @@ export async function readTokenMeta(
   }
   return out;
 }
+
+/**
+ * One token's recorded deployer, with the three answers kept apart:
+ *
+ *   known       the template answered and named a deployer
+ *   none        the call ran and the token is not a Pons template token, so
+ *               no deployer is published — nothing is known, nothing assumed
+ *   unreadable  the read itself failed; the next attempt may answer
+ *
+ * readTokenMeta folds the last two into "absent", which is right for a batch
+ * and wrong for a caller that must not cache a failed read as a fact. Same
+ * claim-not-proof caveat as TokenMeta.deployer: what the token records, never
+ * a trust signal. The launch event's creator topic is the harder-to-forge
+ * source (docs/deployer-following-sketch.md) and can replace this later.
+ */
+export async function readTokenDeployer(
+  client: PublicClient,
+  token: `0x${string}`,
+): Promise<{ state: "known"; deployer: `0x${string}` } | { state: "none" } | { state: "unreadable" }> {
+  const results = await aggregate3(client, [{ target: token, callData: SEL_METADATA as `0x${string}` }]);
+  const r = results[0];
+  if (!r) return { state: "unreadable" };
+  if (!r.success) return { state: "none" };
+  const meta = parseTokenMeta(token, r.returnData);
+  if (!meta || /^0x0{40}$/.test(meta.deployer)) return { state: "none" };
+  return { state: "known", deployer: meta.deployer };
+}
