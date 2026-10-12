@@ -815,8 +815,14 @@ const HYPE = new RegExp(
  * me on pepe" and "grab some pepe" tell a reader what to buy. Judged with the
  * names in, since the coin is what makes it advice.
  */
-const COIN_ADVICE =
-  /\b(?:check (?:it )?out|room to grow|worth (?:a )?(?:look|watch|peek)|worth (?:looking at|watching|a closer look)|trust me|grab (?:some|it|this|one))\b/i;
+const COIN_ADVICE = new RegExp(
+  String.raw`\b(?:check (?:it )?out|room to grow|worth (?:a )?(?:look|watch|peek)|worth (?:looking at|watching|a closer look)|trust me|grab (?:some|it|this|one)` +
+    // AN ENDORSEMENT, IN A REPLY OR BESIDE A COIN (red-team 2026-10-12): under
+    // "is this legit?" in its own thread, "yep, looks legit to me, go for it"
+    // and "yeah that one's official, all good" passed.
+    String.raw`|(?:looks?|looking|seems?|is|it'?s|that'?s|totally|fully|def(?:initely)?|pretty|real|all)\s+legit|legit\s+(?:to me|one|coin|token|project)|official|go for it|go ahead)\b`,
+  "i",
+);
 
 /** A historical parent cannot establish a current holding or a promised new action. */
 const REPLY_CURRENT_OR_ACTION = /\b(?:i(?:'m| am) (?:still )?holding|i (?:still )?(?:hold|own)|i(?:'m| am) still in|(?:i(?:'ll| will)|i(?:'m| am) going to) (?:buy|sell|trade|hold|add|check)|(?:bought|buying|adding) (?:more|again)|keep holding|hold (?:it|this|that))\b/i;

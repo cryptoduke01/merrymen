@@ -116,6 +116,18 @@ describe("an answer says only the buys it was told of (red-team 2026-10-12)", ()
   });
 });
 
+describe("a reply never vouches for a coin (red-team 2026-10-12)", () => {
+  it("\"looks legit, go for it\" and \"that one's official\" are endorsements, in a reply or beside a coin", () => {
+    // The reproduced drafts, each {ok:true} at 11f7acac under "is this legit?".
+    for (const draft of ["yep, looks legit to me, go for it. say stop to opt out.", "yeah that one's official, all good. say stop to opt out."]) {
+      assert.match(reason(draft, { kind: "reply", mode: "live", coins: [], buys: "none" }), /^(?:hype|buy-claim)$/, draft);
+      assert.equal(reason(draft, { kind: "reply", mode: "live", coins: [] }), "hype", `${draft}: an endorsement, whatever it was told`);
+    }
+    assert.equal(reason("pepe looks legit to me", { kind: "casual", mode: "live", coins: ["pepe"] }), "hype", "beside a coin");
+    assert.equal(reason("can't say much here, the public index shows liquidity is thin. say stop to opt out.", { kind: "reply", mode: "live", coins: [], buys: "none" }), "ok");
+  });
+});
+
 describe("public replies preserve the X safeguards and require an opt-out", () => {
   const reply: Partial<XGateCtx> = { kind: "reply", mode: "live", coins: ["pepe"] };
   it("allows a conversational reference back only in an actual reply", () => {

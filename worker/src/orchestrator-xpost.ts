@@ -92,7 +92,7 @@ import {
 import { answerPrompt, answerQuestion, buyPrompt, casualPrompt, draft, introPrompt, introTemplate, modelAnswers, replyPrompt, sellPrompt, sherwoodClaimed, sherwoodMentioned, sherwoodNamed, xpostModel, xpostModelWarning, type AnswerIntentKind, type WriterFacts, type XStyle } from "./xpost/writer";
 import { appendPublicToken, appendPublicWallet, hasPublicWallet, publicTokenStillAllowed, publicWalletStillAllowed, type PublicWallet } from "./xpost/public-wallet";
 import { readPublicProjectDescription } from "./orchestrator-xpost-project";
-import { boughtNames, carriesResearch, classifyTag, createXResearch, generalTradesQuestion, namesACoin, type ResearchBundle, type TagIntent, type XResearch } from "./orchestrator-xpost-research";
+import { boughtNames, carriesResearch, classifyTag, createXResearch, generalTradesQuestion, modelNamed, namesACoin, type ResearchBundle, type TagIntent, type XResearch } from "./orchestrator-xpost-research";
 import { PUBLISHABLE_SOURCES } from "./thesis-policy";
 import { readSaleResults } from "./orchestrator-xpost-results";
 import { appendSaleOutcome, hasSaleOutcome } from "./xpost/sale-outcome";
@@ -1516,9 +1516,14 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // line goes up as said to whoever asked, and "@Sherwood1Token ·
       // SHERWOOD-1 presale LIVE" asking the plain question got it. Only to an
       // author X named, whose handle and display name name no sherwood.
+      // NOR ANY ANSWER TO A SHERWOOD ACCOUNT, and the model line to no name
+      // that names a model or a provider either (red-team 2026-10-12): an
+      // answer under "@SherwoodTGE · SHERWOOD presale LIVE" is Merrymen's
+      // account talking with the presale, whatever it says.
       const author = comment.author;
-      const namedClean = !!author && !sherwoodMentioned(author.username) && !sherwoodMentioned(author.name);
-      const asked: TagIntent = sherwoodTagged || (classified.kind === "model" && (candidate.otherHandles || !namedClean)) ? { kind: "unanswered" } : classified;
+      const authorSherwood = !!author && (sherwoodMentioned(author.username) || sherwoodMentioned(author.name));
+      const namedClean = !!author && !authorSherwood && !modelNamed(author.username) && !modelNamed(author.name);
+      const asked: TagIntent = sherwoodTagged || authorSherwood || (classified.kind === "model" && (candidate.otherHandles || !namedClean)) ? { kind: "unanswered" } : classified;
       // SHERWOOD IN ANY FORM, OR A MODEL QUESTION OFF THE ALLOWLIST, is
       // answered by nothing: the model line under "sherwood TGE soon?" reads
       // as Merrymen confirming a token, and a draft is never asked about the

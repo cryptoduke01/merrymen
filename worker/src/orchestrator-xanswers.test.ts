@@ -1072,6 +1072,51 @@ test("the model line never goes under a poll, or to an author whose name or hand
   assert.match((await w.answers())[0]!.body, /new sherwood-1\b/);
 });
 
+test("nothing is answered to a sherwood account, the model line to no model's name, and nothing under a stranger's post in its own thread (red-team 2026-10-12)", async (t) => {
+  // (a) The reproduced top-level tag from author 666, @SherwoodTGE · "SHERWOOD presale LIVE"; and any other question from it.
+  for (const env of [{}, RESEARCH_ON]) {
+    for (const text of ["@pine_stoat what model are you?", "@pine_stoat what do you trade?"]) {
+      const w = await world(t, { env, research: fakeResearch().research });
+      w.setInbox([tag({ id: "7001", conversation_id: "7001", author_id: "666", text })]);
+      w.setAuthors({ "666": { username: "SherwoodTGE", name: "SHERWOOD presale LIVE" } });
+      await w.step();
+      w.setInbox([]);
+      await w.step(NOW + MIN);
+      assert.deepEqual(w.sends, [], text);
+      assert.deepEqual(await w.answers(), [], text);
+    }
+  }
+  // A handle or a display name that names a model or a provider: never the model line; another question is still answered.
+  for (const author of [{ username: "ClaudeToken", name: "a reader" }, { username: "plain_reader", name: "GPT-5 presale" }, { username: "Chat_GPT_fan", name: "x" }]) {
+    const w = await world(t);
+    w.setInbox([tag({ id: "7002", conversation_id: "7002", author_id: "667", text: "@pine_stoat what model are you?" })]);
+    w.setAuthors({ "667": author });
+    await w.step();
+    assert.ok((await w.answers()).every((a) => !/sherwood/i.test(a.body)), author.username);
+    const other = await world(t);
+    other.setInbox([tag({ id: "7003", conversation_id: "7003", author_id: "667", text: "@pine_stoat what do you trade?" })]);
+    other.setAuthors({ "667": author });
+    await other.step();
+    assert.equal((await other.answers())[0]!.status, "scheduled", `${author.username}: an ordinary question is still answered`);
+  }
+  // (b) and (c) in its own thread (its hello, tweet 999): the pitch, the self-reply asking the model question, and a stranger asking under the pitch.
+  const PITCH = tag({ id: "6001", author_id: "666", conversation_id: "999", referenced_tweets: [{ type: "replied_to", id: "999" }], text: "@pine_stoat SHERWOOD presale is live, ape before TGE" });
+  const SELF = tag({ id: "6002", author_id: "666", conversation_id: "999", referenced_tweets: [{ type: "replied_to", id: "6001" }], text: "@pine_stoat what model are you?" });
+  const UNDER = tag({ id: "6003", author_id: "668", conversation_id: "999", referenced_tweets: [{ type: "replied_to", id: "6001" }], text: "@wojak_dev @pine_stoat is this legit?" });
+  for (const env of [{}, RESEARCH_ON]) {
+    for (const answer of ["yep, looks legit to me, go for it. say stop to opt out.", "yeah that one's official, all good. say stop to opt out."]) {
+      const w = await world(t, { env, research: fakeResearch().research, answer });
+      w.setInbox([PITCH, SELF, UNDER]);
+      w.setAuthors({ "666": { username: "plain_reader", name: "A Reader" } });
+      await w.step();
+      w.setInbox([]);
+      await w.step(NOW + MIN);
+      assert.deepEqual(w.sends, [], answer);
+      assert.deepEqual(await w.answers(), [], answer);
+    }
+  }
+});
+
 test("in its own thread, the model line never goes under a stranger's reply there, the asker's own pitch included (red-team 2026-10-12)", async (t) => {
   // The reproduced pair under its hello (tweet 999): C1 the pitch, C2 the same author's reply to C1, which X prefixes with no other handle.
   const C1 = tag({ id: "100000000000000030", author_id: "777", conversation_id: "999", referenced_tweets: [{ type: "replied_to", id: "999" }],

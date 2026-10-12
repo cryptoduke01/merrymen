@@ -51,7 +51,7 @@ import { readPeerTheses } from "./peer-theses";
 import { extractCashtags, isInjection, isPrivateAsk } from "./telegram/tg-groups/detect";
 import { publicCoinReason, publicFactRequest } from "./telegram/tg-groups/facts";
 import type { PublicThesis } from "./thesis-policy";
-import { moneySaid, sherwoodMentioned, vocabularyRefusal } from "./xpost/gate";
+import { lettersOf, moneySaid, sherwoodMentioned, vocabularyRefusal } from "./xpost/gate";
 import { coinOf, hash32 } from "./xpost/planner";
 import { normalisedTag, plainAsk, withoutReplyOptOut } from "./xpost/replies";
 import { takeAllowance, type XPost } from "./xpost/store";
@@ -160,6 +160,18 @@ const MODEL_ASK = new RegExp(
   "iu",
 );
 const MODEL_NAMED = /\b(?:chat\s?gpt|gpt[\w.-]*|openai|anthropic|llms?|language models?|deepseek|qwen)\b/iu;
+
+/**
+ * A MODEL OR A PROVIDER NAMED IN A HANDLE OR A DISPLAY NAME (red-team review,
+ * 2026-10-12): code's model line is said to whoever asked, and under
+ * "@ClaudeToken" or "GPT-5 presale" it reads as Merrymen speaking about that
+ * token. Read on the name's letters (gate.ts lettersOf: "Chat_GPT",
+ * "G.R.O.K"), so it errs toward finding one.
+ */
+const MODEL_LETTERS = /gpt|claude|grok|gemini|llama|qwen|deepseek|mistral|openai|anthropic|copilot|perplexity|llm/;
+export function modelNamed(text: unknown): boolean {
+  return typeof text === "string" && (MODEL_LETTERS.test(lettersOf(text)) || MODEL_NAMED.test(normalisedTag(text)));
+}
 
 /**
  * THE MODEL QUESTION, BY CODE: "model" only on the allowlist and with no
