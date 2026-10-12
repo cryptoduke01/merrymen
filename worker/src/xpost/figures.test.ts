@@ -98,6 +98,20 @@ describe("tickers: A-Z, two to ten letters, nothing else", () => {
     for (const ok of ["PEPE", "CHUMP", "FROGGY", "WOJAK", "BONK", "COINA", "ZAPX", "QRTZ", "MOLT", "GALA", "BASS", "MERIT"]) assert.equal(cleanTicker(ok), ok, ok);
   });
 
+  it("never merrymen with other vowels, the trencher on its consonants, the house's provider or a model a reader knows (red-team 2026-10-12)", () => {
+    // Posted at fbcf8756: "trending $MARRYMEN …, $TRNCHR …; fomo: most bought $MARRYMEN, $TRNCHR", "$MURRYMEN …, $OPUS …".
+    for (const bad of ["MARRYMEN", "MURRYMEN", "MARYMEN", "MIRRYMEN", "MORRYMAN"]) {
+      assert.equal(cleanTicker(bad), null, bad);
+      assert.ok(merrymenMentioned(bad), bad);
+    }
+    for (const bad of ["TRNCHR", "TRENCHR", "TRANCHER", "GROQ", "OPUS", "SONNET", "HAIKU", "KIMI", "CODEX", "SHOGUN", "SHGN"]) assert.equal(cleanTicker(bad), null, bad);
+    assert.ok(merrymenMentioned("TRNCHR"));
+    for (const ok of ["CHUMP", "PEPE", "MERIT", "MERCURY", "MEME", "SUMMER", "HAMMER", "QRTZ", "ZAPX"]) {
+      assert.equal(cleanTicker(ok), ok, ok);
+      assert.equal(merrymenMentioned(ok), false, ok);
+    }
+  });
+
   it("never the first person, a holding, a pick or a sure thing run together into one word (red-team 2026-10-12)", () => {
     // Each posted at fbcf8756 in both sections: "trending $IBOUGHT 24h +312% vol ~$1.2M, …; fomo: most bought $IBOUGHT".
     for (const bad of ["IBOUGHT", "MYBAG", "MYPICK", "IMIN", "IHOLD", "IMHOLDING", "IGOTIN", "IADDED", "MYCOIN", "MYBOOK", "MYPLAY", "THEPLAY", "SUREBET",

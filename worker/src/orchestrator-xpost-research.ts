@@ -196,7 +196,7 @@ const MODEL_NAMED = /\b(?:chat\s?gpt|gpt[\w.-]*|openai|anthropic|llms?|language 
  * token. Read on the name's letters (gate.ts lettersOf: "Chat_GPT",
  * "G.R.O.K"), so it errs toward finding one.
  */
-const MODEL_LETTERS = /gpt|claude|grok|gemini|llama|qwen|deepseek|mistral|openai|anthropic|copilot|perplexity|llm/;
+const MODEL_LETTERS = /gpt|claude|grok|gemini|llama|qwen|deepseek|mistral|openai|anthropic|copilot|perplexity|llm|groq|opus|sonnet|haiku|kimi|codex|mixtral|cohere|ollama|nemotron|minimax|gemma|xai|openrouter|cerebras/;
 export function modelNamed(text: unknown): boolean {
   return typeof text === "string" && (MODEL_LETTERS.test(lettersOf(text)) || MODEL_NAMED.test(normalisedTag(text)));
 }

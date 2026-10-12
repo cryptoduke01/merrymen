@@ -67,13 +67,16 @@ export const TRENDING_MAX = 3;
  */
 const TICKER_REFUSED = new RegExp([
   // its own house, in any spelling the letters allow ("MERRIMEN", "MERYMEN", "MRYMN": red-team 2026-10-12)
-  "s+h+e*r+w+o*d", "h+e+r+w+o+d", "s+h+e*r+o{2,}d", "sherw", "merry", "merr", "m+e*r+[eiy]*m+[aeiy]*n", "robinhood", "robin", "hood", "alan", "aidale",
+  "s+h+e*r+w+o*d", "h+e+r+w+o+d", "s+h+e*r+o{2,}d", "sherw", "merry", "merr", "m+[aeiouy]*r+[aeiouy]*m+[aeiouy]*n", "robinhood", "robin", "hood", "alan", "aidale",
   // and the house's products and the sources it names ("$TRENCHER", "$FOMO": red-team 2026-10-12)
   "trench", "fomo", "shogun", "pons", "gecko", "bitquery",
   // and the chain's and the agent's names however they are shortened ("RBNHD", "ALDALE": red-team 2026-10-12)
   "r+o*b+[iy]*n+h+o*d", "rbnhd", "aldale", "dale",
   // the model and provider names a tag may never get code's lines under (orchestrator-xpost-research.ts MODEL_LETTERS)
   "gpt", "claude", "grok", "gemini", "llama", "qwen", "deepseek", "mistral", "openai", "anthropic", "copilot", "perplexity", "llm",
+  // and the house's own provider and the models a reader knows it by, in any spelling ("$GROQ", "$OPUS", "$TRNCHR": red-team 2026-10-12)
+  "groq", "opus", "sonnet", "haiku", "kimi", "codex", "mixtral", "cohere", "ollama", "nemotron", "minimax", "gemma", "xai", "openrouter", "cerebras",
+  "t+[aeiouy]*r+[aeiouy]*n+[aeiouy]*c+h+[aeiouy]*r", "shgn", "sh+[aeiouy]*g+[aeiouy]*n",
   // abuse
   "fuck", "fuk", "shit", "cunt", "nigg", "fag", "nazi", "hitler", "rape", "porn", "sex", "nude", "cock", "dick", "puss", "bitch", "whore", "slut", "retard", "kill", "isis", "jihad", "terror",
   // AND EVERY SLUR AND HATE CODE A DEPLOYER MAY NAME A POOL (red-team 2026-10-12): "$KYS", "$KIKE",

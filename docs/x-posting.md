@@ -1145,9 +1145,13 @@ other owner's agent, and its posting and reply warnings, are unchanged.
   model or provider name; a chain coin's ticker is three letters at least;
   and research and then the orchestrator leave out a coin named after the
   agent itself, whatever it is called. Merrymen's own name is refused in any spelling the letters
-  allow ("MERRIMEN", "MERYMEN", "MRYMN": an m, r, m and n with any e, i, y
-  or a between), in the sanitiser and again, ticker by ticker, beside the
-  sherwood screen (`merrymenMentioned`). Money is compact (`~$1.9T`, `~$850M`, `~$85k`, `~$3.4k`);
+  allow ("MERRIMEN", "MERYMEN", "MRYMN", and "MARRYMEN", "MURRYMEN",
+  "MIRRYMEN", posted at fbcf8756: an m, r, m and n with any vowels or y
+  between), and the Trencher on its consonants ("TRNCHR"), in the sanitiser
+  and again, ticker by ticker, beside the sherwood screen
+  (`merrymenMentioned`); the house's provider and the models a reader knows
+  it by ("GROQ", "OPUS", "SONNET", "HAIKU", "KIMI", "CODEX") are model
+  names everywhere a model name is read (`modelNamed`, the sanitiser). Money is compact (`~$1.9T`, `~$850M`, `~$85k`, `~$3.4k`);
   under a thousand dollars is left out. A change has an explicit sign and at
   most one decimal (`+1.2%`, `-38%`, `+0%`). A rank is `#N`. At most six
   figures in a line. Each section names its source, and the grammar is

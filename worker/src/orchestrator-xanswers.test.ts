@@ -3024,6 +3024,30 @@ test("what's hot never shows a ticker that reads as a call to buy with its space
   assert.match(r.log ?? "", /answer-figures-left-out 1/);
 });
 
+test("what's hot never shows merrymen, the trencher or the house's provider in another spelling, nor a model's name, in the pools or as fomo's most bought (red-team 2026-10-12)", async (t) => {
+  // At fbcf8756: "... geckoterminal robinhood: trending $MARRYMEN 24h +412% vol ~$2.3M, $TRNCHR 24h +88.1% vol ~$940k; fomo: most bought
+  // $MARRYMEN, $TRNCHR." and "$MURRYMEN …, $OPUS …, $GOOG …; fomo: most bought $MURRYMEN, $OPUS."; MARYMEN, MIRRYMEN, HAIKU, KIMI, CODEX too.
+  for (const names of [["MARRYMEN", "TRNCHR", "GROQ"], ["MURRYMEN", "OPUS", "GOOG"], ["MARYMEN", "MIRRYMEN", "SONNET"], ["HAIKU", "KIMI", "CODEX"]]) {
+    const pools = [...names.map((n, i) => namedPool(n, i + 1, [412.4, 88.1, -12.2][i]!, [2.31e6, 940_000, 310_000][i]!)), namedPool("CHUMP", 9, 7, 150_000)];
+    const w = await world(t, { env: { ...RESEARCH_ON, MERRYMEN_XPOST_FOMO: "1" }, research: hotWithFomo(pools, names.slice(0, 2)), facts: { ...FACTS, name: "Alan Al Dale", calls: [] } });
+    w.setInbox([tag({ text: "@pine_stoat what's hot?" })]);
+    await w.step();
+    const text = String(w.sends[0]?.text ?? "");
+    assert.match(text, /geckoterminal robinhood: trending \$CHUMP 24h \+7% vol ~\$150k\./, text);
+    for (const n of names) assert.ok(!text.includes(`$${n}`), `${n}: ${text}`);
+    assert.doesNotMatch(text, /fomo: most bought/, text);
+  }
+  // Whatever research hands back, the orchestrator reads each ticker again (merrymenMentioned, modelNamed): no line at all.
+  for (const symbol of ["MARRYMEN", "TRNCHR", "OPUS"]) {
+    const read: HotRead = { coins: 1, lead: { dir: "up", size: "sharply" } };
+    const w = await world(t, { env: RESEARCH_ON, research: handing({ figures: [{ kind: "pools", coins: [{ symbol, change24hPct: 412.4, volume24hUsd: 2.31e6 }] }], hot: read }, /what's hot/) });
+    w.setInbox([tag({ text: "@pine_stoat what's hot?" })]);
+    const r = await w.step();
+    assert.deepEqual(w.sends.map((s) => s.text), [hotAnswers(read, MENTION, { lower: true })[0]], symbol);
+    assert.match(r.log ?? "", /answer-figures-left-out 1/, symbol);
+  }
+});
+
 test("what's hot never shows a coin under a name its own buys go by, a copy at another contract or not, nor as fomo's most bought, under its buy post or anywhere (red-team 2026-10-12)", async (t) => {
   // At fbcf8756, under its own ZAPX buy post: "trending on robinhood: a small group out in front, the frontrunner rising hard lately. a snapshot.
   // geckoterminal robinhood: trending $ZAPX 24h +912% vol ~$1.4M, $QRTZ 24h -8.3% vol ~$310k; fomo: most bought $ZAPX. say stop to opt out."

@@ -489,11 +489,13 @@ export function sherwoodMentioned(text: unknown): boolean {
  * a trending coin in code's line under Merrymen's own account, which reads
  * as the house naming a coin after itself. Read on the text's letters as
  * sherwood is (lettersOf, plain and leet): an m, then r, then m and n, with
- * any run of e, i, y or a between. Errs toward finding it ("MERMAN" counts).
- * Meant for a short text, a ticker: across the words of a sentence its
- * letters run together.
+ * any run of vowels or y between ("MARRYMEN", "MURRYMEN", "MIRRYMEN" were
+ * posted too, red-team 2026-10-12). AND THE TRENCHER, ITS PRODUCT, ON ITS
+ * CONSONANTS ("$TRNCHR"): t, r, n, ch, r with any vowels between. Errs toward
+ * finding it ("MERMAN", "MORMON" count). Meant for a short text, a ticker:
+ * across the words of a sentence its letters run together.
  */
-const MERRYMEN_LETTERS = /m+e*r+[eiy]*m+[aeiy]*n|merr/;
+const MERRYMEN_LETTERS = /m+[aeiouy]*r+[aeiouy]*m+[aeiouy]*n|merr|t+[aeiouy]*r+[aeiouy]*n+[aeiouy]*c+h+[aeiouy]*r/;
 export function merrymenMentioned(text: unknown): boolean {
   if (typeof text !== "string") return false;
   return [lettersOf(text), lettersOf(text, { leet: true })].some((r) => MERRYMEN_LETTERS.test(r));

@@ -39,6 +39,7 @@ import {
   majorAsk,
   majorPhrases,
   majorReadOf,
+  modelNamed,
   namesACoin,
   ONBOARDING_PHRASES,
   ownHistoryPhrases,
@@ -1371,6 +1372,11 @@ describe("what's hot: the chain's trending coins past the fleet's floors, fomo's
     }
     assert.equal(classifyTag("what's hot?").kind, "hot");
     assert.equal(namesACoin({ text: "what's hot?", intent: { kind: "hot" }, address: null }), false, "it names no coin");
+  });
+
+  it("the house's own provider and the models a reader knows are model names, on their letters (red-team 2026-10-12)", () => {
+    for (const name of ["GROQ", "OPUS", "SONNET", "HAIKU", "KIMI", "CODEX", "groq cloud", "Claude Opus", "Mixtral"]) assert.ok(modelNamed(name), name);
+    for (const name of ["CHUMP", "QRTZ", "A Reader", "pine_stoat"]) assert.equal(modelNamed(name), false, name);
   });
 
   it("never one letter from a stock token's symbol: GOOG beside the chain's GOOGL (red-team 2026-10-12)", () => {
