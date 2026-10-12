@@ -29,7 +29,7 @@ const EARLY_PREFIX = "early:";
 
 /** Safe diagnostic codes only; never provider bodies or credential-bearing URLs. */
 const pageFailure = (failure: string | undefined) =>
-  /^(http-\d{3}|timeout|network|invalid-body|invalid-shape|cache-unavailable|provider-cooldown|request-budget)$/.test(failure ?? "") ? failure! : "unavailable";
+  /^(http-\d{3}|timeout|network|invalid-body|invalid-shape|cache-unavailable|provider-cooldown|request-budget|plan-restricted)$/.test(failure ?? "") ? failure! : "unavailable";
 /**
  * A HELD POSITION MAY NOT GO LONGER THAN THIS WITHOUT A REVIEW.
  *

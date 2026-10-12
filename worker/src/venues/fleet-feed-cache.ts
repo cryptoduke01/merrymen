@@ -46,8 +46,92 @@ function cooldownDelay(result: FeedResult, failures: number): number {
     Number.isFinite(result.retryAfterMs) ? result.retryAfterMs! : 0);
 }
 
+/**
+ * WHICH PACING ROW A READ TAKES.
+ *
+ * `default` is every caller there has ever been: the tape feeds, the desk, the
+ * facts and the X lines. `evidence` is a read a decision is WAITING on — the
+ * Brain's candle and trade legs — under a five-second budget per leg.
+ *
+ * On one shared row those legs queued behind the sixty-second tape burst
+ * (seven or eight page requests), so `candles=budget` was the normal outcome,
+ * not a fault. A second row lets them skip that queue.
+ *
+ * IT IS PRIORITY, NOT EXTRA QUOTA. Every evidence slot taken also pushes the
+ * default row back by one slot, so the two rows together never exceed one
+ * request per `spacingMs` over any stretch longer than a slot — the pace the
+ * operator configured and the monthly ceiling was computed for. The only cost
+ * is a burst of two when both rows fire in the same instant, far inside the
+ * provider's per-minute limit. Under sustained evidence demand the default
+ * row waits: the tape goes stale and says so ("request-budget"); no extra
+ * credit is spent. Evidence demand is bounded by the review cadence and a
+ * one-minute memo per pool, so in practice it takes a few slots a minute.
+ *
+ * One 429 cooldown still covers both rows: a rate limit is a fact about the
+ * key, not about which caller earned it.
+ */
+export type FeedLane = "default" | "evidence";
+
+export interface FeedGetOptions {
+  /** Pacing row; omitted means `default`, exactly the old behaviour. */
+  lane?: FeedLane;
+  /**
+   * The provider route this read asks for (path, optionally with a query).
+   * Its TEMPLATE — ids replaced, query dropped — is the plan-refusal latch key.
+   * Ignored unless the cache was built with `latchRefusals`.
+   */
+  route?: string;
+}
+
+export interface FeedCacheOptions {
+  /**
+   * Latch plan refusals per endpoint family (see PLAN_LATCH_MS). Meant for
+   * the credit-metered Pro lane only: a 401 there is a fact about the plan,
+   * and asking again every five seconds is a slot spent on a known answer.
+   */
+  latchRefusals?: boolean;
+  /** Where a newly set latch is said. Defaults to console.warn. */
+  log?: (line: string) => void;
+}
+
+/**
+ * HOW LONG A PLAN REFUSAL IS BELIEVED, fleet-wide: one hour.
+ *
+ * A 401/403 (or CoinGecko's body code 10005, "you may not have access to this
+ * endpoint") from the Pro lane was cached for five seconds like any other
+ * failure, so an endpoint the plan does not include burned a pacing slot
+ * every five seconds, all day, for an answer that could not change. Latched,
+ * it costs one request an hour.
+ *
+ * NEVER ON 5xx OR 429. Those are about the provider's moment, not the plan,
+ * and they already have their own short cache and the shared cooldown.
+ */
+export const PLAN_LATCH_MS = 3_600_000;
+
+/** A refusal that says the plan does not cover this endpoint (or the key is refused). */
+export function isPlanRefusal(failure: string | undefined): boolean {
+  return failure === "http-401" || failure === "http-403" || failure === "plan-restricted";
+}
+
+/**
+ * A route's template: the path without its query, with every hex id replaced.
+ *
+ * The latch is per FAMILY so one refused pool does not leave every other pool
+ * of the same endpoint free to be refused in turn, and so the log line names
+ * an endpoint rather than an address or a search somebody typed.
+ */
+export function endpointFamily(route: string): string {
+  const pathOnly = route.split(/[?#]/, 1)[0]!.replace(/^\/+/, "");
+  // A hex id (an EVM address, a v4 poolId) or a base58 one (a Solana mint).
+  const isId = (seg: string) => /0x[\da-f]{6,}/i.test(seg) || /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(seg);
+  return pathOnly.split("/").map(seg => isId(seg) ? "{id}" : seg).join("/").slice(0, 160);
+}
+
+const latchLine = (family: string, failure: string | undefined) =>
+  `[gecko] coingecko-pro refused ${family} (${failure ?? "refused"}); not asking that endpoint again for 1h`;
+
 export interface FeedCache {
-  get<T extends FeedResult>(key: string, request: () => Promise<T>, unavailable: (reason: string) => T, deadlineMs?: number): Promise<T>;
+  get<T extends FeedResult>(key: string, request: () => Promise<T>, unavailable: (reason: string) => T, deadlineMs?: number, options?: FeedGetOptions): Promise<T>;
   close(): void;
 }
 
@@ -55,9 +139,16 @@ export interface FeedCache {
  * no transaction stays open across a network request. */
 export class FleetFeedCache implements FeedCache {
   private db: DatabaseSync;
-  constructor(home: string, private spacingMs = 6500, private clock: FeedClock = REAL_FEED_CLOCK) {
+  private latchRefusals: boolean;
+  private log: (line: string) => void;
+  constructor(home: string, private spacingMs = 6500, private clock: FeedClock = REAL_FEED_CLOCK, options: FeedCacheOptions = {}) {
+    this.latchRefusals = options.latchRefusals === true;
+    this.log = options.log ?? (line => console.warn(line));
     mkdirSync(home, { recursive: true });
     this.db = new DatabaseSync(path.join(home, "gecko-feed-cache.sqlite"));
+    // Row 1 is the default pacing row every existing caller has always used;
+    // row 2 is the evidence row (see FeedLane). Additive: an older process on
+    // the same file keeps using row 1 and never reads row 2 or the latch.
     this.db.exec(`PRAGMA busy_timeout=1000;
       CREATE TABLE IF NOT EXISTS pages (key TEXT PRIMARY KEY, payload TEXT, expires REAL NOT NULL DEFAULT 0, lease TEXT, lease_until REAL NOT NULL DEFAULT 0);
       CREATE TABLE IF NOT EXISTS cooldown (id INTEGER PRIMARY KEY, until_ms REAL NOT NULL);
@@ -65,16 +156,28 @@ export class FleetFeedCache implements FeedCache {
       CREATE TABLE IF NOT EXISTS provider_backoff (id INTEGER PRIMARY KEY, failures INTEGER NOT NULL DEFAULT 0);
       INSERT OR IGNORE INTO provider_backoff VALUES (1,0);
       CREATE TABLE IF NOT EXISTS pacing (id INTEGER PRIMARY KEY, next_ms REAL NOT NULL);
-      INSERT OR IGNORE INTO pacing VALUES (1,0);`);
+      INSERT OR IGNORE INTO pacing VALUES (1,0);
+      INSERT OR IGNORE INTO pacing VALUES (2,0);
+      CREATE TABLE IF NOT EXISTS plan_latch (family TEXT PRIMARY KEY, until_ms REAL NOT NULL);`);
   }
   close() { this.db.close(); }
 
-  async get<T extends FeedResult>(key: string, request: () => Promise<T>, unavailable: (reason: string) => T, deadlineMs = this.clock.now() + 30_000): Promise<T> {
+  private latched(family: string | undefined, now: number): boolean {
+    if (!family) return false;
+    const row = this.db.prepare("SELECT until_ms FROM plan_latch WHERE family=?").get(family) as { until_ms: number } | undefined;
+    return (row?.until_ms ?? 0) > now;
+  }
+
+  async get<T extends FeedResult>(key: string, request: () => Promise<T>, unavailable: (reason: string) => T, deadlineMs = this.clock.now() + 30_000, options: FeedGetOptions = {}): Promise<T> {
     const deadline = Math.min(deadlineMs, this.clock.now() + 30_000);
+    const row = options.lane === "evidence" ? 2 : 1;
+    const family = this.latchRefusals && options.route ? endpointFamily(options.route) : undefined;
     while (this.clock.now() < deadline) {
       const now = this.clock.now();
-      const row = this.db.prepare("SELECT * FROM pages WHERE key=?").get(key) as {payload: string | null; expires: number} | undefined;
-      if (row?.payload && row.expires > now) return JSON.parse(row.payload) as T;
+      const page = this.db.prepare("SELECT * FROM pages WHERE key=?").get(key) as {payload: string | null; expires: number} | undefined;
+      if (page?.payload && page.expires > now) return JSON.parse(page.payload) as T;
+      // Before the cooldown and before any slot: a latched family costs nothing.
+      if (this.latched(family, now)) return unavailable("plan-restricted");
       const cooldown = this.db.prepare("SELECT until_ms FROM cooldown WHERE id=1").get() as {until_ms: number};
       if (cooldown.until_ms > now) return unavailable("provider-cooldown");
       const lease = randomUUID();
@@ -83,24 +186,38 @@ export class FleetFeedCache implements FeedCache {
         WHERE pages.lease_until<=? AND pages.expires<=?`).run(key, lease, now + 45_000, now, now);
       if (!claimed.changes) { await this.clock.sleep(Math.min(100, deadline - this.clock.now())); continue; }
       try {
-        // One provider-wide slot, even for different page keys. The public
-        // API currently documents ~10/min, so its lane uses 6.5s spacing.
+        // One provider-wide slot per row, even for different page keys. The
+        // public API currently documents ~10/min, so its lane uses 6.5s spacing.
         for (;;) {
           const time = this.clock.now();
           if (time >= deadline) return unavailable("request-budget");
-          const turn = this.db.prepare("UPDATE pacing SET next_ms=? WHERE id=1 AND next_ms<=?")
-            .run(time + this.spacingMs, time);
-          if (turn.changes) break;
-          const pacing = this.db.prepare("SELECT next_ms FROM pacing WHERE id=1").get() as {next_ms: number};
+          const turn = this.db.prepare("UPDATE pacing SET next_ms=? WHERE id=? AND next_ms<=?")
+            .run(time + this.spacingMs, row, time);
+          if (turn.changes) {
+            // PRIORITY, NOT EXTRA QUOTA: the evidence slot is paid for by
+            // pushing the default row one slot later (see FeedLane).
+            if (row === 2) this.db.prepare("UPDATE pacing SET next_ms=MAX(next_ms,?)+? WHERE id=1").run(time, this.spacingMs);
+            break;
+          }
+          const pacing = this.db.prepare("SELECT next_ms FROM pacing WHERE id=?").get(row) as {next_ms: number};
           // Claim at wake-up, not before sleeping: delayed event loops must
           // not release several reserved slots as a catch-up burst.
           await this.clock.sleep(Math.max(1, Math.min(pacing.next_ms - this.clock.now(), deadline - this.clock.now())));
         }
-        // Another page may have received 429 while this one waited its turn.
+        // Another page may have received 429 while this one waited its turn,
+        // or another process may have latched this endpoint.
         const latest = this.db.prepare("SELECT until_ms FROM cooldown WHERE id=1").get() as {until_ms: number};
         if (latest.until_ms > this.clock.now()) return unavailable("provider-cooldown");
+        if (this.latched(family, this.clock.now())) return unavailable("plan-restricted");
         const result = await request();
         const at = this.clock.now();
+        if (family && isPlanRefusal(result.failure)) {
+          // Set only when no live latch exists, so the process that set it is
+          // the one that says so: once per latch, not once per tenant.
+          const set = this.db.prepare(`INSERT INTO plan_latch(family,until_ms) VALUES(?,?)
+            ON CONFLICT(family) DO UPDATE SET until_ms=excluded.until_ms WHERE plan_latch.until_ms<=?`).run(family, at + PLAN_LATCH_MS, at);
+          if (set.changes) this.log(latchLine(family, result.failure));
+        }
         if (result.failure === "http-429") {
           const state = this.db.prepare("UPDATE provider_backoff SET failures=MIN(failures+1,5) WHERE id=1 RETURNING failures").get() as { failures: number };
           this.db.prepare("UPDATE cooldown SET until_ms=MAX(until_ms,?) WHERE id=1")
@@ -124,29 +241,52 @@ export class FleetFeedCache implements FeedCache {
 export class LocalFeedCache implements FeedCache {
   private pages = new Map<string, { result: FeedResult; expires: number }>();
   private pending = new Set<string>();
-  private nextMs = 0;
+  /** Next free slot per pacing row: [default, evidence] (see FeedLane). */
+  private nextMs: [number, number] = [0, 0];
   private untilMs = 0;
   private failures = 0;
-  constructor(private spacingMs: number, private clock: FeedClock = REAL_FEED_CLOCK) {}
-  close() { this.pages.clear(); }
+  private latches = new Map<string, number>();
+  private latchRefusals: boolean;
+  private log: (line: string) => void;
+  constructor(private spacingMs: number, private clock: FeedClock = REAL_FEED_CLOCK, options: FeedCacheOptions = {}) {
+    this.latchRefusals = options.latchRefusals === true;
+    this.log = options.log ?? (line => console.warn(line));
+  }
+  close() { this.pages.clear(); this.latches.clear(); }
 
-  async get<T extends FeedResult>(key: string, request: () => Promise<T>, unavailable: (reason: string) => T, deadlineMs = this.clock.now() + 30_000): Promise<T> {
+  private latched(family: string | undefined, now: number): boolean {
+    return family !== undefined && (this.latches.get(family) ?? 0) > now;
+  }
+
+  async get<T extends FeedResult>(key: string, request: () => Promise<T>, unavailable: (reason: string) => T, deadlineMs = this.clock.now() + 30_000, options: FeedGetOptions = {}): Promise<T> {
     const deadline = Math.min(deadlineMs, this.clock.now() + 30_000);
+    const row = options.lane === "evidence" ? 1 : 0;
+    const family = this.latchRefusals && options.route ? endpointFamily(options.route) : undefined;
     while (this.clock.now() < deadline) {
       const now = this.clock.now(), hit = this.pages.get(key);
       if (hit && hit.expires > now) return hit.result as T;
+      if (this.latched(family, now)) return unavailable("plan-restricted");
       if (this.untilMs > now) return unavailable("provider-cooldown");
       if (this.pending.has(key)) { await this.clock.sleep(Math.min(100, deadline - now)); continue; }
       this.pending.add(key);
       try {
-        while (this.nextMs > this.clock.now()) {
+        while (this.nextMs[row] > this.clock.now()) {
           if (this.clock.now() >= deadline) return unavailable("request-budget");
-          await this.clock.sleep(Math.min(this.nextMs - this.clock.now(), deadline - this.clock.now()));
+          await this.clock.sleep(Math.min(this.nextMs[row] - this.clock.now(), deadline - this.clock.now()));
         }
         if (this.clock.now() >= deadline) return unavailable("request-budget");
         if (this.untilMs > this.clock.now()) return unavailable("provider-cooldown");
-        this.nextMs = this.clock.now() + this.spacingMs;
+        if (this.latched(family, this.clock.now())) return unavailable("plan-restricted");
+        const claimedAt = this.clock.now();
+        this.nextMs[row] = claimedAt + this.spacingMs;
+        // Priority, not extra quota: an evidence slot pushes the default row.
+        if (row === 1) this.nextMs[0] = Math.max(this.nextMs[0], claimedAt) + this.spacingMs;
         const result = await request(), at = this.clock.now();
+        if (family && isPlanRefusal(result.failure) && !this.latched(family, at)) {
+          if (this.latches.size >= 256) this.latches.delete(this.latches.keys().next().value!);
+          this.latches.set(family, at + PLAN_LATCH_MS);
+          this.log(latchLine(family, result.failure));
+        }
         if (result.failure === "http-429") {
           this.untilMs = Math.max(this.untilMs, at + cooldownDelay(result, this.failures));
           this.failures = Math.min(5, this.failures + 1);

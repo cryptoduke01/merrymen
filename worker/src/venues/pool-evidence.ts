@@ -1,4 +1,4 @@
-import { cachedGeckoDetail, geckoSource, GECKO_NETWORK } from './geckoterminal';
+import { cachedGeckoDetail, geckoRefusal, geckoSource, GECKO_NETWORK } from './geckoterminal';
 import { readBoundedJson } from '../bounded-read';
 import type { FeedResult } from './fleet-feed-cache';
 
@@ -54,23 +54,25 @@ async function read<T>(key: string, route: string, parse: (body: unknown) => T[]
   if (cached && cached.until > Date.now()) return cached.value;
   if (pending.has(cacheKey)) return pending.get(cacheKey)!;
   const unavailable = (failure: string): EvidenceRead<T> => ({ failed: true, failure, data: [] });
+  const path = `/networks/${GECKO_NETWORK}/pools/${route}`;
+  // THE EVIDENCE ROW: a review is waiting on this leg, so it does not queue
+  // behind the tape burst (fleet-feed-cache.ts FeedLane). Priority, not extra
+  // quota — each slot it takes pushes the default row back by one.
   const job = cachedGeckoDetail(key, async (source, remainingMs) => {
     const observedAt = Date.now();
     try {
-      const res = await fetch(`${source.base}/networks/${GECKO_NETWORK}/pools/${route}`, {
+      const res = await fetch(`${source.base}${path}`, {
         headers: source.headers, redirect: 'error', signal: AbortSignal.timeout(Math.min(5000, remainingMs)),
       });
       if (!res.ok) {
-        const retry = res.headers.get('retry-after');
-        const ms = retry && /^\d+$/.test(retry) ? Number(retry) * 1000 : Date.parse(retry ?? '') - Date.now();
-        await res.body?.cancel().catch(() => {});
-        return { ...unavailable(`http-${res.status}`), retryAfterMs: Number.isFinite(ms) ? Math.max(0, ms) : 0 };
+        const refused = await geckoRefusal(res);
+        return { ...unavailable(refused.failure), retryAfterMs: refused.retryAfterMs };
       }
       const json = await readBoundedJson(res);
       const data = json.ok ? parse(json.value) : null;
       return data === null ? unavailable('invalid-body') : { failed: false, observedAt, data };
     } catch { return unavailable('unavailable'); }
-  }, unavailable).then(value => {
+  }, unavailable, { lane: 'evidence', route: path }).then(value => {
     if (memo.size >= 256) memo.delete(memo.keys().next().value!);
     memo.set(cacheKey, { until: value.failed ? Date.now() + 5000 : (value.observedAt ?? 0) + 60000, value });
     return value;
@@ -99,6 +101,10 @@ async function read<T>(key: string, route: string, parse: (body: unknown) => T[]
  * all, and because the caller's log drove both halves off the same nullable,
  * every one of them printed `candles=budget trades=budget` — a line that
  * cannot distinguish "both legs missed" from "one did".
+ *
+ * (The legs now take the cache's EVIDENCE row, so they no longer queue behind
+ * the tape burst; the second leg still waits one Pro spacing, which
+ * MERRYMEN_COINGECKO_PRO_SPACING_MS now sets. The per-leg budget stays.)
  *
  * So the budget is applied PER LEG, here, where the two are still separate. A
  * late leg degrades to a `budget` failure and the other leg's real data
