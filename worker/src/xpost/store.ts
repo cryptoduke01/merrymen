@@ -933,11 +933,7 @@ export async function schedulePost(db: Db, p: NewPost): Promise<number | null> {
       await tx.prepare(`INSERT INTO xpost_meta (k, n, v, updated_at_ms) VALUES (?, 0, NULL, ?)
         ON CONFLICT (k) DO UPDATE SET updated_at_ms = excluded.updated_at_ms`)
         .run(answerAuthorKey(p.xUserId, p.replyAuthorId!), int(p.nowMs));
-      const byAuthor = await tx.prepare(`SELECT COUNT(*) AS n
-        FROM xpost_posts sent JOIN xpost_reply_targets r ON r.post_id = sent.id
-        WHERE sent.x_user_id = ? AND sent.kind = 'answer' AND r.author_id = ? AND sent.created_at_ms >= ?`)
-        .get(p.xUserId, p.replyAuthorId!, int(p.nowMs - ANSWER_AUTHOR_WINDOW_MS)) as { n: unknown };
-      if (num(byAuthor.n) >= ANSWERS_PER_AUTHOR) return null;
+      if (await answersToAuthor(tx, p.xUserId, p.replyAuthorId!, p.nowMs) >= ANSWERS_PER_AUTHOR) return null;
       const id = await insertPost(tx, p);
       if (id === null) return null;
       await tx.prepare(`INSERT INTO xpost_reply_targets (post_id, reply_to_tweet_id, root_tweet_id, author_id) VALUES (?, ?, ?, ?)`)
@@ -952,6 +948,25 @@ export async function schedulePost(db: Db, p: NewPost): Promise<number | null> {
 /** Answers to one person per rolling day, including skips and uncertain sends. */
 export const ANSWERS_PER_AUTHOR = 2;
 const ANSWER_AUTHOR_WINDOW_MS = 24 * 60 * 60_000;
+
+/** Answers this X account wrote to one person in the rolling day before `nowMs`, whatever became of them. */
+async function answersToAuthor(db: Db, xUserId: string, authorId: string, nowMs: number): Promise<number> {
+  const row = await db.prepare(`SELECT COUNT(*) AS n
+    FROM xpost_posts sent JOIN xpost_reply_targets r ON r.post_id = sent.id
+    WHERE sent.x_user_id = ? AND sent.kind = 'answer' AND r.author_id = ? AND sent.created_at_ms >= ?`)
+    .get(xUserId, authorId, int(nowMs - ANSWER_AUTHOR_WINDOW_MS)) as { n: unknown };
+  return num(row.n);
+}
+
+/**
+ * HAS THIS PERSON HAD THEIR ANSWERS FOR THE DAY? A read without the lock, so
+ * the answer path can pass over their tag before it spends a lookup or a
+ * model call on a draft schedulePost would refuse, and go on to the next
+ * person's. schedulePost still counts again, under the lock, and decides.
+ */
+export async function answerAuthorSpent(db: Db, xUserId: string, authorId: string, nowMs: number): Promise<boolean> {
+  return (await answersToAuthor(db, xUserId, authorId, nowMs)) >= ANSWERS_PER_AUTHOR;
+}
 
 /** The xpost_meta row an answer's per-person count is taken under: one per posting X account and author. */
 export function answerAuthorKey(xUserId: string, authorId: string): string {

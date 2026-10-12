@@ -490,6 +490,18 @@ the mention itself. They go out **right away**:
   `MERRYMEN_XPOST_REPLY_POLLS_PER_DAY=0` still turns every poll off. An answer
   is sent on the next pass that read the mentions again, so opt-outs are
   always handled first. In practice that is within about a minute.
+- **Answered on the pass that read it.** A poll's cursor moves on as it
+  reads, so a batch is worked through on the same pass, even when that
+  pass's posts are not due for planning (the poll's minute and the plan's
+  drift apart by a pass). Such a pass drafts answers and comment replies
+  only. Up to three tags a batch, ten drafts a pass, as before.
+- **Nothing spent on an answer that cannot go.** Once the X account's 24
+  answers for the day have gone out, no more are drafted that day. A person
+  already answered twice in the rolling day is passed over before any
+  lookup or model call, and the next person in the batch is answered.
+- **Research stays inside the pass's send budget.** An answer's lookups get
+  their twelve seconds or what is left of the pass's five-minute send
+  budget, whichever is less, so they never hold the next pass's sends back.
 
 - **Selection** (`tagCandidate`): a question or plain address. Opt-outs are
   handled first. Links, secrets, abuse, sensitive topics, spam, instructions

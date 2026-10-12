@@ -488,3 +488,56 @@ test("research on: \"did you buy <contract>?\" reaches its own history by the ad
   const [answer] = await w.answers();
   assert.equal(answer!.status, "scheduled");
 });
+
+// ── the answer pass, end to end ─────────────────────────────────────────────
+
+test("a batch read on a pass whose posts are not due is still answered on that pass", async (t) => {
+  const w = await world(t);
+  // The poll's minute and the plan's minute out of step: the poll's last claim
+  // was half a minute before this pass, so this pass plans but cannot poll.
+  await store.claimSpan(w.db, "reply-poll:111", NOW - 30_000, 60_000);
+  await w.step(NOW);
+  assert.deepEqual(w.reads, [], "not polled: its minute is not up");
+  // Half a minute on, the poll is due and the posts' plan is not.
+  await w.step(NOW + 30_000);
+  assert.deepEqual(w.reads, [NOW + 30_000]);
+  const [answer] = await w.answers();
+  assert.ok(answer, "the tag it read was answered, not dropped with the batch");
+  assert.equal(answer.status, "scheduled");
+  // Nothing but answers was planned on that pass: one model call, the answer's.
+  assert.equal(w.asked().length, 1);
+});
+
+test("a person already answered twice today neither costs a draft nor holds back the next person's tag", async (t) => {
+  const w = await world(t);
+  for (const [id, at] of [["100000000000000041", NOW - 3 * HOUR], ["100000000000000042", NOW - 2 * HOUR]] as const) {
+    assert.notEqual(await store.schedulePost(w.db, { tenant: TENANT, xUserId: "111", kind: "answer", dedupeKey: `answer:111:${id}`, body: "", status: "skipped",
+      reason: "pass", nowMs: at, dueAtMs: at, replyToTweetId: id, replyRootTweetId: id, replyAuthorId: "333" }), null);
+  }
+  w.setInbox([
+    tag({ id: "100000000000000043", conversation_id: "100000000000000043", author_id: "333", created_at: new Date(NOW - 2 * MIN).toISOString() }),
+    tag({ id: "100000000000000044", conversation_id: "100000000000000044", author_id: "444" }),
+  ]);
+  await w.step();
+  const answers = (await w.answers()).filter((a) => a.status === "scheduled");
+  assert.deepEqual(answers.map((a) => a.replyToTweetId), ["100000000000000044"], "the next person is answered");
+  assert.equal(w.asked().length, 1, "and the capped person's tag cost no model call");
+});
+
+test("once the day's answers have all gone out, no more are drafted that day", async (t) => {
+  const w = await world(t);
+  for (let i = 0; i < 24; i++) assert.equal(await store.takeAllowance(w.db, "answerday:111:2026-09-30", 24, NOW - HOUR), true);
+  await w.step();
+  assert.equal(w.asked().length, 0, "nothing more can be sent today, so nothing is drafted");
+  assert.equal((await w.answers()).length, 0);
+});
+
+test("research gets only what is left of the pass's send budget, and none past it", async (t) => {
+  const budgets: (number | undefined)[] = [];
+  const research: XResearch = { gather: async (input) => { budgets.push(input.budgetMs); return { facts: [], lookups: 0, notes: [] }; } };
+  const w = await world(t, { env: RESEARCH_ON, research });
+  w.setInbox([tag({ text: "@pine_stoat thoughts on $PEPE?" })]);
+  await w.step();
+  assert.equal(budgets.length, 1);
+  assert.ok(budgets[0]! > 0 && budgets[0]! <= 5 * MIN, String(budgets[0]));
+});

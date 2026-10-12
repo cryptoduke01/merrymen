@@ -51,6 +51,7 @@ import { APP_PAUSE_KEY, APP_PAUSE_MS, CREDITS_PAUSE_MS, PAUSE_KEY, readReplyComm
 import { isReplyOptOut, replyCandidate, tagCandidate, withoutReplyOptOut } from "./xpost/replies";
 import { activeTenantsOf, repliesAllowedFor, repliesScopeOf } from "./xpost/scope";
 import {
+  answerAuthorSpent,
   cancelPost,
   claimSpan,
   deferPost,
@@ -1030,9 +1031,17 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         // Not while the fleet is paused or at its day's ceiling: a draft that
         // cannot go out would only spend the model's allowance, and pile up
         // to go out together when the hold lifts.
-        if (!pause && !ceiling && accounts.length > 0 && nowMs - lastPlanAt >= PLAN_EVERY_MS) {
-          lastPlanAt = nowMs;
-          await planPass(shared, accounts, byTenant, profiles, nowMs, at, bump, zoneOf, comments);
+        //
+        // A BATCH READ IS WORKED THROUGH ON THE PASS THAT READ IT. Its cursor
+        // has already moved on, so a batch no pass drafts from is lost for
+        // good, and the poll's minute (claimed when the read starts) and the
+        // plan's (when the pass starts) drift apart by a pass: an active
+        // agent's every poll could land on a pass whose plan is not due. So a
+        // pass that read one answers from it even then, and plans no posts.
+        const planDue = nowMs - lastPlanAt >= PLAN_EVERY_MS;
+        if (!pause && !ceiling && accounts.length > 0 && (planDue || comments.size > 0)) {
+          if (planDue) lastPlanAt = nowMs;
+          await planPass(shared, accounts, byTenant, profiles, nowMs, at, bump, zoneOf, comments, !planDue);
         }
 
         return { log: summary(counts, nowMs), ...(notes.length ? { notes } : {}) };
@@ -1130,7 +1139,11 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
     bump: (k: string, n?: number) => void,
     zoneOf: (tenant: string, consentTz: string | null) => Promise<{ ok: true; tz: string | null } | { ok: false }>,
     comments: Map<string, XReply[]>,
+    /** Only the answers to this pass's batches: its posts' plan is not due (see the step). */
+    answersOnly = false,
   ): Promise<void> {
+    if (answersOnly) accounts = accounts.filter((a) => comments.has(a.xUserId));
+    if (accounts.length === 0) return;
     const roster = accounts.map((a) => byTenant.get(a.tenant)!);
     const facts = await factsOf(shared, roster, profiles, Math.floor(nowMs / 1000), {
       dialect, ...(comments.size ? { callWindowSec: PLAN_HISTORY_MS / 1000 } : {}),
@@ -1146,16 +1159,17 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
     let model = creds !== null && ((await readMeta(shared, `llm:${utcDay(nowMs)}`))?.n ?? 0) < llmPerDay;
     if (creds !== null && !model) bump("no-model-budget");
     // A ROTATING START. Accounts in tenant order, starting where the last
-    // pass's draft cap cut it short, so no owner is always last in line.
+    // pass's draft cap cut it short, so no owner is always last in line. An
+    // answers-only pass leaves the posts' rotation where it was.
     const ordered = [...accounts].sort((a, b) => (a.tenant < b.tenant ? -1 : a.tenant > b.tenant ? 1 : 0));
-    const from = ordered.findIndex((a) => a.tenant >= planResumeAt);
+    const from = answersOnly ? -1 : ordered.findIndex((a) => a.tenant >= planResumeAt);
     const turn = from > 0 ? [...ordered.slice(from), ...ordered.slice(0, from)] : ordered;
-    planResumeAt = "";
+    if (!answersOnly) planResumeAt = "";
     // Only REAL work counts against the cap: a model call made, or a row written.
     let drafts = 0;
     for (const account of turn) {
       if (drafts >= MAX_DRAFTS_PER_PASS) {
-        planResumeAt = account.tenant;
+        if (!answersOnly) planResumeAt = account.tenant;
         break;
       }
       try {
@@ -1171,12 +1185,12 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         const planNow = at();
         // The X ACCOUNT's history, from every owner posting on it: one timeline, one cadence.
         const posts = await postsOfXUser(shared, account.xUserId, planNow - PLAN_HISTORY_MS, 200);
-        const intros = await introPostsOf(shared, account.tenant, account.xUserId);
-        const social = await deps.socialProfile?.(account.tenant);
+        const intros = answersOnly ? [] : await introPostsOf(shared, account.tenant, account.xUserId);
+        const social = answersOnly ? null : await deps.socialProfile?.(account.tenant);
         const tradeResults = social?.xTradeResults === true && social.currentAgent?.address.toLowerCase() === f.agentId.toLowerCase();
         const sells = tradeResults && social?.currentAgent
           ? await (deps.saleResults ?? readSaleResults)(shared, social.currentAgent.address, social.currentAgent.chainId, Math.floor(planNow / 1000)) : [];
-        const intents = planPosts({
+        const intents = answersOnly ? [] : planPosts({
           tenant: account.tenant,
           account,
           tz: z.tz,
@@ -1236,7 +1250,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
           for (let i = 0; i < (isActive ? ANSWERS_PER_POLL : 1) && drafts < MAX_DRAFTS_PER_PASS; i++) {
             const result = isActive
               // Its OWN posts only: another owner posting on the same X account is not its history.
-              ? await writeAnswer(shared, account, f, comments.get(account.xUserId)!, z.tz, at, recentOwn, recentFleet, said, posts.filter((p) => p.tenant === account.tenant), bump)
+              ? await writeAnswer(shared, account, f, comments.get(account.xUserId)!, z.tz, at, recentOwn, recentFleet, said, posts.filter((p) => p.tenant === account.tenant), bump, nowMs + SEND_BUDGET_MS)
               : await writeReply(shared, account, f, comments.get(account.xUserId)!, z.tz, at, recentOwn, recentFleet);
             if (!result) break;
             drafts++;
@@ -1273,16 +1287,33 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
    * words the answer may say. A tagged contract address is the bundle's
    * lookup key only: the model reads "this coin", never the address. The
    * gate is the same either way. Research off, nothing here changes.
+   *
+   * NEVER PAST THE PASS'S SEND BUDGET. Research runs inside the pass, after
+   * its sends and before the next pass's, so its twelve seconds shrink to
+   * what is left before `sendBy` (the pass's start plus SEND_BUDGET_MS), and
+   * none at all past it: the answer is then written as one that could not
+   * look anything up. Drafts were already bounded per pass
+   * (MAX_DRAFTS_PER_PASS, ANSWERS_PER_POLL a batch).
+   *
+   * NOTHING SPENT ON AN ANSWER THAT CANNOT GO. With the X account's answers
+   * for the day all sent, nothing is drafted; a person already answered
+   * twice in the rolling day is passed over, and the next person's tag is
+   * answered instead of the batch stopping at theirs.
    */
   async function writeAnswer(
     shared: Db, account: XAccount, f: AgentFacts, comments: XReply[], tz: string | null,
     at: () => number, recentOwn: string[], recentFleet: string[], said: string[], posts: readonly XPost[] = [],
-    bump: (k: string, n?: number) => void = () => {},
+    bump: (k: string, n?: number) => void = () => {}, sendBy = Number.POSITIVE_INFINITY,
   ): Promise<{ body: string | null } | null> {
     if (!creds) return null;
     const nowMs = at();
     const consentAt = await replyConsentAt(shared, account.tenant, account.xUserId);
     if (consentAt === null) return null;
+    // The send path's own key for the day's answers (its local day, or UTC without a zone).
+    if (((await readMeta(shared, `answerday:${account.xUserId}:${localDay(tz, nowMs)}`))?.n ?? 0) >= ANSWERS_PER_DAY) {
+      bump("answer-day-spent");
+      return null;
+    }
     const ordered = [...comments].sort((a, b) => a.createdAtMs - b.createdAtMs || a.id.localeCompare(b.id));
     for (const comment of ordered) {
       if (comment.createdAtMs < consentAt || nowMs - comment.createdAtMs > REPLY_STALE_MS) continue;
@@ -1290,6 +1321,10 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       if (!candidate.ok || await repliesOptedOut(shared, account.xUserId, comment.authorId)) continue;
       const dedupeKey = `answer:${account.xUserId}:${comment.id}`;
       if (await keyStatus(shared, dedupeKey) !== null || await keyStatus(shared, `reply:${account.xUserId}:${comment.id}`) !== null) continue;
+      if (await answerAuthorSpent(shared, account.xUserId, comment.authorId, nowMs)) {
+        bump("answer-author-spent");
+        continue;
+      }
       const buys = recentCoins(f);
       // READ BY CODE FIRST, with research on: the model question is answered
       // from a code-built line (writer.ts modelAnswers) and spends no model call.
@@ -1304,7 +1339,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // ONE BUNDLE, AT MOST, for this answer — and only with research on.
       let looked: { intent: ReturnType<typeof classifyTag>["kind"]; research: string[]; creatorClaim?: string } | null = null;
       if (research && intent) {
-        const bundle = await research.gather({ shared, intent, tenant: account.tenant, xUserId: account.xUserId, facts: f, posts, fomo: researchFomo })
+        const bundle = await research.gather({ shared, intent, tenant: account.tenant, xUserId: account.xUserId, facts: f, posts, fomo: researchFomo, budgetMs: Math.max(0, sendBy - at()) })
           .catch((): ResearchBundle => ({ facts: [], lookups: 0, notes: ["fault"] }));
         looked = { intent: intent.kind, research: bundle.facts, ...(bundle.claim ? { creatorClaim: bundle.claim } : {}) };
         bump(`answer-intent-${intent.kind}`);

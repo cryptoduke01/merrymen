@@ -14,6 +14,7 @@ import {
   XPOST_ALTERS,
   XPOST_SCHEMA,
   answerAuthorKey,
+  answerAuthorSpent,
   repliesOffKey,
   cancelPost,
   cancelDisabledKind,
@@ -845,6 +846,10 @@ test("two owners on one X account answer one person at most twice a day between 
   assert.equal(raced.filter((id) => id !== null).length, 1, "the X account's second answer to the person, from either owner");
   assert.equal(await schedulePost(base, answer(OWNER_B, "704", 950)), null, "a third is refused whichever owner writes it");
   assert.ok(await schedulePost(base, { ...answer(OWNER_B, "705", 960), replyAuthorId: "444" }), "another person is counted on their own");
+  // The answer path's unlocked read says the same, before it spends anything on a draft.
+  assert.equal(await answerAuthorSpent(base, "111", "333", 970), true);
+  assert.equal(await answerAuthorSpent(base, "111", "444", 970), false);
+  assert.equal(await answerAuthorSpent(base, "111", "333", 900 + 24 * 60 * 60_000), false, "a rolling day later they may ask again");
 });
 
 test("turning replies off cancels only replies and opt-outs are durable across tenants sharing an account", async (t) => {
