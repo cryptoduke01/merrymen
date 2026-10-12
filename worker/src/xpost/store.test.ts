@@ -16,6 +16,7 @@ import {
   ANSWER_LOOKED_UP,
   answerAuthorKey,
   answerAuthorSpent,
+  ANSWERS_PER_AUTHOR,
   repliesOffKey,
   cancelPost,
   cancelDisabledKind,
@@ -838,7 +839,7 @@ test("an owner's replies off is remembered, and a house consent never overrides 
   assert.equal(await readMeta(db, repliesOffKey(OWNER_B)), null, "the mark is per owner");
 });
 
-test("two owners on one X account answer one person at most twice a day between them, counted under one lock", async (t) => {
+test("two owners on one X account answer one person at most ANSWERS_PER_AUTHOR times a day between them, counted under one lock", async (t) => {
   const { db: base } = await open(t);
   for (const tenant of [OWNER_A, OWNER_B]) {
     await upsertAccount(base, DEK, { tenant, xUserId: "111", username: "r", tokens: TOKENS, nowMs: 1 });
@@ -864,10 +865,13 @@ test("two owners on one X account answer one person at most twice a day between 
   assert.match(locked.sql, /ON CONFLICT \(k\) DO UPDATE SET updated_at_ms = excluded\.updated_at_ms/, "an upsert that always takes the row");
   assert.ok(await readMeta(base, answerAuthorKey("111", "333")));
 
+  // Six a person a day (2026-10-12, up from two): all but the last, from either owner.
+  assert.equal(ANSWERS_PER_AUTHOR, 6);
+  for (let i = 2; i < ANSWERS_PER_AUTHOR; i++) assert.ok(await schedulePost(base, answer(i % 2 ? OWNER_B : OWNER_A, `71${i}`, 850 + i)), `answer ${i}`);
   // Two owners at once, one answer left: one of them writes it.
   const raced = await Promise.all([schedulePost(base, answer(OWNER_A, "702", 900)), schedulePost(base, answer(OWNER_B, "703", 900))]);
-  assert.equal(raced.filter((id) => id !== null).length, 1, "the X account's second answer to the person, from either owner");
-  assert.equal(await schedulePost(base, answer(OWNER_B, "704", 950)), null, "a third is refused whichever owner writes it");
+  assert.equal(raced.filter((id) => id !== null).length, 1, "the X account's last answer to the person, from either owner");
+  assert.equal(await schedulePost(base, answer(OWNER_B, "704", 950)), null, "one more is refused whichever owner writes it");
   assert.ok(await schedulePost(base, { ...answer(OWNER_B, "705", 960), replyAuthorId: "444" }), "another person is counted on their own");
   // The answer path's unlocked read says the same, before it spends anything on a draft.
   assert.equal(await answerAuthorSpent(base, "111", "333", 970), true);

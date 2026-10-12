@@ -24,7 +24,7 @@ import { greetingAnswers, modelAnswers } from "./xpost/writer";
 import { CHAT_SLOTS, chatAnswers, declineAnswers, vibeAnswers } from "./xpost/casual";
 import { hotAnswers, hotNoneAnswers, hotUnreadAnswers, majorAnswers, majorUnreadAnswers, marketAnswers, type HotRead, type MajorRead, type MarketRead } from "./xpost/market";
 import { withoutReplyOptOut } from "./xpost/replies";
-import { ANSWER_GAP_MS } from "./xpost/planner";
+import { ANSWER_GAP_MS, ANSWERS_PER_DAY } from "./xpost/planner";
 import { PAUSE_KEY } from "./xpost/sender";
 import * as store from "./xpost/store";
 
@@ -253,7 +253,7 @@ test("the same-pass send is the normal send path: a pause, the fleet's ceiling o
   const cases: [string, (db: ReturnType<typeof wrapSqlite>) => Promise<void>, string, string][] = [
     ["a credits pause another replica wrote", (db) => store.writeMeta(db, PAUSE_KEY, String(NOW + HOUR), NOW), "scheduled", "paused-for-credits"],
     ["the fleet's ceiling reached", async (db) => { await db.prepare("INSERT INTO xpost_meta (k, n, v, updated_at_ms) VALUES (?, ?, NULL, ?)").run("posts:2026-09-30", 1000, NOW); }, "scheduled", "fleet-ceiling-reached"],
-    ["the day's answers all taken", async (db) => { await db.prepare("INSERT INTO xpost_meta (k, n, v, updated_at_ms) VALUES (?, ?, NULL, ?)").run("answerday:111:2026-09-30", 24, NOW); }, "skipped", "answer-day-cap"],
+    ["the day's answers all taken", async (db) => { await db.prepare("INSERT INTO xpost_meta (k, n, v, updated_at_ms) VALUES (?, ?, NULL, ?)").run("answerday:111:2026-09-30", ANSWERS_PER_DAY, NOW); }, "skipped", "answer-day-cap"],
   ];
   for (const [what, meanwhile, status, said] of cases) {
     const w = await world(t, { duringDraft: meanwhile });
@@ -688,15 +688,15 @@ test("an opt-out however it is said is recorded, and nothing is drafted for that
   }
 });
 
-test("one person gets at most two answers in a rolling day, whatever became of them", async (t) => {
+test("one person gets at most six answers in a rolling day, whatever became of them (2026-10-12: up from two, so a person can chat)", async (t) => {
+  assert.equal(store.ANSWERS_PER_AUTHOR, 6);
   const w = await world(t);
   const answerTo = (id: string, at: number) => store.schedulePost(w.db, { tenant: TENANT, xUserId: "111", kind: "answer",
     dedupeKey: `answer:111:${id}`, body: "", status: "skipped", reason: "pass", nowMs: at, dueAtMs: at,
     replyToTweetId: id, replyRootTweetId: id, replyAuthorId: "333" });
-  assert.notEqual(await answerTo("100000000000000031", NOW - 2 * HOUR), null);
-  assert.notEqual(await answerTo("100000000000000032", NOW - HOUR), null);
-  assert.equal(await answerTo("100000000000000033", NOW), null, "the third in a day is refused");
-  assert.notEqual(await answerTo("100000000000000034", NOW + DAY), null, "a day later they may ask again");
+  for (let i = 0; i < store.ANSWERS_PER_AUTHOR; i++) assert.notEqual(await answerTo(`10000000000000003${i}`, NOW - 6 * HOUR + i * HOUR), null, `answer ${i + 1}`);
+  assert.equal(await answerTo("100000000000000039", NOW), null, "the seventh in a day is refused");
+  assert.notEqual(await answerTo("100000000000000040", NOW + DAY), null, "a day later they may ask again");
   assert.equal(await store.schedulePost(w.db, { tenant: TENANT, xUserId: "111", kind: "answer",
     dedupeKey: "answer:111:100000000000000035", body: "x", nowMs: NOW, dueAtMs: NOW,
     replyToTweetId: "100000000000000035", replyRootTweetId: "100000000000000036", replyAuthorId: "444" }), null, "an answer's root is the mention itself");
@@ -2092,9 +2092,9 @@ test("a batch read on a pass whose posts are not due is still answered on that p
   assert.equal(w.asked().length, 1);
 });
 
-test("a person already answered twice today neither costs a draft nor holds back the next person's tag", async (t) => {
+test("a person already answered six times today neither costs a draft nor holds back the next person's tag", async (t) => {
   const w = await world(t);
-  for (const [id, at] of [["100000000000000041", NOW - 3 * HOUR], ["100000000000000042", NOW - 2 * HOUR]] as const) {
+  for (const [id, at] of Array.from({ length: store.ANSWERS_PER_AUTHOR }, (_, i) => [`10000000000000046${i}`, NOW - (7 - i) * HOUR] as const)) {
     assert.notEqual(await store.schedulePost(w.db, { tenant: TENANT, xUserId: "111", kind: "answer", dedupeKey: `answer:111:${id}`, body: "", status: "skipped",
       reason: "pass", nowMs: at, dueAtMs: at, replyToTweetId: id, replyRootTweetId: id, replyAuthorId: "333" }), null);
   }
@@ -2110,7 +2110,8 @@ test("a person already answered twice today neither costs a draft nor holds back
 
 test("once the day's answers have all gone out, no more are drafted that day", async (t) => {
   const w = await world(t);
-  for (let i = 0; i < 24; i++) assert.equal(await store.takeAllowance(w.db, "answerday:111:2026-09-30", 24, NOW - HOUR), true);
+  assert.equal(ANSWERS_PER_DAY, 60, "sixty a day (2026-10-12: up from 24)");
+  for (let i = 0; i < ANSWERS_PER_DAY; i++) assert.equal(await store.takeAllowance(w.db, "answerday:111:2026-09-30", ANSWERS_PER_DAY, NOW - HOUR), true);
   await w.step();
   assert.equal(w.asked().length, 0, "nothing more can be sent today, so nothing is drafted");
   assert.equal((await w.answers()).length, 0);
@@ -2118,8 +2119,8 @@ test("once the day's answers have all gone out, no more are drafted that day", a
 
 test("answers drafted and still waiting count against the day: a burst never drafts past the day's last answer", async (t) => {
   const w = await world(t);
-  // Twenty-three sent today, and three people tag it in one poll: one more can go today, so one is drafted.
-  for (let i = 0; i < 23; i++) assert.equal(await store.takeAllowance(w.db, "answerday:111:2026-09-30", 24, NOW - HOUR), true);
+  // All but one sent today, and three people tag it in one poll: one more can go today, so one is drafted.
+  for (let i = 0; i < ANSWERS_PER_DAY - 1; i++) assert.equal(await store.takeAllowance(w.db, "answerday:111:2026-09-30", ANSWERS_PER_DAY, NOW - HOUR), true);
   w.setInbox([1, 2, 3].map((n) => tag({ id: `10000000000000007${n}`, conversation_id: `10000000000000007${n}`, author_id: `77${n}` })));
   await w.step();
   assert.equal(w.asked().length, 1, "no model call on an answer that could not go today");
@@ -2135,7 +2136,7 @@ test("an answer that cannot take the day's allowance when it is sent is skipped,
   assert.equal(drafted!.status, "scheduled");
   assert.equal(w.sends.length, 0);
   // Another owner's answers on the same X account use the day up before this one goes.
-  for (let i = 0; i < 24; i++) assert.equal(await store.takeAllowance(w.db, "answerday:111:2026-09-30", 24, NOW), true);
+  for (let i = 0; i < ANSWERS_PER_DAY; i++) assert.equal(await store.takeAllowance(w.db, "answerday:111:2026-09-30", ANSWERS_PER_DAY, NOW), true);
   w.setInbox([]);
   await w.step(NOW + MIN);
   const [after] = await w.answers();
@@ -2270,7 +2271,7 @@ test("what is not only a greeting is not answered as one", async (t) => {
   }
 });
 
-test("a greeting still waits for the hello, the house consent and every opt-out, and counts against the day's 24 and the person's two", async (t) => {
+test("a greeting still waits for the hello, the house consent and every opt-out, and counts against the day's answers and the person's", async (t) => {
   const hiii = (id: string, author = "333", text = "@pine_stoat hiii") => tag({ id, conversation_id: id, author_id: author, text });
   // The hello not dealt with: nothing.
   const early = await world(t, { hello: false, tz: "America/Los_Angeles" });
@@ -2293,16 +2294,16 @@ test("a greeting still waits for the hello, the house consent and every opt-out,
   assert.equal(await store.repliesOptedOut(stopped.db, "111", "444"), true);
   assert.deepEqual(await stopped.answers(), []);
   assert.deepEqual(stopped.sends, []);
-  // The day's 24 all gone: nothing drafted.
+  // The day's answers all gone: nothing drafted.
   const spent = await world(t);
-  for (let i = 0; i < 24; i++) assert.equal(await store.takeAllowance(spent.db, "answerday:111:2026-09-30", 24, NOW - HOUR), true);
+  for (let i = 0; i < ANSWERS_PER_DAY; i++) assert.equal(await store.takeAllowance(spent.db, "answerday:111:2026-09-30", ANSWERS_PER_DAY, NOW - HOUR), true);
   spent.setInbox([hiii(MENTION)]);
   await spent.step();
   assert.deepEqual(await spent.answers(), []);
   assert.deepEqual(spent.sends, []);
-  // Two answers to one person in a rolling day: a third greeting from them gets nothing, and the next person's does.
+  // The person's answers for a rolling day all given: one more greeting from them gets nothing, and the next person's does.
   const twice = await world(t);
-  for (const [id, at] of [["100000000000000311", NOW - 3 * HOUR], ["100000000000000312", NOW - 2 * HOUR]] as const) {
+  for (const [id, at] of Array.from({ length: store.ANSWERS_PER_AUTHOR }, (_, i) => [`10000000000000035${i}`, NOW - (7 - i) * HOUR] as const)) {
     assert.notEqual(await store.schedulePost(twice.db, { tenant: TENANT, xUserId: "111", kind: "answer", dedupeKey: `answer:111:${id}`, body: "", status: "skipped",
       reason: "pass", nowMs: at, dueAtMs: at, replyToTweetId: id, replyRootTweetId: id, replyAuthorId: "333" }), null);
   }

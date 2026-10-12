@@ -924,8 +924,9 @@ export async function schedulePost(db: Db, p: NewPost): Promise<number | null> {
         .run(tenantKey(p.tenant), p.xUserId);
       if (current.changes !== 1 || !(await repliesEnabledFor(tx, p.tenant, p.xUserId)) ||
           await repliesOptedOut(tx, p.xUserId, p.replyAuthorId!)) return null;
-      // ONE PERSON, A FEW ANSWERS A DAY, whatever happened to them: two
-      // accounts tagging each other cannot become an endless conversation.
+      // ONE PERSON, A FEW ANSWERS A DAY (ANSWERS_PER_AUTHOR), whatever happened
+      // to them: two accounts tagging each other cannot become an endless
+      // conversation.
       // THE COUNT IS TAKEN UNDER A LOCK ON THE X ACCOUNT AND THE PERSON. The
       // account row above is the owner's: two owners connected to one X
       // account lock two rows, and could both count one answer and both
@@ -947,8 +948,14 @@ export async function schedulePost(db: Db, p: NewPost): Promise<number | null> {
   return insertPost(db, p);
 }
 
-/** Answers to one person per rolling day, including skips and uncertain sends. */
-export const ANSWERS_PER_AUTHOR = 2;
+/**
+ * Answers to one person per rolling day, including skips and uncertain sends:
+ * six (the owner's decision, 2026-10-12, up from two), so someone who replies
+ * to an answer can carry on a short conversation, and two accounts tagging
+ * each other still cannot become an endless one. Counted under the per-person
+ * lock in schedulePost, whichever owner on the X account writes it.
+ */
+export const ANSWERS_PER_AUTHOR = 6;
 const ANSWER_AUTHOR_WINDOW_MS = 24 * 60 * 60_000;
 
 /** Answers this X account wrote to one person in the rolling day before `nowMs`, whatever became of them. */

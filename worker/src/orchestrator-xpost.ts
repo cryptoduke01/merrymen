@@ -134,10 +134,16 @@ const ANSWERS_PER_POLL = 3;
  * MODEL CALLS AN X ACCOUNT'S ANSWERS MAY SPEND PER UTC DAY
  * (`llm-answers:<xUserId>:<day>`), taken before the fleet's `llm:<day>` and
  * counted in it too. A draft the model PASSes or the gate refuses counts
- * toward none of the day's 24 answers, so without this a wave of strangers'
+ * toward none of the day's answers, so without this a wave of strangers'
  * tags could spend the whole fleet's allowance and stop every owner's posts.
+ *
+ * FORTY-EIGHT, AS BEFORE (2026-10-12): the day's answers went from 24 to 60
+ * (ANSWERS_PER_DAY), the model allowance did not. Code's own lines (the
+ * market, what's hot, a major, a greeting, its mood, a decline, the model
+ * question) spend no model call, so the extra answers come from those, and a
+ * day of drafts is still at most this many of the fleet's DEFAULT_LLM_PER_DAY.
  */
-export const ANSWER_DRAFTS_PER_DAY = 2 * ANSWERS_PER_DAY;
+export const ANSWER_DRAFTS_PER_DAY = 48;
 const MAX_REPLY_POLLS_PER_PASS = 2;
 /** Plans are drafted at most this often; sends run every pass. */
 const PLAN_EVERY_MS = MIN;
@@ -1511,7 +1517,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
    * asleep). It goes out on the pass that read the tag, by the step's second
    * sweep: that pass's read succeeded and its opt-outs were all recorded
    * before this ran. The reply warning that turned this on says both.
-   * Everything else still holds: STOP, two a person a day, 24 a day, the tag
+   * Everything else still holds: STOP, six a person a day, sixty a day, the tag
    * screens, the gate, the fleet's ceiling, the pauses and the 429 backoff.
    *
    * WITH RESEARCH ON (MERRYMEN_XPOST_RESEARCH=1), the question is read by
@@ -1535,7 +1541,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
    * for the day all sent or drafted and waiting, nothing is drafted (and one
    * that still cannot take the day's allowance at send time is skipped, never
    * left for the next day's); a person already answered
-   * twice in the rolling day is passed over, and the next person's tag is
+   * ANSWERS_PER_AUTHOR times in the rolling day is passed over, and the next person's tag is
    * answered instead of the batch stopping at theirs.
    */
   async function writeAnswer(
@@ -1596,7 +1602,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // Code's own classifier must read it as plain chat too, and its reply
       // prefix may name nobody else, or it is answered by nothing (fail
       // closed). Everything else holds as for any answer: the hello first, the
-      // house consent, every opt-out, the day's 24, two a person a day, the
+      // house consent, every opt-out, the day's sixty, six a person a day, the
       // sherwood and author screens below, and the gate.
       const greeting = candidate.greeting === true;
       // SHERWOOD IN ANY FORM INCLUDES A HANDLE ("@SherwoodToken"), read on the
