@@ -3497,10 +3497,14 @@ test("the owner's questions, end to end: each gets one answer in its lane, and n
     [/ai agents/, "honestly they're my people, a whole bunch of bots learning to stay patient and calm."],
     [/what are you/, "a laid-back trader bot merrymen built, mostly reading the tape and staying in my lane."],
     [/tell me a joke/, "why did the trading bot skip sleep? it heard the tape never closes."],
+    [/for fun/, "honestly reading charts all day is the fun part for a bot like me."],
+    [/pick your coins/, "mostly fresh launches, and i only buy when the buying looks real and steady."],
   ];
   // One draft adds the notice anyway, as a model shown older answers might: the gate takes it off.
   const w = await world(t, { env: RESEARCH_ON, research, facts: { ...FACTS, name: "Alan Al Dale" },
     answer: ({ prompt }) => { const d = drafts.find(([re]) => re.test(prompt))?.[1] ?? "PASS"; return /tell me a joke/.test(prompt) ? `${d} say stop to opt out.` : d; } });
+  // Its own buy post, on X as tweet 9100, for the quote below.
+  await postedBuy(w.db, "fill-pepe", "pepe", "grabbed some pepe, the curve looked early", 3 * HOUR, "9100");
   const asks: [string, string, string][] = [
     ["how's the market", "401", "market"], ["how's eth doing", "402", "major"], ["how are you", "333", "chat"], ["what do you think about ai agents", "404", "chat"],
     ["wen moon", "405", "vibe"], ["should i buy pepe", "406", "advice"], ["are you bullish", "407", "vibe"], ["what are you", "408", "chat"],
@@ -3529,6 +3533,20 @@ test("the owner's questions, end to end: each gets one answer in its lane, and n
     assert.doesNotMatch(sent, /i don'?t comment|as an ai|not financial advice|great question/i, sent);
     assert.doesNotMatch(words, /\p{N}|pepe/iu, sent);
   }
+  // REPLYING OR QUOTING IS ASKING (2026-10-12): 404 replies to its answer about ai agents, and 409 quotes its buy post.
+  const answered = (await w.answers()).find((a) => a.replyToTweetId === "100000000000000904")!;
+  assert.ok(answered.tweetId);
+  const later = NOW + 30 * MIN;
+  w.setInbox([tag({ id: "100000000000000920", conversation_id: "100000000000000904", author_id: "404", created_at: new Date(later - 10_000).toISOString(),
+    referenced_tweets: [{ type: "replied_to", id: answered.tweetId }], text: "@pine_stoat what do you do for fun?" })]);
+  await w.step(later);
+  w.setInbox([tag({ id: "100000000000000921", conversation_id: "100000000000000921", author_id: "409", created_at: new Date(later + MIN - 10_000).toISOString(),
+    referenced_tweets: [{ type: "quoted", id: "9100" }], text: "@pine_stoat how do you pick your coins?" })]);
+  await w.step(later + MIN);
+  const to = (id: string) => String(w.sends.find((s) => (s.reply as { in_reply_to_tweet_id: string }).in_reply_to_tweet_id === id)?.text ?? "");
+  assert.equal(to("100000000000000920"), "honestly reading charts all day is the fun part for a bot like me.", "a follow-up to its answer");
+  assert.equal(to("100000000000000921"), "mostly fresh launches, and i only buy when the buying looks real and steady.", "a quote of its buy post");
+  assert.ok(w.sends.every((s) => !/opt out|\bstop\b/i.test(String(s.text))));
 });
 
 test("no friendly line goes up under a name the house never answers under: a decline or the chat fallback stays silent (2026-10-12)", async (t) => {
