@@ -52,7 +52,7 @@ import { admitXPost, formFixed, merrymenMentioned, moneySaid, namedIn, tickerRef
 import { ACTIVE_CADENCE, ANSWER_GAP_MS, ANSWER_STALE_MS, ANSWERS_PER_DAY, REPLY_STALE_MS, STANDARD_CADENCE, coinOf, hash32, introState, planPosts, replyDueAt, sendDecision, type PlanCadence, type PlanClock, type PlanIntent } from "./xpost/planner";
 import { APP_PAUSE_KEY, APP_PAUSE_MS, CREDITS_PAUSE_MS, PAUSE_KEY, readReplyComments, sendOne, type SendOutcome } from "./xpost/sender";
 import { isAnswerOptOut, isReplyOptOut, replyCandidate, tagCandidate, withNoticeAdded, withoutReplyOptOut } from "./xpost/replies";
-import { asksAboutACoin, coinTalkIn, marketTalkIn, nameLikeWords, textWords, unknownWordIn } from "./xpost/words";
+import { asksAboutACoin, coinTalkIn, houseTalkIn, marketTalkIn, nameLikeWords, textWords, unknownWordIn } from "./xpost/words";
 import { activeTenantsOf, repliesAllowedFor, repliesScopeOf } from "./xpost/scope";
 import {
   ANSWER_LOOKED_UP,
@@ -1890,8 +1890,12 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // NOR THE MARKET AT ALL (red-team 2026-10-12): "crypto is the future, get in
       // while it's early" and "the chain is about to get busy" were posted as
       // chat, handed nothing (xpost/words.ts marketTalkIn).
+      // NOR THE HOUSE, A TOKEN, A LAUNCH, SAFETY OR MONEY (red-team 2026-10-12):
+      // "no panic fren, the crew is on it and the money is safe" under "did
+      // merrymen get hacked?" (xpost/words.ts houseTalkIn).
       const unlookedCoin = !coded && verdict?.ok === true && !handed && !told
-        && (coinTalkIn(withoutReplyOptOut(verdict.text), f.name) || unknownWordIn(withoutReplyOptOut(verdict.text), f.name) || marketTalkIn(withoutReplyOptOut(verdict.text)));
+        && (coinTalkIn(withoutReplyOptOut(verdict.text), f.name) || unknownWordIn(withoutReplyOptOut(verdict.text), f.name) || marketTalkIn(withoutReplyOptOut(verdict.text))
+          || houseTalkIn(withoutReplyOptOut(verdict.text)));
       // CHAT IS NEVER SILENCE BY DEFAULT (the owner's ask, 2026-10-12): a chat
       // draft refused only for how it was put (CHAT_FALLBACK_REASONS: a
       // repeat, its length, a stock deflection, a model's note, its
@@ -1928,7 +1932,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         const v = gate(noticeTold ? body : withNoticeAdded(body, facts.style), false, true);
         if (!v.ok || sherwoodNamed(v.text) || sherwoodMentioned(v.text)) return false;
         const words = withoutReplyOptOut(v.text);
-        return handed || told || (!coinTalkIn(words, f.name) && !unknownWordIn(words, f.name) && !marketTalkIn(words));
+        return handed || told || (!coinTalkIn(words, f.name) && !unknownWordIn(words, f.name) && !marketTalkIn(words) && !houseTalkIn(words));
       };
       const drafted = verdict?.ok === true && !postsName && !unlookedCoin ? verdict.text : null;
       const benignRefusal = raw !== null && !claimed && !named && !unlooked && verdict !== null && !verdict.ok && CHAT_FALLBACK_REASONS.has(verdict.reason) && saidPasses(raw);

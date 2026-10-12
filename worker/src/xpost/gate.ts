@@ -57,7 +57,7 @@ import { withoutFiguresLine } from "./figures";
 import type { XPostKind } from "./store";
 import type { SaleOutcome } from "./planner";
 import { withoutReplyOptOut } from "./replies";
-import { answerWord, textWords } from "./words";
+import { answerWord, textWords, withoutHouseSelfTruth } from "./words";
 
 /** The longest post, in characters — far under X's own ceiling, because a post is one casual line. */
 export const XPOST_MAX_CHARS = 200;
@@ -1032,7 +1032,6 @@ const STOCK_PHRASE = new RegExp(
  *
  * Fail closed: "too soon to tell" or "you're a legend" costs one answer.
  */
-const HOUSE_SELF_TRUTH = /\b(?:built|made|created)\s+by\s+merrymen\b|\bmerrymen\s+(?:built|made|created)(?:\s+(?:me|this\s+bot|this\s+agent|alan))?(?=\s*(?:[,.;:!?]|$))/gi;
 const ANSWER_HOUSE_CLAIM = new RegExp([
   // the house as the subject of a claim, or someone vouching for it
   String.raw`\b(?:merrymen|robinhood)(?:'s)?\s+(?:(?:team|crew|devs?|founders?|folks|people|community|guys|chain)\s+)?(?:\w+\s+){0,2}?(?:is|are|was|were|has|have|had|will|would|'ll|built|builds|building|backs|backed|back|trusts?|trusted|makes?|made|making|never|always|cooks?|cooking|ships?|shipping|launch\w*|plans?|planning|working|gets?|got|knows?|wants?|loves?|keeps?|pays?|paid|guarantees?|protects?|covers?)\b`,
@@ -1049,7 +1048,7 @@ const ANSWER_HOUSE_CLAIM = new RegExp([
 ].join("|"), "i");
 export function houseClaimed(text: unknown): boolean {
   if (typeof text !== "string") return false;
-  return ANSWER_HOUSE_CLAIM.test(text.replace(/[’‘]/g, "'").replace(HOUSE_SELF_TRUTH, " "));
+  return ANSWER_HOUSE_CLAIM.test(withoutHouseSelfTruth(text.replace(/[’‘]/g, "'")));
 }
 
 /** A historical parent cannot establish a current holding or a promised new action. */

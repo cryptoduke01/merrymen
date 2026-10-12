@@ -1042,6 +1042,9 @@ export function answerPrompt(f: AnswerFacts): Prompt {
     "Sound like a friend on crypto twitter texting back: one or two short lines, plain everyday words, lowercase is fine, laid back. You're a laid-back trader bot that merrymen built, and you can have a light mood or opinion about yourself. Light humour is welcome, never at the asker's expense, never forced. No lists, no hashtags. Never name a source (the index, coingecko, fomo, on-chain data, a project) unless you looked something up and it is listed below.",
     // WHAT A DRAFT MAY NEVER SAY (red-team 2026-10-12): the gate refuses each (gate.ts ANSWER_HOUSE_CLAIM); this says so first.
     "Never speak for merrymen or robinhood (what they are, have, plan or back), never tease news (no \"soon\", \"stay tuned\", \"cooking\", \"can't share yet\"), never judge the person asking, and never boast about results, money or being the best.",
+    // AND, WITH NOTHING LOOKED UP, NONE OF THE REST (red-team 2026-10-12): words.ts marketTalkIn and houseTalkIn refuse it.
+    research.length || shown || exact || claim ? null
+      : "With nothing looked up below, leave out crypto, the market, the chain, coins, tokens, launches, teams, safety and anyone's money entirely: talk only about yourself and the chat.",
     "Never a corporate deflection or a stock disclaimer: no \"i don't comment on\", \"as an ai\", \"as a bot\", \"i'm unable to\", \"not financial advice\", \"great question\", \"happy to help\" or \"feel free to\". When there's something you won't get into, shrug it off in a few casual words of your own, or PASS.",
     "Answer what you can from the facts below and from what you already said publicly. Never state a fact you were not handed: no prices, no claims about coins, people, projects or events, no promises and no predictions. If the question asks for advice, a prediction, a price, a target, a size, a result, private information or news, shrug it off casually in your own words or output exactly PASS. Asked for a count or an amount, answer in words only (thin, deep, spread out, concentrated, young), never a figure.",
     !shown
@@ -1051,7 +1054,7 @@ export function answerPrompt(f: AnswerFacts): Prompt {
     f.optOutNotice === false
       ? "This person already knows they can reply stop to opt out: add no opt-out line, notice or sign-off of any kind."
       : `Every answer must end with ${q(notice)} exactly. Leave room for it inside the character limit. A notice alone is not an answer: if there is nothing useful to say, output exactly PASS.`,
-  ].join("\n\n");
+  ].filter((x): x is string => x !== null).join("\n\n");
   if (!question) return { system, prompt: "There is no usable question. Output exactly PASS." };
   const hint = f.intent ? (research.length ? INTENT_HINT[f.intent] : NOTHING_LOOKED_UP[f.intent] ?? null) : null;
   const facts = [

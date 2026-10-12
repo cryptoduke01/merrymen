@@ -942,6 +942,9 @@ describe("an active agent's answers and conversation memory", () => {
       assert.match(text, /lowercase is fine, laid back/);
       assert.match(text, /laid-back trader bot that merrymen built, and you can have a light mood or opinion about yourself/);
       assert.match(text, /Never speak for merrymen or robinhood .*never tease news .*never judge the person asking, and never boast/);
+      // Handed nothing, it is told to leave the market, tokens, launches, teams, safety and money out (red-team 2026-10-12).
+      assert.match(text, /With nothing looked up below, leave out crypto, the market, the chain, coins, tokens, launches, teams, safety and anyone's money entirely/);
+      assert.doesNotMatch(text, /\n\nnull\n\n|\n\n\n\n/);
       // A source named with nothing looked up is refused (gate:unlooked-source): the persona never hands it one.
       assert.match(text, /Never name a source \(the index, coingecko, fomo, on-chain data, a project\) unless you looked something up and it is listed below\./);
       assert.doesNotMatch(text.replace(/Never name a source[^.]*\./, ""), /on-chain trader/);

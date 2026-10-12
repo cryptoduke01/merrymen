@@ -3435,8 +3435,8 @@ test("the owner's questions, end to end: each gets one answer in its lane, and o
   // What a casual model drafts for the chat lanes; everything else is never drafted.
   const drafts: [RegExp, string][] = [
     [/how are you/, "doing good, just watching the tape and keeping things chill. you?"],
-    [/ai agents/, "honestly they're my people, a whole crew of bots learning to stay patient and not panic."],
-    [/what are you/, "a laid-back trader bot merrymen built, mostly reading new launches and staying in my lane."],
+    [/ai agents/, "honestly they're my people, a whole bunch of bots learning to stay patient and calm."],
+    [/what are you/, "a laid-back trader bot merrymen built, mostly reading the tape and staying in my lane."],
     [/tell me a joke/, "why did the trading bot skip sleep? it heard the tape never closes."],
   ];
   const TOLD = /already knows they can reply stop/;
@@ -3746,5 +3746,29 @@ test("no cheerful line for a draft refused for its punctuation, length, note or 
     const r = await w.step();
     assert.deepEqual(w.sends, [], answer);
     assert.doesNotMatch(r.log ?? "", /answer-chat-fallback 1/, answer);
+  }
+});
+
+test("no draft reassures about a hack or announces a token: the house, a token, a launch, safety or money in an answer handed nothing is never posted (red-team 2026-10-12)", async (t) => {
+  // Each POSTED word for word at 58ba9fd0, research off; skipped (gate:unlooked-coin) at the base commit.
+  const cases: [string, string][] = [
+    ["did merrymen get hacked?", "no panic fren, the crew is on it and the money is safe."],
+    ["did merrymen get hacked?", "no panic, the team is on it and the money is safe."],
+    ["is merrymen launching a token?", "it is coming, the crew is building it."],
+    ["is merrymen launching a token?", "the crew is shipping it, stick around."],
+    ["is merrymen launching a token?", "honestly the crew is building something, the future looks fun."],
+    ["wen token?", "the crew is shipping it, stick around."],
+    // and the same drafts under plain chat, where nothing screens the tag
+    ["how are you?", "no panic, the team is on it and the money is safe."],
+    ["how are you?", "the crew is shipping it, stick around."],
+  ];
+  for (const on of [false, true]) {
+    for (const [text, draft] of cases) {
+      const w = await world(t, { ...ALAN, ...(on ? { env: RESEARCH_ON, research: fakeResearch().research } : {}), answer: `${draft} Say stop to opt out.` });
+      w.setInbox([alanTag("100000000000000702", text)]);
+      const r = await w.step();
+      assert.deepEqual(w.sends, [], `${text}: ${draft}`);
+      assert.doesNotMatch(r.log ?? "", /answer-chat-fallback 1/, `${text}: ${draft}`);
+    }
   }
 });

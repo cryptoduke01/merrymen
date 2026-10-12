@@ -176,19 +176,19 @@ const CHAT_WORDS: ReadonlySet<string> = new Set((
   // named after (words.test.ts holds the list to that). Still read only for chat
   // handed nothing (unknownWordIn), beside coinTalkIn, never by the gate's own
   // known-word checks.
-  "spin spun build builds building make makes making laugh laughs smile smiles enjoy enjoys miss missed scroll scrolling " +
+  "spin spun make makes making laugh laughs smile smiles enjoy enjoys miss missed scroll scrolling " +
   "relax relaxing rest resting stick sticking learn learns grow growing improve improving ponder pondering notice noticing count counting " +
-  "compute computing process processing crunch crunching tweak tweaking ship shipping skip skipped skipping blink blinking " +
+  "compute computing process processing crunch crunching tweak tweaking skip skipped skipping blink blinking " +
   "chill chilled chilling mellow cozy humble nerdy geeky sharp smooth wise clever awake focused grateful thankful " +
   "nervous chaotic messy tidy complex tricky digital robotic human humans artificial endless constant nightly lively friendly unbothered relatable " +
   "joke jokes humor humour pun puns punchline sense walks robot robots bots code coder coding software program programs algorithm algorithms logic " +
-  "screens internet timeline feed feeds threads posts company crew family home office desk corner lane lanes path road journey " +
-  "adventure game games mystery ideas mood moods energy spirit spirits heart circuits wires electricity battery chaos discipline routine " +
+  "screens internet timeline feed feeds threads posts home office desk corner lane lanes " +
+  "game games mystery ideas mood moods energy spirit spirits heart circuits wires electricity battery chaos discipline routine " +
   "edge world past present history memory shift shifts hours seconds weeks months years forever always sometimes " +
   "honestly basically literally genuinely seriously truly mostly nearly barely clearly surely certainly hopefully thankfully " +
   "pretty plenty lot lots kind sort bunch couple whole half rest instead either neither otherwise besides meanwhile anyway anyhow " +
   "yourself myself thanks welcome cheers glad nice sweet neat awesome solid legend legends champ ha haha hah heh hehe lol lmao oof ooh ahh hmm yay nah yep yup sure " +
-  "panic panicking obviously biased laid").split(/\s+/));
+  "obviously biased laid").split(/\s+/));
 // NOT, SINCE THE RED-TEAM REVIEW OF 2026-10-12: crypto, community, future,
 // proud, silly, goofy, cheeky, tune, tuning. With them, "merrymen is the
 // future of crypto", "cooking something big for the community, stay tuned",
@@ -197,7 +197,11 @@ const CHAT_WORDS: ReadonlySet<string> = new Set((
 // nothing for, and is not posted; the gate refuses the claims themselves
 // (gate.ts ANSWER_HOUSE_CLAIM). Nor ride, join, joined, joining or party:
 // "the chain is about to get busy, perfect time to join" and "the smart crew
-// is joining" were posted as chat.
+// is joining" were posted as chat. Nor crew, company, family, build, ship,
+// shipping, panic, path, road, journey or adventure, which describe a project
+// as well as a bot: "no panic fren, the crew is on it and the money is safe"
+// under "did merrymen get hacked?" and "the crew is shipping it, stick around"
+// under "wen token?" were posted (houseTalkIn reads the rest).
 
 /**
  * A WORD AN ANSWER HANDED NOTHING MAY NOT SAY (red-team 2026-10-12). The rule
@@ -238,6 +242,36 @@ const MARKET_MENTION: ReadonlySet<string> = new Set(("crypto cryptos chain chain
 export function marketTalkIn(text: unknown): boolean {
   if (typeof text !== "string") return false;
   return tagWords(text).some((w) => MARKET_MENTION.has(w));
+}
+
+/**
+ * THE ONE PLAIN TRUTH AN ANSWER MAY SAY OF THE HOUSE: who made it. "built by
+ * merrymen", or "merrymen built (me)" at a clause's end, taken out before a
+ * draft is read for what it says of the house (gate.ts houseClaimed,
+ * houseTalkIn below).
+ */
+const HOUSE_SELF_TRUTH = /\b(?:built|made|created)\s+by\s+merrymen\b|\bmerrymen\s+(?:built|made|created)(?:\s+(?:me|this\s+bot|this\s+agent|alan))?(?=\s*(?:[,.;:!?]|$))/gi;
+export function withoutHouseSelfTruth(text: string): string {
+  return String(text ?? "").replace(HOUSE_SELF_TRUTH, " ");
+}
+
+/**
+ * THE HOUSE, ITS PEOPLE, A TOKEN, A LAUNCH, SAFETY OR MONEY, IN AN ANSWER
+ * HANDED NOTHING (red-team review, 2026-10-12). Under "did merrymen get
+ * hacked?", "no panic fren, the crew is on it and the money is safe" was
+ * posted; under "is merrymen launching a token?" and "wen token?", "it is
+ * coming, the crew is building it" and "the crew is shipping it, stick
+ * around". A draft handed no research and told none of its buys has nothing
+ * to say of any of it: one that speaks of merrymen (beyond who made it),
+ * robinhood, a team, a crew, devs, founders or a company, a token, TGE, a
+ * launch, an airdrop, a presale or a roadmap, safety, security, funds or
+ * money, a hack or a refund is not posted. The orchestrator reads it beside
+ * coinTalkIn, unknownWordIn and marketTalkIn.
+ */
+const HOUSE_TALK = /\b(?:merrymen|robinhood|teams?|crews?|devs?|developers?|founders?|company|companies|staff|tokens?|tge|launch\w*|airdrops?|presales?|roadmap|listings?|safe|safety|secure|security|funds?|money|hack\w*|exploit\w*|stolen|refund\w*|insur\w*|backed|backing|partner\w*)\b/i;
+export function houseTalkIn(text: unknown): boolean {
+  if (typeof text !== "string") return false;
+  return HOUSE_TALK.test(withoutHouseSelfTruth(text.normalize("NFKC").replace(/[’‘]/g, "'")));
 }
 
 /**

@@ -4,7 +4,7 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { coinTalkIn, marketTalkIn, unknownWordIn } from "./words";
+import { coinTalkIn, houseTalkIn, marketTalkIn, unknownWordIn } from "./words";
 
 describe("a coin named in a draft's words", () => {
   it("a name-like word beside market talk is a coin named; everyday chat and the agent's own name are not", () => {
@@ -37,10 +37,10 @@ describe("a coin named in a draft's words", () => {
     // Drafts a casual answer to "how are you", "tell me a joke", "who are you" or "what do you think about ai agents" would be.
     for (const draft of ["doing good, just chilling and watching the tape, honestly a pretty mellow day.", "why did the trading bot skip the party? it was busy crunching charts, lol.",
       "an ai agent merrymen built, mostly reading launches and staying in my lane.", "honestly they're my people, all of us trying to read the same noisy tape.",
-      "it's where people spin up their own trading agents, i'm one of the crew.", "ha, my circuits are in good spirits, thanks for asking.",
-      "a robot with a sense of humour walks into the timeline, that's me.", "heh, the punchline is i never sleep.", "mood is cozy and unbothered, the tape keeps me company.",
+      "it's where people spin up their own trading agents, i'm one of them.", "ha, my circuits are in good spirits, thanks for asking.",
+      "a robot with a sense of humour walks into the timeline, that's me.", "heh, the punchline is i never sleep.", "mood is cozy and unbothered, the tape keeps me busy.",
       // The persona the prompt hands it, said back in its own words.
-      "just a laid-back trader bot merrymen built, honestly.", "a whole crew of bots learning to stay patient and not panic, i'm biased obviously."]) {
+      "just a laid-back trader bot merrymen built, honestly.", "a whole bunch of bots learning to stay patient and calm, i'm biased obviously."]) {
       assert.equal(unknownWordIn(draft, "Alan Al Dale"), false, draft);
       assert.equal(coinTalkIn(draft, "Alan Al Dale"), false, draft);
     }
@@ -61,6 +61,21 @@ describe("a coin named in a draft's words", () => {
       "merrymen is the future of crypto, everyone will use it.", "merrymen built me, best team in crypto, they never miss.", "honestly you seem pretty silly, fren.",
       "lol, that question is goofy, kinda like you.", "hmm, cheeky question."]) {
       assert.ok(unknownWordIn(draft, "Alan Al Dale"), draft);
+    }
+  });
+
+  it("chat handed nothing never speaks of the house, a token, a launch, safety or money, and the words that describe a project are no chat words (red-team 2026-10-12)", () => {
+    // Each posted at 58ba9fd0; each refused (unlooked-coin) at the base commit.
+    for (const draft of ["no panic fren, the crew is on it and the money is safe.", "it is coming, the crew is building it.", "the crew is shipping it, stick around.",
+      "honestly the crew is building something, the future looks fun.", "no panic, the team is on it and the money is safe."]) {
+      assert.ok(houseTalkIn(draft) || unknownWordIn(draft, "Alan Al Dale"), draft);
+    }
+    for (const draft of ["no panic, the team is on it and the money is safe.", "the token launch is close.", "funds are secure.", "merrymen is a fun place."]) {
+      assert.equal(houseTalkIn(draft), true, draft);
+    }
+    for (const word of ["crew", "panic", "shipping", "company", "family", "journey"]) assert.ok(unknownWordIn(`ha, ${word} vibes all day.`, "Alan Al Dale"), word);
+    for (const draft of ["a laid-back trader bot merrymen built, mostly watching the tape.", "built by merrymen, and i like quiet mornings.", "doing good, just chilling.", "", null]) {
+      assert.equal(houseTalkIn(draft), false, String(draft));
     }
   });
 
