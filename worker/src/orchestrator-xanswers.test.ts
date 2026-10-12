@@ -3597,3 +3597,38 @@ test("a chat draft never teases a launch, claims a backing, hypes the house, boa
   await w.step();
   assert.equal(w.sends[0]?.text, "a laid-back trader bot merrymen built, mostly watching the tape. Say stop to opt out.");
 });
+
+test("how's the market: the big coins' words agree with the figures beside them, and never say majors of one coin (red-team 2026-10-12)", async (t) => {
+  const row = (id: string, symbol: string, rank: number, change24hPct: number) => ({ id, symbol, name: id, rank, priceUsd: 1, marketCapUsd: 1e9, volume24hUsd: 1e8, change24hPct, change7dPct: 1 });
+  const research = (rows: ReturnType<typeof row>[]) => createXResearch({
+    hotPools: async () => ({ pools: [hotPool(1, -30, 1.21e6)], failed: false }),
+    majors: { configured: () => true, search: async () => ({ hits: [], failed: true }), market: async () => ({ market: null, failed: true }),
+      markets: async () => ({ markets: rows, failed: false }), trending: async () => ({ coins: [], failed: false }), top: TOP_READ },
+    chainListings: listingsOf([hotPool(1, -30, 1.21e6)]),
+  });
+  const chain = { coins: 1, lead: { dir: "down", size: "sharply" } } as const;
+  // POSTED at 58ba9fd0 as "majors lean green today, … coingecko 24h: $BTC +0.5%, $ETH -0.5%, $SOL -0.5%; …" (…702) and "big caps are grinding upward, …" (…705).
+  for (const [id, rows, line] of [
+    ["100000000000000702", [row("bitcoin", "btc", 1, 0.5), row("ethereum", "eth", 2, -0.49), row("solana", "sol", 6, -0.49)], "$BTC +0.5%, $ETH -0.5%, $SOL -0.5%"],
+    ["100000000000000705", [row("bitcoin", "btc", 1, 0.5), row("ethereum", "eth", 2, -0.49), row("solana", "sol", 6, -0.49)], "$BTC +0.5%, $ETH -0.5%, $SOL -0.5%"],
+    ["100000000000000702", [row("bitcoin", "btc", 1, 2.4), row("ethereum", "eth", 2, -0.45), row("solana", "sol", 6, -0.48)], "$BTC +2.4%, $ETH -0.4%, $SOL -0.5%"],
+    ["100000000000000702", [row("bitcoin", "btc", 1, 0.6), row("ethereum", "eth", 2, -0.4), row("solana", "sol", 6, -0.4)], "$BTC +0.6%, $ETH -0.4%, $SOL -0.4%"],
+    ["100000000000000702", [row("bitcoin", "btc", 1, 0.5), row("ethereum", "eth", 2, -0.49)], "$BTC +0.5%, $ETH -0.5%"],
+  ] as const) {
+    const w = await world(t, { ...ALAN, env: RESEARCH_ON, research: research([...rows]), answer: "PASS" });
+    w.setInbox([alanTag(id, "how's the market?")]);
+    await w.step();
+    const sent = String(w.sends[0]?.text ?? "");
+    assert.ok(sent.includes(`coingecko 24h: ${line};`), sent);
+    const words = /^(.*?) coingecko 24h: /.exec(sent)?.[1] ?? "";
+    assert.ok(marketAnswers({ majors: { dir: "mixed" }, chain }, id, { lower: true }, { notice: false }).includes(words), `${line}: ${sent}`);
+  }
+  // Only bitcoin read: no "majors" words of one coin, and no line of it.
+  const w = await world(t, { ...ALAN, env: RESEARCH_ON, research: research([row("bitcoin", "btc", 1, 0.5)]), answer: "PASS" });
+  w.setInbox([alanTag("100000000000000702", "how's the market?")]);
+  await w.step();
+  const sent = String(w.sends[0]?.text ?? "");
+  assert.doesNotMatch(sent, /coingecko 24h|\$BTC/, sent);
+  const words = /^(.*?) geckoterminal robinhood: /.exec(sent)?.[1] ?? "";
+  assert.ok(marketAnswers({ majors: null, chain }, "100000000000000702", { lower: true }, { notice: false }).includes(words), sent);
+});

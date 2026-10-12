@@ -27,6 +27,7 @@
  * Pure: no I/O, no model, no provider, no clock.
  */
 import { CASUAL_PAPER, latinLines } from "./casual";
+import { signedPercent } from "./figures";
 import { noticeFor, type CodeLineOptions } from "./replies";
 
 /** A day's move as code reads it: which way, and how far, by code's own thresholds. Never a figure. */
@@ -281,12 +282,23 @@ export interface MarketRead {
   chain: HotRead | null;
 }
 
-/** The big coins' day, read together from their moves (moveOf): null when no move is known. */
-export function majorsDirOf(moves: readonly (Move | null)[]): MarketRead["majors"] {
-  const known = moves.filter((m): m is Move => m !== null);
-  if (!known.length) return null;
-  const up = known.some((m) => m.dir === "up"), down = known.some((m) => m.dir === "down");
-  return { dir: up && down ? "mixed" : up ? "up" : down ? "down" : "flat" };
+/**
+ * THE BIG COINS' DAY, READ TOGETHER FROM THE FIGURES THE LINE SHOWS
+ * (red-team review, 2026-10-12). It was read from moveOf, which calls a move
+ * under half a percent flat, so bitcoin +0.5% beside ether and solana at
+ * -0.49% read as "up": "majors lean green today ... coingecko 24h: $BTC
+ * +0.5%, $ETH -0.5%, $SOL -0.5%", words a reader takes as fact against the
+ * figures beside them. Now each change is read as the figures line writes it
+ * (figures.ts signedPercent, rounded to a tenth): up only when every coin
+ * shown is above +0%, down only when every one is below, flat only when every
+ * one is +0%, mixed otherwise. And never "majors" or "the giants" of one coin:
+ * fewer than two shown is no read (null), and the line shows none of them.
+ */
+export function majorsDirOf(changes: readonly unknown[]): MarketRead["majors"] {
+  const shown = changes.map(signedPercent).filter((s): s is string => s !== null);
+  if (shown.length < 2) return null;
+  const signs = shown.map((s) => (s === "+0%" ? 0 : s.startsWith("-") ? -1 : 1));
+  return { dir: signs.every((x) => x > 0) ? "up" : signs.every((x) => x < 0) ? "down" : signs.every((x) => x === 0) ? "flat" : "mixed" };
 }
 
 /**

@@ -142,11 +142,27 @@ describe("what's hot in code's words", () => {
     assert.ok(up.every((l) => /robinhood|chain|onchain|geckoterminal|trenches|index|trending|over there/.test(l)), "it says where the movers are");
     const unread = marketAnswers({ majors: null, chain: null }, "1", { lower: true });
     assert.ok(unread.every((l) => /\bno (?:read|view|glimpse|data|word|signal)\b|can't spot|zilch from/.test(l)), "no read is said as none");
-    assert.equal(majorsDirOf([moveOf(1.2), moveOf(3.4), moveOf(0.6)])?.dir, "up");
-    assert.equal(majorsDirOf([moveOf(-1.2), moveOf(0.1), moveOf(-4)])?.dir, "down");
-    assert.equal(majorsDirOf([moveOf(1.2), moveOf(-3.4), null])?.dir, "mixed");
-    assert.equal(majorsDirOf([moveOf(0.2), moveOf(-0.3), null])?.dir, "flat");
+    assert.equal(majorsDirOf([1.2, 3.4, 0.6])?.dir, "up");
+    assert.equal(majorsDirOf([-1.2, -0.1, -4])?.dir, "down");
+    assert.equal(majorsDirOf([1.2, -3.4, null])?.dir, "mixed");
+    assert.equal(majorsDirOf([0.04, -0.04, null])?.dir, "flat", "both shown as +0%");
     assert.equal(majorsDirOf([null, null]), null);
+  });
+
+  it("the big coins' words agree with the figures beside them: read as the line rounds them, and never of one coin (red-team 2026-10-12)", () => {
+    // Read as "up" at 58ba9fd0 beside "$BTC +0.5%, $ETH -0.5%, $SOL -0.5%".
+    assert.equal(majorsDirOf([0.5, -0.49, -0.49])?.dir, "mixed");
+    assert.equal(majorsDirOf([2.4, -0.45, -0.48])?.dir, "mixed");
+    assert.equal(majorsDirOf([0.6, -0.4, -0.4])?.dir, "mixed");
+    assert.equal(majorsDirOf([0.5, -0.49, null])?.dir, "mixed");
+    // A tiny move the line still shows with its sign is that sign; one it shows as +0% is flat.
+    assert.equal(majorsDirOf([-1.2, 0.1, -4])?.dir, "mixed");
+    assert.equal(majorsDirOf([0.2, -0.3, null])?.dir, "mixed");
+    assert.equal(majorsDirOf([0.12, 0.3])?.dir, "up");
+    assert.equal(majorsDirOf([0.04, 0.2])?.dir, "mixed");
+    // One coin is no "majors": no read.
+    assert.equal(majorsDirOf([0.5, null, null]), null);
+    assert.equal(majorsDirOf([0.5]), null);
   });
 
   it("a paper agent's market line closes with a clause about its own book, never one the coins could take (2026-10-12)", () => {

@@ -1989,7 +1989,8 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
         })();
         const chain = hotBundle();
         const [big, hot] = await Promise.all([bigRead, chain]);
-        const majorsRead = big ? majorsDirOf(big.map((m) => moveOf(m.change24hPct))) : null;
+        // Read from the figures the line will show, and of two coins or more: never "up" beside two red (majorsDirOf).
+        const majorsRead = big ? majorsDirOf(big.map((m) => m.change24hPct)) : null;
         const chainRead: HotRead | null = hot.hot ?? null;
         const read: MarketRead = { majors: majorsRead, chain: chainRead };
         const facts = [

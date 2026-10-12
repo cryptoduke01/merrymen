@@ -1885,9 +1885,10 @@ describe("how's the market: the big coins' day and the chain's movers, read for 
 
   it("a row that is not the coin asked, under another symbol or past the majors' rank, is no read of it", async () => {
     const m = marketFake();
-    const fake = await marketFake({ markets: [{ ...m.BTC, symbol: "btc2" }, { ...ETH_MARKET, rank: 900 }, m.SOL] }).research.gather(input({ kind: "market" }, { xUserId: "m6" }));
-    assert.equal(renderFiguresLine(fake.figures!.filter((s) => s.kind === "majors")), "coingecko 24h: $SOL +3.1%.");
-    assert.deepEqual(fake.market?.majors, { dir: "up" });
+    const fake = await marketFake({ markets: [{ ...m.BTC, symbol: "btc2" }, { ...ETH_MARKET, rank: 900 }, m.SOL, { ...m.SOL, id: "solana-2" }] }).research.gather(input({ kind: "market" }, { xUserId: "m6" }));
+    // Solana alone is left, and one coin is no "majors" (red-team 2026-10-12): no read of them, and no line.
+    assert.deepEqual(fake.figures?.filter((s) => s.kind === "majors") ?? [], []);
+    assert.equal(fake.market?.majors, null);
   });
 
   it("nothing is looked up for its own mood or for advice", async () => {
