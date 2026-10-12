@@ -77,7 +77,8 @@ describe("a tag's intent, read by code", () => {
   it("one contract address is a coin, by its key only; a coin it bought is found without a $", () => {
     assert.deepEqual(classifyTag("what about this coin?", { address: CA }), { kind: "coin", ticker: null, address: CA });
     assert.deepEqual(classifyTag("thoughts on pepe?", { knownCoins: ["Pepe"] }), { kind: "coin", ticker: "Pepe", address: null });
-    assert.deepEqual(classifyTag("why did you buy pepe?", { knownCoins: ["Pepe"] }), { kind: "own-trades", why: true, coin: "pepe" });
+    assert.deepEqual(classifyTag("why did you buy pepe?", { knownCoins: ["Pepe"] }), { kind: "own-trades", why: true, coin: "pepe", address: null });
+    assert.deepEqual(classifyTag("did you buy this coin?", { address: CA }), { kind: "own-trades", why: false, coin: null, address: CA }, "its own history, by the contract");
     assert.equal(classifyTag("what about this coin?", { address: "0xnot-an-address" }).kind, "chat");
   });
 });
@@ -326,11 +327,14 @@ describe("one bounded research bundle per answer", () => {
 
   it("the free intents look nothing up", async () => {
     const { f, research } = fakes();
-    for (const intent of [{ kind: "capabilities" }, { kind: "onboarding" }, { kind: "model" }, { kind: "chat" }, { kind: "own-trades", why: false, coin: null }] as TagIntent[]) {
+    for (const intent of [{ kind: "capabilities" }, { kind: "onboarding" }, { kind: "model" }, { kind: "chat" }, { kind: "own-trades", why: false, coin: null, address: null },
+      { kind: "own-trades", why: true, coin: null, address: PEPE_CA }] as TagIntent[]) {
       const b = await research.gather(input(intent, { fomo: true }));
       assert.equal(b.lookups, 0, intent.kind);
     }
     assert.equal(f.reads.length + f.resolved.length + f.fomoCalls.length, 0);
+    assert.deepEqual((await research.gather(input({ kind: "own-trades", why: true, coin: null, address: PEPE_CA }))).facts.slice(0, 1), ["you bought it lately, on paper"],
+      "a tagged contract it bought is found in its own history, for free");
     assert.match((await research.gather(input({ kind: "capabilities" }, { fomo: true }))).facts.join(" "), /fomo traders/);
   });
 });

@@ -63,8 +63,12 @@ const CHAIN_ID = 4663;
 export type TagIntent =
   | { kind: "capabilities" }
   | { kind: "onboarding" }
-  /** "what are you trading", "why did you buy pepe": its own calls and posts. `coin` is the label asked about, if any. */
-  | { kind: "own-trades"; why: boolean; coin: string | null }
+  /**
+   * "what are you trading", "why did you buy pepe", "did you buy <address>":
+   * its own calls and posts. `coin` is the label asked about, `address` the
+   * tagged contract (a lookup key into its own history only), if any.
+   */
+  | { kind: "own-trades"; why: boolean; coin: string | null; address: string | null }
   /** A coin by $ticker, by a coin it traded named in words, or by ONE contract address (a lookup key only). */
   | { kind: "coin"; ticker: string | null; address: string | null }
   | { kind: "model" }
@@ -111,7 +115,7 @@ export function classifyTag(text: string, o: { address?: string | null; knownCoi
   if (asked?.kind === "trades" || (asked?.kind === "site" && (asked.topic === "attempts" || asked.topic === "trades"))) {
     const why = asked.kind === "trades" ? asked.why : asked.topic === "attempts";
     const coin = asked.kind === "trades" && asked.symbol ? asked.symbol : ticker ?? known;
-    return { kind: "own-trades", why, coin: coin ?? null };
+    return { kind: "own-trades", why, coin: coin ?? null, address };
   }
   // Its wallet, balance, P&L, owner: deflected by the prompt, never looked up.
   if (isPrivateAsk(t)) return { kind: "chat" };
@@ -479,14 +483,14 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
             return { facts: [], lookups, notes };
           case "own-trades": {
             // Only what it already made public, and no paid read: its newest buy
-            // post, or, for a coin it names, that coin's history.
-            if (!i.coin) {
+            // post, or, for a coin it names or a tagged contract, that coin's history.
+            if (!i.coin && !i.address) {
               const latest = input.posts.filter((p) => p.kind === "buy" && p.status === "posted").sort((a, b) => b.createdAtMs - a.createdAtMs)
                 .map((p) => ownPostProse(p.body)).find(sayable);
               return { facts: latest ? [`what you posted on X about your latest buy: ${latest}`].filter(sayable) : [], lookups, notes };
             }
             const theses = await ownTheses();
-            return { facts: ownHistoryPhrases({ coin: { label: i.coin, address: null }, facts: f, posts: input.posts, theses }), lookups, notes };
+            return { facts: ownHistoryPhrases({ coin: { label: i.coin, address: i.address }, facts: f, posts: input.posts, theses }), lookups, notes };
           }
           case "coin":
             break;
