@@ -46,7 +46,7 @@ import { STRATEGY_FLAVOUR, STRATEGY_SPOKEN, TRAIT_VOICE } from "./groupchat/temp
 import { MUSINGS, SUBJECTS, TAKES } from "./groupchat/topics";
 import { xAppFromEnv, type FetchLike, type XApp, type XReply } from "./xpost/client";
 import { admitXPost, vocabularyRefusal, type BaseGate, type XGateCtx } from "./xpost/gate";
-import { ACTIVE_CADENCE, ANSWER_GAP_MS, ANSWERS_PER_DAY, BUY_COIN_FOLD_MS, MIN_LEAD_MS, REPLY_STALE_MS, STANDARD_CADENCE, coinOf, hash32, planPosts, replyDueAt, sendDecision, type PlanCadence, type PlanClock, type PlanIntent } from "./xpost/planner";
+import { ACTIVE_CADENCE, ANSWER_GAP_MS, ANSWERS_PER_DAY, MIN_LEAD_MS, REPLY_STALE_MS, STANDARD_CADENCE, coinOf, hash32, planPosts, replyDueAt, sendDecision, type PlanCadence, type PlanClock, type PlanIntent } from "./xpost/planner";
 import { APP_PAUSE_KEY, APP_PAUSE_MS, CREDITS_PAUSE_MS, PAUSE_KEY, readReplyComments, sendOne, type SendOutcome } from "./xpost/sender";
 import { isReplyOptOut, replyCandidate, tagCandidate, withoutReplyOptOut } from "./xpost/replies";
 import { activeTenantsOf } from "./xpost/scope";
@@ -858,9 +858,12 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
               }
               release.push(() => returnAllowance(shared, tradeDayKey, at()));
             }
-            if ((post.kind === "buy" || post.kind === "sell") && post.coin) {
+            // The coin fold is the owner's cadence's: none on an active one,
+            // which posts every buy and sale (still under the trade and day
+            // allowances above, and the gap).
+            if ((post.kind === "buy" || post.kind === "sell") && post.coin && cadence.coinFoldMs > 0) {
               const foldKey = post.kind === "sell" ? `sell-fold:${post.xUserId}:${post.coin}` : `fold:${post.xUserId}:${post.coin}`;
-              const fold = await claimSpan(shared, foldKey, t, BUY_COIN_FOLD_MS);
+              const fold = await claimSpan(shared, foldKey, t, cadence.coinFoldMs);
               if (!fold.ok) {
                 await giveBack();
                 if (await skipScheduled(shared, post.id, "folded", t)) bump("folded");

@@ -758,6 +758,27 @@ describe("an active owner posts through the waking day, and every buy", () => {
     assert.ok(sent.length <= ACTIVE_CADENCE.perDay);
   });
 
+  it("a rebuy of the same coin is posted again for an active owner, once for a standard one", () => {
+    const rebuys = [8, 14].map((h, i) => call({ decisionId: `pepe-${i}`, atSec: (DAY0 + h * HOUR) / 1000 }));
+    assert.equal(ACTIVE_CADENCE.coinFoldMs, 0);
+    assert.equal(day({}, rebuys).filter((p) => p.kind === "buy").length, 2, "every buy, the same coin again included");
+    assert.equal(day({ cadence: undefined, perDay: 3 }, rebuys).filter((p) => p.kind === "buy").length, 1, "one post per coin in three days");
+    // The control: two coins are both posted on the standard cadence, so the one above is the fold, not the day's allowance.
+    const two = [call({ decisionId: "pepe", atSec: (DAY0 + 8 * HOUR) / 1000 }), call({ decisionId: "bonk", name: "Bonk", symbol: "BONK", atSec: (DAY0 + 14 * HOUR) / 1000 })];
+    assert.equal(day({ cadence: undefined, perDay: 3 }, two).filter((p) => p.kind === "buy").length, 2);
+  });
+
+  it("an active owner's completed sales of one token are each posted; a standard owner's fold", () => {
+    const now = DAY0 + 10 * HOUR;
+    const token = `0x${"b".repeat(40)}`;
+    const earlier = post({ kind: "sell", coin: token, createdAtMs: now - 5 * HOUR, dueAtMs: now - 5 * HOUR, sentAtMs: now - 5 * HOUR });
+    const sale: PlanSell = { decisionId: "sale-2", side: "sell", symbol: "PEPE", name: "Pepe", paper: false,
+      atSec: (now - MIN) / 1000, operationKey: `0x${"a".repeat(64)}`, token, outcome: "profit" };
+    const sells = (over: Partial<PlanInput>) => planPosts(input({ nowMs: now, tradeResults: true, sells: [sale], posts: [earlier], ...over })).filter((p) => p.kind === "sell");
+    assert.equal(sells({ cadence: ACTIVE_CADENCE, perDay: ACTIVE_CADENCE.perDay }).length, 1);
+    assert.equal(sells({}).length, 0);
+  });
+
   it("the owner's own smaller choice still holds", () => {
     assert.ok(day({ ownerPerDay: 2 }).length <= 2);
   });

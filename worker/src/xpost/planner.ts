@@ -104,6 +104,12 @@ export interface PlanCadence {
   casualQuietDaysInTen: number;
   /** Casual slots in ten handed how it trades rather than a passing thought (orchestrator casualInputs). */
   tradeTalkInTen: number;
+  /**
+   * One buy post, and one sale post, per coin in this long. 0 is no fold: a
+   * rebuy of the same coin is posted again, still bounded by tradePerDay,
+   * perDay and the gap. Checked when planned and claimed again at send time.
+   */
+  coinFoldMs: number;
 }
 
 export const STANDARD_CADENCE: Readonly<PlanCadence> = Object.freeze({
@@ -115,12 +121,14 @@ export const STANDARD_CADENCE: Readonly<PlanCadence> = Object.freeze({
   casualWindowUtc: CASUAL_WINDOW_UTC,
   casualQuietDaysInTen: CASUAL_QUIET_DAYS_IN_TEN,
   tradeTalkInTen: 3,
+  coinFoldMs: BUY_COIN_FOLD_MS,
 });
 
 /**
  * Eight casual slots from 09:00 to 23:30 local, and a post for every buy and
- * completed sale on top, up to twelve a day — the seventy-five minute gap
- * over a waking day is the real ceiling.
+ * completed sale on top — a rebuy of a coin it posted about yesterday too, so
+ * no coin fold — up to twelve a day: the seventy-five minute gap over a
+ * waking day is the real ceiling.
  */
 export const ACTIVE_CADENCE: Readonly<PlanCadence> = Object.freeze({
   perDay: 12,
@@ -131,6 +139,7 @@ export const ACTIVE_CADENCE: Readonly<PlanCadence> = Object.freeze({
   casualWindowUtc: [9 * 60, 23 * 60 + 30] as const,
   casualQuietDaysInTen: 0,
   tradeTalkInTen: 7,
+  coinFoldMs: 0,
 });
 
 /** What the planner asks of time. The glue binds it to the owner-local clock the room also uses. */
@@ -368,6 +377,11 @@ function pushedPast(due: number, slots: readonly Slot[], gapMs: number = GAP_MS)
   return at;
 }
 
+/** A post of this kind about this coin within the cadence's fold, so this one is not planned. A fold of 0 folds nothing. */
+function folded(slots: readonly Slot[], kind: "buy" | "sell", coin: string, now: number, foldMs: number): boolean {
+  return foldMs > 0 && slots.some((s) => s.kind === kind && s.coin === coin && s.createdAtMs >= now - foldMs);
+}
+
 /**
  * WHAT TO DRAFT NOW. At most one intro, or else buys and one casual post, in
  * the order they would go out. Each is checked against the account's posts
@@ -412,7 +426,7 @@ export function planPosts(input: PlanInput): PlanIntent[] {
     if (used.has(dedupeKey)) continue;
     const coin = coinOf(call);
     if (!coin) continue;
-    if (slots.some((s) => s.kind === "sell" && s.coin === call.token.toLowerCase() && s.createdAtMs >= now - BUY_COIN_FOLD_MS)) continue;
+    if (folded(slots, "sell", call.token.toLowerCase(), now, cadence.coinFoldMs)) continue;
     const due = pushedPast(now + MIN_LEAD_MS, slots, gap);
     if (due > call.atSec * 1000 + BUY_STALE_MS) continue;
     const day = dayOf(due);
@@ -422,8 +436,9 @@ export function planPosts(input: PlanInput): PlanIntent[] {
     used.add(dedupeKey);
   }
 
-  // BUYS: fresh, after consent, one per coin in three days, two a day at most —
-  // and none at all when the owner turned them off.
+  // BUYS: fresh, after consent, one per coin in three days (every one on an
+  // active cadence), two a day at most — and none at all when the owner
+  // turned them off.
   const buys = input.kinds?.buys === false ? [] : input.calls
     .filter((c) => c.side === "buy" && Number.isFinite(c.atSec) && typeof c.decisionId === "string" && c.decisionId !== "")
     .filter((c) => c.atSec * 1000 > account.consentAtMs! && now - c.atSec * 1000 <= BUY_FRESH_MS && c.atSec * 1000 <= now)
@@ -433,7 +448,7 @@ export function planPosts(input: PlanInput): PlanIntent[] {
     if (used.has(dedupeKey)) continue;
     const coin = coinOf(call);
     if (!coin) continue;
-    if (slots.some((s) => s.kind === "buy" && s.coin === coin.key && s.createdAtMs >= now - BUY_COIN_FOLD_MS)) continue;
+    if (folded(slots, "buy", coin.key, now, cadence.coinFoldMs)) continue;
     const fillMs = call.atSec * 1000;
     const jitter = BUY_JITTER_MIN + (hash32(`buy|${call.decisionId}`) % (BUY_JITTER_MAX - BUY_JITTER_MIN + 1));
     const due = pushedPast(Math.max(fillMs + jitter * MIN, now + MIN_LEAD_MS), slots, gap);
