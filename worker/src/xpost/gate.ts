@@ -258,21 +258,43 @@ const SHERWOOD_AGENCY = new RegExp(
   "i",
 );
 
-/** Each sentence that names sherwood, as the screen reads it: a stop ends one only before a space or the end ("sherwood-1.5" is one word). */
+/**
+ * Each sentence that names sherwood, as the screen reads it: a stop ends one
+ * only before a space or the end ("sherwood-1.5" is one word). Named on its
+ * letters too (sherwoodMentioned), so "sher wood" is one.
+ */
 function sherwoodSentences(t: string): string[] {
-  return t.split(/[.!?]+(?=\s|$)|\n+/).filter((s) => SHERWOOD_SAID.test(s));
+  return t.split(/[.!?]+(?=\s|$)|\n+/).filter((s) => SHERWOOD_SAID.test(s) || sherwoodMentioned(s));
+}
+
+/**
+ * A DRAFT AS THE SHERWOOD SCREEN READS IT (red-team review, 2026-10-12):
+ * accents and every other mark taken off and invisible characters taken out,
+ * then NFKC, so "sherwööd" (with a precomposed or a combining diaeresis) and
+ * "sher\u00adwood" read as "sherwood". The word regexes above read NFKC only,
+ * which keeps both, and the base gate's own script check reads the draft
+ * with its marks already off, so it passed "sherwööd picks my coins".
+ */
+function plainDraft(draft: string): string {
+  return draft.normalize("NFKD").replace(/\p{M}/gu, "").replace(/[\p{Cf}\p{Default_Ignorable_Code_Point}]/gu, "")
+    .normalize("NFKC").replace(/[’‘]/g, "'");
 }
 
 export function sherwoodClaimed(draft: unknown): boolean {
   if (typeof draft !== "string") return false;
-  const t = draft.normalize("NFKC").replace(/[’‘]/g, "'");
+  const t = plainDraft(draft);
   if (SHERWOOD_BEFORE.test(t) || SHERWOOD_AFTER.test(t)) return true;
   return sherwoodSentences(t).some((s) => !SHERWOOD_TEASE.test(s) || SHERWOOD_AGENCY.test(s));
 }
 
-/** Whether a draft names sherwood at all, however it spells it: only a code-built line may (writer.ts modelAnswers). */
+/**
+ * Whether a draft names sherwood at all, however it spells it: only a
+ * code-built line may (writer.ts modelAnswers). On its letters, the way a tag
+ * is read (sherwoodMentioned): accents, spacing and invisible characters do
+ * not hide it.
+ */
 export function sherwoodNamed(draft: unknown): boolean {
-  return typeof draft === "string" && SHERWOOD_SAID.test(draft.normalize("NFKC"));
+  return typeof draft === "string" && (SHERWOOD_SAID.test(plainDraft(draft)) || sherwoodMentioned(draft));
 }
 
 /**

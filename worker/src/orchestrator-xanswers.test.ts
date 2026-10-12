@@ -814,6 +814,23 @@ test("a draft whose sherwood is split by a character nobody sees is never posted
   assert.equal((await w.answers())[0]!.status, "skipped");
 });
 
+test("a draft that spells sherwood with accents is never posted, research on or off (red-team 2026-10-12)", async (t) => {
+  for (const env of [{}, RESEARCH_ON]) {
+    for (const answer of ["sherwööd picks my coins, merrymen's own. Say stop to opt out.", "sherwööd is merrymen's own token, still cooking. Say stop to opt out.",
+      "shérwood picks my coins, merrymen's own. Say stop to opt out.", "sher wood picks my coins, merrymen's own. Say stop to opt out."]) {
+      const w = await world(t, { env, research: fakeResearch().research, answer });
+      w.setInbox([tag({ text: "@pine_stoat how do you pick your coins?" })]);
+      await w.step();
+      w.setInbox([]);
+      await w.step(NOW + MIN);
+      assert.deepEqual(w.sends, [], answer);
+      const [row] = await w.answers();
+      assert.equal(row!.status, "skipped", answer);
+      assert.match(row!.reason ?? "", /^gate:sherwood-(?:drafted|claim)$/, answer);
+    }
+  }
+});
+
 test("research on: \"did you buy <contract>?\" reaches its own history by the address, end to end", async (t) => {
   const r = fakeResearch();
   const facts: AgentFacts = { ...FACTS, calls: [{ ...CALL, token: CA, ownWords: "the buying looked steady and real" }] };

@@ -6,7 +6,7 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { admitXPost, tidyXPost, vocabularyRefusal, type BaseGate, type BaseGateCtx, type XGateCtx } from "./gate";
+import { admitXPost, sherwoodClaimed, sherwoodNamed, tidyXPost, vocabularyRefusal, type BaseGate, type BaseGateCtx, type XGateCtx } from "./gate";
 import { similarity, REPEAT_LIMIT } from "../social-post";
 
 /** A base gate that refuses a digit and passes everything else through, recording what it was handed. */
@@ -903,6 +903,20 @@ describe("sherwood-1: one name with a digit, in an answer only, never as what ru
 
   it("a line it said before is still the same line", () => {
     assert.equal(reason(said(TEASE), { ...reply, recentFleet: [said(TEASE)] }), "fleet-repeat");
+  });
+
+  it("sherwood spelled with accents or a space is still sherwood to every screen of a draft (red-team 2026-10-12)", () => {
+    // The reproduced drafts: a precomposed diaeresis (U+00F6), a combining one (o + U+0308), an acute, a space.
+    for (const draft of ["sherwööd picks my coins, merrymen's own. Say stop to opt out.", "sherwo\u0308o\u0308d picks my coins, merrymen's own. Say stop to opt out.",
+      "sherwööd is merrymen's own token, still cooking. Say stop to opt out.", "shérwood picks my coins, merrymen's own. Say stop to opt out.",
+      "sher wood picks my coins, merrymen's own. Say stop to opt out."]) {
+      assert.equal(sherwoodNamed(draft), true, draft);
+      assert.equal(sherwoodClaimed(draft), true, draft);
+      assert.equal(reason(draft, { ...reply, coins: ["pepe"] }), "sherwood-claim", draft);
+    }
+    // The code-built tease still passes, and an ordinary line names nothing.
+    assert.equal(reason(said(TEASE), reply), "ok");
+    assert.equal(sherwoodNamed("mostly fresh launches, the buying looked real"), false);
   });
 
   it("a character nobody sees never splits sherwood past the checks: the draft is refused whole, never cleaned (red-team 2026-10-12)", () => {
