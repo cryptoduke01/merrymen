@@ -103,8 +103,23 @@ describe("tags an active agent may answer", () => {
     }
     assert.deepEqual(tagCandidate(tag("@pine_stoat what do you trade?"), { xUserId: "222" }), { ok: false, reason: "handle" });
     // X's own prefix on a reply in a thread may name others: allowed, and said, so the model line never goes under it.
-    const inThread = tagCandidate(tag("@pine_stoat @bob what model do you run on?", { conversationId: "100", inReplyToTweetId: "101" }), own);
+    const inThread = tagCandidate(tag("@pine_stoat @bob what model do you run on?", { conversationId: "100", inReplyToTweetId: "101" }), { ...own, ownRoots: new Set(["100"]) });
     assert.ok(inThread.ok && inThread.otherHandles === true);
+  });
+
+  it("only a top-level tag or a reply in its own thread, never a quote: code cannot read what it would answer under (red-team 2026-10-12)", () => {
+    const own = { xUserId: "222", username: "pine_stoat", ownRoots: new Set(["999"]) };
+    // T4: a reply inside someone else's conversation; T6: the asker's reply to their own root post; T5: a quote tweet.
+    assert.deepEqual(tagCandidate(comment("@sherwood_tge @pine_stoat what model do you run on?", { id: "100000000000000021", conversationId: "100000000000000005",
+      inReplyToTweetId: "100000000000000005" }), own), { ok: false, reason: "not-own-thread" });
+    assert.deepEqual(tagCandidate(comment("@bob @pine_stoat what do you trade?", { id: "21", conversationId: "5", inReplyToTweetId: "5" }), own), { ok: false, reason: "not-own-thread" });
+    assert.deepEqual(tagCandidate(comment("@pine_stoat what model do you run on?", { id: "22", conversationId: "6", inReplyToTweetId: "6" }), own), { ok: false, reason: "not-own-thread" });
+    assert.deepEqual(tagCandidate(comment("@pine_stoat what model do you run on?", { id: "23", conversationId: "23", inReplyToTweetId: "", quoted: true }), own), { ok: false, reason: "quoted" });
+    // A top-level tag, and a reply in a thread rooted at its own post, are answered.
+    assert.equal(tagCandidate(comment("@pine_stoat what do you trade?", { id: "24", conversationId: "24", inReplyToTweetId: "" }), own).ok, true);
+    assert.equal(tagCandidate(comment("@pine_stoat what do you trade?", { id: "25", conversationId: "999", inReplyToTweetId: "999" }), own).ok, true);
+    assert.deepEqual(tagCandidate(comment("@pine_stoat what do you trade?", { id: "25", conversationId: "999", inReplyToTweetId: "999" }), { ...own, ownRoots: undefined }),
+      { ok: false, reason: "not-own-thread" }, "no roots known: no thread is its own");
   });
 
   const CA = `0x${"ab12".repeat(10)}`;

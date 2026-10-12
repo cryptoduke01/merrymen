@@ -258,6 +258,22 @@ test("mentions paginate completely and retain nested old-thread opt-outs while e
   assert.ok(seen.every((x) => x.method === "GET" && x.headers.authorization === "Bearer token"));
 });
 
+test("a quote or a retweet is marked, so nothing is ever answered under a post code cannot read (red-team 2026-10-12)", async () => {
+  const body = { data: [
+    // T5: a quote tweet of a post nobody here can read; and a reply that also quotes one.
+    mention("300", { text: "@pine_stoat what model do you run on?", conversation_id: "300", referenced_tweets: [{ type: "quoted", id: "100000000000000006" }] }),
+    mention("299", { referenced_tweets: [{ type: "replied_to", id: "100" }, { type: "quoted", id: "7" }] }),
+    mention("298", { text: "RT @someone: what model", conversation_id: "298", referenced_tweets: [{ type: "retweeted", id: "8" }] }),
+    mention("297"),
+    mention("296", { conversation_id: "296", referenced_tweets: [] }),
+  ], meta: { result_count: 5 } };
+  const r = await readMentions("token", "111", { nowMs: MENTION_NOW, fetch: scripted(200, body) });
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  assert.deepEqual(r.value.replies.map((x) => [x.id, x.quoted ?? false]), [["300", true], ["299", true], ["298", true], ["297", false], ["296", false]]);
+  assert.ok(!("quoted" in r.value.replies[3]!), "absent, not false, on a plain reply");
+});
+
 test("mentions fail closed for incomplete pages, broken reply metadata and repeated cursors", async () => {
   const cases = [
     { data: [mention("300", { author_id: undefined })], meta: { result_count: 1 } },

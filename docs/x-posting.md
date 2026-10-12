@@ -561,7 +561,12 @@ the mention itself. They go out **right away**:
   handle in a tag must be the agent's own: "what model do you run on
   @SherwoodToken" is refused. The one exception is the prefix X writes before
   a reply in a thread, which may name others; such a tag never gets the
-  model line. Sherwood is looked for in the tag as posted, handles included. Digits may appear:
+  model line. Sherwood is looked for in the tag as posted, handles included.
+  Only a top-level tag, or a reply in a thread rooted at one of the X
+  account's own posts (`ownRootTweetIds`), is answered: never a reply in
+  someone else's thread, and never a quote or a retweet, because code cannot
+  read the post the answer would appear under. A follow-up reply under one
+  of its answers sits in the asker's thread, so it goes unanswered too. Digits may appear:
   the writer reads every run of digits as "(a number)", glued to letters or
   not (`answerQuestion`: "24h" is "(a number)h", "L2" is "L(a number)", "saw
   it on 2 lists" is "saw it on (a number) lists"), so the figure never

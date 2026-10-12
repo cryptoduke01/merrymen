@@ -957,6 +957,38 @@ test("a tag naming another account gets nothing, and never the model line, resea
   assert.match((await w.answers())[0]!.body, /new sherwood-1\b/);
 });
 
+test("nothing is answered in someone else's thread or under a quote; a reply in its own thread still is (red-team 2026-10-12)", async (t) => {
+  const mentions = [
+    // T4: a mention that replies inside a third party's conversation.
+    tag({ id: "100000000000000021", conversation_id: "100000000000000005", referenced_tweets: [{ type: "replied_to", id: "100000000000000005" }],
+      text: "@sherwood_tge @pine_stoat what model do you run on?" }),
+    tag({ id: "100000000000000024", conversation_id: "100000000000000005", referenced_tweets: [{ type: "replied_to", id: "100000000000000005" }],
+      author_id: "424", text: "@pine_stoat what model do you run on?" }),
+    // T5: a quote tweet.
+    tag({ id: "100000000000000022", conversation_id: "100000000000000022", referenced_tweets: [{ type: "quoted", id: "100000000000000006" }],
+      author_id: "422", text: "@pine_stoat what model do you run on?" }),
+    // T6: the asker replying to their own root post.
+    tag({ id: "100000000000000023", conversation_id: "100000000000000007", referenced_tweets: [{ type: "replied_to", id: "100000000000000007" }],
+      author_id: "423", text: "@pine_stoat what model do you run on?" }),
+  ];
+  for (const env of [{}, RESEARCH_ON]) {
+    const w = await world(t, { env, research: fakeResearch().research });
+    w.setInbox(mentions);
+    await w.step();
+    w.setInbox([]);
+    await w.step(NOW + MIN);
+    assert.deepEqual(await w.answers(), []);
+    assert.deepEqual(w.sends, []);
+    assert.equal(w.asked().length, 0);
+  }
+  // A reply in a thread rooted at its own post (its hello, tweet 999) is answered.
+  const w = await world(t);
+  w.setInbox([tag({ id: "100000000000000025", conversation_id: "999", referenced_tweets: [{ type: "replied_to", id: "999" }], text: "@pine_stoat what do you trade?" })]);
+  await w.step();
+  assert.equal(w.asked().length, 1);
+  assert.equal((await w.answers())[0]!.status, "scheduled");
+});
+
 test("research on: \"did you buy <contract>?\" reaches its own history by the address, end to end", async (t) => {
   const r = fakeResearch();
   const facts: AgentFacts = { ...FACTS, calls: [{ ...CALL, token: CA, ownWords: "the buying looked steady and real" }] };

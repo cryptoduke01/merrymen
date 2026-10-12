@@ -214,18 +214,31 @@ function standsAlone(t: string, start: number, end: number): boolean {
  * left that is no handle at all is refused too.
  */
 const HANDLE_AT = /@([a-z0-9_]{1,15})\b/gi;
-export function tagCandidate(reply: XReply, ctx: { xUserId: string; research?: boolean; username?: string }): ReplyCandidate {
+/*
+ * ONLY WHERE CODE KNOWS WHAT IT IS ANSWERING UNDER (red-team review,
+ * 2026-10-12). A mention that replies inside somebody else's thread lands
+ * the answer in that thread (a token launch's, say), and a quote tweet shows
+ * the quoted post as its card: code reads neither, and the model line posted
+ * there read as Merrymen speaking under a "SHERWOOD presale live" post. So a
+ * tag is answered only when it is a top-level post (its own conversation,
+ * replying to nothing), or a reply in a conversation rooted at one of this X
+ * account's own posts (`ctx.ownRoots`, store.ts ownRootTweetIds); never a
+ * quote or a retweet (XReply.quoted). Absent `ownRoots`, no thread is its own.
+ */
+export function tagCandidate(reply: XReply, ctx: { xUserId: string; research?: boolean; username?: string; ownRoots?: ReadonlySet<string> }): ReplyCandidate {
   const no = (reason: string): ReplyCandidate => ({ ok: false, reason });
   if (!reply.id || !reply.authorId || !ctx.xUserId) return no("invalid");
   if (reply.authorId === ctx.xUserId) return no("own-comment");
   if (isReplyOptOut(reply.text)) return no("opt-out");
   if (typeof reply.text !== "string") return no("invalid");
+  if (reply.quoted === true) return no("quoted");
+  const topLevel = reply.conversationId === reply.id && reply.inReplyToTweetId === "";
+  if (!topLevel && ctx.ownRoots?.has(reply.conversationId) !== true) return no("not-own-thread");
   const own = String(ctx.username ?? "").trim().replace(/^@/, "").toLowerCase();
   const raw = reply.text.normalize("NFKC");
   const lead = /^(?:\s*@[a-z0-9_]{1,15}\b[\s,:-]*)+/i.exec(raw)?.[0] ?? "";
   const others = (s: string): boolean => [...s.matchAll(HANDLE_AT)].some((m) => own === "" || m[1]!.toLowerCase() !== own);
-  const inThread = reply.conversationId !== reply.id || reply.inReplyToTweetId !== "";
-  if (others(raw.slice(lead.length)) || (others(lead) && !inThread)) return no("handle");
+  if (others(raw.slice(lead.length)) || (others(lead) && topLevel)) return no("handle");
   const said = withoutLeadingMentions(raw).replace(HANDLE_AT, " ").replace(/\s+/g, " ").trim();
   if (said.includes("@")) return no("handle");
   const research = ctx.research === true;

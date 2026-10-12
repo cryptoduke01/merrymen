@@ -1268,6 +1268,25 @@ export async function postsOfXUser(db: Db, xUserId: string, sinceMs: number, lim
 }
 
 /**
+ * THE POSTS A CONVERSATION ON THIS X ACCOUNT MAY BE ROOTED AT: the tweet ids
+ * of its own posted top-level posts (an intro, a casual post, a buy or a
+ * sale; never a reply or an answer, which are themselves replies), newest
+ * first, at most `limit`. A tag that replies inside a thread is answered only
+ * when the thread is rooted at one of these (replies.ts tagCandidate).
+ */
+export async function ownRootTweetIds(db: Db, xUserId: string, limit = 2000): Promise<Set<string>> {
+  const rows = (await db
+    .prepare(
+      `SELECT tweet_id FROM xpost_posts
+        WHERE x_user_id = ? AND status = 'posted' AND tweet_id IS NOT NULL AND kind IN ('intro', 'casual', 'buy', 'sell')
+        ORDER BY created_at_ms DESC, id DESC
+        LIMIT ?`,
+    )
+    .all(String(xUserId), int(Math.max(1, Math.min(5000, limit))))) as { tweet_id: unknown }[];
+  return new Set(rows.map((r) => String(r.tweet_id ?? "")).filter((t) => t !== ""));
+}
+
+/**
  * EVERY INTRO ONE OWNER EVER WROTE FOR ONE X ACCOUNT, oldest first, any status
  * and any age — the first hello's key and each redraft's. Whether the hello
  * has been dealt with is a fact about the account's whole history, not about

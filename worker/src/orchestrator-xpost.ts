@@ -69,6 +69,7 @@ import {
   ownerSendTimesSince,
   tradeSendTimesSince,
   optOutReplies,
+  ownRootTweetIds,
   repliesEnabledFor,
   replyConsentAt,
   firstReplyConsentAt,
@@ -1430,13 +1431,15 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       return null;
     }
     const ordered = [...comments].sort((a, b) => a.createdAtMs - b.createdAtMs || a.id.localeCompare(b.id));
+    // The threads a reply may be answered in: rooted at this X account's own posts (tagCandidate).
+    const ownRoots = ordered.some((c) => c.conversationId !== c.id || c.inReplyToTweetId !== "") ? await ownRootTweetIds(shared, account.xUserId) : new Set<string>();
     const buys = recentCoins(f);
     const knownCoins = [...buys.map((c) => c.label), ...posts.filter((p) => p.kind === "buy" && p.coin).map((p) => p.coin!)];
     // Every name its buys go by, for telling whether a tag names one (namesACoin).
     const bought = boughtNames(f, posts);
     for (const comment of ordered) {
       if (comment.createdAtMs < consentAt || nowMs - comment.createdAtMs > REPLY_STALE_MS) continue;
-      const candidate = tagCandidate(comment, { xUserId: account.xUserId, research: research !== null, username: account.username });
+      const candidate = tagCandidate(comment, { xUserId: account.xUserId, research: research !== null, username: account.username, ownRoots });
       if (!candidate.ok || await repliesOptedOut(shared, account.xUserId, comment.authorId)) continue;
       // READ BY CODE FIRST, research on or off: the allowlist's plain model
       // question is answered from a code-built line (writer.ts modelAnswers)

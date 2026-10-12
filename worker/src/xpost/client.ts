@@ -363,6 +363,13 @@ export interface XReply {
   conversationId: string;
   inReplyToTweetId: string;
   createdAtMs: number;
+  /**
+   * The post refers to another post besides the one it replies to: a quote
+   * tweet (whose card shows the quoted post) or a retweet. Code cannot read
+   * what that post says, so an answer is never posted under it (red-team
+   * 2026-10-12). Absent when it refers to none.
+   */
+  quoted?: true;
 }
 
 export interface XReplyBatch { replies: XReply[]; newestId: string | null }
@@ -380,8 +387,9 @@ function parsedReply(item: unknown, now: number, excludeAuthorId: string): XRepl
       typeof d.text !== "string" || !d.text.trim() || d.text.length > 4000 ||
       !Number.isFinite(createdAtMs) || createdAtMs <= 0 || createdAtMs > now) return null;
   if (parents.length && (typeof d.conversation_id !== "string" || d.id === d.conversation_id)) return null;
+  const quoted = refs.some((r) => r === null || typeof r !== "object" || r.type !== "replied_to");
   return { id: d.id, text: d.text, authorId: d.author_id, conversationId: typeof d.conversation_id === "string" ? d.conversation_id : d.id,
-    inReplyToTweetId: parents.length ? parents[0]!.id as string : "", createdAtMs };
+    inReplyToTweetId: parents.length ? parents[0]!.id as string : "", createdAtMs, ...(quoted ? { quoted: true as const } : {}) };
 }
 
 /**
