@@ -124,9 +124,44 @@ the brackets are measured from (the exit leg, both turnover fees and gas; from
 the quotes above when they are sane, or a gas and turnover-fee floor). It shows
 how to estimate edge from the odds of reaching the take-profit before the stop
 rather than inventing one, and says so when no odds could cover the cost.
+The stop is a trigger, not a fill: the plan prices the loss side at `s`, the
+average realised stop-out loss, never at the trigger, and prints the odds bar
+at the trigger (a floor) and at an illustrative realised stop half again past
+it (-15% for the fast Trencher's -10%).
 It defines continuation and distribution over short windows and states that
 missing news, fundamentals or social-media data is not on its own a reason to
 hold for this strategy. Every disqualifier and check in the persona still applies.
+
+The same entry reviews also send the Trencher's terms (`worker/src/strategy-terms.ts`)
+as trusted desk policy: the exits as enforced triggers, the 30-minute horizon,
+the break-even bar as a floor, how to price expected edge, and what
+continuation and distribution mean. Brain renders them outside every fence, to
+the analysts and the manager (and the debate and risk voices on an escalated
+run). They state the plan's own numbers through the same arithmetic
+(`realisedStopBps` and `breakEvenRate`), with `c` defined in both as each
+exit's cost beyond the average fill, and a test renders both for several
+configs and checks they agree. The worker sends them only to a Brain whose
+`/health` lists `strategy-terms`; until then the request is unchanged and the
+decision row records `signals_json.strategy_terms` as `withheld` (`sent` once
+delivered, null for every other review).
+
+With the Bitquery lane on ([`bitquery-lane.md`](bitquery-lane.md)) and Fomo's
+IPC channel present, the same entry reviews (those with a fresh tape row) also
+ask the orchestrator for the coin's indexed DEX flow: buys and sells over 5,
+15 and 60 minutes, distinct addresses, the largest sells and whether the
+launch record's address sold. The question starts with the review, beside the
+quotes and the candle and trade legs, and is given up at the same 5-second
+evidence budget, so it never delays the review past what it already waited.
+The rendered block (figures kept; it is the Brain's, never X's) goes under its
+own key, `onchain-flow`, which Brain's manager reads beside the measured
+market input without an analyst call; the technical block's 2,400-character
+cut is untouched. It is sent only to a Brain whose `/health` lists the key; a
+failed read or an hour with no indexed trades sends nothing, never "no flow".
+Each review logs `[trencher] flow SYMBOL: lens`, `no-block` or the failure
+word (`timeout`, `budget`, `unavailable`, …). The lane's own daily points,
+with child evidence capped at 80% of them, bound the spend; at one entry
+review every 30 seconds on new coins the evidence share can run out before the
+UTC day ends, and then reviews proceed without the block.
 
 With Fomo on and the owner's Fomo monitoring (or follow) enabled, the same opt-in
 also queues shared Fomo research for the entry candidates that account's review
@@ -145,3 +180,11 @@ matching outcome summary. A missing quote or empty history is a valid unknown.
 Compare the persisted signed limits before and after rollout. Other accounts
 must remain outside the research allowlist; their shared market feed benefits
 from the provider fix without enabling this extra decision work.
+
+Deploy the Brain service from the same commit as the worker (order does not
+matter: the worker sends neither the terms nor the flow block until `/health`
+lists them). Then, on that account's entry reviews, check that the decision log
+line ends `· terms sent`, and, with the Bitquery lane on, that
+`[trencher] flow SYMBOL: lens` lines appear. `· terms withheld` or no flow
+lines on a Brain that should list both means the Brain build is older than the
+worker's; nothing is lost but the extra input.

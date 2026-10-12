@@ -77,7 +77,8 @@ meant as a later source for the early book and nothing calls it yet.
    orchestrator's deploy environment, never in this repository: which agent's
    smart account is on the list is operator configuration, not documentation.
    The allowlist is checked on every request, so a change applies without a
-   respawn.
+   respawn. Deploy the Brain service from the same commit: the review sends
+   the flow block only once its `/health` lists `onchain-flow`.
 6. **Reconcile after a day.** Compare Bitquery's usage page with the lane's
    own counter (table `spend` in `<fleet home>/bitquery-lane/lane.sqlite`, with
    columns `points`, `calls` and `refused` per UTC day) plus the gateway's.
@@ -183,29 +184,40 @@ for the gateway and the IDE.
   variable and appears in no fact, log line or reply, and every rendering
   labels it by its source, the launchpad's launch record.
 
-## Where it plugs in (not wired yet)
+## Where it plugs in
 
-The lane does not feed Brain or the fast-Trencher review yet, because another
-branch is changing that code. When it does:
-
-- **Brain lens.** `renderFlowLens(result)` returns a block of at most 1,200
-  characters: an attribution line ("Indexer data, not a forecast"), one
-  compact JSON object, and a closing "WHAT THIS IS NOT" line. It returns
-  `null` on any failure, on an hour with no indexed trades, or if anything in
-  the block looks like an address. It is meant for the lens key
-  `onchain-flow` (`ONCHAIN_FLOW_LENS`).
-  - Brain accepts a lens only after `services/brain` registers the key
-    (`schemas.py` `LENS_KEYS`, plus an analyst prompt in `analyst.py`) and
-    advertises it on `/health`.
-  - The worker should then set `signals[ONCHAIN_FLOW_LENS]` beside
-    `attachLens` in `worker/src/fomo-child.ts`, behind the same `lens_keys`
-    handshake.
-- **Review evidence.** As an alternative, or in addition, the fast-Trencher
-  review in `worker/src/index.ts` can await
-  `createFlowClient(processFlowPort()).facts(token)` with a 5-second
-  `timeoutMs`, as `entryCostEvidence` bounds its quotes. It would add the
-  rendered block to the evidence for accounts on the decision-research
-  allowlist only. A missing reading is "unavailable", never "no flow".
+- **Fast-Trencher entry reviews, research accounts only** (wired). The review
+  in `worker/src/index.ts` asks through `worker/src/review-flow.ts` exactly
+  where the momentum plan goes — an account on
+  `MERRYMEN_DECISION_RESEARCH_ACCOUNTS`, live rail, an unheld coin — and only
+  with a fresh tape row, since a review without one is never paid for. It asks
+  when the review starts, beside the cost quotes and the candle and trade
+  legs, with the same 5-second evidence budget as the request's deadline, so
+  it cannot hold the review past what it already waited. A reading that lands
+  later is still cached by the lane for the next review of the coin.
+  - `renderFlowLens(result)` turns the reading into a block of at most 1,200
+    characters: an attribution line ("Indexer data, not a forecast"), one
+    compact JSON object, and a closing "WHAT THIS IS NOT" line. It is `null`
+    on any failure, on an hour with no indexed trades, or if anything in it
+    looks like an address; then nothing is sent.
+  - The block goes under its own signals key, `onchain-flow`
+    (`ONCHAIN_FLOW_LENS`), never into `technical`. `services/brain` lists the
+    key in `schemas.py` `LENS_KEYS` and so on `/health` `lens_keys`; no desk
+    asks for it, so it costs no analyst call and takes no pulse slot. The
+    manager reads it directly, after the measured market input and fenced as
+    "the same trades as the tape, counted by another indexer"
+    (`graph.py` `ONCHAIN_FLOW`, cut at 1,200).
+  - The worker sends it only to a Brain whose `/health` lists the key
+    (`BrainCapabilityProbe` on `lens_keys`), so an older Brain never sees it.
+    A decide that carried it and came back unreachable (how a 422 arrives)
+    turns it off until `/health` says yes again.
+  - A child asks only when the orchestrator wrote `MERRYMEN_FLOW_BROKER=1` into
+    its environment, which it does when the lane is on and the child has the
+    IPC channel. Without it no question is sent and nothing is waited for. The
+    orchestrator never passes on a copy from its own environment.
+  - Each review logs `[trencher] flow SYMBOL: lens`, `no-block` (read, nothing
+    to render) or the failure word.
+- **X answers** (not wired here): `flowXLines`, as described above.
 - **Early book.** `BitqueryLane.v3Pools(token)` returns PoolCreated
   candidates from the pinned Uniswap v3 factory. Each one still has to be
   confirmed with the factory's `getPool` and pass the existing depth, TWAP and

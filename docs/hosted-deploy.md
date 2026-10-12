@@ -194,23 +194,60 @@ desk rides. Memecoins only — an equity token on this chain is a wrapper, and
 > re-asking about every unlisted coin every pass is how a generous rate limit
 > becomes a problem of our own making.
 
+### CoinGecko Pro pacing (optional; unset keeps the old 3-second pace)
+
+How fast the Pro key (`MERRYMEN_COINGECKO_PRO_API_KEY`, read by the
+orchestrator's children and by web) may spend. Both services read the same two
+names; set them on each. With a monthly figure set, a spacing below the floor
+that figure allows is raised to it (fleet lane 70% of the month, web 20%, 10%
+headroom), and said once at startup. Details and the arithmetic:
+[`docs/decision-research.md`](decision-research.md#coingecko-pro-pacing).
+
+| Var | Service | Default | Production (the ~5,000,000-credit plan) |
+|---|---|---|---|
+| `MERRYMEN_COINGECKO_PRO_SPACING_MS` | orchestrator (children inherit it) | `3000` | `800` (floor 741 ms) |
+| `MERRYMEN_COINGECKO_MONTHLY_CREDITS` | orchestrator (children inherit it) | unset: no credit floor | `5000000` |
+| `MERRYMEN_COINGECKO_PRO_SPACING_MS` | web | `3000` | `2600` (floor 2,592 ms) |
+| `MERRYMEN_COINGECKO_MONTHLY_CREDITS` | web | unset: no credit floor | `5000000` |
+
+Look for one `[gecko] coingecko-pro fleet lane: 800 ms spacing …` line per
+child and one `local lane: 2600 ms` line on web. A `[gecko] coingecko-pro
+refused <family> … for 1h` line means that endpoint is not on the plan, or the
+key is wrong; latches are per key, so a corrected key and a restart clear them.
+
+### Decision research for chosen accounts (optional; nobody by default)
+
+`MERRYMEN_DECISION_RESEARCH_ACCOUNTS` on the **orchestrator** (children
+inherit it): complete smart-account addresses, comma- or space-separated,
+default nobody. Add the account through the deploy environment; this
+repository names none. For those accounts' live fast-Trencher entry reviews it
+adds cost quotes, the account's own outcomes, the momentum plan, the
+Trencher's terms as trusted desk policy (once the Brain service advertises
+`strategy-terms`) and, with the Bitquery lane below on, the coin's indexed
+flow (once the Brain lists `onchain-flow`). Research inputs only: no cap,
+guard, grant or exit changes. See
+[`docs/decision-research.md`](decision-research.md#opt-in-decision-evidence).
+Deploy the Brain service from the same commit for the last two.
+
 ### The Bitquery lane (optional; off without its key)
 
 DEX flow for a coin over 5, 15 and 60 minutes, the venue split, the largest
 sells, and whether its launcher (as the launchpad's launch record names it)
 sold. The orchestrator answers from one budgeted lane, and children on the
-decision-research allowlist ask it over IPC. For the rollout steps and the IDE
-check to run before setting the key, see
-[`docs/bitquery-lane.md`](bitquery-lane.md). The gateway spends from the same
-plan under its own cap, `MERRYMEN_GATEWAY_BITQUERY_POINTS_PER_DAY` (default
-`5000`, set on the gateway service): keep the two knobs' sum under the plan.
+decision-research allowlist ask it over IPC (the channel exists only with
+`MERRYMEN_FOMO_ENABLED=1`). For the rollout steps and the IDE check to run
+before setting the key, see [`docs/bitquery-lane.md`](bitquery-lane.md). The
+gateway spends from the same plan under its own cap,
+`MERRYMEN_GATEWAY_BITQUERY_POINTS_PER_DAY` (default `5000`, set on the gateway
+service): keep the two knobs' sum under the plan.
 
 | Var | Value |
 |---|---|
-| `MERRYMEN_BITQUERY_API_KEY` | the plan's key. **Orchestrator only**: stripped from every child, together with `BITQUERY_API_KEY` and `MERRYMEN_TOKEN` |
-| `MERRYMEN_BITQUERY_LANE` *(optional)* | `0` turns the lane off while keeping the key |
+| `MERRYMEN_BITQUERY_API_KEY` | the plan's key. **Orchestrator only** — never on web or the Brain service. Stripped from every child, together with `BITQUERY_API_KEY` and `MERRYMEN_TOKEN`. Default unset: lane off |
+| `MERRYMEN_BITQUERY_LANE` *(optional)* | `0` turns the lane off while keeping the key. Default: on when the key is set |
 | `MERRYMEN_BITQUERY_POINTS_PER_DAY` *(optional)* | points per UTC day, default `25000` (750k a month), ceiling `100000`. Child evidence may use at most 80% of it |
 | `MERRYMEN_BITQUERY_RPM` *(optional)* | requests per minute, default `60`, ceiling `90` |
+| `MERRYMEN_FLOW_BROKER` | **do not set.** The orchestrator writes `1` into a child's environment when its lane is on and the child has the IPC channel, and removes any copy inherited from its own |
 
 ### The group chat (on by default, and it needs no key)
 
