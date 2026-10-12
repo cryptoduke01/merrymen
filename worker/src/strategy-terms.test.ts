@@ -30,7 +30,7 @@ describe("Trencher's terms", () => {
     assert.equal(TRENCHER_FAST.takeProfitBps, 2_000);
     assert.equal(TRENCHER_FAST.maxHoldSec, 1_800);
     const t = fast.terms!;
-    assert.match(t, /stop-loss at -10% from entry, a take-profit at \+20%, a time exit at 30 minutes/);
+    assert.match(t, /triggers at -10% \(stop-loss\) and \+20% \(take-profit\) from entry, a time exit at 30 minutes/);
     assert.match(t, /pool depth falls below 50% of its depth at entry/);
     assert.match(t, /enforced by code after every entry, not by you/);
     assert.match(t, /You cannot set, move or widen them\./);
@@ -38,14 +38,42 @@ describe("Trencher's terms", () => {
     assert.equal(fast.horizon, "up to 30 minutes");
   });
 
-  it("frame break-even as the bracket's arithmetic, never as an invented probability", () => {
+  it("call the stop a trigger, not a fill, and never a cap on the loss", () => {
+    // shouldExit fires only when a check sees the move and sells at market on a
+    // thin pool; a drain or rug between checks realises far worse than -10%.
     const t = fast.terms!;
-    // 10 / (10 + 20) = one in three, and two points of drag make it 12 / 30.
-    assert.match(t, /if every trade ended at one of the brackets \(\+20% or -10%\), entries would break even before costs by reaching the take-profit about 33% of the time; time exits land in between/);
-    assert.match(t, /\(10 \+ c\) \/ 30 of entries/);
-    assert.match(t, /at 2% drag, about 40%/);
+    assert.match(t, /A trigger is not a fill: code acts on its next check, selling at market on a thin pool, so a gap, drain or rug can lose far more than 10%\. The stop does not cap the loss\./);
+    assert.doesNotMatch(t, /stop-loss at -10%|bracket caps|max(imum)? loss|loss is (capped|limited)/i);
+    assert.equal((t.match(/cap the loss/g) ?? []).length, (t.match(/does not cap the loss/g) ?? []).length);
+  });
+
+  it("frame break-even as a floor that realised stop-outs raise, never as an invented probability", () => {
+    const t = fast.terms!;
+    // 10 / (10 + 20) = one in three at the nominal stop; a -15% average
+    // realised stop makes it 15 / 35, and two points of drag 12 / 30 and 17 / 35.
+    assert.match(t, /if every trade ended at \+20% or -10%, entries would break even before costs by hitting the take-profit about 33% of the time\. That is a floor: stop-outs fill below -10%; at an average realised stop of -15% the bar is about 43%\./);
+    assert.match(t, /\(s \+ c\) \/ \(s \+ 20\) of entries, s the average realised stop-out loss/);
+    assert.match(t, /c = 2: about 40% at s = 10, 49% at s = 15/);
+    assert.match(t, /Time exits fall between and still pay c\./);
     assert.match(t, /Do not state a probability you cannot measure/);
-    assert.match(t, /expected_edge_usdg is what this bracket is worth at this size after costs, not the take-profit amount/);
+  });
+
+  it("price expected edge with the tail, not at the nominal stop", () => {
+    const t = fast.terms!;
+    assert.match(t, /expected_edge_usdg is this bracket's worth at this size after costs, not the take-profit amount; price its losses at realised stop-outs with a tail to near-total loss, never at -10%\./);
+  });
+
+  it("always show a realised-stop bar above the nominal floor, and never a stop past a total loss", () => {
+    const num = (t: string, re: RegExp) => Number(re.exec(t)?.[1]);
+    for (const over of [{}, { stopLossBps: 500 }, { stopLossBps: 3_500, takeProfitBps: 10_000 }, { stopLossBps: 9_000 }]) {
+      const t = trencherStrategyTerms({ ...TRENCHER_FAST, ...over })!.terms!;
+      const floor = num(t, /take-profit about (\d+)% of the time/);
+      const realisedBar = num(t, /average realised stop of -[\d.]+% the bar is about (\d+)%/);
+      const realisedStop = num(t, /average realised stop of -([\d.]+)%/);
+      assert.ok(floor > 0 && realisedBar > floor, `${JSON.stringify(over)}: ${realisedBar} > ${floor}`);
+      assert.ok(realisedStop <= 100, `${JSON.stringify(over)}: -${realisedStop}%`);
+    }
+    assert.match(trencherStrategyTerms({ ...TRENCHER_FAST, stopLossBps: 9_000 })!.terms!, /average realised stop of -100% the bar is about 83%/);
   });
 
   it("define continuation and distribution, and make ambiguity a hold", () => {
@@ -73,10 +101,13 @@ describe("Trencher's terms", () => {
 
   it("follow the config rather than restating today's numbers", () => {
     const slow = trencherStrategyTerms(TRENCHER_DEFAULTS)!;
-    assert.match(slow.terms!, /stop-loss at -35% from entry, a take-profit at \+100%, a time exit at 72 hours/);
+    assert.match(slow.terms!, /triggers at -35% \(stop-loss\) and \+100% \(take-profit\) from entry, a time exit at 72 hours/);
+    assert.match(slow.terms!, /far more than 35%\. The stop does not cap the loss\./);
+    assert.match(slow.terms!, /about 26% of the time\. That is a floor: stop-outs fill below -35%; at an average realised stop of -52\.5% the bar is about 34%\./);
+    assert.match(slow.terms!, /never at -35%\./);
     assert.equal(slow.horizon, "up to 72 hours");
     const odd = trencherStrategyTerms({ ...TRENCHER_FAST, stopLossBps: 1_250, maxHoldSec: 90, liquidityDrainFraction: 1 })!;
-    assert.match(odd.terms!, /-12\.5% from entry/);
+    assert.match(odd.terms!, /triggers at -12\.5% \(stop-loss\)/);
     assert.match(odd.terms!, /a time exit at 90 seconds\. You cannot/);
     assert.doesNotMatch(odd.terms!, /pool depth falls below/);
   });

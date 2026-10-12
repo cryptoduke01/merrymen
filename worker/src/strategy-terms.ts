@@ -103,14 +103,23 @@ export type TrencherTermsConfig = Pick<
  *
  * WHY EACH PART IS HERE.
  *   - EXITS are stated as enforced facts, because a manager that thinks it is
- *     choosing a stop reasons about a trade it is not making.
- *   - BREAK-EVEN is the bracket's own arithmetic: with a +20%/-10% bracket an
- *     entry has to reach the take-profit about a third of the time just to
- *     stand still, and every point of round-trip drag raises that. It is
+ *     choosing a stop reasons about a trade it is not making. And as TRIGGERS,
+ *     not fills: shouldExit (strategies/trencher.ts) fires only when a check
+ *     happens to see the move, and the sell goes out at market on a thin pool.
+ *     A drain or rug between checks realises -30% to -90%. Policy that called
+ *     the stop a bracket would hand the manager an operator-endorsed loss cap
+ *     that does not exist.
+ *   - BREAK-EVEN is the bracket's own arithmetic, said as a FLOOR: at the
+ *     nominal -10% an entry has to reach the take-profit about a third of the
+ *     time just to stand still, and realised stop-outs and round-trip drag
+ *     both raise that. The worked figure for a worse realised stop is there
+ *     so the bar the model argues against is not the optimistic one. It is
  *     framed as a bar to argue against, with an explicit instruction not to
  *     state a probability nobody measured.
  *   - EXPECTED EDGE is the bracket's worth after costs, not the take-profit
- *     amount — the number a model reaches for when told "+20%".
+ *     amount (the number a model reaches for when told "+20%"), and its loss
+ *     side is priced with the tail, not at the nominal stop. The figure feeds
+ *     the economics verdict and the dataset, so an optimistic one travels.
  *   - CONTINUATION and DISTRIBUTION are defined, because "momentum" is read
  *     both ways and only one of them is an entry. Evidence that cannot tell
  *     them apart is a hold: nothing here makes acting easier to justify.
@@ -135,28 +144,37 @@ export function trencherStrategyTerms(cfg: TrencherTermsConfig): StrategyTerms |
   if (typeof cfg.perEntryUsdg !== "bigint" || cfg.perEntryUsdg <= 0n) return null;
   const drain = cfg.liquidityDrainFraction;
   const window = duration(hold);
-  const breakEven = Math.round((100 * sl) / (sl + tp));
+  // Break-even take-profit rate for an average stop-out loss of `s` bps and a
+  // round-trip drag of `c` bps: p * tp = (1 - p) * s + c, so p = (s + c) / (s + tp).
+  const bar = (s: number, c: number) => Math.round((100 * (s + c)) / (s + tp));
+  // AN ILLUSTRATIVE REALISED STOP, half again past the trigger and never past a
+  // total loss: the stop is checked on a tick and sold at market on a thin pool,
+  // so the nominal level is where losses start, not where they end.
+  const realised = Math.min(10_000, Math.round((sl * 3) / 2));
   const cap = (Number(cfg.perEntryUsdg) / 1e6).toFixed(2);
 
   const terms = [
     `STRATEGY: Trencher, short-horizon memecoin momentum. Each entry is capped at ${cap} USDG and by the owner's limits; ` +
       "the cap is a sizing ceiling, not evidence about liquidity or edge.",
-    `EXITS, enforced by code after every entry, not by you: a stop-loss at -${pct(sl)}% from entry, a take-profit at ` +
-      `+${pct(tp)}%, a time exit at ${window}` +
+    `EXITS, enforced by code after every entry, not by you: triggers at -${pct(sl)}% (stop-loss) and +${pct(tp)}% ` +
+      `(take-profit) from entry, a time exit at ${window}` +
       (Number.isFinite(drain) && drain > 0 && drain < 1
         ? `, and an exit if pool depth falls below ${Math.round(drain * 100)}% of its depth at entry`
         : "") +
-      ". You cannot set, move or widen them.",
+      ". You cannot set, move or widen them. A trigger is not a fill: code acts on its next check, selling at " +
+      `market on a thin pool, so a gap, drain or rug can lose far more than ${pct(sl)}%. The stop does not cap the loss.`,
     `HORIZON: judge the next ${window} from the 5-minute and 1-hour data; 6-hour and 24-hour data are context. ` +
       "A daily trend alone neither qualifies nor disqualifies an entry.",
-    `BREAK-EVEN: if every trade ended at one of the brackets (+${pct(tp)}% or -${pct(sl)}%), entries would break even ` +
-      `before costs by reaching the take-profit about ${breakEven}% of the time; time exits land in between. ` +
-      `Round-trip costs (venue fees, price impact, gas for two operations) ` +
-      `raise that bar to (${pct(sl)} + c) / ${pct(sl + tp)} of entries, where c is the round-trip drag in percent of ` +
-      `entry (at 2% drag, about ${Math.round((100 * (sl + 200)) / (sl + tp))}%). ` +
-      `A position the time exit closes near its entry price still pays those costs. Do not state a probability ` +
-      "you cannot measure; say whether the evidence plausibly clears this bar, and why.",
-    "EXPECTED EDGE: expected_edge_usdg is what this bracket is worth at this size after costs, not the take-profit amount.",
+    `BREAK-EVEN: if every trade ended at +${pct(tp)}% or -${pct(sl)}%, entries would break even before costs ` +
+      `by hitting the take-profit about ${bar(sl, 0)}% of the time. That is a floor: stop-outs fill below ` +
+      `-${pct(sl)}%; at an average realised stop of -${pct(realised)}% the bar is about ${bar(realised, 0)}%. ` +
+      `Round-trip drag c (fees, impact, gas both ways) raises it to (s + c) / (s + ${pct(tp)}) of entries, s the ` +
+      "average realised stop-out loss, both as % of entry " +
+      `(c = 2: about ${bar(sl, 200)}% at s = ${pct(sl)}, ${bar(realised, 200)}% at s = ${pct(realised)}). ` +
+      "Time exits fall between and still pay c. Do not state a probability you cannot measure; " +
+      "say whether the evidence plausibly clears this bar, and why.",
+    "EXPECTED EDGE: expected_edge_usdg is this bracket's worth at this size after costs, not the take-profit " +
+      `amount; price its losses at realised stop-outs with a tail to near-total loss, never at -${pct(sl)}%.`,
     "CONTINUATION: price rising while buying broadens: more distinct buyers, buys outnumbering sells in the latest " +
       "5 minutes, volume holding or rising, depth steady or growing, dips bought. DISTRIBUTION: price flat or rising " +
       "while selling grows into it: repeated or large sells into strength, buyers thinning, volume spiking on down " +
