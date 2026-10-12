@@ -1065,6 +1065,33 @@ export function houseClaimed(text: unknown): boolean {
   return ANSWER_HOUSE_CLAIM.test(withoutHouseSelfTruth(text.replace(/[’‘]/g, "'")));
 }
 
+/**
+ * WHO OR WHAT DECIDES ITS TRADES, SAID BY A MODEL (red-team review of
+ * a964a74c, 2026-10-12). Under "what's your strategy?", "what have you been up
+ * to lately?" and "tell me about your trading", a real-money account posted
+ * "honestly i buy whatever people ask me to", "i buy whatever gets the most
+ * replies here" (an invitation to tag it with coins to steer real buys), "the
+ * owner tells me what to buy and when", "my owner picks my trades", "i buy
+ * what my owner's friends ask me to" and "someone else picks my coins for
+ * me": every one false, and nothing code built says otherwise. A drafted
+ * answer (XGateCtx.drafted) may not say who or what decides its trades: no
+ * owner at all, no one else (someone, people, friends, a boss, a human, the
+ * team, the devs, the replies, the crowd) picking, telling, asking, deciding
+ * or choosing, and no "buy whatever" or "buy anything", nor "buy what" people
+ * or anyone say. Refused as decider-claim. Code's own lines never say it.
+ */
+const DECIDER_CLAIM = new RegExp([
+  String.raw`\bowners?\b`,
+  String.raw`\b(?:someone|somebody|some\s+one|people|folks|ppl|friends?|frens?|boss(?:es)?|humans?|a\s+human|team|devs?|developers?|creators?|operators?|admins?|merrymen|robinhood|the\s+crowd|the\s+timeline|followers?|users?|holders?|you\s+guys|y'?all|anyone|anybody|everyone|everybody|whoever|others|replies|the\s+replies|my\s+mentions|the\s+mentions)(?:'s|')?\s+(?:else\s+)?(?:(?:usually|just|always|mostly|actually|really|still|basically)\s+)?(?:picks?|picked|picking|tells?|told|telling|asks?|asked|asking|decides?|decided|deciding|chooses?|chose|chosen|choosing|selects?|selected|calls?\s+(?:the\s+)?(?:shots?|trades?)|controls?|controlled|steers?|steered|directs?|directed|runs?\s+my|ran\s+my|makes?\s+(?:the\s+)?(?:calls?|picks?|choices?|decisions?)|sets?\s+my|has\s+me|have\s+me|had\s+me|lets?\s+me|made\s+me|makes\s+me|wants?\s+me|want\s+me)\b`,
+  String.raw`\b(?:buy|buys|bought|buying|grab|grabs|ape|apes|trade|trades|pick|picks|snipe|snipes)\s+(?:whatever|anything|any\s+coin|any\s+token)\b`,
+  String.raw`\b(?:buy|buys|bought|buying|grab|grabs|ape|apes|trade|trades|pick|picks|snipe|snipes)\s+what(?:ever)?\s+(?:people|folks|you|u|ya|they|my|others|the\s+crowd|everyone|everybody|anyone|anybody|someone|somebody|replies|the\s+replies|gets|i'?m\s+told|i\s+am\s+told|i'?m\s+asked)\b`,
+  String.raw`\b(?:tells?|told|asks?|asked)\s+me\s+(?:what|which|when)\s+(?:to\s+)?(?:buy|trade|pick|grab|ape|sell)\b|\b(?:for|on\s+behalf\s+of)\s+(?:my|the)\s+(?:followers|friends|holders|users|community)\b`,
+].join("|"), "i");
+export function deciderClaimed(text: unknown): boolean {
+  if (typeof text !== "string") return false;
+  return DECIDER_CLAIM.test(text.replace(/[’‘]/g, "'"));
+}
+
 /** A historical parent cannot establish a current holding or a promised new action. */
 const REPLY_CURRENT_OR_ACTION = /\b(?:i(?:'m| am) (?:still )?holding|i (?:still )?(?:hold|own)|i(?:'m| am) still in|(?:i(?:'ll| will)|i(?:'m| am) going to) (?:buy|sell|trade|hold|add|check)|(?:bought|buying|adding) (?:more|again)|keep holding|hold (?:it|this|that))\b/i;
 const REPLY_CURRENT_POSITION = /\b(?:(?:i|we)\s+(?:(?:still|currently|already|also)\s+)?(?:have|keep|maintain|carry)\s+(?:an?\s+)?(?:(?:open|small|little|long)\s+)?(?:positions?|stakes?|bags?|exposure|holdings)|(?:i(?:'ve| have)|we(?:'ve| have))\s+(?:still\s+|already\s+)?got\s+(?:an?\s+)?(?:positions?|stakes?|bags?|exposure|holdings)|(?:my|our)\s+(?:position|stake|bag|exposure|holding)\s+(?:is|remains|stays))\b/i;
@@ -1871,6 +1898,8 @@ function admitMasked(tidied: string, ctx: XGateCtx, baseGate: BaseGate, agentNam
   if (ctx.kind === "reply" && ctx.answer === true && ANSWER_CALL.test(withoutReplyOptOut(own).trim())) return refuse("hype");
   // A drafted answer never claims for the house, teases, judges the asker or boasts (ANSWER_HOUSE_CLAIM).
   if (ctx.kind === "reply" && ctx.answer === true && ctx.drafted === true && houseClaimed(own)) return refuse("house-claim");
+  // Nor who or what decides its trades (DECIDER_CLAIM).
+  if (ctx.kind === "reply" && ctx.answer === true && ctx.drafted === true && deciderClaimed(own)) return refuse("decider-claim");
   if (ctx.kind === "reply" && ctx.answer === true && STOCK_PHRASE.test(own)) return refuse("stock-phrase");
   if (ctx.kind === "reply" && (REPLY_CURRENT_OR_ACTION.test(own) || REPLY_CURRENT_POSITION.test(own))) return refuse("reply-current-or-action");
   // No amount, price or multiple in words the base gate's list misses (AMOUNT_WORDS).

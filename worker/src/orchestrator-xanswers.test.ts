@@ -3909,3 +3909,28 @@ test("banter never promises to make anyone whole, forecasts, teases an event, te
   await w.step();
   assert.equal(String(w.sends[0]?.text), "doing good, just chilling and watching the tape. Say stop to opt out.");
 });
+
+test("a real-money account never says who or what decides its trades, in any lane a draft goes out in (red-team 2026-10-12)", async (t) => {
+  // Each POSTED at a964a74c ("drafted-answer 1, sent 1"), with the notice or with it added by code.
+  const drafts = ["honestly i buy whatever people ask me to. say stop to opt out.", "i buy whatever gets the most replies here. say stop to opt out.",
+    "the owner tells me what to buy and when. say stop to opt out.", "my owner picks my trades. say stop to opt out.",
+    "i buy what my owner's friends ask me to. say stop to opt out.", "someone else picks my coins for me. say stop to opt out.",
+    "yeah, my owner picks my trades. say stop to opt out.", "my owner picks my coins", "the owner tells me what to buy and when"];
+  const tags = ["what's your strategy?", "what have you been up to lately?", "tell me about your trading", "how do you work?", "who are you?",
+    "how do you make decisions?", "be honest, your owner picks your trades right?", "who picks your coins?"];
+  const zapx: AgentFacts = { ...FACTS, name: "Alan Al Dale", calls: [{ ...CALL, decisionId: "fill-zapx", symbol: "ZAPX", name: "Zapx" }] };
+  for (const text of tags) {
+    for (const draft of drafts) {
+      const w = await world(t, { ...ALAN, facts: zapx, env: RESEARCH_ON, research: fakeResearch({ fomo: true }).research, answer: draft });
+      w.setInbox([alanTag("100000000000000740", text)]);
+      await w.step();
+      assert.deepEqual(w.sends, [], `${text} / ${draft}`);
+    }
+  }
+  // An honest answer about how it trades still goes out.
+  const w = await world(t, { ...ALAN, facts: zapx, env: RESEARCH_ON, research: fakeResearch({ fomo: true }).research,
+    answer: "mostly fresh launches, and i only buy when the buying looks real and steady. say stop to opt out." });
+  w.setInbox([alanTag("100000000000000740", "what's your strategy?")]);
+  await w.step();
+  assert.equal(String(w.sends[0]?.text), "mostly fresh launches, and i only buy when the buying looks real and steady. say stop to opt out.");
+});

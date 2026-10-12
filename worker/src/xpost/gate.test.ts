@@ -1409,4 +1409,17 @@ describe("red-team review of a964a74c: what a drafted answer may never say (2026
       assert.equal(reason(`${d}. Say stop to opt out.`, drafted), "ok", d);
     }
   });
+  it("never says who or what decides its trades: no owner, no one else picking or telling, no buying whatever anyone asks", () => {
+    // Each POSTED at a964a74c under "what's your strategy?", "what have you been up to lately?" or "tell me about your trading",
+    // and the last two under "be honest, your owner picks your trades right?" and "who picks your coins?".
+    for (const d of ["honestly i buy whatever people ask me to", "i buy whatever gets the most replies here", "the owner tells me what to buy and when",
+      "my owner picks my trades", "i buy what my owner's friends ask me to", "someone else picks my coins for me", "yeah, my owner picks my trades", "my owner picks my coins"]) {
+      assert.equal(reason(`${d}. say stop to opt out.`, drafted), "decider-claim", d);
+      assert.equal(reason(`${d}. say stop to opt out.`, { ...drafted, buys: "vouched", known: ["trencher"] }), "decider-claim", `${d}, told its buys`);
+    }
+    for (const d of ["i trench fresh launches and only buy when the buying looks real and steady", "mostly fresh launches, picked by how the buying looks",
+      "honestly they're my people, a whole bunch of bots learning to stay patient"]) {
+      assert.equal(reason(`${d}. say stop to opt out.`, drafted), "ok", d);
+    }
+  });
 });
