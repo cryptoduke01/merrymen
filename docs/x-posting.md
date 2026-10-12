@@ -554,7 +554,10 @@ the mention itself. They go out **right away**:
 
 - **Selection** (`tagCandidate`): a question or plain address. Opt-outs are
   handled first. Links, secrets, abuse, sensitive topics, spam, instructions
-  and advice requests are dropped before any model call. Digits may appear:
+  and advice requests are dropped before any model call. So is a tag with a
+  letter outside A-Z once its accents are off ("café" stays; a Greek Eta,
+  Lisu, Cherokee, Armenian or an IPA letter goes: each spells "SHERWOOD" or
+  "PEPE" on X and nothing to code), and one with a bidi control. Digits may appear:
   the writer reads every run of digits as "(a number)", glued to letters or
   not (`answerQuestion`: "24h" is "(a number)h", "L2" is "L(a number)", "saw
   it on 2 lists" is "saw it on (a number) lists"), so the figure never

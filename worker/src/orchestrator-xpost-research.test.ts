@@ -789,8 +789,10 @@ describe("never confirm a buy by name", () => {
     said: ["picked up some pepe coin, the buying looked real"], walletPublic: false, ...over,
   });
   /** The tag as writeAnswer reads it: screened, classified, looked up (research on) or not, and the prompt it would draft from. */
-  async function promptFor(text: string, research: boolean): Promise<{ prompt: string; named: boolean; exact: boolean }> {
+  async function promptFor(text: string, research: boolean): Promise<{ prompt: string; named: boolean; exact: boolean } | null> {
     const c = tagCandidate({ id: "t1", authorId: "u1", text: `@alan ${text}`, conversationId: "t1", inReplyToTweetId: "t0", createdAtMs: NOW }, { xUserId: "x1", research });
+    // A letter code cannot read is refused at the door, before any prompt (red-team 2026-10-12): only such a tag may be.
+    if (!c.ok && c.reason === "unsafe-text" && /[^\x00-\x7f]/.test(text)) return null;
     assert.ok(c.ok, `${text}: ${c.ok ? "" : c.reason}`);
     if (!c.ok) throw new Error("unreachable");
     const intent = classifyTag(c.text, { address: c.address ?? null, knownCoins: ["Pepe Coin", "Pepe Coin"] });
@@ -818,7 +820,9 @@ describe("never confirm a buy by name", () => {
       "is $PEPE 2.0 the one you bought?", "thoughts on pepe classic?", "did you buy $PEPE\u200b2?"];
     for (const text of asks) {
       for (const research of [true, false]) {
-        const { prompt, named, exact } = await promptFor(text, research);
+        const read = await promptFor(text, research);
+        if (read === null) continue;
+        const { prompt, named, exact } = read;
         const what = `${text} (research ${research})`;
         assert.equal(named, true, what);
         assert.equal(exact, false, what);
@@ -831,7 +835,7 @@ describe("never confirm a buy by name", () => {
   });
 
   it("the tag's own full contract, which its records bought, is the one way it may say it bought a coin", async () => {
-    const { prompt, named, exact } = await promptFor(`did you buy ${PEPE_CA}?`, true);
+    const { prompt, named, exact } = (await promptFor(`did you buy ${PEPE_CA}?`, true))!;
     assert.equal(named, true);
     assert.equal(exact, true);
     assert.match(prompt, /What you looked up just now.*«you bought it lately».*«your own words when you bought it: the buying looked steady and real»/s);
@@ -841,7 +845,7 @@ describe("never confirm a buy by name", () => {
     // Another contract, under its ticker or not: nothing it bought is said.
     const COPY = `0x${"ee".repeat(20)}`;
     for (const text of [`did you buy ${COPY}?`, `did you buy $PEPE ${COPY}?`, `is $PEPE ${COPY} legit?`]) {
-      const other = await promptFor(text, true);
+      const other = (await promptFor(text, true))!;
       assert.equal(other.exact, false, text);
       assert.doesNotMatch(other.prompt, OWN_BUY_FACT, text);
       assert.doesNotMatch(other.prompt, /Coins you bought lately|not the one you bought/, text);
@@ -850,7 +854,7 @@ describe("never confirm a buy by name", () => {
 
   it("a question that names no coin may still see its buys, by its own labels", async () => {
     for (const research of [true, false]) {
-      const { prompt, named } = await promptFor("what have you been buying lately?", research);
+      const { prompt, named } = (await promptFor("what have you been buying lately?", research))!;
       assert.equal(named, false);
       assert.match(prompt, /Coins you bought lately: «Pepe Coin»/);
       assert.doesNotMatch(prompt, /They named a specific coin/);

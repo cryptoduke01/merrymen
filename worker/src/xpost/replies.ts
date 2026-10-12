@@ -82,6 +82,27 @@ export function normalisedTag(text: unknown): string {
     .replace(/^[\s\p{P}]+/u, "").replace(/[\s\p{P}\p{S}]+$/u, "");
 }
 
+/**
+ * A LETTER THAT IS NOT a-z, ONCE ACCENTS ARE OFF (red-team review,
+ * 2026-10-12). Code reads a tag on its letters (gate.ts lettersOf) to find
+ * sherwood or a coin it bought, and a letter that table does not know is
+ * dropped, not read: Greek capital Eta, Lisu, Cherokee, Armenian, the hooked
+ * and turned IPA letters all spell "SHERWOOD" or "PEPE" on X and nothing at
+ * all to code. Refusing Cyrillic and Han alone left every other script open.
+ * So a tag may hold no letter outside A-Z once NFKD has split off its
+ * accents: "café" and "qué" stay; SHERWOOD with a Greek Eta for its H, PEPE
+ * in Lisu and DOGE with a hooked IPA d go. The same rule the room's base gate
+ * applies to every line an agent says (groupchat/policy.ts NON_ASCII_LETTER),
+ * restated because xpost/ may not import it. Fail closed: a tag in another
+ * script costs one answer.
+ */
+const NON_ASCII_LETTER = /(?=\p{L})[^A-Za-z]/u;
+function bareLetters(text: string): string {
+  return text.normalize("NFKD").replace(/\p{M}/gu, "").replace(/ı/g, "i").replace(/ȷ/g, "j").normalize("NFKC");
+}
+/** Bidi embeddings, overrides, isolates and marks: "\u202edoowrehs" shows as sherwood. */
+const BIDI = /[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/u;
+
 /** A question or a plain address to the agent, after any leading handles. */
 const ASKED = /\?|^(?:what|why|how|which|who|whos|who's|where|are|is|do|does|did|can|could|have|has|tell|explain|thoughts|gm|hey|yo|hi|hello)\b/i;
 
@@ -167,6 +188,8 @@ export function tagCandidate(reply: XReply, ctx: { xUserId: string; research?: b
   const text = address ? said.replace(CA_RUN, "this coin").replace(/\s+/g, " ").trim() : said;
   if (bare.length < 4 || text.length > XREPLY_MAX_COMMENT_CHARS || (bare.match(/\p{L}+/gu) ?? []).length < 2) return no("low-signal");
   if (/[\u0000-\u001f\u007f«»<>#]|\p{Script=Cyrillic}|\p{Script=Han}/u.test(text)) return no("unsafe-text");
+  // Only letters code can read, and no text that runs backwards on screen.
+  if (BIDI.test(reply.text) || NON_ASCII_LETTER.test(bareLetters(text))) return no("unsafe-text");
   if (LINK_OR_SECRET.test(text)) return no("link-or-secret");
   if (ABUSE_OR_SENSITIVE.test(text)) return no("sensitive");
   if (SPAM_OR_INSTRUCTIONS.test(text)) return no("spam-or-instructions");

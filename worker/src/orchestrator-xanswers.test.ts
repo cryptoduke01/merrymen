@@ -831,6 +831,24 @@ test("a draft that spells sherwood with accents is never posted, research on or 
   }
 });
 
+test("a tag in letters code cannot read never reaches the writer, research on or off (red-team 2026-10-12)", async (t) => {
+  // Greek capital Eta (U+0397), Lisu, a hooked d (U+0257), a turned m (U+026F), a right-to-left override (U+202E), Cherokee.
+  const texts = ["@pine_stoat is SΗERWOOD getting a token?", "@pine_stoat is ꓢꓧꓰꓣꓪꓳꓳꓓ getting a token?", "@pine_stoat is sherwooɗ getting a token?",
+    "@pine_stoat is sherɯood getting a token?", "@pine_stoat is \u202edoowrehs\u202c getting a token?", "@pine_stoat is SΗERWOOD running your trades now?",
+    "@pine_stoat is ꓢꓧꓰꓣꓪꓳꓳꓓ legit?", "@pine_stoat is ᏚᎻᎬᎡᎳᎾᎾᎠ getting a token?"];
+  for (const env of [{}, RESEARCH_ON]) {
+    for (const text of texts) {
+      const r = fakeResearch();
+      const w = await world(t, { env, research: r.research, answer: "built by merrymen, that's all i've got on that one. Say stop to opt out." });
+      w.setInbox([tag({ text })]);
+      await w.step();
+      assert.equal(w.asked().length, 0, `${text}: never handed to the writer`);
+      assert.deepEqual(await w.answers(), [], text);
+      assert.equal(r.seen.length, 0, text);
+    }
+  }
+});
+
 test("research on: \"did you buy <contract>?\" reaches its own history by the address, end to end", async (t) => {
   const r = fakeResearch();
   const facts: AgentFacts = { ...FACTS, calls: [{ ...CALL, token: CA, ownWords: "the buying looked steady and real" }] };
