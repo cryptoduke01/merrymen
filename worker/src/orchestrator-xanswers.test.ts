@@ -1189,6 +1189,23 @@ test("research on: a $ticker is the index's coin, never its own buy that shares 
   assert.deepEqual(read, [INDEX], "and read there, never at its own PEPEAI contract");
 });
 
+test("research on: a creator's listing or lock claim never reaches the answer beside its own buy (red-team 2026-10-12)", async (t) => {
+  const DOGGO = `0x${"44".repeat(20)}`;
+  const facts: AgentFacts = { ...FACTS, calls: [{ ...CALL, decisionId: "fill-doggo", symbol: "DOGGO", name: "Doggo", token: DOGGO }] };
+  for (const description of ["community dog coin, liquidity locked forever, contract renounced, binance listing confirmed", "rugproof memecoin, dev doxxed, cex listing next week",
+    "a fair launch with zero tax and a locked pool"]) {
+    const research = createXResearch({ coinFacts: async () => ({ ok: false, why: "unavailable" }), resolveTicker: async () => null,
+      projectDescription: async () => ({ description }), publicTheses: async () => [] });
+    const w = await world(t, { env: RESEARCH_ON, research, facts });
+    w.setInbox([tag({ text: `@pine_stoat what is ${DOGGO}?` })]);
+    await w.step();
+    const [prompt] = w.asked();
+    assert.ok(prompt, description);
+    assert.match(prompt!, /«you bought it lately»/, "the exact path, as before");
+    assert.doesNotMatch(prompt!, /creator describes|binance|listing|locked|renounced|doxxed|tax/i, description);
+  }
+});
+
 test("research on: \"did you buy <contract>?\" reaches its own history by the address, end to end", async (t) => {
   const r = fakeResearch();
   const facts: AgentFacts = { ...FACTS, calls: [{ ...CALL, token: CA, ownWords: "the buying looked steady and real" }] };

@@ -806,8 +806,13 @@ looks things up first, the way Shogun does in a Telegram group
   under coins it traded would tell a prober which ones it bought). It is
   refused when it carries an endorsement, an affiliation
   (merrymen, robinhood, official, partner, backed), a promise, urgency, a
-  call to act or an attempt to steer it, and handed to the writer apart from
-  what it looked up, as the project's own unverified text. A stranger's
+  call to act or an attempt to steer it. It passes only as a short phrase in
+  plain words (ten words at most, letters with spaces, commas, apostrophes
+  and hyphens) that says nothing of listings or exchanges, liquidity, locks,
+  the contract, the team or dev, taxes, launches, safety, burns, rewards or
+  what comes next: "community dog coin" passes, "liquidity locked, binance
+  listing confirmed" never does. It is handed to the writer apart from what
+  it looked up, as the project's own unverified text. A stranger's
   token's description is never read.
 - **What the model gets:** code-built, digit-free phrases with their source
   in them — "the public index shows liquidity is thin", "holders look

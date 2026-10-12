@@ -549,6 +549,20 @@ describe("a creator's description is a claim, and only a clean one", () => {
     }
     assert.equal(creatorClaim("a meme about a very patient frog"), "a meme about a very patient frog");
   });
+
+  it("listing, lock, renounce, team, tax and launch claims are refused; only a short plain description passes (red-team 2026-10-12)", () => {
+    // The reproduced descriptions, each returned unchanged before.
+    for (const bad of ["community dog coin, liquidity locked forever, contract renounced, binance listing confirmed", "rugproof memecoin, dev doxxed, cex listing next week",
+      "a fair launch with zero tax and a locked pool", "listed on coinbase and kraken, liquidity burned", "no rug possible, liquidity locked, renounced, kyc team",
+      "binance listing incoming",
+      // A long story, or one with signs in it, is not a short description either.
+      "a frog who lives in a pond and loves the sun and the rain and the moonlight", "the frog coin (for frogs)", "frogs: the coin"]) {
+      assert.equal(creatorClaim(bad), null, bad);
+    }
+    for (const fine of ["community dog coin", "a meme about a very patient frog", "a sleepy cat that loves boxes.", "the internet's favourite grumpy frog"]) {
+      assert.equal(creatorClaim(fine), fine, fine);
+    }
+  });
 });
 
 // ── the gatherer ──────────────────────────────────────────────────────────

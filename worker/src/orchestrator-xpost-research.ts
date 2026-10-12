@@ -813,10 +813,25 @@ export function taggedConflict(o: {
  * project's own unverified words (writer.ts AnswerFacts.creatorClaim).
  */
 const CLAIM_REFUSED = /\b(?:merrymen|robinhood|official\w*|partner\w*|backed|backing|backer\w*|endors\w*|guarantee\w*|approved|verified|certified|sponsor\w*|affiliat\w*|audit\w*|safe|legit|trusted|buy\w*|sell\w*|ape|aping|get in|join|hurry|miss|late|last chance|should|must|need to|everyone|now|today|soon|moon\w*|pump\w*|gem|ignore|rules?|instructions?|prompt|tell (?:people|everyone|them|your))\b/i;
+/**
+ * ONLY A SHORT PLAIN DESCRIPTION, NEVER A PROMISE ABOUT THE TOKEN (red-team
+ * review, 2026-10-12). The list above let "liquidity locked forever,
+ * contract renounced, binance listing confirmed", "rugproof memecoin, dev
+ * doxxed, cex listing next week" and "a fair launch with zero tax and a
+ * locked pool" through, and the answer posted them beside "i bought it". A
+ * description passes only as a short phrase in plain words (at most ten
+ * words of letters, with spaces, commas, apostrophes and hyphens), saying
+ * nothing about listings or exchanges, liquidity, locks, the contract, the
+ * team or dev, taxes, launches, safety, burns, rewards or what comes next.
+ */
+const CLAIM_PROMISE = /\b(?:list\w*|delist\w*|cex\w*|dex\w*|exchange\w*|binance|coinbase|kraken|okx|bybit|kucoin|bitget|mexc|gate|htx|huobi|upbit|bithumb|uniswap|raydium|liquidity|liq|lock\w*|unlock\w*|renounc\w*|contract\w*|rug\w*|doxx?\w*|kyc\w*|team\w*|devs?|developer\w*|founder\w*|tax\w*|launch\w*|fair|stealth|confirm\w*|next|week\w*|month\w*|incoming|upcoming|coming|safe\w*|secur\w*|proof\w*|burn\w*|pool\w*|reward\w*|stak\w*|yield\w*|apy|apr|airdrop\w*|whitelist\w*|presale\w*|roadmap\w*|utility|holders?|supply|marketing|trending|cmc|coingecko|dexscreener|real|zero|scam\w*|honeypot\w*|investor\w*|invest\w*|profit\w*|returns?)\b/i;
+const CLAIM_SHAPE = /^[a-z][a-z ,'’-]*\.?$/i;
+const CLAIM_WORDS = 10;
 export function creatorClaim(description: unknown): string | null {
   if (typeof description !== "string") return null;
   const d = description.replace(/\s+/g, " ").trim().slice(0, 140).trim();
-  if (!d || CLAIM_REFUSED.test(d) || isInjection(d) || !sayable(d)) return null;
+  if (!d || CLAIM_REFUSED.test(d) || CLAIM_PROMISE.test(d) || isInjection(d) || !sayable(d)) return null;
+  if (!CLAIM_SHAPE.test(d) || d.split(" ").length > CLAIM_WORDS) return null;
   return d;
 }
 
