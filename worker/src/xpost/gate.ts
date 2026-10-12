@@ -140,6 +140,15 @@ export interface XGateCtx {
    * buy-claim.
    */
   known?: string[];
+  /**
+   * AN ANSWER HANDED WHAT IT LOOKED UP, TOLD NONE OF ITS BUYS (red-team
+   * 2026-10-12), read with buys "none" and `known`: then every word is an
+   * everyday one, one it was handed, or the name of a coin in `coins`, just
+   * as for an answer told its buys. "per the index, bonk is ripping on
+   * robinhood chain" under a tag about another coin credited a name nothing
+   * looked up to the index; refused as unlooked-name.
+   */
+  lookedOnly?: boolean;
 }
 
 const refuse = (reason: string): XVerdict => ({ ok: false, reason });
@@ -1395,6 +1404,30 @@ function unvouchedWord(text: string, coins: readonly string[], known: readonly s
   return textWords(text).some((w) => /^[a-z]{3,}$/.test(w) && !ok.has(w) && !BUY_FILLER.has(w) && !BUY_OBJECT.has(w) && !answerWord(w));
 }
 
+/** A word and the forms it may stand for once an ending people add is off: "edged" is "edge", "holders" is "holder". */
+function wordForms(w: string): string[] {
+  const out = [w];
+  for (const end of ["s", "es", "ies", "ed", "d", "ing", "er", "est", "ly", "y"]) {
+    if (!w.endsWith(end) || w.length - end.length < 3) continue;
+    const stem = w.slice(0, -end.length);
+    out.push(stem, `${stem}e`);
+    if (end === "ies") out.push(`${stem}y`);
+    if (stem.at(-1) === stem.at(-2)) out.push(stem.slice(0, -1));
+  }
+  return out;
+}
+
+/**
+ * A NAME AN ANSWER HANDED RESEARCH WAS NOT HANDED (XGateCtx.lookedOnly): a
+ * word of three letters or more that is no everyday one (answerWord), in no
+ * form a word of what it was handed (`known`) or of a coin in `coins`.
+ */
+function unlookedName(text: string, coins: readonly string[], known: readonly string[]): boolean {
+  const ok = new Set<string>();
+  for (const n of [...coins, ...known]) for (const w of textWords(n)) for (const f of wordForms(w)) ok.add(f);
+  return textWords(text).some((w) => /^[a-z]{3,}$/.test(w) && !wordForms(w).some((f) => ok.has(f)) && !BUY_FILLER.has(w) && !BUY_OBJECT.has(w) && !answerWord(w));
+}
+
 function buyClaimed(text: string, vouched: readonly string[] | null): boolean {
   if (vouched === null) return BAG.test(text) || new RegExp(ACQUIRED.source, "i").test(text) || OWNED_ACT.test(text) || OWNED_SHAPE.test(text);
   const names = vouched.map((c) => c.trim().toLowerCase().replace(/^\$/, "")).filter((c) => c !== "");
@@ -1510,7 +1543,7 @@ function strings(list: unknown): string[] {
  * Reason codes (stable, operator-only): empty · pass · meta · hidden-chars · charset · too-short · too-long ·
  * handle · link · markup · emoji · exclaim · caps · ops · alert · hype · pnl ·
  * market · human-claim · points-back · coin-unsaid · paper-unsaid · mode-false · undisclosed · intro-no-trading ·
- * opt-out-unsaid · reply-current-or-action · sherwood-claim · bought-named · buy-claim ·
+ * opt-out-unsaid · reply-current-or-action · sherwood-claim · bought-named · buy-claim · unlooked-name ·
  * fleet-repeat · seed-echo — plus whatever the base gate says (has-digits,
  * quantity, repeat, unvouched-ticker, address, secret…).
  *
@@ -1570,6 +1603,8 @@ function admitMasked(tidied: string, ctx: XGateCtx, baseGate: BaseGate, agentNam
   if (ctx.buys !== undefined && buyClaimed(ctx.kind === "reply" ? withoutReplyOptOut(text) : text, ctx.buys === "none" ? null : coins)) return refuse("buy-claim");
   // Told its buys: no word that could be another coin's name (XGateCtx.known).
   if (ctx.buys === "vouched" && ctx.known !== undefined && unvouchedWord(withoutNames(ctx.kind === "reply" ? withoutReplyOptOut(text) : text, [agentName]), coins, strings(ctx.known))) return refuse("buy-claim");
+  // Handed what it looked up and told none of its buys: no name it was not handed either (XGateCtx.lookedOnly).
+  if (ctx.buys === "none" && ctx.lookedOnly === true && ctx.known !== undefined && unlookedName(withoutNames(ctx.kind === "reply" ? withoutReplyOptOut(text) : text, [agentName]), coins, strings(ctx.known))) return refuse("unlooked-name");
   // Nor, of a coin someone named, that it likes it, a yes or a no, or itself outside a deflection (namedClaim).
   if (ctx.buys === "none" && ctx.named === true && namedClaim(ctx.kind === "reply" ? withoutReplyOptOut(text) : text, agentName)) return refuse("buy-claim");
 

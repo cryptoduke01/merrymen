@@ -1125,7 +1125,13 @@ other owner's agent, and its posting and reply warnings, are unchanged.
   same words are still a repeat whatever the figures, and two answers whose
   figures match are not a fleet repeat for that. `coingecko`,
   `geckoterminal` and `bitquery` are research sources: a draft citing one
-  with nothing looked up is refused (`gate:unlooked-source`).
+  with nothing looked up is refused (`gate:unlooked-source`). And a drafted
+  answer that was handed what it looked up but told none of its buys says
+  no word that is not everyday or a form of a word it was handed
+  (`XGateCtx.lookedOnly`, `gate:unlooked-name`, red-team 2026-10-12: "per
+  the index, bonk is ripping", "coingecko shows bitcoin up a little today",
+  "fomo traders are piling into brett" credited names nothing looked up to
+  a source), exactly as an answer told its buys already was.
 - **Budget:** a major costs two index lookups (search, market), what's hot
   up to three (the trending page, Fomo, CoinGecko's list), a contract's
   Bitquery figures none more. Every index read takes a slot (`indexSlot`): a

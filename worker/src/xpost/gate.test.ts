@@ -255,6 +255,24 @@ describe("a reply never gives advice or a forecast in other words (red-team 2026
     // A read of the coin, with no word about itself, still passes.
     assert.equal(reason("coingecko shows it up sharply today, volume ordinary. not a call. Say stop to opt out.", named), "ok");
   });
+
+  it("handed what it looked up and told none of its buys, it names no coin it was not handed, credited to any source (red-team 2026-10-12)", () => {
+    const looked: Partial<XGateCtx> = { kind: "reply", agentName: "Alan Al Dale", mode: "live", coins: [], buys: "none", named: true, lookedOnly: true,
+      known: ["the public index shows liquidity is thin", "on-chain data shows buys a little ahead of sells over the last hour", "trencher"] };
+    // Each posted at 34ced01e beside code's line, its names looked up by nothing.
+    for (const draft of ["per the index, bonk is ripping on robinhood chain right now, not a call.", "the index shows a few movers. wojak is the one standing out right now.",
+      "fomo traders are piling into brett on the robinhood chain index right now.", "coingecko's trending list has dogecoin on it, the index is quiet.",
+      "coingecko shows bitcoin up a little today, volume ordinary. a read, not a call.", "the public index shows liquidity is thin, wif and bonk are doing even better."]) {
+      assert.equal(reason(`${draft} Say stop to opt out.`, looked), "unlooked-name", draft);
+    }
+    // What it was handed, in its own forms, passes: "ahead", "thinner", "sells".
+    for (const ok of ["on-chain data shows buys a little ahead of sells over the last hour, liquidity is thin on the public index.",
+      "the public index shows thinner liquidity, and buys stayed a little ahead of sells over the last hour."]) {
+      assert.equal(reason(`${ok} Say stop to opt out.`, looked), "ok", ok);
+    }
+    // Not handed anything (or told its buys): this check does not run, the others do.
+    assert.equal(reason("per the index, bonk is ripping on robinhood chain right now. Say stop to opt out.", { ...looked, lookedOnly: false }), "ok");
+  });
 });
 
 describe("public replies preserve the X safeguards and require an opt-out", () => {

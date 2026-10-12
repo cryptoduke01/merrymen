@@ -1763,6 +1763,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // "What's hot?" is a whole question on a strict allowlist (hotAsk): none
       // of its words ("trending", "gainers", "meta") can be a coin's name.
       const askerNames = asked.kind === "hot" ? [] : nameLikeWords(candidate.text).filter((w) => !lookedWords.has(w) && !vouchedNames.has(w));
+      // WHAT IT WAS HANDED: research or a creator's claim (an answer handed none cites no source).
+      const handed = !!looked && (looked.research.length > 0 || !!looked.creatorClaim);
       const gate = (text: string) => admitXPost(text, {
         kind: "reply", agentName: f.name, mode, coins: vouched.map((c) => c.label),
         paperCoins: [...vouched.filter((c) => c.paper).map((c) => c.label), ...(f.mode === "idle" ? money.paper : [])], recentOwn, recentFleet, emojiOk: facts.style.emoji > 0,
@@ -1777,7 +1779,12 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
           // but a deflection, no liking, no yes or no.
           named: !told && (coinNamed || asked.kind === "own-trades" || asked.kind === "coin" || asked.kind === "hot" || asked.kind === "major"),
           // Told its buys, every other word is everyday or one it was handed (XGateCtx.known).
-          known: [facts.strategy ?? "", ...(looked?.research ?? []), looked?.creatorClaim ?? ""].filter((k) => k !== "") }),
+          known: [facts.strategy ?? "", ...(looked?.research ?? []), looked?.creatorClaim ?? ""].filter((k) => k !== ""),
+          // HANDED WHAT IT LOOKED UP, AND TOLD NONE OF ITS BUYS (red-team 2026-10-12):
+          // "per the index, bonk is ripping", "coingecko shows bitcoin up a
+          // little" credited names nothing looked up to a source. Every word
+          // is everyday or one it was handed, as for an answer told its buys.
+          lookedOnly: !told && handed }),
       }, BASE_GATE);
       // SHERWOOD DOES NOT RUN IT YET: a draft that says so is refused before
       // the gate, research on or off — and so is a draft that names it at
@@ -1790,7 +1797,6 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // the public index, thin liquidity" was admitted, a read nobody made. A
       // draft handed no research that cites one (the index, fomo, on-chain
       // data, the project or creator) is refused.
-      const handed = !!looked && (looked.research.length > 0 || !!looked.creatorClaim);
       const unlooked = !coded && raw !== null && !handed && carriesResearch(raw);
       let verdict = raw === null || claimed || named || unlooked ? null : gate(raw);
       for (const line of lines.slice(1)) {

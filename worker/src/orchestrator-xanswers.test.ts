@@ -2138,7 +2138,7 @@ function handing(bundle: Partial<ResearchBundle>, match: RegExp = /this coin/): 
     async gather(input: { question?: string }): Promise<ResearchBundle> {
       r.asked++;
       if (!match.test(input.question ?? "")) return { facts: [], lookups: 0, notes: [] };
-      return { facts: ["per on-chain data, the buying has had the edge over the last hour"], lookups: 1, notes: [], ...bundle };
+      return { facts: ["on-chain data shows buys a little ahead of sells over the last hour"], lookups: 1, notes: [], ...bundle };
     },
   };
   return r;
@@ -2319,9 +2319,46 @@ test("majors: never that it holds or is buying the coin, in the third person, no
     await w.step();
     const [row] = await w.answers();
     assert.equal(row!.status, "skipped", end);
-    assert.match(row!.reason ?? "", /^gate:(?:buy-claim|hype)$/, end);
+    assert.match(row!.reason ?? "", /^gate:(?:buy-claim|hype|unlooked-name)$/, end);
     assert.deepEqual(w.sends, [], end);
   }
+});
+
+test("a market answer never names a coin nothing looked up, credited to the index or coingecko, and no drafted answer handed research does either (red-team 2026-10-12)", async (t) => {
+  // At 34ced01e each went out with code's line after it.
+  const hotDrafts = ["per the index, bonk is ripping on robinhood chain right now, not a call.", "the index shows a few movers. wojak is the one standing out right now.",
+    "fomo traders are piling into brett on the robinhood chain index right now.", "coingecko's trending list has dogecoin on it, the index is busy."];
+  const pools = [namedPool("ZAPX", 1, 42.1, 1.2e6), namedPool("QRTZ", 2, -8.3, 310_000), namedPool("MOLT", 3, 5, 90_000)];
+  for (const draft of hotDrafts) {
+    const w = await world(t, { env: RESEARCH_ON, research: hotResearch(pools, ["PEPE"]).research, answer: `${draft} Say stop to opt out.` });
+    w.setInbox([tag({ text: "@pine_stoat what's hot?" })]);
+    await w.step();
+    assert.deepEqual(w.asked(), [], draft);
+    assert.doesNotMatch(String(w.sends[0]?.text ?? ""), /bonk|wojak|brett|dogecoin/i);
+  }
+  const major = await world(t, { env: RESEARCH_ON, research: majorsResearch().research,
+    answer: "coingecko shows bitcoin up a little today, volume ordinary. a read, not a call. Say stop to opt out." });
+  major.setInbox([tag({ text: "@pine_stoat how's eth doing?" })]);
+  await major.step();
+  assert.deepEqual(major.asked(), []);
+  assert.doesNotMatch(String(major.sends[0]?.text ?? ""), /bitcoin/);
+  // A drafted coin answer (a tagged contract, looked up on the index) names nothing it was not handed.
+  for (const draft of ["per the index, bonk is ripping on robinhood chain right now, not a call.", "the public index shows liquidity is thin, wif and bonk are doing even better.",
+    "the public index shows liquidity is thin, brett looks healthier."]) {
+    const w = await world(t, { env: RESEARCH_ON, research: fakeResearch().research, answer: `${draft} Say stop to opt out.` });
+    w.setInbox([tag({ text: ASK_CA })]);
+    await w.step();
+    const [row] = await w.answers();
+    assert.equal(row!.status, "skipped", draft);
+    assert.equal(row!.reason, "gate:unlooked-name", draft);
+    assert.deepEqual(w.sends, [], draft);
+  }
+  // Restating what it was handed still goes out.
+  const fine = await world(t, { env: RESEARCH_ON, research: fakeResearch().research,
+    answer: "the public index shows liquidity is thin and holders look concentrated, not a call. Say stop to opt out." });
+  fine.setInbox([tag({ text: ASK_CA })]);
+  await fine.step();
+  assert.equal((await fine.answers())[0]!.status, "posted");
 });
 
 test("majors: a copycat ticker gets no figures, and goes on as a coin of the chain", async (t) => {
@@ -2349,7 +2386,7 @@ test("a tagged contract with a busy onchain hour goes out with bitquery's buys a
       { minutes: 15, buyUsd: 5_000, sellUsd: 1_200, buys: 12, sells: 4, buyers: 11, sellers: 3 },
       { minutes: 60, buyUsd: 12_300, sellUsd: 8_100, buys: 40, sells: 19, buyers: 30, sellers: 14 },
     ] } };
-  const words = "per on-chain data, the buying has had the edge over the last hour, and liquidity is thin on the public index.";
+  const words = "on-chain data shows buys a little ahead of sells over the last hour, and liquidity is thin on the public index.";
   const w = await world(t, { env: RESEARCH_ON, research: fakeResearch({ flow: reading }).research, answer: `${words} Say stop to opt out.` });
   w.setInbox([tag({ text: `@pine_stoat thoughts on ${CA}?` })]);
   await w.step();
