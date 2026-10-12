@@ -499,7 +499,10 @@ the mention itself. They go out **right away**:
   reads, so a batch is worked through on the same pass, even when that
   pass's posts are not due for planning (the poll's minute and the plan's
   drift apart by a pass). Such a pass drafts answers and comment replies
-  only. Up to three tags a batch, ten drafts a pass, as before.
+  only. Up to three tags a batch. Answers and comment replies have their own
+  bound per pass (two batches' worth, six), apart from the posts' ten drafts:
+  other owners' posts using up the ten never leave a batch unanswered, and
+  the next pass's posts start at the first owner they cut short.
 - **Nothing spent on an answer that cannot go.** The day's 24 count the
   answers already sent and those drafted and still waiting to go out: once
   they make 24, no more are drafted that day. One that still cannot take the

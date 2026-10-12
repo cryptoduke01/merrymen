@@ -38,6 +38,8 @@ async function world(t: TestContext, o: {
   consent?: boolean;
   /** The owner's hello on this X account, already posted before the pass. Default: posted. */
   hello?: boolean;
+  /** Other owners, each on an X account of its own with posting on and no hello yet; their tenants sort first. */
+  others?: number;
   /** MERRYMEN_XPOST_REPLIES_APPROVED as set (null: unset), read as the orchestrator reads it. Default: approved for everyone. */
   scope?: string | null;
   env?: Record<string, string>; research?: XResearch; facts?: AgentFacts; answer?: string;
@@ -56,6 +58,13 @@ async function world(t: TestContext, o: {
       body: "I am an AI trading agent", nowMs: NOW - DAY, dueAtMs: NOW - DAY });
     await store.claimPost(db, intro!, NOW - DAY);
     await store.markPosted(db, intro!, "999", NOW - DAY);
+  }
+  const others = Array.from({ length: o.others ?? 0 }, (_, i) => `0x${(i + 1).toString(16).padStart(2, "0").repeat(20)}`);
+  for (const [i, other] of others.entries()) {
+    await store.upsertAccount(db, dek, { tenant: other, xUserId: `${500 + i}`, username: `other_${i}`,
+      tokens: { accessToken: "private-access", refreshToken: "private-refresh", accessExpiresAtMs: NOW + 7 * DAY, scope: "tweet.read tweet.write" },
+      nowMs: NOW - 2 * DAY });
+    await store.setPosting(db, other, { enabled: true, xUserId: `${500 + i}` }, NOW - DAY);
   }
   let inbox: Record<string, unknown>[] = [tag()];
   const sends: Record<string, unknown>[] = [], prompts: string[] = [], reads: number[] = [];
@@ -78,7 +87,7 @@ async function world(t: TestContext, o: {
       ? { ...xpostEnv(env), repliesApproved: true, replyPollsPerDay: o.polls }
       : { ...xpostEnv(o.scope === null ? env : { ...env, MERRYMEN_XPOST_REPLIES_APPROVED: o.scope }), replyPollsPerDay: o.polls },
     deps: { dialect: "sqlite", fetch, monotonic: () => 0, member: async () => ({ tz: o.tz ?? null }),
-      facts: async () => new Map([[TENANT, o.facts ?? FACTS]]),
+      facts: async () => new Map([[TENANT, o.facts ?? FACTS], ...others.map((t, i): [string, AgentFacts] => [t, { ...FACTS, tenant: t, agentId: t, name: `Other ${i}`, calls: [] }])]),
       // Only the answer prompt gets words back: every other draft passes.
       llm: async (_creds, input) => {
         prompts.push(input.prompt);
@@ -88,7 +97,7 @@ async function world(t: TestContext, o: {
       ...(o.research ? { research: o.research } : {}),
     },
   });
-  const step = (now = NOW) => { clock = now; return poster.step(db, [{ tenant: TENANT, agentId: TENANT }], new Map(), now); };
+  const step = (now = NOW) => { clock = now; return poster.step(db, [{ tenant: TENANT, agentId: TENANT }, ...others.map((t) => ({ tenant: t, agentId: t }))], new Map(), now); };
   const answers = async () => (await store.postsOf(db, TENANT, 0)).filter((p) => p.kind === "answer");
   const asked = () => prompts.filter((p) => /Untrusted question/.test(p));
   return { db, step, answers, asked, systems, sends, reads, setInbox: (v: Record<string, unknown>[]) => { inbox = v; } };
@@ -643,6 +652,17 @@ test("an X account's answers have their own day of model calls, so strangers' ta
   spent.setInbox([tag({ id: "100000000000000081", conversation_id: "100000000000000081", author_id: "881", text: "@pine_stoat what model do you run on?" })]);
   await spent.step(NOW + MIN);
   assert.ok((await spent.answers()).some((a) => a.status === "scheduled" && /new sherwood-1\b/.test(a.body)));
+});
+
+test("a tag this pass read is answered even when other owners' posts used the pass's ten drafts", async (t) => {
+  // Ten owners sorting first, each due its hello: the posts' cap is spent before the active owner's turn.
+  const w = await world(t, { others: 10 });
+  await w.step();
+  const intros = (await Promise.all(Array.from({ length: 10 }, (_, i) => store.introPostsOf(w.db, `0x${(i + 1).toString(16).padStart(2, "0").repeat(20)}`, `${500 + i}`)))).flat();
+  assert.equal(intros.length, 10, "the posts' ten drafts went to the other owners' hellos");
+  const answers = await w.answers();
+  assert.deepEqual(answers.map((a) => a.status), ["scheduled"], "and the batch whose cursor moved on is still answered");
+  assert.equal(w.asked().length, 1);
 });
 
 test("research gets only what is left of the pass's send budget, and none past it", async (t) => {

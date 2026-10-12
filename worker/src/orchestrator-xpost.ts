@@ -142,6 +142,14 @@ const MAX_DUE = 50;
 const MAX_SCAN = 500;
 const MAX_SENDS_PER_PASS = 20;
 const MAX_DRAFTS_PER_PASS = 10;
+/**
+ * ANSWERS AND COMMENT REPLIES HAVE THEIR OWN BOUND, apart from the posts'.
+ * They draft from a batch this pass read, whose cursor has already moved on:
+ * a batch left behind because other owners' posts used the pass's ten is
+ * lost for good. At most MAX_REPLY_POLLS_PER_PASS batches a pass, each worked
+ * through ANSWERS_PER_POLL at a time.
+ */
+const MAX_ANSWER_DRAFTS_PER_PASS = MAX_REPLY_POLLS_PER_PASS * ANSWERS_PER_POLL;
 /** What a new draft must not echo: its own account's history, and the fleet's. */
 const OWN_MEMORY_MS = 60 * DAY;
 const FLEET_MEMORY_MS = 14 * DAY;
@@ -1193,11 +1201,20 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
     if (!answersOnly) planResumeAt = "";
     // Only REAL work counts against the cap: a model call made, or a row written.
     let drafts = 0;
+    // Answers and comment replies, on their own bound (MAX_ANSWER_DRAFTS_PER_PASS).
+    let answerDrafts = 0;
+    let cut = false;
     for (const account of turn) {
-      if (drafts >= MAX_DRAFTS_PER_PASS) {
-        if (!answersOnly) planResumeAt = account.tenant;
-        break;
+      // PAST THE POSTS' CAP, ONLY THIS PASS'S BATCHES: the next pass's posts
+      // start at the first owner cut short, and an owner whose mentions this
+      // pass read still answers them.
+      const postsCapped = drafts >= MAX_DRAFTS_PER_PASS;
+      if (postsCapped) {
+        if (!answersOnly && !cut) planResumeAt = account.tenant;
+        cut = true;
+        if (!comments.has(account.xUserId) || answerDrafts >= MAX_ANSWER_DRAFTS_PER_PASS) continue;
       }
+      const plansPosts = !answersOnly && !postsCapped;
       try {
         const f = facts.get(account.tenant);
         if (!f) continue;
@@ -1211,12 +1228,12 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         const planNow = at();
         // The X ACCOUNT's history, from every owner posting on it: one timeline, one cadence.
         const posts = await postsOfXUser(shared, account.xUserId, planNow - PLAN_HISTORY_MS, 200);
-        const intros = answersOnly ? [] : await introPostsOf(shared, account.tenant, account.xUserId);
-        const social = answersOnly ? null : await deps.socialProfile?.(account.tenant);
+        const intros = plansPosts ? await introPostsOf(shared, account.tenant, account.xUserId) : [];
+        const social = plansPosts ? await deps.socialProfile?.(account.tenant) : null;
         const tradeResults = social?.xTradeResults === true && social.currentAgent?.address.toLowerCase() === f.agentId.toLowerCase();
         const sells = tradeResults && social?.currentAgent
           ? await (deps.saleResults ?? readSaleResults)(shared, social.currentAgent.address, social.currentAgent.chainId, Math.floor(planNow / 1000)) : [];
-        const intents = answersOnly ? [] : planPosts({
+        const intents = !plansPosts ? [] : planPosts({
           tenant: account.tenant,
           account,
           tz: z.tz,
@@ -1243,7 +1260,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         for (const intent of intents) {
           if (drafts >= MAX_DRAFTS_PER_PASS) {
             // Cut short inside this account: the next pass starts here.
-            planResumeAt = account.tenant;
+            if (!cut) planResumeAt = account.tenant;
+            cut = true;
             break;
           }
           const r = await writeIntent(shared, account, f, intent, planNow, recentOwn, recentFleet, talked);
@@ -1261,7 +1279,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         }
         // The batch is the X account's: another owner on it may have been
         // polled, so this owner's own scope is asked again.
-        if (model && drafts < MAX_DRAFTS_PER_PASS && comments.has(account.xUserId) && repliesFor(account.tenant)
+        if (model && answerDrafts < MAX_ANSWER_DRAFTS_PER_PASS && comments.has(account.xUserId) && repliesFor(account.tenant)
           && await repliesEnabledFor(shared, account.tenant, account.xUserId)) {
           // An active agent answers tags (and comments on any of its posts)
           // through one path, so one post is never answered twice.
@@ -1273,13 +1291,13 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
           // may yet be skipped, so it stays in recentOwn (not to be echoed)
           // and out of what an answer may restate as said.
           const said = isActive ? await recentBodies(shared, { tenant: account.tenant, sinceMs: at() - OWN_MEMORY_MS, limit: 20, posted: true }) : [];
-          for (let i = 0; i < (isActive ? ANSWERS_PER_POLL : 1) && drafts < MAX_DRAFTS_PER_PASS; i++) {
+          for (let i = 0; i < (isActive ? ANSWERS_PER_POLL : 1) && answerDrafts < MAX_ANSWER_DRAFTS_PER_PASS; i++) {
             const result = isActive
               // Its OWN posts only: another owner posting on the same X account is not its history.
               ? await writeAnswer(shared, account, f, comments.get(account.xUserId)!, z.tz, at, recentOwn, recentFleet, said, posts.filter((p) => p.tenant === account.tenant), bump, nowMs + SEND_BUDGET_MS)
               : await writeReply(shared, account, f, comments.get(account.xUserId)!, z.tz, at, recentOwn, recentFleet);
             if (!result) break;
-            drafts++;
+            answerDrafts++;
             bump(result.body ? (isActive ? "drafted-answer" : "drafted-reply") : (isActive ? "answer-skipped" : "reply-skipped"));
             if (result.body) { recentOwn.unshift(result.body); recentFleet.unshift(result.body); }
           }
@@ -1319,7 +1337,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
    * what is left before `sendBy` (the pass's start plus SEND_BUDGET_MS), and
    * none at all past it: the answer is then written as one that could not
    * look anything up. Drafts were already bounded per pass
-   * (MAX_DRAFTS_PER_PASS, ANSWERS_PER_POLL a batch).
+   * (MAX_ANSWER_DRAFTS_PER_PASS, ANSWERS_PER_POLL a batch).
    *
    * NOTHING SPENT ON AN ANSWER THAT CANNOT GO. With the X account's answers
    * for the day all sent or drafted and waiting, nothing is drafted (and one
