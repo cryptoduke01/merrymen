@@ -1542,7 +1542,14 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       const coinNamed = namesACoin({ text: candidate.text, intent: asked, address: candidate.address ?? null });
       // ITS BUYS ONLY FOR A PLAIN QUESTION ABOUT WHAT IT TRADES (red-team 2026-10-12):
       // a copycat no matcher finds ("bonc", a frog emoji) is never handed them.
-      const general = !coinNamed && generalTradesQuestion(candidate.text);
+      // NOR UNDER ANOTHER HANDLE (red-team 2026-10-12): the reply prefix X writes
+      // is taken off before the question is read, so "@dogwifcoin @alanaldale
+      // did you buy <its PEPE contract>?" read as the plain exact question and
+      // "yep, bought it lately" was posted under a tag naming another project.
+      // A tag whose prefix names anyone else gets neither its buys nor the
+      // exact path, as it never gets the model line.
+      const otherHandles = candidate.otherHandles === true;
+      const general = !coinNamed && !otherHandles && generalTradesQuestion(candidate.text);
       const intent = research ? asked : null;
       const templated = asked.kind === "model";
       if (!templated) {
@@ -1565,10 +1572,11 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       let looked: { intent: AnswerIntentKind; research: string[]; creatorClaim?: string; boughtExact?: boolean } | null = null;
       if (research && intent) {
         const bundle = await research.gather({ shared, intent, tenant: account.tenant, xUserId: account.xUserId, facts: f, posts, fomo: researchFomo,
-          coinNamed: coinNamed || !general, question: candidate.text, budgetMs: Math.max(0, sendBy - at()) })
+          // Under another handle no question is one the exact path reads (ResearchInput.question: absent, never).
+          coinNamed: coinNamed || !general, ...(otherHandles ? {} : { question: candidate.text }), budgetMs: Math.max(0, sendBy - at()) })
           .catch((): ResearchBundle => ({ facts: [], lookups: 0, notes: ["fault"] }));
         looked = { intent: intent.kind, research: bundle.facts, ...(bundle.claim ? { creatorClaim: bundle.claim } : {}),
-          ...(bundle.exact === true && candidate.address ? { boughtExact: true } : {}) };
+          ...(bundle.exact === true && candidate.address && !otherHandles ? { boughtExact: true } : {}) };
         bump(`answer-intent-${intent.kind}`);
         if (bundle.lookups) bump("answer-lookups", bundle.lookups);
         for (const note of new Set(bundle.notes)) bump(`answer-research-${note}`);

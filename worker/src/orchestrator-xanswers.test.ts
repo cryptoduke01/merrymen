@@ -1130,6 +1130,41 @@ test("told none of its buys, an answer about a named coin never says it bought, 
   assert.equal(row!.reason, "gate:buy-claim");
 });
 
+test("a tag whose reply prefix names another project gets neither its buys nor the exact path (red-team 2026-10-12)", async (t) => {
+  // A live agent that bought PEPE at 0x1a…1a; each tag replies straight to its hello (tweet 999), research on.
+  const PEPE_CA = `0x${"1a".repeat(20)}`;
+  const facts: AgentFacts = { ...FACTS, calls: [{ ...CALL, token: PEPE_CA }] };
+  const inThread = (text: string) => tag({ id: "100000000000000050", conversation_id: "999", referenced_tweets: [{ type: "replied_to", id: "999" }], text });
+  const cases: [string, string][] = [
+    [`@dogwifcoin @pine_stoat did you buy ${PEPE_CA}?`, "yep, bought it lately, real money. Say stop to opt out."],
+    [`@pine_stoat @dogwifcoin did you buy ${PEPE_CA}?`, "yep, bought it lately, real money. Say stop to opt out."],
+    ["@pepe_inu_token @pine_stoat what have you been buying lately?", "yep, grabbed pepe lately with real money. Say stop to opt out."],
+    ["@pine_stoat @pepe_inu_token what have you been buying lately?", "yep, grabbed pepe lately with real money. Say stop to opt out."],
+  ];
+  for (const env of [RESEARCH_ON, {}]) {
+    for (const [text, answer] of cases) {
+      if (env !== RESEARCH_ON && text.includes(PEPE_CA)) continue;
+      const w = await world(t, { env, research: fakeResearch().research, facts, answer });
+      w.setInbox([inThread(text)]);
+      await w.step();
+      w.setInbox([]);
+      await w.step(NOW + MIN);
+      const [prompt] = w.asked();
+      assert.ok(prompt, text);
+      assert.doesNotMatch(prompt!, /They tagged the exact contract|«you bought it lately|Coins you bought lately|«Pepe»/, text);
+      assert.deepEqual(w.sends, [], text);
+      const [row] = await w.answers();
+      assert.equal(row!.status, "skipped", text);
+      assert.match(row!.reason ?? "", /^gate:(?:buy-claim|bought-named)$/, text);
+    }
+  }
+  // The same questions with no other handle: the exact path and the buys, as before.
+  const w = await world(t, { env: RESEARCH_ON, research: fakeResearch().research, facts, answer: "yep, bought it lately, real money. Say stop to opt out." });
+  w.setInbox([inThread(`@pine_stoat did you buy ${PEPE_CA}?`)]);
+  await w.step();
+  assert.match(w.asked()[0]!, /They tagged the exact contract/);
+});
+
 test("asking name by name says nothing of which coins it bought: a name it bought and one it never did are read alike, research on or off (red-team 2026-10-12)", async (t) => {
   // The reproduced pairs, from a live agent that bought only PEPE ("Pepe").
   const pairs = [["@pine_stoat is pepe legit?", "@pine_stoat is bonk legit?"], ["@pine_stoat is pepe legit?", "@pine_stoat is wojak legit?"],
