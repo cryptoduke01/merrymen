@@ -438,7 +438,6 @@ function utcDay(ms: number): string {
   return new Date(ms).toISOString().slice(0, 10);
 }
 
-/** The mode a post may state: the agent's own, or none for an agent that is not trading. */
 /**
  * THE HELLO FIRST. Whether this owner's hello on this X account — the post
  * that tells readers an AI agent posts here — is dealt with: posted, skipped
@@ -452,6 +451,7 @@ async function helloDone(shared: Db, account: XAccount, nowMs: number): Promise<
   return introState({ tenant: account.tenant, account, intros, nowMs, dayOf: utcDay }).state === "done";
 }
 
+/** The mode a post may state: the agent's own, or none for an agent that is not trading. */
 function modeOf(f: AgentFacts): "paper" | "live" | null {
   return f.mode === "idle" ? null : f.mode;
 }
