@@ -367,13 +367,16 @@ struct XPostingAccount: Equatable {
     /// coin posts, inside the posting limit and the ten-minute review. An agent
     /// the operator made active answers posts that tag it instead — comments on
     /// its own posts arrive the same way — right away, in a lane of its own, so
-    /// its warning promises no review window.
+    /// its warning promises no review window. Its answers may carry market
+    /// figures Merrymen renders from public data (worker/src/xpost/figures.ts),
+    /// and its warning says that too; every other owner's is unchanged.
     static func replyWarning(_ handle: String, active: Bool) -> String {
         if active {
             return [
                 "Your Merryman will reply as @\(handle) to selected posts that tag it, including comments on its own posts.",
                 "It chooses which posts to answer; it won’t answer every one. Answers go out right away: they don’t wait under Coming up, so you can’t skip one first.",
-                "Up to 24 answers a day on top of its posts, and at most two to one person a day. Anyone can reply stop to opt out. Turn replies off at any time to stop answering."
+                "Up to 24 answers a day on top of its posts, and at most two to one person a day. Anyone can reply stop to opt out. Turn replies off at any time to stop answering.",
+                "Answers may include market figures from public data (CoinGecko, GeckoTerminal, Fomo and Bitquery), such as a coin’s price, market cap, volume or recent change. Merrymen adds them as the data showed them; they are never advice."
             ].joined(separator: "\n\n")
         }
         return [

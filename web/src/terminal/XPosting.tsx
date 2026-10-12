@@ -164,9 +164,18 @@ const REPLY_WARNING_BODY = [
   "It chooses which comments to answer; it won’t reply to every comment. Replies share the same daily limit as posts.",
   "Each reply waits under Coming up for at least ten minutes first, with a link to the comment, and you can skip it there. Turn replies off at any time to cancel waiting replies.",
 ] as const;
+/**
+ * AN ACTIVE AGENT'S ANSWERS MAY CARRY MARKET FIGURES (2026-10-12): a coin's
+ * rank, price, market cap, volume or recent change, rendered by Merrymen from
+ * public data (CoinGecko, GeckoTerminal, Fomo, Bitquery) after the answer's
+ * own words, which still never hold a number (worker/src/xpost/figures.ts).
+ * So its warning says so; every other owner's is unchanged. Pinned by
+ * x-posting.test.ts and iOS XPostingTests.
+ */
 const ANSWER_WARNING_BODY = [
   "It chooses which posts to answer; it won’t answer every one. Answers go out right away: they don’t wait under Coming up, so you can’t skip one first.",
   "Up to 24 answers a day on top of its posts, and at most two to one person a day. Anyone can reply stop to opt out. Turn replies off at any time to stop answering.",
+  "Answers may include market figures from public data (CoinGecko, GeckoTerminal, Fomo and Bitquery), such as a coin’s price, market cap, volume or recent change. Merrymen adds them as the data showed them; they are never advice.",
 ] as const;
 const replyWarningYes = (handle: string) => `Let it reply as ${handle}`;
 const replyHint = (handle: string, active: boolean) => active

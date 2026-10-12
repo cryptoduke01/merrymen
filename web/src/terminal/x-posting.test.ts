@@ -153,7 +153,7 @@ describe("comment reply consent", () => {
     assert.match(text(), new RegExp(`reply as @${HANDLE} to selected comments on its coin posts\\.`));
     assert.match(text(), /same daily limit/);
     assert.match(text(), /at least ten minutes/);
-    assert.doesNotMatch(text(), /tag it|right away|24 answers/, "an owner merrymen did not make active is told of comment replies only");
+    assert.doesNotMatch(text(), /tag it|right away|24 answers|market figures|CoinGecko/, "an owner merrymen did not make active is told of comment replies only");
     await press(buttons(`Let it reply as @${HANDLE}`)[0], "reply confirm");
     assert.deepEqual(writes()[0]?.body, { action: "enable-replies", owner: OWNER, xUserId: X_ID });
     assert.equal(replySwitch()?.getAttribute("aria-checked"), "true");
@@ -171,6 +171,7 @@ describe("comment reply consent", () => {
     assert.match(dialog, /Answers go out right away: they don’t wait under Coming up/);
     assert.match(dialog, /Up to 24 answers a day on top of its posts, and at most two to one person a day\./);
     assert.match(dialog, /Anyone can reply stop to opt out\./);
+    assert.match(dialog, /Answers may include market figures from public data \(CoinGecko, GeckoTerminal, Fomo and Bitquery\), such as a coin’s price, market cap, volume or recent change\. Merrymen adds them as the data showed them; they are never advice\./);
     assert.doesNotMatch(dialog, /at least ten minutes|same daily limit/, "it keeps no ten-minute review, so it does not promise one");
     await press(buttons(`Let it reply as @${HANDLE}`)[0], "reply confirm");
     assert.deepEqual(writes()[0]?.body, { action: "enable-replies", owner: OWNER, xUserId: X_ID });
@@ -802,6 +803,7 @@ describe("the warning keeps its words", () => {
       "Your Merryman will reply as ${handle} to selected posts that tag it, including comments on its own posts.",
       "It chooses which posts to answer; it won’t answer every one. Answers go out right away: they don’t wait under Coming up, so you can’t skip one first.",
       "Up to 24 answers a day on top of its posts, and at most two to one person a day. Anyone can reply stop to opt out. Turn replies off at any time to stop answering.",
+      "Answers may include market figures from public data (CoinGecko, GeckoTerminal, Fomo and Bitquery), such as a coin’s price, market cap, volume or recent change. Merrymen adds them as the data showed them; they are never advice.",
       "Let it reply as ${handle}",
     ]) {
       assert.ok(SRC.includes(said), `the reply warning lost: "${said}"`);
