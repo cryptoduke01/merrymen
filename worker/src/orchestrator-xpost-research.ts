@@ -117,13 +117,43 @@ const SHERWOOD_ASK = /\bsherwood/i;
  * new sherwood-1 is what they've got in the oven") reads as Merrymen
  * confirming that token, ready to screenshot. So such a tag gets no answer
  * at all: not the model line, and not a draft (which may not name sherwood
- * anyway). "Your coins" is its own trading, not a token, and is read past:
- * "is sherwood choosing your coins?" is still the model question.
+ * anyway).
+ *
+ * READ WIDE, BECAUSE A MISS IS THE SCREENSHOT (final review, 2026-10-12).
+ * Any "$" before a letter is a ticker, however long and with an underscore
+ * ("$SHERWOODINU", "$SHERWOOD_AI"), not only the 2-10 letter cashtag the
+ * Telegram reader takes. Trade, price and venue talk is token talk: "just
+ * aped sherwood", "is sherwood pumping?", "sherwood mcap", "is sherwood on
+ * pons yet?", "is sherwood legit?". A name that runs on from sherwood
+ * ("sherwoodinu", "sherwood_ai") is a token's name, never the model's
+ * (sherwood-1, sherwood one). A model question that happens to use one of
+ * these words fails closed: it is not answered.
+ *
+ * ITS OWN TRADING IS READ PAST, and only that: "does sherwood-1 pick your
+ * trades now?", "is sherwood choosing your coins?" — a word for picking or
+ * running, then "your coins / trades / buys". "Is sherwood one of your
+ * coins?" and "one of their coins" are a token.
  */
-const TOKEN_WORDS = /\b(?:coins?|tokens?|contracts?|ca|launch\w*|presales?|airdrops?|tickers?|mint\w*|memecoins?|listings?|listed|cashtags?)\b/i;
-const OWN_COINS = /\b(?:your|ur|yr|my|its|their)\s+coins\b/gi;
+const TOKEN_WORDS = new RegExp(
+  [
+    String.raw`\b(?:coins?|tokens?|contracts?|ca|launch\w*|presales?|airdrops?|tickers?|mint\w*|memecoins?|listings?|listed|cashtags?)\b`,
+    // Trading it, and what a trader reads off a coin.
+    String.raw`\b(?:buy\w*|bought|ap(?:e|ed|es|ing)|sell\w*|sold|trad(?:e|es|ed|ing)|swap\w*|pump\w*|dump\w*|moon\w*|send(?:ing)?\s+it|bags?|bagholders?|hold(?:s|ing|ers?)?|entry|entries|exit\w*|stak\w*|invest\w*)\b`,
+    String.raw`\b(?:price\w*|worth|charts?|candles?|mcap|marketcap|market\s*caps?|fdv|ath|supply|liq|liquidity|volume|pools?|curve|gem|degen\w*|\d+x|x\d+)\b`,
+    // Whether it is real, and where it trades.
+    String.raw`\b(?:legit|official|fake|scam\w*|rug\w*|honeypot|dex\w*|uniswap|pons|pump\.?fun|robinhood\s+chain)\b`,
+  ].join("|"),
+  "i",
+);
+/** "$" before a letter or an underscore, however long the tag: "$SHERWOODINU", "$sherwood_ai". */
+const ANY_TICKER = /\$\s*[\p{L}_]/u;
+/** A name that runs on from sherwood, other than its model: "sherwoodinu", "sherwood_ai", "sherwoodcoin". */
+const SHERWOOD_COMPOUND = /\bsherwood(?!one\b)[\p{L}_]/iu;
+/** Its own trading, after a word for picking or running it: read past, and nothing else is. */
+const OWN_TRADING = /\b(?:pick\w*|choos\w*|chose\w*|select\w*|decid\w*|mak(?:e|es|ing)|run(?:s|ning)?|driv\w*|call(?:s|ing)?|power\w*|handl\w*|manag\w*|plac\w*|plan\w*|do|does|doing)\s+(?:all\s+)?(?:of\s+)?(?:your|ur|yr|my)\s+(?:coins?|trades?|buys?|sells?|picks?|calls?)\b/gi;
 function tokenAsked(t: string, address: string | null): boolean {
-  return address !== null || extractCashtags(t).length > 0 || TOKEN_WORDS.test(t.replace(OWN_COINS, " "));
+  return address !== null || ANY_TICKER.test(t) || extractCashtags(t).length > 0 || SHERWOOD_COMPOUND.test(t)
+    || TOKEN_WORDS.test(t.replace(OWN_TRADING, " "));
 }
 
 /** A word of the line, for matching a coin it traded named without a $ sign. */

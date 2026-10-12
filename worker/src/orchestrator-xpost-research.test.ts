@@ -129,6 +129,37 @@ describe("a tag's intent, read by code", () => {
     assert.equal(classifyTag("what model do you run on?", { address: CA }).kind, "unanswered", "a model question carrying a contract");
   });
 
+  it("a long or underscored ticker, trade, price or venue talk, or 'one of your coins' beside sherwood is a token: answered by nothing", () => {
+    const tokenAsks = [
+      // Tickers the 2-10 letter cashtag reader does not take.
+      "is $SHERWOODINU legit?", "is $SHERWOOD_AI the merrymen one?", "is $sherwoodinu yours?", "is $ SHERWOOD yours?",
+      // A name that runs on from sherwood is a token's, never the model's.
+      "is sherwoodinu yours?", "is sherwood_ai the merrymen one?",
+      // Trading it, and what a trader reads off it.
+      "just aped sherwood, is it the merrymen one?", "bought some sherwood, is it yours?", "is sherwood pumping?", "what's the sherwood price?",
+      "sherwood mcap looking good, is it official?", "is sherwood on pons yet?", "sherwood chart is wild, is this you guys?",
+      "just aped sherwood, is it official?", "sherwood pumping hard, is that you guys?", "is sherwood on dexscreener yours?", "where to buy sherwood?",
+      "sherwood chart looks wild, is it merrymen's?", "sherwood mcap?", "is sherwood legit?", "is sherwood a rug?", "is sherwood official?",
+      "sherwood on uniswap yet?", "is sherwood on pump.fun?", "sherwood a 100x?", "is sherwood worth holding?", "is sherwood mooning?",
+      "sherwood liquidity looks thin, is it yours?", "is sherwood trading yet?",
+      // Whose coins: only its own picking is read past.
+      "is sherwood one of their coins, is it merrymen's?", "is sherwood one of your coins?", "is sherwood one of its coins?",
+    ];
+    for (const text of tokenAsks) {
+      assert.equal(classifyTag(text).kind, "unanswered", text);
+      // As the orchestrator reads it: the screened candidate, research on or off, is never the model line.
+      for (const research of [true, false]) {
+        const c = tagCandidate({ id: "t1", authorId: "u1", text: `@alan ${text}`, conversationId: "t1", inReplyToTweetId: "t0", createdAtMs: NOW }, { xUserId: "x1", research });
+        if (c.ok) assert.equal(classifyTag(c.text).kind, "unanswered", `${text} (research ${research})`);
+      }
+    }
+    // Its own picking is still the model question.
+    for (const text of ["does sherwood-1 pick your trades now?", "is sherwood choosing your coins?", "does sherwood one make your calls?",
+      "is sherwood running your trades yet?", "which model runs you, and does it pick your coins?", "sherwood one live yet?"]) {
+      assert.equal(classifyTag(text).kind, "model", text);
+    }
+  });
+
   it("one contract address is a coin, by its key only; a coin it bought is found without a $", () => {
     assert.deepEqual(classifyTag("what about this coin?", { address: CA }), { kind: "coin", ticker: null, address: CA });
     assert.deepEqual(classifyTag("is pepe legit?", { knownCoins: ["Pepe"] }), { kind: "coin", ticker: "Pepe", address: null });

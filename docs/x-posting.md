@@ -573,11 +573,19 @@ the mention itself. They go out **right away**:
   first, then the next the gate admits, so the question asked again is
   answered again in other words; a paper agent's lines each add a short
   paper clause of their own. A sherwood or model question that also asks
-  about a token (a `$ticker`, a tagged contract, or a coin, token, contract,
-  CA, launch, presale or airdrop word; "your coins" is its own trading) gets
-  no answer at all, no draft and no post (`answer-token-model`): anyone can
-  launch `$SHERWOOD`, and the model line under "is $SHERWOOD merrymen's new
-  token?" would read as Merrymen confirming it. The writer model is never told the name,
+  about a token gets no answer at all, no draft and no post
+  (`answer-token-model`): anyone can launch `$SHERWOOD`, and the model line
+  under "is $SHERWOOD merrymen's new token?" would read as Merrymen
+  confirming it. A token is read wide, because a miss is the screenshot: any
+  `$` before a letter (`$SHERWOODINU`, `$SHERWOOD_AI`), a tagged contract, a
+  name that runs on from sherwood (`sherwoodinu`), a coin, token, contract,
+  CA, launch, presale or airdrop word, trade talk (bought, aped, pumping,
+  bags, holders), price talk (price, worth, mcap, chart, liquidity, 100x),
+  and whether it is real or where it trades (legit, official, rug, scam,
+  dex, Pons, Uniswap, pump.fun). Only its own picking is read past ("does
+  sherwood-1 pick your trades?", "is sherwood choosing your coins?"); "is
+  sherwood one of your coins?" is a token. A model question that uses one of
+  these words fails closed and is not answered. The writer model is never told the name,
   and a drafted answer or comment reply that names sherwood anyway is
   refused as `gate:sherwood-drafted`. Change `SHERWOOD_ON_X`, those lines and
   the prompt only once sherwood runs the agents.
