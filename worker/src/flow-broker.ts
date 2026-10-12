@@ -14,7 +14,9 @@
  * pass is on (orchestrator.ts spawnChild); without it this broker answers
  * "unavailable" immediately rather than waiting out a timeout.
  *
- * WHAT A CHILD MAY ASK. One thing: the flow facts for a token address. Not a
+ * WHAT A CHILD MAY ASK. One thing: the flow facts for a token address — and
+ * how long it will wait for them (`timeoutMs`), which can only shorten the
+ * orchestrator's work, never lengthen it. Not a
  * query, not a window, not a limit, not a creator — the orchestrator resolves
  * the creator itself from the chain, so a child cannot point the lane at an
  * arbitrary wallet and learn what it sold. Not a tenant either: market flow is
@@ -42,6 +44,12 @@ export const FLOW_BROKER_LIMITS = Object.freeze({
   servePerMinute: 6,
   /** The orchestrator's ceiling on one answer, whatever the child would wait. */
   serveMaxCallMs: 22_000,
+  /**
+   * Taken off the wait a child says it will give an answer, for the trip
+   * back over IPC: the orchestrator stops working on a reading this much
+   * before the child stops waiting for it, so nothing is paid for after.
+   */
+  ipcMarginMs: 250,
   maxRequestBytes: 1024,
   maxResponseBytes: 16 * 1024,
   idChars: 64,
@@ -61,6 +69,13 @@ export interface FlowRequest {
   id: string;
   op: "facts";
   token: string;
+  /**
+   * How long the child waits for this answer. The orchestrator works on it
+   * for at most this, less ipcMarginMs, and never past its own ceiling
+   * (serveMaxCallMs); the lane then sends nothing it could not finish in that
+   * time. Absent (an older child): the orchestrator's own ceiling.
+   */
+  timeoutMs?: number;
 }
 
 export type FlowResponse = { flow: 1; id: string; ok: true; result: FlowResult } | { flow: 1; id: string; ok: false; error: string };
@@ -232,7 +247,8 @@ export function createFlowClient(port: FlowPort | null, opts: FlowClientOptions 
     if (pending.size >= maxInFlight) return Promise.resolve(fail("budget"));
     const fresh = idOf(newId());
     const id = fresh && !pending.has(fresh) ? fresh : randomUUID();
-    const msg: FlowRequest = { flow: 1, id, op: "facts", token };
+    // The wait goes with the question, so the orchestrator stops when this child does.
+    const msg: FlowRequest = { flow: 1, id, op: "facts", token, timeoutMs };
     return new Promise<FlowResult>((resolve) => {
       let done = false;
       const onAbort = (): void => settle(fail("timeout"));
@@ -298,13 +314,15 @@ export interface ServeFlowOptions {
 
 /**
  * Answer one child's flow questions. `answer` is the orchestrator's flowFor,
- * already bound to the child-evidence budget share. Returns the unsubscribe;
- * call it when the child exits.
+ * already bound to the child-evidence budget share, handed `timeoutMs` when
+ * the child said how long it waits (less ipcMarginMs, within the ceiling):
+ * a reading must not be still spending after the child has given up on it.
+ * Returns the unsubscribe; call it when the child exits.
  */
 export function serveFlowRequests(
   port: FlowPort,
   tenant: string,
-  answer: (token: `0x${string}`) => Promise<FlowResult>,
+  answer: (token: `0x${string}`, timeoutMs?: number) => Promise<FlowResult>,
   opts: ServeFlowOptions = {},
 ): () => void {
   const clock = opts.now ?? Date.now;
@@ -340,17 +358,17 @@ export function serveFlowRequests(
   };
 
   /** One bounded answer: a thrown error is "unavailable" and a slow one "timeout", never an exception or a hang. */
-  function bounded(token: `0x${string}`): Promise<FlowResult> {
+  function bounded(token: `0x${string}`, wait: number | undefined): Promise<FlowResult> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const work = (async () => {
       try {
-        return (await answer(token)) ?? fail("unavailable");
+        return (await (wait === undefined ? answer(token) : answer(token, wait))) ?? fail("unavailable");
       } catch {
         sayOnce("threw", "an answer failed inside the orchestrator");
         return fail("unavailable");
       }
     })();
-    const out = Promise.race([work, new Promise<FlowResult>((r) => (timer = setTimeout(() => r(fail("timeout")), maxCallMs)))]);
+    const out = Promise.race([work, new Promise<FlowResult>((r) => (timer = setTimeout(() => r(fail("timeout")), wait ?? maxCallMs)))]);
     return out.finally(() => clearTimeout(timer));
   }
 
@@ -372,13 +390,22 @@ export function serveFlowRequests(
       return;
     }
     for (const field of Object.keys(msg)) {
-      if (field === "flow" || field === "id" || field === "op" || field === "token") continue;
+      if (field === "flow" || field === "id" || field === "op" || field === "token" || field === "timeoutMs") continue;
       // Never read, never used: not a tenant, not a creator, not a window.
       sayOnce(`extra:${FIELD_SHAPE.test(field) ? field : "?"}`, `ignored unexpected field "${FIELD_SHAPE.test(field) ? field : "?"}" on a request`);
     }
     const token = tokenOf(msg.token);
     if (msg.op !== "facts" || !token) {
       reply({ flow: 1, id, ok: false, error: "invalid-request" });
+      return;
+    }
+    // THE CHILD'S OWN WAIT, less the trip back, within the ceiling. Only ever shorter.
+    const waits = msg.timeoutMs;
+    const wait = typeof waits === "number" && Number.isFinite(waits) && waits > 0
+      ? Math.min(maxCallMs, Math.floor(waits) - FLOW_BROKER_LIMITS.ipcMarginMs) : undefined;
+    if (wait !== undefined && wait < 1) {
+      // It will have stopped waiting before anything could come back: nothing is asked.
+      result(id, fail("timeout"));
       return;
     }
     let ok = false;
@@ -413,7 +440,7 @@ export function serveFlowRequests(
       return;
     }
     started.push(now);
-    const p = bounded(token).finally(() => byToken.delete(token));
+    const p = bounded(token, wait).finally(() => byToken.delete(token));
     byToken.set(token, p);
     settle(p);
   }

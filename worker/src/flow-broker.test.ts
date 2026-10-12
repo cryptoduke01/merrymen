@@ -5,7 +5,7 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { createFlowClient, serveFlowRequests, type FlowPort } from "./flow-broker";
+import { createFlowClient, FLOW_BROKER_LIMITS, serveFlowRequests, type FlowPort } from "./flow-broker";
 import type { FlowFacts, FlowResult } from "./flow-facts";
 
 const TOKEN = "0x00000000000000000000000000000000000000c1";
@@ -181,6 +181,29 @@ describe("the orchestrator's end", () => {
     assert.deepEqual(seen, [[TOKEN]], "the lane is handed the token and nothing else");
     assert.match(logs.join("\n"), /ignored unexpected field "tenant"/);
     assert.match(logs.join("\n"), /ignored unexpected field "creator"/);
+  });
+
+  it("the child's wait travels with its question, less the trip back, and only ever shortens the orchestrator's work", async () => {
+    const ch = channel();
+    const seen: unknown[][] = [];
+    serveFlowRequests(ch.parent, "0xtenant", async (...args) => {
+      seen.push(args);
+      return { ok: true, facts: facts(args[0]) };
+    }, { allowed: yes });
+    const c = createFlowClient(ch.child);
+    assert.equal((await c.facts(TOKEN, { timeoutMs: 5_000 })).ok, true);
+    assert.deepEqual(seen.at(-1), [TOKEN, 5_000 - FLOW_BROKER_LIMITS.ipcMarginMs], "a review's five seconds, less the IPC margin");
+    ch.inject("parent", { flow: 1, id: "long", op: "facts", token: TOKEN_B, timeoutMs: 600_000 });
+    ch.inject("parent", { flow: 1, id: "word", op: "facts", token: TOKEN_C, timeoutMs: "forever" });
+    await new Promise((r) => setTimeout(r, 10));
+    assert.deepEqual(seen.slice(1), [[TOKEN_B, FLOW_BROKER_LIMITS.serveMaxCallMs], [TOKEN_C]], "never past the ceiling; a wait that is not a number is no wait");
+    // A child that will have stopped waiting before anything could come back is answered at once, and nothing is asked.
+    const before = seen.length;
+    ch.inject("parent", { flow: 1, id: "short", op: "facts", token: TOKEN, timeoutMs: FLOW_BROKER_LIMITS.ipcMarginMs });
+    await new Promise((r) => setTimeout(r, 10));
+    assert.equal(seen.length, before);
+    const reply = ch.sent.find((m) => m.from === "parent" && (m.msg as { id?: string }).id === "short")?.msg;
+    assert.deepEqual(reply, { flow: 1, id: "short", ok: true, result: { ok: false, failure: "timeout" } });
   });
 
   it("each child has its own rate; a repeat of a question in flight is free", async () => {

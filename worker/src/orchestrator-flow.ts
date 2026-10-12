@@ -279,7 +279,8 @@ export function attachFlowBroker(
 ): (() => void) | null {
   if (!service || proc.connected !== true) return null;
   try {
-    const release = serveFlowRequests(childProcessFlowPort(proc), tenant.toLowerCase(), (t) => service.flowFor(t, { purpose: "evidence" }), {
+    // The child's own wait, carried on the request, bounds the reading: nothing is still spending after it gave up.
+    const release = serveFlowRequests(childProcessFlowPort(proc), tenant.toLowerCase(), (t, timeoutMs) => service.flowFor(t, { purpose: "evidence", ...(timeoutMs !== undefined ? { timeoutMs } : {}) }), {
       allowed: () => decisionResearchEnabledFor(smartAccount, env),
       log,
     });

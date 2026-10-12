@@ -136,7 +136,11 @@ for the gateway and the IDE.
   reserved and nothing sent.
 - **One reading has one deadline.** `flowFor` gives the flow query, the
   launcher lookup and the launcher's query 18 s together, under the broker's
-  22 s ceiling. Short of time, the flow facts come back with the launcher
+  22 s ceiling, or less when the caller waits less. A child's request carries
+  how long it waits (`timeoutMs`), and the orchestrator works on it for that
+  less a quarter-second for the trip back (`ipcMarginMs`), never more than
+  its ceiling, so nothing is still being sent or paid for after the child has
+  given up. Short of time, the flow facts come back with the launcher
   `unavailable` rather than late.
 - **Provider refusals back off the whole lane:**
   - `429` backs off on a ladder from 1 to 15 minutes, or for `Retry-After` if
@@ -175,7 +179,8 @@ for the gateway and the IDE.
   with no indexed trades, and no line for a launcher who did not sell.
 - **A child** uses `createFlowClient(processFlowPort())`
   (`worker/src/flow-broker.ts`) and may ask for one thing: the reading for a
-  token address. It cannot choose a query, a window, a limit or a creator. It
+  token address, and say how long it waits for it, which can only shorten
+  the orchestrator's work. It cannot choose a query, a window, a limit or a creator. It
   never names a tenant, and if it adds one, the field is ignored and logged.
   The broker shares Fomo's IPC channel. That channel exists only while
   `MERRYMEN_FOMO_ENABLED=1`, and without it the client answers `unavailable`
@@ -200,8 +205,10 @@ for the gateway and the IDE.
   with a fresh tape row, since a review without one is never paid for. It asks
   when the review starts, beside the cost quotes and the candle and trade
   legs, with the same 5-second evidence budget as the request's deadline, so
-  it cannot hold the review past what it already waited. A reading that lands
-  later is still cached by the lane for the next review of the coin.
+  it cannot hold the review past what it already waited. The budget travels
+  on the request, so the orchestrator stops the reading when the review stops
+  waiting: on a slow lane the flow facts come back with the launcher
+  `unavailable`, and no launcher query is sent after the review gave up.
   - `renderFlowLens(result)` turns the reading into a block of at most 1,200
     characters: an attribution line ("Indexer data, not a forecast"), one
     compact JSON object, and a closing "WHAT THIS IS NOT" line. It is `null`

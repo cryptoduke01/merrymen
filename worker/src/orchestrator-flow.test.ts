@@ -336,6 +336,18 @@ describe("attachFlowBroker — only allowlisted accounts, only as evidence", () 
     assert.deepEqual(svc.purposes, ["evidence"]);
   });
 
+  it("the review's own budget bounds the reading: the lane is never still spending after the child gave up", async () => {
+    const { lane, calls } = fakeLane();
+    const t = 5_000_000;
+    const svc = makeFlowService({ lane, now: () => t, creatorOf: async () => ({ state: "known", creator: CREATOR }) });
+    const c = fakeChild();
+    attachFlowBroker(svc, "0x00000000000000000000000000000000000000f1", c.proc, LISTED_ACCOUNT, () => {}, { MERRYMEN_DECISION_RESEARCH_ACCOUNTS: LISTED_ACCOUNT });
+    assert.equal((await createFlowClient(c.childPort).facts(TOKEN, { timeoutMs: 5_000 })).ok, true);
+    const deadline = t + 5_000 - FLOW_BROKER_LIMITS.ipcMarginMs;
+    assert.deepEqual(calls.map((x) => [(x.args.at(-1) as { purpose: string }).purpose, (x.args.at(-1) as { deadline: number }).deadline]),
+      [["evidence", deadline], ["evidence", deadline]], "five seconds less the trip back, not the reading's eighteen");
+  });
+
   it("any other account is answered 'unavailable' and costs nothing", async () => {
     const svc = service();
     const c = fakeChild();

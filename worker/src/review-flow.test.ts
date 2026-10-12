@@ -48,14 +48,15 @@ describe("reviewFlowClient — no question unless the orchestrator said a broker
     assert.equal(reviewFlowClient({ [FLOW_BROKER_ENV]: "1" }, () => null), null);
   });
 
-  it("is a client with both, and asks for the token alone", async () => {
+  it("is a client with both, and asks for the token alone, with how long it waits", async () => {
     const port = silentPort();
     const client = reviewFlowClient({ [FLOW_BROKER_ENV]: "1" }, () => port);
     assert.ok(client);
     const r = await readFlowEvidence(client, TOKEN, 20);
     assert.deepEqual(r, { lens: null, status: "timeout" });
     assert.equal(port.sent.length, 1);
-    assert.deepEqual(Object.keys(port.sent[0] as object).sort(), ["flow", "id", "op", "token"]);
+    assert.deepEqual(Object.keys(port.sent[0] as object).sort(), ["flow", "id", "op", "timeoutMs", "token"]);
+    assert.equal((port.sent[0] as { timeoutMs: number }).timeoutMs, 20, "the review's budget goes on the wire");
   });
 });
 
