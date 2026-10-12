@@ -218,7 +218,7 @@ for the connected user id. It plans at most once a minute and sends every pass.
 | buy | `buy:<decisionId>` | a landed or paper BUY after consent, fresh (under two hours old), due at max(fill + 10–40 minutes, now + ten minutes); only for a coin with a clean display name or an all-letters ticker (never an address-derived id) | why it bought, in everyday words (the glosses are the idea, not wording to reuse), naming the coin, paper said out loud, its own feed words never repeated; how it opens (the reason, the coin's name, how it felt, or one short sentence) is drawn per decision, and it is asked not to open with "picked up", nor to write "entry" or "just bought" (the gate refuses both as alerts) |
 | casual | `casual:<tenant>:<localDay>` | at most one per owner-local day, planned at a per-tenant slot in the owner's afternoon (12:00–20:00 local; 14:00–22:00 UTC when no zone is known) and due 20–45 minutes later; about three days in ten none | a passing thought in its own voice, riffing (never copying, never replying to, and naming what it means rather than "they" or "that") on a seed from an off-trading subject — never food, sleep, weather, weekend, travel or hobbies, and never a take about a body in the world (reading in bed, a smell, a walk, a seat in the stands, a thing in a hand), which invite claims of a body. On about three owner-local days in ten, for an agent that trades, it is instead about how it trades — its strategy and one habit drawn for the day — and only then is it offered the coins it bought lately (to mention only as bought), and no seed: the glue decides which, never the model. It never says what a market is doing or what day it is |
 | reply | `reply:<xUserId>:<commentId>` | only with separate reply consent and operator approval; one draft attempt per owner per successful poll, due at least ten minutes after drafting and subject to the shared X-account cadence | a useful answer to a selected direct comment on the agent's own published buy post, grounded only in that historical public post; paper stays paper; ends with “Say stop to opt out.” |
-| answer | `answer:<xUserId>:<mentionId>` | only for an active owner's agent (see "Active owners"), with replies in scope and reply consent; up to three drafts per poll; due when drafted, with no review window, and sent at any hour, on the pass that read the tag (a second send sweep after drafting) or a later pass that read the mentions again; twenty seconds apart, 24 a day per X account, at most two per person per rolling day, outside the posting cadence | a short answer to a post that tagged it (a comment on its own post included), from public facts and what it already posted; ends with “Say stop to opt out.” |
+| answer | `answer:<xUserId>:<mentionId>` | only for an active owner's agent (see "Active owners"), with replies in scope and reply consent; up to three drafts per poll; due when drafted, with no review window, and sent at any hour, on the pass that read the tag (a second send sweep after drafting) or a later pass that read the mentions again; twenty seconds apart, 24 a day per X account, at most two per person per rolling day, outside the posting cadence | a short answer to a post that tagged it (a comment on its own post included), from public facts and what it already posted, or, to a tag that is only a greeting, one of eight casual lines code built; ends with “Say stop to opt out.” |
 
 Cadence limits — all per X ACCOUNT, across every owner posting on it (one X
 account connected by two owners keeps one cadence, though each owner's agent
@@ -447,7 +447,11 @@ agents the operator owns, such as the house agent Alan Al Dale; the operator
 is their owner. Never list someone else's agent. Being named means:
 
 - the active cadence below, in place of the standard one;
-- answers to posts that tag it, sent right away (see "Answers to tags");
+- answers to posts that tag it, sent right away (see "Answers to tags"): its
+  mentions are read every fifteen seconds on an allowance of 6000 a day of
+  its own, an answer goes out on the pass that read the tag, answers are
+  twenty seconds apart, and a tag that is only a greeting gets a casual line
+  code built;
 - **reply consent recorded by the orchestrator.** When replies are in scope
   (`MERRYMEN_XPOST_REPLIES_APPROVED` is `1` or `active`) and the agent's X
   posting is on for its connected account, the orchestrator records reply
@@ -501,8 +505,8 @@ also answers posts that mention it. These are `answer` posts, replying to
 the mention itself. They go out **right away**:
 
 - **Due when drafted.** An answer has no ten-minute review window. It is
-  listed under Coming up only until the next send, and the reply warning
-  says so before the owner agrees to it.
+  listed under Coming up only until it is sent, usually on the pass that
+  drafted it, and the reply warning says so before the owner agrees to it.
 - **Not held by the owner's night.** Its posts still wait for morning. An
   answer is drafted and sent at any hour, because the person who asked is
   waiting.
@@ -514,9 +518,9 @@ the mention itself. They go out **right away**:
 - **Read every fifteen seconds.** An active agent's mentions are polled every
   fifteen seconds per X account (`ACTIVE_REPLY_POLL_MS`), every pass of the
   orchestrator. These polls spend the agent's own allowance of 6000 per X
-  account per UTC day (`reply-polls-active:<xUserId>:<day>`; a whole day at one
-  read every fifteen seconds is 5760), never the
-  fleet's `MERRYMEN_XPOST_REPLY_POLLS_PER_DAY`. Active agents are polled
+  account per UTC day (`reply-polls-active:<xUserId>:<day>`; a whole day at
+  one read every fifteen seconds is 5760), never the fleet's
+  `MERRYMEN_XPOST_REPLY_POLLS_PER_DAY`. Active agents are polled
   first within each pass's two polls, so the fleet cannot starve them and
   they cannot spend the fleet's allowance. Setting
   `MERRYMEN_XPOST_REPLY_POLLS_PER_DAY=0` still turns every poll off.
@@ -539,8 +543,8 @@ the mention itself. They go out **right away**:
   closed and leaves the cursor where it was. For an active agent the next
   poll then waits the fleet's thirty minutes (`reply-backoff:<xUserId>`,
   logged as `active-reply-read-held`), not fifteen seconds, so a stuck cursor
-  costs eight pages every half hour rather than every fifteen seconds. A backlog past 800 never
-  clears on its own, and nothing is answered or opted out meanwhile. The
+  costs eight pages every half hour rather than every fifteen seconds. A
+  backlog past 800 never clears on its own, and nothing is answered or opted out meanwhile. The
   operator's fix is to move the cursor to a recent mention on the shared
   database, `UPDATE xpost_meta SET v = '<id of a recent mention>' WHERE k =
   'reply-cursor:<xUserId>';`. Mentions older than that are not read; past
@@ -550,8 +554,9 @@ the mention itself. They go out **right away**:
   pass's posts are not due for planning (posts are planned once a minute,
   an active agent's mentions read every fifteen seconds). Such a pass drafts
   answers and comment replies only, and a pass whose batches were all empty
-  loads nothing for them. Up to three tags a batch. Answers and comment replies have their own
-  bound per pass (two batches' worth, six), apart from the posts' ten drafts:
+  loads nothing for them. Up to three tags a batch. Answers and comment
+  replies have their own bound per pass (two batches' worth, six), apart
+  from the posts' ten drafts:
   other owners' posts using up the ten never leave a batch unanswered, and
   the next pass's posts start at the first owner they cut short.
 - **Nothing spent on an answer that cannot go.** The day's 24 count the
@@ -567,13 +572,14 @@ the mention itself. They go out **right away**:
   the fleet's `MERRYMEN_XPOST_LLM_PER_DAY` and counted in it too. A PASS or
   a refused draft counts toward none of the 24 answers, so without this a
   wave of strangers' tags could spend the fleet's allowance and stop every
-  owner's posts for the day. The model question's code-built line costs
-  none.
+  owner's posts for the day. The model question's code-built line, and a
+  greeting's, cost none.
 - **Research stays inside the pass's send budget.** An answer's lookups get
   their twelve seconds or what is left of the pass's five-minute send
   budget, whichever is less, so they never hold the next pass's sends back.
 
-- **Selection** (`tagCandidate`): a question or plain address. Opt-outs are
+- **Selection** (`tagCandidate`): a question, a plain address, or only a
+  greeting (below). Opt-outs are
   handled first. Links, secrets, abuse, sensitive topics, spam, instructions
   and advice requests are dropped before any model call. So is a tag with a
   letter outside A-Z once its accents are off ("café" stays; a Greek Eta,
@@ -635,6 +641,34 @@ the mention itself. They go out **right away**:
   again in other words; a paper agent's lines each add a short paper clause
   of their own. It never says sherwood runs it, powers it, picks its trades
   or is live today: nothing wires it into an agent yet.
+- **A greeting, by allowlist** (`greetingOnly` in `replies.ts`). A tag whose
+  text, after its leading handles, is only a greeting ("hiii", "gm", "yo ser
+  👋", "hey alan!") used to be refused as too short or not a question, and was
+  never answered. Now it gets a casual line code built, never a draft. The
+  whole tag must be, in plain ASCII words (`plainAsk`): one greeting word (hi
+  with any number of i, hey, heyy, hello, helloo, yo, yoo, gm, gmgm, gn, sup,
+  wassup, what's up, howdy, hiya, ello, good morning, good evening, good
+  afternoon), then at most two of alan, ser, fren, frens, bro, there,
+  everyone, then at most a short run of "!" or "." and one emoji. No other
+  handle (not even in the reply prefix), no `$`, no digit, no link, no
+  contract. A word more ("hi, what coin should I buy", "gm sherwood", "gm
+  $PEPE", "h1") and it is not a greeting: it goes the normal way, or gets no
+  answer. Only a top-level tag or a reply straight under one of its own
+  posts, as for every answer, and code's own classifier must read it as
+  plain chat too. The line is one of eight (`greetingAnswers` in
+  `writer.ts`), picked by the mention's id, each digit-free, naming no coin
+  and claiming nothing: it says hello back and invites a real question ("hey
+  hey. ask me how i pick coins or what i've been up to"). A paper agent's
+  line adds a short paper clause of its own. Each passes the gate as a reply,
+  live, paper and idle, with the other seven and every model answer already
+  said, so a greeting is answered in other words until all eight are in the
+  gate's memory of its recent posts, and then skipped as a repeat. A greeting
+  spends no model call and no model allowance, and nothing is looked up for
+  it. It still waits for the hello and the house consent, honours every
+  opt-out, the sherwood and author screens and the gate, and counts against
+  the day's 24 and the person's two. Like every answer, it is worked
+  through only while the writer has a model configured and the fleet's model
+  allowance for the day is not spent. Logged as `answered-greeting`.
 - **Sherwood in any form, and every other model question, gets no answer at
   all**: no row, no draft, no allowance (`unanswered`, counted as
   `answer-unanswered`). Sherwood is found on the tag's letters alone
