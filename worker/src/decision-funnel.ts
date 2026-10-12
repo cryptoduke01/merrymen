@@ -106,6 +106,8 @@ export type FunnelInput =
   | { kind: "entry-screen"; why: string }
   | { kind: "candidate-skip"; skip: CandidateSkip }
   | { kind: "not-on-tape" }
+  /** An entry review not paid for: no candles, no trades and a stale tape row (trencher-brain.ts entryEvidenceBlind). */
+  | { kind: "evidence-unavailable" }
   | { kind: "size-below-floor"; sizeUsdg6: bigint; floorUsdg6: bigint }
   | { kind: "tick-block"; block: TickBlock };
 
@@ -364,6 +366,8 @@ export function classifyStage(input: FunnelInput): Classified {
       return { stage: SKIP_STAGE[input.skip] ?? "RESEARCH_INCOMPLETE", detail: input.skip };
     case "not-on-tape":
       return { stage: "NOT_DISCOVERED", detail: "not-on-tape" };
+    case "evidence-unavailable":
+      return { stage: "RESEARCH_INCOMPLETE", detail: "evidence-unavailable: no candles, no trades and a stale tape row; entry review not paid for" };
     case "size-below-floor":
       return { stage: "SIZE_BELOW_ECONOMIC_FLOOR", detail: `size-below-floor: ${usdg6(input.sizeUsdg6)} USDG < ${usdg6(input.floorUsdg6)} USDG` };
     case "tick-block":

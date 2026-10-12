@@ -140,6 +140,12 @@ describe("classifyStage maps the existing vocabularies, keeping the original rea
     assert.deepEqual([small.stage, small.detail], ["SIZE_BELOW_ECONOMIC_FLOOR", "size-below-floor: 1.250000 USDG < 2.000000 USDG"]);
   });
 
+  it("an entry review not paid for, for want of evidence, is research incomplete — not a hold", () => {
+    const skip = classifyStage({ kind: "evidence-unavailable" });
+    assert.equal(skip.stage, "RESEARCH_INCOMPLETE");
+    assert.equal(skip.detail.split(":")[0], "evidence-unavailable");
+  });
+
   it("candidate skips the builder used to make in silence", () => {
     assert.deepEqual(
       (["missing-fdv", "missing-created-at", "created-at-in-future", "autonomous-budget-unread"] as const).map(skip => classifyStage({ kind: "candidate-skip", skip }).stage),

@@ -2,8 +2,14 @@ import { cachedGeckoDetail, geckoSource, GECKO_NETWORK } from './geckoterminal';
 import { readBoundedJson } from '../bounded-read';
 import type { FeedResult } from './fleet-feed-cache';
 
-export type MarketTrade = { id: string; tx: string; time: number; side: 'buy' | 'sell'; usd: number | null; priceUsd: number | null };
-export type PriceBar = { time: number; open: number; high: number; low: number; close: number };
+/**
+ * `wallet` is the transaction's sender as the index reports it, lowercased —
+ * counted for DISTINCT wallets and never passed on as an address. Null when
+ * the index gave none; optional so a trade built before it existed still is one.
+ */
+export type MarketTrade = { id: string; tx: string; time: number; side: 'buy' | 'sell'; usd: number | null; priceUsd: number | null; wallet?: string | null };
+/** `volume` is the bar's USD volume as the index reports it; null when it gave none, never 0. */
+export type PriceBar = { time: number; open: number; high: number; low: number; close: number; volume?: number | null };
 export type EvidenceRead<T> = FeedResult & { data: T[] };
 export type PoolEvidence = { poolId: string; token: string; candles: EvidenceRead<PriceBar>; trades: EvidenceRead<MarketTrade> };
 const number = (v: unknown): number | null => {
@@ -28,9 +34,13 @@ export function parseTrades(body: unknown, token: string, now = Date.now()): Mar
       (from === target) === (to === target)) return [];
     seen.add(id);
     const side = to === target ? 'buy' as const : 'sell' as const;
-    return [{ id, tx: a.tx_hash, time, side, usd: number(a.volume_in_usd), priceUsd: number(side === 'buy' ? a.price_to_in_usd : a.price_from_in_usd) }];
-  }).sort((a, b) => b.time - a.time).slice(0, 300);
+    const wallet = typeof a.tx_from_address === 'string' && /^0x[\da-f]{40}$/i.test(a.tx_from_address) ? a.tx_from_address.toLowerCase() : null;
+    return [{ id, tx: a.tx_hash, time, side, usd: number(a.volume_in_usd), priceUsd: number(side === 'buy' ? a.price_to_in_usd : a.price_from_in_usd), wallet }];
+  }).sort((a, b) => b.time - a.time).slice(0, TRADE_SAMPLE_MAX);
 }
+
+/** The index returns at most this many of a pool's latest trades; a full sample may not reach back a whole window. */
+export const TRADE_SAMPLE_MAX = 300;
 
 export function parsePriceBars(body: unknown, token: string, now = Date.now()): PriceBar[] | null {
   const j = object(body), rows = object(object(j.data).attributes).ohlcv_list;
@@ -38,10 +48,10 @@ export function parsePriceBars(body: unknown, token: string, now = Date.now()): 
   const bars = new Map<number, PriceBar>();
   for (const row of rows) {
     if (!Array.isArray(row)) continue;
-    const [time, open, high, low, close] = row.slice(0, 5).map(number);
+    const [time, open, high, low, close, volume] = row.slice(0, 6).map(number);
     if (!time || !open || !high || !low || !close || time % 300 !== 0 || time + 300 > now / 1000 ||
       low > Math.min(open, close) || high < Math.max(open, close) || high < low) continue;
-    bars.set(time, { time, open, high, low, close });
+    bars.set(time, { time, open, high, low, close, volume: volume ?? null });
   }
   return [...bars.values()].sort((a, b) => a.time - b.time).slice(-24);
 }
@@ -157,6 +167,51 @@ export async function readPoolEvidence(
   return { poolId, token, candles, trades };
 }
 
+/** The trade windows a review is shown: five minutes, a quarter hour and the hour. */
+const TRADE_WINDOWS = [['m5', 300], ['m15', 900], ['h1', 3600]] as const;
+/** Completed 5-minute bars a review is shown one by one; the rest are summarised. */
+const RECENT_BARS = 6;
+
+const round = (v: number | null, dp: number) => v === null ? null : Math.round(v * 10 ** dp) / 10 ** dp;
+const sig = (v: number) => Number(v.toPrecision(6));
+
+/**
+ * ONE WINDOW OF THE TRADE SAMPLE, counted every way a short-horizon read needs:
+ * how many trades each side, how many DISTINCT wallets, the buy share of USD
+ * flow, and how much of the selling one wallet did. A single seller doing
+ * most of it is distribution; many small buyers is demand. Every amount is
+ * null when any trade in the window has none — a missing amount is never 0.
+ *
+ * `sampleCoversWindow` is false when the index's sample was full and its
+ * oldest trade is newer than the window's start: the counts are then the
+ * window's latest trades, not all of them.
+ */
+function tradeWindow(trades: readonly MarketTrade[], seconds: number, nowSec: number, sampleFull: boolean) {
+  const start = nowSec - seconds;
+  const inWindow = trades.filter(t => t.time >= start);
+  const buys = inWindow.filter(t => t.side === 'buy'), sells = inWindow.filter(t => t.side === 'sell');
+  const priced = inWindow.every(t => t.usd !== null);
+  const usd = (ts: readonly MarketTrade[]) => priced ? ts.reduce((s, t) => s + t.usd!, 0) : null;
+  const buyUsd = usd(buys), sellUsd = usd(sells);
+  const attributed = inWindow.every(t => typeof t.wallet === 'string');
+  const distinct = (ts: readonly MarketTrade[]) => attributed ? new Set(ts.map(t => t.wallet)).size : null;
+  let topSeller: number | null = null;
+  if (attributed && sellUsd !== null && sellUsd > 0) {
+    const bySeller = new Map<string, number>();
+    for (const t of sells) bySeller.set(t.wallet!, (bySeller.get(t.wallet!) ?? 0) + t.usd!);
+    topSeller = Math.max(...bySeller.values()) / sellUsd * 100;
+  }
+  const oldest = trades.length ? Math.min(...trades.map(t => t.time)) : undefined;
+  return {
+    trades: inWindow.length, buys: buys.length, sells: sells.length,
+    distinctBuyers: distinct(buys), distinctSellers: distinct(sells),
+    buyUsd: round(buyUsd, 2), sellUsd: round(sellUsd, 2),
+    buySharePct: buyUsd !== null && sellUsd !== null && buyUsd + sellUsd > 0 ? round(buyUsd / (buyUsd + sellUsd) * 100, 1) : null,
+    topSellerSharePctOfSellUsd: round(topSeller, 1),
+    sampleCoversWindow: !sampleFull || (oldest !== undefined && oldest <= start),
+  };
+}
+
 /** Descriptive measurements only: sampled flow is not total market volume or a forecast. */
 export function summarizeEvidence(e: PoolEvidence, now = Date.now()) {
   const fresh = (r: FeedResult) => !r.failed && r.observedAt !== undefined && now - r.observedAt <= 120000;
@@ -170,7 +225,25 @@ export function summarizeEvidence(e: PoolEvidence, now = Date.now()) {
   const priced = trades.length > 0 && trades.every(t => t.usd !== null);
   const buy = priced ? trades.filter(t => t.side === 'buy').reduce((s, t) => s + t.usd!, 0) : null;
   const sell = priced ? trades.filter(t => t.side === 'sell').reduce((s, t) => s + t.usd!, 0) : null;
-  return { source: 'CoinGecko / GeckoTerminal indexed pool data', poolId: e.poolId, token: e.token,
+  // CANDLE VOLUME, which this summary used to leave out entirely — so "price
+  // rose on expanding volume" and "price drifted up on nothing" read the
+  // same. Null unless every bar read carried one. The two quarter-hours are
+  // compared only on a contiguous, current series: a gap would compare
+  // different stretches of time.
+  const volumes = bars.map(b => b.volume);
+  const volumeKnown = bars.length > 0 && volumes.every(v => typeof v === 'number' && Number.isFinite(v));
+  const sumOf = (vs: readonly (number | null | undefined)[]) => vs.reduce<number>((s, v) => s + (v as number), 0);
+  const candleVolumeUsd = fresh(e.candles) && volumeKnown ? {
+    allBars: round(sumOf(volumes), 2),
+    last15m: contiguous && current && bars.length >= 3 ? round(sumOf(volumes.slice(-3)), 2) : null,
+    prior15m: contiguous && current && bars.length >= 6 ? round(sumOf(volumes.slice(-6, -3)), 2) : null,
+  } : null;
+  const nowSec = now / 1000;
+  const sampleFull = e.trades.data.length >= TRADE_SAMPLE_MAX;
+  const tradeWindows = fresh(e.trades)
+    ? Object.fromEntries(TRADE_WINDOWS.map(([name, seconds]) => [name, tradeWindow(e.trades.data, seconds, nowSec, sampleFull)]))
+    : null;
+  return { source: 'CoinGecko / GeckoTerminal indexed pool data',
     candleObservedAt: e.candles.observedAt ?? null, tradeObservedAt: e.trades.observedAt ?? null,
     candleFailure: e.candles.failure ?? null, tradeFailure: e.trades.failure ?? null,
     // NULL, NOT 0, WHEN THE CANDLE READ DID NOT LAND. `bars` is empty both for
@@ -189,7 +262,17 @@ export function summarizeEvidence(e: PoolEvidence, now = Date.now()) {
     measuredReturnPct: contiguous && current && first && last ? (last.close / first.open - 1) * 100 : null,
     fiveMinuteLogReturnStdDevPct: returns.length >= 2 ? Math.sqrt(returns.reduce((s, r) => s + (r - mean) ** 2, 0) / returns.length) * 100 : null,
     latestFiveMinuteReturnPct: current && last ? (last.close / last.open - 1) * 100 : null,
+    candleVolumeUsd,
+    // AT 5, 15 AND 60 MINUTES, not 5 alone: one five-minute window cannot
+    // tell a building move from a blip, and the hour is where distribution
+    // shows. Null when the trade read did not land — unknown, not quiet.
+    tradeWindows,
+    // The last bars themselves, for highs, lows and volume bar by bar.
+    recentBars: bars.slice(-RECENT_BARS).map(b => ({ end: b.time + 300, open: sig(b.open), high: sig(b.high), low: sig(b.low), close: sig(b.close), volumeUsd: round(b.volume ?? null, 2) })),
+    caveat: 'Latest 300 indexed trades maximum, not exhaustive volume; a window the sample does not reach back across says so. Distinct wallets are transaction senders, not verified owners. Candle volume is the index\'s USD volume per completed bar. Missing or stale evidence is unknown. Volatility is not annualized. Measurements are not a forecast or permission to trade.',
+    // The five-minute figures under their original names, for readers written
+    // against them (web market-intel). `tradeWindows.m5` is the same window.
     sampledTrades5m: fresh(e.trades) ? trades.length : null, sampledBuyUsd5m: buy, sampledSellUsd5m: sell,
     sampledBuySharePct5m: buy !== null && sell !== null && buy + sell > 0 ? buy / (buy + sell) * 100 : null,
-    caveat: 'Latest 300 indexed trades maximum, not exhaustive volume. Missing or stale evidence is unknown. Volatility is not annualized. Completed candles only; no candle volume is used. Measurements are not a forecast or permission to trade.' };
+    poolId: e.poolId, token: e.token };
 }

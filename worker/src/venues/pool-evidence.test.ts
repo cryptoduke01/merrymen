@@ -28,6 +28,69 @@ test('candles reject wrong identity, incomplete bars and invalid ranges; sort an
   const bars=parsePriceBars(candleBody([b,a,b,[end,1,2,1,2],[end-300,3,2,1,3]]),token,now)!;
   assert.equal(bars.length,2);assert.equal(bars[0]!.time,end-900);
 });
+test('trades carry the sender wallet, lowercased, or null; bars carry their USD volume, or null — never 0', () => {
+  const t = trade('w'); (t.attributes as Record<string, unknown>).tx_from_address = '0x' + 'AB'.repeat(20);
+  const junk = trade('j'); (junk.attributes as Record<string, unknown>).tx_from_address = 'not-a-wallet';
+  const [a, b] = parseTrades({ data: [t, junk] }, token, now)!;
+  assert.equal(a!.wallet, '0x' + 'ab'.repeat(20));
+  assert.equal(b!.wallet, null);
+  const end = now / 1000;
+  const bars = parsePriceBars(candleBody([[end - 900, 1, 2, 1, 2, '1500.5'], [end - 600, 2, 3, 2, 3]]), token, now)!;
+  assert.deepEqual(bars.map(x => x.volume), [1500.5, null]);
+});
+
+/** A trade `ageSec` old, from `wallet`, buying (to = token) or selling, for `usd`. */
+const flow = (id: string, ageSec: number, side: 'buy' | 'sell', usd: number | null, wallet: string | null) =>
+  ({ id, tx, time: now / 1000 - ageSec, side, usd, priceUsd: 1, wallet });
+const W = (n: number) => '0x' + n.toString(16).padStart(40, '0');
+
+test('trade windows: counts, distinct wallets, buy share and the top seller at 5, 15 and 60 minutes', () => {
+  const trades = [
+    flow('a', 60, 'buy', 30, W(1)), flow('b', 120, 'buy', 30, W(2)), flow('c', 200, 'sell', 20, W(3)),
+    flow('d', 600, 'buy', 50, W(1)), flow('e', 700, 'sell', 80, W(4)), flow('f', 800, 'sell', 20, W(3)),
+    flow('g', 2000, 'sell', 300, W(4)), flow('h', 3000, 'buy', 10, W(5)), flow('old', 4000, 'buy', 999, W(6)),
+  ];
+  const e = { poolId: quote, token, candles: { failed: true, failure: 'budget', data: [] }, trades: { failed: false, observedAt: now, data: trades } };
+  const w = summarizeEvidence(e, now).tradeWindows!;
+  assert.deepEqual(w.m5, { trades: 3, buys: 2, sells: 1, distinctBuyers: 2, distinctSellers: 1, buyUsd: 60, sellUsd: 20, buySharePct: 75, topSellerSharePctOfSellUsd: 100, sampleCoversWindow: true });
+  assert.deepEqual(w.m15, { trades: 6, buys: 3, sells: 3, distinctBuyers: 2, distinctSellers: 2, buyUsd: 110, sellUsd: 120, buySharePct: 47.8, topSellerSharePctOfSellUsd: 66.7, sampleCoversWindow: true });
+  assert.deepEqual(w.h1, { trades: 8, buys: 4, sells: 4, distinctBuyers: 3, distinctSellers: 2, buyUsd: 120, sellUsd: 420, buySharePct: 22.2, topSellerSharePctOfSellUsd: 90.5, sampleCoversWindow: true });
+  // An unpriced trade makes that window's amounts unknown; an unattributed one, its wallet counts.
+  const holes = summarizeEvidence({ ...e, trades: { ...e.trades, data: [flow('x', 30, 'buy', null, W(1)), flow('y', 400, 'sell', 5, null)] } }, now).tradeWindows!;
+  assert.equal(holes.m5!.buyUsd, null);
+  assert.equal(holes.m5!.buySharePct, null);
+  assert.equal(holes.m5!.distinctBuyers, 1);
+  assert.equal(holes.m15!.distinctSellers, null);
+  assert.equal(holes.m15!.topSellerSharePctOfSellUsd, null);
+  // A full sample that does not reach back across a window says so.
+  const full = Array.from({ length: 300 }, (_, i) => flow(`f${i}`, 1 + i, 'buy', 1, W(i + 1)));
+  const capped = summarizeEvidence({ ...e, trades: { ...e.trades, data: full } }, now).tradeWindows!;
+  assert.equal(capped.m5!.sampleCoversWindow, true, "its oldest trade is inside five minutes' reach");
+  assert.equal(capped.m15!.sampleCoversWindow, false);
+  // A trade leg that did not land is unknown, not quiet.
+  assert.equal(summarizeEvidence({ ...e, trades: { failed: true, failure: 'provider-cooldown', data: [] } }, now).tradeWindows, null);
+});
+
+test('candle volume: totals, the last quarter hour against the one before, and the last bars themselves', () => {
+  const end = Math.floor(now / 1000 / 300) * 300;
+  const bars = Array.from({ length: 8 }, (_, i) => ({ time: end - (8 - i) * 300, open: 1, high: 1.2, low: 0.9 + i / 100, close: 1.1, volume: 100 * (i + 1) }));
+  const e = { poolId: quote, token, candles: { failed: false, observedAt: now, data: bars }, trades: { failed: true, failure: 'budget', data: [] } };
+  const s = summarizeEvidence(e, now);
+  assert.deepEqual(s.candleVolumeUsd, { allBars: 3600, last15m: 2100, prior15m: 1200 });
+  assert.equal(s.recentBars.length, 6);
+  assert.deepEqual(s.recentBars.at(-1), { end, open: 1, high: 1.2, low: 0.97, close: 1.1, volumeUsd: 800 });
+  // One bar without a volume: no totals, never a sum that treats it as 0.
+  const gap = summarizeEvidence({ ...e, candles: { ...e.candles, data: bars.map((b, i) => i === 3 ? { ...b, volume: null } : b) } }, now);
+  assert.equal(gap.candleVolumeUsd, null);
+  assert.equal(gap.recentBars[1]!.volumeUsd, null);
+  // A failed candle read: no volume, no bars.
+  const failed = summarizeEvidence({ ...e, candles: { failed: true, failure: 'budget', data: [] } }, now);
+  assert.equal(failed.candleVolumeUsd, null);
+  assert.deepEqual(failed.recentBars, []);
+  assert.match(s.caveat, /Distinct wallets are transaction senders/);
+  assert.doesNotMatch(JSON.stringify(summarizeEvidence({ ...e, trades: { failed: false, observedAt: now, data: [flow('a', 10, 'buy', 1, W(7))] } }, now)), new RegExp(W(7)), 'wallets are counted, never repeated');
+});
+
 test('summary measures contiguous returns and sampled flow, never uses missing amounts as zero',()=>{
   const bars=parsePriceBars(candleBody([[now/1000-900,1,2,1,2],[now/1000-600,2,3,2,3],[now/1000-300,3,4,3,4]]),token,now)!;
   const e={poolId:quote,token,candles:{failed:false,observedAt:now,data:bars},trades:{failed:false,observedAt:now,data:parseTrades({data:[trade('a'),trade('b',token,quote,'10')]},token,now)!}};

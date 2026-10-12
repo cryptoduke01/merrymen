@@ -135,7 +135,7 @@ import { provenanceOf, type Provenance } from "./provenance";
 import { recordDecisionRefusal, verifyDecisionOwner, withDecisionOutcome } from "./decision-identity";
 import { bookGaps, composeEquityUsdg } from "./equity";
 import { publishesAView, reviewRecord, runShadow, type ShadowInputs, type ShadowOutcome } from "./brain-shadow";
-import { HoldBackoff, TrenchBrainReview, TrenchTapeReader, highVolumePools, trenchBrainPersona, trenchBrainSignals, trenchHeat, trenchMaterial, HELD_REVIEW_MAX_GAP_MS, TRENCH_REVIEW_INTERVAL_MS } from "./trencher-brain";
+import { HoldBackoff, TrenchBrainReview, TrenchTapeReader, entryEvidenceBlind, highVolumePools, trenchBrainPersona, trenchBrainSignals, trenchHeat, trenchMaterial, HELD_REVIEW_MAX_GAP_MS, TRENCH_REVIEW_INTERVAL_MS } from "./trencher-brain";
 import { withAgentBrief } from "./agent-brief";
 import { ProjectPurposeReader } from "./research/project-purpose";
 import { getPaperBrainCapital } from "./store";
@@ -13352,6 +13352,26 @@ async function main() {
                 const half = (r: { failure?: string; data: unknown[] } | undefined) =>
                   r === undefined ? "no-read" : r.failure ?? r.data.length;
                 console.log(`[${short(agentId)}] [trencher] evidence ${focus.symbol}: candles=${half(evidence?.candles)} trades=${half(evidence?.trades)}`);
+                // NOTHING CURRENT TO JUDGE, SO NOTHING IS PAID FOR. Both legs
+                // failed (a provider cooldown or the request budget, in
+                // practice) and this pool's tape row is past one refresh: the
+                // Brain would be billed to read a stale summary with no flow
+                // behind it (trencher-brain.ts entryEvidenceBlind). ENTRY
+                // REVIEWS ONLY — a held position is reviewed whatever the
+                // evidence. The coin waits one backoff window unless it moves,
+                // and the skip is said once per coin per window.
+                const tapeAt = trenchTapeReader.observedAtOf(tape);
+                if (!focus.held && entryEvidenceBlind(evidence, tapeAt, Date.now())) {
+                  const say = trenchBrain.evidenceSkipped(focus.token);
+                  funnel.note(focus.token, focus.symbol, classifyStage({ kind: "evidence-unavailable" }));
+                  const age = tapeAt === null ? "gone from the fresh tape" : `${Math.round((Date.now() - tapeAt) / 1000)}s old`;
+                  return {
+                    ran: false,
+                    why: say ? `Entry review of ${focus.symbol} not paid for: candles and trades both unavailable and its tape row is ${age}; it waits a backoff window unless it moves.` : "",
+                    nextReviewAt: null,
+                    trigger: { fire: false, reason: null, detail: "entry evidence unavailable", candidates: [] },
+                  } satisfies ShadowOutcome;
+                }
               } else {
                 // A REVIEW WITH NO TAPE ENTRY IS NOT A REVIEW WITH NO EVIDENCE
                 // LINE, and until now those were the same thing to anyone

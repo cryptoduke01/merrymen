@@ -50,6 +50,36 @@ export const TRENCH_REVIEW_INTERVAL_MS = 30_000;
  */
 export const PRIORITY_RETRY_MS = 2 * TRENCH_REVIEW_INTERVAL_MS;
 
+/** One pool's identity on the tape: token, venue and pool. */
+const tapeKey = (p: Pick<GeckoPool, "tokenAddress" | "dex" | "poolAddress" | "poolId">) =>
+  `${p.tokenAddress}:${p.dex}:${p.poolAddress ?? p.poolId}`.toLowerCase();
+
+/**
+ * A tape row older than this is STALE for an entry review: past one tape
+ * refresh (index.ts refreshTrenchTape asks every 60s), so the latest refresh
+ * brought nothing newer for this pool. Inside TRENCH_TAPE_MAX_AGE_MS on
+ * purpose — it never removes a pool from the tape; it only decides whether
+ * a review with no candles and no trades is worth paying for.
+ */
+export const TRENCH_EVIDENCE_STALE_MS = 60_000;
+
+/**
+ * NOTHING CURRENT TO JUDGE AN ENTRY ON: both evidence legs failed (or the read
+ * never settled) AND the coin's tape row is stale or gone. A paid entry review
+ * in that state is the Brain reading a minute-old summary with no flow behind
+ * it, which can only come back HOLD. Either leg landing, or a current tape
+ * row, and the review runs as before. Held positions never ask this.
+ */
+export function entryEvidenceBlind(
+  evidence: { candles: { failed: boolean }; trades: { failed: boolean } } | null,
+  tapeObservedAt: number | null,
+  now: number,
+): boolean {
+  const legsFailed = !evidence || (evidence.candles.failed && evidence.trades.failed);
+  const stale = tapeObservedAt === null || !Number.isFinite(tapeObservedAt) || now - tapeObservedAt > TRENCH_EVIDENCE_STALE_MS;
+  return legsFailed && stale;
+}
+
 /** Keep each page on its own clock: partial outages must not erase fresh pages
  * or renew the age of old observations. Healthy empty pages replace old data. */
 export class TrenchTapeReader {
@@ -192,11 +222,22 @@ export class TrenchTapeReader {
     const unique = new Map<string, GeckoPool>();
     for (const page of pages.sort((a, b) => b.at - a.at)) {
       for (const p of page.pools) {
-        const key = `${p.tokenAddress}:${p.dex}:${p.poolAddress ?? p.poolId}`.toLowerCase();
+        const key = tapeKey(p);
         if (!unique.has(key)) unique.set(key, p);
       }
     }
     return { pools: [...unique.values()], pages };
+  }
+
+  /**
+   * WHEN THIS POOL WAS LAST OBSERVED, ms: the newest fresh page carrying it —
+   * the same observation `snapshot()` keeps — or null when none does. Per
+   * pool, unlike the snapshot's `observedAt`, which is its oldest page's.
+   */
+  observedAtOf(pool: Pick<GeckoPool, "tokenAddress" | "dex" | "poolAddress" | "poolId">): number | null {
+    const key = tapeKey(pool);
+    for (const page of this.fresh().pages) if (page.pools.some(p => tapeKey(p) === key)) return page.at;
+    return null;
   }
 
   /**

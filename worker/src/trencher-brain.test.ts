@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { setImmediate } from "node:timers/promises";
-import { TrenchBrainReview, TrenchTapeReader, brainNoDecisionNote, fetchTrenchTape, type TrenchBrainOrder, highVolumePools, trenchBrainPersona, trenchScreenReason, trenchBrainSignals, trenchHeat, TRENCH_H1_VOLUME_MIN, HELD_REVIEW_MAX_GAP_MS, NOMINATED_PAGES_MAX, PRIORITY_RETRY_MS, TRENCH_REVIEW_INTERVAL_MS, HoldBackoff, HOLD_BACKOFF, holdReason, isModelHold, materialChange, trenchMaterial, type TrenchMaterial } from "./trencher-brain";
+import { TrenchBrainReview, TrenchTapeReader, brainNoDecisionNote, fetchTrenchTape, type TrenchBrainOrder, highVolumePools, trenchBrainPersona, trenchScreenReason, trenchBrainSignals, trenchHeat, TRENCH_H1_VOLUME_MIN, HELD_REVIEW_MAX_GAP_MS, NOMINATED_PAGES_MAX, PRIORITY_RETRY_MS, TRENCH_REVIEW_INTERVAL_MS, HoldBackoff, HOLD_BACKOFF, holdReason, isModelHold, materialChange, trenchMaterial, type TrenchMaterial, entryEvidenceBlind, TRENCH_EVIDENCE_STALE_MS, TRENCH_TAPE_MAX_AGE_MS } from "./trencher-brain";
 import { classifyReview } from "./decision-funnel";
 import { chooseFocus } from "./brain-focus";
 import { emptyGeckoBuckets, type GeckoPool } from "./venues/geckoterminal";
@@ -887,4 +887,36 @@ test("a context change forgets every backoff; a throwing material reader release
   assert.deepEqual(trenchMaterial(undefined, null), { priceUsd: null, h1VolumeUsd: null, m5Buyers: null });
   assert.deepEqual(trenchMaterial(pool({ buckets: { ...emptyGeckoBuckets(), h1: { changePct: 1, volumeUsd: 5, buys: 1, sells: 1, buyers: 1, sellers: 1 }, m5: { changePct: 0, volumeUsd: 1, buys: 1, sells: 0, buyers: 3, sellers: 0 } } }), 0.5),
     { priceUsd: 0.5, h1VolumeUsd: 5, m5Buyers: 3 });
+});
+
+// ─── Entry evidence: nothing current, nothing paid for ───────────────────
+
+test("an entry review is blind only when BOTH legs failed AND the tape row is stale or gone", () => {
+  const now = 10_000_000;
+  const failed = { failed: true }, landed = { failed: false };
+  const stale = now - TRENCH_EVIDENCE_STALE_MS - 1, current = now - TRENCH_EVIDENCE_STALE_MS;
+  assert.equal(entryEvidenceBlind({ candles: failed, trades: failed }, stale, now), true);
+  assert.equal(entryEvidenceBlind({ candles: failed, trades: failed }, null, now), true, "no tape row at all");
+  assert.equal(entryEvidenceBlind(null, stale, now), true, "a read that never settled is two failed legs");
+  assert.equal(entryEvidenceBlind({ candles: failed, trades: failed }, current, now), false, "a current tape row still runs the review");
+  assert.equal(entryEvidenceBlind({ candles: landed, trades: failed }, stale, now), false, "candles landed");
+  assert.equal(entryEvidenceBlind({ candles: failed, trades: landed }, null, now), false, "trades landed");
+  assert.ok(TRENCH_EVIDENCE_STALE_MS < TRENCH_TAPE_MAX_AGE_MS, "stale for a review is still on the tape: it never removes a pool");
+});
+
+test("observedAtOf: each pool's newest fresh observation, not the snapshot's oldest page", async () => {
+  let now = 100_000;
+  const other = pool({ tokenAddress: ROUTER, poolAddress: ROUTER, poolId: ROUTER, dex: "d" });
+  const mine = pool({ poolAddress: TOKEN, poolId: TOKEN, dex: "d" });
+  const reader = new TrenchTapeReader(async (feed, opts) => {
+    if (feed === "pools" && opts?.page === 1) return { failed: false, pools: [mine], observedAt: 40_000 };
+    if (feed === "trending_pools" && opts?.page === 1) return { failed: false, pools: [mine, other], observedAt: 90_000 };
+    return { failed: false, pools: [], observedAt: 20_000 };
+  }, () => now);
+  await reader.refresh();
+  assert.equal(reader.observedAtOf(mine), 90_000, "the newest page carrying it");
+  assert.equal(reader.observedAtOf({ ...other, poolAddress: null, poolId: "x" }), null, "another pool of the same coin is not it");
+  assert.equal(reader.snapshot().observedAt, 20_000, "the snapshot's own figure is its oldest page");
+  now = 90_000 + TRENCH_TAPE_MAX_AGE_MS + 1;
+  assert.equal(reader.observedAtOf(mine), null, "past the freshness limit: gone");
 });
