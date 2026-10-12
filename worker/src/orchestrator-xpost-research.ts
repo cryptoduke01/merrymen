@@ -53,7 +53,7 @@ import { publicCoinReason, publicFactRequest } from "./telegram/tg-groups/facts"
 import type { PublicThesis } from "./thesis-policy";
 import { sherwoodMentioned, vocabularyRefusal } from "./xpost/gate";
 import { coinOf, hash32 } from "./xpost/planner";
-import { normalisedTag, withoutReplyOptOut } from "./xpost/replies";
+import { normalisedTag, plainAsk, withoutReplyOptOut } from "./xpost/replies";
 import { takeAllowance, type XPost } from "./xpost/store";
 import { coinNamedIn } from "./xpost/writer";
 
@@ -87,7 +87,8 @@ export type TagIntent =
 
 /**
  * WHAT CODE ANSWERS WITH ITS OWN MODEL LINE (fail-closed review, 2026-10-12):
- * the whole tag, normalised (replies.ts normalisedTag), is one of a short list
+ * the whole tag, in plain ASCII words (replies.ts plainAsk: no emoji, symbol,
+ * invisible character or other alphabet anywhere in it), is one of a short list
  * of plain "what are you / what model do you run" shapes, after at most two
  * greeting words and before an optional "for trading" / "to trade". Nothing
  * else is ever the model question. Four review rounds each found a phrasing
@@ -166,7 +167,9 @@ export function modelQuestion(text: unknown, address: string | null = null): "mo
   if (typeof text !== "string") return null;
   if (sherwoodMentioned(text)) return "unanswered";
   const n = normalisedTag(text);
-  if (MODEL_ALLOWED.test(n)) return address ? "unanswered" : "model";
+  // On the allowlist only as plain ASCII words: an emoji or a symbol after it is a word more (plainAsk).
+  const plain = plainAsk(text);
+  if (plain !== null && MODEL_ALLOWED.test(plain)) return address ? "unanswered" : "model";
   return MODEL_ASK.test(text) || MODEL_ASK.test(n) || MODEL_NAMED.test(n) ? "unanswered" : null;
 }
 

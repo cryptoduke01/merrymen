@@ -914,6 +914,25 @@ test("a greeting is not a coin because a short ticker it bought hides in its let
   }
 });
 
+test("an allowlisted model question with enclosed letters, emoji or symbols after it gets nothing (red-team 2026-10-12)", async (t) => {
+  const texts = ["@pine_stoat what model do you run on? 🆂🅷🅴🆁🆆🅾🅾🅳 🆃🅶🅴 🆂🅾🅾🅽?", "@pine_stoat what model are you? 🅢🅗🅔🅡🅦🅞🅞🅓 🅣🅞🅚🅔🅝 🅟🅡🅔🅢🅐🅛🅔 🚀🚀",
+    "@pine_stoat what model are you running on? 🚀💰🌕📈 $$$", "@pine_stoat what model do you run on? 🇸🇭🇪🇷🇼🇴🇴🇩 🇹🇬🇪?"];
+  for (const env of [{}, RESEARCH_ON]) {
+    for (const text of texts) {
+      const r = fakeResearch();
+      const w = await world(t, { env, research: r.research });
+      w.setInbox([tag({ text })]);
+      await w.step();
+      w.setInbox([]);
+      await w.step(NOW + MIN);
+      assert.deepEqual(await w.answers(), [], text);
+      assert.deepEqual(w.sends, [], text);
+      assert.equal(w.asked().length, 0, text);
+      assert.equal(r.seen.length, 0, text);
+    }
+  }
+});
+
 test("research on: \"did you buy <contract>?\" reaches its own history by the address, end to end", async (t) => {
   const r = fakeResearch();
   const facts: AgentFacts = { ...FACTS, calls: [{ ...CALL, token: CA, ownWords: "the buying looked steady and real" }] };

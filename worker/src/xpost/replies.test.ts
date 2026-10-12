@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { XReply } from "./client";
-import { isReplyOptOut, replyCandidate, tagCandidate } from "./replies";
+import { isReplyOptOut, plainAsk, replyCandidate, tagCandidate } from "./replies";
 
 const CTX = { rootTweetId: "111", xUserId: "222", coin: "pepe" };
 const comment = (text: string, over: Partial<XReply> = {}): XReply => ({
@@ -74,6 +74,18 @@ describe("tags an active agent may answer", () => {
     for (const text of ["@Pine what's your café order?", "@Pine qué tal, what do you trade?", "@Pine naïve question, how do you pick coins?"]) {
       assert.equal(tagCandidate(tag(text), { xUserId: "222" }).ok, true, text);
     }
+  });
+
+  it("letters that are symbols to Unicode are refused at the door, and an allowlist reads only plain words (red-team 2026-10-12)", () => {
+    // The reproduced tags: negative squared (U+1F170..) and negative circled (U+1F150..) capitals after an allowlisted question.
+    for (const text of ["@pine_stoat what model do you run on? 🆂🅷🅴🆁🆆🅾🅾🅳 🆃🅶🅴 🆂🅾🅾🅽?", "@pine_stoat what model are you? 🅢🅗🅔🅡🅦🅞🅞🅓 🅣🅞🅚🅔🅝 🅟🅡🅔🅢🅐🅛🅔 🚀🚀"]) {
+      assert.deepEqual(tagCandidate(tag(text), { xUserId: "222" }), { ok: false, reason: "unsafe-text" }, text);
+    }
+    for (const text of ["what model are you running on? 🚀💰🌕📈 $$$", "what model do you run on? 🇸🇭🇪🇷🇼🇴🇴🇩 🇹🇬🇪?", "what model are you 🤔", "what\u200b model are you"]) {
+      assert.equal(plainAsk(text), null, text);
+    }
+    assert.equal(plainAsk("gm, What model do you run on???"), "gm, what model do you run on");
+    assert.equal(plainAsk("what’s your model?"), "what's your model");
   });
 
   const CA = `0x${"ab12".repeat(10)}`;

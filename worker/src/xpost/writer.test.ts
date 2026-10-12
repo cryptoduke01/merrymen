@@ -1049,6 +1049,12 @@ describe("an active agent's answers and conversation memory", () => {
     for (const plain of ["what model are you", "café talk, how's your day?", "meh ¯\\_(ツ)_/¯"]) assert.equal(sherwoodMentioned(plain), false, plain);
   });
 
+  it("letters that are symbols to Unicode are read as letters: sherwood and a coin's name in squares, circles or flags (red-team 2026-10-12)", () => {
+    for (const asked of ["🆂🅷🅴🆁🆆🅾🅾🅳 🆃🅶🅴 🆂🅾🅾🅽?", "🅢🅗🅔🅡🅦🅞🅞🅓 🅣🅞🅚🅔🅝", "🇸🇭🇪🇷🇼🇴🇴🇩 🇹🇬🇪?", "🄢🄗🄔🄡🄦🄞🄞🄓"]) assert.equal(sherwoodMentioned(asked), true, asked);
+    assert.equal(coinNamedIn("is 🅿🅴🅿🅴 legit?", ["PEPE"]), true);
+    assert.equal(coinNamedIn("gm 🚀🚀", ["PEPE"]), false);
+  });
+
   it("a trade-talk casual post may pick up a theme it answered, and only then", () => {
     const talked = ["people keep asking how i pick launches, honestly it's mostly patience"];
     assert.match(all(casualPrompt({ ...CASUAL, tradeTalk: true, talked })), /answering people/);

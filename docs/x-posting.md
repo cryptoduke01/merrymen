@@ -568,9 +568,11 @@ the mention itself. They go out **right away**:
   (`answer-unusable`).
 - **The model question, by allowlist** (`modelQuestion` in
   `orchestrator-xpost-research.ts`). Code reads the question first, research
-  on or off. The tag is normalised: handles removed, NFKC, zero-width and
-  other format characters removed, lowercase, whitespace collapsed, and the
-  punctuation and emoji at either end taken off. Only when the whole of it is
+  on or off. The tag must be plain words (`plainAsk`): after NFKC, nothing
+  but ASCII letters, digits, whitespace and ' , . ! ? - anywhere in it, so a
+  trailing emoji, a symbol, an invisible character or enclosed letters
+  ("🆂🅷🅴🆁🆆🅾🅾🅳") make it a different question; then lowercase,
+  whitespace collapsed and the punctuation at either end taken off. Only when the whole of it is
   one of a short list of plain shapes is it the model question: "what model
   are you", "what ai are you", "which model do you run on", "what llm do you
   use", "what are you built on", "what do you run on", "who made you", "who

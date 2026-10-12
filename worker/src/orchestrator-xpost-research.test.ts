@@ -126,9 +126,14 @@ describe("a tag's intent, read by code", () => {
         if (c.ok) assert.equal(classifyTag(c.text).kind, "model", `${text} (research ${research})`);
       }
     }
-    // Spelled any way NFKC, case, zero-width characters, curly quotes or a trailing emoji make it: the same question.
-    for (const text of ["WHAT MODEL ARE YOU???", "ｗｈａｔ ｍｏｄｅｌ ａｒｅ ｙｏｕ", "what\u200b model are you", "what\u00a0model are   you", "what’s your model?", "what model are you 🤔", "who\u2060 made you"]) {
+    // Spelled any way NFKC, case, whitespace or curly quotes make it: the same question.
+    for (const text of ["WHAT MODEL ARE YOU???", "ｗｈａｔ ｍｏｄｅｌ ａｒｅ ｙｏｕ", "what\u00a0model are   you", "what’s your model?"]) {
       assert.equal(classifyTag(text).kind, "model", text);
+    }
+    // Anything else in it is a word more (red-team 2026-10-12): an emoji, a symbol, an invisible character.
+    for (const text of ["what\u200b model are you", "what model are you 🤔", "who\u2060 made you", "what model do you run on? 🆂🅷🅴🆁🆆🅾🅾🅳 🆃🅶🅴 🆂🅾🅾🅽?",
+      "what model are you? 🅢🅗🅔🅡🅦🅞🅞🅓 🅣🅞🅚🅔🅝 🅟🅡🅔🅢🅐🅛🅔 🚀🚀", "what model are you running on? 🚀💰🌕📈 $$$", "what model do you run on? 🇸🇭🇪🇷🇼🇴🇴🇩 🇹🇬🇪?"]) {
+      assert.equal(classifyTag(text).kind, "unanswered", text);
     }
   });
 

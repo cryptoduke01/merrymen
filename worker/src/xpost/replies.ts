@@ -103,6 +103,33 @@ function bareLetters(text: string): string {
 /** Bidi embeddings, overrides, isolates and marks: "\u202edoowrehs" shows as sherwood. */
 const BIDI = /[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/u;
 
+/**
+ * A TAG AS AN ALLOWLIST READS IT, OR NULL (red-team review, 2026-10-12):
+ * NFKC (a fullwidth "ｗｈａｔ" is "what", as tagCandidate already reads it),
+ * then only plain ASCII letters, digits, whitespace and ' ’ , . ! ? - —
+ * nothing else at all — lowercase, whitespace collapsed and the punctuation
+ * at either end taken off. normalisedTag took symbols and emoji off the end, so
+ * "what model do you run on? 🆂🅷🅴🆁🆆🅾🅾🅳 🆃🅶🅴 🆂🅾🅾🅽?" (enclosed letters,
+ * symbols to Unicode) read as the plain model question and got code's
+ * sherwood-1 line under a visible "SHERWOOD TGE SOON?". Here a trailing emoji,
+ * a symbol, an invisible character or a letter in another alphabet means the
+ * tag is not on any allowlist: a word more, and it is not the question.
+ */
+export function plainAsk(text: unknown): string | null {
+  if (typeof text !== "string") return null;
+  const t = text.normalize("NFKC").replace(/[’‘]/g, "'");
+  if (/[^A-Za-z0-9\s',.!?-]/.test(t)) return null;
+  return t.toLowerCase().replace(/\s+/g, " ").trim().replace(/^[\s,.!?'-]+/, "").replace(/[\s,.!?'-]+$/, "");
+}
+
+/**
+ * LETTERS THAT ARE SYMBOLS TO UNICODE: the negative circled and negative
+ * squared Latin capitals (🅐, 🅰), which NFKC does not fold and no letter
+ * clause sees (the room gate's ENCLOSED_LETTER refuses them in what an agent
+ * says). A tag spelled in them is refused (red-team review, 2026-10-12).
+ */
+const ENCLOSED_LETTER = /[\u{1F130}-\u{1F189}]/u;
+
 /** A question or a plain address to the agent, after any leading handles. */
 const ASKED = /\?|^(?:what|why|how|which|who|whos|who's|where|are|is|do|does|did|can|could|have|has|tell|explain|thoughts|gm|hey|yo|hi|hello)\b/i;
 
@@ -189,7 +216,7 @@ export function tagCandidate(reply: XReply, ctx: { xUserId: string; research?: b
   if (bare.length < 4 || text.length > XREPLY_MAX_COMMENT_CHARS || (bare.match(/\p{L}+/gu) ?? []).length < 2) return no("low-signal");
   if (/[\u0000-\u001f\u007f«»<>#]|\p{Script=Cyrillic}|\p{Script=Han}/u.test(text)) return no("unsafe-text");
   // Only letters code can read, and no text that runs backwards on screen.
-  if (BIDI.test(reply.text) || NON_ASCII_LETTER.test(bareLetters(text))) return no("unsafe-text");
+  if (BIDI.test(reply.text) || NON_ASCII_LETTER.test(bareLetters(text)) || ENCLOSED_LETTER.test(text)) return no("unsafe-text");
   if (LINK_OR_SECRET.test(text)) return no("link-or-secret");
   if (ABUSE_OR_SENSITIVE.test(text)) return no("sensitive");
   if (SPAM_OR_INSTRUCTIONS.test(text)) return no("spam-or-instructions");

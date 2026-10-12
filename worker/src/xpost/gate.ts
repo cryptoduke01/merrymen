@@ -348,11 +348,29 @@ export function lettersOf(text: unknown, o: { leet?: boolean } = {}): string {
   return (o.leet ? out.replace(/vv/g, "w") : out).replace(/[^a-z]/g, "");
 }
 
-/** NFKC, Greek capitals read as the Latin ones they show, lowercase, accents off: what lettersOf maps a character at a time. */
+/**
+ * NFKC, Greek capitals read as the Latin ones they show, the enclosed letters
+ * read as theirs, lowercase, accents off: what lettersOf maps a character at
+ * a time.
+ */
 function asLatin(text: string): string {
   let up = "";
-  for (const ch of text.normalize("NFKC")) up += LOOKALIKE_UPPER[ch] ?? ch;
+  for (const ch of text.normalize("NFKC")) up += LOOKALIKE_UPPER[ch] ?? enclosedLetter(ch) ?? ch;
   return up.toLowerCase().normalize("NFD").replace(/\p{M}/gu, "");
+}
+
+/**
+ * LETTERS THAT ARE SYMBOLS TO UNICODE (red-team review, 2026-10-12): the
+ * squared, negative circled and negative squared Latin capitals (🄰, 🅐, 🅰)
+ * and the regional indicators (🇦, which pair into flags), which NFKC leaves
+ * alone and lettersOf dropped: "🆂🅷🅴🆁🆆🅾🅾🅳" read as nothing. Each is read
+ * as its letter.
+ */
+const ENCLOSED_BASES: readonly number[] = [0x1f130, 0x1f150, 0x1f170, 0x1f1e6];
+function enclosedLetter(ch: string): string | null {
+  const cp = ch.codePointAt(0) ?? 0;
+  for (const base of ENCLOSED_BASES) if (cp >= base && cp < base + 26) return String.fromCharCode(0x61 + cp - base);
+  return null;
 }
 
 /**
