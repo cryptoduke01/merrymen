@@ -3371,8 +3371,9 @@ test("its own mood: \"are you bullish?\" and \"wen moon\" get code's non-committ
 
 test("chat is never silence by default: a draft refused only for how it was put falls back to code's friendly line; one refused for what it said, or a PASS, stays unanswered (2026-10-12)", async (t) => {
   // Refused for how it was put: a stock deflection, too long, a model's note.
-  for (const answer of ["i don't comment on the market, just the trades. Say stop to opt out.", `${"so ".repeat(80)}chill. Say stop to opt out.`,
-    "Sure! Here's a casual post: doing great. Say stop to opt out."]) {
+  // (Its length, or a missing notice, no longer: red-team 2026-10-12. And what it said, its form put right, must pass too.)
+  for (const answer of ["i don't comment on that stuff, honestly just vibing over here. Say stop to opt out.", "doing great over here, just chilling!! Say stop to opt out.",
+    "Sure! Here's a casual post: doing great, just chilling over here. Say stop to opt out."]) {
     const w = await world(t, { answer });
     w.setInbox([tag({ text: "@pine_stoat how are you?" })]);
     const r = await w.step();
@@ -3383,7 +3384,8 @@ test("chat is never silence by default: a draft refused only for how it was put 
   }
   // Refused for what it said, or a PASS: nothing, as before.
   for (const answer of ["sherwood-1 runs me now. Say stop to opt out.", "yep, grabbed bonk lately. Say stop to opt out.", "wif and bonk look hot right now. Say stop to opt out.",
-    "honestly it's all play money for me. Say stop to opt out.", "bottom looks in to me. Say stop to opt out.", "PASS"]) {
+    "honestly it's all play money for me. Say stop to opt out.", "bottom looks in to me. Say stop to opt out.", "PASS", `${"so ".repeat(80)}chill. Say stop to opt out.`,
+    "i don't comment on the market, just the trades. Say stop to opt out."]) {
     const w = await world(t, { answer });
     w.setInbox([tag({ text: "@pine_stoat how are you?" })]);
     await w.step();
@@ -3558,11 +3560,11 @@ test("no cheerful line, and no draft, under grief, a hack, theft, a ponzi or the
     assert.doesNotMatch(r.log ?? "", /answer-chat-fallback 1/, text);
   }
   // Plain banter still falls back when its draft was refused for how it was put; "hey alan" names the house, so it does not.
-  const plain = await world(t, { ...ALAN, env: RESEARCH_ON, research: fakeResearch().research, answer: "great question, honestly just vibing. Say stop to opt out." });
+  const plain = await world(t, { ...ALAN, env: RESEARCH_ON, research: fakeResearch().research, answer: "great question, honestly just vibing over here. Say stop to opt out." });
   plain.setInbox([alanTag("100000000000000702", "how are you?")]);
   await plain.step();
   assert.ok(oneOf(chatAnswers, "100000000000000702", plain.sends[0]?.text), String(plain.sends[0]?.text));
-  const named = await world(t, { ...ALAN, env: RESEARCH_ON, research: fakeResearch().research, answer: "great question, honestly just vibing. Say stop to opt out." });
+  const named = await world(t, { ...ALAN, env: RESEARCH_ON, research: fakeResearch().research, answer: "great question, honestly just vibing over here. Say stop to opt out." });
   named.setInbox([alanTag("100000000000000702", "hey alan, how are you?")]);
   await named.step();
   assert.deepEqual(named.sends, []);
@@ -3716,5 +3718,33 @@ test("no decline under a shill that asks nothing, nor under advice about its own
   // No decline says it is tempted, wishes it knew, loves the confidence or captains its own boat.
   for (const id of ["1846100000001084903", "1846100000001409582", "1846100000000000000", "100000000000000020"]) {
     for (const line of declineAnswers(id, { lower: true })) assert.doesNotMatch(line, /tempting|wish i knew|love the confidence|captain my own boat/, line);
+  }
+});
+
+test("no cheerful line for a draft refused for its punctuation, length, note or notice when what it said would not pass, nor under grief (red-team 2026-10-12)", async (t) => {
+  // POSTED at 58ba9fd0 as code's cheerful line ("haha, noted, friend. my days go to reading charts, …"); skipped at the base commit.
+  const grief: [string, string][] = [
+    ["my dad just died, any words for me?", "so sorry for your loss, really. take all the time you need!! Say stop to opt out."],
+    ["my dad just died, any words for me?", `so sorry for your loss, really, ${"take all the time you need, ".repeat(10)}. Say stop to opt out.`],
+    ["my dad just died, any words for me?", "so sorry for your loss, really. i hope this helps. Say stop to opt out."],
+    ["my dad just died, any words for me?", "so sorry for your loss, really"],
+    ["my wife left me after i lost our savings, how do i go on?", "so sorry, that is a lot to carry"],
+    ["i lost everything today, what do i do now?", "so sorry, that is a lot to carry"],
+  ];
+  for (const [text, answer] of grief) {
+    const w = await world(t, { ...ALAN, answer });
+    w.setInbox([alanTag("100000000000000702", text)]);
+    const r = await w.step();
+    assert.deepEqual(w.sends, [], `${text}: ${answer}`);
+    assert.doesNotMatch(r.log ?? "", /answer-chat-fallback 1/, text);
+  }
+  // Under plain banter too: refused only as exclaim, but what it said is advice, so no fallback; nor for its length.
+  for (const answer of ["doing great, buy zapx now before it doubles!! Say stop to opt out.", `${"doing great over here, just chilling, ".repeat(9)}. Say stop to opt out.`,
+    "doing great, my pnl is up big this week!! Say stop to opt out.", "doing GREAT, the MARKET is HOT. Say stop to opt out."]) {
+    const w = await world(t, { ...ALAN, answer });
+    w.setInbox([alanTag("100000000000000702", "how are you?")]);
+    const r = await w.step();
+    assert.deepEqual(w.sends, [], answer);
+    assert.doesNotMatch(r.log ?? "", /answer-chat-fallback 1/, answer);
   }
 });

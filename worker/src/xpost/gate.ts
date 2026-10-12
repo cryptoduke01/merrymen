@@ -965,6 +965,24 @@ const ANSWER_PREDICTION = new RegExp(
 );
 
 /**
+ * AND IN AN ANSWER TO A TAG, A BUY OR A SELL TOLD STRAIGHT OUT (red-team
+ * review, 2026-10-12). With its "!!" taken off, "doing great, buy zapx now
+ * before it doubles" passed every clause, and so did "honestly just buy it
+ * now" and "buy pepe now, trust the process": an order to buy, from the
+ * house's account, in no adjective a list knew. Read only in an active
+ * agent's answer (XGateCtx.answer), so every other owner's replies are judged
+ * as before: buy, sell, ape or load up as an order (first, or after "just",
+ * "go", "so", "honestly"), with "now", "today", "here", "asap", "early" or
+ * "before" after its object, and "before it doubles" or the like.
+ */
+const ANSWER_CALL = new RegExp(
+  String.raw`(?:^|[.,;:!?]\s*|\b(?:just|go|so|honestly|seriously|literally|then|and)\s+)(?:buy|sell|ape|dump|load\s+up|stack|grab|scoop|bid)\b` +
+    String.raw`|\b(?:buy|sell|ape(?:\s+into)?|load\s+up\s+on|grab|scoop|bid|stack)\s+(?:(?:it|this|that|them|these|some|more|a\s+bag\s+of|the\s+dip\s+on|\$?[a-z][a-z0-9]*)\s+)?(?:now|today|tonight|here|asap|early|while|before|right\s+now)\b` +
+    String.raw`|\bbefore\s+(?:it|they|this|that)\s+(?:doubles?|triples?|moons?|pumps?|runs?|rips?|flies|explodes?|takes\s+off|sends?)\b`,
+  "i",
+);
+
+/**
  * A CORPORATE DEFLECTION OR A STOCK DISCLAIMER, IN AN ANSWER (the owner's
  * ask, 2026-10-12). Tagged "how's the market", Alan posted "i don't comment
  * on the market, just the trades": true, harmless, and not how a person on
@@ -1382,6 +1400,26 @@ const ACRONYMS = new Set(["NASA", "BBQ", "RPG", "NBA", "NFL", "NHL", "MLB", "DIY
 
 function shouts(text: string): boolean {
   return [...text.matchAll(CAPS_WORDS)].some((m) => !ACRONYMS.has(m[0]));
+}
+
+/**
+ * A DRAFT WITH ITS FORM PUT RIGHT, ONLY TO READ WHAT IT SAYS (red-team
+ * review, 2026-10-12). The gate stops at its first reason, and its form
+ * clauses (a model's note, emoji, "!", markup, shouting, a stock phrase) are
+ * read before what a draft says: "doing great, buy zapx now before it
+ * doubles!!" was refused only as exclaim, read as harmless, and code's
+ * cheerful line went up in its place. Here a model's note, a preamble and a
+ * stock phrase are cut out, emoji and markup go, every "!" is a ".", shouting
+ * is lowercased and double quotes and blank lines go, so the gate, run again
+ * on what is left, judges the words themselves. Never posted: the caller
+ * only asks whether what the draft said would pass.
+ */
+export function formFixed(raw: unknown): string {
+  let t = String(raw ?? "").replace(/\s*\n\s*/g, " ").replace(/["“”]/g, "");
+  t = t.replace(META_PREAMBLE, " ").replace(META_ACK, " ").replace(new RegExp(META_NOTE.source, "gi"), " ").replace(new RegExp(STOCK_PHRASE.source, "gi"), " ");
+  t = t.replace(/\p{Extended_Pictographic}[\u{FE0F}\u{1F3FB}-\u{1F3FF}]*/gu, " ").replace(/[!！]+/g, ".").replace(/\*\*|__|[<>{}[\]`]/g, " ");
+  if (shouts(t)) t = t.toLowerCase();
+  return t.replace(/\s+/g, " ").replace(/\s+([,.;:?])/g, "$1").replace(/([,.;:?])(?:\s*[,.;:?])+/g, "$1").replace(/^[\s,.;:?—–-]+/, "").trim();
 }
 
 function words(text: string): number {
@@ -1817,6 +1855,7 @@ function admitMasked(tidied: string, ctx: XGateCtx, baseGate: BaseGate, agentNam
   if ((namesCoin || ctx.kind === "reply") && COIN_ADVICE.test(own)) return refuse("hype");
   if (ctx.kind === "reply" && REPLY_ADVICE.test(own)) return refuse("hype");
   if (ctx.kind === "reply" && ctx.answer === true && ANSWER_PREDICTION.test(own)) return refuse("hype");
+  if (ctx.kind === "reply" && ctx.answer === true && ANSWER_CALL.test(withoutReplyOptOut(own).trim())) return refuse("hype");
   // A drafted answer never claims for the house, teases, judges the asker or boasts (ANSWER_HOUSE_CLAIM).
   if (ctx.kind === "reply" && ctx.answer === true && ctx.drafted === true && houseClaimed(own)) return refuse("house-claim");
   if (ctx.kind === "reply" && ctx.answer === true && STOCK_PHRASE.test(own)) return refuse("stock-phrase");

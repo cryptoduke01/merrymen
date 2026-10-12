@@ -48,7 +48,7 @@ import { ensureGroupchatSchema, getMember } from "./groupchat/store";
 import { STRATEGY_FLAVOUR, STRATEGY_SPOKEN, TRAIT_VOICE } from "./groupchat/templates";
 import { MUSINGS, SUBJECTS, TAKES } from "./groupchat/topics";
 import { xAppFromEnv, type FetchLike, type XApp, type XReply } from "./xpost/client";
-import { admitXPost, merrymenMentioned, moneySaid, namedIn, tickerRefusal, vocabularyRefusal, type BaseGate, type XGateCtx } from "./xpost/gate";
+import { admitXPost, formFixed, merrymenMentioned, moneySaid, namedIn, tickerRefusal, vocabularyRefusal, type BaseGate, type XGateCtx } from "./xpost/gate";
 import { ACTIVE_CADENCE, ANSWER_GAP_MS, ANSWER_STALE_MS, ANSWERS_PER_DAY, REPLY_STALE_MS, STANDARD_CADENCE, coinOf, hash32, introState, planPosts, replyDueAt, sendDecision, type PlanCadence, type PlanClock, type PlanIntent } from "./xpost/planner";
 import { APP_PAUSE_KEY, APP_PAUSE_MS, CREDITS_PAUSE_MS, PAUSE_KEY, readReplyComments, sendOne, type SendOutcome } from "./xpost/sender";
 import { isAnswerOptOut, isReplyOptOut, replyCandidate, tagCandidate, withNoticeAdded, withoutReplyOptOut } from "./xpost/replies";
@@ -181,15 +181,19 @@ const TEMPLATE_TRIES = 8;
 const MAY_BE_ON_X: ReadonlySet<SendOutcome> = new Set<SendOutcome>(["posted", "uncertain", "fault"]);
 /**
  * WHAT A CHAT DRAFT MAY BE REFUSED FOR AND STILL GET CODE'S FRIENDLY LINE
- * (2026-10-12): how it was put, never what it tried to say. A repeat, its
- * length, a stock deflection, a model's note, an emoji or "!" too many,
- * shouting or markup, a missing notice. Anything else — a figure or an
- * amount, sherwood, a buy, a source, a word that may be a coin's name,
- * advice, a forecast, the other money, a body it does not have, a hidden or
- * stray character — leaves the tag unanswered, as before.
+ * (2026-10-12): how it was put, never what it tried to say. A repeat, a stock
+ * deflection, a model's note, an emoji or "!" too many, shouting or markup,
+ * and only when what it said passes with its form put right (saidPasses in
+ * writeAnswer). Anything else — a figure or an amount, sherwood, a buy, a
+ * source, a word that may be a coin's name, advice, a forecast, the other
+ * money, a body it does not have, a hidden or stray character — leaves the
+ * tag unanswered, as before. NOT ITS LENGTH NOR A MISSING NOTICE (red-team
+ * 2026-10-12): an over-long condolence and a draft that forgot the notice
+ * each put a cheerful line up under "my dad just died"; a missing notice is
+ * put on and the draft gated again, and an over-long draft is not answered.
  */
-const CHAT_FALLBACK_REASONS: ReadonlySet<string> = new Set(["repeat", "fleet-repeat", "too-long", "too-short", "stock-phrase", "meta", "emoji", "exclaim",
-  "caps", "markup", "opt-out-unsaid"]);
+const CHAT_FALLBACK_REASONS: ReadonlySet<string> = new Set(["repeat", "fleet-repeat", "too-short", "stock-phrase", "meta", "emoji", "exclaim",
+  "caps", "markup"]);
 /** Log counters that describe a standing condition rather than something that happened. */
 const CONDITIONS: ReadonlySet<string> = new Set(["no-model-budget", "zone-unreadable", "owner-failed", "active-reply-polls-spent"]);
 
@@ -1826,9 +1830,11 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // WHAT IT WAS HANDED: research or a creator's claim (an answer handed none cites no source).
       const handed = !!looked && (looked.research.length > 0 || !!looked.creatorClaim);
       // A code line is gated as one (asCode): the draft-only clauses below never read it.
-      const gate = (text: string, asCode = coded) => admitXPost(text, {
+      // `fresh`: weighed against no recent post, to read what a draft says apart from whether it repeats (saidPasses below).
+      const gate = (text: string, asCode = coded, fresh = false) => admitXPost(text, {
         kind: "reply", answer: true, noticeShown: noticeTold, agentName: f.name, mode, coins: vouched.map((c) => c.label),
-        paperCoins: [...vouched.filter((c) => c.paper).map((c) => c.label), ...(f.mode === "idle" ? money.paper : [])], recentOwn, recentFleet, emojiOk: facts.style.emoji > 0,
+        paperCoins: [...vouched.filter((c) => c.paper).map((c) => c.label), ...(f.mode === "idle" ? money.paper : [])],
+        recentOwn: fresh ? [] : recentOwn, recentFleet: fresh ? [] : recentFleet, emojiOk: facts.style.emoji > 0,
         // A buy it says is one it was told of, or none at all (XGateCtx.buys).
         // A model's draft: never a claim for the house, a tease, a judgement of the asker or a boast (XGateCtx.drafted).
         ...(asCode ? {} : { drafted: true as const, buys: told ? "vouched" as const : "none" as const, unsaid: [...(told && !namesNone ? [] : bought), ...money.otherOnly, ...older, ...askerNames],
@@ -1908,8 +1914,24 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // who are you, tell me a joke), never one that names money, a loss, a
       // death, a token, a launch or the house, nor under a reply prefix that
       // names anyone else.
+      // AND WHAT THE DRAFT SAID MUST PASS, ITS FORM PUT RIGHT (red-team
+      // 2026-10-12): the gate stops at its first reason, and its form clauses
+      // come before what a draft says, so "doing great, buy zapx now before it
+      // doubles!!" was refused only as exclaim and read as harmless. The draft,
+      // its note, stock phrase, emoji, "!", markup and shouting put right
+      // (gate.ts formFixed) and the notice put on, is gated again against no
+      // recent post, and read as an answer handed nothing is; only if all of
+      // it passes was the refusal only for how it was put.
+      const saidPasses = (text: string): boolean => {
+        const body = withoutReplyOptOut(formFixed(text));
+        if (!body) return false;
+        const v = gate(noticeTold ? body : withNoticeAdded(body, facts.style), false, true);
+        if (!v.ok || sherwoodNamed(v.text) || sherwoodMentioned(v.text)) return false;
+        const words = withoutReplyOptOut(v.text);
+        return handed || told || (!coinTalkIn(words, f.name) && !unknownWordIn(words, f.name) && !marketTalkIn(words));
+      };
       const drafted = verdict?.ok === true && !postsName && !unlookedCoin ? verdict.text : null;
-      const benignRefusal = raw !== null && !claimed && !named && !unlooked && verdict !== null && !verdict.ok && CHAT_FALLBACK_REASONS.has(verdict.reason);
+      const benignRefusal = raw !== null && !claimed && !named && !unlooked && verdict !== null && !verdict.ok && CHAT_FALLBACK_REASONS.has(verdict.reason) && saidPasses(raw);
       // Never under a name the house would never show (unshowableName: a slur, a political coin).
       // NOR UNDER A TAG THAT NAMES A COIN IN ANY WORDS (red-team 2026-10-12):
       // "you bought chump today, right?", "zapx is gonna be massive, the team

@@ -6,7 +6,7 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { admitXPost, houseClaimed, sherwoodClaimed, sherwoodMentioned, sherwoodNamed, strayCharacter, tickerRefusal, tidyXPost, vocabularyRefusal, type BaseGate, type BaseGateCtx, type XGateCtx } from "./gate";
+import { admitXPost, formFixed, houseClaimed, sherwoodClaimed, sherwoodMentioned, sherwoodNamed, strayCharacter, tickerRefusal, tidyXPost, vocabularyRefusal, type BaseGate, type BaseGateCtx, type XGateCtx } from "./gate";
 import { similarity, REPEAT_LIMIT } from "../social-post";
 
 /** A base gate that refuses a digit and passes everything else through, recording what it was handed. */
@@ -1241,6 +1241,18 @@ describe("sherwood with a symbol written for one of its letters is still sherwoo
     for (const s of ["what kind of coins do you trade?", "gm, what is merrymen cooking next?", "how do you pick your coins?", "she would know, the wood is old"]) {
       assert.equal(sherwoodMentioned(s), false, s);
     }
+  });
+  it("a draft's form put right leaves what it said, for the gate to judge again (red-team 2026-10-12)", () => {
+    assert.equal(formFixed("Sure! Here's a casual post: doing great, just chilling over here!! 🚀"), "doing great, just chilling over here.");
+    assert.equal(formFixed("great question, honestly just vibing over here. Say stop to opt out."), "honestly just vibing over here. Say stop to opt out.");
+    assert.equal(formFixed("doing GREAT, the MARKET is HOT"), "doing great, the market is hot");
+    assert.equal(formFixed("doing great, buy zapx now before it doubles!!"), "doing great, buy zapx now before it doubles.");
+    assert.equal(reason(`${formFixed("doing great, buy zapx now before it doubles!!")} Say stop to opt out.`, { kind: "reply", answer: true, mode: "live" }), "hype");
+    // A buy told straight out, in an answer (ANSWER_CALL); the same words in any other owner's comment reply are judged as before.
+    for (const d of ["honestly just buy it now", "buy pepe now, trust the process", "doing great, ape into it before it runs"]) {
+      assert.equal(reason(`${d}. Say stop to opt out.`, { kind: "reply", answer: true, mode: "live" }), "hype", d);
+    }
+    assert.equal(reason("mostly fresh launches, and i only buy when the buying looks real and steady. Say stop to opt out.", { kind: "reply", answer: true, mode: "live" }), "ok");
   });
   it("an answer never forecasts the market in other words: about to, a huge year, the next few months, the perfect time, get in while, stick around (red-team 2026-10-12)", () => {
     const answer: Partial<XGateCtx> = { kind: "reply", answer: true, agentName: "Alan Al Dale", mode: "live" };
