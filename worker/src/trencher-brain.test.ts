@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { setImmediate } from "node:timers/promises";
-import { TrenchBrainReview, TrenchTapeReader, brainNoDecisionNote, fetchTrenchTape, type TrenchBrainOrder, highVolumePools, trenchBrainPersona, trenchScreenReason, trenchBrainSignals, trenchHeat, TRENCH_H1_VOLUME_MIN, HELD_REVIEW_MAX_GAP_MS, NOMINATED_PAGES_MAX, PRIORITY_RETRY_MS, TRENCH_REVIEW_INTERVAL_MS, HoldBackoff, HOLD_BACKOFF, holdReason, isModelHold, materialChange, trenchMaterial, type TrenchMaterial, entryEvidenceBlind, TRENCH_EVIDENCE_STALE_MS, TRENCH_TAPE_MAX_AGE_MS } from "./trencher-brain";
+import { TrenchBrainReview, TrenchTapeReader, brainNoDecisionNote, fetchTrenchTape, type TrenchBrainOrder, highVolumePools, trenchBrainPersona, trenchScreenReason, trenchBrainSignals, trenchHeat, TRENCH_H1_VOLUME_MIN, HELD_REVIEW_MAX_GAP_MS, NOMINATED_PAGES_MAX, PRIORITY_RETRY_MS, TRENCH_REVIEW_INTERVAL_MS, HoldBackoff, HOLD_BACKOFF, holdReason, isModelHold, materialChange, trenchMaterial, type TrenchMaterial, entryEvidenceBlind, TRENCH_EVIDENCE_STALE_MS, TRENCH_TAPE_MAX_AGE_MS, TrenchNoticeGate, TRENCH_NOTICE_REPEAT_MS, TRENCH_FEED_OUTAGE_NOTICE, TRENCH_NOTHING_PASSES_NOTICE, trenchDeskNotice, type EarlyLane } from "./trencher-brain";
 import { classifyReview } from "./decision-funnel";
 import { chooseFocus } from "./brain-focus";
 import { emptyGeckoBuckets, type GeckoPool } from "./venues/geckoterminal";
@@ -857,16 +857,16 @@ test("hold memory: when, a short safe reason, and what moved since — unknown s
 test("an evidence skip backs the coin off one base window and is said once per window; it is not a hold", () => {
   const { clock, review } = backoffRig();
   const eligible = [{ token: TOKEN }];
-  assert.equal(review.evidenceSkipped(TOKEN), true, "said the first time");
+  assert.equal(review.evidenceSkipped(TOKEN, "blind"), true, "said the first time");
   assert.equal(review.candidate(eligible), undefined, "and the coin waits out the window");
   clock.now += MIN;
-  assert.equal(review.evidenceSkipped(TOKEN), false, "not said again inside the window");
+  assert.equal(review.evidenceSkipped(TOKEN, "blind"), false, "not said again inside the window");
   assert.equal(review.holdMemory(TOKEN, "MEME"), null, "a skip is not a hold");
   clock.now += HOLD_BACKOFF.baseMs;
   assert.equal(review.candidate(eligible)?.token, TOKEN);
-  assert.equal(review.evidenceSkipped(TOKEN), true, "a new window, said again");
+  assert.equal(review.evidenceSkipped(TOKEN, "blind"), true, "a new window, said again");
   const plain = new TrenchBrainReview(() => 0);
-  assert.equal(plain.evidenceSkipped(TOKEN), true, "no backoff: always said");
+  assert.equal(plain.evidenceSkipped(TOKEN, "blind"), true, "no backoff: always said");
 });
 
 test("a context change forgets every backoff; a throwing material reader releases nothing and breaks nothing", async () => {
@@ -896,7 +896,7 @@ test("a backed-off regular list does not freeze the early lane: a waiting early 
   await reviewOf(ROUTER, () => hold());
   review.earlyLane = () => ({ held: new Set([EARLY_COIN]), waiting: [EARLY_COIN], reserved: false });
   assert.equal(review.candidate(eligible)?.token, EARLY_COIN, "nothing regular is reviewable, so the lane is 'nothing else eligible'");
-  assert.deepEqual(review.backedOffBreakdown(), { holds: 2, evidence: 0 });
+  assert.deepEqual(review.backedOffBreakdown(), { holds: 2, blind: 0, noTape: 0 });
   // With a regular coin open, an unreserved slot is still the rotation's, as before.
   const open = [...eligible, { token: SECOND, volume24hUsd: 100 }];
   assert.equal(review.candidate(open)?.token, SECOND);
@@ -908,15 +908,15 @@ test("a backed-off regular list does not freeze the early lane: a waiting early 
 test("the idle breakdown tells a model-hold backoff from an evidence-skip backoff", async () => {
   const { clock, review, reviewOf } = backoffRig();
   await reviewOf(TOKEN, () => hold());
-  assert.equal(review.evidenceSkipped(ROUTER), true);
+  assert.equal(review.evidenceSkipped(ROUTER, "blind"), true);
   assert.equal(review.candidate([{ token: TOKEN }, { token: ROUTER }]), undefined);
-  assert.deepEqual(review.backedOffBreakdown(), { holds: 1, evidence: 1 });
+  assert.deepEqual(review.backedOffBreakdown(), { holds: 1, blind: 1, noTape: 0 });
   assert.equal(review.backedOffCount(), 2);
   // A skip that outlasts a running hold backoff names the backoff; one inside it does not.
   clock.now += 4 * MIN;
-  assert.equal(review.evidenceSkipped(TOKEN), true);
+  assert.equal(review.evidenceSkipped(TOKEN, "blind"), true);
   assert.equal(review.candidate([{ token: TOKEN }]), undefined);
-  assert.deepEqual(review.backedOffBreakdown(), { holds: 0, evidence: 1 }, "the skip's window now runs longest");
+  assert.deepEqual(review.backedOffBreakdown(), { holds: 0, blind: 1, noTape: 0 }, "the skip's window now runs longest");
 });
 
 test("a PAID HOLD from a review without evidence still backs the coin off one evidence window — with no hold memory and no run of holds", async () => {
@@ -926,7 +926,7 @@ test("a PAID HOLD from a review without evidence still backs the coin off one ev
   await setImmediate();
   clock.now += TRENCH_REVIEW_INTERVAL_MS;
   assert.equal(review.candidate([{ token: TOKEN }]), undefined, "not paid for again on the next pass of an outage");
-  assert.deepEqual(review.backedOffBreakdown(), { holds: 0, evidence: 1 }, "named as an evidence problem, not a verdict");
+  assert.deepEqual(review.backedOffBreakdown(), { holds: 0, blind: 1, noTape: 0 }, "named as an evidence problem, not a verdict");
   assert.equal(review.holdMemory(TOKEN, "MEME"), null, "no flow was judged, so nothing to remember");
   clock.now = started + HOLD_BACKOFF.baseMs;
   assert.equal(review.candidate([{ token: TOKEN }])?.token, TOKEN, "one base window, never doubled");
@@ -941,6 +941,83 @@ test("a PAID HOLD from a review without evidence still backs the coin off one ev
   assert.doesNotMatch(review.holdMemory(TOKEN, "MEME")!, /in a row/);
   clock.now = real + HOLD_BACKOFF.baseMs;
   assert.equal(review.candidate([{ token: TOKEN }])?.token, TOKEN);
+});
+
+test("the notice gate: said on change, never per flicker, and again only after the repeat window", () => {
+  let t = 0;
+  const gate = new TrenchNoticeGate(TRENCH_NOTICE_REPEAT_MS, () => t);
+  assert.equal(gate.say(""), false, "clearing is never said");
+  assert.equal(gate.say(TRENCH_FEED_OUTAGE_NOTICE), true);
+  assert.equal(gate.say(TRENCH_FEED_OUTAGE_NOTICE), false, "unchanged");
+  t += 60_000;
+  assert.equal(gate.say(""), false);
+  assert.equal(gate.say(TRENCH_FEED_OUTAGE_NOTICE), false, "cleared and back within the window: the same notice, no new event");
+  assert.equal(gate.say(TRENCH_NOTHING_PASSES_NOTICE), true, "a different notice is a change");
+  assert.equal(gate.say(TRENCH_FEED_OUTAGE_NOTICE), false, "and flipping back inside the window is not");
+  t += TRENCH_NOTICE_REPEAT_MS;
+  gate.say("");
+  assert.equal(gate.say(TRENCH_FEED_OUTAGE_NOTICE), true, "a new outage half an hour on is said again");
+});
+
+test("the desk notice names a feed outage whatever the slot picked, and blames no feed for a hold or a missing tape row", () => {
+  const none = { holds: 0, blind: 0, noTape: 0 };
+  assert.equal(trenchDeskNotice({ picked: true, braked: false, backoff: { ...none, blind: 2 } }), TRENCH_FEED_OUTAGE_NOTICE, "an early or unaffected coin's review does not clear it");
+  assert.equal(trenchDeskNotice({ picked: false, braked: false, backoff: { ...none, blind: 1, holds: 3 } }), TRENCH_FEED_OUTAGE_NOTICE);
+  assert.equal(trenchDeskNotice({ picked: false, braked: false, backoff: { ...none, noTape: 2 } }), "", "no read was made: not an outage");
+  assert.equal(trenchDeskNotice({ picked: false, braked: false, backoff: { ...none, holds: 2 } }), "", "the rotation working");
+  assert.equal(trenchDeskNotice({ picked: false, braked: false, backoff: none }), TRENCH_NOTHING_PASSES_NOTICE);
+  assert.equal(trenchDeskNotice({ picked: false, braked: true, backoff: none }), "", "braked: the strategy says why");
+  assert.equal(trenchDeskNotice({ picked: true, braked: false, backoff: none }), "");
+});
+
+/**
+ * A constant feed outage, ticked the way index.ts ticks it: pick, word the
+ * notice, write it through the gate, and skip the picked coin's review for
+ * want of evidence. Returns how many notice events were written.
+ */
+async function simulateOutage(hours: number, lane?: () => EarlyLane | null) {
+  const { clock, review } = backoffRig();
+  if (lane) review.earlyLane = lane;
+  const gate = new TrenchNoticeGate(TRENCH_NOTICE_REPEAT_MS, () => clock.now);
+  const eligible = [{ token: TOKEN, volume24hUsd: 900_000 }, { token: ROUTER, volume24hUsd: 800_000 }, { token: SECOND, volume24hUsd: 700_000 },
+    ...(lane ? [{ token: EARLY_COIN, volume24hUsd: 20_000 }] : [])];
+  let events = 0, earlyPicks = 0;
+  for (let tick = 0; tick < hours * 360; tick++) {
+    const cand = review.candidate(eligible);
+    if (gate.say(trenchDeskNotice({ picked: !!cand, braked: false, backoff: review.backedOffBreakdown() }))) events++;
+    if (cand) {
+      const token = cand.token;
+      review.launch("live", input, token, async () => {
+        if (token === EARLY_COIN) earlyPicks++;
+        review.evidenceSkipped(token, "blind");
+        return { ran: false, why: "", nextReviewAt: null, trigger: { fire: false, reason: null, detail: "", candidates: [] } } as ShadowOutcome;
+      }, () => {});
+      await setImmediate();
+    }
+    clock.now += 10_000;
+  }
+  return { events, earlyPicks }; // earlyPicks: reviews of the early coin actually launched
+}
+
+test("a six-hour outage writes ONE desk event, not one per coin per window", async () => {
+  const { events } = await simulateOutage(6);
+  assert.equal(events, 1);
+});
+
+test("a blind waiting early coin waits out its own evidence window: no per-minute re-picks, no notice flicker", async () => {
+  const { events, earlyPicks } = await simulateOutage(1, () => ({ held: new Set([EARLY_COIN]), waiting: [EARLY_COIN], reserved: false }));
+  assert.equal(events, 1);
+  assert.ok(earlyPicks >= 1 && earlyPicks <= 12, `${earlyPicks} skipped reviews in an hour: at most one per five-minute window, not one per minute`);
+});
+
+test("a nomination or early offer releases a HOLD's backoff, never an evidence window; a no-tape skip is counted apart", async () => {
+  const { review, reviewOf } = backoffRig();
+  await reviewOf(TOKEN, () => hold());
+  assert.equal(review.evidenceSkipped(NOMINATED, "blind"), true);
+  assert.equal(review.evidenceSkipped(ROUTER, "no-tape"), true);
+  const eligible = [{ token: TOKEN }, { token: NOMINATED }, { token: ROUTER }];
+  assert.equal(review.candidate(eligible, new Set([TOKEN, NOMINATED, ROUTER]))?.token, TOKEN, "the held coin's nomination is new evidence");
+  assert.deepEqual(review.backedOffBreakdown(), { holds: 0, blind: 1, noTape: 1 }, "the outage and the missing row stand");
 });
 
 test("all entries backed off: a held position still gets its review — the backoff never touches exits", async () => {

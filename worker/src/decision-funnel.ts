@@ -106,8 +106,11 @@ export type FunnelInput =
   | { kind: "entry-screen"; why: string }
   | { kind: "candidate-skip"; skip: CandidateSkip }
   | { kind: "not-on-tape" }
-  /** An entry review not paid for: no candles, no trades and a stale tape row (trencher-brain.ts entryEvidenceBlind). */
-  | { kind: "evidence-unavailable" }
+  /**
+   * An entry review not paid for: no candles, no trades and a stale tape row
+   * (`blind`, trencher-brain.ts entryEvidenceBlind), or no tape row at all.
+   */
+  | { kind: "evidence-unavailable"; why?: "blind" | "no-tape" }
   | { kind: "size-below-floor"; sizeUsdg6: bigint; floorUsdg6: bigint }
   | { kind: "tick-block"; block: TickBlock };
 
@@ -367,7 +370,9 @@ export function classifyStage(input: FunnelInput): Classified {
     case "not-on-tape":
       return { stage: "NOT_DISCOVERED", detail: "not-on-tape" };
     case "evidence-unavailable":
-      return { stage: "RESEARCH_INCOMPLETE", detail: "evidence-unavailable: no candles, no trades and a stale tape row; entry review not paid for" };
+      return { stage: "RESEARCH_INCOMPLETE", detail: input.why === "no-tape"
+        ? "evidence-unavailable: no fresh tape row for its pool; entry review not paid for"
+        : "evidence-unavailable: no candles, no trades and a stale tape row; entry review not paid for" };
     case "size-below-floor":
       return { stage: "SIZE_BELOW_ECONOMIC_FLOOR", detail: `size-below-floor: ${usdg6(input.sizeUsdg6)} USDG < ${usdg6(input.floorUsdg6)} USDG` };
     case "tick-block":

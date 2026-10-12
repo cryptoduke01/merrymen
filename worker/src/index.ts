@@ -135,7 +135,7 @@ import { provenanceOf, type Provenance } from "./provenance";
 import { recordDecisionRefusal, verifyDecisionOwner, withDecisionOutcome } from "./decision-identity";
 import { bookGaps, composeEquityUsdg } from "./equity";
 import { publishesAView, reviewRecord, runShadow, type ShadowInputs, type ShadowOutcome } from "./brain-shadow";
-import { HoldBackoff, TrenchBrainReview, TrenchTapeReader, entryEvidenceBlind, highVolumePools, trenchBrainPersona, trenchBrainSignals, trenchHeat, trenchMaterial, HELD_REVIEW_MAX_GAP_MS, TRENCH_REVIEW_INTERVAL_MS } from "./trencher-brain";
+import { HoldBackoff, TrenchBrainReview, TrenchNoticeGate, TrenchTapeReader, entryEvidenceBlind, trenchDeskNotice, highVolumePools, trenchBrainPersona, trenchBrainSignals, trenchHeat, trenchMaterial, HELD_REVIEW_MAX_GAP_MS, TRENCH_REVIEW_INTERVAL_MS } from "./trencher-brain";
 import { withAgentBrief } from "./agent-brief";
 import { ProjectPurposeReader } from "./research/project-purpose";
 import { getPaperBrainCapital } from "./store";
@@ -1042,14 +1042,14 @@ async function main() {
   let trenchTapeRequestedAt = 0;
   let trenchTapePending = false;
   let lastTrenchFeedHealth = "";
-  let lastTrenchNotice = "";
+  // A notice is written on CHANGE, and a notice that cleared and came back
+  // within half an hour is the same notice, not a new event (TrenchNoticeGate):
+  // an outage flickering the desk notice must not fill the events table.
+  const trenchNoticeGate = new TrenchNoticeGate();
   function trenchNotice(agentId: string, message: string) {
-    if (message === lastTrenchNotice) return;
-    lastTrenchNotice = message;
-    if (message) {
-      console.warn(`[trencher] ${message}`);
-      void addEvent(agentId, "warn", `Trencher: ${message}`).catch(() => {});
-    }
+    if (!trenchNoticeGate.say(message)) return;
+    console.warn(`[trencher] ${message}`);
+    void addEvent(agentId, "warn", `Trencher: ${message}`).catch(() => {});
   }
   function refreshTrenchTape() {
     trenchTapeReader.setDiscoveryFocus(cfg.discoveryFocus);
@@ -1103,8 +1103,8 @@ async function main() {
     const price = q && !q.stale && q.price8 > 0n ? Number(q.price8) / 1e8 : null;
     return trenchMaterial(trenchTapeRow(token, trenchTapeReader.snapshot().pools), price);
   });
-  /** The entry-rotation idle line last printed, so it is said on change rather than every tick. */
-  let lastBackoffIdle = "";
+  /** The entry-rotation idle line, said on change and never per flicker (TrenchNoticeGate). */
+  const backoffIdleGate = new TrenchNoticeGate();
   /**
    * What discovery's early path did, filed ON CHANGE only: every pass would
    * otherwise re-file "early-verified" over the later stage (an entry screen,
@@ -12890,25 +12890,25 @@ async function main() {
         // (idle-notice.ts) — not a second Trencher line saying the same thing.
         //
         // NOR WHEN EVERY ELIGIBLE COIN IS BACKED OFF (trencher-brain.ts
-        // HoldBackoff): coins did pass the entry checks. Two causes, said
+        // HoldBackoff): coins did pass the entry checks. Three causes, said
         // apart. A coin the Brain HELD recently, with nothing material moved
-        // since, is the rotation working and needs no notice. A coin waiting
-        // out an EVIDENCE skip is a feed outage, and the desk is told so — the
-        // notice is never cleared over it. No entry review launches this slot
-        // either way; the log line is said on change, never per tick.
-        const backoff = fastTrencher && !trenchCandidate ? trenchBrain.backedOffBreakdown() : { holds: 0, evidence: 0 };
-        const backedOff = backoff.holds + backoff.evidence;
-        if (fastTrencher) trenchNotice(agentId,
-          backoff.evidence ? "Pool evidence is unavailable (candle and trade reads failing on a stale tape), so new-entry reviews are paused until the market feed recovers. Automatic exits remain active."
-            : trenchSymbols.size || entriesBraked || backedOff ? "" : "No permitted, freshly priced high-volume pool passes the entry checks. Discovery will retry; automatic exits remain active.");
-        const backoffIdle = backedOff ? `${backoff.holds}/${backoff.evidence}` : "";
-        if (backoffIdle !== lastBackoffIdle) {
-          lastBackoffIdle = backoffIdle;
-          const parts = [
-            backoff.holds ? `${backoff.holds} held recently with nothing material moved since` : "",
-            backoff.evidence ? `${backoff.evidence} waiting out an evidence skip (candle and trade reads failed on a stale tape)` : "",
-          ].filter(Boolean).join("; ");
-          if (backedOff) console.log(`[trencher] Entry rotation idle: all ${backedOff} eligible coin(s) backed off — ${parts}. No entry review until one moves or its window passes.`);
+        // since, is the rotation working and needs no notice; nor does a coin
+        // whose pool had no tape row, where nothing was read. A coin waiting
+        // out FAILED CANDLE AND TRADE READS is a feed outage, and the desk is
+        // told so while ANY coin is in that window — whatever this slot
+        // picked, so a review of an early coin or of the coins outside the
+        // outage does not clear it. The notice and the idle line go through
+        // TrenchNoticeGate: said on change, never per flicker.
+        const backoff = fastTrencher ? trenchBrain.backedOffBreakdown() : { holds: 0, blind: 0, noTape: 0 };
+        const backedOff = trenchCandidate ? 0 : backoff.holds + backoff.blind + backoff.noTape;
+        if (fastTrencher) trenchNotice(agentId, trenchDeskNotice({ picked: trenchSymbols.size > 0, braked: entriesBraked, backoff }));
+        const parts = [
+          backoff.holds ? `${backoff.holds} held recently with nothing material moved since` : "",
+          backoff.blind ? `${backoff.blind} waiting out failed candle and trade reads` : "",
+          backoff.noTape ? `${backoff.noTape} waiting out a missing tape row for their pool` : "",
+        ].filter(Boolean).join("; ");
+        if (backoffIdleGate.say(backedOff ? `Entry rotation idle: all ${backedOff} eligible coin(s) backed off — ${parts}. No entry review until one moves or its window passes.` : "")) {
+          console.log(`[trencher] Entry rotation idle: all ${backedOff} eligible coin(s) backed off — ${parts}. No entry review until one moves or its window passes.`);
         }
         const focusPositions = positions.filter(p => !fastTrencher || trenchHeld.has(p.token.toLowerCase())).map((p) => ({
           symbol: p.symbol,
@@ -13345,12 +13345,12 @@ async function main() {
               // come back HOLD. The coin waits one backoff window unless it
               // moves, the skip is said once per coin per window, and the
               // funnel files it as evidence-unavailable.
-              const skipBlindEntry = (why: string): ShadowOutcome => {
-                const say = trenchBrain.evidenceSkipped(focus.token);
-                funnel.note(focus.token, focus.symbol, classifyStage({ kind: "evidence-unavailable" }));
+              const skipBlindEntry = (cause: "blind" | "no-tape", words: string): ShadowOutcome => {
+                const say = trenchBrain.evidenceSkipped(focus.token, cause);
+                funnel.note(focus.token, focus.symbol, classifyStage({ kind: "evidence-unavailable", why: cause }));
                 return {
                   ran: false,
-                  why: say ? `Entry review of ${focus.symbol} not paid for: ${why}; it waits a backoff window unless it moves.` : "",
+                  why: say ? `Entry review of ${focus.symbol} not paid for: ${words}; it waits a backoff window unless it moves.` : "",
                   nextReviewAt: null,
                   trigger: { fire: false, reason: null, detail: "entry evidence unavailable", candidates: [] },
                 };
@@ -13387,7 +13387,7 @@ async function main() {
                 const tapeAt = trenchTapeReader.observedAtOf(tape);
                 if (!focus.held && entryEvidenceBlind(evidence, tapeAt, Date.now())) {
                   const age = tapeAt === null ? "gone from the fresh tape" : `${Math.round((Date.now() - tapeAt) / 1000)}s old`;
-                  return skipBlindEntry(`candles and trades both unavailable and its tape row is ${age}`);
+                  return skipBlindEntry("blind", `candles and trades both unavailable and its tape row is ${age}`);
                 }
                 // A review that goes ahead without either leg (a current tape
                 // row, or a held position) holds on missing flow, not on the
@@ -13410,13 +13410,16 @@ async function main() {
                 // This does not fix the gap — it makes it countable, which is
                 // the prerequisite for deciding whether the window or the pool
                 // match is the thing to change.
-                console.log(`[${short(agentId)}] [trencher] evidence ${focus.symbol}: none — no fresh tape entry for this pool, so the review has no memecoin signals`);
+                //
                 // AND AN ENTRY REVIEW IN THAT STATE IS NOT PAID FOR: no tape
                 // row means no memecoin signals and no pool evidence at all,
-                // strictly less than the blind case above. A held position is
-                // still reviewed, flagged like any review without evidence
+                // strictly less than the blind case above. It is filed as
+                // `no-tape`, not as a feed outage — no read was made — and said
+                // once per coin per window by the skip itself. A held position
+                // is still reviewed, flagged like any review without evidence
                 // (a held review never touches the backoff either way).
-                if (!focus.held) return skipBlindEntry("its pool has no fresh tape row, so there are no memecoin signals or pool evidence");
+                if (!focus.held) return skipBlindEntry("no-tape", "its pool has no fresh tape row, so there are no memecoin signals or pool evidence");
+                console.log(`[${short(agentId)}] [trencher] evidence ${focus.symbol}: none — no fresh tape entry for this pool, so the review has no memecoin signals`);
                 review.withoutEvidence();
               }
               const project = await projectRead;

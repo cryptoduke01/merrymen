@@ -144,6 +144,11 @@ describe("classifyStage maps the existing vocabularies, keeping the original rea
     const skip = classifyStage({ kind: "evidence-unavailable" });
     assert.equal(skip.stage, "RESEARCH_INCOMPLETE");
     assert.equal(skip.detail.split(":")[0], "evidence-unavailable");
+    assert.match(classifyStage({ kind: "evidence-unavailable", why: "blind" }).detail, /no candles, no trades and a stale tape row/);
+    const noTape = classifyStage({ kind: "evidence-unavailable", why: "no-tape" });
+    assert.equal(noTape.detail.split(":")[0], "evidence-unavailable", "the same code, so the summary counts both");
+    assert.match(noTape.detail, /no fresh tape row for its pool/);
+    assert.doesNotMatch(noTape.detail, /candles|trades/, "no read was made, so none is blamed");
     // Filed over an earlier model hold, it is where the coin stops now, and the line counts it by code.
     let t = 1_000_000;
     const f = new FunnelRecorder({ now: () => t });

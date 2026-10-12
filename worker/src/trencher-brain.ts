@@ -568,12 +568,19 @@ interface HoldRecord {
   reason: string | null;
   /** An evidence skip of this coin has been said up to here, ms. */
   skipSaidUntil: number;
-  /** What set the backoff now running: a model hold, or an evidence skip that outlasts it. */
+  /** What set the backoff now running: a model hold, or an evidence window that outlasts it. */
   cause: BackoffCause;
 }
 
-/** Why a coin is backed off: the Brain held it, or its evidence was blind (index.ts). */
-export type BackoffCause = "hold" | "evidence";
+/**
+ * Why a coin is backed off. `hold`: the Brain held it. `blind`: its candle
+ * and trade reads failed (a skipped review, or a paid HOLD that ran without
+ * them). `no-tape`: its pool had no fresh tape row, so nothing was read at
+ * all — not a feed outage, and never worded as one.
+ */
+export type BackoffCause = "hold" | "blind" | "no-tape";
+/** The evidence causes: a window of one base length, never a hold. */
+export type EvidenceCause = Exclude<BackoffCause, "hold">;
 
 const signedPct = (fraction: number) => `${fraction >= 0 ? "+" : "-"}${Math.abs(fraction * 100).toFixed(1)}%`;
 
@@ -621,12 +628,14 @@ export class HoldBackoff {
 
   /**
    * NEW EVIDENCE OF ANOTHER KIND: a nomination or an early offer still waiting
-   * for its review. The backoff ends; the memory of the hold stays, so the
-   * review it gets can still say what changed.
+   * for its review. A HOLD's backoff ends; the memory of the hold stays, so
+   * the review it gets can still say what changed. An EVIDENCE window does
+   * not end: a nomination does not bring the feed back, and releasing it on
+   * every call re-asked a blind coin every retry gap for its whole TTL.
    */
   release(token: string): void {
     const r = this.records.get(token.toLowerCase());
-    if (r) r.until = 0;
+    if (r && r.cause === "hold") r.until = 0;
   }
 
   /**
@@ -638,7 +647,7 @@ export class HoldBackoff {
     return this.blockedBy(token) !== null;
   }
 
-  /** `blocks`, saying which backoff is running: a model hold's, or an evidence skip's. */
+  /** `blocks`, saying which backoff is running: a model hold's, or an evidence window's. */
   blockedBy(token: string): BackoffCause | null {
     const key = token.toLowerCase();
     const r = this.records.get(key);
@@ -656,8 +665,8 @@ export class HoldBackoff {
    * gap is not re-asked every slot; it is not a hold and starts no run.
    * True when the skip should be said: once per coin per window.
    */
-  evidenceSkipped(token: string, at: number, seen: TrenchMaterial | null): boolean {
-    const r = this.evidenceBackoff(token, at, seen);
+  evidenceSkipped(token: string, at: number, seen: TrenchMaterial | null, why: EvidenceCause): boolean {
+    const r = this.evidenceBackoff(token, at, seen, why);
     if (r.skipSaidUntil > at) return false;
     r.skipSaidUntil = r.until;
     return true;
@@ -671,17 +680,17 @@ export class HoldBackoff {
    * judged. But the coin still waits, or an outage would pay for the same
    * blind review on every pass of the rotation.
    */
-  evidenceBackoff(token: string, at: number, seen: TrenchMaterial | null): HoldRecord {
+  evidenceBackoff(token: string, at: number, seen: TrenchMaterial | null, why: EvidenceCause): HoldRecord {
     const key = token.toLowerCase();
     const until = at + HOLD_BACKOFF.baseMs;
     let r = this.records.get(key);
     if (r) {
       // The skip names the backoff only when it is what now runs longest.
-      if (until > r.until) r.cause = "evidence";
+      if (until > r.until) r.cause = why;
       r.until = Math.max(r.until, until);
       r.baseline = seen;
     } else {
-      r = { at, holds: 0, until, seen, baseline: seen, reason: null, skipSaidUntil: 0, cause: "evidence" };
+      r = { at, holds: 0, until, seen, baseline: seen, reason: null, skipSaidUntil: 0, cause: why };
       this.records.set(key, r);
       this.sweep(at);
     }
@@ -783,6 +792,63 @@ export interface TrenchReviewRun {
   withoutEvidence(): void;
 }
 
+/** Eligible coins left out of one `candidate` call, by what backed each off (BackoffCause). */
+export type BackoffBreakdown = { holds: number; blind: number; noTape: number };
+
+/** A desk notice said again within this long of its last saying is not a new event. */
+export const TRENCH_NOTICE_REPEAT_MS = 30 * 60_000;
+
+/** The desk notice while candle and trade reads fail for any candidate. True of some coins or all. */
+export const TRENCH_FEED_OUTAGE_NOTICE = "Candle and trade reads are failing for some candidates, so their entry reviews are paused until the market feed recovers. Automatic exits remain active.";
+/** The desk notice when nothing reaches the review at all, for no reason the backoff explains. */
+export const TRENCH_NOTHING_PASSES_NOTICE = "No permitted, freshly priced high-volume pool passes the entry checks. Discovery will retry; automatic exits remain active.";
+
+/**
+ * THE TRENCHER'S DESK NOTICE FOR A REVIEW TICK (index.ts). A feed outage —
+ * any coin waiting out failed candle and trade reads — is said whatever the
+ * slot picked, so a review of an early coin, or of the coins outside the
+ * outage, never clears it. Otherwise "nothing passes the entry checks" is
+ * said only when it is true: no coin picked, entries not braked (the
+ * strategy says why then), and no coin held back by a hold or a missing tape
+ * row. Pure; TrenchNoticeGate decides whether it is written.
+ */
+export function trenchDeskNotice(t: { picked: boolean; braked: boolean; backoff: BackoffBreakdown }): string {
+  if (t.backoff.blind > 0) return TRENCH_FEED_OUTAGE_NOTICE;
+  const held = t.backoff.holds + t.backoff.noTape;
+  return t.picked || t.braked || held > 0 ? "" : TRENCH_NOTHING_PASSES_NOTICE;
+}
+
+/**
+ * ONE WARNING PER CHANGE, NOT PER FLICKER.
+ *
+ * The desk notice is set on every review tick, and during an outage it
+ * alternates between the outage text and nothing as coins come out of their
+ * evidence windows and are skipped again. Said on every change back, the same
+ * warn was written as a new event roughly once per coin per window — 214 in
+ * six hours in a simulated outage. This says a message only when it differs
+ * from the current one AND has not itself been said within
+ * TRENCH_NOTICE_REPEAT_MS; clearing to "" is never said and resets nothing.
+ */
+export class TrenchNoticeGate {
+  private current = "";
+  private said = new Map<string, number>();
+  constructor(private readonly repeatMs = TRENCH_NOTICE_REPEAT_MS, private readonly now: () => number = Date.now) {}
+
+  /** True when `message` should be written now. */
+  say(message: string): boolean {
+    if (message === this.current) return false;
+    this.current = message;
+    if (!message) return false;
+    const t = this.now();
+    const last = this.said.get(message);
+    if (last !== undefined && t - last < this.repeatMs) return false;
+    this.said.delete(message);
+    this.said.set(message, t);
+    while (this.said.size > 32) this.said.delete(this.said.keys().next().value!);
+    return true;
+  }
+}
+
 /** Model calls cannot hold up a stop-loss tick. Results are one-use, short-lived data. */
 export class TrenchBrainReview {
   private pending = false;
@@ -819,7 +885,7 @@ export class TrenchBrainReview {
   /** Tokens (lowercased) of the reviews actually launched, oldest first, bounded. */
   private launches: string[] = [];
   /** Eligible coins the last `candidate` call left out, by what backed each off. */
-  private backedOff: Record<"holds" | "evidence", number> = { holds: 0, evidence: 0 };
+  private backedOff: BackoffBreakdown = { holds: 0, blind: 0, noTape: 0 };
   constructor(private now = Date.now) {}
 
   /**
@@ -832,15 +898,18 @@ export class TrenchBrainReview {
 
   /** Eligible coins the last `candidate` call skipped for their backoff. All of them, and it returned nothing. */
   backedOffCount(): number {
-    return this.backedOff.holds + this.backedOff.evidence;
+    return this.backedOff.holds + this.backedOff.blind + this.backedOff.noTape;
   }
 
   /**
-   * The same, by cause: held by the model with nothing material moved since,
-   * or waiting out an evidence skip (a feed outage, not a verdict on the coin).
-   * index.ts words its idle line and the desk notice from this.
+   * The same, by cause: held by the model with nothing material moved since;
+   * waiting out failed candle and trade reads (a feed outage, not a verdict
+   * on the coin); or waiting out a missing tape row. Counted on every call
+   * that had eligible coins, whatever it picked — so an early coin taking the
+   * slot cannot hide an outage among the rest. index.ts words its idle line
+   * and the desk notice from this.
    */
-  backedOffBreakdown(): { holds: number; evidence: number } {
+  backedOffBreakdown(): BackoffBreakdown {
     return { ...this.backedOff };
   }
 
@@ -855,13 +924,14 @@ export class TrenchBrainReview {
 
   /**
    * An entry review index.ts skipped for want of evidence: the coin backs off
-   * one base window (HoldBackoff.evidenceSkipped). True when the skip should
-   * be said — once per coin per window, and always without a backoff.
+   * one base window (HoldBackoff.evidenceSkipped), under the cause given.
+   * True when the skip should be said — once per coin per window, and always
+   * without a backoff.
    */
-  evidenceSkipped(token: string): boolean {
+  evidenceSkipped(token: string, why: EvidenceCause): boolean {
     try {
       const b = this.holdBackoff;
-      return b ? b.evidenceSkipped(token, this.now(), b.observe(token)) : true;
+      return b ? b.evidenceSkipped(token, this.now(), b.observe(token), why) : true;
     } catch {
       return true;
     }
@@ -899,7 +969,7 @@ export class TrenchBrainReview {
     this.launches = [];
     // Another agent, rail or grant: its holds were not this context's.
     this.holdBackoff?.clear();
-    this.backedOff = { holds: 0, evidence: 0 };
+    this.backedOff = { holds: 0, blind: 0, noTape: 0 };
     return true;
   }
 
@@ -974,7 +1044,8 @@ export class TrenchBrainReview {
    * With `holdBackoff`, a coin the model held is left out of the ROTATION
    * until its backoff passes or something material moves (HOLD_BACKOFF). A
    * nomination or early offer still waiting for its review is new evidence
-   * and releases it. When every regular coin is backed off, a waiting early
+   * and releases a HOLD's backoff — not an evidence window, which applies to
+   * nominated and early coins too. When every regular coin is backed off, a waiting early
    * coin may take the slot (for the lane, nothing else is reviewable); with
    * none, nothing is picked and no entry review launches this slot — a
    * narrower spend, never a wider one. A coin's memory survives it flickering out of eligibility,
@@ -987,7 +1058,7 @@ export class TrenchBrainReview {
     for (const [key, seq] of this.reviewed) if (!current.has(key) && this.reviewSequence - seq > REVIEWED_KEEP) this.reviewed.delete(key);
     const wanted = new Set([...(priority ?? [])].map(a => a.toLowerCase()));
     this.priorityKeys = wanted;
-    this.backedOff = { holds: 0, evidence: 0 };
+    this.backedOff = { holds: 0, blind: 0, noTape: 0 };
     if (eligible.length === 0) return undefined;
     const lane = this.laneNow();
     if (this.holdBackoff) {
@@ -1001,13 +1072,17 @@ export class TrenchBrainReview {
     // eligible" means nothing the rotation could actually review: a regular
     // list that is entirely backed off must not freeze a waiting early coin
     // out of every unreserved slot until its offer expires.
-    const open = this.holdBackoff ? regular.filter(c => {
+    // Early coins too: a waiting early coin whose reads failed waits out its
+    // evidence window like any other (release() leaves those alone).
+    const unblocked = (cs: readonly T[]) => this.holdBackoff ? cs.filter(c => {
       const why = this.blockedBy(c.token);
-      if (why) this.backedOff[why === "hold" ? "holds" : "evidence"]++;
+      if (why) this.backedOff[why === "hold" ? "holds" : why === "blind" ? "blind" : "noTape"]++;
       return why === null;
-    }) : regular;
-    if (lane && early.length > 0 && (lane.reserved || open.length === 0)) {
-      const pick = this.earlyPick(early, lane.waiting);
+    }) : cs;
+    const open = unblocked(regular);
+    const earlyOpen = early.length > 0 ? unblocked(early) : early;
+    if (lane && earlyOpen.length > 0 && (lane.reserved || open.length === 0)) {
+      const pick = this.earlyPick(earlyOpen, lane.waiting);
       if (pick) return pick;
     }
     if (open.length === 0) return undefined;
@@ -1148,7 +1223,7 @@ export class TrenchBrainReview {
         const d = outcome.result.decision;
         try {
           if (isModelHold(d, stale)) {
-            if (blind) this.holdBackoff.evidenceBackoff(token, started, seen);
+            if (blind) this.holdBackoff.evidenceBackoff(token, started, seen, "blind");
             else this.holdBackoff.held(token, started, seen, holdReason(d));
           }
           else if (String(d.action ?? "").toLowerCase() === "buy") this.holdBackoff.forget(token);
