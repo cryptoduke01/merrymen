@@ -2777,8 +2777,12 @@ test("what's hot never claims, or recommends, a coin the line names, whatever it
       await w.step();
       assert.deepEqual(w.asked(), [], draft);
       const text = String(w.sends[0]?.text ?? "");
-      assert.ok(hotWords(read).includes(wordsBeforeLine(text) ?? ""), text);
-      assert.match(text, /trending \$ZAPX 24h \+42\.1% vol ~\$1\.2M/);
+      // Its own coin, by any name and any contract, is never in what's hot at all (red-team 2026-10-12): the rest are.
+      const held = calls.includes(zapx);
+      assert.ok(hotWords(held ? { coins: 2, lead: { dir: "down", size: "a fair bit" } } : read).includes(wordsBeforeLine(text) ?? ""), text);
+      if (held) assert.match(text, /trending \$QRTZ 24h -8\.3% vol ~\$310k/, text);
+      else assert.match(text, /trending \$ZAPX 24h \+42\.1% vol ~\$1\.2M/);
+      if (held) assert.doesNotMatch(text, /ZAPX/, text);
       assert.doesNotMatch(text, /\b(?:i'm|my|book|keep|play|own|riding|pick|buy list)\b/, text);
     }
   }
@@ -2900,6 +2904,42 @@ test("what's hot names no chain coin coingecko does not list by its contract: a 
   assert.ok(hotWords({ coins: 1, lead: { dir: "up", size: "sharply" } }).includes(wordsBeforeLine(text) ?? ""), text);
   assert.match(text, / geckoterminal robinhood: trending \$CHUMP 24h \+88% vol ~\$940k\. say stop to opt out\.$/, text);
   assert.doesNotMatch(text, /FUHRER|NIGLET/);
+});
+
+test("what's hot never shows a coin under a name its own buys go by, a copy at another contract or not, nor as fomo's most bought, under its buy post or anywhere (red-team 2026-10-12)", async (t) => {
+  // At fbcf8756, under its own ZAPX buy post: "trending on robinhood: a small group out in front, the frontrunner rising hard lately. a snapshot.
+  // geckoterminal robinhood: trending $ZAPX 24h +912% vol ~$1.4M, $QRTZ 24h -8.3% vol ~$310k; fomo: most bought $ZAPX. say stop to opt out."
+  const BUY_TWEET = "1000000000000009001";
+  const zapx: CallFact = { decisionId: "fill-zapx", side: "buy", symbol: "ZAPX", name: "Zapx", token: `0x${"77".repeat(20)}`, paper: false,
+    atSec: (NOW - 2 * HOUR) / 1000, bands: ["curve early"], ownWords: null };
+  const alan: AgentFacts = { ...FACTS, name: "Alan Al Dale", mode: "live", calls: [zapx] };
+  const pools = [{ ...namedPool("ZAPX", 1, 912.4, 1.4e6), tokenAddress: `0x${"11".repeat(20)}` as `0x${string}`, buyers24h: 180 }, namedPool("QRTZ", 2, -8.3, 310_000)];
+  const asks = [
+    tag({ author_id: "909", conversation_id: BUY_TWEET, referenced_tweets: [{ type: "replied_to", id: BUY_TWEET }], text: "@pine_stoat what's hot?" }),
+    tag({ author_id: "909", text: "@pine_stoat what's hot?" }),
+  ];
+  for (const ask of asks) {
+    const w = await world(t, { env: { ...RESEARCH_ON, MERRYMEN_XPOST_FOMO: "1" }, research: hotWithFomo(pools, ["ZAPX"]), facts: alan });
+    await postedBuy(w.db, "fill-zapx", "ZAPX", "grabbed some $ZAPX with real money, curve looked early. not advice.", HOUR, BUY_TWEET);
+    w.setAuthors({ "909": { username: "zapx_copy", name: "zapx copy" } });
+    w.setInbox([ask]);
+    await w.step();
+    const [row] = await w.answers();
+    assert.equal(row?.status, "posted");
+    assert.doesNotMatch(row!.body, /ZAPX|fomo: most bought/, row!.body);
+    assert.match(row!.body, /geckoterminal robinhood: trending \$QRTZ 24h -8\.3% vol ~\$310k\./, row!.body);
+    assert.ok(hotWords({ coins: 1, lead: { dir: "down", size: "a fair bit" } }).includes(wordsBeforeLine(row!.body) ?? ""), row!.body);
+  }
+  // A buy post older than the calls' window still names its coin, and whatever research hands back, the last screen reads the line again.
+  const older: AgentFacts = { ...alan, calls: [] };
+  const read: HotRead = { coins: 1, lead: { dir: "up", size: "sharply" } };
+  const w = await world(t, { env: RESEARCH_ON, facts: older,
+    research: handing({ figures: [{ kind: "pools", coins: [{ symbol: "ZAPXAI", change24hPct: 912.4, volume24hUsd: 1.4e6 }] }], hot: read }, /what's hot/) });
+  await postedBuy(w.db, "fill-zapx", "ZAPX", "grabbed some $ZAPX with real money, curve looked early. not advice.", 20 * DAY, BUY_TWEET);
+  w.setInbox([tag({ text: "@pine_stoat what's hot?" })]);
+  const r = await w.step();
+  assert.deepEqual(w.sends.map((s) => s.text), [hotAnswers(read, MENTION, { lower: true })[0]]);
+  assert.match(r.log ?? "", /answer-figures-left-out 1/);
 });
 
 test("what's hot never shows the slurs and hate codes the first list missed, even listed, in the pools or as fomo's most bought (red-team 2026-10-12)", async (t) => {

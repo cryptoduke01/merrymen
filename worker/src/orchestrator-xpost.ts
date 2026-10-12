@@ -96,7 +96,7 @@ import {
 import { answerPrompt, answerQuestion, buyPrompt, casualPrompt, draft, greetingAnswers, introPrompt, introTemplate, modelAnswers, replyPrompt, sellPrompt, sherwoodClaimed, sherwoodMentioned, sherwoodNamed, xpostModel, xpostModelWarning, type AnswerIntentKind, type WriterFacts, type XStyle } from "./xpost/writer";
 import { appendPublicToken, appendPublicWallet, hasPublicWallet, publicTokenStillAllowed, publicWalletStillAllowed, type PublicWallet } from "./xpost/public-wallet";
 import { readPublicProjectDescription } from "./orchestrator-xpost-project";
-import { boughtNames, carriesResearch, classifyTag, createXResearch, generalTradesQuestion, modelNamed, namesACoin, type ResearchBundle, type TagIntent, type XResearch } from "./orchestrator-xpost-research";
+import { boughtNames, carriesResearch, classifyTag, createXResearch, generalTradesQuestion, modelNamed, namesACoin, ownCoinTicker, type ResearchBundle, type TagIntent, type XResearch } from "./orchestrator-xpost-research";
 import { PUBLISHABLE_SOURCES } from "./thesis-policy";
 import { readSaleResults } from "./orchestrator-xpost-results";
 import { appendSaleOutcome, hasSaleOutcome } from "./xpost/sale-outcome";
@@ -1678,7 +1678,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       if (research && intent) {
         const bundle = await research.gather({ shared, intent, tenant: account.tenant, xUserId: account.xUserId, facts: f, posts, fomo: researchFomo,
           // Under another handle no question is one the exact path reads (ResearchInput.question: absent, never).
-          coinNamed: coinNamed || !general, ...(otherHandles ? {} : { question: candidate.text }), budgetMs: Math.max(0, sendBy - at()) })
+          coinNamed: coinNamed || !general, ...(otherHandles ? {} : { question: candidate.text }), ownCoins: olderBought, budgetMs: Math.max(0, sendBy - at()) })
           .catch((): ResearchBundle => ({ facts: [], lookups: 0, notes: ["fault"] }));
         looked = { intent: bundle.intent ?? intent.kind, research: bundle.facts, ...(bundle.claim ? { creatorClaim: bundle.claim } : {}),
           ...(bundle.exact === true && candidate.address && !otherHandles ? { boughtExact: true } : {}) };
@@ -1841,9 +1841,17 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // OR A PROVIDER'S (red-team 2026-10-12): a coin named after the agent or
       // its model, trending under its own answer, reads as the house's coin.
       const ownNames = [f.name, ...String(f.name ?? "").split(/\s+/).filter((w) => /^\p{L}{3,}$/u.test(w))];
+      // NOR, IN WHAT'S HOT, A NAME ITS OWN BUYS GO BY, ANY CONTRACT (red-team
+      // 2026-10-12): a copy of its ZAPX buy, trending, went out as "$ZAPX 24h
+      // +912%" under its own ZAPX buy post. Its buys' names and sixty days of
+      // buy posts' coins, read again here as research reads them
+      // (ownCoinTicker). Never for a major: the asker named that coin, and a
+      // line that came or went by its name would say which names it bought.
+      const ownCoins = hotCoded ? [...bought, ...olderBought] : [];
       const figured = admitted && lineFigures?.length && !templated && active.has(account.tenant.toLowerCase()) ? withFigures(admitted, lineFigures) : null;
       const lined = figured?.line != null && admitFiguresLine(figured.line) && !sherwoodMentioned(figured.line)
-        && figuresTickers(figured.line).every((t) => tickerRefusal(t) === null && !merrymenMentioned(t) && !sherwoodMentioned(t) && !namedIn(t, ownNames) && !modelNamed(t)) ? figured : null;
+        && figuresTickers(figured.line).every((t) => tickerRefusal(t) === null && !merrymenMentioned(t) && !sherwoodMentioned(t) && !namedIn(t, ownNames) && !modelNamed(t)
+          && !ownCoinTicker(t, ownCoins)) ? figured : null;
       if (figures && admitted) bump(lined ? (lined.dropped > 0 ? "answer-figures-shortened" : "answer-figures") : "answer-figures-left-out");
       const body = lined ? lined.text : admitted;
       // MARKED BY WHAT IT WAS HANDED, not by what the model wrote: an answer

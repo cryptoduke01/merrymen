@@ -31,6 +31,7 @@ import {
   HOT_NONE,
   hotAsk,
   hotShaped,
+  ownCoinTicker,
   hotPhrases,
   hotScreen,
   majorAsk,
@@ -1361,6 +1362,20 @@ describe("what's hot: the chain's trending coins past the fleet's floors, fomo's
     }
     assert.equal(classifyTag("what's hot?").kind, "hot");
     assert.equal(namesACoin({ text: "what's hot?", intent: { kind: "hot" }, address: null }), false, "it names no coin");
+  });
+
+  it("never a coin under a name its own buys go by, any contract, nor as fomo's most bought (red-team 2026-10-12)", async () => {
+    const pools = [pool(1, { name: "ZAPX / WETH 1%", change24hPct: 912.4, volume24hUsd: 1.4e6 }), pool(2, { name: "QRTZ / WETH 1%", change24hPct: -8.3, volume24hUsd: 310_000 })];
+    const h = hotFake({ pools, fomo: true, crowd: [{ address: pools[0]!.tokenAddress, symbol: "ZAPX" }] });
+    const zapx = { decisionId: "fill-zapx", side: "buy" as const, symbol: "ZAPX", name: "Zapx", token: `0x${"77".repeat(20)}`, paper: false, atSec: 0, bands: [], ownWords: null };
+    const b = await h.research.gather(input({ kind: "hot" }, { fomo: true, facts: { ...FACTS, calls: [zapx] } }));
+    assert.deepEqual(b.figures, [{ kind: "pools", coins: [{ symbol: "QRTZ", change24hPct: -8.3, volume24hUsd: 310_000 }] }]);
+    // Sixty days of buy posts' coins, handed in by the orchestrator, count the same.
+    const older = await hotFake({ pools }).research.gather(input({ kind: "hot" }, { ownCoins: ["Zapx"] }));
+    assert.deepEqual(older.figures?.[0], { kind: "pools", coins: [{ symbol: "QRTZ", change24hPct: -8.3, volume24hUsd: 310_000 }] });
+    for (const t of ["ZAPX", "ZAPXAI", "BABYZAPX", "ZAP"]) assert.ok(ownCoinTicker(t, ["ZAPX", "Zap Coin"]), t);
+    for (const t of ["QRTZ", "CHUMP"]) assert.equal(ownCoinTicker(t, ["ZAPX", "Zap Coin"]), false, t);
+    assert.equal(ownCoinTicker("ZAPX", []), false);
   });
 
   it("a what's-hot question with a word more is answered by nothing: what to buy in other words (red-team 2026-10-12)", () => {

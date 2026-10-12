@@ -487,6 +487,18 @@ export function boughtNames(facts: AgentFacts, posts: readonly XPost[]): string[
 }
 
 /**
+ * IS THIS TICKER ONE OF ITS OWN COINS, BY ANY NAME? The ticker holds a name
+ * its buys go by, or a name holds the ticker (gate.ts namedIn, on letters;
+ * a name or ticker under four letters only as a whole word): "ZAPX", "ZAPXAI"
+ * and "ZAP" beside a ZAPX or "Zap Coin" buy. Errs toward yes: a coin it never
+ * bought that shares a name costs one ticker in one line.
+ */
+export function ownCoinTicker(ticker: string, names: readonly string[]): boolean {
+  const list = names.filter((n) => typeof n === "string" && n.trim() !== "");
+  return list.length > 0 && (namedIn(ticker, list) || list.some((n) => namedIn(n, [ticker])));
+}
+
+/**
  * DOES THE TAG NAME A SPECIFIC COIN, IN ANY WAY? (fail-closed review,
  * 2026-10-12) A tagged contract, a coin or ticker classifyTag found, a
  * $cashtag of any length, or a letter code cannot read (writer.ts
@@ -644,6 +656,12 @@ export interface ResearchInput {
    * absent, never.
    */
   question?: string;
+  /**
+   * Every name its own buy posts went by in the orchestrator's sixty days
+   * (orchestrator-xpost.ts olderBought), beside `posts`' own: what's hot shows
+   * no coin under any of them (ownCoinTicker).
+   */
+  ownCoins?: readonly string[];
   /**
    * What is left of the caller's own time, in ms, when that is less than the
    * bundle's twelve seconds: an answer drafted late in a pass gets only what
@@ -1513,7 +1531,15 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
           .filter((t): t is string => t !== null));
         // Nor a coin named after the agent itself, whatever it is called (red-team 2026-10-12).
         const own = [input.facts.name, ...String(input.facts.name ?? "").split(/\s+/).filter((w) => /^\p{L}{3,}$/u.test(w))];
-        const kept = vouched.filter((s) => !listed.has(s.ticker) && !namedIn(s.ticker, own));
+        // NOR A COIN UNDER A NAME ITS OWN BUYS GO BY (red-team 2026-10-12):
+        // Alan bought ZAPX at one contract, a copy at another trended at
+        // +912%, and "what's hot?" under its own ZAPX buy post posted
+        // "trending $ZAPX 24h +912% …; fomo: most bought $ZAPX": its coin, to
+        // anyone reading the thread. Every name of its buys and buy posts, any
+        // contract, the same one included: what's hot is never a read of its
+        // own book, and the last screen cannot tell a contract from a copy.
+        const mine = [...boughtNames(input.facts, input.posts), ...(input.ownCoins ?? [])];
+        const kept = vouched.filter((s) => !listed.has(s.ticker) && !namedIn(s.ticker, own) && !ownCoinTicker(s.ticker, mine));
         if (!kept.length) {
           notes.push(vouched.length ? "hot-none" : "hot-unlisted");
           return { facts: hotPhrases({ changes: [], crowd: 0, trending: 0 }), hot: { coins: 0, lead: null }, lookups, notes };

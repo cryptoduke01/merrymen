@@ -1052,7 +1052,15 @@ other owner's agent, and its posting and reply warnings, are unchanged.
   asked and no chain coin is named). What CoinGecko said of a contract is
   kept an hour. Nothing listed is code's nothing-standing-out line; the
   listings unread is code's no-read line; the screens above stay as a second
-  layer. Then, side by side: with Fomo usable for the owner, the
+  layer. **Nor a coin under a name its own buys go by** (red-team
+  2026-10-12: a copy of its ZAPX buy at another contract trended at +912%,
+  and under its own ZAPX buy post "trending $ZAPX 24h +912% …; fomo: most
+  bought $ZAPX" went out): every name of its buys and of sixty days of its
+  buy posts (`ownCoinTicker`, either name holding the other), at any
+  contract, its own included; research leaves such a coin out and the
+  orchestrator reads every ticker of a what's-hot line again (never a
+  major's: a line that came or went by the asked name would say which names
+  it bought). Then, side by side: with Fomo usable for the owner, the
   coins Fomo traders bought most in the day (`fomo_get_token_activity` with
   no token, its feed-wide `topTokens`: Fomo's thesis read needs a coin, so
   "what fomo traders are on" is the coins the most distinct Fomo traders
