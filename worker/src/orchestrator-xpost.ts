@@ -1034,8 +1034,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
                 for (const r of release.reverse()) await r();
               };
               if (post.kind !== "intro") {
-                // AN ANSWER'S OWN LANE: a few minutes apart and a day allowance
-                // of its own, so a tag is answered without holding a post back.
+                // AN ANSWER'S OWN LANE: twenty seconds apart (ANSWER_GAP_MS) and a
+                // day allowance of its own, so a tag is answered without holding a post back.
                 const gapKey = answer ? `answer-gap:${post.xUserId}` : `gap:${post.xUserId}`;
                 const span = answer ? ANSWER_GAP_MS : cadence.gapMs;
                 const gap = await claimSpan(shared, gapKey, t, span);

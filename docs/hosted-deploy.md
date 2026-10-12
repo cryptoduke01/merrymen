@@ -417,7 +417,7 @@ requests are processed before selection, including when the model budget is
 empty. Replies require a fresh successful poll before sending and share the
 existing posting, quiet-hour and model budgets, with at least ten minutes
 under Coming up. An active owner's answers to tags have their own lane
-instead: due when drafted, not held by the owner's night, a minute apart and
+instead: due when drafted, not held by the owner's night, twenty seconds apart and
 24 a day (see "Rollout: Alan's research lanes and X answers" below and
 [x-posting.md](x-posting.md) "Active owners"). There is no incoming-comment archive: only consent, reply
 target metadata, cursors and recipient opt-outs are persisted alongside the

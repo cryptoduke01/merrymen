@@ -706,19 +706,39 @@ test("the house consent is only for the agents the operator named, and only whil
   }
 });
 
-test("answers go out a minute apart, in their own lane", async (t) => {
+test("answers go out twenty seconds apart, in their own lane", async (t) => {
+  assert.equal(ANSWER_GAP_MS, 20_000);
   const w = await world(t);
   w.setInbox([]);
-  for (const [n, word] of [[1, "one"], [2, "two"]] as const) {
+  for (const [n, word] of [[1, "one"], [2, "two"], [3, "three"]] as const) {
     const id = `10000000000000007${n}`;
     await store.schedulePost(w.db, { tenant: TENANT, xUserId: "111", kind: "answer", dedupeKey: `answer:111:${id}`,
       body: `answer number ${word}. Say stop to opt out.`, nowMs: NOW, dueAtMs: NOW, replyToTweetId: id, replyRootTweetId: id, replyAuthorId: `77${n}` });
   }
   await w.step(NOW);
   assert.equal(w.sends.length, 1);
-  assert.equal((await w.answers()).find((a) => a.status === "scheduled")?.dueAtMs, NOW + MIN, "the next one a minute after");
-  await w.step(NOW + MIN);
+  assert.deepEqual((await w.answers()).filter((a) => a.status === "scheduled").map((a) => a.dueAtMs), [NOW + 20_000, NOW + 20_000], "the rest twenty seconds after");
+  await w.step(NOW + 15_000);
+  assert.equal(w.sends.length, 1, "never inside the twenty seconds");
+  await w.step(NOW + 30_000);
   assert.equal(w.sends.length, 2);
+  await w.step(NOW + 45_000);
+  assert.equal(w.sends.length, 2);
+  await w.step(NOW + 60_000);
+  assert.equal(w.sends.length, 3, "three people tagging at once are all answered within the minute");
+  assert.equal((await store.readMeta(w.db, "answerday:111:2026-09-30"))?.n, 3);
+});
+
+test("several people tagging at once are answered a pass or two apart: the first on the pass that read them", async (t) => {
+  const w = await world(t);
+  w.setInbox([1, 2, 3].map((n) => tag({ id: `10000000000000022${n}`, conversation_id: `10000000000000022${n}`, author_id: `22${n}`,
+    text: ["@pine_stoat what model do you run on?", "@pine_stoat who made you?", "@pine_stoat what model are you?"][n - 1]! })));
+  await w.step(NOW);
+  assert.equal(w.sends.length, 1, "the first on the pass that read them");
+  w.setInbox([]);
+  for (const at of [NOW + 15_000, NOW + 30_000, NOW + 45_000, NOW + 60_000]) await w.step(at);
+  assert.equal(w.sends.length, 3, "and all three inside a minute");
+  assert.deepEqual((await w.answers()).map((a) => a.status), ["posted", "posted", "posted"]);
 });
 
 // ── research for answers ────────────────────────────────────────────────────
