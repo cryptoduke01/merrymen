@@ -942,6 +942,38 @@ const CHILD_SECRET_STRIP = [
    * above.
    */
   "MERRYMEN_OPS_TOKEN",
+  /**
+   * BITQUERY, UNDER EVERY NAME A CHILD COULD READ IT BY, AND THE HOUSE'S MERRY
+   * CIRCLE TOKEN — the published-key reason, and a fan-out reason of their own.
+   *
+   * MERRYMEN_BITQUERY_API_KEY is the fleet lane's key (venues/bitquery-lane.ts):
+   * read here, held by this process, spent under one daily points budget. A
+   * child has no business holding it, for the Marketaux reason above.
+   *
+   * BITQUERY_API_KEY and MERRYMEN_TOKEN are what a CHILD's own discovery reads
+   * (settings.ts `str(file.bitqueryApiKey, env.BITQUERY_API_KEY)` and
+   * `str(file.merrymenToken, env.MERRYMEN_TOKEN)`). Hosted, both fields are
+   * house keys stripped from the tenant's file (HOUSE_KEY_FIELDS), so the env is
+   * the ONLY value a child could ever see — the operator's — and
+   * discoveryEnabled defaults on. Either one set on this process would have
+   * every child poll Bitquery on its own timer: N pollers on the house's paid
+   * plan with no shared budget, or N pollers sharing one holder's per-address
+   * gateway bucket under that holder's identity. Neither is a tenant's to spend.
+   *
+   * CHILDREN NEVER NEED EITHER. Nothing else reads them: settings.ts is the only
+   * reader and it feeds runDiscovery alone; this process reads neither. A
+   * tenant's OWN holder token still reaches discovery through its own brain key
+   * (llmProvider "merrymen", bitquery.ts gatewayTokenForDiscovery), on its own
+   * quota. Flow facts a child wants come from this process over IPC
+   * (flow-broker.ts), never from a key of its own.
+   *
+   * Latent until now, because the gateway header bug (bitqueryRequestHeaders)
+   * made every gateway call a 401. Fixing the header without this strip would
+   * have switched the fan-out on.
+   */
+  "MERRYMEN_BITQUERY_API_KEY",
+  "BITQUERY_API_KEY",
+  "MERRYMEN_TOKEN",
 ] as const;
 
 /** Where a tenant's child keeps its own ~/.merrymen — isolated from every other. */

@@ -336,6 +336,7 @@ import {
   quoteUsdOf,
   resolveBitquery,
 } from "./discovery";
+import { gatewayTokenForDiscovery } from "./venues/bitquery";
 import { fetchGeckoPools, readTokenPools, type ScreenLimits, type GeckoPool } from "./venues/geckoterminal";
 import { createMemecoinScout, nullScout } from "./strategist/memecoin-scout";
 import { readCurvePrices } from "./venues/curve-prices";
@@ -6230,9 +6231,15 @@ async function main() {
       // The holder token doubles as the gateway credential — the same one the
       // brain claims. No Bitquery account needed for Circle members.
       // The standalone token first, then the LLM key when the brain IS the
-      // gateway — one claimed token opens both, but choosing the gateway for
-      // discovery must not force choosing it for thinking as well.
-      merrymenToken: cfg.merrymenToken ?? (cfg.llmProvider === "merrymen" ? cfg.llmApiKey : undefined),
+      // gateway — never the house's brain key on a hosted child
+      // (gatewayTokenForDiscovery).
+      merrymenToken: gatewayTokenForDiscovery({
+        merrymenToken: cfg.merrymenToken,
+        llmProvider: cfg.llmProvider,
+        llmApiKey: cfg.llmApiKey,
+        hosted: isHostedMode(),
+        houseLlmKey: process.env.MERRYMEN_LLM_API_KEY,
+      }),
     });
     if (!creds) return; // no key, no discovery — honest silence, not an error
     const nowSec = Math.floor(Date.now() / 1000);

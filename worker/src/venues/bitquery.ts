@@ -84,6 +84,37 @@ export function resolveBitquery(cfg: {
 }
 
 /**
+ * The Merry Circle token this process may spend on discovery, or none.
+ *
+ * The standalone token first, then the brain key when the brain IS the gateway
+ * — one claimed token opens both, but choosing the gateway for discovery must
+ * not force choosing it for thinking as well.
+ *
+ * HOSTED, THE HOUSE'S BRAIN KEY IS NOT A DISCOVERY CREDENTIAL. A tenant may
+ * bring its own brain key, and when that is its own holder token, discovery on
+ * its own per-address quota is exactly right. But a child with no key of its
+ * own inherits the house's MERRYMEN_LLM_API_KEY, and if the house ever ran its
+ * brain through the gateway, every such child would poll /bitquery under one
+ * holder's identity and share that holder's bucket — the fan-out
+ * CHILD_SECRET_STRIP closes for MERRYMEN_TOKEN, reopened through a side door.
+ * Dormant while the gateway header bug made every call a 401; refused here now
+ * that the header is fixed. Self-hosted, the house and the owner are one.
+ */
+export function gatewayTokenForDiscovery(c: {
+  merrymenToken?: string;
+  llmProvider?: string;
+  llmApiKey?: string;
+  hosted: boolean;
+  /** The house's brain key as this process inherited it (MERRYMEN_LLM_API_KEY). */
+  houseLlmKey?: string;
+}): string | undefined {
+  if (c.merrymenToken) return c.merrymenToken;
+  if (c.llmProvider !== "merrymen" || !c.llmApiKey) return undefined;
+  if (c.hosted && c.houseLlmKey?.trim() && c.llmApiKey.trim() === c.houseLlmKey.trim()) return undefined;
+  return c.llmApiKey;
+}
+
+/**
  * The right auth header for whichever Bitquery credential the operator set.
  *
  * Bitquery has two credential types and two eras of endpoint. The legacy V1 API
