@@ -29,6 +29,17 @@
  * pipeline, so the default policy enables nothing at all; turning a kind on
  * here is a deliberate wiring change that needs Milla's review.
  *
+ * ONE NARROW EXCEPTION IS BUILT ELSEWHERE, NOT HERE.
+ * orchestrator-xpost-research.ts can put paraphrased, attributed Fomo facts
+ * in an active agent's ANSWERS to people who tagged it on X — "fomo traders
+ * mostly argue it's still early" — and nothing more: no handles, quotes, P&L
+ * or wallet lists, built by code and gated like every other X answer, behind
+ * MERRYMEN_XPOST_FOMO=1 (default off). Republishing provider-derived data
+ * needs the provider's Enterprise redistribution rights: confirmed by the
+ * owner on 2026-10-12 (docs/fomo.md "Publication"), and the Enterprise plan
+ * covers these paraphrased, attributed facts in X answers. Every kind in this
+ * outbox stays policy-blocked exactly as above.
+ *
  * AT MOST ONCE, EVEN ACROSS A CRASH, as on the X path. A draft is written under a
  * UNIQUE dedupe key before anything is sent, and claimed (queued → sending)
  * with a conditional transition before the sender is called. Anything that

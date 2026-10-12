@@ -258,6 +258,51 @@ test("mentions paginate completely and retain nested old-thread opt-outs while e
   assert.ok(seen.every((x) => x.method === "GET" && x.headers.authorization === "Bearer token"));
 });
 
+test("a quote or a retweet is marked, so nothing is ever answered under a post code cannot read (red-team 2026-10-12)", async () => {
+  const body = { data: [
+    // T5: a quote tweet of a post nobody here can read; and a reply that also quotes one.
+    mention("300", { text: "@pine_stoat what model do you run on?", conversation_id: "300", referenced_tweets: [{ type: "quoted", id: "100000000000000006" }] }),
+    mention("299", { referenced_tweets: [{ type: "replied_to", id: "100" }, { type: "quoted", id: "7" }] }),
+    mention("298", { text: "RT @someone: what model", conversation_id: "298", referenced_tweets: [{ type: "retweeted", id: "8" }] }),
+    mention("297"),
+    mention("296", { conversation_id: "296", referenced_tweets: [] }),
+  ], meta: { result_count: 5 } };
+  const r = await readMentions("token", "111", { nowMs: MENTION_NOW, fetch: scripted(200, body) });
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  assert.deepEqual(r.value.replies.map((x) => [x.id, x.quoted ?? false]), [["300", true], ["299", true], ["298", true], ["297", false], ["296", false]]);
+  assert.ok(!("quoted" in r.value.replies[3]!), "absent, not false, on a plain reply");
+});
+
+test("a poll, media, a card or a long post's rest is marked, and the author X expanded is read (red-team 2026-10-12)", async () => {
+  const seen: Seen[] = [];
+  const body = { data: [
+    // The reproduced tag: the plain model question with a poll attached, from author 888.
+    mention("100000000000000040", { text: "@pine_stoat what model are you?", author_id: "888", conversation_id: "100000000000000040", referenced_tweets: [],
+      attachments: { poll_ids: ["1199786642468413448"] } }),
+    mention("299", { attachments: { media_keys: ["3_1"] } }),
+    mention("298", { card_uri: "card://123" }),
+    mention("297", { note_tweet: { text: "a long post" } }),
+    mention("296", { attachments: "garbled" }),
+    mention("295", { attachments: {}, author_id: "999" }),
+    mention("294", { author_id: "777" }),
+  ], includes: { users: [{ id: "888", username: "Sherwood1Token", name: "SHERWOOD-1 presale LIVE" }, { id: "222", username: "reader", name: "A Reader" },
+    { id: "777", username: 7, name: "bad" }] }, meta: { result_count: 7 } };
+  const r = await readMentions("token", "111", { nowMs: MENTION_NOW, fetch: scripted(200, body, {}, seen) });
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  assert.deepEqual(r.value.replies.map((x) => [x.id, x.attached ?? false]),
+    [["100000000000000040", true], ["299", true], ["298", true], ["297", true], ["296", true], ["295", false], ["294", false]]);
+  assert.deepEqual(r.value.replies[0]!.author, { username: "Sherwood1Token", name: "SHERWOOD-1 presale LIVE" });
+  assert.deepEqual(r.value.replies[1]!.author, { username: "reader", name: "A Reader" });
+  assert.equal(r.value.replies[5]!.author, undefined, "an author X did not expand is unknown");
+  assert.equal(r.value.replies[6]!.author, undefined, "and so is a malformed one");
+  const q = new URL(seen[0]!.url).searchParams;
+  assert.deepEqual(q.get("tweet.fields")!.split(",").sort(), ["attachments", "author_id", "card_uri", "conversation_id", "created_at", "note_tweet", "referenced_tweets"]);
+  assert.equal(q.get("expansions"), "author_id");
+  assert.equal(q.get("user.fields"), "username,name");
+});
+
 test("mentions fail closed for incomplete pages, broken reply metadata and repeated cursors", async () => {
   const cases = [
     { data: [mention("300", { author_id: undefined })], meta: { result_count: 1 } },

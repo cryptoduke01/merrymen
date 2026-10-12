@@ -1566,7 +1566,8 @@ describe("the orchestrator ferries it where the contract says", () => {
 
     const spawnFn = body("async function spawnChild(");
     const restore = spawnFn.indexOf("await restoreTgGroupsForChild(tenant);");
-    const env = spawnFn.indexOf("env: childEnv(tenant, { tgGroupsOff: tgGroupsHeld.has(tenant.toLowerCase()) })");
+    // (The same call also says whether the flow broker answers; bitquery-boundary.test.ts pins that half.)
+    const env = spawnFn.search(/env: childEnv\(tenant, \{\s*tgGroupsOff: tgGroupsHeld\.has\(tenant\.toLowerCase\(\)\),/);
     assert.ok(restore > 0 && env > restore, "the child's env is decided after this spawn's restore");
     // The child's, above, and the hold process's (startHolderProcess), which
     // never opens the group store: while trading is held nothing of the

@@ -22,7 +22,7 @@ process.env.MERRYMEN_X_CLIENT_SECRET = "x-client-secret-never-to-a-child";
 process.env.MERRYMEN_XPOST_LLM_KEY = "gsk_x_only_key_never_to_a_child";
 
 const { childEnv } = await import("./orchestrator");
-const { X_MUSINGS, X_TAKES, casualInputs, casualSeed, makeXPoster, tradeTalkDay, writerFacts, xpostEnv, xpostSetup } = await import("./orchestrator-xpost");
+const { X_MUSINGS, X_TAKES, casualInputs, casualSeed, makeXPoster, talkedOf, tradeTalkDay, writerFacts, xpostEnv, xpostSetup } = await import("./orchestrator-xpost");
 const { TRAIT_VOICE } = await import("./groupchat/templates");
 const { admitAgentLine } = await import("./groupchat/policy");
 const { isAsleep } = await import("./groupchat/clock");
@@ -346,6 +346,8 @@ function poster(
     publicProjectDescription?: XPosterDeps["publicProjectDescription"];
     /** The pass's own clock. Default: held — no time passes inside a pass. */
     monotonic?: () => number;
+    /** TENANT on the operator's active cadence (MERRYMEN_XPOST_ACTIVE_TENANTS). */
+    active?: boolean;
   } = {},
 ) {
   const answer =
@@ -353,7 +355,7 @@ function poster(
     ((prompt: string) => (/very first post/.test(prompt) ? INTRO : /What happened: you bought/.test(prompt) ? BUY : "slow afternoons make me weirdly calm, nothing to prove"));
   return makeXPoster({
     creds: over.creds === undefined ? CREDS : over.creds,
-    knobs: { ...xpostEnv({}), llmPerDay: over.llmPerDay, fleetPerDay: over.fleetPerDay, perDay: over.perDay },
+    knobs: { ...xpostEnv(over.active ? { MERRYMEN_XPOST_ACTIVE_TENANTS: TENANT } : {}), llmPerDay: over.llmPerDay, fleetPerDay: over.fleetPerDay, perDay: over.perDay },
     app: APP,
     dek: w.dek,
     deps: {
@@ -977,6 +979,24 @@ describe("fleet guards", () => {
     assert.equal(await store.keyStatus(v.db, "buy:pepe-b"), "skipped");
   });
 
+  it("an active owner's rebuy of a coin goes out again at send time; a standard owner's is folded", async (t) => {
+    for (const active of [true, false]) {
+      const v = await world(t, T0 - 3 * HOUR);
+      await introDealtWith(v);
+      const buy = (key: string, dueAtMs: number) =>
+        store.schedulePost(v.db, { tenant: TENANT, xUserId: "111", kind: "buy", dedupeKey: key, body: BUY, coin: "pepe", decisionId: key, dueAtMs, nowMs: dueAtMs - 20 * MIN });
+      await buy("buy:pepe-1", T0 - MIN);
+      await buy("buy:pepe-2", T0 + 4 * HOUR - MIN);
+      const p = poster(v, { active });
+      await p.step(v.db, ROSTER, new Map(), T0);
+      const second = (await p.step(v.db, ROSTER, new Map(), T0 + 4 * HOUR)).log;
+      assert.equal(v.tweets.length, active ? 2 : 1, active ? "every buy, the same coin again included" : "one post per coin in three days");
+      assert.equal(await store.keyStatus(v.db, "buy:pepe-2"), active ? "posted" : "skipped");
+      if (active) assert.equal(await store.readMeta(v.db, "fold:111:pepe"), null, "no fold is claimed on an active cadence");
+      else assert.match(second ?? "", /folded 1/);
+    }
+  });
+
   it("the owner's choices reach the pass: coins it buys off plans no buy post and cancels one waiting; their number a day holds at send time", async (t) => {
     const w = await world(t, T0 - 3 * HOUR);
     await introDealtWith(w);
@@ -1440,6 +1460,34 @@ describe("what a casual post starts from", () => {
       assert.equal(casualInputs(agent("live", { strategy: null, traits: [], calls: [] }), day).tradeTalk, false);
     }
     assert.ok(talk > 0);
+  });
+
+  it("a casual post may pick up its own answers, never one that carried a stranger's coin research", () => {
+    const T0 = Date.UTC(2026, 8, 28, 8, 0);
+    const OTHER = `0x${"ef".repeat(20)}`;
+    const post = (id: number, kind: "answer" | "reply" | "casual", body: string, over: Record<string, unknown> = {}) => ({
+      id, tenant: TENANT, xUserId: "111", kind, dedupeKey: `${kind}:${id}`, body, coin: null, decisionId: null, status: "posted" as const,
+      reason: null, createdAtMs: T0 - id * MIN, dueAtMs: T0 - id * MIN, sentAtMs: T0 - id * MIN, tweetId: `10000000000000000${id}`, updatedAtMs: T0, ...over,
+    });
+    const talked = talkedOf([
+      post(1, "answer", "folks keep asking about frogcoin, on-chain data shows buys clearly outweighing sells over the last hour. Say stop to opt out."),
+      post(2, "answer", "the public index shows liquidity is thin, fomo traders mostly argue it's still early. Say stop to opt out."),
+      post(3, "answer", "mostly fresh launches, i like the buying to look real. Say stop to opt out."),
+      post(4, "reply", "the pool looked deep enough to me at the time. Say stop to opt out."),
+      post(5, "casual", "soup weather again"),
+      post(6, "answer", "not mine to share. Say stop to opt out.", { tenant: OTHER }),
+      post(7, "answer", "patience mostly, honestly. Say stop to opt out.", { status: "skipped" }),
+      post(8, "answer", "quiet tapes suit me fine. Say stop to opt out."),
+      post(9, "answer", "i keep it simple. Say stop to opt out."),
+    ] as never, TENANT);
+    assert.deepEqual(talked, ["mostly fresh launches, i like the buying to look real.", "the pool looked deep enough to me at the time.", "quiet tapes suit me fine."]);
+    // Marked by what it was handed: research the model said without a source word is still never a theme.
+    const marked = talkedOf([
+      post(1, "answer", "thin liquidity and holders bunched up at the top, spicy one. Say stop to opt out.", { coin: store.ANSWER_LOOKED_UP }),
+      post(2, "answer", "traders reckon it's still early, wild one. Say stop to opt out.", { coin: store.ANSWER_LOOKED_UP }),
+      post(3, "answer", "quiet tapes suit me fine. Say stop to opt out."),
+    ] as never, TENANT);
+    assert.deepEqual(marked, ["quiet tapes suit me fine."]);
   });
 
   it("a buy post's gloss dice are the account's and the decision's", () => {

@@ -363,11 +363,64 @@ export interface XReply {
   conversationId: string;
   inReplyToTweetId: string;
   createdAtMs: number;
+  /**
+   * The post refers to another post besides the one it replies to: a quote
+   * tweet (whose card shows the quoted post) or a retweet. Code cannot read
+   * what that post says, so an answer is never posted under it (red-team
+   * 2026-10-12). Absent when it refers to none.
+   */
+  quoted?: true;
+  /**
+   * SHOWN WITH THE POST, NOT IN ITS TEXT (red-team review, 2026-10-12): a
+   * poll, media, a card, or the rest of a long post (a note tweet, whose
+   * `text` is cut short). A poll adds no link to the text, so "what model are
+   * you?" with a poll "sherwood-1 token: aping / waiting for launch" read as
+   * the plain question, and code's sherwood-1 line went up under the poll.
+   * Code reads none of it, so nothing is answered under it. Absent when there
+   * is none.
+   */
+  attached?: true;
+  /**
+   * THE HANDLE AND DISPLAY NAME X SHOWS BESIDE THE POST, when X expanded its
+   * author (red-team review, 2026-10-12): an answer reads as said to them,
+   * and "@Sherwood1Token · SHERWOOD-1 presale LIVE" asking the plain model
+   * question got code's sherwood-1 line. Absent when X did not say who wrote
+   * it; whoever reads it then knows nothing of the name and fails closed.
+   */
+  author?: { username: string; name: string };
 }
 
 export interface XReplyBatch { replies: XReply[]; newestId: string | null }
 
-function parsedReply(item: unknown, now: number, excludeAuthorId: string): XReply | null {
+/** The longest handle or display name read: X's own limits, with room. A longer one is no name code can vouch for. */
+const AUTHOR_FIELD_MAX = 100;
+
+/** The authors X expanded on a page (`includes.users`), by id. A malformed entry is left out: its author is then unknown. */
+function authorsOf(includes: unknown): Map<string, { username: string; name: string }> {
+  const out = new Map<string, { username: string; name: string }>();
+  const users = includes !== null && typeof includes === "object" && !Array.isArray(includes) ? (includes as Record<string, unknown>).users : null;
+  if (!Array.isArray(users)) return out;
+  for (const u of users) {
+    if (!u || typeof u !== "object" || Array.isArray(u)) continue;
+    const r = u as Record<string, unknown>;
+    if (typeof r.id !== "string" || !ID.test(r.id) || typeof r.username !== "string" || typeof r.name !== "string") continue;
+    if (r.username.length > AUTHOR_FIELD_MAX || r.name.length > AUTHOR_FIELD_MAX) continue;
+    out.set(r.id, { username: r.username, name: r.name });
+  }
+  return out;
+}
+
+/** Anything shown with the post that its text does not carry: attachments of any kind, a card, a long post's rest. */
+function attachedTo(d: Record<string, unknown>): boolean {
+  const a = d.attachments;
+  const attachments = a !== undefined && a !== null
+    && !(typeof a === "object" && !Array.isArray(a) && Object.values(a as Record<string, unknown>).every((v) => Array.isArray(v) && v.length === 0));
+  const card = d.card_uri !== undefined && d.card_uri !== null && d.card_uri !== "";
+  const note = d.note_tweet !== undefined && d.note_tweet !== null;
+  return attachments || card || note;
+}
+
+function parsedReply(item: unknown, now: number, excludeAuthorId: string, authors: ReadonlyMap<string, { username: string; name: string }> = new Map()): XReply | null {
   if (!item || typeof item !== "object" || Array.isArray(item)) return null;
   const d = item as Record<string, unknown>;
   const refs = Array.isArray(d.referenced_tweets) ? d.referenced_tweets : [];
@@ -380,8 +433,11 @@ function parsedReply(item: unknown, now: number, excludeAuthorId: string): XRepl
       typeof d.text !== "string" || !d.text.trim() || d.text.length > 4000 ||
       !Number.isFinite(createdAtMs) || createdAtMs <= 0 || createdAtMs > now) return null;
   if (parents.length && (typeof d.conversation_id !== "string" || d.id === d.conversation_id)) return null;
+  const quoted = refs.some((r) => r === null || typeof r !== "object" || r.type !== "replied_to");
+  const author = authors.get(d.author_id);
   return { id: d.id, text: d.text, authorId: d.author_id, conversationId: typeof d.conversation_id === "string" ? d.conversation_id : d.id,
-    inReplyToTweetId: parents.length ? parents[0]!.id as string : "", createdAtMs };
+    inReplyToTweetId: parents.length ? parents[0]!.id as string : "", createdAtMs, ...(quoted ? { quoted: true as const } : {}),
+    ...(attachedTo(d) ? { attached: true as const } : {}), ...(author ? { author: { ...author } } : {}) };
 }
 
 /**
@@ -405,7 +461,11 @@ export async function readMentions(
   let cursor: string | undefined;
   let newestId: string | null = null;
   for (let page = 0; page < 8; page++) {
-    const query = new URLSearchParams({ max_results: "100", "tweet.fields": "author_id,conversation_id,referenced_tweets,created_at" });
+    // Attachments, cards and long posts, and the author's handle and display name: what X shows with a tag (XReply.attached, XReply.author).
+    const query = new URLSearchParams({
+      max_results: "100", "tweet.fields": "author_id,conversation_id,referenced_tweets,created_at,attachments,card_uri,note_tweet",
+      expansions: "author_id", "user.fields": "username,name",
+    });
     if (opts.sinceId) query.set("since_id", opts.sinceId);
     else if (opts.startTimeMs !== undefined) query.set("start_time", new Date(Math.floor(opts.startTimeMs / 1000) * 1000).toISOString());
     if (cursor) query.set("pagination_token", cursor);
@@ -420,6 +480,7 @@ export async function readMentions(
     const m = meta as Record<string, unknown>;
     const data = read.value.data === undefined && m.result_count === 0 ? [] : read.value.data;
     if (!Array.isArray(data) || data.length > 100 || m.result_count !== data.length || Array.isArray(read.value.errors)) return fail("invalid", res.status);
+    const authors = authorsOf(read.value.includes);
     for (const item of data) {
       if (!item || typeof item !== "object" || Array.isArray(item)) return fail("invalid", res.status);
       const d = item as Record<string, unknown>;
@@ -431,7 +492,7 @@ export async function readMentions(
       // target makes them ineligible for a generated response in the planner.
       if (d.author_id === xUserId) continue;
       const arrivedAtMs = now + Math.max(0, performance.now() - started) + MENTION_CLOCK_SKEW_MS;
-      const reply = parsedReply(d, arrivedAtMs, xUserId);
+      const reply = parsedReply(d, arrivedAtMs, xUserId, authors);
       if (!reply) return fail("invalid", res.status);
       replies.push(reply);
     }

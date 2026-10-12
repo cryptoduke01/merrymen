@@ -52,6 +52,29 @@ curl -s https://ai.merrymen.dev/bitquery \
 - Discovery has its **own, tighter rate bucket** (`BITQUERY_RATE_PER_MIN`, 6/min
   per wallet) — it's polled by a worker on a timer, not driven by a human typing,
   so sharing the chat allowance would let a background feed starve the brain.
+- One **fleet-wide daily cap** bounds them all: every holder and the public
+  memescope reserve each upstream call's points against
+  `MERRYMEN_GATEWAY_BITQUERY_POINTS_PER_DAY` (default 12,500 per UTC day,
+  ceiling 30,000) *before* calling, in two purses. The memescope spends only
+  its own share (`MEMESCOPE_SHARE`, 80%: 10,000 a day) and refreshes at most
+  every `MEMESCOPE_TTL_SEC` (45 s: at most 1,921 refreshes, 9,605 points), so
+  it fits its share all day. A failed refresh waits out the same 45 s before
+  the next attempt, serving its last rows meanwhile, so a Bitquery outage
+  costs no more than a day of refreshes and the page catches up once Bitquery
+  is back. Holders spend the other 2,500, which the public page can never
+  touch. Each holder may spend at most 750 of those a day
+  (`BITQUERY_POINTS_PER_HOLDER_PER_DAY`, enough for the worker's default
+  ten-minute discovery all day); past it that wallet alone gets 429 until
+  00:00 UTC, so one holder polling every minute cannot starve the rest. The
+  purse covers three holders at the default interval all day; a fourth runs
+  it out in the evening. Past their purse, `/bitquery` answers 503 and the
+  memescope serves its last rows. A cap below about 12,000 leaves the
+  memescope's 80% short of its 45 s day: once that share is spent the page
+  serves its last rows until 00:00 UTC. The orchestrator's Bitquery lane (`docs/bitquery-lane.md`)
+  counts separately, under its own `MERRYMEN_BITQUERY_POINTS_PER_DAY` (default
+  25,000); neither knob sees the other, so if the two keys share a plan, size
+  both to it. With the in-memory store a restart forgets the day's count; set
+  the KV store for a durable one.
 - Upstream error bodies are **not** relayed; they can quote the request, and the
   request carries your key on the way out.
 

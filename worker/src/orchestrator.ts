@@ -50,6 +50,7 @@ import { makeConductor, type Conductor, type RosterMember } from "./groupchat/co
 import { chatProfileOf, type ChatProfile } from "./groupchat/facts";
 import { describeCreds, groupChatCreds } from "./groupchat/voice";
 import { makeXPoster, xpostSetup, type XPoster, type XPostSetup, type XSocialProfile } from "./orchestrator-xpost";
+import { createXResearch, type FlowReader } from "./orchestrator-xpost-research";
 // The fleet's default trading model, so the room can say when its own model is
 // the same one (see groupChatModelWarning).
 import { SETTINGS_DEFAULTS as GROUPCHAT_FLEET_DEFAULTS } from "../../packages/core/src/index";
@@ -212,6 +213,7 @@ import {
 import { storeDek } from "./store-crypto";
 import { writePeersForChild } from "./peer-files";
 import { materializeOwnOutcomeLearning } from "./orchestrator-own-learning";
+import { decisionResearchBootLine, decisionResearchEnabledFor } from "./decision-research";
 import { writeResearchForChild } from "./research-files";
 import { addressesOf, makeBuilderDesk, type BuilderDesk } from "./builder-pass";
 import { makeNewsDesk, type NewsDesk } from "./research-pass";
@@ -223,11 +225,14 @@ import { budgetUnrestored, seedBudget } from "./budget-seed";
 import { ORDER_IN_FLIGHT_MS, commandWhereabouts, dropCommandResult, drainCommandResults, writeCommand, type FileCommandResult } from "./command-files";
 import { expiredOrderReceipt, type OrderReceipt } from "./order-receipt";
 import { makeMcpBackground } from "./mcp/background";
-import { childProcessBrokerPort, serveBrokerRequests } from "./fomo/broker";
+import { childProcessBrokerPort, createDirectBroker, serveBrokerRequests } from "./fomo/broker";
+import { answerReadingsPerDay, attachFlowBroker, flowFor, flowRuntimeNow as flowRuntimeFor, type FlowRuntime } from "./orchestrator-flow";
+import { FLOW_BROKER_ENV } from "./flow-broker";
 import { budgetConfigFor, describeBudget, fomoBudgetFrom, fomoPlanFrom, FREE_PLAN_CREDITS_PER_MONTH, type FomoBudget, type FomoBudgetConfig } from "./fomo/budget";
 import { writeChildFomoFile } from "./fomo/child-file";
 import { fomoTailsOn, type FomoAccess, type FomoService } from "./fomo/contract";
 import type { FomoClient } from "./fomo/provider";
+import type { ReviewCandidate } from "./fomo/review-candidates";
 import { SYSTEM_TIMERS } from "./fomo/stream";
 import {
   FOMO_FLEET_LEASE,
@@ -942,6 +947,38 @@ const CHILD_SECRET_STRIP = [
    * above.
    */
   "MERRYMEN_OPS_TOKEN",
+  /**
+   * BITQUERY, UNDER EVERY NAME A CHILD COULD READ IT BY, AND THE HOUSE'S MERRY
+   * CIRCLE TOKEN — the published-key reason, and a fan-out reason of their own.
+   *
+   * MERRYMEN_BITQUERY_API_KEY is the fleet lane's key (venues/bitquery-lane.ts):
+   * read here, held by this process, spent under one daily points budget. A
+   * child has no business holding it, for the Marketaux reason above.
+   *
+   * BITQUERY_API_KEY and MERRYMEN_TOKEN are what a CHILD's own discovery reads
+   * (settings.ts `str(file.bitqueryApiKey, env.BITQUERY_API_KEY)` and
+   * `str(file.merrymenToken, env.MERRYMEN_TOKEN)`). Hosted, both fields are
+   * house keys stripped from the tenant's file (HOUSE_KEY_FIELDS), so the env is
+   * the ONLY value a child could ever see — the operator's — and
+   * discoveryEnabled defaults on. Either one set on this process would have
+   * every child poll Bitquery on its own timer: N pollers on the house's paid
+   * plan with no shared budget, or N pollers sharing one holder's per-address
+   * gateway bucket under that holder's identity. Neither is a tenant's to spend.
+   *
+   * CHILDREN NEVER NEED EITHER. Nothing else reads them: settings.ts is the only
+   * reader and it feeds runDiscovery alone; this process reads neither. A
+   * tenant's OWN holder token still reaches discovery through its own brain key
+   * (llmProvider "merrymen", bitquery.ts gatewayTokenForDiscovery), on its own
+   * quota. Flow facts a child wants come from this process over IPC
+   * (flow-broker.ts), never from a key of its own.
+   *
+   * Latent until now, because the gateway header bug (bitqueryRequestHeaders)
+   * made every gateway call a 401. Fixing the header without this strip would
+   * have switched the fan-out on.
+   */
+  "MERRYMEN_BITQUERY_API_KEY",
+  "BITQUERY_API_KEY",
+  "MERRYMEN_TOKEN",
 ] as const;
 
 /** Where a tenant's child keeps its own ~/.merrymen — isolated from every other. */
@@ -966,7 +1003,7 @@ export { botWillPoll };
  * tenant's home and the hosted flag. Inheriting (rather than allowlisting) keeps
  * the OS essentials and the injected house keys; the strip is what makes it safe.
  */
-export function childEnv(tenant: string, opts: { tgGroupsOff?: boolean } = {}): NodeJS.ProcessEnv {
+export function childEnv(tenant: string, opts: { tgGroupsOff?: boolean; flowBroker?: boolean } = {}): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env };
   for (const k of CHILD_SECRET_STRIP) delete env[k];
   env.MERRYMEN_HOSTED = "1";
@@ -1005,6 +1042,14 @@ export function childEnv(tenant: string, opts: { tgGroupsOff?: boolean } = {}): 
   // and hand out a fresh day's allowances. Never set to "1": an operator's
   // fleet-wide 0 is inherited above and stays.
   if (opts.tgGroupsOff) env.MERRYMEN_TG_GROUPS = "0";
+  // THE FLOW BROKER ANSWERS ON THIS CHILD'S CHANNEL (flow-broker.ts
+  // FLOW_BROKER_ENV): said only when the Bitquery lane is on here and the
+  // child gets the IPC channel, so a child never asks — and never waits — for
+  // a broker nobody attached. Never inherited: it describes this process,
+  // not a fleet-wide choice an operator's variable could make for it. Who may
+  // actually ask is still decided per request, by the research allowlist.
+  delete env[FLOW_BROKER_ENV];
+  if (opts.flowBroker) env[FLOW_BROKER_ENV] = "1";
   /**
    * WHERE THE CHILDREN AGREE WITH EACH OTHER.
    *
@@ -4722,7 +4767,11 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
         // then says "unavailable" at once instead of waiting out a timeout.
         {
           cwd: ROOT,
-          env: childEnv(tenant, { tgGroupsOff: tgGroupsHeld.has(tenant.toLowerCase()) }),
+          env: childEnv(tenant, {
+            tgGroupsOff: tgGroupsHeld.has(tenant.toLowerCase()),
+            // The flow broker below is attached exactly when both hold.
+            flowBroker: !fomoBootNow().off && flowRuntimeNow().service !== null,
+          }),
           stdio: fomoBootNow().off ? ["ignore", "pipe", "pipe"] : ["ignore", "pipe", "pipe", "ipc"],
         },
       );
@@ -4768,6 +4817,9 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
     // Answer its Fomo questions on that channel, until it exits. Before the
     // runtime is built the pass attaches it later (startFomoPass).
     attachFomoBroker(tenant, proc);
+    // And its flow questions on the same channel, as decision evidence, when
+    // the Bitquery lane is on and its account is on the research allowlist.
+    attachFlowBroker(flowRuntimeNow().service, tenant, proc, smartAccount, log);
     const tag = `[${tenant.slice(0, 8)}]`;
     const pipe = (stream: NodeJS.ReadableStream | null, sink: NodeJS.WriteStream) =>
       stream?.on("data", (c: Buffer) =>
@@ -11261,6 +11313,32 @@ async function runXPostPass(boot: XPostSetup): Promise<void> {
               throw new Error("X social profile could not be read");
             }
           },
+          // WHAT AN ANSWER LOOKS UP, only with MERRYMEN_XPOST_RESEARCH=1
+          // (orchestrator-xpost-research.ts). Index reads spend the FLEET's
+          // Gecko lane — this process's home is the children's
+          // MERRYMEN_FLEET_HOME (childEnv), passed explicitly, never set on
+          // process.env. Fomo, only with MERRYMEN_XPOST_FOMO=1 as well, asks
+          // THIS process's own service for the answering tenant, as a public
+          // x-answer; with the Fomo pass off or its runtime not built yet,
+          // there is no broker and the answer goes without it. Whether Fomo
+          // can answer for THIS owner (her own data access, the x-answer cap
+          // above zero) is asked per answer, so "what can you do?" never
+          // promises Fomo that a coin answer would then not deliver.
+          // Onchain flow, only while the Bitquery lane is configured here
+          // (MERRYMEN_BITQUERY_API_KEY on this service): this process's own
+          // flowFor, inside the answer's time share, said only through
+          // flowXLines' digit-free bands, and at most the readings a day that
+          // child evidence's share leaves (answerReadingsPerDay).
+          ...(boot.knobs.research ? {
+            research: createXResearch({
+              fleetHome: merrymenHome(),
+              ...(boot.knobs.researchPerHour !== undefined ? { lookupsPerHour: boot.knobs.researchPerHour } : {}),
+              // The runtime exists only once the switched-on Fomo pass built it (fomoRuntimeNow).
+              fomo: (tenant) => (fomoRuntime && !xAnswerFomoCapped() ? createDirectBroker(fomoRuntime.service, tenant.toLowerCase(), { log }) : null),
+              fomoUsable: async (tenant) => !!fomoRuntime && !xAnswerFomoCapped() && (await fomoAccessFor(tenant)).dataAccess === true,
+              ...xAnswerFlow(),
+            }),
+          } : {}),
         },
       });
       log(xPoster.plan().why);
@@ -11275,6 +11353,7 @@ async function runXPostPass(boot: XPostSetup): Promise<void> {
       roster.push({ tenant: key, agentId: child.smartAccount.toLowerCase() });
     }
     const r = await xPoster.step(shared, roster, tenantChatProfile, Date.now());
+    for (const note of r.notes ?? []) log(note);
     if (r.log) log(r.log);
   } catch (e) {
     const text = e instanceof Error ? e.message : String(e);
@@ -11300,7 +11379,10 @@ async function runXPostPass(boot: XPostSetup): Promise<void> {
 /** What this file uses of fomo/runtime.ts, stated here so a change there fails the typecheck, not the boot. */
 interface FomoRuntimeHandle {
   db: Db;
-  service: FomoService & { heldTokensSnapshot?(now?: number): Map<string, string[]> };
+  service: FomoService & {
+    heldTokensSnapshot?(now?: number): Map<string, string[]>;
+    reviewCandidatesSnapshot?(tenant: string, now?: number): ReviewCandidate[];
+  };
   client: FomoClient | null;
   /**
    * The budget fleet reads are charged to: the shared pool and its class
@@ -11318,6 +11400,32 @@ interface FomoBoot {
   planCredits: number | undefined;
   /** The operator's cap overrides (fomo/budget.ts fomoBudgetFrom), read exactly as the web process reads them. */
   budget: Partial<FomoBudgetConfig>;
+}
+
+/**
+ * THE BITQUERY LANE (orchestrator-flow.ts), built once, here at boot so its
+ * line carries this process's log prefix. MERRYMEN_BITQUERY_API_KEY is
+ * stripped from every child (CHILD_SECRET_STRIP); off without it. `flowFor`
+ * is the orchestrator's own door to it — X answers import it from
+ * orchestrator-flow.ts directly, which keeps the passes free of a cycle.
+ */
+function flowRuntimeNow(): FlowRuntime {
+  return flowRuntimeFor({ log });
+}
+export { flowFor };
+
+/**
+ * WHAT AN X ANSWER'S RESEARCH GETS OF THE LANE: nothing with the lane off;
+ * on, `flowFor` for a Robinhood Chain contract, bounded by the answer's own
+ * time share, and a daily count that keeps public tags out of the evidence
+ * share. Said once, when the X poster is built.
+ */
+function xAnswerFlow(): { flow?: FlowReader; flowPerDay?: number } {
+  const rt = flowRuntimeNow();
+  if (!rt.service) return {};
+  const flowPerDay = answerReadingsPerDay(rt.setup);
+  log(`xpost: answers may read onchain flow — up to ${flowPerDay} readings per UTC day across X accounts, said only in bands`);
+  return { flow: (q) => (q.chainId === 4663 ? flowFor(q.address, { timeoutMs: q.timeoutMs }) : Promise.resolve(null)), flowPerDay };
 }
 
 let fomoBoot: FomoBoot | null = null;
@@ -11390,6 +11498,14 @@ export function fomoSetup(env: Record<string, string | undefined> = process.env)
   const caps = fomoBudgetFrom(env);
   lines.push(...caps.problems, describeBudget(budgetConfigFor(planCredits ?? FREE_PLAN_CREDITS_PER_MONTH, caps.budget)));
   return { off: false, lines, apiKey, planCredits, budget: caps.budget };
+}
+
+/**
+ * MERRYMEN_FOMO_X_HOURLY_CREDITS=0, the operator's off for Fomo in X answers:
+ * no broker is handed to them, and the service refuses the surface too.
+ */
+function xAnswerFomoCapped(): boolean {
+  return fomoBoot?.budget.xHourlyCredits === 0;
 }
 
 /** The switches, decided and said once, on first use: the first spawn or the first pass, whichever comes first. */
@@ -11546,6 +11662,13 @@ async function runFomoPass(boot: FomoBoot): Promise<void> {
       // Read, and read from a child still running here: a reading left behind
       // by a child that moved or stood down is not this tenant's book now.
       holdingsKnown: (tenant) => tenantHeldCoins.has(tenant.toLowerCase()) && fomoStillOurs(tenant),
+      // RESEARCH FOR THE COINS A REVIEW IS ABOUT TO LOOK AT (fomo/review-candidates.ts):
+      // what each child here named, queued only for an agent on the operator's
+      // research allowlist (MERRYMEN_DECISION_RESEARCH_ACCOUNTS, nobody by default).
+      // (Not `(tenant, now)`: accounting-truth.test.ts pins that no call after
+      // deriveBootstrapAccounting( ends in that pair.)
+      reviewCandidates: (who, at) => rt.service.reviewCandidatesSnapshot?.(who, at) ?? [],
+      reviewResearchFor: (agentId) => decisionResearchEnabledFor(agentId),
       // Checked right before each fomo.json is written: the roster was read
       // when the pass started, and a tenant may since have moved or been held.
       stillOurs: fomoStillOurs,
@@ -12269,6 +12392,12 @@ export async function runOrchestrator(): Promise<void> {
   // spawns and no pass runs, and the operator should still read whether it
   // is on (docs/fomo.md). Reads the environment and logs; nothing else.
   fomoBootNow();
+  // The Bitquery lane's switches, said once for the same reason
+  // (docs/bitquery-lane.md). Off without its key: then nothing else happens.
+  flowRuntimeNow();
+  // Which smart accounts get the extra decision research, said once: the
+  // allowlist is public addresses, and nothing else shows who is on it.
+  log(decisionResearchBootLine());
   // HOW THE LAST ORCHESTRATOR STOPPED, from the receipt its drain wrote
   // (fleet-drain.ts): said once, and moved aside so that a crash of this run
   // is never read as the clean stop of the last.

@@ -194,6 +194,66 @@ desk rides. Memecoins only — an equity token on this chain is a wrapper, and
 > re-asking about every unlisted coin every pass is how a generous rate limit
 > becomes a problem of our own making.
 
+### CoinGecko Pro pacing (optional; unset keeps the old 3-second pace)
+
+How fast the Pro key (`MERRYMEN_COINGECKO_PRO_API_KEY`, read by the
+orchestrator's children and by web) may spend. Both services read the same two
+names; set them on each. With a monthly figure set, a spacing below the floor
+that figure allows is raised to it (fleet lane 70% of the month, web 20%, 10%
+headroom), and said once at startup. On web, setting either one also paces
+the chart reads, which stay unpaced while both are unset. Details and the arithmetic:
+[`docs/decision-research.md`](decision-research.md#coingecko-pro-pacing).
+
+| Var | Service | Default | Production (the ~5,000,000-credit plan) |
+|---|---|---|---|
+| `MERRYMEN_COINGECKO_PRO_SPACING_MS` | orchestrator (children inherit it) | `3000` | `800` (floor 741 ms) |
+| `MERRYMEN_COINGECKO_MONTHLY_CREDITS` | orchestrator (children inherit it) | unset: no credit floor | `5000000` |
+| `MERRYMEN_COINGECKO_PRO_SPACING_MS` | web | `3000` | `2600` (floor 2,592 ms) |
+| `MERRYMEN_COINGECKO_MONTHLY_CREDITS` | web | unset: no credit floor | `5000000` |
+
+Look for one `[gecko] coingecko-pro fleet lane: 800 ms spacing …` line per
+child and one `local lane: 2600 ms` line on web. A `[gecko] coingecko-pro
+refused <family> … for 1h` line means that endpoint is not on the plan, or the
+key is wrong; latches are per key, so a corrected key and a restart clear them.
+
+### Decision research for chosen accounts (optional; nobody by default)
+
+`MERRYMEN_DECISION_RESEARCH_ACCOUNTS` on the **orchestrator** (children
+inherit it): complete smart-account addresses, comma- or space-separated,
+default nobody. Add the account through the deploy environment; this
+repository names none. For those accounts' live fast-Trencher entry reviews it
+adds cost quotes, the account's own outcomes, the momentum plan, the
+Trencher's terms as trusted desk policy (once the Brain service advertises
+`strategy-terms`) and, with the Bitquery lane below on, the coin's indexed
+flow (once the Brain lists `onchain-flow`). Research inputs only: no cap,
+guard, grant or exit changes. See
+[`docs/decision-research.md`](decision-research.md#opt-in-decision-evidence).
+Deploy the Brain service from the same commit for the last two.
+
+### The Bitquery lane (optional; off without its key)
+
+DEX flow for a coin over 5, 15 and 60 minutes, the venue split, the largest
+sells, and whether its launcher (as the launchpad's launch record names it)
+sold. The orchestrator answers from one budgeted lane, and children on the
+decision-research allowlist ask it over IPC (the channel exists only with
+`MERRYMEN_FOMO_ENABLED=1`). For the rollout steps and the IDE check to run
+before setting the key, see [`docs/bitquery-lane.md`](bitquery-lane.md). The
+gateway spends under its own, separate cap,
+`MERRYMEN_GATEWAY_BITQUERY_POINTS_PER_DAY` (default `12500`, set on the
+gateway service; its public memescope spends only its own 10,000 of that,
+enough to refresh every 45 s all day, and holders the other 2,500, at most 750
+each). Neither cap sees the other's spend: when both keys are on one plan,
+size both to it. Below about 12,000 the memescope runs short of its 45 s day
+and serves its last rows until 00:00 UTC.
+
+| Var | Value |
+|---|---|
+| `MERRYMEN_BITQUERY_API_KEY` | the plan's key. **Orchestrator only** — never on web or the Brain service. Stripped from every child, together with `BITQUERY_API_KEY` and `MERRYMEN_TOKEN`. Default unset: lane off |
+| `MERRYMEN_BITQUERY_LANE` *(optional)* | `0` turns the lane off while keeping the key. Default: on when the key is set |
+| `MERRYMEN_BITQUERY_POINTS_PER_DAY` *(optional)* | points per UTC day, default `25000` (750k a month), ceiling `100000`. Child evidence may use at most 80% of it |
+| `MERRYMEN_BITQUERY_RPM` *(optional)* | requests per minute, default `60`, ceiling `90` |
+| `MERRYMEN_FLOW_BROKER` | **do not set.** The orchestrator writes `1` into a child's environment when its lane is on and the child has the IPC channel, and removes any copy inherited from its own |
+
 ### The group chat (on by default, and it needs no key)
 
 One public room at `/groupchat` where the whole fleet talks: agents call what
@@ -298,8 +358,12 @@ routes answer 404 and the section does not render.
 | `MERRYMEN_PUBLIC_ORIGIN` | web (already set above) | builds the callback `${origin}/connect/x`; the orchestrator does not need it for X |
 | `MERRYMEN_X_REDIRECT_URI` *(optional)* | web | an explicit callback instead of the one built from the origin (https, or http on loopback for local testing). It must still be this web service's own `/connect/x` page — the finish needs its session — and be registered on the X app byte for byte |
 | `MERRYMEN_XPOST` *(optional)* | orchestrator | `0` stops all posting. Owners can still connect and see their drafts; drafts stay pending while posting is off, and a casual one past its day is skipped as stale when it comes back |
-| `MERRYMEN_XPOST_REPLIES_APPROVED` *(optional; leave unset)* | **web + orchestrator** | exactly `1` permits selective comment replies after written X approval. No approval has been obtained for this deployment, so leave this unset on both services. Owners must also enable replies separately for their connected X account |
-| `MERRYMEN_XPOST_REPLY_POLLS_PER_DAY` *(optional)* | orchestrator | fleet comment polls per UTC day, default `200`; `0` or an invalid value disables polling. Each poll may read up to eight pages of one hundred mentions and consume several X read requests |
+| `MERRYMEN_XPOST_REPLIES_APPROVED` *(optional)* | **web + orchestrator** | exactly `1` permits selective comment replies, and active owners' answers to tags, for every consenting owner. Exactly `active` permits them only for the agents in `MERRYMEN_XPOST_ACTIVE_TENANTS`, and every other owner sees replies as unavailable. Any other value is off, with a boot line naming the variable. `1` is for use only after written X approval, which has not been obtained for this deployment. On 2026-10-12 the owner (Milla) decided to set it to `active` on both services for the operator's own agent only, so Alan answers people who tag him. X's published automation rules ask for written approval for AI reply bots; an X staff answer on the developer forum says replies triggered by a mention do not need it, and Alan's request for clarification is pending. `1` (every owner) stays unset until written approval exists. Owners must also enable replies separately for their connected X account. The orchestrator records that consent itself for the operator's own agents (see `MERRYMEN_XPOST_ACTIVE_TENANTS`) |
+| `MERRYMEN_XPOST_ACTIVE_TENANTS` *(optional)* | **web + orchestrator, same value** | comma-separated tenant addresses of the **operator's own** agents (the operator is their owner; never list someone else's agent). Named agents get the active cadence (every buy and completed sale, about ten posts a day, 75 minutes apart) and, when replies are in scope, answer posts that tag them right away, with no ten-minute review and not held by the owner's night. Their mentions are read every minute. The orchestrator also records their reply consent once, while posting is on, unless the owner turned replies off in Settings. The web reads it for the reply warning, so set it on both services. Entries that are not addresses are ignored, and a boot line names them by position. See [x-posting.md](x-posting.md) "Active owners" |
+| `MERRYMEN_XPOST_REPLY_POLLS_PER_DAY` *(optional)* | orchestrator | fleet comment polls per UTC day, default `200`. `0` or an invalid value disables all polling, including the active agents'. Each poll may read up to eight pages of one hundred mentions and consume several X read requests. An active agent's one-minute polls use their own allowance of up to 1500 per X account per UTC day, and do not count against this one |
+| `MERRYMEN_XPOST_RESEARCH` *(optional; off)* | orchestrator | exactly `1` lets an active agent's answers to tags look things up first (public index on the fleet CoinGecko lane, the creator's description, its own history); see docs/x-posting.md "Research for answers" |
+| `MERRYMEN_XPOST_FOMO` *(optional)* | orchestrator | exactly `1`, with `MERRYMEN_XPOST_RESEARCH=1` and the Fomo pass on: answers may use Fomo's token activity and quick theses, paraphrased and attributed, capped by `MERRYMEN_FOMO_X_HOURLY_CREDITS` (default 3,000 per X account per hour) and a quarter of the owner's daily Fomo cap. Enterprise redistribution rights confirmed by the owner on 2026-10-12 (docs/fomo.md "Publication") |
+| `MERRYMEN_XPOST_RESEARCH_PER_HOUR` *(optional)* | orchestrator | public-index lookups per hour across X accounts for answers, default `120`; `0` = none |
 | `MERRYMEN_XPOST_LLM_KEY` *(optional)* | **orchestrator only** | a key used **only** for X posts. Unset: the room's `MERRYMEN_GROUPCHAT_LLM_KEY` is used as it is — unless it is a fleet key, which X refuses. Neither: only intros are posted, from templates |
 | `MERRYMEN_XPOST_LLM_PROVIDER` *(optional)* | orchestrator | `groq` (default), `anthropic` (default model `claude-opus-5`), or `openai` for any OpenAI-compatible endpoint. **A provider other than Groq receives the writer's inputs: name it in the privacy policy (`site/components/PrivacyPolicyDoc.tsx`, section 5) before deploying it** |
 | `MERRYMEN_XPOST_MODEL` *(optional)* | orchestrator | the writer's model; default `qwen/qwen3.8-27b` on Groq. Required for `openai` |
@@ -331,15 +395,19 @@ routes answer 404 and the section does not render.
 > pass that did something logs counts only — `xpost: sent 1, drafted-buy 1` —
 > never a post's text and never a token.
 
-**Selective replies are implemented but remain disabled.** Do not set the
-approval variable while written X approval is absent. Once approval exists,
-configure the gate on both web and orchestrator; this only makes a separate
+**Selective replies for every owner remain disabled.** Do not set the
+approval variable to `1` while written X approval is absent. The exception is
+`active`, set by the owner's decision of 2026-10-12 for the operator's own
+agent only (Alan answers tags; see the variable's row above). Once approval
+exists, configure the gate on both web and orchestrator; this only makes a separate
 Reply to comments consent available to owners whose posting is already on.
 The warning names the connected X account. Disabling replies cancels waiting
 replies, and posting off, disconnect or an account switch clears reply consent.
 
 Polling is limited to one read per thirty minutes per X account, two accounts
-per orchestrator pass and the durable fleet allowance above. The first read
+per orchestrator pass and the durable fleet allowance above. An active owner's
+X account is read once a minute on its own allowance (1,500 a UTC day), ahead
+of the fleet's turn, and a batch is drafted from on the pass that read it. The first read
 starts at the earliest active owner’s reply consent for that X account; later
 reads use a stored cursor. Each owner’s selection excludes comments from
 before their own consent. At most one reply is drafted per owner per poll;
@@ -348,7 +416,10 @@ over-limit batches produce no replies and do not advance the cursor. STOP
 requests are processed before selection, including when the model budget is
 empty. Replies require a fresh successful poll before sending and share the
 existing posting, quiet-hour and model budgets, with at least ten minutes
-under Coming up. There is no incoming-comment archive: only consent, reply
+under Coming up. An active owner's answers to tags have their own lane
+instead: due when drafted, not held by the owner's night, a minute apart and
+24 a day (see "Rollout: Alan's research lanes and X answers" below and
+[x-posting.md](x-posting.md) "Active owners"). There is no incoming-comment archive: only consent, reply
 target metadata, cursors and recipient opt-outs are persisted alongside the
 outgoing drafts. See [Posting on X](x-posting.md#selective-comment-replies) for
 selection, freshness and durable delivery rules.
@@ -885,6 +956,53 @@ recorded in the ledger (`PAYMENTS CONFIG RECORDED`).
 - Open the dashboard, **sign in** (SIWE — your wallet signs a free challenge), create/**sign a testnet grant** (session-key-only; the owner key never leaves your browser).
 - The orchestrator logs `... spawned (pid …)` for your tenant within ~15s and writes `children/<you>/grant.json` (session key only) + `settings.json`.
 - **Fund** the smart account on testnet (ETH for gas). The child arms and trades on 46630.
+
+## 6b. Rollout: Alan's research lanes and X answers
+
+Everything this release adds, in the order to turn it on for Alan Al Dale,
+the operator's own agent. Unset is the default and changes nothing, except
+for an account already on `MERRYMEN_DECISION_RESEARCH_ACCOUNTS` (step 1). This table is the same in [`hosted-deploy.md`](hosted-deploy.md) and [`x-posting.md`](x-posting.md); change both together.
+
+| Step | Variable | Service | Value for Alan's rollout | What it does, and what to look for |
+|---|---|---|---|---|
+| 1 | *(deploy)* | Brain service, orchestrator, web; the gateway (its own project) first or with them | this commit | The worker sends the Trencher terms and the flow lens only once Brain's `/health` lists `strategy-terms` and `onchain-flow`, so either order is safe. The worker's Bearer fix starts gateway spending, under the gateway's own cap (below). **An account already on `MERRYMEN_DECISION_RESEARCH_ACCOUNTS` changes at deploy, with nothing else set:** its live fast-Trencher entry reviews get the new momentum plan at once, the Trencher terms once Brain lists `strategy-terms`, and, with Fomo already on and the owner's monitoring or follow setting on, Fomo research on its review candidates. To stage those, take the account out of the variable before deploying and put it back at step 3 |
+| 2 | `MERRYMEN_COINGECKO_PRO_SPACING_MS` | orchestrator (children inherit it) | `800` | One `[gecko] coingecko-pro fleet lane: 800 ms` line per child |
+| 2 | `MERRYMEN_COINGECKO_PRO_SPACING_MS` | web | `2600` | One `local lane: 2600 ms` line on web. From here web's chart reads are paced too (unset, they stay unpaced as before), so two cold token pages opened within about 2.6 s may show the second one's chart as unreachable until it is read again |
+| 2 | `MERRYMEN_COINGECKO_MONTHLY_CREDITS` | orchestrator and web | `5000000` | The plan's month; a spacing below the floor it allows is raised to it. `MERRYMEN_COINGECKO_PRO_API_KEY` stays as it is |
+| 3 | `MERRYMEN_FOMO_ENABLED` | web + orchestrator, same value | `1` | Fomo itself, and the IPC channel a child asks the flow lane over |
+| 3 | `MERRYMEN_DECISION_RESEARCH_ACCOUNTS` | orchestrator (children inherit it) | Alan's smart account, from the deploy environment (this repository names no account) | Cost quotes, his own outcomes, the momentum plan, the Trencher terms and indexed flow for his live fast-Trencher entry reviews. Decision log lines end `· terms sent` |
+| 4 | `MERRYMEN_BITQUERY_API_KEY` | **orchestrator only** | the plan's key, after the IDE checks in [`bitquery-lane.md`](bitquery-lane.md) step 1 | Never on web, Brain or a child (stripped). Boot line `bitquery lane: on — 25000 points/UTC day (20000 for child evidence) …`; reviews log `[trencher] flow SYMBOL: lens` |
+| 4 | `MERRYMEN_BITQUERY_LANE`, `MERRYMEN_BITQUERY_POINTS_PER_DAY`, `MERRYMEN_BITQUERY_RPM` | orchestrator | unset (on, `25000`, `60`) | |
+| 4 | `MERRYMEN_GATEWAY_BITQUERY_POINTS_PER_DAY` | gateway | `12500`, set explicitly when its key shares the plan | A separate counter from the lane's `25000`: lane plus gateway is 37,500 points a day, sized by the operator to the plan. The gateway's 12,500 includes the public memescope's own 10,000 (at most 9,605 used, one refresh per 45 s, matching the Markets page's own 45 s poll); holders get the other 2,500, at most 750 a day each |
+| 4 | `MERRYMEN_FLOW_BROKER` | none | never set | The orchestrator writes it into each child that may ask, and removes an inherited copy |
+| 5 | `MERRYMEN_XPOST_ACTIVE_TENANTS` | web + orchestrator, same value | Alan's tenant address, from the deploy environment | The active cadence, his reply consent recorded by the orchestrator, and answers to tags sent right away. The web reads it for the reply warning |
+| 5 | `MERRYMEN_XPOST_REPLIES_APPROVED` | web + orchestrator, same value | `active` (the owner's decision of 2026-10-12, for the operator's own agent only; `1` stays unset until X's written approval) | Without it there are no comment replies and no answers to tags. On 2026-10-12 the owner (Milla) decided to set it to `active` on both services for the operator's own agent only, so Alan answers people who tag him. X's published automation rules ask for written approval for AI reply bots; an X staff answer on the developer forum says replies triggered by a mention do not need it, and Alan's request for clarification is pending. `1` (every owner) stays unset until written approval exists. |
+| 5 | `MERRYMEN_XPOST_REPLY_POLLS_PER_DAY` | orchestrator | unset (`200` for the fleet) | Alan's one-minute polls spend their own 1,500 per X account per UTC day |
+| 6 | `MERRYMEN_XPOST_RESEARCH` | orchestrator | `1` | Answers look things up first. Boot line `xpost: on — … answers look things up first`; with the Bitquery key also `xpost: answers may read onchain flow — up to 200 readings per UTC day …` |
+| 6 | `MERRYMEN_XPOST_RESEARCH_PER_HOUR` | orchestrator | unset (`120`) | Public-index lookups per hour across X accounts |
+| 6 | `MERRYMEN_XPOST_FOMO` | orchestrator | `1` (Enterprise rights confirmed by the owner on 2026-10-12, [`fomo.md`](fomo.md) "Publication") | Paraphrased, attributed Fomo facts in answers |
+| 6 | `MERRYMEN_FOMO_X_HOURLY_CREDITS` | orchestrator | unset (`3000`) | Per X account per hour, and at most a quarter of the owner's daily Fomo cap |
+
+No migrations: the new state is `xpost_meta` keys only (`answer-author:…`,
+`replies-off:…`, `reply-polls-active:…`, `x-answer-flow:…`). No trading cap,
+risk limit, grant, wallet authority or authentication check changes. The X
+gate gains one narrow exception, the name `sherwood-1` in an answer. Steps 5
+and 6 change what is said publicly on X and need Milla's review; step 6's
+answers need step 5's approval first. Nothing in this table is set by
+merging: each value is the operator's to set on the service named.
+
+**Rolling the orchestrator back past this release.** An older orchestrator
+reads an `answer` row as a casual post, with no reply target, and would
+publish a queued answer (a reply to one person, ending "Say stop to opt
+out.") as a standalone post on Alan's timeline the same day. So before
+deploying an older orchestrator, empty the queue first. Either unset
+`MERRYMEN_XPOST_REPLIES_APPROVED` (or take Alan's tenant out of
+`MERRYMEN_XPOST_ACTIVE_TENANTS`) on the orchestrator and let one pass of this
+release run, which cancels every waiting answer as `replies-off`; or cancel
+them directly on the shared database:
+`UPDATE xpost_posts SET status = 'cancelled', reason = 'rollback' WHERE kind = 'answer' AND status = 'scheduled';`
+Then deploy the older build. An answer this release could not send within an
+hour of drafting it is already skipped as stale, so the queue is short.
 
 ## 7. Known limits of the slice (closed in Phase B)
 - **The dashboard feed now reads the shared Postgres** — the ledger→Postgres port (B2) has landed, so `/api/feed` and `/api/scoreboard` show a child's live numbers in hosted mode. (`pg` is a runtime-only dependency the `Dockerfile` installs into the image; it is deliberately absent from `package.json` so self-hosted stays lean.)

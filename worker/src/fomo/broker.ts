@@ -31,7 +31,8 @@ import type { ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { sanitizeText } from "../research/news";
 import type { BrokerCallOptions, BrokerReport, BrokerRequest, BrokerResponse, FomoBroker, FomoService, MemoryRead } from "./contract";
-import { tokenFromKey } from "./identity";
+import { isRobinhoodToken, tokenFromKey } from "./identity";
+import { REVIEW_CANDIDATES } from "./review-candidates";
 import { followAssessmentOf, tenantKey } from "./store";
 import type {
   FomoCallContext,
@@ -79,6 +80,8 @@ export const BROKER_LIMITS = Object.freeze({
   /** store.ts FOMO_LIMITS.subjectJsonChars. */
   memoryJsonChars: 16_384,
   heldTokens: 200,
+  /** Coins one "review-candidates" report may name (review-candidates.ts REVIEW_CANDIDATES.perWindow). */
+  reviewCandidates: REVIEW_CANDIDATES.perWindow,
   reportTextChars: 500,
   reportIdChars: 128,
 });
@@ -118,12 +121,17 @@ export function isFomoToolName(v: unknown): v is FomoToolName {
   return typeof v === "string" && Object.hasOwn(TOOL_FRESHNESS, v);
 }
 
-const SURFACES: Record<FomoSurface, true> = { "app-chat": true, "telegram-dm": true, "telegram-group": true, mcp: true, background: true };
+const SURFACES: Record<FomoSurface, true> = { "app-chat": true, "telegram-dm": true, "telegram-group": true, mcp: true, background: true, "x-answer": true };
+
+/** Surfaces whose audience is public: they may never ask as the owner. */
+const PUBLIC_SURFACES: ReadonlySet<FomoSurface> = new Set<FomoSurface>(["telegram-group", "x-answer"]);
 
 /**
  * The surfaces a hosted child actually has. App chat and MCP run in the web
  * process against its own service; a child claiming one is lying about where
- * the question came from, and surface drives budgets and audience rules.
+ * the question came from, and surface drives budgets and audience rules. An
+ * X answer is asked by the orchestrator itself (orchestrator-xpost-research.ts,
+ * through createDirectBroker), so a child claiming it is refused too.
  */
 const CHILD_SURFACES: ReadonlySet<FomoSurface> = new Set<FomoSurface>(["telegram-dm", "telegram-group", "background"]);
 
@@ -405,8 +413,8 @@ function parseCallOptions(v: unknown, surfaces: ReadonlySet<FomoSurface> | null)
   if (!isRecord(v)) return { ok: false, reason: "invalid-request" };
   if (!isIn(SURFACES, v.surface) || (surfaces !== null && !surfaces.has(v.surface))) return { ok: false, reason: "invalid-request" };
   if (!isIn(AUDIENCES, v.audience)) return { ok: false, reason: "invalid-request" };
-  // A group can never be the owner's audience: private research state stays in DMs.
-  if (v.surface === "telegram-group" && v.audience !== "group") return { ok: false, reason: "invalid-request" };
+  // A group, or a public answer on X, can never be the owner's audience: private research state stays in DMs.
+  if (PUBLIC_SURFACES.has(v.surface) && v.audience !== "group") return { ok: false, reason: "invalid-request" };
   if (!isIn(PRIORITIES, v.priority)) return { ok: false, reason: "invalid-request" };
   let conversationKey: string | null = null;
   if (v.conversationKey !== null && v.conversationKey !== undefined) {
@@ -565,6 +573,21 @@ export function validateBrokerReport(v: unknown, tenant: string): ReportCheck {
         if (!keys.includes(key)) keys.push(key);
       }
       return { ok: true, report: { kind: "held-tokens", tokenKeys: keys, atMs } };
+    }
+    case "review-candidates": {
+      const atMs = timeOf(v.atMs);
+      if (atMs === null || !Array.isArray(v.tokenKeys) || v.tokenKeys.length === 0 || v.tokenKeys.length > BROKER_LIMITS.reviewCandidates) return invalid;
+      const keys: string[] = [];
+      for (const k of v.tokenKeys) {
+        // ROBINHOOD CHAIN ONLY, the one chain a review can act on; and one bad
+        // key refuses the whole report, so a child sending garbage is visible
+        // in the log rather than quietly half-served.
+        const key = tokenKeyOf(k);
+        const token = key ? tokenFromKey(key) : null;
+        if (!key || !token || !isRobinhoodToken(token)) return invalid;
+        if (!keys.includes(key)) keys.push(key);
+      }
+      return { ok: true, report: { kind: "review-candidates", tokenKeys: keys, atMs } };
     }
     default:
       return invalid;
@@ -766,12 +789,14 @@ export function createDirectBroker(service: FomoService, tenant: string, opts: D
       const checked = validateBrokerReport(r, fixed);
       if (!checked.ok) {
         log(`fomo broker: report refused (${checked.reason})`);
-        return;
+        return false;
       }
       try {
         await service.report(fixed, checked.report, clock());
+        return true;
       } catch (e) {
         log(`fomo broker: report failed (${errorName(e)})`);
+        return false;
       }
     },
     configured() {
@@ -1082,9 +1107,11 @@ export function createIpcBroker(port: BrokerPort, opts: IpcBrokerOptions = {}): 
       },
     },
     async report(r) {
-      if (!isRecord(r)) return;
+      if (!isRecord(r)) return false;
       const { wire } = await request((id) => ({ fomo: 1, id, op: "report", report: r }), defaultTimeout);
-      if (wire.kind !== "result") log(`fomo broker: report not recorded (${wire.kind === "refused" ? wire.error : wire.kind})`);
+      if (wire.kind === "result") return true;
+      log(`fomo broker: report not recorded (${wire.kind === "refused" ? wire.error : wire.kind})`);
+      return false;
     },
     configured() {
       refreshConfigured();

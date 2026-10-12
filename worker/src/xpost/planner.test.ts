@@ -8,6 +8,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  ACTIVE_CADENCE,
   BUY_STALE_MS,
   CASUAL_MAX_PUSH_MS,
   GAP_MS,
@@ -15,6 +16,7 @@ import {
   MIN_LEAD_MS,
   REPLY_ROOT_MAX_AGE_MS,
   REPLY_STALE_MS,
+  ANSWER_STALE_MS,
   buyKey,
   sellKey,
   casualKey,
@@ -692,6 +694,14 @@ describe("sendDecision", () => {
     assert.deepEqual(sendDecision({ ...p, kind: "casual", createdAtMs: now - 20 * HOUR }, on, now, false), { action: "send" });
   });
 
+  it("skips an answer still waiting an hour after it was drafted; a comment reply only after a day", () => {
+    const answer = { ...p, kind: "answer" as const };
+    assert.deepEqual(sendDecision({ ...answer, createdAtMs: now - ANSWER_STALE_MS }, on, now, false), { action: "send" });
+    assert.deepEqual(sendDecision({ ...answer, createdAtMs: now - ANSWER_STALE_MS - 1 }, on, now, false), { action: "skip", reason: "stale" });
+    assert.deepEqual(sendDecision({ ...p, kind: "reply", createdAtMs: now - ANSWER_STALE_MS - 1 }, on, now, false), { action: "send" });
+    assert.deepEqual(sendDecision({ ...p, kind: "reply", createdAtMs: now - REPLY_STALE_MS - 1 }, on, now, false), { action: "skip", reason: "stale" });
+  });
+
   it("skips a casual post held past its owner-local day, or six hours past due; never the intro", () => {
     const utcDay = (ms: number) => new Date(ms).toISOString().slice(0, 10);
     const casual = { ...p, kind: "casual" as const, createdAtMs: now - 2 * HOUR, dueAtMs: now - HOUR };
@@ -712,5 +722,78 @@ describe("sendDecision", () => {
     assert.deepEqual(sendDecision(p, on, now, true), { action: "wait" });
     assert.deepEqual(sendDecision({ ...p, dueAtMs: now + 1 }, on, now, false), { action: "wait" });
     assert.deepEqual(sendDecision(p, on, now, false), { action: "send" });
+  });
+});
+
+// ── the active cadence ──────────────────────────────────────────────────────
+
+describe("an active owner posts through the waking day, and every buy", () => {
+  /**
+   * A DAY OF PASSES, every five minutes from midnight: whatever is planned is
+   * sent at its due time unless the owner sleeps then (and a casual post due
+   * on another day is skipped, as sendDecision would).
+   */
+  function day(over: Partial<PlanInput> = {}, calls: PlanCall[] = []): XPost[] {
+    const tz = "UTC";
+    const out: XPost[] = [];
+    for (let now = DAY0; now < DAY0 + 24 * HOUR; now += 5 * MIN) {
+      for (const p of out) if (p.status === "scheduled" && p.dueAtMs <= now && !clock.isAsleep(tz, TENANT, now)) {
+        if (p.kind === "casual" && clock.localDay(tz, p.dueAtMs) !== clock.localDay(tz, now)) p.status = "skipped";
+        else { p.status = "posted"; p.sentAtMs = now; }
+      }
+      const fresh = calls.filter((c) => c.atSec * 1000 <= now);
+      for (const i of planPosts(input({ tz, nowMs: now, posts: out, calls: fresh, cadence: ACTIVE_CADENCE, perDay: ACTIVE_CADENCE.perDay, ...over }))) {
+        out.push(post({ kind: i.kind, dedupeKey: i.dedupeKey, status: "scheduled", dueAtMs: i.dueAtMs, createdAtMs: now, coin: i.kind === "buy" ? i.coinKey : null }));
+      }
+    }
+    return out.filter((p) => p.status === "posted");
+  }
+
+  it("posts several casual lines a day, each under its own key, never inside the gap or the night", () => {
+    const sent = day();
+    const casual = sent.filter((p) => p.kind === "casual");
+    assert.ok(casual.length >= 6 && casual.length <= ACTIVE_CADENCE.casualPerDay, `${casual.length} casual posts`);
+    assert.equal(new Set(casual.map((p) => p.dedupeKey)).size, casual.length);
+    assert.ok(casual.some((p) => p.dedupeKey === casualKey(TENANT, "2026-09-28")), "slot 0 keeps the historic key");
+    const times = sent.map((p) => p.sentAtMs!).sort((a, b) => a - b);
+    for (let i = 1; i < times.length; i++) assert.ok(times[i]! - times[i - 1]! >= ACTIVE_CADENCE.gapMs, "seventy-five minutes apart");
+    for (const t of times) assert.equal(clock.isAsleep("UTC", TENANT, t), false);
+  });
+
+  it("posts every buy of the day, inside the day's ceiling", () => {
+    const calls = [8, 10, 12, 14, 16, 18].map((h, i) => call({ decisionId: `buy-${i}`, name: ["Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot"][i], symbol: null, atSec: (DAY0 + h * HOUR) / 1000 }));
+    const sent = day({}, calls);
+    assert.equal(sent.filter((p) => p.kind === "buy").length, 6, "every buy");
+    assert.ok(sent.length <= ACTIVE_CADENCE.perDay);
+  });
+
+  it("a rebuy of the same coin is posted again for an active owner, once for a standard one", () => {
+    const rebuys = [8, 14].map((h, i) => call({ decisionId: `pepe-${i}`, atSec: (DAY0 + h * HOUR) / 1000 }));
+    assert.equal(ACTIVE_CADENCE.coinFoldMs, 0);
+    assert.equal(day({}, rebuys).filter((p) => p.kind === "buy").length, 2, "every buy, the same coin again included");
+    assert.equal(day({ cadence: undefined, perDay: 3 }, rebuys).filter((p) => p.kind === "buy").length, 1, "one post per coin in three days");
+    // The control: two coins are both posted on the standard cadence, so the one above is the fold, not the day's allowance.
+    const two = [call({ decisionId: "pepe", atSec: (DAY0 + 8 * HOUR) / 1000 }), call({ decisionId: "bonk", name: "Bonk", symbol: "BONK", atSec: (DAY0 + 14 * HOUR) / 1000 })];
+    assert.equal(day({ cadence: undefined, perDay: 3 }, two).filter((p) => p.kind === "buy").length, 2);
+  });
+
+  it("an active owner's completed sales of one token are each posted; a standard owner's fold", () => {
+    const now = DAY0 + 10 * HOUR;
+    const token = `0x${"b".repeat(40)}`;
+    const earlier = post({ kind: "sell", coin: token, createdAtMs: now - 5 * HOUR, dueAtMs: now - 5 * HOUR, sentAtMs: now - 5 * HOUR });
+    const sale: PlanSell = { decisionId: "sale-2", side: "sell", symbol: "PEPE", name: "Pepe", paper: false,
+      atSec: (now - MIN) / 1000, operationKey: `0x${"a".repeat(64)}`, token, outcome: "profit" };
+    const sells = (over: Partial<PlanInput>) => planPosts(input({ nowMs: now, tradeResults: true, sells: [sale], posts: [earlier], ...over })).filter((p) => p.kind === "sell");
+    assert.equal(sells({ cadence: ACTIVE_CADENCE, perDay: ACTIVE_CADENCE.perDay }).length, 1);
+    assert.equal(sells({}).length, 0);
+  });
+
+  it("the owner's own smaller choice still holds", () => {
+    assert.ok(day({ ownerPerDay: 2 }).length <= 2);
+  });
+
+  it("an owner without the active cadence keeps one casual post at most", () => {
+    const sent = day({ cadence: undefined, perDay: 3 });
+    assert.ok(sent.filter((p) => p.kind === "casual").length <= 1);
   });
 });

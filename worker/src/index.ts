@@ -135,7 +135,9 @@ import { provenanceOf, type Provenance } from "./provenance";
 import { recordDecisionRefusal, verifyDecisionOwner, withDecisionOutcome } from "./decision-identity";
 import { bookGaps, composeEquityUsdg } from "./equity";
 import { publishesAView, reviewRecord, runShadow, type ShadowInputs, type ShadowOutcome } from "./brain-shadow";
-import { HoldBackoff, TrenchBrainReview, TrenchNoticeGate, TrenchTapeReader, entryEvidenceBlind, trenchDeskNotice, highVolumePools, trenchBrainPersona, trenchBrainSignals, trenchHeat, trenchMaterial, HELD_REVIEW_MAX_GAP_MS, TRENCH_REVIEW_INTERVAL_MS } from "./trencher-brain";
+import { BrainCapabilityProbe } from "./brain-client";
+import { ONCHAIN_FLOW_LENS, flowLensRefused, readFlowEvidence, reviewFlowClient } from "./review-flow";
+import { HoldBackoff, TrenchBrainReview, TrenchNoticeGate, TrenchTapeReader, entryEvidenceBlind, entryMayGoBlind, trenchDeskNotice, highVolumePools, trenchBrainPersona, trenchBrainSignals, trenchHeat, trenchMaterial, HELD_REVIEW_MAX_GAP_MS, TRENCH_REVIEW_INTERVAL_MS } from "./trencher-brain";
 import { withAgentBrief } from "./agent-brief";
 import { ProjectPurposeReader } from "./research/project-purpose";
 import { getPaperBrainCapital } from "./store";
@@ -148,6 +150,7 @@ import { ChainCoinNames, makeDecisionNamer, warmHeldNames } from "./decision-nam
 import { intentDecisionRow } from "./decision-row";
 import { leadMemory, memoryLines, positionContext, sentimentLine, technicalLine } from "./brain-material";
 import { DECISION_RESEARCH_GUIDANCE, decisionResearchEnabledFor, entryCostResearch, researchEntrySize, trenchBreakEven, trenchMomentumBrief } from "./decision-research";
+import { trencherStrategyTerms } from "./strategy-terms";
 import { readOwnOutcomeLearningFile } from "./own-outcome-learning-file";
 import { outcomeLearningLines } from "./own-outcome-learning";
 import { readFeedHistory } from "./read-feed-history";
@@ -336,6 +339,7 @@ import {
   quoteUsdOf,
   resolveBitquery,
 } from "./discovery";
+import { gatewayTokenForDiscovery } from "./venues/bitquery";
 import { fetchGeckoPools, readTokenPools, type ScreenLimits, type GeckoPool } from "./venues/geckoterminal";
 import { createMemecoinScout, nullScout } from "./strategist/memecoin-scout";
 import { readCurvePrices } from "./venues/curve-prices";
@@ -904,6 +908,15 @@ async function main() {
     log: (line) => console.log(line),
   });
   installFomoChild(fomoChild);
+  /**
+   * THE ORCHESTRATOR'S FLOW LANE, for research accounts' Trencher entry
+   * reviews (review-flow.ts). Null unless the orchestrator said its broker
+   * answers on this channel; then no question is ever sent. The probe asks
+   * Brain's /health whether it accepts `onchain-flow`, and is consulted only
+   * for a review that has a flow question to send.
+   */
+  const reviewFlow = reviewFlowClient();
+  const flowLensProbe = new BrainCapabilityProbe(undefined, undefined, undefined, undefined, undefined, "lens_keys");
   /**
    * THE OWNER'S FOMO TAIL NOTICES (fomo/tail-notifier.ts), asked by the
    * Telegram notifier only past its own gates. Read-only over the child:
@@ -6254,9 +6267,15 @@ async function main() {
       // The holder token doubles as the gateway credential — the same one the
       // brain claims. No Bitquery account needed for Circle members.
       // The standalone token first, then the LLM key when the brain IS the
-      // gateway — one claimed token opens both, but choosing the gateway for
-      // discovery must not force choosing it for thinking as well.
-      merrymenToken: cfg.merrymenToken ?? (cfg.llmProvider === "merrymen" ? cfg.llmApiKey : undefined),
+      // gateway — never the house's brain key on a hosted child
+      // (gatewayTokenForDiscovery).
+      merrymenToken: gatewayTokenForDiscovery({
+        merrymenToken: cfg.merrymenToken,
+        llmProvider: cfg.llmProvider,
+        llmApiKey: cfg.llmApiKey,
+        hosted: isHostedMode(),
+        houseLlmKey: process.env.MERRYMEN_LLM_API_KEY,
+      }),
     });
     if (!creds) return; // no key, no discovery — honest silence, not an error
     const nowSec = Math.floor(Date.now() / 1000);
@@ -12883,6 +12902,8 @@ async function main() {
         // ELIGIBLE here — the same filter every tape coin passes. The hint
         // moves it up the queue, never onto it (trencher-brain.ts candidate).
         const trenchCandidate = trenchBrain.candidate(trenchEligible.filter(c => trenchReviewable(c)), tgBook.priority(), cfg.discoveryFocus);
+        // Fomo research for these entry candidates' next review (fomo-child.ts reportReviewCandidates): research only, never awaited, never a gate.
+        fomoChild.reportReviewCandidates(trenchEligible.filter(c => !market.pausedTokens.has(c.token.toLowerCase()) && shouldEnter(c, TRENCHER_FAST, Math.floor(Date.now() / 1000)).enter).map(c => c.token));
         const trenchSymbols = new Set(trenchCandidate ? [trenchCandidate.symbol] : []);
         // Braked, "no pool passes the entry checks" would be a false sentence:
         // none was looked at. The strategy's idle reason says why instead, as
@@ -13334,8 +13355,29 @@ async function main() {
               sizeUsdg: researchSize, gasPerOperationUsdg: expectedTradeGasMicro, tradeFeeBps: cfg.tradeFeeBps,
             } : null;
             if (enhancedResearch) inputs.persona += `\n\n${DECISION_RESEARCH_GUIDANCE}`;
+            // THE TRENCHER'S TERMS AS TRUSTED DESK POLICY (strategy-terms.ts),
+            // exactly where the momentum plan goes: research accounts' entry
+            // reviews. They state the plan's own exits, s and c, so the two
+            // never disagree; decide() sends them only to a Brain whose /health
+            // advertises "strategy-terms", and any other request is today's.
+            if (costContext) inputs.strategyTerms = trencherStrategyTerms(TRENCHER_FAST);
+            // THE INDEXER'S FLOW FOR THIS COIN (review-flow.ts), for the same
+            // reviews, only with a fresh tape row (a review without one is never
+            // paid for) and only to a Brain that lists the key. The probe is
+            // asked last, so a review with nothing to send reads nothing new.
+            const flowClient = costContext && tape && reviewFlow && flowLensProbe.advertises(cfg.brainUrl, ONCHAIN_FLOW_LENS) ? reviewFlow : null;
             trenchBrain.launch(trenchContext, inputs, focus.token, async (review) => {
+              const reviewStartedAt = Date.now();
               const costRead = costContext ? entryCostResearch(costContext) : Promise.resolve(null);
+              // The legs' hard backstop below, and a second's slack for the clock.
+              const legsMaxMs = EVIDENCE_BUDGET_MS + 2000;
+              // Asked now, beside the cost quotes and the candle and trade legs,
+              // and given up at their budget: it never holds the review past it.
+              // Only while the tape row is sure to be current when the legs are
+              // done, so the review cannot then be skipped as blind and the
+              // reading thrown away unpaid; otherwise asked after that check.
+              let flowRead = flowClient && tape && !entryMayGoBlind(trenchTapeReader.observedAtOf(tape), reviewStartedAt, legsMaxMs + 1000)
+                ? readFlowEvidence(flowClient, focus.token, EVIDENCE_BUDGET_MS) : null;
               const projectRead = projectContext
                 ? projectPurpose.read(projectContext.client, projectContext.token, projectContext.chainId, projectContext.browser)
                 : Promise.resolve(null);
@@ -13367,7 +13409,7 @@ async function main() {
                 let timer: ReturnType<typeof setTimeout> | undefined;
                 const evidence = await Promise.race([
                   readPoolEvidence(tape.poolId, focus.token, EVIDENCE_BUDGET_MS).catch(() => null),
-                  new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), EVIDENCE_BUDGET_MS + 2000); }),
+                  new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), legsMaxMs); }),
                 ]).finally(() => { if (timer) clearTimeout(timer); });
                 // The compact copy (pool-evidence.ts brainEvidence): the manager
                 // reads only technical[:2400], tape JSON first, then this.
@@ -13389,6 +13431,10 @@ async function main() {
                   const age = tapeAt === null ? "gone from the fresh tape" : `${Math.round((Date.now() - tapeAt) / 1000)}s old`;
                   return skipBlindEntry("blind", `candles and trades both unavailable and its tape row is ${age}`);
                 }
+                // Past the blind check, the flow not yet asked is asked now, on
+                // what is left of the same budget (none left: nothing is sent).
+                const flowLeftMs = EVIDENCE_BUDGET_MS - (Date.now() - reviewStartedAt);
+                if (flowClient && !flowRead && flowLeftMs > 0) flowRead = readFlowEvidence(flowClient, focus.token, flowLeftMs);
                 // A review that goes ahead without either leg (a current tape
                 // row, or a held position) holds on missing flow, not on the
                 // coin: an entry HOLD from it gets one evidence window, never
@@ -13432,6 +13478,14 @@ async function main() {
                 // liquidity analyst; the manager still needs the same costs.
                 inputs.memory = [costEvidence, ...(inputs.memory ?? []).slice(0, 5)];
               }
+              // Its own key, which Brain's manager reads beside the measured
+              // market input: technical's 2,400-character cut is not touched.
+              // No block is no key — a missing reading is never "no flow".
+              const flow = flowRead ? await flowRead : null;
+              if (flow) {
+                if (flow.lens) inputs.market.signals[ONCHAIN_FLOW_LENS] = flow.lens;
+                console.log(`[${short(agentId)}] [trencher] flow ${focus.symbol}: ${flow.status}`);
+              }
               // THE MOMENTUM ENTRY PLAN, for research accounts' entry reviews
               // only (costContext exists exactly then): the mechanical exits
               // from TRENCHER_FAST, the round-trip cost just read (or its gas
@@ -13459,7 +13513,7 @@ async function main() {
                 // A paid review, claimed against today's energy once the
                 // trigger has fired and before it is paid for.
                 admit: claimReview,
-              }).then(outcome => { tgNoteReview(focus.token, outcome); return outcome; }); },
+              }).then(outcome => { if (flowLensRefused(Boolean(flow?.lens), outcome)) flowLensProbe.invalidate(); tgNoteReview(focus.token, outcome); return outcome; }); },
               m => console.log(`[trencher] ${m}`));
           }
           const outcome: ShadowOutcome = fastTrencher ? { ran: false, why: "Trencher Brain review runs off the trading tick", nextReviewAt: Math.floor(Date.now() / 1000) + 60, trigger: { fire: false, reason: null, detail: "background review", candidates: [] } } : await runShadow(

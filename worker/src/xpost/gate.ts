@@ -56,6 +56,7 @@ import { xWeightedLength, X_MAX_WEIGHTED } from "./client";
 import type { XPostKind } from "./store";
 import type { SaleOutcome } from "./planner";
 import { withoutReplyOptOut } from "./replies";
+import { answerWord, textWords } from "./words";
 
 /** The longest post, in characters — far under X's own ceiling, because a post is one casual line. */
 export const XPOST_MAX_CHARS = 200;
@@ -101,6 +102,43 @@ export interface XGateCtx {
   seeds?: string[];
   /** The agent's style never uses emoji: a draft with one is not in its voice. Default: allowed (at most one). */
   emojiOk?: boolean;
+  /**
+   * NAMES THIS POST MAY NOT SAY AT ALL, however spelled (namedIn). An answer
+   * to a tag that named a coin is handed every name its own buys go by: it
+   * was never told what it bought, so a draft that names one anyway confirms
+   * a buy by name ("yep, picked up pepe") — refused as bought-named, whatever
+   * the model did with the prompt (red-team 2026-10-12).
+   */
+  unsaid?: string[];
+  /**
+   * WHAT AN ANSWER MAY SAY IT BOUGHT (red-team review, 2026-10-12), checked
+   * only when set. "none": an answer that was told none of its buys — a tag
+   * that named a coin, or anything but a plain question about its trades —
+   * says no first-person buy at all ("yep, grabbed bonk", "bought it", "in
+   * my bag"): the prompt said so, and this is the backstop when the model
+   * does not listen. "vouched": a buy it says is of a coin in `coins`, or of
+   * "it", "a few", "some coins"; "yep, bought wif lately" for a coin it was
+   * never told of is refused. Either way, as buy-claim.
+   */
+  buys?: "none" | "vouched";
+  /**
+   * THE TAG NAMED A COIN, OR ASKED ABOUT ITS TRADES OR A COIN IN WORDS THAT
+   * ARE NOT ONE OF THE PLAIN TRADES QUESTIONS (red-team review, 2026-10-12).
+   * Read only with buys "none": then the answer may not say it likes the coin
+   * either (LIKED), answer yes or no, or speak of itself outside a deflection
+   * (namedClaim), as buy-claim.
+   */
+  named?: boolean;
+  /**
+   * WORDS AN ANSWER TOLD ITS BUYS WAS HANDED BESIDE THEM (red-team review,
+   * 2026-10-12): its strategy's name, what it looked up. Read only when set, with buys
+   * "vouched": then every word of the answer is an everyday one (xpost/words.ts
+   * answerWord), one of these, or a word of a coin in `coins`. "grabbed some
+   * coins lately, mostly wojak and bonk" named two coins it never bought, and
+   * no verb list sees a name: a word that is none of those is refused, as
+   * buy-claim.
+   */
+  known?: string[];
 }
 
 const refuse = (reason: string): XVerdict => ({ ok: false, reason });
@@ -128,7 +166,405 @@ export function tidyXPost(raw: unknown, agentName: string): string {
   return s.replace(WRAP, "").trim();
 }
 
+// ── sherwood-1, a name ──────────────────────────────────────────────────────
+
+/**
+ * SHERWOOD-1 IS A NAME, NOT A NUMBER (the owner's ask, 2026-10-12). Asked
+ * what model it runs on, an answer teases "the new sherwood-1": built by
+ * merrymen, whose own model it is, and still cooking. Every other digit is
+ * still refused: the base gate's has-digits rule is what keeps prices, sizes,
+ * counts and P&L off X, and it does not move.
+ *
+ * SO THE EXCEPTION IS ONE EXACT TOKEN, IN ONE KIND OF POST. Only in a reply
+ * (answers are gated as replies); only "sherwood-1" spelled out, in any case,
+ * standing alone as a word — after the start, a space or an opening quote or
+ * bracket, and before the end, a space, a closing quote or bracket, or
+ * sentence punctuation that is itself followed by a space or the end: never
+ * "sherwood-10", "sherwood-1x", "sherwood-1.5", "sherwood-1%", "$sherwood-1",
+ * "@sherwood-1" or one inside a link. Each one
+ * is masked with a digit-free stand-in before the base gate and the X clauses
+ * read the text, and put back as written in the text that is posted. Any
+ * other digit beside it ("1 sherwood-1", "$1") is still has-digits. A casual,
+ * buy, sell or intro post never names it.
+ *
+ * AND NEVER AS WHAT RUNS IT. Nothing wires sherwood into an agent yet, so on a
+ * real-money trading account "running on sherwood-1", "powered by sherwood",
+ * "sherwood-1 is live" is a false claim about what powers it. A reply that
+ * says so is refused as sherwood-claim before anything else, with or without
+ * the digit. Change this only once sherwood actually runs the agents.
+ */
+export const SHERWOOD_NAME = "sherwood-1";
+const SHERWOOD_TOKEN = /(?<=^|[\s("“'‘])sherwood-1(?=$|[\s)"”]|[.,!?;:'’](?:$|[\s)"”]))/giu;
+/** A digit-free stand-in no draft would say; a draft that does say it gets no exception. */
+const SHERWOOD_STAND_IN = "sherwoodmerrymenname";
+const STAND_IN = new RegExp(SHERWOOD_STAND_IN, "gi");
+const HAS_STAND_IN = new RegExp(SHERWOOD_STAND_IN, "i");
+
+/**
+ * The text with every exact "sherwood-1" masked, and the spellings masked, in
+ * order. Null when there is one to mask but the stand-in is already in the
+ * text: then nothing could tell the two apart, and the digit is not excepted.
+ */
+function maskSherwood(text: string): { text: string; said: string[] } | null {
+  const said: string[] = [];
+  const masked = text.replace(SHERWOOD_TOKEN, (m) => {
+    said.push(m);
+    return SHERWOOD_STAND_IN;
+  });
+  if (said.length > 0 && HAS_STAND_IN.test(text)) return null;
+  return { text: masked, said };
+}
+
+/** An earlier post as the masked draft is weighed against it. */
+const withStandIn = (text: string): string => text.replace(SHERWOOD_TOKEN, SHERWOOD_STAND_IN);
+
+/** The gated text with each stand-in put back as it was written. Anything else is refused, never guessed. */
+function unmaskSherwood(text: string, said: string[]): XVerdict {
+  const found = text.match(STAND_IN) ?? [];
+  if (found.length !== said.length) return refuse("has-digits");
+  let i = 0;
+  return { ok: true, text: text.replace(STAND_IN, () => said[i++]!) };
+}
+
+/**
+ * A DRAFT THAT SAYS SHERWOOD RUNS IT TODAY: "running on sherwood-1",
+ * "powered by the new sherwood one", "sherwood-1 is what runs me", "i'm on
+ * sherwood", "sherwood-1 is live". Errs toward refusing: a near miss costs
+ * one answer, never a false claim. (writer.ts re-exports it for the answer
+ * path, which records such a draft as gate:sherwood-claim.)
+ */
+const SHERWOOD_BEFORE = /\b(?:run(?:s|ning)?\s+(?:on|me|with)|ran\s+on|powered|powering|powers|built\s+on|based\s+on|i'?m\s+on|im\s+on|i\s+am\s+on|now\s+on|using|uses|i\s+use|under\s+the\s+hood|my\s+brain|my\s+model|behind\s+me|switched\s+to|upgraded\s+to|moved\s+to)\b[^.!?\n]{0,30}?\bsherwood\b/i;
+const SHERWOOD_AFTER = /\bsherwood\b[^.!?\n]{0,40}?\b(?:runs|running|ran|powers|powering|powered|drives|driving|under\s+the\s+hood|is\s+my\s+(?:brain|model)|what\s+i\s+(?:run|use)|behind\s+me|in\s+charge|is\s+live|went\s+live|live\s+now|is\s+out|out\s+now|launched|shipped)\b/i;
+
+/**
+ * AN ALLOWLIST, NOT ONLY A LIST OF VERBS (review, 2026-10-12). A stranger who
+ * asks "does sherwood-1 pick your trades now?" invites "yep, sherwood-1
+ * picks my trades now", "my trades come from sherwood-1", "sherwood-1 is the
+ * model behind this account" — none of which the verbs above name. So every
+ * sentence that names sherwood must also tease it (cooking, in the oven, in
+ * the works, coming, merrymen's own or house model…) and must say nothing
+ * about trading, deciding, what it does or who it is: no pick, trade, call,
+ * decide, choose, handle, buy, sell, entry, coin, no me, my, i, we, you, no
+ * account, agent, brain or behind, and nothing about now. A sentence that
+ * does either is a claim.
+ */
+const SHERWOOD_SAID = /\bsherwood/i;
+const SHERWOOD_TEASE = /\b(?:cook(?:s|ed|ing)?|oven|bak(?:e|es|ed|ing)|in\s+the\s+works|in\s+the\s+making|coming(?:\s+soon)?|soon|simmer(?:s|ed|ing)?|stove|kitchen|brew(?:s|ed|ing)?|workshop|working\s+on|merrymen'?s\s+own|their\s+own|own\s+model|house\s+model|homegrown|not\s+(?:done|ready|served|out)|isn'?t\s+(?:done|ready|out)|(?:done|ready)\s+yet|not\s+yet|next\s+up|give\s+it\s+time|no\s+peeking|in\s+progress|on\s+the\s+way|under\s+wraps)\b/i;
+const SHERWOOD_AGENCY = new RegExp(
+  "\\b(?:" +
+    [
+      "pick(?:s|ed|ing|er)?",
+      "trad(?:e|es|ed|er|ers|ing)",
+      "call(?:s|ed|ing)?",
+      "decid(?:e|es|ed|ing)",
+      "decisions?",
+      "choos(?:e|es|ing)",
+      "chose|chosen|choices?",
+      "handl(?:e|es|ed|ing)",
+      "buy(?:s|ing)?|bought",
+      "sell(?:s|ing)?|sold",
+      "entr(?:y|ies)",
+      "exits?",
+      "coins?",
+      "tokens?",
+      "positions?",
+      "signals?",
+      "portfolio",
+      "money",
+      "wallets?",
+      "i|me|my|mine|myself|im|ive|i'm|i've|i'd|i'll",
+      "we|us|our|ours|we're|we've",
+      "you|your|yours|ya|u|you're",
+      "accounts?",
+      "agents?",
+      "brain",
+      "engine",
+      "behind",
+      "run(?:s|ning)?|ran",
+      "power(?:s|ed|ing)?",
+      "driv(?:e|es|ing)|drove",
+      "us(?:e|es|ed|ing)",
+      "answer(?:s|ed|ing)?",
+      "repl(?:y|ies|ied|ying)",
+      "writ(?:e|es|ing)|wrote",
+      "talk(?:s|ed|ing)?",
+      "speak(?:s|ing)?",
+      "posts?|posting",
+      "now|today|already|currently|live",
+    ].join("|") +
+    ")\\b",
+  "i",
+);
+
+/**
+ * Each sentence that names sherwood, as the screen reads it: a stop ends one
+ * only before a space or the end ("sherwood-1.5" is one word). Named on its
+ * letters too (sherwoodMentioned), so "sher wood" is one.
+ */
+function sherwoodSentences(t: string): string[] {
+  return t.split(/[.!?]+(?=\s|$)|\n+/).filter((s) => SHERWOOD_SAID.test(s) || sherwoodMentioned(s));
+}
+
+/**
+ * A DRAFT AS THE SHERWOOD SCREEN READS IT (red-team review, 2026-10-12):
+ * accents and every other mark taken off and invisible characters taken out,
+ * then NFKC, so "sherwööd" (with a precomposed or a combining diaeresis) and
+ * "sher\u00adwood" read as "sherwood". The word regexes above read NFKC only,
+ * which keeps both, and the base gate's own script check reads the draft
+ * with its marks already off, so it passed "sherwööd picks my coins".
+ */
+function plainDraft(draft: string): string {
+  return draft.normalize("NFKD").replace(/\p{M}/gu, "").replace(/[\p{Cf}\p{Default_Ignorable_Code_Point}]/gu, "")
+    .normalize("NFKC").replace(/[’‘]/g, "'");
+}
+
+export function sherwoodClaimed(draft: unknown): boolean {
+  if (typeof draft !== "string") return false;
+  const t = plainDraft(draft);
+  if (SHERWOOD_BEFORE.test(t) || SHERWOOD_AFTER.test(t)) return true;
+  return sherwoodSentences(t).some((s) => !SHERWOOD_TEASE.test(s) || SHERWOOD_AGENCY.test(s));
+}
+
+/**
+ * Whether a draft names sherwood at all, however it spells it: only a
+ * code-built line may (writer.ts modelAnswers). On its letters, the way a tag
+ * is read (sherwoodMentioned): accents, spacing and invisible characters do
+ * not hide it.
+ */
+export function sherwoodNamed(draft: unknown): boolean {
+  return typeof draft === "string" && (SHERWOOD_SAID.test(plainDraft(draft)) || sherwoodMentioned(draft));
+}
+
+/**
+ * LETTERS THAT READ AS LATIN ONES: Greek, Cyrillic, small capitals and a few
+ * stroked letters that a tag can swap in for a plain letter and still read
+ * the same on X. NFKC folds the fullwidth and mathematical alphabets
+ * already; these it leaves alone.
+ */
+const LOOKALIKE: Readonly<Record<string, string>> = Object.freeze({
+  α: "a", δ: "d", ε: "e", η: "n", ι: "i", κ: "k", ν: "v", ο: "o", ρ: "p", ς: "s", τ: "t", υ: "u", χ: "x", ω: "w",
+  а: "a", в: "b", е: "e", к: "k", м: "m", н: "h", о: "o", р: "p", с: "c", т: "t", у: "y", х: "x", ѕ: "s", і: "i", ј: "j", һ: "h", ԁ: "d", ԝ: "w",
+  ᴀ: "a", ʙ: "b", ᴄ: "c", ᴅ: "d", ᴇ: "e", ɢ: "g", ʜ: "h", ɪ: "i", ᴊ: "j", ᴋ: "k", ʟ: "l", ᴍ: "m", ɴ: "n", ᴏ: "o", ᴘ: "p", ʀ: "r", ꜱ: "s", ᴛ: "t", ᴜ: "u", ᴠ: "v", ᴡ: "w", ʏ: "y", ᴢ: "z",
+  ø: "o", ł: "l", đ: "d", ð: "d", ħ: "h", ı: "i", ɑ: "a", ɡ: "g", ȷ: "j",
+  // Hooked and turned IPA letters, and Armenian ones, that read as Latin on X (red-team 2026-10-12).
+  ɗ: "d", ɖ: "d", ɓ: "b", ɦ: "h", ɾ: "r", ɯ: "w", ƥ: "p", օ: "o", հ: "h", ս: "u",
+});
+/**
+ * CAPITALS THAT LOWERCASE INTO ANOTHER LOOK-ALIKE (red-team review,
+ * 2026-10-12): a Greek capital Eta reads as H on X, but lowercased it is an
+ * eta, which the table above reads as n ("SHERWOOD" with an Eta was
+ * "snerwood"); a capital Nu reads as N, its small nu as v; a capital Beta was
+ * dropped. So a Greek capital is read as the Latin capital it shows, before
+ * anything is lowercased.
+ */
+const LOOKALIKE_UPPER: Readonly<Record<string, string>> = Object.freeze({
+  Α: "a", Β: "b", Ε: "e", Ζ: "z", Η: "h", Ι: "i", Κ: "k", Μ: "m", Ν: "n", Ο: "o", Ρ: "p", Τ: "t", Υ: "y", Χ: "x",
+});
+/**
+ * Digits and signs written for a letter: "sherw00d", "5herwood", "$herwood".
+ * And the symbols that read as one of sherwood's letters on X (red-team
+ * review, 2026-10-12): "sherwoo∂", "§herwood", "sher₩ood", "she℞wood",
+ * "s♄erwood", "s#erwood". lettersOf dropped each, and the letter with it.
+ */
+const LEET: Readonly<Record<string, string>> = Object.freeze({
+  "0": "o", "3": "e", "4": "a", "5": "s", "7": "t", $: "s", "@": "a", "€": "e",
+  "∂": "d", "§": "s", "₩": "w", "℞": "r", "♄": "h", "#": "h", "®": "r", "©": "c", "°": "o",
+});
+/**
+ * STROKES WRITTEN FOR A LETTER, read as it before lettersOf drops them
+ * (red-team review, 2026-10-12): "s|-|erwood", "sher\/\/ood", "sherwoo|)",
+ * "she|2wood", "sherw()()d". Only for finding sherwood (sherwoodMentioned).
+ */
+const STROKES: readonly (readonly [RegExp, string])[] = [
+  [/\\\/\\\//g, "w"], [/\\\//g, "v"], [/\|-\|/g, "h"], [/\]-\[/g, "h"], [/\}\{/g, "h"],
+  [/\|[)\]>]/g, "d"], [/\[\)/g, "d"], [/\|2/g, "r"], [/\(\)/g, "o"], [/\[\]/g, "o"], [/\|_\|/g, "u"],
+];
+function withStrokes(text: string): string {
+  let t = text.normalize("NFKC");
+  for (const [re, letter] of STROKES) t = t.replace(re, letter);
+  return t;
+}
+
+/**
+ * A TEXT'S LETTERS AND NOTHING ELSE, a-z: NFKC, lowercase, accents taken off,
+ * look-alike letters read as the Latin ones, and every other character —
+ * spaces, digits, punctuation, zero-width characters — dropped, so "pe pe",
+ * "pe\u200bpe", "p.e.p.e" and "ρepe" are all "pepe". With `leet`, the digits
+ * and signs people write for a letter are read as it first ("sherw00d").
+ * What code matches a name against, never what anyone reads.
+ */
+export function lettersOf(text: unknown, o: { leet?: boolean } = {}): string {
+  if (typeof text !== "string") return "";
+  let out = "";
+  for (const ch of asLatin(text)) out += LOOKALIKE[ch] ?? (o.leet ? LEET[ch] ?? ch : ch);
+  return (o.leet ? out.replace(/vv/g, "w") : out).replace(/[^a-z]/g, "");
+}
+
+/**
+ * NFKC, Greek capitals read as the Latin ones they show, the enclosed letters
+ * read as theirs, lowercase, accents off: what lettersOf maps a character at
+ * a time.
+ */
+function asLatin(text: string): string {
+  let up = "";
+  for (const ch of text.normalize("NFKC")) up += LOOKALIKE_UPPER[ch] ?? enclosedLetter(ch) ?? ch;
+  return up.toLowerCase().normalize("NFD").replace(/\p{M}/gu, "");
+}
+
+/**
+ * LETTERS THAT ARE SYMBOLS TO UNICODE (red-team review, 2026-10-12): the
+ * squared, negative circled and negative squared Latin capitals (🄰, 🅐, 🅰)
+ * and the regional indicators (🇦, which pair into flags), which NFKC leaves
+ * alone and lettersOf dropped: "🆂🅷🅴🆁🆆🅾🅾🅳" read as nothing. Each is read
+ * as its letter.
+ */
+const ENCLOSED_BASES: readonly number[] = [0x1f130, 0x1f150, 0x1f170, 0x1f1e6];
+function enclosedLetter(ch: string): string | null {
+  const cp = ch.codePointAt(0) ?? 0;
+  for (const base of ENCLOSED_BASES) if (cp >= base && cp < base + 26) return String.fromCharCode(0x61 + cp - base);
+  return null;
+}
+
+/**
+ * A LETTER lettersOf CANNOT READ (red-team review, 2026-10-12): one that is
+ * neither a-z nor a look-alike it knows, so lettersOf would drop it and a
+ * name spelled with it would read as nothing ("ꓢꓧꓰꓣꓪꓳꓳꓓ" in Lisu is
+ * "SHERWOOD" on X and "" to code). Whoever asks whether a text names
+ * something treats one as a yes: fail closed. The shrug's ツ is the room
+ * gate's own exception, and reads as nothing.
+ */
+export function unreadableLetter(text: unknown): boolean {
+  if (typeof text !== "string") return false;
+  for (const ch of asLatin(text)) {
+    if (ch !== "ツ" && /\p{L}/u.test(ch) && !/^[a-z]$/.test(LOOKALIKE[ch] ?? ch)) return true;
+  }
+  return false;
+}
+
+/**
+ * SHERWOOD NAMED IN A TAG, IN ANY FORM (fail-closed review, 2026-10-12):
+ * "sherwood", "$SHERWOODINU", "sherwood-1", "sherw00d", "s h e r w o o d",
+ * "sher\u200bwood", "ꜱʜᴇʀᴡᴏᴏᴅ", "sherwοod" with a Greek o, "sherwod". Read on
+ * the text's letters alone, so spacing, digits, zero-width characters and
+ * look-alikes do not hide it. Errs toward finding it ("usher wood" counts):
+ * a tag it finds gets no answer at all, which costs one answer, never a
+ * screenshot of Merrymen's account confirming somebody's token. A letter it
+ * cannot read at all (unreadableLetter: Lisu, Cherokee, Armenian, an IPA
+ * letter it has no mapping for) counts as finding it: what code cannot read
+ * may spell it.
+ */
+const SHERWOOD_LETTERS = /s+h+e*r+w+o*d/;
+/**
+ * ONE OF ITS LETTERS GONE (red-team review, 2026-10-12): a symbol no table
+ * knows, written for one letter, takes that letter out of what lettersOf
+ * reads ("sherwoo∂" was "sherwoo", "s|-|erwood" was "serwood"), and the
+ * skeleton above missed it. So sherwood with any one of s, h, r, w or d
+ * missing counts too (with both o's when the w or the d is the one gone):
+ * "herwood", "serwood", "shewood", "sherood", "sherwoo". Errs toward
+ * finding it: "her wood" counts, at the cost of one answer.
+ */
+const SHERWOOD_NEAR = /h+e+r+w+o+d|s+e+r+w+o+d|s+h+e+w+o+d|s+h+e*r+o{2,}d|s+h+e*r+w+o{2,}/;
+export function sherwoodMentioned(text: unknown): boolean {
+  if (typeof text !== "string") return false;
+  const stroked = withStrokes(text);
+  const reads = [lettersOf(text), lettersOf(text, { leet: true }), lettersOf(stroked, { leet: true })];
+  // "cl" written for a d ("sherwoocl"), read only for this.
+  reads.push(reads[2]!.replace(/cl/g, "d"));
+  return reads.some((r) => SHERWOOD_LETTERS.test(r) || SHERWOOD_NEAR.test(r)) || unreadableLetter(text);
+}
+
+/**
+ * DOES A TEXT NAME ANY OF THESE, ON ITS LETTERS? Each name's letters inside
+ * the text's (lettersOf: case, spacing, digits, invisible characters and
+ * look-alikes ignored), plain or as leet. What a tag is matched against to
+ * tell whether it names a coin it bought (writer.ts coinNamedIn), and what a
+ * coin-named answer may not say (XGateCtx.unsaid). Errs toward yes.
+ *
+ * A NAME WITH NEXT TO NO LETTERS a-z (red-team review, 2026-10-12): a buy
+ * called "ペペ" or "🐸" has no letters to match, so it was never found and
+ * the tag that named it was told what it bought. Such a name (fewer than
+ * three letters) is also matched on its own characters, NFKC, lowercase,
+ * invisible characters out, whitespace collapsed, when it has a character
+ * other than a plain letter or digit to match on.
+ *
+ * A SHORT NAME ONLY AS A WORD (red-team review, 2026-10-12). Inside the
+ * letters of a whole sentence a ticker of two or three letters turns up
+ * everywhere: an agent that bought MU, USO or BE was "named" by "gm, u
+ * trading today?", "how do you source your coins?" and "what have you been
+ * buying?". So a name of fewer than four letters counts only as a whole word
+ * of the text (its letters, as lettersOf reads them, are the word's), and a
+ * longer one anywhere in its letters, which still catches every copycat
+ * that carries the full name ("pepe inu", "pepe2", "pe pe").
+ */
+export function namedIn(text: unknown, names: readonly unknown[]): boolean {
+  if (typeof text !== "string") return false;
+  const read = [lettersOf(text), lettersOf(text, { leet: true })];
+  const whole = rawName(text);
+  const words = whole.split(/[^\p{L}\p{N}$@€]+/u).filter(Boolean).map((w) => [lettersOf(w), lettersOf(w, { leet: true })]);
+  return names.some((name) => {
+    const letters = [lettersOf(name), lettersOf(name, { leet: true })];
+    if (letters.some((n) => n.length >= 4 && read.some((r) => r.includes(n)))) return true;
+    if (letters.some((n) => n !== "" && n.length < 4 && words.some((w) => w.includes(n)))) return true;
+    if (typeof name !== "string" || letters[0]!.length >= 3) return false;
+    const raw = rawName(name);
+    return /[^a-z0-9\s]/u.test(raw) && /[\p{L}\p{Extended_Pictographic}]/u.test(raw) && whole.includes(raw);
+  });
+}
+
+/** A name or a text as its own characters: NFKC, invisible characters out, lowercase, whitespace collapsed. */
+function rawName(s: string): string {
+  return s.normalize("NFKC").replace(/[\p{Cf}\p{Default_Ignorable_Code_Point}]/gu, "").toLowerCase().replace(/\s+/g, " ").trim();
+}
+
 // ── the X clauses ───────────────────────────────────────────────────────────
+
+/**
+ * A CHARACTER NOBODY SEES, IN A DRAFT (red-team review, 2026-10-12). The base
+ * gate takes every format and default-ignorable character out of what it
+ * posts, so "sher\u00adwood runs my trades" (a soft hyphen, a zero-width
+ * space) passed every sherwood check that read the draft and was posted as
+ * "sherwood runs my trades". A model has no reason to write one: a draft
+ * that carries one is refused whole, never cleaned. The only exceptions are
+ * the base gate's own, inside an emoji: U+FE0F straight after a pictograph
+ * (or its skin tone), and a zero-width joiner between two pictographs.
+ */
+const HIDDEN = /[\p{Cf}\p{Default_Ignorable_Code_Point}]/u;
+export function hidesCharacters(text: string): boolean {
+  const t = text
+    .replace(/(?<=\p{Extended_Pictographic}[\u{1F3FB}-\u{1F3FF}]?)\ufe0f/gu, "")
+    .replace(/(?<=\p{Extended_Pictographic}[\ufe0f\u{1F3FB}-\u{1F3FF}]?)\u200d(?=\p{Extended_Pictographic})/gu, "");
+  return HIDDEN.test(t);
+}
+
+/**
+ * ONLY CHARACTERS THAT ARE WHAT THEY LOOK LIKE, IN A REPLY (red-team review,
+ * 2026-10-12). "sherwoo∂ is merrymen's own, still cooking", "§herwood",
+ * "sher₩ood", "s|-|erwood", "sher\/\/ood" and "sherwoo|)" read as sherwood on
+ * X, and every sherwood check read them as nothing: a symbol written for a
+ * letter is dropped, and the letter with it. A list of look-alikes can never
+ * be whole, so an answer is held to plain characters instead: letters a-z
+ * (accents aside), digits (the base gate still refuses them, bar
+ * "sherwood-1"), spaces, ordinary sentence punctuation, and the characters
+ * the clauses after this refuse by name ($ @ # " < > { } [ ] ` &), plus
+ * emoji, which the emoji clause counts. And between two letters only one
+ * apostrophe, hyphen, dash, stop, comma or colon, or a run with a digit in it
+ * (has-digits refuses that): never "s|-|erwood" or "she®wood".
+ * Anything else refuses the draft whole, before any sherwood check reads it.
+ */
+const REPLY_CHAR = /^[A-Za-z0-9 .,!?':;()\-—–…$"“”@#&<>{}[\]`]$/u;
+const SKIN_TONE = /^[\u{1F3FB}-\u{1F3FF}]$/u;
+const IN_WORD = /(?<=\p{L})[^\p{L}\s]+(?=\p{L})/gu;
+export function strayCharacter(text: unknown): boolean {
+  if (typeof text !== "string") return true;
+  const t = plainDraft(text);
+  let prev = "";
+  for (const ch of t) {
+    const ok = REPLY_CHAR.test(ch) || /\p{Extended_Pictographic}/u.test(ch) || (SKIN_TONE.test(ch) && /\p{Extended_Pictographic}/u.test(prev));
+    if (!ok) return true;
+    prev = ch;
+  }
+  return [...t.matchAll(IN_WORD)].some((m) => !/^['.,:;\-—–]$/.test(m[0]) && !/[0-9]/.test(m[0]));
+}
 
 /** The model's "nothing to say", however it decorated it. */
 const PASS = /^[^\p{L}\p{N}]*pass(?![\p{L}\p{N}_])/iu;
@@ -391,8 +827,22 @@ const HYPE = new RegExp(
  * me on pepe" and "grab some pepe" tell a reader what to buy. Judged with the
  * names in, since the coin is what makes it advice.
  */
-const COIN_ADVICE =
-  /\b(?:check (?:it )?out|room to grow|worth (?:a )?(?:look|watch|peek)|worth (?:looking at|watching|a closer look)|trust me|grab (?:some|it|this|one))\b/i;
+const COIN_ADVICE = new RegExp(
+  String.raw`\b(?:check (?:it )?out|room to grow|worth (?:a )?(?:look|watch|peek)|worth (?:looking at|watching|a closer look)|trust me|grab (?:some|it|this|one)` +
+    // AN ENDORSEMENT, IN A REPLY OR BESIDE A COIN (red-team 2026-10-12): under
+    // "is this legit?" in its own thread, "yep, looks legit to me, go for it"
+    // and "yeah that one's official, all good" passed.
+    String.raw`|(?:looks?|looking|seems?|is|it'?s|that'?s|totally|fully|def(?:initely)?|pretty|real|all)\s+legit|legit\s+(?:to me|one|coin|token|project)|official|go for it|go ahead` +
+    // ADVICE AND PREDICTION IN OTHER WORDS (red-team 2026-10-12): "honestly i'd
+    // buy it", "worth buying imo", "solid buy for sure, get some", "it could
+    // easily double from here", "pretty sure it goes up from here".
+    String.raw`|(?:i'?d|i\s+would|i'?ll|i\s+will|i'?m\s+gonna|i'?m\s+going\s+to)\s+(?:(?:definitely|probably|totally|happily|still)\s+)?(?:buy|get|grab|ape|add|load|hold)` +
+    String.raw`|worth\s+(?:buying|getting|grabbing|a\s+buy|an?\s+ape|it|holding|the\s+risk)|(?:a\s+)?(?:solid|good|great|safe|smart|easy|strong|decent)\s+(?:buy|bet|pick|entry|play|hold)` +
+    String.raw`|get\s+some\b|(?:goes|going|go|gone|heading|headed|head)\s+(?:way\s+|much\s+|a\s+lot\s+)?(?:up|higher|lower)|(?:way|much|a\s+lot)\s+higher|higher\s+from\s+here` +
+    String.raw`|(?:could|will|might|should|gonna|going\s+to|bound\s+to|about\s+to)\s+(?:easily\s+|definitely\s+|probably\s+|totally\s+|still\s+)?(?:double|triple|go\s+up|run|pump|moon|rip|fly|explode|rise|recover|bounce|climb|take\s+off)` +
+    String.raw`|(?:best|top)\s+(?:coin|token|buy|pick|play|bet|memecoin)s?|(?:my|a)\s+top\s+pick|the\s+one\s+to\s+(?:buy|get|hold|watch|grab|ape))\b`,
+  "i",
+);
 
 /** A historical parent cannot establish a current holding or a promised new action. */
 const REPLY_CURRENT_OR_ACTION = /\b(?:i(?:'m| am) (?:still )?holding|i (?:still )?(?:hold|own)|i(?:'m| am) still in|(?:i(?:'ll| will)|i(?:'m| am) going to) (?:buy|sell|trade|hold|add|check)|(?:bought|buying|adding) (?:more|again)|keep holding|hold (?:it|this|that))\b/i;
@@ -494,6 +944,38 @@ const MARKET = new RegExp(
     ")\\b",
   "i",
 );
+
+/**
+ * AN AMOUNT, A PRICE OR A MULTIPLE IN WORDS THE BASE GATE LETS THROUGH, IN A
+ * REPLY (red-team review, 2026-10-12): "about one k holders", "a bil market
+ * cap", "a fraction of a cent", "a couple grand of liquidity", "a quarter of
+ * the supply", "under a penny", "up IOx" (capital I and O for ten). An answer
+ * is gated with no numbers in it; these are numbers. Refused as quantity.
+ */
+const AMOUNT_WORDS = new RegExp(
+  "\\b(?:" +
+    [
+      "k|ks|bils?|bn|mn",
+      "pennies|penny|cents?|bucks?|dimes?|nickels?|quid|sats?",
+      "dollars?|usd",
+      "(?:a|one|two|few|couple|several|some|like|about|around)\\s+(?:of\\s+)?grand",
+      "grand\\s+(?:of|in|worth)",
+      "(?:a\\s+)?fraction\\s+of",
+      "quarters?\\s+of|thirds?\\s+of|halves\\s+of",
+      "half\\s+(?:of\\s+)?(?:the|its|it|them|all)\\b(?:\\s+(?:supply|liquidity|holders|cap|pool|tokens|coins))?",
+      "(?:about|around|nearly|almost|roughly|over|under)\\s+half",
+      "(?:up|down)\\s+(?:a\\s+ton|tons|a\\s+lot|loads|big|huge)",
+      "a\\s+ton\\s+of|tons\\s+of",
+      "[IlLoO0-9]{2,4}x",
+    ].join("|") +
+    ")\\b",
+  "u",
+);
+/** The amount words read in any case but the multiples, whose capitals are what make them one. */
+const AMOUNT_WORDS_I = new RegExp(AMOUNT_WORDS.source.replace("|[IlLoO0-9]{2,4}x", ""), "iu");
+function amountSaid(text: string): boolean {
+  return AMOUNT_WORDS_I.test(text) || /\b(?!lox\b)[IlLoO0-9]{2,4}x\b/u.test(text);
+}
 
 /** The idioms that share a word with it, taken out first: "i'm sold on soup", "the selling point", "a loss for words". */
 const PNL_IDIOM =
@@ -629,6 +1111,19 @@ const ON_PAPER_CLAIM =
 /** Real money claimed — not denied: the buy prompt itself says "practice money, not real money", and a paper post may echo it. */
 const SAYS_REAL_MONEY = /(?<!\b(?:not|no|never|isn'?t|wasn'?t|aren'?t)\s+(?:with\s+|using\s+|any\s+)?)\breal (?:money|cash)\b/i;
 
+/**
+ * THE OTHER MONEY IN OTHER WORDS, IN A REPLY (red-team review, 2026-10-12): a
+ * live agent answered "honestly it's all play money for me, nothing at stake",
+ * "it's monopoly money", "this is a simulation, none of it is real"; a paper
+ * agent "i trade on paper, kidding, it's real dollars on the line", "on paper
+ * trades, but the money is real". The paper and real-money phrases read only
+ * their own words. In a reply, fail closed on what either money is called.
+ */
+const PLAY_MONEY =
+  /\b(?:play|fake|pretend|test|demo|simulated|sim|monopoly|imaginary|virtual|toy|funny|make[\s-]?believe)\s+(?:money|funds|cash|dollars|bucks|coins|sol|usd|trades?|trading|account|mode|portfolio)\b|\bnothing\s+(?:real\s+)?(?:at\s+stake|on\s+the\s+line)\b|\bno\s+(?:real\s+)?(?:stakes|risk|skin\s+in\s+the\s+game)\b|\bsimulat\w+|\bdemo\s+mode\b|\b(?:none|nothing)\s+of\s+it(?:'s|\s+is)\s+real\b|\bnothing\s+real\b|\bnot\s+real\b/i;
+const REAL_IN_OTHER_WORDS =
+  /\b(?:real|actual|live|hard)\s+(?:dollars|funds|stakes|usd|sol|eth|cash|capital|bucks)\b|\b(?:the\s+)?money(?:'s|\s+is|\s+was)\s+(?:real|actual|live)\b|(?<!\b(?:nothing|no|not)\b[\w\s']{0,24})\b(?:on\s+the\s+line|skin\s+in\s+the\s+game)\b|\bfeels?\s+like\s+real\b|\b(?:kidding|jk|j\/k|not\s+really|just\s+joking|joking)\b/i;
+
 function paperOfCoin(text: string, coins: readonly string[]): boolean {
   return coins.some((c) => c.trim() !== "" && new RegExp(`\\bpaper[\\s-]+\\$?${escapeRe(c.trim())}(?![\\p{L}\\p{N}_])`, "iu").test(text));
 }
@@ -637,6 +1132,18 @@ function paperOfCoin(text: string, coins: readonly string[]): boolean {
 function saysPaper(text: string, coins: readonly string[]): boolean {
   const t = text.replace(PAPER_HANDS, " ");
   return PAPER_PHRASE.test(t) || ON_PAPER.test(t) || paperOfCoin(t, coins);
+}
+
+/**
+ * WHICH MONEY A POST'S OWN WORDS SAY, as the gate reads them: "paper" when
+ * they say paper as a phrase about the money (saysPaper), "live" when they
+ * claim real money, null when neither. What research reads an old buy post
+ * with before quoting it to an answer (red-team review, 2026-10-12).
+ */
+export function moneySaid(text: unknown): "paper" | "live" | null {
+  if (typeof text !== "string") return null;
+  if (saysPaper(text, [])) return "paper";
+  return SAYS_REAL_MONEY.test(text) ? "live" : null;
 }
 
 /** Paper claimed of the money, by a live post that must not claim it. */
@@ -707,6 +1214,138 @@ export function vocabularyRefusal(text: string): string | null {
   if (HUMAN.some((re) => re.test(t))) return "human-claim";
   if (MARKET.test(t)) return "market";
   return null;
+}
+
+/**
+ * A BUY SAID IN THE FIRST PERSON: bought, grabbed, picked up, scooped,
+ * snagged, aped, got in on, entered, added, loaded up on, went in on, been
+ * buying — with or without the "i" people drop ("yep, grabbed bonk"). "i buy
+ * when…" is a habit and "the buying" a noun; neither is a buy. A bag is a
+ * holding.
+ */
+const ACQUIRED = /\b(?:bought(?:\s+into)?|grabbed|grabbing|picked\s+up|picking\s+up|scooped(?:\s+up)?|snagged|copped|aped(?:\s+in(?:to)?)?|aping(?:\s+in(?:to)?)?|got\s+in(?:to)?(?:\s+on)?|getting\s+in(?:to)?(?:\s+on)?|entered|added|loaded\s+up(?:\s+on)?|went\s+in(?:\s+on)?|took\s+a\s+position\s+in|(?:been|i'?m|im|was|were)\s+buying)\b/gi;
+const BAG = /\bbag(?:s|ged|holder|holders|holding)?\b/i;
+/** What may come between a buy and what it was of: "a little", "some of the". */
+const BUY_FILLER: ReadonlySet<string> = new Set("a an the some little bit of couple few small more another new fresh early my".split(" "));
+/** What a buy may be of without naming a coin, or the clause going on: "bought it", "picked up a few with real money", "grabbed some coins lately". */
+const BUY_OBJECT: ReadonlySet<string> = new Set(("it its them those these that this one ones coins coin tokens token memecoins memes launches stuff things names plays " +
+  "with when because cause cuz on in at for and but or lately recently today yesterday earlier here there back too again after before since while as then now " +
+  "from off up into last so just around over what which whatever anything something nothing any i i'm im i've ive").split(" "));
+
+/**
+ * A BUY OR A HOLDING, WHATEVER THE VERB (red-team review, 2026-10-12). Told
+ * none of its buys and asked "did you buy $WIF?", an answer said "yep,
+ * purchased it lately", "picked some up", "traded it lately", "nabbed a few",
+ * "snapped some up", "i'm in on that one", "it's one of mine", "my owner had
+ * me buy it", "i went for it anyway", "i did": none of them ACQUIRED's verbs,
+ * every one a public yes on a real-money account. So, told none: any
+ * acquiring or holding verb said by "i" or "we", or opening a clause with the
+ * "i" dropped ("yep, nabbed a few"); "i did" or "i have" as an answer, and
+ * "i didn't" or "never bought" (a no says just as much); and the shapes of
+ * owning it ("mine", "in my book", "riding it", "my latest pick"). A third
+ * person is not read: "the creator still holding a big chunk" and "late
+ * buyers end up holding it" are what research says.
+ */
+const OWN_VERB = String.raw`(?:purchas(?:e|es|ed|ing)|nabb?(?:ed|ing|s)?|snapp(?:ed|ing)|snag(?:g(?:ed|ing))?|traded|pick(?:ed|ing)?|took|got|gotten|own(?:ed|ing|s)?|hold(?:s|ing)?|held|scoop(?:ed|ing)?|copp?(?:ed|ing)?|bought|grabb?(?:ed|ing)?|aped|aping|bagg?(?:ed|ing)|added|loaded|went\s+(?:for|with|in(?:to)?|all)|go(?:ing)?\s+(?:for|with)\s+it)`;
+const BY_ME = String.raw`\b(?:i|we|i'?ve|ive|we'?ve|i'?m|im|we'?re|i'?d)\s+(?:(?:just|already|also|recently|still|been|finally|only|sure|even|did|do|have|had|really|actually|kinda)\s+){0,2}`;
+const CLAUSE_OPEN = String.raw`(?:^|[,.;:!?—–]\s*|\b(?:and|but|so|then|yep|yeah|yes|yup|ya|honestly|sure)[\s,]+)(?:(?:just|already|also|recently|still|been|finally|only)\s+){0,2}`;
+const OWNED_ACT = new RegExp(String.raw`(?:${BY_ME}|${CLAUSE_OPEN})${OWN_VERB}\b`, "iu");
+const OWNED_SHAPE = new RegExp(
+  "\\b(?:" +
+    [
+      "mine",
+      "one\\s+of\\s+my\\s+(?:buys|picks|coins|bags|positions|trades|plays|calls|bets)",
+      "(?:in|on)\\s+my\\s+(?:book|books|bag|bags|portfolio|wallet|stack|list|holdings|positions?)",
+      "my\\s+(?:latest|last|newest|recent|first|top|fav(?:ou?rite)?|current|new|big|best|own)\\s+(?:pick|buy|play|trade|call|bet|position|coin|token|one|entry|bag)s?",
+      "riding\\s+(?:it|that|this|them|that\\s+one)",
+      "in\\s+on\\s+(?:it|that|this|them|one)",
+      "(?:i'?m|im|i\\s+am|we'?re)\\s+in\\b(?!\\s+(?:the|a|an|no|my|your|for|love|doubt|between)\\b)",
+      "(?:my|the|our)\\s+owner\\s+(?:had|made|got|let|wanted)\\s+(?:me|us)",
+      "sure\\s+did",
+      "(?:i|we)\\s+(?:did|do|have|had)(?=\\s*(?:[,.;:!?—–]|$|\\s+(?:too|some|one|it|that|this|them|a\\s+(?:bit|little|few))\\b))",
+      "(?:i|we)\\s+(?:didn'?t|don'?t|haven'?t|hadn'?t|did\\s+not|do\\s+not|have\\s+not)\\s+(?:buy|bought|touch|touched|trade|traded|own|owned|hold|held|ape|aped|have\\s+(?:it|any|one))",
+      "never\\s+(?:bought|touched|traded|owned|held|aped)",
+    ].join("|") +
+    ")\\b",
+  "iu",
+);
+
+/**
+ * LIKING IT IS SAYING IT TOO (red-team review, 2026-10-12): "yes, it's one of
+ * mine, i like it a lot", "liked the early curve". Asked about a named coin,
+ * an answer told none of its buys may not say it likes, loves or rates it,
+ * that it is a fan of it or into it. Never "looks like it", "feels like
+ * that": those compare, not prefer.
+ */
+const LIKED = new RegExp(
+  "\\b(?:" +
+    [
+      "(?:i|we)\\s+(?:(?:really|kinda|still|do|also|just|totally|actually)\\s+)?(?:like|liked|love|loved|dig|dug|rate|rated|fancy|fancied|prefer|preferred|enjoy|enjoyed|adore|adored)",
+      String.raw`(?:^|(?<=[,.;:!?—–]\s*)|(?<=\b(?:and|but|so|yep|yeah|yes|yup|honestly|really)[\s,]+))(?:like|liked|love|loved|dig|dug|rate|rated|adore|adored)`,
+      String.raw`(?<!\b(?:looks?|looked|seems?|seemed|feels?|felt|sounds?|sounded|just|kinda|more|less|something|nothing|anything|much|is|was|be|it's|that's|not)\s)(?:like|liked|love|loved|dig|rate|rated)\s+(?:it|that|this|them|how|the\s+way)`,
+      "fan\\s+of",
+      "big\\s+fan",
+      "into\\s+(?:it|that|this|them)",
+      "my\\s+(?:kind|type|sort)\\s+of",
+      "(?:a|my|the)\\s+fav(?:ou?rite)?s?",
+      "(?:i'?m|im|i\\s+am|we'?re)\\s+(?:a\\s+(?:big\\s+)?)?(?:fan|into|keen|sold)",
+    ].join("|") +
+    ")\\b",
+  "iu",
+);
+
+/**
+ * OF A NAMED COIN, NO YES OR NO AND NO "I" BUT A DEFLECTION (red-team review,
+ * 2026-10-12). "did you buy $PEPE2?" answered "yep, i did. that one's mine",
+ * "yeah that one was my latest pick", "yes, it's in my book, been riding it",
+ * "sure did": a list of verbs is never whole. An answer about a coin someone
+ * named, told none of its buys, has only these to say: what it looked up
+ * (said of the source, never of itself), that it could not look, that it
+ * keeps single positions to itself, and, on paper, that it is on paper. So
+ * it may not answer yes or no, and it may not speak of itself in the first
+ * person outside those few clauses.
+ */
+const AFFIRM = /(?:^|[,.;:!?—–(]\s*|\b(?:and|but|so|honestly|well|oh|lol|haha|ha)[\s,]+)(?:yes+|yep|yup|yeah|yea|ya|yah|sure|absolutely|definitely|certainly|indeed|correct|totally|you bet|bingo|of course|nope|nah|naw|no(?=\s*[,.;:!?—–]|\s+(?:i|i'?ve|i'?m|never|not|sir|way)\b))\b/iu;
+const SPEAKS_OF_ITSELF = /\b(?:i|i'?m|im|i'?ve|ive|i'?d|i'?ll|me|my|mine|myself|we|we'?re|we'?ve|our|ours|us)\b/iu;
+const DEFLECTIONS: readonly RegExp[] = [
+  /\b(?:i|we)\s+(?:(?:really|just|honestly)\s+)?(?:don'?t|do\s+not|never|won'?t|can'?t|cannot)\s+(?:really\s+)?(?:talk|say|share|discuss|comment|get|go|speak|weigh|chat|name|post)\b(?:\s+(?:about|on|into|in|over))?(?:\s+(?:my|any|individual|single|specific|particular|the|those|these|one-off))*\s+(?:positions?|coins?|tokens?|trades?|buys?|picks?|holdings?|bags?|names?|calls?|ones?)\b(?:\s+(?:here|on\s+here|publicly|in\s+public|on\s+x))?/giu,
+  /\b(?:i|we)\s+keep\s+(?:(?:my|our|individual|single|specific|those|that|the|own)\s+)*(?:positions?|trades?|buys?|picks?|coins?|holdings?|bags?|calls?)\s+to\s+(?:myself|ourselves)(?:\s+here)?/giu,
+  /\b(?:i|we)\s+(?:couldn'?t|could\s+not|can'?t|cannot|wasn'?t\s+able\s+to)\s+(?:look|check|pull|find|get)\s+(?:(?:it|that|this|that\s+one|this\s+one|anything)\s+)?(?:up\b|on\s+it\b)?/giu,
+  /\b(?:i|we)\s+looked\s+(?:(?:it|that|this|that\s+one)\s+)?up\b/giu,
+  /\b(?:i'?m|im|i\s+am|we'?re)\s+(?:(?:still|just|only|strictly|trading|playing)\s+)*on\s+paper\b|\b(?:i|we)\s+(?:only\s+|just\s+)?(?:trade|play)\s+(?:it\s+)?on\s+paper\b/giu,
+  /\b(?:i|we)\s+(?:don'?t|do\s+not|never)\s+(?:give|do|hand\s+out|make|offer)\s+(?:out\s+)?(?:advice|calls|picks|tips|predictions)\b/giu,
+];
+function namedClaim(text: string): boolean {
+  if (AFFIRM.test(text) || LIKED.test(text)) return true;
+  let rest = text;
+  for (const re of DEFLECTIONS) rest = rest.replace(re, " ");
+  return SPEAKS_OF_ITSELF.test(rest);
+}
+
+/**
+ * A WORD THAT COULD BE A COIN IT WAS NEVER TOLD OF, in an answer told its
+ * buys: one of three letters or more that is not everyday (answerWord), not a
+ * word of a coin it was told of, and not one it was handed (`known`).
+ */
+function unvouchedWord(text: string, coins: readonly string[], known: readonly string[]): boolean {
+  const ok = new Set<string>();
+  for (const n of [...coins, ...known]) for (const w of textWords(n)) ok.add(w);
+  return textWords(text).some((w) => /^[a-z]{3,}$/.test(w) && !ok.has(w) && !BUY_FILLER.has(w) && !BUY_OBJECT.has(w) && !answerWord(w));
+}
+
+function buyClaimed(text: string, vouched: readonly string[] | null): boolean {
+  if (vouched === null) return BAG.test(text) || new RegExp(ACQUIRED.source, "i").test(text) || OWNED_ACT.test(text) || OWNED_SHAPE.test(text);
+  const names = vouched.map((c) => c.trim().toLowerCase().replace(/^\$/, "")).filter((c) => c !== "");
+  for (const m of text.matchAll(ACQUIRED)) {
+    const after = text.slice((m.index ?? 0) + m[0].length).split(/[.,!?;:—–]/)[0]!.toLowerCase();
+    const rest = after.trim().replace(/^\$/, "");
+    if (names.some((n) => rest === n || rest.startsWith(`${n} `) || rest.startsWith(`${n}'`))) continue;
+    const word = after.split(/\s+/).filter(Boolean).find((w) => !BUY_FILLER.has(w)) ?? "";
+    const bare = word.replace(/^\$/, "").replace(/'s$/, "");
+    if (word === "" || BUY_OBJECT.has(bare) || names.some((n) => n === bare || n.split(/\s+/)[0] === bare)) continue;
+    return true;
+  }
+  return false;
 }
 
 /** A name as a whole word, with or without a cashtag's $. */
@@ -806,10 +1445,10 @@ function strings(list: unknown): string[] {
  * MAY THIS BE POSTED ON X? Tidy, then the base gate, then every X clause.
  * `ok` carries the exact text to store and post.
  *
- * Reason codes (stable, operator-only): empty · pass · meta · too-short · too-long ·
+ * Reason codes (stable, operator-only): empty · pass · meta · hidden-chars · charset · too-short · too-long ·
  * handle · link · markup · emoji · exclaim · caps · ops · alert · hype · pnl ·
  * market · human-claim · points-back · coin-unsaid · paper-unsaid · mode-false · undisclosed · intro-no-trading ·
- * opt-out-unsaid · reply-current-or-action ·
+ * opt-out-unsaid · reply-current-or-action · sherwood-claim · bought-named · buy-claim ·
  * fleet-repeat · seed-echo — plus whatever the base gate says (has-digits,
  * quantity, repeat, unvouched-ticker, address, secret…).
  */
@@ -819,6 +1458,29 @@ export function admitXPost(raw: unknown, ctx: XGateCtx, baseGate: BaseGate): XVe
   if (tidied === "") return refuse("empty");
   if (PASS.test(tidied)) return refuse("pass");
   if (metaRefusal(raw, tidied, agentName)) return refuse("meta");
+  // Nothing invisible: the base gate would take it out after every check here had read around it.
+  if (hidesCharacters(tidied)) return refuse("hidden-chars");
+  // Nothing written for a letter, read before any sherwood check (strayCharacter).
+  if (ctx.kind === "reply" && strayCharacter(tidied)) return refuse("charset");
+  // A reply never says sherwood runs it, whoever drafted it (see SHERWOOD_NAME).
+  if (ctx.kind === "reply" && sherwoodClaimed(tidied)) return refuse("sherwood-claim");
+  // In a reply only, "sherwood-1" is a name: masked for every check below, put back after.
+  const named = ctx.kind === "reply" ? maskSherwood(tidied) : { text: tidied, said: [] };
+  if (named === null) return refuse("has-digits");
+  // What it is weighed against is masked the same way, so a line said before is still the same line.
+  const against = ctx.kind === "reply"
+    ? { ...ctx, recentOwn: strings(ctx.recentOwn).map(withStandIn), recentFleet: strings(ctx.recentFleet).map(withStandIn), seeds: strings(ctx.seeds).map(withStandIn) }
+    : ctx;
+  const verdict = admitMasked(named.text, against, baseGate, agentName);
+  if (!verdict.ok) return verdict;
+  const out = named.said.length === 0 ? verdict : unmaskSherwood(verdict.text, named.said);
+  // WHAT IS POSTED, JUDGED AGAIN: the base gate hands back its own cleaned
+  // text, and a claim it put together is still a claim.
+  if (out.ok && ctx.kind === "reply" && sherwoodClaimed(out.text)) return refuse("sherwood-claim");
+  return out;
+}
+
+function admitMasked(tidied: string, ctx: XGateCtx, baseGate: BaseGate, agentName: string): XVerdict {
 
   const coins = strings(ctx.coins);
   const baseCtx = {
@@ -831,6 +1493,15 @@ export function admitXPost(raw: unknown, ctx: XGateCtx, baseGate: BaseGate): XVe
   const base = baseGate(tidied, baseCtx);
   if (!base.ok) return base;
   const text = base.text;
+  // Never a coin it bought, in an answer that was never told what it bought.
+  const unsaid = strings(ctx.unsaid);
+  if (unsaid.length && namedIn(ctx.kind === "reply" ? withoutReplyOptOut(text) : text, unsaid)) return refuse("bought-named");
+  // Nor a buy it was not told of.
+  if (ctx.buys !== undefined && buyClaimed(ctx.kind === "reply" ? withoutReplyOptOut(text) : text, ctx.buys === "none" ? null : coins)) return refuse("buy-claim");
+  // Told its buys: no word that could be another coin's name (XGateCtx.known).
+  if (ctx.buys === "vouched" && ctx.known !== undefined && unvouchedWord(withoutNames(ctx.kind === "reply" ? withoutReplyOptOut(text) : text, [agentName]), coins, strings(ctx.known))) return refuse("buy-claim");
+  // Nor, of a coin someone named, that it likes it, a yes or a no, or itself outside a deflection (namedClaim).
+  if (ctx.buys === "none" && ctx.named === true && namedClaim(ctx.kind === "reply" ? withoutReplyOptOut(text) : text)) return refuse("buy-claim");
 
   if (text.length > XPOST_MAX_CHARS || xWeightedLength(text) > X_MAX_WEIGHTED) return refuse("too-long");
   if (words(text) < XPOST_MIN_WORDS) return refuse("too-short");
@@ -868,6 +1539,8 @@ export function admitXPost(raw: unknown, ctx: XGateCtx, baseGate: BaseGate): XVe
   const namesCoin = coins.some((c) => mentions(text, c));
   if ((namesCoin || ctx.kind === "reply") && COIN_ADVICE.test(own)) return refuse("hype");
   if (ctx.kind === "reply" && (REPLY_CURRENT_OR_ACTION.test(own) || REPLY_CURRENT_POSITION.test(own))) return refuse("reply-current-or-action");
+  // No amount, price or multiple in words the base gate's list misses (AMOUNT_WORDS).
+  if (ctx.kind === "reply" && amountSaid(withoutReplyOptOut(own))) return refuse("quantity");
   if (shouts(own)) return refuse("caps");
   if (ctx.kind !== "reply" && POINTS_BACK.test(own.trim())) return refuse("points-back");
 
@@ -886,7 +1559,27 @@ export function admitXPost(raw: unknown, ctx: XGateCtx, baseGate: BaseGate): XVe
   if (aboutPaper && !saysPaper(text, coins)) return refuse("paper-unsaid");
   if (ctx.kind === "sell" && ctx.mode === "live" && saysPaper(text, coins)) return refuse("mode-false");
   if (ctx.mode === "live" && claimsPaper(text, coins) && !aboutPaper) return refuse("mode-false");
+  // A LIVE AGENT'S REPLY NEVER SAYS PAPER AT ALL (red-team 2026-10-12): "bonk
+  // was a fun one on paper before that" said a paper buy beside "with real
+  // money", and claimsPaper reads only its shapes. In a reply, fail closed:
+  // any paper phrase, the idiom too, unless a paper coin it was told of is named.
+  if (ctx.kind === "reply" && ctx.mode === "live" && saysPaper(text, coins) && !aboutPaper) return refuse("mode-false");
+  // And either money in other words: play money for a live reply, real dollars (or "kidding") for a paper one.
+  if (ctx.kind === "reply" && ctx.mode === "live" && PLAY_MONEY.test(text) && !aboutPaper) return refuse("mode-false");
+  if (ctx.kind === "reply" && ctx.mode === "paper" && REAL_IN_OTHER_WORDS.test(text)) return refuse("mode-false");
   if (ctx.mode === "paper" && SAYS_REAL_MONEY.test(text)) return refuse("mode-false");
+  // AN IDLE AGENT'S REPLY, COIN BY COIN (red-team 2026-10-12): "bought pepe and
+  // bonk lately, both on paper" called a live buy paper, and "grabbed bonk and
+  // pepe with real money, nothing on paper" a paper buy real money, because
+  // paper was read for the whole text. With no mode to hold it to, a reply may
+  // not name coins of both moneys, nor say paper beside a real-money coin, nor
+  // real money beside a paper one.
+  if (ctx.kind === "reply" && ctx.mode === null) {
+    const isPaper = (c: string) => paperCoins.some((p) => p.trim().toLowerCase() === c.trim().toLowerCase());
+    const liveNamed = coins.some((c) => !isPaper(c) && mentions(text, c));
+    const paperNamed = paperCoins.some((c) => mentions(text, c));
+    if ((liveNamed && paperNamed) || (liveNamed && saysPaper(text, coins)) || (paperNamed && SAYS_REAL_MONEY.test(text))) return refuse("mode-false");
+  }
 
   if (ctx.kind === "intro") {
     if (!SAYS_AGENT.test(text)) return refuse("undisclosed");

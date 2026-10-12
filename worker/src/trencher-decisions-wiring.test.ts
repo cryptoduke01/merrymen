@@ -78,4 +78,39 @@ describe("the Trencher review's hold backoff, memory, evidence rule and research
     assert.match(run, /if \(costContext\) \{\s*inputs\.persona \+= `\\n\\n\$\{trenchMomentumBrief\(TRENCHER_FAST, trenchBreakEven\(costResearch, costContext\), costContext\.sizeUsdg\)\}`;\s*\}/);
     assert.equal(CODE.split("trenchMomentumBrief(").length - 1, 1, "one call site");
   });
+
+  it("the indexer's flow: research entry reviews with a tape row, asked at launch, bounded by the evidence budget, under its own key", () => {
+    assert.equal(CODE.split("reviewFlowClient(").length - 1, 1, "one client, built once");
+    assert.match(CODE, /const reviewFlow = reviewFlowClient\(\);/);
+    assert.match(CODE, /const flowLensProbe = new BrainCapabilityProbe\(undefined, undefined, undefined, undefined, undefined, "lens_keys"\);/);
+    // The same gate as the plan, plus a tape row; the probe last, so nothing new is read for anyone else.
+    assert.match(CODE, /const flowClient = costContext && tape && reviewFlow && flowLensProbe\.advertises\(cfg\.brainUrl, ONCHAIN_FLOW_LENS\) \? reviewFlow : null;/);
+    assert.ok(CODE.indexOf("const flowClient = ") < LAUNCH);
+    const run = CODE.slice(LAUNCH, PAID);
+    // Started beside the cost quotes, before the evidence legs, on their clock —
+    // only while the review cannot then be skipped as blind (its tape row current past the legs).
+    assert.match(run, /let flowRead = flowClient && tape && !entryMayGoBlind\(trenchTapeReader\.observedAtOf\(tape\), reviewStartedAt, legsMaxMs \+ 1000\)\s*\? readFlowEvidence\(flowClient, focus\.token, EVIDENCE_BUDGET_MS\) : null;/);
+    assert.ok(run.indexOf("let flowRead = ") < run.indexOf("readPoolEvidence("), "asked before the legs start, not after them");
+    assert.match(run, /new Promise<null>\(resolve => \{ timer = setTimeout\(\(\) => resolve\(null\), legsMaxMs\); \}\)/, "the same backstop the check counts on");
+    // Otherwise asked only once the blind check passed, on what is left of the budget.
+    const blind = run.indexOf('return skipBlindEntry("blind"');
+    const late = run.indexOf("if (flowClient && !flowRead && flowLeftMs > 0) flowRead = readFlowEvidence(flowClient, focus.token, flowLeftMs);");
+    assert.ok(blind > 0 && late > blind, "never before a blind skip");
+    assert.match(run, /const flowLeftMs = EVIDENCE_BUDGET_MS - \(Date\.now\(\) - reviewStartedAt\);/);
+    // Its own key: technical (and its 2,400-character cut) is never touched by it.
+    assert.match(run, /const flow = flowRead \? await flowRead : null;\s*if \(flow\) \{\s*if \(flow\.lens\) inputs\.market\.signals\[ONCHAIN_FLOW_LENS\] = flow\.lens;/);
+    assert.equal(CODE.split("signals[ONCHAIN_FLOW_LENS]").length - 1, 1, "set in one place");
+    assert.doesNotMatch(run, /signals\.technical \+= [^;]*flow/);
+    assert.ok(run.indexOf("const flow = flowRead") < run.length, "awaited before the paid call");
+    // An older Brain's 422 on a decide that carried it turns the key off.
+    assert.match(CODE, /\.then\(outcome => \{ if \(flowLensRefused\(Boolean\(flow\?\.lens\), outcome\)\) flowLensProbe\.invalidate\(\);/);
+  });
+
+  it("the trusted strategy terms ride on the same costContext as the plan, and are set before the review launches", () => {
+    assert.match(CODE, /if \(costContext\) inputs\.strategyTerms = trencherStrategyTerms\(TRENCHER_FAST\);/);
+    assert.equal(CODE.split("trencherStrategyTerms(").length - 1, 1, "one call site");
+    assert.equal(CODE.split("inputs.strategyTerms").length - 1, 1, "nothing else sets or clears them");
+    assert.ok(CODE.indexOf("inputs.strategyTerms = ") < LAUNCH, "set on the inputs the launch captures, never after");
+    assert.ok(CODE.indexOf("const costContext = enhancedResearch && !focus.held ? {") < CODE.indexOf("inputs.strategyTerms = "));
+  });
 });

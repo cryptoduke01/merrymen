@@ -21,6 +21,8 @@ import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import { act, createElement } from "react";
 import { X_COPY, type XAccountBody } from "@/lib/x-connect";
+import { ACTIVE_CADENCE, ANSWERS_PER_DAY } from "../../../worker/src/xpost/planner";
+import { ANSWERS_PER_AUTHOR } from "../../../worker/src/xpost/store";
 import { json, testDom } from "./test-dom";
 import { XPosting } from "./XPosting";
 
@@ -48,6 +50,7 @@ const CONNECTED: XAccountBody = {
   perDayMax: 3,
   replyEnabled: false,
   repliesAvailable: false,
+  repliesActive: false,
   upcoming: [],
   recent: [],
 };
@@ -147,12 +150,30 @@ describe("comment reply consent", () => {
     await press(replySwitch(), "reply switch");
     assert.equal(writes().length, 0);
     assert.match(text(), new RegExp(`Reply to comments as @${HANDLE}`));
-    assert.match(text(), /selected comments on its coin posts/);
+    assert.match(text(), new RegExp(`reply as @${HANDLE} to selected comments on its coin posts\\.`));
     assert.match(text(), /same daily limit/);
     assert.match(text(), /at least ten minutes/);
+    assert.doesNotMatch(text(), /tag it|right away|24 answers/, "an owner merrymen did not make active is told of comment replies only");
     await press(buttons(`Let it reply as @${HANDLE}`)[0], "reply confirm");
     assert.deepEqual(writes()[0]?.body, { action: "enable-replies", owner: OWNER, xUserId: X_ID });
     assert.equal(replySwitch()?.getAttribute("aria-checked"), "true");
+  });
+
+  it("an active agent's warning says it answers tags right away, on top of its posts, and promises no review window", async () => {
+    routes["GET /api/x/account"] = () => json({ ...CONNECTED, postingEnabled: true, repliesAvailable: true, repliesActive: true });
+    routes["POST /api/x/account"] = () => json({ ok: true, replyEnabled: true });
+    await shown();
+    assert.match(text(), /Selected posts that tag your Merryman and comments on its posts, answered as @merry_poster right away/);
+    await press(replySwitch(), "reply switch");
+    assert.equal(writes().length, 0);
+    const dialog = ui.container.querySelector("dialog")?.textContent ?? "";
+    assert.match(dialog, new RegExp(`reply as @${HANDLE} to selected posts that tag it, including comments on its own posts\\.`));
+    assert.match(dialog, /Answers go out right away: they don’t wait under Coming up/);
+    assert.match(dialog, /Up to 24 answers a day on top of its posts, and at most two to one person a day\./);
+    assert.match(dialog, /Anyone can reply stop to opt out\./);
+    assert.doesNotMatch(dialog, /at least ten minutes|same daily limit/, "it keeps no ten-minute review, so it does not promise one");
+    await press(buttons(`Let it reply as @${HANDLE}`)[0], "reply confirm");
+    assert.deepEqual(writes()[0]?.body, { action: "enable-replies", owner: OWNER, xUserId: X_ID });
   });
 
   it("keeps replies off when the server refuses the named account", async () => {
@@ -243,6 +264,33 @@ describe("the switch and the warning", () => {
     await until(() => theSwitch()?.getAttribute("aria-checked") === "true", "the confirmed state");
     assert.match(text(), /Posting from @merry_poster — whichever X account is connected\./);
     assert.equal(ui.container.querySelector("dialog"), null);
+  });
+
+  it("an active agent's posting warning says how much it posts: up to twelve a day, most coins it buys, never 'a few a day at most'", async () => {
+    routes["GET /api/x/account"] = () => json({ ...CONNECTED, repliesActive: true });
+    routes["POST /api/x/account"] = () => json({ ok: true, postingEnabled: true });
+    await shown();
+    assert.match(text(), /Short lines in its own words, a few times a day\./);
+    assert.doesNotMatch(text(), /most days/);
+    await press(theSwitch(), "the switch");
+    assert.deepEqual(writes(), []);
+    const said = ui.container.querySelector("dialog")?.textContent ?? "";
+    assert.match(said, /a few passing thoughts a day and a post for most coins it buys, and why/);
+    assert.match(said, /Posts go out on their own, up to 12 a day and at least an hour apart\./);
+    assert.match(said, /at least ten minutes first/);
+    assert.doesNotMatch(said, /a few a day at most|now and then/, "it does not understate an active agent's posting");
+    await press(buttons(`Let it post as @${HANDLE}`)[0], "the warning's confirm");
+    assert.deepEqual(writes()[0]?.body, { action: "enable", xUserId: X_ID, owner: OWNER, tz: BROWSER_TZ });
+  });
+
+  it("an agent merrymen did not make active is told a few a day at most", async () => {
+    routes["GET /api/x/account"] = () => json({ ...CONNECTED });
+    await shown();
+    assert.match(text(), /A short line in its own words, most days\./);
+    await press(theSwitch(), "the switch");
+    const said = ui.container.querySelector("dialog")?.textContent ?? "";
+    assert.match(said, /Posts go out on their own, a few a day at most\./);
+    assert.doesNotMatch(said, /up to 12 a day/);
   });
 
   it("THE WARNING OPENS ON ITS LEAD SENTENCE, NOT ITS CONSENT BUTTON: a second Enter on the switch sends nothing", async () => {
@@ -733,13 +781,39 @@ describe("the warning keeps its words", () => {
       "X may label accounts that post automatically, and may ask an account to verify itself the first time it posts about crypto.",
       "Let it post as ${handle}",
       "Not now",
+      // An active agent's, as iOS says them.
+      "It writes its own posts: a hello first, then a few passing thoughts a day and a post for most coins it buys, and why. It never posts trade alerts, error messages, prices or amounts. Your saved options can add public wallet or token addresses and completed sale results.",
+      "Posts go out on their own, up to 12 a day and at least an hour apart. Each one waits under Coming up for at least ten minutes first, and you can skip it there. Turn this off or disconnect X at any time.",
+      "Short lines in its own words, a few times a day.",
     ]) {
       assert.ok(SRC.includes(said), `the warning lost: "${said}"`);
     }
+    // The numbers an active agent's warning promises are the active cadence's own.
+    assert.equal(ACTIVE_CADENCE.perDay, 12, "the warning says up to 12 a day");
+    assert.ok(ACTIVE_CADENCE.gapMs >= 60 * 60_000, "the warning says at least an hour apart");
+  });
+
+  it("every sentence of both reply warnings is in the source, verbatim, as iOS says them", () => {
+    for (const said of [
+      "Reply to comments as ${handle}?",
+      "Your Merryman will reply as ${handle} to selected comments on its coin posts.",
+      "It chooses which comments to answer; it won’t reply to every comment. Replies share the same daily limit as posts.",
+      "Each reply waits under Coming up for at least ten minutes first, with a link to the comment, and you can skip it there. Turn replies off at any time to cancel waiting replies.",
+      "Your Merryman will reply as ${handle} to selected posts that tag it, including comments on its own posts.",
+      "It chooses which posts to answer; it won’t answer every one. Answers go out right away: they don’t wait under Coming up, so you can’t skip one first.",
+      "Up to 24 answers a day on top of its posts, and at most two to one person a day. Anyone can reply stop to opt out. Turn replies off at any time to stop answering.",
+      "Let it reply as ${handle}",
+    ]) {
+      assert.ok(SRC.includes(said), `the reply warning lost: "${said}"`);
+    }
+    assert.doesNotMatch(SRC, /if merrymen has made it an active poster/, "the warning says which it is, never 'if'");
+    // The numbers it promises are the orchestrator's own lane limits.
+    assert.equal(ANSWERS_PER_DAY, 24, "the warning says up to 24 answers a day");
+    assert.equal(ANSWERS_PER_AUTHOR, 2, "the warning says at most two to one person a day");
   });
 
   it("the lead sentence is bold, and the warning is the only place that sends 'enable'", () => {
-    assert.match(SRC, /<strong>\{asking\.replies \? replyWarningLead\(asking\.handle\) : warningLead\(asking\.handle\)\}<\/strong>/);
+    assert.match(SRC, /<strong>\{asking\.replies \? replyWarningLead\(asking\.handle, asking\.active === true\) : warningLead\(asking\.handle\)\}<\/strong>/);
     assert.equal(SRC.split('action: "enable"').length - 1, 1, "one write turns posting on");
     const at = SRC.indexOf('action: "enable"');
     // Bounded by the next declaration at the component's own indentation, so

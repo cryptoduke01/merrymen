@@ -15,7 +15,7 @@
  */
 import { createServer } from "node:http";
 import { createPublicClient, defineChain, http } from "viem";
-import { createGateway, clientIp } from "./lib/core.mjs";
+import { bitqueryPointsPerDayFrom, createGateway, clientIp } from "./lib/core.mjs";
 import { createStore, hasRedis } from "./lib/store.mjs";
 import { CLAIM_HTML } from "./lib/claimPage.mjs";
 import { addSignup, signupCount } from "./lib/signups.mjs";
@@ -30,6 +30,8 @@ const PORT = Number(process.env.PORT || 8787);
 const UPSTREAM_URL = process.env.MERRYMEN_GATEWAY_UPSTREAM || "https://api.groq.com/openai/v1/chat/completions";
 const UPSTREAM_KEY = process.env.MERRYMEN_GATEWAY_UPSTREAM_KEY; // REQUIRED — the real key, server-only
 const BITQUERY_KEY = process.env.MERRYMEN_GATEWAY_BITQUERY_KEY; // optional — enables /bitquery for holders
+// The fleet-wide daily cap on what that key spends, holders and memescope together (lib/core.mjs).
+const BITQUERY_BUDGET = bitqueryPointsPerDayFrom(process.env.MERRYMEN_GATEWAY_BITQUERY_POINTS_PER_DAY);
 // FORCED SERVER-SIDE, and it must be a model that still exists. Groq retired
 // the whole Llama 3.x chat line; see packages/core/src/llm-providers.ts for
 // the trace. That fix landed for the groq provider and missed this file, so
@@ -81,6 +83,7 @@ const gw = createGateway({
   tokenAddress: TOKEN_ADDRESS,
   publicClient,
   store,
+  tunables: { BITQUERY_POINTS_PER_DAY: BITQUERY_BUDGET.points },
 });
 
 // ── http plumbing ────────────────────────────────────────────────────────────
@@ -365,7 +368,12 @@ const server = createServer(async (req, res) => {
 
 server.listen(PORT, () => {
   console.log(`[gateway] Merrymen AI listening on :${PORT} — model forced to "${MODEL}", min hold ${MIN_TOKENS} $MERRYMEN`);
-  console.log(`[gateway] discovery: ${BITQUERY_KEY ? "Bitquery ON (named queries only)" : "Bitquery OFF (no key set)"}`);
+  console.log(
+    `[gateway] discovery: ${BITQUERY_KEY ? `Bitquery ON (named queries only, ${BITQUERY_BUDGET.points} points/UTC day across holders and the memescope)` : "Bitquery OFF (no key set)"}`,
+  );
+  if (BITQUERY_KEY && BITQUERY_BUDGET.note) console.error(`[gateway] ${BITQUERY_BUDGET.note}`);
+  // The day's count lives in the store; in memory, a restart forgets it.
+  if (BITQUERY_KEY && !hasRedis) console.log("[gateway] discovery spend is counted in memory: a restart starts the day's count again.");
   if (!hasRedis) console.log("[gateway] state store: in-memory (fine for a single process; set KV_REST_API_URL/TOKEN for multi-instance).");
   // Optional services, so not fatal, but say so at boot: otherwise the first
   // sign of a missing secret is a partner's or developer's 503.

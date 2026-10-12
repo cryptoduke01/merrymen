@@ -30,7 +30,7 @@ const EARLY_PREFIX = "early:";
 
 /** Safe diagnostic codes only; never provider bodies or credential-bearing URLs. */
 const pageFailure = (failure: string | undefined) =>
-  /^(http-\d{3}|timeout|network|invalid-body|invalid-shape|cache-unavailable|provider-cooldown|request-budget)$/.test(failure ?? "") ? failure! : "unavailable";
+  /^(http-\d{3}|timeout|network|invalid-body|invalid-shape|cache-unavailable|provider-cooldown|request-budget|plan-restricted)$/.test(failure ?? "") ? failure! : "unavailable";
 /**
  * A HELD POSITION MAY NOT GO LONGER THAN THIS WITHOUT A REVIEW.
  *
@@ -78,6 +78,19 @@ export function entryEvidenceBlind(
   const legsFailed = !evidence || (evidence.candles.failed && evidence.trades.failed);
   const stale = tapeObservedAt === null || !Number.isFinite(tapeObservedAt) || now - tapeObservedAt > TRENCH_EVIDENCE_STALE_MS;
   return legsFailed && stale;
+}
+
+/**
+ * CAN THIS ENTRY REVIEW STILL BE SKIPPED AS BLIND within `withinMs` of `now`?
+ * Not when its tape row will still be current then (TRENCH_EVIDENCE_STALE_MS):
+ * entryEvidenceBlind needs a stale row, whatever the legs do. A paid extra
+ * read (the indexer's flow) is started beside the legs only when this says
+ * no; otherwise it waits for the blind check, so nothing is spent on a
+ * review that is then not paid for.
+ */
+export function entryMayGoBlind(tapeObservedAt: number | null, now: number, withinMs: number): boolean {
+  if (tapeObservedAt === null || !Number.isFinite(tapeObservedAt)) return true;
+  return now + Math.max(0, withinMs) - tapeObservedAt > TRENCH_EVIDENCE_STALE_MS;
 }
 
 /** Keep each page on its own clock: partial outages must not erase fresh pages

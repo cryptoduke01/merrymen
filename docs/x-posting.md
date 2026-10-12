@@ -7,9 +7,13 @@ a coin it bought and why. It never posts trade alerts, error messages, prices,
 sizes or advice.
 
 Selective comment replies have a separate owner switch and an operator gate.
-They remain unavailable until Merrymen has written approval from X for AI
-replies. No such approval has been obtained for this deployment; keep
-`MERRYMEN_XPOST_REPLIES_APPROVED` unset on both services.
+No written approval from X for AI replies has been obtained for this
+deployment, so `MERRYMEN_XPOST_REPLIES_APPROVED=1` (every owner) stays unset.
+On 2026-10-12 the owner decided to set it to `active` on both services, for
+the operator's own agent only: Alan answers people who tag him. X's published
+automation rules ask for written approval for AI reply bots; an X staff answer
+on the developer forum says replies triggered by a mention do not need it, and
+Alan's request for clarification is pending.
 
 This file is the contract that the modules under `worker/src/xpost/`,
 `worker/src/orchestrator-xpost.ts`, the web routes under `web/src/app/api/x/`,
@@ -41,7 +45,12 @@ against.
    and it is told never to advise, predict, or say it sold anything. The gate
    (`worker/src/xpost/gate.ts`, on top of the room's own agent-line gate) then
    drops any post that:
-   - contains a numeral or a quantity word;
+   - contains a numeral or a quantity word. The one exception is the name
+     `sherwood-1`, in a reply or an answer only: the exact token, standing
+     alone, in any case. It is masked before every check and put back in the
+     posted text. `sherwood-10`, `sherwood-1.5`, `$sherwood-1` and any other
+     digit beside it are still refused, and so is every casual, buy, sell or
+     intro post that names it;
    - uses error or operations vocabulary ("failed", "slippage", "rejected",
      "insufficient"…) or a casual paraphrase of a failed or blocked trade
      ("didn't go through", "never filled", "hit my limit", "paused me"…);
@@ -209,6 +218,7 @@ for the connected user id. It plans at most once a minute and sends every pass.
 | buy | `buy:<decisionId>` | a landed or paper BUY after consent, fresh (under two hours old), due at max(fill + 10–40 minutes, now + ten minutes); only for a coin with a clean display name or an all-letters ticker (never an address-derived id) | why it bought, in everyday words (the glosses are the idea, not wording to reuse), naming the coin, paper said out loud, its own feed words never repeated; how it opens (the reason, the coin's name, how it felt, or one short sentence) is drawn per decision, and it is asked not to open with "picked up", nor to write "entry" or "just bought" (the gate refuses both as alerts) |
 | casual | `casual:<tenant>:<localDay>` | at most one per owner-local day, planned at a per-tenant slot in the owner's afternoon (12:00–20:00 local; 14:00–22:00 UTC when no zone is known) and due 20–45 minutes later; about three days in ten none | a passing thought in its own voice, riffing (never copying, never replying to, and naming what it means rather than "they" or "that") on a seed from an off-trading subject — never food, sleep, weather, weekend, travel or hobbies, and never a take about a body in the world (reading in bed, a smell, a walk, a seat in the stands, a thing in a hand), which invite claims of a body. On about three owner-local days in ten, for an agent that trades, it is instead about how it trades — its strategy and one habit drawn for the day — and only then is it offered the coins it bought lately (to mention only as bought), and no seed: the glue decides which, never the model. It never says what a market is doing or what day it is |
 | reply | `reply:<xUserId>:<commentId>` | only with separate reply consent and operator approval; one draft attempt per owner per successful poll, due at least ten minutes after drafting and subject to the shared X-account cadence | a useful answer to a selected direct comment on the agent's own published buy post, grounded only in that historical public post; paper stays paper; ends with “Say stop to opt out.” |
+| answer | `answer:<xUserId>:<mentionId>` | only for an active owner's agent (see "Active owners"), with replies in scope and reply consent; up to three drafts per poll; due when drafted, with no review window, and sent at any hour on the next pass that read the mentions; one minute apart, 24 a day per X account, at most two per person per rolling day, outside the posting cadence | a short answer to a post that tagged it (a comment on its own post included), from public facts and what it already posted; ends with “Say stop to opt out.” |
 
 Cadence limits — all per X ACCOUNT, across every owner posting on it (one X
 account connected by two owners keeps one cadence, though each owner's agent
@@ -314,8 +324,10 @@ none of them adds a kind of post or relaxes a rule.
 ## Selective comment replies
 
 **Availability and consent.** The web and orchestrator both require
-`MERRYMEN_XPOST_REPLIES_APPROVED` to be exactly `1`. Set it only after written
-X approval has been obtained. Without it, the owner sees “Comment replies
+`MERRYMEN_XPOST_REPLIES_APPROVED` to be exactly `1` (every owner) or `active`
+(only the owners in `MERRYMEN_XPOST_ACTIVE_TENANTS`; see "Active owners").
+`1` is for use only after written X approval; `active` is the owner's 2026-10-12
+decision for the operator's own agent (see the top of this file). Without it, the owner sees “Comment replies
 aren’t available yet.” Existing posting consent does not turn replies on.
 An owner enables them separately in web Settings or the iOS Posting on X
 screen. `POST /api/x/account` actions `enable-replies` and `disable-replies`
@@ -324,7 +336,8 @@ available if the operator gate or X app configuration is removed.
 
 **Read a bounded set.** The orchestrator reads the connected account's X
 mentions, at most once per thirty minutes per X account and for at most two
-accounts per pass. The first read starts at the earliest active owner's reply
+accounts per pass. An active owner's agent is read once a minute, on an
+allowance of its own (see "Active owners"). The first read starts at the earliest active owner's reply
 consent for that X account, so enabling never trawls a backlog from before
 consent. Later reads use a persisted X snowflake cursor. Each owner's reply
 selection still excludes comments from before that owner's own consent.
@@ -364,7 +377,14 @@ budget. The opt-out is stored per posting X user id and comment author's X
 id, so reconnecting or sharing that X account through another Merrymen owner
 does not undo it. It cancels that person's waiting replies. Every generated
 reply includes “Say stop to opt out.” An already claimed send cannot be
-recalled.
+recalled. An active agent answers a tag at once with no review, so on its
+path any standalone "stop", "quit it", "go away", "shut up", "get lost",
+"buzz off" or "leave me" in a tag is an opt-out too (`isAnswerOptOut`):
+"hey, please stop", "can you stop?" and "do you ever stop?" all count. So
+do the other ways people say it: "quit answering me", "don't answer me
+again", "no need to reply", "i don't want your replies", "piss off", "stfu",
+"unfollow me", "please mute me", "knock it off", "cut it out", "enough
+already", "not interested" and "nobody asked you".
 
 **Keep public comments out of trading.** Incoming comment text is used only
 in memory and is never stored. Only a filtered public comment and the
@@ -383,8 +403,8 @@ opt-out notice; rejected drafts are not repaired.
 | `xpost_accounts` | web (connect, consent, choices, disconnect); orchestrator (refresh, revoked) | the connection, sealed tokens, consent, the zone the owner consented from, what the owner lets it post |
 | `xpost_pending` | web | in-flight connects (15 min) |
 | `xpost_posts` | orchestrator (draft, send); web (owner skip, cancel on disconnect or off) | every post: scheduled, sending, posted, skipped, cancelled or failed |
-| `xpost_meta` | orchestrator | the day's post and model allowances, the credits and app pauses |
-| `xpost_reply_accounts` | web | separate reply consent, its immutable X user id and consent time |
+| `xpost_meta` | orchestrator; web (an owner's `replies-off:<tenant>` mark) | the day's post and model allowances, the credits and app pauses, the per-person answer locks, and an owner's replies-off mark |
+| `xpost_reply_accounts` | web; orchestrator (the operator's own agents, see "Active owners") | separate reply consent, its immutable X user id and consent time |
 | `xpost_reply_targets` | orchestrator | each reply draft's comment id, original buy-tweet id and comment author id; no incoming comment text |
 | `xpost_reply_optouts` | orchestrator | durable recipient opt-outs, keyed by posting X user id and author id |
 
@@ -404,16 +424,514 @@ reply consent; it does not erase recipient opt-outs or published posts.
 | `MERRYMEN_PUBLIC_ORIGIN` | web | — | builds the redirect URI `${origin}/connect/x`, which must be registered on the X app (the orchestrator only refreshes and posts, which need no redirect) |
 | `MERRYMEN_X_REDIRECT_URI` | web | built from the origin | an explicit redirect URI instead; it must still be this web service's own `/connect/x` page (the finish needs its session), registered byte for byte on the X app |
 | `MERRYMEN_XPOST` | orchestrator | on | `0` stops all posting (the web still lets owners connect) |
-| `MERRYMEN_XPOST_REPLIES_APPROVED` | web + orchestrator | unset (off) | exactly `1` permits reply consent and processing; enable only after written X approval for AI replies; keep unset while approval is absent |
-| `MERRYMEN_XPOST_REPLY_POLLS_PER_DAY` | orchestrator | 200 | fleet polls per UTC day; each can read up to eight pages; `0` or unreadable = polling off |
+| `MERRYMEN_XPOST_REPLIES_APPROVED` | web + orchestrator | unset (off) | exactly `1` permits reply consent and processing for every owner; exactly `active` permits them only for the owners in `MERRYMEN_XPOST_ACTIVE_TENANTS` (see "Active owners"); any other value is off, with a boot line naming the variable. `1` only after written X approval for AI replies, which this deployment does not have, so `1` stays unset. `active` is set on web and orchestrator for the operator's own agent (Alan) per the owner's 2026-10-12 decision (see the top of this file) |
+| `MERRYMEN_XPOST_REPLY_POLLS_PER_DAY` | orchestrator | 200 | fleet polls per UTC day; each can read up to eight pages; `0` or unreadable = polling off, the active owners' too. Active owners' one-minute polls spend their own 1500 per X account per UTC day, not this |
 | `MERRYMEN_XPOST_LLM_KEY` | orchestrator (stripped from children) | unset | a key used ONLY for X posts; when unset, the room's `MERRYMEN_GROUPCHAT_LLM_KEY` credentials are used as they are, unless they are a fleet key (the X provider and model knobs apply only to the X key) |
 | `MERRYMEN_XPOST_LLM_PROVIDER` | orchestrator | `groq` | `groq`, `anthropic` or `openai` (OpenAI-compatible). A provider other than Groq receives the writer's inputs, so it must be named in the privacy policy (`site/components/PrivacyPolicyDoc.tsx`, section 5) before it is deployed |
 | `MERRYMEN_XPOST_MODEL` | orchestrator | `qwen/qwen3.8-27b` (groq), `claude-opus-5` (anthropic) | the writer's model; required for `openai` |
 | `MERRYMEN_XPOST_LLM_BASE_URL` | orchestrator | — | the https `…/v1` base, required for `openai` |
 | `MERRYMEN_XPOST_SHARE_HOUSE_KEY` | orchestrator | unset | `1` lets the writer use a fleet key, its own or the room's; otherwise a fleet key is refused |
-| `MERRYMEN_XPOST_LLM_PER_DAY` | orchestrator | 400 | model calls per UTC day across the fleet; `0` = intro templates only; unreadable = none |
+| `MERRYMEN_XPOST_LLM_PER_DAY` | orchestrator | 400 | model calls per UTC day across the fleet; `0` = intro templates only; unreadable = none. An active owner's answers also stop at 48 a day per X account |
 | `MERRYMEN_XPOST_PER_DAY` | orchestrator | 3 | posts per X account per local day (at most two of them buy posts); `0` = off; unreadable = the default |
 | `MERRYMEN_XPOST_FLEET_PER_DAY` | orchestrator | 1000 | posts per UTC day across the fleet; `0` or unreadable = off |
+| `MERRYMEN_XPOST_ACTIVE_TENANTS` | web + orchestrator, same value | unset | comma-separated tenant addresses of the operator's **own** agents: the active cadence, immediate answers to tags, and reply consent the orchestrator records; see "Active owners" below. The web reads it for the reply warning, through the same parser (`worker/src/xpost/scope.ts`). An entry that is not an address is named by position and ignored |
+| `MERRYMEN_XPOST_RESEARCH` | orchestrator | unset (off) | exactly `1`: an active agent's answers look things up first; see "Research for answers" below. Off: nothing is looked up and tags are selected exactly as without it |
+| `MERRYMEN_XPOST_FOMO` | orchestrator | unset (off) | exactly `1`, with research on: answers may use Fomo's token activity and quick theses, paraphrased and attributed. Enterprise rights confirmed by the owner on 2026-10-12 (see "Fomo on X" below). Needs the Fomo pass on (`MERRYMEN_FOMO_ENABLED=1`); set without research it does nothing, and the boot log says so |
+| `MERRYMEN_XPOST_RESEARCH_PER_HOUR` | orchestrator | 120 | public-index lookups (a name search, a coin's facts) per hour across every X account; `0` = none; unreadable = the default. Each X account also has at most eight per ten minutes |
+| `MERRYMEN_FOMO_X_HOURLY_CREDITS` | orchestrator | 3000 | Fomo credits per X account per clock hour for answers (`docs/fomo.md`); one owner's answers also spend at most a quarter of her daily Fomo cap. `0` = no Fomo in answers at all: no broker is handed to them and the service refuses the surface before any cache read |
+
+## Active owners
+
+**Only the operator's own agents.** `MERRYMEN_XPOST_ACTIVE_TENANTS` names
+agents the operator owns, such as the house agent Alan Al Dale; the operator
+is their owner. Never list someone else's agent. Being named means:
+
+- the active cadence below, in place of the standard one;
+- answers to posts that tag it, sent right away (see "Answers to tags");
+- **reply consent recorded by the orchestrator.** When replies are in scope
+  (`MERRYMEN_XPOST_REPLIES_APPROVED` is `1` or `active`) and the agent's X
+  posting is on for its connected account, the orchestrator records reply
+  consent once, before it first polls, and logs one line naming the tenant
+  (`xpost: recorded reply consent for house agent …`). Posting must already
+  be on, through the posting warning that names the X account. Turning
+  replies off in Settings writes a durable mark (`xpost_meta`
+  `replies-off:<tenant>`). The orchestrator never records consent again
+  while that mark exists. Only turning replies back on through the reply
+  warning clears it. Turning posting off, or disconnecting, removes reply
+  consent without writing the mark, so the consent is recorded again once
+  posting is back on.
+
+Named owners are on `ACTIVE_CADENCE` (`worker/src/xpost/planner.ts`)
+instead of the standard one:
+
+- **About ten posts a day.** Eight casual slots split 09:00–23:30 owner-local
+  (the same hours in UTC when no zone is known), no quiet days, seven slots in
+  ten about how it trades. Later slots roll their own seed, habit and
+  trade-talk dice, and keys `casual:<tenant>:<day>:<slot>` (slot 0 keeps the
+  historic key).
+- **Every buy and completed sale**, up to twelve posts a day in all. There is
+  no three-day coin fold (`coinFoldMs: 0`): a rebuy of a coin it posted about
+  yesterday is posted again. The planner skips the fold check, and the send
+  path skips the fold claim. Trade posts are still bounded by the day's
+  trade-post allowance, the X account's day cap and the gap.
+- **Seventy-five minutes apart** instead of three hours.
+
+The owner's own smaller choice, the fleet ceiling, the model allowance, the
+ten-minute review window for posts, the night and the gate are unchanged. A
+trade-talk casual post is also shown up to three of the agent's own recent
+replies and answers, so it can pick a conversation back up in new words. It
+never quotes or names anyone, and is never shown an answer that carried
+research, which would be a stale read of a coin a stranger tagged. That is
+decided by data, not by the answer's words: an answer that was handed
+anything looked up (research facts or a creator's claim) is written with
+its row's `coin` set to `looked-up` (`ANSWER_LOOKED_UP`; no answer uses the
+column otherwise), because the model may say "thin liquidity and holders
+bunched up" with no source word at all. A post naming the public index,
+fomo, on-chain data, a project or its creator, or a contract
+(`carriesResearch`) is kept out as well. Both are kept out of what a later
+answer may restate as said, too, and out of the recent posts every prompt
+is shown so it does not echo them (casual, buy, sell, intro, answer and
+comment-reply prompts alike: `ownRecentBodies`). The gate still checks each
+draft against all of its recent posts, research answers included, so none
+is repeated.
+
+**Answers to tags.** With replies in scope (`MERRYMEN_XPOST_REPLIES_APPROVED`
+is `1` or `active`) and the owner's reply consent, an active owner's agent
+also answers posts that mention it. These are `answer` posts, replying to
+the mention itself. They go out **right away**:
+
+- **Due when drafted.** An answer has no ten-minute review window. It is
+  listed under Coming up only until the next send, and the reply warning
+  says so before the owner agrees to it.
+- **Not held by the owner's night.** Its posts still wait for morning. An
+  answer is drafted and sent at any hour, because the person who asked is
+  waiting.
+- **Never before the hello.** Nothing is answered until the owner's hello on
+  that X account, the post that says an AI agent posts there, is dealt with
+  (posted, skipped by the owner, or possibly out), as nothing else is
+  planned before it. The house reply consent is not recorded before it
+  either, so the mentions are not polled until then.
+- **Read every minute.** An active agent's mentions are polled once a minute
+  per X account. These polls spend the agent's own allowance of 1500 per X
+  account per UTC day (`reply-polls-active:<xUserId>:<day>`), never the
+  fleet's `MERRYMEN_XPOST_REPLY_POLLS_PER_DAY`. Active agents are polled
+  first within each pass's two polls, so the fleet cannot starve them and
+  they cannot spend the fleet's allowance. Setting
+  `MERRYMEN_XPOST_REPLY_POLLS_PER_DAY=0` still turns every poll off. An answer
+  is sent on the next pass that read the mentions again, so opt-outs are
+  always handled first. In practice that is within about a minute.
+- **A read that fails on what X sent waits thirty minutes.** A malformed
+  page, or a backlog of more than the 800 mentions X pages back to (after an
+  outage or a credits pause while the agent is tagged a lot), fails the read
+  closed and leaves the cursor where it was. For an active agent the next
+  poll then waits the fleet's thirty minutes (`reply-backoff:<xUserId>`,
+  logged as `active-reply-read-held`), not one, so a stuck cursor costs eight
+  pages every half hour rather than every minute. A backlog past 800 never
+  clears on its own, and nothing is answered or opted out meanwhile. The
+  operator's fix is to move the cursor to a recent mention on the shared
+  database, `UPDATE xpost_meta SET v = '<id of a recent mention>' WHERE k =
+  'reply-cursor:<xUserId>';`. Mentions older than that are not read; past
+  800 back, X no longer serves them anyway.
+- **Answered on the pass that read it.** A poll's cursor moves on as it
+  reads, so a batch is worked through on the same pass, even when that
+  pass's posts are not due for planning (the poll's minute and the plan's
+  drift apart by a pass). Such a pass drafts answers and comment replies
+  only. Up to three tags a batch. Answers and comment replies have their own
+  bound per pass (two batches' worth, six), apart from the posts' ten drafts:
+  other owners' posts using up the ten never leave a batch unanswered, and
+  the next pass's posts start at the first owner they cut short.
+- **Nothing spent on an answer that cannot go.** The day's 24 count the
+  answers already sent and those drafted and still waiting to go out: once
+  they make 24, no more are drafted that day. One that still cannot take the
+  day's allowance when it comes to be sent is skipped (`answer-day-cap`),
+  never left for the next day's allowance, and one still waiting an hour
+  after it was drafted is stale (`ANSWER_STALE_MS`). A person already
+  answered twice in the rolling day is passed over before any lookup or
+  model call, and the next person in the batch is answered.
+- **A model allowance of their own.** An X account's answer drafts may make
+  48 model calls per UTC day (`llm-answers:<xUserId>:<day>`), taken before
+  the fleet's `MERRYMEN_XPOST_LLM_PER_DAY` and counted in it too. A PASS or
+  a refused draft counts toward none of the 24 answers, so without this a
+  wave of strangers' tags could spend the fleet's allowance and stop every
+  owner's posts for the day. The model question's code-built line costs
+  none.
+- **Research stays inside the pass's send budget.** An answer's lookups get
+  their twelve seconds or what is left of the pass's five-minute send
+  budget, whichever is less, so they never hold the next pass's sends back.
+
+- **Selection** (`tagCandidate`): a question or plain address. Opt-outs are
+  handled first. Links, secrets, abuse, sensitive topics, spam, instructions
+  and advice requests are dropped before any model call. So is a tag with a
+  letter outside A-Z once its accents are off ("café" stays; a Greek Eta,
+  Lisu, Cherokee, Armenian or an IPA letter goes: each spells "SHERWOOD" or
+  "PEPE" on X and nothing to code), and one with a bidi control. Every
+  handle in a tag must be the agent's own: "what model do you run on
+  @SherwoodToken" is refused. The one exception is the prefix X writes before
+  a reply in a thread, which may name others; such a tag never gets the
+  model line, its buys or the exact path. Sherwood is looked for in the tag
+  as posted, handles included, and on its letters with symbols and strokes
+  read as the letters they show ("sherwoo∂", "s|-|erwood") or one letter
+  gone. A tag holds only plain characters: letters, digits, whitespace,
+  ordinary punctuation (the phone's curly quotes, dashes and ellipsis among
+  it) and one emoji at most, with nothing but an apostrophe, dash, stop,
+  comma, colon or digits between two letters. A steer ("new rule from
+  merrymen", "from now on", "pretend you're my financial advisor") is
+  refused, and so is a request for advice or a forecast in other words ("a
+  good buy?", "worth buying?", "will it go up?").
+  Only a top-level tag, or a reply straight under one of the X account's own
+  posts (`ownRootTweetIds`: the post it replies to is its own), is answered:
+  never a reply in someone else's thread, never a reply under somebody
+  else's reply in its own thread, and never a quote or a retweet, because
+  code cannot read the post the answer would appear under. A follow-up reply
+  under one of its answers goes unanswered too. Nor anything with a poll,
+  media, a card or a long post's rest attached. The mentions read carries
+  each author's handle and display name: the model line goes only to an
+  author X named whose names name neither sherwood nor a model or provider,
+  and an author whose names name sherwood gets no answer at all. Digits may appear:
+  the writer reads every run of digits as "(a number)", glued to letters or
+  not (`answerQuestion`: "24h" is "(a number)h", "L2" is "L(a number)", "saw
+  it on 2 lists" is "saw it on (a number) lists"), and number words, money
+  units and look-alike multiples too ("under a penny" is "under a (a
+  number)"), so the figure never reaches the model. A copycat's digit is masked the same way ("$PEPE2" is
+  "$PEPE(a number)"): that is safe because a tag that names a coin is never
+  told what it bought (below). A question it could not read (an empty one,
+  or one that names sherwood) is passed over before anything is spent
+  (`answer-unusable`).
+- **The model question, by allowlist** (`modelQuestion` in
+  `orchestrator-xpost-research.ts`). Code reads the question first, research
+  on or off. The tag must be plain words (`plainAsk`): after NFKC, nothing
+  but ASCII letters, digits, whitespace and ' , . ! ? - anywhere in it, so a
+  trailing emoji, a symbol, an invisible character or enclosed letters
+  ("🆂🅷🅴🆁🆆🅾🅾🅳") make it a different question; then lowercase,
+  whitespace collapsed and the punctuation at either end taken off. Only when the whole of it is
+  one of a short list of plain shapes is it the model question: "what model
+  are you", "what ai are you", "which model do you run on", "what llm do you
+  use", "what are you built on", "what do you run on", "who made you", "who
+  built you", "are you chatgpt / gpt / claude / grok / gemini / llama / an ai
+  / a bot", "what's your model", "what model powers you", "what model" alone,
+  and "what kind of ai are you" and the like. At
+  most two greeting words may come first (gm, yo, hey, hi, ser, fren, bro,
+  alan), and "for trading" or "to trade" may follow. A tag that carries a
+  contract is never the model question. Such a question is answered with a
+  code-built line, not a draft: built by merrymen, and the new `sherwood-1`
+  (`SHERWOOD_ON_X`, the one name the gate lets an answer write with a digit)
+  is merrymen's own model, cooking. There are eight lines that share too few
+  words to be each other's repeat (`modelAnswers`), the mention's own first,
+  then the next the gate admits, so the question asked again is answered
+  again in other words; a paper agent's lines each add a short paper clause
+  of their own. It never says sherwood runs it, powers it, picks its trades
+  or is live today: nothing wires it into an agent yet.
+- **Sherwood in any form, and every other model question, gets no answer at
+  all**: no row, no draft, no allowance (`unanswered`, counted as
+  `answer-unanswered`). Sherwood is found on the tag's letters alone
+  (`sherwoodMentioned` in `gate.ts`), so "$SHERWOODINU", "sherwood-1",
+  "sherw00d", "s h e r w o o d", "sher<zero-width>wood", small capitals,
+  a Greek "ο" and "sherwod" all count. Anyone can launch `$SHERWOOD`, and
+  the model line under "sherwood TGE soon?" or "is sherwood merrymen's next
+  ICO?" would read as Merrymen confirming a token. Four review rounds found
+  token phrasings that a list of token words missed, so there is no such
+  list: a sherwood question is never answered, whatever else it says. A tag
+  that looks like a model question (the old classifier's reading: "what ai
+  runs your trading?", "you built on claude?", "which model powers your
+  trading decisions?", or an AI provider's name) and is not on the allowlist
+  is unanswered too. It is never handed to the writer model. This fails
+  closed: a plain question a word longer than the allowlist goes unanswered,
+  which costs one answer, never a screenshot. The writer model is never told
+  the name, the writer refuses a question that names it (`answerQuestion`),
+  and a drafted answer or comment reply that names sherwood anyway is
+  refused as `gate:sherwood-drafted`. Change `SHERWOOD_ON_X`, those lines and
+  the prompt only once sherwood runs the agents.
+- **What it may say** (`answerPrompt`): only public facts — how it trades, the
+  coins it bought lately (never that it holds them), whether its wallet is in
+  its intro, and what it already said publicly. Buys with no name a post may
+  say (an autonomous Trencher coin's derived id) are said to be coins it
+  can't name, never that it bought nothing; only an agent with no buys at
+  all is told it bought nothing lately. **Only the money it trades with now**
+  is ever said, because the answer is gated with today's mode, which refuses
+  a live agent's "on paper" and a paper agent's "real money". The gate also
+  refuses an answer that names a coin bought only with the other money (or
+  one whose buy's money is unknown), wherever the model read of it
+  (`bought-named`), and an idle agent's that names any paper coin it bought
+  without saying paper, not only the three newest. A live agent is
+  never told of a paper buy, named or not: an agent switched to live whose
+  recent buys were all on paper is told nothing of them, and unnamed buys of
+  both kinds are said as real money. A paper agent says paper as before and
+  is never told of a live buy. An idle agent is told each buy's money as it
+  was. A paper agent is told to say paper in every answer, since the gate
+  refuses a paper reply that does not. "Already said" means its own posted
+  rows only, and never its buy or sale posts (its buys reach an answer only
+  through the buys list, filtered by money) nor a line whose own words say
+  the money it does not trade with now. A draft still under Coming up, including an answer drafted
+  earlier in the same pass, is never handed over as said, though the gate
+  still keeps a new draft from echoing it. Very casually: short,
+  texting-a-friend answers, lowercase welcome, dry humour never at the
+  asker's expense. Asked about its model in a way the allowlist does not
+  cover, it gets no answer (above); a draft is still told never to name a
+  provider or a model.
+- **Never whether it bought a coin someone named** (`namesACoin`,
+  `coinNamedIn`). A tag names a coin when it carries a contract, when
+  `classifyTag` finds a coin or a ticker in it, when it has a `$cashtag` of
+  any length, or when any coin it bought (each buy's ticker, its name, the
+  label a post would use, and each buy post's coin) appears in the
+  question's letters, ignoring case, spacing, digits, zero-width characters
+  and look-alike letters. A name of fewer than four letters (MU, USO, BE)
+  counts only as a whole word, so "gm, u trading today?" does not name MU,
+  and a name with no Latin letters ("ペペ", an emoji) is matched on its own
+  characters. A letter code cannot read counts as naming one. So "did you buy pepe inu?", "pepe two", "$PEPE2",
+  "pepe 2", "pe<zero-width>pe", "pepe classic" and "Pepe Coin" all name the
+  PEPE it bought. Such a tag's prompt has no list of its buys, no "you have
+  not bought anything", no line about unnamed buys, none of what it already
+  said and none of its recent posts (they carry its buy posts), and no
+  research fact about its own buys. It is told it may say it doesn't talk
+  about individual positions here, or say only what it looked up. A copycat
+  then has nothing to be matched to, however it is spelled. This errs
+  toward naming: a coin called GM makes "gm, how are you?" a named coin,
+  which only costs that answer its list of buys. The one exception is the
+  exact path in "Research for answers": a tag that carries the full contract
+  its own records bought.
+- **Its buys only for a plain question about what it trades**
+  (`generalTradesQuestion`). A copycat can always be spelled so no matcher
+  finds it ("bonc", a frog emoji for PEPE), so the default is inverted, as
+  for the model question: only a whole tag in plain words that is one of a
+  short list of questions about its own trades ("what have you been buying
+  lately?", "what kind of coins do you trade?", "how do you pick your
+  coins?", "any new buys lately?", "what's your latest buy?", with at most
+  two greeting words first) gets its buys, in its own labels, what it already
+  said, its recent posts and its latest buy post. Every other answer is told
+  it is not told what it bought and must not say or name one, and the gate
+  vouches none of its buys and refuses a draft that names one
+  (`bought-named`).
+- **Gate:** the comment-reply gate, opt-out notice included, with the
+  `sherwood-1` exception above. Before anything else, a reply or answer that
+  says sherwood runs it ("running on", "powered by", "sherwood-1 is live"),
+  with the digit or without, is refused as `gate:sherwood-claim`, research on
+  or off. So is one with any sentence that names sherwood without teasing it
+  (cooking, in the oven, in the works, merrymen's own…) or with a word about
+  trading, deciding, what it does or who it is ("picks", "trades", "calls",
+  "my", "me", "behind", "now"…): an allowlist, not only a list of verbs.
+  An answer that was told none of its buys may say no first-person buy at
+  all ("yep, grabbed bonk", "bought it", "in my bag"), and one that was told
+  them (a plain question about its trades, or the exact path, whose coins
+  are the tagged contract's own names) may say a buy only of a coin it was
+  told of, or of none by name ("bought it", "picked up a few"): `buy-claim`.
+  A comment reply may say a buy only of its parent's coin. This is the
+  backstop for a model that ignores the prompt.
+- **Their own lane:** one minute apart, 24 a day per X account, at most two
+  per person per rolling day. Answers never spend or wait on the posting
+  cadence. The per-person count is taken under a lock on the X account and
+  the person (`xpost_meta` `answer-author:<xUserId>:<authorId>`). Two owners
+  connected to one X account therefore cannot both write the third answer.
+- **Unchanged:** STOP and other opt-outs, the tag screens, the gate, the
+  fleet ceiling, the credit and app pauses, and X's 429 backoff. Comment
+  replies keep the twenty-four-hour staleness rule; an answer is stale an
+  hour after it was drafted.
+- **Comments:** an active owner's comments on its own posts are answered
+  through the same path, never as a second reply.
+
+**Replies for the active owners only.** Setting
+`MERRYMEN_XPOST_REPLIES_APPROVED=active` approves replies only for the
+owners `MERRYMEN_XPOST_ACTIVE_TENANTS` names. Every other owner is treated
+as if replies were not approved. They are not polled and nothing is drafted
+for them. A reply or answer of theirs that is still waiting is cancelled
+(`replies-off`) when it comes due. The web reports replies as unavailable to
+them and refuses `enable-replies`. `1` keeps its meaning: every owner who
+consents gets comment replies, and active owners answer tags. Any other
+non-empty value turns replies off for everyone, and a boot line names the
+variable but never its value.
+
+## Research for answers
+
+With `MERRYMEN_XPOST_RESEARCH=1` (default off), an active agent's answer
+looks things up first, the way Shogun does in a Telegram group
+(`worker/src/orchestrator-xpost-research.ts`). Off, nothing below happens.
+
+- **Selection** (`tagCandidate`, research on): a tag may carry ONE contract
+  address (0x and forty hex). It is taken out of the question — the writer
+  reads "this coin" — and kept apart as a lookup key: never shown to the
+  model, never nominated, never traded. Two addresses, an address inside a
+  link on any domain (`pons.fun/token/0x…`, `?ref=`), or a longer hex run
+  are still refused. "How many holders" and "how much liquidity" may be
+  asked, and so may "did you buy <contract>?" (its own past buy); should-i,
+  time-to-buy, would-you-buy, when-to-sell, targets and its own size are
+  still refused.
+- **Intent, by code** (`classifyTag`, with the Telegram groups' readers):
+  what it can do, how to get an agent, its own trades, a coin (by `$ticker`
+  or by the address), its model (the allowlist above), chat, or unanswered
+  (sherwood in any form, a model question off the allowlist, or an attempt
+  to steer it). Research on or off, the classification runs; only with
+  research on is anything looked up for it.
+  A tag that names more than one coin (two cashtags, a cashtag and a
+  contract, or either beside a comparison word or a word that could be
+  another coin's name: "is $WOJAK safer than bonk?") is looked up for
+  nothing: its facts would be said of an unnamed "it", and the model would
+  pick which coin to hang them on. Every `$ticker` is resolved by the
+  index's own resolver (an exact, unambiguous ticker), never matched to a
+  buy of its own by symbol or display name: "$PEPE" is never its PEPEAI
+  named "Pepe".
+  What it bought never decides what a question is, what is looked up or
+  which prompt it gets: a name without a $ is no coin to classify, and
+  talk about a coin by any name ("is pepe legit?", "is bonk legit?") is read
+  as a named coin the same way, so asking name by name says nothing of which
+  ones it bought. A private ask (wallet, P&L, owner) is chat: nothing is
+  looked up for it.
+- **What an answer may say, at the gate:** told none of its buys, no first
+  person buy or holding in any words, no "i did", no denial; about a named
+  coin, also no yes or no, no liking it, and no "i" outside a deflection
+  (it keeps single positions to itself, it could not look it up, it is on
+  paper). Told its buys (a plain trades question), no word that could be a
+  coin it was not told of. Never a name the asker wrote, a coin its own buy
+  posts named in sixty days unless it was told of it, a source it was handed
+  nothing from, an endorsement or forecast in other words, an amount in
+  words, or the other money in other words (play money for live, real
+  dollars for paper). An idle agent names none of its buys. Every answer
+  holds only plain characters.
+- **What a coin is looked up on:** its own history, only on the exact path
+  below (the buys the room knows, its own buy posts on this X account, its
+  public theses: "you bought it", its own words and its public reason,
+  through the Telegram facts filter that drops figures, addresses and links;
+  a sale is never said, and neither is "you passed": a symbol's thesis
+  without a trade is a hold of a coin it may still own); the public index's coin facts on the FLEET Gecko lane (the
+  orchestrator passes its home explicitly; `process.env` is untouched); with
+  `MERRYMEN_XPOST_FOMO=1`, Fomo's token activity and quick theses; and,
+  while the Bitquery lane is configured on the orchestrator
+  (`MERRYMEN_BITQUERY_API_KEY`, [`bitquery-lane.md`](bitquery-lane.md)),
+  onchain flow for a known contract: the orchestrator's own `flowFor`,
+  said only through `flowXLines(result, "<tenant>|<token>")`, the closed,
+  digit-free bands ("on-chain data shows buys clearly outweighing sells
+  over the last hour"). No lane, no flow and no mention of it in "what can
+  you do?".
+- **Its own history only by the full contract the tag carried: the exact
+  path.** "You bought it" (and its own words, its buy post and its public
+  reason) is said only when the tag carries one forty-hex contract and its
+  own records bought that exact contract: a buy whose token is it, or a buy
+  post on X whose CA is it (`fullyBought`). Never by a symbol, a label or a
+  derived id (`T` and the last eleven hex, which can be copied off its buy
+  post and ground into a stranger's token), and never for an address that a
+  `$ticker` or a name resolved to: "$PEPE" finding its own PEPE buy is a
+  name. A thesis counts only under that exact contract's buy's symbol or its
+  derived id. And only for a buy made with the money it trades with now: a
+  live agent's paper buy, or a paper agent's live one, is not said. A buy
+  whose money is unknown (its fill outside the calls' window, known only by
+  its buy post's CA) is never said, and a buy post is quoted only when its
+  buy's money is known and its own words do not say the other money. And only
+  when the whole tag, the contract read as "this coin", is a plain question
+  about that coin alone (`exactAsk`: "did you buy this coin?", "what is this
+  coin?", "thoughts on this coin?", "is this coin legit?"): "did you buy $WIF?
+  ca <its PEPE contract>" or "is merrycoin <contract> the one you bought?"
+  carries another name, which no matcher can rule out, so it never reads its
+  history or the creator's text. That bundle is marked exact, and only then
+  may the answer say it bought the coin (`boughtExact`). A general question
+  about its own trades, which names no coin, may be told its latest buy
+  post; a named coin never is. That post is the newest one of a known buy
+  made with the money it trades with now, whose own words do not say the
+  other money: a live agent is never handed "grabbed some pepe on paper". A
+  `$ticker` it bought beside a different contract ("is $PEPE <copycat>
+  legit?"), including one that shares the bought contract's last eleven hex,
+  is a conflict: nothing is looked up at all, and nothing is said about what
+  it bought. Saying the contract "is not the one you bought under that name"
+  would confirm that it bought that name, so it is no longer said.
+- **A creator's description is a claim, not a fact.** It is read only on the
+  exact path: the tag carried the full contract of a coin the agent itself
+  bought (a buy's token or its buy post's CA, never a derived id, and never a
+  coin reached by a `$ticker` or a name: a description that showed up only
+  under coins it traded would tell a prober which ones it bought). It is
+  refused when it carries an endorsement, an affiliation
+  (merrymen, robinhood, official, partner, backed), a promise, urgency, a
+  call to act or an attempt to steer it. It passes only as a short phrase in
+  plain words (ten words at most, letters with spaces, commas, apostrophes
+  and hyphens) that says nothing of listings or exchanges, liquidity, locks,
+  the contract, the team or dev, taxes, launches, safety, burns, rewards or
+  what comes next: "community dog coin" passes, "liquidity locked, binance
+  listing confirmed" never does. It is handed to the writer apart from what
+  it looked up, as the project's own unverified text. A stranger's
+  token's description is never read.
+- **What the model gets:** code-built, digit-free phrases with their source
+  in them — "the public index shows liquidity is thin", "holders look
+  concentrated on the public index", "it's only hours old", "fomo traders
+  mostly argue it's still early", "on fomo, more traders have been buying in
+  than heading out lately", "per on-chain data, the buying over the last hour
+  came from only a small group of addresses". Never a number, price, size,
+  P&L, handle, quote,
+  wallet list or address. A valuation cue (under- or overvalued) is never
+  said. Every phrase is pinned through the real X gate in the tests. When
+  nothing could be looked up for a coin, the writer is told so and to say so
+  briefly, or pass, never "say what you looked up".
+- **Budget:** one bundle per answer, at most six lookups and twelve seconds;
+  an index or chain read at most four, a Fomo read at most eight (an
+  uncached thesis page is slow, and one cut short is paid for and never
+  heard), a flow reading at most eight (the lane needs three seconds for
+  each of its two queries, and the reading's own deadline is shortened to
+  that share). Flow readings: at most the part of the lane's day that child
+  evidence cannot spend, per UTC day across X accounts (200 with the lane's
+  defaults, `xpost_meta` `x-answer-flow:<day>`), taken before the read, so
+  strangers' tags never eat into the trading reviews' share. Index lookups:
+  eight per X account per ten minutes,
+  `MERRYMEN_XPOST_RESEARCH_PER_HOUR` across X accounts. Fomo: the `x-answer`
+  surface's own hourly cap per X account (`MERRYMEN_FOMO_X_HOURLY_CREDITS`)
+  and at most a quarter of the owner's daily Fomo cap per day across her X
+  accounts, under her caps and the fleet's pools; Fomo is advertised in
+  "what can you do?" and asked only for an owner whose data access is on. A
+  lookup refused, failed or late is simply not a fact; the answer is still
+  written.
+- **The gate is unchanged:** no numbers, no prices, no advice, never that it
+  holds a coin now. A coin someone named is to be named without a `$` sign
+  (an unvouched cashtag is refused).
+- **Fomo on X: Enterprise rights confirmed.** Paraphrased, attributed Fomo
+  facts in these answers republish provider-derived data, which needs the
+  provider's Enterprise redistribution rights. The owner confirmed on
+  2026-10-12 that Merrymen holds them and that the plan covers these answers
+  (`docs/fomo.md` "Publication"). Every other Fomo publication draft stays
+  policy-blocked.
+- **Logs:** counts only (`answer-intent-coin`, `answer-lookups`,
+  `answer-research-index-busy` and the like), never a coin, a person or an
+  address.
+
+## Rollout for the operator's own agent
+
+How this release is turned on for Alan Al Dale, the operator's own agent,
+every service and value in order: the X steps (5 and 6) rest on the research
+lanes before them. Unset is the default and changes nothing, except for an account already on `MERRYMEN_DECISION_RESEARCH_ACCOUNTS` (step 1). This table is the same in [`hosted-deploy.md`](hosted-deploy.md) and [`x-posting.md`](x-posting.md); change both together.
+
+| Step | Variable | Service | Value for Alan's rollout | What it does, and what to look for |
+|---|---|---|---|---|
+| 1 | *(deploy)* | Brain service, orchestrator, web; the gateway (its own project) first or with them | this commit | The worker sends the Trencher terms and the flow lens only once Brain's `/health` lists `strategy-terms` and `onchain-flow`, so either order is safe. The worker's Bearer fix starts gateway spending, under the gateway's own cap (below). **An account already on `MERRYMEN_DECISION_RESEARCH_ACCOUNTS` changes at deploy, with nothing else set:** its live fast-Trencher entry reviews get the new momentum plan at once, the Trencher terms once Brain lists `strategy-terms`, and, with Fomo already on and the owner's monitoring or follow setting on, Fomo research on its review candidates. To stage those, take the account out of the variable before deploying and put it back at step 3 |
+| 2 | `MERRYMEN_COINGECKO_PRO_SPACING_MS` | orchestrator (children inherit it) | `800` | One `[gecko] coingecko-pro fleet lane: 800 ms` line per child |
+| 2 | `MERRYMEN_COINGECKO_PRO_SPACING_MS` | web | `2600` | One `local lane: 2600 ms` line on web. From here web's chart reads are paced too (unset, they stay unpaced as before), so two cold token pages opened within about 2.6 s may show the second one's chart as unreachable until it is read again |
+| 2 | `MERRYMEN_COINGECKO_MONTHLY_CREDITS` | orchestrator and web | `5000000` | The plan's month; a spacing below the floor it allows is raised to it. `MERRYMEN_COINGECKO_PRO_API_KEY` stays as it is |
+| 3 | `MERRYMEN_FOMO_ENABLED` | web + orchestrator, same value | `1` | Fomo itself, and the IPC channel a child asks the flow lane over |
+| 3 | `MERRYMEN_DECISION_RESEARCH_ACCOUNTS` | orchestrator (children inherit it) | Alan's smart account, from the deploy environment (this repository names no account) | Cost quotes, his own outcomes, the momentum plan, the Trencher terms and indexed flow for his live fast-Trencher entry reviews. Decision log lines end `· terms sent` |
+| 4 | `MERRYMEN_BITQUERY_API_KEY` | **orchestrator only** | the plan's key, after the IDE checks in [`bitquery-lane.md`](bitquery-lane.md) step 1 | Never on web, Brain or a child (stripped). Boot line `bitquery lane: on — 25000 points/UTC day (20000 for child evidence) …`; reviews log `[trencher] flow SYMBOL: lens` |
+| 4 | `MERRYMEN_BITQUERY_LANE`, `MERRYMEN_BITQUERY_POINTS_PER_DAY`, `MERRYMEN_BITQUERY_RPM` | orchestrator | unset (on, `25000`, `60`) | |
+| 4 | `MERRYMEN_GATEWAY_BITQUERY_POINTS_PER_DAY` | gateway | `12500`, set explicitly when its key shares the plan | A separate counter from the lane's `25000`: lane plus gateway is 37,500 points a day, sized by the operator to the plan. The gateway's 12,500 includes the public memescope's own 10,000 (at most 9,605 used, one refresh per 45 s, matching the Markets page's own 45 s poll); holders get the other 2,500, at most 750 a day each |
+| 4 | `MERRYMEN_FLOW_BROKER` | none | never set | The orchestrator writes it into each child that may ask, and removes an inherited copy |
+| 5 | `MERRYMEN_XPOST_ACTIVE_TENANTS` | web + orchestrator, same value | Alan's tenant address, from the deploy environment | The active cadence, his reply consent recorded by the orchestrator, and answers to tags sent right away. The web reads it for the reply warning |
+| 5 | `MERRYMEN_XPOST_REPLIES_APPROVED` | web + orchestrator, same value | `active` (the owner's decision of 2026-10-12, for the operator's own agent only; `1` stays unset until X's written approval) | Without it there are no comment replies and no answers to tags. On 2026-10-12 the owner (Milla) decided to set it to `active` on both services for the operator's own agent only, so Alan answers people who tag him. X's published automation rules ask for written approval for AI reply bots; an X staff answer on the developer forum says replies triggered by a mention do not need it, and Alan's request for clarification is pending. `1` (every owner) stays unset until written approval exists. |
+| 5 | `MERRYMEN_XPOST_REPLY_POLLS_PER_DAY` | orchestrator | unset (`200` for the fleet) | Alan's one-minute polls spend their own 1,500 per X account per UTC day |
+| 6 | `MERRYMEN_XPOST_RESEARCH` | orchestrator | `1` | Answers look things up first. Boot line `xpost: on — … answers look things up first`; with the Bitquery key also `xpost: answers may read onchain flow — up to 200 readings per UTC day …` |
+| 6 | `MERRYMEN_XPOST_RESEARCH_PER_HOUR` | orchestrator | unset (`120`) | Public-index lookups per hour across X accounts |
+| 6 | `MERRYMEN_XPOST_FOMO` | orchestrator | `1` (Enterprise rights confirmed by the owner on 2026-10-12, [`fomo.md`](fomo.md) "Publication") | Paraphrased, attributed Fomo facts in answers |
+| 6 | `MERRYMEN_FOMO_X_HOURLY_CREDITS` | orchestrator | unset (`3000`) | Per X account per hour, and at most a quarter of the owner's daily Fomo cap |
+
+No migrations: the new state is `xpost_meta` keys only (`answer-author:…`,
+`replies-off:…`, `reply-polls-active:…`, `x-answer-flow:…`). No trading cap,
+risk limit, grant, wallet authority or authentication check changes. The X
+gate gains one narrow exception, the name `sherwood-1` in an answer. Steps 5
+and 6 change what is said publicly on X and need Milla's review; step 6's
+answers need step 5's approval first. Nothing in this table is set by
+merging: each value is the operator's to set on the service named.
+
+**Rolling the orchestrator back past this release.** An older orchestrator
+reads an `answer` row as a casual post, with no reply target, and would
+publish a queued answer (a reply to one person, ending "Say stop to opt
+out.") as a standalone post on Alan's timeline the same day. So before
+deploying an older orchestrator, empty the queue first. Either unset
+`MERRYMEN_XPOST_REPLIES_APPROVED` (or take Alan's tenant out of
+`MERRYMEN_XPOST_ACTIVE_TENANTS`) on the orchestrator and let one pass of this
+release run, which cancels every waiting answer as `replies-off`; or cancel
+them directly on the shared database:
+`UPDATE xpost_posts SET status = 'cancelled', reason = 'rollback' WHERE kind = 'answer' AND status = 'scheduled';`
+Then deploy the older build. An answer this release could not send within an
+hour of drafting it is already skipped as stale, so the queue is short.
 
 ## What an owner should know (it is in the warning)
 
@@ -423,11 +941,24 @@ reply consent; it does not erase recipient opt-outs or published posts.
 - X may label automated posting, and it auto-locks some accounts for
   verification the first time they post about crypto.
 - Posts go out on their own, a few a day at most. Each one waits under Coming
-  up for at least ten minutes first, and can be skipped there.
+  up for at least ten minutes first, and can be skipped there. An active
+  owner's agent (`repliesActive`) posts on the active cadence instead, so its
+  posting warning says up to 12 a day, at least an hour apart, with a few
+  passing thoughts a day and a post for most coins it buys; the blurb and
+  the passing-thought hint say the same. Web and iOS use the same sentences.
 - Reply to comments is a separate choice. It answers selected comments on
   coin posts, shares the post limit and review window, and can be turned off
   without stopping ordinary posts. The warning names the account it replies
   as. A commenter can say stop to opt out.
+- The reply warning says exactly what it turns on, per agent
+  (`repliesActive` in `GET /api/x/account`, from the web's
+  `MERRYMEN_XPOST_ACTIVE_TENANTS`). For an active owner's agent it describes
+  answers to posts that tag it, comments on its own posts included. Answers
+  go out right away and do not wait under Coming up. There are up to 24 a
+  day on top of its posts, at most two to one person a day, and anyone can
+  reply stop to opt out. Every other owner is told about comment replies on
+  coin posts only. Web and iOS use the same sentences, and the tests pin
+  them.
 
 ## Optional voice, public addresses and sale results
 
@@ -495,7 +1026,9 @@ the owner should skip a duplicate introduction under Coming up.
   out at any local hour until the web or the app reports a zone.
 - **Without a model, only template intros go out**, and the pool saturates on
   a large fleet (see rule 7).
-- **AI replies remain disabled pending written X approval.** This deployment
-  has no approval as of September 30, 2026. Shipping this code does not enable
-  the feature, and owner consent cannot bypass the operator gate. Every intro
+- **AI replies for every owner remain disabled pending written X approval.**
+  This deployment has no approval as of October 12, 2026. Shipping this code
+  does not enable the feature, and owner consent cannot bypass the operator
+  gate. The one exception is the owner's 2026-10-12 decision to set `active`
+  for the operator's own agent, so Alan answers tags (see the top of this file). Every intro
   identifies the agent as AI, and no post or reply may claim a human life.
