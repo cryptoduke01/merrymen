@@ -33,6 +33,25 @@ describe("on the answer path, any plain stop is an opt-out (red-team 2026-10-12)
       assert.deepEqual(tagCandidate(comment(`@alanaldale ${text}`, { conversationId: "333", inReplyToTweetId: "" }), { xUserId: "222", username: "alanaldale" }), { ok: false, reason: "opt-out" });
     });
   }
+  it("however else it is said: answering, piss off, unfollow, knock it off, stfu, mute me, nobody asked (red-team 2026-10-12, second round)", () => {
+    for (const text of ["hey, quit answering me", "hey don't answer me again", "hey, no need to reply to me", "hey piss off", "hey, unfollow me and leave my posts alone",
+      "hey enough already, not interested", "hey, knock it off", "hey cut it out", "yo stfu", "hey, i don't want your replies", "hi, please mute me", "hey bot, nobody asked you",
+      "quit answering me?", "why do you keep answering me? i don't want answers"]) {
+      for (const own of [true, false]) {
+        const over = own ? { conversationId: "999", inReplyToTweetId: "999" } : { conversationId: "333", inReplyToTweetId: "" };
+        assert.equal(isAnswerOptOut(`@alanaldale ${text}`), true, text);
+        assert.deepEqual(tagCandidate(comment(`@alanaldale ${text}`, over), { xUserId: "222", username: "alanaldale", research: true, ownRoots: new Set(["999"]) }),
+          { ok: false, reason: "opt-out" }, text);
+      }
+    }
+    assert.equal(isReplyOptOut("don't answer me again"), true, "the comment path reads answer too");
+    // Ordinary questions that share a word are not opt-outs.
+    for (const text of ["@alanaldale is there enough liquidity on $pepe?", "@alanaldale first off, what do you trade?", "@alanaldale what's your answer on fresh launches?",
+      "@alanaldale do you block out the noise?"]) {
+      assert.equal(isAnswerOptOut(text), false, text);
+    }
+  });
+
   it("what was already an opt-out still is, and an ordinary question is not", () => {
     for (const text of ["stop", "please stop", "can you stop replying?", "how do i opt out?"]) assert.equal(isAnswerOptOut(text), true, text);
     for (const text of ["@alanaldale what do you trade?", "@alanaldale how do you pick coins?", "@alanaldale gm, how's your day?", "@stopwatch_fan what do you trade?", null]) {

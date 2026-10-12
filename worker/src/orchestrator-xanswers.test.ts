@@ -449,6 +449,25 @@ test("any plain stop in a tag opts the person out of answers, and nothing is dra
   }
 });
 
+test("an opt-out however it is said is recorded, and nothing is drafted for that person again (red-team 2026-10-12)", async (t) => {
+  // The reproduced tags, each answered at once with the person left opted in at 11f7acac.
+  for (const text of ["@pine_stoat hey, quit answering me", "@pine_stoat hey don't answer me again", "@pine_stoat hey, no need to reply to me", "@pine_stoat hey piss off",
+    "@pine_stoat hey, unfollow me and leave my posts alone", "@pine_stoat hey enough already, not interested", "@pine_stoat hey, knock it off", "@pine_stoat hey cut it out",
+    "@pine_stoat yo stfu", "@pine_stoat hey, i don't want your replies", "@pine_stoat hi, please mute me", "@pine_stoat hey bot, nobody asked you",
+    "@pine_stoat quit answering me?", "@pine_stoat why do you keep answering me? i don't want answers"]) {
+    const w = await world(t, { answer: "fair enough, i'll keep it short then. Say stop to opt out." });
+    w.setInbox([tag({ text })]);
+    await w.step();
+    assert.equal(w.asked().length, 0, text);
+    assert.deepEqual(await w.answers(), [], text);
+    assert.equal(await store.repliesOptedOut(w.db, "111", "333"), true, `${text}: recorded`);
+    w.setInbox([tag({ id: "100000000000000026", conversation_id: "100000000000000026", created_at: new Date(NOW + 9 * MIN).toISOString(), text: "@pine_stoat what do you trade?" })]);
+    await w.step(NOW + 10 * MIN);
+    assert.equal(w.asked().length, 0, text);
+    assert.deepEqual(w.sends, [], text);
+  }
+});
+
 test("one person gets at most two answers in a rolling day, whatever became of them", async (t) => {
   const w = await world(t);
   const answerTo = (id: string, at: number) => store.schedulePost(w.db, { tenant: TENANT, xUserId: "111", kind: "answer",

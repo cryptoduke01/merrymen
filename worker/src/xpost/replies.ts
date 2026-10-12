@@ -14,10 +14,12 @@ export function isReplyOptOut(raw: unknown): boolean {
   if (typeof raw !== "string") return false;
   const text = withoutLeadingMentions(raw.normalize("NFKC").replace(/[’‘]/g, "'")).replace(/^[/\s]+/, "").toLowerCase();
   return /^(?:please\s+)?(?:stop|unsubscribe|opt[ -]?out)\b/.test(text)
-    || /\b(?:don'?t|do not|never)\s+(?:reply|respond|message|contact|tag|mention)\b/.test(text)
-    || /\b(?:stop|quit)\s+(?:replying|responding|messaging|contacting|tagging|mentioning)\b/.test(text)
+    // "answer" too, the name of this very feature (red-team 2026-10-12): "don't answer me again", "quit answering me".
+    || /\b(?:don'?t|do not|never|no need to)\s+(?:ever\s+)?(?:reply|respond|message|contact|tag|mention|answer)\b/.test(text)
+    || /\b(?:stop|quit)\s+(?:replying|responding|messaging|contacting|tagging|mentioning|answering)\b/.test(text)
     || /\bopt\s+(?:me\s+)?out\b|\bunsubscribe me\b/.test(text)
-    || /\bleave me alone\b|\bno more (?:replies|responses|messages|mentions)\b|\bremove me\b/.test(text);
+    || /\bleave me alone\b|\bno more (?:replies|responses|messages|mentions|answers)\b|\bremove me\b/.test(text)
+    || /\b(?:i\s+)?(?:don'?t|do not)\s+want\s+(?:your\s+|any\s+|these\s+|the\s+)?(?:replies|responses|answers|messages|mentions)\b/.test(text);
 }
 
 /**
@@ -38,7 +40,17 @@ export function isAnswerOptOut(raw: unknown): boolean {
   if (typeof raw !== "string") return false;
   const text = raw.normalize("NFKC").replace(/[\p{Cf}\p{Default_Ignorable_Code_Point}]/gu, "").replace(/[’‘]/g, "'")
     .replace(/@[a-z0-9_]{1,15}\b/gi, " ").toLowerCase();
-  return /\b(?:stop|stopp+|quit it|go away|shut up|get lost|buzz off|leave me)\b/.test(text);
+  return /\b(?:stop|stopp+|quit it|go away|shut up|get lost|buzz off|leave me)\b/.test(text)
+    // HOWEVER ELSE IT IS SAID (red-team review, 2026-10-12): "quit answering
+    // me", "piss off", "unfollow me", "knock it off", "cut it out", "stfu",
+    // "please mute me", "nobody asked you", "not interested" were answered at
+    // once and the person stayed opted in.
+    || /\b(?:quit|stop)\s+(?:answering|replying|responding|it|that)\b|\bno need to (?:reply|respond|answer)\b/.test(text)
+    || /\b(?:piss|bugger|sod|back|bog|clear|f(?:uck|k|ck))\s*off\b|\bstfu\b|\bgtfo\b|\bfoad\b|\bkys\b/.test(text)
+    || /\bunfollow\w*\b|\b(?:mute|block|ignore|report)\s+(?:me|you|this)\b|\b(?:muting|blocking|reporting)\s+(?:you|this)\b|\bi'?ll\s+(?:mute|block|report)\b/.test(text)
+    || /\bknock it off\b|\bcut it out\b|\bnot interested\b|\benough (?:already|of (?:this|you|that|it))\b|\bthat'?s enough\b|\bgive it a rest\b/.test(text)
+    || /\b(?:nobody|no one|noone|who)\s+asked\b|\bleave (?:me|my posts|my tweets|us) alone\b|\bbuzz off\b|\bmind your own\b/.test(text)
+    || /\b(?:don'?t|do not)\s+want\s+(?:your\s+|any\s+)?(?:replies|answers|responses|messages)\b/.test(text);
 }
 
 /**
