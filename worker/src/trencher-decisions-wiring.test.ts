@@ -50,7 +50,7 @@ describe("the Trencher review's hold backoff, memory, evidence rule and research
     assert.equal(run.split("return skipBlindEntry(").length - 1, 2, "the two skips, and no other");
   });
 
-  it("a review that goes ahead without either leg, or without a tape row, is flagged so its HOLD backs nothing off", () => {
+  it("a review that goes ahead without either leg, or without a tape row, is flagged so its HOLD is an evidence window, not a verdict", () => {
     const run = CODE.slice(LAUNCH, PAID);
     assert.match(run, /if \(!evidence \|\| \(evidence\.candles\.failed && evidence\.trades\.failed\)\) review\.withoutEvidence\(\);/);
     assert.match(run, /return skipBlindEntry\("its pool has no fresh tape row[^;]*;\s*review\.withoutEvidence\(\);/);

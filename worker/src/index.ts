@@ -13391,7 +13391,8 @@ async function main() {
                 }
                 // A review that goes ahead without either leg (a current tape
                 // row, or a held position) holds on missing flow, not on the
-                // coin: its HOLD backs nothing off and seeds no hold memory.
+                // coin: an entry HOLD from it gets one evidence window, never
+                // a run of holds or hold memory (trencher-brain.ts launch).
                 if (!evidence || (evidence.candles.failed && evidence.trades.failed)) review.withoutEvidence();
               } else {
                 // A REVIEW WITH NO TAPE ENTRY IS NOT A REVIEW WITH NO EVIDENCE
@@ -13413,8 +13414,8 @@ async function main() {
                 // AND AN ENTRY REVIEW IN THAT STATE IS NOT PAID FOR: no tape
                 // row means no memecoin signals and no pool evidence at all,
                 // strictly less than the blind case above. A held position is
-                // still reviewed; its hold, like any no-evidence hold, backs
-                // nothing off.
+                // still reviewed, flagged like any review without evidence
+                // (a held review never touches the backoff either way).
                 if (!focus.held) return skipBlindEntry("its pool has no fresh tape row, so there are no memecoin signals or pool evidence");
                 review.withoutEvidence();
               }

@@ -657,6 +657,21 @@ export class HoldBackoff {
    * True when the skip should be said: once per coin per window.
    */
   evidenceSkipped(token: string, at: number, seen: TrenchMaterial | null): boolean {
+    const r = this.evidenceBackoff(token, at, seen);
+    if (r.skipSaidUntil > at) return false;
+    r.skipSaidUntil = r.until;
+    return true;
+  }
+
+  /**
+   * ONE BASE WINDOW FOR A COIN WHOSE FLOW COULD NOT BE READ — a skipped entry
+   * review (evidenceSkipped), or a PAID one that went ahead without candles or
+   * trades and came back HOLD (TrenchBrainReview.launch). Not a hold: it
+   * starts no run of holds and writes no hold memory, because no flow was
+   * judged. But the coin still waits, or an outage would pay for the same
+   * blind review on every pass of the rotation.
+   */
+  evidenceBackoff(token: string, at: number, seen: TrenchMaterial | null): HoldRecord {
     const key = token.toLowerCase();
     const until = at + HOLD_BACKOFF.baseMs;
     let r = this.records.get(key);
@@ -670,9 +685,7 @@ export class HoldBackoff {
       this.records.set(key, r);
       this.sweep(at);
     }
-    if (r.skipSaidUntil > at) return false;
-    r.skipSaidUntil = r.until;
-    return true;
+    return r;
   }
 
   /**
@@ -763,7 +776,8 @@ export function brainNoDecisionNote(symbol: string, result: BrainResult): string
 /**
  * What a review's run may tell `launch` about itself. `withoutEvidence`: the
  * review went ahead with no candle and no trade reading (index.ts), so a HOLD
- * it returns backs nothing off and seeds no hold memory.
+ * it returns is not a verdict on the coin: one evidence window
+ * (HoldBackoff.evidenceBackoff), no run of holds, no hold memory.
  */
 export interface TrenchReviewRun {
   withoutEvidence(): void;
@@ -1125,13 +1139,18 @@ export class TrenchBrainReview {
       // ENTRY REVIEWS ONLY. A held position's review is about its exit, and
       // nothing here may slow that down. A model hold backs the coin off; a
       // BUY ends the run of holds. Anything else (no decision, a gate-forced
-      // or stale-mark hold) leaves the backoff exactly as it was — and so does
-      // a hold from a review that had no flow to read: like a stale mark, it
-      // says the evidence was missing, not that the coin was looked at.
+      // or stale-mark hold) leaves the backoff exactly as it was. A hold from
+      // a review that had no flow to read (`blind`) says the evidence was
+      // missing, not that the coin was judged: no run of holds and no hold
+      // memory — but one EVIDENCE window, or an outage would pay for the same
+      // blind review of this coin on every pass of the rotation.
       if (!held && this.holdBackoff && outcome.ran && outcome.result.ok) {
         const d = outcome.result.decision;
         try {
-          if (isModelHold(d, stale)) { if (!blind) this.holdBackoff.held(token, started, seen, holdReason(d)); }
+          if (isModelHold(d, stale)) {
+            if (blind) this.holdBackoff.evidenceBackoff(token, started, seen);
+            else this.holdBackoff.held(token, started, seen, holdReason(d));
+          }
           else if (String(d.action ?? "").toLowerCase() === "buy") this.holdBackoff.forget(token);
         } catch { /* The backoff is a spend saver; it cannot break the review. */ }
       }

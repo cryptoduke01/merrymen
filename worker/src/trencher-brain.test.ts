@@ -919,18 +919,28 @@ test("the idle breakdown tells a model-hold backoff from an evidence-skip backof
   assert.deepEqual(review.backedOffBreakdown(), { holds: 0, evidence: 1 }, "the skip's window now runs longest");
 });
 
-test("a HOLD from a review that ran without evidence backs nothing off and seeds no hold memory", async () => {
+test("a PAID HOLD from a review without evidence still backs the coin off one evidence window — with no hold memory and no run of holds", async () => {
   const { clock, review } = backoffRig();
+  const started = clock.now;
   review.launch("live", input, TOKEN, async (run) => { run.withoutEvidence(); return hold(); }, () => {});
   await setImmediate();
   clock.now += TRENCH_REVIEW_INTERVAL_MS;
-  assert.equal(review.candidate([{ token: TOKEN }])?.token, TOKEN, "no flow was read, so the hold says nothing about the coin");
-  assert.equal(review.holdMemory(TOKEN, "MEME"), null);
-  // The same hold with evidence backs off as before.
+  assert.equal(review.candidate([{ token: TOKEN }]), undefined, "not paid for again on the next pass of an outage");
+  assert.deepEqual(review.backedOffBreakdown(), { holds: 0, evidence: 1 }, "named as an evidence problem, not a verdict");
+  assert.equal(review.holdMemory(TOKEN, "MEME"), null, "no flow was judged, so nothing to remember");
+  clock.now = started + HOLD_BACKOFF.baseMs;
+  assert.equal(review.candidate([{ token: TOKEN }])?.token, TOKEN, "one base window, never doubled");
+  // Blind holds start no run: the first real hold after them is still a first hold (five minutes).
+  review.launch("live", input, TOKEN, async (run) => { run.withoutEvidence(); return hold(); }, () => {});
+  await setImmediate();
+  clock.now += HOLD_BACKOFF.baseMs;
+  const real = clock.now;
   review.launch("live", input, TOKEN, async () => hold(), () => {});
   await setImmediate();
-  clock.now += TRENCH_REVIEW_INTERVAL_MS;
-  assert.equal(review.candidate([{ token: TOKEN }]), undefined);
+  assert.match(review.holdMemory(TOKEN, "MEME")!, /held because/);
+  assert.doesNotMatch(review.holdMemory(TOKEN, "MEME")!, /in a row/);
+  clock.now = real + HOLD_BACKOFF.baseMs;
+  assert.equal(review.candidate([{ token: TOKEN }])?.token, TOKEN);
 });
 
 test("all entries backed off: a held position still gets its review — the backoff never touches exits", async () => {
