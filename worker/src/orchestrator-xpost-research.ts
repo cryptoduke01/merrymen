@@ -295,7 +295,11 @@ export function classifyTag(text: string, o: { address?: string | null } = {}): 
   // ITS OWN TRADES, the Telegram groups' reading of them: what it traded, why.
   if (asked?.kind === "trades" || (asked?.kind === "site" && (asked.topic === "attempts" || asked.topic === "trades"))) {
     const why = asked.kind === "trades" ? asked.why : asked.topic === "attempts";
-    const coin = asked.kind === "trades" && asked.symbol ? asked.symbol : ticker;
+    // A PLAIN QUESTION ABOUT ITS TRADES NAMES NO COIN (red-team 2026-10-12):
+    // "what have you bought lately?" read "lately" as the coin asked about,
+    // and an allowlisted question was told "They named a specific coin".
+    const plainAsk = generalTradesQuestion(t);
+    const coin = plainAsk ? null : asked.kind === "trades" && asked.symbol ? asked.symbol : ticker;
     return { kind: "own-trades", why, coin: coin ?? null, address, ...(many ? { many: true as const } : {}) };
   }
   // Its wallet, balance, P&L, owner: deflected by the prompt, never looked up.

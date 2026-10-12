@@ -244,6 +244,19 @@ describe("a tag's intent, read by code", () => {
     }
   });
 
+  it("a plain question about its trades names no coin: \"lately\" and \"recently\" are no tickers (red-team 2026-10-12)", () => {
+    for (const text of ["what have you bought lately?", "what did you buy recently?", "what did you trade lately?"]) {
+      const intent = classifyTag(text);
+      assert.ok(intent.kind === "own-trades" && intent.coin === null, `${text} → ${JSON.stringify(intent)}`);
+      assert.equal(namesACoin({ text, intent, address: null }), false, text);
+      assert.equal(generalTradesQuestion(text), true, text);
+      const p = answerPrompt({ agentName: "Alan", strategy: "trencher", flavour: null, traits: [], mode: "live", style: { lower: true, emoji: 0, exclaim: 0 },
+        recentOwn: [], question: text, recentBuys: [{ label: "Pepe Coin", paper: false }], boughtLately: "live", said: [], walletPublic: false, coinNamed: false, general: true });
+      assert.match(p.prompt, /Coins you bought lately: «Pepe Coin»/, text);
+      assert.doesNotMatch(p.prompt, /They named a specific coin/, text);
+    }
+  });
+
   it("which coins it bought never changes what a question is, what is looked up or which prompt it gets (red-team 2026-10-12)", async () => {
     // The reproduced pairs: a live agent that bought PEPE ("Pepe"); "pepe" and "bonk" asked the same way, research on and off.
     const facts: AgentFacts = { ...FACTS, mode: "live", calls: [{ ...CALL, paper: false, symbol: "PEPE", name: "Pepe" }] };

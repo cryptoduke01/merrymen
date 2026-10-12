@@ -1282,6 +1282,21 @@ test("asking name by name says nothing of which coins it bought: a name it bough
   }
 });
 
+test("\"what have you bought lately?\" is the plain question it is: told its buys, and a true answer goes out (red-team 2026-10-12)", async (t) => {
+  for (const env of [{}, RESEARCH_ON]) {
+    for (const text of ["@pine_stoat what have you bought lately?", "@pine_stoat what did you buy recently?", "@pine_stoat what did you trade lately?"]) {
+      const w = await world(t, { env, research: fakeResearch().research, answer: "been grabbing some pepe lately, the curve looked early. Say stop to opt out." });
+      w.setInbox([tag({ text })]);
+      await w.step();
+      const [prompt] = w.asked();
+      assert.match(prompt!, /Coins you bought lately: «Pepe»/, text);
+      assert.doesNotMatch(prompt!, /They named a specific coin|You are not told what you bought/, text);
+      const [row] = await w.answers();
+      assert.equal(row!.status, "scheduled", `${text}: ${row!.reason}`);
+    }
+  }
+});
+
 test("a general answer told its buys never names a coin it did not buy, research on or off (red-team 2026-10-12)", async (t) => {
   // A live agent that bought only PEPE; the reproduced drafts for "what are you buying lately?".
   for (const env of [{}, RESEARCH_ON]) {
