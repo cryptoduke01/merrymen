@@ -1,7 +1,7 @@
 /**
  * AN ACTIVE AGENT ANSWERS TAGS: a post that mentions it and asks it something
  * gets one answer, from public facts, in its own lane, right away — read
- * within a minute, due when drafted, the owner's night no hold — but never
+ * every fifteen seconds, due when drafted, the owner's night no hold — but never
  * for an owner the operator did not make active, never for advice, never
  * twice to one person in a day beyond the allowance, and never after a STOP.
  */
@@ -10,7 +10,7 @@ import { randomBytes } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { test, type TestContext } from "node:test";
 import { wrapSqlite } from "./db";
-import { makeXPoster, xpostEnv } from "./orchestrator-xpost";
+import { ACTIVE_REPLY_POLL_MS, ACTIVE_REPLY_POLLS_PER_DAY, makeXPoster, xpostEnv } from "./orchestrator-xpost";
 import { isAsleep } from "./groupchat/clock";
 import { createXResearch, type XResearch } from "./orchestrator-xpost-research";
 import type { CoinFacts } from "./coin-facts-types";
@@ -18,6 +18,7 @@ import type { FomoBroker } from "./fomo/contract";
 import type { FlowResult } from "./flow-facts";
 import type { AgentFacts, CallFact } from "./groupchat/facts";
 import type { FetchLike } from "./xpost/client";
+import { PAUSE_KEY } from "./xpost/sender";
 import * as store from "./xpost/store";
 
 const MIN = 60_000, HOUR = 60 * MIN, DAY = 24 * HOUR;
@@ -68,8 +69,14 @@ async function world(t: TestContext, o: {
   }
   let inbox: Record<string, unknown>[] = [tag()];
   const sends: Record<string, unknown>[] = [], prompts: string[] = [], reads: number[] = [];
+  /** Whose mentions each read was for, by X user id, in order. */
+  const readers: string[] = [];
+  /** When the room's facts were loaded: once per pass that planned or answered. */
+  const factLoads: number[] = [];
   let clock = NOW;
   let garbled = false;
+  /** X's answer to a read of the mentions instead of the inbox: a 429 with its reset, or a 402. */
+  let refuseRead: { status: 429; resetSec: number } | { status: 402 } | null = null;
   // Who X says wrote each tag (expansions=author_id): an ordinary reader by default; null leaves an author out.
   let authors = new Map<string, { username: string; name: string } | null>();
   const users = () => [...new Set(inbox.map((m) => String(m.author_id)))].flatMap((id) => {
@@ -79,6 +86,11 @@ async function world(t: TestContext, o: {
   const fetch: FetchLike = async (url, init) => {
     if (url.includes("/mentions?")) {
       reads.push(clock);
+      readers.push(/\/users\/(\d+)\/mentions/.exec(url)?.[1] ?? "");
+      if (refuseRead) {
+        const reset = refuseRead.status === 429 ? String(refuseRead.resetSec) : null;
+        return { status: refuseRead.status, headers: { get: (h: string) => (h.toLowerCase() === "x-rate-limit-reset" ? reset : null) }, text: async () => "{}" };
+      }
       // A page that does not add up, as X's answer past its eight hundred mentions reads to the client.
       if (garbled) return { status: 200, headers: { get: () => null }, text: async () => JSON.stringify({ data: inbox, meta: { result_count: inbox.length + 1 } }) };
       return { status: 200, headers: { get: () => null }, text: async () => JSON.stringify({ data: inbox, includes: { users: users() }, meta: { result_count: inbox.length } }) };
@@ -96,7 +108,7 @@ async function world(t: TestContext, o: {
       ? { ...xpostEnv(env), repliesApproved: true, replyPollsPerDay: o.polls }
       : { ...xpostEnv(o.scope === null ? env : { ...env, MERRYMEN_XPOST_REPLIES_APPROVED: o.scope }), replyPollsPerDay: o.polls },
     deps: { dialect: "sqlite", fetch, monotonic: () => 0, member: async () => ({ tz: o.tz ?? null }),
-      facts: async () => new Map([[TENANT, o.facts ?? FACTS], ...others.map((t, i): [string, AgentFacts] => [t, { ...FACTS, tenant: t, agentId: t, name: `Other ${i}`, calls: [] }])]),
+      facts: async () => { factLoads.push(clock); return new Map([[TENANT, o.facts ?? FACTS], ...others.map((t, i): [string, AgentFacts] => [t, { ...FACTS, tenant: t, agentId: t, name: `Other ${i}`, calls: [] }])]); },
       // Only the answer prompt gets words back: every other draft passes.
       llm: async (_creds, input) => {
         prompts.push(input.prompt);
@@ -110,7 +122,8 @@ async function world(t: TestContext, o: {
   const step = (now = NOW) => { clock = now; return poster.step(db, [{ tenant: TENANT, agentId: TENANT }, ...others.map((t) => ({ tenant: t, agentId: t }))], new Map(), now); };
   const answers = async () => (await store.postsOf(db, TENANT, 0)).filter((p) => p.kind === "answer");
   const asked = () => prompts.filter((p) => /Untrusted question/.test(p));
-  return { db, step, answers, asked, systems, everySystem, sends, reads, setInbox: (v: Record<string, unknown>[]) => { inbox = v; }, garble: (on: boolean) => { garbled = on; },
+  return { db, step, answers, asked, systems, everySystem, sends, reads, readers, factLoads, setInbox: (v: Record<string, unknown>[]) => { inbox = v; }, garble: (on: boolean) => { garbled = on; },
+    refuseRead: (v: typeof refuseRead) => { refuseRead = v; },
     setAuthors: (v: Record<string, { username: string; name: string } | null>) => { authors = new Map(Object.entries(v)); } };
 }
 
@@ -134,10 +147,11 @@ test("a tag gets one answer to the mention itself, right away, in its own lane",
   assert.doesNotMatch(prompt!, /@pine_stoat|private-access|private-refresh|private-model/);
   w.setInbox([]);
   // Not on a pass that did not read the inbox again: opt-outs come first.
-  await w.step(NOW + 15_000);
+  await w.step(NOW + 14_999);
+  assert.equal(w.reads.length, 1, "its fifteen seconds are not up");
   assert.equal(w.sends.length, 0, "a send waits for a fresh read of the mentions");
-  // The next pass that reads them, a minute on, sends it.
-  await w.step(NOW + MIN);
+  // The next pass that reads them, fifteen seconds on, sends it.
+  await w.step(NOW + 15_000);
   assert.deepEqual(w.sends, [{ text: ANSWER, reply: { in_reply_to_tweet_id: MENTION } }]);
   assert.equal((await w.answers())[0]!.status, "posted");
   assert.equal(await store.lastOutAt(w.db, "111", NOW - DAY), null, "an answer is not a post the cadence waits behind");
@@ -250,7 +264,10 @@ test("the owner's night never holds an answer: a tag is answered and sent while 
   assert.equal((await store.postsOf(w.db, TENANT, 0)).filter((p) => p.kind !== "answer" && p.kind !== "intro").length, 0);
 });
 
-test("an active agent's mentions are read every minute on an allowance of its own; another owner's every thirty", async (t) => {
+test("an active agent's mentions are read every fifteen seconds on an allowance of its own; another owner's every thirty minutes", async (t) => {
+  assert.equal(ACTIVE_REPLY_POLL_MS, 15_000);
+  assert.equal(ACTIVE_REPLY_POLLS_PER_DAY, 6000);
+  assert.ok(ACTIVE_REPLY_POLLS_PER_DAY >= DAY / ACTIVE_REPLY_POLL_MS, "a whole UTC day of fifteen-second reads fits in the allowance");
   const passes = (from: number, to: number) => Array.from({ length: (to - from) / 15_000 + 1 }, (_, i) => NOW + from + i * 15_000);
   const active = await world(t);
   active.setInbox([]);
@@ -258,9 +275,14 @@ test("an active agent's mentions are read every minute on an allowance of its ow
   await store.takeAllowance(active.db, "reply-polls:2026-09-30", 1, NOW);
   await active.db.prepare("UPDATE xpost_meta SET n = 200 WHERE k = ?").run("reply-polls:2026-09-30");
   for (const at of passes(0, 3 * MIN)) await active.step(at);
-  assert.deepEqual(active.reads, [NOW, NOW + MIN, NOW + 2 * MIN, NOW + 3 * MIN], "once a minute, every minute");
-  assert.equal((await store.readMeta(active.db, "reply-polls-active:111:2026-09-30"))?.n, 4);
+  assert.deepEqual(active.reads, passes(0, 3 * MIN), "every pass, fifteen seconds apart");
+  assert.equal((await store.readMeta(active.db, "reply-polls-active:111:2026-09-30"))?.n, 13);
   assert.equal((await store.readMeta(active.db, "reply-polls:2026-09-30"))?.n, 200, "never the fleet's");
+  // Never twice inside fifteen seconds, whatever the passes do.
+  await active.step(NOW + 3 * MIN + 14_999);
+  assert.equal(active.reads.length, 13, "a pass inside the fifteen seconds does not read again");
+  // An empty read has nothing to answer: facts are loaded only for the once-a-minute plan.
+  assert.deepEqual(active.factLoads, [NOW, NOW + MIN, NOW + 2 * MIN, NOW + 3 * MIN]);
 
   const other = await world(t, { active: false });
   other.setInbox([]);
@@ -272,6 +294,59 @@ test("an active agent's mentions are read every minute on an allowance of its ow
   const off = await world(t, { polls: 0 });
   await off.step();
   assert.deepEqual(off.reads, [], "polling switched off is off for the active owners too");
+});
+
+test("an active agent's day of fifteen-second reads is its own: spent, it waits for tomorrow and the fleet goes on", async (t) => {
+  const w = await world(t);
+  w.setInbox([]);
+  await w.db.prepare("INSERT INTO xpost_meta (k, n, v, updated_at_ms) VALUES (?, ?, NULL, ?)").run("reply-polls-active:111:2026-09-30", ACTIVE_REPLY_POLLS_PER_DAY, NOW);
+  const r = await w.step();
+  assert.deepEqual(w.reads, [], "no read past its allowance");
+  assert.match(r.log ?? "", /active-reply-polls-spent 1/);
+  assert.equal(await store.readMeta(w.db, "reply-polls:2026-09-30"), null, "and none of the fleet's spent instead");
+  // A new UTC day, a new allowance.
+  await w.step(Date.UTC(2026, 9, 1, 0, 0, 15));
+  assert.equal(w.reads.length, 1);
+});
+
+test("an active agent is read first within the pass's two reads, every pass, while the fleet takes turns behind it", async (t) => {
+  const w = await world(t, { others: 3 });
+  w.setInbox([]);
+  // Three other owners with replies on: their tenants sort before the active one's.
+  for (let i = 0; i < 3; i++) {
+    assert.equal(await store.setReplying(w.db, `0x${(i + 1).toString(16).padStart(2, "0").repeat(20)}`, true, `${500 + i}`, NOW - DAY), true);
+  }
+  const perPass: string[][] = [];
+  for (const at of [NOW, NOW + 15_000, NOW + 30_000, NOW + 45_000]) {
+    const before = w.readers.length;
+    await w.step(at);
+    perPass.push(w.readers.slice(before));
+  }
+  assert.deepEqual(perPass, [["111", "500"], ["111", "501"], ["111", "502"], ["111"]],
+    "the active account first on every pass, at most two reads a pass, and the others each once in their thirty minutes");
+});
+
+test("X's 429 holds an active agent's reads until its reset, and a credits refusal pauses them with the fleet", async (t) => {
+  const limited = await world(t);
+  limited.setInbox([]);
+  limited.refuseRead({ status: 429, resetSec: (NOW + 2 * MIN) / 1000 });
+  await limited.step(NOW);
+  assert.equal(limited.reads.length, 1);
+  assert.equal(Number((await store.readMeta(limited.db, "reply-backoff:111"))?.v), NOW + 2 * MIN);
+  limited.refuseRead(null);
+  for (let at = NOW + 15_000; at < NOW + 2 * MIN; at += 15_000) await limited.step(at);
+  assert.equal(limited.reads.length, 1, "no read before X's reset");
+  await limited.step(NOW + 2 * MIN);
+  assert.deepEqual(limited.reads, [NOW, NOW + 2 * MIN], "read again at the reset");
+
+  const broke = await world(t);
+  broke.setInbox([]);
+  broke.refuseRead({ status: 402 });
+  await broke.step(NOW);
+  assert.ok(Number((await store.readMeta(broke.db, PAUSE_KEY))?.v) > NOW, "the fleet is paused for credits");
+  broke.refuseRead(null);
+  for (let at = NOW + 15_000; at <= NOW + 5 * MIN; at += 15_000) await broke.step(at);
+  assert.deepEqual(broke.reads, [NOW], "and no read while it lasts");
 });
 
 test("an active account whose mentions cannot be read waits thirty minutes, not one, before it pays for another read", async (t) => {
@@ -1680,14 +1755,14 @@ test("research on: \"did you buy <contract>?\" reaches its own history by the ad
 
 test("a batch read on a pass whose posts are not due is still answered on that pass", async (t) => {
   const w = await world(t);
-  // The poll's minute and the plan's minute out of step: the poll's last claim
-  // was half a minute before this pass, so this pass plans but cannot poll.
-  await store.claimSpan(w.db, "reply-poll:111", NOW - 30_000, 60_000);
+  // The poll's fifteen seconds and the plan's minute out of step: the poll's
+  // last claim was ten seconds before this pass, so this pass plans but cannot poll.
+  await store.claimSpan(w.db, "reply-poll:111", NOW - 10_000, 15_000);
   await w.step(NOW);
-  assert.deepEqual(w.reads, [], "not polled: its minute is not up");
-  // Half a minute on, the poll is due and the posts' plan is not.
-  await w.step(NOW + 30_000);
-  assert.deepEqual(w.reads, [NOW + 30_000]);
+  assert.deepEqual(w.reads, [], "not polled: its fifteen seconds are not up");
+  // Fifteen seconds on, the poll is due and the posts' plan is not.
+  await w.step(NOW + 15_000);
+  assert.deepEqual(w.reads, [NOW + 15_000]);
   const [answer] = await w.answers();
   assert.ok(answer, "the tag it read was answered, not dropped with the batch");
   assert.equal(answer.status, "scheduled");

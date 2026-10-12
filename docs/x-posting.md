@@ -336,7 +336,7 @@ available if the operator gate or X app configuration is removed.
 
 **Read a bounded set.** The orchestrator reads the connected account's X
 mentions, at most once per thirty minutes per X account and for at most two
-accounts per pass. An active owner's agent is read once a minute, on an
+accounts per pass. An active owner's agent is read every fifteen seconds, on an
 allowance of its own (see "Active owners"). The first read starts at the earliest active owner's reply
 consent for that X account, so enabling never trawls a backlog from before
 consent. Later reads use a persisted X snowflake cursor. Each owner's reply
@@ -425,7 +425,7 @@ reply consent; it does not erase recipient opt-outs or published posts.
 | `MERRYMEN_X_REDIRECT_URI` | web | built from the origin | an explicit redirect URI instead; it must still be this web service's own `/connect/x` page (the finish needs its session), registered byte for byte on the X app |
 | `MERRYMEN_XPOST` | orchestrator | on | `0` stops all posting (the web still lets owners connect) |
 | `MERRYMEN_XPOST_REPLIES_APPROVED` | web + orchestrator | unset (off) | exactly `1` permits reply consent and processing for every owner; exactly `active` permits them only for the owners in `MERRYMEN_XPOST_ACTIVE_TENANTS` (see "Active owners"); any other value is off, with a boot line naming the variable. `1` only after written X approval for AI replies, which this deployment does not have, so `1` stays unset. `active` is set on web and orchestrator for the operator's own agent (Alan) per the owner's 2026-10-12 decision (see the top of this file) |
-| `MERRYMEN_XPOST_REPLY_POLLS_PER_DAY` | orchestrator | 200 | fleet polls per UTC day; each can read up to eight pages; `0` or unreadable = polling off, the active owners' too. Active owners' one-minute polls spend their own 1500 per X account per UTC day, not this |
+| `MERRYMEN_XPOST_REPLY_POLLS_PER_DAY` | orchestrator | 200 | fleet polls per UTC day; each can read up to eight pages; `0` or unreadable = polling off, the active owners' too. Active owners' fifteen-second polls spend their own 6000 per X account per UTC day, not this |
 | `MERRYMEN_XPOST_LLM_KEY` | orchestrator (stripped from children) | unset | a key used ONLY for X posts; when unset, the room's `MERRYMEN_GROUPCHAT_LLM_KEY` credentials are used as they are, unless they are a fleet key (the X provider and model knobs apply only to the X key) |
 | `MERRYMEN_XPOST_LLM_PROVIDER` | orchestrator | `groq` | `groq`, `anthropic` or `openai` (OpenAI-compatible). A provider other than Groq receives the writer's inputs, so it must be named in the privacy policy (`site/components/PrivacyPolicyDoc.tsx`, section 5) before it is deployed |
 | `MERRYMEN_XPOST_MODEL` | orchestrator | `qwen/qwen3.8-27b` (groq), `claude-opus-5` (anthropic) | the writer's model; required for `openai` |
@@ -511,22 +511,24 @@ the mention itself. They go out **right away**:
   (posted, skipped by the owner, or possibly out), as nothing else is
   planned before it. The house reply consent is not recorded before it
   either, so the mentions are not polled until then.
-- **Read every minute.** An active agent's mentions are polled once a minute
-  per X account. These polls spend the agent's own allowance of 1500 per X
-  account per UTC day (`reply-polls-active:<xUserId>:<day>`), never the
+- **Read every fifteen seconds.** An active agent's mentions are polled every
+  fifteen seconds per X account (`ACTIVE_REPLY_POLL_MS`), every pass of the
+  orchestrator. These polls spend the agent's own allowance of 6000 per X
+  account per UTC day (`reply-polls-active:<xUserId>:<day>`; a whole day at one
+  read every fifteen seconds is 5760), never the
   fleet's `MERRYMEN_XPOST_REPLY_POLLS_PER_DAY`. Active agents are polled
   first within each pass's two polls, so the fleet cannot starve them and
   they cannot spend the fleet's allowance. Setting
   `MERRYMEN_XPOST_REPLY_POLLS_PER_DAY=0` still turns every poll off. An answer
   is sent on the next pass that read the mentions again, so opt-outs are
-  always handled first. In practice that is within about a minute.
+  always handled first. In practice that is within about fifteen seconds.
 - **A read that fails on what X sent waits thirty minutes.** A malformed
   page, or a backlog of more than the 800 mentions X pages back to (after an
   outage or a credits pause while the agent is tagged a lot), fails the read
   closed and leaves the cursor where it was. For an active agent the next
   poll then waits the fleet's thirty minutes (`reply-backoff:<xUserId>`,
-  logged as `active-reply-read-held`), not one, so a stuck cursor costs eight
-  pages every half hour rather than every minute. A backlog past 800 never
+  logged as `active-reply-read-held`), not fifteen seconds, so a stuck cursor
+  costs eight pages every half hour rather than every fifteen seconds. A backlog past 800 never
   clears on its own, and nothing is answered or opted out meanwhile. The
   operator's fix is to move the cursor to a recent mention on the shared
   database, `UPDATE xpost_meta SET v = '<id of a recent mention>' WHERE k =
@@ -534,9 +536,10 @@ the mention itself. They go out **right away**:
   800 back, X no longer serves them anyway.
 - **Answered on the pass that read it.** A poll's cursor moves on as it
   reads, so a batch is worked through on the same pass, even when that
-  pass's posts are not due for planning (the poll's minute and the plan's
-  drift apart by a pass). Such a pass drafts answers and comment replies
-  only. Up to three tags a batch. Answers and comment replies have their own
+  pass's posts are not due for planning (posts are planned once a minute,
+  an active agent's mentions read every fifteen seconds). Such a pass drafts
+  answers and comment replies only, and a pass whose batches were all empty
+  loads nothing for them. Up to three tags a batch. Answers and comment replies have their own
   bound per pass (two batches' worth, six), apart from the posts' ten drafts:
   other owners' posts using up the ten never leave a batch unanswered, and
   the next pass's posts start at the first owner they cut short.
@@ -906,7 +909,7 @@ lanes before them. Unset is the default and changes nothing, except for an accou
 | 4 | `MERRYMEN_FLOW_BROKER` | none | never set | The orchestrator writes it into each child that may ask, and removes an inherited copy |
 | 5 | `MERRYMEN_XPOST_ACTIVE_TENANTS` | web + orchestrator, same value | Alan's tenant address, from the deploy environment | The active cadence, his reply consent recorded by the orchestrator, and answers to tags sent right away. The web reads it for the reply warning |
 | 5 | `MERRYMEN_XPOST_REPLIES_APPROVED` | web + orchestrator, same value | `active` (the owner's decision of 2026-10-12, for the operator's own agent only; `1` stays unset until X's written approval) | Without it there are no comment replies and no answers to tags. On 2026-10-12 the owner (Milla) decided to set it to `active` on both services for the operator's own agent only, so Alan answers people who tag him. X's published automation rules ask for written approval for AI reply bots; an X staff answer on the developer forum says replies triggered by a mention do not need it, and Alan's request for clarification is pending. `1` (every owner) stays unset until written approval exists. |
-| 5 | `MERRYMEN_XPOST_REPLY_POLLS_PER_DAY` | orchestrator | unset (`200` for the fleet) | Alan's one-minute polls spend their own 1,500 per X account per UTC day |
+| 5 | `MERRYMEN_XPOST_REPLY_POLLS_PER_DAY` | orchestrator | unset (`200` for the fleet) | Alan's fifteen-second polls spend their own 6,000 per X account per UTC day |
 | 6 | `MERRYMEN_XPOST_RESEARCH` | orchestrator | `1` | Answers look things up first. Boot line `xpost: on — … answers look things up first`; with the Bitquery key also `xpost: answers may read onchain flow — up to 200 readings per UTC day …` |
 | 6 | `MERRYMEN_XPOST_RESEARCH_PER_HOUR` | orchestrator | unset (`120`) | Public-index lookups per hour across X accounts |
 | 6 | `MERRYMEN_XPOST_FOMO` | orchestrator | `1` (Enterprise rights confirmed by the owner on 2026-10-12, [`fomo.md`](fomo.md) "Publication") | Paraphrased, attributed Fomo facts in answers |

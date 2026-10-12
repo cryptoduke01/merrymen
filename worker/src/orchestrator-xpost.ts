@@ -108,15 +108,20 @@ export const DEFAULT_LLM_PER_DAY = 400;
 export const DEFAULT_REPLY_POLLS_PER_DAY = 200;
 const REPLY_POLL_MS = 30 * MIN;
 /**
- * AN ACTIVE AGENT'S MENTIONS ARE READ EVERY MINUTE, so a tag is answered within
- * a minute or two: its answers go out as soon as they are drafted. Those
- * polls spend an allowance of their own, per X account and UTC day
- * (`reply-polls-active:<xUserId>:<day>`), never the fleet's
- * (`reply-polls:<day>`): the fleet's polls cannot starve it, nor it theirs.
+ * AN ACTIVE AGENT'S MENTIONS ARE READ EVERY FIFTEEN SECONDS — every pass, as
+ * the orchestrator runs one every RECONCILE_MS (orchestrator.ts) — so a tag is
+ * answered within seconds, about as fast as a Telegram group answers: its
+ * answers go out as soon as they are drafted. Those polls spend an allowance
+ * of their own, per X account and UTC day (`reply-polls-active:<xUserId>:<day>`),
+ * never the fleet's (`reply-polls:<day>`): the fleet's polls cannot starve it,
+ * nor it theirs. 6000 covers a whole day at one read every fifteen seconds
+ * (5760); spent, the account waits for tomorrow's. Active accounts are still
+ * read first within the pass's MAX_REPLY_POLLS_PER_PASS, and X's 429 backoff
+ * and the credits and app pauses hold them like everyone else.
  * MERRYMEN_XPOST_REPLY_POLLS_PER_DAY=0 still turns every poll off.
  */
-const ACTIVE_REPLY_POLL_MS = MIN;
-export const ACTIVE_REPLY_POLLS_PER_DAY = 1500;
+export const ACTIVE_REPLY_POLL_MS = 15_000;
+export const ACTIVE_REPLY_POLLS_PER_DAY = 6000;
 /** Tags an active agent may answer from one poll's batch. */
 const ANSWERS_PER_POLL = 3;
 /**
@@ -1154,12 +1159,14 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         //
         // A BATCH READ IS WORKED THROUGH ON THE PASS THAT READ IT. Its cursor
         // has already moved on, so a batch no pass drafts from is lost for
-        // good, and the poll's minute (claimed when the read starts) and the
-        // plan's (when the pass starts) drift apart by a pass: an active
-        // agent's every poll could land on a pass whose plan is not due. So a
-        // pass that read one answers from it even then, and plans no posts.
+        // good, and an active agent is read every fifteen seconds while posts
+        // are planned once a minute: most of its polls land on a pass whose
+        // plan is not due. So a pass that read one answers from it even then,
+        // and plans no posts. A batch with nothing in it has nothing to
+        // answer, so a pass that read only empty ones loads no facts for them.
         const planDue = nowMs - lastPlanAt >= PLAN_EVERY_MS;
-        if (!pause && !ceiling && accounts.length > 0 && (planDue || comments.size > 0)) {
+        const tagged = [...comments.values()].some((batch) => batch.length > 0);
+        if (!pause && !ceiling && accounts.length > 0 && (planDue || tagged)) {
           if (planDue) lastPlanAt = nowMs;
           await planPass(shared, accounts, byTenant, profiles, nowMs, at, bump, zoneOf, comments, !planDue);
         }
@@ -1188,8 +1195,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
     const isActive = (a: XAccount) => active.has(a.tenant.toLowerCase());
     const byTenant = (a: XAccount, b: XAccount) => a.tenant.localeCompare(b.tenant);
     // THE ACTIVE OWNERS FIRST, then the rest from where the last pass left
-    // off: an active agent due its minute's poll is never behind the fleet's
-    // turn, and the rotation is the fleet's alone.
+    // off: an active agent due its fifteen-second poll is never behind the
+    // fleet's turn, and the rotation is the fleet's alone.
     const ordered = accounts.filter((a) => !isActive(a)).sort(byTenant);
     const from = ordered.findIndex((a) => a.tenant >= replyResumeAt);
     const rest = from > 0 ? [...ordered.slice(from), ...ordered.slice(0, from)] : ordered;
@@ -1224,10 +1231,10 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         bump(`reply-read-${result.failure}`);
         if (result.resetAtMs) await writeMeta(shared, `reply-backoff:${account.xUserId}`, String(result.resetAtMs), at());
         // A READ THAT FAILS ON WHAT X SENT waits the fleet's thirty minutes,
-        // not an active account's one. A backlog past the eight hundred
-        // mentions X pages back to fails this way on every poll until the
-        // cursor is moved (docs/x-posting.md "Active owners"), and a minute's
-        // poll would buy eight billable pages and nothing else.
+        // not an active account's fifteen seconds. A backlog past the eight
+        // hundred mentions X pages back to fails this way on every poll until
+        // the cursor is moved (docs/x-posting.md "Active owners"), and a poll
+        // every fifteen seconds would buy eight billable pages and nothing else.
         else if (result.failure === "invalid" && isActive(account)) {
           await writeMeta(shared, `reply-backoff:${account.xUserId}`, String(t + REPLY_POLL_MS), at());
           bump("active-reply-read-held");
@@ -1273,7 +1280,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
     /** Only the answers to this pass's batches: its posts' plan is not due (see the step). */
     answersOnly = false,
   ): Promise<void> {
-    if (answersOnly) accounts = accounts.filter((a) => comments.has(a.xUserId));
+    if (answersOnly) accounts = accounts.filter((a) => (comments.get(a.xUserId)?.length ?? 0) > 0);
     if (accounts.length === 0) return;
     const roster = accounts.map((a) => byTenant.get(a.tenant)!);
     const facts = await factsOf(shared, roster, profiles, Math.floor(nowMs / 1000), {
