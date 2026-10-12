@@ -1,9 +1,10 @@
 import type { BrainDecision, BrainResult } from "./brain-client";
 import { orderFromDecision } from "./brain-live";
 import type { ShadowInputs, ShadowOutcome } from "./brain-shadow";
+import { DEFAULT_TRIGGERS, pctMove } from "./brain-trigger";
 import type { GeckoFetch, GeckoPool } from "./venues/geckoterminal";
 import { fetchGeckoPoolsResult, readTokenPoolsResult } from "./venues/geckoterminal";
-import { NOMINATE } from "./trencher-nominate";
+import { NOMINATE, safeNotes } from "./trencher-nominate";
 import { newProjectAge, type DiscoveryFocus } from "./discovery-focus";
 import { EARLY_PAGES_MAX, EARLY_VENUE, earlyScreenReason, type EarlyScreen } from "./early-candidates";
 import { CASH, instrumentClassOf } from "../../packages/core/src/index";
@@ -415,6 +416,250 @@ export function trenchBrainPersona(symbol: string, held: boolean): string {
 type Ready = { decision: BrainDecision; input: ShadowInputs; token: string; context: string; started: number };
 
 /**
+ * WHAT A HOLD IS MEASURED AGAINST: the coin's quote and its tape when the
+ * Brain looked, and again now. Null is unknown, never zero — and an unknown
+ * on either side can never be what releases a backoff or prints a change.
+ */
+export interface TrenchMaterial {
+  /** The tick's own quote for the coin, USD — the price the Brain was handed. */
+  priceUsd: number | null;
+  /** The pool's last-hour volume, USD (the tape's h1 bucket). */
+  h1VolumeUsd: number | null;
+  /** Distinct buyers in the pool's last five minutes (the tape's m5 bucket). */
+  m5Buyers: number | null;
+}
+
+const finiteOrNull = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
+
+/** A coin's material from its tape row and its quote. Either may be missing; neither is defaulted. */
+export function trenchMaterial(p: GeckoPool | null | undefined, priceUsd: number | null): TrenchMaterial {
+  const price = finiteOrNull(priceUsd);
+  return {
+    priceUsd: price !== null && price > 0 ? price : null,
+    h1VolumeUsd: finiteOrNull(p?.buckets?.h1?.volumeUsd),
+    m5Buyers: finiteOrNull(p?.buckets?.m5?.buyers),
+  };
+}
+
+/**
+ * HOW LONG A COIN THE BRAIN JUST HELD WAITS BEFORE IT IS ASKED AGAIN.
+ *
+ * The rotation had no per-coin memory: the same five eligible coins were
+ * re-reviewed every few minutes with near-identical tape, and produced
+ * near-identical holds, each one paid for. A hold now backs its coin off
+ * for `baseMs`, doubling with every consecutive hold up to `maxMs`, unless
+ * something MATERIAL moved since the review — the thresholds below. Judgment
+ * calls, named so they can be argued with. Review ORDER only: nothing here
+ * admits a coin, sizes a trade or touches a held position.
+ */
+export const HOLD_BACKOFF = {
+  /** The first hold's backoff. Each consecutive hold doubles it: 5, 10, 20, 40, then 60 minutes. */
+  baseMs: 5 * 60_000,
+  maxMs: 60 * 60_000,
+  /** A move this large either way since the review releases it — the Brain trigger's own threshold (brain-trigger.ts). */
+  priceMove: DEFAULT_TRIGGERS.priceMovePct,
+  /** Last-hour volume up by at least this fraction of what the review saw. */
+  h1VolumeRise: 0.5,
+  /** Five-minute distinct buyers up by at least this many AND at least this multiple. Both, so 1→2 is not a jump. */
+  m5BuyersRise: 3,
+  m5BuyersRatio: 1.5,
+  /** A hold older than this is forgotten: its run of consecutive holds and its memory line. */
+  memoryMs: 3 * 60 * 60_000,
+  /** Coins remembered at once; the oldest is forgotten first. */
+  maxCoins: 256,
+} as const;
+
+/**
+ * Why a backoff should end early, or null when nothing material changed.
+ * PURE. Unknown on either side of a comparison is no change.
+ */
+export function materialChange(seen: TrenchMaterial | null, now: TrenchMaterial | null): "price" | "volume" | "buyers" | null {
+  if (!seen || !now) return null;
+  // A hair of slack so an exact 3.0% is not lost to floating point.
+  if (seen.priceUsd !== null && now.priceUsd !== null && pctMove(now.priceUsd, seen.priceUsd) >= HOLD_BACKOFF.priceMove - 1e-9) return "price";
+  if (seen.h1VolumeUsd !== null && now.h1VolumeUsd !== null && seen.h1VolumeUsd > 0 &&
+      now.h1VolumeUsd >= seen.h1VolumeUsd * (1 + HOLD_BACKOFF.h1VolumeRise)) return "volume";
+  if (seen.m5Buyers !== null && now.m5Buyers !== null &&
+      now.m5Buyers - seen.m5Buyers >= HOLD_BACKOFF.m5BuyersRise && now.m5Buyers >= seen.m5Buyers * HOLD_BACKOFF.m5BuyersRatio) return "buyers";
+  return null;
+}
+
+/**
+ * A HOLD THE MODEL CHOSE about this coin — exactly what the decision funnel
+ * files as MODEL_HOLD (decision-funnel.ts classifyReview, pinned against it
+ * in a test). A gate-forced hold is about the book, not the coin, and a hold
+ * on a stale mark is about a missing price; neither says the coin was looked
+ * at and passed on, so neither backs it off.
+ */
+export function isModelHold(d: Pick<BrainDecision, "action" | "hold_kind" | "gate_verdict">, priceStale: boolean): boolean {
+  if (String(d.action ?? "").toLowerCase() !== "hold") return false;
+  if (priceStale && d.hold_kind !== "GATE_FORCED_HOLD") return false;
+  if (d.hold_kind === "MODEL_HOLD") return true;
+  return (d.hold_kind === undefined || d.hold_kind === null) && d.gate_verdict === "proceed";
+}
+
+/** Characters of a hold's reason the memory line repeats. */
+const HOLD_REASON_MAX = 120;
+
+/**
+ * THE SHORT REASON A HOLD GAVE, through the same filter a Telegram group's
+ * "passed" note goes through (trencher-nominate.ts safeNotes): bear case and
+ * risks first, the thesis only when they left nothing, and any clause with a
+ * figure, an address or a link dropped whole. Null when nothing survives.
+ */
+export function holdReason(d: Pick<BrainDecision, "bear_case" | "risks" | "thesis">): string | null {
+  let notes = safeNotes([d.bear_case, ...(Array.isArray(d.risks) ? d.risks : [])], HOLD_REASON_MAX);
+  if (notes.length === 0) notes = safeNotes([d.thesis], HOLD_REASON_MAX);
+  return notes.length ? notes.join("; ") : null;
+}
+
+interface HoldRecord {
+  /** When the last held review launched (or the record began, for a skip), ms. */
+  at: number;
+  /** Consecutive model holds. 0 for a record an evidence skip made on its own. */
+  holds: number;
+  /** The backoff ends here, ms; 0 once released. */
+  until: number;
+  /** What the held review saw — the memory line's "since then". */
+  seen: TrenchMaterial | null;
+  /** What a release is measured against: the review's view, or what a later skip saw. */
+  baseline: TrenchMaterial | null;
+  reason: string | null;
+  /** An evidence skip of this coin has been said up to here, ms. */
+  skipSaidUntil: number;
+}
+
+const signedPct = (fraction: number) => `${fraction >= 0 ? "+" : "-"}${Math.abs(fraction * 100).toFixed(1)}%`;
+
+/**
+ * THE PER-COIN MEMORY THE ROTATION LACKED (see HOLD_BACKOFF).
+ *
+ * Fleet-wide and in memory, like the rest of TrenchBrainReview: a restart
+ * forgets it, which can only cost a review, never cause a trade. Kept across
+ * a coin's flicker in and out of eligibility — the tape turns over every
+ * minute and a coin that drops off for one refresh has not changed — and
+ * forgotten only by age, by a BUY, or by a context change.
+ *
+ * `material` reads what a coin looks like NOW (index.ts: the tick's quote and
+ * the fresh tape). An accessor that throws is no reading, and no reading
+ * never releases anything.
+ */
+export class HoldBackoff {
+  private records = new Map<string, HoldRecord>();
+  constructor(private readonly material: (token: string) => TrenchMaterial | null, private readonly now: () => number = Date.now) {}
+
+  /** What the coin looks like now. `priceUsd`, when given, replaces the quote (a review's own mark). */
+  observe(token: string, priceUsd?: number | null): TrenchMaterial | null {
+    let m: TrenchMaterial | null;
+    try { m = this.material(token.toLowerCase()); } catch { m = null; }
+    if (priceUsd === undefined) return m;
+    const price = finiteOrNull(priceUsd);
+    return { ...(m ?? { h1VolumeUsd: null, m5Buyers: null }), priceUsd: price !== null && price > 0 ? price : null };
+  }
+
+  /** A model hold on a coin not held: back it off, longer for each hold in a row. */
+  held(token: string, at: number, seen: TrenchMaterial | null, reason: string | null): void {
+    const key = token.toLowerCase();
+    const prior = this.records.get(key);
+    const holds = (prior && at - prior.at <= HOLD_BACKOFF.memoryMs ? prior.holds : 0) + 1;
+    const ms = Math.min(HOLD_BACKOFF.maxMs, HOLD_BACKOFF.baseMs * 2 ** (holds - 1));
+    this.records.delete(key);
+    this.records.set(key, { at, holds, until: at + ms, seen, baseline: seen, reason, skipSaidUntil: prior?.skipSaidUntil ?? 0 });
+    this.sweep(at);
+  }
+
+  /** The Brain said BUY: the run of holds is over, and so is the memory of them. */
+  forget(token: string): void {
+    this.records.delete(token.toLowerCase());
+  }
+
+  /**
+   * NEW EVIDENCE OF ANOTHER KIND: a nomination or an early offer still waiting
+   * for its review. The backoff ends; the memory of the hold stays, so the
+   * review it gets can still say what changed.
+   */
+  release(token: string): void {
+    const r = this.records.get(token.toLowerCase());
+    if (r) r.until = 0;
+  }
+
+  /**
+   * True while the coin is backed off and nothing material changed since its
+   * review. A material change releases it here, for good: the next review
+   * is the one that decides whether it backs off again.
+   */
+  blocks(token: string): boolean {
+    const key = token.toLowerCase();
+    const r = this.records.get(key);
+    if (!r || r.until <= this.now()) return false;
+    if (materialChange(r.baseline, this.observe(key)) !== null) {
+      r.until = 0;
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * AN ENTRY REVIEW SKIPPED FOR WANT OF EVIDENCE (index.ts). The coin backs
+   * off one base window, measured from what it looks like now, so the same
+   * gap is not re-asked every slot; it is not a hold and starts no run.
+   * True when the skip should be said: once per coin per window.
+   */
+  evidenceSkipped(token: string, at: number, seen: TrenchMaterial | null): boolean {
+    const key = token.toLowerCase();
+    const until = at + HOLD_BACKOFF.baseMs;
+    let r = this.records.get(key);
+    if (r) {
+      r.until = Math.max(r.until, until);
+      r.baseline = seen;
+    } else {
+      r = { at, holds: 0, until, seen, baseline: seen, reason: null, skipSaidUntil: 0 };
+      this.records.set(key, r);
+      this.sweep(at);
+    }
+    if (r.skipSaidUntil > at) return false;
+    r.skipSaidUntil = r.until;
+    return true;
+  }
+
+  /**
+   * ONE LINE OF MEMORY FOR THE NEXT REVIEW OF A COIN IT HELD: when, why in
+   * a few safe words, and what moved since. Holds are otherwise kept out of
+   * the Brain's memory (brain-material.ts memoryLines) because "I held"
+   * twenty times teaches nothing; "I held this twelve minutes ago, and since
+   * then buyers tripled" is a comparison it can actually make. Null when the
+   * coin has no hold within HOLD_BACKOFF.memoryMs.
+   */
+  memoryLine(token: string, symbol: string): string | null {
+    const r = this.records.get(token.toLowerCase());
+    const now = this.now();
+    if (!r || r.holds < 1 || now - r.at > HOLD_BACKOFF.memoryMs) return null;
+    const was = r.seen;
+    const cur = this.observe(token);
+    const price = was?.priceUsd != null && cur?.priceUsd != null ? signedPct(cur.priceUsd / was.priceUsd - 1) : "unknown";
+    const volume = was?.h1VolumeUsd != null && was.h1VolumeUsd > 0 && cur?.h1VolumeUsd != null
+      ? signedPct(cur.h1VolumeUsd / was.h1VolumeUsd - 1) : "unknown";
+    const buyers = was?.m5Buyers != null && cur?.m5Buyers != null ? `${was.m5Buyers}→${cur.m5Buyers}` : "unknown";
+    const mins = Math.max(0, Math.round((now - r.at) / 60_000));
+    const run = r.holds > 1 ? ` (${r.holds} holds in a row)` : "";
+    return `You reviewed ${symbol} ${mins} min ago and held${run} because ${r.reason ?? "no short reason survived the filter"}. ` +
+      `Since then: price ${price}, last-hour volume ${volume}, 5-minute distinct buyers ${buyers}. Judge the setup as it is now, not the earlier answer.`;
+  }
+
+  clear(): void {
+    this.records.clear();
+  }
+
+  /** Forget what is past its memory and out of backoff; then the oldest, past the bound. */
+  private sweep(now: number): void {
+    for (const [key, r] of this.records) {
+      if (now - r.at > HOLD_BACKOFF.memoryMs && r.until <= now) this.records.delete(key);
+    }
+    while (this.records.size > HOLD_BACKOFF.maxCoins) this.records.delete(this.records.keys().next().value!);
+  }
+}
+
+/**
  * THE EARLY LANE the review rotation is told about (early-candidates.ts).
  * index.ts builds it from the early book on every `candidate` call.
  */
@@ -429,6 +674,12 @@ export interface EarlyLane {
 
 /** Reviews remembered for `recentLaunches`; more than the reserved-capacity window ever reads. */
 const LAUNCH_MEMORY = 16;
+/**
+ * A coin off the eligible list keeps its place in the pass until this many
+ * reviews have launched since its own — about half an hour at one review a
+ * slot. Only a bound on growth: within it, a flicker changes nothing.
+ */
+const REVIEWED_KEEP = 64;
 
 /** What a dropped order was about, for a caller that files it by coin (the decision funnel). */
 export type TrenchDropInfo = { symbol: string; token: string; action: string; reason: string; decisionId?: string };
@@ -491,7 +742,45 @@ export class TrenchBrainReview {
   private reviewSequence = 0;
   /** Tokens (lowercased) of the reviews actually launched, oldest first, bounded. */
   private launches: string[] = [];
+  /** How many eligible coins the last `candidate` call left out for their hold backoff. */
+  private backedOff = 0;
   constructor(private now = Date.now) {}
+
+  /**
+   * THE PER-COIN HOLD BACKOFF (HoldBackoff), set once by index.ts. Absent,
+   * the rotation is exactly what it was before it existed. It narrows the
+   * ENTRY rotation only: `candidate` is never handed a held position, and
+   * `launch` records nothing from a review of one.
+   */
+  holdBackoff?: HoldBackoff;
+
+  /** Eligible coins the last `candidate` call skipped for their backoff. All of them, and it returned nothing. */
+  backedOffCount(): number {
+    return this.backedOff;
+  }
+
+  /** The hold-memory line for an entry review of this coin (HoldBackoff.memoryLine), or null. */
+  holdMemory(token: string, symbol: string): string | null {
+    try {
+      return this.holdBackoff?.memoryLine(token, symbol) ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * An entry review index.ts skipped for want of evidence: the coin backs off
+   * one base window (HoldBackoff.evidenceSkipped). True when the skip should
+   * be said — once per coin per window, and always without a backoff.
+   */
+  evidenceSkipped(token: string): boolean {
+    try {
+      const b = this.holdBackoff;
+      return b ? b.evidenceSkipped(token, this.now(), b.observe(token)) : true;
+    } catch {
+      return true;
+    }
+  }
 
   /**
    * Where the early lane comes from (index.ts sets it once). Asked on every
@@ -523,6 +812,9 @@ export class TrenchBrainReview {
     this.priorityLaunchedAtMs = undefined;
     this.reviewSequence = 0;
     this.launches = [];
+    // Another agent, rail or grant: its holds were not this context's.
+    this.holdBackoff?.clear();
+    this.backedOff = 0;
     return true;
   }
 
@@ -591,14 +883,31 @@ export class TrenchBrainReview {
    * already run — and a decided coin (Brain said BUY, entry pending) is not
    * picked again: a second review would supersede the order it is waiting
    * on. What a review then decides, and what may be bought, is unchanged.
+   *
+   * ── A COIN THE BRAIN JUST HELD WAITS ITS TURN OUT ────────────────────
+   *
+   * With `holdBackoff`, a coin the model held is left out of the ROTATION
+   * until its backoff passes or something material moves (HOLD_BACKOFF). A
+   * nomination or early offer still waiting for its review is new evidence
+   * and releases it. When every eligible coin is backed off, nothing is
+   * picked and no entry review launches this slot — a narrower spend, never
+   * a wider one. A coin's memory survives it flickering out of eligibility,
+   * and so does its place in the pass: the tape turns over every minute, and
+   * a coin that missed one refresh was not thereby un-reviewed.
    */
   candidate<T extends { token: string; volume24hUsd?: number; heat?: number; ageSec?: number }>(eligible: readonly T[], priority?: ReadonlySet<string>, focus: DiscoveryFocus = "balanced"): T | undefined {
     const current = new Set(eligible.map(c => c.token.toLowerCase()));
-    for (const key of this.reviewed.keys()) if (!current.has(key)) this.reviewed.delete(key);
+    // Bounded by age in reviews, not by this pass's eligibility (see above).
+    for (const [key, seq] of this.reviewed) if (!current.has(key) && this.reviewSequence - seq > REVIEWED_KEEP) this.reviewed.delete(key);
     const wanted = new Set([...(priority ?? [])].map(a => a.toLowerCase()));
     this.priorityKeys = wanted;
+    this.backedOff = 0;
     if (eligible.length === 0) return undefined;
     const lane = this.laneNow();
+    if (this.holdBackoff) {
+      for (const key of wanted) this.holdBackoff.release(key);
+      for (const key of lane?.waiting ?? []) this.holdBackoff.release(key);
+    }
     if (lane) {
       const early = eligible.filter(c => lane.held.has(c.token.toLowerCase()));
       if (early.length > 0) {
@@ -626,6 +935,12 @@ export class TrenchBrainReview {
           if (c && spaced(this.launchedAtMs.get(key))) return c;
         }
       }
+    }
+    if (this.holdBackoff) {
+      const open = eligible.filter(c => !this.blocked(c.token));
+      this.backedOff = eligible.length - open.length;
+      if (open.length === 0) return undefined;
+      eligible = open;
     }
     const seq = (c: T) => this.reviewed.get(c.token.toLowerCase()) ?? 0;
     // Hottest now first (trenchHeat), where the candidate carries it; else its day.
@@ -655,14 +970,28 @@ export class TrenchBrainReview {
     }, undefined);
   }
 
-  /** The lane for this call, or null. An observer that throws is no lane, not a broken rotation. */
-  private laneNow(): EarlyLane | null {
+  /**
+   * The lane for this call, or null. An observer that throws is no lane, not a
+   * broken rotation. `waiting` is read once, here: the backoff release and the
+   * reserved pick both walk it, and an iterator can be walked only once.
+   */
+  private laneNow(): (EarlyLane & { waiting: string[] }) | null {
     if (!this.earlyLane) return null;
     try {
       const lane = this.earlyLane(this.recentLaunches());
-      return lane && typeof lane.held?.has === "function" && lane.held.size > 0 ? lane : null;
+      if (!lane || typeof lane.held?.has !== "function" || lane.held.size === 0) return null;
+      return { ...lane, waiting: [...(lane.waiting ?? [])].filter((a): a is string => typeof a === "string") };
     } catch {
       return null;
+    }
+  }
+
+  /** The backoff's verdict on one coin. A backoff that throws blocks nothing. */
+  private blocked(token: string): boolean {
+    try {
+      return this.holdBackoff?.blocks(token) ?? false;
+    } catch {
+      return false;
     }
   }
 
@@ -706,12 +1035,30 @@ export class TrenchBrainReview {
     for (const [key, at] of this.launchedAtMs) if (started - at > 3_600_000) this.launchedAtMs.delete(key);
     const generation = this.generation;
     this.nextAt = started + TRENCH_REVIEW_INTERVAL_MS;
+    // WHAT THIS REVIEW SAW, read now rather than when it lands: a hold is
+    // measured against the tape and the mark the Brain was actually handed.
+    const stale = input.market.priceStale === true;
+    let seen: TrenchMaterial | null = null;
+    try {
+      seen = this.holdBackoff?.observe(token, stale ? null : Number(input.market.priceUsd)) ?? null;
+    } catch { seen = null; }
     void run().then(outcome => {
       if (this.context !== context || this.generation !== generation) return;
       const held = Boolean(input.positions?.some(p => p.symbol === input.market.symbol && Number(p.qtyRaw) > 0));
       try {
         this.onReviewed?.({ token, symbol: input.market.symbol, held, priceStale: input.market.priceStale === true, outcome });
       } catch { /* An observer cannot break the review it observes. */ }
+      // ENTRY REVIEWS ONLY. A held position's review is about its exit, and
+      // nothing here may slow that down. A model hold backs the coin off; a
+      // BUY ends the run of holds. Anything else (no decision, a gate-forced
+      // or stale-mark hold) leaves the backoff exactly as it was.
+      if (!held && this.holdBackoff && outcome.ran && outcome.result.ok) {
+        const d = outcome.result.decision;
+        try {
+          if (isModelHold(d, stale)) this.holdBackoff.held(token, started, seen, holdReason(d));
+          else if (String(d.action ?? "").toLowerCase() === "buy") this.holdBackoff.forget(token);
+        } catch { /* The backoff is a spend saver; it cannot break the review. */ }
+      }
       if (outcome.ran && outcome.result.ok) {
         // A NEWER DECISION REPLACES AN UNUSED ORDER, AND THAT IS SAID TOO.
         // Every branch here overwrites `ready`; an untaken BUY or SELL sitting
@@ -744,7 +1091,9 @@ export class TrenchBrainReview {
         }
         this.ready = { decision: outcome.result.decision, input, token, context, started };
         note(`Brain reviewed ${input.market.symbol}: ${outcome.result.decision.action}`);
-      } else note(outcome.ran ? brainNoDecisionNote(input.market.symbol, outcome.result) : outcome.why);
+        // An outcome with no `why` was already said by the run that made it
+        // (index.ts: an evidence skip, said once per coin per backoff window).
+      } else if (outcome.ran || outcome.why) note(outcome.ran ? brainNoDecisionNote(input.market.symbol, outcome.result) : outcome.why);
     }).catch(() => note("Brain review failed; no new entry approved")).finally(() => { this.pending = false; });
   }
 

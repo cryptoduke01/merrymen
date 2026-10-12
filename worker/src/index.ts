@@ -135,7 +135,7 @@ import { provenanceOf, type Provenance } from "./provenance";
 import { recordDecisionRefusal, verifyDecisionOwner, withDecisionOutcome } from "./decision-identity";
 import { bookGaps, composeEquityUsdg } from "./equity";
 import { publishesAView, reviewRecord, runShadow, type ShadowInputs, type ShadowOutcome } from "./brain-shadow";
-import { TrenchBrainReview, TrenchTapeReader, highVolumePools, trenchBrainPersona, trenchBrainSignals, trenchHeat, HELD_REVIEW_MAX_GAP_MS, TRENCH_REVIEW_INTERVAL_MS } from "./trencher-brain";
+import { HoldBackoff, TrenchBrainReview, TrenchTapeReader, highVolumePools, trenchBrainPersona, trenchBrainSignals, trenchHeat, trenchMaterial, HELD_REVIEW_MAX_GAP_MS, TRENCH_REVIEW_INTERVAL_MS } from "./trencher-brain";
 import { withAgentBrief } from "./agent-brief";
 import { ProjectPurposeReader } from "./research/project-purpose";
 import { getPaperBrainCapital } from "./store";
@@ -1081,6 +1081,30 @@ async function main() {
     trenchTapeAt = snapshot.observedAt;
     return snapshot.pools;
   };
+  /**
+   * The tape row a review of this coin reads: its discovery-verified pool
+   * when there is one, else its first pool on the tape. One helper, so the
+   * review and the hold backoff below can never be reading different pools.
+   */
+  function trenchTapeRow(token: string, tape: readonly GeckoPool[]): GeckoPool | undefined {
+    const key = token.toLowerCase();
+    const verifiedPool = autoTrench?.qualified.find(p => p.tokenAddress.toLowerCase() === key);
+    return tape.find(p => p.tokenAddress.toLowerCase() === key && (!verifiedPool || p.poolAddress === verifiedPool.poolAddress));
+  }
+  /**
+   * THE HOLD BACKOFF'S VIEW OF A COIN (trencher-brain.ts HoldBackoff): the
+   * tick's own quote — the mark a review is handed — and the fresh tape's
+   * hour volume and five-minute buyers. Read-only; it never fetches. A coin
+   * with neither reads as unknown throughout, and unknown releases nothing.
+   */
+  trenchBrain.holdBackoff = new HoldBackoff((token) => {
+    const t = watchTokens.find((w) => w.address.toLowerCase() === token);
+    const q = t ? lastPrices.get(t.symbol) : undefined;
+    const price = q && !q.stale && q.price8 > 0n ? Number(q.price8) / 1e8 : null;
+    return trenchMaterial(trenchTapeRow(token, trenchTapeReader.snapshot().pools), price);
+  });
+  /** The entry-rotation idle line last printed, so it is said on change rather than every tick. */
+  let lastBackoffIdle = "";
   /**
    * What discovery's early path did, filed ON CHANGE only: every pass would
    * otherwise re-file "early-verified" over the later stage (an entry screen,
@@ -12864,7 +12888,18 @@ async function main() {
         // none was looked at. The strategy's idle reason says why instead, as
         // a WARNING written after this one, so it is the notice the desk shows
         // (idle-notice.ts) — not a second Trencher line saying the same thing.
-        if (fastTrencher) trenchNotice(agentId, trenchSymbols.size || entriesBraked ? "" : "No permitted, freshly priced high-volume pool passes the entry checks. Discovery will retry; automatic exits remain active.");
+        //
+        // NOR WHEN EVERY ELIGIBLE COIN IS IN ITS HOLD BACKOFF: coins did pass
+        // the entry checks, and the Brain held each of them recently with
+        // nothing material moving since (trencher-brain.ts HoldBackoff). No
+        // entry review launches this slot; said on change, never per tick.
+        const backedOff = fastTrencher && !trenchCandidate ? trenchBrain.backedOffCount() : 0;
+        if (fastTrencher) trenchNotice(agentId, trenchSymbols.size || entriesBraked || backedOff ? "" : "No permitted, freshly priced high-volume pool passes the entry checks. Discovery will retry; automatic exits remain active.");
+        const backoffIdle = backedOff ? `${backedOff}` : "";
+        if (backoffIdle !== lastBackoffIdle) {
+          lastBackoffIdle = backoffIdle;
+          if (backedOff) console.log(`[trencher] Entry rotation idle: all ${backedOff} eligible coin(s) were held recently and nothing material has moved since; no entry review until one does or its backoff passes.`);
+        }
         const focusPositions = positions.filter(p => !fastTrencher || trenchHeld.has(p.token.toLowerCase())).map((p) => ({
           symbol: p.symbol,
           token: p.token,
@@ -13254,8 +13289,16 @@ async function main() {
             }
             const freshTape = freshTrenchTape();
             const verifiedPool = autoTrench?.qualified.find(p => p.tokenAddress.toLowerCase() === focus.token.toLowerCase());
-            const tape = freshTape.find(p => p.tokenAddress.toLowerCase() === focus.token.toLowerCase() && (!verifiedPool || p.poolAddress === verifiedPool.poolAddress));
+            const tape = trenchTapeRow(focus.token, freshTape);
             inputs.persona = withAgentBrief(trenchBrainPersona(focus.symbol, focus.held), cfg.agentBrief);
+            // WHAT IT SAID LAST TIME, AND WHAT MOVED SINCE — entry reviews only.
+            // Holds stay out of the published-memory lines (brain-material.ts
+            // memoryLines); this one line is the exception that carries a
+            // comparison rather than a repetition: when it held this coin, a
+            // short safe reason, and the price, hour volume and five-minute
+            // buyers then and now. First, so the six-line memory cap keeps it.
+            const holdLine = focus.held ? null : trenchBrain.holdMemory(focus.token, focus.symbol);
+            if (holdLine) inputs.memory = [holdLine, ...(inputs.memory ?? [])];
             if (tape) {
               Object.assign(inputs.market.signals, trenchBrainSignals(tape, trenchTapeAt, lastLiquidityUsd.get(focus.token.toLowerCase()) ?? null));
             }

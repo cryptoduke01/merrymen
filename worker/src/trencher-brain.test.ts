@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { setImmediate } from "node:timers/promises";
-import { TrenchBrainReview, TrenchTapeReader, brainNoDecisionNote, fetchTrenchTape, type TrenchBrainOrder, highVolumePools, trenchBrainPersona, trenchScreenReason, trenchBrainSignals, trenchHeat, TRENCH_H1_VOLUME_MIN, HELD_REVIEW_MAX_GAP_MS, NOMINATED_PAGES_MAX, PRIORITY_RETRY_MS, TRENCH_REVIEW_INTERVAL_MS } from "./trencher-brain";
+import { TrenchBrainReview, TrenchTapeReader, brainNoDecisionNote, fetchTrenchTape, type TrenchBrainOrder, highVolumePools, trenchBrainPersona, trenchScreenReason, trenchBrainSignals, trenchHeat, TRENCH_H1_VOLUME_MIN, HELD_REVIEW_MAX_GAP_MS, NOMINATED_PAGES_MAX, PRIORITY_RETRY_MS, TRENCH_REVIEW_INTERVAL_MS, HoldBackoff, HOLD_BACKOFF, holdReason, isModelHold, materialChange, trenchMaterial, type TrenchMaterial } from "./trencher-brain";
+import { classifyReview } from "./decision-funnel";
 import { chooseFocus } from "./brain-focus";
 import { emptyGeckoBuckets, type GeckoPool } from "./venues/geckoterminal";
 import type { ShadowInputs, ShadowOutcome } from "./brain-shadow";
@@ -682,4 +683,208 @@ test("without an early lane the rotation is exactly what it was", () => {
   review.earlyLane = () => ({ held: new Set([EARLY_COIN]), waiting: [EARLY_COIN], reserved: true });
   assert.equal(review.candidate(eligible)?.token, EARLY_COIN, "a reserved slot with an eligible waiting coin");
   assert.equal(review.candidate([{ token: TOKEN }], new Set())?.token, TOKEN, "an early coin that is not eligible gets nothing");
+});
+
+// ─── The hold backoff (HoldBackoff) ───────────────────────────────────────
+//
+// A coin the model just held waits before it is asked again, unless something
+// material moved. Review ORDER only: nothing here admits, sizes or exits.
+
+const MIN = 60_000;
+const hold = (over = {}) => answer({ action: "hold", hold_kind: "MODEL_HOLD", bear_case: "Sellers dominate the last hour. Flow is one-sided", ...over });
+/** A review rig whose coins all look like `fallback` unless a test sets `look`. */
+function backoffRig(start = 1_000_000) {
+  const clock = { now: start };
+  const look = new Map<string, TrenchMaterial>();
+  const fallback: TrenchMaterial = { priceUsd: 0.01, h1VolumeUsd: 40_000, m5Buyers: 6 };
+  const review = new TrenchBrainReview(() => clock.now);
+  review.holdBackoff = new HoldBackoff(token => look.get(token) ?? fallback, () => clock.now);
+  review.reset("live");
+  const reviewOf = async (token: string, outcome: () => ShadowOutcome | Promise<ShadowOutcome>) => {
+    review.launch("live", input, token, async () => outcome(), () => {});
+    await setImmediate();
+    clock.now += TRENCH_REVIEW_INTERVAL_MS;
+  };
+  return { clock, look, review, reviewOf };
+}
+
+test("a model hold backs its coin off the rotation; when every eligible coin is backed off, no review launches", async () => {
+  const { review, reviewOf } = backoffRig();
+  const eligible = [{ token: TOKEN, volume24hUsd: 900_000 }, { token: ROUTER, volume24hUsd: 800_000 }];
+  assert.equal(review.candidate(eligible)?.token, TOKEN);
+  await reviewOf(TOKEN, () => hold());
+  assert.equal(review.candidate(eligible)?.token, ROUTER, "the held coin waits; the other goes");
+  assert.equal(review.backedOffCount(), 1);
+  await reviewOf(ROUTER, () => hold());
+  assert.equal(review.candidate(eligible), undefined, "nothing picked: no paid entry review this slot");
+  assert.equal(review.backedOffCount(), 2);
+  assert.equal(review.candidate([]), undefined);
+  assert.equal(review.backedOffCount(), 0, "nothing eligible is not a backoff");
+});
+
+test("the backoff grows with consecutive holds — 5, 10, 20, 40, then capped at 60 minutes — and a BUY ends the run", async () => {
+  const { clock, review, reviewOf } = backoffRig();
+  const eligible = [{ token: TOKEN }];
+  for (const minutes of [5, 10, 20, 40, 60, 60]) {
+    const started = clock.now;
+    await reviewOf(TOKEN, () => hold());
+    clock.now = started + minutes * MIN - 1;
+    assert.equal(review.candidate(eligible), undefined, `still backed off just before ${minutes} min`);
+    clock.now = started + minutes * MIN;
+    assert.equal(review.candidate(eligible)?.token, TOKEN, `free again at ${minutes} min`);
+  }
+  assert.equal(HOLD_BACKOFF.maxMs, 60 * MIN);
+  // A BUY: the run is over, so the next hold starts again at the base.
+  await reviewOf(TOKEN, () => answer());
+  const started = clock.now;
+  await reviewOf(TOKEN, () => hold());
+  clock.now = started + 5 * MIN;
+  assert.equal(review.candidate(eligible)?.token, TOKEN, "back to five minutes after a buy");
+});
+
+test("only a MODEL hold of an unheld coin backs off: gate-forced, stale-mark, no-decision and held-position reviews do not", async () => {
+  const { clock, review, reviewOf } = backoffRig();
+  const eligible = [{ token: TOKEN }];
+  await reviewOf(TOKEN, () => answer({ action: "hold", hold_kind: "GATE_FORCED_HOLD", gate_verdict: "downgrade-to-hold" }));
+  assert.equal(review.candidate(eligible)?.token, TOKEN, "the gate held the book, not the coin");
+  await reviewOf(TOKEN, noDecision);
+  assert.equal(review.candidate(eligible)?.token, TOKEN, "no decision is no hold");
+  review.launch("live", { ...input, market: { ...input.market, priceStale: true } } as ShadowInputs, TOKEN, async () => hold(), () => {});
+  await setImmediate();
+  clock.now += TRENCH_REVIEW_INTERVAL_MS;
+  assert.equal(review.candidate(eligible)?.token, TOKEN, "a hold on a stale mark is about the missing price");
+  // A HELD position's review: exits keep their cadence, so nothing is recorded.
+  const heldInput = { ...input, positions: [{ symbol: "MEME", qtyRaw: "5" }] } as unknown as ShadowInputs;
+  review.launch("live", heldInput, TOKEN, async () => hold(), () => {});
+  await setImmediate();
+  clock.now += TRENCH_REVIEW_INTERVAL_MS;
+  assert.equal(review.candidate(eligible)?.token, TOKEN, "a held coin's hold never backs its later entry off");
+  assert.equal(review.holdMemory(TOKEN, "MEME"), null, "and leaves no hold memory");
+});
+
+test("isModelHold is exactly the funnel's MODEL_HOLD", () => {
+  const base = (hold() as unknown as { result: { decision: Record<string, unknown> } }).result.decision;
+  for (const action of ["hold", "buy", "sell"] as const) {
+    for (const hold_kind of [undefined, null, "MODEL_HOLD", "GATE_FORCED_HOLD"] as const) {
+      for (const gate_verdict of [undefined, null, "proceed", "downgrade-to-hold", "refuse"] as const) {
+        for (const priceStale of [false, true]) {
+          const outcome = { ran: true, result: { ok: true, decision: { ...base, action, hold_kind, gate_verdict } } } as unknown as ShadowOutcome;
+          const funnel = classifyReview(outcome, { held: false, priceStale });
+          assert.equal(isModelHold({ action, hold_kind, gate_verdict }, priceStale), funnel?.stage === "MODEL_HOLD", `${action}/${hold_kind}/${gate_verdict}/${priceStale}`);
+        }
+      }
+    }
+  }
+});
+
+test("a material move releases the backoff early: price 3% either way, hour volume +50%, or a jump in 5-minute buyers", async () => {
+  const seen: TrenchMaterial = { priceUsd: 0.01, h1VolumeUsd: 40_000, m5Buyers: 6 };
+  assert.equal(materialChange(seen, { ...seen, priceUsd: 0.01029 }), null, "2.9% is not material");
+  assert.equal(materialChange(seen, { ...seen, priceUsd: 0.0103 }), "price");
+  assert.equal(materialChange(seen, { ...seen, priceUsd: 0.0097 }), "price", "down counts too");
+  assert.equal(materialChange(seen, { ...seen, h1VolumeUsd: 59_999 }), null);
+  assert.equal(materialChange(seen, { ...seen, h1VolumeUsd: 60_000 }), "volume");
+  assert.equal(materialChange(seen, { ...seen, m5Buyers: 8 }), null, "+2 is not a jump");
+  assert.equal(materialChange(seen, { ...seen, m5Buyers: 9 }), "buyers");
+  assert.equal(materialChange({ ...seen, m5Buyers: 10 }, { ...seen, m5Buyers: 13 }), null, "+3 but not half again");
+  assert.equal(materialChange({ priceUsd: null, h1VolumeUsd: null, m5Buyers: null }, { priceUsd: 9, h1VolumeUsd: 9e9, m5Buyers: 99 }), null, "unknown at review time releases nothing");
+  assert.equal(materialChange(seen, null), null, "no reading now releases nothing");
+
+  const { look, review, reviewOf } = backoffRig();
+  const eligible = [{ token: TOKEN }];
+  await reviewOf(TOKEN, () => hold());
+  assert.equal(review.candidate(eligible), undefined);
+  look.set(TOKEN, { priceUsd: 0.0104, h1VolumeUsd: 40_000, m5Buyers: 6 });
+  assert.equal(review.candidate(eligible)?.token, TOKEN, "moved 4%: asked again now");
+  look.delete(TOKEN);
+  assert.equal(review.candidate(eligible)?.token, TOKEN, "released for good, not just while the move lasts");
+});
+
+test("a nomination or early offer waiting for review releases the backoff; the hold memory stays", async () => {
+  const { review, reviewOf } = backoffRig();
+  const eligible = [{ token: TOKEN, volume24hUsd: 900_000 }, { token: NOMINATED, volume24hUsd: 100_000 }];
+  await reviewOf(NOMINATED, () => hold());
+  await reviewOf(TOKEN, () => hold());
+  assert.equal(review.candidate(eligible), undefined, "both backed off");
+  assert.equal(review.candidate(eligible, new Set([NOMINATED]))?.token, NOMINATED, "a fresh nomination is new evidence");
+  assert.match(review.holdMemory(NOMINATED, "NOM") ?? "", /^You reviewed NOM 1 min ago and held/);
+  // The early lane's waiting coins likewise, and a lane given as a one-shot iterator still works.
+  assert.equal(review.candidate([{ token: TOKEN }]), undefined);
+  review.earlyLane = () => ({ held: new Set([EARLY_COIN]), waiting: [EARLY_COIN, TOKEN].values(), reserved: false });
+  assert.equal(review.candidate([{ token: TOKEN }])?.token, TOKEN, "a coin waiting on an early offer is released too");
+});
+
+test("the backoff, and the coin's place in the pass, survive a flicker out of eligibility", async () => {
+  const { review, reviewOf } = backoffRig();
+  const both = [{ token: TOKEN, volume24hUsd: 900_000 }, { token: ROUTER, volume24hUsd: 100 }];
+  await reviewOf(TOKEN, () => hold());
+  assert.equal(review.candidate([{ token: ROUTER }])?.token, ROUTER, "TOKEN dropped off the tape for a refresh");
+  assert.equal(review.candidate(both)?.token, ROUTER, "and on its return it is still backed off");
+  // Without a backoff, the pass alone: a coin reviewed one slot ago is not "never reviewed" because it flickered.
+  let now = 1000;
+  const plain = new TrenchBrainReview(() => now);
+  plain.reset("live");
+  plain.launch("live", input, TOKEN, noDecision, () => {});
+  await setImmediate();
+  now += TRENCH_REVIEW_INTERVAL_MS;
+  assert.equal(plain.candidate([{ token: ROUTER, volume24hUsd: 100 }])?.token, ROUTER);
+  assert.equal(plain.candidate(both)?.token, ROUTER, "the busier coin was reviewed this pass; the quiet one is due");
+});
+
+test("hold memory: when, a short safe reason, and what moved since — unknown stays unknown", async () => {
+  const { clock, look, review, reviewOf } = backoffRig();
+  look.set(TOKEN, { priceUsd: 0.01, h1VolumeUsd: 40_000, m5Buyers: 4 });
+  const started = clock.now;
+  await reviewOf(TOKEN, () => hold({ bear_case: `Sellers dominate the last hour. Down 12% since ${ROUTER}; see example.com`, risks: ["Liquidity is thin"] }));
+  clock.now = started + 12 * MIN;
+  look.set(TOKEN, { priceUsd: 0.0105, h1VolumeUsd: 64_800, m5Buyers: 11 });
+  const line = review.holdMemory(TOKEN, "MEME")!;
+  assert.equal(line, "You reviewed MEME 12 min ago and held because Sellers dominate the last hour; Liquidity is thin. " +
+    "Since then: price +5.0%, last-hour volume +62.0%, 5-minute distinct buyers 4→11. Judge the setup as it is now, not the earlier answer.");
+  assert.doesNotMatch(line, /0x|12%|example/, "figure-, address- and link-shaped clauses are dropped whole");
+  look.set(TOKEN, { priceUsd: null, h1VolumeUsd: null, m5Buyers: null });
+  assert.match(review.holdMemory(TOKEN, "MEME")!, /price unknown, last-hour volume unknown, 5-minute distinct buyers unknown/);
+  // A second hold in a row says so.
+  await reviewOf(TOKEN, () => hold());
+  assert.match(review.holdMemory(TOKEN, "MEME")!, /held \(2 holds in a row\) because/);
+  clock.now += HOLD_BACKOFF.memoryMs + 1;
+  assert.equal(review.holdMemory(TOKEN, "MEME"), null, "forgotten after the memory window");
+  assert.equal(review.holdMemory(ROUTER, "OTHER"), null, "never held: no line");
+  assert.equal(holdReason({ bear_case: "", risks: [], thesis: "Edge unclear, flow two-sided" }), "Edge unclear, flow two-sided", "the thesis when nothing else survives");
+  assert.equal(holdReason({ bear_case: "Up 40%", risks: ["0.5% fee"], thesis: "" }), null);
+});
+
+test("an evidence skip backs the coin off one base window and is said once per window; it is not a hold", () => {
+  const { clock, review } = backoffRig();
+  const eligible = [{ token: TOKEN }];
+  assert.equal(review.evidenceSkipped(TOKEN), true, "said the first time");
+  assert.equal(review.candidate(eligible), undefined, "and the coin waits out the window");
+  clock.now += MIN;
+  assert.equal(review.evidenceSkipped(TOKEN), false, "not said again inside the window");
+  assert.equal(review.holdMemory(TOKEN, "MEME"), null, "a skip is not a hold");
+  clock.now += HOLD_BACKOFF.baseMs;
+  assert.equal(review.candidate(eligible)?.token, TOKEN);
+  assert.equal(review.evidenceSkipped(TOKEN), true, "a new window, said again");
+  const plain = new TrenchBrainReview(() => 0);
+  assert.equal(plain.evidenceSkipped(TOKEN), true, "no backoff: always said");
+});
+
+test("a context change forgets every backoff; a throwing material reader releases nothing and breaks nothing", async () => {
+  const { review, reviewOf } = backoffRig();
+  await reviewOf(TOKEN, () => hold());
+  assert.equal(review.candidate([{ token: TOKEN }]), undefined);
+  review.reset("another-grant");
+  assert.equal(review.candidate([{ token: TOKEN }])?.token, TOKEN);
+  let t = 1000;
+  const broken = new TrenchBrainReview(() => t);
+  broken.holdBackoff = new HoldBackoff(() => { throw new Error("tape bug"); }, () => t);
+  broken.reset("live");
+  broken.launch("live", input, TOKEN, async () => hold(), () => {});
+  await setImmediate();
+  t += TRENCH_REVIEW_INTERVAL_MS;
+  assert.equal(broken.candidate([{ token: TOKEN }]), undefined, "still backed off: no reading releases nothing");
+  assert.match(broken.holdMemory(TOKEN, "MEME")!, /Since then: price unknown, last-hour volume unknown/, "and no reading prints no change");
+  assert.deepEqual(trenchMaterial(undefined, null), { priceUsd: null, h1VolumeUsd: null, m5Buyers: null });
+  assert.deepEqual(trenchMaterial(pool({ buckets: { ...emptyGeckoBuckets(), h1: { changePct: 1, volumeUsd: 5, buys: 1, sells: 1, buyers: 1, sellers: 1 }, m5: { changePct: 0, volumeUsd: 1, buys: 1, sells: 0, buyers: 3, sellers: 0 } } }), 0.5),
+    { priceUsd: 0.5, h1VolumeUsd: 5, m5Buyers: 3 });
 });
