@@ -256,6 +256,16 @@ describe("a reply never gives advice or a forecast in other words (red-team 2026
     assert.equal(reason("coingecko shows it up sharply today, volume ordinary. not a call. Say stop to opt out.", named), "ok");
   });
 
+  it("a call with no adjective is advice: the play, a buy, the move, the trade, the ones to own, a buy list (red-team 2026-10-12)", () => {
+    // Each admitted at 34ced01e, and posted beside "coingecko: $PEPE #30, mcap ~$4.2B, vol ~$900M, 24h +14.2%, 7d +31%."
+    for (const draft of ["coingecko shows it up sharply today. it's the play.", "coingecko shows it up sharply today. it's a buy.", "coingecko shows it up sharply today. it's the move.",
+      "coingecko shows it up sharply today, looks like the trade.", "the index shows a few coins standing out, the ones to own.", "the index shows a few coins standing out, the first one is the play.",
+      "the index shows a few coins standing out right now. my buy list for today.", "that's a steal at this point."]) {
+      assert.equal(reason(`${draft} Say stop to opt out.`, { kind: "reply", mode: "live", coins: [] }), "hype", draft);
+    }
+    assert.equal(reason("coingecko shows it up sharply today, volume ordinary. not a call. Say stop to opt out.", { kind: "reply", mode: "live", coins: [] }), "ok");
+  });
+
   it("handed what it looked up and told none of its buys, it names no coin it was not handed, credited to any source (red-team 2026-10-12)", () => {
     const looked: Partial<XGateCtx> = { kind: "reply", agentName: "Alan Al Dale", mode: "live", coins: [], buys: "none", named: true, lookedOnly: true,
       known: ["the public index shows liquidity is thin", "on-chain data shows buys a little ahead of sells over the last hour", "trencher"] };

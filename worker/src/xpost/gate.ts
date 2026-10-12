@@ -878,7 +878,12 @@ const COIN_ADVICE = new RegExp(
     String.raw`|still\s+early\s+(?:on|in|for)\s+(?:this|the|it|all|these|them)|(?:would|will|'d)\s+be\s+a\s+gift|a\s+gift\s+(?:here|at|from)|dips?\s+(?:to\s+buy|would\s+be|is\s+a|here)` +
     String.raw`|more\s+to\s+come|up\s+only|only\s+(?:goes|going)\s+up` +
     // A HOLDING RECOMMENDED WITHOUT A VERB OF ITS OWN (red-team 2026-10-12): "a nice one to have in the book".
-    String.raw`|(?:nice|good|great|solid|fine|safe)\s+one\s+to\s+(?:have|own|hold|keep)|to\s+have\s+in\s+(?:the|a|your|my|any)\s+(?:book|bag|portfolio|stack))\b`,
+    String.raw`|(?:nice|good|great|solid|fine|safe)\s+one\s+to\s+(?:have|own|hold|keep)|to\s+have\s+in\s+(?:the|a|your|my|any)\s+(?:book|bag|portfolio|stack)` +
+    // A CALL WITH NO ADJECTIVE (red-team 2026-10-12): beside "$PEPE #30 … 24h
+    // +14.2%", "it's the play", "it's a buy", "it's the move" and "looks like
+    // the trade" were admitted; only "solid play" or "top pick" were read.
+    String.raw`|(?:it'?s|its|is|that'?s|thats|this\s+is|looks?\s+like|seems?\s+like|feels?\s+like)\s+(?:the|a|an)\s+(?:play|move|buy|trade|bet|pick|steal|bargain|opportunity)` +
+    String.raw`|the\s+play|(?:the\s+)?ones?\s+to\s+(?:own|buy|hold|grab|get|watch|keep|have)|(?:buy|shopping|watch)\s*lists?)\b`,
   "i",
 );
 

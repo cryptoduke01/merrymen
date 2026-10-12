@@ -992,7 +992,9 @@ other owner's agent, and its posting and reply warnings, are unchanged.
   of the chain or as chat, drafted as before, and the gate refuses a
   forecast or a target in other words in any drafted answer (new highs, the
   next stop, set to, keep climbing, steam or legs left, still early on it, a
-  gift, more to come, up only).
+  gift, more to come, up only), or a call with no adjective ("it's the
+  play", "it's a buy", "it's the move", "looks like the trade", "the ones to
+  own", "my buy list": red-team 2026-10-12).
 - **What's hot** (`hotAsk`): only these whole questions, with at most two
   greeting words and a "today" / "right now" / "on robinhood chain" around
   them: "what's hot / trending / moving / pumping", "top gainers", "what

@@ -2239,14 +2239,16 @@ function majorsResearch(eth: { change24hPct?: number; change7dPct?: number } = {
         asked.push(`search:${query}`);
         return { failed: false, observedAt: NOW, hits: [
           { id: "ethereum", symbol: "ETH", name: "Ethereum", rank: 2 }, { id: "bitcoin-2", symbol: "BTC2", name: "Bitcoin 2", rank: null },
-          { id: "wojak", symbol: "WOJAK", name: "Wojak", rank: 1450 },
+          { id: "wojak", symbol: "WOJAK", name: "Wojak", rank: 1450 }, { id: "pepe", symbol: "PEPE", name: "Pepe", rank: 30 },
         ] };
       },
       async market(id) {
         asked.push(`market:${id}`);
         return id === "ethereum"
           ? { failed: false, observedAt: NOW, market: { id, symbol: "eth", name: "Ethereum", rank: 2, priceUsd: 3412.5, marketCapUsd: 411e9, volume24hUsd: 18.2e9, change24hPct: 1.24, change7dPct: -3.4, ...eth } }
-          : { failed: true, failure: "invalid-shape", market: null };
+          : id === "pepe"
+            ? { failed: false, observedAt: NOW, market: { id, symbol: "pepe", name: "Pepe", rank: 30, priceUsd: 0.00001, marketCapUsd: 4.2e9, volume24hUsd: 900e6, change24hPct: 14.2, change7dPct: 31 } }
+            : { failed: true, failure: "invalid-shape", market: null };
       },
     },
     resolveTicker: async (t) => { resolved.push(t); return null; },
@@ -2359,6 +2361,30 @@ test("a market answer never names a coin nothing looked up, credited to the inde
   fine.setInbox([tag({ text: ASK_CA })]);
   await fine.step();
   assert.equal((await fine.answers())[0]!.status, "posted");
+});
+
+test("majors: \"it's the play\" and every call without an adjective never stands beside a coin's figures, nor in any drafted answer (red-team 2026-10-12)", async (t) => {
+  // At 34ced01e, "how's pepe doing?" went out as "coingecko shows it up sharply today. it's the play. coingecko: $PEPE #30, mcap ~$4.2B, …",
+  // whether or not it had bought pepe; and "it's a buy.", "it's the move.", "looks like the trade." the same way.
+  const endings = ["it's the play", "it's a buy", "it's the move", "looks like the trade"];
+  const line = "coingecko: $PEPE #30, mcap ~$4.2B, vol ~$900M, 24h +14.2%, 7d +31%.";
+  for (const end of endings) {
+    for (const calls of [[CALL], []]) {
+      const w = await world(t, { env: RESEARCH_ON, research: majorsResearch().research, facts: { ...FACTS, calls }, answer: `coingecko shows it up sharply today. ${end}. Say stop to opt out.` });
+      w.setInbox([tag({ text: "@pine_stoat how's pepe doing?" })]);
+      await w.step();
+      assert.deepEqual(w.asked(), [], end);
+      const text = String(w.sends[0]?.text ?? "");
+      assert.ok(text.endsWith(`${line} say stop to opt out.`) && !text.includes(end), text);
+    }
+    // A drafted coin answer saying it is refused as advice.
+    const w = await world(t, { env: RESEARCH_ON, research: fakeResearch().research, answer: `the public index shows liquidity is thin. ${end}. Say stop to opt out.` });
+    w.setInbox([tag({ text: ASK_CA })]);
+    await w.step();
+    const [row] = await w.answers();
+    assert.equal(row!.status, "skipped", end);
+    assert.equal(row!.reason, "gate:hype", end);
+  }
 });
 
 test("majors: a copycat ticker gets no figures, and goes on as a coin of the chain", async (t) => {
