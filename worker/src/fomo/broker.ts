@@ -784,12 +784,14 @@ export function createDirectBroker(service: FomoService, tenant: string, opts: D
       const checked = validateBrokerReport(r, fixed);
       if (!checked.ok) {
         log(`fomo broker: report refused (${checked.reason})`);
-        return;
+        return false;
       }
       try {
         await service.report(fixed, checked.report, clock());
+        return true;
       } catch (e) {
         log(`fomo broker: report failed (${errorName(e)})`);
+        return false;
       }
     },
     configured() {
@@ -1100,9 +1102,11 @@ export function createIpcBroker(port: BrokerPort, opts: IpcBrokerOptions = {}): 
       },
     },
     async report(r) {
-      if (!isRecord(r)) return;
+      if (!isRecord(r)) return false;
       const { wire } = await request((id) => ({ fomo: 1, id, op: "report", report: r }), defaultTimeout);
-      if (wire.kind !== "result") log(`fomo broker: report not recorded (${wire.kind === "refused" ? wire.error : wire.kind})`);
+      if (wire.kind === "result") return true;
+      log(`fomo broker: report not recorded (${wire.kind === "refused" ? wire.error : wire.kind})`);
+      return false;
     },
     configured() {
       refreshConfigured();

@@ -231,19 +231,23 @@ function memoryCounters(): FollowCounters & { taken: number; day: string } {
   return c;
 }
 
-function recordingBroker(): FomoBroker & { reports: BrokerReport[] } {
+function recordingBroker(): FomoBroker & { reports: BrokerReport[]; answer: () => Promise<boolean | void> } {
   const reports: BrokerReport[] = [];
-  return {
+  const b: FomoBroker & { reports: BrokerReport[]; answer: () => Promise<boolean | void> } = {
     reports,
+    /** What the orchestrator answers a report: accepted, unless a test says otherwise. */
+    answer: async () => true,
     async call(tool) {
       return brokerFailureEnvelope(tool, "not-configured", "not configured", T0);
     },
     memory: { get: async () => null, set: async () => {}, clear: async () => {} },
     async report(r) {
       reports.push(r);
+      return b.answer();
     },
     configured: () => true,
   };
+  return b;
 }
 
 interface HarnessOpts {
@@ -1742,6 +1746,53 @@ describe("reports", () => {
       assert.equal(again, 10);
       assert.deepEqual(sent(h)[1]!.tokenKeys.slice(0, 2), [coin(20), coin(21)].map((c) => `eip155:4663:${c}`), "the two that waited go first");
       assert.equal(sent(h).length, 2);
+    });
+
+    it("a report the orchestrator did not accept gives its coins back, so the next review sends them again", async () => {
+      const turn = () => new Promise((r) => setImmediate(r));
+      const rk = (c: string) => `eip155:4663:${c}`;
+      const answers: [string, () => Promise<boolean | void>][] = [
+        ["refused, rate-limited, timed out or unanswered", async () => false],
+        ["a wrapper that cannot tell", async () => undefined],
+        ["a broker that rejects after all", async () => Promise.reject(new Error("closed"))],
+      ];
+      for (const [why, answer] of answers) {
+        const h = liveAgent();
+        h.tick();
+        const b = h.broker as ReturnType<typeof recordingBroker>;
+        b.answer = answer;
+        assert.equal(h.child.reportReviewCandidates([coin(1), coin(2)], LISTED), 2, why);
+        await turn();
+        h.t.now += 60_000;
+        b.answer = async () => true;
+        assert.equal(h.child.reportReviewCandidates([coin(1), coin(2), coin(3)], LISTED), 3, `${why}: sent again inside the window`);
+        assert.deepEqual([...sent(h)[1]!.tokenKeys].sort(), [coin(1), coin(2), coin(3)].map(rk).sort(), why);
+        await turn();
+        h.t.now += 60_000;
+        assert.equal(h.child.reportReviewCandidates([coin(1), coin(2), coin(3)], LISTED), 0, `${why}: accepted, so not again inside its window`);
+      }
+      // A report still in flight keeps its coins: the next review does not send them twice.
+      const h = liveAgent();
+      h.tick();
+      const b = h.broker as ReturnType<typeof recordingBroker>;
+      let answer: (v: boolean) => void = () => {};
+      b.answer = () => new Promise<boolean>((r) => (answer = r));
+      assert.equal(h.child.reportReviewCandidates([coin(1)], LISTED), 1);
+      await turn();
+      assert.equal(h.child.reportReviewCandidates([coin(1)], LISTED), 0, "in flight: not sent twice");
+      answer(false);
+      await turn();
+      b.answer = async () => true;
+      assert.equal(h.child.reportReviewCandidates([coin(1)], LISTED), 1, "and once it fails, it goes again");
+      // A broker that throws outright gives the room back at once.
+      const thrower = liveAgent();
+      thrower.tick();
+      (thrower.broker as ReturnType<typeof recordingBroker>).report = () => {
+        throw new Error("synchronous");
+      };
+      assert.equal(thrower.child.reportReviewCandidates([coin(1)], LISTED), 0);
+      (thrower.broker as ReturnType<typeof recordingBroker>).report = async () => true;
+      assert.equal(thrower.child.reportReviewCandidates([coin(1)], LISTED), 1);
     });
 
     it("send nothing off the allowlist, on paper, off a fast Trencher, with research off, without a broker, or with Fomo off", () => {

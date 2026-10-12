@@ -121,6 +121,23 @@ export class ReviewCandidateWindow {
     return out;
   }
 
+  /**
+   * UNDO AN ADMISSION THAT WAS NEVER DELIVERED (the report carrying it was
+   * refused, never sent or never answered), so the next offer sends these
+   * coins again, and first: forgotten, they rank as never admitted. Only the
+   * admission made at `at` is undone; a coin admitted again since keeps its
+   * newer admission. Admitting before sending and forgetting on failure, rather
+   * than admitting on success, keeps a report still in flight from being sent
+   * twice by the next review.
+   */
+  forget(keys: readonly string[], at: number): void {
+    if (!Array.isArray(keys)) return;
+    for (const k of keys) {
+      if (this.inWindow.get(k) === at) this.inWindow.delete(k);
+      if (this.last.get(k) === at) this.last.delete(k);
+    }
+  }
+
   carried(now: number): ReviewCandidate[] {
     if (!finiteTime(now)) return [];
     return [...this.last]

@@ -2938,8 +2938,14 @@ export class FomoChild {
    * researched as held), at most REVIEW_CANDIDATES.perWindow new coins per
    * window; a coin named again inside its window is not sent again.
    *
+   * SENT MEANS ACCEPTED. The coins take their room in the window when the
+   * report goes out (so a report still in flight is not sent twice), and give
+   * it back unless the orchestrator accepts it (FomoBroker.report resolves
+   * true): a full store lane, a timeout or a channel with nobody answering yet
+   * would otherwise lose them for a whole window while nothing was researched.
+   *
    * Research only: nothing here is a nomination, a gate or a size. Never
-   * awaited, never throws. Returns how many coins were sent (tests, logs).
+   * awaited, never throws. Returns how many coins went out (tests, logs).
    */
   reportReviewCandidates(tokens: readonly string[], env: NodeJS.ProcessEnv = process.env): number {
     if (this.isOff()) return 0;
@@ -2955,7 +2961,17 @@ export class FomoChild {
       const offered = (Array.isArray(tokens) ? tokens : []).map(lower).filter((a) => tradableCoin(a) && !this.held.has(a));
       const fresh = this.reviewCandidates.admit([...new Set(offered)].map(robinhoodKey), now).slice(0, REVIEW_CANDIDATES.perWindow);
       if (fresh.length === 0) return 0;
-      void broker.report({ kind: "review-candidates", tokenKeys: fresh, atMs: now }).catch(() => {});
+      const giveBack = (): void => this.reviewCandidates.forget(fresh, now);
+      let sent: Promise<boolean | void>;
+      try {
+        sent = Promise.resolve(broker.report({ kind: "review-candidates", tokenKeys: fresh, atMs: now }));
+      } catch {
+        giveBack();
+        return 0;
+      }
+      void sent.then((accepted) => {
+        if (accepted !== true) giveBack();
+      }, giveBack);
       return fresh.length;
     } catch (e) {
       this.once(`review-candidates:${e instanceof Error ? e.name : "error"}`, `[fomo] review candidates not reported (${e instanceof Error ? e.name : "error"})`);

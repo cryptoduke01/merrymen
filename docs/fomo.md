@@ -468,7 +468,12 @@ pause and `shouldEnter` screen. The child drops the following before anything is
 The report is a `BrokerReport` of kind `"review-candidates"`. On both sides of the IPC
 channel, at most 10 distinct coins are accepted per rolling 10 minutes. A coin named again
 inside its window is a duplicate, not a new coin. When a review rotates through more than
-10 coins, coins never sent go first. The broker refuses a whole report if it names any
+10 coins, coins never sent go first. A coin counts as sent only once the orchestrator has
+accepted the report (`FomoBroker.report` resolves `true`). If the report is refused,
+rate-limited on the store lane, times out, or gets no answer (a child spawned before the
+orchestrator's Fomo runtime attached), its coins are given back and the next review sends
+them again. While a report is in flight its coins keep their place, so they are not sent
+twice. The broker refuses a whole report if it names any
 non-Robinhood key, names more than 10 coins, or names none. The orchestrator records the
 coins under the reporting child's own tenant, in memory. That is enough because a child
 reports to the replica that spawned it, and that replica writes its file. After a lease

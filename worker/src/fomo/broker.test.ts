@@ -719,11 +719,44 @@ describe("IPC broker round trip", () => {
     assert.equal(svc.reports[0]!.tenant, ORCH_TENANT);
     await broker.report({ kind: "held-tokens", tokenKeys: [RH_KEY, "eip155:4663:not-an-address"], atMs: NOW });
     assert.equal(svc.reports.length, 1, "a held-tokens report with a forged key is refused whole");
-    await broker.report({ kind: "review-candidates", tokenKeys: [RH_KEY, SOL_KEY], atMs: NOW });
+    assert.equal(await broker.report({ kind: "review-candidates", tokenKeys: [RH_KEY, SOL_KEY], atMs: NOW }), false, "refused: not accepted");
     assert.equal(svc.reports.length, 1, "a review-candidates report naming another chain is refused whole");
-    await broker.report({ kind: "review-candidates", tokenKeys: [RH_KEY], atMs: NOW });
+    assert.equal(await broker.report({ kind: "review-candidates", tokenKeys: [RH_KEY], atMs: NOW }), true, "accepted");
     assert.equal(svc.reports.length, 2);
     assert.equal(svc.reports[1]!.tenant, ORCH_TENANT, "stamped with the child's own tenant");
+  });
+
+  it("a report resolves true only when the orchestrator accepted it: never on a full lane, a timeout or a closed channel", async () => {
+    const report: BrokerReport = { kind: "review-candidates", tokenKeys: [RH_KEY], atMs: NOW };
+    // The orchestrator's store lane: one in flight, the next refused as rate-limited.
+    const lane = setup({ maxInFlight: 1 });
+    await flush();
+    const slow = gate();
+    lane.svc.report = async () => {
+      await slow.wait;
+    };
+    const first = lane.broker.report(report);
+    await flush();
+    assert.equal(await lane.broker.report(report), false, "rate-limited");
+    slow.open();
+    assert.equal(await first, true);
+    // Nobody answering (a child spawned before the orchestrator's Fomo runtime attached).
+    const silent: BrokerPort = { send: () => true, onMessage: () => () => {}, connected: () => true };
+    const quiet = createIpcBroker(silent, { timeoutMs: 20 });
+    assert.equal(await quiet.report(report), false, "timed out");
+    quiet.close();
+    assert.equal(await quiet.report(report), false, "closed");
+    const gone: BrokerPort = { send: () => true, onMessage: () => () => {}, connected: () => false };
+    assert.equal(await createIpcBroker(gone).report(report), false, "disconnected");
+    // In process: refused, accepted, or the service failing.
+    const svc = new FakeService();
+    const direct = createDirectBroker(svc, ORCH_TENANT, { now: () => NOW });
+    assert.equal(await direct.report({ ...report, tokenKeys: [SOL_KEY] }), false);
+    assert.equal(await direct.report(report), true);
+    svc.report = async () => {
+      throw new Error("store down");
+    };
+    assert.equal(await direct.report(report), false);
   });
 
   it("fails fast as unavailable when disconnected, and on disconnect mid-request", async () => {

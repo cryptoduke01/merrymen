@@ -124,8 +124,16 @@ export interface FomoBroker {
     set(conversationKey: string, json: string): Promise<void>;
     clear(conversationKey: string): Promise<void>;
   };
-  /** Persist a tenant-private fact. Best effort; never throws. */
-  report(r: BrokerReport): Promise<void>;
+  /**
+   * Persist a tenant-private fact. Best effort; never throws. Resolves `true`
+   * when the host accepted the report (validated it and handed it to its
+   * service), `false` when it was refused, never sent or never answered (the
+   * in-flight cap, a rate limit, a timeout, a closed channel). A sender that
+   * keeps its own "already sent" state (fomo-child.ts reportReviewCandidates)
+   * keeps it only on `true`. A wrapper that cannot tell resolves undefined,
+   * which such a sender treats as not accepted.
+   */
+  report(r: BrokerReport): Promise<boolean | void>;
   /** Whether a provider key is configured at all (a missing key answers "not configured", honestly). */
   configured(): boolean;
 }

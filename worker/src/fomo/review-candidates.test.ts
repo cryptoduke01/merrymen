@@ -20,6 +20,18 @@ describe("ReviewCandidateWindow", () => {
     assert.deepEqual(w.admit([key(40)], NOW + 10 * MIN), [key(40)], "two aged out at the ten-minute mark; one is taken");
   });
 
+  it("forget gives an undelivered admission back, and only that admission", () => {
+    const w = new ReviewCandidateWindow();
+    assert.deepEqual(w.admit(keys(1, 10), NOW), keys(1, 10));
+    w.forget([key(1), key(2)], NOW);
+    assert.deepEqual(w.carried(NOW).map((c) => c.tokenKey).sort(), keys(3, 8).sort(), "never carried for research");
+    assert.deepEqual(w.admit([key(30), key(1), key(2)], NOW + MIN), [key(30), key(1)], "room again, and the given-back coins rank as never admitted");
+    // An admission made later is not undone by forgetting an earlier one.
+    w.forget([key(1)], NOW);
+    assert.deepEqual(w.admit([key(1)], NOW + 2 * MIN), [], "key(1)'s newer admission stands");
+    w.forget("nope" as unknown as string[], NOW);
+  });
+
   it("ignores what is not a key", () => {
     const w = new ReviewCandidateWindow();
     assert.deepEqual(w.admit(["", 7 as unknown as string, null as unknown as string, key(1)], NOW), [key(1)]);
