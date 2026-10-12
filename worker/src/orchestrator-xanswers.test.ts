@@ -2490,12 +2490,27 @@ function listingsOf(pools: GeckoPool[], unlisted: readonly string[] = []) {
     .map((p) => ({ address: p.tokenAddress, id: `${poolSymbol(p).toLowerCase()}-robinhood`, symbol: poolSymbol(p).toLowerCase(), name: poolSymbol(p), rank: 4000 })) });
 }
 
-function hotResearch(pools: GeckoPool[], trending: string[] = [], o: { unlisted?: string[] } = {}) {
+/**
+ * CoinGecko's biggest coins as /coins/markets lists them, a slice of the real
+ * top two hundred and fifty (symbol, name, rank): the names no chain coin in
+ * what's hot may go by (red-team 2026-10-12).
+ */
+const TOP_COINS_FAKE = ([["BTC", "Bitcoin"], ["ETH", "Ethereum"], ["USDT", "Tether"], ["XRP", "XRP"], ["BNB", "BNB"], ["SOL", "Solana"], ["USDC", "USDC"],
+  ["DOGE", "Dogecoin"], ["TRX", "TRON"], ["ADA", "Cardano"], ["HYPE", "Hyperliquid"], ["LINK", "Chainlink"], ["SUI", "Sui"], ["XLM", "Stellar"],
+  ["WLFI", "World Liberty Financial"], ["MNT", "Mantle"], ["S", "Sonic"], ["LDO", "Lido DAO"], ["ASTER", "Aster"], ["XDC", "XDC Network"], ["NEXO", "NEXO"],
+  ["CRV", "Curve DAO Token"], ["MORPHO", "Morpho"], ["WIF", "dogwifhat"], ["PEPE", "Pepe"], ["TAO", "Bittensor"], ["ARB", "Arbitrum"],
+  ["ENS", "Ethereum Name Service"], ["AERO", "Aerodrome Finance"], ["COMP", "Compound"], ["SNX", "Synthetix Network"], ["LUNA", "Terra"], ["HNT", "Helium"],
+  ["XPL", "Plasma"], ["FLR", "Flare"], ["JST", "JUST"], ["TIA", "Celestia"], ["LINEA", "Linea"], ["SUSHI", "Sushi"]] as const)
+  .map(([symbol, name], i) => ({ id: name.toLowerCase().replace(/\s+/g, "-"), symbol: symbol.toLowerCase(), name, rank: i + 1 }));
+const TOP_READ = async () => ({ coins: TOP_COINS_FAKE, failed: false });
+
+function hotResearch(pools: GeckoPool[], trending: string[] = [], o: { unlisted?: string[]; top?: "fail" } = {}) {
   const reads: string[] = [];
   const research = createXResearch({
     hotPools: async () => { reads.push("pools"); return { pools, failed: false }; },
     majors: { configured: () => true, search: async () => ({ hits: [], failed: true }), market: async () => ({ market: null, failed: true }),
-      trending: async () => { reads.push("trending"); return { coins: trending.map((s, i) => ({ id: s.toLowerCase(), symbol: s, name: s, rank: 20 + i })), failed: false }; } },
+      trending: async () => { reads.push("trending"); return { coins: trending.map((s, i) => ({ id: s.toLowerCase(), symbol: s, name: s, rank: 20 + i })), failed: false }; },
+      top: o.top === "fail" ? async () => ({ coins: [], failed: true, failure: "http-503" }) : TOP_READ },
     chainListings: listingsOf(pools, o.unlisted),
   });
   return { research, reads };
@@ -2568,7 +2583,7 @@ function hotWithFomo(pools: GeckoPool[], crowd: string[] = []) {
   return createXResearch({
     hotPools: async () => ({ pools, failed: false }),
     majors: { configured: () => true, search: async () => ({ hits: [], failed: true }), market: async () => ({ market: null, failed: true }),
-      trending: async () => ({ coins: [], failed: false }) },
+      trending: async () => ({ coins: [], failed: false }), top: TOP_READ },
     chainListings: listingsOf(pools),
     fomo: () => broker,
   });
@@ -2862,6 +2877,9 @@ function fakeCoinGecko(t: TestContext, pools: { name: string; change: number; vo
       return Response.json({ data: pools.map((p, i) => ({ id: `robinhood_${token(i)}`, type: "token",
         attributes: { address: token(i), name: p.name, symbol: p.name, coingecko_coin_id: listed.includes(p.name) ? `${p.name.toLowerCase()}-robinhood` : null } })) });
     }
+    if (url.includes("/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=250&page=1")) {
+      return Response.json(TOP_COINS_FAKE.map((c) => ({ id: c.id, symbol: c.symbol, name: c.name, market_cap_rank: c.rank })));
+    }
     if (url.includes("/coins/markets")) return Response.json(listed.map((name) => ({ id: `${name.toLowerCase()}-robinhood`, symbol: name.toLowerCase(), name, market_cap_rank: 3100 })));
     throw new Error(`not faked: ${url}`);
   }) as typeof globalThis.fetch;
@@ -2886,7 +2904,7 @@ test("what's hot names no chain coin coingecko does not list by its contract: a 
     assert.equal(row!.status, "posted", names.join());
     assert.deepEqual(w.sends.map((s) => s.text), [hotNoneAnswers(MENTION, { lower: true })[0]], names.join());
     for (const n of names) assert.ok(!row!.body.includes(`$${n}`), `${n}: ${row!.body}`);
-    assert.ok(!urls.some((u) => u.includes("/coins/markets")), "no coin id, no market read");
+    assert.ok(!urls.some((u) => u.includes("/coins/markets?vs_currency=usd&ids=")), "no coin id, no market read");
   }
   // Names no screen knows, unlisted: asked about by contract, and never shown.
   const urls = fakeCoinGecko(t, ["ZORBLAT", "QUIXEL", "FENDRO"].map((name, i) => ({ name, ...figures[i]! })), []);
@@ -2904,6 +2922,37 @@ test("what's hot names no chain coin coingecko does not list by its contract: a 
   assert.ok(hotWords({ coins: 1, lead: { dir: "up", size: "sharply" } }).includes(wordsBeforeLine(text) ?? ""), text);
   assert.match(text, / geckoterminal robinhood: trending \$CHUMP 24h \+88% vol ~\$940k\. say stop to opt out\.$/, text);
   assert.doesNotMatch(text, /FUHRER|NIGLET/);
+});
+
+test("what's hot never shows a chain coin under a big coin's ticker or name, read off coingecko's own biggest coins, and none at all without them (red-team 2026-10-12)", async (t) => {
+  // At fbcf8756: "... geckoterminal robinhood: trending $WLFI 24h +412% vol ~$2.3M, $MNT 24h +88% vol ~$940k, $SONIC 24h -12.2% vol ~$310k.",
+  // with Fomo "fomo: most bought $WLFI"; under "what's moving on robinhood chain?" LIDO/MANTLE/ASTER and HYPEX/XRPAI/WIFX, and the rest below.
+  const runs: { ask: string; names: string[] }[] = [
+    { ask: "@pine_stoat what's hot?", names: ["WLFI", "MNT", "SONIC"] },
+    { ask: "@pine_stoat what's moving on robinhood chain?", names: ["LIDO", "MANTLE", "ASTER"] },
+    { ask: "@pine_stoat what's moving on robinhood chain?", names: ["HYPEX", "XRPAI", "WIFX"] },
+    { ask: "@pine_stoat what's hot?", names: ["XDC", "NEXO", "FLR"] },
+    { ask: "@pine_stoat what's hot?", names: ["ENS", "CRV", "AERO"] },
+    { ask: "@pine_stoat what's hot?", names: ["MORPHO", "COMP", "SNX"] },
+    { ask: "@pine_stoat what's hot?", names: ["LUNA", "HNT", "XPL"] },
+    { ask: "@pine_stoat what's hot?", names: ["CURVE", "CELESTIA", "JST"] },
+    { ask: "@pine_stoat what's hot?", names: ["ASTER", "LINEA", "WLFI"] },
+  ];
+  for (const { ask, names } of runs) {
+    const pools = [...names.map((n, i) => namedPool(n, i + 1, [412.4, 88.04, -12.2][i]!, [2.31e6, 940_000, 310_000][i]!)), namedPool("CHUMP", 9, 7, 150_000)];
+    const w = await world(t, { env: { ...RESEARCH_ON, MERRYMEN_XPOST_FOMO: "1" }, research: hotWithFomo(pools, [names[0]!]), facts: { ...FACTS, name: "Alan Al Dale", calls: [] } });
+    w.setInbox([tag({ text: ask })]);
+    await w.step();
+    const text = String(w.sends[0]?.text ?? "");
+    assert.match(text, /geckoterminal robinhood: trending \$CHUMP 24h \+7% vol ~\$150k\./, text);
+    for (const n of names) assert.ok(!text.includes(`$${n}`), `${n}: ${text}`);
+    assert.doesNotMatch(text, /fomo: most bought/, text);
+  }
+  // CoinGecko's biggest coins unread: no chain coin is named at all, only code's no-read line.
+  const w = await world(t, { env: RESEARCH_ON, research: hotResearch([namedPool("CHUMP", 1, 41.2, 1.1e6)], [], { top: "fail" }).research });
+  w.setInbox([tag({ text: "@pine_stoat what's hot?" })]);
+  await w.step();
+  assert.deepEqual(w.sends.map((s) => s.text), [hotUnreadAnswers(MENTION, { lower: true })[0]]);
 });
 
 test("what's hot never shows a coin under a name its own buys go by, a copy at another contract or not, nor as fomo's most bought, under its buy post or anywhere (red-team 2026-10-12)", async (t) => {

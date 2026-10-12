@@ -180,6 +180,31 @@ export async function readCoinTrending(o: CoinReadOptions): Promise<CoinTrending
   }, (failure) => ({ coins: [], failed: true, failure }), { lane: LANE, route, budgetMs: o.timeoutMs, ...(o.fleet ? { fleet: o.fleet } : {}) });
 }
 
+// ── the biggest coins, for the copycat screen ───────────────────────────────
+
+/** CoinGecko's biggest coins by market cap, as the copycat screen reads them. */
+export interface CoinTopRead extends FeedResult { coins: CoinHit[] }
+/** How many of them: one page of /coins/markets. */
+export const TOP_COINS = 250;
+
+/**
+ * COINGECKO'S BIGGEST COINS, BY MARKET CAP (red-team 2026-10-12): one page of
+ * /coins/markets, the symbols and names a chain coin may not trend under
+ * ("$WLFI", "$MNT", "$SONIC" from a chain memecoin read as World Liberty
+ * Financial, Mantle and Sonic moving). An answer reads it at most once a day
+ * (orchestrator-xpost-research.ts); a page with no coin on it is a failure,
+ * never an empty list: no list is no screen, and the screen fails closed.
+ */
+export async function readTopCoins(o: CoinReadOptions): Promise<CoinTopRead> {
+  const route = `/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=${TOP_COINS}&page=1`;
+  return cachedCoinGecko<CoinTopRead>(`top:${TOP_COINS}`, async (headers, base, remainingMs) => {
+    const r = await getMain(base, headers, route, Math.min(o.timeoutMs, remainingMs));
+    if (!r.ok) return { coins: [], failed: true, failure: r.failure, ...(r.retryAfterMs ? { retryAfterMs: r.retryAfterMs } : {}) };
+    const coins = Array.isArray(r.body) ? r.body.slice(0, TOP_COINS).map(hitOf).filter((h): h is CoinHit => h !== null) : [];
+    return coins.length ? { coins, failed: false, observedAt: r.observedAt } : { coins: [], failed: true, failure: "invalid-shape" };
+  }, (failure) => ({ coins: [], failed: true, failure }), { lane: LANE, route, budgetMs: o.timeoutMs, ...(o.fleet ? { fleet: o.fleet } : {}) });
+}
+
 // ── a chain coin CoinGecko lists, by its address ────────────────────────────
 
 /**

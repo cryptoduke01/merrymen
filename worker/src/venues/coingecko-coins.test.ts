@@ -6,7 +6,7 @@
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import {
-  MAJORS_MAX_RANK, coinQuery, parseCoinMarket, parseCoinSearch, parseCoinTrending, parseTokenCoinIds, pickMajor, readChainListings, readCoinMarket, readCoinTrending,
+  MAJORS_MAX_RANK, coinQuery, parseCoinMarket, parseCoinSearch, parseCoinTrending, parseTokenCoinIds, pickMajor, readChainListings, readCoinMarket, readCoinTrending, readTopCoins,
   searchCoinList, type CoinHit,
 } from "./coingecko-coins";
 import { resetGeckoFeedsForTest } from "./geckoterminal";
@@ -198,6 +198,23 @@ describe("read on the fleet's CoinGecko Pro lane, and only with its key", () => 
     const refused = await readChainListings([A], { timeoutMs: 4000 });
     assert.equal(refused.failed, true);
     assert.deepEqual(refused.listings, []);
+  });
+
+  it("coingecko's biggest coins: one page of markets by cap; a page with no coin on it is a failure, never an empty list (red-team 2026-10-12)", async () => {
+    const urls: string[] = [];
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      urls.push(String(input));
+      return Response.json([{ id: "world-liberty-financial", symbol: "wlfi", name: "World Liberty Financial", market_cap_rank: 30 }, { id: "Bad Id!", symbol: "x", name: "x" }]);
+    }) as typeof globalThis.fetch;
+    const r = await readTopCoins({ timeoutMs: 4000 });
+    assert.equal(r.failed, false);
+    assert.deepEqual(r.coins, [{ id: "world-liberty-financial", symbol: "wlfi", name: "World Liberty Financial", rank: 30 }]);
+    assert.deepEqual(urls, ["https://pro-api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=250&page=1"]);
+    resetGeckoFeedsForTest({ now: () => now, sleep: async (ms) => { now += ms; } });
+    globalThis.fetch = (async () => Response.json([])) as typeof globalThis.fetch;
+    assert.equal((await readTopCoins({ timeoutMs: 4000 })).failure, "invalid-shape");
+    delete process.env.MERRYMEN_COINGECKO_PRO_API_KEY;
+    assert.equal((await readTopCoins({ timeoutMs: 4000 })).failure, "no-pro-key");
   });
 
   it("only a query or a key that is one ever reaches the URL", async () => {

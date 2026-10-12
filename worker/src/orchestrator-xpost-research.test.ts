@@ -32,6 +32,8 @@ import {
   hotAsk,
   hotShaped,
   ownCoinTicker,
+  topCopycat,
+  topCopyOf,
   hotPhrases,
   hotScreen,
   majorAsk,
@@ -1310,10 +1312,16 @@ function pool(n: number, over: Partial<GeckoPool> = {}): GeckoPool {
 
 /** A pool's own symbol, as its name shows it. */
 const poolSymbol = (p: GeckoPool): string => p.name.split(" / ")[0]!;
+/** A slice of CoinGecko's biggest coins, as /coins/markets lists them: the names no chain coin in what's hot may go by. */
+const TOP: CoinHit[] = ([["BTC", "Bitcoin"], ["ETH", "Ethereum"], ["SOL", "Solana"], ["XRP", "XRP"], ["DOGE", "Dogecoin"], ["HYPE", "Hyperliquid"], ["WIF", "dogwifhat"],
+  ["WLFI", "World Liberty Financial"], ["MNT", "Mantle"], ["S", "Sonic"], ["LDO", "Lido DAO"], ["ASTER", "Aster"], ["CRV", "Curve DAO Token"], ["PEPE", "Pepe"],
+  ["TAO", "Bittensor"], ["LINEA", "Linea"]] as const).map(([symbol, name], i) => ({ id: name.toLowerCase().replace(/\s+/g, "-"), symbol: symbol.toLowerCase(), name, rank: i + 1 }));
 
 function hotFake(o: { pools?: GeckoPool[]; poolsFail?: string; crowd?: { address: string; symbol: string }[]; trending?: CoinHit[]; cgOff?: boolean; fomo?: boolean;
   /** CoinGecko listing each pool's contract under its pool's symbol, ranked, but these symbols; or "fail" the read. Default: every pool listed. */
-  unlisted?: string[]; listings?: "fail"; } = {}) {
+  unlisted?: string[]; listings?: "fail";
+  /** CoinGecko's biggest coins: TOP by default, or "fail" the read. */
+  top?: CoinHit[] | "fail"; } = {}) {
   const asked: string[] = [];
   const listed: string[][] = [];
   const fomoCalls: { tool: string; args: Record<string, unknown>; surface: string }[] = [];
@@ -1333,6 +1341,7 @@ function hotFake(o: { pools?: GeckoPool[]; poolsFail?: string; crowd?: { address
       search: async () => ({ hits: [], failed: true, failure: "unused" }),
       market: async () => ({ market: null, failed: true, failure: "unused" }),
       trending: async () => { asked.push("trending"); return { coins: o.trending ?? [], failed: false }; },
+      top: async () => { asked.push("top"); return o.top === "fail" ? { coins: [], failed: true, failure: "http-503" } : { coins: o.top ?? TOP, failed: false }; },
     },
     chainListings: async (addresses) => {
       asked.push("listings");
@@ -1362,6 +1371,26 @@ describe("what's hot: the chain's trending coins past the fleet's floors, fomo's
     }
     assert.equal(classifyTag("what's hot?").kind, "hot");
     assert.equal(namesACoin({ text: "what's hot?", intent: { kind: "hot" }, address: null }), false, "it names no coin");
+  });
+
+  it("never a big coin's ticker or name, or one built on it, read off coingecko's own biggest coins; and none without them (red-team 2026-10-12)", async () => {
+    const top = topCopyOf(TOP);
+    for (const t of ["WLFI", "MNT", "SONIC", "LIDO", "MANTLE", "ASTER", "HYPEX", "XRPAI", "WIFX", "CURVE", "LINEA", "BABYWIF", "SOLANAX", "BITTENSOR", "WORLDCAT", "S"]) {
+      assert.ok(topCopycat(t, top), t);
+    }
+    for (const t of ["CHUMP", "COINA", "QRTZ", "ZAPX", "FROGGY", "MOLT"]) assert.equal(topCopycat(t, top), false, t);
+    const pools = [pool(1, { name: "WLFI / WETH 1%" }), pool(2, { name: "MANTLE / WETH 1%" }), pool(3, { name: "HYPEX / WETH 1%" }), pool(4, { name: "CHUMP / WETH 1%" })];
+    const b = await hotFake({ pools }).research.gather(input({ kind: "hot" }));
+    assert.deepEqual(b.figures, [{ kind: "pools", coins: [{ symbol: "CHUMP", change24hPct: 12, volume24hUsd: 400_000 }] }]);
+    // Unread: no read at all; read once, kept a day.
+    const down = await hotFake({ pools, top: "fail" }).research.gather(input({ kind: "hot" }));
+    assert.equal(down.figures, undefined);
+    assert.equal(down.hot, undefined);
+    assert.ok(down.notes.includes("top-http-503"));
+    const h = hotFake({ pools });
+    await h.research.gather(input({ kind: "hot" }));
+    await h.research.gather(input({ kind: "hot" }, { xUserId: "222" }));
+    assert.equal(h.asked.filter((a) => a === "top").length, 1);
   });
 
   it("never a coin under a name its own buys go by, any contract, nor as fomo's most bought (red-team 2026-10-12)", async () => {
@@ -1460,14 +1489,14 @@ describe("what's hot: the chain's trending coins past the fleet's floors, fomo's
     }
   });
 
-  it("a bundle: three coins, fomo's most bought among the screened, coingecko's list inside the rank cap; words and figures, four lookups", async () => {
+  it("a bundle: three coins, fomo's most bought among the screened, coingecko's list inside the rank cap; words and figures, five lookups", async () => {
     const pools = [pool(1, { change24hPct: 42.07, volume24hUsd: 1.21e6 }), pool(2, { change24hPct: -8.3, volume24hUsd: 310_400 }), pool(3), pool(4, { volume24hUsd: 90_000 })];
     const h = hotFake({ pools, fomo: true,
       crowd: [{ address: pools[3]!.tokenAddress, symbol: "IGNORED" }, { address: `0x${"77".repeat(20)}`, symbol: "NOTSCREENED" }, { address: pools[1]!.tokenAddress, symbol: "x" }],
       trending: [{ id: "pepe", symbol: "PEPE", name: "Pepe", rank: 30 }, { id: "smol", symbol: "SMOL", name: "Smol", rank: 900 }, { id: "tao", symbol: "TAO", name: "Bittensor", rank: 40 }, { id: "x", symbol: "🐸", name: "x", rank: 5 }] });
     const b = await h.research.gather(input({ kind: "hot" }, { fomo: true }));
-    assert.deepEqual(h.asked.sort(), ["listings", "pools", "trending"]);
-    assert.equal(b.lookups, 4);
+    assert.deepEqual(h.asked.sort(), ["listings", "pools", "top", "trending"]);
+    assert.equal(b.lookups, 5);
     assert.deepEqual(h.listed, [pools.map((p) => p.tokenAddress)], "only the screened coins' contracts are asked about");
     assert.deepEqual(h.fomoCalls.map((c) => [c.tool, c.args.token, c.args.chain, c.surface]), [["fomo_get_token_activity", null, "robinhood", "x-answer"]]);
     assert.deepEqual(b.figures, [
@@ -1529,7 +1558,7 @@ describe("what's hot: the chain's trending coins past the fleet's floors, fomo's
     // Listed with no rank, or under another symbol than its pool shows: not vouched for either.
     const pools = [pool(1), pool(2), pool(3)];
     const research = createXResearch({ hotPools: async () => ({ pools, failed: false }),
-      majors: { configured: () => true, search: async () => ({ hits: [], failed: true }), market: async () => ({ market: null, failed: true }), trending: async () => ({ coins: [], failed: false }) },
+      majors: { configured: () => true, search: async () => ({ hits: [], failed: true }), market: async () => ({ market: null, failed: true }), trending: async () => ({ coins: [], failed: false }), top: async () => ({ coins: TOP, failed: false }) },
       chainListings: async () => ({ failed: false, listings: [
         { address: pools[0]!.tokenAddress, id: "coina", symbol: "COINA", name: "Coin A", rank: null },
         { address: pools[1]!.tokenAddress, id: "other", symbol: "OTHER", name: "Other", rank: 900 },
@@ -1604,20 +1633,20 @@ describe("majors and what's hot spend the research allowances, and never wait pa
   it("the hour's index lookups across X accounts (MERRYMEN_XPOST_RESEARCH_PER_HOUR) cap majors and what's hot together", async () => {
     const asked: string[] = [];
     const research = createXResearch({
-      lookupsPerHour: 4,
+      lookupsPerHour: 5,
       majors: { configured: () => true, search: async () => { asked.push("search"); return { hits: SEARCH_HITS, failed: false }; },
-        market: async () => { asked.push("market"); return { market: ETH_MARKET, failed: false }; }, trending: async () => { asked.push("trending"); return { coins: [], failed: false }; } },
+        market: async () => { asked.push("market"); return { market: ETH_MARKET, failed: false }; }, trending: async () => { asked.push("trending"); return { coins: [], failed: false }; }, top: async () => { asked.push("top"); return { coins: TOP, failed: false }; } },
       hotPools: async () => { asked.push("pools"); return { pools: [pool(1)], failed: false }; },
       chainListings: async () => { asked.push("listings"); return { failed: false, listings: [{ address: pool(1).tokenAddress, id: "coina", symbol: "COINA", name: "Coin A", rank: 3000 }] }; },
       now: () => Date.now(),
     });
     assert.ok((await research.gather(input({ kind: "major", query: "eth", fallback: null }, { xUserId: "1" }))).figures);
     const hot = await research.gather(input({ kind: "hot" }, { xUserId: "2" }));
-    assert.deepEqual(asked, ["search", "market", "pools", "listings"], "the fourth lookup was the hour's last: no coingecko list");
+    assert.deepEqual(asked, ["search", "market", "pools", "listings", "top"], "the fifth lookup was the hour's last: no coingecko list");
     assert.deepEqual(hot.figures?.map((s) => s.kind), ["pools"]);
     assert.ok(hot.notes.includes("index-busy"));
     const after = await research.gather(input({ kind: "major", query: "eth", fallback: null }, { xUserId: "3" }));
     assert.deepEqual(after.facts, []);
-    assert.equal(asked.length, 4, "nothing more this hour");
+    assert.equal(asked.length, 5, "nothing more this hour");
   });
 });

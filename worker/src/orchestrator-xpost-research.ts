@@ -68,7 +68,7 @@ import { coinNamedIn, type AnswerIntentKind } from "./xpost/writer";
 import { asksAboutACoin, everydayWord, nameLikeWords } from "./xpost/words";
 import { cleanTicker, type FiguresSpec } from "./xpost/figures";
 import { moveOf, type HotRead, type MajorRead } from "./xpost/market";
-import { coinQuery, LISTINGS_MAX, MAJORS_MAX_RANK, pickMajor, readChainListings, readCoinMarket, readCoinTrending, searchCoinList, type ChainListing, type ChainListingsRead, type CoinMarket, type CoinMarketRead, type CoinSearchRead, type CoinTrendingRead } from "./venues/coingecko-coins";
+import { coinQuery, LISTINGS_MAX, MAJORS_MAX_RANK, pickMajor, readChainListings, readCoinMarket, readCoinTrending, readTopCoins, searchCoinList, type ChainListing, type ChainListingsRead, type CoinHit, type CoinMarket, type CoinMarketRead, type CoinSearchRead, type CoinTopRead, type CoinTrendingRead } from "./venues/coingecko-coins";
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -578,6 +578,12 @@ export interface MajorsReader {
   market(id: string, timeoutMs: number): Promise<CoinMarketRead>;
   /** CoinGecko's own trending list, for "what's hot". Absent: not asked. */
   trending?(timeoutMs: number): Promise<CoinTrendingRead>;
+  /**
+   * CoinGecko's biggest coins by market cap (venues/coingecko-coins.ts
+   * readTopCoins), read at most once a day: the names no chain coin in what's
+   * hot may go by (TopCopy). Absent or unread: no chain coin is named.
+   */
+  top?(timeoutMs: number): Promise<CoinTopRead>;
 }
 
 export interface XResearchDeps {
@@ -994,6 +1000,55 @@ export function copycatTicker(ticker: string): boolean {
 }
 
 /**
+ * THE BIG COINS' NAMES, FROM COINGECKO ITSELF (red-team 2026-10-12). The hand
+ * list above missed most of the top two hundred: "$WLFI", "$MNT", "$SONIC",
+ * "$LIDO", "$MANTLE", "$ASTER", "$XDC", "$NEXO", "$CRV", "$MORPHO" from chain
+ * memecoins were each posted as trending, and "$HYPEX", "$XRPAI", "$WIFX"
+ * built on big coins' tickers, which the list only matched whole. So the
+ * screen is built from CoinGecko's own biggest coins (readTopCoins): each
+ * symbol and each name (letters only, whole, and each word of it of four
+ * letters or more but the generic ones). A ticker that is one of them, or
+ * starts or ends with one of three letters or more, never shows.
+ */
+export interface TopCopy {
+  /** Matched whole only: symbols and names under three letters ("S", "OM"). */
+  whole: ReadonlySet<string>;
+  /** Matched whole, or at a ticker's start or end. */
+  roots: readonly string[];
+}
+
+/** Words of a coin's name that name no coin of their own. */
+const NAME_FILLER: ReadonlySet<string> = new Set(("TOKEN TOKENS COIN COINS NETWORK PROTOCOL FINANCE FINANCIAL WRAPPED STAKED BRIDGED CLASSIC CHAIN LABS " +
+  "NAME SERVICE SERVICES EXCHANGE SYSTEM SYSTEMS PROJECT DOLLAR GLOBAL DIGITAL CAPITAL PLATFORM").split(" "));
+
+/** The copycat screen of a list of CoinGecko's biggest coins. */
+export function topCopyOf(coins: readonly Pick<CoinHit, "symbol" | "name">[]): TopCopy {
+  const whole = new Set<string>(), roots = new Set<string>();
+  const add = (raw: string) => {
+    const t = raw.toUpperCase().replace(/[^A-Z]/g, "");
+    if (!t) return;
+    if (t.length >= 3) roots.add(t);
+    else whole.add(t);
+  };
+  for (const c of coins) {
+    if (typeof c?.symbol === "string") add(c.symbol);
+    if (typeof c?.name !== "string") continue;
+    add(c.name);
+    for (const w of c.name.toUpperCase().split(/[^A-Z]+/)) if (w.length >= 4 && !NAME_FILLER.has(w)) roots.add(w);
+  }
+  return { whole, roots: [...roots] };
+}
+
+/** Would this ticker read as one of CoinGecko's biggest coins? */
+export function topCopycat(ticker: string, top: TopCopy): boolean {
+  const t = String(ticker ?? "").toUpperCase();
+  return top.whole.has(t) || top.roots.some((r) => t === r || t.startsWith(r) || t.endsWith(r));
+}
+
+/** How long CoinGecko's biggest coins are read as such. */
+const TOP_COPY_MS = DAY;
+
+/**
  * A PROVIDER'S SYMBOL THE LINE MAY SHOW, or null: the figures line's sanitiser
  * (no digit, no refused word) and then the X gate's own vocabulary
  * (tickerRefusal), so the line is never laxer than the gate it is put in
@@ -1312,7 +1367,10 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
     search: (query, timeoutMs) => searchCoinList(query, { timeoutMs, ...(lane ? { fleet: lane } : {}) }),
     market: (id, timeoutMs) => readCoinMarket(id, { timeoutMs, ...(lane ? { fleet: lane } : {}) }),
     trending: (timeoutMs) => readCoinTrending({ timeoutMs, ...(lane ? { fleet: lane } : {}) }),
+    top: (timeoutMs) => readTopCoins({ timeoutMs, ...(lane ? { fleet: lane } : {}) }),
   };
+  /** CoinGecko's biggest coins as the copycat screen reads them, kept a day from their read (TopCopy). */
+  let topCopy: { copy: TopCopy; until: number } | null = null;
   // Someone is waiting: the evidence row, the whole read held to the answer's share.
   const hotPools = d.hotPools ?? ((timeoutMs: number) => fetchGeckoPoolsResult("trending_pools", { timeoutMs, budgetMs: timeoutMs, lane: "evidence", ...(lane ? { fleet: lane } : {}) }));
   const chainListings = d.chainListings ?? ((addresses: readonly string[], timeoutMs: number) => readChainListings(addresses, { timeoutMs, ...(lane ? { fleet: lane } : {}) }));
@@ -1503,12 +1561,19 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
         const unknown = candidates.filter((s) => !fresh(s.token)).map((s) => s.token);
         // Its slot before CoinGecko's own list: without it no chain coin is named at all.
         const vet = unknown.length > 0 && indexSlot();
+        // CoinGecko's biggest coins, read at most once a day (TopCopy): without them no chain coin is named either.
+        const topStale = !topCopy || topCopy.until <= now();
+        const topRead = topStale && !!majors.top && majors.configured?.() !== false && indexSlot();
         const cg = !!majors.trending && majors.configured?.() !== false && indexSlot();
-        const [crowdEnv, trend, listings] = await Promise.all([
+        const [crowdEnv, trend, listings, topPage] = await Promise.all([
           broker ? look((ms) => broker.call("fomo_get_token_activity", { token: null, chain: "robinhood", window: "24h", limit: 5 }, fomoOpts(ms)), null, false, RESEARCH_BUDGET.fomoMs) : Promise.resolve(null),
           cg ? look((ms) => majors.trending!(ms), null) : Promise.resolve(null),
           vet ? look((ms) => chainListings(unknown, ms), null) : Promise.resolve(null),
+          topRead ? look((ms) => majors.top!(ms), null) : Promise.resolve(null),
         ]);
+        if (topPage && !topPage.failed && topPage.coins.length) topCopy = { copy: topCopyOf(topPage.coins), until: now() + TOP_COPY_MS };
+        else if (topStale) notes.push(`top-${failureCode(topPage?.failure ?? (majors.top ? undefined : "unwired"))}`);
+        const top = topCopy && topCopy.until > now() ? topCopy.copy : null;
         if (listings && !listings.failed) {
           const until = now() + HOUR;
           for (const token of unknown) listingMemo.set(token, { listing: listings.listings.find((l) => l.address === token) ?? null, until });
@@ -1524,6 +1589,10 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
         // NOTHING VOUCHED FOR, AND SOME CONTRACT COULD NOT BE ASKED ABOUT: no
         // read at all (code's "no read" line), never a guess, never a name.
         if (!vouched.length && candidates.some((s) => listingOf(s.token) === undefined)) return { facts: [], lookups, notes };
+        // AND NONE AT ALL WITHOUT COINGECKO'S BIGGEST COINS TO SCREEN THEM BY
+        // (TopCopy, red-team 2026-10-12): no read, never a name the screen
+        // could not judge.
+        if (vouched.length && !top) return { facts: [], lookups, notes };
         // NOR A CHAIN COIN UNDER A NAME COINGECKO'S OWN LIST HAS TODAY (red-team
         // 2026-10-12): beside "coingecko: trending $X", a chain "$X" reads as
         // the same coin. Every symbol and name on the list, any rank.
@@ -1539,7 +1608,7 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
         // contract, the same one included: what's hot is never a read of its
         // own book, and the last screen cannot tell a contract from a copy.
         const mine = [...boughtNames(input.facts, input.posts), ...(input.ownCoins ?? [])];
-        const kept = vouched.filter((s) => !listed.has(s.ticker) && !namedIn(s.ticker, own) && !ownCoinTicker(s.ticker, mine));
+        const kept = vouched.filter((s) => !listed.has(s.ticker) && !namedIn(s.ticker, own) && !ownCoinTicker(s.ticker, mine) && !topCopycat(s.ticker, top!));
         if (!kept.length) {
           notes.push(vouched.length ? "hot-none" : "hot-unlisted");
           return { facts: hotPhrases({ changes: [], crowd: 0, trending: 0 }), hot: { coins: 0, lead: null }, lookups, notes };
