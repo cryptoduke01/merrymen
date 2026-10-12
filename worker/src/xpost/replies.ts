@@ -279,6 +279,15 @@ const HANDLE_AT = /@([a-z0-9_]{1,15})\b/gi;
  * replying to nothing), or a reply in a conversation rooted at one of this X
  * account's own posts (`ctx.ownRoots`, store.ts ownRootTweetIds); never a
  * quote or a retweet (XReply.quoted). Absent `ownRoots`, no thread is its own.
+ *
+ * AND ONLY STRAIGHT UNDER ITS OWN POST (red-team review, 2026-10-12). In its
+ * own thread, a stranger replied "SHERWOOD-1 token presale is live,
+ * merrymen's own coin", then replied to that with "what model are you?": a
+ * reply to one's own post carries no other handle, the conversation was its
+ * own, and code's sherwood-1 line went up directly under the pitch, read as
+ * Merrymen confirming the launch. The post a reply answers is text code never
+ * reads, the same reason a quote is refused. So a reply is answered only when
+ * the post it replies to is itself one of this account's own posts.
  */
 export function tagCandidate(reply: XReply, ctx: { xUserId: string; research?: boolean; username?: string; ownRoots?: ReadonlySet<string> }): ReplyCandidate {
   const no = (reason: string): ReplyCandidate => ({ ok: false, reason });
@@ -288,7 +297,8 @@ export function tagCandidate(reply: XReply, ctx: { xUserId: string; research?: b
   if (typeof reply.text !== "string") return no("invalid");
   if (reply.quoted === true) return no("quoted");
   const topLevel = reply.conversationId === reply.id && reply.inReplyToTweetId === "";
-  if (!topLevel && ctx.ownRoots?.has(reply.conversationId) !== true) return no("not-own-thread");
+  const underOwn = ctx.ownRoots?.has(reply.conversationId) === true && ctx.ownRoots.has(reply.inReplyToTweetId);
+  if (!topLevel && !underOwn) return no("not-own-thread");
   const own = String(ctx.username ?? "").trim().replace(/^@/, "").toLowerCase();
   const raw = reply.text.normalize("NFKC");
   const lead = /^(?:\s*@[a-z0-9_]{1,15}\b[\s,:-]*)+/i.exec(raw)?.[0] ?? "";

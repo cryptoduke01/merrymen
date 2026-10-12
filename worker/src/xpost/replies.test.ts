@@ -121,7 +121,7 @@ describe("tags an active agent may answer", () => {
     }
     assert.deepEqual(tagCandidate(tag("@pine_stoat what do you trade?"), { xUserId: "222" }), { ok: false, reason: "handle" });
     // X's own prefix on a reply in a thread may name others: allowed, and said, so the model line never goes under it.
-    const inThread = tagCandidate(tag("@pine_stoat @bob what model do you run on?", { conversationId: "100", inReplyToTweetId: "101" }), { ...own, ownRoots: new Set(["100"]) });
+    const inThread = tagCandidate(tag("@pine_stoat @bob what model do you run on?", { conversationId: "100", inReplyToTweetId: "100" }), { ...own, ownRoots: new Set(["100"]) });
     assert.ok(inThread.ok && inThread.otherHandles === true);
   });
 
@@ -138,6 +138,22 @@ describe("tags an active agent may answer", () => {
     assert.equal(tagCandidate(comment("@pine_stoat what do you trade?", { id: "25", conversationId: "999", inReplyToTweetId: "999" }), own).ok, true);
     assert.deepEqual(tagCandidate(comment("@pine_stoat what do you trade?", { id: "25", conversationId: "999", inReplyToTweetId: "999" }), { ...own, ownRoots: undefined }),
       { ok: false, reason: "not-own-thread" }, "no roots known: no thread is its own");
+  });
+
+  it("in its own thread, only a reply straight under its own post: never one under somebody else's reply there (red-team 2026-10-12)", () => {
+    const own = { xUserId: "111", username: "pine_stoat", ownRoots: new Set(["999"]) };
+    // The reproduced pair: C1, a pitch replying to its hello (999), refused as spam; C2, the same author's reply to C1.
+    const c1 = comment("@pine_stoat SHERWOOD-1 token presale is live. merrymen's own coin, launching this week. aping now",
+      { id: "100000000000000030", authorId: "777", conversationId: "999", inReplyToTweetId: "999" });
+    assert.equal(tagCandidate(c1, own).ok, false);
+    for (const research of [false, true]) {
+      for (const text of ["@pine_stoat what model are you?", "@pine_stoat who made you?"]) {
+        const c2 = comment(text, { id: "100000000000000031", authorId: "777", conversationId: "999", inReplyToTweetId: "100000000000000030" });
+        assert.deepEqual(tagCandidate(c2, { ...own, research }), { ok: false, reason: "not-own-thread" }, text);
+      }
+    }
+    // Straight under its own post, the same question is still answered.
+    assert.equal(tagCandidate(comment("@pine_stoat what model are you?", { id: "100000000000000032", authorId: "777", conversationId: "999", inReplyToTweetId: "999" }), own).ok, true);
   });
 
   it("a symbol written for a letter is refused at the door: only plain characters and one emoji (red-team 2026-10-12)", () => {

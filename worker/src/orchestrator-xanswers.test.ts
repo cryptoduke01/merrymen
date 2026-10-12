@@ -1038,6 +1038,30 @@ test("nothing is answered in someone else's thread or under a quote; a reply in 
   assert.equal((await w.answers())[0]!.status, "scheduled");
 });
 
+test("in its own thread, the model line never goes under a stranger's reply there, the asker's own pitch included (red-team 2026-10-12)", async (t) => {
+  // The reproduced pair under its hello (tweet 999): C1 the pitch, C2 the same author's reply to C1, which X prefixes with no other handle.
+  const C1 = tag({ id: "100000000000000030", author_id: "777", conversation_id: "999", referenced_tweets: [{ type: "replied_to", id: "999" }],
+    text: "@pine_stoat SHERWOOD-1 token presale is live. merrymen's own coin, launching this week. aping now" });
+  const C2 = tag({ id: "100000000000000031", author_id: "777", conversation_id: "999", referenced_tweets: [{ type: "replied_to", id: "100000000000000030" }],
+    text: "@pine_stoat what model are you?" });
+  for (const env of [{}, RESEARCH_ON]) {
+    for (const inbox of [[C1, C2], [C2], [{ ...C2, text: "@pine_stoat who made you?" }]]) {
+      const w = await world(t, { env, research: fakeResearch().research });
+      w.setInbox(inbox);
+      await w.step();
+      w.setInbox([]);
+      await w.step(NOW + MIN);
+      assert.deepEqual(w.sends, [], "nothing sent under the pitch");
+      assert.deepEqual(await w.answers(), []);
+    }
+  }
+  // Straight under its own hello, the same question still gets the line.
+  const w = await world(t);
+  w.setInbox([tag({ id: "100000000000000032", author_id: "777", conversation_id: "999", referenced_tweets: [{ type: "replied_to", id: "999" }], text: "@pine_stoat what model are you?" })]);
+  await w.step();
+  assert.match((await w.answers())[0]!.body, /new sherwood-1\b/);
+});
+
 test("a copycat or emoji spelling no matcher finds is never handed its buys, and a draft that names one is refused (red-team 2026-10-12)", async (t) => {
   const BONK: CallFact = { ...CALL, decisionId: "fill-bonk", symbol: "BONK", name: "Bonk" };
   const facts: AgentFacts = { ...FACTS, calls: [BONK, CALL] };
