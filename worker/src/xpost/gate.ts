@@ -1445,6 +1445,11 @@ function admitMasked(tidied: string, ctx: XGateCtx, baseGate: BaseGate, agentNam
   if (aboutPaper && !saysPaper(text, coins)) return refuse("paper-unsaid");
   if (ctx.kind === "sell" && ctx.mode === "live" && saysPaper(text, coins)) return refuse("mode-false");
   if (ctx.mode === "live" && claimsPaper(text, coins) && !aboutPaper) return refuse("mode-false");
+  // A LIVE AGENT'S REPLY NEVER SAYS PAPER AT ALL (red-team 2026-10-12): "bonk
+  // was a fun one on paper before that" said a paper buy beside "with real
+  // money", and claimsPaper reads only its shapes. In a reply, fail closed:
+  // any paper phrase, the idiom too, unless a paper coin it was told of is named.
+  if (ctx.kind === "reply" && ctx.mode === "live" && saysPaper(text, coins) && !aboutPaper) return refuse("mode-false");
   if (ctx.mode === "paper" && SAYS_REAL_MONEY.test(text)) return refuse("mode-false");
 
   if (ctx.kind === "intro") {

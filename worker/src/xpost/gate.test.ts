@@ -84,6 +84,15 @@ describe("an answer says only the buys it was told of (red-team 2026-10-12)", ()
     }
   });
 
+  it("a live agent's reply never says paper, in any shape, unless it names a paper coin it was told of (red-team 2026-10-12)", () => {
+    const general: Partial<XGateCtx> = { kind: "reply", mode: "live", coins: ["Pepe"], buys: "vouched", unsaid: ["Bonk"] };
+    // The reproduced draft, scheduled at 11f7acac with BONK in neither unsaid nor coins.
+    assert.equal(reason("grabbed pepe with real money lately, and bonk was a fun one on paper before that. Say stop to opt out.", { ...general, unsaid: [] }), "mode-false");
+    assert.equal(reason("grabbed pepe with real money lately, and bonk was a fun one on paper before that. Say stop to opt out.", general), "bought-named");
+    assert.equal(reason("on paper a slow day sounds boring, but i like it. Say stop to opt out.", { kind: "reply", mode: "live", coins: [] }), "mode-false", "in a reply, the idiom too");
+    assert.equal(reason("on paper a slow day sounds boring, but i like it", { kind: "casual", mode: "live", coins: [] }), "ok", "a casual post keeps the idiom");
+  });
+
   it("told its buys: a buy it says is of one of them, or of no coin by name", () => {
     assert.equal(reason("yep, bought wif lately, the curve looked early. say stop to opt out.", vouched), "buy-claim");
     assert.equal(reason("lately i grabbed a little trump, the buying looked steady. say stop to opt out.", vouched), "buy-claim");

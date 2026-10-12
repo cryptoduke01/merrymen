@@ -1492,6 +1492,13 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
     const buys = recentCoins(f);
     // Every name its buys go by: what an answer not shown them may never say (XGateCtx.unsaid).
     const bought = boughtNames(f, posts);
+    // EVERY COIN ITS OWN BUY POSTS NAMED IN SIXTY DAYS (red-team 2026-10-12):
+    // a buy post older than the calls' window ("grabbed some bonk on paper", ten
+    // days back) is in no list above, and an answer that names its coin claims a
+    // buy nobody vouched for, on paper or not. Never said, unless it is one of
+    // the buys the answer was told of (vouched below).
+    const olderBought = (await postsOfXUser(shared, account.xUserId, nowMs - OWN_MEMORY_MS, 500))
+      .filter((p) => p.tenant === account.tenant && p.kind === "buy" && typeof p.coin === "string" && p.coin.trim() !== "").map((p) => p.coin!.trim());
     for (const comment of ordered) {
       if (comment.createdAtMs < consentAt || nowMs - comment.createdAtMs > REPLY_STALE_MS) continue;
       const candidate = tagCandidate(comment, { xUserId: account.xUserId, research: research !== null, username: account.username, ownRoots });
@@ -1565,7 +1572,12 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       }
       const day = localDay(tz, nowMs);
       // Shown its recent posts without a research answer; gated against them all.
-      const facts = writerFacts(f, day, shownOwn);
+      // NEVER ITS BUY OR SALE POSTS, NOR A LINE OF THE OTHER MONEY (red-team
+      // 2026-10-12): sixty days of every kind of post put a paper-era "grabbed
+      // some bonk on paper" in front of a live agent's general answer as "your
+      // recent posts", beside "You trade with real money". It is shown what it
+      // already said (`said`, filtered by money and kind), as its recent posts too.
+      const facts = writerFacts(f, day, said);
       const social = templated ? null : await deps.socialProfile?.(account.tenant);
       const walletPublic = !!social?.publicWallet && social.publicWallet.address.toLowerCase() === f.agentId.toLowerCase();
       // ONE BUNDLE, AT MOST, for this answer — and only with research on.
@@ -1603,11 +1615,18 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // unknown) is never named, and an idle agent that names any paper coin
       // says paper — not only the three newest the buys list holds.
       const money = moneyNames(f, posts);
+      // Its older buy posts' coins, but for one it was told of by any of that coin's names.
+      const vouchedNames = new Set(vouched.map((v) => v.label.toLowerCase()));
+      for (const c of f.calls) {
+        if (c.side !== "buy" || !vouched.some((v) => v.label === coinOf(c)?.label)) continue;
+        for (const n of [c.symbol, c.name, coinOf(c)?.label]) if (typeof n === "string" && n.trim()) vouchedNames.add(n.trim().toLowerCase());
+      }
+      const older = olderBought.filter((c) => !vouchedNames.has(c.toLowerCase()));
       const gate = (text: string) => admitXPost(text, {
         kind: "reply", agentName: f.name, mode, coins: vouched.map((c) => c.label),
         paperCoins: [...vouched.filter((c) => c.paper).map((c) => c.label), ...(f.mode === "idle" ? money.paper : [])], recentOwn, recentFleet, emojiOk: facts.style.emoji > 0,
         // A buy it says is one it was told of, or none at all (XGateCtx.buys).
-        ...(templated ? {} : { buys: told ? "vouched" as const : "none" as const, unsaid: [...(told ? [] : bought), ...money.otherOnly],
+        ...(templated ? {} : { buys: told ? "vouched" as const : "none" as const, unsaid: [...(told ? [] : bought), ...money.otherOnly, ...older],
           // A coin named, or its trades or a coin asked about off the plain list: not even that it likes it (XGateCtx.named).
           named: !told && (coinNamed || asked.kind === "own-trades" || asked.kind === "coin") }),
       }, BASE_GATE);

@@ -1130,6 +1130,35 @@ test("told none of its buys, an answer about a named coin never says it bought, 
   assert.equal(row!.reason, "gate:buy-claim");
 });
 
+test("a live agent's general answer is never shown a paper-era buy post as its recent posts, and never posts that buy (red-team 2026-10-12)", async (t) => {
+  const draftA = "grabbed pepe with real money lately, and bonk was a fun one on paper before that. Say stop to opt out.";
+  for (const env of [{}, RESEARCH_ON]) {
+    for (const answer of [draftA, "grabbed pepe with real money lately, and bonk was a fun one before that. Say stop to opt out."]) {
+      const w = await world(t, { env, research: fakeResearch().research, answer });
+      const post = async (key: string, body: string, coin: string, decisionId: string, at: number) => {
+        const id = await store.schedulePost(w.db, { tenant: TENANT, xUserId: "111", kind: "buy", dedupeKey: key, body, coin, decisionId, nowMs: at, dueAtMs: at });
+        await store.claimPost(w.db, id!, at);
+        await store.markPosted(w.db, id!, `1000000000000009${key.length}`, at);
+      };
+      // Its live PEPE buy's post, and a paper-era BONK buy post ten days back: outside the calls' window, inside sixty days.
+      await post("buy:pepe", "picked up a little pepe with real money, the curve looked early", "Pepe", "fill-pepe", NOW - 4 * HOUR);
+      await post("buy:bonk-paper", "grabbed some bonk on paper, the early curve looked fun", "Bonk", "d-bonk-paper", NOW - 10 * DAY);
+      w.setInbox([tag({ text: "@pine_stoat what have you been buying lately?" })]);
+      await w.step();
+      w.setInbox([]);
+      await w.step(NOW + MIN);
+      const [prompt] = w.asked();
+      assert.match(prompt!, /Coins you bought lately: «Pepe»/, "the general path, as before");
+      assert.doesNotMatch(`${w.systems[0]}\n${prompt}`, /grabbed some bonk on paper/, "never the paper-era buy post");
+      assert.doesNotMatch(/Your recent posts[^\n]*/.exec(w.systems[0]!)?.[0] ?? "", /picked up a little pepe/, "no buy post among its recent posts");
+      assert.deepEqual(w.sends, [], answer);
+      const [row] = await w.answers();
+      assert.equal(row!.status, "skipped", answer);
+      assert.match(row!.reason ?? "", /^gate:(?:bought-named|mode-false|buy-claim)$/, answer);
+    }
+  }
+});
+
 test("a tag whose reply prefix names another project gets neither its buys nor the exact path (red-team 2026-10-12)", async (t) => {
   // A live agent that bought PEPE at 0x1a…1a; each tag replies straight to its hello (tweet 999), research on.
   const PEPE_CA = `0x${"1a".repeat(20)}`;
