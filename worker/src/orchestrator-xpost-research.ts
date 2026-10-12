@@ -73,7 +73,12 @@ export type TagIntent =
   /** A coin by $ticker, by a coin it traded named in words, or by ONE contract address (a lookup key only). */
   | { kind: "coin"; ticker: string | null; address: string | null }
   | { kind: "model" }
-  | { kind: "chat" };
+  | { kind: "chat" }
+  /**
+   * A tag that asks about sherwood or the model AND about a token: answered
+   * by nothing at all, no draft and no post (TOKEN_ASK).
+   */
+  | { kind: "unanswered" };
 
 /**
  * "WHAT MODEL ARE YOU ON", "are you chatgpt", "what ai runs you". Read before
@@ -104,6 +109,23 @@ const MODEL_ASK = new RegExp(
 /** Sherwood named at all, however it is spelled: only code's own lines answer it (writer.ts modelAnswers). */
 const SHERWOOD_ASK = /\bsherwood/i;
 
+/**
+ * A TOKEN IN A SHERWOOD OR MODEL QUESTION (review, 2026-10-12): a $ticker, a
+ * tagged contract, or a word for a coin, a token or its launch. Anyone can
+ * launch $SHERWOOD and tag the official account with "is $SHERWOOD
+ * merrymen's new token?"; code's model line under it ("merrymen made me. the
+ * new sherwood-1 is what they've got in the oven") reads as Merrymen
+ * confirming that token, ready to screenshot. So such a tag gets no answer
+ * at all: not the model line, and not a draft (which may not name sherwood
+ * anyway). "Your coins" is its own trading, not a token, and is read past:
+ * "is sherwood choosing your coins?" is still the model question.
+ */
+const TOKEN_WORDS = /\b(?:coins?|tokens?|contracts?|ca|launch\w*|presales?|airdrops?|tickers?|mint\w*|memecoins?|listings?|listed|cashtags?)\b/i;
+const OWN_COINS = /\b(?:your|ur|yr|my|its|their)\s+coins\b/gi;
+function tokenAsked(t: string, address: string | null): boolean {
+  return address !== null || extractCashtags(t).length > 0 || TOKEN_WORDS.test(t.replace(OWN_COINS, " "));
+}
+
 /** A word of the line, for matching a coin it traded named without a $ sign. */
 const words = (s: string): Set<string> => new Set((s.toLowerCase().match(/[a-z][a-z0-9'-]*/g) ?? []));
 
@@ -119,8 +141,9 @@ export function classifyTag(text: string, o: { address?: string | null; knownCoi
   // An attempt to steer it is answered as chat: nothing is looked up for it.
   if (!t.trim() || isInjection(t)) return { kind: "chat" };
   // ANY TAG THAT NAMES SHERWOOD gets code's own line: "does sherwood-1 pick
-  // your trades now?" is bait for "yep, sherwood-1 picks my trades".
-  if (MODEL_ASK.test(t) || SHERWOOD_ASK.test(t)) return { kind: "model" };
+  // your trades now?" is bait for "yep, sherwood-1 picks my trades". Unless
+  // it also asks about a token: then nothing answers it (TOKEN_WORDS).
+  if (MODEL_ASK.test(t) || SHERWOOD_ASK.test(t)) return tokenAsked(t, address) ? { kind: "unanswered" } : { kind: "model" };
   const asked = publicFactRequest(t);
   if (asked?.kind === "site" && asked.topic === "capabilities") return { kind: "capabilities" };
   if (asked?.kind === "site" && asked.topic === "onboarding") return { kind: "onboarding" };
@@ -684,6 +707,7 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
             return { facts: ONBOARDING_PHRASES.filter(sayable), lookups, notes };
           case "model":
           case "chat":
+          case "unanswered":
             return { facts: [], lookups, notes };
           case "own-trades": {
             // Only what it already made public, and no paid read: its newest buy

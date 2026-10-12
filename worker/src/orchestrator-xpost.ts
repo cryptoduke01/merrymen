@@ -86,7 +86,7 @@ import {
   type XAccount,
   type XPost,
 } from "./xpost/store";
-import { answerPrompt, answerQuestion, buyPrompt, casualPrompt, draft, introPrompt, introTemplate, modelAnswers, replyPrompt, sellPrompt, sherwoodClaimed, sherwoodNamed, xpostModel, xpostModelWarning, type WriterFacts, type XStyle } from "./xpost/writer";
+import { answerPrompt, answerQuestion, buyPrompt, casualPrompt, draft, introPrompt, introTemplate, modelAnswers, replyPrompt, sellPrompt, sherwoodClaimed, sherwoodNamed, xpostModel, xpostModelWarning, type AnswerIntentKind, type WriterFacts, type XStyle } from "./xpost/writer";
 import { appendPublicToken, appendPublicWallet, hasPublicWallet, publicTokenStillAllowed, publicWalletStillAllowed, type PublicWallet } from "./xpost/public-wallet";
 import { readPublicProjectDescription } from "./orchestrator-xpost-project";
 import { carriesResearch, classifyTag, createXResearch, type ResearchBundle, type XResearch } from "./orchestrator-xpost-research";
@@ -1412,6 +1412,13 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // gathers anything for what it reads.
       const knownCoins = [...buys.map((c) => c.label), ...posts.filter((p) => p.kind === "buy" && p.coin).map((p) => p.coin!)];
       const asked = classifyTag(candidate.text, { address: candidate.address ?? null, knownCoins });
+      // A TOKEN ASKED ABOUT BESIDE SHERWOOD OR THE MODEL is answered by
+      // nothing: the model line under "is $SHERWOOD merrymen's token?" reads
+      // as Merrymen confirming it. No draft, no post, nothing spent.
+      if (asked.kind === "unanswered") {
+        bump("answer-token-model");
+        continue;
+      }
       const intent = research ? asked : null;
       const templated = asked.kind === "model";
       if (!templated) {
@@ -1430,7 +1437,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       const social = templated ? null : await deps.socialProfile?.(account.tenant);
       const walletPublic = !!social?.publicWallet && social.publicWallet.address.toLowerCase() === f.agentId.toLowerCase();
       // ONE BUNDLE, AT MOST, for this answer — and only with research on.
-      let looked: { intent: ReturnType<typeof classifyTag>["kind"]; research: string[]; creatorClaim?: string } | null = null;
+      let looked: { intent: AnswerIntentKind; research: string[]; creatorClaim?: string } | null = null;
       if (research && intent) {
         const bundle = await research.gather({ shared, intent, tenant: account.tenant, xUserId: account.xUserId, facts: f, posts, fomo: researchFomo, budgetMs: Math.max(0, sendBy - at()) })
           .catch((): ResearchBundle => ({ facts: [], lookups: 0, notes: ["fault"] }));

@@ -611,6 +611,25 @@ test("a stranger's sherwood bait gets code's line, research on or off, and a dra
   }
 });
 
+test("a tag asking whether a token is sherwood or merrymen's gets nothing at all, research on or off", async (t) => {
+  for (const env of [{}, RESEARCH_ON]) {
+    const r = fakeResearch();
+    const texts = ["@pine_stoat is $SHERWOOD merrymen's new token?", "@pine_stoat did you buy $SHERWOOD?",
+      ...(env === RESEARCH_ON ? [`@pine_stoat ${CA} sherwood coin?`] : [])];
+    const w = await world(t, { env, research: r.research });
+    w.setInbox(texts.map((text, n) => tag({ id: `10000000000000013${n}`, conversation_id: `10000000000000013${n}`, author_id: `13${n}`, text })));
+    await w.step();
+    assert.deepEqual(await w.answers(), [], "no answer row, no post");
+    assert.equal(w.asked().length, 0, "no draft");
+    assert.equal(r.seen.length, 0, "nothing looked up");
+    assert.equal((await store.readMeta(w.db, "llm-answers:111:2026-09-30"))?.n ?? 0, 0, "and no allowance spent");
+    // The asker is not charged one of their two answers for it: a real question next is answered.
+    w.setInbox([tag({ id: "100000000000000139", conversation_id: "100000000000000139", author_id: "130", text: "@pine_stoat what model do you run on?" })]);
+    await w.step(NOW + MIN);
+    assert.deepEqual((await w.answers()).map((a) => a.status), ["scheduled"]);
+  }
+});
+
 test("a draft that says sherwood runs it is refused, research on or off", async (t) => {
   for (const env of [{}, RESEARCH_ON]) {
     for (const answer of ["running on the new sherwood one, built by merrymen. Say stop to opt out.", "built by merrymen, powered by sherwood one now. Say stop to opt out.",

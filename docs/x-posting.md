@@ -554,7 +554,12 @@ the mention itself. They go out **right away**:
   answered with a code-built line, not a draft: eight lines that share too
   few words to be each other's repeat (`modelAnswers`), the mention's own
   first, then the next the gate admits, so the question asked again is
-  answered again in other words. The writer model is never told the name,
+  answered again in other words. A sherwood or model question that also asks
+  about a token (a `$ticker`, a tagged contract, or a coin, token, contract,
+  CA, launch, presale or airdrop word; "your coins" is its own trading) gets
+  no answer at all, no draft and no post (`answer-token-model`): anyone can
+  launch `$SHERWOOD`, and the model line under "is $SHERWOOD merrymen's new
+  token?" would read as Merrymen confirming it. The writer model is never told the name,
   and a drafted answer or comment reply that names sherwood anyway is
   refused as `gate:sherwood-drafted`. Change `SHERWOOD_ON_X`, those lines and
   the prompt only once sherwood runs the agents.
