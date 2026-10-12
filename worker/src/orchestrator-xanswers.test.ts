@@ -561,6 +561,30 @@ test("research off too: the model question is answered from a code-built line, n
   assert.equal(w.asked().length, 0, "no model call: the line is code's");
 });
 
+test("a paper agent answers the model question too, saying paper, and in other words each time", async (t) => {
+  const paper: AgentFacts = { ...FACTS, mode: "paper", calls: [{ ...CALL, paper: true }] };
+  for (const env of [{}, RESEARCH_ON]) {
+    const w = await world(t, { env, research: fakeResearch().research, facts: paper });
+    w.setInbox([1, 2, 3].map((n) => tag({ id: `10000000000000012${n}`, conversation_id: `10000000000000012${n}`, author_id: `12${n}`,
+      text: n === 3 ? "@pine_stoat is sherwood live yet?" : "@pine_stoat what model do you run on?" })));
+    await w.step();
+    const answers = await w.answers();
+    assert.deepEqual(answers.map((a) => a.status), ["scheduled", "scheduled", "scheduled"], answers.map((a) => a.reason).join(","));
+    assert.equal(new Set(answers.map((a) => a.body)).size, 3);
+    for (const a of answers) {
+      assert.match(a.body, /new sherwood-1\b/);
+      assert.match(a.body, /\bon paper\b/, "a paper reply says paper");
+    }
+    assert.equal(w.asked().length, 0, "still code's line, no draft");
+  }
+  // A paper agent's drafted answer is told to say paper whatever it is asked.
+  const w = await world(t, { facts: paper, answer: "honestly just vibing on paper today. Say stop to opt out." });
+  w.setInbox([tag({ text: "@pine_stoat how's your day going?" })]);
+  await w.step();
+  assert.match(w.asked()[0]!, /every answer must say so in a few words/);
+  assert.equal((await w.answers())[0]!.status, "scheduled");
+});
+
 test("a stranger's sherwood bait gets code's line, research on or off, and a draft that names sherwood is never posted", async (t) => {
   // "does sherwood-1 pick your trades now?" reads as chat to the model question's strict screen; any tag naming sherwood is code's.
   for (const env of [{}, RESEARCH_ON]) {

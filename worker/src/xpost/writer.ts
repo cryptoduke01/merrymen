@@ -229,17 +229,44 @@ const MODEL_ANSWERS: readonly string[] = Object.freeze([
   `merrymen's work. their new ${SHERWOOD_ON_X} is still baking, no peeking`,
 ]);
 
-/** Every model answer, starting from this mention's own line, each with the opt-out notice. */
-export function modelAnswers(seed: string, style: Pick<XStyle, "lower">): string[] {
+/**
+ * A PAPER AGENT'S MODEL ANSWER SAYS PAPER. An answer is gated as a reply,
+ * and a paper agent's reply that never says paper reads as real money: the
+ * gate refuses it (paper-unsaid). Without these, every model question a
+ * paper agent was asked was skipped, and still used one of the asker's two
+ * answers for the day. One clause per line, each with a word of its own
+ * beside "on paper": the same clause on all eight would push the lines that
+ * share four words past the gate's repeat limit of each other.
+ */
+const MODEL_PAPER: readonly string[] = Object.freeze([
+  "i'm on paper for the moment",
+  "meanwhile i'm on paper",
+  "i'm trading on paper",
+  "i'm on paper myself",
+  "these days i'm on paper",
+  "i play it on paper for now",
+  "i'm strictly on paper",
+  "i'm on paper so far",
+]);
+
+/**
+ * Every model answer, starting from this mention's own line, each with the
+ * opt-out notice — and, for an agent trading on paper (`paper`), its line's
+ * paper clause.
+ */
+export function modelAnswers(seed: string, style: Pick<XStyle, "lower">, o: { paper?: boolean } = {}): string[] {
   let h = 0;
   for (const ch of String(seed ?? "")) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
   const notice = style.lower ? REPLY_OPT_OUT.toLowerCase() : REPLY_OPT_OUT;
-  return MODEL_ANSWERS.map((_, i) => `${MODEL_ANSWERS[(h + i) % MODEL_ANSWERS.length]!}. ${notice}`);
+  return MODEL_ANSWERS.map((_, i) => {
+    const k = (h + i) % MODEL_ANSWERS.length;
+    return `${MODEL_ANSWERS[k]!}${o.paper === true ? `. ${MODEL_PAPER[k]!}` : ""}. ${notice}`;
+  });
 }
 
 /** This mention's own model answer: the first of modelAnswers. */
-export function modelAnswer(seed: string, style: Pick<XStyle, "lower">): string {
-  return modelAnswers(seed, style)[0]!;
+export function modelAnswer(seed: string, style: Pick<XStyle, "lower">, o: { paper?: boolean } = {}): string {
+  return modelAnswers(seed, style, o)[0]!;
 }
 
 export interface Prompt {
@@ -756,7 +783,9 @@ export function answerPrompt(f: AnswerFacts): Prompt {
   if (!question) return { system, prompt: "There is no usable question. Output exactly PASS." };
   const facts = [
     f.strategy ? `How you trade: ${q(f.strategy)}.` : null,
-    f.mode === "live" ? "You trade with real money." : f.mode === "paper" ? "You trade on paper, with practice money: say so if you talk about your trades." : "You are not trading right now.",
+    // EVERY ANSWER, NOT ONLY ONE ABOUT ITS TRADES: a paper agent's answer that
+    // never says paper reads as real money, and the gate refuses it.
+    f.mode === "live" ? "You trade with real money." : f.mode === "paper" ? "You trade on paper, with practice money: every answer must say so in a few words (that you're on paper), whatever it is about." : "You are not trading right now.",
     buys.length ? `Coins you bought lately: ${buys.map((c) => `${q(c.label)}${c.paper ? " (on paper)" : ""}`).join(", ")}.`
       : f.boughtLately === true ? "You bought coins lately that you can't name here: never name or guess one, and never say you haven't bought anything."
       : f.boughtLately === false ? "You have not bought anything lately." : null,

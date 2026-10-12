@@ -838,6 +838,28 @@ describe("an active agent's answers and conversation memory", () => {
     const all8 = modelAnswers("1", { lower: false });
     assert.equal(all8[0], modelAnswer("1", { lower: false }), "the mention's own line first");
     assert.equal(new Set(all8).size, 8, "then every other line, once");
+    // A paper agent's lines: the same lines, each with its own paper clause, and still never what runs it.
+    const paper = modelAnswers("1", { lower: false }, { paper: true });
+    assert.equal(new Set(paper).size, 8);
+    for (const [i, line] of paper.entries()) {
+      assert.ok(line.startsWith(all8[i]!.replace(/\. Say stop to opt out\.$/, "")), line);
+      assert.match(line, /\bon paper\b/);
+      assert.match(line, /Say stop to opt out\.$/);
+      assert.doesNotMatch(line.replace(/\bsherwood-1\b/, ""), /\p{N}/u);
+      assert.equal(sherwoodClaimed(line), false, line);
+      assert.equal(vocabularyRefusal(line), null, line);
+    }
+    // Weighed as the gate weighs a reply: without the notice every line ends with.
+    const bare = paper.map((l) => l.replace(/\. Say stop to opt out\.$/, ""));
+    for (let i = 0; i < bare.length; i++) {
+      for (let j = i + 1; j < bare.length; j++) assert.ok(similarity(bare[i]!, bare[j]!) < 0.6, `${bare[i]} / ${bare[j]}`);
+    }
+  });
+
+  it("a paper agent's answer is told to say paper whatever the question, not only about its trades", () => {
+    const text = all(answerPrompt({ ...BASE, mode: "paper", question: "how's your day going?", recentBuys: [], said: [], walletPublic: false }));
+    assert.match(text, /every answer must say so in a few words \(that you're on paper\), whatever it is about/);
+    assert.doesNotMatch(all(answerPrompt({ ...BASE, mode: "live", question: "how's your day going?", recentBuys: [], said: [], walletPublic: false })), /on paper/);
   });
 
   it("a draft that says sherwood runs it today is caught; a tease is not", () => {

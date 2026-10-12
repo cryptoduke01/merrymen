@@ -1441,7 +1441,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       }
       // THE MODEL QUESTION'S LINES, this mention's own first: one it already
       // said is a repeat to the gate, so the next is tried rather than none.
-      const lines = templated ? modelAnswers(comment.id, facts.style) : [];
+      // A paper agent's lines say paper: it is gated as a paper reply.
+      const lines = templated ? modelAnswers(comment.id, facts.style, { paper: f.mode === "paper" }) : [];
       const raw = templated
         ? lines[0]!
         : await draft(creds, answerPrompt({ ...facts, question: candidate.text, recentBuys: buys, boughtLately: f.calls.some((c) => c.side === "buy"),

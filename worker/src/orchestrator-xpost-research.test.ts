@@ -222,14 +222,31 @@ describe("words from measurements: digit-free, attributed, and through the X gat
   });
 
   it("the model answers are not each other: each clears the gate with every other one already said", () => {
-    const lines = modelAnswers("1", { lower: false });
-    assert.equal(lines.length, 8);
-    for (const line of lines) {
-      const others = lines.filter((l) => l !== line);
-      const v = admitXPost(line, { kind: "reply", agentName: "Alan", mode: "live", coins: [], recentOwn: others, recentFleet: others }, (r, c) => admitAgentLine(r, c));
-      assert.ok(v.ok, `${line} → ${v.ok ? "" : v.reason}`);
-      const again = admitXPost(line, { kind: "reply", agentName: "Alan", mode: "live", coins: [], recentOwn: [line], recentFleet: [line] }, (r, c) => admitAgentLine(r, c));
-      assert.equal(again.ok, false, "but never itself again");
+    for (const mode of ["live", "paper"] as const) {
+      const lines = modelAnswers("1", { lower: false }, { paper: mode === "paper" });
+      assert.equal(lines.length, 8);
+      for (const line of lines) {
+        const others = lines.filter((l) => l !== line);
+        const v = admitXPost(line, { kind: "reply", agentName: "Alan", mode, coins: [], recentOwn: others, recentFleet: others }, (r, c) => admitAgentLine(r, c));
+        assert.ok(v.ok, `${mode}: ${line} → ${v.ok ? "" : v.reason}`);
+        const again = admitXPost(line, { kind: "reply", agentName: "Alan", mode, coins: [], recentOwn: [line], recentFleet: [line] }, (r, c) => admitAgentLine(r, c));
+        assert.equal(again.ok, false, "but never itself again");
+      }
+    }
+  });
+
+  it("a paper agent's model answer says paper and clears the gate as a paper reply; a live one never says paper", () => {
+    for (let i = 0; i < 40; i++) {
+      for (const lower of [true, false]) {
+        const paper = modelAnswer(`1000000000000${i}`, { lower }, { paper: true });
+        assert.match(paper, /\bon paper\b/);
+        assert.match(paper, /new sherwood-1\b/);
+        assert.deepEqual(admitXPost(paper, { kind: "reply", agentName: "Alan", mode: "paper", coins: [], recentOwn: [], recentFleet: [] }, (r, c) => admitAgentLine(r, c)), { ok: true, text: paper }, paper);
+        const plain = modelAnswer(`1000000000000${i}`, { lower });
+        assert.doesNotMatch(plain, /paper|practice/);
+        const unsaid = admitXPost(plain, { kind: "reply", agentName: "Alan", mode: "paper", coins: [], recentOwn: [], recentFleet: [] }, (r, c) => admitAgentLine(r, c));
+        assert.equal(unsaid.ok ? "ok" : unsaid.reason, "paper-unsaid", "why a paper agent needs its clause");
+      }
     }
   });
 
