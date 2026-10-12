@@ -98,11 +98,11 @@ import {
 import { answerPrompt, answerQuestion, buyPrompt, casualPrompt, draft, greetingAnswers, introPrompt, introTemplate, modelAnswers, replyPrompt, sellPrompt, sherwoodClaimed, sherwoodMentioned, sherwoodNamed, xpostModel, xpostModelWarning, type AnswerIntentKind, type WriterFacts, type XStyle } from "./xpost/writer";
 import { appendPublicToken, appendPublicWallet, hasPublicWallet, publicTokenStillAllowed, publicWalletStillAllowed, type PublicWallet } from "./xpost/public-wallet";
 import { readPublicProjectDescription } from "./orchestrator-xpost-project";
-import { boughtNames, carriesResearch, classifyTag, createXResearch, generalTradesQuestion, modelNamed, namesACoin, ownCoinTicker, type ResearchBundle, type TagIntent, type XResearch } from "./orchestrator-xpost-research";
+import { boughtNames, carriesResearch, classifyTag, createXResearch, generalTradesQuestion, MARKET_MAJORS, modelNamed, namesACoin, ownCoinTicker, type ResearchBundle, type TagIntent, type XResearch } from "./orchestrator-xpost-research";
 import { PUBLISHABLE_SOURCES } from "./thesis-policy";
 import { readSaleResults } from "./orchestrator-xpost-results";
 import { appendSaleOutcome, hasSaleOutcome } from "./xpost/sale-outcome";
-import { admitFiguresLine, figuresTickers, withFigures, type FiguresSpec } from "./xpost/figures";
+import { admitFiguresLine, cleanTicker, figuresTickers, withFigures, type FiguresSpec } from "./xpost/figures";
 import { hotAnswers, hotNoneAnswers, hotUnreadAnswers, majorAnswers, majorUnreadAnswers, marketAnswers, type HotRead, type MajorRead, type MarketRead } from "./xpost/market";
 import { chatAnswers, declineAnswers, vibeAnswers } from "./xpost/casual";
 
@@ -1933,11 +1933,17 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // buy posts' coins, read again here as research reads them
       // (ownCoinTicker). Never for a major: the asker named that coin, and a
       // line that came or went by its name would say which names it bought.
+      // HOW'S THE MARKET TOO, for the chain's coins (2026-10-12); never for its
+      // big coins (bitcoin, ether, solana), which are the same three for every
+      // asker and say nothing of what it bought: a buy called "SOLX" or "WETH"
+      // would otherwise take the whole line out for $SOL or $ETH.
       const ownCoins = hotCoded || marketCoded ? [...bought, ...olderBought] : [];
+      const bigCoins = new Set((lineFigures ?? []).flatMap((s) => (s.kind === "majors" ? s.coins.map((c) => cleanTicker(c.symbol)) : []))
+        .filter((t): t is string => t !== null && MARKET_MAJORS.some((m) => m.symbol.toUpperCase() === t)));
       const figured = admitted && lineFigures?.length && !templated && active.has(account.tenant.toLowerCase()) ? withFigures(admitted, lineFigures) : null;
       const lined = figured?.line != null && admitFiguresLine(figured.line) && !sherwoodMentioned(figured.line)
         && figuresTickers(figured.line).every((t) => tickerRefusal(t) === null && !merrymenMentioned(t) && !sherwoodMentioned(t) && !namedIn(t, ownNames) && !modelNamed(t)
-          && !ownCoinTicker(t, ownCoins)) ? figured : null;
+          && (bigCoins.has(t) || !ownCoinTicker(t, ownCoins))) ? figured : null;
       if (figures && admitted) bump(lined ? (lined.dropped > 0 ? "answer-figures-shortened" : "answer-figures") : "answer-figures-left-out");
       const body = lined ? lined.text : admitted;
       // MARKED BY WHAT IT WAS HANDED, not by what the model wrote: an answer

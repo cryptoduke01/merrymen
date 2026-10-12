@@ -3394,3 +3394,20 @@ test("chat is never silence by default: a draft refused only for how it was put 
   await w.step();
   assert.deepEqual(w.sends, []);
 });
+
+test("how's the market keeps bitcoin, ether and solana in its line whatever its own buys are called; the chain's coins are still screened by them (2026-10-12)", async (t) => {
+  // A buy called SOLX, and one called WETH: either used to read as $SOL or $ETH being its own coin, and took the whole line out.
+  const facts: AgentFacts = { ...FACTS, calls: [{ ...CALL, decisionId: "fill-solx", symbol: "SOLX", name: "Sol X" }, { ...CALL, decisionId: "fill-weth", symbol: "WETH", name: "Wrapped Ether" }] };
+  const m = marketResearch([hotPool(1, 42.07, 1.21e6)]);
+  const w = await world(t, { env: RESEARCH_ON, research: m.research, facts });
+  w.setInbox([tag({ text: "@pine_stoat how's the market?" })]);
+  await w.step();
+  assert.match(String(w.sends[0]?.text ?? ""), / coingecko 24h: \$BTC \+1\.2%, \$ETH \+2\.4%, \$SOL \+4\.8%; geckoterminal robinhood: trending \$COINA 24h \+42\.1%\. say stop to opt out\.$/);
+  // A chain coin under a name its own buys go by never shows, as in what's hot.
+  const own: AgentFacts = { ...FACTS, calls: [{ ...CALL, decisionId: "fill-coina", symbol: "COINA", name: "Coin A" }] };
+  const w2 = await world(t, { env: RESEARCH_ON, research: marketResearch([hotPool(1, 42.07, 1.21e6)]).research, facts: own });
+  w2.setInbox([tag({ text: "@pine_stoat how's the market?" })]);
+  await w2.step();
+  assert.ok(w2.sends.length === 1);
+  assert.doesNotMatch(String(w2.sends[0]?.text ?? ""), /\$COINA/);
+});
