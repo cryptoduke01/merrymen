@@ -84,7 +84,7 @@ import {
   type XAccount,
   type XPost,
 } from "./xpost/store";
-import { answerPrompt, buyPrompt, casualPrompt, draft, introPrompt, introTemplate, modelAnswer, replyPrompt, sellPrompt, sherwoodClaimed, xpostModel, xpostModelWarning, type WriterFacts, type XStyle } from "./xpost/writer";
+import { answerPrompt, buyPrompt, casualPrompt, draft, introPrompt, introTemplate, modelAnswers, replyPrompt, sellPrompt, sherwoodClaimed, xpostModel, xpostModelWarning, type WriterFacts, type XStyle } from "./xpost/writer";
 import { appendPublicToken, appendPublicWallet, hasPublicWallet, publicTokenStillAllowed, publicWalletStillAllowed, type PublicWallet } from "./xpost/public-wallet";
 import { readPublicProjectDescription } from "./orchestrator-xpost-project";
 import { classifyTag, createXResearch, type ResearchBundle, type XResearch } from "./orchestrator-xpost-research";
@@ -1292,7 +1292,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       if (await keyStatus(shared, dedupeKey) !== null || await keyStatus(shared, `reply:${account.xUserId}:${comment.id}`) !== null) continue;
       const buys = recentCoins(f);
       // READ BY CODE FIRST, with research on: the model question is answered
-      // from a code-built line (writer.ts modelAnswer) and spends no model call.
+      // from a code-built line (writer.ts modelAnswers) and spends no model call.
       const knownCoins = [...buys.map((c) => c.label), ...posts.filter((p) => p.kind === "buy" && p.coin).map((p) => p.coin!)];
       const intent = research ? classifyTag(candidate.text, { address: candidate.address ?? null, knownCoins }) : null;
       const templated = intent?.kind === "model";
@@ -1311,16 +1311,24 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         if (bundle.lookups) bump("answer-lookups", bundle.lookups);
         for (const note of new Set(bundle.notes)) bump(`answer-research-${note}`);
       }
+      // THE MODEL QUESTION'S LINES, this mention's own first: one it already
+      // said is a repeat to the gate, so the next is tried rather than none.
+      const lines = templated ? modelAnswers(comment.id, facts.style) : [];
       const raw = templated
-        ? modelAnswer(comment.id, facts.style)
+        ? lines[0]!
         : await draft(creds, answerPrompt({ ...facts, question: candidate.text, recentBuys: buys, said: said.map(withoutReplyOptOut), walletPublic, ...(looked ?? {}) }), { call: deps.llm, timeoutMs: deps.draftTimeoutMs });
       const mode = f.mode === "idle" ? null : f.mode;
-      // SHERWOOD DOES NOT RUN IT YET: a draft that says so is refused before the gate, research on or off.
-      const claimed = raw !== null && sherwoodClaimed(raw);
-      const verdict = raw === null || claimed ? null : admitXPost(raw, {
+      const gate = (text: string) => admitXPost(text, {
         kind: "reply", agentName: f.name, mode, coins: buys.map((c) => c.label),
         paperCoins: buys.filter((c) => c.paper).map((c) => c.label), recentOwn, recentFleet, emojiOk: facts.style.emoji > 0,
       }, BASE_GATE);
+      // SHERWOOD DOES NOT RUN IT YET: a draft that says so is refused before the gate, research on or off.
+      const claimed = raw !== null && sherwoodClaimed(raw);
+      let verdict = raw === null || claimed ? null : gate(raw);
+      for (const line of lines.slice(1)) {
+        if (verdict?.ok) break;
+        verdict = gate(line);
+      }
       const finishedAt = at();
       const body = verdict?.ok ? verdict.text : null;
       const id = await schedulePost(shared, {

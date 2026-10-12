@@ -811,3 +811,55 @@ table("a small size is a size; small things are not", [
   ["small steps still count as moving", LIVE, "ok"],
   ["a little bite of something sweet never hurt anyone's afternoon", LIVE, "ok"],
 ]);
+
+describe("sherwood-1: one name with a digit, in an answer only, never as what runs it", () => {
+  const reply: Partial<XGateCtx> = { kind: "reply", mode: "live" };
+  const said = (line: string) => `${line}. Say stop to opt out.`;
+  const TEASE = "built by merrymen, and the new sherwood-1 is still cooking";
+
+  it("passes in a reply, and the text posted says it exactly as written", () => {
+    assert.deepEqual(admit(said(TEASE), reply), { ok: true, text: said(TEASE) });
+    const caps = said("built by merrymen, and the new Sherwood-1 is still cooking");
+    assert.deepEqual(admit(caps, reply), { ok: true, text: caps });
+    const twice = said("sherwood-1 is merrymen's own, and sherwood-1 is still in the oven");
+    assert.deepEqual(admit(twice, reply), { ok: true, text: twice });
+    assert.equal(reason(`${TEASE}. And it is not done yet. Say stop to opt out.`, reply), "ok", "a full stop after it is a sentence, not a version");
+  });
+
+  it("only the exact token: any other digit, version or spelling is still a digit", () => {
+    for (const line of [
+      "built by merrymen, and the new sherwood-2 is still cooking",
+      "built by merrymen, and the new sherwood-10 is still cooking",
+      "built by merrymen, and the new sherwood-1.5 is still cooking",
+      "built by merrymen, and the new sherwood-1x is still cooking",
+      "built by merrymen, and the new sherwood-1-mini is still cooking",
+      "built by merrymen, and 1 sherwood-1 is still cooking",
+      "built by merrymen, and the new sherwood-1 cost $1 to cook",
+      "built by merrymen, and the new $sherwood-1 is still cooking",
+      "built by merrymen, and the new sherwood 1 is still cooking",
+      "built by merrymen, and the new sherwood1 is still cooking",
+    ]) assert.equal(reason(said(line), reply), "has-digits", line);
+  });
+
+  it("never says sherwood runs it, with the digit or without", () => {
+    for (const line of ["sherwood-1 runs me, built by merrymen", "i run on sherwood-1 these days, built by merrymen", "powered by the new sherwood-1, built by merrymen",
+      "built by merrymen and sherwood-1 is live now", "i'm on sherwood these days, built by merrymen"]) {
+      assert.equal(reason(said(line), reply), "sherwood-claim", line);
+    }
+  });
+
+  it("is refused in every post that is not a reply", () => {
+    for (const kind of ["casual", "intro", "buy", "sell"] as const) {
+      assert.equal(reason("built by merrymen, and the new sherwood-1 is still cooking, an ai agent trading on merrymen", { kind, mode: "live", coins: ["pepe"] }), "has-digits", kind);
+    }
+  });
+
+  it("a stand-in already in the draft gets no exception", () => {
+    assert.equal(reason(said("the new sherwood-1 and the sherwoodmerrymenname are still cooking"), reply), "has-digits");
+    assert.equal(reason(said("the sherwoodmerrymenname is still cooking in the back"), reply), "ok", "without the digit it is only a word");
+  });
+
+  it("a line it said before is still the same line", () => {
+    assert.equal(reason(said(TEASE), { ...reply, recentFleet: [said(TEASE)] }), "fleet-repeat");
+  });
+});

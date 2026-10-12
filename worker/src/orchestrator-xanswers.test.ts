@@ -422,11 +422,41 @@ test("research on: the model question is answered from a code-built sherwood lin
   const [answer] = await w.answers();
   assert.equal(answer!.status, "scheduled", answer!.reason ?? "");
   assert.match(answer!.body, /merrymen/);
-  assert.match(answer!.body, /the new sherwood one/);
-  assert.match(answer!.body, /cooking|oven/);
+  assert.match(answer!.body, /new sherwood-1\b/, "by its exact name");
   assert.match(answer!.body, /Say stop to opt out\.$/i);
-  assert.doesNotMatch(answer!.body, /\p{N}|running on|powered|runs me/u);
+  assert.doesNotMatch(answer!.body.replace(/\bsherwood-1\b/, ""), /\p{N}/u, "and no other digit");
+  assert.doesNotMatch(answer!.body, /running on|powered|runs me/);
   assert.equal((await store.readMeta(w.db, "llm:2026-09-30"))?.n ?? 0, 0, "and no model allowance spent");
+});
+
+test("research on: the model question asked again is answered again, in other words, never the same line twice", async (t) => {
+  const w = await world(t, { env: RESEARCH_ON, research: fakeResearch().research });
+  // Three people in one poll, and the same mention's own line for all three: each later one would repeat the first.
+  w.setInbox([1, 2, 3].map((n) => tag({ id: `10000000000000009${n}`, conversation_id: `10000000000000009${n}`, author_id: `99${n}`,
+    text: "@pine_stoat what model do you run on?" })));
+  await w.step();
+  const answers = await w.answers();
+  assert.deepEqual(answers.map((a) => a.status), ["scheduled", "scheduled", "scheduled"], answers.map((a) => a.reason).join(","));
+  assert.equal(new Set(answers.map((a) => a.body)).size, 3, "three different lines");
+  for (const a of answers) assert.match(a.body, /new sherwood-1\b/);
+  assert.equal(w.asked().length, 0, "still no model call");
+});
+
+test("research off: a drafted model answer may say sherwood-1, and one that says it runs on it is refused", async (t) => {
+  const tease = await world(t, { answer: "built by merrymen, and the new sherwood-1 is still cooking. Say stop to opt out." });
+  tease.setInbox([tag({ text: "@pine_stoat what model do you run on?" })]);
+  await tease.step();
+  const [ok] = await tease.answers();
+  assert.equal(ok!.status, "scheduled", ok!.reason ?? "");
+  assert.equal(ok!.body, "built by merrymen, and the new sherwood-1 is still cooking. Say stop to opt out.");
+  for (const answer of ["i run on sherwood-1, built by merrymen. Say stop to opt out.", "built by merrymen, and sherwood-2 is still cooking. Say stop to opt out."]) {
+    const w = await world(t, { answer });
+    w.setInbox([tag({ text: "@pine_stoat what model do you run on?" })]);
+    await w.step();
+    const [skipped] = await w.answers();
+    assert.equal(skipped!.status, "skipped", answer);
+    assert.match(skipped!.reason ?? "", /^gate:(?:sherwood-claim|has-digits)$/, answer);
+  }
 });
 
 test("a draft that says sherwood runs it is refused, research on or off", async (t) => {

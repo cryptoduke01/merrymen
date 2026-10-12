@@ -27,6 +27,7 @@ import {
   introPrompt,
   introTemplate,
   modelAnswer,
+  modelAnswers,
   replyPrompt,
   sherwoodClaimed,
   xpostCreds,
@@ -727,8 +728,8 @@ describe("an active agent's answers and conversation memory", () => {
       said: ["mostly fresh launches for me. Say stop to opt out."], walletPublic: true });
     const text = all(p);
     assert.match(text, /what model are you running on/);
-    assert.match(text, /sherwood/);
-    assert.match(text, /never claim sherwood runs you today/i);
+    assert.match(text, /sherwood-1/);
+    assert.match(text, /never claim sherwood runs you, powers you or is live today/i);
     assert.match(text, /Pepe/);
     assert.match(text, /on paper/);
     assert.match(text, /Never write the address/);
@@ -736,14 +737,14 @@ describe("an active agent's answers and conversation memory", () => {
     assert.match(answerPrompt({ ...BASE, question: "", recentBuys: [], said: [], walletPublic: false }).prompt, /PASS/);
   });
 
-  it("an answer is very casual and teases the new sherwood one, spelled with no digit, never as what runs it", () => {
+  it("an answer is very casual and teases the new sherwood-1 by its exact name, never as what runs it", () => {
     const text = all(answerPrompt({ ...BASE, question: "what model do you run on", recentBuys: [], said: [], walletPublic: false }));
     assert.match(text, /texting a friend/);
     assert.match(text, /never at the asker's expense/);
     assert.match(text, new RegExp(`new «${SHERWOOD_ON_X}», merrymen's own model, as cooking`));
-    assert.equal(SHERWOOD_ON_X, "sherwood one");
-    assert.doesNotMatch(text, /sherwood-\d|sherwood \d/i, "a post carries no digits, so the model is never shown one in its name");
-    assert.match(text, /never claim sherwood runs you today/i);
+    assert.equal(SHERWOOD_ON_X, "sherwood-1");
+    assert.match(text, /Write it exactly «sherwood-1», lowercase with the hyphen: it is a name, the only one you may write with a digit, and no other figure goes beside it/);
+    assert.match(text, /never claim sherwood runs you, powers you or is live today/i);
     assert.doesNotMatch(text, /\b(?:groq|qwen|gpt|llama|claude|openai|anthropic)\b/i);
   });
 
@@ -785,20 +786,24 @@ describe("an active agent's answers and conversation memory", () => {
     assert.doesNotMatch(all(answerPrompt({ ...BASE, question: "what is this coin?", recentBuys: [], said: [], walletPublic: false, creatorClaim: "it has 1000 holders" })), /creator describes/, "a figure never reaches the model");
   });
 
-  it("the model answer is code's: built by merrymen, the new sherwood one cooking, never what runs it", () => {
+  it("the model answer is code's: built by merrymen, the new sherwood-1 cooking, never what runs it", () => {
     const lines = new Set<string>();
     for (let i = 0; i < 200; i++) lines.add(modelAnswer(`10000000000000${i}`, { lower: false }));
-    assert.equal(lines.size, 4, "every variant is reachable");
+    assert.equal(lines.size, 8, "every variant is reachable");
     for (const line of lines) {
       assert.match(line, /merrymen/);
-      assert.match(line, new RegExp(`the new ${SHERWOOD_ON_X}`));
+      assert.match(line, new RegExp(`new ${SHERWOOD_ON_X}\\b`));
       assert.match(line, /Say stop to opt out\.$/);
-      assert.doesNotMatch(line, /\p{N}|\b(?:groq|qwen|gpt|llama|claude|openai|anthropic)\b/iu);
+      assert.doesNotMatch(line.replace(/\bsherwood-1\b/, ""), /\p{N}/u, "sherwood-1 is the only digit");
+      assert.doesNotMatch(line, /\b(?:groq|qwen|gpt|llama|claude|openai|anthropic)\b/i);
       assert.equal(sherwoodClaimed(line), false, line);
       assert.equal(vocabularyRefusal(line), null, line);
     }
     assert.match(modelAnswer("1", { lower: true }), /say stop to opt out\.$/);
     assert.equal(modelAnswer("1", { lower: true }), modelAnswer("1", { lower: true }), "the same mention, the same line");
+    const all8 = modelAnswers("1", { lower: false });
+    assert.equal(all8[0], modelAnswer("1", { lower: false }), "the mention's own line first");
+    assert.equal(new Set(all8).size, 8, "then every other line, once");
   });
 
   it("a draft that says sherwood runs it today is caught; a tease is not", () => {
@@ -807,7 +812,9 @@ describe("an active agent's answers and conversation memory", () => {
       "Sherwood One powers me", "sherwood one is my brain", "i’m on sherwood"]) {
       assert.equal(sherwoodClaimed(claim), true, claim);
     }
+    for (const claim of ["sherwood-1 runs me", "i run on sherwood-1", "the new sherwood-1 is live"]) assert.equal(sherwoodClaimed(claim), true, claim);
     for (const tease of ["built by merrymen. the new sherwood one, merrymen's own model, is still cooking", "merrymen is working on sherwood one, not served yet",
+      "built by merrymen. their own model, the new sherwood-1, is still cooking",
       "sherwood one is coming, it's merrymen's own model", "mostly fresh launches, i like real buying", null]) {
       assert.equal(sherwoodClaimed(tease), false, String(tease));
     }

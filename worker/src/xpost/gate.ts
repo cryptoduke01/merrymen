@@ -128,6 +128,78 @@ export function tidyXPost(raw: unknown, agentName: string): string {
   return s.replace(WRAP, "").trim();
 }
 
+// ── sherwood-1, a name ──────────────────────────────────────────────────────
+
+/**
+ * SHERWOOD-1 IS A NAME, NOT A NUMBER (the owner's ask, 2026-10-12). Asked
+ * what model it runs on, an answer teases "the new sherwood-1": built by
+ * merrymen, whose own model it is, and still cooking. Every other digit is
+ * still refused: the base gate's has-digits rule is what keeps prices, sizes,
+ * counts and P&L off X, and it does not move.
+ *
+ * SO THE EXCEPTION IS ONE EXACT TOKEN, IN ONE KIND OF POST. Only in a reply
+ * (answers are gated as replies); only "sherwood-1" spelled out, in any case,
+ * standing alone as a word: never "sherwood-10", "sherwood-1x",
+ * "sherwood-1.5", "$sherwood-1", "@sherwood-1" or one inside a link. Each one
+ * is masked with a digit-free stand-in before the base gate and the X clauses
+ * read the text, and put back as written in the text that is posted. Any
+ * other digit beside it ("1 sherwood-1", "$1") is still has-digits. A casual,
+ * buy, sell or intro post never names it.
+ *
+ * AND NEVER AS WHAT RUNS IT. Nothing wires sherwood into an agent yet, so on a
+ * real-money trading account "running on sherwood-1", "powered by sherwood",
+ * "sherwood-1 is live" is a false claim about what powers it. A reply that
+ * says so is refused as sherwood-claim before anything else, with or without
+ * the digit. Change this only once sherwood actually runs the agents.
+ */
+export const SHERWOOD_NAME = "sherwood-1";
+const SHERWOOD_TOKEN = /(?<![\p{L}\p{N}_$@#/.:-])sherwood-1(?![\p{L}\p{N}_]|[.,:'’/-][\p{L}\p{N}])/giu;
+/** A digit-free stand-in no draft would say; a draft that does say it gets no exception. */
+const SHERWOOD_STAND_IN = "sherwoodmerrymenname";
+const STAND_IN = new RegExp(SHERWOOD_STAND_IN, "gi");
+const HAS_STAND_IN = new RegExp(SHERWOOD_STAND_IN, "i");
+
+/**
+ * The text with every exact "sherwood-1" masked, and the spellings masked, in
+ * order. Null when there is one to mask but the stand-in is already in the
+ * text: then nothing could tell the two apart, and the digit is not excepted.
+ */
+function maskSherwood(text: string): { text: string; said: string[] } | null {
+  const said: string[] = [];
+  const masked = text.replace(SHERWOOD_TOKEN, (m) => {
+    said.push(m);
+    return SHERWOOD_STAND_IN;
+  });
+  if (said.length > 0 && HAS_STAND_IN.test(text)) return null;
+  return { text: masked, said };
+}
+
+/** An earlier post as the masked draft is weighed against it. */
+const withStandIn = (text: string): string => text.replace(SHERWOOD_TOKEN, SHERWOOD_STAND_IN);
+
+/** The gated text with each stand-in put back as it was written. Anything else is refused, never guessed. */
+function unmaskSherwood(text: string, said: string[]): XVerdict {
+  const found = text.match(STAND_IN) ?? [];
+  if (found.length !== said.length) return refuse("has-digits");
+  let i = 0;
+  return { ok: true, text: text.replace(STAND_IN, () => said[i++]!) };
+}
+
+/**
+ * A DRAFT THAT SAYS SHERWOOD RUNS IT TODAY: "running on sherwood-1",
+ * "powered by the new sherwood one", "sherwood-1 is what runs me", "i'm on
+ * sherwood", "sherwood-1 is live". Errs toward refusing: a near miss costs
+ * one answer, never a false claim. (writer.ts re-exports it for the answer
+ * path, which records such a draft as gate:sherwood-claim.)
+ */
+const SHERWOOD_BEFORE = /\b(?:run(?:s|ning)?\s+(?:on|me|with)|ran\s+on|powered|powering|powers|built\s+on|based\s+on|i'?m\s+on|im\s+on|i\s+am\s+on|now\s+on|using|uses|i\s+use|under\s+the\s+hood|my\s+brain|my\s+model|behind\s+me|switched\s+to|upgraded\s+to|moved\s+to)\b[^.!?\n]{0,30}?\bsherwood\b/i;
+const SHERWOOD_AFTER = /\bsherwood\b[^.!?\n]{0,40}?\b(?:runs|running|ran|powers|powering|powered|drives|driving|under\s+the\s+hood|is\s+my\s+(?:brain|model)|what\s+i\s+(?:run|use)|behind\s+me|in\s+charge|is\s+live|went\s+live|live\s+now|is\s+out|out\s+now|launched|shipped)\b/i;
+export function sherwoodClaimed(draft: unknown): boolean {
+  if (typeof draft !== "string") return false;
+  const t = draft.normalize("NFKC").replace(/[’‘]/g, "'");
+  return SHERWOOD_BEFORE.test(t) || SHERWOOD_AFTER.test(t);
+}
+
 // ── the X clauses ───────────────────────────────────────────────────────────
 
 /** The model's "nothing to say", however it decorated it. */
@@ -809,7 +881,7 @@ function strings(list: unknown): string[] {
  * Reason codes (stable, operator-only): empty · pass · meta · too-short · too-long ·
  * handle · link · markup · emoji · exclaim · caps · ops · alert · hype · pnl ·
  * market · human-claim · points-back · coin-unsaid · paper-unsaid · mode-false · undisclosed · intro-no-trading ·
- * opt-out-unsaid · reply-current-or-action ·
+ * opt-out-unsaid · reply-current-or-action · sherwood-claim ·
  * fleet-repeat · seed-echo — plus whatever the base gate says (has-digits,
  * quantity, repeat, unvouched-ticker, address, secret…).
  */
@@ -819,6 +891,21 @@ export function admitXPost(raw: unknown, ctx: XGateCtx, baseGate: BaseGate): XVe
   if (tidied === "") return refuse("empty");
   if (PASS.test(tidied)) return refuse("pass");
   if (metaRefusal(raw, tidied, agentName)) return refuse("meta");
+  // A reply never says sherwood runs it, whoever drafted it (see SHERWOOD_NAME).
+  if (ctx.kind === "reply" && sherwoodClaimed(tidied)) return refuse("sherwood-claim");
+  // In a reply only, "sherwood-1" is a name: masked for every check below, put back after.
+  const named = ctx.kind === "reply" ? maskSherwood(tidied) : { text: tidied, said: [] };
+  if (named === null) return refuse("has-digits");
+  // What it is weighed against is masked the same way, so a line said before is still the same line.
+  const against = ctx.kind === "reply"
+    ? { ...ctx, recentOwn: strings(ctx.recentOwn).map(withStandIn), recentFleet: strings(ctx.recentFleet).map(withStandIn), seeds: strings(ctx.seeds).map(withStandIn) }
+    : ctx;
+  const verdict = admitMasked(named.text, against, baseGate, agentName);
+  if (!verdict.ok || named.said.length === 0) return verdict;
+  return unmaskSherwood(verdict.text, named.said);
+}
+
+function admitMasked(tidied: string, ctx: XGateCtx, baseGate: BaseGate, agentName: string): XVerdict {
 
   const coins = strings(ctx.coins);
   const baseCtx = {

@@ -41,7 +41,12 @@ against.
    and it is told never to advise, predict, or say it sold anything. The gate
    (`worker/src/xpost/gate.ts`, on top of the room's own agent-line gate) then
    drops any post that:
-   - contains a numeral or a quantity word;
+   - contains a numeral or a quantity word. The one exception is the name
+     `sherwood-1`, in a reply or an answer only: the exact token, standing
+     alone, in any case. It is masked before every check and put back in the
+     posted text. `sherwood-10`, `sherwood-1.5`, `$sherwood-1` and any other
+     digit beside it are still refused, and so is every casual, buy, sell or
+     intro post that names it;
    - uses error or operations vocabulary ("failed", "slippage", "rejected",
      "insufficient"…) or a casual paraphrase of a failed or blocked trade
      ("didn't go through", "never filled", "hit my limit", "paused me"…);
@@ -497,16 +502,21 @@ the mention itself. They go out **right away**:
   gate still keeps a new draft from echoing it. Very casually: short,
   texting-a-friend answers, lowercase welcome, dry humour never at the
   asker's expense. Asked about its model, it never names a provider: it is
-  built by merrymen, and the new "sherwood one" (merrymen/sherwood-1, spelled
-  without a digit because a post carries none; `SHERWOOD_ON_X`) is
-  merrymen's own model, cooking. It never says sherwood runs it today: nothing
-  wires it into an agent yet. With research on, code knows the question is
-  the model one and the answer is a code-built line (`modelAnswer`), not a
-  draft. Change `SHERWOOD_ON_X`, those lines and the prompt only once it does.
-- **Gate:** the comment-reply gate, opt-out notice included. Before it, any
-  answer draft that says sherwood runs it ("running on", "powered by",
-  "sherwood one is live") is refused as `gate:sherwood-claim`, research on or
-  off.
+  built by merrymen, and the new `sherwood-1` (`SHERWOOD_ON_X`, the one name
+  the gate lets an answer write with a digit) is merrymen's own model,
+  cooking. It never says sherwood runs it, powers it or is live today:
+  nothing wires it into an agent yet. With research on, code knows the
+  question is the model one and the answer is a code-built line, not a
+  draft: eight lines that share too few words to be each other's repeat
+  (`modelAnswers`), the mention's own first, then the next the gate admits,
+  so the question asked again is answered again in other words. Change
+  `SHERWOOD_ON_X`, those lines and the prompt only once sherwood runs the
+  agents.
+- **Gate:** the comment-reply gate, opt-out notice included, with the
+  `sherwood-1` exception above. Before anything else, a reply or answer that
+  says sherwood runs it ("running on", "powered by", "sherwood-1 is live"),
+  with the digit or without, is refused as `gate:sherwood-claim`, research on
+  or off.
 - **Their own lane:** one minute apart, 24 a day per X account, at most two
   per person per rolling day. Answers never spend or wait on the posting
   cadence. The per-person count is taken under a lock on the X account and

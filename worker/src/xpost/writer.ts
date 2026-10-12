@@ -41,7 +41,10 @@
 import { SETTINGS_DEFAULTS } from "../../../packages/core/src/index";
 import { llmText, type LlmCreds } from "../llm";
 import { hash32, type SaleOutcome } from "./planner";
+import { SHERWOOD_NAME, sherwoodClaimed } from "./gate";
 import { REPLY_OPT_OUT, XREPLY_MAX_COMMENT_CHARS } from "./replies";
+
+export { sherwoodClaimed };
 
 export type { LlmCreds };
 
@@ -170,54 +173,57 @@ export interface AnswerFacts extends WriterFacts {
 export type AnswerIntentKind = "capabilities" | "onboarding" | "own-trades" | "coin" | "model" | "chat";
 
 /**
- * THE MODEL IT IS ASKED ABOUT, AS AN X POST MAY SPELL IT. merrymen's own
- * model is "sherwood-1"; a post carries no digits (the gate refuses one), so
- * on X it is "sherwood one", a name and not a count. It is merrymen's own
- * model in the making: an answer teases it as new and cooking, and NEVER says
- * it runs the agent today — nothing wires it into an agent yet, and saying so
- * on a real-money trading account would be false advertising. Change the
- * wording here only once it actually runs the agents.
+ * THE MODEL IT IS ASKED ABOUT, AS AN X POST SPELLS IT: "sherwood-1", merrymen's
+ * own model. A post carries no digits, and this is the one name the gate lets
+ * an answer say with one (gate.ts SHERWOOD_NAME: a reply only, the exact
+ * token only). It is merrymen's own model in the making: an answer teases it
+ * as new and cooking, and NEVER says it runs the agent today — nothing wires
+ * it into an agent yet, and saying so on a real-money trading account would
+ * be false advertising. Change the wording here only once it actually runs
+ * the agents.
  */
-export const SHERWOOD_ON_X = "sherwood one";
+export const SHERWOOD_ON_X = SHERWOOD_NAME;
 
 /**
  * THE MODEL ANSWER, BUILT BY CODE (review, 2026-10-12). Asked what model it
  * runs on, a small writer model told "tease sherwood, never say it runs you"
- * can still write "running on the new sherwood one", and the X gate admits
+ * can still write "running on the new sherwood-1", and the X gate admits
  * it. So with research on, where code knows the question is the model one,
  * the answer is one of these lines and no draft at all: built by merrymen,
- * the new sherwood one is merrymen's own model and it is cooking. Picked by
- * the mention's id, so two people asking in a day are rarely answered word
- * for word alike. Still gated like any answer.
+ * and the new sherwood-1, merrymen's own, is still cooking. Still gated like
+ * any answer.
+ *
+ * EIGHT LINES THAT ARE NOT EACH OTHER. The gate refuses an answer that
+ * repeats one it said (60 days of its own posts, 14 of the fleet's): with
+ * four lines sharing most of their words, the first model answer was the last
+ * for two months. These share at most four of seven content words with each
+ * other (under the gate's 0.6, pinned in the tests), and the answer path
+ * takes the first the gate admits, starting from the mention's own line
+ * (modelAnswers), so the same question is answered again in other words
+ * until every line has been said.
  */
 const MODEL_ANSWERS: readonly string[] = Object.freeze([
-  `built by merrymen. the new ${SHERWOOD_ON_X}, merrymen's own model, is still cooking`,
-  `merrymen built me. their own model, the new ${SHERWOOD_ON_X}, is cooking in the back`,
-  `made by merrymen, and the new ${SHERWOOD_ON_X} is merrymen's own model. it's cooking, not served yet`,
-  `merrymen made me. the new ${SHERWOOD_ON_X}, their own model, is in the oven`,
+  `built by merrymen. their own model, the new ${SHERWOOD_ON_X}, is still cooking`,
+  `merrymen made me, and the new ${SHERWOOD_ON_X} is what they've got in the oven`,
+  `i'm a merrymen build. the new ${SHERWOOD_ON_X} is homegrown and still simmering`,
+  `the merrymen crew put me together. the new ${SHERWOOD_ON_X} is theirs, and it isn't done yet`,
+  `a merrymen original. the new ${SHERWOOD_ON_X} is their house model, still in the works`,
+  `merrymen raised me. the new ${SHERWOOD_ON_X} is the next thing in their kitchen, give it time`,
+  `came out of the merrymen workshop. the new ${SHERWOOD_ON_X} is on the stove over there`,
+  `merrymen's work. their new ${SHERWOOD_ON_X} is still baking, no peeking`,
 ]);
-export function modelAnswer(seed: string, style: Pick<XStyle, "lower">): string {
+
+/** Every model answer, starting from this mention's own line, each with the opt-out notice. */
+export function modelAnswers(seed: string, style: Pick<XStyle, "lower">): string[] {
   let h = 0;
   for (const ch of String(seed ?? "")) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
-  const line = MODEL_ANSWERS[h % MODEL_ANSWERS.length]!;
-  return `${line}. ${style.lower ? REPLY_OPT_OUT.toLowerCase() : REPLY_OPT_OUT}`;
+  const notice = style.lower ? REPLY_OPT_OUT.toLowerCase() : REPLY_OPT_OUT;
+  return MODEL_ANSWERS.map((_, i) => `${MODEL_ANSWERS[(h + i) % MODEL_ANSWERS.length]!}. ${notice}`);
 }
 
-/**
- * A DRAFT THAT SAYS SHERWOOD RUNS IT TODAY: "running on sherwood one",
- * "powered by the new sherwood one", "sherwood one is what runs me", "i'm on
- * sherwood", "sherwood one is live". Nothing wires sherwood into an agent
- * yet, so on a real-money trading account that is a false claim about what
- * powers it. Every answer draft is held to this, research on or off; a
- * refused draft is skipped (gate:sherwood-claim). Errs toward refusing: a
- * near miss costs one answer, never a false claim.
- */
-const SHERWOOD_BEFORE = /\b(?:run(?:s|ning)?\s+(?:on|me|with)|ran\s+on|powered|powering|powers|built\s+on|based\s+on|i'?m\s+on|im\s+on|i\s+am\s+on|now\s+on|using|uses|i\s+use|under\s+the\s+hood|my\s+brain|my\s+model|behind\s+me|switched\s+to|upgraded\s+to|moved\s+to)\b[^.!?\n]{0,30}?\bsherwood\b/i;
-const SHERWOOD_AFTER = /\bsherwood\b[^.!?\n]{0,40}?\b(?:runs|running|ran|powers|powering|powered|drives|driving|under\s+the\s+hood|is\s+my\s+(?:brain|model)|what\s+i\s+(?:run|use)|behind\s+me|in\s+charge|is\s+live|went\s+live|live\s+now|is\s+out|out\s+now|launched|shipped)\b/i;
-export function sherwoodClaimed(draft: unknown): boolean {
-  if (typeof draft !== "string") return false;
-  const t = draft.normalize("NFKC").replace(/[’‘]/g, "'");
-  return SHERWOOD_BEFORE.test(t) || SHERWOOD_AFTER.test(t);
+/** This mention's own model answer: the first of modelAnswers. */
+export function modelAnswer(seed: string, style: Pick<XStyle, "lower">): string {
+  return modelAnswers(seed, style)[0]!;
 }
 
 export interface Prompt {
@@ -693,7 +699,7 @@ const NOTHING_LOOKED_UP: Readonly<Partial<Record<AnswerIntentKind, string>>> = {
  * welcome, dry humour about itself or the idea, never at the asker's expense.
  *
  * ASKED WHAT MODEL IT RUNS ON, it never names a provider and never claims one
- * it does not run: it is built by merrymen, and the new sherwood one —
+ * it does not run: it is built by merrymen, and the new sherwood-1 —
  * merrymen's own model, SHERWOOD_ON_X — is cooking. Never that it runs it today.
  */
 export function answerPrompt(f: AnswerFacts): Prompt {
@@ -712,7 +718,7 @@ export function answerPrompt(f: AnswerFacts): Prompt {
     "Sound like you're texting a friend back: very casual, one or two quick sentences, plain everyday words, lowercase is fine. Dry humour about yourself or the idea is welcome, never at the asker's expense, never forced. No corporate tone, no lists, no \"great question\".",
     "Answer what you can from the facts below and from what you already said publicly. If the question asks for advice, a prediction, a price, a target, a size, a result, private information, news, or anything not covered below, either say plainly you don't share that or output exactly PASS. Asked for a count or an amount, answer in words only (thin, deep, spread out, concentrated, young), never a figure.",
     "Never say you hold, still hold, will buy, will sell or will do anything next. Coins you bought lately are past events: say you bought them, never that you hold them now.",
-    `If asked what model or AI you run on: say you're built by merrymen, and tease the new ${q(SHERWOOD_ON_X)}, merrymen's own model, as cooking or coming soon. Write it exactly ${q(SHERWOOD_ON_X)}: it is a name, not a count. Never name another provider or model, never claim sherwood runs you today.`,
+    `If asked what model or AI you run on: say you're built by merrymen, and tease the new ${q(SHERWOOD_ON_X)}, merrymen's own model, as cooking or coming soon. Write it exactly ${q(SHERWOOD_ON_X)}, lowercase with the hyphen: it is a name, the only one you may write with a digit, and no other figure goes beside it. Never name another provider or model, never claim sherwood runs you, powers you or is live today.`,
     `Every answer must end with ${q(notice)} exactly. Leave room for it inside the character limit. A notice alone is not an answer: if there is nothing useful to say, output exactly PASS.`,
   ].join("\n\n");
   if (!question) return { system, prompt: "There is no usable question. Output exactly PASS." };

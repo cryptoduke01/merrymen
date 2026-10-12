@@ -36,7 +36,7 @@ import {
 import type { PublicThesis } from "./thesis-policy";
 import { admitXPost } from "./xpost/gate";
 import { tagCandidate } from "./xpost/replies";
-import { modelAnswer } from "./xpost/writer";
+import { modelAnswer, modelAnswers } from "./xpost/writer";
 import { ensureXpostSchema, readMeta, type XPost } from "./xpost/store";
 
 const NOW = Date.UTC(2026, 9, 12, 12);
@@ -201,13 +201,47 @@ describe("words from measurements: digit-free, attributed, and through the X gat
     }
   });
 
-  it("every code-built model answer clears the unchanged X gate, in either case", () => {
+  it("every code-built model answer clears the X gate, in either case, saying sherwood-1 exactly", () => {
     for (let i = 0; i < 40; i++) {
       for (const lower of [true, false]) {
         const line = modelAnswer(`1000000000000${i}`, { lower });
         const v = admitXPost(line, { kind: "reply", agentName: "Alan", mode: "live", coins: [], recentOwn: [], recentFleet: [] }, (r, c) => admitAgentLine(r, c));
-        assert.ok(v.ok, `${line} → ${v.ok ? "" : v.reason}`);
+        assert.deepEqual(v, { ok: true, text: line }, line);
+        assert.match(line, /new sherwood-1\b/);
       }
+    }
+  });
+
+  it("the model answers are not each other: each clears the gate with every other one already said", () => {
+    const lines = modelAnswers("1", { lower: false });
+    assert.equal(lines.length, 8);
+    for (const line of lines) {
+      const others = lines.filter((l) => l !== line);
+      const v = admitXPost(line, { kind: "reply", agentName: "Alan", mode: "live", coins: [], recentOwn: others, recentFleet: others }, (r, c) => admitAgentLine(r, c));
+      assert.ok(v.ok, `${line} → ${v.ok ? "" : v.reason}`);
+      const again = admitXPost(line, { kind: "reply", agentName: "Alan", mode: "live", coins: [], recentOwn: [line], recentFleet: [line] }, (r, c) => admitAgentLine(r, c));
+      assert.equal(again.ok, false, "but never itself again");
+    }
+  });
+
+  it("with the production base gate, sherwood-1 is the only digit an answer may carry, and never as what runs it", () => {
+    const gate = (line: string, kind: "reply" | "casual" | "buy" | "sell" | "intro" = "reply") =>
+      admitXPost(`${line}. Say stop to opt out.`, { kind, agentName: "Alan", mode: "live", coins: kind === "buy" || kind === "sell" ? ["pepe"] : [], recentOwn: [], recentFleet: [] }, (r, c) => admitAgentLine(r, c));
+    const tease = "built by merrymen, and the new sherwood-1 is still cooking";
+    assert.deepEqual(gate(tease), { ok: true, text: `${tease}. Say stop to opt out.` });
+    for (const line of ["built by merrymen, and the new sherwood-2 is still cooking", "built by merrymen, and the new sherwood-10 is still cooking",
+      "built by merrymen, and the new sherwood-1.5 is still cooking", "built by merrymen, and 1 sherwood-1 is still cooking",
+      "built by merrymen, and sherwood-1 cost about $1 to cook"]) {
+      const v = gate(line);
+      assert.equal(v.ok ? "ok" : v.reason, "has-digits", line);
+    }
+    for (const line of ["sherwood-1 runs me, built by merrymen", "i run on sherwood-1, built by merrymen"]) {
+      const v = gate(line);
+      assert.equal(v.ok ? "ok" : v.reason, "sherwood-claim", line);
+    }
+    for (const kind of ["casual", "buy", "sell", "intro"] as const) {
+      const v = gate("pepe and the new sherwood-1 from merrymen, an ai agent trading here", kind);
+      assert.equal(v.ok, false, kind);
     }
   });
 
