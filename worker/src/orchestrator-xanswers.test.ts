@@ -771,6 +771,18 @@ test("a tag this pass read is answered even when other owners' posts used the pa
   assert.equal(w.asked().length, 1);
 });
 
+test("research on: a greeting is chat even when it bought a coin called GM, and nothing is looked up for it", async (t) => {
+  const gathered: string[] = [];
+  const research: XResearch = { gather: async (input) => { gathered.push(input.intent.kind); return { facts: [], lookups: 0, notes: [] }; } };
+  const facts: AgentFacts = { ...FACTS, calls: [{ ...CALL, decisionId: "fill-gm", symbol: "GM", name: "GM" }] };
+  const w = await world(t, { env: RESEARCH_ON, research, facts });
+  w.setInbox([tag({ text: "@pine_stoat gm, how are you doing today?" })]);
+  await w.step();
+  assert.deepEqual(gathered, ["chat"]);
+  assert.match(w.asked()[0]!, /It is just chat/);
+  assert.doesNotMatch(w.asked()[0]!, /asking about a coin/);
+});
+
 test("research gets only what is left of the pass's send budget, and none past it", async (t) => {
   const budgets: (number | undefined)[] = [];
   const research: XResearch = { gather: async (input) => { budgets.push(input.budgetMs); return { facts: [], lookups: 0, notes: [] }; } };

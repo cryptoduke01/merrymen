@@ -131,10 +131,32 @@ describe("a tag's intent, read by code", () => {
 
   it("one contract address is a coin, by its key only; a coin it bought is found without a $", () => {
     assert.deepEqual(classifyTag("what about this coin?", { address: CA }), { kind: "coin", ticker: null, address: CA });
-    assert.deepEqual(classifyTag("thoughts on pepe?", { knownCoins: ["Pepe"] }), { kind: "coin", ticker: "Pepe", address: null });
+    assert.deepEqual(classifyTag("is pepe legit?", { knownCoins: ["Pepe"] }), { kind: "coin", ticker: "Pepe", address: null });
+    assert.deepEqual(classifyTag("thoughts on the pepe chart?", { knownCoins: ["Pepe"] }), { kind: "coin", ticker: "Pepe", address: null });
     assert.deepEqual(classifyTag("why did you buy pepe?", { knownCoins: ["Pepe"] }), { kind: "own-trades", why: true, coin: "pepe", address: null });
     assert.deepEqual(classifyTag("did you buy this coin?", { address: CA }), { kind: "own-trades", why: false, coin: null, address: CA }, "its own history, by the contract");
     assert.equal(classifyTag("what about this coin?", { address: "0xnot-an-address" }).kind, "chat");
+  });
+
+  it("a coin it bought named with a common word is never found in ordinary chat", () => {
+    for (const [text, knownCoins] of [
+      ["gm, how are you doing today?", ["GM"]],
+      ["how are you?", ["You"]],
+      ["what do you think about the weekend?", ["The Weekend"]],
+      ["my cat is asleep on the keyboard, cute right?", ["Cat"]],
+      ["how's the moon looking tonight?", ["Moon"]],
+      ["hey what's up?", ["Up"]],
+      ["how's trading today?", ["Trading"]],
+      ["gm, what coins are you buying?", ["GM"]],
+      ["thoughts on pepe?", ["Pepe"]],
+    ] as const) {
+      const intent = classifyTag(text, { knownCoins });
+      assert.ok(intent.kind !== "coin" && !(intent.kind === "own-trades" && intent.coin !== null), `${text} → ${JSON.stringify(intent)}`);
+    }
+    // In talk about a coin, the same labels are its coins.
+    const weekend = classifyTag("thoughts on the weekend coin?", { knownCoins: ["The Weekend"] });
+    assert.deepEqual(weekend, { kind: "coin", ticker: "The Weekend", address: null });
+    assert.deepEqual(classifyTag("is the cat token legit?", { knownCoins: ["Cat"] }), { kind: "coin", ticker: "Cat", address: null });
   });
 });
 

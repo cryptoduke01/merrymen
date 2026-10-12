@@ -130,10 +130,33 @@ function tokenAsked(t: string, address: string | null): boolean {
 const words = (s: string): Set<string> => new Set((s.toLowerCase().match(/[a-z][a-z0-9'-]*/g) ?? []));
 
 /**
+ * A COIN IT BOUGHT, NAMED WITHOUT A $, ONLY IN TALK ABOUT A COIN (review,
+ * 2026-10-12). A coin can be called GM, You, Moon or The Weekend, and every
+ * word of such a label turns up in ordinary chat: "gm, how are you doing
+ * today?" was read as a question about GM, paid for an index read, Fomo
+ * credits and a flow reading, and answered with a memecoin's facts. So a
+ * label counts only beside a word about a coin or a trade that is not the
+ * label's own, and never when it is shorter than three letters or made of
+ * greetings, pronouns and other common words alone.
+ */
+const COIN_TALK: ReadonlySet<string> = new Set(("coin coins token tokens ticker chart charts buy buys bought buying ape aped apes aping " +
+  "sell sells sold selling trade trades traded trading holder holders liquidity liq volume mcap marketcap pump pumping pumped " +
+  "dump dumped rug rugged legit bag bags entry position ca contract launch launched curve pool").split(" "));
+const COMMON: ReadonlySet<string> = new Set(("gm gn hi hey yo hello sup thanks thx lol ok okay yes no you u ya me i we us they them it its this that " +
+  "the a an and or of on in to at for is are was do does did what how why who which when where good morning night day today").split(" "));
+function knownCoinAsked(label: string, said: ReadonlySet<string>): boolean {
+  const own = label.toLowerCase().split(/\s+/).filter(Boolean);
+  if (!own.length || !own.every((w) => said.has(w))) return false;
+  if (own.join("").replace(/[^a-z]/g, "").length < 3 || own.every((w) => COMMON.has(w))) return false;
+  return [...said].some((w) => COIN_TALK.has(w) && !own.includes(w));
+}
+
+/**
  * WHAT THE QUESTION IS, BY CODE. `address` is the one contract address
  * tagCandidate took out of the text; `knownCoins` are the labels of coins it
- * bought lately, so "why'd you buy pepe" and "thoughts on pepe" find their
- * coin without a $ sign. Never a model call, never a network read.
+ * bought lately, so "why'd you buy pepe" and "is pepe legit" find their coin
+ * without a $ sign — only in talk about a coin (knownCoinAsked). Never a
+ * model call, never a network read.
  */
 export function classifyTag(text: string, o: { address?: string | null; knownCoins?: readonly string[] } = {}): TagIntent {
   const t = typeof text === "string" ? text : "";
@@ -149,7 +172,7 @@ export function classifyTag(text: string, o: { address?: string | null; knownCoi
   if (asked?.kind === "site" && asked.topic === "onboarding") return { kind: "onboarding" };
   const ticker = extractCashtags(t)[0] ?? null;
   const said = words(t);
-  const known = (o.knownCoins ?? []).find((c) => c.trim() && c.toLowerCase().split(/\s+/).every((w) => said.has(w))) ?? null;
+  const known = (o.knownCoins ?? []).find((c) => c.trim() && knownCoinAsked(c, said)) ?? null;
   // ITS OWN TRADES, the Telegram groups' reading of them: what it traded, why.
   if (asked?.kind === "trades" || (asked?.kind === "site" && (asked.topic === "attempts" || asked.topic === "trades"))) {
     const why = asked.kind === "trades" ? asked.why : asked.topic === "attempts";
