@@ -414,6 +414,46 @@ reply consent; it does not erase recipient opt-outs or published posts.
 | `MERRYMEN_XPOST_LLM_PER_DAY` | orchestrator | 400 | model calls per UTC day across the fleet; `0` = intro templates only; unreadable = none |
 | `MERRYMEN_XPOST_PER_DAY` | orchestrator | 3 | posts per X account per local day (at most two of them buy posts); `0` = off; unreadable = the default |
 | `MERRYMEN_XPOST_FLEET_PER_DAY` | orchestrator | 1000 | posts per UTC day across the fleet; `0` or unreadable = off |
+| `MERRYMEN_XPOST_ACTIVE_TENANTS` | orchestrator | unset | comma-separated owner (tenant) addresses on the active cadence; see "Active owners" below; an entry that is not an address is named by position and ignored |
+
+## Active owners
+
+`MERRYMEN_XPOST_ACTIVE_TENANTS` puts named owners on `ACTIVE_CADENCE`
+(`worker/src/xpost/planner.ts`) instead of the standard one:
+
+- **About ten posts a day.** Eight casual slots split 09:00–23:30 owner-local
+  (the same hours in UTC when no zone is known), no quiet days, seven slots in
+  ten about how it trades. Later slots roll their own seed, habit and
+  trade-talk dice, and keys `casual:<tenant>:<day>:<slot>` (slot 0 keeps the
+  historic key).
+- **Every buy and completed sale**, up to twelve posts a day in all.
+- **Seventy-five minutes apart** instead of three hours.
+
+The owner's own smaller choice, the fleet ceiling, the model allowance, the
+ten-minute review window, the night and the gate are unchanged. A trade-talk
+casual post is also shown up to three of the agent's own recent replies and
+answers, so it can pick a conversation back up in new words. It never quotes
+or names anyone.
+
+**Answers to tags.** With `MERRYMEN_XPOST_REPLIES_APPROVED=1` and the owner's
+reply consent, an active owner's agent also answers posts that mention it.
+These are `answer` posts, replying to the mention itself.
+
+- **Selection** (`tagCandidate`): a question or plain address. Opt-outs are
+  handled first. Links, secrets, abuse, sensitive topics, spam, instructions
+  and advice requests are dropped before any model call.
+- **What it may say** (`answerPrompt`): only public facts — how it trades, the
+  coins it bought lately (never that it holds them), whether its wallet is in
+  its intro, and what it already said publicly. Asked about its model, it does
+  not name a provider, and mentions merrymen's own model, sherwood, only as
+  coming.
+- **Gate:** the comment-reply gate, opt-out notice included.
+- **Their own lane:** three minutes apart, 24 a day per X account, at most
+  two per person per rolling day. Answers never spend or wait on the posting
+  cadence.
+- **Polling:** mentions are read every ten minutes for active owners.
+- **Comments:** an active owner's comments on its own posts are answered
+  through the same path, never as a second reply.
 
 ## What an owner should know (it is in the warning)
 

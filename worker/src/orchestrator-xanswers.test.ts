@@ -1,0 +1,134 @@
+/**
+ * AN ACTIVE AGENT ANSWERS TAGS: a post that mentions it and asks it something
+ * gets one reviewed answer, from public facts, in its own lane — never for an
+ * owner the operator did not make active, never for advice, never twice to
+ * one person in a day beyond the allowance, and never after a STOP.
+ */
+import assert from "node:assert/strict";
+import { randomBytes } from "node:crypto";
+import { DatabaseSync } from "node:sqlite";
+import { test, type TestContext } from "node:test";
+import { wrapSqlite } from "./db";
+import { makeXPoster, xpostEnv } from "./orchestrator-xpost";
+import type { AgentFacts, CallFact } from "./groupchat/facts";
+import type { FetchLike } from "./xpost/client";
+import * as store from "./xpost/store";
+
+const MIN = 60_000, HOUR = 60 * MIN, DAY = 24 * HOUR;
+const NOW = Date.UTC(2026, 8, 30, 9);
+const TENANT = `0x${"ab".repeat(20)}`;
+const MENTION = "100000000000000020";
+const ANSWER = "mostly fresh launches, and i only buy when the buying looks real and steady. Say stop to opt out.";
+const CALL: CallFact = { decisionId: "fill-pepe", side: "buy", symbol: "PEPE", name: "Pepe", token: null,
+  paper: false, atSec: (NOW - 4 * HOUR) / 1000, bands: ["curve early"], ownWords: null };
+const FACTS: AgentFacts = { tenant: TENANT, agentId: TENANT, slug: null, name: "Pine Stoat", mode: "live",
+  ageDays: 2, strategy: "trencher", traits: [], calls: [CALL] };
+const tag = (over: Record<string, unknown> = {}) => ({ id: MENTION, author_id: "333", conversation_id: MENTION,
+  created_at: new Date(NOW - MIN).toISOString(), text: "@pine_stoat what kind of coins do you trade?", ...over });
+
+async function world(t: TestContext, o: { active?: boolean } = {}) {
+  const raw = new DatabaseSync(":memory:");
+  t.after(() => raw.close());
+  const db = wrapSqlite(raw), dek = randomBytes(32);
+  await store.ensureXpostSchema(db, "sqlite");
+  await store.upsertAccount(db, dek, { tenant: TENANT, xUserId: "111", username: "pine_stoat",
+    tokens: { accessToken: "private-access", refreshToken: "private-refresh", accessExpiresAtMs: NOW + 7 * DAY, scope: "tweet.read tweet.write" },
+    nowMs: NOW - 2 * DAY });
+  await store.setPosting(db, TENANT, { enabled: true, xUserId: "111" }, NOW - DAY);
+  assert.equal(await store.setReplying(db, TENANT, true, "111", NOW - DAY), true);
+  const intro = await store.schedulePost(db, { tenant: TENANT, xUserId: "111", kind: "intro", dedupeKey: `intro:${TENANT}:111`,
+    body: "I am an AI trading agent", nowMs: NOW - DAY, dueAtMs: NOW - DAY });
+  await store.claimPost(db, intro!, NOW - DAY);
+  await store.markPosted(db, intro!, "999", NOW - DAY);
+  let inbox: Record<string, unknown>[] = [tag()];
+  const sends: Record<string, unknown>[] = [], prompts: string[] = [];
+  const fetch: FetchLike = async (url, init) => {
+    if (url.includes("/mentions?")) {
+      return { status: 200, headers: { get: () => null }, text: async () => JSON.stringify({ data: inbox, meta: { result_count: inbox.length } }) };
+    }
+    assert.equal(url, "https://api.x.com/2/tweets");
+    sends.push(JSON.parse(init.body ?? "{}"));
+    return { status: 201, headers: { get: () => null }, text: async () => JSON.stringify({ data: { id: `1000000000000001${sends.length}0` } }) };
+  };
+  const env = o.active === false ? {} : { MERRYMEN_XPOST_ACTIVE_TENANTS: TENANT };
+  const poster = makeXPoster({
+    app: { clientId: "client", clientSecret: "secret", redirectUri: "https://app.test/connect/x" }, dek,
+    creds: { provider: "groq", transport: "openai", model: "test", apiKey: "private-model", baseUrl: "https://model.test/v1", vision: false },
+    knobs: { ...xpostEnv(env), repliesApproved: true },
+    deps: { dialect: "sqlite", fetch, monotonic: () => 0, member: async () => ({ tz: null }),
+      facts: async () => new Map([[TENANT, FACTS]]),
+      // Only the answer prompt gets words back: every other draft passes.
+      llm: async (_creds, input) => { prompts.push(input.prompt); return /Untrusted question/.test(input.prompt) ? ANSWER : "PASS"; },
+    },
+  });
+  const step = (now = NOW) => poster.step(db, [{ tenant: TENANT, agentId: TENANT }], new Map(), now);
+  const answers = async () => (await store.postsOf(db, TENANT, 0)).filter((p) => p.kind === "answer");
+  const asked = () => prompts.filter((p) => /Untrusted question/.test(p));
+  return { db, step, answers, asked, sends, setInbox: (v: Record<string, unknown>[]) => { inbox = v; } };
+}
+
+test("the operator's active owners are read by address only, and a bad entry is named by position", () => {
+  const env = xpostEnv({ MERRYMEN_XPOST_ACTIVE_TENANTS: ` ${TENANT.toUpperCase().replace("0X", "0x")} , alan ` });
+  assert.deepEqual([...(env.activeTenants ?? [])], [TENANT]);
+  assert.ok(env.notes.some((n) => /entry 2 of MERRYMEN_XPOST_ACTIVE_TENANTS/.test(n) && !/alan/.test(n)));
+  assert.equal(xpostEnv({}).activeTenants, undefined);
+});
+
+test("a tag gets one reviewed answer to the mention itself, in its own lane", async (t) => {
+  const w = await world(t);
+  await w.step();
+  const [answer] = await w.answers();
+  assert.ok(answer, "an answer was drafted");
+  assert.equal(answer.status, "scheduled");
+  assert.ok(answer.dueAtMs >= NOW + 10 * MIN, "the owner still gets ten minutes to skip it");
+  assert.equal(answer.replyToTweetId, MENTION);
+  const [prompt] = w.asked();
+  assert.match(prompt!, /what kind of coins do you trade/);
+  assert.doesNotMatch(prompt!, /@pine_stoat|private-access|private-refresh|private-model/);
+  w.setInbox([]);
+  await w.step(NOW + 30 * MIN);
+  assert.deepEqual(w.sends, [{ text: ANSWER, reply: { in_reply_to_tweet_id: MENTION } }]);
+  assert.equal((await w.answers())[0]!.status, "posted");
+  assert.equal(await store.lastOutAt(w.db, "111", NOW - DAY), null, "an answer is not a post the cadence waits behind");
+  assert.equal((await store.readMeta(w.db, `xday:111:2026-09-30`))?.n ?? 0, 0, "nor one it counts");
+  assert.equal((await store.readMeta(w.db, `answerday:111:2026-09-30`))?.n, 1);
+});
+
+test("an owner the operator did not make active answers no tags", async (t) => {
+  const w = await world(t, { active: false });
+  await w.step();
+  assert.equal((await w.answers()).length, 0);
+  assert.equal(w.asked().length, 0);
+});
+
+test("advice requests and plain chatter get no answer and cost no model call", async (t) => {
+  for (const text of ["@pine_stoat should i buy pepe now?", "@pine_stoat nice", "@pine_stoat check my presale, link in bio?"]) {
+    const w = await world(t);
+    w.setInbox([tag({ text })]);
+    await w.step();
+    assert.equal((await w.answers()).length, 0, text);
+    assert.equal(w.asked().length, 0, text);
+  }
+});
+
+test("a STOP opts the person out and nothing is drafted for them again", async (t) => {
+  const w = await world(t);
+  w.setInbox([tag({ id: "100000000000000019", text: "@pine_stoat stop" }), tag()]);
+  await w.step();
+  assert.equal((await w.answers()).length, 0);
+  assert.equal(w.asked().length, 0);
+});
+
+test("one person gets at most two answers in a rolling day, whatever became of them", async (t) => {
+  const w = await world(t);
+  const answerTo = (id: string, at: number) => store.schedulePost(w.db, { tenant: TENANT, xUserId: "111", kind: "answer",
+    dedupeKey: `answer:111:${id}`, body: "", status: "skipped", reason: "pass", nowMs: at, dueAtMs: at,
+    replyToTweetId: id, replyRootTweetId: id, replyAuthorId: "333" });
+  assert.notEqual(await answerTo("100000000000000031", NOW - 2 * HOUR), null);
+  assert.notEqual(await answerTo("100000000000000032", NOW - HOUR), null);
+  assert.equal(await answerTo("100000000000000033", NOW), null, "the third in a day is refused");
+  assert.notEqual(await answerTo("100000000000000034", NOW + DAY), null, "a day later they may ask again");
+  assert.equal(await store.schedulePost(w.db, { tenant: TENANT, xUserId: "111", kind: "answer",
+    dedupeKey: "answer:111:100000000000000035", body: "x", nowMs: NOW, dueAtMs: NOW,
+    replyToTweetId: "100000000000000035", replyRootTweetId: "100000000000000036", replyAuthorId: "444" }), null, "an answer's root is the mention itself");
+});

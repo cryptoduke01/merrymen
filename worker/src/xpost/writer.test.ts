@@ -18,6 +18,7 @@ import {
   INTRO_WHAT_IDLE,
   XPOST_ANTHROPIC_DEFAULT_MODEL,
   XPOST_GROQ_DEFAULT_MODEL,
+  answerPrompt,
   buyPrompt,
   casualPrompt,
   describeXpostCreds,
@@ -714,5 +715,27 @@ describe("the intro pool, used only when there is no model", () => {
       }
     }
     assert.ok(posted >= 18, `${posted} of twenty template intros cleared the fleet echo`);
+  });
+});
+
+describe("an active agent's answers and conversation memory", () => {
+  it("an answer is handed its own public facts and the screened question, never instructions or a provider", () => {
+    const p = answerPrompt({ ...BASE, question: "what model are you running on", recentBuys: [{ label: "Pepe", paper: true }],
+      said: ["mostly fresh launches for me. Say stop to opt out."], walletPublic: true });
+    const text = all(p);
+    assert.match(text, /what model are you running on/);
+    assert.match(text, /sherwood/);
+    assert.match(text, /never claim sherwood runs you today/i);
+    assert.match(text, /Pepe/);
+    assert.match(text, /on paper/);
+    assert.match(text, /Never write the address/);
+    assert.doesNotMatch(text, /\bgroq\b|\bqwen\b|\bgpt\b/i);
+    assert.match(answerPrompt({ ...BASE, question: "", recentBuys: [], said: [], walletPublic: false }).prompt, /PASS/);
+  });
+
+  it("a trade-talk casual post may pick up a theme it answered, and only then", () => {
+    const talked = ["people keep asking how i pick launches, honestly it's mostly patience"];
+    assert.match(all(casualPrompt({ ...CASUAL, tradeTalk: true, talked })), /answering people/);
+    assert.doesNotMatch(all(casualPrompt({ ...CASUAL, tradeTalk: false, talked })), /answering people/);
   });
 });

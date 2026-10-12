@@ -129,14 +129,14 @@ const WARNING_BODY = [
 ] as const;
 const warningYes = (handle: string) => `Let it post as ${handle}`;
 const replyWarningTitle = (handle: string) => `Reply to comments as ${handle}?`;
-const replyWarningLead = (handle: string) => `Your Merryman will reply as ${handle} to selected comments on its coin posts.`;
+const replyWarningLead = (handle: string) => `Your Merryman will reply as ${handle} to selected comments on its coin posts — and, if merrymen has made it an active poster, to selected posts that tag it.`;
 const REPLY_WARNING_BODY = [
   "It chooses which comments to answer; it won’t reply to every comment. Replies share the same daily limit as posts.",
   "Each reply waits under Coming up for at least ten minutes first, with a link to the comment, and you can skip it there. Turn replies off at any time to cancel waiting replies.",
 ] as const;
 const replyWarningYes = (handle: string) => `Let it reply as ${handle}`;
 
-const KIND_LABEL: Record<XUpcomingPost["kind"], string> = { intro: "Hello post", casual: "Casual post", buy: "Buy post", sell: "Sale post", reply: "Comment reply" };
+const KIND_LABEL: Record<XUpcomingPost["kind"], string> = { intro: "Hello post", casual: "Casual post", buy: "Buy post", sell: "Sale post", reply: "Comment reply", answer: "Answer to a tag" };
 const commentUrl = (post: XUpcomingPost | XRecentPost) => /^\d{1,25}$/.test(post.replyToTweetId ?? "")
   ? `https://x.com/i/status/${post.replyToTweetId}` : null;
 
@@ -465,7 +465,7 @@ export function XPosting({
       setBusy(true);
       const r = await send("POST", "/api/x/account", { action: "disable-replies", xUserId: account.xUserId, owner });
       setBusy(false);
-      if (r.ok && r.data.replyEnabled === false) patch({ replyEnabled: false, upcoming: account.upcoming.filter((p) => p.kind !== "reply") });
+      if (r.ok && r.data.replyEnabled === false) patch({ replyEnabled: false, upcoming: account.upcoming.filter((p) => p.kind !== "reply" && p.kind !== "answer") });
       else setNote({ text: r.ok ? "merrymen didn't confirm that, so replies may still be on." : r.message, alert: true });
       void load(true);
     })();
@@ -730,7 +730,7 @@ export function XPosting({
                 <p>{p.body}</p>
                 {commentUrl(p) && <a href={commentUrl(p)!} target="_blank" rel="noreferrer noopener">View comment</a>}
                 <div className="xpost-meta">
-                  <span>{p.kind === "reply" ? "Comment reply · " : ""}{shortDateTime(p.sentAt)}</span>
+                  <span>{p.kind === "reply" ? "Comment reply · " : p.kind === "answer" ? "Answer to a tag · " : ""}{shortDateTime(p.sentAt)}</span>
                   {STATUS_URL.test(p.url) && (
                     <a href={p.url} target="_blank" rel="noreferrer noopener">{COPY.viewOnX}</a>
                   )}

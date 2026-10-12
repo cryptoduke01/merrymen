@@ -83,7 +83,7 @@ CREATE TABLE IF NOT EXISTS xpost_posts (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   tenant TEXT NOT NULL,
   x_user_id TEXT NOT NULL,                 -- the account it was written for
-  kind TEXT NOT NULL,                      -- intro casual buy sell or reply
+  kind TEXT NOT NULL,                      -- intro casual buy sell reply or answer
   dedupe_key TEXT NOT NULL UNIQUE,
   body TEXT NOT NULL,
   coin TEXT,                               -- a buy post coin, for the per coin fold
@@ -456,7 +456,7 @@ export async function setReplying(db: Db, tenant: string, enabled: boolean, seen
     } else {
       await tx.prepare(`DELETE FROM xpost_reply_accounts WHERE tenant = ?`).run(key);
       await tx.prepare(`UPDATE xpost_posts SET status = 'cancelled', reason = 'replies-off', updated_at_ms = ?
-        WHERE tenant = ? AND kind = 'reply' AND status = 'scheduled'`).run(int(nowMs), key);
+        WHERE tenant = ? AND kind IN ('reply', 'answer') AND status = 'scheduled'`).run(int(nowMs), key);
     }
     return true;
   });
@@ -474,7 +474,7 @@ export async function optOutReplies(db: Db, xUserId: string, authorId: string, n
     await tx.prepare(`INSERT INTO xpost_reply_optouts (x_user_id, author_id, created_at_ms) VALUES (?, ?, ?)
       ON CONFLICT (x_user_id, author_id) DO NOTHING`).run(xUserId, authorId, int(nowMs));
     await tx.prepare(`UPDATE xpost_posts SET status = 'cancelled', reason = 'recipient-optout', updated_at_ms = ?
-      WHERE x_user_id = ? AND kind = 'reply' AND status = 'scheduled'
+      WHERE x_user_id = ? AND kind IN ('reply', 'answer') AND status = 'scheduled'
         AND EXISTS (SELECT 1 FROM xpost_reply_targets r WHERE r.post_id = xpost_posts.id AND r.author_id = ?)`)
       .run(int(nowMs), xUserId, authorId);
   });
@@ -749,7 +749,12 @@ export async function markRevoked(db: Db, tenant: string, atVersion: number, now
 
 // ── posts ───────────────────────────────────────────────────────────────────
 
-export type XPostKind = "intro" | "casual" | "buy" | "sell" | "reply";
+/**
+ * `answer` is an active agent's reply to a post that tagged it (the mention is
+ * both its target and its root). It has its own short gap and day allowance,
+ * so it neither waits behind nor spends the account's posting cadence.
+ */
+export type XPostKind = "intro" | "casual" | "buy" | "sell" | "reply" | "answer";
 export type XPostStatus = "scheduled" | "sending" | "posted" | "skipped" | "cancelled" | "failed";
 
 export interface XPost {
@@ -801,7 +806,7 @@ interface PostRow {
   updated_at_ms: unknown;
 }
 
-const KINDS: ReadonlySet<string> = new Set(["intro", "casual", "buy", "sell", "reply"]);
+const KINDS: ReadonlySet<string> = new Set(["intro", "casual", "buy", "sell", "reply", "answer"]);
 const STATUSES: ReadonlySet<string> = new Set(["scheduled", "sending", "posted", "skipped", "cancelled", "failed"]);
 
 function postOf(r: PostRow): XPost {
@@ -884,9 +889,35 @@ export async function schedulePost(db: Db, p: NewPost): Promise<number | null> {
       return id;
     });
   }
+  if (p.kind === "answer") {
+    if (!validReplyIds(p) || p.replyToTweetId !== p.replyRootTweetId || p.dedupeKey !== `answer:${p.xUserId}:${p.replyToTweetId}` || p.replyAuthorId === p.xUserId) return null;
+    return db.tx(async (tx) => {
+      const current = await tx.prepare(`UPDATE xpost_accounts SET updated_at_ms = updated_at_ms
+        WHERE tenant = ? AND x_user_id = ? AND posting_enabled = 1 AND status = 'ok' AND consent_x_user_id = x_user_id`)
+        .run(tenantKey(p.tenant), p.xUserId);
+      if (current.changes !== 1 || !(await repliesEnabledFor(tx, p.tenant, p.xUserId)) ||
+          await repliesOptedOut(tx, p.xUserId, p.replyAuthorId!)) return null;
+      // ONE PERSON, A FEW ANSWERS A DAY, whatever happened to them: two
+      // accounts tagging each other cannot become an endless conversation.
+      const byAuthor = await tx.prepare(`SELECT COUNT(*) AS n
+        FROM xpost_posts sent JOIN xpost_reply_targets r ON r.post_id = sent.id
+        WHERE sent.x_user_id = ? AND sent.kind = 'answer' AND r.author_id = ? AND sent.created_at_ms >= ?`)
+        .get(p.xUserId, p.replyAuthorId!, int(p.nowMs - ANSWER_AUTHOR_WINDOW_MS)) as { n: unknown };
+      if (num(byAuthor.n) >= ANSWERS_PER_AUTHOR) return null;
+      const id = await insertPost(tx, p);
+      if (id === null) return null;
+      await tx.prepare(`INSERT INTO xpost_reply_targets (post_id, reply_to_tweet_id, root_tweet_id, author_id) VALUES (?, ?, ?, ?)`)
+        .run(id, p.replyToTweetId!, p.replyRootTweetId!, p.replyAuthorId!);
+      return id;
+    });
+  }
   if (p.replyToTweetId || p.replyRootTweetId || p.replyAuthorId) return null;
   return insertPost(db, p);
 }
+
+/** Answers to one person per rolling day, including skips and uncertain sends. */
+export const ANSWERS_PER_AUTHOR = 2;
+const ANSWER_AUTHOR_WINDOW_MS = 24 * 60 * 60_000;
 
 async function insertPost(db: Db, p: NewPost): Promise<number | null> {
   const row = (await db
@@ -996,7 +1027,7 @@ export async function reschedulePost(db: Db, id: number, dueAtMs: number, nowMs:
                  AND (xpost_posts.kind <> 'buy' OR a.post_buys = 1)
                  AND (xpost_posts.kind <> 'casual' OR a.post_casual = 1)
             )
-            AND (kind <> 'reply' OR EXISTS (
+            AND (kind NOT IN ('reply', 'answer') OR EXISTS (
               SELECT 1 FROM xpost_reply_targets r JOIN xpost_reply_accounts c ON c.tenant = xpost_posts.tenant
               WHERE r.post_id = xpost_posts.id AND c.x_user_id = xpost_posts.x_user_id
                 AND c.consent_at_ms <= xpost_posts.created_at_ms
@@ -1144,7 +1175,7 @@ export async function lastOutAt(db: Db, xUserId: string, sinceMs: number): Promi
   const row = (await db
     .prepare(
       `SELECT MAX(CASE WHEN status = 'posted' THEN sent_at_ms ELSE updated_at_ms END) AS at FROM xpost_posts
-        WHERE x_user_id = ? AND created_at_ms >= ? AND kind <> 'intro'
+        WHERE x_user_id = ? AND created_at_ms >= ? AND kind NOT IN ('intro', 'answer')
           AND (status = 'posted' OR (status = 'failed' AND reason IN ('uncertain', 'interrupted', 'fault')))`,
     )
     .get(String(xUserId), int(sinceMs))) as { at: unknown } | undefined;
@@ -1226,14 +1257,16 @@ export async function replyTargetFor(db: Db, post: Pick<XPost, "id" | "tenant" |
     FROM xpost_reply_targets r JOIN xpost_posts p ON p.id = r.post_id
     JOIN xpost_accounts a ON a.tenant = p.tenant
     JOIN xpost_reply_accounts c ON c.tenant = p.tenant
-    WHERE p.id = ? AND p.tenant = ? AND p.x_user_id = ? AND p.kind = 'reply'
+    WHERE p.id = ? AND p.tenant = ? AND p.x_user_id = ? AND p.kind IN ('reply', 'answer')
       AND p.status IN ('scheduled', 'sending') AND a.x_user_id = p.x_user_id
       AND a.posting_enabled = 1 AND a.status = 'ok' AND a.consent_x_user_id = a.x_user_id
       AND a.consent_at_ms <= p.created_at_ms AND c.x_user_id = p.x_user_id AND c.consent_at_ms <= p.created_at_ms
       AND r.author_id <> p.x_user_id
-      AND p.dedupe_key = 'reply:' || p.x_user_id || ':' || r.reply_to_tweet_id
-      AND EXISTS (SELECT 1 FROM xpost_posts parent WHERE parent.tenant = p.tenant AND parent.x_user_id = p.x_user_id
-        AND parent.kind = 'buy' AND parent.status = 'posted' AND parent.tweet_id = r.root_tweet_id)
+      AND ((p.kind = 'reply' AND p.dedupe_key = 'reply:' || p.x_user_id || ':' || r.reply_to_tweet_id
+        AND EXISTS (SELECT 1 FROM xpost_posts parent WHERE parent.tenant = p.tenant AND parent.x_user_id = p.x_user_id
+          AND parent.kind = 'buy' AND parent.status = 'posted' AND parent.tweet_id = r.root_tweet_id))
+        OR (p.kind = 'answer' AND p.dedupe_key = 'answer:' || p.x_user_id || ':' || r.reply_to_tweet_id
+          AND r.root_tweet_id = r.reply_to_tweet_id))
       AND NOT EXISTS (SELECT 1 FROM xpost_reply_optouts o WHERE o.x_user_id = p.x_user_id AND o.author_id = r.author_id)`)
     .get(int(post.id), tenantKey(post.tenant), post.xUserId) as
     { reply_to_tweet_id: string; root_tweet_id: string; author_id: string } | undefined;
@@ -1298,7 +1331,7 @@ export async function takeOwnerAllowance(db: Db, tenant: string, dayKey: string,
  */
 export async function ownerSendTimesSince(db: Db, tenant: string, sinceMs: number): Promise<number[]> {
   const rows = await db.prepare(`SELECT CASE WHEN status = 'posted' THEN sent_at_ms ELSE updated_at_ms END AS at_ms
-    FROM xpost_posts WHERE tenant = ? AND (
+    FROM xpost_posts WHERE tenant = ? AND kind <> 'answer' AND (
       (status = 'posted' AND sent_at_ms >= ?)
       OR ((status = 'sending' OR (status = 'failed' AND reason IN ('uncertain', 'interrupted', 'fault'))) AND updated_at_ms >= ?)
     )`).all(tenantKey(tenant), int(sinceMs), int(sinceMs)) as { at_ms: unknown }[];

@@ -46,9 +46,9 @@ import { STRATEGY_FLAVOUR, STRATEGY_SPOKEN, TRAIT_VOICE } from "./groupchat/temp
 import { MUSINGS, SUBJECTS, TAKES } from "./groupchat/topics";
 import { xAppFromEnv, type FetchLike, type XApp, type XReply } from "./xpost/client";
 import { admitXPost, vocabularyRefusal, type BaseGate, type XGateCtx } from "./xpost/gate";
-import { ACTIVE_CADENCE, BUY_COIN_FOLD_MS, STANDARD_CADENCE, coinOf, hash32, planPosts, replyDueAt, sendDecision, type PlanCadence, type PlanClock, type PlanIntent } from "./xpost/planner";
+import { ACTIVE_CADENCE, ANSWER_GAP_MS, ANSWERS_PER_DAY, BUY_COIN_FOLD_MS, MIN_LEAD_MS, REPLY_STALE_MS, STANDARD_CADENCE, coinOf, hash32, planPosts, replyDueAt, sendDecision, type PlanCadence, type PlanClock, type PlanIntent } from "./xpost/planner";
 import { APP_PAUSE_KEY, APP_PAUSE_MS, CREDITS_PAUSE_MS, PAUSE_KEY, readReplyComments, sendOne, type SendOutcome } from "./xpost/sender";
-import { isReplyOptOut, replyCandidate } from "./xpost/replies";
+import { isReplyOptOut, replyCandidate, tagCandidate, withoutReplyOptOut } from "./xpost/replies";
 import {
   cancelPost,
   claimSpan,
@@ -80,7 +80,7 @@ import {
   writeMeta,
   type XAccount,
 } from "./xpost/store";
-import { buyPrompt, casualPrompt, draft, introPrompt, introTemplate, replyPrompt, sellPrompt, xpostModel, xpostModelWarning, type WriterFacts, type XStyle } from "./xpost/writer";
+import { answerPrompt, buyPrompt, casualPrompt, draft, introPrompt, introTemplate, replyPrompt, sellPrompt, xpostModel, xpostModelWarning, type WriterFacts, type XStyle } from "./xpost/writer";
 import { appendPublicToken, appendPublicWallet, hasPublicWallet, publicTokenStillAllowed, publicWalletStillAllowed, type PublicWallet } from "./xpost/public-wallet";
 import { readPublicProjectDescription } from "./orchestrator-xpost-project";
 import { PUBLISHABLE_SOURCES } from "./thesis-policy";
@@ -96,6 +96,8 @@ export const DEFAULT_FLEET_PER_DAY = 1000;
 export const DEFAULT_LLM_PER_DAY = 400;
 export const DEFAULT_REPLY_POLLS_PER_DAY = 200;
 const REPLY_POLL_MS = 30 * MIN;
+/** An active agent's mentions are read more often, so a tag is answered the same hour. */
+const ACTIVE_REPLY_POLL_MS = 10 * MIN;
 const MAX_REPLY_POLLS_PER_PASS = 2;
 /** Plans are drafted at most this often; sends run every pass. */
 const PLAN_EVERY_MS = MIN;
@@ -729,8 +731,9 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
           for (const post of page) {
             after = { dueAtMs: post.dueAtMs, id: post.id };
             const t = at();
-            if (post.kind === "reply") {
-              if (!repliesApproved || !(await repliesEnabledFor(shared, post.tenant, post.xUserId))) {
+            if (post.kind === "reply" || post.kind === "answer") {
+              if (!repliesApproved || !(await repliesEnabledFor(shared, post.tenant, post.xUserId))
+                || (post.kind === "answer" && !active.has(post.tenant.toLowerCase()))) {
                 if (await cancelPost(shared, post.id, "replies-off", t)) bump("cancelled");
                 continue;
               }
@@ -758,7 +761,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
               bump("waiting");
               continue;
             }
-            if (post.kind === "reply" && !comments.has(post.xUserId)) continue;
+            if ((post.kind === "reply" || post.kind === "answer") && !comments.has(post.xUserId)) continue;
             if (pause) {
               if (pauseSaidUntil < pause.until) {
                 pauseSaidUntil = pause.until;
@@ -774,7 +777,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
             // gap; a buy still goes stale on its own clock, a casual post past
             // its day. The hello is exempt, both ways.
             const cadence = cadenceOf(post.tenant);
-            if (post.kind !== "intro") {
+            const answer = post.kind === "answer";
+            if (post.kind !== "intro" && !answer) {
               const last = await lastOutOf(post.xUserId);
               if (last !== null && t - last < cadence.gapMs) {
                 if (await deferPost(shared, post.id, last + cadence.gapMs, t)) bump("deferred");
@@ -796,10 +800,13 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
               for (const r of release.reverse()) await r();
             };
             if (post.kind !== "intro") {
-              const gapKey = `gap:${post.xUserId}`;
-              const gap = await claimSpan(shared, gapKey, t, cadence.gapMs);
+              // AN ANSWER'S OWN LANE: a few minutes apart and a day allowance
+              // of its own, so a tag is answered without holding a post back.
+              const gapKey = answer ? `answer-gap:${post.xUserId}` : `gap:${post.xUserId}`;
+              const span = answer ? ANSWER_GAP_MS : cadence.gapMs;
+              const gap = await claimSpan(shared, gapKey, t, span);
               if (!gap.ok) {
-                if (await deferPost(shared, post.id, gap.lastAtMs + cadence.gapMs, t)) bump("deferred");
+                if (await deferPost(shared, post.id, gap.lastAtMs + span, t)) bump("deferred");
                 continue;
               }
               release.push(() => releaseSpan(shared, gapKey, t, gap.prev, at()));
@@ -808,13 +815,22 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
             // smaller choice has its own counter, so someone else's post
             // cannot spend it. Both count the hello and reply posts too.
             const localDayKey = dayOf ? dayOf(t) : utcDay(t);
+            if (answer) {
+              const answerDayKey = `answerday:${post.xUserId}:${localDayKey}`;
+              if (!(await takeAllowance(shared, answerDayKey, ANSWERS_PER_DAY, t))) {
+                await giveBack();
+                bump("answer-day-cap");
+                continue;
+              }
+              release.push(() => returnAllowance(shared, answerDayKey, at()));
+            }
             const accountDayKey = `xday:${post.xUserId}:${localDayKey}`;
-            if (!(await takeAllowance(shared, accountDayKey, cadence.perDay, t))) {
+            if (!answer && !(await takeAllowance(shared, accountDayKey, cadence.perDay, t))) {
               await giveBack();
               bump("account-day-cap");
               continue;
             }
-            release.push(() => returnAllowance(shared, accountDayKey, at()));
+            if (!answer) release.push(() => returnAllowance(shared, accountDayKey, at()));
             const ownerDayKey = `xownerday:${post.tenant}:${localDayKey}`;
             // On rollout this counter does not exist yet, but earlier sends
             // today still count. Include uncertain claims as possible sends.
@@ -825,12 +841,12 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
             }
             // Reads the latest stored choice under the same account row lock
             // as a preference save, then reserves one unit atomically.
-            if (!(await takeOwnerAllowance(shared, post.tenant, ownerDayKey, cadence.perDay, t, initialOwnerUsed))) {
+            if (!answer && !(await takeOwnerAllowance(shared, post.tenant, ownerDayKey, cadence.perDay, t, initialOwnerUsed))) {
               await giveBack();
               bump("owner-day-cap");
               continue;
             }
-            release.push(() => returnAllowance(shared, ownerDayKey, at()));
+            if (!answer) release.push(() => returnAllowance(shared, ownerDayKey, at()));
             if (post.kind === "buy" || post.kind === "sell") {
               const tradeDayKey = `tradeday:${post.xUserId}:${localDayKey}`;
               // Older deployments have no shared buy/sell counter. Their
@@ -899,7 +915,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
             if (!MAY_BE_ON_X.has(out)) {
               await returnAllowance(shared, dayKey, at());
               await giveBack();
-            } else if (post.kind !== "intro") lastOut.set(post.xUserId, t);
+            } else if (post.kind !== "intro" && !answer) lastOut.set(post.xUserId, t);
             // The sender wrote the pause; this pass honours it at once, and the
             // event just said is the pause's line, so later passes stay quiet.
             if (out === "credits" || out === "app") {
@@ -951,7 +967,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       if (consentAt === null) continue;
       const t = at();
       const backoff = Number((await readMeta(shared, `reply-backoff:${account.xUserId}`))?.v ?? 0);
-      if (backoff > t || !(await claimSpan(shared, `reply-poll:${account.xUserId}`, t, REPLY_POLL_MS)).ok) continue;
+      const every = active.has(account.tenant.toLowerCase()) ? ACTIVE_REPLY_POLL_MS : REPLY_POLL_MS;
+      if (backoff > t || !(await claimSpan(shared, `reply-poll:${account.xUserId}`, t, every)).ok) continue;
       if (!(await takeAllowance(shared, `reply-polls:${utcDay(t)}`, replyPollsPerDay, t))) break;
       polls++;
       const storedCursor = (await readMeta(shared, `reply-cursor:${account.xUserId}`))?.v;
@@ -1064,13 +1081,18 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
           kinds: { buys: account.prefs.buys, casual: account.prefs.casual },
         });
         const recentOwn = await recentBodies(shared, { tenant: account.tenant, sinceMs: planNow - OWN_MEMORY_MS, limit: 200 });
+        // ITS OWN CONVERSATIONS, for a casual post to pick back up: replies and
+        // answers it sent, never anyone else's words.
+        const talked = posts
+          .filter((p) => (p.kind === "reply" || p.kind === "answer") && p.status === "posted" && p.tenant === account.tenant)
+          .map((p) => withoutReplyOptOut(p.body)).filter((b) => b !== "").slice(0, 3);
         for (const intent of intents) {
           if (drafts >= MAX_DRAFTS_PER_PASS) {
             // Cut short inside this account: the next pass starts here.
             planResumeAt = account.tenant;
             break;
           }
-          const r = await writeIntent(shared, account, f, intent, planNow, recentOwn, recentFleet);
+          const r = await writeIntent(shared, account, f, intent, planNow, recentOwn, recentFleet, talked);
           if (r.outcome === "key-spent") continue;
           bump(r.outcome);
           if (r.outcome === "no-model-budget") {
@@ -1085,10 +1107,15 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         }
         if (model && drafts < MAX_DRAFTS_PER_PASS && comments.has(account.xUserId)
           && await repliesEnabledFor(shared, account.tenant, account.xUserId)) {
-          const result = await writeReply(shared, account, f, comments.get(account.xUserId)!, z.tz, at, recentOwn, recentFleet);
+          // An active agent answers tags (and comments on any of its posts)
+          // through one path, so one post is never answered twice.
+          const isActive = active.has(account.tenant.toLowerCase());
+          const result = isActive
+            ? await writeAnswer(shared, account, f, comments.get(account.xUserId)!, z.tz, at, recentOwn, recentFleet)
+            : await writeReply(shared, account, f, comments.get(account.xUserId)!, z.tz, at, recentOwn, recentFleet);
           if (result) {
             drafts++;
-            bump(result.body ? "drafted-reply" : "reply-skipped");
+            bump(result.body ? (isActive ? "drafted-answer" : "drafted-reply") : (isActive ? "answer-skipped" : "reply-skipped"));
             if (result.body) { recentOwn.unshift(result.body); recentFleet.unshift(result.body); }
           }
         }
@@ -1097,6 +1124,55 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         if (!ownerFailure) ownerFailure = (e instanceof Error ? e.message : String(e)).replace(/\s+/g, " ").slice(0, 160);
       }
     }
+  }
+
+  /**
+   * ANSWER ONE TAG, per account per pass — the oldest eligible one first, so a
+   * flood of newer tags is not rewarded. Like a Telegram group answer: from
+   * public facts (how it trades, coins it bought lately, what it already said),
+   * never from the question. Every attempt spends its key, so a PASS or a
+   * refused draft is not drafted again.
+   */
+  async function writeAnswer(
+    shared: Db, account: XAccount, f: AgentFacts, comments: XReply[], tz: string | null,
+    at: () => number, recentOwn: string[], recentFleet: string[],
+  ): Promise<{ body: string | null } | null> {
+    if (!creds) return null;
+    const nowMs = at();
+    if (PLAN_CLOCK.isAsleep(tz, account.tenant, nowMs)) return null;
+    const consentAt = await replyConsentAt(shared, account.tenant, account.xUserId);
+    if (consentAt === null) return null;
+    const ordered = [...comments].sort((a, b) => a.createdAtMs - b.createdAtMs || a.id.localeCompare(b.id));
+    for (const comment of ordered) {
+      if (comment.createdAtMs < consentAt || nowMs - comment.createdAtMs > REPLY_STALE_MS) continue;
+      const candidate = tagCandidate(comment, { xUserId: account.xUserId });
+      if (!candidate.ok || await repliesOptedOut(shared, account.xUserId, comment.authorId)) continue;
+      const dedupeKey = `answer:${account.xUserId}:${comment.id}`;
+      if (await keyStatus(shared, dedupeKey) !== null || await keyStatus(shared, `reply:${account.xUserId}:${comment.id}`) !== null) continue;
+      if (!(await takeAllowance(shared, `llm:${utcDay(nowMs)}`, llmPerDay, nowMs))) return null;
+      const day = localDay(tz, nowMs);
+      const facts = writerFacts(f, day, recentOwn);
+      const buys = recentCoins(f);
+      const social = await deps.socialProfile?.(account.tenant);
+      const walletPublic = !!social?.publicWallet && social.publicWallet.address.toLowerCase() === f.agentId.toLowerCase();
+      const prompt = answerPrompt({ ...facts, question: candidate.text, recentBuys: buys, said: recentOwn.map(withoutReplyOptOut), walletPublic });
+      const raw = await draft(creds, prompt, { call: deps.llm, timeoutMs: deps.draftTimeoutMs });
+      const mode = f.mode === "idle" ? null : f.mode;
+      const verdict = raw === null ? null : admitXPost(raw, {
+        kind: "reply", agentName: f.name, mode, coins: buys.map((c) => c.label),
+        paperCoins: buys.filter((c) => c.paper).map((c) => c.label), recentOwn, recentFleet, emojiOk: facts.style.emoji > 0,
+      }, BASE_GATE);
+      const finishedAt = at();
+      const body = verdict?.ok ? verdict.text : null;
+      const id = await schedulePost(shared, {
+        tenant: account.tenant, xUserId: account.xUserId, kind: "answer", dedupeKey, body: body ?? "",
+        coin: null, decisionId: null, dueAtMs: finishedAt + MIN_LEAD_MS, nowMs: finishedAt,
+        replyToTweetId: comment.id, replyRootTweetId: comment.id, replyAuthorId: comment.authorId,
+        status: body ? "scheduled" : "skipped", reason: body ? null : verdict && !verdict.ok ? `gate:${verdict.reason}` : "no-draft",
+      });
+      return id === null ? null : { body };
+    }
+    return null;
   }
 
   async function writeReply(
@@ -1195,6 +1271,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
     nowMs: number,
     recentOwn: string[],
     recentFleet: string[],
+    talked: string[] = [],
   ): Promise<{ outcome: string; body: string | null }> {
     // A KEY ALREADY SPENT IS NOT DRAFTED AGAIN. The plan weighs the X
     // account's history, so a key this owner wrote for the X account it had
@@ -1269,7 +1346,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       gate.coins = casual.recentCoins.map((c) => c.label);
       gate.paperCoins = casual.recentCoins.filter((c) => c.paper).map((c) => c.label);
       gate.seeds = casual.seed ? [casual.seed] : [];
-      prompt = casualPrompt({ ...facts, ...casual });
+      prompt = casualPrompt({ ...facts, ...casual, talked });
     }
 
     let body: string | null = null;

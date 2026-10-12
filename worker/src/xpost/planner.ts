@@ -62,6 +62,9 @@ export const BUY_STALE_MS = 8 * HOUR;
 export const REPLY_STALE_MS = 24 * HOUR;
 export const REPLY_ROOT_MAX_AGE_MS = 72 * HOUR;
 export const REPLIES_PER_ROOT = 2;
+/** An active agent's answers to tags: their own gap and day allowance, never the cadence's. */
+export const ANSWER_GAP_MS = 3 * MIN;
+export const ANSWERS_PER_DAY = 24;
 /** The least time between two posts of one account. The intro is exempt, both ways. */
 export const GAP_MS = 3 * HOUR;
 /** A casual post pushed further than this by the gap waits for another day instead; one held this long past due is stale. */
@@ -391,7 +394,8 @@ export function planPosts(input: PlanInput): PlanIntent[] {
   if (intro.state !== "done") return [];
   if (input.model === false) return [];
 
-  const slots: Slot[] = input.posts.filter((p) => LIVE_STATUSES.has(p.status)).map(slotOf);
+  // An answer to a tag has its own lane: it neither spends nor waits on the cadence.
+  const slots: Slot[] = input.posts.filter((p) => LIVE_STATUSES.has(p.status) && p.kind !== "answer").map(slotOf);
   const used = new Set(input.posts.map((p) => p.dedupeKey));
   const onDay = (day: string, kind?: XPost["kind"]) => slots.filter((s) => dayOf(s.atMs) === day && (!kind || s.kind === kind)).length;
   const ownerOnDay = (day: string) => slots.filter((s) => s.tenant === key(tenant) && dayOf(s.atMs) === day).length;
@@ -519,7 +523,7 @@ export function sendDecision(
     return { action: "cancel", reason: "kind-off" };
   }
   if ((post.kind === "buy" || post.kind === "sell") && nowMs - post.createdAtMs > BUY_STALE_MS) return { action: "skip", reason: "stale" };
-  if (post.kind === "reply" && nowMs - post.createdAtMs > REPLY_STALE_MS) return { action: "skip", reason: "stale" };
+  if ((post.kind === "reply" || post.kind === "answer") && nowMs - post.createdAtMs > REPLY_STALE_MS) return { action: "skip", reason: "stale" };
   if (post.kind === "casual" && post.dueAtMs <= nowMs) {
     if (nowMs - post.dueAtMs > CASUAL_MAX_PUSH_MS) return { action: "skip", reason: "stale" };
     if (dayOf && dayOf(nowMs) !== dayOf(post.dueAtMs)) return { action: "skip", reason: "stale" };
@@ -552,8 +556,8 @@ export function replyDueAt(input: {
   // or model refusal cannot turn one thread into an unlimited drafting loop.
   const thread = posts.filter((p) => p.kind === "reply" && p.replyRootTweetId === parent.tweetId);
   if (thread.length >= REPLIES_PER_ROOT || thread.some((p) => p.replyAuthorId === input.authorId)) return null;
-  const slots = posts.filter((p) => LIVE_STATUSES.has(p.status)
-    || (p.status === "failed" && ["uncertain", "interrupted", "fault"].includes(p.reason ?? ""))).map(slotOf);
+  const slots = posts.filter((p) => p.kind !== "answer" && (LIVE_STATUSES.has(p.status)
+    || (p.status === "failed" && ["uncertain", "interrupted", "fault"].includes(p.reason ?? "")))).map(slotOf);
   const due = pushedPast(now + MIN_LEAD_MS, slots);
   if (due - input.commentAtMs > REPLY_STALE_MS) return null;
   const day = clock.localDay(tz, due);

@@ -261,8 +261,9 @@ export async function sendOne(db: Db, dek: Buffer, app: XApp, post: XPost, deps:
         refusal = "context-changed";
         return null;
       }
-      const target = post.kind === "reply" ? await replyTargetFor(db, post) : null;
-      if (post.kind === "reply" && !target) return null;
+      const replying = post.kind === "reply" || post.kind === "answer";
+      const target = replying ? await replyTargetFor(db, post) : null;
+      if (replying && !target) return null;
       return createPost(tokens.accessToken, post.body, { fetch: deps.fetch, nowMs: now,
         ...(target ? { replyToTweetId: target.replyToTweetId } : {}) });
     };
