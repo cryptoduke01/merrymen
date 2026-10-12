@@ -21,6 +21,8 @@ import { xWeightedLength, X_MAX_WEIGHTED, type FetchLike } from "./xpost/client"
 import type { FiguresSpec } from "./xpost/figures";
 import { emptyGeckoBuckets, type GeckoPool } from "./venues/geckoterminal";
 import { greetingAnswers, modelAnswers } from "./xpost/writer";
+import { hotAnswers, type HotRead } from "./xpost/market";
+import { withoutReplyOptOut } from "./xpost/replies";
 import { ANSWER_GAP_MS } from "./xpost/planner";
 import { PAUSE_KEY } from "./xpost/sender";
 import * as store from "./xpost/store";
@@ -2302,21 +2304,25 @@ function hotResearch(pools: GeckoPool[], trending: string[] = []) {
   return { research, reads };
 }
 
-test("what's hot: an overview from the index past the floors, in words, with code's line of tickers and figures", async (t) => {
+/** Code's own words for a what's hot read, as the answer says them (the notice taken off). */
+const hotWords = (read: HotRead): string[] => hotAnswers(read, MENTION, { lower: false }).map(withoutReplyOptOut);
+const escapeRe = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+/** The words before the figures line of a posted answer, or null when it carries none. */
+const wordsBeforeLine = (text: string): string | null => /^(.*?) (?:geckoterminal robinhood|coingecko|fomo|bitquery): /.exec(text)?.[1] ?? null;
+
+test("what's hot: an overview from the index past the floors, in code's words, with code's line of tickers and figures, and no draft", async (t) => {
   const h = hotResearch([hotPool(1, 42.07, 1.21e6), hotPool(2, -8.3, 310_400), hotPool(3, 5, 90_000)], ["PEPE", "WIF", "TAO"]);
-  const words = "the robinhood chain index has a few coins standing out, mostly up on the day. what it shows, not a call.";
-  const w = await world(t, { env: RESEARCH_ON, research: h.research, answer: `${words} Say stop to opt out.` });
+  const w = await world(t, { env: RESEARCH_ON, research: h.research, answer: "a draft nobody should see. Say stop to opt out." });
   w.setInbox([tag({ text: "@pine_stoat gm, what's hot today?" })]);
   const r = await w.step();
-  const [prompt] = w.asked();
-  assert.match(prompt!, /the robinhood chain index shows a few coins standing out right now/);
-  assert.match(prompt!, /what the index shows right now, a read and not a call/);
-  assert.doesNotMatch(prompt!, /COIN\d|PEPE|\p{N}|~\$/u, "never a name or a figure");
+  assert.deepEqual(w.asked(), [], "no model call: the words are code's");
   const text = String(w.sends[0]?.text ?? "");
   assert.ok(xWeightedLength(text) <= X_MAX_WEIGHTED, String(xWeightedLength(text)));
-  assert.match(text, new RegExp(`^${words.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} geckoterminal robinhood: trending \\$COIN1 24h \\+42\\.1% vol ~\\$1\\.2M, `));
-  assert.match(text, /Say stop to opt out\.$/);
+  assert.ok(hotWords({ coins: 3, lead: { dir: "up", size: "sharply" } }).includes(wordsBeforeLine(text) ?? ""), text);
+  assert.match(text, / geckoterminal robinhood: trending \$COIN1 24h \+42\.1% vol ~\$1\.2M, /);
+  assert.match(text, /say stop to opt out\.$/i);
   assert.match(r.log ?? "", /answer-intent-hot 1/);
+  assert.match(r.log ?? "", /answer-code-words 1/);
   assert.match(r.log ?? "", /answer-figures(?:-shortened)? 1/);
 });
 
@@ -2331,15 +2337,75 @@ test("what's hot with nothing past the floors: a plain nothing-standing-out answ
   assert.deepEqual(w.sends.map((s) => s.text), [`${words} Say stop to opt out.`]);
 });
 
-test("what's hot: a draft that names a coin, says buy or early, or gives a number is refused, line and all", async (t) => {
+test("what's hot: a draft that names a coin, says buy or early, or gives a number is never posted: the words beside the coins are code's", async (t) => {
   for (const draft of ["coin one is ripping today, get in early. Say stop to opt out.", "a few movers on the index, worth buying a couple. Say stop to opt out.",
     "the index has three coins up big today. Say stop to opt out.", "$COIN1 is the one on the index right now. Say stop to opt out."]) {
     const h = hotResearch([hotPool(1, 42, 1.2e6), hotPool(2, 3, 400_000)]);
     const w = await world(t, { env: RESEARCH_ON, research: h.research, answer: draft });
     w.setInbox([tag({ text: "@pine_stoat what's trending?" })]);
     await w.step();
-    assert.equal((await w.answers())[0]!.status, "skipped", draft);
-    assert.deepEqual(w.sends, [], draft);
+    assert.deepEqual(w.asked(), [], draft);
+    const text = String(w.sends[0]?.text ?? "");
+    assert.ok(hotWords({ coins: 2, lead: { dir: "up", size: "sharply" } }).includes(wordsBeforeLine(text) ?? ""), text);
+    assert.ok(!text.includes(draft.replace(/ Say stop to opt out\.$/, "")), draft);
+  }
+});
+
+/** A trending pool past every floor under a name of the asker's choosing. */
+function namedPool(name: string, n: number, change24hPct: number, volume24hUsd: number): GeckoPool {
+  return { ...hotPool(n, change24hPct, volume24hUsd), name: `${name} / WETH 1%` };
+}
+
+/** The real research with the index's trending page faked, and Fomo's most bought: what the red team ran. */
+function hotWithFomo(pools: GeckoPool[], crowd: string[] = []) {
+  const broker: FomoBroker = {
+    async call(tool) {
+      return { status: "ok", tool, data: { topTokens: crowd.map((sym) => {
+        const p = pools.find((x) => x.name.startsWith(`${sym} /`))!;
+        return { token: { address: p.tokenAddress, key: p.tokenAddress, chain: {} }, label: { symbol: sym, name: null }, buyers: 9, sellers: 2 };
+      }) } } as never;
+    },
+    memory: { get: async () => null, set: async () => {}, clear: async () => {} },
+    report: async () => {},
+    configured: () => true,
+  };
+  return createXResearch({
+    hotPools: async () => ({ pools, failed: false }),
+    majors: { configured: () => true, search: async () => ({ hits: [], failed: true }), market: async () => ({ market: null, failed: true }),
+      trending: async () => ({ coins: [], failed: false }) },
+    fomo: () => broker,
+  });
+}
+
+test("what's hot: the model's words never stand beside code's coins, so no draft endorses or claims a coin the line names (red-team 2026-10-12)", async (t) => {
+  // The red team's own drafts, each admitted by the gate and posted with
+  // code's line after it at 34ced01e: a pick, a favourite, "my plays", a
+  // long, a rotation, all pointing at the coins the line names.
+  const drafts = [
+    "a few coins standing out on the robinhood chain index right now. if i had to pick one it'd be the first, the standout for me. Say stop to opt out.",
+    "a few coins standing out on the robinhood chain index right now, the first one is my favourite of the lot. Say stop to opt out.",
+    "a few coins standing out on the robinhood chain index right now, first on the list is the one i'd back. Say stop to opt out.",
+    "the robinhood chain index shows a couple standing out. these are my plays right now. Say stop to opt out.",
+    "a couple standing out on the robinhood chain index, and i'm long the first. Say stop to opt out.",
+    "here's what i've been rotating into lately on the robinhood chain index. Say stop to opt out.",
+  ];
+  const sets = [
+    { pools: [namedPool("TSLA", 1, 412.4, 2.31e6), namedPool("BITCOIN", 2, 88.04, 940_000), namedPool("NVDA", 3, -12.2, 310_000)], crowd: ["TSLA"] },
+    { pools: [namedPool("CHUMP", 1, 41.2, 1.1e6), namedPool("FROGGY", 2, 8, 300_000)], crowd: [] },
+  ];
+  for (const { pools, crowd } of sets) {
+    for (const draft of drafts) {
+      const w = await world(t, { env: { ...RESEARCH_ON, MERRYMEN_XPOST_FOMO: "1" }, research: hotWithFomo(pools, crowd), answer: draft,
+        facts: { ...FACTS, name: "Alan Al Dale", calls: [] } });
+      w.setInbox([tag({ text: "@pine_stoat what's hot?" })]);
+      await w.step();
+      assert.deepEqual(w.asked(), [], "never drafted");
+      const [row] = await w.answers();
+      assert.equal(row!.status, "posted", draft);
+      const words = wordsBeforeLine(row!.body);
+      assert.ok(words !== null && hotWords({ coins: pools.length, lead: { dir: "up", size: "sharply" } }).includes(words), row!.body);
+      assert.doesNotMatch(row!.body, /\b(?:i|i'd|i'm|i've|my|favourite|plays?|pick|back|long|rotating|these)\b/i, row!.body);
+    }
   }
 });
 

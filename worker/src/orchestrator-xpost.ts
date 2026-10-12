@@ -101,6 +101,7 @@ import { PUBLISHABLE_SOURCES } from "./thesis-policy";
 import { readSaleResults } from "./orchestrator-xpost-results";
 import { appendSaleOutcome, hasSaleOutcome } from "./xpost/sale-outcome";
 import { admitFiguresLine, withFigures, type FiguresSpec } from "./xpost/figures";
+import { hotAnswers, type HotRead } from "./xpost/market";
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -1632,8 +1633,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       const general = !coinNamed && !otherHandles && generalTradesQuestion(candidate.text);
       // Nothing is looked up for a greeting.
       const intent = research && !greeting ? asked : null;
+      const answerKey = `llm-answers:${account.xUserId}:${utcDay(nowMs)}`;
       if (!templated) {
-        const answerKey = `llm-answers:${account.xUserId}:${utcDay(nowMs)}`;
         if (!(await takeAllowance(shared, answerKey, ANSWER_DRAFTS_PER_DAY, nowMs))) {
           bump("answer-drafts-spent");
           return null;
@@ -1660,6 +1661,9 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // Only beside words it was handed: a line with nothing looked up to
       // stand on is never put in.
       let figures: FiguresSpec | null = null;
+      // WHAT'S HOT, AS CODE READ IT: set only beside a line of coins, and then
+      // the answer's words are code's own (xpost/market.ts), never a draft.
+      let hotRead: HotRead | null = null;
       if (research && intent) {
         const bundle = await research.gather({ shared, intent, tenant: account.tenant, xUserId: account.xUserId, facts: f, posts, fomo: researchFomo,
           // Under another handle no question is one the exact path reads (ResearchInput.question: absent, never).
@@ -1668,17 +1672,33 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         looked = { intent: bundle.intent ?? intent.kind, research: bundle.facts, ...(bundle.claim ? { creatorClaim: bundle.claim } : {}),
           ...(bundle.exact === true && candidate.address && !otherHandles ? { boughtExact: true } : {}) };
         if (bundle.figures?.length && bundle.facts.length) figures = bundle.figures;
+        if (asked.kind === "hot" && figures && bundle.hot && bundle.hot.coins >= 1) hotRead = bundle.hot;
         bump(`answer-intent-${intent.kind}`);
         if (bundle.lookups) bump("answer-lookups", bundle.lookups);
         for (const note of new Set(bundle.notes)) bump(`answer-research-${note}`);
       }
-      // CODE'S LINES, the model question's or a greeting's, this mention's own
-      // first: one it already said is a repeat to the gate, so the next is
-      // tried rather than none, and when all have been said lately, none.
-      // A paper agent's lines say paper: it is gated as a paper reply.
+      // NO MODEL WORDS BESIDE A LINE OF COINS (red-team 2026-10-12): the gate
+      // read a "what's hot?" draft before code put "$CHUMP 24h +41.2%" after
+      // it, so "if i had to pick one it'd be the first", "these are my plays"
+      // and "i'm in the top one myself" were each admitted and posted as a
+      // pick, or a holding, of a named coin. With coins to show, the words
+      // are code's (xpost/market.ts hotAnswers): how many stand out, and which
+      // way the first went, in one of eight frames. Nothing is drafted, so the
+      // model allowances taken for a draft go back.
+      const market = !templated && hotRead ? hotAnswers(hotRead, comment.id, facts.style, { paper: f.mode === "paper" }) : [];
+      if (market.length) {
+        await returnAllowance(shared, answerKey, at());
+        await returnAllowance(shared, `llm:${utcDay(nowMs)}`, at());
+        bump("answer-code-words");
+      }
+      const coded = templated || market.length > 0;
+      // CODE'S LINES, the model question's, a greeting's or a market answer's,
+      // this mention's own first: one it already said is a repeat to the gate,
+      // so the next is tried rather than none, and when all have been said
+      // lately, none. A paper agent's lines say paper: it is gated as a paper reply.
       const lines = greeting ? greetingAnswers(comment.id, facts.style, { paper: f.mode === "paper" })
-        : templated ? modelAnswers(comment.id, facts.style, { paper: f.mode === "paper" }) : [];
-      const raw = templated
+        : templated ? modelAnswers(comment.id, facts.style, { paper: f.mode === "paper" }) : market;
+      const raw = coded
         ? lines[0]!
         : await draft(creds, answerPrompt({ ...facts, question: candidate.text, recentBuys: buys, boughtLately: boughtKind(f),
           said: said.map(withoutReplyOptOut), walletPublic, coinNamed, general, ...(looked ?? {}) }), { call: deps.llm, timeoutMs: deps.draftTimeoutMs });
@@ -1719,7 +1739,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         kind: "reply", agentName: f.name, mode, coins: vouched.map((c) => c.label),
         paperCoins: [...vouched.filter((c) => c.paper).map((c) => c.label), ...(f.mode === "idle" ? money.paper : [])], recentOwn, recentFleet, emojiOk: facts.style.emoji > 0,
         // A buy it says is one it was told of, or none at all (XGateCtx.buys).
-        ...(templated ? {} : { buys: told ? "vouched" as const : "none" as const, unsaid: [...(told && !namesNone ? [] : bought), ...money.otherOnly, ...older, ...askerNames],
+        ...(coded ? {} : { buys: told ? "vouched" as const : "none" as const, unsaid: [...(told && !namesNone ? [] : bought), ...money.otherOnly, ...older, ...askerNames],
           // A coin named, or its trades or a coin asked about off the plain list: not even that it likes it (XGateCtx.named).
           named: !told && (coinNamed || asked.kind === "own-trades" || asked.kind === "coin"),
           // Told its buys, every other word is everyday or one it was handed (XGateCtx.known).
@@ -1737,7 +1757,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // draft handed no research that cites one (the index, fomo, on-chain
       // data, the project or creator) is refused.
       const handed = !!looked && (looked.research.length > 0 || !!looked.creatorClaim);
-      const unlooked = !templated && raw !== null && !handed && carriesResearch(raw);
+      const unlooked = !coded && raw !== null && !handed && carriesResearch(raw);
       let verdict = raw === null || claimed || named || unlooked ? null : gate(raw);
       for (const line of lines.slice(1)) {
         if (verdict?.ok) break;

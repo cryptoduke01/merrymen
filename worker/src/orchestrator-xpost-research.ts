@@ -67,6 +67,7 @@ import { takeAllowance, type XPost } from "./xpost/store";
 import { coinNamedIn, type AnswerIntentKind } from "./xpost/writer";
 import { asksAboutACoin, everydayWord, nameLikeWords } from "./xpost/words";
 import { cleanTicker, type FiguresSpec } from "./xpost/figures";
+import { moveOf, type HotRead } from "./xpost/market";
 import { coinQuery, MAJORS_MAX_RANK, pickMajor, readCoinMarket, readCoinTrending, searchCoinList, type CoinMarket, type CoinMarketRead, type CoinSearchRead, type CoinTrendingRead } from "./venues/coingecko-coins";
 
 const MIN = 60_000;
@@ -647,6 +648,13 @@ export interface ResearchBundle {
    * writeAnswer). Absent: no line.
    */
   figures?: FiguresSpec;
+  /**
+   * WHAT'S HOT AS CODE READ IT, for code's own words (xpost/market.ts
+   * hotAnswers): how many coins the line shows and which way the first went
+   * on the day. Set only beside a line of coins: the answer's words are then
+   * code's, never a draft (red-team 2026-10-12).
+   */
+  hot?: HotRead;
   /**
    * What the answer turned out to be about, when that is not what the tag was
    * read as: a ticker on the coin list that is no major (a copycat, unranked,
@@ -1364,7 +1372,8 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
           ...(crowd.length ? [{ kind: "crowd" as const, symbols: crowd }] : []),
           ...(trending.length ? [{ kind: "trending" as const, symbols: trending }] : []),
         ];
-        return { facts: hotPhrases({ changes: shown.map((s) => s.pool.change24hPct), crowd: crowd.length, trending: trending.length }), figures, lookups, notes };
+        return { facts: hotPhrases({ changes: shown.map((s) => s.pool.change24hPct), crowd: crowd.length, trending: trending.length }), figures,
+          hot: { coins: shown.length, lead: moveOf(shown[0]!.pool.change24hPct) }, lookups, notes };
       };
       const i = input.intent;
       const f = input.facts;

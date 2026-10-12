@@ -1,0 +1,122 @@
+/**
+ * A MARKET ANSWER'S WORDS, BUILT BY CODE (red-team review, 2026-10-12).
+ *
+ * An active agent's answer to "what's hot?" carries code's figures line
+ * (figures.ts): the chain's trending coins by ticker, each with its day's
+ * change and volume. The model's words used to stand right before that line,
+ * and the X gate judged them before the line was put in, with nothing in them
+ * to say a coin was named: "if i had to pick one it'd be the first", "these
+ * are my plays right now", "i'm in the top one myself" and "the first one is
+ * the play" were each admitted, and code then put "$CHUMP 24h +41.2%" right
+ * after them. On the house's real-money account that is a recommendation of a
+ * named coin, and a claim to hold coins it never bought. A list of pointing
+ * words is never whole.
+ *
+ * So a market answer has no model words at all. Its words are one of the
+ * frames below, filled from a typed read (`HotRead`) of what research found:
+ * how many coins stand out, and which way the one on top went on the day,
+ * never a name, a figure, a "buy", an "early" or a target. Each frame is
+ * gated like any answer, and the figures line goes in after it. The frames do
+ * not share their words (the gate's repeat limit, pinned in market.test.ts),
+ * so the same read is said again in other words, and when every frame has
+ * been said lately, not at all: the same rule as code's model and greeting
+ * lines (writer.ts codeLines).
+ *
+ * Pure: no I/O, no model, no provider, no clock.
+ */
+import { REPLY_OPT_OUT } from "./replies";
+
+/** A day's move as code reads it: which way, and how far, by code's own thresholds. Never a figure. */
+export interface Move {
+  dir: "up" | "down" | "flat";
+  /** null when flat. */
+  size: "a little" | "a fair bit" | "sharply" | null;
+}
+
+/** A change in percent as a Move: flat under half a percent, a little under three, a fair bit under ten, sharply past that. */
+export function moveOf(pct: unknown): Move | null {
+  if (typeof pct !== "number" || !Number.isFinite(pct)) return null;
+  const a = Math.abs(pct);
+  if (a < 0.5) return { dir: "flat", size: null };
+  return { dir: pct > 0 ? "up" : "down", size: a < 3 ? "a little" : a < 10 ? "a fair bit" : "sharply" };
+}
+
+/**
+ * A MOVE IN ONE FRAME'S OWN WORDS: each frame says a move its own way, so two
+ * frames saying the same read share as few words as they can (the gate's
+ * repeat limit weighs content words). [up, down] for a little, a fair bit,
+ * sharply; then flat.
+ */
+interface MoveWords { little: readonly [string, string]; fair: readonly [string, string]; sharp: readonly [string, string]; flat: string }
+function said(m: Move, w: MoveWords): string {
+  if (m.dir === "flat") return w.flat;
+  const pair = m.size === "sharply" ? w.sharp : m.size === "a fair bit" ? w.fair : w.little;
+  return m.dir === "up" ? pair[0] : pair[1];
+}
+
+/**
+ * WHAT'S HOT, AS CODE READ IT: how many coins the line shows (one, or a few),
+ * and which way the first of them went on the day. The first coin is the one
+ * the line always keeps however it is shortened (figures.ts withFigures), so
+ * what the words say of it is what the reader sees beside them.
+ */
+export interface HotRead {
+  /** Coins past the floors the line shows, at most three; at least one here (none is another answer). */
+  coins: number;
+  /** The first coin's day, or null when the index did not say. */
+  lead: Move | null;
+}
+
+/**
+ * EIGHT FRAMES THAT ARE NOT EACH OTHER. Each names its source (the chain's
+ * trending index), says how many and the first coin's day in words of its
+ * own, and closes with "not a call" its own way. None says "i", "my", "buy",
+ * "early", "pick", "play", "own", "hold", "back", "long" or a target, and none
+ * a coin's name: the line after it does.
+ */
+const HOT_FRAMES: readonly ((many: boolean, lead: Move | null) => string)[] = [
+  (many, lead) => `${many ? "a few coins" : "one coin"} standing out on the robinhood chain index${lead ? `, the top one ${said(lead, { little: ["up a little", "down a little"], fair: ["up a fair bit", "down a fair bit"], sharp: ["up sharply", "down sharply"], flat: "flat" })} today` : ""}. not a call`,
+  (many, lead) => `geckoterminal has ${many ? "several tokens" : "a single token"} trending for robinhood${lead ? `, the leader ${said(lead, { little: ["slightly higher", "slightly lower"], fair: ["noticeably higher", "noticeably lower"], sharp: ["steeply higher", "steeply lower"], flat: "unchanged" })} since yesterday` : ""}. just data`,
+  (many, lead) => `per the chain's index, ${many ? "a handful of names" : "one name"} drawing action${lead ? `, the busiest ${said(lead, { little: ["gaining a touch", "slipping a touch"], fair: ["gaining moderately", "slipping moderately"], sharp: ["gaining strongly", "slipping strongly"], flat: "staying level" })}` : ""}. observation only`,
+  (many, lead) => `trending on robinhood: ${many ? "a small group" : "a lone ticker"} out in front${lead ? `, the frontrunner ${said(lead, { little: ["rising mildly", "falling mildly"], fair: ["rising solidly", "falling solidly"], sharp: ["rising hard", "falling hard"], flat: "moving sideways" })} lately` : ""}. a snapshot`,
+  (many, lead) => `index movers over there: ${many ? "multiple listings" : "one listing"} getting attention${lead ? `, number one ${said(lead, { little: ["up marginally", "down marginally"], fair: ["up meaningfully", "down meaningfully"], sharp: ["up dramatically", "down dramatically"], flat: "barely changed" })}` : ""}. no recommendation`,
+  (many, lead) => `robinhood chain's trending list has ${many ? "a cluster of busy coins" : "one busy coin"}${lead ? `, the first ${said(lead, { little: ["a bit firmer", "a bit softer"], fair: ["clearly firmer", "clearly softer"], sharp: ["far firmer", "far softer"], flat: "steady" })} for the day` : ""}. descriptive only`,
+  (many, lead) => `the index flags ${many ? "a bunch of coins" : "a coin"} heating up${lead ? `, the head of the pack ${said(lead, { little: ["edging up", "edging down"], fair: ["climbing decently", "sliding decently"], sharp: ["rising fast", "dropping fast"], flat: "going nowhere" })}` : ""}. reporting, not recommending`,
+  (many, lead) => `over on robinhood chain, ${many ? "some tickers" : "one ticker"} top geckoterminal's page${lead ? `, the leading one ${said(lead, { little: ["up mildly", "off mildly"], fair: ["up notably", "off notably"], sharp: ["up substantially", "off heavily"], flat: "about level" })} over a day` : ""}. info only`,
+];
+
+/**
+ * A paper agent's market answer says paper: the gate refuses a paper reply
+ * that never does. One clause per frame, each in words of its own.
+ */
+const MARKET_PAPER: readonly string[] = Object.freeze([
+  "i'm on paper myself",
+  "i trade on paper for now",
+  "i'm on paper these days",
+  "i play it on paper",
+  "i'm strictly on paper",
+  "i'm trading on paper",
+  "i'm on paper so far",
+  "i'm on paper at the moment",
+]);
+
+/** The lines, this mention's own frame first (chosen by its id), each with the notice and, on paper, a paper clause. */
+function framed(texts: readonly string[], seed: string, style: { lower: boolean }, o: { paper?: boolean }): string[] {
+  let h = 0;
+  for (const ch of String(seed ?? "")) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  const notice = style.lower ? REPLY_OPT_OUT.toLowerCase() : REPLY_OPT_OUT;
+  return texts.map((_, i) => {
+    const k = (h + i) % texts.length;
+    return `${texts[k]!}${o.paper === true ? `. ${MARKET_PAPER[k % MARKET_PAPER.length]!}` : ""}. ${notice}`;
+  });
+}
+
+/**
+ * WHAT'S HOT, ANSWERED BY CODE: every frame for this read, starting from this
+ * mention's own (`seed`, its id). Empty for a read with no coin: that is not
+ * this answer.
+ */
+export function hotAnswers(read: HotRead, seed: string, style: { lower: boolean }, o: { paper?: boolean } = {}): string[] {
+  if (!read || !(read.coins >= 1)) return [];
+  return framed(HOT_FRAMES.map((f) => f(read.coins > 1, read.lead ?? null)), seed, style, o);
+}

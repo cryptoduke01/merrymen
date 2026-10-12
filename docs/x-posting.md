@@ -1001,13 +1001,21 @@ other owner's agent, and its posting and reply warnings, are unchanged.
   bought), kept only when the same screen kept them and shown by the
   screened ticker, never Fomo's label, at most two; with a Pro key,
   CoinGecko's `/search/trending`, kept only inside the majors' rank cap, at
-  most three. The model gets words only ("the robinhood chain index shows a
-  few coins standing out right now", "on the index they're a mix of up and
-  down on the day", "fomo traders are most active in one coin the index has
-  trending") and is told it is what the index shows, not a call: never buy,
-  never early, never a target, no coin's name, no number. Nothing past the
-  floors: "nothing is standing out on the robinhood chain index right now",
-  no line, and nothing more looked up.
+  most three. **With coins to show, the words are code's, never a draft**
+  (red-team 2026-10-12): the gate used to judge a model's draft before code
+  put the coins after it, so "if i had to pick one it'd be the first", "these
+  are my plays right now" and "i'm in the top one myself" were admitted and
+  posted beside `$CHUMP 24h +41.2%` as a pick, or a holding, of a named
+  coin. Now research hands a typed read (`HotRead`: how many coins the line
+  shows, and which way the first went on the day, by code's thresholds), and
+  `xpost/market.ts` `hotAnswers` says it in one of eight frames ("a few coins
+  standing out on the robinhood chain index, the top one up sharply today.
+  not a call"), none of which names a coin, says "i", "buy", "early", "pick"
+  or a target, and no two of which repeat each other at the gate's limit.
+  Each is gated like any answer, this mention's own frame first, and the
+  line goes in after it; the model allowances a draft would have taken go
+  back. Nothing past the floors: "nothing is standing out on the robinhood
+  chain index right now", no line, and nothing more looked up.
 - **A tagged contract's onchain hour:** the Bitquery reading the coin path
   already makes; its last hour's buys and sells go to code's line beside
   their bands, only when both sides reach a thousand dollars.
@@ -1033,10 +1041,10 @@ other owner's agent, and its posting and reply warnings, are unchanged.
   (every field of a coin optional but at least one; sections joined by
   `; `; the line ends with a full stop). For example:
   `coingecko: $ETH #2, ~$3.4k, mcap ~$411B, vol ~$18B, 24h +1.2%, 7d -3.4%.`
-- **Composition** (`withFigures`, in `writeAnswer`): the model writes its
-  casual words exactly as before, digit-free, and the X gate judges them
-  unchanged. Only AFTER the gate admitted them, and only for an active
-  owner's drafted answer (never a greeting's or the model question's code
+- **Composition** (`withFigures`, in `writeAnswer`): the words are drafted
+  digit-free, or for what's hot built by code (above), and the X gate judges
+  them unchanged. Only AFTER the gate admitted them, and only for an active
+  owner's answer (never a greeting's or the model question's code
   line), code puts the line between the words and the mandatory opt-out
   sentence, checks it again against the grammar (`admitFiguresLine`) and
   that it names no sherwood, and fits the whole post to X's weighted 280:

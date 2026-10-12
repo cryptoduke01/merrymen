@@ -1398,6 +1398,7 @@ describe("what's hot: the chain's trending coins past the fleet's floors, fomo's
       { kind: "trending", symbols: ["PEPE", "TAO"] },
     ], "fomo's own labels never shown: the screened coin's ticker is");
     assert.deepEqual(b.facts, hotPhrases({ changes: [42.07, -8.3, 12], crowd: 2, trending: 2 }));
+    assert.deepEqual(b.hot, { coins: 3, lead: { dir: "up", size: "sharply" } }, "code's own words are built from this read, never a draft");
     assert.equal(renderFiguresLine(b.figures!),
       "geckoterminal robinhood: trending $COIN1 24h +42.1% vol ~$1.2M, $COIN2 24h -8.3% vol ~$310k, $COIN3 24h +12% vol ~$400k; fomo: most bought $COIN4, $COIN2; coingecko: trending $PEPE, $TAO.");
   });
@@ -1407,6 +1408,7 @@ describe("what's hot: the chain's trending coins past the fleet's floors, fomo's
     const q = await quiet.research.gather(input({ kind: "hot" }, { fomo: true }));
     assert.deepEqual(q.facts, [HOT_NONE]);
     assert.equal(q.figures, undefined);
+    assert.equal(q.hot, undefined);
     assert.deepEqual(quiet.asked, ["pools"]);
     assert.deepEqual(quiet.fomoCalls, []);
     const down = hotFake({ poolsFail: "http-503" });
