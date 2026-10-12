@@ -1184,7 +1184,7 @@ test("told none of its buys, an answer about a named coin never says it bought, 
     assert.deepEqual(w.sends, [], `${text} / ${answer}`);
     const [row] = await w.answers();
     assert.equal(row!.status, "skipped", answer);
-    assert.equal(row!.reason, "gate:buy-claim", answer);
+    assert.match(row!.reason ?? "", /^gate:(?:buy-claim|unlooked-source)$/, answer);
   }
   // A paper agent's.
   const paper: AgentFacts = { ...FACTS, mode: "paper", calls: [{ ...CALL, paper: true, token: `0x${"1a".repeat(20)}` }] };
@@ -1282,6 +1282,27 @@ test("asking name by name says nothing of which coins it bought: a name it bough
   }
 });
 
+test("a tag naming two coins is looked up for nothing, and its answer neither names the other nor cites a read nobody made (red-team 2026-10-12)", async (t) => {
+  // The reproduced tags and drafts, research on: WOJAK's index facts were gathered and both drafts admitted at 11f7acac.
+  for (const text of ["@pine_stoat is $WOJAK safer than bonk?", "@pine_stoat $WOJAK or bonk, which one has more liquidity?"]) {
+    for (const answer of ["bonk's the shaky one, the public index shows thin liquidity and holders look concentrated. say stop to opt out.",
+      "it's only hours old on the public index, thin liquidity, concentrated holders. say stop to opt out.", "bonk's the shakier one, thin and concentrated. say stop to opt out."]) {
+      const r = fakeResearch();
+      const w = await world(t, { env: RESEARCH_ON, research: r.research, answer });
+      w.setInbox([tag({ text })]);
+      await w.step();
+      w.setInbox([]);
+      await w.step(NOW + MIN);
+      assert.deepEqual(r.seen, [], `${text}: nothing looked up`);
+      assert.doesNotMatch(w.asked()[0]!, /What you looked up/, text);
+      assert.deepEqual(w.sends, [], `${text} / ${answer}`);
+      const [row] = await w.answers();
+      assert.equal(row!.status, "skipped", answer);
+      assert.match(row!.reason ?? "", /^gate:(?:bought-named|unlooked-source)$/, answer);
+    }
+  }
+});
+
 test("a tag asking for advice or a forecast in other words is never drafted, and such a draft is never posted (red-team 2026-10-12)", async (t) => {
   for (const env of [{}, RESEARCH_ON]) {
     for (const text of ["@pine_stoat is $WOJAK a good buy?", "@pine_stoat is $WOJAK worth buying?", "@pine_stoat do you think $WOJAK will go up?",
@@ -1358,7 +1379,7 @@ test("a coin-named tag is never answered yes, no, or in the first person outside
         assert.deepEqual(w.sends, [], `${text} / ${answer}`);
         const [row] = await w.answers();
         assert.equal(row!.status, "skipped", `${text} / ${answer}`);
-        assert.match(row!.reason ?? "", /^gate:(?:buy-claim|bought-named)$/, `${text} / ${answer}`);
+        assert.match(row!.reason ?? "", /^gate:(?:buy-claim|bought-named|unlooked-source)$/, `${text} / ${answer}`);
       }
     }
   }

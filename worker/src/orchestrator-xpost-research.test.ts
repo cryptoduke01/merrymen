@@ -743,6 +743,19 @@ describe("one bounded research bundle per answer", () => {
       assert.equal(f.reads.length + f.resolved.length + f.fomoCalls.length + f.flows.length + f.described.length, 0, `${text}: nothing looked up`);
       assert.ok(b.notes.includes("many"), b.notes.join(","));
     }
+    // A second coin in words, or any comparison beside a cashtag (red-team 2026-10-12, second round): the reproduced tags, each looked up as WOJAK at 11f7acac.
+    for (const text of ["@alanaldale is $WOJAK safer than bonk?", "@alanaldale $WOJAK or bonk, which one has more liquidity?", "@alanaldale $WOJAK vs bonk?",
+      "@alanaldale is bonk safer than $WOJAK?", "@alanaldale which is riskier, bonk or $WOJAK?", "@alanaldale is $WOJAK safer than the frog one?"]) {
+      const v = tagCandidate({ id: "1", text, authorId: "9", conversationId: "1", inReplyToTweetId: "", createdAtMs: NOW }, { xUserId: "111", research: true, username: "alanaldale" });
+      assert.ok(v.ok, text);
+      if (!v.ok) continue;
+      const intent = classifyTag(v.text, { address: v.address ?? null });
+      assert.ok(intent.kind === "coin" && intent.many === true, `${text} → ${JSON.stringify(intent)}`);
+      const { f, research } = fakes({ flow: true });
+      const b = await research.gather(input(intent, { fomo: true, question: v.text }));
+      assert.deepEqual(b.facts, [], text);
+      assert.equal(f.reads.length + f.resolved.length + f.fomoCalls.length + f.flows.length, 0, `${text}: nothing looked up`);
+    }
     // One coin, however it is named, is still one coin.
     assert.equal((classifyTag("thoughts on $PEPE and the pepe chart?") as { many?: true }).many, undefined);
     assert.equal((classifyTag("thoughts on $WOJAK?") as { many?: true }).many, undefined);

@@ -253,6 +253,9 @@ export function exactAsk(text: unknown): boolean {
   return plain !== null && EXACT_ALLOWED.test(plain);
 }
 
+/** Words that set one coin against another. */
+const COMPARES = /\b(?:vs\.?|versus|or|than|compared?|comparison|comparing|better|worse|safer|riskier|healthier|stronger|weaker|which|either|between|instead)\b/i;
+
 /**
  * WHAT THE QUESTION IS, BY CODE. `address` is the one contract address
  * tagCandidate took out of the text. Never a model call, never a network
@@ -290,7 +293,11 @@ export function classifyTag(text: string, o: { address?: string | null } = {}): 
   // the other. Two cashtags, a cashtag and a contract, or either beside a
   // word that could be another coin's name (nameLikeWords, the same for every
   // name, never by its own buys): nothing is looked up at all.
-  const other = nameLikeWords(t).some((w) => !tickers.some((k) => sameLabel(k, w)));
+  // AND ANY COMPARISON (red-team 2026-10-12): "is $WOJAK safer than the frog
+  // one?", "$WOJAK or that new launch, which is riskier?" name a second coin in
+  // words no list knows. Fail closed: a cashtag or a contract beside "vs",
+  // "or", "than", "which", "better" or the like is looked up for nothing.
+  const other = nameLikeWords(t).some((w) => !tickers.some((k) => sameLabel(k, w))) || COMPARES.test(t);
   const many = tickers.length > 1 || (ticker !== null && address !== null) || ((ticker !== null || address !== null) && other);
   // ITS OWN TRADES, the Telegram groups' reading of them: what it traded, why.
   if (asked?.kind === "trades" || (asked?.kind === "site" && (asked.topic === "attempts" || asked.topic === "trades"))) {

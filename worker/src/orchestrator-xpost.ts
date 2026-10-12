@@ -49,6 +49,7 @@ import { admitXPost, moneySaid, vocabularyRefusal, type BaseGate, type XGateCtx 
 import { ACTIVE_CADENCE, ANSWER_GAP_MS, ANSWER_STALE_MS, ANSWERS_PER_DAY, REPLY_STALE_MS, STANDARD_CADENCE, coinOf, hash32, introState, planPosts, replyDueAt, sendDecision, type PlanCadence, type PlanClock, type PlanIntent } from "./xpost/planner";
 import { APP_PAUSE_KEY, APP_PAUSE_MS, CREDITS_PAUSE_MS, PAUSE_KEY, readReplyComments, sendOne, type SendOutcome } from "./xpost/sender";
 import { isAnswerOptOut, isReplyOptOut, replyCandidate, tagCandidate, withoutReplyOptOut } from "./xpost/replies";
+import { nameLikeWords, textWords } from "./xpost/words";
 import { activeTenantsOf, repliesAllowedFor, repliesScopeOf } from "./xpost/scope";
 import {
   ANSWER_LOOKED_UP,
@@ -1630,11 +1631,18 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         for (const n of [c.symbol, c.name, coinOf(c)?.label]) if (typeof n === "string" && n.trim()) vouchedNames.add(n.trim().toLowerCase());
       }
       const older = olderBought.filter((c) => !vouchedNames.has(c.toLowerCase()));
+      // NOR A NAME THE ASKER WROTE (red-team 2026-10-12): under "is $WOJAK safer
+      // than bonk?" the answer said "bonk's the shaky one" with WOJAK's index
+      // read. A word of the question that could be a coin's name (nameLikeWords)
+      // is never said back, unless what it looked up says it; read alike for
+      // every name, so a refusal tells nothing of which ones it bought.
+      const lookedWords = new Set([...(looked?.research ?? []), looked?.creatorClaim ?? ""].flatMap((r) => textWords(r)));
+      const askerNames = nameLikeWords(candidate.text).filter((w) => !lookedWords.has(w) && !vouchedNames.has(w));
       const gate = (text: string) => admitXPost(text, {
         kind: "reply", agentName: f.name, mode, coins: vouched.map((c) => c.label),
         paperCoins: [...vouched.filter((c) => c.paper).map((c) => c.label), ...(f.mode === "idle" ? money.paper : [])], recentOwn, recentFleet, emojiOk: facts.style.emoji > 0,
         // A buy it says is one it was told of, or none at all (XGateCtx.buys).
-        ...(templated ? {} : { buys: told ? "vouched" as const : "none" as const, unsaid: [...(told && !namesNone ? [] : bought), ...money.otherOnly, ...older],
+        ...(templated ? {} : { buys: told ? "vouched" as const : "none" as const, unsaid: [...(told && !namesNone ? [] : bought), ...money.otherOnly, ...older, ...askerNames],
           // A coin named, or its trades or a coin asked about off the plain list: not even that it likes it (XGateCtx.named).
           named: !told && (coinNamed || asked.kind === "own-trades" || asked.kind === "coin"),
           // Told its buys, every other word is everyday or one it was handed (XGateCtx.known).
@@ -1646,7 +1654,14 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       const claimed = raw !== null && sherwoodClaimed(raw);
       // ON ITS LETTERS, NOT A WORD: "sher\u00adwood" is sherwood to a reader.
       const named = !templated && raw !== null && (sherwoodNamed(raw) || sherwoodMentioned(raw));
-      let verdict = raw === null || claimed || named ? null : gate(raw);
+      // NO SOURCE NOTHING WAS LOOKED UP IN (red-team 2026-10-12): under "is
+      // $WOJAK safer than bonk?", looked up for nothing, "it's only hours old on
+      // the public index, thin liquidity" was admitted, a read nobody made. A
+      // draft handed no research that cites one (the index, fomo, on-chain
+      // data, the project or creator) is refused.
+      const handed = !!looked && (looked.research.length > 0 || !!looked.creatorClaim);
+      const unlooked = !templated && raw !== null && !handed && carriesResearch(raw);
+      let verdict = raw === null || claimed || named || unlooked ? null : gate(raw);
       for (const line of lines.slice(1)) {
         if (verdict?.ok) break;
         verdict = gate(line);
@@ -1663,7 +1678,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         coin: lookedUp ? ANSWER_LOOKED_UP : null, decisionId: null, dueAtMs: finishedAt, nowMs: finishedAt,
         replyToTweetId: comment.id, replyRootTweetId: comment.id, replyAuthorId: comment.authorId,
         status: body ? "scheduled" : "skipped",
-        reason: body ? null : claimed ? "gate:sherwood-claim" : named || postsName ? "gate:sherwood-drafted" : verdict && !verdict.ok ? `gate:${verdict.reason}` : "no-draft",
+        reason: body ? null : claimed ? "gate:sherwood-claim" : named || postsName ? "gate:sherwood-drafted" : unlooked ? "gate:unlooked-source"
+          : verdict && !verdict.ok ? `gate:${verdict.reason}` : "no-draft",
       });
       return id === null ? null : { body, lookedUp };
     }
