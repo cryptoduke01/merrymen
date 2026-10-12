@@ -10,7 +10,7 @@ import {
   admitFiguresLine, cleanTicker, compactMoney, FIGURES_LINE, FIGURES_MAX, figuresTickers, rankOf, renderFiguresLine, signedPercent,
   withFigures, withoutFiguresLine, type FiguresSpec,
 } from "./figures";
-import { sherwoodMentioned } from "./gate";
+import { merrymenMentioned, sherwoodMentioned } from "./gate";
 
 const BTC: FiguresSpec = [{ kind: "major", symbol: "btc", rank: 1, priceUsd: 97_431.2, marketCapUsd: 1.93e12, volume24hUsd: 41.2e9, change24hPct: 1.234, change7dPct: -3.44 }];
 const HOT: FiguresSpec = [
@@ -53,6 +53,18 @@ describe("tickers: A-Z, two to ten letters, nothing else", () => {
     // Whatever the gate reads as sherwood, the line never shows.
     for (const t of ["SHERW00D", "SHERWOOD", "SHERWOOOD", "5HERWOOD", "SHERWOD"]) {
       if (sherwoodMentioned(t)) assert.equal(cleanTicker(t), null, t);
+    }
+  });
+
+  it("never merrymen in any spelling the letters allow (red-team 2026-10-12)", () => {
+    // Posted at 34ced01e: "trending $MERRIMEN 24h +12% vol ~$300k, $MERYMEN 24h +9% vol ~$200k".
+    for (const bad of ["MERRYMEN", "MERRYMAN", "MERRYMEM", "MERRIMEN", "MERYMEN", "MERIMEN", "MERRMEN", "MRRYMEN", "MEERYMEN", "MRYMN", "MERR", "MERRIMAN", "merrimen"]) {
+      assert.equal(cleanTicker(bad), null, bad);
+      assert.ok(merrymenMentioned(bad), bad);
+    }
+    for (const ok of ["CHUMP", "PEPE", "MERIT", "MERCURY", "MEME", "SUMMER", "HAMMER"]) {
+      assert.equal(cleanTicker(ok), ok, ok);
+      assert.equal(merrymenMentioned(ok), false, ok);
     }
   });
 

@@ -48,7 +48,7 @@ import { ensureGroupchatSchema, getMember } from "./groupchat/store";
 import { STRATEGY_FLAVOUR, STRATEGY_SPOKEN, TRAIT_VOICE } from "./groupchat/templates";
 import { MUSINGS, SUBJECTS, TAKES } from "./groupchat/topics";
 import { xAppFromEnv, type FetchLike, type XApp, type XReply } from "./xpost/client";
-import { admitXPost, moneySaid, tickerRefusal, vocabularyRefusal, type BaseGate, type XGateCtx } from "./xpost/gate";
+import { admitXPost, merrymenMentioned, moneySaid, tickerRefusal, vocabularyRefusal, type BaseGate, type XGateCtx } from "./xpost/gate";
 import { ACTIVE_CADENCE, ANSWER_GAP_MS, ANSWER_STALE_MS, ANSWERS_PER_DAY, REPLY_STALE_MS, STANDARD_CADENCE, coinOf, hash32, introState, planPosts, replyDueAt, sendDecision, type PlanCadence, type PlanClock, type PlanIntent } from "./xpost/planner";
 import { APP_PAUSE_KEY, APP_PAUSE_MS, CREDITS_PAUSE_MS, PAUSE_KEY, readReplyComments, sendOne, type SendOutcome } from "./xpost/sender";
 import { isAnswerOptOut, isReplyOptOut, replyCandidate, tagCandidate, withoutReplyOptOut } from "./xpost/replies";
@@ -1775,10 +1775,12 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // Never a code-built model line or a greeting's. AND NEVER LAXER THAN THE
       // GATE (red-team 2026-10-12): every ticker it shows must clear the
       // gate's own vocabulary (tickerRefusal); "$BUY", "$WAGMI" or "$SHILL"
-      // in the line puts no line in at all.
+      // in the line puts no line in at all. NOR THE HOUSE'S OWN NAME in any
+      // spelling ("$MERRIMEN", "$MERYMEN": red-team 2026-10-12), read ticker
+      // by ticker beside the sherwood screen.
       const figured = admitted && figures && !templated && active.has(account.tenant.toLowerCase()) ? withFigures(admitted, figures) : null;
       const lined = figured?.line != null && admitFiguresLine(figured.line) && !sherwoodMentioned(figured.line)
-        && figuresTickers(figured.line).every((t) => tickerRefusal(t) === null) ? figured : null;
+        && figuresTickers(figured.line).every((t) => tickerRefusal(t) === null && !merrymenMentioned(t) && !sherwoodMentioned(t)) ? figured : null;
       if (figures && admitted) bump(lined ? (lined.dropped > 0 ? "answer-figures-shortened" : "answer-figures") : "answer-figures-left-out");
       const body = lined ? lined.text : admitted;
       // MARKED BY WHAT IT WAS HANDED, not by what the model wrote: an answer

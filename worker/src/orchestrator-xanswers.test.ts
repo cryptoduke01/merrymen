@@ -2461,3 +2461,16 @@ test("what's hot never shows a ticker with a digit, nor one the gate would refus
   assert.match(r.log ?? "", /answer-figures-left-out 1/);
 });
 
+test("what's hot never shows merrymen's own name in any spelling, in the pools or as fomo's most bought (red-team 2026-10-12)", async (t) => {
+  // Posted at 34ced01e under "what's moving?": "trending $MERRIMEN 24h +12% vol ~$300k, $MERYMEN 24h +9% vol ~$200k".
+  for (const names of [["MERRIMEN", "MERYMEN"], ["MRYMN", "MEERYMEN"], ["MERRYMEN", "MERRMEN"]]) {
+    const pools = [namedPool(names[0]!, 1, 12, 300_000), namedPool(names[1]!, 2, 9, 200_000), namedPool("CHUMP", 3, 7, 150_000)];
+    const w = await world(t, { env: { ...RESEARCH_ON, MERRYMEN_XPOST_FOMO: "1" }, research: hotWithFomo(pools, [names[0]!]), facts: { ...FACTS, calls: [] } });
+    w.setInbox([tag({ text: "@pine_stoat what's moving?" })]);
+    await w.step();
+    const text = String(w.sends[0]?.text ?? "");
+    assert.match(text, /geckoterminal robinhood: trending \$CHUMP 24h \+7% vol ~\$150k\./, text);
+    assert.doesNotMatch(text, /\$M[A-Z]*N\b|fomo: most bought/, text);
+  }
+});
+
