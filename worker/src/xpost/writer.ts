@@ -296,16 +296,31 @@ function clean(text: unknown, max: number): string | null {
 /**
  * A TAG'S QUESTION AS THE MODEL MAY READ IT, or null when nothing of it is
  * usable. tagCandidate lets digits through, and a memecoin question often
- * carries one ("saw it on 2 lists", "$PEPE2", "top 3 coins?"); clean() alone
+ * carries one ("saw it on 2 lists", "top 3 coins?", "a 100x?"); clean() alone
  * would refuse the whole question, after the answer's research and model
- * allowances were already spent, for a prompt that can only say PASS. So each
- * run of digits is read as "(a number)": the question survives and the model
- * is never handed the figure. The gate still refuses any digit in what goes
- * out. Exported so the caller decides before it spends anything.
+ * allowances were already spent, for a prompt that can only say PASS. So a
+ * figure that stands alone (a unit after it at most: k, m, b, bn, x) is read
+ * as "(a number)": the question survives and the model is never handed the
+ * figure. The gate still refuses any digit in what goes out. Exported so the
+ * caller decides before it spends anything.
+ *
+ * A DIGIT THAT IS PART OF A NAME IS NEVER MASKED (final review, 2026-10-12).
+ * Read as "$PEPE(a number)", a copycat's "$PEPE2" became the coin it bought,
+ * and "did you buy $PEPE2?" could be answered "yep, grabbed pepe". So a digit
+ * glued to a letter or an underscore ("$PEPE2", "pepe2", "v2", "2pepe")
+ * leaves the question unusable (null), and so does a coin it
+ * bought followed by a number ("pepe 2", "pepe v2", "pepe-2.0") when `coins`
+ * names it: the caller passes the tag over before anything is spent.
  */
-export function answerQuestion(text: unknown): string | null {
+const STANDALONE_FIGURE = /(?<![\p{L}\p{N}_])\p{N}+(?:[.,:/]\p{N}+)*(?=(?:k|m|b|bn|x)?(?![\p{L}\p{N}_]))/giu;
+const escapeRe = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+export function answerQuestion(text: unknown, coins: readonly string[] = []): string | null {
   if (typeof text !== "string") return null;
-  return clean(text.replace(/\p{N}+(?:[.,:/]\p{N}+)*/gu, "(a number)"), XREPLY_MAX_COMMENT_CHARS);
+  for (const coin of coins) {
+    const label = typeof coin === "string" ? coin.trim() : "";
+    if (label && new RegExp(String.raw`(?<![\p{L}\p{N}_])\$?${escapeRe(label)}[\s_-]*v?\p{N}`, "iu").test(text)) return null;
+  }
+  return clean(text.replace(STANDALONE_FIGURE, "(a number)"), XREPLY_MAX_COMMENT_CHARS);
 }
 
 /** Quoted as data. The agent's own name may carry a digit ("Agent Seven" or not): it is its name, not a figure. */
@@ -762,7 +777,8 @@ const NOTHING_LOOKED_UP: Readonly<Partial<Record<AnswerIntentKind, string>>> = {
  * the writer is never told the name, and a draft that names it is refused.
  */
 export function answerPrompt(f: AnswerFacts): Prompt {
-  const question = answerQuestion(f.question);
+  // A coin it bought, followed by a number, is another coin: no usable question.
+  const question = answerQuestion(f.question, (f.recentBuys ?? []).map((c) => c.label));
   const notice = f.style.lower ? REPLY_OPT_OUT.toLowerCase() : REPLY_OPT_OUT;
   const buys = (f.recentBuys ?? []).map((c) => ({ label: clean(c.label, 40), paper: c.paper })).filter((c): c is { label: string; paper: boolean } => !!c.label).slice(0, 4);
   const said = (f.said ?? []).map((r) => clean(r, 220)).filter((r): r is string => !!r).slice(0, 6);

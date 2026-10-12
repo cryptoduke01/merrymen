@@ -739,11 +739,11 @@ describe("an active agent's answers and conversation memory", () => {
     assert.match(answerPrompt({ ...BASE, question: "", recentBuys: [], said: [], walletPublic: false }).prompt, /PASS/);
   });
 
-  it("a question with a figure in it is still a question: each run of digits is read as a number, never shown", () => {
+  it("a question with a figure in it is still a question: each figure that stands alone is read as a number, never shown", () => {
     for (const [question, read] of [
       ["is $PEPE legit? saw it on 2 lists", "is $PEPE legit? saw it on (a number) lists"],
-      ["is $PEPE2 the real one?", "is $PEPE(a number) the real one?"],
       ["top 3 coins? and is 1,000 holders a lot or 2.5k", "top (a number) coins? and is (a number) holders a lot or (a number)k"],
+      ["is $WIF a 100x? mcap is $40m", "is $WIF a (a number)x? mcap is $(a number)m"],
     ] as const) {
       assert.equal(answerQuestion(question), read);
       const p = answerPrompt({ ...BASE, question, recentBuys: [], said: [], walletPublic: false });
@@ -753,6 +753,22 @@ describe("an active agent's answers and conversation memory", () => {
     }
     assert.equal(answerQuestion(""), null);
     assert.equal(answerQuestion(null), null);
+  });
+
+  it("a digit that is part of a name is never masked: a copycat ticker never reads as the coin it bought", () => {
+    // Glued to a letter or an underscore: another coin's name, never "$PEPE(a number)".
+    for (const question of ["did you buy $PEPE2?", "is $PEPE2 the real one?", "why did you buy pepe2?", "is $2PEPE legit?", "is pepe_2 yours?", "pepe v2 out?"]) {
+      assert.equal(answerQuestion(question), null, question);
+    }
+    // A coin it bought, followed by a number, with a space or a dash: another coin too.
+    for (const question of ["did you buy pepe 2?", "did you buy PEPE-2.0?", "is pepe v2 the real one?", "did you buy $pepe 2?"]) {
+      assert.equal(answerQuestion(question, ["PEPE"]), null, question);
+      const p = answerPrompt({ ...BASE, question, recentBuys: [{ label: "PEPE", paper: false }], boughtLately: true, said: [], walletPublic: false });
+      assert.match(p.prompt, /no usable question/, question);
+    }
+    // A figure beside another coin, or a coin it bought with no number after it, is still a question.
+    assert.equal(answerQuestion("did you buy pepe? saw it on 2 lists", ["PEPE"]), "did you buy pepe? saw it on (a number) lists");
+    assert.equal(answerQuestion("is wif 2x from here?", ["PEPE"]), "is wif (a number)x from here?");
   });
 
   it("buys it cannot name are never said to be no buys: \"not bought anything\" only when it bought nothing", () => {

@@ -251,6 +251,28 @@ test("a tag with a figure in it is answered, the figure read as a number and nev
   }
 });
 
+test("a copycat ticker beside a coin it bought is never answered as that coin: nothing drafted, nothing spent", async (t) => {
+  for (const env of [{}, RESEARCH_ON]) {
+    const r = fakeResearch();
+    // It bought PEPE (FACTS); each of these names another coin.
+    const texts = ["@pine_stoat did you buy $PEPE2?", "@pine_stoat why did you buy pepe2?", "@pine_stoat is $PEPE2 the real one?", "@pine_stoat did you buy pepe 2?"];
+    const w = await world(t, { env, research: r.research, answer: "yep, grabbed pepe lately. Say stop to opt out." });
+    w.setInbox(texts.map((text, n) => tag({ id: `10000000000000014${n}`, conversation_id: `10000000000000014${n}`, author_id: `14${n}`, text })));
+    await w.step();
+    assert.deepEqual(await w.answers(), [], "no answer row, no post");
+    assert.equal(w.asked().length, 0, "no draft");
+    assert.equal(r.seen.length, 0, "nothing looked up");
+    assert.equal((await store.readMeta(w.db, "llm-answers:111:2026-09-30"))?.n ?? 0, 0, "and no allowance spent");
+  }
+  // The model question's line is code's and never reads the question: a digit in sherwood's name still gets it.
+  const w = await world(t);
+  w.setInbox([tag({ text: "@pine_stoat sherwood1 running the show yet?" })]);
+  await w.step();
+  const [answer] = await w.answers();
+  assert.equal(answer?.status, "scheduled", answer?.reason ?? "");
+  assert.match(answer!.body, /new sherwood-1\b/);
+});
+
 test("a live agent whose buys all lack a sayable name is never told it bought nothing", async (t) => {
   // An autonomous Trencher buy: its symbol is the derived id, and its name has a digit.
   const derived: CallFact = { ...CALL, decisionId: "fill-derived", symbol: "T7631DACC21B", name: "Pepe 2.0" };

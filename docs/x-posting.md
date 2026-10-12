@@ -546,10 +546,15 @@ the mention itself. They go out **right away**:
 - **Selection** (`tagCandidate`): a question or plain address. Opt-outs are
   handled first. Links, secrets, abuse, sensitive topics, spam, instructions
   and advice requests are dropped before any model call. Digits may appear:
-  the writer reads each run of them as "(a number)" (`answerQuestion`), so a
-  question like "saw it on 2 lists" is answered, and the figure never reaches
-  the model; a question it could not read is passed over before anything is
-  spent.
+  the writer reads a figure that stands alone as "(a number)"
+  (`answerQuestion`), so a question like "saw it on 2 lists" is answered, and
+  the figure never reaches the model; a question it could not read is passed
+  over before anything is spent (`answer-unusable`). A digit that is part of a
+  name is never masked: "$PEPE2", "pepe2" or "v2", or a coin it bought
+  followed by a number ("pepe 2", "pepe v2"), is another coin, and read as
+  "$PEPE(a number)" it would let "did you buy $PEPE2?" be answered as the
+  PEPE it bought, so such a tag is passed over too. The model question's
+  line is code's and never reads the question, so it is not held to this.
 - **What it may say** (`answerPrompt`): only public facts — how it trades, the
   coins it bought lately (never that it holds them), whether its wallet is in
   its intro, and what it already said publicly. Buys with no name a post may

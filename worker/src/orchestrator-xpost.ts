@@ -1389,13 +1389,23 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       return null;
     }
     const ordered = [...comments].sort((a, b) => a.createdAtMs - b.createdAtMs || a.id.localeCompare(b.id));
+    const buys = recentCoins(f);
+    const knownCoins = [...buys.map((c) => c.label), ...posts.filter((p) => p.kind === "buy" && p.coin).map((p) => p.coin!)];
     for (const comment of ordered) {
       if (comment.createdAtMs < consentAt || nowMs - comment.createdAtMs > REPLY_STALE_MS) continue;
       const candidate = tagCandidate(comment, { xUserId: account.xUserId, research: research !== null });
       if (!candidate.ok || await repliesOptedOut(shared, account.xUserId, comment.authorId)) continue;
+      // READ BY CODE FIRST, research on or off: the model question, and any
+      // tag that names sherwood, is answered from a code-built line
+      // (writer.ts modelAnswers) and spends no model call. Only research
+      // gathers anything for what it reads.
+      const asked = classifyTag(candidate.text, { address: candidate.address ?? null, knownCoins });
       // DECIDED BEFORE ANYTHING IS SPENT: a question the writer could not read
-      // would buy research and a model call for a prompt that says PASS.
-      if (answerQuestion(candidate.text) === null) {
+      // would buy research and a model call for a prompt that says PASS. A
+      // digit in a name ("$PEPE2", "pepe 2" beside a PEPE it bought) is
+      // another coin, never masked into one it bought: unusable too. The
+      // model question's line is code's and never reads the question.
+      if (asked.kind !== "model" && answerQuestion(candidate.text, knownCoins) === null) {
         bump("answer-unusable");
         continue;
       }
@@ -1405,13 +1415,6 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         bump("answer-author-spent");
         continue;
       }
-      const buys = recentCoins(f);
-      // READ BY CODE FIRST, research on or off: the model question, and any
-      // tag that names sherwood, is answered from a code-built line
-      // (writer.ts modelAnswers) and spends no model call. Only research
-      // gathers anything for what it reads.
-      const knownCoins = [...buys.map((c) => c.label), ...posts.filter((p) => p.kind === "buy" && p.coin).map((p) => p.coin!)];
-      const asked = classifyTag(candidate.text, { address: candidate.address ?? null, knownCoins });
       // A TOKEN ASKED ABOUT BESIDE SHERWOOD OR THE MODEL is answered by
       // nothing: the model line under "is $SHERWOOD merrymen's token?" reads
       // as Merrymen confirming it. No draft, no post, nothing spent.
