@@ -464,6 +464,17 @@ interface Fakes {
   flows: { address: string; chainId: number; timeoutMs: number }[];
 }
 
+/**
+ * HOLD THE PROCESS OPEN WHILE A SLOW BUNDLE IS AWAITED. The bundle's own
+ * deadline timer is unref'd (it must never keep the orchestrator alive), and so
+ * is the slow fake's: with nothing else pending, the event loop empties and the
+ * runner cancels the test and every one after it (seen on CI, not locally).
+ */
+async function alive<T>(p: Promise<T>): Promise<T> {
+  const keep = setInterval(() => {}, 1_000);
+  try { return await p; } finally { clearInterval(keep); }
+}
+
 function fakes(o: {
   facts?: CoinFacts | null; resolve?: string | null; slow?: boolean; flow?: boolean | FlowResult; fomoEnv?: (tool: FomoToolName) => FomoEnvelope;
   description?: string; usable?: boolean; noBroker?: boolean; unconfigured?: boolean; flowPerDay?: number; theses?: PublicThesis[];
@@ -650,7 +661,7 @@ describe("one bounded research bundle per answer", () => {
   it("a caller with less time left gets a bundle cut to it, and none at all with nothing left", async () => {
     const slow = fakes({ slow: true, flow: true });
     const t0 = Date.now();
-    const s = await slow.research.gather(input({ kind: "coin", ticker: null, address: CA }, { budgetMs: 1_000 }));
+    const s = await alive(slow.research.gather(input({ kind: "coin", ticker: null, address: CA }, { budgetMs: 1_000 })));
     assert.ok(Date.now() - t0 < 1_000 + 500, `${Date.now() - t0} ms`);
     assert.ok(slow.f.reads.every((q) => q.timeoutMs <= 1_000), "every read asked to finish inside what is left");
     assert.ok(slow.f.flows.every((q) => q.timeoutMs <= 1_000));
@@ -668,7 +679,7 @@ describe("one bounded research bundle per answer", () => {
     assert.ok(b.lookups <= RESEARCH_BUDGET.maxLookups, `${b.lookups} lookups`);
     const slow = fakes({ slow: true, flow: true });
     const t0 = Date.now();
-    const s = await slow.research.gather(input({ kind: "coin", ticker: null, address: CA }));
+    const s = await alive(slow.research.gather(input({ kind: "coin", ticker: null, address: CA })));
     assert.ok(Date.now() - t0 < RESEARCH_BUDGET.readMs + 1_000, "one slow read is cut at its share");
     assert.ok(!s.facts.some((p) => /public index shows/.test(p)), "a late read is no fact");
     assert.ok(s.facts.some((p) => BUYS_LEAD.test(p)), "the others still count");
