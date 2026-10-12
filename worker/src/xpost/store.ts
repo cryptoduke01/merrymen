@@ -971,6 +971,37 @@ export async function answerAuthorSpent(db: Db, xUserId: string, authorId: strin
 }
 
 /**
+ * HOW LONG ONE TOLD "SAY STOP TO OPT OUT" COUNTS FOR (the owner's decision,
+ * 2026-10-12): an active agent's answer carries the line only when this X
+ * account has not posted it to the same person in the last 30 days. The
+ * first answer to someone carries it, later ones that month do not, and the
+ * first after 30 days carries it again. A stop is honoured either way.
+ */
+export const OPT_OUT_NOTICE_MS = 30 * 24 * 60 * 60_000;
+
+/** The notice as a posted body carries it, lowercase, for a LIKE on either dialect. */
+const NOTICE_LIKE = "%say stop to opt out.%";
+
+/**
+ * WAS THIS PERSON ALREADY TOLD THEY CAN SAY STOP? True when this X account
+ * POSTED an answer or a comment reply to them (by the reply's author) at or
+ * after `sinceMs` whose body carries the opt-out notice. Only `posted` rows
+ * count: a draft still waiting, a skipped one, a failed or an uncertain send
+ * may never have been seen, so the next answer carries the line again. Read
+ * by the answer path (orchestrator-xpost.ts writeAnswer) before it builds an
+ * answer, and handed to the gate as XGateCtx.noticeShown. Fails closed: a
+ * read that throws is the caller's "not told".
+ */
+export async function optOutToldSince(db: Db, xUserId: string, authorId: string, sinceMs: number): Promise<boolean> {
+  const row = await db.prepare(`SELECT sent.id AS id
+    FROM xpost_posts sent JOIN xpost_reply_targets r ON r.post_id = sent.id
+    WHERE sent.x_user_id = ? AND r.author_id = ? AND sent.kind IN ('answer', 'reply') AND sent.status = 'posted'
+      AND sent.sent_at_ms >= ? AND LOWER(sent.body) LIKE ?
+    LIMIT 1`).get(xUserId, authorId, int(sinceMs), NOTICE_LIKE) as { id: unknown } | undefined;
+  return !!row;
+}
+
+/**
  * ANSWERS DRAFTED AND STILL WAITING TO GO OUT on this X account, drafted
  * since `sinceMs`. The day's answer allowance is taken at send time, so the
  * answer path counts these against it too: a draft that could not take the
