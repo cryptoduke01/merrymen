@@ -94,6 +94,31 @@ test("a tag gets one reviewed answer to the mention itself, in its own lane", as
   assert.equal((await store.readMeta(w.db, `answerday:111:2026-09-30`))?.n, 1);
 });
 
+test("an answer restates only what X published, never a draft still waiting or one written this pass", async (t) => {
+  const w = await world(t);
+  const write = async (key: string, body: string, posted: boolean) => {
+    const id = await store.schedulePost(w.db, { tenant: TENANT, xUserId: "111", kind: "casual", dedupeKey: key, body, nowMs: NOW - 2 * HOUR, dueAtMs: NOW + 5 * HOUR });
+    if (posted) { await store.claimPost(w.db, id!, NOW - HOUR); await store.markPosted(w.db, id!, "100000000000000088", NOW - HOUR); }
+  };
+  await write("casual:out", "quiet tapes suit me fine", true);
+  await write("casual:waiting", "an unsent thought about owls", false);
+  w.setInbox([1, 2].map((n) => tag({ id: `10000000000000006${n}`, conversation_id: `10000000000000006${n}`, author_id: `66${n}`,
+    text: "@pine_stoat what kind of coins do you trade?" })));
+  await w.step();
+  const said = w.asked().map((p) => /What you already said publicly[^\n]*/.exec(p)?.[0] ?? "");
+  assert.equal(said.length, 2, "both tags were answered");
+  for (const line of said) {
+    assert.match(line, /quiet tapes suit me fine/, "a posted line is what it said");
+    assert.match(line, /I am an AI trading agent/);
+    assert.doesNotMatch(line, /owls/, "a draft still under Coming up was not said");
+    assert.doesNotMatch(line, /fresh launches/, "nor the answer drafted a moment ago in this pass");
+  }
+  // The draft written a moment ago still keeps the next one from echoing it.
+  const answers = (await w.answers()).sort((a, b) => a.id - b.id);
+  assert.deepEqual(answers.map((a) => a.status), ["scheduled", "skipped"]);
+  assert.match(answers[1]!.reason ?? "", /^gate:/);
+});
+
 test("an owner the operator did not make active answers no tags", async (t) => {
   const w = await world(t, { active: false });
   await w.step();

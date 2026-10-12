@@ -419,6 +419,13 @@ test("recent bodies: one account's, or the fleet's, never the ones that did not 
   assert.deepEqual(await recentBodies(db, { tenant: OWNER_A, sinceMs: 0, limit: 10 }), ["one"]);
   assert.deepEqual(await recentBodies(db, { tenant: null, sinceMs: 0, limit: 10 }), ["two", "one"]);
   assert.deepEqual(await recentBodies(db, { tenant: null, sinceMs: 15, limit: 10 }), ["two"]);
+  // What it SAID is only what X published: a draft still waiting is not.
+  assert.deepEqual(await recentBodies(db, { tenant: OWNER_A, sinceMs: 0, limit: 10, posted: true }), []);
+  const out = (await schedulePost(db, post({ dedupeKey: "a4", body: "five", nowMs: 42 })))!;
+  await claimPost(db, out, 43);
+  await markPosted(db, out, "900", 44);
+  assert.deepEqual(await recentBodies(db, { tenant: OWNER_A, sinceMs: 0, limit: 10, posted: true }), ["five"]);
+  assert.deepEqual(await recentBodies(db, { tenant: OWNER_A, sinceMs: 0, limit: 10 }), ["five", "one"]);
   assert.equal(await cancelScheduled(db, OWNER_B, 50, "turned-off"), 1);
 });
 
@@ -523,6 +530,7 @@ test("every statement the store sends translates to Postgres with matching, bind
   await deferPost(db, id, 21.5, 21.5);
   await recentBodies(db, { tenant: OWNER_A, sinceMs: 0.5, limit: 5.5 });
   await recentBodies(db, { tenant: null, sinceMs: 0.5, limit: 5.5 });
+  await recentBodies(db, { tenant: OWNER_A, sinceMs: 0.5, limit: 5.5, posted: true });
   await returnAllowance(db, "k", 14.7);
   await takeAllowance(db, "k", 3.5, 14.5);
   await takeOwnerAllowance(db, OWNER_A, "owner-day", 3.5, 14.5);

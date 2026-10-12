@@ -1223,21 +1223,26 @@ export async function introPostsOf(db: Db, tenant: string, xUserId: string): Pro
  * every account's when `tenant` is null. What a new draft must not repeat: its
  * own account's history, and the fleet's (X: never "identical or substantially
  * similar content across multiple accounts").
+ *
+ * `posted` narrows it to what X surely published: what an agent may say it
+ * already said. A draft still waiting may yet be skipped by its owner, so it
+ * is something not to echo, never something said.
  */
-export async function recentBodies(db: Db, opts: { tenant: string | null; sinceMs: number; limit: number }): Promise<string[]> {
+export async function recentBodies(db: Db, opts: { tenant: string | null; sinceMs: number; limit: number; posted?: boolean }): Promise<string[]> {
   const lim = int(Math.max(1, Math.min(2000, opts.limit)));
+  const statuses = opts.posted ? "('posted')" : "('scheduled', 'sending', 'posted')";
   const rows = (opts.tenant === null
     ? await db
         .prepare(
           `SELECT body FROM xpost_posts
-            WHERE status IN ('scheduled', 'sending', 'posted') AND created_at_ms >= ?
+            WHERE status IN ${statuses} AND created_at_ms >= ?
             ORDER BY created_at_ms DESC, id DESC LIMIT ?`,
         )
         .all(int(opts.sinceMs), lim)
     : await db
         .prepare(
           `SELECT body FROM xpost_posts
-            WHERE tenant = ? AND status IN ('scheduled', 'sending', 'posted') AND created_at_ms >= ?
+            WHERE tenant = ? AND status IN ${statuses} AND created_at_ms >= ?
             ORDER BY created_at_ms DESC, id DESC LIMIT ?`,
         )
         .all(tenantKey(opts.tenant), int(opts.sinceMs), lim)) as { body: unknown }[];

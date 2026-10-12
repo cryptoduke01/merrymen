@@ -1113,9 +1113,14 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
           // A poll's batch is seen once (the cursor moves on), so an active
           // agent works through a few of its tags, not only the first.
           const isActive = active.has(account.tenant.toLowerCase());
+          // WHAT IT ALREADY SAID is what X published: posted rows only. A
+          // draft still under Coming up — this pass's own answers included —
+          // may yet be skipped, so it stays in recentOwn (not to be echoed)
+          // and out of what an answer may restate as said.
+          const said = isActive ? await recentBodies(shared, { tenant: account.tenant, sinceMs: at() - OWN_MEMORY_MS, limit: 20, posted: true }) : [];
           for (let i = 0; i < (isActive ? ANSWERS_PER_POLL : 1) && drafts < MAX_DRAFTS_PER_PASS; i++) {
             const result = isActive
-              ? await writeAnswer(shared, account, f, comments.get(account.xUserId)!, z.tz, at, recentOwn, recentFleet)
+              ? await writeAnswer(shared, account, f, comments.get(account.xUserId)!, z.tz, at, recentOwn, recentFleet, said)
               : await writeReply(shared, account, f, comments.get(account.xUserId)!, z.tz, at, recentOwn, recentFleet);
             if (!result) break;
             drafts++;
@@ -1133,13 +1138,14 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
   /**
    * ANSWER ONE TAG, per account per pass — the oldest eligible one first, so a
    * flood of newer tags is not rewarded. Like a Telegram group answer: from
-   * public facts (how it trades, coins it bought lately, what it already said),
-   * never from the question. Every attempt spends its key, so a PASS or a
-   * refused draft is not drafted again.
+   * public facts (how it trades, coins it bought lately, what it already said
+   * — `said`, its posted rows only), never from the question. `recentOwn`,
+   * drafts included, is only what the gate keeps it from echoing. Every
+   * attempt spends its key, so a PASS or a refused draft is not drafted again.
    */
   async function writeAnswer(
     shared: Db, account: XAccount, f: AgentFacts, comments: XReply[], tz: string | null,
-    at: () => number, recentOwn: string[], recentFleet: string[],
+    at: () => number, recentOwn: string[], recentFleet: string[], said: string[],
   ): Promise<{ body: string | null } | null> {
     if (!creds) return null;
     const nowMs = at();
@@ -1159,7 +1165,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       const buys = recentCoins(f);
       const social = await deps.socialProfile?.(account.tenant);
       const walletPublic = !!social?.publicWallet && social.publicWallet.address.toLowerCase() === f.agentId.toLowerCase();
-      const prompt = answerPrompt({ ...facts, question: candidate.text, recentBuys: buys, said: recentOwn.map(withoutReplyOptOut), walletPublic });
+      const prompt = answerPrompt({ ...facts, question: candidate.text, recentBuys: buys, said: said.map(withoutReplyOptOut), walletPublic });
       const raw = await draft(creds, prompt, { call: deps.llm, timeoutMs: deps.draftTimeoutMs });
       const mode = f.mode === "idle" ? null : f.mode;
       const verdict = raw === null ? null : admitXPost(raw, {
