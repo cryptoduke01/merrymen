@@ -47,6 +47,7 @@
  * Pure: no I/O, no clock, no model, no provider.
  */
 import { xWeightedLength, X_MAX_WEIGHTED } from "./client";
+import { answerWord } from "./words";
 
 // ── the pieces ──────────────────────────────────────────────────────────────
 
@@ -106,6 +107,11 @@ const TICKER_REFUSED = new RegExp([
   "buy", "sell", "send", "ape", "lfg", "wagmi", "ngmi", "nfa", "dyor", "bull", "bear", "rich", "safu", "hodl", "yolo", "long", "short",
   "alert", "signal", "entry", "target", "profit", "gain", "rekt", "shill", "free", "risk", "guarant", "winner", "winning", "invest",
   "airdrop", "presale", "giveaway", "bonus", "claim", "rocket", "dip",
+  // AND A HOLDING, A PICK OR A SURE THING RUN TOGETHER (red-team 2026-10-12): "$IBOUGHT", "$MYBAG",
+  // "$THEPLAY", "$SUREBET", "$GETIN", "$HOLDIT", "$NOLOSS", "$UPONLY", "$EZMONEY", "$TOPPICK" were
+  // posted in the house's line, reading as Alan claiming a buy, a bag or a pick.
+  "bought", "bag", "pick", "hold", "play", "bet", "getin", "gotin", "allin", "imin", "loadup", "load", "grab", "jump", "noloss", "nolose",
+  "cantlose", "uponly", "onlyup", "goup", "money", "cash", "stack", "surewin", "added",
   // money in words: "$MILLION" beside "~$1.2M" reads as a sum code never built
   "million", "billion", "trillion", "thousand", "hundred", "dollar", "bucks", "cents", "usd",
 ].join("|"));
@@ -124,6 +130,25 @@ const SKELETON_REFUSED = /n+g+r|n+g{2,}|n+q{2,}|n+b{2,}|h+t+l+r|f+h+r+r|g+s+t+h+
 const skeletonOf = (lower: string): string => lower.replace(/[aeiouy]/g, "");
 
 /**
+ * THE FIRST PERSON RUN INTO A TICKER (red-team 2026-10-12): "$MYBAG",
+ * "$MYCOIN", "$IHOLD", "$IMIN", "$IMHOLDING", "$IGOTIN" beside figures in
+ * the house's own line read as Alan saying it holds or bought the coin. A
+ * ticker that starts with MY or OUR is never shown, nor one that is I, IM, IAM,
+ * IVE, WE or WEARE before an everyday word (words.ts answerWord) or a word of a
+ * claim. Errs toward dropping: "MYTH" goes too.
+ */
+const FIRST_PERSON = /^(?:my|our)/;
+const CLAIMS: ReadonlySet<string> = new Set("got gotin add added aped ape buy buying bought in am on won win love like call called said own have had bag bagged long short".split(" "));
+function firstPerson(lower: string): boolean {
+  if (FIRST_PERSON.test(lower)) return true;
+  for (const p of ["i", "im", "iam", "ive", "we", "weare"]) {
+    const rest = lower.slice(p.length);
+    if (lower.startsWith(p) && rest.length >= 2 && (CLAIMS.has(rest) || answerWord(rest))) return true;
+  }
+  return false;
+}
+
+/**
  * A PROVIDER'S SYMBOL AS THE LINE MAY SHOW IT, or null. Exactly A-Z and a-z,
  * two to ten of them, read before anything is changed (a Turkish dotless i or
  * a German sharp s never becomes a capital by upper-casing): then upper-cased.
@@ -140,7 +165,7 @@ export function cleanTicker(raw: unknown): string | null {
   if (typeof raw !== "string" || !/^[A-Za-z]{2,10}$/.test(raw)) return null;
   const t = raw.toUpperCase();
   const lower = t.toLowerCase();
-  return TICKER_REFUSED.test(lower) || TICKER_REFUSED_WHOLE.has(t) || SKELETON_REFUSED.test(skeletonOf(lower)) ? null : t;
+  return TICKER_REFUSED.test(lower) || TICKER_REFUSED_WHOLE.has(t) || SKELETON_REFUSED.test(skeletonOf(lower)) || firstPerson(lower) ? null : t;
 }
 
 /** Every ticker a rendered line shows, without its $. */

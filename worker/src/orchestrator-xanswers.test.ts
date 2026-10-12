@@ -2986,6 +2986,21 @@ test("what's hot never shows a chain coin named after a big coin or one letter f
   }
 });
 
+test("what's hot never shows a ticker that runs the first person, a holding, a pick or a sure thing into one word, in the pools or as fomo's most bought (red-team 2026-10-12)", async (t) => {
+  // At fbcf8756 each was posted as "... geckoterminal robinhood: trending $IBOUGHT 24h +312% vol ~$1.2M, $QRTZ 24h +4% vol ~$300k; fomo: most bought $IBOUGHT."
+  for (const sym of ["IBOUGHT", "MYBAG", "MYPICK", "IMIN", "IHOLD", "IMHOLDING", "IGOTIN", "IADDED", "MYCOIN", "MYBOOK", "MYPLAY", "THEPLAY", "SUREBET",
+    "BESTBET", "STACKIN", "ALLIN", "GETIN", "HOLDIT", "HOLD", "LOADUP", "GRAB", "JUMPIN", "NOLOSS", "CANTLOSE", "UPONLY", "GOUP", "EZMONEY", "MONEY", "TOPPICK"]) {
+    const pools = [namedPool(sym, 1, 312, 1.2e6), namedPool("QRTZ", 2, 4, 300_000)];
+    const w = await world(t, { env: { ...RESEARCH_ON, MERRYMEN_XPOST_FOMO: "1" }, research: hotWithFomo(pools, [sym]), facts: { ...FACTS, name: "Alan Al Dale", calls: [] } });
+    w.setInbox([tag({ text: "@pine_stoat what's hot today?" })]);
+    await w.step();
+    const text = String(w.sends[0]?.text ?? "");
+    assert.match(text, /geckoterminal robinhood: trending \$QRTZ 24h \+4% vol ~\$300k\./, `${sym}: ${text}`);
+    assert.ok(!text.includes(`$${sym}`), `${sym}: ${text}`);
+    assert.doesNotMatch(text, /fomo: most bought/, `${sym}: ${text}`);
+  }
+});
+
 test("what's hot never shows a coin under a name its own buys go by, a copy at another contract or not, nor as fomo's most bought, under its buy post or anywhere (red-team 2026-10-12)", async (t) => {
   // At fbcf8756, under its own ZAPX buy post: "trending on robinhood: a small group out in front, the frontrunner rising hard lately. a snapshot.
   // geckoterminal robinhood: trending $ZAPX 24h +912% vol ~$1.4M, $QRTZ 24h -8.3% vol ~$310k; fomo: most bought $ZAPX. say stop to opt out."

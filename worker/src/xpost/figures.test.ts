@@ -98,6 +98,16 @@ describe("tickers: A-Z, two to ten letters, nothing else", () => {
     for (const ok of ["PEPE", "CHUMP", "FROGGY", "WOJAK", "BONK", "COINA", "ZAPX", "QRTZ", "MOLT", "GALA", "BASS", "MERIT"]) assert.equal(cleanTicker(ok), ok, ok);
   });
 
+  it("never the first person, a holding, a pick or a sure thing run together into one word (red-team 2026-10-12)", () => {
+    // Each posted at fbcf8756 in both sections: "trending $IBOUGHT 24h +312% vol ~$1.2M, …; fomo: most bought $IBOUGHT".
+    for (const bad of ["IBOUGHT", "MYBAG", "MYPICK", "IMIN", "IHOLD", "IMHOLDING", "IGOTIN", "IADDED", "MYCOIN", "MYBOOK", "MYPLAY", "THEPLAY", "SUREBET",
+      "BESTBET", "STACKIN", "ALLIN", "GETIN", "HOLDIT", "HOLD", "LOADUP", "GRAB", "JUMPIN", "NOLOSS", "CANTLOSE", "UPONLY", "GOUP", "EZMONEY", "MONEY",
+      "TOPPICK", "MYBUY", "RICHES", "NEXTGEM", "EASYGAINS", "OURBAG", "WEBOUGHT", "IVEGOT", "IAMIN", "WELOVE"]) {
+      assert.equal(cleanTicker(bad), null, bad);
+    }
+    for (const ok of ["PEPE", "CHUMP", "FROGGY", "IOTA", "ICP", "IMX", "INJ", "WOJAK", "COINA", "ZAPX", "QRTZ", "WEETH"]) assert.equal(cleanTicker(ok), ok, ok);
+  });
+
   it("never a slur, a political name or a hype word", () => {
     for (const bad of ["NAZI", "FUCK", "TRUMP", "MAGA", "BIDEN", "PUMP", "MOON", "GEM", "SCAM", "SAFE", "LEGIT"]) assert.equal(cleanTicker(bad), null, bad);
   });

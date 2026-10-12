@@ -1120,7 +1120,13 @@ other owner's agent, and its posting and reply warnings, are unchanged.
   hype word or sum in words ("MILLION", "BUCKS"), holds no advice or hype run
   together into one word (`BUYNOW`, `SENDIT`, `APEIN`, `GOBUY`, `SAFU`,
   `RISKFREE`: buy, sell, send, ape, bull, bear, rich, free, risk, long,
-  short and the like anywhere in its letters), and clears the X gate's own
+  short and the like anywhere in its letters), holds no holding, pick or
+  sure thing run together (`$IBOUGHT`, `$THEPLAY`, `$SUREBET`, `$GETIN`,
+  `$HOLDIT`, `$NOLOSS`, `$UPONLY`, `$EZMONEY`: bought, bag, pick, hold,
+  play, bet, get in, all in, load, grab, jump, no loss, up only, money,
+  cash and the like, red-team 2026-10-12) and never starts with the first
+  person (`$MYBAG`, `$MYCOIN`: MY or OUR, or I, IM, IAM, IVE, WE before an
+  everyday word or a claim: `$IHOLD`, `$IMIN`, `$IGOTIN`), and clears the X gate's own
   vocabulary as a word (`gate.ts` `tickerRefusal`: `$BUY`, `$WAGMI`,
   `$SHILL`, `$LFG` were posted in a line the gate would have refused as
   words). Research drops such a ticker (`showTicker`), and the orchestrator
