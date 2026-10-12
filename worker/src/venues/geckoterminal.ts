@@ -30,6 +30,7 @@
 
 import { readBoundedJson } from "../bounded-read";
 import { FleetFeedCache, LocalFeedCache, REAL_FEED_CLOCK, type FeedCache, type FeedClock, type FeedResult } from "./fleet-feed-cache";
+import { proPacing } from "./coingecko-pacing";
 import path from "node:path";
 
 const GECKO_BASE = "https://api.geckoterminal.com/api/v2";
@@ -57,14 +58,37 @@ export function resetGeckoFeedsForTest(clock: FeedClock = REAL_FEED_CLOCK): void
   feedClock = clock;
 }
 
+/** Each operator note once per process, however many lanes are rebuilt. */
+const saidNotes = new Set<string>();
+function sayOnce(line: string): void {
+  if (saidNotes.has(line)) return;
+  saidNotes.add(line);
+  console.warn(`[gecko] ${line}`);
+}
+
+/**
+ * The pace a source's lane runs at.
+ *
+ * Public swagger documents approximately 10/min (the older FAQ says 30), so
+ * the public lane keeps the stricter bound and is not configurable: there is
+ * no plan to buy more of it. Pro is the operator's plan, so its pace is the
+ * operator's knob, clamped to the monthly credit ceiling (coingecko-pacing.ts).
+ * A fleet home means the shared worker lane; anything else is process-local
+ * (the web service, a self-hosted worker) and gets the smaller share.
+ */
+export function laneSpacingMs(source: GeckoSource, fleet: boolean, env: Parameters<typeof proPacing>[0] = process.env): number {
+  if (source.id === "geckoterminal-public") return 6500;
+  const pacing = proPacing(env, fleet ? "fleet" : "local");
+  for (const note of pacing.notes) sayOnce(note);
+  return pacing.spacingMs;
+}
+
 function cacheFor(source: GeckoSource): FeedCache {
   const home = process.env.MERRYMEN_FLEET_HOME?.trim();
   const key = `${home ? path.resolve(home) : "local"}:${source.id}`;
   let cache = feedCaches.get(key);
   if (!cache) {
-    // Public swagger documents approximately 10/min (the older FAQ says 30).
-    // Use the stricter bound. Pro keeps the existing conservative 20/min.
-    const spacing = source.id === "geckoterminal-public" ? 6500 : 3000;
+    const spacing = laneSpacingMs(source, Boolean(home));
     cache = home ? new FleetFeedCache(path.join(home, source.id), spacing, feedClock) : new LocalFeedCache(spacing, feedClock);
     feedCaches.set(key, cache);
   }
