@@ -1282,6 +1282,24 @@ test("asking name by name says nothing of which coins it bought: a name it bough
   }
 });
 
+test("a tag asking for advice or a forecast in other words is never drafted, and such a draft is never posted (red-team 2026-10-12)", async (t) => {
+  for (const env of [{}, RESEARCH_ON]) {
+    for (const text of ["@pine_stoat is $WOJAK a good buy?", "@pine_stoat is $WOJAK worth buying?", "@pine_stoat do you think $WOJAK will go up?",
+      "@pine_stoat would you buy $WOJAK here?", "@pine_stoat is $WOJAK going to pump?"]) {
+      const w = await world(t, { env, research: fakeResearch().research });
+      w.setInbox([tag({ text })]);
+      await w.step();
+      assert.equal(w.asked().length, 0, text);
+      assert.deepEqual(await w.answers(), [], text);
+    }
+    // A coin question that is not one, drafted as advice anyway: refused.
+    const w = await world(t, { env, research: fakeResearch().research, answer: "honestly i'd buy it, the public index shows liquidity is pretty deep. say stop to opt out." });
+    w.setInbox([tag({ text: "@pine_stoat thoughts on $WOJAK?" })]);
+    await w.step();
+    assert.equal((await w.answers())[0]!.status, "skipped");
+  }
+});
+
 test("\"what have you bought lately?\" is the plain question it is: told its buys, and a true answer goes out (red-team 2026-10-12)", async (t) => {
   for (const env of [{}, RESEARCH_ON]) {
     for (const text of ["@pine_stoat what have you bought lately?", "@pine_stoat what did you buy recently?", "@pine_stoat what did you trade lately?"]) {

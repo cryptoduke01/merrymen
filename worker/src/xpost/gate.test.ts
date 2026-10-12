@@ -169,6 +169,20 @@ describe("a reply never vouches for a coin (red-team 2026-10-12)", () => {
   });
 });
 
+describe("a reply never gives advice or a forecast in other words (red-team 2026-10-12)", () => {
+  it("\"i'd buy it\", \"worth buying\", \"a solid buy, get some\", \"could double\", \"goes up from here\" are refused", () => {
+    // The reproduced drafts, each {ok:true} in the production context (live, reply, buys none) at 11f7acac.
+    for (const draft of ["honestly i'd buy it, the public index shows liquidity is pretty deep. say stop to opt out.",
+      "worth buying imo, fomo traders mostly argue it's still early. say stop to opt out.", "solid buy for sure, get some before everyone else does. say stop to opt out.",
+      "this one is going way higher, it could easily double from here. say stop to opt out.", "pretty sure it goes up from here, the index shows buyers piling in. say stop to opt out."]) {
+      assert.notEqual(reason(draft, { kind: "reply", mode: "live", coins: [], buys: "none", unsaid: ["PEPE", "Pepe"] }), "ok", draft);
+      assert.equal(reason(draft, { kind: "reply", mode: "live", coins: [] }), "hype", draft);
+    }
+    // A buy post's own reasons are not advice.
+    assert.equal(reason("it was cheap for me to get in and back out of pepe, which i liked", { kind: "buy", mode: "live", coins: ["pepe"] }), "ok");
+  });
+});
+
 describe("public replies preserve the X safeguards and require an opt-out", () => {
   const reply: Partial<XGateCtx> = { kind: "reply", mode: "live", coins: ["pepe"] };
   it("allows a conversational reference back only in an actual reply", () => {

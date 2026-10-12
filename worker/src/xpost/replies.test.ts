@@ -85,7 +85,7 @@ describe("select only useful direct comments on the known public buy", () => {
 describe("tags an active agent may answer", () => {
   const tag = (text: string, over: Partial<XReply> = {}) => comment(text, { conversationId: "333", inReplyToTweetId: "", ...over });
   it("a question or plain address, with handles stripped", () => {
-    for (const text of ["@Pine what do you trade?", "@Pine why did you pass on the last launch?", "hey @Pine, how do you pick coins", "@Pine what model are you on? 100x?"]) {
+    for (const text of ["@Pine what do you trade?", "@Pine why did you pass on the last launch?", "hey @Pine, how do you pick coins", "@Pine what model are you on? 24h?"]) {
       const v = tagCandidate(tag(text), { xUserId: "222", username: "Pine" });
       assert.equal(v.ok, true, text);
       if (v.ok) assert.doesNotMatch(v.text, /@/);
@@ -228,6 +228,21 @@ describe("tags an active agent may answer", () => {
       assert.equal(tagCandidate(tag(text), ON).ok, false, text);
     }
   });
+  it("advice or a prediction asked for without \"should i\" is refused at the door (red-team 2026-10-12)", () => {
+    // The reproduced tags, each passing tagCandidate with classifyTag coin WOJAK at 11f7acac.
+    for (const text of ["is $WOJAK a good buy?", "is $WOJAK worth buying?", "do you think $WOJAK will go up?", "would you buy $WOJAK here?", "is $WOJAK going to pump?",
+      "is $WOJAK a buy?", "$WOJAK going higher?", "is $WOJAK bullish?", "will $WOJAK moon?", "is it too late to get into $WOJAK?", "is $WOJAK undervalued?",
+      "do you think $pepe will go up?", "what model are you on? 100x?", "what's the best coin to buy?"]) {
+      for (const research of [true, false]) {
+        assert.deepEqual(tagCandidate(tag(`@Pine ${text}`), { xUserId: "222", research, username: "Pine" }), { ok: false, reason: "advice-request" }, text);
+      }
+    }
+    for (const text of ["@Pine thoughts on $WOJAK?", "@Pine is $WOJAK legit?", "@Pine what do you trade?", "@Pine did you buy $WIF?", "@Pine what model do you run on?",
+      "@Pine is the 24h volume on $pepe thin?"]) {
+      assert.equal(tagCandidate(tag(text), ON).ok, true, text);
+    }
+  });
+
   it("a coin's public facts may be asked how many or how much of, never advice or its own size", () => {
     for (const text of ["@Pine how many holders does $pepe have?", "@Pine how much liquidity is in this?", `@Pine how many holders on ${CA}?`]) {
       assert.equal(tagCandidate(tag(text), ON).ok, true, text);

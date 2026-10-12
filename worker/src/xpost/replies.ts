@@ -70,7 +70,20 @@ export type ReplyCandidate =
 const LINK_OR_SECRET = /https?:|www\.|\b[a-z0-9-]+\.(?:com|net|org|io|dev|app|xyz|gg|co|me|ai)\b|0x[a-f0-9]{8,}|\b(?:sk-|gsk_|api[ _-]?key|seed phrase|private key|password|secret)\b/i;
 const ABUSE_OR_SENSITIVE = /\b(?:fuck\w*|shit\w*|bitch\w*|idiot\w*|moron\w*|retard\w*|kill\w*|suicid\w*|rape\w*|porn\w*|sex\w*|nude\w*|terror\w*|nazi\w*|racis\w*|politic\w*|election\w*|president\w*|democrat\w*|republican\w*|religio\w*|christian\w*|muslim\w*|jew\w*|medical\w*|diagnos\w*|cancer|medication\w*|depress\w*)\b/i;
 const SPAM_OR_INSTRUCTIONS = /\b(?:airdrop\w*|giveaway\w*|whitelist\w*|presale\w*|referral\w*|telegram|discord|dm me|follow me|follow back|check (?:my|our)|join (?:my|our|the)|claim (?:your|free)|promo\w*|sponsored|automated (?:message|reply)|i am a bot|ignore (?:all|any|the|your|previous)|system prompt|developer message|instructions?|execute|run (?:this|the)|call (?:a |the )?tool|transfer|send (?:me|us)|connect (?:your|a) wallet)\b/i;
-const ADVICE_REQUEST = /\b(?:should (?:i|we)|would you recommend|recommend (?:me|a|to)|(?:can|will|could) (?:i|we) (?:buy|sell|hold|profit)|(?:buy|sell|hold|ape|pump|dump) (?:this|that|it|now|more)|(?:price|profit|return|exit|entry) (?:target|prediction|forecast)|how (?:much|many)|when (?:to|should|will)|(?:buy|sell|trade) (?:for me|on my behalf))\b/i;
+const ADVICE_REQUEST = new RegExp(
+  String.raw`\b(?:should (?:i|we)|would you recommend|recommend (?:me|a|to)|(?:can|will|could) (?:i|we) (?:buy|sell|hold|profit)|(?:buy|sell|hold|ape|pump|dump) (?:this|that|it|now|more)|(?:price|profit|return|exit|entry) (?:target|prediction|forecast)|how (?:much|many)|when (?:to|should|will)|(?:buy|sell|trade) (?:for me|on my behalf)` +
+    // ADVICE AND PREDICTION ASKED FOR WITHOUT "SHOULD I" (red-team 2026-10-12):
+    // "is $WOJAK a good buy?", "worth buying?", "will it go up?", "would you
+    // buy $WOJAK here?", "is it going to pump?", "too late to get in?".
+    String.raw`|(?:a|an)\s+(?:(?:good|bad|safe|solid|smart|great|decent|strong|easy)\s+)?(?:buy|investment|bet|entry|play|hold|flip)` +
+    String.raw`|worth\s+(?:buying|getting|it|a\s+buy|an?\s+ape|holding|the\s+risk)` +
+    String.raw`|(?:will|would|could|can|does|do|is|gonna)\s+(?!(?:you|u|ya|i|we|your|ur)\b)(?:it|this|that|they|\$?[a-z][a-z0-9]*)\s+(?:ever\s+|still\s+)?(?:go|get|pump|run|moon|rise|drop|dump|recover|bounce|double|triple|rip|fly|explode|climb|crash|tank|hit|reach|break)\b` +
+    String.raw`|(?:going|gonna|about)\s+to\s+(?:pump|go|moon|run|dump|rise|drop|explode|rip|fly|double|crash|tank|recover)` +
+    String.raw`|(?:would|will|should|gonna)\s+(?:you|u|ya)\s+(?:buy|ape|get|grab|hold|sell|add)` +
+    String.raw`|(?:best|top|next)\s+(?:coin|token|buy|pick|play|gem|memecoin)s?|too\s+late\s+to\s+(?:get|buy|ape|jump)|(?:get|jump)\s+in(?:to)?\s+(?:now|early|before)` +
+    String.raw`|(?:going|go|goes|headed|heading)\s+(?:up|higher|lower|down|to\s+zero)|undervalued|overvalued|bullish|bearish|moon(?:ing)?|(?:\d+|ten|hundred)\s*x)\b`,
+  "i",
+);
 const MEANINGFUL = /\b(?:reason\w*|liquidity|pool|curve|buyers?|activity|risk\w*|paper|practice|approach|choice|agree|disagree|makes sense|fair (?:enough|point))\b|\b(?:why|what|how|which)\b[^.!]{0,70}\b(?:this|that|it|coin|buy|bought)\b/i;
 
 /**

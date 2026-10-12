@@ -832,7 +832,15 @@ const COIN_ADVICE = new RegExp(
     // AN ENDORSEMENT, IN A REPLY OR BESIDE A COIN (red-team 2026-10-12): under
     // "is this legit?" in its own thread, "yep, looks legit to me, go for it"
     // and "yeah that one's official, all good" passed.
-    String.raw`|(?:looks?|looking|seems?|is|it'?s|that'?s|totally|fully|def(?:initely)?|pretty|real|all)\s+legit|legit\s+(?:to me|one|coin|token|project)|official|go for it|go ahead)\b`,
+    String.raw`|(?:looks?|looking|seems?|is|it'?s|that'?s|totally|fully|def(?:initely)?|pretty|real|all)\s+legit|legit\s+(?:to me|one|coin|token|project)|official|go for it|go ahead` +
+    // ADVICE AND PREDICTION IN OTHER WORDS (red-team 2026-10-12): "honestly i'd
+    // buy it", "worth buying imo", "solid buy for sure, get some", "it could
+    // easily double from here", "pretty sure it goes up from here".
+    String.raw`|(?:i'?d|i\s+would|i'?ll|i\s+will|i'?m\s+gonna|i'?m\s+going\s+to)\s+(?:(?:definitely|probably|totally|happily|still)\s+)?(?:buy|get|grab|ape|add|load|hold)` +
+    String.raw`|worth\s+(?:buying|getting|grabbing|a\s+buy|an?\s+ape|it|holding|the\s+risk)|(?:a\s+)?(?:solid|good|great|safe|smart|easy|strong|decent)\s+(?:buy|bet|pick|entry|play|hold)` +
+    String.raw`|get\s+some\b|(?:goes|going|go|gone|heading|headed|head)\s+(?:way\s+|much\s+|a\s+lot\s+)?(?:up|higher|lower)|(?:way|much|a\s+lot)\s+higher|higher\s+from\s+here` +
+    String.raw`|(?:could|will|might|should|gonna|going\s+to|bound\s+to|about\s+to)\s+(?:easily\s+|definitely\s+|probably\s+|totally\s+|still\s+)?(?:double|triple|go\s+up|run|pump|moon|rip|fly|explode|rise|recover|bounce|climb|take\s+off)` +
+    String.raw`|(?:best|top)\s+(?:coin|token|buy|pick|play|bet|memecoin)s?|(?:my|a)\s+top\s+pick|the\s+one\s+to\s+(?:buy|get|hold|watch|grab|ape))\b`,
   "i",
 );
 
