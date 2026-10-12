@@ -55,6 +55,11 @@ Public peer transport is unchanged. The summary reaches only the same account's
 decision context; no private trade text, counterparty data or credentials are
 passed through it. Legacy published outcomes are labelled gross before fees/gas.
 
+With Fomo on and the owner's Fomo monitoring (or follow) enabled, the same opt-in
+also queues shared Fomo research for the entry candidates that account's review
+rotates through, so their next review carries the trader-flow lens. See
+docs/fomo.md "Research for review candidates".
+
 This opt-in changes research inputs only. It never changes per-trade/day caps,
 operation counts, drawdown checks, signed expiry, execution routes or exit rules.
 

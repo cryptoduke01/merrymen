@@ -401,6 +401,124 @@ chat, background research and triggered reviews.
 `lens.ts` renders the vendor-neutral `trader-flow` Brain lens. It contains no addresses and
 no vendor name, and carries opaque refs that the worker validates against what was sent.
 
+The lens also carries one statistics line when the dossier's stats read succeeded: holders,
+the top ten wallets' share, and unique buyers against unique sellers over the last hour and
+the last 24 hours. These are the source's own counts across all trade sizes, so they are
+not limited by the feed's $3,000 floor. For example: "Across all trade sizes, the same
+platform counts 812 holders; the top 10 wallets hold 61.4%; unique buyers vs sellers: last
+hour 9 vs 14, last 24h 220 vs 198."
+
+- **Re-checked numbers only.** The dossier keeps them as `CoinDossier.stats`, built by
+  `dossier.ts dossierStatsOf`. A value that is not a plain count, or a share outside
+  0–100, counts as unknown. An unknown side reads "unknown", never zero.
+- **Ranking.** The line comes right after the strongest cases for and against, so it
+  ranks ahead of the written follow-ups.
+- **A failed read.** If the read failed, or a budget refused it (a 503, an outage), the
+  line says "Holder and unique buyer/seller statistics: unavailable on this read." That
+  line ranks with coverage. The dossier's own "Token statistics were not available"
+  unknown is then left out, so the outage is not said twice. Nothing waits for the read.
+- **Never a lens on their own.** Brain gives this lens a pulse slot whenever it is fed
+  (`PULSE_RESERVED_LENSES`). That works only because the lens is fed when traders were
+  actually seen on the coin. Holder counts exist for nearly every coin, so a lens of
+  statistics alone would push a market analyst out of almost every review.
+- **Unchanged.** The attribution sentence, the "WHAT THIS IS NOT" line and the leak
+  checks all work as before. The lens is never a reason to buy.
+- **Older revisions.** A revision built before this change says nothing about statistics.
+
+## Research for review candidates
+
+`worker/src/fomo/review-candidates.ts`, `fomo-child.ts reportReviewCandidates` and
+`orchestrator-fomo.ts syncReviewCandidates`.
+
+Shared research follows the cohort. Before this change, a coin no watched trader touched
+got no dossier and no lens. The fast Trencher's tape coins are mostly such coins, so the
+Brain reviewed nearly all of them with no trader-flow lens. Now an opted-in agent names the
+entry candidates its review rotates through. The orchestrator queues research for exactly
+those coins, and the next review of each coin carries its dossier and lens.
+
+**Who.** Three conditions must all hold, and the child and the orchestrator each check
+them:
+
+- The agent's smart account is listed in `MERRYMEN_DECISION_RESEARCH_ACCOUNTS`
+  (`decision-research.ts decisionResearchEnabledFor`). This is the same operator opt-in
+  as the review's cost evidence, and it lists nobody by default.
+- The agent runs a fast Trencher on the live rail.
+- The owner has research on: `fomoDataAccess`, plus `fomoMonitoringEnabled` (research
+  only) or `fomoFollowEnabled`.
+
+The orchestrator gets the allowlist from `orchestrator.ts`, keyed by the roster's agent. A
+child cannot widen it. Owner settings are read, never changed.
+
+**What is sent.** Once per review, right after the review picks its coin, the child calls
+`reportReviewCandidates`. It passes the entry candidates that cleared that review's own
+pause and `shouldEnter` screen. The child drops the following before anything is sent:
+
+- held coins (they are already researched as held)
+- cash and the energy reserve
+- anything that is not a Robinhood Chain memecoin
+
+The report is a `BrokerReport` of kind `"review-candidates"`. On both sides of the IPC
+channel, at most 10 distinct coins are accepted per rolling 10 minutes. A coin named again
+inside its window is a duplicate, not a new coin. When a review rotates through more than
+10 coins, coins never sent go first. The broker refuses a whole report if it names any
+non-Robinhood key, names more than 10 coins, or names none. The orchestrator records the
+coins under the reporting child's own tenant, in memory. That is enough because a child
+reports to the replica that spawned it, and that replica writes its file. After a lease
+moves, the child reports again within 10 minutes.
+
+**What the orchestrator does.** On each pass, for each allowlisted roster agent whose
+owner has research on:
+
+- **A research item.** Each carried coin (at most 10, each named in the last 20 minutes)
+  becomes a research item at discovery priority. That happens at most once per coin per
+  30 minutes, which is the thesis class's own freshness. The evidence revision is the
+  time bucket, so every replica and owner asking in one bucket coalesces into one row. No
+  tenant is written on the row. The leader's queue pays for it like any other discovery
+  item: from the discovery share, under the background research cap
+  (`BACKGROUND_RESEARCH_CAP`), behind held coins, watches and a due cohort refresh.
+  Without a key, nothing is queued.
+- **A `candidate` signal.** The coin goes into that owner's own `fomo.json` as a
+  `candidate` signal at discovery priority, with the latest shared dossier and lens. It
+  sorts after every other discovery coin, so it never crowds out what the cohort is
+  buying. A coin that is only a candidate has no triggers.
+
+**What it never is.** A coin that is only a candidate is never put through the follow
+machine. It cannot become a nomination, a verification ask, an assessment row or a
+publication draft. Its lens is attached to the review exactly like any other
+(`attachLens`). No entry floor, price or divergence guard, cap, energy check, grant or
+policy changes. A refused budget or a provider outage leaves the coin with no lens yet, or
+with a lens whose statistics line says "unavailable". A review never waits for it.
+
+**Cost.** Each coin costs about 1,625 credits per refresh (one thesis page, the feed and
+stats), at most once per 30 minutes. A cache hit costs nothing. A review that keeps
+rotating through the same 10 coins costs at most 20 refreshes an hour (about 32,500
+credits). The absolute worst case is 10 new coins every 10 minutes: 60 refreshes, or
+about 97,500 credits, an hour per agent. Either way it stays inside the discovery share,
+which is the knob; when the share is spent, discovery items simply wait. Removing the
+account from the allowlist stops it.
+
+**Not the same thing: `[trending] … research is not configured or enabled — candidates
+remain unassessed`.** That line comes from the owner-notification discoverer
+(`index.ts runTrendingDiscovery`, `discovery.ts trendingStatusLine`), not from Fomo. Its
+"research" is the LLM memecoin scout that ranks the trending, new and graduated pools. The
+scout runs only when the owner's `scoutEnabled` is on, and only when a model credential
+resolves (`llm.ts resolveLlm`: the chosen provider, an Anthropic key or a Groq key).
+Otherwise discovery uses the null scout, which picks nothing, and the status is
+`unavailable`. `scoutEnabled` defaults to off: on 2026-08-31 this per-tenant pass used up
+the shared house model allowance. A model that is configured but failing reads "research
+failed", not "not configured". So for an agent that logs the "not configured" line, either
+`scoutEnabled` is off or no model credential resolves in that child.
+
+- **What turns the line off.** The owner turns on `scoutEnabled`, with a model credential
+  that resolves. Note that `scoutEnabled` together with `scoutBudgetUsdg` also governs
+  real-money exploration buys (quarantine), so it is the owner's call, not a research
+  switch.
+- **What this change needs instead.** Fomo research for the Trencher's own candidates
+  needs `MERRYMEN_DECISION_RESEARCH_ACCOUNTS` to list the agent's smart account, plus
+  `fomoMonitoringEnabled` (or follow) on for the owner.
+- **The two are separate.** Turning on Fomo monitoring does not silence the `[trending]`
+  line, and turning on `scoutEnabled` does not route Fomo research.
+
 ## Selective following, sizing and lifecycle
 
 `following.ts`, `sizing.ts`, `lifecycle.ts`, wired in `worker/src/fomo-child.ts`.
@@ -773,6 +891,7 @@ Free 250k, Starter 2.5M, Builder 12.5M, Growth 37.5M, Scale 112.5M.
 | Stream | 0 | free on every plan |
 | Recovery after a reconnect | 125–1,250 | at most 10 pages |
 | Quick dossier refresh | ≈ 1,625 | 1 thesis page + alerts + stats |
+| Review candidates (allowlisted agents only) | ≈ 1,625 per coin per 30 min at most; ≤ 10 new coins per 10 min per agent | discovery class, under the background research cap; "Research for review candidates" |
 | Holdings question | 250 | |
 | Theses question | 1,250 per page | |
 | A tail | 0–250 to resolve the trader, at most 2 × 1,250 thesis reads | alerts come from the stored feed: 0 |
@@ -824,6 +943,7 @@ answers use one call on the existing house model.
 | `MERRYMEN_TG_THESES_MODEL=1` | worker children | turns ON the group model's paraphrase of a coin's theses (off by default, Milla 2026-10-08); unset, rooms hear the code-written digest only |
 | `MERRYMEN_FOMO_ENABLED=1` | web and orchestrator, same value | **hosted Fomo is opt-in: off unless exactly `1`.** Off, the orchestrator opens no Fomo pool, runs no `fomo_*` DDL, writes no `fomo.json` and spawns children without IPC; a hosted child is Fomo-on only with both the channel and this value, and off it runs no Fomo code (no Telegram research lane or classifier entries, nothing charged to the scout budget). The web builds no runtime, its chat answers as before, Settings shows no Fomo section and MCP lists no Fomo tool. Self-hosted: on unless `0` (worker and web alike); a self-hosted install never owes the scout budget anything for Fomo |
 | `MERRYMEN_FOMO_FOLLOW_LIVE` | worker children | allowlist of agents whose follow nominations may execute live (default nobody) |
+| `MERRYMEN_DECISION_RESEARCH_ACCOUNTS` | orchestrator (children inherit it) | smart accounts whose live fast-Trencher review gets extra research (docs/decision-research.md); for Fomo, the accounts whose review candidates are researched (default nobody). Research inputs only: never a cap, a grant or an execution permission |
 | `MERRYMEN_TG_GROUPS_FOMO=0` | worker children | turns off the Telegram group research lane |
 | `MERRYMEN_TG_GROUPS_ROUTER=0` | worker children | turns off the group router (docs/tg-groups.md "What a line wants"): lines no rule knew go to the persona |
 | `MERRYMEN_FOMO_TAILS=0` | orchestrator and worker children | turns tails off: `fomo_tail_trader` refuses (`tails-disabled`), no tail routing, no tails block in child files, no tail notices. Stored tails stay stored, can be stopped, and expire on their own |
