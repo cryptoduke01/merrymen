@@ -73,7 +73,7 @@ export function creditFloorMs(credits: number, share: number): number {
  * once per read.
  */
 export function proPacing(
-  env: { MERRYMEN_COINGECKO_PRO_SPACING_MS?: string; MERRYMEN_COINGECKO_MONTHLY_CREDITS?: string } = process.env,
+  env: Readonly<Record<string, string | undefined>> = process.env,
   lane: ProLane = "fleet",
 ): ProPacing {
   const notes: string[] = [];

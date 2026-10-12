@@ -25,6 +25,7 @@ import assert from "node:assert/strict";
 import { afterEach, beforeEach, describe, it } from "node:test";
 
 import { readCandles, __resetCandleCacheForTest } from "./read-candles";
+import { resetGeckoFeedsForTest } from "../../../worker/src/venues/geckoterminal";
 
 /** One pool, one window, so every case shares a cache key. */
 const POOL = "0xpool";
@@ -126,5 +127,78 @@ describe("a pool with genuinely no history is not an outage", () => {
     const read = await readCandles(POOL, TOKEN, "1h");
     assert.equal(read.state, "none");
     assert.equal(read.reason, null);
+  });
+});
+
+/**
+ * THE PRO KEY IS METERED, SO ITS CHART READS SHARE THE WEB PROCESS'S LANE.
+ *
+ * Without a key nothing here changes (the cases above run keyless). With one,
+ * each read is paced by the same knob as every other web Pro read, and one
+ * 429 holds the whole process back rather than only the pool that earned it.
+ */
+describe("chart reads on the Pro key are paced and share one cooldown", () => {
+  const KNOBS = ["MERRYMEN_COINGECKO_PRO_API_KEY", "MERRYMEN_FLEET_HOME", "MERRYMEN_COINGECKO_PRO_SPACING_MS", "MERRYMEN_COINGECKO_MONTHLY_CREDITS"] as const;
+  let saved: Record<string, string | undefined> = {};
+  let now = 0;
+  const pool = (n: string) => `0x${n.repeat(40)}`;
+  beforeEach(() => {
+    saved = Object.fromEntries(KNOBS.map((k) => [k, process.env[k]]));
+    for (const k of KNOBS) delete process.env[k];
+    process.env.MERRYMEN_COINGECKO_PRO_API_KEY = "private-web-key";
+    now = 1_000_000;
+    resetGeckoFeedsForTest({ now: () => now, sleep: async (ms) => { now += ms; } });
+  });
+  afterEach(() => {
+    resetGeckoFeedsForTest();
+    for (const k of KNOBS) if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k];
+  });
+
+  it("two pools' charts are spaced by the Pro pace (default 3000 ms, or the knob)", async () => {
+    const starts: number[] = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      assert.ok(String(input).startsWith("https://pro-api.coingecko.com/api/v3/onchain/networks/robinhood/pools/"));
+      assert.equal(new Headers(init?.headers).get("x-cg-pro-api-key"), "private-web-key");
+      starts.push(now);
+      return Response.json(okBody());
+    }) as typeof fetch;
+    assert.equal((await readCandles(pool("1"), TOKEN, "1h")).state, "ok");
+    assert.equal((await readCandles(pool("2"), TOKEN, "1h")).state, "ok");
+    assert.equal(starts[1]! - starts[0]!, 3000);
+
+    resetGeckoFeedsForTest({ now: () => now, sleep: async (ms) => { now += ms; } });
+    __resetCandleCacheForTest();
+    process.env.MERRYMEN_COINGECKO_PRO_SPACING_MS = "1200";
+    starts.length = 0;
+    await readCandles(pool("3"), TOKEN, "1h");
+    await readCandles(pool("4"), TOKEN, "1h");
+    assert.equal(starts[1]! - starts[0]!, 1200);
+  });
+
+  it("one Pro 429 holds back every pool in the process, not only the one that earned it", async () => {
+    const pro: string[] = [];
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.startsWith("https://pro-api.coingecko.com/")) { pro.push(url); return new Response("limited", { status: 429 }); }
+      return new Response("limited", { status: 429 });
+    }) as typeof fetch;
+    const first = await readCandles(pool("5"), TOKEN, "1h");
+    assert.equal(first.state, "refused");
+    assert.equal(first.reason, "rate-limited");
+    const other = await readCandles(pool("6"), TOKEN, "4h");
+    assert.equal(other.reason, "rate-limited");
+    assert.equal(pro.length, 1, "the second pool did not spend a Pro request into a known 429");
+  });
+
+  it("a Pro outage still charts from the public index, which never sees the key", async () => {
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      if (url.startsWith("https://pro-api.coingecko.com/")) return new Response("down", { status: 503 });
+      assert.equal(new Headers(init?.headers).get("x-cg-pro-api-key"), null);
+      return Response.json(okBody());
+    }) as typeof fetch;
+    const read = await readCandles(pool("7"), TOKEN, "1h");
+    assert.equal(read.state, "ok");
+    assert.equal(read.candles.length, 1);
   });
 });
