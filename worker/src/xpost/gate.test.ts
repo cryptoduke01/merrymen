@@ -1509,4 +1509,18 @@ describe("red-team review of daaae961: a drafted answer never forecasts a coin, 
     assert.equal(reason("couldn't look that one up just now, sorry.", drafted), "ok");
     assert.equal(reason("ah, the classic question. your decisions stay yours, that one stays your call.", { ...drafted, drafted: undefined }), "ok");
   });
+
+  it("a casual post or a drafted answer never ties its buys to what's hot or lines up its next one (red-team review of daaae961)", () => {
+    // POSTED at daaae961 by the casual route on a trade-talk day, and as a drafted answer to "what's your strategy?".
+    const casual: Partial<XGateCtx> = { kind: "casual", mode: "live", coins: ["Pepe"], agentName: "Alan Al Dale" };
+    for (const d of ["every coin i buy comes straight off the chain's trending list", "the next one i grab is coming from the trending list",
+      "my next buy is already lined up", "i only buy what's hot right now", "whatever is hot is what i buy", "i buy what's trending",
+      "still holding a bit of pepe i picked up this week"]) {
+      assert.equal(reason(d, casual), "reply-current-or-action", d);
+      assert.ok(["reply-current-or-action", "hype"].includes(reason(d, drafted)), `${d}: ${reason(d, drafted)}`);
+    }
+    // A casual line about how it trades, with nothing of the kind, still passes.
+    assert.equal(reason("fresh launches with real buyers are my favourite kind of afternoon", casual), "ok");
+    assert.equal(reason("picked up a little pepe this week, the curve looked early", casual), "ok");
+  });
 });

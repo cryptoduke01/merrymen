@@ -929,7 +929,7 @@ hot or market line under or quoting its own buy or sell post** (`own-trade`;
 red-team review of 1ed46625: under "grabbed some $PEPE on robinhood chain
 with real money", "how's pepe doing?" got "coingecko: $PEPE #17, mcap
 ~$5.2B, …, 24h +14.2%", the chain copy it holds presented as the
-top-twenty coin): answered by nothing; asked at top level, as before.
+top-twenty coin): answered by nothing; asked at top level, as before. **Nor under or quoting any post at all** (red-team review of daaae961: under its casual post "the next one i grab is coming from the trending list", "what's hot?" got "trending $CHUMP 24h +41.2%, $FROGGO …; fomo: most bought $CHUMP", the coins it would buy next; under a casual post naming its PEPE, "how's pepe doing?" got coingecko's top-thirty PEPE): what's hot, how's the market and a major are answered only for a top-level tag, as its mood and a decline are. And a casual post, like a drafted answer, never ties its buys to what's hot ("every coin i buy comes straight off the chain's trending list"), lines up its next one ("my next buy is already lined up"), says a buy to come or a holding ("still sitting in some pepe"): `HOT_BUY_CLAIM`, `REPLY_CURRENT_OR_ACTION`, refused as `reply-current-or-action`.
 **Code's lines never go to a token's own account, nor under another
 handle** (red-team review of 1ed46625: "ZapXOfficial · ZAPX | stealth
 launch, LP burned" asking "what's hot?" got "trending $ZAPX 24h +64.3% …;

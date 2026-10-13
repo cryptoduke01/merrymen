@@ -1181,6 +1181,31 @@ const REPLY_CURRENT_OR_ACTION = new RegExp([
   String.raw`\b(?:what|whatever|whichever|which|the\s+(?:next|first)\s+(?:one|coin|token)|the\s+one)\s+(?:i|we)\s+${FUTURE_VERB}\s+(?:next|tonight|tomorrow|later|soon)\b|\b(?:i|we)\s+${FUTURE_VERB}\s+next\b`,
   String.raw`\bnext\s+(?:one|coin|token|buy|pick|grab|snipe|ape|play|trade|bag|entry)\s+(?:i|we)\s+(?:\w+\s+)?${FUTURE_VERB}\b`,
 ].join("|"), "i");
+/**
+ * ITS BUYS TIED TO WHAT'S HOT, OR ITS NEXT ONE LINED UP (red-team review of
+ * daaae961, 2026-10-12). On a trade-talk day the casual route posted "every
+ * coin i buy comes straight off the chain's trending list", "the next one i
+ * grab is coming from the trending list" and "my next buy is already lined
+ * up", and a drafted answer "i only buy what's hot right now"; a reply
+ * "what's hot?" under any of them read code's trending list as the coins it
+ * buys next. Read in a casual post and in a drafted answer: a buy or a grab
+ * beside hot, trending, moving, pumping, gainers, the list or the index, in
+ * either order; and "my next buy", "my next pick", "next one i". Refused as
+ * reply-current-or-action, with what REPLY_CURRENT_OR_ACTION already holds
+ * (a buy to come, a holding), which a casual post is held to now too.
+ */
+const HOT_BUY_CLAIM = new RegExp([
+  String.raw`\b(?:buy|buys|buying|bought|grab|grabs|grabbing|grabbed|pick|picks|picking|picked|snipe|snipes|sniping|sniped|ape|apes|aping|aped|scoop\w*|get|gets|getting)\b[^.!?;]{0,40}?\b(?:hot|trending|trend|moving|movers?|pumping|gainers?|the\s+list|the\s+index)\b`,
+  String.raw`\b(?:hot|trending|moving|movers?|pumping|gainers?)\b[^.!?;]{0,40}?\b(?:i|we)\s+(?:\w+\s+)?(?:buy|buys|grab|grabs|pick|picks|snipe|snipes|ape|apes|scoop|scoops|get|gets)\b`,
+  String.raw`\b(?:my|our)\s+next\s+(?:buy|pick|grab|snipe|ape|play|trade|bag|entry|coin|token|one)\b|\bnext\s+(?:one|coin|token|buy|pick)\s+(?:i|we)\b`,
+].join("|"), "i");
+/** A holding said in other words: "still holding a bit of pepe", "still sitting in some pepe", "riding it" (red-team review of daaae961). */
+const HOLDING_SAID = /\b(?:still|currently|now)\s+(?:holding|hodling|hodl|in|sitting\s+(?:in|on)|riding|bagging|long)\b|\b(?:sitting\s+(?:in|on)|riding|holding\s+(?:onto|on\s+to))\s+(?:some|a\s+bit|a\s+little|my|the|it|this|that|these|those|a\s+bag)\b/i;
+export function hotBuyClaimed(text: unknown): boolean {
+  if (typeof text !== "string") return false;
+  const t = text.normalize("NFKC").replace(/[’‘]/g, "'");
+  return HOT_BUY_CLAIM.test(t) || HOLDING_SAID.test(t);
+}
 const REPLY_CURRENT_POSITION = /\b(?:(?:i|we)\s+(?:(?:still|currently|already|also)\s+)?(?:have|keep|maintain|carry)\s+(?:an?\s+)?(?:(?:open|small|little|long)\s+)?(?:positions?|stakes?|bags?|exposure|holdings)|(?:i(?:'ve| have)|we(?:'ve| have))\s+(?:still\s+|already\s+)?got\s+(?:an?\s+)?(?:positions?|stakes?|bags?|exposure|holdings)|(?:my|our)\s+(?:position|stake|bag|exposure|holding)\s+(?:is|remains|stays))\b/i;
 
 /**
@@ -2015,6 +2040,9 @@ function admitMasked(tidied: string, ctx: XGateCtx, baseGate: BaseGate, agentNam
   if (ctx.kind === "reply" && ctx.answer === true && ctx.drafted === true && deciderClaimed(own)) return refuse("decider-claim");
   if (ctx.kind === "reply" && ctx.answer === true && STOCK_PHRASE.test(own)) return refuse("stock-phrase");
   if (ctx.kind === "reply" && (REPLY_CURRENT_OR_ACTION.test(own) || REPLY_CURRENT_POSITION.test(own))) return refuse("reply-current-or-action");
+  // A casual post, and a drafted answer, never ties its buys to what's hot, nor lines up its next one; a casual post never says a buy to come or a holding either (HOT_BUY_CLAIM).
+  if (ctx.kind === "casual" && (REPLY_CURRENT_OR_ACTION.test(own) || REPLY_CURRENT_POSITION.test(own))) return refuse("reply-current-or-action");
+  if ((ctx.kind === "casual" || (ctx.kind === "reply" && ctx.answer === true && ctx.drafted === true)) && hotBuyClaimed(own)) return refuse("reply-current-or-action");
   // No amount, price or multiple in words the base gate's list misses (AMOUNT_WORDS).
   if (ctx.kind === "reply" && amountSaid(withoutReplyOptOut(own))) return refuse("quantity");
   if (shouts(own)) return refuse("caps");

@@ -1722,8 +1722,19 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // how's the market asked in a reply under or a quote of its own buy or
       // sell post (followUp "own-trade") is answered by nothing; asked at top
       // level, as before.
+      // NOR UNDER OR QUOTING ANY POST AT ALL (red-team review of daaae961,
+      // 2026-10-12). Under its own answer "i only buy what's hot right now",
+      // and under its casual post "the next one i grab is coming from the
+      // trending list", a reply "what's hot?" got "trending $CHUMP 24h +41.2%,
+      // $FROGGO …; fomo: most bought $CHUMP": read together, the coins it
+      // would buy next, from the real-money account, and what's hot drops the
+      // coins it already bought. And under a casual post that named its PEPE,
+      // "how's pepe doing?" got coingecko's top-thirty PEPE as the chain copy
+      // it holds. Code never reads the post a reply sits under: what's hot,
+      // how's the market and a major are answered only for a top-level tag,
+      // the rule its mood and a decline already keep (casualUnderPost).
       const marketKind = classified.kind === "major" || classified.kind === "hot" || classified.kind === "market";
-      const tradeMarket = candidate.followUp === "own-trade" && marketKind;
+      const tradeMarket = marketKind && !topLevelTag;
       // NO CODE LINE UNDER ANOTHER HANDLE, NOR A MARKET LINE TO A NAME CODE HAS
       // NOT READ (red-team review of 1ed46625, 2026-10-12). "@alanaidale
       // @ZapXOfficial are you bullish?" got "in a patient sort of way" under

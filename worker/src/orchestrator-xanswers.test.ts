@@ -4863,3 +4863,42 @@ test("no decline under advice about its own buying however \"you\" is written, a
   await w.step();
   assert.ok(oneOf(declineAnswers, "100000000000000119", w.sends[0]?.text), String(w.sends[0]?.text));
 });
+
+test("what's hot, how's the market and a major only for a top-level tag: never under its own answer or casual post that said what it buys (red-team review of daaae961, 2026-10-12)", async (t) => {
+  // POSTED at daaae961: under its answer "i only buy what's hot right now" to "what's your strategy?", and under its casual post "the next one i
+  // grab is coming from the trending list" (tweet 100000000000000110), a reply "@alanaidale what's hot?" got "… geckoterminal robinhood: trending
+  // $CHUMP 24h +41.2% vol ~$1.1M, $FROGGO 24h +12.5% vol ~$400k; fomo: most bought $CHUMP." Pools CHUMP and FROGGO, Fomo's crowd CHUMP.
+  const pools = () => [namedPool("CHUMP", 1, 41.2, 1.1e6), namedPool("FROGGO", 2, 12.5, 400_000)];
+  const env = { ...RESEARCH_ON, MERRYMEN_XPOST_FOMO: "1" };
+  for (const ask of ["what's hot?", "how's the market?", "how's eth doing?", "$PEPE today?"]) {
+    // (1) Under its own answer to "what's your strategy?".
+    const w = await world(t, { ...ALAN, env, research: hotWithFomo(pools(), ["CHUMP"]), answer: "i only buy what's hot right now. Say stop to opt out." });
+    w.setInbox([alanTag("100000000000000300", "what's your strategy?")]);
+    await w.step();
+    const strategy = (await w.answers())[0]!;
+    assert.equal(strategy.status, "posted");
+    assert.doesNotMatch(strategy.body, /hot|trending/, strategy.body);
+    w.setInbox([tag({ id: "100000000000000301", author_id: "444", conversation_id: "100000000000000300", created_at: new Date(NOW + 30_000).toISOString(),
+      referenced_tweets: [{ type: "replied_to", id: strategy.tweetId }], text: `@alanaidale ${ask}` })]);
+    await w.step(NOW + MIN);
+    assert.equal(w.sends.length, 1, `${ask}: ${JSON.stringify(w.sends.slice(1))}`);
+    // (2) Under, or quoting, its posted casual post.
+    for (const over of [{ conversation_id: "100000000000000110", referenced_tweets: [{ type: "replied_to", id: "100000000000000110" }] },
+      { conversation_id: "100000000000000302", referenced_tweets: [{ type: "quoted", id: "100000000000000110" }] }]) {
+      const c = await world(t, { ...ALAN, env, research: hotWithFomo(pools(), ["CHUMP"]) });
+      const id = await store.schedulePost(c.db, { tenant: TENANT, xUserId: "111", kind: "casual", dedupeKey: "casual:next", body: "the next one i grab is coming from the trending list",
+        nowMs: NOW - 2 * HOUR, dueAtMs: NOW - 2 * HOUR });
+      await store.claimPost(c.db, id!, NOW - HOUR);
+      await store.markPosted(c.db, id!, "100000000000000110", NOW - HOUR);
+      c.setInbox([tag({ id: "100000000000000302", author_id: "445", text: `@alanaidale ${ask}`, ...over })]);
+      await c.step();
+      assert.deepEqual(c.sends, [], `${ask} ${JSON.stringify(over)}`);
+      assert.deepEqual(await c.answers(), [], `${ask} ${JSON.stringify(over)}`);
+    }
+  }
+  // Asked at top level, what's hot is the owner's policy: code's words and the line of coins.
+  const w = await world(t, { ...ALAN, env, research: hotWithFomo(pools(), ["CHUMP"]) });
+  w.setInbox([alanTag("100000000000000303", "what's hot?")]);
+  await w.step();
+  assert.match(String(w.sends[0]?.text), /trending \$CHUMP 24h \+41\.2%/);
+});
