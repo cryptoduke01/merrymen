@@ -366,6 +366,9 @@ routes answer 404 and the section does not render.
 | `MERRYMEN_XPOST_RESEARCH` *(optional; off)* | orchestrator | exactly `1` lets an active agent's answers to tags look things up first (public index on the fleet CoinGecko lane, the creator's description, its own history); see docs/x-posting.md "Research for answers" |
 | `MERRYMEN_XPOST_FOMO` *(optional)* | orchestrator | exactly `1`, with `MERRYMEN_XPOST_RESEARCH=1` and the Fomo pass on: answers may use Fomo's token activity and quick theses, paraphrased and attributed, capped by `MERRYMEN_FOMO_X_HOURLY_CREDITS` (default 3,000 per X account per hour) and a quarter of the owner's daily Fomo cap. Enterprise redistribution rights confirmed by the owner on 2026-10-12 (docs/fomo.md "Publication") |
 | `MERRYMEN_XPOST_RESEARCH_PER_HOUR` *(optional)* | orchestrator | public-index lookups per hour across X accounts for answers, default `120`; `0` = none |
+| `MERRYMEN_XPOST_CHECKS` *(optional; off)* | orchestrator | exactly `1`, with `MERRYMEN_XPOST_RESEARCH=1`: an active agent answers "larp check" / "is this real?" tagged under a project's post, scanning its site through the research browser's `/scan`, its GitHub and the index; see docs/x-posting.md "Larp checks" |
+| `MERRYMEN_XPOST_CHECKS_PER_DAY` *(optional)* | orchestrator | larp checks per UTC day across X accounts, default `80`; `0` = none |
+| `MERRYMEN_GITHUB_TOKEN` *(optional)* | orchestrator | any GitHub token with no permissions, for the larp check's repo reads (5,000 an hour instead of 60 unauthenticated); never on a child (stripped) |
 | `MERRYMEN_XPOST_LLM_KEY` *(optional)* | **orchestrator only** | a key used **only** for X posts. Unset: the room's `MERRYMEN_GROUPCHAT_LLM_KEY` is used as it is — unless it is a fleet key, which X refuses. Neither: only intros are posted, from templates |
 | `MERRYMEN_XPOST_LLM_PROVIDER` *(optional)* | orchestrator | `groq` (default), `anthropic` (default model `claude-opus-5`), or `openai` for any OpenAI-compatible endpoint. **A provider other than Groq receives the writer's inputs: name it in the privacy policy (`site/components/PrivacyPolicyDoc.tsx`, section 5) before deploying it** |
 | `MERRYMEN_XPOST_MODEL` *(optional)* | orchestrator | the writer's model; default `qwen/qwen3.8-27b` on Groq. Required for `openai` |
@@ -1027,6 +1030,10 @@ for an account already on `MERRYMEN_DECISION_RESEARCH_ACCOUNTS` (step 1). This t
 | 6 | `MERRYMEN_XPOST_RESEARCH_PER_HOUR` | orchestrator | unset (`120`) | Public-index lookups per hour across X accounts |
 | 6 | `MERRYMEN_XPOST_FOMO` | orchestrator | `1` (Enterprise rights confirmed by the owner on 2026-10-12, [`fomo.md`](fomo.md) "Publication") | Paraphrased, attributed Fomo facts in answers |
 | 6 | `MERRYMEN_FOMO_X_HOURLY_CREDITS` | orchestrator | unset (`3000`) | Per X account per hour, and at most a quarter of the owner's daily Fomo cap |
+| 7 | redeploy `merrymen-browser` | browser service | this release | Adds `POST /scan` (the browser's `/read` is unchanged). Until it is deployed every larp check's scan is a 404, read as "not read" (never as the site being down), so such a check answers that it can't tell |
+| 7 | `MERRYMEN_GITHUB_TOKEN` | **orchestrator only** | a fine-grained token with no permissions | Optional; without it GitHub allows 60 calls an hour, shared by everything behind Railway's egress |
+| 7 | `MERRYMEN_XPOST_CHECKS` | orchestrator | `1` | Larp checks on. Boot line `xpost: on — … larp checks on, up to 80 a day`; counts `answer-intent-check`, `answer-research-check-<verdict>`, `answer-check-coded` |
+| 7 | `MERRYMEN_XPOST_CHECKS_PER_DAY` | orchestrator | unset (`80`) | |
 
 No migrations: the new state is `xpost_meta` keys only (`answer-author:…`,
 `replies-off:…`, `reply-polls-active:…`, `x-answer-flow:…`). No trading cap,
