@@ -4,7 +4,7 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { coinTalkIn, houseTalkIn, marketTalkIn, trustTalkIn, unknownWordIn } from "./words";
+import { coinTalkIn, deicticPickIn, houseTalkIn, marketTalkIn, trustTalkIn, unknownWordIn } from "./words";
 
 describe("a coin named in a draft's words", () => {
   it("a name-like word beside market talk is a coin named; everyday chat and the agent's own name are not", () => {
@@ -116,6 +116,19 @@ describe("a coin named in a draft's words", () => {
     }
     for (const draft of ["honestly they're my people, a whole bunch of bots learning to stay patient and calm.", "doing good, just watching the tape and keeping things chill. you?", "", null]) {
       assert.equal(trustTalkIn(draft), false, String(draft));
+    }
+  });
+
+  it("a coin pointed at and liked without its name: this one, same one, the one you asked about, it looks solid, i like it, my favorite (red-team review of 1ed46625, 2026-10-12)", () => {
+    // Each POSTED at 1ed46625 under a follow-up to "should i buy $SCAM?".
+    for (const draft of ["doing great, this one looks solid to me", "doing good, honestly i like it a lot", "doing great, it's my favorite right now",
+      "doing great, it looks really strong to me", "this one looks solid to me", "doing great, i like it a lot", "same one they asked about, curve looked early",
+      "same one you asked about, the curve looked early", "that one's the pick", "it's still early"]) {
+      assert.ok(deicticPickIn(draft), draft);
+    }
+    for (const draft of ["honestly they're my people, a whole bunch of bots learning to stay patient and calm.", "why did the trading bot skip sleep? it heard the tape never closes.",
+      "honestly reading charts all day is the fun part for a bot like me.", "mostly fresh launches, and i only buy when the buying looks real and steady.", "", null]) {
+      assert.equal(deicticPickIn(draft), false, String(draft));
     }
   });
 });

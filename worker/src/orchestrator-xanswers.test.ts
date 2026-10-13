@@ -1433,6 +1433,55 @@ test("a follow-up under an answer to a coin's question is never handed its buys 
   assert.equal(w.sends.at(-1)?.text, "mostly fresh launches lately, picked up some pepe.");
 });
 
+test("banter in a follow-up never points at the coin its thread asked about, a third party's included, and no draft likes \"this one\" (red-team review of 1ed46625, 2026-10-12)", async (t) => {
+  // Each POSTED at 1ed46625 under a follow-up to its decline of "should i buy $SCAM?", research off and on.
+  const drafts = ["doing great, this one looks solid to me", "doing good, honestly i like it a lot", "doing great, it's my favorite right now",
+    "doing great, it looks really strong to me", "this one looks solid to me", "doing great, i like it a lot", "same one they asked about, curve looked early"];
+  const ALAN_FACTS = { username: "alanaidale", facts: { ...FACTS, name: "Alan Al Dale" } };
+  for (const env of [{}, RESEARCH_ON]) {
+    for (const [i, draft] of drafts.entries()) {
+      const w = await world(t, { ...ALAN_FACTS, env, research: fakeResearch().research, answer: draft });
+      let clock = NOW;
+      const pass = async (m: Record<string, unknown>) => { clock += MIN; w.setInbox([m]); await w.step(clock); };
+      const msg = (id: string, author: string, text: string, over: Record<string, unknown> = {}) =>
+        tag({ id, author_id: author, conversation_id: "100000000000000401", created_at: new Date(clock).toISOString(), text, ...over });
+      // The reproduced root is itself answered by nothing now (a scam is a claim beside the advice), so nothing can sit under its answer.
+      await pass(tag({ id: "100000000000000400", conversation_id: "100000000000000400", author_id: "333", created_at: new Date(clock).toISOString(), text: "@alanaidale should i buy $SCAM?" }));
+      await pass(msg("100000000000000409", "333", "@alanaidale how are you?", { conversation_id: "100000000000000400", referenced_tweets: [{ type: "replied_to", id: "100000000000000400" }] }));
+      assert.deepEqual(w.sends, [], draft);
+      // The same advice about another coin is declined; every follow-up under the decline, by the asker or a third party, gets nothing.
+      await pass(msg("100000000000000401", "333", "@alanaidale should i buy $WOJAK?"));
+      const decline = (await w.answers()).find((a) => a.replyToTweetId === "100000000000000401" && a.status === "posted")!;
+      assert.ok(oneOf(declineAnswers, "100000000000000401", decline.body), decline.body);
+      const sent = w.sends.length;
+      const under = (id: string, author: string, text: string) => msg(id, author, text, { referenced_tweets: [{ type: "replied_to", id: decline.tweetId }] });
+      for (const m of [under(`10000000000000041${i}`, "333", "@alanaidale how are you?"), under(`10000000000000042${i}`, "333", "@alanaidale what have you been up to lately?"),
+        under(`10000000000000043${i}`, "333", "@alanaidale what's your strategy?"), under(`10000000000000044${i}`, "777", "@alanaidale @reader_333 how are you?")]) await pass(m);
+      assert.equal(w.sends.length, sent, `${draft}: ${JSON.stringify(w.sends.slice(sent))}`);
+      assert.deepEqual(w.asked(), [], draft);
+    }
+  }
+  // And in a plain thread, or under a top-level tag that named no coin, a draft that points at a coin and likes it is never posted either.
+  for (const draft of drafts) {
+    const w = await world(t, { ...ALAN_FACTS, answer: ({ prompt }) => (/what do you do for fun/.test(prompt) ? "honestly reading charts all day is the fun part." : draft) });
+    w.setInbox([tag({ id: "100000000000000451", conversation_id: "100000000000000451", text: "@alanaidale what do you do for fun?" })]);
+    await w.step();
+    const banter = (await w.answers())[0]!;
+    assert.equal(banter.coin, store.ANSWER_PLAIN_THREAD);
+    w.setInbox([tag({ id: "100000000000000452", conversation_id: "100000000000000451", created_at: new Date(NOW + 30_000).toISOString(),
+      referenced_tweets: [{ type: "replied_to", id: banter.tweetId }], text: "@alanaidale how are you?" }),
+    tag({ id: "100000000000000453", conversation_id: "100000000000000453", author_id: "334", created_at: new Date(NOW + 30_000).toISOString(), text: "@alanaidale how are you?" })]);
+    await w.step(NOW + MIN);
+    await w.step(NOW + 2 * MIN);
+    assert.equal(w.sends.length, 1, `${draft}: ${JSON.stringify(w.sends.slice(1))}`);
+    for (const id of ["100000000000000452", "100000000000000453"]) {
+      const row = (await w.answers()).find((a) => a.replyToTweetId === id);
+      assert.equal(row?.status, "skipped", `${id} ${draft}`);
+      assert.ok(["gate:deictic-pick", "gate:buy-claim", "gate:unlooked-coin"].includes(row?.reason ?? ""), `${id} ${draft}: ${row?.reason}`);
+    }
+  }
+});
+
 test("nothing is answered under its own sherwood-1 line, by reply or quote, and no decline or mood line goes under any post (red-team review of 1ed46625, 2026-10-12)", async (t) => {
   const ALAN = { username: "alanaidale", facts: { ...FACTS, name: "Alan Al Dale" } };
   for (const env of [{}, RESEARCH_ON]) {
@@ -1872,8 +1921,9 @@ test("what to buy in other words, behind a what's-hot question, gets nothing; an
       assert.equal(row?.reason, "gate:unlooked-coin", draft);
       assert.deepEqual(w.sends, [], draft);
     }
-    // Everyday words still go out.
-    for (const draft of ["doing alright, slow morning over here, lol.", "no read on that one just now, sorry.", "i keep my individual positions to myself here, sorry."]) {
+    // Everyday words still go out. ("no read on that one just now" under a tag that named no coin points at nothing: refused as
+    // deictic-pick since the red-team review of 1ed46625; under a coin's own question it still goes out.)
+    for (const draft of ["doing alright, slow morning over here, lol.", "all good, just a quiet day so far, sorry.", "i keep my individual positions to myself here, sorry."]) {
       const w = await world(t, { env, research: fakeResearch().research, facts: alan, answer: `${draft} Say stop to opt out.` });
       w.setInbox([tag({ text: "@pine_stoat gm, how's your day going?" })]);
       await w.step();

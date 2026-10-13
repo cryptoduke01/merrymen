@@ -917,7 +917,14 @@ one answered), `own-trade` (its own buy or sell post) or `closed` (anything
 else: a decline, its mood, a market line, a coin's answer, an answer told its
 buys, a comment reply, any answer from before the mark). Under a closed one
 only a greeting is answered (code's hello): no draft, no buys, no exact path,
-no code line.
+no code line. And no draft in a plain follow-up, or under a top-level tag
+that named no coin, points at a coin and likes it without its name ("this
+one", "same one", "the one you asked about", "it looks solid", "i like it a
+lot", "it's my favorite": `deicticPickIn`, refused as `deictic-pick` with no
+fallback; red-team review of 1ed46625: "doing great, this one looks solid to
+me" went up under a follow-up to "should i buy $SCAM?", a third party's
+included). Under its own buy post the coin is its own public buy, and a
+coin's own question may still say "no read on that one".
 
 **Limits.** `ANSWERS_PER_AUTHOR` is six a person a rolling day (from two) and
 `ANSWERS_PER_DAY` sixty a day per X account (from 24), so a person can

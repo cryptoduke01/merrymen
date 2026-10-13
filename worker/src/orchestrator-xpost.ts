@@ -52,7 +52,7 @@ import { admitXPost, formFixed, merrymenMentioned, moneySaid, namedIn, tickerRef
 import { ACTIVE_CADENCE, ANSWER_GAP_MS, ANSWER_STALE_MS, ANSWERS_PER_DAY, REPLY_STALE_MS, STANDARD_CADENCE, coinOf, hash32, introState, planPosts, replyDueAt, sendDecision, type PlanCadence, type PlanClock, type PlanIntent } from "./xpost/planner";
 import { APP_PAUSE_KEY, APP_PAUSE_MS, CREDITS_PAUSE_MS, PAUSE_KEY, readReplyComments, sendOne, type SendOutcome } from "./xpost/sender";
 import { isAnswerOptOut, isReplyOptOut, replyCandidate, tagCandidate, withoutReplyOptOut } from "./xpost/replies";
-import { asksAboutACoin, coinTalkIn, houseTalkIn, marketTalkIn, nameLikeWords, textWords, trustTalkIn, unknownWordIn } from "./xpost/words";
+import { asksAboutACoin, coinTalkIn, deicticPickIn, houseTalkIn, marketTalkIn, nameLikeWords, textWords, trustTalkIn, unknownWordIn } from "./xpost/words";
 import { activeTenantsOf, repliesAllowedFor, repliesScopeOf } from "./xpost/scope";
 import {
   ANSWER_LOOKED_UP,
@@ -1984,6 +1984,19 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // speaks of a scam, a rug, a fake, trust, honesty, legitimacy or the like
       // (xpost/words.ts trustTalkIn) is not posted, and gets no fallback.
       const untrusted = !coded && verdict?.ok === true && !handed && trustTalkIn(withoutReplyOptOut(verdict.text));
+      // NOR A COIN POINTED AT AND LIKED WITHOUT ITS NAME (red-team review of
+      // 1ed46625, 2026-10-12): under "should i buy $SCAM?", "doing great, this
+      // one looks solid to me", "doing good, honestly i like it a lot" and "same
+      // one they asked about, curve looked early" read as Alan recommending
+      // the coin asked about one post up. A drafted answer in a plain follow-up,
+      // or under a top-level tag that named no coin (where "this one" has
+      // nothing of the asker's to point at), that says "this one", "same one",
+      // "the one you asked about", or calls "it" solid, early or its favourite
+      // (xpost/words.ts deicticPickIn) is not posted. Under its own buy post the
+      // coin is its own public buy, and a coin's own question may say "no read
+      // on that one".
+      const pointsFree = candidate.followUp === "plain" || (candidate.followUp === undefined && !coinNamed);
+      const pointed = !coded && verdict?.ok === true && pointsFree && deicticPickIn(withoutReplyOptOut(verdict.text));
       // CHAT IS NEVER SILENCE BY DEFAULT (the owner's ask, 2026-10-12): a chat
       // draft refused only for how it was put (CHAT_FALLBACK_REASONS: a
       // repeat, its length, a stock deflection, a model's note, its
@@ -2020,10 +2033,10 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         const v = gate(body, false, true);
         if (!v.ok || sherwoodNamed(v.text) || sherwoodMentioned(v.text)) return false;
         const words = withoutReplyOptOut(v.text);
-        if (!handed && trustTalkIn(words)) return false;
+        if ((!handed && trustTalkIn(words)) || (pointsFree && deicticPickIn(words))) return false;
         return handed || told || (!coinTalkIn(words, f.name) && !unknownWordIn(words, f.name) && !marketTalkIn(words) && !houseTalkIn(words));
       };
-      const drafted = verdict?.ok === true && !postsName && !unlookedCoin && !untrusted ? verdict.text : null;
+      const drafted = verdict?.ok === true && !postsName && !unlookedCoin && !untrusted && !pointed ? verdict.text : null;
       const benignRefusal = raw !== null && !claimed && !named && !unlooked && verdict !== null && !verdict.ok && CHAT_FALLBACK_REASONS.has(verdict.reason) && saidPasses(raw);
       // Never under a name the house would never show (unshowableName: a slur, a political coin).
       // NOR UNDER A TAG THAT NAMES A COIN IN ANY WORDS (red-team 2026-10-12):
@@ -2102,7 +2115,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         replyToTweetId: comment.id, replyRootTweetId: comment.id, replyAuthorId: comment.authorId,
         status: body ? "scheduled" : "skipped",
         reason: body ? null : claimed ? "gate:sherwood-claim" : named || postsName ? "gate:sherwood-drafted" : unlooked ? "gate:unlooked-source"
-          : unlookedCoin ? "gate:unlooked-coin" : untrusted ? "gate:trust-talk" : verdict && !verdict.ok ? `gate:${verdict.reason}` : "no-draft",
+          : unlookedCoin ? "gate:unlooked-coin" : untrusted ? "gate:trust-talk" : pointed ? "gate:deictic-pick" : verdict && !verdict.ok ? `gate:${verdict.reason}` : "no-draft",
       });
       if (id !== null && greeting && body) bump("answered-greeting");
       return id === null ? null : { body, lookedUp };

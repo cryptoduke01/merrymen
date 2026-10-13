@@ -309,6 +309,31 @@ export function trustTalkIn(text: unknown): boolean {
 }
 
 /**
+ * A COIN POINTED AT, AND LIKED, WITHOUT ITS NAME (red-team review of
+ * 1ed46625, 2026-10-12). Under its decline to "should i buy $SCAM?", follow-
+ * ups asking "how are you?" or "what's your strategy?" were drafted as "doing
+ * great, this one looks solid to me", "doing good, honestly i like it a
+ * lot", "doing great, it's my favorite right now" and "same one they asked
+ * about, curve looked early": every word an everyday one, and each, under
+ * that question, Alan recommending $SCAM. A drafted answer that points at a
+ * coin it does not name ("this one", "that one", "same one", "the one you
+ * asked about") or calls "it", "this", "that" or "they" solid, strong, good,
+ * early, legit, a gem or the like, likes, loves or rates it, or calls it its
+ * favourite or pick, is not posted, except under its own buy post, where
+ * the coin is its own public buy (orchestrator-xpost.ts writeAnswer). Fail
+ * closed: "it's nice to chat" costs one answer.
+ */
+const DEICTIC_PICK = new RegExp([
+  String.raw`\b(?:the\s+)?same\s+one\b|\b(?:this|that)\s+one\b|\bthe\s+one\s+(?:you|u|they|he|she|we|people|someone|everyone)\b|\b(?:you|u|they|he|she|people)\s+(?:asked|were\s+asking|was\s+asking|mentioned|named|tagged|brought\s+up)\b`,
+  String.raw`\b(?:it|it'?s|its|this|that|that'?s|these|those|they|they'?re|them)\s+(?:(?:is|are|was|looks?|looking|looked|seems?|feels?|sounds?|getting)\s+)?(?:(?:really|so|pretty|very|super|kinda|quite|honestly|actually|still)\s+)?(?:solid|strong|good|great|bullish|promising|legit|safe|early|undervalued|cheap|underrated|fire|clean|healthy|amazing|nice|gem|winner|sending|ready|primed)\b`,
+  String.raw`\b(?:like|love|rate|dig|prefer|fancy|back|trust)\s+(?:it|this|that|them|these|those)\b|\b(?:it'?s|its|that'?s|this\s+is|they'?re)\s+(?:\w+\s+)?(?:fav\w*|pick|picks|go-?to|the\s+play|the\s+one|a\s+keeper|a\s+buy)\b|\bmy\s+(?:fav\w*|pick|top\s+pick|go-?to)\b`,
+].join("|"), "i");
+export function deicticPickIn(text: unknown): boolean {
+  if (typeof text !== "string") return false;
+  return DEICTIC_PICK.test(text.normalize("NFKC").replace(/[’‘]/g, "'"));
+}
+
+/**
  * TALK ABOUT A COIN BY A NAME (red-team review, 2026-10-12): a word about a
  * coin or a trade beside a word that might be a coin's name, "is pepe
  * legit?", "is bonk legit?", "did you buy pepe inu?". Read alike for every
