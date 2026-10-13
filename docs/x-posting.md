@@ -155,7 +155,10 @@ refresher; that is not built.
 
 merrymen is a **confidential** X client (`MERRYMEN_X_CLIENT_ID`,
 `MERRYMEN_X_CLIENT_SECRET`). Scopes: `tweet.read tweet.write users.read
-offline.access`. Privy's X sign-in is not used for posting: Privy hands provider
+offline.access media.write`. `media.write` (2026-10-13) is only for the profit
+card on an active owner's sale ("The profit card on a sale" below); a grant
+made before it lacks it, and those sales post as text until the owner
+reconnects. Privy's X sign-in is not used for posting: Privy hands provider
 tokens only to the browser, sets scopes app-wide (so every sign-in would ask to
 post), and does not refresh them.
 
@@ -1676,6 +1679,50 @@ The private `agentBrief` never enters an X prompt.
   or estimated cost basis means neutral sale commentary with no result claim.
   There is no claim of net profitability or of selling early; those require
   evidence this path does not have.
+
+### The profit card on a sale (2026-10-13)
+
+A win nobody sees is a win nobody notices: the owner's teammate asked for the
+profit card to be shared when the agent makes a profit. So a **profitable**
+completed sale by one of the operator's own
+agents (`MERRYMEN_XPOST_ACTIVE_TENANTS`, today Alan Al Dale only) carries its
+P&L card as an image: the same house card the owner's desk downloads
+(`/api/pnl`) and Telegram sends, drawn by `worker/src/pnl-card.ts` on
+`pnl/PNL.jpg` (in the image at `/app/pnl/PNL.jpg`, resolved from the module,
+never from the working directory).
+
+- **Which sales.** Only an active owner's, only one the send-time check has
+  just vouched for, with a measured gross **profit** on evidenced cost and its
+  gain figure on the post. Never a loss, a flat or an unknown result, never
+  paper, never another owner's agent. The card's figures are that sale's own
+  receipt-backed fill (`readSaleCard` in `orchestrator-xpost-results.ts`, from
+  the same read as the post's check), under the one live-sale rule the desk
+  uses (`liveSellCard`: landed live swap or curve sell, measured proceeds and
+  P&L, vouched proceeds and basis, a printable coin name, not dust). The model
+  never sees a figure or the card.
+- **When.** At send time, after the claim and every send-time check, right
+  before the post: drawn, uploaded as the owner (`POST /2/media/upload`,
+  base64 JSON, `media_category: "tweet_image"`, under X's 5 MB; the card is
+  about 1.2 MB), and named on the post (`media.media_ids`). Nothing is stored:
+  no image bytes and no flag in the database.
+- **Bounded, once, and never in the way.** Drawing and uploading share one
+  eight-second budget (`CARD_BUDGET_MS`) and happen at most once per send; a
+  401 retry of the post reuses the media id or goes without. A missing
+  `media.write`, a card the ledger no longer vouches for, a draw that fails
+  or runs out of time, and any upload refusal (401, 403, 429, 5xx, a timeout,
+  an unreadable answer) all post the same sale as text. An upload is not a
+  post, so it changes nothing about rule 4's at-most-once send.
+- **Reconnect once.** A grant made before `media.write` was asked for posts
+  as text and logs, once per owner per orchestrator run,
+  `xpost: <tenant>'s X grant has no media.write — reconnect X to attach
+  profit cards; …`. The web offers Reconnect only for a connection X stopped
+  honouring, so: Disconnect in Settings (it cancels what waits under Coming up
+  and resets the post choices), Connect X account as the same account, turn
+  posting on again through the warning and re-check the choices. For an
+  active owner the orchestrator records reply consent again once posting is
+  on. Until then the sales post as text; nothing waits on the reconnect.
+- **Counts** in the pass line: `card-attached`, `card-upload-failed`,
+  `card-draw-failed`, `card-timeout`. Nothing counted means no card was wanted.
 
 The complete post, including deterministic suffixes, must fit X's weighted
 character limit. Pending disclosures are revalidated against current consent,
