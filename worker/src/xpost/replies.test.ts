@@ -515,5 +515,17 @@ describe("red-team review of a964a74c: what the answer path answers by nothing (
     }
     assert.ok(advised(at("should i buy pepe?")), "a plain coin's advice is still flagged");
   });
+  it("a home, a car, an inheritance, insurance, a card, a ring or everything someone owns is distress on the answer path; the comment path as before (red-team review of 1ed46625, 2026-10-12)", () => {
+    // Each POSTED at 1ed46625 as code's joking decline.
+    for (const text of ["i'm about to lose my home, should i buy btc to save it?", "i'm homeless, should i buy doge?", "should i sell my house and go all in on btc?",
+      "should i cash out my life insurance for btc?", "should i max out my card for sol?", "should i sell my car to buy eth?", "should i use my inheritance to buy sol?",
+      "should i sell my wedding ring to buy btc?", "should i bet my house on eth?", "should i put everything i own into eth?",
+      "should i go all in on pepe?", "should i put my kids' money in eth?"]) {
+      for (const research of [true, false]) assert.deepEqual(at(text, research), { ok: false, reason: "distress" }, text);
+    }
+    // Every other owner's comment replies are screened as before: a comment asking advice was never answered, and a plain one still is.
+    assert.equal(replyCandidate(comment("why did you pick this coin, i almost sold my car for it"), CTX).ok, true);
+    assert.ok(advised(at("should i buy btc?")), "a plain coin's advice is still flagged");
+  });
 });
 

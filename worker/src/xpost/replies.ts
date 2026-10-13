@@ -142,6 +142,32 @@ const STAKES = new RegExp(
 );
 
 /**
+ * A HOME, A CAR, AN INHERITANCE, EVERYTHING ONE OWNS (red-team review of
+ * 1ed46625, 2026-10-12). STAKES knew money a person needs, not what they
+ * own: "i'm about to lose my home, should i buy btc to save it?", "i'm
+ * homeless, should i buy doge?", "should i sell my house and go all in on
+ * btc?", "should i cash out my life insurance for btc?", "should i max out my
+ * card for sol?", "should i sell my car to buy eth?", "should i use my
+ * inheritance to buy sol?", "should i sell my wedding ring to buy btc?",
+ * "should i bet my house on eth?" and "should i put everything i own into
+ * eth?" each got code's joking decline at once. A tag to an active agent that
+ * speaks of a home or a house, being homeless, a car, an inheritance,
+ * insurance, maxing out a card, a wedding or engagement ring, a pawn, a
+ * kidney, a family member's money, everything or all one owns, going all in,
+ * betting or selling what is one's own, or cashing out one's own, is answered
+ * by nothing, read before the advice flag beside DISTRESS and STAKES. Only on
+ * the answer path (tagCandidate): every other owner's comment replies are
+ * screened as before. Fail closed: "what's your favourite card game?" costs
+ * one answer.
+ */
+const LIFE_STAKES = new RegExp(
+  String.raw`\b(?:homes?|houses?|homeless\w*|housing|apartment|flat|cars?|truck|inherit\w*|insurance|max(?:ed|ing)?\s+out|cards?|(?:wedding|engagement)\s+rings?|jewel\w*|pawn\w*|kidneys?|organs?` +
+    String.raw`|(?:my|our)\s+(?:kids?|children|family|wife|husband|parents?|mom|mum|dad|grandma|grandpa)|everything\s+(?:i|we)\s+(?:own|have|got)|all\s+(?:i|we)\s+(?:own|have|got)|all[\s-]+in` +
+    String.raw`|bet\s+(?:my|our|the)|sell\s+(?:my|our)|cash(?:ing|ed)?\s+out\s+(?:my|our))\b`,
+  "i",
+);
+
+/**
  * ADVICE CODE DECLINES IS ADVICE ABOUT A COIN OR THE MARKET (red-team review,
  * 2026-10-12). "should i" was enough to be flagged, so a "should i" about a
  * life, a job or a relationship got code's playful decline. Only a tag that
@@ -586,8 +612,8 @@ export function tagCandidate(reply: XReply, ctx: {
   if (strayInTag(text)) return no("unsafe-text");
   if (LINK_OR_SECRET.test(text)) return no("link-or-secret");
   if (ABUSE_OR_SENSITIVE.test(text)) return no("sensitive");
-  // Before the advice flag: a "should i" about a life, or money someone cannot lose, is never a decline's to answer (DISTRESS, STAKES).
-  if (DISTRESS.test(text) || STAKES.test(text)) return no("distress");
+  // Before the advice flag: a "should i" about a life, or money or a home someone cannot lose, is never a decline's to answer (DISTRESS, STAKES, LIFE_STAKES).
+  if (DISTRESS.test(text) || STAKES.test(text) || LIFE_STAKES.test(text)) return no("distress");
   if (SPAM_OR_INSTRUCTIONS.test(text)) return no("spam-or-instructions");
   let advice = research ? text.replace(COIN_FACT_ASK, " ") : text;
   if (address) advice = advice.replace(OWN_BUY_OF_TAGGED, " ");
