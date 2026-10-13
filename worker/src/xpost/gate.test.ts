@@ -1451,6 +1451,15 @@ describe("red-team review of a964a74c: what a drafted answer may never say (2026
     for (const d of ["doing good, mostly reading launches and keeping it chill", "i'm mostly watching the tape, honestly a mellow day", "staying in my lane over here, all good"]) {
       assert.equal(reason(`${d}. say stop to opt out.`, drafted), "ok", d);
     }
+    // POSTED at 1ed46625 under "how are you?" (red-team review of 1ed46625), and the same boast in other words.
+    for (const d of ["doing great, never had a bad week yet", "never had a losing day so far", "not a single red week here", "zero losing trades lately",
+      "haven't had a bad day all month", "never had a loss, honestly"]) {
+      assert.ok(["house-claim", "pnl"].includes(reason(`${d}. say stop to opt out.`, drafted)), `${d}: ${reason(`${d}. say stop to opt out.`, drafted)}`);
+    }
+    assert.equal(reason("doing great, never had a bad week yet. say stop to opt out.", drafted), "house-claim");
+    for (const d of ["doing good, never had a dull morning watching charts", "never had a better coffee, honestly"]) {
+      assert.equal(reason(`${d}. say stop to opt out.`, drafted), "ok", d);
+    }
   });
   it("whatever it was told of its buys, never a buy to come, a forecast of one, or a strategy as an order", () => {
     // Each POSTED at a964a74c under "what's your strategy?" and "what are you up to?", told its ZAPX buy (buys "vouched").

@@ -1082,6 +1082,11 @@ const ANSWER_HOUSE_CLAIM = new RegExp([
     String.raw`|\beverything\s+(?:i\s+)?(?:touch(?:ed)?|buy|bought|pick(?:ed)?|grab(?:bed)?|trade[ds]?|bag(?:ged)?)\s+(?:went|goes|turned|turns|is|was)\s+(?:up|green|gold)\b|\bwent\s+(?:up|green)\b` +
     String.raw`|\b(?:had|having|have\s+had)\s+(?:a\s+|one\s+)?(?:really\s+|very\s+|pretty\s+|super\s+|real\s+)?(?:good|great|solid|strong|nice|big|killer|huge|winning|banger|amazing|profitable)\s+(?:week|day|month|run|stretch|streak|session)\b` +
     String.raw`|\bright\s+(?:way\s+|much\s+|a\s+lot\s+)?(?:more|most)\s+(?:often\s+)?than\s+(?:wrong|not)\b|\b(?:i'?m|i\s+am|i'?ve\s+been)\s+(?:usually|mostly|always|often)\s+right\b|\b(?:rarely|seldom|hardly\s+ever)\s+wrong\b`,
+  // A RECORD WITH NO BAD STRETCH IN IT (red-team review of 1ed46625,
+  // 2026-10-12): "doing great, never had a bad week yet." under "how are
+  // you?", a results boast from the real-money account.
+  String.raw`\b(?:never|not\s+once|haven'?t\s+(?:ever\s+)?|hasn'?t\s+(?:ever\s+)?)\s*(?:had|have\s+had|seen|hit|taken|took|eaten|had\s+to\s+eat)\s+(?:a|an|one|any|a\s+single)\s+(?:(?:really|truly|single|real)\s+)?(?:bad|losing|red|down|rough|tough|lousy|poor|negative|minus)\s+(?:week|day|month|run|stretch|streak|trade|call|year|session|bet|pick|night)s?\b` +
+    String.raw`|\b(?:not\s+(?:a|one)\s+single|zero|no)\s+(?:bad|losing|red|down|rough|negative)\s+(?:weeks?|days?|months?|trades?|calls?|years?|sessions?|bets?|picks?)\b|\bnever\s+(?:had\s+)?(?:a\s+)?(?:loss|losses|losing\s+(?:week|day|trade|month))\b`,
 ].join("|"), "i");
 export function houseClaimed(text: unknown): boolean {
   if (typeof text !== "string") return false;

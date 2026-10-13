@@ -52,7 +52,7 @@ import { admitXPost, formFixed, merrymenMentioned, moneySaid, namedIn, tickerRef
 import { ACTIVE_CADENCE, ANSWER_GAP_MS, ANSWER_STALE_MS, ANSWERS_PER_DAY, REPLY_STALE_MS, STANDARD_CADENCE, coinOf, hash32, introState, planPosts, replyDueAt, sendDecision, type PlanCadence, type PlanClock, type PlanIntent } from "./xpost/planner";
 import { APP_PAUSE_KEY, APP_PAUSE_MS, CREDITS_PAUSE_MS, PAUSE_KEY, readReplyComments, sendOne, type SendOutcome } from "./xpost/sender";
 import { isAnswerOptOut, isReplyOptOut, replyCandidate, tagCandidate, withoutReplyOptOut } from "./xpost/replies";
-import { asksAboutACoin, coinTalkIn, houseTalkIn, marketTalkIn, nameLikeWords, textWords, unknownWordIn } from "./xpost/words";
+import { asksAboutACoin, coinTalkIn, houseTalkIn, marketTalkIn, nameLikeWords, textWords, trustTalkIn, unknownWordIn } from "./xpost/words";
 import { activeTenantsOf, repliesAllowedFor, repliesScopeOf } from "./xpost/scope";
 import {
   ANSWER_LOOKED_UP,
@@ -1961,6 +1961,14 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       const unlookedCoin = !coded && verdict?.ok === true && !handed && !told
         && (coinTalkIn(withoutReplyOptOut(verdict.text), f.name) || unknownWordIn(withoutReplyOptOut(verdict.text), f.name) || marketTalkIn(withoutReplyOptOut(verdict.text))
           || houseTalkIn(withoutReplyOptOut(verdict.text)));
+      // NOR TRUST OR FRAUD, HANDED NOTHING, TOLD ITS BUYS OR NOT (red-team
+      // review of 1ed46625, 2026-10-12): "i scam people for fun, honestly.",
+      // "a bot that will rug you, fren.", "i'm a fake agent, the trades are fake
+      // too." and "the only honest bot on the timeline, the rest are fake."
+      // were posted under banter. A drafted answer handed no research that
+      // speaks of a scam, a rug, a fake, trust, honesty, legitimacy or the like
+      // (xpost/words.ts trustTalkIn) is not posted, and gets no fallback.
+      const untrusted = !coded && verdict?.ok === true && !handed && trustTalkIn(withoutReplyOptOut(verdict.text));
       // CHAT IS NEVER SILENCE BY DEFAULT (the owner's ask, 2026-10-12): a chat
       // draft refused only for how it was put (CHAT_FALLBACK_REASONS: a
       // repeat, its length, a stock deflection, a model's note, its
@@ -1997,9 +2005,10 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         const v = gate(body, false, true);
         if (!v.ok || sherwoodNamed(v.text) || sherwoodMentioned(v.text)) return false;
         const words = withoutReplyOptOut(v.text);
+        if (!handed && trustTalkIn(words)) return false;
         return handed || told || (!coinTalkIn(words, f.name) && !unknownWordIn(words, f.name) && !marketTalkIn(words) && !houseTalkIn(words));
       };
-      const drafted = verdict?.ok === true && !postsName && !unlookedCoin ? verdict.text : null;
+      const drafted = verdict?.ok === true && !postsName && !unlookedCoin && !untrusted ? verdict.text : null;
       const benignRefusal = raw !== null && !claimed && !named && !unlooked && verdict !== null && !verdict.ok && CHAT_FALLBACK_REASONS.has(verdict.reason) && saidPasses(raw);
       // Never under a name the house would never show (unshowableName: a slur, a political coin).
       // NOR UNDER A TAG THAT NAMES A COIN IN ANY WORDS (red-team 2026-10-12):
@@ -2071,7 +2080,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         replyToTweetId: comment.id, replyRootTweetId: comment.id, replyAuthorId: comment.authorId,
         status: body ? "scheduled" : "skipped",
         reason: body ? null : claimed ? "gate:sherwood-claim" : named || postsName ? "gate:sherwood-drafted" : unlooked ? "gate:unlooked-source"
-          : unlookedCoin ? "gate:unlooked-coin" : verdict && !verdict.ok ? `gate:${verdict.reason}` : "no-draft",
+          : unlookedCoin ? "gate:unlooked-coin" : untrusted ? "gate:trust-talk" : verdict && !verdict.ok ? `gate:${verdict.reason}` : "no-draft",
       });
       if (id !== null && greeting && body) bump("answered-greeting");
       return id === null ? null : { body, lookedUp };

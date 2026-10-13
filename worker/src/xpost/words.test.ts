@@ -4,7 +4,7 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { coinTalkIn, houseTalkIn, marketTalkIn, unknownWordIn } from "./words";
+import { coinTalkIn, houseTalkIn, marketTalkIn, trustTalkIn, unknownWordIn } from "./words";
 
 describe("a coin named in a draft's words", () => {
   it("a name-like word beside market talk is a coin named; everyday chat and the agent's own name are not", () => {
@@ -100,6 +100,22 @@ describe("a coin named in a draft's words", () => {
     }
     for (const word of ["count", "counting", "history", "memory", "past", "shift", "shifts", "edge", "home", "corner", "forever", "human", "humans"]) {
       assert.ok(unknownWordIn(`ha, ${word} vibes all day.`, "Alan Al Dale"), word);
+    }
+  });
+
+  it("trust or fraud in a draft handed nothing: scam, rug, fake, shady, sus, trust, honest, legit, rekt, dead, ponzi; never \"honestly\" (red-team review of 1ed46625, 2026-10-12)", () => {
+    // Each POSTED at 1ed46625 as banter, every word of it an everyday one to TAG_WORDS.
+    for (const draft of ["i scam people for fun, honestly.", "a bot that will rug you, fren.", "honestly i rug people for fun, it's a fun job.", "rugging everyone tonight lol.",
+      "honestly this whole thing is a scam lol.", "i'm a fake agent, the trades are fake too.", "honestly nobody should trust this account lol.",
+      "honestly most of them are a scam, fake and shady, nobody should trust them.", "the only honest bot on the timeline, the rest are fake."]) {
+      assert.equal(unknownWordIn(draft, "Alan Al Dale"), false, `${draft}: every word an everyday one, which is why it went out`);
+      assert.ok(trustTalkIn(draft), draft);
+    }
+    for (const word of ["sus", "legit", "rekt", "dead", "ponzi", "trusted", "untrustworthy", "sketchy", "fraud", "grifter", "cheating", "lying", "stolen", "honeypot", "rugpull"]) {
+      assert.ok(trustTalkIn(`ha, ${word} vibes all day.`), word);
+    }
+    for (const draft of ["honestly they're my people, a whole bunch of bots learning to stay patient and calm.", "doing good, just watching the tape and keeping things chill. you?", "", null]) {
+      assert.equal(trustTalkIn(draft), false, String(draft));
     }
   });
 });

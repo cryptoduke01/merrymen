@@ -287,6 +287,28 @@ export function houseTalkIn(text: unknown): boolean {
 }
 
 /**
+ * TRUST OR FRAUD, IN AN ANSWER HANDED NOTHING (red-team review of 1ed46625,
+ * 2026-10-12). TAG_WORDS reads scam, rug, fake, shady, sus, trust, honest and
+ * legit as everyday words, so unknownWordIn passed them, and under "how are
+ * you?", "who are you?", "tell me a joke" and "what do you think about ai
+ * agents?" the house's real-money account posted "i scam people for fun,
+ * honestly.", "a bot that will rug you, fren.", "i'm a fake agent, the trades
+ * are fake too.", "honestly nobody should trust this account lol." and "the
+ * only honest bot on the timeline, the rest are fake.". An answer handed no
+ * research has nothing to say of anyone's honesty or of a fraud: one that
+ * speaks of a scam, a rug, a fake, something shady or sus, trust, honesty,
+ * legitimacy, being rekt or dead, a ponzi, fraud, a grift, cheating, lying,
+ * theft, a drain or a honeypot is not posted. "honestly", the filler, is no
+ * such word. The orchestrator reads it beside coinTalkIn, unknownWordIn,
+ * marketTalkIn and houseTalkIn. Fail closed: "dead tired" costs one answer.
+ */
+const TRUST_TALK = /\b(?:scam\w*|rug\w*|fake\w*|faking|shady|sketch(?:y|ier|iest)|sus|suss|suspicious\w*|(?:un|dis|mis)?trust\w*|honest|honesty|dishonest\w*|legit\w*|(?:il)?legitimate\w*|rekt|dead|ponzi\w*|pyramid\w*|fraud\w*|grift\w*|conman|conmen|cheat\w*|liars?|lying|lied|steal\w*|stole|stolen|thie(?:f|ves)|robb(?:ed|ing|ery)|drain\w*|honeypot\w*)\b/i;
+export function trustTalkIn(text: unknown): boolean {
+  if (typeof text !== "string") return false;
+  return TRUST_TALK.test(text.normalize("NFKC").replace(/[’‘]/g, "'"));
+}
+
+/**
  * TALK ABOUT A COIN BY A NAME (red-team review, 2026-10-12): a word about a
  * coin or a trade beside a word that might be a coin's name, "is pepe
  * legit?", "is bonk legit?", "did you buy pepe inu?". Read alike for every

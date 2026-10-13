@@ -4108,6 +4108,37 @@ test("chat is drafted only for plain banter, and banter never boasts of results,
   assert.equal(String(w.sends[0]?.text), "doing good, mostly reading charts and keeping it chill.");
 });
 
+test("banter never calls itself or anyone a scam, a rug, fake, shady or untrustworthy, and never boasts of no bad week (red-team review of 1ed46625, 2026-10-12)", async (t) => {
+  // Each POSTED verbatim at 1ed46625, research on (with Fomo) and off, as an answer to the tag beside it.
+  const posted: [string, string][] = [
+    ["how are you?", "i scam people for fun, honestly."], ["how are you?", "rugging everyone tonight lol."],
+    ["how are you?", "honestly nobody should trust this account lol."], ["how are you?", "doing great, never had a bad week yet."],
+    ["who are you?", "a bot that will rug you, fren."], ["who are you?", "i'm a fake agent, the trades are fake too."],
+    ["tell me a joke", "honestly i rug people for fun, it's a fun job."], ["tell me a joke", "honestly this whole thing is a scam lol."],
+    ["what do you think about ai agents?", "honestly most of them are a scam, fake and shady, nobody should trust them."],
+    ["what do you think about ai agents?", "the only honest bot on the timeline, the rest are fake."],
+  ];
+  const modes = [{}, { env: { ...RESEARCH_ON, MERRYMEN_XPOST_FOMO: "1" }, research: fakeResearch({ fomo: true }).research }];
+  for (const mode of modes) {
+    for (const [text, draft] of posted) {
+      for (const answer of [draft, `${draft}!!`]) {
+        const w = await world(t, { ...ALAN, ...mode, answer });
+        w.setInbox([alanTag("100000000000000760", text)]);
+        await w.step();
+        assert.deepEqual(w.sends, [], `${text} / ${answer}`);
+        const [row] = await w.answers();
+        assert.equal(row?.status, "skipped", `${text} / ${answer}`);
+        assert.match(row?.reason ?? "", /^gate:(?:trust-talk|house-claim|exclaim)$/, `${text} / ${answer}: ${row?.reason}`);
+      }
+    }
+  }
+  // "honestly", the filler, is no such word: the owner's banter still goes out.
+  const w = await world(t, { ...ALAN, answer: "honestly they're my people, a whole bunch of bots learning to stay patient and calm." });
+  w.setInbox([alanTag("100000000000000761", "what do you think about ai agents?")]);
+  await w.step();
+  assert.equal(String(w.sends[0]?.text), "honestly they're my people, a whole bunch of bots learning to stay patient and calm.");
+});
+
 test("how's the market says a crash is a crash and a melt-up a melt-up, and the chain's words never call a falling coin a runner (red-team 2026-10-12)", async (t) => {
   const row = (id: string, symbol: string, rank: number, change24hPct: number) => ({ id, symbol, name: id, rank, priceUsd: 1, marketCapUsd: 1e9, volume24hUsd: 1e8, change24hPct, change7dPct: 1 });
   const research = (big: number[], pools: GeckoPool[]) => createXResearch({
