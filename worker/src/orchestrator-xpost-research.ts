@@ -1116,12 +1116,13 @@ export function sayable(s: unknown): s is string {
  * says one carries research; a draft that cites one with nothing looked up
  * is refused (orchestrator-xpost.ts, gate:unlooked-source).
  *
- * AND CODE'S FIGURES LINE ITSELF (2026-10-13): the line names no source any
+ * AND "THE MARKET DATA", the words a major's phrases say where the provider's
+ * name used to be (2026-10-13). AND CODE'S FIGURES LINE ITSELF (2026-10-13): the line names no source any
  * more ("ETH #2, ~$3.4k, …", "24h: BTC +1.2%, …"), so a post that ends in one
  * (figures.ts withoutFiguresLine) carries research by the line alone: an
  * answer's, and an active owner's market insight post's.
  */
-const RESEARCH_SOURCE = /\b(?:index|fomo|on[\s-]?chain|chain data|project|creator|contract|coin\s?gecko|gecko\s?terminal|bit\s?query)\b/i;
+const RESEARCH_SOURCE = /\b(?:index|fomo|on[\s-]?chain|chain data|market data|project|creator|contract|coin\s?gecko|gecko\s?terminal|bit\s?query)\b/i;
 export function carriesResearch(body: unknown): boolean {
   return typeof body === "string" && (RESEARCH_SOURCE.test(body) || withoutFiguresLine(body) !== body);
 }
@@ -1264,22 +1265,23 @@ function moveWords(pct: number | null, when: string): string | null {
 /**
  * A MAJOR'S MARKET, IN WORDS (2026-10-12): where it ranks, how the day and the
  * week went, how busy its trading is against its size, each from CoinGecko's
- * numbers by code's own thresholds and with "coingecko" in it. Never a
+ * numbers by code's own thresholds, said as "the market data" and never by
+ * the provider's name (the owner's teammate, 2026-10-13). Never a
  * figure, never its name (the asker named it; the answer calls it "it"), and
  * nothing about whether to buy it. The figures themselves go in code's line
  * (xpost/figures.ts), never to the model.
  */
 export function majorPhrases(m: Pick<CoinMarket, "rank" | "marketCapUsd" | "volume24hUsd" | "change24hPct" | "change7dPct">): string[] {
   const out: string[] = [];
-  if (m.rank !== null) out.push(m.rank <= 10 ? "coingecko ranks it among the very biggest coins" : m.rank <= 50 ? "coingecko ranks it a large cap" : "coingecko ranks it a mid cap");
+  if (m.rank !== null) out.push(m.rank <= 10 ? "the market data ranks it among the very biggest coins" : m.rank <= 50 ? "the market data ranks it a large cap" : "the market data ranks it a mid cap");
   const day = moveWords(m.change24hPct, "today");
-  if (day) out.push(`coingecko shows it ${day}`);
+  if (day) out.push(`the market data shows it ${day}`);
   const week = moveWords(m.change7dPct, "on the week");
-  if (week) out.push(`coingecko shows it ${week}`);
+  if (week) out.push(`the market data shows it ${week}`);
   const vol = m.volume24hUsd, cap = m.marketCapUsd;
   if (vol !== null && cap !== null && Number.isFinite(vol) && Number.isFinite(cap) && cap > 0 && vol >= 0) {
     const turnover = vol / cap;
-    out.push(turnover >= 0.1 ? "trading volume looks heavy on coingecko" : turnover <= 0.02 ? "trading volume looks light on coingecko" : "trading volume looks ordinary on coingecko");
+    out.push(turnover >= 0.1 ? "trading volume looks heavy in the market data" : turnover <= 0.02 ? "trading volume looks light in the market data" : "trading volume looks ordinary in the market data");
   }
   return out.filter(sayable);
 }
@@ -1588,7 +1590,7 @@ export function hotScreen(pools: readonly GeckoPool[]): HotCoin[] {
 }
 
 /** Said when the index shows nothing past the floors. */
-export const HOT_NONE = "nothing is standing out on the robinhood chain index right now";
+export const HOT_NONE = "nothing is standing out on the chain's index right now";
 
 /**
  * WHAT'S HOT, IN WORDS: how many coins stand out (one, a couple, a few), which
@@ -1600,7 +1602,7 @@ export const HOT_NONE = "nothing is standing out on the robinhood chain index ri
 export function hotPhrases(o: { changes: readonly (number | null)[]; crowd: number; trending: number }): string[] {
   const n = o.changes.length;
   if (n === 0) return [HOT_NONE].filter(sayable);
-  const out = [`the robinhood chain index shows ${n === 1 ? "one coin" : n === 2 ? "a couple of coins" : "a few coins"} standing out right now`];
+  const out = [`the chain's index shows ${n === 1 ? "one coin" : n === 2 ? "a couple of coins" : "a few coins"} standing out right now`];
   const known = o.changes.filter((c): c is number => c !== null && Number.isFinite(c));
   if (known.length) {
     const up = known.filter((c) => c > 0).length, down = known.filter((c) => c < 0).length;
@@ -1608,7 +1610,7 @@ export function hotPhrases(o: { changes: readonly (number | null)[]; crowd: numb
     else out.push(up === known.length ? "on the index they're all up on the day" : down === known.length ? "on the index they're all down on the day" : "on the index they're a mix of up and down on the day");
   }
   if (o.crowd > 0) out.push(`fomo traders are most active in ${o.crowd === 1 ? "one coin" : "a couple of coins"} the index has trending`);
-  if (o.trending > 0) out.push(`coingecko's global trending list has ${o.trending === 1 ? "a big name" : "a few big names"} on it`);
+  if (o.trending > 0) out.push(`the global trending index has ${o.trending === 1 ? "a big name" : "a few big names"} on it`);
   return out.filter(sayable);
 }
 
@@ -2196,7 +2198,7 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
         const chainRead: HotRead | null = hot.hot ?? null;
         const read: MarketRead = { majors: majorsRead, chain: chainRead };
         const facts = [
-          ...(majorsRead ? [`coingecko shows the big coins ${majorsRead.dir === "up" ? "mostly up" : majorsRead.dir === "down" ? "mostly down" : majorsRead.dir === "mixed" ? "split" : "flat"} today`] : []),
+          ...(majorsRead ? [`the market data shows the big coins ${majorsRead.dir === "up" ? "mostly up" : majorsRead.dir === "down" ? "mostly down" : majorsRead.dir === "mixed" ? "split" : "flat"} today`] : []),
           ...hot.facts,
         ].filter(sayable);
         const pools = hot.figures?.find((x): x is Extract<FiguresSection, { kind: "pools" }> => x.kind === "pools");

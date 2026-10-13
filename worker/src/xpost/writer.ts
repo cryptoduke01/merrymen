@@ -894,8 +894,8 @@ const INTENT_HINT: Readonly<Record<AnswerIntentKind, string>> = {
   model: "They are asking what model you run on. Answer only with the model line in the rules.",
   chat: "It is just chat or banter: answer it the way a friend would, briefly and in good humour. A light mood or opinion about yourself is fine (how your day is going, what you like about trading, being a bot); a joke is fine if it is about yourself. Say nothing about any coin, market, person, project or event.",
   // A MAJOR (2026-10-12): its words are code's (xpost/market.ts) whenever coingecko
-  // was read; never told figures follow (red-team 2026-10-12).
-  major: "They are asking about a big coin on coingecko's list. Say what you looked up as what coingecko shows right now, a read and not a call: never whether to buy it, never where it's headed. It is not a robinhood chain coin and not one you trade, so keep yourself, your trades and your holdings out of it. Write no number or amount.",
+  // was read; never told figures follow (red-team 2026-10-12), nor told a provider's name (2026-10-13).
+  major: "They are asking about a big coin. Say what you looked up as what the market data shows right now, a read and not a call: never whether to buy it, never where it's headed. It is not a coin of the chain you trade on and not one you trade, so keep yourself, your trades and your holdings out of it. Write no number or amount.",
   // WHAT'S HOT (2026-10-12): drafted only when there is no coin to show; with
   // coins, the words are code's (xpost/market.ts). Never told a list follows:
   // "added after your words" invited words that point at it (red-team 2026-10-12).
@@ -1039,7 +1039,7 @@ export function answerPrompt(f: AnswerFacts): Prompt {
     // a friend on crypto twitter, not a help desk. "i don't comment on the market,
     // just the trades" was true and dead; the gate now refuses that shape
     // (gate.ts STOCK_PHRASE), and this says what to do instead.
-    "Sound like a friend on crypto twitter texting back: one or two short lines, plain everyday words, lowercase is fine, laid back. You're a laid-back trader bot that merrymen built, and you can have a light mood or opinion about yourself. Light humour is welcome, never at the asker's expense, never forced. No lists, no hashtags. Never name a source (the index, coingecko, fomo, on-chain data, a project) unless you looked something up and it is listed below.",
+    "Sound like a friend on crypto twitter texting back: one or two short lines, plain everyday words, lowercase is fine, laid back. You're a laid-back trader bot that merrymen built, and you can have a light mood or opinion about yourself. Light humour is welcome, never at the asker's expense, never forced. No lists, no hashtags. Never name a source (the index, fomo, on-chain data, a project) unless you looked something up and it is listed below, and never name a data provider.",
     // WHAT A DRAFT MAY NEVER SAY (red-team 2026-10-12): the gate refuses each (gate.ts ANSWER_HOUSE_CLAIM); this says so first.
     "Never speak for merrymen or robinhood (what they are, have, plan or back), never tease news (no \"soon\", \"stay tuned\", \"cooking\", \"can't share yet\"), never judge the person asking, and never boast about results, money or being the best.",
     // AND, WITH NOTHING LOOKED UP, NONE OF THE REST (red-team 2026-10-12): words.ts marketTalkIn and houseTalkIn refuse it.

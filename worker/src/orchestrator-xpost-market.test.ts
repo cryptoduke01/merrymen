@@ -17,7 +17,7 @@ const MOVES: (Move | null)[] = [null, { dir: "flat", size: null },
   ...(["up", "down"] as const).flatMap((dir) => (["a little", "a fair bit", "sharply"] as const).map((size) => ({ dir, size })))];
 /** Gated as what it is: an active agent's answer, which carries no opt-out line (2026-10-12). */
 const gate = (text: string, recentOwn: string[], mode: "live" | "paper") =>
-  admitXPost(text, { kind: "reply", answer: true, agentName: "Alan Al Dale", mode, coins: [], recentOwn, recentFleet: [] }, (r, c) => admitAgentLine(r, c));
+  admitXPost(text, { kind: "reply", answer: true, house: true, agentName: "Alan Al Dale", mode, coins: [], recentOwn, recentFleet: [] }, (r, c) => admitAgentLine(r, c));
 
 /** Every line of one read: each clears the gate alone and after all the others were said, and none repeats another. */
 function judged(lines: string[], paper: boolean): void {
@@ -78,7 +78,7 @@ describe("what's hot in code's words", () => {
       judged(majorUnreadAnswers("1000000000000000123", { lower: false }, { paper }), paper);
     }
     assert.deepEqual(majorAnswers({ rank: null, day: null, week: null, volume: null }, "1", { lower: false }), [], "nothing to say: no answer");
-    for (const line of majorAnswers({ rank: "top", day: moves[0]!, week: moves[0]!, volume: "heavy" }, "1", { lower: false })) assert.match(line, /coingecko/);
+    for (const line of majorAnswers({ rank: "top", day: moves[0]!, week: moves[0]!, volume: "heavy" }, "1", { lower: false })) assert.doesNotMatch(line, /gecko|bitquery|robinhood/i, "no source named (2026-10-13)");
   });
 
   it("a paper agent's clause is about its own trading, never a pronoun or a verb the coin just described could take (red-team 2026-10-12)", () => {
@@ -136,7 +136,7 @@ describe("what's hot in code's words", () => {
     }
     // The words say what was read, and only that.
     const up = marketAnswers({ majors: { dir: "up", size: "a little" }, chain: { coins: 3, lead: null } }, "1", { lower: true });
-    assert.ok(up.every((l) => /robinhood|chain|onchain|geckoterminal|trenches|index|trending|over there/.test(l)), "it says where the movers are");
+    assert.ok(up.every((l) => /board|chain|onchain|screener|trenches|index|trending|over there/.test(l)), "it says where the movers are");
     const unread = marketAnswers({ majors: null, chain: null }, "1", { lower: true });
     assert.ok(unread.every((l) => /\bno (?:read|view|glimpse|data|word|signal)\b|can't spot|zilch from/.test(l)), "no read is said as none");
     assert.equal(majorsDirOf([1.2, 3.4, 0.6])?.dir, "up");
@@ -239,6 +239,22 @@ describe("what's hot in code's words", () => {
         assert.ok(v.ok, `${line} → ${v.ok ? "" : v.reason}`);
         assert.equal(v.ok && v.text, line, "posted exactly as built");
       }
+    }
+  });
+});
+
+describe("code's market words name no source (the owner's teammate, 2026-10-13)", () => {
+  it("no what's hot, major or market line, read or unread, live or paper, says coingecko, geckoterminal, bitquery or robinhood chain", () => {
+    const hot: HotRead[] = [{ coins: 1, lead: null }, { coins: 3, lead: { dir: "up", size: "sharply" } }];
+    const majors: MarketRead["majors"][] = [null, { dir: "mixed" }, { dir: "flat" }, { dir: "up", size: "a little" }, { dir: "down", size: "uneven" }];
+    for (const paper of [false, true]) {
+      const lines = [
+        ...hot.flatMap((h) => hotAnswers(h, "1", { lower: true }, { paper })), ...hotNoneAnswers("1", { lower: true }, { paper }), ...hotUnreadAnswers("1", { lower: true }, { paper }),
+        ...majorAnswers({ rank: "top", day: MOVES[2]!, week: MOVES[3]!, volume: "heavy" }, "1", { lower: true }, { paper }), ...majorUnreadAnswers("1", { lower: true }, { paper }),
+        ...majors.flatMap((m) => [null, ...hot].flatMap((chain) => marketAnswers({ majors: m, chain }, "1", { lower: true }, { paper }))),
+      ];
+      assert.ok(lines.length > 60);
+      for (const line of lines) assert.doesNotMatch(line, /gecko|bitquery|robinhood chain/i, line);
     }
   });
 });

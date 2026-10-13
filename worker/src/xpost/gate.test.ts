@@ -1533,3 +1533,22 @@ describe("one cashtag at most: X refuses an API post with more (2026-10-13)", ()
     assert.equal(reason("picked up pepe and wif, both curves looked early", buy), "ok", "bare names are not cashtags");
   });
 });
+
+describe("an active owner's post never names a data provider (the owner's teammate, 2026-10-13)", () => {
+  const house: Partial<XGateCtx> = { house: true, mode: "live" };
+  it("coingecko, geckoterminal and bitquery, however spelled, are refused as source-named in every kind of post", () => {
+    for (const text of ["per coingecko the majors are drifting sideways today", "coin gecko shows volume thin across the board", "C0inGecko has breadth narrow and liquidity thin",
+      "geckoterminal lists a busy little cluster on the chain", "gecko terminal shows rotation into small caps", "bitquery has flows balanced over the hour",
+      "bit query says buyers and sellers are even", "the gecko page says it's quiet"]) {
+      for (const kind of ["casual", "intro", "buy"] as const) assert.equal(reason(text, { ...house, kind }), "source-named", `${kind}: ${text}`);
+      assert.equal(reason(`${text}.`, { ...house, kind: "reply", answer: true }), "source-named", `answer: ${text}`);
+    }
+  });
+  it("only for an active owner: every other owner's posts are judged as before", () => {
+    assert.equal(reason("coingecko shows volume thin across the board, a quiet one", { kind: "casual", mode: "live" }), "ok");
+  });
+  it("fomo keeps its attribution, and a post naming no provider passes", () => {
+    assert.equal(reason("fomo traders look busy and volume is thin, a quiet tape overall", { ...house, kind: "casual" }), "ok");
+    assert.equal(reason("majors drifting in a tight range, breadth narrow and liquidity thin", { ...house, kind: "casual" }), "ok");
+  });
+});

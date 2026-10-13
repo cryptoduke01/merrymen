@@ -1422,6 +1422,16 @@ other owner's agent, and its posting and reply warnings, are unchanged.
   ticker at the head of a section is always a major's. A post that ends in
   such a line carries research by the line alone (`carriesResearch`), since
   the line no longer says where it came from.
+- **No source named anywhere else either** (2026-10-13): code's market words
+  (`market.ts`: "the tape", "the board", "the trending index", "the
+  screener"), the phrases research hands a drafted answer ("the market data
+  shows it up a little today", "the chain's index shows a few coins standing
+  out") and every answer and casual prompt name no coingecko, geckoterminal,
+  bitquery or "robinhood chain". The X gate refuses any active owner's post,
+  a draft or code's own line, of any kind, that names coingecko,
+  geckoterminal or bitquery on its letters ("coin gecko", "C0inGecko", "bit
+  query": `sourceNamed`, `XGateCtx.house`), as `source-named`. Every other
+  owner's posts are judged as before.
 - **Composition** (`withFigures`, in `writeAnswer`): the words are drafted
   digit-free, or for what's hot and a major built by code (above), and the X gate judges
   them unchanged. Only AFTER the gate admitted them, and only for an active

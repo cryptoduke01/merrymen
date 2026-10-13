@@ -2090,7 +2090,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // A code line is gated as one (asCode): the draft-only clauses below never read it.
       // `fresh`: weighed against no recent post, to read what a draft says apart from whether it repeats (saidPasses below).
       const gate = (text: string, asCode = coded, fresh = false) => admitXPost(text, {
-        kind: "reply", answer: true, agentName: f.name, mode, coins: vouched.map((c) => c.label),
+        // An active owner's answer: never a data provider named, code's line or draft (XGateCtx.house).
+        kind: "reply", answer: true, house: true, agentName: f.name, mode, coins: vouched.map((c) => c.label),
         paperCoins: [...vouched.filter((c) => c.paper).map((c) => c.label), ...(f.mode === "idle" ? money.paper : [])],
         recentOwn: fresh ? [] : recentOwn, recentFleet: fresh ? [] : recentFleet, emojiOk: facts.style.emoji > 0,
         // A buy it says is one it was told of, or none at all (XGateCtx.buys).
@@ -2373,6 +2374,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       recentOwn,
       recentFleet,
       emojiOk: facts.style.emoji > 0,
+      // An active owner's post never names a data provider, whatever its kind (XGateCtx.house, 2026-10-13).
+      ...(active.has(account.tenant.toLowerCase()) ? { house: true as const } : {}),
     };
     let prompt: ReturnType<typeof introPrompt> | null = null;
     let coin: string | null = null;
