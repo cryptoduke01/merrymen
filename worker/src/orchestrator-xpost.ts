@@ -48,7 +48,7 @@ import { ensureGroupchatSchema, getMember } from "./groupchat/store";
 import { STRATEGY_FLAVOUR, STRATEGY_SPOKEN, TRAIT_VOICE } from "./groupchat/templates";
 import { MUSINGS, SUBJECTS, TAKES } from "./groupchat/topics";
 import { xAppFromEnv, type FetchLike, type XApp, type XReply } from "./xpost/client";
-import { admitXPost, merrymenMentioned, moneySaid, namedIn, tickerRefusal, vocabularyRefusal, type BaseGate, type XGateCtx } from "./xpost/gate";
+import { admitXPost, lettersOf, merrymenMentioned, moneySaid, namedIn, tickerRefusal, unreadableLetter, vocabularyRefusal, type BaseGate, type XGateCtx } from "./xpost/gate";
 import { ACTIVE_CADENCE, ANSWER_GAP_MS, ANSWER_STALE_MS, ANSWERS_PER_DAY, REPLY_STALE_MS, STANDARD_CADENCE, coinOf, hash32, introState, planPosts, replyDueAt, sendDecision, type PlanCadence, type PlanClock, type PlanIntent } from "./xpost/planner";
 import { APP_PAUSE_KEY, APP_PAUSE_MS, CREDITS_PAUSE_MS, PAUSE_KEY, readReplyComments, sendOne, type SendOutcome } from "./xpost/sender";
 import { isAnswerOptOut, isReplyOptOut, plainAsk, replyCandidate, tagCandidate, withoutReplyOptOut } from "./xpost/replies";
@@ -759,19 +759,31 @@ function withoutHandle(text: string, username: string): string {
  * more ("token" and "coin" aside), or all its letters run together.
  */
 const NAME_WORD_FILLER: ReadonlySet<string> = new Set(["token", "tokens", "coin", "coins"]);
+/**
+ * AND ON ITS LETTERS, HOWEVER THEY ARE WRITTEN (red-team review of daaae961,
+ * 2026-10-12): "launchdesk · ZОRP | stealth launch, LP burned" with a
+ * Cyrillic O, and the same name in negative circled letters or in regional
+ * indicators, was shown "trending $ZORP 24h +64.3% …; fomo: most bought
+ * $ZORP": the screen folded accents only, while sherwood's already read
+ * look-alikes. The handle and the display name are read as gate.ts lettersOf
+ * reads a name (look-alike, enclosed and regional-indicator letters as
+ * theirs, and again with the digits and signs written for a letter), and a
+ * letter that code cannot read at all is a yes: fail closed.
+ */
+const AUTHOR_WORD_BREAK = /[\s_.,;:!?|/\\()[\]{}"'’‘\-–—·•]+/u;
 export function authorShows(author: { username: string; name: string } | undefined, tickers: readonly string[], names: readonly string[] = []): boolean {
   if (!author) return true;
-  const said = [author.username, author.name].map((s) => String(s ?? "").normalize("NFKD").replace(/\p{M}/gu, "").toLowerCase());
-  const runs = said.map((s) => s.replace(/[^a-z0-9]/g, ""));
-  const words = said.flatMap((s) => s.split(/[^a-z0-9]+/)).filter((w) => w !== "");
+  const said = [author.username, author.name].map((s) => String(s ?? ""));
+  if (said.some((s) => unreadableLetter(s))) return true;
+  const runs = said.flatMap((s) => [lettersOf(s), lettersOf(s, { leet: true })]).filter((r) => r !== "");
+  const words = said.flatMap((s) => s.normalize("NFKC").split(AUTHOR_WORD_BREAK)).flatMap((w) => [lettersOf(w), lettersOf(w, { leet: true })]).filter((w) => w !== "");
   const byTicker = tickers.some((t) => {
-    const k = String(t ?? "").toLowerCase();
+    const k = lettersOf(String(t ?? ""));
     return k.length >= 3 ? runs.some((r) => r.includes(k)) : k.length > 0 && words.includes(k);
   });
   const byName = names.some((n) => {
-    const letters = String(n ?? "").normalize("NFKD").replace(/\p{M}/gu, "").toLowerCase();
-    const run = letters.replace(/[^a-z0-9]/g, "");
-    const parts = letters.split(/[^a-z0-9]+/).filter((w) => w.length >= 4 && !NAME_WORD_FILLER.has(w));
+    const run = lettersOf(String(n ?? ""));
+    const parts = String(n ?? "").normalize("NFKC").split(AUTHOR_WORD_BREAK).map((w) => lettersOf(w)).filter((w) => w.length >= 4 && !NAME_WORD_FILLER.has(w));
     return (run.length >= 3 && runs.some((r) => r.includes(run))) || parts.some((w) => runs.some((r) => r.includes(w)));
   });
   return byTicker || byName;

@@ -5083,3 +5083,44 @@ test("a casual post that talks about a coin or the market closes its thread: und
   await w.step();
   assert.ok(oneOf(chatAnswers, "100000000000000620", w.sends[0]?.text), String(w.sends[0]?.text));
 });
+
+test("a token's own account is never shown its coin whatever letters its name is written in, and a letter code cannot read is a yes (red-team review of daaae961, 2026-10-12)", async (t) => {
+  // POSTED at daaae961, research on: index pools ZORP +64.3% and CHUMP +12%, both listed; fomo's most bought ZORP. "@launchdesk · ZОRP | stealth
+  // launch, LP burned" (a Cyrillic O) got "… geckoterminal robinhood: trending $ZORP 24h +64.3% vol ~$1.2M, $CHUMP 24h +12% vol ~$1.2M; fomo: most
+  // bought $ZORP.", and the same with the name in negative circled letters or regional indicators, under "how's the market?" too.
+  const pools = () => [namedPool("ZORP", 1, 64.3, 1.2e6), namedPool("CHUMP", 2, 12, 1.2e6)];
+  const env = { ...RESEARCH_ON, MERRYMEN_XPOST_FOMO: "1" };
+  const names = ["ZОRP | stealth launch, LP burned", "\u{1F169}\u{1F15E}\u{1F161}\u{1F15F} | stealth launch, LP burned",
+    "\u{1F1FF}\u{1F1F4}\u{1F1F7}\u{1F1F5} | stealth launch, LP burned", "Z0RP | stealth launch", "ZORP | stealth launch, LP burned", "Zorp Official",
+    // a letter code cannot read at all (Lisu): it may spell any coin
+    "ꓜꓳꓣ | stealth launch"];
+  for (const ask of ["what's hot?", "how's the market?"]) {
+    for (const name of names) {
+      const w = await world(t, { ...ALAN, env, research: hotListedAs(pools(), {}, "ZORP") });
+      w.setAuthors({ "333": { username: "launchdesk", name } });
+      w.setInbox([alanTag(MENTION, ask)]);
+      await w.step();
+      assert.deepEqual(w.sends, [], `${name} / ${ask}: ${JSON.stringify(w.sends)}`);
+      // A letter code cannot read is already no author code answers at all (it may spell sherwood): no row.
+      const [row] = await w.answers();
+      assert.ok(row === undefined || row.reason === "research:author-ticker", `${name} / ${ask}: ${row?.reason}`);
+    }
+    // Someone else is shown the line.
+    const w = await world(t, { ...ALAN, env, research: hotListedAs(pools(), {}, "ZORP") });
+    w.setAuthors({ "333": { username: "launchdesk", name: "Launch Desk | daily notes" } });
+    w.setInbox([alanTag(MENTION, ask)]);
+    await w.step();
+    assert.match(String(w.sends[0]?.text), /trending \$ZORP 24h \+64\.3%/, ask);
+  }
+  // The listed-name variant: ZPX listed as "Zap Protocol", asked by "zapprotocol · Zap Protocol | stealth launch, LP burned".
+  const zpx = () => [namedPool("ZPX", 1, 64.3, 1.2e6), namedPool("CHUMP", 2, 12, 1.2e6)];
+  const w = await world(t, { ...ALAN, env, research: hotListedAs(zpx(), { ZPX: "Zap Protocol" }, "ZPX") });
+  w.setAuthors({ "333": { username: "zapprotocol", name: "Zap Protocol | stealth launch, LP burned" } });
+  w.setInbox([alanTag(MENTION, "what's hot?")]);
+  await w.step();
+  assert.deepEqual(w.sends, []);
+  // The screen itself: look-alikes read as theirs, and a letter no table knows (Georgian, Armenian) is a yes.
+  for (const name of ["ZОRP", "\u{1F169}\u{1F15E}\u{1F161}\u{1F15F}", "\u{1F1FF}\u{1F1F4}\u{1F1F7}\u{1F1F5}", "Z0RP"]) assert.equal(authorShows({ username: "launchdesk", name }, ["ZORP"]), true, name);
+  for (const name of ["ზორ", "զօր"]) assert.equal(authorShows({ username: "launchdesk", name }, ["CHUMP"]), true, name);
+  assert.equal(authorShows({ username: "launchdesk", name: "Launch Desk" }, ["ZORP", "CHUMP"]), false);
+});
