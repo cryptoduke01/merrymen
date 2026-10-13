@@ -19,12 +19,20 @@
  * All of it is DATA — content written by whoever launched a memecoin, chosen to
  * be read by an agent. It is never instructions, and the prompt that consumes it
  * says so in the same words the Telegram agent already uses.
+ *
+ * AND, ON POST /scan, WHAT THE PAGE IS MADE OF (an X agent's larp check,
+ * 2026-10-13): every link and word on the page, its markup, the scripts it
+ * loaded, read for the contracts and the GitHub it points at
+ * (packages/core/src/site-scan.ts), and how many calls it made to its own
+ * site. No screenshot: nobody looks at one. The findings are strings a
+ * stranger's page contained; the caller decides what is worth a lookup.
  */
 
 import { createServer } from "node:http";
 import { chromium } from "playwright";
 import { safeFetchUrl } from "../packages/core/src/safe-url";
 import { createPublicProxy } from "../packages/core/src/server/public-proxy";
+import { findInSources, type ScanSource } from "../packages/core/src/site-scan";
 
 const PORT = Number(process.env.PORT ?? 8080);
 const TOKEN = process.env.MERRYMEN_BROWSER_TOKEN ?? "";
@@ -34,6 +42,25 @@ const NAV_TIMEOUT_MS = 15_000;
 const MAX_TEXT = 20_000;
 const MAX_LINKS = 40;
 const VIEWPORT = { width: 1280, height: 900 };
+
+/**
+ * A SCAN (POST /scan) READS WHAT A READ DOES, AND WHAT THE PAGE IS MADE OF:
+ * the scripts it loaded and the calls it made while it settled. That is where
+ * a dapp keeps its contract addresses and its GitHub, and whether it talks to
+ * a backend of its own at all is the difference between a product and a
+ * landing page. Bounded on every axis, because the page decides how much it
+ * sends: a few seconds more to settle, a dozen scripts, a few megabytes.
+ */
+const SCAN_SETTLE_MS = 2_500;
+const SCAN_SCRIPTS_MAX = 12;
+const SCAN_SCRIPT_BYTES = 3_000_000;
+const SCAN_TOTAL_BYTES = 8_000_000;
+/** The page's own markup, read for addresses in attributes and inline data. */
+const SCAN_HTML_MAX = 800_000;
+/** Every link on the page is read for findings; only MAX_LINKS go back. */
+const SCAN_LINKS_READ = 400;
+/** How long a scan waits for the one browser before it is told "busy". A tag is waiting; a read is not. */
+const SCAN_SLOT_WAIT_MS = 20_000;
 
 let browser: import("playwright").Browser | null = null;
 let outboundProxy: Awaited<ReturnType<typeof createPublicProxy>> | null = null;
@@ -62,14 +89,19 @@ async function getBrowser() {
   return browser;
 }
 
+/** The site a page belongs to, for "did it call its own backend": the last two labels of the host. */
+function siteOf(host: string): string {
+  return host.toLowerCase().split(".").slice(-2).join(".");
+}
+
 /**
- * Read one page.
+ * Read one page; with `scan`, also what it is made of.
  *
  * `domcontentloaded`, not `networkidle`: a memecoin site is usually a landing
  * page with an animation loop or a live price widget, and networkidle on those
  * waits for the full timeout every time and then reports a timeout as a failure.
  */
-async function read(url: URL) {
+async function visit(url: URL, scan: boolean) {
   const b = await getBrowser();
   const ctx = await b.newContext({
     viewport: VIEWPORT,
@@ -94,16 +126,52 @@ async function read(url: URL) {
     });
     const page = await ctx.newPage();
     page.setDefaultTimeout(NAV_TIMEOUT_MS);
+
+    // WHAT THE PAGE LOADED, ONLY ON A SCAN: its scripts' text (the bundles
+    // already came through the proxy; this only keeps them), and how many
+    // calls it made to its own site. Every body is bounded before and after
+    // it is read, and a body that fails to read is simply not kept.
+    const scripts: string[] = [];
+    let scriptBytes = 0;
+    let ownCalls = 0;
+    const callHosts = new Set<string>();
+    const pending: Promise<void>[] = [];
+    if (scan) {
+      const own = siteOf(url.hostname);
+      page.on("response", (response) => {
+        const kind = response.request().resourceType();
+        let host = "";
+        try {
+          host = new URL(response.url()).hostname;
+        } catch {
+          return;
+        }
+        if (kind === "fetch" || kind === "xhr") {
+          if (siteOf(host) === own) ownCalls++;
+          if (callHosts.size < 12) callHosts.add(host.toLowerCase());
+          return;
+        }
+        if (kind !== "script" || response.status() !== 200 || scripts.length >= SCAN_SCRIPTS_MAX) return;
+        const declared = Number(response.headers()["content-length"] ?? "0");
+        if (declared > SCAN_SCRIPT_BYTES || scriptBytes + declared > SCAN_TOTAL_BYTES) return;
+        pending.push(response.body().then((buf) => {
+          if (buf.length > SCAN_SCRIPT_BYTES || scriptBytes + buf.length > SCAN_TOTAL_BYTES || scripts.length >= SCAN_SCRIPTS_MAX) return;
+          scriptBytes += buf.length;
+          scripts.push(buf.toString("utf8"));
+        }, () => {}));
+      });
+    }
+
     const res = await page.goto(url.toString(), { waitUntil: "domcontentloaded", timeout: NAV_TIMEOUT_MS });
     // Give a single-page app a beat to render, but never more than a beat.
-    await page.waitForTimeout(1200);
+    // A scan waits a little longer, for the calls an app makes once it is up.
+    await page.waitForTimeout(scan ? SCAN_SETTLE_MS : 1200);
 
-    const data = await page.evaluate((maxLinks) => {
+    const data = await page.evaluate((o) => {
       const strip = (s: string | null | undefined) => (s || "").replace(/\s+/g, " ").trim();
-      const links = [...document.querySelectorAll<HTMLAnchorElement>("a[href]")]
+      const all = [...document.querySelectorAll<HTMLAnchorElement>("a[href]")]
         .map((a) => ({ text: strip((a as HTMLAnchorElement).textContent).slice(0, 80), href: (a as HTMLAnchorElement).href }))
-        .filter((l) => l.href.startsWith("http"))
-        .slice(0, maxLinks);
+        .filter((l) => l.href.startsWith("http"));
       // Prefer the main content, fall back to the body — the same order the
       // dashboard's own text extraction uses.
       const root = document.querySelector("main") || document.querySelector("article") || document.body;
@@ -111,13 +179,17 @@ async function read(url: URL) {
         title: strip(document.title),
         description: strip(document.querySelector('meta[name="description"]')?.getAttribute("content")),
         text: strip(root?.innerText),
-        links,
+        // A scan reads every word on the page, not only the main column: a
+        // contract is as often in the footer as in the hero.
+        allText: o.scan ? strip(document.body?.innerText) : "",
+        links: all.slice(0, o.maxLinks),
+        allLinks: o.scan ? all.slice(0, o.linksRead).map((l) => l.href) : [],
+        html: o.scan ? document.documentElement.outerHTML.slice(0, o.htmlMax) : "",
         finalUrl: location.href,
       };
-    }, MAX_LINKS);
+    }, { maxLinks: MAX_LINKS, scan, linksRead: SCAN_LINKS_READ, htmlMax: SCAN_HTML_MAX });
 
-    const shot = await page.screenshot({ type: "jpeg", quality: 55, fullPage: false });
-    return {
+    const base = {
       ok: true,
       status: res?.status() ?? 0,
       title: data.title,
@@ -126,7 +198,25 @@ async function read(url: URL) {
       truncated: data.text.length > MAX_TEXT,
       links: data.links,
       finalUrl: data.finalUrl,
-      screenshotJpegBase64: shot.toString("base64"),
+    };
+    if (!scan) {
+      const shot = await page.screenshot({ type: "jpeg", quality: 55, fullPage: false });
+      return { ...base, screenshotJpegBase64: shot.toString("base64") };
+    }
+    // The bundles still arriving get a moment, never the page's say.
+    await Promise.race([Promise.allSettled(pending), new Promise((r) => setTimeout(r, 3_000))]);
+    const sources: ScanSource[] = [
+      { where: "link", text: data.allLinks.join("\n") },
+      { where: "text", text: data.allText },
+      { where: "html", text: data.html },
+      ...scripts.map((text): ScanSource => ({ where: "script", text })),
+    ];
+    return {
+      ...base,
+      // Every word the page shows, for "does it name this contract", bounded as a read's text is.
+      allText: data.allText.slice(0, MAX_TEXT * 2),
+      findings: findInSources(sources),
+      loaded: { scripts: scripts.length, scriptBytes, ownCalls, callHosts: [...callHosts] },
     };
   } finally {
     await ctx.close().catch(() => {});
@@ -139,9 +229,21 @@ const send = (res: import("node:http").ServerResponse, code: number, body: unkno
   res.end(json);
 };
 
+/** Waits up to `ms` for the one browser, or false. A read never waits; a scan has someone waiting on X. */
+async function slot(ms: number): Promise<boolean> {
+  const until = Date.now() + ms;
+  while (busy) {
+    if (Date.now() >= until) return false;
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  busy = true;
+  return true;
+}
+
 createServer(async (req, res) => {
   if (req.method === "GET" && req.url === "/health") return send(res, 200, { ok: true, busy });
-  if (req.method !== "POST" || !req.url?.startsWith("/read")) return send(res, 404, { error: "not found" });
+  const route = req.method === "POST" && req.url ? (req.url.startsWith("/read") ? "read" : req.url.startsWith("/scan") ? "scan" : null) : null;
+  if (!route) return send(res, 404, { error: "not found" });
 
   // The token is not optional. Without it this is an open proxy with an address
   // on the same private network as the database.
@@ -167,10 +269,9 @@ createServer(async (req, res) => {
   const url = safeFetchUrl(String(parsed?.url ?? ""));
   if (!url) return send(res, 400, { error: "refused: not an https URL we will fetch" });
 
-  if (busy) return send(res, 429, { error: "busy" });
-  busy = true;
+  if (!(await slot(route === "scan" ? SCAN_SLOT_WAIT_MS : 0))) return send(res, 429, { error: "busy" });
   try {
-    send(res, 200, await read(url));
+    send(res, 200, await visit(url, route === "scan"));
   } catch (e) {
     send(res, 502, { error: `could not read the page: ${String((e as Error)?.message ?? e).slice(0, 200)}` });
   } finally {

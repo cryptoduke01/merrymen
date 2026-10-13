@@ -11,7 +11,16 @@
  * matters — the browser image — is where it will show.
  */
 declare module "playwright" {
+  /** A response the page received: read by /scan for the bundles it loaded and the calls it made. */
+  export interface Response {
+    url(): string;
+    status(): number;
+    headers(): Record<string, string>;
+    body(): Promise<Buffer>;
+    request(): { url(): string; resourceType(): string };
+  }
   export interface Page {
+    on(event: "response", handler: (response: Response) => void): void;
     setDefaultTimeout(ms: number): void;
     goto(url: string, opts?: { waitUntil?: string; timeout?: number }): Promise<{ status(): number } | null>;
     waitForTimeout(ms: number): Promise<void>;
