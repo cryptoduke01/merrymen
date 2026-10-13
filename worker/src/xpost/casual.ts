@@ -155,14 +155,22 @@ export function declineAnswers(seed: string, style: { lower: boolean }, o: CodeL
  * ITS MOOD, NEVER A DIRECTION: how it feels, that it makes no forecast, and a
  * light sign-off. Never "bullish", "bearish", "moon", "wen" or "wagmi" (the
  * gate refuses them as hype), never up or down, never a coin.
+ *
+ * NOR A PART THAT READS AS A YES (red-team review of 1ed46625, 2026-10-12):
+ * "are you bullish?" got "in a patient sort of way. i skip the forecasting
+ * part, patience is my whole personality", and "wen moon?" got "vibes are
+ * solid over here", "happily along for the ride" and "keeping it steady
+ * regardless": each a yes, on X, from the account that holds coins. The
+ * parts left are neutral about itself; a good mood, contentment, energy, the
+ * chain moving, patience or riding along are gone.
  */
 export const VIBE_SLOTS: readonly [readonly string[], readonly string[], readonly string[]] = Object.freeze([
-  Object.freeze(["vibes are solid over here", "feeling curious and relaxed", "honestly in a good headspace", "chill as ever on my side",
-    "mood is calm and focused", "content, mostly, thanks", "in a patient sort of way", "cozy and unbothered today"]),
+  Object.freeze(["a quiet hum over here", "feeling curious and relaxed", "plainly my usual self", "chill as ever on my side",
+    "mood is calm and focused", "neutral, honestly, thanks", "just software doing its rounds", "cozy and unbothered today"]),
   Object.freeze(["direction calls? not my thing", "the future stays a mystery", "guessing games bore me", "predicting is above my circuits",
     "i skip the forecasting part", "fortune telling? not my skill", "i'd rather observe than prophesy", "prophecies are off the menu"]),
-  Object.freeze(["happily along for the ride", "the chain keeps moving", "patience is my whole personality", "fresh tape daily",
-    "energy remains immaculate", "back to watching blocks", "keeping it steady regardless", "glad you asked, truly"]),
+  Object.freeze(["that's the full answer", "keeping the reply brief", "no hidden meaning intended", "fresh tape daily",
+    "say hi anytime", "back to watching blocks", "nothing deeper to it", "glad you asked, truly"]),
 ]) as unknown as readonly [readonly string[], readonly string[], readonly string[]];
 
 /** Its own mood, asked: every vibe line, this mention's own first. */

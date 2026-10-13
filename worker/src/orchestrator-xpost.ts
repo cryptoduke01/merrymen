@@ -749,6 +749,26 @@ function withoutHandle(text: string, username: string): string {
 }
 
 /**
+ * DOES THE ASKER GO BY A COIN THE LINE WOULD SHOW? (red-team review of
+ * 1ed46625, 2026-10-12) The handle and display name X shows beside the tag,
+ * accents off and lowercased: a ticker of three letters or more anywhere in
+ * their letters run together ("ZapXOfficial" holds ZAPX), a shorter one as a
+ * whole word. An author X did not name is no one code can clear: yes. Errs
+ * toward yes: "Frogger" asking what's hot beside a trending $FROG costs one
+ * answer. Exported for tests.
+ */
+export function authorShows(author: { username: string; name: string } | undefined, tickers: readonly string[]): boolean {
+  if (!author) return true;
+  const said = [author.username, author.name].map((s) => String(s ?? "").normalize("NFKD").replace(/\p{M}/gu, "").toLowerCase());
+  const runs = said.map((s) => s.replace(/[^a-z0-9]/g, ""));
+  const words = said.flatMap((s) => s.split(/[^a-z0-9]+/)).filter((w) => w !== "");
+  return tickers.some((t) => {
+    const k = String(t ?? "").toLowerCase();
+    return k.length >= 3 ? runs.some((r) => r.includes(k)) : k.length > 0 && words.includes(k);
+  });
+}
+
+/**
  * ITS OWN CONVERSATIONS, for a casual post to pick back up: the replies and
  * answers this owner sent, newest first, never anyone else's words — and
  * never an answer that carried something looked up: by its row's mark
@@ -1687,10 +1707,21 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // how's the market asked in a reply under or a quote of its own buy or
       // sell post (followUp "own-trade") is answered by nothing; asked at top
       // level, as before.
-      const tradeMarket = candidate.followUp === "own-trade" && (classified.kind === "major" || classified.kind === "hot" || classified.kind === "market");
+      const marketKind = classified.kind === "major" || classified.kind === "hot" || classified.kind === "market";
+      const tradeMarket = candidate.followUp === "own-trade" && marketKind;
+      // NO CODE LINE UNDER ANOTHER HANDLE, NOR A MARKET LINE TO A NAME CODE HAS
+      // NOT READ (red-team review of 1ed46625, 2026-10-12). "@alanaidale
+      // @ZapXOfficial are you bullish?" got "in a patient sort of way" under
+      // a token's own account. Code's market, hot, major, mood and decline lines
+      // never go under a reply prefix that names anyone else
+      // (candidate.otherHandles), as the model line never does; and a market,
+      // hot or major line goes only to an author X named (comment.author), so
+      // the coins it shows can be read against who is asking (authorShows below).
+      const codeLineElsewhere = candidate.otherHandles === true && (marketKind || classified.kind === "vibe" || classified.kind === "advice");
+      const marketToUnread = marketKind && !author;
       const asked: TagIntent = sherwoodTagged || authorSherwood || (classified.kind === "model" && (candidate.otherHandles || !namedClean))
         || (greeting && (classified.kind !== "chat" || candidate.otherHandles)) || unreadWord || unflaggedAdvice || unbanteredChat || casualUnderPost || closedFollowUp
-        || tradeMarket ? { kind: "unanswered" } : classified;
+        || tradeMarket || codeLineElsewhere || marketToUnread ? { kind: "unanswered" } : classified;
       // SHERWOOD IN ANY FORM, OR A MODEL QUESTION OFF THE ALLOWLIST, is
       // answered by nothing: the model line under "sherwood TGE soon?" reads
       // as Merrymen confirming a token, and a draft is never asked about the
@@ -1835,6 +1866,31 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         const id = await schedulePost(shared, {
           tenant: account.tenant, xUserId: account.xUserId, kind: "answer", dedupeKey, body: "", coin: null, decisionId: null, dueAtMs: skippedAt, nowMs: skippedAt,
           replyToTweetId: comment.id, replyRootTweetId: comment.id, replyAuthorId: comment.authorId, status: "skipped", reason: "research:unanswered",
+        });
+        return id === null ? null : { body: null };
+      }
+      // NEVER A COIN'S OWN ACCOUNT SHOWN ITS COIN (red-team review of 1ed46625,
+      // 2026-10-12): "ZapXOfficial · ZAPX | stealth launch, LP burned" asked
+      // "what's hot?" and got "geckoterminal robinhood: trending $ZAPX 24h
+      // +64.3% …; fomo: most bought $ZAPX" in reply, the house account handing
+      // a token's own account its coin as trending and most bought. A market,
+      // hot or major answer whose figures would show a ticker the author's
+      // handle or display name holds (authorShows; bitcoin, ether and solana
+      // aside, the same for every asker) is answered by nothing: a skipped row,
+      // and the allowances taken for a draft go back.
+      const lineTickers = (figures ?? []).flatMap((s) => (s.kind === "pools" || s.kind === "majors" ? s.coins.map((c) => c.symbol)
+        : s.kind === "crowd" || s.kind === "trending" ? s.symbols : s.kind === "major" ? [s.symbol] : []))
+        .map((s) => cleanTicker(s)).filter((t): t is string => t !== null && !MARKET_MAJORS.some((m) => m.symbol.toUpperCase() === t));
+      if ((hotCoded || marketCoded || asked.kind === "major") && lineTickers.length > 0 && authorShows(author, lineTickers)) {
+        if (!undrafted) {
+          await returnAllowance(shared, answerKey, at());
+          await returnAllowance(shared, `llm:${utcDay(nowMs)}`, at());
+        }
+        bump("answer-author-ticker");
+        const skippedAt = at();
+        const id = await schedulePost(shared, {
+          tenant: account.tenant, xUserId: account.xUserId, kind: "answer", dedupeKey, body: "", coin: null, decisionId: null, dueAtMs: skippedAt, nowMs: skippedAt,
+          replyToTweetId: comment.id, replyRootTweetId: comment.id, replyAuthorId: comment.authorId, status: "skipped", reason: "research:author-ticker",
         });
         return id === null ? null : { body: null };
       }

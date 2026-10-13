@@ -930,6 +930,19 @@ red-team review of 1ed46625: under "grabbed some $PEPE on robinhood chain
 with real money", "how's pepe doing?" got "coingecko: $PEPE #17, mcap
 ~$5.2B, …, 24h +14.2%", the chain copy it holds presented as the
 top-twenty coin): answered by nothing; asked at top level, as before.
+**Code's lines never go to a token's own account, nor under another
+handle** (red-team review of 1ed46625: "ZapXOfficial · ZAPX | stealth
+launch, LP burned" asking "what's hot?" got "trending $ZAPX 24h +64.3% …;
+fomo: most bought $ZAPX", and "@alanaidale @ZapXOfficial are you bullish?"
+got "in a patient sort of way"). A market, hot or major line goes only to an
+author X named, and never when the figures would show a ticker the author's
+handle or display name holds (`authorShows`; bitcoin, ether and solana
+aside): a skipped `research:author-ticker` row. Under a reply prefix that
+names anyone else, no market, hot, major, mood or decline line. And the
+mood line's parts that read as a yes ("in a patient sort of way",
+"patience is my whole personality", "vibes are solid over here", "happily
+along for the ride", "keeping it steady regardless", a good headspace,
+contentment, energy, the chain moving) are gone.
 
 **Limits.** `ANSWERS_PER_AUTHOR` is six a person a rolling day (from two) and
 `ANSWERS_PER_DAY` sixty a day per X account (from 24), so a person can

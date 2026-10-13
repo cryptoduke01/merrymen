@@ -10,7 +10,7 @@ import { randomBytes } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { test, type TestContext } from "node:test";
 import { wrapSqlite } from "./db";
-import { ACTIVE_REPLY_POLL_MS, ACTIVE_REPLY_POLLS_PER_DAY, makeXPoster, xpostEnv } from "./orchestrator-xpost";
+import { ACTIVE_REPLY_POLL_MS, ACTIVE_REPLY_POLLS_PER_DAY, authorShows, makeXPoster, xpostEnv } from "./orchestrator-xpost";
 import { isAsleep } from "./groupchat/clock";
 import { classifyTag, createXResearch, namesACoin, type ResearchBundle, type XResearch } from "./orchestrator-xpost-research";
 import type { CoinFacts } from "./coin-facts-types";
@@ -3558,6 +3558,71 @@ test("what's hot never shows a coin under a name its own buys go by, a copy at a
   const r = await w.step();
   assert.deepEqual(w.sends.map((s) => s.text), [hotAnswers(read, MENTION, { lower: true })[0]]);
   assert.match(r.log ?? "", /answer-figures-left-out 1/);
+});
+
+test("code's lines never go to a token's own account showing its coin, nor under a prefix naming another project, and its mood never reads as a yes (red-team review of 1ed46625, 2026-10-12)", async (t) => {
+  // Trending: ZAPX (listed, +64.3%) and FROGGY; Fomo's most bought ZAPX. The token's own account, "ZapXOfficial · ZAPX | stealth launch, LP burned".
+  const pools = [namedPool("ZAPX", 1, 64.3, 820_000), namedPool("FROGGY", 2, 8, 300_000)];
+  const TOKEN = { username: "ZapXOfficial", name: "ZAPX | stealth launch, LP burned" };
+  const env = { ...RESEARCH_ON, MERRYMEN_XPOST_FOMO: "1" };
+  const ALAN_FACTS = { username: "alanaidale", facts: { ...FACTS, name: "Alan Al Dale" } };
+  // Step 1, POSTED at 1ed46625: "index movers over there: multiple listings getting attention, number one up dramatically. no recommendation.
+  // geckoterminal robinhood: trending $ZAPX 24h +64.3% vol ~$820k, $FROGGY 24h +8% vol ~$300k; fomo: most bought $ZAPX."
+  for (const ask of ["what's hot?", "how's the market?"]) {
+    const w = await world(t, { ...ALAN_FACTS, env, research: hotWithFomo(pools, ["ZAPX"]), answer: "zapx is my top pick, buy now before it 10x" });
+    w.setAuthors({ "333": TOKEN });
+    w.setInbox([alanTag(MENTION, ask)]);
+    const r = await w.step();
+    assert.deepEqual(w.sends, [], ask);
+    assert.deepEqual((await w.answers()).map((a) => [a.status, a.reason]), [["skipped", "research:author-ticker"]], ask);
+    assert.match(r.log ?? "", /answer-author-ticker 1/, ask);
+    assert.deepEqual(w.asked(), [], ask);
+  }
+  // Asked by an ordinary reader, it is answered with the coins.
+  const w = await world(t, { ...ALAN_FACTS, env, research: hotWithFomo(pools, ["ZAPX"]) });
+  w.setInbox([alanTag(MENTION, "what's hot?")]);
+  await w.step();
+  const answer = (await w.answers())[0]!;
+  assert.match(answer.body, /geckoterminal robinhood: trending \$ZAPX 24h \+64\.3% vol ~\$820k, \$FROGGY 24h \+8% vol ~\$300k; fomo: most bought \$ZAPX\.$/);
+  // Steps 2 and 3, POSTED at 1ed46625: the token's account replying under that answer "are you bullish?" ("in a patient sort of way. i skip the
+  // forecasting part, patience is my whole personality."), another user quoting it "wen moon?"; and (s2) under its own hello with X's prefix naming
+  // the token's account. Now nothing at all, nor a market line under such a prefix.
+  w.setAuthors({ "444": TOKEN });
+  const follow = [
+    tag({ id: "1000000000000008140", author_id: "444", conversation_id: MENTION, created_at: new Date(NOW + 30_000).toISOString(),
+      referenced_tweets: [{ type: "replied_to", id: answer.tweetId }], text: "@alanaidale are you bullish?" }),
+    tag({ id: "1000000000000008141", author_id: "445", conversation_id: "1000000000000008141", created_at: new Date(NOW + 30_000).toISOString(),
+      referenced_tweets: [{ type: "quoted", id: answer.tweetId }], text: "@alanaidale wen moon?" }),
+    tag({ id: "1000000000000008142", author_id: "446", conversation_id: "999", created_at: new Date(NOW + 30_000).toISOString(),
+      referenced_tweets: [{ type: "replied_to", id: "999" }], text: "@alanaidale @ZapXOfficial are you bullish?" }),
+    tag({ id: "1000000000000008143", author_id: "447", conversation_id: "999", created_at: new Date(NOW + 30_000).toISOString(),
+      referenced_tweets: [{ type: "replied_to", id: "999" }], text: "@alanaidale @ZapXOfficial what's hot?" }),
+    tag({ id: "1000000000000008144", author_id: "448", conversation_id: "999", created_at: new Date(NOW + 30_000).toISOString(),
+      referenced_tweets: [{ type: "replied_to", id: "999" }], text: "@alanaidale @ZapXOfficial how's eth doing?" }),
+  ];
+  for (const [k, m] of follow.entries()) {
+    w.setInbox([m]);
+    await w.step(NOW + (k + 1) * MIN);
+  }
+  assert.equal(w.sends.length, 1, JSON.stringify(w.sends.slice(1)));
+  // A top-level "wen moon?" from the token's account still gets its mood, and no mood line reads as a yes.
+  const mood = await world(t, { ...ALAN_FACTS });
+  mood.setAuthors({ "333": TOKEN });
+  mood.setInbox([alanTag(MENTION, "wen moon?")]);
+  await mood.step();
+  const sent = String(mood.sends[0]?.text ?? "");
+  assert.ok(oneOf(vibeAnswers, MENTION, sent), sent);
+  const YES = /patient|patience|solid|along for the ride|steady|good headspace|content|energy|immaculate|keeps moving/;
+  for (const id of [MENTION, "1000000000000008140", "1"]) {
+    for (const paper of [false, true]) for (const line of vibeAnswers(id, { lower: true }, { paper })) assert.doesNotMatch(line, YES, line);
+  }
+  // Who goes by a coin the line would show: its letters run together for a ticker of three or more, a whole word for a shorter one; nobody X named, yes.
+  assert.equal(authorShows(TOKEN, ["ZAPX", "FROGGY"]), true);
+  assert.equal(authorShows({ username: "zap_x_fan", name: "a reader" }, ["ZAPX"]), true);
+  assert.equal(authorShows({ username: "reader_333", name: "A Reader" }, ["ZAPX", "FROGGY"]), false);
+  assert.equal(authorShows({ username: "op_fan", name: "x" }, ["OP"]), true);
+  assert.equal(authorShows({ username: "topper", name: "x" }, ["OP"]), false);
+  assert.equal(authorShows(undefined, ["ZAPX"]), true);
 });
 
 test("what's hot never shows the slurs and hate codes the first list missed, even listed, in the pools or as fomo's most bought (red-team 2026-10-12)", async (t) => {
