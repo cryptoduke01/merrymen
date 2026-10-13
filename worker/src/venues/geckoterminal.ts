@@ -165,6 +165,41 @@ async function readGecko<T extends FeedResult>(key: string, request: (source: Ge
   return { ...await read(geckoSource({})), primaryFailure: result.failure };
 }
 
+/** CoinGecko's MAIN API (coins, search, trending), on the Pro key's own fixed origin. */
+export const COINGECKO_PRO_MAIN = "https://pro-api.coingecko.com/api/v3";
+
+/**
+ * ONE READ OF COINGECKO'S MAIN API — a coin by name or ticker, its market,
+ * the trending list — on the Pro lane: the same spacing slot (and evidence
+ * row), 429 cooldown, plan latch and monthly credit ceiling as every onchain
+ * read, its pages kept apart (`coins:`). `route` names the endpoint for the
+ * latch ("search", "coins/markets", "search/trending").
+ *
+ * ONLY WITH A PRO KEY, AND NEVER A FALLBACK. The keyless public GeckoTerminal
+ * source has no such endpoints, and the key never goes anywhere but this
+ * origin: keyless is `no-pro-key`, and nothing is asked. `budgetMs` bounds
+ * the whole read, slot wait included, so a caller with seconds to spare is
+ * told `request-budget` rather than kept waiting or charged for an answer
+ * nobody hears.
+ */
+export async function cachedCoinGecko<T extends FeedResult>(
+  key: string,
+  request: (headers: Readonly<Record<string, string>>, base: string, remainingMs: number) => Promise<T>,
+  unavailable: (reason: string) => T,
+  opts: GeckoReadOptions = {},
+): Promise<T> {
+  const source = geckoSource();
+  if (source.id !== "coingecko-pro") return unavailable("no-pro-key");
+  const deadline = feedClock.now() + Math.min(30_000, Math.max(0, opts.budgetMs ?? 30_000));
+  try {
+    return await cacheFor(source, opts.fleet).get(`coins:${key}`, async () => {
+      const remaining = deadline - feedClock.now();
+      const result = remaining > 0 ? await request(source.headers, COINGECKO_PRO_MAIN, remaining) : unavailable("request-budget");
+      return { ...result, provider: source.id };
+    }, failure => ({ ...unavailable(failure), provider: source.id }), deadline, { lane: opts.lane, route: opts.route });
+  } catch { return { ...unavailable("cache-unavailable"), provider: source.id }; }
+}
+
 /**
  * A refused response, reduced to a safe failure code and a Retry-After.
  *
@@ -431,12 +466,14 @@ export interface GeckoFetch extends FeedResult {
  */
 export async function fetchGeckoPoolsResult(
   feed: PoolFeed,
-  opts: { timeoutMs?: number; page?: number } = {},
+  opts: { timeoutMs?: number; page?: number } & Pick<GeckoReadOptions, "budgetMs" | "fleet" | "lane"> = {},
 ): Promise<GeckoFetch> {
   return readGecko(`${feed}:${opts.page ?? 1}`,
-    (source, remainingMs) => requestGeckoPools(feed, { ...opts, timeoutMs: Math.min(opts.timeoutMs ?? 10_000, remainingMs) }, source),
+    (source, remainingMs) => requestGeckoPools(feed, { timeoutMs: Math.min(opts.timeoutMs ?? 10_000, remainingMs), ...(opts.page !== undefined ? { page: opts.page } : {}) }, source),
     failure => ({ pools: [], failed: true, failure }),
-    { route: poolsRoute(feed, opts.page) });
+    // A caller someone is waiting on (an X answer) names its budget, its row
+    // and the fleet lane; the tape names none and reads as it always did.
+    { route: poolsRoute(feed, opts.page), ...(opts.budgetMs !== undefined ? { budgetMs: opts.budgetMs } : {}), ...(opts.fleet ? { fleet: opts.fleet } : {}), ...(opts.lane ? { lane: opts.lane } : {}) });
 }
 
 const poolsRoute = (feed: PoolFeed, page = 1) => `/networks/${GECKO_NETWORK}/${feed}?page=${page}`;
@@ -621,6 +658,21 @@ export interface ScreenLimits {
    */
   minFdvUsd?: number;
 }
+
+/**
+ * THE DISCOVERY SCREEN: what a trending coin has to clear before the scout is
+ * even asked about it (index.ts discoverTrending) — at least $25k in the pool
+ * (the Trencher's own price floor, strategies/trencher.ts minLiquidityUsd),
+ * $50k of volume and a hundred distinct buyers in a day. Measured against live
+ * data it keeps roughly 32 of 56 distinct pools: a cheapness filter, not a
+ * judgement. Exported so an X answer's "what's hot" shows only coins the
+ * fleet's own discovery would look at (orchestrator-xpost-research.ts).
+ */
+export const DISCOVERY_SCREEN: Readonly<ScreenLimits> = Object.freeze({
+  minReserveUsd: 25_000,
+  minVolume24hUsd: 50_000,
+  minBuyers24h: 100,
+});
 
 /**
  * Drop pools not worth considering, and say why for the ones dropped.

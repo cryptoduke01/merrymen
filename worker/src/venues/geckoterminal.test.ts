@@ -778,6 +778,22 @@ describe("the Pro lane's pace, priority and plan latch", () => {
     } finally { console.warn = warn; resetGeckoFeedsForTest(); rmSync(home, { recursive: true, force: true }); }
   });
 
+  it("an X answer's pool read names its budget: a slot that does not come in time is skipped, never waited on or paid for", async () => {
+    const starts: number[] = [];
+    recordStarts(starts);
+    // The tape's own read took the evidence row's slot a moment ago.
+    await fetchGeckoPoolsResult("new_pools", { lane: "evidence" });
+    const t = now;
+    const late = await fetchGeckoPoolsResult("trending_pools", { timeoutMs: 1000, budgetMs: 1000, lane: "evidence" });
+    assert.equal(late.failed, true);
+    assert.match(late.failure ?? "", /^(?:request-budget|timeout)$/);
+    assert.equal(starts.length, 1, "nothing was asked, nothing spent");
+    assert.ok(now - t <= 1000, "and it waited no longer than its budget");
+    // The tape's own read, with no budget named, still reads as it always did.
+    assert.equal((await fetchGeckoPoolsResult("trending_pools")).failed, false);
+    assert.equal(starts.length, 2);
+  });
+
   it("a 5xx or 429 on Pro is never latched", async () => {
     let pro = 0;
     globalThis.fetch = (async (input: string | URL | Request) => {

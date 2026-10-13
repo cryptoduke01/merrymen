@@ -153,7 +153,7 @@ describe("comment reply consent", () => {
     assert.match(text(), new RegExp(`reply as @${HANDLE} to selected comments on its coin posts\\.`));
     assert.match(text(), /same daily limit/);
     assert.match(text(), /at least ten minutes/);
-    assert.doesNotMatch(text(), /tag it|right away|24 answers/, "an owner merrymen did not make active is told of comment replies only");
+    assert.doesNotMatch(text(), /tag it|right away|60 answers|market figures|CoinGecko/, "an owner merrymen did not make active is told of comment replies only");
     await press(buttons(`Let it reply as @${HANDLE}`)[0], "reply confirm");
     assert.deepEqual(writes()[0]?.body, { action: "enable-replies", owner: OWNER, xUserId: X_ID });
     assert.equal(replySwitch()?.getAttribute("aria-checked"), "true");
@@ -163,14 +163,17 @@ describe("comment reply consent", () => {
     routes["GET /api/x/account"] = () => json({ ...CONNECTED, postingEnabled: true, repliesAvailable: true, repliesActive: true });
     routes["POST /api/x/account"] = () => json({ ok: true, replyEnabled: true });
     await shown();
-    assert.match(text(), /Selected posts that tag your Merryman and comments on its posts, answered as @merry_poster right away/);
+    assert.match(text(), /Selected posts that tag your Merryman, reply to it or quote it, answered as @merry_poster right away/);
     await press(replySwitch(), "reply switch");
     assert.equal(writes().length, 0);
     const dialog = ui.container.querySelector("dialog")?.textContent ?? "";
-    assert.match(dialog, new RegExp(`reply as @${HANDLE} to selected posts that tag it, including comments on its own posts\\.`));
+    assert.match(dialog, new RegExp(`reply as @${HANDLE} to selected posts that tag it, reply to it or quote it\\.`));
     assert.match(dialog, /Answers go out right away: they don’t wait under Coming up/);
-    assert.match(dialog, /Up to 24 answers a day on top of its posts, and at most two to one person a day\./);
-    assert.match(dialog, /Anyone can reply stop to opt out\./);
+    assert.match(dialog, /It answers people who tag it, reply to it or quote it, a few times a day each: up to 60 answers a day on top of its posts, and at most six to one person a day\./);
+    assert.match(dialog, /Answers carry no opt-out line, and it never answers someone who asked it to stop\./);
+    // No promise to anyone that they can reply stop (the owner's decision, 2026-10-12): replying or quoting is asking.
+    assert.doesNotMatch(dialog, /Anyone can reply stop|can reply stop to opt out|after 30 days/);
+    assert.match(dialog, /Answers may include market figures from public data \(CoinGecko, GeckoTerminal, Fomo and Bitquery\), such as a coin’s price, market cap, volume or recent change\. Merrymen adds them as the data showed them; they are never advice\./);
     assert.doesNotMatch(dialog, /at least ten minutes|same daily limit/, "it keeps no ten-minute review, so it does not promise one");
     await press(buttons(`Let it reply as @${HANDLE}`)[0], "reply confirm");
     assert.deepEqual(writes()[0]?.body, { action: "enable-replies", owner: OWNER, xUserId: X_ID });
@@ -279,6 +282,9 @@ describe("the switch and the warning", () => {
     assert.match(said, /Posts go out on their own, up to 12 a day and at least an hour apart\./);
     assert.match(said, /at least ten minutes first/);
     assert.doesNotMatch(said, /a few a day at most|now and then/, "it does not understate an active agent's posting");
+    // Its answers may carry figures Merrymen builds from public data (2026-10-12): never "no prices or amounts".
+    assert.match(said, /It never posts trade alerts or error messages, and its answers may carry market figures built from public data\./);
+    assert.doesNotMatch(said, /prices or amounts/);
     await press(buttons(`Let it post as @${HANDLE}`)[0], "the warning's confirm");
     assert.deepEqual(writes()[0]?.body, { action: "enable", xUserId: X_ID, owner: OWNER, tz: BROWSER_TZ });
   });
@@ -782,7 +788,7 @@ describe("the warning keeps its words", () => {
       "Let it post as ${handle}",
       "Not now",
       // An active agent's, as iOS says them.
-      "It writes its own posts: a hello first, then a few passing thoughts a day and a post for most coins it buys, and why. It never posts trade alerts, error messages, prices or amounts. Your saved options can add public wallet or token addresses and completed sale results.",
+      "It writes its own posts: a hello first, then a few passing thoughts a day and a post for most coins it buys, and why. It never posts trade alerts or error messages, and its answers may carry market figures built from public data. Your saved options can add public wallet or token addresses and completed sale results.",
       "Posts go out on their own, up to 12 a day and at least an hour apart. Each one waits under Coming up for at least ten minutes first, and you can skip it there. Turn this off or disconnect X at any time.",
       "Short lines in its own words, a few times a day.",
     ]) {
@@ -799,17 +805,18 @@ describe("the warning keeps its words", () => {
       "Your Merryman will reply as ${handle} to selected comments on its coin posts.",
       "It chooses which comments to answer; it won’t reply to every comment. Replies share the same daily limit as posts.",
       "Each reply waits under Coming up for at least ten minutes first, with a link to the comment, and you can skip it there. Turn replies off at any time to cancel waiting replies.",
-      "Your Merryman will reply as ${handle} to selected posts that tag it, including comments on its own posts.",
+      "Your Merryman will reply as ${handle} to selected posts that tag it, reply to it or quote it.",
       "It chooses which posts to answer; it won’t answer every one. Answers go out right away: they don’t wait under Coming up, so you can’t skip one first.",
-      "Up to 24 answers a day on top of its posts, and at most two to one person a day. Anyone can reply stop to opt out. Turn replies off at any time to stop answering.",
+      "It answers people who tag it, reply to it or quote it, a few times a day each: up to 60 answers a day on top of its posts, and at most six to one person a day. Answers carry no opt-out line, and it never answers someone who asked it to stop. Turn replies off at any time to stop answering.",
+      "Answers may include market figures from public data (CoinGecko, GeckoTerminal, Fomo and Bitquery), such as a coin’s price, market cap, volume or recent change. Merrymen adds them as the data showed them; they are never advice.",
       "Let it reply as ${handle}",
     ]) {
       assert.ok(SRC.includes(said), `the reply warning lost: "${said}"`);
     }
     assert.doesNotMatch(SRC, /if merrymen has made it an active poster/, "the warning says which it is, never 'if'");
     // The numbers it promises are the orchestrator's own lane limits.
-    assert.equal(ANSWERS_PER_DAY, 24, "the warning says up to 24 answers a day");
-    assert.equal(ANSWERS_PER_AUTHOR, 2, "the warning says at most two to one person a day");
+    assert.equal(ANSWERS_PER_DAY, 60, "the warning says up to 60 answers a day");
+    assert.equal(ANSWERS_PER_AUTHOR, 6, "the warning says at most six to one person a day");
   });
 
   it("the lead sentence is bold, and the warning is the only place that sends 'enable'", () => {

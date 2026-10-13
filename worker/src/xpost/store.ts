@@ -924,8 +924,9 @@ export async function schedulePost(db: Db, p: NewPost): Promise<number | null> {
         .run(tenantKey(p.tenant), p.xUserId);
       if (current.changes !== 1 || !(await repliesEnabledFor(tx, p.tenant, p.xUserId)) ||
           await repliesOptedOut(tx, p.xUserId, p.replyAuthorId!)) return null;
-      // ONE PERSON, A FEW ANSWERS A DAY, whatever happened to them: two
-      // accounts tagging each other cannot become an endless conversation.
+      // ONE PERSON, A FEW ANSWERS A DAY (ANSWERS_PER_AUTHOR), whatever happened
+      // to them: two accounts tagging each other cannot become an endless
+      // conversation.
       // THE COUNT IS TAKEN UNDER A LOCK ON THE X ACCOUNT AND THE PERSON. The
       // account row above is the owner's: two owners connected to one X
       // account lock two rows, and could both count one answer and both
@@ -947,8 +948,14 @@ export async function schedulePost(db: Db, p: NewPost): Promise<number | null> {
   return insertPost(db, p);
 }
 
-/** Answers to one person per rolling day, including skips and uncertain sends. */
-export const ANSWERS_PER_AUTHOR = 2;
+/**
+ * Answers to one person per rolling day, including skips and uncertain sends:
+ * six (the owner's decision, 2026-10-12, up from two), so someone who replies
+ * to an answer can carry on a short conversation, and two accounts tagging
+ * each other still cannot become an endless one. Counted under the per-person
+ * lock in schedulePost, whichever owner on the X account writes it.
+ */
+export const ANSWERS_PER_AUTHOR = 6;
 const ANSWER_AUTHOR_WINDOW_MS = 24 * 60 * 60_000;
 
 /** Answers this X account wrote to one person in the rolling day before `nowMs`, whatever became of them. */
@@ -1286,6 +1293,127 @@ export async function ownRootTweetIds(db: Db, xUserId: string, limit = 2000): Pr
     )
     .all(String(xUserId), int(Math.max(1, Math.min(5000, limit))))) as { tweet_id: unknown }[];
   return new Set(rows.map((r) => String(r.tweet_id ?? "")).filter((t) => t !== ""));
+}
+
+/**
+ * THE CONVERSATIONS THIS X ACCOUNT IS IN, AND WHO IT ANSWERED THERE (the
+ * owner's decision, 2026-10-12: whoever replies to it or quotes it is giving
+ * consent). What tagCandidate (replies.ts) answers a reply or a quote by:
+ *
+ *   - `roots`: its own posted top-level posts (ownRootTweetIds);
+ *   - `posts`: those, and every answer or comment reply it posted (kind
+ *     answer or reply, status posted, with a tweet id): its own words, which
+ *     a follow-up or a quote may sit under;
+ *   - `answered`: each tag or comment one of those posted answers replied
+ *     to, by its author: the person's own earlier post that this account
+ *     read, judged answerable and answered. A conversation rooted at one is
+ *     one it is in; a person's reply to their own such post is a follow-up.
+ *
+ * Only what X surely published counts (posted rows): a draft, a skip, a
+ * failed or uncertain send was never seen under anyone's post. Bounded like
+ * ownRootTweetIds: at most `limit` top-level posts and `limit` answers and
+ * replies, newest first; a reply under an older one is no reply this account
+ * can vouch for, and goes unanswered.
+ *
+ * NOR ANYTHING UNDER A POST OF ITS OWN THAT `shut` REFUSES (red-team review
+ * of 1ed46625, 2026-10-12). Under its own sherwood-1 model line ("the new
+ * sherwood-1 is what they've got in the oven"), "can i buy it yet?", "should
+ * i buy some before it's done?" and "wen moon" got code's decline or mood
+ * line, "mum's the word on the rest" reading as Merrymen confirming a
+ * sherwood-1 token. A posted tweet whose body `shut` refuses (the caller's
+ * screen: orchestrator-xpost.ts passes sherwood in any form) is in none of
+ * the three: a reply or a quote under it, or under the tag it answered, is
+ * answered by nothing, and a conversation rooted at it is no conversation of
+ * its own.
+ *
+ * AND WHAT A FOLLOW-UP THERE SITS UNDER (red-team review of 1ed46625,
+ * 2026-10-12). A follow-up lost the coin its conversation was about: under
+ * its decline to "should i buy $SCAM?", "what have you been buying lately?"
+ * was handed its PEPE buys and "yes, bought it earlier" went out, and "how
+ * are you?" was drafted as "doing great, this one looks solid to me". Code
+ * never stores what a tag said, so it stores what kind of exchange each
+ * answer was (`ANSWER_PLAIN_THREAD` on the answer's row), and:
+ *
+ *   - `plain`: what a follow-up may sit under as plain chat: its own intro
+ *     and casual posts, and each answer marked plain (a greeting, or banter
+ *     handed nothing, in a thread that was itself plain), with the tag it
+ *     answered;
+ *   - `trade`: its own buy and sell posts, under which the coin is its own
+ *     public buy; and an intro or casual post that names a coin it bought
+ *     (the caller's `trade` screen, red-team review of daaae961).
+ *
+ * Anything else in `posts` or `answered` (a decline, its mood, a market
+ * line, a coin's answer, an answer told its buys, a comment reply on a buy
+ * post, any answer from before the mark) is closed: a follow-up under it is
+ * answered with a greeting or nothing (orchestrator-xpost.ts writeAnswer).
+ */
+export interface OwnThreads {
+  roots: Set<string>;
+  posts: Set<string>;
+  answered: Map<string, string>;
+  plain: Set<string>;
+  trade: Set<string>;
+}
+
+/**
+ * AN ANSWER A FOLLOW-UP MAY BE CHATTED UNDER, by its row's `coin` (which no
+ * answer otherwise uses but ANSWER_LOOKED_UP): a greeting, or banter handed
+ * nothing and told none of its buys, under a tag that was itself top level or
+ * plain (orchestrator-xpost.ts writeAnswer). Absent: closed.
+ */
+export const ANSWER_PLAIN_THREAD = "plain-thread";
+
+/**
+ * `trade`: the caller's screen for an intro or casual post that is about a
+ * coin it bought (orchestrator-xpost.ts passes its buys' names, red-team
+ * review of daaae961): such a post sits with its buy and sell posts, never in
+ * `plain`. `closed`: the caller's screen for a casual post that talks about
+ * a coin or the market at all (red-team review of daaae961): in neither, so
+ * a reply under it or a quote of it is answered with a greeting or nothing.
+ * Its hello is what it is, and stays plain.
+ */
+export async function ownThreadTweets(db: Db, xUserId: string, limit = 2000, shut: (body: string) => boolean = () => false,
+  trade: (body: string) => boolean = () => false, closed: (body: string) => boolean = () => false): Promise<OwnThreads> {
+  const max = int(Math.max(1, Math.min(5000, limit)));
+  const tops = (await db
+    .prepare(
+      `SELECT tweet_id, body, kind FROM xpost_posts
+        WHERE x_user_id = ? AND status = 'posted' AND tweet_id IS NOT NULL AND kind IN ('intro', 'casual', 'buy', 'sell')
+        ORDER BY created_at_ms DESC, id DESC
+        LIMIT ?`,
+    )
+    .all(String(xUserId), max)) as { tweet_id: unknown; body: unknown; kind: unknown }[];
+  const roots = new Set<string>(), plain = new Set<string>(), traded = new Set<string>();
+  for (const r of tops) {
+    const tweet = String(r.tweet_id ?? "");
+    if (tweet === "" || shut(String(r.body ?? ""))) continue;
+    roots.add(tweet);
+    const own = r.kind === "buy" || r.kind === "sell";
+    if (r.kind === "casual" && closed(String(r.body ?? ""))) continue;
+    (own || trade(String(r.body ?? "")) ? traded : plain).add(tweet);
+  }
+  const rows = (await db
+    .prepare(
+      `SELECT p.tweet_id AS tweet_id, p.body AS body, p.kind AS kind, p.coin AS coin, r.reply_to_tweet_id AS reply_to_tweet_id, r.author_id AS author_id
+        FROM xpost_posts p JOIN xpost_reply_targets r ON r.post_id = p.id
+        WHERE p.x_user_id = ? AND p.status = 'posted' AND p.tweet_id IS NOT NULL AND p.kind IN ('answer', 'reply')
+        ORDER BY p.created_at_ms DESC, p.id DESC
+        LIMIT ?`,
+    )
+    .all(String(xUserId), max)) as { tweet_id: unknown; body: unknown; kind: unknown; coin: unknown; reply_to_tweet_id: unknown; author_id: unknown }[];
+  const posts = new Set(roots);
+  const answered = new Map<string, string>();
+  for (const r of rows) {
+    const tweet = String(r.tweet_id ?? ""), to = String(r.reply_to_tweet_id ?? ""), author = String(r.author_id ?? "");
+    if (shut(String(r.body ?? ""))) continue;
+    if (tweet !== "") posts.add(tweet);
+    if (to !== "" && author !== "" && !answered.has(to)) answered.set(to, author);
+    if (r.kind === "answer" && r.coin === ANSWER_PLAIN_THREAD) {
+      if (tweet !== "") plain.add(tweet);
+      if (to !== "") plain.add(to);
+    }
+  }
+  return { roots, posts, answered, plain, trade: traded };
 }
 
 /**

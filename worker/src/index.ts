@@ -340,7 +340,7 @@ import {
   resolveBitquery,
 } from "./discovery";
 import { gatewayTokenForDiscovery } from "./venues/bitquery";
-import { fetchGeckoPools, readTokenPools, type ScreenLimits, type GeckoPool } from "./venues/geckoterminal";
+import { DISCOVERY_SCREEN, fetchGeckoPools, readTokenPools, type ScreenLimits, type GeckoPool } from "./venues/geckoterminal";
 import { createMemecoinScout, nullScout } from "./strategist/memecoin-scout";
 import { readCurvePrices } from "./venues/curve-prices";
 import { createV4KeyBook, keysForToken } from "./venues/v4-keys";
@@ -354,11 +354,7 @@ import { readBestV4Price, describeV4, V4_GUARD_DEFAULTS, V4_NATIVE } from "./ven
  * is a cheapness filter rather than a judgement. Distinct BUYERS rather than
  * trade count, because a wash-trader inflates the second cheaply.
  */
-const TRENDING_SCREEN: ScreenLimits = {
-  minReserveUsd: 25_000,
-  minVolume24hUsd: 50_000,
-  minBuyers24h: 100,
-};
+const TRENDING_SCREEN: ScreenLimits = DISCOVERY_SCREEN;
 
 /**
  * The screen this tenant actually wants, which is the one above plus their own

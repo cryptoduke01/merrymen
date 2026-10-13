@@ -12,17 +12,23 @@ final class XPostingTests: XCTestCase {
         XCTAssertTrue(warning.contains("same daily limit as posts"))
         XCTAssertTrue(warning.contains("at least ten minutes"))
         XCTAssertFalse(warning.contains("tag it"))
+        XCTAssertFalse(warning.contains("market figures"))
     }
 
     /// An agent the operator made active answers tags right away, so its warning
-    /// says so and promises no review window — word for word as the web's.
+    /// says so, promises no review window, and says its answers may carry market
+    /// figures from public data — word for word as the web's.
     func testActiveAgentReplyWarningDisclosesImmediateTagAnswers() throws {
         XCTAssertEqual(XPostingAccount.replyWarning("robin_trades", active: true), [
-            "Your Merryman will reply as @robin_trades to selected posts that tag it, including comments on its own posts.",
+            "Your Merryman will reply as @robin_trades to selected posts that tag it, reply to it or quote it.",
             "It chooses which posts to answer; it won’t answer every one. Answers go out right away: they don’t wait under Coming up, so you can’t skip one first.",
-            "Up to 24 answers a day on top of its posts, and at most two to one person a day. Anyone can reply stop to opt out. Turn replies off at any time to stop answering."
+            "It answers people who tag it, reply to it or quote it, a few times a day each: up to 60 answers a day on top of its posts, and at most six to one person a day. Answers carry no opt-out line, and it never answers someone who asked it to stop. Turn replies off at any time to stop answering.",
+            "Answers may include market figures from public data (CoinGecko, GeckoTerminal, Fomo and Bitquery), such as a coin’s price, market cap, volume or recent change. Merrymen adds them as the data showed them; they are never advice."
         ].joined(separator: "\n\n"))
         XCTAssertTrue(XPostingAccount.replyHint("robin_trades", active: true).contains("right away"))
+        XCTAssertTrue(XPostingAccount.replyHint("robin_trades", active: true).contains("reply to it or quote it"))
+        // No promise to anyone that they can reply stop: replying or quoting is asking (2026-10-12).
+        XCTAssertFalse(XPostingAccount.replyWarning("robin_trades", active: true).contains("can reply stop"))
         XCTAssertTrue(XPostingAccount.replyHint("robin_trades", active: false).contains("ten-minute review window"))
         let active = try JSONDecoder().decode(J.self, from: Data(#"{"available":true,"connected":true,"postingEnabled":true,"repliesAvailable":true,"repliesActive":true,"username":"robin_trades","xUserId":"123","upcoming":[],"recent":[]}"#.utf8))
         XCTAssertTrue(try XCTUnwrap(XPostingAccount(active)).repliesActive)
@@ -60,11 +66,13 @@ final class XPostingTests: XCTestCase {
     func testActiveAgentPostingWarningSaysHowMuchItPosts() {
         XCTAssertEqual(XPostingAccount.warning("robin_trades", active: true), [
             "Your Merryman will post from whichever X account is connected — right now that's @robin_trades.",
-            "It writes its own posts: a hello first, then a few passing thoughts a day and a post for most coins it buys, and why. It never posts trade alerts, error messages, prices or amounts.",
+            "It writes its own posts: a hello first, then a few passing thoughts a day and a post for most coins it buys, and why. It never posts trade alerts or error messages, and its answers may carry market figures built from public data.",
             "Posts go out on their own, up to 12 a day and at least an hour apart. Each one waits under Coming up for at least ten minutes first, and you can skip it there. Turn this off or disconnect X at any time.",
             "X may label accounts that post automatically, and may ask an account to verify itself the first time it posts about crypto."
         ].joined(separator: "\n\n"))
         XCTAssertFalse(XPostingAccount.warning("robin_trades", active: true).contains("a few a day at most"))
+        XCTAssertFalse(XPostingAccount.warning("robin_trades", active: true).contains("prices or amounts"))
+        XCTAssertTrue(XPostingAccount.warning("robin_trades", active: false).contains("It never posts trade alerts, error messages, prices or amounts."))
     }
 
     /// Consent carries the X user id the warning named and the device's zone

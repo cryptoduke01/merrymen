@@ -486,7 +486,7 @@ export function createGateway(cfg) {
    * its MEMESCOPE_SHARE of the day, holders only the rest: the two together
    * never pass BITQUERY_POINTS_PER_DAY, and neither can spend the other's.
    */
-  async function reserveBitqueryPoints(points, purse = "holders", utc = new Date().toISOString().slice(0, 10)) {
+  async function reserveBitqueryPoints(points, purse = "holders", utc = new Date(Date.now()).toISOString().slice(0, 10)) {
     const day = T.BITQUERY_POINTS_PER_DAY;
     if (!(day > 0) || typeof store.reservePoints !== "function") return null;
     const cap = purseCap(purse);
@@ -514,7 +514,7 @@ export function createGateway(cfg) {
    * keeps points from the rest.
    */
   async function reserveHolderPoints(addr, points) {
-    const utc = new Date().toISOString().slice(0, 10);
+    const utc = new Date(Date.now()).toISOString().slice(0, 10);
     const shared = await reserveBitqueryPoints(points, "holders", utc);
     if (shared !== true) return shared;
     const own = Math.min(Math.floor(Number(T.BITQUERY_POINTS_PER_HOLDER_PER_DAY)), purseCap("holders"));
@@ -727,7 +727,7 @@ export function createGateway(cfg) {
       // operator guess between a bad key, a plan limit, a rejected query and a
       // network blip — all of which look identical from outside. The message is
       // safe to print; the key only ever travels in a request header.
-      const day = new Date().toISOString().slice(0, 10);
+      const day = new Date(Date.now()).toISOString().slice(0, 10);
       if (!err?.budget) console.error(`[gateway] memescope upstream failed: ${err instanceof Error ? err.message : String(err)}`);
       else if (scopeBudgetSaid !== day) {
         scopeBudgetSaid = day;
