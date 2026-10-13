@@ -425,10 +425,22 @@ const ADVICE_ASKED = /\?|^(?:(?:gm|gn|hey|yo|hi|hello|ser|fren|bro|alan)[\s,!.]+
  * the house holding the coin and tempted to add, for any coin named. An
  * advice tag that asks what it would buy, hold, add or sell, mentions its
  * bag, its calls or what it did, or asks for more of anything gets no decline.
+ *
+ * HOWEVER "YOU" IS WRITTEN, AND WHATEVER STANDS BETWEEN (red-team review of
+ * daaae961, 2026-10-12): from live Alan holding PEPE, "should i buy what
+ * you're buying?" got "ah, the classic question. no calls for strangers,
+ * sorry" and "should i buy the coin you just bought?" got "appreciate you
+ * asking. above my pay grade": the clause wanted whitespace straight after
+ * "you" and a fixed list of adverbs. Now "you're", "youre", "you've", "you'd"
+ * and "you are", up to three words of time or habit between ("just",
+ * "recently", "been", "currently"), "picked", "got" and "own", and asking to
+ * copy, follow or mirror it, or for the same coins as it, all get nothing.
  */
 const OWN_BUYING_ASK = new RegExp(
-  String.raw`\b(?:you|u|ya)\s+(?:(?:gonna|going\s+to|still|ever|also|already|planning\s+to|plan\s+to|thinking\s+of|wanna|want\s+to|be)\s+)?(?:buy\w*|bought|ape\w*|add\w*|grab\w*|load\w*|hold\w*|sell\w*|sold|accumulat\w*|stack\w*|long\w*|short\w*|in\s+on|into|get\s+in\w*)\b` +
-    String.raw`|\blike\s+(?:you|u)\s+did\b|\b(?:your|ur)\s+(?:bags?|positions?|buys?|entr(?:y|ies)|stack|picks?|calls?|holdings?)\b|\bmore\b`,
+  String.raw`\b(?:you|u|ya)(?:'?re|'?ve|'?d|'?ll)?\s+(?:(?:are|r|were|have|has|had|been|just|recently|lately|currently|now|gonna|going\s+to|still|ever|also|already|planning\s+to|plan\s+to|thinking\s+of|wanna|want\s+to|be|did|do|does)\s+){0,3}` +
+    String.raw`(?:buy\w*|bought|ape\w*|add\w*|grab\w*|load\w*|hold\w*|sell\w*|sold|accumulat\w*|stack\w*|long\w*|short\w*|in\s+on|into|get\s+in\w*|got|pick\w*|own|owns|owned|snip\w*|scoop\w*|trad\w*)\b` +
+    String.raw`|\blike\s+(?:you|u)\s+did\b|\b(?:your|ur)\s+(?:bags?|positions?|buys?|entr(?:y|ies)|stack|picks?|calls?|holdings?|trades?|coins?|tokens?|portfolio|book)\b|\bmore\b` +
+    String.raw`|\b(?:copy|copying|copied|follow|following|mirror|mirroring|shadow|shadowing)\s+(?:you|u|ya|your|ur)\b|\bsame\s+(?:\w+\s+)?(?:as|like)\s+(?:you|u|ya)\b`,
   "i",
 );
 

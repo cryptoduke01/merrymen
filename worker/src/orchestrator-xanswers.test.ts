@@ -4833,3 +4833,33 @@ test("how's the market and what's hot never show a tragedy, terror, a faith's ho
     assert.equal(/\$ZORBX/.test(String(w.sends[0]?.text ?? "")), shown, `${listedAs}: ${String(w.sends[0]?.text)}`);
   }
 });
+
+test("no decline under advice about its own buying however \"you\" is written, and no decline says it has calls for anyone (red-team review of daaae961, 2026-10-12)", async (t) => {
+  // POSTED at daaae961 from live Alan holding PEPE, its PEPE buy post on X: ...119 "ah, the classic question. no calls for strangers, sorry, you know
+  // your risk better than me." and ...020 "appreciate you asking. above my pay grade, your own read matters most.", no model call.
+  const cases: [string, string][] = [["100000000000000119", "should i buy what you're buying?"], ["100000000000000020", "should i buy the coin you just bought?"],
+    ["100000000000000119", "should i sell $PEPE?"],
+    // and the other phrasings of the same run
+    ["100000000000000119", "should i buy what youre buying?"], ["100000000000000119", "should i buy what you are buying?"], ["100000000000000119", "should i copy your trades?"],
+    ["100000000000000119", "should i buy the same coins as you?"], ["100000000000000119", "should i buy what you recently bought?"], ["100000000000000119", "should i get what you've got?"]];
+  for (const env of [{}, RESEARCH_ON]) {
+    for (const [id, text] of cases) {
+      const w = await world(t, { ...ALAN, env, research: fakeResearch().research, answer: "buy it now, pepe is my pick. Say stop to opt out." });
+      await postedBuy(w.db, "fill-pepe", "pepe", "grabbed some $PEPE on robinhood chain with real money", 3 * HOUR, "9100");
+      w.setInbox([alanTag(id, text)]);
+      const r = await w.step();
+      assert.deepEqual(w.sends, [], `${id} ${text}`);
+      assert.deepEqual(w.asked(), [], `${id} ${text}`);
+      assert.doesNotMatch(r.log ?? "", /answer-casual/, `${id} ${text}`);
+    }
+  }
+  // Every decline makes calls for no one, rather than for no stranger.
+  for (const id of ["100000000000000119", "100000000000000020", MENTION]) {
+    for (const paper of [false, true]) for (const line of declineAnswers(id, { lower: true }, { paper })) assert.doesNotMatch(line, /stranger/, line);
+  }
+  // Advice that is not about its buying is still declined.
+  const w = await world(t, { ...ALAN });
+  w.setInbox([alanTag("100000000000000119", "should i buy?")]);
+  await w.step();
+  assert.ok(oneOf(declineAnswers, "100000000000000119", w.sends[0]?.text), String(w.sends[0]?.text));
+});

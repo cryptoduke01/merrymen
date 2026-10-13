@@ -151,7 +151,7 @@ function styled(slots: readonly [readonly string[], readonly string[], readonly 
 export const DECLINE_SLOTS: readonly [readonly string[], readonly string[], readonly string[]] = Object.freeze([
   Object.freeze(["ah, the classic question", "whoa, straight to it", "fair ask", "that old chestnut",
     "the perennial query", "appreciate you asking", "a frequent request", "ahh, the eternal riddle"]),
-  Object.freeze(["picking winners: not my department", "no calls for strangers, sorry", "the crystal ball's foggy", "above my pay grade",
+  Object.freeze(["picking winners: not my department", "i make calls for nobody", "the crystal ball's foggy", "above my pay grade",
     "direction from a bot? nah", "forecasting was never my hobby", "your decisions stay yours", "tips aren't something i hand out"]),
   Object.freeze(["your own read matters most", "you know your risk better than me", "the timeline has opinions enough", "process talk is welcome",
     "happy to chat about method instead", "that one stays your call", "staying in my lane over here", "no hard feelings at all"]),

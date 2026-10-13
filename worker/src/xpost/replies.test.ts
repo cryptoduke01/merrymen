@@ -494,6 +494,16 @@ describe("advice is declined only when asked, and never about its own buying (re
     // Asked, and about the asker's own choice: still declined in code's words.
     for (const text of ["should i buy pepe?", "gm, should i buy pepe", "is $WOJAK a good buy?", "what should i buy"]) assert.ok(advised(tagCandidate(tag(`@alanaidale ${text}`), ON)), text);
   });
+  it("however \"you\" is written, and whatever stands between: you're, you've, you just, the coin you bought, copy your trades (red-team review of daaae961)", () => {
+    // Each declined at daaae961 from live Alan holding PEPE.
+    for (const text of ["should i buy what you're buying?", "should i buy the coin you just bought?", "should i buy what youre buying?", "should i buy what you are buying?",
+      "should i buy what you recently bought?", "should i get what you've got?", "should i copy your trades?", "should i buy the same coins as you?",
+      "should i follow you into it?", "should i buy what you have been buying lately?", "should i own what you own?"]) {
+      assert.deepEqual(tagCandidate(tag(`@alanaidale ${text}`), ON), { ok: false, reason: "advice-own-buying" }, text);
+    }
+    // Advice that is not about its buying is untouched.
+    for (const text of ["should i buy now?", "do you think eth will go up?", "do you think it will go up?"]) assert.ok(advised(tagCandidate(tag(`@alanaidale ${text}`), ON)), text);
+  });
 });
 
 describe("distress is answered by nothing, before the advice flag, on the answer path and the comment path (red-team 2026-10-12)", () => {
