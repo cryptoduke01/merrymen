@@ -52,7 +52,7 @@ import { admitXPost, merrymenMentioned, moneySaid, namedIn, tickerRefusal, vocab
 import { ACTIVE_CADENCE, ANSWER_GAP_MS, ANSWER_STALE_MS, ANSWERS_PER_DAY, REPLY_STALE_MS, STANDARD_CADENCE, coinOf, hash32, introState, planPosts, replyDueAt, sendDecision, type PlanCadence, type PlanClock, type PlanIntent } from "./xpost/planner";
 import { APP_PAUSE_KEY, APP_PAUSE_MS, CREDITS_PAUSE_MS, PAUSE_KEY, readReplyComments, sendOne, type SendOutcome } from "./xpost/sender";
 import { isAnswerOptOut, isReplyOptOut, plainAsk, replyCandidate, tagCandidate, withoutReplyOptOut } from "./xpost/replies";
-import { coinTalkIn, deicticPickIn, houseTalkIn, marketTalkIn, nameLikeWords, textWords, trustTalkIn, unknownWordIn } from "./xpost/words";
+import { asksAboutACoin, coinTalkIn, deicticPickIn, houseTalkIn, marketTalkIn, nameLikeWords, textWords, trustTalkIn, unknownWordIn } from "./xpost/words";
 import { activeTenantsOf, repliesAllowedFor, repliesScopeOf } from "./xpost/scope";
 import {
   ANSWER_LOOKED_UP,
@@ -1630,8 +1630,18 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
     // (ownCoinTicker's reading, on letters) sits with its buy and sell posts.
     const ownNamed = [...bought, ...olderBought];
     const tradeBody = (body: string): boolean => ownNamed.length > 0 && namedIn(body, ownNamed);
+    // AND ONE THAT TALKS ABOUT A COIN OR THE MARKET AT ALL IS CLOSED (red-team
+    // review of daaae961, 2026-10-12): quoting its casual post "picked up some
+    // pepe on robinhood chain lately, the curve looked early to me", "how are
+    // you?" was drafted as "doing great, the curve still looks early" and
+    // "doing good, that was a smart grab", each a call on the coin the post
+    // names. A casual post with a $ticker, a word that might be a
+    // coin's name beside coin or market talk (xpost/words.ts coinTalkIn,
+    // asksAboutACoin), or the market or the chain at all (marketTalkIn) is
+    // one under which a follow-up gets a greeting or nothing, whatever coin.
+    const closedBody = (body: string): boolean => /\$[a-z]/i.test(body) || coinTalkIn(body, f.name) || asksAboutACoin(body) || marketTalkIn(body);
     const threads = ordered.some((c) => c.conversationId !== c.id || c.inReplyToTweetId !== "" || c.quoted === true)
-      ? await ownThreadTweets(shared, account.xUserId, undefined, shut, tradeBody)
+      ? await ownThreadTweets(shared, account.xUserId, undefined, shut, tradeBody, closedBody)
       : { roots: new Set<string>(), posts: new Set<string>(), answered: new Map<string, string>(), plain: new Set<string>(), trade: new Set<string>() };
     for (const comment of ordered) {
       if (comment.createdAtMs < consentAt || nowMs - comment.createdAtMs > REPLY_STALE_MS) continue;

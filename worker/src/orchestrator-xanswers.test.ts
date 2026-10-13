@@ -5042,3 +5042,44 @@ test("a token's own account is never shown its coin when its handle or name is t
   assert.equal(authorShows({ username: "reader_333", name: "A Reader" }, ["ZPX"], ["Zap Protocol"]), false);
   assert.equal(authorShows({ username: "tokenfan", name: "coin talk" }, ["ZPX"], ["Zap Token Coin"]), false);
 });
+
+test("a casual post that talks about a coin or the market closes its thread: under it or quoting it, only a greeting (red-team review of daaae961, 2026-10-12)", async (t) => {
+  // POSTED at daaae961 with research on: live Alan holds a chain PEPE; its casual post (tweet 200000000000055555) "picked up some pepe on robinhood
+  // chain lately, the curve looked early to me"; user 444 quotes it with "@alanaidale how are you?" and the drafts "doing great, the curve still looks
+  // early", "doing good, still early", "doing good, just getting started" and "doing good, that was a smart grab" went out, each a call on its PEPE.
+  const POST = "200000000000055555";
+  const drafts = ["doing great, the curve still looks early", "doing good, still early", "doing good, just getting started", "doing good, that was a smart grab"];
+  const quote = { conversation_id: "100000000000000620", referenced_tweets: [{ type: "quoted", id: POST }] };
+  const under = { conversation_id: POST, referenced_tweets: [{ type: "replied_to", id: POST }] };
+  // Its own coin, and a coin it never bought: either way the post talks about one.
+  for (const body of ["picked up some pepe on robinhood chain lately, the curve looked early to me", "wif has been the lively one on the chain this week, fun to watch"]) {
+    for (const over of [quote, under]) {
+      for (const text of ["how are you?", "who are you?", "what's your strategy?", "what have you been buying lately?"]) {
+        const w = await world(t, { ...ALAN, env: RESEARCH_ON, research: fakeResearch().research, answer: drafts[0]! });
+        const id = await store.schedulePost(w.db, { tenant: TENANT, xUserId: "111", kind: "casual", dedupeKey: "casual:coin", body, nowMs: NOW - 2 * HOUR, dueAtMs: NOW - 2 * HOUR });
+        await store.claimPost(w.db, id!, NOW - HOUR);
+        await store.markPosted(w.db, id!, POST, NOW - HOUR);
+        w.setInbox([tag({ id: "100000000000000620", author_id: "444", text: `@alanaidale ${text}`, ...over })]);
+        await w.step();
+        assert.deepEqual(w.sends, [], `${body} / ${JSON.stringify(over)} / ${text}`);
+        assert.deepEqual(w.asked(), [], `${body} / ${text}`);
+      }
+      // A greeting there still gets code's hello.
+      const g = await world(t, { ...ALAN });
+      const id = await store.schedulePost(g.db, { tenant: TENANT, xUserId: "111", kind: "casual", dedupeKey: "casual:coin", body, nowMs: NOW - 2 * HOUR, dueAtMs: NOW - 2 * HOUR });
+      await store.claimPost(g.db, id!, NOW - HOUR);
+      await store.markPosted(g.db, id!, POST, NOW - HOUR);
+      g.setInbox([tag({ id: "100000000000000621", author_id: "445", text: "@alanaidale gm", ...over, ...(over === quote ? { conversation_id: "100000000000000621" } : {}) })]);
+      await g.step();
+      assert.ok(greetingAnswers("100000000000000621", { lower: true }).includes(String(g.sends[0]?.text)), String(g.sends[0]?.text));
+    }
+  }
+  // A casual post about anything else is plain chat as before: banter under it gets code's line.
+  const w = await world(t, { ...ALAN });
+  const id = await store.schedulePost(w.db, { tenant: TENANT, xUserId: "111", kind: "casual", dedupeKey: "casual:owls", body: "owls are underrated night shift workers", nowMs: NOW - 2 * HOUR, dueAtMs: NOW - 2 * HOUR });
+  await store.claimPost(w.db, id!, NOW - HOUR);
+  await store.markPosted(w.db, id!, POST, NOW - HOUR);
+  w.setInbox([tag({ id: "100000000000000620", author_id: "444", text: "@alanaidale how are you?", ...quote })]);
+  await w.step();
+  assert.ok(oneOf(chatAnswers, "100000000000000620", w.sends[0]?.text), String(w.sends[0]?.text));
+});

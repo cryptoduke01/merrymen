@@ -939,6 +939,12 @@ test("the conversations an X account is in: its posted top-level posts and answe
   assert.deepEqual([...traded.trade].sort(), ["9002", "9003"]);
   assert.ok(traded.plain.has("9004") && !traded.plain.has("9003"), "the other casual post is still plain");
   assert.ok(traded.roots.has("9003") && traded.posts.has("9003"), "and still its own post");
+  // And a casual post the caller's closed screen reads as coin or market talk is in neither: closed (red-team review of daaae961).
+  await sent(post({ kind: "casual", dedupeKey: "casual:a:chain", body: "picked up some pepe on robinhood chain lately, the curve looked early to me", nowMs: 120, dueAtMs: 120 }), "9005");
+  const closed = await ownThreadTweets(db, "111", undefined, undefined, (body) => /\bpepe\b/.test(body), (body) => /\bchain\b/.test(body));
+  assert.ok(!closed.plain.has("9005") && !closed.trade.has("9005"), "closed, more closed than its trade");
+  assert.ok(closed.roots.has("9005") && closed.posts.has("9005"), "and still its own post");
+  assert.ok(closed.trade.has("9003") && closed.plain.has("9004") && closed.plain.has("9001"), "the rest as they were, its hello plain");
 });
 
 test("turning replies off cancels only replies and opt-outs are durable across tenants sharing an account", async (t) => {

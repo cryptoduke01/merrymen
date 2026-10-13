@@ -1367,10 +1367,13 @@ export const ANSWER_PLAIN_THREAD = "plain-thread";
  * `trade`: the caller's screen for an intro or casual post that is about a
  * coin it bought (orchestrator-xpost.ts passes its buys' names, red-team
  * review of daaae961): such a post sits with its buy and sell posts, never in
- * `plain`.
+ * `plain`. `closed`: the caller's screen for a casual post that talks about
+ * a coin or the market at all (red-team review of daaae961): in neither, so
+ * a reply under it or a quote of it is answered with a greeting or nothing.
+ * Its hello is what it is, and stays plain.
  */
 export async function ownThreadTweets(db: Db, xUserId: string, limit = 2000, shut: (body: string) => boolean = () => false,
-  trade: (body: string) => boolean = () => false): Promise<OwnThreads> {
+  trade: (body: string) => boolean = () => false, closed: (body: string) => boolean = () => false): Promise<OwnThreads> {
   const max = int(Math.max(1, Math.min(5000, limit)));
   const tops = (await db
     .prepare(
@@ -1385,7 +1388,9 @@ export async function ownThreadTweets(db: Db, xUserId: string, limit = 2000, shu
     const tweet = String(r.tweet_id ?? "");
     if (tweet === "" || shut(String(r.body ?? ""))) continue;
     roots.add(tweet);
-    (r.kind === "buy" || r.kind === "sell" || trade(String(r.body ?? "")) ? traded : plain).add(tweet);
+    const own = r.kind === "buy" || r.kind === "sell";
+    if (r.kind === "casual" && closed(String(r.body ?? ""))) continue;
+    (own || trade(String(r.body ?? "")) ? traded : plain).add(tweet);
   }
   const rows = (await db
     .prepare(
