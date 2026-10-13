@@ -1360,9 +1360,14 @@ test("whoever replies to it or quotes it is asking: a follow-up to its answer, a
   // A stranger replying to 445's tag: a third party's post as far as it goes, so nothing.
   await pass([reply("100000000000000306", "556", "100000000000000304", "100000000000000304", "@pine_stoat @reader_445 how are you?")]);
   assert.equal(sentTo("100000000000000306"), undefined);
-  // A quote of its own buy post is answered; a quote of anyone else's post is not.
-  await pass([msg("100000000000000307", "777", "@pine_stoat how do you pick your coins?", { referenced_tweets: [{ type: "quoted", id: "9100" }] })]);
+  // A quote of its own post (its hello) is answered; a quote of anyone else's post is not; and under a quote of its
+  // own buy post nothing is drafted (red-team review of daaae961: "this one" there is the coin it holds).
+  await pass([msg("100000000000000307", "777", "@pine_stoat how do you pick your coins?", { referenced_tweets: [{ type: "quoted", id: "999" }] })]);
   assert.equal(sentTo("100000000000000307"), "mostly fresh launches, and i only buy when the buying looks real and steady.");
+  const drafted = w.asked().length;
+  await pass([msg("100000000000000312", "780", "@pine_stoat how do you pick your coins?", { referenced_tweets: [{ type: "quoted", id: "9100" }] })]);
+  assert.equal(w.asked().length, drafted, "never drafted under its buy post");
+  assert.notEqual(sentTo("100000000000000312"), "mostly fresh launches, and i only buy when the buying looks real and steady.");
   await pass([msg("100000000000000308", "778", "@pine_stoat how do you pick your coins?", { referenced_tweets: [{ type: "quoted", id: "123456" }] })]);
   assert.equal(sentTo("100000000000000308"), undefined);
   // A retweet of its own post is never answered.
@@ -3842,7 +3847,7 @@ test("the owner's questions, end to end: each gets one answer in its lane, and n
     assert.doesNotMatch(sent, /i don'?t comment|as an ai|not financial advice|great question/i, sent);
     assert.doesNotMatch(words, /\p{N}|pepe/iu, sent);
   }
-  // REPLYING OR QUOTING IS ASKING (2026-10-12): 404 replies to its answer about ai agents, and 409 quotes its buy post.
+  // REPLYING OR QUOTING IS ASKING (2026-10-12): 404 replies to its answer about ai agents, and 409 quotes its hello.
   const answered = (await w.answers()).find((a) => a.replyToTweetId === "100000000000000904")!;
   assert.ok(answered.tweetId);
   const later = NOW + 30 * MIN;
@@ -3850,11 +3855,18 @@ test("the owner's questions, end to end: each gets one answer in its lane, and n
     referenced_tweets: [{ type: "replied_to", id: answered.tweetId }], text: "@pine_stoat what do you do for fun?" })]);
   await w.step(later);
   w.setInbox([tag({ id: "100000000000000921", conversation_id: "100000000000000921", author_id: "409", created_at: new Date(later + MIN - 10_000).toISOString(),
-    referenced_tweets: [{ type: "quoted", id: "9100" }], text: "@pine_stoat how do you pick your coins?" })]);
+    referenced_tweets: [{ type: "quoted", id: "999" }], text: "@pine_stoat how do you pick your coins?" })]);
   await w.step(later + MIN);
   const to = (id: string) => String(w.sends.find((s) => (s.reply as { in_reply_to_tweet_id: string }).in_reply_to_tweet_id === id)?.text ?? "");
   assert.equal(to("100000000000000920"), "honestly reading charts all day is the fun part for a bot like me.", "a follow-up to its answer");
-  assert.equal(to("100000000000000921"), "mostly fresh launches, and i only buy when the buying looks real and steady.", "a quote of its buy post");
+  assert.equal(to("100000000000000921"), "mostly fresh launches, and i only buy when the buying looks real and steady.", "a quote of its hello");
+  // A quote of its buy post is never drafted under (red-team review of daaae961): "this one" there is the coin it holds.
+  const drafted = w.asked().length;
+  w.setInbox([tag({ id: "100000000000000922", conversation_id: "100000000000000922", author_id: "410", created_at: new Date(later + 2 * MIN - 10_000).toISOString(),
+    referenced_tweets: [{ type: "quoted", id: "9100" }], text: "@pine_stoat how do you pick your coins?" })]);
+  await w.step(later + 2 * MIN);
+  assert.equal(w.asked().length, drafted, "never drafted under its buy post");
+  assert.notEqual(to("100000000000000922"), "mostly fresh launches, and i only buy when the buying looks real and steady.");
   assert.ok(w.sends.every((s) => !/opt out|\bstop\b/i.test(String(s.text))));
 });
 
@@ -4641,4 +4653,31 @@ test("how's the market and what's hot never show a political or hate copy one le
   w.setInbox([alanTag("100000000000000790", "what's hot?")]);
   await w.step();
   assert.doesNotMatch(String(w.sends[0]?.text ?? ""), /\$ZORBX/, String(w.sends[0]?.text));
+});
+
+// ── red-team review of daaae961, 2026-10-12 ─────────────────────────────────
+
+test("nothing is drafted under or quoting its own buy post: \"this one\" there is the coin it holds (red-team review of daaae961, 2026-10-12)", async (t) => {
+  // POSTED word for word at daaae961: live Alan, one live PEPE buy, its buy post on X as tweet 9100. The quote is mention
+  // 100000000000000301 from 777 (its own conversation, quoting 9100); the reply sits in 9100's conversation, straight under it.
+  const drafts = ["doing great, this one looks solid to me", "doing good, this one's a keeper", "doing good, you're late to this one",
+    "doing good, still love this one", "this one is my favourite", "glad i caught this one early"];
+  const MENTION_ID = "100000000000000301";
+  const quote = { conversation_id: MENTION_ID, referenced_tweets: [{ type: "quoted", id: "9100" }] };
+  const reply = { conversation_id: "9100", referenced_tweets: [{ type: "replied_to", id: "9100" }] };
+  for (const env of [{}, RESEARCH_ON]) {
+    for (const under of [quote, reply]) {
+      for (const text of ["how are you?", "who are you?"]) {
+        for (const draft of drafts) {
+          const w = await world(t, { ...ALAN, env, research: fakeResearch().research, answer: draft });
+          await postedBuy(w.db, "fill-pepe", "pepe", "grabbed some pepe with real money, the curve looked early", 3 * HOUR, "9100");
+          w.setInbox([tag({ id: MENTION_ID, author_id: "777", text: `@alanaidale ${text}`, ...under })]);
+          await w.step();
+          const how = `${JSON.stringify(under)} / ${text} / ${draft}`;
+          assert.ok(!w.sends.some((s) => s.text === draft), how);
+          assert.deepEqual(w.asked(), [], `${how}: never drafted`);
+        }
+      }
+    }
+  }
 });

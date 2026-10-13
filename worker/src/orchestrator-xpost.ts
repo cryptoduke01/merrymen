@@ -1752,6 +1752,23 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       const casualKind = asked.kind === "vibe" || asked.kind === "advice" ? asked.kind : null;
       // No model call at all for these: no allowance, no question read.
       const undrafted = templated || hotCoded || marketCoded || casualKind !== null;
+      // NO DRAFT UNDER OR QUOTING ITS OWN BUY OR SELL POST (red-team review of
+      // daaae961, 2026-10-12). Quoting its posted "grabbed some pepe with real
+      // money, the curve looked early" (and replying under it), "how are
+      // you?" and "who are you?" were drafted as "doing great, this one looks
+      // solid to me", "doing good, this one's a keeper", "doing good, you're
+      // late to this one", "still love this one" and "glad i caught this one
+      // early", and each went out word for word: under its own buy card "this
+      // one" is the coin it holds, so every such line is a recommendation or
+      // a holding, from the real-money account. The deictic screen was never
+      // read there (pointsFree below), and no list of shapes can be whole. A
+      // reply under or a quote of its own buy or sell post (followUp
+      // "own-trade") is answered only with code's own lines; anything that
+      // would be drafted is answered by nothing: no row, no model call.
+      if (candidate.followUp === "own-trade" && !undrafted) {
+        bump("answer-unanswered");
+        continue;
+      }
       // DECIDED BEFORE ANYTHING IS SPENT: a question the writer could not read
       // would buy research and a model call for a prompt that says PASS. Its
       // digits are read as "(a number)"; a copycat's ("$PEPE2") is safe to
@@ -2058,9 +2075,9 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // or under a top-level tag that named no coin (where "this one" has
       // nothing of the asker's to point at), that says "this one", "same one",
       // "the one you asked about", or calls "it" solid, early or its favourite
-      // (xpost/words.ts deicticPickIn) is not posted. Under its own buy post the
-      // coin is its own public buy, and a coin's own question may say "no read
-      // on that one".
+      // (xpost/words.ts deicticPickIn) is not posted. Under its own buy post
+      // nothing is drafted at all (followUp "own-trade" above), and a coin's
+      // own question may say "no read on that one".
       const pointsFree = candidate.followUp === "plain" || (candidate.followUp === undefined && !coinNamed);
       const pointed = !coded && verdict?.ok === true && pointsFree && deicticPickIn(withoutReplyOptOut(verdict.text));
       // CHAT IS NEVER SILENCE BY DEFAULT (the owner's ask, 2026-10-12): a chat

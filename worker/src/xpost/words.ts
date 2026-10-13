@@ -319,9 +319,10 @@ export function trustTalkIn(text: unknown): boolean {
  * coin it does not name ("this one", "that one", "same one", "the one you
  * asked about") or calls "it", "this", "that" or "they" solid, strong, good,
  * early, legit, a gem or the like, likes, loves or rates it, or calls it its
- * favourite or pick, is not posted, except under its own buy post, where
- * the coin is its own public buy (orchestrator-xpost.ts writeAnswer). Fail
- * closed: "it's nice to chat" costs one answer.
+ * favourite or pick, is not posted; and under its own buy or sell post,
+ * where "this one" is the coin it holds, nothing is drafted at all (red-team
+ * review of daaae961: orchestrator-xpost.ts writeAnswer). Fail closed: "it's
+ * nice to chat" costs one answer.
  */
 const DEICTIC_PICK = new RegExp([
   String.raw`\b(?:the\s+)?same\s+one\b|\b(?:this|that)\s+one\b|\bthe\s+one\s+(?:you|u|they|he|she|we|people|someone|everyone)\b|\b(?:you|u|they|he|she|people)\s+(?:asked|were\s+asking|was\s+asking|mentioned|named|tagged|brought\s+up)\b`,
