@@ -56,7 +56,6 @@ import { asksAboutACoin, coinTalkIn, deicticPickIn, houseTalkIn, marketTalkIn, n
 import { activeTenantsOf, repliesAllowedFor, repliesScopeOf } from "./xpost/scope";
 import {
   ANSWER_LOOKED_UP,
-  ANSWER_PLAIN_THREAD,
   answerAuthorSpent,
   answersWaiting,
   cancelPost,
@@ -94,7 +93,7 @@ import {
   type XAccount,
   type XPost,
 } from "./xpost/store";
-import { answerPrompt, answerQuestion, buyPrompt, casualPrompt, draft, greetingAnswers, introPrompt, introTemplate, modelAnswers, replyPrompt, sellPrompt, sherwoodClaimed, sherwoodMentioned, sherwoodNamed, xpostModel, xpostModelWarning, type AnswerIntentKind, type WriterFacts, type XStyle } from "./xpost/writer";
+import { answerPrompt, answerQuestion, buyPrompt, casualPrompt, draft, introPrompt, introTemplate, modelAnswers, replyPrompt, sellPrompt, sherwoodClaimed, sherwoodMentioned, sherwoodNamed, xpostModel, xpostModelWarning, type AnswerIntentKind, type WriterFacts, type XStyle } from "./xpost/writer";
 import { appendPublicToken, appendPublicWallet, hasPublicWallet, publicTokenStillAllowed, publicWalletStillAllowed, type PublicWallet } from "./xpost/public-wallet";
 import { readPublicProjectDescription } from "./orchestrator-xpost-project";
 import { banterAsk, boughtNames, carriesResearch, classifyTag, createXResearch, generalTradesQuestion, MARKET_MAJORS, modelNamed, namesACoin, ownCoinTicker, selfAsk, unshowableName, type ResearchBundle, type TagIntent, type XResearch } from "./orchestrator-xpost-research";
@@ -103,7 +102,7 @@ import { readSaleResults } from "./orchestrator-xpost-results";
 import { appendSaleOutcome, hasSaleOutcome } from "./xpost/sale-outcome";
 import { admitFiguresLine, cleanTicker, figuresTickers, withFigures, type FiguresSpec } from "./xpost/figures";
 import { hotAnswers, hotNoneAnswers, hotUnreadAnswers, majorAnswers, majorUnreadAnswers, marketAnswers, type HotRead, type MajorRead, type MarketRead } from "./xpost/market";
-import { chatAnswers, declineAnswers, selfAnswers, tradesAnswers, vibeAnswers } from "./xpost/casual";
+import { selfAnswers, tradesAnswers } from "./xpost/casual";
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -140,8 +139,8 @@ const ANSWERS_PER_POLL = 3;
  *
  * FORTY-EIGHT, AS BEFORE (2026-10-12): the day's answers went from 24 to 60
  * (ANSWERS_PER_DAY), the model allowance did not. Code's own lines (the
- * market, what's hot, a major, a greeting, its mood, a decline, the model
- * question) spend no model call, so the extra answers come from those, and a
+ * market, what's hot, a major, its strategy, its buys, the model question)
+ * spend no model call, so the extra answers come from those, and a
  * day of drafts is still at most this many of the fleet's DEFAULT_LLM_PER_DAY.
  */
 export const ANSWER_DRAFTS_PER_DAY = 48;
@@ -185,11 +184,11 @@ const TEMPLATE_TRIES = 8;
 /** Send outcomes after which the post may exist on X: they keep their unit of the fleet's ceiling. */
 const MAY_BE_ON_X: ReadonlySet<SendOutcome> = new Set<SendOutcome>(["posted", "uncertain", "fault"]);
 /**
- * WHAT A TAG MAY BE READ AS AND STILL GET CODE'S BANTER, STRATEGY OR BUYS
- * LINE (red-team review of daaae961): chat, a question about its trades, or
- * one about what it can do or how to get an agent ("what do you do?" is both
- * banter and what it can do). Anything else a banter-shaped tag was read as
- * keeps its own way.
+ * WHAT A TAG MAY BE READ AS AND STILL GET CODE'S STRATEGY OR BUYS LINE
+ * (red-team review of daaae961): chat, a question about its trades, or one
+ * about what it can do or how to get an agent. Banter gets no line at all
+ * since 2026-10-13 (writeAnswer's smallTalk): "what do you do?", both banter
+ * and what it can do, is answered as what it can do.
  */
 const CHAT_LINE_KINDS: ReadonlySet<string> = new Set(["chat", "own-trades", "capabilities", "onboarding"]);
 /** Log counters that describe a standing condition rather than something that happened. */
@@ -1650,7 +1649,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
     // names. A casual post with a $ticker, a word that might be a
     // coin's name beside coin or market talk (xpost/words.ts coinTalkIn,
     // asksAboutACoin), or the market or the chain at all (marketTalkIn) is
-    // one under which a follow-up gets a greeting or nothing, whatever coin.
+    // one under which a follow-up gets nothing, whatever coin.
     const closedBody = (body: string): boolean => /\$[a-z]/i.test(body) || coinTalkIn(body, f.name) || asksAboutACoin(body) || marketTalkIn(body);
     const threads = ordered.some((c) => c.conversationId !== c.id || c.inReplyToTweetId !== "" || c.quoted === true)
       ? await ownThreadTweets(shared, account.xUserId, undefined, shut, tradeBody, closedBody)
@@ -1664,17 +1663,19 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // question is answered from a code-built line (writer.ts modelAnswers)
       // and spends no model call. Only research gathers anything for what it
       // reads.
-      // ADVICE ASKED FOR (tagCandidate's flag) is no longer silence: code reads it, as its own mood or as a decline.
       const classified = classifyTag(candidate.text, { address: candidate.address ?? null, advice: candidate.advice === true });
-      // A GREETING AND NOTHING ELSE ("hiii", "gm", "yo ser 👋": replies.ts
-      // greetingOnly) is answered with one of code's casual lines (writer.ts
-      // greetingAnswers): no model call, no research, no model allowance.
-      // Code's own classifier must read it as plain chat too, and its reply
-      // prefix may name nobody else, or it is answered by nothing (fail
-      // closed). Everything else holds as for any answer: the hello first, the
-      // house consent, every opt-out, the day's sixty, six a person a day, the
-      // sherwood and author screens below, and the gate.
-      const greeting = candidate.greeting === true;
+      // NO SMALL TALK (the owner's teammate, 2026-10-13: "do not respond to
+      // normal conversations"). A greeting and nothing else ("hiii", "gm":
+      // replies.ts greetingOnly), its own mood ("are you bullish?", "wen
+      // moon": vibe), advice or a forecast asked for ("should i buy pepe":
+      // advice, once declined in a playful line) and banter ("how are you",
+      // "tell me a joke": banterAsk) are answered by nothing: no row, no model
+      // call, no lookup. What is answered: how's the market, a coin's facts (a
+      // major by name or ticker, a $ticker or a contract of the chain), what's
+      // hot, its own trading or strategy, the model question on its allowlist,
+      // and what it can do or how to get an agent.
+      const smallTalk = candidate.greeting === true || classified.kind === "vibe" || classified.kind === "advice"
+        || (classified.kind === "chat" && banterAsk(candidate.text));
       // SHERWOOD IN ANY FORM INCLUDES A HANDLE ("@SherwoodToken"), read on the
       // tag as posted with only its own handle set aside; and the model line
       // never goes under a reply prefix that names anyone else (red-team 2026-10-12).
@@ -1706,16 +1707,14 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // drafts in everyday words posted "they are bad at trading honestly",
       // "worst is behind us, relax", "it will be over in a couple weeks", "it
       // was planned from the start", "they will be fine, it is not that bad" and
-      // "they are coming for everyone next". Only a whole tag on the banter
-      // allowlist (banterAsk: how are you, who are you, tell me a joke, what do
-      // you do for fun, what do you think about ai agents), one of the plain
-      // questions about what it trades (generalTradesQuestion), or about how it
-      // trades and what it has been up to (selfAsk), is answered (in code's
-      // words since the red-team review of daaae961, below); any other chat
-      // tag, a person, a group or an event among them, is answered by nothing:
-      // no row, no model call. A greeting is code's own line and never drafted.
-      const chatAllowed = (text: string): boolean => banterAsk(text) || generalTradesQuestion(text) || selfAsk(text);
-      const unbanteredChat = classified.kind === "chat" && !greeting && !chatAllowed(candidate.text);
+      // "they are coming for everyone next". Only one of the plain questions
+      // about what it trades (generalTradesQuestion), or about how it trades
+      // and what it has been up to (selfAsk), is answered (in code's words
+      // since the red-team review of daaae961, below); any other chat tag, a
+      // person, a group or an event among them, and since 2026-10-13 banter
+      // too (smallTalk above), is answered by nothing: no row, no model call.
+      const chatAllowed = (text: string): boolean => generalTradesQuestion(text) || selfAsk(text);
+      const unbanteredChat = classified.kind === "chat" && !chatAllowed(candidate.text);
       // BANTER, HOW IT TRADES AND WHAT IT BOUGHT, IN CODE'S WORDS, NEVER A
       // DRAFT (red-team review of daaae961, 2026-10-12). Drafted, those three
       // allowlists posted, word for word and with no review, "doing good, i'm
@@ -1727,28 +1726,22 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // old), "just hold and chill", "i run the biggest fund on robinhood
       // chain" and "fresh launches, pepe is the strongest coin on the chain":
       // the gate reads listed phrasings, and a model always finds another. The
-      // allowlists are whole tags, so their answers are code's lines too, as
-      // its mood and a decline are: banter gets a friendly line about itself
-      // (xpost/casual.ts chatAnswers), how it trades or what it is up to its
-      // strategy by name and what its rules are like (selfAnswers), and what
-      // it bought lately the coins it bought with the money it trades with now
-      // (tradesAnswers). No model call, no lookup. What it bought is never
-      // said under a reply prefix that names anyone else (as `general` below):
-      // that tag is answered by nothing.
+      // allowlists are whole tags, so their answers are code's lines too: how
+      // it trades or what it is up to its strategy by name and what its rules
+      // are like (selfAnswers), and what it bought lately the coins it bought
+      // with the money it trades with now (tradesAnswers). No model call, no
+      // lookup. Banter's friendly line is gone with banter (smallTalk). What it
+      // bought is never said under a reply prefix that names anyone else (as
+      // `general` below): that tag is answered by nothing.
       const methodAsk = generalTradesQuestion(candidate.text) && /^(?:(?:gm|yo|hey|hi|ser|fren|bro|alan)[\s,!.]+){0,2}how\b/.test(plainAsk(candidate.text) ?? "");
-      const chatKind: "banter" | "self" | "trades" | null = greeting || !CHAT_LINE_KINDS.has(classified.kind) ? null
-        : banterAsk(candidate.text) ? "banter" : selfAsk(candidate.text) || methodAsk ? "self" : generalTradesQuestion(candidate.text) ? "trades" : null;
+      const chatKind: "self" | "trades" | null = !CHAT_LINE_KINDS.has(classified.kind) ? null
+        : selfAsk(candidate.text) || methodAsk ? "self" : generalTradesQuestion(candidate.text) ? "trades" : null;
       const tradesElsewhere = chatKind === "trades" && candidate.otherHandles === true;
-      // A DECLINE OR ITS MOOD ONLY UNDER A TOP-LEVEL TAG (red-team review of
-      // 1ed46625, 2026-10-12). Both are code's lines whose meaning is the
-      // post they sit under, and code never reads that post: "can i buy it
-      // yet?" under its own sherwood-1 line got "tips aren't something i hand
-      // out, mum's the word on the rest", and "wen moon" quoting its own ZAPX
-      // buy post got "in a patient sort of way", a yes about the coin. A
-      // reply under any post or a quote of one, its own included, asking
-      // advice or its mood is answered by nothing, as before the decline.
+      // A TOP-LEVEL TAG: no reply under a post, no quote of one. Code never
+      // reads the post a reply sits under, so a line whose meaning is that
+      // post's goes only under a top-level tag (tradeMarket below; a decline
+      // and its mood were held to the same rule until they went, 2026-10-13).
       const topLevelTag = comment.conversationId === comment.id && comment.inReplyToTweetId === "" && comment.quoted !== true;
-      const casualUnderPost = (classified.kind === "advice" || classified.kind === "vibe") && !topLevelTag;
       // A FOLLOW-UP KEEPS WHAT ITS THREAD WAS ABOUT (red-team review of
       // 1ed46625, 2026-10-12). Under its decline to "should i buy $SCAM?",
       // "what have you been buying lately?" was handed its PEPE buys and "yes,
@@ -1759,9 +1752,10 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // on its own words alone. Now a reply or a quote under anything but
       // plain chat (tagCandidate followUp "closed": a decline, its mood, a
       // market line, a coin's answer, an answer told its buys, a comment
-      // reply) is answered only with a greeting: no draft, no buys, no exact
-      // path, no code line whose meaning is the thread's.
-      const closedFollowUp = candidate.followUp === "closed" && !greeting;
+      // reply) is answered by nothing (a greeting there was answered until
+      // greetings went, 2026-10-13): no draft, no buys, no exact path, no code
+      // line whose meaning is the thread's.
+      const closedFollowUp = candidate.followUp === "closed";
       // NO MARKET LINE UNDER ITS OWN BUY OR SELL POST (red-team review of
       // 1ed46625, 2026-10-12). Alan bought a Robinhood-chain "PEPE" and
       // posted "grabbed some $PEPE on robinhood chain with real money"; a
@@ -1780,22 +1774,21 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // coins it already bought. And under a casual post that named its PEPE,
       // "how's pepe doing?" got coingecko's top-thirty PEPE as the chain copy
       // it holds. Code never reads the post a reply sits under: what's hot,
-      // how's the market and a major are answered only for a top-level tag,
-      // the rule its mood and a decline already keep (casualUnderPost).
+      // how's the market and a major are answered only for a top-level tag.
       const marketKind = classified.kind === "major" || classified.kind === "hot" || classified.kind === "market";
       const tradeMarket = marketKind && !topLevelTag;
       // NO CODE LINE UNDER ANOTHER HANDLE, NOR A MARKET LINE TO A NAME CODE HAS
       // NOT READ (red-team review of 1ed46625, 2026-10-12). "@alanaidale
       // @ZapXOfficial are you bullish?" got "in a patient sort of way" under
-      // a token's own account. Code's market, hot, major, mood and decline lines
+      // a token's own account. Code's market, hot and major lines
       // never go under a reply prefix that names anyone else
       // (candidate.otherHandles), as the model line never does; and a market,
       // hot or major line goes only to an author X named (comment.author), so
       // the coins it shows can be read against who is asking (authorShows below).
-      const codeLineElsewhere = candidate.otherHandles === true && (marketKind || classified.kind === "vibe" || classified.kind === "advice");
+      const codeLineElsewhere = candidate.otherHandles === true && marketKind;
       const marketToUnread = marketKind && !author;
       const asked: TagIntent = sherwoodTagged || authorSherwood || (classified.kind === "model" && (candidate.otherHandles || !namedClean))
-        || (greeting && (classified.kind !== "chat" || candidate.otherHandles)) || unreadWord || unflaggedAdvice || unbanteredChat || casualUnderPost || closedFollowUp
+        || smallTalk || unreadWord || unflaggedAdvice || unbanteredChat || closedFollowUp
         || tradeMarket || codeLineElsewhere || marketToUnread || tradesElsewhere ? { kind: "unanswered" } : classified;
       // SHERWOOD IN ANY FORM, OR A MODEL QUESTION OFF THE ALLOWLIST, is
       // answered by nothing: the model line under "sherwood TGE soon?" reads
@@ -1805,8 +1798,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         bump("answer-unanswered");
         continue;
       }
-      // CODE'S OWN LINE, NEVER A DRAFT: the model question's, or a greeting's.
-      const templated = asked.kind === "model" || greeting;
+      // CODE'S OWN LINE, NEVER A DRAFT: the model question's.
+      const templated = asked.kind === "model";
       // WHAT'S HOT IS NEVER DRAFTED (red-team 2026-10-12): a draft named coins
       // the index never showed it ("chump is the one standing out", "wif and
       // bonk are the ones"), credited to the index, and with coins to show
@@ -1819,14 +1812,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // casual words (xpost/market.ts marketAnswers) and code's figures, read
       // or not; the same reasons as what's hot.
       const marketCoded = asked.kind === "market";
-      // ITS OWN MOOD, AND ADVICE DECLINED (2026-10-12): "are you bullish?",
-      // "wen moon" get a non-committal line about itself, and "should i buy
-      // pepe", "is it going up", "what should i buy" a playful decline, both
-      // in code's words (xpost/casual.ts): never a draft, never a lookup,
-      // never the coin.
-      const casualKind = asked.kind === "vibe" || asked.kind === "advice" ? asked.kind : null;
       // No model call at all for these: no allowance, no question read.
-      const undrafted = templated || hotCoded || marketCoded || casualKind !== null || chatKind !== null;
+      const undrafted = templated || hotCoded || marketCoded || chatKind !== null;
       // NO DRAFT UNDER OR QUOTING ITS OWN BUY OR SELL POST (red-team review of
       // daaae961, 2026-10-12). Quoting its posted "grabbed some pepe with real
       // money, the curve looked early" (and replying under it), "how are
@@ -1848,8 +1835,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // would buy research and a model call for a prompt that says PASS. Its
       // digits are read as "(a number)"; a copycat's ("$PEPE2") is safe to
       // mask because a tag that names a coin never sees what it bought
-      // (coinNamed below). The model question's line, and a greeting's, is
-      // code's and never reads the question.
+      // (coinNamed below). The model question's line is code's and never
+      // reads the question.
       if (!undrafted && answerQuestion(candidate.text) === null) {
         bump("answer-unusable");
         continue;
@@ -1883,8 +1870,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // exact path, as it never gets the model line.
       const otherHandles = candidate.otherHandles === true;
       const general = !coinNamed && !otherHandles && generalTradesQuestion(candidate.text);
-      // Nothing is looked up for a greeting, its own mood, advice declined, banter, its strategy or its buys.
-      const intent = research && !greeting && casualKind === null && chatKind === null ? asked : null;
+      // Nothing is looked up for its strategy or its buys.
+      const intent = research && chatKind === null ? asked : null;
       const answerKey = `llm-answers:${account.xUserId}:${utcDay(nowMs)}`;
       if (!undrafted) {
         if (!(await takeAllowance(shared, answerKey, ANSWER_DRAFTS_PER_DAY, nowMs))) {
@@ -1936,7 +1923,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         if (hotCoded && bundle.hot) hotRead = bundle.hot;
         if (asked.kind === "major" && figures && bundle.major) majorRead = bundle.major;
         if (marketCoded && bundle.market) marketRead = bundle.market;
-        // Chat as research read it is held to the banter allowlist too (unbanteredChat above).
+        // Chat as research read it is held to the same allowlists too (unbanteredChat above).
         researchUnanswered = bundle.unanswered === true || (looked.intent === "chat" && !chatAllowed(candidate.text));
         bump(`answer-intent-${intent.kind}`);
         if (bundle.lookups) bump("answer-lookups", bundle.lookups);
@@ -1991,21 +1978,14 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         });
         return id === null ? null : { body: null };
       }
-      // CODE'S DECLINE ONLY UNDER WHAT TAGCANDIDATE FLAGGED AS ADVICE (red-team
-      // review, 2026-10-12): the advice screens read the tag itself; any other
-      // way to the decline put a joke under a question about people.
-      const casualLines = casualKind === "vibe" ? vibeAnswers(comment.id, facts.style, lineOpts)
-        : casualKind === "advice" && candidate.advice === true ? declineAnswers(comment.id, facts.style, lineOpts) : [];
-      if (casualLines.length) bump(`answer-casual-${casualKind ?? "advice"}`);
-      // BANTER, ITS STRATEGY, ITS BUYS, IN CODE'S WORDS (chatKind above). Its
+      // ITS STRATEGY, ITS BUYS, IN CODE'S WORDS (chatKind above). Its
       // buys: those of the money it trades with now, newest first, never a
       // name no line of the house's answers under, and none at all for an
       // agent that is not trading (as an idle agent's draft was told none),
       // nor for a tag that is not the plain question (`general`: no coin named,
       // no other handle).
       const tradeNames = !general || f.mode === "idle" ? [] : buys.filter((b) => b.paper === (f.mode === "paper") && !unshowableName(b.label)).map((b) => b.label);
-      const chatLines = chatKind === "banter" ? chatAnswers(comment.id, facts.style, lineOpts)
-        : chatKind === "self" ? selfAnswers(facts.strategy, comment.id, facts.style, lineOpts)
+      const chatLines = chatKind === "self" ? selfAnswers(facts.strategy, comment.id, facts.style, lineOpts)
         : chatKind === "trades" ? tradesAnswers(tradeNames, comment.id, facts.style, lineOpts) : [];
       if (chatLines.length) bump(`answer-chat-${chatKind}`);
       // NO MODEL WORDS BESIDE A LINE OF COINS (red-team 2026-10-12): the gate
@@ -2028,7 +2008,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       const majorLines = stillMajor && majorRead ? majorAnswers(majorRead, comment.id, facts.style, lineOpts) : [];
       // Figures only beside the words that read them: never beside "no read".
       if (stillMajor && !majorLines.length) figures = null;
-      const market = casualLines.length ? [] : hotCoded
+      const market = hotCoded
         ? hotRead && hotRead.coins >= 1 ? hotAnswers(hotRead, comment.id, facts.style, lineOpts)
           : hotRead ? hotNoneAnswers(comment.id, facts.style, lineOpts) : hotUnreadAnswers(comment.id, facts.style, lineOpts)
         : marketCoded ? marketAnswers(marketRead, comment.id, facts.style, lineOpts)
@@ -2040,14 +2020,13 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         await returnAllowance(shared, `llm:${utcDay(nowMs)}`, at());
       }
       if (market.length) bump("answer-code-words");
-      const coded = templated || market.length > 0 || casualLines.length > 0 || chatLines.length > 0;
-      // CODE'S LINES, the model question's, a greeting's, a market answer's,
-      // its mood, a decline, banter, its strategy or its buys, this mention's
-      // own first: one it already said is a repeat to the gate, so the next is
-      // tried rather than none, and when all have been said lately, none. A
-      // paper agent's lines say paper: it is gated as a paper reply.
-      const lines = greeting ? greetingAnswers(comment.id, facts.style, lineOpts)
-        : templated ? modelAnswers(comment.id, facts.style, lineOpts) : casualLines.length ? casualLines : chatLines.length ? chatLines : market;
+      const coded = templated || market.length > 0 || chatLines.length > 0;
+      // CODE'S LINES, the model question's, a market answer's, its strategy or
+      // its buys, this mention's own first: one it already said is a repeat to
+      // the gate, so the next is tried rather than none, and when all have been
+      // said lately, none. A paper agent's lines say paper: it is gated as a
+      // paper reply.
+      const lines = templated ? modelAnswers(comment.id, facts.style, lineOpts) : chatLines.length ? chatLines : market;
       const raw = coded
         ? lines[0]!
         : await draft(creds, answerPrompt({ ...facts, question: candidate.text, recentBuys: buys, boughtLately: boughtKind(f),
@@ -2173,10 +2152,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       const pointsFree = candidate.followUp === "plain" || (candidate.followUp === undefined && !coinNamed);
       const pointed = !coded && verdict?.ok === true && pointsFree && deicticPickIn(withoutReplyOptOut(verdict.text));
       // NO FRIENDLY LINE IN PLACE OF A REFUSED DRAFT (red-team review of
-      // daaae961, 2026-10-12). The fallback was for plain banter alone, and
-      // banter, like its strategy and its buys, is now answered in code's own
-      // words from the start (chatKind above): a draft refused for anything at
-      // all, or a PASS, leaves the tag unanswered.
+      // daaae961, 2026-10-12): a draft refused for anything at all, or a PASS,
+      // leaves the tag unanswered.
       const drafted = verdict?.ok === true && !postsName && !unlookedCoin && !untrusted && !pointed ? verdict.text : null;
       const finishedAt = at();
       const admitted = drafted;
@@ -2185,7 +2162,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // only a line in the renderer's own grammar (admitFiguresLine, again
       // here), after the admitted words, and only while the
       // whole post fits X; else the answer goes out as the gate admitted it.
-      // Never a code-built model line or a greeting's. AND NEVER LAXER THAN THE
+      // Never a code-built model line. AND NEVER LAXER THAN THE
       // GATE (red-team 2026-10-12): every ticker it shows must clear the
       // gate's own vocabulary (tickerRefusal); "$BUY", "$WAGMI" or "$SHILL"
       // in the line puts no line in at all. NOR THE HOUSE'S OWN NAME in any
@@ -2225,22 +2202,17 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // given anything looked up is never handed on (ANSWER_LOOKED_UP).
       const lookedUp = !!looked && (looked.research.length > 0 || !!looked.creatorClaim || lined !== null);
       // AND BY WHAT KIND OF EXCHANGE IT WAS (red-team review of 1ed46625): a
-      // greeting, or banter (code's friendly line since the review of
-      // daaae961), under a top-level tag or a plain follow-up, is one a
-      // follow-up may be chatted under (ANSWER_PLAIN_THREAD); every other
-      // answer, its strategy and its buys among them, closes its thread to all
-      // but a greeting.
-      const plainThread = !!body && !lookedUp && (candidate.followUp === undefined || candidate.followUp === "plain")
-        && (greeting || chatKind === "banter");
+      // greeting or banter was one a follow-up may be chatted under
+      // (ANSWER_PLAIN_THREAD, still read on older rows); neither is answered
+      // since 2026-10-13, so every answer closes its thread.
       const id = await schedulePost(shared, {
         tenant: account.tenant, xUserId: account.xUserId, kind: "answer", dedupeKey, body: body ?? "",
-        coin: lookedUp ? ANSWER_LOOKED_UP : plainThread ? ANSWER_PLAIN_THREAD : null, decisionId: null, dueAtMs: finishedAt, nowMs: finishedAt,
+        coin: lookedUp ? ANSWER_LOOKED_UP : null, decisionId: null, dueAtMs: finishedAt, nowMs: finishedAt,
         replyToTweetId: comment.id, replyRootTweetId: comment.id, replyAuthorId: comment.authorId,
         status: body ? "scheduled" : "skipped",
         reason: body ? null : claimed ? "gate:sherwood-claim" : named || postsName ? "gate:sherwood-drafted" : unlooked ? "gate:unlooked-source"
           : unlookedCoin ? "gate:unlooked-coin" : untrusted ? "gate:trust-talk" : pointed ? "gate:deictic-pick" : verdict && !verdict.ok ? `gate:${verdict.reason}` : "no-draft",
       });
-      if (id !== null && greeting && body) bump("answered-greeting");
       return id === null ? null : { body, lookedUp };
     }
     return null;

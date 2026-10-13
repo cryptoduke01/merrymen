@@ -303,8 +303,8 @@ test("scope active: the owners it names are still polled and answered", async (t
   const w = await world(t);
   // A comment the answer lane answers under its own buy post: chat off the banter allowlist ("why did you choose
   // this coin?") is answered by nothing there since the red-team review of a964a74c, and nothing is drafted under
-  // its own buy post since that of daaae961, so a greeting, which gets code's own line.
-  w.setInbox([comment({ text: "gm" })]);
+  // its own buy post since that of daaae961, and a greeting gets nothing since 2026-10-13: so how it trades, which gets code's own line.
+  w.setInbox([comment({ text: "how do you pick your coins?" })]);
   await w.step(w.poster({ env: { MERRYMEN_XPOST_REPLIES_APPROVED: "active", MERRYMEN_XPOST_ACTIVE_TENANTS: TENANT } }));
   assert.equal(w.reads, 1);
   const answers = (await store.postsOf(w.db, TENANT, 0)).filter((p) => p.kind === "answer");

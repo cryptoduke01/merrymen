@@ -694,6 +694,29 @@ export function houseTroubleAsk(text: unknown): boolean {
   return HOUSE_TROUBLE.test(t) || (HOUSE_WORD.test(t) && ROADMAP_WORD.test(t));
 }
 
+/**
+ * HOW TO GET AN AGENT, ASKED PLAINLY (the owner's teammate, 2026-10-13: "how
+ * do i get an agent" is one of the few questions an active agent answers on
+ * X). The Telegram groups' reader (publicFactRequest) knows "get my own
+ * agent" and "an agent like you"; these whole plain tags (plainAsk) are read
+ * as onboarding too, after at most two greeting words: how or where do i get,
+ * make, build, set up or create an agent (or a bot, my own, an ai trading
+ * one), and can i get one. A word more, and it is not on the list. Exported
+ * for tests.
+ */
+const AGENT_NOUN = String.raw`(?:an?|my own|my|one|an ai|a trading|an ai trading) ?(?:ai |trading |ai trading )?(?:agent|bot)(?: like (?:you|u|yours|this one)| of my own| too)?`;
+const ONBOARDING_SHAPES = [
+  `(?:how|where) (?:do|can|could|would) i (?:get|make|build|set up|setup|create|start) ${AGENT_NOUN}`,
+  `how (?:to|does one|do you|do u) (?:get|make|build|set up|setup|create|start) ${AGENT_NOUN}`,
+  `can i (?:get|have|make|build|set up|create) ${AGENT_NOUN}`,
+  `how do i get (?:one|one of you|started)`,
+];
+const ONBOARDING_ALLOWED = new RegExp(`^${GREETING}(?:${ONBOARDING_SHAPES.join("|")})$`, "u");
+export function onboardingAsk(text: unknown): boolean {
+  const plain = plainAsk(text);
+  return plain !== null && !sherwoodMentioned(text) && ONBOARDING_ALLOWED.test(plain);
+}
+
 /** Words that set one coin against another. */
 const COMPARES = /\b(?:vs\.?|versus|or|than|compared?|comparison|comparing|better|worse|safer|riskier|healthier|stronger|weaker|which|either|between|instead)\b/i;
 
@@ -742,6 +765,8 @@ export function classifyTag(text: string, o: { address?: string | null; advice?:
   const asked = publicFactRequest(t);
   if (asked?.kind === "site" && asked.topic === "capabilities") return { kind: "capabilities" };
   if (asked?.kind === "site" && asked.topic === "onboarding") return { kind: "onboarding" };
+  // HOW TO GET AN AGENT, ON THE X ALLOWLIST'S PLAIN SHAPES (onboardingAsk, 2026-10-13).
+  if (address === null && onboardingAsk(t)) return { kind: "onboarding" };
   // "HOW'S THE MARKET?", ON THE ALLOWLIST'S PLAIN SHAPES (marketAsk): the big coins' day and the chain's movers.
   if (address === null && marketAsk(t)) return { kind: "market" };
   // "WHAT'S HOT?", ON THE ALLOWLIST'S PLAIN SHAPES (hotAsk): an overview, no coin named.

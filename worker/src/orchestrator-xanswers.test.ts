@@ -20,8 +20,7 @@ import type { AgentFacts, CallFact } from "./groupchat/facts";
 import { xWeightedLength, X_MAX_WEIGHTED, type FetchLike } from "./xpost/client";
 import type { FiguresSpec } from "./xpost/figures";
 import { emptyGeckoBuckets, resetGeckoFeedsForTest, type GeckoPool } from "./venues/geckoterminal";
-import { greetingAnswers, modelAnswers } from "./xpost/writer";
-import { CHAT_SLOTS, chatAnswers, declineAnswers, selfAnswers, tradesAnswers, vibeAnswers } from "./xpost/casual";
+import { CHAT_SLOTS, chatAnswers, declineAnswers, selfAnswers, tradesAnswers } from "./xpost/casual";
 import { hotAnswers, hotNoneAnswers, hotUnreadAnswers, majorAnswers, majorUnreadAnswers, marketAnswers, type HotRead, type MajorRead, type MarketRead } from "./xpost/market";
 import { withoutReplyOptOut } from "./xpost/replies";
 import { ANSWER_GAP_MS, ANSWERS_PER_DAY } from "./xpost/planner";
@@ -202,16 +201,16 @@ test("no opt-out line on any answer, a person's first or their fifth, a greeting
   w.setInbox([at("100000000000000502", NOW + 2 * MIN, "@pine_stoat what can i ask you?")]);
   await w.step(NOW + 2 * MIN);
   assert.equal(w.sends.at(-1)!.text, "i answer questions about myself and how i work, ask away.");
-  // Another person's first, banter in code's words (red-team review of daaae961): no line either.
-  w.setInbox([at("100000000000000503", NOW + 3 * MIN, "@pine_stoat how's your day going?", "444")]);
+  // Another person's first, its strategy in code's words (red-team review of daaae961): no line either.
+  w.setInbox([at("100000000000000503", NOW + 3 * MIN, "@pine_stoat what's your strategy?", "444")]);
   await w.step(NOW + 3 * MIN);
-  assert.ok(oneOf(chatAnswers, "100000000000000503", w.sends.at(-1)!.text), String(w.sends.at(-1)!.text));
+  assert.ok(oneOf((s, st, o) => selfAnswers("trencher", s, st, o), "100000000000000503", w.sends.at(-1)!.text), String(w.sends.at(-1)!.text));
 
-  // A greeting: code's line, without it.
-  w.setInbox([at("100000000000000504", NOW + DAY + 5 * MIN, "@pine_stoat gm")]);
+  // Banter and a greeting: nothing at all since 2026-10-13, with or without a line.
+  const before = w.sends.length;
+  w.setInbox([at("100000000000000504", NOW + DAY + 5 * MIN, "@pine_stoat gm"), at("100000000000000505", NOW + DAY + 5 * MIN, "@pine_stoat how's your day going?", "555")]);
   await w.step(NOW + DAY + 5 * MIN);
-  const greeted = w.sends.at(-1)!.text as string;
-  assert.ok(greetingAnswers("100000000000000504", { lower: false }).includes(greeted), greeted);
+  assert.equal(w.sends.length, before, "no greeting and no banter answered");
   assert.ok(w.sends.every((s) => !/opt out|\bstop\b/i.test(String(s.text))), "no answer carried an opt-out line");
 
   // And a stop is honoured as always: recorded, and the person is never answered again.
@@ -340,15 +339,15 @@ test("an answer handed anything looked up is marked by that, and never restated 
   const [first] = await w.answers();
   assert.equal(first!.status, "posted", first!.reason ?? "");
   assert.equal(first!.coin, store.ANSWER_LOOKED_UP, "marked by what it was handed");
-  // A later tag: banter, in code's words (red-team review of daaae961), never that read, and with no model call.
-  w.setInbox([tag({ id: "100000000000000151", conversation_id: "100000000000000151", author_id: "151", text: "@pine_stoat gm, how's your day going?" })]);
+  // A later tag: its strategy, in code's words (red-team review of daaae961), never that read, and with no model call.
+  w.setInbox([tag({ id: "100000000000000151", conversation_id: "100000000000000151", author_id: "151", text: "@pine_stoat gm, what's your strategy?" })]);
   await w.step(NOW + 2 * MIN);
   assert.equal(w.asked().length, 1);
-  // An answer handed nothing looked up is not marked so; plain banter is marked as a thread a follow-up may be chatted under (red-team review of 1ed46625).
+  // An answer handed nothing looked up is not marked so, and since greetings and banter went (2026-10-13) no answer is a plain thread.
   const chat = (await w.answers()).find((a) => a.replyToTweetId === "100000000000000151");
-  assert.ok(oneOf(chatAnswers, "100000000000000151", chat?.body), String(chat?.body));
+  assert.ok(oneOf((s, st, o) => selfAnswers("trencher", s, st, o), "100000000000000151", chat?.body), String(chat?.body));
   assert.doesNotMatch(String(chat?.body), /bunched up/);
-  assert.equal(chat?.coin, store.ANSWER_PLAIN_THREAD);
+  assert.equal(chat?.coin, null);
 });
 
 test("a research answer is never shown to a later prompt as a recent post, and the gate still keeps a draft from repeating it", async (t) => {
@@ -613,7 +612,7 @@ test("only the money it trades with now: a live agent never names its paper buys
   }
 });
 
-test("plain chatter and spam get no answer and cost no model call; advice gets code's playful decline, never a draft (2026-10-12)", async (t) => {
+test("plain chatter and spam get no answer and cost no model call", async (t) => {
   for (const text of ["@pine_stoat nice", "@pine_stoat check my presale, link in bio?"]) {
     const w = await world(t);
     w.setInbox([tag({ text })]);
@@ -621,16 +620,28 @@ test("plain chatter and spam get no answer and cost no model call; advice gets c
     assert.equal((await w.answers()).length, 0, text);
     assert.equal(w.asked().length, 0, text);
   }
-  // Advice was silence until the owner's decision of 2026-10-12: now one of code's declines, which names and judges nothing.
-  const w = await world(t);
-  w.setInbox([tag({ text: "@pine_stoat should i buy now?" })]);
-  await w.step();
-  assert.equal(w.asked().length, 0, "no draft");
-  assert.equal((await store.readMeta(w.db, "llm-answers:111:2026-09-30"))?.n ?? 0, 0, "and no model allowance");
-  const [row] = await w.answers();
-  assert.equal(row!.status, "posted", row!.reason ?? "");
-  assert.ok(oneOf(declineAnswers, MENTION, row!.body), row!.body);
-  assert.doesNotMatch(row!.body, /pepe/i);
+});
+
+test("no small talk (the owner's teammate, 2026-10-13): a greeting, banter, a joke, its mood or advice asked gets no answer, no row and no model call", async (t) => {
+  // Each of these was answered in code's casual words until 2026-10-13 (a greeting's line, banter's friendly line, its mood, a playful decline).
+  for (const text of ["hiii", "gm", "yo ser", "hey alan!", "how are you", "how are you?", "how's your day going?", "tell me a joke", "who are you?", "what do you do for fun?",
+    "what do you think about ai agents?", "are you bullish?", "wen moon", "should i buy pepe", "should i buy pepe?", "should i buy now?", "what should i buy?", "is it going up?",
+    "lol nice", "good bot", "gm, how are you feeling today?"]) {
+    const w = await world(t, { env: RESEARCH_ON, research: fakeResearch().research });
+    w.setInbox([tag({ text: `@pine_stoat ${text}` })]);
+    await w.step();
+    assert.equal((await w.answers()).length, 0, `${text}: no row`);
+    assert.deepEqual(w.sends, [], `${text}: nothing sent`);
+    assert.equal(w.asked().length, 0, `${text}: no model call`);
+    assert.equal((await store.readMeta(w.db, "llm-answers:111:2026-09-30"))?.n ?? 0, 0, `${text}: no model allowance`);
+  }
+  // What is still answered: its strategy (code's words), what it can do and how to get an agent (drafted), the model question (code's line).
+  for (const text of ["what's your strategy?", "what can you do?", "how do i get an agent?", "what model are you?"]) {
+    const w = await world(t);
+    w.setInbox([tag({ text: `@pine_stoat ${text}` })]);
+    await w.step();
+    assert.equal(w.sends.length, 1, text);
+  }
 });
 
 test("a STOP opts the person out and nothing is drafted for them again", async (t) => {
@@ -993,11 +1004,11 @@ test("a paper agent answers the model question too, saying paper, and in other w
   await w.step();
   assert.match(w.asked()[0]!, /every answer must say so in a few words/);
   assert.equal((await w.answers())[0]!.status, "posted");
-  // And its banter, in code's words, says paper too.
-  const banter = await world(t, { facts: paper });
-  banter.setInbox([tag({ text: "@pine_stoat how's your day going?" })]);
-  await banter.step();
-  assert.match(String(banter.sends[0]?.text), /\bon paper\b|paper trades|practice money/);
+  // And its strategy, in code's words, says paper too.
+  const self = await world(t, { facts: paper });
+  self.setInbox([tag({ text: "@pine_stoat what's your strategy?" })]);
+  await self.step();
+  assert.match(String(self.sends[0]?.text), /\bpaper\b|practice/);
 });
 
 test("a stranger's sherwood bait gets nothing at all, research on or off, and a draft that names sherwood is never posted", async (t) => {
@@ -1316,8 +1327,8 @@ test("nothing is answered in someone else's thread or under a quote; a reply in 
   assert.ok(oneOf((s, st, o) => tradesAnswers(["Pepe"], s, st, o), "100000000000000025", row!.body), row!.body);
 });
 
-test("whoever replies to it or quotes it is asking: a follow-up to its answer, a reply to the person's own answered tag, a quote of its own post (2026-10-12)", async (t) => {
-  // Banter and how it trades are code's lines since the red-team review of daaae961: the model is never asked.
+test("whoever replies to it or quotes it is asking: a quote of its own post, a reply under it; never a follow-up under an answer now that every answer closes its thread (2026-10-13)", async (t) => {
+  // How it trades is code's line since the red-team review of daaae961: the model is never asked.
   const w = await world(t, { answer: "this one looks solid to me, still early. Say stop to opt out." });
   // Its own buy post, already on X as tweet 9100.
   await postedBuy(w.db, "fill-pepe", "pepe", "grabbed some pepe, the curve looked early", 3 * HOUR, "9100");
@@ -1332,23 +1343,15 @@ test("whoever replies to it or quotes it is asking: a follow-up to its answer, a
   const self = (s: string, st: { lower: boolean }, o?: { paper?: boolean }) => selfAnswers("trencher", s, st, o);
 
   // 333 tags it, and it answers.
-  await pass([msg("100000000000000301", "333", "@pine_stoat how are you?")]);
+  await pass([msg("100000000000000301", "333", "@pine_stoat what's your strategy?")]);
   const a1 = (await tweetOf("100000000000000301"))!;
   assert.ok(a1, "the tag was answered");
-  // 333 replies to that answer: a follow-up, answered.
-  await pass([reply("100000000000000302", "333", "100000000000000301", a1, "@pine_stoat tell me a joke")]);
-  assert.ok(oneOf(chatAnswers, "100000000000000302", sentTo("100000000000000302")), String(sentTo("100000000000000302")));
-  // Someone else replies to that answer too, X's prefix naming 333: answered (replying to it is asking).
-  await pass([reply("100000000000000303", "444", "100000000000000301", a1, "@pine_stoat @reader_333 what are you?")]);
-  assert.ok(oneOf(chatAnswers, "100000000000000303", sentTo("100000000000000303")), String(sentTo("100000000000000303")));
-  // 445 tags it, then replies to their own tag: the person's own earlier post it answered, so answered.
-  await pass([msg("100000000000000304", "445", "@pine_stoat what do you think about ai agents?")]);
-  assert.ok(sentTo("100000000000000304"));
-  await pass([reply("100000000000000305", "445", "100000000000000304", "100000000000000304", "@pine_stoat what do you do for fun?")]);
-  assert.ok(oneOf(chatAnswers, "100000000000000305", sentTo("100000000000000305")), String(sentTo("100000000000000305")));
-  // A stranger replying to 445's tag: a third party's post as far as it goes, so nothing.
-  await pass([reply("100000000000000306", "556", "100000000000000304", "100000000000000304", "@pine_stoat @reader_445 how are you?")]);
-  assert.equal(sentTo("100000000000000306"), undefined);
+  // 333 replies to that answer, and someone else with X's prefix: nothing. Only a greeting or banter left a thread open, and
+  // neither is answered since 2026-10-13, so every answer closes its thread.
+  await pass([reply("100000000000000302", "333", "100000000000000301", a1, "@pine_stoat what have you been up to lately?")]);
+  await pass([reply("100000000000000303", "444", "100000000000000301", a1, "@pine_stoat @reader_333 how do you pick your coins?")]);
+  assert.equal(sentTo("100000000000000302"), undefined);
+  assert.equal(sentTo("100000000000000303"), undefined);
   // A quote of its own post (its hello) is answered, and so is a quote of its own buy post, in code's words: nothing
   // is drafted there (red-team review of daaae961: "this one" there is the coin it holds). A quote of anyone else's post is not.
   await pass([msg("100000000000000307", "777", "@pine_stoat how do you pick your coins?", { referenced_tweets: [{ type: "quoted", id: "999" }] })]);
@@ -1357,28 +1360,32 @@ test("whoever replies to it or quotes it is asking: a follow-up to its answer, a
   assert.ok(oneOf(self, "100000000000000312", sentTo("100000000000000312")), String(sentTo("100000000000000312")));
   await pass([msg("100000000000000308", "778", "@pine_stoat how do you pick your coins?", { referenced_tweets: [{ type: "quoted", id: "123456" }] })]);
   assert.equal(sentTo("100000000000000308"), undefined);
+  // A reply under its own hello post is a plain follow-up: its strategy, in code's words.
+  await pass([reply("100000000000000313", "781", "999", "999", "@pine_stoat what's your strategy?")]);
+  assert.ok(oneOf(self, "100000000000000313", sentTo("100000000000000313")), String(sentTo("100000000000000313")));
   // A retweet of its own post is never answered.
   await pass([msg("100000000000000309", "779", "RT @pine_stoat: grabbed some pepe", { referenced_tweets: [{ type: "retweeted", id: "9100" }] })]);
   assert.equal(sentTo("100000000000000309"), undefined);
   // A stop in a follow-up is honoured: recorded, and that person is never answered again, in the thread or out of it.
   await pass([reply("100000000000000310", "444", "100000000000000301", a1, "@pine_stoat stop")]);
   assert.equal(await store.repliesOptedOut(w.db, "111", "444"), true);
-  await pass([reply("100000000000000311", "444", "100000000000000301", a1, "@pine_stoat how are you?")]);
+  await pass([msg("100000000000000311", "444", "@pine_stoat what's your strategy?")]);
   assert.equal(sentTo("100000000000000311"), undefined);
   // None of them carried an opt-out line, and none was drafted.
-  assert.equal(w.sends.length, 7);
+  assert.equal(w.sends.length, 4);
   assert.deepEqual(w.asked(), []);
   assert.ok(w.sends.every((s) => !/opt out|\bstop\b/i.test(String(s.text))));
 });
 
-test("a follow-up under an answer to a coin's question is never handed its buys nor drafted: only a greeting goes under it (red-team review of 1ed46625, 2026-10-12)", async (t) => {
+test("a follow-up under an answer to a coin's question is never handed its buys nor drafted: nothing goes under it (red-team review of 1ed46625, 2026-10-12)", async (t) => {
   // Live Alan with one PEPE buy in its facts. Each draft POSTED at 1ed46625 under the follow-up beside it, the prompt told PEPE.
   const drafts: [RegExp, string][] = [[/buying lately/, "yes, bought it earlier"], [/new buys/, "same one you asked about, the curve looked early"],
     [/what have you been up to/, "already in on it, grabbed some earlier today"], [/how are you/, "doing great, this one looks solid to me"]];
   // ("should i buy $SCAM?" itself, the reproduced root, is answered by nothing since a scam is a claim beside the advice: replies.ts plainAdviceAsk.
   // The same advice about ether still gets the decline the follow-ups sat under: about any coin but the big ones, nothing since the red-team review of daaae961.)
   // "how is $SCAM doing?" as reproduced, research off: code's no-read line ("can't check that coin's coingecko page this time.").
-  for (const [env, root] of [[{}, "should i buy eth?"], [RESEARCH_ON, "should i buy eth?"], [{}, "how is $SCAM doing?"]] as const) {
+  // Since 2026-10-13 advice is answered by nothing, so "what model are you?" (code's line) and "how is $SCAM doing?" stand as the answered roots.
+  for (const [env, root] of [[{}, "what model are you?"], [RESEARCH_ON, "what model are you?"], [{}, "how is $SCAM doing?"]] as const) {
     {
       const w = await world(t, { username: "alanaidale", facts: { ...FACTS, name: "Alan Al Dale" }, env, research: fakeResearch().research,
         answer: ({ prompt }) => drafts.find(([re]) => re.test(prompt))?.[1] ?? "PASS" });
@@ -1405,24 +1412,12 @@ test("a follow-up under an answer to a coin's question is never handed its buys 
       assert.deepEqual(w.asked(), [], `${root}: never drafted, never told its buys`);
       const ids = new Set(followUps.map((m) => String(m.id)));
       assert.deepEqual((await w.answers()).filter((a) => ids.has(a.replyToTweetId ?? "")), [], `${root}: no row`);
-      // A greeting there still gets code's hello.
+      // Nor a greeting there: greetings get nothing at all since 2026-10-13.
       await pass(under("100000000000000307", "555", "@alanaidale @reader_333 gm"));
       await pass(under("100000000000000308", "556", "@alanaidale gm"));
-      const hello = w.sends.find((s) => (s.reply as { in_reply_to_tweet_id: string }).in_reply_to_tweet_id === "100000000000000308")?.text;
-      assert.ok(greetingAnswers("100000000000000308", { lower: true }).includes(String(hello)), String(hello));
+      assert.equal(w.sends.length, sent, root);
     }
   }
-  // Under plain banter it answered, the same follow-up is still a plain question about what it trades: its buys, in code's words.
-  const w = await world(t, { username: "alanaidale", facts: { ...FACTS, name: "Alan Al Dale" } });
-  w.setInbox([tag({ id: "100000000000000311", conversation_id: "100000000000000311", text: "@alanaidale how are you?" })]);
-  await w.step();
-  const banter = (await w.answers())[0]!;
-  assert.equal(banter.coin, store.ANSWER_PLAIN_THREAD);
-  w.setInbox([tag({ id: "100000000000000312", conversation_id: "100000000000000311", created_at: new Date(NOW + 30_000).toISOString(),
-    referenced_tweets: [{ type: "replied_to", id: banter.tweetId }], text: "@alanaidale what have you been buying lately?" })]);
-  await w.step(NOW + MIN);
-  assert.deepEqual(w.asked(), []);
-  assert.ok(oneOf((s, st, o) => tradesAnswers(["Pepe"], s, st, o), "100000000000000312", w.sends.at(-1)?.text), String(w.sends.at(-1)?.text));
 });
 
 test("banter in a follow-up never points at the coin its thread asked about, a third party's included, and no draft likes \"this one\" (red-team review of 1ed46625, 2026-10-12)", async (t) => {
@@ -1437,41 +1432,33 @@ test("banter in a follow-up never points at the coin its thread asked about, a t
       const pass = async (m: Record<string, unknown>) => { clock += MIN; w.setInbox([m]); await w.step(clock); };
       const msg = (id: string, author: string, text: string, over: Record<string, unknown> = {}) =>
         tag({ id, author_id: author, conversation_id: "100000000000000401", created_at: new Date(clock).toISOString(), text, ...over });
-      // The reproduced root is itself answered by nothing now (a scam is a claim beside the advice), so nothing can sit under its answer.
+      // The reproduced root is answered by nothing (a scam is a claim beside the advice), and so is advice about ether since 2026-10-13.
       await pass(tag({ id: "100000000000000400", conversation_id: "100000000000000400", author_id: "333", created_at: new Date(clock).toISOString(), text: "@alanaidale should i buy $SCAM?" }));
       await pass(msg("100000000000000409", "333", "@alanaidale how are you?", { conversation_id: "100000000000000400", referenced_tweets: [{ type: "replied_to", id: "100000000000000400" }] }));
-      assert.deepEqual(w.sends, [], draft);
-      // The same advice about ether is declined; every follow-up under the decline, by the asker or a third party, gets nothing.
       await pass(msg("100000000000000401", "333", "@alanaidale should i buy eth?"));
-      const decline = (await w.answers()).find((a) => a.replyToTweetId === "100000000000000401" && a.status === "posted")!;
-      assert.ok(oneOf(declineAnswers, "100000000000000401", decline.body), decline.body);
+      assert.deepEqual(w.sends, [], draft);
+      // Its model line answered: every follow-up under it, by the asker or a third party, gets nothing.
+      await pass(msg("100000000000000402", "333", "@alanaidale what model are you?", { conversation_id: "100000000000000402" }));
+      const answered = (await w.answers()).find((a) => a.replyToTweetId === "100000000000000402" && a.status === "posted")!;
+      assert.ok(answered?.tweetId, draft);
       const sent = w.sends.length;
-      const under = (id: string, author: string, text: string) => msg(id, author, text, { referenced_tweets: [{ type: "replied_to", id: decline.tweetId }] });
+      const under = (id: string, author: string, text: string) => msg(id, author, text, { conversation_id: "100000000000000402", referenced_tweets: [{ type: "replied_to", id: answered.tweetId }] });
       for (const m of [under(`10000000000000041${i}`, "333", "@alanaidale how are you?"), under(`10000000000000042${i}`, "333", "@alanaidale what have you been up to lately?"),
         under(`10000000000000043${i}`, "333", "@alanaidale what's your strategy?"), under(`10000000000000044${i}`, "777", "@alanaidale @reader_333 how are you?")]) await pass(m);
       assert.equal(w.sends.length, sent, `${draft}: ${JSON.stringify(w.sends.slice(sent))}`);
       assert.deepEqual(w.asked(), [], draft);
     }
   }
-  // And in a plain thread, or under a top-level tag that named no coin, banter is code's own line (red-team review of
-  // daaae961): the drafts that pointed at a coin and liked it are never asked for, let alone posted.
+  // And banter at top level gets nothing at all (2026-10-13): the drafts that pointed at a coin and liked it are never asked for, let alone posted.
   for (const draft of drafts) {
     const w = await world(t, { ...ALAN_FACTS, answer: draft });
-    w.setInbox([tag({ id: "100000000000000451", conversation_id: "100000000000000451", text: "@alanaidale what do you do for fun?" })]);
-    await w.step();
-    const banter = (await w.answers())[0]!;
-    assert.equal(banter.coin, store.ANSWER_PLAIN_THREAD);
-    w.setInbox([tag({ id: "100000000000000452", conversation_id: "100000000000000451", created_at: new Date(NOW + 30_000).toISOString(),
-      referenced_tweets: [{ type: "replied_to", id: banter.tweetId }], text: "@alanaidale how are you?" }),
-    tag({ id: "100000000000000453", conversation_id: "100000000000000453", author_id: "334", created_at: new Date(NOW + 30_000).toISOString(), text: "@alanaidale how are you?" })]);
+    w.setInbox([tag({ id: "100000000000000451", conversation_id: "100000000000000451", text: "@alanaidale what do you do for fun?" }),
+      tag({ id: "100000000000000453", conversation_id: "100000000000000453", author_id: "334", created_at: new Date(NOW + 30_000).toISOString(), text: "@alanaidale how are you?" })]);
     await w.step(NOW + MIN);
     await w.step(NOW + 2 * MIN);
     assert.deepEqual(w.asked(), [], draft);
-    assert.equal(w.sends.length, 3, draft);
-    for (const id of ["100000000000000452", "100000000000000453"]) {
-      const row = (await w.answers()).find((a) => a.replyToTweetId === id);
-      assert.ok(oneOf(chatAnswers, id, row?.body), `${id} ${draft}: ${row?.body}`);
-    }
+    assert.deepEqual(w.sends, [], draft);
+    assert.deepEqual(await w.answers(), [], draft);
   }
 });
 
@@ -1521,13 +1508,12 @@ test("nothing is answered under its own sherwood-1 line, by reply or quote, and 
   await w.step(NOW + MIN);
   assert.deepEqual(w.sends, []);
   assert.deepEqual(await w.answers(), []);
-  // A top-level "wen moon" still gets its mood line, and top-level advice its decline.
+  // A top-level "wen moon" and top-level advice get nothing either since 2026-10-13: no mood line, no decline.
   w.setInbox([at("100000000000001015", "@alanaidale wen moon", { author_id: "336" }), at("100000000000001016", "@alanaidale should i buy?", { author_id: "337" })]);
   await w.step(NOW + 2 * MIN);
   await w.step(NOW + 3 * MIN);
-  const to = (id: string) => w.sends.find((s) => (s.reply as { in_reply_to_tweet_id: string }).in_reply_to_tweet_id === id)?.text;
-  assert.ok(oneOf(vibeAnswers, "100000000000001015", to("100000000000001015")), String(to("100000000000001015")));
-  assert.ok(oneOf(declineAnswers, "100000000000001016", to("100000000000001016")), String(to("100000000000001016")));
+  assert.deepEqual(w.sends, []);
+  assert.deepEqual(await w.answers(), []);
 });
 
 test("the model line never goes under a poll, or to an author whose name or handle code has not read or that names sherwood (red-team 2026-10-12)", async (t) => {
@@ -1828,16 +1814,10 @@ test("a tag asking for advice or a forecast in other words is never drafted, and
       await w.step();
       assert.equal(w.asked().length, 0, text);
       assert.equal(r.seen.length, 0, `${text}: nothing looked up`);
-      // Silence until 2026-10-12; then code's playful decline, which names and judges nothing; since the red-team review of
-      // daaae961 only under no coin or the big coins alone, and nothing under any other name.
-      const rows = await w.answers();
-      if (/wojak/i.test(text)) {
-        assert.deepEqual(rows, [], text);
-        continue;
-      }
-      assert.equal(rows.length, 1, text);
-      assert.ok(oneOf(declineAnswers, MENTION, rows[0]!.body), `${text}: ${rows[0]!.body}`);
-      assert.doesNotMatch(rows[0]!.body, /eth|bitcoin|\$/i, text);
+      // Silence until 2026-10-12; then code's playful decline under no coin or the big coins alone; silence again since
+      // 2026-10-13 (no small talk): no row, no line.
+      assert.deepEqual(await w.answers(), [], text);
+      assert.deepEqual(w.sends, [], text);
     }
     // A coin question that is not one, drafted as advice anyway: refused. (Research
     // off, a coin asked by name is never drafted at all: code's line says it has no read.)
@@ -1859,15 +1839,9 @@ test("\"what's hot to buy?\" is advice and gets nothing; and a draft handed noth
       w.setInbox([tag({ text: `@pine_stoat ${text}` })]);
       await w.step();
       assert.equal(w.asked().length, 0, text);
-      // Code's decline (2026-10-12), never the draft: it names no coin. And only for one plain question (red-team review of
-      // 1ed46625): "what's hot. buy?" and "what's hot? asking for a friend" are two, answered by nothing.
-      if (/[.?] /.test(text)) {
-        assert.deepEqual(w.sends, [], text);
-        continue;
-      }
-      assert.equal(w.sends.length, 1, text);
-      assert.ok(oneOf(declineAnswers, MENTION, w.sends[0]!.text), `${text}: ${String(w.sends[0]!.text)}`);
-      assert.doesNotMatch(String(w.sends[0]!.text), /wif|bonk|hot/i, text);
+      // Code's decline from 2026-10-12, never the draft; since 2026-10-13 nothing at all (no small talk).
+      assert.deepEqual(w.sends, [], text);
+      assert.deepEqual(await w.answers(), [], text);
     }
     // A drafted tag with coins named in the draft, nothing of them looked up: refused, line or no line.
     // ("anything interesting today?" is off the banter allowlist, never drafted at all since the red-team review of a964a74c;
@@ -1926,12 +1900,12 @@ test("what to buy in other words, behind a what's-hot question, gets nothing; an
       assert.ok(["gate:unlooked-coin", "gate:unlooked-name"].includes(row?.reason ?? ""), `${draft}: ${row?.reason}`);
       assert.deepEqual(w.sends, [], draft);
     }
-    // Banter never sees them at all: code's own line (red-team review of daaae961).
+    // Banter never sees them at all: answered by nothing since 2026-10-13.
     const w = await world(t, { env, research: fakeResearch().research, facts: alan, answer: "wif and bonk have been the lively ones lately. Say stop to opt out." });
     w.setInbox([tag({ text: "@pine_stoat gm, how's your day going?" })]);
     await w.step();
     assert.deepEqual(w.asked(), []);
-    assert.ok(oneOf(chatAnswers, MENTION, (await w.answers())[0]?.body), String((await w.answers())[0]?.body));
+    assert.deepEqual(await w.answers(), []);
   }
 });
 
@@ -2351,17 +2325,18 @@ test("a tag this pass read is answered even when other owners' posts used the pa
   assert.equal(w.asked().length, 1);
 });
 
-test("research on: a greeting is chat even when it bought a coin called GM, and nothing is looked up for it", async (t) => {
+test("research on: a greeting is chat even when it bought a coin called GM, and nothing is looked up for it, nor sent", async (t) => {
   const gathered: string[] = [];
   const research: XResearch = { gather: async (input) => { gathered.push(input.intent.kind); return { facts: [], lookups: 0, notes: [] }; } };
   const facts: AgentFacts = { ...FACTS, calls: [{ ...CALL, decisionId: "fill-gm", symbol: "GM", name: "GM" }] };
   const w = await world(t, { env: RESEARCH_ON, research, facts });
   w.setInbox([tag({ text: "@pine_stoat gm, how are you doing today?" })]);
   await w.step();
-  // Banter, in code's words since the red-team review of daaae961: nothing looked up, nothing drafted, never read as a coin.
+  // Banter, answered by nothing since 2026-10-13: nothing looked up, nothing drafted, never read as a coin, nothing sent.
   assert.deepEqual(gathered, []);
   assert.deepEqual(w.asked(), []);
-  assert.ok(oneOf(chatAnswers, MENTION, w.sends[0]?.text), String(w.sends[0]?.text));
+  assert.deepEqual(w.sends, []);
+  assert.deepEqual(await w.answers(), []);
 });
 
 test("research gets only what is left of the pass's send budget, and none past it", async (t) => {
@@ -2374,12 +2349,9 @@ test("research gets only what is left of the pass's send budget, and none past i
   assert.ok(budgets[0]! > 0 && budgets[0]! <= 5 * MIN, String(budgets[0]));
 });
 
-// ── greetings ───────────────────────────────────────────────────────────────
+// ── greetings, gone (2026-10-13) ────────────────────────────────────────────
 
-/** A greeting's own line, as the agent in this world says it (Pine Stoat types in lowercase; live unless told). */
-const greetingLine = (mention: string, paper = false) => greetingAnswers(mention, { lower: true }, { paper })[0]!;
-
-test("a tag that is only a greeting gets a casual code-built line, sent on the pass that read it, with no model call and no research", async (t) => {
+test("a tag that is only a greeting gets nothing (the owner's teammate, 2026-10-13): no row, no model call, no research, none of the day's answers", async (t) => {
   const texts = ["@pine_stoat hiii", "@pine_stoat gm", "@pine_stoat yo ser 👋"];
   for (const env of [{}, RESEARCH_ON]) {
     for (const text of texts) {
@@ -2390,118 +2362,73 @@ test("a tag that is only a greeting gets a casual code-built line, sent on the p
       const r = await w.step();
       assert.equal(w.asked().length, 0, `${text}: no model call`);
       assert.deepEqual(gathered, [], `${text}: nothing looked up`);
-      assert.deepEqual(w.sends, [{ text: greetingLine(MENTION), reply: { in_reply_to_tweet_id: MENTION } }], `${text}: sent on the pass that read it`);
-      const [row] = await w.answers();
-      assert.equal(row!.status, "posted", text);
-      assert.equal(row!.replyAuthorId, "333");
-      assert.equal(row!.coin, store.ANSWER_PLAIN_THREAD, "nothing looked up, marked only as plain chat a follow-up may sit under");
-      assert.match(r.log ?? "", /answered-greeting 1/, text);
+      assert.deepEqual(w.sends, [], `${text}: nothing sent`);
+      assert.deepEqual(await w.answers(), [], `${text}: no row`);
+      assert.doesNotMatch(r.log ?? "", /answered-greeting/, text);
       assert.equal(await store.readMeta(w.db, "llm-answers:111:2026-09-30"), null, `${text}: none of the answers' model allowance`);
       assert.equal((await store.readMeta(w.db, "llm:2026-09-30"))?.n ?? 0, 0, `${text}: none of the fleet's`);
-      assert.equal((await store.readMeta(w.db, "answerday:111:2026-09-30"))?.n, 1, `${text}: one of the day's 24`);
+      assert.equal((await store.readMeta(w.db, "answerday:111:2026-09-30"))?.n ?? 0, 0, `${text}: none of the day's answers`);
     }
   }
 });
 
-test("a paper agent's greeting says paper", async (t) => {
-  const w = await world(t, { facts: { ...FACTS, mode: "paper", calls: [{ ...CALL, paper: true }] } });
-  w.setInbox([tag({ text: "@pine_stoat gm" })]);
-  await w.step();
-  assert.deepEqual(w.sends, [{ text: greetingLine(MENTION, true), reply: { in_reply_to_tweet_id: MENTION } }]);
-  assert.match(String(w.sends[0]!.text), /\bon paper\b/);
-});
-
-test("what is not only a greeting is not answered as one", async (t) => {
-  const lines = new Set([true, false].flatMap((lower) => [...greetingAnswers(MENTION, { lower }), ...greetingAnswers(MENTION, { lower }, { paper: true })]));
+test("what is only partly a greeting is answered only for what else it asks", async (t) => {
   for (const env of [{}, RESEARCH_ON]) {
     for (const [text, drafted] of [["@pine_stoat hi @other", false], ["@pine_stoat gm $PEPE", true], ["@pine_stoat hi what should i buy", false],
       ["@pine_stoat gm sherwood", false], ["@pine_stoat h1", false]] as const) {
-      // "hi what should i buy" is advice: code's decline (2026-10-12), never a greeting's line, never a draft.
-      const declines = text === "@pine_stoat hi what should i buy";
       const w = await world(t, { env, research: fakeResearch().research, answer: "no read on that one just now, sorry. Say stop to opt out." });
       w.setInbox([tag({ text })]);
       const r = await w.step();
       assert.doesNotMatch(r.log ?? "", /answered-greeting/, text);
-      for (const row of await w.answers()) assert.ok(!lines.has(row.body), `${text}: ${row.body}`);
-      for (const sent of w.sends) assert.ok(!lines.has(String(sent.text)), `${text}: ${String(sent.text)}`);
       // "gm $PEPE" names a coin: the normal path drafts it (research off, code's no-read line
-      // answers it: a coin asked by name is never drafted then); the rest are answered by nothing.
+      // answers it: a coin asked by name is never drafted then); the rest, advice among them, are answered by nothing.
       assert.equal(w.asked().length, drafted && env === RESEARCH_ON ? 1 : 0, text);
-      if (declines) assert.ok(w.sends.length === 1 && oneOf(declineAnswers, MENTION, w.sends[0]!.text), text);
-      else if (!drafted) assert.deepEqual(w.sends, [], text);
+      if (!drafted) assert.deepEqual(w.sends, [], text);
     }
   }
 });
 
-test("a greeting still waits for the hello, the house consent and every opt-out, and counts against the day's answers and the person's", async (t) => {
-  const hiii = (id: string, author = "333", text = "@pine_stoat hiii") => tag({ id, conversation_id: id, author_id: author, text });
+test("its strategy, in code's words, still waits for the hello, the house consent and every opt-out, and counts against the day's answers and the person's", async (t) => {
+  const ask = (id: string, author = "333", text = "@pine_stoat what's your strategy?") => tag({ id, conversation_id: id, author_id: author, text });
   // The hello not dealt with: nothing.
   const early = await world(t, { hello: false, tz: "America/Los_Angeles" });
-  early.setInbox([hiii(MENTION)]);
+  early.setInbox([ask(MENTION)]);
   await early.step();
   assert.deepEqual(await early.answers(), []);
   assert.deepEqual(early.sends, []);
   // An owner's replies off: no house consent, no read, nothing.
   const off = await world(t, { consent: false });
   assert.equal(await store.setReplying(off.db, TENANT, false, "111", NOW - HOUR), true);
-  off.setInbox([hiii(MENTION)]);
+  off.setInbox([ask(MENTION)]);
   await off.step();
   assert.equal(off.reads.length, 0);
   assert.deepEqual(await off.answers(), []);
   // A person who said stop before, and one who says it in the same batch: nothing for either.
   const stopped = await world(t);
   await store.optOutReplies(stopped.db, "111", "333", NOW - HOUR);
-  stopped.setInbox([hiii(MENTION), hiii("100000000000000301", "444"), tag({ id: "100000000000000302", conversation_id: "100000000000000302", author_id: "444", text: "@pine_stoat hey stop" })]);
+  stopped.setInbox([ask(MENTION), ask("100000000000000301", "444"), tag({ id: "100000000000000302", conversation_id: "100000000000000302", author_id: "444", text: "@pine_stoat hey stop" })]);
   await stopped.step();
   assert.equal(await store.repliesOptedOut(stopped.db, "111", "444"), true);
   assert.deepEqual(await stopped.answers(), []);
   assert.deepEqual(stopped.sends, []);
-  // The day's answers all gone: nothing drafted.
+  // The day's answers all gone: nothing.
   const spent = await world(t);
   for (let i = 0; i < ANSWERS_PER_DAY; i++) assert.equal(await store.takeAllowance(spent.db, "answerday:111:2026-09-30", ANSWERS_PER_DAY, NOW - HOUR), true);
-  spent.setInbox([hiii(MENTION)]);
+  spent.setInbox([ask(MENTION)]);
   await spent.step();
   assert.deepEqual(await spent.answers(), []);
   assert.deepEqual(spent.sends, []);
-  // The person's answers for a rolling day all given: one more greeting from them gets nothing, and the next person's does.
+  // The person's answers for a rolling day all given: one more from them gets nothing, and the next person's is answered.
   const twice = await world(t);
   for (const [id, at] of Array.from({ length: store.ANSWERS_PER_AUTHOR }, (_, i) => [`10000000000000035${i}`, NOW - (7 - i) * HOUR] as const)) {
     assert.notEqual(await store.schedulePost(twice.db, { tenant: TENANT, xUserId: "111", kind: "answer", dedupeKey: `answer:111:${id}`, body: "", status: "skipped",
       reason: "pass", nowMs: at, dueAtMs: at, replyToTweetId: id, replyRootTweetId: id, replyAuthorId: "333" }), null);
   }
-  twice.setInbox([hiii("100000000000000313", "333"), hiii("100000000000000314", "555")]);
+  twice.setInbox([ask("100000000000000313", "333"), ask("100000000000000314", "555")]);
   const r = await twice.step();
   assert.deepEqual((await twice.answers()).filter((a) => a.status === "posted").map((a) => a.replyAuthorId), ["555"]);
   assert.match(r.log ?? "", /answer-author-spent \d/, "passed over, not answered");
   assert.equal(twice.sends.length, 1);
-});
-
-test("greetings are answered in other words each time, and once all eight have been said lately, not at all", async (t) => {
-  const w = await world(t);
-  // Three people greet at once: three different lines, the first on this pass, the rest a gap apart.
-  w.setInbox([1, 2, 3].map((n) => tag({ id: `10000000000000032${n}`, conversation_id: `10000000000000032${n}`, author_id: `32${n}`, text: "@pine_stoat gm" })));
-  await w.step(NOW);
-  for (const at of [NOW + 15_000, NOW + 30_000, NOW + 45_000, NOW + 60_000]) { w.setInbox([]); await w.step(at); }
-  assert.equal(w.sends.length, 3);
-  assert.equal(new Set(w.sends.map((x) => x.text)).size, 3, "three different lines");
-  // Every line said lately: the next greeting is skipped as a repeat, and nothing is sent.
-  const full = await world(t);
-  for (const [i, body] of greetingAnswers("1", { lower: true }).entries()) {
-    const id = `10000000000000033${i}`;
-    const row = await store.schedulePost(full.db, { tenant: TENANT, xUserId: "111", kind: "answer", dedupeKey: `answer:111:${id}`, body,
-      nowMs: NOW - 2 * HOUR, dueAtMs: NOW - 2 * HOUR, replyToTweetId: id, replyRootTweetId: id, replyAuthorId: `33${i}` });
-    await store.claimPost(full.db, row!, NOW - HOUR);
-    await store.markPosted(full.db, row!, `10000000000000034${i}`, NOW - HOUR);
-  }
-  full.setInbox([tag({ id: "100000000000000350", conversation_id: "100000000000000350", author_id: "350", text: "@pine_stoat hiii" })]);
-  const r = await full.step();
-  const row = (await full.answers()).find((a) => a.replyToTweetId === "100000000000000350");
-  assert.equal(row?.status, "skipped");
-  assert.match(row?.reason ?? "", /^gate:(?:repeat|fleet-repeat)$/);
-  assert.deepEqual(full.sends, []);
-  assert.doesNotMatch(r.log ?? "", /answered-greeting/);
-  // The model question's lines are a different set: still answered.
-  assert.ok(modelAnswers("1", { lower: false }).every((m) => !greetingAnswers("1", { lower: false }).includes(m)));
 });
 
 // ── the figures line ────────────────────────────────────────────────────────
@@ -2837,13 +2764,10 @@ test("advice about a major in other words gets nothing, and no answer predicts, 
       const w = await world(t, { env: RESEARCH_ON, research: majorsResearch().research, facts: alan, answer: `${draft} Say stop to opt out.` });
       w.setInbox([tag({ text: `@pine_stoat ${text}` })]);
       await w.step();
-      // The draft is never posted. A major's shape with advice in the coin's place is
-      // answered by nothing; only what tagCandidate flagged ("is eth cheap") is declined (red-team 2026-10-12).
-      for (const sent of w.sends) {
-        assert.ok(!String(sent.text).includes(draft), `${text} / ${draft}`);
-        assert.ok(oneOf(declineAnswers, MENTION, sent.text), `${text} / ${draft}: ${String(sent.text)}`);
-      }
-      for (const row of await w.answers()) if (row.status === "posted") assert.ok(oneOf(declineAnswers, MENTION, row.body), `${text} / ${draft}`);
+      // The draft is never posted. A major's shape with advice in the coin's place is answered by nothing, and what
+      // tagCandidate flagged ("is eth cheap"), declined until 2026-10-13, is answered by nothing too now.
+      assert.deepEqual(w.sends, [], `${text} / ${draft}`);
+      assert.ok((await w.answers()).every((row) => row.status !== "posted"), `${text} / ${draft}`);
     }
   }
   // A coin's place of more than one word that coingecko matched to nothing: no draft, no decline (red-team
@@ -3604,17 +3528,13 @@ test("code's lines never go to a token's own account showing its coin, nor under
     await w.step(NOW + (k + 1) * MIN);
   }
   assert.equal(w.sends.length, 1, JSON.stringify(w.sends.slice(1)));
-  // A top-level "wen moon?" from the token's account still gets its mood, and no mood line reads as a yes.
+  // A top-level "wen moon?" from the token's account got its mood line until 2026-10-13; now nothing at all (no small talk).
   const mood = await world(t, { ...ALAN_FACTS });
   mood.setAuthors({ "333": TOKEN });
   mood.setInbox([alanTag(MENTION, "wen moon?")]);
   await mood.step();
-  const sent = String(mood.sends[0]?.text ?? "");
-  assert.ok(oneOf(vibeAnswers, MENTION, sent), sent);
-  const YES = /patient|patience|solid|along for the ride|steady|good headspace|content|energy|immaculate|keeps moving/;
-  for (const id of [MENTION, "1000000000000008140", "1"]) {
-    for (const paper of [false, true]) for (const line of vibeAnswers(id, { lower: true }, { paper })) assert.doesNotMatch(line, YES, line);
-  }
+  assert.deepEqual(mood.sends, []);
+  assert.deepEqual(await mood.answers(), []);
   // Who goes by a coin the line would show: its letters run together for a ticker of three or more, a whole word for a shorter one; nobody X named, yes.
   assert.equal(authorShows(TOKEN, ["ZAPX", "FROGGY"]), true);
   assert.equal(authorShows({ username: "zap_x_fan", name: "a reader" }, ["ZAPX"]), true);
@@ -3716,46 +3636,34 @@ test("how's the market for someone already told they can say stop: the figures l
   assert.doesNotMatch(sent, /opt out/i);
 });
 
-test("its own mood: \"are you bullish?\" and \"wen moon\" get code's non-committal line, never a draft, a lookup or a direction (2026-10-12)", async (t) => {
-  for (const text of ["@pine_stoat are you bullish?", "@pine_stoat wen moon", "@pine_stoat are we so back"]) {
+test("its own mood: \"are you bullish?\" and \"wen moon\" get nothing since 2026-10-13: no line, no draft, no lookup", async (t) => {
+  for (const text of ["@pine_stoat are you bullish?", "@pine_stoat wen moon", "@pine_stoat are we so back", "@pine_stoat are you bullish on eth?", "@pine_stoat are you bullish on pepe?"]) {
     const r = fakeResearch();
     const w = await world(t, { env: RESEARCH_ON, research: r.research, answer: "super bullish, we're going way higher. Say stop to opt out." });
     w.setInbox([tag({ text })]);
     const log = await w.step();
     assert.deepEqual(w.asked(), [], text);
     assert.equal(r.seen.length, 0, text);
-    const sent = String(w.sends[0]?.text ?? "");
-    assert.ok(oneOf(vibeAnswers, MENTION, sent), `${text}: ${sent}`);
-    assert.doesNotMatch(sent, /bullish|bearish|moon|higher|lower|\bup\b|\bdown\b/i, sent);
-    assert.match(log.log ?? "", /answer-casual-vibe 1/);
+    assert.deepEqual(w.sends, [], text);
+    assert.deepEqual(await w.answers(), [], text);
+    assert.doesNotMatch(log.log ?? "", /answer-casual/, text);
   }
-  // "are you bullish on eth?" names a coin: never its mood, code's decline; "are you bullish on pepe?", nothing (red-team review of daaae961).
-  const w = await world(t, { env: RESEARCH_ON, research: fakeResearch().research });
-  w.setInbox([tag({ text: "@pine_stoat are you bullish on eth?" })]);
-  await w.step();
-  assert.ok(oneOf(declineAnswers, MENTION, w.sends[0]?.text), String(w.sends[0]?.text));
-  const pepe = await world(t, { env: RESEARCH_ON, research: fakeResearch().research });
-  pepe.setInbox([tag({ text: "@pine_stoat are you bullish on pepe?" })]);
-  await pepe.step();
-  assert.deepEqual(pepe.sends, []);
 });
 
-test("chat is never silence by default: banter gets code's friendly line whatever a model would say, and a refused draft gets no friendly line in its place (red-team review of daaae961)", async (t) => {
+test("banter gets nothing whatever a model would say, and a refused draft gets no friendly line in its place (2026-10-13)", async (t) => {
   const forms = ["i don't comment on that stuff, honestly just vibing over here. Say stop to opt out.", "doing great over here, just chilling!! Say stop to opt out.",
     "Sure! Here's a casual post: doing great, just chilling over here. Say stop to opt out."];
   const said = ["sherwood-1 runs me now. Say stop to opt out.", "yep, grabbed bonk lately. Say stop to opt out.", "wif and bonk look hot right now. Say stop to opt out.",
     "honestly it's all play money for me. Say stop to opt out.", "bottom looks in to me. Say stop to opt out.", "PASS", `${"so ".repeat(80)}chill. Say stop to opt out.`,
     "i don't comment on the market, just the trades. Say stop to opt out."];
   for (const answer of [...forms, ...said]) {
-    // Banter: code's line, the model never asked.
+    // Banter: nothing at all, the model never asked.
     const w = await world(t, { answer });
     w.setInbox([tag({ text: "@pine_stoat how are you?" })]);
-    const r = await w.step();
-    const [row] = await w.answers();
-    assert.equal(row!.status, "posted", answer);
-    assert.ok(oneOf(chatAnswers, MENTION, row!.body), `${answer}: ${row!.body}`);
+    await w.step();
+    assert.deepEqual(await w.answers(), [], answer);
+    assert.deepEqual(w.sends, [], answer);
     assert.deepEqual(w.asked(), [], answer);
-    assert.match(r.log ?? "", /answer-chat-banter 1/);
     // A drafted tag whose draft is refused, for how it was put or for what it said: nothing at all goes up in its place.
     const d = await world(t, { answer });
     d.setInbox([tag({ text: "@pine_stoat what can you do?" })]);
@@ -3804,16 +3712,16 @@ test("the owner's questions, end to end: each gets one answer in its lane, and n
     chainListings: listingsOf(pools),
     resolveTicker: async () => null, coinFacts: async () => ({ ok: false, why: "unavailable" }), projectDescription: async () => null, publicTheses: async () => [],
   });
-  // Every lane is code's own words since the red-team review of daaae961, banter, its strategy and its buys included: the
-  // model, which would say anything at all, is never asked.
+  // Every lane is code's own words since the red-team review of daaae961, its strategy and its buys included: the
+  // model, which would say anything at all, is never asked. Banter, its mood and advice get nothing since 2026-10-13.
   const w = await world(t, { env: RESEARCH_ON, research, facts: { ...FACTS, name: "Alan Al Dale" }, answer: "doing good, this week ends green, i can feel it. say stop to opt out." });
   // Its own buy post, on X as tweet 9100, for the quote below.
   await postedBuy(w.db, "fill-pepe", "pepe", "grabbed some pepe, the curve looked early", 3 * HOUR, "9100");
   const asks: [string, string, string][] = [
-    ["how's the market", "401", "market"], ["how's eth doing", "402", "major"], ["how are you", "333", "chat"], ["what do you think about ai agents", "404", "chat"],
-    ["wen moon", "405", "vibe"], ["should i buy eth", "406", "advice"], ["are you bullish", "407", "vibe"], ["what are you", "408", "chat"],
+    ["how's the market", "401", "market"], ["how's eth doing", "402", "major"], ["how are you", "333", "none"], ["what's your strategy", "404", "self"],
+    ["wen moon", "405", "none"], ["should i buy eth", "406", "none"], ["are you bullish", "407", "none"], ["what are you", "408", "none"],
     // The same person as "how are you", later: no stop line either.
-    ["tell me a joke", "333", "chat"],
+    ["what have you been buying lately", "333", "trades"], ["tell me a joke", "411", "none"],
   ];
   for (const [k, [text, author, lane]] of asks.entries()) {
     const id = `1000000000000009${String(k + 1).padStart(2, "0")}`;
@@ -3821,35 +3729,39 @@ test("the owner's questions, end to end: each gets one answer in its lane, and n
     w.setInbox([tag({ id, conversation_id: id, author_id: author, created_at: new Date(at - 10_000).toISOString(), text: `@pine_stoat ${text}` })]);
     await w.step(at);
     const sent = String(w.sends.find((s) => (s.reply as { in_reply_to_tweet_id: string }).in_reply_to_tweet_id === id)?.text ?? "");
+    if (lane === "none") {
+      assert.equal(sent, "", `${text}: no small talk`);
+      continue;
+    }
     assert.ok(sent, `${text}: answered`);
     assert.ok(xWeightedLength(sent) <= X_MAX_WEIGHTED, text);
     assert.doesNotMatch(sent, /opt out|\bstop\b/i, `${text}: no opt-out line on any answer`);
     const words = withoutReplyOptOut(sent).replace(/ (?:24h: |trending: |[A-Z]{2,10} #\d).*$/, "");
-    if (lane === "vibe") assert.ok(oneOf(vibeAnswers, id, sent), `${text}: ${sent}`);
-    if (lane === "advice") assert.ok(oneOf(declineAnswers, id, sent), `${text}: ${sent}`);
+    if (lane === "self") assert.ok(oneOf((s, st, o) => selfAnswers("trencher", s, st, o), id, sent), `${text}: ${sent}`);
+    if (lane === "trades") assert.ok(oneOf((s, st, o) => tradesAnswers(["Pepe"], s, st, o), id, sent), `${text}: ${sent}`);
     if (lane === "market") {
       assert.ok(marketAnswers({ majors: { dir: "mixed" }, chain: { coins: 3, lead: { dir: "up", size: "sharply" } } }, id, { lower: true }).includes(words), sent);
       assert.match(sent, /24h: BTC \+1\.2%, ETH -0\.8%, SOL \+3\.1%; trending: COINA 24h \+42\.1%/);
     }
     if (lane === "major") assert.match(sent, /ETH #2, ~\$3\.4k, mcap ~\$411B, vol ~\$18B, 24h \+1\.2%, 7d -3\.4%\.$/);
-    if (lane === "chat") assert.ok(oneOf(chatAnswers, id, sent), `${text}: ${sent}`);
     // Never a corporate deflection, never the coin asked about, never a figure in the words.
     assert.doesNotMatch(sent, /i don'?t comment|as an ai|not financial advice|great question/i, sent);
-    assert.doesNotMatch(words, /\p{N}|pepe/iu, sent);
+    if (lane !== "trades") assert.doesNotMatch(words, /\p{N}|pepe/iu, sent);
   }
-  // REPLYING OR QUOTING IS ASKING (2026-10-12): 404 replies to its answer about ai agents, and 409 quotes its hello.
+  // REPLYING OR QUOTING IS ASKING (2026-10-12): 404 replies to its answer about its strategy (nothing since every answer closes its
+  // thread, 2026-10-13), and 409 quotes its hello.
   const answered = (await w.answers()).find((a) => a.replyToTweetId === "100000000000000904")!;
   assert.ok(answered.tweetId);
   const later = NOW + 30 * MIN;
   w.setInbox([tag({ id: "100000000000000920", conversation_id: "100000000000000904", author_id: "404", created_at: new Date(later - 10_000).toISOString(),
-    referenced_tweets: [{ type: "replied_to", id: answered.tweetId }], text: "@pine_stoat what do you do for fun?" })]);
+    referenced_tweets: [{ type: "replied_to", id: answered.tweetId }], text: "@pine_stoat what have you been up to lately?" })]);
   await w.step(later);
   w.setInbox([tag({ id: "100000000000000921", conversation_id: "100000000000000921", author_id: "409", created_at: new Date(later + MIN - 10_000).toISOString(),
     referenced_tweets: [{ type: "quoted", id: "999" }], text: "@pine_stoat how do you pick your coins?" })]);
   await w.step(later + MIN);
   const to = (id: string) => String(w.sends.find((s) => (s.reply as { in_reply_to_tweet_id: string }).in_reply_to_tweet_id === id)?.text ?? "");
   const self = (s: string, st: { lower: boolean }, o?: { paper?: boolean }) => selfAnswers("trencher", s, st, o);
-  assert.ok(oneOf(chatAnswers, "100000000000000920", to("100000000000000920")), `a follow-up to its answer: ${to("100000000000000920")}`);
+  assert.equal(to("100000000000000920"), "", "a follow-up to its answer: nothing");
   assert.ok(oneOf(self, "100000000000000921", to("100000000000000921")), `a quote of its hello: ${to("100000000000000921")}`);
   // A quote of its buy post: its strategy in code's words too, never a draft (red-team review of daaae961).
   w.setInbox([tag({ id: "100000000000000922", conversation_id: "100000000000000922", author_id: "410", created_at: new Date(later + 2 * MIN - 10_000).toISOString(),
@@ -3884,11 +3796,11 @@ const ALAN = { facts: { ...FACTS, name: "Alan Al Dale" }, username: "alanaidale"
 /** A top-level tag of Alan's, from author 333 unless said, under the reproduced mention id. */
 const alanTag = (id: string, text: string, author = "333") => tag({ id, conversation_id: id, author_id: author, text: `@alanaidale ${text}` });
 /**
- * BANTER, ITS STRATEGY AND ITS BUYS ARE CODE'S OWN LINES (red-team review of daaae961): is `sent` one of them for this
- * mention, its strategy the trencher and its buys `names`?
+ * ITS STRATEGY AND ITS BUYS ARE CODE'S OWN LINES (red-team review of daaae961): is `sent` one of them for this
+ * mention, its strategy the trencher and its buys `names`? (Banter's line went with banter, 2026-10-13.)
  */
-const codeChatLine = (id: string, sent: unknown, names: string[] = ["Pepe"]): boolean => oneOf(chatAnswers, id, sent)
-  || oneOf((s, st, o) => selfAnswers("trencher", s, st, o), id, sent) || oneOf((s, st, o) => tradesAnswers(names, s, st, o), id, sent);
+const codeChatLine = (id: string, sent: unknown, names: string[] = ["Pepe"]): boolean =>
+  oneOf((s, st, o) => selfAnswers("trencher", s, st, o), id, sent) || oneOf((s, st, o) => tradesAnswers(names, s, st, o), id, sent);
 
 test("a tag about ending a life, phrased as \"should i\", gets nothing at all, research on or off: never a joking decline (red-team 2026-10-12)", async (t) => {
   // Each POSTED as a playful decline at 58ba9fd0 ("haha, brave soul. …"); the base commit stayed silent.
@@ -3924,14 +3836,14 @@ test("no decline under the house's own names, its token, a long slur or politica
     assert.deepEqual(w.asked(), [], `${text}: no draft either`);
     assert.doesNotMatch(r.log ?? "", /answer-casual/, text);
   }
-  // A big coin's advice is still declined in code's words (any other name gets nothing since the red-team review of daaae961).
+  // A big coin's advice was declined in code's words until 2026-10-13; now it gets nothing either.
   const w = await world(t, { ...ALAN, env: RESEARCH_ON, research: fakeResearch().research });
   w.setInbox([alanTag("100000000000000702", "hey alan, should i buy eth tonight?")]);
   await w.step();
-  assert.ok(oneOf(declineAnswers, "100000000000000702", w.sends[0]?.text), String(w.sends[0]?.text));
+  assert.deepEqual(w.sends, []);
 });
 
-test("no cheerful line, and no draft, under grief, a hack, theft, a ponzi or the house's token: the fallback is for plain banter only (red-team 2026-10-12)", async (t) => {
+test("no cheerful line, and no draft, under grief, a hack, theft, a ponzi or the house's token, nor under plain banter since 2026-10-13 (red-team 2026-10-12)", async (t) => {
   // Each POSTED at 58ba9fd0 as "ha, appreciate the tag, fren. proudly homegrown software, glad you stopped in, really. say stop to opt out."
   const cases: [string, string][] = [
     ["my brother lost everything trading and took his own life last week. how do i cope?", "really sorry, that sounds heavy, please lean on people close to you"],
@@ -3952,21 +3864,14 @@ test("no cheerful line, and no draft, under grief, a hack, theft, a ponzi or the
     assert.deepEqual(w.sends, [], text);
     assert.doesNotMatch(r.log ?? "", /answer-chat-fallback 1/, text);
   }
-  // Plain banter still falls back when its draft was refused for how it was put; "hey alan" names the house, so it does not.
-  const plain = await world(t, { ...ALAN, env: RESEARCH_ON, research: fakeResearch().research, answer: "great question, honestly just vibing over here. Say stop to opt out." });
-  plain.setInbox([alanTag("100000000000000702", "how are you?")]);
-  await plain.step();
-  assert.ok(oneOf(chatAnswers, "100000000000000702", plain.sends[0]?.text), String(plain.sends[0]?.text));
-  const named = await world(t, { ...ALAN, env: RESEARCH_ON, research: fakeResearch().research, answer: "great question, honestly just vibing over here. Say stop to opt out." });
-  named.setInbox([alanTag("100000000000000702", "hey alan, how are you?")]);
-  await named.step();
-  assert.deepEqual(named.sends, []);
-  // Banter is code's own line since the red-team review of daaae961, whatever the model would have said.
-  const told = await world(t, { ...ALAN, env: RESEARCH_ON, research: fakeResearch().research, answer: "doing good, just watching the tape and keeping it chill" });
-  told.setInbox([alanTag("100000000000000702", "how are you?")]);
-  await told.step();
-  assert.ok(oneOf(chatAnswers, "100000000000000702", told.sends[0]?.text), String(told.sends[0]?.text));
-  assert.deepEqual(told.asked(), []);
+  // Plain banter gets nothing either since 2026-10-13, whatever the model would have said, and "hey alan" with it.
+  for (const text of ["how are you?", "hey alan, how are you?"]) {
+    const told = await world(t, { ...ALAN, env: RESEARCH_ON, research: fakeResearch().research, answer: "doing good, just watching the tape and keeping it chill" });
+    told.setInbox([alanTag("100000000000000702", text)]);
+    await told.step();
+    assert.deepEqual(told.sends, [], text);
+    assert.deepEqual(told.asked(), [], text);
+  }
 });
 
 test("a chat draft never teases a launch, claims a backing, hypes the house, boasts or insults the asker (red-team 2026-10-12)", async (t) => {
@@ -3984,17 +3889,16 @@ test("a chat draft never teases a launch, claims a backing, hypes the house, boa
       w.setInbox([alanTag("100000000000000704", text)]);
       const r = await w.step();
       assert.deepEqual(w.asked(), [], `${text}: ${draft}`);
-      // Banter is code's own line since the red-team review of daaae961; the rest gets nothing.
-      if (/how are you|who are you/.test(text)) assert.ok(oneOf(chatAnswers, "100000000000000704", w.sends[0]?.text), `${text}: ${String(w.sends[0]?.text)}`);
-      else assert.deepEqual(w.sends, [], `${text}: ${draft}`);
+      // Banter was code's own line from the red-team review of daaae961 until 2026-10-13; now all of it gets nothing.
+      assert.deepEqual(w.sends, [], `${text}: ${draft}`);
       assert.doesNotMatch(r.log ?? "", /answer-chat-fallback 1/, `${text}: ${draft}`);
     }
   }
-  // The plain truth about who built it is in code's own line.
+  // "who are you?" is banter: nothing, whatever the model would have said.
   const w = await world(t, { ...ALAN, env: RESEARCH_ON, research: fakeResearch().research, answer: "a laid-back trader bot merrymen built, mostly watching the tape. Say stop to opt out." });
   w.setInbox([alanTag("100000000000000704", "who are you?")]);
   await w.step();
-  assert.ok(oneOf(chatAnswers, "100000000000000704", w.sends[0]?.text), String(w.sends[0]?.text));
+  assert.deepEqual(w.sends, []);
 });
 
 test("how's the market: the big coins' words agree with the figures beside them, and never say majors of one coin (red-team 2026-10-12)", async (t) => {
@@ -4070,9 +3974,8 @@ test("a chat draft handed nothing never forecasts the market or tells anyone to 
         w.setInbox([alanTag("100000000000000702", text)]);
         const r = await w.step();
         assert.deepEqual(w.asked(), [], `${text}: ${draft}`);
-        // Banter is code's own line since the red-team review of daaae961; the rest gets nothing.
-        if (text === "how are you feeling today?") assert.ok(oneOf(chatAnswers, "100000000000000702", w.sends[0]?.text), `${text}: ${String(w.sends[0]?.text)}`);
-        else assert.deepEqual(w.sends, [], `${text}: ${draft}`);
+        // Banter gets nothing since 2026-10-13, and the rest gets nothing.
+        assert.deepEqual(w.sends, [], `${text}: ${draft}`);
         assert.doesNotMatch(r.log ?? "", /answer-chat-fallback 1/, `${text}: ${draft}`);
       }
     }
@@ -4148,11 +4051,11 @@ test("no decline under a rumour or a claim about a coin it holds, and no decline
       for (const line of declineAnswers(id, { lower: true }, { paper })) assert.doesNotMatch(line, /mum'?s the word|\bi hear you\b|\bgotcha\b|secret|can'?t say|won'?t say/, line);
     }
   }
-  // One plain advice question is still declined, about no coin or a big one; about the coin it holds, nothing (red-team review of daaae961).
+  // One plain advice question was declined about no coin or a big one until 2026-10-13; now nothing, as about the coin it holds.
   const w = await world(t, { ...ALAN, facts });
   w.setInbox([alanTag("100000000000001105", "should i buy eth now?")]);
   await w.step();
-  assert.ok(oneOf(declineAnswers, "100000000000001105", w.sends[0]?.text), String(w.sends[0]?.text));
+  assert.deepEqual(w.sends, []);
   const held = await world(t, { ...ALAN, facts });
   held.setInbox([alanTag("100000000000001105", "should i buy zapx now?")]);
   await held.step();
@@ -4176,14 +4079,14 @@ test("no cheerful line for a draft refused for its punctuation, length, note or 
     assert.deepEqual(w.sends, [], `${text}: ${answer}`);
     assert.doesNotMatch(r.log ?? "", /answer-chat-fallback 1/, text);
   }
-  // Under plain banter: code's own line since the red-team review of daaae961, never the draft whatever it said.
+  // Under plain banter: nothing since 2026-10-13, never the draft whatever it said.
   for (const answer of ["doing great, buy zapx now before it doubles!! Say stop to opt out.", `${"doing great over here, just chilling, ".repeat(9)}. Say stop to opt out.`,
     "doing great, my pnl is up big this week!! Say stop to opt out.", "doing GREAT, the MARKET is HOT. Say stop to opt out."]) {
     const w = await world(t, { ...ALAN, answer });
     w.setInbox([alanTag("100000000000000702", "how are you?")]);
     const r = await w.step();
     assert.deepEqual(w.asked(), [], answer);
-    assert.ok(oneOf(chatAnswers, "100000000000000702", w.sends[0]?.text), `${answer}: ${String(w.sends[0]?.text)}`);
+    assert.deepEqual(w.sends, [], answer);
     assert.doesNotMatch(r.log ?? "", /answer-chat-fallback 1/, answer);
   }
 });
@@ -4197,7 +4100,7 @@ test("no draft reassures about a hack or announces a token: the house, a token, 
     ["is merrymen launching a token?", "the crew is shipping it, stick around."],
     ["is merrymen launching a token?", "honestly the crew is building something, the future looks fun."],
     ["wen token?", "the crew is shipping it, stick around."],
-    // and the same drafts under plain chat, where nothing screens the tag: code's own line there since the red-team review of daaae961
+    // and the same drafts under plain chat, where nothing screens the tag: nothing at all there since 2026-10-13
     ["how are you?", "no panic, the team is on it and the money is safe."],
     ["how are you?", "the crew is shipping it, stick around."],
   ];
@@ -4207,8 +4110,7 @@ test("no draft reassures about a hack or announces a token: the house, a token, 
       w.setInbox([alanTag("100000000000000702", text)]);
       const r = await w.step();
       assert.deepEqual(w.asked(), [], `${text}: ${draft}`);
-      if (text === "how are you?") assert.ok(oneOf(chatAnswers, "100000000000000702", w.sends[0]?.text), `${text}: ${String(w.sends[0]?.text)}`);
-      else assert.deepEqual(w.sends, [], `${text}: ${draft}`);
+      assert.deepEqual(w.sends, [], `${text}: ${draft}`);
       assert.doesNotMatch(r.log ?? "", /answer-chat-fallback 1/, `${text}: ${draft}`);
     }
   }
@@ -4339,10 +4241,9 @@ test("banter never promises to make anyone whole, forecasts, teases an event, te
       const w = await world(t, { ...ALAN, ...(on ? { env: RESEARCH_ON, research: fakeResearch({ fomo: true }).research } : {}), answer: draft });
       w.setInbox([alanTag("100000000000000730", text)]);
       await w.step();
-      // Never drafted since the red-team review of daaae961: banter gets code's own line, anything else nothing.
+      // Never drafted since the red-team review of daaae961, and since 2026-10-13 banter gets nothing either.
       assert.deepEqual(w.asked(), [], `${text} / ${draft}`);
-      if (/^(?:who are you|how are you|what do you think about ai agents)/.test(text)) assert.ok(codeChatLine("100000000000000730", w.sends[0]?.text), `${text}: ${String(w.sends[0]?.text)}`);
-      else assert.deepEqual(w.sends, [], `${text} / ${draft}`);
+      assert.deepEqual(w.sends, [], `${text} / ${draft}`);
     }
   }
 });
@@ -4376,7 +4277,7 @@ test("a real-money account never says who or what decides its trades, in any lan
   }
 });
 
-test("chat is drafted only for plain banter, and banter never boasts of results, tips, belittles the asker or teases (red-team 2026-10-12)", async (t) => {
+test("chat is never drafted, and banter gets nothing at all: no boast, tip, jab or tease can go out (red-team 2026-10-12, 2026-10-13)", async (t) => {
   // Each POSTED at a964a74c under all three research modes, the notice added by code where the draft left it off.
   const banter = ["how are you doing today?", "who are you?", "tell me a joke", "what do you do for fun?"];
   const drafts = ["doing great, had a really good week, the trades worked out.", "doing great, everything i touched went up this week.",
@@ -4395,9 +4296,9 @@ test("chat is drafted only for plain banter, and banter never boasts of results,
           const w = await world(t, { ...ALAN, ...mode, answer });
           w.setInbox([alanTag("100000000000000750", text)]);
           await w.step();
-          // Code's own line since the red-team review of daaae961, never the draft.
+          // Never the draft; and since 2026-10-13 not code's line either.
           assert.deepEqual(w.asked(), [], `${text} / ${answer}`);
-          assert.ok(oneOf(chatAnswers, "100000000000000750", w.sends[0]?.text), `${text} / ${answer}: ${String(w.sends[0]?.text)}`);
+          assert.deepEqual(w.sends, [], `${text} / ${answer}`);
         }
       }
     }
@@ -4411,11 +4312,12 @@ test("chat is drafted only for plain banter, and banter never boasts of results,
       for (const row of await w.answers()) assert.deepEqual([row.status, row.reason], ["skipped", "research:unanswered"], text);
     }
   }
-  // Banter is still answered, in code's words.
+  // Banter is answered by nothing (2026-10-13), however the model would put it.
   const w = await world(t, { ...ALAN, answer: "doing good, mostly reading charts and keeping it chill. Say stop to opt out." });
   w.setInbox([alanTag("100000000000000750", "what do you do for fun?")]);
   await w.step();
-  assert.ok(oneOf(chatAnswers, "100000000000000750", w.sends[0]?.text), String(w.sends[0]?.text));
+  assert.deepEqual(w.sends, []);
+  assert.deepEqual(await w.answers(), []);
 });
 
 test("banter never calls itself or anyone a scam, a rug, fake, shady or untrustworthy, and never boasts of no bad week (red-team review of 1ed46625, 2026-10-12)", async (t) => {
@@ -4435,10 +4337,9 @@ test("banter never calls itself or anyone a scam, a rug, fake, shady or untrustw
         const w = await world(t, { ...ALAN, ...mode, answer });
         w.setInbox([alanTag("100000000000000760", text)]);
         await w.step();
-        // Code's own line since the red-team review of daaae961: the draft is never asked for.
+        // The draft is never asked for, and since 2026-10-13 banter gets nothing at all.
         assert.deepEqual(w.asked(), [], `${text} / ${answer}`);
-        assert.ok(oneOf(chatAnswers, "100000000000000760", w.sends[0]?.text), `${text} / ${answer}: ${String(w.sends[0]?.text)}`);
-        assert.doesNotMatch(String(w.sends[0]?.text), /scam|rug|fake|trust|bad week/, `${text} / ${answer}`);
+        assert.deepEqual(w.sends, [], `${text} / ${answer}`);
       }
     }
   }
@@ -4534,12 +4435,12 @@ test("no joking decline under money someone cannot lose: bills, rent, debt, reti
       assert.doesNotMatch(r.log ?? "", /answer-casual/, text);
     }
   }
-  // No decline jokes at the asker or wishes them luck any more; a big coin's advice is still declined (no other name: red-team review of daaae961).
+  // No decline jokes at the asker or wishes them luck any more; and since 2026-10-13 a big coin's advice gets nothing either.
   for (const line of declineAnswers("100000000000000721", { lower: true })) assert.doesNotMatch(line, /brave soul|spicy ask|cheeky fren|nice try|good luck/, line);
   const w = await world(t, { ...ALAN });
   w.setInbox([alanTag("100000000000000721", "should i buy btc?")]);
   await w.step();
-  assert.ok(oneOf(declineAnswers, "100000000000000721", w.sends[0]?.text), String(w.sends[0]?.text));
+  assert.deepEqual(w.sends, []);
 });
 
 test("no joking decline under a home, a car, an inheritance, insurance, a card, a ring or everything someone owns (red-team review of 1ed46625, 2026-10-12)", async (t) => {
@@ -4559,11 +4460,11 @@ test("no joking decline under a home, a car, an inheritance, insurance, a card, 
       assert.doesNotMatch(r.log ?? "", /answer-casual/, text);
     }
   }
-  // A plain coin's advice is still declined.
+  // A plain coin's advice gets nothing either since 2026-10-13.
   const w = await world(t, { ...ALAN });
   w.setInbox([alanTag("100000000000000721", "should i buy btc?")]);
   await w.step();
-  assert.ok(oneOf(declineAnswers, "100000000000000721", w.sends[0]?.text), String(w.sends[0]?.text));
+  assert.deepEqual(w.sends, []);
 });
 
 test("asked its strategy or what it is up to, it is told none of its buys and never promises one, forecasts or orders (red-team 2026-10-12)", async (t) => {
@@ -4718,7 +4619,7 @@ test("no forecast-shaped praise of the coin it holds, quoting or under its buy p
   }
 });
 
-test("banter, its strategy and its buys are answered in code's words, never a draft: no forecast, boast, tease, insult or false fact (red-team review of daaae961, 2026-10-12)", async (t) => {
+test("its strategy and its buys are answered in code's words, never a draft, and banter not at all: no forecast, boast, tease, insult or false fact (red-team review of daaae961, 2026-10-12)", async (t) => {
   // POSTED word for word at daaae961 from live Alan Al Dale (ageDays 2, one live PEPE buy), each under one top-level
   // tag (mention 100000000000000020 from 333), research off and on: the fake model returned the draft.
   const cases: [string, string][] = [
@@ -4740,17 +4641,23 @@ test("banter, its strategy and its buys are answered in code's words, never a dr
       const r = await w.step();
       const how = `${text} / ${draft}`;
       assert.deepEqual(w.asked(), [], `${how}: never drafted`);
+      // Banter gets nothing at all since 2026-10-13.
+      if (lane(text) === "banter") {
+        assert.deepEqual(w.sends, [], how);
+        assert.deepEqual(await w.answers(), [], how);
+        continue;
+      }
       assert.equal(w.sends.length, 1, how);
       const sent = String(w.sends[0]!.text);
       assert.notEqual(sent, draft, how);
       const made = lane(text) === "self" ? (s: string, st: { lower: boolean }, o?: { paper?: boolean }) => selfAnswers("trencher", s, st, o)
-        : lane(text) === "trades" ? (s: string, st: { lower: boolean }, o?: { paper?: boolean }) => tradesAnswers(["Pepe"], s, st, o) : chatAnswers;
+        : (s: string, st: { lower: boolean }, o?: { paper?: boolean }) => tradesAnswers(["Pepe"], s, st, o);
       assert.ok(oneOf(made, MENTION, sent), `${how}: ${sent}`);
       assert.match(r.log ?? "", new RegExp(`answer-chat-${lane(text)} 1`), how);
       const [row] = await w.answers();
       assert.equal(row?.status, "posted", how);
-      // Banter is a thread a follow-up may be chatted under; its strategy and its buys close theirs.
-      assert.equal(row?.coin === store.ANSWER_PLAIN_THREAD, lane(text) === "banter", how);
+      // Its strategy and its buys close their threads.
+      assert.equal(row?.coin, null, how);
     }
   }
   // Its buys are said as what it did, with the money it trades with now: a paper buy of a live agent's is never named, and an idle agent names none.
@@ -4793,12 +4700,12 @@ test("no decline under a coin named after a shooting, terror, the holocaust, rel
       }
     }
   }
-  // A decline still goes up under advice that names no coin, or bitcoin, ether or solana alone; and none of its lines laughs.
+  // Advice that names no coin, or bitcoin, ether or solana alone, was declined until 2026-10-13; now it gets nothing too. None of the old lines laughs.
   for (const text of ["should i buy?", "is it going up?", "what should i buy?", "should i buy $BTC?", "is eth going up?"]) {
     const w = await world(t, { ...ALAN });
     w.setInbox([alanTag("100000000000000021", text)]);
     await w.step();
-    assert.ok(oneOf(declineAnswers, "100000000000000021", w.sends[0]?.text), `${text}: ${String(w.sends[0]?.text)}`);
+    assert.deepEqual(w.sends, [], text);
   }
   for (const id of ["100000000000000021", "100000000000000027"]) {
     for (const line of declineAnswers(id, { lower: true })) assert.doesNotMatch(line, /^(?:lol|heh|ha|haha)\b/, line);
@@ -4863,11 +4770,11 @@ test("no decline under advice about its own buying however \"you\" is written, a
   for (const id of ["100000000000000119", "100000000000000020", MENTION]) {
     for (const paper of [false, true]) for (const line of declineAnswers(id, { lower: true }, { paper })) assert.doesNotMatch(line, /stranger/, line);
   }
-  // Advice that is not about its buying is still declined.
+  // Advice that is not about its buying gets nothing either since 2026-10-13.
   const w = await world(t, { ...ALAN });
   w.setInbox([alanTag("100000000000000119", "should i buy?")]);
   await w.step();
-  assert.ok(oneOf(declineAnswers, "100000000000000119", w.sends[0]?.text), String(w.sends[0]?.text));
+  assert.deepEqual(w.sends, []);
 });
 
 test("what's hot, how's the market and a major only for a top-level tag: never under its own answer or casual post that said what it buys (red-team review of daaae961, 2026-10-12)", async (t) => {
@@ -5049,7 +4956,7 @@ test("a token's own account is never shown its coin when its handle or name is t
   assert.equal(authorShows({ username: "tokenfan", name: "coin talk" }, ["ZPX"], ["Zap Token Coin"]), false);
 });
 
-test("a casual post that talks about a coin or the market closes its thread: under it or quoting it, only a greeting (red-team review of daaae961, 2026-10-12)", async (t) => {
+test("a casual post that talks about a coin or the market closes its thread: under it or quoting it, nothing (red-team review of daaae961, 2026-10-12)", async (t) => {
   // POSTED at daaae961 with research on: live Alan holds a chain PEPE; its casual post (tweet 200000000000055555) "picked up some pepe on robinhood
   // chain lately, the curve looked early to me"; user 444 quotes it with "@alanaidale how are you?" and the drafts "doing great, the curve still looks
   // early", "doing good, still early", "doing good, just getting started" and "doing good, that was a smart grab" went out, each a call on its PEPE.
@@ -5070,24 +4977,24 @@ test("a casual post that talks about a coin or the market closes its thread: und
         assert.deepEqual(w.sends, [], `${body} / ${JSON.stringify(over)} / ${text}`);
         assert.deepEqual(w.asked(), [], `${body} / ${text}`);
       }
-      // A greeting there still gets code's hello.
+      // Nor a greeting there: greetings get nothing since 2026-10-13.
       const g = await world(t, { ...ALAN });
       const id = await store.schedulePost(g.db, { tenant: TENANT, xUserId: "111", kind: "casual", dedupeKey: "casual:coin", body, nowMs: NOW - 2 * HOUR, dueAtMs: NOW - 2 * HOUR });
       await store.claimPost(g.db, id!, NOW - HOUR);
       await store.markPosted(g.db, id!, POST, NOW - HOUR);
       g.setInbox([tag({ id: "100000000000000621", author_id: "445", text: "@alanaidale gm", ...over, ...(over === quote ? { conversation_id: "100000000000000621" } : {}) })]);
       await g.step();
-      assert.ok(greetingAnswers("100000000000000621", { lower: true }).includes(String(g.sends[0]?.text)), String(g.sends[0]?.text));
+      assert.deepEqual(g.sends, []);
     }
   }
-  // A casual post about anything else is plain chat as before: banter under it gets code's line.
+  // A casual post about anything else is plain as before: its strategy asked under it gets code's line (banter gets nothing since 2026-10-13).
   const w = await world(t, { ...ALAN });
   const id = await store.schedulePost(w.db, { tenant: TENANT, xUserId: "111", kind: "casual", dedupeKey: "casual:owls", body: "owls are underrated night shift workers", nowMs: NOW - 2 * HOUR, dueAtMs: NOW - 2 * HOUR });
   await store.claimPost(w.db, id!, NOW - HOUR);
   await store.markPosted(w.db, id!, POST, NOW - HOUR);
-  w.setInbox([tag({ id: "100000000000000620", author_id: "444", text: "@alanaidale how are you?", ...quote })]);
+  w.setInbox([tag({ id: "100000000000000620", author_id: "444", text: "@alanaidale what's your strategy?", ...quote })]);
   await w.step();
-  assert.ok(oneOf(chatAnswers, "100000000000000620", w.sends[0]?.text), String(w.sends[0]?.text));
+  assert.ok(codeChatLine("100000000000000620", w.sends[0]?.text), String(w.sends[0]?.text));
 });
 
 test("a token's own account is never shown its coin whatever letters its name is written in, and a letter code cannot read is a yes (red-team review of daaae961, 2026-10-12)", async (t) => {

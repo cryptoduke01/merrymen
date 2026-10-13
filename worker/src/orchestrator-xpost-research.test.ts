@@ -117,6 +117,11 @@ describe("a tag's intent, read by code", () => {
     ["what can you do?", "capabilities"],
     ["how do i get my own agent?", "onboarding"],
     ["how do i get an agent like you", "onboarding"],
+    // The X allowlist's plain onboarding shapes (onboardingAsk, 2026-10-13).
+    ["how do i get an agent?", "onboarding"],
+    ["hey, how can i make an ai trading agent?", "onboarding"],
+    ["can i get a bot like you?", "onboarding"],
+    ["where do i set up my own agent", "onboarding"],
     ["what are you trading lately?", "own-trades"],
     ["why did you buy $PEPE?", "own-trades"],
     ["what model do you run on?", "model"],
