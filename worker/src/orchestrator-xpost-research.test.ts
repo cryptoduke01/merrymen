@@ -1458,6 +1458,22 @@ describe("what's hot: the chain's trending coins past the fleet's floors, fomo's
     for (const name of ["Coin A", "Chump", "Froggy Token", "Zorblat"]) assert.equal(copycatName(name, top), false, name);
   });
 
+  it("two neighbouring letters swapped is one edit: BTICOIN, ETEHREUM, SOALNA, TEHTER, DOEG, BNOK, SHBI, HYEP are copies (red-team review of daaae961)", () => {
+    // Each posted at daaae961 as a trending chain coin, listed on coingecko by its contract under the same symbol.
+    const swapped = ["BTICOIN", "ETEHREUM", "SOALNA", "TEHTER", "BITCION", "RIPLPE", "CARDNAO", "DOEG", "BNOK", "SHBI", "HYEP"];
+    for (const sym of swapped) assert.ok(copycatTicker(sym), sym);
+    const top = topCopyOf([{ symbol: "btc", name: "Bitcoin" }, { symbol: "eth", name: "Ethereum" }, { symbol: "sol", name: "Solana" }, { symbol: "usdt", name: "Tether" },
+      { symbol: "xrp", name: "XRP" }, { symbol: "ada", name: "Cardano" }, { symbol: "doge", name: "Dogecoin" }, { symbol: "shib", name: "Shiba Inu" },
+      { symbol: "bonk", name: "Bonk" }, { symbol: "pepe", name: "Pepe" }]);
+    for (const t of ["BTICOIN", "ETEHREUM", "SOALNA", "TEHTER", "BITCION", "CARDNAO", "DOGECION"]) assert.ok(topCopycat(t, top), t);
+    for (const name of ["Bticoin", "Etehreum Classic", "Soalna Robinhood"]) assert.ok(copycatName(name, top), name);
+    // A coin no screen knows still passes, and so does a swap of letters that are not neighbours to anything big.
+    for (const sym of ["CHUMP", "COINA", "FROGGY", "QRTZ", "ZAPX", "MOLT", "ZORBLAT", "FENDRO"]) {
+      assert.equal(copycatTicker(sym), false, sym);
+      assert.equal(topCopycat(sym, top), false, sym);
+    }
+  });
+
   it("never a big coin's ticker or name, or one built on it, read off coingecko's own biggest coins; and none without them (red-team 2026-10-12)", async () => {
     const top = topCopyOf(TOP);
     for (const t of ["WLFI", "MNT", "SONIC", "LIDO", "MANTLE", "ASTER", "HYPEX", "XRPAI", "WIFX", "CURVE", "LINEA", "BABYWIF", "SOLANAX", "BITTENSOR", "WORLDCAT", "S"]) {

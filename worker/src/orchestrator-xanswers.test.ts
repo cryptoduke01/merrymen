@@ -4971,3 +4971,26 @@ test("what's hot never shows its own bag once the buy leaves the facts' window, 
     }
   }
 });
+
+test("what's hot and how's the market never show a big coin with two neighbouring letters swapped (red-team review of daaae961, 2026-10-12)", async (t) => {
+  // POSTED at daaae961 with the real readers, one pool per ticker at +312% with ~$1.1M of volume, listed by its contract under the same symbol at
+  // #3100: "robinhood chain's trending list has one busy coin, the first far firmer for the day. descriptive only. geckoterminal robinhood:
+  // trending $BTICOIN 24h +312% vol ~$1.1M." and the same for the rest, under "what's hot?" and "how's the market?".
+  for (const name of ["BTICOIN", "ETEHREUM", "SOALNA", "TEHTER", "BITCION", "RIPLPE", "CARDNAO", "DOEG", "BNOK", "SHBI", "HYEP"]) {
+    for (const ask of ["what's hot?", "how's the market?"]) {
+      fakeCoinGecko(t, [{ name, change: 312, vol: 1_100_000 }], [name]);
+      const w = await world(t, { ...ALAN, env: RESEARCH_ON, research: createXResearch(), answer: "the first one is the play, get in. Say stop to opt out." });
+      w.setInbox([alanTag(MENTION, ask)]);
+      await w.step();
+      const text = String(w.sends[0]?.text ?? "");
+      assert.ok(text, `${name} / ${ask}: answered`);
+      assert.ok(!text.includes(`$${name}`), `${name} / ${ask}: ${text}`);
+    }
+  }
+  // One letter changed or doubled is refused as before, and a coin that copies nothing still shows.
+  fakeCoinGecko(t, [{ name: "CHUMP", change: 312, vol: 1_100_000 }], ["CHUMP"]);
+  const w = await world(t, { ...ALAN, env: RESEARCH_ON, research: createXResearch() });
+  w.setInbox([alanTag(MENTION, "what's hot?")]);
+  await w.step();
+  assert.match(String(w.sends[0]?.text ?? ""), /trending \$CHUMP 24h \+312%/);
+});

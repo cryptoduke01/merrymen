@@ -1368,9 +1368,22 @@ const STOCK_NAMES: readonly string[] = [...new Set([...STOCK_TOKENS.map((t) => t
  * dropped from a stock symbol of four letters or more ("GOOG", "TSLX",
  * "NVDIA") reads as that stock. COIN and META only exactly, as above.
  */
+/**
+ * AND TWO NEIGHBOURING LETTERS SWAPPED IS ONE EDIT TOO (red-team review of
+ * daaae961, 2026-10-12): "$BTICOIN 24h +312%", "$ETEHREUM", "$SOALNA",
+ * "$TEHTER", "$BITCION", "$RIPLPE", "$CARDNAO", "$DOEG", "$BNOK", "$SHBI" and
+ * "$HYEP" were posted as trending chain coins, each read as the big coin
+ * itself, because a swap is two changed letters to a plain count and one to a
+ * reader (a Damerau edit).
+ */
 function oneEditFrom(a: string, b: string): boolean {
   if (a === b || Math.abs(a.length - b.length) > 1) return a === b;
-  if (a.length === b.length) return [...a].filter((ch, i) => ch !== b[i]).length === 1;
+  if (a.length === b.length) {
+    const diff = [...a].map((ch, i) => (ch !== b[i] ? i : -1)).filter((i) => i >= 0);
+    if (diff.length === 1) return true;
+    const [i, j] = diff;
+    return diff.length === 2 && j === i! + 1 && a[i!] === b[j!] && a[j!] === b[i!];
+  }
   const [long, short] = a.length > b.length ? [a, b] : [b, a];
   for (let i = 0; i < long.length; i++) if (long.slice(0, i) + long.slice(i + 1) === short) return true;
   return false;
@@ -1423,6 +1436,9 @@ function rootIn(core: string, root: string, oneEditAt: number): boolean {
   return r.length >= oneEditAt && (oneEditFrom(core, r) || oneEditFrom(core, undoubled(r)));
 }
 
+/** The reserved tickers and names long enough to read one edit off them (five letters or more: "TETHER", "RIPPLE", "CARDANO"). */
+const RESERVED_LONG: readonly string[] = [...RESERVED_TICKERS].filter((r) => r.length >= 5);
+
 /** Would this ticker read as bitcoin, ether, a dollar, a big memecoin, gold or a currency, or one of the chain's stock tokens? */
 export function copycatTicker(ticker: string): boolean {
   const t = String(ticker ?? "").toUpperCase();
@@ -1432,8 +1448,10 @@ export function copycatTicker(ticker: string): boolean {
   if (STOCK_ROOTS.some((s) => t.startsWith(s) || t.endsWith(s))) return true;
   if (STOCK_ROOTS.some((s) => s.length >= 4 && oneEditFrom(t, s))) return true;
   if (STOCK_NAMES.some((n) => t.includes(n))) return true;
-  // Its cores (copyCores), against the big coins and memecoins, the reserve coins and the currencies (red-team review of 1ed46625).
-  return copyCores(t).some((c) => RESERVED_TICKERS.has(c) || RESERVED_ROOTS.some((r) => rootIn(c, r, 4)) || COPY_ROOTS.some((r) => rootIn(c, r, 4)));
+  // Its cores (copyCores), against the big coins and memecoins, the reserve coins and the currencies (red-team review of 1ed46625);
+  // and one edit, a swap included, from any reserved ticker or name of five letters or more ("RIPLPE", "CARDNAO": red-team review of daaae961).
+  return copyCores(t).some((c) => RESERVED_TICKERS.has(c) || RESERVED_ROOTS.some((r) => rootIn(c, r, 4)) || COPY_ROOTS.some((r) => rootIn(c, r, 4))
+    || RESERVED_LONG.some((r) => oneEditFrom(c, r)));
 }
 
 /**

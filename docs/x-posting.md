@@ -1309,7 +1309,7 @@ other owner's agent, and its posting and reply warnings, are unchanged.
   "LIL", "MINI", "AI", "INU", "X", "KING" and the like, each also with its
   doubled letters run together); a root matches a core whole, at its start
   or end, anywhere inside it at four letters or more, and one letter off at
-  four letters or more for the hand list and five for CoinGecko's. The name
+  four letters or more for the hand list and five for CoinGecko's, two neighbouring letters swapped counting as one (red-team review of daaae961: `$BTICOIN`, `$ETEHREUM`, `$SOALNA`, `$TEHTER`, `$RIPLPE`, `$DOEG`, `$BNOK`, `$SHBI` were posted as trending), and one edit off any reserved ticker or name of five letters or more. The name
   CoinGecko lists a chain coin under is read the same way, word by word and
   run together (`copycatName`). Robin Hood's other merry men and his country
   are the house's names too (`$LITTLEJOHN`, `$FRIARTUCK`, `$MAIDMARIAN` were
