@@ -66,7 +66,7 @@ import { normalisedTag, plainAsk, withoutReplyOptOut } from "./xpost/replies";
 import { takeAllowance, type XPost } from "./xpost/store";
 import { coinNamedIn, type AnswerIntentKind } from "./xpost/writer";
 import { asksAboutACoin, everydayWord, nameLikeWords } from "./xpost/words";
-import { cleanTicker, neverAnsweredName, type FiguresSection, type FiguresSpec } from "./xpost/figures";
+import { cleanTicker, neverAnsweredName, withoutFiguresLine, type FiguresSection, type FiguresSpec } from "./xpost/figures";
 import { majorsDirOf, moveOf, type HotRead, type MajorRead, type MarketRead } from "./xpost/market";
 import { coinQuery, LISTINGS_MAX, MAJORS_MAX_RANK, pickMajor, readChainListings, readCoinMarket, readCoinMarkets, readCoinTrending, readTopCoins, searchCoinList, type ChainListing, type ChainListingsRead, type CoinHit, type CoinMarket, type CoinMarketRead, type CoinMarketsRead, type CoinSearchRead, type CoinTopRead, type CoinTrendingRead } from "./venues/coingecko-coins";
 
@@ -1115,10 +1115,15 @@ export function sayable(s: unknown): s is string {
  * bitquery, which the market phrases and the figures line name. A post that
  * says one carries research; a draft that cites one with nothing looked up
  * is refused (orchestrator-xpost.ts, gate:unlooked-source).
+ *
+ * AND CODE'S FIGURES LINE ITSELF (2026-10-13): the line names no source any
+ * more ("ETH #2, ~$3.4k, …", "24h: BTC +1.2%, …"), so a post that ends in one
+ * (figures.ts withoutFiguresLine) carries research by the line alone: an
+ * answer's, and an active owner's market insight post's.
  */
 const RESEARCH_SOURCE = /\b(?:index|fomo|on[\s-]?chain|chain data|project|creator|contract|coin\s?gecko|gecko\s?terminal|bit\s?query)\b/i;
 export function carriesResearch(body: unknown): boolean {
-  return typeof body === "string" && RESEARCH_SOURCE.test(body);
+  return typeof body === "string" && (RESEARCH_SOURCE.test(body) || withoutFiguresLine(body) !== body);
 }
 
 /** A promise held to `ms`, or `fallback`. Never throws; its timer never holds a shutdown. */

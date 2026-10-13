@@ -1609,7 +1609,7 @@ describe("what's hot: the chain's trending coins past the fleet's floors, fomo's
     assert.deepEqual(b.facts, hotPhrases({ changes: [42.07, -8.3, 12], crowd: 2, trending: 2 }));
     assert.deepEqual(b.hot, { coins: 3, lead: { dir: "up", size: "sharply" } }, "code's own words are built from this read, never a draft");
     assert.equal(renderFiguresLine(b.figures!),
-      "geckoterminal robinhood: trending COINA 24h +42.1% vol ~$1.2M, COINB 24h -8.3% vol ~$310k, COINC 24h +12% vol ~$400k; fomo: most bought COIND, COINB; coingecko: trending PEPE, TAO.");
+      "trending: COINA 24h +42.1% vol ~$1.2M, COINB 24h -8.3% vol ~$310k, COINC 24h +12% vol ~$400k; fomo: most bought COIND, COINB; hot: PEPE, TAO.");
   });
 
   it("nothing past the floors: the plain line and nothing more looked up; the index unread: nothing at all", async () => {
@@ -1698,7 +1698,7 @@ describe("a tagged contract's last hour of onchain flow, as figures beside its w
     const { research } = fakes({ flow: busyHour(12_300, 8_100) });
     const b = await research.gather(input({ kind: "coin", ticker: null, address: CA }));
     assert.deepEqual(b.figures, [{ kind: "flow", buyUsd: 12_300, sellUsd: 8_100 }]);
-    assert.equal(renderFiguresLine(b.figures!), "bitquery: 1h buys ~$12k, sells ~$8.1k.");
+    assert.equal(renderFiguresLine(b.figures!), "1h buys ~$12k, sells ~$8.1k.");
     assert.ok(b.facts.every((p) => !/\p{N}|\$/u.test(p)));
   });
   it("no reading, a failed one, or an hour too thin to show: no figures", async () => {
@@ -1957,7 +1957,7 @@ describe("how's the market: the big coins' day and the chain's movers, read for 
     assert.ok(b.lookups <= RESEARCH_BUDGET.maxLookups);
     assert.ok(b.notes.includes("market"));
     // The figures: the big coins by their day, the chain's coins by theirs only (no volume), never coingecko's global list.
-    assert.equal(renderFiguresLine(b.figures!), "coingecko 24h: BTC +1.2%, ETH -0.8%, SOL +3.1%; geckoterminal robinhood: trending COINA 24h +12%, COINB 24h -8.3%, COINC 24h +12%.");
+    assert.equal(renderFiguresLine(b.figures!), "24h: BTC +1.2%, ETH -0.8%, SOL +3.1%; trending: COINA 24h +12%, COINB 24h -8.3%, COINC 24h +12%.");
     assert.ok(!b.figures!.some((s) => s.kind === "trending"));
   });
 
