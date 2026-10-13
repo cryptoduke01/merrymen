@@ -168,20 +168,26 @@ async function visit(url: URL, scan: boolean) {
     await page.waitForTimeout(scan ? SCAN_SETTLE_MS : 1200);
 
     const data = await page.evaluate((o) => {
-      const strip = (s: string | null | undefined) => (s || "").replace(/\s+/g, " ").trim();
-      const all = [...document.querySelectorAll<HTMLAnchorElement>("a[href]")]
-        .map((a) => ({ text: strip((a as HTMLAnchorElement).textContent).slice(0, 80), href: (a as HTMLAnchorElement).href }))
+      // NO NAMED FUNCTION IN HERE, NOT EVEN AN ARROW IN A CONST. This body is
+      // sent to the page as source, and tsx compiles this file with esbuild's
+      // keepNames, which wraps every named function in a `__name(...)` call
+      // that exists in Node and not in the page: `const strip = (s) => …`
+      // here threw "__name is not defined" on every page, so every read failed
+      // (found by running the service against live sites, 2026-10-13).
+      const ws = /\s+/g;
+      const all = [...document.querySelectorAll("a[href]")]
+        .map((a) => ({ text: (a.textContent || "").replace(ws, " ").trim().slice(0, 80), href: (a as HTMLAnchorElement).href }))
         .filter((l) => l.href.startsWith("http"));
       // Prefer the main content, fall back to the body — the same order the
       // dashboard's own text extraction uses.
-      const root = document.querySelector("main") || document.querySelector("article") || document.body;
+      const root = (document.querySelector("main") || document.querySelector("article") || document.body) as HTMLElement | null;
       return {
-        title: strip(document.title),
-        description: strip(document.querySelector('meta[name="description"]')?.getAttribute("content")),
-        text: strip(root?.innerText),
+        title: (document.title || "").replace(ws, " ").trim(),
+        description: (document.querySelector('meta[name="description"]')?.getAttribute("content") || "").replace(ws, " ").trim(),
+        text: (root?.innerText || "").replace(ws, " ").trim(),
         // A scan reads every word on the page, not only the main column: a
         // contract is as often in the footer as in the hero.
-        allText: o.scan ? strip(document.body?.innerText) : "",
+        allText: o.scan ? (document.body?.innerText || "").replace(ws, " ").trim() : "",
         links: all.slice(0, o.maxLinks),
         allLinks: o.scan ? all.slice(0, o.linksRead).map((l) => l.href) : [],
         html: o.scan ? document.documentElement.outerHTML.slice(0, o.htmlMax) : "",
