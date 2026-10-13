@@ -49,8 +49,8 @@ import { STRATEGY_FLAVOUR, STRATEGY_SPOKEN, TRAIT_VOICE } from "./groupchat/temp
 import { MUSINGS, SUBJECTS, TAKES } from "./groupchat/topics";
 import { xAppFromEnv, type FetchLike, type XApp, type XReply } from "./xpost/client";
 import { admitXPost, lettersOf, merrymenMentioned, moneySaid, namedIn, tickerRefusal, unreadableLetter, vocabularyRefusal, type BaseGate, type XGateCtx } from "./xpost/gate";
-import { ACTIVE_CADENCE, ANSWER_GAP_MS, ANSWER_STALE_MS, ANSWERS_PER_DAY, REPLY_STALE_MS, STANDARD_CADENCE, coinOf, hash32, introState, planPosts, replyDueAt, sendDecision, type PlanCadence, type PlanClock, type PlanIntent } from "./xpost/planner";
-import { APP_PAUSE_KEY, APP_PAUSE_MS, CREDITS_PAUSE_MS, PAUSE_KEY, readReplyComments, sendOne, type SendOutcome } from "./xpost/sender";
+import { ACTIVE_CADENCE, ANSWER_GAP_MS, ANSWER_STALE_MS, ANSWERS_PER_DAY, REPLY_STALE_MS, STANDARD_CADENCE, coinOf, hash32, introState, planPosts, replyDueAt, sendDecision, type PlanCadence, type PlanClock, type PlanIntent, type PlanSell } from "./xpost/planner";
+import { APP_PAUSE_KEY, APP_PAUSE_MS, CREDITS_PAUSE_MS, PAUSE_KEY, readReplyComments, sendOne, type CardOutcome, type SendOutcome } from "./xpost/sender";
 import { isAnswerOptOut, isReplyOptOut, plainAsk, replyCandidate, tagCandidate, withoutReplyOptOut } from "./xpost/replies";
 import { asksAboutACoin, coinTalkIn, deicticPickIn, houseTalkIn, marketTalkIn, nameLikeWords, textWords, trustTalkIn, unknownWordIn } from "./xpost/words";
 import { activeTenantsOf, repliesAllowedFor, repliesScopeOf } from "./xpost/scope";
@@ -98,7 +98,8 @@ import { appendPublicToken, appendPublicWallet, hasPublicWallet, publicTokenStil
 import { readPublicProjectDescription } from "./orchestrator-xpost-project";
 import { banterAsk, boughtNames, carriesResearch, classifyTag, createXResearch, generalTradesQuestion, MARKET_MAJORS, modelNamed, namesACoin, ownCoinTicker, sayable, selfAsk, unshowableName, type ResearchBundle, type TagIntent, type XResearch } from "./orchestrator-xpost-research";
 import { PUBLISHABLE_SOURCES } from "./thesis-policy";
-import { readSaleResults } from "./orchestrator-xpost-results";
+import { readSaleCard, readSaleResults } from "./orchestrator-xpost-results";
+import { renderPnlCard, type PnlCardData } from "./pnl-card";
 import { appendSaleOutcome, hasSaleOutcome } from "./xpost/sale-outcome";
 import { admitFiguresLine, cleanTicker, figuresTickers, withFigures, type FiguresSpec } from "./xpost/figures";
 import { hotAnswers, hotNoneAnswers, hotUnreadAnswers, insightFacts, majorAnswers, majorUnreadAnswers, marketAnswers, type HotRead, type MajorRead, type MarketRead } from "./xpost/market";
@@ -377,6 +378,10 @@ export interface XPosterDeps {
   /** Fresh, minimal projection of owner settings plus the currently running grant identity. */
   socialProfile?: (tenant: string) => Promise<XSocialProfile | null>;
   saleResults?: typeof readSaleResults;
+  /** One sale's profit card, for a test. Default readSaleCard. */
+  saleCard?: typeof readSaleCard;
+  /** The card drawn as a PNG, for a test. Default renderPnlCard on pnl/PNL.jpg. */
+  renderCard?: (card: PnlCardData) => Promise<Uint8Array>;
   publicProjectDescription?: typeof readPublicProjectDescription;
   /**
    * What an answer looks up, used only with research on (XPostEnv.research).
@@ -915,6 +920,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
   /** The last standing condition said, and when: a condition that has not changed is said again only every twenty minutes. */
   let lastCondition: { text: string; at: number } | null = null;
   let ownerFailure = "";
+  /** Owners already told to reconnect X for profit cards. Only active owners are ever added. */
+  const reconnectNoted = new Set<string>();
 
   const why =
     `xpost: on — at most ${perDay} posts per X account a day, ${fleetPerDay} across the fleet a day; ` +
@@ -1210,10 +1217,14 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
                 continue;
               }
               sends++;
+              // THE SALE THIS SEND'S CHECKS JUST VOUCHED FOR, so its profit card
+              // is of that sale and no other. Reset by every check.
+              let vouchedSale: { sale: PlanSell; agent: PublicWallet } | null = null;
               const out = await sendOne(shared, o.dek, o.app, post, {
                 fetch: deps.fetch,
                 nowMs: t,
                 validateBeforeSend: async (pending) => {
+                  vouchedSale = null;
                   if (!hasPublicWallet(pending.body) && pending.kind !== "sell") return true;
                   const profile = await deps.socialProfile?.(pending.tenant);
                   const current = byTenant.get(pending.tenant);
@@ -1223,6 +1234,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
                     const sales = await (deps.saleResults ?? readSaleResults)(shared, agent.address, agent.chainId, Math.floor(at() / 1000));
                     const sale = sales.find((s) => pending.dedupeKey === `sell:${pending.tenant}:${s.operationKey}` && pending.decisionId === s.decisionId);
                     if (!sale || pending.coin !== sale.token.toLowerCase() || !hasSaleOutcome(pending.body, sale.outcome, active.has(pending.tenant.toLowerCase()) ? sale.gainPct : undefined)) return false;
+                    vouchedSale = { sale, agent };
                   }
                   if (pending.kind === "buy" || pending.kind === "sell") {
                     if (!hasPublicWallet(pending.body)) return true;
@@ -1234,6 +1246,29 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
                   const wallet = profile?.publicWallet;
                   return !!current && !!wallet && current.agentId === wallet.address.toLowerCase() && publicWalletStillAllowed(pending, wallet);
                 },
+                // THE PROFIT CARD (the owner's teammate, 2026-10-13: a win nobody
+                // sees is a win nobody notices). Only the operator's own agents,
+                // only a sale its checks vouched for as a measured profit with
+                // its gain on the post, drawn from that sale's own receipt-backed
+                // fill. Anything else, or anything failing, posts the text alone.
+                ...(post.kind === "sell" && active.has(post.tenant.toLowerCase()) ? {
+                  saleCard: async (pending: XPost, grant: { mediaWrite: boolean }) => {
+                    const vouched = vouchedSale as { sale: PlanSell; agent: PublicWallet } | null;
+                    if (!vouched || pending.id !== post.id || vouched.sale.outcome !== "profit" || typeof vouched.sale.gainPct !== "number") return null;
+                    if (!grant.mediaWrite) {
+                      // A grant from before media.write was asked for. Said once
+                      // per owner while this process runs, never as a hold.
+                      if (!reconnectNoted.has(pending.tenant)) {
+                        reconnectNoted.add(pending.tenant);
+                        notes.push(`xpost: ${pending.tenant}'s X grant has no media.write — reconnect X to attach profit cards; its sales post as text until then`);
+                      }
+                      return null;
+                    }
+                    const card = await (deps.saleCard ?? readSaleCard)(shared, vouched.agent.address, vouched.agent.chainId, vouched.sale.operationKey, Math.floor(at() / 1000));
+                    return card ? (deps.renderCard ?? ((c: PnlCardData) => renderPnlCard(c)))(card) : null;
+                  },
+                  onCard: (outcome: CardOutcome) => { if (outcome !== "none") bump(`card-${outcome}`); },
+                } : {}),
               });
               // The app's credentials refused is the one line an operator must act
               // on, so it says what happened rather than an outcome code.
