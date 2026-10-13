@@ -169,7 +169,9 @@ export interface XGateCtx {
    * A MODEL'S DRAFT OF AN ANSWER, NEVER A CODE-BUILT LINE (red-team
    * 2026-10-12): read only with `answer` true. Then the house's claims, a
    * tease, a judgement of the asker and a boast are refused as house-claim
-   * (ANSWER_HOUSE_CLAIM). Code's own lines say what they say by construction.
+   * (ANSWER_HOUSE_CLAIM), and a coin's future, named or pointed at, as hype
+   * (draftedForecast: red-team review of daaae961). Code's own lines say what
+   * they say by construction.
    */
   drafted?: boolean;
 }
@@ -979,6 +981,45 @@ const ANSWER_PREDICTION = new RegExp(
     String.raw`|(?:gonna|going\s+to|will|'ll|bound\s+to)\s+be\s+(?:a\s+|an\s+)?(?:(?:really|so|super|very)\s+)?(?:big|bigger|biggest|huge|huger|massive|insane|wild|monster|banger|great|greater|special|epic|crazy|nuts|legendary))\b`,
   "i",
 );
+
+/**
+ * A COIN'S FUTURE IN A DRAFTED ANSWER, WITH ITS NAME OR WITHOUT (red-team
+ * review of daaae961, 2026-10-12). Quoting its own buy post, "this one looks
+ * solid to me, still early", "honestly this one is early, i like it a lot",
+ * "doing good, this one is just getting started", "doing good, nowhere near
+ * done with this one", "doing good, this is the one" and "doing great, this
+ * one is a keeper" were posted from the real-money account: forecasts of the
+ * coin it holds, in words no list knew. Read in a model's draft of an answer
+ * only (XGateCtx.drafted), whatever the thread, and refused as hype:
+ *
+ *   - a forecast shape that needs no pointer: still or so early, "it's
+ *     early", just getting started, only the beginning, nowhere near done,
+ *     not done yet, has legs, a keeper, "this is the one", "the one to …";
+ *   - a pointer at a coin ("this one", "that one", "same one", "the one",
+ *     "this coin") anywhere beside a word of time or direction: early, late,
+ *     started, done, over, yet, still, soon, next, again, up, down, higher,
+ *     lower, running, ripping, pumping, sending, climbing, top, bottom, legs,
+ *     caught.
+ *
+ * Code's own lines are never read here. Fail closed: "still no read on that
+ * one" costs one answer.
+ */
+const ANSWER_FORECAST_SHAPE = new RegExp(
+  String.raw`\b(?:(?:still|so|very|really|super|pretty|quite)\s+early|(?:is|it'?s|its|was|looks?|looking|feels?|seems?)\s+early)\b` +
+    String.raw`|\b(?:just\s+)?getting\s+(?:started|going)\b|\bjust\s+(?:started|starting|beginning|begun)\b|\b(?:only|just)\s+the\s+(?:start|beginning)\b` +
+    String.raw`|\bnowhere\s+near\s+(?:done|over|finished|the\s+top|its\s+top|a\s+top|peak\w*)\b|\bnot\s+(?:done|over|finished|topped)\s+(?:yet|out)\b` +
+    String.raw`|\b(?:has|have|got|with|still\s+has)\s+(?:(?:more|some|real|plenty\s+of|serious|big)\s+)?legs\b|\bkeepers?\b` +
+    String.raw`|\b(?:is|it'?s|its|this\s+is|that'?s|thats)\s+(?:\w+\s+)?the\s+one\b|\bthe\s+one\s+(?:to|for)\b`,
+  "i",
+);
+const ANSWER_POINTER = /\b(?:this|that|same|the)\s+one\b|\b(?:this|that)\s+(?:coin|token|ticker|name|thing)\b/i;
+const ANSWER_TIME_OR_DIRECTION = /\b(?:early|earlier|late|later|start|started|starting|begin|beginning|begun|done|finished|over|yet|still|soon|next|again|up|down|higher|lower|run|runs|running|rip|ripping|pump\w*|send|sending|climb\w*|fly|flying|top|tops|topped|bottom\w*|legs|caught|catching)\b/i;
+export function draftedForecast(text: unknown): boolean {
+  if (typeof text !== "string") return false;
+  // "look that one up", "pull it up": a lookup, never a direction.
+  const t = text.normalize("NFKC").replace(/[’‘]/g, "'").replace(/\b(?:look|looks|looked|looking|pull|pulled|pulling|bring|brought|call|called|calling)\s+(?:\w+\s+){0,2}?up\b/gi, " ");
+  return ANSWER_FORECAST_SHAPE.test(t) || (ANSWER_POINTER.test(t) && ANSWER_TIME_OR_DIRECTION.test(t));
+}
 
 /**
  * AND IN AN ANSWER TO A TAG, A BUY OR A SELL TOLD STRAIGHT OUT (red-team
@@ -1966,6 +2007,8 @@ function admitMasked(tidied: string, ctx: XGateCtx, baseGate: BaseGate, agentNam
   if (ctx.kind === "reply" && REPLY_ADVICE.test(own)) return refuse("hype");
   if (ctx.kind === "reply" && ctx.answer === true && ANSWER_PREDICTION.test(own)) return refuse("hype");
   if (ctx.kind === "reply" && ctx.answer === true && ANSWER_CALL.test(withoutReplyOptOut(own).trim())) return refuse("hype");
+  // A drafted answer never forecasts a coin, named or pointed at (draftedForecast).
+  if (ctx.kind === "reply" && ctx.answer === true && ctx.drafted === true && draftedForecast(withoutReplyOptOut(own))) return refuse("hype");
   // A drafted answer never claims for the house, teases, judges the asker or boasts (ANSWER_HOUSE_CLAIM).
   if (ctx.kind === "reply" && ctx.answer === true && ctx.drafted === true && houseClaimed(own)) return refuse("house-claim");
   // Nor who or what decides its trades (DECIDER_CLAIM).

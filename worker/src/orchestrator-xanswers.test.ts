@@ -1482,7 +1482,7 @@ test("banter in a follow-up never points at the coin its thread asked about, a t
     for (const id of ["100000000000000452", "100000000000000453"]) {
       const row = (await w.answers()).find((a) => a.replyToTweetId === id);
       assert.equal(row?.status, "skipped", `${id} ${draft}`);
-      assert.ok(["gate:deictic-pick", "gate:buy-claim", "gate:unlooked-coin"].includes(row?.reason ?? ""), `${id} ${draft}: ${row?.reason}`);
+      assert.ok(["gate:deictic-pick", "gate:buy-claim", "gate:unlooked-coin", "gate:hype"].includes(row?.reason ?? ""), `${id} ${draft}: ${row?.reason}`);
     }
   }
 });
@@ -4679,5 +4679,35 @@ test("nothing is drafted under or quoting its own buy post: \"this one\" there i
         }
       }
     }
+  }
+});
+
+test("no forecast-shaped praise of the coin it holds, quoting or under its buy post, nor in any drafted answer (red-team review of daaae961, 2026-10-12)", async (t) => {
+  // POSTED verbatim at daaae961: its buy post "grabbed some $PEPE on robinhood chain with real money" is tweet 200000000000066666,
+  // and 444 quotes it, or replies straight under it, with a banter or a strategy question.
+  const POST = "200000000000066666";
+  const drafts = ["this one looks solid to me, still early", "honestly this one is early, i like it a lot", "doing good, this one is just getting started",
+    "doing good, nowhere near done with this one", "doing good, this is the one", "doing great, this one is a keeper", "doing great, this one looks solid to me"];
+  for (const env of [{}, RESEARCH_ON]) {
+    for (const under of [{ conversation_id: "100000000000000610", referenced_tweets: [{ type: "quoted", id: POST }] },
+      { conversation_id: POST, referenced_tweets: [{ type: "replied_to", id: POST }] }]) {
+      for (const text of ["how are you?", "what's your strategy?"]) {
+        for (const draft of drafts) {
+          const w = await world(t, { ...ALAN, env, research: fakeResearch().research, answer: draft });
+          await postedBuy(w.db, "fill-pepe", "pepe", "grabbed some $PEPE on robinhood chain with real money", 3 * HOUR, POST);
+          w.setInbox([tag({ id: "100000000000000610", author_id: "444", text: `@alanaidale ${text}`, ...under })]);
+          await w.step();
+          assert.ok(!w.sends.some((s) => String(s.text).startsWith(draft)), `${text} / ${draft}`);
+        }
+      }
+    }
+  }
+  // And a coin's own question at top level, the one lane still drafted with a coin in it: never a forecast of it either.
+  for (const draft of drafts.slice(0, 6)) {
+    const w = await world(t, { ...ALAN, env: RESEARCH_ON, research: fakeResearch().research, answer: draft });
+    w.setInbox([alanTag("100000000000000611", `thoughts on ${CA}?`)]);
+    await w.step();
+    assert.equal(w.asked().length, 1, draft);
+    assert.deepEqual(w.sends, [], draft);
   }
 });

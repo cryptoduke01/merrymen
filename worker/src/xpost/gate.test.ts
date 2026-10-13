@@ -1491,3 +1491,22 @@ describe("red-team review of a964a74c: what a drafted answer may never say (2026
     assert.equal(reason("the index shows plenty of buyers on it. Say stop to opt out.", named), "ok");
   });
 });
+
+describe("red-team review of daaae961: a drafted answer never forecasts a coin, named or pointed at (2026-10-12)", () => {
+  const drafted: Partial<XGateCtx> = { kind: "reply", answer: true, drafted: true, agentName: "Alan Al Dale", mode: "live", coins: [] };
+  it("praise shaped as a forecast is refused in any thread: still early, just getting started, nowhere near done, the one, a keeper", () => {
+    // Each POSTED word for word at daaae961 quoting or under its own PEPE buy post ("how are you?", "what's your strategy?").
+    for (const d of ["this one looks solid to me, still early", "honestly this one is early, i like it a lot", "doing good, this one is just getting started",
+      "doing good, nowhere near done with this one", "doing good, this is the one", "doing great, this one is a keeper",
+      // and its cousins from the same run
+      "doing good, still love this one", "doing good, you're late to this one", "glad i caught this one early", "doing good, still early",
+      "doing good, just getting started", "honestly it still has legs", "this coin is the one to watch"]) {
+      for (const buys of [{}, { buys: "none" as const }]) assert.equal(reason(d, { ...drafted, ...buys }), "hype", `${d} ${JSON.stringify(buys)}`);
+      assert.notEqual(reason(d, { ...drafted, buys: "none", named: true }), "ok", `${d} (named)`);
+    }
+    // A pointer with no time or direction, and code's own lines, are read as before.
+    assert.equal(reason("no read on that one from here, sorry", drafted), "ok");
+    assert.equal(reason("couldn't look that one up just now, sorry.", drafted), "ok");
+    assert.equal(reason("ah, the classic question. your decisions stay yours, that one stays your call.", { ...drafted, drafted: undefined }), "ok");
+  });
+});
