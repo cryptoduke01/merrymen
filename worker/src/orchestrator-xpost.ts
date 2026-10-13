@@ -1678,9 +1678,19 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // reply) is answered only with a greeting: no draft, no buys, no exact
       // path, no code line whose meaning is the thread's.
       const closedFollowUp = candidate.followUp === "closed" && !greeting;
+      // NO MARKET LINE UNDER ITS OWN BUY OR SELL POST (red-team review of
+      // 1ed46625, 2026-10-12). Alan bought a Robinhood-chain "PEPE" and
+      // posted "grabbed some $PEPE on robinhood chain with real money"; a
+      // reply under it, "how's pepe doing?", and a quote of it, "$PEPE
+      // today?", got "coingecko: $PEPE #17, mcap ~$5.2B, 24h +14.2%": the chain
+      // copy it holds presented as the top-twenty coin. A major, what's hot or
+      // how's the market asked in a reply under or a quote of its own buy or
+      // sell post (followUp "own-trade") is answered by nothing; asked at top
+      // level, as before.
+      const tradeMarket = candidate.followUp === "own-trade" && (classified.kind === "major" || classified.kind === "hot" || classified.kind === "market");
       const asked: TagIntent = sherwoodTagged || authorSherwood || (classified.kind === "model" && (candidate.otherHandles || !namedClean))
         || (greeting && (classified.kind !== "chat" || candidate.otherHandles)) || unreadWord || unflaggedAdvice || unbanteredChat || casualUnderPost || closedFollowUp
-        ? { kind: "unanswered" } : classified;
+        || tradeMarket ? { kind: "unanswered" } : classified;
       // SHERWOOD IN ANY FORM, OR A MODEL QUESTION OFF THE ALLOWLIST, is
       // answered by nothing: the model line under "sherwood TGE soon?" reads
       // as Merrymen confirming a token, and a draft is never asked about the

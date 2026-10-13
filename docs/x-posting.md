@@ -924,7 +924,12 @@ lot", "it's my favorite": `deicticPickIn`, refused as `deictic-pick` with no
 fallback; red-team review of 1ed46625: "doing great, this one looks solid to
 me" went up under a follow-up to "should i buy $SCAM?", a third party's
 included). Under its own buy post the coin is its own public buy, and a
-coin's own question may still say "no read on that one".
+coin's own question may still say "no read on that one". **No major, what's
+hot or market line under or quoting its own buy or sell post** (`own-trade`;
+red-team review of 1ed46625: under "grabbed some $PEPE on robinhood chain
+with real money", "how's pepe doing?" got "coingecko: $PEPE #17, mcap
+~$5.2B, …, 24h +14.2%", the chain copy it holds presented as the
+top-twenty coin): answered by nothing; asked at top level, as before.
 
 **Limits.** `ANSWERS_PER_AUTHOR` is six a person a rolling day (from two) and
 `ANSWERS_PER_DAY` sixty a day per X account (from 24), so a person can

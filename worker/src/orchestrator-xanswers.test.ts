@@ -2680,6 +2680,44 @@ test("majors: no prediction, target, advice or claim in any words beside a coin'
   }
 });
 
+test("majors, what's hot and the market are never answered under or quoting its own buy post: the chain copy it holds is no top-twenty coin (red-team review of 1ed46625, 2026-10-12)", async (t) => {
+  // Live Alan bought a Robinhood-chain PEPE (0x7777…77) and posted it as tweet 900000000000000888. CoinGecko's PEPE: #17, ~$5.2B, 24h +14.2%, 7d +31%.
+  const facts: AgentFacts = { ...FACTS, name: "Alan Al Dale", calls: [{ ...CALL, token: `0x${"77".repeat(20)}` }] };
+  const asked: string[] = [];
+  const research = () => createXResearch({
+    majors: { configured: () => true,
+      search: async (q) => { asked.push(`search:${q}`); return { failed: false, observedAt: NOW, hits: [{ id: "pepe", symbol: "PEPE", name: "Pepe", rank: 17 }] }; },
+      market: async (id) => { asked.push(`market:${id}`); return { failed: false, observedAt: NOW, market: { id, symbol: "pepe", name: "Pepe", rank: 17, priceUsd: 0.00001, marketCapUsd: 5.2e9, volume24hUsd: 1.8e9, change24hPct: 14.2, change7dPct: 31 } }; },
+      markets: async () => ({ failed: false, markets: [] }), trending: async () => ({ coins: [], failed: false }), top: TOP_READ },
+    hotPools: async () => ({ pools: [hotPool(1, 42, 1.2e6)], failed: false }), chainListings: listingsOf([hotPool(1, 42, 1.2e6)]),
+    resolveTicker: async () => null, coinFacts: async () => ({ ok: false, why: "unavailable" }), projectDescription: async () => null, publicTheses: async () => [],
+  });
+  const POST = "900000000000000888";
+  const at = (id: string, text: string, over: Record<string, unknown>) => tag({ id, author_id: `5${id.slice(-2)}`, conversation_id: id, text: `@alanaidale ${text}`, ...over });
+  const reply = { conversation_id: POST, referenced_tweets: [{ type: "replied_to", id: POST }] };
+  const quote = { referenced_tweets: [{ type: "quoted", id: POST }] };
+  // Each POSTED at 1ed46625 with "coingecko: $PEPE #17, mcap ~$5.2B, vol ~$1.8B, 24h +14.2%, 7d +31%." (the first two), and their cousins.
+  const inbox = [at("100000000000000801", "how's pepe doing?", reply), at("100000000000000802", "$PEPE today?", quote),
+    at("100000000000000803", "$PEPE today?", reply), at("100000000000000804", "how's pepe doing?", quote),
+    at("100000000000000805", "what's hot?", reply), at("100000000000000806", "how's the market?", quote)];
+  const w = await world(t, { username: "alanaidale", facts, env: RESEARCH_ON, research: research(), answer: "pepe has been ripping lately, still early on this move fr" });
+  await postedBuy(w.db, "fill-pepe", "pepe", "grabbed some $PEPE on robinhood chain with real money", 3 * HOUR, POST);
+  for (const [k, m] of inbox.entries()) {
+    w.setInbox([m]);
+    await w.step(NOW + k * MIN);
+  }
+  assert.deepEqual(w.sends, []);
+  assert.deepEqual(await w.answers(), []);
+  assert.deepEqual(asked, [], "nothing looked up");
+  assert.deepEqual(w.asked(), [], "never drafted");
+  // Asked at top level, it is the majors policy: code's words and coingecko's figures.
+  const top = await world(t, { username: "alanaidale", facts, env: RESEARCH_ON, research: research() });
+  await postedBuy(top.db, "fill-pepe", "pepe", "grabbed some $PEPE on robinhood chain with real money", 3 * HOUR, POST);
+  top.setInbox([at("100000000000000807", "how's pepe doing?", {})]);
+  await top.step();
+  assert.match(String(top.sends[0]?.text ?? ""), /coingecko: \$PEPE #17, .*24h \+14\.2%, 7d \+31%\.$/);
+});
+
 test("majors: never that it holds or is buying the coin, in the third person, nor another coin set against it; and no drafted coin answer says so either (red-team 2026-10-12)", async (t) => {
   // Posted at 34ced01e by the active "Alan Al Dale", live, whose only call is a PEPE buy, each with "coingecko: $ETH #2, …" after it.
   const endings = ["alan has been stacking it all week", "wif and bonk are doing even better", "a nice one to have in the book", "alan is long it", "alan is buying it"];
@@ -3499,6 +3537,12 @@ test("what's hot never shows a coin under a name its own buys go by, a copy at a
     w.setInbox([ask]);
     await w.step();
     const [row] = await w.answers();
+    // Under its own buy post, what's hot is answered by nothing at all since the red-team review of 1ed46625.
+    if (ask.conversation_id === BUY_TWEET) {
+      assert.equal(row, undefined);
+      assert.deepEqual(w.sends, []);
+      continue;
+    }
     assert.equal(row?.status, "posted");
     assert.doesNotMatch(row!.body, /ZAPX|fomo: most bought/, row!.body);
     assert.match(row!.body, /geckoterminal robinhood: trending \$QRTZ 24h -8\.3% vol ~\$310k\./, row!.body);
