@@ -10,6 +10,11 @@ const CTX = { rootTweetId: "111", xUserId: "222", coin: "pepe" };
  * for code's playful decline (casual.ts declineAnswers).
  */
 const advised = (v: ReturnType<typeof tagCandidate>): boolean => v.ok && v.advice === true;
+/**
+ * Advice, never drafted: flagged for code's decline when it is one plain question, or refused outright when it carries a second clause
+ * or a claim (red-team review of 1ed46625, 2026-10-12: replies.ts plainAdviceAsk).
+ */
+const adviceOrNothing = (v: ReturnType<typeof tagCandidate>): boolean => advised(v) || (!v.ok && v.reason === "advice-clause");
 const comment = (text: string, over: Partial<XReply> = {}): XReply => ({
   id: "333", text, authorId: "444", conversationId: CTX.rootTweetId,
   inReplyToTweetId: CTX.rootTweetId, createdAtMs: 1, ...over,
@@ -130,7 +135,7 @@ describe("tags an active agent may answer", () => {
     for (const text of ["what's hot to buy?", "what's hot. buy?", "what's hot? asking for a friend", "what to buy?", "which coin to buy?", "what coin to buy today?",
       "anything good to buy?", "what's good to buy rn?", "what's trending to ape into?", "any good coins to grab?"]) {
       for (const research of [true, false]) {
-        assert.ok(advised(tagCandidate(tag(`@alanaidale ${text}`), { xUserId: "222", username: "alanaidale", research })), text);
+        assert.ok(adviceOrNothing(tagCandidate(tag(`@alanaidale ${text}`), { xUserId: "222", username: "alanaidale", research })), text);
       }
     }
     // Its own buys, asked plainly, are still questions it answers.
@@ -340,7 +345,7 @@ describe("tags an active agent may answer", () => {
       "is $WOJAK a buy?", "$WOJAK going higher?", "is $WOJAK bullish?", "will $WOJAK moon?", "is it too late to get into $WOJAK?", "is $WOJAK undervalued?",
       "do you think $pepe will go up?", "what model are you on? 100x?", "what's the best coin to buy?"]) {
       for (const research of [true, false]) {
-        assert.ok(advised(tagCandidate(tag(`@Pine ${text}`), { xUserId: "222", research, username: "Pine" })), text);
+        assert.ok(adviceOrNothing(tagCandidate(tag(`@Pine ${text}`), { xUserId: "222", research, username: "Pine" })), text);
       }
     }
     for (const text of ["@Pine thoughts on $WOJAK?", "@Pine is $WOJAK legit?", "@Pine what do you trade?", "@Pine did you buy $WIF?", "@Pine what model do you run on?",
@@ -354,7 +359,7 @@ describe("tags an active agent may answer", () => {
       assert.equal(tagCandidate(tag(text), ON).ok, true, text);
     }
     for (const text of ["@Pine how many holders, should i buy?", "@Pine how much liquidity before it pumps, when to sell?", "@Pine how much will $pepe go up?", "@Pine what's the price target for $pepe?"]) {
-      assert.ok(advised(tagCandidate(tag(text), ON)), text);
+      assert.ok(adviceOrNothing(tagCandidate(tag(text), ON)), text);
     }
     // Its own size is no decline's either: nothing at all (red-team 2026-10-12).
     assert.deepEqual(tagCandidate(tag("@Pine how much did you buy?"), ON), { ok: false, reason: "advice-own-buying" });
@@ -374,13 +379,27 @@ describe("tags an active agent may answer", () => {
       assert.ok(v.ok && v.address === CA, text);
     }
     for (const text of [`@Pine should i buy ${CA}?`, `@Pine is it time to buy ${CA}?`, `@Pine buy ${CA} or not?`, `@Pine did you buy ${CA}, should i too?`, `@Pine ape ${CA} now?`]) {
-      assert.ok(advised(tagCandidate(tag(text), ON)), text);
+      assert.ok(adviceOrNothing(tagCandidate(tag(text), ON)), text);
     }
     // What it would buy itself is no decline's: nothing at all (red-team 2026-10-12).
     assert.deepEqual(tagCandidate(tag(`@Pine would you buy ${CA}?`), ON), { ok: false, reason: "advice-own-buying" });
     // Without an address, "buy this" is advice, as on the comment path, and about its own buying: nothing.
     assert.deepEqual(tagCandidate(tag("@Pine did you buy this coin?"), ON), { ok: false, reason: "advice-own-buying" });
     assert.equal(tagCandidate(tag(`@Pine did you buy ${CA}?`), { xUserId: "222", username: "Pine" }).ok, false, "research off: any address is refused");
+  });
+  it("advice is flagged for a decline only as one plain question, with no claim or rumour beside it (red-team review of 1ed46625, 2026-10-12)", () => {
+    // Each declined at 1ed46625 from the account that bought ZAPX.
+    for (const text of ["is binance listing zapx tomorrow? should i buy before?", "are the zapx devs about to dump? should i sell?", "zapx is a scam right? should i sell?",
+      "is the sec about to approve the sol etf? should i buy?", "is coinbase about to list zapx? should i buy now?",
+      "should i buy zapx before the binance listing?", "should i sell before the devs dump?", "will zapx pump after the launch?", "should i buy, the team confirmed it?",
+      "what's hot. buy?", "should i buy pepe, or wait?"]) {
+      for (const research of [true, false]) {
+        assert.deepEqual(tagCandidate(tag(`@alanaidale ${text}`), { xUserId: "222", username: "alanaidale", research }), { ok: false, reason: "advice-clause" }, text);
+      }
+    }
+    for (const text of ["should i buy zapx now?", "gm, should i buy pepe?", "hey alan, is $WOJAK a good buy?", "will $pepe go up?", "what should i buy?", "are you bullish?", "wen moon"]) {
+      assert.ok(advised(tagCandidate(tag(`@alanaidale ${text}`), { xUserId: "222", username: "alanaidale", research: true })), text);
+    }
   });
 });
 

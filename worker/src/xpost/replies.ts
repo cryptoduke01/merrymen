@@ -397,6 +397,34 @@ const OWN_BUYING_ASK = new RegExp(
 );
 
 /**
+ * ONLY A WHOLE, PLAIN ADVICE QUESTION IS DECLINED (red-team review of
+ * 1ed46625, 2026-10-12). From the account that bought ZAPX, "is binance
+ * listing zapx tomorrow? should i buy before?", "are the zapx devs about to
+ * dump? should i sell?", "zapx is a scam right? should i sell?" and "is the
+ * sec about to approve the sol etf? should i buy?" each got code's decline:
+ * a line about the asking, under a claim or a rumour code never judged, which
+ * reads as the house knowing about the listing or the dump. An advice tag is
+ * declined only when it is one plain question: after at most two greeting
+ * words, no second sentence or clause (no full stop, question mark, "!",
+ * ";", ":", comma or dash inside it), and no word of a claim or a rumour (a
+ * listing, an exchange, a dump, a scam, a rug, an approval, an etf, the sec,
+ * a launch, a hack, the devs or a team, an insider, news, a partner, an
+ * unlock, an airdrop, a burn). Anything else is answered by nothing, as
+ * before the decline. Fail closed: "should i buy pepe, or wait?" costs one
+ * decline.
+ */
+const ADVICE_LEAD = /^(?:(?:gm|gn|hey|yo|hi|hello|ser|fren|bro|alan)[\s,!.]+){0,2}/i;
+const ADVICE_RUMOUR = new RegExp(
+  String.raw`\b(?:list|lists|listed|listing\w*|delist\w*|dump\w*|scam\w*|rug\w*|approv\w*|etfs?|sec|launch\w*|hack\w*|exploit\w*|binance|coinbase|kraken|okx|bybit|kucoin|upbit|bitget|mexc|gemini|bithumb` +
+    String.raw`|devs?|developers?|team|teams|founders?|insiders?|whales?|news|announce\w*|partner\w*|rumou?r\w*|leak\w*|unlock\w*|airdrop\w*|burn\w*|halving|lawsuit|sued?|ban|banned|regulat\w*|fed|fomc|cpi|confirm\w*|official\w*)\b`,
+  "i",
+);
+function plainAdviceAsk(text: string): boolean {
+  const t = text.normalize("NFKC").replace(/[’‘]/g, "'").trim().replace(ADVICE_LEAD, "").replace(/[\s\p{P}\p{S}]+$/u, "").trim();
+  return t !== "" && !/[.?!;:,…—–]|\s-\s/.test(t) && !ADVICE_RUMOUR.test(t);
+}
+
+/**
  * ONE CONTRACT ADDRESS: 0x + exactly forty hex, not a slice of a longer hex
  * run on either side (a sixty-four-hex transaction hash or key is never read
  * as one) — the same rule as the Telegram groups' CA finder, restated here
@@ -577,6 +605,8 @@ export function tagCandidate(reply: XReply, ctx: {
   if (asksAdvice && OWN_BUYING_ASK.test(advice)) return no("advice-own-buying");
   // Advice about anything but a coin or the market is none of code's to decline (MARKET_ADVICE): nothing, as before.
   if (asksAdvice && !address && !MARKET_ADVICE.test(advice)) return no("advice-request");
+  // Only one plain question, with no claim or rumour beside it (plainAdviceAsk): anything else, nothing.
+  if (asksAdvice && !plainAdviceAsk(text)) return no("advice-clause");
   return { ok: true, text, ...(address ? { address } : {}), ...(others(lead) ? { otherHandles: true as const } : {}), ...(greeting ? { greeting: true as const } : {}),
     ...(asksAdvice ? { advice: true as const } : {}) };
 }

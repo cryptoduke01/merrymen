@@ -1744,7 +1744,8 @@ describe("answer anything: every tag past the screens has a lane, and silence on
       // e) advice or a forecast, however asked: code's playful decline.
       ["should i buy pepe", "advice"], ["what should i buy", "advice"], ["is pepe going up", "advice"], ["pepe price target?", "advice"], ["is pepe a good investment", "advice"],
       ["will eth pump", "advice"], ["are you bullish on pepe?", "advice"], ["wen moon for $WIF", "advice"], ["is $pepe going to moon?", "advice"],
-      ["how's the market, should i buy?", "advice"],
+      // ...only one plain question (red-team review of 1ed46625): a second clause, a claim or a rumour beside it, and nothing.
+      ["how's the market, should i buy?", "advice-clause"], ["is binance listing zapx tomorrow? should i buy before?", "advice-clause"],
       // ...never a tag tagCandidate did not flag (red-team 2026-10-12): an entry in a major's place, what's hot with a word more.
       ["thoughts on aping eth", "unanswered"], ["what's hot? need a new bag", "unanswered"], ["what's hot with black people?", "unanswered"],
       // ...but a shill or an order asks nothing, and advice about its own buying is no decline's (red-team 2026-10-12).

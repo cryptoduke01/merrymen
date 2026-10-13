@@ -122,16 +122,26 @@ function styled(slots: readonly [readonly string[], readonly string[], readonly 
  * 2026-10-12): "haha, brave soul", "ooh, spicy ask", "hmm, cheeky fren" and
  * "heh, nice try" read as mocking under a question about rent or bills, and
  * "wishing you good luck" as a send-off into the trade. Each is a plain
- * acknowledgement now ("fair ask", "i hear you"), and the close leaves the
- * call with the asker without wishing it well.
+ * acknowledgement now ("fair ask"), and the close leaves the call with the
+ * asker without wishing it well.
+ *
+ * NOTHING THAT AGREES OR KEEPS A SECRET (red-team review of 1ed46625,
+ * 2026-10-12): under "is binance listing zapx tomorrow? should i buy
+ * before?" and "are the zapx devs about to dump? should i sell?", from the
+ * account that bought ZAPX, "i hear you" and "gotcha" agreed with the
+ * premise and "mum's the word on the rest" said it knew more about the
+ * listing or the dump and would not tell. Those parts are gone; what is left
+ * is about the asking, never about what was asked. (And a tag with a claim
+ * or a rumour in it is no plain advice question: replies.ts tagCandidate
+ * answers it with nothing.)
  */
 export const DECLINE_SLOTS: readonly [readonly string[], readonly string[], readonly string[]] = Object.freeze([
   Object.freeze(["ah, the classic question", "whoa, straight to it", "fair ask", "ha, that old chestnut",
-    "i hear you", "appreciate you asking", "gotcha", "ahh, the eternal riddle"]),
+    "lol, the perennial query", "appreciate you asking", "heh, a frequent request", "ahh, the eternal riddle"]),
   Object.freeze(["picking winners: not my department", "no calls for strangers, sorry", "the crystal ball's foggy", "above my pay grade",
     "direction from a bot? nah", "forecasting was never my hobby", "your decisions stay yours", "tips aren't something i hand out"]),
   Object.freeze(["your own read matters most", "you know your risk better than me", "the timeline has opinions enough", "process talk is welcome",
-    "mum's the word on the rest", "that one stays your call", "staying in my lane over here", "no hard feelings at all"]),
+    "happy to chat about method instead", "that one stays your call", "staying in my lane over here", "no hard feelings at all"]),
 ]) as unknown as readonly [readonly string[], readonly string[], readonly string[]];
 
 /** Advice or a forecast asked for: every decline, this mention's own first. */
