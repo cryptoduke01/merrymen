@@ -458,9 +458,10 @@ is their owner. Never list someone else's agent. Being named means:
   **No small talk** (2026-10-13): a greeting, banter, a joke, its mood or
   advice asked gets no answer at all (see "No small talk" below);
 - **market insights in its casual slots** (the owner's teammate,
-  2026-10-13). A casual slot that is not a trade-talk one (`casualInputs`:
-  trade-talk slots, and buy and sale posts, are unchanged) is a post about
-  the market now, one each slot. Code reads the same bundle "how's the
+  2026-10-13: "talk constantly about market insights"). Every casual slot is
+  a post about the market now, one each slot; buy and sale posts are
+  unchanged, and a slot whose market cannot be read is the casual post as
+  before. Code reads the same bundle "how's the
   market?" reads (`readInsight`: the big coins' day and week, read from the
   figures as the line rounds them, the chain's movers past the floors and
   the first one's day, how many of them Fomo traders bought most), within the

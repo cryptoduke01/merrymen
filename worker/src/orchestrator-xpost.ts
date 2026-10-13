@@ -2442,16 +2442,16 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // A trade-talk day is handed no seed, any other day no coin: neither is
       // offered, or vouched to the gate, on the day it is not about.
       const casual = casualInputs(f, intent.day, { coins: account.prefs.buys, slot: intent.slot, tradeTalkInTen: cadenceOf(account.tenant).tradeTalkInTen });
-      // MARKET INSIGHTS ON THE TIMELINE (the owner's teammate, 2026-10-13): an
-      // active owner's casual slot that is not a trade-talk one is a post
+      // MARKET INSIGHTS ON THE TIMELINE (the owner's teammate, 2026-10-13: "talk
+      // constantly about market insights"): every casual slot of an active owner is a post
       // about the market now, in a trader's technical words, from code's read
       // of the market (readInsight) and nothing else: no digit, no name, no
       // source, no forecast, no advice, no buy or holding (XGateCtx.insight,
       // `buys: "none"`), every word everyday, technical (INSIGHT_VOCABULARY)
       // or one it was handed (`lookedOnly`, `known`), and code's figures line
-      // after it. A trade-talk slot, every other owner's casual post, and a
-      // slot whose market cannot be read, are the casual post as before.
-      const read = active.has(account.tenant.toLowerCase()) && !casual.tradeTalk ? await readInsight(shared, account, f, nowMs) : null;
+      // after it. Every other owner's casual post, and a slot whose market
+      // cannot be read, are the casual post as before.
+      const read = active.has(account.tenant.toLowerCase()) ? await readInsight(shared, account, f, nowMs) : null;
       const insightAsk = read ? insightPrompt({ ...facts, read: read.read }) : null;
       if (read && insightAsk) {
         insight = { figures: read.figures, ownCoins: read.ownCoins };
