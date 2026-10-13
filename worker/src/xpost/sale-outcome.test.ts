@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { appendSaleOutcome, hasSaleOutcome } from "./sale-outcome";
+import { appendSaleOutcome, gainFigure, hasSaleOutcome } from "./sale-outcome";
 import { admitXPost, type XGateCtx } from "./gate";
 import { sellPrompt, type WriterFacts } from "./writer";
 
@@ -45,5 +45,26 @@ describe("sale prose and deterministic gross outcome", () => {
     assert.match(a.prompt, /under ninety characters/);
     assert.match(a.prompt, /partial sale/);
     assert.match(a.system, /Trusted code adds any measured result separately/);
+  });
+});
+
+describe("a measured gain leads the result line for the operator's agents (2026-10-13)", () => {
+  it("is written by code: a sign, whole percent from ten up with separators, one decimal under ten", () => {
+    assert.equal(gainFigure(1034.4), "+1,034%");
+    assert.equal(gainFigure(42.6), "+43%");
+    assert.equal(gainFigure(3.04), "+3%");
+    assert.equal(gainFigure(3.46), "+3.5%");
+    assert.equal(gainFigure(-12.2), "-12%");
+    for (const bad of [null, undefined, Number.NaN, Number.POSITIVE_INFINITY, 1e8]) assert.equal(gainFigure(bad as number), null);
+  });
+  it("leads the trusted line, and the send-time check holds the post to the same figure", () => {
+    const body = appendSaleOutcome("sold some pepe", "profit", 1034.4)!;
+    assert.equal(body, "sold some pepe\n+1,034% gross gain before fees and gas. pleased with that part.");
+    assert.equal(hasSaleOutcome(body, "profit", 1034.4), true);
+    assert.equal(hasSaleOutcome(body, "profit", 980), false, "fresh evidence with another figure withholds it");
+    assert.equal(hasSaleOutcome(body, "profit"), false, "an agent not given the figure never matches a figured line");
+    assert.equal(appendSaleOutcome("sold some pepe", "profit"), "sold some pepe\ngross gain before fees and gas. pleased with that part.", "no figure, the old line");
+    assert.equal(appendSaleOutcome("sold some pepe", "flat", 0.0), "sold some pepe\nflat before fees and gas. no victory lap.", "flat says no figure");
+    assert.equal(appendSaleOutcome("sold some pepe", "unknown", 50), "sold some pepe", "unevidenced cost: no result claim at all");
   });
 });

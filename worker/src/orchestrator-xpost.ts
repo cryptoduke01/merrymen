@@ -1199,7 +1199,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
                     if (!profile?.xTradeResults || !agent || !current || current.agentId !== agent.address.toLowerCase()) return false;
                     const sales = await (deps.saleResults ?? readSaleResults)(shared, agent.address, agent.chainId, Math.floor(at() / 1000));
                     const sale = sales.find((s) => pending.dedupeKey === `sell:${pending.tenant}:${s.operationKey}` && pending.decisionId === s.decisionId);
-                    if (!sale || pending.coin !== sale.token.toLowerCase() || !hasSaleOutcome(pending.body, sale.outcome)) return false;
+                    if (!sale || pending.coin !== sale.token.toLowerCase() || !hasSaleOutcome(pending.body, sale.outcome, active.has(pending.tenant.toLowerCase()) ? sale.gainPct : undefined)) return false;
                   }
                   if (pending.kind === "buy" || pending.kind === "sell") {
                     if (!hasPublicWallet(pending.body)) return true;
@@ -2460,7 +2460,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       }
     }
     if (body && intent.kind === "sell") {
-      body = appendSaleOutcome(body, intent.call.outcome);
+      body = appendSaleOutcome(body, intent.call.outcome, active.has(account.tenant.toLowerCase()) ? intent.call.gainPct : undefined);
       if (!body) reason = "sale-outcome-invalid";
     }
     if (body && wallet) {

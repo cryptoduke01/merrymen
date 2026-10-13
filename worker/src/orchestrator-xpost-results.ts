@@ -17,6 +17,15 @@ export function grossSaleOutcome(row: { pnl: unknown; cash: unknown }, costEvide
   return pnl > 0 ? "profit" : pnl < 0 ? "loss" : "flat";
 }
 
+/** The measured gross gain on cost, in percent, under the same evidence rule as the outcome. */
+export function grossGainPct(row: { pnl: unknown; cash: unknown }, costEvidenced: boolean): number | null {
+  if (grossSaleOutcome(row, costEvidenced) === "unknown") return null;
+  const pnl = Number(row.pnl);
+  const cost = Number(row.cash) - pnl;
+  const pct = (pnl / cost) * 100;
+  return Number.isFinite(pct) ? pct : null;
+}
+
 /**
  * Only the current verified grant's account/chain and receipt-backed live
  * exits. Partial sells say sold, never fully closed. A cost replay failure
@@ -58,6 +67,7 @@ export async function readSaleResults(db: Db, agentId: string, chainId: number, 
       paper: false,
       atSec: Number(r.created_at),
       outcome: grossSaleOutcome({ pnl: r.pnl, cash: r.cash }, evidenced.has(String(r.op))),
+      gainPct: grossGainPct({ pnl: r.pnl, cash: r.cash }, evidenced.has(String(r.op))),
     }));
   } catch {
     return [];

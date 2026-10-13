@@ -194,6 +194,8 @@ export interface PlanSell extends PlanCall {
   operationKey: string;
   token: string;
   outcome: SaleOutcome;
+  /** Measured gross gain on the evidenced cost, in percent; null when the cost is not evidenced. */
+  gainPct?: number | null;
 }
 
 export type PlanIntent =

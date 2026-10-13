@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import { describe, it } from "node:test";
 import { wrapSqlite, type Db } from "./db";
-import { grossSaleOutcome, readSaleResults } from "./orchestrator-xpost-results";
+import { grossGainPct, grossSaleOutcome, readSaleResults } from "./orchestrator-xpost-results";
 
 const ACCOUNT = `0x${"a".repeat(40)}`;
 const OTHER = `0x${"b".repeat(40)}`;
@@ -39,7 +39,9 @@ describe("receipt-backed sale results", () => {
       assert.equal(result[0]?.paper, false);
       assert.equal(result[0]?.token, TOKEN);
       assert.equal(result[0]?.operationKey, hash(2));
-      assert.deepEqual(Object.keys(result[0]!).sort(), ["atSec", "decisionId", "name", "operationKey", "outcome", "paper", "side", "symbol", "token"]);
+      // gainPct is the derived percent code appends after the gate (sale-outcome.ts); raw proceeds and cost still never leave here.
+      assert.deepEqual(Object.keys(result[0]!).sort(), ["atSec", "decisionId", "gainPct", "name", "operationKey", "outcome", "paper", "side", "symbol", "token"]);
+      assert.equal(typeof result[0]!.gainPct, "number");
       await db.exec("UPDATE trades SET realized_pnl_usdg = -2, fill_cash_usdg = 3 WHERE id = 2");
       assert.equal((await readSaleResults(db, ACCOUNT, 4663, NOW))[0]?.outcome, "loss");
       await db.exec("UPDATE trades SET realized_pnl_usdg = 0, fill_cash_usdg = 5 WHERE id = 2");
@@ -93,5 +95,15 @@ describe("gross result validation", () => {
     for (const row of [{ pnl: null, cash: 10 }, { pnl: 10, cash: 10 }, { pnl: NaN, cash: 10 }, { pnl: 1, cash: Infinity }, { pnl: -10, cash: -1 }]) assert.equal(grossSaleOutcome(row, true), "unknown");
     assert.equal(grossSaleOutcome({ pnl: 2, cash: 7 }, false), "unknown");
     assert.equal(grossSaleOutcome({ pnl: -0.000001, cash: 10 }, true), "loss");
+  });
+});
+
+describe("the measured gain on evidenced cost (2026-10-13)", () => {
+  it("is pnl over cost, and nothing where the outcome is unknown", () => {
+    // cost 10, proceeds 113.4, pnl 103.4 -> +1034%
+    assert.equal(Math.round(grossGainPct({ pnl: 103.4, cash: 113.4 }, true)!), 1034);
+    assert.equal(grossGainPct({ pnl: -2, cash: 8 }, true), -20);
+    assert.equal(grossGainPct({ pnl: 103.4, cash: 113.4 }, false), null, "cost not evidenced");
+    assert.equal(grossGainPct({ pnl: null, cash: 10 }, true), null);
   });
 });

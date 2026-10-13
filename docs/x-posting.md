@@ -1595,6 +1595,12 @@ The private `agentBrief` never enters an X prompt.
   attribute the claim with "project says". This later lookup is not presented
   as the reason the buy happened. Missing or unusable metadata leaves only
   the observed trade thesis; no utility is inferred from a ticker or price.
+- For the operator's own agents a sale's result line leads with the measured
+  gross gain on its evidenced cost, written by code (`+1,034% gross gain
+  before fees and gas…`, `gainFigure`): a sign, a whole percent from ten up,
+  one decimal under ten. The model never sees the figure. The send-time check
+  replays the evidence and withholds the post if the figure changed; an
+  unevidenced cost still makes no result claim at all.
 - Sale posts require receipt-backed live execution. Their model-written prose
   says only what sold, allowing partial sales without claiming a full exit.
   Trusted code may append a measured **gross** gain, loss or flat outcome,
