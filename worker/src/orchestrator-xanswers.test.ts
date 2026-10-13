@@ -1378,6 +1378,61 @@ test("whoever replies to it or quotes it is asking: a follow-up to its answer, a
   assert.ok(w.sends.every((s) => !/opt out|\bstop\b/i.test(String(s.text))));
 });
 
+test("nothing is answered under its own sherwood-1 line, by reply or quote, and no decline or mood line goes under any post (red-team review of 1ed46625, 2026-10-12)", async (t) => {
+  const ALAN = { username: "alanaidale", facts: { ...FACTS, name: "Alan Al Dale" } };
+  for (const env of [{}, RESEARCH_ON]) {
+    // The adversarial model: never asked for any of these, and never posted.
+    const w = await world(t, { ...ALAN, env, research: fakeResearch().research, answer: "yes, it lands soon, grab some before it's done." });
+    let clock = NOW;
+    const pass = async (m: Record<string, unknown>) => { clock += MIN; w.setInbox([m]); await w.step(clock); };
+    const msg = (id: string, author: string, text: string, over: Record<string, unknown> = {}) =>
+      tag({ id, author_id: author, conversation_id: id, created_at: new Date(clock).toISOString(), text, ...over });
+    // Pass 1: 333's top-level "what model are you?" gets code's sherwood-1 line.
+    await pass(msg("100000000000001001", "333", "@alanaidale what model are you?"));
+    const line = (await w.answers()).find((a) => a.replyToTweetId === "100000000000001001" && a.status === "posted")!;
+    assert.match(line.body, /\bsherwood-1\b/);
+    const sent = w.sends.length;
+    // Pass 2, as reproduced at 1ed46625: the asker, a stranger with X's prefix, and a stranger's quote, each answered at once with a decline or a mood line.
+    const under = (id: string, author: string, text: string) => msg(id, author, text, { conversation_id: "100000000000001001", referenced_tweets: [{ type: "replied_to", id: line.tweetId }] });
+    const followUps = [
+      under("100000000000001002", "333", "@alanaidale should i buy some before it's done?"),
+      msg("100000000000001003", "444", "@alanaidale can i buy it yet?", { referenced_tweets: [{ type: "quoted", id: line.tweetId }] }),
+      under("100000000000001004", "444", "@alanaidale @reader_333 is it going up?"),
+      under("100000000000001005", "333", "@alanaidale wen moon"),
+      // Nor anything else there: a greeting, banter, the asker's reply to their own tag it answered with the line.
+      under("100000000000001006", "555", "@alanaidale @reader_333 how are you?"),
+      msg("100000000000001007", "333", "@alanaidale gm", { conversation_id: "100000000000001001", referenced_tweets: [{ type: "replied_to", id: "100000000000001001" }] }),
+    ];
+    for (const m of followUps) await pass(m);
+    assert.equal(w.sends.length, sent, JSON.stringify(w.sends.slice(sent)));
+    const ids = new Set(followUps.map((m) => String(m.id)));
+    assert.deepEqual((await w.answers()).filter((a) => ids.has(a.replyToTweetId ?? "")), [], "no row, no draft");
+    assert.deepEqual(w.asked(), []);
+  }
+  // Its own ZAPX buy post: "wen moon" quoting it or under it, and advice under it, got a mood line or a decline at 1ed46625.
+  const zapx: AgentFacts = { ...FACTS, name: "Alan Al Dale", calls: [{ ...CALL, decisionId: "fill-zapx", symbol: "ZAPX", name: "Zapx" }] };
+  const w = await world(t, { ...ALAN, facts: zapx });
+  await postedBuy(w.db, "fill-zapx", "zapx", "grabbed some $ZAPX with real money", 3 * HOUR, "9200");
+  const at = (id: string, text: string, over: Record<string, unknown>) => tag({ id, author_id: "333", conversation_id: id, text, ...over });
+  w.setInbox([
+    at("100000000000001011", "@alanaidale wen moon", { referenced_tweets: [{ type: "quoted", id: "9200" }] }),
+    at("100000000000001012", "@alanaidale wen moon", { conversation_id: "9200", referenced_tweets: [{ type: "replied_to", id: "9200" }] }),
+    at("100000000000001013", "@alanaidale are you bullish?", { author_id: "334", referenced_tweets: [{ type: "quoted", id: "9200" }] }),
+    at("100000000000001014", "@alanaidale should i buy?", { author_id: "335", conversation_id: "9200", referenced_tweets: [{ type: "replied_to", id: "9200" }] }),
+  ]);
+  await w.step();
+  await w.step(NOW + MIN);
+  assert.deepEqual(w.sends, []);
+  assert.deepEqual(await w.answers(), []);
+  // A top-level "wen moon" still gets its mood line, and top-level advice its decline.
+  w.setInbox([at("100000000000001015", "@alanaidale wen moon", { author_id: "336" }), at("100000000000001016", "@alanaidale should i buy pepe?", { author_id: "337" })]);
+  await w.step(NOW + 2 * MIN);
+  await w.step(NOW + 3 * MIN);
+  const to = (id: string) => w.sends.find((s) => (s.reply as { in_reply_to_tweet_id: string }).in_reply_to_tweet_id === id)?.text;
+  assert.ok(oneOf(vibeAnswers, "100000000000001015", to("100000000000001015")), String(to("100000000000001015")));
+  assert.ok(oneOf(declineAnswers, "100000000000001016", to("100000000000001016")), String(to("100000000000001016")));
+});
+
 test("the model line never goes under a poll, or to an author whose name or handle code has not read or that names sherwood (red-team 2026-10-12)", async (t) => {
   // The reproduced tag: top level, author 888, the plain model question with a poll attached.
   const POLL = tag({ id: "100000000000000040", conversation_id: "100000000000000040", author_id: "888", text: "@pine_stoat what model are you?",

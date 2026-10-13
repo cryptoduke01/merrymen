@@ -894,6 +894,14 @@ post is one of its own posted tweets; a quote of anyone else's post, and any
 retweet, is still refused. Every screen above still reads a follow-up or a
 quote, and the prefix X writes before a reply may name others (then
 `otherHandles`: no model line, no buys, no exact path).
+Nothing is answered under, or quoting, a post of its own that names sherwood
+in any form (code's model line), nor under the tag that line answered: it is
+in none of `ownThreadTweets`' sets (red-team review of 1ed46625: "can i buy it
+yet?" and "wen moon" under "the new sherwood-1 is what they've got in the
+oven" got a decline or a mood line, "mum's the word on the rest" reading as a
+token teased). And code's decline and its mood line go only under a top-level
+tag: their meaning is the post they sit under, so advice or its mood asked in
+a reply or a quote, under its own buy post included, is answered by nothing.
 
 **Limits.** `ANSWERS_PER_AUTHOR` is six a person a rolling day (from two) and
 `ANSWERS_PER_DAY` sixty a day per X account (from 24), so a person can

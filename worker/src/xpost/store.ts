@@ -1314,27 +1314,48 @@ export async function ownRootTweetIds(db: Db, xUserId: string, limit = 2000): Pr
  * ownRootTweetIds: at most `limit` top-level posts and `limit` answers and
  * replies, newest first; a reply under an older one is no reply this account
  * can vouch for, and goes unanswered.
+ *
+ * NOR ANYTHING UNDER A POST OF ITS OWN THAT `shut` REFUSES (red-team review
+ * of 1ed46625, 2026-10-12). Under its own sherwood-1 model line ("the new
+ * sherwood-1 is what they've got in the oven"), "can i buy it yet?", "should
+ * i buy some before it's done?" and "wen moon" got code's decline or mood
+ * line, "mum's the word on the rest" reading as Merrymen confirming a
+ * sherwood-1 token. A posted tweet whose body `shut` refuses (the caller's
+ * screen: orchestrator-xpost.ts passes sherwood in any form) is in none of
+ * the three: a reply or a quote under it, or under the tag it answered, is
+ * answered by nothing, and a conversation rooted at it is no conversation of
+ * its own.
  */
 export interface OwnThreads {
   roots: Set<string>;
   posts: Set<string>;
   answered: Map<string, string>;
 }
-export async function ownThreadTweets(db: Db, xUserId: string, limit = 2000): Promise<OwnThreads> {
-  const roots = await ownRootTweetIds(db, xUserId, limit);
+export async function ownThreadTweets(db: Db, xUserId: string, limit = 2000, shut: (body: string) => boolean = () => false): Promise<OwnThreads> {
+  const max = int(Math.max(1, Math.min(5000, limit)));
+  const tops = (await db
+    .prepare(
+      `SELECT tweet_id, body FROM xpost_posts
+        WHERE x_user_id = ? AND status = 'posted' AND tweet_id IS NOT NULL AND kind IN ('intro', 'casual', 'buy', 'sell')
+        ORDER BY created_at_ms DESC, id DESC
+        LIMIT ?`,
+    )
+    .all(String(xUserId), max)) as { tweet_id: unknown; body: unknown }[];
+  const roots = new Set(tops.filter((r) => !shut(String(r.body ?? ""))).map((r) => String(r.tweet_id ?? "")).filter((t) => t !== ""));
   const rows = (await db
     .prepare(
-      `SELECT p.tweet_id AS tweet_id, r.reply_to_tweet_id AS reply_to_tweet_id, r.author_id AS author_id
+      `SELECT p.tweet_id AS tweet_id, p.body AS body, r.reply_to_tweet_id AS reply_to_tweet_id, r.author_id AS author_id
         FROM xpost_posts p JOIN xpost_reply_targets r ON r.post_id = p.id
         WHERE p.x_user_id = ? AND p.status = 'posted' AND p.tweet_id IS NOT NULL AND p.kind IN ('answer', 'reply')
         ORDER BY p.created_at_ms DESC, p.id DESC
         LIMIT ?`,
     )
-    .all(String(xUserId), int(Math.max(1, Math.min(5000, limit))))) as { tweet_id: unknown; reply_to_tweet_id: unknown; author_id: unknown }[];
+    .all(String(xUserId), max)) as { tweet_id: unknown; body: unknown; reply_to_tweet_id: unknown; author_id: unknown }[];
   const posts = new Set(roots);
   const answered = new Map<string, string>();
   for (const r of rows) {
     const tweet = String(r.tweet_id ?? ""), to = String(r.reply_to_tweet_id ?? ""), author = String(r.author_id ?? "");
+    if (shut(String(r.body ?? ""))) continue;
     if (tweet !== "") posts.add(tweet);
     if (to !== "" && author !== "" && !answered.has(to)) answered.set(to, author);
   }

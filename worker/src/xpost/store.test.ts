@@ -914,6 +914,11 @@ test("the conversations an X account is in: its posted top-level posts and answe
   const one = await ownThreadTweets(db, "111", 1);
   assert.deepEqual([...one.posts].sort(), ["9001", "9511"]);
   assert.deepEqual([...one.answered.keys()], ["510"]);
+  // A post the caller's screen shuts (red-team review of 1ed46625: its own sherwood-1 line) is in none of them, nor the tag it answered.
+  const shut = await ownThreadTweets(db, "111", undefined, (body) => /\b510\b|hello/.test(body));
+  assert.deepEqual([...shut.roots], []);
+  assert.deepEqual([...shut.posts], ["9501"]);
+  assert.deepEqual([...shut.answered.entries()], [["500", "333"]]);
 });
 
 test("turning replies off cancels only replies and opt-outs are durable across tenants sharing an account", async (t) => {

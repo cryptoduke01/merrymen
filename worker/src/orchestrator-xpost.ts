@@ -1573,8 +1573,15 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
     // its own posted tweets or the person's own earlier post it answered; a
     // quote of one of its own posted tweets (store.ts ownThreadTweets,
     // replies.ts tagCandidate). Read only when the batch holds one.
+    // NEVER UNDER ITS OWN SHERWOOD LINE (red-team review of 1ed46625,
+    // 2026-10-12): a post of its own that names sherwood in any form (code's
+    // model line) is no post a reply or a quote is answered under, nor is the
+    // tag it answered (store.ts ownThreadTweets `shut`). What a decline or a
+    // mood line means there is the parent's: "mum's the word" under "the new
+    // sherwood-1 is what they've got in the oven" read as a token teased.
+    const shut = (body: string): boolean => sherwoodMentioned(body) || sherwoodNamed(body);
     const threads = ordered.some((c) => c.conversationId !== c.id || c.inReplyToTweetId !== "" || c.quoted === true)
-      ? await ownThreadTweets(shared, account.xUserId) : { roots: new Set<string>(), posts: new Set<string>(), answered: new Map<string, string>() };
+      ? await ownThreadTweets(shared, account.xUserId, undefined, shut) : { roots: new Set<string>(), posts: new Set<string>(), answered: new Map<string, string>() };
     const buys = recentCoins(f);
     // Every name its buys go by: what an answer not shown them may never say (XGateCtx.unsaid).
     const bought = boughtNames(f, posts);
@@ -1646,8 +1653,19 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // is code's own line and never drafted.
       const chatAllowed = (text: string): boolean => banterAsk(text) || generalTradesQuestion(text) || selfAsk(text);
       const unbanteredChat = classified.kind === "chat" && !greeting && !chatAllowed(candidate.text);
+      // A DECLINE OR ITS MOOD ONLY UNDER A TOP-LEVEL TAG (red-team review of
+      // 1ed46625, 2026-10-12). Both are code's lines whose meaning is the
+      // post they sit under, and code never reads that post: "can i buy it
+      // yet?" under its own sherwood-1 line got "tips aren't something i hand
+      // out, mum's the word on the rest", and "wen moon" quoting its own ZAPX
+      // buy post got "in a patient sort of way", a yes about the coin. A
+      // reply under any post or a quote of one, its own included, asking
+      // advice or its mood is answered by nothing, as before the decline.
+      const topLevelTag = comment.conversationId === comment.id && comment.inReplyToTweetId === "" && comment.quoted !== true;
+      const casualUnderPost = (classified.kind === "advice" || classified.kind === "vibe") && !topLevelTag;
       const asked: TagIntent = sherwoodTagged || authorSherwood || (classified.kind === "model" && (candidate.otherHandles || !namedClean))
-        || (greeting && (classified.kind !== "chat" || candidate.otherHandles)) || unreadWord || unflaggedAdvice || unbanteredChat ? { kind: "unanswered" } : classified;
+        || (greeting && (classified.kind !== "chat" || candidate.otherHandles)) || unreadWord || unflaggedAdvice || unbanteredChat || casualUnderPost
+        ? { kind: "unanswered" } : classified;
       // SHERWOOD IN ANY FORM, OR A MODEL QUESTION OFF THE ALLOWLIST, is
       // answered by nothing: the model line under "sherwood TGE soon?" reads
       // as Merrymen confirming a token, and a draft is never asked about the
