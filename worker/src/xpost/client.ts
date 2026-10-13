@@ -39,6 +39,12 @@ export const X_TOKEN_URL = "https://api.x.com/2/oauth2/token";
 export const X_REVOKE_URL = "https://api.x.com/2/oauth2/revoke";
 export const X_ME_URL = "https://api.x.com/2/users/me";
 export const X_POSTS_URL = "https://api.x.com/2/tweets";
+export const X_MEDIA_UPLOAD_URL = "https://api.x.com/2/media/upload";
+
+/** X's ceiling for one image upload (docs.x.com, media: images up to 5 MB). */
+export const X_MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+/** X's media id: a decimal of at most nineteen digits (POST /2/tweets `media.media_ids`). */
+const MEDIA_ID = /^\d{1,19}$/;
 
 /**
  * What posting needs, and nothing more. POST /2/tweets declares all three of
@@ -187,9 +193,10 @@ const realFetch: FetchLike = (url, init) => fetch(url, init);
 
 type Response = Awaited<ReturnType<FetchLike>>;
 
-async function call(fetchImpl: FetchLike, url: string, init: Parameters<FetchLike>[1]): Promise<Response | null> {
+async function call(fetchImpl: FetchLike, url: string, init: Parameters<FetchLike>[1], timeoutMs = TIMEOUT_MS): Promise<Response | null> {
   try {
-    return await fetchImpl(url, { ...init, signal: AbortSignal.timeout(TIMEOUT_MS) });
+    const ms = Number.isFinite(timeoutMs) ? Math.min(TIMEOUT_MS, Math.max(1, Math.floor(timeoutMs))) : TIMEOUT_MS;
+    return await fetchImpl(url, { ...init, signal: AbortSignal.timeout(ms) });
   } catch {
     return null;
   }
@@ -352,13 +359,20 @@ export async function fetchMe(accessToken: string, opts: { fetch?: FetchLike; no
 export async function createPost(
   accessToken: string,
   text: string,
-  opts: { fetch?: FetchLike; nowMs?: number; replyToTweetId?: string } = {},
+  opts: { fetch?: FetchLike; nowMs?: number; replyToTweetId?: string; mediaIds?: readonly string[] } = {},
 ): Promise<XResult<{ id: string }>> {
   if (opts.replyToTweetId !== undefined && !ID.test(opts.replyToTweetId)) return fail("invalid", null);
+  // Only ids X itself handed back from an upload (uploadImage), at most X's four.
+  const media = opts.mediaIds ?? [];
+  if (media.length > 4 || media.some((id) => typeof id !== "string" || !MEDIA_ID.test(id))) return fail("invalid", null);
   const res = await call(opts.fetch ?? realFetch, X_POSTS_URL, {
     method: "POST",
     headers: { authorization: `Bearer ${accessToken}`, "content-type": "application/json", accept: "application/json" },
-    body: JSON.stringify({ text, ...(opts.replyToTweetId ? { reply: { in_reply_to_tweet_id: opts.replyToTweetId } } : {}) }),
+    body: JSON.stringify({
+      text,
+      ...(opts.replyToTweetId ? { reply: { in_reply_to_tweet_id: opts.replyToTweetId } } : {}),
+      ...(media.length ? { media: { media_ids: [...media] } } : {}),
+    }),
   });
   if (!res) return fail("uncertain", null);
   const read = await classify(res, opts.nowMs ?? Date.now());
@@ -367,6 +381,42 @@ export async function createPost(
   const id = data !== null && typeof data === "object" ? (data as Record<string, unknown>).id : null;
   // A 2xx we cannot read an id from DID create something, or might have.
   if (typeof id !== "string" || !ID.test(id)) return fail("uncertain", res.status);
+  return { ok: true, value: { id } };
+}
+
+/**
+ * UPLOAD ONE IMAGE for a post, as the owner (OAuth 2.0 user token holding
+ * media.write): POST /2/media/upload with the image base64-encoded in a JSON
+ * body and `media_category: "tweet_image"`, answered with `data.id`, the id
+ * POST /2/tweets takes in `media.media_ids`. One image, one request: X's
+ * single-request upload takes an image whole, under its 5 MB image limit.
+ *
+ * AN UPLOAD IS NOT A POST. Nothing appears on anybody's timeline until a post
+ * names the id, and an id no post names expires at X. So every failure here,
+ * `uncertain` included, costs only the picture: the caller posts the text on
+ * its own and never uploads again for that post. The answers are sorted by the
+ * same `classify` as a post (401 auth, 403 forbidden, 429 rate, 5xx uncertain).
+ *
+ * `timeoutMs` bounds the call below the client's own ten seconds, so a slow
+ * upload cannot hold the post it was for past the caller's budget.
+ */
+export async function uploadImage(
+  accessToken: string,
+  image: Uint8Array,
+  opts: { fetch?: FetchLike; nowMs?: number; timeoutMs?: number } = {},
+): Promise<XResult<{ id: string }>> {
+  if (!(image instanceof Uint8Array) || image.byteLength === 0 || image.byteLength > X_MAX_IMAGE_BYTES) return fail("invalid", null);
+  const res = await call(opts.fetch ?? realFetch, X_MEDIA_UPLOAD_URL, {
+    method: "POST",
+    headers: { authorization: `Bearer ${accessToken}`, "content-type": "application/json", accept: "application/json" },
+    body: JSON.stringify({ media: Buffer.from(image.buffer, image.byteOffset, image.byteLength).toString("base64"), media_category: "tweet_image" }),
+  }, opts.timeoutMs);
+  if (!res) return fail("uncertain", null);
+  const read = await classify(res, opts.nowMs ?? Date.now());
+  if (!read.ok) return read;
+  const data = read.value.data;
+  const id = data !== null && typeof data === "object" && !Array.isArray(data) ? (data as Record<string, unknown>).id : null;
+  if (typeof id !== "string" || !MEDIA_ID.test(id)) return fail("uncertain", res.status);
   return { ok: true, value: { id } };
 }
 

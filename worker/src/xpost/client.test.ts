@@ -21,6 +21,8 @@ import {
   readMentions,
   revokeToken,
   stateClient,
+  uploadImage,
+  X_MAX_IMAGE_BYTES,
   xAppFromEnv,
   xWeightedLength,
   type FetchLike,
@@ -235,6 +237,90 @@ test("every answer to a post is sorted by whether X might have created it", asyn
     assert.deepEqual(await createPost("acc", "hello there friends", { fetch: scripted(status, body, headers), nowMs: at }), want, `${status} ${JSON.stringify(body)}`);
   }
   assert.deepEqual(await createPost("acc", "hello there friends", { fetch: throwing }), { ok: false, failure: "uncertain", status: null });
+});
+
+// ── media ───────────────────────────────────────────────────────────────────
+
+const PNG = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
+
+test("an image is uploaded as the owner, base64 in JSON as a tweet_image, and X's media id handed back", async () => {
+  const seen: Seen[] = [];
+  const r = await uploadImage("acc", PNG, {
+    fetch: scripted(200, { data: { id: "1880028106020515840", media_key: "3_1880028106020515840", size: 11, expires_after_secs: 86400 } }, {}, seen),
+  });
+  assert.deepEqual(r, { ok: true, value: { id: "1880028106020515840" } });
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0]?.url, "https://api.x.com/2/media/upload");
+  assert.equal(seen[0]?.method, "POST");
+  assert.equal(seen[0]?.headers.authorization, "Bearer acc");
+  assert.equal(seen[0]?.headers["content-type"], "application/json");
+  const body = JSON.parse(seen[0]!.body!);
+  assert.deepEqual(Object.keys(body).sort(), ["media", "media_category"]);
+  assert.equal(body.media_category, "tweet_image");
+  assert.deepEqual([...Buffer.from(body.media, "base64")], [...PNG]);
+});
+
+test("an upload is refused before X is asked when there is no image or it is over X's 5 MB", async () => {
+  const seen: Seen[] = [];
+  const f = scripted(200, { data: { id: "1" } }, {}, seen);
+  assert.deepEqual(await uploadImage("acc", new Uint8Array(0), { fetch: f }), { ok: false, failure: "invalid", status: null });
+  assert.deepEqual(await uploadImage("acc", new Uint8Array(X_MAX_IMAGE_BYTES + 1), { fetch: f }), { ok: false, failure: "invalid", status: null });
+  assert.equal(seen.length, 0);
+  assert.equal((await uploadImage("acc", new Uint8Array(X_MAX_IMAGE_BYTES), { fetch: f })).ok, true, "exactly 5 MB is X's limit, not over it");
+});
+
+test("every refused or unreadable upload is sorted like a post's answer", async () => {
+  const at = 1_000_000;
+  const cases: [number, unknown, Record<string, string>, unknown][] = [
+    [401, { title: "Unauthorized" }, {}, { ok: false, failure: "auth", status: 401 }],
+    [403, { title: "Forbidden", detail: "Missing scope media.write" }, {}, { ok: false, failure: "forbidden", status: 403 }],
+    [429, {}, { "x-rate-limit-reset": String(at / 1000 + 600) }, { ok: false, failure: "rate", status: 429, resetAtMs: at + 600_000 }],
+    [400, { title: "Invalid Request" }, {}, { ok: false, failure: "invalid", status: 400 }],
+    [413, "", {}, { ok: false, failure: "invalid", status: 413 }],
+    [500, "", {}, { ok: false, failure: "uncertain", status: 500 }],
+    [503, "", {}, { ok: false, failure: "uncertain", status: 503 }],
+    [200, "not json", {}, { ok: false, failure: "uncertain", status: 200 }],
+    [200, { data: {} }, {}, { ok: false, failure: "uncertain", status: 200 }],
+    [200, { data: { id: "12345678901234567890" } }, {}, { ok: false, failure: "uncertain", status: 200 }],
+    [200, { data: { id: 1880028106020515840 } }, {}, { ok: false, failure: "uncertain", status: 200 }],
+    [200, { data: { id: "1880?evil" } }, {}, { ok: false, failure: "uncertain", status: 200 }],
+  ];
+  const warn = console.warn;
+  console.warn = () => {};
+  try {
+    for (const [status, body, headers, want] of cases) {
+      assert.deepEqual(await uploadImage("acc", PNG, { fetch: scripted(status, body, headers), nowMs: at }), want, `${status} ${JSON.stringify(body)}`);
+    }
+  } finally {
+    console.warn = warn;
+  }
+  assert.deepEqual(await uploadImage("acc", PNG, { fetch: throwing }), { ok: false, failure: "uncertain", status: null });
+});
+
+test("an upload is bounded by the caller's budget, never past the client's own ten seconds", async () => {
+  const aborted: number[] = [];
+  const hanging: FetchLike = (_url, init) => new Promise((_, reject) => {
+    const started = Date.now();
+    init.signal?.addEventListener("abort", () => { aborted.push(Date.now() - started); reject(new Error("aborted")); });
+  });
+  assert.deepEqual(await uploadImage("acc", PNG, { fetch: hanging, timeoutMs: 30 }), { ok: false, failure: "uncertain", status: null });
+  assert.equal(aborted.length, 1);
+  assert.ok(aborted[0]! < 2_000, `aborted after ${aborted[0]}ms`);
+});
+
+test("a post carries X's media ids when it has them, and nothing else becomes one", async () => {
+  const seen: Seen[] = [];
+  const f = scripted(201, { data: { id: "1840000000000000001" } }, {}, seen);
+  assert.equal((await createPost("acc", "sold it", { fetch: f, mediaIds: ["1880028106020515840"] })).ok, true);
+  assert.deepEqual(JSON.parse(seen[0]!.body!), { text: "sold it", media: { media_ids: ["1880028106020515840"] } });
+  assert.equal((await createPost("acc", "sold it", { fetch: f, mediaIds: ["1880028106020515840"], replyToTweetId: "123" })).ok, true);
+  assert.deepEqual(JSON.parse(seen[1]!.body!), { text: "sold it", reply: { in_reply_to_tweet_id: "123" }, media: { media_ids: ["1880028106020515840"] } });
+  assert.equal((await createPost("acc", "sold it", { fetch: f, mediaIds: [] })).ok, true);
+  assert.deepEqual(JSON.parse(seen[2]!.body!), { text: "sold it" }, "no ids, no media object");
+  for (const bad of [["1880?evil"], ["12345678901234567890"], [""], ["1", "2", "3", "4", "5"]]) {
+    assert.deepEqual(await createPost("acc", "sold it", { fetch: f, mediaIds: bad }), { ok: false, failure: "invalid", status: null }, JSON.stringify(bad));
+  }
+  assert.equal(seen.length, 3, "a malformed id never reaches X");
 });
 
 test("length is counted the way X counts it", () => {
