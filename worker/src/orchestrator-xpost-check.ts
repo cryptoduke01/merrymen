@@ -178,14 +178,15 @@ export function createLarpChecker(d: LarpCheckerDeps): LarpChecker {
         if (left() < 5_000) notes.push("check-late");
         else {
           lookups++;
-          const r = await scan(siteUrl, Math.min(SCAN_MS, left() - 3_000)).catch((): ScanResult => ({ ok: false, url: siteUrl!, failure: "unreachable" }));
+          const r = await scan(siteUrl, Math.min(SCAN_MS, left() - 3_000)).catch((): ScanResult => ({ ok: false, url: siteUrl!, failure: "browser-error" }));
           if (r.ok && r.page) {
             page = r.page;
             notes.push("check-site-read");
           } else {
             notes.push(`check-site-${r.failure ?? "failed"}`);
           }
-          const read: NonNullable<CheckEvidence["site"]>["read"] = page ? "ok" : r.failure === "busy" ? "busy" : r.failure === "no-browser" ? "none" : "unreachable";
+          // "unreachable" only when the browser saw the page fail to load (scanPage); every other failure is ours, and is "not read".
+          const read: NonNullable<CheckEvidence["site"]>["read"] = page ? "ok" : r.failure === "busy" ? "busy" : r.failure === "unreachable" ? "unreachable" : "none";
           let namesCoin: NonNullable<CheckEvidence["site"]>["namesCoin"] = null;
           if (page && target.kind === "coin") {
             const all = [...page.findings.evm, ...page.findings.solana];

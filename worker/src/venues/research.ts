@@ -182,14 +182,19 @@ export async function scanPage(cfg: BrowserConfig | null, rawUrl: string, fetchI
     if (r.status === 429) return { ok: false, url, failure: "busy" };
     if (!r.ok) {
       const detail = await r.text().catch(() => "");
-      // 502 is the service saying the page itself did not load.
-      return { ok: false, url, failure: r.status === 502 ? "unreachable" : "browser-error", detail: detail.slice(0, 200) };
+      // THE SITE'S FAULT ONLY WHEN THE BROWSER SAYS SO: a 502 whose reason is
+      // Chromium's own navigation failure (net::ERR_…, a navigation timeout).
+      // Anything else (a 404 from a browser without /scan, a crash, a refused
+      // token) is our side, never "their site wouldn't load" said in public.
+      const theirs = r.status === 502 && /net::ERR_|NS_ERROR_|Timeout \d+ms exceeded/i.test(detail);
+      return { ok: false, url, failure: theirs ? "unreachable" : "browser-error", detail: detail.slice(0, 200) };
     }
     const read = await readBoundedJson<unknown>(r);
     const page = read.ok ? scanOf(read.value) : null;
     return page ? { ok: true, url, page } : { ok: false, url, failure: "browser-error", detail: read.ok ? "malformed scan" : read.detail.slice(0, 200) };
   } catch (e) {
-    return { ok: false, url, failure: "unreachable", detail: String((e as Error)?.message ?? e).slice(0, 200) };
+    // The browser service itself did not answer in time: our gap, not the site's.
+    return { ok: false, url, failure: "browser-error", detail: String((e as Error)?.message ?? e).slice(0, 200) };
   } finally {
     clearTimeout(timer);
   }

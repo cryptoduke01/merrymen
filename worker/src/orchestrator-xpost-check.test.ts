@@ -99,6 +99,14 @@ describe("the larp check's legwork", () => {
     assert.equal(r.evidence.site?.namesCoin, null);
   });
 
+  it("a browser that cannot scan is never said as the site being down", async () => {
+    const { checker } = world({ scan: (url) => ({ ok: false, url, failure: "browser-error" }) });
+    const r = await checker.check({ kind: "site", url: "https://acme.example/" }, { budgetMs: 50_000, chatId: 1 });
+    assert.equal(r.evidence.site?.read, "none");
+    assert.ok(!assessCheck(r.evidence).signals.includes("site-down"));
+    assert.equal(assessCheck(r.evidence).verdict, "unclear");
+  });
+
   it("a busy browser and a GitHub that would not answer are unread, never findings", async () => {
     const { checker } = world({ scan: (url) => ({ ok: false, url, failure: "busy" }) });
     const r = await checker.check({ kind: "site", url: "https://acme.example/" }, { budgetMs: 50_000, chatId: 1 });
@@ -141,7 +149,11 @@ describe("the browser's /scan, as this side trusts it", () => {
     const say = (status: number, body: unknown) => (async (url: string) => { calls.push(url); return new Response(JSON.stringify(body), { status }); }) as unknown as typeof fetch;
     const cfg = { baseUrl: "http://browser.internal/", token: "t" };
     assert.equal((await scanPage(cfg, "https://acme.example", say(429, {}))).failure, "busy");
-    assert.equal((await scanPage(cfg, "https://acme.example", say(502, { error: "could not read" }))).failure, "unreachable");
+    assert.equal((await scanPage(cfg, "https://acme.example", say(502, { error: "could not read the page: page.goto: net::ERR_NAME_NOT_RESOLVED at https://acme.example/" }))).failure, "unreachable");
+    // Our side, never the site's: a browser without /scan, a crash, a browser that never answered.
+    assert.equal((await scanPage(cfg, "https://acme.example", say(404, { error: "not found" }))).failure, "browser-error");
+    assert.equal((await scanPage(cfg, "https://acme.example", say(502, { error: "could not read the page: browserType.launch: Executable doesn't exist" }))).failure, "browser-error");
+    assert.equal((await scanPage(cfg, "https://acme.example", (async () => { throw new Error("connect ECONNREFUSED"); }) as unknown as typeof fetch)).failure, "browser-error");
     assert.equal((await scanPage(cfg, "https://acme.example", say(200, { nope: true }))).ok, true, "a body with no findings is a page with none");
     assert.equal((await scanPage(cfg, "http://acme.example", say(200, {}))).failure, "refused-url");
     assert.equal((await scanPage(null, "https://acme.example", say(200, {}))).failure, "no-browser");
