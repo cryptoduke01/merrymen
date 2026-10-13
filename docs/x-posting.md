@@ -1551,6 +1551,100 @@ other owner's agent, and its posting and reply warnings, are unchanged.
   it: its children inherit it from there, and an answer's coin facts already
   read it on the same fleet lane.
 
+### Larp checks: "@alanaidale larp check" under a project's post (2026-10-13)
+
+The owner's ask: Alan checks whether a website or a coin is real when someone
+tags him under a post, the way larpcheck.app does, and says so casually.
+Behind `MERRYMEN_XPOST_CHECKS=1`, with research on; off by default.
+
+**What counts as a check** (xpost/check.ts `checkAsk`): the whole tag, once
+the leading handles, links, a contract and one emoji are off, is one of the
+plain ways of asking: "larp check", "is this real?", "real or larp", "check
+this", "scan this", "dyor this", "what is this project", "anything behind
+this?". A sentence with a claim or a request beside it is not one, and nor
+is a tag with anyone's handle in it but the X prefix's.
+
+**What it checks** (`checkTargetOf`): the tag's own contract or link first;
+then the post it replies to; then the post it quotes; then the profile link
+of whoever wrote the post it sits under. One contract (with that post's one
+site, if any), else one site. Two contracts, X itself, chat apps, charting
+and swap sites, plain http, a private host and any merrymen page are no
+target. Never one of its own posts. Mentions now expand the posts a tag
+refers to (`referenced_tweets.id`, their authors and those authors' profile
+links, and every t.co's real destination); that context is read only here,
+never handed to a prompt.
+
+**Where it is answered.** A check is taken before the thread, quote and card
+screens, which exist because code never read what a tag sits under; a check
+reads exactly that, and speaks only of the one target it found. Opt-outs,
+abuse, sensitive topics and distress are read on the tag and on the post
+under it as before. Never under a post, quote, author or target that names
+sherwood in any form or merrymen. At most `MERRYMEN_XPOST_CHECKS_PER_DAY`
+(default 80) a UTC day across X accounts, counted before anything is read,
+and inside the answer caps (sixty a day, six a person).
+
+**What is read** (orchestrator-xpost-check.ts), inside fifty seconds:
+1. A coin: its facts on the index, Robinhood Chain first, then Base,
+   Ethereum and BSC (a Solana mint on Solana), with the website the token's
+   info lists. A coin the index lists with no website is a finding.
+2. The site, through the research browser's new `POST /scan`
+   (browser/server.ts): every link and word, the markup, up to a dozen
+   loaded scripts, and how many calls the page made to its own backend.
+   packages/core/src/site-scan.ts finds the contracts, the GitHub, socials
+   and docs, keeping where each was seen. For a coin: does the site name
+   this very contract, only others a visitor is shown, or none (a library's
+   address in a bundle never counts as "another contract").
+3. The project's own GitHub (research/github.ts): last push, commits in
+   thirty days (a full page is "100+"), stars, age, fork, archived, size.
+   A repo the site links but that carries none of the project's names is
+   "someone else's code", never "their github", and its numbers are never
+   shown. A github.com link is read on GitHub's API, not in the browser.
+4. A site's one visible contract, on the index, for how its holders sit.
+
+A read that fails is "unread", never a finding. What was seen is cached half
+an hour per target.
+
+**The verdict is code's** (`assessCheck`): from fifty by fixed weights, real
+(75+), partly real (55+), thin, larp, or can't tell. Larp needs a red flag
+beside a low score (the site names a different contract, a forked, borrowed
+or empty repo, an empty site with no code anywhere): a memecoin with no site
+and no GitHub claims nothing, so it is thin. Nothing seen is can't tell.
+Real means a build a visitor can see, never safe.
+
+**The words.** The model is handed the verdict and up to five reasons as
+digit-free phrases, and the site's own one-line description as an unverified
+claim (screened like a creator's). `checkPrompt` asks for a friend texting
+back what they found: the take first, then the finding that matters, no
+"verdict:", no "per the data". The draft is gated as an answer about a named
+coin (no first person, no liking, no yes or no), held to what it was handed
+and `CHECK_VOCABULARY`, and refused after the gate if it says scam, rug,
+fraud, honeypot, safe, avoid or stay away (`gate:accusation`). A refused
+draft, a PASS, or the house model down, and code's own casual line for the
+same verdict and reasons goes instead (`checkAnswers`: thirty-six per check,
+every one cleared through the real gate live and paper). Then code's figures
+line: `github: last push 2d ago, 41 commits in 30d, 52 stars, repo 10mo old;
+top10 hold 35%, creator 1%.`
+
+Example, under "@acmeproj @alanaidale larp check": *"site's up and the repo
+got pushes this week, contract on the page matches. real build. github: last
+push 2d ago, 41 commits in 30d, 52 stars, repo 10mo old; top10 hold 35%,
+creator 1%."*
+
+**Counts:** `answer-intent-check`, `answer-research-check-<verdict>`,
+`answer-research-check-site-read`, `answer-research-check-github-<failure>`,
+`answer-check-coded` (code's line stood in), `answer-checks-spent`.
+
+**Knobs:** `MERRYMEN_XPOST_CHECKS=1`, `MERRYMEN_XPOST_CHECKS_PER_DAY`, and
+`MERRYMEN_GITHUB_TOKEN` (optional, any token with no permissions: GitHub
+allows sixty unauthenticated calls an hour from one address, shared by the
+fleet's egress; read only by the orchestrator, stripped from children). The
+browser is the existing `merrymen-browser` service
+(`MERRYMEN_BROWSER_URL`/`_TOKEN`, already on the orchestrator); it must be
+redeployed from this release for `/scan`. Until then every scan is a 404,
+which is read as "not read" (never as the site being down), so a check that
+needs the site answers that it can't tell. Only Chromium's own navigation
+failure (`net::ERR_…`, a navigation timeout) is said as the site not loading.
+
 ## Rollout for the operator's own agent
 
 How this release is turned on for Alan Al Dale, the operator's own agent,

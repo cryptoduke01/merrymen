@@ -93,7 +93,7 @@ import {
   type XAccount,
   type XPost,
 } from "./xpost/store";
-import { answerPrompt, answerQuestion, buyPrompt, casualPrompt, draft, INSIGHT_VOCABULARY, insightPrompt, introPrompt, introTemplate, modelAnswers, replyPrompt, sellPrompt, sherwoodClaimed, sherwoodMentioned, sherwoodNamed, xpostModel, xpostModelWarning, type AnswerIntentKind, type WriterFacts, type XStyle } from "./xpost/writer";
+import { answerPrompt, answerQuestion, buyPrompt, casualPrompt, checkPrompt, draft, INSIGHT_VOCABULARY, insightPrompt, introPrompt, introTemplate, modelAnswers, replyPrompt, sellPrompt, sherwoodClaimed, sherwoodMentioned, sherwoodNamed, xpostModel, xpostModelWarning, type AnswerIntentKind, type WriterFacts, type XStyle } from "./xpost/writer";
 import { appendPublicToken, appendPublicWallet, hasPublicWallet, publicTokenStillAllowed, publicWalletStillAllowed, type PublicWallet } from "./xpost/public-wallet";
 import { readPublicProjectDescription } from "./orchestrator-xpost-project";
 import { banterAsk, boughtNames, carriesResearch, classifyTag, createXResearch, generalTradesQuestion, MARKET_MAJORS, modelNamed, namesACoin, ownCoinTicker, sayable, selfAsk, unshowableName, type ResearchBundle, type TagIntent, type XResearch } from "./orchestrator-xpost-research";
@@ -104,6 +104,7 @@ import { appendSaleOutcome, hasSaleOutcome } from "./xpost/sale-outcome";
 import { admitFiguresLine, cleanTicker, figuresTickers, withFigures, type FiguresSpec } from "./xpost/figures";
 import { hotAnswers, hotNoneAnswers, hotUnreadAnswers, insightFacts, majorAnswers, majorUnreadAnswers, marketAnswers, type HotRead, type MajorRead, type MarketRead } from "./xpost/market";
 import { selfAnswers, tradesAnswers } from "./xpost/casual";
+import { accusationIn, CHECK_VOCABULARY, checkAnswers, type CheckRead } from "./xpost/check";
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -240,10 +241,25 @@ export interface XPostEnv {
   researchFomo?: boolean;
   /** MERRYMEN_XPOST_RESEARCH_PER_HOUR: index lookups per hour across X accounts. Absent: the research default. */
   researchPerHour?: number;
+  /**
+   * MERRYMEN_XPOST_CHECKS=1, with research on: an active agent answers a larp
+   * check (xpost/check.ts). Opt-in, like research and Fomo: it is the house
+   * account saying, in public, whether a stranger's project looks real.
+   */
+  checks?: boolean;
+  /** MERRYMEN_XPOST_CHECKS_PER_DAY: larp checks a UTC day across X accounts. Absent: DEFAULT_CHECKS_PER_DAY. */
+  checksPerDay?: number;
   replyPollsPerDay?: number;
   /** One boot line per value that was set and could not be honoured as written. */
   notes: string[];
 }
+
+/**
+ * LARP CHECKS A UTC DAY across X accounts (MERRYMEN_XPOST_CHECKS_PER_DAY): a
+ * check holds the one research browser for up to forty seconds and reads
+ * GitHub and the index, so it is counted apart from answers.
+ */
+export const DEFAULT_CHECKS_PER_DAY = 80;
 
 export function xpostEnv(env: Record<string, string | undefined> = process.env): XPostEnv {
   const none = { perDay: undefined, fleetPerDay: undefined, llmPerDay: undefined, notes: [] };
@@ -311,6 +327,12 @@ export function xpostEnv(env: Record<string, string | undefined> = process.env):
   const perHourRaw = env.MERRYMEN_XPOST_RESEARCH_PER_HOUR?.trim();
   const researchPerHour = perHourRaw ? count(perHourRaw) : null;
   if (perHourRaw && researchPerHour === null) notes.push("xpost: ignoring MERRYMEN_XPOST_RESEARCH_PER_HOUR — it is not a count of lookups; the default applies");
+  // LARP CHECKS, OPT-IN, and only on research: a check is a research lane.
+  const checksAsked = env.MERRYMEN_XPOST_CHECKS?.trim() === "1";
+  if (checksAsked && !research) notes.push("xpost: MERRYMEN_XPOST_CHECKS=1 does nothing without MERRYMEN_XPOST_RESEARCH=1 — a larp check is research");
+  const checksRaw = env.MERRYMEN_XPOST_CHECKS_PER_DAY?.trim();
+  const checksPerDay = checksRaw ? count(checksRaw) : null;
+  if (checksRaw && checksPerDay === null) notes.push("xpost: ignoring MERRYMEN_XPOST_CHECKS_PER_DAY — it is not a count of checks; the default applies");
   return { off: null, perDay, fleetPerDay, llmPerDay, notes,
     ...(replies.scope !== "off" ? { repliesApproved: true } : {}),
     ...(replies.scope === "active" ? { repliesActiveOnly: true } : {}),
@@ -318,6 +340,8 @@ export function xpostEnv(env: Record<string, string | undefined> = process.env):
     ...(research ? { research: true } : {}),
     ...(research && fomoAsked ? { researchFomo: true } : {}),
     ...(researchPerHour !== null ? { researchPerHour } : {}),
+    ...(research && checksAsked ? { checks: true } : {}),
+    ...(checksPerDay !== null ? { checksPerDay } : {}),
     ...(replyRaw ? { replyPollsPerDay: replyPollsPerDay ?? 0 } : {}),
   };
 }
@@ -907,6 +931,9 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
     ? (deps.research ?? createXResearch(o.knobs.researchPerHour !== undefined ? { lookupsPerHour: o.knobs.researchPerHour } : {}))
     : null;
   const researchFomo = research !== null && o.knobs.researchFomo === true;
+  // LARP CHECKS (xpost/check.ts): only with research, only when switched on, at most this many a UTC day across X accounts.
+  const checks = research !== null && o.knobs.checks === true;
+  const checksPerDay = o.knobs.checksPerDay ?? DEFAULT_CHECKS_PER_DAY;
 
   let lastPlanAt = Number.NEGATIVE_INFINITY;
   /** The tenant the last plan pass's draft cap cut it short at; "" when it reached everyone. */
@@ -928,7 +955,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
     (creds ? `up to ${llmPerDay} model calls a day` : "no model, so only intros are posted, from templates") +
     (active.size ? `; ${active.size} owner(s) on the active cadence, up to ${ACTIVE_CADENCE.perDay} a day` : "") +
     (repliesApproved ? (o.knobs.repliesActiveOnly ? "; replies for the active owners only" : "; replies for owners who consent") : "") +
-    (research ? `; answers look things up first${researchFomo ? ", Fomo included" : ""}` : "");
+    (research ? `; answers look things up first${researchFomo ? ", Fomo included" : ""}` : "") +
+    (checks ? `; larp checks on, up to ${checksPerDay} a day` : "");
 
   return {
     plan: () => ({ why }),
@@ -1716,13 +1744,15 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
     for (const comment of ordered) {
       if (comment.createdAtMs < consentAt || nowMs - comment.createdAtMs > REPLY_STALE_MS) continue;
       const candidate = tagCandidate(comment, { xUserId: account.xUserId, research: research !== null, username: account.username,
-        ownRoots: threads.roots, ownPosts: threads.posts, answered: threads.answered, plain: threads.plain, trade: threads.trade });
+        ownRoots: threads.roots, ownPosts: threads.posts, answered: threads.answered, plain: threads.plain, trade: threads.trade, checks });
       if (!candidate.ok || await repliesOptedOut(shared, account.xUserId, comment.authorId)) continue;
       // READ BY CODE FIRST, research on or off: the allowlist's plain model
       // question is answered from a code-built line (writer.ts modelAnswers)
       // and spends no model call. Only research gathers anything for what it
-      // reads.
-      const classified = classifyTag(candidate.text, { address: candidate.address ?? null, advice: candidate.advice === true });
+      // reads. A LARP CHECK is read by tagCandidate already, and is nothing else.
+      const checked = candidate.check ?? null;
+      const classified: TagIntent = checked ? { kind: "check", target: checked.target }
+        : classifyTag(candidate.text, { address: candidate.address ?? null, advice: candidate.advice === true });
       // NO SMALL TALK (the owner's teammate, 2026-10-13: "do not respond to
       // normal conversations"). A greeting and nothing else ("hiii", "gm":
       // replies.ts greetingOnly), its own mood ("are you bullish?", "wen
@@ -1846,9 +1876,16 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // the coins it shows can be read against who is asking (authorShows below).
       const codeLineElsewhere = candidate.otherHandles === true && marketKind;
       const marketToUnread = marketKind && !author;
+      // A CHECK NEVER UNDER SHERWOOD OR THE HOUSE (2026-10-13): a post, a quoted
+      // post, an author or a target that names sherwood in any form or merrymen
+      // is one the house account never larp-checks: it would be Merrymen
+      // judging a token named after its own model, or itself.
+      const checkTarget = checked ? (checked.target.kind === "site" ? checked.target.url : `${checked.target.address} ${checked.target.site ?? ""}`) : "";
+      const checkHouse = checked !== null && [checkTarget, ...(comment.context ?? []).flatMap((c) => [c.text, c.author?.username ?? "", c.author?.name ?? "", c.author?.url ?? ""])]
+        .some((t) => sherwoodMentioned(t) || sherwoodNamed(t) || merrymenMentioned(t));
       const asked: TagIntent = sherwoodTagged || authorSherwood || (classified.kind === "model" && (candidate.otherHandles || !namedClean))
         || smallTalk || unreadWord || unflaggedAdvice || unbanteredChat || closedFollowUp
-        || tradeMarket || codeLineElsewhere || marketToUnread || tradesElsewhere ? { kind: "unanswered" } : classified;
+        || tradeMarket || codeLineElsewhere || marketToUnread || tradesElsewhere || checkHouse ? { kind: "unanswered" } : classified;
       // SHERWOOD IN ANY FORM, OR A MODEL QUESTION OFF THE ALLOWLIST, is
       // answered by nothing: the model line under "sherwood TGE soon?" reads
       // as Merrymen confirming a token, and a draft is never asked about the
@@ -1918,7 +1955,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // NEVER CONFIRM A BUY BY NAME: a tag that names a coin in any way gets
       // no list of its buys and no fact about them, research on or off. Only
       // the tag's own full contract, bought by its records, may be (exact).
-      const coinNamed = namesACoin({ text: candidate.text, intent: asked, address: candidate.address ?? null });
+      // A CHECK IS ALWAYS OF A NAMED COIN: a project behind a ticker is a coin on this account (writer.ts checkPrompt).
+      const coinNamed = asked.kind === "check" || namesACoin({ text: candidate.text, intent: asked, address: candidate.address ?? null });
       // ITS BUYS ONLY FOR A PLAIN QUESTION ABOUT WHAT IT TRADES (red-team 2026-10-12):
       // a copycat no matcher finds ("bonc", a frog emoji) is never handed them.
       // NOR UNDER ANOTHER HANDLE (red-team 2026-10-12): the reply prefix X writes
@@ -1932,6 +1970,12 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // Nothing is looked up for its strategy or its buys.
       const intent = research && chatKind === null ? asked : null;
       const answerKey = `llm-answers:${account.xUserId}:${utcDay(nowMs)}`;
+      // THE DAY'S LARP CHECKS, counted before anything is read: a check past
+      // the count is answered by nothing (the tag is passed over, no row).
+      if (asked.kind === "check" && !(await takeAllowance(shared, `x-checks:${utcDay(nowMs)}`, checksPerDay, nowMs))) {
+        bump("answer-checks-spent");
+        continue;
+      }
       if (!undrafted) {
         if (!(await takeAllowance(shared, answerKey, ANSWER_DRAFTS_PER_DAY, nowMs))) {
           bump("answer-drafts-spent");
@@ -1970,6 +2014,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       let researchUnanswered = false;
       // The names CoinGecko lists the line's coins under, read only against who is asking (authorShows).
       let lineNames: string[] = [];
+      // A LARP CHECK AS CODE READ IT: its verdict and reasons, for code's own lines when the draft does not stand.
+      let checkRead: CheckRead | null = null;
       if (research && intent) {
         const bundle = await research.gather({ shared, intent, tenant: account.tenant, xUserId: account.xUserId, facts: f, posts, fomo: researchFomo,
           // Under another handle no question is one the exact path reads (ResearchInput.question: absent, never).
@@ -1982,6 +2028,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         if (hotCoded && bundle.hot) hotRead = bundle.hot;
         if (asked.kind === "major" && figures && bundle.major) majorRead = bundle.major;
         if (marketCoded && bundle.market) marketRead = bundle.market;
+        if (asked.kind === "check" && bundle.check) checkRead = bundle.check;
         // Chat as research read it is held to the same allowlists too (unbanteredChat above).
         researchUnanswered = bundle.unanswered === true || (looked.intent === "chat" && !chatAllowed(candidate.text));
         bump(`answer-intent-${intent.kind}`);
@@ -2088,6 +2135,10 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       const lines = templated ? modelAnswers(comment.id, facts.style, lineOpts) : chatLines.length ? chatLines : market;
       const raw = coded
         ? lines[0]!
+        // A LARP CHECK IN ITS OWN VOICE (writer.ts checkPrompt): the take code reached, texted back casually.
+        : asked.kind === "check"
+        ? await draft(creds, checkPrompt({ ...facts, question: candidate.text, research: looked?.research ?? [], ...(looked?.creatorClaim ? { creatorClaim: looked.creatorClaim } : {}) }),
+          { call: deps.llm, timeoutMs: deps.draftTimeoutMs })
         : await draft(creds, answerPrompt({ ...facts, question: candidate.text, recentBuys: buys, boughtLately: boughtKind(f),
           said: said.map(withoutReplyOptOut), walletPublic, coinNamed, general, ...(looked ?? {}) }), { call: deps.llm, timeoutMs: deps.draftTimeoutMs });
       const mode = f.mode === "idle" ? null : f.mode;
@@ -2122,7 +2173,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       const lookedWords = new Set([...(looked?.research ?? []), looked?.creatorClaim ?? ""].flatMap((r) => textWords(r)));
       // "What's hot?" is a whole question on a strict allowlist (hotAsk): none
       // of its words ("trending", "gainers", "meta") can be a coin's name.
-      const askerNames = asked.kind === "hot" ? [] : nameLikeWords(candidate.text).filter((w) => !lookedWords.has(w) && !vouchedNames.has(w));
+      // Nor a larp check's ask ("larp check", "is this real?": checkAsk), a whole-tag allowlist with no coin's name in it.
+      const askerNames = asked.kind === "hot" || asked.kind === "check" ? [] : nameLikeWords(candidate.text).filter((w) => !lookedWords.has(w) && !vouchedNames.has(w));
       // WHAT IT WAS HANDED: research or a creator's claim (an answer handed none cites no source).
       const handed = !!looked && (looked.research.length > 0 || !!looked.creatorClaim);
       // A code line is gated as one (asCode): the draft-only clauses below never read it.
@@ -2144,7 +2196,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
           // but a deflection, no liking, no yes or no.
           named: !told && (coinNamed || asked.kind === "own-trades" || asked.kind === "coin" || asked.kind === "hot" || asked.kind === "major"),
           // Told its buys, every other word is everyday or one it was handed (XGateCtx.known).
-          known: [facts.strategy ?? "", ...(looked?.research ?? []), looked?.creatorClaim ?? ""].filter((k) => k !== ""),
+          // A check's draft may also use how people talk about digging through a project (CHECK_VOCABULARY).
+          known: [facts.strategy ?? "", ...(looked?.research ?? []), looked?.creatorClaim ?? "", asked.kind === "check" ? CHECK_VOCABULARY : ""].filter((k) => k !== ""),
           // HANDED WHAT IT LOOKED UP, AND TOLD NONE OF ITS BUYS (red-team 2026-10-12):
           // "per the index, bonk is ripping", "coingecko shows bitcoin up a
           // little" credited names nothing looked up to a source. Every word
@@ -2213,9 +2266,28 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // NO FRIENDLY LINE IN PLACE OF A REFUSED DRAFT (red-team review of
       // daaae961, 2026-10-12): a draft refused for anything at all, or a PASS,
       // leaves the tag unanswered.
-      const drafted = verdict?.ok === true && !postsName && !unlookedCoin && !untrusted && !pointed ? verdict.text : null;
+      // NEVER AN ACCUSATION, A SAFETY CALL OR ADVICE IN A CHECK (xpost/check.ts accusationIn).
+      const accused = asked.kind === "check" && !coded && verdict?.ok === true && accusationIn(verdict.text);
+      const drafted = verdict?.ok === true && !postsName && !unlookedCoin && !untrusted && !pointed && !accused ? verdict.text : null;
+      // A CHECK STILL GETS ITS ANSWER WHEN THE DRAFT DOES NOT STAND (2026-10-13):
+      // refused, a PASS, or the house model down, and code's own casual lines
+      // for the same verdict and reasons go instead (xpost/check.ts
+      // checkAnswers), gated as code lines, the first the gate admits. Unlike
+      // a friendly line in place of a refused chat draft, these say exactly
+      // what code found, and nothing else.
+      let admitted = drafted;
+      if (!admitted && asked.kind === "check" && checkRead) {
+        for (const line of checkAnswers(checkRead, comment.id, lineOpts)) {
+          const v = gate(line, true);
+          if (v.ok && !accusationIn(v.text)) {
+            admitted = v.text;
+            bump("answer-check-coded");
+            break;
+          }
+        }
+      }
+      if (asked.kind === "check" && checkRead) bump(`answer-check-${checkRead.verdict}`);
       const finishedAt = at();
-      const admitted = drafted;
       // THE FIGURES LINE, CODE'S, AFTER THE GATE (xpost/figures.ts): only an
       // active owner's answer, only from what research built for this tag,
       // only a line in the renderer's own grammar (admitFiguresLine, again
@@ -2233,7 +2305,9 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // drafted answer carries at most a section that names no coin (a
       // tagged contract's onchain hour); the major, the chain's coins, Fomo's
       // and CoinGecko's tickers stand only beside code's own market words.
-      const lineFigures = !figures ? null : market.length > 0 ? figures : figures.filter((s) => s.kind === "flow");
+      // A CHECK'S GITHUB AND HOLDERS (xpost/check.ts checkFigures) name no coin either, so they stand beside its words, drafted or code's.
+      const lineFigures = !figures ? null : market.length > 0 ? figures
+        : figures.filter((s) => s.kind === "flow" || (asked.kind === "check" && (s.kind === "git" || s.kind === "holders")));
       // NOR THE AGENT'S OWN NAME, whatever the agent is called, NOR A MODEL'S
       // OR A PROVIDER'S (red-team 2026-10-12): a coin named after the agent or
       // its model, trending under its own answer, reads as the house's coin.
@@ -2265,7 +2339,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         replyToTweetId: comment.id, replyRootTweetId: comment.id, replyAuthorId: comment.authorId,
         status: body ? "scheduled" : "skipped",
         reason: body ? null : claimed ? "gate:sherwood-claim" : named || postsName ? "gate:sherwood-drafted" : unlooked ? "gate:unlooked-source"
-          : unlookedCoin ? "gate:unlooked-coin" : untrusted ? "gate:trust-talk" : pointed ? "gate:deictic-pick" : verdict && !verdict.ok ? `gate:${verdict.reason}` : "no-draft",
+          : unlookedCoin ? "gate:unlooked-coin" : untrusted ? "gate:trust-talk" : pointed ? "gate:deictic-pick" : accused ? "gate:accusation"
+          : verdict && !verdict.ok ? `gate:${verdict.reason}` : "no-draft",
       });
       return id === null ? null : { body, lookedUp };
     }

@@ -84,14 +84,14 @@ export interface HotRead {
  * a coin's name: the line after it does.
  */
 const HOT_FRAMES: readonly ((many: boolean, lead: Move | null) => string)[] = [
-  (many, lead) => `${many ? "a few coins" : "one coin"} standing out on the trending index${lead ? `, the top one ${said(lead, { little: ["up a little", "down a little"], fair: ["up a fair bit", "down a fair bit"], sharp: ["up sharply", "down sharply"], flat: "flat" })} today` : ""}. not a call`,
-  (many, lead) => `the movers screen has ${many ? "several tokens" : "a single token"} trending onchain${lead ? `, the leader ${said(lead, { little: ["slightly higher", "slightly lower"], fair: ["noticeably higher", "noticeably lower"], sharp: ["steeply higher", "steeply lower"], flat: "unchanged" })} since yesterday` : ""}. just data`,
-  (many, lead) => `per the chain's index, ${many ? "a handful of names" : "one name"} drawing action${lead ? `, the busiest ${said(lead, { little: ["gaining a touch", "slipping a touch"], fair: ["gaining moderately", "slipping moderately"], sharp: ["gaining strongly", "slipping strongly"], flat: "staying level" })}` : ""}. observation only`,
-  (many, lead) => `trending right now: ${many ? "a small group" : "a lone ticker"} out in front${lead ? `, the frontrunner ${said(lead, { little: ["rising mildly", "falling mildly"], fair: ["rising solidly", "falling solidly"], sharp: ["rising hard", "falling hard"], flat: "moving sideways" })} lately` : ""}. a snapshot`,
-  (many, lead) => `index movers over there: ${many ? "multiple listings" : "one listing"} getting attention${lead ? `, number one ${said(lead, { little: ["up marginally", "down marginally"], fair: ["up meaningfully", "down meaningfully"], sharp: ["up dramatically", "down dramatically"], flat: "barely changed" })}` : ""}. no recommendation`,
-  (many, lead) => `the chain's trending list has ${many ? "a cluster of busy coins" : "one busy coin"}${lead ? `, the first ${said(lead, { little: ["a bit firmer", "a bit softer"], fair: ["clearly firmer", "clearly softer"], sharp: ["far firmer", "far softer"], flat: "steady" })} for the day` : ""}. descriptive only`,
-  (many, lead) => `the index flags ${many ? "a bunch of coins" : "a coin"} heating up${lead ? `, the head of the pack ${said(lead, { little: ["edging up", "edging down"], fair: ["climbing decently", "sliding decently"], sharp: ["rising fast", "dropping fast"], flat: "going nowhere" })}` : ""}. reporting, not recommending`,
-  (many, lead) => `over on the chain, ${many ? "some tickers" : "one ticker"} top the leaderboard${lead ? `, the leading one ${said(lead, { little: ["up mildly", "off mildly"], fair: ["up notably", "off notably"], sharp: ["up substantially", "off heavily"], flat: "about level" })} over a day` : ""}. info only`,
+  (many, lead) => `${many ? "a few coins" : "one coin"} popping on the trending index rn${lead ? `, the top one ${said(lead, { little: ["up a little", "down a little"], fair: ["up a fair bit", "down a fair bit"], sharp: ["up sharply", "down sharply"], flat: "flat" })} today` : ""}. not a call tho`,
+  (many, lead) => `the movers screen's got ${many ? "several tokens" : "a single token"} trending onchain${lead ? `, the leader ${said(lead, { little: ["slightly higher", "slightly lower"], fair: ["noticeably higher", "noticeably lower"], sharp: ["steeply higher", "steeply lower"], flat: "unchanged" })} since yesterday` : ""}. just what the screen says`,
+  (many, lead) => `the chain's index has ${many ? "a handful of names" : "one name"} pulling action${lead ? `, the busiest ${said(lead, { little: ["gaining a touch", "slipping a touch"], fair: ["gaining moderately", "slipping moderately"], sharp: ["gaining strongly", "slipping strongly"], flat: "staying level" })}` : ""}. tape talk, no call`,
+  (many, lead) => `trending rn: ${many ? "a small group" : "a lone ticker"} out in front${lead ? `, the frontrunner ${said(lead, { little: ["rising mildly", "falling mildly"], fair: ["rising solidly", "falling solidly"], sharp: ["rising hard", "falling hard"], flat: "moving sideways" })} lately` : ""}. that's the snapshot`,
+  (many, lead) => `index movers over there: ${many ? "multiple listings" : "one listing"} getting eyeballs${lead ? `, number one ${said(lead, { little: ["up marginally", "down marginally"], fair: ["up meaningfully", "down meaningfully"], sharp: ["up dramatically", "down dramatically"], flat: "barely changed" })}` : ""}. no tips attached`,
+  (many, lead) => `the chain's trending list has ${many ? "a cluster of busy coins" : "one busy coin"}${lead ? `, the first ${said(lead, { little: ["a bit firmer", "a bit softer"], fair: ["clearly firmer", "clearly softer"], sharp: ["far firmer", "far softer"], flat: "steady" })} for the day` : ""}. not calling anything`,
+  (many, lead) => `the index has ${many ? "a bunch of coins" : "a coin"} heating up${lead ? `, the head of the pack ${said(lead, { little: ["edging up", "edging down"], fair: ["climbing decently", "sliding decently"], sharp: ["rising fast", "dropping fast"], flat: "going nowhere" })}` : ""}. the board talking, not a recommendation`,
+  (many, lead) => `over on the chain, ${many ? "some tickers" : "one ticker"} topping the leaderboard${lead ? `, the leading one ${said(lead, { little: ["up mildly", "off mildly"], fair: ["up notably", "off notably"], sharp: ["up substantially", "off heavily"], flat: "about level" })} over a day` : ""}. fyi, nothing more`,
 ];
 
 /**
@@ -212,28 +212,28 @@ interface MajorWords {
 
 /** EIGHT FRAMES THAT ARE NOT EACH OTHER, naming no source (2026-10-13), never the coin, a figure, "i", "buy", "early" or where it is headed. */
 const MAJOR_FRAMES: readonly MajorWords[] = [
-  { open: "the tape has it", close: "not a call", rank: { top: "among the very biggest", large: "a large cap", mid: "a mid cap" },
+  { open: "quick look, it's", close: "not a call tho", rank: { top: "among the very biggest", large: "a large cap", mid: "a mid cap" },
     move: { little: ["up a little", "down a little"], fair: ["up a fair bit", "down a fair bit"], sharp: ["up sharply", "down sharply"], flat: "flat" },
     day: "today", week: "on the week", volume: { heavy: "volume heavy", light: "volume light", ordinary: "volume ordinary" } },
-  { open: "per the data it's", close: "just data", rank: { top: "one of the largest", large: "big by value", mid: "mid-sized" },
+  { open: "right now it's", close: "just what the screen says", rank: { top: "one of the largest", large: "big by value", mid: "mid-sized" },
     move: { little: ["slightly higher", "slightly lower"], fair: ["noticeably higher", "noticeably lower"], sharp: ["steeply higher", "steeply lower"], flat: "unchanged" },
     day: "since yesterday", week: "over the week", volume: { heavy: "turnover high", light: "turnover low", ordinary: "turnover normal" } },
-  { open: "on the board it sits", close: "observation only", rank: { top: "near the top", large: "ranked high", mid: "mid-ranked" },
+  { open: "on the board it's sitting", close: "no call either way", rank: { top: "near the top", large: "ranked high", mid: "mid-ranked" },
     move: { little: ["gaining a touch", "slipping a touch"], fair: ["gaining moderately", "slipping moderately"], sharp: ["gaining strongly", "slipping strongly"], flat: "level" },
     day: "this session", week: "across the week", volume: { heavy: "busy trading", light: "thin trading", ordinary: "normal trading" } },
-  { open: "the market view:", close: "a snapshot", rank: { top: "a heavyweight", large: "a big name", mid: "a mid-tier name" },
+  { open: "vibe check:", close: "that's the snapshot", rank: { top: "a heavyweight", large: "a big name", mid: "a mid-tier name" },
     move: { little: ["rising mildly", "falling mildly"], fair: ["rising solidly", "falling solidly"], sharp: ["rising hard", "falling hard"], flat: "sideways" },
     day: "lately", week: "week over week", volume: { heavy: "lots of volume", light: "little volume", ordinary: "average volume" } },
-  { open: "by the numbers it's", close: "for reference", rank: { top: "top tier", large: "upper tier", mid: "middle tier" },
+  { open: "numbers wise it's", close: "fyi only", rank: { top: "top tier", large: "upper tier", mid: "middle tier" },
     move: { little: ["up marginally", "down marginally"], fair: ["up meaningfully", "down meaningfully"], sharp: ["up dramatically", "down dramatically"], flat: "barely changed" },
     day: "for the day", week: "for the week", volume: { heavy: "volume elevated", light: "volume subdued", ordinary: "volume typical" } },
-  { open: "the screen shows it as", close: "descriptive only", rank: { top: "one of the giants", large: "a sizeable coin", mid: "a mid-weight coin" },
+  { open: "charts have it as", close: "not telling anyone anything", rank: { top: "one of the giants", large: "a sizeable coin", mid: "a mid-weight coin" },
     move: { little: ["a bit firmer", "a bit softer"], fair: ["clearly firmer", "clearly softer"], sharp: ["far firmer", "far softer"], flat: "steady" },
     day: "on the day", week: "on the week", volume: { heavy: "brisk turnover", light: "slow turnover", ordinary: "steady turnover" } },
-  { open: "the market page lists it", close: "no recommendation", rank: { top: "elite by valuation", large: "sizeable by valuation", mid: "modest by valuation" },
+  { open: "pulled it up:", close: "no tips attached", rank: { top: "elite by valuation", large: "sizeable by valuation", mid: "modest by valuation" },
     move: { little: ["edging up", "edging down"], fair: ["climbing", "sliding"], sharp: ["racing up", "plunging"], flat: "idle" },
     day: "in a day", week: "over a week", volume: { heavy: "packed order flow", light: "sparse order flow", ordinary: "usual order flow" } },
-  { open: "across the market it's", close: "info only", rank: { top: "top of the table", large: "well up the table", mid: "mid-table" },
+  { open: "zooming out it's", close: "take it as info", rank: { top: "top of the table", large: "well up the table", mid: "mid-table" },
     move: { little: ["up mildly", "off mildly"], fair: ["up notably", "off notably"], sharp: ["up strongly", "off heavily"], flat: "about level" },
     day: "past day", week: "through the week", volume: { heavy: "active trade", light: "quiet trade", ordinary: "routine trade" } },
 ];
@@ -389,10 +389,10 @@ const MAJORS_SAID: Readonly<Record<"mixed" | "flat" | "unread", readonly string[
  * chain's words only count what the index lists; the figures say the rest.
  */
 const CHAIN_SAID: Readonly<Record<"one" | "some" | "none" | "unread", readonly string[]>> = Object.freeze({
-  some: ["a few tokens appear on the board", "the chain lists a handful of names", "a couple of coins register onchain", "the screener shows several tickers",
-    "some activity is visible over there", "the trenches feature a small group", "the index carries a short list", "the trending page has a tight cluster"],
-  one: ["a single token appears on the board", "the chain lists one name", "a lone coin registers onchain", "the screener has a sole ticker",
-    "a bit of activity is visible over there", "the trenches feature a lonely listing", "the index carries a solitary item", "the trending page has a solo line"],
+  some: ["a few tokens sit on the board", "the chain's got a handful of names listed", "a couple of coins made the list onchain", "the screener's showing several tickers",
+    "a scatter of blips on the radar over there", "the trenches have a small group in view", "the index has a short lineup", "the trending page has a tight little cluster"],
+  one: ["a single token sits on the board", "the chain's got one name listed", "a lone coin made the list onchain", "the screener's showing a sole ticker",
+    "one faint blip on the radar over there", "the trenches have one lonely listing in view", "the index has a solitary item", "the trending page has a solo line"],
   none: ["the board is pretty quiet", "the chain is resting easy", "onchain feels sleepy", "the screener shows no standouts",
     "no action brewing anywhere", "the trenches are snoozing hard", "the index is mellow lately", "the trending page is a ghost town"],
   unread: ["the board is a blank right now", "couldn't pull up the chain", "onchain didn't load for me", "the screener went quiet on me",
@@ -400,8 +400,8 @@ const CHAIN_SAID: Readonly<Record<"one" | "some" | "none" | "unread", readonly s
 });
 
 /** How a market line closes: a read, never a call, each in words of its own. */
-const MARKET_CLOSE: readonly string[] = ["not a call, purely the tape", "snapshot only, nothing implied", "make of it whatever you like", "just reporting, never recommending",
-  "no tips attached whatsoever", "a glance, nothing deeper", "for what it's worth, cheers", "observations only, not a plan"];
+const MARKET_CLOSE: readonly string[] = ["not a call tho, purely the tape", "snapshot only, nothing implied", "make of it whatever you like", "that's all it says, no more",
+  "no tips attached whatsoever", "quick glance, no deep dive", "for what it's worth, cheers", "eyes only, no plan"];
 
 /**
  * HOW'S THE MARKET, ANSWERED BY CODE: the big coins in casual words, the

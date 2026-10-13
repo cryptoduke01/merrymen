@@ -863,6 +863,9 @@ const CHILD_SECRET_STRIP = [
   // outright, and there is no "but then the fetch fails" pressure to ever
   // remove it. See research/hey.ts.
   "MERRYMEN_HEY_API_KEY",
+  // THE LARP CHECK'S GITHUB TOKEN (orchestrator-xpost-check.ts): read only by
+  // this process, for an X answer. No child reads GitHub at all.
+  "MERRYMEN_GITHUB_TOKEN",
   // THE FOMO DATA KEY, under both names an operator might set (the house's and
   // the provider's own docs'). Same reason as the two above: a child holding it
   // could leak it into a prompt, a decision row or a log line. A hosted child
@@ -11283,6 +11286,24 @@ function startXPostPass(): void {
   });
 }
 
+/**
+ * THE LARP CHECK'S READERS IN THIS PROCESS: the research browser
+ * (MERRYMEN_BROWSER_URL and _TOKEN, the same service discovery reads through,
+ * never public) and an optional GitHub token. Without a browser a check still
+ * reads GitHub and the index, and says it could not see the site; that is
+ * said once, at boot.
+ */
+let larpBrowserNoted = false;
+function larpCheckDeps(): { browser: { baseUrl: string; token: string } | null; githubToken?: string } {
+  const url = process.env.MERRYMEN_BROWSER_URL?.trim() ?? "", token = process.env.MERRYMEN_BROWSER_TOKEN?.trim() ?? "";
+  const github = process.env.MERRYMEN_GITHUB_TOKEN?.trim() ?? "";
+  if ((!url || !token) && !larpBrowserNoted) {
+    larpBrowserNoted = true;
+    log("xpost: larp checks are on but MERRYMEN_BROWSER_URL / MERRYMEN_BROWSER_TOKEN are not both set — no site is scanned, only GitHub and the index are read");
+  }
+  return { browser: url && token ? { baseUrl: url, token } : null, ...(github ? { githubToken: github } : {}) };
+}
+
 async function runXPostPass(boot: XPostSetup): Promise<void> {
   try {
     if (!xPoster) {
@@ -11337,6 +11358,11 @@ async function runXPostPass(boot: XPostSetup): Promise<void> {
               fomo: (tenant) => (fomoRuntime && !xAnswerFomoCapped() ? createDirectBroker(fomoRuntime.service, tenant.toLowerCase(), { log }) : null),
               fomoUsable: async (tenant) => !!fomoRuntime && !xAnswerFomoCapped() && (await fomoAccessFor(tenant)).dataAccess === true,
               ...xAnswerFlow(),
+              // THE LARP CHECK (orchestrator-xpost-check.ts), only with
+              // MERRYMEN_XPOST_CHECKS=1: the research browser this process
+              // already holds the address and token of, over the private
+              // network, and GitHub (MERRYMEN_GITHUB_TOKEN optional).
+              ...(boot.knobs.checks ? { check: larpCheckDeps() } : {}),
             }),
           } : {}),
         },

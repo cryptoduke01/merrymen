@@ -220,3 +220,16 @@ describe("collapseOf: measured, worth saying, and nearly all gone", () => {
     assert.equal(collapseOf(null), false);
   });
 });
+
+describe("the token's own links, for the X agent's larp check", () => {
+  const MINT_ID = "solana_t9bnCGiZVUYsRKvx4d5dPcoDCSyuBM9C33ZNGNULARP";
+  const info = (a: Record<string, unknown>) => ({ data: { id: MINT_ID, attributes: { holders: null, ...a } } });
+  it("keeps https websites and a handle X could have, and nothing else", () => {
+    const r = parseFactsInfo(info({ websites: ["https://larpcheck.app/", "http://plain.example", "javascript:alert(1)", "https://a.example/x y", 7, "https://b.example", "https://c.example", "https://d.example"], twitter_handle: "@larpcheck" }), "solana", MINT_ID.slice(7));
+    assert.deepEqual(r?.links, { websites: ["https://larpcheck.app/", "https://b.example", "https://c.example"], twitter: "larpcheck" });
+  });
+  it("a handle no X account could have is none", () => {
+    const r = parseFactsInfo(info({ twitter_handle: "not a handle!" }), "solana", MINT_ID.slice(7));
+    assert.deepEqual(r?.links, { websites: [], twitter: null });
+  });
+});
