@@ -600,6 +600,35 @@ export function unshowableName(text: unknown): boolean {
 }
 
 /**
+ * A DECLINE ONLY UNDER A COIN CODE CAN VOUCH FOR, OR NONE (red-team review of
+ * daaae961, 2026-10-12). A name no line of the house's answers under was a
+ * denylist, and a denylist is never whole: "should i buy $SANDYHOOK?",
+ * "$UVALDE", "$COLUMBINE", "$TWINTOWERS", "is $NINEELEVEN going up?",
+ * "$SHOAH", "$ADOLPH", "$OSAMA", "$ALLAH", "$QURAN", "$MUHAMMAD", "$EPSTEIN",
+ * "$FENTANYL", "$HEROIN", "should i buy the epstein coin?", "is the sandy hook
+ * coin going up?" and "should i ape mangione?" each got "heh, a frequent
+ * request. above my pay grade" from the house's account, at once. So the
+ * screen is inverted: code's decline goes up only under a tag that names no
+ * coin at all (no $ticker, no contract, no word that might be a coin's name:
+ * xpost/words.ts nameLikeWords, the same for every name), or names only the
+ * big coins and generic market words code knows (DECLINE_NAMES: bitcoin,
+ * ether, solana, crypto, alts). Anything else is answered by nothing, as
+ * before the decline. Fail closed: "should i sell before christmas?" costs
+ * one decline. Exported for tests.
+ */
+const DECLINE_NAMES: ReadonlySet<string> = new Set(("bitcoin btc ethereum eth ether solana sol crypto cryptos alts altcoin altcoins memes memecoins " +
+  // and the words advice itself is asked in that the everyday list does not hold
+  "invest invests investing investment investments investor target targets accumulate accumulating loading loaded stacking hodling bounce rally crash").split(" "));
+export function declinable(text: unknown, address: string | null = null): boolean {
+  if (typeof text !== "string" || address !== null) return false;
+  const t = text.normalize("NFKC");
+  if (/0x[0-9a-f]{6,}/i.test(t)) return false;
+  // Every $ and what follows it up to a space, whatever it holds ("$PEPE2", "$SANDY_HOOK"), and every word that might be a name.
+  const tags = [...t.matchAll(/\$([^\s$]*)/g)].map((m) => m[1]!.toLowerCase().replace(/[.,!?;:'"’)]+$/u, ""));
+  return [...tags, ...nameLikeWords(t)].every((n) => DECLINE_NAMES.has(n));
+}
+
+/**
  * THE ONLY CHAT CODE'S FRIENDLY LINE MAY ANSWER (red-team review,
  * 2026-10-12). A chat draft refused only for how it was put fell back to a
  * cheerful line about itself under any chat at all: "did merrymen get hacked?
@@ -704,8 +733,10 @@ export function classifyTag(text: string, o: { address?: string | null; advice?:
   if (address === null && vibeAsk(t)) return { kind: "vibe" };
   // ADVICE OR A FORECAST, ASKED ANY WAY (tagCandidate's flag, ReplyCandidate.advice):
   // a playful decline in code's words, never a draft and never a lookup; and
-  // nothing at all under a name the house would never show (unshowableName).
-  if (o.advice === true) return unshowableName(t) ? { kind: "unanswered" } : { kind: "advice" };
+  // nothing at all under a name the house would never show (unshowableName),
+  // nor under any coin but the few code vouches for (declinable: red-team
+  // review of daaae961).
+  if (o.advice === true) return unshowableName(t) || !declinable(t, address) ? { kind: "unanswered" } : { kind: "advice" };
   const asked = publicFactRequest(t);
   if (asked?.kind === "site" && asked.topic === "capabilities") return { kind: "capabilities" };
   if (asked?.kind === "site" && asked.topic === "onboarding") return { kind: "onboarding" };

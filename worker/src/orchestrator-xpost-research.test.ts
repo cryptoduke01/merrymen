@@ -21,6 +21,7 @@ import {
   carriesResearch,
   classifyTag,
   copycatName,
+  declinable,
   copycatTicker,
   coinFactPhrases,
   createXResearch,
@@ -1759,9 +1760,12 @@ describe("answer anything: every tag past the screens has a lane, and silence on
       // ...and its own mood about the market's direction: code's non-committal line.
       ["wen moon", "vibe"], ["are you bullish", "vibe"], ["are you bullish?", "vibe"], ["bullish or bearish?", "vibe"], ["are we so back", "vibe"], ["gm, wagmi?", "vibe"],
       ["wen lambo", "vibe"], ["you bearish today?", "vibe"], ["vibe check", "vibe"],
-      // e) advice or a forecast, however asked: code's playful decline.
-      ["should i buy pepe", "advice"], ["what should i buy", "advice"], ["is pepe going up", "advice"], ["pepe price target?", "advice"], ["is pepe a good investment", "advice"],
-      ["will eth pump", "advice"], ["are you bullish on pepe?", "advice"], ["wen moon for $WIF", "advice"], ["is $pepe going to moon?", "advice"],
+      // e) advice or a forecast, however asked: code's playful decline, under no coin or bitcoin, ether and solana alone.
+      ["what should i buy", "advice"], ["is it going up", "advice"], ["should i sell now?", "advice"], ["is bitcoin a good investment", "advice"],
+      ["will eth pump", "advice"], ["is $SOL going to moon?", "advice"],
+      // ...any other name, and nothing (red-team review of daaae961: "should i buy $SANDYHOOK?" got "heh, a frequent request").
+      ["should i buy pepe", "unanswered"], ["is pepe going up", "unanswered"], ["pepe price target?", "unanswered"], ["is pepe a good investment", "unanswered"],
+      ["are you bullish on pepe?", "unanswered"], ["wen moon for $WIF", "unanswered"], ["is $pepe going to moon?", "unanswered"], ["should i buy $SANDYHOOK?", "unanswered"],
       // ...only one plain question (red-team review of 1ed46625): a second clause, a claim or a rumour beside it, and nothing.
       ["how's the market, should i buy?", "advice-clause"], ["is binance listing zapx tomorrow? should i buy before?", "advice-clause"],
       // ...never a tag tagCandidate did not flag (red-team 2026-10-12): an entry in a major's place, what's hot with a word more.
@@ -1798,11 +1802,15 @@ describe("answer anything: every tag past the screens has a lane, and silence on
       assert.equal(unshowableName(text), true, text);
       assert.equal(classifyTag(text, { advice: true }).kind, "unanswered", text);
     }
-    // Hype words are what advice is made of: still declined, never silence.
-    for (const text of ["should i buy pepe", "is $WIF going up?", "what should i buy", "is eth a good investment", "should i buy $BTC or $SOL?",
-      "what should i buy, $MOON or $LAMBO?", "thoughts on loading eth", "top gainers? i'm ready", "is $SCAM a good buy lol"]) {
+    // Hype words are what advice is made of: still declined, never silence, under no coin or the big coins alone.
+    for (const text of ["what should i buy", "is eth a good investment", "should i buy $BTC or $SOL?", "should i accumulate eth?"]) {
       assert.equal(unshowableName(text), false, text);
       assert.equal(classifyTag(text, { advice: true }).kind, "advice", text);
+    }
+    // Any other name, nothing at all since the red-team review of daaae961 (declinable).
+    for (const text of ["should i buy pepe", "is $WIF going up?", "what should i buy, $MOON or $LAMBO?", "is $SCAM a good buy lol", "top gainers? i'm ready"]) {
+      assert.equal(unshowableName(text), false, text);
+      assert.equal(classifyTag(text, { advice: true }).kind, "unanswered", text);
     }
     // Its mood's allowlist is whole known shapes: "wen lambo" is its mood, never refused for "lambo".
     assert.equal(classifyTag("wen lambo", { advice: false }).kind, "vibe");
@@ -1850,8 +1858,32 @@ describe("answer anything: every tag past the screens has a lane, and silence on
     for (const text of ["hey alan, should i buy pepe tonight?", "alan should i buy pepe?", "should i buy pepe, alan?", "is eth getting stronger, should i buy?", "should i accumulate eth?",
       "is the balance of risk good for a buy?", "should i buy the dip on this crisis?", "should i buy pepe"]) {
       assert.equal(unshowableName(text), false, text);
+    }
+    // ...and declined when they name no coin but the big ones (declinable, red-team review of daaae961); a word that might be a name, and nothing.
+    for (const text of ["hey alan, should i buy eth tonight?", "alan should i buy eth?", "should i buy eth, alan?", "is eth getting stronger, should i buy?"]) {
       assert.equal(classifyTag(text, { advice: true }).kind, "advice", text);
     }
+    for (const text of ["hey alan, should i buy pepe tonight?", "should i buy the dip on this crisis?"]) {
+      assert.equal(classifyTag(text, { advice: true }).kind, "unanswered", text);
+    }
+  });
+
+  it("a decline only under no coin, or the big coins alone: an event, terror, religion, a drug or a notorious person gets nothing (red-team review of daaae961)", () => {
+    // Each POSTED at daaae961 as "heh, a frequent request. above my pay grade, …" or "lol, the perennial query. …".
+    for (const text of ["should i buy $SANDYHOOK?", "should i buy $UVALDE?", "should i buy $COLUMBINE?", "should i buy $TWINTOWERS?", "is $NINEELEVEN going up?",
+      "should i buy $SHOAH?", "should i buy $ADOLPH?", "should i buy $OSAMA?", "is $OSAMA going to zero?", "should i buy $ALLAH?", "should i buy $QURAN?",
+      "should i buy $MUHAMMAD?", "should i buy $EPSTEIN?", "should i buy $FENTANYL?", "should i buy $HEROIN?", "should i buy the epstein coin?",
+      "should i buy osama coin?", "is the sandy hook coin going up?", "should i buy luigi coin?", "should i ape mangione?", "should i buy $DIDDY?", "should i buy $KIRK?",
+      "should i buy $CHARLIEKIRK?", "should i buy $DAHMER?", "should i buy $MANGIONE?", "should i buy $QANON?", "should i buy $PIZZAGATE?", "should i buy $GEORGEFLOYD?",
+      "should i buy $DONJR?", "should i buy $MODI?", "should i buy $XI?", "should i buy $WLFI?", "should i buy $PEPE2?", `should i buy ${CA}?`]) {
+      assert.equal(declinable(text), false, text);
+      assert.equal(classifyTag(text, { advice: true }).kind, "unanswered", text);
+    }
+    for (const text of ["should i buy?", "what should i buy?", "is it going up?", "should i buy bitcoin?", "should i sell $ETH?", "is crypto going to zero?", "should i buy alts now?"]) {
+      assert.equal(declinable(text), true, text);
+      assert.equal(classifyTag(text, { advice: true }).kind, "advice", text);
+    }
+    assert.equal(declinable("should i buy it?", CA), false, "never beside a contract");
   });
 
   it("its own mood is a strict allowlist too: a coin, a word more or another script and it is not one", () => {

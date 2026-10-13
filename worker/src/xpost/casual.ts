@@ -141,10 +141,16 @@ function styled(slots: readonly [readonly string[], readonly string[], readonly 
  * is about the asking, never about what was asked. (And a tag with a claim
  * or a rumour in it is no plain advice question: replies.ts tagCandidate
  * answers it with nothing.)
+ *
+ * NO LAUGH IN IT (red-team review of daaae961, 2026-10-12): "heh, a frequent
+ * request" and "lol, the perennial query" went up under "should i buy
+ * $SANDYHOOK?" and "is $NINEELEVEN going up?". Such a tag gets no decline at
+ * all now (orchestrator-xpost-research.ts declinable), and no opener laughs
+ * either: "ha", "lol" and "heh" are gone.
  */
 export const DECLINE_SLOTS: readonly [readonly string[], readonly string[], readonly string[]] = Object.freeze([
-  Object.freeze(["ah, the classic question", "whoa, straight to it", "fair ask", "ha, that old chestnut",
-    "lol, the perennial query", "appreciate you asking", "heh, a frequent request", "ahh, the eternal riddle"]),
+  Object.freeze(["ah, the classic question", "whoa, straight to it", "fair ask", "that old chestnut",
+    "the perennial query", "appreciate you asking", "a frequent request", "ahh, the eternal riddle"]),
   Object.freeze(["picking winners: not my department", "no calls for strangers, sorry", "the crystal ball's foggy", "above my pay grade",
     "direction from a bot? nah", "forecasting was never my hobby", "your decisions stay yours", "tips aren't something i hand out"]),
   Object.freeze(["your own read matters most", "you know your risk better than me", "the timeline has opinions enough", "process talk is welcome",

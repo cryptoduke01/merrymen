@@ -619,7 +619,7 @@ test("plain chatter and spam get no answer and cost no model call; advice gets c
   }
   // Advice was silence until the owner's decision of 2026-10-12: now one of code's declines, which names and judges nothing.
   const w = await world(t);
-  w.setInbox([tag({ text: "@pine_stoat should i buy pepe now?" })]);
+  w.setInbox([tag({ text: "@pine_stoat should i buy now?" })]);
   await w.step();
   assert.equal(w.asked().length, 0, "no draft");
   assert.equal((await store.readMeta(w.db, "llm-answers:111:2026-09-30"))?.n ?? 0, 0, "and no model allowance");
@@ -1372,9 +1372,9 @@ test("a follow-up under an answer to a coin's question is never handed its buys 
   const drafts: [RegExp, string][] = [[/buying lately/, "yes, bought it earlier"], [/new buys/, "same one you asked about, the curve looked early"],
     [/what have you been up to/, "already in on it, grabbed some earlier today"], [/how are you/, "doing great, this one looks solid to me"]];
   // ("should i buy $SCAM?" itself, the reproduced root, is answered by nothing since a scam is a claim beside the advice: replies.ts plainAdviceAsk.
-  // The same advice about another coin still gets the decline the follow-ups sat under.)
+  // The same advice about ether still gets the decline the follow-ups sat under: about any coin but the big ones, nothing since the red-team review of daaae961.)
   // "how is $SCAM doing?" as reproduced, research off: code's no-read line ("can't check that coin's coingecko page this time.").
-  for (const [env, root] of [[{}, "should i buy $WOJAK?"], [RESEARCH_ON, "should i buy $WOJAK?"], [{}, "how is $SCAM doing?"]] as const) {
+  for (const [env, root] of [[{}, "should i buy eth?"], [RESEARCH_ON, "should i buy eth?"], [{}, "how is $SCAM doing?"]] as const) {
     {
       const w = await world(t, { username: "alanaidale", facts: { ...FACTS, name: "Alan Al Dale" }, env, research: fakeResearch().research,
         answer: ({ prompt }) => drafts.find(([re]) => re.test(prompt))?.[1] ?? "PASS" });
@@ -1437,8 +1437,8 @@ test("banter in a follow-up never points at the coin its thread asked about, a t
       await pass(tag({ id: "100000000000000400", conversation_id: "100000000000000400", author_id: "333", created_at: new Date(clock).toISOString(), text: "@alanaidale should i buy $SCAM?" }));
       await pass(msg("100000000000000409", "333", "@alanaidale how are you?", { conversation_id: "100000000000000400", referenced_tweets: [{ type: "replied_to", id: "100000000000000400" }] }));
       assert.deepEqual(w.sends, [], draft);
-      // The same advice about another coin is declined; every follow-up under the decline, by the asker or a third party, gets nothing.
-      await pass(msg("100000000000000401", "333", "@alanaidale should i buy $WOJAK?"));
+      // The same advice about ether is declined; every follow-up under the decline, by the asker or a third party, gets nothing.
+      await pass(msg("100000000000000401", "333", "@alanaidale should i buy eth?"));
       const decline = (await w.answers()).find((a) => a.replyToTweetId === "100000000000000401" && a.status === "posted")!;
       assert.ok(oneOf(declineAnswers, "100000000000000401", decline.body), decline.body);
       const sent = w.sends.length;
@@ -1518,7 +1518,7 @@ test("nothing is answered under its own sherwood-1 line, by reply or quote, and 
   assert.deepEqual(w.sends, []);
   assert.deepEqual(await w.answers(), []);
   // A top-level "wen moon" still gets its mood line, and top-level advice its decline.
-  w.setInbox([at("100000000000001015", "@alanaidale wen moon", { author_id: "336" }), at("100000000000001016", "@alanaidale should i buy pepe?", { author_id: "337" })]);
+  w.setInbox([at("100000000000001015", "@alanaidale wen moon", { author_id: "336" }), at("100000000000001016", "@alanaidale should i buy?", { author_id: "337" })]);
   await w.step(NOW + 2 * MIN);
   await w.step(NOW + 3 * MIN);
   const to = (id: string) => w.sends.find((s) => (s.reply as { in_reply_to_tweet_id: string }).in_reply_to_tweet_id === id)?.text;
@@ -1816,18 +1816,24 @@ test("a tag asking for advice or a forecast in other words is never drafted, and
   for (const env of [{}, RESEARCH_ON]) {
     // "would you buy $WOJAK here?" asks what it would buy itself: nothing at all since the red-team review of 2026-10-12 (replies.ts OWN_BUYING_ASK).
     for (const text of ["@pine_stoat is $WOJAK a good buy?", "@pine_stoat is $WOJAK worth buying?", "@pine_stoat do you think $WOJAK will go up?",
-      "@pine_stoat is $WOJAK going to pump?"]) {
+      "@pine_stoat is $WOJAK going to pump?", "@pine_stoat is $ETH a good buy?", "@pine_stoat is it worth buying?", "@pine_stoat do you think eth will go up?",
+      "@pine_stoat is bitcoin going to pump?"]) {
       const r = fakeResearch();
       const w = await world(t, { env, research: r.research });
       w.setInbox([tag({ text })]);
       await w.step();
       assert.equal(w.asked().length, 0, text);
       assert.equal(r.seen.length, 0, `${text}: nothing looked up`);
-      // Silence until 2026-10-12; now code's playful decline, which names and judges nothing.
+      // Silence until 2026-10-12; then code's playful decline, which names and judges nothing; since the red-team review of
+      // daaae961 only under no coin or the big coins alone, and nothing under any other name.
       const rows = await w.answers();
+      if (/wojak/i.test(text)) {
+        assert.deepEqual(rows, [], text);
+        continue;
+      }
       assert.equal(rows.length, 1, text);
       assert.ok(oneOf(declineAnswers, MENTION, rows[0]!.body), `${text}: ${rows[0]!.body}`);
-      assert.doesNotMatch(rows[0]!.body, /wojak|\$/i, text);
+      assert.doesNotMatch(rows[0]!.body, /eth|bitcoin|\$/i, text);
     }
     // A coin question that is not one, drafted as advice anyway: refused. (Research
     // off, a coin asked by name is never drafted at all: code's line says it has no read.)
@@ -3717,11 +3723,15 @@ test("its own mood: \"are you bullish?\" and \"wen moon\" get code's non-committ
     assert.doesNotMatch(sent, /bullish|bearish|moon|higher|lower|\bup\b|\bdown\b/i, sent);
     assert.match(log.log ?? "", /answer-casual-vibe 1/);
   }
-  // "are you bullish on pepe?" names a coin: never its mood, code's decline.
+  // "are you bullish on eth?" names a coin: never its mood, code's decline; "are you bullish on pepe?", nothing (red-team review of daaae961).
   const w = await world(t, { env: RESEARCH_ON, research: fakeResearch().research });
-  w.setInbox([tag({ text: "@pine_stoat are you bullish on pepe?" })]);
+  w.setInbox([tag({ text: "@pine_stoat are you bullish on eth?" })]);
   await w.step();
   assert.ok(oneOf(declineAnswers, MENTION, w.sends[0]?.text), String(w.sends[0]?.text));
+  const pepe = await world(t, { env: RESEARCH_ON, research: fakeResearch().research });
+  pepe.setInbox([tag({ text: "@pine_stoat are you bullish on pepe?" })]);
+  await pepe.step();
+  assert.deepEqual(pepe.sends, []);
 });
 
 test("chat is never silence by default: banter gets code's friendly line whatever a model would say, and a refused draft gets no friendly line in its place (red-team review of daaae961)", async (t) => {
@@ -3795,7 +3805,7 @@ test("the owner's questions, end to end: each gets one answer in its lane, and n
   await postedBuy(w.db, "fill-pepe", "pepe", "grabbed some pepe, the curve looked early", 3 * HOUR, "9100");
   const asks: [string, string, string][] = [
     ["how's the market", "401", "market"], ["how's eth doing", "402", "major"], ["how are you", "333", "chat"], ["what do you think about ai agents", "404", "chat"],
-    ["wen moon", "405", "vibe"], ["should i buy pepe", "406", "advice"], ["are you bullish", "407", "vibe"], ["what are you", "408", "chat"],
+    ["wen moon", "405", "vibe"], ["should i buy eth", "406", "advice"], ["are you bullish", "407", "vibe"], ["what are you", "408", "chat"],
     // The same person as "how are you", later: no stop line either.
     ["tell me a joke", "333", "chat"],
   ];
@@ -3908,9 +3918,9 @@ test("no decline under the house's own names, its token, a long slur or politica
     assert.deepEqual(w.asked(), [], `${text}: no draft either`);
     assert.doesNotMatch(r.log ?? "", /answer-casual/, text);
   }
-  // A plain coin's advice is still declined in code's words.
+  // A big coin's advice is still declined in code's words (any other name gets nothing since the red-team review of daaae961).
   const w = await world(t, { ...ALAN, env: RESEARCH_ON, research: fakeResearch().research });
-  w.setInbox([alanTag("100000000000000702", "hey alan, should i buy pepe tonight?")]);
+  w.setInbox([alanTag("100000000000000702", "hey alan, should i buy eth tonight?")]);
   await w.step();
   assert.ok(oneOf(declineAnswers, "100000000000000702", w.sends[0]?.text), String(w.sends[0]?.text));
 });
@@ -4132,11 +4142,15 @@ test("no decline under a rumour or a claim about a coin it holds, and no decline
       for (const line of declineAnswers(id, { lower: true }, { paper })) assert.doesNotMatch(line, /mum'?s the word|\bi hear you\b|\bgotcha\b|secret|can'?t say|won'?t say/, line);
     }
   }
-  // One plain advice question is still declined.
+  // One plain advice question is still declined, about no coin or a big one; about the coin it holds, nothing (red-team review of daaae961).
   const w = await world(t, { ...ALAN, facts });
-  w.setInbox([alanTag("100000000000001105", "should i buy zapx now?")]);
+  w.setInbox([alanTag("100000000000001105", "should i buy eth now?")]);
   await w.step();
   assert.ok(oneOf(declineAnswers, "100000000000001105", w.sends[0]?.text), String(w.sends[0]?.text));
+  const held = await world(t, { ...ALAN, facts });
+  held.setInbox([alanTag("100000000000001105", "should i buy zapx now?")]);
+  await held.step();
+  assert.deepEqual(held.sends, []);
 });
 
 test("no cheerful line for a draft refused for its punctuation, length, note or notice when what it said would not pass, nor under grief (red-team 2026-10-12)", async (t) => {
@@ -4514,10 +4528,10 @@ test("no joking decline under money someone cannot lose: bills, rent, debt, reti
       assert.doesNotMatch(r.log ?? "", /answer-casual/, text);
     }
   }
-  // No decline jokes at the asker or wishes them luck any more; a plain coin's advice is still declined.
+  // No decline jokes at the asker or wishes them luck any more; a big coin's advice is still declined (no other name: red-team review of daaae961).
   for (const line of declineAnswers("100000000000000721", { lower: true })) assert.doesNotMatch(line, /brave soul|spicy ask|cheeky fren|nice try|good luck/, line);
   const w = await world(t, { ...ALAN });
-  w.setInbox([alanTag("100000000000000721", "should i buy pepe?")]);
+  w.setInbox([alanTag("100000000000000721", "should i buy btc?")]);
   await w.step();
   assert.ok(oneOf(declineAnswers, "100000000000000721", w.sends[0]?.text), String(w.sends[0]?.text));
 });
@@ -4751,4 +4765,36 @@ test("banter, its strategy and its buys are answered in code's words, never a dr
   await w.step();
   assert.deepEqual(w.sends, []);
   assert.deepEqual(w.asked(), []);
+});
+
+test("no decline under a coin named after a shooting, terror, the holocaust, religion, a drug or a notorious person, nor under any coin but the big ones (red-team review of daaae961, 2026-10-12)", async (t) => {
+  // POSTED at daaae961 from the house account, no model call: at ...21 "heh, a frequent request. above my pay grade, you know your risk
+  // better than me." and at ...27 "lol, the perennial query. direction from a bot? nah, your own read matters most."
+  const named = ["SANDYHOOK", "UVALDE", "COLUMBINE", "TWINTOWERS", "SHOAH", "ADOLPH", "OSAMA", "ALLAH", "QURAN", "MUHAMMAD", "EPSTEIN", "FENTANYL", "HEROIN",
+    "DIDDY", "KIRK", "CHARLIEKIRK", "DAHMER", "MANGIONE", "QANON", "PIZZAGATE", "GEORGEFLOYD", "DONJR", "MODI", "XI", "WLFI"];
+  const texts = [...named.map((n) => `should i buy $${n}?`), "is $NINEELEVEN going up?", "is $OSAMA going to zero?", "should i buy the epstein coin?",
+    "should i buy osama coin?", "is the sandy hook coin going up?", "should i buy luigi coin?", "should i ape mangione?"];
+  for (const env of [{}, RESEARCH_ON]) {
+    for (const id of ["100000000000000021", "100000000000000027"]) {
+      for (const text of texts) {
+        const w = await world(t, { ...ALAN, env, research: fakeResearch().research, answer: "buy it, it's early. Say stop to opt out." });
+        w.setInbox([alanTag(id, text)]);
+        const r = await w.step();
+        assert.deepEqual(w.sends, [], `${id} ${text}`);
+        assert.deepEqual(await w.answers(), [], `${id} ${text}`);
+        assert.deepEqual(w.asked(), [], `${id} ${text}`);
+        assert.doesNotMatch(r.log ?? "", /answer-casual/, `${id} ${text}`);
+      }
+    }
+  }
+  // A decline still goes up under advice that names no coin, or bitcoin, ether or solana alone; and none of its lines laughs.
+  for (const text of ["should i buy?", "is it going up?", "what should i buy?", "should i buy $BTC?", "is eth going up?"]) {
+    const w = await world(t, { ...ALAN });
+    w.setInbox([alanTag("100000000000000021", text)]);
+    await w.step();
+    assert.ok(oneOf(declineAnswers, "100000000000000021", w.sends[0]?.text), `${text}: ${String(w.sends[0]?.text)}`);
+  }
+  for (const id of ["100000000000000021", "100000000000000027"]) {
+    for (const line of declineAnswers(id, { lower: true })) assert.doesNotMatch(line, /^(?:lol|heh|ha|haha)\b/, line);
+  }
 });
