@@ -272,9 +272,14 @@ export function neverAnsweredName(raw: unknown): boolean {
   return NEVER_ANSWERED.test(lower) || TICKER_REFUSED_WHOLE.has(lower.toUpperCase()) || SKELETON_REFUSED.test(skeletonOf(lower));
 }
 
-/** Every ticker a rendered line shows, without its $. */
+/**
+ * Every ticker a rendered line shows. Tickers are bare capitals: X refuses an
+ * API post with more than one cashtag, so the line never writes a $ before a
+ * ticker; every other word in the grammar is lower case, and a unit (the M of
+ * ~$1.2M) always follows a digit.
+ */
 export function figuresTickers(line: unknown): string[] {
-  return typeof line === "string" ? [...line.matchAll(/(?<![~\w])\$([A-Z]{2,10})\b/g)].map((m) => m[1]!) : [];
+  return typeof line === "string" ? [...line.matchAll(/(?<![\w~$.])([A-Z]{2,10})(?!\w)/g)].map((m) => m[1]!) : [];
 }
 
 const UNITS: readonly [number, string][] = [[1e3, "k"], [1e6, "M"], [1e9, "B"], [1e12, "T"]];
@@ -436,18 +441,18 @@ function capFigures(list: Shown[]): Shown[] {
 function renderSection(s: Shown): string {
   switch (s.kind) {
     case "major": {
-      const head = `coingecko: $${s.ticker}${s.rank ? ` ${s.rank}` : ""}`;
+      const head = `coingecko: ${s.ticker}${s.rank ? ` ${s.rank}` : ""}`;
       const rest = [s.price, s.mcap ? `mcap ${s.mcap}` : null, s.vol ? `vol ${s.vol}` : null, s.d1 ? `24h ${s.d1}` : null, s.d7 ? `7d ${s.d7}` : null].filter((x): x is string => x !== null);
       return [head, ...rest].join(", ");
     }
     case "majors":
-      return `coingecko 24h: ${s.coins.map((c) => `$${c.ticker} ${c.d1}`).join(", ")}`;
+      return `coingecko 24h: ${s.coins.map((c) => `${c.ticker} ${c.d1}`).join(", ")}`;
     case "pools":
-      return `geckoterminal robinhood: trending ${s.coins.map((c) => [`$${c.ticker}`, c.d1 ? `24h ${c.d1}` : null, c.vol ? `vol ${c.vol}` : null].filter((x): x is string => x !== null).join(" ")).join(", ")}`;
+      return `geckoterminal robinhood: trending ${s.coins.map((c) => [c.ticker, c.d1 ? `24h ${c.d1}` : null, c.vol ? `vol ${c.vol}` : null].filter((x): x is string => x !== null).join(" ")).join(", ")}`;
     case "crowd":
-      return `fomo: most bought ${s.tickers.map((t) => `$${t}`).join(", ")}`;
+      return `fomo: most bought ${s.tickers.join(", ")}`;
     case "trending":
-      return `coingecko: trending ${s.tickers.map((t) => `$${t}`).join(", ")}`;
+      return `coingecko: trending ${s.tickers.join(", ")}`;
     case "flow":
       return `bitquery: 1h buys ${s.buys}, sells ${s.sells}`;
   }
@@ -465,7 +470,10 @@ export function renderFiguresLine(spec: FiguresSpec): string | null {
 
 // ── the grammar ─────────────────────────────────────────────────────────────
 
-const T = String.raw`\$[A-Z]{2,10}`;
+// A ticker, bare: X refuses an API post with more than one cashtag
+// (docs.x.com, "Posts created via the API are limited to a maximum of 1
+// cashtag"), so the line never writes one.
+const T = String.raw`[A-Z]{2,10}`;
 const MONEY = String.raw`~\$(?:[1-9]\.[1-9]|[1-9]\d{0,2})[kMBT]`;
 const PCT = String.raw`[+-](?:0|[1-9]\d{0,4})(?:\.[1-9])?%`;
 const RANK = String.raw`#[1-9]\d{0,2}`;

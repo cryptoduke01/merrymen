@@ -82,7 +82,7 @@ describe("what's hot in code's words", () => {
   });
 
   it("a paper agent's clause is about its own trading, never a pronoun or a verb the coin just described could take (red-team 2026-10-12)", () => {
-    // At fbcf8756: "coingecko's view: a heavyweight, rising solidly lately, … a snapshot. i play it on paper. coingecko: $ETH #2, …".
+    // At fbcf8756: "coingecko's view: a heavyweight, rising solidly lately, … a snapshot. i play it on paper. coingecko: ETH #2, …".
     const lines = [
       ...majorAnswers({ rank: "top", day: { dir: "up", size: "a fair bit" }, week: { dir: "up", size: "a little" }, volume: "ordinary" }, "1000000000000000903", { lower: true }, { paper: true }),
       ...majorUnreadAnswers("1000000000000000903", { lower: true }, { paper: true }),
