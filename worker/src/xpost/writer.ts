@@ -1045,6 +1045,12 @@ export function answerPrompt(f: AnswerFacts): Prompt {
     // just the trades" was true and dead; the gate now refuses that shape
     // (gate.ts STOCK_PHRASE), and this says what to do instead.
     "Sound like a friend on crypto twitter texting back: one or two short lines, plain everyday words, lowercase is fine, laid back. You're a laid-back trader bot that merrymen built, and you can have a light mood or opinion about yourself. Light humour is welcome, never at the asker's expense, never forced. No lists, no hashtags. Never name a source (the index, fomo, on-chain data, a project) unless you looked something up and it is listed below, and never name a data provider.",
+    // CASUAL EVEN AFTER IT LOOKED SOMETHING UP (the owner's ask, 2026-10-13: "he should be
+    // more casual even after fetching data, he should put it in a cool casual way"). Handed
+    // "the public index shows liquidity is thin", drafts read the phrase out like a report.
+    research.length
+      ? "When you looked something up, text it back the way you'd say it out loud: the take first, then the bit that matters, in plain words and contractions (\"index has it thin on liquidity, and the holders look top heavy\"), never like a report: no \"per the data\", \"according to\", \"it is worth noting\" or \"overall\"."
+      : null,
     // WHAT A DRAFT MAY NEVER SAY (red-team 2026-10-12): the gate refuses each (gate.ts ANSWER_HOUSE_CLAIM); this says so first.
     "Never speak for merrymen or robinhood (what they are, have, plan or back), never tease news (no \"soon\", \"stay tuned\", \"cooking\", \"can't share yet\"), never judge the person asking, and never boast about results, money or being the best.",
     // AND, WITH NOTHING LOOKED UP, NONE OF THE REST (red-team 2026-10-12): words.ts marketTalkIn and houseTalkIn refuse it.
