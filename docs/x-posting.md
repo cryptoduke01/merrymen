@@ -902,6 +902,22 @@ oven" got a decline or a mood line, "mum's the word on the rest" reading as a
 token teased). And code's decline and its mood line go only under a top-level
 tag: their meaning is the post they sit under, so advice or its mood asked in
 a reply or a quote, under its own buy post included, is answered by nothing.
+**A follow-up keeps what its thread was about** (red-team review of
+1ed46625: under its decline to "should i buy $SCAM?", "what have you been
+buying lately?" was handed its PEPE buys and "yes, bought it earlier" went
+out, and "how are you?" got "doing great, this one looks solid to me"). Code
+never stores what a tag said, so each answer's row says what kind of
+exchange it was: a greeting, or chat handed nothing and told none of its
+buys, under a top-level tag or a plain follow-up, is marked
+`ANSWER_PLAIN_THREAD` (its `coin`, as `ANSWER_LOOKED_UP` is). `tagCandidate`
+reports what a reply or a quote sits under (`followUp`, the most closed of
+the post it replies to, the conversation's root and the post it quotes):
+`plain` (its own intro or casual post, an answer marked plain, or the tag
+one answered), `own-trade` (its own buy or sell post) or `closed` (anything
+else: a decline, its mood, a market line, a coin's answer, an answer told its
+buys, a comment reply, any answer from before the mark). Under a closed one
+only a greeting is answered (code's hello): no draft, no buys, no exact path,
+no code line.
 
 **Limits.** `ANSWERS_PER_AUTHOR` is six a person a rolling day (from two) and
 `ANSWERS_PER_DAY` sixty a day per X account (from 24), so a person can

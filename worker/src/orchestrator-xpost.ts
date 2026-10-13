@@ -56,6 +56,7 @@ import { asksAboutACoin, coinTalkIn, houseTalkIn, marketTalkIn, nameLikeWords, t
 import { activeTenantsOf, repliesAllowedFor, repliesScopeOf } from "./xpost/scope";
 import {
   ANSWER_LOOKED_UP,
+  ANSWER_PLAIN_THREAD,
   answerAuthorSpent,
   answersWaiting,
   cancelPost,
@@ -1581,7 +1582,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
     // sherwood-1 is what they've got in the oven" read as a token teased.
     const shut = (body: string): boolean => sherwoodMentioned(body) || sherwoodNamed(body);
     const threads = ordered.some((c) => c.conversationId !== c.id || c.inReplyToTweetId !== "" || c.quoted === true)
-      ? await ownThreadTweets(shared, account.xUserId, undefined, shut) : { roots: new Set<string>(), posts: new Set<string>(), answered: new Map<string, string>() };
+      ? await ownThreadTweets(shared, account.xUserId, undefined, shut)
+      : { roots: new Set<string>(), posts: new Set<string>(), answered: new Map<string, string>(), plain: new Set<string>(), trade: new Set<string>() };
     const buys = recentCoins(f);
     // Every name its buys go by: what an answer not shown them may never say (XGateCtx.unsaid).
     const bought = boughtNames(f, posts);
@@ -1595,7 +1597,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
     for (const comment of ordered) {
       if (comment.createdAtMs < consentAt || nowMs - comment.createdAtMs > REPLY_STALE_MS) continue;
       const candidate = tagCandidate(comment, { xUserId: account.xUserId, research: research !== null, username: account.username,
-        ownRoots: threads.roots, ownPosts: threads.posts, answered: threads.answered });
+        ownRoots: threads.roots, ownPosts: threads.posts, answered: threads.answered, plain: threads.plain, trade: threads.trade });
       if (!candidate.ok || await repliesOptedOut(shared, account.xUserId, comment.authorId)) continue;
       // READ BY CODE FIRST, research on or off: the allowlist's plain model
       // question is answered from a code-built line (writer.ts modelAnswers)
@@ -1663,8 +1665,21 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // advice or its mood is answered by nothing, as before the decline.
       const topLevelTag = comment.conversationId === comment.id && comment.inReplyToTweetId === "" && comment.quoted !== true;
       const casualUnderPost = (classified.kind === "advice" || classified.kind === "vibe") && !topLevelTag;
+      // A FOLLOW-UP KEEPS WHAT ITS THREAD WAS ABOUT (red-team review of
+      // 1ed46625, 2026-10-12). Under its decline to "should i buy $SCAM?",
+      // "what have you been buying lately?" was handed its PEPE buys and "yes,
+      // bought it earlier" and "same one you asked about, the curve looked
+      // early" went out; "how are you?" there got "doing great, this one looks
+      // solid to me", and a third party's reply with X's prefix the same. Code
+      // never stored the tag a thread began with, so a follow-up was judged
+      // on its own words alone. Now a reply or a quote under anything but
+      // plain chat (tagCandidate followUp "closed": a decline, its mood, a
+      // market line, a coin's answer, an answer told its buys, a comment
+      // reply) is answered only with a greeting: no draft, no buys, no exact
+      // path, no code line whose meaning is the thread's.
+      const closedFollowUp = candidate.followUp === "closed" && !greeting;
       const asked: TagIntent = sherwoodTagged || authorSherwood || (classified.kind === "model" && (candidate.otherHandles || !namedClean))
-        || (greeting && (classified.kind !== "chat" || candidate.otherHandles)) || unreadWord || unflaggedAdvice || unbanteredChat || casualUnderPost
+        || (greeting && (classified.kind !== "chat" || candidate.otherHandles)) || unreadWord || unflaggedAdvice || unbanteredChat || casualUnderPost || closedFollowUp
         ? { kind: "unanswered" } : classified;
       // SHERWOOD IN ANY FORM, OR A MODEL QUESTION OFF THE ALLOWLIST, is
       // answered by nothing: the model line under "sherwood TGE soon?" reads
@@ -2074,9 +2089,16 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // MARKED BY WHAT IT WAS HANDED, not by what the model wrote: an answer
       // given anything looked up is never handed on (ANSWER_LOOKED_UP).
       const lookedUp = !!looked && (looked.research.length > 0 || !!looked.creatorClaim || lined !== null);
+      // AND BY WHAT KIND OF EXCHANGE IT WAS (red-team review of 1ed46625): a
+      // greeting, or chat handed nothing and told none of its buys, under a
+      // top-level tag or a plain follow-up, is one a follow-up may be chatted
+      // under (ANSWER_PLAIN_THREAD); every other answer closes its thread to
+      // all but a greeting.
+      const plainThread = !!body && !lookedUp && (candidate.followUp === undefined || candidate.followUp === "plain")
+        && (greeting || (!coded && asked.kind === "chat" && !told && (looked === null || looked.intent === "chat")));
       const id = await schedulePost(shared, {
         tenant: account.tenant, xUserId: account.xUserId, kind: "answer", dedupeKey, body: body ?? "",
-        coin: lookedUp ? ANSWER_LOOKED_UP : null, decisionId: null, dueAtMs: finishedAt, nowMs: finishedAt,
+        coin: lookedUp ? ANSWER_LOOKED_UP : plainThread ? ANSWER_PLAIN_THREAD : null, decisionId: null, dueAtMs: finishedAt, nowMs: finishedAt,
         replyToTweetId: comment.id, replyRootTweetId: comment.id, replyAuthorId: comment.authorId,
         status: body ? "scheduled" : "skipped",
         reason: body ? null : claimed ? "gate:sherwood-claim" : named || postsName ? "gate:sherwood-drafted" : unlooked ? "gate:unlooked-source"

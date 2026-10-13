@@ -18,6 +18,9 @@ export const REPLY_OPT_OUT = "Say stop to opt out.";
  * gate.ts opt-out-unsaid).
  */
 export interface CodeLineOptions { paper?: boolean }
+
+/** What a reply or a quote to an active agent sits under (ReplyCandidate.followUp), from the most open to the most closed. */
+export type FollowUp = "plain" | "own-trade" | "closed";
 export const XREPLY_MAX_COMMENT_CHARS = 280;
 
 /** Remove only leading reply mentions; handles are never sent to the writer. */
@@ -87,8 +90,15 @@ export type ReplyCandidate =
    * a playful decline instead of silence). Never drafted and never looked up
    * for: answered with code's decline (casual.ts declineAnswers), unless code
    * reads it as its own mood first ("are you bullish?": vibeAsk).
+   * `followUp`: set by tagCandidate on a reply or a quote (absent on a
+   * top-level tag), from what it sits under (red-team review of 1ed46625):
+   * "plain" (its own intro or casual post, or an answer it marked plain),
+   * "own-trade" (its own buy or sell post), or "closed" (anything else it
+   * posted or answered: a decline, a market line, a coin's answer, its
+   * buys). The worst of the post it replies to, the conversation's root and
+   * the post it quotes.
    */
-  | { ok: true; text: string; address?: string; otherHandles?: true; greeting?: true; advice?: true }
+  | { ok: true; text: string; address?: string; otherHandles?: true; greeting?: true; advice?: true; followUp?: FollowUp }
   | { ok: false; reason: string };
 
 const LINK_OR_SECRET = /https?:|www\.|\b[a-z0-9-]+\.(?:com|net|org|io|dev|app|xyz|gg|co|me|ai)\b|0x[a-f0-9]{8,}|\b(?:sk-|gsk_|api[ _-]?key|seed phrase|private key|password|secret)\b/i;
@@ -558,6 +568,15 @@ const HANDLE_AT = /@([a-z0-9_]{1,15})\b/gi;
  * is answered only when what it quotes is one of its own posted tweets
  * (XReply.quotedTweetId); a quote of anyone else's post, and any retweet, is
  * still refused. Absent these sets, nothing but a top-level tag is its own.
+ *
+ * AND WHAT IT SITS UNDER, CARRIED ON (red-team review of 1ed46625,
+ * 2026-10-12): a follow-up under its decline to "should i buy $SCAM?" asked
+ * "what have you been buying lately?" and was handed its buys, and "yes,
+ * bought it earlier" went out under the $SCAM thread. A reply or a quote is
+ * reported with `followUp`: "plain" only when the post it replies to, the
+ * conversation's root and the post it quotes are each in `ctx.plain`; else
+ * "own-trade" when each is plain or in `ctx.trade`; else "closed" (store.ts
+ * ownThreadTweets). Absent those sets, every follow-up is closed.
  */
 export function tagCandidate(reply: XReply, ctx: {
   xUserId: string; research?: boolean; username?: string; ownRoots?: ReadonlySet<string>;
@@ -565,6 +584,10 @@ export function tagCandidate(reply: XReply, ctx: {
   ownPosts?: ReadonlySet<string>;
   /** Each post one of its posted answers replied to, by that post's author (store.ts ownThreadTweets). */
   answered?: ReadonlyMap<string, string>;
+  /** Its own posts, and the tags it answered, under which a follow-up is plain chat (store.ts ownThreadTweets). */
+  plain?: ReadonlySet<string>;
+  /** Its own buy and sell posts (store.ts ownThreadTweets). */
+  trade?: ReadonlySet<string>;
 }): ReplyCandidate {
   const no = (reason: string): ReplyCandidate => ({ ok: false, reason });
   if (!reply.id || !reply.authorId || !ctx.xUserId) return no("invalid");
@@ -582,6 +605,12 @@ export function tagCandidate(reply: XReply, ctx: {
   // Under one of its own posted tweets, or the same person's own earlier post it answered there.
   const underOwn = !topLevel && parent !== "" && ownConversation && (ownPost(parent) || ctx.answered?.get(parent) === reply.authorId);
   if (!topLevel && !underOwn) return no("not-own-thread");
+  // What it sits under: the parent and the conversation's root of a reply, the post a quote shows; the most closed of them.
+  const under = [...(topLevel ? [] : [parent, reply.conversationId]), ...(reply.quoted === true ? [String(reply.quotedTweetId ?? "")] : [])];
+  const RANK: Readonly<Record<FollowUp, number>> = { plain: 0, "own-trade": 1, closed: 2 };
+  const followUp: FollowUp | undefined = under.length === 0 ? undefined : under
+    .map((id): FollowUp => (ctx.plain?.has(id) === true ? "plain" : ctx.trade?.has(id) === true ? "own-trade" : "closed"))
+    .reduce((worst, k) => (RANK[k] > RANK[worst] ? k : worst), "plain" as FollowUp);
   const own = String(ctx.username ?? "").trim().replace(/^@/, "").toLowerCase();
   const raw = reply.text.normalize("NFKC");
   const lead = /^(?:\s*@[a-z0-9_]{1,15}\b[\s,:-]*)+/i.exec(raw)?.[0] ?? "";
@@ -634,5 +663,5 @@ export function tagCandidate(reply: XReply, ctx: {
   // Only one plain question, with no claim or rumour beside it (plainAdviceAsk): anything else, nothing.
   if (asksAdvice && !plainAdviceAsk(text)) return no("advice-clause");
   return { ok: true, text, ...(address ? { address } : {}), ...(others(lead) ? { otherHandles: true as const } : {}), ...(greeting ? { greeting: true as const } : {}),
-    ...(asksAdvice ? { advice: true as const } : {}) };
+    ...(asksAdvice ? { advice: true as const } : {}), ...(followUp ? { followUp } : {}) };
 }

@@ -351,9 +351,9 @@ test("an answer handed anything looked up is marked by that, and never restated 
   const later = w.asked().at(-1)!;
   assert.match(later, /how's your day going/);
   assert.doesNotMatch(/What you already said publicly[^\n]*/.exec(later)?.[0] ?? "", /bunched up/);
-  // An answer handed nothing looked up is not marked.
+  // An answer handed nothing looked up is not marked so; plain banter is marked as a thread a follow-up may be chatted under (red-team review of 1ed46625).
   const chat = (await w.answers()).find((a) => a.replyToTweetId === "100000000000000151");
-  assert.equal(chat?.coin, null);
+  assert.equal(chat?.coin, store.ANSWER_PLAIN_THREAD);
 });
 
 test("a research answer is never shown to a later prompt as a recent post, and the gate still keeps a draft from repeating it", async (t) => {
@@ -1378,6 +1378,61 @@ test("whoever replies to it or quotes it is asking: a follow-up to its answer, a
   assert.ok(w.sends.every((s) => !/opt out|\bstop\b/i.test(String(s.text))));
 });
 
+test("a follow-up under an answer to a coin's question is never handed its buys nor drafted: only a greeting goes under it (red-team review of 1ed46625, 2026-10-12)", async (t) => {
+  // Live Alan with one PEPE buy in its facts. Each draft POSTED at 1ed46625 under the follow-up beside it, the prompt told PEPE.
+  const drafts: [RegExp, string][] = [[/buying lately/, "yes, bought it earlier"], [/new buys/, "same one you asked about, the curve looked early"],
+    [/what have you been up to/, "already in on it, grabbed some earlier today"], [/how are you/, "doing great, this one looks solid to me"]];
+  // ("should i buy $SCAM?" itself, the reproduced root, is answered by nothing since a scam is a claim beside the advice: replies.ts plainAdviceAsk.
+  // The same advice about another coin still gets the decline the follow-ups sat under.)
+  // "how is $SCAM doing?" as reproduced, research off: code's no-read line ("can't check that coin's coingecko page this time.").
+  for (const [env, root] of [[{}, "should i buy $WOJAK?"], [RESEARCH_ON, "should i buy $WOJAK?"], [{}, "how is $SCAM doing?"]] as const) {
+    {
+      const w = await world(t, { username: "alanaidale", facts: { ...FACTS, name: "Alan Al Dale" }, env, research: fakeResearch().research,
+        answer: ({ prompt }) => drafts.find(([re]) => re.test(prompt))?.[1] ?? "PASS" });
+      let clock = NOW;
+      const pass = async (m: Record<string, unknown>) => { clock += MIN; w.setInbox([m]); await w.step(clock); };
+      const msg = (id: string, author: string, text: string, over: Record<string, unknown> = {}) =>
+        tag({ id, author_id: author, conversation_id: "100000000000000301", created_at: new Date(clock).toISOString(), text, ...over });
+      // Pass 1: 333's top-level tag gets code's decline, or the no-read line for $SCAM.
+      await pass(msg("100000000000000301", "333", `@alanaidale ${root}`));
+      const first = (await w.answers()).find((a) => a.replyToTweetId === "100000000000000301" && a.status === "posted")!;
+      assert.ok(first?.tweetId, `${root}: answered`);
+      const sent = w.sends.length;
+      // Pass 2: follow-ups replying to that answer, to the asker's own tag, and a third party's with X's prefix.
+      const under = (id: string, author: string, text: string, parent = first.tweetId!) => msg(id, author, text, { referenced_tweets: [{ type: "replied_to", id: parent }] });
+      const followUps = [
+        under("100000000000000302", "333", "@alanaidale what have you been buying lately?"),
+        under("100000000000000303", "333", "@alanaidale any new buys lately?"),
+        under("100000000000000304", "333", "@alanaidale what have you been buying lately?", "100000000000000301"),
+        under("100000000000000305", "333", "@alanaidale what have you been up to lately?"),
+        under("100000000000000306", "444", "@alanaidale @reader_333 how are you?"),
+      ];
+      for (const m of followUps) await pass(m);
+      assert.equal(w.sends.length, sent, `${root}: ${JSON.stringify(w.sends.slice(sent))}`);
+      assert.deepEqual(w.asked(), [], `${root}: never drafted, never told its buys`);
+      const ids = new Set(followUps.map((m) => String(m.id)));
+      assert.deepEqual((await w.answers()).filter((a) => ids.has(a.replyToTweetId ?? "")), [], `${root}: no row`);
+      // A greeting there still gets code's hello.
+      await pass(under("100000000000000307", "555", "@alanaidale @reader_333 gm"));
+      await pass(under("100000000000000308", "556", "@alanaidale gm"));
+      const hello = w.sends.find((s) => (s.reply as { in_reply_to_tweet_id: string }).in_reply_to_tweet_id === "100000000000000308")?.text;
+      assert.ok(greetingAnswers("100000000000000308", { lower: true }).includes(String(hello)), String(hello));
+    }
+  }
+  // Under plain banter it answered, the same follow-up is still a plain question about what it trades, told its buys.
+  const w = await world(t, { username: "alanaidale", facts: { ...FACTS, name: "Alan Al Dale" },
+    answer: ({ prompt }) => /how are you/.test(prompt) ? "doing good, keeping it chill." : "mostly fresh launches lately, picked up some pepe." });
+  w.setInbox([tag({ id: "100000000000000311", conversation_id: "100000000000000311", text: "@alanaidale how are you?" })]);
+  await w.step();
+  const banter = (await w.answers())[0]!;
+  assert.equal(banter.coin, store.ANSWER_PLAIN_THREAD);
+  w.setInbox([tag({ id: "100000000000000312", conversation_id: "100000000000000311", created_at: new Date(NOW + 30_000).toISOString(),
+    referenced_tweets: [{ type: "replied_to", id: banter.tweetId }], text: "@alanaidale what have you been buying lately?" })]);
+  await w.step(NOW + MIN);
+  assert.match(w.asked().at(-1)!, /Coins you bought lately: «Pepe»/, "told its buys under plain banter");
+  assert.equal(w.sends.at(-1)?.text, "mostly fresh launches lately, picked up some pepe.");
+});
+
 test("nothing is answered under its own sherwood-1 line, by reply or quote, and no decline or mood line goes under any post (red-team review of 1ed46625, 2026-10-12)", async (t) => {
   const ALAN = { username: "alanaidale", facts: { ...FACTS, name: "Alan Al Dale" } };
   for (const env of [{}, RESEARCH_ON]) {
@@ -2292,7 +2347,7 @@ test("a tag that is only a greeting gets a casual code-built line, sent on the p
       const [row] = await w.answers();
       assert.equal(row!.status, "posted", text);
       assert.equal(row!.replyAuthorId, "333");
-      assert.equal(row!.coin, null, "nothing looked up, nothing marked");
+      assert.equal(row!.coin, store.ANSWER_PLAIN_THREAD, "nothing looked up, marked only as plain chat a follow-up may sit under");
       assert.match(r.log ?? "", /answered-greeting 1/, text);
       assert.equal(await store.readMeta(w.db, "llm-answers:111:2026-09-30"), null, `${text}: none of the answers' model allowance`);
       assert.equal((await store.readMeta(w.db, "llm:2026-09-30"))?.n ?? 0, 0, `${text}: none of the fleet's`);

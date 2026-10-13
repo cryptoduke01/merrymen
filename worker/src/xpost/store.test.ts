@@ -38,6 +38,7 @@ import {
   ownerCancel,
   ownRecentBodies,
   ownThreadTweets,
+  ANSWER_PLAIN_THREAD,
   ownerSendTimesSince,
   tradeSendTimesSince,
   postingAccounts,
@@ -892,7 +893,8 @@ test("the conversations an X account is in: its posted top-level posts and answe
   };
   const answer = (tag: string, author: string, nowMs: number, over: Partial<NewPost> = {}): NewPost => post({ kind: "answer", dedupeKey: `answer:111:${tag}`,
     body: `an answer to ${tag}`, replyToTweetId: tag, replyRootTweetId: tag, replyAuthorId: author, nowMs, dueAtMs: nowMs, ...over });
-  assert.deepEqual(await ownThreadTweets(db, "111"), { roots: new Set(), posts: new Set(), answered: new Map() }, "nothing posted yet");
+  const none = { roots: new Set(), posts: new Set(), answered: new Map(), plain: new Set(), trade: new Set() };
+  assert.deepEqual(await ownThreadTweets(db, "111"), none, "nothing posted yet");
 
   await sent(post({ kind: "intro", dedupeKey: "intro:a:111", body: "hello", nowMs: 10, dueAtMs: 10 }), "9001");
   await sent(answer("500", "333", 20), "9501");
@@ -909,7 +911,7 @@ test("the conversations an X account is in: its posted top-level posts and answe
   assert.deepEqual([...own.posts].sort(), ["9001", "9501", "9511"], "and its posted answers");
   assert.deepEqual([...own.answered.entries()].sort(), [["500", "333"], ["510", "444"]], "each answered post, by its author");
   // Another X account's are not its own.
-  assert.deepEqual(await ownThreadTweets(db, "222"), { roots: new Set(), posts: new Set(), answered: new Map() });
+  assert.deepEqual(await ownThreadTweets(db, "222"), none);
   // Bounded, newest first: with room for one answer, only the newest is known.
   const one = await ownThreadTweets(db, "111", 1);
   assert.deepEqual([...one.posts].sort(), ["9001", "9511"]);
@@ -919,6 +921,16 @@ test("the conversations an X account is in: its posted top-level posts and answe
   assert.deepEqual([...shut.roots], []);
   assert.deepEqual([...shut.posts], ["9501"]);
   assert.deepEqual([...shut.answered.entries()], [["500", "333"]]);
+  // What a follow-up sits under (red-team review of 1ed46625): its intro is plain chat, a buy post its own trade, an answer only when marked plain.
+  assert.deepEqual([...own.plain], ["9001"], "no answer marked plain yet: each closes its thread to all but a greeting");
+  assert.deepEqual([...own.trade], []);
+  await sent(post({ kind: "buy", dedupeKey: "buy:a:1", body: "grabbed some pepe", coin: "pepe", nowMs: 70, dueAtMs: 70 }), "9002");
+  await sent(answer("550", "888", 80, { coin: ANSWER_PLAIN_THREAD }), "9551");
+  await sent(answer("560", "999", 90, { coin: ANSWER_LOOKED_UP }), "9561");
+  const marked = await ownThreadTweets(db, "111");
+  assert.deepEqual([...marked.plain].sort(), ["550", "9001", "9551"], "the plain answer and the tag it answered");
+  assert.deepEqual([...marked.trade], ["9002"]);
+  assert.ok(marked.posts.has("9561") && !marked.plain.has("9561") && !marked.plain.has("560"), "a looked-up answer is its own post, never plain");
 });
 
 test("turning replies off cancels only replies and opt-outs are durable across tenants sharing an account", async (t) => {

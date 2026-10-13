@@ -205,6 +205,31 @@ describe("tags an active agent may answer", () => {
       { ok: false, reason: "not-own-thread" }, "no roots known: no thread is its own");
   });
 
+  it("a follow-up carries what it sits under: plain chat, its own buy, or closed, the most closed of its parent, its root and what it quotes (red-team review of 1ed46625, 2026-10-12)", () => {
+    // Its hello (999) is plain and its buy post (998) a trade; it answered 333's banter 500 with 501 (marked plain), and 444's "should i buy $SCAM?" 600 with its decline 601.
+    const own = { xUserId: "222", username: "pine_stoat", ownRoots: new Set(["999", "998"]), ownPosts: new Set(["999", "998", "501", "601"]),
+      answered: new Map([["500", "333"], ["600", "444"]]), plain: new Set(["999", "501", "500"]), trade: new Set(["998"]) };
+    const at = (over: Partial<XReply>, text = "@pine_stoat what have you been buying lately?") => tagCandidate(comment(text, over), own);
+    const followUp = (v: ReturnType<typeof tagCandidate>) => (v.ok ? v.followUp : v.reason);
+    assert.equal(followUp(at({ id: "24", conversationId: "24", inReplyToTweetId: "" })), undefined, "a top-level tag sits under nothing");
+    assert.equal(followUp(at({ id: "502", authorId: "333", conversationId: "500", inReplyToTweetId: "501" })), "plain");
+    assert.equal(followUp(at({ id: "503", authorId: "333", conversationId: "500", inReplyToTweetId: "500" })), "plain");
+    assert.equal(followUp(at({ id: "25", conversationId: "999", inReplyToTweetId: "999" })), "plain");
+    assert.equal(followUp(at({ id: "26", conversationId: "998", inReplyToTweetId: "998" })), "own-trade");
+    // The reproduced follow-ups under its decline to "should i buy $SCAM?": closed, however they reach it.
+    assert.equal(followUp(at({ id: "602", authorId: "444", conversationId: "600", inReplyToTweetId: "601" })), "closed");
+    assert.equal(followUp(at({ id: "603", authorId: "444", conversationId: "600", inReplyToTweetId: "600" })), "closed");
+    assert.equal(followUp(at({ id: "604", authorId: "777", conversationId: "600", inReplyToTweetId: "601" }, "@pine_stoat @reader_444 how are you?")), "closed");
+    // Quotes: of its plain hello plain, of its buy post its own trade, of its decline closed; a quote that is also a reply takes the more closed.
+    assert.equal(followUp(at({ id: "705", conversationId: "705", inReplyToTweetId: "", quoted: true, quotedTweetId: "999" })), "plain");
+    assert.equal(followUp(at({ id: "706", conversationId: "706", inReplyToTweetId: "", quoted: true, quotedTweetId: "998" })), "own-trade");
+    assert.equal(followUp(at({ id: "707", conversationId: "707", inReplyToTweetId: "", quoted: true, quotedTweetId: "601" })), "closed");
+    assert.equal(followUp(at({ id: "708", authorId: "333", conversationId: "500", inReplyToTweetId: "501", quoted: true, quotedTweetId: "998" })), "own-trade");
+    // Without the sets, every follow-up is closed.
+    assert.equal(followUp(tagCandidate(comment("@pine_stoat how are you?", { id: "502", authorId: "333", conversationId: "500", inReplyToTweetId: "501" }),
+      { ...own, plain: undefined, trade: undefined })), "closed");
+  });
+
   it("whoever replies to it or quotes it is asking: a follow-up to its answer, a reply in a thread it answered, a quote of its own post (2026-10-12)", () => {
     // Its hello (999) and a buy post (998) are its roots; it answered 333's top-level tag 500 with 501, and 444's reply 600 under its buy post with 601.
     const own = { xUserId: "222", username: "pine_stoat", ownRoots: new Set(["999", "998"]), ownPosts: new Set(["999", "998", "501", "601"]),
@@ -404,7 +429,8 @@ describe("tags an active agent may answer", () => {
 });
 
 describe("a tag that is only a greeting (2026-10-12)", () => {
-  const own = { xUserId: "222", username: "pine_stoat", ownRoots: new Set(["999"]) };
+  // Its hello (999) is a plain post of its own: a follow-up under it is plain chat (store.ts ownThreadTweets).
+  const own = { xUserId: "222", username: "pine_stoat", ownRoots: new Set(["999"]), plain: new Set(["999"]) };
   const top = (text: string, over: Partial<XReply> = {}) => comment(text, { id: "700", conversationId: "700", inReplyToTweetId: "", ...over });
 
   it("is read on a strict allowlist of whole tags: one greeting word, at most two of the extras, a short ! or . and one emoji", () => {
@@ -424,7 +450,7 @@ describe("a tag that is only a greeting (2026-10-12)", () => {
     for (const text of ["@pine_stoat hiii", "@pine_stoat gm", "@pine_stoat yo ser 👋", "@pine_stoat hey alan!"]) {
       assert.deepEqual(tagCandidate(top(text), own), { ok: true, text: text.replace("@pine_stoat ", ""), greeting: true }, text);
     }
-    assert.deepEqual(tagCandidate(top("@pine_stoat gm", { conversationId: "999", inReplyToTweetId: "999" }), own), { ok: true, text: "gm", greeting: true });
+    assert.deepEqual(tagCandidate(top("@pine_stoat gm", { conversationId: "999", inReplyToTweetId: "999" }), own), { ok: true, text: "gm", greeting: true, followUp: "plain" });
   });
 
   it("anything else is not a greeting: it goes the normal way, or is refused as before", () => {
@@ -440,7 +466,7 @@ describe("a tag that is only a greeting (2026-10-12)", () => {
     assert.deepEqual(tagCandidate(top("@pine_stoat hiii", { attached: true }), own), { ok: false, reason: "attached" });
     // A reply prefix that names someone else: never code's line, and "hiii" alone is no question.
     assert.deepEqual(tagCandidate(top("@bob @pine_stoat hiii", { conversationId: "999", inReplyToTweetId: "999" }), own), { ok: false, reason: "low-signal" });
-    assert.deepEqual(tagCandidate(top("@bob @pine_stoat yo ser", { conversationId: "999", inReplyToTweetId: "999" }), own), { ok: true, text: "yo ser", otherHandles: true });
+    assert.deepEqual(tagCandidate(top("@bob @pine_stoat yo ser", { conversationId: "999", inReplyToTweetId: "999" }), own), { ok: true, text: "yo ser", otherHandles: true, followUp: "plain" });
     // A stop is an opt-out first, however friendly.
     for (const text of ["@pine_stoat hey stop", "@pine_stoat hi, please stop", "@pine_stoat yo go away"]) assert.deepEqual(tagCandidate(top(text), own), { ok: false, reason: "opt-out" }, text);
     // An address is never a greeting, research on.

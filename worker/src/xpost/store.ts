@@ -1325,32 +1325,69 @@ export async function ownRootTweetIds(db: Db, xUserId: string, limit = 2000): Pr
  * the three: a reply or a quote under it, or under the tag it answered, is
  * answered by nothing, and a conversation rooted at it is no conversation of
  * its own.
+ *
+ * AND WHAT A FOLLOW-UP THERE SITS UNDER (red-team review of 1ed46625,
+ * 2026-10-12). A follow-up lost the coin its conversation was about: under
+ * its decline to "should i buy $SCAM?", "what have you been buying lately?"
+ * was handed its PEPE buys and "yes, bought it earlier" went out, and "how
+ * are you?" was drafted as "doing great, this one looks solid to me". Code
+ * never stores what a tag said, so it stores what kind of exchange each
+ * answer was (`ANSWER_PLAIN_THREAD` on the answer's row), and:
+ *
+ *   - `plain`: what a follow-up may sit under as plain chat: its own intro
+ *     and casual posts, and each answer marked plain (a greeting, or banter
+ *     handed nothing, in a thread that was itself plain), with the tag it
+ *     answered;
+ *   - `trade`: its own buy and sell posts, under which the coin is its own
+ *     public buy.
+ *
+ * Anything else in `posts` or `answered` (a decline, its mood, a market
+ * line, a coin's answer, an answer told its buys, a comment reply on a buy
+ * post, any answer from before the mark) is closed: a follow-up under it is
+ * answered with a greeting or nothing (orchestrator-xpost.ts writeAnswer).
  */
 export interface OwnThreads {
   roots: Set<string>;
   posts: Set<string>;
   answered: Map<string, string>;
+  plain: Set<string>;
+  trade: Set<string>;
 }
+
+/**
+ * AN ANSWER A FOLLOW-UP MAY BE CHATTED UNDER, by its row's `coin` (which no
+ * answer otherwise uses but ANSWER_LOOKED_UP): a greeting, or banter handed
+ * nothing and told none of its buys, under a tag that was itself top level or
+ * plain (orchestrator-xpost.ts writeAnswer). Absent: closed.
+ */
+export const ANSWER_PLAIN_THREAD = "plain-thread";
+
 export async function ownThreadTweets(db: Db, xUserId: string, limit = 2000, shut: (body: string) => boolean = () => false): Promise<OwnThreads> {
   const max = int(Math.max(1, Math.min(5000, limit)));
   const tops = (await db
     .prepare(
-      `SELECT tweet_id, body FROM xpost_posts
+      `SELECT tweet_id, body, kind FROM xpost_posts
         WHERE x_user_id = ? AND status = 'posted' AND tweet_id IS NOT NULL AND kind IN ('intro', 'casual', 'buy', 'sell')
         ORDER BY created_at_ms DESC, id DESC
         LIMIT ?`,
     )
-    .all(String(xUserId), max)) as { tweet_id: unknown; body: unknown }[];
-  const roots = new Set(tops.filter((r) => !shut(String(r.body ?? ""))).map((r) => String(r.tweet_id ?? "")).filter((t) => t !== ""));
+    .all(String(xUserId), max)) as { tweet_id: unknown; body: unknown; kind: unknown }[];
+  const roots = new Set<string>(), plain = new Set<string>(), trade = new Set<string>();
+  for (const r of tops) {
+    const tweet = String(r.tweet_id ?? "");
+    if (tweet === "" || shut(String(r.body ?? ""))) continue;
+    roots.add(tweet);
+    (r.kind === "buy" || r.kind === "sell" ? trade : plain).add(tweet);
+  }
   const rows = (await db
     .prepare(
-      `SELECT p.tweet_id AS tweet_id, p.body AS body, r.reply_to_tweet_id AS reply_to_tweet_id, r.author_id AS author_id
+      `SELECT p.tweet_id AS tweet_id, p.body AS body, p.kind AS kind, p.coin AS coin, r.reply_to_tweet_id AS reply_to_tweet_id, r.author_id AS author_id
         FROM xpost_posts p JOIN xpost_reply_targets r ON r.post_id = p.id
         WHERE p.x_user_id = ? AND p.status = 'posted' AND p.tweet_id IS NOT NULL AND p.kind IN ('answer', 'reply')
         ORDER BY p.created_at_ms DESC, p.id DESC
         LIMIT ?`,
     )
-    .all(String(xUserId), max)) as { tweet_id: unknown; body: unknown; reply_to_tweet_id: unknown; author_id: unknown }[];
+    .all(String(xUserId), max)) as { tweet_id: unknown; body: unknown; kind: unknown; coin: unknown; reply_to_tweet_id: unknown; author_id: unknown }[];
   const posts = new Set(roots);
   const answered = new Map<string, string>();
   for (const r of rows) {
@@ -1358,8 +1395,12 @@ export async function ownThreadTweets(db: Db, xUserId: string, limit = 2000, shu
     if (shut(String(r.body ?? ""))) continue;
     if (tweet !== "") posts.add(tweet);
     if (to !== "" && author !== "" && !answered.has(to)) answered.set(to, author);
+    if (r.kind === "answer" && r.coin === ANSWER_PLAIN_THREAD) {
+      if (tweet !== "") plain.add(tweet);
+      if (to !== "") plain.add(to);
+    }
   }
-  return { roots, posts, answered };
+  return { roots, posts, answered, plain, trade };
 }
 
 /**
