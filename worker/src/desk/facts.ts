@@ -186,7 +186,7 @@ export function measureBars(bars: readonly Bar[], priceNow: number, supply: numb
 }
 
 /** The token's info: holders, the top ten's share and when counted, the creator's share. Never the creator's address. */
-export function parseFactsInfo(body: unknown, network: FactsNetwork, address: string): Pick<CoinFacts, "holders" | "creatorHoldingPct"> | null {
+export function parseFactsInfo(body: unknown, network: FactsNetwork, address: string): Pick<CoinFacts, "holders" | "creatorHoldingPct" | "links"> | null {
   try {
     const d = (body as { data?: { id?: unknown; attributes?: Record<string, unknown> } } | null)?.data;
     const id = idAddress(d?.id, FACTS_NETWORK_IDS[network]);
@@ -197,10 +197,24 @@ export function parseFactsInfo(body: unknown, network: FactsNetwork, address: st
     const top = num(h?.distribution_percentage?.top_10);
     const holders = c !== null && c > 0 ? { count: c, top10Pct: top !== null && top >= 0 && top <= 100 ? top : null, updatedAtMs: when(h?.last_updated) } : null;
     const dev = num(a.developer_holding_percentage);
-    return { holders, creatorHoldingPct: dev !== null && dev >= 0 && dev <= 100 ? dev : null };
+    return { holders, creatorHoldingPct: dev !== null && dev >= 0 && dev <= 100 ? dev : null, links: linksOf(a) };
   } catch {
     return null;
   }
+}
+
+/**
+ * The token's own links as the index lists them: https websites only (an
+ * http one is refused, as the research browser refuses it), each a plain URL
+ * of sane length, at most three; and its X handle when it is one X could
+ * have. A stranger wrote both: they are pointers for a scan, never facts.
+ */
+function linksOf(a: Record<string, unknown>): { websites: string[]; twitter: string | null } {
+  const websites = (Array.isArray(a.websites) ? a.websites : [])
+    .filter((w): w is string => typeof w === "string" && w.length <= 200 && /^https:\/\/[^\s"'<>]+$/i.test(w.trim()))
+    .map((w) => w.trim()).slice(0, 3);
+  const handle = typeof a.twitter_handle === "string" ? a.twitter_handle.trim().replace(/^@/, "") : "";
+  return { websites, twitter: /^[A-Za-z0-9_]{1,15}$/.test(handle) ? handle : null };
 }
 
 /** How one index read went: its body, or why not. */
@@ -332,6 +346,7 @@ export function createCoinFactsReader(o: { fetchJson?: FactsFetch; now?: () => n
           holders: info?.holders ?? null,
           creatorHoldingPct: info?.creatorHoldingPct ?? null,
           info: !q.withInfo ? "not-asked" : info ? "read" : "failed",
+          ...(info?.links ? { links: info.links } : {}),
           poolsSeen: all.length,
         };
         return { ok: true, facts };
