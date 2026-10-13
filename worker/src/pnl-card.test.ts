@@ -5,8 +5,11 @@ import { describe, it } from "node:test";
 import {
   formatRoi,
   formatUsdg,
+  liveSellCard,
   measure,
   pnlCaption,
+  printableCoinName,
+  type LiveSellRow,
   pnlCardFromFill,
   pnlCardSvg,
   roiPercent,
@@ -233,5 +236,48 @@ describe("a trade row becomes a card only when it closed something knowable", ()
     assert.ok(card, "an even close must still produce a card");
     assert.equal(formatUsdg(card.realisedUsdg, true), "+0.00");
     assert.equal(formatUsdg(card.investedUsdg), "5.00");
+  });
+});
+
+describe("a live sale's card follows one rule, wherever it is shown", () => {
+  const live: LiveSellRow = {
+    status: "landed", fill_side: "sell", kind: "swap", sell_token: "0x2ca2b5bd3b6635d630419c57a13c6b6a856ec96d",
+    fill_cash_usdg: 17.39, realized_pnl_usdg: 12.39, coin_symbol: "DOGGOS", display_name: "Doggos", target: "0x0000000000000000000000000000000000000001",
+  };
+  const vouched = async () => true;
+
+  it("draws a completed, evidenced live sell under its coin's name, never the row's target", async () => {
+    const r = await liveSellCard(live, vouched);
+    assert.deepEqual(r, { kind: "card", card: { symbol: "DOGGOS", investedUsdg: 5_000_000n, proceedsUsdg: 17_390_000n, realisedUsdg: 12_390_000n } });
+  });
+
+  it("refuses paper, a buy, a pending attempt and any other kind, before evidence is read", async () => {
+    let asked = 0;
+    const counting = async () => { asked++; return true; };
+    for (const row of [{ ...live, status: "paper" }, { ...live, status: "pending" }, { ...live, fill_side: "buy" }, { ...live, kind: "perp" }]) {
+      assert.equal((await liveSellCard(row, counting)).kind, "ineligible", JSON.stringify(row));
+    }
+    for (const row of [{ ...live, realized_pnl_usdg: null }, { ...live, fill_cash_usdg: -1 }, { ...live, sell_token: null }, { ...live, fill_cash_usdg: Number.NaN }]) {
+      assert.equal((await liveSellCard(row, counting)).kind, "ineligible", JSON.stringify(row));
+    }
+    assert.equal(asked, 0, "the ledger replay is asked only for a sale that could be drawn");
+  });
+
+  it("refuses a sale whose proceeds and cost basis are not both vouched for", async () => {
+    assert.deepEqual(await liveSellCard(live, async () => false), { kind: "ineligible", reason: "The trade's proceeds and cost basis could not both be verified." });
+  });
+
+  it("prints a human name, falling back to the decision's, and never an address or token id", async () => {
+    assert.equal(printableCoinName("0x2ca2b5bd3b6635d630419c57a13c6b6a856ec96d"), null);
+    assert.equal(printableCoinName("T0123456789A"), null);
+    assert.equal(printableCoinName("x".repeat(65)), null);
+    assert.equal(printableCoinName("DOG‮GOS"), null);
+    const r = await liveSellCard({ ...live, coin_symbol: "T0123456789A" }, vouched);
+    assert.equal(r.kind === "card" ? r.card.symbol : r.reason, "Doggos");
+    assert.equal((await liveSellCard({ ...live, coin_symbol: "0xabc", display_name: null }, vouched)).kind, "ineligible");
+  });
+
+  it("refuses dust through pnlCardFromFill", async () => {
+    assert.equal((await liveSellCard({ ...live, fill_cash_usdg: 0.004, realized_pnl_usdg: 0.001 }, vouched)).kind, "ineligible");
   });
 });

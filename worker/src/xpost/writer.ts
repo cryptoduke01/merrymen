@@ -571,7 +571,7 @@ function usedEmoji(recent: readonly string[]): boolean {
  * answerPrompt says false, and its recent posts are shown without the notice
  * older answers carried, so nothing invites the model to copy it.
  */
-function rules(f: WriterFacts, kind: "intro" | "buy" | "sell" | "casual" | "reply" | "answer", notice: boolean = kind === "reply" || kind === "answer"): string {
+function rules(f: WriterFacts, kind: "intro" | "buy" | "sell" | "casual" | "insight" | "reply" | "answer", notice: boolean = kind === "reply" || kind === "answer"): string {
   const recent = (f.recentOwn ?? []).map((r) => ownWords(notice ? r : withoutReplyOptOut(String(r ?? "")), 220)).filter((r): r is string => !!r).slice(0, 6);
   const used = usedEmoji(recent);
   const shown = recent.map((r) => r.replace(EMOJI, "").trim()).filter((r) => r !== "");
@@ -604,6 +604,8 @@ function rules(f: WriterFacts, kind: "intro" | "buy" | "sell" | "casual" | "repl
     // each fact, in words, with its source in it); never more, never a view.
     kind === "answer"
       ? "- Never say what a market or any coin will do, and never say whether a coin is good or bad to buy. What you looked up (listed below) may be said as what its source showed when you looked, naming the source; anything else about a coin, leave out."
+      : kind === "insight"
+      ? "- Never say what a market or any coin will do next. What is written here about the market right now may be described in a trader's technical words, as it is now; anything else about a market or a coin, leave out."
       : kind === "buy" || kind === "reply"
       ? "- Never say what a market or any coin is doing now or will do. About the coin, say only the reason written here, as it was when you bought." + (kind === "buy" ? " A separately supplied creator description may also be explained as the project's claim, never as a verified fact or as your original reason for buying." : "")
       : "- Never say what a market or any coin is doing, did or will do.",
@@ -627,7 +629,7 @@ function rules(f: WriterFacts, kind: "intro" | "buy" | "sell" | "casual" | "repl
   return out.join("\n");
 }
 
-function build(f: WriterFacts, kind: "intro" | "buy" | "sell" | "casual", persona: Persona, task: string): Prompt {
+function build(f: WriterFacts, kind: "intro" | "buy" | "sell" | "casual" | "insight", persona: Persona, task: string): Prompt {
   return {
     system: [who(f, persona), rules(f, kind)].join("\n\n"),
     prompt: `${task}\n\nWrite the post now, or PASS.`,
@@ -894,8 +896,8 @@ const INTENT_HINT: Readonly<Record<AnswerIntentKind, string>> = {
   model: "They are asking what model you run on. Answer only with the model line in the rules.",
   chat: "It is just chat or banter: answer it the way a friend would, briefly and in good humour. A light mood or opinion about yourself is fine (how your day is going, what you like about trading, being a bot); a joke is fine if it is about yourself. Say nothing about any coin, market, person, project or event.",
   // A MAJOR (2026-10-12): its words are code's (xpost/market.ts) whenever coingecko
-  // was read; never told figures follow (red-team 2026-10-12).
-  major: "They are asking about a big coin on coingecko's list. Say what you looked up as what coingecko shows right now, a read and not a call: never whether to buy it, never where it's headed. It is not a robinhood chain coin and not one you trade, so keep yourself, your trades and your holdings out of it. Write no number or amount.",
+  // was read; never told figures follow (red-team 2026-10-12), nor told a provider's name (2026-10-13).
+  major: "They are asking about a big coin. Say what you looked up as what the market data shows right now, a read and not a call: never whether to buy it, never where it's headed. It is not a coin of the chain you trade on and not one you trade, so keep yourself, your trades and your holdings out of it. Write no number or amount.",
   // WHAT'S HOT (2026-10-12): drafted only when there is no coin to show; with
   // coins, the words are code's (xpost/market.ts). Never told a list follows:
   // "added after your words" invited words that point at it (red-team 2026-10-12).
@@ -1039,7 +1041,7 @@ export function answerPrompt(f: AnswerFacts): Prompt {
     // a friend on crypto twitter, not a help desk. "i don't comment on the market,
     // just the trades" was true and dead; the gate now refuses that shape
     // (gate.ts STOCK_PHRASE), and this says what to do instead.
-    "Sound like a friend on crypto twitter texting back: one or two short lines, plain everyday words, lowercase is fine, laid back. You're a laid-back trader bot that merrymen built, and you can have a light mood or opinion about yourself. Light humour is welcome, never at the asker's expense, never forced. No lists, no hashtags. Never name a source (the index, coingecko, fomo, on-chain data, a project) unless you looked something up and it is listed below.",
+    "Sound like a friend on crypto twitter texting back: one or two short lines, plain everyday words, lowercase is fine, laid back. You're a laid-back trader bot that merrymen built, and you can have a light mood or opinion about yourself. Light humour is welcome, never at the asker's expense, never forced. No lists, no hashtags. Never name a source (the index, fomo, on-chain data, a project) unless you looked something up and it is listed below, and never name a data provider.",
     // WHAT A DRAFT MAY NEVER SAY (red-team 2026-10-12): the gate refuses each (gate.ts ANSWER_HOUSE_CLAIM); this says so first.
     "Never speak for merrymen or robinhood (what they are, have, plan or back), never tease news (no \"soon\", \"stay tuned\", \"cooking\", \"can't share yet\"), never judge the person asking, and never boast about results, money or being the best.",
     // AND, WITH NOTHING LOOKED UP, NONE OF THE REST (red-team 2026-10-12): words.ts marketTalkIn and houseTalkIn refuse it.
@@ -1159,6 +1161,65 @@ export function casualPrompt(f: CasualFacts): Prompt {
     lines.push("Leave trading out of this one: nothing about trading, markets, prices or coins.");
   }
   return build(f, "casual", "none", lines.join(" "));
+}
+
+// ── a market insight post ──────────────────────────────────────────────────
+
+/**
+ * A TRADER'S TECHNICAL WORDS (the owner's teammate, 2026-10-13): what an
+ * active agent's market insight post is written in, beside the facts code
+ * read (market.ts insightFacts) and everyday words. The X gate holds an
+ * insight post to exactly these (XGateCtx.lookedOnly, `known`), so no coin,
+ * person or source can be named in words the post was never handed. None of
+ * them is a call, a level or a forecast on its own: the gate's screens refuse
+ * those in any words ("breakout", "support level", "bullish", "bounce",
+ * "from here" among them), and this list holds none of them.
+ */
+export const INSIGHT_VOCABULARY: readonly string[] = Object.freeze([
+  "momentum", "volume", "volumes", "liquidity", "rotation", "rotating", "rotate", "breadth", "broad", "narrow", "narrowing", "widening",
+  "risk-on", "risk-off", "risk", "appetite", "consolidation", "consolidating", "consolidate", "range", "ranges", "ranging", "rangebound", "range-bound",
+  "breakdown", "chop", "choppy", "sideways", "trend", "trending", "uptrend", "downtrend", "tape", "majors", "alts", "altcoins", "small", "caps", "cap",
+  "large", "leadership", "leading", "leaders", "laggards", "lagging", "divergence", "diverging", "compression", "compressing", "expansion", "volatility",
+  "volatile", "participation", "conviction", "flows", "flow", "bid", "bids", "buyers", "sellers", "defensive", "speculative", "speculation", "froth",
+  "frothy", "heavy", "thin", "thinner", "deep", "shallow", "firm", "firmer", "soft", "softer", "weak", "weaker", "weakness", "strength", "strong",
+  "stronger", "tight", "tighter", "wide", "upper", "lower", "half", "highs", "lows", "edge", "drift", "drifting", "grind", "grinding", "pressing",
+  "fading", "fade", "cooling", "heating", "active", "activity", "quiet", "busy", "red", "green", "mixed", "split", "flat", "chain", "onchain",
+  "trenches", "memes", "memecoins", "coins", "names", "board", "crowd", "fomo", "traders", "week", "weekly", "day", "daily", "session", "intraday",
+  "structure", "regime", "sentiment", "tone", "mood", "unevenly", "uneven", "steady", "muted", "heated", "elevated", "subdued", "concentrated",
+  "action", "crowding", "crowded", "movers", "mover", "toward", "towards", "pockets", "pocket", "spread", "led", "lead", "leads", "stretched",
+]);
+/** The technical words an insight prompt names, in the teammate's own list's order (2026-10-13). */
+const INSIGHT_WORDS_SHOWN = "momentum, volume, liquidity, rotation, breadth, risk-on and risk-off, consolidation, a range and where things sit in it, chop, trend, leadership, divergence, volatility, flows, participation";
+
+/** An insight post's facts and the agent's own: what insightPrompt is handed. */
+export interface InsightFacts extends WriterFacts {
+  /** Code's words for the market now (market.ts insightFacts): digit-free, naming no coin and no source. */
+  read: string[];
+}
+
+/**
+ * AN ACTIVE AGENT'S MARKET INSIGHT POST (the owner's teammate, 2026-10-13):
+ * one or two lines about the market right now, in a trader's technical
+ * words, from the words code read (`read`) and nothing else. Never a digit,
+ * a name, a source, a forecast, a target, a level as a number, advice or a
+ * claim that it holds or will buy anything; the X gate refuses each in any
+ * words (XGateCtx.insight). Code's figures line goes after what the gate
+ * admits; the model is never told one follows. Null read: no prompt (the
+ * caller falls back to the casual post).
+ */
+export function insightPrompt(f: InsightFacts): Prompt | null {
+  const read = (Array.isArray(f.read) ? f.read : []).map((r) => clean(r, 160)).filter((r): r is string => !!r && !/\p{N}/u.test(r)).slice(0, 6);
+  if (!read.length) return null;
+  const lines = [
+    "Write one post with your read on the crypto market right now, the way a trader sums up the tape: one or two short lines.",
+    `How the market looks right now, as you read it just now (your only facts about it: say them your own way and add nothing): ${read.map(q).join(" / ")}.`,
+    `Put it in a trader's technical words where they fit what is written: ${INSIGHT_WORDS_SHOWN}. Say where things sit only in words (the upper or the lower half of a range, near the week's lows), never as a number, a price or a level. Say rotation toward something, never rotating into it.`,
+    "Describe only what is happening now. Never say what comes next: no forecast, no prediction, no target, no \"about to\", no \"from here\", no bounce, recovery or breakout to come, and never the words bullish, bearish, breakout or support or resistance level.",
+    "No advice: never tell anyone to buy, sell, long, short, hold, enter, exit or watch anything.",
+    "Never say you hold, bought, sold, are buying or will buy anything, and never mention your own trades.",
+    "Name no coin, no ticker, no person, no project, no exchange, no data source and no chain by name: say the big coins, the majors, the chain's trending coins.",
+  ];
+  return build(f, "insight", "none", lines.join(" "));
 }
 
 // ── the model's credentials ─────────────────────────────────────────────────

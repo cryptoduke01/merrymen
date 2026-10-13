@@ -174,6 +174,25 @@ export interface XGateCtx {
    * they say by construction.
    */
   drafted?: boolean;
+  /**
+   * AN ACTIVE OWNER'S POST (MERRYMEN_XPOST_ACTIVE_TENANTS: the house's own
+   * agents), whatever its kind (the owner's teammate, 2026-10-13): it never
+   * names a data provider, coingecko, geckoterminal or bitquery, on its
+   * letters (sourceNamed), and is refused as source-named, a model's draft
+   * or code's own line alike. Every other owner's posts are judged as before.
+   */
+  house?: boolean;
+  /**
+   * AN ACTIVE OWNER'S MARKET INSIGHT POST (kind "casual", the owner's
+   * teammate, 2026-10-13): a model's words about the market now, beside
+   * which code puts its figures line. Held to every screen a drafted answer
+   * is: no advice, call, forecast, level, target or entry in any words
+   * (COIN_ADVICE, REPLY_ADVICE, ANSWER_PREDICTION, ANSWER_CALL,
+   * draftedForecast: hype), nothing for the house (house-claim), no amount
+   * in words (quantity); and the caller passes `buys: "none"`, so any buy or
+   * holding it says is refused (buy-claim).
+   */
+  insight?: boolean;
 }
 
 const refuse = (reason: string): XVerdict => ({ ok: false, reason });
@@ -537,6 +556,19 @@ const MERRYMEN_LETTERS = /m+[aeiouy]*r+[aeiouy]*m+[aeiouy]*n|merr|t+[aeiouy]*r+[
 export function merrymenMentioned(text: unknown): boolean {
   if (typeof text !== "string") return false;
   return [lettersOf(text), lettersOf(text, { leet: true })].some((r) => MERRYMEN_LETTERS.test(r));
+}
+
+/**
+ * A DATA PROVIDER NAMED, ON ITS LETTERS (the owner's teammate, 2026-10-13):
+ * coingecko, geckoterminal or bitquery, however spaced, cased, dotted or
+ * spelled in look-alikes or digits ("coin gecko", "C0inGecko", "bit-query").
+ * "gecko" alone is enough: no trading post needs the lizard. What an active
+ * owner's post may never say (XGateCtx.house, "source-named").
+ */
+const SOURCE_LETTERS = /gecko|g+e+c+k+o+t+e+r+m|b+i+t+q+u+e+r+y|bitqry/;
+export function sourceNamed(text: unknown): boolean {
+  if (typeof text !== "string") return false;
+  return [lettersOf(text), lettersOf(text, { leet: true })].some((r) => SOURCE_LETTERS.test(r));
 }
 
 /**
@@ -1952,6 +1984,8 @@ export function admitXPost(raw: unknown, given: XGateCtx, baseGate: BaseGate): X
   if (hidesCharacters(tidied)) return refuse("hidden-chars");
   // Nothing written for a letter, read before any sherwood check (strayCharacter).
   if (ctx.kind === "reply" && strayCharacter(tidied)) return refuse("charset");
+  // An active owner's post never names a data provider (XGateCtx.house).
+  if (ctx.house === true && sourceNamed(tidied)) return refuse("source-named");
   // A reply never says sherwood runs it, whoever drafted it (see SHERWOOD_NAME).
   if (ctx.kind === "reply" && sherwoodClaimed(tidied)) return refuse("sherwood-claim");
   // In a reply only, "sherwood-1" is a name: masked for every check below, put back after.
@@ -2040,6 +2074,12 @@ function admitMasked(tidied: string, ctx: XGateCtx, baseGate: BaseGate, agentNam
   if (ctx.kind === "reply" && ctx.answer === true && ANSWER_CALL.test(withoutReplyOptOut(own).trim())) return refuse("hype");
   // A drafted answer never forecasts a coin, named or pointed at (draftedForecast).
   if (ctx.kind === "reply" && ctx.answer === true && ctx.drafted === true && draftedForecast(withoutReplyOptOut(own))) return refuse("hype");
+  // AN INSIGHT POST IS HELD TO EVERY SCREEN A DRAFTED ANSWER IS (XGateCtx.insight).
+  if (ctx.kind === "casual" && ctx.insight === true) {
+    if (COIN_ADVICE.test(own) || REPLY_ADVICE.test(own) || ANSWER_PREDICTION.test(own) || ANSWER_CALL.test(own.trim()) || draftedForecast(own)) return refuse("hype");
+    if (houseClaimed(own) || deciderClaimed(own)) return refuse("house-claim");
+    if (amountSaid(own)) return refuse("quantity");
+  }
   // A drafted answer never claims for the house, teases, judges the asker or boasts (ANSWER_HOUSE_CLAIM).
   if (ctx.kind === "reply" && ctx.answer === true && ctx.drafted === true && houseClaimed(own)) return refuse("house-claim");
   // Nor who or what decides its trades (DECIDER_CLAIM).

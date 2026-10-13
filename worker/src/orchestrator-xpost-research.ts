@@ -66,8 +66,8 @@ import { normalisedTag, plainAsk, withoutReplyOptOut } from "./xpost/replies";
 import { takeAllowance, type XPost } from "./xpost/store";
 import { coinNamedIn, type AnswerIntentKind } from "./xpost/writer";
 import { asksAboutACoin, everydayWord, nameLikeWords } from "./xpost/words";
-import { cleanTicker, neverAnsweredName, type FiguresSection, type FiguresSpec } from "./xpost/figures";
-import { majorsDirOf, moveOf, type HotRead, type MajorRead, type MarketRead } from "./xpost/market";
+import { cleanTicker, neverAnsweredName, withoutFiguresLine, type FiguresSection, type FiguresSpec } from "./xpost/figures";
+import { majorsDirOf, moveOf, type HotRead, type InsightRead, type MajorRead, type MarketRead } from "./xpost/market";
 import { coinQuery, LISTINGS_MAX, MAJORS_MAX_RANK, pickMajor, readChainListings, readCoinMarket, readCoinMarkets, readCoinTrending, readTopCoins, searchCoinList, type ChainListing, type ChainListingsRead, type CoinHit, type CoinMarket, type CoinMarketRead, type CoinMarketsRead, type CoinSearchRead, type CoinTopRead, type CoinTrendingRead } from "./venues/coingecko-coins";
 
 const MIN = 60_000;
@@ -694,6 +694,29 @@ export function houseTroubleAsk(text: unknown): boolean {
   return HOUSE_TROUBLE.test(t) || (HOUSE_WORD.test(t) && ROADMAP_WORD.test(t));
 }
 
+/**
+ * HOW TO GET AN AGENT, ASKED PLAINLY (the owner's teammate, 2026-10-13: "how
+ * do i get an agent" is one of the few questions an active agent answers on
+ * X). The Telegram groups' reader (publicFactRequest) knows "get my own
+ * agent" and "an agent like you"; these whole plain tags (plainAsk) are read
+ * as onboarding too, after at most two greeting words: how or where do i get,
+ * make, build, set up or create an agent (or a bot, my own, an ai trading
+ * one), and can i get one. A word more, and it is not on the list. Exported
+ * for tests.
+ */
+const AGENT_NOUN = String.raw`(?:an?|my own|my|one|an ai|a trading|an ai trading) ?(?:ai |trading |ai trading )?(?:agent|bot)(?: like (?:you|u|yours|this one)| of my own| too)?`;
+const ONBOARDING_SHAPES = [
+  `(?:how|where) (?:do|can|could|would) i (?:get|make|build|set up|setup|create|start) ${AGENT_NOUN}`,
+  `how (?:to|does one|do you|do u) (?:get|make|build|set up|setup|create|start) ${AGENT_NOUN}`,
+  `can i (?:get|have|make|build|set up|create) ${AGENT_NOUN}`,
+  `how do i get (?:one|one of you|started)`,
+];
+const ONBOARDING_ALLOWED = new RegExp(`^${GREETING}(?:${ONBOARDING_SHAPES.join("|")})$`, "u");
+export function onboardingAsk(text: unknown): boolean {
+  const plain = plainAsk(text);
+  return plain !== null && !sherwoodMentioned(text) && ONBOARDING_ALLOWED.test(plain);
+}
+
 /** Words that set one coin against another. */
 const COMPARES = /\b(?:vs\.?|versus|or|than|compared?|comparison|comparing|better|worse|safer|riskier|healthier|stronger|weaker|which|either|between|instead)\b/i;
 
@@ -742,6 +765,8 @@ export function classifyTag(text: string, o: { address?: string | null; advice?:
   const asked = publicFactRequest(t);
   if (asked?.kind === "site" && asked.topic === "capabilities") return { kind: "capabilities" };
   if (asked?.kind === "site" && asked.topic === "onboarding") return { kind: "onboarding" };
+  // HOW TO GET AN AGENT, ON THE X ALLOWLIST'S PLAIN SHAPES (onboardingAsk, 2026-10-13).
+  if (address === null && onboardingAsk(t)) return { kind: "onboarding" };
   // "HOW'S THE MARKET?", ON THE ALLOWLIST'S PLAIN SHAPES (marketAsk): the big coins' day and the chain's movers.
   if (address === null && marketAsk(t)) return { kind: "market" };
   // "WHAT'S HOT?", ON THE ALLOWLIST'S PLAIN SHAPES (hotAsk): an overview, no coin named.
@@ -1072,6 +1097,14 @@ export interface ResearchBundle {
    */
   market?: MarketRead;
   /**
+   * THE MARKET NOW FOR AN ACTIVE OWNER'S INSIGHT POST (xpost/market.ts
+   * InsightRead, 2026-10-13): the market read's big coins' day, their week
+   * too, the chain's movers and how many of them Fomo traders bought most.
+   * Set beside `market` whenever the big coins or the chain were read; absent
+   * when neither was.
+   */
+  insight?: InsightRead;
+  /**
    * What the answer turned out to be about, when that is not what the tag was
    * read as: a ticker on the coin list that is no major (a copycat, unranked,
    * past the rank cap) goes on as a coin of the chain. Absent: the tag's own.
@@ -1115,10 +1148,16 @@ export function sayable(s: unknown): s is string {
  * bitquery, which the market phrases and the figures line name. A post that
  * says one carries research; a draft that cites one with nothing looked up
  * is refused (orchestrator-xpost.ts, gate:unlooked-source).
+ *
+ * AND "THE MARKET DATA", the words a major's phrases say where the provider's
+ * name used to be (2026-10-13). AND CODE'S FIGURES LINE ITSELF (2026-10-13): the line names no source any
+ * more ("ETH #2, ~$3.4k, …", "24h: BTC +1.2%, …"), so a post that ends in one
+ * (figures.ts withoutFiguresLine) carries research by the line alone: an
+ * answer's, and an active owner's market insight post's.
  */
-const RESEARCH_SOURCE = /\b(?:index|fomo|on[\s-]?chain|chain data|project|creator|contract|coin\s?gecko|gecko\s?terminal|bit\s?query)\b/i;
+const RESEARCH_SOURCE = /\b(?:index|fomo|on[\s-]?chain|chain data|market data|project|creator|contract|coin\s?gecko|gecko\s?terminal|bit\s?query)\b/i;
 export function carriesResearch(body: unknown): boolean {
-  return typeof body === "string" && RESEARCH_SOURCE.test(body);
+  return typeof body === "string" && (RESEARCH_SOURCE.test(body) || withoutFiguresLine(body) !== body);
 }
 
 /** A promise held to `ms`, or `fallback`. Never throws; its timer never holds a shutdown. */
@@ -1259,22 +1298,23 @@ function moveWords(pct: number | null, when: string): string | null {
 /**
  * A MAJOR'S MARKET, IN WORDS (2026-10-12): where it ranks, how the day and the
  * week went, how busy its trading is against its size, each from CoinGecko's
- * numbers by code's own thresholds and with "coingecko" in it. Never a
+ * numbers by code's own thresholds, said as "the market data" and never by
+ * the provider's name (the owner's teammate, 2026-10-13). Never a
  * figure, never its name (the asker named it; the answer calls it "it"), and
  * nothing about whether to buy it. The figures themselves go in code's line
  * (xpost/figures.ts), never to the model.
  */
 export function majorPhrases(m: Pick<CoinMarket, "rank" | "marketCapUsd" | "volume24hUsd" | "change24hPct" | "change7dPct">): string[] {
   const out: string[] = [];
-  if (m.rank !== null) out.push(m.rank <= 10 ? "coingecko ranks it among the very biggest coins" : m.rank <= 50 ? "coingecko ranks it a large cap" : "coingecko ranks it a mid cap");
+  if (m.rank !== null) out.push(m.rank <= 10 ? "the market data ranks it among the very biggest coins" : m.rank <= 50 ? "the market data ranks it a large cap" : "the market data ranks it a mid cap");
   const day = moveWords(m.change24hPct, "today");
-  if (day) out.push(`coingecko shows it ${day}`);
+  if (day) out.push(`the market data shows it ${day}`);
   const week = moveWords(m.change7dPct, "on the week");
-  if (week) out.push(`coingecko shows it ${week}`);
+  if (week) out.push(`the market data shows it ${week}`);
   const vol = m.volume24hUsd, cap = m.marketCapUsd;
   if (vol !== null && cap !== null && Number.isFinite(vol) && Number.isFinite(cap) && cap > 0 && vol >= 0) {
     const turnover = vol / cap;
-    out.push(turnover >= 0.1 ? "trading volume looks heavy on coingecko" : turnover <= 0.02 ? "trading volume looks light on coingecko" : "trading volume looks ordinary on coingecko");
+    out.push(turnover >= 0.1 ? "trading volume looks heavy in the market data" : turnover <= 0.02 ? "trading volume looks light in the market data" : "trading volume looks ordinary in the market data");
   }
   return out.filter(sayable);
 }
@@ -1583,7 +1623,7 @@ export function hotScreen(pools: readonly GeckoPool[]): HotCoin[] {
 }
 
 /** Said when the index shows nothing past the floors. */
-export const HOT_NONE = "nothing is standing out on the robinhood chain index right now";
+export const HOT_NONE = "nothing is standing out on the chain's index right now";
 
 /**
  * WHAT'S HOT, IN WORDS: how many coins stand out (one, a couple, a few), which
@@ -1595,7 +1635,7 @@ export const HOT_NONE = "nothing is standing out on the robinhood chain index ri
 export function hotPhrases(o: { changes: readonly (number | null)[]; crowd: number; trending: number }): string[] {
   const n = o.changes.length;
   if (n === 0) return [HOT_NONE].filter(sayable);
-  const out = [`the robinhood chain index shows ${n === 1 ? "one coin" : n === 2 ? "a couple of coins" : "a few coins"} standing out right now`];
+  const out = [`the chain's index shows ${n === 1 ? "one coin" : n === 2 ? "a couple of coins" : "a few coins"} standing out right now`];
   const known = o.changes.filter((c): c is number => c !== null && Number.isFinite(c));
   if (known.length) {
     const up = known.filter((c) => c > 0).length, down = known.filter((c) => c < 0).length;
@@ -1603,7 +1643,7 @@ export function hotPhrases(o: { changes: readonly (number | null)[]; crowd: numb
     else out.push(up === known.length ? "on the index they're all up on the day" : down === known.length ? "on the index they're all down on the day" : "on the index they're a mix of up and down on the day");
   }
   if (o.crowd > 0) out.push(`fomo traders are most active in ${o.crowd === 1 ? "one coin" : "a couple of coins"} the index has trending`);
-  if (o.trending > 0) out.push(`coingecko's global trending list has ${o.trending === 1 ? "a big name" : "a few big names"} on it`);
+  if (o.trending > 0) out.push(`the global trending index has ${o.trending === 1 ? "a big name" : "a few big names"} on it`);
   return out.filter(sayable);
 }
 
@@ -1638,7 +1678,10 @@ function ownMoney(mode: AgentFacts["mode"], paper: boolean): boolean {
 
 /** A buy post as the model may read it: its prose, without the CA or wallet suffix and the opt-out. */
 function ownPostProse(body: string): string {
-  return withoutReplyOptOut(String(body ?? "").split(/ (?:CA|Wallet) \(/)[0] ?? "").replace(/\s+/g, " ").trim();
+  // The trusted lines code appends: the older " CA (chain): 0x…" / " Wallet (…)"
+  // suffixes, and since 2026-10-13 a blank line then the tx link and the bare CA.
+  const text = String(body ?? "").replace(/(?:\n\nhttps:\/\/robinhoodchain\.blockscout\.com\/tx\/0x[0-9a-fA-F]{64})?\n\n0x[0-9a-fA-F]{40}$/, "");
+  return withoutReplyOptOut(text.split(/ (?:CA|Wallet) \(/)[0] ?? "").replace(/\s+/g, " ").trim();
 }
 
 /**
@@ -1661,7 +1704,9 @@ const TRENCHER_ID = /^T[0-9A-F]{11}$/;
 
 /** A buy post's own contract, from the CA suffix the pipeline adds (public-wallet.ts appendPublicToken), or null. */
 function postContract(body: string): string | null {
-  const m = / CA \([^)]*\): (0x[0-9a-fA-F]{40})\b/.exec(String(body ?? ""));
+  const text = String(body ?? "");
+  // Alone on the last line after a blank one (2026-10-13), or the older " CA (chain): 0x…" suffix.
+  const m = /\n\n(0x[0-9a-fA-F]{40})$/.exec(text) ?? / CA \([^)]*\): (0x[0-9a-fA-F]{40})\b/.exec(text);
   return m ? m[1]!.toLowerCase() : null;
 }
 
@@ -2188,8 +2233,12 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
         const majorsRead = big ? majorsDirOf(big.map((m) => m.change24hPct)) : null;
         const chainRead: HotRead | null = hot.hot ?? null;
         const read: MarketRead = { majors: majorsRead, chain: chainRead };
+        // And for an insight post: the week as the day is read (majorsDirOf), and Fomo's most bought among the chain's movers.
+        const crowdShown = hot.figures?.find((x): x is Extract<FiguresSection, { kind: "crowd" }> => x.kind === "crowd")?.symbols.length ?? 0;
+        const insight: InsightRead | null = majorsRead || chainRead
+          ? { day: majorsRead, week: big ? majorsDirOf(big.map((m) => m.change7dPct)) : null, chain: chainRead, crowd: input.fomo ? crowdShown : null } : null;
         const facts = [
-          ...(majorsRead ? [`coingecko shows the big coins ${majorsRead.dir === "up" ? "mostly up" : majorsRead.dir === "down" ? "mostly down" : majorsRead.dir === "mixed" ? "split" : "flat"} today`] : []),
+          ...(majorsRead ? [`the market data shows the big coins ${majorsRead.dir === "up" ? "mostly up" : majorsRead.dir === "down" ? "mostly down" : majorsRead.dir === "mixed" ? "split" : "flat"} today`] : []),
           ...hot.facts,
         ].filter(sayable);
         const pools = hot.figures?.find((x): x is Extract<FiguresSection, { kind: "pools" }> => x.kind === "pools");
@@ -2200,7 +2249,8 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
           ...(crowd ? [crowd] : []),
         ];
         notes.push("market");
-        return { facts, ...(figures.length ? { figures } : {}), ...(hot.shownNames?.length ? { shownNames: hot.shownNames } : {}), market: read, ...(hot.hot ? { hot: hot.hot } : {}), lookups, notes };
+        return { facts, ...(figures.length ? { figures } : {}), ...(hot.shownNames?.length ? { shownNames: hot.shownNames } : {}), market: read, ...(insight ? { insight } : {}),
+          ...(hot.hot ? { hot: hot.hot } : {}), lookups, notes };
       };
       const i = input.intent;
       const f = input.facts;

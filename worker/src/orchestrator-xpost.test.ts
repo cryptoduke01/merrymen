@@ -288,7 +288,7 @@ interface World {
   fetch: FetchLike;
 }
 
-async function world(t: { after(fn: () => void): void }, consentAtMs: number): Promise<World> {
+async function world(t: { after(fn: () => void): void }, consentAtMs: number, scope = "tweet.write"): Promise<World> {
   const raw = new DatabaseSync(":memory:");
   t.after(() => raw.close());
   const db = wrapSqlite(raw);
@@ -298,7 +298,7 @@ async function world(t: { after(fn: () => void): void }, consentAtMs: number): P
     tenant: TENANT,
     xUserId: "111",
     username: "robin_trades",
-    tokens: { accessToken: "access-token", refreshToken: "refresh-token", accessExpiresAtMs: consentAtMs + 30 * 24 * HOUR, scope: "tweet.write" },
+    tokens: { accessToken: "access-token", refreshToken: "refresh-token", accessExpiresAtMs: consentAtMs + 30 * 24 * HOUR, scope },
     nowMs: consentAtMs - MIN,
   });
   await store.setPosting(db, TENANT, { enabled: true, xUserId: "111" }, consentAtMs);
@@ -343,6 +343,8 @@ function poster(
     facts?: XPosterDeps["facts"];
     socialProfile?: XPosterDeps["socialProfile"];
     saleResults?: XPosterDeps["saleResults"];
+    saleCard?: XPosterDeps["saleCard"];
+    renderCard?: XPosterDeps["renderCard"];
     publicProjectDescription?: XPosterDeps["publicProjectDescription"];
     /** The pass's own clock. Default: held — no time passes inside a pass. */
     monotonic?: () => number;
@@ -366,6 +368,8 @@ function poster(
       monotonic: over.monotonic ?? (() => 0),
       socialProfile: over.socialProfile,
       saleResults: over.saleResults,
+      saleCard: over.saleCard,
+      renderCard: over.renderCard,
       publicProjectDescription: over.publicProjectDescription,
       llm: async (_creds, { prompt }) => {
         w.prompts.push(prompt);
@@ -433,7 +437,7 @@ describe("owner-scoped token contracts", () => {
     await p.step(w.db, ROSTER, new Map(), T0 + MIN);
     const buy = (await rows(w)).find((row) => row.kind === "buy")!;
     assert.ok(buy);
-    assert.equal(buy.body, `${BUY} CA (Robinhood Chain): ${TOKEN}`);
+    assert.equal(buy.body, `${BUY}\n\n${TOKEN}`);
     assert.ok(w.prompts.every((prompt) => !prompt.includes(TOKEN)));
     consent = false;
     await p.step(w.db, ROSTER, new Map(), buy.dueAtMs);
@@ -478,7 +482,7 @@ describe("owner-scoped token contracts", () => {
         assert.equal(post.reason, "gate:project-attribution");
       } else {
         assert.equal(post.status, "scheduled");
-        assert.match(post.body, / CA \(Robinhood Chain\): 0x/);
+        assert.match(post.body, /\n\n0x[0-9a-f]{40}$/);
       }
     });
   }
@@ -512,6 +516,131 @@ describe("receipt-backed sale posts", () => {
     await p.step(w.db, ROSTER, new Map(), post.dueAtMs + MIN);
     assert.deepEqual(w.tweets, [post.body]);
   });
+  describe("the profit card on an active owner's sale (2026-10-13)", () => {
+    const MEDIA = "tweet.read tweet.write users.read offline.access media.write";
+    const WIN = { ...sale, gainPct: 40 };
+    const CARD = { symbol: "PEPE", investedUsdg: 5_000_000n, proceedsUsdg: 7_000_000n, realisedUsdg: 2_000_000n };
+    const PNG = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 1, 2, 3]);
+    /** X, recording every call: an upload answers a media id, a post an id. */
+    function xWithMedia(calls: { url: string; body: Record<string, unknown> }[], upload: { status: number; body: unknown } = { status: 200, body: { data: { id: "1880028106020515840" } } }): FetchLike {
+      return async (url, init) => {
+        calls.push({ url, body: JSON.parse(init.body ?? "{}") });
+        const reply = url.endsWith("/2/media/upload") ? upload : { status: 201, body: { data: { id: String(1840000000000000000n + BigInt(calls.length)) } } };
+        const text = JSON.stringify(reply.body);
+        return { status: reply.status, headers: { get: () => null }, text: async () => text };
+      };
+    }
+    async function sendSale(over: { scope?: string; active?: boolean; result?: PlanSell; card?: XPosterDeps["saleCard"]; render?: XPosterDeps["renderCard"]; upload?: { status: number; body: unknown } }, t: { after(fn: () => void): void }) {
+      const w = await world(t, T0, over.scope ?? MEDIA);
+      await ready(w);
+      const calls: { url: string; body: Record<string, unknown> }[] = [];
+      const asked: { agent: string; chainId: number; op: string }[] = [];
+      const drawn: unknown[] = [];
+      const results: PlanSell[] = [over.result ?? WIN];
+      const p = poster(w, {
+        active: over.active ?? true,
+        answer: () => "i sold some pepe.", facts: factsOf([], "live"),
+        fetch: xWithMedia(calls, over.upload),
+        socialProfile: async () => ({ xTradeResults: true, currentAgent: { address: AGENT, chainId: 4663 } }),
+        saleResults: async () => results,
+        saleCard: over.card ?? (async (_db, agent, chainId, op) => { asked.push({ agent, chainId, op }); return CARD; }),
+        renderCard: over.render ?? (async (card) => { drawn.push(card); return PNG; }),
+      });
+      await p.step(w.db, ROSTER, new Map(), T0 + MIN);
+      const post = (await rows(w)).find((r) => r.kind === "sell")!;
+      assert.ok(post, "the sale was drafted");
+      const logs: string[] = [];
+      const notes: string[] = [];
+      for (const at of [post.dueAtMs, post.dueAtMs + MIN]) {
+        const r = await p.step(w.db, ROSTER, new Map(), at);
+        if (r.log) logs.push(r.log);
+        notes.push(...(r.notes ?? []));
+      }
+      const sent = (await rows(w)).find((r) => r.id === post.id)!;
+      return { w, p, post, sent, calls, asked, drawn, logs, notes, results };
+    }
+
+    it("uploads the card of the vouched sale right before its post, and the post names the media id", async (t) => {
+      const { post, sent, calls, asked, drawn, logs } = await sendSale({}, t);
+      assert.match(post.body, /\n\+40% gross gain before fees and gas/);
+      assert.equal(sent.status, "posted");
+      const sale = calls.filter((c) => c.url.endsWith("/2/media/upload") || c.body.text === post.body);
+      assert.deepEqual(sale.map((c) => c.url), ["https://api.x.com/2/media/upload", "https://api.x.com/2/tweets"]);
+      assert.equal(sale[0]!.body.media_category, "tweet_image");
+      assert.deepEqual([...Buffer.from(String(sale[0]!.body.media), "base64")], [...PNG]);
+      assert.deepEqual(sale[1]!.body, { text: post.body, media: { media_ids: ["1880028106020515840"] } });
+      assert.deepEqual(asked, [{ agent: AGENT, chainId: 4663, op: WIN.operationKey }], "the card is the vouched sale's, asked once");
+      assert.deepEqual(drawn, [CARD]);
+      assert.match(logs.join(" "), /card-attached 1/);
+    });
+
+    it("a grant from before media.write posts the sale as text and asks the operator, once, to reconnect X", async (t) => {
+      const { p, w, sent, calls, asked, drawn, notes, results } = await sendSale({ scope: "tweet.read tweet.write users.read offline.access" }, t);
+      assert.equal(sent.status, "posted");
+      assert.equal(calls.filter((c) => c.url.endsWith("/2/media/upload")).length, 0);
+      assert.ok(calls.filter((c) => c.body.text === sent.body).every((c) => c.body.media === undefined));
+      assert.deepEqual(asked, [], "no card is read or drawn that cannot be attached");
+      assert.deepEqual(drawn, []);
+      const said = notes.filter((n) => /reconnect X to attach profit cards/.test(n));
+      assert.equal(said.length, 1);
+      assert.ok(said[0]!.includes(TENANT.toLowerCase()) && said[0]!.length < 200, "bounded, and names the owner, never a token");
+      assert.ok(!said[0]!.includes("access-token") && !said[0]!.includes(sent.body));
+      // A second profitable sale for the same owner posts too, and is not said again.
+      const next: PlanSell = { ...WIN, decisionId: "sale-two", operationKey: `0x${"34".repeat(32)}`, atSec: (T0 + 2 * HOUR) / 1000 };
+      results.push(next);
+      const id = await store.schedulePost(w.db, { tenant: TENANT, xUserId: "111", kind: "sell", dedupeKey: `sell:${TENANT}:${next.operationKey}`, body: sent.body, coin: next.token, decisionId: next.decisionId, nowMs: T0 + 2 * HOUR, dueAtMs: T0 + 2 * HOUR });
+      assert.ok(id);
+      const later: string[] = [];
+      for (let at = T0 + 2 * HOUR; at <= T0 + 6 * HOUR; at += 15 * MIN) later.push(...((await p.step(w.db, ROSTER, new Map(), at)).notes ?? []));
+      assert.equal((await rows(w)).find((r) => r.id === id)?.status, "posted");
+      assert.equal(later.filter((n) => /reconnect X/.test(n)).length, 0);
+      assert.equal(calls.filter((c) => c.url.endsWith("/2/media/upload")).length, 0);
+    });
+
+    it("never for an owner the operator did not name", async (t) => {
+      const { sent, calls, asked, drawn } = await sendSale({ active: false, result: sale }, t);
+      assert.equal(sent.status, "posted");
+      assert.equal(calls.filter((c) => c.url.endsWith("/2/media/upload")).length, 0);
+      assert.deepEqual([asked, drawn], [[], []]);
+    });
+
+    for (const outcome of ["loss", "flat", "unknown"] as const) {
+      it(`never for a ${outcome} sale`, async (t) => {
+        const { sent, calls, asked, drawn } = await sendSale({ result: { ...WIN, outcome, gainPct: outcome === "loss" ? -20 : outcome === "flat" ? 0 : null } }, t);
+        assert.equal(sent.status, "posted");
+        assert.equal(calls.filter((c) => c.url.endsWith("/2/media/upload")).length, 0);
+        assert.deepEqual([asked, drawn], [[], []]);
+      });
+    }
+
+    it("a sale the ledger no longer draws a card for, or one that cannot be drawn, posts as text", async (t) => {
+      const none = await sendSale({ card: async () => null }, t);
+      assert.equal(none.sent.status, "posted");
+      assert.equal(none.calls.filter((c) => c.url.endsWith("/2/media/upload")).length, 0);
+      assert.deepEqual(none.drawn, []);
+
+      const broken = await sendSale({ render: async () => { throw new Error("sharp would not load"); } }, t);
+      assert.equal(broken.sent.status, "posted");
+      assert.equal(broken.calls.filter((c) => c.url.endsWith("/2/media/upload")).length, 0);
+      assert.match(broken.logs.join(" "), /card-draw-failed 1/);
+    });
+
+    it("an upload X refuses costs only the picture: the sale posts once, as text", async (t) => {
+      const warn = console.warn;
+      console.warn = () => {};
+      try {
+        const { sent, calls, logs } = await sendSale({ upload: { status: 403, body: { title: "Forbidden" } } }, t);
+        assert.equal(sent.status, "posted");
+        const sale = calls.filter((c) => c.url.endsWith("/2/media/upload") || c.body.text === sent.body);
+        assert.deepEqual(sale.map((c) => c.url), ["https://api.x.com/2/media/upload", "https://api.x.com/2/tweets"]);
+        assert.equal(sale[1]!.body.media, undefined);
+        assert.match(logs.join(" "), /card-upload-failed 1/);
+      } finally {
+        console.warn = warn;
+      }
+    });
+  });
+
   for (const changed of ["consent", "result", "proof", "token"] as const) {
     it(`withholds a pending sale if its ${changed} changes before send`, async (t) => {
       const w = await world(t, T0);
