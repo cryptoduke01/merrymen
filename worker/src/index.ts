@@ -519,7 +519,7 @@ import {
 } from "./class-active";
 import { ACTIVITY_GATE, MAX_ACTIVITY_BLOCKS, readCurveActivity } from "./venues/pons-activity";
 import type { CurveLeg } from "./strategist/proposals";
-import { mainnetClient, readAccountBalances, readClassCustody, readMarketSafety, setMainnetRpc } from "./snapshot";
+import { mainnetClient, mainnetPoolClient, readAccountBalances, readClassCustody, readMarketSafety, setMainnetRpc } from "./snapshot";
 import { applyFill } from "./basis";
 import {
   addDecision,
@@ -5526,7 +5526,8 @@ async function main() {
   // watchTokens is read through a closure because the owner can change the watch
   // set mid-run — capturing the array once would freeze the universe.
   const depthReader = createDepthReader({
-    client: mainnetClient(),
+    // A getter, so a settings change that moves the RPC moves depth with it.
+    client: mainnetPoolClient,
     tokens: () => watchTokens,
     cash: CASH.USDG as `0x${string}`,
     cashDecimals: USDG_DECIMALS,
@@ -5671,8 +5672,9 @@ async function main() {
     }
     const { quotes, refused } = await poolPrices.read({
       // Pools live on MAINNET, like the feeds — a testnet grant still values its
-      // book against the real market rather than against nothing.
-      client: mainnetClient(),
+      // book against the real market rather than against nothing. The pool
+      // client packs a pass's reads into aggregate3 calls (snapshot.ts).
+      client: mainnetPoolClient(),
       tokens: feedless,
       guard: {
         minLiquidityUsdg: usdg(cfg.minPoolLiquidityUsdg),
