@@ -44,8 +44,20 @@ export const X_POSTS_URL = "https://api.x.com/2/tweets";
  * What posting needs, and nothing more. POST /2/tweets declares all three of
  * tweet.write, tweet.read and users.read; offline.access is what makes X issue
  * a refresh token at all, without which the connection dies in two hours.
+ * media.write is POST /2/media/upload's, for the profit card an active owner's
+ * sale carries (docs/x-posting.md "Sale posts"). A grant made before it was
+ * asked for lacks it: those sales post without the card, as they always did,
+ * until the owner reconnects X.
  */
-export const X_SCOPES = ["tweet.read", "tweet.write", "users.read", "offline.access"] as const;
+export const X_SCOPES = ["tweet.read", "tweet.write", "users.read", "offline.access", "media.write"] as const;
+
+/** The scope a card upload needs. */
+export const X_MEDIA_SCOPE = "media.write";
+
+/** Whether a stored grant's scope string (space-separated, as X answers it) holds `scope`. */
+export function grantHolds(granted: string | null | undefined, scope: string): boolean {
+  return typeof granted === "string" && granted.split(/\s+/).includes(scope);
+}
 
 /** A request to X that has not answered in this long is an answer: uncertain. */
 const TIMEOUT_MS = 10_000;
@@ -248,7 +260,10 @@ async function tokenCall(app: XApp, form: Record<string, string>, fetchImpl: Fet
       refreshToken: typeof refresh === "string" && refresh.length >= 8 ? refresh : null,
       // A missing or absurd lifetime is read as X's documented two hours.
       accessExpiresAtMs: nowMs + (Number.isFinite(expiresIn) && expiresIn > 0 && expiresIn < 30 * 86_400 ? expiresIn : 7200) * 1000,
-      scope: typeof body?.scope === "string" ? body.scope : X_SCOPES.join(" "),
+      // A grant X does not name is read WITHOUT media.write: a token issued
+      // before it was asked for would otherwise be stored as holding it, and
+      // its owner never told to reconnect. Posting needs nothing it adds.
+      scope: typeof body?.scope === "string" ? body.scope : X_SCOPES.filter((s) => s !== X_MEDIA_SCOPE).join(" "),
     },
   };
 }

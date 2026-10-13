@@ -7,8 +7,10 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
 import {
+  X_MEDIA_SCOPE,
   X_SCOPES,
   authorizeUrl,
+  grantHolds,
   createPost,
   exchangeCode,
   fetchMe,
@@ -75,12 +77,27 @@ test("PKCE is S256 and the authorize URL asks for exactly what posting needs", (
   assert.equal(url.searchParams.get("response_type"), "code");
   assert.equal(url.searchParams.get("client_id"), "client-id");
   assert.equal(url.searchParams.get("redirect_uri"), "https://app.test/connect/x");
-  assert.equal(url.searchParams.get("scope"), "tweet.read tweet.write users.read offline.access");
+  assert.equal(url.searchParams.get("scope"), "tweet.read tweet.write users.read offline.access media.write");
   assert.equal(url.searchParams.get("code_challenge_method"), "S256");
   assert.equal(url.searchParams.get("code_challenge"), challenge);
   assert.equal(url.searchParams.get("state"), "w.s");
   assert.ok(!url.toString().includes("client-secret"), "the secret never goes through a browser");
-  assert.deepEqual([...X_SCOPES], ["tweet.read", "tweet.write", "users.read", "offline.access"]);
+  assert.deepEqual([...X_SCOPES], ["tweet.read", "tweet.write", "users.read", "offline.access", "media.write"]);
+});
+
+test("a stored grant holds media.write only when X named it, and an unnamed grant is never read as holding it", async () => {
+  assert.equal(grantHolds("tweet.read tweet.write users.read offline.access media.write", X_MEDIA_SCOPE), true);
+  // Every grant issued before the card asked for it.
+  assert.equal(grantHolds("tweet.read tweet.write users.read offline.access", X_MEDIA_SCOPE), false);
+  assert.equal(grantHolds("tweet.write", X_MEDIA_SCOPE), false);
+  assert.equal(grantHolds("media.writer", X_MEDIA_SCOPE), false, "a whole word, not a prefix");
+  assert.equal(grantHolds("", X_MEDIA_SCOPE), false);
+  assert.equal(grantHolds(null, X_MEDIA_SCOPE), false);
+  // An answer that names no scope is stored as the posting scopes alone.
+  const r = await refreshTokens(APP, "old-refresh", { fetch: scripted(200, { access_token: "acc-12345", refresh_token: "ref-12345", expires_in: 7200 }), nowMs: 1_000 });
+  assert.ok(r.ok);
+  assert.equal(r.value.scope, "tweet.read tweet.write users.read offline.access");
+  assert.equal(grantHolds(r.value.scope, X_MEDIA_SCOPE), false);
 });
 
 test("a state routes the callback page and nothing else", () => {
