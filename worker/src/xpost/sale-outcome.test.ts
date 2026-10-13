@@ -68,3 +68,12 @@ describe("a measured gain leads the result line for the operator's agents (2026-
     assert.equal(appendSaleOutcome("sold some pepe", "unknown", 50), "sold some pepe", "unevidenced cost: no result claim at all");
   });
 });
+
+describe("a gain too small to show is no figure, never +0% (review, 2026-10-13)", () => {
+  it("returns no figure under five hundredths of a percent, and the old line follows", () => {
+    assert.equal(gainFigure(0.04), null);
+    assert.equal(gainFigure(-0.049), null);
+    assert.equal(gainFigure(0.05), "+0.1%");
+    assert.equal(appendSaleOutcome("sold some pepe", "profit", 0.01), "sold some pepe\ngross gain before fees and gas. pleased with that part.");
+  });
+});

@@ -16,6 +16,8 @@ const RESULT: Readonly<Record<Exclude<SaleOutcome, "unknown">, string>> = {
 export function gainFigure(pct: number | null | undefined): string | null {
   if (typeof pct !== "number" || !Number.isFinite(pct) || Math.abs(pct) >= 1e7) return null;
   const abs = Math.abs(pct);
+  // A gain or loss too small to show at one decimal is no figure, never "+0%".
+  if (abs < 0.05) return null;
   const shown = abs >= 10 ? Math.round(abs).toLocaleString("en-US") : abs.toFixed(1).replace(/\.0$/, "");
   return `${pct < 0 ? "-" : "+"}${shown}%`;
 }

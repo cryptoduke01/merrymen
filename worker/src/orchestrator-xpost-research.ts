@@ -1678,7 +1678,10 @@ function ownMoney(mode: AgentFacts["mode"], paper: boolean): boolean {
 
 /** A buy post as the model may read it: its prose, without the CA or wallet suffix and the opt-out. */
 function ownPostProse(body: string): string {
-  return withoutReplyOptOut(String(body ?? "").split(/ (?:CA|Wallet) \(/)[0] ?? "").replace(/\s+/g, " ").trim();
+  // The trusted lines code appends: the older " CA (chain): 0x…" / " Wallet (…)"
+  // suffixes, and since 2026-10-13 a blank line then the tx link and the bare CA.
+  const text = String(body ?? "").replace(/(?:\n\nhttps:\/\/robinhoodchain\.blockscout\.com\/tx\/0x[0-9a-fA-F]{64})?\n\n0x[0-9a-fA-F]{40}$/, "");
+  return withoutReplyOptOut(text.split(/ (?:CA|Wallet) \(/)[0] ?? "").replace(/\s+/g, " ").trim();
 }
 
 /**

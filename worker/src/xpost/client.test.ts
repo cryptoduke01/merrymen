@@ -303,7 +303,13 @@ test("an upload is bounded by the caller's budget, never past the client's own t
     const started = Date.now();
     init.signal?.addEventListener("abort", () => { aborted.push(Date.now() - started); reject(new Error("aborted")); });
   });
-  assert.deepEqual(await uploadImage("acc", PNG, { fetch: hanging, timeoutMs: 30 }), { ok: false, failure: "uncertain", status: null });
+  // The client's abort timer is unref'd (it must never hold a process open), and a
+  // hanging fake leaves nothing else pending: on Node 22 the loop empties and the
+  // runner cancels this test and the rest of the file. Hold it open while it waits.
+  const keep = setInterval(() => {}, 1_000);
+  let result;
+  try { result = await uploadImage("acc", PNG, { fetch: hanging, timeoutMs: 30 }); } finally { clearInterval(keep); }
+  assert.deepEqual(result, { ok: false, failure: "uncertain", status: null });
   assert.equal(aborted.length, 1);
   assert.ok(aborted[0]! < 2_000, `aborted after ${aborted[0]}ms`);
 });
