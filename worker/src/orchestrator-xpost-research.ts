@@ -2074,9 +2074,23 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
         // contract, the same one included: what's hot is never a read of its
         // own book, and the last screen cannot tell a contract from a copy.
         const mine = [...boughtNames(input.facts, input.posts), ...(input.ownCoins ?? [])];
+        // AND BY ITS CONTRACT, AND BY THE NAME COINGECKO LISTS IT UNDER (red-team
+        // review of daaae961, 2026-10-12). Alan bought CHMP, listed as "Chump
+        // Frog", and its buy post stored the coin as "chump frog" (planner.ts
+        // coinOf keys on the name). Five days on, its call out of the facts'
+        // window, "what's hot?" posted "trending $CHMP 24h +64.3% …; fomo: most
+        // bought $CHMP": "chump frog" names no "CHMP". So a coin is left out
+        // when its contract is one its calls bought, and when the name
+        // CoinGecko lists it under goes by any name its buys or buy posts do,
+        // as its ticker already is.
+        const ownTokens = new Set(input.facts.calls.filter((c) => c.side === "buy" && typeof c.token === "string").map((c) => c.token!.toLowerCase()));
+        const ownListing = (token: string): boolean => {
+          const name = listingOf(token)?.name;
+          return typeof name === "string" && name.trim() !== "" && ownCoinTicker(name, mine);
+        };
         // AND NEVER UNDER A BIG COIN'S NAME AS COINGECKO LISTS IT (red-team review of 1ed46625): the same screens on the listing's name (copycatName).
         const kept = vouched.filter((s) => !listed.has(s.ticker) && !namedIn(s.ticker, own) && !ownCoinTicker(s.ticker, mine) && !topCopycat(s.ticker, top!)
-          && !copycatName(listingOf(s.token)?.name, top!));
+          && !copycatName(listingOf(s.token)?.name, top!) && !ownTokens.has(s.token) && !ownListing(s.token));
         if (!kept.length) {
           notes.push(vouched.length ? "hot-none" : "hot-unlisted");
           return { facts: hotPhrases({ changes: [], crowd: 0, trending: 0 }), hot: { coins: 0, lead: null }, lookups, notes };

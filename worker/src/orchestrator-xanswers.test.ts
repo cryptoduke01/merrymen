@@ -4933,3 +4933,41 @@ test("a casual post that names a coin it bought is a trade post: no major's line
     assert.deepEqual(w.asked(), [], `${text} ${JSON.stringify(over)}: never drafted`);
   }
 });
+
+test("what's hot never shows its own bag once the buy leaves the facts' window, whatever its ticker beside the name its buy post stored (red-team review of daaae961, 2026-10-12)", async (t) => {
+  // POSTED at daaae961: live Alan bought CHMP ("Chump Frog", its token the CHMP pool's) five days ago, its buy post stored as "chump frog"
+  // (planner.ts coinOf keys on the name). The call is past the four-day window (calls: []), CHMP trends at +64.3%, coingecko lists it as
+  // chmp / "Chump Frog" at #3100, and fomo's most bought is CHMP: "… geckoterminal robinhood: trending $CHMP 24h +64.3% vol ~$1.1M,
+  // $FROGGO 24h +12.5% vol ~$400k; fomo: most bought $CHMP."
+  const chmp = namedPool("CHMP", 1, 64.3, 1.1e6), froggo = namedPool("FROGGO", 2, 12.5, 400_000);
+  const research = () => {
+    const broker: FomoBroker = {
+      async call(tool) {
+        return { status: "ok", tool, data: { topTokens: [{ token: { address: chmp.tokenAddress, key: chmp.tokenAddress, chain: {} }, label: { symbol: "CHMP", name: null }, buyers: 9, sellers: 2 }] } } as never;
+      },
+      memory: { get: async () => null, set: async () => {}, clear: async () => {} }, report: async () => {}, configured: () => true,
+    };
+    return createXResearch({
+      hotPools: async () => ({ pools: [chmp, froggo], failed: false }),
+      chainListings: async (addresses) => ({ failed: false, listings: [
+        { address: chmp.tokenAddress, id: "chump-frog", symbol: "chmp", name: "Chump Frog", rank: 3100 },
+        { address: froggo.tokenAddress, id: "froggo", symbol: "froggo", name: "FROGGO", rank: 4000 }].filter((l) => addresses.includes(l.address)) }),
+      majors: { configured: () => true, search: async () => ({ hits: [], failed: true }), market: async () => ({ market: null, failed: true }),
+        markets: async () => ({ failed: false, markets: [] }), trending: async () => ({ coins: [], failed: false }), top: TOP_READ },
+      fomo: () => broker,
+    });
+  };
+  const env = { ...RESEARCH_ON, MERRYMEN_XPOST_FOMO: "1" };
+  for (const [what, facts] of [["out of the window", { ...ALAN.facts, calls: [] }],
+    ["still in the window, at its contract under another name", { ...ALAN.facts, calls: [{ ...CALL, decisionId: "fill-chmp", symbol: "ZQX", name: "Zeq Thing", token: chmp.tokenAddress }] }]] as [string, AgentFacts][]) {
+    for (const ask of ["what's hot?", "how's the market?"]) {
+      const w = await world(t, { ...ALAN, facts, env, research: research() });
+      await postedBuy(w.db, "fill-chmp", "chump frog", "grabbed some chump frog on robinhood chain, real money", 5 * DAY, "9400");
+      w.setInbox([alanTag(MENTION, ask)]);
+      await w.step();
+      const text = String(w.sends[0]?.text ?? "");
+      assert.doesNotMatch(text, /\$CHMP/, `${what} / ${ask}: ${text}`);
+      assert.match(text, /\$FROGGO 24h \+12\.5%/, `${what} / ${ask}: ${text}`);
+    }
+  }
+});

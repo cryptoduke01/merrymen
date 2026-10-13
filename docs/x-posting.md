@@ -1285,7 +1285,7 @@ other owner's agent, and its posting and reply warnings, are unchanged.
   contract, its own included; research leaves such a coin out and the
   orchestrator reads every ticker of a what's-hot line again (never a
   major's: a line that came or went by the asked name would say which names
-  it bought). **Nor a big coin's ticker or name, read off CoinGecko itself**
+  it bought); and, since the red-team review of daaae961 ("chump frog" stored for a CHMP buy, then "trending $CHMP 24h +64.3%; fomo: most bought $CHMP" once the call left the four-day window), the name CoinGecko lists a coin under is read against the same names, and a contract its calls bought is left out whatever it is called (the buy post stores no contract, so past the window only the names screen it). **Nor a big coin's ticker or name, read off CoinGecko itself**
   (red-team 2026-10-12: the hand list missed most of the top two hundred;
   `$WLFI`, `$MNT`, `$SONIC`, `$LIDO`, `$MANTLE`, `$ASTER`, `$XDC`, `$CRV`
   from chain memecoins and `$HYPEX`, `$XRPAI`, `$WIFX` built on big coins
