@@ -3423,7 +3423,8 @@ test("how's the market: the big coins' day and the chain's movers, in code's cas
     assert.deepEqual(w.asked(), [], `${text}: no model call, the words are code's`);
     assert.equal(m.reads[0], "markets:bitcoin,ethereum,solana");
     const sent = String(w.sends[0]?.text ?? "");
-    const read: MarketRead = { majors: { dir: "up", size: "a fair bit" }, chain: { coins: 2, lead: { dir: "up", size: "sharply" } } };
+    // BTC +1.2% and ETH +2.4% a little, SOL +4.8% a fair bit: all up, by uneven margins (red-team review of 1ed46625, never "climbing steadily").
+    const read: MarketRead = { majors: { dir: "up", size: "uneven" }, chain: { coins: 2, lead: { dir: "up", size: "sharply" } } };
     const words = /^(.*?) coingecko 24h: /.exec(sent)?.[1] ?? "";
     assert.ok(marketAnswers(read, MENTION, { lower: true }).includes(words), `${text}: ${sent}`);
     assert.match(sent, / coingecko 24h: \$BTC \+1\.2%, \$ETH \+2\.4%, \$SOL \+4\.8%; geckoterminal robinhood: trending \$COINA 24h \+42\.1%, \$COINB 24h -8\.3%\.$/, sent);
@@ -4208,6 +4209,41 @@ test("how's the market says a crash is a crash and a melt-up a melt-up, and the 
       assert.doesNotMatch(words, /\b(?:runners?|runaway|standout|running|lively|buzz\w*|moving|movers?)\b/, `${id}: ${sent}`);
       if (big[0]! < -10) assert.doesNotMatch(words, /\b(?:slightly|a touch|gently|breather|a little|tired|easing|softening|drifting|sagging)\b/, `${id}: ${sent}`);
       if (big[0]! > 10) assert.doesNotMatch(words, /\b(?:inching|a touch|a hair|mildly|perky|nudged|edging|lean green)\b/, `${id}: ${sent}`);
+      assert.deepEqual(w.asked(), [], "never a draft");
+    }
+  }
+});
+
+test("how's the market never says the majors crashed or soared when bitcoin and ether barely moved: one coin's big day sets no size for all (red-team review of 1ed46625, 2026-10-12)", async (t) => {
+  const row = (id: string, symbol: string, rank: number, change24hPct: number) => ({ id, symbol, name: id, rank, priceUsd: 1, marketCapUsd: 1e9, volume24hUsd: 1e8, change24hPct, change7dPct: 1 });
+  const research = (big: number[]) => createXResearch({
+    hotPools: async () => ({ pools: [], failed: false }),
+    majors: { configured: () => true, search: async () => ({ hits: [], failed: true }), market: async () => ({ market: null, failed: true }),
+      markets: async () => ({ markets: [row("bitcoin", "btc", 1, big[0]!), row("ethereum", "eth", 2, big[1]!), row("solana", "sol", 6, big[2]!)], failed: false }),
+      trending: async () => ({ coins: [], failed: false }), top: TOP_READ },
+    chainListings: listingsOf([]),
+  });
+  // POSTED at 1ed46625 with the figures beside them: "majors are plunging", "the old guard took a beating", "the heavyweights dropped heavily",
+  // "majors are surging", "the old guard are soaring", "the giants fell steeply", "the heavyweights lost solid ground".
+  const BIG = /\b(?:plung\w*|beating|tumbl\w*|steep\w*|surg\w*|soar\w*|racing|leapt|heavily|hammered|sharply|dramatic\w*|fast|sinking|spiked|shot)\b/;
+  const SIZED = /\b(?:slightly|a touch|gently|inching|a hair|mildly|breather|perky|nudged|tired|easing|softening|drifting|sagging|edging|lean green|solid ground|steadily|decently|noticeably|a fair way|front foot|back foot|grinding|pushing ahead|retreating)\b/;
+  const worlds: [number[], RegExp, "up" | "down"][] = [
+    [[-1.2, -2.0, -10.5], /coingecko 24h: \$BTC -1\.2%, \$ETH -2%, \$SOL -10\.5%/, "down"],
+    [[0.8, 1.1, 10.3], /coingecko 24h: \$BTC \+0\.8%, \$ETH \+1\.1%, \$SOL \+10\.3%/, "up"],
+    [[-0.1, -0.2, -14], /coingecko 24h: \$BTC -0\.1%, \$ETH -0\.2%, \$SOL -14%/, "down"],
+    [[-1.2, -2, -4.5], /coingecko 24h: \$BTC -1\.2%, \$ETH -2%, \$SOL -4\.5%/, "down"],
+  ];
+  for (const [big, figures, dir] of worlds) {
+    for (const id of ["100000000000000775", "100000000000000780", "100000000000000781", "100000000000000770", "100000000000000776", "100000000000000777"]) {
+      const w = await world(t, { ...ALAN, env: RESEARCH_ON, research: research(big), answer: "buy btc now, it will 10x. say stop to opt out." });
+      w.setInbox([alanTag(id, "how's the market?")]);
+      await w.step();
+      const sent = String(w.sends[0]?.text ?? "");
+      assert.match(sent, figures, sent);
+      const words = /^(.*?) coingecko 24h: /.exec(sent)?.[1] ?? "";
+      assert.ok(marketAnswers({ majors: { dir, size: "uneven" }, chain: { coins: 0, lead: null } }, id, { lower: true }).includes(words), `${big}: ${sent}`);
+      assert.doesNotMatch(words, BIG, `${big}: ${sent}`);
+      assert.doesNotMatch(words, SIZED, `${big}: ${sent}`);
       assert.deepEqual(w.asked(), [], "never a draft");
     }
   }

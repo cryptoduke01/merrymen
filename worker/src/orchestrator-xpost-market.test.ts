@@ -111,7 +111,7 @@ describe("what's hot in code's words", () => {
   it("how's the market, in code's casual words: every line of every read clears the gate, none repeats another of its read, none names a coin or a figure (2026-10-12)", () => {
     const told = (text: string, mode: "live" | "paper" | null, recentOwn: string[]) => admitXPost(text, { kind: "reply", answer: true,
       agentName: "Alan Al Dale", mode, coins: [], recentOwn, recentFleet: [] }, (r, c) => admitAgentLine(r, c));
-    const majorsReads: MarketRead["majors"][] = [...(["up", "down"] as const).flatMap((dir) => (["a little", "a fair bit", "sharply"] as const).map((size) => ({ dir, size }))),
+    const majorsReads: MarketRead["majors"][] = [...(["up", "down"] as const).flatMap((dir) => (["a little", "a fair bit", "sharply", "uneven"] as const).map((size) => ({ dir, size }))),
       { dir: "mixed" }, { dir: "flat" }, null];
     const chainReads: MarketRead["chain"][] = [{ coins: 3, lead: { dir: "up", size: "sharply" } }, { coins: 1, lead: null }, { coins: 0, lead: null }, null];
     for (const majors of majorsReads) {
@@ -168,9 +168,12 @@ describe("what's hot in code's words", () => {
     // "a pack running" beside $CHUMP -62.5% and chain coins down by half.
     assert.deepEqual(majorsDirOf([-15.2, -21.7, -28.3]), { dir: "down", size: "sharply" });
     assert.deepEqual(majorsDirOf([18.4, 24.9, 31]), { dir: "up", size: "sharply" });
-    assert.deepEqual(majorsDirOf([1.2, 2.4, 4.8]), { dir: "up", size: "a fair bit" });
+    assert.deepEqual(majorsDirOf([3.2, 4.4, 8.8]), { dir: "up", size: "a fair bit" });
     assert.deepEqual(majorsDirOf([-0.6, -1.1, -2.94]), { dir: "down", size: "a little" });
-    assert.deepEqual(majorsDirOf([-0.6, -1.1, -2.96]), { dir: "down", size: "a fair bit" }, "read as the line shows it: -3%");
+    // Read as the line shows it: -3% is a fair bit, so the three are in different bands (red-team review of 1ed46625).
+    assert.deepEqual(majorsDirOf([-0.6, -1.1, -2.96]), { dir: "down", size: "uneven" }, "read as the line shows it: -3%");
+    assert.deepEqual(majorsDirOf([-3.04, -9.96]), { dir: "down", size: "uneven" }, "read as the line shows it: -10%");
+    assert.deepEqual(majorsDirOf([-3.04, -9.94]), { dir: "down", size: "a fair bit" }, "read as the line shows it: -9.9%");
     const small = /\b(?:slightly|a touch|gently|inching|a little|a hair|mildly|breather|perky|nudged|tired|easing|softening|drifting|sagging|lean green|edging)\b/;
     for (const majors of [{ dir: "down", size: "sharply" }, { dir: "up", size: "sharply" }, { dir: "down", size: "a fair bit" }, { dir: "up", size: "a fair bit" }] as const) {
       for (const chain of [{ coins: 1, lead: { dir: "down", size: "sharply" } }, { coins: 2, lead: { dir: "down", size: "sharply" } }, { coins: 3, lead: { dir: "up", size: "sharply" } }] as const) {
@@ -182,6 +185,31 @@ describe("what's hot in code's words", () => {
             if (majors.dir === "down") assert.doesNotMatch(words, /\b(?:up|higher|climb\w*|green|perky|forward|ahead|surging|soaring)\b/, line);
             if (majors.dir === "up") assert.doesNotMatch(words, /\b(?:down|lower|dipped|sliding|falling|plunging|tumbling)\b/, line);
           }
+        }
+      }
+    }
+  });
+
+  it("one coin's big day sets no size for all the big coins: in different bands they are only up or down, with no size (red-team review of 1ed46625, 2026-10-12)", () => {
+    // POSTED at 1ed46625: "majors are plunging" beside $BTC -1.2%, $ETH -2%, $SOL -10.5%; "majors are surging" beside +0.8%, +1.1%, +10.3%;
+    // "the giants fell steeply" beside -0.1%, -0.2%, -14%; "the heavyweights lost solid ground" beside -1.2%, -2%, -4.5%.
+    assert.deepEqual(majorsDirOf([-1.2, -2.0, -10.5]), { dir: "down", size: "uneven" });
+    assert.deepEqual(majorsDirOf([0.8, 1.1, 10.3]), { dir: "up", size: "uneven" });
+    assert.deepEqual(majorsDirOf([-0.1, -0.2, -14]), { dir: "down", size: "uneven" });
+    assert.deepEqual(majorsDirOf([-1.2, -2, -4.5]), { dir: "down", size: "uneven" });
+    // All in one band: that band.
+    assert.deepEqual(majorsDirOf([-1.2, -2, -2.5]), { dir: "down", size: "a little" });
+    assert.deepEqual(majorsDirOf([12, 15, 30]), { dir: "up", size: "sharply" });
+    const big = /\b(?:plung\w*|beating|tumbl\w*|steep\w*|surg\w*|soar\w*|racing|leapt|heavily|hammered|sharply|dramatic\w*|fast|sinking|spiked|shot)\b/;
+    const sized = /\b(?:slightly|a touch|gently|inching|a hair|mildly|breather|perky|nudged|tired|easing|softening|drifting|sagging|edging|lean green|solid ground|steadily|decently|noticeably|a fair way|front foot|back foot|grinding|pushing ahead|retreating)\b/;
+    for (const dir of ["up", "down"] as const) {
+      for (const id of ["1", "7", "100000000000000775", "100000000000000780"]) {
+        for (const line of marketAnswers({ majors: { dir, size: "uneven" }, chain: { coins: 2, lead: null } }, id, { lower: true })) {
+          const words = withoutReplyOptOut(line);
+          assert.doesNotMatch(words, big, line);
+          assert.doesNotMatch(words, sized, line);
+          if (dir === "down") assert.doesNotMatch(words, /\b(?:up|upward|higher|climb\w*|green|rose|gained|advanced)\b/, line);
+          if (dir === "up") assert.doesNotMatch(words, /\b(?:down|downward|lower|fell|red|lost|slid|retreated)\b/, line);
         }
       }
     }

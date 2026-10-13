@@ -278,14 +278,19 @@ export function majorUnreadAnswers(seed: string, style: { lower: boolean }, o: C
  * code's line (figures.ts "coingecko 24h:" and "geckoterminal robinhood:"),
  * never in these words.
  */
+/** How far the big coins moved together: one of moveOf's bands when all of them are in it, else "uneven". */
+export type MajorsSize = NonNullable<Move["size"]> | "uneven";
+
 export interface MarketRead {
   /**
    * Which way the big coins went on the day, together: all up, all down, some
-   * each way, or all flat; and, all up or all down, how far the one that moved
-   * most went (moveOf's bands on the figures as shown), so the words never say
-   * "slightly" beside a crash (red-team review of a964a74c, 2026-10-12).
+   * each way, or all flat; and, all up or all down, how far: the band every
+   * one of them is in (moveOf's bands on the figures as shown), so the words
+   * never say "slightly" beside a crash (red-team review of a964a74c), or
+   * "uneven" when they are in different bands, so they never say "plunging"
+   * beside bitcoin down a percent (red-team review of 1ed46625, 2026-10-12).
    */
-  majors: { dir: "up" | "down"; size: NonNullable<Move["size"]> } | { dir: "mixed" | "flat" } | null;
+  majors: { dir: "up" | "down"; size: MajorsSize } | { dir: "mixed" | "flat" } | null;
   /** The chain's movers past the floors: how many (0: none), and the first one's day. */
   chain: HotRead | null;
 }
@@ -308,12 +313,20 @@ export function majorsDirOf(changes: readonly unknown[]): MarketRead["majors"] {
   const signs = shown.map((s) => (s === "+0%" ? 0 : s.startsWith("-") ? -1 : 1));
   const dir = signs.every((x) => x > 0) ? "up" : signs.every((x) => x < 0) ? "down" : signs.every((x) => x === 0) ? "flat" : "mixed";
   if (dir === "mixed" || dir === "flat") return { dir };
-  // HOW FAR, BY THE COIN THAT MOVED MOST AS THE LINE SHOWS IT (red-team review
-  // of a964a74c, 2026-10-12): "$BTC -15.2%, $ETH -21.7%, $SOL -28.3%" went
-  // out beside "the giants dipped slightly". Read from the very figures shown,
-  // on moveOf's bands, and never a small word past the small band.
-  const most = Math.max(...shown.map((s) => Math.abs(Number.parseFloat(s.replace(/[+%]/g, "")))).filter(Number.isFinite));
-  const size = Number.isFinite(most) && most < 3 ? "a little" : Number.isFinite(most) && most < 10 ? "a fair bit" : "sharply";
+  // HOW FAR, AS EVERY COIN THE LINE SHOWS MOVED (red-team review of
+  // a964a74c, 2026-10-12): "$BTC -15.2%, $ETH -21.7%, $SOL -28.3%" went out
+  // beside "the giants dipped slightly". Then the coin that moved most set the
+  // size, and it overstated (red-team review of 1ed46625): "$BTC -1.2%, $ETH
+  // -2%, $SOL -10.5%" went out beside "majors are plunging" and "the old guard
+  // took a beating", "$BTC -0.1%, $ETH -0.2%, $SOL -14%" beside "the giants
+  // fell steeply", and "$BTC +0.8%, $ETH +1.1%, $SOL +10.3%" beside "majors are
+  // surging": a crash or a surge in bitcoin and ether that the figures beside
+  // them contradict. Each coin is read on moveOf's bands from the very figure
+  // shown; a band only when every coin is in it, and "uneven" otherwise, said
+  // with no size at all.
+  const bands = shown.map((s) => Math.abs(Number.parseFloat(s.replace(/[+%]/g, ""))))
+    .map((a) => (!Number.isFinite(a) ? null : a < 3 ? "a little" as const : a < 10 ? "a fair bit" as const : "sharply" as const));
+  const size: MajorsSize = bands[0] != null && bands.every((b) => b === bands[0]) ? bands[0] : "uneven";
   return { dir, size };
 }
 
@@ -332,12 +345,15 @@ const MAJORS_SUBJECT: readonly string[] = ["majors", "the heavyweights", "blue c
  * percent), a fair bit (under ten), sharply. No "slightly", "a touch",
  * "gently" or "inching" past the small band, nothing small in the sharp one.
  */
-const MAJORS_MOVED: Readonly<Record<"up" | "down", Readonly<Record<NonNullable<Move["size"]>, readonly string[]>>>> = Object.freeze({
+const MAJORS_MOVED: Readonly<Record<"up" | "down", Readonly<Record<MajorsSize, readonly string[]>>>> = Object.freeze({
   up: {
     "a little": ["lean green today", "are inching forward", "look perky", "are edging up", "ticked a touch higher", "are up a hair", "nudged upward", "are mildly firmer"],
     "a fair bit": ["are climbing steadily", "are grinding upward", "are on the front foot", "are pushing ahead", "gained solid ground", "are up a fair way",
       "are rising decently", "are noticeably stronger"],
     sharply: ["are surging", "shot up", "are up sharply", "are racing upward", "leapt dramatically", "are climbing fast", "spiked steeply", "are soaring"],
+    // ALL UP, IN DIFFERENT BANDS (red-team review of 1ed46625): which way, never how far; the figures beside the words say that.
+    uneven: ["rose unevenly", "are higher by differing amounts", "are green, though not equally", "advanced at mixed speeds", "all gained, unequally",
+      "are up in varying degrees", "climbed, each its own way", "moved upward, out of step"],
   },
   down: {
     "a little": ["are sliding a little", "seem tired", "are softening a touch", "are easing off", "dipped slightly", "are drifting downward", "are taking a breather",
@@ -345,6 +361,8 @@ const MAJORS_MOVED: Readonly<Record<"up" | "down", Readonly<Record<NonNullable<M
     "a fair bit": ["are falling steadily", "lost solid ground", "are on the back foot", "are retreating", "are grinding lower", "are down a fair way",
       "are noticeably weaker", "are slipping decently"],
     sharply: ["are plunging", "dropped heavily", "are down sharply", "are tumbling", "fell steeply", "are sinking fast", "are getting hammered", "took a beating"],
+    uneven: ["fell unevenly", "are lower by differing amounts", "are red, though not equally", "retreated at mixed speeds", "all lost ground, unequally",
+      "are down in varying degrees", "slid, each its own way", "moved downward, out of step"],
   },
 });
 const MAJORS_SAID: Readonly<Record<"mixed" | "flat" | "unread", readonly string[]>> = Object.freeze({
