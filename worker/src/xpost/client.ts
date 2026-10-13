@@ -538,6 +538,11 @@ async function classify(res: Response, nowMs: number, maxBytes = MAX_BODY_BYTES)
       .join(" ");
     if (/duplicate/i.test(said)) return fail("duplicate", 403);
     if (/credit/i.test(said)) return fail("credits", 403);
+    // WHY X SAID NO, for the operator: a bare "forbidden" hid that a market
+    // answer had more than one cashtag (2026-10-13). X's own words only, plain
+    // characters, bounded; they carry no token and no post text.
+    const why = said.replace(/[^A-Za-z0-9 .,:;'()/_-]/g, " ").replace(/\s+/g, " ").trim().slice(0, 160);
+    if (why) console.warn(`[xpost] X refused the request (403): ${why}`);
     return fail("forbidden", 403);
   }
   if (res.status >= 500) return fail("uncertain", res.status);
