@@ -1,5 +1,6 @@
 /** Select public comments conservatively. Pure: no model, credentials, trading state or I/O. */
 import type { XReply } from "./client";
+import { checkAsk, checkAskText, checkTargetOf, type CheckFrom, type CheckTarget } from "./check";
 
 export const REPLY_OPT_OUT = "Say stop to opt out.";
 
@@ -98,7 +99,15 @@ export type ReplyCandidate =
    * buys). The worst of the post it replies to, the conversation's root and
    * the post it quotes.
    */
-  | { ok: true; text: string; address?: string; otherHandles?: true; greeting?: true; advice?: true; followUp?: FollowUp }
+  | { ok: true; text: string; address?: string; otherHandles?: true; greeting?: true; advice?: true; followUp?: FollowUp;
+      /**
+       * A LARP CHECK (xpost/check.ts, 2026-10-13): the tag asked one of the
+       * plain ways ("larp check", "is this real?") and code found one clear
+       * thing to check. Set only with checks on (`ctx.checks`). Such a tag is
+       * answered under any post, quoted or not, with a card or not: what it is
+       * about is the target code read, never the post's words.
+       */
+      check?: { target: CheckTarget; from: CheckFrom } }
   | { ok: false; reason: string };
 
 const LINK_OR_SECRET = /https?:|www\.|\b[a-z0-9-]+\.(?:com|net|org|io|dev|app|xyz|gg|co|me|ai)\b|0x[a-f0-9]{8,}|\b(?:sk-|gsk_|api[ _-]?key|seed phrase|private key|password|secret)\b/i;
@@ -600,12 +609,34 @@ export function tagCandidate(reply: XReply, ctx: {
   plain?: ReadonlySet<string>;
   /** Its own buy and sell posts (store.ts ownThreadTweets). */
   trade?: ReadonlySet<string>;
+  /** MERRYMEN_XPOST_CHECKS=1 (with research): a larp check may be taken (`ReplyCandidate.check`). */
+  checks?: boolean;
 }): ReplyCandidate {
   const no = (reason: string): ReplyCandidate => ({ ok: false, reason });
   if (!reply.id || !reply.authorId || !ctx.xUserId) return no("invalid");
   if (reply.authorId === ctx.xUserId) return no("own-comment");
   if (isAnswerOptOut(reply.text)) return no("opt-out");
   if (typeof reply.text !== "string") return no("invalid");
+  // A LARP CHECK, BEFORE THE THREAD, QUOTE AND CARD SCREENS (2026-10-13). Those
+  // screens exist because code never read the post a tag sits under; a check
+  // reads exactly that, and answers only about the one target code found in
+  // it, never about its words. The ask is a whole-tag allowlist (checkAsk);
+  // whatever the post under it says is refused here when it is abuse, a
+  // sensitive topic or distress, and the orchestrator refuses one that names
+  // sherwood or merrymen. With no clear target, the tag goes on to be read as
+  // any other.
+  if (ctx.checks === true && checkAsk(reply.text, ctx.username)) {
+    const found = checkTargetOf(reply, { ownId: ctx.xUserId, ownPosts: ctx.ownPosts });
+    if (found) {
+      const under = (reply.context ?? []).map((c) => c.text).join("\n");
+      if (ABUSE_OR_SENSITIVE.test(under)) return no("sensitive");
+      if (DISTRESS.test(under)) return no("distress");
+      const lead = /^(?:\s*@[a-z0-9_]{1,15}\b[\s,:-]*)+/i.exec(reply.text.normalize("NFKC"))?.[0] ?? "";
+      const own = String(ctx.username ?? "").trim().replace(/^@/, "").toLowerCase();
+      const others = [...lead.matchAll(HANDLE_AT)].some((m) => own === "" || m[1]!.toLowerCase() !== own);
+      return { ok: true, text: checkAskText(reply.text, ctx.username) || "larp check", check: found, ...(others ? { otherHandles: true as const } : {}) };
+    }
+  }
   const ownPost = (id: string): boolean => id !== "" && (ctx.ownRoots?.has(id) === true || ctx.ownPosts?.has(id) === true);
   // A quote only of its own posted tweet: what the card shows is its own words (XReply.quotedTweetId).
   if (reply.quoted === true && !(typeof reply.quotedTweetId === "string" && ownPost(reply.quotedTweetId))) return no("quoted");

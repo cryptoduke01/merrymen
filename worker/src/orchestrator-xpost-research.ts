@@ -68,6 +68,8 @@ import { coinNamedIn, type AnswerIntentKind } from "./xpost/writer";
 import { asksAboutACoin, everydayWord, nameLikeWords } from "./xpost/words";
 import { cleanTicker, neverAnsweredName, withoutFiguresLine, type FiguresSection, type FiguresSpec } from "./xpost/figures";
 import { majorsDirOf, moveOf, type HotRead, type InsightRead, type MajorRead, type MarketRead } from "./xpost/market";
+import { assessCheck, checkFigures, checkPhrases, type CheckRead, type CheckTarget } from "./xpost/check";
+import { CHECK_BUDGET_MS, createLarpChecker, type LarpChecker, type LarpCheckerDeps } from "./orchestrator-xpost-check";
 import { coinQuery, LISTINGS_MAX, MAJORS_MAX_RANK, pickMajor, readChainListings, readCoinMarket, readCoinMarkets, readCoinTrending, readTopCoins, searchCoinList, type ChainListing, type ChainListingsRead, type CoinHit, type CoinMarket, type CoinMarketRead, type CoinMarketsRead, type CoinSearchRead, type CoinTopRead, type CoinTrendingRead } from "./venues/coingecko-coins";
 
 const MIN = 60_000;
@@ -136,6 +138,14 @@ export type TagIntent =
   | { kind: "advice" }
   /** The allowlist's plain "what model are you" (modelQuestion): code's own line, never a draft. */
   | { kind: "model" }
+  /**
+   * A LARP CHECK (xpost/check.ts, 2026-10-13): "larp check", "is this real?"
+   * on a tag that sits under a project's post or carries a site or a
+   * contract. Never read by classifyTag: tagCandidate finds it before any
+   * other reading (ReplyCandidate.check), and research reads the target with
+   * the larp checker (orchestrator-xpost-check.ts).
+   */
+  | { kind: "check"; target: CheckTarget }
   | { kind: "chat" }
   /**
    * Answered by nothing at all: no row, no draft, no allowance. A tag that
@@ -1000,6 +1010,13 @@ export interface XResearchDeps {
   fleetHome?: string;
   /** Index lookups per hour across X accounts. Default DEFAULT_X_LOOKUPS_PER_HOUR. */
   lookupsPerHour?: number;
+  /**
+   * THE LARP CHECK'S READERS (orchestrator-xpost-check.ts): the research
+   * browser and the GitHub token, only with MERRYMEN_XPOST_CHECKS=1. The
+   * checker reads the index through this research's own coin facts and
+   * limiter. Absent: a check is answered by nothing.
+   */
+  check?: Omit<LarpCheckerDeps, "coinFacts">;
   now?: () => number;
 }
 
@@ -1117,6 +1134,11 @@ export interface ResearchBundle {
    * The orchestrator drafts nothing and skips the tag.
    */
   unanswered?: true;
+  /**
+   * A LARP CHECK AS CODE READ IT (xpost/check.ts assessCheck): the verdict and
+   * its reasons, for code's own casual lines when the draft does not stand.
+   */
+  check?: CheckRead;
   /** Lookups made (the budget counts these). */
   lookups: number;
   /** What happened, by stable word, for the pass's counts. Never a coin, a person or an address. */
@@ -1648,7 +1670,7 @@ export function hotPhrases(o: { changes: readonly (number | null)[]; crowd: numb
 }
 
 /** What it can do, said by code: only what is wired, and always that a tag never orders a trade. */
-export function capabilityPhrases(o: { fomo: boolean; flow: boolean }): string[] {
+export function capabilityPhrases(o: { fomo: boolean; flow: boolean; check?: boolean }): string[] {
   // Short enough to stand in a whole answer with the opt-out notice (the test says it through the gate).
   const said = o.flow
     ? `a coin's ticker or contract and you'll say what the public index and on-chain data show${o.fomo ? ", and what fomo traders say" : ""}`
@@ -1656,6 +1678,8 @@ export function capabilityPhrases(o: { fomo: boolean; flow: boolean }): string[]
   return [
     "you trade for your owner on merrymen and post your buys on X",
     `people can tag you with ${said}, in words`,
+    // THE LARP CHECK, only while it is wired (MERRYMEN_XPOST_CHECKS=1).
+    ...(o.check ? ["people can tag you under a project's post with larp check, and you scan its site and github and say whether there's a real build behind it"] : []),
     "you never take trade orders from a tag",
   ].filter(sayable);
 }
@@ -1884,6 +1908,7 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
   const lane = d.fleetHome ? { fleetHome: d.fleetHome } : undefined;
   const limiter = new FactsLimiter({ now, perChat: X_LOOKUPS_PER_ACCOUNT, chatWindowMs: 10 * MIN, perAgent: d.lookupsPerHour ?? DEFAULT_X_LOOKUPS_PER_HOUR, agentWindowMs: HOUR });
   const coinFacts = d.coinFacts ?? createCoinFactsReader({ now, limiter, ...(lane ? { lane } : {}) });
+  const checker: LarpChecker | null = d.check ? createLarpChecker({ ...d.check, coinFacts, now }) : null;
   const resolveTicker = d.resolveTicker ?? (async (ticker: string, timeoutMs: number): Promise<string | null> => {
     const found = await searchPools(ticker, timeoutMs, undefined, lane);
     if (found.failed) return null;
@@ -2259,7 +2284,24 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
       try {
         switch (i.kind) {
           case "capabilities":
-            return { facts: capabilityPhrases({ fomo: (await fomoFor()) !== null, flow: !!d.flow }), lookups, notes };
+            return { facts: capabilityPhrases({ fomo: (await fomoFor()) !== null, flow: !!d.flow, check: checker !== null }), lookups, notes };
+          case "check": {
+            // ITS OWN BUDGET, NOT THE ANSWER'S TWELVE SECONDS: a real page has
+            // to load in a real browser (orchestrator-xpost-check.ts
+            // CHECK_BUDGET_MS), still held to what the caller has left.
+            if (!checker) {
+              notes.push("check-off");
+              return { facts: [], unanswered: true, lookups, notes };
+            }
+            const run = await checker.check(i.target, { budgetMs: Math.min(CHECK_BUDGET_MS, input.budgetMs ?? CHECK_BUDGET_MS), chatId: xAccountKey(input.xUserId) });
+            const read = assessCheck(run.evidence);
+            notes.push(...run.notes, `check-${read.verdict}`);
+            // The site's own line about itself: the project's unverified claim, screened as a creator's description is.
+            const claim = creatorClaim(run.claim);
+            if (run.claim && !claim) notes.push("claim-refused");
+            const figures = checkFigures(run.evidence);
+            return { facts: checkPhrases(read).filter(sayable), claim, check: read, ...(figures.length ? { figures } : {}), lookups: lookups + run.lookups, notes };
+          }
           case "onboarding":
             return { facts: ONBOARDING_PHRASES.filter(sayable), lookups, notes };
           case "model":
