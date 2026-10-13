@@ -3217,6 +3217,40 @@ test("what's hot names no chain coin coingecko does not list by its contract: a 
   assert.doesNotMatch(text, /FUHRER|NIGLET/);
 });
 
+test("what's hot and how's the market never show a big memecoin one letter off, doubled or inside the ticker, nor the merry men, nor as fomo's most bought (red-team review of 1ed46625, 2026-10-12)", async (t) => {
+  // At 1ed46625, the real readers, every pool past the floors and listed by its contract under its own symbol, Fomo's most bought the first:
+  // "... geckoterminal robinhood: trending $PEPPE 24h +312% vol ~$2.3M, $DOGGE 24h +88% vol ~$940k, $BOONK 24h +41% vol ~$310k; fomo: most bought $PEPPE."
+  const figures = [{ change: 312, vol: 2_310_000 }, { change: 88, vol: 940_000 }, { change: 41, vol: 310_000 }];
+  const broker = (symbol: string): FomoBroker => ({
+    async call(tool) {
+      return { status: "ok", tool, data: { topTokens: [{ token: { address: `0x${"1".repeat(40)}`, key: `0x${"1".repeat(40)}`, chain: {} }, label: { symbol, name: null }, buyers: 9, sellers: 2 }] } } as never;
+    },
+    memory: { get: async () => null, set: async () => {}, clear: async () => {} }, report: async () => {}, configured: () => true,
+  });
+  const sets = [["PEPPE", "DOGGE", "BOONK"], ["LILPEPEAI", "BABYWIFAI", "MINIBONKAI"], ["POPCAAT", "FLOKKI", "SHIIB"], ["LITTLEJOHN", "FRIARTUCK", "MAIDMARIAN"]];
+  for (const names of sets) {
+    for (const ask of ["what's hot?", "how's the market?"]) {
+      fakeCoinGecko(t, names.map((name, i) => ({ name, ...figures[i]! })), names);
+      const w = await world(t, { ...ALAN, env: { ...RESEARCH_ON, MERRYMEN_XPOST_FOMO: "1" }, research: createXResearch({ fomo: () => broker(names[0]!) }),
+        answer: "the first one is the play, get in. Say stop to opt out." });
+      w.setInbox([alanTag(MENTION, ask)]);
+      await w.step();
+      assert.deepEqual(w.asked(), [], "never drafted");
+      const text = String(w.sends[0]?.text ?? "");
+      assert.ok(text, `${names.join()} / ${ask}: answered`);
+      for (const n of names) assert.ok(!text.includes(`$${n}`), `${n} / ${ask}: ${text}`);
+      assert.doesNotMatch(text, /geckoterminal robinhood|fomo: most bought/, `${names.join()} / ${ask}: ${text}`);
+      if (ask === "what's hot?") assert.deepEqual(w.sends.map((s) => s.text), [hotNoneAnswers(MENTION, { lower: true })[0]], names.join());
+    }
+  }
+  // A coin no screen knows, listed, still shows, Fomo's most bought with it.
+  fakeCoinGecko(t, [{ name: "CHUMP", ...figures[0]! }], ["CHUMP"]);
+  const w = await world(t, { ...ALAN, env: { ...RESEARCH_ON, MERRYMEN_XPOST_FOMO: "1" }, research: createXResearch({ fomo: () => broker("CHUMP") }) });
+  w.setInbox([alanTag(MENTION, "what's hot?")]);
+  await w.step();
+  assert.match(String(w.sends[0]?.text ?? ""), / geckoterminal robinhood: trending \$CHUMP 24h \+312% vol ~\$2\.3M; fomo: most bought \$CHUMP\.$/);
+});
+
 test("what's hot never shows a chain coin under a big coin's ticker or name, read off coingecko's own biggest coins, and none at all without them (red-team 2026-10-12)", async (t) => {
   // At fbcf8756: "... geckoterminal robinhood: trending $WLFI 24h +412% vol ~$2.3M, $MNT 24h +88% vol ~$940k, $SONIC 24h -12.2% vol ~$310k.",
   // with Fomo "fomo: most bought $WLFI"; under "what's moving on robinhood chain?" LIDO/MANTLE/ASTER and HYPEX/XRPAI/WIFX, and the rest below.

@@ -1259,7 +1259,21 @@ other owner's agent, and its posting and reply warnings, are unchanged.
   `$PNUTAI`, `$MOGAI`, `$TAOAI` were posted), the large caps and reserve
   coins it missed (`MNT`, `CRV`, `SDAI`, `USTC`, `WLFI`, `NEXO`, `XDC`,
   `MORPHO`, `AERO`), and gold, silver, oil and the currencies (`GOLD`,
-  `SILVER`, `OIL`, `JPY`, `GBP`, `CNH`, `UST` and the like) as roots. Then, side by side: with Fomo usable for the owner, the
+  `SILVER`, `OIL`, `JPY`, `GBP`, `CNH`, `UST` and the like) as roots. **And
+  not one letter off, doubled, or inside the ticker** (red-team review of
+  1ed46625: `$PEPPE`, `$DOGGE`, `$BOONK`, `$LILPEPEAI`, `$BABYWIFAI`,
+  `$MINIBONKAI`, `$POPCAAT`, `$FLOKKI` and `$SHIIB` were posted as trending
+  and as "fomo: most bought"): a ticker is read as its cores (`copyCores`:
+  itself, and itself with a copy's affixes peeled off either end, "BABY",
+  "LIL", "MINI", "AI", "INU", "X", "KING" and the like, each also with its
+  doubled letters run together); a root matches a core whole, at its start
+  or end, anywhere inside it at four letters or more, and one letter off at
+  four letters or more for the hand list and five for CoinGecko's. The name
+  CoinGecko lists a chain coin under is read the same way, word by word and
+  run together (`copycatName`). Robin Hood's other merry men and his country
+  are the house's names too (`$LITTLEJOHN`, `$FRIARTUCK`, `$MAIDMARIAN` were
+  posted; "marian", "scarlet", "sheriff", "nottingham", "loxley" and "tuck"
+  whole are refused like "robinhood"). Then, side by side: with Fomo usable for the owner, the
   coins Fomo traders bought most in the day (`fomo_get_token_activity` with
   no token, its feed-wide `topTokens`: Fomo's thesis read needs a coin, so
   "what fomo traders are on" is the coins the most distinct Fomo traders

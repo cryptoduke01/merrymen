@@ -1343,7 +1343,54 @@ function oneEditFrom(a: string, b: string): boolean {
   return false;
 }
 
-/** Would this ticker read as bitcoin, ether, a dollar or one of the chain's stock tokens? */
+/**
+ * A BIG COIN'S NAME ONE LETTER OFF, DOUBLED, OR INSIDE THE TICKER (red-team
+ * review of 1ed46625, 2026-10-12). The roots were matched whole or at a
+ * ticker's start or end, so what's hot posted "trending $PEPPE 24h +312%,
+ * $DOGGE …, $BOONK …; fomo: most bought $PEPPE", "$LILPEPEAI, $BABYWIFAI,
+ * $MINIBONKAI", and "$POPCAAT, $FLOKKI, $SHIIB" from the house account, each
+ * reading as the big memecoin itself. Now a ticker is read as a set of cores:
+ * itself, and itself with the affixes a copy is built of peeled off either end
+ * ("BABY", "LIL", "MINI", "AI", "INU", "X", "KING", "CAT" …, `copyCores`), each
+ * also with its doubled letters run together ("PEPPE" is "PEPE", "SHIIB" is
+ * "SHIB"). A root matches a core whole or at its start or end; a root of four
+ * letters or more anywhere inside it; and a root of `oneEditAt` letters or
+ * more one letter changed, added or dropped (oneEditFrom). Errs toward
+ * dropping: "BOOK" is one letter from BONK and "OTHER" from ETHER, and each
+ * costs one ticker in one line.
+ */
+const COPY_AFFIXES: readonly string[] = ("BABY BBY MINI LIL LITTLE BIG MEGA GIGA SUPER KING QUEEN LORD SIR MR MRS DR THE REAL OG NEW AI INU X CTO CAT DOG COIN TOKEN PRO MAX ONE " +
+  "CLASSIC").split(" ");
+const undoubled = (s: string): string => s.replace(/(.)\1+/g, "$1");
+export function copyCores(ticker: string): string[] {
+  const t = String(ticker ?? "").toUpperCase().replace(/[^A-Z]/g, "");
+  const out = new Set<string>(t ? [t] : []);
+  const queue = [...out];
+  while (queue.length) {
+    const c = queue.pop()!;
+    for (const a of COPY_AFFIXES) {
+      for (const next of [c.startsWith(a) ? c.slice(a.length) : "", c.endsWith(a) ? c.slice(0, -a.length) : ""]) {
+        if (next.length >= 3 && !out.has(next)) {
+          out.add(next);
+          queue.push(next);
+        }
+      }
+    }
+  }
+  return [...new Set([...out, ...[...out].map(undoubled).filter((c) => c.length >= 3)])];
+}
+function rootIn(core: string, root: string, oneEditAt: number): boolean {
+  const r = String(root ?? "").toUpperCase();
+  if (!r) return false;
+  for (const form of new Set([r, undoubled(r)])) {
+    if (form.length < 3) continue;
+    if (core === form || core.startsWith(form) || core.endsWith(form)) return true;
+    if (form.length >= 4 && core.includes(form)) return true;
+  }
+  return r.length >= oneEditAt && (oneEditFrom(core, r) || oneEditFrom(core, undoubled(r)));
+}
+
+/** Would this ticker read as bitcoin, ether, a dollar, a big memecoin, gold or a currency, or one of the chain's stock tokens? */
 export function copycatTicker(ticker: string): boolean {
   const t = String(ticker ?? "").toUpperCase();
   if (RESERVED_TICKERS.has(t) || STOCK_SYMBOLS.includes(t)) return true;
@@ -1351,7 +1398,9 @@ export function copycatTicker(ticker: string): boolean {
   if (COPY_ROOTS.some((r) => t.startsWith(r) || t.endsWith(r))) return true;
   if (STOCK_ROOTS.some((s) => t.startsWith(s) || t.endsWith(s))) return true;
   if (STOCK_ROOTS.some((s) => s.length >= 4 && oneEditFrom(t, s))) return true;
-  return STOCK_NAMES.some((n) => t.includes(n));
+  if (STOCK_NAMES.some((n) => t.includes(n))) return true;
+  // Its cores (copyCores), against the big coins and memecoins, the reserve coins and the currencies (red-team review of 1ed46625).
+  return copyCores(t).some((c) => RESERVED_TICKERS.has(c) || RESERVED_ROOTS.some((r) => rootIn(c, r, 4)) || COPY_ROOTS.some((r) => rootIn(c, r, 4)));
 }
 
 /**
@@ -1394,10 +1443,30 @@ export function topCopyOf(coins: readonly Pick<CoinHit, "symbol" | "name">[]): T
   return { whole, roots: [...roots] };
 }
 
-/** Would this ticker read as one of CoinGecko's biggest coins? */
+/**
+ * Would this ticker read as one of CoinGecko's biggest coins? Read on its
+ * cores as copycatTicker reads them (red-team review of 1ed46625): a root
+ * whole, at a core's start or end, of four letters or more inside it, and of
+ * five letters or more one letter off (four-letter names one letter off are
+ * half the dictionary: "LINK" would take "PINK", "SINK" and "LINE" with it).
+ */
 export function topCopycat(ticker: string, top: TopCopy): boolean {
   const t = String(ticker ?? "").toUpperCase();
-  return top.whole.has(t) || top.roots.some((r) => t === r || t.startsWith(r) || t.endsWith(r));
+  if (top.whole.has(t) || top.roots.some((r) => t === r || t.startsWith(r) || t.endsWith(r))) return true;
+  return copyCores(t).some((c) => top.whole.has(c) || top.roots.some((r) => rootIn(c, r, 5)));
+}
+
+/**
+ * A NAME COINGECKO LISTS A CHAIN COIN UNDER THAT IS A BIG COIN'S, read as
+ * its ticker is (red-team review of 1ed46625, 2026-10-12): every word of
+ * three letters or more that names no coin of its own ("coin", "token":
+ * NAME_FILLER), and all its letters run together ("Lil Pepe AI" is
+ * LILPEPEAI). A coin listed as "Peppe" shows under no ticker at all.
+ */
+export function copycatName(name: unknown, top: TopCopy): boolean {
+  const n = String(name ?? "").toUpperCase();
+  const runs = [n.replace(/[^A-Z]/g, ""), ...n.split(/[^A-Z]+/).filter((w) => !NAME_FILLER.has(w))].filter((w) => w.length >= 3);
+  return runs.some((w) => copycatTicker(w) || topCopycat(w, top));
 }
 
 /** How long CoinGecko's biggest coins are read as such. */
@@ -1972,7 +2041,9 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
         // contract, the same one included: what's hot is never a read of its
         // own book, and the last screen cannot tell a contract from a copy.
         const mine = [...boughtNames(input.facts, input.posts), ...(input.ownCoins ?? [])];
-        const kept = vouched.filter((s) => !listed.has(s.ticker) && !namedIn(s.ticker, own) && !ownCoinTicker(s.ticker, mine) && !topCopycat(s.ticker, top!));
+        // AND NEVER UNDER A BIG COIN'S NAME AS COINGECKO LISTS IT (red-team review of 1ed46625): the same screens on the listing's name (copycatName).
+        const kept = vouched.filter((s) => !listed.has(s.ticker) && !namedIn(s.ticker, own) && !ownCoinTicker(s.ticker, mine) && !topCopycat(s.ticker, top!)
+          && !copycatName(listingOf(s.token)?.name, top!));
         if (!kept.length) {
           notes.push(vouched.length ? "hot-none" : "hot-unlisted");
           return { facts: hotPhrases({ changes: [], crowd: 0, trending: 0 }), hot: { coins: 0, lead: null }, lookups, notes };

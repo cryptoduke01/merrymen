@@ -56,6 +56,16 @@ describe("tickers: A-Z, two to ten letters, nothing else", () => {
     }
   });
 
+  it("never Robin Hood's other merry men or his country: Little John, Friar Tuck, Maid Marian, Will Scarlet, the sheriff (red-team review of 1ed46625, 2026-10-12)", () => {
+    // Posted at 1ed46625: "trending $LITTLEJOHN 24h +212% …, $FRIARTUCK …, $MAIDMARIAN …; fomo: most bought $LITTLEJOHN".
+    for (const bad of ["LITTLEJOHN", "LITLEJOHN", "LITTLEJON", "FRIARTUCK", "FRIAR", "TUCK", "MAIDMARIAN", "MARIAN", "SCARLET", "WILLSCARLET", "NOTTINGHAM",
+      "LOXLEY", "LOCKSLEY", "SHERIFF", "SHERIF", "GISBORNE"]) {
+      assert.equal(cleanTicker(bad), null, bad);
+      assert.ok(neverAnsweredName(bad), bad);
+    }
+    for (const ok of ["CHUMP", "TRUCK", "STUCK", "JOHN", "MARINA", "FROGGY"]) assert.equal(cleanTicker(ok), ok, ok);
+  });
+
   it("never merrymen in any spelling the letters allow (red-team 2026-10-12)", () => {
     // Posted at 34ced01e: "trending $MERRIMEN 24h +12% vol ~$300k, $MERYMEN 24h +9% vol ~$200k".
     for (const bad of ["MERRYMEN", "MERRYMAN", "MERRYMEM", "MERRIMEN", "MERYMEN", "MERIMEN", "MERRMEN", "MRRYMEN", "MEERYMEN", "MRYMN", "MERR", "MERRIMAN", "merrimen"]) {

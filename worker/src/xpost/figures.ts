@@ -82,6 +82,10 @@ const HOUSE_NAMES: readonly string[] = [
   "s+h+e*r+w+o*d", "h+e+r+w+o+d", "s+h+e*r+o{2,}d", "sherw", "merry", "merr", "m+[aeiouy]*r+[aeiouy]*m+[aeiouy]*n", "robinhood", "robin", "hood", "alan", "aidale",
   // and the chain's and the agent's names however they are shortened ("RBNHD", "ALDALE": red-team 2026-10-12)
   "r+o*b+[iy]*n+h+o*d", "rbnhd", "aldale", "dale",
+  // AND ROBIN HOOD'S OTHER MERRY MEN AND HIS COUNTRY (red-team review of 1ed46625, 2026-10-12): "trending $LITTLEJOHN 24h +212%, $FRIARTUCK …,
+  // $MAIDMARIAN …; fomo: most bought $LITTLEJOHN" went out from the account of Alan-a-Dale of merrymen. ("TUCK" whole only: "stuck", "truck".)
+  "l+[iy]+t+l+e*j+o+h*n", "f+r+[iy]+a+r", "m+a+r+[iy]+a+n", "s+c+a+r+l+e+t", "n+o+t+[iy]*n+g+h+a+m", "l+o+x+l+e*y", "l+o+c+k+s+l+e*y", "s+h+e+r+[iy]+f",
+  "gisborne", "gamwell",
   // the model and provider names a tag may never get code's lines under (orchestrator-xpost-research.ts MODEL_LETTERS)
   "gpt", "claude", "grok", "gemini", "llama", "qwen", "deepseek", "mistral", "openai", "anthropic", "copilot", "perplexity", "llm",
   // and the house's own provider and the models a reader knows it by, in any spelling ("$GROQ", "$OPUS": red-team 2026-10-12)
@@ -158,7 +162,7 @@ const TICKER_REFUSED = new RegExp([...HOUSE_NAMES, ...HOUSE_PRODUCTS, ...ABUSE_A
 const NEVER_ANSWERED = new RegExp([...HOUSE_NAMES, ...HOUSE_OWN_PRODUCTS, ...ABUSE_AND_POLITICS].join("|"));
 
 /** Words too short to read inside other tickers, refused only whole: "ASS", "CUM", "JAP", "DIE", "HH", "SS", "WOP". */
-const TICKER_REFUSED_WHOLE: ReadonlySet<string> = new Set("ASS CUM JAP DIE HH SS WOP FAP KMS NAMBLA HOE NIP CP".split(" "));
+const TICKER_REFUSED_WHOLE: ReadonlySet<string> = new Set("ASS CUM JAP DIE HH SS WOP FAP KMS NAMBLA HOE NIP CP TUCK".split(" "));
 
 /**
  * AND ON ITS CONSONANTS (red-team 2026-10-12): a slur spelled without its

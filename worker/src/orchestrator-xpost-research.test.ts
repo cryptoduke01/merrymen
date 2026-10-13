@@ -20,6 +20,7 @@ import {
   capabilityPhrases,
   carriesResearch,
   classifyTag,
+  copycatName,
   copycatTicker,
   coinFactPhrases,
   createXResearch,
@@ -1437,6 +1438,23 @@ describe("what's hot: the chain's trending coins past the fleet's floors, fomo's
       assert.ok(copycatTicker(sym), sym);
     }
     for (const sym of ["CHUMP", "COINA", "FROGGY", "QRTZ", "ZAPX", "MOLT"]) assert.equal(copycatTicker(sym), false, sym);
+  });
+
+  it("a big memecoin one letter off, its letters doubled, or inside the ticker between a copy's affixes is a copy too (red-team review of 1ed46625, 2026-10-12)", () => {
+    // Each posted at 1ed46625 as a trending chain coin, or as fomo's most bought.
+    for (const sym of ["PEPPE", "DOGGE", "BOONK", "LILPEPEAI", "BABYWIFAI", "MINIBONKAI", "POPCAAT", "FLOKKI", "SHIIB", "PEPA", "BONKK", "XWIFX", "KINGSHIBX",
+      "SUPERDOGEAI", "BITCOINN", "ETHHER", "USDCC", "SOLLANA"]) {
+      assert.ok(copycatTicker(sym), sym);
+    }
+    for (const sym of ["CHUMP", "COINA", "FROGGY", "QRTZ", "ZAPX", "MOLT", "ZORBLAT", "FENDRO"]) assert.equal(copycatTicker(sym), false, sym);
+    // CoinGecko's own: the cores, a root of four letters or more inside, and of five or more one letter off.
+    const top = topCopyOf([{ symbol: "pepe", name: "Pepe" }, { symbol: "doge", name: "Dogecoin" }, { symbol: "bonk", name: "Bonk" }, { symbol: "popcat", name: "Popcat" },
+      { symbol: "floki", name: "FLOKI" }, { symbol: "shib", name: "Shiba Inu" }, { symbol: "wif", name: "dogwifhat" }, { symbol: "s", name: "Sonic" }]);
+    for (const t of ["PEPPE", "DOGGE", "BOONK", "LILPEPEAI", "BABYWIFAI", "MINIBONKAI", "POPCAAT", "FLOKKI", "SHIIB", "SONNIC", "SONIX", "SHIBBA"]) assert.ok(topCopycat(t, top), t);
+    for (const t of ["CHUMP", "COINA", "QRTZ", "ZAPX", "FROGGY", "MOLT"]) assert.equal(topCopycat(t, top), false, t);
+    // And the name coingecko lists a chain coin under, word by word and run together.
+    for (const name of ["Peppe", "Lil Pepe AI", "Baby Wif AI", "Doggecoin", "Shiib Inu", "Pepe Robinhood"]) assert.ok(copycatName(name, top), name);
+    for (const name of ["Coin A", "Chump", "Froggy Token", "Zorblat"]) assert.equal(copycatName(name, top), false, name);
   });
 
   it("never a big coin's ticker or name, or one built on it, read off coingecko's own biggest coins; and none without them (red-team 2026-10-12)", async () => {
