@@ -426,9 +426,40 @@ test("a poll, media, a card or a long post's rest is marked, and the author X ex
   assert.equal(r.value.replies[5]!.author, undefined, "an author X did not expand is unknown");
   assert.equal(r.value.replies[6]!.author, undefined, "and so is a malformed one");
   const q = new URL(seen[0]!.url).searchParams;
-  assert.deepEqual(q.get("tweet.fields")!.split(",").sort(), ["attachments", "author_id", "card_uri", "conversation_id", "created_at", "note_tweet", "referenced_tweets"]);
-  assert.equal(q.get("expansions"), "author_id");
-  assert.equal(q.get("user.fields"), "username,name");
+  assert.deepEqual(q.get("tweet.fields")!.split(",").sort(), ["attachments", "author_id", "card_uri", "conversation_id", "created_at", "entities", "note_tweet", "referenced_tweets"]);
+  assert.equal(q.get("expansions"), "author_id,referenced_tweets.id,referenced_tweets.id.author_id");
+  assert.equal(q.get("user.fields"), "username,name,url,entities");
+});
+
+test("what a tag sits under is read for a larp check: its words, its links and its author's profile link, and nothing malformed fails the batch (2026-10-13)", async () => {
+  const body = { data: [
+    // "@proj @alanaidale larp check", replying to the project's post, which links its site.
+    mention("400", { text: "@proj @alanaidale larp check", conversation_id: "390", referenced_tweets: [{ type: "replied_to", id: "390" }],
+      entities: { urls: [{ url: "https://t.co/a", expanded_url: "https://x.com/proj/status/390" }] } }),
+    // A quote of a post whose long text and link X sent as a note.
+    mention("401", { text: "@alanaidale is this real?", referenced_tweets: [{ type: "quoted", id: "391" }],
+      entities: { urls: [{ url: "https://t.co/b", expanded_url: "https://acme.example/app", unwound_url: "https://acme.example/app?ref=x" }, { expanded_url: "javascript:alert(1)" }, 7] } }),
+    // A reply under a post X did not expand: no context, still a reply.
+    mention("402", { text: "@alanaidale check this", conversation_id: "392", referenced_tweets: [{ type: "replied_to", id: "392" }] }),
+  ], includes: {
+    users: [{ id: "555", username: "proj", name: "Proj", url: "https://t.co/p", entities: { url: { urls: [{ url: "https://t.co/p", expanded_url: "https://proj.example" }] } } }],
+    tweets: [
+      { id: "390", author_id: "555", text: "we are live https://t.co/z", entities: { urls: [{ url: "https://t.co/z", expanded_url: "https://proj.example/launch" }] } },
+      { id: "391", author_id: "556", text: "short", note_tweet: { text: "the whole long post with CA 0x86aF99052DB086a66aF7D764bB04d3abb81b485F", entities: { urls: [{ expanded_url: "https://acme.example" }] } } },
+      { id: "bad", text: 9 },
+    ],
+  }, meta: { result_count: 3 } };
+  const r = await readMentions("token", "111", { nowMs: MENTION_NOW, fetch: scripted(200, body) });
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  const [a, b, c] = r.value.replies;
+  assert.deepEqual(a!.links, ["https://x.com/proj/status/390"]);
+  assert.deepEqual(a!.context, [{ id: "390", relation: "replied_to", text: "we are live https://t.co/z", links: ["https://proj.example/launch"], authorId: "555",
+    author: { username: "proj", name: "Proj", url: "https://proj.example" } }]);
+  assert.deepEqual(b!.links, ["https://acme.example/app?ref=x"], "the unwound destination, and nothing that is not a web link");
+  assert.deepEqual(b!.context?.map((x) => [x.relation, x.text.startsWith("the whole long post"), x.links, x.author]), [["quoted", true, ["https://acme.example"], undefined]]);
+  assert.equal(c!.context, undefined);
+  assert.equal(c!.links, undefined);
 });
 
 test("mentions fail closed for incomplete pages, broken reply metadata and repeated cursors", async () => {

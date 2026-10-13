@@ -461,9 +461,90 @@ export interface XReply {
    * it; whoever reads it then knows nothing of the name and fails closed.
    */
   author?: { username: string; name: string };
+  /**
+   * THE LINKS IN THE TAG ITSELF, as X expanded them (its `entities.urls`): the
+   * real destination behind each t.co, at most XLINKS_MAX. Read only by a larp
+   * check (xpost/check.ts), which decides what is a site worth scanning.
+   * Absent when the tag carried none.
+   */
+  links?: string[];
+  /**
+   * WHAT THE TAG SITS UNDER, AS X EXPANDED IT (2026-10-13, the larp check): the
+   * post it replies to and the post it quotes, each with its words, its
+   * links and its author's handle and profile link. Read only by
+   * xpost/check.ts, for what to check; never by the writer, never handed to a
+   * prompt. Absent when X expanded neither (or the tag refers to neither).
+   */
+  context?: XContext[];
+}
+
+/** A post a tag replies to or quotes, as X expanded it. Untrusted: a stranger wrote every field. */
+export interface XContext {
+  id: string;
+  relation: "replied_to" | "quoted";
+  /** Its words, the whole of a long post when X sent it, at most CONTEXT_TEXT_MAX. */
+  text: string;
+  links: string[];
+  authorId: string;
+  author?: { username: string; name: string; url?: string };
 }
 
 export interface XReplyBatch { replies: XReply[]; newestId: string | null }
+
+/** Links read from one post, and the longest one kept. */
+export const XLINKS_MAX = 5;
+const XLINK_CHARS = 300;
+/** The most of a post a tag sits under that is read. */
+const CONTEXT_TEXT_MAX = 4000;
+
+/** The real destinations of a post's links (X's `entities.urls`), http(s) only, deduplicated, at most XLINKS_MAX. Malformed: none. */
+function linksOf(entities: unknown): string[] {
+  const urls = entities !== null && typeof entities === "object" && !Array.isArray(entities) ? (entities as Record<string, unknown>).urls : null;
+  if (!Array.isArray(urls)) return [];
+  const out: string[] = [];
+  for (const u of urls) {
+    if (!u || typeof u !== "object" || Array.isArray(u)) continue;
+    const r = u as Record<string, unknown>;
+    const href = [r.unwound_url, r.expanded_url].find((v): v is string => typeof v === "string" && /^https?:\/\/\S+$/i.test(v) && v.length <= XLINK_CHARS);
+    if (href && !out.includes(href)) out.push(href);
+    if (out.length >= XLINKS_MAX) break;
+  }
+  return out;
+}
+
+/** The profile link each expanded author shows (`url`, expanded through `entities.url`), by id. */
+function profileLinksOf(includes: unknown): Map<string, string> {
+  const out = new Map<string, string>();
+  const users = includes !== null && typeof includes === "object" && !Array.isArray(includes) ? (includes as Record<string, unknown>).users : null;
+  if (!Array.isArray(users)) return out;
+  for (const u of users) {
+    if (!u || typeof u !== "object" || Array.isArray(u)) continue;
+    const r = u as Record<string, unknown>;
+    if (typeof r.id !== "string" || !ID.test(r.id)) continue;
+    const e = r.entities !== null && typeof r.entities === "object" ? (r.entities as Record<string, unknown>).url : null;
+    const link = linksOf(e)[0];
+    if (link) out.set(r.id, link);
+  }
+  return out;
+}
+
+/** The posts X expanded beside a page (`includes.tweets`), by id: words, links, author. A malformed one is left out. */
+function referencedOf(includes: unknown): Map<string, { text: string; links: string[]; authorId: string }> {
+  const out = new Map<string, { text: string; links: string[]; authorId: string }>();
+  const tweets = includes !== null && typeof includes === "object" && !Array.isArray(includes) ? (includes as Record<string, unknown>).tweets : null;
+  if (!Array.isArray(tweets)) return out;
+  for (const t of tweets) {
+    if (!t || typeof t !== "object" || Array.isArray(t)) continue;
+    const r = t as Record<string, unknown>;
+    if (typeof r.id !== "string" || !ID.test(r.id) || typeof r.author_id !== "string" || !ID.test(r.author_id) || typeof r.text !== "string") continue;
+    // A long post's whole text and links, when X sent them; else what the post shows.
+    const note = r.note_tweet !== null && typeof r.note_tweet === "object" ? r.note_tweet as Record<string, unknown> : null;
+    const text = typeof note?.text === "string" && note.text.trim() ? note.text : r.text;
+    const links = [...linksOf(r.entities), ...linksOf(note?.entities)].filter((l, i, all) => all.indexOf(l) === i).slice(0, XLINKS_MAX);
+    out.set(r.id, { text: text.slice(0, CONTEXT_TEXT_MAX), links, authorId: r.author_id });
+  }
+  return out;
+}
 
 /** The longest handle or display name read: X's own limits, with room. A longer one is no name code can vouch for. */
 const AUTHOR_FIELD_MAX = 100;
@@ -493,7 +574,15 @@ function attachedTo(d: Record<string, unknown>): boolean {
   return attachments || card || note;
 }
 
-function parsedReply(item: unknown, now: number, excludeAuthorId: string, authors: ReadonlyMap<string, { username: string; name: string }> = new Map()): XReply | null {
+interface Expanded {
+  authors: ReadonlyMap<string, { username: string; name: string }>;
+  profiles: ReadonlyMap<string, string>;
+  tweets: ReadonlyMap<string, { text: string; links: string[]; authorId: string }>;
+}
+const NOTHING_EXPANDED: Expanded = { authors: new Map(), profiles: new Map(), tweets: new Map() };
+
+function parsedReply(item: unknown, now: number, excludeAuthorId: string, expanded: Expanded = NOTHING_EXPANDED): XReply | null {
+  const authors = expanded.authors;
   if (!item || typeof item !== "object" || Array.isArray(item)) return null;
   const d = item as Record<string, unknown>;
   const refs = Array.isArray(d.referenced_tweets) ? d.referenced_tweets : [];
@@ -512,10 +601,23 @@ function parsedReply(item: unknown, now: number, excludeAuthorId: string, author
   const only = besides.length === 1 ? besides[0] as Record<string, unknown> | null : null;
   const quotedTweetId = only !== null && typeof only === "object" && only.type === "quoted" && typeof only.id === "string" && ID.test(only.id) ? only.id : null;
   const author = authors.get(d.author_id);
+  const links = linksOf(d.entities);
+  // What it sits under, parent first: each post X expanded, with its author's handle and profile link when X sent them.
+  const context: XContext[] = [];
+  for (const r of [...parents, ...besides.filter((b) => b !== null && typeof b === "object" && b.type === "quoted")]) {
+    const ref = r as Record<string, unknown>;
+    const t = typeof ref.id === "string" ? expanded.tweets.get(ref.id) : undefined;
+    if (!t) continue;
+    const who = authors.get(t.authorId);
+    const url = expanded.profiles.get(t.authorId);
+    context.push({ id: ref.id as string, relation: ref.type === "quoted" ? "quoted" : "replied_to", text: t.text, links: t.links, authorId: t.authorId,
+      ...(who || url ? { author: { username: who?.username ?? "", name: who?.name ?? "", ...(url ? { url } : {}) } } : {}) });
+  }
   return { id: d.id, text: d.text, authorId: d.author_id, conversationId: typeof d.conversation_id === "string" ? d.conversation_id : d.id,
     inReplyToTweetId: parents.length ? parents[0]!.id as string : "", createdAtMs, ...(quoted ? { quoted: true as const } : {}),
     ...(quotedTweetId ? { quotedTweetId } : {}),
-    ...(attachedTo(d) ? { attached: true as const } : {}), ...(author ? { author: { ...author } } : {}) };
+    ...(attachedTo(d) ? { attached: true as const } : {}), ...(author ? { author: { ...author } } : {}),
+    ...(links.length ? { links } : {}), ...(context.length ? { context } : {}) };
 }
 
 /**
@@ -540,9 +642,12 @@ export async function readMentions(
   let newestId: string | null = null;
   for (let page = 0; page < 8; page++) {
     // Attachments, cards and long posts, and the author's handle and display name: what X shows with a tag (XReply.attached, XReply.author).
+    // AND WHAT IT SITS UNDER (2026-10-13, the larp check): the links behind each
+    // t.co (entities), the posts it replies to and quotes, their authors and
+    // those authors' profile links (XReply.links, XReply.context).
     const query = new URLSearchParams({
-      max_results: "100", "tweet.fields": "author_id,conversation_id,referenced_tweets,created_at,attachments,card_uri,note_tweet",
-      expansions: "author_id", "user.fields": "username,name",
+      max_results: "100", "tweet.fields": "author_id,conversation_id,referenced_tweets,created_at,attachments,card_uri,note_tweet,entities",
+      expansions: "author_id,referenced_tweets.id,referenced_tweets.id.author_id", "user.fields": "username,name,url,entities",
     });
     if (opts.sinceId) query.set("since_id", opts.sinceId);
     else if (opts.startTimeMs !== undefined) query.set("start_time", new Date(Math.floor(opts.startTimeMs / 1000) * 1000).toISOString());
@@ -558,7 +663,7 @@ export async function readMentions(
     const m = meta as Record<string, unknown>;
     const data = read.value.data === undefined && m.result_count === 0 ? [] : read.value.data;
     if (!Array.isArray(data) || data.length > 100 || m.result_count !== data.length || Array.isArray(read.value.errors)) return fail("invalid", res.status);
-    const authors = authorsOf(read.value.includes);
+    const expanded: Expanded = { authors: authorsOf(read.value.includes), profiles: profileLinksOf(read.value.includes), tweets: referencedOf(read.value.includes) };
     for (const item of data) {
       if (!item || typeof item !== "object" || Array.isArray(item)) return fail("invalid", res.status);
       const d = item as Record<string, unknown>;
@@ -570,7 +675,7 @@ export async function readMentions(
       // target makes them ineligible for a generated response in the planner.
       if (d.author_id === xUserId) continue;
       const arrivedAtMs = now + Math.max(0, performance.now() - started) + MENTION_CLOCK_SKEW_MS;
-      const reply = parsedReply(d, arrivedAtMs, xUserId, authors);
+      const reply = parsedReply(d, arrivedAtMs, xUserId, expanded);
       if (!reply) return fail("invalid", res.status);
       replies.push(reply);
     }

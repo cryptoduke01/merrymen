@@ -334,6 +334,37 @@ export function signedPercent(v: unknown): string | null {
   return `${sign}${Number.isInteger(abs) ? String(abs) : abs.toFixed(1)}%`;
 }
 
+/** Whole days as a span: "3d", "2w", "5mo", "2y". Null for anything that is not a whole, sane number of days. */
+function spanOf(days: unknown): string | null {
+  if (typeof days !== "number" || !Number.isFinite(days) || days < 1 || days > 36_500) return null;
+  const d = Math.floor(days);
+  if (d < 14) return `${d}d`;
+  if (d < 60) return `${Math.round(d / 7)}w`;
+  if (d < 730) return `${Math.min(99, Math.round(d / 30))}mo`;
+  return `${Math.min(99, Math.round(d / 365))}y`;
+}
+/** Days since: "today" under a day, else a span and "ago". */
+function agoOf(days: unknown): string | null {
+  if (typeof days !== "number" || !Number.isFinite(days) || days < 0) return null;
+  if (days < 1) return "today";
+  const span = spanOf(days);
+  return span ? `${span} ago` : null;
+}
+/** Commits in the window: "1 commit", "14 commits", "100+ commits" when the page filled. */
+function commitsOf(n: unknown, partial: boolean): string | null {
+  if (typeof n !== "number" || !Number.isInteger(n) || n < 0 || n > 100) return null;
+  // A full page is a floor however it was flagged: never "100 commits", always "100+".
+  if (partial || n >= 100) return n >= 100 ? "100+ commits" : `${n} commit${n === 1 ? "" : "s"}`;
+  return `${n} commit${n === 1 ? "" : "s"}`;
+}
+function starsOf(n: unknown): string | null {
+  return typeof n === "number" && Number.isInteger(n) && n >= 1 && n <= 999_999 ? `${n} star${n === 1 ? "" : "s"}` : null;
+}
+/** A share of supply, whole percent, 0 to 100. */
+function shareOf(v: unknown): string | null {
+  return typeof v === "number" && Number.isFinite(v) && v >= 0 && v <= 100 ? `${Math.round(v)}%` : null;
+}
+
 /** A market-cap rank: #1 to #999. */
 export function rankOf(v: unknown): string | null {
   return typeof v === "number" && Number.isInteger(v) && v >= 1 && v <= 999 ? `#${v}` : null;
@@ -354,7 +385,16 @@ export type FiguresSection =
   /** CoinGecko's own trending list, by ticker only. */
   | { kind: "trending"; symbols: string[] }
   /** One coin's last hour of onchain flow, from Bitquery: buys and sells in money. */
-  | { kind: "flow"; buyUsd?: number | null; sellUsd?: number | null };
+  | { kind: "flow"; buyUsd?: number | null; sellUsd?: number | null }
+  /**
+   * A PROJECT'S GITHUB, as a larp check read it (research/github.ts): days
+   * since its last push, commits in thirty days (a floor when `commitsPartial`),
+   * stars, and the repo's age in days. Names no coin, so it may stand beside a
+   * drafted answer, as a coin's flow may.
+   */
+  | { kind: "git"; pushedDaysAgo: number | null; commits30d?: number | null; commitsPartial?: boolean; stars?: number | null; repoAgeDays?: number | null }
+  /** A coin's holders as the index counts them: the top ten's share and the creator's. Names no coin. */
+  | { kind: "holders"; top10Pct: number | null; creatorPct?: number | null };
 
 export type FiguresSpec = readonly FiguresSection[];
 
@@ -376,7 +416,9 @@ type Shown =
   | { kind: "pools"; coins: { ticker: string; d1: string | null; vol: string | null }[] }
   | { kind: "crowd"; tickers: string[] }
   | { kind: "trending"; tickers: string[] }
-  | { kind: "flow"; buys: string | null; sells: string | null };
+  | { kind: "flow"; buys: string | null; sells: string | null }
+  | { kind: "git"; pushed: string; commits: string | null; stars: string | null; age: string | null }
+  | { kind: "holders"; top10: string; creator: string | null };
 
 /** What of a spec can be shown: unclean tickers, unshowable numbers and empty sections out; the caps applied. */
 function shownOf(spec: FiguresSpec): Shown[] {
@@ -416,6 +458,15 @@ function shownOf(spec: FiguresSpec): Shown[] {
       const buys = compactMoney(s.buyUsd), sells = compactMoney(s.sellUsd);
       // Both sides or neither: one side alone is half a picture.
       if (buys && sells) out.push({ kind: "flow", buys, sells });
+    } else if (s.kind === "git") {
+      // The last push or no section: the push is what "is it alive" means.
+      const pushed = agoOf(s.pushedDaysAgo);
+      if (!pushed) continue;
+      const age = spanOf(s.repoAgeDays);
+      out.push({ kind: "git", pushed, commits: commitsOf(s.commits30d, s.commitsPartial === true), stars: starsOf(s.stars), age });
+    } else if (s.kind === "holders") {
+      const top10 = shareOf(s.top10Pct);
+      if (top10) out.push({ kind: "holders", top10, creator: shareOf(s.creatorPct) });
     }
   }
   return capFigures(out);
@@ -427,6 +478,8 @@ function figuresIn(s: Shown): number {
     case "majors": return s.coins.length;
     case "pools": return s.coins.reduce((n, c) => n + (c.d1 ? 1 : 0) + (c.vol ? 1 : 0), 0);
     case "flow": return 2;
+    case "git": return [s.pushed, s.commits, s.stars, s.age].filter((x) => x !== null).length;
+    case "holders": return s.creator === null ? 1 : 2;
     default: return 0;
   }
 }
@@ -461,6 +514,10 @@ function renderSection(s: Shown): string {
       return `hot: ${s.tickers.join(", ")}`;
     case "flow":
       return `1h buys ${s.buys}, sells ${s.sells}`;
+    case "git":
+      return [`github: last push ${s.pushed}`, s.commits ? `${s.commits} in 30d` : null, s.stars, s.age ? `repo ${s.age} old` : null].filter((x): x is string => x !== null).join(", ");
+    case "holders":
+      return `top10 hold ${s.top10}${s.creator ? `, creator ${s.creator}` : ""}`;
   }
 }
 
@@ -494,7 +551,12 @@ const POOLS = String.raw`trending: ${POOL}(?:, ${POOL}){0,${POOLS_MAX - 1}}`;
 const CROWD = String.raw`fomo: most bought ${T}(?:, ${T}){0,${CROWD_MAX - 1}}`;
 const TRENDING = String.raw`hot: ${T}(?:, ${T}){0,${TRENDING_MAX - 1}}`;
 const FLOW = String.raw`1h buys ${MONEY}, sells ${MONEY}`;
-const SECTION = `(?:${MAJOR}|${MAJORS}|${POOLS}|${CROWD}|${TRENDING}|${FLOW})`;
+// A larp check's GitHub and holders (2026-10-13): spans in whole days, weeks, months or years, shares in whole percent.
+const SPAN = String.raw`[1-9]\d?(?:d|w|mo|y)`;
+const SHARE = String.raw`(?:100|[1-9]?\d)%`;
+const GIT = String.raw`github: last push (?:today|${SPAN} ago)(?:, (?:(?:0|[1-9]\d?) commits?|100\+ commits) in 30d)?(?:, [1-9]\d{0,5} stars?)?(?:, repo ${SPAN} old)?`;
+const HOLDERS = String.raw`top10 hold ${SHARE}(?:, creator ${SHARE})?`;
+const SECTION = `(?:${MAJOR}|${MAJORS}|${POOLS}|${CROWD}|${TRENDING}|${FLOW}|${GIT}|${HOLDERS})`;
 /** The line, whole: one to five sections joined by "; ", ending with a full stop. Nothing else. */
 const LINE = String.raw`${SECTION}(?:; ${SECTION}){0,4}\.`;
 export const FIGURES_LINE = new RegExp(`^${LINE}$`);
@@ -551,6 +613,15 @@ function* shorter(list: Shown[]): Generator<Shown[]> {
   while ((majors()?.coins.length ?? 0) > 1) {
     const m = majors()!;
     yield emit(cur.map((s) => (s === m ? { ...m, coins: m.coins.slice(0, -1) } : s)));
+  }
+  // A larp check's line: the holders go whole first (the repo is what was
+  // checked), then the repo's age, its stars and its commits; the last push stays.
+  const holders = cur.find((s) => s.kind === "holders");
+  if (holders && cur.length > 1) yield emit(cur.filter((s) => s !== holders));
+  for (const field of ["age", "stars", "commits"] as const) {
+    const g = cur.find((s): s is Extract<Shown, { kind: "git" }> => s.kind === "git");
+    if (!g || g[field] === null) continue;
+    yield emit(cur.map((s) => (s === g ? { ...g, [field]: null } : s)));
   }
 }
 

@@ -510,3 +510,32 @@ describe("no source named in the line (the owner's teammate, 2026-10-13)", () =>
     assert.equal(admitFiguresLine("hot: PEPE; BTC #1."), true);
   });
 });
+
+describe("a larp check's figures", () => {
+  it("renders a project's github and holders in the line's own grammar", () => {
+    const line = renderFiguresLine([{ kind: "git", pushedDaysAgo: 2.4, commits30d: 14, stars: 41, repoAgeDays: 200 }, { kind: "holders", top10Pct: 41.3, creatorPct: 2.6 }]);
+    assert.equal(line, "github: last push 2d ago, 14 commits in 30d, 41 stars, repo 7mo old; top10 hold 41%, creator 3%.");
+    assert.ok(admitFiguresLine(line));
+  });
+  it("says a full page of commits as a floor, a push today as today, and one of each in the singular", () => {
+    assert.equal(renderFiguresLine([{ kind: "git", pushedDaysAgo: 0.2, commits30d: 100, commitsPartial: true, stars: 1 }]), "github: last push today, 100+ commits in 30d, 1 star.");
+    assert.equal(renderFiguresLine([{ kind: "git", pushedDaysAgo: 800, commits30d: 1 }]), "github: last push 2y ago, 1 commit in 30d.");
+  });
+  it("shows no github section without its last push, and no holders without the top ten", () => {
+    assert.equal(renderFiguresLine([{ kind: "git", pushedDaysAgo: null, commits30d: 5 }]), null);
+    assert.equal(renderFiguresLine([{ kind: "holders", top10Pct: null, creatorPct: 5 }]), null);
+  });
+  it("drops the holders, then the repo's age, stars and commits to fit, and keeps the push", () => {
+    const words = "w".repeat(200);
+    const r = withFigures(words, [{ kind: "git", pushedDaysAgo: 3, commits30d: 9, stars: 12, repoAgeDays: 40 }, { kind: "holders", top10Pct: 50, creatorPct: 1 }]);
+    assert.ok(r.line === null || r.line.startsWith("github: last push 3d ago"));
+    const short = withFigures("site is up, repo is busy.", [{ kind: "git", pushedDaysAgo: 3, commits30d: 9, stars: 12, repoAgeDays: 40 }, { kind: "holders", top10Pct: 50, creatorPct: 1 }]);
+    assert.equal(short.dropped, 0);
+    assert.equal(withoutFiguresLine(short.text), "site is up, repo is busy.");
+  });
+  it("refuses a github line in any other shape", () => {
+    for (const bad of ["github: last push 3d ago, 100 commits in 30d.", "github: last push soon.", "github: last push 3d ago, see github.com/x.", "top10 hold 101%."]) {
+      assert.equal(admitFiguresLine(bad), false, bad);
+    }
+  });
+});
