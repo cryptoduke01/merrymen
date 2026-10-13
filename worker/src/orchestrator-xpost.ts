@@ -93,15 +93,15 @@ import {
   type XAccount,
   type XPost,
 } from "./xpost/store";
-import { answerPrompt, answerQuestion, buyPrompt, casualPrompt, draft, introPrompt, introTemplate, modelAnswers, replyPrompt, sellPrompt, sherwoodClaimed, sherwoodMentioned, sherwoodNamed, xpostModel, xpostModelWarning, type AnswerIntentKind, type WriterFacts, type XStyle } from "./xpost/writer";
+import { answerPrompt, answerQuestion, buyPrompt, casualPrompt, draft, INSIGHT_VOCABULARY, insightPrompt, introPrompt, introTemplate, modelAnswers, replyPrompt, sellPrompt, sherwoodClaimed, sherwoodMentioned, sherwoodNamed, xpostModel, xpostModelWarning, type AnswerIntentKind, type WriterFacts, type XStyle } from "./xpost/writer";
 import { appendPublicToken, appendPublicWallet, hasPublicWallet, publicTokenStillAllowed, publicWalletStillAllowed, type PublicWallet } from "./xpost/public-wallet";
 import { readPublicProjectDescription } from "./orchestrator-xpost-project";
-import { banterAsk, boughtNames, carriesResearch, classifyTag, createXResearch, generalTradesQuestion, MARKET_MAJORS, modelNamed, namesACoin, ownCoinTicker, selfAsk, unshowableName, type ResearchBundle, type TagIntent, type XResearch } from "./orchestrator-xpost-research";
+import { banterAsk, boughtNames, carriesResearch, classifyTag, createXResearch, generalTradesQuestion, MARKET_MAJORS, modelNamed, namesACoin, ownCoinTicker, sayable, selfAsk, unshowableName, type ResearchBundle, type TagIntent, type XResearch } from "./orchestrator-xpost-research";
 import { PUBLISHABLE_SOURCES } from "./thesis-policy";
 import { readSaleResults } from "./orchestrator-xpost-results";
 import { appendSaleOutcome, hasSaleOutcome } from "./xpost/sale-outcome";
 import { admitFiguresLine, cleanTicker, figuresTickers, withFigures, type FiguresSpec } from "./xpost/figures";
-import { hotAnswers, hotNoneAnswers, hotUnreadAnswers, majorAnswers, majorUnreadAnswers, marketAnswers, type HotRead, type MajorRead, type MarketRead } from "./xpost/market";
+import { hotAnswers, hotNoneAnswers, hotUnreadAnswers, insightFacts, majorAnswers, majorUnreadAnswers, marketAnswers, type HotRead, type MajorRead, type MarketRead } from "./xpost/market";
 import { selfAnswers, tradesAnswers } from "./xpost/casual";
 
 const MIN = 60_000;
@@ -733,6 +733,30 @@ function exactBuys(f: AgentFacts, address: string | null): { label: string; pape
 }
 
 /** A tag's text with the agent's own handle taken out, every other handle left in. */
+/**
+ * CODE'S FIGURES LINE AFTER WORDS THE GATE ADMITTED, OR NULL (xpost/figures.ts
+ * withFigures): an active owner's answer's, and its market insight post's
+ * (2026-10-13). Only a line in the renderer's own grammar (admitFiguresLine,
+ * again here), naming no sherwood, and every ticker it shows clearing the
+ * gate's own vocabulary (tickerRefusal), naming no merrymen in any spelling,
+ * none of `ownNames` (the agent's own name and its words) and no model or
+ * provider; and, but for bitcoin, ether and solana in the big coins' day, no
+ * name its own buys go by (`ownCoins`, ownCoinTicker).
+ */
+function figuresFor(admitted: string, spec: FiguresSpec, ownNames: readonly string[], ownCoins: readonly string[]): ReturnType<typeof withFigures> | null {
+  const bigCoins = new Set(spec.flatMap((s) => (s.kind === "majors" ? s.coins.map((c) => cleanTicker(c.symbol)) : []))
+    .filter((t): t is string => t !== null && MARKET_MAJORS.some((m) => m.symbol.toUpperCase() === t)));
+  const figured = withFigures(admitted, spec);
+  return figured.line != null && admitFiguresLine(figured.line) && !sherwoodMentioned(figured.line)
+    && figuresTickers(figured.line).every((t) => tickerRefusal(t) === null && !merrymenMentioned(t) && !sherwoodMentioned(t) && !namedIn(t, [...ownNames]) && !modelNamed(t)
+      && (bigCoins.has(t) || !ownCoinTicker(t, ownCoins))) ? figured : null;
+}
+
+/** The agent's own name, and each word of it, as figuresFor reads it. */
+function ownNamesOf(name: unknown): string[] {
+  return [String(name ?? ""), ...String(name ?? "").split(/\s+/).filter((w) => /^\p{L}{3,}$/u.test(w))];
+}
+
 function withoutHandle(text: string, username: string): string {
   const own = String(username ?? "").trim().replace(/^@/, "");
   if (!/^[a-z0-9_]{1,15}$/i.test(own)) return text;
@@ -2178,7 +2202,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // NOR THE AGENT'S OWN NAME, whatever the agent is called, NOR A MODEL'S
       // OR A PROVIDER'S (red-team 2026-10-12): a coin named after the agent or
       // its model, trending under its own answer, reads as the house's coin.
-      const ownNames = [f.name, ...String(f.name ?? "").split(/\s+/).filter((w) => /^\p{L}{3,}$/u.test(w))];
+      const ownNames = ownNamesOf(f.name);
       // NOR, IN WHAT'S HOT, A NAME ITS OWN BUYS GO BY, ANY CONTRACT (red-team
       // 2026-10-12): a copy of its ZAPX buy, trending, went out as "$ZAPX 24h
       // +912%" under its own ZAPX buy post. Its buys' names and sixty days of
@@ -2190,12 +2214,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // asker and say nothing of what it bought: a buy called "SOLX" or "WETH"
       // would otherwise take the whole line out for $SOL or $ETH.
       const ownCoins = hotCoded || marketCoded ? [...bought, ...olderBought] : [];
-      const bigCoins = new Set((lineFigures ?? []).flatMap((s) => (s.kind === "majors" ? s.coins.map((c) => cleanTicker(c.symbol)) : []))
-        .filter((t): t is string => t !== null && MARKET_MAJORS.some((m) => m.symbol.toUpperCase() === t)));
-      const figured = admitted && lineFigures?.length && !templated && active.has(account.tenant.toLowerCase()) ? withFigures(admitted, lineFigures) : null;
-      const lined = figured?.line != null && admitFiguresLine(figured.line) && !sherwoodMentioned(figured.line)
-        && figuresTickers(figured.line).every((t) => tickerRefusal(t) === null && !merrymenMentioned(t) && !sherwoodMentioned(t) && !namedIn(t, ownNames) && !modelNamed(t)
-          && (bigCoins.has(t) || !ownCoinTicker(t, ownCoins))) ? figured : null;
+      const lined = admitted && lineFigures?.length && !templated && active.has(account.tenant.toLowerCase()) ? figuresFor(admitted, lineFigures, ownNames, ownCoins) : null;
       if (figures && admitted) bump(lined ? (lined.dropped > 0 ? "answer-figures-shortened" : "answer-figures") : "answer-figures-left-out");
       const body = lined ? lined.text : admitted;
       // MARKED BY WHAT IT WAS HANDED, not by what the model wrote: an answer
@@ -2308,6 +2327,29 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
   }
 
   /**
+   * THE MARKET NOW, FOR AN ACTIVE OWNER'S INSIGHT POST (the owner's teammate,
+   * 2026-10-13), or null when it cannot be read: research off, a fault, or
+   * neither the big coins nor the chain read, or nothing in code's words or
+   * its line to show. The same bundle "how's the market?" reads
+   * (orchestrator-xpost-research.ts marketBundle), within the same lookup
+   * allowances and its twelve seconds. `read` is code's words for the model
+   * (market.ts insightFacts, each `sayable`); `figures` the line code puts
+   * after the gate; `ownCoins` every name its buys and sixty days of its buy
+   * posts go by, which the post may never say and the line never shows.
+   */
+  async function readInsight(shared: Db, account: XAccount, f: AgentFacts, nowMs: number): Promise<{ read: string[]; figures: FiguresSpec; ownCoins: string[] } | null> {
+    if (!research) return null;
+    const posts = (await postsOfXUser(shared, account.xUserId, nowMs - OWN_MEMORY_MS, 500)).filter((p) => p.tenant === account.tenant);
+    const olderBought = posts.filter((p) => p.kind === "buy" && typeof p.coin === "string" && p.coin.trim() !== "").map((p) => p.coin!.trim());
+    const bundle = await research.gather({ shared, intent: { kind: "market" }, tenant: account.tenant, xUserId: account.xUserId, facts: f, posts, fomo: researchFomo,
+      coinNamed: true, ownCoins: olderBought }).catch((): ResearchBundle => ({ facts: [], lookups: 0, notes: ["fault"] }));
+    if (!bundle.insight || !bundle.figures?.length) return null;
+    const read = insightFacts(bundle.insight).filter(sayable);
+    if (!read.length) return null;
+    return { read, figures: bundle.figures, ownCoins: [...boughtNames(f, posts), ...olderBought] };
+  }
+
+  /**
    * DRAFT, GATE, WRITE — one intent, unless its key is already spent. Scheduled when a draft passed; skipped
    * (the key spent) when the model passed or the gate refused, so the same
    * buy or day is not drafted again every minute. The intro alone falls back
@@ -2354,6 +2396,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
     let decisionId: string | null = null;
     let projectDescription: string | null = null;
     let tokenDisclosure: PublicWallet | null = null;
+    // An active owner's market insight post (2026-10-13): code's figures line goes after the words, and the coins it may not show.
+    let insight: { figures: FiguresSpec; ownCoins: string[] } | null = null;
     if (intent.kind === "intro") {
       prompt = introPrompt(facts);
     } else if (intent.kind === "buy") {
@@ -2398,10 +2442,27 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // A trade-talk day is handed no seed, any other day no coin: neither is
       // offered, or vouched to the gate, on the day it is not about.
       const casual = casualInputs(f, intent.day, { coins: account.prefs.buys, slot: intent.slot, tradeTalkInTen: cadenceOf(account.tenant).tradeTalkInTen });
-      gate.coins = casual.recentCoins.map((c) => c.label);
-      gate.paperCoins = casual.recentCoins.filter((c) => c.paper).map((c) => c.label);
-      gate.seeds = casual.seed ? [casual.seed] : [];
-      prompt = casualPrompt({ ...facts, ...casual, talked });
+      // MARKET INSIGHTS ON THE TIMELINE (the owner's teammate, 2026-10-13): an
+      // active owner's casual slot that is not a trade-talk one is a post
+      // about the market now, in a trader's technical words, from code's read
+      // of the market (readInsight) and nothing else: no digit, no name, no
+      // source, no forecast, no advice, no buy or holding (XGateCtx.insight,
+      // `buys: "none"`), every word everyday, technical (INSIGHT_VOCABULARY)
+      // or one it was handed (`lookedOnly`, `known`), and code's figures line
+      // after it. A trade-talk slot, every other owner's casual post, and a
+      // slot whose market cannot be read, are the casual post as before.
+      const read = active.has(account.tenant.toLowerCase()) && !casual.tradeTalk ? await readInsight(shared, account, f, nowMs) : null;
+      const insightAsk = read ? insightPrompt({ ...facts, read: read.read }) : null;
+      if (read && insightAsk) {
+        insight = { figures: read.figures, ownCoins: read.ownCoins };
+        Object.assign(gate, { insight: true, buys: "none", lookedOnly: true, known: [...INSIGHT_VOCABULARY, ...read.read], unsaid: read.ownCoins, coins: [], seeds: [] });
+        prompt = insightAsk;
+      } else {
+        gate.coins = casual.recentCoins.map((c) => c.label);
+        gate.paperCoins = casual.recentCoins.filter((c) => c.paper).map((c) => c.label);
+        gate.seeds = casual.seed ? [casual.seed] : [];
+        prompt = casualPrompt({ ...facts, ...casual, talked });
+      }
     }
 
     let body: string | null = null;
@@ -2434,6 +2495,17 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         else reason = `template:${v.reason}`;
       }
     }
+    // AN INSIGHT POST CARRIES CODE'S FIGURES LINE, OR IS NOT POSTED: the words
+    // describe what the line shows, and a post with no line is skipped
+    // (insight-figures-left-out) rather than going out on words alone.
+    if (body && insight) {
+      const lined = figuresFor(body, insight.figures, ownNamesOf(f.name), insight.ownCoins);
+      if (lined?.line) body = lined.text;
+      else {
+        body = null;
+        reason = "insight-figures-left-out";
+      }
+    }
     if (body && intent.kind === "sell") {
       body = appendSaleOutcome(body, intent.call.outcome, active.has(account.tenant.toLowerCase()) ? intent.call.gainPct : undefined);
       if (!body) reason = "sale-outcome-invalid";
@@ -2461,6 +2533,6 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       reason: body ? null : reason,
     });
     if (written === null) return { outcome: "already-written", body: null };
-    return { outcome: body ? `drafted-${intent.kind}` : "not-posted", body };
+    return { outcome: body ? (insight ? "drafted-insight" : `drafted-${intent.kind}`) : "not-posted", body };
   }
 }

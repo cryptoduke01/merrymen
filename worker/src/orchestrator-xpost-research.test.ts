@@ -1965,6 +1965,11 @@ describe("how's the market: the big coins' day and the chain's movers, read for 
     // The figures: the big coins by their day, the chain's coins by theirs only (no volume), never coingecko's global list.
     assert.equal(renderFiguresLine(b.figures!), "24h: BTC +1.2%, ETH -0.8%, SOL +3.1%; trending: COINA 24h +12%, COINB 24h -8.3%, COINC 24h +12%.");
     assert.ok(!b.figures!.some((s) => s.kind === "trending"));
+    // And for an active owner's insight post (2026-10-13): the day, the week read the same way, the chain, and Fomo not read.
+    assert.equal(b.insight?.day?.dir, "mixed");
+    assert.ok(b.insight?.week !== undefined, "the week is read beside the day");
+    assert.deepEqual(b.insight?.chain, b.market?.chain);
+    assert.equal(b.insight?.crowd, null, "fomo not asked: no crowd read");
   });
 
   it("each source unread is said as unread: no figures of it, and never a guess", async () => {
@@ -1981,6 +1986,9 @@ describe("how's the market: the big coins' day and the chain's movers, read for 
     assert.deepEqual(noChain.figures?.map((s) => s.kind), ["majors"]);
     const quiet = await marketFake({ pools: [pool(1, { volume24hUsd: 10 })] }).research.gather(input({ kind: "market" }, { xUserId: "m5" }));
     assert.deepEqual(quiet.market?.chain, { coins: 0, lead: null }, "nothing past the floors is none, not unread");
+    // Neither read: no insight at all, so an insight post falls back to the casual post (2026-10-13).
+    const neither = await marketFake({ markets: "fail", poolsFail: "http-429" }).research.gather(input({ kind: "market" }, { xUserId: "m7" }));
+    assert.equal(neither.insight, undefined);
   });
 
   it("a row that is not the coin asked, under another symbol or past the majors' rank, is no read of it", async () => {

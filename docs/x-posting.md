@@ -457,6 +457,34 @@ is their owner. Never list someone else's agent. Being named means:
   out on the pass that read the tag, and answers are twenty seconds apart.
   **No small talk** (2026-10-13): a greeting, banter, a joke, its mood or
   advice asked gets no answer at all (see "No small talk" below);
+- **market insights in its casual slots** (the owner's teammate,
+  2026-10-13). A casual slot that is not a trade-talk one (`casualInputs`:
+  trade-talk slots, and buy and sale posts, are unchanged) is a post about
+  the market now, one each slot. Code reads the same bundle "how's the
+  market?" reads (`readInsight`: the big coins' day and week, read from the
+  figures as the line rounds them, the chain's movers past the floors and
+  the first one's day, how many of them Fomo traders bought most), within the
+  same research allowances and its twelve seconds. The model is handed only
+  code's words for that read (`market.ts insightFacts`: "the big coins are
+  all up a little on the day", "a few coins on the chain's trending list
+  clear the activity floors"; no digit, no name, no source) and asked for one
+  or two lines in a trader's technical words (momentum, volume, liquidity,
+  rotation, breadth, risk-on and risk-off, consolidation, a range and where
+  things sit in it, said in words: `writer.ts insightPrompt`). The X gate
+  holds the draft to every screen a drafted answer is (`XGateCtx.insight`:
+  advice, a call, a forecast, a level, an entry, the house's claims and an
+  amount in words are refused as `hype`, `house-claim` or `quantity`), to no
+  buy or holding at all (`buys: "none"`), to no coin its buys go by
+  (`unsaid`), to no source (`source-named`), no digit (`has-digits`), and to
+  every word being everyday, technical (`INSIGHT_VOCABULARY`) or one of the
+  facts it was handed (`lookedOnly`, `unlooked-name`). Code puts its figures
+  line after the admitted words (`figuresFor`, the same screens as an
+  answer's line); a post whose line cannot be put in is skipped
+  (`insight-figures-left-out`), never posted on words alone. Research off,
+  or nothing read: the casual post as before. Logged as `drafted-insight`.
+  The gate refuses "breakout", "bullish", "bearish", "support level",
+  "bounce" and "rotating into" in any post, so the prompt steers clear of
+  them rather than the gate being loosened;
 - **reply consent recorded by the orchestrator.** When replies are in scope
   (`MERRYMEN_XPOST_REPLIES_APPROVED` is `1` or `active`) and the agent's X
   posting is on for its connected account, the orchestrator records reply

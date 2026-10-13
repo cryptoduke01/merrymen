@@ -419,3 +419,56 @@ export function marketAnswers(read: MarketRead, seed: string, style: { lower: bo
   const paperOf = new Map(MARKET_CLOSE.map((close, i) => [close, CASUAL_PAPER[i % CASUAL_PAPER.length]!] as const));
   return latinLines([majors, chain, MARKET_CLOSE], seed, (a, b, c) => `${a}, and ${b}. ${c}${o.paper === true ? `. ${paperOf.get(c)!}` : ""}.`);
 }
+
+// ── a market insight post ──────────────────────────────────────────────────
+
+/**
+ * THE MARKET NOW, AS CODE READ IT FOR AN INSIGHT POST (the owner's teammate,
+ * 2026-10-13: an active agent's casual slots become market insights). The
+ * same reads "how's the market?" makes (orchestrator-xpost-research.ts
+ * marketBundle): the big coins' day and week together, each read from the
+ * figures as the line rounds them (majorsDirOf), the chain's movers past the
+ * floors and the first one's day, and how many of them Fomo traders are most
+ * active in. Null where a source was not read. Never a figure, a name or a
+ * source: the model is handed only `insightFacts`' words, and the figures go
+ * in code's line after the gate (figures.ts).
+ */
+export interface InsightRead {
+  day: MarketRead["majors"];
+  week: MarketRead["majors"];
+  chain: HotRead | null;
+  /** How many of the chain's movers Fomo traders bought most (0: none); null when Fomo was not read. */
+  crowd: number | null;
+}
+
+function bigCoinsSaid(m: MarketRead["majors"], when: string): string | null {
+  if (!m) return null;
+  if (m.dir === "mixed") return `the big coins are split ${when}, some up and some down`;
+  if (m.dir === "flat" || !("size" in m)) return `the big coins are flat ${when}`;
+  if (m.size === "uneven") return `the big coins are all ${m.dir} ${when}, by uneven amounts`;
+  return `the big coins are all ${m.dir} ${m.size} ${when}`;
+}
+
+/**
+ * AN INSIGHT POST'S FACTS, IN WORDS: what the model is handed, and all it is
+ * handed, about the market. Digit-free, naming no coin, no ticker and no
+ * source (the chain's coins are "the chain's trending list"); empty when
+ * nothing was read. The model puts them in a trader's technical words
+ * (writer.ts insightPrompt); the X gate holds what it writes to these words,
+ * everyday ones and the technical vocabulary (INSIGHT_VOCABULARY).
+ */
+export function insightFacts(r: InsightRead | null | undefined): string[] {
+  if (!r) return [];
+  const out = [bigCoinsSaid(r.day, "on the day"), bigCoinsSaid(r.week, "on the week")];
+  const chain = r.chain;
+  if (chain) {
+    const n = chain.coins;
+    out.push(n === 0 ? "nothing on the chain's trending list clears the activity floors"
+      : n === 1 ? "one coin on the chain's trending list clears the activity floors" : "a few coins on the chain's trending list clear the activity floors");
+    const lead = n > 0 ? chain.lead : null;
+    const who = n === 1 ? "that coin is" : "the most active of them is";
+    if (lead) out.push(lead.dir === "flat" ? `${who} flat on the day` : `${who} ${lead.dir} ${lead.size ?? "a little"} on the day`);
+    if (n > 0 && r.crowd !== null && r.crowd > 0) out.push(`fomo traders are most active in ${r.crowd === 1 ? "one" : "a couple"} of those trending coins`);
+  }
+  return out.filter((x): x is string => x !== null);
+}

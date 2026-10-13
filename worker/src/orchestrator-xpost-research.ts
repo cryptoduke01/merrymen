@@ -67,7 +67,7 @@ import { takeAllowance, type XPost } from "./xpost/store";
 import { coinNamedIn, type AnswerIntentKind } from "./xpost/writer";
 import { asksAboutACoin, everydayWord, nameLikeWords } from "./xpost/words";
 import { cleanTicker, neverAnsweredName, withoutFiguresLine, type FiguresSection, type FiguresSpec } from "./xpost/figures";
-import { majorsDirOf, moveOf, type HotRead, type MajorRead, type MarketRead } from "./xpost/market";
+import { majorsDirOf, moveOf, type HotRead, type InsightRead, type MajorRead, type MarketRead } from "./xpost/market";
 import { coinQuery, LISTINGS_MAX, MAJORS_MAX_RANK, pickMajor, readChainListings, readCoinMarket, readCoinMarkets, readCoinTrending, readTopCoins, searchCoinList, type ChainListing, type ChainListingsRead, type CoinHit, type CoinMarket, type CoinMarketRead, type CoinMarketsRead, type CoinSearchRead, type CoinTopRead, type CoinTrendingRead } from "./venues/coingecko-coins";
 
 const MIN = 60_000;
@@ -1096,6 +1096,14 @@ export interface ResearchBundle {
    * its words are always code's (marketAnswers), never a draft.
    */
   market?: MarketRead;
+  /**
+   * THE MARKET NOW FOR AN ACTIVE OWNER'S INSIGHT POST (xpost/market.ts
+   * InsightRead, 2026-10-13): the market read's big coins' day, their week
+   * too, the chain's movers and how many of them Fomo traders bought most.
+   * Set beside `market` whenever the big coins or the chain were read; absent
+   * when neither was.
+   */
+  insight?: InsightRead;
   /**
    * What the answer turned out to be about, when that is not what the tag was
    * read as: a ticker on the coin list that is no major (a copycat, unranked,
@@ -2222,6 +2230,10 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
         const majorsRead = big ? majorsDirOf(big.map((m) => m.change24hPct)) : null;
         const chainRead: HotRead | null = hot.hot ?? null;
         const read: MarketRead = { majors: majorsRead, chain: chainRead };
+        // And for an insight post: the week as the day is read (majorsDirOf), and Fomo's most bought among the chain's movers.
+        const crowdShown = hot.figures?.find((x): x is Extract<FiguresSection, { kind: "crowd" }> => x.kind === "crowd")?.symbols.length ?? 0;
+        const insight: InsightRead | null = majorsRead || chainRead
+          ? { day: majorsRead, week: big ? majorsDirOf(big.map((m) => m.change7dPct)) : null, chain: chainRead, crowd: input.fomo ? crowdShown : null } : null;
         const facts = [
           ...(majorsRead ? [`the market data shows the big coins ${majorsRead.dir === "up" ? "mostly up" : majorsRead.dir === "down" ? "mostly down" : majorsRead.dir === "mixed" ? "split" : "flat"} today`] : []),
           ...hot.facts,
@@ -2234,7 +2246,8 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
           ...(crowd ? [crowd] : []),
         ];
         notes.push("market");
-        return { facts, ...(figures.length ? { figures } : {}), ...(hot.shownNames?.length ? { shownNames: hot.shownNames } : {}), market: read, ...(hot.hot ? { hot: hot.hot } : {}), lookups, notes };
+        return { facts, ...(figures.length ? { figures } : {}), ...(hot.shownNames?.length ? { shownNames: hot.shownNames } : {}), market: read, ...(insight ? { insight } : {}),
+          ...(hot.hot ? { hot: hot.hot } : {}), lookups, notes };
       };
       const i = input.intent;
       const f = input.facts;

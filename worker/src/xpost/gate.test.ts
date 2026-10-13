@@ -1547,6 +1547,20 @@ describe("an active owner's post never names a data provider (the owner's teamma
   it("only for an active owner: every other owner's posts are judged as before", () => {
     assert.equal(reason("coingecko shows volume thin across the board, a quiet one", { kind: "casual", mode: "live" }), "ok");
   });
+  it("an insight post is held to every screen a drafted answer is: no call, forecast, level, holding or amount in any words (2026-10-13)", () => {
+    const insight: Partial<XGateCtx> = { ...house, kind: "casual", insight: true, buys: "none" };
+    for (const ok of ["majors drifting in a tight range, breadth narrow and liquidity thin", "risk-off tone on the majors, momentum concentrated in the chain's trending names"]) {
+      assert.equal(reason(ok, insight), "ok", ok);
+    }
+    for (const [text, why] of [["majors firm, it's the play while breadth is narrow", "hype"], ["majors near the week's lows, a bounce from here looks likely", "hype"],
+      ["volume is thin, the next few days will be huge for the majors", "hype"], ["majors grinding higher, just buy and hold", "buy-claim"], ["breadth is narrow, the majors could keep climbing", "hype"],
+      ["majors up a little, and i'm holding some myself", "buy-claim"], ["majors grinding along, merrymen is cooking something soon", "house-claim"],
+      ["liquidity thin, a couple grand of volume on the chain", "quantity"]] as const) {
+      assert.equal(reason(text, insight), why, text);
+      // The same words in a plain casual post are judged as before.
+      assert.notEqual(reason(text, { ...house, kind: "casual" }), "source-named", text);
+    }
+  });
   it("fomo keeps its attribution, and a post naming no provider passes", () => {
     assert.equal(reason("fomo traders look busy and volume is thin, a quiet tape overall", { ...house, kind: "casual" }), "ok");
     assert.equal(reason("majors drifting in a tight range, breadth narrow and liquidity thin", { ...house, kind: "casual" }), "ok");
