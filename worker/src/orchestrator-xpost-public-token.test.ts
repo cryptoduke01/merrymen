@@ -22,7 +22,7 @@ test("public CA comes from the landed scoped decision, exact token side, and mat
   await db.prepare("INSERT INTO agents (smart_account, chain_id) VALUES (?, ?)").run(agent.address, agent.chainId);
   await db.prepare("INSERT INTO decisions VALUES (?, ?, ?, ?)").run("d1", agent.address, "buy", PUBLISHABLE_SOURCES[0]!);
   await db.prepare("INSERT INTO trades (id, decision_id, agent_id, kind, status, tx_hash, buy_token, sell_token) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(1, "d1", agent.address, "swap", "landed", hash, token, agent.address);
-  assert.deepEqual(await publicTokenForDecision(db, agent, "d1", "buy"), { address: token, chainId: 4663 });
+  assert.deepEqual(await publicTokenForDecision(db, agent, "d1", "buy"), { address: token, chainId: 4663, txHash: hash });
   assert.equal(await publicTokenForDecision(db, { ...agent, chainId: 46630 }, "d1", "buy"), null);
   assert.equal(await publicTokenForDecision(db, { ...agent, address: token }, "d1", "buy"), null);
   assert.equal(await publicTokenForDecision(db, agent, "d1", "sell"), null);
@@ -35,7 +35,7 @@ test("public CA comes from the landed scoped decision, exact token side, and mat
   await db.prepare("UPDATE trades SET agent_id = ?").run(agent.address);
   await db.prepare("UPDATE decisions SET action = 'sell'").run();
   await db.prepare("UPDATE trades SET fill_side = 'sell'").run();
-  assert.deepEqual(await publicTokenForDecision(db, agent, "d1", "sell"), agent);
+  assert.deepEqual(await publicTokenForDecision(db, agent, "d1", "sell"), { ...agent, txHash: hash });
   for (const [column, value] of [["epoch", 0], ["basis_source", "quote"], ["fill_side", "buy"], ["fill_qty_raw", "0"], ["fill_qty_raw", null]] as const) {
     await db.prepare(`UPDATE trades SET ${column} = ?`).run(value);
     assert.equal(await publicTokenForDecision(db, agent, "d1", "sell"), null, `${column}=${value} is not current receipt proof`);
@@ -44,7 +44,7 @@ test("public CA comes from the landed scoped decision, exact token side, and mat
   await db.prepare("UPDATE trades SET status = 'paper', tx_hash = NULL").run();
   assert.equal(await publicTokenForDecision(db, agent, "d1", "sell"), null, "paper requires dedicated simulated basis");
   await db.prepare("UPDATE trades SET basis_source = 'paper'").run();
-  assert.deepEqual(await publicTokenForDecision(db, agent, "d1", "sell"), agent);
+  assert.deepEqual(await publicTokenForDecision(db, agent, "d1", "sell"), { ...agent, txHash: null }, "paper has no transaction to link");
   await db.prepare("UPDATE decisions SET source = 'untrusted'").run();
   assert.equal(await publicTokenForDecision(db, agent, "d1", "sell"), null);
 });

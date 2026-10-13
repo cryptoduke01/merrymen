@@ -8,8 +8,14 @@
  * is held to its own grammar here, so nothing but what these functions render
  * can ever stand where it stands.
  *
- *   coingecko: $BTC #1, ~$97k, mcap ~$1.9T, vol ~$41B, 24h +1.2%, 7d -3.4%.
- *   geckoterminal robinhood: trending $ABC 24h +42.1% vol ~$1.2M; fomo: most bought $ABC.
+ *   BTC #1, ~$97k, mcap ~$1.9T, vol ~$41B, 24h +1.2%, 7d -3.4%.
+ *   trending: ABC 24h +42.1% vol ~$1.2M; fomo: most bought ABC.
+ *
+ * NO SOURCE NAMED (the owner's teammate, 2026-10-13): the line never says
+ * coingecko, geckoterminal or bitquery, and nothing else posted by an active
+ * owner does either (gate.ts XGateCtx.house, "source-named"). Fomo's own
+ * section keeps "fomo:": the owner holds Enterprise rights to paraphrased,
+ * attributed Fomo facts.
  *
  * WHAT GOES IN IS TYPED DATA, NEVER TEXT. A provider's numbers, and of its
  * words only a ticker that passes `cleanTicker`: A-Z, two to ten letters,
@@ -27,14 +33,14 @@
  *   percent  an explicit sign, then at most one decimal (below 100) or a whole
  *            number, then %: +1.2%, -38%, +0%.
  *   rank     #1 to #999.
- *   sections "coingecko:" (one coin's rank, price, market cap, 24h volume,
- *            24h and 7d change), "coingecko 24h:" (up to three big coins,
- *            each its day's change: the market overview, 2026-10-12),
- *            "geckoterminal robinhood: trending" (up to
- *            three coins, each its 24h change and volume), "fomo: most bought"
- *            (up to two tickers), "coingecko: trending" (up to three
- *            tickers), "bitquery: 1h" (buys and sells in money), joined by
- *            "; ", ending with ".". At most six figures in all: a handful.
+ *   sections a ticker alone at the head (one coin's rank, price, market
+ *            cap, 24h volume, 24h and 7d change), "24h:" (up to three big
+ *            coins, each its day's change: the market overview, 2026-10-12),
+ *            "trending:" (up to three of the chain's coins, each its 24h
+ *            change and volume), "fomo: most bought" (up to two tickers),
+ *            "hot:" (up to three tickers of the global trending list), "1h"
+ *            (a coin's buys and sells in money), joined by "; ", ending with
+ *            ".". At most six figures in all: a handful.
  *
  * TOO LONG FOR X, FIELDS GO FIRST, THEN THE LINE (`withFigures`): the least
  * telling field is dropped, then the next, and when no form of the line fits
@@ -185,7 +191,7 @@ const TICKER_REFUSED = new RegExp([...HOUSE_NAMES, ...HOUSE_PRODUCTS, ...ABUSE_A
 /**
  * The house's own names and its own products' ("fomo", "trencher": red-team
  * 2026-10-12), a model's, a slur, a hate code or a political name: what no
- * line of the house's answers under. The sources it names (coingecko,
+ * line of the house's answers under. The sources it reads (coingecko,
  * bitquery, pons) are no such name.
  */
 const NEVER_ANSWERED = new RegExp([...HOUSE_NAMES, ...HOUSE_OWN_PRODUCTS, ...ABUSE_AND_POLITICS, ...TRAGEDY_AND_NOTORIETY].join("|"));
@@ -337,9 +343,9 @@ export function rankOf(v: unknown): string | null {
 
 /** One section of the line: what one source showed, as numbers and tickers only. */
 export type FiguresSection =
-  /** A coin by name or ticker, from CoinGecko's markets: "coingecko: $BTC #1, ~$97k, mcap …". */
+  /** A coin by name or ticker, from CoinGecko's markets: "BTC #1, ~$97k, mcap …". */
   | { kind: "major"; symbol: string; rank?: number | null; priceUsd?: number | null; marketCapUsd?: number | null; volume24hUsd?: number | null; change24hPct?: number | null; change7dPct?: number | null }
-  /** The big coins' day, from CoinGecko's markets: "coingecko 24h: $BTC +1.2%, $ETH -0.8%, $SOL +3.1%" (the market overview). */
+  /** The big coins' day, from CoinGecko's markets: "24h: BTC +1.2%, ETH -0.8%, SOL +3.1%" (the market overview). */
   | { kind: "majors"; coins: { symbol: string; change24hPct?: number | null }[] }
   /** Robinhood Chain coins trending on GeckoTerminal that cleared the fleet's floors. */
   | { kind: "pools"; coins: { symbol: string; change24hPct?: number | null; volume24hUsd?: number | null }[] }
@@ -441,20 +447,20 @@ function capFigures(list: Shown[]): Shown[] {
 function renderSection(s: Shown): string {
   switch (s.kind) {
     case "major": {
-      const head = `coingecko: ${s.ticker}${s.rank ? ` ${s.rank}` : ""}`;
+      const head = `${s.ticker}${s.rank ? ` ${s.rank}` : ""}`;
       const rest = [s.price, s.mcap ? `mcap ${s.mcap}` : null, s.vol ? `vol ${s.vol}` : null, s.d1 ? `24h ${s.d1}` : null, s.d7 ? `7d ${s.d7}` : null].filter((x): x is string => x !== null);
       return [head, ...rest].join(", ");
     }
     case "majors":
-      return `coingecko 24h: ${s.coins.map((c) => `${c.ticker} ${c.d1}`).join(", ")}`;
+      return `24h: ${s.coins.map((c) => `${c.ticker} ${c.d1}`).join(", ")}`;
     case "pools":
-      return `geckoterminal robinhood: trending ${s.coins.map((c) => [c.ticker, c.d1 ? `24h ${c.d1}` : null, c.vol ? `vol ${c.vol}` : null].filter((x): x is string => x !== null).join(" ")).join(", ")}`;
+      return `trending: ${s.coins.map((c) => [c.ticker, c.d1 ? `24h ${c.d1}` : null, c.vol ? `vol ${c.vol}` : null].filter((x): x is string => x !== null).join(" ")).join(", ")}`;
     case "crowd":
       return `fomo: most bought ${s.tickers.join(", ")}`;
     case "trending":
-      return `coingecko: trending ${s.tickers.join(", ")}`;
+      return `hot: ${s.tickers.join(", ")}`;
     case "flow":
-      return `bitquery: 1h buys ${s.buys}, sells ${s.sells}`;
+      return `1h buys ${s.buys}, sells ${s.sells}`;
   }
 }
 
@@ -478,14 +484,16 @@ const MONEY = String.raw`~\$(?:[1-9]\.[1-9]|[1-9]\d{0,2})[kMBT]`;
 const PCT = String.raw`[+-](?:0|[1-9]\d{0,4})(?:\.[1-9])?%`;
 const RANK = String.raw`#[1-9]\d{0,2}`;
 // A coin with no figure is never rendered, so the grammar refuses one: after
-// the ticker a field must follow (the lookahead), whichever it is.
-const MAJOR = String.raw`coingecko: ${T}(?=[ ,])(?: ${RANK})?(?:, ${MONEY})?(?:, mcap ${MONEY})?(?:, vol ${MONEY})?(?:, 24h ${PCT})?(?:, 7d ${PCT})?`;
-const MAJORS = String.raw`coingecko 24h: ${T} ${PCT}(?:, ${T} ${PCT}){0,${MAJORS_MAX - 1}}`;
+// the ticker a field must follow (the lookahead), whichever it is. Every other
+// section opens with a word of its own in lower case or a digit, so a ticker
+// at the head of a section is always a major's.
+const MAJOR = String.raw`${T}(?=[ ,])(?: ${RANK})?(?:, ${MONEY})?(?:, mcap ${MONEY})?(?:, vol ${MONEY})?(?:, 24h ${PCT})?(?:, 7d ${PCT})?`;
+const MAJORS = String.raw`24h: ${T} ${PCT}(?:, ${T} ${PCT}){0,${MAJORS_MAX - 1}}`;
 const POOL = String.raw`${T}(?= )(?: 24h ${PCT})?(?: vol ${MONEY})?`;
-const POOLS = String.raw`geckoterminal robinhood: trending ${POOL}(?:, ${POOL}){0,${POOLS_MAX - 1}}`;
+const POOLS = String.raw`trending: ${POOL}(?:, ${POOL}){0,${POOLS_MAX - 1}}`;
 const CROWD = String.raw`fomo: most bought ${T}(?:, ${T}){0,${CROWD_MAX - 1}}`;
-const TRENDING = String.raw`coingecko: trending ${T}(?:, ${T}){0,${TRENDING_MAX - 1}}`;
-const FLOW = String.raw`bitquery: 1h buys ${MONEY}, sells ${MONEY}`;
+const TRENDING = String.raw`hot: ${T}(?:, ${T}){0,${TRENDING_MAX - 1}}`;
+const FLOW = String.raw`1h buys ${MONEY}, sells ${MONEY}`;
 const SECTION = `(?:${MAJOR}|${MAJORS}|${POOLS}|${CROWD}|${TRENDING}|${FLOW})`;
 /** The line, whole: one to five sections joined by "; ", ending with a full stop. Nothing else. */
 const LINE = String.raw`${SECTION}(?:; ${SECTION}){0,4}\.`;

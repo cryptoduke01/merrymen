@@ -117,6 +117,11 @@ describe("a tag's intent, read by code", () => {
     ["what can you do?", "capabilities"],
     ["how do i get my own agent?", "onboarding"],
     ["how do i get an agent like you", "onboarding"],
+    // The X allowlist's plain onboarding shapes (onboardingAsk, 2026-10-13).
+    ["how do i get an agent?", "onboarding"],
+    ["hey, how can i make an ai trading agent?", "onboarding"],
+    ["can i get a bot like you?", "onboarding"],
+    ["where do i set up my own agent", "onboarding"],
     ["what are you trading lately?", "own-trades"],
     ["why did you buy $PEPE?", "own-trades"],
     ["what model do you run on?", "model"],
@@ -1226,16 +1231,16 @@ describe("majors: a coin by name or ticker, read on coingecko's list (2026-10-12
     assert.ok(namesACoin({ text: "how's eth doing?", intent: classifyTag("how's eth doing?"), address: null }), "a named major is a named coin");
   });
 
-  it("its market in words: rank, the day, the week, volume against size, each with coingecko in it, through the X gate", () => {
+  it("its market in words: rank, the day, the week, volume against size, each as the market data and never the provider's name, through the X gate", () => {
     const said = majorPhrases(ETH_MARKET);
-    assert.deepEqual(said, ["coingecko ranks it among the very biggest coins", "coingecko shows it up a little today", "coingecko shows it down a fair bit on the week",
-      "trading volume looks ordinary on coingecko"]);
+    assert.deepEqual(said, ["the market data ranks it among the very biggest coins", "the market data shows it up a little today", "the market data shows it down a fair bit on the week",
+      "trading volume looks ordinary in the market data"]);
     const bands = [
       ...majorPhrases({ rank: 30, marketCapUsd: 1e9, volume24hUsd: 2e8, change24hPct: -15, change7dPct: 0.2 }),
       ...majorPhrases({ rank: 150, marketCapUsd: 1e9, volume24hUsd: 1e7, change24hPct: 7, change7dPct: -0.3 }),
     ];
-    for (const p of ["coingecko ranks it a large cap", "coingecko shows it down sharply today", "coingecko shows it flat on the week", "trading volume looks heavy on coingecko",
-      "coingecko ranks it a mid cap", "coingecko shows it up a fair bit today", "trading volume looks light on coingecko"]) assert.ok(bands.includes(p), p);
+    for (const p of ["the market data ranks it a large cap", "the market data shows it down sharply today", "the market data shows it flat on the week", "trading volume looks heavy in the market data",
+      "the market data ranks it a mid cap", "the market data shows it up a fair bit today", "trading volume looks light in the market data"]) assert.ok(bands.includes(p), p);
     for (const p of [...said, ...bands]) {
       assert.ok(sayable(p), p);
       assert.doesNotMatch(p, /\p{N}|eth|ethereum|buy|\$/iu, p);
@@ -1330,13 +1335,14 @@ describe("majors: a coin by name or ticker, read on coingecko's list (2026-10-12
     assert.ok(lateB.notes.includes("late"));
   });
 
-  it("the writer is told it is a big coin on coingecko's list, not a robinhood chain coin it trades, with no figure and no name", () => {
+  it("the writer is told it is a big coin, not a coin of the chain it trades, with no figure, no name and no source's name", () => {
     const facts: AnswerFacts = { agentName: "Alan", strategy: "trencher", flavour: null, traits: [], mode: "live", style: { lower: true, emoji: 0, exclaim: 0 }, recentOwn: [],
       question: "how's eth doing?", recentBuys: [{ label: "PEPE", paper: false }], boughtLately: "live", said: ["grabbed some pepe"], walletPublic: false, coinNamed: true,
       intent: "major", research: majorPhrases(ETH_MARKET) };
     const p = answerPrompt(facts);
-    assert.match(p.prompt, /big coin on coingecko's list/);
-    assert.match(p.prompt, /not a robinhood chain coin and not one you trade/);
+    assert.match(p.prompt, /They are asking about a big coin\./);
+    assert.match(p.prompt, /not a coin of the chain you trade on and not one you trade/);
+    assert.doesNotMatch(p.prompt, /gecko|bitquery|robinhood chain/i, "no provider's name, nor the chain's (2026-10-13)");
     assert.match(p.prompt, /Write no number or amount/);
     assert.doesNotMatch(p.prompt, /added after your words/, "never told a line follows its words");
     assert.match(p.prompt, /They named a specific coin/);
@@ -1577,11 +1583,11 @@ describe("what's hot: the chain's trending coins past the fleet's floors, fomo's
       ...hotPhrases({ changes: [0], crowd: 0, trending: 0 }),
       ...hotPhrases({ changes: [], crowd: 0, trending: 0 }),
     ];
-    for (const p of ["the robinhood chain index shows a few coins standing out right now", "on the index they're all up on the day",
-      "fomo traders are most active in a couple of coins the index has trending", "coingecko's global trending list has a few big names on it",
-      "the robinhood chain index shows a couple of coins standing out right now", "on the index they're all down on the day",
-      "fomo traders are most active in one coin the index has trending", "coingecko's global trending list has a big name on it",
-      "on the index they're a mix of up and down on the day", "the robinhood chain index shows one coin standing out right now", "on the index it's flat on the day", HOT_NONE]) {
+    for (const p of ["the chain's index shows a few coins standing out right now", "on the index they're all up on the day",
+      "fomo traders are most active in a couple of coins the index has trending", "the global trending index has a few big names on it",
+      "the chain's index shows a couple of coins standing out right now", "on the index they're all down on the day",
+      "fomo traders are most active in one coin the index has trending", "the global trending index has a big name on it",
+      "on the index they're a mix of up and down on the day", "the chain's index shows one coin standing out right now", "on the index it's flat on the day", HOT_NONE]) {
       assert.ok(all.includes(p), p);
     }
     for (const p of all) {
@@ -1609,7 +1615,7 @@ describe("what's hot: the chain's trending coins past the fleet's floors, fomo's
     assert.deepEqual(b.facts, hotPhrases({ changes: [42.07, -8.3, 12], crowd: 2, trending: 2 }));
     assert.deepEqual(b.hot, { coins: 3, lead: { dir: "up", size: "sharply" } }, "code's own words are built from this read, never a draft");
     assert.equal(renderFiguresLine(b.figures!),
-      "geckoterminal robinhood: trending COINA 24h +42.1% vol ~$1.2M, COINB 24h -8.3% vol ~$310k, COINC 24h +12% vol ~$400k; fomo: most bought COIND, COINB; coingecko: trending PEPE, TAO.");
+      "trending: COINA 24h +42.1% vol ~$1.2M, COINB 24h -8.3% vol ~$310k, COINC 24h +12% vol ~$400k; fomo: most bought COIND, COINB; hot: PEPE, TAO.");
   });
 
   it("nothing past the floors: the plain line and nothing more looked up; the index unread: nothing at all", async () => {
@@ -1698,7 +1704,7 @@ describe("a tagged contract's last hour of onchain flow, as figures beside its w
     const { research } = fakes({ flow: busyHour(12_300, 8_100) });
     const b = await research.gather(input({ kind: "coin", ticker: null, address: CA }));
     assert.deepEqual(b.figures, [{ kind: "flow", buyUsd: 12_300, sellUsd: 8_100 }]);
-    assert.equal(renderFiguresLine(b.figures!), "bitquery: 1h buys ~$12k, sells ~$8.1k.");
+    assert.equal(renderFiguresLine(b.figures!), "1h buys ~$12k, sells ~$8.1k.");
     assert.ok(b.facts.every((p) => !/\p{N}|\$/u.test(p)));
   });
   it("no reading, a failed one, or an hour too thin to show: no figures", async () => {
@@ -1953,12 +1959,17 @@ describe("how's the market: the big coins' day and the chain's movers, read for 
     assert.ok(m.asked.includes("pools"));
     assert.deepEqual(b.market, { majors: { dir: "mixed" }, chain: { coins: 3, lead: { dir: "up", size: "sharply" } } });
     assert.ok(b.facts.length > 0 && b.facts.every((f) => sayable(f)), b.facts.join(" | "));
-    assert.ok(b.facts.includes("coingecko shows the big coins split today"));
+    assert.ok(b.facts.includes("the market data shows the big coins split today"));
     assert.ok(b.lookups <= RESEARCH_BUDGET.maxLookups);
     assert.ok(b.notes.includes("market"));
     // The figures: the big coins by their day, the chain's coins by theirs only (no volume), never coingecko's global list.
-    assert.equal(renderFiguresLine(b.figures!), "coingecko 24h: BTC +1.2%, ETH -0.8%, SOL +3.1%; geckoterminal robinhood: trending COINA 24h +12%, COINB 24h -8.3%, COINC 24h +12%.");
+    assert.equal(renderFiguresLine(b.figures!), "24h: BTC +1.2%, ETH -0.8%, SOL +3.1%; trending: COINA 24h +12%, COINB 24h -8.3%, COINC 24h +12%.");
     assert.ok(!b.figures!.some((s) => s.kind === "trending"));
+    // And for an active owner's insight post (2026-10-13): the day, the week read the same way, the chain, and Fomo not read.
+    assert.equal(b.insight?.day?.dir, "mixed");
+    assert.ok(b.insight?.week !== undefined, "the week is read beside the day");
+    assert.deepEqual(b.insight?.chain, b.market?.chain);
+    assert.equal(b.insight?.crowd, null, "fomo not asked: no crowd read");
   });
 
   it("each source unread is said as unread: no figures of it, and never a guess", async () => {
@@ -1975,6 +1986,9 @@ describe("how's the market: the big coins' day and the chain's movers, read for 
     assert.deepEqual(noChain.figures?.map((s) => s.kind), ["majors"]);
     const quiet = await marketFake({ pools: [pool(1, { volume24hUsd: 10 })] }).research.gather(input({ kind: "market" }, { xUserId: "m5" }));
     assert.deepEqual(quiet.market?.chain, { coins: 0, lead: null }, "nothing past the floors is none, not unread");
+    // Neither read: no insight at all, so an insight post falls back to the casual post (2026-10-13).
+    const neither = await marketFake({ markets: "fail", poolsFail: "http-429" }).research.gather(input({ kind: "market" }, { xUserId: "m7" }));
+    assert.equal(neither.insight, undefined);
   });
 
   it("a row that is not the coin asked, under another symbol or past the majors' rank, is no read of it", async () => {

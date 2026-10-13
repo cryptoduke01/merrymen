@@ -155,7 +155,10 @@ refresher; that is not built.
 
 merrymen is a **confidential** X client (`MERRYMEN_X_CLIENT_ID`,
 `MERRYMEN_X_CLIENT_SECRET`). Scopes: `tweet.read tweet.write users.read
-offline.access`. Privy's X sign-in is not used for posting: Privy hands provider
+offline.access media.write`. `media.write` (2026-10-13) is only for the profit
+card on an active owner's sale ("The profit card on a sale" below); a grant
+made before it lacks it, and those sales post as text until the owner
+reconnects. Privy's X sign-in is not used for posting: Privy hands provider
 tokens only to the browser, sets scopes app-wide (so every sign-in would ask to
 post), and does not refresh them.
 
@@ -454,8 +457,38 @@ is their owner. Never list someone else's agent. Being named means:
 - answers to posts that tag it, reply to it or quote one of its own posts,
   sent right away (see "Answers to tags"): its mentions are read every
   fifteen seconds on an allowance of 6000 a day of its own, an answer goes
-  out on the pass that read the tag, answers are twenty seconds apart, and a
-  tag that is only a greeting gets a casual line code built;
+  out on the pass that read the tag, and answers are twenty seconds apart.
+  **No small talk** (2026-10-13): a greeting, banter, a joke, its mood or
+  advice asked gets no answer at all (see "No small talk" below);
+- **market insights in its casual slots** (the owner's teammate,
+  2026-10-13: "talk constantly about market insights"). Every casual slot is
+  a post about the market now, one each slot; buy and sale posts are
+  unchanged, and a slot whose market cannot be read is the casual post as
+  before. Code reads the same bundle "how's the
+  market?" reads (`readInsight`: the big coins' day and week, read from the
+  figures as the line rounds them, the chain's movers past the floors and
+  the first one's day, how many of them Fomo traders bought most), within the
+  same research allowances and its twelve seconds. The model is handed only
+  code's words for that read (`market.ts insightFacts`: "the big coins are
+  all up a little on the day", "a few coins on the chain's trending list
+  clear the activity floors"; no digit, no name, no source) and asked for one
+  or two lines in a trader's technical words (momentum, volume, liquidity,
+  rotation, breadth, risk-on and risk-off, consolidation, a range and where
+  things sit in it, said in words: `writer.ts insightPrompt`). The X gate
+  holds the draft to every screen a drafted answer is (`XGateCtx.insight`:
+  advice, a call, a forecast, a level, an entry, the house's claims and an
+  amount in words are refused as `hype`, `house-claim` or `quantity`), to no
+  buy or holding at all (`buys: "none"`), to no coin its buys go by
+  (`unsaid`), to no source (`source-named`), no digit (`has-digits`), and to
+  every word being everyday, technical (`INSIGHT_VOCABULARY`) or one of the
+  facts it was handed (`lookedOnly`, `unlooked-name`). Code puts its figures
+  line after the admitted words (`figuresFor`, the same screens as an
+  answer's line); a post whose line cannot be put in is skipped
+  (`insight-figures-left-out`), never posted on words alone. Research off,
+  or nothing read: the casual post as before. Logged as `drafted-insight`.
+  The gate refuses "breakout", "bullish", "bearish", "support level",
+  "bounce" and "rotating into" in any post, so the prompt steers clear of
+  them rather than the gate being loosened;
 - **reply consent recorded by the orchestrator.** When replies are in scope
   (`MERRYMEN_XPOST_REPLIES_APPROVED` is `1` or `active`) and the agent's X
   posting is on for its connected account, the orchestrator records reply
@@ -581,8 +614,8 @@ to the mention itself. They go out **right away**:
   wave of strangers' tags could spend the fleet's allowance and stop every
   owner's posts for the day. It stayed 48 when the day's answers went to
   sixty (`ANSWER_DRAFTS_PER_DAY` no longer follows `ANSWERS_PER_DAY`):
-  code's own lines (the model question, a greeting, the market, what's hot,
-  a major, its mood, a decline) cost none.
+  code's own lines (the model question, the market, what's hot, a major, its
+  strategy, its buys) cost none.
 - **Research stays inside the pass's send budget.** An answer's lookups get
   their twelve seconds or what is left of the pass's five-minute send
   budget, whichever is less, so they never hold the next pass's sends back.
@@ -667,7 +700,28 @@ to the mention itself. They go out **right away**:
   again in other words; a paper agent's lines each add a short paper clause
   of their own. It never says sherwood runs it, powers it, picks its trades
   or is live today: nothing wires it into an agent yet.
-- **A greeting, by allowlist** (`greetingOnly` in `replies.ts`). A tag whose
+- **No small talk** (the owner's teammate, 2026-10-13: "do not respond to
+  normal conversations"). An active agent answers a tag only when it is one
+  of: how's the market (`marketAsk`); a coin's facts (a major by name or
+  ticker, a `$ticker` or a contract of the chain); what's hot (`hotAsk`); its
+  own trading or strategy (`generalTradesQuestion`, `selfAsk`, its own
+  trades); the model question on its allowlist (the sherwood-1 tease); and
+  what it can do or how to get an agent (capabilities and onboarding,
+  `onboardingAsk` adding "how do i get an agent?", "can i get a bot like
+  you?" and their kin on X). Everything else gets no answer, no row and no
+  model call (`writeAnswer`'s `smallTalk`, `unanswered`): a greeting
+  ("hiii", "gm"), banter ("how are you", "tell me a joke", "who are you",
+  "what do you do for fun"), its mood ("are you bullish?", "wen moon"), the
+  playful decline of advice ("should i buy pepe", "what should i buy"), and
+  any other chat. "What do you do?" is read as what it can do. With
+  greetings and banter gone, no answer leaves its thread open
+  (`ANSWER_PLAIN_THREAD` is still read on older rows): a reply under any of
+  its answers gets nothing, while a reply under, or a quote of, its own
+  hello or a plain casual post is read as before. The code lines below
+  (`greetingAnswers`, `chatAnswers`, `vibeAnswers`, `declineAnswers`) stay
+  in `writer.ts` and `casual.ts` with their tests but are no longer posted.
+- **A greeting, by allowlist** (retired 2026-10-13: no greeting is answered
+  now; what follows is how it worked) (`greetingOnly` in `replies.ts`). A tag whose
   text, after its leading handles, is only a greeting ("hiii", "gm", "yo ser
   👋", "hey alan!") used to be refused as too short or not a question, and was
   never answered. Now it gets a casual line code built, never a draft. The
@@ -834,11 +888,11 @@ words and never on what they mean:
 
 | | what is asked | how it is answered |
 |---|---|---|
-| a) market | "how's the market", "market update", "how are things looking", "what's the market doing", "how's crypto today", "is it a green day" (`marketAsk`: a strict allowlist of whole plain tags, after at most two greeting words, a "today" or the like) | Bitcoin, ether and solana's day in one CoinGecko read (`MARKET_MAJORS`, `readCoinMarkets`) beside what's hot on Robinhood Chain (every floor and screen of what's hot), in code's casual words (`marketAnswers`: the big coins up, down, split, flat or unread, read from the very figures the line shows as it rounds them (`majorsDirOf`: up only when every coin shown is above +0%, down only when every one is below, flat only when all are +0%, split otherwise; one coin read is no read of "majors", and the line shows none), all up or all down said as big as the move only when every coin the line shows is in the same band (`moveOf`'s bands: a little under three percent, a fair bit under ten, sharply past it; red-team review of a964a74c: "the giants dipped slightly" went out beside BTC -15.2%, ETH -21.7%, SOL -28.3%), and in different bands with no size at all ("fell unevenly", "are up in varying degrees"; red-team review of 1ed46625: sized by the coin that moved most, "majors are plunging" went out beside BTC -1.2%, ETH -2%, SOL -10.5%, and "majors are surging" beside +0.8%, +1.1%, +10.3%); the chain's coins counted one, some, none or unread, never with a direction ("a solo runner" went out beside $CHUMP -62.5%); a close that says it is a read) and code's figures line (`coingecko 24h: BTC +1.2%, ETH -0.8%, SOL +3.1%; geckoterminal robinhood: trending ABC 24h +42.1%`). Never drafted. Research off or nothing read: a line that says so, no figures |
+| a) market | "how's the market", "market update", "how are things looking", "what's the market doing", "how's crypto today", "is it a green day" (`marketAsk`: a strict allowlist of whole plain tags, after at most two greeting words, a "today" or the like) | Bitcoin, ether and solana's day in one CoinGecko read (`MARKET_MAJORS`, `readCoinMarkets`) beside what's hot on Robinhood Chain (every floor and screen of what's hot), in code's casual words (`marketAnswers`: the big coins up, down, split, flat or unread, read from the very figures the line shows as it rounds them (`majorsDirOf`: up only when every coin shown is above +0%, down only when every one is below, flat only when all are +0%, split otherwise; one coin read is no read of "majors", and the line shows none), all up or all down said as big as the move only when every coin the line shows is in the same band (`moveOf`'s bands: a little under three percent, a fair bit under ten, sharply past it; red-team review of a964a74c: "the giants dipped slightly" went out beside BTC -15.2%, ETH -21.7%, SOL -28.3%), and in different bands with no size at all ("fell unevenly", "are up in varying degrees"; red-team review of 1ed46625: sized by the coin that moved most, "majors are plunging" went out beside BTC -1.2%, ETH -2%, SOL -10.5%, and "majors are surging" beside +0.8%, +1.1%, +10.3%); the chain's coins counted one, some, none or unread, never with a direction ("a solo runner" went out beside $CHUMP -62.5%); a close that says it is a read) and code's figures line (`24h: BTC +1.2%, ETH -0.8%, SOL +3.1%; trending: ABC 24h +42.1%`). Never drafted. Research off or nothing read: a line that says so, no figures |
 | b) coin facts | a major by name or ticker, what's hot, a `$ticker` or a contract on the chain | as before ("Research for answers", "Market intel"), with every rule that keeps it from confirming a buy by name |
 | c) itself | what it trades: the plain questions (`generalTradesQuestion`); and how it trades and what it has been up to on an allowlist of their own (`selfAsk`: "what have you been up to", "what are you up to", "what's your strategy", "tell me about your trading", "how do you decide what to buy") | **in code's words since the red-team review of daaae961, never a draft**: what it bought lately, the coins it bought with the money it trades with now and nothing else said of them (`tradesAnswers`; none it can name, and it says only that), and how it trades, the strategy it runs by name and what its rules are like (`selfAnswers`; "how do you pick your coins" is one of these). Drafted, "doing good, i'm up on every trade this month", "the top isn't in yet, relax", "just hold and chill", "i run the biggest fund on robinhood chain" and "fresh launches, pepe is the strongest coin on the chain" went out. Before that review: drafted, told its buys only for the plain questions about what it trades; the `selfAsk` questions told none of them (red-team review of a964a74c: told its buys, "the next one i grab is gonna be a big one", "whatever is trending tonight is what i grab next" and "snipe early and never sell" were posted). Whatever it was told, no reply says a buy to come in any words ("gonna snipe", "about to grab", "tonight i grab", "what i grab next": `REPLY_CURRENT_OR_ACTION`), no answer forecasts how big one will be ("gonna be huge": `ANSWER_PREDICTION`) or gives a strategy as an order ("never sell": `ANSWER_CALL`). No drafted answer, in any lane, says who or what decides its trades: an owner at all, anyone else picking, telling, asking or choosing, "buy whatever people ask", "whatever gets the most replies" (`DECIDER_CLAIM`, refused as `decider-claim`, red-team review of a964a74c: "my owner picks my trades" and "i buy whatever people ask me to" were posted under "what's your strategy?") |
-| d) chat, banter, opinion | only a whole tag on the banter allowlist (`banterAsk`: "how are you", "what do you think about ai agents", "tell me a joke", "who are you", "what do you do for fun") or one of the plain questions about its trades; any other chat ("what do you think of women?", "thoughts on the war?", "how are the victims doing?", "what's merrymen", a private ask) is answered by nothing, no row and no model call (red-team review of a964a74c: drafts in everyday words posted "they are bad at trading honestly", "it will be over in a couple weeks", "it was planned from the start") | **code's friendly line about itself since the red-team review of daaae961, never a draft** (`chatAnswers`; drafted, "this week ends green, i can feel it", "a whole new model of me is almost done", "you people never learn lol", "doing good, the fed is cooked" and "i've been live for years" went out, two days old), with no fallback for a refused draft in any lane. Before that review: a casual draft that states no fact it was not handed, in character as a laid-back trader bot merrymen built (never "on-chain": a source word with nothing looked up is refused), with a light mood or opinion about itself. No drafted answer speaks for merrymen or robinhood beyond "built by merrymen", says anyone backs or trusts it, teases news ("soon", "stay tuned", "cooking", "can't share that yet"), judges the asker ("you seem", "kinda like you") or boasts of money or being the best (`ANSWER_HOUSE_CLAIM`, refused as `house-claim`); and "crypto", "community", "future", "proud", "silly", "goofy", "cheeky", "tune", "ride", "join" and "party" are no chat words. A draft handed nothing that speaks of crypto, the chain, the market, a big coin by name or its direction (`marketTalkIn`), or of merrymen beyond who made it, robinhood, a team, a crew, devs or a company, a token, TGE, a launch, an airdrop, a presale, safety, security, funds, money, a hack or a refund (`houseTalkIn`), is not posted, and "crew", "company", "family", "build", "ship", "panic", "path", "road", "journey" and "adventure" are no chat words, nor (red-team review of a964a74c) "count", "history", "memory", "past", "shift", "edge", "home", "corner", "forever" or "human"; no drafted answer promises to make anyone whole, says "count on me", ranks itself above people or the asker ("smarter than every human", `ANSWER_HOUSE_CLAIM`) or boasts of no bad stretch ("never had a bad week yet", red-team review of 1ed46625); no drafted answer handed no research speaks of a scam, a rug, a fake, something shady or sus, trust, honesty, legitimacy, being rekt or dead, a ponzi, fraud, cheating, theft or a honeypot ("honestly", the filler, aside: `trustTalkIn`, refused as `trust-talk` with no fallback; red-team review of 1ed46625: "i scam people for fun, honestly.", "a bot that will rug you, fren." and "the only honest bot on the timeline, the rest are fake." were posted as banter); and no answer says the market's future in other words ("about to", "a huge year", "the next few months", "the perfect time", "get in while", "plenty of room", "a sweet spot", "stick around", "history says", "ends well", "coming in a couple hours", "around the corner", "is coming": `ANSWER_PREDICTION`). A chat draft refused only for how it was put (a repeat, a stock deflection, a model's note, punctuation, casing or markup: `CHAT_FALLBACK_REASONS`; never its length, nor an opt-out line worded its own way), and whose words, that form put right (`formFixed`) and gated again against no recent post, would pass as an answer handed nothing, falls back to one of code's friendly lines about itself (`chatAnswers`, logged `answer-chat-fallback`), only when the whole tag is plain banter on a strict allowlist (`banterAsk`: how are you, how's it going, who or what are you, tell me a joke, what do you do for fun, what do you think about ai agents; never one that says money, funds, a hack, a scam, a rug, a loss, a death, a token, TGE, a launch, merrymen, robinhood or alan), and never under such a name as in e); one refused for what it said (sherwood, a buy, a source, a word that may be a coin's name, advice, a forecast, a figure, the other money, a body), or a PASS, stays unanswered. Its own mood about the market's direction ("are you bullish?", "wen moon", "are we so back", "wagmi?": `vibeAsk`, a strict allowlist) gets code's non-committal line about itself (`vibeAnswers`), never a direction or a coin |
-| e) advice | "should i buy X", "what should i buy", "is X going up", a price target, "is X a good investment", each flagged as advice by `tagCandidate` on the tag itself (a major's shape with an entry in the coin's place, what's hot with a word more and research's "unanswered" are never declined: answered by nothing, red-team review of a964a74c) | code's playful decline (`declineAnswers`: "fair ask. i make calls for nobody, process talk is welcome."), **only under a tag that names no coin, or bitcoin, ether or solana alone** (`declinable`, red-team review of daaae961: "should i buy $SANDYHOOK?", "$OSAMA", "$SHOAH", "$EPSTEIN", "$FENTANYL" and "should i buy the epstein coin?" got "heh, a frequent request"; any other name, a $ticker or a word that might be one, gets nothing, and no opener laughs), never naming or judging the coin, never hinting at a view or a position (no "tempting", "wish i knew" or "i captain my own boat"), never a joke at the asker or luck wished ("haha, brave soul", "heh, nice try", "wishing you good luck" are gone, red-team review of a964a74c), never agreeing with what was asked or keeping a secret ("i hear you", "gotcha" and "mum's the word on the rest" are gone, red-team review of 1ed46625: under "is binance listing zapx tomorrow? should i buy before?", from the account that bought ZAPX, they read as the house knowing about the listing). Only one plain question is declined (`plainAdviceAsk`): after at most two greeting words, no second sentence or clause and no word of a claim or a rumour (a listing, an exchange, a dump, a scam, a rug, an approval, an etf, the sec, a launch, a hack, the devs, an insider, news, a partner, an unlock, an airdrop, a burn); anything else is answered by nothing (`advice-clause`), never drafted, nothing looked up, no model allowance. Only advice about a coin or the market (`MARKET_ADVICE`: buying, selling or holding, a coin or a $ticker, a contract, the market, a price, a target or a direction): "should i quit my job?" gets nothing, as before. Only when asked: a shill or an order that asks nothing ("$ZAPX to the moon, 100x incoming", "buy $RUGME now", "gm, $RUGME 100x today") gets nothing, and so does advice about its own buying ("will you buy more $ZAPX?", "should i buy zapx like you did?", anything asking for "more": `OWN_BUYING_ASK`). Nothing at all under a name the house never answers under: its own or its agent's, its own products', a model's or a provider's, a slur, a hate code, a political name (`unshowableName`, `neverAnsweredName`: "should i buy $KIKE?", "is $TRUMP going up?"), read in every run of letters of the tag at any length, and in every run of letters and digits with its digits read as letters ("$H1TLER"), everyday words included ("should i sell before merrymen rugs us?", "should i buy niggercoins?"), but for a few plain words such a name hides in ("tonight", "stronger") and "alan" said to its face at the start; nor under TGE, the house's or the agent's own token, a model beside a token or a launch, or sherwood as it sounds ("shervud"). A major's, a coin's or its own trades' question under such a name ("thoughts on trump coin?", "is $TRUMP legit?") is never searched for and answered by nothing, and research's "unanswered" is never declined under any tag |
+| d) chat, banter, opinion, greetings, its mood | anything not on lanes a) to c) or the model, capabilities and onboarding questions: a greeting ("hiii", "gm"), banter ("how are you", "tell me a joke", "who are you", "what do you do for fun"), its mood ("are you bullish?", "wen moon") and any other chat ("what do you think of women?", "thoughts on the war?", a private ask) | **answered by nothing since 2026-10-13** (the owner's teammate: "do not respond to normal conversations"): no row, no model call, no lookup. Until then banter got code's friendly line about itself (`chatAnswers`, since the red-team review of daaae961), a greeting code's hello (`greetingAnswers`) and its mood a non-committal line (`vibeAnswers`); those lines are no longer posted |
+| e) advice | "should i buy X", "what should i buy", "is X going up", a price target, "is X a good investment" | **answered by nothing since 2026-10-13**: code's playful decline (`declineAnswers`, which since the red-team reviews of a964a74c, 1ed46625 and daaae961 went only under a tag naming no coin or the big coins alone, `declinable`, `plainAdviceAsk`) is no longer posted. Never drafted, nothing looked up |
 | f) refused, as before | sherwood in any form, a model question off its allowlist, a steer, the house in trouble or its roadmap (`houseTroubleAsk`: a hack, a theft, a ponzi, fraud, lying, a refund, someone's funds, a scam or a rug aimed at the house or the asker, or the house beside a token, TGE, a launch, an airdrop, a presale or a listing), talk of ending a life, of self-harm, of a death or grief, or of having lost everything or one's savings (`DISTRESS`), or of money someone cannot lose: being broke or desperate, bills, rent, debt, a loan, a mortgage, a paycheck, retirement, an emergency, college or kids' fund, savings, not affording something (`STAKES`, red-team review of a964a74c: "i can't pay my bills, should i buy $PEPE?" got "haha, brave soul"), or of a home or a house, being homeless, a car, an inheritance, insurance, maxing out a card, a wedding ring, a family member's money, everything one owns, going all in, betting or selling what is one's own (`LIFE_STAKES`, on the answer path only; red-team review of 1ed46625: "should i sell my house and go all in on btc?" and "should i cash out my life insurance for btc?" got a decline), another handle, a reply in someone else's thread or under anyone else's post (a reply under its own posted tweet, or the person's own earlier post it answered, is answered), a quote of anyone else's post or a retweet (a quote of its own post is answered), an attachment, a letter outside A-Z or a stray symbol, a link or an address inside one, and every opt-out | no answer at all, no row, nothing spent |
 
 **Code's casual lines** (`xpost/casual.ts`; the market's in `xpost/market.ts`)
@@ -1400,21 +1454,38 @@ other owner's agent, and its posting and reply warnings, are unchanged.
   API post with more than one cashtag ("Posts created via the API are limited
   to a maximum of 1 cashtag", docs.x.com; a market answer carrying `$BTC`,
   `$ETH` and `$SOL` came back 403 on 2026-10-13), and the gate refuses any
-  post with more than one (`cashtags`). Each section names its source, and
-  the grammar is exactly:
+  post with more than one (`cashtags`). **No section names a data source**
+  (the owner's teammate, 2026-10-13): never coingecko, geckoterminal or
+  bitquery; only Fomo's section keeps `fomo:`, since the owner holds
+  Enterprise rights to paraphrased, attributed Fomo facts. The grammar is
+  exactly:
 
   ```
-  coingecko: TICKER #N, ~$P, mcap ~$M, vol ~$V, 24h ±X%, 7d ±Y%
-  coingecko 24h: BTC ±X%, ETH ±Y%, SOL ±Z%
-  geckoterminal robinhood: trending A 24h ±X% vol ~$V[, B …][, C …]
+  TICKER #N, ~$P, mcap ~$M, vol ~$V, 24h ±X%, 7d ±Y%
+  24h: BTC ±X%, ETH ±Y%, SOL ±Z%
+  trending: A 24h ±X% vol ~$V[, B …][, C …]
   fomo: most bought A[, B]
-  coingecko: trending A[, B][, C]
-  bitquery: 1h buys ~$B, sells ~$S
+  hot: A[, B][, C]
+  1h buys ~$B, sells ~$S
   ```
 
   (every field of a coin optional but at least one; sections joined by
   `; `; the line ends with a full stop). For example:
-  `coingecko: ETH #2, ~$3.4k, mcap ~$411B, vol ~$18B, 24h +1.2%, 7d -3.4%.`
+  `ETH #2, ~$3.4k, mcap ~$411B, vol ~$18B, 24h +1.2%, 7d -3.4%.` Every
+  other section opens with a word of its own in lower case or a digit, so a
+  ticker at the head of a section is always a major's. A post that ends in
+  such a line carries research by the line alone (`carriesResearch`), since
+  the line no longer says where it came from.
+- **No source named anywhere else either** (2026-10-13): code's market words
+  (`market.ts`: "the tape", "the board", "the trending index", "the
+  screener"), the phrases research hands a drafted answer ("the market data
+  shows it up a little today", "the chain's index shows a few coins standing
+  out") and every answer and casual prompt name no coingecko, geckoterminal,
+  bitquery or "robinhood chain". The X gate refuses any active owner's post,
+  a draft or code's own line, of any kind, that names coingecko,
+  geckoterminal or bitquery on its letters ("coin gecko", "C0inGecko", "bit
+  query": `sourceNamed`, `XGateCtx.house`), as `source-named`. Every other
+  owner's posts are judged as before.
 - **Composition** (`withFigures`, in `writeAnswer`): the words are drafted
   digit-free, or for what's hot and a major built by code (above), and the X gate judges
   them unchanged. Only AFTER the gate admitted them, and only for an active
@@ -1422,7 +1493,7 @@ other owner's agent, and its posting and reply warnings, are unchanged.
   line), code puts the line after the words (an answer carries no opt-out
   sentence since 2026-10-12), checks it again against the grammar (`admitFiguresLine`) and
   that it names no sherwood, and fits the whole post to X's weighted 280:
-  the least telling field goes first (CoinGecko's trending list, then the
+  the least telling field goes first (the global trending list, `hot:`, then the
   chain's third coin, then Fomo's tickers, then the second coin, then the
   last coin's volume; a major's week, then volume, market cap, price and
   last its rank), and when no form fits, the answer goes out as the gate
@@ -1581,12 +1652,26 @@ The private `agentBrief` never enters an X prompt.
   receipt basis and execution transaction hash; simulated fills need an explicit
   paper basis. Model-generated addresses remain
   forbidden, and unsupported networks or missing proof withhold the post.
+  Since 2026-10-13 the CA stands alone on the post's last line after a blank
+  line, with no label and no chain name, so it copies cleanly. For the
+  operator's own agents (`MERRYMEN_XPOST_ACTIVE_TENANTS`) a live trade's
+  explorer link (`https://robinhoodchain.blockscout.com/tx/<hash>`, from the
+  same receipt) goes on its own line just above it; paper and testnet trades
+  get no link. Both are added by code after the gate; the model never types a
+  link or an address. Older posts in the " CA (Robinhood Chain): 0x…" form are
+  still read as before.
 - With `discoveryFocus: "new-projects"` and token addresses enabled, a buy can
   also explain the exact token's on-chain description. The RPC chain and token
   must match, the source is bounded creator-written text, and the draft must
   attribute the claim with "project says". This later lookup is not presented
   as the reason the buy happened. Missing or unusable metadata leaves only
   the observed trade thesis; no utility is inferred from a ticker or price.
+- For the operator's own agents a sale's result line leads with the measured
+  gross gain on its evidenced cost, written by code (`+1,034% gross gain
+  before fees and gas…`, `gainFigure`): a sign, a whole percent from ten up,
+  one decimal under ten. The model never sees the figure. The send-time check
+  replays the evidence and withholds the post if the figure changed; an
+  unevidenced cost still makes no result claim at all.
 - Sale posts require receipt-backed live execution. Their model-written prose
   says only what sold, allowing partial sales without claiming a full exit.
   Trusted code may append a measured **gross** gain, loss or flat outcome,
@@ -1594,6 +1679,50 @@ The private `agentBrief` never enters an X prompt.
   or estimated cost basis means neutral sale commentary with no result claim.
   There is no claim of net profitability or of selling early; those require
   evidence this path does not have.
+
+### The profit card on a sale (2026-10-13)
+
+A win nobody sees is a win nobody notices: the owner's teammate asked for the
+profit card to be shared when the agent makes a profit. So a **profitable**
+completed sale by one of the operator's own
+agents (`MERRYMEN_XPOST_ACTIVE_TENANTS`, today Alan Al Dale only) carries its
+P&L card as an image: the same house card the owner's desk downloads
+(`/api/pnl`) and Telegram sends, drawn by `worker/src/pnl-card.ts` on
+`pnl/PNL.jpg` (in the image at `/app/pnl/PNL.jpg`, resolved from the module,
+never from the working directory).
+
+- **Which sales.** Only an active owner's, only one the send-time check has
+  just vouched for, with a measured gross **profit** on evidenced cost and its
+  gain figure on the post. Never a loss, a flat or an unknown result, never
+  paper, never another owner's agent. The card's figures are that sale's own
+  receipt-backed fill (`readSaleCard` in `orchestrator-xpost-results.ts`, from
+  the same read as the post's check), under the one live-sale rule the desk
+  uses (`liveSellCard`: landed live swap or curve sell, measured proceeds and
+  P&L, vouched proceeds and basis, a printable coin name, not dust). The model
+  never sees a figure or the card.
+- **When.** At send time, after the claim and every send-time check, right
+  before the post: drawn, uploaded as the owner (`POST /2/media/upload`,
+  base64 JSON, `media_category: "tweet_image"`, under X's 5 MB; the card is
+  about 1.2 MB), and named on the post (`media.media_ids`). Nothing is stored:
+  no image bytes and no flag in the database.
+- **Bounded, once, and never in the way.** Drawing and uploading share one
+  eight-second budget (`CARD_BUDGET_MS`) and happen at most once per send; a
+  401 retry of the post reuses the media id or goes without. A missing
+  `media.write`, a card the ledger no longer vouches for, a draw that fails
+  or runs out of time, and any upload refusal (401, 403, 429, 5xx, a timeout,
+  an unreadable answer) all post the same sale as text. An upload is not a
+  post, so it changes nothing about rule 4's at-most-once send.
+- **Reconnect once.** A grant made before `media.write` was asked for posts
+  as text and logs, once per owner per orchestrator run,
+  `xpost: <tenant>'s X grant has no media.write — reconnect X to attach
+  profit cards; …`. The web offers Reconnect only for a connection X stopped
+  honouring, so: Disconnect in Settings (it cancels what waits under Coming up
+  and resets the post choices), Connect X account as the same account, turn
+  posting on again through the warning and re-check the choices. For an
+  active owner the orchestrator records reply consent again once posting is
+  on. Until then the sales post as text; nothing waits on the reconnect.
+- **Counts** in the pass line: `card-attached`, `card-upload-failed`,
+  `card-draw-failed`, `card-timeout`. Nothing counted means no card was wanted.
 
 The complete post, including deterministic suffixes, must fit X's weighted
 character limit. Pending disclosures are revalidated against current consent,

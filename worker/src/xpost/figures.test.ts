@@ -37,13 +37,13 @@ describe("tickers: A-Z, two to ten letters, nothing else", () => {
     // The red team's posts: "trending $100X 24h +55.5% vol ~$1.2M, $1B 24h +21% vol ~$640k, $97K 24h +3.3% vol ~$120k".
     for (const bad of ["100X", "1B", "97K", "10M", "1000X", "1INCH", "PEPE2", "USDC2", "ETH2", "S0L", "HH1488"]) assert.equal(cleanTicker(bad), null, bad);
     assert.equal(renderFiguresLine([{ kind: "pools", coins: ["100X", "1B", "97K"].map((symbol) => ({ symbol, change24hPct: 21, volume24hUsd: 640_000 })) }]), null);
-    assert.equal(admitFiguresLine("geckoterminal robinhood: trending $1B 24h +21% vol ~$640k."), false, "nor does the grammar take one");
+    assert.equal(admitFiguresLine("trending: $1B 24h +21% vol ~$640k."), false, "nor does the grammar take one");
     for (const bad of ["MILLION", "BILLIONS", "BUCKS", "DOLLAR", "MELANIA"]) assert.equal(cleanTicker(bad), null, bad);
   });
 
   it("every ticker a line shows, read off it", () => {
     assert.deepEqual(figuresTickers(renderFiguresLine(HOT)), ["ABC", "DEF", "GHI", "DEF", "PEPE", "WIF", "TAO"]);
-    assert.deepEqual(figuresTickers("bitquery: 1h buys ~$12k, sells ~$8.1k."), []);
+    assert.deepEqual(figuresTickers("1h buys ~$12k, sells ~$8.1k."), []);
   });
 
   it("never a sherwood, merrymen, robinhood or agent name, however its digits spell it", () => {
@@ -170,29 +170,29 @@ describe("figures, compact and signed", () => {
 });
 
 describe("the line, rendered from typed data", () => {
-  it("a coin by name or ticker: rank, price, market cap, volume, the day and the week, named coingecko", () => {
-    assert.equal(renderFiguresLine(BTC), "coingecko: BTC #1, ~$97k, mcap ~$1.9T, vol ~$41B, 24h +1.2%, 7d -3.4%.");
+  it("a coin by name or ticker: rank, price, market cap, volume, the day and the week, naming no source", () => {
+    assert.equal(renderFiguresLine(BTC), "BTC #1, ~$97k, mcap ~$1.9T, vol ~$41B, 24h +1.2%, 7d -3.4%.");
   });
 
   it("a major under a thousand dollars shows no price", () => {
     assert.equal(renderFiguresLine([{ kind: "major", symbol: "sol", rank: 5, priceUsd: 185.2, marketCapUsd: 88e9, volume24hUsd: 4.1e9, change24hPct: -2.1, change7dPct: 6 }]),
-      "coingecko: SOL #5, mcap ~$88B, vol ~$4.1B, 24h -2.1%, 7d +6%.");
+      "SOL #5, mcap ~$88B, vol ~$4.1B, 24h -2.1%, 7d +6%.");
   });
 
-  it("what's hot: three coins of the chain, fomo's most bought, coingecko's trending", () => {
+  it("what's hot: three coins of the chain, fomo's most bought, the global trending list", () => {
     assert.equal(renderFiguresLine(HOT),
-      "geckoterminal robinhood: trending ABC 24h +42.1% vol ~$1.2M, DEF 24h -8.3% vol ~$310k, GHI 24h +5% vol ~$90k; fomo: most bought DEF; coingecko: trending PEPE, WIF, TAO.");
+      "trending: ABC 24h +42.1% vol ~$1.2M, DEF 24h -8.3% vol ~$310k, GHI 24h +5% vol ~$90k; fomo: most bought DEF; hot: PEPE, WIF, TAO.");
   });
 
   it("onchain flow: both sides, or nothing", () => {
-    assert.equal(renderFiguresLine([{ kind: "flow", buyUsd: 12_300, sellUsd: 8_100 }]), "bitquery: 1h buys ~$12k, sells ~$8.1k.");
+    assert.equal(renderFiguresLine([{ kind: "flow", buyUsd: 12_300, sellUsd: 8_100 }]), "1h buys ~$12k, sells ~$8.1k.");
     assert.equal(renderFiguresLine([{ kind: "flow", buyUsd: 12_300, sellUsd: 400 }]), null);
   });
 
   it("an unclean ticker takes its coin with it; nothing showable is no line", () => {
     assert.equal(renderFiguresLine([{ kind: "major", symbol: "B T C", rank: 1, priceUsd: 97_000 }]), null);
     assert.equal(renderFiguresLine([{ kind: "pools", coins: [{ symbol: "SHERWOOD", change24hPct: 900, volume24hUsd: 5e6 }, { symbol: "OKAY", change24hPct: 2, volume24hUsd: 60_000 }] }]),
-      "geckoterminal robinhood: trending OKAY 24h +2% vol ~$60k.");
+      "trending: OKAY 24h +2% vol ~$60k.");
     assert.equal(renderFiguresLine([{ kind: "major", symbol: "BTC", rank: null, priceUsd: 900 }]), null, "a coin with no figure is no line");
     assert.equal(renderFiguresLine([{ kind: "crowd", symbols: ["🐸", "a b"] }]), null);
     assert.equal(renderFiguresLine([]), null);
@@ -206,7 +206,7 @@ describe("the line, rendered from typed data", () => {
       { kind: "flow", buyUsd: 5_000, sellUsd: 5_000 },
     ])!;
     assert.doesNotMatch(line, /DD|CC, \$|XD/);
-    assert.doesNotMatch(line, /bitquery/, "a section past six figures is left out whole");
+    assert.doesNotMatch(line, /1h buys/, "a section past six figures is left out whole");
     assert.ok((line.match(/~\$|[+-]\d/g) ?? []).length <= FIGURES_MAX);
   });
 });
@@ -221,24 +221,24 @@ describe("the grammar the validator holds an inserted line to", () => {
   });
 
   it("nothing else is: a word more, a link, a handle, a lowercase ticker, a missing stop, a seventh figure", () => {
-    const ok = "coingecko: BTC #1, ~$97k, mcap ~$1.9T.";
+    const ok = "BTC #1, ~$97k, mcap ~$1.9T.";
     assert.ok(admitFiguresLine(ok));
     for (const bad of [
-      "coingecko: BTC #1, ~$97k, mcap ~$1.9T", // no full stop
-      "coingecko: $btc #1, ~$97k.",
-      "coingecko: BTC #1, ~$97k, buy now.",
-      "coingecko: BTC #1, ~$97k, https://x.co.",
-      "coingecko: BTC #1, @someone.",
-      "coingecko: BTC.",
-      "coingecko: BTC #0.",
-      "coingecko: BTC, ~$97.0k.",
-      "coingecko: BTC, ~$1000k.",
-      "coingecko: BTC, 24h 1.2%.",
-      "coingecko: BTC, 24h +1.23%.",
+      "BTC #1, ~$97k, mcap ~$1.9T", // no full stop
+      "$btc #1, ~$97k.",
+      "BTC #1, ~$97k, buy now.",
+      "BTC #1, ~$97k, https://x.co.",
+      "BTC #1, @someone.",
+      "BTC.",
+      "BTC #0.",
+      "BTC, ~$97.0k.",
+      "BTC, ~$1000k.",
+      "BTC, 24h 1.2%.",
+      "BTC, 24h +1.23%.",
       "the public index: BTC #1.",
-      "coingecko: BTC #1, ~$97k, mcap ~$1.9T, vol ~$41B, 24h +1.2%, 7d -3.4%; bitquery: 1h buys ~$1k, sells ~$1k.",
-      "geckoterminal robinhood: trending AA 24h +1%, BB 24h +1%, CC 24h +1%, DD 24h +1%.",
-      "geckoterminal robinhood: trending AA.",
+      "BTC #1, ~$97k, mcap ~$1.9T, vol ~$41B, 24h +1.2%, 7d -3.4%; 1h buys ~$1k, sells ~$1k.",
+      "trending: AA 24h +1%, BB 24h +1%, CC 24h +1%, DD 24h +1%.",
+      "trending: AA.",
       "Say stop to opt out.",
       "",
       null,
@@ -271,14 +271,14 @@ describe("fitting it into the answer", () => {
 
   it("between the words and the notice, the whole line when it fits", () => {
     const r = withFigures(`${words} ${NOTICE}`, BTC);
-    assert.equal(r.text, `${words} coingecko: BTC #1, ~$97k, mcap ~$1.9T, vol ~$41B, 24h +1.2%, 7d -3.4%. ${NOTICE}`);
+    assert.equal(r.text, `${words} BTC #1, ~$97k, mcap ~$1.9T, vol ~$41B, 24h +1.2%, 7d -3.4%. ${NOTICE}`);
     assert.equal(r.dropped, 0);
     assert.ok(xWeightedLength(r.text) <= X_MAX_WEIGHTED);
   });
 
   it("words that end without a stop get one; a lowercase notice stays as written", () => {
     const r = withFigures(`its up a little today on coingecko ${NOTICE.toLowerCase()}`, BTC);
-    assert.match(r.text, /^its up a little today on coingecko\. coingecko: BTC #1, .* say stop to opt out\.$/);
+    assert.match(r.text, /^its up a little today on coingecko\. BTC #1, .* say stop to opt out\.$/);
   });
 
   it("too long for X: the least telling fields go first, then the line", () => {
@@ -294,13 +294,13 @@ describe("fitting it into the answer", () => {
     assert.equal(none.text, `${longer} ${NOTICE}`, "no form fits: the gate's text as it was");
   });
 
-  it("what's hot sheds coingecko's list, then the third coin, then fomo's, then coins, then volume, before the line", () => {
-    const mid = "y".repeat(110) + ", not a call.";
+  it("what's hot sheds the global trending list, then the third coin, then fomo's, then coins, then volume, before the line", () => {
+    const mid = "y".repeat(130) + ", not a call.";
     const r = withFigures(`${mid} ${NOTICE}`, HOT);
     assert.ok(r.line);
     assert.ok(xWeightedLength(r.text) <= X_MAX_WEIGHTED);
-    assert.doesNotMatch(r.line!, /coingecko: trending/);
-    assert.match(r.line!, /^geckoterminal robinhood: trending ABC/);
+    assert.doesNotMatch(r.line!, /hot:/);
+    assert.match(r.line!, /^trending: ABC/);
     // As the words grow, each shorter form in turn, and every post fits.
     const seen: (string | null)[] = [];
     for (let n = 4; n <= 270; n++) {
@@ -310,19 +310,19 @@ describe("fitting it into the answer", () => {
     }
     assert.deepEqual(seen, [
       renderFiguresLine(HOT),
-      "geckoterminal robinhood: trending ABC 24h +42.1% vol ~$1.2M, DEF 24h -8.3% vol ~$310k, GHI 24h +5% vol ~$90k; fomo: most bought DEF.",
-      "geckoterminal robinhood: trending ABC 24h +42.1% vol ~$1.2M, DEF 24h -8.3% vol ~$310k; fomo: most bought DEF.",
-      "geckoterminal robinhood: trending ABC 24h +42.1% vol ~$1.2M, DEF 24h -8.3% vol ~$310k.",
-      "geckoterminal robinhood: trending ABC 24h +42.1% vol ~$1.2M.",
-      "geckoterminal robinhood: trending ABC 24h +42.1%.",
+      "trending: ABC 24h +42.1% vol ~$1.2M, DEF 24h -8.3% vol ~$310k, GHI 24h +5% vol ~$90k; fomo: most bought DEF.",
+      "trending: ABC 24h +42.1% vol ~$1.2M, DEF 24h -8.3% vol ~$310k; fomo: most bought DEF.",
+      "trending: ABC 24h +42.1% vol ~$1.2M, DEF 24h -8.3% vol ~$310k.",
+      "trending: ABC 24h +42.1% vol ~$1.2M.",
+      "trending: ABC 24h +42.1%.",
       null,
     ]);
   });
 
   it("no notice (someone already told they can say stop): the line goes after the words, and still fits X (2026-10-12)", () => {
     const r = withFigures(words, BTC);
-    assert.equal(r.text, `${words} coingecko: BTC #1, ~$97k, mcap ~$1.9T, vol ~$41B, 24h +1.2%, 7d -3.4%.`);
-    assert.equal(withFigures("its up a little today on coingecko", BTC).text.startsWith("its up a little today on coingecko. coingecko: BTC #1,"), true, "a stop added");
+    assert.equal(r.text, `${words} BTC #1, ~$97k, mcap ~$1.9T, vol ~$41B, 24h +1.2%, 7d -3.4%.`);
+    assert.equal(withFigures("its up a little today on coingecko", BTC).text.startsWith("its up a little today on coingecko. BTC #1,"), true, "a stop added");
     assert.equal(withoutFiguresLine(r.text), words, "read back without its line");
     const long = "x".repeat(200) + " up a little on coingecko today.";
     const fit = withFigures(long, BTC);
@@ -366,7 +366,7 @@ describe("how's the market: the big coins' day beside the chain's movers (2026-1
   ];
   it("renders in its own grammar, each big coin by its day's change only, within the handful of figures", () => {
     const line = renderFiguresLine(MARKET)!;
-    assert.equal(line, "coingecko 24h: BTC +1.2%, ETH -0.8%, SOL +3.1%; geckoterminal robinhood: trending ABC 24h +42.1%, DEF 24h -8.3%, GHI 24h +5%; fomo: most bought DEF.");
+    assert.equal(line, "24h: BTC +1.2%, ETH -0.8%, SOL +3.1%; trending: ABC 24h +42.1%, DEF 24h -8.3%, GHI 24h +5%; fomo: most bought DEF.");
     assert.ok(admitFiguresLine(line));
     assert.match(line, FIGURES_LINE);
     assert.deepEqual(figuresTickers(line), ["BTC", "ETH", "SOL", "ABC", "DEF", "GHI", "DEF"]);
@@ -374,9 +374,9 @@ describe("how's the market: the big coins' day beside the chain's movers (2026-1
   });
   it("a big coin with no change, a dirty ticker or one past three is left out, never shown bare; none at all is no section", () => {
     assert.equal(renderFiguresLine([{ kind: "majors", coins: [{ symbol: "btc", change24hPct: null }, { symbol: "e.th", change24hPct: 1 }, { symbol: "sol", change24hPct: -2 },
-      { symbol: "bnb", change24hPct: 1 }, { symbol: "xrp", change24hPct: 1 }, { symbol: "ada", change24hPct: 1 }] }]), "coingecko 24h: SOL -2%, BNB +1%, XRP +1%.");
+      { symbol: "bnb", change24hPct: 1 }, { symbol: "xrp", change24hPct: 1 }, { symbol: "ada", change24hPct: 1 }] }]), "24h: SOL -2%, BNB +1%, XRP +1%.");
     assert.equal(renderFiguresLine([{ kind: "majors", coins: [{ symbol: "btc" }, { symbol: "pump", change24hPct: 9 }] }]), null);
-    for (const bad of ["coingecko 24h: BTC.", "coingecko 24h: BTC +1.2%, ETH -0.8%, SOL +3.1%, BNB +1%.", "coingecko 24h: BTC ~$97k.", "coingecko 24h: BTC +1.2% buy."]) {
+    for (const bad of ["24h: BTC.", "24h: BTC +1.2%, ETH -0.8%, SOL +3.1%, BNB +1%.", "24h: BTC ~$97k.", "24h: BTC +1.2% buy."]) {
       assert.equal(admitFiguresLine(bad), false, bad);
     }
   });
@@ -389,12 +389,12 @@ describe("how's the market: the big coins' day beside the chain's movers (2026-1
     }
     assert.deepEqual(seen, [
       renderFiguresLine(MARKET),
-      "coingecko 24h: BTC +1.2%, ETH -0.8%, SOL +3.1%; geckoterminal robinhood: trending ABC 24h +42.1%, DEF 24h -8.3%; fomo: most bought DEF.",
-      "coingecko 24h: BTC +1.2%, ETH -0.8%, SOL +3.1%; geckoterminal robinhood: trending ABC 24h +42.1%, DEF 24h -8.3%.",
-      "coingecko 24h: BTC +1.2%, ETH -0.8%, SOL +3.1%; geckoterminal robinhood: trending ABC 24h +42.1%.",
-      "coingecko 24h: BTC +1.2%, ETH -0.8%, SOL +3.1%.",
-      "coingecko 24h: BTC +1.2%, ETH -0.8%.",
-      "coingecko 24h: BTC +1.2%.",
+      "24h: BTC +1.2%, ETH -0.8%, SOL +3.1%; trending: ABC 24h +42.1%, DEF 24h -8.3%; fomo: most bought DEF.",
+      "24h: BTC +1.2%, ETH -0.8%, SOL +3.1%; trending: ABC 24h +42.1%, DEF 24h -8.3%.",
+      "24h: BTC +1.2%, ETH -0.8%, SOL +3.1%; trending: ABC 24h +42.1%.",
+      "24h: BTC +1.2%, ETH -0.8%, SOL +3.1%.",
+      "24h: BTC +1.2%, ETH -0.8%.",
+      "24h: BTC +1.2%.",
       null,
     ]);
     // Read back without its line, notice or none.
@@ -420,7 +420,7 @@ describe("never read back as its own words", () => {
   });
 
   it("text that only looks like a line is left as it was", () => {
-    for (const t of ["nothing here. Say stop to opt out.", "coingecko: $btc #1. Say stop to opt out.", "coingecko: BTC #1, buy. Say stop to opt out."]) {
+    for (const t of ["nothing here. Say stop to opt out.", "$btc #1. Say stop to opt out.", "BTC #1, buy. Say stop to opt out."]) {
       assert.equal(withoutFiguresLine(t), t);
     }
   });
@@ -465,13 +465,48 @@ describe("no cashtag in the line: X refuses an API post with more than one (2026
     ]);
     assert.ok(line);
     assert.doesNotMatch(line!, CASHTAG);
-    assert.equal(renderFiguresLine(BTC), "coingecko: BTC #1, ~$97k, mcap ~$1.9T, vol ~$41B, 24h +1.2%, 7d -3.4%.");
+    assert.equal(renderFiguresLine(BTC), "BTC #1, ~$97k, mcap ~$1.9T, vol ~$41B, 24h +1.2%, 7d -3.4%.");
     for (const t of ["BTC", "ETH", "SOL", "ABC"]) assert.ok(figuresTickers(line).includes(t), t);
     assert.ok(figuresTickers(line).every((t) => /^[A-Z]{2,10}$/.test(t)), "only bare tickers, never a unit or a lower-case word");
   });
   it("the grammar refuses a ticker written as a cashtag", () => {
-    assert.equal(admitFiguresLine("coingecko: $BTC #1, ~$97k."), false);
-    assert.equal(admitFiguresLine("coingecko 24h: $BTC +1.2%, $ETH -0.8%."), false);
-    assert.equal(admitFiguresLine("coingecko 24h: BTC +1.2%, ETH -0.8%."), true);
+    assert.equal(admitFiguresLine("$BTC #1, ~$97k."), false);
+    assert.equal(admitFiguresLine("24h: $BTC +1.2%, $ETH -0.8%."), false);
+    assert.equal(admitFiguresLine("24h: BTC +1.2%, ETH -0.8%."), true);
+  });
+});
+
+describe("no source named in the line (the owner's teammate, 2026-10-13)", () => {
+  it("each section as the teammate wrote it: a major, the big coins' day, the chain's trending, the global list, the hour's flow", () => {
+    assert.equal(renderFiguresLine([{ kind: "major", symbol: "eth", rank: 2, priceUsd: 3_412, marketCapUsd: 411e9, volume24hUsd: 18e9, change24hPct: 1.2, change7dPct: -3.4 }]),
+      "ETH #2, ~$3.4k, mcap ~$411B, vol ~$18B, 24h +1.2%, 7d -3.4%.");
+    assert.equal(renderFiguresLine([{ kind: "majors", coins: [{ symbol: "btc", change24hPct: 1.2 }, { symbol: "eth", change24hPct: -0.8 }, { symbol: "sol", change24hPct: 3.1 }] }]),
+      "24h: BTC +1.2%, ETH -0.8%, SOL +3.1%.");
+    assert.equal(renderFiguresLine([{ kind: "pools", coins: [{ symbol: "abc", change24hPct: 42.1, volume24hUsd: 1.2e6 }] }]), "trending: ABC 24h +42.1% vol ~$1.2M.");
+    assert.equal(renderFiguresLine([{ kind: "trending", symbols: ["aa", "bb"] }]), "hot: AA, BB.");
+    assert.equal(renderFiguresLine([{ kind: "flow", buyUsd: 12_300, sellUsd: 8_100 }]), "1h buys ~$12k, sells ~$8.1k.");
+    assert.equal(renderFiguresLine([{ kind: "crowd", symbols: ["abc"] }]), "fomo: most bought ABC.", "fomo's attribution stays");
+  });
+
+  it("no rendered line, whole or shortened, ever says coingecko, geckoterminal or bitquery, nor carries a cashtag", () => {
+    const specs: FiguresSpec[] = [BTC, HOT, [{ kind: "flow", buyUsd: 9_000, sellUsd: 4_000 }],
+      [{ kind: "majors", coins: [{ symbol: "btc", change24hPct: 1 }, { symbol: "eth", change24hPct: 2 }] }, ...HOT]];
+    for (const spec of specs) {
+      for (let n = 4; n <= 260; n += 3) {
+        const f = withFigures(`${"w".repeat(n)}.`, spec);
+        if (!f.line) continue;
+        assert.doesNotMatch(f.line, /gecko|bitquery|robinhood/i, f.line);
+        assert.doesNotMatch(f.line, /\$[A-Za-z]/, f.line);
+      }
+    }
+  });
+
+  it("the old source-named forms are no line at all: the validator holds only the new grammar", () => {
+    for (const old of ["coingecko: BTC #1, ~$97k.", "coingecko 24h: BTC +1.2%, ETH -0.8%.", "geckoterminal robinhood: trending ABC 24h +42.1%.",
+      "coingecko: trending PEPE, WIF.", "bitquery: 1h buys ~$12k, sells ~$8.1k."]) {
+      assert.equal(admitFiguresLine(old), false, old);
+    }
+    assert.equal(admitFiguresLine("BTC."), false, "a ticker with no figure is no section");
+    assert.equal(admitFiguresLine("hot: PEPE; BTC #1."), true);
   });
 });
