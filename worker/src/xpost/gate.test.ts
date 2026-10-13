@@ -1309,7 +1309,7 @@ describe("a figures line in an earlier post is never what makes, or unmakes, a r
     return c.recentOwn.some((p) => similarity(raw, p) >= REPEAT_LIMIT) ? { ok: false, reason: "repeat" } : { ok: true, text: raw };
   };
   const reply: Partial<XGateCtx> = { kind: "reply", mode: "live", coins: [] };
-  const LINE = "geckoterminal robinhood: trending $ABC 24h +4% vol ~$90k; fomo: most bought $ABC; coingecko: trending $PEPE, $WIF.";
+  const LINE = "geckoterminal robinhood: trending ABC 24h +4% vol ~$90k; fomo: most bought ABC; coingecko: trending PEPE, WIF.";
   it("words said before are still a repeat with a line after them, its own or the fleet's", () => {
     const said = `quiet hour on the robinhood chain index, nothing wild. ${LINE} Say stop to opt out.`;
     const draft = "quiet hour on the robinhood chain index, nothing wild. Say stop to opt out.";
@@ -1522,5 +1522,14 @@ describe("red-team review of daaae961: a drafted answer never forecasts a coin, 
     // A casual line about how it trades, with nothing of the kind, still passes.
     assert.equal(reason("fresh launches with real buyers are my favourite kind of afternoon", casual), "ok");
     assert.equal(reason("picked up a little pepe this week, the curve looked early", casual), "ok");
+  });
+});
+
+describe("one cashtag at most: X refuses an API post with more (2026-10-13)", () => {
+  it("two cashtags are refused before X is asked; one is the gate's usual business", () => {
+    const buy = { kind: "buy" as const, mode: "live" as const, coins: ["pepe", "PEPE", "wif", "WIF"] };
+    assert.equal(reason("picked up $PEPE and $WIF, both curves looked early", buy), "cashtags");
+    assert.equal(reason("picked up $PEPE, the curve looked early", buy), "ok");
+    assert.equal(reason("picked up pepe and wif, both curves looked early", buy), "ok", "bare names are not cashtags");
   });
 });

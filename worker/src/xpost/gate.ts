@@ -1357,6 +1357,8 @@ const POINTS_BACK =
 
 /** No reach outside the post, whatever the base gate let through: no @, no #, no link. */
 const HANDLE = /[@#＠＃﹫﹟]\s*[\p{L}\p{N}_]/u;
+/** A cashtag as X counts one: a $ right before a letter, not inside a word or after another $. */
+const CASHTAG_ANY = /(?<![\w$])\$[A-Za-z][A-Za-z0-9_]*/g;
 const LINK = /https?:|www\.|\b[a-z0-9-]+\.(?:com|net|org|io|xyz|gg|ly|fun|app|me|co|ai|so|to|tv|dev|finance|exchange)\b/i;
 /** Markup a model leaks (a thinking tag, bold, a code span): never what a person types into X. */
 const MARKUP = /[<>{}[\]`]|\*\*|__/;
@@ -1928,7 +1930,7 @@ export const OPT_OUT_SAID = /\b(?:say|reply|replying|type|send|text|dm|tweet|wri
  * handle · link · markup · emoji · exclaim · caps · ops · alert · hype · pnl ·
  * market · human-claim · points-back · coin-unsaid · paper-unsaid · mode-false · undisclosed · intro-no-trading ·
  * opt-out-unsaid · opt-out-said · reply-current-or-action · sherwood-claim · bought-named · buy-claim · unlooked-name · stock-phrase ·
- * fleet-repeat · seed-echo — plus whatever the base gate says (has-digits,
+ * cashtags · fleet-repeat · seed-echo — plus whatever the base gate says (has-digits,
  * quantity, repeat, unvouched-ticker, address, secret…).
  *
  * WHAT A DRAFT IS WEIGHED AGAINST HAS NO FIGURES LINE (figures.ts). An active
@@ -2006,6 +2008,10 @@ function admitMasked(tidied: string, ctx: XGateCtx, baseGate: BaseGate, agentNam
     if (!bodyGate.ok) return bodyGate;
   }
   if (HANDLE.test(text)) return refuse("handle");
+  // ONE CASHTAG AT MOST: X refuses an API post with more than one (docs.x.com,
+  // "Posts created via the API are limited to a maximum of 1 cashtag"); such a
+  // draft would only come back a 403 after its slot and its unit were spent.
+  if ((text.match(CASHTAG_ANY) ?? []).length > 1) return refuse("cashtags");
   if (LINK.test(text)) return refuse("link");
   if (MARKUP.test(text)) return refuse("markup");
 

@@ -28,6 +28,10 @@ import { ANSWER_GAP_MS, ANSWERS_PER_DAY } from "./xpost/planner";
 import { PAUSE_KEY } from "./xpost/sender";
 import * as store from "./xpost/store";
 
+/** Is this ticker shown in a posted text, bare (the figures line) or as a cashtag? */
+const showsTicker = (text: string, ticker: string): boolean =>
+  new RegExp(`(?<![A-Za-z0-9])\\$?${ticker}(?![A-Za-z0-9])`).test(text);
+
 const MIN = 60_000, HOUR = 60 * MIN, DAY = 24 * HOUR;
 const NOW = Date.UTC(2026, 8, 30, 9);
 const TENANT = `0x${"ab".repeat(20)}`;
@@ -2520,7 +2524,7 @@ const FLOW_LINE = "bitquery: 1h buys ~$12k, sells ~$8.1k.";
 const UP_A_LITTLE = "on-chain data shows buyers a little ahead over the hour, nothing wild, not a call. Say stop to opt out.";
 const ASK_CA = `@pine_stoat thoughts on ${CA}?`;
 const MAJOR_FIGURES: FiguresSpec = [{ kind: "major", symbol: "eth", rank: 2, priceUsd: 3_412, marketCapUsd: 411e9, volume24hUsd: 18.2e9, change24hPct: 1.24, change7dPct: -3.4 }];
-const MAJOR_LINE = "coingecko: $ETH #2, ~$3.4k, mcap ~$411B, vol ~$18B, 24h +1.2%, 7d -3.4%.";
+const MAJOR_LINE = "coingecko: ETH #2, ~$3.4k, mcap ~$411B, vol ~$18B, 24h +1.2%, 7d -3.4%.";
 /** ETH as code reads coingecko's row above: among the biggest, up a little today, down a fair bit on the week, ordinary volume. */
 const ETH_READ: MajorRead = { rank: "top", day: { dir: "up", size: "a little" }, week: { dir: "down", size: "a fair bit" }, volume: "ordinary" };
 
@@ -2593,7 +2597,7 @@ test("too long for X with its words: the line sheds fields, then goes, and the p
   const r = await w.step();
   const text = String(w.sends[0]?.text ?? "");
   assert.ok(xWeightedLength(text) <= X_MAX_WEIGHTED, String(xWeightedLength(text)));
-  assert.match(text, / geckoterminal robinhood: trending \$ZXCVBNMQWE 24h -12\.3% vol ~\$310M, .*\.$/);
+  assert.match(text, / geckoterminal robinhood: trending ZXCVBNMQWE 24h -12\.3% vol ~\$310M, .*\.$/);
   assert.doesNotMatch(text, /opt out/i);
   assert.doesNotMatch(text, /coingecko: trending/, "coingecko's list went first");
   assert.match(r.log ?? "", /answer-figures-shortened 1/);
@@ -2647,7 +2651,7 @@ test("majors: \"how's eth doing?\" is read on coingecko, said in code's words, a
 });
 
 test("majors: no prediction, target, advice or claim in any words beside a coin's figures, however a draft would put it (red-team 2026-10-12)", async (t) => {
-  // Posted at 34ced01e with "coingecko: $ETH #2, ~$3.4k, mcap ~$411B, vol ~$18B, 24h +11.8%, 7d +24.5%." after each.
+  // Posted at 34ced01e with "coingecko: ETH #2, ~$3.4k, mcap ~$411B, vol ~$18B, 24h +11.8%, 7d +24.5%." after each.
   const drafts = [
     "coingecko shows it up sharply today and on the week, looks set to keep climbing toward new highs.",
     "coingecko shows it up sharply today, and new highs look close. a read, not a call.",
@@ -2659,7 +2663,7 @@ test("majors: no prediction, target, advice or claim in any words beside a coin'
     "eth is up a little today on coingecko, not a call.", "coingecko shows it up a little today, i hold some myself.",
     "coingecko shows it up a little today, worth buying here.",
   ].map((d) => `${d} Say stop to opt out.`);
-  const line = "coingecko: $ETH #2, ~$3.4k, mcap ~$411B, vol ~$18B, 24h +11.8%, 7d +24.5%.";
+  const line = "coingecko: ETH #2, ~$3.4k, mcap ~$411B, vol ~$18B, 24h +11.8%, 7d +24.5%.";
   const read: MajorRead = { rank: "top", day: { dir: "up", size: "sharply" }, week: { dir: "up", size: "sharply" }, volume: "ordinary" };
   for (const draft of drafts) {
     const m = majorsResearch({ change24hPct: 11.8, change7dPct: 24.5 });
@@ -2689,7 +2693,7 @@ test("majors, what's hot and the market are never answered under or quoting its 
   const at = (id: string, text: string, over: Record<string, unknown>) => tag({ id, author_id: `5${id.slice(-2)}`, conversation_id: id, text: `@alanaidale ${text}`, ...over });
   const reply = { conversation_id: POST, referenced_tweets: [{ type: "replied_to", id: POST }] };
   const quote = { referenced_tweets: [{ type: "quoted", id: POST }] };
-  // Each POSTED at 1ed46625 with "coingecko: $PEPE #17, mcap ~$5.2B, vol ~$1.8B, 24h +14.2%, 7d +31%." (the first two), and their cousins.
+  // Each POSTED at 1ed46625 with "coingecko: PEPE #17, mcap ~$5.2B, vol ~$1.8B, 24h +14.2%, 7d +31%." (the first two), and their cousins.
   const inbox = [at("100000000000000801", "how's pepe doing?", reply), at("100000000000000802", "$PEPE today?", quote),
     at("100000000000000803", "$PEPE today?", reply), at("100000000000000804", "how's pepe doing?", quote),
     at("100000000000000805", "what's hot?", reply), at("100000000000000806", "how's the market?", quote)];
@@ -2708,11 +2712,11 @@ test("majors, what's hot and the market are never answered under or quoting its 
   await postedBuy(top.db, "fill-pepe", "pepe", "grabbed some $PEPE on robinhood chain with real money", 3 * HOUR, POST);
   top.setInbox([at("100000000000000807", "how's pepe doing?", {})]);
   await top.step();
-  assert.match(String(top.sends[0]?.text ?? ""), /coingecko: \$PEPE #17, .*24h \+14\.2%, 7d \+31%\.$/);
+  assert.match(String(top.sends[0]?.text ?? ""), /coingecko: PEPE #17, .*24h \+14\.2%, 7d \+31%\.$/);
 });
 
 test("majors: never that it holds or is buying the coin, in the third person, nor another coin set against it; and no drafted coin answer says so either (red-team 2026-10-12)", async (t) => {
-  // Posted at 34ced01e by the active "Alan Al Dale", live, whose only call is a PEPE buy, each with "coingecko: $ETH #2, …" after it.
+  // Posted at 34ced01e by the active "Alan Al Dale", live, whose only call is a PEPE buy, each with "coingecko: ETH #2, …" after it.
   const endings = ["alan has been stacking it all week", "wif and bonk are doing even better", "a nice one to have in the book", "alan is long it", "alan is buying it"];
   const alan: AgentFacts = { ...FACTS, name: "Alan Al Dale" };
   for (const end of endings) {
@@ -2774,10 +2778,10 @@ test("a market answer never names a coin nothing looked up, credited to the inde
 });
 
 test("majors: \"it's the play\" and every call without an adjective never stands beside a coin's figures, nor in any drafted answer (red-team 2026-10-12)", async (t) => {
-  // At 34ced01e, "how's pepe doing?" went out as "coingecko shows it up sharply today. it's the play. coingecko: $PEPE #30, mcap ~$4.2B, …",
+  // At 34ced01e, "how's pepe doing?" went out as "coingecko shows it up sharply today. it's the play. coingecko: PEPE #30, mcap ~$4.2B, …",
   // whether or not it had bought pepe; and "it's a buy.", "it's the move.", "looks like the trade." the same way.
   const endings = ["it's the play", "it's a buy", "it's the move", "looks like the trade"];
-  const line = "coingecko: $PEPE #30, mcap ~$4.2B, vol ~$900M, 24h +14.2%, 7d +31%.";
+  const line = "coingecko: PEPE #30, mcap ~$4.2B, vol ~$900M, 24h +14.2%, 7d +31%.";
   for (const end of endings) {
     for (const calls of [[CALL], []]) {
       const w = await world(t, { env: RESEARCH_ON, research: majorsResearch().research, facts: { ...FACTS, calls }, answer: `coingecko shows it up sharply today. ${end}. Say stop to opt out.` });
@@ -2799,7 +2803,7 @@ test("majors: \"it's the play\" and every call without an adjective never stands
 
 test("a paper agent's market answer says paper of its own trading, never with a pronoun the coin it just described could take (red-team 2026-10-12)", async (t) => {
   // At fbcf8756, mention ...903 (frame 3): "coingecko's view: a heavyweight, rising solidly lately, rising mildly week over week, average volume.
-  // a snapshot. i play it on paper. coingecko: $ETH #2, ~$3.4k, mcap ~$411B, vol ~$18B, 24h +4.2%, 7d +1.1%. say stop to opt out."
+  // a snapshot. i play it on paper. coingecko: ETH #2, ~$3.4k, mcap ~$411B, vol ~$18B, 24h +4.2%, 7d +1.1%. say stop to opt out."
   const id = "100000000000000903";
   const paper: AgentFacts = { ...FACTS, name: "Alan Al Dale", mode: "paper", calls: [] };
   const runs: { env: Record<string, string>; research?: XResearch; text: string }[] = [
@@ -2952,7 +2956,7 @@ test("what's hot: an overview from the index past the floors, in code's words, w
   const text = String(w.sends[0]?.text ?? "");
   assert.ok(xWeightedLength(text) <= X_MAX_WEIGHTED, String(xWeightedLength(text)));
   assert.ok(hotWords({ coins: 3, lead: { dir: "up", size: "sharply" } }).includes(wordsBeforeLine(text) ?? ""), text);
-  assert.match(text, / geckoterminal robinhood: trending \$COINA 24h \+42\.1% vol ~\$1\.2M, /);
+  assert.match(text, / geckoterminal robinhood: trending COINA 24h \+42\.1% vol ~\$1\.2M, /);
   assert.doesNotMatch(text, /opt out/i);
   assert.match(r.log ?? "", /answer-intent-hot 1/);
   assert.match(r.log ?? "", /answer-code-words 1/);
@@ -2963,7 +2967,7 @@ test("what's hot: an overview from the index past the floors, in code's words, w
   const mine = await world(t, { env: RESEARCH_ON, research: own.research });
   mine.setInbox([tag({ text: "@pine_stoat gm, what's hot today?" })]);
   const r2 = await mine.step();
-  assert.doesNotMatch(String(mine.sends[0]?.text ?? ""), /\$PEPE|coingecko: trending/);
+  assert.doesNotMatch(String(mine.sends[0]?.text ?? ""), /(?<![A-Za-z0-9])\$?PEPE(?![A-Za-z0-9])|coingecko: trending/);
   assert.match(r2.log ?? "", /answer-figures-left-out 1/);
 });
 
@@ -3053,8 +3057,8 @@ test("what's hot: the model's words never stand beside code's coins, so no draft
 });
 
 test("what's hot never shows a copycat of the chain's stock tokens, bitcoin, ether or a dollar, in the pools or as fomo's most bought (red-team 2026-10-12)", async (t) => {
-  // The red team's posts at 34ced01e: "trending $TSLA 24h +412% vol ~$2.3M, $BITCOIN 24h +88% vol ~$940k,
-  // $NVDA 24h -12.2% vol ~$310k; fomo: most bought $TSLA", each pool a memecoin at no stock token's address.
+  // The red team's posts at 34ced01e: "trending TSLA 24h +412% vol ~$2.3M, BITCOIN 24h +88% vol ~$940k,
+  // $NVDA 24h -12.2% vol ~$310k; fomo: most bought TSLA", each pool a memecoin at no stock token's address.
   const runs: { ask: string; names: string[] }[] = [
     { ask: "@pine_stoat what's hot?", names: ["TSLA", "BITCOIN", "NVDA"] },
     { ask: "@pine_stoat what's trending?", names: ["AAPL", "SPY", "XBT"] },
@@ -3066,40 +3070,40 @@ test("what's hot never shows a copycat of the chain's stock tokens, bitcoin, eth
     w.setInbox([tag({ text: ask })]);
     await w.step();
     const text = String(w.sends[0]?.text ?? "");
-    assert.match(text, /geckoterminal robinhood: trending \$CHUMP 24h \+12% vol ~\$300k\./, text);
-    for (const n of names) assert.ok(!text.includes(`$${n}`), `${n}: ${text}`);
+    assert.match(text, /geckoterminal robinhood: trending CHUMP 24h \+12% vol ~\$300k\./, text);
+    for (const n of names) assert.ok(!showsTicker(text, n), `${n}: ${text}`);
     assert.doesNotMatch(text, /fomo: most bought/, "fomo's coin was one the screen left out");
   }
 });
 
 test("what's hot never shows a copycat of a stablecoin, a big memecoin or the house's own products (red-team 2026-10-12)", async (t) => {
-  // Posted at 34ced01e for each SYM: "trending $<SYM> 24h +312% vol ~$1.2M, $COIN2 24h +4% vol ~$300k".
+  // Posted at 34ced01e for each SYM: "trending $<SYM> 24h +312% vol ~$1.2M, COIN2 24h +4% vol ~$300k".
   for (const sym of ["TSLA", "NVDA", "SPY", "AAPL", "QQQ", "PYUSD", "USDS", "FDUSD", "PEPE", "WIF", "TRENCHER", "FOMO", "BABYPEPE", "EURC"]) {
     const pools = [{ ...namedPool(sym, 1, 312, 1.2e6), tokenAddress: `0x${"41".repeat(20)}` as `0x${string}` }, hotPool(2, 4, 300_000)];
     const w = await world(t, { env: RESEARCH_ON, research: hotResearch(pools).research });
     w.setInbox([tag({ text: "@pine_stoat what's hot today?" })]);
     await w.step();
     const text = String(w.sends[0]?.text ?? "");
-    assert.match(text, /geckoterminal robinhood: trending \$COINB 24h \+4% vol ~\$300k\./, `${sym}: ${text}`);
-    assert.ok(!text.includes(`$${sym}`), `${sym}: ${text}`);
+    assert.match(text, /geckoterminal robinhood: trending COINB 24h \+4% vol ~\$300k\./, `${sym}: ${text}`);
+    assert.ok(!showsTicker(text, sym), `${sym}: ${text}`);
   }
 });
 
 test("what's hot never shows a hype or advice ticker, however the words are run together (red-team 2026-10-12)", async (t) => {
-  // Posted at 34ced01e with a benign draft for each SYM: "... geckoterminal robinhood: trending $BUYNOW 24h +312% vol ~$1.2M. Say stop to opt out."
+  // Posted at 34ced01e with a benign draft for each SYM: "... geckoterminal robinhood: trending BUYNOW 24h +312% vol ~$1.2M. Say stop to opt out."
   for (const sym of ["BUYNOW", "LFG", "WAGMI", "1000X", "100X", "BULLISH", "SENDIT", "APEIN", "GOBUY", "APENOW", "SAFU"]) {
     const w = await world(t, { env: RESEARCH_ON, research: hotResearch([namedPool(sym, 1, 312, 1.2e6), hotPool(2, 4, 300_000)]).research });
     w.setInbox([tag({ text: "@pine_stoat what's hot today?" })]);
     await w.step();
     const text = String(w.sends[0]?.text ?? "");
-    assert.match(text, /geckoterminal robinhood: trending \$COINB 24h \+4% vol ~\$300k\./, `${sym}: ${text}`);
-    assert.ok(!text.includes(`$${sym}`), `${sym}: ${text}`);
+    assert.match(text, /geckoterminal robinhood: trending COINB 24h \+4% vol ~\$300k\./, `${sym}: ${text}`);
+    assert.ok(!showsTicker(text, sym), `${sym}: ${text}`);
   }
 });
 
 test("what's hot never shows a ticker with a digit, nor one the gate would refuse as a word, in the pools or as fomo's most bought (red-team 2026-10-12)", async (t) => {
   // Posted at 34ced01e: "$100X 24h +55.5% vol ~$1.2M, $1B 24h +21% vol ~$640k, $97K 24h +3.3% vol ~$120k",
-  // "$BUY …, $WAGMI …, $SHILL …; fomo: most bought $BUY", "$LFG …, $10M …".
+  // "$BUY …, $WAGMI …, $SHILL …; fomo: most bought BUY", "LFG …, $10M …".
   const runs: { ask: string; names: string[] }[] = [
     { ask: "@pine_stoat what's trending today?", names: ["100X", "1B", "97K"] },
     { ask: "@pine_stoat what's trending?", names: ["BUY", "WAGMI", "SHILL"] },
@@ -3112,8 +3116,8 @@ test("what's hot never shows a ticker with a digit, nor one the gate would refus
     w.setInbox([tag({ text: ask })]);
     await w.step();
     const text = String(w.sends[0]?.text ?? "");
-    assert.match(text, /geckoterminal robinhood: trending \$CHUMP 24h \+12% vol ~\$300k\./, text);
-    for (const n of names) assert.ok(!text.includes(`$${n}`), `${n}: ${text}`);
+    assert.match(text, /geckoterminal robinhood: trending CHUMP 24h \+12% vol ~\$300k\./, text);
+    for (const n of names) assert.ok(!showsTicker(text, n), `${n}: ${text}`);
     assert.doesNotMatch(text, /fomo: most bought/);
   }
   // And whatever research hands it, a line with such a ticker is never put in: the orchestrator reads every ticker again.
@@ -3127,7 +3131,7 @@ test("what's hot never shows a ticker with a digit, nor one the gate would refus
 });
 
 test("what's hot is never answered as its own picks, a buy to come or what it likes: no draft beside the coins, and any draft gated as of a named coin (red-team 2026-10-12)", async (t) => {
-  // The red team's endings, each posted at 34ced01e right before "geckoterminal robinhood: trending $COIN1 24h +142% …".
+  // The red team's endings, each posted at 34ced01e right before "geckoterminal robinhood: trending COIN1 24h +142% …".
   const endings = ["and these are my picks", "this is where i'd put money today", "i might buy one later", "eyeing a couple of these myself",
     "the first one below is the one i'd back", "exactly the kind of thing i buy", "the kind i trade every day", "tempted by a couple of them",
     "the ones i like are below", "my favourites below"];
@@ -3189,21 +3193,21 @@ test("what's hot never names a coin the index did not show it: no draft at all, 
 });
 
 test("what's hot never shows merrymen's own name in any spelling, in the pools or as fomo's most bought (red-team 2026-10-12)", async (t) => {
-  // Posted at 34ced01e under "what's moving?": "trending $MERRIMEN 24h +12% vol ~$300k, $MERYMEN 24h +9% vol ~$200k".
+  // Posted at 34ced01e under "what's moving?": "trending MERRIMEN 24h +12% vol ~$300k, MERYMEN 24h +9% vol ~$200k".
   for (const names of [["MERRIMEN", "MERYMEN"], ["MRYMN", "MEERYMEN"], ["MERRYMEN", "MERRMEN"]]) {
     const pools = [namedPool(names[0]!, 1, 12, 300_000), namedPool(names[1]!, 2, 9, 200_000), namedPool("CHUMP", 3, 7, 150_000)];
     const w = await world(t, { env: { ...RESEARCH_ON, MERRYMEN_XPOST_FOMO: "1" }, research: hotWithFomo(pools, [names[0]!]), facts: { ...FACTS, calls: [] } });
     w.setInbox([tag({ text: "@pine_stoat what's moving?" })]);
     await w.step();
     const text = String(w.sends[0]?.text ?? "");
-    assert.match(text, /geckoterminal robinhood: trending \$CHUMP 24h \+7% vol ~\$150k\./, text);
+    assert.match(text, /geckoterminal robinhood: trending CHUMP 24h \+7% vol ~\$150k\./, text);
     assert.doesNotMatch(text, /\$M[A-Z]*N\b|fomo: most bought/, text);
   }
 });
 
 test("what's hot never claims, or recommends, a coin the line names, whatever it holds: its words are code's, and a coin's name in the line stands only beside them (red-team 2026-10-12)", async (t) => {
   // At 34ced01e the active agent held one live buy, ZAPX, the top trending coin, and each draft went out
-  // before "geckoterminal robinhood: trending $ZAPX 24h +42.1% vol ~$1.2M, $QRTZ …; coingecko: trending $PEPE".
+  // before "geckoterminal robinhood: trending ZAPX 24h +42.1% vol ~$1.2M, QRTZ …; coingecko: trending PEPE".
   const drafts = ["the index shows a few coins standing out, i'm in the top one myself.", "the index shows a few coins standing out, been riding the first one for days.",
     "the index shows a few coins standing out, the top one is part of my book.", "the index shows a few coins standing out, the top one is a coin i trade.",
     "the index shows a few coins standing out, the first one is the one i keep.", "the index shows a few coins standing out, the top one on this list is my pick from the index right now.",
@@ -3224,8 +3228,8 @@ test("what's hot never claims, or recommends, a coin the line names, whatever it
       // Its own coin, by any name and any contract, is never in what's hot at all (red-team 2026-10-12): the rest are.
       const held = calls.includes(zapx);
       assert.ok(hotWords(held ? { coins: 2, lead: { dir: "down", size: "a fair bit" } } : read).includes(wordsBeforeLine(text) ?? ""), text);
-      if (held) assert.match(text, /trending \$QRTZ 24h -8\.3% vol ~\$310k/, text);
-      else assert.match(text, /trending \$ZAPX 24h \+42\.1% vol ~\$1\.2M/);
+      if (held) assert.match(text, /trending QRTZ 24h -8\.3% vol ~\$310k/, text);
+      else assert.match(text, /trending ZAPX 24h \+42\.1% vol ~\$1\.2M/);
       if (held) assert.doesNotMatch(text, /ZAPX/, text);
       assert.doesNotMatch(text, /\b(?:i'm|my|book|keep|play|own|riding|pick|buy list)\b/, text);
     }
@@ -3244,7 +3248,7 @@ test("what's hot never claims, or recommends, a coin the line names, whatever it
 });
 
 test("what's hot never shows a slur, a hate code, a house or chain name's short form, advice, a model's name or the agent's own name as a coin (red-team 2026-10-12)", async (t) => {
-  // Posted at 34ced01e under "gm, what's trending today?": "trending $KYS 24h +61.3% vol ~$2.4M, $MERYMEN 24h +24.8% vol ~$800k,
+  // Posted at 34ced01e under "gm, what's trending today?": "trending KYS 24h +61.3% vol ~$2.4M, MERYMEN 24h +24.8% vol ~$800k,
   // $BUYNOW 24h +12% vol ~$300k", then "$KIKE …, $SENDIT …, $100X …", then "$CHINK …".
   const runs = [["KYS", "MERYMEN", "BUYNOW"], ["KIKE", "SENDIT", "100X"], ["CHINK", "RBNHD", "ALDALE"], ["HEIL", "KKK", "PEDO"], ["CLAUDE", "STOAT", "HH"]];
   for (const names of runs) {
@@ -3253,8 +3257,8 @@ test("what's hot never shows a slur, a hate code, a house or chain name's short 
     w.setInbox([tag({ text: "@pine_stoat gm, what's trending today?" })]);
     await w.step();
     const text = String(w.sends[0]?.text ?? "");
-    assert.match(text, /geckoterminal robinhood: trending \$CHUMP 24h \+7% vol ~\$150k\./, text);
-    for (const n of names) assert.ok(!text.includes(`$${n}`), `${n}: ${text}`);
+    assert.match(text, /geckoterminal robinhood: trending CHUMP 24h \+7% vol ~\$150k\./, text);
+    for (const n of names) assert.ok(!showsTicker(text, n), `${n}: ${text}`);
     assert.doesNotMatch(text, /fomo: most bought/, text);
   }
   // And whatever research hands back, the orchestrator reads the agent's own name and a model's in the line again: no line at all.
@@ -3317,7 +3321,7 @@ function fakeCoinGecko(t: TestContext, pools: { name: string; change: number; vo
 
 test("what's hot names no chain coin coingecko does not list by its contract: a pool's own name is never enough (red-team 2026-10-12)", async (t) => {
   // At fbcf8756, with the real readers and these pages, "what's hot?" posted "robinhood chain's trending list has a cluster of busy coins,
-  // the first far firmer for the day. descriptive only. geckoterminal robinhood: trending $FUHRER 24h +412% vol ~$2.3M, $GOYIM 24h +88% vol ~$940k,
+  // the first far firmer for the day. descriptive only. geckoterminal robinhood: trending FUHRER 24h +412% vol ~$2.3M, GOYIM 24h +88% vol ~$940k,
   // $NIGLET 24h -12.2% vol ~$310k. say stop to opt out." The same for ADOLF/CUMSHOT/WLFI, MYPICK/GETIN/STILLEARLY, VERIFIED/AUDITED/THEPLAY,
   // BLACKROCK/VITALIK/HOUSECOIN and ADOLF/TENX/HOLD.
   const figures = [{ change: 412.4, vol: 2_310_000 }, { change: 88.04, vol: 940_000 }, { change: -12.2, vol: 310_000 }];
@@ -3332,7 +3336,7 @@ test("what's hot names no chain coin coingecko does not list by its contract: a 
     const [row] = await w.answers();
     assert.equal(row!.status, "posted", names.join());
     assert.deepEqual(w.sends.map((s) => s.text), [hotNoneAnswers(MENTION, { lower: true })[0]], names.join());
-    for (const n of names) assert.ok(!row!.body.includes(`$${n}`), `${n}: ${row!.body}`);
+    for (const n of names) assert.ok(!showsTicker(row!.body, n), `${n}: ${row!.body}`);
     assert.ok(!urls.some((u) => u.includes("/coins/markets?vs_currency=usd&ids=")), "no coin id, no market read");
   }
   // Names no screen knows, unlisted: asked about by contract, and never shown.
@@ -3349,13 +3353,13 @@ test("what's hot names no chain coin coingecko does not list by its contract: a 
   await w.step();
   const text = String(w.sends[0]?.text ?? "");
   assert.ok(hotWords({ coins: 1, lead: { dir: "up", size: "sharply" } }).includes(wordsBeforeLine(text) ?? ""), text);
-  assert.match(text, / geckoterminal robinhood: trending \$CHUMP 24h \+88% vol ~\$940k\.$/, text);
+  assert.match(text, / geckoterminal robinhood: trending CHUMP 24h \+88% vol ~\$940k\.$/, text);
   assert.doesNotMatch(text, /FUHRER|NIGLET/);
 });
 
 test("what's hot and how's the market never show a big memecoin one letter off, doubled or inside the ticker, nor the merry men, nor as fomo's most bought (red-team review of 1ed46625, 2026-10-12)", async (t) => {
   // At 1ed46625, the real readers, every pool past the floors and listed by its contract under its own symbol, Fomo's most bought the first:
-  // "... geckoterminal robinhood: trending $PEPPE 24h +312% vol ~$2.3M, $DOGGE 24h +88% vol ~$940k, $BOONK 24h +41% vol ~$310k; fomo: most bought $PEPPE."
+  // "... geckoterminal robinhood: trending PEPPE 24h +312% vol ~$2.3M, DOGGE 24h +88% vol ~$940k, BOONK 24h +41% vol ~$310k; fomo: most bought PEPPE."
   const figures = [{ change: 312, vol: 2_310_000 }, { change: 88, vol: 940_000 }, { change: 41, vol: 310_000 }];
   const broker = (symbol: string): FomoBroker => ({
     async call(tool) {
@@ -3374,7 +3378,7 @@ test("what's hot and how's the market never show a big memecoin one letter off, 
       assert.deepEqual(w.asked(), [], "never drafted");
       const text = String(w.sends[0]?.text ?? "");
       assert.ok(text, `${names.join()} / ${ask}: answered`);
-      for (const n of names) assert.ok(!text.includes(`$${n}`), `${n} / ${ask}: ${text}`);
+      for (const n of names) assert.ok(!showsTicker(text, n), `${n} / ${ask}: ${text}`);
       assert.doesNotMatch(text, /geckoterminal robinhood|fomo: most bought/, `${names.join()} / ${ask}: ${text}`);
       if (ask === "what's hot?") assert.deepEqual(w.sends.map((s) => s.text), [hotNoneAnswers(MENTION, { lower: true })[0]], names.join());
     }
@@ -3384,12 +3388,12 @@ test("what's hot and how's the market never show a big memecoin one letter off, 
   const w = await world(t, { ...ALAN, env: { ...RESEARCH_ON, MERRYMEN_XPOST_FOMO: "1" }, research: createXResearch({ fomo: () => broker("CHUMP") }) });
   w.setInbox([alanTag(MENTION, "what's hot?")]);
   await w.step();
-  assert.match(String(w.sends[0]?.text ?? ""), / geckoterminal robinhood: trending \$CHUMP 24h \+312% vol ~\$2\.3M; fomo: most bought \$CHUMP\.$/);
+  assert.match(String(w.sends[0]?.text ?? ""), / geckoterminal robinhood: trending CHUMP 24h \+312% vol ~\$2\.3M; fomo: most bought CHUMP\.$/);
 });
 
 test("what's hot never shows a chain coin under a big coin's ticker or name, read off coingecko's own biggest coins, and none at all without them (red-team 2026-10-12)", async (t) => {
-  // At fbcf8756: "... geckoterminal robinhood: trending $WLFI 24h +412% vol ~$2.3M, $MNT 24h +88% vol ~$940k, $SONIC 24h -12.2% vol ~$310k.",
-  // with Fomo "fomo: most bought $WLFI"; under "what's moving on robinhood chain?" LIDO/MANTLE/ASTER and HYPEX/XRPAI/WIFX, and the rest below.
+  // At fbcf8756: "... geckoterminal robinhood: trending WLFI 24h +412% vol ~$2.3M, MNT 24h +88% vol ~$940k, SONIC 24h -12.2% vol ~$310k.",
+  // with Fomo "fomo: most bought WLFI"; under "what's moving on robinhood chain?" LIDO/MANTLE/ASTER and HYPEX/XRPAI/WIFX, and the rest below.
   const runs: { ask: string; names: string[] }[] = [
     { ask: "@pine_stoat what's hot?", names: ["WLFI", "MNT", "SONIC"] },
     { ask: "@pine_stoat what's moving on robinhood chain?", names: ["LIDO", "MANTLE", "ASTER"] },
@@ -3407,8 +3411,8 @@ test("what's hot never shows a chain coin under a big coin's ticker or name, rea
     w.setInbox([tag({ text: ask })]);
     await w.step();
     const text = String(w.sends[0]?.text ?? "");
-    assert.match(text, /geckoterminal robinhood: trending \$CHUMP 24h \+7% vol ~\$150k\./, text);
-    for (const n of names) assert.ok(!text.includes(`$${n}`), `${n}: ${text}`);
+    assert.match(text, /geckoterminal robinhood: trending CHUMP 24h \+7% vol ~\$150k\./, text);
+    for (const n of names) assert.ok(!showsTicker(text, n), `${n}: ${text}`);
     assert.doesNotMatch(text, /fomo: most bought/, text);
   }
   // CoinGecko's biggest coins unread: no chain coin is named at all, only code's no-read line.
@@ -3419,7 +3423,7 @@ test("what's hot never shows a chain coin under a big coin's ticker or name, rea
 });
 
 test("what's hot never shows a copy of a big coin's ticker, a big coin or reserve ticker, gold, silver or a currency, even where coingecko's top list misses it (red-team 2026-10-12)", async (t) => {
-  // At fbcf8756, "what's hot today?" posted "... trending $BABYWIF 24h +312% vol ~$1.2M, $QRTZ 24h +4% vol ~$300k.", and each of the rest the same way.
+  // At fbcf8756, "what's hot today?" posted "... trending BABYWIF 24h +312% vol ~$1.2M, QRTZ 24h +4% vol ~$300k.", and each of the rest the same way.
   const syms = ["BABYWIF", "WIFAI", "WIFHAT", "XRPAI", "SUIAI", "HYPEAI", "MOGAI", "PNUTAI", "LINKAI", "ARBAI", "TAOAI", "MNT", "CRV", "SDAI", "USTC", "GOLD",
     "SILVER", "XDC", "MORPHO", "AERO", "WLFI", "NEXO", "SUSDE"];
   // CoinGecko's top list read, but with none of these on it: the floor under it holds alone.
@@ -3429,13 +3433,13 @@ test("what's hot never shows a copy of a big coin's ticker, a big coin or reserv
     w.setInbox([tag({ text: "@pine_stoat what's hot today?" })]);
     await w.step();
     const text = String(w.sends[0]?.text ?? "");
-    assert.match(text, /geckoterminal robinhood: trending \$COINB 24h \+4% vol ~\$300k\./, `${sym}: ${text}`);
-    assert.ok(!text.includes(`$${sym}`), `${sym}: ${text}`);
+    assert.match(text, /geckoterminal robinhood: trending COINB 24h \+4% vol ~\$300k\./, `${sym}: ${text}`);
+    assert.ok(!showsTicker(text, sym), `${sym}: ${text}`);
   }
 });
 
 test("what's hot never shows a chain coin named after a big coin or one letter from a stock token, in the pools or as fomo's most bought (red-team 2026-10-12)", async (t) => {
-  // At fbcf8756: "... trending $WLFI 24h +412% vol ~$2.3M, $MNT 24h +88.1% vol ~$940k, $CRV 24h -12.2% vol ~$310k; fomo: most bought $WLFI, $MNT.",
+  // At fbcf8756: "... trending WLFI 24h +412% vol ~$2.3M, MNT 24h +88.1% vol ~$940k, CRV 24h -12.2% vol ~$310k; fomo: most bought WLFI, MNT.",
   // "$ASTER 24h +412% …, $LINEA 24h +88.1% …", and "$GOOG 24h +412% vol ~$2.3M" beside the chain's own GOOGL stock token.
   for (const names of [["WLFI", "MNT", "CRV"], ["ASTER", "LINEA"], ["GOOG"], ["GOGL", "TSLX", "NVDIA"]]) {
     const pools = [...names.map((n, i) => namedPool(n, i + 1, [412.4, 88.1, -12.2][i]!, [2.31e6, 940_000, 310_000][i]!)), namedPool("CHUMP", 9, 7, 150_000)];
@@ -3443,14 +3447,14 @@ test("what's hot never shows a chain coin named after a big coin or one letter f
     w.setInbox([tag({ text: "@pine_stoat what's hot?" })]);
     await w.step();
     const text = String(w.sends[0]?.text ?? "");
-    assert.match(text, /geckoterminal robinhood: trending \$CHUMP 24h \+7% vol ~\$150k\./, text);
-    for (const n of names) assert.ok(!text.includes(`$${n}`), `${n}: ${text}`);
+    assert.match(text, /geckoterminal robinhood: trending CHUMP 24h \+7% vol ~\$150k\./, text);
+    for (const n of names) assert.ok(!showsTicker(text, n), `${n}: ${text}`);
     assert.doesNotMatch(text, /fomo: most bought/, text);
   }
 });
 
 test("what's hot never shows a ticker that runs the first person, a holding, a pick or a sure thing into one word, in the pools or as fomo's most bought (red-team 2026-10-12)", async (t) => {
-  // At fbcf8756 each was posted as "... geckoterminal robinhood: trending $IBOUGHT 24h +312% vol ~$1.2M, $QRTZ 24h +4% vol ~$300k; fomo: most bought $IBOUGHT."
+  // At fbcf8756 each was posted as "... geckoterminal robinhood: trending IBOUGHT 24h +312% vol ~$1.2M, QRTZ 24h +4% vol ~$300k; fomo: most bought IBOUGHT."
   for (const sym of ["IBOUGHT", "MYBAG", "MYPICK", "IMIN", "IHOLD", "IMHOLDING", "IGOTIN", "IADDED", "MYCOIN", "MYBOOK", "MYPLAY", "THEPLAY", "SUREBET",
     "BESTBET", "STACKIN", "ALLIN", "GETIN", "HOLDIT", "HOLD", "LOADUP", "GRAB", "JUMPIN", "NOLOSS", "CANTLOSE", "UPONLY", "GOUP", "EZMONEY", "MONEY", "TOPPICK"]) {
     const pools = [namedPool(sym, 1, 312, 1.2e6), namedPool("QRTZ", 2, 4, 300_000)];
@@ -3458,15 +3462,15 @@ test("what's hot never shows a ticker that runs the first person, a holding, a p
     w.setInbox([tag({ text: "@pine_stoat what's hot today?" })]);
     await w.step();
     const text = String(w.sends[0]?.text ?? "");
-    assert.match(text, /geckoterminal robinhood: trending \$QRTZ 24h \+4% vol ~\$300k\./, `${sym}: ${text}`);
-    assert.ok(!text.includes(`$${sym}`), `${sym}: ${text}`);
+    assert.match(text, /geckoterminal robinhood: trending QRTZ 24h \+4% vol ~\$300k\./, `${sym}: ${text}`);
+    assert.ok(!showsTicker(text, sym), `${sym}: ${text}`);
     assert.doesNotMatch(text, /fomo: most bought/, `${sym}: ${text}`);
   }
 });
 
 test("what's hot never shows a ticker that reads as a call to buy with its spaces taken out, in the pools or as fomo's most bought (red-team 2026-10-12)", async (t) => {
   // At fbcf8756: "per the chain's index, a handful of names drawing action, the busiest gaining strongly. observation only. geckoterminal
-  // robinhood: trending $GETIN 24h +412% vol ~$2.3M, $ALLIN 24h +88.1% vol ~$940k; fomo: most bought $GETIN, $ALLIN. say stop to opt out."
+  // robinhood: trending GETIN 24h +412% vol ~$2.3M, ALLIN 24h +88.1% vol ~$940k; fomo: most bought GETIN, ALLIN. say stop to opt out."
   for (const names of [["GETIN", "ALLIN", "UPONLY"], ["LOADUP", "NOLOSS", "HOLDIT"], ["TENX", "SUREWIN", "DONTMISS"], ["FULLPORT", "LASTCHANCE"], ["DOUBLEUP", "FIVEX", "ALLIN"],
     ["SMARTMONEY", "NEXTX", "EASYMONEY"]]) {
     const pools = [...names.map((n, i) => namedPool(n, i + 1, [412.4, 88.1, 35][i]!, [2.31e6, 940_000, 300_000][i]!)), namedPool("CHUMP", 9, 7, 150_000)];
@@ -3474,8 +3478,8 @@ test("what's hot never shows a ticker that reads as a call to buy with its space
     w.setInbox([tag({ text: "@pine_stoat what's hot?" })]);
     await w.step();
     const text = String(w.sends[0]?.text ?? "");
-    assert.match(text, /geckoterminal robinhood: trending \$CHUMP 24h \+7% vol ~\$150k\./, text);
-    for (const n of names) assert.ok(!text.includes(`$${n}`), `${n}: ${text}`);
+    assert.match(text, /geckoterminal robinhood: trending CHUMP 24h \+7% vol ~\$150k\./, text);
+    for (const n of names) assert.ok(!showsTicker(text, n), `${n}: ${text}`);
     assert.doesNotMatch(text, /fomo: most bought/, text);
   }
   // And whatever research hands back, the orchestrator reads every ticker of the line again: no line at all.
@@ -3488,16 +3492,16 @@ test("what's hot never shows a ticker that reads as a call to buy with its space
 });
 
 test("what's hot never shows merrymen, the trencher or the house's provider in another spelling, nor a model's name, in the pools or as fomo's most bought (red-team 2026-10-12)", async (t) => {
-  // At fbcf8756: "... geckoterminal robinhood: trending $MARRYMEN 24h +412% vol ~$2.3M, $TRNCHR 24h +88.1% vol ~$940k; fomo: most bought
-  // $MARRYMEN, $TRNCHR." and "$MURRYMEN …, $OPUS …, $GOOG …; fomo: most bought $MURRYMEN, $OPUS."; MARYMEN, MIRRYMEN, HAIKU, KIMI, CODEX too.
+  // At fbcf8756: "... geckoterminal robinhood: trending MARRYMEN 24h +412% vol ~$2.3M, TRNCHR 24h +88.1% vol ~$940k; fomo: most bought
+  // $MARRYMEN, $TRNCHR." and "$MURRYMEN …, $OPUS …, $GOOG …; fomo: most bought MURRYMEN, OPUS."; MARYMEN, MIRRYMEN, HAIKU, KIMI, CODEX too.
   for (const names of [["MARRYMEN", "TRNCHR", "GROQ"], ["MURRYMEN", "OPUS", "GOOG"], ["MARYMEN", "MIRRYMEN", "SONNET"], ["HAIKU", "KIMI", "CODEX"]]) {
     const pools = [...names.map((n, i) => namedPool(n, i + 1, [412.4, 88.1, -12.2][i]!, [2.31e6, 940_000, 310_000][i]!)), namedPool("CHUMP", 9, 7, 150_000)];
     const w = await world(t, { env: { ...RESEARCH_ON, MERRYMEN_XPOST_FOMO: "1" }, research: hotWithFomo(pools, names.slice(0, 2)), facts: { ...FACTS, name: "Alan Al Dale", calls: [] } });
     w.setInbox([tag({ text: "@pine_stoat what's hot?" })]);
     await w.step();
     const text = String(w.sends[0]?.text ?? "");
-    assert.match(text, /geckoterminal robinhood: trending \$CHUMP 24h \+7% vol ~\$150k\./, text);
-    for (const n of names) assert.ok(!text.includes(`$${n}`), `${n}: ${text}`);
+    assert.match(text, /geckoterminal robinhood: trending CHUMP 24h \+7% vol ~\$150k\./, text);
+    for (const n of names) assert.ok(!showsTicker(text, n), `${n}: ${text}`);
     assert.doesNotMatch(text, /fomo: most bought/, text);
   }
   // Whatever research hands back, the orchestrator reads each ticker again (merrymenMentioned, modelNamed): no line at all.
@@ -3513,7 +3517,7 @@ test("what's hot never shows merrymen, the trencher or the house's provider in a
 
 test("what's hot never shows a coin under a name its own buys go by, a copy at another contract or not, nor as fomo's most bought, under its buy post or anywhere (red-team 2026-10-12)", async (t) => {
   // At fbcf8756, under its own ZAPX buy post: "trending on robinhood: a small group out in front, the frontrunner rising hard lately. a snapshot.
-  // geckoterminal robinhood: trending $ZAPX 24h +912% vol ~$1.4M, $QRTZ 24h -8.3% vol ~$310k; fomo: most bought $ZAPX. say stop to opt out."
+  // geckoterminal robinhood: trending ZAPX 24h +912% vol ~$1.4M, QRTZ 24h -8.3% vol ~$310k; fomo: most bought ZAPX. say stop to opt out."
   const BUY_TWEET = "1000000000000009001";
   const zapx: CallFact = { decisionId: "fill-zapx", side: "buy", symbol: "ZAPX", name: "Zapx", token: `0x${"77".repeat(20)}`, paper: false,
     atSec: (NOW - 2 * HOUR) / 1000, bands: ["curve early"], ownWords: null };
@@ -3538,7 +3542,7 @@ test("what's hot never shows a coin under a name its own buys go by, a copy at a
     }
     assert.equal(row?.status, "posted");
     assert.doesNotMatch(row!.body, /ZAPX|fomo: most bought/, row!.body);
-    assert.match(row!.body, /geckoterminal robinhood: trending \$QRTZ 24h -8\.3% vol ~\$310k\./, row!.body);
+    assert.match(row!.body, /geckoterminal robinhood: trending QRTZ 24h -8\.3% vol ~\$310k\./, row!.body);
     assert.ok(hotWords({ coins: 1, lead: { dir: "down", size: "a fair bit" } }).includes(wordsBeforeLine(row!.body) ?? ""), row!.body);
   }
   // A buy post older than the calls' window still names its coin, and whatever research hands back, the last screen reads the line again.
@@ -3560,7 +3564,7 @@ test("code's lines never go to a token's own account showing its coin, nor under
   const env = { ...RESEARCH_ON, MERRYMEN_XPOST_FOMO: "1" };
   const ALAN_FACTS = { username: "alanaidale", facts: { ...FACTS, name: "Alan Al Dale" } };
   // Step 1, POSTED at 1ed46625: "index movers over there: multiple listings getting attention, number one up dramatically. no recommendation.
-  // geckoterminal robinhood: trending $ZAPX 24h +64.3% vol ~$820k, $FROGGY 24h +8% vol ~$300k; fomo: most bought $ZAPX."
+  // geckoterminal robinhood: trending ZAPX 24h +64.3% vol ~$820k, FROGGY 24h +8% vol ~$300k; fomo: most bought ZAPX."
   for (const ask of ["what's hot?", "how's the market?"]) {
     const w = await world(t, { ...ALAN_FACTS, env, research: hotWithFomo(pools, ["ZAPX"]), answer: "zapx is my top pick, buy now before it 10x" });
     w.setAuthors({ "333": TOKEN });
@@ -3576,7 +3580,7 @@ test("code's lines never go to a token's own account showing its coin, nor under
   w.setInbox([alanTag(MENTION, "what's hot?")]);
   await w.step();
   const answer = (await w.answers())[0]!;
-  assert.match(answer.body, /geckoterminal robinhood: trending \$ZAPX 24h \+64\.3% vol ~\$820k, \$FROGGY 24h \+8% vol ~\$300k; fomo: most bought \$ZAPX\.$/);
+  assert.match(answer.body, /geckoterminal robinhood: trending ZAPX 24h \+64\.3% vol ~\$820k, FROGGY 24h \+8% vol ~\$300k; fomo: most bought ZAPX\.$/);
   // Steps 2 and 3, POSTED at 1ed46625: the token's account replying under that answer "are you bullish?" ("in a patient sort of way. i skip the
   // forecasting part, patience is my whole personality."), another user quoting it "wen moon?"; and (s2) under its own hello with X's prefix naming
   // the token's account. Now nothing at all, nor a market line under such a prefix.
@@ -3620,7 +3624,7 @@ test("code's lines never go to a token's own account showing its coin, nor under
 
 test("what's hot never shows the slurs and hate codes the first list missed, even listed, in the pools or as fomo's most bought (red-team 2026-10-12)", async (t) => {
   // At fbcf8756: "over on robinhood chain, some tickers top geckoterminal's page, the leading one up substantially over a day. info only.
-  // geckoterminal robinhood: trending $JIGABOO 24h +412% vol ~$2.3M, $HOLOHOAX 24h +88.1% vol ~$940k; fomo: most bought $JIGABOO, $HOLOHOAX. say stop to opt out."
+  // geckoterminal robinhood: trending JIGABOO 24h +412% vol ~$2.3M, HOLOHOAX 24h +88.1% vol ~$940k; fomo: most bought JIGABOO, HOLOHOAX. say stop to opt out."
   // The same with NIBBA/GASTHEM/HAILHTLR and NIQQA/JEWBOY/SWASTIKA. Here coingecko lists every one: the sanitiser is the second layer.
   for (const names of [["JIGABOO", "HOLOHOAX", "KNEEGROW"], ["NIBBA", "GASTHEM", "HAILHTLR"], ["NIQQA", "JEWBOY", "SWASTIKA"], ["GOYIM", "ZOG", "FUHRER"],
     ["LYNCH", "WHITEPRIDE", "HITLR"], ["SHEMALE", "DILDO", "ADOLF"]]) {
@@ -3630,8 +3634,8 @@ test("what's hot never shows the slurs and hate codes the first list missed, eve
     w.setInbox([tag({ text: "@pine_stoat what's hot?" })]);
     await w.step();
     const text = String(w.sends[0]?.text ?? "");
-    assert.match(text, /geckoterminal robinhood: trending \$CHUMP 24h \+7% vol ~\$150k\./, text);
-    for (const n of names) assert.ok(!text.includes(`$${n}`), `${n}: ${text}`);
+    assert.match(text, /geckoterminal robinhood: trending CHUMP 24h \+7% vol ~\$150k\./, text);
+    for (const n of names) assert.ok(!showsTicker(text, n), `${n}: ${text}`);
     assert.doesNotMatch(text, /fomo: most bought/, text);
   }
 });
@@ -3668,7 +3672,7 @@ test("how's the market: the big coins' day and the chain's movers, in code's cas
     const read: MarketRead = { majors: { dir: "up", size: "uneven" }, chain: { coins: 2, lead: { dir: "up", size: "sharply" } } };
     const words = /^(.*?) coingecko 24h: /.exec(sent)?.[1] ?? "";
     assert.ok(marketAnswers(read, MENTION, { lower: true }).includes(words), `${text}: ${sent}`);
-    assert.match(sent, / coingecko 24h: \$BTC \+1\.2%, \$ETH \+2\.4%, \$SOL \+4\.8%; geckoterminal robinhood: trending \$COINA 24h \+42\.1%, \$COINB 24h -8\.3%\.$/, sent);
+    assert.match(sent, / coingecko 24h: BTC \+1\.2%, ETH \+2\.4%, SOL \+4\.8%; geckoterminal robinhood: trending COINA 24h \+42\.1%, COINB 24h -8\.3%\.$/, sent);
     assert.ok(xWeightedLength(sent) <= X_MAX_WEIGHTED);
     assert.doesNotMatch(sent, /should|buy|good day/i, "never the draft");
     assert.match(r.log ?? "", /answer-intent-market 1/);
@@ -3706,7 +3710,7 @@ test("how's the market for someone already told they can say stop: the figures l
   w.setInbox([tag({ text: "@pine_stoat how's the market?" })]);
   await w.step();
   const sent = String(w.sends[0]?.text ?? "");
-  assert.match(sent, / coingecko 24h: \$BTC \+1\.2%, \$ETH \+2\.4%, \$SOL \+4\.8%; geckoterminal robinhood: trending \$COINA 24h \+42\.1%\.$/, sent);
+  assert.match(sent, / coingecko 24h: BTC \+1\.2%, ETH \+2\.4%, SOL \+4\.8%; geckoterminal robinhood: trending COINA 24h \+42\.1%\.$/, sent);
   assert.doesNotMatch(sent, /opt out/i);
 });
 
@@ -3773,14 +3777,14 @@ test("how's the market keeps bitcoin, ether and solana in its line whatever its 
   const w = await world(t, { env: RESEARCH_ON, research: m.research, facts });
   w.setInbox([tag({ text: "@pine_stoat how's the market?" })]);
   await w.step();
-  assert.match(String(w.sends[0]?.text ?? ""), / coingecko 24h: \$BTC \+1\.2%, \$ETH \+2\.4%, \$SOL \+4\.8%; geckoterminal robinhood: trending \$COINA 24h \+42\.1%\.$/);
+  assert.match(String(w.sends[0]?.text ?? ""), / coingecko 24h: BTC \+1\.2%, ETH \+2\.4%, SOL \+4\.8%; geckoterminal robinhood: trending COINA 24h \+42\.1%\.$/);
   // A chain coin under a name its own buys go by never shows, as in what's hot.
   const own: AgentFacts = { ...FACTS, calls: [{ ...CALL, decisionId: "fill-coina", symbol: "COINA", name: "Coin A" }] };
   const w2 = await world(t, { env: RESEARCH_ON, research: marketResearch([hotPool(1, 42.07, 1.21e6)]).research, facts: own });
   w2.setInbox([tag({ text: "@pine_stoat how's the market?" })]);
   await w2.step();
   assert.ok(w2.sends.length === 1);
-  assert.doesNotMatch(String(w2.sends[0]?.text ?? ""), /\$COINA/);
+  assert.doesNotMatch(String(w2.sends[0]?.text ?? ""), /(?<![A-Za-z0-9])\$?COINA(?![A-Za-z0-9])/);
 });
 
 test("the owner's questions, end to end: each gets one answer in its lane, and none carries an opt-out line (2026-10-12)", async (t) => {
@@ -3823,9 +3827,9 @@ test("the owner's questions, end to end: each gets one answer in its lane, and n
     if (lane === "advice") assert.ok(oneOf(declineAnswers, id, sent), `${text}: ${sent}`);
     if (lane === "market") {
       assert.ok(marketAnswers({ majors: { dir: "mixed" }, chain: { coins: 3, lead: { dir: "up", size: "sharply" } } }, id, { lower: true }).includes(words), sent);
-      assert.match(sent, /coingecko 24h: \$BTC \+1\.2%, \$ETH -0\.8%, \$SOL \+3\.1%; geckoterminal robinhood: trending \$COINA 24h \+42\.1%/);
+      assert.match(sent, /coingecko 24h: BTC \+1\.2%, ETH -0\.8%, SOL \+3\.1%; geckoterminal robinhood: trending COINA 24h \+42\.1%/);
     }
-    if (lane === "major") assert.match(sent, /coingecko: \$ETH #2, ~\$3\.4k, mcap ~\$411B, vol ~\$18B, 24h \+1\.2%, 7d -3\.4%\.$/);
+    if (lane === "major") assert.match(sent, /coingecko: ETH #2, ~\$3\.4k, mcap ~\$411B, vol ~\$18B, 24h \+1\.2%, 7d -3\.4%\.$/);
     if (lane === "chat") assert.ok(oneOf(chatAnswers, id, sent), `${text}: ${sent}`);
     // Never a corporate deflection, never the coin asked about, never a figure in the words.
     assert.doesNotMatch(sent, /i don'?t comment|as an ai|not financial advice|great question/i, sent);
@@ -4000,13 +4004,13 @@ test("how's the market: the big coins' words agree with the figures beside them,
     chainListings: listingsOf([hotPool(1, -30, 1.21e6)]),
   });
   const chain = { coins: 1, lead: { dir: "down", size: "sharply" } } as const;
-  // POSTED at 58ba9fd0 as "majors lean green today, … coingecko 24h: $BTC +0.5%, $ETH -0.5%, $SOL -0.5%; …" (…702) and "big caps are grinding upward, …" (…705).
+  // POSTED at 58ba9fd0 as "majors lean green today, … coingecko 24h: BTC +0.5%, ETH -0.5%, SOL -0.5%; …" (…702) and "big caps are grinding upward, …" (…705).
   for (const [id, rows, line] of [
-    ["100000000000000702", [row("bitcoin", "btc", 1, 0.5), row("ethereum", "eth", 2, -0.49), row("solana", "sol", 6, -0.49)], "$BTC +0.5%, $ETH -0.5%, $SOL -0.5%"],
-    ["100000000000000705", [row("bitcoin", "btc", 1, 0.5), row("ethereum", "eth", 2, -0.49), row("solana", "sol", 6, -0.49)], "$BTC +0.5%, $ETH -0.5%, $SOL -0.5%"],
-    ["100000000000000702", [row("bitcoin", "btc", 1, 2.4), row("ethereum", "eth", 2, -0.45), row("solana", "sol", 6, -0.48)], "$BTC +2.4%, $ETH -0.4%, $SOL -0.5%"],
-    ["100000000000000702", [row("bitcoin", "btc", 1, 0.6), row("ethereum", "eth", 2, -0.4), row("solana", "sol", 6, -0.4)], "$BTC +0.6%, $ETH -0.4%, $SOL -0.4%"],
-    ["100000000000000702", [row("bitcoin", "btc", 1, 0.5), row("ethereum", "eth", 2, -0.49)], "$BTC +0.5%, $ETH -0.5%"],
+    ["100000000000000702", [row("bitcoin", "btc", 1, 0.5), row("ethereum", "eth", 2, -0.49), row("solana", "sol", 6, -0.49)], "BTC +0.5%, ETH -0.5%, SOL -0.5%"],
+    ["100000000000000705", [row("bitcoin", "btc", 1, 0.5), row("ethereum", "eth", 2, -0.49), row("solana", "sol", 6, -0.49)], "BTC +0.5%, ETH -0.5%, SOL -0.5%"],
+    ["100000000000000702", [row("bitcoin", "btc", 1, 2.4), row("ethereum", "eth", 2, -0.45), row("solana", "sol", 6, -0.48)], "BTC +2.4%, ETH -0.4%, SOL -0.5%"],
+    ["100000000000000702", [row("bitcoin", "btc", 1, 0.6), row("ethereum", "eth", 2, -0.4), row("solana", "sol", 6, -0.4)], "BTC +0.6%, ETH -0.4%, SOL -0.4%"],
+    ["100000000000000702", [row("bitcoin", "btc", 1, 0.5), row("ethereum", "eth", 2, -0.49)], "BTC +0.5%, ETH -0.5%"],
   ] as const) {
     const w = await world(t, { ...ALAN, env: RESEARCH_ON, research: research([...rows]), answer: "PASS" });
     w.setInbox([alanTag(id, "how's the market?")]);
@@ -4021,7 +4025,7 @@ test("how's the market: the big coins' words agree with the figures beside them,
   w.setInbox([alanTag("100000000000000702", "how's the market?")]);
   await w.step();
   const sent = String(w.sends[0]?.text ?? "");
-  assert.doesNotMatch(sent, /coingecko 24h|\$BTC/, sent);
+  assert.doesNotMatch(sent, /coingecko 24h|(?<![A-Za-z0-9])\$?BTC(?![A-Za-z0-9])/, sent);
   const words = /^(.*?) geckoterminal robinhood: /.exec(sent)?.[1] ?? "";
   assert.ok(marketAnswers({ majors: null, chain }, "100000000000000702", { lower: true }).includes(words), sent);
 });
@@ -4312,7 +4316,7 @@ test("no joking decline and no coin's no-read line under a question about people
   const eth = await world(t, { ...ALAN, env: RESEARCH_ON, research: majorsResearch().research });
   eth.setInbox([alanTag("100000000000000721", "how's eth doing?")]);
   await eth.step();
-  assert.match(String(eth.sends[0]?.text), /coingecko: \$ETH #2/);
+  assert.match(String(eth.sends[0]?.text), /coingecko: ETH #2/);
 });
 
 test("banter never promises to make anyone whole, forecasts, teases an event, tells people to go home or ranks itself above people (red-team 2026-10-12)", async (t) => {
@@ -4448,13 +4452,13 @@ test("how's the market says a crash is a crash and a melt-up a melt-up, and the 
     chainListings: listingsOf(pools),
   });
   // POSTED at a964a74c: ...775 "the giants dipped slightly, and a single token is moving on robinhood. no tips attached whatsoever. coingecko 24h:
-  // $BTC -15.2%, $ETH -21.7%, $SOL -28.3%; geckoterminal robinhood: trending $CHUMP 24h -62.5%. say stop to opt out.", ...780 "the leaders are
+  // $BTC -15.2%, $ETH -21.7%, $SOL -28.3%; geckoterminal robinhood: trending CHUMP 24h -62.5%. say stop to opt out.", ...780 "the leaders are
   // taking a breather, and geckoterminal shows a solo runner", ...776 "the bellwethers are inching forward" beside +18.4/+24.9/+31, and
   // ...780/...781 "geckoterminal shows several runners", ...770 "the trending page has a pack running" beside chain coins at -55% and -48%.
   const worlds: [number[], GeckoPool[], RegExp][] = [
-    [[-15.2, -21.7, -28.3], [namedPool("CHUMP", 1, -62.5, 1.21e6)], /\$BTC -15\.2%, \$ETH -21\.7%, \$SOL -28\.3%; geckoterminal robinhood: trending \$CHUMP 24h -62\.5%/],
-    [[18.4, 24.9, 31], [namedPool("CHUMP", 1, 41.2, 1.21e6)], /\$BTC \+18\.4%, \$ETH \+24\.9%, \$SOL \+31%/],
-    [[1.2, 2.4, 4.8], [namedPool("CHUMP", 1, -55, 1.21e6), namedPool("DUMPR", 2, -48, 900_000)], /trending \$CHUMP 24h -55%, \$DUMPR 24h -48%/],
+    [[-15.2, -21.7, -28.3], [namedPool("CHUMP", 1, -62.5, 1.21e6)], /BTC -15\.2%, ETH -21\.7%, SOL -28\.3%; geckoterminal robinhood: trending CHUMP 24h -62\.5%/],
+    [[18.4, 24.9, 31], [namedPool("CHUMP", 1, 41.2, 1.21e6)], /BTC \+18\.4%, ETH \+24\.9%, SOL \+31%/],
+    [[1.2, 2.4, 4.8], [namedPool("CHUMP", 1, -55, 1.21e6), namedPool("DUMPR", 2, -48, 900_000)], /trending CHUMP 24h -55%, DUMPR 24h -48%/],
   ];
   for (const [big, pools, figures] of worlds) {
     for (const id of ["100000000000000775", "100000000000000780", "100000000000000781", "100000000000000770", "100000000000000776"]) {
@@ -4486,10 +4490,10 @@ test("how's the market never says the majors crashed or soared when bitcoin and 
   const BIG = /\b(?:plung\w*|beating|tumbl\w*|steep\w*|surg\w*|soar\w*|racing|leapt|heavily|hammered|sharply|dramatic\w*|fast|sinking|spiked|shot)\b/;
   const SIZED = /\b(?:slightly|a touch|gently|inching|a hair|mildly|breather|perky|nudged|tired|easing|softening|drifting|sagging|edging|lean green|solid ground|steadily|decently|noticeably|a fair way|front foot|back foot|grinding|pushing ahead|retreating)\b/;
   const worlds: [number[], RegExp, "up" | "down"][] = [
-    [[-1.2, -2.0, -10.5], /coingecko 24h: \$BTC -1\.2%, \$ETH -2%, \$SOL -10\.5%/, "down"],
-    [[0.8, 1.1, 10.3], /coingecko 24h: \$BTC \+0\.8%, \$ETH \+1\.1%, \$SOL \+10\.3%/, "up"],
-    [[-0.1, -0.2, -14], /coingecko 24h: \$BTC -0\.1%, \$ETH -0\.2%, \$SOL -14%/, "down"],
-    [[-1.2, -2, -4.5], /coingecko 24h: \$BTC -1\.2%, \$ETH -2%, \$SOL -4\.5%/, "down"],
+    [[-1.2, -2.0, -10.5], /coingecko 24h: BTC -1\.2%, ETH -2%, SOL -10\.5%/, "down"],
+    [[0.8, 1.1, 10.3], /coingecko 24h: BTC \+0\.8%, ETH \+1\.1%, SOL \+10\.3%/, "up"],
+    [[-0.1, -0.2, -14], /coingecko 24h: BTC -0\.1%, ETH -0\.2%, SOL -14%/, "down"],
+    [[-1.2, -2, -4.5], /coingecko 24h: BTC -1\.2%, ETH -2%, SOL -4\.5%/, "down"],
   ];
   for (const [big, figures, dir] of worlds) {
     for (const id of ["100000000000000775", "100000000000000780", "100000000000000781", "100000000000000770", "100000000000000776", "100000000000000777"]) {
@@ -4582,7 +4586,7 @@ test("asked its strategy or what it is up to, it is told none of its buys and ne
     answer: "whatever is trending tonight is what i grab next. Say stop to opt out." });
   w.setInbox([alanTag("100000000000000761", "what's hot?")]);
   await w.step();
-  assert.match(String(w.sends[0]?.text), /trending \$CHUMP 24h \+41\.2%/);
+  assert.match(String(w.sends[0]?.text), /trending CHUMP 24h \+41\.2%/);
   w.setInbox([tag({ id: "100000000000000762", conversation_id: "100000000000000762", author_id: "333", created_at: new Date(NOW + 30_000).toISOString(), text: "@alanaidale what's your strategy?" })]);
   await w.step(NOW + MIN);
   assert.deepEqual(w.asked(), [], "the strategy question is never drafted");
@@ -4621,8 +4625,8 @@ test("told none of its buys, a coin answer never says it sniped, swapped into, m
 });
 
 test("how's the market and what's hot never show a political or hate copy one letter off, nor a coin coingecko lists under such a name (red-team 2026-10-12)", async (t) => {
-  // POSTED at a964a74c: "… geckoterminal robinhood: trending $NATZI 24h +80%, $TRMP 24h +70%; fomo: most bought $NATZI. …" under "how's the market",
-  // and "… trending $NATZI 24h +80% vol ~$1.5M, $TRMP 24h +70% vol ~$1.4M, $FJB 24h +60% vol ~$1.3M; fomo: most bought $NATZI. …" under "what's hot?".
+  // POSTED at a964a74c: "… geckoterminal robinhood: trending NATZI 24h +80%, TRMP 24h +70%; fomo: most bought NATZI. …" under "how's the market",
+  // and "… trending NATZI 24h +80% vol ~$1.5M, TRMP 24h +70% vol ~$1.4M, FJB 24h +60% vol ~$1.3M; fomo: most bought NATZI. …" under "what's hot?".
   const sets = [["NATZI", "TRMP", "FJB"], ["DJT", "BODEN", "KAMLA"], ["GOEBEL", "LETSGO", "NAZY"]];
   const row = (id: string, symbol: string, rank: number, change24hPct: number) => ({ id, symbol, name: id, rank, priceUsd: 1, marketCapUsd: 1e9, volume24hUsd: 1e8, change24hPct, change7dPct: 1 });
   for (const names of sets) {
@@ -4638,7 +4642,7 @@ test("how's the market and what's hot never show a political or hate copy one le
       const w = await world(t, { ...ALAN, env: RESEARCH_ON, research: r, answer: "natzi and trmp are the plays. Say stop to opt out." });
       w.setInbox([alanTag("100000000000000790", text)]);
       await w.step();
-      for (const s of w.sends) for (const n of names) assert.doesNotMatch(String(s.text), new RegExp(`\\$${n}\\b`), `${text}: ${String(s.text)}`);
+      for (const s of w.sends) for (const n of names) assert.doesNotMatch(String(s.text), new RegExp(`(?<![A-Za-z0-9])\\$?${n}\\b`), `${text}: ${String(s.text)}`);
     }
   }
   // A clean ticker whose coingecko listing is under such a name is never shown either.
@@ -4652,7 +4656,7 @@ test("how's the market and what's hot never show a political or hate copy one le
   const w = await world(t, { ...ALAN, env: RESEARCH_ON, research: named });
   w.setInbox([alanTag("100000000000000790", "what's hot?")]);
   await w.step();
-  assert.doesNotMatch(String(w.sends[0]?.text ?? ""), /\$ZORBX/, String(w.sends[0]?.text));
+  assert.doesNotMatch(String(w.sends[0]?.text ?? ""), /(?<![A-Za-z0-9])\$?ZORBX(?![A-Za-z0-9])/, String(w.sends[0]?.text));
 });
 
 // ── red-team review of daaae961, 2026-10-12 ─────────────────────────────────
@@ -4800,8 +4804,8 @@ test("no decline under a coin named after a shooting, terror, the holocaust, rel
 });
 
 test("how's the market and what's hot never show a tragedy, terror, a faith's holy names, a drug or a notorious person as a coin, listed or not (red-team review of daaae961, 2026-10-12)", async (t) => {
-  // POSTED at daaae961 with the real readers, every contract listed on coingecko: "… coingecko 24h: $BTC +1.2%, $ETH +2.4%, $SOL +4.8%;
-  // geckoterminal robinhood: trending $EPSTEIN 24h +312%, $OSAMA 24h +88%, $SANDYHOOK 24h +41%." and the same under "what's hot?" with volumes.
+  // POSTED at daaae961 with the real readers, every contract listed on coingecko: "… coingecko 24h: BTC +1.2%, ETH +2.4%, SOL +4.8%;
+  // geckoterminal robinhood: trending EPSTEIN 24h +312%, OSAMA 24h +88%, SANDYHOOK 24h +41%." and the same under "what's hot?" with volumes.
   const figures = [{ change: 312, vol: 2_310_000 }, { change: 88, vol: 940_000 }, { change: 41, vol: 310_000 }];
   const sets = [["EPSTEIN", "OSAMA", "SANDYHOOK"], ["COLUMBINE", "FENTANYL", "QANON"], ["MANGIONE", "SHOAH", "ADOLPH"], ["DAHMER", "UVALDE", "PIZZAGATE"],
     ["TWINTOWERS", "ALLAH", "HEROIN"], ["QURAN", "MUHAMMAD", "DIDDY"]];
@@ -4814,7 +4818,7 @@ test("how's the market and what's hot never show a tragedy, terror, a faith's ho
       assert.deepEqual(w.asked(), [], "never drafted");
       const text = String(w.sends[0]?.text ?? "");
       assert.ok(text, `${names.join()} / ${ask}: answered`);
-      for (const n of names) assert.ok(!text.includes(`$${n}`), `${n} / ${ask}: ${text}`);
+      for (const n of names) assert.ok(!showsTicker(text, n), `${n} / ${ask}: ${text}`);
       assert.doesNotMatch(text, /geckoterminal robinhood/, `${names.join()} / ${ask}: ${text}`);
     }
   }
@@ -4830,7 +4834,7 @@ test("how's the market and what's hot never show a tragedy, terror, a faith's ho
     const w = await world(t, { ...ALAN, env: RESEARCH_ON, research });
     w.setInbox([alanTag(MENTION, "what's hot?")]);
     await w.step();
-    assert.equal(/\$ZORBX/.test(String(w.sends[0]?.text ?? "")), shown, `${listedAs}: ${String(w.sends[0]?.text)}`);
+    assert.equal(/(?<![A-Za-z0-9])\$?ZORBX(?![A-Za-z0-9])/.test(String(w.sends[0]?.text ?? "")), shown, `${listedAs}: ${String(w.sends[0]?.text)}`);
   }
 });
 
@@ -4867,7 +4871,7 @@ test("no decline under advice about its own buying however \"you\" is written, a
 test("what's hot, how's the market and a major only for a top-level tag: never under its own answer or casual post that said what it buys (red-team review of daaae961, 2026-10-12)", async (t) => {
   // POSTED at daaae961: under its answer "i only buy what's hot right now" to "what's your strategy?", and under its casual post "the next one i
   // grab is coming from the trending list" (tweet 100000000000000110), a reply "@alanaidale what's hot?" got "… geckoterminal robinhood: trending
-  // $CHUMP 24h +41.2% vol ~$1.1M, $FROGGO 24h +12.5% vol ~$400k; fomo: most bought $CHUMP." Pools CHUMP and FROGGO, Fomo's crowd CHUMP.
+  // $CHUMP 24h +41.2% vol ~$1.1M, $FROGGO 24h +12.5% vol ~$400k; fomo: most bought CHUMP." Pools CHUMP and FROGGO, Fomo's crowd CHUMP.
   const pools = () => [namedPool("CHUMP", 1, 41.2, 1.1e6), namedPool("FROGGO", 2, 12.5, 400_000)];
   const env = { ...RESEARCH_ON, MERRYMEN_XPOST_FOMO: "1" };
   for (const ask of ["what's hot?", "how's the market?", "how's eth doing?", "$PEPE today?"]) {
@@ -4900,12 +4904,12 @@ test("what's hot, how's the market and a major only for a top-level tag: never u
   const w = await world(t, { ...ALAN, env, research: hotWithFomo(pools(), ["CHUMP"]) });
   w.setInbox([alanTag("100000000000000303", "what's hot?")]);
   await w.step();
-  assert.match(String(w.sends[0]?.text), /trending \$CHUMP 24h \+41\.2%/);
+  assert.match(String(w.sends[0]?.text), /trending CHUMP 24h \+41\.2%/);
 });
 
 test("a casual post that names a coin it bought is a trade post: no major's line, and no draft, under or quoting it (red-team review of daaae961, 2026-10-12)", async (t) => {
   // POSTED at daaae961: live Alan holds a Robinhood-chain PEPE (0x7e7e…); its casual post "still sitting in some pepe from earlier this week, fun
-  // ride so far" is tweet 100000000000000110; a reply under it and a quote of it, "how's pepe doing?" and "$PEPE today?", got "coingecko: $PEPE #30,
+  // ride so far" is tweet 100000000000000110; a reply under it and a quote of it, "how's pepe doing?" and "$PEPE today?", got "coingecko: PEPE #30,
   // mcap ~$5B, vol ~$900M, 24h +14.2%, 7d +3%." with coingecko's search and market finding pepe at rank 30.
   const facts: AgentFacts = { ...ALAN.facts, calls: [{ ...CALL, token: `0x${"7e".repeat(20)}` }] };
   const POST = "100000000000000110";
@@ -4937,8 +4941,8 @@ test("a casual post that names a coin it bought is a trade post: no major's line
 test("what's hot never shows its own bag once the buy leaves the facts' window, whatever its ticker beside the name its buy post stored (red-team review of daaae961, 2026-10-12)", async (t) => {
   // POSTED at daaae961: live Alan bought CHMP ("Chump Frog", its token the CHMP pool's) five days ago, its buy post stored as "chump frog"
   // (planner.ts coinOf keys on the name). The call is past the four-day window (calls: []), CHMP trends at +64.3%, coingecko lists it as
-  // chmp / "Chump Frog" at #3100, and fomo's most bought is CHMP: "… geckoterminal robinhood: trending $CHMP 24h +64.3% vol ~$1.1M,
-  // $FROGGO 24h +12.5% vol ~$400k; fomo: most bought $CHMP."
+  // chmp / "Chump Frog" at #3100, and fomo's most bought is CHMP: "… geckoterminal robinhood: trending CHMP 24h +64.3% vol ~$1.1M,
+  // $FROGGO 24h +12.5% vol ~$400k; fomo: most bought CHMP."
   const chmp = namedPool("CHMP", 1, 64.3, 1.1e6), froggo = namedPool("FROGGO", 2, 12.5, 400_000);
   const research = () => {
     const broker: FomoBroker = {
@@ -4966,8 +4970,8 @@ test("what's hot never shows its own bag once the buy leaves the facts' window, 
       w.setInbox([alanTag(MENTION, ask)]);
       await w.step();
       const text = String(w.sends[0]?.text ?? "");
-      assert.doesNotMatch(text, /\$CHMP/, `${what} / ${ask}: ${text}`);
-      assert.match(text, /\$FROGGO 24h \+12\.5%/, `${what} / ${ask}: ${text}`);
+      assert.doesNotMatch(text, /(?<![A-Za-z0-9])\$?CHMP(?![A-Za-z0-9])/, `${what} / ${ask}: ${text}`);
+      assert.match(text, /FROGGO 24h \+12\.5%/, `${what} / ${ask}: ${text}`);
     }
   }
 });
@@ -4975,7 +4979,7 @@ test("what's hot never shows its own bag once the buy leaves the facts' window, 
 test("what's hot and how's the market never show a big coin with two neighbouring letters swapped (red-team review of daaae961, 2026-10-12)", async (t) => {
   // POSTED at daaae961 with the real readers, one pool per ticker at +312% with ~$1.1M of volume, listed by its contract under the same symbol at
   // #3100: "robinhood chain's trending list has one busy coin, the first far firmer for the day. descriptive only. geckoterminal robinhood:
-  // trending $BTICOIN 24h +312% vol ~$1.1M." and the same for the rest, under "what's hot?" and "how's the market?".
+  // trending BTICOIN 24h +312% vol ~$1.1M." and the same for the rest, under "what's hot?" and "how's the market?".
   for (const name of ["BTICOIN", "ETEHREUM", "SOALNA", "TEHTER", "BITCION", "RIPLPE", "CARDNAO", "DOEG", "BNOK", "SHBI", "HYEP"]) {
     for (const ask of ["what's hot?", "how's the market?"]) {
       fakeCoinGecko(t, [{ name, change: 312, vol: 1_100_000 }], [name]);
@@ -4984,7 +4988,7 @@ test("what's hot and how's the market never show a big coin with two neighbourin
       await w.step();
       const text = String(w.sends[0]?.text ?? "");
       assert.ok(text, `${name} / ${ask}: answered`);
-      assert.ok(!text.includes(`$${name}`), `${name} / ${ask}: ${text}`);
+      assert.ok(!showsTicker(text, name), `${name} / ${ask}: ${text}`);
     }
   }
   // One letter changed or doubled is refused as before, and a coin that copies nothing still shows.
@@ -4992,7 +4996,7 @@ test("what's hot and how's the market never show a big coin with two neighbourin
   const w = await world(t, { ...ALAN, env: RESEARCH_ON, research: createXResearch() });
   w.setInbox([alanTag(MENTION, "what's hot?")]);
   await w.step();
-  assert.match(String(w.sends[0]?.text ?? ""), /trending \$CHUMP 24h \+312%/);
+  assert.match(String(w.sends[0]?.text ?? ""), /trending CHUMP 24h \+312%/);
 });
 
 /** CHMP listed on coingecko as `listedAs`, trending with FROGGO, and Fomo's most bought: the research the red team ran against a token's own account. */
@@ -5018,7 +5022,7 @@ function hotListedAs(pools: GeckoPool[], listedAs: Record<string, string>, crowd
 
 test("a token's own account is never shown its coin when its handle or name is the coin's listed name, not its ticker (red-team review of daaae961, 2026-10-12)", async (t) => {
   // POSTED at daaae961 to @chimpplanet "Chimp Planet | stealth launch, LP burned" and @ChimpPlanetHQ "Chimp Planet": "robinhood chain's trending list has a
-  // cluster of busy coins, … geckoterminal robinhood: trending $CHMP 24h +64.3% vol ~$1.1M, $FROGGO 24h +12.5% vol ~$400k; fomo: most bought $CHMP."
+  // cluster of busy coins, … geckoterminal robinhood: trending CHMP 24h +64.3% vol ~$1.1M, FROGGO 24h +12.5% vol ~$400k; fomo: most bought CHMP."
   const pools = () => [namedPool("CHMP", 1, 64.3, 1.1e6), namedPool("FROGGO", 2, 12.5, 400_000)];
   const env = { ...RESEARCH_ON, MERRYMEN_XPOST_FOMO: "1" };
   for (const ask of ["what's hot?", "how's the market?"]) {
@@ -5035,7 +5039,7 @@ test("a token's own account is never shown its coin when its handle or name is t
     const w = await world(t, { ...ALAN, env, research: hotListedAs(pools(), { CHMP: "Chimp Planet" }, "CHMP") });
     w.setInbox([alanTag(MENTION, ask)]);
     await w.step();
-    assert.match(String(w.sends[0]?.text), /trending \$CHMP 24h \+64\.3%/, ask);
+    assert.match(String(w.sends[0]?.text), /trending CHMP 24h \+64\.3%/, ask);
   }
   // The screen itself: a listed name's words of four letters or more, or all its letters run together; "token" and "coin" alone are no such word.
   assert.equal(authorShows({ username: "zapprotocol", name: "Zap Protocol" }, ["ZPX"], ["Zap Protocol"]), true);
@@ -5086,7 +5090,7 @@ test("a casual post that talks about a coin or the market closes its thread: und
 
 test("a token's own account is never shown its coin whatever letters its name is written in, and a letter code cannot read is a yes (red-team review of daaae961, 2026-10-12)", async (t) => {
   // POSTED at daaae961, research on: index pools ZORP +64.3% and CHUMP +12%, both listed; fomo's most bought ZORP. "@launchdesk · ZОRP | stealth
-  // launch, LP burned" (a Cyrillic O) got "… geckoterminal robinhood: trending $ZORP 24h +64.3% vol ~$1.2M, $CHUMP 24h +12% vol ~$1.2M; fomo: most
+  // launch, LP burned" (a Cyrillic O) got "… geckoterminal robinhood: trending ZORP 24h +64.3% vol ~$1.2M, CHUMP 24h +12% vol ~$1.2M; fomo: most
   // bought $ZORP.", and the same with the name in negative circled letters or regional indicators, under "how's the market?" too.
   const pools = () => [namedPool("ZORP", 1, 64.3, 1.2e6), namedPool("CHUMP", 2, 12, 1.2e6)];
   const env = { ...RESEARCH_ON, MERRYMEN_XPOST_FOMO: "1" };
@@ -5110,7 +5114,7 @@ test("a token's own account is never shown its coin whatever letters its name is
     w.setAuthors({ "333": { username: "launchdesk", name: "Launch Desk | daily notes" } });
     w.setInbox([alanTag(MENTION, ask)]);
     await w.step();
-    assert.match(String(w.sends[0]?.text), /trending \$ZORP 24h \+64\.3%/, ask);
+    assert.match(String(w.sends[0]?.text), /trending ZORP 24h \+64\.3%/, ask);
   }
   // The listed-name variant: ZPX listed as "Zap Protocol", asked by "zapprotocol · Zap Protocol | stealth launch, LP burned".
   const zpx = () => [namedPool("ZPX", 1, 64.3, 1.2e6), namedPool("CHUMP", 2, 12, 1.2e6)];
