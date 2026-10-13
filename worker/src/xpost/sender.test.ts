@@ -7,11 +7,12 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
-import test from "node:test";
+import test, { after } from "node:test";
 import { wrapSqlite, type Db } from "../db";
 import type { FetchLike, XApp } from "./client";
 import { APP_PAUSE_KEY, APP_PAUSE_MS, CREDITS_PAUSE_MS, PAUSE_KEY, RETRY_AFTER_MS, sendOne, readReplyComments } from "./sender";
 import {
+
   ensureXpostSchema,
   getAccount,
   keyStatus,
@@ -28,6 +29,13 @@ import {
   type TokenSetPlain,
   type XPost,
 } from "./store";
+
+// The card's draw and upload budgets are unref'd timers (they must never hold the
+// orchestrator open). A test whose fake draw hangs leaves nothing else pending, so
+// on Node 22 the loop empties and the runner cancels the rest of this file. One
+// ref'd timer for the file's life keeps it running; cleared when the file ends.
+const keepAlive = setInterval(() => {}, 1_000);
+after(() => clearInterval(keepAlive));
 
 const OWNER = `0x${"cd".repeat(20)}`;
 const DEK = randomBytes(32);
