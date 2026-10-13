@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import { describe, it } from "node:test";
 import { wrapSqlite, type Db } from "./db";
-import { grossGainPct, grossSaleOutcome, readSaleResults } from "./orchestrator-xpost-results";
+import { grossGainPct, grossSaleOutcome, readSaleCard, readSaleResults } from "./orchestrator-xpost-results";
 
 const ACCOUNT = `0x${"a".repeat(40)}`;
 const OTHER = `0x${"b".repeat(40)}`;
@@ -86,6 +86,53 @@ describe("receipt-backed sale results", () => {
       assert.equal(result.length, 1);
       assert.equal(result[0]?.atSec, NOW - 100);
       assert.equal(result[0]?.outcome, "profit");
+    } finally { raw.close(); }
+  });
+});
+
+describe("the profit card of a receipt-backed sale (2026-10-13)", () => {
+  it("is the sale's own figures, under its coin's name, for a measured profit on vouched cost", async () => {
+    const { raw, db } = await fixture();
+    try {
+      // cost 5, proceeds 7, pnl 2 -> +40%.
+      assert.deepEqual(await readSaleCard(db, ACCOUNT, 4663, hash(2), NOW), { symbol: "PEPE", investedUsdg: 5_000_000n, proceedsUsdg: 7_000_000n, realisedUsdg: 2_000_000n });
+      assert.deepEqual(await readSaleCard(db, ACCOUNT.toUpperCase().replace("0X", "0x"), 4663, hash(2).toUpperCase().replace("0X", "0x"), NOW), { symbol: "PEPE", investedUsdg: 5_000_000n, proceedsUsdg: 7_000_000n, realisedUsdg: 2_000_000n });
+    } finally { raw.close(); }
+  });
+
+  it("is never drawn for a loss, a flat or an unknown result", async () => {
+    const { raw, db } = await fixture();
+    try {
+      for (const [pnl, cash] of [[-2, 3], [0, 5], [null, 7]] as const) {
+        await db.prepare("UPDATE trades SET realized_pnl_usdg = ?, fill_cash_usdg = ? WHERE id = 2").run(pnl, cash);
+        assert.equal(await readSaleCard(db, ACCOUNT, 4663, hash(2), NOW), null, `pnl=${pnl}`);
+      }
+      await db.exec("UPDATE trades SET realized_pnl_usdg = 2, fill_cash_usdg = 7 WHERE id = 2; UPDATE trades SET basis_source = 'quote' WHERE id = 1");
+      assert.equal(await readSaleCard(db, ACCOUNT, 4663, hash(2), NOW), null, "estimated cost is not vouched");
+    } finally { raw.close(); }
+  });
+
+  it("is never drawn for paper, another account, another chain, another sale, or a coin with no printable name", async () => {
+    const { raw, db } = await fixture();
+    try {
+      assert.equal(await readSaleCard(db, OTHER, 4663, hash(2), NOW), null);
+      assert.equal(await readSaleCard(db, ACCOUNT, 1, hash(2), NOW), null);
+      assert.equal(await readSaleCard(db, ACCOUNT, 4663, hash(3), NOW), null);
+      assert.equal(await readSaleCard(db, ACCOUNT, 4663, "row:2", NOW), null);
+      await db.exec("UPDATE trades SET status = 'paper', basis_source = 'paper' WHERE id = 2");
+      assert.equal(await readSaleCard(db, ACCOUNT, 4663, hash(2), NOW), null);
+      await db.exec("UPDATE trades SET status = 'landed', basis_source = 'receipt', fill_symbol = NULL WHERE id = 2; UPDATE decisions SET symbol = 'T0123456789A', display_name = NULL");
+      assert.equal(await readSaleCard(db, ACCOUNT, 4663, hash(2), NOW), null, "an autonomous token id is no coin name");
+      await db.exec("UPDATE decisions SET display_name = 'Pepe'");
+      assert.equal((await readSaleCard(db, ACCOUNT, 4663, hash(2), NOW))?.symbol, "Pepe");
+    } finally { raw.close(); }
+  });
+
+  it("is null, never a throw, when the ledger cannot be read", async () => {
+    const { raw, db } = await fixture();
+    try {
+      const broken: Db = { ...db, prepare: () => { throw new Error("ledger down"); } };
+      assert.equal(await readSaleCard(broken, ACCOUNT, 4663, hash(2), NOW), null);
     } finally { raw.close(); }
   });
 });
