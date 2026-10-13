@@ -1593,9 +1593,6 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
     // mood line means there is the parent's: "mum's the word" under "the new
     // sherwood-1 is what they've got in the oven" read as a token teased.
     const shut = (body: string): boolean => sherwoodMentioned(body) || sherwoodNamed(body);
-    const threads = ordered.some((c) => c.conversationId !== c.id || c.inReplyToTweetId !== "" || c.quoted === true)
-      ? await ownThreadTweets(shared, account.xUserId, undefined, shut)
-      : { roots: new Set<string>(), posts: new Set<string>(), answered: new Map<string, string>(), plain: new Set<string>(), trade: new Set<string>() };
     const buys = recentCoins(f);
     // Every name its buys go by: what an answer not shown them may never say (XGateCtx.unsaid).
     const bought = boughtNames(f, posts);
@@ -1606,6 +1603,19 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
     // the buys the answer was told of (vouched below).
     const olderBought = (await postsOfXUser(shared, account.xUserId, nowMs - OWN_MEMORY_MS, 500))
       .filter((p) => p.tenant === account.tenant && p.kind === "buy" && typeof p.coin === "string" && p.coin.trim() !== "").map((p) => p.coin!.trim());
+    // A CASUAL POST THAT NAMES A COIN IT BOUGHT IS A TRADE POST (red-team review
+    // of daaae961, 2026-10-12). On a trade-talk day the casual route posted
+    // "still sitting in some pepe from earlier this week, fun ride so far",
+    // and every casual post counted as plain: a reply under it or a quote of
+    // it, "how's pepe doing?", got coingecko's top-thirty PEPE as the chain
+    // copy it holds, the harm the buy post's own-trade rule stops. A casual or
+    // intro post whose words name any coin its buys or buy posts go by
+    // (ownCoinTicker's reading, on letters) sits with its buy and sell posts.
+    const ownNamed = [...bought, ...olderBought];
+    const tradeBody = (body: string): boolean => ownNamed.length > 0 && namedIn(body, ownNamed);
+    const threads = ordered.some((c) => c.conversationId !== c.id || c.inReplyToTweetId !== "" || c.quoted === true)
+      ? await ownThreadTweets(shared, account.xUserId, undefined, shut, tradeBody)
+      : { roots: new Set<string>(), posts: new Set<string>(), answered: new Map<string, string>(), plain: new Set<string>(), trade: new Set<string>() };
     for (const comment of ordered) {
       if (comment.createdAtMs < consentAt || nowMs - comment.createdAtMs > REPLY_STALE_MS) continue;
       const candidate = tagCandidate(comment, { xUserId: account.xUserId, research: research !== null, username: account.username,

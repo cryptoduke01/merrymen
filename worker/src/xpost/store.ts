@@ -1339,7 +1339,8 @@ export async function ownRootTweetIds(db: Db, xUserId: string, limit = 2000): Pr
  *     handed nothing, in a thread that was itself plain), with the tag it
  *     answered;
  *   - `trade`: its own buy and sell posts, under which the coin is its own
- *     public buy.
+ *     public buy; and an intro or casual post that names a coin it bought
+ *     (the caller's `trade` screen, red-team review of daaae961).
  *
  * Anything else in `posts` or `answered` (a decline, its mood, a market
  * line, a coin's answer, an answer told its buys, a comment reply on a buy
@@ -1362,7 +1363,14 @@ export interface OwnThreads {
  */
 export const ANSWER_PLAIN_THREAD = "plain-thread";
 
-export async function ownThreadTweets(db: Db, xUserId: string, limit = 2000, shut: (body: string) => boolean = () => false): Promise<OwnThreads> {
+/**
+ * `trade`: the caller's screen for an intro or casual post that is about a
+ * coin it bought (orchestrator-xpost.ts passes its buys' names, red-team
+ * review of daaae961): such a post sits with its buy and sell posts, never in
+ * `plain`.
+ */
+export async function ownThreadTweets(db: Db, xUserId: string, limit = 2000, shut: (body: string) => boolean = () => false,
+  trade: (body: string) => boolean = () => false): Promise<OwnThreads> {
   const max = int(Math.max(1, Math.min(5000, limit)));
   const tops = (await db
     .prepare(
@@ -1372,12 +1380,12 @@ export async function ownThreadTweets(db: Db, xUserId: string, limit = 2000, shu
         LIMIT ?`,
     )
     .all(String(xUserId), max)) as { tweet_id: unknown; body: unknown; kind: unknown }[];
-  const roots = new Set<string>(), plain = new Set<string>(), trade = new Set<string>();
+  const roots = new Set<string>(), plain = new Set<string>(), traded = new Set<string>();
   for (const r of tops) {
     const tweet = String(r.tweet_id ?? "");
     if (tweet === "" || shut(String(r.body ?? ""))) continue;
     roots.add(tweet);
-    (r.kind === "buy" || r.kind === "sell" ? trade : plain).add(tweet);
+    (r.kind === "buy" || r.kind === "sell" || trade(String(r.body ?? "")) ? traded : plain).add(tweet);
   }
   const rows = (await db
     .prepare(
@@ -1400,7 +1408,7 @@ export async function ownThreadTweets(db: Db, xUserId: string, limit = 2000, shu
       if (to !== "") plain.add(to);
     }
   }
-  return { roots, posts, answered, plain, trade };
+  return { roots, posts, answered, plain, trade: traded };
 }
 
 /**

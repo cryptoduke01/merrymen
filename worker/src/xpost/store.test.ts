@@ -931,6 +931,14 @@ test("the conversations an X account is in: its posted top-level posts and answe
   assert.deepEqual([...marked.plain].sort(), ["550", "9001", "9551"], "the plain answer and the tag it answered");
   assert.deepEqual([...marked.trade], ["9002"]);
   assert.ok(marked.posts.has("9561") && !marked.plain.has("9561") && !marked.plain.has("560"), "a looked-up answer is its own post, never plain");
+  // A casual post the caller's trade screen reads as about a coin it bought sits with its buy posts (red-team review of daaae961:
+  // "still sitting in some pepe from earlier this week, fun ride so far" counted as plain, and a major's line went up under it).
+  await sent(post({ kind: "casual", dedupeKey: "casual:a:pepe", body: "still sitting in some pepe from earlier this week, fun ride so far", nowMs: 100, dueAtMs: 100 }), "9003");
+  await sent(post({ kind: "casual", dedupeKey: "casual:a:owls", body: "owls are underrated night shift workers", nowMs: 110, dueAtMs: 110 }), "9004");
+  const traded = await ownThreadTweets(db, "111", undefined, undefined, (body) => /\bpepe\b/.test(body));
+  assert.deepEqual([...traded.trade].sort(), ["9002", "9003"]);
+  assert.ok(traded.plain.has("9004") && !traded.plain.has("9003"), "the other casual post is still plain");
+  assert.ok(traded.roots.has("9003") && traded.posts.has("9003"), "and still its own post");
 });
 
 test("turning replies off cancels only replies and opt-outs are durable across tenants sharing an account", async (t) => {

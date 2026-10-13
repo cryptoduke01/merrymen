@@ -913,7 +913,7 @@ buys, under a top-level tag or a plain follow-up, is marked
 reports what a reply or a quote sits under (`followUp`, the most closed of
 the post it replies to, the conversation's root and the post it quotes):
 `plain` (its own intro or casual post, an answer marked plain, or the tag
-one answered), `own-trade` (its own buy or sell post) or `closed` (anything
+one answered), `own-trade` (its own buy or sell post, or an intro or casual post that names a coin it bought: red-team review of daaae961, "still sitting in some pepe" was plain) or `closed` (anything
 else: a decline, its mood, a market line, a coin's answer, an answer told its
 buys, a comment reply, any answer from before the mark). Under a closed one
 only a greeting is answered (code's hello): no draft, no buys, no exact path,

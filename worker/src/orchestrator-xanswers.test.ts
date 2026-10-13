@@ -4902,3 +4902,34 @@ test("what's hot, how's the market and a major only for a top-level tag: never u
   await w.step();
   assert.match(String(w.sends[0]?.text), /trending \$CHUMP 24h \+41\.2%/);
 });
+
+test("a casual post that names a coin it bought is a trade post: no major's line, and no draft, under or quoting it (red-team review of daaae961, 2026-10-12)", async (t) => {
+  // POSTED at daaae961: live Alan holds a Robinhood-chain PEPE (0x7e7e…); its casual post "still sitting in some pepe from earlier this week, fun
+  // ride so far" is tweet 100000000000000110; a reply under it and a quote of it, "how's pepe doing?" and "$PEPE today?", got "coingecko: $PEPE #30,
+  // mcap ~$5B, vol ~$900M, 24h +14.2%, 7d +3%." with coingecko's search and market finding pepe at rank 30.
+  const facts: AgentFacts = { ...ALAN.facts, calls: [{ ...CALL, token: `0x${"7e".repeat(20)}` }] };
+  const POST = "100000000000000110";
+  const research = () => createXResearch({
+    majors: { configured: () => true,
+      search: async () => ({ failed: false, observedAt: NOW, hits: [{ id: "pepe", symbol: "PEPE", name: "Pepe", rank: 30 }] }),
+      market: async (id) => ({ failed: false, observedAt: NOW, market: { id, symbol: "pepe", name: "Pepe", rank: 30, priceUsd: 0.00001, marketCapUsd: 5e9, volume24hUsd: 9e8, change24hPct: 14.2, change7dPct: 3 } }),
+      markets: async () => ({ failed: false, markets: [] }), trending: async () => ({ coins: [], failed: false }), top: TOP_READ },
+    resolveTicker: async () => null, coinFacts: async () => ({ ok: false, why: "unavailable" }), projectDescription: async () => null, publicTheses: async () => [],
+  });
+  const under = { conversation_id: POST, referenced_tweets: [{ type: "replied_to", id: POST }] };
+  const quote = { conversation_id: "100000000000000611", referenced_tweets: [{ type: "quoted", id: POST }] };
+  for (const [text, over] of [["how's pepe doing?", under], ["how's pepe doing?", quote], ["$PEPE today?", quote], ["$PEPE today?", under],
+    // and a drafted lane, which a plain post would still have drafted under
+    ["what can you do?", quote], ["what can you do?", under], ["is $PEPE legit?", quote]] as const) {
+    const w = await world(t, { ...ALAN, facts, env: RESEARCH_ON, research: research() });
+    for (const casual of ["still sitting in some pepe from earlier this week, fun ride so far", "picked up some pepe on robinhood chain lately, the curve looked early to me"]) {
+      const id = await store.schedulePost(w.db, { tenant: TENANT, xUserId: "111", kind: "casual", dedupeKey: `casual:${casual.length}`, body: casual, nowMs: NOW - 2 * HOUR, dueAtMs: NOW - 2 * HOUR });
+      await store.claimPost(w.db, id!, NOW - HOUR);
+      await store.markPosted(w.db, id!, casual.startsWith("still") ? POST : "100000000000000112", NOW - HOUR);
+    }
+    w.setInbox([tag({ id: "100000000000000611", author_id: "444", text: `@alanaidale ${text}`, ...over })]);
+    await w.step();
+    assert.deepEqual(w.sends, [], `${text} ${JSON.stringify(over)}`);
+    assert.deepEqual(w.asked(), [], `${text} ${JSON.stringify(over)}: never drafted`);
+  }
+});
