@@ -423,7 +423,7 @@ export async function publicTokenForDecision(
   if (row.status === "landed" && (typeof row.tx_hash !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(row.tx_hash))) return null;
   const address = side === "buy" ? row.buy_token : row.sell_token;
   if (typeof address !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(address) || /^0x0{40}$/i.test(address)) return null;
-  return { address: address.toLowerCase(), chainId: current.chainId };
+  return { address: address.toLowerCase(), chainId: current.chainId, txHash: row.status === "landed" ? String(row.tx_hash).toLowerCase() : null };
 }
 
 export interface XPoster {
@@ -1206,7 +1206,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
                     const agent = profile?.currentAgent;
                     if (!profile?.xTokenAddresses || !agent || !current || current.agentId !== agent.address.toLowerCase() || !pending.decisionId) return false;
                     const token = await publicTokenForDecision(shared, agent, pending.decisionId, pending.kind);
-                    return publicTokenStillAllowed(pending, token);
+                    return publicTokenStillAllowed(pending, token, active.has(pending.tenant.toLowerCase()));
                   }
                   const wallet = profile?.publicWallet;
                   return !!current && !!wallet && current.agentId === wallet.address.toLowerCase() && publicWalletStillAllowed(pending, wallet);
@@ -2468,7 +2468,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       if (!body) reason = "wallet-intro-invalid";
     }
     if (body && tokenDisclosure) {
-      body = appendPublicToken(body, tokenDisclosure);
+      body = appendPublicToken(body, tokenDisclosure, active.has(account.tenant.toLowerCase()));
       if (!body) reason = "token-disclosure-invalid";
     }
     const written = await schedulePost(shared, {

@@ -1581,6 +1581,14 @@ The private `agentBrief` never enters an X prompt.
   receipt basis and execution transaction hash; simulated fills need an explicit
   paper basis. Model-generated addresses remain
   forbidden, and unsupported networks or missing proof withhold the post.
+  Since 2026-10-13 the CA stands alone on the post's last line after a blank
+  line, with no label and no chain name, so it copies cleanly. For the
+  operator's own agents (`MERRYMEN_XPOST_ACTIVE_TENANTS`) a live trade's
+  explorer link (`https://robinhoodchain.blockscout.com/tx/<hash>`, from the
+  same receipt) goes on its own line just above it; paper and testnet trades
+  get no link. Both are added by code after the gate; the model never types a
+  link or an address. Older posts in the " CA (Robinhood Chain): 0x…" form are
+  still read as before.
 - With `discoveryFocus: "new-projects"` and token addresses enabled, a buy can
   also explain the exact token's on-chain description. The RPC chain and token
   must match, the source is bounded creator-written text, and the draft must

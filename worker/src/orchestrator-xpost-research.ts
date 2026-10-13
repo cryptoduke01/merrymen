@@ -1661,7 +1661,9 @@ const TRENCHER_ID = /^T[0-9A-F]{11}$/;
 
 /** A buy post's own contract, from the CA suffix the pipeline adds (public-wallet.ts appendPublicToken), or null. */
 function postContract(body: string): string | null {
-  const m = / CA \([^)]*\): (0x[0-9a-fA-F]{40})\b/.exec(String(body ?? ""));
+  const text = String(body ?? "");
+  // Alone on the last line after a blank one (2026-10-13), or the older " CA (chain): 0x…" suffix.
+  const m = /\n\n(0x[0-9a-fA-F]{40})$/.exec(text) ?? / CA \([^)]*\): (0x[0-9a-fA-F]{40})\b/.exec(text);
   return m ? m[1]!.toLowerCase() : null;
 }
 

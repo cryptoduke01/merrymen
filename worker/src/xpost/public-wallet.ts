@@ -4,6 +4,8 @@ import { xWeightedLength, X_MAX_WEIGHTED } from "./client";
 export interface PublicWallet {
   address: string;
   chainId: number;
+  /** For a trade's token: its landed transaction, when there is one (paper has none). */
+  txHash?: string | null;
 }
 
 const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
@@ -42,21 +44,33 @@ export function publicWalletStillAllowed(
   return prose.length > 0 && !hasPublicWallet(prose) && xWeightedLength(post.body) <= X_MAX_WEIGHTED;
 }
 
-/** A CA is a completed trade's exact token contract on its verified execution network. */
-export function publicTokenSuffix(token: PublicWallet | null | undefined): string | null {
-  return publicWalletSuffix(token)?.replace(MARKER, TOKEN_MARKER) ?? null;
+/** Where a landed Robinhood Chain transaction is shown. Testnet trades get no link. */
+const TX_BASE = "https://robinhoodchain.blockscout.com/tx/";
+
+/**
+ * A CA is a completed trade's exact token contract on its verified execution
+ * network. It stands alone on the post's last line after a blank one: no label
+ * and no chain, so it copies cleanly (owner's direction, 2026-10-13). With
+ * `withTx` (the operator's own agents) the landed transaction's explorer link
+ * goes on its own line just before it.
+ */
+export function publicTokenSuffix(token: PublicWallet | null | undefined, withTx = false): string | null {
+  if (!token || !ADDRESS.test(token.address) || ![4663, 46630].includes(token.chainId)) return null;
+  const tx = withTx && token.chainId === 4663 && typeof token.txHash === "string" && /^0x[0-9a-fA-F]{64}$/.test(token.txHash)
+    ? `\n\n${TX_BASE}${token.txHash.toLowerCase()}` : "";
+  return `${tx}\n\n${token.address.toLowerCase()}`;
 }
 
-export function appendPublicToken(prose: string, token: PublicWallet): string | null {
-  const suffix = publicTokenSuffix(token);
+export function appendPublicToken(prose: string, token: PublicWallet, withTx = false): string | null {
+  const suffix = publicTokenSuffix(token, withTx);
   if (!suffix || hasPublicWallet(prose)) return null;
   const body = prose + suffix;
   return xWeightedLength(body) <= X_MAX_WEIGHTED ? body : null;
 }
 
-export function publicTokenStillAllowed(post: { kind: string; body: string }, token: PublicWallet | null | undefined): boolean {
+export function publicTokenStillAllowed(post: { kind: string; body: string }, token: PublicWallet | null | undefined, withTx = false): boolean {
   if (!hasPublicWallet(post.body)) return true;
-  const suffix = publicTokenSuffix(token);
+  const suffix = publicTokenSuffix(token, withTx);
   if ((post.kind !== "buy" && post.kind !== "sell") || !suffix || !post.body.endsWith(suffix)) return false;
   const prose = post.body.slice(0, -suffix.length);
   return prose.length > 0 && !hasPublicWallet(prose) && xWeightedLength(post.body) <= X_MAX_WEIGHTED;

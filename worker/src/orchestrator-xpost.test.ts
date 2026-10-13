@@ -433,7 +433,7 @@ describe("owner-scoped token contracts", () => {
     await p.step(w.db, ROSTER, new Map(), T0 + MIN);
     const buy = (await rows(w)).find((row) => row.kind === "buy")!;
     assert.ok(buy);
-    assert.equal(buy.body, `${BUY} CA (Robinhood Chain): ${TOKEN}`);
+    assert.equal(buy.body, `${BUY}\n\n${TOKEN}`);
     assert.ok(w.prompts.every((prompt) => !prompt.includes(TOKEN)));
     consent = false;
     await p.step(w.db, ROSTER, new Map(), buy.dueAtMs);
@@ -478,7 +478,7 @@ describe("owner-scoped token contracts", () => {
         assert.equal(post.reason, "gate:project-attribution");
       } else {
         assert.equal(post.status, "scheduled");
-        assert.match(post.body, / CA \(Robinhood Chain\): 0x/);
+        assert.match(post.body, /\n\n0x[0-9a-f]{40}$/);
       }
     });
   }
