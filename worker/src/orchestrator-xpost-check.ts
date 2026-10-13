@@ -156,9 +156,11 @@ export function createLarpChecker(d: LarpCheckerDeps): LarpChecker {
       let siteUrl: string | null = target.kind === "site" ? target.url : target.site;
       let token: CheckEvidence["token"] = null;
       let noSite = false;
+      let coinHandle: string | null = null;
       if (target.kind === "coin") {
         const facts = await factsFor(target.address, target.chain);
         token = tokenOf(facts);
+        coinHandle = facts?.links?.twitter ?? null;
         if (!siteUrl && facts) {
           const listed = facts.links?.websites ?? [];
           siteUrl = listed.map(siteLink).find((s): s is string => s !== null) ?? null;
@@ -199,7 +201,8 @@ export function createLarpChecker(d: LarpCheckerDeps): LarpChecker {
           site = { url: siteUrl, read, textChars: page ? Math.max(page.allText.length, page.text.length) : 0, ownCalls: page ? page.loaded.ownCalls : null,
             docs: page?.findings.docs === true, namesCoin };
           if (page) {
-            const names = siteNames({ url: page.finalUrl || siteUrl, title: page.title, extra: page.findings.x });
+            // The coin's own X handle, as the index lists it, is one of its names; the handles a page links are not (a docs site links its sponsors).
+            const names = siteNames({ url: page.finalUrl || siteUrl, title: page.title, extra: coinHandle ? [coinHandle] : [] });
             const own = ownRepo(page.findings, names);
             if (own) repoAsked = { owner: own.repo.owner, repo: own.repo.repo, linkedOnly: own.linkedOnly };
           }

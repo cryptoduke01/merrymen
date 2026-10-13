@@ -24,7 +24,7 @@ describe("what a scanned site points at", () => {
   });
 
   it("drops the addresses every dapp's libraries carry", () => {
-    const f = findInSources([{ where: "script", text: `"0xcA11bde05977b3631167028862bE2a173976CA11","0x000000000022D473030F116dDEE9F6B43aC78BA3","0x0000000000000000000000000000000000000000","0x4200000000000000000000000000000000000006"` }]);
+    const f = findInSources([{ where: "script", text: `"0xcA11bde05977b3631167028862bE2a173976CA11","0x000000000022D473030F116dDEE9F6B43aC78BA3","0x0000000000000000000000000000000000000000","0x4200000000000000000000000000000000000006","0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"` }]);
     assert.deepEqual(f.evm, []);
   });
 
@@ -89,7 +89,9 @@ describe("what a scanned site points at", () => {
 
 describe("the project's own repo", () => {
   it("takes the project's names from its host and title", () => {
-    assert.deepEqual(siteNames({ url: "https://app.sourcepad.site/launch", title: "SourcePad | coins for GitHub projects" }), ["sourcepad", "coins", "projects"]);
+    assert.deepEqual(siteNames({ url: "https://app.sourcepad.site/launch", title: "SourcePad | coins for GitHub projects" }), ["sourcepad"]);
+    assert.deepEqual(siteNames({ url: "https://sourcepad.site/", title: "Source — Discover projects. Back the builders." }), ["sourcepad", "source"], "the brand, never a generic word");
+    assert.deepEqual(siteNames({ url: "https://larpcheck.app/", title: "larpcheck: is it real, or is it LARP?" }), ["larpcheck"]);
     assert.deepEqual(siteNames({ url: "https://littlebitllm.com/" }), ["littlebitllm"]);
   });
 

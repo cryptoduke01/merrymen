@@ -106,6 +106,7 @@ const SOLANA_QUOTED = new RegExp(`(?<=["'\`])[${B58}]{32,44}(?=["'\`])`, "g");
 const EVM_INFRA: ReadonlySet<string> = new Set([
   "0x0000000000000000000000000000000000000000",
   "0x000000000000000000000000000000000000dead",
+  "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", // the "native coin" placeholder every swap kit uses
   "0xca11bde05977b3631167028862be2a173976ca11", // Multicall3
   "0x000000000022d473030f116ddee9f6b43ac78ba3", // Permit2
   "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", // WETH, Ethereum
@@ -257,8 +258,13 @@ const HOST_NOISE: ReadonlySet<string> = new Set(["www", "app", "beta", "docs", "
 /**
  * THE NAMES A PROJECT GOES BY, as its site says them: the host's labels
  * (littlebitllm.com → "littlebitllm", app.sourcepad.site → "sourcepad",
- * a vercel preview's first label), and the page title's words of four
- * letters or more. Read for `affiliated` only.
+ * a vercel preview's first label), and the words of the title's BRAND, the
+ * part before its first separator ("Source — Discover projects" → "source",
+ * never "discover" or "projects": a generic word would tie any repo with it
+ * in its name to the project). `extra`: other names the caller vouches for
+ * (the coin's own X handle from the index), never every handle a page links
+ * (a docs site links its sponsors). Four letters or more. Read for
+ * `affiliated` only.
  */
 export function siteNames(o: { url?: string | null; title?: string | null; extra?: readonly (string | null | undefined)[] }): string[] {
   const out = new Set<string>();
@@ -270,7 +276,8 @@ export function siteNames(o: { url?: string | null; title?: string | null; extra
   } catch {
     // No URL: the title alone.
   }
-  for (const s of [o.title, ...(o.extra ?? [])]) {
+  const brand = String(o.title ?? "").split(/\s[—–|:·-]\s|[|:·]/)[0] ?? "";
+  for (const s of [brand, ...(o.extra ?? [])]) {
     for (const w of String(s ?? "").split(/[^\p{L}\p{N}]+/u)) {
       const l = letters(w);
       if (l.length >= 4 && !HOST_NOISE.has(l)) out.add(l);
