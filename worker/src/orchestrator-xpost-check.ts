@@ -184,14 +184,27 @@ export function createLarpChecker(d: LarpCheckerDeps): LarpChecker {
         else {
           lookups++;
           const r = await scan(siteUrl, Math.min(SCAN_MS, left() - 3_000)).catch((): ScanResult => ({ ok: false, url: siteUrl!, failure: "browser-error" }));
-          if (r.ok && r.page) {
+          // AN ERROR PAGE IS NO SITE (review of #333): a 404 or a 500 still loads
+          // in a browser, and a verbose error page would otherwise earn
+          // "site-up", hand over unrelated links and help a broken project URL
+          // to a public "real". Gone or broken (404, 410, a 5xx but 503) is the
+          // site down; anything else at 400 and over (401, 403, 429, 503: a
+          // login, a bot wall, a rate limit, Cloudflare's own page) is the site
+          // refusing to be read, which says nothing about it.
+          const status = r.ok && r.page ? r.page.status : 0;
+          const errored = status >= 400;
+          const broken = status === 404 || status === 410 || (status >= 500 && status !== 503);
+          if (r.ok && r.page && !errored) {
             page = r.page;
             notes.push("check-site-read");
+          } else if (errored) {
+            notes.push(broken ? "check-site-http-broken" : "check-site-http-refused");
           } else {
             notes.push(`check-site-${r.failure ?? "failed"}`);
           }
-          // "unreachable" only when the browser saw the page fail to load (scanPage); every other failure is ours, and is "not read".
-          const read: NonNullable<CheckEvidence["site"]>["read"] = page ? "ok" : r.failure === "busy" ? "busy" : r.failure === "unreachable" ? "unreachable" : "none";
+          // "unreachable" only when the browser saw the page fail to load (scanPage) or the site answered gone or broken; every other failure is ours, and is "not read".
+          const read: NonNullable<CheckEvidence["site"]>["read"] = page ? "ok" : errored ? (broken ? "unreachable" : "none")
+            : r.failure === "busy" ? "busy" : r.failure === "unreachable" ? "unreachable" : "none";
           let namesCoin: NonNullable<CheckEvidence["site"]>["namesCoin"] = null;
           if (page && target.kind === "coin") {
             const all = [...page.findings.evm, ...page.findings.solana];

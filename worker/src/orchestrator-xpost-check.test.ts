@@ -99,6 +99,18 @@ describe("the larp check's legwork", () => {
     assert.equal(r.evidence.site?.namesCoin, null);
   });
 
+  it("an error page is no site: a 404 or a 500 is the site down, a bot wall or a login is not read, and neither is scored (review of #333)", async () => {
+    for (const [status, read] of [[404, "unreachable"], [500, "unreachable"], [410, "unreachable"], [403, "none"], [429, "none"], [503, "none"], [401, "none"]] as const) {
+      const { checker, asked } = world({ scan: (url) => ({ ok: true, url, page: page({ status }) }) });
+      const r = await checker.check({ kind: "coin", address: CA, chain: "evm", site: "https://acme.example/" }, { budgetMs: 50_000, chatId: 1 });
+      assert.equal(r.evidence.site?.read, read, String(status));
+      assert.equal(r.evidence.site?.namesCoin, null, `${status}: nothing on an error page is read`);
+      assert.equal(r.evidence.github, null, `${status}: no GitHub from an error page`);
+      assert.deepEqual(asked.github, [], String(status));
+      assert.ok(!assessCheck(r.evidence).signals.includes("site-up"), String(status));
+    }
+  });
+
   it("a browser that cannot scan is never said as the site being down", async () => {
     const { checker } = world({ scan: (url) => ({ ok: false, url, failure: "browser-error" }) });
     const r = await checker.check({ kind: "site", url: "https://acme.example/" }, { budgetMs: 50_000, chatId: 1 });

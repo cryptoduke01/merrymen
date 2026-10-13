@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { affiliated, findInSources, ownRepo, siteNames, FINDINGS_MAX } from "./site-scan";
+import { affiliated, findInSources, ownRepo, siteNames, siteOf, FINDINGS_MAX } from "./site-scan";
 
 const CA = "0x86aF99052DB086a66aF7D764bB04d3abb81b485F";
 const MINT = "t9bnCGiZVUYsRKvx4d5dPcoDCSyuBM9C33ZNGNULARP";
@@ -37,7 +37,7 @@ describe("what a scanned site points at", () => {
   });
 
   it("never reads an English word, a one-case run or a system program as a mint", () => {
-    const f = findInSources([{ where: "text", text: "abcdefghijkmnopqrstuvwxyzabcdefghijk ABCDEFGHJKLMNPQRSTUVWXYZABCDEFGH23 TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA So11111111111111111111111111111111111111112" }]);
+    const f = findInSources([{ where: "text", text: "abcdefghijkmnopqrstuvwxyzabcdefghijk ABCDEFGHJKLMNPQRSTUVWXYZABCDEFGH23 TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA So11111111111111111111111111111111111111112 SysvarRecentB1ockHashes11111111111111111111" }]);
     assert.deepEqual(f.solana, []);
   });
 
@@ -115,5 +115,21 @@ describe("the project's own repo", () => {
     const bundled = ownRepo(findInSources([{ where: "script", text: "https://github.com/facebook/react https://github.com/acme/acme-core" }]), names);
     assert.deepEqual([bundled?.repo.repo, bundled?.linkedOnly], ["acme-core", false]);
     assert.equal(ownRepo(findInSources([{ where: "script", text: "https://github.com/facebook/react" }]), names), null, "a library alone is no repo of theirs");
+  });
+});
+
+describe("the site a host belongs to (review of #333)", () => {
+  it("never lumps two tenants of a shared host or a country second level into one site", () => {
+    assert.equal(siteOf("api.acme.com"), "acme.com");
+    assert.equal(siteOf("acme.com"), "acme.com");
+    assert.equal(siteOf("project.example.co.uk"), "example.co.uk");
+    assert.notEqual(siteOf("project.example.co.uk"), siteOf("analytics.other.co.uk"));
+    assert.equal(siteOf("foo.vercel.app"), "foo.vercel.app");
+    assert.notEqual(siteOf("foo.vercel.app"), siteOf("bar.vercel.app"));
+    assert.equal(siteOf("api.foo.vercel.app"), "foo.vercel.app");
+    assert.equal(siteOf("x.up.railway.app"), "x.up.railway.app");
+    assert.notEqual(siteOf("a.up.railway.app"), siteOf("b.up.railway.app"));
+    assert.equal(siteOf("WWW.Acme.COM."), "acme.com");
+    assert.equal(siteOf("1.2.3.4"), "1.2.3.4");
   });
 });

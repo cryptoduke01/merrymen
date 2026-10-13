@@ -11,12 +11,14 @@
  * matters — the browser image — is where it will show.
  */
 declare module "playwright" {
-  /** A response the page received: read by /scan for the bundles it loaded and the calls it made. */
+  /**
+   * A response the page received: read by /scan for which scripts it loaded
+   * and which calls it made. Never its body: body() buffers whatever size the
+   * page sent (server.ts readScripts reads the text again under our own caps).
+   */
   export interface Response {
     url(): string;
     status(): number;
-    headers(): Record<string, string>;
-    body(): Promise<Buffer>;
     request(): { url(): string; resourceType(): string };
   }
   export interface Page {

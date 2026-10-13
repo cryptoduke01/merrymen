@@ -32,7 +32,8 @@ import { createServer } from "node:http";
 import { chromium } from "playwright";
 import { safeFetchUrl } from "../packages/core/src/safe-url";
 import { createPublicProxy } from "../packages/core/src/server/public-proxy";
-import { findInSources, type ScanSource } from "../packages/core/src/site-scan";
+import { fetchPublicHttps } from "../packages/core/src/server/public-network";
+import { findInSources, siteOf, type ScanSource } from "../packages/core/src/site-scan";
 
 const PORT = Number(process.env.PORT ?? 8080);
 const TOKEN = process.env.MERRYMEN_BROWSER_TOKEN ?? "";
@@ -50,11 +51,26 @@ const VIEWPORT = { width: 1280, height: 900 };
  * a backend of its own at all is the difference between a product and a
  * landing page. Bounded on every axis, because the page decides how much it
  * sends: a few seconds more to settle, a dozen scripts, a few megabytes.
+ *
+ * NEVER A BODY THE PAGE SIZED (review of #333). Playwright's response.body()
+ * hands Node the whole decoded body, of whatever size, for as many responses
+ * as are in flight at once: a hostile page from an X tag could have the one
+ * shared browser buffer it out of memory (chunked, or a compression bomb, so
+ * no declared length bounds it). So the browser only notes which scripts the
+ * page loaded, a dozen at most; their text is fetched again afterwards by
+ * fetchPublicHttps, which pins a public address, refuses any compressed
+ * body (so its byte cap also bounds what is decoded), and stops reading at
+ * the cap. Three at a time, each slot's bytes reserved from the total before
+ * its read starts, all of it inside a few seconds.
  */
 const SCAN_SETTLE_MS = 2_500;
 const SCAN_SCRIPTS_MAX = 12;
 const SCAN_SCRIPT_BYTES = 3_000_000;
 const SCAN_TOTAL_BYTES = 8_000_000;
+const SCAN_FETCH_PARALLEL = 3;
+const SCAN_FETCH_MS = 5_000;
+/** The whole of the bundle reads, waits included. */
+const SCAN_FETCHES_MS = 8_000;
 /** The page's own markup, read for addresses in attributes and inline data. */
 const SCAN_HTML_MAX = 800_000;
 /** Every link on the page is read for findings; only MAX_LINKS go back. */
@@ -89,9 +105,39 @@ async function getBrowser() {
   return browser;
 }
 
-/** The site a page belongs to, for "did it call its own backend": the last two labels of the host. */
-function siteOf(host: string): string {
-  return host.toLowerCase().split(".").slice(-2).join(".");
+/**
+ * THE SCRIPTS' TEXT, BOUNDED BY US, NEVER BY THE PAGE: each URL read again
+ * with fetchPublicHttps, at most SCAN_FETCH_PARALLEL at once. A slot's byte
+ * cap is reserved from the total before its read starts and the unused part
+ * given back after, so the total can never be overrun by reads in flight
+ * together. A read that fails, is compressed or runs over its cap is no
+ * script. Everything stops at SCAN_FETCHES_MS.
+ */
+async function readScripts(urls: readonly string[]): Promise<{ scripts: string[]; scriptBytes: number }> {
+  const scripts: string[] = [];
+  let reserved = 0, scriptBytes = 0, next = 0;
+  const until = Date.now() + SCAN_FETCHES_MS;
+  const worker = async (): Promise<void> => {
+    while (next < urls.length) {
+      const u = urls[next++]!;
+      const cap = Math.min(SCAN_SCRIPT_BYTES, SCAN_TOTAL_BYTES - reserved);
+      const ms = Math.min(SCAN_FETCH_MS, until - Date.now());
+      if (cap < 1 || ms < 250) return;
+      reserved += cap;
+      try {
+        const r = await fetchPublicHttps(u, { maxBytes: cap, timeoutMs: ms, maxRedirects: 2 });
+        if (r.status === 200) {
+          scripts.push(r.body.toString("utf8"));
+          scriptBytes += r.body.length;
+        }
+        reserved -= cap - (r.status === 200 ? r.body.length : 0);
+      } catch {
+        reserved -= cap;
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: SCAN_FETCH_PARALLEL }, worker));
+  return { scripts, scriptBytes };
 }
 
 /**
@@ -127,15 +173,13 @@ async function visit(url: URL, scan: boolean) {
     const page = await ctx.newPage();
     page.setDefaultTimeout(NAV_TIMEOUT_MS);
 
-    // WHAT THE PAGE LOADED, ONLY ON A SCAN: its scripts' text (the bundles
-    // already came through the proxy; this only keeps them), and how many
-    // calls it made to its own site. Every body is bounded before and after
-    // it is read, and a body that fails to read is simply not kept.
-    const scripts: string[] = [];
-    let scriptBytes = 0;
+    // WHAT THE PAGE LOADED, ONLY ON A SCAN: which scripts (their URLs, a dozen
+    // at most, read again later by readScripts and never by body()), and how
+    // many calls it made to its own site (siteOf: a shared host's other
+    // tenants are other sites).
+    const scriptUrls: string[] = [];
     let ownCalls = 0;
     const callHosts = new Set<string>();
-    const pending: Promise<void>[] = [];
     if (scan) {
       const own = siteOf(url.hostname);
       page.on("response", (response) => {
@@ -151,14 +195,9 @@ async function visit(url: URL, scan: boolean) {
           if (callHosts.size < 12) callHosts.add(host.toLowerCase());
           return;
         }
-        if (kind !== "script" || response.status() !== 200 || scripts.length >= SCAN_SCRIPTS_MAX) return;
-        const declared = Number(response.headers()["content-length"] ?? "0");
-        if (declared > SCAN_SCRIPT_BYTES || scriptBytes + declared > SCAN_TOTAL_BYTES) return;
-        pending.push(response.body().then((buf) => {
-          if (buf.length > SCAN_SCRIPT_BYTES || scriptBytes + buf.length > SCAN_TOTAL_BYTES || scripts.length >= SCAN_SCRIPTS_MAX) return;
-          scriptBytes += buf.length;
-          scripts.push(buf.toString("utf8"));
-        }, () => {}));
+        if (kind !== "script" || response.status() !== 200 || scriptUrls.length >= SCAN_SCRIPTS_MAX) return;
+        const u = response.url();
+        if (u.startsWith("https://") && !scriptUrls.includes(u)) scriptUrls.push(u);
       });
     }
 
@@ -209,8 +248,8 @@ async function visit(url: URL, scan: boolean) {
       const shot = await page.screenshot({ type: "jpeg", quality: 55, fullPage: false });
       return { ...base, screenshotJpegBase64: shot.toString("base64") };
     }
-    // The bundles still arriving get a moment, never the page's say.
-    await Promise.race([Promise.allSettled(pending), new Promise((r) => setTimeout(r, 3_000))]);
+    // The bundles' text, read again by us under our own caps (readScripts).
+    const { scripts, scriptBytes } = await readScripts(scriptUrls);
     const sources: ScanSource[] = [
       { where: "link", text: data.allLinks.join("\n") },
       { where: "text", text: data.allText },

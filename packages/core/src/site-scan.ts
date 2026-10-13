@@ -149,7 +149,8 @@ const SOLANA_INFRA: ReadonlySet<string> = new Set([
  * mint written in one case only is missed, never a sentence read as a mint.
  */
 function solanaShaped(s: string): boolean {
-  return /[A-Z]/.test(s) && /[a-z]/.test(s) && /[1-9]/.test(s) && !SOLANA_INFRA.has(s);
+  // A run of 1s at the end is a padded system id (SysvarRecentB1ockHashes111…, Stake111…, Vote111…), never a mint.
+  return /[A-Z]/.test(s) && /[a-z]/.test(s) && /[1-9]/.test(s) && !SOLANA_INFRA.has(s) && !/1{8,}$/.test(s);
 }
 
 /**
@@ -245,6 +246,44 @@ export function findInSources(sources: readonly ScanSource[]): SiteFindings {
     docs ||= DOCS.test(text);
   }
   return { evm: [...evm.values()], solana: [...solana.values()], github: [...github.values()], x: [...x], telegram, discord, docs };
+}
+
+/**
+ * SUFFIXES UNDER WHICH STRANGERS EACH GET A NAME (review of #333): hosting
+ * platforms that hand out subdomains, where `foo.vercel.app` and
+ * `bar.vercel.app` are two unrelated tenants. Not the whole Public Suffix
+ * List (the browser image carries no dependency for it): the platforms a
+ * launch site is actually put on, plus the second-level country domains
+ * below. A suffix missing here can only make two tenants of it read as one
+ * site, which costs a "talks to its own backend" signal at most.
+ */
+const SHARED_SUFFIXES: ReadonlySet<string> = new Set([
+  "vercel.app", "now.sh", "netlify.app", "netlify.com", "pages.dev", "workers.dev", "github.io", "gitlab.io", "web.app", "firebaseapp.com",
+  "herokuapp.com", "onrender.com", "railway.app", "up.railway.app", "fly.dev", "surge.sh", "glitch.me", "replit.app", "repl.co", "replit.dev",
+  "gitbook.io", "framer.app", "framer.website", "webflow.io", "wixsite.com", "carrd.co", "notion.site", "super.site", "myshopify.com",
+  "azurewebsites.net", "azurestaticapps.net", "cloudfront.net", "amazonaws.com", "appspot.com", "blogspot.com", "ngrok.io", "ngrok.app",
+  "ngrok-free.app", "lovable.app", "bolt.host", "netlify.live", "deno.dev", "render.com", "pythonanywhere.com", "on.fleek.co", "ipfs.dweb.link",
+  "mypinata.cloud", "4everland.app", "pump.fun", "medium.com", "substack.com", "linktr.ee", "beehiiv.com", "hashnode.dev", "mirror.xyz",
+]);
+/** Second-level labels a two-letter country domain registers under: co.uk, com.au, net.br, org.ng. */
+const COUNTRY_SECOND = /^(?:co|com|net|org|gov|edu|ac|gob|or|ne|go|ltd|plc|nom|info|biz)$/;
+
+/**
+ * THE SITE A HOST BELONGS TO, as a registrar sees it: its registrable domain,
+ * aware of the shared hosting suffixes and the country second levels above
+ * (api.acme.co.uk → acme.co.uk, app.foo.vercel.app → foo.vercel.app,
+ * www.acme.com → acme.com). Lowercased. An IP or a single label is itself.
+ */
+export function siteOf(host: string): string {
+  const h = String(host ?? "").toLowerCase().replace(/\.$/, "");
+  const labels = h.split(".").filter(Boolean);
+  if (labels.length <= 2 || /^\d+(?:\.\d+){3}$/.test(h) || h.includes(":")) return h;
+  for (let take = Math.min(4, labels.length - 1); take >= 2; take--) {
+    const suffix = labels.slice(-take).join(".");
+    if (SHARED_SUFFIXES.has(suffix)) return labels.slice(-(take + 1)).join(".");
+  }
+  const tld = labels[labels.length - 1]!, second = labels[labels.length - 2]!;
+  return tld.length === 2 && COUNTRY_SECOND.test(second) ? labels.slice(-3).join(".") : labels.slice(-2).join(".");
 }
 
 /** Letters only, lowercased: "LittleBit-LLM" and "littlebitllm" are one name. */
