@@ -437,3 +437,17 @@ describe("red-team review of a964a74c: political and hate copies one letter off,
     for (const t of ["CHUMP", "ZAPX", "FROGGY", "COINA", "QRTZ", "DUMPR"]) assert.equal(cleanTicker(t), t, t);
   });
 });
+
+describe("a tragedy, terror, a faith's holy names, a drug or a notorious person is no ticker and no name the house answers under (red-team review of daaae961)", () => {
+  it("each is refused, inside a ticker or whole, and everyday tickers still pass", () => {
+    // Each shown as a trending chain coin, listed on coingecko, at daaae961; or declined in a laugh under "should i buy $X?".
+    for (const t of ["EPSTEIN", "OSAMA", "SANDYHOOK", "COLUMBINE", "FENTANYL", "QANON", "MANGIONE", "SHOAH", "ADOLPH", "DAHMER", "UVALDE", "PIZZAGATE",
+      "TWINTOWERS", "NINEELEVEN", "ALLAH", "QURAN", "MUHAMMAD", "HEROIN", "DIDDY", "KIRK", "CHARLIEKIRK", "DONJR", "MODI", "XI", "WLFI", "BABYEPSTEIN", "OSAMAINU"]) {
+      assert.equal(cleanTicker(t), null, t);
+      assert.equal(neverAnsweredName(t), true, t);
+    }
+    // The short ones only whole: they hide in everyday tickers and words.
+    for (const t of ["METHOD", "LEGACY", "MODIFY", "PROXY", "KIRKBY"]) assert.notEqual(cleanTicker(t), null, t);
+    for (const t of ["CHUMP", "ZAPX", "FROGGY", "ZORBX"]) assert.equal(cleanTicker(t), t, t);
+  });
+});

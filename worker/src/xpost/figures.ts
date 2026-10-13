@@ -135,6 +135,35 @@ const ABUSE_AND_POLITICS: readonly string[] = [
   // and the dictators, movements and groups the first list missed (red-team review of a964a74c: "$ZIONIST", "$STALIN")
   "zionis", "stalin", "lenin", "zedong", "maotse", "houthi", "intifada", "idf", "mussolini", "pinochet", "kimjong", "jongun",
 ];
+/**
+ * AND A TRAGEDY, TERROR, A FAITH'S HOLY NAMES, A DRUG OR A NOTORIOUS PERSON
+ * (red-team review of daaae961, 2026-10-12). With CoinGecko listing each
+ * contract, "how's the market?" and "what's hot?" posted "geckoterminal
+ * robinhood: trending $EPSTEIN 24h +312%, $OSAMA 24h +88%, $SANDYHOOK 24h
+ * +41%" from the house account, and the same for COLUMBINE, FENTANYL, QANON,
+ * MANGIONE, SHOAH, ADOLPH, DAHMER, UVALDE and PIZZAGATE; and "should i buy
+ * $SANDYHOOK?" was declined in a laugh. Whoever deploys a token names it, so
+ * no list is whole: these are the classes the review found, read inside a
+ * ticker like the rest. The short or everyday ones ("meth" hides in
+ * "something", "gacy" in "legacy", "modi" in "modify") are refused only
+ * whole (TICKER_REFUSED_WHOLE).
+ */
+const TRAGEDY_AND_NOTORIETY: readonly string[] = [
+  // mass shootings, attacks and atrocities
+  "sandyhook", "uvalde", "columbine", "parkland", "twintower", "nineeleven", "christchurch", "utoya", "bataclan", "hiroshima", "nagasaki", "chernobyl",
+  "shoah", "holodomor", "nakba", "unabomber", "mcveigh", "breivik", "tarrant", "kaczynski",
+  // terror
+  "osama", "binladen", "laden", "baghdadi", "zarqawi", "alqaida", "alshabaab", "bokoharam", "jihadi",
+  // a faith's holy names, books and places
+  "allah", "quran", "koran", "muhammad", "mohammed", "mohammad", "prophet", "jesus", "christ", "yahweh", "jehovah", "messiah", "buddha", "krishna",
+  "vishnu", "bible", "torah", "talmud", "mecca", "kaaba", "vatican", "satan", "lucifer",
+  // drugs
+  "fentanyl", "fentanil", "heroin", "cocaine", "cocain", "opioid", "opium", "oxycontin", "oxycodone", "xanax", "ketamine", "methamphet",
+  // notorious people and conspiracies
+  "epstein", "diddy", "dahmer", "mangione", "luigi", "manson", "bundy", "escobar", "elchapo", "saddam", "gaddafi", "qaddafi", "adolph",
+  "rittenhouse", "chauvin", "georgefloyd", "floyd", "charliekirk", "andrewtate", "bankman", "dokwon", "qanon", "pizzagate", "donjr", "wlfi",
+];
+
 const HYPE_AND_MONEY: readonly string[] = [
   // hype and trust words
   "pump", "moon", "gem", "lambo", "scam", "rug", "safe", "legit", "official",
@@ -152,17 +181,19 @@ const HYPE_AND_MONEY: readonly string[] = [
   // money in words: "$MILLION" beside "~$1.2M" reads as a sum code never built
   "million", "billion", "trillion", "thousand", "hundred", "dollar", "bucks", "cents", "usd",
 ];
-const TICKER_REFUSED = new RegExp([...HOUSE_NAMES, ...HOUSE_PRODUCTS, ...ABUSE_AND_POLITICS, ...HYPE_AND_MONEY].join("|"));
+const TICKER_REFUSED = new RegExp([...HOUSE_NAMES, ...HOUSE_PRODUCTS, ...ABUSE_AND_POLITICS, ...TRAGEDY_AND_NOTORIETY, ...HYPE_AND_MONEY].join("|"));
 /**
  * The house's own names and its own products' ("fomo", "trencher": red-team
  * 2026-10-12), a model's, a slur, a hate code or a political name: what no
  * line of the house's answers under. The sources it names (coingecko,
  * bitquery, pons) are no such name.
  */
-const NEVER_ANSWERED = new RegExp([...HOUSE_NAMES, ...HOUSE_OWN_PRODUCTS, ...ABUSE_AND_POLITICS].join("|"));
+const NEVER_ANSWERED = new RegExp([...HOUSE_NAMES, ...HOUSE_OWN_PRODUCTS, ...ABUSE_AND_POLITICS, ...TRAGEDY_AND_NOTORIETY].join("|"));
 
 /** Words too short to read inside other tickers, refused only whole: "ASS", "CUM", "JAP", "DIE", "HH", "SS", "WOP". */
-const TICKER_REFUSED_WHOLE: ReadonlySet<string> = new Set("ASS CUM JAP DIE HH SS WOP FAP KMS NAMBLA HOE NIP CP TUCK".split(" "));
+const TICKER_REFUSED_WHOLE: ReadonlySet<string> = new Set(("ASS CUM JAP DIE HH SS WOP FAP KMS NAMBLA HOE NIP CP TUCK " +
+  // and the short or everyday names of TRAGEDY_AND_NOTORIETY's classes, whole only
+  "WTC METH OXY LSD MDMA COKE CRACK WEED KIRK TATE GACY MODI XI SBF POPE").split(" "));
 
 /**
  * AND ON ITS CONSONANTS (red-team 2026-10-12): a slur spelled without its

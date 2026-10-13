@@ -1382,7 +1382,7 @@ other owner's agent, and its posting and reply warnings, are unchanged.
   shortest only whole: `ASS`, `HH`, `SS`; and those it missed, `$FUHRER`,
   `$GOYIM`, `$NIGLET`, `$JIGABOO`, `$HOLOHOAX`, `$GASTHEM`, `$DILDO`, posted
   at fbcf8756, with a slur read on its consonants too: `KNEEGROW`,
-  `HAILHTLR`, `NIBBA`, `NIQQA`, at the cost of `ANGER` or `JEWEL`), more political names, the
+  `HAILHTLR`, `NIBBA`, `NIQQA`, at the cost of `ANGER` or `JEWEL`), more political names, a tragedy, terror, a faith's holy names, a drug or a notorious person (`TRAGEDY_AND_NOTORIETY`, red-team review of daaae961: `$EPSTEIN`, `$OSAMA`, `$SANDYHOOK`, `$SHOAH`, `$FENTANYL`, `$QANON` went up trending, coingecko listing each contract; the short ones, `METH`, `MODI`, `XI`, `KIRK`, only whole; a denylist, as the review warned, never whole), the
   chain's and the agent's shortened names (`RBNHD`, `ALDALE`) and every
   model or provider name; a chain coin's ticker is three letters at least;
   and research and then the orchestrator leave out a coin named after the

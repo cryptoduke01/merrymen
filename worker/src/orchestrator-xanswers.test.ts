@@ -4798,3 +4798,38 @@ test("no decline under a coin named after a shooting, terror, the holocaust, rel
     for (const line of declineAnswers(id, { lower: true })) assert.doesNotMatch(line, /^(?:lol|heh|ha|haha)\b/, line);
   }
 });
+
+test("how's the market and what's hot never show a tragedy, terror, a faith's holy names, a drug or a notorious person as a coin, listed or not (red-team review of daaae961, 2026-10-12)", async (t) => {
+  // POSTED at daaae961 with the real readers, every contract listed on coingecko: "… coingecko 24h: $BTC +1.2%, $ETH +2.4%, $SOL +4.8%;
+  // geckoterminal robinhood: trending $EPSTEIN 24h +312%, $OSAMA 24h +88%, $SANDYHOOK 24h +41%." and the same under "what's hot?" with volumes.
+  const figures = [{ change: 312, vol: 2_310_000 }, { change: 88, vol: 940_000 }, { change: 41, vol: 310_000 }];
+  const sets = [["EPSTEIN", "OSAMA", "SANDYHOOK"], ["COLUMBINE", "FENTANYL", "QANON"], ["MANGIONE", "SHOAH", "ADOLPH"], ["DAHMER", "UVALDE", "PIZZAGATE"],
+    ["TWINTOWERS", "ALLAH", "HEROIN"], ["QURAN", "MUHAMMAD", "DIDDY"]];
+  for (const names of sets) {
+    for (const ask of ["how's the market?", "what's hot?"]) {
+      fakeCoinGecko(t, names.map((name, i) => ({ name, ...figures[i]! })), names);
+      const w = await world(t, { ...ALAN, env: RESEARCH_ON, research: createXResearch(), answer: "the first one is the play, get in. Say stop to opt out." });
+      w.setInbox([alanTag(MENTION, ask)]);
+      await w.step();
+      assert.deepEqual(w.asked(), [], "never drafted");
+      const text = String(w.sends[0]?.text ?? "");
+      assert.ok(text, `${names.join()} / ${ask}: answered`);
+      for (const n of names) assert.ok(!text.includes(`$${n}`), `${n} / ${ask}: ${text}`);
+      assert.doesNotMatch(text, /geckoterminal robinhood/, `${names.join()} / ${ask}: ${text}`);
+    }
+  }
+  // A clean ticker listed under such a name is never shown either; a coin no screen knows still is.
+  for (const [listedAs, shown] of [["Epstein Island", false], ["Sandy Hook Memorial", false], ["Fentanyl Finance", false], ["Zorb Blat", true]] as const) {
+    const pool = namedPool("ZORBX", 1, 80, 1.5e6);
+    const research = createXResearch({
+      hotPools: async () => ({ pools: [pool], failed: false }),
+      chainListings: async (addresses) => ({ failed: false, listings: addresses.includes(pool.tokenAddress) ? [{ address: pool.tokenAddress, id: "zorbx", symbol: "zorbx", name: listedAs, rank: 4000 }] : [] }),
+      majors: { configured: () => true, search: async () => ({ hits: [], failed: true }), market: async () => ({ market: null, failed: true }),
+        trending: async () => ({ coins: [], failed: false }), top: TOP_READ },
+    });
+    const w = await world(t, { ...ALAN, env: RESEARCH_ON, research });
+    w.setInbox([alanTag(MENTION, "what's hot?")]);
+    await w.step();
+    assert.equal(/\$ZORBX/.test(String(w.sends[0]?.text ?? "")), shown, `${listedAs}: ${String(w.sends[0]?.text)}`);
+  }
+});

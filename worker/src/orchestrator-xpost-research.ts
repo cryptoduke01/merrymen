@@ -581,7 +581,9 @@ const EVERYDAY_HIDING: ReadonlySet<string> = new Set((
   "cucumber succumb incumbent manuscript tardy magazine auspicious cocoon basement manager managers angry angrier hungry stranger strangers " +
   "ranger rangers singer singers ginger messenger passenger passengers challenger challengers avenger avengers " +
   // the political names read one letter off (figures.ts, red-team review of a964a74c) hide in these
-  "goblin goblins gobble gobbled tramp tramps trampoline computer computers"
+  "goblin goblins gobble gobbled tramp tramps trampoline computer computers " +
+  // and the names of a tragedy, a faith or a drug (figures.ts TRAGEDY_AND_NOTORIETY, red-team review of daaae961) hide in these
+  "christmas heroine heroines prophetic challah"
 ).split(/\s+/));
 /** "alan" said to it at the start, after at most two greeting words, or after a comma at the very end: an address, never a name the tag is about. */
 const ALAN_ADDRESSED = /^(?:(?:gm|gn|yo|hey|hi|hello|ser|fren|bro|sup)[\s,!.]+){0,2}alan\b[\s,!.:-]*|,\s*alan$/;
