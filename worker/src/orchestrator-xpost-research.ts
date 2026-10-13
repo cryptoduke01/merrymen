@@ -912,6 +912,9 @@ export const RESEARCH_BUDGET = Object.freeze({ maxLookups: 6, totalMs: 12_000, r
  * lookup past either is not made, and the answer goes without it.
  */
 export const X_LOOKUPS_PER_ACCOUNT = 8;
+/** A larp check's index reads, per X account per ten minutes and across accounts per hour: a check may try four chains and a site's own contract. */
+export const CHECK_LOOKUPS_PER_ACCOUNT = 30;
+export const CHECK_LOOKUPS_PER_HOUR = 120;
 export const DEFAULT_X_LOOKUPS_PER_HOUR = 120;
 
 /** The limiter's key for an X account: X ids are too long for a safe integer, so a hash of one. */
@@ -1908,7 +1911,13 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
   const lane = d.fleetHome ? { fleetHome: d.fleetHome } : undefined;
   const limiter = new FactsLimiter({ now, perChat: X_LOOKUPS_PER_ACCOUNT, chatWindowMs: 10 * MIN, perAgent: d.lookupsPerHour ?? DEFAULT_X_LOOKUPS_PER_HOUR, agentWindowMs: HOUR });
   const coinFacts = d.coinFacts ?? createCoinFactsReader({ now, limiter, ...(lane ? { lane } : {}) });
-  const checker: LarpChecker | null = d.check ? createLarpChecker({ ...d.check, coinFacts, now }) : null;
+  // A LARP CHECK'S INDEX READS ON A LIMITER OF THEIR OWN (live run, 2026-10-13):
+  // a 0x contract is looked for on up to four chains, and on the answers'
+  // eight reads per ten minutes two checks spent the account's share and the
+  // next was "index busy". Checks are already held to their own day's count
+  // (MERRYMEN_XPOST_CHECKS_PER_DAY); the reads share the fleet lane and its memo.
+  const checkFacts = d.coinFacts ?? createCoinFactsReader({ now, limiter: new FactsLimiter({ now, perChat: CHECK_LOOKUPS_PER_ACCOUNT, chatWindowMs: 10 * MIN, perAgent: CHECK_LOOKUPS_PER_HOUR, agentWindowMs: HOUR }), ...(lane ? { lane } : {}) });
+  const checker: LarpChecker | null = d.check ? createLarpChecker({ ...d.check, coinFacts: checkFacts, now }) : null;
   const resolveTicker = d.resolveTicker ?? (async (ticker: string, timeoutMs: number): Promise<string | null> => {
     const found = await searchPools(ticker, timeoutMs, undefined, lane);
     if (found.failed) return null;

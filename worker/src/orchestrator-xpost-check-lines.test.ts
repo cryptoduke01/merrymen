@@ -104,6 +104,12 @@ describe("the verdict", () => {
     assert.equal(r.signals[0], "names-other");
   });
 
+  it("a coin shilled with a good site that names another contract is still a larp: the site's strengths are the site's (live run, 2026-10-13)", () => {
+    const r = assessCheck(evidence({ site: site({ namesCoin: "other", ownCalls: 5 }), github: repo() }));
+    assert.equal(r.verdict, "larp");
+    assert.equal(r.signals[0], "names-other");
+  });
+
   it("a coin with no site and no code claims nothing, so it is thin, never a larp", () => {
     const r = assessCheck(evidence({ noSite: true, token: { liquidityUsd: 5000, top10Pct: 90, creatorPct: 40, poolAgeDays: 1 } }));
     assert.equal(r.verdict, "thin");

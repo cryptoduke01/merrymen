@@ -314,7 +314,13 @@ export function assessCheck(e: CheckEvidence): CheckRead {
   const score = 50 + w.reduce((n, x) => n + x.weight, 0);
   const saw = siteRead || e?.noSite === true || g?.found === "repo";
   const flagged = w.some((x) => RED_FLAGS.has(x.signal)) || (w.some((x) => x.signal === "site-thin") && w.some((x) => x.signal === "git-none"));
-  const verdict: CheckVerdict = !saw ? "unclear" : score >= 75 ? "real" : score >= 55 ? "partly" : score < 35 && flagged ? "larp" : "thin";
+  // A COIN SHILLED WITH A SITE THAT NAMES ANOTHER CONTRACT IS A LARP, however
+  // good the site (live run, 2026-10-13): $BIT's contract beside larpcheck.app
+  // scored "thin", the site's own app and words credited to a coin that is
+  // not on it. Everything the site shows is the site's; the coin only
+  // borrows it.
+  const borrowed = w.some((x) => x.signal === "names-other");
+  const verdict: CheckVerdict = !saw ? "unclear" : borrowed ? "larp" : score >= 75 ? "real" : score >= 55 ? "partly" : score < 35 && flagged ? "larp" : "thin";
   // For a good verdict the good news leads; for a bad one the bad news does. Colour (no weight) last.
   const up = verdict === "real" || verdict === "partly";
   const ordered = [...w].sort((a, b) => {

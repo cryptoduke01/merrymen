@@ -129,6 +129,8 @@ export function createLarpChecker(d: LarpCheckerDeps): LarpChecker {
 
       /** A coin on the index: the first chain that lists it, held to what is left. */
       const factsFor = async (address: string, chain: "evm" | "solana"): Promise<CoinFacts | null> => {
+        // Not found everywhere and some chain unreadable are different notes: the second is the index's window, not the coin.
+        let unread = false;
         for (const network of chain === "solana" ? (["solana"] as const) : EVM_NETWORKS) {
           if (left() < 1_000) {
             notes.push("check-late");
@@ -143,8 +145,9 @@ export function createLarpChecker(d: LarpCheckerDeps): LarpChecker {
             notes.push("check-index-busy");
             return null;
           }
+          if (r.why === "unavailable") unread = true;
         }
-        notes.push("check-index-not-found");
+        notes.push(unread ? "check-index-unavailable" : "check-index-not-found");
         return null;
       };
       const tokenOf = (f: CoinFacts | null): CheckEvidence["token"] => f === null ? null : {
