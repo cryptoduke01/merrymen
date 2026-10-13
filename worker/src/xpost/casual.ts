@@ -13,16 +13,23 @@
  *     never read into it.
  *   - ITS OWN MOOD ("are you bullish?", "wen moon", "are we so back"): a
  *     non-committal line about itself (`vibeAnswers`), never a direction.
- *   - CHAT THE WRITER COULD NOT ANSWER: a chat tag ("how are you", "tell me a
- *     joke") is drafted by the model first; a draft the gate refuses, or a
- *     PASS, falls back to a friendly line about itself (`chatAnswers`), so
- *     the answer is never silence by default.
+ *   - BANTER ("how are you", "tell me a joke": orchestrator-xpost-research.ts
+ *     banterAsk): a friendly line about itself (`chatAnswers`). Never a
+ *     draft since the red-team review of daaae961: drafted, banter posted
+ *     forecasts, results boasts, a model tease, insults and false facts.
+ *   - HOW IT TRADES, OR WHAT IT IS UP TO (selfAsk, and "how do you pick your
+ *     coins"): the strategy it runs by name and what its rules are like
+ *     (`selfAnswers`). Never a draft, for the same reason.
+ *   - WHAT IT BOUGHT LATELY (generalTradesQuestion): the coins it bought with
+ *     the money it trades with now, named and nothing more (`tradesAnswers`).
+ *     Never a draft: drafted, it endorsed the coin it holds.
  *
  * NONE OF THEM STATES A FACT about a coin, a market, a person, a project or an
  * event, and none promises, predicts or advises. Each says only what the
  * agent is (an AI agent built by merrymen), how it likes to work, and that it
- * makes no calls for anyone. No line claims it is trading right now, so an
- * idle agent may say any of them.
+ * makes no calls for anyone; the buys line says which coins it bought, a fact
+ * the caller vouched, and nothing of them. No line claims it is trading right
+ * now, so an idle agent may say any of them.
  *
  * SIXTY-FOUR LINES A KIND THAT ARE NOT EACH OTHER. The gate refuses an answer
  * that repeats one of its recent posts (shared content words over the shorter
@@ -178,13 +185,13 @@ export function vibeAnswers(seed: string, style: { lower: boolean }, o: CodeLine
   return styled(VIBE_SLOTS, seed, o, (a, b, c) => `${a}. ${b}, ${c}`);
 }
 
-// ── chat the writer could not answer ─────────────────────────────────────────
+// ── banter ───────────────────────────────────────────────────────────────────
 
 /**
- * A FRIENDLY LINE ABOUT ITSELF, for chat the model's draft could not say: a
- * thanks, what it is (an AI agent merrymen built), and an invitation. It
- * answers no question it was not asked, and only plain banter gets it
- * (orchestrator-xpost-research.ts banterAsk).
+ * A FRIENDLY LINE ABOUT ITSELF, the answer to plain banter
+ * (orchestrator-xpost-research.ts banterAsk; never a draft since the red-team
+ * review of daaae961): a thanks, what it is (an AI agent merrymen built), and
+ * an invitation. It answers no question it was not asked.
  *
  * NO OPENER AGREES OR ACKNOWLEDGES (red-team review, 2026-10-12): a fixed
  * line goes up under text code has not judged, and "word, right on, pal",
@@ -201,7 +208,94 @@ export const CHAT_SLOTS: readonly [readonly string[], readonly string[], readonl
     "grateful for the company today", "glad you stopped in, really", "hit me with another question", "nice chatting, as usual"]),
 ]) as unknown as readonly [readonly string[], readonly string[], readonly string[]];
 
-/** Chat the writer's draft could not say: every friendly line, this mention's own first. */
+/** Plain banter (banterAsk): every friendly line, this mention's own first. */
 export function chatAnswers(seed: string, style: { lower: boolean }, o: CodeLineOptions = {}): string[] {
   return styled(CHAT_SLOTS, seed, o, (a, b, c) => `${a}. ${b}, ${c}`);
+}
+
+// ── how it trades, and what it bought ────────────────────────────────────────
+
+/**
+ * HOW IT TRADES, IN CODE'S WORDS (red-team review of daaae961, 2026-10-12).
+ * "what's your strategy?", "what are you up to?", "how do you pick your
+ * coins?" were drafted, and "the top isn't in yet, relax", "just hold and
+ * chill", "i'm up on every trade this month" and "doing great, i run the
+ * biggest fund on robinhood chain" went out from the real-money account: no
+ * list of refused phrasings is ever whole. Now the answer is one of these:
+ * the strategy it runs by name (the publication list's spoken name,
+ * writer.ts WriterFacts.strategy, or "a fixed routine" when none is
+ * published), what its rules are like, and a sign-off. Never what it buys
+ * next, never what is hot or trending, never a result, a size, a forecast or
+ * advice, and no claim that it is trading right now.
+ */
+export const SELF_SLOTS: readonly [readonly string[], readonly string[], readonly string[]] = Object.freeze([
+  Object.freeze(["my chosen strategy is {s}", "{s} is my daily playbook", "my habits come from {s}", "{s} shapes my process",
+    "{s} is the rulebook i keep", "{s} sets my approach", "i'm built around {s}", "my working method is {s}"]),
+  Object.freeze(["checks before feelings", "patience beats impulse", "a checklist, every time", "rules written down",
+    "limits decided beforehand", "no hunches involved", "slow and deliberate", "boring by design"]),
+  Object.freeze(["happy to explain more", "that's the whole recipe", "nothing secret about it", "simple stuff really",
+    "ask me anything else", "glad you're curious", "short version, anyway", "questions always welcome"]),
+]) as unknown as readonly [readonly string[], readonly string[], readonly string[]];
+/** What a line says it runs when no strategy is published. */
+export const SELF_NO_STRATEGY = "a fixed routine";
+
+/** Its strategy asked, or what it is up to: every line, this mention's own first. */
+export function selfAnswers(strategy: string | null, seed: string, style: { lower: boolean }, o: CodeLineOptions = {}): string[] {
+  const s = typeof strategy === "string" && /^[a-z][a-z -]{1,30}$/.test(strategy.trim()) ? strategy.trim() : SELF_NO_STRATEGY;
+  const slots = [SELF_SLOTS[0].map((p) => p.replace("{s}", s)), SELF_SLOTS[1], SELF_SLOTS[2]] as const;
+  return styled(slots, seed, o, (a, b, c) => `${a}. ${b}, ${c}`);
+}
+
+/**
+ * WHAT IT BOUGHT LATELY, IN CODE'S WORDS (red-team review of daaae961,
+ * 2026-10-12). "what have you been buying lately?" was drafted told its PEPE
+ * buy, and "fresh launches, pepe is the strongest coin on the chain" went
+ * out: an endorsement of the coin it holds. Now the answer names the coins it
+ * bought lately, with the money it trades with now and nothing else said of
+ * them, between an opener and a sign-off that call it a record and never a
+ * call. With none it can name, it says only that (TRADES_NONE_SLOTS): never
+ * that it bought nothing or had a quiet stretch, which is false for an agent
+ * whose buys have no sayable name or were made with the other money.
+ */
+export const TRADES_SLOTS: readonly [readonly string[], readonly string[], readonly string[]] = Object.freeze([
+  Object.freeze(["fair question", "glad you asked", "of course, friend", "quick recap", "for the public record", "here's the rundown", "simple enough", "happy to share"]),
+  Object.freeze(["lately i bought {c}", "my recent buys were {c}", "{c} joined my book recently", "my newest fills were {c}",
+    "i added {c} not long ago", "the last orders went to {c}", "{c} showed up in my trades", "i picked up {c} of late"]),
+  Object.freeze(["for reference, never a tip", "just history, no call attached", "past tense only", "logged and done",
+    "no forecast implied", "what i did, nothing more", "the receipts, plainly", "facts about me, period"]),
+]) as unknown as readonly [readonly string[], readonly string[], readonly string[]];
+export const TRADES_NONE_SLOTS: readonly [readonly string[], readonly string[], readonly string[]] = Object.freeze([
+  TRADES_SLOTS[0],
+  Object.freeze(["nothing i can name", "no names i can list", "none i can point to", "no coins to mention",
+    "no labels to offer", "no tickers to report", "can't spell those out", "no specifics to give"]),
+  Object.freeze(["ask another day", "patience is part of it", "such is life", "that's the plain answer",
+    "no drama there", "it happens", "more later, maybe", "that's the routine"]),
+]) as unknown as readonly [readonly string[], readonly string[], readonly string[]];
+
+/** At most this many coins, and this many words of their names, in one line: more and two lines would share too much to be told apart. */
+export const TRADES_COINS_MAX = 2;
+const TRADES_COIN_WORDS_MAX = 2;
+
+/** "pepe", "pepe and bonk", "pepe, bonk and wif". */
+function listOf(names: readonly string[]): string {
+  return names.length <= 1 ? (names[0] ?? "") : `${names.slice(0, -1).join(", ")} and ${names.at(-1)!}`;
+}
+
+/**
+ * Its buys asked: every line naming `coins` (newest first, as the caller
+ * vouched them: the money it trades with now, names a line may say; at most
+ * TRADES_COINS_MAX, and two words of names but for a first name longer than
+ * that), or, with none, every line that says it has none to name.
+ */
+export function tradesAnswers(coins: readonly string[], seed: string, style: { lower: boolean }, o: CodeLineOptions = {}): string[] {
+  const clean = [...new Set(coins.map((c) => String(c ?? "").trim().replace(/\s+/g, " ")).filter((c) => /^[A-Za-z][A-Za-z '-]{0,23}$/.test(c)))];
+  const names: string[] = [];
+  for (const c of clean) {
+    const words = [...names, c].join(" ").split(" ").length;
+    if (names.length >= TRADES_COINS_MAX || (names.length > 0 && words > TRADES_COIN_WORDS_MAX)) break;
+    names.push(c);
+  }
+  if (!names.length) return styled(TRADES_NONE_SLOTS, seed, o, (a, b, c) => `${a}. ${b}, ${c}`);
+  const slots = [TRADES_SLOTS[0], TRADES_SLOTS[1].map((p) => p.replace("{c}", listOf(names))), TRADES_SLOTS[2]] as const;
+  return styled(slots, seed, o, (a, b, c) => `${a}. ${b}, ${c}`);
 }

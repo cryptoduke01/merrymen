@@ -48,11 +48,11 @@ import { ensureGroupchatSchema, getMember } from "./groupchat/store";
 import { STRATEGY_FLAVOUR, STRATEGY_SPOKEN, TRAIT_VOICE } from "./groupchat/templates";
 import { MUSINGS, SUBJECTS, TAKES } from "./groupchat/topics";
 import { xAppFromEnv, type FetchLike, type XApp, type XReply } from "./xpost/client";
-import { admitXPost, formFixed, merrymenMentioned, moneySaid, namedIn, tickerRefusal, vocabularyRefusal, type BaseGate, type XGateCtx } from "./xpost/gate";
+import { admitXPost, merrymenMentioned, moneySaid, namedIn, tickerRefusal, vocabularyRefusal, type BaseGate, type XGateCtx } from "./xpost/gate";
 import { ACTIVE_CADENCE, ANSWER_GAP_MS, ANSWER_STALE_MS, ANSWERS_PER_DAY, REPLY_STALE_MS, STANDARD_CADENCE, coinOf, hash32, introState, planPosts, replyDueAt, sendDecision, type PlanCadence, type PlanClock, type PlanIntent } from "./xpost/planner";
 import { APP_PAUSE_KEY, APP_PAUSE_MS, CREDITS_PAUSE_MS, PAUSE_KEY, readReplyComments, sendOne, type SendOutcome } from "./xpost/sender";
-import { isAnswerOptOut, isReplyOptOut, replyCandidate, tagCandidate, withoutReplyOptOut } from "./xpost/replies";
-import { asksAboutACoin, coinTalkIn, deicticPickIn, houseTalkIn, marketTalkIn, nameLikeWords, textWords, trustTalkIn, unknownWordIn } from "./xpost/words";
+import { isAnswerOptOut, isReplyOptOut, plainAsk, replyCandidate, tagCandidate, withoutReplyOptOut } from "./xpost/replies";
+import { coinTalkIn, deicticPickIn, houseTalkIn, marketTalkIn, nameLikeWords, textWords, trustTalkIn, unknownWordIn } from "./xpost/words";
 import { activeTenantsOf, repliesAllowedFor, repliesScopeOf } from "./xpost/scope";
 import {
   ANSWER_LOOKED_UP,
@@ -103,7 +103,7 @@ import { readSaleResults } from "./orchestrator-xpost-results";
 import { appendSaleOutcome, hasSaleOutcome } from "./xpost/sale-outcome";
 import { admitFiguresLine, cleanTicker, figuresTickers, withFigures, type FiguresSpec } from "./xpost/figures";
 import { hotAnswers, hotNoneAnswers, hotUnreadAnswers, majorAnswers, majorUnreadAnswers, marketAnswers, type HotRead, type MajorRead, type MarketRead } from "./xpost/market";
-import { chatAnswers, declineAnswers, vibeAnswers } from "./xpost/casual";
+import { chatAnswers, declineAnswers, selfAnswers, tradesAnswers, vibeAnswers } from "./xpost/casual";
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -185,21 +185,13 @@ const TEMPLATE_TRIES = 8;
 /** Send outcomes after which the post may exist on X: they keep their unit of the fleet's ceiling. */
 const MAY_BE_ON_X: ReadonlySet<SendOutcome> = new Set<SendOutcome>(["posted", "uncertain", "fault"]);
 /**
- * WHAT A CHAT DRAFT MAY BE REFUSED FOR AND STILL GET CODE'S FRIENDLY LINE
- * (2026-10-12): how it was put, never what it tried to say. A repeat, a stock
- * deflection, a model's note, an emoji or "!" too many, shouting or markup,
- * and only when what it said passes with its form put right (saidPasses in
- * writeAnswer). Anything else — a figure or an amount, sherwood, a buy, a
- * source, a word that may be a coin's name, advice, a forecast, the other
- * money, a body it does not have, a hidden or stray character — leaves the
- * tag unanswered, as before. NOT ITS LENGTH (red-team 2026-10-12): an
- * over-long condolence put a cheerful line up under "my dad just died"; an
- * over-long draft is not answered. Nor an opt-out line (opt-out-said): an
- * answer carries none (the owner's decision, 2026-10-12), and a draft that
- * words one its own way is not answered either.
+ * WHAT A TAG MAY BE READ AS AND STILL GET CODE'S BANTER, STRATEGY OR BUYS
+ * LINE (red-team review of daaae961): chat, a question about its trades, or
+ * one about what it can do or how to get an agent ("what do you do?" is both
+ * banter and what it can do). Anything else a banter-shaped tag was read as
+ * keeps its own way.
  */
-const CHAT_FALLBACK_REASONS: ReadonlySet<string> = new Set(["repeat", "fleet-repeat", "too-short", "stock-phrase", "meta", "emoji", "exclaim",
-  "caps", "markup"]);
+const CHAT_LINE_KINDS: ReadonlySet<string> = new Set(["chat", "own-trades", "capabilities", "onboarding"]);
 /** Log counters that describe a standing condition rather than something that happened. */
 const CONDITIONS: ReadonlySet<string> = new Set(["no-model-budget", "zone-unreadable", "owner-failed", "active-reply-polls-spent"]);
 
@@ -1668,13 +1660,36 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // "they are coming for everyone next". Only a whole tag on the banter
       // allowlist (banterAsk: how are you, who are you, tell me a joke, what do
       // you do for fun, what do you think about ai agents), one of the plain
-      // questions about what it trades (generalTradesQuestion, told its buys),
-      // or about how it trades and what it has been up to (selfAsk, told none),
-      // is drafted as chat; any other chat tag, a person, a group or an event
-      // among them, is answered by nothing: no row, no model call. A greeting
-      // is code's own line and never drafted.
+      // questions about what it trades (generalTradesQuestion), or about how it
+      // trades and what it has been up to (selfAsk), is answered (in code's
+      // words since the red-team review of daaae961, below); any other chat
+      // tag, a person, a group or an event among them, is answered by nothing:
+      // no row, no model call. A greeting is code's own line and never drafted.
       const chatAllowed = (text: string): boolean => banterAsk(text) || generalTradesQuestion(text) || selfAsk(text);
       const unbanteredChat = classified.kind === "chat" && !greeting && !chatAllowed(candidate.text);
+      // BANTER, HOW IT TRADES AND WHAT IT BOUGHT, IN CODE'S WORDS, NEVER A
+      // DRAFT (red-team review of daaae961, 2026-10-12). Drafted, those three
+      // allowlists posted, word for word and with no review, "doing good, i'm
+      // up on every trade this month", "this week ends green, i can feel it",
+      // "the top isn't in yet, relax", "tomorrow's gonna be a good day for
+      // everyone holding", "a whole new model of me is almost done", "you
+      // people never learn lol", "doing good, you're exit liquidity fren",
+      // "doing good, the fed is cooked", "i've been live for years" (two days
+      // old), "just hold and chill", "i run the biggest fund on robinhood
+      // chain" and "fresh launches, pepe is the strongest coin on the chain":
+      // the gate reads listed phrasings, and a model always finds another. The
+      // allowlists are whole tags, so their answers are code's lines too, as
+      // its mood and a decline are: banter gets a friendly line about itself
+      // (xpost/casual.ts chatAnswers), how it trades or what it is up to its
+      // strategy by name and what its rules are like (selfAnswers), and what
+      // it bought lately the coins it bought with the money it trades with now
+      // (tradesAnswers). No model call, no lookup. What it bought is never
+      // said under a reply prefix that names anyone else (as `general` below):
+      // that tag is answered by nothing.
+      const methodAsk = generalTradesQuestion(candidate.text) && /^(?:(?:gm|yo|hey|hi|ser|fren|bro|alan)[\s,!.]+){0,2}how\b/.test(plainAsk(candidate.text) ?? "");
+      const chatKind: "banter" | "self" | "trades" | null = greeting || !CHAT_LINE_KINDS.has(classified.kind) ? null
+        : banterAsk(candidate.text) ? "banter" : selfAsk(candidate.text) || methodAsk ? "self" : generalTradesQuestion(candidate.text) ? "trades" : null;
+      const tradesElsewhere = chatKind === "trades" && candidate.otherHandles === true;
       // A DECLINE OR ITS MOOD ONLY UNDER A TOP-LEVEL TAG (red-team review of
       // 1ed46625, 2026-10-12). Both are code's lines whose meaning is the
       // post they sit under, and code never reads that post: "can i buy it
@@ -1721,7 +1736,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       const marketToUnread = marketKind && !author;
       const asked: TagIntent = sherwoodTagged || authorSherwood || (classified.kind === "model" && (candidate.otherHandles || !namedClean))
         || (greeting && (classified.kind !== "chat" || candidate.otherHandles)) || unreadWord || unflaggedAdvice || unbanteredChat || casualUnderPost || closedFollowUp
-        || tradeMarket || codeLineElsewhere || marketToUnread ? { kind: "unanswered" } : classified;
+        || tradeMarket || codeLineElsewhere || marketToUnread || tradesElsewhere ? { kind: "unanswered" } : classified;
       // SHERWOOD IN ANY FORM, OR A MODEL QUESTION OFF THE ALLOWLIST, is
       // answered by nothing: the model line under "sherwood TGE soon?" reads
       // as Merrymen confirming a token, and a draft is never asked about the
@@ -1751,7 +1766,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // never the coin.
       const casualKind = asked.kind === "vibe" || asked.kind === "advice" ? asked.kind : null;
       // No model call at all for these: no allowance, no question read.
-      const undrafted = templated || hotCoded || marketCoded || casualKind !== null;
+      const undrafted = templated || hotCoded || marketCoded || casualKind !== null || chatKind !== null;
       // NO DRAFT UNDER OR QUOTING ITS OWN BUY OR SELL POST (red-team review of
       // daaae961, 2026-10-12). Quoting its posted "grabbed some pepe with real
       // money, the curve looked early" (and replying under it), "how are
@@ -1808,8 +1823,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // exact path, as it never gets the model line.
       const otherHandles = candidate.otherHandles === true;
       const general = !coinNamed && !otherHandles && generalTradesQuestion(candidate.text);
-      // Nothing is looked up for a greeting, its own mood or advice declined.
-      const intent = research && !greeting && casualKind === null ? asked : null;
+      // Nothing is looked up for a greeting, its own mood, advice declined, banter, its strategy or its buys.
+      const intent = research && !greeting && casualKind === null && chatKind === null ? asked : null;
       const answerKey = `llm-answers:${account.xUserId}:${utcDay(nowMs)}`;
       if (!undrafted) {
         if (!(await takeAllowance(shared, answerKey, ANSWER_DRAFTS_PER_DAY, nowMs))) {
@@ -1917,6 +1932,17 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       const casualLines = casualKind === "vibe" ? vibeAnswers(comment.id, facts.style, lineOpts)
         : casualKind === "advice" && candidate.advice === true ? declineAnswers(comment.id, facts.style, lineOpts) : [];
       if (casualLines.length) bump(`answer-casual-${casualKind ?? "advice"}`);
+      // BANTER, ITS STRATEGY, ITS BUYS, IN CODE'S WORDS (chatKind above). Its
+      // buys: those of the money it trades with now, newest first, never a
+      // name no line of the house's answers under, and none at all for an
+      // agent that is not trading (as an idle agent's draft was told none),
+      // nor for a tag that is not the plain question (`general`: no coin named,
+      // no other handle).
+      const tradeNames = !general || f.mode === "idle" ? [] : buys.filter((b) => b.paper === (f.mode === "paper") && !unshowableName(b.label)).map((b) => b.label);
+      const chatLines = chatKind === "banter" ? chatAnswers(comment.id, facts.style, lineOpts)
+        : chatKind === "self" ? selfAnswers(facts.strategy, comment.id, facts.style, lineOpts)
+        : chatKind === "trades" ? tradesAnswers(tradeNames, comment.id, facts.style, lineOpts) : [];
+      if (chatLines.length) bump(`answer-chat-${chatKind}`);
       // NO MODEL WORDS BESIDE A LINE OF COINS (red-team 2026-10-12): the gate
       // read a "what's hot?" draft before code put "$CHUMP 24h +41.2%" after
       // it, so "if i had to pick one it'd be the first", "these are my plays"
@@ -1949,14 +1975,14 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         await returnAllowance(shared, `llm:${utcDay(nowMs)}`, at());
       }
       if (market.length) bump("answer-code-words");
-      const coded = templated || market.length > 0 || casualLines.length > 0;
+      const coded = templated || market.length > 0 || casualLines.length > 0 || chatLines.length > 0;
       // CODE'S LINES, the model question's, a greeting's, a market answer's,
-      // its mood or a decline, this mention's own first: one it already said is
-      // a repeat to the gate, so the next is tried rather than none, and when
-      // all have been said lately, none. A paper agent's lines say paper: it is
-      // gated as a paper reply.
+      // its mood, a decline, banter, its strategy or its buys, this mention's
+      // own first: one it already said is a repeat to the gate, so the next is
+      // tried rather than none, and when all have been said lately, none. A
+      // paper agent's lines say paper: it is gated as a paper reply.
       const lines = greeting ? greetingAnswers(comment.id, facts.style, lineOpts)
-        : templated ? modelAnswers(comment.id, facts.style, lineOpts) : casualLines.length ? casualLines : market;
+        : templated ? modelAnswers(comment.id, facts.style, lineOpts) : casualLines.length ? casualLines : chatLines.length ? chatLines : market;
       const raw = coded
         ? lines[0]!
         : await draft(creds, answerPrompt({ ...facts, question: candidate.text, recentBuys: buys, boughtLately: boughtKind(f),
@@ -2080,67 +2106,14 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // own question may say "no read on that one".
       const pointsFree = candidate.followUp === "plain" || (candidate.followUp === undefined && !coinNamed);
       const pointed = !coded && verdict?.ok === true && pointsFree && deicticPickIn(withoutReplyOptOut(verdict.text));
-      // CHAT IS NEVER SILENCE BY DEFAULT (the owner's ask, 2026-10-12): a chat
-      // draft refused only for how it was put (CHAT_FALLBACK_REASONS: a
-      // repeat, its length, a stock deflection, a model's note, its
-      // punctuation, casing or markup) falls back to one of
-      // code's friendly lines about itself (xpost/casual.ts chatAnswers),
-      // gated as a code line, this mention's own first. NEVER AFTER A DRAFT
-      // REFUSED FOR WHAT IT SAID, NOR A PASS: one that named or claimed
-      // sherwood, claimed or named a buy, cited a source nothing was looked
-      // up in, said a word that may be a coin's name, gave advice, a forecast
-      // or a figure, or said the other money stays unanswered, as before; and
-      // so does a PASS or no draft at all (the model judged it had nothing
-      // honest to say, or could not be asked), so a sensitive tag is never
-      // answered with a cheerful line. Only chat: a coin, its own trades, what
-      // it can do or how to get an agent stay unsaid.
-      // AND ONLY PLAIN BANTER (red-team 2026-10-12): under "did merrymen get
-      // hacked?", "why did you guys steal my money?" or "wen tge for the
-      // merrymen model?" a teasing or sympathetic draft refused for its form
-      // put "ha, appreciate the tag, fren" up instead. The fallback
-      // is for a strict allowlist of whole banter tags (banterAsk: how are you,
-      // who are you, tell me a joke), never one that names money, a loss, a
-      // death, a token, a launch or the house, nor under a reply prefix that
-      // names anyone else.
-      // AND WHAT THE DRAFT SAID MUST PASS, ITS FORM PUT RIGHT (red-team
-      // 2026-10-12): the gate stops at its first reason, and its form clauses
-      // come before what a draft says, so "doing great, buy zapx now before it
-      // doubles!!" was refused only as exclaim and read as harmless. The draft,
-      // its note, stock phrase, emoji, "!", markup and shouting put right
-      // (gate.ts formFixed), is gated again against no
-      // recent post, and read as an answer handed nothing is; only if all of
-      // it passes was the refusal only for how it was put.
-      const saidPasses = (text: string): boolean => {
-        const body = withoutReplyOptOut(formFixed(text));
-        if (!body) return false;
-        const v = gate(body, false, true);
-        if (!v.ok || sherwoodNamed(v.text) || sherwoodMentioned(v.text)) return false;
-        const words = withoutReplyOptOut(v.text);
-        if ((!handed && trustTalkIn(words)) || (pointsFree && deicticPickIn(words))) return false;
-        return handed || told || (!coinTalkIn(words, f.name) && !unknownWordIn(words, f.name) && !marketTalkIn(words) && !houseTalkIn(words));
-      };
+      // NO FRIENDLY LINE IN PLACE OF A REFUSED DRAFT (red-team review of
+      // daaae961, 2026-10-12). The fallback was for plain banter alone, and
+      // banter, like its strategy and its buys, is now answered in code's own
+      // words from the start (chatKind above): a draft refused for anything at
+      // all, or a PASS, leaves the tag unanswered.
       const drafted = verdict?.ok === true && !postsName && !unlookedCoin && !untrusted && !pointed ? verdict.text : null;
-      const benignRefusal = raw !== null && !claimed && !named && !unlooked && verdict !== null && !verdict.ok && CHAT_FALLBACK_REASONS.has(verdict.reason) && saidPasses(raw);
-      // Never under a name the house would never show (unshowableName: a slur, a political coin).
-      // NOR UNDER A TAG THAT NAMES A COIN IN ANY WORDS (red-team 2026-10-12):
-      // "you bought chump today, right?", "zapx is gonna be massive, the team
-      // is legit, agree?" and "chump is safe, the team is doxxed, right?" read
-      // as chat, and "word, right on, pal" went up under each, confirming a
-      // buy it never made or agreeing a coin is safe. A word that might be a
-      // coin's name, or talk about one, and there is no fallback.
-      const chatFallback = !coded && drafted === null && benignRefusal && (asked.kind === "chat" || looked?.intent === "chat") && !unshowableName(candidate.text)
-        && banterAsk(candidate.text) && candidate.otherHandles !== true
-        && !coinNamed && !asksAboutACoin(candidate.text) && nameLikeWords(candidate.text).length === 0;
-      let fallback: string | null = null;
-      if (chatFallback) {
-        for (const line of chatAnswers(comment.id, facts.style, lineOpts)) {
-          const v = gate(line, true);
-          if (v.ok) { fallback = v.text; break; }
-        }
-        bump(fallback ? "answer-chat-fallback" : "answer-chat-fallback-spent");
-      }
       const finishedAt = at();
-      const admitted = drafted ?? fallback;
+      const admitted = drafted;
       // THE FIGURES LINE, CODE'S, AFTER THE GATE (xpost/figures.ts): only an
       // active owner's answer, only from what research built for this tag,
       // only a line in the renderer's own grammar (admitFiguresLine, again
@@ -2186,12 +2159,13 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // given anything looked up is never handed on (ANSWER_LOOKED_UP).
       const lookedUp = !!looked && (looked.research.length > 0 || !!looked.creatorClaim || lined !== null);
       // AND BY WHAT KIND OF EXCHANGE IT WAS (red-team review of 1ed46625): a
-      // greeting, or chat handed nothing and told none of its buys, under a
-      // top-level tag or a plain follow-up, is one a follow-up may be chatted
-      // under (ANSWER_PLAIN_THREAD); every other answer closes its thread to
-      // all but a greeting.
+      // greeting, or banter (code's friendly line since the review of
+      // daaae961), under a top-level tag or a plain follow-up, is one a
+      // follow-up may be chatted under (ANSWER_PLAIN_THREAD); every other
+      // answer, its strategy and its buys among them, closes its thread to all
+      // but a greeting.
       const plainThread = !!body && !lookedUp && (candidate.followUp === undefined || candidate.followUp === "plain")
-        && (greeting || (!coded && asked.kind === "chat" && !told && (looked === null || looked.intent === "chat")));
+        && (greeting || chatKind === "banter");
       const id = await schedulePost(shared, {
         tenant: account.tenant, xUserId: account.xUserId, kind: "answer", dedupeKey, body: body ?? "",
         coin: lookedUp ? ANSWER_LOOKED_UP : plainThread ? ANSWER_PLAIN_THREAD : null, decisionId: null, dueAtMs: finishedAt, nowMs: finishedAt,
