@@ -169,7 +169,7 @@ describe("comment reply consent", () => {
     const dialog = ui.container.querySelector("dialog")?.textContent ?? "";
     assert.match(dialog, new RegExp(`reply as @${HANDLE} to selected posts that tag it, reply to it or quote it\\.`));
     assert.match(dialog, /Answers go out right away: they don’t wait under Coming up/);
-    assert.match(dialog, /It answers people who tag it, reply to it or quote it, a few times a day each: up to 60 answers a day on top of its posts, and at most six to one person a day\./);
+    assert.match(dialog, /It answers questions about the market, coins, how it trades and what it can do, never small talk, from people who tag it, reply to it or quote it, a few times a day each: up to 60 answers a day on top of its posts, and at most six to one person a day\./);
     assert.match(dialog, /Answers carry no opt-out line, and it never answers someone who asked it to stop\./);
     // No promise to anyone that they can reply stop (the owner's decision, 2026-10-12): replying or quoting is asking.
     assert.doesNotMatch(dialog, /Anyone can reply stop|can reply stop to opt out|after 30 days/);
@@ -278,12 +278,12 @@ describe("the switch and the warning", () => {
     await press(theSwitch(), "the switch");
     assert.deepEqual(writes(), []);
     const said = ui.container.querySelector("dialog")?.textContent ?? "";
-    assert.match(said, /a few passing thoughts a day and a post for most coins it buys, and why/);
+    assert.match(said, /a few reads on the market a day and a post for most coins it buys, and why/);
     assert.match(said, /Posts go out on their own, up to 12 a day and at least an hour apart\./);
     assert.match(said, /at least ten minutes first/);
     assert.doesNotMatch(said, /a few a day at most|now and then/, "it does not understate an active agent's posting");
     // Its answers may carry figures Merrymen builds from public data (2026-10-12): never "no prices or amounts".
-    assert.match(said, /It never posts trade alerts or error messages, and its answers may carry market figures built from public data\./);
+    assert.match(said, /It never posts trade alerts or error messages, and its market reads and answers may carry market figures built from public data\./);
     assert.doesNotMatch(said, /prices or amounts/);
     await press(buttons(`Let it post as @${HANDLE}`)[0], "the warning's confirm");
     assert.deepEqual(writes()[0]?.body, { action: "enable", xUserId: X_ID, owner: OWNER, tz: BROWSER_TZ });
@@ -788,7 +788,7 @@ describe("the warning keeps its words", () => {
       "Let it post as ${handle}",
       "Not now",
       // An active agent's, as iOS says them.
-      "It writes its own posts: a hello first, then a few passing thoughts a day and a post for most coins it buys, and why. It never posts trade alerts or error messages, and its answers may carry market figures built from public data. Your saved options can add public wallet or token addresses and completed sale results.",
+      "It writes its own posts: a hello first, then a few reads on the market a day and a post for most coins it buys, and why. It never posts trade alerts or error messages, and its market reads and answers may carry market figures built from public data. Your saved options can add public wallet or token addresses and completed sale results.",
       "Posts go out on their own, up to 12 a day and at least an hour apart. Each one waits under Coming up for at least ten minutes first, and you can skip it there. Turn this off or disconnect X at any time.",
       "Short lines in its own words, a few times a day.",
     ]) {
@@ -807,7 +807,7 @@ describe("the warning keeps its words", () => {
       "Each reply waits under Coming up for at least ten minutes first, with a link to the comment, and you can skip it there. Turn replies off at any time to cancel waiting replies.",
       "Your Merryman will reply as ${handle} to selected posts that tag it, reply to it or quote it.",
       "It chooses which posts to answer; it won’t answer every one. Answers go out right away: they don’t wait under Coming up, so you can’t skip one first.",
-      "It answers people who tag it, reply to it or quote it, a few times a day each: up to 60 answers a day on top of its posts, and at most six to one person a day. Answers carry no opt-out line, and it never answers someone who asked it to stop. Turn replies off at any time to stop answering.",
+      "It answers questions about the market, coins, how it trades and what it can do, never small talk, from people who tag it, reply to it or quote it, a few times a day each: up to 60 answers a day on top of its posts, and at most six to one person a day. Answers carry no opt-out line, and it never answers someone who asked it to stop. Turn replies off at any time to stop answering.",
       "Answers may include market figures from public data (CoinGecko, GeckoTerminal, Fomo and Bitquery), such as a coin’s price, market cap, volume or recent change. Merrymen adds them as the data showed them; they are never advice.",
       "Let it reply as ${handle}",
     ]) {
