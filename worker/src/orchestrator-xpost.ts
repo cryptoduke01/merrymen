@@ -749,15 +749,32 @@ function withoutHandle(text: string, username: string): string {
  * toward yes: "Frogger" asking what's hot beside a trending $FROG costs one
  * answer. Exported for tests.
  */
-export function authorShows(author: { username: string; name: string } | undefined, tickers: readonly string[]): boolean {
+/**
+ * AND THE NAMES COINGECKO LISTS ITS COINS UNDER (red-team review of daaae961,
+ * 2026-10-12): "@chimpplanet · Chimp Planet | stealth launch, LP burned"
+ * asked "what's hot?" and got "trending $CHMP 24h +64.3% …; fomo: most
+ * bought $CHMP", CHMP listed as "Chimp Planet": a project's own account goes
+ * by its name, not its ticker. `names` (ResearchBundle.shownNames): yes when
+ * the handle or the display name holds any word of one of four letters or
+ * more ("token" and "coin" aside), or all its letters run together.
+ */
+const NAME_WORD_FILLER: ReadonlySet<string> = new Set(["token", "tokens", "coin", "coins"]);
+export function authorShows(author: { username: string; name: string } | undefined, tickers: readonly string[], names: readonly string[] = []): boolean {
   if (!author) return true;
   const said = [author.username, author.name].map((s) => String(s ?? "").normalize("NFKD").replace(/\p{M}/gu, "").toLowerCase());
   const runs = said.map((s) => s.replace(/[^a-z0-9]/g, ""));
   const words = said.flatMap((s) => s.split(/[^a-z0-9]+/)).filter((w) => w !== "");
-  return tickers.some((t) => {
+  const byTicker = tickers.some((t) => {
     const k = String(t ?? "").toLowerCase();
     return k.length >= 3 ? runs.some((r) => r.includes(k)) : k.length > 0 && words.includes(k);
   });
+  const byName = names.some((n) => {
+    const letters = String(n ?? "").normalize("NFKD").replace(/\p{M}/gu, "").toLowerCase();
+    const run = letters.replace(/[^a-z0-9]/g, "");
+    const parts = letters.split(/[^a-z0-9]+/).filter((w) => w.length >= 4 && !NAME_WORD_FILLER.has(w));
+    return (run.length >= 3 && runs.some((r) => r.includes(run))) || parts.some((w) => runs.some((r) => r.includes(w)));
+  });
+  return byTicker || byName;
 }
 
 /**
@@ -1883,6 +1900,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       let marketRead: MarketRead = { majors: null, chain: null };
       // ANSWERED BY NOTHING, AS RESEARCH READ IT (ResearchBundle.unanswered): no draft, a skipped row, the allowances back.
       let researchUnanswered = false;
+      // The names CoinGecko lists the line's coins under, read only against who is asking (authorShows).
+      let lineNames: string[] = [];
       if (research && intent) {
         const bundle = await research.gather({ shared, intent, tenant: account.tenant, xUserId: account.xUserId, facts: f, posts, fomo: researchFomo,
           // Under another handle no question is one the exact path reads (ResearchInput.question: absent, never).
@@ -1891,6 +1910,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         looked = { intent: bundle.intent ?? intent.kind, research: bundle.facts, ...(bundle.claim ? { creatorClaim: bundle.claim } : {}),
           ...(bundle.exact === true && candidate.address && !otherHandles ? { boughtExact: true } : {}) };
         if (bundle.figures?.length && bundle.facts.length) figures = bundle.figures;
+        if (bundle.shownNames?.length) lineNames = bundle.shownNames;
         if (hotCoded && bundle.hot) hotRead = bundle.hot;
         if (asked.kind === "major" && figures && bundle.major) majorRead = bundle.major;
         if (marketCoded && bundle.market) marketRead = bundle.market;
@@ -1928,13 +1948,15 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // +64.3% …; fomo: most bought $ZAPX" in reply, the house account handing
       // a token's own account its coin as trending and most bought. A market,
       // hot or major answer whose figures would show a ticker the author's
-      // handle or display name holds (authorShows; bitcoin, ether and solana
+      // handle or display name holds, or the name coingecko lists such a coin
+      // under (red-team review of daaae961: "@chimpplanet" was shown CHMP,
+      // listed as "Chimp Planet") (authorShows; bitcoin, ether and solana
       // aside, the same for every asker) is answered by nothing: a skipped row,
       // and the allowances taken for a draft go back.
       const lineTickers = (figures ?? []).flatMap((s) => (s.kind === "pools" || s.kind === "majors" ? s.coins.map((c) => c.symbol)
         : s.kind === "crowd" || s.kind === "trending" ? s.symbols : s.kind === "major" ? [s.symbol] : []))
         .map((s) => cleanTicker(s)).filter((t): t is string => t !== null && !MARKET_MAJORS.some((m) => m.symbol.toUpperCase() === t));
-      if ((hotCoded || marketCoded || asked.kind === "major") && lineTickers.length > 0 && authorShows(author, lineTickers)) {
+      if ((hotCoded || marketCoded || asked.kind === "major") && (lineTickers.length > 0 || lineNames.length > 0) && authorShows(author, lineTickers, lineNames)) {
         if (!undrafted) {
           await returnAllowance(shared, answerKey, at());
           await returnAllowance(shared, `llm:${utcDay(nowMs)}`, at());

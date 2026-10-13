@@ -4994,3 +4994,51 @@ test("what's hot and how's the market never show a big coin with two neighbourin
   await w.step();
   assert.match(String(w.sends[0]?.text ?? ""), /trending \$CHUMP 24h \+312%/);
 });
+
+/** CHMP listed on coingecko as `listedAs`, trending with FROGGO, and Fomo's most bought: the research the red team ran against a token's own account. */
+function hotListedAs(pools: GeckoPool[], listedAs: Record<string, string>, crowd: string) {
+  const broker: FomoBroker = {
+    async call(tool) {
+      const p = pools.find((x) => x.name.startsWith(`${crowd} /`))!;
+      return { status: "ok", tool, data: { topTokens: [{ token: { address: p.tokenAddress, key: p.tokenAddress, chain: {} }, label: { symbol: crowd, name: null }, buyers: 9, sellers: 2 }] } } as never;
+    },
+    memory: { get: async () => null, set: async () => {}, clear: async () => {} }, report: async () => {}, configured: () => true,
+  };
+  return createXResearch({
+    hotPools: async () => ({ pools, failed: false }),
+    chainListings: async (addresses) => ({ failed: false, listings: pools.filter((p) => addresses.includes(p.tokenAddress)).map((p) => {
+      const sym = poolSymbol(p);
+      return { address: p.tokenAddress, id: sym.toLowerCase(), symbol: sym.toLowerCase(), name: listedAs[sym] ?? sym, rank: 3100 };
+    }) }),
+    majors: { configured: () => true, search: async () => ({ hits: [], failed: true }), market: async () => ({ market: null, failed: true }),
+      markets: async () => ({ failed: false, markets: [] }), trending: async () => ({ coins: [], failed: false }), top: TOP_READ },
+    fomo: () => broker,
+  });
+}
+
+test("a token's own account is never shown its coin when its handle or name is the coin's listed name, not its ticker (red-team review of daaae961, 2026-10-12)", async (t) => {
+  // POSTED at daaae961 to @chimpplanet "Chimp Planet | stealth launch, LP burned" and @ChimpPlanetHQ "Chimp Planet": "robinhood chain's trending list has a
+  // cluster of busy coins, … geckoterminal robinhood: trending $CHMP 24h +64.3% vol ~$1.1M, $FROGGO 24h +12.5% vol ~$400k; fomo: most bought $CHMP."
+  const pools = () => [namedPool("CHMP", 1, 64.3, 1.1e6), namedPool("FROGGO", 2, 12.5, 400_000)];
+  const env = { ...RESEARCH_ON, MERRYMEN_XPOST_FOMO: "1" };
+  for (const ask of ["what's hot?", "how's the market?"]) {
+    for (const [username, name] of [["chimpplanet", "Chimp Planet | stealth launch, LP burned"], ["ChimpPlanetHQ", "Chimp Planet"], ["ChmpOfficial", "CHMP | stealth launch"],
+      ["planet_watch", "Chimp Fan"]] as [string, string][]) {
+      const w = await world(t, { ...ALAN, env, research: hotListedAs(pools(), { CHMP: "Chimp Planet" }, "CHMP") });
+      w.setAuthors({ "333": { username, name } });
+      w.setInbox([alanTag(MENTION, ask)]);
+      await w.step();
+      assert.deepEqual(w.sends, [], `${username} / ${ask}: ${JSON.stringify(w.sends)}`);
+      assert.equal((await w.answers())[0]?.reason, "research:author-ticker", `${username} / ${ask}`);
+    }
+    // Anyone else is shown the line.
+    const w = await world(t, { ...ALAN, env, research: hotListedAs(pools(), { CHMP: "Chimp Planet" }, "CHMP") });
+    w.setInbox([alanTag(MENTION, ask)]);
+    await w.step();
+    assert.match(String(w.sends[0]?.text), /trending \$CHMP 24h \+64\.3%/, ask);
+  }
+  // The screen itself: a listed name's words of four letters or more, or all its letters run together; "token" and "coin" alone are no such word.
+  assert.equal(authorShows({ username: "zapprotocol", name: "Zap Protocol" }, ["ZPX"], ["Zap Protocol"]), true);
+  assert.equal(authorShows({ username: "reader_333", name: "A Reader" }, ["ZPX"], ["Zap Protocol"]), false);
+  assert.equal(authorShows({ username: "tokenfan", name: "coin talk" }, ["ZPX"], ["Zap Token Coin"]), false);
+});

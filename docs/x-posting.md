@@ -936,7 +936,7 @@ launch, LP burned" asking "what's hot?" got "trending $ZAPX 24h +64.3% …;
 fomo: most bought $ZAPX", and "@alanaidale @ZapXOfficial are you bullish?"
 got "in a patient sort of way"). A market, hot or major line goes only to an
 author X named, and never when the figures would show a ticker the author's
-handle or display name holds (`authorShows`; bitcoin, ether and solana
+handle or display name holds, or whose name as CoinGecko lists it the author goes by (any word of four letters or more, or all its letters run together; red-team review of daaae961: "@chimpplanet · Chimp Planet | stealth launch" was shown CHMP, listed as "Chimp Planet") (`authorShows`; bitcoin, ether and solana
 aside): a skipped `research:author-ticker` row. Under a reply prefix that
 names anyone else, no market, hot, major, mood or decline line. And the
 mood line's parts that read as a yes ("in a patient sort of way",

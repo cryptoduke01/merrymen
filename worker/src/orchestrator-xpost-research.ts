@@ -1041,6 +1041,17 @@ export interface ResearchBundle {
    */
   figures?: FiguresSpec;
   /**
+   * THE NAMES COINGECKO LISTS THE FIGURES' COINS UNDER (red-team review of
+   * daaae961, 2026-10-12): each chain coin the line shows (in the pools or as
+   * Fomo's most bought) and a major, but never bitcoin, ether or solana,
+   * which are the same for every asker. Never shown to anyone: read only
+   * against who is asking (orchestrator-xpost.ts authorShows), as the
+   * tickers are, because "@chimpplanet · Chimp Planet | stealth launch" was
+   * shown its coin CHMP, listed as "Chimp Planet", as trending and most
+   * bought.
+   */
+  shownNames?: string[];
+  /**
    * WHAT'S HOT AS CODE READ IT, for code's own words (xpost/market.ts): how
    * many coins the line shows and which way the first went on the day; zero
    * coins when nothing is past the floors. Absent: the index was not read.
@@ -1945,7 +1956,7 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
        * simply off and a tag goes on exactly as it did before them. "unread":
        * it could not be asked this time, or did not answer.
        */
-      const majorBundle = async (query: string): Promise<{ kind: "major"; facts: string[]; figures: FiguresSpec; read: MajorRead } | { kind: "none" } | { kind: "unread" }> => {
+      const majorBundle = async (query: string): Promise<{ kind: "major"; facts: string[]; figures: FiguresSpec; read: MajorRead; names: string[] } | { kind: "none" } | { kind: "unread" }> => {
         if (majors.configured?.() === false) {
           notes.push("majors-off");
           return { kind: "none" };
@@ -1991,7 +2002,9 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
         }
         notes.push("major");
         return { kind: "major", facts, read: majorReadOf(m), figures: [{ kind: "major", symbol: m.symbol, rank: m.rank, priceUsd: m.priceUsd, marketCapUsd: m.marketCapUsd,
-          volume24hUsd: m.volume24hUsd, change24hPct: m.change24hPct, change7dPct: m.change7dPct }] };
+          volume24hUsd: m.volume24hUsd, change24hPct: m.change24hPct, change7dPct: m.change7dPct }],
+          // Its name, read against who is asking, but for bitcoin, ether and solana (ResearchBundle.shownNames).
+          names: MARKET_MAJORS.some((x) => x.id === m.id) || typeof m.name !== "string" ? [] : [m.name] };
       };
       /** A public x-answer read of Fomo, keyed by this X account (its hourly cap). */
       const fomoOpts = (ms: number) => ({
@@ -2116,10 +2129,11 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
         const shown = kept.slice(0, HOT_COINS);
         // Fomo's labels are the provider's: kept only for a coin the same screen kept, by its address, through the sanitiser.
         const byToken = new Map(kept.map((s) => [s.token, s.ticker] as const));
-        const crowd: string[] = [];
+        const crowd: string[] = [], crowdTokens: string[] = [];
         for (const c of dataOf<TokenActivityData>(crowdEnv)?.topTokens ?? []) {
-          const ticker = byToken.get(String(c?.token?.address ?? "").toLowerCase());
-          if (ticker && !crowd.includes(ticker)) crowd.push(ticker);
+          const token = String(c?.token?.address ?? "").toLowerCase();
+          const ticker = byToken.get(token);
+          if (ticker && !crowd.includes(ticker)) { crowd.push(ticker); crowdTokens.push(token); }
           if (crowd.length >= HOT_CROWD) break;
         }
         if (broker && !crowd.length) notes.push("fomo-nothing");
@@ -2136,7 +2150,9 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
           ...(crowd.length ? [{ kind: "crowd" as const, symbols: crowd }] : []),
           ...(trending.length ? [{ kind: "trending" as const, symbols: trending }] : []),
         ];
-        return { facts: hotPhrases({ changes: shown.map((s) => s.pool.change24hPct), crowd: crowd.length, trending: trending.length }), figures,
+        // The names CoinGecko lists the line's chain coins under, read only against who is asking (ResearchBundle.shownNames).
+        const shownNames = [...new Set([...shown.map((s) => s.token), ...crowdTokens].map((t) => listingOf(t)?.name).filter((n): n is string => typeof n === "string" && n.trim() !== ""))];
+        return { facts: hotPhrases({ changes: shown.map((s) => s.pool.change24hPct), crowd: crowd.length, trending: trending.length }), figures, shownNames,
           hot: { coins: shown.length, lead: moveOf(shown[0]!.pool.change24hPct) }, lookups, notes };
       };
       /**
@@ -2184,7 +2200,7 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
           ...(crowd ? [crowd] : []),
         ];
         notes.push("market");
-        return { facts, ...(figures.length ? { figures } : {}), market: read, ...(hot.hot ? { hot: hot.hot } : {}), lookups, notes };
+        return { facts, ...(figures.length ? { figures } : {}), ...(hot.shownNames?.length ? { shownNames: hot.shownNames } : {}), market: read, ...(hot.hot ? { hot: hot.hot } : {}), lookups, notes };
       };
       const i = input.intent;
       const f = input.facts;
@@ -2249,7 +2265,7 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
             return await marketBundle();
           case "major": {
             const found = await majorBundle(i.query);
-            if (found.kind === "major") return { facts: found.facts, figures: found.figures, major: found.read, lookups, notes };
+            if (found.kind === "major") return { facts: found.facts, figures: found.figures, major: found.read, ...(found.names.length ? { shownNames: found.names } : {}), lookups, notes };
             // A WORD IS NO COIN UNTIL COINGECKO MATCHED IT (red-team review,
             // 2026-10-12). "what do you think of black people?", "thoughts on gay
             // marriage?", "thoughts on trans kids?" are a major's shape with a
