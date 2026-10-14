@@ -104,6 +104,7 @@ import { appendSaleOutcome, hasSaleOutcome } from "./xpost/sale-outcome";
 import { admitFiguresLine, cleanTicker, figuresTickers, withFigures, type FiguresSpec } from "./xpost/figures";
 import { hotAnswers, hotNoneAnswers, hotUnreadAnswers, insightFacts, majorAnswers, majorUnreadAnswers, marketAnswers, type HotRead, type MajorRead, type MarketRead } from "./xpost/market";
 import { selfAnswers, tradesAnswers } from "./xpost/casual";
+import { recapFigures, recapLines } from "./xpost/recap";
 import { accusationIn, CHECK_VOCABULARY, checkAnswers, type CheckRead } from "./xpost/check";
 
 const MIN = 60_000;
@@ -1103,11 +1104,15 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
                 // THE OWNER'S NIGHT NEVER HOLDS AN ANSWER. Someone who tagged an
                 // active agent at 3am the owner's time is answered then: the
                 // night keeps the owner's own timeline quiet, not a reply to a
-                // person who asked. Every other post waits for morning.
-                asleep = post.kind !== "answer" && (!z.ok || isAsleep(z.tz, post.tenant, t));
+                // person who asked. NOR AN ACTIVE AGENT'S TRADE POSTS (the
+                // owner's ask, 2026-10-14: PlanCadence.tradesAtNight): it trades
+                // around the clock, and its buys, sales and recaps go out when
+                // they happen. Every other post waits for morning.
+                const nightTrade = cadenceOf(post.tenant).tradesAtNight && (post.kind === "buy" || post.kind === "sell" || post.kind === "recap");
+                asleep = post.kind !== "answer" && !nightTrade && (!z.ok || isAsleep(z.tz, post.tenant, t));
                 if (z.ok) dayOf = (ms) => localDay(z.tz, ms);
               }
-              const d = sendDecision(post, account, t, asleep, dayOf);
+              const d = sendDecision(post, account, t, asleep, dayOf, { tradeStaleMs: cadenceOf(post.tenant).tradeStaleMs });
               if (d.action === "cancel") {
                 if (await cancelPost(shared, post.id, d.reason, t)) bump("cancelled");
                 continue;
@@ -1207,7 +1212,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
                 continue;
               }
               if (!answer) release.push(() => returnAllowance(shared, ownerDayKey, at()));
-              if (post.kind === "buy" || post.kind === "sell") {
+              // A recap is a trade post: it shares the trade allowance with the buys and sales it sums up.
+              if (post.kind === "buy" || post.kind === "sell" || post.kind === "recap") {
                 const tradeDayKey = `tradeday:${post.xUserId}:${localDayKey}`;
                 // Older deployments have no shared buy/sell counter. Their
                 // durable sends still consume today's slots, across owners.
@@ -1547,6 +1553,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
           cadence: cadenceOf(account.tenant),
           model,
           kinds: { buys: account.prefs.buys, casual: account.prefs.casual },
+          // A recap says only trades of the money it trades with now.
+          money: f.mode === "idle" ? null : f.mode,
         });
         // ITS RECENT POSTS, TWICE: `recentOwn`, everything, what each draft is
         // gated against; `shownOwn`, what a prompt is shown as its recent
@@ -2548,6 +2556,31 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         if (!tokenDisclosure || tokenDisclosure.address !== call.token.toLowerCase()) return { outcome: "token-unverified", body: null };
       }
       prompt = sellPrompt({ ...facts, coin: intent.coin, paper: false, outcome: call.outcome });
+    } else if (intent.kind === "recap") {
+      // A RECAP IS CODE'S WORDS AND CODE'S FIGURES (xpost/recap.ts): no model
+      // call, so a burst is said even when the model passes or is down. The
+      // first of its lines the gate admits, then its figures line, or nothing.
+      const money = f.mode === "idle" ? null : f.mode;
+      if (!money) return { outcome: "recap-idle", body: null };
+      gate.mode = money;
+      let said: string | null = null, why = "recap-gate";
+      for (const line of recapLines(intent.dedupeKey, { paper: money === "paper" })) {
+        const v = admitXPost(line, gate, BASE_GATE);
+        if (v.ok) {
+          said = v.text;
+          break;
+        }
+        why = `gate:${v.reason}`;
+      }
+      const lined = said ? figuresFor(said, recapFigures(intent), ownNamesOf(f.name), []) : null;
+      const recapBody = lined?.line ? lined.text : null;
+      const written = await schedulePost(shared, {
+        tenant: account.tenant, xUserId: account.xUserId, kind: "recap", dedupeKey: intent.dedupeKey, body: recapBody ?? "",
+        coin: null, decisionId: null, dueAtMs: intent.dueAtMs, nowMs,
+        status: recapBody ? "scheduled" : "skipped", reason: recapBody ? null : said ? "recap-figures-left-out" : why,
+      });
+      if (written === null) return { outcome: "already-written", body: null };
+      return { outcome: recapBody ? "drafted-recap" : "not-posted", body: recapBody };
     } else {
       // A trade-talk day is handed no seed, any other day no coin: neither is
       // offered, or vouched to the gate, on the day it is not about.

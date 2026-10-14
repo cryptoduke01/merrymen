@@ -191,7 +191,7 @@ const replyHint = (handle: string, active: boolean) => active
   ? `Selected posts that tag your Merryman, reply to it or quote it, answered as ${handle} right away, up to 60 a day on top of its posts.`
   : `Selected comments on your Merryman’s coin posts, answered as ${handle}. Replies share the post limit and ten-minute review window.`;
 
-const KIND_LABEL: Record<XUpcomingPost["kind"], string> = { intro: "Hello post", casual: "Casual post", buy: "Buy post", sell: "Sale post", reply: "Comment reply", answer: "Answer to a tag" };
+const KIND_LABEL: Record<XUpcomingPost["kind"], string> = { intro: "Hello post", casual: "Casual post", buy: "Buy post", sell: "Sale post", reply: "Comment reply", answer: "Answer to a tag", recap: "Trade recap" };
 const commentUrl = (post: XUpcomingPost | XRecentPost) => /^\d{1,25}$/.test(post.replyToTweetId ?? "")
   ? `https://x.com/i/status/${post.replyToTweetId}` : null;
 

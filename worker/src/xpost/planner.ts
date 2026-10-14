@@ -18,7 +18,10 @@
  *     writes it under its UNIQUE dedupe key, which is what makes a second
  *     plan of the same thing (another replica, the next minute) a no-op;
  *   - plan while the owner is asleep. A post drafted at night would be the
- *     first thing on their timeline at 3am local, or a stale draft by morning;
+ *     first thing on their timeline at 3am local, or a stale draft by morning.
+ *     The one exception is an active agent's trade posts (PlanCadence
+ *     .tradesAtNight, 2026-10-14): it trades around the clock, and its buys,
+ *     sales and recaps go out when they happen;
  *   - plan anything but the intro before the intro has been dealt with — a
  *     coin post as the account's first ever post is how a timeline becomes a
  *     bot's, and it is the intro that says an AI trading agent is posting.
@@ -60,6 +63,30 @@ export const BUY_JITTER_MIN = 10;
 export const BUY_JITTER_MAX = 40;
 /** A buy post still waiting this long after it was drafted is stale; one that could not go out within this of the fill is not planned. */
 export const BUY_STALE_MS = 8 * HOUR;
+/**
+ * AN ACTIVE AGENT'S WIDER WINDOW (the owner's ask, 2026-10-14: "widen the
+ * 2-hour window"). Its trades are posted while six hours fresh, and a post
+ * may go out up to ten hours after its fill: a morning burst is still news
+ * that afternoon.
+ */
+export const ACTIVE_TRADE_FRESH_MS = 6 * HOUR;
+export const ACTIVE_TRADE_STALE_MS = 10 * HOUR;
+/**
+ * THE RECAP (planRecap). A single trade post planned to go out further
+ * ahead than RECAP_HORIZON_MS is left for the recap instead. A recap is
+ * planned when at least RECAP_MIN_UNPOSTED trades of the window were not
+ * posted one by one, the newest of them at least RECAP_SETTLE_MS old (the
+ * burst has paused) or RECAP_FLUSH_UNPOSTED of them waiting, and no recap
+ * went out in RECAP_GAP_MS. It covers every trade since the last recap, at
+ * most RECAP_WINDOW_MS back, and goes out within RECAP_MAX_PUSH_MS.
+ */
+export const RECAP_HORIZON_MS = 2 * HOUR;
+export const RECAP_MIN_UNPOSTED = 3;
+export const RECAP_FLUSH_UNPOSTED = 8;
+export const RECAP_SETTLE_MS = 20 * MIN;
+export const RECAP_GAP_MS = 3 * HOUR;
+export const RECAP_WINDOW_MS = 12 * HOUR;
+export const RECAP_MAX_PUSH_MS = 4 * HOUR;
 /** A reply waiting this long is no longer timely. */
 export const REPLY_STALE_MS = 24 * HOUR;
 export const REPLY_ROOT_MAX_AGE_MS = 72 * HOUR;
@@ -133,6 +160,27 @@ export interface PlanCadence {
    * perDay and the gap. Checked when planned and claimed again at send time.
    */
   coinFoldMs: number;
+  /**
+   * TRADE POSTS THROUGH THE OWNER'S NIGHT (the owner's ask, 2026-10-14: "let
+   * his trade posts through at night"). The night keeps a person's own
+   * timeline quiet; an operator's trading agent trades around the clock, and
+   * a buy it made at three in the morning was never posted at all (planned
+   * only in the morning, by then past its freshness). True: buys, sales and
+   * recaps are planned and sent at night; the intro and casual posts still
+   * wait for morning.
+   */
+  tradesAtNight: boolean;
+  /** A trade is posted about only while it is this fresh. */
+  tradeFreshMs: number;
+  /** A trade post that cannot go out within this of its fill is not planned; one still waiting this long after it was drafted is stale. */
+  tradeStaleMs: number;
+  /**
+   * ONE RECAP FOR A BURST (the owner's ask, 2026-10-14): when more trades
+   * come in than the gap lets it post one by one, the ones that could not
+   * go out soon are said together in one recap post, instead of a queue of
+   * single posts that goes stale (planRecap).
+   */
+  recap: boolean;
 }
 
 export const STANDARD_CADENCE: Readonly<PlanCadence> = Object.freeze({
@@ -145,6 +193,10 @@ export const STANDARD_CADENCE: Readonly<PlanCadence> = Object.freeze({
   casualQuietDaysInTen: CASUAL_QUIET_DAYS_IN_TEN,
   tradeTalkInTen: 3,
   coinFoldMs: BUY_COIN_FOLD_MS,
+  tradesAtNight: false,
+  tradeFreshMs: BUY_FRESH_MS,
+  tradeStaleMs: BUY_STALE_MS,
+  recap: false,
 });
 
 /**
@@ -163,6 +215,10 @@ export const ACTIVE_CADENCE: Readonly<PlanCadence> = Object.freeze({
   casualQuietDaysInTen: 0,
   tradeTalkInTen: 7,
   coinFoldMs: 0,
+  tradesAtNight: true,
+  tradeFreshMs: ACTIVE_TRADE_FRESH_MS,
+  tradeStaleMs: ACTIVE_TRADE_STALE_MS,
+  recap: true,
 });
 
 /** What the planner asks of time. The glue binds it to the owner-local clock the room also uses. */
@@ -204,7 +260,14 @@ export type PlanIntent =
   | { kind: "buy"; dedupeKey: string; dueAtMs: number; call: PlanCall; coin: string; coinKey: string }
   | { kind: "sell"; dedupeKey: string; dueAtMs: number; call: PlanSell; coin: string; coinKey: string }
   /** `slot` is 0 for the day's first casual post; ACTIVE_CADENCE has more than one. */
-  | { kind: "casual"; dedupeKey: string; dueAtMs: number; day: string; slot: number };
+  | { kind: "casual"; dedupeKey: string; dueAtMs: number; day: string; slot: number }
+  /**
+   * A RECAP of every trade since the last one (planRecap): its buys (calls)
+   * and its sales (receipt-backed when trade results are on, else calls),
+   * of the money it trades with now. `toSec` is the newest trade it covers,
+   * in its key, so no later plan posts those trades one by one.
+   */
+  | { kind: "recap"; dedupeKey: string; dueAtMs: number; buys: PlanCall[]; sells: PlanCall[]; results: PlanSell[]; fromSec: number; toSec: number };
 
 /** An intro row, as introState weighs it. */
 export type IntroRow = Pick<XPost, "dedupeKey" | "status" | "reason" | "createdAtMs" | "updatedAtMs">;
@@ -240,6 +303,8 @@ export interface PlanInput {
   kinds?: Partial<Pick<XPostPrefs, "buys" | "casual">>;
   /** How often this account posts. Absent is STANDARD_CADENCE; `perDay`, when given, still sets the ceiling. */
   cadence?: Readonly<PlanCadence>;
+  /** The money it trades with now: a recap says only trades of it. Null (idle) or absent: no recap. */
+  money?: "live" | "paper" | null;
 }
 
 // ── keys and dice ───────────────────────────────────────────────────────────
@@ -258,6 +323,15 @@ export function sellKey(tenant: string, operationKey: string): string {
   return `sell:${key(tenant)}:${operationKey.toLowerCase()}`;
 }
 /** Slot 0 keeps the historic `casual:<tenant>:<day>`; a later slot of an active day adds `:<slot>`. */
+/** A recap's key: the newest trade it covers, so the next recap starts after it. */
+export function recapKey(tenant: string, toSec: number): string {
+  return `recap:${key(tenant)}:${Math.floor(toSec)}`;
+}
+/** The newest trade a recap row covers, read back from its key; null for any other key. */
+export function recapCovers(dedupeKey: unknown): number | null {
+  const m = typeof dedupeKey === "string" ? /^recap:[^:]+:(\d{1,12})$/.exec(dedupeKey) : null;
+  return m ? Number(m[1]) : null;
+}
 export function casualKey(tenant: string, day: string, slot = 0): string {
   return slot > 0 ? `casual:${key(tenant)}:${day}:${slot}` : `casual:${key(tenant)}:${day}`;
 }
@@ -420,13 +494,17 @@ export function planPosts(input: PlanInput): PlanIntent[] {
   const gap = cadence.gapMs;
   const ownerPerDay = ownerLimit(perDay, input.ownerPerDay);
   if (!account.xUserId || account.consentAtMs === null || account.consentAtMs === undefined) return [];
-  // NOTHING IS PLANNED WHILE THE OWNER SLEEPS — the intro included.
-  if (clock.isAsleep(tz, key(tenant), now)) return [];
+  // NOTHING IS PLANNED WHILE THE OWNER SLEEPS — the intro included — but an
+  // active agent's trade posts (PlanCadence.tradesAtNight): its buys, sales
+  // and recaps are planned at night too; its intro and casual posts are not.
+  const asleep = clock.isAsleep(tz, key(tenant), now);
+  if (asleep && !cadence.tradesAtNight) return [];
 
   const dayOf = (ms: number) => clock.localDay(tz, ms);
 
   // THE INTRO FIRST, AND ALONE.
   const intro = introState({ tenant, account, intros: input.intros, nowMs: now, dayOf });
+  if (intro.state === "draft" && asleep) return [];
   if (intro.state === "draft") {
     return [{ kind: "intro", dedupeKey: intro.dedupeKey, attempt: intro.attempt, dueAtMs: Math.max(now + MIN_LEAD_MS, account.consentAtMs + INTRO_DELAY_MS) }];
   }
@@ -438,13 +516,27 @@ export function planPosts(input: PlanInput): PlanIntent[] {
   const used = new Set(input.posts.map((p) => p.dedupeKey));
   const onDay = (day: string, kind?: XPost["kind"]) => slots.filter((s) => dayOf(s.atMs) === day && (!kind || s.kind === kind)).length;
   const ownerOnDay = (day: string) => slots.filter((s) => s.tenant === key(tenant) && dayOf(s.atMs) === day).length;
+  /** Trade posts on a day: buys, sales and recaps share the trade allowance. */
+  const tradesOnDay = (day: string) => onDay(day, "buy") + onDay(day, "sell") + onDay(day, "recap");
   const out: PlanIntent[] = [];
+  const freshMs = cadence.tradeFreshMs, staleMs = cadence.tradeStaleMs;
+  // EVERY TRADE A RECAP ALREADY SAID is never posted one by one after it
+  // (the newest trade a live recap covers, read from its key: recapCovers).
+  const coveredSec = input.posts.filter((p) => p.kind === "recap" && LIVE_STATUSES.has(p.status))
+    .reduce((m, p) => Math.max(m, recapCovers(p.dedupeKey) ?? 0), 0);
+  // ON A RECAP CADENCE, A SINGLE POST GOES OUT SOON OR NOT AT ALL: one that
+  // the gap would push past the horizon is left for the recap (planRecap),
+  // so a burst is one post, not a queue of single posts going stale.
+  // Only where a recap can pick it up: no recap (a standard cadence, buy posts
+  // off, an idle agent), and every trade is posted one by one as before.
+  const recaps = cadence.recap && input.kinds?.buys !== false && (input.money === "live" || input.money === "paper");
+  const soonEnough = (due: number) => !recaps || due <= now + RECAP_HORIZON_MS;
 
   // Completed sales share the account and owner caps, trade-post allowance,
   // review window, freshness and gap. A separate explicit opt-in enables them.
   const sells = input.tradeResults === true ? (input.sells ?? [])
     .filter((c) => c.side === "sell" && c.paper === false && /^0x[0-9a-f]{64}$/i.test(c.operationKey) && /^0x[0-9a-f]{40}$/i.test(c.token))
-    .filter((c) => Number.isFinite(c.atSec) && c.atSec * 1000 > account.consentAtMs! && c.atSec * 1000 <= now && now - c.atSec * 1000 <= BUY_FRESH_MS)
+    .filter((c) => Number.isFinite(c.atSec) && c.atSec * 1000 > account.consentAtMs! && c.atSec * 1000 <= now && now - c.atSec * 1000 <= freshMs && c.atSec > coveredSec)
     .sort((a, b) => a.atSec - b.atSec) : [];
   for (const call of sells) {
     const dedupeKey = sellKey(tenant, call.operationKey);
@@ -453,9 +545,9 @@ export function planPosts(input: PlanInput): PlanIntent[] {
     if (!coin) continue;
     if (folded(slots, "sell", call.token.toLowerCase(), now, cadence.coinFoldMs)) continue;
     const due = pushedPast(now + MIN_LEAD_MS, slots, gap);
-    if (due > call.atSec * 1000 + BUY_STALE_MS) continue;
+    if (due > call.atSec * 1000 + staleMs || !soonEnough(due)) continue;
     const day = dayOf(due);
-    if (onDay(day, "buy") + onDay(day, "sell") >= cadence.tradePerDay || onDay(day) >= perDay || ownerOnDay(day) >= ownerPerDay) continue;
+    if (tradesOnDay(day) >= cadence.tradePerDay || onDay(day) >= perDay || ownerOnDay(day) >= ownerPerDay) continue;
     out.push({ kind: "sell", dedupeKey, dueAtMs: due, call, coin: coin.label, coinKey: call.token.toLowerCase() });
     slots.push({ tenant: key(tenant), kind: "sell", atMs: due, coin: call.token.toLowerCase(), createdAtMs: now });
     used.add(dedupeKey);
@@ -466,7 +558,7 @@ export function planPosts(input: PlanInput): PlanIntent[] {
   // turned them off.
   const buys = input.kinds?.buys === false ? [] : input.calls
     .filter((c) => c.side === "buy" && Number.isFinite(c.atSec) && typeof c.decisionId === "string" && c.decisionId !== "")
-    .filter((c) => c.atSec * 1000 > account.consentAtMs! && now - c.atSec * 1000 <= BUY_FRESH_MS && c.atSec * 1000 <= now)
+    .filter((c) => c.atSec * 1000 > account.consentAtMs! && now - c.atSec * 1000 <= freshMs && c.atSec * 1000 <= now && c.atSec > coveredSec)
     .sort((a, b) => a.atSec - b.atSec);
   for (const call of buys) {
     const dedupeKey = buyKey(call.decisionId);
@@ -477,9 +569,9 @@ export function planPosts(input: PlanInput): PlanIntent[] {
     const fillMs = call.atSec * 1000;
     const jitter = BUY_JITTER_MIN + (hash32(`buy|${call.decisionId}`) % (BUY_JITTER_MAX - BUY_JITTER_MIN + 1));
     const due = pushedPast(Math.max(fillMs + jitter * MIN, now + MIN_LEAD_MS), slots, gap);
-    if (due > fillMs + BUY_STALE_MS) continue;
+    if (due > fillMs + staleMs || !soonEnough(due)) continue;
     const day = dayOf(due);
-    if (onDay(day, "buy") + onDay(day, "sell") >= cadence.tradePerDay || onDay(day) >= perDay || ownerOnDay(day) >= ownerPerDay) continue;
+    if (tradesOnDay(day) >= cadence.tradePerDay || onDay(day) >= perDay || ownerOnDay(day) >= ownerPerDay) continue;
     out.push({ kind: "buy", dedupeKey, dueAtMs: due, call, coin: coin.label, coinKey: coin.key });
     slots.push({ tenant: key(tenant), kind: "buy", atMs: due, coin: coin.key, createdAtMs: now });
     used.add(dedupeKey);
@@ -495,7 +587,7 @@ export function planPosts(input: PlanInput): PlanIntent[] {
   const today = dayOf(now);
   const minutes = clock.localMinutes(tz, now);
   const slotsToday = Math.max(1, Math.floor(cadence.casualPerDay));
-  if (input.kinds?.casual !== false && minutes !== null) {
+  if (!asleep && input.kinds?.casual !== false && minutes !== null) {
     const [start, end] = tz ? cadence.casualWindowLocal : cadence.casualWindowUtc;
     const quiet = hash32(`casual|${key(tenant)}|${today}`) % 10 < cadence.casualQuietDaysInTen;
     const width = Math.floor((end - start) / slotsToday);
@@ -517,7 +609,59 @@ export function planPosts(input: PlanInput): PlanIntent[] {
       break;
     }
   }
+
+  // THE RECAP, LAST: whatever trades of the window the passes before and
+  // this one could not post one by one (planRecap).
+  if (recaps && (input.money === "live" || input.money === "paper")) {
+    const liveKeys = new Set(input.posts.filter((p) => LIVE_STATUSES.has(p.status)).map((p) => p.dedupeKey));
+    for (const i of out) liveKeys.add(i.dedupeKey);
+    const recap = planRecap({ tenant, now, consentAtMs: account.consentAtMs, coveredSec, money: input.money, calls: input.calls,
+      results: input.tradeResults === true ? input.sells ?? [] : null, liveKeys, used,
+      lastRecapAtMs: input.posts.filter((p) => p.kind === "recap" && LIVE_STATUSES.has(p.status)).reduce((m, p) => Math.max(m, p.sentAtMs ?? p.dueAtMs), 0) });
+    if (recap) {
+      const due = pushedPast(now + MIN_LEAD_MS, slots, gap);
+      const day = dayOf(due);
+      if (due - now <= RECAP_MAX_PUSH_MS && tradesOnDay(day) < cadence.tradePerDay && onDay(day) < perDay && ownerOnDay(day) < ownerPerDay) {
+        out.push({ ...recap, dueAtMs: due });
+        slots.push({ tenant: key(tenant), kind: "recap", atMs: due, coin: null, createdAtMs: now });
+      }
+    }
+  }
   return out.sort((a, b) => a.dueAtMs - b.dueAtMs);
+}
+
+/**
+ * WHICH TRADES A RECAP SAYS, OR NONE (the owner's ask, 2026-10-14: "post one
+ * recap for a burst, like 'closed 6 trades this morning'"). Every trade
+ * since the last recap (`coveredSec`), after consent and within
+ * RECAP_WINDOW_MS, of the money it trades with now: its buys from the calls,
+ * its sales from the receipt-backed results when trade results are on
+ * (`results`, which carry each sale's measured outcome) or else from the
+ * calls. A recap is planned only when at least RECAP_MIN_UNPOSTED of those
+ * trades have no single post out or on its way (`liveKeys`), the newest
+ * trade is RECAP_SETTLE_MS old or RECAP_FLUSH_UNPOSTED are waiting, and no
+ * recap went out in RECAP_GAP_MS. Pure.
+ */
+export function planRecap(o: {
+  tenant: string; now: number; consentAtMs: number; coveredSec: number; money: "live" | "paper";
+  calls: readonly PlanCall[]; results: readonly PlanSell[] | null; liveKeys: ReadonlySet<string>; used: ReadonlySet<string>; lastRecapAtMs: number;
+}): Omit<Extract<PlanIntent, { kind: "recap" }>, "dueAtMs"> | null {
+  if (o.lastRecapAtMs > 0 && o.now - o.lastRecapAtMs < RECAP_GAP_MS) return null;
+  const fromSec = Math.max(o.coveredSec, Math.floor(o.consentAtMs / 1000), Math.floor((o.now - RECAP_WINDOW_MS) / 1000));
+  const inWindow = (c: PlanCall) => Number.isFinite(c.atSec) && c.atSec > fromSec && c.atSec * 1000 <= o.now && c.paper === (o.money === "paper") && coinOf(c) !== null;
+  const buys = o.calls.filter((c) => c.side === "buy" && typeof c.decisionId === "string" && c.decisionId !== "" && inWindow(c));
+  const results = o.results === null ? [] : o.results.filter((c) => c.side === "sell" && inWindow(c));
+  const sells = o.results === null ? o.calls.filter((c) => c.side === "sell" && inWindow(c)) : results;
+  const unposted = [
+    ...buys.filter((c) => !o.liveKeys.has(buyKey(c.decisionId))),
+    ...(o.results === null ? sells : results.filter((c) => !o.liveKeys.has(sellKey(o.tenant, c.operationKey)))),
+  ];
+  if (unposted.length < RECAP_MIN_UNPOSTED) return null;
+  const newest = Math.max(...[...buys, ...sells].map((c) => c.atSec));
+  if (o.now - newest * 1000 < RECAP_SETTLE_MS && unposted.length < RECAP_FLUSH_UNPOSTED) return null;
+  const dedupeKey = recapKey(o.tenant, newest);
+  if (o.used.has(dedupeKey)) return null;
+  return { kind: "recap", dedupeKey, buys, sells, results, fromSec, toSec: newest };
 }
 
 // ── sending ─────────────────────────────────────────────────────────────────
@@ -557,14 +701,18 @@ export function sendDecision(
   nowMs: number,
   asleep: boolean,
   dayOf?: (ms: number) => string,
+  /** The owner's cadence's trade staleness (PlanCadence.tradeStaleMs). Absent: BUY_STALE_MS. */
+  opts: { tradeStaleMs?: number } = {},
 ): SendDecision {
   if (!account) return { action: "cancel", reason: "account-gone" };
   if (account.xUserId !== post.xUserId) return { action: "cancel", reason: "account-changed" };
   if (!account.posting) return { action: "cancel", reason: "account-off" };
-  if ((post.kind === "buy" && account.prefs?.buys === false) || (post.kind === "casual" && account.prefs?.casual === false)) {
+  // A recap names the coins it bought: off with its buy posts.
+  if (((post.kind === "buy" || post.kind === "recap") && account.prefs?.buys === false) || (post.kind === "casual" && account.prefs?.casual === false)) {
     return { action: "cancel", reason: "kind-off" };
   }
-  if ((post.kind === "buy" || post.kind === "sell") && nowMs - post.createdAtMs > BUY_STALE_MS) return { action: "skip", reason: "stale" };
+  const tradeStale = Number.isFinite(opts.tradeStaleMs) && (opts.tradeStaleMs ?? 0) > 0 ? opts.tradeStaleMs! : BUY_STALE_MS;
+  if ((post.kind === "buy" || post.kind === "sell" || post.kind === "recap") && nowMs - post.createdAtMs > tradeStale) return { action: "skip", reason: "stale" };
   if (post.kind === "reply" && nowMs - post.createdAtMs > REPLY_STALE_MS) return { action: "skip", reason: "stale" };
   if (post.kind === "answer" && nowMs - post.createdAtMs > ANSWER_STALE_MS) return { action: "skip", reason: "stale" };
   if (post.kind === "casual" && post.dueAtMs <= nowMs) {

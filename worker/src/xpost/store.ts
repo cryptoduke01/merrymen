@@ -642,7 +642,8 @@ export async function setPrefs(db: Db, tenant: string, change: Partial<XPostPref
       | undefined;
     if (!row) return null;
     const next = prefsOf(row);
-    for (const kind of [...(next.buys ? [] : ["buy"]), ...(next.casual ? [] : ["casual"])]) {
+    // A recap names the coins it bought: it goes with the buy posts.
+    for (const kind of [...(next.buys ? [] : ["buy", "recap"]), ...(next.casual ? [] : ["casual"])]) {
       await tx
         .prepare(
           `UPDATE xpost_posts
@@ -779,9 +780,10 @@ export async function markRevoked(db: Db, tenant: string, atVersion: number, now
  * both its target and its root). It has its own short gap and day allowance,
  * so it neither waits behind nor spends the account's posting cadence.
  */
-export type XPostKind = "intro" | "casual" | "buy" | "sell" | "reply" | "answer";
+/** `recap`: an active agent's one post for a burst of trades (planner.ts planRecap, 2026-10-14). */
+export type XPostKind = "intro" | "casual" | "buy" | "sell" | "reply" | "answer" | "recap";
 /** Every kind, as a closed list: what a kind filter may name in SQL. */
-const XPOST_KINDS: readonly XPostKind[] = ["intro", "casual", "buy", "sell", "reply", "answer"];
+const XPOST_KINDS: readonly XPostKind[] = ["intro", "casual", "buy", "sell", "reply", "answer", "recap"];
 export type XPostStatus = "scheduled" | "sending" | "posted" | "skipped" | "cancelled" | "failed";
 
 export interface XPost {
@@ -833,7 +835,7 @@ interface PostRow {
   updated_at_ms: unknown;
 }
 
-const KINDS: ReadonlySet<string> = new Set(["intro", "casual", "buy", "sell", "reply", "answer"]);
+const KINDS: ReadonlySet<string> = new Set(XPOST_KINDS);
 const STATUSES: ReadonlySet<string> = new Set(["scheduled", "sending", "posted", "skipped", "cancelled", "failed"]);
 
 function postOf(r: PostRow): XPost {
@@ -1040,7 +1042,7 @@ export async function claimPost(db: Db, id: number, nowMs: number): Promise<bool
     .prepare(`UPDATE xpost_posts SET status = 'sending', updated_at_ms = ? WHERE id = ? AND status = 'scheduled'
       AND NOT EXISTS (
         SELECT 1 FROM xpost_accounts a WHERE a.tenant = xpost_posts.tenant
-          AND ((xpost_posts.kind = 'buy' AND a.post_buys = 0) OR (xpost_posts.kind = 'casual' AND a.post_casual = 0))
+          AND ((xpost_posts.kind IN ('buy', 'recap') AND a.post_buys = 0) OR (xpost_posts.kind = 'casual' AND a.post_casual = 0))
       )`)
     .run(int(nowMs), int(id));
   return r.changes === 1;
@@ -1051,7 +1053,7 @@ export async function cancelDisabledKind(db: Db, id: number, nowMs: number): Pro
   const result = await db.prepare(`UPDATE xpost_posts SET status = 'cancelled', reason = 'kind-off', updated_at_ms = ?
     WHERE id = ? AND status = 'sending' AND (reason = 'kind-off' OR EXISTS (
       SELECT 1 FROM xpost_accounts a WHERE a.tenant = xpost_posts.tenant
-        AND ((xpost_posts.kind = 'buy' AND a.post_buys = 0) OR (xpost_posts.kind = 'casual' AND a.post_casual = 0))
+        AND ((xpost_posts.kind IN ('buy', 'recap') AND a.post_buys = 0) OR (xpost_posts.kind = 'casual' AND a.post_casual = 0))
     ))`).run(int(nowMs), int(id));
   return result.changes === 1;
 }
@@ -1278,8 +1280,8 @@ export async function postsOfXUser(db: Db, xUserId: string, sinceMs: number, lim
 
 /**
  * THE POSTS A CONVERSATION ON THIS X ACCOUNT MAY BE ROOTED AT: the tweet ids
- * of its own posted top-level posts (an intro, a casual post, a buy or a
- * sale; never a reply or an answer, which are themselves replies), newest
+ * of its own posted top-level posts (an intro, a casual post, a buy, a sale
+ * or a recap; never a reply or an answer, which are themselves replies), newest
  * first, at most `limit`. A tag that replies inside a thread is answered only
  * when the thread is rooted at one of these (replies.ts tagCandidate).
  */
@@ -1287,7 +1289,7 @@ export async function ownRootTweetIds(db: Db, xUserId: string, limit = 2000): Pr
   const rows = (await db
     .prepare(
       `SELECT tweet_id FROM xpost_posts
-        WHERE x_user_id = ? AND status = 'posted' AND tweet_id IS NOT NULL AND kind IN ('intro', 'casual', 'buy', 'sell')
+        WHERE x_user_id = ? AND status = 'posted' AND tweet_id IS NOT NULL AND kind IN ('intro', 'casual', 'buy', 'sell', 'recap')
         ORDER BY created_at_ms DESC, id DESC
         LIMIT ?`,
     )
@@ -1378,7 +1380,7 @@ export async function ownThreadTweets(db: Db, xUserId: string, limit = 2000, shu
   const tops = (await db
     .prepare(
       `SELECT tweet_id, body, kind FROM xpost_posts
-        WHERE x_user_id = ? AND status = 'posted' AND tweet_id IS NOT NULL AND kind IN ('intro', 'casual', 'buy', 'sell')
+        WHERE x_user_id = ? AND status = 'posted' AND tweet_id IS NOT NULL AND kind IN ('intro', 'casual', 'buy', 'sell', 'recap')
         ORDER BY created_at_ms DESC, id DESC
         LIMIT ?`,
     )
@@ -1388,7 +1390,8 @@ export async function ownThreadTweets(db: Db, xUserId: string, limit = 2000, shu
     const tweet = String(r.tweet_id ?? "");
     if (tweet === "" || shut(String(r.body ?? ""))) continue;
     roots.add(tweet);
-    const own = r.kind === "buy" || r.kind === "sell";
+    // A recap names the coins it traded, as a buy or sale post does: a reply under it is a reply under its trades.
+    const own = r.kind === "buy" || r.kind === "sell" || r.kind === "recap";
     if (r.kind === "casual" && closed(String(r.body ?? ""))) continue;
     (own || trade(String(r.body ?? "")) ? traded : plain).add(tweet);
   }
@@ -1611,7 +1614,7 @@ export async function ownerSendTimesSince(db: Db, tenant: string, sinceMs: numbe
 /** Account-wide trade sends, including uncertain attempts, for a new trade counter. */
 export async function tradeSendTimesSince(db: Db, xUserId: string, sinceMs: number): Promise<number[]> {
   const rows = await db.prepare(`SELECT CASE WHEN status = 'posted' THEN sent_at_ms ELSE updated_at_ms END AS at_ms
-    FROM xpost_posts WHERE x_user_id = ? AND kind IN ('buy', 'sell') AND (
+    FROM xpost_posts WHERE x_user_id = ? AND kind IN ('buy', 'sell', 'recap') AND (
       (status = 'posted' AND sent_at_ms >= ?)
       OR ((status = 'sending' OR (status = 'failed' AND reason IN ('uncertain', 'interrupted', 'fault'))) AND updated_at_ms >= ?)
     )`).all(xUserId, int(sinceMs), int(sinceMs)) as { at_ms: unknown }[];

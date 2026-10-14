@@ -38,7 +38,7 @@ const MENTION = "100000000000000020";
 /** What the model drafts by default: no opt-out line, as an answer never carries one (2026-10-12). */
 const ANSWER = "happy to chat about my strategy and my process, ask me anything.";
 const CALL: CallFact = { decisionId: "fill-pepe", side: "buy", symbol: "PEPE", name: "Pepe", token: null,
-  paper: false, atSec: (NOW - 4 * HOUR) / 1000, bands: ["curve early"], ownWords: null };
+  paper: false, atSec: (NOW - 7 * HOUR) / 1000, bands: ["curve early"], ownWords: null };
 const FACTS: AgentFacts = { tenant: TENANT, agentId: TENANT, slug: null, name: "Pine Stoat", mode: "live",
   ageDays: 2, strategy: "trencher", traits: [], calls: [CALL] };
 const tag = (over: Record<string, unknown> = {}) => ({ id: MENTION, author_id: "333", conversation_id: MENTION,
@@ -385,8 +385,11 @@ test("the owner's night never holds an answer: a tag is answered and sent while 
   assert.equal((await w.answers())[0]!.status, "posted");
   w.setInbox([]);
   await w.step(NOW + MIN);
-  // Everything else still waits for morning: nothing but the answer went out.
-  assert.equal((await store.postsOf(w.db, TENANT, 0)).filter((p) => p.kind !== "answer" && p.kind !== "intro").length, 0);
+  // Everything else still waits for morning but an active agent's trade posts
+  // (2026-10-14, PlanCadence.tradesAtNight): its fresh buy is planned in the
+  // night too; no casual post is.
+  const rest = (await store.postsOf(w.db, TENANT, 0)).filter((p) => p.kind !== "answer" && p.kind !== "intro");
+  assert.deepEqual([...new Set(rest.map((p) => p.kind))], rest.length ? ["buy"] : [], "only trade posts, never a casual one, at night");
 });
 
 test("an active agent's mentions are read every fifteen seconds on an allowance of its own; another owner's every thirty minutes", async (t) => {
