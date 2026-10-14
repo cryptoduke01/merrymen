@@ -444,6 +444,10 @@ describe("a win alone (the owner's ask, 2026-10-14: \"where are the trade pnls\"
       post({ kind: "buy", status: "posted", dedupeKey: `done-${i}`, sentAtMs: DAY0 + 1 * HOUR + i * MIN, dueAtMs: DAY0 + 1 * HOUR + i * MIN }));
     const [win] = sells();
     assert.equal(sellsOf(planPosts(input({ nowMs: now, calls: [], tradeResults: true, sells: [win!], posts: today }))).length, 1);
+    // A trade no recap can count (a coin with no postable name) keeps nothing back either (third review).
+    const nameless = buy(7.5, { symbol: "T7631DACC21B", name: null });
+    assert.equal(sellsOf(planPosts(input({ nowMs: now, calls: [nameless], tradeResults: true, sells: [win!], posts: today }))).length, 1);
+    assert.equal(sellsOf(planPosts(input({ nowMs: now, calls: [buy(7.5)], tradeResults: true, sells: [win!], posts: today }))).length, 0, "a named buy does");
   });
 
   it("a standard owner's sales, and an active owner's with buy posts off, are posted as before, wins and losses alike", () => {

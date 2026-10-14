@@ -638,7 +638,9 @@ describe("receipt-backed sale posts", () => {
       // many of code's lines run long too and the next is tried until one fits.
       // And a name no line can carry (too long beside a five-figure gain; a number word the gate reads as a quantity): its ticker is said.
       for (const [answer, name, symbol, gainPct, said] of [["PASS", "Pepe", "PEPE", 12.4, "Pepe"], ["sold some pepe today, the swap went through and the receipt is filed away.", "Pepe", "PEPE", 12.4, "Pepe"],
-        ["PASS", "Pudgy Penguin Club", "PUDGY", 12345, null], ["PASS", "Wrapped Robinhood Ether", "WETH", 12345, "WETH"], ["PASS", "Million", "MM", 12.4, "MM"]] as const) {
+        ["PASS", "Pudgy Penguin Club", "PUDGY", 12345, null], ["PASS", "Wrapped Robinhood Ether", "WETH", 12345, "WETH"], ["PASS", "Million", "MM", 12.4, "MM"],
+        // A long name and no ticker the gate can say: its two-part lines (third review).
+        ["PASS", "Wrapped Robinhood Ethers", "WETH2", 12345, "Wrapped Robinhood Ethers"]] as const) {
         for (let i = 0; i < 12; i++) {
           const w = await world(t, T0, MEDIA);
           await ready(w);

@@ -2714,8 +2714,9 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         const tidy = (n: string) => n.replace(/\s+/g, " ").trim();
         const names = [...new Set([tidy(intent.coin), ...gate.coins.map(tidy).sort((x, y) => x.length - y.length)])].filter(Boolean);
         const wordsGate: XGateCtx = { ...gate, coins: [...new Set([...gate.coins, ...names])] };
-        names: for (const name of names) {
-          for (const line of saleLines(name, intent.dedupeKey)) {
+        // Every name's three-part lines, then the shorter two-part ones.
+        names: for (const name of [...names.map((x) => [x, 3] as const), ...names.map((x) => [x, 2] as const)]) {
+          for (const line of saleLines(name[0], intent.dedupeKey, name[1])) {
             const v = admitXPost(line, wordsGate, BASE_GATE);
             if (!v.ok) {
               reason = `sale-words:${v.reason}`;

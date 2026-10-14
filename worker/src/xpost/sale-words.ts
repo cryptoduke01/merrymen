@@ -26,27 +26,38 @@
  * parts, one from each slot of twelve, joined by a Latin square (casual.ts
  * latinLines's arrangement), so any two lines share at most one part; every
  * part has exactly two words the gate counts and shares none with another.
- * Two wins sharing a part are half alike at most even when they are the same
- * coin (second review of the wins branch: with two parts of three words, the
- * twelfth win of one coin in memory had no line left), and a line identical
- * to a recent one is refused and the next tried.
+ * Two wins sharing a part are half alike at most, the same coin's too while
+ * its name is one or two words (second review of the wins branch: with two
+ * parts of three words, the twelfth win of one coin in memory had no line
+ * left); a longer name's lines meet the limit sooner, and its other vetted
+ * names are tried. A line identical to a recent one is refused and the next
+ * tried.
  *
  * Pure: no I/O, no model, no clock.
  */
 import { hash32 } from "./planner";
 
-/** What the sale put on the record, how the desk goes on, and a plain close: twelve each. */
+/** What the sale put on the record, how the desk goes on, and what else was noted: twelve each, none a claim a receipt does not show. */
 export const SALE_PARTS: readonly [readonly string[], readonly string[], readonly string[]] = Object.freeze([
   Object.freeze(["receipt saved", "ledger updated", "history noted", "swap settled", "journal note", "books show it", "tally amended", "record made",
     "archive copy", "log marked", "report filed", "sheet posted"]),
   Object.freeze(["desk running", "terminal open", "radar sweeping", "scanner busy", "screens lit", "search goes", "routine intact", "list refreshed",
     "engine ticking", "feed updating", "monitors awake", "charts redraw"]),
-  Object.freeze(["nothing further", "rules followed", "process repeats", "cycle resumes", "usual cadence", "regular rhythm", "standard fare",
-    "steady state", "basic hygiene", "calm operations", "tidy habits", "status recorded"]),
+  // Third review of the wins branch: "rules followed", "calm operations", "tidy habits", "basic hygiene", "steady state",
+  // "standard fare" and "nothing further" claimed a quality or an end no receipt shows; these only note the record.
+  Object.freeze(["time stamped", "hash stored", "process repeats", "cycle resumes", "slot cleared", "counter ticked", "block included",
+    "date logged", "reference added", "pair tagged", "queue advanced", "status recorded"]),
 ]) as unknown as readonly [readonly string[], readonly string[], readonly string[]];
 
-/** Every sale line for this coin, this post's own first (by its key). The caller tries each, whole, until one fits. */
-export function saleLines(coin: string, seed: string): string[] {
+/**
+ * Every sale line for this coin, this post's own first (by its key): the
+ * hundred and forty-four of three parts, or (`parts` 2) the same pairs of a
+ * record and a desk part alone, shorter, for a name too long for three beside
+ * an active owner's tx link and contract (third review of the wins branch: a
+ * name of twenty characters or more had no line that fit). The caller tries
+ * each, whole, until one fits: every name's three-part lines first.
+ */
+export function saleLines(coin: string, seed: string, parts: 2 | 3 = 3): string[] {
   const name = String(coin ?? "").replace(/\s+/g, " ").trim();
   const [record, desk, close] = SALE_PARTS;
   const n = record.length, cells = n * n;
@@ -57,7 +68,8 @@ export function saleLines(coin: string, seed: string): string[] {
   for (let t = 0; t < cells; t++) {
     const k = (start + t * stride) % cells;
     const a = k % n, b = Math.floor(k / n), c = (a + b) % n;
-    out.push(`${a % 2 ? "i sold" : "sold"} ${name}. ${record[a]}, ${desk[b]}, ${close[c]}.`);
+    const opener = `${a % 2 ? "i sold" : "sold"} ${name}.`;
+    out.push(parts === 2 ? `${opener} ${record[a]}, ${desk[b]}.` : `${opener} ${record[a]}, ${desk[b]}, ${close[c]}.`);
   }
   return out;
 }

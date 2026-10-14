@@ -27,12 +27,15 @@ const whole = (line: string, gainPct: number) => {
 };
 
 describe("a win's own words", () => {
-  it("a hundred and forty-four lines, this post's own first, the same set for every key", () => {
+  it("a hundred and forty-four lines of three parts, this post's own first, and the same pairs with two; the same set for every key", () => {
     const a = saleLines("WISP", "sell:a"), b = saleLines("WISP", "sell:b");
     assert.equal(a.length, 144);
     assert.equal(new Set(a).size, 144);
     assert.deepEqual([...a].sort(), [...b].sort());
     assert.notEqual(a[0], b[0]);
+    const parts = (l: string) => l.split(". ")[1]!.split(", ").length;
+    const two = saleLines("WISP", "sell:a", 2);
+    assert.ok(a.every((l) => parts(l) === 3) && two.length === 144 && new Set(two).size === 144 && two.every((l) => parts(l) === 2));
     assert.deepEqual(saleLines("", "sell:a"), []);
   });
 
@@ -64,6 +67,9 @@ describe("a win's own words", () => {
     for (const coin of ["PEPE", "CAPITOL", "IGNITION", "ALTAI", "MOON"]) {
       for (const gain of [0.1, 12.4, 99]) assert.ok(saleLines(coin, "s").every((l) => whole(l, gain) !== null), `${coin} at +${gain}%: every line fits`);
     }
+    // A name of twenty-four characters, the longest a name may be, still fits at a five-figure gain, by its two-part lines (third review).
+    assert.ok(!saleLines("Wrapped Robinhood Ethers", "s").some((l) => whole(l, 12345) !== null), "three parts do not fit");
+    assert.ok(saleLines("Wrapped Robinhood Ethers", "s", 2).some((l) => admit(l, "Wrapped Robinhood Ethers").ok && whole(l, 12345) !== null));
     // A four-figure gain or a long name leaves fewer, at least a quarter: the writer tries the next, then the coin's other names.
     for (const coin of ["IGNITION", "Pudgy Penguin", "T57F813C4571"]) {
       const fit = saleLines(coin, "s").filter((l) => whole(l, 1234) !== null).length;
@@ -76,7 +82,7 @@ describe("a win's own words", () => {
       assert.match(line, /\bsold\b/);
       assert.match(line, /\bWISP\b/);
       assert.doesNotMatch(line, /\p{N}|%|\$|@|#|https?:|\b(?:profit|gain|loss|green|red|win|won|up|down|all|closed|exited|out|early|late|pleased|nice)\b/iu, line);
-      assert.doesNotMatch(line, /\b(?:just|now|then|today|fast|quick\w*|prompt\w*|smooth\w*|fine|safe\w*|neat\w*|proper\w*|clean\w*|moving on|next|elsewhere|fresh|is sold|coffee|eyes|me)\b/i, line);
+      assert.doesNotMatch(line, /\b(?:just|now|then|today|fast|quick\w*|prompt\w*|smooth\w*|fine|safe\w*|neat\w*|proper\w*|clean\w*|moving on|next|elsewhere|fresh|is sold|coffee|eyes|me|calm\w*|tidy|hygiene|rules?|steady|standard|further|nothing)\b/i, line);
     }
   });
 

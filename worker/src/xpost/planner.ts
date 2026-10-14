@@ -318,7 +318,7 @@ export type PlanIntent =
    * in its key, so no later plan posts those trades one by one.
    */
   | { kind: "recap"; dedupeKey: string; dueAtMs: number; buys: PlanCall[]; sells: PlanSell[]; results: PlanSell[]; toSec: number;
-      /** The single-post keys of every trade it says (buyKey, sellKey): stored on its row (recapCoverOf), never said again. */
+      /** The single-post keys of every trade it says (buyKey, sellKey): stored on its row (recapCoverOf), never recapped again, nor posted alone but an active owner's win. */
       covers: string[] };
 
 /** An intro row, as introState weighs it. */
@@ -619,10 +619,11 @@ export function planPosts(input: PlanInput): PlanIntent[] {
   const tradesOnDay = (day: string) => onDay(day, "buy") + onDay(day, "sell") + onDay(day, "recap");
   const out: PlanIntent[] = [];
   const freshMs = cadence.tradeFreshMs, staleMs = cadence.tradeStaleMs;
-  // EVERY TRADE A RECAP ALREADY SAID is never posted one by one after it, nor
-  // said again: the keys this owner's recaps that are out, on their way or may
-  // be out (maybeOut) covered (recapCoverOf). Only this owner's own recaps: on
-  // a shared X account another owner's trades are another owner's.
+  // EVERY TRADE A RECAP ALREADY SAID is never recapped again, nor posted one
+  // by one after it but an active owner's win (which still goes out alone,
+  // with its card): the keys this owner's recaps that are out, on their way or
+  // may be out (maybeOut) covered (recapCoverOf). Only this owner's own
+  // recaps: on a shared X account another owner's trades are another owner's.
   const ownRecaps = (input.recaps ?? input.posts).filter((p) => p.kind === "recap" && key(p.tenant) === key(tenant) && maybeOut(p));
   const covered = new Set(ownRecaps.flatMap((p) => recapCoverOf(p.coin)));
   // ON A RECAP CADENCE, A SINGLE POST GOES OUT SOON OR NOT AT ALL: one that
@@ -648,11 +649,14 @@ export function planPosts(input: PlanInput): PlanIntent[] {
   const recapFrom = Math.max(account.consentAtMs, now - RECAP_WINDOW_MS);
   const inRecapWindow = (atSec: number) => Number.isFinite(atSec) && atSec * 1000 > recapFrom && atSec * 1000 <= now;
   const unsaid = (k: string) => !covered.has(k) && !liveNow.has(k);
+  // Only trades a recap will count (planRecap's own test, a postable name
+  // included): a coin with none is said by no post, and held the day's last
+  // post for eight hours (third review of the wins branch).
   const recapHasWork = recaps && (
     input.calls.some((c) => c.side === "buy" && typeof c.decisionId === "string" && c.decisionId !== "" && c.paper === (input.money === "paper")
-      && inRecapWindow(c.atSec) && unsaid(buyKey(c.decisionId)))
+      && inRecapWindow(c.atSec) && coinOf(c) !== null && unsaid(buyKey(c.decisionId)))
     || (input.money === "live" && input.tradeResults === true && (input.sells ?? []).some((c) => c.side === "sell" && !isWin(c)
-      && /^0x[0-9a-f]{64}$/i.test(c.operationKey) && inRecapWindow(c.atSec) && unsaid(sellKey(tenant, c.operationKey)))));
+      && /^0x[0-9a-f]{64}$/i.test(c.operationKey) && c.paper === false && inRecapWindow(c.atSec) && coinOf(c) !== null && unsaid(sellKey(tenant, c.operationKey)))));
   const keep = recapHasWork && perDay > 1 && ownerPerDay > 1 ? 1 : 0;
 
   // Completed sales share the account and owner caps, trade-post allowance,

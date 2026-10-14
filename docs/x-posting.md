@@ -1612,8 +1612,9 @@ cadence is as before.
   otherwise it is withheld.
 - **Covered by key, never said twice.** A recap row records the single-post
   keys of every trade it said (its `coin` column, `recapCoverOf`), written
-  in the same insert. A trade a recap covered is never posted one by one or
-  recapped again, including when the recap's send ended uncertain,
+  in the same insert. A trade a recap covered is never recapped again, nor
+  posted one by one (but an active owner's win, below, which still goes out
+  alone while fresh), including when the recap's send ended uncertain,
   interrupted or in our fault (it may be on X). Recaps are read by their own
   query (store.ts `recapPostsOf`), never lost from the capped history, and
   only an owner's own recaps cover that owner's trades.
@@ -1658,17 +1659,22 @@ now goes out alone only when it is a win:
   receipt does not show (no timing, speed or quality, no whole position, no
   leaving the coin, no human life). A hundred and forty-four lines of three
   two-word parts, any two sharing at most one part, so two wins are never one
-  template to the repeat check, of different coins or the same. An active
+  template to the repeat check, of different coins or of the same coin with
+  a name of one or two words; then the same lines with two parts, for a name
+  too long for three. A win whose only name is long and that the model cannot
+  word may still find none that fits, and is counted by a recap. An active
   owner's win needs no model whether or not its buy posts are on.
 - **Counted by the recap too.** A recap counts every sale of its window,
   wins included ("4 green" counts every win), and a win a recap counted
   still goes out alone while it is fresh: no win waits on its own post to be
   counted, so none is lost between the two.
 - **One post of the day is kept for the recap** while the recap has
-  something to count (a buy, or a sale that is no win, said by no post and no
-  recap) and the owner's day allows more than one post: a win, a buy or a
-  casual post leaves the day's last post to the recap, so a day of wins
-  still has its losses counted.
+  something to count (a buy, or a sale that is no win, with a postable name,
+  said by no post and no recap) and the owner's day allows more than one
+  post: a win, a buy or a casual post leaves the day's last post to the
+  recap. It is decided on what is waiting when a post is planned: losses that
+  land after the day's posts are spent wait for the next day's first recap,
+  which reaches back eight hours, and older ones go unsaid.
 - **A loss, a flat or an unmeasured sale** is the recap's to count, never a
   post of its own on this cadence. Where no recap can count it, it posts
   alone as before: an active owner with buy posts off (no recap), an agent
