@@ -1038,7 +1038,8 @@ test("turning a kind off while sending permanently prevents its refused send bei
   const { db } = await open(t);
   await upsertAccount(db, DEK, { tenant: OWNER_A, xUserId: "111", username: "r", tokens: TOKENS, nowMs: 1 });
   await setPosting(db, OWNER_A, { enabled: true, xUserId: "111" }, 2);
-  for (const [kind, field] of [["buy", "buys"], ["casual", "casual"]] as const) {
+  // A recap is a buy post's kind for the switch (it names the coins it bought).
+  for (const [kind, field] of [["buy", "buys"], ["recap", "buys"], ["casual", "casual"]] as const) {
     const id = (await schedulePost(db, post({ kind, dedupeKey: `${kind}:off-during-send` })))!;
     assert.equal(await claimPost(db, id, 1000), true);
     await setPrefs(db, OWNER_A, { [field]: false }, 1001);
@@ -1058,7 +1059,7 @@ test("claiming a draft created after a concurrent kind-off save checks the curre
   const { db } = await open(t);
   await upsertAccount(db, DEK, { tenant: OWNER_A, xUserId: "111", username: "r", tokens: TOKENS, nowMs: 1 });
   await setPrefs(db, OWNER_A, { buys: false, casual: false }, 2);
-  for (const kind of ["buy", "casual"] as const) {
+  for (const kind of ["buy", "recap", "casual"] as const) {
     const id = (await schedulePost(db, post({ kind, dedupeKey: `${kind}:stale-plan` })))!;
     assert.equal(await claimPost(db, id, 1000), false);
   }

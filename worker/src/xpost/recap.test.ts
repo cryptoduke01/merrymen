@@ -63,7 +63,7 @@ const kinds = (out: PlanIntent[]) => out.map((i) => i.kind);
 const recapOf = (out: PlanIntent[]) => out.find((i): i is Extract<PlanIntent, { kind: "recap" }> => i.kind === "recap");
 /** A recap row as writeIntent writes it: its covered keys in `coin`. */
 const recapRow = (r: Extract<PlanIntent, { kind: "recap" }>, over: Partial<XPost> = {}) =>
-  post({ kind: "recap", dedupeKey: r.dedupeKey, coin: recapCoverText(r.covers), status: "posted", sentAtMs: r.dueAtMs, dueAtMs: r.dueAtMs, ...over });
+  post({ kind: "recap", dedupeKey: r.dedupeKey, coin: recapCoverText(r.covers), status: "posted", sentAtMs: r.dueAtMs, dueAtMs: r.dueAtMs, updatedAtMs: r.dueAtMs, ...over });
 
 describe("an active agent's trade posts through the night", () => {
   it("plans a fresh buy at three in the morning, and no casual post or hello", () => {
@@ -112,11 +112,13 @@ describe("one recap for a burst", () => {
     assert.ok(recap);
     assert.equal(recap!.buys.length, 8);
     assert.deepEqual(recap!.covers.sort(), calls.map((c) => buyKey(c.decisionId)).sort());
-    assert.equal(recap!.dedupeKey, recapKey(TENANT, calls[7]!.atSec));
+    // Keyed by its newest trade and the trades it covers: a refused recap's key never blocks a recap of more.
+    assert.equal(recap!.dedupeKey, recapKey(TENANT, calls[7]!.atSec, recap!.covers));
+    assert.notEqual(recapKey(TENANT, calls[7]!.atSec, recap!.covers.slice(1)), recap!.dedupeKey);
     assert.deepEqual(recapCoverOf(recapCoverText(recap!.covers)).sort(), recap!.covers.sort());
   });
 
-  it("never posts one by one, nor recaps again, what a recap covered; no second recap for three hours", () => {
+  it("never posts one by one, nor recaps again, what a recap covered; no second recap for four hours", () => {
     const calls = burst();
     const recap = recapOf(planPosts(input({ nowMs: now, calls })))!;
     const row = recapRow(recap);
@@ -151,15 +153,16 @@ describe("one recap for a burst", () => {
   it("a trade that lands after the recap but was decided before its newest is still said (covered by key, never by time)", () => {
     const calls = burst();
     const recap = recapOf(planPosts(input({ nowMs: now, calls })))!;
-    const late = buy(7.1); // decided before the recap's newest trade, seen only now
-    const later = planPosts(input({ nowMs: now + 15 * MIN, calls: [...calls, late], posts: [recapRow(recap)] }));
+    const late = buy(7.1); // decided before the recap's newest trade, seen only once the recap went out
+    const later = planPosts(input({ nowMs: recap.dueAtMs + 5 * MIN, calls: [...calls, late], posts: [recapRow(recap)] }));
     assert.deepEqual(later.filter((i) => i.kind === "buy").map((i) => i.dedupeKey), [buyKey(late.decisionId)]);
   });
 
   it("another owner's recap on a shared X account never hides this owner's trades", () => {
     const calls = burst();
     const recap = recapOf(planPosts(input({ nowMs: now, calls })))!;
-    const theirs = recapRow(recap, { tenant: OTHER, dedupeKey: recapKey(OTHER, calls[7]!.atSec) });
+    // Theirs went out half an hour ago, covering the very same keys.
+    const theirs = recapRow(recap, { tenant: OTHER, dedupeKey: recapKey(OTHER, calls[7]!.atSec, recap.covers), sentAtMs: now - 30 * MIN, dueAtMs: now - 30 * MIN });
     assert.ok(recapOf(planPosts(input({ nowMs: now, calls, posts: [theirs] }))), "this owner's burst is still recapped");
   });
 
@@ -167,6 +170,17 @@ describe("one recap for a burst", () => {
     const calls = burst();
     const recap = recapOf(planPosts(input({ nowMs: now, calls })))!;
     assert.deepEqual(planPosts(input({ nowMs: now + 30 * MIN, calls, posts: [], recaps: [recapRow(recap)] })), []);
+  });
+
+  it("is planned ahead of a casual post: small talk never takes the trades' slot (third review, 2026-10-14)", () => {
+    // 10:00 is inside this owner's casual slot; the burst's recap is still planned, and any casual post goes after it.
+    const at10 = DAY0 + 10 * HOUR;
+    const withCasual = planPosts(input({ nowMs: at10, calls: [], tradeResults: false }));
+    assert.deepEqual(kinds(withCasual), ["casual"], "the slot is open");
+    const out = planPosts(input({ nowMs: at10, calls: burst() }));
+    const recap = recapOf(out);
+    assert.ok(recap, kinds(out).join(", "));
+    for (const c of out.filter((i) => i.kind === "casual")) assert.ok(c.dueAtMs > recap!.dueAtMs);
   });
 
   it("is planned with no model left, when no single post or casual post can be", () => {
@@ -248,10 +262,10 @@ describe("a recap at send time", () => {
 });
 
 describe("a recap's words", () => {
-  it("sixty-four lines, this recap's own first, no word in two parts, so recaps never run out to the repeat limit", () => {
+  it("a hundred lines, this recap's own first, no word in two parts, so recaps never run out to the repeat limit", () => {
     const a = recapLines(recapKey(TENANT, 1)), b = recapLines(recapKey(TENANT, 2));
-    assert.equal(a.length, 64);
-    assert.equal(new Set(a).size, 64);
+    assert.equal(a.length, 100);
+    assert.equal(new Set(a).size, 100);
     assert.deepEqual([...a].sort(), [...b].sort());
     const words = (t: string) => new Set(t.toLowerCase().split(/[^a-z']+/).filter((w) => w.length > 2 && similarity(w, w) > 0));
     const seen = new Map<string, string>();
@@ -259,13 +273,15 @@ describe("a recap's words", () => {
       assert.ok(!seen.has(w), `"${w}" is in "${part}" and "${seen.get(w)}"`);
       seen.set(w, part);
     }
-    // After any one went out, nearly all the rest are still no repeat of it.
-    for (const said of a) assert.ok(a.filter((l) => l !== said && similarity(l, said) < REPEAT_LIMIT).length >= 56, said);
+    // After any one went out, every other one is still no repeat of it, live and paper.
+    for (const lines of [a, recapLines(recapKey(TENANT, 1), { paper: true })]) {
+      for (const said of lines) assert.ok(lines.every((l) => l === said || similarity(l, said) < REPEAT_LIMIT), said);
+    }
   });
 
   it("no digit, no result word, no time of day; a paper clause on paper", () => {
     for (const l of [...recapLines("x"), ...recapLines("x", { paper: true })]) {
-      assert.doesNotMatch(l, /\p{N}|\$|@|#|https?:|green|\bred\b|profit|loss|gain|\bwin|morning|night|tonight|today|on.?chain/iu, l);
+      assert.doesNotMatch(l, /\p{N}|\$|@|#|https?:|green|\bred\b|profit|loss|gain|\bwin(?:s|ning|ner)?\b|morning|night|tonight|today|on.?chain/iu, l);
     }
     assert.ok(recapLines("x", { paper: true }).every((l) => /paper|practice/.test(l)));
   });

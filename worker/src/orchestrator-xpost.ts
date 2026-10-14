@@ -300,7 +300,7 @@ export function xpostEnv(env: Record<string, string | undefined> = process.env):
     const n = count(llmRaw);
     if (n === null) {
       llmPerDay = 0;
-      notes.push("xpost: MERRYMEN_XPOST_LLM_PER_DAY is set but is not a count of calls — no model calls until it is; only intros are posted, from templates");
+      notes.push("xpost: MERRYMEN_XPOST_LLM_PER_DAY is set but is not a count of calls — no model calls until it is; only intros (from templates) and an active owner's recaps (code's own words) are posted");
     } else {
       llmPerDay = n;
     }
@@ -954,7 +954,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
 
   const why =
     `xpost: on — at most ${perDay} posts per X account a day, ${fleetPerDay} across the fleet a day; ` +
-    (creds ? `up to ${llmPerDay} model calls a day` : "no model, so only intros are posted, from templates") +
+    (creds ? `up to ${llmPerDay} model calls a day` : "no model, so only intros (from templates) and active owners' recaps (code's words) are posted") +
     (active.size ? `; ${active.size} owner(s) on the active cadence, up to ${ACTIVE_CADENCE.perDay} a day` : "") +
     (repliesApproved ? (o.knobs.repliesActiveOnly ? "; replies for the active owners only" : "; replies for owners who consent") : "") +
     (research ? `; answers look things up first${researchFomo ? ", Fomo included" : ""}` : "") +
@@ -1276,7 +1276,10 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
                     const current = byTenant.get(pending.tenant);
                     const agent = profile?.currentAgent;
                     if (!profile?.xTradeResults || !agent || !current || current.agentId !== agent.address.toLowerCase()) return false;
-                    const sales = await (deps.saleResults ?? readSaleResults)(shared, agent.address, agent.chainId, Math.floor(at() / 1000));
+                    // As of its draft: the same window its sales were counted from, never
+                    // one that has moved past its oldest sale (second review, 2026-10-14),
+                    // with each sale's evidence as the receipts say it now.
+                    const sales = await (deps.saleResults ?? readSaleResults)(shared, agent.address, agent.chainId, Math.floor(pending.createdAtMs / 1000));
                     return recapStillHolds(pending, sales);
                   }
                   if (!hasPublicWallet(pending.body) && pending.kind !== "sell") return true;
@@ -1507,7 +1510,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
     });
     const recentFleet = await recentBodies(shared, { tenant: null, sinceMs: nowMs - FLEET_MEMORY_MS, limit: FLEET_MEMORY_MAX });
     // THE MODEL'S ALLOWANCE, READ ONCE A PASS. Once it is spent, only intros
-    // are planned (they fall back to the template pool): a buy or casual
+    // are planned (they fall back to the template pool), and an active
+    // owner's recaps (code's own words, planner.ts modelOk): a buy or casual
     // intent the model cannot write writes nothing, so it would come back
     // every minute, and on a big enough fleet fill every draft slot before
     // the accounts further on — a newly consented owner's hello among them —
@@ -1557,7 +1561,9 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         const sells = tradeResults && social?.currentAgent
           ? await (deps.saleResults ?? readSaleResults)(shared, social.currentAgent.address, social.currentAgent.chainId, Math.floor(planNow / 1000)) : [];
         // This owner's recaps, read apart from the capped history (PlanInput.recaps).
-        const recapRows = plansPosts && cadenceOf(account.tenant).recap ? await recapPostsOf(shared, account.tenant, planNow - RECAP_WINDOW_MS - RECAP_GAP_MS - HOUR) : [];
+        // Read on every cadence (second review, 2026-10-14): an owner taken off the
+        // active list still has recaps whose trades must never be posted again.
+        const recapRows = plansPosts ? await recapPostsOf(shared, account.tenant, planNow - RECAP_WINDOW_MS - RECAP_GAP_MS - HOUR) : [];
         const intents = !plansPosts ? [] : planPosts({
           tenant: account.tenant,
           account,

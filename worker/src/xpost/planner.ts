@@ -88,14 +88,22 @@ export const ACTIVE_TRADE_SEND_STALE_MS = ACTIVE_TRADE_STALE_MS - ACTIVE_TRADE_F
  * went out in RECAP_GAP_MS. It covers every trade since the last recap, at
  * most RECAP_WINDOW_MS back, and goes out within RECAP_MAX_PUSH_MS.
  */
-export const RECAP_HORIZON_MS = 2 * HOUR;
+/** One gap: in a burst, one single post goes out soon and the recap after it says the rest (second review, 2026-10-14). */
+export const RECAP_HORIZON_MS = 75 * MIN;
 export const RECAP_MIN_UNPOSTED = 3;
 export const RECAP_FLUSH_UNPOSTED = 8;
 export const RECAP_SETTLE_MS = 20 * MIN;
-export const RECAP_GAP_MS = 3 * HOUR;
+/** Four hours: at most six a day, so a hundred recap lines last a fleet more than two weeks of the gate's memory. */
+export const RECAP_GAP_MS = 4 * HOUR;
 /** Eight hours back at most: inside the room's twelve-hour read of calls even after a recap waits its four hours to go out. */
 export const RECAP_WINDOW_MS = 8 * HOUR;
-export const RECAP_MAX_PUSH_MS = 4 * HOUR;
+/**
+ * A recap planned further out than this is not planned: it must go out with a
+ * gap's room to spare before it goes stale (ACTIVE_TRADE_SEND_STALE_MS less
+ * the active gap), or one send-time deferral would skip it (second review of
+ * the recap branch, 2026-10-14).
+ */
+export const RECAP_MAX_PUSH_MS = 2 * HOUR + 30 * MIN;
 /** A reply waiting this long is no longer timely. */
 export const REPLY_STALE_MS = 24 * HOUR;
 export const REPLY_ROOT_MAX_AGE_MS = 72 * HOUR;
@@ -346,8 +354,12 @@ export function sellKey(tenant: string, operationKey: string): string {
 }
 /** Slot 0 keeps the historic `casual:<tenant>:<day>`; a later slot of an active day adds `:<slot>`. */
 /** A recap's key: the newest trade it covers, so the next recap starts after it. */
-export function recapKey(tenant: string, toSec: number): string {
-  return `recap:${key(tenant)}:${Math.floor(toSec)}`;
+export function recapKey(tenant: string, toSec: number, covers: readonly string[] = []): string {
+  // THE SET IT COVERS IN THE KEY, not only its newest second (second review,
+  // 2026-10-14): a later recap whose newest trade shares that second (late
+  // trades decided before it) was blocked forever by the earlier one's key.
+  const set = covers.length ? `:${hash32([...covers].sort().join(" ")).toString(36)}` : "";
+  return `recap:${key(tenant)}:${Math.floor(toSec)}${set}`;
 }
 /**
  * WHAT A RECAP ROW COVERS: the single-post keys of the trades it said, kept
@@ -372,6 +384,19 @@ export function recapCoverOf(coin: unknown): string[] {
 const MAYBE_OUT_REASONS: ReadonlySet<string> = new Set(["uncertain", "interrupted", "fault"]);
 export function maybeOut(p: Pick<XPost, "status" | "reason">): boolean {
   return LIVE_STATUSES.has(p.status) || (p.status === "failed" && MAYBE_OUT_REASONS.has(p.reason ?? ""));
+}
+/**
+ * WHEN A RECAP WENT OUT, OR MAY HAVE, OR WILL (second review, 2026-10-14), as
+ * store.ts lastOutAt reads a post: posted, when it was sent; sending or a
+ * send that may be out, when that send ended (a held send fails long after
+ * its due time, and a gap from the due time could follow it minutes later);
+ * still scheduled, its due time or now, whichever is later, so no second
+ * recap is planned behind one that is waiting to go.
+ */
+export function recapOutAt(p: Pick<XPost, "status" | "sentAtMs" | "dueAtMs" | "updatedAtMs">, nowMs: number): number {
+  if (p.status === "posted") return p.sentAtMs ?? p.updatedAtMs;
+  if (p.status === "scheduled") return Math.max(p.dueAtMs, nowMs);
+  return p.updatedAtMs;
 }
 export function casualKey(tenant: string, day: string, slot = 0): string {
   return slot > 0 ? `casual:${key(tenant)}:${day}:${slot}` : `casual:${key(tenant)}:${day}`;
@@ -577,6 +602,10 @@ export function planPosts(input: PlanInput): PlanIntent[] {
   // off, an idle agent), and every trade is posted one by one as before.
   const recaps = cadence.recap && input.kinds?.buys !== false && (input.money === "live" || input.money === "paper");
   const soonEnough = (due: number) => !recaps || due <= now + RECAP_HORIZON_MS;
+  // NEVER PLANNED TO GO STALE (second review, 2026-10-14): a trade post due
+  // past its send staleness is skipped at send time for certain; on the active
+  // cadence, a gap's room is kept for one send-time deferral.
+  const sendable = (due: number) => due - now <= cadence.sendStaleMs - (cadence.recap ? gap : 0);
 
   // Completed sales share the account and owner caps, trade-post allowance,
   // review window, freshness and gap. A separate explicit opt-in enables them.
@@ -591,7 +620,7 @@ export function planPosts(input: PlanInput): PlanIntent[] {
     if (!coin) continue;
     if (folded(slots, "sell", call.token.toLowerCase(), now, cadence.coinFoldMs)) continue;
     const due = pushedPast(now + MIN_LEAD_MS, slots, gap);
-    if (due > call.atSec * 1000 + staleMs || !soonEnough(due)) continue;
+    if (due > call.atSec * 1000 + staleMs || !soonEnough(due) || !sendable(due)) continue;
     const day = dayOf(due);
     if (tradesOnDay(day) >= cadence.tradePerDay || onDay(day) >= perDay || ownerOnDay(day) >= ownerPerDay) continue;
     out.push({ kind: "sell", dedupeKey, dueAtMs: due, call, coin: coin.label, coinKey: call.token.toLowerCase() });
@@ -615,12 +644,38 @@ export function planPosts(input: PlanInput): PlanIntent[] {
     const fillMs = call.atSec * 1000;
     const jitter = BUY_JITTER_MIN + (hash32(`buy|${call.decisionId}`) % (BUY_JITTER_MAX - BUY_JITTER_MIN + 1));
     const due = pushedPast(Math.max(fillMs + jitter * MIN, now + MIN_LEAD_MS), slots, gap);
-    if (due > fillMs + staleMs || !soonEnough(due)) continue;
+    if (due > fillMs + staleMs || !soonEnough(due) || !sendable(due)) continue;
     const day = dayOf(due);
     if (tradesOnDay(day) >= cadence.tradePerDay || onDay(day) >= perDay || ownerOnDay(day) >= ownerPerDay) continue;
     out.push({ kind: "buy", dedupeKey, dueAtMs: due, call, coin: coin.label, coinKey: coin.key });
     slots.push({ tenant: key(tenant), kind: "buy", atMs: due, coin: coin.key, createdAtMs: now });
     used.add(dedupeKey);
+  }
+
+  // THE RECAP, AFTER THE SINGLE POSTS AND BEFORE A CASUAL ONE: whatever
+  // trades of the window the passes before and this one could not post one
+  // by one (planRecap). Ahead of the casual post (third review, 2026-10-14):
+  // planned after it, a casual post took the slot and pushed the recap past
+  // its limit for the pass, small talk ahead of the trades the owner asked to
+  // see; a casual post pushed out finds its slot again on a later pass.
+  if (recaps && (input.money === "live" || input.money === "paper")) {
+    // A single post out, on its way or that may be out already said its trade.
+    const liveKeys = new Set(input.posts.filter((p) => maybeOut(p)).map((p) => p.dedupeKey));
+    for (const i of out) liveKeys.add(i.dedupeKey);
+    const recap = planRecap({ tenant, now, consentAtMs: account.consentAtMs, covered, money: input.money, calls: input.calls,
+      // SALES ONLY FROM THE RECEIPT-BACKED RESULTS, AND ONLY WITH THE OWNER'S
+      // OPT-IN TO SALE POSTS (review of the recap branch, 2026-10-14): a
+      // recap never says a sale the owner did not choose to have posted.
+      results: input.tradeResults === true ? input.sells ?? [] : [], liveKeys, used,
+      lastRecapAtMs: ownRecaps.reduce((m, p) => Math.max(m, recapOutAt(p, now)), 0) });
+    if (recap) {
+      const due = pushedPast(now + MIN_LEAD_MS, slots, gap);
+      const day = dayOf(due);
+      if (due - now <= Math.min(RECAP_MAX_PUSH_MS, cadence.sendStaleMs - gap) && tradesOnDay(day) < cadence.tradePerDay && onDay(day) < perDay && ownerOnDay(day) < ownerPerDay) {
+        out.push({ ...recap, dueAtMs: due });
+        slots.push({ tenant: key(tenant), kind: "recap", atMs: due, coin: null, createdAtMs: now });
+      }
+    }
   }
 
   // CASUAL POSTS, at the account's own slots in the owner's waking window,
@@ -655,28 +710,6 @@ export function planPosts(input: PlanInput): PlanIntent[] {
       break;
     }
   }
-
-  // THE RECAP, LAST: whatever trades of the window the passes before and
-  // this one could not post one by one (planRecap).
-  if (recaps && (input.money === "live" || input.money === "paper")) {
-    // A single post out, on its way or that may be out already said its trade.
-    const liveKeys = new Set(input.posts.filter((p) => maybeOut(p)).map((p) => p.dedupeKey));
-    for (const i of out) liveKeys.add(i.dedupeKey);
-    const recap = planRecap({ tenant, now, consentAtMs: account.consentAtMs, covered, money: input.money, calls: input.calls,
-      // SALES ONLY FROM THE RECEIPT-BACKED RESULTS, AND ONLY WITH THE OWNER'S
-      // OPT-IN TO SALE POSTS (review of the recap branch, 2026-10-14): a
-      // recap never says a sale the owner did not choose to have posted.
-      results: input.tradeResults === true ? input.sells ?? [] : [], liveKeys, used,
-      lastRecapAtMs: ownRecaps.reduce((m, p) => Math.max(m, p.sentAtMs ?? p.dueAtMs), 0) });
-    if (recap) {
-      const due = pushedPast(now + MIN_LEAD_MS, slots, gap);
-      const day = dayOf(due);
-      if (due - now <= RECAP_MAX_PUSH_MS && tradesOnDay(day) < cadence.tradePerDay && onDay(day) < perDay && ownerOnDay(day) < ownerPerDay) {
-        out.push({ ...recap, dueAtMs: due });
-        slots.push({ tenant: key(tenant), kind: "recap", atMs: due, coin: null, createdAtMs: now });
-      }
-    }
-  }
   return out.sort((a, b) => a.dueAtMs - b.dueAtMs);
 }
 
@@ -707,7 +740,7 @@ export function planRecap(o: {
   if (unposted.length < RECAP_MIN_UNPOSTED) return null;
   const newest = Math.max(...[...buys, ...sells].map((c) => c.atSec));
   if (o.now - newest * 1000 < RECAP_SETTLE_MS && unposted.length < RECAP_FLUSH_UNPOSTED) return null;
-  const dedupeKey = recapKey(o.tenant, newest);
+  const dedupeKey = recapKey(o.tenant, newest, covers);
   if (o.used.has(dedupeKey)) return null;
   return { kind: "recap", dedupeKey, buys, sells, results: sells, toSec: newest, covers };
 }

@@ -18,35 +18,45 @@
  *
  * Pure: no I/O, no model, no clock.
  */
-import { CASUAL_PAPER, latinLines } from "./casual";
+import { latinLines } from "./casual";
 import { cleanTicker, renderFiguresLine, TRADED_MAX, type FiguresSection, type FiguresSpec } from "./figures";
 import { recapCoverOf, sellKey, type PlanCall, type PlanIntent, type PlanSell } from "./planner";
 
 /**
- * SIXTY-FOUR WAYS TO SAY "A RECAP FOLLOWS" (review of the recap branch,
- * 2026-10-14: with eight fixed lines, the ninth recap found every line a
- * repeat of one of the last eight to the gate, and recaps stopped). Three
- * slots of eight, joined by a Latin square (casual.ts latinLines), so any two
- * lines share at most one part, and no word is in two parts. No coin, no
- * result word (green, profit, loss), no time of day, no pointing word the
- * gate reads as a call, no source word (on-chain) that marks a post as
- * research.
+ * A HUNDRED WAYS TO SAY "A RECAP FOLLOWS" (two reviews of the recap branch,
+ * 2026-10-14: with eight fixed lines the ninth recap was a repeat of one of
+ * the last eight to the gate and recaps stopped; with sixty-four of uneven
+ * length, a paper agent or a busy fleet still ran out, since the gate weighs
+ * shared words against the shorter post and a short part shared was half a
+ * line). Three slots of ten, joined by a Latin square (casual.ts latinLines),
+ * so any two lines share at most one part; every part three or four content
+ * words, no word in two parts, so a shared part is never near the repeat
+ * limit (the worst pair is under half, paper clause included: recap.test.ts).
+ * No coin, no result word (green, profit, loss), no time of day, no pointing
+ * word the gate reads as a call, no source word (on-chain) that marks a post
+ * as research.
  */
 export const RECAP_SLOTS: readonly [readonly string[], readonly string[], readonly string[]] = Object.freeze([
-  Object.freeze(["busy stretch on the desk", "lots of trading lately", "been an active session", "the book kept moving",
-    "a flurry of trades", "plenty happening on my side", "quite the run of activity", "the pace picked up"]),
-  Object.freeze(["quick recap", "the rundown", "the summary", "here's the tape", "the tally", "the scorecard", "a look back", "the short version"]),
-  Object.freeze(["for the record", "nothing more to it", "that's the lot", "straight from the fills", "logged and done", "as it landed", "no spin", "numbers attached"]),
+  Object.freeze(["busy stretch on the trading desk", "heavy action across the book", "a properly active session wrapped up", "the pace picked up noticeably",
+    "a flurry of buys and sells", "plenty happening on the screens recently", "a solid run of activity", "the strategy kept firing away",
+    "the engine stayed hard at work", "a crowded little window of orders"]),
+  Object.freeze(["here is the quick recap", "the full rundown follows", "a tidy summary of it all", "the tape in short form", "the running tally laid out",
+    "the whole scorecard at a glance", "a brief look back over it", "the condensed version of events", "the highlights reel in numbers", "the wrap sheet put together"]),
+  Object.freeze(["straight from the actual fills", "logged exactly as landed", "no spin attached whatsoever", "noted plainly for the record", "nothing more to add on it",
+    "receipts checked line by line", "minus any fluff or filler", "that about covers everything worth saying", "precisely what the ledger shows", "hot off the settlement press"]),
 ]) as unknown as readonly [readonly string[], readonly string[], readonly string[]];
 
 /**
- * EVERY RECAP LINE, this recap's own first (by its key), each with a paper
- * clause when the agent trades on paper (a paper recap that never said paper
- * would read as real money), picked by its first part.
+ * ONE PAPER CLAUSE, A SINGLE WORD OF ITS OWN (second review, 2026-10-14): the
+ * casual posts' paper sentences share "paper", "trades", "desk" and "book"
+ * among themselves and with these parts, and each paper recap that went out
+ * blocked six to eight others. "on paper" adds one word to every paper line.
  */
+const RECAP_PAPER = "on paper";
+
+/** Every recap line, this recap's own first (by its key), a paper agent's with its paper clause. */
 export function recapLines(seed: string, o: { paper?: boolean } = {}): string[] {
-  const paperOf = new Map(RECAP_SLOTS[0].map((part, i) => [part, CASUAL_PAPER[i % CASUAL_PAPER.length]!] as const));
-  return latinLines(RECAP_SLOTS, seed, (a, b, c) => `${a}. ${b}, ${c}${o.paper === true ? `. ${paperOf.get(a)!}` : ""}.`);
+  return latinLines(RECAP_SLOTS, seed, (a, b, c) => `${a}. ${b}, ${c}${o.paper === true ? `, ${RECAP_PAPER}` : ""}.`);
 }
 
 /** A trade's ticker as the figures line may show it: its symbol, else its name, when either is one. */
