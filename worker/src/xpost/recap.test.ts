@@ -18,8 +18,10 @@ import {
   STANDARD_CADENCE,
   buyKey,
   introKey,
+  isWin,
   maybeOut,
   planPosts,
+  planRecap,
   recapCoverOf,
   recapCoverText,
   recapKey,
@@ -249,7 +251,8 @@ describe("one recap for a burst", () => {
   });
 
   it("counts sales only from the receipt-backed results, and only with the owner's opt-in to sale posts", () => {
-    const sells = [sale(6, "profit", 12.4), sale(6.5, "loss", null), sale(7, "profit", 3.1)];
+    // Past a single post's six hours: a fresh win would go out alone first (2026-10-14).
+    const sells = [sale(1.5, "profit", 12.4), sale(1.7, "loss", null), sale(1.9, "profit", 3.1)];
     const recap = recapOf(planPosts(input({ nowMs: now, calls: burst(), tradeResults: true, sells })))!;
     assert.equal(recap.sells.length, 3);
     assert.ok(recap.covers.includes(sellKey(TENANT, sells[0]!.operationKey)));
@@ -359,5 +362,64 @@ describe("a recap's words", () => {
     for (const l of [...recapLines("x"), ...recapLines("x", { paper: true })]) {
       assert.doesNotMatch(l, /\b(?:buys?|bought|buying|sells?|sold|selling|sales?|receipts?|settle\w*|fills?|filled)\b/i, l);
     }
+  });
+});
+
+describe("a win alone (the owner's ask, 2026-10-14: \"where are the trade pnls\")", () => {
+  const now = DAY0 + 8 * HOUR;
+  const burst = () => [5.5, 5.7, 5.9, 6.1, 6.3, 6.6, 6.9, 7.2].map((h) => buy(h));
+  const sells = () => [sale(7, "profit", 12.4), sale(6.9, "loss", null), sale(6.95, "flat", 0), sale(7.05, "unknown", null)];
+  const sellsOf = (out: PlanIntent[]) => out.filter((i): i is Extract<PlanIntent, { kind: "sell" }> => i.kind === "sell");
+
+  it("is a measured profit big enough to show", () => {
+    assert.equal(isWin({ outcome: "profit", gainPct: 12.4 }), true);
+    assert.equal(isWin({ outcome: "profit", gainPct: 0.05 }), true);
+    for (const s of [{ outcome: "profit" as const, gainPct: 0.04 }, { outcome: "profit" as const, gainPct: null }, { outcome: "profit" as const }, { outcome: "loss" as const, gainPct: -3 },
+      { outcome: "flat" as const, gainPct: 0 }, { outcome: "unknown" as const, gainPct: 5 }, { outcome: "profit" as const, gainPct: Number.NaN }]) assert.equal(isWin(s), false, JSON.stringify(s));
+  });
+
+  it("goes out alone, first, ahead of the buys; a loss, a flat and an unmeasured sale do not", () => {
+    const list = sells();
+    const out = planPosts(input({ nowMs: now, calls: burst(), tradeResults: true, sells: list }));
+    assert.deepEqual(sellsOf(out).map((i) => i.dedupeKey), [sellKey(TENANT, list[0]!.operationKey)]);
+    assert.equal(out[0]!.kind, "sell", "the first slot is the win's");
+  });
+
+  it("takes the first slot that will not go stale, past the single horizon a buy is held to", () => {
+    const queued = post({ kind: "buy", status: "scheduled", dueAtMs: now + HOUR, sentAtMs: null });
+    const out = planPosts(input({ nowMs: now, calls: [], tradeResults: true, sells: sells(), posts: [queued] }));
+    const [win] = sellsOf(out);
+    assert.ok(win, "planned");
+    assert.ok(win!.dueAtMs - now > RECAP_HORIZON_MS && win!.dueAtMs - now <= ACTIVE_CADENCE.sendStaleMs - ACTIVE_CADENCE.gapMs, `${(win!.dueAtMs - now) / MIN} min out`);
+    // A buy in the same place waits for the recap.
+    assert.equal(planPosts(input({ nowMs: now, calls: [buy(7.5)], posts: [queued] })).filter((i) => i.kind === "buy").length, 0);
+  });
+
+  it("needs no model: code's words say it when the model cannot", () => {
+    const out = planPosts(input({ nowMs: now, calls: burst(), tradeResults: true, sells: sells(), model: false }));
+    assert.equal(sellsOf(out).length, 1);
+    assert.equal(out.filter((i) => i.kind === "buy").length, 0);
+  });
+
+  it("waits outside the recap until its own post is out or tried; past its freshness unsaid, a recap says it", () => {
+    const [win, loss] = sells();
+    const base = { tenant: TENANT, now, consentAtMs: 0, covered: new Set<string>(), money: "live" as const, calls: burst(), results: [win!, loss!],
+      liveKeys: new Set<string>(), used: new Set<string>(), lastRecapAtMs: 0, freshMs: ACTIVE_CADENCE.tradeFreshMs };
+    const winKey = sellKey(TENANT, win!.operationKey), lossKey = sellKey(TENANT, loss!.operationKey);
+    const waiting = planRecap(base)!;
+    assert.ok(waiting.covers.includes(lossKey) && !waiting.covers.includes(winKey), "a fresh win with no post of its own is not the recap's");
+    assert.ok(planRecap({ ...base, liveKeys: new Set([winKey]) })!.covers.includes(winKey), "once its post is on its way, the recap counts it");
+    assert.ok(planRecap({ ...base, used: new Set([winKey]) })!.covers.includes(winKey), "once its post was tried and refused, a recap may say it");
+    const late = win!.atSec * 1000 + ACTIVE_CADENCE.tradeFreshMs + MIN;
+    assert.ok(planRecap({ ...base, now: late })!.covers.includes(winKey), "past its freshness unsaid, a recap says it");
+  });
+
+  it("a standard owner's sales, and an active owner's with buy posts off, are posted as before, wins and losses alike", () => {
+    const list = sells();
+    const std = planPosts(input({ nowMs: now, calls: [], tradeResults: true, sells: list, cadence: STANDARD_CADENCE, perDay: 3 }));
+    assert.ok(sellsOf(std).some((i) => i.call.outcome === "loss"), "a standard owner's loss posts alone, as before");
+    const off = planPosts(input({ nowMs: now, calls: [], tradeResults: true, sells: [list[1]!], kinds: { buys: false } }));
+    assert.deepEqual(sellsOf(off).map((i) => i.call.outcome), ["loss"], "no recap to count it, so the loss posts alone");
+    assert.equal(sellsOf(planPosts(input({ nowMs: now, calls: [], tradeResults: true, sells: [list[1]!], kinds: { buys: false }, model: false }))).length, 0, "and needs the model");
   });
 });

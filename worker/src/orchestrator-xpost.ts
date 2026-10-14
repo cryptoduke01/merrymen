@@ -49,7 +49,7 @@ import { STRATEGY_FLAVOUR, STRATEGY_SPOKEN, TRAIT_VOICE } from "./groupchat/temp
 import { MUSINGS, SUBJECTS, TAKES } from "./groupchat/topics";
 import { xAppFromEnv, type FetchLike, type XApp, type XReply } from "./xpost/client";
 import { admitXPost, lettersOf, merrymenMentioned, moneySaid, namedIn, tickerRefusal, unreadableLetter, vocabularyRefusal, type BaseGate, type XGateCtx } from "./xpost/gate";
-import { ACTIVE_CADENCE, ANSWER_GAP_MS, ANSWER_STALE_MS, ANSWERS_PER_DAY, RECAP_CALLS_PER_AGENT, RECAP_GAP_MS, RECAP_WINDOW_MS, REPLY_STALE_MS, STANDARD_CADENCE, coinOf, hash32, introState, planPosts, recapCoverOf, recapCoverText, replyDueAt, sendDecision, type PlanCadence, type PlanClock, type PlanIntent, type PlanSell } from "./xpost/planner";
+import { ACTIVE_CADENCE, ANSWER_GAP_MS, ANSWER_STALE_MS, ANSWERS_PER_DAY, RECAP_CALLS_PER_AGENT, RECAP_GAP_MS, RECAP_WINDOW_MS, REPLY_STALE_MS, STANDARD_CADENCE, coinOf, hash32, introState, isWin, planPosts, recapCoverOf, recapCoverText, replyDueAt, sendDecision, type PlanCadence, type PlanClock, type PlanIntent, type PlanSell } from "./xpost/planner";
 import { APP_PAUSE_KEY, APP_PAUSE_MS, CREDITS_PAUSE_MS, PAUSE_KEY, readReplyComments, sendOne, type CardOutcome, type SendOutcome } from "./xpost/sender";
 import { isAnswerOptOut, isReplyOptOut, plainAsk, replyCandidate, tagCandidate, withoutReplyOptOut } from "./xpost/replies";
 import { asksAboutACoin, coinTalkIn, deicticPickIn, houseTalkIn, marketTalkIn, nameLikeWords, textWords, trustTalkIn, unknownWordIn } from "./xpost/words";
@@ -102,6 +102,7 @@ import { PUBLISHABLE_SOURCES } from "./thesis-policy";
 import { readSaleCard, readSaleResults } from "./orchestrator-xpost-results";
 import { renderPnlCard, type PnlCardData } from "./pnl-card";
 import { appendSaleOutcome, hasSaleOutcome } from "./xpost/sale-outcome";
+import { saleLines } from "./xpost/sale-words";
 import { admitFiguresLine, cleanTicker, figuresTickers, withFigures, type FiguresSpec } from "./xpost/figures";
 import { hotAnswers, hotNoneAnswers, hotUnreadAnswers, insightFacts, majorAnswers, majorUnreadAnswers, marketAnswers, type HotRead, type MajorRead, type MarketRead } from "./xpost/market";
 import { selfAnswers, tradesAnswers } from "./xpost/casual";
@@ -2554,6 +2555,10 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
     let tokenDisclosure: PublicWallet | null = null;
     // An active owner's market insight post (2026-10-13): code's figures line goes after the words, and the coins it may not show.
     let insight: { figures: FiguresSpec; ownCoins: string[] } | null = null;
+    // AN ACTIVE OWNER'S WIN IS SAID WHATEVER THE MODEL DOES (the owner's ask,
+    // 2026-10-14): when its draft is not there (a pass, a refusal, an outage,
+    // a spent allowance), code's own sale words are (sale-words.ts).
+    const winWords = intent.kind === "sell" && active.has(account.tenant.toLowerCase()) && isWin(intent.call);
     if (intent.kind === "intro") {
       prompt = introPrompt(facts);
     } else if (intent.kind === "buy") {
@@ -2668,7 +2673,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         }
       } else {
         reason = "no-budget";
-        if (intent.kind !== "intro") return { outcome: "no-model-budget", body: null };
+        if (intent.kind !== "intro" && !winWords) return { outcome: "no-model-budget", body: null };
       }
     }
     if (!body && intent.kind === "intro") {
@@ -2679,6 +2684,18 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         const v = admitXPost(text, gate, BASE_GATE);
         if (v.ok) body = v.text;
         else reason = `template:${v.reason}`;
+      }
+    }
+    if (!body && winWords && intent.kind === "sell") {
+      // The first of this win's lines the gate admits, held to every rule a
+      // drafted sale sentence is: the coin named, "sold" said, no result word.
+      for (const line of saleLines(intent.coin, intent.dedupeKey)) {
+        const v = admitXPost(line, gate, BASE_GATE);
+        if (v.ok) {
+          body = v.text;
+          break;
+        }
+        reason = `sale-words:${v.reason}`;
       }
     }
     // AN INSIGHT POST CARRIES CODE'S FIGURES LINE, OR IS NOT POSTED: the words

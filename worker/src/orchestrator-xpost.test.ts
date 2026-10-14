@@ -530,16 +530,19 @@ describe("receipt-backed sale posts", () => {
         return { status: reply.status, headers: { get: () => null }, text: async () => text };
       };
     }
-    async function sendSale(over: { scope?: string; active?: boolean; result?: PlanSell; card?: XPosterDeps["saleCard"]; render?: XPosterDeps["renderCard"]; upload?: { status: number; body: unknown } }, t: { after(fn: () => void): void }) {
+    async function sendSale(over: { scope?: string; active?: boolean; result?: PlanSell; card?: XPosterDeps["saleCard"]; render?: XPosterDeps["renderCard"]; upload?: { status: number; body: unknown }; buysOff?: boolean; answer?: string; llmPerDay?: number }, t: { after(fn: () => void): void }) {
       const w = await world(t, T0, over.scope ?? MEDIA);
       await ready(w);
+      // Buy posts off: an active owner without recaps, where a sale that is no win still posts alone (planner.ts winsAlone).
+      if (over.buysOff) await store.setPrefs(w.db, TENANT, { buys: false }, T0);
       const calls: { url: string; body: Record<string, unknown> }[] = [];
       const asked: { agent: string; chainId: number; op: string }[] = [];
       const drawn: unknown[] = [];
       const results: PlanSell[] = [over.result ?? WIN];
       const p = poster(w, {
         active: over.active ?? true,
-        answer: () => "i sold some pepe.", facts: factsOf([], "live"),
+        answer: () => over.answer ?? "i sold some pepe.", facts: factsOf([], "live"),
+        ...(over.llmPerDay === undefined ? {} : { llmPerDay: over.llmPerDay }),
         fetch: xWithMedia(calls, over.upload),
         socialProfile: async () => ({ xTradeResults: true, currentAgent: { address: AGENT, chainId: 4663 } }),
         saleResults: async () => results,
@@ -606,10 +609,39 @@ describe("receipt-backed sale posts", () => {
 
     for (const outcome of ["loss", "flat", "unknown"] as const) {
       it(`never for a ${outcome} sale`, async (t) => {
-        const { sent, calls, asked, drawn } = await sendSale({ result: { ...WIN, outcome, gainPct: outcome === "loss" ? -20 : outcome === "flat" ? 0 : null } }, t);
+        // Posted alone only where no recap counts it: buy posts off (2026-10-14).
+        const { sent, calls, asked, drawn } = await sendSale({ buysOff: true, result: { ...WIN, outcome, gainPct: outcome === "loss" ? -20 : outcome === "flat" ? 0 : null } }, t);
         assert.equal(sent.status, "posted");
         assert.equal(calls.filter((c) => c.url.endsWith("/2/media/upload")).length, 0);
         assert.deepEqual([asked, drawn], [[], []]);
+      });
+    }
+
+    it("on an active owner's cadence only a win posts alone: a loss, a flat or an unmeasured sale is the recap's to count (2026-10-14)", async (t) => {
+      for (const result of [{ ...WIN, outcome: "loss" as const, gainPct: -20 }, { ...WIN, outcome: "flat" as const, gainPct: 0 }, { ...WIN, outcome: "unknown" as const, gainPct: null }, { ...WIN, gainPct: 0.01 }]) {
+        const w = await world(t, T0, MEDIA);
+        await ready(w);
+        const p = poster(w, {
+          active: true, answer: () => "i sold some pepe.", facts: factsOf([], "live"),
+          socialProfile: async () => ({ xTradeResults: true, currentAgent: { address: AGENT, chainId: 4663 } }),
+          saleResults: async () => [result],
+        });
+        await p.step(w.db, ROSTER, new Map(), T0 + MIN);
+        assert.equal((await rows(w)).filter((r) => r.kind === "sell").length, 0, `${result.outcome} ${result.gainPct}`);
+      }
+    });
+
+    for (const why of ["the model passes", "the model allowance is spent"] as const) {
+      it(`a win is said in code's own words when ${why}, its gain and card as ever (2026-10-14)`, async (t) => {
+        const { post, sent, calls, logs } = await sendSale(why === "the model passes" ? { answer: "PASS" } : { llmPerDay: 0 }, t);
+        const [words, result] = post.body.split("\n");
+        assert.match(words!, /\bsold\b/);
+        assert.match(words!, /\b(?:PEPE|Pepe)\b/);
+        assert.doesNotMatch(words!, /i sold some pepe/, "not the model's");
+        assert.equal(result, "+40% gross gain before fees and gas. pleased with that part.");
+        assert.equal(sent.status, "posted");
+        assert.equal(calls.filter((c) => c.url.endsWith("/2/media/upload")).length, 1);
+        assert.match(logs.join(" "), /card-attached 1/);
       });
     }
 

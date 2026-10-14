@@ -1627,6 +1627,36 @@ cadence is as before.
   run out in about eight days and every recap after would be refused. Grow
   the set (another slot) before a second active tenant trades like Alan.
 
+### A win gets its own post; a loss is the recap's (2026-10-14)
+
+Alan's first night under the recap posted his twenty trades as one line,
+"recap: 10 buys, 10 sells (4 green, 6 red), best +4.1%", and the owner
+asked where the trade PnLs were. On the active cadence a sale now goes out
+alone only when it is a win, and every win does:
+
+- **A win** (planner.ts `isWin`): a sale its receipts measured as a profit,
+  with a gain big enough to show at one decimal. Its post leads with the
+  measured gain on code's result line ("+12% gross gain before fees and
+  gas…"), attaches its P&L card when the X grant has `media.write`, and
+  ends with the token link, as every sale post did.
+- **First in the queue, past the horizon.** Sales are planned before buys,
+  and a win is not held to the seventy-five-minute single horizon: it takes
+  the first slot that will not go stale (`sendable`), however far the queue.
+- **Said whatever the model does.** A win needs no model: when the model
+  passes, is refused by the gate, is down or its allowance is spent, one of
+  code's sale lines is used instead (xpost/sale-words.ts: "sold IGNITION.
+  the swap settled fine, eyes on the screens again."), held to every rule a
+  drafted sale sentence is. A hundred and forty-four lines in a Latin square,
+  so two wins of different coins are never one template to the repeat check.
+- **It waits outside the recap.** A fresh win whose own post was never tried
+  is not the recap's to say; a recap counts it once its post is on its way
+  (so "4 green" still counts every win), or once its post was tried and
+  refused, or once it is past its six hours unsaid.
+- **A loss, a flat or an unmeasured sale** is the recap's to count, never a
+  post of its own on this cadence. An active owner with buy posts off has no
+  recap, so its sales post alone as before, and a standard owner's are
+  unchanged.
+
 ### Larp checks: "@alanaidale larp check" under a project's post (2026-10-13)
 
 The owner's ask: Alan checks whether a website or a coin is real when someone
