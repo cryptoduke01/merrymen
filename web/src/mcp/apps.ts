@@ -19,10 +19,10 @@
  *    textContent and createElement only, never parsed as markup, and text a
  *    third party wrote (token names, stored explanations, notes) is visibly
  *    marked as such.
- *  - Read-only. A view sends only the handshake, its size and — when the owner
- *    clicks the approval link — a request to open it. It never calls a tool,
- *    even though the protocol would let it, so no view can place, cancel or
- *    approve anything.
+ *  - The home view may call an explicit set of scoped reads, configuration
+ *    drafts and alert preferences after a user action. Other views are passive.
+ *    No view may sign, fund, approve or place a trade. The host and server
+ *    recheck every call; available_tools only controls visible affordances.
  *
  * The handshake is written by hand against the spec (the SDK's App class
  * would pull a bundler and zod into the page): the view sends `ui/initialize`,
@@ -30,6 +30,7 @@
  * `ui/notifications/initialized`, and the host then delivers
  * `ui/notifications/tool-input` and `ui/notifications/tool-result`.
  */
+import { HOME_CSS, HOME_JS } from "./onboarding-app";
 import { mcpConfig } from "./config";
 import type { ResourceDef } from "./resources";
 import type { Capability } from "./scopes";
@@ -44,9 +45,10 @@ export const LEGACY_RESOURCE_URI_META_KEY = "ui/resourceUri";
 /** The Apps protocol version the views announce in ui/initialize. */
 export const APPS_PROTOCOL_VERSION = "2026-01-26";
 
-export type AppView = "portfolio" | "decision" | "token" | "proposal";
+export type AppView = "home" | "portfolio" | "decision" | "token" | "proposal";
 
 export const APP_VIEW_URI: Readonly<Record<AppView, string>> = {
+  home: "ui://merrymen/home.html",
   portfolio: "ui://merrymen/portfolio.html",
   decision: "ui://merrymen/decision.html",
   token: "ui://merrymen/token.html",
@@ -55,6 +57,9 @@ export const APP_VIEW_URI: Readonly<Record<AppView, string>> = {
 
 /** Which view renders which tool's result. */
 export const APP_VIEW_OF_TOOL: Readonly<Record<string, AppView>> = {
+  get_merryman_setup: "home",
+  create_merryman: "proposal",
+  create_agent_draft: "proposal",
   get_portfolio: "portfolio",
   get_performance: "portfolio",
   explain_agent_inactivity: "decision",
@@ -69,24 +74,30 @@ export const APP_VIEW_OF_TOOL: Readonly<Record<string, AppView>> = {
 
 /**
  * Who may call a tool that has a view (McpUiToolMeta.visibility). The spec's
- * default is ["model", "app"], which would let a view ask the host to call the
- * tool. No view here ever calls a tool, so the tools declare the model only:
- * a host then refuses a tools/call that comes from a view.
+ * default is ["model", "app"]. Passive views stay model-only unless the
+ * home explicitly needs that tool. Every actual call still checks scopes
+ * and object ownership on the server.
  */
 export const APP_TOOL_VISIBILITY: readonly ("model" | "app")[] = Object.freeze(["model"] as const);
 
-function toolMeta(view: AppView): Record<string, unknown> {
+/** Only these safe reads, configuration drafts and alert preferences are callable from an app. */
+export const APP_CALLABLE_TOOLS = new Set([
+  "get_merryman_setup", "list_agents", "get_portfolio", "get_trades", "list_decisions", "get_agent_controls",
+  "create_merryman", "create_agent_draft", "list_notification_channels", "list_subscriptions", "subscribe", "unsubscribe",
+]);
+
+function toolMeta(view: AppView, name: string): Record<string, unknown> {
   const uri = APP_VIEW_URI[view];
-  return { ui: { resourceUri: uri, visibility: [...APP_TOOL_VISIBILITY] }, [LEGACY_RESOURCE_URI_META_KEY]: uri };
+  return { ui: { resourceUri: uri, visibility: APP_CALLABLE_TOOLS.has(name) ? ["model", "app"] : [...APP_TOOL_VISIBILITY] }, [LEGACY_RESOURCE_URI_META_KEY]: uri };
 }
 
 /**
  * The `_meta` each tool needs for a host to attach its view: the current
- * `ui.resourceUri` and the legacy flat key, and model-only visibility. CSP
+ * `ui.resourceUri` and the legacy flat key, and each tool's visibility. CSP
  * belongs on the resource, not the tool.
  */
 export const APP_TOOL_META: Readonly<Record<string, Record<string, unknown>>> = Object.fromEntries(
-  Object.entries(APP_VIEW_OF_TOOL).map(([tool, view]) => [tool, toolMeta(view)]),
+  Object.entries(APP_VIEW_OF_TOOL).map(([tool, view]) => [tool, toolMeta(view, tool)]),
 );
 
 /**
@@ -111,7 +122,12 @@ export const APP_RESOURCE_META: Readonly<Record<string, unknown>> = {
 export function withAppMeta<T extends ToolDef>(tools: readonly T[]): T[] {
   return tools.map((t) => {
     // Own keys only: a tool named like an Object.prototype member gets no view.
-    if (!Object.prototype.hasOwnProperty.call(APP_TOOL_META, t.name)) return t;
+    if (!Object.prototype.hasOwnProperty.call(APP_TOOL_META, t.name)) {
+      if (!APP_CALLABLE_TOOLS.has(t.name)) return t;
+      const current = t.meta ?? {};
+      const currentUi = current.ui && typeof current.ui === "object" && !Array.isArray(current.ui) ? current.ui as Record<string, unknown> : {};
+      return { ...t, meta: { ...current, ui: { visibility: ["model", "app"], ...currentUi } } };
+    }
     const add = APP_TOOL_META[t.name]!;
     const addUi = add.ui as { resourceUri: string; visibility: string[] };
     const current = t.meta ?? {};
@@ -250,6 +266,7 @@ function request(method, params, cb) {
   var id = nextId++;
   pending[String(id)] = cb || null;
   post({ jsonrpc: "2.0", id: id, method: method, params: params });
+  return id;
 }
 function notify(method, params) {
   var m = { jsonrpc: "2.0", method: method };
@@ -573,6 +590,7 @@ function boot() {
     initialized = true;
     notify("ui/notifications/initialized");
     watchSize();
+    if (typeof onHostReady === "function") onHostReady();
   });
   setTimeout(function () { if (!initialized && !rendered) notice("Waiting for the app to start this view…"); }, 10000);
 }
@@ -1167,14 +1185,14 @@ var STATUS_TONE = {
 };
 var FAIL_TEXT = { rejected: "Declined", cancelled: "Cancelled", expired: "Expired", refused: "Refused", failed: "Failed" };
 var KIND_TEXT = { settings: "a change to the agent's settings", agent_draft: "a draft agent setup", post: "a post in the group chat" };
-var KNOWN_SUMMARY = {
+var KNOWN_SUMMARY = { purpose: 1,
   action: 1, token: 1, book: 1, book_note: 1, expected_out: 1, min_out: 1, price_impact_bps: 1, assistant_note: 1, requested_by: 1,
   text: 1, diff: 1, settings: 1, after_approval: 1, risk_level: 1
 };
 // Keys resultBlock renders itself (or, worker_line, never: a raw worker line
 // is no longer sent, and would not be shown if it were).
 var RESULT_SKIP = {
-  worker_line: 1, notes: 1, agent_said_untrusted: 1, outcome_unknown: 1, simulated_because: 1,
+  setup_only: 1, setup_url: 1, worker_line: 1, notes: 1, agent_said_untrusted: 1, outcome_unknown: 1, simulated_because: 1,
   rule: 1, rule_family: 1, rule_label: 1, rule_remedy: 1, rule_detail_withheld: 1
 };
 
@@ -1286,10 +1304,10 @@ function generic(parent, rec, skip) {
   keys.forEach(function (k) { row(g, human(k) || "?", valueText(o[k])); });
 }
 
-function timeline(parent, kind, status, decided, failLabel) {
+function timeline(parent, kind, status, decided, failLabel, setupOnly) {
   var steps = kind === "trade"
     ? [["awaiting_approval", "Awaiting approval"], ["approved", "Approved"], ["submitted", "Submitted to the agent"], ["executing", "Executing"], ["confirmed", "Confirmed on chain"]]
-    : [["awaiting_approval", "Awaiting approval"], ["applied", "Applied"]];
+    : [["awaiting_approval", "Awaiting approval"], ["applied", setupOnly ? "Setup approved" : "Applied"]];
   if (status === "paper_filled" && kind === "trade") steps[4] = ["paper_filled", "Filled on paper"];
   if (status === "filled_awaiting_ledger" && kind === "trade") steps.splice(4, 0, ["filled_awaiting_ledger", "Waiting for the ledger"]);
   var idx = -1;
@@ -1315,6 +1333,7 @@ function renderProposal(d) {
   var kind = str(d.kind, 24) || "trade";
   var status = str(d.status, 40) || "";
   var res = obj(d.result);
+  var setupOnly = kind === "agent_draft" && (s.purpose === "create" || (res && res.setup_only === true));
   if (kind === "trade") {
     var proposed = pick({ live: "live", paper: "paper" }, s.book, null);
     var actual = outcomeBook(status, res);
@@ -1336,24 +1355,24 @@ function renderProposal(d) {
   // "failed" with outcome_unknown is not a failure the evidence shows: the
   // order finished and no record that is clearly its own arrived in time.
   var unconfirmed = status === "failed" && !!res && res.outcome_unknown === true;
-  hd.appendChild(unconfirmed ? chip("outcome not confirmed", "warn") : chip(human(status) || UNKNOWN, pick(STATUS_TONE, status, "unk")));
-  put(st, "p", null, str(d.status_explained, 400) || pick(STATUS_TEXT, status, ""));
-  timeline(st, kind, status, !!d.decided_at, unconfirmed ? "Outcome not confirmed" : null);
+  hd.appendChild(unconfirmed ? chip("outcome not confirmed", "warn") : chip(setupOnly && status === "applied" ? "Setup approved" : human(status) || UNKNOWN, pick(STATUS_TONE, status, "unk")));
+  put(st, "p", null, setupOnly && status === "applied" ? "Your setup is approved. Owner wallet creation, permission signing and activation are still required; this does not confirm a running agent." : str(d.status_explained, 400) || pick(STATUS_TEXT, status, ""));
+  timeline(st, kind, status, !!d.decided_at, unconfirmed ? "Outcome not confirmed" : null, setupOnly);
   var g = grid(st);
   if (d.created_at) row(g, "Created", when(d.created_at));
-  row(g, status === "awaiting_approval" ? "Expires" : "Approval window", when(d.expires_at), status === "awaiting_approval" ? null : "Only matters while it waits for approval");
+  row(g, setupOnly ? "Setup expires" : status === "awaiting_approval" ? "Expires" : "Approval window", when(d.expires_at), setupOnly ? "Finish owner signing before this setup expires" : status === "awaiting_approval" ? null : "Only matters while it waits for approval");
   if (d.decided_at) row(g, "Decided", when(d.decided_at));
   if (d.order_id) row(g, "Order", mono(str(d.order_id, 80)));
 
-  if (status === "awaiting_approval") {
-    var ap = section(root, "Approve in Merrymen");
+  if (status === "awaiting_approval" || (setupOnly && status === "applied")) {
+    var ap = section(root, setupOnly && status === "applied" ? "Finish setup in Merrymen" : "Approve in Merrymen");
     var exp = Date.parse(typeof d.expires_at === "string" ? d.expires_at : "");
-    var link = approvalLink(d.approval_url, d.proposal_id);
+    var link = approvalLink(setupOnly && status === "applied" ? ISSUER + "/connect/approve/" + d.proposal_id : d.approval_url, d.proposal_id);
     if (isFinite(exp) && exp <= Date.now()) {
       put(ap, "p", "warn-text", "This proposal has expired. Ask for a fresh one.");
     } else if (link) {
-      put(ap, "p", null, (kind === "trade" ? "Nothing is traded" : "Nothing changes") + " until you open this page, sign in to Merrymen and approve.");
-      var a = put(ap, "a", "cta", "Open the approval page");
+      put(ap, "p", null, setupOnly && status === "applied" ? "Return to your approved setup to continue wallet creation and permission signing." : (kind === "trade" ? "Nothing is traded" : "Nothing changes") + " until you open this page, sign in to Merrymen and approve.");
+      var a = put(ap, "a", "cta", setupOnly && status === "applied" ? "Continue owner setup" : "Open the approval page");
       a.setAttribute("href", link.href);
       a.setAttribute("target", "_blank");
       a.setAttribute("rel", "noopener noreferrer");
@@ -1435,6 +1454,7 @@ function renderQuote(parent, q, standalone) {
 const CSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'none'; font-src 'none'; connect-src 'none'; frame-src 'none'; object-src 'none'; form-action 'none'; base-uri 'none'";
 
 const VIEWS: Record<AppView, { title: string; js: string; description: string }> = {
+  home: { title: "Your Merryman", js: PORTFOLIO_JS.replace("function render(d)", "function renderPortfolioResult(d)") + PROPOSAL_JS.replace("function render(d)", "function renderProposalResult(d)") + HOME_JS, description: "Interactive setup and management: name, strategy, risk, readiness, portfolio, activity and alerts. Tools remain scoped to the connected owner; wallet signing and approval stay in Merrymen." },
   portfolio: { title: "Merrymen portfolio", js: PORTFOLIO_JS, description: "Renders a portfolio and its performance: paper and live books side by side, never summed." },
   decision: { title: "Merrymen decision", js: DECISION_JS, description: "Renders why an agent has not traded, or one of its decisions: the primary cause, each check's status, evidence and what the owner can do." },
   token: { title: "Merrymen token", js: TOKEN_JS, description: "Renders a token's market data, a token search or a trade-eligibility check: discoverable, priceable and executable, with third-party text marked." },
@@ -1453,7 +1473,7 @@ function issuerLiteral(issuer: string): string {
  */
 export function appHtml(view: AppView, opts: { issuer?: string } = {}): string {
   const v = VIEWS[view];
-  const config = view === "proposal" ? `var ISSUER = ${issuerLiteral(opts.issuer ?? "")};\n` : "";
+  const config = view === "proposal" || view === "home" ?  `var ISSUER = ${issuerLiteral(opts.issuer ?? "")};\n` : "";
   const script = `(function () {\n"use strict";\nvar VIEW = ${JSON.stringify(view)};\n${config}${RUNTIME.replace("__PROTOCOL__", APPS_PROTOCOL_VERSION)}\n${v.js}\nboot();\n})();`;
   return `<!doctype html>
 <html lang="en">
@@ -1464,7 +1484,7 @@ export function appHtml(view: AppView, opts: { issuer?: string } = {}): string {
 <meta name="color-scheme" content="light dark">
 <meta name="referrer" content="no-referrer">
 <title>${v.title}</title>
-<style>${CSS}</style>
+<style>${CSS}${view === "home" ? HOME_CSS : ""}</style>
 </head>
 <body>
 <main id="app" aria-live="polite"><p class="notice">Loading…</p></main>
@@ -1486,7 +1506,7 @@ function appResource(view: AppView): AppResourceDef {
   return {
     name: `app_${view}_view`,
     title: v.title,
-    description: `${v.description} Presentation only: it holds no data and makes no network requests.`,
+    description: `${v.description} The resource holds no data and makes no direct network requests.`,
     mimeType: MCP_APP_MIME,
     // Pure presentation: the page carries no owner data, so it needs no scope.
     capability: null,
@@ -1498,9 +1518,9 @@ function appResource(view: AppView): AppResourceDef {
     uri: APP_VIEW_URI[view],
     meta: APP_RESOURCE_META,
     async read() {
-      return { mimeType: MCP_APP_MIME, text: appHtml(view, view === "proposal" ? { issuer: mcpConfig().issuer } : {}) };
+      return { mimeType: MCP_APP_MIME, text: appHtml(view, view === "proposal" || view === "home" ? { issuer: mcpConfig().issuer } : {}) };
     },
   };
 }
 
-export const APP_RESOURCES: AppResourceDef[] = (["portfolio", "decision", "token", "proposal"] as const).map(appResource);
+export const APP_RESOURCES: AppResourceDef[] = (["home", "portfolio", "decision", "token", "proposal"] as const).map(appResource);

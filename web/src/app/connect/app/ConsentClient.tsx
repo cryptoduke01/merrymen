@@ -162,6 +162,8 @@ export function ConsentClient() {
   // connection can refresh until it is disconnected or reaches its limit).
   // Filtered here too, so an older server can never show it as a choice.
   const visibleScopes = view ? view.scopes.filter((s) => s.id !== "offline_access") : [];
+  const setupScope = visibleScopes.find((s) => s.id === "drafts:write");
+  const needsSetup = !!view && view.agents.every((a) => !a.account);
   const chosenUseful = [...scopes].some((s) => s !== "offline_access" && (agents.size > 0 || !view?.scopes.find((x) => x.id === s)?.needsAgent));
   // The plain-words reading of the ticked boxes; it follows every tick in the full list.
   const summary = accessSummary(visibleScopes.map((s) => ({ ...s, phrase: s.phrase || s.title })), scopes, agents.size > 0);
@@ -210,7 +212,7 @@ export function ConsentClient() {
                 at the start like the old checkbox list; the permissions below
                 say what the app may do with it. */}
             {noAgent
-              ? <p className="mcp-note">You don’t have an agent yet, so there is no agent to share. You can reconnect after creating one.</p>
+              ? <p className="mcp-note">You don’t have an agent to share yet.{setupScope ? " You can let your assistant prepare a setup below, then review and sign it in Merrymen." : " Create one in Merrymen, then reconnect to choose what to share."}</p>
               : onlyAgent
                 ? <div className="mcp-agent-card">
                   <span className="mcp-agent-card-icon"><Bot size={19} aria-hidden /></span>
@@ -232,6 +234,18 @@ export function ConsentClient() {
                       <span><strong>Agent {a.slug}</strong><span>{a.account ? `Account ${shortAccount(a.account)}` : "No trading permission signed yet"}</span></span></label></li>))}</ul>
                 </>}
 
+            {setupScope && <ul className="mcp-checks" aria-label="Optional setup and settings permission">
+              <li className="mcp-sensitive">
+                <label>
+                  <input type="checkbox" checked={scopes.has(setupScope.id)} onChange={() => toggle(scopes, setupScope.id, setScopes)} />
+                  <span>
+                    <strong>{needsSetup ? `Let ${appName} help set up your Merryman` : setupScope.title} <em className="mcp-level mcp-level-sensitive">Optional</em></strong>
+                    <span>Prepare a new Merryman or suggest setting changes. You review every proposal in Merrymen. Creating an agent still requires you to review its limits and sign with your own wallet.</span>
+                  </span>
+                </label>
+              </li>
+            </ul>}
+
             <div className="mcp-summary">
               <ul aria-label={`What ${appName} could do`}>
                 {summary.map((g) => (
@@ -252,7 +266,7 @@ export function ConsentClient() {
               Change what {appName} can do <ChevronDown size={15} aria-hidden />
             </button>
             <div id="mcp-customize" className="mcp-customize" hidden={!customizing}>
-              <ul className="mcp-checks">{visibleScopes.map((s) => {
+              <ul className="mcp-checks">{visibleScopes.filter((s) => s.id !== "drafts:write").map((s) => {
                 const disabled = s.needsAgent && agents.size === 0;
                 return (
                   <li key={s.id} className={s.level === "sensitive" ? "mcp-sensitive" : ""}>

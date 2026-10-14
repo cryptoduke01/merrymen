@@ -14,7 +14,7 @@ import { fullDateTime } from "@/lib/format";
 import { SignIn } from "@/terminal/HostedControls";
 import { BrandLockup } from "../../BrandLockup";
 
-import { TERMINAL, approvable, bookBox, headline, resumeDecision, short, text, usdg, type SettingsCheck, type View } from "./approve-view";
+import { TERMINAL, approvable, bookBox, headline, resumeDecision, short, text, usdg, walletSetupUrl, type SettingsCheck, type View } from "./approve-view";
 export { approvable, bookBox, headline, outcomeBook, resumeDecision } from "./approve-view";
 
 /** What the owner reads when their session ended mid-decision: never a bare status word. */
@@ -83,6 +83,12 @@ function Details({ v }: { v: View }) {
     return <ul className="mcp-checks">{diff.map((d) => <li key={d.label}><label><span><strong>{d.label}: {d.current} → {d.proposed}</strong><span>{d.help}</span></span></label></li>)}</ul>;
   }
   if (v.kind === "agent_draft") {
+    if(b.purpose === "create") {
+      const settings=(b.settings as Record<string,unknown>)??{};
+      const rows=v.settings_check?.rows;
+      const leftOut=v.settings_check?.left_out??(Array.isArray(b.left_out)?b.left_out:[]);
+      return <><ul className="mcp-checks">{rows?rows.map(d=><li key={d.key}><label><span><strong>{d.label}: {d.proposed}</strong><span>{d.help}</span></span></label></li>):Object.entries(settings).map(([k,val])=><li key={k}><label><span><strong>{k}</strong><span>{text(val)}</span></span></label></li>)}</ul>{leftOut.length>0&&<p className="mcp-note">Left out of this setup: {leftOut.map(text).join(", ")}. Safety floors such as the price-impact cap are only changed in Settings.</p>}<div className="connect-boundary"><ShieldCheck size={18} aria-hidden/><p>Review this setup, then continue to create your wallet and sign its trading limits. Your Merryman runs on Merrymen and you manage it from your assistant. Approving this page alone does not create a wallet, change settings or start trading.</p></div></>;
+    }
     const c = v.settings_check;
     if (!c) {
       const settings = (b.settings as Record<string, unknown>) ?? {};
@@ -167,6 +173,7 @@ export function ApproveClient({ id }: { id: string }) {
 
   const expired = v ? v.expires_at * 1000 < Date.now() : false;
   const deciding = v?.status === "awaiting_approval";
+  const setupUrl = v ? walletSetupUrl(v) : null;
   const noun = v?.kind === "trade" ? "Trade" : v?.kind === "settings" ? "Setting changes" : v?.kind === "agent_draft" ? "Agent setup" : v?.kind === "post" ? "Post" : "Request";
   const title = v && !deciding ? `${noun}: ${headline(v).toLowerCase()}` : v?.kind === "trade" ? "Approve this trade?" : v?.kind === "settings" ? "Approve these setting changes?" : v?.kind === "agent_draft" ? "Approve this agent setup?" : v?.kind === "post" ? "Approve this post?" : "Review a request";
 
@@ -196,6 +203,7 @@ export function ApproveClient({ id }: { id: string }) {
             {typeof v.summary.assistant_note === "string" && <p className="mcp-note">Assistant’s note (unverified): “{v.summary.assistant_note}”</p>}
             {v.status === "cancelled" && v.result?.requester_withdrawn === true && typeof v.result.why === "string" && <div className="connect-boundary mcp-warn"><AlertTriangle size={18} aria-hidden /><p>Cancelled because {v.result.why}. Nothing was sent, and it can no longer be approved.</p></div>}
             <Details v={v} />
+            {setupUrl&&!signedOut&&<a className="flow-primary" href={setupUrl}>Continue to wallet setup <ArrowRight size={16} aria-hidden/></a>}
             {v.result && <details open={TERMINAL.has(v.status)}><summary>Result</summary><pre className="mcp-activity">{JSON.stringify(v.result, null, 2)}</pre></details>}
             {/* No decision is offered while signed out: pressing it could not be sent. */}
             {v.status === "awaiting_approval" && !expired && !signedOut && <>

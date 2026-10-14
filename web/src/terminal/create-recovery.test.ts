@@ -7,6 +7,7 @@ import { JSDOM } from "jsdom";
 import type { Grant } from "@/lib/session";
 import type { AccountState } from "./HostedControls";
 import { markPermissionForReplacement } from "@/lib/permission-replacement";
+import { RISK_PROFILES } from "@merrymen/core";
 
 const tenant = `0x${"a".repeat(40)}`;
 const grant = { smartAccount: `0x${"b".repeat(40)}`, owner: tenant, sessionKeyAddress: `0x${"c".repeat(40)}`, chainId: 4663, binding: { version: "privy-did-owner-v1" }, caps: { perTradeUsdg: 10, dailyUsdg: 50 } } as Grant;
@@ -18,6 +19,9 @@ let storageFailed: boolean;
 let mintCalls: number;
 let signerAddress: string;
 let writes: string[];
+let settingsWrite: Record<string,unknown>|null;
+let setupResponse: unknown;
+let setupReads: number;
 let current: { kind: "ready"; account: AccountState } | { kind: "changed" };
 let CreateAgent: typeof import("./screens/CreateAgent").CreateAgent;
 let testDom: typeof import("./test-dom").testDom;
@@ -58,11 +62,13 @@ before(async () => {
 
 beforeEach(() => {
   ui = testDom(); stored = null; snapshots = []; trusted = true; storageFailed = false; mintCalls = 0; signerAddress = tenant; writes = [];
+  settingsWrite=null;setupResponse=null;setupReads=0;
   current = { kind: "ready", account };
   globalThis.fetch = async (input, init) => {
     const route = String(input);
     if (init?.method && init.method !== "GET") writes.push(route);
-    if (route === "/api/settings") return Response.json({ values: {} });
+    if (route.startsWith("/api/mcp/approvals/")) { setupReads++; return setupResponse instanceof Response ? setupResponse : Response.json(setupResponse); }
+    if (route === "/api/settings") { if(init?.method==="PUT")settingsWrite=JSON.parse(String(init.body)); return Response.json({ values: {} }); }
     if (route === "/api/grants") return Response.json({ ok: true });
     throw new Error(`Unexpected request: ${route}`);
   };
@@ -144,4 +150,56 @@ it("a stale Privy signer from another hosted login cannot mint or change setting
   await ui.click("Create agent");
   assert.equal(mintCalls, 0); assert.deepEqual(writes, []);
   assert.match(ui.container.textContent!, /Your signing wallet changed/);
+});
+
+const proposalId=`prp_${"f".repeat(32)}`;
+function setup(owner=tenant) {
+  const expires_at=Math.floor(Date.now()/1000)+3600;
+  const {maxImpactBps:_,...risk}=RISK_PROFILES.careful.settings;
+  return {id:proposalId,kind:"agent_draft",status:"applied",binding:{purpose:"create",tenant:owner,expires_at,risk_level:"careful",settings:{agentName:"Little Robin",strategy:"weekend-gap",basketSymbols:["TSLA"],assetMode:"stocks",...risk}},expires_at,requested_by:"ChatGPT",result:{setup_only:true}};
+}
+async function assistantSetup() {
+  ui.dom.window.history.replaceState(null,"",`/create?proposal=${proposalId}`);
+  setupResponse=setup();
+  await ui.render(screen());
+}
+it("assistant setup carries name, strategy, basket and reviewed risk into actual wallet creation",async()=>{
+  await assistantSetup();
+  assert.match(ui.container.textContent!,/Little Robin/);assert.match(ui.container.textContent!,/Weekend gap/);
+  assert.equal(ui.container.querySelector<HTMLInputElement>('input[name="mode"]')?.checked,true,"chat cannot opt a user into live trading");
+  assert.equal(mintCalls,0);assert.deepEqual(writes,[]);
+  await ui.click("Create agent");
+  assert.equal(setupReads,2,"setup standing is re-read before creation");
+  assert.equal(mintCalls,1);
+  assert.deepEqual({name:settingsWrite?.agentName,strategy:settingsWrite?.strategy,basket:settingsWrite?.basketSymbols,live:settingsWrite?.liveTradingEnabled}, {name:"Little Robin",strategy:"weekend-gap",basket:["TSLA"],live:false});
+  for(const key of ["slippageBps","strategistStopLossBps","takeProfitBps","buyPerTickUsdg","llmMaxActionUsdg"]){
+    assert.equal(settingsWrite?.[key],RISK_PROFILES.careful.settings[key as keyof typeof RISK_PROFILES.careful.settings]);
+  }
+  assert.equal(settingsWrite?.maxImpactBps,undefined);
+});
+it("revoking a connection after loading a setup blocks settings and wallet signing",async()=>{
+  await assistantSetup();
+  setupResponse=Response.json({error:"This assistant connection was revoked."},{status:403});
+  await ui.click("Create agent");
+  assert.equal(mintCalls,0);assert.deepEqual(writes,[]);
+  assert.match(ui.container.textContent!,/no longer available to your signed-in account or assistant connection/);
+});
+it("a foreign or expired setup never offers wallet creation",async()=>{
+  ui.dom.window.history.replaceState(null,"",`/create?proposal=${proposalId}`);
+  setupResponse=setup(`0x${"d".repeat(40)}`);
+  await ui.render(screen());
+  assert.match(ui.container.textContent!,/not approved for your current account/);
+  assert.equal(ui.container.querySelector("#agent-name"),null);assert.equal(mintCalls,0);assert.deepEqual(writes,[]);
+  const expired=setup();expired.expires_at=1;expired.binding.expires_at=1;setupResponse=expired;
+  await ui.remount(screen());
+  assert.match(ui.container.textContent!,/not approved for your current account/);
+  assert.equal(mintCalls,0);assert.deepEqual(writes,[]);
+});
+it("a login change invalidates a previously loaded assistant setup",async()=>{
+  await assistantSetup();
+  const other=`0x${"d".repeat(40)}`;
+  const changed={...account,session:{...account.session,address:other}};
+  await ui.render(React.createElement(CreateAgent,{account:changed,onRefresh(){},onSignedIn(){},onBack(){},onDone(){},onFund(){}}));
+  assert.match(ui.container.textContent!,/not approved for your current account/);
+  assert.equal(mintCalls,0);assert.deepEqual(writes,[]);
 });

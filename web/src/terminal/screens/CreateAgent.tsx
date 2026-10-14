@@ -26,6 +26,7 @@ import type { TierView } from "@/app/api/tier/route";
 import { loadTier, newAgentQualifies } from "../tier";
 import { count, decimalSeparator } from "@/lib/format";
 import { useT } from "@/lib/i18n";
+import { loadMcpCreateSetup, mcpSetupRequest, type McpCreateSetup } from "../mcp-create-setup";
 
 /**
  * `circle` MARKS A STRATEGY THE WORKER WILL NOT ACTUALLY RUN FOR A NON-HOLDER.
@@ -49,6 +50,7 @@ import { useT } from "@/lib/i18n";
 const STRATEGIES = [
   {id:"trencher",name:"Trencher",description:"Find verified memecoin pools, with Brain reviews and automatic exits."},
   {id:"steady-basket",name:"Steady basket",description:"Buy a little of your selected stocks on a schedule."},
+  {id:"weekend-gap",name:"Weekend gap",description:"Buy selected tokenised stocks while their underlying market is closed, then sell when it reopens."},
   {id:"even-keel",name:"Even keel",description:"Keep the stocks in your basket evenly weighted.",circle:true},
   {id:"dip-hunter",name:"Dip hunter",description:"Look for pullbacks in the stocks you follow.",circle:true},
   {id:"llm-strategist",name:"Strategist",description:"Assess the market with AI and follow its reasoning."},
@@ -56,6 +58,7 @@ const STRATEGIES = [
 const EXAMPLES:Record<string,string>={
   "trencher":"For example, assess an active memecoin pool, buy within your limits, and monitor it for an exit. No token addresses to add.",
   "steady-basket":"For example, buy small amounts of your selected stocks over time instead of buying everything at once.",
+  "weekend-gap":"For example, enter a selected stock after its underlying market closes and exit when its price feed becomes fresh again, within your limits.",
   "even-keel":"For example, if one stock grows to dominate your basket, adjust positions toward your target weights.",
   "dip-hunter":"For example, wait for a pullback that matches the strategy before considering an entry.",
   "llm-strategist":"For example, assess current market information, explain a proposed move, and check it against your limits.",
@@ -112,6 +115,24 @@ export function CreateAgent({account,accountFailed=false,retrying=false,onRefres
   const inFlight=useRef(false);
   const [status,setStatus]=useState("");
   const [error,setError]=useState("");
+  const [setupRequest,setSetupRequest]=useState<ReturnType<typeof mcpSetupRequest>|null>(null);
+  const setupOwner=account?.session.address?.toLowerCase()??"";
+  const [assistantSetup,setAssistantSetup]=useState<{owner:string;id:string;setup:McpCreateSetup|null;error:string}|null>(null);
+  useEffect(()=>{setSetupRequest(mcpSetupRequest(window.location.search));},[]);
+  useEffect(()=>{
+    if(!setupRequest?.id||!setupOwner||account?.status.exists)return;
+    let active=true;
+    const id=setupRequest.id;
+    setAssistantSetup(null);
+    void loadMcpCreateSetup(id,setupOwner).then(setup=>{
+      if(!active)return;
+      setAssistantSetup({owner:setupOwner,id,setup,error:""});
+      setName(setup.name);setStrategy(setup.strategy);setAssetMode(setup.assetMode);setBasket(setup.basket);
+      setPaper(true);setAck(false);setStep("limits");
+    }).catch(e=>{if(active)setAssistantSetup({owner:setupOwner,id,setup:null,error:e instanceof Error?e.message:"Could not load your assistant's setup."});});
+    return()=>{active=false;};
+  },[setupRequest,setupOwner,account?.status.exists]);
+  const reviewedSetup=assistantSetup?.owner===setupOwner&&assistantSetup.id===setupRequest?.id?assistantSetup:null;
   const savedContext=account ? `${account.session.hosted}:${account.session.address?.toLowerCase()??""}:${account.status.exists}` : "";
   const [savedRecovery,setSavedRecovery]=useState<{context:string;grant:Grant|null;failed:boolean}|null>(null);
   async function recoverableFor(session:AccountState["session"]):Promise<Grant|null>{
@@ -161,6 +182,9 @@ export function CreateAgent({account,accountFailed=false,retrying=false,onRefres
   if(!grant&&!privyOwner)return <section className="create-agent"><h1>Use a protected signing wallet.</h1><p>New mainnet agents require a Privy wallet so their owner key is not stored in this browser.</p>{PRIVY_BETA?<><p>Sign in with X or email, then wait for your signing wallet to become ready.</p><SignIn onDone={onSignedIn}/><RetryButton retrying={retrying} onRetry={onRefresh}/></>:<p>Protected wallet sign-in is not enabled on this installation. Enable it before creating a mainnet agent, or use testnet from Wallet &amp; permissions.</p>}<a href="/grant">Manage an existing wallet or use testnet</a></section>;
   if(!grant&&!account.status.exists&&!recovery)return <section className="create-agent"><SkeletonRows rows={3} label="Checking your saved wallet"/></section>;
   if(!grant&&recovery?.failed)return <section className="create-agent"><h1>Couldn&apos;t check your saved wallet.</h1><p>Restore access to browser storage and reload before creating or replacing a permission.</p><a href="/grant#resign">Open Wallet &amp; permissions</a><RetryButton retrying={retrying} onRetry={onRefresh}/></section>;
+  if(!grant&&!setupRequest)return <section className="create-agent"><SkeletonRows rows={3} label="Loading your setup"/></section>;
+  if(!grant&&(setupRequest?.invalid||reviewedSetup?.error))return <section className="create-agent"><h1>Review your setup again.</h1><p role="alert">{reviewedSetup?.error||"This setup link is invalid. Return to your assistant for a new setup."}</p><a href="/create">Start a new setup</a></section>;
+  if(!grant&&setupRequest?.id&&!reviewedSetup?.setup)return <section className="create-agent"><SkeletonRows rows={3} label="Loading your assistant's setup"/></section>;
   async function create(practice=paper, liveConsent=false) {
     if(inFlight.current || busy || grant || !account)return;
     if(!privyOwner){setError("Your signing wallet is not ready. Sign in with X or email and try again.");return;}
@@ -212,12 +236,15 @@ export function CreateAgent({account,accountFailed=false,retrying=false,onRefres
       // or new signature; the initial UI check is not an authorization cache.
       const saved=await recoverableFor(current.account.session);
       if(saved){setSavedRecovery({context:savedContext,grant:saved,failed:false});throw new Error("Resume your saved wallet from Wallet & permissions before creating another permission.");}
+      // Recheck expiry, connection standing and owner immediately before the
+      // settings write/signature. A loaded setup is not an authorization cache.
+      const setup=setupRequest?.id?await loadMcpCreateSetup(setupRequest.id,current.account.session.address??""):null;
       const settings=await requestJson<{values:{customTokens?:unknown[];v4AdapterAddress?:string;ponsAdapterAddress?:string;ponsClassVaultFactory?:string}}>("/api/settings");
       const address=(value?:string)=>value&&/^0x[0-9a-fA-F]{40}$/.test(value) ? value as `0x${string}` : undefined;
       const pons=await verifiedAdapter(address(settings.values.ponsAdapterAddress),4663,setStatus);
       // The market answers ride the settings write that was already happening —
       // one round trip, not four.
-      await requestJson("/api/settings",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({owner:account.session.hosted?account.session.address:undefined,agentName:name.trim(),strategy,paperTradingEnabled:true,liveTradingEnabled:!practice,assetMode:strategy==="trencher"?"crypto":assetMode,basketSymbols:strategy==="trencher"?[]:basket,customTokens:[...((settings.values.customTokens??[]) as CustomToken[]),...wizardTokens],...(strategy==="trencher"?{discoveryEnabled:true,officialCoinsEnabled:true,trencherFastEnabled:true,trencherLiveEnabled:!practice,tickSeconds:15}:{})})});
+      await requestJson("/api/settings",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({...setup?.riskSettings,owner:account.session.hosted?account.session.address:undefined,agentName:name.trim(),strategy,paperTradingEnabled:true,liveTradingEnabled:!practice,assetMode:strategy==="trencher"?"crypto":assetMode,basketSymbols:strategy==="trencher"?[]:basket,customTokens:[...((settings.values.customTokens??[]) as CustomToken[]),...wizardTokens],...(strategy==="trencher"?{discoveryEnabled:true,officialCoinsEnabled:true,trencherFastEnabled:true,trencherLiveEnabled:!practice,tickSeconds:15}:{})})});
       /**
        * MERGED LOCALLY, NOT RE-READ — and getting this wrong would silently
        * undo the whole point of the step.
@@ -261,6 +288,7 @@ export function CreateAgent({account,accountFailed=false,retrying=false,onRefres
   const index=steps.indexOf(step);
   return <section className="create-agent">
     <header className="create-heading"><button aria-label="Back" disabled={busy||step==="backup"} onClick={()=>step==="limits"?setStep(strategy==="trencher"?"agent":"market"):step==="market"?setStep("agent"):onBack()}><ArrowLeft size={18}/></button><span>Create an agent</span></header>
+    {reviewedSetup?.setup&&!grant&&<div className="create-example"><span>Prepared with {reviewedSetup.setup.requestedBy}</span><h2>{name}</h2><p>{STRATEGIES.find(s=>s.id===strategy)?.name??strategy}{reviewedSetup.setup.riskLevel?` · ${reviewedSetup.setup.riskLevel} settings`:""}{basket.length?` · ${basket.join(", ")}`:""}</p><p>Your Merryman runs on Merrymen after setup. Choose your trading limits below and approve the wallet prompts. You can manage it from ChatGPT or Claude without keeping the chat open.</p>{STRATEGIES.find(s=>s.id===strategy)?.circle&&<p>This strategy requires a qualifying $MERRYMEN holding. Until you qualify, it opens no new positions. You can choose Steady basket or Strategist to start without that requirement.</p>}</div>}
     {step!=="quick"&&<ol className="create-steps" aria-label="Setup progress">{steps.map((stage,i)=><li key={stage} aria-current={i===index?"step":undefined}><span>{i<index?<Check size={12}/>:i+1}</span>{stage==="fund"?"Ready":stage[0]!.toUpperCase()+stage.slice(1)}</li>)}</ol>}
     {step==="quick"&&<>
       <div className="create-intro"><Face name={name||"Your agent"} slug={null}/><h1>Start your Trencher.</h1><p>Finds verified memecoin pools, asks Brain before buying, and monitors exits. No token addresses to enter.</p></div>

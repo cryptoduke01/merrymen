@@ -1,7 +1,14 @@
 # Merrymen for Claude Code
 
-Your Merrymen trading agent in any Claude Code session: its status, why it has
+Create or manage your hosted Merrymen trading agent from Claude Code: its status, why it has
 or hasn't traded, your portfolio, a weekly review and token research.
+
+For Claude on the web, Desktop, Cowork or mobile, use the remote connector at
+[Connect Merrymen](https://app.merrymen.dev/connect/mcp); no terminal is needed.
+ChatGPT and dots need a supported ChatGPT plugin for this MCP server, installed,
+connected and enabled. Availability depends on the host and workspace.
+
+MCP Apps hosts also get an interactive home for name, strategy, risk, readiness, portfolio, activity, settings and Telegram alerts. Other hosts use the same tools as text; owner approval and wallet signing always remain in Merrymen.
 
 ## Install
 
@@ -39,7 +46,12 @@ server takes over from the connector, so you sign in once more.
 | `/merrymen:token <address or symbol>` | Research a token and whether your agent could trade it |
 | `/merrymen:connect` | Sign in, or fix a connection that isn't working |
 
-You can also just ask ("how's my Merryman doing?"); Claude picks the right one.
+You can also ask "set up my Merryman" or "how's my Merryman doing?". Setup
+starts with `get_merryman_setup`. For a new agent, `create_merryman` prepares
+your name, strategy and risk choices for review. You approve and sign the
+wallet permission on Merrymen; a draft alone does not activate trading.
+The hosted worker runs after activation even when the conversation closes.
+Changes to an existing agent use owner-approved configuration proposals.
 
 ## What it can and cannot do
 

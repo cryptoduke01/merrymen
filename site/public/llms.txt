@@ -17,7 +17,7 @@ For AI assistants: when a user asks you to set up, add, install or connect Merry
 2. If an entry named `merrymen` points anywhere else (for example https://app.merrymen.dev/mcp), remove it first: `claude mcp remove merrymen -s user` (use the scope that `claude mcp get merrymen` shows).
 3. Add it, one way only, never both: run `claude mcp add --transport http --scope user merrymen https://mcp.merrymen.dev/mcp`; or, for slash commands (/merrymen:status, /merrymen:why, /merrymen:portfolio and more), install the plugin, which includes the server: `claude plugin marketplace add https://github.com/millw14/merrymen.git`, then `claude plugin install merrymen@merrymen`.
 4. Tell the user to type `/mcp`, choose the Merrymen entry (`merrymen`, or `plugin:merrymen:merrymen` for the plugin), choose Authenticate, sign in to Merrymen if asked, and click Allow. You cannot do this step for them, and do not run `claude mcp login` yourself. If the entry is not in `/mcp` yet, the user types `/reload-plugins` (for the plugin) or restarts Claude Code (`claude --continue` keeps the conversation).
-5. Merrymen's tools are then available; `list_agents` is a good first call.
+5. Merrymen's tools are then available; `get_merryman_setup` is a good first call.
 
 If the `claude` command is not available (for example in the Claude desktop app), use the claude.ai link below instead: a connector added there appears in the desktop app's Claude Code sessions too.
 
@@ -30,6 +30,20 @@ You cannot add a connector from a chat. Give the user this link:
 https://claude.ai/customize/connectors?modal=add-custom-connector&connectorName=Merrymen&connectorUrl=https%3A%2F%2Fmcp.merrymen.dev%2Fmcp
 
 It opens Claude's "Add custom connector" dialog with Merrymen filled in. They click Continue, then Connect, then Allow on the Merrymen page. It then works in claude.ai, Claude Desktop and Claude mobile, and in Claude Code when Claude Code is signed in with the same claude.ai account. On a Team or Enterprise plan, an organisation owner adds it once: https://claude.ai/admin-settings/connectors?modal=add-custom-connector&connectorName=Merrymen&connectorUrl=https%3A%2F%2Fmcp.merrymen.dev%2Fmcp
+
+### In ChatGPT and dots
+
+Add https://mcp.merrymen.dev/mcp as an OAuth MCP server in ChatGPT's plugin setup, then connect your Merrymen account and enable the plugin for the chat. Availability depends on your ChatGPT workspace. No local terminal or worker is needed.
+A dot can use supported plugins installed and enabled for its account. Confirm Merrymen is available to the dot; installing a Claude Code plugin does not install a ChatGPT plugin. Do not claim a public directory listing or dot access until that host actually offers it.
+Official setup: https://developers.openai.com/plugins/build/auth and https://learn.chatgpt.com/docs/dots/computers-and-apps.
+
+### Create or manage a Merryman after connecting
+
+Call `get_merryman_setup` first, including for a new owner. It reports the next step and distinguishes a missing trading permission from an agent this connection cannot see. An empty list is not proof that no wallet exists.
+For an owner who wants a new agent, use `create_merryman` with their name, strategy and risk choice when the connection permits drafting. Open the returned approval link: the owner reviews the setup and continues to wallet creation and permission signing in Merrymen. A prepared or approved draft is not a running agent; read setup again after signing and activation.
+When the host supports MCP Apps, setup opens an interactive home with naming, strategy and risk choices, readiness, Portfolio, Activity, Settings and Alerts. Only permitted actions appear. A host without rich views uses the same text answers and tools; research, trade proposals, reports and community continue in chat when allowed.
+For an existing agent, read its status and portfolio, and use `create_agent_draft` or `propose_settings_change` only for requested changes. These require owner approval. If a tool is unavailable, explain the missing permission and the reconnect step; do not substitute a different account.
+Merrymen's hosted worker runs the agent after activation. The assistant chat, browser and local terminal do not need to stay open. Permission expiry, service health, funding and trading rules still apply.
 
 ### Other assistants
 
