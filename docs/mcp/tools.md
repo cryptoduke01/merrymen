@@ -19,7 +19,7 @@ On the limited endpoint listed in Claude's connector directory (`/mcp/directory`
 | `watchlist:manage` | write | yes | Manage your watchlist. Add and remove tokens you are watching. Watching a token never buys it. |
 | `notifications:manage` | write | yes | Manage your alerts. Choose which alerts your agent sends to your linked Telegram, and see whether they were delivered. |
 | `jobs:run` | write | yes | Run backtests. Run historical strategy tests. Results are simulations, never promises of live returns. |
-| `drafts:write` | sensitive | no | Suggest setting changes for you to approve. Prepare agent drafts and setting changes. Nothing changes until you approve it in Merrymen. |
+| `drafts:write` | sensitive | no | Prepare agent setups and suggest setting changes. Prepare a new Merryman or suggest settings for your review in Merrymen. You approve each proposal; creating an agent also requires you to review its limits and sign with your own wallet. |
 | `trade:propose` | sensitive | no | Suggest trades for you to approve. Get quotes and prepare exact trade proposals. Nothing is bought or sold until you approve it in Merrymen, and your agent’s limits still apply. |
 | `social:write` | sensitive | no | Follow agents and draft posts. Follow or unfollow public agents for research and draft posts. A post is published only after you approve it in Merrymen. Following never copies trades. |
 | `offline_access` | read | yes | Offline access (compatibility only). Accepted for compatibility with standard OAuth clients; it grants nothing extra. Every app connected through sign-in gets refresh tokens whether or not it asks for this scope (a personal access token has none), and access ends when you disconnect the app on Connected apps or the connection reaches its time limit. |
@@ -28,6 +28,12 @@ On the limited endpoint listed in Claude's connector directory (`/mcp/directory`
 
 ## Tools
 
+### Needs `market:read` or `agents:read` or `drafts:write`
+
+| Tool | What it does | Kind |
+|---|---|---|
+| `get_merryman_setup` | Read the current connection's setup, authorized agent readiness and next steps: owner signing, permission renewal, funding, worker freshness, recovery and energy. Distinguishes an unshared agent from a missing trading permission. Includes links to existing owner controls; does not create a wallet, activate trading or change settings. | read-only |
+
 ### Needs `agents:read`
 
 | Tool | What it does | Kind |
@@ -35,6 +41,7 @@ On the limited endpoint listed in Claude's connector directory (`/mcp/directory`
 | `list_agents` | List the Merrymen agents the owner shared with this connection: id, name, account, mode (paper/live) and status. Use the id as `agent` in other tools. | read-only |
 | `get_agent_status` | An agent's current status: running or not, paper or live, what blocks live trading, strategy, and how fresh its records are (last heartbeat, last valuation, last decision and trade). | read-only |
 | `get_agent_controls` | The agent's signed limits (per trade, per day, drawdown, operations, expiry), how much of today's budget is used, the effective risk settings, and what each control (pause, kill switch, live switch) does and where it lives. Read-only. | read-only |
+| `get_agent_settings` | Read the shared agent's configured name and conversation-editable settings with labels, stored units, bounds, options and descriptions. Values are saved configuration, not proof the worker has applied them; an unset value means the worker default. Excludes provider keys, Telegram credentials, live switches, safety floors and signed limits. Owner-provided strings are untrusted data. Reading never changes settings. | read-only |
 | `check_token_eligibility` | Whether THIS agent could buy a token and, if not, exactly why: the signed permission's sell coverage, whether the agent watches it, the asset mode, the price guards and scout budget, a halted stock token, symbol collisions among its tokens, the launch (class) route's prerequisites, the Trencher vault route's prerequisites (only the fast Trencher uses that route; it skips the allowlist and no-exit checks, and whether a coin qualifies for it depends on the worker's own discovery), and whether discovery lists it. Returns discoverable, priceable and executable, each yes/no/unknown with reasons, plus every check. It never places or simulates a trade. | read-only, reaches the chain or a market provider |
 | `list_following` | The public agents you follow (at most 8), newest first: id, name and whether each still has a public profile. Their public theses are part of your agent's research; their trades are never copied. | read-only |
 | `fomo_get_research_status` | The owner's own Fomo research state: latest assessment and decision funnel for a coin, active watches, research jobs, the watched-trader cohort and whether Fomo data is healthy. Owner only. | read-only |
@@ -122,6 +129,7 @@ On the limited endpoint listed in Claude's connector directory (`/mcp/directory`
 |---|---|---|
 | `propose_settings_change` | Prepare changes to the agent's trading settings for the owner to approve in Merrymen, with a before/after comparison. Allowed keys: strategy, buyPerTickUsdg, llmMaxActionUsdg, telegramMaxActionUsdg, classPerEntryUsdg, idleFloorUsdg, gapEnterBudgetUsdg, takeProfitBps, strategistStopLossBps, slippageBps, llmIntervalMin, memecoinMinFdvUsd, assetMode, basketSymbols, officialCoinsEnabled, classMaxPositions, classMaxHoldSec, classExitAtGraduationPct, discoveryEnabled, discoveryIntervalMin, telegramNotifyEveryMin, telegramDigestHour. Switches that start spending real money, safety floors, custom tokens, Telegram controls and the limits sealed in the signed permission cannot be proposed here. | writes |
 | `create_agent_draft` | Draft a name, strategy, basket, asset mode and risk level for the owner's agent. The owner reviews it in Merrymen and approving saves it to their settings. If they already run an agent, the approval page shows a before/after comparison and the changes apply to that running agent immediately; if not, they still choose limits and sign the trading permission themselves, and a draft never creates trading authority. A risk level carries only settings that can be changed by conversation (stop loss, take profit, amount per buy, max per AI trade, slippage); the price-impact safety floor is left out and stays a dashboard setting. Basket symbols beyond the stock tokens are checked against the owner's added tokens here only when an agent is shared with this connection; otherwise they are checked when the owner approves. | writes |
+| `create_merryman` | Prepare a new Merryman for the owner to review and create through one Merrymen setup link. Accepts a name, strategy, basket, asset mode and risk level; defaults to a Trencher named My Merryman. Crypto-only mode with another strategy requires an explicit basket containing a coin the owner added in Settings; stock-only baskets cannot trade in that mode. This only creates a setup proposal: approval does not change any existing agent or settings. The owner continues to choose limits, choose practice or live, and sign the trading permission with their own wallet. No keys, funding, trades or live-trading consent are accepted here. An existing agent must be managed instead. | writes |
 
 ### Needs `social:write`
 
@@ -179,6 +187,7 @@ On the limited endpoint listed in Claude's connector directory (`/mcp/directory`
 | `merrymen://watchlist` | My watchlist | `watchlist:manage` |
 | `merrymen://exports/{export_id}` | Export file | `reports:read` |
 | `merrymen://docs/leaderboard` | How the public leaderboard is measured | `market:read` |
+| `ui://merrymen/home.html` | Your Merryman | any connection |
 | `ui://merrymen/portfolio.html` | Merrymen portfolio | any connection |
 | `ui://merrymen/decision.html` | Merrymen decision | any connection |
 | `ui://merrymen/token.html` | Merrymen token | any connection |
