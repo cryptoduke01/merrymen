@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { appendSaleOutcome, gainFigure, hasSaleOutcome } from "./sale-outcome";
-import { admitXPost, type XGateCtx } from "./gate";
+import { admitXPost, XPOST_MIN_WORDS, type XGateCtx } from "./gate";
 import { sellPrompt, type WriterFacts } from "./writer";
 
 const facts: WriterFacts = { agentName: "Alan", strategy: null, flavour: null, traits: [], mode: "live", style: { lower: true, emoji: 0, exclaim: 0 }, recentOwn: [] };
@@ -42,7 +42,11 @@ describe("sale prose and deterministic gross outcome", () => {
     const a = sellPrompt({ ...facts, coin: "Pepe", paper: false, outcome: "profit" });
     const b = sellPrompt({ ...facts, coin: "Pepe", paper: false, outcome: "loss" });
     assert.deepEqual(a, b);
-    assert.match(a.prompt, /under ninety characters/);
+    assert.match(a.prompt, /under sixty characters/);
+    // Asked for more words than the gate's floor: "sold some PEPE." was refused as too short, every sale of 2026-10-14.
+    assert.match(a.prompt, /five to twelve words/);
+    assert.ok(5 > XPOST_MIN_WORDS);
+    assert.equal(admitXPost("sold some PEPE.", { ...gate, coins: ["PEPE"] }, base).ok, false, "the floor the prompt now clears");
     assert.match(a.prompt, /partial sale/);
     assert.match(a.system, /Trusted code adds any measured result separately/);
   });
