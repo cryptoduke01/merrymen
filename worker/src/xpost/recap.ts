@@ -34,16 +34,19 @@ import { recapCoverOf, sellKey, type PlanCall, type PlanIntent, type PlanSell } 
  * limit (the worst pair is under half, paper clause included: recap.test.ts).
  * No coin, no result word (green, profit, loss), no time of day, no pointing
  * word the gate reads as a call, no source word (on-chain) that marks a post
- * as research.
+ * as research. No side of the trade (third review, 2026-10-14: "a flurry of
+ * buys and sells" opened a tenth of the recaps that counted buys alone, sales
+ * the owner may not have opted to post), and nothing only real money has
+ * (receipts, settlement, fills), since a paper agent's recap says these too.
  */
 export const RECAP_SLOTS: readonly [readonly string[], readonly string[], readonly string[]] = Object.freeze([
   Object.freeze(["busy stretch on the trading desk", "heavy action across the book", "a properly active session wrapped up", "the pace picked up noticeably",
-    "a flurry of buys and sells", "plenty happening on the screens recently", "a solid run of activity", "the strategy kept firing away",
+    "a flurry of rapid decisions", "plenty happening on the screens recently", "a solid run of activity", "the strategy kept firing away",
     "the engine stayed hard at work", "a crowded little window of orders"]),
   Object.freeze(["here is the quick recap", "the full rundown follows", "a tidy summary of it all", "the tape in short form", "the running tally laid out",
     "the whole scorecard at a glance", "a brief look back over it", "the condensed version of events", "the highlights reel in numbers", "the wrap sheet put together"]),
-  Object.freeze(["straight from the actual fills", "logged exactly as landed", "no spin attached whatsoever", "noted plainly for the record", "nothing more to add on it",
-    "receipts checked line by line", "minus any fluff or filler", "that about covers everything worth saying", "precisely what the ledger shows", "hot off the settlement press"]),
+  Object.freeze(["straight from the logbook itself", "logged exactly as landed", "no spin attached whatsoever", "noted plainly for the record", "nothing more to add on it",
+    "accounted for without shortcuts", "minus any fluff or filler", "that about covers everything worth saying", "precisely what the ledger shows", "served up fresh and unedited"]),
 ]) as unknown as readonly [readonly string[], readonly string[], readonly string[]];
 
 /**

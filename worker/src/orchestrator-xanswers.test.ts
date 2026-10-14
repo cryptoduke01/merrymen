@@ -37,8 +37,11 @@ const TENANT = `0x${"ab".repeat(20)}`;
 const MENTION = "100000000000000020";
 /** What the model drafts by default: no opt-out line, as an answer never carries one (2026-10-12). */
 const ANSWER = "happy to chat about my strategy and my process, ask me anything.";
+// Bought nine hours ago: past an active agent's six-hour single posts and its
+// recap's eight-hour window (2026-10-14), so these tests' passes plan no trade
+// post of their own; an answer still reads it (a mention batch reads four days).
 const CALL: CallFact = { decisionId: "fill-pepe", side: "buy", symbol: "PEPE", name: "Pepe", token: null,
-  paper: false, atSec: (NOW - 7 * HOUR) / 1000, bands: ["curve early"], ownWords: null };
+  paper: false, atSec: (NOW - 9 * HOUR) / 1000, bands: ["curve early"], ownWords: null };
 const FACTS: AgentFacts = { tenant: TENANT, agentId: TENANT, slug: null, name: "Pine Stoat", mode: "live",
   ageDays: 2, strategy: "trencher", traits: [], calls: [CALL] };
 const tag = (over: Record<string, unknown> = {}) => ({ id: MENTION, author_id: "333", conversation_id: MENTION,

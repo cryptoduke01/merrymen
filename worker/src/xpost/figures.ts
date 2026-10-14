@@ -489,7 +489,8 @@ function shownOf(spec: FiguresSpec): Shown[] {
       // (review of the recap branch, 2026-10-14): "3 sells (1 green, 0 red)"
       // beside two sales nobody measured reads as none of them lost.
       const wl = sells > 0 && w + l === sells ? { w, l } : null;
-      const best = typeof s.bestPct === "number" && s.bestPct > 0 && wl && wl.w > 0 ? signedPercent(s.bestPct) : null;
+      // A best gain too small to show at one decimal is none, never "+0%" beside a green (third review, 2026-10-14; sale-outcome.ts gainFigure).
+      const best = typeof s.bestPct === "number" && s.bestPct >= 0.05 && wl && wl.w > 0 ? signedPercent(s.bestPct) : null;
       if (buys + sells > 0) out.push({ kind: "recap", buys, sells, wl, best });
     } else if (s.kind === "traded") {
       const list = tickers(Array.isArray(s.symbols) ? s.symbols : [], TRADED_MAX);
@@ -600,8 +601,8 @@ const COUNT = String.raw`[1-9]\d{0,2}`, COUNT0 = String.raw`(?:0|[1-9]\d{0,2})`;
 // never alone, so an ordinary sentence ending "traded ETH." is never read as
 // a figures line (review of the recap branch, 2026-10-14).
 const R_BUYS = String.raw`${COUNT} buys?`;
-// A best gain is a gain: signed plus, never minus.
-const GAIN = String.raw`\+(?:0|[1-9]\d{0,4})(?:\.[1-9])?%`;
+// A best gain is a gain: signed plus, never minus, never "+0%".
+const GAIN = String.raw`\+(?:0\.[1-9]|[1-9]\d{0,4}(?:\.[1-9])?)%`;
 const R_SELLS = String.raw`${COUNT} sells?(?: \((?:${COUNT} green, ${COUNT0} red\)(?:, best ${GAIN})?|0 green, ${COUNT} red\)))?`;
 const TRADED = String.raw`traded ${T}(?:, ${T}){0,${TRADED_MAX - 1}}`;
 const RECAP = String.raw`recap: (?:${R_BUYS}(?:, ${R_SELLS})?|${R_SELLS})(?:; ${TRADED})?`;

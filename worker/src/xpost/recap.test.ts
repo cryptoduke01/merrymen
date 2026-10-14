@@ -13,6 +13,7 @@ import {
   BUY_STALE_MS,
   RECAP_GAP_MS,
   RECAP_HORIZON_MS,
+  RECAP_MAX_PUSH_MS,
   STANDARD_CADENCE,
   buyKey,
   introKey,
@@ -72,6 +73,16 @@ describe("an active agent's trade posts through the night", () => {
     assert.deepEqual(kinds(planPosts(input({ nowMs: at3, calls: [buy(2.9)] }))), ["buy"]);
     assert.deepEqual(planPosts(input({ nowMs: at3, calls: [buy(2.9)], cadence: STANDARD_CADENCE, perDay: 3 })), [], "a standard owner's night holds everything");
     assert.deepEqual(planPosts(input({ nowMs: at3, calls: [buy(2.9)], intros: [] })), [], "a hello still waits for morning");
+  });
+
+  it("no casual post where the night and the casual window overlap, though a buy still is (third review, 2026-10-14)", () => {
+    // An owner whose night begins at ten (a sleep window's jitter allows it), inside the active cadence's last casual slot.
+    const awake: PlanClock = { ...clock, isAsleep: () => false };
+    const nightFrom10: PlanClock = { ...clock, isAsleep: (_tz, _k, ms) => new Date(ms).getUTCHours() >= 22 };
+    const at = Array.from({ length: 90 }, (_, m) => DAY0 + 22 * HOUR + m * MIN).find((t) => kinds(planPosts(input({ nowMs: t, clock: awake }))).includes("casual"));
+    assert.ok(at, "a casual slot is open after ten");
+    assert.deepEqual(kinds(planPosts(input({ nowMs: at!, clock: nightFrom10 }))), []);
+    assert.deepEqual(kinds(planPosts(input({ nowMs: at!, clock: nightFrom10, calls: [buy((at! - DAY0) / HOUR - 0.1)] }))), ["buy"]);
   });
 
   it("goes stale four hours after its draft on the active cadence, so never more than ten after its fill", () => {
@@ -183,6 +194,39 @@ describe("one recap for a burst", () => {
     for (const c of out.filter((i) => i.kind === "casual")) assert.ok(c.dueAtMs > recap!.dueAtMs);
   });
 
+  it("says a trade past a single post's freshness at once, one alone, when no recap went out in the gap (third review, 2026-10-14)", () => {
+    // Sixteen night buys nine minutes apart; a recap said the first ten, singles the next four; d-15 is left.
+    const calls = Array.from({ length: 16 }, (_, i) => buy(1 + i * 0.15, { decisionId: `tail-${i}` }));
+    const at = (h: number, m = 0) => DAY0 + h * HOUR + m * MIN;
+    const single = (i: number, ms: number, status: XPost["status"] = "posted") =>
+      post({ kind: "buy", dedupeKey: buyKey(`tail-${i}`), decisionId: `tail-${i}`, status, dueAtMs: ms, sentAtMs: status === "posted" ? ms : null, updatedAtMs: ms });
+    const r1 = post({ kind: "recap", dedupeKey: "recap:r1", coin: recapCoverText(calls.slice(0, 10).map((c) => buyKey(c.decisionId))), dueAtMs: at(4, 1), sentAtMs: at(4, 1), updatedAtMs: at(4, 1) });
+    const posts = [single(0, at(1, 31)), single(1, at(2, 46)), r1, single(10, at(5, 16)), single(11, at(6, 31)), single(12, at(7, 46)), single(13, at(9, 1)), single(14, at(10, 16), "scheduled")];
+    const plan = (now: number, rows = posts) => planPosts(input({ nowMs: now, calls, posts: rows, recaps: rows.filter((p) => p.kind === "recap") }));
+    // d-15 filled at 03:15: a minute short of six hours, it may still go alone, and one trade is no recap.
+    assert.equal(recapOf(plan(at(9, 14))), undefined);
+    const now = at(9, 16);
+    const recap = recapOf(plan(now));
+    assert.ok(recap, "past its freshness, the recap says it");
+    assert.deepEqual(recap!.covers.sort(), calls.slice(10).map((c) => buyKey(c.decisionId)).sort());
+    assert.ok(recap!.dueAtMs - now <= RECAP_MAX_PUSH_MS);
+    // Never inside the gap: had the last recap gone out at 06:00, it waits for ten.
+    const late = posts.map((p) => (p === r1 ? { ...r1, dueAtMs: at(6), sentAtMs: at(6), updatedAtMs: at(6) } : p));
+    assert.equal(recapOf(plan(now, late)), undefined);
+    assert.ok(recapOf(plan(at(10, 1), late)));
+  });
+
+  it("plans a casual post on a recap cadence only within the single horizon, so it never holds a trade's slot (third review, 2026-10-14)", () => {
+    const awake: PlanClock = { ...clock, isAsleep: () => false };
+    const at = Array.from({ length: 90 }, (_, m) => DAY0 + 22 * HOUR + m * MIN).find((t) => kinds(planPosts(input({ nowMs: t, clock: awake }))).includes("casual"))!;
+    // A post due in an hour pushes the casual post past the horizon: not planned now, a later pass finds its slot.
+    const queued = post({ kind: "buy", status: "scheduled", dueAtMs: at + HOUR, sentAtMs: null });
+    assert.deepEqual(kinds(planPosts(input({ nowMs: at, clock: awake, posts: [queued] }))), []);
+    for (const i of planPosts(input({ nowMs: at, clock: awake }))) assert.ok(i.dueAtMs - at <= RECAP_HORIZON_MS);
+    // A standard owner's casual post is planned as before.
+    assert.ok(kinds(planPosts(input({ nowMs: at, clock: awake, posts: [queued], cadence: STANDARD_CADENCE, perDay: 3 }))).length <= 1);
+  });
+
   it("is planned with no model left, when no single post or casual post can be", () => {
     const out = planPosts(input({ nowMs: now, calls: burst(), model: false }));
     assert.deepEqual(kinds(out), ["recap"]);
@@ -218,6 +262,13 @@ describe("a recap's figures", () => {
     assert.equal(renderFiguresLine(recapFigures({ buys: [], sells: [], results: [] })), null);
   });
 
+  it("shows no best gain too small for one decimal, never '+0%' beside a green (third review, 2026-10-14)", () => {
+    assert.equal(renderFiguresLine(recapFigures({ buys: [], sells: [sale(1, "profit", 0.03)], results: [sale(1, "profit", 0.03)] })), "recap: 1 sell (1 green, 0 red); traded WISP.");
+    assert.equal(renderFiguresLine(recapFigures({ buys: [], sells: [sale(1, "profit", 0.05)], results: [sale(1, "profit", 0.05)] })), "recap: 1 sell (1 green, 0 red), best +0.1%; traded WISP.");
+    assert.equal(admitFiguresLine("recap: 1 sell (1 green, 0 red), best +0%."), false);
+    assert.equal(admitFiguresLine("recap: 1 sell (1 green, 0 red), best +0.1%."), true);
+  });
+
   it("says green and red only when every sale counted was measured", () => {
     const sells = [sale(1, "profit", 9), sale(2, "unknown"), sale(3, "flat")];
     assert.equal(renderFiguresLine(recapFigures({ buys: [buy(0.5)], sells, results: sells }))?.startsWith("recap: 1 buy, 3 sells; traded "), true);
@@ -232,8 +283,11 @@ describe("a recap's figures", () => {
 
   it("drops the coins, then the best gain, before the post runs long, and keeps the counts", () => {
     const spec = recapFigures({ buys: [buy(1, { symbol: "CAPITOL" }), buy(2, { symbol: "WISP" }), buy(3, { symbol: "INDEX" })], sells: [sale(4, "profit", 9)], results: [sale(4, "profit", 9)] });
-    const long = withFigures("x".repeat(200), spec);
-    assert.ok(long.line === null || /^recap: 3 buys, 1 sell/.test(long.line));
+    // Exactly the room for all of it; one more character drops the coins; more drops the best gain; then the line.
+    assert.equal(withFigures("x".repeat(200), spec).line, "recap: 3 buys, 1 sell (1 green, 0 red), best +9%; traded WISP, INDEX, CAPITOL.");
+    assert.equal(withFigures("x".repeat(201), spec).line, "recap: 3 buys, 1 sell (1 green, 0 red), best +9%.");
+    assert.equal(withFigures("x".repeat(230), spec).line, "recap: 3 buys, 1 sell (1 green, 0 red).");
+    assert.equal(withFigures("x".repeat(240), spec).line, null);
     const short = withFigures("busy stretch on the desk. quick recap, for the record", spec);
     assert.equal(short.dropped, 0);
     assert.equal(withoutFiguresLine(short.text), "busy stretch on the desk. quick recap, for the record.");
@@ -284,5 +338,9 @@ describe("a recap's words", () => {
       assert.doesNotMatch(l, /\p{N}|\$|@|#|https?:|green|\bred\b|profit|loss|gain|\bwin(?:s|ning|ner)?\b|morning|night|tonight|today|on.?chain/iu, l);
     }
     assert.ok(recapLines("x", { paper: true }).every((l) => /paper|practice/.test(l)));
+    // No side of the trade, which a recap of buys alone would misstate, and nothing only real money has (third review, 2026-10-14).
+    for (const l of [...recapLines("x"), ...recapLines("x", { paper: true })]) {
+      assert.doesNotMatch(l, /\b(?:buys?|bought|buying|sells?|sold|selling|sales?|receipts?|settle\w*|fills?|filled)\b/i, l);
+    }
   });
 });

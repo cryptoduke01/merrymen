@@ -65,9 +65,10 @@ export const BUY_JITTER_MAX = 40;
 export const BUY_STALE_MS = 8 * HOUR;
 /**
  * AN ACTIVE AGENT'S WIDER WINDOW (the owner's ask, 2026-10-14: "widen the
- * 2-hour window"). Its trades are posted while six hours fresh, and a post
- * may go out up to ten hours after its fill: a morning burst is still news
- * that afternoon.
+ * 2-hour window"). Its trades are posted while six hours fresh, and a single
+ * post may go out up to ten hours after its fill: a morning burst is still
+ * news that afternoon. A recap says trades up to RECAP_WINDOW_MS old when it
+ * is drafted and goes stale as a single post does, so up to twelve.
  */
 export const ACTIVE_TRADE_FRESH_MS = 6 * HOUR;
 export const ACTIVE_TRADE_STALE_MS = 10 * HOUR;
@@ -85,17 +86,25 @@ export const ACTIVE_TRADE_SEND_STALE_MS = ACTIVE_TRADE_STALE_MS - ACTIVE_TRADE_F
  * planned when at least RECAP_MIN_UNPOSTED trades of the window were not
  * posted one by one, the newest of them at least RECAP_SETTLE_MS old (the
  * burst has paused) or RECAP_FLUSH_UNPOSTED of them waiting, and no recap
- * went out in RECAP_GAP_MS. It covers every trade since the last recap, at
- * most RECAP_WINDOW_MS back, and goes out within RECAP_MAX_PUSH_MS.
+ * went out in RECAP_GAP_MS; or, gap allowing, at once when a trade not posted
+ * one by one is past the freshness a single post needs (the recap is the
+ * only post left that can say it). It covers every trade since the last
+ * recap, at most RECAP_WINDOW_MS back, and goes out within RECAP_MAX_PUSH_MS.
  */
 /** One gap: in a burst, one single post goes out soon and the recap after it says the rest (second review, 2026-10-14). */
 export const RECAP_HORIZON_MS = 75 * MIN;
 export const RECAP_MIN_UNPOSTED = 3;
 export const RECAP_FLUSH_UNPOSTED = 8;
 export const RECAP_SETTLE_MS = 20 * MIN;
-/** Four hours: at most six a day, so a hundred recap lines last a fleet more than two weeks of the gate's memory. */
+/** Four hours: at most six a day, so a hundred recap lines last one active agent more than the gate's two weeks of memory (a second needs more lines: docs/x-posting.md). */
 export const RECAP_GAP_MS = 4 * HOUR;
-/** Eight hours back at most: inside the room's twelve-hour read of calls even after a recap waits its four hours to go out. */
+/**
+ * Eight hours back at most: two hours past a single post's freshness, so a
+ * trade the singles could not reach is still in the window when the gap
+ * opens. The plan pass reads at least this much of the calls whether or not
+ * it read mentions (orchestrator-xpost.ts planPass; third review, 2026-10-14:
+ * without a mention batch it read six hours, and the window was six).
+ */
 export const RECAP_WINDOW_MS = 8 * HOUR;
 /**
  * A recap planned further out than this is not planned: it must go out with a
@@ -666,7 +675,7 @@ export function planPosts(input: PlanInput): PlanIntent[] {
       // SALES ONLY FROM THE RECEIPT-BACKED RESULTS, AND ONLY WITH THE OWNER'S
       // OPT-IN TO SALE POSTS (review of the recap branch, 2026-10-14): a
       // recap never says a sale the owner did not choose to have posted.
-      results: input.tradeResults === true ? input.sells ?? [] : [], liveKeys, used,
+      results: input.tradeResults === true ? input.sells ?? [] : [], liveKeys, used, freshMs,
       lastRecapAtMs: ownRecaps.reduce((m, p) => Math.max(m, recapOutAt(p, now)), 0) });
     if (recap) {
       const due = pushedPast(now + MIN_LEAD_MS, slots, gap);
@@ -703,7 +712,11 @@ export function planPosts(input: PlanInput): PlanIntent[] {
       const lead = CASUAL_LEAD_MIN + (hash32(`casual-lead|${cKey}`) % (CASUAL_LEAD_MAX - CASUAL_LEAD_MIN + 1));
       const due = pushedPast(now + lead * MIN, slots, gap);
       const day = dayOf(due);
-      if (due - now <= CASUAL_MAX_PUSH_MS && onDay(day) < perDay && ownerOnDay(day) < ownerPerDay) {
+      // ON A RECAP CADENCE, A CASUAL POST TOO GOES OUT SOON OR NOT AT ALL
+      // (third review, 2026-10-14): one reserved hours ahead held the slot a
+      // trade's single post needed, every pass, until the trade went stale
+      // unsaid. Within the horizon, the single posts, planned first, win.
+      if (due - now <= CASUAL_MAX_PUSH_MS && soonEnough(due) && onDay(day) < perDay && ownerOnDay(day) < ownerPerDay) {
         out.push({ kind: "casual", dedupeKey: cKey, dueAtMs: due, day: today, slot: i });
         slots.push({ tenant: key(tenant), kind: "casual", atMs: due, coin: null, createdAtMs: now });
       }
@@ -720,14 +733,16 @@ export function planPosts(input: PlanInput): PlanIntent[] {
  * RECAP_WINDOW_MS, of the money it trades with now: its buys from the calls,
  * its sales from the receipt-backed results (`results`: empty without the
  * owner's opt-in to sale posts), which carry each sale's measured outcome.
- * A recap is planned only when at least RECAP_MIN_UNPOSTED of those trades
- * have no single post out, on its way or maybe out (`liveKeys`), the newest
- * trade is RECAP_SETTLE_MS old or RECAP_FLUSH_UNPOSTED are waiting, and no
- * recap went out in RECAP_GAP_MS. Pure.
+ * A recap is planned only when no recap went out in RECAP_GAP_MS, and at
+ * least RECAP_MIN_UNPOSTED of those trades have no single post out, on its
+ * way or maybe out (`liveKeys`), the newest trade RECAP_SETTLE_MS old or
+ * RECAP_FLUSH_UNPOSTED waiting; or when any trade with no single post is
+ * older than `freshMs`, the freshness a single post needs. Pure.
  */
 export function planRecap(o: {
   tenant: string; now: number; consentAtMs: number; covered: ReadonlySet<string>; money: "live" | "paper";
   calls: readonly PlanCall[]; results: readonly PlanSell[]; liveKeys: ReadonlySet<string>; used: ReadonlySet<string>; lastRecapAtMs: number;
+  freshMs: number;
 }): Omit<Extract<PlanIntent, { kind: "recap" }>, "dueAtMs"> | null {
   if (o.lastRecapAtMs > 0 && o.now - o.lastRecapAtMs < RECAP_GAP_MS) return null;
   const fromMs = Math.max(o.consentAtMs, o.now - RECAP_WINDOW_MS);
@@ -735,11 +750,19 @@ export function planRecap(o: {
   const buys = o.calls.filter((c) => c.side === "buy" && typeof c.decisionId === "string" && c.decisionId !== "" && inWindow(c) && !o.covered.has(buyKey(c.decisionId)));
   const sells = (Array.isArray(o.results) ? o.results : []).filter((c) => c.side === "sell" && /^0x[0-9a-f]{64}$/i.test(c.operationKey) && inWindow(c)
     && !o.covered.has(sellKey(o.tenant, c.operationKey)));
-  const covers = [...buys.map((c) => buyKey(c.decisionId)), ...sells.map((c) => sellKey(o.tenant, c.operationKey))];
-  const unposted = covers.filter((k) => !o.liveKeys.has(k));
-  if (unposted.length < RECAP_MIN_UNPOSTED) return null;
-  const newest = Math.max(...[...buys, ...sells].map((c) => c.atSec));
-  if (o.now - newest * 1000 < RECAP_SETTLE_MS && unposted.length < RECAP_FLUSH_UNPOSTED) return null;
+  const trades = [...buys.map((c) => ({ key: buyKey(c.decisionId), atSec: c.atSec })), ...sells.map((c) => ({ key: sellKey(o.tenant, c.operationKey), atSec: c.atSec }))];
+  const covers = trades.map((t) => t.key);
+  const unposted = trades.filter((t) => !o.liveKeys.has(t.key));
+  if (!unposted.length) return null;
+  const newest = Math.max(...trades.map((t) => t.atSec));
+  // THE LAST POST THAT CAN SAY IT (third review, 2026-10-14): a burst's tail
+  // of one or two trades, left for the recap past the single horizon, was
+  // never said once the singles drained too slowly: below the minimum, no
+  // recap came, and past its freshness no single could. A trade with no
+  // single post past that freshness is said now, few or mid-burst alike.
+  const lastChance = unposted.some((t) => o.now - t.atSec * 1000 > o.freshMs);
+  if (!lastChance && unposted.length < RECAP_MIN_UNPOSTED) return null;
+  if (!lastChance && o.now - newest * 1000 < RECAP_SETTLE_MS && unposted.length < RECAP_FLUSH_UNPOSTED) return null;
   const dedupeKey = recapKey(o.tenant, newest, covers);
   if (o.used.has(dedupeKey)) return null;
   return { kind: "recap", dedupeKey, buys, sells, results: sells, toSec: newest, covers };

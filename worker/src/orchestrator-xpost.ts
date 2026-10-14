@@ -1505,8 +1505,12 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
     if (answersOnly) accounts = accounts.filter((a) => (comments.get(a.xUserId)?.length ?? 0) > 0);
     if (accounts.length === 0) return answered;
     const roster = accounts.map((a) => byTenant.get(a.tenant)!);
+    // AT LEAST A RECAP'S WINDOW OF CALLS, MENTIONS OR NOT (third review,
+    // 2026-10-14): a pass that read no mention batch read six hours, so a
+    // recap's eight-hour window was six on most passes, and a trade past a
+    // single post's freshness was never seen by the recap meant to say it.
     const facts = await factsOf(shared, roster, profiles, Math.floor(nowMs / 1000), {
-      dialect, ...(comments.size ? { callWindowSec: PLAN_HISTORY_MS / 1000 } : {}),
+      dialect, callWindowSec: (comments.size ? Math.max(PLAN_HISTORY_MS, RECAP_WINDOW_MS) : RECAP_WINDOW_MS) / 1000,
     });
     const recentFleet = await recentBodies(shared, { tenant: null, sinceMs: nowMs - FLEET_MEMORY_MS, limit: FLEET_MEMORY_MAX });
     // THE MODEL'S ALLOWANCE, READ ONCE A PASS. Once it is spent, only intros
