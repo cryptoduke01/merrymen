@@ -162,6 +162,14 @@ describe("every trade of an active agent is said", () => {
     }
   });
 
+  it("a day of only wins, more than the day's posts: the last post is the recap's, and every win is said (Codex review of PR #336)", () => {
+    const sales = [...Array.from({ length: 12 }, (_, i) => ({ h: 3 + i, win: true })), { h: 15, win: true }, { h: 15.5, win: true }];
+    const r = simulate({ trades: [], sales, fromH: 2.5, toH: 40, casual: true });
+    assert.deepEqual(r.unsaid, [], "every win said, alone or by a recap");
+    assert.deepEqual(r.twice, []);
+    assert.deepEqual(r.stale, []);
+  });
+
   it("a dozen hourly wins in a day still leave the recap its post: every loss and buy that day is counted (review of the wins branch)", () => {
     const sales = [...Array.from({ length: 12 }, (_, i) => ({ h: 8 + i, win: true })), ...Array.from({ length: 10 }, (_, i) => ({ h: 8.5 + i, win: false }))].sort((a, b) => a.h - b.h);
     const r = simulate({ trades: [9.2, 12.4, 15.7], sales, fromH: 7.5, toH: 30, casual: false });

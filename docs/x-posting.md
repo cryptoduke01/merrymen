@@ -1668,13 +1668,14 @@ now goes out alone only when it is a win:
   wins included ("4 green" counts every win), and a win a recap counted
   still goes out alone while it is fresh: no win waits on its own post to be
   counted, so none is lost between the two.
-- **One post of the day is kept for the recap** while the recap has
-  something to count (a buy, or a sale that is no win, with a postable name,
-  said by no post and no recap) and the owner's day allows more than one
-  post: a win, a buy or a casual post leaves the day's last post to the
-  recap. It is decided on what is waiting when a post is planned: losses that
-  land after the day's posts are spent wait for the next day's first recap,
-  which reaches back eight hours, and older ones go unsaid.
+- **The day's last post is the recap's** while the owner's day allows more
+  than one post. A win or a buy never takes it: the recap does, and says
+  whatever the day still has to say, wins that could not go alone included
+  (Codex review of PR #336: twelve wins spent the day and a thirteenth was
+  never said). A casual post may take it only while no trade with a
+  postable name waits for the recap, so a quiet day keeps its casual posts.
+  Trades that land after the day's posts are all spent wait for the next
+  day's first recap, which reaches back eight hours; older ones go unsaid.
 - **A loss, a flat or an unmeasured sale** is the recap's to count, never a
   post of its own on this cadence. Where no recap can count it, it posts
   alone as before: an active owner with buy posts off (no recap), an agent

@@ -439,15 +439,22 @@ describe("a win alone (the owner's ask, 2026-10-14: \"where are the trade pnls\"
       const out = planPosts(input({ nowMs: now, calls: burst(), tradeResults: true, sells: sells(), ownerPerDay: perDay }));
       assert.equal(sellsOf(out).length, 1, `owner allows ${perDay} a day`);
     }
-    // A day with nothing for a recap to count keeps nothing back: the last post may be a win's.
+    // The day's last post is never a single's: a win there is the recap's to say (Codex review of PR #336: a thirteenth win
+    // with the day spent was never said), and the recap that counts it goes inside the day's allowance.
     const today = Array.from({ length: ACTIVE_CADENCE.tradePerDay - 1 }, (_, i) =>
       post({ kind: "buy", status: "posted", dedupeKey: `done-${i}`, sentAtMs: DAY0 + 1 * HOUR + i * MIN, dueAtMs: DAY0 + 1 * HOUR + i * MIN }));
     const [win] = sells();
-    assert.equal(sellsOf(planPosts(input({ nowMs: now, calls: [], tradeResults: true, sells: [win!], posts: today }))).length, 1);
-    // A trade no recap can count (a coin with no postable name) keeps nothing back either (third review).
-    const nameless = buy(7.5, { symbol: "T7631DACC21B", name: null });
-    assert.equal(sellsOf(planPosts(input({ nowMs: now, calls: [nameless], tradeResults: true, sells: [win!], posts: today }))).length, 1);
-    assert.equal(sellsOf(planPosts(input({ nowMs: now, calls: [buy(7.5)], tradeResults: true, sells: [win!], posts: today }))).length, 0, "a named buy does");
+    assert.equal(sellsOf(planPosts(input({ nowMs: now, calls: [], tradeResults: true, sells: [win!], posts: today }))).length, 0);
+    const late = win!.atSec * 1000 + ACTIVE_CADENCE.tradeFreshMs + MIN;
+    const recap = recapOf(planPosts(input({ nowMs: late, calls: [], tradeResults: true, sells: [win!], posts: today })));
+    assert.ok(recap?.covers.includes(sellKey(TENANT, win!.operationKey)), "the recap says it, in the day's last post");
+    // A casual post takes the last post only while no trade waits for the recap, and a coin no recap can count waits for nothing (third review).
+    const awake: PlanClock = { ...clock, isAsleep: () => false };
+    const at = Array.from({ length: 90 }, (_, m) => DAY0 + 22 * HOUR + m * MIN).find((t) => kinds(planPosts(input({ nowMs: t, clock: awake }))).includes("casual"))!;
+    const casualWith = (calls: PlanCall[]) => kinds(planPosts(input({ nowMs: at, clock: awake, calls, posts: today, model: true }))).includes("casual");
+    assert.equal(casualWith([]), true, "a quiet day: the casual post may take it");
+    assert.equal(casualWith([buy((at - DAY0) / HOUR - 1, { symbol: "T7631DACC21B", name: null })]), true, "a nameless coin waits for no recap");
+    assert.equal(casualWith([buy((at - DAY0) / HOUR - 1)]), false, "a named buy waits for the recap");
   });
 
   it("a standard owner's sales, and an active owner's with buy posts off, are posted as before, wins and losses alike", () => {
