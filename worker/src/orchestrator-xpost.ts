@@ -2708,14 +2708,22 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       };
       let post = body ? whole(body) : null;
       if (!post && winWords) {
-        for (const line of saleLines(intent.coin, intent.dedupeKey)) {
-          const v = admitXPost(line, gate, BASE_GATE);
-          if (!v.ok) {
-            reason = `sale-words:${v.reason}`;
-            continue;
+        // The coin's label first, then its other vetted names, shortest first
+        // (second review of the wins branch: a long name, a name with a number
+        // word or doubled spaces had no line, though its ticker would).
+        const tidy = (n: string) => n.replace(/\s+/g, " ").trim();
+        const names = [...new Set([tidy(intent.coin), ...gate.coins.map(tidy).sort((x, y) => x.length - y.length)])].filter(Boolean);
+        const wordsGate: XGateCtx = { ...gate, coins: [...new Set([...gate.coins, ...names])] };
+        names: for (const name of names) {
+          for (const line of saleLines(name, intent.dedupeKey)) {
+            const v = admitXPost(line, wordsGate, BASE_GATE);
+            if (!v.ok) {
+              reason = `sale-words:${v.reason}`;
+              continue;
+            }
+            post = whole(v.text);
+            if (post) break names;
           }
-          post = whole(v.text);
-          if (post) break;
         }
       }
       body = post;

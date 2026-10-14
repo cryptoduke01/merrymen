@@ -414,17 +414,36 @@ describe("a win alone (the owner's ask, 2026-10-14: \"where are the trade pnls\"
     assert.equal(out.filter((i) => i.kind === "buy").length, 0);
   });
 
-  it("waits outside the recap until its own post is out or tried; past its freshness unsaid, a recap says it", () => {
+  it("is counted by a recap like every sale, and still goes out alone after: a recap never stops a win's own post (second review)", () => {
     const [win, loss] = sells();
     const base = { tenant: TENANT, now, consentAtMs: 0, covered: new Set<string>(), money: "live" as const, calls: burst(), results: [win!, loss!],
       liveKeys: new Set<string>(), used: new Set<string>(), lastRecapAtMs: 0, freshMs: ACTIVE_CADENCE.tradeFreshMs };
     const winKey = sellKey(TENANT, win!.operationKey), lossKey = sellKey(TENANT, loss!.operationKey);
-    const waiting = planRecap(base)!;
-    assert.ok(waiting.covers.includes(lossKey) && !waiting.covers.includes(winKey), "a fresh win with no post of its own is not the recap's");
-    assert.ok(planRecap({ ...base, liveKeys: new Set([winKey]) })!.covers.includes(winKey), "once its post is on its way, the recap counts it");
-    assert.ok(planRecap({ ...base, used: new Set([winKey]) })!.covers.includes(winKey), "once its post was tried and refused, a recap may say it");
-    const late = win!.atSec * 1000 + ACTIVE_CADENCE.tradeFreshMs + MIN;
-    assert.ok(planRecap({ ...base, now: late })!.covers.includes(winKey), "past its freshness unsaid, a recap says it");
+    const recap = planRecap(base)!;
+    assert.ok(recap.covers.includes(lossKey) && recap.covers.includes(winKey), "the recap counts the win with the loss");
+    // That recap is out: the win, fresh and never posted, still gets its own post; the loss never does.
+    const row = recapRow({ ...recap, dueAtMs: now + 10 * MIN });
+    const after = planPosts(input({ nowMs: row.sentAtMs! + 5 * MIN, calls: [], tradeResults: true, sells: [win!, loss!], posts: [row] }));
+    assert.deepEqual(sellsOf(after).map((i) => i.dedupeKey), [winKey]);
+  });
+
+  it("needs no model with buy posts off either, where a loss posts alone and needs one", () => {
+    const [win, loss] = sells();
+    const out = planPosts(input({ nowMs: now, calls: [], tradeResults: true, sells: [win!, loss!], kinds: { buys: false }, model: false }));
+    assert.deepEqual(sellsOf(out).map((i) => i.call.outcome), ["profit"]);
+  });
+
+  it("keeps a post for the recap only while it has something to count and the owner's day has room for more (second review)", () => {
+    // An owner who chose one post a day: a win still goes out alone.
+    for (const perDay of [1, 2, 3]) {
+      const out = planPosts(input({ nowMs: now, calls: burst(), tradeResults: true, sells: sells(), ownerPerDay: perDay }));
+      assert.equal(sellsOf(out).length, 1, `owner allows ${perDay} a day`);
+    }
+    // A day with nothing for a recap to count keeps nothing back: the last post may be a win's.
+    const today = Array.from({ length: ACTIVE_CADENCE.tradePerDay - 1 }, (_, i) =>
+      post({ kind: "buy", status: "posted", dedupeKey: `done-${i}`, sentAtMs: DAY0 + 1 * HOUR + i * MIN, dueAtMs: DAY0 + 1 * HOUR + i * MIN }));
+    const [win] = sells();
+    assert.equal(sellsOf(planPosts(input({ nowMs: now, calls: [], tradeResults: true, sells: [win!], posts: today }))).length, 1);
   });
 
   it("a standard owner's sales, and an active owner's with buy posts off, are posted as before, wins and losses alike", () => {

@@ -13,48 +13,51 @@
  * outcome is code's line), nothing that says the whole position went or that
  * the agent left the coin (a partial sale is possible), and nothing a receipt
  * does not show: no speed, no smoothness, no human life (review of the wins
- * branch, 2026-10-14). The words only say the sale is on the record and the
- * desk goes on.
+ * branch, 2026-10-14). The words only say the sale is on the record, the desk
+ * goes on, and nothing more.
  *
  * SHORT ENOUGH FOR AN ACTIVE OWNER'S POST: the result line and the tx link
  * and contract after it leave about sixty-five characters, so every part is
- * at most twenty-four (orchestrator-xpost-sale-words.test.ts).
+ * at most fifteen (orchestrator-xpost-sale-words.test.ts).
  *
- * A HUNDRED AND FORTY-FOUR LINES, NONE A TICKER-SWAPPED TEMPLATE. The gate
- * refuses a post that shares six tenths of its content words with a recent
- * one, which is what a template with only the coin changed does. Every line is
- * "sold COIN." (or "i sold COIN."), then one part about the record and one
- * about the desk, twelve of each: two lines share at most one part, every part
- * has exactly three words the gate counts and shares none with another, so two
- * wins of different coins that share a part are under six tenths alike, and a
- * line identical to a recent win but for its coin is refused and the next one
- * tried.
+ * A HUNDRED AND FORTY-FOUR LINES, NONE A TEMPLATE TO THE REPEAT CHECK. The
+ * gate refuses a post that shares six tenths of its content words with a
+ * recent one. Every line is "sold COIN." (or "i sold COIN.") and then three
+ * parts, one from each slot of twelve, joined by a Latin square (casual.ts
+ * latinLines's arrangement), so any two lines share at most one part; every
+ * part has exactly two words the gate counts and shares none with another.
+ * Two wins sharing a part are half alike at most even when they are the same
+ * coin (second review of the wins branch: with two parts of three words, the
+ * twelfth win of one coin in memory had no line left), and a line identical
+ * to a recent one is refused and the next tried.
  *
  * Pure: no I/O, no model, no clock.
  */
 import { hash32 } from "./planner";
 
-/** What the sale put on the record, and how the desk goes on: twelve each. */
-export const SALE_PARTS: readonly [readonly string[], readonly string[]] = Object.freeze([
-  Object.freeze(["receipt saved to log", "ledger row written", "history file updated", "swap marked settled", "journal note added", "books show the trade",
-    "tally sheet amended", "record line made", "archive copy stored", "timeline marker placed", "report page appended", "statement item posted"]),
-  Object.freeze(["desk keeps going", "terminal stays open", "radar sweeping onward", "scanner hums along", "screens remain lit", "search carries forward",
-    "routine runs unchanged", "list refresh pending", "engine ticking quietly", "feed refreshes again", "monitors stay active", "charts redraw themselves"]),
-]) as unknown as readonly [readonly string[], readonly string[]];
+/** What the sale put on the record, how the desk goes on, and a plain close: twelve each. */
+export const SALE_PARTS: readonly [readonly string[], readonly string[], readonly string[]] = Object.freeze([
+  Object.freeze(["receipt saved", "ledger updated", "history noted", "swap settled", "journal note", "books show it", "tally amended", "record made",
+    "archive copy", "log marked", "report filed", "sheet posted"]),
+  Object.freeze(["desk running", "terminal open", "radar sweeping", "scanner busy", "screens lit", "search goes", "routine intact", "list refreshed",
+    "engine ticking", "feed updating", "monitors awake", "charts redraw"]),
+  Object.freeze(["nothing further", "rules followed", "process repeats", "cycle resumes", "usual cadence", "regular rhythm", "standard fare",
+    "steady state", "basic hygiene", "calm operations", "tidy habits", "status recorded"]),
+]) as unknown as readonly [readonly string[], readonly string[], readonly string[]];
 
 /** Every sale line for this coin, this post's own first (by its key). The caller tries each, whole, until one fits. */
 export function saleLines(coin: string, seed: string): string[] {
-  const name = String(coin ?? "").trim();
-  const [record, desk] = SALE_PARTS;
-  const n = record.length, cells = n * desk.length;
-  if (!name || cells === 0) return [];
+  const name = String(coin ?? "").replace(/\s+/g, " ").trim();
+  const [record, desk, close] = SALE_PARTS;
+  const n = record.length, cells = n * n;
+  if (!name || n === 0 || desk.length !== n || close.length !== n) return [];
   // A stride sharing no factor with the cell count visits every line once.
   const stride = 79, start = hash32(`sale-words|${seed}`) % cells;
   const out: string[] = [];
   for (let t = 0; t < cells; t++) {
     const k = (start + t * stride) % cells;
-    const r = k % n, d = Math.floor(k / n);
-    out.push(`${(r + d) % 2 ? "i sold" : "sold"} ${name}. ${record[r]}, ${desk[d]}.`);
+    const a = k % n, b = Math.floor(k / n), c = (a + b) % n;
+    out.push(`${a % 2 ? "i sold" : "sold"} ${name}. ${record[a]}, ${desk[b]}, ${close[c]}.`);
   }
   return out;
 }

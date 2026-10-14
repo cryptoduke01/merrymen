@@ -636,7 +636,9 @@ describe("receipt-backed sale posts", () => {
       const TOKEN = `0x${"ef".repeat(20)}`;
       // The model passing; a model sentence too long to fit beside the link; and a long ticker at a five-figure gain, where
       // many of code's lines run long too and the next is tried until one fits.
-      for (const [answer, name, gainPct] of [["PASS", "Pepe", 12.4], ["sold some pepe today, the swap went through and the receipt is filed away.", "Pepe", 12.4], ["PASS", "Pudgy Penguin Club", 12345]] as const) {
+      // And a name no line can carry (too long beside a five-figure gain; a number word the gate reads as a quantity): its ticker is said.
+      for (const [answer, name, symbol, gainPct, said] of [["PASS", "Pepe", "PEPE", 12.4, "Pepe"], ["sold some pepe today, the swap went through and the receipt is filed away.", "Pepe", "PEPE", 12.4, "Pepe"],
+        ["PASS", "Pudgy Penguin Club", "PUDGY", 12345, null], ["PASS", "Wrapped Robinhood Ether", "WETH", 12345, "WETH"], ["PASS", "Million", "MM", 12.4, "MM"]] as const) {
         for (let i = 0; i < 12; i++) {
           const w = await world(t, T0, MEDIA);
           await ready(w);
@@ -649,7 +651,7 @@ describe("receipt-backed sale posts", () => {
           await w.db.prepare("INSERT INTO agents (smart_account, chain_id) VALUES (?, ?)").run(AGENT, 4663);
           await w.db.prepare("INSERT INTO decisions VALUES (?, ?, ?, ?)").run(`sale-${i}`, AGENT, "sell", PUBLISHABLE_SOURCES[0]!);
           await w.db.prepare("INSERT INTO trades (id, decision_id, agent_id, kind, status, tx_hash, buy_token, sell_token) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(1, `sale-${i}`, AGENT, "swap", "landed", tx, null, TOKEN);
-          const win: PlanSell = { ...WIN, name, decisionId: `sale-${i}`, token: TOKEN, operationKey: `0x${randomBytes(32).toString("hex")}`, gainPct };
+          const win: PlanSell = { ...WIN, name, symbol, decisionId: `sale-${i}`, token: TOKEN, operationKey: `0x${randomBytes(32).toString("hex")}`, gainPct };
           const p = poster(w, {
             active: true, answer: () => answer, facts: factsOf([], "live"),
             socialProfile: async () => ({ xTradeResults: true, xTokenAddresses: true, currentAgent: { address: AGENT, chainId: 4663 } }),
@@ -660,6 +662,7 @@ describe("receipt-backed sale posts", () => {
           assert.equal(post?.status, "scheduled", `${answer.slice(0, 12)} #${i}: ${post?.reason}`);
           assert.ok(post!.body.includes(`\n${gainPct > 100 ? "+12,345%" : "+12%"} gross gain before fees and gas.`) && post!.body.includes(tx) && post!.body.endsWith(TOKEN), post!.body);
           assert.ok(xWeightedLength(post!.body) <= 280);
+          if (said) assert.match(post!.body.split("\n")[0]!, new RegExp(`\\b${said}\\b`));
         }
       }
     });

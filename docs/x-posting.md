@@ -1645,27 +1645,30 @@ now goes out alone only when it is a win:
 - **First in the queue, inside the horizon.** Sales are planned before buys,
   inside the same seventy-five-minute single horizon: wins booked further
   out held every slot the recap could reach until the losses aged out of its
-  window. About five wins in six hours go out alone; more than that, and the
-  rest are counted by the recap.
+  window. About five wins in six hours fit; a win that cannot get its own
+  post while six hours fresh is still counted by a recap.
 - **Said whatever the model does.** A win needs no model. When the model's
   sentence is not there (a pass, a refusal, an outage, a spent allowance) or
   does not fit beside the result line, tx link and contract (about sixty-five
   characters are left), code's own line is used (xpost/sale-words.ts, e.g.
-  "sold IGNITION. receipt saved to log, desk keeps going."): the first the gate
-  admits that fits whole. They say the sale is on the record and the desk goes
-  on, and nothing a receipt does not show (no timing, speed or quality, no
-  whole position, no leaving the coin, no human life). A hundred and
-  forty-four lines, two of which share at most one part, so two wins of
-  different coins are never one template to the repeat check. An active
-  owner's win uses them whether or not its buy posts are on.
-- **It waits outside the recap.** A fresh win whose own post was never tried
-  is not the recap's to say; a recap counts it once its post is on its way
-  (so "4 green" still counts every win), or once its post was tried and
-  refused, or once it is past its six hours unsaid.
-- **One post of the day is kept for the recap.** On a recap cadence a win, a
-  buy or a casual post leaves the day's last post (trade, account and owner
-  allowance alike) to the recap, so a day of wins still has its losses
-  counted.
+  "sold IGNITION. receipt saved, desk running, nothing further."): the first
+  the gate admits that fits whole, for the coin's name and then its other
+  vetted names (a ticker when the name is too long or reads as a quantity).
+  They say the sale is on the record and the desk goes on, and nothing a
+  receipt does not show (no timing, speed or quality, no whole position, no
+  leaving the coin, no human life). A hundred and forty-four lines of three
+  two-word parts, any two sharing at most one part, so two wins are never one
+  template to the repeat check, of different coins or the same. An active
+  owner's win needs no model whether or not its buy posts are on.
+- **Counted by the recap too.** A recap counts every sale of its window,
+  wins included ("4 green" counts every win), and a win a recap counted
+  still goes out alone while it is fresh: no win waits on its own post to be
+  counted, so none is lost between the two.
+- **One post of the day is kept for the recap** while the recap has
+  something to count (a buy, or a sale that is no win, said by no post and no
+  recap) and the owner's day allows more than one post: a win, a buy or a
+  casual post leaves the day's last post to the recap, so a day of wins
+  still has its losses counted.
 - **A loss, a flat or an unmeasured sale** is the recap's to count, never a
   post of its own on this cadence. Where no recap can count it, it posts
   alone as before: an active owner with buy posts off (no recap), an agent

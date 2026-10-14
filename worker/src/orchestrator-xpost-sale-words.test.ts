@@ -36,13 +36,14 @@ describe("a win's own words", () => {
     assert.deepEqual(saleLines("", "sell:a"), []);
   });
 
-  it("opens with 'sold COIN' or 'i sold COIN' alone; every part three counted words, none shared, short", () => {
+  it("opens with 'sold COIN' or 'i sold COIN' alone; every part two counted words, none shared, short", () => {
     for (const line of saleLines("WISP", "x")) assert.match(line, /^(?:i )?sold WISP\. /);
+    assert.equal(saleLines("Pudgy  Penguin", "x")[0]!.includes("Pudgy Penguin."), true, "a name's spaces tidied");
     const seen = new Map<string, string>();
     for (const part of SALE_PARTS.flat()) {
       const words = counted(part);
-      assert.equal(words.length, 3, part);
-      assert.ok(part.length <= 24, `${part}: ${part.length}`);
+      assert.equal(words.length, 2, part);
+      assert.ok(part.length <= 15, `${part}: ${part.length}`);
       for (const w of words) {
         assert.ok(!seen.has(w), `"${w}" is in "${part}" and "${seen.get(w)}"`);
         seen.set(w, part);
@@ -63,10 +64,10 @@ describe("a win's own words", () => {
     for (const coin of ["PEPE", "CAPITOL", "IGNITION", "ALTAI", "MOON"]) {
       for (const gain of [0.1, 12.4, 99]) assert.ok(saleLines(coin, "s").every((l) => whole(l, gain) !== null), `${coin} at +${gain}%: every line fits`);
     }
-    // A four-figure gain or a long name leaves fewer, at least a third: the writer tries the next until one fits.
+    // A four-figure gain or a long name leaves fewer, at least a quarter: the writer tries the next, then the coin's other names.
     for (const coin of ["IGNITION", "Pudgy Penguin", "T57F813C4571"]) {
       const fit = saleLines(coin, "s").filter((l) => whole(l, 1234) !== null).length;
-      assert.ok(fit >= 48, `${coin} at +1,234%: ${fit} fit`);
+      assert.ok(fit >= 36, `${coin} at +1,234%: ${fit} fit`);
     }
   });
 
@@ -76,6 +77,15 @@ describe("a win's own words", () => {
       assert.match(line, /\bWISP\b/);
       assert.doesNotMatch(line, /\p{N}|%|\$|@|#|https?:|\b(?:profit|gain|loss|green|red|win|won|up|down|all|closed|exited|out|early|late|pleased|nice)\b/iu, line);
       assert.doesNotMatch(line, /\b(?:just|now|then|today|fast|quick\w*|prompt\w*|smooth\w*|fine|safe\w*|neat\w*|proper\w*|clean\w*|moving on|next|elsewhere|fresh|is sold|coffee|eyes|me)\b/i, line);
+    }
+  });
+
+  it("thirty wins of one coin in memory still leave a line: two lines share at most one part, half alike even for the same coin (second review)", () => {
+    const said: string[] = [];
+    for (let i = 0; i < 30; i++) {
+      const line = saleLines("PEPE", `sell:${i}`).find((l) => admit(l, "PEPE", said).ok);
+      assert.ok(line, `win ${i + 1}`);
+      said.push(line!);
     }
   });
 

@@ -639,8 +639,21 @@ export function planPosts(input: PlanInput): PlanIntent[] {
   // ONE POST OF THE DAY KEPT FOR THE RECAP (review of the wins branch,
   // 2026-10-14): wins, buys and casual posts took the day's allowance before
   // any recap, and the losses that day were never counted. On a recap
-  // cadence a single or casual post leaves the day's last post to the recap.
-  const keep = recaps ? 1 : 0;
+  // cadence a single or casual post leaves the day's last post to the recap
+  // while the recap has something to count (a buy or a sale that is no win,
+  // in its window, said by no post and no recap) and the day has room for
+  // more than it (second review: an owner who chose one post a day got
+  // recaps only, and a quiet day nothing at all).
+  const liveNow = new Set(input.posts.filter((p) => maybeOut(p)).map((p) => p.dedupeKey));
+  const recapFrom = Math.max(account.consentAtMs, now - RECAP_WINDOW_MS);
+  const inRecapWindow = (atSec: number) => Number.isFinite(atSec) && atSec * 1000 > recapFrom && atSec * 1000 <= now;
+  const unsaid = (k: string) => !covered.has(k) && !liveNow.has(k);
+  const recapHasWork = recaps && (
+    input.calls.some((c) => c.side === "buy" && typeof c.decisionId === "string" && c.decisionId !== "" && c.paper === (input.money === "paper")
+      && inRecapWindow(c.atSec) && unsaid(buyKey(c.decisionId)))
+    || (input.money === "live" && input.tradeResults === true && (input.sells ?? []).some((c) => c.side === "sell" && !isWin(c)
+      && /^0x[0-9a-f]{64}$/i.test(c.operationKey) && inRecapWindow(c.atSec) && unsaid(sellKey(tenant, c.operationKey)))));
+  const keep = recapHasWork && perDay > 1 && ownerPerDay > 1 ? 1 : 0;
 
   // Completed sales share the account and owner caps, trade-post allowance,
   // review window, freshness and gap. A separate explicit opt-in enables them.
@@ -653,16 +666,20 @@ export function planPosts(input: PlanInput): PlanIntent[] {
   // recap could reach until the losses aged out of its window). Only where
   // the recap can count the sales: they are live money, so a recap of paper
   // trades never would, and an agent trading paper posts its live sales as
-  // before.
+  // before. An active owner's win needs no model however it posts, and a
+  // recap that counted it never stops its own post (second review: a win
+  // held back for its post while a recap went out, then past the next
+  // recap's window, was never said at all; a recap now counts every win, and
+  // the win still goes out alone, with its card).
   const winsAlone = recaps && input.money === "live";
-  const sells = input.tradeResults === true && (winsAlone || modelOk) ? (input.sells ?? [])
+  const sells = input.tradeResults === true ? (input.sells ?? [])
     .filter((c) => c.side === "sell" && c.paper === false && /^0x[0-9a-f]{64}$/i.test(c.operationKey) && /^0x[0-9a-f]{40}$/i.test(c.token))
     .filter((c) => Number.isFinite(c.atSec) && c.atSec * 1000 > account.consentAtMs! && c.atSec * 1000 <= now && now - c.atSec * 1000 <= freshMs)
-    .filter((c) => !winsAlone || isWin(c))
+    .filter((c) => (winsAlone ? isWin(c) : modelOk || (cadence.recap && isWin(c))))
     .sort((a, b) => a.atSec - b.atSec) : [];
   for (const call of sells) {
     const dedupeKey = sellKey(tenant, call.operationKey);
-    if (used.has(dedupeKey) || covered.has(dedupeKey)) continue;
+    if (used.has(dedupeKey) || (covered.has(dedupeKey) && !(cadence.recap && isWin(call)))) continue;
     const coin = coinOf(call);
     if (!coin) continue;
     if (folded(slots, "sell", call.token.toLowerCase(), now, cadence.coinFoldMs)) continue;
@@ -771,8 +788,7 @@ export function planPosts(input: PlanInput): PlanIntent[] {
  * earlier recap covered (`covered`, by key), after consent and within
  * RECAP_WINDOW_MS, of the money it trades with now: its buys from the calls,
  * its sales from the receipt-backed results (`results`: empty without the
- * owner's opt-in to sale posts), which carry each sale's measured outcome,
- * but a fresh win whose own post was never tried (it waits for that post).
+ * owner's opt-in to sale posts), which carry each sale's measured outcome.
  * A recap is planned only when no recap went out in RECAP_GAP_MS, and at
  * least RECAP_MIN_UNPOSTED of those trades have no single post out, on its
  * way or maybe out (`liveKeys`), the newest trade RECAP_SETTLE_MS old or
@@ -788,17 +804,11 @@ export function planRecap(o: {
   const fromMs = Math.max(o.consentAtMs, o.now - RECAP_WINDOW_MS);
   const inWindow = (c: PlanCall) => Number.isFinite(c.atSec) && c.atSec * 1000 > fromMs && c.atSec * 1000 <= o.now && c.paper === (o.money === "paper") && coinOf(c) !== null;
   const buys = o.calls.filter((c) => c.side === "buy" && typeof c.decisionId === "string" && c.decisionId !== "" && inWindow(c) && !o.covered.has(buyKey(c.decisionId)));
-  // A WIN WAITS FOR ITS OWN POST (the owner's ask, 2026-10-14): a profitable
-  // sale whose single post was never tried, still fresh enough for one, is
-  // not the recap's to say. It goes out alone, with its card, and a later
-  // recap counts it once its post is out; past its freshness unsaid, or once
-  // its post was tried and refused, a recap may say it like any trade.
-  const awaiting = (c: PlanSell) => {
-    const k = sellKey(o.tenant, c.operationKey);
-    return isWin(c) && o.now - c.atSec * 1000 <= o.freshMs && !o.used.has(k) && !o.liveKeys.has(k);
-  };
+  // Every sale of the window a recap has not counted, wins included: a win
+  // counted here still goes out alone (planPosts), so no win waits on its own
+  // post to be counted (second review of the wins branch, 2026-10-14).
   const sells = (Array.isArray(o.results) ? o.results : []).filter((c) => c.side === "sell" && /^0x[0-9a-f]{64}$/i.test(c.operationKey) && inWindow(c)
-    && !o.covered.has(sellKey(o.tenant, c.operationKey)) && !awaiting(c));
+    && !o.covered.has(sellKey(o.tenant, c.operationKey)));
   const trades = [...buys.map((c) => ({ key: buyKey(c.decisionId), atSec: c.atSec })), ...sells.map((c) => ({ key: sellKey(o.tenant, c.operationKey), atSec: c.atSec }))];
   const covers = trades.map((t) => t.key);
   const unposted = trades.filter((t) => !o.liveKeys.has(t.key));

@@ -105,10 +105,7 @@ function assertSaid(r: Run, what: string) {
   assert.deepEqual(r.twice, [], `${what}: a trade in two recaps`);
   assert.deepEqual(r.stale, [], `${what}: planned to go stale`);
   assert.deepEqual(r.othersAlone, [], `${what}: a sale that is no win posted alone`);
-  if (r.capped.size === 0) {
-    assert.deepEqual(r.unsaid, [], `${what}: never said`);
-    assert.deepEqual(r.winsNotAlone, [], `${what}: a win never posted alone`);
-  }
+  if (r.capped.size === 0) assert.deepEqual(r.unsaid, [], `${what}: never said`);
 }
 
 describe("every trade of an active agent is said", () => {
@@ -152,6 +149,17 @@ describe("every trade of an active agent is said", () => {
     const r = simulate({ trades: buys, sales, fromH: 11.5, toH: 30, casual: false });
     assertSaid(r, "a stream of wins");
     assert.equal(r.capped.size, 0);
+  });
+
+  it("a burst of more wins than single posts can take: every one said, alone or by a recap (second review of the wins branch)", () => {
+    const sales = Array.from({ length: 12 }, (_, i) => ({ h: 10 + i / 6, win: i % 3 !== 2 }));
+    for (const extra of [[], [{ h: 11.3, win: true }, { h: 11.4, win: true }]]) {
+      const r = simulate({ trades: [10.08, 10.25, 10.42], sales: [...sales, ...extra].sort((a, b) => a.h - b.h), fromH: 9.5, toH: 34, casual: false });
+      assert.deepEqual(r.unsaid, [], "every trade said");
+      assert.deepEqual(r.othersAlone, []);
+      assert.deepEqual(r.stale, []);
+      assert.ok([...r.singles.keys()].filter((k) => k.startsWith("sell:")).length >= 5, "the first wins alone");
+    }
   });
 
   it("a dozen hourly wins in a day still leave the recap its post: every loss and buy that day is counted (review of the wins branch)", () => {
