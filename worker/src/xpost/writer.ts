@@ -724,7 +724,9 @@ export function sellPrompt(f: SellFacts): Prompt {
     // FIVE WORDS AT LEAST (2026-10-14): asked only for a sentence under ninety
     // characters, the model wrote "sold some PEPE." and the gate's four-word
     // floor (gate.ts XPOST_MIN_WORDS) refused every sale of Alan's night.
-    "Write one casual, neutral sentence of five to fourteen words, under ninety characters. Name the coin and say sold. A partial sale is possible, so never say fully closed, all out or exited.",
+    // AND UNDER SIXTY CHARACTERS (review of the wins branch): an active
+    // owner's result line, tx link and contract leave about sixty-five.
+    "Write one casual, neutral sentence of five to twelve words, under sixty characters. Name the coin and say sold. A partial sale is possible, so never say fully closed, all out or exited.",
     "You have no supplied reason or post-sale price history. Do not invent either. No emotion or performance judgment: the measured outcome is appended by trusted code.",
   ].join(" "));
 }

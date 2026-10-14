@@ -144,6 +144,25 @@ describe("every trade of an active agent is said", () => {
     assert.equal([...r.singles.keys()].filter((k) => k.startsWith("sell:")).length, 4, "four wins, four posts of their own");
   });
 
+  it("a stream of wins never holds the slots the recap needs: the losses and buys between them are counted (review of the wins branch)", () => {
+    const h = (t: string) => { const [a, b] = t.split(":").map(Number); return a! + b! / 60; };
+    const buys = ["11:59", "13:03", "13:11", "14:55"].map(h);
+    const sales = [...["13:28", "13:42", "14:42"].map((t) => ({ h: h(t), win: false })), ...["11:56", "13:25", "14:40", "15:53", "17:13", "18:29", "19:45", "21:03"].map((t) => ({ h: h(t), win: true }))]
+      .sort((a, b) => a.h - b.h);
+    const r = simulate({ trades: buys, sales, fromH: 11.5, toH: 30, casual: false });
+    assertSaid(r, "a stream of wins");
+    assert.equal(r.capped.size, 0);
+  });
+
+  it("a dozen hourly wins in a day still leave the recap its post: every loss and buy that day is counted (review of the wins branch)", () => {
+    const sales = [...Array.from({ length: 12 }, (_, i) => ({ h: 8 + i, win: true })), ...Array.from({ length: 10 }, (_, i) => ({ h: 8.5 + i, win: false }))].sort((a, b) => a.h - b.h);
+    const r = simulate({ trades: [9.2, 12.4, 15.7], sales, fromH: 7.5, toH: 30, casual: false });
+    assert.deepEqual(r.twice, []);
+    assert.deepEqual(r.stale, []);
+    assert.deepEqual(r.othersAlone, []);
+    assert.deepEqual(r.unsaid, [], "every trade said, the losses by a recap");
+  });
+
   for (const casual of [false, true]) {
     it(`seeded random bursts of buys and sales, casual posts ${casual ? "on" : "off"}`, () => {
       let seed = casual ? 17 : 19;

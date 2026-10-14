@@ -385,14 +385,27 @@ describe("a win alone (the owner's ask, 2026-10-14: \"where are the trade pnls\"
     assert.equal(out[0]!.kind, "sell", "the first slot is the win's");
   });
 
-  it("takes the first slot that will not go stale, past the single horizon a buy is held to", () => {
+  it("books no further out than the single horizon, so a stream of wins never holds the slots a recap needs (review of the wins branch)", () => {
     const queued = post({ kind: "buy", status: "scheduled", dueAtMs: now + HOUR, sentAtMs: null });
-    const out = planPosts(input({ nowMs: now, calls: [], tradeResults: true, sells: sells(), posts: [queued] }));
-    const [win] = sellsOf(out);
-    assert.ok(win, "planned");
-    assert.ok(win!.dueAtMs - now > RECAP_HORIZON_MS && win!.dueAtMs - now <= ACTIVE_CADENCE.sendStaleMs - ACTIVE_CADENCE.gapMs, `${(win!.dueAtMs - now) / MIN} min out`);
-    // A buy in the same place waits for the recap.
-    assert.equal(planPosts(input({ nowMs: now, calls: [buy(7.5)], posts: [queued] })).filter((i) => i.kind === "buy").length, 0);
+    // Its slot would be past the horizon: not now; a later pass, when the queue is shorter, plans it first.
+    assert.equal(sellsOf(planPosts(input({ nowMs: now, calls: [], tradeResults: true, sells: sells(), posts: [queued] }))).length, 0);
+    const later = planPosts(input({ nowMs: now + HOUR, calls: [], tradeResults: true, sells: sells(), posts: [queued] }));
+    const [win] = sellsOf(later);
+    assert.ok(win && win.dueAtMs - (now + HOUR) <= RECAP_HORIZON_MS, kinds(later).join(", "));
+  });
+
+  it("leaves the day's last post to the recap: a win, a buy or a casual post never takes it (review of the wins branch)", () => {
+    const today = Array.from({ length: ACTIVE_CADENCE.tradePerDay - 1 }, (_, i) =>
+      post({ kind: "buy", status: "posted", dedupeKey: `done-${i}`, sentAtMs: DAY0 + 1 * HOUR + i * MIN, dueAtMs: DAY0 + 1 * HOUR + i * MIN }));
+    const out = planPosts(input({ nowMs: now, calls: burst(), tradeResults: true, sells: sells(), posts: today }));
+    assert.equal(sellsOf(out).length + out.filter((i) => i.kind === "buy" || i.kind === "casual").length, 0, kinds(out).join(", "));
+    assert.ok(recapOf(out), "the recap takes it, counting the losses");
+  });
+
+  it("an agent trading paper posts its live sales as before: a recap of paper trades would never count a live loss (review of the wins branch)", () => {
+    const [, loss] = sells();
+    const out = planPosts(input({ nowMs: now, calls: [], tradeResults: true, sells: [loss!], money: "paper" }));
+    assert.deepEqual(sellsOf(out).map((i) => i.call.outcome), ["loss"]);
   });
 
   it("needs no model: code's words say it when the model cannot", () => {

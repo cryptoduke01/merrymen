@@ -636,16 +636,25 @@ export function planPosts(input: PlanInput): PlanIntent[] {
   // past its send staleness is skipped at send time for certain; on the active
   // cadence, a gap's room is kept for one send-time deferral.
   const sendable = (due: number) => due - now <= cadence.sendStaleMs - (cadence.recap ? gap : 0);
+  // ONE POST OF THE DAY KEPT FOR THE RECAP (review of the wins branch,
+  // 2026-10-14): wins, buys and casual posts took the day's allowance before
+  // any recap, and the losses that day were never counted. On a recap
+  // cadence a single or casual post leaves the day's last post to the recap.
+  const keep = recaps ? 1 : 0;
 
   // Completed sales share the account and owner caps, trade-post allowance,
   // review window, freshness and gap. A separate explicit opt-in enables them.
   // ON A RECAP CADENCE ONLY A WIN GOES OUT ALONE (the owner's ask, 2026-10-14:
   // "where are the trade pnls"): every profitable sale gets its own post with
   // its P&L card, and every other sale is the recap's to count. A win needs no
-  // model (code's own words when the model cannot, sale-words.ts), is planned
-  // ahead of the buys, and is not held to the single horizon: it takes the
-  // first slot that will not go stale (`sendable`), however far the queue.
-  const winsAlone = recaps;
+  // model (code's own words when the model cannot, sale-words.ts) and is
+  // planned ahead of the buys, inside the same single horizon (review of the
+  // wins branch: booked further out, a stream of wins held every slot the
+  // recap could reach until the losses aged out of its window). Only where
+  // the recap can count the sales: they are live money, so a recap of paper
+  // trades never would, and an agent trading paper posts its live sales as
+  // before.
+  const winsAlone = recaps && input.money === "live";
   const sells = input.tradeResults === true && (winsAlone || modelOk) ? (input.sells ?? [])
     .filter((c) => c.side === "sell" && c.paper === false && /^0x[0-9a-f]{64}$/i.test(c.operationKey) && /^0x[0-9a-f]{40}$/i.test(c.token))
     .filter((c) => Number.isFinite(c.atSec) && c.atSec * 1000 > account.consentAtMs! && c.atSec * 1000 <= now && now - c.atSec * 1000 <= freshMs)
@@ -658,9 +667,10 @@ export function planPosts(input: PlanInput): PlanIntent[] {
     if (!coin) continue;
     if (folded(slots, "sell", call.token.toLowerCase(), now, cadence.coinFoldMs)) continue;
     const due = pushedPast(now + MIN_LEAD_MS, slots, gap);
-    if (due > call.atSec * 1000 + staleMs || (!winsAlone && !soonEnough(due)) || !sendable(due)) continue;
+    // A sale no recap can count is not held to the horizon that leaves trades for one.
+    if (due > call.atSec * 1000 + staleMs || (winsAlone && !soonEnough(due)) || !sendable(due)) continue;
     const day = dayOf(due);
-    if (tradesOnDay(day) >= cadence.tradePerDay || onDay(day) >= perDay || ownerOnDay(day) >= ownerPerDay) continue;
+    if (tradesOnDay(day) >= cadence.tradePerDay - keep || onDay(day) >= perDay - keep || ownerOnDay(day) >= ownerPerDay - keep) continue;
     out.push({ kind: "sell", dedupeKey, dueAtMs: due, call, coin: coin.label, coinKey: call.token.toLowerCase() });
     slots.push({ tenant: key(tenant), kind: "sell", atMs: due, coin: call.token.toLowerCase(), createdAtMs: now });
     used.add(dedupeKey);
@@ -684,7 +694,7 @@ export function planPosts(input: PlanInput): PlanIntent[] {
     const due = pushedPast(Math.max(fillMs + jitter * MIN, now + MIN_LEAD_MS), slots, gap);
     if (due > fillMs + staleMs || !soonEnough(due) || !sendable(due)) continue;
     const day = dayOf(due);
-    if (tradesOnDay(day) >= cadence.tradePerDay || onDay(day) >= perDay || ownerOnDay(day) >= ownerPerDay) continue;
+    if (tradesOnDay(day) >= cadence.tradePerDay - keep || onDay(day) >= perDay - keep || ownerOnDay(day) >= ownerPerDay - keep) continue;
     out.push({ kind: "buy", dedupeKey, dueAtMs: due, call, coin: coin.label, coinKey: coin.key });
     slots.push({ tenant: key(tenant), kind: "buy", atMs: due, coin: coin.key, createdAtMs: now });
     used.add(dedupeKey);
@@ -745,7 +755,7 @@ export function planPosts(input: PlanInput): PlanIntent[] {
       // (third review, 2026-10-14): one reserved hours ahead held the slot a
       // trade's single post needed, every pass, until the trade went stale
       // unsaid. Within the horizon, the single posts, planned first, win.
-      if (due - now <= CASUAL_MAX_PUSH_MS && soonEnough(due) && onDay(day) < perDay && ownerOnDay(day) < ownerPerDay) {
+      if (due - now <= CASUAL_MAX_PUSH_MS && soonEnough(due) && onDay(day) < perDay - keep && ownerOnDay(day) < ownerPerDay - keep) {
         out.push({ kind: "casual", dedupeKey: cKey, dueAtMs: due, day: today, slot: i });
         slots.push({ tenant: key(tenant), kind: "casual", atMs: due, coin: null, createdAtMs: now });
       }

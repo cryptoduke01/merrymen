@@ -36,6 +36,7 @@ import type { AgentFacts, CallFact } from "./groupchat/facts";
 import type { Db } from "./db";
 import type { LlmCreds } from "./llm";
 import type { FetchLike, XApp } from "./xpost/client";
+import { xWeightedLength } from "./xpost/client";
 import type { XPosterDeps } from "./orchestrator-xpost";
 import type { XGateCtx } from "./xpost/gate";
 import type { PlanSell } from "./xpost/planner";
@@ -628,6 +629,38 @@ describe("receipt-backed sale posts", () => {
         });
         await p.step(w.db, ROSTER, new Map(), T0 + MIN);
         assert.equal((await rows(w)).filter((r) => r.kind === "sell").length, 0, `${result.outcome} ${result.gainPct}`);
+      }
+    });
+
+    it("an active owner's win with its tx link and contract goes out whole, the model passing or writing long (review of the wins branch, 2026-10-14)", async (t) => {
+      const TOKEN = `0x${"ef".repeat(20)}`;
+      // The model passing; a model sentence too long to fit beside the link; and a long ticker at a five-figure gain, where
+      // many of code's lines run long too and the next is tried until one fits.
+      for (const [answer, name, gainPct] of [["PASS", "Pepe", 12.4], ["sold some pepe today, the swap went through and the receipt is filed away.", "Pepe", 12.4], ["PASS", "Pudgy Penguin Club", 12345]] as const) {
+        for (let i = 0; i < 12; i++) {
+          const w = await world(t, T0, MEDIA);
+          await ready(w);
+          await w.db.exec(`
+            CREATE TABLE agents (smart_account TEXT, chain_id INTEGER, epoch INTEGER DEFAULT 1);
+            CREATE TABLE decisions (id TEXT, agent_id TEXT, action TEXT, source TEXT);
+            CREATE TABLE trades (id INTEGER PRIMARY KEY, decision_id TEXT, agent_id TEXT, kind TEXT, status TEXT, tx_hash TEXT, buy_token TEXT, sell_token TEXT, epoch INTEGER DEFAULT 1, basis_source TEXT DEFAULT 'receipt', fill_side TEXT DEFAULT 'sell', fill_qty_raw TEXT DEFAULT '1');
+          `);
+          const tx = `0x${randomBytes(32).toString("hex")}`;
+          await w.db.prepare("INSERT INTO agents (smart_account, chain_id) VALUES (?, ?)").run(AGENT, 4663);
+          await w.db.prepare("INSERT INTO decisions VALUES (?, ?, ?, ?)").run(`sale-${i}`, AGENT, "sell", PUBLISHABLE_SOURCES[0]!);
+          await w.db.prepare("INSERT INTO trades (id, decision_id, agent_id, kind, status, tx_hash, buy_token, sell_token) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(1, `sale-${i}`, AGENT, "swap", "landed", tx, null, TOKEN);
+          const win: PlanSell = { ...WIN, name, decisionId: `sale-${i}`, token: TOKEN, operationKey: `0x${randomBytes(32).toString("hex")}`, gainPct };
+          const p = poster(w, {
+            active: true, answer: () => answer, facts: factsOf([], "live"),
+            socialProfile: async () => ({ xTradeResults: true, xTokenAddresses: true, currentAgent: { address: AGENT, chainId: 4663 } }),
+            saleResults: async () => [win],
+          });
+          await p.step(w.db, ROSTER, new Map(), T0 + MIN);
+          const post = (await rows(w)).find((r) => r.kind === "sell");
+          assert.equal(post?.status, "scheduled", `${answer.slice(0, 12)} #${i}: ${post?.reason}`);
+          assert.ok(post!.body.includes(`\n${gainPct > 100 ? "+12,345%" : "+12%"} gross gain before fees and gas.`) && post!.body.includes(tx) && post!.body.endsWith(TOKEN), post!.body);
+          assert.ok(xWeightedLength(post!.body) <= 280);
+        }
       }
     });
 

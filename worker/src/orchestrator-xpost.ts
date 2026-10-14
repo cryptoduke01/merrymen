@@ -2686,17 +2686,39 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         else reason = `template:${v.reason}`;
       }
     }
-    if (!body && winWords && intent.kind === "sell") {
-      // The first of this win's lines the gate admits, held to every rule a
-      // drafted sale sentence is: the coin named, "sold" said, no result word.
-      for (const line of saleLines(intent.coin, intent.dedupeKey)) {
-        const v = admitXPost(line, gate, BASE_GATE);
-        if (v.ok) {
-          body = v.text;
-          break;
+    // A SALE POST IS WHOLE OR NOT AT ALL: its words, code's result line, and
+    // the token link after it, inside X's limit (review of the wins branch,
+    // 2026-10-14: an active owner's tx link and contract leave about sixty-five
+    // characters for the words, and a win whose words ran longer was skipped).
+    // A win takes code's own words (sale-words.ts) whenever the model's are
+    // not there or do not fit: the first line the gate admits that fits whole,
+    // each held to every rule a drafted sale sentence is.
+    if (intent.kind === "sell") {
+      const sale = intent.call;
+      const whole = (words: string): string | null => {
+        const said = appendSaleOutcome(words, sale.outcome, active.has(account.tenant.toLowerCase()) ? sale.gainPct : undefined);
+        if (!said) {
+          reason = "sale-outcome-invalid";
+          return null;
         }
-        reason = `sale-words:${v.reason}`;
+        if (!tokenDisclosure) return said;
+        const linked = appendPublicToken(said, tokenDisclosure, active.has(account.tenant.toLowerCase()));
+        if (!linked) reason = "token-disclosure-invalid";
+        return linked;
+      };
+      let post = body ? whole(body) : null;
+      if (!post && winWords) {
+        for (const line of saleLines(intent.coin, intent.dedupeKey)) {
+          const v = admitXPost(line, gate, BASE_GATE);
+          if (!v.ok) {
+            reason = `sale-words:${v.reason}`;
+            continue;
+          }
+          post = whole(v.text);
+          if (post) break;
+        }
       }
+      body = post;
     }
     // AN INSIGHT POST CARRIES CODE'S FIGURES LINE, OR IS NOT POSTED: the words
     // describe what the line shows, and a post with no line is skipped
@@ -2709,15 +2731,12 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         reason = "insight-figures-left-out";
       }
     }
-    if (body && intent.kind === "sell") {
-      body = appendSaleOutcome(body, intent.call.outcome, active.has(account.tenant.toLowerCase()) ? intent.call.gainPct : undefined);
-      if (!body) reason = "sale-outcome-invalid";
-    }
     if (body && wallet) {
       body = appendPublicWallet(body, wallet);
       if (!body) reason = "wallet-intro-invalid";
     }
-    if (body && tokenDisclosure) {
+    // A buy's token link; a sale's is in its whole post above.
+    if (body && tokenDisclosure && intent.kind !== "sell") {
       body = appendPublicToken(body, tokenDisclosure, active.has(account.tenant.toLowerCase()));
       if (!body) reason = "token-disclosure-invalid";
     }

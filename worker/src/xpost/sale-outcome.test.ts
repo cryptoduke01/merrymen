@@ -42,9 +42,9 @@ describe("sale prose and deterministic gross outcome", () => {
     const a = sellPrompt({ ...facts, coin: "Pepe", paper: false, outcome: "profit" });
     const b = sellPrompt({ ...facts, coin: "Pepe", paper: false, outcome: "loss" });
     assert.deepEqual(a, b);
-    assert.match(a.prompt, /under ninety characters/);
+    assert.match(a.prompt, /under sixty characters/);
     // Asked for more words than the gate's floor: "sold some PEPE." was refused as too short, every sale of 2026-10-14.
-    assert.match(a.prompt, /five to fourteen words/);
+    assert.match(a.prompt, /five to twelve words/);
     assert.ok(5 > XPOST_MIN_WORDS);
     assert.equal(admitXPost("sold some PEPE.", { ...gate, coins: ["PEPE"] }, base).ok, false, "the floor the prompt now clears");
     assert.match(a.prompt, /partial sale/);
