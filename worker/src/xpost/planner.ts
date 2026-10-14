@@ -294,6 +294,16 @@ export interface PlanSell extends PlanCall {
   gainPct?: number | null;
 }
 
+/**
+ * A WIN: a sale its receipts measured as a profit, with a gain big enough to
+ * show at one decimal (sale-outcome.ts gainFigure, never "+0%"). On a recap
+ * cadence a win is posted alone, with its P&L card; every other sale is the
+ * recap's to count (the owner's ask, 2026-10-14).
+ */
+export function isWin(s: Pick<PlanSell, "outcome" | "gainPct">): boolean {
+  return s.outcome === "profit" && typeof s.gainPct === "number" && Number.isFinite(s.gainPct) && s.gainPct >= 0.05;
+}
+
 export type PlanIntent =
   /** `attempt` is 0 for the account's first hello, n for the n-th redraft. */
   | { kind: "intro"; dedupeKey: string; dueAtMs: number; attempt: number }
@@ -308,7 +318,7 @@ export type PlanIntent =
    * in its key, so no later plan posts those trades one by one.
    */
   | { kind: "recap"; dedupeKey: string; dueAtMs: number; buys: PlanCall[]; sells: PlanSell[]; results: PlanSell[]; toSec: number;
-      /** The single-post keys of every trade it says (buyKey, sellKey): stored on its row (recapCoverOf), never said again. */
+      /** The single-post keys of every trade it says (buyKey, sellKey): stored on its row (recapCoverOf), never recapped again, nor posted alone but an active owner's win. */
       covers: string[] };
 
 /** An intro row, as introState weighs it. */
@@ -594,9 +604,10 @@ export function planPosts(input: PlanInput): PlanIntent[] {
     return [{ kind: "intro", dedupeKey: intro.dedupeKey, attempt: intro.attempt, dueAtMs: Math.max(now + MIN_LEAD_MS, account.consentAtMs + INTRO_DELAY_MS) }];
   }
   if (intro.state !== "done") return [];
-  // NO MODEL, NO SINGLE POST OR CASUAL ONE; A RECAP STILL (review of the recap
-  // branch, 2026-10-14): a recap's words and figures are code's, so a spent
-  // model allowance, or no model at all, never silences a burst.
+  // NO MODEL, NO SINGLE POST OR CASUAL ONE; A RECAP AND A WIN STILL (review of
+  // the recap branch, 2026-10-14): a recap's words and figures are code's, and
+  // so are a win's when the model cannot write them (sale-words.ts), so a spent
+  // model allowance, or no model at all, never silences a burst or a win.
   const modelOk = input.model !== false;
 
   // An answer to a tag has its own lane: it neither spends nor waits on the cadence.
@@ -608,10 +619,11 @@ export function planPosts(input: PlanInput): PlanIntent[] {
   const tradesOnDay = (day: string) => onDay(day, "buy") + onDay(day, "sell") + onDay(day, "recap");
   const out: PlanIntent[] = [];
   const freshMs = cadence.tradeFreshMs, staleMs = cadence.tradeStaleMs;
-  // EVERY TRADE A RECAP ALREADY SAID is never posted one by one after it, nor
-  // said again: the keys this owner's recaps that are out, on their way or may
-  // be out (maybeOut) covered (recapCoverOf). Only this owner's own recaps: on
-  // a shared X account another owner's trades are another owner's.
+  // EVERY TRADE A RECAP ALREADY SAID is never recapped again, nor posted one
+  // by one after it but an active owner's win (which still goes out alone,
+  // with its card): the keys this owner's recaps that are out, on their way or
+  // may be out (maybeOut) covered (recapCoverOf). Only this owner's own
+  // recaps: on a shared X account another owner's trades are another owner's.
   const ownRecaps = (input.recaps ?? input.posts).filter((p) => p.kind === "recap" && key(p.tenant) === key(tenant) && maybeOut(p));
   const covered = new Set(ownRecaps.flatMap((p) => recapCoverOf(p.coin)));
   // ON A RECAP CADENCE, A SINGLE POST GOES OUT SOON OR NOT AT ALL: one that
@@ -625,23 +637,68 @@ export function planPosts(input: PlanInput): PlanIntent[] {
   // past its send staleness is skipped at send time for certain; on the active
   // cadence, a gap's room is kept for one send-time deferral.
   const sendable = (due: number) => due - now <= cadence.sendStaleMs - (cadence.recap ? gap : 0);
+  // THE DAY'S LAST POST IS THE RECAP'S (review of the wins branch,
+  // 2026-10-14): wins, buys and casual posts took the day's allowance before
+  // any recap, and the losses that day were never counted. On a recap
+  // cadence, while the day has room for more than one post (second review:
+  // an owner who chose one post a day got recaps only):
+  //   - a single post (a win, a buy) never takes the day's last post: the
+  //     recap does, and says whatever the day still has to say, wins that
+  //     could not go alone included (Codex review of PR #336: twelve wins
+  //     spent the day, a thirteenth could neither go alone nor be recapped,
+  //     and by the next day's recap it was past the window);
+  //   - a casual post takes it only while no trade waits for the recap (a
+  //     quiet day keeps its casual posts).
+  const liveNow = new Set(input.posts.filter((p) => maybeOut(p)).map((p) => p.dedupeKey));
+  const recapFrom = Math.max(account.consentAtMs, now - RECAP_WINDOW_MS);
+  const inRecapWindow = (atSec: number) => Number.isFinite(atSec) && atSec * 1000 > recapFrom && atSec * 1000 <= now;
+  const unsaid = (k: string) => !covered.has(k) && !liveNow.has(k);
+  // A trade waits for the recap when a recap will count it (planRecap's own
+  // test, a postable name included: a coin with none is said by no post, and
+  // held the day's last post for eight hours, third review of the wins
+  // branch), and no post and no recap has said it yet; wins included.
+  const recapHasWork = recaps && (
+    input.calls.some((c) => c.side === "buy" && typeof c.decisionId === "string" && c.decisionId !== "" && c.paper === (input.money === "paper")
+      && inRecapWindow(c.atSec) && coinOf(c) !== null && unsaid(buyKey(c.decisionId)))
+    || (input.money === "live" && input.tradeResults === true && (input.sells ?? []).some((c) => c.side === "sell"
+      && /^0x[0-9a-f]{64}$/i.test(c.operationKey) && c.paper === false && inRecapWindow(c.atSec) && coinOf(c) !== null && unsaid(sellKey(tenant, c.operationKey)))));
+  const roomForMore = perDay > 1 && ownerPerDay > 1;
+  const keepSingles = recaps && roomForMore ? 1 : 0;
+  const keepCasual = recapHasWork && roomForMore ? 1 : 0;
 
   // Completed sales share the account and owner caps, trade-post allowance,
   // review window, freshness and gap. A separate explicit opt-in enables them.
-  const sells = modelOk && input.tradeResults === true ? (input.sells ?? [])
+  // ON A RECAP CADENCE ONLY A WIN GOES OUT ALONE (the owner's ask, 2026-10-14:
+  // "where are the trade pnls"): every profitable sale gets its own post with
+  // its P&L card, and every other sale is the recap's to count. A win needs no
+  // model (code's own words when the model cannot, sale-words.ts) and is
+  // planned ahead of the buys, inside the same single horizon (review of the
+  // wins branch: booked further out, a stream of wins held every slot the
+  // recap could reach until the losses aged out of its window). Only where
+  // the recap can count the sales: they are live money, so a recap of paper
+  // trades never would, and an agent trading paper posts its live sales as
+  // before. An active owner's win needs no model however it posts, and a
+  // recap that counted it never stops its own post (second review: a win
+  // held back for its post while a recap went out, then past the next
+  // recap's window, was never said at all; a recap now counts every win, and
+  // the win still goes out alone, with its card).
+  const winsAlone = recaps && input.money === "live";
+  const sells = input.tradeResults === true ? (input.sells ?? [])
     .filter((c) => c.side === "sell" && c.paper === false && /^0x[0-9a-f]{64}$/i.test(c.operationKey) && /^0x[0-9a-f]{40}$/i.test(c.token))
     .filter((c) => Number.isFinite(c.atSec) && c.atSec * 1000 > account.consentAtMs! && c.atSec * 1000 <= now && now - c.atSec * 1000 <= freshMs)
+    .filter((c) => (winsAlone ? isWin(c) : modelOk || (cadence.recap && isWin(c))))
     .sort((a, b) => a.atSec - b.atSec) : [];
   for (const call of sells) {
     const dedupeKey = sellKey(tenant, call.operationKey);
-    if (used.has(dedupeKey) || covered.has(dedupeKey)) continue;
+    if (used.has(dedupeKey) || (covered.has(dedupeKey) && !(cadence.recap && isWin(call)))) continue;
     const coin = coinOf(call);
     if (!coin) continue;
     if (folded(slots, "sell", call.token.toLowerCase(), now, cadence.coinFoldMs)) continue;
     const due = pushedPast(now + MIN_LEAD_MS, slots, gap);
-    if (due > call.atSec * 1000 + staleMs || !soonEnough(due) || !sendable(due)) continue;
+    // A sale no recap can count is not held to the horizon that leaves trades for one.
+    if (due > call.atSec * 1000 + staleMs || (winsAlone && !soonEnough(due)) || !sendable(due)) continue;
     const day = dayOf(due);
-    if (tradesOnDay(day) >= cadence.tradePerDay || onDay(day) >= perDay || ownerOnDay(day) >= ownerPerDay) continue;
+    if (tradesOnDay(day) >= cadence.tradePerDay - keepSingles || onDay(day) >= perDay - keepSingles || ownerOnDay(day) >= ownerPerDay - keepSingles) continue;
     out.push({ kind: "sell", dedupeKey, dueAtMs: due, call, coin: coin.label, coinKey: call.token.toLowerCase() });
     slots.push({ tenant: key(tenant), kind: "sell", atMs: due, coin: call.token.toLowerCase(), createdAtMs: now });
     used.add(dedupeKey);
@@ -665,7 +722,7 @@ export function planPosts(input: PlanInput): PlanIntent[] {
     const due = pushedPast(Math.max(fillMs + jitter * MIN, now + MIN_LEAD_MS), slots, gap);
     if (due > fillMs + staleMs || !soonEnough(due) || !sendable(due)) continue;
     const day = dayOf(due);
-    if (tradesOnDay(day) >= cadence.tradePerDay || onDay(day) >= perDay || ownerOnDay(day) >= ownerPerDay) continue;
+    if (tradesOnDay(day) >= cadence.tradePerDay - keepSingles || onDay(day) >= perDay - keepSingles || ownerOnDay(day) >= ownerPerDay - keepSingles) continue;
     out.push({ kind: "buy", dedupeKey, dueAtMs: due, call, coin: coin.label, coinKey: coin.key });
     slots.push({ tenant: key(tenant), kind: "buy", atMs: due, coin: coin.key, createdAtMs: now });
     used.add(dedupeKey);
@@ -726,7 +783,7 @@ export function planPosts(input: PlanInput): PlanIntent[] {
       // (third review, 2026-10-14): one reserved hours ahead held the slot a
       // trade's single post needed, every pass, until the trade went stale
       // unsaid. Within the horizon, the single posts, planned first, win.
-      if (due - now <= CASUAL_MAX_PUSH_MS && soonEnough(due) && onDay(day) < perDay && ownerOnDay(day) < ownerPerDay) {
+      if (due - now <= CASUAL_MAX_PUSH_MS && soonEnough(due) && onDay(day) < perDay - keepCasual && ownerOnDay(day) < ownerPerDay - keepCasual) {
         out.push({ kind: "casual", dedupeKey: cKey, dueAtMs: due, day: today, slot: i });
         slots.push({ tenant: key(tenant), kind: "casual", atMs: due, coin: null, createdAtMs: now });
       }
@@ -758,6 +815,9 @@ export function planRecap(o: {
   const fromMs = Math.max(o.consentAtMs, o.now - RECAP_WINDOW_MS);
   const inWindow = (c: PlanCall) => Number.isFinite(c.atSec) && c.atSec * 1000 > fromMs && c.atSec * 1000 <= o.now && c.paper === (o.money === "paper") && coinOf(c) !== null;
   const buys = o.calls.filter((c) => c.side === "buy" && typeof c.decisionId === "string" && c.decisionId !== "" && inWindow(c) && !o.covered.has(buyKey(c.decisionId)));
+  // Every sale of the window a recap has not counted, wins included: a win
+  // counted here still goes out alone (planPosts), so no win waits on its own
+  // post to be counted (second review of the wins branch, 2026-10-14).
   const sells = (Array.isArray(o.results) ? o.results : []).filter((c) => c.side === "sell" && /^0x[0-9a-f]{64}$/i.test(c.operationKey) && inWindow(c)
     && !o.covered.has(sellKey(o.tenant, c.operationKey)));
   const trades = [...buys.map((c) => ({ key: buyKey(c.decisionId), atSec: c.atSec })), ...sells.map((c) => ({ key: sellKey(o.tenant, c.operationKey), atSec: c.atSec }))];

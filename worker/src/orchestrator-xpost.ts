@@ -49,7 +49,7 @@ import { STRATEGY_FLAVOUR, STRATEGY_SPOKEN, TRAIT_VOICE } from "./groupchat/temp
 import { MUSINGS, SUBJECTS, TAKES } from "./groupchat/topics";
 import { xAppFromEnv, type FetchLike, type XApp, type XReply } from "./xpost/client";
 import { admitXPost, lettersOf, merrymenMentioned, moneySaid, namedIn, tickerRefusal, unreadableLetter, vocabularyRefusal, type BaseGate, type XGateCtx } from "./xpost/gate";
-import { ACTIVE_CADENCE, ANSWER_GAP_MS, ANSWER_STALE_MS, ANSWERS_PER_DAY, RECAP_CALLS_PER_AGENT, RECAP_GAP_MS, RECAP_WINDOW_MS, REPLY_STALE_MS, STANDARD_CADENCE, coinOf, hash32, introState, planPosts, recapCoverOf, recapCoverText, replyDueAt, sendDecision, type PlanCadence, type PlanClock, type PlanIntent, type PlanSell } from "./xpost/planner";
+import { ACTIVE_CADENCE, ANSWER_GAP_MS, ANSWER_STALE_MS, ANSWERS_PER_DAY, RECAP_CALLS_PER_AGENT, RECAP_GAP_MS, RECAP_WINDOW_MS, REPLY_STALE_MS, STANDARD_CADENCE, coinOf, hash32, introState, isWin, planPosts, recapCoverOf, recapCoverText, replyDueAt, sendDecision, type PlanCadence, type PlanClock, type PlanIntent, type PlanSell } from "./xpost/planner";
 import { APP_PAUSE_KEY, APP_PAUSE_MS, CREDITS_PAUSE_MS, PAUSE_KEY, readReplyComments, sendOne, type CardOutcome, type SendOutcome } from "./xpost/sender";
 import { isAnswerOptOut, isReplyOptOut, plainAsk, replyCandidate, tagCandidate, withoutReplyOptOut } from "./xpost/replies";
 import { asksAboutACoin, coinTalkIn, deicticPickIn, houseTalkIn, marketTalkIn, nameLikeWords, textWords, trustTalkIn, unknownWordIn } from "./xpost/words";
@@ -102,6 +102,7 @@ import { PUBLISHABLE_SOURCES } from "./thesis-policy";
 import { readSaleCard, readSaleResults } from "./orchestrator-xpost-results";
 import { renderPnlCard, type PnlCardData } from "./pnl-card";
 import { appendSaleOutcome, hasSaleOutcome } from "./xpost/sale-outcome";
+import { saleLines } from "./xpost/sale-words";
 import { admitFiguresLine, cleanTicker, figuresTickers, withFigures, type FiguresSpec } from "./xpost/figures";
 import { hotAnswers, hotNoneAnswers, hotUnreadAnswers, insightFacts, majorAnswers, majorUnreadAnswers, marketAnswers, type HotRead, type MajorRead, type MarketRead } from "./xpost/market";
 import { selfAnswers, tradesAnswers } from "./xpost/casual";
@@ -2554,6 +2555,10 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
     let tokenDisclosure: PublicWallet | null = null;
     // An active owner's market insight post (2026-10-13): code's figures line goes after the words, and the coins it may not show.
     let insight: { figures: FiguresSpec; ownCoins: string[] } | null = null;
+    // AN ACTIVE OWNER'S WIN IS SAID WHATEVER THE MODEL DOES (the owner's ask,
+    // 2026-10-14): when its draft is not there (a pass, a refusal, an outage,
+    // a spent allowance), code's own sale words are (sale-words.ts).
+    const winWords = intent.kind === "sell" && active.has(account.tenant.toLowerCase()) && isWin(intent.call);
     if (intent.kind === "intro") {
       prompt = introPrompt(facts);
     } else if (intent.kind === "buy") {
@@ -2668,7 +2673,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         }
       } else {
         reason = "no-budget";
-        if (intent.kind !== "intro") return { outcome: "no-model-budget", body: null };
+        if (intent.kind !== "intro" && !winWords) return { outcome: "no-model-budget", body: null };
       }
     }
     if (!body && intent.kind === "intro") {
@@ -2681,6 +2686,49 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         else reason = `template:${v.reason}`;
       }
     }
+    // A SALE POST IS WHOLE OR NOT AT ALL: its words, code's result line, and
+    // the token link after it, inside X's limit (review of the wins branch,
+    // 2026-10-14: an active owner's tx link and contract leave about sixty-five
+    // characters for the words, and a win whose words ran longer was skipped).
+    // A win takes code's own words (sale-words.ts) whenever the model's are
+    // not there or do not fit: the first line the gate admits that fits whole,
+    // each held to every rule a drafted sale sentence is.
+    if (intent.kind === "sell") {
+      const sale = intent.call;
+      const whole = (words: string): string | null => {
+        const said = appendSaleOutcome(words, sale.outcome, active.has(account.tenant.toLowerCase()) ? sale.gainPct : undefined);
+        if (!said) {
+          reason = "sale-outcome-invalid";
+          return null;
+        }
+        if (!tokenDisclosure) return said;
+        const linked = appendPublicToken(said, tokenDisclosure, active.has(account.tenant.toLowerCase()));
+        if (!linked) reason = "token-disclosure-invalid";
+        return linked;
+      };
+      let post = body ? whole(body) : null;
+      if (!post && winWords) {
+        // The coin's label first, then its other vetted names, shortest first
+        // (second review of the wins branch: a long name, a name with a number
+        // word or doubled spaces had no line, though its ticker would).
+        const tidy = (n: string) => n.replace(/\s+/g, " ").trim();
+        const names = [...new Set([tidy(intent.coin), ...gate.coins.map(tidy).sort((x, y) => x.length - y.length)])].filter(Boolean);
+        const wordsGate: XGateCtx = { ...gate, coins: [...new Set([...gate.coins, ...names])] };
+        // Every name's three-part lines, then the shorter two-part ones.
+        names: for (const name of [...names.map((x) => [x, 3] as const), ...names.map((x) => [x, 2] as const)]) {
+          for (const line of saleLines(name[0], intent.dedupeKey, name[1])) {
+            const v = admitXPost(line, wordsGate, BASE_GATE);
+            if (!v.ok) {
+              reason = `sale-words:${v.reason}`;
+              continue;
+            }
+            post = whole(v.text);
+            if (post) break names;
+          }
+        }
+      }
+      body = post;
+    }
     // AN INSIGHT POST CARRIES CODE'S FIGURES LINE, OR IS NOT POSTED: the words
     // describe what the line shows, and a post with no line is skipped
     // (insight-figures-left-out) rather than going out on words alone.
@@ -2692,15 +2740,12 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         reason = "insight-figures-left-out";
       }
     }
-    if (body && intent.kind === "sell") {
-      body = appendSaleOutcome(body, intent.call.outcome, active.has(account.tenant.toLowerCase()) ? intent.call.gainPct : undefined);
-      if (!body) reason = "sale-outcome-invalid";
-    }
     if (body && wallet) {
       body = appendPublicWallet(body, wallet);
       if (!body) reason = "wallet-intro-invalid";
     }
-    if (body && tokenDisclosure) {
+    // A buy's token link; a sale's is in its whole post above.
+    if (body && tokenDisclosure && intent.kind !== "sell") {
       body = appendPublicToken(body, tokenDisclosure, active.has(account.tenant.toLowerCase()));
       if (!body) reason = "token-disclosure-invalid";
     }

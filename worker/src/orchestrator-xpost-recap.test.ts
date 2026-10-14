@@ -107,7 +107,8 @@ describe("every recap line clears the real gate", () => {
 
 test("a recap's sale results are read again at send time: a changed outcome withholds it (review, 2026-10-14)", async (t) => {
   const now = Date.UTC(2026, 9, 13, 9);
-  let sales = [sale(now, 2.5, 1, "profit", 12.4), sale(now, 2, 2, "loss"), sale(now, 1.5, 3, "profit", 3)];
+  // Past a single post's six hours, so its wins are the recap's to count, not posts of their own (2026-10-14).
+  let sales = [sale(now, 7, 1, "profit", 12.4), sale(now, 6.8, 2, "loss"), sale(now, 6.6, 3, "profit", 3)];
   const w = await world(t, { now, calls: calls(now, [3, 2.8, 2.6]), sales: () => sales });
   await w.step(now);
   const recap = (await w.rows()).find((p) => p.kind === "recap");

@@ -36,6 +36,7 @@ import type { AgentFacts, CallFact } from "./groupchat/facts";
 import type { Db } from "./db";
 import type { LlmCreds } from "./llm";
 import type { FetchLike, XApp } from "./xpost/client";
+import { xWeightedLength } from "./xpost/client";
 import type { XPosterDeps } from "./orchestrator-xpost";
 import type { XGateCtx } from "./xpost/gate";
 import type { PlanSell } from "./xpost/planner";
@@ -530,16 +531,19 @@ describe("receipt-backed sale posts", () => {
         return { status: reply.status, headers: { get: () => null }, text: async () => text };
       };
     }
-    async function sendSale(over: { scope?: string; active?: boolean; result?: PlanSell; card?: XPosterDeps["saleCard"]; render?: XPosterDeps["renderCard"]; upload?: { status: number; body: unknown } }, t: { after(fn: () => void): void }) {
+    async function sendSale(over: { scope?: string; active?: boolean; result?: PlanSell; card?: XPosterDeps["saleCard"]; render?: XPosterDeps["renderCard"]; upload?: { status: number; body: unknown }; buysOff?: boolean; answer?: string; llmPerDay?: number }, t: { after(fn: () => void): void }) {
       const w = await world(t, T0, over.scope ?? MEDIA);
       await ready(w);
+      // Buy posts off: an active owner without recaps, where a sale that is no win still posts alone (planner.ts winsAlone).
+      if (over.buysOff) await store.setPrefs(w.db, TENANT, { buys: false }, T0);
       const calls: { url: string; body: Record<string, unknown> }[] = [];
       const asked: { agent: string; chainId: number; op: string }[] = [];
       const drawn: unknown[] = [];
       const results: PlanSell[] = [over.result ?? WIN];
       const p = poster(w, {
         active: over.active ?? true,
-        answer: () => "i sold some pepe.", facts: factsOf([], "live"),
+        answer: () => over.answer ?? "i sold some pepe.", facts: factsOf([], "live"),
+        ...(over.llmPerDay === undefined ? {} : { llmPerDay: over.llmPerDay }),
         fetch: xWithMedia(calls, over.upload),
         socialProfile: async () => ({ xTradeResults: true, currentAgent: { address: AGENT, chainId: 4663 } }),
         saleResults: async () => results,
@@ -606,10 +610,76 @@ describe("receipt-backed sale posts", () => {
 
     for (const outcome of ["loss", "flat", "unknown"] as const) {
       it(`never for a ${outcome} sale`, async (t) => {
-        const { sent, calls, asked, drawn } = await sendSale({ result: { ...WIN, outcome, gainPct: outcome === "loss" ? -20 : outcome === "flat" ? 0 : null } }, t);
+        // Posted alone only where no recap counts it: buy posts off (2026-10-14).
+        const { sent, calls, asked, drawn } = await sendSale({ buysOff: true, result: { ...WIN, outcome, gainPct: outcome === "loss" ? -20 : outcome === "flat" ? 0 : null } }, t);
         assert.equal(sent.status, "posted");
         assert.equal(calls.filter((c) => c.url.endsWith("/2/media/upload")).length, 0);
         assert.deepEqual([asked, drawn], [[], []]);
+      });
+    }
+
+    it("on an active owner's cadence only a win posts alone: a loss, a flat or an unmeasured sale is the recap's to count (2026-10-14)", async (t) => {
+      for (const result of [{ ...WIN, outcome: "loss" as const, gainPct: -20 }, { ...WIN, outcome: "flat" as const, gainPct: 0 }, { ...WIN, outcome: "unknown" as const, gainPct: null }, { ...WIN, gainPct: 0.01 }]) {
+        const w = await world(t, T0, MEDIA);
+        await ready(w);
+        const p = poster(w, {
+          active: true, answer: () => "i sold some pepe.", facts: factsOf([], "live"),
+          socialProfile: async () => ({ xTradeResults: true, currentAgent: { address: AGENT, chainId: 4663 } }),
+          saleResults: async () => [result],
+        });
+        await p.step(w.db, ROSTER, new Map(), T0 + MIN);
+        assert.equal((await rows(w)).filter((r) => r.kind === "sell").length, 0, `${result.outcome} ${result.gainPct}`);
+      }
+    });
+
+    it("an active owner's win with its tx link and contract goes out whole, the model passing or writing long (review of the wins branch, 2026-10-14)", async (t) => {
+      const TOKEN = `0x${"ef".repeat(20)}`;
+      // The model passing; a model sentence too long to fit beside the link; and a long ticker at a five-figure gain, where
+      // many of code's lines run long too and the next is tried until one fits.
+      // And a name no line can carry (too long beside a five-figure gain; a number word the gate reads as a quantity): its ticker is said.
+      for (const [answer, name, symbol, gainPct, said] of [["PASS", "Pepe", "PEPE", 12.4, "Pepe"], ["sold some pepe today, the swap went through and the receipt is filed away.", "Pepe", "PEPE", 12.4, "Pepe"],
+        ["PASS", "Pudgy Penguin Club", "PUDGY", 12345, null], ["PASS", "Wrapped Robinhood Ether", "WETH", 12345, "WETH"], ["PASS", "Million", "MM", 12.4, "MM"],
+        // A long name and no ticker the gate can say: its two-part lines (third review).
+        ["PASS", "Wrapped Robinhood Ethers", "WETH2", 12345, "Wrapped Robinhood Ethers"]] as const) {
+        for (let i = 0; i < 12; i++) {
+          const w = await world(t, T0, MEDIA);
+          await ready(w);
+          await w.db.exec(`
+            CREATE TABLE agents (smart_account TEXT, chain_id INTEGER, epoch INTEGER DEFAULT 1);
+            CREATE TABLE decisions (id TEXT, agent_id TEXT, action TEXT, source TEXT);
+            CREATE TABLE trades (id INTEGER PRIMARY KEY, decision_id TEXT, agent_id TEXT, kind TEXT, status TEXT, tx_hash TEXT, buy_token TEXT, sell_token TEXT, epoch INTEGER DEFAULT 1, basis_source TEXT DEFAULT 'receipt', fill_side TEXT DEFAULT 'sell', fill_qty_raw TEXT DEFAULT '1');
+          `);
+          const tx = `0x${randomBytes(32).toString("hex")}`;
+          await w.db.prepare("INSERT INTO agents (smart_account, chain_id) VALUES (?, ?)").run(AGENT, 4663);
+          await w.db.prepare("INSERT INTO decisions VALUES (?, ?, ?, ?)").run(`sale-${i}`, AGENT, "sell", PUBLISHABLE_SOURCES[0]!);
+          await w.db.prepare("INSERT INTO trades (id, decision_id, agent_id, kind, status, tx_hash, buy_token, sell_token) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(1, `sale-${i}`, AGENT, "swap", "landed", tx, null, TOKEN);
+          const win: PlanSell = { ...WIN, name, symbol, decisionId: `sale-${i}`, token: TOKEN, operationKey: `0x${randomBytes(32).toString("hex")}`, gainPct };
+          const p = poster(w, {
+            active: true, answer: () => answer, facts: factsOf([], "live"),
+            socialProfile: async () => ({ xTradeResults: true, xTokenAddresses: true, currentAgent: { address: AGENT, chainId: 4663 } }),
+            saleResults: async () => [win],
+          });
+          await p.step(w.db, ROSTER, new Map(), T0 + MIN);
+          const post = (await rows(w)).find((r) => r.kind === "sell");
+          assert.equal(post?.status, "scheduled", `${answer.slice(0, 12)} #${i}: ${post?.reason}`);
+          assert.ok(post!.body.includes(`\n${gainPct > 100 ? "+12,345%" : "+12%"} gross gain before fees and gas.`) && post!.body.includes(tx) && post!.body.endsWith(TOKEN), post!.body);
+          assert.ok(xWeightedLength(post!.body) <= 280);
+          if (said) assert.match(post!.body.split("\n")[0]!, new RegExp(`\\b${said}\\b`));
+        }
+      }
+    });
+
+    for (const why of ["the model passes", "the model allowance is spent"] as const) {
+      it(`a win is said in code's own words when ${why}, its gain and card as ever (2026-10-14)`, async (t) => {
+        const { post, sent, calls, logs } = await sendSale(why === "the model passes" ? { answer: "PASS" } : { llmPerDay: 0 }, t);
+        const [words, result] = post.body.split("\n");
+        assert.match(words!, /\bsold\b/);
+        assert.match(words!, /\b(?:PEPE|Pepe)\b/);
+        assert.doesNotMatch(words!, /i sold some pepe/, "not the model's");
+        assert.equal(result, "+40% gross gain before fees and gas. pleased with that part.");
+        assert.equal(sent.status, "posted");
+        assert.equal(calls.filter((c) => c.url.endsWith("/2/media/upload")).length, 1);
+        assert.match(logs.join(" "), /card-attached 1/);
       });
     }
 
