@@ -130,6 +130,23 @@ test("create_merryman refuses a visible existing agent but never probes an unsha
   assert.equal(code(await run("create_merryman", { idempotency_key: "new-noscope-01" }, noScope.principal)), "insufficient_scope");
 });
 
+test("crypto-only creation requires a coin basket before preparing the compact handoff", async () => {
+  const { d, run } = await setup({ directory: fixtureDirectory({ [OWNER_A]: [] }) });
+  for (const [index, basket] of [undefined, ["NVDA", "TSLA"], ["qqq", "nvda"]].entries()) {
+    const result = await run("create_merryman", { strategy: "steady-basket", asset_mode: "crypto", ...(basket ? { basket } : {}), idempotency_key: `crypto-empty-${index}` });
+    assert.equal(code(result), "invalid_input");
+    assert.match(errorOf(result).message, /basket containing at least one coin/);
+  }
+  assert.equal((d.raw.prepare("SELECT COUNT(*) AS n FROM mcp_proposals").get() as { n: number }).n, 0);
+  const coin = data(await run("create_merryman", { strategy: "llm-strategist", asset_mode: "crypto", basket: ["MYCOIN"], idempotency_key: "crypto-explicit-coin" }));
+  assert.equal(coin.status, "awaiting_approval", "owner-side custom token validation still remains");
+  const binding = JSON.parse((await proposalRow(d.db, OWNER_A, coin.proposal_id as string))!.binding_json) as DraftBinding;
+  assert.deepEqual(binding.settings.basketSymbols, ["MYCOIN"]);
+  const trencher = data(await run("create_merryman", { strategy: "trencher", asset_mode: "crypto", idempotency_key: "crypto-trencher" }));
+  assert.equal(trencher.status, "awaiting_approval", "Trencher discovery does not need a basket");
+  assert.equal((d.raw.prepare("SELECT COUNT(*) AS n FROM grants").get() as { n: number }).n, 0);
+});
+
 test("quote_trade: expected, minimum at the agent's slippage, impact, route and caveats — and places nothing", async () => {
   const { d, run } = await setup();
   const r = await run("quote_trade", { side: "buy", token: NVDA, amount_usdg: 10 });

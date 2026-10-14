@@ -401,7 +401,7 @@ function agentDraftTool(creationOnly: boolean) { return defineTool({
   name: creationOnly ? "create_merryman" : "create_agent_draft",
   title: creationOnly ? "Set up a new Merryman" : "Draft an agent setup",
   description: creationOnly
-    ? "Prepare a new Merryman for the owner to review and create through one Merrymen setup link. Accepts a name, strategy, basket, asset mode and risk level; defaults to a Trencher named My Merryman. This only creates a setup proposal: approval does not change any existing agent or settings. The owner continues to choose limits, choose practice or live, and sign the trading permission with their own wallet. No keys, funding, trades or live-trading consent are accepted here. An existing agent must be managed instead."
+    ? "Prepare a new Merryman for the owner to review and create through one Merrymen setup link. Accepts a name, strategy, basket, asset mode and risk level; defaults to a Trencher named My Merryman. Crypto-only mode with another strategy requires an explicit basket containing a coin the owner added in Settings; stock-only baskets cannot trade in that mode. This only creates a setup proposal: approval does not change any existing agent or settings. The owner continues to choose limits, choose practice or live, and sign the trading permission with their own wallet. No keys, funding, trades or live-trading consent are accepted here. An existing agent must be managed instead."
     : "Draft a name, strategy, basket, asset mode and risk level for the owner's agent. The owner reviews it in Merrymen and approving saves it to their settings. If they already run an agent, the approval page shows a before/after comparison and the changes apply to that running agent immediately; if not, they still choose limits and sign the trading permission themselves, and a draft never creates trading authority. A risk level carries only settings that can be changed by conversation (stop loss, take profit, amount per buy, max per AI trade, slippage); the price-impact safety floor is left out and stays a dashboard setting. Basket symbols beyond the stock tokens are checked against the owner's added tokens here only when an agent is shared with this connection; otherwise they are checked when the owner approves.",
   capability: "drafts.write",
   input: z.object({
@@ -423,6 +423,14 @@ function agentDraftTool(creationOnly: boolean) { return defineTool({
   async handler(args, ctx) {
     const now = ctx.now();
     const tenant = ctx.principal.tenant;
+    // A compact creation handoff skips market selection. Never silently pair
+    // its stock basket default with a mode that excludes every stock. This
+    // check uses only the request and public registry; owner-added symbols
+    // still undergo the existing owner-side approval validation.
+    if (creationOnly && (args.strategy ?? "trencher") !== "trencher" && args.asset_mode === "crypto"
+      && !args.basket?.some(symbol => !STOCK_TOKENS.some(token => token.symbol.toLowerCase() === symbol.toLowerCase()))) {
+      throw new McpError("invalid_input", "Crypto-only setup needs a basket containing at least one coin you added in Merrymen Settings. Choose Trencher for automatic coin discovery, or choose Stocks only or Stocks and crypto for a stock basket.");
+    }
     // A connection the owner shared no agent with may draft, but may not learn
     // the owner's settings — not their added tokens, not their current values.
     const agents = await ctx.agents();

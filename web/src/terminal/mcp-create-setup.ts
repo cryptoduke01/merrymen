@@ -1,8 +1,9 @@
-import { AGENT_NAME_RE, DEFAULT_BASKET_SYMBOLS, RISK_PROFILES, normalizeAgentName } from "@merrymen/core";
+import { AGENT_NAME_RE, DEFAULT_BASKET_SYMBOLS, RISK_PROFILES, STOCK_TOKENS, normalizeAgentName } from "@merrymen/core";
 import { requestJson, RequestError } from "./request-json";
 
 const ID = /^prp_[0-9a-f]{32}$/;
 const STRATEGIES = new Set(["steady-basket", "weekend-gap", "llm-strategist", "trencher", "even-keel", "dip-hunter"]);
+const STOCK_SYMBOLS = new Set(STOCK_TOKENS.map(token => token.symbol.toUpperCase()));
 const RISK_KEYS = ["strategistStopLossBps", "takeProfitBps", "buyPerTickUsdg", "llmMaxActionUsdg", "slippageBps"] as const;
 const KEYS = new Set<string>(["agentName", "strategy", "basketSymbols", "assetMode", ...RISK_KEYS]);
 const object = (value: unknown): Record<string, unknown> | null => value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
@@ -55,6 +56,12 @@ export function approvedMcpSetup(value: unknown, id: string, owner: string, nowM
   if (typeof s.strategy !== "string" || !STRATEGIES.has(s.strategy)) throw refused();
   if (s.assetMode !== undefined && !["all", "stocks", "crypto"].includes(String(s.assetMode))) throw refused();
   if (s.basketSymbols !== undefined && (!Array.isArray(s.basketSymbols) || s.basketSymbols.length < 1 || s.basketSymbols.length > 10 || s.basketSymbols.some(x => typeof x !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._$-]{0,15}$/.test(x)))) throw refused();
+  // Older approved drafts can omit their basket. The stock default would be
+  // excluded by crypto-only mode, and this handoff skips market selection.
+  // Custom-token membership remains the owner approval's responsibility.
+  if (s.strategy !== "trencher" && s.assetMode === "crypto" && (!Array.isArray(s.basketSymbols) || s.basketSymbols.every(symbol => STOCK_SYMBOLS.has(symbol.toUpperCase())))) {
+    throw new Error("Crypto-only setup needs an explicit basket containing at least one crypto token. Return to your assistant to choose a crypto basket or another asset mode and prepare a fresh setup.");
+  }
   const level = b.risk_level;
   if (level !== null && level !== "careful" && level !== "balanced" && level !== "bold") throw refused();
   const riskSettings: Record<string, number> = {};

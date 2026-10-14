@@ -244,3 +244,13 @@ it("an unavailable compact setup sends the owner back to chat instead of restart
   assert.equal(ui.container.querySelector('a[href="/create"]'),null);
   assert.equal(mintCalls,0);assert.deepEqual(writes,[]);
 });
+
+it("an older approved crypto-only setup without a crypto basket cannot reach signing",async()=>{
+  const old=setup();const settings=old.binding.settings as Record<string,unknown>;
+  settings.assetMode="crypto";delete settings.basketSymbols;setupResponse=old;
+  await ui.render(React.createElement(CreateAgent,{account,assistantProposalId:proposalId,onRefresh(){},onSignedIn(){},onBack(){},onDone(){},onFund(){}}));
+  assert.match(ui.container.textContent!,/Crypto-only setup needs an explicit basket/);
+  assert.match(ui.container.textContent!,/Return to the same chat/);
+  assert.equal(Array.from(ui.container.querySelectorAll("button")).some(button=>button.textContent==="Confirm and sign"),false);
+  assert.equal(mintCalls,0);assert.deepEqual(writes,[]);
+});

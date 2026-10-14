@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { it } from "node:test";
-import { RISK_PROFILES } from "@merrymen/core";
+import { DEFAULT_BASKET_SYMBOLS, RISK_PROFILES } from "@merrymen/core";
 import { approvedMcpSetup, mcpSetupRequest } from "./mcp-create-setup";
 import { headline, walletSetupUrl, type View } from "../app/connect/approve/[id]/approve-view";
 
@@ -47,6 +47,34 @@ it("rejects injected settings, altered presets and unknown strategies",()=>{
     const v=setupView();Object.assign(v.binding.settings as object,patch);
     assert.throws(()=>approvedMcpSetup(v,id,owner,now),/not approved/);
   }
+});
+it("rejects crypto-only non-Trencher setups with an omitted or stock-only basket",()=>{
+  for(const strategy of ["steady-basket","weekend-gap","llm-strategist","even-keel","dip-hunter"]){
+    for(const basketSymbols of [undefined,["TSLA"],["qqq","nVdA","tsla"]]){
+      const v=setupView();const settings=v.binding.settings as Record<string,unknown>;
+      Object.assign(settings,{strategy,assetMode:"crypto"});
+      if(basketSymbols===undefined)delete settings.basketSymbols;else settings.basketSymbols=basketSymbols;
+      assert.throws(()=>approvedMcpSetup(v,id,owner,now),/Crypto-only setup needs an explicit basket/,`${strategy}: ${basketSymbols}`);
+    }
+  }
+});
+it("preserves an explicit owner-reviewed crypto basket instead of substituting stocks",()=>{
+  const v=setupView();Object.assign(v.binding.settings as object,{strategy:"llm-strategist",assetMode:"crypto",basketSymbols:["Cat"]});
+  const setup=approvedMcpSetup(v,id,owner,now);
+  assert.equal(setup.assetMode,"crypto");assert.deepEqual(setup.basket,["Cat"]);
+});
+it("keeps stock-capable basket defaults and Trencher discovery setup unchanged",()=>{
+  for(const assetMode of [undefined,"all","stocks"]){
+    const v=setupView();const settings=v.binding.settings as Record<string,unknown>;
+    delete settings.basketSymbols;
+    if(assetMode!==undefined)settings.assetMode=assetMode;
+    const setup=approvedMcpSetup(v,id,owner,now);
+    assert.equal(setup.assetMode,assetMode??"all");assert.deepEqual(setup.basket,DEFAULT_BASKET_SYMBOLS);
+  }
+  const v=setupView();const settings=v.binding.settings as Record<string,unknown>;
+  Object.assign(settings,{strategy:"trencher",assetMode:"crypto"});delete settings.basketSymbols;
+  const setup=approvedMcpSetup(v,id,owner,now);
+  assert.equal(setup.assetMode,"crypto");assert.deepEqual(setup.basket,[]);
 });
 it("owner continuation is local and says wallet setup still remains",()=>{
   const v=setupView();assert.equal(headline(v),"Ready for wallet setup");
