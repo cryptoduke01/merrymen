@@ -701,6 +701,13 @@ export async function loadFacts(
      * facts.test.ts builds one — the cut is plain.
      */
     dialect?: "postgres" | "sqlite";
+    /**
+     * Each agent's newest fills kept, unless the room already posted them:
+     * CALLS_PER_AGENT unless a caller needs a whole window it reads (the X
+     * plan pass, for an active agent's recap: xpost/planner.ts
+     * RECAP_CALLS_PER_AGENT). A positive whole number, else the default.
+     */
+    callsPerAgent?: number;
   } = {},
 ): Promise<Map<string, AgentFacts>> {
   const out = new Map<string, AgentFacts>();
@@ -767,7 +774,8 @@ export async function loadFacts(
   const keepPosted = opts.dialect !== undefined;
   if (keepPosted) await ensureGroupchatSchema(shared, opts.dialect!);
   const { sql, fixed } = callsSql(callable.length, { keepPosted });
-  const rows = (await shared.prepare(sql).all(nowSec - windowSec, ...callable, ...fixed, CALLS_PER_AGENT)) as CallRow[];
+  const perAgent = typeof opts.callsPerAgent === "number" && Number.isInteger(opts.callsPerAgent) && opts.callsPerAgent > 0 ? opts.callsPerAgent : CALLS_PER_AGENT;
+  const rows = (await shared.prepare(sql).all(nowSec - windowSec, ...callable, ...fixed, perAgent)) as CallRow[];
 
   for (const row of rows) {
     const tenant = byAgent.get(String(row.agent_id ?? "").toLowerCase());

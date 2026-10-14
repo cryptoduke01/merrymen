@@ -15,7 +15,7 @@ import { makeXPoster, xpostEnv } from "./orchestrator-xpost";
 import type { FetchLike } from "./xpost/client";
 import { admitXPost } from "./xpost/gate";
 import { recapLines } from "./xpost/recap";
-import { RECAP_WINDOW_MS, buyKey, recapCoverOf, sellKey, type PlanSell } from "./xpost/planner";
+import { RECAP_CALLS_PER_AGENT, RECAP_WINDOW_MS, buyKey, recapCoverOf, sellKey, type PlanSell } from "./xpost/planner";
 import * as store from "./xpost/store";
 
 const MIN = 60_000, HOUR = 60 * MIN, DAY = 24 * HOUR;
@@ -29,7 +29,7 @@ const sale = (nowMs: number, hoursAgo: number, n: number, outcome: PlanSell["out
   ({ decisionId: `sale-${n}`, side: "sell", symbol: "WISP", name: null, paper: false, atSec: (nowMs - hoursAgo * HOUR) / 1000,
     operationKey: `0x${String(n).padStart(64, "e")}`, token: `0x${"c".repeat(40)}`, outcome, gainPct });
 
-async function world(t: TestContext, o: { now: number; calls: CallFact[]; tz?: string | null; draft?: string; sales?: () => PlanSell[]; zoneFails?: () => boolean; name?: string; factsOpts?: unknown[]; replies?: boolean }) {
+async function world(t: TestContext, o: { now: number; calls: CallFact[]; tz?: string | null; draft?: string; sales?: () => PlanSell[]; zoneFails?: () => boolean; name?: string; factsOpts?: unknown[]; replies?: boolean; standard?: boolean }) {
   const raw = new DatabaseSync(":memory:");
   t.after(() => raw.close());
   const db = wrapSqlite(raw), dek = randomBytes(32);
@@ -50,7 +50,7 @@ async function world(t: TestContext, o: { now: number; calls: CallFact[]; tz?: s
   const poster = makeXPoster({
     app: { clientId: "client", clientSecret: "secret", redirectUri: "https://app.test/connect/x" }, dek,
     creds: { provider: "groq", transport: "openai", model: "test", apiKey: "k", baseUrl: "https://model.test/v1", vision: false },
-    knobs: { ...xpostEnv({ MERRYMEN_XPOST_ACTIVE_TENANTS: TENANT }), repliesApproved: o.replies ?? true },
+    knobs: { ...xpostEnv(o.standard ? {} : { MERRYMEN_XPOST_ACTIVE_TENANTS: TENANT }), repliesApproved: o.replies ?? true },
     deps: { dialect: "sqlite", fetch, monotonic: () => 0, facts: async (...args) => { o.factsOpts?.push(args[4]); return new Map([[TENANT, facts]]); },
       member: async () => { if (o.zoneFails?.()) throw new Error("member read failed"); return { tz: o.tz ?? null }; },
       // The model passes on everything unless a draft is given: a recap needs none.
@@ -155,4 +155,15 @@ test("the plan pass reads a recap's window of calls with no mention batch to rea
   await w.step(now);
   assert.ok(factsOpts.length > 0, "the plan pass read facts");
   for (const opts of factsOpts) assert.ok(((opts as { callWindowSec?: number })?.callWindowSec ?? 0) >= RECAP_WINDOW_MS / 1000, JSON.stringify(opts));
+});
+
+test("an active agent's plan pass reads its whole recap window of fills; a standard owner's keeps the default cut (review of PR #334, 2026-10-14)", async (t) => {
+  const now = Date.UTC(2026, 9, 13, 9);
+  const per = (o: unknown) => (o as { callsPerAgent?: number } | undefined)?.callsPerAgent;
+  const active: unknown[] = [], standard: unknown[] = [];
+  await (await world(t, { now, calls: calls(now, [7.5, 7.2, 7]), factsOpts: active })).step(now);
+  await (await world(t, { now, calls: calls(now, [7.5, 7.2, 7]), factsOpts: standard, standard: true })).step(now);
+  assert.ok(active.length > 0 && standard.length > 0, "both passes read facts");
+  assert.ok(active.some((o) => per(o) === RECAP_CALLS_PER_AGENT), JSON.stringify(active));
+  assert.ok(standard.every((o) => per(o) === undefined), JSON.stringify(standard));
 });

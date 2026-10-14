@@ -11,6 +11,7 @@ import {
   ACTIVE_TRADE_FRESH_MS,
   ACTIVE_TRADE_SEND_STALE_MS,
   BUY_STALE_MS,
+  RECAP_CALLS_PER_AGENT,
   RECAP_GAP_MS,
   RECAP_HORIZON_MS,
   RECAP_MAX_PUSH_MS,
@@ -273,6 +274,12 @@ describe("a recap's figures", () => {
     assert.equal(renderFiguresLine(recapFigures({ buys: [], sells: [sale(1, "profit", 0.05)], results: [sale(1, "profit", 0.05)] })), "recap: 1 sell (1 green, 0 red), best +0.1%; traded WISP.");
     assert.equal(admitFiguresLine("recap: 1 sell (1 green, 0 red), best +0%."), false);
     assert.equal(admitFiguresLine("recap: 1 sell (1 green, 0 red), best +0.1%."), true);
+  });
+
+  it("can say every fill the plan pass reads for a recap: eight hours at twice the busiest basket's pace (review of PR #334)", () => {
+    assert.ok(RECAP_CALLS_PER_AGENT >= 8 * 90, "three fills every four minutes is 45 an hour");
+    const many = Array.from({ length: RECAP_CALLS_PER_AGENT }, (_, i) => buy(1 + i / 1000));
+    assert.match(renderFiguresLine(recapFigures({ buys: many, sells: [], results: [] }))!, new RegExp(`^recap: ${RECAP_CALLS_PER_AGENT} buys; traded `));
   });
 
   it("says green and red only when every sale counted was measured", () => {

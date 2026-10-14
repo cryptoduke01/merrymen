@@ -1590,7 +1590,9 @@ cadence is as before.
   no earlier recap covered, at most eight hours back, of the money it trades
   with now; the plan pass reads at least those eight hours of calls whether
   or not it read mentions (it read six without a mention batch, and the
-  recap never saw a trade the singles had let go). Its key carries its
+  recap never saw a trade the singles had let go), and with an active agent
+  in it, its newest 720 fills rather than the facts read's usual 180
+  (`RECAP_CALLS_PER_AGENT`: a busy paper basket passes 180 in four hours). Its key carries its
   newest trade and a hash of the trades it covers, so a refused recap's key
   never blocks a recap of more. Its words are code's, never a model's (a
   hundred lines, three slots of ten, any two sharing at most one part, no

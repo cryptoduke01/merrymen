@@ -49,7 +49,7 @@ import { STRATEGY_FLAVOUR, STRATEGY_SPOKEN, TRAIT_VOICE } from "./groupchat/temp
 import { MUSINGS, SUBJECTS, TAKES } from "./groupchat/topics";
 import { xAppFromEnv, type FetchLike, type XApp, type XReply } from "./xpost/client";
 import { admitXPost, lettersOf, merrymenMentioned, moneySaid, namedIn, tickerRefusal, unreadableLetter, vocabularyRefusal, type BaseGate, type XGateCtx } from "./xpost/gate";
-import { ACTIVE_CADENCE, ANSWER_GAP_MS, ANSWER_STALE_MS, ANSWERS_PER_DAY, RECAP_GAP_MS, RECAP_WINDOW_MS, REPLY_STALE_MS, STANDARD_CADENCE, coinOf, hash32, introState, planPosts, recapCoverOf, recapCoverText, replyDueAt, sendDecision, type PlanCadence, type PlanClock, type PlanIntent, type PlanSell } from "./xpost/planner";
+import { ACTIVE_CADENCE, ANSWER_GAP_MS, ANSWER_STALE_MS, ANSWERS_PER_DAY, RECAP_CALLS_PER_AGENT, RECAP_GAP_MS, RECAP_WINDOW_MS, REPLY_STALE_MS, STANDARD_CADENCE, coinOf, hash32, introState, planPosts, recapCoverOf, recapCoverText, replyDueAt, sendDecision, type PlanCadence, type PlanClock, type PlanIntent, type PlanSell } from "./xpost/planner";
 import { APP_PAUSE_KEY, APP_PAUSE_MS, CREDITS_PAUSE_MS, PAUSE_KEY, readReplyComments, sendOne, type CardOutcome, type SendOutcome } from "./xpost/sender";
 import { isAnswerOptOut, isReplyOptOut, plainAsk, replyCandidate, tagCandidate, withoutReplyOptOut } from "./xpost/replies";
 import { asksAboutACoin, coinTalkIn, deicticPickIn, houseTalkIn, marketTalkIn, nameLikeWords, textWords, trustTalkIn, unknownWordIn } from "./xpost/words";
@@ -1509,8 +1509,13 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
     // 2026-10-14): a pass that read no mention batch read six hours, so a
     // recap's eight-hour window was six on most passes, and a trade past a
     // single post's freshness was never seen by the recap meant to say it.
+    // AND THE WHOLE WINDOW'S FILLS FOR AN ACTIVE AGENT'S RECAP (review of PR
+    // #334): the default per-agent cut of 180 newest dropped a busy basket's
+    // oldest in-window trades; a pass that only answers plans no recap.
+    const recapRead = !answersOnly && accounts.some((a) => cadenceOf(a.tenant).recap);
     const facts = await factsOf(shared, roster, profiles, Math.floor(nowMs / 1000), {
       dialect, callWindowSec: (comments.size ? Math.max(PLAN_HISTORY_MS, RECAP_WINDOW_MS) : RECAP_WINDOW_MS) / 1000,
+      ...(recapRead ? { callsPerAgent: RECAP_CALLS_PER_AGENT } : {}),
     });
     const recentFleet = await recentBodies(shared, { tenant: null, sinceMs: nowMs - FLEET_MEMORY_MS, limit: FLEET_MEMORY_MAX });
     // THE MODEL'S ALLOWANCE, READ ONCE A PASS. Once it is spent, only intros

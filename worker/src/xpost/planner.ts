@@ -107,6 +107,16 @@ export const RECAP_GAP_MS = 4 * HOUR;
  */
 export const RECAP_WINDOW_MS = 8 * HOUR;
 /**
+ * HOW MANY OF AN AGENT'S NEWEST FILLS THE PLAN PASS READS when an active
+ * agent is in it (review of PR #334, 2026-10-14): the facts read keeps the
+ * newest CALLS_PER_AGENT (180), and a paper basket filling three coins every
+ * four minutes passes 180 in four hours, so the six-to-eight-hour-old trades
+ * only a recap can say were cut before it saw them. Eight hours at twice that
+ * pace, and under the figures line's 999 a count may say. A live agent's
+ * operation cap keeps it far below either.
+ */
+export const RECAP_CALLS_PER_AGENT = 720;
+/**
  * A recap planned further out than this is not planned: it must go out with a
  * gap's room to spare before it goes stale (ACTIVE_TRADE_SEND_STALE_MS less
  * the active gap), or one send-time deferral would skip it (second review of

@@ -903,6 +903,32 @@ describe("loadFacts against the ledger schema", () => {
     }
   });
 
+  it("keeps as many newest fills as a caller asks for, else CALLS_PER_AGENT (review of PR #334, 2026-10-14)", async () => {
+    // The X plan pass reads a whole recap window for an active agent; a busy basket passes 180 well inside it.
+    const r = new DatabaseSync(":memory:");
+    const d = wrapSqlite(r);
+    try {
+      await applyLedgerSchema(d);
+      await agent(d, { id: A1, name: "Busy Basket", mode: "paper" });
+      const made: string[] = [];
+      for (let i = 0; i < CALLS_PER_AGENT + 40; i++) {
+        const id = await decision(d, { agent: A1, source: "strategy:steady-basket", action: "buy", at: NOW - 5 * 3600 + i * 60, symbol: "TSLA" });
+        await trade(d, { agent: A1, decision: id, status: "paper", buy: TSLA, sell: CASH.USDG });
+        made.push(id);
+      }
+      const roster = [{ tenant: T1, agentId: A1 }];
+      const read = async (callsPerAgent?: number) => (await loadFacts(d, roster, new Map(), NOW, { identities, ...(callsPerAgent === undefined ? {} : { callsPerAgent }) })).get(T1)!.calls;
+      assert.equal((await read()).length, CALLS_PER_AGENT);
+      const all = await read(CALLS_PER_AGENT + 100);
+      assert.equal(all.length, CALLS_PER_AGENT + 40, "every fill of the window");
+      assert.ok(all.some((c) => c.decisionId === made[0]), "the oldest included");
+      assert.equal((await read(10)).length, 10, "and fewer, when asked");
+      for (const bad of [0, -5, 2.5, Number.NaN]) assert.equal((await read(bad)).length, CALLS_PER_AGENT, `${bad}: the default`);
+    } finally {
+      r.close();
+    }
+  });
+
   it("keeps a night's backlog whole, because the conductor announces the OLDEST call it has not said", async () => {
     // An agent that traded all night while its owner slept: forty calls, and on
     // waking the conductor starts from the earliest. A newest-25 cut would hand
