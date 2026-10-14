@@ -9,8 +9,9 @@
  * planRecap), and this file says it.
  *
  * CODE'S WORDS AND CODE'S FIGURES, NO MODEL. A recap is a count of its own
- * receipt-backed trades: the words only say it is one ("busy stretch on the
- * desk, here's the rundown"), naming no coin, no result and no time of day,
+ * receipt-backed trades: the words only say it is one ("an update on the
+ * trading desk, the full rundown follows"), naming no coin, no result, no
+ * size and no time of day,
  * and the figures line after the gate says the rest (xpost/figures.ts
  * "recap:" and "traded"). Nothing for a model to embellish, and nothing a
  * model outage can silence: a recap goes out whenever the gate admits one of
@@ -38,11 +39,14 @@ import { recapCoverOf, sellKey, type PlanCall, type PlanIntent, type PlanSell } 
  * buys and sells" opened a tenth of the recaps that counted buys alone, sales
  * the owner may not have opted to post), and nothing only real money has
  * (receipts, settlement, fills), since a paper agent's recap says these too.
+ * No size either way (fourth review, 2026-10-14): a recap may say one trade a
+ * single post could not, and "heavy action across the book" above "recap: 1
+ * buy" was untrue; the figures line says how many.
  */
 export const RECAP_SLOTS: readonly [readonly string[], readonly string[], readonly string[]] = Object.freeze([
-  Object.freeze(["busy stretch on the trading desk", "heavy action across the book", "a properly active session wrapped up", "the pace picked up noticeably",
-    "a flurry of rapid decisions", "plenty happening on the screens recently", "a solid run of activity", "the strategy kept firing away",
-    "the engine stayed hard at work", "a crowded little window of orders"]),
+  Object.freeze(["an update on the trading desk", "checking in on the order book", "where the strategy currently stands", "a catch up on the engine's work",
+    "keeping everyone posted", "for the sake of transparency", "the session under review", "a status report on the portfolio",
+    "a peek behind the curtain", "a glimpse into the machine"]),
   Object.freeze(["here is the quick recap", "the full rundown follows", "a tidy summary of it all", "the tape in short form", "the running tally laid out",
     "the whole scorecard at a glance", "a brief look back over it", "the condensed version of events", "the highlights reel in numbers", "the wrap sheet put together"]),
   Object.freeze(["straight from the logbook itself", "logged exactly as landed", "no spin attached whatsoever", "noted plainly for the record", "nothing more to add on it",

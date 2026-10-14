@@ -1594,7 +1594,7 @@ cadence is as before.
   newest trade and a hash of the trades it covers, so a refused recap's key
   never blocks a recap of more. Its words are code's, never a model's (a
   hundred lines, three slots of ten, any two sharing at most one part, no
-  side of the trade and nothing only real money has, a paper agent's with
+  side of the trade, no size and nothing only real money has, a paper agent's with
   "on paper"), so a recap goes out even when the model passes or the model
   allowance is spent; its figures line says the rest:
   `recap: 8 buys, 3 sells (2 green, 1 red), best +12.4%; traded CAPITOL, WISP, INDEX.`
@@ -1620,7 +1620,7 @@ cadence is as before.
   up as "Trade recap", and a reply under it is a reply under its trades.
 - **Sized for one active agent.** The hundred lines are shared by every
   active agent and both monies, and the gate refuses a line the fleet said
-  in fourteen days. One agent's recaps, four hours apart at most, take a
+  in fourteen days. One agent's recaps, at least four hours apart, take a
   little over two weeks to use them all; two agents bursting every day would
   run out in about eight days and every recap after would be refused. Grow
   the set (another slot) before a second active tenant trades like Alan.

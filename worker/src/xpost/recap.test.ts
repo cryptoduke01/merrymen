@@ -223,8 +223,14 @@ describe("one recap for a burst", () => {
     const queued = post({ kind: "buy", status: "scheduled", dueAtMs: at + HOUR, sentAtMs: null });
     assert.deepEqual(kinds(planPosts(input({ nowMs: at, clock: awake, posts: [queued] }))), []);
     for (const i of planPosts(input({ nowMs: at, clock: awake }))) assert.ok(i.dueAtMs - at <= RECAP_HORIZON_MS);
-    // A standard owner's casual post is planned as before.
-    assert.ok(kinds(planPosts(input({ nowMs: at, clock: awake, posts: [queued], cadence: STANDARD_CADENCE, perDay: 3 }))).length <= 1);
+    // A standard owner's casual post is planned as before, however far the gap pushes it.
+    const std = (t: number, rows: XPost[]) => planPosts(input({ nowMs: t, clock: awake, posts: rows, cadence: STANDARD_CADENCE, perDay: 3 }));
+    // Most days have one (some are quiet): the first open slot in three days.
+    const stdAt = Array.from({ length: 3 * 24 * 60 }, (_, m) => DAY0 + m * MIN).find((t) => kinds(std(t, [])).includes("casual"));
+    assert.ok(stdAt, "a standard owner's casual slot opens");
+    const pushed = std(stdAt!, [post({ kind: "buy", status: "scheduled", dueAtMs: stdAt! + HOUR, sentAtMs: null })]).filter((i) => i.kind === "casual");
+    assert.equal(pushed.length, 1);
+    assert.ok(pushed[0]!.dueAtMs - stdAt! > RECAP_HORIZON_MS, "past the horizon, and planned all the same");
   });
 
   it("is planned with no model left, when no single post or casual post can be", () => {
@@ -338,7 +344,11 @@ describe("a recap's words", () => {
       assert.doesNotMatch(l, /\p{N}|\$|@|#|https?:|green|\bred\b|profit|loss|gain|\bwin(?:s|ning|ner)?\b|morning|night|tonight|today|on.?chain/iu, l);
     }
     assert.ok(recapLines("x", { paper: true }).every((l) => /paper|practice/.test(l)));
-    // No side of the trade, which a recap of buys alone would misstate, and nothing only real money has (third review, 2026-10-14).
+    // No side of the trade, which a recap of buys alone would misstate, nothing only real money has (third review, 2026-10-14),
+    // and no size, which a recap of one trade would misstate (fourth review).
+    for (const l of [...recapLines("x"), ...recapLines("x", { paper: true })]) {
+      assert.doesNotMatch(l, /\b(?:busy|heavy|flurry|crowded|plenty|pace|burst|lots?|many|loads?|frantic|hectic|active|action|small|quiet|little|few)\b/i, l);
+    }
     for (const l of [...recapLines("x"), ...recapLines("x", { paper: true })]) {
       assert.doesNotMatch(l, /\b(?:buys?|bought|buying|sells?|sold|selling|sales?|receipts?|settle\w*|fills?|filled)\b/i, l);
     }
