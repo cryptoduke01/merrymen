@@ -204,11 +204,15 @@ It reports the connected account's setup and the next action, including when
 an existing agent has not been shared with this connection.
 
 In a host that supports [MCP Apps](https://modelcontextprotocol.io/extensions/apps/build),
-this opens an interactive Merryman home: choose a name, strategy and risk
-settings, review readiness, and open Portfolio, Activity, Settings and Alerts.
+this opens an interactive Merryman home: choose a name, strategy, asset mode,
+basket and risk settings, review readiness, and open Portfolio, Activity,
+Settings, Approvals and Alerts.
 The tabs and actions follow the connection's actual permissions. Portfolio
 keeps paper and live books separate; Settings prepares an owner-reviewed
-change, and Alerts manages the owner's linked Telegram preferences. Unsupported
+change, Approvals follows or cancels pending configuration proposals, and
+Alerts manages the owner's linked Telegram preferences, including digests and
+price thresholds. Unsaved form choices stay available while moving between
+tabs in the same view. Unsupported
 hosts receive the same setup as text, with owner links and normal chat tools.
 Research, trade proposals, reports and community features remain available
 through chat when the connection allows them; the home is not a separate source
@@ -216,10 +220,15 @@ of permissions. This flow uses the same remote server from ChatGPT and Claude.
 
 For a new agent, the assistant prepares `create_merryman` with your chosen
 name, strategy and risk level. This requires the drafting permission. Open its
-review link, approve the exact setup, then continue to wallet creation,
-practice/live selection, limits and signing on Merrymen. The assistant never
+review link and choose **Continue to wallet setup**. A focused secure page
+at `/connect/setup/<proposal-id>` carries the approved choices directly to
+wallet creation, practice/live selection, limits and signing without asking
+you to repeat the name or strategy wizard. The assistant never
 receives your private key. A draft or an approval alone does not start trading.
-After signing, refresh setup until the worker reports its actual state.
+After signing, return to the same conversation and refresh setup until the
+worker reports its actual state. The handoff does not redirect to an arbitrary
+chat URL or expose a chat token. An interrupted activation retains the existing
+permission recovery path instead of creating another wallet.
 
 Once activated, Merrymen's hosted worker keeps running when your chat and
 browser close. No local terminal is required. It remains subject to its signed
@@ -227,8 +236,21 @@ permission, expiry, funding, service health and trading rules. Use status,
 portfolio, decision and report tools to inspect it. For requested name or
 strategy changes, `create_agent_draft` prepares a configuration review for the
 existing agent; `propose_settings_change` handles other supported settings.
+The embedded editor reads `get_agent_settings`: only allowlisted settings,
+their current configured values and validated input metadata are returned;
+provider credentials and Telegram secrets are never included. A configured
+value is not a claim that the worker has adopted it yet.
 The owner approves those changes in Merrymen. Funding, withdrawals, permission
 renewal and live activation remain owner controls linked from setup.
+
+This implementation is not a public-directory approval. ChatGPT's
+[directory guidelines](https://developers.openai.com/plugins/plugin-guidelines)
+exclude plugins that enable financial transfers or investment-trade execution;
+Anthropic's [directory policy](https://support.claude.com/en/articles/13145358-anthropic-software-directory-policy)
+excludes financial execution and transfers unless permitted in writing.
+The limited `/mcp/directory` profile still excludes setup/settings proposals
+and trade proposals. A secure handoff does not remove a publishing restriction;
+host acceptance and real-host sign-in/signing must be validated separately.
 
 ## Cursor
 

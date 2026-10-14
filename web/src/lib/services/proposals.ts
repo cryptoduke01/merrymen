@@ -145,7 +145,7 @@ export type Binding = TradeBinding | SettingsBinding | DraftBinding | PostBindin
 export function creationSetupResult(proposalId: string): Record<string, unknown> {
   return {
     setup_only: true,
-    setup_url: `/create?proposal=${encodeURIComponent(proposalId)}`,
+    setup_url: `/connect/setup/${encodeURIComponent(proposalId)}`,
     note: "Setup approved. No agent, trading permission, settings or trades were created. Continue in Merrymen to review limits and sign with your own wallet.",
   };
 }

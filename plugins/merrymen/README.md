@@ -8,7 +8,7 @@ For Claude on the web, Desktop, Cowork or mobile, use the remote connector at
 ChatGPT and dots need a supported ChatGPT plugin for this MCP server, installed,
 connected and enabled. Availability depends on the host and workspace.
 
-MCP Apps hosts also get an interactive home for name, strategy, risk, readiness, portfolio, activity, settings and Telegram alerts. Other hosts use the same tools as text; owner approval and wallet signing always remain in Merrymen.
+MCP Apps hosts also get an interactive home for name, strategy, basket, risk, readiness, portfolio, activity, editable settings, pending approvals and Telegram alerts. A focused secure handoff carries the chosen setup into wallet authorization. Other hosts use the same tools as text; owner approval and wallet signing always remain in Merrymen.
 
 ## Install
 

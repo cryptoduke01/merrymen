@@ -144,6 +144,10 @@ export function ApproveClient({ id }: { id: string }) {
     try {
       const next = await call<View>(id, { decision, hash: on.binding_hash });
       setV(next);
+      // Only the owner's explicit continuation enters signing. Merely reading
+      // or reloading an approved proposal never navigates or signs anything.
+      const setup = decision === "approve" ? walletSetupUrl(next) : null;
+      if (setup) window.location.assign(setup);
       if (!TERMINAL.has(next.status)) poll.current = setTimeout(() => void load(), 5000);
     } catch (e) {
       if (isSignedOut(e)) {
@@ -208,7 +212,7 @@ export function ApproveClient({ id }: { id: string }) {
             {/* No decision is offered while signed out: pressing it could not be sent. */}
             {v.status === "awaiting_approval" && !expired && !signedOut && <>
               {/* A settings change whose "before" moved, or a trade whose book moved, is refused by the server; no button offers it. */}
-              {approvable(v) && <button className="flow-primary" disabled={busy} onClick={() => void decide("approve")}>{busy ? "Working…" : "Approve"} {!busy && <ArrowRight size={16} aria-hidden />}</button>}
+              {approvable(v) && <button className="flow-primary" disabled={busy} onClick={() => void decide("approve")}>{busy ? "Working…" : v.kind === "agent_draft" && v.binding.purpose === "create" ? "Continue to wallet setup" : "Approve"} {!busy && <ArrowRight size={16} aria-hidden />}</button>}
               <button className="connect-cancel" disabled={busy} onClick={() => void decide("reject")}><X size={15} aria-hidden /> Decline</button>
             </>}
             {v.status === "awaiting_approval" && expired && <p className="mcp-note">This request expired. Ask your assistant for a fresh one.</p>}

@@ -35,6 +35,7 @@ import { mcpConfig } from "./config";
 import type { ResourceDef } from "./resources";
 import type { Capability } from "./scopes";
 import type { ToolDef } from "./tool";
+import { SETTING_SPECS } from "../../../worker/src/telegram/setting-spec";
 
 /** MIME type the extension defines for a view (RESOURCE_MIME_TYPE in @modelcontextprotocol/ext-apps). */
 export const MCP_APP_MIME = "text/html;profile=mcp-app";
@@ -60,6 +61,7 @@ export const APP_VIEW_OF_TOOL: Readonly<Record<string, AppView>> = {
   get_merryman_setup: "home",
   create_merryman: "proposal",
   create_agent_draft: "proposal",
+  propose_settings_change: "proposal",
   get_portfolio: "portfolio",
   get_performance: "portfolio",
   explain_agent_inactivity: "decision",
@@ -82,8 +84,9 @@ export const APP_TOOL_VISIBILITY: readonly ("model" | "app")[] = Object.freeze([
 
 /** Only these safe reads, configuration drafts and alert preferences are callable from an app. */
 export const APP_CALLABLE_TOOLS = new Set([
-  "get_merryman_setup", "list_agents", "get_portfolio", "get_trades", "list_decisions", "get_agent_controls",
-  "create_merryman", "create_agent_draft", "list_notification_channels", "list_subscriptions", "subscribe", "unsubscribe",
+  "get_merryman_setup", "list_agents", "get_portfolio", "get_trades", "list_decisions", "get_agent_controls", "get_agent_settings",
+  "create_merryman", "create_agent_draft", "propose_settings_change", "list_notification_channels", "list_subscriptions", "subscribe", "unsubscribe",
+  "get_proposal", "list_proposals", "cancel_proposal",
 ]);
 
 function toolMeta(view: AppView, name: string): Record<string, unknown> {
@@ -1187,7 +1190,7 @@ var FAIL_TEXT = { rejected: "Declined", cancelled: "Cancelled", expired: "Expire
 var KIND_TEXT = { settings: "a change to the agent's settings", agent_draft: "a draft agent setup", post: "a post in the group chat" };
 var KNOWN_SUMMARY = { purpose: 1,
   action: 1, token: 1, book: 1, book_note: 1, expected_out: 1, min_out: 1, price_impact_bps: 1, assistant_note: 1, requested_by: 1,
-  text: 1, diff: 1, settings: 1, after_approval: 1, risk_level: 1
+  text: 1, diff: 1, settings: 1, after_approval: 1, risk_level: 1, left_out: 1
 };
 // Keys resultBlock renders itself (or, worker_line, never: a raw worker line
 // is no longer sent, and would not be shown if it were).
@@ -1205,12 +1208,12 @@ function render(d) {
 // An approval link is linked only when it is exactly this server's approval
 // page for this proposal: same origin as the configured issuer, the fixed
 // path, no credentials, query or fragment.
-function approvalLink(raw, id) {
+function approvalLink(raw, id, setup) {
   if (!ISSUER || typeof raw !== "string" || raw.length > 400 || typeof id !== "string" || !/^prp_[0-9a-f]{32}$/.test(id)) return null;
   var u;
   try { u = new URL(raw); } catch (e) { return null; }
   if (u.origin !== ISSUER || u.username || u.password || u.search || u.hash) return null;
-  if (u.pathname !== "/connect/approve/" + id) return null;
+  if (u.pathname !== (setup ? "/connect/setup/" : "/connect/approve/") + id) return null;
   return { href: u.href, host: u.host };
 }
 
@@ -1284,6 +1287,16 @@ function whenSec(v) {
 }
 
 var DRAFT_LABEL = { agentName: "Agent name", strategy: "Strategy", basketSymbols: "Basket", assetMode: "Asset mode" };
+function draftValue(k,v) {
+  var spec=pick(SETTING_META,k,null);
+  if(!spec)return valueText(v);
+  if(num(v)===0 && spec.zero)return spec.zero;
+  if(spec.kind==="pct")return num(v)===null?null:fmt(num(v)/100,2)+"%";
+  if(spec.kind==="usd")return money(v);
+  if(spec.kind==="hoursAsSec")return num(v)===null?null:fmt(num(v)/3600,2)+" hours";
+  if(spec.kind==="bool")return v===true?"On":v===false?"Off":null;
+  return valueText(v);
+}
 function draftSettings(parent, rec) {
   var o = obj(rec);
   if (!o) return;
@@ -1291,7 +1304,8 @@ function draftSettings(parent, rec) {
   var g = grid(parent);
   Object.keys(o).slice(0, 30).forEach(function (k) {
     // The name is the assistant's suggestion; the rest are checked values.
-    row(g, pick(DRAFT_LABEL, k, human(k) || "?"), k === "agentName" ? utInline(o[k], false) : valueText(o[k]));
+    var spec=pick(SETTING_META,k,null);
+    row(g, pick(DRAFT_LABEL, k, spec ? spec.label : human(k) || "?"), k === "agentName" ? utInline(o[k], false) : draftValue(k,o[k]));
   });
 }
 
@@ -1360,14 +1374,16 @@ function renderProposal(d) {
   timeline(st, kind, status, !!d.decided_at, unconfirmed ? "Outcome not confirmed" : null, setupOnly);
   var g = grid(st);
   if (d.created_at) row(g, "Created", when(d.created_at));
-  row(g, setupOnly ? "Setup expires" : status === "awaiting_approval" ? "Expires" : "Approval window", when(d.expires_at), setupOnly ? "Finish owner signing before this setup expires" : status === "awaiting_approval" ? null : "Only matters while it waits for approval");
+  var setupOpen=setupOnly && ["awaiting_approval","approved","applied"].indexOf(status)>=0;
+  row(g, setupOpen ? "Setup expires" : status === "awaiting_approval" ? "Expires" : "Approval window", when(d.expires_at), setupOpen ? "Finish owner signing before this setup expires" : setupOnly ? "This setup cannot be continued" : status === "awaiting_approval" ? null : "Only matters while it waits for approval");
   if (d.decided_at) row(g, "Decided", when(d.decided_at));
   if (d.order_id) row(g, "Order", mono(str(d.order_id, 80)));
 
   if (status === "awaiting_approval" || (setupOnly && status === "applied")) {
     var ap = section(root, setupOnly && status === "applied" ? "Finish setup in Merrymen" : "Approve in Merrymen");
     var exp = Date.parse(typeof d.expires_at === "string" ? d.expires_at : "");
-    var link = approvalLink(setupOnly && status === "applied" ? ISSUER + "/connect/approve/" + d.proposal_id : d.approval_url, d.proposal_id);
+    var continuingSetup = setupOnly && status === "applied";
+    var link = approvalLink(continuingSetup ? ISSUER + "/connect/setup/" + d.proposal_id : d.approval_url, d.proposal_id, continuingSetup);
     if (isFinite(exp) && exp <= Date.now()) {
       put(ap, "p", "warn-text", "This proposal has expired. Ask for a fresh one.");
     } else if (link) {
@@ -1393,28 +1409,31 @@ function renderProposal(d) {
   if (s.expected_out !== undefined) row(dg, "Expected", fmt(s.expected_out, 6), "When it was proposed");
   if (s.min_out !== undefined) row(dg, "Minimum received", fmt(s.min_out, 6));
   if (s.price_impact_bps !== undefined) row(dg, "Price impact", bps(s.price_impact_bps));
-  if (s.risk_level !== undefined) row(dg, "Risk level", human(s.risk_level));
+  if (s.risk_level !== undefined && s.risk_level !== null) row(dg, "Risk level", human(s.risk_level));
   var by = s.requested_by !== undefined ? s.requested_by : d.requested_by;
   if (by !== undefined) row(dg, "Requested by", utInline(by, false));
   generic(ds, s, KNOWN_SUMMARY);
-  var diff = arr(s.diff, 20).map(obj).filter(Boolean);
+  var rawDiff = Array.isArray(s.diff) ? s.diff : d.diff;
+  var diff = arr(rawDiff, 20).map(obj).filter(Boolean);
   if (diff.length) {
     put(ds, "h3", null, "Setting changes");
     table(ds, [{ label: "Setting" }, { label: "Now" }, { label: "Proposed" }], diff.map(function (x) {
       return [str(x.label, 80) || str(x.key, 40), str(x.current, 120), str(x.proposed, 120)];
-    }), (Array.isArray(s.diff) ? s.diff.length : 0) - diff.length);
+    }), (Array.isArray(rawDiff) ? rawDiff.length : 0) - diff.length);
   }
   draftSettings(ds, s.settings);
+  var kept=arr(s.left_out,12).map(obj).filter(Boolean);
+  if(kept.length){var unchanged=section(ds,"Kept unchanged");kept.forEach(function(x){put(unchanged,"p","small muted",str(x.why,300));});}
   if (s.after_approval) put(ds, "p", "small muted", str(s.after_approval, 400));
   // A post is the assistant's own words, published under the owner's agent.
   if (kind === "post" || s.text !== undefined) untrustedBox(ds, "The post the assistant drafted", s.text, 500);
   if (s.assistant_note) untrustedBox(ds, "The assistant's note", s.assistant_note, 280);
-  if (d.binding_hash) put(ds, "p", "small muted", "Binding " + str(d.binding_hash, 80) + " — an approval acts only on this exact binding.");
+  if (d.binding_hash) { var audit=put(ds,"details");put(audit,"summary",null,"Review reference");put(audit,"p","small muted","Binding "+str(d.binding_hash,80)+" — approval applies only to this exact request."); }
 
   if (res && Object.keys(res).length) { var rs = section(root, "Result"); resultBlock(rs, res); }
   var q = obj(d.quote);
   if (q) renderQuote(root, q, false);
-  notes([d.next_steps]);
+  notes([kind === "agent_draft" || kind === "settings" ? "Return to this chat after the secure review to check your Merryman's latest status." : d.next_steps]);
 }
 
 function renderQuote(parent, q, standalone) {
@@ -1473,7 +1492,8 @@ function issuerLiteral(issuer: string): string {
  */
 export function appHtml(view: AppView, opts: { issuer?: string } = {}): string {
   const v = VIEWS[view];
-  const config = view === "proposal" || view === "home" ?  `var ISSUER = ${issuerLiteral(opts.issuer ?? "")};\n` : "";
+  const settingMeta = Object.fromEntries(SETTING_SPECS.map(s => [s.key, { label: s.label, kind: s.kind, zero: s.zero }]));
+  const config = view === "proposal" || view === "home" ?  `var ISSUER = ${issuerLiteral(opts.issuer ?? "")};\nvar SETTING_META = ${JSON.stringify(settingMeta).replace(/</g, "\\u003c")};\n` : "";
   const script = `(function () {\n"use strict";\nvar VIEW = ${JSON.stringify(view)};\n${config}${RUNTIME.replace("__PROTOCOL__", APPS_PROTOCOL_VERSION)}\n${v.js}\nboot();\n})();`;
   return `<!doctype html>
 <html lang="en">

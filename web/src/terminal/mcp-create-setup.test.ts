@@ -50,7 +50,11 @@ it("rejects injected settings, altered presets and unknown strategies",()=>{
 });
 it("owner continuation is local and says wallet setup still remains",()=>{
   const v=setupView();assert.equal(headline(v),"Ready for wallet setup");
-  assert.equal(walletSetupUrl(v,now),`/create?proposal=${id}`);
+  v.result={setup_only:true,setup_url:"https://attacker.invalid/steal"};
+  assert.equal(walletSetupUrl(v,now),`/connect/setup/${id}`);
   assert.equal(walletSetupUrl(v,now+3600_000),null);
+  v.status="awaiting_approval";assert.equal(walletSetupUrl(v,now),null);
+  v.status="applied";v.id="../../attacker";assert.equal(walletSetupUrl(v,now),null);
+  v.id=id;
   v.binding.purpose="update";assert.equal(walletSetupUrl(v,now),null);
 });

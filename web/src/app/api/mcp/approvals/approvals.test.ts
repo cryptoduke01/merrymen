@@ -226,7 +226,7 @@ test("new Merryman approval reviews setup without writing settings, a grant or a
   const approved = await res.json() as { status: string; result: Record<string, unknown> };
   assert.equal(approved.status, "applied");
   assert.equal(approved.result.setup_only, true);
-  assert.equal(approved.result.setup_url, `/create?proposal=${id}`);
+  assert.equal(approved.result.setup_url, `/connect/setup/${id}`);
   assert.equal(settings.agentName, "Kept");
   assert.equal(settings.strategy, "steady-basket");
   assert.equal((d.raw.prepare("SELECT COUNT(*) AS n FROM grants").get() as { n: number }).n, 0);

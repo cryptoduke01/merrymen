@@ -46,6 +46,7 @@ const getMerrymanSetup = defineTool({
     phase: PHASE,
     summary: z.string(),
     connection: z.object({
+      id: z.string().describe("Opaque connection identifier for isolating view state; never a credential"),
       profile: z.string(), can_read_agents: z.boolean(), can_create_draft: z.boolean(),
       can_propose_settings: z.boolean(), shared_agent_count: z.number(), available_tools: z.array(z.string()),
     }),
@@ -124,7 +125,7 @@ const getMerrymanSetup = defineTool({
       };
       if (!selected.account) {
         phase = "permission_required";
-        summary = "This shared identity has no active stored trading permission. Wallet creation, settings approval and trading authorization are separate steps.";
+        summary = "Your account is connected. Choose a name and strategy here, then confirm your wallet and trading limits in a secure step. If you already created a wallet, resume it instead.";
         if (canDraft) step("draft_setup", "Prepare a first agent setup", "Prepare a setup if you have not created a wallet; resume the saved wallet otherwise. The owner reviews the setup and signs the trading permission in Merrymen.", null, false, "create_merryman");
         step("sign_permission", "Review wallet and permission", "The owner reviews the saved wallet and signs its trading permission in Merrymen. Retry a saved activation instead of creating a second wallet.", links.wallet);
       } else if (recovery?.tradingPaused) {
@@ -172,8 +173,9 @@ const getMerrymanSetup = defineTool({
     const availableTools = ["get_merryman_setup"];
     if (canRead) availableTools.push("list_agents");
     if (canDraft && !agents.some(a => a.account !== null)) availableTools.push("create_merryman");
+    if (canDraft) availableTools.push("get_proposal", "list_proposals", "cancel_proposal");
     if (selected) {
-      availableTools.push("get_agent_status", "get_agent_controls");
+      availableTools.push("get_agent_status", "get_agent_controls", "get_agent_settings");
       if (hasCapability(ctx.principal, "portfolio.read")) availableTools.push("get_portfolio", "get_trades");
       if (hasCapability(ctx.principal, "decisions.read")) availableTools.push("list_decisions", "get_refusals");
       if (hasCapability(ctx.principal, "notifications.manage")) availableTools.push("list_notification_channels", "list_subscriptions", "subscribe", "unsubscribe");
@@ -181,7 +183,7 @@ const getMerrymanSetup = defineTool({
     }
     const data = {
       phase, summary,
-      connection: { profile: ctx.principal.profile ?? "full", can_read_agents: canRead, can_create_draft: canDraft, can_propose_settings: canDraft && selected !== null, shared_agent_count: agents.length, available_tools: availableTools },
+      connection: { id: ctx.principal.connectionId, profile: ctx.principal.profile ?? "full", can_read_agents: canRead, can_create_draft: canDraft, can_propose_settings: canDraft && selected !== null, shared_agent_count: agents.length, available_tools: availableTools },
       agent: view, next_steps: next, links,
       runtime: { hosted: true as const, keep_chat_open: false as const, explanation: "Merrymen's hosted worker runs the agent after owner signing and activation. The assistant chat, browser and local terminal do not need to stay open. This assistant connection does not itself create trading authority or keep the worker alive." },
       controls: selected ? agentControls(ctx.principal) : [],

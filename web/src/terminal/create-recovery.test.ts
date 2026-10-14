@@ -17,6 +17,7 @@ let snapshots: Grant[];
 let trusted: boolean;
 let storageFailed: boolean;
 let mintCalls: number;
+let handoffOk: boolean;
 let signerAddress: string;
 let writes: string[];
 let settingsWrite: Record<string,unknown>|null;
@@ -51,7 +52,7 @@ before(async () => {
         loadGrant: () => stored,
         retryGrantHandoff: async () => { writes.push("/api/grants"); return { ok: true }; },
         isPrivyOwned: () => true,
-        createPrivyOwnedWallet: async () => { mintCalls++; return { local: grant, handoff: { ok: false, error: "temporary activation failure" } }; },
+        createPrivyOwnedWallet: async () => { mintCalls++; return { local: grant, handoff: { ok: handoffOk, ...(handoffOk?{}:{error: "temporary activation failure"}) } }; },
       };
     }
     return load.call(this, id, parent, isMain);
@@ -61,7 +62,7 @@ before(async () => {
 });
 
 beforeEach(() => {
-  ui = testDom(); stored = null; snapshots = []; trusted = true; storageFailed = false; mintCalls = 0; signerAddress = tenant; writes = [];
+  ui = testDom(); stored = null; snapshots = []; trusted = true; storageFailed = false; mintCalls = 0; handoffOk=false; signerAddress = tenant; writes = [];
   settingsWrite=null;setupResponse=null;setupReads=0;
   current = { kind: "ready", account };
   globalThis.fetch = async (input, init) => {
@@ -201,5 +202,45 @@ it("a login change invalidates a previously loaded assistant setup",async()=>{
   const changed={...account,session:{...account.session,address:other}};
   await ui.render(React.createElement(CreateAgent,{account:changed,onRefresh(){},onSignedIn(){},onBack(){},onDone(){},onFund(){}}));
   assert.match(ui.container.textContent!,/not approved for your current account/);
+  assert.equal(mintCalls,0);assert.deepEqual(writes,[]);
+});
+
+it("the compact handoff carries the approved setup straight to explicit signing and returns to chat",async()=>{
+  ui.dom.window.history.replaceState(null,"",`/connect/setup/${proposalId}?proposal=untrusted&name=Injected`);
+  setupResponse=setup();handoffOk=true;
+  let returned=0;let backed=0;
+  await ui.render(React.createElement(CreateAgent,{account,assistantProposalId:proposalId,onRefresh(){},onSignedIn(){},onBack(){backed++;},onDone(){returned++;},onFund(){}}));
+  assert.match(ui.container.textContent!,/Little Robin/);
+  assert.match(ui.container.textContent!,/Weekend gap/);
+  assert.match(ui.container.textContent!,/Confirm your limits/);
+  assert.equal(ui.container.querySelector("#agent-name"),null,"the owner does not repeat chat's name and strategy choices");
+  assert.equal(ui.container.querySelector<HTMLInputElement>('input[name="mode"]')?.checked,true);
+  assert.equal(mintCalls,0);assert.deepEqual(writes,[]);
+  await act(async()=>{ui.container.querySelector<HTMLButtonElement>('button[aria-label="Back to approved setup"]')!.click();});
+  assert.equal(backed,1);
+  assert.equal(ui.container.querySelector("#agent-name"),null,"Back returns to review instead of opening a new setup wizard");
+  await ui.click("Confirm and sign");
+  assert.equal(setupReads,2);assert.equal(mintCalls,1);
+  assert.equal(settingsWrite?.agentName,"Little Robin");assert.equal(settingsWrite?.strategy,"weekend-gap");
+  assert.equal(settingsWrite?.liveTradingEnabled,false);
+  assert.match(ui.container.textContent!,/Wallet connected/);
+  assert.match(ui.container.textContent!,/refresh Merryman to check activation/);
+  await ui.click("Done — return to chat");assert.equal(returned,1);
+});
+
+it("compact handoff still blocks a revoked setup at the moment of signing",async()=>{
+  setupResponse=setup();
+  await ui.render(React.createElement(CreateAgent,{account,assistantProposalId:proposalId,onRefresh(){},onSignedIn(){},onBack(){},onDone(){},onFund(){}}));
+  setupResponse=Response.json({error:"forbidden"},{status:403});
+  await ui.click("Confirm and sign");
+  assert.equal(mintCalls,0);assert.deepEqual(writes,[]);
+  assert.match(ui.container.textContent!,/no longer available/);
+});
+
+it("an unavailable compact setup sends the owner back to chat instead of restarting the full wizard",async()=>{
+  setupResponse=Response.json({error:"expired"},{status:410});
+  await ui.render(React.createElement(CreateAgent,{account,assistantProposalId:proposalId,onRefresh(){},onSignedIn(){},onBack(){},onDone(){},onFund(){}}));
+  assert.match(ui.container.textContent!,/Return to the same chat/);
+  assert.equal(ui.container.querySelector('a[href="/create"]'),null);
   assert.equal(mintCalls,0);assert.deepEqual(writes,[]);
 });

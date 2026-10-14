@@ -198,14 +198,14 @@ export function ConsentClient() {
 
           {!loading && view && !view.signedIn && <>
             <span className="connect-step-label">01 · SIGN IN</span>
-            <h2>Sign in to Merrymen.</h2>
-            <p>{appName} wants to connect to your Merrymen. Sign in first; you will review exactly what it could do before anything is shared.</p>
+            <h2>Sign in or create your account.</h2>
+            <p>Connect your Merrymen account to {appName}. You’ll choose its access here, then return to your chat. {setupScope?"Allow setup suggestions below if you want your assistant to help name your agent and choose its strategy.":"Your assistant can use only the access you choose."}</p>
             <SignIn onDone={() => void load()} />
           </>}
 
           {!loading && view && view.signedIn && !done && <>
             <span className="connect-step-label">02 · ALLOW ACCESS</span>
-            <h2>Allow {appName} to use your Merryman?</h2>
+            <h2>Connect {appName} to Merrymen?</h2>
             {view.client.registration === "dynamic" && <div className="connect-boundary mcp-warn"><AlertTriangle size={18} aria-hidden /><p>Merrymen cannot confirm who made this app. Only continue if you just started this connection yourself and recognise <b>{view.client.redirectHost}</b>.</p></div>}
 
             {/* One agent (every owner, today) is a card with a Share box, ticked

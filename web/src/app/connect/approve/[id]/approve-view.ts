@@ -148,7 +148,7 @@ export function headline(v: Pick<View, "status" | "result">): string {
 /** Never navigate to a URL supplied in an assistant's proposal or result. */
 export function walletSetupUrl(v: Pick<View, "id" | "kind" | "status" | "binding" | "result" | "expires_at">, nowMs=Date.now()): string | null {
   return v.kind === "agent_draft" && v.binding.purpose === "create" && v.status === "applied" && v.result?.setup_only === true && /^prp_[0-9a-f]{32}$/.test(v.id) && v.expires_at * 1000 > nowMs
-    ? `/create?proposal=${v.id}` : null;
+    ? `/connect/setup/${v.id}` : null;
 }
 
 /**

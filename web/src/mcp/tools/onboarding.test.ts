@@ -26,7 +26,7 @@ afterEach(() => {
 
 type Setup = {
   phase: string; summary: string;
-  connection: { can_read_agents: boolean; can_create_draft: boolean; can_propose_settings: boolean; shared_agent_count: number; available_tools: string[] };
+  connection: { id: string; can_read_agents: boolean; can_create_draft: boolean; can_propose_settings: boolean; shared_agent_count: number; available_tools: string[] };
   agent: null | { id: string; account: string | null; mode: string; worker_fresh: boolean | null; energy: null | { fresh: boolean; entry_allowance_exhausted: boolean | null } };
   next_steps: Array<{ action: string; label: string; detail: string; url: string | null; tool: string | null }>;
   links: Record<string, string>;
@@ -62,14 +62,15 @@ async function setup(o: {
 }
 
 test("a new unshared connection receives usable setup links without claiming no account exists", async () => {
-  const { read } = await setup({ scopes: ["market:read", "drafts:write"], shared: [] });
+  const { read, principal } = await setup({ scopes: ["market:read", "drafts:write"], shared: [] });
   const r = await read();
   assert.equal(r.phase, "no_shared_agent");
   assert.equal(r.agent, null);
   assert.match(r.summary, /does not mean the owner has no agent/);
   assert.equal(r.connection.can_create_draft, true);
+  assert.equal(r.connection.id, principal.connectionId, "a view can separate account connections even before an agent is shared");
   assert.equal(r.connection.can_propose_settings, false);
-  assert.deepEqual(r.connection.available_tools, ["get_merryman_setup", "create_merryman"]);
+  assert.deepEqual(r.connection.available_tools, ["get_merryman_setup", "create_merryman", "get_proposal", "list_proposals", "cancel_proposal"]);
   assert.equal(r.next_steps.find(s => s.action === "draft_setup")?.tool, "create_merryman");
   assert.equal(r.links.funding, "https://app.test/deposit");
   assert.ok(Object.values(r.links).every(url => new URL(url).origin === "https://app.test"));
@@ -310,8 +311,8 @@ test("home actions expose only real tools covered by the selected agent's connec
   const { seed, read } = await setup({ scopes: ["market:read", "agents:read", "portfolio:read", "decisions:read", "notifications:manage", "drafts:write"] });
   await seed();
   const r = await read();
-  assert.deepEqual(r.connection.available_tools, ["get_merryman_setup", "list_agents", "get_agent_status", "get_agent_controls",
+  assert.deepEqual(r.connection.available_tools, ["get_merryman_setup", "list_agents", "get_proposal", "list_proposals", "cancel_proposal", "get_agent_status", "get_agent_controls", "get_agent_settings",
     "get_portfolio", "get_trades", "list_decisions", "get_refusals", "list_notification_channels", "list_subscriptions",
     "subscribe", "unsubscribe", "create_agent_draft", "propose_settings_change"]);
-  assert.ok(!r.connection.available_tools.includes("get_agent_settings"));
+  assert.ok(r.connection.available_tools.includes("get_agent_settings"));
 });
