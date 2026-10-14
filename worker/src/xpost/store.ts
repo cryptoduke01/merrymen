@@ -1279,6 +1279,25 @@ export async function postsOfXUser(db: Db, xUserId: string, sinceMs: number, lim
 }
 
 /**
+ * ONE OWNER'S RECAP ROWS SINCE `sinceMs`, any status (planner.ts PlanInput
+ * .recaps): what each covered (its `coin`, recapCoverOf) and when it went
+ * out. Read apart from postsOfXUser, whose few hundred newest rows a day of
+ * answers can fill and push a recap out of (review of the recap branch,
+ * 2026-10-14). At most a hundred: one every three hours fits many times over.
+ */
+export async function recapPostsOf(db: Db, tenant: string, sinceMs: number): Promise<XPost[]> {
+  const rows = (await db
+    .prepare(
+      `SELECT ${POST_COLUMNS} FROM xpost_posts
+        WHERE tenant = ? AND kind = 'recap' AND created_at_ms >= ?
+        ORDER BY created_at_ms DESC, id DESC
+        LIMIT 100`,
+    )
+    .all(tenantKey(tenant), int(sinceMs))) as PostRow[];
+  return rows.map(postOf);
+}
+
+/**
  * THE POSTS A CONVERSATION ON THIS X ACCOUNT MAY BE ROOTED AT: the tweet ids
  * of its own posted top-level posts (an intro, a casual post, a buy, a sale
  * or a recap; never a reply or an answer, which are themselves replies), newest

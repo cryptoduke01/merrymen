@@ -18,51 +18,49 @@
  *
  * Pure: no I/O, no model, no clock.
  */
-import { CASUAL_PAPER } from "./casual";
-import { cleanTicker, TRADED_MAX, type FiguresSpec } from "./figures";
-import type { PlanCall, PlanIntent, PlanSell } from "./planner";
+import { CASUAL_PAPER, latinLines } from "./casual";
+import { cleanTicker, renderFiguresLine, TRADED_MAX, type FiguresSection, type FiguresSpec } from "./figures";
+import { recapCoverOf, sellKey, type PlanCall, type PlanIntent, type PlanSell } from "./planner";
 
 /**
- * EIGHT WAYS TO SAY "A RECAP FOLLOWS", none of them sharing much with another,
- * so two recaps in a day are never each other's repeat to the gate. No coin,
- * no result word (green, profit, loss), no time of day, no pointing word the
- * gate reads as a call.
+ * SIXTY-FOUR WAYS TO SAY "A RECAP FOLLOWS" (review of the recap branch,
+ * 2026-10-14: with eight fixed lines, the ninth recap found every line a
+ * repeat of one of the last eight to the gate, and recaps stopped). Three
+ * slots of eight, joined by a Latin square (casual.ts latinLines), so any two
+ * lines share at most one part, and no word is in two parts. No coin, no
+ * result word (green, profit, loss), no time of day, no pointing word the
+ * gate reads as a call, no source word (on-chain) that marks a post as
+ * research.
  */
-export const RECAP_LINES: readonly string[] = Object.freeze([
-  "busy stretch on the desk, here's the rundown",
-  "lot of trading in the last few hours, quick recap",
-  "been an active session, the tape from it",
-  "quick recap of the latest run of trades",
-  "recap time, how the session shaped up",
-  "a flurry of trades lately, the summary",
-  "the desk kept moving, recap of the run",
-  "wrapping up a busy session, the numbers",
-]);
-
-/** The hash a recap's lines start from: its key. */
-function seedOf(seed: string): number {
-  let h = 0;
-  for (const ch of String(seed ?? "")) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
-  return h;
-}
+export const RECAP_SLOTS: readonly [readonly string[], readonly string[], readonly string[]] = Object.freeze([
+  Object.freeze(["busy stretch on the desk", "lots of trading lately", "been an active session", "the book kept moving",
+    "a flurry of trades", "plenty happening on my side", "quite the run of activity", "the pace picked up"]),
+  Object.freeze(["quick recap", "the rundown", "the summary", "here's the tape", "the tally", "the scorecard", "a look back", "the short version"]),
+  Object.freeze(["for the record", "nothing more to it", "that's the lot", "straight from the fills", "logged and done", "as it landed", "no spin", "numbers attached"]),
+]) as unknown as readonly [readonly string[], readonly string[], readonly string[]];
 
 /**
  * EVERY RECAP LINE, this recap's own first (by its key), each with a paper
- * clause when the agent trades on paper (the gate's rule for a paper reply
- * is no rule for a recap, but a paper recap that never said paper would read
- * as real money all the same).
+ * clause when the agent trades on paper (a paper recap that never said paper
+ * would read as real money), picked by its first part.
  */
 export function recapLines(seed: string, o: { paper?: boolean } = {}): string[] {
-  const h = seedOf(seed);
-  return RECAP_LINES.map((_, i) => {
-    const k = (h + i) % RECAP_LINES.length;
-    return `${RECAP_LINES[k]!}${o.paper === true ? `. ${CASUAL_PAPER[k % CASUAL_PAPER.length]!}` : ""}.`;
-  });
+  const paperOf = new Map(RECAP_SLOTS[0].map((part, i) => [part, CASUAL_PAPER[i % CASUAL_PAPER.length]!] as const));
+  return latinLines(RECAP_SLOTS, seed, (a, b, c) => `${a}. ${b}, ${c}${o.paper === true ? `. ${paperOf.get(a)!}` : ""}.`);
 }
 
 /** A trade's ticker as the figures line may show it: its symbol, else its name, when either is one. */
 function tickerOf(c: Pick<PlanCall, "symbol" | "name">): string | null {
   return cleanTicker(c.symbol) ?? cleanTicker(c.name);
+}
+
+/** A recap's counts, as the figures line's recap section: buys, sales, and their measured outcomes. */
+function recapSection(buys: number, sells: number, results: readonly PlanSell[]): Extract<FiguresSection, { kind: "recap" }> {
+  const measured = results.filter((s) => s.outcome === "profit" || s.outcome === "loss");
+  const gains = measured.filter((s) => s.outcome === "profit" && typeof s.gainPct === "number" && Number.isFinite(s.gainPct)).map((s) => s.gainPct as number);
+  return { kind: "recap", buys, sells,
+    ...(measured.length ? { wins: measured.filter((s) => s.outcome === "profit").length, losses: measured.filter((s) => s.outcome === "loss").length } : {}),
+    ...(gains.length ? { bestPct: Math.max(...gains) } : {}) };
 }
 
 /**
@@ -72,13 +70,28 @@ function tickerOf(c: Pick<PlanCall, "symbol" | "name">): string | null {
  * is a count of its own trades or a gain the sale's receipts measured.
  */
 export function recapFigures(r: Pick<Extract<PlanIntent, { kind: "recap" }>, "buys" | "sells" | "results">): FiguresSpec {
-  const measured: PlanSell[] = Array.isArray(r.results) ? r.results.filter((s) => s.outcome === "profit" || s.outcome === "loss") : [];
-  const gains = measured.filter((s) => s.outcome === "profit" && typeof s.gainPct === "number" && Number.isFinite(s.gainPct)).map((s) => s.gainPct as number);
   const coins = [...(r.buys ?? []), ...(r.sells ?? [])].sort((a, b) => b.atSec - a.atSec).map(tickerOf).filter((t): t is string => t !== null);
-  return [
-    { kind: "recap", buys: (r.buys ?? []).length, sells: (r.sells ?? []).length,
-      ...(measured.length ? { wins: measured.filter((s) => s.outcome === "profit").length, losses: measured.filter((s) => s.outcome === "loss").length } : {}),
-      ...(gains.length ? { bestPct: Math.max(...gains) } : {}) },
-    { kind: "traded", symbols: [...new Set(coins)].slice(0, TRADED_MAX) },
-  ];
+  return [recapSection((r.buys ?? []).length, (r.sells ?? []).length, Array.isArray(r.results) ? r.results : []),
+    { kind: "traded", symbols: [...new Set(coins)].slice(0, TRADED_MAX) }];
+}
+
+/**
+ * DOES A RECAP STILL SAY WHAT ITS RECEIPTS SAY, AT SEND TIME? (review of the
+ * recap branch, 2026-10-14: a sale post's evidence is replayed before it
+ * goes out, and a recap's was not.) Its covered keys (its row's `coin`) are
+ * read again: every sale it counted must still be one of the receipt-backed
+ * sales (`sales`, read fresh), and the counts, outcomes and best gain those
+ * give now must be the ones on the post, whole or with the best gain the
+ * line may have dropped to fit. Any doubt: false, and the recap is withheld.
+ */
+export function recapStillHolds(post: { tenant: string; body: string; coin: string | null }, sales: readonly PlanSell[]): boolean {
+  const keys = recapCoverOf(post.coin);
+  if (!keys.length || typeof post.body !== "string") return false;
+  const buys = keys.filter((k) => k.startsWith("buy:")).length;
+  const sellKeys = new Set(keys.filter((k) => k.startsWith("sell:")));
+  const matched = sales.filter((s) => sellKeys.has(sellKey(post.tenant, s.operationKey)));
+  if (matched.length !== sellKeys.size) return false;
+  const full = recapSection(buys, matched.length, matched);
+  const variants = [full, { ...full, bestPct: null }].map((s) => renderFiguresLine([s])).filter((l): l is string => l !== null).map((l) => l.slice(0, -1));
+  return variants.some((v) => post.body.includes(` ${v};`) || post.body.endsWith(` ${v}.`));
 }

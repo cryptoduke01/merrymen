@@ -15,17 +15,21 @@ import { makeXPoster, xpostEnv } from "./orchestrator-xpost";
 import type { FetchLike } from "./xpost/client";
 import { admitXPost } from "./xpost/gate";
 import { recapLines } from "./xpost/recap";
+import { buyKey, recapCoverOf, sellKey, type PlanSell } from "./xpost/planner";
 import * as store from "./xpost/store";
 
 const MIN = 60_000, HOUR = 60 * MIN, DAY = 24 * HOUR;
 const TENANT = `0x${"ab".repeat(20)}`;
 
-function calls(nowMs: number, hoursAgo: number[], paper = false): CallFact[] {
-  return hoursAgo.map((h, i) => ({ decisionId: `fill-${i}`, side: "buy", symbol: ["CAPITOL", "WISP", "INDEX"][i % 3]!, name: null, token: null,
+function calls(nowMs: number, hoursAgo: number[], paper = false, symbols = ["CAPITOL", "WISP", "INDEX"]): CallFact[] {
+  return hoursAgo.map((h, i) => ({ decisionId: `fill-${i}`, side: "buy", symbol: symbols[i % symbols.length]!, name: null, token: null,
     paper, atSec: (nowMs - h * HOUR) / 1000, bands: ["curve early"], ownWords: null }));
 }
+const sale = (nowMs: number, hoursAgo: number, n: number, outcome: PlanSell["outcome"], gainPct: number | null = null): PlanSell =>
+  ({ decisionId: `sale-${n}`, side: "sell", symbol: "WISP", name: null, paper: false, atSec: (nowMs - hoursAgo * HOUR) / 1000,
+    operationKey: `0x${String(n).padStart(64, "e")}`, token: `0x${"c".repeat(40)}`, outcome, gainPct });
 
-async function world(t: TestContext, o: { now: number; calls: CallFact[]; tz?: string | null; draft?: string }) {
+async function world(t: TestContext, o: { now: number; calls: CallFact[]; tz?: string | null; draft?: string; sales?: () => PlanSell[]; zoneFails?: () => boolean; name?: string }) {
   const raw = new DatabaseSync(":memory:");
   t.after(() => raw.close());
   const db = wrapSqlite(raw), dek = randomBytes(32);
@@ -42,14 +46,19 @@ async function world(t: TestContext, o: { now: number; calls: CallFact[]; tz?: s
     sends.push(JSON.parse(init.body ?? "{}"));
     return { status: 201, headers: { get: () => null }, text: async () => JSON.stringify({ data: { id: `1000000000000007${sends.length}0` } }) };
   };
-  const facts: AgentFacts = { tenant: TENANT, agentId: TENANT, slug: null, name: "Alan Al Dale", mode: "live", ageDays: 20, strategy: "trencher", traits: [], calls: o.calls };
+  const facts: AgentFacts = { tenant: TENANT, agentId: TENANT, slug: null, name: o.name ?? "Alan Al Dale", mode: "live", ageDays: 20, strategy: "trencher", traits: [], calls: o.calls };
   const poster = makeXPoster({
     app: { clientId: "client", clientSecret: "secret", redirectUri: "https://app.test/connect/x" }, dek,
     creds: { provider: "groq", transport: "openai", model: "test", apiKey: "k", baseUrl: "https://model.test/v1", vision: false },
     knobs: { ...xpostEnv({ MERRYMEN_XPOST_ACTIVE_TENANTS: TENANT }), repliesApproved: true },
-    deps: { dialect: "sqlite", fetch, monotonic: () => 0, member: async () => ({ tz: o.tz ?? null }), facts: async () => new Map([[TENANT, facts]]),
+    deps: { dialect: "sqlite", fetch, monotonic: () => 0, facts: async () => new Map([[TENANT, facts]]),
+      member: async () => { if (o.zoneFails?.()) throw new Error("member read failed"); return { tz: o.tz ?? null }; },
       // The model passes on everything unless a draft is given: a recap needs none.
-      llm: async () => o.draft ?? "PASS" },
+      llm: async () => o.draft ?? "PASS",
+      ...(o.sales ? {
+        socialProfile: async () => ({ xTradeResults: true, currentAgent: { address: TENANT, chainId: 4663 } }),
+        saleResults: async () => o.sales!(),
+      } : {}) },
   });
   const step = (now: number) => poster.step(db, [{ tenant: TENANT, agentId: TENANT }], new Map(), now);
   const rows = async () => (await store.postsOf(db, TENANT, 0)).filter((p) => p.kind !== "intro");
@@ -64,6 +73,8 @@ test("a burst of buys is said in one recap, with code's figures, though the mode
   assert.ok(recap, "a recap is planned");
   assert.equal(recap!.status, "scheduled", recap!.reason ?? "");
   assert.match(recap!.body, /\. recap: 8 buys; traded (?:[A-Z]+(?:, )?){3}\.$/);
+  // It records exactly the trades it said (review, 2026-10-14).
+  assert.deepEqual(recapCoverOf(recap!.coin).sort(), Array.from({ length: 8 }, (_, i) => buyKey(`fill-${i}`)).sort());
   // It goes out when due, as it was written.
   await w.step(recap!.dueAtMs + MIN);
   assert.ok(w.sends.some((s) => s.text === recap!.body), "and is sent");
@@ -92,4 +103,45 @@ describe("every recap line clears the real gate", () => {
       }
     });
   }
+});
+
+test("a recap's sale results are read again at send time: a changed outcome withholds it (review, 2026-10-14)", async (t) => {
+  const now = Date.UTC(2026, 9, 13, 9);
+  let sales = [sale(now, 2.5, 1, "profit", 12.4), sale(now, 2, 2, "loss"), sale(now, 1.5, 3, "profit", 3)];
+  const w = await world(t, { now, calls: calls(now, [3, 2.8, 2.6]), sales: () => sales });
+  await w.step(now);
+  const recap = (await w.rows()).find((p) => p.kind === "recap");
+  assert.ok(recap, "a recap is planned");
+  assert.match(recap!.body, /recap: 3 buys, 3 sells \(2 green, 1 red\), best \+12\.4%/);
+  assert.ok(recapCoverOf(recap!.coin).includes(sellKey(TENANT, sales[0]!.operationKey)));
+  // The best sale's evidence changes before the recap is due: it is withheld, never sent saying what is no longer true.
+  sales = [{ ...sales[0]!, gainPct: 4 }, sales[1]!, sales[2]!];
+  await w.step(recap!.dueAtMs + MIN);
+  assert.ok(!w.sends.some((s) => s.text === recap!.body), "not sent");
+  const after = (await w.rows()).find((p) => p.id === recap!.id)!;
+  assert.notEqual(after.status, "posted");
+});
+
+test("a night trade post still waits when the owner's zone cannot be read (review, 2026-10-14)", async (t) => {
+  const now = Date.UTC(2026, 9, 13, 3);
+  let fails = false;
+  const w = await world(t, { now, calls: calls(now, [0.2]), tz: "UTC", draft: "grabbed some capitol, the curve looked early", zoneFails: () => fails });
+  await w.step(now);
+  const [buy] = (await w.rows()).filter((p) => p.kind === "buy");
+  assert.equal(buy?.status, "scheduled", "planned in the night while the zone read");
+  // At send time the zone cannot be read: the night exception reads the owner's day, so it holds.
+  fails = true;
+  await w.step(buy!.dueAtMs + MIN);
+  assert.equal(w.sends.length, 0);
+});
+
+test("a coin the ticker screens refuse costs the recap its coins, never the recap (review, 2026-10-14)", async (t) => {
+  const now = Date.UTC(2026, 9, 13, 9);
+  // "STOAT" clears the ticker cleaner but is this agent's own name, which the line never shows. The rest of the recap still goes.
+  const w = await world(t, { now, calls: calls(now, [3, 2.8, 2.6, 2.4, 2.2, 2], false, ["STOAT", "WISP"]), name: "Pine Stoat" });
+  await w.step(now);
+  const recap = (await w.rows()).find((p) => p.kind === "recap");
+  assert.equal(recap?.status, "scheduled", recap?.reason ?? "no recap");
+  assert.match(recap!.body, /recap: 6 buys\.$/);
+  assert.doesNotMatch(recap!.body, /STOAT/);
 });

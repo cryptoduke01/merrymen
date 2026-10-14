@@ -485,8 +485,10 @@ function shownOf(spec: FiguresSpec): Shown[] {
     } else if (s.kind === "recap") {
       const count = (v: unknown): number => (typeof v === "number" && Number.isInteger(v) && v >= 0 && v <= RECAP_COUNT_MAX ? v : 0);
       const buys = count(s.buys), sells = count(s.sells), w = count(s.wins), l = count(s.losses);
-      // A win and a loss only of sales it counted; the best gain only when it is one.
-      const wl = sells > 0 && w + l > 0 && w + l <= sells ? { w, l } : null;
+      // GREEN AND RED ONLY WHEN EVERY SALE COUNTED HAS A MEASURED OUTCOME
+      // (review of the recap branch, 2026-10-14): "3 sells (1 green, 0 red)"
+      // beside two sales nobody measured reads as none of them lost.
+      const wl = sells > 0 && w + l === sells ? { w, l } : null;
       const best = typeof s.bestPct === "number" && s.bestPct > 0 && wl && wl.w > 0 ? signedPercent(s.bestPct) : null;
       if (buys + sells > 0) out.push({ kind: "recap", buys, sells, wl, best });
     } else if (s.kind === "traded") {
@@ -593,12 +595,15 @@ const GIT = String.raw`github: last push (?:today|${SPAN} ago)(?:, (?:(?:0|[1-9]
 const HOLDERS = String.raw`top10 hold ${SHARE}(?:, creator ${SHARE})?`;
 // A recap's counts (2026-10-14): buys, then sales with their green and red, then the best gain; at least one side.
 const COUNT = String.raw`[1-9]\d{0,2}`, COUNT0 = String.raw`(?:0|[1-9]\d{0,2})`;
-// The best gain only after sales whose outcomes were measured: never beside buys alone.
+// The best gain only after measured sales with at least one green, never
+// beside buys alone or a red-only run; and "traded" only right after a recap,
+// never alone, so an ordinary sentence ending "traded ETH." is never read as
+// a figures line (review of the recap branch, 2026-10-14).
 const R_BUYS = String.raw`${COUNT} buys?`;
-const R_SELLS = String.raw`${COUNT} sells?(?: \(${COUNT0} green, ${COUNT0} red\)(?:, best ${PCT})?)?`;
-const RECAP = String.raw`recap: (?:${R_BUYS}(?:, ${R_SELLS})?|${R_SELLS})`;
+const R_SELLS = String.raw`${COUNT} sells?(?: \((?:${COUNT} green, ${COUNT0} red\)(?:, best ${PCT})?|0 green, ${COUNT} red\)))?`;
 const TRADED = String.raw`traded ${T}(?:, ${T}){0,${TRADED_MAX - 1}}`;
-const SECTION = `(?:${MAJOR}|${MAJORS}|${POOLS}|${CROWD}|${TRENDING}|${FLOW}|${GIT}|${HOLDERS}|${RECAP}|${TRADED})`;
+const RECAP = String.raw`recap: (?:${R_BUYS}(?:, ${R_SELLS})?|${R_SELLS})(?:; ${TRADED})?`;
+const SECTION = `(?:${MAJOR}|${MAJORS}|${POOLS}|${CROWD}|${TRENDING}|${FLOW}|${GIT}|${HOLDERS}|${RECAP})`;
 /** The line, whole: one to five sections joined by "; ", ending with a full stop. Nothing else. */
 const LINE = String.raw`${SECTION}(?:; ${SECTION}){0,4}\.`;
 export const FIGURES_LINE = new RegExp(`^${LINE}$`);

@@ -1563,24 +1563,38 @@ cadence is as before.
 
 - **Through the night** (`PlanCadence.tradesAtNight`): buys, sales and
   recaps are planned and sent at any hour. The hello and casual posts still
-  wait for morning.
+  wait for morning, and an owner whose zone cannot be read holds every post
+  but an answer, as before.
 - **Six hours fresh** (`ACTIVE_TRADE_FRESH_MS`): a trade is posted about
-  while six hours old (two for everyone else), and a post may go out up to
-  ten hours after its fill (`ACTIVE_TRADE_STALE_MS`).
+  while six hours old (two for everyone else); a drafted post goes stale four
+  hours after its draft (`ACTIVE_TRADE_SEND_STALE_MS`), so nothing goes out
+  more than ten hours after its fill.
 - **One recap for a burst** (planner.ts `planRecap`, xpost/recap.ts): a
   single trade post the gap would push more than two hours out is left for
-  a recap instead. A recap is planned when at least three trades since the
-  last one were not posted one by one, the burst has paused for twenty
-  minutes (or eight are waiting), and no recap went out in three hours. It
-  counts every trade since the last recap (at most twelve hours back), of
-  the money it trades with now. Its words are code's, never a model's
-  ("busy stretch on the desk, here's the rundown"), so a recap goes out even
-  when the model passes; its figures line says the rest:
+  a recap instead. A recap is planned when at least three trades no recap
+  covered were not posted one by one, the burst has paused for twenty
+  minutes (or eight are waiting), and no recap of this owner went out in
+  three hours. It says every trade no earlier recap covered, at most eight
+  hours back, of the money it trades with now. Its words are code's, never
+  a model's (sixty-four lines, three slots of eight), so a recap goes out
+  even when the model passes or the model allowance is spent; its figures
+  line says the rest:
   `recap: 8 buys, 3 sells (2 green, 1 red), best +12.4%; traded CAPITOL, WISP, INDEX.`
-  Wins, losses and the best gain come only from receipt-backed sales
-  (`xTradeResults`); a gain is shown only beside a sale that measured one.
-  A trade a live recap covers is never posted one by one afterwards (the
-  recap's key carries its newest trade: `recap:<tenant>:<sec>`).
+- **What a recap says, and only that.** Sales are counted only from the
+  receipt-backed results, and only with the owner's opt-in to sale posts
+  (`xTradeResults`). Green and red only when every sale counted was
+  measured; the best gain only beside a measured profit. A coin the ticker
+  screens refuse costs the line its coins, never the recap. Before a recap
+  that counts sales goes out, its sales are read again: the opt-in must still
+  be on, the agent the same, and the counts, outcomes and best gain what the
+  receipts say now (`recapStillHolds`); otherwise it is withheld.
+- **Covered by key, never said twice.** A recap row records the single-post
+  keys of every trade it said (its `coin` column, `recapCoverOf`), written
+  in the same insert. A trade a recap covered is never posted one by one or
+  recapped again, including when the recap's send ended uncertain,
+  interrupted or in our fault (it may be on X). Recaps are read by their own
+  query (store.ts `recapPostsOf`), never lost from the capped history, and
+  only an owner's own recaps cover that owner's trades.
 - A recap is a trade post: it shares the day's trade allowance, is
   cancelled with buy posts when the owner turns those off, shows in Coming
   up as "Trade recap", and a reply under it is a reply under its trades.
@@ -1724,6 +1738,14 @@ them directly on the shared database:
 `UPDATE xpost_posts SET status = 'cancelled', reason = 'rollback' WHERE kind = 'answer' AND status = 'scheduled';`
 Then deploy the older build. An answer this release could not send within an
 hour of drafting it is already skipped as stale, so the queue is short.
+
+**And past the recap release (2026-10-14).** An older orchestrator reads a
+`recap` row as a casual post: a queued recap would go out as a casual post
+whatever the owner's buy-post choice, and the trades it covered could be
+posted one by one again. Cancel the waiting recaps before deploying an older
+build:
+`UPDATE xpost_posts SET status = 'cancelled', reason = 'rollback' WHERE kind = 'recap' AND status = 'scheduled';`
+A recap already posted stays on X; the older build does not read it as cover.
 
 ## What an owner should know (it is in the warning)
 

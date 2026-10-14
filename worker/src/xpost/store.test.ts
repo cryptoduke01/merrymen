@@ -41,6 +41,7 @@ import {
   ANSWER_PLAIN_THREAD,
   ownerSendTimesSince,
   tradeSendTimesSince,
+  recapPostsOf,
   postingAccounts,
   postsOf,
   postsOfXUser,
@@ -1110,4 +1111,30 @@ test("trade allowance history counts all owners of an X account without reading 
   assert.deepEqual((await tradeSendTimesSince(db, "111", 1000)).sort(), [2001, 2002, 2003, 2004, 2005, 2006]);
   assert.deepEqual(await tradeSendTimesSince(db, "222", 1000), [2010]);
   assert.deepEqual(await tradeSendTimesSince(db, "333", 1000), []);
+});
+
+test("a recap row (2026-10-14): read back as a recap with its cover, a thread root and a trade post, a trade send, and cancelled with buy posts", async (t) => {
+  const { db, raw } = await open(t);
+  await upsertAccount(db, DEK, { tenant: OWNER_A, xUserId: "111", username: "r", tokens: TOKENS, nowMs: 1 });
+  const covers = "buy:d1 buy:d2 buy:d3";
+  const sent = (await schedulePost(db, post({ kind: "recap", dedupeKey: `recap:${OWNER_A.toLowerCase()}:100`, coin: covers, body: "the tally, no spin. recap: 3 buys." })))!;
+  const waiting = (await schedulePost(db, post({ kind: "recap", dedupeKey: `recap:${OWNER_A.toLowerCase()}:200`, coin: "buy:d4 buy:d5 buy:d6", body: "the rundown, no spin. recap: 3 buys." })))!;
+  const theirs = (await schedulePost(db, post({ tenant: OWNER_B, kind: "recap", dedupeKey: `recap:${OWNER_B}:100`, coin: "buy:x1 buy:x2 buy:x3", body: "a look back. recap: 3 buys." })))!;
+  // Read back whole, by its own query, this owner's only.
+  const rows = await recapPostsOf(db, OWNER_A, 0);
+  assert.deepEqual(rows.map((r) => [r.kind, r.coin]).sort(), [["recap", covers], ["recap", "buy:d4 buy:d5 buy:d6"]].sort());
+  assert.ok((await postsOfXUser(db, "111", 0)).every((p) => p.kind === "recap"), "never read back as a casual post");
+  // Posted: a root of its own threads, with the trade posts, and a trade send.
+  assert.ok(await claimPost(db, sent, 1_500));
+  await markPosted(db, sent, "777", 1_600);
+  const threads = await ownThreadTweets(db, "111");
+  assert.ok(threads.roots.has("777"));
+  assert.ok(threads.trade.has("777"));
+  assert.ok(!threads.plain.has("777"));
+  assert.deepEqual(await tradeSendTimesSince(db, "111", 0), [1_600]);
+  // Buy posts off: the waiting recap goes with them, another owner's stays.
+  await setPrefs(db, OWNER_A, { buys: false }, 2_000);
+  const status = (id: number) => raw.prepare("SELECT status, reason FROM xpost_posts WHERE id = ?").get(id) as { status: string; reason: string | null };
+  assert.deepEqual({ ...status(waiting) }, { status: "cancelled", reason: "kind-off" });
+  assert.equal(status(theirs).status, "scheduled");
 });
