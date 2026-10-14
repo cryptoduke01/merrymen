@@ -139,8 +139,9 @@ against.
    `MERRYMEN_XPOST_SHARE_HOUSE_KEY=1`, and a Groq key running trading's own
    model gets a boot WARNING (Groq rations per organization and model). The
    model is held to a durable daily call budget; once it is spent, only intros
-   are planned until the UTC day turns. Without a model, only the
-   intro is posted, from a small template pool, and nothing else. A pool is
+   and an active owner's recaps (code's own words, no model) are planned until
+   the UTC day turns. Without a model, only the intro is posted, from a small
+   template pool, and an active owner's recaps, and nothing else. A pool is
    finite: on a large fleet the gate's fleet-echo clause skips more template
    intros, so a model key is what makes posting scale.
 
@@ -1551,6 +1552,81 @@ other owner's agent, and its posting and reply warnings, are unchanged.
   it: its children inherit it from there, and an answer's coin facts already
   read it on the same fleet lane.
 
+### An active agent's trades: at night, six hours fresh, and one recap for a burst (2026-10-14)
+
+Alan made about twenty trades between 02:19 and 06:40 UTC on 2026-10-13 and
+four were posted. The night held the plan until 06:23, by then the two-hour
+freshness had dropped half the burst, and the seventy-five-minute gap queued
+the rest until they went stale. The owner's ask: let his trade posts through
+at night, widen the window, and post one recap for a burst. Only the active
+cadence (`MERRYMEN_XPOST_ACTIVE_TENANTS`) changes; every other owner's
+cadence is as before.
+
+- **Through the night** (`PlanCadence.tradesAtNight`): buys, sales and
+  recaps are planned and sent at any hour. The hello and casual posts still
+  wait for morning, and an owner whose zone cannot be read holds every post
+  but an answer, as before.
+- **Six hours fresh** (`ACTIVE_TRADE_FRESH_MS`): a trade is posted about
+  while six hours old (two for everyone else); a drafted post goes stale four
+  hours after its draft (`ACTIVE_TRADE_SEND_STALE_MS`), so no single post
+  goes out more than ten hours after its fill. A recap says trades up to
+  eight hours old when drafted and goes stale the same four hours after, so
+  it may say a trade up to twelve hours after its fill.
+- **One recap for a burst** (planner.ts `planRecap`, xpost/recap.ts): a
+  single trade post the gap would push more than seventy-five minutes out
+  (`RECAP_HORIZON_MS`) is left for a recap instead, and none is planned to
+  go out past its send staleness. A recap is planned when at least three
+  trades no recap covered were not posted one by one, the burst has paused
+  for twenty minutes (or eight are waiting), and no recap of this owner went
+  out in four hours (`RECAP_GAP_MS`, counted from when the last one went
+  out, or was tried, or is due). Gap allowing, a trade with no single post
+  that is past the six hours a single post needs is said by a recap at once,
+  even alone or mid-burst: the recap is the only post left that can say it,
+  and a burst's tail of one or two was otherwise never said. It is planned
+  after the single posts and before a casual one, and on this cadence a
+  casual post too goes out within the seventy-five minutes or waits for a
+  later pass, so small talk never holds a slot a trade needs. A recap goes
+  out within two and a half hours (`RECAP_MAX_PUSH_MS`). It says every trade
+  no earlier recap covered, at most eight hours back, of the money it trades
+  with now; the plan pass reads at least those eight hours of calls whether
+  or not it read mentions (it read six without a mention batch, and the
+  recap never saw a trade the singles had let go), and with an active agent
+  in it, its newest 720 fills rather than the facts read's usual 180
+  (`RECAP_CALLS_PER_AGENT`: a busy paper basket passes 180 in four hours). Its key carries its
+  newest trade and a hash of the trades it covers, so a refused recap's key
+  never blocks a recap of more. Its words are code's, never a model's (a
+  hundred lines, three slots of ten, any two sharing at most one part, no
+  side of the trade, no size and nothing only real money has, a paper agent's with
+  "on paper"), so a recap goes out even when the model passes or the model
+  allowance is spent; its figures line says the rest:
+  `recap: 8 buys, 3 sells (2 green, 1 red), best +12.4%; traded CAPITOL, WISP, INDEX.`
+- **What a recap says, and only that.** Sales are counted only from the
+  receipt-backed results, and only with the owner's opt-in to sale posts
+  (`xTradeResults`). Green and red only when every sale counted was
+  measured; the best gain only beside a measured profit, and none too small
+  to show at one decimal (never "+0%"). A coin the ticker
+  screens refuse costs the line its coins, never the recap. Before a recap
+  that counts sales goes out, its sales are read again (from when it was
+  drafted): the opt-in must still be on, the agent the same, and the counts,
+  outcomes and best gain what the receipts say now (`recapStillHolds`);
+  otherwise it is withheld.
+- **Covered by key, never said twice.** A recap row records the single-post
+  keys of every trade it said (its `coin` column, `recapCoverOf`), written
+  in the same insert. A trade a recap covered is never posted one by one or
+  recapped again, including when the recap's send ended uncertain,
+  interrupted or in our fault (it may be on X). Recaps are read by their own
+  query (store.ts `recapPostsOf`), never lost from the capped history, and
+  only an owner's own recaps cover that owner's trades.
+- A recap is a trade post: it shares the day's trade allowance, is
+  cancelled with buy posts when the owner turns those off, shows in Coming
+  up as "Trade recap", and a reply under it is a reply under its trades.
+- **Sized for one active agent.** The hundred lines are shared by every
+  active agent and both monies, and the gate refuses a line the fleet said
+  in fourteen days. One agent's recaps, at least four hours apart, take a
+  little over two weeks to use them all; two agents bursting every day would
+  run out in about eight days and every recap after would be refused. Grow
+  the set (another slot) before a second active tenant trades like Alan.
+
 ### Larp checks: "@alanaidale larp check" under a project's post (2026-10-13)
 
 The owner's ask: Alan checks whether a website or a coin is real when someone
@@ -1690,6 +1766,14 @@ them directly on the shared database:
 `UPDATE xpost_posts SET status = 'cancelled', reason = 'rollback' WHERE kind = 'answer' AND status = 'scheduled';`
 Then deploy the older build. An answer this release could not send within an
 hour of drafting it is already skipped as stale, so the queue is short.
+
+**And past the recap release (2026-10-14).** An older orchestrator reads a
+`recap` row as a casual post: a queued recap would go out as a casual post
+whatever the owner's buy-post choice, and the trades it covered could be
+posted one by one again. Cancel the waiting recaps before deploying an older
+build:
+`UPDATE xpost_posts SET status = 'cancelled', reason = 'rollback' WHERE kind = 'recap' AND status = 'scheduled';`
+A recap already posted stays on X; the older build does not read it as cover.
 
 ## What an owner should know (it is in the warning)
 

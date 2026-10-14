@@ -49,7 +49,7 @@ import { STRATEGY_FLAVOUR, STRATEGY_SPOKEN, TRAIT_VOICE } from "./groupchat/temp
 import { MUSINGS, SUBJECTS, TAKES } from "./groupchat/topics";
 import { xAppFromEnv, type FetchLike, type XApp, type XReply } from "./xpost/client";
 import { admitXPost, lettersOf, merrymenMentioned, moneySaid, namedIn, tickerRefusal, unreadableLetter, vocabularyRefusal, type BaseGate, type XGateCtx } from "./xpost/gate";
-import { ACTIVE_CADENCE, ANSWER_GAP_MS, ANSWER_STALE_MS, ANSWERS_PER_DAY, REPLY_STALE_MS, STANDARD_CADENCE, coinOf, hash32, introState, planPosts, replyDueAt, sendDecision, type PlanCadence, type PlanClock, type PlanIntent, type PlanSell } from "./xpost/planner";
+import { ACTIVE_CADENCE, ANSWER_GAP_MS, ANSWER_STALE_MS, ANSWERS_PER_DAY, RECAP_CALLS_PER_AGENT, RECAP_GAP_MS, RECAP_WINDOW_MS, REPLY_STALE_MS, STANDARD_CADENCE, coinOf, hash32, introState, planPosts, recapCoverOf, recapCoverText, replyDueAt, sendDecision, type PlanCadence, type PlanClock, type PlanIntent, type PlanSell } from "./xpost/planner";
 import { APP_PAUSE_KEY, APP_PAUSE_MS, CREDITS_PAUSE_MS, PAUSE_KEY, readReplyComments, sendOne, type CardOutcome, type SendOutcome } from "./xpost/sender";
 import { isAnswerOptOut, isReplyOptOut, plainAsk, replyCandidate, tagCandidate, withoutReplyOptOut } from "./xpost/replies";
 import { asksAboutACoin, coinTalkIn, deicticPickIn, houseTalkIn, marketTalkIn, nameLikeWords, textWords, trustTalkIn, unknownWordIn } from "./xpost/words";
@@ -70,6 +70,7 @@ import {
   lastOutAt,
   postingAccounts,
   postsOfXUser,
+  recapPostsOf,
   ownerSendTimesSince,
   tradeSendTimesSince,
   optOutReplies,
@@ -104,6 +105,7 @@ import { appendSaleOutcome, hasSaleOutcome } from "./xpost/sale-outcome";
 import { admitFiguresLine, cleanTicker, figuresTickers, withFigures, type FiguresSpec } from "./xpost/figures";
 import { hotAnswers, hotNoneAnswers, hotUnreadAnswers, insightFacts, majorAnswers, majorUnreadAnswers, marketAnswers, type HotRead, type MajorRead, type MarketRead } from "./xpost/market";
 import { selfAnswers, tradesAnswers } from "./xpost/casual";
+import { recapFigures, recapLines, recapStillHolds } from "./xpost/recap";
 import { accusationIn, CHECK_VOCABULARY, checkAnswers, type CheckRead } from "./xpost/check";
 
 const MIN = 60_000;
@@ -298,7 +300,7 @@ export function xpostEnv(env: Record<string, string | undefined> = process.env):
     const n = count(llmRaw);
     if (n === null) {
       llmPerDay = 0;
-      notes.push("xpost: MERRYMEN_XPOST_LLM_PER_DAY is set but is not a count of calls — no model calls until it is; only intros are posted, from templates");
+      notes.push("xpost: MERRYMEN_XPOST_LLM_PER_DAY is set but is not a count of calls — no model calls until it is; only intros (from templates) and an active owner's recaps (code's own words) are posted");
     } else {
       llmPerDay = n;
     }
@@ -952,7 +954,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
 
   const why =
     `xpost: on — at most ${perDay} posts per X account a day, ${fleetPerDay} across the fleet a day; ` +
-    (creds ? `up to ${llmPerDay} model calls a day` : "no model, so only intros are posted, from templates") +
+    (creds ? `up to ${llmPerDay} model calls a day` : "no model, so only intros (from templates) and active owners' recaps (code's words) are posted") +
     (active.size ? `; ${active.size} owner(s) on the active cadence, up to ${ACTIVE_CADENCE.perDay} a day` : "") +
     (repliesApproved ? (o.knobs.repliesActiveOnly ? "; replies for the active owners only" : "; replies for owners who consent") : "") +
     (research ? `; answers look things up first${researchFomo ? ", Fomo included" : ""}` : "") +
@@ -1103,11 +1105,18 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
                 // THE OWNER'S NIGHT NEVER HOLDS AN ANSWER. Someone who tagged an
                 // active agent at 3am the owner's time is answered then: the
                 // night keeps the owner's own timeline quiet, not a reply to a
-                // person who asked. Every other post waits for morning.
-                asleep = post.kind !== "answer" && (!z.ok || isAsleep(z.tz, post.tenant, t));
+                // person who asked. NOR AN ACTIVE AGENT'S TRADE POSTS (the
+                // owner's ask, 2026-10-14: PlanCadence.tradesAtNight): it trades
+                // around the clock, and its buys, sales and recaps go out when
+                // they happen. Every other post waits for morning.
+                // An unreadable zone still holds every post but an answer: the
+                // night exception reads the owner's day, and without a zone it
+                // would count today's caps on the UTC day (review, 2026-10-14).
+                const nightTrade = cadenceOf(post.tenant).tradesAtNight && (post.kind === "buy" || post.kind === "sell" || post.kind === "recap");
+                asleep = post.kind !== "answer" && (!z.ok || (!nightTrade && isAsleep(z.tz, post.tenant, t)));
                 if (z.ok) dayOf = (ms) => localDay(z.tz, ms);
               }
-              const d = sendDecision(post, account, t, asleep, dayOf);
+              const d = sendDecision(post, account, t, asleep, dayOf, { tradeStaleMs: cadenceOf(post.tenant).sendStaleMs });
               if (d.action === "cancel") {
                 if (await cancelPost(shared, post.id, d.reason, t)) bump("cancelled");
                 continue;
@@ -1207,7 +1216,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
                 continue;
               }
               if (!answer) release.push(() => returnAllowance(shared, ownerDayKey, at()));
-              if (post.kind === "buy" || post.kind === "sell") {
+              // A recap is a trade post: it shares the trade allowance with the buys and sales it sums up.
+              if (post.kind === "buy" || post.kind === "sell" || post.kind === "recap") {
                 const tradeDayKey = `tradeday:${post.xUserId}:${localDayKey}`;
                 // Older deployments have no shared buy/sell counter. Their
                 // durable sends still consume today's slots, across owners.
@@ -1253,6 +1263,25 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
                 nowMs: t,
                 validateBeforeSend: async (pending) => {
                   vouchedSale = null;
+                  // A RECAP'S RECEIPTS, READ AGAIN (review of the recap branch,
+                  // 2026-10-14), as a sale post's are: one that counts sales
+                  // needs the owner's opt-in to sale posts and the same agent
+                  // still, and its counts, outcomes and best gain must still be
+                  // what the receipt-backed sales say now (recapStillHolds).
+                  if (pending.kind === "recap") {
+                    const counted = recapCoverOf(pending.coin);
+                    if (!counted.length) return false;
+                    if (!counted.some((k) => k.startsWith("sell:"))) return recapStillHolds(pending, []);
+                    const profile = await deps.socialProfile?.(pending.tenant);
+                    const current = byTenant.get(pending.tenant);
+                    const agent = profile?.currentAgent;
+                    if (!profile?.xTradeResults || !agent || !current || current.agentId !== agent.address.toLowerCase()) return false;
+                    // As of its draft: the same window its sales were counted from, never
+                    // one that has moved past its oldest sale (second review, 2026-10-14),
+                    // with each sale's evidence as the receipts say it now.
+                    const sales = await (deps.saleResults ?? readSaleResults)(shared, agent.address, agent.chainId, Math.floor(pending.createdAtMs / 1000));
+                    return recapStillHolds(pending, sales);
+                  }
                   if (!hasPublicWallet(pending.body) && pending.kind !== "sell") return true;
                   const profile = await deps.socialProfile?.(pending.tenant);
                   const current = byTenant.get(pending.tenant);
@@ -1476,12 +1505,22 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
     if (answersOnly) accounts = accounts.filter((a) => (comments.get(a.xUserId)?.length ?? 0) > 0);
     if (accounts.length === 0) return answered;
     const roster = accounts.map((a) => byTenant.get(a.tenant)!);
+    // AT LEAST A RECAP'S WINDOW OF CALLS, MENTIONS OR NOT (third review,
+    // 2026-10-14): a pass that read no mention batch read six hours, so a
+    // recap's eight-hour window was six on most passes, and a trade past a
+    // single post's freshness was never seen by the recap meant to say it.
+    // AND THE WHOLE WINDOW'S FILLS FOR AN ACTIVE AGENT'S RECAP (review of PR
+    // #334): the default per-agent cut of 180 newest dropped a busy basket's
+    // oldest in-window trades; a pass that only answers plans no recap.
+    const recapRead = !answersOnly && accounts.some((a) => cadenceOf(a.tenant).recap);
     const facts = await factsOf(shared, roster, profiles, Math.floor(nowMs / 1000), {
-      dialect, ...(comments.size ? { callWindowSec: PLAN_HISTORY_MS / 1000 } : {}),
+      dialect, callWindowSec: (comments.size ? Math.max(PLAN_HISTORY_MS, RECAP_WINDOW_MS) : RECAP_WINDOW_MS) / 1000,
+      ...(recapRead ? { callsPerAgent: RECAP_CALLS_PER_AGENT } : {}),
     });
     const recentFleet = await recentBodies(shared, { tenant: null, sinceMs: nowMs - FLEET_MEMORY_MS, limit: FLEET_MEMORY_MAX });
     // THE MODEL'S ALLOWANCE, READ ONCE A PASS. Once it is spent, only intros
-    // are planned (they fall back to the template pool): a buy or casual
+    // are planned (they fall back to the template pool), and an active
+    // owner's recaps (code's own words, planner.ts modelOk): a buy or casual
     // intent the model cannot write writes nothing, so it would come back
     // every minute, and on a big enough fleet fill every draft slot before
     // the accounts further on — a newly consented owner's hello among them —
@@ -1530,6 +1569,10 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         const tradeResults = social?.xTradeResults === true && social.currentAgent?.address.toLowerCase() === f.agentId.toLowerCase();
         const sells = tradeResults && social?.currentAgent
           ? await (deps.saleResults ?? readSaleResults)(shared, social.currentAgent.address, social.currentAgent.chainId, Math.floor(planNow / 1000)) : [];
+        // This owner's recaps, read apart from the capped history (PlanInput.recaps).
+        // Read on every cadence (second review, 2026-10-14): an owner taken off the
+        // active list still has recaps whose trades must never be posted again.
+        const recapRows = plansPosts ? await recapPostsOf(shared, account.tenant, planNow - RECAP_WINDOW_MS - RECAP_GAP_MS - HOUR) : [];
         const intents = !plansPosts ? [] : planPosts({
           tenant: account.tenant,
           account,
@@ -1547,6 +1590,9 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
           cadence: cadenceOf(account.tenant),
           model,
           kinds: { buys: account.prefs.buys, casual: account.prefs.casual },
+          // A recap says only trades of the money it trades with now.
+          money: f.mode === "idle" ? null : f.mode,
+          recaps: recapRows,
         });
         // ITS RECENT POSTS, TWICE: `recentOwn`, everything, what each draft is
         // gated against; `shownOwn`, what a prompt is shown as its recent
@@ -2548,6 +2594,36 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         if (!tokenDisclosure || tokenDisclosure.address !== call.token.toLowerCase()) return { outcome: "token-unverified", body: null };
       }
       prompt = sellPrompt({ ...facts, coin: intent.coin, paper: false, outcome: call.outcome });
+    } else if (intent.kind === "recap") {
+      // A RECAP IS CODE'S WORDS AND CODE'S FIGURES (xpost/recap.ts): no model
+      // call, so a burst is said even when the model passes or is down. The
+      // first of its lines the gate admits, then its figures line, or nothing.
+      const money = f.mode === "idle" ? null : f.mode;
+      if (!money) return { outcome: "recap-idle", body: null };
+      gate.mode = money;
+      let said: string | null = null, why = "recap-gate";
+      for (const line of recapLines(intent.dedupeKey, { paper: money === "paper" })) {
+        const v = admitXPost(line, gate, BASE_GATE);
+        if (v.ok) {
+          said = v.text;
+          break;
+        }
+        why = `gate:${v.reason}`;
+      }
+      // A COIN THE TICKER SCREENS REFUSE COSTS THE COINS, NEVER THE RECAP (review,
+      // 2026-10-14): the line is tried whole, then without its "traded" coins.
+      const spec = recapFigures(intent);
+      const lined = said ? (figuresFor(said, spec, ownNamesOf(f.name), []) ?? figuresFor(said, spec.filter((x) => x.kind !== "traded"), ownNamesOf(f.name), [])) : null;
+      const recapBody = lined?.line ? lined.text : null;
+      const written = await schedulePost(shared, {
+        tenant: account.tenant, xUserId: account.xUserId, kind: "recap", dedupeKey: intent.dedupeKey, body: recapBody ?? "",
+        // WHAT IT COVERS, IN THE SAME INSERT (planner.ts recapCoverText): no
+        // later plan posts those trades one by one or recaps them again.
+        coin: recapCoverText(intent.covers), decisionId: null, dueAtMs: intent.dueAtMs, nowMs,
+        status: recapBody ? "scheduled" : "skipped", reason: recapBody ? null : said ? "recap-figures-left-out" : why,
+      });
+      if (written === null) return { outcome: "already-written", body: null };
+      return { outcome: recapBody ? "drafted-recap" : "not-posted", body: recapBody };
     } else {
       // A trade-talk day is handed no seed, any other day no coin: neither is
       // offered, or vouched to the gate, on the day it is not about.

@@ -68,6 +68,10 @@ export const POOLS_MAX = 3;
 export const MAJORS_MAX = 3;
 export const CROWD_MAX = 2;
 export const TRENDING_MAX = 3;
+/** Coins a recap's line names. */
+export const TRADED_MAX = 3;
+/** The most trades of one side a recap counts: past this it is no recap but a feed. */
+const RECAP_COUNT_MAX = 999;
 
 /**
  * WORDS A TICKER MAY NOT SPELL, read on its letters. Merrymen's own names and
@@ -394,7 +398,16 @@ export type FiguresSection =
    */
   | { kind: "git"; pushedDaysAgo: number | null; commits30d?: number | null; commitsPartial?: boolean; stars?: number | null; repoAgeDays?: number | null }
   /** A coin's holders as the index counts them: the top ten's share and the creator's. Names no coin. */
-  | { kind: "holders"; top10Pct: number | null; creatorPct?: number | null };
+  | { kind: "holders"; top10Pct: number | null; creatorPct?: number | null }
+  /**
+   * AN ACTIVE AGENT'S RECAP OF A BURST OF TRADES (planner.ts planRecap,
+   * 2026-10-14): how many buys and sales, how many of the sales closed in
+   * profit and at a loss (receipt-backed outcomes only), and the best measured
+   * gain among them. Counts of its own trades, never a balance or a size.
+   */
+  | { kind: "recap"; buys: number; sells: number; wins?: number | null; losses?: number | null; bestPct?: number | null }
+  /** The coins a recap's trades were in, by ticker, newest first, at most TRADED_MAX. */
+  | { kind: "traded"; symbols: string[] };
 
 export type FiguresSpec = readonly FiguresSection[];
 
@@ -418,7 +431,9 @@ type Shown =
   | { kind: "trending"; tickers: string[] }
   | { kind: "flow"; buys: string | null; sells: string | null }
   | { kind: "git"; pushed: string; commits: string | null; stars: string | null; age: string | null }
-  | { kind: "holders"; top10: string; creator: string | null };
+  | { kind: "holders"; top10: string; creator: string | null }
+  | { kind: "recap"; buys: number; sells: number; wl: { w: number; l: number } | null; best: string | null }
+  | { kind: "traded"; tickers: string[] };
 
 /** What of a spec can be shown: unclean tickers, unshowable numbers and empty sections out; the caps applied. */
 function shownOf(spec: FiguresSpec): Shown[] {
@@ -467,6 +482,19 @@ function shownOf(spec: FiguresSpec): Shown[] {
     } else if (s.kind === "holders") {
       const top10 = shareOf(s.top10Pct);
       if (top10) out.push({ kind: "holders", top10, creator: shareOf(s.creatorPct) });
+    } else if (s.kind === "recap") {
+      const count = (v: unknown): number => (typeof v === "number" && Number.isInteger(v) && v >= 0 && v <= RECAP_COUNT_MAX ? v : 0);
+      const buys = count(s.buys), sells = count(s.sells), w = count(s.wins), l = count(s.losses);
+      // GREEN AND RED ONLY WHEN EVERY SALE COUNTED HAS A MEASURED OUTCOME
+      // (review of the recap branch, 2026-10-14): "3 sells (1 green, 0 red)"
+      // beside two sales nobody measured reads as none of them lost.
+      const wl = sells > 0 && w + l === sells ? { w, l } : null;
+      // A best gain too small to show at one decimal is none, never "+0%" beside a green (third review, 2026-10-14; sale-outcome.ts gainFigure).
+      const best = typeof s.bestPct === "number" && s.bestPct >= 0.05 && wl && wl.w > 0 ? signedPercent(s.bestPct) : null;
+      if (buys + sells > 0) out.push({ kind: "recap", buys, sells, wl, best });
+    } else if (s.kind === "traded") {
+      const list = tickers(Array.isArray(s.symbols) ? s.symbols : [], TRADED_MAX);
+      if (list.length) out.push({ kind: "traded", tickers: list });
     }
   }
   return capFigures(out);
@@ -480,6 +508,7 @@ function figuresIn(s: Shown): number {
     case "flow": return 2;
     case "git": return [s.pushed, s.commits, s.stars, s.age].filter((x) => x !== null).length;
     case "holders": return s.creator === null ? 1 : 2;
+    case "recap": return (s.buys > 0 ? 1 : 0) + (s.sells > 0 ? 1 : 0) + (s.best ? 1 : 0);
     default: return 0;
   }
 }
@@ -518,6 +547,15 @@ function renderSection(s: Shown): string {
       return [`github: last push ${s.pushed}`, s.commits ? `${s.commits} in 30d` : null, s.stars, s.age ? `repo ${s.age} old` : null].filter((x): x is string => x !== null).join(", ");
     case "holders":
       return `top10 hold ${s.top10}${s.creator ? `, creator ${s.creator}` : ""}`;
+    case "recap": {
+      const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? "" : "s"}`;
+      const parts = [s.buys > 0 ? plural(s.buys, "buy") : null,
+        s.sells > 0 ? `${plural(s.sells, "sell")}${s.wl ? ` (${s.wl.w} green, ${s.wl.l} red)` : ""}` : null,
+        s.best ? `best ${s.best}` : null].filter((x): x is string => x !== null);
+      return `recap: ${parts.join(", ")}`;
+    }
+    case "traded":
+      return `traded ${s.tickers.join(", ")}`;
   }
 }
 
@@ -556,7 +594,19 @@ const SPAN = String.raw`[1-9]\d?(?:d|w|mo|y)`;
 const SHARE = String.raw`(?:100|[1-9]?\d)%`;
 const GIT = String.raw`github: last push (?:today|${SPAN} ago)(?:, (?:(?:0|[1-9]\d?) commits?|100\+ commits) in 30d)?(?:, [1-9]\d{0,5} stars?)?(?:, repo ${SPAN} old)?`;
 const HOLDERS = String.raw`top10 hold ${SHARE}(?:, creator ${SHARE})?`;
-const SECTION = `(?:${MAJOR}|${MAJORS}|${POOLS}|${CROWD}|${TRENDING}|${FLOW}|${GIT}|${HOLDERS})`;
+// A recap's counts (2026-10-14): buys, then sales with their green and red, then the best gain; at least one side.
+const COUNT = String.raw`[1-9]\d{0,2}`, COUNT0 = String.raw`(?:0|[1-9]\d{0,2})`;
+// The best gain only after measured sales with at least one green, never
+// beside buys alone or a red-only run; and "traded" only right after a recap,
+// never alone, so an ordinary sentence ending "traded ETH." is never read as
+// a figures line (review of the recap branch, 2026-10-14).
+const R_BUYS = String.raw`${COUNT} buys?`;
+// A best gain is a gain: signed plus, never minus, never "+0%".
+const GAIN = String.raw`\+(?:0\.[1-9]|[1-9]\d{0,4}(?:\.[1-9])?)%`;
+const R_SELLS = String.raw`${COUNT} sells?(?: \((?:${COUNT} green, ${COUNT0} red\)(?:, best ${GAIN})?|0 green, ${COUNT} red\)))?`;
+const TRADED = String.raw`traded ${T}(?:, ${T}){0,${TRADED_MAX - 1}}`;
+const RECAP = String.raw`recap: (?:${R_BUYS}(?:, ${R_SELLS})?|${R_SELLS})(?:; ${TRADED})?`;
+const SECTION = `(?:${MAJOR}|${MAJORS}|${POOLS}|${CROWD}|${TRENDING}|${FLOW}|${GIT}|${HOLDERS}|${RECAP})`;
 /** The line, whole: one to five sections joined by "; ", ending with a full stop. Nothing else. */
 const LINE = String.raw`${SECTION}(?:; ${SECTION}){0,4}\.`;
 export const FIGURES_LINE = new RegExp(`^${LINE}$`);
@@ -583,7 +633,7 @@ export function admitFiguresLine(line: unknown): line is string {
 /** Each shorter form of a section list, least telling field first, down to one field; never the empty list. */
 function* shorter(list: Shown[]): Generator<Shown[]> {
   let cur = list.map((s) => (s.kind === "pools" || s.kind === "majors" ? { ...s, coins: s.coins.map((c) => ({ ...c })) } : { ...s })) as Shown[];
-  const emit = (next: Shown[]) => { cur = next.filter((s) => figuresIn(s) > 0 || s.kind === "crowd" || s.kind === "trending"); return cur; };
+  const emit = (next: Shown[]) => { cur = next.filter((s) => figuresIn(s) > 0 || s.kind === "crowd" || s.kind === "trending" || s.kind === "traded"); return cur; };
   const pools = (): Extract<Shown, { kind: "pools" }> | undefined => cur.find((s): s is Extract<Shown, { kind: "pools" }> => s.kind === "pools");
   const fewerCoins = (down: number) => { const p = pools()!; return emit(cur.map((s) => (s === p ? { ...p, coins: p.coins.slice(0, down) } : s))); };
   const without = (kind: "trending" | "crowd") => (cur.some((s) => s.kind === kind) && cur.length > 1 ? emit(cur.filter((s) => s.kind !== kind)) : null);
@@ -614,6 +664,11 @@ function* shorter(list: Shown[]): Generator<Shown[]> {
     const m = majors()!;
     yield emit(cur.map((s) => (s === m ? { ...m, coins: m.coins.slice(0, -1) } : s)));
   }
+  // A recap's line: the coins go first, then the best gain; the counts stay.
+  const traded = cur.find((s) => s.kind === "traded");
+  if (traded && cur.length > 1) yield emit(cur.filter((s) => s !== traded));
+  const recap = cur.find((s): s is Extract<Shown, { kind: "recap" }> => s.kind === "recap");
+  if (recap?.best) yield emit(cur.map((s) => (s === recap ? { ...recap, best: null } : s)));
   // A larp check's line: the holders go whole first (the repo is what was
   // checked), then the repo's age, its stars and its commits; the last push stays.
   const holders = cur.find((s) => s.kind === "holders");
@@ -656,14 +711,14 @@ export function withFigures(admitted: string, spec: FiguresSpec | null | undefin
   const lead = /[.!?…]$/.test(words) ? words : `${words}.`;
   const full = shownOf(spec);
   if (!full.length) return none;
-  const total = full.reduce((n, s) => n + figuresIn(s) + (s.kind === "crowd" || s.kind === "trending" ? s.tickers.length : 0), 0);
+  const total = full.reduce((n, s) => n + figuresIn(s) + (s.kind === "crowd" || s.kind === "trending" || s.kind === "traded" ? s.tickers.length : 0), 0);
   const tries: Shown[][] = [full, ...shorter(full)];
   for (const t of tries) {
     const line = renderShown(t);
     if (line === null || !admitFiguresLine(line)) continue;
     const text = m ? `${lead} ${line} ${m[1]!}` : `${lead} ${line}`;
     if (xWeightedLength(text) > X_MAX_WEIGHTED) continue;
-    const kept = t.reduce((n, s) => n + figuresIn(s) + (s.kind === "crowd" || s.kind === "trending" ? s.tickers.length : 0), 0);
+    const kept = t.reduce((n, s) => n + figuresIn(s) + (s.kind === "crowd" || s.kind === "trending" || s.kind === "traded" ? s.tickers.length : 0), 0);
     return { text, line, dropped: total - kept };
   }
   return none;
