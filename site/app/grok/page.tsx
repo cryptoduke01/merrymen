@@ -1,10 +1,15 @@
 import type { Metadata } from "next";
+import { HeroSignal } from "../../components/HeroSignal";
+import { Icon } from "../../components/Icon";
+import { Logo } from "../../components/Logo";
 import { GrokQuickStart } from "./GrokQuickStart";
 import "./grok.css";
 
-const title = "Set up Merrymen in Grok and Grok Bot";
-const description =
-  "Connect Grok or Grok Bot to Merrymen, create your Merryman, approve its wallet permissions yourself and check whether it is running. No model API key needed.";
+const title = "Your Merryman. Now in Grok.";
+const description = "Connect Merrymen to Grok. Set up your trading agent, understand its decisions and check its status from chat. Your wallet approvals stay with you. No model API key needed.";
+const SERVER = "https://mcp.merrymen.dev/mcp";
+const CONNECT_HUB = "https://app.merrymen.dev/connect/mcp";
+const CONNECTED_APPS = "https://app.merrymen.dev/connect/apps";
 
 export const metadata: Metadata = {
   title,
@@ -14,168 +19,103 @@ export const metadata: Metadata = {
   twitter: { card: "summary", title, description, site: "@MerrymenAI", creator: "@MerrymenAI" },
 };
 
-const SERVER = "https://mcp.merrymen.dev/mcp";
-const CONNECT_HUB = "https://app.merrymen.dev/connect/mcp";
-const CONNECTED_APPS = "https://app.merrymen.dev/connect/apps";
-
 export default function GrokSetup() {
   return (
-    <div className="wrap" style={{ maxWidth: 760, padding: "40px 24px 80px" }}>
-      <article className="doc-body">
-        <h1>Your Merryman in Grok</h1>
-        <p className="doc-lead">
-          Ask Grok or Grok Bot to help set up your Merryman, check its trades and explain what it
-          is doing. Connect your Merrymen account once, then work from the conversation.
-        </p>
-        <GrokQuickStart server={SERVER} />
-        <p>Using Grok Bot? <a href={`${CONNECT_HUB}#grok-bot`} className="link">Get its separate setup prompt</a>.</p>
-        <p>
-          Merrymen connects through MCP, the same tool interface used by Claude and ChatGPT.
-          You don&apos;t need an xAI API key or an extra model service to make the connection.
-          You choose the agent and permissions Grok receives on Merrymen&apos;s consent page.
-        </p>
-
-        <details className="grok-guide-details">
-        <summary>Full setup guide, Grok Bot and troubleshooting</summary>
-        <h2 id="grok">Connect Grok</h2>
-        <p>
-          Add Merrymen as a custom connector once before using it in chat. Asking Grok to
-          “connect Merrymen” by name does not install this unlisted connector; a catalog search
-          can miss it. Use the manual setup below.
-        </p>
-        <ol>
-          <li>
-            In Grok&apos;s sidebar, open <strong>Plugins</strong>, select the <strong>Connectors</strong>
-            {" "}tab, then choose <strong>New Connector</strong> → <strong>Custom</strong>
-            {" "}(“Add your own custom connector”). The <a className="link" href="https://grok.com/connectors" target="_blank" rel="noopener noreferrer">Open Grok connectors</a>
-            {" "}button takes you to the connectors page; it does not fill in or install Merrymen.
-          </li>
-          <li>Enter <strong>Merrymen</strong> as the <strong>Name</strong> and paste this into <strong>Server URL</strong>:</li>
-        </ol>
-        <pre className="code" style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{SERVER}</pre>
-        <ol start={3}>
-          <li>
-            Select <strong>Add Connector</strong>, then complete authentication. Sign in to
-            Merrymen, or create your account if you are new.
-            Choose the Merryman to share and the permissions to allow. If you want Grok to draft
-            a new Merryman, enable <strong>Prepare agent setups and suggest setting changes</strong>.
-          </li>
-          <li>Return to Grok and ask: “Help me set up my Merryman and check whether it is running.”</li>
-        </ol>
-        <p>
-          These connector steps follow the <a className="link" href="https://docs.x.ai/grok/connectors" target="_blank" rel="noopener noreferrer">official Grok guide</a>.
-          Business and Enterprise accounts may need an administrator to provision the connector.
-          The <a className="link" href={`${CONNECT_HUB}#grok`}>Merrymen connection page</a> has a
-          copy button for the address.
-        </p>
-
-        <h2 id="grok-bot">Connect Grok Bot</h2>
-        <p>
-          Start with the <a className="link" href={`${CONNECT_HUB}#grok-bot`}>copyable Grok Bot setup prompt</a>.
-          It gives your Bot the server address, setup instructions and the checks to perform after
-          you finish. You can also ask:
-        </p>
-        <pre className="code" style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{
-          "Help me connect Merrymen using https://merrymen.dev/llms.txt. Guide me through creating my Merryman and checking whether it is running. Send sign-in, setup and wallet approval links for me to open in my own device’s browser. Never sign in or approve wallet permissions on the Bot’s shared computer."
-        }</pre>
-        <p>
-          The <a className="link" href="https://x.ai/bot/guides/grok-bot-101" target="_blank" rel="noopener noreferrer">Grok Bot guide</a> says
-          it supports Cursor-compatible MCP servers, plugins and skills. The connection page supplies
-          manual JSON configuration for hosts that accept a custom MCP server. If your Bot does not
-          offer custom configuration, have it check its supported installation options and explain
-          any missing step. Set up and verify the Bot connection separately from grok.com.
-        </p>
-        <p>
-          Grok Bot&apos;s documented plugin route is <strong>Connect apps</strong> → choose a
-          plugin → <strong>Authorize</strong> or <strong>Authenticate</strong>. A Merrymen catalog
-          listing has not been confirmed. Installed plugins can be available to your other bots
-          on the same account, so grant only the permissions you want that account to use.
-          See <a className="link" href="https://cursor.com/help/grok-bot/connect-plugins" target="_blank" rel="noopener noreferrer">Grok Bot&apos;s plugin instructions</a>.
-        </p>
-        <p>
-          <strong>Use your own device for sign-in and wallet approval.</strong> Grok Bot&apos;s cloud
-          computer is shared with its bots. Open Merrymen links in your own browser and keep your
-          wallet there. If the Bot cannot hand authentication to your own device, pause that setup
-          and use Grok&apos;s connector flow. Never give a bot your recovery phrase, private key,
-          sign-in code or wallet session.
-        </p>
-
-        <h2 id="setup">From an account to a running Merryman</h2>
-        <ol>
-          <li><strong>Connect your account.</strong> Sign in and choose what the assistant may access.</li>
-          <li>
-            <strong>Choose your Merryman.</strong> Share an existing one, or ask for a new setup
-            draft with your name, strategy, basket and risk choice. A draft needs your review.
-          </li>
-          <li>
-            <strong>Finish the secure handoff.</strong> Open the returned Merrymen link on your
-            own device. Review the setup, create or connect the wallet, and approve the exact
-            permissions and limits yourself. Complete any remaining activation steps shown there.
-          </li>
-          <li>
-            <strong>Return to the same chat.</strong> Ask Grok to read setup and status again.
-            It should name any remaining step and confirm the agent&apos;s actual running state,
-            with paper and live kept separate.
-          </li>
-        </ol>
-        <p>
-          A connected assistant, a prepared draft and an approved draft are different steps.
-          None alone proves that your Merryman is running. An agent may also be running and waiting
-          because its strategy or limits do not permit a trade yet.
-        </p>
-
-        <h2 id="try">Try it</h2>
-        <ul>
-          <li>“What remains before my Merryman is running?”</li>
-          <li>“Why hasn&apos;t my agent traded?”</li>
-          <li>“Show my recent trades with their receipts. Keep paper and live separate.”</li>
-          <li>“Explain my portfolio and the limits my agent must follow.”</li>
-        </ul>
-
-        <h2 id="permissions">You control the permissions</h2>
-        <p>
-          Grok receives only the agents and permissions you share. Trade and setting proposals
-          need the corresponding permission and your approval in Merrymen. The connector cannot
-          sign wallet transactions, reveal keys, turn on live trading or loosen signed limits.
-          Disconnect it any time on <a className="link" href={CONNECTED_APPS}>Connected apps</a>.
-        </p>
-        <p>
-          Grok web&apos;s fresh-account signup, connection, interactive setup card, owner wallet
-          signing and fresh practice-worker report have been verified. Full Grok Bot setup
-          remains unverified. If a host cannot show the card, use ordinary text responses and
-          open the approval links in your own browser.
-        </p>
-
-        <h2 id="help">If setup stops</h2>
-        <ul>
-          <li>
-            <strong>No agent is shared:</strong> connect using the same Merrymen account that
-            owns it, and select that agent on the consent page.
-          </li>
-          <li>
-            <strong>The setup tool is missing:</strong> reconnect and allow agent drafts and
-            setting changes, or finish setup directly in Merrymen.
-          </li>
-          <li>
-            <strong>The connector is present but cannot read status:</strong> finish authentication,
-            then try the status check again. Adding the address alone does not grant access.
-          </li>
-          <li>
-            <strong>The draft is approved but the agent is not running:</strong> open the latest
-            setup link and finish the remaining owner steps. Ask Grok to recheck afterwards.
-          </li>
-        </ul>
-        <p>
-          See the <a className="link" href="/privacy">privacy policy</a> for data handling.
-          For help, email <a className="link" href="mailto:support@merrymen.dev">support@merrymen.dev</a>
-          {" "}with the step that failed, without keys, tokens or sign-in codes.
-        </p>
-        <div className="callout" style={{ marginTop: 40 }}>
-          <strong>For AI assistants:</strong> read <a className="link" href="/llms.txt">merrymen.dev/llms.txt</a>
-          {" "}for tool setup, owner handoffs and the checks that establish whether a Merryman is running.
+    <div className="home-page grok-page">
+      <section className="grok-hero" aria-labelledby="grok-title">
+        <div className="wrap grok-hero-layout">
+          <div className="grok-hero-copy">
+            <p className="hero-eyebrow">Merrymen × Grok</p>
+            <h1 id="grok-title">Your Merryman.<br /><span>Now in Grok.</span></h1>
+            <p className="grok-hero-lead">Give your trading agent a place in the conversation. Set it up, understand its decisions, and check what it is doing. You keep the keys and approve the limits.</p>
+            <div className="grok-hero-actions">
+              <a className="btn btn-primary btn-lg" href="https://grok.com/connectors" target="_blank" rel="noopener noreferrer">
+                Open Grok connectors <Icon name="arrow" size={18} />
+                <span className="grok-sr-only"> (opens in a new tab)</span>
+              </a>
+              <a className="grok-text-link" href="#setup">See the three steps <span aria-hidden>↓</span></a>
+            </div>
+            <p className="grok-hero-note">Add a custom connector once. No model API key needed.</p>
+          </div>
+          <div className="grok-hero-stage">
+            <HeroSignal />
+            <figure className="grok-example">
+              <figcaption>Example conversation</figcaption>
+              <p className="grok-example-prompt">Set up a practice Merryman for me.</p>
+              <div className="grok-example-reply">
+                <span className="grok-example-mark"><Logo size={25} /><strong>Merrymen</strong></span>
+                <p>A strategy you choose.<br />Limits you approve.<br />A status you can check.</p>
+                <div className="grok-example-handoff"><Icon name="wallet" size={18} /><span>Review and sign in Merrymen</span><Icon name="arrow" size={16} /></div>
+              </div>
+              <p className="grok-example-foot">Your conversation starts the setup.<br />Your approval makes it yours.</p>
+            </figure>
+          </div>
         </div>
-        </details>
-      </article>
+      </section>
+
+      <div className="wrap">
+        <GrokQuickStart server={SERVER} />
+        <section className="grok-use-section" aria-labelledby="grok-use-title">
+          <div className="grok-section-intro">
+            <div className="tag"><span className="n">02</span> — once connected</div>
+            <h2 id="grok-use-title">Less dashboard.<br />More conversation.</h2>
+            <p>Ask about the Merrymen you share with Grok. Get the next step, the reason, or the receipt.</p>
+          </div>
+          <div className="grok-use-list">
+            <div><Icon name="chat" size={22} /><h3>Get ready</h3><p>“What remains before my Merryman is running?”</p></div>
+            <div><Icon name="eye" size={22} /><h3>Understand a decision</h3><p>“Why hasn’t my agent traded?”</p></div>
+            <div><Icon name="ledger" size={22} /><h3>Check the receipts</h3><p>“Show my recent trades. Keep practice and live separate.”</p></div>
+          </div>
+        </section>
+        <section className="grok-control" aria-labelledby="grok-control-title">
+          <div className="tag"><span className="n">03</span> — your rules</div>
+          <div className="grok-control-layout">
+            <h2 id="grok-control-title">The conversation changes.<br /><span>Your control doesn’t.</span></h2>
+            <div>
+              <p>You choose the Merryman and permissions to share. Grok can read what you allow and prepare proposals. You review setup and wallet permissions in Merrymen.</p>
+              <p>The connector cannot sign wallet transactions or loosen your signed limits. Disconnect any time in <a href={CONNECTED_APPS}>Connected apps</a>.</p>
+            </div>
+          </div>
+        </section>
+        <section className="grok-help" aria-labelledby="grok-help-title">
+          <div className="grok-section-intro">
+            <div className="tag"><span className="n">04</span> — a little help</div>
+            <h2 id="grok-help-title">One connection.<br />A few good answers.</h2>
+            <p>New to Merrymen? You can create your account during connection.</p>
+          </div>
+          <div className="grok-faq">
+            <details>
+              <summary>Why can’t Grok find Merrymen by name?<span aria-hidden>+</span></summary>
+              <p>Add Merrymen manually as a custom connector first. Asking chat to find it searches a catalog and does not install this connection. Use the name and server address in <a href="#setup">step one</a>.</p>
+            </details>
+            <details>
+              <summary>Do I need an API key or a paid Grok plan?<span aria-hidden>+</span></summary>
+              <p>No model API key or extra model service is needed. xAI says connectors are available to all Grok users. Business and Enterprise connectors must be provisioned by your administrator. See the <a href="https://docs.x.ai/grok/connectors" target="_blank" rel="noopener noreferrer">official Grok connector guide</a>.</p>
+            </details>
+            <details>
+              <summary>Connected, but no Merryman or setup tool?<span aria-hidden>+</span></summary>
+              <p>Finish authentication with the Merrymen account that owns your agent and select it on the consent page. To prepare a new agent from chat, reconnect and allow “Prepare agent setups and suggest setting changes.” You can also finish setup directly in Merrymen.</p>
+            </details>
+            <details>
+              <summary>Does “approved” mean it is running?<span aria-hidden>+</span></summary>
+              <p>Not yet. Open the latest Merrymen setup link and complete any remaining owner steps. Then ask Grok to check status again. Practice and live are separate, and a running agent may wait when its strategy or limits do not permit a trade.</p>
+            </details>
+            <details>
+              <summary>What has been tested?<span aria-hidden>+</span></summary>
+              <p>Grok web has been tested through fresh-account signup, connection, the interactive setup card, owner wallet signing and a fresh practice-worker report. If a host cannot display the card, use its text response and open the Merrymen review link yourself. Full Grok Bot setup remains unverified.</p>
+            </details>
+            <p className="grok-support">Still stuck? <a href="mailto:support@merrymen.dev">Ask us for help <Icon name="arrow" size={14} /></a></p>
+          </div>
+        </section>
+        <section className="grok-bot" id="grok-bot" aria-labelledby="grok-bot-title">
+          <div className="grok-bot-heading"><Icon name="terminal" size={25} /><h2 id="grok-bot-title">Working with Grok Bot?</h2></div>
+          <div className="grok-bot-copy">
+            <p>Set up the Bot separately. Get the Merrymen setup prompt and configuration, then check which custom MCP options your Bot supports. A Merrymen catalog listing and personal Bot installation have not been verified.</p>
+            <p>Open sign-in and wallet approval links on your own device. Keep your wallet and sign-in codes off the Bot’s shared computer.</p>
+            <div className="grok-bot-links"><a className="grok-text-link" href={`${CONNECT_HUB}#grok-bot`}>Get the Bot setup prompt <Icon name="arrow" size={16} /></a><a href="https://docs.x.ai/grok-bot/computer-and-apps" target="_blank" rel="noopener noreferrer">Grok Bot documentation</a></div>
+          </div>
+        </section>
+      </div>
     </div>
   );
 }
