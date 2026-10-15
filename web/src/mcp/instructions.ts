@@ -4,6 +4,21 @@
  */
 export const SERVER_VERSION = "1.0.0";
 
+/** Draft fields only: practice mode and signed limits remain owner choices. */
+export const SETUP_DRAFT_DEFAULTS = {
+  name: "My Merryman",
+  strategy: "steady-basket",
+  asset_mode: "stocks",
+  risk_level: "careful",
+} as const;
+
+/** Shared by native MCP hosts and the copyable Bot prompt. */
+export const SETUP_WORKFLOW = `For a requested setup, call get_merryman_setup before acting and use only the available tools and their schemas. Reuse the selected agent and saved wallet; an empty list is not evidence that no wallet exists. A status question does not authorize a new draft.
+Use preferences already supplied without asking again. Before creating, inspect a known proposal with get_proposal, or list_proposals with status=all when available, and resume the matching setup, including an approved draft awaiting signing. Ask only when the intended agent/proposal is ambiguous or supplied choices conflict. Do not replace an existing agent or alter its settings just to complete setup.
+For a requested new setup with no strategy, asset or basket preference and no live-mode request, disclose this practice starter before preparing the draft: ${JSON.stringify(SETUP_DRAFT_DEFAULTS)}. Preserve any supplied name/risk choice. Leave the basket to Merrymen's owner-review defaults unless the owner supplied one. Otherwise preserve the owner's configuration and omit unspecified optional fields; ask only for a missing choice required to make it valid. These defaults never change an existing agent. Mode is an owner choice, not a create_merryman argument: do not send mode, wallet, signing or limit fields.
+Use create_merryman only if that tool is granted. Choose one idempotency_key per distinct draft and retain it with the proposal ID. After an uncertain result, inspect that proposal or recent proposals; do not create another draft with a fresh key. If drafting is unavailable, offer the returned owner creation link and explain optional drafting access without automatically expanding scopes.
+Return one approval_url with a short summary of the prepared choices and intended mode. The owner reviews and continues through account/wallet setup, mode selection and signing on their own device; never perform signup, consent or signing on a shared cloud computer. After the owner returns, call get_merryman_setup again and get_agent_status if available. Report practice active only when setup reports phase=paper with a fresh worker report; otherwise state the actual phase and blocker. Signing or approval alone is not activation.`;
+
 export const SERVER_INSTRUCTIONS = `Merrymen runs autonomous trading agents ("Merrymen") on Robinhood Chain for their owners. This server lets you inspect the owner's agents, research markets, talk with an agent and prepare actions the owner approves in Merrymen.
 
 Rules that matter:
@@ -18,7 +33,9 @@ Rules that matter:
 - Backtests and paper results are simulations with stated assumptions, never a promise of live returns.
 - When a tool returns an error with retryable=true, wait retry_after_s before retrying.
 
-Start with get_merryman_setup. Follow its current next steps and available tools; get_agent_status or explain_agent_inactivity can provide more detail for an authorized shared agent.`;
+${SETUP_WORKFLOW}
+
+For management, follow the current next steps and available tools; get_agent_status or explain_agent_inactivity can provide more detail for an authorized shared agent.`;
 
 /**
  * The same rules for the directory profile (/mcp/directory), which cannot

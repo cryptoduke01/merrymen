@@ -252,6 +252,18 @@ The limited `/mcp/directory` profile still excludes setup/settings proposals
 and trade proposals. A secure handoff does not remove a publishing restriction;
 host acceptance and real-host sign-in/signing must be validated separately.
 
+## Grok chat, Grok Bot and Grok Build
+
+For Grok chat, open [Grok Connectors](https://grok.com/connectors), select
+**New Connector → Custom**, enter `https://mcp.merrymen.dev/mcp`, and complete
+Merrymen OAuth on your own device. Ask “Set up my Merryman” after connecting.
+
+Grok Bot is a separate product with MCP/plugins and optional routines. The
+[Grok guide](grok.md) includes the [setup and monitoring package](../../plugins/merrymen-grok/README.md),
+verified vendor instructions, the separate Grok Build CLI route, and the
+native-client acceptance checks still pending. Do not sign in to Merrymen or
+use a signing wallet on the Bot's shared cloud computer.
+
 ## Cursor
 
 <https://cursor.com/en/install-mcp?name=merrymen&config=eyJ1cmwiOiJodHRwczovL21jcC5tZXJyeW1lbi5kZXYvbWNwIn0%3D>
@@ -356,8 +368,10 @@ stateless fallback, on the same endpoint.
 ## What was verified, and how
 
 The install-link formats follow each vendor's documentation as of 2026-09-25.
-Only the claude.ai link was opened live; the others are pinned byte for byte
-by `web/src/mcp/install-links.test.ts` but were not clicked through.
+Only the claude.ai pre-filled install link was opened live; the other generated
+install links are pinned byte for byte by `web/src/mcp/install-links.test.ts`
+but were not clicked through. Grok's manual custom-connector flow was tested
+separately on 2026-10-15, as recorded below.
 
 | Client | Verified |
 |---|---|
@@ -368,4 +382,6 @@ by `web/src/mcp/install-links.test.ts` but were not clicked through.
 | Claude Code plugin (2.1.281) | 2026-09-25, in a throwaway `CLAUDE_CONFIG_DIR`: `claude plugin validate` passed for the plugin and the marketplace; `claude plugin marketplace add` (local checkout) and `claude plugin install merrymen@merrymen` installed 6 skills and the server; `claude mcp list` showed `plugin:merrymen:merrymen` pointing at production as "Needs authentication"; `claude mcp login plugin:merrymen:merrymen --no-browser` produced an authorization URL with Claude Code's metadata-document client and the production `resource`, and that URL reached Merrymen's consent page. After merge, the same run from GitHub in a fresh config: `claude plugin marketplace add https://github.com/millw14/merrymen.git`, install, `claude mcp list` and the login URL all worked, the URL reaching the consent page. The `millw14/merrymen` shorthand failed on that machine because Claude Code clones it over SSH ("SSH host key is not in your known_hosts file"), which is why every command here uses the HTTPS URL. |
 | Codex | Not verified (the Codex CLI is not installed on the build machine). Commands and configuration follow OpenAI's Codex MCP documentation. |
 | ChatGPT / dots | Local transport and OAuth tests cover metadata negotiation and scoped tool calls. Actual ChatGPT connection, dot availability and owner signing have not been verified in a real session. |
+| Grok chat | **Production end to end on 2026-10-15:** manual custom connector, fresh account signup, OAuth consent, authorized setup tool call, inline MCP App, owner wallet signing and return to chat with a fresh paper-mode worker report. The newer combined owner-review screen is locally browser-tested with simulated wallet calls, not yet deployed or signed in the native flow. Live trading and native revocation/scope-denial remain unverified. See [Grok verification](grok.md#verification). |
+| Grok Bot / Grok Build | Official connection and package formats researched on 2026-10-15. Package integrity is checked locally; native installation, OAuth, tool calls and owner signing are not yet acceptance-tested. See [Grok verification](grok.md#verification). |
 | Cursor, VS Code, Gemini CLI, Kiro, LM Studio, Goose, Windsurf / Devin, Zed | Not verified. Links, commands and configuration follow each vendor's documentation as of 2026-09-25. |
