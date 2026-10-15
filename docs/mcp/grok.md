@@ -31,8 +31,9 @@ marketplace or has completed sign-in testing in every client.
 This is a one-time manual connection. Asking Grok to connect Merrymen by name
 can search only its available catalog and report that Merrymen is unavailable;
 that does not establish whether the **Custom** option supports the server.
-The custom route above reached Merrymen's OAuth consent screen in a signed-in
-Grok web session on 2026-10-15. Consent and tool execution remain separate steps.
+The custom route above completed OAuth in a signed-in Grok web session on
+2026-10-15. Grok then called `get_merryman_setup` and rendered its interactive
+Merryman setup card. Consent and tool execution remain separate steps.
 
 Grok Business and Enterprise require an admin to provision the connector
 first. The MCP endpoint must be public; your laptop's localhost address will
@@ -53,6 +54,8 @@ For installed plugins, the documented route is **Connect apps → select a
 plugin → add → Authorize/Authenticate**, then confirm **Installed**.
 [Grok Bot plugin setup](https://cursor.com/help/grok-bot/connect-plugins)
 This repository does not promise that a Merrymen entry appears there.
+See [distribution and listing materials](grok-distribution.md) for the current
+vendor submission process, team rollout option and outstanding acceptance checks.
 
 The [Merrymen Grok package](../../plugins/merrymen-grok/README.md) provides a
 Cursor-format manifest, [remote configuration](../../plugins/merrymen-grok/mcp.json),
@@ -144,12 +147,13 @@ Research checked against the linked official documentation on 2026-10-15.
 | Generic text-only MCP onboarding, without MCP Apps | Passed over the production HTTP/SDK handler with fixture storage in both protocol versions: pending/idempotent drafts, scope denial, owner isolation and rejection of wallet/live authority. These are compatibility tests, not a native Grok session. |
 | Public production server discovery | Health reported ready at commit `67fdaa624222`; protected-resource/OAuth metadata returned 200 and unauthenticated initialization returned the expected 401 discovery challenge on 2026-10-15. |
 | Local setup pages and copy controls | Rendered in a browser; Bot prompt copy showed success and configured local URLs appeared in the prompt. MCP/connection-page suite: 606 tests passed; app and marketing production builds passed. After a clean install, the full local repository typecheck and 27 targeted handoff/recovery/HTTP onboarding tests passed. The PR's clean GitHub CI typecheck also passed. Completion guidance returns owners to their connected assistant. |
-| Grok chat custom connector discovery and OAuth handoff | Verified in signed-in Grok web on Chrome on 2026-10-15: Plugins → Connectors → New Connector → Custom accepted the production URL, checked authentication and opened Merrymen consent with client name Grok and a grok.com return destination. No callback exception was needed. Consent reused the existing Merrymen session; access was not approved during this check. |
-| Grok chat authorized tool calls | Pending owner consent. Reaching the consent screen does not establish authenticated tool execution. |
+| Grok chat custom connector discovery and OAuth handoff | Verified in signed-in Grok web on Chrome on 2026-10-15: Plugins → Connectors → New Connector → Custom accepted the production URL, checked authentication and opened Merrymen consent with client name Grok and a grok.com return destination. No callback exception was needed. After fresh-account signup and owner consent, Grok showed Merrymen as Connected and listed its authorized tools. |
+| Grok chat authorized tool calls | `get_merryman_setup` succeeded for the new shared account: `permission_required`, no trading account or permission expiry, one shared agent and `can_create_draft:true`. The in-chat card submitted a careful Steady Basket draft with a stock basket and received an awaiting-approval proposal. |
 | Grok Bot package installation, OAuth and tool calls | Not yet tested in the native client. |
 | Grok Build CLI installation and OAuth | Commands researched; not executed. |
-| Fresh owner sign-up, wallet signing, activation and return to Grok | Signed out of the existing Merrymen session, restarted Grok OAuth and reached the new-owner Privy email signup form on 2026-10-15. Signup completion, wallet signing and worker activation remain pending. Fixed misleading X-only sign-in/busy labels; 42 targeted sign-in/security-boundary tests passed. |
-| Grok rendering Merrymen's MCP App view | Not assumed; standard text/tool responses remain the fallback. |
+| Fresh owner sign-up, wallet signing, activation and return to Grok | Fresh signup completed on 2026-10-15. The card's proposal opened the secure owner review, and Continue to wallet setup preserved the selected name, strategy, risk and basket. Paper trading was selected with default signed limits: $10/trade, $50/day, seven days, 5% drawdown and 24 operations/day. Wallet signing and worker activation remain pending owner action. Fixed misleading X-only sign-in/busy labels; 42 targeted sign-in/security-boundary tests passed. |
+| Grok rendering Merrymen's MCP App view | Verified on Grok web in Chrome: Your Merryman rendered its name/strategy/risk/assets/basket form in Grok's MCP App sandbox. Submitting the form displayed the proposal and its owner-review link. This establishes the tested setup card, not all clients or every app action; text/link fallback remains available. |
+| Branding and guided installation | Added the current PNG and SVG marks plus description to MCP server identity, and packaged the same PNG as the portable plugin logo. 49 protocol/onboarding tests and four plugin integrity tests passed. The branded quick-start rendered at desktop and 390px mobile widths without horizontal overflow; its address copy control showed success, and two DOM tests covered copying and manual fallback. Grok's display of the new icon metadata remains unverified until deployment and refresh. |
 
 Before claiming native acceptance, connect a real client, verify the selected
 account and scope-filtered tools, run read-only setup/status, and test revoked

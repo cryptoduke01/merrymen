@@ -6,5 +6,6 @@
   "homepage": "https://merrymen.dev/grok",
   "repository": "https://github.com/millw14/merrymen",
   "license": "MIT",
+  "logo": "assets/logo.png",
   "keywords": ["merrymen", "grok", "mcp", "portfolio", "monitoring"]
 }

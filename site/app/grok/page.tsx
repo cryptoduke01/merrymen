@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
-import { Icon } from "@/components/Icon";
+import { GrokQuickStart } from "./GrokQuickStart";
+import "./grok.css";
 
 const title = "Set up Merrymen in Grok and Grok Bot";
 const description =
@@ -26,18 +27,16 @@ export default function GrokSetup() {
           Ask Grok or Grok Bot to help set up your Merryman, check its trades and explain what it
           is doing. Connect your Merrymen account once, then work from the conversation.
         </p>
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 12, marginBottom: 18 }}>
-          <a href="https://grok.com/connectors" className="btn btn-primary btn-lg has-box" target="_blank" rel="noopener noreferrer">
-            Open Grok connectors <span className="box"><Icon name="arrow" size={16} /></span>
-          </a>
-          <a href={`${CONNECT_HUB}#grok-bot`} className="btn btn-lg">Get the Grok Bot setup prompt</a>
-        </div>
+        <GrokQuickStart server={SERVER} />
+        <p>Using Grok Bot? <a href={`${CONNECT_HUB}#grok-bot`} className="link">Get its separate setup prompt</a>.</p>
         <p>
           Merrymen connects through MCP, the same tool interface used by Claude and ChatGPT.
           You don&apos;t need an xAI API key or an extra model service to make the connection.
           You choose the agent and permissions Grok receives on Merrymen&apos;s consent page.
         </p>
 
+        <details className="grok-guide-details">
+        <summary>Full setup guide, Grok Bot and troubleshooting</summary>
         <h2 id="grok">Connect Grok</h2>
         <p>
           Add Merrymen as a custom connector once before using it in chat. Asking Grok to
@@ -141,10 +140,10 @@ export default function GrokSetup() {
           Disconnect it any time on <a className="link" href={CONNECTED_APPS}>Connected apps</a>.
         </p>
         <p>
-          You can use the tools through ordinary text responses and approval links. Interactive
-          Merrymen cards inside Grok are not required; their support has not been verified.
-          This guide follows documented Grok connector and Bot capabilities. A live authenticated
-          Grok or Grok Bot session has not yet been validated by Merrymen.
+          Grok web&apos;s authenticated setup check and interactive Merrymen setup card have been
+          verified. Wallet activation through that flow and the full Grok Bot setup remain
+          unverified. If a host cannot show the card, use ordinary text responses and open the
+          approval links in your own browser.
         </p>
 
         <h2 id="help">If setup stops</h2>
@@ -175,6 +174,7 @@ export default function GrokSetup() {
           <strong>For AI assistants:</strong> read <a className="link" href="/llms.txt">merrymen.dev/llms.txt</a>
           {" "}for tool setup, owner handoffs and the checks that establish whether a Merryman is running.
         </div>
+        </details>
       </article>
     </div>
   );

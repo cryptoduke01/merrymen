@@ -18,7 +18,7 @@ test("the Grok package is declarative and targets the production MCP endpoint wi
   assert.match(manifest.version, /^\d+\.\d+\.\d+$/);
   assert.ok(manifest.description && manifest.author?.name);
   // Reject new execution/configuration surfaces unless their packaging is reviewed.
-  assert.deepEqual(Object.keys(manifest).sort(), ["author", "description", "homepage", "keywords", "license", "name", "repository", "version"]);
+  assert.deepEqual(Object.keys(manifest).sort(), ["author", "description", "homepage", "keywords", "license", "logo", "name", "repository", "version"]);
   assert.deepEqual(JSON.parse(read("mcp.json")), {
     mcpServers: { merrymen: { url: PLUGIN_SERVER_URL } },
   });
@@ -28,9 +28,20 @@ test("the Grok package is declarative and targets the production MCP endpoint wi
       return relative(fileURLToPath(root), join(parent, entry.name)).replaceAll("\\", "/");
     }).sort();
   assert.deepEqual(files, [
-    ".cursor-plugin/plugin.json", "README.md", "mcp.json",
+    ".cursor-plugin/plugin.json", "README.md", "assets/logo.png", "mcp.json",
     ...skills.map(skill => `skills/${skill}/SKILL.md`),
-  ].sort(), "package contains only the reviewed manifest, remote config, README and skills");
+  ].sort(), "package contains only the reviewed manifest, logo, remote config, README and skills");
+});
+
+test("the plugin logo resolves within the package and matches the current public MCP icon", () => {
+  const manifest = JSON.parse(read(".cursor-plugin/plugin.json"));
+  assert.equal(manifest.logo, "assets/logo.png");
+  const logo = readFileSync(new URL(manifest.logo, root));
+  const publicIcon = readFileSync(new URL("../../public/mcp-icon-512.png", import.meta.url));
+  assert.deepEqual(logo, publicIcon, "refresh the packaged logo when the public MCP icon changes");
+  assert.deepEqual(logo.subarray(0, 8), Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+  assert.equal(logo.readUInt32BE(16), 512, "logo width");
+  assert.equal(logo.readUInt32BE(20), 512, "logo height");
 });
 
 test("packaged skills resolve to current Merrymen tools", () => {

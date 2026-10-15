@@ -91,8 +91,12 @@ export function buildServer(principal: Principal | null, opts: { tools?: readonl
   const server = new McpServer(
     {
       name: "merrymen", title: "Merrymen", version: SERVER_VERSION, websiteUrl: "https://merrymen.dev",
-      // The current mark (the redesigned terminal's LogoMark), served by the web app.
-      ...(issuer ? { icons: [{ src: `${issuer}/mcp-icon.svg`, mimeType: "image/svg+xml", sizes: ["any"] }] } : {}),
+      description: "Your Merrymen trading agent, portfolio, trade receipts and decisions.",
+      // Current connector assets; PNG also works in hosts that do not display SVG.
+      ...(issuer ? { icons: [
+        { src: `${issuer}/mcp-icon-512.png`, mimeType: "image/png", sizes: ["512x512"] },
+        { src: `${issuer}/mcp-icon.svg`, mimeType: "image/svg+xml", sizes: ["any"] },
+      ] } : {}),
     },
     {
       instructions: profile === "directory" ? DIRECTORY_INSTRUCTIONS : SERVER_INSTRUCTIONS,
