@@ -208,6 +208,50 @@ test("a host approval longer than 30 seconds still delivers the new Merryman han
   assert.doesNotMatch(m.doc.querySelector(".home-status")!.textContent!, /waiting|returned/i);
 });
 
+test("optional assets survive a delayed host response and the resulting approval has a single branded view", async () => {
+  const m = await start(setup({ agent: null, phase: "no_shared_agent", connection: { ...setup().connection, shared_agent_count: 0, available_tools: ["get_merryman_setup", "create_merryman"] } }));
+  const advanced = field(m, "Assets to consider").closest("details")!;
+  assert.equal(advanced.open, false, "optional fields start folded");
+  advanced.open = true;
+  change(m, "Name", "Marian"); change(m, "Assets to consider", "stocks"); change(m, "Basket symbols", "NVDA, AAPL"); submit(m, "Name");
+  const call = last(m, "create_merryman");
+  assert.equal(call.params!.arguments!.asset_mode, "stocks");
+  assert.deepEqual(call.params!.arguments!.basket, ["NVDA", "AAPL"]);
+  m.expireLastToolWait();
+  assert.equal(field(m, "Assets to consider").value, "stocks");
+  assert.equal(field(m, "Basket symbols").value, "NVDA, AAPL");
+  assert.equal(field(m, "Assets to consider").closest("details")!.open, true, "edited fields remain discoverable after waiting");
+  assert.equal(calls(m).length, 1, "waiting never submits a second draft");
+  const result = draftResult("create");
+  await answer(m, call, { ...result, summary: { ...result.summary, settings: { agentName: "Marian", assetMode: "stocks", basketSymbols: ["NVDA", "AAPL"] } } });
+  assert.equal(m.doc.querySelectorAll(".mm-brand").length, 1);
+  assert.equal(m.doc.querySelector(".home-hero"), null, "the overview hero is not repeated above the approval");
+  assert.equal(m.doc.querySelectorAll(".mm-setup-card").length, 1);
+  assert.equal(m.doc.querySelectorAll(".mm-setup-card a.cta").length, 1);
+  const details = m.doc.querySelector<HTMLDetailsElement>(".setup-details")!;
+  assert.equal(details.open, false);
+  assert.match(details.textContent!, /Marian/);
+  assert.match(details.textContent!, /stocks/);
+  assert.match(details.textContent!, /NVDA, AAPL/);
+  assert.equal(calls(m).length, 1, "showing owner approval does not sign or activate");
+});
+
+test("home shows one next step while keeping later owner actions available in disclosure", async () => {
+  const m = await start(setup({ phase: "permission_expired", next_steps: [
+    { action: "renew_permission", label: "Renew trading permission", detail: "Owner signing is required to renew the existing permission.", url: ISSUER + "/grant", tool: null, owner_action_required: true },
+    { action: "inspect_status", label: "Inspect worker status", detail: "Check the last worker report before changing settings.", url: ISSUER + "/agent", tool: null, owner_action_required: false },
+  ] }));
+  const next = m.doc.querySelector(".home-next")!;
+  assert.match(next.textContent!, /Renew trading permission/);
+  assert.doesNotMatch(next.textContent!, /Inspect worker status/);
+  assert.equal(next.querySelector("a")!.getAttribute("href"), ISSUER + "/grant");
+  const more = [...m.doc.querySelectorAll<HTMLDetailsElement>("details")].find(details => details.querySelector("summary")?.textContent === "More options")!;
+  assert.equal(more.open, false);
+  assert.match(more.textContent!, /Inspect worker status/);
+  assert.equal(more.querySelector("a")!.getAttribute("href"), ISSUER + "/agent");
+  assert.equal(calls(m).length, 0, "disclosing actions does not run them");
+});
+
 test("retrying a slow host request keeps its key and ignores an older result during the retry", async () => {
   const m = await start(); await loadSettings(m); change(m, "Name", "Marian"); submit(m, "Name"); const first = last(m, "create_agent_draft");
   m.expireLastToolWait(); submit(m, "Name"); const retry = last(m, "create_agent_draft");
