@@ -342,6 +342,18 @@ it("an older approved crypto-only setup without a crypto basket cannot reach sig
 function pendingSetup(){return {...setup(),status:"awaiting_approval",result:null};}
 const combinedScreen=(ownerAccount=account)=>React.createElement(CreateAgent,{account:ownerAccount,assistantProposalId:proposalId,onRefresh(){},onSignedIn(){},onBack(){},onDone(){},onFund(){}});
 
+it("the owner review formats monetary strategy settings in the reader's locale",async()=>{
+  ui.dom.window.document.documentElement.lang="pt-BR";
+  setupResponse=pendingSetup();
+  await ui.render(combinedScreen());
+  const rows=Array.from(ui.container.querySelectorAll("details dl > div"));
+  for(const label of ["Amount per buy","Maximum AI trade"]){
+    const row=rows.find(item=>item.querySelector("dt")?.textContent===label);
+    assert.match(row?.querySelector("dd")?.textContent??"",/^US\$\s10,00$/);
+  }
+  assert.equal(settingsWrite,null);assert.equal(mintCalls,0);assert.deepEqual(writes,[]);
+});
+
 it("one explicit action approves the displayed draft before saving settings and signing",async()=>{
   setupResponse=pendingSetup();handoffOk=true;
   await ui.render(combinedScreen());

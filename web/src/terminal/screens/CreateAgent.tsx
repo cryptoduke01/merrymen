@@ -24,7 +24,7 @@ import { SkeletonRows } from "../Skeleton";
 import { CAP_FIELD, parseAmount } from "@/lib/parse-amount";
 import type { TierView } from "@/app/api/tier/route";
 import { loadTier, newAgentQualifies } from "../tier";
-import { count, decimalSeparator, fullDateTime } from "@/lib/format";
+import { count, decimalSeparator, fullDateTime, usd } from "@/lib/format";
 import { useT } from "@/lib/i18n";
 import { approveMcpCreateSetup, declineMcpCreateSetup, loadMcpCreateReview, mcpSetupRequest, type McpCreateReview } from "../mcp-create-setup";
 
@@ -73,7 +73,7 @@ function AssistantSetupSummary({setup,showSigningGuidance=false}:{setup:McpCreat
     <p>{strategy?.name??setup.strategy}{setup.riskLevel?` · ${setup.riskLevel} settings`:""}{setup.basket.length?` · ${setup.basket.join(", ")}`:""}</p>
     <p>{setup.assetMode==="stocks"?"Stocks only":setup.assetMode==="crypto"?"Crypto only":"Stocks and crypto"}. {strategy?.description}</p>
     <p>Setup expires {fullDateTime(setup.expiresAt*1000)}.</p>
-    {Object.keys(setup.riskSettings).length>0&&<details><summary>Review strategy settings</summary><dl className="fund-breakdown">{Object.entries(setup.riskSettings).map(([key,value])=><div key={key}><dt>{RISK_LABELS[key]}</dt><dd>{key.endsWith("Bps")?`${value/100}%`:`$${value}`}</dd></div>)}</dl><p>Price-impact safety limits stay unchanged.</p></details>}
+    {Object.keys(setup.riskSettings).length>0&&<details><summary>Review strategy settings</summary><dl className="fund-breakdown">{Object.entries(setup.riskSettings).map(([key,value])=><div key={key}><dt>{RISK_LABELS[key]}</dt><dd>{key.endsWith("Bps")?`${value/100}%`:usd(value)}</dd></div>)}</dl><p>Price-impact safety limits stay unchanged.</p></details>}
     {showSigningGuidance&&<p>Your wallet confirms the limits below. Then return to your chat.</p>}
     {strategy?.circle&&<p>This strategy requires a qualifying $MERRYMEN holding. Until you qualify, it opens no new positions. Ask your assistant for a different strategy if you want to start without that requirement.</p>}
   </div>;
