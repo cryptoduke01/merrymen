@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { PLUGIN_SERVER_URL } from "./install-links";
 import { SCOPES, scopeFor } from "./scopes";
 import { ALL_TOOLS } from "./tools";
+import { SETUP_DRAFT_DEFAULTS } from "./instructions";
 
 const root = new URL("../../../plugins/merrymen-grok/", import.meta.url);
 const read = (relative: string) => readFileSync(new URL(relative, root), "utf8");
@@ -55,6 +56,23 @@ test("packaged skills resolve to current Merrymen tools", () => {
     for (const [, name] of text.matchAll(/`([a-z]+(?:_[a-z]+)+)`/g)) {
       assert.ok(tools.has(name), `${skill} references missing tool ${name}`);
     }
+  }
+});
+
+test("the setup skill and host instructions carry the same supported draft template", () => {
+  const text = read("skills/merrymen-setup/SKILL.md");
+  const block = /```json\n([\s\S]*?)\n```/.exec(text)?.[1];
+  assert.ok(block, "setup must disclose its starter configuration");
+  const defaults = JSON.parse(block);
+  assert.deepEqual(defaults, SETUP_DRAFT_DEFAULTS);
+  const tool = ALL_TOOLS.find(tool => tool.name === "create_merryman");
+  assert.ok(tool);
+  const input = { ...defaults, idempotency_key: "grok-setup-contract-test" };
+  assert.deepEqual(tool.input.parse(input), input);
+  assert.equal(tool.capability, "drafts.write");
+  for (const unsupported of ["mode", "liveTradingEnabled", "wallet", "max_per_trade_usdg"]) {
+    assert.equal(tool.input.safeParse({ ...input, [unsupported]: "paper" }).success, false,
+      `${unsupported} must remain outside the setup proposal contract`);
   }
 });
 

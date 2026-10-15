@@ -86,15 +86,17 @@ results. Local package tests alone do not complete this procedure.
 
 | Check | Evidence as of 2026-10-15 |
 |---|---|
-| Local package | All four integrity tests passed, including logo bytes/dimensions, production endpoint, current tools and the monitoring allowlist. `git diff --check` passed. |
+| Local package | Five package integrity tests passed, covering logo bytes/dimensions, production endpoint, current tools, the setup template's actual tool schema and the monitoring allowlist. All 17 targeted Grok prompt/package/HTTP onboarding tests passed. |
 | Native Grok chat | Authenticated `get_merryman_setup` succeeded and an interactive Merrymen MCP App rendered. |
-| Native setup handoff | Created a Grok Scout draft through the card and opened the approved secure wallet page on the owner's device. |
-| Wallet signing and activation | Signing is pending; worker activation and a fresh running-state result in Grok are not established. The current test is configured for practice mode. |
+| Native setup handoff | Fresh-account consent and Grok Scout drafting through the MCP App completed; the approved secure wallet page preserved the chosen configuration on the owner's device. |
+| Wallet signing and activation | The owner signed paper limits, returned to Grok and selected Check activation. Grok reported paper mode with a fresh worker report. The native practice flow passed; live trading was not tested. |
 | Grok Bot | Package installation, OAuth, tool execution and setup/monitoring skill behavior remain unverified in the native Bot client. Grok chat success does not verify Grok Bot. |
 | Branding and distribution | Public connector icon rendering, a marketplace listing and a catalog install link are not verified. The package logo is a local asset, not evidence of catalog approval. |
 | Permissions and monitoring | Native-client revocation, scope-denial and scheduled monitoring acceptance checks above remain pending. |
 
-The untested Grok Bot installation/behavior and unfinished activation prevent
-an honest attestation that the full advertised workflow has been tested
-locally and in-app. Complete the chosen host's acceptance checks and update
-this record before the owner submits. No external form has been submitted.
+The untested Grok Bot installation/behavior and outstanding permissions and
+monitoring checks prevent an honest attestation that the full advertised
+Bot workflow has been tested locally and in-app. Native Grok chat practice
+activation does not replace those checks. Complete the chosen host's acceptance
+checks and update this record before the owner submits. No external form has
+been submitted.

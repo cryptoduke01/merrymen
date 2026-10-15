@@ -12,10 +12,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AlertTriangle, ArrowRight, Bot, Check, ChevronDown, Cpu, Laptop, ShieldCheck, Unplug, X } from "lucide-react";
 import { SignIn } from "@/terminal/HostedControls";
+import { SignOut } from "@/terminal/SignOut";
 import { BrandLockup } from "../BrandLockup";
 import { accessSummary, initialSelection, previousNote, type Selection } from "./summary";
 
 const STORAGE = "merrymen.mcp-consent";
+const SWITCH_STORAGE = `${STORAGE}.switching`;
 
 interface ScopeView {
   id: string;
@@ -87,6 +89,9 @@ export function ConsentClient() {
   const [customizing, setCustomizing] = useState(false);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
+  const [switchingAccount, setSwitchingAccount] = useState(false);
+  const [switchError, setSwitchError] = useState("");
+  const accountSwitchPending = useRef(false);
   const [done, setDone] = useState<"approved" | "declined" | null>(null);
   const [error, setError] = useState("");
   const version = useRef(0);
@@ -97,20 +102,28 @@ export function ConsentClient() {
     const supplied = new URLSearchParams(window.location.hash.slice(1)).get("request");
     if (window.location.hash) window.history.replaceState(null, "", window.location.pathname);
     let value = supplied;
+    let unfinishedSwitch = false;
     try {
       if (supplied) sessionStorage.setItem(STORAGE, supplied);
       else value = sessionStorage.getItem(STORAGE);
+      unfinishedSwitch = !!value && sessionStorage.getItem(SWITCH_STORAGE) === value;
     } catch { /* tab storage is optional */ }
     if (!value || value.length > 200) {
       setLoading(false);
       setError("Start the connection from your AI assistant (for example “Add connector” in Claude, or `codex mcp login merrymen`). This page opens by itself.");
       return;
     }
+    if (unfinishedSwitch) {
+      accountSwitchPending.current = true;
+      setSwitchingAccount(true);
+      setSwitchError("Account switching did not finish. Retry sign-out before using another account.");
+      setLoading(false);
+    }
     setRequest(value);
   }, []);
 
   const load = useCallback(async () => {
-    if (!request) return;
+    if (!request || accountSwitchPending.current) return;
     const v = ++version.current;
     setLoading(true);
     setError("");
@@ -135,7 +148,7 @@ export function ConsentClient() {
   useEffect(() => { if (request) void load(); }, [request, load]);
 
   async function decide(approve: boolean) {
-    if (!request || busy) return;
+    if (!request || busy || accountSwitchPending.current) return;
     setBusy(true);
     setError("");
     try {
@@ -148,6 +161,32 @@ export function ConsentClient() {
     } finally {
       setBusy(false);
     }
+  }
+
+  function accountSignedOut() {
+    // Keep the request in this tab, but never carry an old owner's selection
+    // across accounts. The server describes the next owner's access afresh.
+    setView(null);
+    setStart(null);
+    setScopes(new Set());
+    setAgents(new Set());
+    setCustomizing(false);
+    try { sessionStorage.removeItem(SWITCH_STORAGE); } catch { /* tab storage is optional */ }
+    accountSwitchPending.current = false;
+    setSwitchingAccount(false);
+    setSwitchError("");
+    void load();
+  }
+
+  function accountSwitchStarted() {
+    accountSwitchPending.current = true;
+    version.current++;
+    // A refresh after partial logout must not reopen sign-in for the old
+    // Privy account. This marker belongs only to this tab and request.
+    try { if (request) sessionStorage.setItem(SWITCH_STORAGE, request); } catch { /* optional */ }
+    setSwitchingAccount(true);
+    setSwitchError("");
+    setError("");
   }
 
   const toggle = (set: Set<string>, id: string, update: (s: Set<string>) => void) => {
@@ -169,6 +208,13 @@ export function ConsentClient() {
   const summary = accessSummary(visibleScopes.map((s) => ({ ...s, phrase: s.phrase || s.title })), scopes, agents.size > 0);
   const note = view && start ? previousNote(start, { scopes, agents }, view.previous?.partial === true, appName) : null;
   const onlyAgent = view && view.agents.length === 1 ? view.agents[0] : null;
+  const accountSwitchControl = <>
+    <div className="mcp-account-actions">
+      <span>{switchingAccount ? "Switching accounts" : "Signed in to Merrymen"}</span>
+      <SignOut label={switchError ? "Retry account switch" : "Use another account"} className="mcp-switch-account" disabled={busy} onStart={accountSwitchStarted} onError={setSwitchError} after={accountSignedOut} />
+    </div>
+    {switchError && <p className="flow-error" role="alert">{switchError}</p>}
+  </>;
 
   return (
     <div className="terminal-host partner-connect mcp-connect">
@@ -193,19 +239,25 @@ export function ConsentClient() {
           )}
         </div>
 
-        <section className="connect-panel" aria-label="Approve access" aria-busy={loading || busy}>
+        <section className="connect-panel" aria-label="Approve access" aria-busy={loading || busy || (switchingAccount && !switchError)}>
           {loading && <div className="connect-wait" role="status"><span className="connect-spinner" aria-hidden />Checking the request…</div>}
 
-          {!loading && view && !view.signedIn && <>
+          {!loading && switchingAccount && !view && <>
+            <h2>Finish switching accounts.</h2>
+            {accountSwitchControl}
+          </>}
+
+          {!loading && view && !view.signedIn && !switchingAccount && <>
             <span className="connect-step-label">01 · SIGN IN</span>
             <h2>Sign in or create your account.</h2>
-            <p>Connect your Merrymen account to {appName}. You’ll choose its access here, then return to your chat. {setupScope?"Allow setup suggestions below if you want your assistant to help name your agent and choose its strategy.":"Your assistant can use only the access you choose."}</p>
+            <p>Sign in, verify account ownership, then choose what {appName} can access. You’ll return to your chat after connecting. {setupScope?"On the next step, you can allow setup suggestions to help name your Merryman and choose its strategy.":"Your assistant can use only the access you choose."}</p>
             <SignIn onDone={() => void load()} />
           </>}
 
           {!loading && view && view.signedIn && !done && <>
             <span className="connect-step-label">02 · ALLOW ACCESS</span>
             <h2>Connect {appName} to Merrymen?</h2>
+            {accountSwitchControl}
             {view.client.registration === "dynamic" && <div className="connect-boundary mcp-warn"><AlertTriangle size={18} aria-hidden /><p>Merrymen cannot confirm who made this app. Only continue if you just started this connection yourself and recognise <b>{view.client.redirectHost}</b>.</p></div>}
 
             {/* One agent (every owner, today) is a card with a Share box, ticked
@@ -259,8 +311,8 @@ export function ConsentClient() {
               {note && <p className="mcp-summary-note">{note}</p>}
             </div>
 
-            <button className="flow-primary" disabled={busy || !chosenUseful} onClick={() => void decide(true)}>{busy ? "Connecting…" : `Allow ${appName}`} {!busy && <ArrowRight size={16} aria-hidden />}</button>
-            <button className="connect-cancel" disabled={busy} onClick={() => void decide(false)}><Unplug size={15} aria-hidden /> Decline</button>
+            <button className="flow-primary" disabled={busy || switchingAccount || !chosenUseful} onClick={() => void decide(true)}>{busy ? "Connecting…" : `Allow ${appName}`} {!busy && <ArrowRight size={16} aria-hidden />}</button>
+            <button className="connect-cancel" disabled={busy || switchingAccount} onClick={() => void decide(false)}><Unplug size={15} aria-hidden /> Decline</button>
 
             <button type="button" className="mcp-customize-toggle" aria-expanded={customizing} aria-controls="mcp-customize" onClick={() => setCustomizing((open) => !open)}>
               Change what {appName} can do <ChevronDown size={15} aria-hidden />

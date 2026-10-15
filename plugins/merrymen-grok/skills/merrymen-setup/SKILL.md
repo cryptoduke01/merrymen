@@ -5,7 +5,7 @@ description: Connect hosted Merrymen to Grok Bot or another compatible MCP host,
 
 # Set up Merrymen
 
-Use the connected Merrymen MCP tools. This package points to
+Use only the connection's available tools and their current schemas. This package points to
 `https://mcp.merrymen.dev/mcp`, a hosted service with OAuth. It does not install
 a trading worker on the Bot's computer. Do not create another connection if
 the host already has this endpoint configured and usable.
@@ -29,25 +29,60 @@ Give the owner the link instead.
 1. Call `get_merryman_setup`. Report its phase, observation time and next step.
    Use `list_agents` if the owner needs to choose between shared agents.
    An empty list means no agent is visible to this connection; it does not
-   prove that the owner has no existing account or wallet.
+   prove that the owner has no existing account or wallet. A status question
+   does not authorize a new draft.
 2. If an agent already exists, inspect `get_agent_status`. Report permission
    expiry, worker freshness and blockers. Follow the returned owner links for
    sharing access, funding, permission renewal or recovery. Do not create a
-   replacement wallet to resolve an access error.
-3. For an explicitly requested new Merryman, collect the owner's name,
-   strategy, risk and asset preferences. Call `create_merryman` only when the
-   connection permits drafting and those choices are known. Never lower a
-   risk limit to clear a blocker. If drafting is unavailable, explain the
-   optional setup permission and give the owner the returned creation link.
-4. Give the owner the proposal's review link. They review it and continue to
-   wallet setup in Merrymen on their own device. Preserve the proposal ID;
-   use `get_proposal` to check an uncertain result instead of issuing another
-   draft after a timeout. If no ID returned, inspect `list_proposals` for the
-   attempted setup; if its outcome remains unclear, report that and stop.
-5. After the owner returns, call `get_merryman_setup` and `get_agent_status`
-   again. A draft, approval or successful OAuth connection does not prove
-   activation. Say the worker is running only when fresh status supports it;
-   distinguish paper mode from live funds and report remaining blockers.
+   replacement wallet or change existing settings to resolve a setup blocker.
+3. Before drafting, inspect a known proposal with `get_proposal`, or use
+   `list_proposals` with status=all when available. Resume a matching setup,
+   including an approved draft whose owner signing is unfinished. Preserve
+   choices supplied earlier; ask only if the intended agent/proposal is
+   ambiguous or the configuration conflicts.
+
+## Prepare a requested setup
+
+For a requested new Merryman with no strategy, asset or basket preference
+and no live-mode request, disclose this practice starter and prepare it
+without a questionnaire:
+
+```json
+{
+  "name": "My Merryman",
+  "strategy": "steady-basket",
+  "asset_mode": "stocks",
+  "risk_level": "careful"
+}
+```
+
+Preserve a name or risk choice already supplied. Leave the basket to
+Merrymen's defaults shown at owner review unless the owner supplied one.
+Otherwise preserve their configuration and omit unspecified optional fields;
+ask one short question only when a missing choice is needed to make it valid.
+Never apply this template to an existing agent or lower a limit to clear a
+blocker. Practice is the intended mode the owner selects in Merrymen, not a
+draft-tool field; never invent mode, wallet, signing or limit arguments.
+
+Call `create_merryman` only if granted, using the supported fields and one
+unique idempotency key for this distinct request. Retain that key and the
+proposal ID. After a timeout, inspect the proposal or recent proposals;
+never create another draft with a new key to resolve an unknown outcome.
+If drafting is unavailable, offer the returned owner creation link and
+explain optional drafting access. Do not automatically expand scopes or
+require reconnecting when the owner can continue in Merrymen.
+
+Give one returned approval link with a short summary of the choices and intended mode.
+The owner reviews and continues through the linked account/wallet setup,
+mode choice and signing on their own device. Do not ask them to
+re-enter preferences already carried by the proposal.
+
+After the owner returns, call `get_merryman_setup` again and
+`get_agent_status` if available. Report practice active only when setup
+reports phase=paper with a fresh worker report. Otherwise report the actual
+phase and remaining blocker; an approval, signature or successful OAuth
+connection alone does not establish activation. Keep live and practice
+results separate, and do not enable live mode as a setup shortcut.
 
 Merrymen's hosted worker continues after activation when this chat closes.
 Its signed authority, funding, service health and trading limits still apply.

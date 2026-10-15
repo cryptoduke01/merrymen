@@ -66,9 +66,10 @@ test("Grok and Grok Bot have separate visible connection routes and owner handof
   assert.match(grok, /<summary>Read the setup prompt/);
   assert.match(grok, /browser on my own device/);
   assert.match(grok, /Do not sign in to Merrymen, approve proposals, create wallets or sign permissions/);
-  assert.match(grok, /Call get_merryman_setup first/);
-  assert.match(grok, /After I return, call get_merryman_setup again/);
-  assert.match(grok, /Report running only from fresh worker evidence/);
+  assert.match(grok, /call get_merryman_setup before acting/);
+  assert.match(grok, /After the owner returns, call get_merryman_setup again/);
+  assert.match(grok, /Report practice active only when setup reports phase=paper with a fresh worker report/);
+  assert.match(grok, /Signing or approval alone is not activation/);
   assert.match(grok, /do not assume a Grok chat connector is installed in this Bot/);
   assert.match(grok, /Use text and links if this host cannot render MCP Apps/);
   assert.match(grok, /<code>\/mcps<\/code>/);

@@ -432,6 +432,9 @@
   font-size: 13px;
   color: var(--tx-2);
 }
+:where(.terminal-host) .hosted-signin-methods { display: grid; gap: 10px; }
+:where(.terminal-host) .hosted-signin-methods .flow-secondary { width: 100%; border: 1px solid var(--line); border-radius: 12px; }
+:where(.terminal-host) .hosted-auth .hosted-auth-note { margin: 12px 0; color: var(--tx-2); font-size: 12px; line-height: 1.6; }
 :where(.terminal-host) .flow-actions > .flow-hint {
   text-align: center;
   margin: 3px 0;

@@ -32,8 +32,10 @@ This is a one-time manual connection. Asking Grok to connect Merrymen by name
 can search only its available catalog and report that Merrymen is unavailable;
 that does not establish whether the **Custom** option supports the server.
 The custom route above completed OAuth in a signed-in Grok web session on
-2026-10-15. Grok then called `get_merryman_setup` and rendered its interactive
-Merryman setup card. Consent and tool execution remain separate steps.
+2026-10-15. Grok called `get_merryman_setup`, rendered its interactive setup
+card, and prepared a draft. After owner review and signing, **Check activation**
+reported paper mode with a fresh worker report. This establishes the tested
+practice flow; it does not establish live trading or native Grok Bot behavior.
 
 Grok Business and Enterprise require an admin to provision the connector
 first. The MCP endpoint must be public; your laptop's localhost address will
@@ -71,12 +73,21 @@ and account permissions are the same.
 
 ## Setup, wallet and activation
 
-The assistant starts with `get_merryman_setup`. If no agent is visible, check
-sharing before creating one. For a requested new Merryman, `create_merryman`
-prepares the selected name, strategy and risk choices when drafting access is
-granted. Open the returned review link on your own device, approve, and
-continue to wallet setup. After signing, return to the same chat; the
-assistant refreshes setup and status to verify the worker's actual state.
+Ask, “Set up my Merryman in practice mode.” The assistant starts with
+`get_merryman_setup` and reuses the existing agent or matching draft. It uses
+preferences already supplied. For a new setup with no strategy/assets chosen,
+the shared host instructions and Bot skill disclose a starter: My Merryman,
+Steady Basket, stocks, careful risk, with Merrymen's default basket shown at
+owner review. They ask only about an ambiguous target or a conflicting or
+required missing choice. Existing agents are never reset to these defaults.
+
+When drafting is granted, `create_merryman` prepares the supported choices
+and returns one owner review link. Practice mode and signed limits are owner
+choices, not draft-tool arguments. Open the link on your own device, approve,
+and continue to wallet setup. After signing, return to the same chat; the
+assistant checks fresh setup/status before reporting practice active. Missing
+optional drafting access can use the owner creation link without automatically
+expanding the connection's permissions.
 
 Owner sign-in, consent, funding, approval and wallet signing stay in your own
 device browser. Never import a signing wallet or use an owner session in
@@ -151,13 +162,14 @@ Research checked against the linked official documentation on 2026-10-15.
 | Grok chat authorized tool calls | `get_merryman_setup` succeeded for the new shared account: `permission_required`, no trading account or permission expiry, one shared agent and `can_create_draft:true`. The in-chat card submitted a careful Steady Basket draft with a stock basket and received an awaiting-approval proposal. |
 | Grok Bot package installation, OAuth and tool calls | Not yet tested in the native client. |
 | Grok Build CLI installation and OAuth | Commands researched; not executed. |
-| Fresh owner sign-up, wallet signing, activation and return to Grok | Fresh signup completed on 2026-10-15. The card's proposal opened the secure owner review, and Continue to wallet setup preserved the selected name, strategy, risk and basket. Paper trading was selected with default signed limits: $10/trade, $50/day, seven days, 5% drawdown and 24 operations/day. Wallet signing and worker activation remain pending owner action. Fixed misleading X-only sign-in/busy labels; 42 targeted sign-in/security-boundary tests passed. |
+| Fresh owner sign-up, wallet signing, activation and return to Grok | Completed on 2026-10-15: fresh signup and consent, Grok Scout draft through the MCP App, owner review, wallet setup and signed paper limits on the owner's device. The handoff preserved name, strategy, risk and basket. Returning to Grok and selecting Check activation reported paper mode with a fresh worker report. This verifies practice activation, not live trading. The sign-in improvements preserve wallet ownership proof and now offer explicit email/X choices and account switching. |
 | Grok rendering Merrymen's MCP App view | Verified on Grok web in Chrome: Your Merryman rendered its name/strategy/risk/assets/basket form in Grok's MCP App sandbox. Submitting the form displayed the proposal and its owner-review link. This establishes the tested setup card, not all clients or every app action; text/link fallback remains available. |
+| Shorter owner review and sign-in | The combined draft/limits screen and single completion panel are branch changes, checked with rendered-component tests and a local browser preview using a synthetic account and mocked wallet calls. They have not been deployed or acceptance-tested with another real wallet signature. |
 | Branding and guided installation | Added the current PNG and SVG marks plus description to MCP server identity, and packaged the same PNG as the portable plugin logo. 49 protocol/onboarding tests and four plugin integrity tests passed. The branded quick-start rendered at desktop and 390px mobile widths without horizontal overflow; its address copy control showed success, and two DOM tests covered copying and manual fallback. Grok's display of the new icon metadata remains unverified until deployment and refresh. |
 
-Before claiming native acceptance, connect a real client, verify the selected
-account and scope-filtered tools, run read-only setup/status, and test revoked
-access. For the full onboarding claim, also complete an owner-reviewed setup
-and signing on the owner's device, then verify fresh worker status in the
-original conversation. Record the client/version, endpoint, date and evidence.
-Test monitoring with read-only access and confirm unchanged state stays quiet.
+The native Grok web practice flow above passed. Grok Bot acceptance remains
+pending: verify its connection, authorized tools, reuse of existing setup,
+owner handoff and fresh worker status in the original conversation. Record
+the client/version, endpoint, date and evidence. Native revocation/scope-denial
+checks and requested read-only monitoring still need testing, including that
+unchanged state stays quiet.

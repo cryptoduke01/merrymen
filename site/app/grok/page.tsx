@@ -140,10 +140,10 @@ export default function GrokSetup() {
           Disconnect it any time on <a className="link" href={CONNECTED_APPS}>Connected apps</a>.
         </p>
         <p>
-          Grok web&apos;s authenticated setup check and interactive Merrymen setup card have been
-          verified. Wallet activation through that flow and the full Grok Bot setup remain
-          unverified. If a host cannot show the card, use ordinary text responses and open the
-          approval links in your own browser.
+          Grok web&apos;s fresh-account signup, connection, interactive setup card, owner wallet
+          signing and fresh practice-worker report have been verified. Full Grok Bot setup
+          remains unverified. If a host cannot show the card, use ordinary text responses and
+          open the approval links in your own browser.
         </p>
 
         <h2 id="help">If setup stops</h2>

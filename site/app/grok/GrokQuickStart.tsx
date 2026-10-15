@@ -3,7 +3,7 @@
 import { useId, useRef, useState } from "react";
 import { Icon } from "../../components/Icon";
 
-const SETUP_PROMPT = "Set up my Merryman. Check my setup first, guide me through approvals in Merrymen, then confirm whether it is running. Keep practice and live separate.";
+const SETUP_PROMPT = "Set up a practice Merryman for me. Check my setup first and reuse anything already prepared. Send me one link to review the setup and sign in Merrymen, then check whether it is running.";
 
 /** The text stays visible and selectable when clipboard access is unavailable. */
 function CopyField({ label, value, action }: { label: string; value: string; action: string }) {
@@ -74,7 +74,7 @@ export function GrokQuickStart({ server }: { server: string }) {
         <li>
           <h3>Sign in, then return to Grok</h3>
           <p>Sign in to Merrymen or create your account. To create a Merryman from chat, allow
-            <strong> Prepare agent setups and suggest setting changes</strong>. Then paste this in Grok to open the setup card:</p>
+            <strong> Prepare agent setups and suggest setting changes</strong>. Then ask Grok to prepare your setup:</p>
           <CopyField label="First message" value={SETUP_PROMPT} action="Copy setup prompt" />
           <p className="grok-quick-note">Review setup and wallet approvals yourself in Merrymen. Grok can check what remains afterwards.</p>
         </li>

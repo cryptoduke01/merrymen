@@ -34,8 +34,8 @@ test("quick start copies the displayed address and offers the real connector set
   assert.equal(link?.rel, "noopener noreferrer");
   assert.ok(ui.container.textContent?.includes("Plugins → Connectors → New Connector → Custom"));
   await ui.click("Copy setup prompt");
-  assert.match(copied[1], /^Set up my Merryman\./);
-  assert.match(copied[1], /approvals in Merrymen/);
+  assert.match(copied[1], /^Set up a practice Merryman for me\./);
+  assert.match(copied[1], /review the setup and sign in Merrymen/);
 });
 
 test("a rejected clipboard leaves the exact address selected and gives a visible remedy", async () => {
