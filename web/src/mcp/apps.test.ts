@@ -982,7 +982,7 @@ test("proposal view: settings, agent-draft and post proposals render their conte
     left_out: [{ key: "maxImpactBps", why: "The price-impact safety floor stays unchanged." }],
     after_approval: "Approving saves these settings.", requested_by: "Claude",
   } }));
-  assert.match(draft.text(), /a draft agent setup/);
+  assert.match(draft.text(), /a change to the agent's settings/, "a draft without creation purpose does not promise a new wallet setup");
   const name = Array.from(draft.doc.querySelectorAll("dt")).find((x) => x.textContent === "Agent name")!.nextElementSibling!;
   assert.ok(name.querySelector(".ut-inline"), "the suggested name is the assistant's text");
   assert.match(draft.text(), /BasketNVDA, TSLA/);

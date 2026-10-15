@@ -61,12 +61,20 @@ const open: JSDOM[] = [];
 afterEach(() => { while (open.length) open.pop()!.window.close(); });
 function mount() {
   const sent: Message[] = [];
+  const toolTimeouts: Array<() => void> = [];
   const host = { postMessage(m: Message) { sent.push(JSON.parse(JSON.stringify(m))); } };
-  const dom = new JSDOM(appHtml("home", { issuer: ISSUER }), { runScripts: "dangerously", url: "https://sandbox.example", pretendToBeVisual: true, beforeParse(w) { (w as unknown as { parent: unknown }).parent = host; } });
+  const dom = new JSDOM(appHtml("home", { issuer: ISSUER }), { runScripts: "dangerously", url: "https://sandbox.example", pretendToBeVisual: true, beforeParse(w) {
+    (w as unknown as { parent: unknown }).parent = host;
+    const schedule = w.setTimeout.bind(w);
+    w.setTimeout = (handler, timeout, ...args) => {
+      if (timeout === 30_000 && typeof handler === "function") toolTimeouts.push(() => handler(...args));
+      return schedule(handler, timeout, ...args);
+    };
+  } });
   open.push(dom);
   const w = dom.window;
   const deliver = (data: unknown) => w.dispatchEvent(new w.MessageEvent("message", { data, source: host as never }));
-  return { w, doc: w.document, sent, deliver, tick: () => new Promise<void>(r => setTimeout(r, 10)), text: () => w.document.getElementById("app")!.textContent ?? "" };
+  return { w, doc: w.document, sent, deliver, expireLastToolWait() { assert.ok(toolTimeouts.length); toolTimeouts.at(-1)!(); }, tick: () => new Promise<void>(r => setTimeout(r, 10)), text: () => w.document.getElementById("app")!.textContent ?? "" };
 }
 type Mount = ReturnType<typeof mount>;
 async function show(m: Mount, data: unknown) { m.deliver({ jsonrpc: "2.0", method: "ui/notifications/tool-result", params: { structuredContent: data } }); await m.tick(); }
@@ -187,6 +195,85 @@ test("a failed rename stays name-only when a refresh reveals newer saved strateg
 function draftResult(purpose = "settings") {
   return { proposal_id: PID, kind: "agent_draft", status: "awaiting_approval", approval_url: `${ISSUER}/connect/approve/${PID}`, expires_at: FUTURE, binding_hash: "ab".repeat(32), summary: { action: purpose === "create" ? "Create a new Merryman" : "Update settings", purpose, settings: { agentName: "Marian" } }, next_steps: "Owner review required.", created: true, risk_profile: null, left_out: [], diff: null };
 }
+
+test("a host approval longer than 30 seconds still delivers the new Merryman handoff", async () => {
+  const m = await start(setup({ agent: null, phase: "no_shared_agent", connection: { ...setup().connection, shared_agent_count: 0, available_tools: ["get_merryman_setup", "create_merryman"] } }));
+  change(m, "Name", "Marian"); submit(m, "Name"); const call = last(m, "create_merryman");
+  m.expireLastToolWait();
+  assert.equal(field(m, "Name").value, "Marian", "waiting preserves the submitted setup");
+  assert.equal(calls(m).length, 1, "waiting does not repeat a host approval or create another draft");
+  await answer(m, call, draftResult("create"));
+  assert.ok(m.doc.querySelector(`a[href="${ISSUER}/connect/approve/${PID}"]`), "late approved call remains actionable");
+  assert.match(m.text(), /Draft prepared/);
+  assert.doesNotMatch(m.doc.querySelector(".home-status")!.textContent!, /waiting|returned/i);
+});
+
+test("optional assets survive a delayed host response and the resulting approval has a single branded view", async () => {
+  const m = await start(setup({ agent: null, phase: "no_shared_agent", connection: { ...setup().connection, shared_agent_count: 0, available_tools: ["get_merryman_setup", "create_merryman"] } }));
+  const advanced = field(m, "Assets to consider").closest("details")!;
+  assert.equal(advanced.open, false, "optional fields start folded");
+  advanced.open = true;
+  change(m, "Name", "Marian"); change(m, "Assets to consider", "stocks"); change(m, "Basket symbols", "NVDA, AAPL"); submit(m, "Name");
+  const call = last(m, "create_merryman");
+  assert.equal(call.params!.arguments!.asset_mode, "stocks");
+  assert.deepEqual(call.params!.arguments!.basket, ["NVDA", "AAPL"]);
+  m.expireLastToolWait();
+  assert.equal(field(m, "Assets to consider").value, "stocks");
+  assert.equal(field(m, "Basket symbols").value, "NVDA, AAPL");
+  assert.equal(field(m, "Assets to consider").closest("details")!.open, true, "edited fields remain discoverable after waiting");
+  assert.equal(calls(m).length, 1, "waiting never submits a second draft");
+  const result = draftResult("create");
+  await answer(m, call, { ...result, summary: { ...result.summary, settings: { agentName: "Marian", assetMode: "stocks", basketSymbols: ["NVDA", "AAPL"] } } });
+  assert.equal(m.doc.querySelectorAll(".mm-brand").length, 1);
+  assert.equal(m.doc.querySelector(".home-hero"), null, "the overview hero is not repeated above the approval");
+  assert.equal(m.doc.querySelectorAll(".mm-setup-card").length, 1);
+  assert.equal(m.doc.querySelectorAll(".mm-setup-card a.cta").length, 1);
+  const details = m.doc.querySelector<HTMLDetailsElement>(".setup-details")!;
+  assert.equal(details.open, false);
+  assert.match(details.textContent!, /Marian/);
+  assert.match(details.textContent!, /stocks/);
+  assert.match(details.textContent!, /NVDA, AAPL/);
+  assert.equal(calls(m).length, 1, "showing owner approval does not sign or activate");
+});
+
+test("home shows one next step while keeping later owner actions available in disclosure", async () => {
+  const m = await start(setup({ phase: "permission_expired", next_steps: [
+    { action: "renew_permission", label: "Renew trading permission", detail: "Owner signing is required to renew the existing permission.", url: ISSUER + "/grant", tool: null, owner_action_required: true },
+    { action: "inspect_status", label: "Inspect worker status", detail: "Check the last worker report before changing settings.", url: ISSUER + "/agent", tool: null, owner_action_required: false },
+  ] }));
+  const next = m.doc.querySelector(".home-next")!;
+  assert.match(next.textContent!, /Renew trading permission/);
+  assert.doesNotMatch(next.textContent!, /Inspect worker status/);
+  assert.equal(next.querySelector("a")!.getAttribute("href"), ISSUER + "/grant");
+  const more = [...m.doc.querySelectorAll<HTMLDetailsElement>("details")].find(details => details.querySelector("summary")?.textContent === "More options")!;
+  assert.equal(more.open, false);
+  assert.match(more.textContent!, /Inspect worker status/);
+  assert.equal(more.querySelector("a")!.getAttribute("href"), ISSUER + "/agent");
+  assert.equal(calls(m).length, 0, "disclosing actions does not run them");
+});
+
+test("retrying a slow host request keeps its key and ignores an older result during the retry", async () => {
+  const m = await start(); await loadSettings(m); change(m, "Name", "Marian"); submit(m, "Name"); const first = last(m, "create_agent_draft");
+  m.expireLastToolWait(); submit(m, "Name"); const retry = last(m, "create_agent_draft");
+  assert.notEqual(retry.id, first.id); assert.deepEqual(retry.params!.arguments, first.params!.arguments);
+  await answer(m, first, draftResult());
+  assert.equal(m.doc.querySelector(`a[href="${ISSUER}/connect/approve/${PID}"]`), null);
+  assert.match(m.doc.querySelector(".home-status")!.textContent!, /Working/);
+  assert.ok(m.doc.querySelector<HTMLButtonElement>('button[type="submit"]')!.disabled);
+  await answer(m, retry, draftResult());
+  assert.ok(m.doc.querySelector(`a[href="${ISSUER}/connect/approve/${PID}"]`));
+});
+
+test("a delayed host approval cannot restore the previous connection's setup", async () => {
+  const initial = setup({ agent: null, phase: "no_shared_agent", connection: { ...setup().connection, shared_agent_count: 0, available_tools: ["get_merryman_setup", "create_merryman"] } });
+  const m = await start(initial); change(m, "Name", "Private draft"); submit(m, "Name"); const call = last(m, "create_merryman");
+  m.expireLastToolWait();
+  await show(m, setup({ ...initial, connection: { ...initial.connection, id: "connection-test-b" } }));
+  await answer(m, call, draftResult("create"));
+  assert.equal(field(m, "Name").value, "My Merryman");
+  assert.equal(m.doc.querySelector(`a[href="${ISSUER}/connect/approve/${PID}"]`), null);
+  assert.doesNotMatch(m.text(), /Draft prepared|Private draft/);
+});
 
 test("a cancelled configuration draft does not trap an identical new intent behind its old idempotency key", async () => {
   const m = await start(); await loadSettings(m); change(m, "Name", "Marian"); submit(m, "Name"); const first = last(m, "create_agent_draft"); await answer(m, first, draftResult());

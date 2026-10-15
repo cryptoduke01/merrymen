@@ -29,6 +29,7 @@ let respond: (call: Call) => Promise<Response>;
 let creations: number;
 let tokens: number;
 let logins: number;
+let loginOptions: unknown[];
 let logouts: number;
 let completed: number;
 let requests: Call[];
@@ -38,7 +39,7 @@ let loginError: (error: string) => void;
 const originalFetch = globalThis.fetch;
 const getAccessToken = () => { tokens++; return accessToken(); };
 const createWallet = () => { creations++; return create(); };
-const login = () => { logins++; };
+const login = (options: unknown) => { logins++; loginOptions.push(options); };
 const logout = async () => { logouts++; authenticated = false; };
 const onDone = () => { completed++; };
 const never = () => new Promise<never>(() => undefined);
@@ -109,6 +110,7 @@ beforeEach(() => {
   };
   creations = tokens = logins = logouts = completed = 0;
   requests = [];
+  loginOptions = [];
   signatures = [];
   create = never;
   accessToken = async () => "verified-owner-token";
@@ -336,15 +338,42 @@ describe("Privy sign-in wallet provisioning and proof", () => {
     assert.equal(completed, 1);
   });
 
-  it("returns to an enabled action when login is cancelled or refused", async () => {
+  for (const [label, method] of [["Continue with email", "email"], ["Continue with X", "twitter"]]) {
+    it(`opens the standard Privy modal for ${method} without creating or proving a wallet early`, async () => {
+      authenticated = false;
+      await render();
+      assert.equal(ui.container.querySelector('[role="group"]')?.getAttribute("aria-label"), "Sign-in options");
+      await ui.click(label);
+      assert.deepEqual(loginOptions, [{ loginMethods: [method] }]);
+      assert.equal(primary().disabled, true);
+      assert.match(ui.container.querySelector('[role="status"]')?.textContent ?? "", /Complete verification/);
+      assert.equal(creations, 0);
+      assert.equal(requests.length, 0);
+    });
+  }
+
+  it("returns to both method choices when login is cancelled or refused", async () => {
     authenticated = false;
     await render();
-    await ui.click("Continue with X");
+    await ui.click("Continue with email");
     assert.equal(logins, 1);
+    assert.equal(primary().textContent, "Waiting for sign-in…");
     await act(async () => { loginError("exited_auth_flow"); });
     assert.equal(primary().disabled, false);
     assert.equal(creations, 0);
     assert.equal(requests.length, 0);
+    await ui.click("Continue with X");
+    assert.deepEqual(loginOptions, [{ loginMethods: ["email"] }, { loginMethods: ["twitter"] }]);
+  });
+
+  it("explains the ownership signature without implying a trading permission", async () => {
+    connectOwner();
+    sign = never;
+    await render();
+    await drain();
+    assert.equal(primary().textContent, "Verifying account ownership…");
+    assert.match(ui.container.querySelector('[role="status"]')?.textContent ?? "", /sign-in signature.*does not allow trading/);
+    assert.equal(posts().length, 0);
   });
 
   it("can start over while wallet creation is still pending", async () => {

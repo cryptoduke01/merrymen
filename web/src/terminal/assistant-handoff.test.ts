@@ -34,10 +34,12 @@ before(async () => {
     if (parent?.filename === file) {
       if (name === "@/terminal/account-session") return { fetchAccountForSession: () => answer() };
       if (name === "@/terminal/screens/CreateAgent") return { CreateAgent: (incoming: CreationProps) => {
+        const [finished,setFinished]=React.useState(false);
         props = incoming;
         return React.createElement("div", null,
           React.createElement("span", { "data-owner": incoming.account?.session.address ?? "" }, incoming.accountFailed ? "Account unavailable" : incoming.account?.session.address ?? "Waiting for account"),
-          React.createElement("button", { onClick: incoming.onDone }, "Finish test handoff"));
+          finished?React.createElement("p", { "data-completion": true }, "Creation screen completion")
+            :React.createElement("button", { onClick: ()=>setFinished(true) }, "Finish test handoff"));
       } };
     }
     return load.call(this, name, parent, isMain);
@@ -48,15 +50,15 @@ before(async () => {
 beforeEach(() => { ui = testDom(); answer = async () => ready("a"); });
 afterEach(async () => { await ui.close(); });
 
-it("the handoff passes only its proposal ID and shows return guidance without claiming a running worker", async () => {
+it("the handoff keeps completion in the owner-bound creation screen without another completion step", async () => {
   await ui.render(React.createElement(SetupClient, { id }));
   assert.equal(props.assistantProposalId, id);
   assert.equal(props.account?.session.address, account("a").session.address);
   assert.doesNotMatch(ui.container.textContent!, /Back to your chat/);
   await ui.click("Finish test handoff");
-  assert.match(ui.container.textContent!, /Back to your chat/);
-  assert.match(ui.container.textContent!, /does not confirm a running worker/);
-  assert.match(ui.container.textContent!, /same ChatGPT or Claude conversation/);
+  assert.match(ui.container.textContent!, /Creation screen completion/);
+  assert.doesNotMatch(ui.container.textContent!, /Back to your chat|Done — return to chat/);
+  assert.equal(props.account?.session.address,account("a").session.address);
   assert.equal(ui.container.querySelector('a[href^="https://"]'), null, "the handoff invents no chat callback or external return URL");
 });
 
@@ -72,7 +74,7 @@ it("a late old-account read cannot replace a new signed-in owner", async () => {
   assert.doesNotMatch(ui.container.textContent!, new RegExp(account("a").session.address!));
 });
 
-it("an unreadable account clears both the prior owner and completion state", async () => {
+it("an unreadable account clears both the prior owner and the creation screen's completion state", async () => {
   await ui.render(React.createElement(SetupClient, { id }));
   const refresh = props.onRefresh;
   await ui.click("Finish test handoff");
@@ -81,5 +83,5 @@ it("an unreadable account clears both the prior owner and completion state", asy
   assert.equal(props.account, null);
   assert.equal(props.accountFailed, true);
   assert.match(ui.container.textContent!, /Account unavailable/);
-  assert.doesNotMatch(ui.container.textContent!, /Back to your chat/);
+  assert.equal(ui.container.querySelector('[data-completion]'),null);
 });

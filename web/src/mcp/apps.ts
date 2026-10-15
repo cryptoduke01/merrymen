@@ -30,7 +30,7 @@
  * `ui/notifications/initialized`, and the host then delivers
  * `ui/notifications/tool-input` and `ui/notifications/tool-result`.
  */
-import { HOME_CSS, HOME_JS } from "./onboarding-app";
+import { CONFIG_CARD_CSS, CONFIG_CARD_JS, HOME_CSS, HOME_JS } from "./onboarding-app";
 import { mcpConfig } from "./config";
 import type { ResourceDef } from "./resources";
 import type { Capability } from "./scopes";
@@ -1217,10 +1217,18 @@ function approvalLink(raw, id, setup) {
   return { href: u.href, host: u.host };
 }
 
-function openViaHost(url, statusEl) {
+function openViaHost(url, statusEl, reference) {
   if (!initialized || !obj(hostCaps.openLinks)) return false;
   request("ui/open-link", { url: url }, function (err, res) {
-    if (err || (obj(res) && res.isError === true)) statusEl.textContent = "Your app did not open the link. Copy the address below into a browser.";
+    if (err || (obj(res) && res.isError === true)) {
+      statusEl.textContent = reference ? "Your app did not open the link. Copy the owner page address from Review reference below into a browser." : "Your app did not open the link. Copy the address below into a browser.";
+      if (reference) {
+        reference.open = true;
+        var enclosing = reference.parentElement.closest("details");
+        if (enclosing) enclosing.open = true;
+      }
+      queueSize();
+    }
   });
   return true;
 }
@@ -1345,6 +1353,7 @@ function timeline(parent, kind, status, decided, failLabel, setupOnly) {
 function renderProposal(d) {
   var s = obj(d.summary) || {};
   var kind = str(d.kind, 24) || "trade";
+  if (kind === "agent_draft" || kind === "settings") return renderConfigurationProposal(d);
   var status = str(d.status, 40) || "";
   var res = obj(d.result);
   var setupOnly = kind === "agent_draft" && (s.purpose === "create" || (res && res.setup_only === true));
@@ -1473,11 +1482,11 @@ function renderQuote(parent, q, standalone) {
 const CSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'none'; font-src 'none'; connect-src 'none'; frame-src 'none'; object-src 'none'; form-action 'none'; base-uri 'none'";
 
 const VIEWS: Record<AppView, { title: string; js: string; description: string }> = {
-  home: { title: "Your Merryman", js: PORTFOLIO_JS.replace("function render(d)", "function renderPortfolioResult(d)") + PROPOSAL_JS.replace("function render(d)", "function renderProposalResult(d)") + HOME_JS, description: "Interactive setup and management: name, strategy, risk, readiness, portfolio, activity and alerts. Tools remain scoped to the connected owner; wallet signing and approval stay in Merrymen." },
+  home: { title: "Your Merryman", js: CONFIG_CARD_JS + PORTFOLIO_JS.replace("function render(d)", "function renderPortfolioResult(d)") + PROPOSAL_JS.replace("function render(d)", "function renderProposalResult(d)") + HOME_JS, description: "Interactive setup and management: name, strategy, risk, readiness, portfolio, activity and alerts. Tools remain scoped to the connected owner; wallet signing and approval stay in Merrymen." },
   portfolio: { title: "Merrymen portfolio", js: PORTFOLIO_JS, description: "Renders a portfolio and its performance: paper and live books side by side, never summed." },
   decision: { title: "Merrymen decision", js: DECISION_JS, description: "Renders why an agent has not traded, or one of its decisions: the primary cause, each check's status, evidence and what the owner can do." },
   token: { title: "Merrymen token", js: TOKEN_JS, description: "Renders a token's market data, a token search or a trade-eligibility check: discoverable, priceable and executable, with third-party text marked." },
-  proposal: { title: "Merrymen proposal", js: PROPOSAL_JS, description: "Renders quote_trade, propose_trade and get_proposal: the paper or live banner, the status timeline and the approval link." },
+  proposal: { title: "Merrymen proposal", js: CONFIG_CARD_JS + PROPOSAL_JS, description: "Renders quote_trade, propose_trade and get_proposal: the paper or live banner, the status timeline and the approval link." },
 };
 
 /** An origin as JS source, safe inside a script element; anything but a plain origin becomes "". */
@@ -1504,7 +1513,7 @@ export function appHtml(view: AppView, opts: { issuer?: string } = {}): string {
 <meta name="color-scheme" content="light dark">
 <meta name="referrer" content="no-referrer">
 <title>${v.title}</title>
-<style>${CSS}${view === "home" ? HOME_CSS : ""}</style>
+<style>${CSS}${view === "home" || view === "proposal" ? CONFIG_CARD_CSS : ""}${view === "home" ? HOME_CSS : ""}</style>
 </head>
 <body>
 <main id="app" aria-live="polite"><p class="notice">Loading…</p></main>

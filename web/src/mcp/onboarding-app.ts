@@ -1,7 +1,85 @@
+/** Shared setup presentation. All links still pass the proposal renderer's exact issuer/id checks. */
+export const CONFIG_CARD_CSS = String.raw`
+.mm-brand{display:flex;align-items:center;gap:9px;margin-bottom:22px;font-size:16px;font-weight:750;letter-spacing:-.04em}.mm-brand small{margin-left:auto;color:var(--mm-fg2);font-size:10px;font-weight:600;letter-spacing:.1em;text-transform:uppercase}
+.mm-mark{position:relative;display:block;flex:none;width:28px;height:28px;border-radius:9px;background:#b9f36e;overflow:hidden}.mm-mark:before{content:"";position:absolute;left:10px;top:3px;width:10px;height:22px;border-radius:80% 0 70% 30%;background:#17351e;transform:rotate(40deg)}.mm-mark:after{content:"";position:absolute;width:2px;height:21px;left:13px;top:6px;background:#b9f36e;transform:rotate(40deg)}
+.mm-setup-card{max-width:720px;margin:auto;padding:12px 10px;color:var(--mm-fg);overflow-wrap:anywhere}.mm-setup-card h1{font-size:24px;line-height:1.2;letter-spacing:-.035em;margin:0 0 8px}.setup-intro{color:var(--mm-fg2);font-size:13px;max-width:62ch;margin:0 0 16px}.setup-kicker{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.12em;color:var(--mm-fg2);margin:0 0 8px}
+.setup-progress{display:flex;list-style:none;padding:0;margin:0 0 20px;gap:8px;font-size:11px;color:var(--mm-fg2)}.setup-progress li{display:flex;align-items:center;gap:6px;flex:1;min-width:0}.setup-progress li:before{content:"";flex:none;width:6px;height:6px;border-radius:50%;background:var(--mm-border)}.setup-progress li:not(:last-child):after{content:"";flex:1;height:1px;background:var(--mm-border);margin-left:2px}.setup-progress .done:before{background:var(--mm-ok)}.setup-progress .current{color:var(--mm-fg);font-weight:650}.setup-progress .current:before{background:var(--mm-ok);outline:3px solid var(--mm-ok-bg)}
+.setup-facts{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));padding:14px 0;margin:0 0 14px;border-block:1px solid var(--mm-border);gap:16px}.setup-facts>div{min-width:0}.setup-facts dt{font-size:11px;color:var(--mm-fg2);margin-bottom:5px}.setup-facts dd{margin:0;font-size:13px;font-weight:600}.setup-facts .ut-inline:after{display:block;font-size:9px;font-weight:400;content:"Suggested name";margin-top:2px}.setup-facts .ut-inline{border:0}
+.setup-action{display:flex;gap:12px;align-items:center;margin:16px 0 8px}.mm-setup-card a.cta{display:inline-flex;align-items:center;justify-content:center;gap:14px;min-height:42px;background:#b9f36e;color:#17351e;border:1px solid #b9f36e;border-radius:10px;font-size:13px;padding:10px 16px;text-decoration:none;font-weight:700}.mm-setup-card a.cta:after{content:"↗";font-size:16px}.setup-origin{font-size:11px;color:var(--mm-fg2);margin:0}.setup-expiry{font-size:11px;color:var(--mm-fg2);margin:8px 0 18px}.setup-expiry strong{font-weight:500;color:var(--mm-fg)}
+.mm-setup-card details{border-top:1px solid var(--mm-border);margin:0;padding:0}.mm-setup-card summary{padding:13px 0;font-size:12px;font-weight:600;color:var(--mm-fg);cursor:pointer}.mm-setup-card details .grid{font-size:12px;grid-template-columns:minmax(100px,1fr) 1.5fr}.mm-setup-card details>p:last-child{margin-bottom:14px}.mm-setup-card details .card{border:0;padding:0;background:transparent}.mm-setup-card details h3{font-size:10px}.setup-reference .mono{font-size:10px}.setup-return{font-size:11px;color:var(--mm-fg2);margin:14px 0 0}.setup-result{font-size:12px;border-left:2px solid var(--mm-border);padding:0 0 0 12px;margin:14px 0}.mm-setup-card :is(a,summary):focus-visible{outline:2px solid var(--mm-ok);outline-offset:4px}.mm-setup-card a.cta:hover{filter:brightness(.95)}
+@media(max-width:420px){.mm-setup-card{padding:8px 4px}.mm-setup-card h1{font-size:22px}.mm-brand{margin-bottom:18px}.setup-facts{gap:10px}.setup-action{align-items:flex-start;flex-direction:column;gap:8px}.mm-setup-card a.cta{width:100%}.setup-progress{gap:6px;font-size:10px}.setup-progress li{gap:5px}.setup-progress li:not(:last-child):after{display:none}.mm-setup-card details .grid{grid-template-columns:1fr;gap:2px}.mm-setup-card details dd{margin-bottom:8px}}
+`;
+
+export const CONFIG_CARD_JS = String.raw`
+function merrymenBrand(parent,label){
+ var brand=put(parent,"div","mm-brand");var mark=put(brand,"span","mm-mark");mark.setAttribute("aria-hidden","true");put(brand,"span",null,"merrymen");if(label)put(brand,"small",null,label);
+}
+function setupDisclosure(parent,label,cls){var d=put(parent,"details",cls);put(d,"summary",null,label);return d;}
+function setupProgress(parent,labels,current){
+ var list=put(parent,"ol","setup-progress");list.setAttribute("aria-label","Setup progress");
+ labels.forEach(function(label,i){var item=put(list,"li",i<current?"done":i===current?"current":null,label);if(i===current)item.setAttribute("aria-current","step");});
+}
+function renderConfigurationProposal(d){
+ var s=obj(d.summary)||{},res=obj(d.result),settings=obj(s.settings)||{};
+ var creating=d.kind==="agent_draft"&&(s.purpose==="create"||(res&&res.setup_only===true));
+ var status=str(d.status,40)||"",pending=status==="awaiting_approval",applied=status==="applied";
+ var exp=Date.parse(typeof d.expires_at==="string"?d.expires_at:"");
+ var expired=isFinite(exp)&&exp<=Date.now()&&(pending||(creating&&applied));
+ var card=put(root,"article","mm-setup-card");
+ // The home already carries a brand; standalone tool results carry their own.
+ if(VIEW!=="home")merrymenBrand(card,"Owner review");
+ put(card,"p","setup-kicker",creating?"New Merryman":"Settings proposal");
+ var title=expired?"This setup has expired":pending?"Ready for your review":applied?(creating?"Setup approved":"Settings applied"):pick({cancelled:"Draft cancelled",rejected:"Proposal declined",expired:"This setup has expired",failed:"Setup needs attention",approved:"Approval recorded"},status,"Check proposal status");
+ put(card,"h1",null,title);
+ var explanation=expired?"Ask for a fresh proposal. This setup cannot be continued.":creating&&applied?"Owner wallet creation, permission signing and activation are still required; this does not confirm a running agent.":pending?(creating?"Review this setup in Merrymen, then sign your wallet's trading permission. Nothing changes until you approve.":"Review the exact changes in Merrymen. Approval can change your running agent immediately."):str(d.status_explained,400)||pick(STATUS_TEXT,status,"Check the latest status in chat.");
+ put(card,"p","setup-intro",explanation);
+ if(!expired&&(pending||applied))setupProgress(card,creating?["Draft ready","Owner approval","Activation"]:["Draft ready","Owner approval","Applied"],pending?1:creating?2:3);
+ var facts=put(card,"dl","setup-facts");
+ function fact(label,value){var item=put(facts,"div");put(item,"dt",null,label);cellInto(put(item,"dd"),value);}
+ if(settings.agentName)fact("Name",utInline(settings.agentName,false));
+ if(settings.strategy)fact("Strategy",human(settings.strategy));
+ if(s.risk_level)fact("Risk level",human(s.risk_level));
+ if(settings.basketSymbols&&facts.childNodes.length<3)fact("Basket",draftValue("basketSymbols",settings.basketSymbols));
+ var rawDiff=Array.isArray(s.diff)?s.diff:d.diff,diff=arr(rawDiff,20).map(obj).filter(Boolean);
+ if(!facts.childNodes.length){facts.remove();if(diff.length)put(card,"p","small muted",String(diff.length)+" proposed setting change"+(diff.length===1?"":"s")+" · review before approving");}
+ var link=null;
+ if(!expired&&(pending||(creating&&applied))){
+  link=approvalLink(creating&&applied?ISSUER+"/connect/setup/"+d.proposal_id:d.approval_url,d.proposal_id,creating&&applied);
+  if(link){
+   var action=put(card,"div","setup-action");var a=put(action,"a","cta",creating&&applied?"Continue owner setup":creating?"Review & approve setup":"Review settings change");a.href=link.href;a.target="_blank";a.rel="noopener noreferrer";
+   var note=put(action,"p","setup-origin","Opens "+link.host);a.addEventListener("click",function(e){if(openViaHost(link.href,note,reference))e.preventDefault();});
+  }else put(card,"p","warn-text",typeof d.approval_url==="string"?"This approval address is not this Merrymen server's approval page, so it is not linked.":"No approval link in this result. Ask in chat for the latest proposal.");
+ }
+ if(pending||(creating&&applied)){var expiry=put(card,"p","setup-expiry");put(expiry,"strong",null,creating?"Setup expires: ":"Approval expires: ");put(expiry,"span",null,when(d.expires_at)||"Not known");if(creating&&!expired)put(expiry,"span",null," · Finish owner signing before expiry");}
+ // Risk and service messages remain visible, even while full configuration is folded.
+ var kept=arr(s.left_out,12).map(obj).filter(Boolean);kept.forEach(function(x){put(card,"p","small muted",str(x.why,300));});
+ if(res&&Object.keys(res).length){var result=put(card,"div","setup-result");resultBlock(result,res);}
+ var details=setupDisclosure(card,creating?"Review full configuration":"Review exact changes","setup-details");
+ put(details,"p","small muted",creating?"This is a draft agent setup. Owner signing sets trading permission and limits; practice uses simulated funds.":"This is a change to the agent's settings. Signed limits and live activation stay under your control.");
+ if(diff.length)table(details,[{label:"Setting"},{label:"Now"},{label:"Proposed"}],diff.map(function(x){return [str(x.label,80)||str(x.key,40),str(x.current,120),str(x.proposed,120)];}),(Array.isArray(rawDiff)?rawDiff.length:0)-diff.length);
+ draftSettings(details,settings);generic(details,s,KNOWN_SUMMARY);
+ var by=s.requested_by!==undefined?s.requested_by:d.requested_by;if(by!==undefined)row(grid(details),"Requested by",utInline(by,false));
+ if(s.after_approval)put(details,"p","small muted",str(s.after_approval,400));
+ if(s.assistant_note)untrustedBox(details,"The assistant's note",s.assistant_note,280);
+ var reference=setupDisclosure(details,"Review reference","setup-reference");var g=grid(reference);
+ row(g,"Proposal",mono(str(d.proposal_id,80)));if(d.binding_hash)row(g,"Binding",mono(str(d.binding_hash,80)));
+ if(d.created_at)row(g,"Created",when(d.created_at));if(d.decided_at)row(g,"Decided",when(d.decided_at));
+ if(!pending&&!(creating&&applied))row(g,"Approval window",when(d.expires_at));
+ if(link)row(g,"Owner page",mono(link.href));
+ else if(typeof d.approval_url==="string"&&!expired&&pending)untrustedBox(reference,"Address as received",d.approval_url,300);
+ put(reference,"p","small muted","Approval applies only to this exact request.");
+ if(pending||(creating&&applied))put(card,"p","setup-return",creating?"Return to chat after the secure review to check activation. A fresh worker report confirms readiness.":"Return to chat after the secure review to check the latest status.");
+}
+`;
+
 /** Interactive home. Uses only the shared MCP Apps bridge; no direct network or wallet authority. */
 export const HOME_CSS = String.raw`
-.mm-home{max-width:900px;padding:20px}.home-brand{display:flex;align-items:center;gap:10px;margin-bottom:22px}.home-mark{display:grid;place-items:center;width:34px;height:34px;border-radius:11px;background:#b9f36e;color:#143319;font-size:21px;font-weight:800}.home-wordmark{font-weight:750;letter-spacing:-.03em;font-size:19px}.home-brand .chip{margin-left:auto}.home-hero h1{font-size:30px;line-height:1.12;letter-spacing:-.04em;margin:8px 0}.home-hero p{max-width:650px;color:var(--mm-fg2)}.home-kicker{text-transform:uppercase;letter-spacing:.13em;font-size:10px;font-weight:700;color:var(--mm-ok)}.home-tabs{display:flex;gap:4px;overflow:auto;border-bottom:1px solid var(--mm-border);margin:22px 0 18px;padding-bottom:5px}.mm-home button{font:inherit;cursor:pointer;border:1px solid var(--mm-border);border-radius:9px;background:var(--mm-bg2);color:var(--mm-fg);padding:9px 13px;font-weight:600}.mm-home button:hover{border-color:var(--mm-fg2)}.mm-home button:focus-visible,.mm-home input:focus-visible,.mm-home select:focus-visible{outline:2px solid var(--mm-ok);outline-offset:3px}.mm-home button:disabled{opacity:.5;cursor:default}.home-tabs button{border:0;background:transparent;white-space:nowrap;font-size:12px}.home-tabs button[aria-selected=true]{color:var(--mm-ok);background:var(--mm-ok-bg)}.mm-home .primary{background:#b9f36e;color:#143319;border-color:#b9f36e}.home-split{display:grid;grid-template-columns:1.4fr 1fr;gap:12px}.home-metrics{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:16px 0}.home-metric{padding:13px;border:1px solid var(--mm-border);border-radius:12px;background:var(--mm-bg2)}.home-metric strong{display:block;margin:5px 0;font-size:16px;overflow-wrap:anywhere}.home-field{display:flex;flex-direction:column;gap:6px;margin:0 0 14px;font-size:12px;font-weight:600}.mm-home input,.mm-home select{font:inherit;font-size:14px;color:var(--mm-fg);background:var(--mm-bg);border:1px solid var(--mm-border);padding:11px 12px;border-radius:9px;min-width:0;width:100%}.home-form .card{border-radius:14px}.home-step{display:flex;gap:12px;align-items:flex-start;padding:12px 0;border-bottom:1px solid var(--mm-border)}.home-number{flex:none;border:1px solid var(--mm-border);border-radius:50%;width:24px;height:24px;display:grid;place-items:center;font-size:11px;color:var(--mm-fg2)}.home-step p{font-size:12px;color:var(--mm-fg2)}.home-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}.home-footer{font-size:11px;color:var(--mm-fg2);margin:18px 0 0;padding-top:12px;border-top:1px solid var(--mm-border)}.home-result{margin-top:14px}.home-result:empty{display:none}.home-activity{border-left:2px solid var(--mm-border);padding:0 0 16px 14px;margin-left:4px}.home-activity strong{font-size:13px}.home-activity p{font-size:12px;color:var(--mm-fg2)}.home-empty{padding:22px 10px;text-align:center;color:var(--mm-fg2)}.home-status{font-size:12px;min-height:18px}.home-status:empty{display:none}.home-strategy-note{min-height:36px;color:var(--mm-fg2);font-size:12px}.mm-home a.cta{font-size:12px;background:var(--mm-ok-bg);color:var(--mm-ok)}@media(max-width:560px){.mm-home{padding:14px}.home-hero h1{font-size:26px}.home-split{grid-template-columns:1fr}.home-metrics{grid-template-columns:1fr 1fr}.home-metric:last-child{grid-column:1/-1}.home-tabs{gap:0}.home-tabs button{padding:8px 10px}}
-.mm-home details{margin:14px 0}.mm-home summary{cursor:pointer;font-size:12px;font-weight:600;padding:8px 0}.home-disclosure{border-bottom:1px solid var(--mm-border);padding-bottom:8px}.home-disclosure p{font-size:12px;color:var(--mm-fg2)}
+.mm-home{max-width:760px;margin:auto;padding:22px;overflow-wrap:anywhere}.home-hero h1{font-size:25px;line-height:1.15;letter-spacing:-.035em;margin:6px 0 10px}.home-hero p{color:var(--mm-fg2);font-size:13px}.home-kicker{text-transform:uppercase;letter-spacing:.1em;font-size:10px;font-weight:650;color:var(--mm-fg2)}
+.home-tabs{display:flex;gap:4px;overflow:auto;border-bottom:1px solid var(--mm-border);margin:18px 0 16px;padding-bottom:5px}.mm-home button{font:inherit;cursor:pointer;border:1px solid var(--mm-border);border-radius:9px;background:var(--mm-bg);color:var(--mm-fg);padding:9px 12px;font-size:12px;font-weight:600}.mm-home button:hover{border-color:var(--mm-fg2)}.mm-home :is(button,input,select,summary,a):focus-visible{outline:2px solid var(--mm-ok);outline-offset:3px}.mm-home button:disabled{opacity:.5;cursor:default}.home-tabs button{border:0;background:transparent;white-space:nowrap}.home-tabs button[aria-selected=true]{color:var(--mm-fg);background:var(--mm-bg2)}.mm-home .primary{background:#b9f36e;color:#17351e;border-color:#b9f36e;min-height:42px;padding:10px 16px}
+.home-metrics{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin:16px 0;border-block:1px solid var(--mm-border);padding:14px 0}.home-metric strong{display:block;margin:5px 0;font-size:13px}.home-field{display:flex;flex-direction:column;gap:6px;margin:0 0 12px;font-size:12px;font-weight:600}.mm-home input,.mm-home select{font:inherit;font-size:13px;color:var(--mm-fg);background:var(--mm-bg);border:1px solid var(--mm-border);padding:10px 12px;border-radius:9px;min-width:0;width:100%}.home-form{margin:16px 0}.home-fields{display:grid;grid-template-columns:1fr 1fr;gap:0 14px}.home-fields>.home-field:first-child,.home-fields>.home-strategy-note{grid-column:1/-1}.home-fields>.home-strategy-note{grid-row:3;margin:0 0 12px}.home-form h2{font-size:14px;margin:0 0 14px}.home-review{margin:14px 0 0}.home-review p{font-size:12px;color:var(--mm-fg2);max-width:62ch;margin:8px 0}.home-review .primary{margin:4px 0}
+.home-step{display:flex;gap:12px;align-items:flex-start;padding:10px 0}.home-step p{font-size:12px;color:var(--mm-fg2)}.home-step strong{font-size:13px}.home-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:12px}.home-footer{font-size:11px;color:var(--mm-fg2);margin:16px 0 0;padding-top:12px;border-top:1px solid var(--mm-border)}.home-activity{border-left:2px solid var(--mm-border);padding:0 0 16px 14px;margin-left:4px}.home-activity strong{font-size:13px}.home-activity p{font-size:12px;color:var(--mm-fg2)}.home-empty{padding:18px 8px;text-align:center;color:var(--mm-fg2)}.home-status{font-size:12px;min-height:18px}.home-status:empty{display:none}.home-strategy-note{color:var(--mm-fg2);font-size:12px}.mm-home a.cta{font-size:12px}.home-panel>.mm-setup-card{padding:0;max-width:none}
+.mm-home details{margin:12px 0}.mm-home summary{cursor:pointer;font-size:12px;font-weight:600;padding:10px 0}.home-disclosure{border-top:1px solid var(--mm-border)}.home-disclosure p{font-size:12px;color:var(--mm-fg2)}.home-manage a.cta,.home-step a.cta{background:transparent;color:var(--mm-fg);padding:4px 0;text-decoration:underline;text-underline-offset:3px}.home-manage .home-actions{margin:0}.home-next{padding:12px 0;border-top:1px solid var(--mm-border)}.home-next h2{font-size:12px;color:var(--mm-fg2)}.home-flash{font-size:12px;color:var(--mm-fg2)}.home-announcement{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}.home-proposal-options>.home-actions{margin:0}
+@media(max-width:480px){.mm-home{padding:16px}.home-hero h1{font-size:23px}.home-metrics{gap:8px}.home-metric strong{font-size:12px}.home-tabs button{padding:8px 9px}.home-review .primary{width:100%}}
 `;
 
 export const HOME_JS = String.raw`
@@ -9,6 +87,7 @@ var setup = null;
 var homeTab = "Overview";
 var homeBusy = false;
 var homeGeneration = 0;
+var homePendingCall = null;
 var homeDraft = null;
 var homeForms = {};
 var homeData = {};
@@ -54,11 +133,13 @@ function homeErrorMessage(protocolError,result){
 }
 function homeCall(name,args,done) {
  if(homeBusy || !initialized || !obj(hostCaps.serverTools) || !canHome(name)) return;
+ homeDiscardPendingCall();
  homeBusy=true; homeMessage="Working…"; var generation=homeGeneration;
+ var call={id:null,timer:null};homePendingCall=call;
  var buttons=Array.from(root.querySelectorAll("button")).map(function(b){var was=b.disabled;b.disabled=true;return {button:b,disabled:was};});
  var status=root.querySelector(".home-status"); if(status) status.textContent=homeMessage;
- var timer; var id=request("tools/call",{name:name,arguments:args},function(err,r){
-  clearTimeout(timer); if(generation!==homeGeneration)return; homeBusy=false;
+ call.id=request("tools/call",{name:name,arguments:args},function(err,r){
+  clearTimeout(call.timer); if(homePendingCall!==call || generation!==homeGeneration)return; homePendingCall=null;homeBusy=false;
   var d=r && (obj(r.structuredContent)||parseText(r.content));
   if(err || !r || r.isError || !d){
    homeMessage=homeErrorMessage(err,r);
@@ -66,11 +147,16 @@ function homeCall(name,args,done) {
   }
   homeMessage="";if(status)status.textContent="";buttons.forEach(function(b){b.button.disabled=b.disabled;});done(d);queueSize();
  });
- timer=setTimeout(function(){
-  delete pending[String(id)]; if(generation!==homeGeneration)return; homeBusy=false;
-  homeMessage="The host has not returned a result. Retry with the same details to safely reuse this request, or check in chat.";
+ call.timer=setTimeout(function(){
+  if(homePendingCall!==call || generation!==homeGeneration)return; homeBusy=false;
+  // A host can wait for the user's approval longer than 30 seconds. Keep its
+  // response active until a retry or refreshed context supersedes this call.
+  homeMessage="Still waiting for your app. Finish any approval in chat; the result will appear here when it arrives. You can also retry with the same details.";
   homeDraw(); queueSize();
  },30000);
+}
+function homeDiscardPendingCall(){
+ if(!homePendingCall)return;clearTimeout(homePendingCall.timer);delete pending[String(homePendingCall.id)];homePendingCall=null;
 }
 function ownerLink(parent,label,raw) {
  if(!ISSUER || typeof raw!=="string")return;
@@ -89,17 +175,19 @@ function homeRefresh(){homeCall("get_merryman_setup",homeArgs(),function(d){home
 function onHostReady(){if(setup)homeDraw();}
 function render(d){
  if(!obj(d.connection) || !Array.isArray(d.next_steps) || !obj(d.runtime))return false;
- homeAcceptSetup(d);homeGeneration++;homeBusy=false;homeMessage="";homeDraw();return true;
+ homeDiscardPendingCall();homeAcceptSetup(d);homeGeneration++;homeBusy=false;homeMessage="";homeDraw();return true;
 }
 function homeDraw(){
  clear(root);root.className="mm-home";
- var brand=put(root,"div","home-brand");put(brand,"span","home-mark","m");put(brand,"span","home-wordmark","merrymen");brand.appendChild(chip("HOSTED", "ok"));
+ merrymenBrand(root,"Hosted");
  var hasAccount=!!(setup.agent&&setup.agent.account);
- var hero=put(root,"header","home-hero");put(hero,"div","home-kicker",hasAccount?"YOUR MERRYMAN":"MAKE IT YOURS");
- put(hero,"h1",null,hasAccount ? clean(setup.agent.name,40)||"Your Merryman" : "Meet your next Merryman.");
- hero.appendChild(chip(human(setup.phase),setup.phase==="live"?"live":setup.phase==="paper"?"paper":"info"));
- put(hero,"p",null,clean(setup.summary,600));
- if(!obj(hostCaps.serverTools))put(hero,"p","small","Your host can display this home. Ask in chat to use its tools, or continue through the owner links.");
+ if(!(homeTab==="Approvals"&&homeProposal)){
+  var hero=put(root,"header","home-hero");put(hero,"div","home-kicker",hasAccount?"YOUR MERRYMAN":"MAKE IT YOURS");
+  put(hero,"h1",null,hasAccount?clean(setup.agent.name,40)||"Your Merryman":"Meet your next Merryman.");
+  if(hasAccount)hero.appendChild(chip(human(setup.phase),setup.phase==="live"?"live":setup.phase==="paper"?"paper":"info"));
+  put(hero,"p",null,setup.phase==="no_shared_agent"&&canHome("create_merryman")?"Choose a direction. Review your setup and sign securely in Merrymen.":clean(setup.summary,600));
+  if(!obj(hostCaps.serverTools))put(hero,"p","small","Your host can display this home. Ask in chat to use its tools, or continue through the owner links.");
+ }
  var nav=put(root,"nav","home-tabs");nav.setAttribute("aria-label","Merryman sections");nav.setAttribute("role","tablist");
  var tabs=["Overview"];
  if(hasAccount&&canHome("get_portfolio"))tabs.push("Portfolio");
@@ -110,7 +198,7 @@ function homeDraw(){
  if(tabs.indexOf(homeTab)<0)homeTab="Overview";
  tabs.forEach(function(label){var b=homeButton(nav,label,function(){homeTab=label;homeMessage="";homeConfirm=null;homeDraw();homeLoadTab();});b.setAttribute("role","tab");b.setAttribute("aria-selected",String(label===homeTab));});
  var status=put(root,"p","home-status",homeMessage);status.setAttribute("role","status");
- if(homeFlash){var flash=put(root,"p","small",homeFlash);flash.setAttribute("role","status");}
+ if(homeFlash){var flash=put(root,"p",homeProposal&&homeProposal.status==="awaiting_approval"?"home-flash home-announcement":"home-flash",homeFlash);flash.setAttribute("role","status");}
  homePanel=put(root,"div","home-panel");homePanel.setAttribute("role","tabpanel");homePanel.setAttribute("aria-label",homeTab);
  if(homeTab==="Overview")homeOverview();
  else if(homeTab==="Settings")homeSettings();
@@ -119,24 +207,30 @@ function homeDraw(){
  else if(homeTab==="Portfolio"&&homeData.portfolio)inHomePanel(function(){renderPortfolioResult(homeData.portfolio);});
  else if(homeTab==="Activity"&&homeData.activity)homeActivity(homeData.activity.data,homeData.activity.tool);
  else put(homePanel,"p","home-empty","Use Refresh to load the latest "+homeTab.toLowerCase()+".");
- var actions=put(root,"div","home-actions");
- homeButton(actions,"Refresh",function(){if(homeTab==="Overview")homeRefresh();else homeLoadTab();}).disabled=homeBusy||!initialized||!obj(hostCaps.serverTools);
- var links=obj(setup.links)||{};ownerLink(actions,"Wallet & permissions ↗",links.wallet);ownerLink(actions,"Connected apps ↗",links.connected_apps);
- put(root,"footer","home-footer",clean(setup.runtime.explanation,650));queueSize();
+ if(!(homeTab==="Approvals"&&homeProposal)){
+  var actions=put(root,"div","home-actions");
+  homeButton(actions,"Refresh",function(){if(homeTab==="Overview")homeRefresh();else homeLoadTab();}).disabled=homeBusy||!initialized||!obj(hostCaps.serverTools);
+ }
+ var manage=setupDisclosure(root,"Wallet & connected apps","home-disclosure home-manage"),links=obj(setup.links)||{};
+ var linksRow=put(manage,"div","home-actions");ownerLink(linksRow,"Wallet & permissions ↗",links.wallet);ownerLink(linksRow,"Connected apps ↗",links.connected_apps);
+ put(manage,"p","small",clean(setup.runtime.explanation,650));queueSize();
 }
 function homeOverview(){
- var a=obj(setup.agent);var links=obj(setup.links)||{};
+ var a=obj(setup.agent),links=obj(setup.links)||{},creating=canHome("create_merryman");
  if(a&&a.account){
   var metrics=put(homePanel,"div","home-metrics");
   [["LAST REPORTED MODE",a.mode==="live"?"Live · real funds":a.mode==="paper"?"Paper · simulated":human(a.mode)||"Not reporting"],["WORKER",a.worker_fresh===true?"Fresh report":a.worker_fresh===false?"Awaiting fresh report":"Not known"],["STRATEGY",human(a.strategy)||"Not selected"]].forEach(function(v){var m=put(metrics,"div","home-metric");put(m,"span","home-kicker",v[0]);put(m,"strong",null,v[1]);});
-  var wallet=section(homePanel,"Wallet & permission");var g=grid(wallet);row(g,"Smart account",shortAddr(a.account));row(g,"Permission expires",when(a.permission_expires_at));row(g,"Worker reported",when(a.heartbeat_at));
+  var wallet=setupDisclosure(homePanel,"Wallet & permission details","home-disclosure");var g=grid(wallet);row(g,"Smart account",shortAddr(a.account));row(g,"Permission expires",when(a.permission_expires_at));row(g,"Worker reported",when(a.heartbeat_at));
  }
- if(canHome("create_merryman"))homeConfig(homePanel,true);
- var steps=arr(setup.next_steps,12).filter(function(s){return obj(s) && s.action!=="propose_settings";});
- if(steps.length){var s=section(homePanel,a?"Next steps":"Your setup, step by step");steps.forEach(function(x,i){var r=put(s,"div","home-step");put(r,"span","home-number",String(i+1));var text=put(r,"div");put(text,"strong",null,clean(x.label,100));put(text,"p",null,clean(x.detail,500));if(x.url)ownerLink(text,x.owner_action_required?"Continue in Merrymen ↗":"Open Merrymen ↗",x.url);});}
- if(setup.phase==="select_agent" && canHome("list_agents"))homeToolButton(homePanel,"Choose a shared Merryman","list_agents",{},homeAgentList);
- if(!a && !canHome("create_merryman"))ownerLink(homePanel,"Connect or share a Merryman ↗",links.connected_apps);
- var more=section(homePanel,"Keep exploring in chat");put(more,"p","small muted","Ask about token research, trade proposals, reports or community. Your assistant only offers features this connection allows; each trade proposal still needs your approval.");
+ if(creating){setupProgress(homePanel,["Prepare setup","Owner approval","Activation"],0);homeConfig(homePanel,true);}
+ var steps=arr(setup.next_steps,12).filter(function(s){return obj(s)&&s.action!=="propose_settings"&&(!creating||s.action!=="draft_setup");});
+ function step(parent,x){var r=put(parent,"div","home-step"),text=put(r,"div");put(text,"strong",null,clean(x.label,100));put(text,"p",null,clean(x.detail,500));if(x.url)ownerLink(text,x.owner_action_required?"Continue in Merrymen ↗":"Open Merrymen ↗",x.url);}
+ if(steps.length){
+  if(creating){var options=setupDisclosure(homePanel,"Already have a Merryman?","home-disclosure home-manage");if(setup.phase==="no_shared_agent")put(options,"p",null,clean(setup.summary,600));steps.forEach(function(x){step(options,x);});}
+  else {var next=put(homePanel,"section","home-next");put(next,"h2",null,"Next step");step(next,steps[0]);if(steps.length>1){var more=setupDisclosure(homePanel,"More options","home-disclosure");steps.slice(1).forEach(function(x){step(more,x);});}}
+ }
+ if(setup.phase==="select_agent"&&canHome("list_agents"))homeToolButton(homePanel,"Choose a shared Merryman","list_agents",{},homeAgentList,true);
+ if(!a&&!creating)ownerLink(homePanel,"Connect or share a Merryman ↗",links.connected_apps);
 }
 function homeAgentList(d){
  clear(homePanel);put(homePanel,"h2",null,"Choose your Merryman");
@@ -161,22 +255,24 @@ function homeConfig(parent,creating){
  var asset=fieldsByKey.assetMode;var basketSpec=fieldsByKey.basketSymbols;
  var defaults={name:creating?"My Merryman":saved.configured_name||"",strategy:creating?"trencher":saved.strategy||"",risk_level:creating?"careful":"",asset_mode:asset&&asset.valid_for_proposal===true?asset.value:"",basket:basketSpec&&basketSpec.valid_for_proposal===true?arr(basketSpec.value,10).join(", "):""};
  var state=homeForms[context]||(homeForms[context]={});var shown=Object.assign({},defaults,state);
- var form=put(parent,"form","home-form");var split=put(form,"div","home-split");var fields=section(split,creating?"Give it a name and a direction":"Name, strategy & basket");
+ var form=put(parent,"form","home-form");if(!creating)put(form,"h2",null,"Name, strategy & basket");
+ var fields=put(form,"div","home-fields");
  var name=homeField(fields,"Name");name.name="name";name.maxLength=24;name.required=creating;name.value=shown.name;name.autocomplete="off";
  var strategy=homeField(fields,"Strategy","select",(creating?[]:[["","Keep current strategy"]]).concat(STRATEGIES));strategy.name="strategy";strategy.value=shown.strategy;
  var note=put(fields,"p","home-strategy-note");function strategyNote(){var s=STRATEGIES.find(function(v){return v[0]===strategy.value;});note.textContent=s?s[2]:"";}strategyNote();strategy.addEventListener("change",strategyNote);
  var risk=homeField(fields,"Risk settings","select",(creating?[]:[["","Keep current risk settings"]]).concat([["careful","Careful"],["balanced","Balanced"],["bold","Bold"]]));risk.name="risk_level";risk.value=shown.risk_level;
- var mode=homeField(fields,"Assets to consider","select",[["",creating?"Choose later":"Keep current assets"],["all","Stocks and crypto"],["stocks","Stocks only"],["crypto","Crypto only"]]);mode.value=shown.asset_mode;
- var basket=homeField(fields,"Basket symbols");basket.value=shown.basket;basket.placeholder="e.g. NVDA, AAPL";basket.maxLength=170;
- put(fields,"p","small muted",creating?"Optional basket: up to 10 supported stock symbols. Your owner review shows the exact configuration.":"Comma-separated symbols. Leave blank to keep the current basket. Available: "+arr(saved.available_basket_symbols,50).join(", "));
+ var advanced=setupDisclosure(form,"Assets & basket · optional","home-disclosure");advanced.open=!!(state.asset_mode||state.basket);
+ var mode=homeField(advanced,"Assets to consider","select",[["",creating?"Choose later":"Keep current assets"],["all","Stocks and crypto"],["stocks","Stocks only"],["crypto","Crypto only"]]);mode.value=shown.asset_mode;
+ var basket=homeField(advanced,"Basket symbols");basket.value=shown.basket;basket.placeholder="e.g. NVDA, AAPL";basket.maxLength=170;
+ put(advanced,"p","small muted",creating?"Optional basket: up to 10 supported stock symbols. Your owner review shows the exact configuration.":"Comma-separated symbols. Leave blank to keep the current basket. Available: "+arr(saved.available_basket_symbols,50).join(", "));
  var configFields=[[name,"name"],[strategy,"strategy"],[risk,"risk_level"],[mode,"asset_mode"],[basket,"basket"]];
  function rememberConfig(v){if(v[0].value===defaults[v[1]])delete state[v[1]];else state[v[1]]=v[0].value;}
  configFields.forEach(function(v){v[0].addEventListener("input",function(){rememberConfig(v);});v[0].addEventListener("change",function(){rememberConfig(v);});});
- var why=section(split,"You stay in control");put(why,"p",null,creating?"Start with the name, strategy and risk settings you want. Review the exact setup before your wallet is created and trading permission is signed.":"Review the exact before-and-after settings in Merrymen. Approval can change your running agent immediately.");
- if(!creating)put(why,"p","small muted","These are your saved settings. The worker's last reported strategy can differ until it picks up a change.");
+ var why=put(form,"div","home-review");
+ put(why,"p",null,creating?"Only you can approve the setup and sign the wallet's trading permission.":"Review the exact before-and-after settings in Merrymen. Approval can change your running agent immediately.");
+ homeSubmit(why,creating?"Prepare my Merryman →":"Review settings change →",creating?"create_merryman":"create_agent_draft");
  put(why,"p","small muted","Practice uses simulated funds. Live mode, funding and signed trading limits stay under your control.");
- homeSubmit(why,creating?"Review my Merryman →":"Review settings change →",creating?"create_merryman":"create_agent_draft");
- put(why,"p","small muted","Runs on Merrymen's hosted worker. You can close the chat after activation.");
+ if(!creating)put(why,"p","small muted","These are your saved settings. The worker's last reported strategy can differ until it picks up a change.");
  form.addEventListener("submit",function(e){e.preventDefault();configFields.forEach(rememberConfig);
   basket.setCustomValidity("");var symbols=basket.value.trim()?basket.value.split(",").map(function(v){return v.trim();}):[];
   if(symbols.length>10||symbols.some(function(v){return !/^[A-Za-z0-9][A-Za-z0-9._$-]{0,15}$/.test(v);}))basket.setCustomValidity("Enter up to 10 symbols separated by commas.");
@@ -248,20 +344,23 @@ function homeLoadTab(){
  else if(homeTab==="Approvals"){if(homeProposal&&canHome("get_proposal"))homeCall("get_proposal",{proposal_id:homeProposal.proposal_id},function(d){homeSetProposal(d);homeDraw();});else homeCall("list_proposals",{status:"open",limit:20},function(d){homeData.proposals=d;homeDraw();});}
 }
 function homeApprovals(){
- var actions=put(homePanel,"div","home-actions");
- if(canHome("list_proposals"))homeToolButton(actions,homeProposal?"Back to approvals":"Load pending approvals","list_proposals",{status:"open",limit:20},function(d){homeProposal=null;homeData.proposals=d;homeConfirm=null;homeDraw();});
  if(homeProposal){
   inHomePanel(function(){renderProposalResult(homeProposal);});
   var follow=put(homePanel,"div","home-actions");
-  if(canHome("get_proposal"))homeToolButton(follow,"Check approval status","get_proposal",{proposal_id:homeProposal.proposal_id},function(d){homeSetProposal(d);homeDraw();});
-  homeToolButton(follow,"Check activation","get_merryman_setup",homeArgs(),function(d){homeAcceptSetup(d);homeTab="Overview";homeDraw();});
+  var creating=homeProposal.kind==="agent_draft"&&((obj(homeProposal.summary)||{}).purpose==="create"||(obj(homeProposal.result)||{}).setup_only===true);
+  if(canHome("get_proposal")&&!(creating&&homeProposal.status==="applied"))homeToolButton(follow,"Check approval status","get_proposal",{proposal_id:homeProposal.proposal_id},function(d){homeSetProposal(d);homeDraw();});
+  else homeToolButton(follow,"Check activation","get_merryman_setup",homeArgs(),function(d){homeAcceptSetup(d);homeTab="Overview";homeDraw();});
+  var options=setupDisclosure(homePanel,"Manage this proposal","home-disclosure home-proposal-options");var actions=put(options,"div","home-actions");
+  if(canHome("list_proposals"))homeToolButton(actions,"Back to approvals","list_proposals",{status:"open",limit:20},function(d){homeProposal=null;homeData.proposals=d;homeConfirm=null;homeDraw();});
   var cancellable=homeProposal.status==="awaiting_approval"&&["agent_draft","settings"].indexOf(homeProposal.kind)>=0;
   if(cancellable&&canHome("cancel_proposal")){
-   if(homeConfirm===homeProposal.proposal_id){put(homePanel,"p","small","Cancel this unapproved configuration draft? Your saved settings will stay unchanged.");homeToolButton(follow,"Confirm cancel draft","cancel_proposal",{proposal_id:homeProposal.proposal_id},function(d){homeSetProposal(d);homeConfirm=null;homeFlash=d.status==="cancelled"?"Draft cancelled. Your saved settings are unchanged.":"The proposal changed before it could be cancelled. Check its current status.";homeDraw();});homeButton(follow,"Keep draft",function(){homeConfirm=null;homeDraw();});}
-   else homeButton(follow,"Cancel draft",function(){homeConfirm=homeProposal.proposal_id;homeDraw();});
+   if(homeConfirm===homeProposal.proposal_id){options.open=true;put(options,"p","small","Cancel this unapproved configuration draft? Your saved settings will stay unchanged.");homeToolButton(actions,"Confirm cancel draft","cancel_proposal",{proposal_id:homeProposal.proposal_id},function(d){homeSetProposal(d);homeConfirm=null;homeFlash=d.status==="cancelled"?"Draft cancelled. Your saved settings are unchanged.":"The proposal changed before it could be cancelled. Check its current status.";homeDraw();});homeButton(actions,"Keep draft",function(){homeConfirm=null;homeDraw();});}
+   else homeButton(actions,"Cancel draft",function(){homeConfirm=homeProposal.proposal_id;homeDraw();});
   }
+  if(!actions.childNodes.length)options.remove();
   return;
  }
+ if(canHome("list_proposals"))homeToolButton(homePanel,"Load pending approvals","list_proposals",{status:"open",limit:20},function(d){homeProposal=null;homeData.proposals=d;homeConfirm=null;homeDraw();});
  var list=homeData.proposals;var items=arr(list&&list.proposals,50);
  put(homePanel,"p","small muted","Proposals visible to this connection. A pending draft has no effect until you approve it in Merrymen.");
  if(!items.length)put(homePanel,"p","home-empty",list?"No pending approvals. Prepare a settings change or ask your assistant for a proposal.":"Load pending approvals to see what still needs your review.");

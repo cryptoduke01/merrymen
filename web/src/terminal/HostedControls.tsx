@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { toHex } from "viem";
 import { findInjectedProvider, requestAccount } from "@/lib/wallet";
 import { RecoverPanel } from "@/components/RecoverPanel";
-import { loadGrant } from "@/lib/session";
+import { loadGrant, type GrantPermissionView } from "@/lib/session";
 import { X } from "lucide-react";
 import { PrivySignIn } from "@/terminal/PrivySignIn";
 import { announceSignedIn } from "@/lib/resign-anchor";
@@ -49,7 +49,7 @@ export interface AccountState {
    * today (AgentStatus.energy). Null or absent is "not said yet", never an
    * empty allowance and never a zero balance.
    */
-  status: {exists: boolean; /** Authenticated tenant bound to hosted /api/grants responses. */ tenant?: string | null; recovery?: FleetRecoveryView | null; mode?: "paper" | "live" | "idle" | null; liveBlocker?: string | null; workerAliveAt?: number | null; gasSponsored?: boolean | null; balances?: GrantBalances; energy?: EnergyStatus | null; grant?: {smartAccount: string; chainId:number; caps:{perTradeUsdg:number; dailyUsdg:number}; expiresAt?:number; grantedAt?:number}};
+  status: {exists: boolean; /** Authenticated tenant bound to hosted /api/grants responses. */ tenant?: string | null; recovery?: FleetRecoveryView | null; mode?: "paper" | "live" | "idle" | null; liveBlocker?: string | null; workerAliveAt?: number | null; gasSponsored?: boolean | null; balances?: GrantBalances; energy?: EnergyStatus | null; grant?: GrantPermissionView & {smartAccount: string; chainId:number; caps:{perTradeUsdg:number; dailyUsdg:number}}};
 }
 // Moved to its own module so it can be executed in a test; re-exported so no import moves.
 export { requestJson } from "./request-json";

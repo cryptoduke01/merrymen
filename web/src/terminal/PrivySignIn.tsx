@@ -1,10 +1,10 @@
 "use client";
 
 /**
- * CONTINUE WITH X — the first thing a tester sees.
+ * CONTINUE TO SIGN IN — the first thing a tester sees.
  *
- * The Privy modal offers X and email. A restored authenticated session may
- * still lack its embedded wallet, so this component also repairs that state
+ * Email and X open Privy's standard modal for the chosen method. A restored
+ * authenticated session may still lack its embedded wallet, so this component also repairs that state
  * after the modal closes. Creation and proof have deadlines and explicit retry.
  *
  * WHAT HAPPENS AFTER THE MODAL CLOSES is the part worth reading. Privy hands
@@ -44,10 +44,10 @@ export const PRIVY_PROOF_TIMEOUT_MS = 60_000;
 type Phase = "idle" | "authorising" | "provisioning" | "proving" | "done" | "error" | "resetting";
 
 const LABEL: Record<Phase, string> = {
-  idle: "Continue with X",
-  authorising: "Waiting for X…",
-  provisioning: "Creating your wallet…",
-  proving: "Signing you in…",
+  idle: "Continue to sign in",
+  authorising: "Waiting for sign-in…",
+  provisioning: "Preparing your account…",
+  proving: "Verifying account ownership…",
   done: "Signed in",
   error: "Try again",
   resetting: "Signing out…",
@@ -218,30 +218,41 @@ export function PrivySignIn({ onDone }: { onDone: () => void }) {
     }
   }
 
+  function signIn(method: "email" | "twitter" = "email") {
+    cancelAttempt();
+    setError("");
+    if (authenticated) {
+      setPhase("idle");
+      refresh((value) => value + 1);
+    } else {
+      setPhase("authorising");
+      try { login({ loginMethods: [method] }); } catch { setError("Sign-in didn't finish. Try again."); setPhase("error"); }
+    }
+  }
+
   if (!ready) return <div className="hosted-auth"><button className="flow-primary" disabled>Loading…</button></div>;
 
   return (
     <div className="hosted-auth">
+      {!authenticated && (phase === "idle" || phase === "error") ? <>
+        <div className="hosted-signin-methods" role="group" aria-label="Sign-in options">
+          <button className="flow-primary" onClick={() => signIn("email")}>Continue with email</button>
+          <button className="flow-secondary" onClick={() => signIn("twitter")}>Continue with X</button>
+        </div>
+        <p className="hosted-auth-note">Use the same email or X account when you return.</p>
+      </> :
       <button
         className="flow-primary"
         disabled={phase !== "idle" && phase !== "error"}
-        onClick={() => {
-          cancelAttempt();
-          setError("");
-          if (authenticated) {
-            setPhase("idle");
-            refresh((value) => value + 1);
-          } else {
-            setPhase("authorising");
-            try { login(); } catch { setError("Sign-in didn't finish. Try again."); setPhase("error"); }
-          }
-        }}
+        onClick={() => signIn()}
       >
         {LABEL[phase]}
-      </button>
-      {phase === "provisioning" && (
-        <p className="flow-note">Setting up the wallet that will own your Merryman. This happens once.</p>
-      )}
+      </button>}
+      <div role="status" aria-live="polite">
+        {phase === "authorising" && <p className="hosted-auth-note">Complete verification in the sign-in dialog to continue.</p>}
+        {phase === "provisioning" && <p className="hosted-auth-note">Connecting your account’s wallet. If you’re new, Merrymen creates it once.</p>}
+        {phase === "proving" && <p className="hosted-auth-note">Approve the sign-in signature if prompted. It proves you own this account and does not allow trading.</p>}
+      </div>
       {error && <p role="alert" className="flow-error">{error}</p>}
       {(authenticated || error) && phase !== "done" && (
         <button className="flow-secondary" disabled={phase === "resetting"} onClick={() => void startOver()}>Start over</button>

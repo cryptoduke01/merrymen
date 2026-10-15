@@ -9,6 +9,7 @@
  * what this page displayed.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
+import dynamic from "next/dynamic";
 import { AlertTriangle, ArrowRight, Check, ShieldCheck, X } from "lucide-react";
 import { fullDateTime } from "@/lib/format";
 import { SignIn } from "@/terminal/HostedControls";
@@ -16,6 +17,10 @@ import { BrandLockup } from "../../BrandLockup";
 
 import { TERMINAL, approvable, bookBox, headline, resumeDecision, short, text, usdg, walletSetupUrl, type SettingsCheck, type View } from "./approve-view";
 export { approvable, bookBox, headline, outcomeBook, resumeDecision } from "./approve-view";
+
+const CreateSetup = dynamic(() => import("../../setup/[id]/SetupClient").then(m => m.SetupClient), {
+  loading: () => <div className="terminal-host partner-connect"><main className="connect-main"><p role="status">Loading your setup and limits…</p></main></div>,
+});
 
 /** What the owner reads when their session ended mid-decision: never a bare status word. */
 export const SESSION_ENDED = "Your session ended; sign in to finish.";
@@ -180,6 +185,12 @@ export function ApproveClient({ id }: { id: string }) {
   const setupUrl = v ? walletSetupUrl(v) : null;
   const noun = v?.kind === "trade" ? "Trade" : v?.kind === "settings" ? "Setting changes" : v?.kind === "agent_draft" ? "Agent setup" : v?.kind === "post" ? "Post" : "Request";
   const title = v && !deciding ? `${noun}: ${headline(v).toLowerCase()}` : v?.kind === "trade" ? "Approve this trade?" : v?.kind === "settings" ? "Approve these setting changes?" : v?.kind === "agent_draft" ? "Approve this agent setup?" : v?.kind === "post" ? "Approve this post?" : "Review a request";
+
+  // Creation has one owner review: the assistant's exact setup and the
+  // wallet's limits. The embedded flow still approves the stored hash before
+  // writing settings or signing; mounting it performs only authenticated reads.
+  if (!loading && !signedOut && v?.kind === "agent_draft" && v.binding.purpose === "create"
+    && (v.status === "awaiting_approval" || v.status === "applied")) return <CreateSetup id={id} />;
 
   return (
     <div className="terminal-host partner-connect mcp-connect">

@@ -135,20 +135,33 @@ test("every client request to /mcp still meets the Host, Origin and bearer check
   assert.equal((await handleMcpRequest(pageLoad("mcp.test"), { cfg: testConfig({ enabled: false, disabledWhy: "off" }) })).status, 404);
 });
 
-test("serverInfo offers the current SVG mark, a file the app serves", async () => {
+for (const era of ["legacy", "modern"] as Era[]) test(`${era}: serverInfo offers a description and current PNG and SVG connector marks`, async () => {
   const { a } = await setup();
   // buildServer reads the issuer from the environment, which these tests leave unset.
   const saved = process.env.MERRYMEN_PUBLIC_ORIGIN;
   process.env.MERRYMEN_PUBLIC_ORIGIN = "https://app.test";
   try {
-    const res = await rpcResult(await call(mcpRequest(a.tokens.access_token, "initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "x", version: "1" } })));
-    const icons = (res.result?.serverInfo as { icons?: Array<{ src: string; mimeType: string; sizes: string[] }> } | undefined)?.icons ?? [];
+    const res = era === "legacy"
+      ? await rpcResult(await call(mcpRequest(a.tokens.access_token, "initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "x", version: "1" } })))
+      : await rpcResult(await call(mcpRequest(a.tokens.access_token, "server/discover", {}, { era })));
+    const info = (era === "legacy" ? res.result?.serverInfo : (res.result?._meta as Record<string, unknown>)?.["io.modelcontextprotocol/serverInfo"]) as {
+      title?: string; description?: string; websiteUrl?: string; icons?: Array<{ src: string; mimeType: string; sizes: string[] }>;
+    } | undefined;
+    assert.equal(info?.title, "Merrymen");
+    assert.equal(info?.websiteUrl, "https://merrymen.dev");
+    assert.match(info?.description ?? "", /trading agent, portfolio, trade receipts and decisions/);
+    const icons = info?.icons ?? [];
     assert.deepEqual(icons.map((i) => [i.src, i.mimeType, i.sizes.join(" ")]), [
+      ["https://app.test/mcp-icon-512.png", "image/png", "512x512"],
       ["https://app.test/mcp-icon.svg", "image/svg+xml", "any"],
     ]);
-    // Only the SVG: the PNG app icons still carry the old mark until PR #166 regenerates them.
+    // Check the published types and dimensions against actual public files.
     for (const icon of icons) {
-      assert.match(readFileSync(new URL(`../../public${new URL(icon.src).pathname}`, import.meta.url), "utf8"), /<svg/, icon.src);
+      const bytes = readFileSync(new URL(`../../public${new URL(icon.src).pathname}`, import.meta.url));
+      if (icon.mimeType === "image/png") {
+        assert.deepEqual([...bytes.subarray(0, 8)], [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], icon.src);
+        assert.deepEqual([bytes.readUInt32BE(16), bytes.readUInt32BE(20)], [512, 512], icon.src);
+      } else assert.match(bytes.toString("utf8"), /<svg/, icon.src);
     }
   } finally {
     if (saved === undefined) delete process.env.MERRYMEN_PUBLIC_ORIGIN;

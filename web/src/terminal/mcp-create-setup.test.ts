@@ -1,14 +1,14 @@
 import assert from "node:assert/strict";
 import { it } from "node:test";
 import { DEFAULT_BASKET_SYMBOLS, RISK_PROFILES } from "@merrymen/core";
-import { approvedMcpSetup, mcpSetupRequest } from "./mcp-create-setup";
+import { approvedMcpSetup, mcpSetupRequest, reviewMcpCreateSetup } from "./mcp-create-setup";
 import { headline, walletSetupUrl, type View } from "../app/connect/approve/[id]/approve-view";
 
 const id=`prp_${"a".repeat(32)}`;
 const owner=`0x${"b".repeat(40)}`;
 const now=1_800_000_000_000;
 function view():View {
-  return {id,kind:"agent_draft",status:"applied",binding:{purpose:"create",tenant:owner,settings:{agentName:"Robin",strategy:"steady-basket",basketSymbols:["TSLA"],...RISK_PROFILES.careful.settings},risk_level:"careful",expires_at:now/1000+3600},binding_hash:"hash",summary:{},requested_by:"Claude",created_at:now/1000,expires_at:now/1000+3600,decided_at:now/1000,result:{setup_only:true,setup_url:"https://evil.example/steal"},fresh_quote:null,settings_check:null};
+  return {id,kind:"agent_draft",status:"applied",binding:{purpose:"create",tenant:owner,settings:{agentName:"Robin",strategy:"steady-basket",basketSymbols:["TSLA"],...RISK_PROFILES.careful.settings},risk_level:"careful",expires_at:now/1000+3600},binding_hash:"a".repeat(64),summary:{},requested_by:"Claude",created_at:now/1000,expires_at:now/1000+3600,decided_at:now/1000,result:{setup_only:true,setup_url:"https://evil.example/steal"},fresh_quote:null,settings_check:null};
 }
 function setupView():View {
   const v=view();
@@ -41,6 +41,31 @@ it("rejects unapproved, foreign, expired and non-creation drafts",()=>{
     (v:View)=>{v.binding.expires_at=now/1000+7200;},
     (v:View)=>{v.id=`prp_${"d".repeat(32)}`;},
   ]){const v=setupView();mutate(v);assert.throws(()=>approvedMcpSetup(v,id,owner,now),/not approved/);}
+});
+it("a pending creation can be displayed without becoming an approved setup",()=>{
+  const v=setupView();v.status="awaiting_approval";v.result=null;
+  const review=reviewMcpCreateSetup(v,id,owner,now);
+  assert.equal(review.name,"Robin");assert.equal(review.status,"awaiting_approval");
+  assert.equal(review.bindingHash,v.binding_hash);
+  assert.throws(()=>approvedMcpSetup(v,id,owner,now),/not approved/);
+});
+it("pending display rejects foreign, expired, altered and malformed proposals",()=>{
+  for(const mutate of [
+    (v:View)=>{v.binding.tenant=`0x${"c".repeat(40)}`;},
+    (v:View)=>{v.expires_at=now/1000;v.binding.expires_at=v.expires_at;},
+    (v:View)=>{v.binding.purpose="settings";},
+    (v:View)=>{v.binding_hash="missing";},
+    (v:View)=>{v.status="rejected";},
+    (v:View)=>{(v.binding.settings as Record<string,unknown>).liveTradingEnabled=true;},
+    (v:View)=>{(v.binding.settings as Record<string,unknown>).slippageBps=9999;},
+  ]){
+    const v=setupView();v.status="awaiting_approval";v.result=null;mutate(v);
+    assert.throws(()=>reviewMcpCreateSetup(v,id,owner,now));
+  }
+});
+it("an applied review still requires the approved setup-only result",()=>{
+  const v=setupView();v.result={};
+  assert.throws(()=>reviewMcpCreateSetup(v,id,owner,now),/not approved/);
 });
 it("rejects injected settings, altered presets and unknown strategies",()=>{
   for(const patch of [{liveTradingEnabled:true},{maxImpactBps:9999},{slippageBps:9999},{strategy:"made-up"},{agentName:""},{basketSymbols:["bad symbol"]}]){
