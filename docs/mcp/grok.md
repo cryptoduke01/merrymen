@@ -20,11 +20,19 @@ marketplace or has completed sign-in testing in every client.
 
 ## Grok chat
 
-1. Open [Grok Connectors](https://grok.com/connectors).
-2. Select **New Connector → Custom** and enter the server address above.
+1. In Grok, open **Plugins → Connectors**, or open
+   [Grok Connectors](https://grok.com/connectors).
+2. Select **New Connector → Custom**, name it **Merrymen**, and enter the
+   server address above. Select **Add Connector** to start authentication.
 3. Complete Merrymen OAuth in your own browser. Sign in, select the shared
    agent and permissions, and approve the connection.
 4. Return to Grok and ask, “Set up my Merryman” or “How is my Merryman doing?”
+
+This is a one-time manual connection. Asking Grok to connect Merrymen by name
+can search only its available catalog and report that Merrymen is unavailable;
+that does not establish whether the **Custom** option supports the server.
+The custom route above reached Merrymen's OAuth consent screen in a signed-in
+Grok web session on 2026-10-15. Consent and tool execution remain separate steps.
 
 Grok Business and Enterprise require an admin to provision the connector
 first. The MCP endpoint must be public; your laptop's localhost address will
@@ -136,7 +144,8 @@ Research checked against the linked official documentation on 2026-10-15.
 | Generic text-only MCP onboarding, without MCP Apps | Passed over the production HTTP/SDK handler with fixture storage in both protocol versions: pending/idempotent drafts, scope denial, owner isolation and rejection of wallet/live authority. These are compatibility tests, not a native Grok session. |
 | Public production server discovery | Health reported ready at commit `67fdaa624222`; protected-resource/OAuth metadata returned 200 and unauthenticated initialization returned the expected 401 discovery challenge on 2026-10-15. |
 | Local setup pages and copy controls | Rendered in a browser; Bot prompt copy showed success and configured local URLs appeared in the prompt. MCP/connection-page suite: 606 tests passed; app and marketing production builds passed. After a clean install, the full local repository typecheck and 27 targeted handoff/recovery/HTTP onboarding tests passed. The PR's clean GitHub CI typecheck also passed. Completion guidance returns owners to their connected assistant. |
-| Grok chat custom connector OAuth and tool calls | Not yet tested in a real Grok account. |
+| Grok chat custom connector discovery and OAuth handoff | Verified in signed-in Grok web on Chrome on 2026-10-15: Plugins → Connectors → New Connector → Custom accepted the production URL, checked authentication and opened Merrymen consent with client name Grok and a grok.com return destination. No callback exception was needed. Consent reused the existing Merrymen session; access was not approved during this check. |
+| Grok chat authorized tool calls | Pending owner consent. Reaching the consent screen does not establish authenticated tool execution. |
 | Grok Bot package installation, OAuth and tool calls | Not yet tested in the native client. |
 | Grok Build CLI installation and OAuth | Commands researched; not executed. |
 | Fresh owner sign-up, wallet signing, activation and return to Grok | Not yet acceptance-tested. |

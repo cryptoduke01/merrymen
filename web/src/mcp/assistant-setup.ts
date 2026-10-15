@@ -87,7 +87,7 @@ export function assistantSetupMarkdown({ server, app, directory }: AssistantSetu
     "",
     "### In Grok (web or mobile)",
     "",
-    `Open ${links.grok}, choose New Connector, then Custom. Enter ${server}, complete OAuth in Merrymen, and enable the connector for the conversation. This is a settings link, not a pre-filled install or automatic connection. Business and Enterprise workspaces may need an admin to provision the connector first.`,
+    `Open Plugins → Connectors → New Connector → Custom in Grok, or start at ${links.grok}. Set Name to Merrymen and Server URL to ${server}, then choose Add Connector, complete OAuth in Merrymen, and enable the connector for the conversation. This is a one-time manual setup; asking chat to connect Merrymen by name may only search the catalog and cannot install this unlisted custom connector. The URL is a settings link, not a pre-filled install or automatic connection. Business and Enterprise workspaces may need an admin to provision the connector first.`,
     "The owner signs in or creates their Merrymen account in their own browser and chooses access. To prepare a new Merryman in chat, enable the optional permission to suggest setting changes (drafts:write); it is off by default. Share the intended agent for private status and portfolio access. Never ask for a wallet key or an xAI API key.",
     "Verify by calling `get_merryman_setup`, then use the setup flow below. If rich MCP App views are unavailable, return the same tool results and owner approval links as text. Do not claim support for an interactive view without observing it in the host.",
     "Official custom connector setup: https://docs.x.ai/grok/connectors.",

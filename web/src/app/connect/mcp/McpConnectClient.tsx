@@ -271,12 +271,13 @@ export function McpConnectClient({ url, app, enabled, disabledWhy }: { url: stri
                   </div>
                 </Row>
                 <Row name="Grok" id="grok">
-                  <p>Open Grok’s connectors, choose <b>New Connector → Custom</b>, and paste this server address. Complete the Merrymen sign-in and choose what to allow.</p>
+                  <p>One-time setup in Grok: open <b>Plugins → Connectors → New Connector → Custom</b>. Set <b>Name</b> to <b>Merrymen</b>, paste this address into <b>Server URL</b>, then choose <b>Add Connector</b>.</p>
                   <div className="mcp-hub-actions">
                     <CopyButton text={url} target={addressId} label="Copy address for Grok">Copy address</CopyButton>
                     <Out className="mcp-hub-action" href={links.grok}>Open Grok connectors <ArrowUpRight size={14} aria-hidden /></Out>
                   </div>
-                  <p>Then ask “Help me set up my Merryman and check whether it is running.” If you need a new Merryman, allow setup drafts when connecting. Review its setup and approve its wallet permissions in Merrymen, then return to Grok to check its actual status.</p>
+                  <p>Asking Grok chat to “connect Merrymen” by name does not install this unlisted custom connector. Add it manually once, then complete the Merrymen sign-in and choose what to allow.</p>
+                  <p>After connecting, ask “Help me set up my Merryman and check whether it is running.” If you need a new Merryman, allow setup drafts when connecting. Review its setup and approve its wallet permissions in Merrymen, then return to Grok to check its actual status.</p>
                   <p className="mcp-hub-fine">No model API key needed. Business and Enterprise accounts may need an administrator to provision the connector. <Out href="https://docs.x.ai/grok/connectors">Grok’s connector guide</Out></p>
                 </Row>
                 <Row name="Grok Bot" id="grok-bot">

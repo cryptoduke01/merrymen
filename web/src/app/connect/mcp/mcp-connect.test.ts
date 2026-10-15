@@ -56,7 +56,10 @@ test("Grok and Grok Bot have separate visible connection routes and owner handof
   const html = unescape(render(true));
   const grok = html.slice(html.indexOf('<li class="mcp-hub-row" id="grok">'), html.indexOf('<h3>Codex</h3>'));
   assert.match(grok, /<h3>Grok<\/h3>/);
-  assert.match(grok, /New Connector → Custom/);
+  assert.match(grok, /Plugins → Connectors → New Connector → Custom/);
+  assert.match(grok, /Set <b>Name<\/b> to <b>Merrymen<\/b>/);
+  assert.match(grok, /<b>Server URL<\/b>, then choose <b>Add Connector<\/b>/);
+  assert.match(grok, /does not install this unlisted custom connector/);
   assert.match(grok, /aria-label="Copy address for Grok"/);
   assert.match(grok, /<h3>Grok Bot<\/h3>/);
   assert.match(grok, /aria-label="Copy the Grok Bot setup prompt"/);

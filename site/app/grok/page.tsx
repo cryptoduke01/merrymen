@@ -39,17 +39,25 @@ export default function GrokSetup() {
         </p>
 
         <h2 id="grok">Connect Grok</h2>
+        <p>
+          Add Merrymen as a custom connector once before using it in chat. Asking Grok to
+          “connect Merrymen” by name does not install this unlisted connector; a catalog search
+          can miss it. Use the manual setup below.
+        </p>
         <ol>
           <li>
-            Open <a className="link" href="https://grok.com/connectors" target="_blank" rel="noopener noreferrer">Grok connectors</a>,
-            choose <strong>New Connector</strong>, then <strong>Custom</strong>.
+            In Grok&apos;s sidebar, open <strong>Plugins</strong>, select the <strong>Connectors</strong>
+            {" "}tab, then choose <strong>New Connector</strong> → <strong>Custom</strong>
+            {" "}(“Add your own custom connector”). The <a className="link" href="https://grok.com/connectors" target="_blank" rel="noopener noreferrer">Open Grok connectors</a>
+            {" "}button takes you to the connectors page; it does not fill in or install Merrymen.
           </li>
-          <li>Use this MCP server address:</li>
+          <li>Enter <strong>Merrymen</strong> as the <strong>Name</strong> and paste this into <strong>Server URL</strong>:</li>
         </ol>
         <pre className="code" style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{SERVER}</pre>
         <ol start={3}>
           <li>
-            Complete authentication. Sign in to Merrymen, or create your account if you are new.
+            Select <strong>Add Connector</strong>, then complete authentication. Sign in to
+            Merrymen, or create your account if you are new.
             Choose the Merryman to share and the permissions to allow. If you want Grok to draft
             a new Merryman, enable <strong>Prepare agent setups and suggest setting changes</strong>.
           </li>
