@@ -312,6 +312,19 @@ it("an authenticated owner without a protected signer can review and decline, bu
   assert.match(ui.container.textContent!,/Setup declined/);
 });
 
+it("a proposal URL also reaches review and decline without a protected signer",async()=>{
+  ui.dom.window.history.replaceState(null,"",`/create?proposal=${proposalId}`);
+  setupResponse=pendingSetup();signerReady=false;
+  await ui.render(screen());
+  assert.match(ui.container.textContent!,/Little Robin/);
+  const create=Array.from(ui.container.querySelectorAll("button")).find(b=>b.textContent==="Approve and create practice agent")!;
+  assert.ok(create);assert.equal(create.disabled,true);
+  await ui.click("Decline setup");
+  assert.deepEqual(approvalBodies,[{decision:"reject",hash:"1".repeat(64)}]);
+  assert.equal(settingsWrite,null);assert.equal(mintCalls,0);
+  assert.match(ui.container.textContent!,/Setup declined/);
+});
+
 it("an already-approved setup remains readable but cannot create without a protected signer",async()=>{
   setupResponse=setup();signerReady=false;
   await ui.render(combinedScreen());
