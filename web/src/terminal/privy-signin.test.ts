@@ -339,8 +339,9 @@ describe("Privy sign-in wallet provisioning and proof", () => {
   it("returns to an enabled action when login is cancelled or refused", async () => {
     authenticated = false;
     await render();
-    await ui.click("Continue with X");
+    await ui.click("Continue to sign in");
     assert.equal(logins, 1);
+    assert.equal(primary().textContent, "Waiting for sign-in…");
     await act(async () => { loginError("exited_auth_flow"); });
     assert.equal(primary().disabled, false);
     assert.equal(creations, 0);

@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * CONTINUE WITH X — the first thing a tester sees.
+ * CONTINUE TO SIGN IN — the first thing a tester sees.
  *
  * The Privy modal offers X and email. A restored authenticated session may
  * still lack its embedded wallet, so this component also repairs that state
@@ -44,8 +44,8 @@ export const PRIVY_PROOF_TIMEOUT_MS = 60_000;
 type Phase = "idle" | "authorising" | "provisioning" | "proving" | "done" | "error" | "resetting";
 
 const LABEL: Record<Phase, string> = {
-  idle: "Continue with X",
-  authorising: "Waiting for X…",
+  idle: "Continue to sign in",
+  authorising: "Waiting for sign-in…",
   provisioning: "Creating your wallet…",
   proving: "Signing you in…",
   done: "Signed in",

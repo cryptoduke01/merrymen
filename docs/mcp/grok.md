@@ -148,7 +148,7 @@ Research checked against the linked official documentation on 2026-10-15.
 | Grok chat authorized tool calls | Pending owner consent. Reaching the consent screen does not establish authenticated tool execution. |
 | Grok Bot package installation, OAuth and tool calls | Not yet tested in the native client. |
 | Grok Build CLI installation and OAuth | Commands researched; not executed. |
-| Fresh owner sign-up, wallet signing, activation and return to Grok | Not yet acceptance-tested. |
+| Fresh owner sign-up, wallet signing, activation and return to Grok | Signed out of the existing Merrymen session, restarted Grok OAuth and reached the new-owner Privy email signup form on 2026-10-15. Signup completion, wallet signing and worker activation remain pending. Fixed misleading X-only sign-in/busy labels; 42 targeted sign-in/security-boundary tests passed. |
 | Grok rendering Merrymen's MCP App view | Not assumed; standard text/tool responses remain the fallback. |
 
 Before claiming native acceptance, connect a real client, verify the selected
