@@ -7,7 +7,6 @@ import "./grok.css";
 
 const title = "Your Merryman. Now in Grok.";
 const description = "Connect Merrymen to Grok. Set up your trading agent, understand its decisions and check its status from chat. Your wallet approvals stay with you. No model API key needed.";
-const PAGE_URL = "https://www.merrymen.si/grok";
 const SERVER = "https://mcp.merrymen.dev/mcp";
 const CONNECT_HUB = "https://app.merrymen.dev/connect/mcp";
 const CONNECTED_APPS = "https://app.merrymen.dev/connect/apps";
@@ -15,8 +14,8 @@ const CONNECTED_APPS = "https://app.merrymen.dev/connect/apps";
 export const metadata: Metadata = {
   title,
   description,
-  alternates: { canonical: PAGE_URL },
-  openGraph: { title, description, url: PAGE_URL, siteName: "merrymen", type: "website" },
+  alternates: { canonical: "/grok" },
+  openGraph: { title, description, url: "https://merrymen.dev/grok", siteName: "merrymen", type: "website" },
   twitter: { card: "summary", title, description, site: "@MerrymenAI", creator: "@MerrymenAI" },
 };
 
