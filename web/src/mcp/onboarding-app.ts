@@ -9,6 +9,7 @@ var setup = null;
 var homeTab = "Overview";
 var homeBusy = false;
 var homeGeneration = 0;
+var homePendingCall = null;
 var homeDraft = null;
 var homeForms = {};
 var homeData = {};
@@ -54,11 +55,13 @@ function homeErrorMessage(protocolError,result){
 }
 function homeCall(name,args,done) {
  if(homeBusy || !initialized || !obj(hostCaps.serverTools) || !canHome(name)) return;
+ homeDiscardPendingCall();
  homeBusy=true; homeMessage="Working…"; var generation=homeGeneration;
+ var call={id:null,timer:null};homePendingCall=call;
  var buttons=Array.from(root.querySelectorAll("button")).map(function(b){var was=b.disabled;b.disabled=true;return {button:b,disabled:was};});
  var status=root.querySelector(".home-status"); if(status) status.textContent=homeMessage;
- var timer; var id=request("tools/call",{name:name,arguments:args},function(err,r){
-  clearTimeout(timer); if(generation!==homeGeneration)return; homeBusy=false;
+ call.id=request("tools/call",{name:name,arguments:args},function(err,r){
+  clearTimeout(call.timer); if(homePendingCall!==call || generation!==homeGeneration)return; homePendingCall=null;homeBusy=false;
   var d=r && (obj(r.structuredContent)||parseText(r.content));
   if(err || !r || r.isError || !d){
    homeMessage=homeErrorMessage(err,r);
@@ -66,11 +69,16 @@ function homeCall(name,args,done) {
   }
   homeMessage="";if(status)status.textContent="";buttons.forEach(function(b){b.button.disabled=b.disabled;});done(d);queueSize();
  });
- timer=setTimeout(function(){
-  delete pending[String(id)]; if(generation!==homeGeneration)return; homeBusy=false;
-  homeMessage="The host has not returned a result. Retry with the same details to safely reuse this request, or check in chat.";
+ call.timer=setTimeout(function(){
+  if(homePendingCall!==call || generation!==homeGeneration)return; homeBusy=false;
+  // A host can wait for the user's approval longer than 30 seconds. Keep its
+  // response active until a retry or refreshed context supersedes this call.
+  homeMessage="Still waiting for your app. Finish any approval in chat; the result will appear here when it arrives. You can also retry with the same details.";
   homeDraw(); queueSize();
  },30000);
+}
+function homeDiscardPendingCall(){
+ if(!homePendingCall)return;clearTimeout(homePendingCall.timer);delete pending[String(homePendingCall.id)];homePendingCall=null;
 }
 function ownerLink(parent,label,raw) {
  if(!ISSUER || typeof raw!=="string")return;
@@ -89,7 +97,7 @@ function homeRefresh(){homeCall("get_merryman_setup",homeArgs(),function(d){home
 function onHostReady(){if(setup)homeDraw();}
 function render(d){
  if(!obj(d.connection) || !Array.isArray(d.next_steps) || !obj(d.runtime))return false;
- homeAcceptSetup(d);homeGeneration++;homeBusy=false;homeMessage="";homeDraw();return true;
+ homeDiscardPendingCall();homeAcceptSetup(d);homeGeneration++;homeBusy=false;homeMessage="";homeDraw();return true;
 }
 function homeDraw(){
  clear(root);root.className="mm-home";

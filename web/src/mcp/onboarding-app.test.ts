@@ -61,12 +61,20 @@ const open: JSDOM[] = [];
 afterEach(() => { while (open.length) open.pop()!.window.close(); });
 function mount() {
   const sent: Message[] = [];
+  const toolTimeouts: Array<() => void> = [];
   const host = { postMessage(m: Message) { sent.push(JSON.parse(JSON.stringify(m))); } };
-  const dom = new JSDOM(appHtml("home", { issuer: ISSUER }), { runScripts: "dangerously", url: "https://sandbox.example", pretendToBeVisual: true, beforeParse(w) { (w as unknown as { parent: unknown }).parent = host; } });
+  const dom = new JSDOM(appHtml("home", { issuer: ISSUER }), { runScripts: "dangerously", url: "https://sandbox.example", pretendToBeVisual: true, beforeParse(w) {
+    (w as unknown as { parent: unknown }).parent = host;
+    const schedule = w.setTimeout.bind(w);
+    w.setTimeout = (handler, timeout, ...args) => {
+      if (timeout === 30_000 && typeof handler === "function") toolTimeouts.push(() => handler(...args));
+      return schedule(handler, timeout, ...args);
+    };
+  } });
   open.push(dom);
   const w = dom.window;
   const deliver = (data: unknown) => w.dispatchEvent(new w.MessageEvent("message", { data, source: host as never }));
-  return { w, doc: w.document, sent, deliver, tick: () => new Promise<void>(r => setTimeout(r, 10)), text: () => w.document.getElementById("app")!.textContent ?? "" };
+  return { w, doc: w.document, sent, deliver, expireLastToolWait() { assert.ok(toolTimeouts.length); toolTimeouts.at(-1)!(); }, tick: () => new Promise<void>(r => setTimeout(r, 10)), text: () => w.document.getElementById("app")!.textContent ?? "" };
 }
 type Mount = ReturnType<typeof mount>;
 async function show(m: Mount, data: unknown) { m.deliver({ jsonrpc: "2.0", method: "ui/notifications/tool-result", params: { structuredContent: data } }); await m.tick(); }
@@ -187,6 +195,41 @@ test("a failed rename stays name-only when a refresh reveals newer saved strateg
 function draftResult(purpose = "settings") {
   return { proposal_id: PID, kind: "agent_draft", status: "awaiting_approval", approval_url: `${ISSUER}/connect/approve/${PID}`, expires_at: FUTURE, binding_hash: "ab".repeat(32), summary: { action: purpose === "create" ? "Create a new Merryman" : "Update settings", purpose, settings: { agentName: "Marian" } }, next_steps: "Owner review required.", created: true, risk_profile: null, left_out: [], diff: null };
 }
+
+test("a host approval longer than 30 seconds still delivers the new Merryman handoff", async () => {
+  const m = await start(setup({ agent: null, phase: "no_shared_agent", connection: { ...setup().connection, shared_agent_count: 0, available_tools: ["get_merryman_setup", "create_merryman"] } }));
+  change(m, "Name", "Marian"); submit(m, "Name"); const call = last(m, "create_merryman");
+  m.expireLastToolWait();
+  assert.equal(field(m, "Name").value, "Marian", "waiting preserves the submitted setup");
+  assert.equal(calls(m).length, 1, "waiting does not repeat a host approval or create another draft");
+  await answer(m, call, draftResult("create"));
+  assert.ok(m.doc.querySelector(`a[href="${ISSUER}/connect/approve/${PID}"]`), "late approved call remains actionable");
+  assert.match(m.text(), /Draft prepared/);
+  assert.doesNotMatch(m.doc.querySelector(".home-status")!.textContent!, /waiting|returned/i);
+});
+
+test("retrying a slow host request keeps its key and ignores an older result during the retry", async () => {
+  const m = await start(); await loadSettings(m); change(m, "Name", "Marian"); submit(m, "Name"); const first = last(m, "create_agent_draft");
+  m.expireLastToolWait(); submit(m, "Name"); const retry = last(m, "create_agent_draft");
+  assert.notEqual(retry.id, first.id); assert.deepEqual(retry.params!.arguments, first.params!.arguments);
+  await answer(m, first, draftResult());
+  assert.equal(m.doc.querySelector(`a[href="${ISSUER}/connect/approve/${PID}"]`), null);
+  assert.match(m.doc.querySelector(".home-status")!.textContent!, /Working/);
+  assert.ok(m.doc.querySelector<HTMLButtonElement>('button[type="submit"]')!.disabled);
+  await answer(m, retry, draftResult());
+  assert.ok(m.doc.querySelector(`a[href="${ISSUER}/connect/approve/${PID}"]`));
+});
+
+test("a delayed host approval cannot restore the previous connection's setup", async () => {
+  const initial = setup({ agent: null, phase: "no_shared_agent", connection: { ...setup().connection, shared_agent_count: 0, available_tools: ["get_merryman_setup", "create_merryman"] } });
+  const m = await start(initial); change(m, "Name", "Private draft"); submit(m, "Name"); const call = last(m, "create_merryman");
+  m.expireLastToolWait();
+  await show(m, setup({ ...initial, connection: { ...initial.connection, id: "connection-test-b" } }));
+  await answer(m, call, draftResult("create"));
+  assert.equal(field(m, "Name").value, "My Merryman");
+  assert.equal(m.doc.querySelector(`a[href="${ISSUER}/connect/approve/${PID}"]`), null);
+  assert.doesNotMatch(m.text(), /Draft prepared|Private draft/);
+});
 
 test("a cancelled configuration draft does not trap an identical new intent behind its old idempotency key", async () => {
   const m = await start(); await loadSettings(m); change(m, "Name", "Marian"); submit(m, "Name"); const first = last(m, "create_agent_draft"); await answer(m, first, draftResult());

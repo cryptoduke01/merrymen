@@ -11,7 +11,7 @@ import {
   type CustomToken,
   isWallTooWide,
 } from "@merrymen/core";
-import { createPrivyOwnedWallet, isPrivyOwned, loadGrant, retryGrantHandoff, type Grant, type GrantCaps } from "@/lib/session";
+import { createPrivyOwnedWallet, isPrivyOwned, loadGrant, retryGrantHandoff, sameGrantPermission, type Grant, type GrantCaps } from "@/lib/session";
 import { usePrivyOwner } from "@/terminal/usePrivyOwner";
 import { verifiedAdapter } from "@/lib/verified-adapter";
 import { TRENCHER_FACTORY } from "@/lib/trencher-permission";
@@ -275,10 +275,25 @@ export function CreateAgent({account,accountFailed=false,retrying=false,assistan
       if(current.kind!=="ready"||!await trustedSavedGrant(grant,current.account.session,window.location.origin)){
         onRefresh();throw new Error("This saved wallet could not be verified for your current account. Open Wallet & permissions.");
       }
-      if(current.account.status.exists&&current.account.status.grant?.smartAccount.toLowerCase()!==grant.smartAccount.toLowerCase())throw new Error("A different agent is active for this account. Reload before continuing.");
       if(needsPermissionReplacement(grant))throw new Error("This permission is awaiting replacement. Resume it from Wallet & permissions.");
-      const {demoOwnerPrivateKey:owner,...publicGrant}=grant;
-      const handoff=await retryGrantHandoff(account.session.hosted?publicGrant:grant);
+      if(current.account.status.exists){
+        if(!sameGrantPermission(current.account.status.grant,grant))throw new Error("Another permission is active for this account. Reload before continuing.");
+        // A lost response can leave this permission durably stored. Match all
+        // public bounds/provenance before skipping another handoff or signature.
+        setArmed(true);onRefresh();return;
+      }
+      if(account.session.hosted&&(!privyOwner||!isPrivyOwned(grant)))throw new Error("Open Wallet & permissions to confirm the signer for this saved wallet.");
+      const handoff=await retryGrantHandoff(grant,account.session.hosted&&privyOwner?{
+        ownerSigner:{account:privyOwner.account,binding:"privy-did-owner-v1",did:privyOwner.did},
+        tenant:current.account.session.address as `0x${string}`,
+        beforeSubmit:async()=>{
+          if(needsPermissionReplacement(grant))throw new Error("This permission is awaiting replacement. Resume it from Wallet & permissions.");
+          const latest=await fetchAccountForSession(account.session);
+          if(latest.kind!=="ready"||!await trustedSavedGrant(grant,latest.account.session,window.location.origin))throw new Error("Your signed-in account changed while confirming the wallet. Reload before retrying activation.");
+          if(needsPermissionReplacement(grant))throw new Error("This permission is awaiting replacement. Resume it from Wallet & permissions.");
+          if(latest.account.status.exists&&!sameGrantPermission(latest.account.status.grant,grant))throw new Error("Another permission is active for this account. Reload before continuing.");
+        },
+      }:undefined);
       if(!handoff.ok)throw new Error(handoff.error??"Could not activate your agent. Your saved permission is ready to retry.");
       setArmed(true);onRefresh();
     }catch(e){setError(e instanceof Error ? e.message : "Could not activate your agent.");}finally{inFlight.current=false;setBusy(false);}
@@ -429,7 +444,7 @@ export function CreateAgent({account,accountFailed=false,retrying=false,assistan
         that was working. So this step says what is actually true of each. */}
     {step==="backup"&&grant&&isPrivyOwned(grant)&&<><div className="create-intro"><h1>Your agent has a home.</h1><p>Your signing wallet holds the key that owns this account. There is nothing here to write down — merrymen never sees it, so it cannot show it to you or lose it.</p></div><div className="create-secret"><code>Held by your Privy login</code></div><label className="create-check"><input type="checkbox" checked={backupAck} onChange={e=>setBackupAck(e.target.checked)}/>I understand: if I lose access to my sign-in account, merrymen cannot recover these funds for me.</label><button className="flow-primary" disabled={!backupAck} onClick={()=>{localStorage.setItem(`merrymen.backup.${grant.smartAccount.toLowerCase()}`,"1");setStep("fund");}}>Continue</button></>}
     {step==="backup"&&grant&&!isPrivyOwned(grant)&&<><div className="create-intro"><h1>Your agent has a home.</h1><p>Save the recovery key before you go. It lets you recover this wallet if you lose this device.</p></div><label className="create-label">Recovery key</label><div className="create-secret"><code>{reveal ? grant.demoOwnerPrivateKey : "•••• •••• •••• •••• •••• ••••"}</code><button aria-label={reveal?"Hide recovery key":"Reveal recovery key"} onClick={()=>setReveal(!reveal)}>{reveal?<EyeOff size={18}/>:<Eye size={18}/>}</button></div><label className="create-check"><input type="checkbox" checked={backupAck} onChange={e=>setBackupAck(e.target.checked)}/>I saved my recovery key somewhere safe.</label><button className="flow-primary" disabled={!backupAck} onClick={()=>{localStorage.setItem(`merrymen.backup.${grant.smartAccount.toLowerCase()}`,"1");setReveal(false);setStep("fund");}}>Continue</button></>}
-    {step==="fund"&&grant&&<><div className="create-intro"><h1>{armed?(assistantProposalId?"Wallet connected.":"Ready when you are."):"One last connection."}</h1><p>{armed?(assistantProposalId?"Your signed permission is saved. Return to your chat and refresh Merryman to check activation and manage your agent.":paper ? "Your wallet is connected. Open your agent to check its status and follow paper trades." : "Your wallet is connected. Add trading funds, then open your agent to check its status."):"Your wallet is saved. Retry activation to connect it to your agent."}</p></div>{armed?<><dl className="fund-breakdown"><div><dt>Agent</dt><dd>{name || "Your agent"}</dd></div><div><dt>Strategy</dt><dd>{STRATEGIES.find(s=>s.id===strategy)?.name ?? strategy}</dd></div><div><dt>Trading mode</dt><dd>{paper ? "Paper trading" : "Live trading"}</dd></div></dl>{strategy==="trencher"&&<p className="create-note">Brain reviews and eligible pools are required before Trencher buys. Open your agent to check its current status. Keep access to the sign-in account that controls your wallet.</p>}{strategy==="llm-strategist"&&<p className="create-note">Check your AI provider in <a href="/settings">Settings</a> before your strategist starts.</p>}{!paper&&<button className="flow-primary" onClick={()=>onFund(grant)}>Add trading funds</button>}<button className="flow-primary" onClick={()=>{onRefresh();onDone();}}>{assistantProposalId?"Done — return to chat":"Open your agent"}</button></>:<button className="flow-primary" disabled={busy} onClick={()=>void retryActivation()}>Retry activation</button>}</>}
+    {step==="fund"&&grant&&<><div className="create-intro"><h1>{armed?(assistantProposalId?"Wallet connected.":"Ready when you are."):"One last connection."}</h1><p>{armed?(assistantProposalId?"Your signed permission is saved. Return to your chat and refresh Merryman to check activation and manage your agent.":paper ? "Your wallet is connected. Open your agent to check its status and follow paper trades." : "Your wallet is connected. Add trading funds, then open your agent to check its status."):"Your wallet is saved. Retry activation and confirm a fresh account-link signature. Your wallet, trading permission and limits stay the same."}</p></div>{armed?<><dl className="fund-breakdown"><div><dt>Agent</dt><dd>{name || "Your agent"}</dd></div><div><dt>Strategy</dt><dd>{STRATEGIES.find(s=>s.id===strategy)?.name ?? strategy}</dd></div><div><dt>Trading mode</dt><dd>{paper ? "Paper trading" : "Live trading"}</dd></div></dl>{strategy==="trencher"&&<p className="create-note">Brain reviews and eligible pools are required before Trencher buys. Open your agent to check its current status. Keep access to the sign-in account that controls your wallet.</p>}{strategy==="llm-strategist"&&<p className="create-note">Check your AI provider in <a href="/settings">Settings</a> before your strategist starts.</p>}{!paper&&<button className="flow-primary" onClick={()=>onFund(grant)}>Add trading funds</button>}<button className="flow-primary" onClick={()=>{onRefresh();onDone();}}>{assistantProposalId?"Done — return to chat":"Open your agent"}</button></>:<button className="flow-primary" disabled={busy} onClick={()=>void retryActivation()}>Retry activation</button>}</>}
     {status&&<p role="status" className="create-note">{status}</p>}{error&&<p role="alert" className="flow-error">{error}{isWallTooWide(error)&&<> <a href="/settings">Review custom tokens</a></>}</p>}
   </section>;
 }

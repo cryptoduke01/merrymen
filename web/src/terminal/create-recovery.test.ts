@@ -4,13 +4,13 @@ import { afterEach, before, beforeEach, it, mock } from "node:test";
 import { fileURLToPath } from "node:url";
 import React, { act } from "react";
 import { JSDOM } from "jsdom";
-import type { Grant } from "@/lib/session";
+import { sameGrantPermission, type Grant, type GrantRetryProof } from "@/lib/session";
 import type { AccountState } from "./HostedControls";
 import { markPermissionForReplacement } from "@/lib/permission-replacement";
 import { RISK_PROFILES } from "@merrymen/core";
 
 const tenant = `0x${"a".repeat(40)}`;
-const grant = { smartAccount: `0x${"b".repeat(40)}`, owner: tenant, sessionKeyAddress: `0x${"c".repeat(40)}`, chainId: 4663, binding: { version: "privy-did-owner-v1" }, caps: { perTradeUsdg: 10, dailyUsdg: 50 } } as Grant;
+const grant = { smartAccount: `0x${"b".repeat(40)}`, owner: tenant, sessionKeyAddress: `0x${"c".repeat(40)}`, chainId: 4663, grantedAt: 1, expiresAt: 604801, binding: { version: "privy-did-owner-v1" }, caps: { perTradeUsdg: 10, dailyUsdg: 50, expiryDays: 7, maxDrawdownPct: 5, maxOpsPerDay: 24 } } as Grant;
 const account: AccountState = { session: { hosted: true, address: tenant }, status: { exists: false, tenant } };
 let stored: Grant | null;
 let snapshots: Grant[];
@@ -19,6 +19,8 @@ let storageFailed: boolean;
 let mintCalls: number;
 let handoffOk: boolean;
 let signerAddress: string;
+let beforeRetrySubmit: (() => void) | null;
+let retryProof: GrantRetryProof | undefined;
 let writes: string[];
 let settingsWrite: Record<string,unknown>|null;
 let setupResponse: unknown;
@@ -49,8 +51,12 @@ before(async () => {
         trustedSavedGrant: async (candidate: Grant) => !!candidate && trusted,
       };
       if (id === "@/lib/session") return {
+        sameGrantPermission,
         loadGrant: () => stored,
-        retryGrantHandoff: async () => { writes.push("/api/grants"); return { ok: true }; },
+        retryGrantHandoff: async (_grant: Grant, proof?: GrantRetryProof) => {
+          retryProof=proof;beforeRetrySubmit?.();await proof?.beforeSubmit();
+          writes.push("/api/grants"); return { ok: true };
+        },
         isPrivyOwned: () => true,
         createPrivyOwnedWallet: async () => { mintCalls++; return { local: grant, handoff: { ok: handoffOk, ...(handoffOk?{}:{error: "temporary activation failure"}) } }; },
       };
@@ -63,6 +69,7 @@ before(async () => {
 
 beforeEach(() => {
   ui = testDom(); stored = null; snapshots = []; trusted = true; storageFailed = false; mintCalls = 0; handoffOk=false; signerAddress = tenant; writes = [];
+  beforeRetrySubmit=null;retryProof=undefined;
   settingsWrite=null;setupResponse=null;setupReads=0;
   current = { kind: "ready", account };
   globalThis.fetch = async (input, init) => {
@@ -143,6 +150,70 @@ it("Retry activation rechecks the signed-in account and never posts after a tena
   await ui.click("Retry activation");
   assert.deepEqual(writes, []);
   assert.match(ui.container.textContent!, /could not be verified for your current account/);
+});
+
+it("Retry activation requests a fresh proof for the same owner and permission", async () => {
+  await failedActivation();
+  await ui.click("Retry activation");
+  assert.equal(mintCalls,1);
+  assert.equal(retryProof?.ownerSigner.account.address,tenant);
+  assert.equal(retryProof?.ownerSigner.binding,"privy-did-owner-v1");
+  assert.equal(retryProof?.tenant,tenant);
+  assert.deepEqual(writes,["/api/grants"]);
+});
+
+it("a lost success response recovers from authenticated stored permission status without posting again", async () => {
+  await failedActivation();
+  current={kind:"ready",account:{...account,status:{exists:true,tenant,grant}}};
+  await ui.click("Retry activation");
+  assert.deepEqual(writes,[]);
+  assert.equal(retryProof,undefined);
+  assert.equal(mintCalls,1);
+  assert.match(ui.container.textContent!,/Your wallet is connected/);
+});
+
+for(const change of ["caps","expiry"] as const){
+  const changedGrant=()=>change==="caps"?{...grant,caps:{...grant.caps,perTradeUsdg:1}}:{...grant,expiresAt:grant.expiresAt+1000};
+  it(`reusing a session key with different ${change} cannot recover a lost response as success`,async()=>{
+    await failedActivation();
+    current={kind:"ready",account:{...account,status:{exists:true,tenant,grant:changedGrant()}}};
+    await ui.click("Retry activation");
+    assert.deepEqual(writes,[]);assert.equal(retryProof,undefined);
+    assert.match(ui.container.textContent!,/Another permission is active/);
+    assert.doesNotMatch(ui.container.textContent!,/Your wallet is connected/);
+  });
+  it(`reusing a session key with different ${change} during signing cannot allow a stale repost`,async()=>{
+    await failedActivation();
+    beforeRetrySubmit=()=>{current={kind:"ready",account:{...account,status:{exists:true,tenant,grant:changedGrant()}}};};
+    await ui.click("Retry activation");
+    assert.deepEqual(writes,[]);
+    assert.match(ui.container.textContent!,/Another permission is active/);
+    assert.doesNotMatch(ui.container.textContent!,/Your wallet is connected/);
+  });
+}
+
+it("changing login during the retry signature prevents the handoff", async () => {
+  await failedActivation();
+  beforeRetrySubmit=()=>{current={kind:"changed"};};
+  await ui.click("Retry activation");
+  assert.deepEqual(writes,[]);
+  assert.match(ui.container.textContent!,/signed-in account changed while confirming/);
+});
+
+it("selecting revocation during the retry signature prevents the handoff", async () => {
+  await failedActivation();
+  beforeRetrySubmit=()=>markPermissionForReplacement(grant);
+  await ui.click("Retry activation");
+  assert.deepEqual(writes,[]);
+  assert.match(ui.container.textContent!,/Resume your saved wallet/);
+});
+
+it("a newer permission arriving during the retry signature is not replaced", async () => {
+  await failedActivation();
+  beforeRetrySubmit=()=>{current={kind:"ready",account:{...account,status:{exists:true,tenant,grant:{...grant,sessionKeyAddress:`0x${"e".repeat(40)}`}}}};};
+  await ui.click("Retry activation");
+  assert.deepEqual(writes,[]);
+  assert.match(ui.container.textContent!,/Another permission is active/);
 });
 
 it("a stale Privy signer from another hosted login cannot mint or change settings", async () => {

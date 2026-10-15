@@ -4,7 +4,7 @@ import { afterEach, before, beforeEach, describe, it, mock } from "node:test";
 import { fileURLToPath } from "node:url";
 import { JSDOM } from "jsdom";
 import React, { act } from "react";
-import type { Grant, MintOptions } from "@/lib/session";
+import { sameGrantPermission, type Grant, type MintOptions } from "@/lib/session";
 import type { AccountState } from "./HostedControls";
 
 const OWNER = `0x${"a".repeat(40)}`;
@@ -47,6 +47,7 @@ before(async () => {
       if (id === "../account-session") return { fetchAccountForSession: async () => current };
       if (id === "@/lib/saved-grant-binding") return { loadRecoveryGrants: () => [], trustedSavedGrant: async (candidate: Grant) => candidate.owner === OWNER };
       if (id === "@/lib/session") return {
+        sameGrantPermission,
         loadGrant: () => stored,
         isPrivyOwned: (grant: Grant) => grant.binding?.version === "privy-did-owner-v1",
         createPrivyOwnedWallet: async (_owner: unknown, _did: string, options: MintOptions) => {
