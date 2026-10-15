@@ -56,7 +56,7 @@ it("the handoff passes only its proposal ID and shows return guidance without cl
   await ui.click("Finish test handoff");
   assert.match(ui.container.textContent!, /Back to your chat/);
   assert.match(ui.container.textContent!, /does not confirm a running worker/);
-  assert.match(ui.container.textContent!, /same ChatGPT or Claude conversation/);
+  assert.match(ui.container.textContent!, /same conversation with your assistant/);
   assert.equal(ui.container.querySelector('a[href^="https://"]'), null, "the handoff invents no chat callback or external return URL");
 });
 

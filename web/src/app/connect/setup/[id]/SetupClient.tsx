@@ -53,7 +53,7 @@ export function SetupClient({ id }: { id: string }) {
         {finishedFor && finishedFor === owner ? <>
           <div className="connect-success-icon"><Check size={25} aria-hidden /></div>
           <h1>Back to your chat.</h1>
-          <p>Return to the same ChatGPT or Claude conversation and refresh Merryman. Your assistant can check activation, show your portfolio and help manage your agent.</p>
+          <p>Return to the same conversation with your assistant and refresh Merryman. Your assistant can check activation, show your portfolio and help manage your agent.</p>
           <p>A saved permission does not confirm a running worker. Ask for its latest status before relying on trading.</p>
           <button className="flow-primary" onClick={() => {
             void navigator.clipboard?.writeText(STATUS_PROMPT).then(() => setCopied(true)).catch(() => setCopied(false));
