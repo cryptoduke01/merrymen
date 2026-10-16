@@ -142,6 +142,7 @@ internal fun signInLanded(before: String?, now: String?): Boolean =
 @Composable
 fun SignInScreen(nav: NavHostController) {
   val c = LocalContainer.current
+  val openedAt = remember { c.repo.serverTurn.value }
   val signedIn by c.repo.signedIn.collectAsState()
   val hosted by c.repo.hosted.collectAsState()
   val before = remember { c.repo.signedIn.value }
@@ -196,9 +197,8 @@ fun SignInScreen(nav: NavHostController) {
         WebFlow(
           url = WebAuth.signInUrl(o),
           origin = o,
-          jar = c.cookieJar,
           seed = { c.repo.seedWebView(o) },
-          onCookies = { scope.launch { c.repo.adoptWebSession() } },
+          onCookies = { c.repo.adoptWebSession(o, openedAt) },
           modifier = Modifier.fillMaxSize(),
         )
       }
@@ -209,6 +209,7 @@ fun SignInScreen(nav: NavHostController) {
 @Composable
 fun WebFlowScreen(nav: NavHostController, path: String, title: String) {
   val c = LocalContainer.current
+  val openedAt = remember { c.repo.serverTurn.value }
   var origin by remember { mutableStateOf<String?>(null) }
   val scope = rememberCoroutineScope()
   LaunchedEffect(Unit) { origin = c.repo.originNow() }
@@ -220,9 +221,8 @@ fun WebFlowScreen(nav: NavHostController, path: String, title: String) {
       WebFlow(
         url = o + path,
         origin = o,
-        jar = c.cookieJar,
         seed = { c.repo.seedWebView(o) },
-        onCookies = { scope.launch { c.repo.adoptWebSession() } },
+        onCookies = { c.repo.adoptWebSession(o, openedAt) },
         modifier = Modifier.fillMaxSize(),
       )
     }

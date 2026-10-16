@@ -21,11 +21,25 @@ details. Google documents [converting a Personal account](https://support.google
 Do not create a different business identity or classify trading as a
 non-financial app to work around this requirement.
 
-The business evidence supplied so far is a CAC name-reservation approval only.
-The owner confirmed incorporation has not yet been completed. Complete CAC
-registration and obtain the incorporation certificate/RC number before using
-the company as a verified legal organization; the reservation code is not an
-RC number or a D-U-N-S number. See [CAC's registration steps](https://www.cac.gov.ng/services/company-registration).
+On 2026-10-16, the owner supplied completed registration details for BELLYACHE LTD
+(RC 9927050) and D-U-N-S 352298383. These are owner-provided details; organization
+conversion and Google's verification have not yet been confirmed. The actual
+incorporation document, registered address and authorized representative evidence
+must match the selected payments and D&B profiles.
+
+The live Console on 2026-10-16 shows an earlier payments-profile change awaiting
+identity verification. **Change account type** and **Update details** are disabled
+until that check completes. The current profile is still Personal, with a US
+payments country; do not infer the company's country or address from that profile.
+The owner must finish the pending identity check and provide the official company
+registered address before organization conversion can continue. The owner supplied
+`https://bellyache.tech` as the company website and Abuja, FCT, Nigeria as its
+location. Use Nigeria for the company country; obtain the full registered street
+address/postal code if the D-U-N-S lookup does not populate it. Website ownership
+verification has not been confirmed. The owner supplied the first internal tester
+address privately; it is saved in the selected `Merrymen internal testers` list
+and Console marks **Select testers** complete. Additional testers will follow.
+Tester addresses belong in Console, not in source control.
 
 ## Store assets and description
 

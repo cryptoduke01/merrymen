@@ -304,6 +304,10 @@ data class Position(
   @SerialName("stop_floor_bps") val stopFloorBps: Int? = null,
   /** The sentence that stop was graded for, written at entry. */
   @SerialName("stop_floor_why") val stopFloorWhy: String? = null,
+  /** Display identity only; [symbol] remains the ledger and order key. */
+  val token: String? = null,
+  /** Older feeds omit this field; explicit null means no verified display label. */
+  @SerialName("display_symbol") val displaySymbol: String? = symbol,
 ) {
   val priceStale: Boolean get() = priceStaleRaw != 0
 }

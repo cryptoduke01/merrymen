@@ -1,0 +1,8 @@
+<en-US>
+Faster portfolio and account loading, with fewer duplicate requests.
+Clearer navigation labels and a simpler welcome screen.
+Guided Telegram setup and more useful connection status.
+Recognizable token tickers and quick access to Trades & P&L.
+Easy access to current AI model, research and social settings.
+Smoother sign-in and web setup navigation, with loading and retry feedback.
+</en-US>

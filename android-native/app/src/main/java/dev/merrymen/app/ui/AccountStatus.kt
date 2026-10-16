@@ -373,7 +373,7 @@ fun accountPct(p: Double?): String {
  * "+20%" alone says how a position is doing and nothing about how much of the
  * owner's money is in it.
  */
-data class PositionLine(val symbol: String, val detail: String, val pnlPct: Double?) {
+data class PositionLine(val symbol: String, val detail: String, val pnlPct: Double?, val label: String = symbol) {
   /** "+12.34%" or null — never "0%" for a return nobody could compute. */
   val pctText: String? get() = pnlPct?.takeIf { it.isFinite() }?.let { accountPct(it) }
   val down: Boolean get() = (pnlPct ?: 0.0) < 0
@@ -399,6 +399,7 @@ fun positionLinesOf(positions: List<Position>): List<PositionLine> =
     val pct = cost?.let { (value - it) / it * 100 }
     PositionLine(
       symbol = p.symbol,
+      label = positionLabel(p),
       detail = accountUsd(value) +
         (if (p.priceStale) " · last mark" else "") +
         (if (cost == null) " · cost unknown" else if (unconfirmed) " · cost unconfirmed" else ""),

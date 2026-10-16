@@ -49,8 +49,8 @@ android {
     minSdk = 26
     targetSdk = 36
     // Http.kt derives the user-agent version from BuildConfig.VERSION_NAME.
-    versionCode = 3
-    versionName = "0.3.0"
+    versionCode = 4
+    versionName = "0.4.0"
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
     // THE ORIGIN IS A BUILD INPUT, not a literal in the code. The gateway host

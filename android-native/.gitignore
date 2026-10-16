@@ -1,6 +1,7 @@
 # Android / Gradle
 build/
 .gradle/
+.kotlin/
 .idea/
 *.iml
 *.hprof

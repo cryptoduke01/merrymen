@@ -26,7 +26,7 @@ export ANDROID_HOME="$HOME/Library/Android/sdk"
 daemons building in parallel worktrees ran it out of memory once. It costs
 about a minute a build.
 
-`minSdk 26`, `targetSdk 36`, `compileSdk 36`, version 0.3.0 (code 3). The
+`minSdk 26`, `targetSdk 36`, `compileSdk 36`, version 0.4.0 (code 4). The
 user-agent derives its version from `BuildConfig.VERSION_NAME`.
 
 **Tests are JVM unit tests** under `app/src/test/`, run by
@@ -131,8 +131,8 @@ ceremonies. They belong where the key is.
 | Agent profile — stats, top trades, fills, growth, the public book, the owner's own dollars, wire in | `/api/agents/{slug}`, `/api/agents/{slug}/own`, `/api/feed`, `/api/follow` |
 | Group chat — read, post, reply, take back, mute, time zone | `/api/groupchat` (GET, POST, DELETE), `/api/groupchat/me` (GET, POST) |
 | The Merry Circle | `/api/circle` |
-| Telegram — connection, link code, test the bot | `/api/telegram` (GET, POST) |
-| Settings — Live trading switch with its consent, the web's form bound to its owner, server origin, practice reset | `/api/settings` (GET, PUT), `/api/paper-reset`, `/api/telegram`, `/api/auth/session` |
+| Telegram — measured connection status, private chat link, token check, managed setup handoff | `/api/telegram` (owner-scoped GET, POST token check) |
+| Settings — Live trading switch with its consent, the web's form bound to its owner, server origin, practice reset | `/api/settings` (GET, PUT), `/api/paper-reset`, `/api/auth/session` |
 | Every agent face and banner | `/api/agent-image/{slug}/avatar` and `/banner` (ETag, `?v=` after an upload) |
 
 Nothing calls `/api/auth/challenge`, `/api/auth/verify`, `/api/holder`,
@@ -339,3 +339,20 @@ need a *Windows* path for the host side (`C:\...`), while guest paths like
 `/sdcard/ui.xml` get mangled into `C:/Program Files/Git/sdcard/...` unless you
 set `MSYS2_ARG_CONV_EXCL="*"`. Setting `MSYS_NO_PATHCONV=1` fixes the guest side
 and breaks the host side, so set neither globally — scope them per command.
+
+## October 2026 Android refresh (0.4.0)
+
+Home and You load account status alongside the portfolio and coalesce overlapping
+refreshes. Private screen state is keyed to both wallet and server. Failed reads
+retain the last good value with its existing stale-data caption.
+
+Navigation has visible labels and clears space for the keyboard. Welcome uses one
+sign-in action and a guest exploration path. Settings links to current model,
+research, Telegram-group and X-posting controls; signing stays in the protected
+web flow. Telegram uses the hosted managed-bot setup and reports measured listener
+state instead of equating a saved token with a running bot. Positions display
+verified ticker metadata without changing ledger identities. You links to the
+current Trades & P&L cards.
+
+Perpetual and Solana trading on separate, unmerged branches are not included.
+This build is based on main at `fc6758fd`, plus the prior Play release preparation.

@@ -18,6 +18,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * WHAT THE APP KNOWS, AND HOW SURE IT IS.
@@ -274,8 +275,8 @@ class Repository(
    */
   suspend fun refreshIdentity() {
     identity.refuseInsideHook("refreshIdentity")
-    val asOf = identity.turn
-    identity.answered(api.session(), asOf)
+    val read = identity.beginRead() ?: return
+    identity.answered(api.session(), read.turn, read.sequence)
   }
 
   /**
@@ -322,15 +323,38 @@ class Repository(
    * handoff, which costs nothing because the WebView is being opened anyway.
    */
   suspend fun seedWebView(origin: String) {
-    val first = !session.webViewSessionReseeded()
-    if (cookies.seedWebView(origin, rewriteSame = first) && first) session.markWebViewSessionReseeded()
+    identity.refuseInsideHook("seedWebView")
+    val turn = identity.turn
+    moving.withLock {
+      if (identity.turn != turn || originNow() != origin) return@withLock
+      val first = !session.webViewSessionReseeded()
+      if (cookies.seedWebView(origin, rewriteSame = first) && first) session.markWebViewSessionReseeded()
+    }
   }
 
-  /** Called after the WebView flow settles, to pick up a fresh session cookie. */
-  suspend fun adoptWebSession() {
+  /**
+   * Adopt only the session of the server that opened this WebView. False keeps
+   * a changed cookie pending so a transient identity-read failure is retried.
+   */
+  suspend fun adoptWebSession(expectedOrigin: String? = null, expectedServerTurn: Long? = null): Boolean {
     identity.refuseInsideHook("adoptWebSession")
-    cookies.harvest(session.originNow())
-    refreshIdentity()
+    val origin = expectedOrigin ?: originNow()
+    val turn = expectedServerTurn ?: serverTurn.value
+    val identityTurn = identity.turn
+    // Once a browser snapshot may change native credentials, finish its bounded
+    // identity check even if Back disposes the WebView. A failed check leaves
+    // identity unknown, which the shell retries after this screen has gone.
+    return withContext(NonCancellable) {
+      val read = moving.withLock {
+        if (serverTurn.value != turn || identity.turn != identityTurn || originNow() != origin) null
+        else if (!cookies.harvestChecked(origin)) null
+        else identity.credentialsAdopted(identityTurn)
+      } ?: return@withContext false
+      val answer = withTimeoutOrNull(30_000) { withContext(ServerBound(turn)) { api.session() } }
+        ?: ApiResult.Unreachable("the session check timed out")
+      if (serverTurn.value != turn) return@withContext false
+      identity.answered(answer, read.turn, read.sequence)
+    }
   }
 
   /**
@@ -343,10 +367,16 @@ class Repository(
   suspend fun signOut() {
     identity.refuseInsideHook("signOut")
     api.logout()
-    cookies.forgetAll()
-    session.clearSession()
-    // What this wallet liked, wired and said in chat is not the next wallet's
-    // business: every forget hook runs here.
-    identity.signedOut()
+    // A WebView snapshot read before sign-out must not land after its clear.
+    // Finish local cleanup as one turn even if its screen goes away midway.
+    withContext(NonCancellable) {
+      moving.withLock {
+        cookies.forgetAll()
+        session.clearSession()
+        // What this wallet liked, wired and said in chat is not the next wallet's
+        // business: every forget hook runs here.
+        identity.signedOut()
+      }
+    }
   }
 }
