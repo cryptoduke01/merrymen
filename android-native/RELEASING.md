@@ -8,7 +8,7 @@ project in `mobile/`, which uses the same package name but a different client.
 
 - JDK 17, Android SDK platform 36, and build-tools 35.0.0.
 - The committed Gradle 9.3.1 wrapper, AGP 8.13.1 and Kotlin 2.2.20.
-- Version 0.4.0, code 4. Before an upload, check Play Console for the highest
+- Version 0.4.1, code 5. Before an upload, check Play Console for the highest
   version code already used; every new upload must use a higher code.
 
 [AGP 8.13 supports API 36.1 and requires at least Gradle 8.13/JDK 17](https://developer.android.com/build/releases/agp-8-13-0-release-notes).
@@ -99,3 +99,42 @@ data safety, deletion, content rating, audience, financial features and any
 testing requirements are complete and accurate. Listing screenshots must come
 from the build being tested. A successful AAB build is not evidence that Google
 has approved distribution or that the app is live.
+
+## 0.4.1 server and sign-in rollout
+
+Deploy the matching web changes before distributing 0.4.1 as the completed speed
+fix. The native app remains compatible with older responses, but an older server
+still performs the expensive full ranking/profile/feed reads. Test actual public
+agents, recent activity and a profile against the deployed routes; an empty state
+or a timeout is not a successful data check.
+
+The current mark is the 19 rounded bars from `web/src/terminal/ui.tsx` and
+`ui/Logo.kt`, also in `site/public/favicon.svg`. The older feather files in
+`web/public/icon-*.png` are not the current brand. The Android adaptive foreground
+uses the current geometry within the safe area. Store artwork uses that same mark.
+
+External X authorization stays disabled until all of these are true:
+
+1. `/auth/android`, `/api/auth/android` and `/.well-known/assetlinks.json` are
+   deployed at `https://app.merrymen.dev`.
+2. Digital Asset Links lists both the Google Play **app signing** certificate and
+   the existing GitHub APK/upload certificate. Verify their fingerprints in Play
+   Console and against the signed APK; never replace either with a debug key.
+3. Privy allows the canonical origin and the `/auth/android` redirect. On
+   2026-10-16 its redirect list was empty (all allowed-origin paths permitted),
+   so no dashboard mutation was needed. Recheck before enabling; do not narrow
+   redirects in a way that breaks web or iOS sign-in.
+4. Set `MERRYMEN_ANDROID_OAUTH_ENABLED=1` only after that deployment and association
+   check. Native code independently requires OS verification of the App Link.
+5. On a physical device, finish X approval and verify return to Merrymen, correct
+   owner identity and a normal signed-in screen. Repeat with no X app installed,
+   cancel/retry, rotation, process death and email fallback. Installed X app
+   handling depends on X and Android; browser authorization remains supported.
+
+The returned code/state/provider is short lived and accepted once for the pending
+flow only. It is never a native session or wallet credential. Do not log OAuth
+query values, cookies, tokens, signing secrets or private keys.
+
+Keep 0.4.0 assets intact. 0.4.1 uses the same GitHub signing certificate and can
+upgrade 0.4.0 in place. Google Play signs its delivered APKs with its own key, so
+GitHub and Play installations are separate distribution paths.

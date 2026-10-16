@@ -26,7 +26,7 @@ export ANDROID_HOME="$HOME/Library/Android/sdk"
 daemons building in parallel worktrees ran it out of memory once. It costs
 about a minute a build.
 
-`minSdk 26`, `targetSdk 36`, `compileSdk 36`, version 0.4.0 (code 4). The
+`minSdk 26`, `targetSdk 36`, `compileSdk 36`, version 0.4.1 (code 5). The
 user-agent derives its version from `BuildConfig.VERSION_NAME`.
 
 **Tests are JVM unit tests** under `app/src/test/`, run by
@@ -59,7 +59,10 @@ every write's body one-shot, so even a stray `http.newCall(POST)` or a 503
 saying `Retry-After: 0` is not re-sent behind the owner's back
 (`WriteOnceTest`). The app's reads through the API still recover from a stale
 pooled connection (`AppGraph` builds it with `recoverReads = true`); an API
-built over any other client reads exactly as that client does.
+built over another client preserves its retry policy. GET/HEAD calls have a
+30-second whole-call ceiling (or the caller’s shorter ceiling), so sequential
+connection attempts cannot keep a screen spinning for minutes. Write and chat
+stream deadlines are unchanged.
 
 **The Server field** (Settings) takes `https://…`, or plain `http://` only for
 `localhost` and `10.0.2.2` — the hosts `network_security_config.xml` allows in
@@ -77,6 +80,23 @@ other host, so fixing the field to that server keeps the owner signed in, and
 typing any other server sends it nothing.
 
 ---
+
+## Startup, discovery and Android sign-in
+
+The first screen waits only for local credential migration. Version and session
+checks run in parallel; private screens still wait for verified identity. Home
+shows public Agents, Activity and Markets immediately. Directory, activity and
+profile summary requests avoid historical financial calculations; full rankings
+and profile history load when requested. A server rollout is required for those
+fast API views; an older server may still take longer despite the native deadline.
+
+Android X sign-in has a dedicated `/auth/android` page. Once the server advertises
+support and Android verifies the HTTPS App Link, authorization opens in an
+installed supporting app or browser and returns to the original WebView. That
+WebView retains Privy PKCE/state and completes the existing server-verified owner
+proof; a callback alone never establishes identity. Unsupported/unverified
+configurations keep embedded sign-in. See [RELEASING.md](RELEASING.md) for rollout
+and account/device testing requirements.
 
 ## The one architectural decision
 
@@ -119,7 +139,7 @@ ceremonies. They belong where the key is.
 | Screen | Endpoints |
 |---|---|
 | Home — the owner's book (mode chip, liveBlocker and its fix, positions, honest P&L, own tape), the Telegram/Trencher strip, Circle banner, group chat door | `/api/feed`, `/api/grants`, `/api/telegram`, `/api/settings`, `/api/tier`; `/api/auth/session` when a read answers for nobody |
-| Feed — trades vs views, the agent's own take, per-call figures, ×N since, Real money toggle, hearts, the wire ring | `/api/theses`, `/api/market`, `/api/discoveries`, `/api/likes`, `/api/like-counts`, `/api/follow` |
+| Feed — recent activity first, trades vs views, the agent's own take, per-call figures, ×N since, Real money toggle, hearts, the wire ring | `/api/theses?view=activity`, `/api/market`, `/api/discoveries`, `/api/likes`, `/api/like-counts`, `/api/follow` |
 | Chat — streamed replies, the persisted thread with receipts and the unread dot, confirm cards bound to the owner, fills landing in the thread | `/api/chat` (streamed), `/api/feed`, `/api/grants`, `/api/settings`, `/api/orders/ceiling`, `GET /api/orders?id=` |
 | Trade, Coins to consider, How much risk — confirm card inside the ceiling and the sealed cap, orders followed to their own window | `POST /api/orders`, `POST /api/snipe`, `GET /api/orders`, `/api/orders/ceiling`, `/api/proposals` (and `/api/discoveries` when it answers "nothing-vetted"), `/api/settings`, `/api/grants`, `/api/feed` |
 | Alpha — locked gate with its perks, "could not look" vs "nothing vetted", tier badge | `/api/alpha` |
@@ -127,8 +147,8 @@ ceremonies. They belong where the key is.
 | Markets — stocks, then launchpad coins; no 24h figure on a new pool | `/api/market`, `/api/discoveries` |
 | Token — chart over six spans with stale bars captioned, market activity, holders, star, share | `/api/tokens/{address}` (`&activity=1` once per visit), `/api/venue?desk=chart` |
 | Search — debounced, cancelled, retried; launchpad coins matched here, as the web matches them, since the route never returns one | `/api/search`, `/api/discoveries` |
-| Leaderboard — every agent, paper returns stamped Paper, the retired count | `/api/leaderboard`, `/api/feed` (which row is yours), `/api/follow` |
-| Agent profile — stats, top trades, fills, growth, the public book, the owner's own dollars, wire in | `/api/agents/{slug}`, `/api/agents/{slug}/own`, `/api/feed`, `/api/follow` |
+| Agents — identity directory first, optional performance rankings, paper and retired labels | `/api/leaderboard?view=directory`, `/api/leaderboard`, `/api/feed` (which row is yours), `/api/follow` |
+| Agent profile — identity and activity independently, optional performance/history, the public book, owner dollars, wire in | `/api/agents/{slug}?view=summary`, `?view=activity`, `?view=details`, `/api/agents/{slug}/own`, `/api/feed`, `/api/follow` |
 | Group chat — read, post, reply, take back, mute, time zone | `/api/groupchat` (GET, POST, DELETE), `/api/groupchat/me` (GET, POST) |
 | The Merry Circle | `/api/circle` |
 | Telegram — measured connection status, private chat link, token check, managed setup handoff | `/api/telegram` (owner-scoped GET, POST token check) |
@@ -164,7 +184,10 @@ active, so the `Host` must be loopback or private-LAN.
 
 ## Known gaps
 
-- No offline cache, no push, no widgets.
+- No persistent offline cache, no push, no widgets. Home and Agents share a
+  server-scoped memory cache containing public identities only; stale names
+  remain visible with refresh/failure wording. No performance or owner dollars
+  are retained in that cache.
 - The **watchlist is device-local**, in DataStore, the way the web's is
   device-local in `localStorage`. Starring here does not star on the web. There
   is no server route for it and inventing one would put a per-caller read in

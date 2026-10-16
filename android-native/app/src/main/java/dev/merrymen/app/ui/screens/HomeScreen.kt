@@ -286,6 +286,7 @@ fun HomeScreen(nav: NavHostController) {
   val c = LocalContainer.current
   val signedIn by c.repo.signedIn.collectAsState()
   val hosted by c.repo.hosted.collectAsState()
+  val identityKnown by c.repo.identityKnown.collectAsState()
   val canOfferSignIn by c.repo.canOfferSignIn.collectAsState()
   val serverTurn by c.repo.serverTurn.collectAsState()
   val reads = remember(signedIn, serverTurn) { OwnReads() }
@@ -296,6 +297,7 @@ fun HomeScreen(nav: NavHostController) {
   val lifecycle = LocalLifecycleOwner.current.lifecycle
 
   suspend fun load(afterChange: Boolean = false) {
+    if (!c.repo.identityKnown.value || !c.api.servers.holds(serverTurn)) return
     reads.load(
       c.api, signedIn, c.repo.hosted.value, withStrip = true,
       nowMs = { System.currentTimeMillis() },
@@ -305,15 +307,15 @@ fun HomeScreen(nav: NavHostController) {
     nowMs = System.currentTimeMillis()
   }
 
-  LaunchedEffect(signedIn, serverTurn) {
-    if (!c.api.servers.holds(serverTurn)) return@LaunchedEffect
+  LaunchedEffect(signedIn, serverTurn, identityKnown) {
+    if (!identityKnown || !c.api.servers.holds(serverTurn)) return@LaunchedEffect
     tier = c.api.tier().toLoaded()
   }
   // EVERY 60s WHILE IN FRONT, and never in the background: repeatOnLifecycle
   // stops the loop when the screen is paused and starts it (with a read) when
   // it is back.
-  LaunchedEffect(signedIn, serverTurn, lifecycle) {
-    if (!c.api.servers.holds(serverTurn)) return@LaunchedEffect
+  LaunchedEffect(signedIn, serverTurn, identityKnown, lifecycle) {
+    if (!identityKnown || !c.api.servers.holds(serverTurn)) return@LaunchedEffect
     lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
       while (true) {
         load()
@@ -388,10 +390,13 @@ fun HomeScreen(nav: NavHostController) {
         }
       }
 
+      HomeDiscovery(nav)
       SignedInNotice(Modifier.padding(bottom = 20.dp))
       CircleLockBanner(tier, nav)
 
-      when (book) {
+      if (!identityKnown) {
+        Prose("Checking your account… You can explore agents and activity above.", 14.sp, 20.sp, MerryColors.tx2)
+      } else when (book) {
         OwnBook.Loading -> LoadedBlock(Loaded.Loading) { _: Unit -> }
         is OwnBook.Failed -> LoadedBlock(
           book.state,
@@ -399,8 +404,8 @@ fun HomeScreen(nav: NavHostController) {
           onRetry = { scope.launch { load() } },
         ) { _: Unit -> }
         is OwnBook.SignedOut -> NoBookHero(
-          title = "Your agent starts here",
-          body = "Sign in to see your agent's balance, positions and trades here.",
+          title = "Your agent",
+          body = "Sign in to create an agent or see its portfolio.",
           action = if (book.canSignIn) "Sign in" else null,
           onAction = { nav.navigate(Routes.SIGN_IN) },
         )
@@ -445,7 +450,6 @@ fun HomeScreen(nav: NavHostController) {
 @Composable
 private fun NoBookHero(title: String, body: String, action: String?, onAction: () -> Unit) {
   Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(20.dp)) {
-    Prose(text = "This one trades.", size = 22.sp, lineHeight = 26.4.sp, color = MerryColors.tx, weight = FontWeight.W700)
     Notice(title = title, body = body, actionLabel = action, onAction = if (action != null) onAction else null)
   }
 }
@@ -581,14 +585,7 @@ private fun OwnHome(
 @Composable
 private fun HomeGo(nav: NavHostController) {
   Column(Modifier.fillMaxWidth().padding(top = 28.dp)) {
-    TabSectionHeading("Go", Modifier.padding(bottom = 12.dp))
-    // Two rows of two rather than a flow, so the wrap point is authored rather
-    // than left to whatever the longest label happens to be.
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-      LinkChip("Markets", Modifier.weight(1f)) { nav.navigate(Routes.MARKETS) }
-      LinkChip("Leaderboard", Modifier.weight(1f)) { nav.navigate(Routes.LEADERBOARD) }
-    }
-    Spacer(Modifier.height(8.dp))
+    TabSectionHeading("Account & app", Modifier.padding(bottom = 12.dp))
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
       LinkChip("Trade", Modifier.weight(1f)) { nav.navigate(Routes.TRADE) }
       LinkChip("Settings", Modifier.weight(1f)) { nav.navigate(Routes.SETTINGS) }
@@ -597,7 +594,7 @@ private fun HomeGo(nav: NavHostController) {
 }
 
 @Composable
-private fun LinkChip(label: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
+internal fun LinkChip(label: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
   val shape = RoundedCornerShape(12.dp)
   Box(
     modifier

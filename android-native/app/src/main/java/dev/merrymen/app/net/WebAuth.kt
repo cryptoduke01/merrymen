@@ -2,6 +2,9 @@ package dev.merrymen.app.net
 
 import android.annotation.SuppressLint
 import android.content.Intent
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
 import android.os.Message
 import android.view.ViewGroup
 import android.webkit.CookieManager
@@ -22,6 +25,10 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.key
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.platform.LocalContext
+import java.util.UUID
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.unit.dp
 import dev.merrymen.app.ui.MerryColors
@@ -353,6 +360,12 @@ private class PopupWebView(val view: WebView) {
   }
 }
 
+private fun Context.hostActivity(): Activity? = when (this) {
+  is Activity -> this
+  is ContextWrapper -> baseContext.takeUnless { it === this }?.hostActivity()
+  else -> null
+}
+
 /**
  * The delegated-signature surface: the real web app, in a WebView, with its
  * cookies handed back to the native client on every page settle.
@@ -373,6 +386,8 @@ fun WebFlow(
   seed: suspend () -> Unit,
   onCookies: suspend () -> Boolean,
   modifier: Modifier = Modifier,
+  externalOAuth: Boolean = false,
+  authContextCurrent: () -> Boolean = { true },
 ) {
   // AN ADDRESS THAT IS NOT ONE gets a sentence, not a WebView error page. An
   // older build could store a Server with no scheme; loading "app.merrymen.dev/home"
@@ -387,6 +402,16 @@ fun WebFlow(
     return
   }
   var seeded by remember(origin) { mutableStateOf(false) }
+  val authFlowId = rememberSaveable(origin, url) { UUID.randomUUID().toString() }
+  val hostActivity = LocalContext.current.hostActivity()
+  val currentAuthContext by rememberUpdatedState(authContextCurrent)
+  DisposableEffect(authFlowId) {
+    onDispose {
+      // Rotation recreates the view but retains the flow id and Privy's DOM
+      // storage. Leaving the screen abandons its pending external approval.
+      if (hostActivity?.isChangingConfigurations != true) AndroidOAuthReturns.cancelFlow(authFlowId)
+    }
+  }
   val currentOnCookies by rememberUpdatedState(onCookies)
   val lifecycle = LocalLifecycleOwner.current.lifecycle
   LaunchedEffect(origin) {
@@ -425,6 +450,20 @@ fun WebFlow(
       var popupHost by remember { mutableStateOf("Opening page…") }
       var canGoBack by remember { mutableStateOf(false) }
       var active by remember { mutableStateOf(true) }
+      var externalUrl by rememberSaveable(authFlowId) { mutableStateOf<String?>(null) }
+      var continueEmbedded by remember { mutableStateOf(false) }
+      val returned by AndroidOAuthReturns.delivery.collectAsState()
+      LaunchedEffect(returned, webView) {
+        if (returned?.flowId != authFlowId || webView == null) return@LaunchedEffect
+        if (!active || !currentAuthContext()) {
+          AndroidOAuthReturns.cancelFlow(authFlowId)
+          return@LaunchedEffect
+        }
+        AndroidOAuthReturns.take(authFlowId)?.let { resume ->
+          externalUrl = null
+          webView?.loadUrl(resume)
+        }
+      }
       fun closePopup() {
         val closing = popup
         popup = null
@@ -449,6 +488,7 @@ fun WebFlow(
         view.setBackgroundColor(android.graphics.Color.rgb(14, 15, 12))
         view.settings.javaScriptEnabled = true
         view.settings.domStorageEnabled = true
+        view.settings.userAgentString += " $ANDROID_AUTH_USER_AGENT"
         // Keep popup-based OAuth and Telegram's about:blank placeholder from
         // replacing the settings page that owns their pending request.
         view.settings.setSupportMultipleWindows(true)
@@ -457,6 +497,17 @@ fun WebFlow(
         view.webViewClient = object : WebViewClient() {
           override fun shouldOverrideUrlLoading(source: WebView?, request: WebResourceRequest?): Boolean {
             if (!active || request == null) return true
+            if (externalOAuth && !continueEmbedded && request.isForMainFrame && currentAuthContext() &&
+              AndroidOAuthReturns.begin(authFlowId, source?.url, request.url.toString())
+            ) {
+              if (openExternalX(view.context, request.url.toString())) {
+                externalUrl = request.url.toString()
+                loading = false
+                return true
+              }
+              // No suitable app/browser: retain the original in-app flow.
+              AndroidOAuthReturns.cancelFlow(authFlowId)
+            }
             return when (webLinkTarget(request.url.toString(), request.isForMainFrame)) {
               WebLinkTarget.Embedded -> false
               WebLinkTarget.Telegram -> {
@@ -566,6 +617,20 @@ fun WebFlow(
         Notice(
           title = "Link unavailable", body = message,
           actionLabel = "Dismiss", onAction = { linkNotice = null },
+          modifier = Modifier.align(Alignment.BottomCenter).padding(16.dp),
+        )
+      }
+      externalUrl?.let { authorization ->
+        Notice(
+          title = "Finish signing in",
+          body = "Approve with X or your browser, then return to Merrymen. You can also finish here.",
+          actionLabel = "Continue in Merrymen",
+          onAction = {
+            AndroidOAuthReturns.cancelFlow(authFlowId)
+            externalUrl = null
+            continueEmbedded = true
+            webView?.loadUrl(authorization)
+          },
           modifier = Modifier.align(Alignment.BottomCenter).padding(16.dp),
         )
       }

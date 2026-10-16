@@ -17,8 +17,10 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -27,6 +29,10 @@ import androidx.navigation.NavHostController
 import dev.merrymen.app.LocalContainer
 import dev.merrymen.app.net.WebAuth
 import dev.merrymen.app.net.WebFlow
+import dev.merrymen.app.net.ANDROID_AUTH_URL
+import dev.merrymen.app.net.androidOAuthAvailability
+import dev.merrymen.app.net.hasVerifiedAndroidAuthLink
+import dev.merrymen.app.net.valueOrNull
 import dev.merrymen.app.ui.MerryColors
 import dev.merrymen.app.ui.Notice
 import dev.merrymen.app.ui.PagePadH
@@ -39,6 +45,7 @@ import dev.merrymen.app.ui.signInPageOf
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * The compact header for a screen whose body is the WEB APP ITSELF.
@@ -144,15 +151,27 @@ internal fun signInLanded(before: String?, now: String?): Boolean =
 @Composable
 fun SignInScreen(nav: NavHostController) {
   val c = LocalContainer.current
-  val openedAt = remember { c.repo.serverTurn.value }
+  val context = LocalContext.current
+  val openedAt = rememberSaveable { c.repo.serverTurn.value }
   val signedIn by c.repo.signedIn.collectAsState()
   val hosted by c.repo.hosted.collectAsState()
-  val before = remember { c.repo.signedIn.value }
-  var origin by remember { mutableStateOf<String?>(null) }
+  val before by rememberSaveable { mutableStateOf(c.repo.signedIn.value) }
+  var origin by rememberSaveable { mutableStateOf<String?>(null) }
+  var externalOAuth by rememberSaveable { mutableStateOf(false) }
   var asked by remember { mutableStateOf(false) }
   val scope = rememberCoroutineScope()
   LaunchedEffect(Unit) {
-    origin = c.repo.originNow()
+    if (origin == null) {
+      val readOrigin = c.repo.originNow()
+      // Keep this choice over rotation: another capability read must not send
+      // an in-progress external approval back to the old /home entry point.
+      if (hasVerifiedAndroidAuthLink(context, readOrigin)) {
+        externalOAuth = withTimeoutOrNull(1_500) {
+          c.api.androidOAuthAvailability().valueOrNull()?.enabled == true
+        } == true
+      }
+      origin = readOrigin
+    }
     if (c.repo.hosted.value == null) c.repo.refreshIdentity()
     asked = true
   }
@@ -197,10 +216,12 @@ fun SignInScreen(nav: NavHostController) {
       )
       SignInPage.Open -> if (o != null) {
         WebFlow(
-          url = WebAuth.signInUrl(o),
+          url = if (externalOAuth) ANDROID_AUTH_URL else WebAuth.signInUrl(o),
           origin = o,
           seed = { c.repo.seedWebView(o) },
           onCookies = { c.repo.adoptWebSession(o, openedAt) },
+          externalOAuth = externalOAuth,
+          authContextCurrent = { c.repo.serverTurn.value == openedAt && c.repo.signedIn.value == before },
           modifier = Modifier.fillMaxSize(),
         )
       }

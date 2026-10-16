@@ -411,6 +411,7 @@ fun SettingsScreen(nav: NavHostController) {
   val c = LocalContainer.current
   val signedIn by c.repo.signedIn.collectAsState()
   val hosted by c.repo.hosted.collectAsState()
+  val identityKnown by c.repo.identityKnown.collectAsState()
   val canOfferSignIn by c.repo.canOfferSignIn.collectAsState()
   // WHOSE FORM THIS IS: the server it was read from and the wallet it was read for.
   val form = currentFormOwner(c.repo)
@@ -439,10 +440,14 @@ fun SettingsScreen(nav: NavHostController) {
   val scope = rememberCoroutineScope()
 
   suspend fun load() {
+    if (!c.repo.identityKnown.value || c.repo.serverTurn.value % 2L != 0L) {
+      state = Loaded.Loading
+      return
+    }
     state = readSettingsFor(c.api, signedIn, c.repo.hosted.value) { c.repo.refreshIdentity() }
   }
 
-  LaunchedEffect(form) {
+  LaunchedEffect(form, identityKnown) {
     origin = c.repo.originNow()
     load()
   }
