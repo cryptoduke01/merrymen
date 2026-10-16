@@ -11,6 +11,7 @@
  * (tg-groups/desk.ts): every figure in it must be one the brief contained.
  */
 import { randomUUID } from "node:crypto";
+import { onchainIdIn } from "../../../packages/core/src/ids";
 import type { TgDeskStance, TgDeskThinkRequest, TgDeskThought } from "../telegram/tg-groups/types";
 
 export interface BrainDeskConfig {
@@ -42,8 +43,9 @@ async function readBounded(res: Response, max: number): Promise<string> {
   return Buffer.concat(chunks).toString("utf8");
 }
 
+/** FORBIDDEN, plus a Solana key or signature (core's onchainIdIn), which has no 0x for it to see. */
 const text = (v: unknown, max: number): string | null =>
-  typeof v === "string" && v.trim().length <= max && !FORBIDDEN.test(v) ? v.replace(/\s+/g, " ").trim() : null;
+  typeof v === "string" && v.trim().length <= max && !FORBIDDEN.test(v) && !onchainIdIn(v) ? v.replace(/\s+/g, " ").trim() : null;
 
 /** Brain's analysis, shape-checked. Null for anything that is not one. */
 export function parseDeskAnalysis(raw: unknown): TgDeskThought | null {

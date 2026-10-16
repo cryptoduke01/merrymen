@@ -25,6 +25,7 @@
  * shadow-mode guarantee rather than a flag someone could flip.
  */
 import type { PortfolioSnapshot } from "../../packages/core/src/index";
+import { onchainIdIn } from "../../packages/core/src/ids";
 import { strategyTermsWire, type StrategyTerms } from "./strategy-terms";
 
 /**
@@ -162,7 +163,7 @@ const MAX_BYTES = 256 * 1024;
  * Brain EMITTING one, and this stops the worker ACCEPTING one from a service
  * that might one day be a different build than we think. A defence that lives
  * only on the far side of a network boundary is a defence you cannot audit from
- * here.
+ * here. A Solana key or signature (core's onchainIdIn) counts as an address.
  */
 const ADDRESS = /0x[0-9a-fA-F]{40}/;
 const HEXBLOB = /0x[0-9a-fA-F]{16,}/;
@@ -185,7 +186,7 @@ function carriesExecutable(d: BrainDecision): string | null {
   ];
   for (const [name, v] of fields) {
     if (typeof v !== "string") continue;
-    if (ADDRESS.test(v)) return `${name} carries an address`;
+    if (ADDRESS.test(v) || onchainIdIn(v)) return `${name} carries an address`;
     if (HEXBLOB.test(v)) return `${name} carries a hex blob`;
   }
   return null;
