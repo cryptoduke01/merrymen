@@ -239,6 +239,17 @@ describe("a trade row becomes a card only when it closed something knowable", ()
     assert.equal(printableCoinName("musebook"), "musebook");
   });
 
+  it("NEVER prints a name with a whole 0x address inside it (tightened in Solana P0)", () => {
+    // Before, only a leading 0x was refused, so this was drawn as the coin.
+    const named = "PEPE 0x2ca2b5bd3b6635d630419c57a13c6b6a856ec96d";
+    assert.equal(printableCoinName(named), null);
+    assert.equal(printableCoinName(`PEPE 0x${"ab".repeat(32)}`), null);
+    // The name is refused and the card falls back to the target, a ticker here.
+    assert.equal(pnlCardFromFill(sell, named)?.symbol, "DOGGOS");
+    assert.equal(pnlCardFromFill({ ...sell, target: named }), null);
+    assert.equal(printableCoinName("PEPE 2"), "PEPE 2");
+  });
+
   it("treats a realised zero as a real close, not as absent", () => {
     // Breaking exactly even is a closed trade with a P&L of 0.00, and `0` is
     // falsy — the reason this is checked against null/undefined and not truth.

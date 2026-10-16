@@ -45,6 +45,8 @@ export function coinDisplayName(token: NameableToken | undefined | null): string
   const head = raw.split("/")[0]!.trim();
   const kept = head.replace(/[^A-Za-z0-9 ._-]/g, "").trim();
   // A Solana key has no 0x, and cut to 24 it would no longer read as one: checked whole, first.
+  // This also refuses a whole 0x address anywhere in the name ("PEPE 0x…"),
+  // which the cut used to print as a partial one.
   if (onchainIdIn(head) || onchainIdIn(kept)) return null;
   const clean = kept.slice(0, 24);
   if (!clean || clean === token.symbol || /^0x/i.test(clean) || !/[A-Za-z]/.test(clean)) return null;

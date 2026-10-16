@@ -50,6 +50,14 @@ describe("what is never printed as a name", () => {
     assert.equal(coinDisplayName(coin("CASHCAT / SOL")), "CASHCAT");
   });
 
+  it("refuses a name with a whole 0x address or hash inside it (tightened in Solana P0)", () => {
+    // Before, the 24-character cap printed this as "PEPE 0x2ca2b5bd3b6635d63",
+    // a partial address. Core's detector sees the whole one first.
+    assert.equal(coinDisplayName(coin("PEPE 0x2ca2b5bd3b6635d630419c57a13c6b6a856ec96d")), null);
+    assert.equal(coinDisplayName(coin(`PEPE 0x${"ab".repeat(32)} / WETH`)), null);
+    assert.equal(coinDisplayName(coin("PEPE 2 / WETH 1%")), "PEPE 2");
+  });
+
   it("refuses one that is only punctuation", () => {
     assert.equal(coinDisplayName(coin("!!! ###")), null);
     assert.equal(coinDisplayName(coin("   ")), null);

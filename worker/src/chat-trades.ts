@@ -54,6 +54,7 @@ export interface TradeFactsOptions {
 export interface TradeFacts { trades: ChatTradeFact[]; complete: boolean }
 const finite = (v: unknown): number | null => typeof v === "number" && Number.isFinite(v) ? v : null;
 // A name is never an address: 0x, or a Solana key or signature (core's onchainIdIn).
+// A display name with a whole 0x address inside it ("PEPE 0x…") is refused too.
 function label(v: unknown): string | null {
   return typeof v === "string" && /^[A-Za-z0-9$._-]{1,32}$/.test(v.trim()) && !/^0x/i.test(v.trim()) && !onchainIdIn(v) && !/^T[0-9A-F]{11}$/i.test(v.trim()) ? v.trim() : null;
 }

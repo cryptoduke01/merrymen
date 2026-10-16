@@ -108,3 +108,16 @@ test("a Solana key is never a coin's label or name in chat facts, as a 0x one is
   assert.equal(plain?.label,"PRISM");assert.equal(plain?.displayName,"Prism");
   d.close();
 });
+
+test("a display name with a whole 0x address inside it is refused in chat facts (tightened in Solana P0)",async()=> {
+  // Before, only a leading 0x was refused, so this reached the chat model as the coin's name.
+  const {d,add}=db();
+  d.prepare("INSERT INTO decisions VALUES ('evm',?,?,'PRISM',?,'buy','why','brain')").run(OWNER,DAY+1,"PEPE 0x2ca2b5bd3b6635d630419c57a13c6b6a856ec96d");
+  add(1,2,"buy",DAY+1,"0xevmname","landed",5,"100","receipt",null,"evm");
+  add(2,2,"buy",DAY+2,"0xplain","landed",5,"100","receipt",null,"buy");
+  const facts=await readTradeFacts(readOnlyFactsDb(d),{account:OWNER,epoch:2,since:DAY,until:NOW});
+  const evm=facts.trades.find(t=>t.id===1),plain=facts.trades.find(t=>t.id===2);
+  assert.equal(evm?.label,"PRISM");assert.equal(evm?.displayName,null);
+  assert.equal(plain?.displayName,"Prism");
+  d.close();
+});
