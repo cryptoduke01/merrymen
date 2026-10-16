@@ -57,6 +57,7 @@
  * background feature has already exhausted it once. It never calls resolveLlm,
  * which would happily hand back an owner's Anthropic key with an Opus default.
  */
+import { onchainIdsIn } from "../../../packages/core/src/ids";
 import { everyBand } from "../class-evidence";
 import { llmText, type LlmCreds } from "../llm";
 import { sameCoin, type AgentFacts, type CallFact } from "./facts";
@@ -4936,10 +4937,12 @@ const TAIL_LINES = 12;
 /**
  * Anything id-shaped out of a quote. Room lines passed the gates and hold no
  * address, so this is belt and braces: the prompt is the one place an internal
- * id could reach a model, and a model that has seen one can print it.
+ * id could reach a model, and a model that has seen one can print it. A
+ * Solana key or signature (core's onchainIdsIn) goes the way any 0x run does.
  */
 function scrubIds(text: string, speaker: AgentFacts): string {
   let s = text.replace(/0x[0-9a-f]{4,}/gi, "[address]").replace(/\brh:[a-z0-9-]+/gi, "[account]");
+  for (const hit of onchainIdsIn(s)) if (hit.family === "solana" && hit.shape !== "link") s = s.split(hit.value).join("[address]");
   for (const id of [speaker.tenant, speaker.agentId]) {
     if (typeof id === "string" && id.length >= 6) s = s.split(id).join("[private]").split(id.toLowerCase()).join("[private]");
   }

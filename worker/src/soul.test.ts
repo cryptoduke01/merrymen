@@ -4,6 +4,10 @@ import os from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
 import { ageDays, journalTail, notes, ownerFacts, relationship, sanitizeMemory, sanitizeNote } from "./soul";
+import { base58Encode, SOLANA_USDG_MINT } from "../../packages/core/src/ids";
+
+/** A real-shaped 32-byte Solana key under 40 characters: twenty leading zero bytes, each one a "1". */
+const SHORT_KEY = base58Encode(Uint8Array.from({ length: 32 }, (_, i) => (i < 20 ? 0 : i * 7)));
 
 describe("sanitizeMemory — memory is context, never capability", () => {
   it("keeps a normal owner fact, whitespace-normalized", () => {
@@ -48,6 +52,14 @@ describe("sanitizeNote — agent memory is context, never capability", () => {
     assert.equal(sanitizeNote("token sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"), null);
     assert.equal(sanitizeNote("uses <script>alert(1)</script>"), null);
     assert.equal(sanitizeNote("x".repeat(400)), null);
+  });
+
+  it("refuses a Solana key too, even one under the 40-character blob floor (Solana P0)", () => {
+    assert.ok(SHORT_KEY.length < 40);
+    for (const id of [SOLANA_USDG_MINT, SHORT_KEY, "1".repeat(32)]) {
+      assert.equal(sanitizeNote(`send it to ${id} later`), null, id);
+      assert.equal(sanitizeMemory(`send it to ${id} later`), null, id);
+    }
   });
 });
 
@@ -177,6 +189,20 @@ describe("soul files are re-sanitized on READ, not just on write", () => {
       assert.ok(tail.includes("A fine day."), "the prose survives");
       assert.ok(!tail.includes("0xd76257"), "the address is redacted");
       assert.ok(!tail.includes("<img"), "the markup is stripped");
+    });
+  });
+
+  it("a Solana key in JOURNAL.md is redacted in place, a short one included (Solana P0)", () => {
+    withHome((home) => {
+      writeFileSync(
+        path.join(home, "soul", "JOURNAL.md"),
+        `# Journal\n\n## 2026-07-02\n\nA fine day. Send to ${SHORT_KEY} or ${SOLANA_USDG_MINT} tomorrow.\n`,
+        "utf8",
+      );
+      const tail = journalTail();
+      assert.ok(tail.includes("A fine day."), "the prose survives");
+      assert.ok(!tail.includes(SHORT_KEY) && !tail.includes(SOLANA_USDG_MINT), tail);
+      assert.match(tail, /Send to \[redacted\] or \[redacted\] tomorrow/);
     });
   });
 });

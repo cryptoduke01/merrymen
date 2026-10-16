@@ -30,6 +30,7 @@ import {
   STORED_AGENT_NAME_RE,
   normalizeAgentName,
 } from "../../packages/core/src/agent-name";
+import { onchainIdIn, onchainIdsIn } from "../../packages/core/src/ids";
 import type { NameSeat } from "./name-reconcile";
 import { completePersonalMemoryForget, recordPersonalMemoryForget } from "./personal-memory-ferry";
 
@@ -235,6 +236,7 @@ export function sanitizeMemory(raw: string): string | null {
   if (!fact || fact.length < 3) return null;
   if (fact.length > MAX_FACT_CHARS) return null;
   if (/0x[0-9a-fA-F]{6,}/.test(fact)) return null; // addresses / keys / calldata
+  if (onchainIdIn(fact)) return null; // Solana keys, signatures, explorer links
   if (/[A-Za-z0-9_-]{30,}/.test(fact)) return null; // token/secret-shaped blobs
   if (/<[^>]*>/.test(fact)) return null; // no markup into prompts
   return fact;
@@ -351,6 +353,7 @@ export function sanitizeNote(raw: string): string | null {
   if (!note || note.length < 3) return null;
   if (note.length > MAX_NOTE_CHARS) return null;
   if (/0x[0-9a-fA-F]{6,}/.test(note)) return null; // addresses / keys / calldata
+  if (onchainIdIn(note)) return null; // Solana keys (some under the blob floor), signatures, links
   if (/[A-Za-z0-9_-]{40,}/.test(note)) return null; // token/secret-shaped blobs
   if (/<[^>]*>/.test(note)) return null; // no markup into prompts
   return note;
@@ -430,10 +433,13 @@ export function appendJournal(entry: string, nowSec?: number): void {
  * write-side strip doesn't cover anything typed in afterwards.
  */
 function scrubProse(text: string): string {
-  return text
+  let out = text
     .replace(/<[^>]*>/g, "") // no markup into prompts
     .replace(/0x[0-9a-fA-F]{6,}/g, "[redacted]") // addresses / keys / calldata
     .replace(/\b[A-Za-z0-9_-]{40,}\b/g, "[redacted]"); // token/secret-shaped blobs
+  // A Solana key can be 32-39 characters, under the blob floor.
+  for (const hit of onchainIdsIn(out)) if (hit.family === "solana" && hit.shape !== "link") out = out.split(hit.value).join("[redacted]");
+  return out;
 }
 
 /** The last few journal entries (for prompt context). */
