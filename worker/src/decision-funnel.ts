@@ -106,6 +106,11 @@ export type FunnelInput =
   | { kind: "entry-screen"; why: string }
   | { kind: "candidate-skip"; skip: CandidateSkip }
   | { kind: "not-on-tape" }
+  /**
+   * An entry review not paid for: no candles, no trades and a stale tape row
+   * (`blind`, trencher-brain.ts entryEvidenceBlind), or no tape row at all.
+   */
+  | { kind: "evidence-unavailable"; why?: "blind" | "no-tape" }
   | { kind: "size-below-floor"; sizeUsdg6: bigint; floorUsdg6: bigint }
   | { kind: "tick-block"; block: TickBlock };
 
@@ -364,6 +369,10 @@ export function classifyStage(input: FunnelInput): Classified {
       return { stage: SKIP_STAGE[input.skip] ?? "RESEARCH_INCOMPLETE", detail: input.skip };
     case "not-on-tape":
       return { stage: "NOT_DISCOVERED", detail: "not-on-tape" };
+    case "evidence-unavailable":
+      return { stage: "RESEARCH_INCOMPLETE", detail: input.why === "no-tape"
+        ? "evidence-unavailable: no fresh tape row for its pool; entry review not paid for"
+        : "evidence-unavailable: no candles, no trades and a stale tape row; entry review not paid for" };
     case "size-below-floor":
       return { stage: "SIZE_BELOW_ECONOMIC_FLOOR", detail: `size-below-floor: ${usdg6(input.sizeUsdg6)} USDG < ${usdg6(input.floorUsdg6)} USDG` };
     case "tick-block":
@@ -446,6 +455,32 @@ export function trenchReviewBlock(t: {
 /** The venue autonomous discovery verifies (trencher-discovery.ts). */
 const AUTONOMOUS_VENUE = "uniswap-v3-robinhood";
 
+/** Characters of venue names a `venue-not-supported` detail carries. */
+const VENUE_LIST_MAX = 80;
+/** What a venue name looks like on the index (`uniswap-v4-robinhood`, `pons-v2-dex`); anything else is not counted as one. */
+const VENUE_NAME = /^[a-z0-9][a-z0-9_.-]{0,63}$/i;
+
+/**
+ * A coin's venues, sorted, as WHOLE names within VENUE_LIST_MAX. This was a
+ * plain slice, which could cut the last name in half — harmless in a
+ * sentence, wrong in the summary below, which counts the names.
+ */
+function venueList(dexes: Iterable<string>): string {
+  let out = "";
+  for (const d of [...dexes].sort()) {
+    const next = out ? `${out}, ${d}` : d;
+    if (next.length > VENUE_LIST_MAX) break;
+    out = next;
+  }
+  return out;
+}
+
+/** The venues a `venue-not-supported` detail names: its closing parenthesis, as unqualifiedReasons writes it. */
+function venuesOf(detail: string): string[] {
+  const m = /\(([^()]*)\)\s*$/.exec(detail);
+  return m ? m[1]!.split(",").map(v => v.trim()).filter(v => VENUE_NAME.test(v)) : [];
+}
+
 /**
  * WHY A COIN ON THE SCREENED TAPE NEVER REACHED THE VERIFIED UNIVERSE.
  *
@@ -478,7 +513,7 @@ export function unqualifiedReasons(args: {
   const out = new Map<string, Classified>();
   for (const [token, dexes] of venues) {
     if (!dexes.has(AUTONOMOUS_VENUE)) {
-      out.set(token, classifyStage({ kind: "discovery", screen: "venue-not-supported", venue: [...dexes].sort().join(", ").slice(0, 80) }));
+      out.set(token, classifyStage({ kind: "discovery", screen: "venue-not-supported", venue: venueList(dexes) }));
       continue;
     }
     const rank = ranked.indexOf(token);
@@ -559,6 +594,13 @@ export interface FunnelSummary {
   reasons: Partial<Record<FunnelStep, { code: string; tokens: number }[]>>;
   /** Whole-tick blocks since, busiest first. */
   blocks: { stage: FunnelStage; detail: string; count: number }[];
+  /**
+   * WHICH VENUES the `venue-not-supported` coins were on, busiest first —
+   * so "41 coins were on a venue we cannot use" says which venue. A coin on
+   * two such venues counts under both; one whose detail names none counts
+   * under `unnamed`. Latest entries only, like `reasons`.
+   */
+  unsupportedVenues: { dex: string; tokens: number }[];
   /**
    * Brain approvals older than the grace period with nothing filed after them
    * for the same decision — orders that vanished. See BRAIN_APPROVED.
@@ -755,6 +797,7 @@ export class FunnelRecorder {
     const latest: Partial<Record<FunnelStep, number>> = {};
     const entries: Partial<Record<FunnelStep, number>> = {};
     const codes = new Map<FunnelStep, Map<string, number>>();
+    const venues = new Map<string, number>();
     let tokens = 0;
     let approvalsWithoutOutcome = 0;
     for (const ring of this.rings.values()) {
@@ -767,6 +810,10 @@ export class FunnelRecorder {
       const byCode = codes.get(last.stage) ?? new Map<string, number>();
       byCode.set(codeOf(last.detail), (byCode.get(codeOf(last.detail)) ?? 0) + 1);
       codes.set(last.stage, byCode);
+      if (last.stage === "UNSUPPORTED_ROUTE" && codeOf(last.detail) === "venue-not-supported") {
+        const named = new Set(venuesOf(last.detail));
+        for (const dex of named.size ? named : ["unnamed"]) venues.set(dex, (venues.get(dex) ?? 0) + 1);
+      }
       ring.forEach((e, i) => {
         if (e.stage !== "BRAIN_APPROVED" || e.lastAt < sinceMs || now - e.lastAt < this.approvalGraceMs) return;
         const after = ring.slice(i + 1);
@@ -782,7 +829,8 @@ export class FunnelRecorder {
       .filter(b => b.lastAt >= sinceMs)
       .map(b => ({ stage: b.stage, detail: b.detail, count: b.count }))
       .sort((a, b) => b.count - a.count || a.detail.localeCompare(b.detail));
-    return { sinceMs, tokens, latest, entries, reasons, blocks, approvalsWithoutOutcome };
+    const unsupportedVenues = [...venues].map(([dex, n]) => ({ dex, tokens: n })).sort((a, b) => b.tokens - a.tokens || a.dex.localeCompare(b.dex));
+    return { sinceMs, tokens, latest, entries, reasons, blocks, approvalsWithoutOutcome, unsupportedVenues };
   }
 
   /**
@@ -799,14 +847,29 @@ export class FunnelRecorder {
   }
 }
 
-/** A summary as the one line an operator scans. */
+/** Venues named in the summary line's `venue-not-supported` breakdown; the rest are counted, not named. */
+const VENUES_SHOWN = 5;
+
+/**
+ * A summary as the one line an operator scans.
+ *
+ * `venue-not-supported` carries its venue breakdown, e.g. `UNSUPPORTED_ROUTE
+ * 41 (venue-not-supported 41: uniswap-v4-robinhood 22, pons-v2-dex 15,
+ * pons-v2 4)`. A stage that carries one separates its reasons with `;`, so
+ * the venue list cannot be misread as more reasons.
+ */
 export function formatSummary(s: FunnelSummary, nowMs: number): string {
   const mins = Math.max(1, Math.round((nowMs - s.sinceMs) / 60_000));
+  const venues = s.unsupportedVenues ?? [];
+  const breakdown = venues.slice(0, VENUES_SHOWN).map(v => `${v.dex} ${v.tokens}`).join(", ") +
+    (venues.length > VENUES_SHOWN ? `, +${venues.length - VENUES_SHOWN} more` : "");
   const parts: string[] = [];
   for (const stage of STEPS_ORDER) {
     const n = s.latest[stage];
     if (!n) continue;
-    const top = (s.reasons[stage] ?? []).slice(0, 3).map(r => `${r.code} ${r.tokens}`).join(", ");
+    const shown = (s.reasons[stage] ?? []).slice(0, 3);
+    const split = breakdown && shown.some(r => r.code === "venue-not-supported");
+    const top = shown.map(r => `${r.code} ${r.tokens}${split && r.code === "venue-not-supported" ? `: ${breakdown}` : ""}`).join(split ? "; " : ", ");
     parts.push(`${stage} ${n}${top ? ` (${top})` : ""}`);
   }
   const blocks = s.blocks.slice(0, 4).map(b => `${b.detail} x${b.count}`).join(", ");

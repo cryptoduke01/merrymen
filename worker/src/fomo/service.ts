@@ -71,6 +71,7 @@ import { chronologicalOrder, dedupeEvents } from "./events";
 import { changeSummary, earlyDiscovery, participationBreadth } from "./features";
 import { GROUP_REUSE_MS, SingleFlight, buildFreshness, decideRead, policyFor, type CacheEntryState } from "./freshness";
 import { chainFromUserText, executionAvailabilityOf, isRobinhoodToken, ROBINHOOD_NETWORK_ID, tokenFromKey, tokenIdentity } from "./identity";
+import { REVIEW_CANDIDATES, ReviewCandidateWindow, type ReviewCandidate } from "./review-candidates";
 import {
   MIN_ATTEMPT_MS,
   ROUTE_COST,
@@ -253,6 +254,14 @@ export interface RefreshOutcome {
 export interface FomoServiceExt extends FomoService {
   /** Tenants that reported holding each token recently (position-protection routing for the orchestrator pass). */
   heldTokensSnapshot(now?: number): Map<string, string[]>;
+  /**
+   * The coins ONE tenant's review named recently (BrokerReport
+   * "review-candidates"), newest first, at most REVIEW_CANDIDATES.carriedMax.
+   * In-process only: the child reports to the replica that spawned it, which
+   * is the replica that writes its file. Nothing here checks the research
+   * allowlist or spends anything; the orchestrator pass does both.
+   */
+  reviewCandidatesSnapshot(tenant: string, now?: number): ReviewCandidate[];
   /**
    * One owner's health, in the states the owner can act on: their own data
    * access and monitoring switches, the shared feed's freshness and open
@@ -438,6 +447,8 @@ const FEED_FRESH_MS = 10 * MIN;
 /** A budget refusal colours health for this long. */
 const BUDGET_HEALTH_MS = 15 * MIN;
 const HELD_TTL_MS = 6 * HOUR;
+/** Tenants whose review-candidate windows one process keeps (a replica holds far fewer children). */
+const REVIEW_CANDIDATE_TENANTS_MAX = 500;
 const FIRST_SEEN_LOOKBACK_MS = 7 * DAY;
 /** Provider pages are fetched at a fixed size so every caller shares one cached copy. */
 const BOARD_LIMIT = 100;
@@ -884,6 +895,10 @@ function budgetMessage(reason: string | null, now: number): string {
   switch (reason) {
     case "budget-group-hourly":
       return `Fomo research is rationed right now: this group's hourly research allowance is used up${when}.`;
+    case "budget-x-hourly":
+      return `Fomo research is rationed right now: this X account's hourly research allowance is used up${when}.`;
+    case "budget-x-daily":
+      return `Fomo research is rationed right now: today's research allowance for X answers is used up${when}.`;
     case "budget-tenant-hourly":
       return `Fomo research is rationed right now: your hourly Fomo research allowance is used up${when}.`;
     case "budget-tenant-daily":
@@ -994,6 +1009,8 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
   let capabilityPrior: Map<string, CapabilityRecord> | null = null;
   const capabilityWrittenAt = new Map<string, { at: number; status: string }>();
   const held = new Map<string, { keys: string[]; at: number }>();
+  /** Each tenant's own window of review candidates (review-candidates.ts), bounded per tenant and in tenants. */
+  const reviewCandidates = new Map<string, ReviewCandidateWindow>();
   let cohortMemo: { at: number; value: CohortSnap } | null = null;
 
   interface CohortSnap {
@@ -1221,7 +1238,8 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
     // A ROOM NEVER FORCES A PAID REFRESH (D8), and otherwise reuses the slow
     // classes' copies longer (D7, GROUP_REUSE_MS); the answer carries the
     // copy's age either way. Every other surface reads as it asked.
-    const room = cc.surface === "telegram-group";
+    // A public X answer reads the way a room does: never a forced refresh, the longer reuse windows.
+    const room = cc.surface === "telegram-group" || cc.surface === "x-answer";
     const mode: FreshnessMode = room && asked === "force-refresh" ? "prefer-fresh" : asked;
     const reuseMs = room && asked !== "force-refresh" && cc.noReuse !== true ? GROUP_REUSE_MS[spec.cls] : undefined;
     let entry: store.CacheEntry | null = null;
@@ -3571,6 +3589,17 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
       await audit(env.status, { reason: env.reason });
       return env;
     }
+    // 1b. AN X ANSWER WITH ITS CAP AT ZERO IS OFF, not merely unpaid
+    // (MERRYMEN_FOMO_X_HOURLY_CREDITS=0, the documented off). A cap only
+    // refuses paid reads: a fresh copy an owner's or a room's read paid for
+    // would still be served, and a held one would still stand in when the
+    // charge is refused, and either would reach a public post on X. So the
+    // surface is refused here, before any cache read.
+    if (surface === "x-answer" && !((budget.config?.xHourlyCredits ?? 1) > 0)) {
+      const env = bare(ic, "unavailable", "x-answers-off");
+      await audit(env.status, { reason: env.reason });
+      return env;
+    }
     // 2. Audience: private state and mutations belong to the owner, in a direct conversation.
     const def = FOMO_TOOL_DEFS[tool];
     if ((def.ownerOnly || isMutationTool(tool)) && audience !== "owner") {
@@ -3592,7 +3621,7 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
     if (ctx?.retryEmpty === true) ic.cc.retryEmpty = true;
     // A room's "now" is an ordinary read (D8): the answer says what it served, and how old it is.
     const asked = v.args as { freshness?: unknown };
-    if (surface === "telegram-group" && asked && asked.freshness === "force-refresh") {
+    if ((surface === "telegram-group" || surface === "x-answer") && asked && asked.freshness === "force-refresh") {
       asked.freshness = "prefer-fresh";
       ic.cc.noReuse = true;
       // ...and a room's explicit "now" or "recheck" never gets a held "nothing here" again.
@@ -3763,6 +3792,24 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
             await store.setHeldTokens(db, t, keys, at);
             return;
           }
+          case "review-candidates": {
+            // NOTED, NEVER SPENT ON HERE: the reporting tenant's own window,
+            // Robinhood keys only, at most REVIEW_CANDIDATES.perWindow distinct
+            // coins per window whatever the child sends, on this process's
+            // clock. Whether research is queued for them is the pass's call
+            // (allowlist, owner switches, the discovery budget).
+            const keys = Array.isArray(r.tokenKeys)
+              ? [...new Set(r.tokenKeys.filter((k) => typeof k === "string" && tokenFromKey(k)?.key === k && isRobinhoodToken(tokenFromKey(k))))]
+              : [];
+            let w = reviewCandidates.get(t);
+            if (!w) {
+              if (reviewCandidates.size >= REVIEW_CANDIDATE_TENANTS_MAX) reviewCandidates.delete(reviewCandidates.keys().next().value as string);
+              w = new ReviewCandidateWindow();
+              reviewCandidates.set(t, w);
+            }
+            w.admit(keys.slice(0, REVIEW_CANDIDATES.perWindow), nowMs);
+            return;
+          }
           default:
             return;
         }
@@ -3810,6 +3857,12 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
       }
       for (const list of out.values()) list.sort();
       return out;
+    },
+
+    reviewCandidatesSnapshot(tenant: string, now?: number) {
+      const t = store.tenantKey(tenant);
+      if (!t) return [];
+      return reviewCandidates.get(t)?.carried(finite(now) ? now : clock()) ?? [];
     },
   };
   return service;

@@ -1269,7 +1269,7 @@ describe("index.ts wires the seams in the order that makes them safe", () => {
   });
 
   it("the nomination only reorders the review, and the Brain's input is any tape coin's", () => {
-    assert.match(CODE, /trenchBrain\.candidate\(trenchEligible\.filter\([^\n]*\), tgBook\.priority\(\)\);/);
+    assert.match(CODE, /trenchBrain\.candidate\(trenchEligible\.filter\([^\n]*\), tgBook\.priority\(\), cfg\.discoveryFocus\);/);
     const inputsAt = CODE.indexOf("const inputs: ShadowInputs = {");
     const launchAt = CODE.indexOf("trenchBrain.launch(trenchContext, inputs");
     assert.ok(inputsAt > 0 && launchAt > inputsAt);
@@ -1278,7 +1278,8 @@ describe("index.ts wires the seams in the order that makes them safe", () => {
 
   it("every trencher review is reported after it is persisted, and cannot break the review", () => {
     const at = CODE.indexOf("return runShadow(brainConfig, inputs,");
-    assert.match(CODE.slice(at, at + 1600), /admit: claimReview,\n\s+\}\)\.then\(outcome => \{ tgNoteReview\(focus\.token, outcome\); return outcome; \}\); \},/);
+    // (The flow-lens probe hears the outcome first: a pure check and a field write, neither of which throws.)
+    assert.match(CODE.slice(at, at + 1600), /admit: claimReview,\n\s+\}\)\.then\(outcome => \{ if \(flowLensRefused\(Boolean\(flow\?\.lens\), outcome\)\) flowLensProbe\.invalidate\(\); tgNoteReview\(focus\.token, outcome\); return outcome; \}\); \},/);
     const body = CODE.slice(CODE.indexOf("function tgNoteReview("), CODE.indexOf("function tgNoteHeld("));
     assert.match(body, /try \{[\s\S]*\} catch/);
   });
@@ -1299,7 +1300,7 @@ describe("index.ts wires the seams in the order that makes them safe", () => {
     // early path (a follow nomination): the regular autonomous list is built
     // by regularEntryPools, which drops early pools, and the paper list drops
     // verify-only coins. They earn no review slot or ceiling by themselves.
-    assert.match(refresh, /discoverTrencherUniverse\(mainnetClient\(\),\s*current\.grant,\s*freshTrenchTape\(\),\s*\{\s*nominated:\s*new Set\(tgNominated\),\s*cache:\s*poolCache(?:,\s*early:\s*(?:earlyBook\.addresses\(\)|earlyDiscoverySet\(\)))?\s*\}\)/);
+    assert.match(refresh, /discoverTrencherUniverse\(mainnetClient\(\),\s*current\.grant,\s*freshTrenchTape\(\),\s*\{\s*nominated:\s*new Set\(tgNominated\),\s*cache:\s*poolCache(?:,\s*early:\s*(?:earlyBook\.addresses\(\)|earlyDiscoverySet\(\)))?,\s*focus:\s*cfg\.discoveryFocus\s*\}\)/);
     assert.match(refresh, /autoTrenchContext === context && trenchPoolCache === poolCache && active/,
       "a result from an old grant or connection cannot replace the current discovery");
   });

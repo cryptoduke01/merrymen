@@ -128,12 +128,14 @@ jobs:
         run: npx tsx --test --test-shard=${{ matrix.shard }}/4 "worker/src/**/*.test.ts" "web/src/**/*.test.ts" "packages/*/src/**/*.test.ts" "sdk/*.test.ts" "cli/*.test.mjs" "site/app/**/*.test.ts"
 
   app-postgres:
-    name: app · partner store on Postgres
+    name: app · Postgres suites
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-    # Production's partner store is Postgres, and its locks, slot limits, list
-    # ordering and reconnect SQL exist only on that dialect. The app-test shards
-    # have no database, so they skip this suite; this job is the one that runs it.
+    timeout-minutes: 20
+    # Production's stores are Postgres, and their locks, caps, list ordering,
+    # migrations and crash barriers exist only on that dialect. The app-test
+    # shards have no database, so every suite that reads MERRYMEN_TEST_PG_URL
+    # runs here. They are FOUND, not listed: a hand-kept list ran three of
+    # twenty-three, and two of the others had been failing unseen since early October.
     services:
       postgres:
         # By digest, like the actions above: a moved tag is a supply-chain rewrite.
@@ -159,15 +161,36 @@ jobs:
           MERRYMEN_SKIP_BUILD: "1"
 
       - name: Test
-        # The suite skips itself without a database URL, and a skipped suite is
-        # green: this job fails unless it actually ran.
+        # Each suite gets a database of its own, so no suite sees another's
+        # schema or rows. A suite skips itself without a database URL, and a
+        # skipped suite is green: each must report no skips and some passes.
+        # --test-force-exit because some suites leave a pool open. Every suite
+        # runs even after one fails, so one failure cannot hide another.
         run: |
-          set -o pipefail
-          npx tsx --test --test-reporter=spec web/src/lib/partner-store.postgres.test.ts | tee "$RUNNER_TEMP/postgres.out"
-          grep -q '^ℹ skipped 0$' "$RUNNER_TEMP/postgres.out"
-          grep -q '^ℹ pass [1-9]' "$RUNNER_TEMP/postgres.out"
+          set -uo pipefail
+          files=()
+          while IFS= read -r f; do files+=("$f"); done < <(git grep -lE 'MERRYMEN_TEST_(PG|POSTGRES)_URL' -- '*.test.ts' '*.test.mjs')
+          test "${#files[@]}" -gt 0
+          failed=()
+          for i in "${!files[@]}"; do
+            f="${files[$i]}"
+            out="$RUNNER_TEMP/suite_$i.out"
+            echo "::group::$f"
+            docker exec "$PG_CONTAINER" createdb -U postgres "suite_$i"
+            url="postgres://postgres:postgres@127.0.0.1:5432/suite_$i"
+            status=0
+            MERRYMEN_TEST_PG_URL="$url" MERRYMEN_TEST_POSTGRES_URL="$url" \
+              npx tsx --test --test-force-exit --test-reporter=spec "$f" 2>&1 | tee "$out" || status=$?
+            echo "::endgroup::"
+            if [ "$status" -ne 0 ] || ! grep -q '^ℹ skipped 0$' "$out" || ! grep -q '^ℹ pass [1-9]' "$out"; then
+              echo "::error file=$f::failed, or did not run its Postgres cases"
+              failed+=("$f")
+            fi
+          done
+          echo "${#files[@]} Postgres suites, ${#failed[@]} failed"
+          test "${#failed[@]}" -eq 0
         env:
-          MERRYMEN_TEST_POSTGRES_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres
+          PG_CONTAINER: ${{ job.services.postgres.id }}
 
   app:
     name: app

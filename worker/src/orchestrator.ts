@@ -49,7 +49,8 @@ import { repairHistoricalFills } from "./history-fill-repair";
 import { makeConductor, type Conductor, type RosterMember } from "./groupchat/conductor";
 import { chatProfileOf, type ChatProfile } from "./groupchat/facts";
 import { describeCreds, groupChatCreds } from "./groupchat/voice";
-import { makeXPoster, xpostSetup, type XPoster, type XPostSetup } from "./orchestrator-xpost";
+import { makeXPoster, xpostSetup, type XPoster, type XPostSetup, type XSocialProfile } from "./orchestrator-xpost";
+import { createXResearch, type FlowReader } from "./orchestrator-xpost-research";
 // The fleet's default trading model, so the room can say when its own model is
 // the same one (see groupChatModelWarning).
 import { SETTINGS_DEFAULTS as GROUPCHAT_FLEET_DEFAULTS } from "../../packages/core/src/index";
@@ -121,19 +122,30 @@ import type { AccountPlan } from "./accounting-reconstruction";
 import { accountPreviewLines, previewRequested, rosterLines, runPreview } from "./accounting-preview";
 import { parseRepairOptions, repairLines, runRepair } from "./accounting-repair";
 import { accountingCommitRefusal, accountingHoldTenants, accountingTenantHeld, runAccountingReconstructionAtStartup } from "./accounting-maintenance";
+import { attestOriginalReceipt, type ReceiptAttestationOptions, type ReceiptAttestationReport } from "./receipt-attestation";
+import { assertNoPendingReceiptAttestation, ensureReceiptAttestationSchema } from "./receipt-attestation-state";
+import { receiptAttestationRequest, receiptAttestationTenant } from "./receipt-attestation-controls";
 import {
   ADMISSION_LEVEL_ENV,
   FLEET_ROLLOUT_ENV,
+  ROLLOUT_NEW_TENANTS_ENV,
   childAdmissionLevel,
   fleetRollout,
+  newTenantLevel,
+  newTenantRouteOpen,
+  newTenantsStartupLine,
   rolloutAdmitsWholeFleet,
   rolloutCounts,
   rolloutHeld,
   rolloutLine,
+  rolloutNewTenants,
   rolloutStartupLine,
   rolloutSummary,
   type RolloutCounts,
 } from "./fleet-rollout";
+import {
+  NEW_TENANT_HEADROOM, NEW_TENANT_LOOKS_PER_PASS, admitNewTenant, newTenantRefusal, newTenantRoom, readNewTenantAdmissions, volumeHistory, type NewTenantScope,
+} from "./new-tenant-admission";
 import { decomposeGas, gasAuditLines, type GasOp } from "./gas-audit";
 import { cohortLines, vetCandidate, type CandidateVerdictDetail } from "./cohort-vetting";
 import { datasetLines, viewRun } from "./brain-dataset";
@@ -200,6 +212,8 @@ import {
 } from "./personal-memory-ferry";
 import { storeDek } from "./store-crypto";
 import { writePeersForChild } from "./peer-files";
+import { materializeOwnOutcomeLearning } from "./orchestrator-own-learning";
+import { decisionResearchBootLine, decisionResearchEnabledFor } from "./decision-research";
 import { writeResearchForChild } from "./research-files";
 import { addressesOf, makeBuilderDesk, type BuilderDesk } from "./builder-pass";
 import { makeNewsDesk, type NewsDesk } from "./research-pass";
@@ -211,11 +225,14 @@ import { budgetUnrestored, seedBudget } from "./budget-seed";
 import { ORDER_IN_FLIGHT_MS, commandWhereabouts, dropCommandResult, drainCommandResults, writeCommand, type FileCommandResult } from "./command-files";
 import { expiredOrderReceipt, type OrderReceipt } from "./order-receipt";
 import { makeMcpBackground } from "./mcp/background";
-import { childProcessBrokerPort, serveBrokerRequests } from "./fomo/broker";
+import { childProcessBrokerPort, createDirectBroker, serveBrokerRequests } from "./fomo/broker";
+import { answerReadingsPerDay, attachFlowBroker, flowFor, flowRuntimeNow as flowRuntimeFor, type FlowRuntime } from "./orchestrator-flow";
+import { FLOW_BROKER_ENV } from "./flow-broker";
 import { budgetConfigFor, describeBudget, fomoBudgetFrom, fomoPlanFrom, FREE_PLAN_CREDITS_PER_MONTH, type FomoBudget, type FomoBudgetConfig } from "./fomo/budget";
 import { writeChildFomoFile } from "./fomo/child-file";
 import { fomoTailsOn, type FomoAccess, type FomoService } from "./fomo/contract";
 import type { FomoClient } from "./fomo/provider";
+import type { ReviewCandidate } from "./fomo/review-candidates";
 import { SYSTEM_TIMERS } from "./fomo/stream";
 import {
   FOMO_FLEET_LEASE,
@@ -458,11 +475,297 @@ function nextRung(child: Child, aliveUntilMs: number): number {
  * and is asked with rolloutHeld: the accounting hold has never stopped those,
  * and this change does not make it. Neither hold defers its owner's kill, nor
  * keeps an expired key's copy on the volume.
+ *
+ * A tenant the new-tenant route has admitted (newTenantAdmissions) is in the
+ * rollout like a named one, at MERRYMEN_ROLLOUT_NEW_TENANTS's level as it
+ * reads now; the accounting hold is asked first, and still holds it.
  */
 function operatorHold(tenant: string): string | null {
   if (accountingTenantHeld(tenant)) return "operator accounting maintenance holds this tenant";
-  if (rolloutHeld(tenant)) return `${FLEET_ROLLOUT_ENV} does not admit this tenant`;
+  if (rolloutHeld(tenant, process.env, newTenantAdmissions)) return `${FLEET_ROLLOUT_ENV} does not admit this tenant`;
   return null;
+}
+
+/**
+ * TENANTS THE NEW-TENANT ROUTE HAS ADMITTED (MERRYMEN_ROLLOUT_NEW_TENANTS,
+ * new-tenant-admission.ts), lowercase: fleet_new_tenant_admissions as the
+ * start of the last reconcile pass read it, and every tenant this process has
+ * recorded since. Read before that pass asks who is held, so a restarted
+ * orchestrator never stands down a tenant its record admits.
+ *
+ * Only ever the record's answer, and only for the rollout's question: the
+ * rollout reads it for a tenant an explicit list does not name, at the level
+ * the variable gives now (fleet-rollout.ts rolloutLevel), so with the
+ * variable unset, or the scope `none` or `all`, it changes nothing. A pass
+ * that cannot read the table keeps the last answer rather than stop running
+ * agents over a failed read, and admits nobody new until it reads again.
+ */
+let newTenantAdmissions: ReadonlySet<string> = new Set();
+/** False while the last read of the record failed: no new tenant is proved or recorded until it reads. */
+let newTenantRecordReadable = true;
+/** The last read failure said, so it is said once per kind rather than every pass. */
+let newTenantReadAlert: string | null = null;
+/**
+ * UNNAMED TENANTS FOUND NOT NEW ON A FACT, and the fact: a home or an archive
+ * on the volume, or history in Postgres. None of those goes away, so this
+ * process does not read them again; a read that failed is never kept here.
+ */
+const notNewTenants = new Map<string, { why: string; onVolume: boolean }>();
+/** The last "not new" summary said (newTenantSummary), and when. */
+let lastNewTenantSummary: { line: string; at: number } | null = null;
+/** The last count of new tenants waiting for a slot said, so the alert is said once per change. */
+let lastNewTenantWait: { waiting: number; at: number } | null = null;
+
+/** Tenants with a kill request this pass, in any state but none (reconcile fills it from honourKill): none of them is proved new. */
+const newTenantKillSeen = new Set<string>();
+
+/** Test seam: forget what this process knows of the new-tenant route, as a restart would, so the next pass reads the record afresh. */
+export function forgetNewTenantAdmissionsForTest(): void {
+  newTenantAdmissions = new Set();
+  newTenantRecordReadable = true;
+  newTenantReadAlert = null;
+  notNewTenants.clear();
+  newTenantKillSeen.clear();
+  lastNewTenantSummary = null;
+  lastNewTenantWait = null;
+}
+
+/** The shared store the record lives in, or null with none configured (no DATABASE_URL): then nothing can be recorded durably, and nobody is admitted new. */
+async function newTenantDb(): Promise<Db | null> {
+  const url = process.env.DATABASE_URL;
+  if (!url && !retirementMemoryStoreForTest) return null;
+  return retirementMemoryStoreForTest?.shared ?? await makePgDb(url!);
+}
+
+/** Said once per kind of failure, and once when it reads again. */
+function sayNewTenantRead(alert: string | null): void {
+  if (alert === newTenantReadAlert) return;
+  if (alert) log(`[alert] new tenants: ${alert}`);
+  else if (newTenantReadAlert) log(`new tenants: fleet_new_tenant_admissions reads again — recorded tenants are admitted, and unnamed ones proved, as before`);
+  newTenantReadAlert = alert;
+}
+
+/**
+ * READ THE RECORD, at the start of every reconcile pass, before anything asks
+ * who is held. With the route shut nothing is read, and the set is emptied:
+ * the rollout ignores it then anyway (rolloutLevel), and an emptied set is
+ * one fewer thing to reason about when it is opened again. A read that fails
+ * keeps the set as it was (an agent already running is not stood down over
+ * one failed read) and proves nobody new until it reads; a successful read
+ * replaces the set, so an operator's deleted row is a revoked admission on the
+ * next pass.
+ */
+async function refreshNewTenantAdmissions(): Promise<void> {
+  if (newTenantLevel(process.env) === null) {
+    newTenantAdmissions = new Set();
+    newTenantRecordReadable = true;
+    newTenantReadAlert = null;
+    return;
+  }
+  try {
+    const db = await newTenantDb();
+    if (!db) {
+      newTenantRecordReadable = false;
+      sayNewTenantRead(`${ROLLOUT_NEW_TENANTS_ENV} is set, but there is no shared database to record admissions in durably (DATABASE_URL unset) — ` +
+        "no tenant the list does not name is admitted");
+      return;
+    }
+    newTenantAdmissions = await readNewTenantAdmissions(db);
+    newTenantRecordReadable = true;
+    sayNewTenantRead(null);
+  } catch (e) {
+    newTenantRecordReadable = false;
+    sayNewTenantRead(`fleet_new_tenant_admissions could not be read (${errorKind(e)}) — tenants it admitted keep running if they were, ` +
+      "none is started or proved new until it reads again");
+  }
+}
+
+/** The per-pass tally sayNewTenantPass reports. */
+interface NewTenantPass {
+  /** Postgres reads spent this pass (NEW_TENANT_LOOKS_PER_PASS bounds it). */
+  looks: number;
+  /** Proved new and recorded this pass (or found already recorded under the lease). */
+  admitted: number;
+  /** Recorded new tenants, and unproven ones not yet known not to be new, that waited for a process slot. */
+  waiting: number;
+  /** Unnamed tenants known not to be new: a home or an archive on the volume. */
+  onVolume: number;
+  /** Unnamed tenants known not to be new: history in Postgres. */
+  history: number;
+  /** Unnamed tenants whose answer was not read this pass: a read that failed, a kill seen, the record unreadable, or the pass's reads spent. */
+  unanswered: number;
+}
+
+/** THE SCOPE OF ONE TENANT'S PROOF: its grant's addresses, every path its home could have, every archive root. Throws when the grant or the volume cannot be read. */
+async function newTenantScope(tenant: `0x${string}`): Promise<NewTenantScope | null> {
+  const grant = await getGrantStore().get(tenant);
+  if (!grant) return null;
+  const homes = new Set([childHome(tenant)]);
+  const archiveRoots = new Set([path.join(merrymenHome(), "archive")]);
+  // The verified volume's root, where it differs from MERRYMEN_HOME: a
+  // volume that cannot be verified throws, and the tenant is not new.
+  const volume = persistentFleetHome();
+  if (volume) {
+    homes.add(path.join(volume.homeRoot, "children", tenant));
+    archiveRoots.add(path.join(volume.homeRoot, "archive"));
+  }
+  return {
+    tenant, account: grant.smartAccount.toLowerCase(), owner: grant.owner.toLowerCase(), chainId: grant.chainId,
+    homes: [...homes], archiveRoots: [...archiveRoots],
+  };
+}
+
+/** Said once per tenant per fact, so a held pre-incident tenant is named once per process, not every pass. */
+function sayNotNew(tenant: string, why: string): void {
+  log(`new tenants: ${tenant} is not new — ${why}; it stays held. If it should run, name it in ${FLEET_ROLLOUT_ENV} ` +
+    "once its accounting is reviewed (docs/fleet-resume.md)");
+}
+
+/**
+ * THE FREE HALF OF THE PROOF, asked before the process cap: what this process
+ * already knows, the record's and the kill's state, and the volume. The scope
+ * when nothing here says "not new" (Postgres is still to be read), or null:
+ * the tenant stays held this pass, and is counted. Read-only.
+ */
+async function newTenantFreeCheck(tenant: `0x${string}`, pass: NewTenantPass): Promise<NewTenantScope | null> {
+  const known = notNewTenants.get(tenant);
+  if (known) {
+    if (known.onVolume) pass.onVolume += 1; else pass.history += 1;
+    return null;
+  }
+  if (!newTenantRecordReadable || newTenantKillSeen.has(tenant)) { pass.unanswered += 1; return null; }
+  try {
+    const scope = await newTenantScope(tenant);
+    if (!scope) { pass.unanswered += 1; return null; }
+    // Most unnamed tenants are pre-incident ones with a home, and need no
+    // Postgres read at all.
+    const onVolume = volumeHistory(scope);
+    if (onVolume) {
+      notNewTenants.set(tenant, { why: onVolume, onVolume: true });
+      sayNotNew(tenant, onVolume);
+      pass.onVolume += 1;
+      return null;
+    }
+    return scope;
+  } catch (e) {
+    sayTenantAlert(tenant, `[alert] new tenants: ${tenant} could not be checked (${errorKind(e)}) — held, and checked again next pass`);
+    pass.unanswered += 1;
+    return null;
+  }
+}
+
+/**
+ * IS THIS UNNAMED, UNRECORDED TENANT NEW? Read-only, before any lease, and
+ * only once newTenantFreeCheck has passed it and a process slot is free:
+ * every history record in Postgres (newTenantRefusal reads the volume again
+ * first), within the pass's budget. The scope it was proved on, or null. A
+ * fact is remembered for the life of the process and said once; a failure is
+ * said and asked again next pass. recordNewTenant proves it all again under
+ * the lease before the insert.
+ */
+async function newTenantLooksNew(tenant: `0x${string}`, scope: NewTenantScope, pass: NewTenantPass): Promise<NewTenantScope | null> {
+  if (pass.looks >= NEW_TENANT_LOOKS_PER_PASS) { pass.unanswered += 1; return null; }
+  pass.looks += 1;
+  let db: Db | null;
+  try { db = await newTenantDb(); } catch (e) {
+    sayTenantAlert(tenant, `[alert] new tenants: ${tenant} could not be checked (${errorKind(e)}) — held, and checked again next pass`);
+    pass.unanswered += 1;
+    return null;
+  }
+  if (!db) { pass.unanswered += 1; return null; }
+  const refused = await newTenantRefusal(db, scope);
+  if (!refused) return scope;
+  if (refused.fact) {
+    notNewTenants.set(tenant, { why: refused.why, onVolume: refused.onVolume === true });
+    sayNotNew(tenant, refused.why);
+    if (refused.onVolume) pass.onVolume += 1; else pass.history += 1;
+  } else {
+    sayTenantAlert(tenant, `[alert] new tenants: ${tenant} not admitted this pass — ${refused.why}; held, and checked again next pass`);
+    pass.unanswered += 1;
+  }
+  return null;
+}
+
+/**
+ * PROVE IT AGAIN AND RECORD IT, under the lease reconcile has just taken,
+ * before the spawn that follows. True only once the record is durable (or
+ * another replica's was there first) and the tenant is in
+ * newTenantAdmissions, which is what lets operatorHold, and so spawnChild,
+ * admit it. Every write proof is asked before and after the insert: the
+ * lease, FLEET_HALT, the drain, the accounting hold, a kill, the route still
+ * open and the list still not naming it. The grant must still name the
+ * account, chain and owner the first look proved.
+ */
+async function recordNewTenant(tenant: `0x${string}`, proved: NewTenantScope, pass: NewTenantPass): Promise<boolean> {
+  const lease = leases.get(tenant);
+  const level = newTenantLevel(process.env);
+  if (!lease || level === null) return false;
+  const mayWrite = (): boolean =>
+    !stopping && !haltRequested() && leases.get(tenant) === lease && lease.healthy() && !accountingTenantHeld(tenant)
+    && newTenantRouteOpen(tenant, process.env) && !newTenantKillSeen.has(tenant) && !killRequested(childHome(tenant));
+  let scope: NewTenantScope | null;
+  let db: Db | null;
+  try {
+    scope = await newTenantScope(tenant);
+    db = await newTenantDb();
+  } catch (e) {
+    sayTenantAlert(tenant, `[alert] new tenants: ${tenant} could not be recorded (${errorKind(e)}) — held, and tried again next pass`);
+    return false;
+  }
+  if (!scope || !db) return false;
+  if (scope.account !== proved.account || scope.chainId !== proved.chainId || scope.owner !== proved.owner) {
+    log(`new tenants: ${tenant}'s grant changed while it was being checked — not recorded; checked again next pass`);
+    return false;
+  }
+  const result = await admitNewTenant(db, { ...scope, level, nowMs: Date.now(), mayWrite });
+  if (!result.admitted) {
+    if (result.fact) {
+      notNewTenants.set(tenant, { why: result.why, onVolume: result.onVolume === true });
+      sayNotNew(tenant, result.why);
+    } else {
+      sayTenantAlert(tenant, `[alert] new tenants: ${tenant} not admitted this pass — ${result.why}; held, and tried again next pass`);
+    }
+    return false;
+  }
+  newTenantAdmissions = new Set([...newTenantAdmissions, tenant]);
+  pass.admitted += 1;
+  log(result.fresh
+    ? `new tenants: ${tenant} admitted at ${level} (${ROLLOUT_NEW_TENANTS_ENV}) — no home or archive on the volume, no history in Postgres, no kill or ` +
+      `accounting hold; recorded in fleet_new_tenant_admissions (evidence ${result.digest.slice(0, 12)}…) before its first spawn. ` +
+      `To hold it: name it in MERRYMEN_ACCOUNTING_HOLD_TENANTS and deploy`
+    : `new tenants: ${tenant} was already recorded as admitted (evidence ${result.digest.slice(0, 12)}…) — runs at ${level}`);
+  return true;
+}
+
+/**
+ * THE PASS, SAID WHEN IT CHANGES (or every five minutes while it does not):
+ * how many unnamed tenants were admitted, wait for a slot, are not new and
+ * why, or could not be answered. The rollout's own line carries the count
+ * of admitted new tenants (fleet-rollout.ts rolloutLine).
+ */
+function sayNewTenantPass(pass: NewTenantPass): void {
+  // The admissions themselves are said per tenant: a pass that admitted one
+  // does not make the rest of the line new.
+  const steady = [
+    `${pass.waiting} waiting for a process slot`,
+    `${pass.onVolume + pass.history} not new and held (${pass.onVolume} with a home or archive on the volume, ${pass.history} with history in Postgres)`,
+    `${pass.unanswered} not answered this pass`,
+  ].join(" · ");
+  const line = `new tenants (${ROLLOUT_NEW_TENANTS_ENV}=${newTenantLevel(process.env)}): ${pass.admitted} admitted this pass · ${steady}`;
+  const now = Date.now();
+  if (!lastNewTenantSummary || lastNewTenantSummary.line !== steady || now - lastNewTenantSummary.at > 5 * 60_000) {
+    log(line);
+    lastNewTenantSummary = { line: steady, at: now };
+  }
+  if (pass.waiting > 0 && lastNewTenantWait?.waiting !== pass.waiting) {
+    log(`[alert] new tenants: ${pass.waiting} wait for a process slot — workers and holds leave fewer than ${NEW_TENANT_HEADROOM} of the ` +
+      `${MAX_LOCAL_CHILD_PROCESSES} free, or a tenant the list names is waiting; each starts once one frees (never raise the cap to fit)`);
+  }
+  lastNewTenantWait = pass.waiting > 0 ? { waiting: pass.waiting, at: now } : null;
+}
+/** Test seam: the tenants the new-tenant route admits, as this process holds them now. */
+export function newTenantAdmissionsForTest(): string[] {
+  return [...newTenantAdmissions].sort();
 }
 
 function operatorHeld(tenant: string): boolean {
@@ -644,6 +947,38 @@ const CHILD_SECRET_STRIP = [
    * above.
    */
   "MERRYMEN_OPS_TOKEN",
+  /**
+   * BITQUERY, UNDER EVERY NAME A CHILD COULD READ IT BY, AND THE HOUSE'S MERRY
+   * CIRCLE TOKEN — the published-key reason, and a fan-out reason of their own.
+   *
+   * MERRYMEN_BITQUERY_API_KEY is the fleet lane's key (venues/bitquery-lane.ts):
+   * read here, held by this process, spent under one daily points budget. A
+   * child has no business holding it, for the Marketaux reason above.
+   *
+   * BITQUERY_API_KEY and MERRYMEN_TOKEN are what a CHILD's own discovery reads
+   * (settings.ts `str(file.bitqueryApiKey, env.BITQUERY_API_KEY)` and
+   * `str(file.merrymenToken, env.MERRYMEN_TOKEN)`). Hosted, both fields are
+   * house keys stripped from the tenant's file (HOUSE_KEY_FIELDS), so the env is
+   * the ONLY value a child could ever see — the operator's — and
+   * discoveryEnabled defaults on. Either one set on this process would have
+   * every child poll Bitquery on its own timer: N pollers on the house's paid
+   * plan with no shared budget, or N pollers sharing one holder's per-address
+   * gateway bucket under that holder's identity. Neither is a tenant's to spend.
+   *
+   * CHILDREN NEVER NEED EITHER. Nothing else reads them: settings.ts is the only
+   * reader and it feeds runDiscovery alone; this process reads neither. A
+   * tenant's OWN holder token still reaches discovery through its own brain key
+   * (llmProvider "merrymen", bitquery.ts gatewayTokenForDiscovery), on its own
+   * quota. Flow facts a child wants come from this process over IPC
+   * (flow-broker.ts), never from a key of its own.
+   *
+   * Latent until now, because the gateway header bug (bitqueryRequestHeaders)
+   * made every gateway call a 401. Fixing the header without this strip would
+   * have switched the fan-out on.
+   */
+  "MERRYMEN_BITQUERY_API_KEY",
+  "BITQUERY_API_KEY",
+  "MERRYMEN_TOKEN",
 ] as const;
 
 /** Where a tenant's child keeps its own ~/.merrymen — isolated from every other. */
@@ -668,7 +1003,7 @@ export { botWillPoll };
  * tenant's home and the hosted flag. Inheriting (rather than allowlisting) keeps
  * the OS essentials and the injected house keys; the strip is what makes it safe.
  */
-export function childEnv(tenant: string, opts: { tgGroupsOff?: boolean } = {}): NodeJS.ProcessEnv {
+export function childEnv(tenant: string, opts: { tgGroupsOff?: boolean; flowBroker?: boolean } = {}): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env };
   for (const k of CHILD_SECRET_STRIP) delete env[k];
   env.MERRYMEN_HOSTED = "1";
@@ -693,15 +1028,28 @@ export function childEnv(tenant: string, opts: { tgGroupsOff?: boolean } = {}): 
    * MERRYMEN_HOLDER_ADDRESS is: it names other tenants, which is an answer to
    * a question about somebody else, and a child that read it might one day
    * mistake another tenant's level for its own.
+   *
+   * The same for MERRYMEN_ROLLOUT_NEW_TENANTS: a tenant that route admitted
+   * gets its level here, reduced to its own, like any other, and the
+   * fleet-wide variable never reaches a child.
    */
   delete env[FLEET_ROLLOUT_ENV];
-  env[ADMISSION_LEVEL_ENV] = childAdmissionLevel(tenant);
+  delete env[ROLLOUT_NEW_TENANTS_ENV];
+  env[ADMISSION_LEVEL_ENV] = childAdmissionLevel(tenant, process.env, newTenantAdmissions);
   // TELEGRAM GROUPS HELD OFF for a child whose group memory could not be put
   // back (tgGroupsHeldOff). The operator's own switch, set for this one child:
   // on an empty memory it would re-ask about the owner's groups, leave them,
   // and hand out a fresh day's allowances. Never set to "1": an operator's
   // fleet-wide 0 is inherited above and stays.
   if (opts.tgGroupsOff) env.MERRYMEN_TG_GROUPS = "0";
+  // THE FLOW BROKER ANSWERS ON THIS CHILD'S CHANNEL (flow-broker.ts
+  // FLOW_BROKER_ENV): said only when the Bitquery lane is on here and the
+  // child gets the IPC channel, so a child never asks — and never waits — for
+  // a broker nobody attached. Never inherited: it describes this process,
+  // not a fleet-wide choice an operator's variable could make for it. Who may
+  // actually ask is still decided per request, by the research allowlist.
+  delete env[FLOW_BROKER_ENV];
+  if (opts.flowBroker) env[FLOW_BROKER_ENV] = "1";
   /**
    * WHERE THE CHILDREN AGREE WITH EACH OTHER.
    *
@@ -1089,6 +1437,27 @@ const accountingMaintenanceLocalState = (tenant: string) => ({
     restartPending.has(tenant) || exitingChildren.has(tenant) || retiringExpired.has(tenant) || leaseLossDraining.has(tenant),
   localHomePresent: existsSync(childHome(tenant)),
 });
+
+/** The only mutation entry: ownership is derived from actual supervisor state. */
+export async function attestReceiptUnderSupervisor(o: Pick<ReceiptAttestationOptions,
+  "tenant" | "smartAccount" | "shared" | "rpc" | "mode" | "approvedDigest" | "dialect" | "checkpoint">): Promise<ReceiptAttestationReport> {
+  const tenant = o.tenant.toLowerCase() as `0x${string}`, lease = leases.get(tenant), volume = persistentFleetHome();
+  if (!lease || !volume) throw new Error("Receipt attestation requires the supervisor's tenant lease and verified persistent volume.");
+  const grant = await getGrantStore().get(tenant);
+  if (!grant || grant.smartAccount.toLowerCase() !== o.smartAccount.toLowerCase()) throw new Error("Receipt attestation requires the same current stored account permission; do not replace it to repair accounting.");
+  const assertQuiescent = () => {
+    if (stopping || copiesClosed || leases.get(tenant) !== lease || !lease.healthy()
+        || accountingMaintenanceLocalState(tenant).processPresent) throw new Error("Receipt attestation requires a quiet supervisor with its original healthy lease.");
+  };
+  assertQuiescent();
+  // Wait for every already-scheduled copy. New copies queue behind the complete
+  // repair and must pass its shared pending gate before touching a cursor.
+  return mirrorSerially(tenant, async () => {
+    assertQuiescent();
+    return attestOriginalReceipt({ ...o, tenant, smartAccount: grant.smartAccount, chainId: grant.chainId,
+      home: childHome(tenant), volume, lease, assertQuiescent });
+  });
+}
 
 function log(msg: string): void {
   console.log(`[orchestrator] ${msg}`);
@@ -2819,6 +3188,14 @@ const LEDGER_SOURCE_BLOCK = "ledger-source-blocked.json";
 // in this supervisor. Keep the deployment for recovery if durable storage fails.
 const blockedLedgerHomes = new Set<string>();
 const removedLedgerPending = new Map<string, TenantLease>();
+const receiptSchemaReady = new WeakSet<Db>();
+async function receiptSourceAllowsWrite(shared: Db, tenant: string): Promise<void> {
+  if (!receiptSchemaReady.has(shared)) {
+    await ensureReceiptAttestationSchema(shared);
+    receiptSchemaReady.add(shared);
+  }
+  await assertNoPendingReceiptAttestation(shared, tenant);
+}
 
 /** Publish the source gate without changing any ledger, cursor, permission or source barrier. */
 async function reportFleetSource(tenant: `0x${string}`, grant: StoredGrant, lease: TenantLease, cause: RecoveryCause | null): Promise<boolean> {
@@ -2871,6 +3248,7 @@ async function pausedSourceCause(tenant: string): Promise<RecoveryCause | null> 
   const handle = openChildLedger(home);
   try {
     const shared = retirementMemoryStoreForTest?.shared ?? await makePgDb(process.env.DATABASE_URL!);
+    await receiptSourceAllowsWrite(shared, tenant);
     if (!handle) {
       // No DDL and no zero substitution: an old cursor is evidence that an
       // absent local file is an accounting blocker, including before renewal.
@@ -2989,6 +3367,7 @@ async function mirrorGuardedLedger(tenant: string, child: Db, shared: Db, home =
     if (copiesClosed && !drainPass) throw new Error("The fleet is being called home; no new ledger copy starts before the next owner's.");
     if (stillOwned && !stillOwned()) throw new Error("Ledger mirror no longer owns the current worker and lease.");
     if (ledgerSourceBlocked(home)) throw new Error("Ledger source is blocked; preserve the home and recover its accounting before rearming.");
+    await receiptSourceAllowsWrite(shared, tenant);
     // Check the original witnesses BEFORE mirrorTenant can advance any cursor.
     // Retrying a rebuilt source after that advancement can otherwise erase the
     // shared position on the second pass, once its rewind evidence is gone.
@@ -3026,6 +3405,7 @@ async function ledgerSourceAllowsResume(tenant: string, afterRestore = false): P
   }
   try {
     const shared = retirementMemoryStoreForTest?.shared ?? await makePgDb(process.env.DATABASE_URL!);
+    await receiptSourceAllowsWrite(shared, tenant);
     await shared.exec(translateSchema(MIRROR_STATE_DDL));
     try { await shared.exec("ALTER TABLE mirror_state ADD COLUMN last_stamp INTEGER"); } catch { /* already present */ }
     if (!handle) {
@@ -3440,6 +3820,7 @@ async function resumeAdmission(tenant: `0x${string}`, lease: TenantLease, grant:
   let approval: ApprovalRow | null;
   try {
     shared = retirementMemoryStoreForTest?.shared ?? await makePgDb(url!);
+    await receiptSourceAllowsWrite(shared, tenant);
     approval = await readOpenApproval(shared, tenant);
   } catch (e) {
     sayTenantAlert(tenant, `[alert] ${tenant}: resume approvals unreadable (${errorKind(e)}) — retaining its home without starting a worker`);
@@ -4039,7 +4420,7 @@ async function autoAdmitResignedPaper(roster: ReadonlyArray<{ tenant: string; ke
         continue;
       }
       log(`resume auto-paper: ${tenant} self-approved (a re-signed paper tenant that could not arm live and holds nothing; evidence ` +
-        `${entry.digest!.slice(0, 12)}…) — its admission starts this pass, at ${childAdmissionLevel(tenant)}, the level ${FLEET_ROLLOUT_ENV} gives it`);
+        `${entry.digest!.slice(0, 12)}…) — its admission starts this pass, at ${childAdmissionLevel(tenant, process.env, newTenantAdmissions)}, the level ${FLEET_ROLLOUT_ENV} gives it`);
       await settle(change, "auto-approved", run);
     } catch (e) {
       // Anything that threw on the way (a verdict read that failed — schema
@@ -4386,7 +4767,11 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
         // then says "unavailable" at once instead of waiting out a timeout.
         {
           cwd: ROOT,
-          env: childEnv(tenant, { tgGroupsOff: tgGroupsHeld.has(tenant.toLowerCase()) }),
+          env: childEnv(tenant, {
+            tgGroupsOff: tgGroupsHeld.has(tenant.toLowerCase()),
+            // The flow broker below is attached exactly when both hold.
+            flowBroker: !fomoBootNow().off && flowRuntimeNow().service !== null,
+          }),
           stdio: fomoBootNow().off ? ["ignore", "pipe", "pipe"] : ["ignore", "pipe", "pipe", "ipc"],
         },
       );
@@ -4432,6 +4817,9 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
     // Answer its Fomo questions on that channel, until it exits. Before the
     // runtime is built the pass attaches it later (startFomoPass).
     attachFomoBroker(tenant, proc);
+    // And its flow questions on the same channel, as decision evidence, when
+    // the Bitquery lane is on and its account is on the research allowlist.
+    attachFlowBroker(flowRuntimeNow().service, tenant, proc, smartAccount, log);
     const tag = `[${tenant.slice(0, 8)}]`;
     const pipe = (stream: NodeJS.ReadableStream | null, sink: NodeJS.WriteStream) =>
       stream?.on("data", (c: Buffer) =>
@@ -5527,7 +5915,7 @@ async function retireExpiredGrants(
     // should not sit on the volume, and in its backups, for as long as the
     // tenant is held. What follows stops a process, mirrors its book under the
     // lease and then lets the lease go: that waits for the pass that admits it.
-    if (rolloutHeld(lc)) continue;
+    if (rolloutHeld(lc, process.env, newTenantAdmissions)) continue;
     if (!children.has(lc) && !holders.has(lc) && !exitingChildren.has(lc) && !spawning.has(lc) && !restartPending.has(lc) && !leases.has(lc)) continue;
     // A re-sign may have landed since listTenantExpiries. Do not retire that
     // fresh grant just because the roster snapshot was old.
@@ -6041,13 +6429,21 @@ export async function reconcile(): Promise<void> {
   // only takes authority away (see pendingKillTenants).
   const nowSec = Math.floor(Date.now() / 1000);
   const kept: `0x${string}`[] = [];
+  newTenantKillSeen.clear();
   for (const tenant of tenants) {
     const lc = tenant.toLowerCase() as `0x${string}`;
-    if ((await honourKill(lc, nowSec)).outcome === "revoked") continue;
+    const kill = await honourKill(lc, nowSec);
+    if (kill.outcome === "revoked") continue;
+    // Any kill request at all, carried out or not: never proved new this pass.
+    if (kill.outcome !== "none") newTenantKillSeen.add(lc);
     kept.push(tenant);
   }
   tenants = kept;
   const wanted = new Set(tenants.map((t) => t.toLowerCase()));
+  // THE NEW-TENANT ROUTE'S RECORD, before anything below asks who is held: a
+  // tenant it admitted is in the rollout, and a pass that asked first would
+  // stand its running agent down. Shut, it reads nothing and admits nobody.
+  await refreshNewTenantAdmissions();
   // Remain wanted: a maintenance hold must not revoke the grant or wipe its
   // home. A fresh held deployment starts no process for these tenants. Also
   // stand down a local incarnation if a hold is introduced during a test or
@@ -6076,7 +6472,7 @@ export async function reconcile(): Promise<void> {
   // unchanged, on the pass that admits it. The accounting hold has never
   // skipped either.
   await retireExpiredGrants(tenants, expiresAtByTenant, nowSec);
-  await reportPausedFleetSources(tenants.filter((tenant) => !rolloutHeld(tenant)));
+  await reportPausedFleetSources(tenants.filter((tenant) => !rolloutHeld(tenant, process.env, newTenantAdmissions)));
   // A delete/re-grant cannot outrun the stopped source's unfinished final
   // copy. Retry under precisely the retained lease before permitting a fork.
   for (const [tenant, lease] of removedLedgerPending) {
@@ -6112,7 +6508,7 @@ export async function reconcile(): Promise<void> {
   // The heartbeat's count of the whole roster (fleetHealth): admitted per
   // level, held by either operator hold, or expired. After the retirement
   // above, whose re-read of a re-signed key this roster's expiries include.
-  lastRolloutCounts = rolloutCounts(tenants, process.env, { accountingHeld: accountingHolds, unexpired: eligible });
+  lastRolloutCounts = rolloutCounts(tenants, process.env, { accountingHeld: accountingHolds, unexpired: eligible, newTenants: newTenantAdmissions });
   const expiredCount = tenants.length - eligibleToSpawn.length;
   if (!lastRosterLog || lastRosterLog.active !== eligibleToSpawn.length || lastRosterLog.expired !== expiredCount || Date.now() - lastRosterLog.at > 5 * 60_000) {
     log(`grant roster: ${eligibleToSpawn.length} unexpired, ${expiredCount} expired or unreadable; only unexpired keys may consume worker processes`);
@@ -6139,11 +6535,33 @@ export async function reconcile(): Promise<void> {
   // watched: a kill above has taken them out of `wanted`.
   await autoAdmitResignedPaper(grantKeys.filter((g) => wanted.has(g.tenant)), eligible);
   await refreshResumePending();
-  for (const tenant of eligibleToSpawn) {
+  // NEW TENANTS LAST, AND ONLY IN THE ROOM LEFT (MERRYMEN_ROLLOUT_NEW_TENANTS,
+  // new-tenant-admission.ts). With the route open, every tenant an explicit
+  // list does not name (and the accounting hold does not) goes after every
+  // tenant it does: recorded ones, which its record admits, and unproven
+  // ones, which are held unless proved new below. Each waits while starting
+  // it would leave fewer than NEW_TENANT_HEADROOM of the process slots free,
+  // or while any named tenant waited for a slot this pass, so a new tenant
+  // never takes a slot a named one needs. Shut, the order and every step are
+  // exactly what they were.
+  const newRouteOpen = newTenantLevel(process.env) !== null;
+  const byNewRoute = (lc: string): boolean => newRouteOpen && newTenantRouteOpen(lc, process.env) && !accountingTenantHeld(lc);
+  const spawnOrder = newRouteOpen
+    ? [...eligibleToSpawn.filter((t) => !byNewRoute(t.toLowerCase())), ...eligibleToSpawn.filter((t) => byNewRoute(t.toLowerCase()))]
+    : eligibleToSpawn;
+  const newPass: NewTenantPass = { looks: 0, admitted: 0, waiting: 0, onVolume: 0, history: 0, unanswered: 0 };
+  for (const tenant of spawnOrder) {
     const lc = tenant.toLowerCase() as `0x${string}`;
+    // An unnamed tenant the route has not recorded: held, and taken past the
+    // next line only to be proved new (newTenantFreeCheck and
+    // newTenantLooksNew, read-only, before any lease) and recorded under its
+    // lease (recordNewTenant) before it is spawned. Recorded, operatorHeld no
+    // longer holds it.
+    const unproven = byNewRoute(lc) && !newTenantAdmissions.has(lc);
     // First, before a lease is so much as asked for: nothing below this line
-    // is for a tenant the operator holds, the lease attempt included.
-    if (operatorHeld(lc)) continue;
+    // is for a tenant the operator holds, the lease attempt included — but
+    // for that proof and its record.
+    if (operatorHeld(lc) && !unproven) continue;
     if (retiringExpired.has(lc) || leaseLossDraining.has(lc) || exitingChildren.has(lc)) continue;
     // A spawn still preparing is a child about to be running, not one that
     // isn't: a restart timer, usually, got here first. See `spawning`. And a
@@ -6189,6 +6607,23 @@ export async function reconcile(): Promise<void> {
       gaveUpUntil.delete(lc);
       log(`${lc}: stand-down over — trying once more`);
     }
+    // Before the cap's own check, whose room is never smaller: a new tenant
+    // waiting here is never counted among the named tenants the cap deferred.
+    // An unproven one is first put through what costs nothing (what this
+    // process knows, the volume), so a pre-incident tenant is never counted
+    // as waiting for a slot; the Postgres read, which scans every book table,
+    // only once a slot is there to take.
+    let proved: NewTenantScope | null = null;
+    if (byNewRoute(lc)) {
+      const free = unproven ? await newTenantFreeCheck(lc, newPass) : null;
+      if (unproven && !free) continue;
+      if (newTenantRoom({ running: localChildProcessCount(), cap: MAX_LOCAL_CHILD_PROCESSES, namedWaiting: capacityDeferred }) <= 0) {
+        newPass.waiting += 1;
+        await releaseLease(lc);
+        continue;
+      }
+      if (free && !(proved = await newTenantLooksNew(lc, free, newPass))) continue;
+    }
     if (localChildProcessCount() >= MAX_LOCAL_CHILD_PROCESSES) {
       capacityDeferred += 1;
       // A tenant that cannot run here must not keep a lease that would keep
@@ -6210,6 +6645,12 @@ export async function reconcile(): Promise<void> {
       }
       leases.set(lc, lease);
     }
+    // PROVED NEW, AND RECORDED UNDER THE LEASE BEFORE ITS FIRST SPAWN, or not
+    // spawned: the lease taken only to record it goes back.
+    if (proved && !(await recordNewTenant(lc, proved, newPass))) {
+      await releaseLease(lc);
+      continue;
+    }
     await spawnChild(lc, cool?.restarts ?? 0);
   }
   if (capacityDeferred > 0 && (!lastCapacityLog || lastCapacityLog.deferred !== capacityDeferred || Date.now() - lastCapacityLog.at > 60_000)) {
@@ -6217,6 +6658,12 @@ export async function reconcile(): Promise<void> {
     lastCapacityLog = { deferred: capacityDeferred, at: Date.now() };
   } else if (capacityDeferred === 0) {
     lastCapacityLog = null;
+  }
+  if (newRouteOpen) {
+    // The counts above were taken before this loop recorded anyone: counted
+    // again, so the heartbeat never reports a tenant it has just started as held.
+    if (newPass.admitted > 0) lastRolloutCounts = rolloutCounts(tenants, process.env, { accountingHeld: accountingHolds, unexpired: eligible, newTenants: newTenantAdmissions });
+    sayNewTenantPass(newPass);
   }
   // HELD TENANTS WHOSE RESTORE IS DUE AGAIN, and the handover to trading when
   // it takes. See retryHold.
@@ -9537,6 +9984,42 @@ async function runIdentityAuditIfAsked(): Promise<void> {
   }
 }
 
+async function runReceiptAttestationIfAsked(): Promise<void> {
+  const request = receiptAttestationRequest(process.env);
+  if (!request) return;
+  if (!process.env.DATABASE_URL || !persistentFleetHome()) throw new Error("Receipt attestation requires shared Postgres and the verified original persistent home.");
+  const store = getGrantStore(), roster: Array<{ tenant: string; account: string }> = [];
+  for (const tenant of await store.listTenants()) {
+    const grant = await store.get(tenant);
+    if (grant) roster.push({ tenant, account: grant.smartAccount });
+  }
+  const tenant = receiptAttestationTenant(request, roster);
+  if (!accountingTenantHeld(tenant) || accountingMaintenanceLocalState(tenant).processPresent) throw new Error("Receipt attestation target must be explicitly held with no local incarnation.");
+  let lease = leases.get(tenant), temporary = false;
+  if (!lease) {
+    lease = await acquireTenantLease(tenant) ?? undefined;
+    if (!lease) throw new Error("Receipt attestation tenant is still leased by another supervisor.");
+    leases.set(tenant, lease); temporary = true;
+  }
+  try {
+    const shared = await makePgDb(process.env.DATABASE_URL), rpcUrl = process.env.MERRYMEN_RPC_MAINNET ?? "https://rpc.mainnet.chain.robinhood.com";
+    let id = 0;
+    const rpc: ReceiptAttestationOptions["rpc"] = async (method, params) => {
+      const response = await fetch(rpcUrl, { method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: ++id, method, params }), signal: AbortSignal.timeout(30_000) });
+      if (!response.ok) throw new Error(`Receipt evidence RPC returned HTTP ${response.status}`);
+      const body = await response.json() as { result?: unknown; error?: { message?: string } };
+      if (body.error) throw new Error(body.error.message ?? "Receipt evidence RPC failed");
+      return body.result ?? null;
+    };
+    const report = await attestReceiptUnderSupervisor({ tenant, smartAccount: request.account, shared, rpc, mode: request.mode, approvedDigest: request.approvedDigest });
+    log(`receipt-attestation| ${JSON.stringify(report)}`);
+    log("receipt-attestation| Original grant, account, ledger generation, row IDs, flow time, epoch, high-water mark and mirror witnesses retained. Operator hold and rollout are unchanged.");
+  } finally {
+    if (temporary && leases.get(tenant) === lease && !accountingMaintenanceLocalState(tenant).processPresent) await releaseLease(tenant);
+  }
+}
+
 async function runReconstructionDryRunIfAsked(): Promise<void> {
   if ((process.env.MERRYMEN_ACCOUNTING_RECONSTRUCT ?? "").trim() !== "1") return;
   const url = process.env.DATABASE_URL;
@@ -10495,6 +10978,13 @@ async function mirrorLedgers(): Promise<void> {
     // `children` is keyed by the grant store's own tenant list, which is
     // 0x-shaped by construction — the same cast writeSettingsForChild takes.
     await writePeersFor(tenant as `0x${string}`, shared);
+    try {
+      await materializeOwnOutcomeLearning({ db: shared, home: childHome(tenant),
+        readGrant: () => getGrantStore().get(tenant as `0x${string}`), nowSec: Math.floor(Date.now() / 1000) });
+    } catch {
+      // Optional derived evidence expires quickly; never disrupt the mirror.
+      log(`own-learning: ${tenant} could not refresh its outcome evidence`);
+    }
   }
 
   // HELD TENANTS: THEIR TELEGRAM, AND NOTHING ELSE. The link code the hold
@@ -10796,7 +11286,61 @@ function startXPostPass(): void {
 async function runXPostPass(boot: XPostSetup): Promise<void> {
   try {
     if (!xPoster) {
-      xPoster = makeXPoster({ creds: boot.creds, knobs: boot.knobs, app: boot.app!, dek: boot.dek! });
+      xPoster = makeXPoster({
+        creds: boot.creds, knobs: boot.knobs, app: boot.app!, dek: boot.dek!,
+        deps: {
+          socialProfile: async (tenant) => {
+            try {
+              const key = tenant.toLowerCase() as `0x${string}`;
+              const settings = await getSettingsStore().get(key);
+              const profile: XSocialProfile = {
+                xVoice: settings?.xVoice === "dry" ? "dry" : "default", publicWallet: null, currentAgent: null,
+                xTokenAddresses: settings?.xTokenAddresses === true, xTradeResults: settings?.xTradeResults === true,
+                discoveryFocus: settings?.discoveryFocus === "new-projects" ? "new-projects" : "balanced",
+              };
+              if (!settings?.xPublicWalletIntro && !profile.xTokenAddresses && !profile.xTradeResults) return profile;
+              // Fresh send-time authority, not the child settings snapshot.
+              const grant = await getGrantStore().get(key);
+              const child = children.get(key);
+              const held = leases.get(key);
+              if (grant && child && held?.healthy() && !killRequested(childHome(key)) && grant.smartAccount.toLowerCase() === child.smartAccount.toLowerCase()) {
+                profile.currentAgent = { address: grant.smartAccount, chainId: grant.chainId };
+                if (settings?.xPublicWalletIntro === true) profile.publicWallet = profile.currentAgent;
+              }
+              return profile;
+            } catch {
+              // Store errors can carry connection strings; the public projection never does.
+              throw new Error("X social profile could not be read");
+            }
+          },
+          // WHAT AN ANSWER LOOKS UP, only with MERRYMEN_XPOST_RESEARCH=1
+          // (orchestrator-xpost-research.ts). Index reads spend the FLEET's
+          // Gecko lane — this process's home is the children's
+          // MERRYMEN_FLEET_HOME (childEnv), passed explicitly, never set on
+          // process.env. Fomo, only with MERRYMEN_XPOST_FOMO=1 as well, asks
+          // THIS process's own service for the answering tenant, as a public
+          // x-answer; with the Fomo pass off or its runtime not built yet,
+          // there is no broker and the answer goes without it. Whether Fomo
+          // can answer for THIS owner (her own data access, the x-answer cap
+          // above zero) is asked per answer, so "what can you do?" never
+          // promises Fomo that a coin answer would then not deliver.
+          // Onchain flow, only while the Bitquery lane is configured here
+          // (MERRYMEN_BITQUERY_API_KEY on this service): this process's own
+          // flowFor, inside the answer's time share, said only through
+          // flowXLines' digit-free bands, and at most the readings a day that
+          // child evidence's share leaves (answerReadingsPerDay).
+          ...(boot.knobs.research ? {
+            research: createXResearch({
+              fleetHome: merrymenHome(),
+              ...(boot.knobs.researchPerHour !== undefined ? { lookupsPerHour: boot.knobs.researchPerHour } : {}),
+              // The runtime exists only once the switched-on Fomo pass built it (fomoRuntimeNow).
+              fomo: (tenant) => (fomoRuntime && !xAnswerFomoCapped() ? createDirectBroker(fomoRuntime.service, tenant.toLowerCase(), { log }) : null),
+              fomoUsable: async (tenant) => !!fomoRuntime && !xAnswerFomoCapped() && (await fomoAccessFor(tenant)).dataAccess === true,
+              ...xAnswerFlow(),
+            }),
+          } : {}),
+        },
+      });
       log(xPoster.plan().why);
     }
     const shared = await makePgDb(process.env.DATABASE_URL!);
@@ -10809,6 +11353,7 @@ async function runXPostPass(boot: XPostSetup): Promise<void> {
       roster.push({ tenant: key, agentId: child.smartAccount.toLowerCase() });
     }
     const r = await xPoster.step(shared, roster, tenantChatProfile, Date.now());
+    for (const note of r.notes ?? []) log(note);
     if (r.log) log(r.log);
   } catch (e) {
     const text = e instanceof Error ? e.message : String(e);
@@ -10834,7 +11379,10 @@ async function runXPostPass(boot: XPostSetup): Promise<void> {
 /** What this file uses of fomo/runtime.ts, stated here so a change there fails the typecheck, not the boot. */
 interface FomoRuntimeHandle {
   db: Db;
-  service: FomoService & { heldTokensSnapshot?(now?: number): Map<string, string[]> };
+  service: FomoService & {
+    heldTokensSnapshot?(now?: number): Map<string, string[]>;
+    reviewCandidatesSnapshot?(tenant: string, now?: number): ReviewCandidate[];
+  };
   client: FomoClient | null;
   /**
    * The budget fleet reads are charged to: the shared pool and its class
@@ -10852,6 +11400,32 @@ interface FomoBoot {
   planCredits: number | undefined;
   /** The operator's cap overrides (fomo/budget.ts fomoBudgetFrom), read exactly as the web process reads them. */
   budget: Partial<FomoBudgetConfig>;
+}
+
+/**
+ * THE BITQUERY LANE (orchestrator-flow.ts), built once, here at boot so its
+ * line carries this process's log prefix. MERRYMEN_BITQUERY_API_KEY is
+ * stripped from every child (CHILD_SECRET_STRIP); off without it. `flowFor`
+ * is the orchestrator's own door to it — X answers import it from
+ * orchestrator-flow.ts directly, which keeps the passes free of a cycle.
+ */
+function flowRuntimeNow(): FlowRuntime {
+  return flowRuntimeFor({ log });
+}
+export { flowFor };
+
+/**
+ * WHAT AN X ANSWER'S RESEARCH GETS OF THE LANE: nothing with the lane off;
+ * on, `flowFor` for a Robinhood Chain contract, bounded by the answer's own
+ * time share, and a daily count that keeps public tags out of the evidence
+ * share. Said once, when the X poster is built.
+ */
+function xAnswerFlow(): { flow?: FlowReader; flowPerDay?: number } {
+  const rt = flowRuntimeNow();
+  if (!rt.service) return {};
+  const flowPerDay = answerReadingsPerDay(rt.setup);
+  log(`xpost: answers may read onchain flow — up to ${flowPerDay} readings per UTC day across X accounts, said only in bands`);
+  return { flow: (q) => (q.chainId === 4663 ? flowFor(q.address, { timeoutMs: q.timeoutMs }) : Promise.resolve(null)), flowPerDay };
 }
 
 let fomoBoot: FomoBoot | null = null;
@@ -10924,6 +11498,14 @@ export function fomoSetup(env: Record<string, string | undefined> = process.env)
   const caps = fomoBudgetFrom(env);
   lines.push(...caps.problems, describeBudget(budgetConfigFor(planCredits ?? FREE_PLAN_CREDITS_PER_MONTH, caps.budget)));
   return { off: false, lines, apiKey, planCredits, budget: caps.budget };
+}
+
+/**
+ * MERRYMEN_FOMO_X_HOURLY_CREDITS=0, the operator's off for Fomo in X answers:
+ * no broker is handed to them, and the service refuses the surface too.
+ */
+function xAnswerFomoCapped(): boolean {
+  return fomoBoot?.budget.xHourlyCredits === 0;
 }
 
 /** The switches, decided and said once, on first use: the first spawn or the first pass, whichever comes first. */
@@ -11080,6 +11662,13 @@ async function runFomoPass(boot: FomoBoot): Promise<void> {
       // Read, and read from a child still running here: a reading left behind
       // by a child that moved or stood down is not this tenant's book now.
       holdingsKnown: (tenant) => tenantHeldCoins.has(tenant.toLowerCase()) && fomoStillOurs(tenant),
+      // RESEARCH FOR THE COINS A REVIEW IS ABOUT TO LOOK AT (fomo/review-candidates.ts):
+      // what each child here named, queued only for an agent on the operator's
+      // research allowlist (MERRYMEN_DECISION_RESEARCH_ACCOUNTS, nobody by default).
+      // (Not `(tenant, now)`: accounting-truth.test.ts pins that no call after
+      // deriveBootstrapAccounting( ends in that pair.)
+      reviewCandidates: (who, at) => rt.service.reviewCandidatesSnapshot?.(who, at) ?? [],
+      reviewResearchFor: (agentId) => decisionResearchEnabledFor(agentId),
       // Checked right before each fomo.json is written: the roster was read
       // when the pass started, and a tenant may since have moved or been held.
       stillOurs: fomoStillOurs,
@@ -11732,9 +12321,15 @@ export async function runOrchestrator(): Promise<void> {
   assertHostedFleetStart();
   // Validate operator intent before either entry path can initialize anything.
   const accountingHolds = accountingHoldTenants(process.env);
+  receiptAttestationRequest(process.env);
   // THE ROLLOUT TOO, and for both paths: a malformed value, or an unset one on
   // Railway, refuses here, before the halt, the volume or a lease is touched.
   const rollout = fleetRollout(process.env);
+  // AND THE NEW-TENANT ROUTE'S LEVEL (fleet-rollout.ts rolloutNewTenants), on
+  // the same rule: unset or one of observe, exits-only, trade, and anything
+  // else refuses here. Accepted beside `none` and `all`, where it does
+  // nothing, so the emergency stop never needs it removed to boot.
+  rolloutNewTenants(process.env);
   // AND THE RESUME ADMISSION VARIABLES (ledger-resume.ts), on the same rule:
   // malformed refuses boot, never a guess at which tenants were meant.
   const resumeControls = {
@@ -11782,6 +12377,7 @@ export async function runOrchestrator(): Promise<void> {
   // child starts. A malformed entry must never silently drop from a hold.
   if (accountingHolds.size) log(`accounting maintenance holds ${accountingHolds.size} named tenant(s); grants and ledger remain stored; old deployment removal must be verified separately before commit`);
   log(rolloutStartupLine(rollout));
+  log(newTenantsStartupLine(process.env));
   log(resumeAutoPaper
     ? `resume auto-paper: ${RESUME_AUTO_PAPER_ENV}=1 — a tenant whose grant row changes is previewed automatically, and a re-signed one the continuity gate holds that is paper, ` +
       `could not arm live and holds nothing is approved by this process (at most ${AUTO_PAPER_PER_PASS} a pass, within the process cap) and admitted at its rollout level` +
@@ -11796,6 +12392,12 @@ export async function runOrchestrator(): Promise<void> {
   // spawns and no pass runs, and the operator should still read whether it
   // is on (docs/fomo.md). Reads the environment and logs; nothing else.
   fomoBootNow();
+  // The Bitquery lane's switches, said once for the same reason
+  // (docs/bitquery-lane.md). Off without its key: then nothing else happens.
+  flowRuntimeNow();
+  // Which smart accounts get the extra decision research, said once: the
+  // allowlist is public addresses, and nothing else shows who is on it.
+  log(decisionResearchBootLine());
   // HOW THE LAST ORCHESTRATOR STOPPED, from the receipt its drain wrote
   // (fleet-drain.ts): said once, and moved aside so that a crash of this run
   // is never read as the clean stop of the last.
@@ -11840,7 +12442,7 @@ export async function runOrchestrator(): Promise<void> {
   // recheck shutdown/hold/fresh-state at the commit boundary inside the job.
   await runAccountingReconstructionAtStartup({
     heldTenants: accountingHolds,
-    reconstruct: runReconstructionDryRunIfAsked,
+    reconstruct: async () => { await runReceiptAttestationIfAsked(); await runReconstructionDryRunIfAsked(); },
     onError: (error) => log(`accounting reconstruction failed — ${error instanceof Error ? error.message : String(error)}`),
   });
   if (stopping) return;

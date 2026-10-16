@@ -775,9 +775,12 @@ test("Postgres: the drill's SQL over two real databases", { skip: !url, timeout:
 
   // A role that may not read a table still sees it in the catalog, so the
   // drill stops on that table instead of calling it absent on both sides.
-  await admin.query(`CREATE ROLE ${reader} LOGIN`);
+  // It has a password because a server that checks them (the postgres image
+  // CI runs) refuses a role without one before any table is read.
+  const readerPassword = randomBytes(12).toString("hex");
+  await admin.query(`CREATE ROLE ${reader} LOGIN PASSWORD '${readerPassword}'`);
   for (const c of Object.values(clients)) await c.query(`GRANT SELECT ON trades, flows, holder_claims, tenant_settings TO ${reader}`);
-  const as = (name) => Object.assign(new URL(urlOf(name)), { username: reader, password: "" }).toString();
+  const as = (name) => Object.assign(new URL(urlOf(name)), { username: reader, password: readerPassword }).toString();
   const unreadable = await run({ MERRYMEN_RESTORE_FORK_URL: as(names.fork), MERRYMEN_RESTORE_SOURCE_URL: as(names.source) });
   assert.equal(unreadable.exitCode, 1);
   assert.deepEqual(unreadable.report.error, { code: "query-failed", detail: "A read failed and the drill stopped.", side: "fork", table: "grants", cause: "42501" });

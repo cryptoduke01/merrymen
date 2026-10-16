@@ -7,6 +7,9 @@ import { diskAgent } from "@/lib/agent-for";
 import { getGrantStore } from "@merrymen/grant-store";
 import { readAgentEnergy } from "@/lib/agent-energy";
 import { ceilingFor } from "@/lib/order-ceiling";
+import { getSettingsStore } from "@merrymen/settings-store";
+import { resolveConfig } from "../../../../../worker/src/settings";
+import { normalizeAgentBrief } from "../../../../../worker/src/agent-brief";
 import { ledgerChatReply } from "@/lib/chat-ledger-facts";
 import { fomoChatTurn } from "@/lib/fomo-chat";
 import { fomoEnabledFor } from "@/lib/fomo-switch";
@@ -102,5 +105,12 @@ export async function POST(req: Request) {
     : null;
   // The Fomo switches are settings change-settings may name only where this deployment runs Fomo.
   const fomoSettings = fomoEnabledFor(hosted);
-  return agentReplyResponse(body, { stream, signal: req.signal }, { energy, factualReply, fomo, recovery, fomoSettings });
+  let agentBrief: string | undefined;
+  try {
+    const saved = hosted ? await getSettingsStore().get(tenant!) : resolveConfig();
+    agentBrief = normalizeAgentBrief(saved?.agentBrief);
+  } catch { /* Missing preferences do not change account or recovery authority. */ }
+  // `hosted` so a failed model call can say whether it ran on the house's key
+  // (agent-chat.ts onHouseAccount): ours to fix, or the owner's.
+  return agentReplyResponse(body, { stream, signal: req.signal }, { energy, factualReply, fomo, recovery, fomoSettings, hosted, agentBrief });
 }

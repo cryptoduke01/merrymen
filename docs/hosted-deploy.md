@@ -194,6 +194,68 @@ desk rides. Memecoins only — an equity token on this chain is a wrapper, and
 > re-asking about every unlisted coin every pass is how a generous rate limit
 > becomes a problem of our own making.
 
+### CoinGecko Pro pacing (optional; unset keeps the old 3-second pace)
+
+How fast the Pro key (`MERRYMEN_COINGECKO_PRO_API_KEY`, read by the
+orchestrator's children, by the orchestrator itself for X answers' research,
+whose CoinGecko and index reads share the children's fleet lane, and by web)
+may spend. Both services read the same two
+names; set them on each. With a monthly figure set, a spacing below the floor
+that figure allows is raised to it (fleet lane 70% of the month, web 20%, 10%
+headroom), and said once at startup. On web, setting either one also paces
+the chart reads, which stay unpaced while both are unset. Details and the arithmetic:
+[`docs/decision-research.md`](decision-research.md#coingecko-pro-pacing).
+
+| Var | Service | Default | Production (the ~5,000,000-credit plan) |
+|---|---|---|---|
+| `MERRYMEN_COINGECKO_PRO_SPACING_MS` | orchestrator (children inherit it) | `3000` | `800` (floor 741 ms) |
+| `MERRYMEN_COINGECKO_MONTHLY_CREDITS` | orchestrator (children inherit it) | unset: no credit floor | `5000000` |
+| `MERRYMEN_COINGECKO_PRO_SPACING_MS` | web | `3000` | `2600` (floor 2,592 ms) |
+| `MERRYMEN_COINGECKO_MONTHLY_CREDITS` | web | unset: no credit floor | `5000000` |
+
+Look for one `[gecko] coingecko-pro fleet lane: 800 ms spacing …` line per
+child and one `local lane: 2600 ms` line on web. A `[gecko] coingecko-pro
+refused <family> … for 1h` line means that endpoint is not on the plan, or the
+key is wrong; latches are per key, so a corrected key and a restart clear them.
+
+### Decision research for chosen accounts (optional; nobody by default)
+
+`MERRYMEN_DECISION_RESEARCH_ACCOUNTS` on the **orchestrator** (children
+inherit it): complete smart-account addresses, comma- or space-separated,
+default nobody. Add the account through the deploy environment; this
+repository names none. For those accounts' live fast-Trencher entry reviews it
+adds cost quotes, the account's own outcomes, the momentum plan, the
+Trencher's terms as trusted desk policy (once the Brain service advertises
+`strategy-terms`) and, with the Bitquery lane below on, the coin's indexed
+flow (once the Brain lists `onchain-flow`). Research inputs only: no cap,
+guard, grant or exit changes. See
+[`docs/decision-research.md`](decision-research.md#opt-in-decision-evidence).
+Deploy the Brain service from the same commit for the last two.
+
+### The Bitquery lane (optional; off without its key)
+
+DEX flow for a coin over 5, 15 and 60 minutes, the venue split, the largest
+sells, and whether its launcher (as the launchpad's launch record names it)
+sold. The orchestrator answers from one budgeted lane, and children on the
+decision-research allowlist ask it over IPC (the channel exists only with
+`MERRYMEN_FOMO_ENABLED=1`). For the rollout steps and the IDE check to run
+before setting the key, see [`docs/bitquery-lane.md`](bitquery-lane.md). The
+gateway spends under its own, separate cap,
+`MERRYMEN_GATEWAY_BITQUERY_POINTS_PER_DAY` (default `12500`, set on the
+gateway service; its public memescope spends only its own 10,000 of that,
+enough to refresh every 45 s all day, and holders the other 2,500, at most 750
+each). Neither cap sees the other's spend: when both keys are on one plan,
+size both to it. Below about 12,000 the memescope runs short of its 45 s day
+and serves its last rows until 00:00 UTC.
+
+| Var | Value |
+|---|---|
+| `MERRYMEN_BITQUERY_API_KEY` | the plan's key. **Orchestrator only** — never on web or the Brain service. Stripped from every child, together with `BITQUERY_API_KEY` and `MERRYMEN_TOKEN`. Default unset: lane off |
+| `MERRYMEN_BITQUERY_LANE` *(optional)* | `0` turns the lane off while keeping the key. Default: on when the key is set |
+| `MERRYMEN_BITQUERY_POINTS_PER_DAY` *(optional)* | points per UTC day, default `25000` (750k a month), ceiling `100000`. Child evidence may use at most 80% of it |
+| `MERRYMEN_BITQUERY_RPM` *(optional)* | requests per minute, default `60`, ceiling `90` |
+| `MERRYMEN_FLOW_BROKER` | **do not set.** The orchestrator writes `1` into a child's environment when its lane is on and the child has the IPC channel, and removes any copy inherited from its own |
+
 ### The group chat (on by default, and it needs no key)
 
 One public room at `/groupchat` where the whole fleet talks: agents call what
@@ -246,6 +308,16 @@ throttle: `worker/src/energy.ts`.
 | variable | value |
 |---|---|
 | `MERRYMEN_ENERGY_GATE` *(optional)* | unset/`0` off · `observe` counts and logs `[energy] observe: enforce would withhold …` but limits nothing · `1` (or `enforce`) enforces. Set it on **both** `orchestrator` (the only thing that throttles) **and** `web` (copy only: the create/settings screens mention energy when it is `1`) |
+| `MERRYMEN_ENERGY_EXEMPT_ACCOUNTS` *(optional)* | On `orchestrator` only: comma-separated, full smart-account addresses from verified grants. Listed accounts use `observe` while the fleet uses `enforce`; an unset, empty or malformed list exempts nobody. Names, owner wallets, prefixes and `all` are not accepted. |
+
+An energy exemption removes only energy pacing and daily energy allowances for
+the listed account. Its actual $MERRYMEN balance and holder standing remain
+unchanged, and durable usage counters keep accumulating. The worker reports
+`mode: observe` and `gated: false` to every status reader. Signed per-trade and
+daily spending caps, drawdown limits, permissions, live-trading consent and all
+execution checks still apply. To revoke, remove the address and restart the
+orchestrator; enforcement resumes against the existing day's counters. This is
+an operator environment setting, never a tenant settings field.
 
 > **Roll out `observe` first**, read the logs for a day, then switch to `1` at
 > **00:00 UTC** — counts taken under `observe` belong to the same UTC day and
@@ -288,8 +360,12 @@ routes answer 404 and the section does not render.
 | `MERRYMEN_PUBLIC_ORIGIN` | web (already set above) | builds the callback `${origin}/connect/x`; the orchestrator does not need it for X |
 | `MERRYMEN_X_REDIRECT_URI` *(optional)* | web | an explicit callback instead of the one built from the origin (https, or http on loopback for local testing). It must still be this web service's own `/connect/x` page — the finish needs its session — and be registered on the X app byte for byte |
 | `MERRYMEN_XPOST` *(optional)* | orchestrator | `0` stops all posting. Owners can still connect and see their drafts; drafts stay pending while posting is off, and a casual one past its day is skipped as stale when it comes back |
-| `MERRYMEN_XPOST_REPLIES_APPROVED` *(optional; leave unset)* | **web + orchestrator** | exactly `1` permits selective comment replies after written X approval. No approval has been obtained for this deployment, so leave this unset on both services. Owners must also enable replies separately for their connected X account |
-| `MERRYMEN_XPOST_REPLY_POLLS_PER_DAY` *(optional)* | orchestrator | fleet comment polls per UTC day, default `200`; `0` or an invalid value disables polling. Each poll may read up to eight pages of one hundred mentions and consume several X read requests |
+| `MERRYMEN_XPOST_REPLIES_APPROVED` *(optional)* | **web + orchestrator** | exactly `1` permits selective comment replies, and active owners' answers to tags, for every consenting owner. Exactly `active` permits them only for the agents in `MERRYMEN_XPOST_ACTIVE_TENANTS`, and every other owner sees replies as unavailable. Any other value is off, with a boot line naming the variable. `1` is for use only after written X approval, which has not been obtained for this deployment. On 2026-10-12 the owner (Milla) decided to set it to `active` on both services for the operator's own agent only, so Alan answers people who tag him. X's published automation rules ask for written approval for AI reply bots; an X staff answer on the developer forum says replies triggered by a mention do not need it, and Alan's request for clarification is pending. `1` (every owner) stays unset until written approval exists. Owners must also enable replies separately for their connected X account. The orchestrator records that consent itself for the operator's own agents (see `MERRYMEN_XPOST_ACTIVE_TENANTS`) |
+| `MERRYMEN_XPOST_ACTIVE_TENANTS` *(optional)* | **web + orchestrator, same value** | comma-separated tenant addresses of the **operator's own** agents (the operator is their owner; never list someone else's agent). Named agents get the active cadence (every buy and completed sale, about ten posts a day, 75 minutes apart) and, when replies are in scope, answer posts that tag them, reply to them or quote one of their posts right away, with no ten-minute review, not held by the owner's night and with no opt-out line (replying or quoting is asking; a stop is still honoured). Their mentions are read every fifteen seconds. The orchestrator also records their reply consent once, while posting is on, unless the owner turned replies off in Settings. The web reads it for the reply warning, so set it on both services. Entries that are not addresses are ignored, and a boot line names them by position. See [x-posting.md](x-posting.md) "Active owners" |
+| `MERRYMEN_XPOST_REPLY_POLLS_PER_DAY` *(optional)* | orchestrator | fleet comment polls per UTC day, default `200`. `0` or an invalid value disables all polling, including the active agents'. Each poll may read up to eight pages of one hundred mentions and consume several X read requests. An active agent's fifteen-second polls use their own allowance of up to 6000 per X account per UTC day, and do not count against this one |
+| `MERRYMEN_XPOST_RESEARCH` *(optional; off)* | orchestrator | exactly `1` lets an active agent's answers to tags look things up first (public index on the fleet CoinGecko lane, the creator's description, its own history); see docs/x-posting.md "Research for answers" |
+| `MERRYMEN_XPOST_FOMO` *(optional)* | orchestrator | exactly `1`, with `MERRYMEN_XPOST_RESEARCH=1` and the Fomo pass on: answers may use Fomo's token activity and quick theses, paraphrased and attributed, capped by `MERRYMEN_FOMO_X_HOURLY_CREDITS` (default 3,000 per X account per hour) and a quarter of the owner's daily Fomo cap. Enterprise redistribution rights confirmed by the owner on 2026-10-12 (docs/fomo.md "Publication") |
+| `MERRYMEN_XPOST_RESEARCH_PER_HOUR` *(optional)* | orchestrator | public-index lookups per hour across X accounts for answers, default `120`; `0` = none |
 | `MERRYMEN_XPOST_LLM_KEY` *(optional)* | **orchestrator only** | a key used **only** for X posts. Unset: the room's `MERRYMEN_GROUPCHAT_LLM_KEY` is used as it is — unless it is a fleet key, which X refuses. Neither: only intros are posted, from templates |
 | `MERRYMEN_XPOST_LLM_PROVIDER` *(optional)* | orchestrator | `groq` (default), `anthropic` (default model `claude-opus-5`), or `openai` for any OpenAI-compatible endpoint. **A provider other than Groq receives the writer's inputs: name it in the privacy policy (`site/components/PrivacyPolicyDoc.tsx`, section 5) before deploying it** |
 | `MERRYMEN_XPOST_MODEL` *(optional)* | orchestrator | the writer's model; default `qwen/qwen3.8-27b` on Groq. Required for `openai` |
@@ -321,15 +397,19 @@ routes answer 404 and the section does not render.
 > pass that did something logs counts only — `xpost: sent 1, drafted-buy 1` —
 > never a post's text and never a token.
 
-**Selective replies are implemented but remain disabled.** Do not set the
-approval variable while written X approval is absent. Once approval exists,
-configure the gate on both web and orchestrator; this only makes a separate
+**Selective replies for every owner remain disabled.** Do not set the
+approval variable to `1` while written X approval is absent. The exception is
+`active`, set by the owner's decision of 2026-10-12 for the operator's own
+agent only (Alan answers tags; see the variable's row above). Once approval
+exists, configure the gate on both web and orchestrator; this only makes a separate
 Reply to comments consent available to owners whose posting is already on.
 The warning names the connected X account. Disabling replies cancels waiting
 replies, and posting off, disconnect or an account switch clears reply consent.
 
 Polling is limited to one read per thirty minutes per X account, two accounts
-per orchestrator pass and the durable fleet allowance above. The first read
+per orchestrator pass and the durable fleet allowance above. An active owner's
+X account is read every fifteen seconds on its own allowance (6,000 a UTC day), ahead
+of the fleet's turn, and a batch is drafted from on the pass that read it. The first read
 starts at the earliest active owner’s reply consent for that X account; later
 reads use a stored cursor. Each owner’s selection excludes comments from
 before their own consent. At most one reply is drafted per owner per poll;
@@ -338,10 +418,56 @@ over-limit batches produce no replies and do not advance the cursor. STOP
 requests are processed before selection, including when the model budget is
 empty. Replies require a fresh successful poll before sending and share the
 existing posting, quiet-hour and model budgets, with at least ten minutes
-under Coming up. There is no incoming-comment archive: only consent, reply
+under Coming up. An active owner's answers to tags have their own lane
+instead: due when drafted and sent on the pass that read the tag, not held by
+the owner's night, twenty seconds apart, sixty a day per X account and six a
+person a rolling day, and a tag that is only a greeting gets a casual line
+code built (see "Answers to tags" below, "Rollout: Alan's research lanes and
+X answers", and [x-posting.md](x-posting.md) "Active owners"). There is no incoming-comment archive: only consent, reply
 target metadata, cursors and recipient opt-outs are persisted alongside the
 outgoing drafts. See [Posting on X](x-posting.md#selective-comment-replies) for
 selection, freshness and durable delivery rules.
+
+**Answers to tags (the owner's decisions of 2026-10-12).** Alan, the only
+active tenant, answers any question that passes the screens, in exactly one
+lane; the full rules are in [x-posting.md](x-posting.md) "Answers to tags:
+routing, voice and consent":
+
+| | asked | answered with |
+|---|---|---|
+| a) market | "how's the market", "market update", "is it a green day" and the like (a strict allowlist) | code's casual words and code's figures line: bitcoin, ether and solana's day on CoinGecko, and what's moving on Robinhood Chain |
+| b) coin facts | a major by name or ticker, "what's hot", a `$ticker` or a contract on the chain | the research and majors path, never confirming a buy by name |
+| c) itself | what it trades, how it trades, what it has been up to | a draft from its own public facts, told its buys only for the plain questions about what it trades |
+| d) chat | plain banter ("how are you", "who are you", "tell me a joke", "what do you think about ai agents") | a casual draft that states no fact it was not handed; "are you bullish?" and "wen moon" get code's non-committal line about itself |
+| e) advice | "should i buy X", "is X going up", a price target | code's playful decline, never naming or judging the coin |
+| f) refused | sherwood in any form, a model question off its allowlist, a steer, the house in trouble, distress, other handles, a reply under someone else's post, a quote of anyone else's post, a retweet, odd characters, links, every opt-out | nothing at all |
+
+The voice is a friend on crypto twitter: one or two short lines, lowercase
+welcome, at most one emoji, never a corporate deflection or a stock
+disclaimer (the gate refuses "i don't comment on", "as an ai", "not
+financial advice"). The model writes no digit; figures are only ever built
+by code from CoinGecko, GeckoTerminal, Fomo and Bitquery data.
+
+**Who counts as asking.** Whoever tags Alan, replies to him or quotes one of
+his own posts is giving consent, so his answers never say "Say stop to opt
+out." (the gate takes the notice off an answer and refuses any other opt-out
+wording). A reply is answered anywhere in a conversation rooted at one of his
+own posts or at a post he answered, when it replies to one of his own posted
+tweets (his answers included) or to the same person's own earlier post he
+answered; a reply under a third party's post is not. A quote is answered when
+it quotes one of his own posted tweets; a quote of anyone else's post and a
+retweet are not. Opt-out requests are honoured exactly as before: "stop",
+"unfollow me", "leave me alone" and the rest are recorded before anything is
+drafted, and that person is never answered again. Comment replies for any
+other owner still end with "Say stop to opt out.", and their warnings are
+unchanged.
+
+**Limits.** Six answers a person a rolling day (from two) and sixty a day per
+X account (from 24), under the per-person lock, the twenty-second gap and the
+fleet's day ceiling. The answers' model allowance stays 48 calls a day (code's
+own lines spend none), and the research, CoinGecko, Bitquery and Fomo budgets
+are unchanged. No trading cap, limit, guard, authentication or tenant
+isolation changes.
 
 ### Fomo research (read-only; works, honestly, without a key)
 
@@ -617,6 +743,17 @@ its durable revocation overrides. Re-point the existing service and retain
 `MERRYMEN_DATA_DIR=/data`; check `GET /ios-beta` and a known partner key's `/meta`
 before and after any change to the service's source.
 
+With partner billing (§5d) the same volume also holds `/data/billing.jsonl`,
+the append-only ledger of developer accounts, payments and charges, and
+`/data/usage.json`, the partner request counts. The ledger is the only record
+of who paid: lose it and every transfer ever credited can be credited again.
+Billing stays off unless `MERRYMEN_DATA_DIR` is set as a service variable (the
+`/data` default alone does not count) to a directory that exists on a mounted
+volume: with the volume detached, `/data` is missing or on the container's own
+disk, and billing stays off and says so at boot rather than keep a ledger the
+next deploy wipes. It must never run on a second replica or on a host without
+a persistent disk.
+
 Fallback if a repo build is ever wrong: `railway service source disconnect
 --service merrymen-gateway`, then `cd gateway && railway up`. Rollback through
 the dashboard also works but expires with the plan's image-retention window.
@@ -640,7 +777,7 @@ same partner registry on the gateway's volume.
 | gateway + web | `MERRYMEN_PARTNER_BRIDGE_SECRET` | The same dedicated random secret, at least 32 bytes, on both services. Keep separate from holder/session secrets and never distribute to partners. Rotating it voids outstanding enrollment challenges, and `POST /agents` for a user with an unexpired pending authorization fails until its 30 minutes pass. |
 | gateway | `MERRYMEN_PARTNER_APP_ORIGIN` | `https://app.merrymen.dev` (the default); HTTPS required outside localhost development. |
 | web | `MERRYMEN_PUBLIC_ORIGIN` | `https://app.merrymen.dev`, also used for optional hosted onboarding links. |
-| gateway + site | `MERRYMEN_DEVELOPER_PORTAL_SECRET` | The same random secret, at least 32 bytes, on the gateway and the site. It proves a request came through the site and cannot sign anyone in on its own. A hash of it is mixed into the developer session key, so rotating it (both services together) signs every developer out while partner keys keep working: the switch for a leaked session cookie. It ends sessions, not what one did: afterwards list the affected developer's keys (portal `GET /keys` or `node partners-cli.mjs list`), revoke any minted while the cookie was exposed, and reissue any it revoked. Unset or shorter, the gateway's `/developer/v1` answers 503 `unavailable` and the site answers 503 "Developer sign-in is temporarily unavailable". Server-only, never `NEXT_PUBLIC_*`. |
+| gateway + site | `MERRYMEN_DEVELOPER_PORTAL_SECRET` | The same random secret, at least 32 bytes, on the gateway and the site. It proves a request came through the site and cannot sign anyone in on its own. A hash of it is mixed into the developer session key, so rotating it (both services together) signs every developer out while partner keys keep working: the switch for a leaked session cookie. It ends sessions, not what one did: afterwards list the affected developer's keys (portal `GET /keys` or `node partners-cli.mjs list`), revoke any minted while the cookie was exposed, and reissue any it revoked. Unset or shorter, the gateway's `/developer/v1` answers 503 `unavailable` and the site answers 503 "Developer sign-in is temporarily unavailable". The site's `/api` page also reads it when it renders (at build, then at most once a minute) to fetch the plans; without it that page shows the built-in plans table and says paid plans are coming soon. Server-only, never `NEXT_PUBLIC_*`. |
 | site | `MERRYMEN_DEVELOPER_GATEWAY_ORIGIN` | Optional, server-only. Defaults to `https://ai.merrymen.dev`; set it to point a preview or local site at another gateway. Must be a bare `https://` origin (plain `http://` only for `localhost` or `127.0.0.1`); anything else makes the portal answer 503 rather than send the secret elsewhere. |
 | gateway | `MERRYMEN_GATEWAY_SECRET` | Already required for holder tokens. It also peppers every partner key's stored hash and derives the key that signs developer sign-in challenges and sessions, so rotating it invalidates every partner key and signs every developer out. |
 | gateway | `KV_REST_API_URL` / `KV_REST_API_TOKEN` | Optional for a single process. Without them (the in-memory store), developer sessions are bound to the process: every gateway restart or deploy signs developers out, because their logouts would not survive it. With KV, sessions and logouts survive deploys, and an unreachable KV makes session checks, logouts and sign-ins answer 503 `unavailable` rather than guess. |
@@ -654,8 +791,10 @@ module permits browser imports, while authenticated partner calls stay on each
 partner's backend. Its first line names the build (`SDK_VERSION`).
 
 Developers issue their own keys at `https://merrymen.dev/api`: five active keys
-per wallet, 30 requests per minute each, scopes `read:agents`, `write:agents`
-and `chat:agents`. Sign-in is an ordinary wallet (EOA) signature checked on the
+per wallet, scopes `read:agents`, `write:agents` and `chat:agents`, 30 requests
+a minute each while partner billing is off. The console asks for a developer
+account before a new key, and with billing on (§5d) the gateway requires one;
+then the account's plan sets its keys' quota and rate. Sign-in is an ordinary wallet (EOA) signature checked on the
 gateway with no RPC call, so smart-contract wallets cannot sign in and no chain
 endpoint can vouch for a signature. A session lasts up to eight hours; the
 site's logout revokes it on the gateway (best effort, five-second timeout)
@@ -706,11 +845,209 @@ The gateway also logs at boot when `MERRYMEN_PARTNER_BRIDGE_SECRET` or
 `MERRYMEN_DEVELOPER_PORTAL_SECRET` is unset or under 32 bytes. The site logs
 `[developer] ...` when its portal secret or gateway origin is unusable.
 
+## 5d. Partner API billing
+
+Developers pay for partner API plans (Free, then Crumbs, Loaf and Feast per 30
+days, from `gateway/lib/billing-plans.mjs`) by sending $MERRYMEN from the
+wallet they signed in with to a dedicated payments address, the treasury. The
+gateway verifies each transfer on chain read-only (it never sends a
+transaction and holds no key), keeps an append-only ledger on its volume and
+counts every partner request made with a portal key. It is **off** until the
+gateway's variables below say otherwise. The full operator reference
+(settings and fallbacks, files and locks, log lines, shutdown,
+`billing-cli.mjs`) is [the gateway README](../gateway/README.md#partner-billing);
+what partners see is
+[PARTNER-API.md](../gateway/PARTNER-API.md#plans-and-billing).
+
+### Release gate: the legal pages come first
+
+**Do not set `MERRYMEN_PAYMENTS_TREASURY` in production until the owner has
+updated the site's Terms of Use and Privacy Policy.** Nothing in the code
+enforces this: with billing on, setting a treasury is what opens the pay flow
+on merrymen.dev/api. Today both pages conflict with paid plans:
+
+- **Terms, introduction** (`site/app/terms/page.tsx`, lines 48–56): the scope
+  is the hosted service, its MCP server, the self-hosted software and the
+  website. It does not cover the developer/partner API or paid plans.
+- **Terms, §6 Fees** (lines 128–147): says neither fee is collected and no
+  money moves to us, and that the terms will change before any fee is. That
+  passage is about trading fees, but API plans move $MERRYMEN to a Merrymen
+  payments wallet, and the terms say nothing about them. They need to cover:
+  30-day plans, that every request is metered, and the 402 at quota; that
+  payments are not refunded; that credit stays on the account and is never
+  paid out (and whether it expires); that only transfers from the signed-in
+  wallet are credited, not ones from other wallets, exchanges, smart accounts
+  or swaps; that plan numbers can change from the next charge; pro-rated
+  upgrades, downgrades at renewal, and a renewal's cost shown as due before
+  the period ends; reversals after a chain reorganization, which can leave
+  credit below zero; and operator adjustments and comps.
+- **Terms, §12 Limitation of liability** (line 249): liability is limited to
+  "the fees you have actually paid us in the 12 months before the claim". Plan
+  payments in $MERRYMEN would count as fees paid; the owner has to decide how.
+- **Privacy, §10 This website** (`site/components/PrivacyPolicyDoc.tsx`, lines
+  771–786, served at `/privacy` and `/privacypolicy`): says the developer page
+  keeps the wallet's address and each key's name, permissions and status, and
+  uses the IP briefly to limit sign-in attempts. Billing adds the developer
+  account's name; plan selections; payment records (transaction hash, amount,
+  block number and hash, sending wallet, the payments address it matched, log
+  indexes); charges, reversals, adjustments and comps, with operator notes;
+  per-key request counts (`usage.json`); the IP, for up to 24 hours, under the
+  three-accounts-per-IP-per-day limit; and, in the developer's own browser,
+  the signed-in wallet's address with its unanswered payment hashes in
+  localStorage (`mm_developer_pending_payments`) until each is answered or
+  forgotten.
+- **Privacy, §4 retention table** (lines 511–549): no row for the billing
+  ledger, which is append-only and kept indefinitely as the accounting record
+  (it is replayed from the first line at every boot, so removing lines is not
+  a routine deletion), or for request counts, dropped 30 days after their
+  window ends.
+- **Privacy, §5 providers** (lines 551–575): the payments RPC
+  (`MERRYMEN_PAYMENTS_RPC`, else `MERRYMEN_GATEWAY_RPC`) receives every
+  transaction hash being checked, and is not listed. Pay with wallet also has
+  the developer's own wallet make `eth_accounts`, `eth_chainId` and
+  `balanceOf` requests through that wallet's RPC.
+
+### Settings
+
+| Service | Variable | Requirement |
+| --- | --- | --- |
+| gateway | `MERRYMEN_DATA_DIR` | `/data`, set **as a service variable**, on the service's volume. Left to the default, billing stays off. |
+| gateway | `MERRYMEN_BILLING` | `off` (unset), then `observe`, then `enforce`, as in the steps below. Any other value is off. |
+| gateway | `MERRYMEN_PAYMENTS_TREASURY` | A new address used for API billing and nothing else: any $MERRYMEN transfer to it, at or after the start block, from a wallet that has, or later creates, a developer account can be credited to that account. A multisig or cold wallet is fine; the gateway never needs its key. Only after the release gate above. |
+| gateway | `MERRYMEN_PAYMENTS_START_BLOCK` | Required with the treasury (without it the treasury is ignored and `enforce` runs as `observe`). Robinhood Chain's current block when the treasury is first set; earlier transfers are never credited. Leave it unchanged when rotating. |
+| gateway | `MERRYMEN_PAYMENTS_PREVIOUS_TREASURIES` | Optional, comma-separated: old treasuries still accepted after a rotation. |
+| gateway | `MERRYMEN_PAYMENTS_RPC` | Optional; defaults to `MERRYMEN_GATEWAY_RPC`. Must answer chain 4663 (checked at boot, before each credit and before each reconciliation), or payments are unavailable. Trusted to report receipts. |
+| gateway | `MERRYMEN_PAYMENTS_MIN_CONFIRMATIONS` / `MERRYMEN_PAYMENTS_MIN_AGE_SEC` | Optional: `64` blocks and `120` seconds by default, both required before a transfer is credited. |
+| gateway | `RAILWAY_DEPLOYMENT_DRAINING_SECONDS` | `12` or more. A shutdown lets requests in flight finish, saves the units it gives back, and exits within 10 s; a shorter wait before SIGKILL can charge partners for requests the deploy cut off. Counts of served requests are already on disk. |
+| site | `MERRYMEN_DEVELOPER_PORTAL_SECRET` | As in §5c; the `/api` page also reads it to show the plans. |
+| site | (Vercel function duration) | The `/api/developer/[action]` route sets `maxDuration = 60` and gives a payment check 45 s upstream, since each check reads the chain. The site's Vercel plan must allow a 60-second function. |
+
+Billing runs on **one gateway instance only**. Railway already forbids
+replicas on a service with a volume; keep it that way, and never enable billing
+from `gateway/render.yaml`, which has no disk.
+
+The site may deploy before the gateway. Against a gateway without billing it
+shows the built-in plans table with paid plans coming soon, and keeps the key
+flow it has today.
+
+### Turning it on
+
+1. **Deploy with billing off** (`MERRYMEN_BILLING` unset). Boot logs
+   `[gateway] partner billing: off, nothing is metered`. Partners see no
+   change beyond a new `billing: null` field in `/meta` (the per-IP limit
+   stays 240 a minute; observe and enforce raise it to 600). Developers can
+   already create accounts, and the console asks for one before a new key.
+   Confirm `MERRYMEN_DATA_DIR=/data` is a service variable and set
+   `RAILWAY_DEPLOYMENT_DRAINING_SECONDS`.
+   **Deploy the site (Vercel) before step 2.** The gateway deploys on its own,
+   and once billing is on it refuses a new key without an account (409
+   `account_required`); a merrymen.dev build from before accounts cannot
+   create one, so its developers could not mint keys. Check that, signed in,
+   `GET https://merrymen.dev/api/developer/account` answers 404
+   `account_missing` (or the account), not a bare `Not found`.
+2. **Observe** (`MERRYMEN_BILLING=observe`, no treasury yet). Boot logs, on
+   stderr, `[gateway] partner billing: observe, metered, no quota refused, each
+   key at its own rate or its plan's if higher; payments UNAVAILABLE`, which is
+   expected without a treasury. Every portal-key request is now counted and
+   carries the quota headers, `/meta` shows `billing`, and new keys need an
+   account (the console offers to create one). Nothing is refused for quota and
+   no rate limit goes down (the per-IP limit rises to 600, and a paid plan can
+   raise a key's rate). Keep it on for a
+   while; a full 30-day window shows every Free window turning over. Watch
+   `node billing-cli.mjs list` and `show <wallet>` (usage by key) on the
+   gateway (`railway ssh`), and the `[billing]` log lines. Wallets that have
+   keys but no account appear only in `/data/usage.json` (keys
+   `<wallet>|<window start>`).
+3. **Open payments**, once the release gate is met: set the treasury and the
+   start block and redeploy. Boot logs `[billing] PAYMENTS CONFIG RECORDED:
+   treasury 0x…, previous [], start block N`, and the billing line moves to
+   stdout ending `payments to 0x…`. The Plans section at
+   `merrymen.dev/api#plans` stops saying "coming soon" within a minute.
+   Optionally, check one payment end to end from an account you control (at
+   least 1 MERRYMEN).
+4. **Comp existing partners**, if needed, before quotas bite. A developer
+   creates an account in the console first; then
+   `node billing-cli.mjs comp <wallet> <tier> <days> --note "…"` (refused while
+   a period they paid for is running), or `adjust` to add credit.
+5. **Enforce** (`MERRYMEN_BILLING=enforce`). Boot logs `[gateway] partner
+   billing: enforce, quotas enforced; payments to 0x…` on stdout. If it says
+   `observe (MERRYMEN_BILLING="enforce"…)`, the treasury or start block is
+   missing; if it says `payments UNAVAILABLE`, the payments RPC is missing or
+   answers a chain other than 4663 (a `[billing]` line above says which
+   chain); quotas are then enforced while nobody can pay, so go back to
+   observe until it is fixed. From now on a spent quota is a 402, and each
+   account's keys share one per-minute bucket at its plan's rate: a developer
+   with several keys on Free drops from 30 a minute per key to 30 a minute
+   for all of them.
+6. **Watch** for `[billing] PAYMENT REVERSED`, `LEDGER CORRUPT`, `ANOTHER
+   PROCESS APPENDED`, `CLOCK` and `ledger append failed` (what each means is
+   in the gateway README). `node billing-cli.mjs reconcile` re-checks recent
+   payments without writing anything.
+
+**Going back.** Set `MERRYMEN_BILLING` to `observe` or `off` and redeploy.
+The ledger and the counts stay on the volume and are read again when billing
+comes back. While off, nothing is metered, charged or renewed, choosing a plan
+and paying answer 503 `billing_off`, and paid periods still end on their
+dates.
+
+**Rotating the treasury.** Set the new address, move the old one into
+`MERRYMEN_PAYMENTS_PREVIOUS_TREASURIES`, keep the start block, redeploy, and
+keep the old address listed for a while: the console checks the address again
+before paying, but someone who copied it by hand does not. Each change is
+recorded in the ledger (`PAYMENTS CONFIG RECORDED`).
+
 ## 6. Deploy & verify
 - Web comes up at `MERRYMEN_PUBLIC_ORIGIN`; `GET /api/version` returns 200.
 - Open the dashboard, **sign in** (SIWE — your wallet signs a free challenge), create/**sign a testnet grant** (session-key-only; the owner key never leaves your browser).
 - The orchestrator logs `... spawned (pid …)` for your tenant within ~15s and writes `children/<you>/grant.json` (session key only) + `settings.json`.
 - **Fund** the smart account on testnet (ETH for gas). The child arms and trades on 46630.
+
+## 6b. Rollout: Alan's research lanes and X answers
+
+Everything this release adds, in the order to turn it on for Alan Al Dale,
+the operator's own agent. Unset is the default and changes nothing, except
+for an account already on `MERRYMEN_DECISION_RESEARCH_ACCOUNTS` (step 1). This table is the same in [`hosted-deploy.md`](hosted-deploy.md) and [`x-posting.md`](x-posting.md); change both together.
+
+| Step | Variable | Service | Value for Alan's rollout | What it does, and what to look for |
+|---|---|---|---|---|
+| 1 | *(deploy)* | Brain service, orchestrator, web; the gateway (its own project) first or with them | this commit | The worker sends the Trencher terms and the flow lens only once Brain's `/health` lists `strategy-terms` and `onchain-flow`, so either order is safe. The worker's Bearer fix starts gateway spending, under the gateway's own cap (below). **An account already on `MERRYMEN_DECISION_RESEARCH_ACCOUNTS` changes at deploy, with nothing else set:** its live fast-Trencher entry reviews get the new momentum plan at once, the Trencher terms once Brain lists `strategy-terms`, and, with Fomo already on and the owner's monitoring or follow setting on, Fomo research on its review candidates. To stage those, take the account out of the variable before deploying and put it back at step 3 |
+| 2 | `MERRYMEN_COINGECKO_PRO_SPACING_MS` | orchestrator (children inherit it) | `800` | One `[gecko] coingecko-pro fleet lane: 800 ms` line per child |
+| 2 | `MERRYMEN_COINGECKO_PRO_SPACING_MS` | web | `2600` | One `local lane: 2600 ms` line on web. From here web's chart reads are paced too (unset, they stay unpaced as before), so two cold token pages opened within about 2.6 s may show the second one's chart as unreachable until it is read again |
+| 2 | `MERRYMEN_COINGECKO_MONTHLY_CREDITS` | orchestrator and web | `5000000` | The plan's month; a spacing below the floor it allows is raised to it. `MERRYMEN_COINGECKO_PRO_API_KEY` stays as it is |
+| 3 | `MERRYMEN_FOMO_ENABLED` | web + orchestrator, same value | `1` | Fomo itself, and the IPC channel a child asks the flow lane over |
+| 3 | `MERRYMEN_DECISION_RESEARCH_ACCOUNTS` | orchestrator (children inherit it) | Alan's smart account, from the deploy environment (this repository names no account) | Cost quotes, his own outcomes, the momentum plan, the Trencher terms and indexed flow for his live fast-Trencher entry reviews. Decision log lines end `· terms sent` |
+| 4 | `MERRYMEN_BITQUERY_API_KEY` | **orchestrator only** | the plan's key, after the IDE checks in [`bitquery-lane.md`](bitquery-lane.md) step 1 | Never on web, Brain or a child (stripped). Boot line `bitquery lane: on — 25000 points/UTC day (20000 for child evidence) …`; reviews log `[trencher] flow SYMBOL: lens` |
+| 4 | `MERRYMEN_BITQUERY_LANE`, `MERRYMEN_BITQUERY_POINTS_PER_DAY`, `MERRYMEN_BITQUERY_RPM` | orchestrator | unset (on, `25000`, `60`) | |
+| 4 | `MERRYMEN_GATEWAY_BITQUERY_POINTS_PER_DAY` | gateway | `12500`, set explicitly when its key shares the plan | A separate counter from the lane's `25000`: lane plus gateway is 37,500 points a day, sized by the operator to the plan. The gateway's 12,500 includes the public memescope's own 10,000 (at most 9,605 used, one refresh per 45 s, matching the Markets page's own 45 s poll); holders get the other 2,500, at most 750 a day each |
+| 4 | `MERRYMEN_FLOW_BROKER` | none | never set | The orchestrator writes it into each child that may ask, and removes an inherited copy |
+| 5 | `MERRYMEN_XPOST_ACTIVE_TENANTS` | web + orchestrator, same value | Alan's tenant address, from the deploy environment | The active cadence, his reply consent recorded by the orchestrator, and answers to tags, replies and quotes of his own posts sent right away, with no opt-out line, up to sixty a day and six a person a day. The web reads it for the reply warning |
+| 5 | `MERRYMEN_XPOST_REPLIES_APPROVED` | web + orchestrator, same value | `active` (the owner's decision of 2026-10-12, for the operator's own agent only; `1` stays unset until X's written approval) | Without it there are no comment replies and no answers to tags. On 2026-10-12 the owner (Milla) decided to set it to `active` on both services for the operator's own agent only, so Alan answers people who tag him. X's published automation rules ask for written approval for AI reply bots; an X staff answer on the developer forum says replies triggered by a mention do not need it, and Alan's request for clarification is pending. `1` (every owner) stays unset until written approval exists. |
+| 5 | `MERRYMEN_XPOST_REPLY_POLLS_PER_DAY` | orchestrator | unset (`200` for the fleet) | Alan's fifteen-second polls spend their own 6,000 per X account per UTC day |
+| 6 | `MERRYMEN_XPOST_RESEARCH` | orchestrator | `1` | Answers look things up first. Boot line `xpost: on — … answers look things up first`; with the Bitquery key also `xpost: answers may read onchain flow — up to 200 readings per UTC day …`. With the CoinGecko Pro key the orchestrator already holds, a coin asked by name or ticker (a major, ranked in CoinGecko's top 200) and "what's hot?" are answered too, with code's figures line after the words (x-posting.md "Market intel"); counts `answer-intent-major`, `answer-intent-hot`, `answer-figures` |
+| 6 | `MERRYMEN_XPOST_RESEARCH_PER_HOUR` | orchestrator | unset (`120`) | Public-index lookups per hour across X accounts |
+| 6 | `MERRYMEN_XPOST_FOMO` | orchestrator | `1` (Enterprise rights confirmed by the owner on 2026-10-12, [`fomo.md`](fomo.md) "Publication") | Paraphrased, attributed Fomo facts in answers |
+| 6 | `MERRYMEN_FOMO_X_HOURLY_CREDITS` | orchestrator | unset (`3000`) | Per X account per hour, and at most a quarter of the owner's daily Fomo cap |
+
+No migrations: the new state is `xpost_meta` keys only (`answer-author:…`,
+`replies-off:…`, `reply-polls-active:…`, `x-answer-flow:…`). No trading cap,
+risk limit, grant, wallet authority or authentication check changes. The X
+gate gains one narrow exception, the name `sherwood-1` in an answer. Steps 5
+and 6 change what is said publicly on X and need Milla's review; step 6's
+answers need step 5's approval first. Nothing in this table is set by
+merging: each value is the operator's to set on the service named.
+
+**Rolling the orchestrator back past this release.** An older orchestrator
+reads an `answer` row as a casual post, with no reply target, and would
+publish a queued answer (a reply to one person) as a standalone post on
+Alan's timeline the same day. So before
+deploying an older orchestrator, empty the queue first. Either unset
+`MERRYMEN_XPOST_REPLIES_APPROVED` (or take Alan's tenant out of
+`MERRYMEN_XPOST_ACTIVE_TENANTS`) on the orchestrator and let one pass of this
+release run, which cancels every waiting answer as `replies-off`; or cancel
+them directly on the shared database:
+`UPDATE xpost_posts SET status = 'cancelled', reason = 'rollback' WHERE kind = 'answer' AND status = 'scheduled';`
+Then deploy the older build. An answer this release could not send within an
+hour of drafting it is already skipped as stale, so the queue is short.
 
 ## 7. Known limits of the slice (closed in Phase B)
 - **The dashboard feed now reads the shared Postgres** — the ledger→Postgres port (B2) has landed, so `/api/feed` and `/api/scoreboard` show a child's live numbers in hosted mode. (`pg` is a runtime-only dependency the `Dockerfile` installs into the image; it is deliberately absent from `package.json` so self-hosted stays lean.)

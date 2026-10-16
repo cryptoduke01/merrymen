@@ -24,6 +24,7 @@ import {
   heldTokensFrom,
   ingestStoreOver,
   makeFomoPass,
+  MAX_CHILD_SIGNALS,
   mergeHeldTokens,
   normalizeAlertFrame,
   publicationStoreOver,
@@ -45,6 +46,7 @@ import { buildDossier } from "./fomo/dossier";
 import { tokenFromKey } from "./fomo/identity";
 import { isUnrecoverableGap, type IngestConfig } from "./fomo/ingest";
 import { createFomoClient, type FomoClient } from "./fomo/provider";
+import { REVIEW_CANDIDATES, type ReviewCandidate } from "./fomo/review-candidates";
 import { draftPublication, type PublicationDraft } from "./fomo/publish";
 import * as store from "./fomo/store";
 import { RESEARCH_PRIORITY } from "./fomo/store";
@@ -320,6 +322,8 @@ async function rig(o: {
   ingestConfig?: Partial<IngestConfig>;
   calls?: string[];
   budget?: FomoBudgetPort;
+  reviewCandidates?: (tenant: string, now: number) => readonly ReviewCandidate[];
+  reviewResearchFor?: (agentId: string) => boolean;
 } = {}): Promise<Rig> {
   const db = o.db ?? (await freshDb());
   const time = o.time ?? new ManualTime();
@@ -355,6 +359,8 @@ async function rig(o: {
     heldTokens: () => held,
     holdingsKnown: o.holdingsKnown ?? (() => true),
     ...(o.stillOurs ? { stillOurs: o.stillOurs } : {}),
+    ...(o.reviewCandidates ? { reviewCandidates: o.reviewCandidates } : {}),
+    ...(o.reviewResearchFor ? { reviewResearchFor: o.reviewResearchFor } : {}),
     childHome: (t) => `/homes/${t}`,
     writeChildFile: (home, file) => {
       // The child's own reader must accept every file the pass writes.
@@ -676,6 +682,258 @@ describe("child files", () => {
     await r.run([T1, T2], T0 + 61_000);
     assert.equal(r.files.get(`/homes/${T2}`)?.length, 1, "and written once it is ours again");
     r.pass.stop();
+  });
+});
+
+describe("review candidates", () => {
+  const cand = (tokenKey: string, admittedAt = T0 - MIN): ReviewCandidate => ({ tokenKey, admittedAt });
+
+  /** A shared dossier one feed trader and the source's statistics stand behind, so its lens renders. */
+  async function seedTradedDossier(db: Db, key: string, at: number) {
+    const w = (uniqueBuyers: number, uniqueSellers: number) => ({
+      buys: null,
+      sells: null,
+      uniqueBuyers,
+      uniqueSellers,
+      buyVolumeUsd: null,
+      sellVolumeUsd: null,
+      netVolumeUsd: null,
+      buySellRatio: null,
+    });
+    const built = buildDossier({
+      token: tok(key),
+      label: { symbol: "CAND", name: null },
+      theses: [],
+      thesisCoverage: { pagesRequested: 1, pagesReturned: 1, providerTotal: 0, capped: false, stale: false, ageSeconds: null, chainFilterHonoured: true },
+      events: [event(90, STAR, key, at - 10 * MIN)],
+      cohortUserIds: new Set(),
+      stats: { token: tok(key), holders: 321, top10HoldersPercent: 52.5, windows: { "1h": w(7, 3), "24h": w(90, 61) } },
+      marketContext: [],
+      routeContext: [],
+      ownFamilies: new Set(),
+      selfNames: [],
+      previous: null,
+      now: at,
+      window: "24h",
+      activityRead: true,
+    });
+    return store.insertDossierRevision(db, key, built.dossier.inputsHash, built.dossier, at);
+  }
+
+  it("queue discovery research and ride in the owner's own file only for an allowlisted agent whose owner has research on", async () => {
+    const db = await freshDb();
+    await seedTradedDossier(db, X1, T0 - 5 * MIN);
+    const named: Record<string, ReviewCandidate[]> = { [T1]: [cand(X1), cand(Y1)], [T2]: [cand(X2)], [T3]: [cand(rh("77"))] };
+    const asked: string[] = [];
+    const r = await rig({
+      db,
+      serve: {},
+      access: { [T1]: ACCESS.monitoring, [T2]: ACCESS.monitoring, [T3]: ACCESS.lookupsOnly },
+      reviewCandidates: (t) => named[t] ?? [],
+      // T1 and T3 are on the operator's allowlist; T2 is not.
+      reviewResearchFor: (agentId) => {
+        asked.push(agentId);
+        return agentId === T1 || agentId === T3;
+      },
+    });
+    await r.run([T1, T2, T3]);
+    assert.deepEqual(asked.sort(), [T1, T2, T3].sort(), "asked by agent, from the roster");
+
+    const rows = await researchRows(db);
+    assert.deepEqual(
+      rows.map((x) => [x.token_key, x.priority, x.tenants_json]),
+      [
+        [X1, RESEARCH_PRIORITY.discovery, "[]"],
+        [Y1, RESEARCH_PRIORITY.discovery, "[]"],
+      ].sort((a, b) => (String(a[0]) < String(b[0]) ? -1 : 1)),
+      "discovery priority, no tenant on the row, nothing for T2 (not listed) or T3 (research off)",
+    );
+
+    const f1 = r.last(T1);
+    const candidates = f1.signals.filter((s) => s.reasons.includes("candidate"));
+    assert.deepEqual(candidates.map((s) => [s.token.key, s.reasons, s.priority, s.triggers.length]).sort(), [
+      [X1, ["candidate"], "discovery", 0],
+      [Y1, ["candidate"], "discovery", 0],
+    ].sort());
+    const x1 = candidates.find((s) => s.token.key === X1)!;
+    assert.equal(x1.dossier?.revision, 1, "the shared dossier rides along");
+    assert.ok(x1.lens, "and its trader-flow lens");
+    assert.equal(x1.dossier?.stats?.holders, 321, "with the source's statistics, which the lens adds only in the room its caveats leave (lens.test.ts)");
+    assert.match(x1.lens!, /WHAT THIS IS NOT/);
+    assert.match(x1.lens!, /Would change the reading:/, "a thin candidate lens keeps its caveats");
+    assert.doesNotMatch(x1.lens!, /fomo|0x[0-9a-f]{6}/i);
+    assert.equal(candidates.find((s) => s.token.key === Y1)!.lens, null, "no dossier yet, no lens: unavailable, never a stalled review");
+    assert.ok(!r.last(T2).signals.some((s) => s.reasons.includes("candidate")), "not on the allowlist");
+    assert.deepEqual(r.last(T3).signals, [], "research off: no signals at all");
+    const s1 = JSON.stringify(f1);
+    assert.ok(!s1.includes(addressOf(X2)) && !s1.includes("77".repeat(20)), "another owner's candidates never reach this file");
+
+    // The same bucket queues nothing again; the next one asks for a fresh read.
+    await r.run([T1, T2, T3], T0 + 61_000);
+    assert.equal((await researchRows(db)).length, 2);
+    await r.run([T1, T2, T3], T0 + REVIEW_CANDIDATES.refreshEveryMs + 61_000);
+    assert.equal((await researchRows(db)).length, 4, "one new item per candidate per refresh bucket");
+    r.pass.stop();
+  });
+
+  it("a candidate brings no triggers of its own, and naming a coin is not activity", async () => {
+    const db = await freshDb();
+    const C1 = rh("44");
+    const TH = rh("55");
+    await seedCohort(db, [member(KALEO, "CryptoKaleo")]);
+    await store.insertEvents(db, [
+      event(1, KALEO, C1, T0 - 5 * MIN), // the cohort buying a coin the review also named
+      event(2, KALEO, X1, T0 - 20 * MIN), // older cohort activity elsewhere
+      event(3, STAR, Y1, T0 - 2 * MIN), // a stranger on a coin only the review named
+      event(4, STAR, TH, T0 - 25 * MIN, "thesis"), // an older thesis on a coin the review also named
+    ]);
+    const r = await rig({
+      db,
+      serve: {},
+      access: { [T1]: ACCESS.monitoring },
+      // Named a second ago: far newer than any trade here.
+      reviewCandidates: () => [cand(Y1, T0 - 1_000), cand(C1, T0 - 1_000), cand(TH, T0 - 1_000)],
+      reviewResearchFor: () => true,
+    });
+    await r.run([T1]);
+    const f = r.last(T1);
+    assert.deepEqual(
+      f.signals.map((s) => [s.token.key, s.reasons]),
+      [
+        [Y1, ["candidate"]],
+        [C1, ["candidate", "cohort"]],
+        [X1, ["cohort"]],
+        [TH, ["candidate", "robinhood-thesis"]],
+      ],
+      "candidate-only coins in their reserved places, then the rest by their own activity: the review's admission never lifts a thesis coin above fresher cohort buying",
+    );
+    const at = (k: string) => f.signals.findIndex((s) => s.token.key === k);
+    assert.ok(at(X1) < at(TH), "cohort buying 20 minutes ago outranks a 25-minute-old thesis, however recently the review named that coin");
+    assert.deepEqual(f.signals[1]!.triggers.map((e) => e.trader.userId), [KALEO], "the cohort's triggers stand");
+    assert.deepEqual(f.signals[0]!.triggers, [], "nothing on a candidate-only coin counts as breadth");
+    r.pass.stop();
+  });
+
+  it("a full file keeps places for candidates by leaving out the cohort's oldest coins, and pays for no candidate it turned away", async () => {
+    const coinN = (n: number) => `eip155:4663:0x${n.toString(16).padStart(40, "0")}`;
+    const db = await freshDb();
+    await seedCohort(db, [member(KALEO, "CryptoKaleo")]);
+    // 45 cohort coins inside the breadth window, one every 30 s: more than a file holds on their own.
+    await store.insertEvents(db, Array.from({ length: 45 }, (_, i) => event(100 + i, KALEO, coinN(1_000 + i), T0 - (i + 1) * 30_000)));
+    const named = [cand(X1, T0 - 3_000), cand(Y1, T0 - 2_000), cand(X2, T0 - 1_000)];
+    const HELD = coinN(9_999);
+    const r = await rig({
+      db,
+      serve: {},
+      access: { [T1]: ACCESS.monitoring },
+      held: new Map([[HELD, [T1]]]),
+      reviewCandidates: () => named,
+      reviewResearchFor: () => true,
+    });
+    await r.run([T1]);
+    const f = r.last(T1);
+    assert.equal(f.signals.length, MAX_CHILD_SIGNALS);
+    assert.deepEqual(
+      f.signals.slice(0, 4).map((s) => [s.token.key, s.reasons]),
+      [
+        [HELD, ["held"]],
+        [X2, ["candidate"]],
+        [Y1, ["candidate"]],
+        [X1, ["candidate"]],
+      ],
+      "held first, then the candidates, newest named first: the 2 MB fit cuts from the end",
+    );
+    const cohort = f.signals.slice(4).map((s) => s.token.key);
+    assert.deepEqual(cohort, Array.from({ length: 36 }, (_, i) => coinN(1_000 + i)), "the 36 newest cohort coins; the 9 oldest make way");
+    assert.deepEqual((await researchRows(db)).map((x) => x.token_key).sort(), [X1, X2, Y1].sort(), "research for exactly the candidates the file carried");
+    assert.equal(r.pass.health().reviewCandidates.leftOut, 0);
+    assert.equal(r.pass.health().reviewCandidates.queued, 3);
+    r.pass.stop();
+
+    // Held coins and watches are never left out for a candidate: one that finds no place is counted, and costs nothing.
+    const db2 = await freshDb();
+    const held = new Map(Array.from({ length: MAX_CHILD_SIGNALS - 2 }, (_, i) => [coinN(5_000 + i), [T1]] as [string, string[]]));
+    const r2 = await rig({ db: db2, serve: {}, access: { [T1]: ACCESS.monitoring }, held, reviewCandidates: () => named, reviewResearchFor: () => true });
+    await r2.run([T1]);
+    const f2 = r2.last(T1);
+    assert.equal(f2.signals.filter((s) => s.reasons.includes("held")).length, MAX_CHILD_SIGNALS - 2, "every held coin");
+    assert.deepEqual(f2.signals.filter((s) => s.reasons.includes("candidate")).map((s) => s.token.key), [X2, Y1], "room for two, newest named first");
+    assert.deepEqual((await researchRows(db2)).map((x) => x.token_key).sort(), [X2, Y1].sort(), "nothing paid for the one turned away");
+    assert.equal(r2.pass.health().reviewCandidates.leftOut, 1);
+    r2.pass.stop();
+  });
+
+  it("queue a coin's research at most once per refresh interval, even across a clock bucket's edge", async () => {
+    const db = await freshDb();
+    const every = REVIEW_CANDIDATES.refreshEveryMs;
+    const edge = Math.ceil(T0 / every) * every + every;
+    let named: ReviewCandidate[] = [cand(X1, edge - 10_000)];
+    const r = await rig({ db, serve: {}, access: { [T1]: ACCESS.monitoring }, reviewCandidates: () => named, reviewResearchFor: () => true });
+    const revs = async () => ((await db.prepare("SELECT evidence_rev FROM fomo_research_queue WHERE token_key = ?").all(X1)) as { evidence_rev: string }[]).map((x) => x.evidence_rev);
+    await r.run([T1], edge - 5_000);
+    assert.equal((await revs()).length, 1);
+    // Named again just past the edge of a 30-minute bucket: not queued again.
+    named = [cand(X1, edge + 1_000)];
+    await r.run([T1], edge + 5_000);
+    await r.run([T1], edge + 2 * MIN);
+    assert.equal((await revs()).length, 1, "seconds later, in a new bucket: still the one item");
+    // A full interval after it was queued, a fresh read (a new revision).
+    named = [cand(X1, edge - 5_000 + every)];
+    await r.run([T1], edge - 5_000 + every);
+    const after = await revs();
+    assert.equal(after.length, 2);
+    assert.equal(new Set(after).size, 2, "a new evidence revision, so a fresh read rather than a finished row");
+    r.pass.stop();
+  });
+
+  it("re-checks the allowlist and the owner's switches every pass (the rail and the fast Trencher are the child's to check)", async () => {
+    const db = await freshDb();
+    let listed = true;
+    const r = await rig({
+      db,
+      serve: {},
+      access: { [T1]: ACCESS.monitoring },
+      reviewCandidates: () => [cand(X1)],
+      reviewResearchFor: () => listed,
+    });
+    await r.run([T1]);
+    assert.ok(r.last(T1).signals.some((s) => s.reasons.includes("candidate")));
+    assert.equal((await researchRows(db)).length, 1);
+    // Taken off the allowlist while its candidates are still carried: gone from the next file, nothing more queued.
+    listed = false;
+    await r.run([T1], T0 + REVIEW_CANDIDATES.refreshEveryMs + 61_000);
+    assert.ok(!r.last(T1).signals.some((s) => s.reasons.includes("candidate")), "the allowlist, re-read by agent");
+    assert.equal((await researchRows(db)).length, 1);
+    // Back on the list, but the owner turned research off: no signals at all, nothing queued.
+    listed = true;
+    r.access.set(T1, ACCESS.lookupsOnly);
+    await r.run([T1], T0 + 2 * REVIEW_CANDIDATES.refreshEveryMs + 2 * 61_000);
+    assert.deepEqual(r.last(T1).signals, [], "the owner's switches, re-read");
+    assert.equal((await researchRows(db)).length, 1);
+    r.pass.stop();
+  });
+
+  it("without the allowlist hook, with a failing hook or without a key, nothing is queued", async () => {
+    for (const o of [
+      { reviewResearchFor: undefined, configured: true },
+      { reviewResearchFor: () => { throw new Error("allowlist unreadable"); }, configured: true },
+      { reviewResearchFor: () => true, configured: false },
+    ]) {
+      const db = await freshDb();
+      const r = await rig({
+        db,
+        serve: {},
+        configured: o.configured,
+        access: { [T1]: ACCESS.monitoring },
+        reviewCandidates: () => [cand(X1)],
+        ...(o.reviewResearchFor ? { reviewResearchFor: o.reviewResearchFor } : {}),
+      });
+      await r.run([T1]);
+      assert.deepEqual(await researchRows(db), []);
+      const carried = r.last(T1).signals.some((s) => s.reasons.includes("candidate"));
+      assert.equal(carried, o.reviewResearchFor !== undefined && o.configured === false, "carried only when listed (the queue just waits for a key)");
+      r.pass.stop();
+    }
   });
 });
 
@@ -1912,6 +2170,14 @@ describe("the orchestrator's wiring", () => {
     for (const f of ["fomo/broker.ts", "fomo/service.ts", "orchestrator-fomo.ts"]) assert.ok(!/MERRYMEN_TENANT/.test(code(f)), `${f} reads the child's tenant variable`);
     const uses = code("orchestrator.ts").match(/MERRYMEN_TENANT/g) ?? [];
     assert.equal(uses.length, 1, "set once, in childEnv, and read nowhere in the orchestrator");
+  });
+
+  it("hands the pass each child's review candidates and the operator's research allowlist, by agent", () => {
+    const code = SRC.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:"'`])\/\/.*$/gm, "$1");
+    const run = code.slice(code.indexOf("async function runFomoPass("), code.indexOf("export function watchdog("));
+    assert.match(run, /reviewCandidates: \(who, at\) => rt\.service\.reviewCandidatesSnapshot\?\.\(who, at\) \?\? \[\],/);
+    assert.match(run, /reviewResearchFor: \(agentId\) => decisionResearchEnabledFor\(agentId\),/, "the existing helper, nobody by default");
+    assert.match(run, /roster\.push\(\{ tenant: key, agentId: child\.smartAccount\.toLowerCase\(\) \}\)/, "the agent is the smart account the allowlist names");
   });
 
   it("the pass itself reads no environment and never names the key", () => {

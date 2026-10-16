@@ -25,10 +25,20 @@
  * shadow-mode guarantee rather than a flag someone could flip.
  */
 import type { PortfolioSnapshot } from "../../packages/core/src/index";
+import { strategyTermsWire, type StrategyTerms } from "./strategy-terms";
+
+/**
+ * Whether the caller's desk policy reached Brain. "withheld" when the caller
+ * supplied one and it did not go — this Brain does not advertise the
+ * capability yet, or the policy failed the wire bounds. Absent when the caller
+ * supplied none. Recorded with the decision, so "did the terms change what the
+ * desk decided?" is answerable from the ledger rather than from a deploy date.
+ */
+export type StrategyTermsDelivery = "sent" | "withheld";
 
 /** What Brain answered, as a closed union. An exception is not an answer. */
 export type BrainResult =
-  | { ok: true; decision: BrainDecision; seconds: number }
+  | { ok: true; decision: BrainDecision; seconds: number; strategyTerms?: StrategyTermsDelivery }
   | { ok: false; kind: "refused"; reason: string; detail: string; cost: BrainCost }
   | { ok: false; kind: "unreachable"; detail: string }
   | { ok: false; kind: "malformed"; detail: string };
@@ -200,6 +210,154 @@ export interface DecideArgs {
   persona?: string;
   memory?: string[];
   tier?: "pulse" | "research" | "deep";
+  /**
+   * THE DESK'S OWN TERMS, rendered by strategy-terms.ts from repo code and
+   * never from owner or market text — the type is branded so a string cannot
+   * be passed here, and it is re-validated below because a brand can be
+   * forged. Brain renders it as trusted DESK POLICY; `persona` stays the
+   * fenced, untrusted brief. Omitted, the request is byte-for-byte today's.
+   */
+  strategyTerms?: StrategyTerms | null;
+}
+
+// ─── What this Brain build accepts ─────────────────────────────────────────
+
+/** The /health capability that says `strategy_terms` and `horizon` are accepted. */
+export const STRATEGY_TERMS_CAPABILITY = "strategy-terms";
+
+/**
+ * WHICH OPTIONAL DECIDE FIELDS THIS BRAIN ACCEPTS, read from GET /health
+ * (`capabilities`). Brain's DecideRequest forbids unknown keys, so sending
+ * `strategy_terms` to an older build is a 422 — and a 422 here arrives as
+ * "unreachable" and costs the whole review, not just the terms.
+ *
+ * The same shape as fomo-child.ts's BrainLensProbe, for the same reasons:
+ * false until known, at most one read an hour per URL, never on the review's
+ * own clock (a review asks, gets the cached answer and, when due, starts a
+ * read in the background), and a decide that 422s while carrying the fields
+ * turns them off at once, because /health and /v1/decide can be served by
+ * different builds during a rollback.
+ *
+ * A FAILED READ IS NOT AN ANSWER. Only a 2xx whose body parses as a JSON
+ * object replaces what is cached, and then it is believed either way: an
+ * older build's /health that lists no capabilities is a real "no". A network
+ * error, a timeout, a non-2xx or an unparseable body keeps the last answer and
+ * asks again after `retryMs` instead of the full hour. A read that lands in a
+ * restart window, as one will on the deploy this channel needs, would
+ * otherwise withhold every review's terms for an hour and fill the ledger with
+ * "withheld" for a Brain that supports them. Real skew does not depend on this
+ * path: it shows up as a 422 on decide, and that calls `invalidate`.
+ *
+ * FREE. /health is Brain's own unauthenticated status endpoint on the private
+ * network: no model call, no vendor, nothing metered.
+ *
+ * THE SAME READ ANSWERS FOR A LENS KEY with `list: "lens_keys"`: Brain's
+ * MarketState refuses a signals key it does not know, with the same 422 and
+ * the same lost review (index.ts asks it before sending `onchain-flow`).
+ */
+export class BrainCapabilityProbe {
+  private url = "";
+  private checkedAt = Number.NEGATIVE_INFINITY;
+  private value: ReadonlySet<string> = new Set();
+  private inflight: Promise<void> | null = null;
+  /** Bumped by `invalidate`: a read that started before it cannot restore the old answer. */
+  private generation = 0;
+
+  constructor(
+    private readonly fetchImpl?: typeof fetch,
+    private readonly now: () => number = Date.now,
+    private readonly everyMs: number = 60 * 60_000,
+    private readonly timeoutMs: number = 3_000,
+    /** How soon a read that got no answer is retried. Still never on a review's clock. */
+    private readonly retryMs: number = 60_000,
+    /** Which /health list is read: decide fields (`capabilities`) or signals keys (`lens_keys`). */
+    private readonly list: "capabilities" | "lens_keys" = "capabilities",
+  ) {}
+
+  advertises(brainUrl: string | null | undefined, capability: string): boolean {
+    const u = typeof brainUrl === "string" ? brainUrl.trim().replace(/\/+$/, "") : "";
+    if (!/^https?:\/\/\S+$/.test(u)) return false;
+    if (u !== this.url) {
+      this.url = u;
+      this.checkedAt = Number.NEGATIVE_INFINITY;
+      this.value = new Set();
+    }
+    const t = this.now();
+    if (!this.inflight && t - this.checkedAt >= this.everyMs) {
+      this.checkedAt = t;
+      this.inflight = this.probe(u).finally(() => {
+        this.inflight = null;
+      });
+    }
+    return this.value.has(capability);
+  }
+
+  /**
+   * A decide carrying the fields came back 422. Off NOW, for at least
+   * `recheckAfterMs`, and back only when a /health read made after this moment
+   * says so again.
+   */
+  invalidate(recheckAfterMs: number = 5 * 60_000): void {
+    this.generation++;
+    this.value = new Set();
+    this.checkedAt = this.now() - this.everyMs + Math.max(0, recheckAfterMs);
+  }
+
+  /** Resolves when no read is in flight (tests, shutdown). */
+  settled(): Promise<void> {
+    return this.inflight ?? Promise.resolve();
+  }
+
+  private async probe(u: string): Promise<void> {
+    const generation = this.generation;
+    // NULL IS "NO ANSWER", which is not the same as an empty advert: see the
+    // class header. Only a parsed object below sets it.
+    let caps: ReadonlySet<string> | null = null;
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), this.timeoutMs);
+    (timer as { unref?: () => void }).unref?.();
+    try {
+      const res = await (this.fetchImpl ?? fetch)(`${u}/health`, {
+        method: "GET",
+        signal: ctl.signal,
+        headers: { accept: "application/json" },
+      });
+      if (res.ok) {
+        const text = await res.text();
+        if (text.length <= 64_000) {
+          const j = JSON.parse(text) as unknown;
+          if (j !== null && typeof j === "object" && !Array.isArray(j)) {
+            const listed = (j as Record<string, unknown>)[this.list];
+            caps = new Set(
+              Array.isArray(listed) ? listed.filter((c): c is string => typeof c === "string" && c.length <= 64) : [],
+            );
+          }
+        }
+      } else {
+        void res.body?.cancel().catch(() => {});
+      }
+    } catch {
+      caps = null;
+    } finally {
+      clearTimeout(timer);
+    }
+    if (this.url !== u || this.generation !== generation) return;
+    if (caps) {
+      this.value = caps;
+      return;
+    }
+    // KEEP THE LAST ANSWER, ASK AGAIN SOON. Never later than the hourly read
+    // already due, so a short `everyMs` is not stretched by the retry.
+    this.checkedAt = Math.min(this.checkedAt, this.now() - this.everyMs + Math.max(0, this.retryMs));
+  }
+}
+
+/** The process's probe. One worker child talks to one Brain URL. */
+export const brainCapabilities = new BrainCapabilityProbe();
+
+export interface DecideDeps {
+  /** Injected in tests; the process-wide probe otherwise. */
+  capabilities?: Pick<BrainCapabilityProbe, "advertises" | "invalidate">;
 }
 
 /**
@@ -210,12 +368,21 @@ export interface DecideArgs {
  * the moment this function starts reshaping them there are two NAV
  * implementations again.
  */
-export async function decide(cfg: BrainConfig, args: DecideArgs): Promise<BrainResult> {
+export async function decide(cfg: BrainConfig, args: DecideArgs, deps: DecideDeps = {}): Promise<BrainResult> {
   if (!cfg.url || !cfg.token) {
     // FAIL CLOSED. An unconfigured Brain is not a Brain that says hold; it is a
     // Brain that was never asked, and the caller must be able to tell.
     return { ok: false, kind: "unreachable", detail: "brainUrl or brainToken is not configured" };
   }
+
+  // THE DESK POLICY GOES ONLY WHERE IT IS UNDERSTOOD, and only when it passes
+  // Brain's own bounds. Either failure WITHHOLDS it and sends today's request —
+  // never a 422 that would cost the review. The probe is consulted only when a
+  // caller supplied terms, so a request without them reads nothing new.
+  const probe = deps.capabilities ?? brainCapabilities;
+  const terms = args.strategyTerms ? strategyTermsWire(args.strategyTerms) : null;
+  const sendTerms = terms !== null && probe.advertises(cfg.url, STRATEGY_TERMS_CAPABILITY);
+  const delivery: StrategyTermsDelivery | undefined = args.strategyTerms ? (sendTerms ? "sent" : "withheld") : undefined;
 
   const body = {
     schema_version: "1.0.0",
@@ -230,6 +397,7 @@ export async function decide(cfg: BrainConfig, args: DecideArgs): Promise<BrainR
     // ADAPTIVE IS THE DEFAULT, on measured evidence: on 36 scenarios it scored
     // 28/36 against the full committee's 27/36, for 58% of the cost.
     stages: "adaptive",
+    ...(sendTerms && terms ? terms : {}),
   };
 
   const ac = new AbortController();
@@ -250,6 +418,10 @@ export async function decide(cfg: BrainConfig, args: DecideArgs): Promise<BrainR
   if (!res.ok && res.status !== 200) {
     clearTimeout(timer);
     void res.body?.cancel().catch(() => {});
+    // A 422 WHILE CARRYING THE TERMS is the build skew the probe exists for —
+    // /health said yes and /v1/decide is an older build. Off at once; this
+    // review is lost (no retry: see the header), the next one is not.
+    if (sendTerms && res.status === 422) probe.invalidate();
     return { ok: false, kind: "unreachable", detail: `brain returned HTTP ${res.status}` };
   }
 
@@ -290,7 +462,12 @@ export async function decide(cfg: BrainConfig, args: DecideArgs): Promise<BrainR
     return { ok: false, kind: "malformed", detail: `refusing a decision that ${bad}` };
   }
 
-  return { ok: true, decision, seconds: Number(payload.seconds ?? 0) };
+  return {
+    ok: true,
+    decision,
+    seconds: Number(payload.seconds ?? 0),
+    ...(delivery ? { strategyTerms: delivery } : {}),
+  };
 }
 
 /** The canonical snapshot, renamed for Brain's request shape. NOTHING is recomputed. */

@@ -591,7 +591,14 @@ export interface FomoEnvelope<T = unknown> {
 
 // ── Trusted call context ─────────────────────────────────────────────────
 
-export type FomoSurface = "app-chat" | "telegram-dm" | "telegram-group" | "mcp" | "background";
+/**
+ * `x-answer` is an active agent answering a public tag on X, asked from the
+ * ORCHESTRATOR's own service (orchestrator-xpost-research.ts), never by a
+ * child (broker.ts CHILD_SURFACES leaves it out). Its audience is a group's —
+ * public data only — and it has its own hourly cap per X account
+ * (budget.ts xHourlyCredits), keyed like a room's by `groupId`.
+ */
+export type FomoSurface = "app-chat" | "telegram-dm" | "telegram-group" | "mcp" | "background" | "x-answer";
 
 /**
  * Who is asking, derived ONLY from trusted server context (session cookie,
@@ -710,6 +717,24 @@ export interface FlowSummary {
   notes: string[];
 }
 
+/** Unique wallets on each side over one window, at every trade size. Unknown is null, never 0. */
+export interface DossierStatsWindow {
+  uniqueBuyers: number | null;
+  uniqueSellers: number | null;
+}
+
+/**
+ * The source's own token statistics at build time, numbers only: unlike the
+ * feed, they count trades of every size. Wallet counts, not proven people.
+ */
+export interface DossierStats {
+  holders: number | null;
+  /** 0–100. */
+  top10HoldersPercent: number | null;
+  window1h: DossierStatsWindow | null;
+  window24h: DossierStatsWindow | null;
+}
+
 export interface CoinDossier {
   dossierId: string;
   revision: number;
@@ -733,6 +758,13 @@ export interface CoinDossier {
   evidence: EvidenceRef[];
   /** Sections refreshed in this revision; the rest carried from the previous one. */
   refreshedSections: string[];
+  /**
+   * The source's token statistics this revision was built with. Null: the
+   * read failed or was refused (coverage.missingSections says "token-stats"),
+   * which the lens says as "unavailable". Absent: a revision built before this
+   * field existed, about which nothing is said.
+   */
+  stats?: DossierStats | null;
 }
 
 // ── Selective following ──────────────────────────────────────────────────

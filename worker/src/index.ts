@@ -1,4 +1,4 @@
-import { EVIDENCE_BUDGET_MS, readPoolEvidence, summarizeEvidence } from "./venues/pool-evidence";
+import { EVIDENCE_BUDGET_MS, brainEvidence, readPoolEvidence } from "./venues/pool-evidence";
 import { upsertRefusal, type RefusalRow } from "./venues/refusal-rows";
 /**
  * merrymen worker — the 24/7 loop.
@@ -135,16 +135,24 @@ import { provenanceOf, type Provenance } from "./provenance";
 import { recordDecisionRefusal, verifyDecisionOwner, withDecisionOutcome } from "./decision-identity";
 import { bookGaps, composeEquityUsdg } from "./equity";
 import { publishesAView, reviewRecord, runShadow, type ShadowInputs, type ShadowOutcome } from "./brain-shadow";
-import { TrenchBrainReview, TrenchTapeReader, highVolumePools, trenchBrainPersona, trenchBrainSignals, trenchHeat, HELD_REVIEW_MAX_GAP_MS, TRENCH_REVIEW_INTERVAL_MS } from "./trencher-brain";
+import { BrainCapabilityProbe } from "./brain-client";
+import { ONCHAIN_FLOW_LENS, flowLensRefused, readFlowEvidence, reviewFlowClient } from "./review-flow";
+import { HoldBackoff, TrenchBrainReview, TrenchNoticeGate, TrenchTapeReader, entryEvidenceBlind, entryMayGoBlind, trenchDeskNotice, highVolumePools, trenchBrainPersona, trenchBrainSignals, trenchHeat, trenchMaterial, HELD_REVIEW_MAX_GAP_MS, TRENCH_REVIEW_INTERVAL_MS } from "./trencher-brain";
+import { withAgentBrief } from "./agent-brief";
+import { ProjectPurposeReader } from "./research/project-purpose";
 import { getPaperBrainCapital } from "./store";
 import { nextTickDelayMs, tickIntervalMs } from "./decision-cadence";
 import { scheduledInterval, DEFAULT_TRIGGERS } from "./brain-trigger";
 import { boundedRead } from "./optional-read-deadline";
 import { recoverReceiptBasis } from "./receipt-basis-recovery";
-import { MarketReviewClock, quietReviewRow } from "./market-review";
+import { MarketReviewClock, quietReviewRow, quietReviewScope } from "./market-review";
 import { ChainCoinNames, makeDecisionNamer, warmHeldNames } from "./decision-name";
 import { intentDecisionRow } from "./decision-row";
-import { memoryLines, positionContext, sentimentLine, technicalLine } from "./brain-material";
+import { leadMemory, memoryLines, positionContext, sentimentLine, technicalLine } from "./brain-material";
+import { DECISION_RESEARCH_GUIDANCE, decisionResearchEnabledFor, entryCostResearch, researchEntrySize, trenchBreakEven, trenchMomentumBrief } from "./decision-research";
+import { trencherStrategyTerms } from "./strategy-terms";
+import { readOwnOutcomeLearningFile } from "./own-outcome-learning-file";
+import { outcomeLearningLines } from "./own-outcome-learning";
 import { readFeedHistory } from "./read-feed-history";
 import { gradeFloor } from "./strategist/floor-grade";
 import { renderLiquidity } from "./research/coin-liquidity";
@@ -219,6 +227,7 @@ import {
   countsAsEntry,
   energyBuyOf,
   energyLevel,
+  energyModeForAccount,
   energyPlan,
   energyShortfallRaw,
   energyStatus,
@@ -267,7 +276,9 @@ import { KEY_INSTALL_KIND } from "./telegram/trade-rows";
 import { gasFields, installKeyRecorded, settleKeyInstall } from "./key-install-accounting";
 import { ethPrice8FromFeed, ethUsdFeed, priceGasAt, type EthFeed } from "./eth-feed";
 import { ExecBackoff, KEY_INSTALL_HOLD_MS, heldReply, type Hold } from "./exec-backoff";
-import { bookCapitalFlow, energyBuysInFlight, hasFlowForTx, newestLandedEnergyBuy } from "./store";
+import { bookCapitalFlow, bookInitialCapital, energyBuysInFlight, hasFlowForTx, newestLandedEnergyBuy } from "./store";
+import { readInitialCapital } from "./initial-capital";
+import type { RpcCall } from "./chain-capital";
 import {
   claimEnergy,
   claimEnergyNotice,
@@ -299,6 +310,7 @@ import { takeHeldGroupUpdates } from "./telegram/held-groups";
 import { NOMINATE, NominationBook, trencherReadiness } from "./trencher-nominate";
 import { COIN_LOOK, chainTokenProbe, claimGroupEntry, createCoinLook, createTgCoinsPort, groupExitOf, reviewedDecisionOf, type GroupEntryClaim } from "./tg-coin-look";
 import { createDesk } from "./desk/desk";
+import { createCoinFactsReader, FactsLimiter } from "./desk/facts";
 import type { TgDeskPort } from "./telegram/tg-groups/types";
 import { readDexTokenPairs } from "./venues/dexscreener";
 import { startNotifier } from "./telegram/notifier";
@@ -328,7 +340,8 @@ import {
   quoteUsdOf,
   resolveBitquery,
 } from "./discovery";
-import { fetchGeckoPools, readTokenPools, solanaMarkPrice, type ScreenLimits, type GeckoPool } from "./venues/geckoterminal";
+import { gatewayTokenForDiscovery } from "./venues/bitquery";
+import { DISCOVERY_SCREEN, fetchGeckoPools, readTokenPools, solanaMarkPrice, type ScreenLimits, type GeckoPool } from "./venues/geckoterminal";
 import { createMemecoinScout, nullScout } from "./strategist/memecoin-scout";
 import { readCurvePrices } from "./venues/curve-prices";
 import { createV4KeyBook, keysForToken } from "./venues/v4-keys";
@@ -342,11 +355,7 @@ import { readBestV4Price, describeV4, V4_GUARD_DEFAULTS, V4_NATIVE } from "./ven
  * is a cheapness filter rather than a judgement. Distinct BUYERS rather than
  * trade count, because a wash-trader inflates the second cheaply.
  */
-const TRENDING_SCREEN: ScreenLimits = {
-  minReserveUsd: 25_000,
-  minVolume24hUsd: 50_000,
-  minBuyers24h: 100,
-};
+const TRENDING_SCREEN: ScreenLimits = DISCOVERY_SCREEN;
 
 /**
  * The screen this tenant actually wants, which is the one above plus their own
@@ -799,6 +808,7 @@ async function main() {
    */
   let lastPrices: Map<string, PriceQuote> = new Map();
   const trenchBrain = new TrenchBrainReview();
+  const projectPurpose = new ProjectPurposeReader();
   /**
    * WHERE EACH COIN STOPPED (decision-funnel.ts). One recorder per process,
    * installed so the Telegram chat tools can answer "why did you skip that
@@ -895,6 +905,15 @@ async function main() {
     log: (line) => console.log(line),
   });
   installFomoChild(fomoChild);
+  /**
+   * THE ORCHESTRATOR'S FLOW LANE, for research accounts' Trencher entry
+   * reviews (review-flow.ts). Null unless the orchestrator said its broker
+   * answers on this channel; then no question is ever sent. The probe asks
+   * Brain's /health whether it accepts `onchain-flow`, and is consulted only
+   * for a review that has a flow question to send.
+   */
+  const reviewFlow = reviewFlowClient();
+  const flowLensProbe = new BrainCapabilityProbe(undefined, undefined, undefined, undefined, undefined, "lens_keys");
   /**
    * THE OWNER'S FOMO TAIL NOTICES (fomo/tail-notifier.ts), asked by the
    * Telegram notifier only past its own gates. Read-only over the child:
@@ -1029,7 +1048,7 @@ async function main() {
       // or the grant/custody checks that admit one to the trading universe.
       // Early candidates are read beside them, through the same verification,
       // without the volume screen or the top slice (trencher-discovery.ts).
-      const result = await discoverTrencherUniverse(mainnetClient(), current.grant, freshTrenchTape(), { nominated: new Set(tgNominated), cache: poolCache, early: earlyDiscoverySet() });
+      const result = await discoverTrencherUniverse(mainnetClient(), current.grant, freshTrenchTape(), { nominated: new Set(tgNominated), cache: poolCache, early: earlyDiscoverySet(), focus: cfg.discoveryFocus });
       if (autoTrenchContext === context && trenchPoolCache === poolCache && active && `${active.agentId}:${active.grant.grantedAt}` === context) {
         autoTrench = result;
         warmHeldNames(coinNames, result);
@@ -1056,21 +1075,28 @@ async function main() {
   let trenchTapeAt = 0;
   let trenchTapeRequestedAt = 0;
   let trenchTapePending = false;
-  let lastTrenchNotice = "";
+  let lastTrenchFeedHealth = "";
+  // A notice is written on CHANGE, and a notice that cleared and came back
+  // within half an hour is the same notice, not a new event (TrenchNoticeGate):
+  // an outage flickering the desk notice must not fill the events table.
+  const trenchNoticeGate = new TrenchNoticeGate();
   function trenchNotice(agentId: string, message: string) {
-    if (message === lastTrenchNotice) return;
-    lastTrenchNotice = message;
-    if (message) {
-      console.warn(`[trencher] ${message}`);
-      void addEvent(agentId, "warn", `Trencher: ${message}`).catch(() => {});
-    }
+    if (!trenchNoticeGate.say(message)) return;
+    console.warn(`[trencher] ${message}`);
+    void addEvent(agentId, "warn", `Trencher: ${message}`).catch(() => {});
   }
   function refreshTrenchTape() {
+    trenchTapeReader.setDiscoveryFocus(cfg.discoveryFocus);
     if (trenchTapePending || Date.now() - trenchTapeRequestedAt < 60_000) return;
     trenchTapePending = true;
     trenchTapeRequestedAt = Date.now();
     void trenchTapeReader.refresh().then(result => {
       trenchTapeAt = result.observedAt;
+      const feedHealth = `${result.providers.join(",")}|${result.primaryFailures.join(",")}|${result.pools.length > 0}`;
+      if (feedHealth !== lastTrenchFeedHealth) {
+        lastTrenchFeedHealth = feedHealth;
+        console.log(`[trencher] Market feed source=${result.providers.join(",") || "unavailable"}; primary=${result.primaryFailures.join(",") || (result.providers.length ? "healthy" : "unavailable")}; ${result.pools.length} fresh screened pools.`);
+      }
       if (result.failures.length) console.warn(`[trencher] Market tape pages failed: ${result.failures.join(", ")}; ${result.pools.length} fresh pools retained.`);
       // The coins the tape screen dropped, once per refresh, by the rule each failed.
       for (const s of trenchTapeReader.screenedOut()) funnel.note(s.tokenAddress, null, classifyStage({ kind: "discovery", screen: s.reason }));
@@ -1089,6 +1115,30 @@ async function main() {
     trenchTapeAt = snapshot.observedAt;
     return snapshot.pools;
   };
+  /**
+   * The tape row a review of this coin reads: its discovery-verified pool
+   * when there is one, else its first pool on the tape. One helper, so the
+   * review and the hold backoff below can never be reading different pools.
+   */
+  function trenchTapeRow(token: string, tape: readonly GeckoPool[]): GeckoPool | undefined {
+    const key = token.toLowerCase();
+    const verifiedPool = autoTrench?.qualified.find(p => p.tokenAddress.toLowerCase() === key);
+    return tape.find(p => p.tokenAddress.toLowerCase() === key && (!verifiedPool || p.poolAddress === verifiedPool.poolAddress));
+  }
+  /**
+   * THE HOLD BACKOFF'S VIEW OF A COIN (trencher-brain.ts HoldBackoff): the
+   * tick's own quote — the mark a review is handed — and the fresh tape's
+   * hour volume and five-minute buyers. Read-only; it never fetches. A coin
+   * with neither reads as unknown throughout, and unknown releases nothing.
+   */
+  trenchBrain.holdBackoff = new HoldBackoff((token) => {
+    const t = watchTokens.find((w) => w.address.toLowerCase() === token);
+    const q = t ? lastPrices.get(t.symbol) : undefined;
+    const price = q && !q.stale && q.price8 > 0n ? Number(q.price8) / 1e8 : null;
+    return trenchMaterial(trenchTapeRow(token, trenchTapeReader.snapshot().pools), price);
+  });
+  /** The entry-rotation idle line, said on change and never per flicker (TrenchNoticeGate). */
+  const backoffIdleGate = new TrenchNoticeGate();
   /**
    * What discovery's early path did, filed ON CHANGE only: every pass would
    * otherwise re-file "early-verified" over the later stage (an entry screen,
@@ -4177,7 +4227,7 @@ async function main() {
     // `grant` rides along so the flow classifier can be told which contracts
     // hold this account's own assets — without it a class buy pairs with
     // nothing and books as a withdrawal. See ClassifyInput.custodyAddresses.
-    scan?: { chain: ReconcileChain; smartAccount: `0x${string}`; grant?: StoredGrant },
+    scan?: { chain: ReconcileChain; smartAccount: `0x${string}`; grant?: StoredGrant; initialRpc?: RpcCall },
   ): Promise<"held" | "settled"> => {
     const record = async (
       deltaUsdg: bigint,
@@ -4371,7 +4421,31 @@ async function main() {
     // EXACT BEFORE INFERRED. When the scan covered the window it is the whole
     // truth about money crossing the boundary, and inference must not book the
     // same movement a second time from the balance change it already explains.
-    const covered = scan ? await scanChainFlows(scan) : false;
+    let covered = false;
+    if (initialCapitalLicence !== null && !initialCapitalComplete && (cashUsdg > 0n || equityUsdg > 0n)) {
+      // Receipt proof is mandatory even with the optional ongoing scanner off.
+      // A failed read leaves the licence and baseline available for the retry.
+      if (!scan?.initialRpc || !scan.grant || cashUsdg !== equityUsdg || paperActive()) {
+        throw new Error("Initial funding needs complete cash-only receipt evidence");
+      }
+      const capital = await readInitialCapital(scan.initialRpc, {
+        account: scan.smartAccount, chainId: scan.grant.chainId, licence: initialCapitalLicence,
+      });
+      if (capital.cashUsdg6 !== cashUsdg) throw new Error("Initial funding balance changed while receipts were read");
+      const booked = await bookInitialCapital(agentId, capital);
+      if (booked.kind === "refused") throw new Error(booked.why);
+      highWaterMarkUsdg = usdg((await getAgentFinancials(agentId)).hwmUsdg);
+      initialCapitalComplete = true;
+      chainScanCursor = capital.blockNumber;
+      covered = true;
+    } else if (initialCapitalLicence !== null && !initialCapitalComplete) {
+      // No funding yet. Keep the initial baseline open so observeRailCash can
+      // see the first deposit and publish a live rail. Settling zero here would
+      // pin execMode to lastCash=0 and prevent the live-only booker from starting.
+      return "held";
+    } else if (cfg.depositScanEnabled && scan) {
+      covered = await scanChainFlows(scan);
+    }
 
     // THE LEDGER, READ ONCE AND AFTER THE BALANCE — and the settlement queue
     // only after the ledger. The resolver queues a settlement BEFORE it writes
@@ -4497,9 +4571,9 @@ async function main() {
             if (l.verdict.action === "infer") await record(l.verdict.deltaUsdg, "changed while the worker was stopped");
           }
         } else if (plan.action === "book-opening-balance") {
-          // THE ONLY PATH THAT BOOKS A CONTRIBUTION HERE, and it runs only when
-          // the orchestrator READ durable state and found none.
-          if (plan.amountUsdg > 0n) await record(plan.amountUsdg, "opening balance");
+          // A funded hosted opening must have been covered by the receipt path
+          // above. Keep this guard even if a future caller omits its RPC seam.
+          if (plan.amountUsdg > 0n) throw new Error("Hosted initial funding requires verified receipts");
         } else if (plan.action === "resume-with-drift") {
           doubtContributions(`cash moved across the downtime window and nothing could price it`);
           await addEvent(
@@ -4625,7 +4699,7 @@ async function main() {
     // `grant` rides along so the flow classifier can be told which contracts
     // hold this account's own assets — without it a class buy pairs with
     // nothing and books as a withdrawal. See ClassifyInput.custodyAddresses.
-    scan?: { chain: ReconcileChain; smartAccount: `0x${string}`; grant?: StoredGrant },
+    scan?: { chain: ReconcileChain; smartAccount: `0x${string}`; grant?: StoredGrant; initialRpc?: RpcCall },
   ): Promise<"held" | "settled"> => {
     try {
       return await reconcileFlows(agentId, cashUsdg, equityUsdg, scan);
@@ -4782,6 +4856,8 @@ async function main() {
   };
   /** The believed truth about contributions, folded from every licence seen. */
   let truth: ContributionTruth = INITIAL_CONTRIBUTION_TRUTH;
+  let initialCapitalLicence: "new-account" | "untouched-book" | null = null;
+  let initialCapitalComplete = false;
   /** Cash at the anchor's newest durable observation. The downtime baseline. */
   let anchorCashUsdg: bigint | null = null;
   /**
@@ -4819,6 +4895,9 @@ async function main() {
     console.log(anchorLine(agentId, verdict));
     const l = accountingLicence(verdict, { hosted: isHostedMode() });
     accounting.openingBalanceLicence = l.licence;
+    initialCapitalLicence = l.licence === "new-account" ? "new-account"
+      : isHostedMode() && verdict.kind === "valid" && verdict.accounting.kind === "established"
+        && verdict.accounting.initialCapitalEligible === true ? "untouched-book" : null;
     anchorHwmUsdg = l.highWaterMarkUsdg;
     anchorHwmWithdrawnUsdg = l.highWaterWithdrawnUsdg;
     anchorCashUsdg = l.lastObservedCashUsdg;
@@ -4885,6 +4964,7 @@ async function main() {
    * after arm. Throws when the ledger will not answer — never a guess.
    */
   async function durableNetContributions(agentId: string): Promise<bigint | null> {
+    if (initialCapitalLicence !== null && !initialCapitalComplete) return null;
     const local = await getNetContributionsSince(agentId, anchorWrittenAtSec ?? 0);
     return durableNetContributionsUsdg6({
       anchorNetUsdg6: anchorNetContributionsUsdg,
@@ -5289,7 +5369,7 @@ async function main() {
   ): Promise<void> {
     const now = Math.floor(Date.now() / 1000);
     energyWithheld = false;
-    const mode = cfg.energyGate;
+    const mode = energyModeForAccount(cfg.energyGate, grant.smartAccount, cfg.energyExemptAccounts);
     let reviewsAllowed = 0;
     let estimate: number | null = null;
     if (mode === "off") {
@@ -6208,9 +6288,15 @@ async function main() {
       // The holder token doubles as the gateway credential — the same one the
       // brain claims. No Bitquery account needed for Circle members.
       // The standalone token first, then the LLM key when the brain IS the
-      // gateway — one claimed token opens both, but choosing the gateway for
-      // discovery must not force choosing it for thinking as well.
-      merrymenToken: cfg.merrymenToken ?? (cfg.llmProvider === "merrymen" ? cfg.llmApiKey : undefined),
+      // gateway — never the house's brain key on a hosted child
+      // (gatewayTokenForDiscovery).
+      merrymenToken: gatewayTokenForDiscovery({
+        merrymenToken: cfg.merrymenToken,
+        llmProvider: cfg.llmProvider,
+        llmApiKey: cfg.llmApiKey,
+        hosted: isHostedMode(),
+        houseLlmKey: process.env.MERRYMEN_LLM_API_KEY,
+      }),
     });
     if (!creds) return; // no key, no discovery — honest silence, not an error
     const nowSec = Math.floor(Date.now() / 1000);
@@ -12367,9 +12453,11 @@ async function main() {
         agentId,
         balances.cashUsdg,
         equityUsdg,
-        cfg.depositScanEnabled
+        cfg.depositScanEnabled || (initialCapitalLicence !== null && !initialCapitalComplete)
           ? {
               chain: makeReconcileChain(client),
+              initialRpc: (method, params) => (client.request as unknown as
+                (args: { method: string; params: unknown[] }) => Promise<unknown>)({ method, params }),
               smartAccount: grant.smartAccount as `0x${string}`,
               // So the flow classifier can tell a class trade from a withdrawal.
               grant,
@@ -12449,8 +12537,9 @@ async function main() {
       riskHighWaterMarkUsdg = riskPeak === null ? null : usdg(riskPeak);
       const gasCov = await getGasPaidUsdg(agentId, await getAgentEpoch(agentId));
       await setAgentQuality(agentId, {
-        contributionsKnown: accounting.contributionsKnown,
-        why: accounting.why,
+        contributionsKnown: accounting.contributionsKnown && (initialCapitalLicence === null || initialCapitalComplete),
+        why: initialCapitalLicence !== null && !initialCapitalComplete
+          ? "first funding is waiting for complete deposit receipt verification" : accounting.why,
         // ONE RULE, IN CORE. This read `usdg > 0 ? "net" : "unknown"` here and
         // in two other places, and all three took a sponsored agent's genuine
         // zero for an absence. See packages/core/src/gas-basis.ts.
@@ -12696,10 +12785,32 @@ async function main() {
       reviewPreparationMs = Math.max(reviewPreparationMs, Date.now() - tickStartedAt);
       const clock = reviewClock(agentId);
       if (!clock.due(now, reviewPreparationMs)) return;
+      // A quiet Trencher still talks about its own coins. The basket remains
+      // watched for accounting, but cannot become its fallback market view.
+      const trenchScope = cfg.strategy === "trencher"
+        ? {
+            // Read the existing entry records only. trenchOpen also repairs
+            // exit baselines, which a fallback explanation must not do.
+            held: (await Promise.all(positions.map(async p =>
+              (autoTrenchBalances.get(p.token.toLowerCase()) ?? 0n) > 0n || await getTrenchEntry(agentId, basisMode, p.symbol)
+                ? p.token : null,
+            ))).filter((token): token is `0x${string}` => token !== null),
+            candidates: (await trenchCandidates())
+              .filter(c => shouldEnter(c, cfg.trencherFastEnabled ? TRENCHER_FAST : TRENCHER_DEFAULTS, now).enter)
+              .map(c => c.token),
+          }
+        : { held: [], candidates: [] };
+      const scope = quietReviewScope({
+        strategy: cfg.strategy,
+        positions: positions.filter(p => !p.priceStale),
+        universe: watchTokens,
+        trencherHeld: trenchScope.held,
+        trencherCandidates: trenchScope.candidates,
+      });
       const focus = chooseFocus({
         agentId,
-        positions: positions.filter(p => !p.priceStale).map(p => ({ ...p, valueUsdg: Number(p.valueUsdg) })),
-        universe: watchTokens.map(t => ({ symbol: t.symbol, address: t.address })),
+        positions: scope.positions.map(p => ({ ...p, valueUsdg: Number(p.valueUsdg) })),
+        universe: scope.universe.map(t => ({ symbol: t.symbol, address: t.address })),
         prices: market.prices,
         paused: market.pausedTokens,
       });
@@ -12716,6 +12827,7 @@ async function main() {
       // was written at as its mark — see quietReviewRow, where a test runs it.
       await addDecision(quietReviewRow({
         id, agentId, review, quote, focusSymbol: focus?.symbol, historyRead: history?.read ?? false,
+        waitingForTrencher: cfg.strategy === "trencher" && !focus,
       }));
       // Failed persistence leaves this decision due for the next tick.
       if (verifyDecisionOwner(await decisionAgent(id), agentId).ok) {
@@ -12810,13 +12922,36 @@ async function main() {
         // A nominated coin (Telegram groups) is looked at first when it is
         // ELIGIBLE here — the same filter every tape coin passes. The hint
         // moves it up the queue, never onto it (trencher-brain.ts candidate).
-        const trenchCandidate = trenchBrain.candidate(trenchEligible.filter(c => trenchReviewable(c)), tgBook.priority());
+        const trenchCandidate = trenchBrain.candidate(trenchEligible.filter(c => trenchReviewable(c)), tgBook.priority(), cfg.discoveryFocus);
+        // Fomo research for these entry candidates' next review (fomo-child.ts reportReviewCandidates): research only, never awaited, never a gate.
+        fomoChild.reportReviewCandidates(trenchEligible.filter(c => !market.pausedTokens.has(c.token.toLowerCase()) && shouldEnter(c, TRENCHER_FAST, Math.floor(Date.now() / 1000)).enter).map(c => c.token));
         const trenchSymbols = new Set(trenchCandidate ? [trenchCandidate.symbol] : []);
         // Braked, "no pool passes the entry checks" would be a false sentence:
         // none was looked at. The strategy's idle reason says why instead, as
         // a WARNING written after this one, so it is the notice the desk shows
         // (idle-notice.ts) — not a second Trencher line saying the same thing.
-        if (fastTrencher) trenchNotice(agentId, trenchSymbols.size || entriesBraked ? "" : "No permitted, freshly priced high-volume pool passes the entry checks. Discovery will retry; automatic exits remain active.");
+        //
+        // NOR WHEN EVERY ELIGIBLE COIN IS BACKED OFF (trencher-brain.ts
+        // HoldBackoff): coins did pass the entry checks. Three causes, said
+        // apart. A coin the Brain HELD recently, with nothing material moved
+        // since, is the rotation working and needs no notice; nor does a coin
+        // whose pool had no tape row, where nothing was read. A coin waiting
+        // out FAILED CANDLE AND TRADE READS is a feed outage, and the desk is
+        // told so while ANY coin is in that window — whatever this slot
+        // picked, so a review of an early coin or of the coins outside the
+        // outage does not clear it. The notice and the idle line go through
+        // TrenchNoticeGate: said on change, never per flicker.
+        const backoff = fastTrencher ? trenchBrain.backedOffBreakdown() : { holds: 0, blind: 0, noTape: 0 };
+        const backedOff = trenchCandidate ? 0 : backoff.holds + backoff.blind + backoff.noTape;
+        if (fastTrencher) trenchNotice(agentId, trenchDeskNotice({ picked: trenchSymbols.size > 0, braked: entriesBraked, backoff }));
+        const parts = [
+          backoff.holds ? `${backoff.holds} held recently with nothing material moved since` : "",
+          backoff.blind ? `${backoff.blind} waiting out failed candle and trade reads` : "",
+          backoff.noTape ? `${backoff.noTape} waiting out a missing tape row for their pool` : "",
+        ].filter(Boolean).join("; ");
+        if (backoffIdleGate.say(backedOff ? `Entry rotation idle: all ${backedOff} eligible coin(s) backed off — ${parts}. No entry review until one moves or its window passes.` : "")) {
+          console.log(`[trencher] Entry rotation idle: all ${backedOff} eligible coin(s) backed off — ${parts}. No entry review until one moves or its window passes.`);
+        }
         const focusPositions = positions.filter(p => !fastTrencher || trenchHeld.has(p.token.toLowerCase())).map((p) => ({
           symbol: p.symbol,
           token: p.token,
@@ -12902,6 +13037,11 @@ async function main() {
               : null;
           const brainPeers = wire.theses;
           const brainOwn = wire.own ?? [];
+          const enhancedResearch = fastTrencher && !paper && decisionResearchEnabledFor(active.grant.smartAccount);
+          const ownLearning = enhancedResearch ? readOwnOutcomeLearningFile(merrymenHome(), {
+            account: active.grant.smartAccount, chainId: active.grant.chainId, expiresAt: active.grant.expiresAt, epoch: epochNow,
+          }, Math.floor(Date.now() / 1000)) : null;
+          const learnedOutcomes = ownLearning ? outcomeLearningLines(ownLearning) : [];
           // THE KEY THE DESK FOR THIS INSTRUMENT ACTUALLY READS.
           //
           // `_lenses_for` gives an equity token `sentiment` and a memecoin
@@ -13042,7 +13182,7 @@ async function main() {
               // Null when the ledger could not be read, and core refuses on
               // null rather than assuming a clean history.
               currentAccountingHistoryAuditable: historyAuditable,
-              contributionsKnown: accounting.contributionsKnown,
+              contributionsKnown: accounting.contributionsKnown && (initialCapitalLicence === null || initialCapitalComplete),
               equityComplete: !bookIncomplete,
               gasBasis: gasBasisOf(gasNow),
               // ASKED, NOT ASSUMED. This was hardcoded `false`, which is not a
@@ -13177,12 +13317,12 @@ async function main() {
               },
             },
             expectedTradeGasUsdg: expectedTradeGasMicro === null ? null : Number(expectedTradeGasMicro),
-            persona: cfg.agentName ? `You are ${cfg.agentName}, a Merryman.` : "",
+            persona: withAgentBrief(cfg.agentName ? `You are ${cfg.agentName}, a Merryman.` : "", cfg.agentBrief),
             // ITS OWN PUBLISHED THESES, and what came of them. Read from the
             // peer file rather than the child's `decisions` table because that
             // table is wiped by every redeploy — an agent reading memory from
             // it would permanently be having its first thought.
-            memory: memoryLines(brainOwn, Math.floor(Date.now() / 1000)),
+            memory: [...learnedOutcomes, ...memoryLines(brainOwn, Math.floor(Date.now() / 1000)).slice(0, 6 - learnedOutcomes.length)],
           };
           reviewPreparationMs = Math.max(reviewPreparationMs, Date.now() - tickStartedAt);
           inputs.reviewPreparationMs = reviewPreparationMs;
@@ -13201,8 +13341,17 @@ async function main() {
             }
             const freshTape = freshTrenchTape();
             const verifiedPool = autoTrench?.qualified.find(p => p.tokenAddress.toLowerCase() === focus.token.toLowerCase());
-            const tape = freshTape.find(p => p.tokenAddress.toLowerCase() === focus.token.toLowerCase() && (!verifiedPool || p.poolAddress === verifiedPool.poolAddress));
-            inputs.persona = trenchBrainPersona(focus.symbol, focus.held);
+            const tape = trenchTapeRow(focus.token, freshTape);
+            inputs.persona = withAgentBrief(trenchBrainPersona(focus.symbol, focus.held), cfg.agentBrief);
+            // WHAT IT SAID LAST TIME, AND WHAT MOVED SINCE — entry reviews only.
+            // Holds stay out of the published-memory lines (brain-material.ts
+            // memoryLines); this one line is the exception that carries a
+            // comparison rather than a repetition: when it held this coin, a
+            // short safe reason, and the price, hour volume and five-minute
+            // buyers then and now. First, within the six lines the Brain reads
+            // (graph.py memory[:6]) — and never at the paper notice's expense.
+            const holdLine = focus.held ? null : trenchBrain.holdMemory(focus.token, focus.symbol);
+            if (holdLine) inputs.memory = leadMemory(inputs.memory ?? [], holdLine, paper);
             if (tape) {
               Object.assign(inputs.market.signals, trenchBrainSignals(tape, trenchTapeAt, lastLiquidityUsd.get(focus.token.toLowerCase()) ?? null));
             }
@@ -13212,7 +13361,63 @@ async function main() {
             // No addresses, no vendor name (lens.ts; re-checked in fomo-child.ts).
             fomoChild.attachLens(inputs.market.signals, focus.token, cfg.brainUrl);
             const brainConfig = { url: cfg.brainUrl, token: cfg.brainToken, timeoutMs: 25_000 };
-            trenchBrain.launch(trenchContext, inputs, focus.token, async () => {
+            const projectContext = cfg.discoveryFocus === "new-projects"
+              ? { client, token: focus.token, chainId: active.grant.chainId, browser: browserCfg() } : null;
+            // Capture read-only inputs before launching: a re-arm must not let a
+            // background review read another grant's state or alter its limits.
+            const researchSize = researchEntrySize([
+              TRENCHER_FAST.perEntryUsdg, active.limits.perTradeUsdg, balances.cashUsdg,
+              active.limits.dailyUsdg > spentToday() ? active.limits.dailyUsdg - spentToday() : 0n,
+              BigInt(Math.max(0, Math.floor(earlyEntryBound(cfg.llmMaxActionUsdg, earlyBook.maxUsdgFor(focus.token), false) * 1e6))),
+            ]);
+            const costContext = enhancedResearch && !focus.held ? {
+              client: mainnetClient(), token: focus.token as `0x${string}`,
+              facts: verifiedPool?.poolAddress ? trenchPoolCache.verified(UNISWAP.v3Factory, verifiedPool.poolAddress) : undefined,
+              sizeUsdg: researchSize, gasPerOperationUsdg: expectedTradeGasMicro, tradeFeeBps: cfg.tradeFeeBps,
+            } : null;
+            if (enhancedResearch) inputs.persona += `\n\n${DECISION_RESEARCH_GUIDANCE}`;
+            // THE TRENCHER'S TERMS AS TRUSTED DESK POLICY (strategy-terms.ts),
+            // exactly where the momentum plan goes: research accounts' entry
+            // reviews. They state the plan's own exits, s and c, so the two
+            // never disagree; decide() sends them only to a Brain whose /health
+            // advertises "strategy-terms", and any other request is today's.
+            if (costContext) inputs.strategyTerms = trencherStrategyTerms(TRENCHER_FAST);
+            // THE INDEXER'S FLOW FOR THIS COIN (review-flow.ts), for the same
+            // reviews, only with a fresh tape row (a review without one is never
+            // paid for) and only to a Brain that lists the key. The probe is
+            // asked last, so a review with nothing to send reads nothing new.
+            const flowClient = costContext && tape && reviewFlow && flowLensProbe.advertises(cfg.brainUrl, ONCHAIN_FLOW_LENS) ? reviewFlow : null;
+            trenchBrain.launch(trenchContext, inputs, focus.token, async (review) => {
+              const reviewStartedAt = Date.now();
+              const costRead = costContext ? entryCostResearch(costContext) : Promise.resolve(null);
+              // The legs' hard backstop below, and a second's slack for the clock.
+              const legsMaxMs = EVIDENCE_BUDGET_MS + 2000;
+              // Asked now, beside the cost quotes and the candle and trade legs,
+              // and given up at their budget: it never holds the review past it.
+              // Only while the tape row is sure to be current when the legs are
+              // done, so the review cannot then be skipped as blind and the
+              // reading thrown away unpaid; otherwise asked after that check.
+              let flowRead = flowClient && tape && !entryMayGoBlind(trenchTapeReader.observedAtOf(tape), reviewStartedAt, legsMaxMs + 1000)
+                ? readFlowEvidence(flowClient, focus.token, EVIDENCE_BUDGET_MS) : null;
+              const projectRead = projectContext
+                ? projectPurpose.read(projectContext.client, projectContext.token, projectContext.chainId, projectContext.browser)
+                : Promise.resolve(null);
+              // NOTHING CURRENT TO JUDGE, SO NOTHING IS PAID FOR — an ENTRY
+              // review only; a held position is reviewed whatever the evidence.
+              // The Brain would be billed to read no flow at all and could only
+              // come back HOLD. The coin waits one backoff window unless it
+              // moves, the skip is said once per coin per window, and the
+              // funnel files it as evidence-unavailable.
+              const skipBlindEntry = (cause: "blind" | "no-tape", words: string): ShadowOutcome => {
+                const say = trenchBrain.evidenceSkipped(focus.token, cause);
+                funnel.note(focus.token, focus.symbol, classifyStage({ kind: "evidence-unavailable", why: cause }));
+                return {
+                  ran: false,
+                  why: say ? `Entry review of ${focus.symbol} not paid for: ${words}; it waits a backoff window unless it moves.` : "",
+                  nextReviewAt: null,
+                  trigger: { fire: false, reason: null, detail: "entry evidence unavailable", candidates: [] },
+                };
+              };
               // Enrichment cannot block the trading tick or mutate a review after its deadline.
               if (tape) {
                 // THE BUDGET IS NOW SPENT PER LEG, INSIDE readPoolEvidence, so
@@ -13225,9 +13430,11 @@ async function main() {
                 let timer: ReturnType<typeof setTimeout> | undefined;
                 const evidence = await Promise.race([
                   readPoolEvidence(tape.poolId, focus.token, EVIDENCE_BUDGET_MS).catch(() => null),
-                  new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), EVIDENCE_BUDGET_MS + 2000); }),
+                  new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), legsMaxMs); }),
                 ]).finally(() => { if (timer) clearTimeout(timer); });
-                const detail = evidence ? JSON.stringify(summarizeEvidence(evidence)) : 'Detailed candles and trade sample unavailable within the review budget; do not infer zero activity.';
+                // The compact copy (pool-evidence.ts brainEvidence): the manager
+                // reads only technical[:2400], tape JSON first, then this.
+                const detail = evidence ? brainEvidence(evidence) :'Detailed candles and trade sample unavailable within the review budget; do not infer zero activity.';
                 inputs.market.signals.technical += `\n${detail}`;
                 // EACH HALF PRINTS ITS OWN OUTCOME. Both halves used to be
                 // driven off one nullable, so `candles=23 trades=budget` was
@@ -13237,6 +13444,23 @@ async function main() {
                 const half = (r: { failure?: string; data: unknown[] } | undefined) =>
                   r === undefined ? "no-read" : r.failure ?? r.data.length;
                 console.log(`[${short(agentId)}] [trencher] evidence ${focus.symbol}: candles=${half(evidence?.candles)} trades=${half(evidence?.trades)}`);
+                // Both legs failed (a provider cooldown or the request budget,
+                // in practice) on a tape row past one refresh: a stale summary
+                // with no flow behind it (trencher-brain.ts entryEvidenceBlind).
+                const tapeAt = trenchTapeReader.observedAtOf(tape);
+                if (!focus.held && entryEvidenceBlind(evidence, tapeAt, Date.now())) {
+                  const age = tapeAt === null ? "gone from the fresh tape" : `${Math.round((Date.now() - tapeAt) / 1000)}s old`;
+                  return skipBlindEntry("blind", `candles and trades both unavailable and its tape row is ${age}`);
+                }
+                // Past the blind check, the flow not yet asked is asked now, on
+                // what is left of the same budget (none left: nothing is sent).
+                const flowLeftMs = EVIDENCE_BUDGET_MS - (Date.now() - reviewStartedAt);
+                if (flowClient && !flowRead && flowLeftMs > 0) flowRead = readFlowEvidence(flowClient, focus.token, flowLeftMs);
+                // A review that goes ahead without either leg (a current tape
+                // row, or a held position) holds on missing flow, not on the
+                // coin: an entry HOLD from it gets one evidence window, never
+                // a run of holds or hold memory (trencher-brain.ts launch).
+                if (!evidence || (evidence.candles.failed && evidence.trades.failed)) review.withoutEvidence();
               } else {
                 // A REVIEW WITH NO TAPE ENTRY IS NOT A REVIEW WITH NO EVIDENCE
                 // LINE, and until now those were the same thing to anyone
@@ -13253,7 +13477,45 @@ async function main() {
                 // This does not fix the gap — it makes it countable, which is
                 // the prerequisite for deciding whether the window or the pool
                 // match is the thing to change.
+                //
+                // AND AN ENTRY REVIEW IN THAT STATE IS NOT PAID FOR: no tape
+                // row means no memecoin signals and no pool evidence at all,
+                // strictly less than the blind case above. It is filed as
+                // `no-tape`, not as a feed outage — no read was made — and said
+                // once per coin per window by the skip itself. A held position
+                // is still reviewed, flagged like any review without evidence
+                // (a held review never touches the backoff either way).
+                if (!focus.held) return skipBlindEntry("no-tape", "its pool has no fresh tape row, so there are no memecoin signals or pool evidence");
                 console.log(`[${short(agentId)}] [trencher] evidence ${focus.symbol}: none — no fresh tape entry for this pool, so the review has no memecoin signals`);
+                review.withoutEvidence();
+              }
+              const project = await projectRead;
+              if (project) inputs.market.signals.builder = [project, inputs.market.signals.builder].filter(Boolean).join("\n\n");
+              const costResearch = await costRead;
+              const costEvidence = costResearch?.text ?? null;
+              if (costEvidence) {
+                inputs.market.signals.liquidity = [costEvidence, inputs.market.signals.liquidity].filter(Boolean).join("\n\n");
+                // Pulse can reserve a slot for project research and omit the
+                // liquidity analyst; the manager still needs the same costs.
+                inputs.memory = [costEvidence, ...(inputs.memory ?? []).slice(0, 5)];
+              }
+              // Its own key, which Brain's manager reads beside the measured
+              // market input: technical's 2,400-character cut is not touched.
+              // No block is no key — a missing reading is never "no flow".
+              const flow = flowRead ? await flowRead : null;
+              if (flow) {
+                if (flow.lens) inputs.market.signals[ONCHAIN_FLOW_LENS] = flow.lens;
+                console.log(`[${short(agentId)}] [trencher] flow ${focus.symbol}: ${flow.status}`);
+              }
+              // THE MOMENTUM ENTRY PLAN, for research accounts' entry reviews
+              // only (costContext exists exactly then): the mechanical exits
+              // from TRENCHER_FAST, the round-trip cost just read (or its gas
+              // floor), the cost c each exit still pays beyond the average
+              // fill the brackets run from (trenchBreakEven), and how to turn
+              // odds of +take before -stop into an edge instead of inventing one.
+              // Research inputs only: no cap, guard, gate or exit changes.
+              if (costContext) {
+                inputs.persona += `\n\n${trenchMomentumBrief(TRENCHER_FAST, trenchBreakEven(costResearch, costContext), costContext.sizeUsdg)}`;
               }
               // Once the decision is persisted (runShadow writes it before it
               // returns), the nomination book hears what was decided about this
@@ -13272,7 +13534,7 @@ async function main() {
                 // A paid review, claimed against today's energy once the
                 // trigger has fired and before it is paid for.
                 admit: claimReview,
-              }).then(outcome => { tgNoteReview(focus.token, outcome); return outcome; }); },
+              }).then(outcome => { if (flowLensRefused(Boolean(flow?.lens), outcome)) flowLensProbe.invalidate(); tgNoteReview(focus.token, outcome); return outcome; }); },
               m => console.log(`[trencher] ${m}`));
           }
           const outcome: ShadowOutcome = fastTrencher ? { ran: false, why: "Trencher Brain review runs off the trading tick", nextReviewAt: Math.floor(Date.now() / 1000) + 60, trigger: { fire: false, reason: null, detail: "background review", candidates: [] } } : await runShadow(
@@ -14765,6 +15027,7 @@ async function main() {
     paper: paperActive(),
     paused: isPaused(),
     workerAliveSec: 0, // the worker itself is answering, so it's alive
+    admission: { level: admission.level, draining },
     grant: active
       ? {
           perTradeUsdg: active.grant.caps.perTradeUsdg,
@@ -14871,6 +15134,11 @@ async function main() {
     // ticker shape /buy parses and the same watch-set resolution it uses.
     buyable: (symbol) => /^[A-Za-z]{1,6}$/.test(symbol) && resolveOrderToken(symbol, watchTokens).kind === "token",
     tailsAvailable: () => !fomoOff && fomoTailsState() === "on",
+    // A coin's measured facts for a room that asks what happened to it
+    // (docs/tg-groups.md "A coin's facts, on request"): GeckoTerminal's public
+    // index on the fleet quota, at most 4 reads per room per 10 minutes and 20
+    // per agent per hour, 10 s each. Independent of the desk's switch.
+    facts: createCoinFactsReader({ limiter: new FactsLimiter() }),
   });
 
   // Kept for the SIGTERM handler below, which stops the poll on the way out.

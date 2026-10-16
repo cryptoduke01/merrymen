@@ -69,6 +69,7 @@ import { policyFor } from "./fomo/freshness";
 import { isRobinhoodToken, robinhoodChain, tokenFromKey, tokenIdentity } from "./fomo/identity";
 import {
   createIngestor,
+  evidenceRevOf,
   higherPriority,
   INGEST_DEFAULTS,
   type IngestConfig,
@@ -174,6 +175,7 @@ import {
   type StoredTraderEvent,
   type StoredTraderEvidence,
 } from "./fomo/store";
+import { REVIEW_CANDIDATES, type ReviewCandidate } from "./fomo/review-candidates";
 import { AlertStream, type ClockPort, type SocketLike, type StreamState, type StreamStateDetail, type TimerPort } from "./fomo/stream";
 import { readTokenPools, solanaMarkPrice } from "./venues/geckoterminal";
 import { capabilityFromStream, mergeCapability, type StreamProbe } from "./fomo/capabilities";
@@ -252,6 +254,15 @@ export const FOMO_PASS_DEFAULTS: Readonly<FomoPassKnobs> = Object.freeze({
 
 /** Signals one child file may carry (the contract's bound). */
 export const MAX_CHILD_SIGNALS = 40;
+/**
+ * Places in one child file kept for coins that are ONLY review candidates
+ * (signalsFor), taken from the lowest-ranked discovery coins and never from a
+ * held coin or a watch. As many as one tenant can carry
+ * (REVIEW_CANDIDATES.carriedMax): research is queued only for candidates that
+ * reached the file (queueCandidateResearch), and a full file must not quietly
+ * turn every candidate away.
+ */
+export const CANDIDATE_SIGNAL_RESERVE = REVIEW_CANDIDATES.carriedMax;
 /** Cohort and dependency events per signal (the contract's bound). */
 export const MAX_SIGNAL_TRIGGERS = 25;
 /** Events per tail in a child file (the contract's bound). */
@@ -414,6 +425,20 @@ export interface FomoPassDeps {
    * from heldTokens; an unread mirror is not an empty book.
    */
   holdingsKnown?(tenant: string): boolean;
+  /**
+   * The coins a tenant's OWN review named lately (BrokerReport
+   * "review-candidates", kept by the service that answered its child:
+   * service.ts reviewCandidatesSnapshot), newest first. Absent: none.
+   */
+  reviewCandidates?(tenant: string, now: number): readonly ReviewCandidate[];
+  /**
+   * Whether this AGENT (the roster's agentId, its smart account) is on the
+   * operator's research allowlist (orchestrator.ts: decision-research.ts
+   * decisionResearchEnabledFor, MERRYMEN_DECISION_RESEARCH_ACCOUNTS). Absent,
+   * false or throwing: no, and a candidate queues nothing and adds no signal.
+   * Injected because the pass reads no environment.
+   */
+  reviewResearchFor?(agentId: string): boolean;
   childHome(tenant: string): string;
   /**
    * Whether this replica still speaks for the tenant's running child, asked
@@ -457,6 +482,13 @@ export interface FomoPassHealth {
   cohortWaitingOnBudget: boolean;
   research: { done: number; retried: number; failed: number };
   childFilesWritten: number;
+  /**
+   * Review candidates since this process started: research items queued for
+   * candidates a file carried, and candidate-only coins a full file still
+   * turned away (more than CANDIDATE_SIGNAL_RESERVE, or held coins and watches
+   * filling it). Counts only: no tenant, no coin.
+   */
+  reviewCandidates: { queued: number; leftOut: number };
   drafts: { admitted: number; duplicate: number };
   /** Calls to the publication sender. Zero by construction in this change. */
   senderCalls: number;
@@ -1072,8 +1104,11 @@ interface Candidate {
   priority: RetrievalPriority;
   reasons: Set<ChildSignal["reasons"][number]>;
   firstSeenAt: number | null;
+  /** The newest activity that put the coin here; a review naming it is not activity (-Infinity alone). */
   lastSeenAt: number;
   label: TokenLabel | null;
+  /** When this owner's review last named it (the `candidate` reason), kept apart from lastSeenAt. */
+  admittedAt?: number;
 }
 
 const EMPTY_INTEREST: InterestSnapshot = {
@@ -1135,6 +1170,12 @@ export function makeFomoPass(deps: FomoPassDeps): FomoPass {
   /** When each coin first went into a tenant's file: the honest "first seen" of a holding or watch with no cohort activity. */
   const firstTracked = new Map<string, Map<string, number>>();
   const assessmentSeen = new Map<string, number>();
+  /** This pass's review candidates per roster tenant (syncReviewCandidates): allowlisted, research on, bounded. */
+  let candidatesNow = new Map<string, ReviewCandidate[]>();
+  /** tenant → the candidate coins its last written file carried: the only ones queueCandidateResearch pays for. */
+  const candidateFiled = new Map<string, Set<string>>();
+  /** tokenKey → when this replica last queued candidate research for it (at most once per REVIEW_CANDIDATES.refreshEveryMs). */
+  const candidateQueued = new Map<string, number>();
 
   const counters = {
     routed: 0,
@@ -1145,6 +1186,8 @@ export function makeFomoPass(deps: FomoPassDeps): FomoPass {
     draftsAdmitted: 0,
     draftsDuplicate: 0,
     senderCalls: 0,
+    candidatesQueued: 0,
+    candidatesLeftOut: 0,
   };
   let lastPassAt: number | null = null;
   let lastFailure: { at: number; step: string; reason: string } | null = null;
@@ -1703,6 +1746,110 @@ export function makeFomoPass(deps: FomoPassDeps): FomoPass {
     }
   };
 
+  // ── review candidates (every replica, its roster) ──
+
+  /**
+   * RESEARCH FOR THE COINS AN OWNER'S REVIEW IS ABOUT TO LOOK AT
+   * (fomo/review-candidates.ts). For each roster tenant whose AGENT is on the
+   * operator's allowlist and whose owner has research on (data access, and
+   * monitoring or follow — the same test as the file's signals), the coins
+   * its child named lately become:
+   *
+   *   a `candidate`     signal in that owner's own file (signalsFor), so the
+   *                     next review of the coin carries its dossier and lens;
+   *   a research item   for each candidate that file actually carried
+   *                     (queueCandidateResearch, after the files are written).
+   *
+   * WHAT IS RE-CHECKED HERE: the allowlist (by the roster's agent) and the
+   * owner's research switches. The live rail and the fast Trencher are the
+   * child's to check (fomo-child.ts reportReviewCandidates); this replica
+   * cannot see them, so an agent that just left them keeps its candidates
+   * (and their research) until they age out of keepMs. Research only either way.
+   *
+   * Rebuilt every pass from the service's in-process windows: the child
+   * reports to the replica that spawned it, which is the one writing its
+   * file. A failure costs this tenant's candidates this pass, never the pass.
+   */
+  const syncReviewCandidates = async (roster: readonly FomoRosterMember[], now: number): Promise<void> => {
+    const next = new Map<string, ReviewCandidate[]>();
+    candidatesNow = next;
+    const read = deps.reviewCandidates;
+    const allowed = deps.reviewResearchFor;
+    if (!read || !allowed) return;
+    for (const m of roster) {
+      const tenant = tenantKey(m.tenant);
+      if (!tenant || next.has(tenant)) continue;
+      let listed = false;
+      try {
+        listed = typeof m.agentId === "string" && allowed(m.agentId) === true;
+      } catch {
+        listed = false;
+      }
+      if (!listed) continue;
+      const access = await accessFor(tenant, now);
+      if (!access || !access.dataAccess || !(access.monitoring || access.follow)) continue;
+      let list: readonly ReviewCandidate[];
+      try {
+        list = read(tenant, now) ?? [];
+      } catch (e) {
+        noteFailure("review-candidates", e);
+        continue;
+      }
+      const kept: ReviewCandidate[] = [];
+      for (const c of Array.isArray(list) ? list : []) {
+        if (kept.length >= REVIEW_CANDIDATES.carriedMax) break;
+        const token = typeof c?.tokenKey === "string" ? tokenFromKey(c.tokenKey) : null;
+        if (!token || token.key !== c.tokenKey || !isRobinhoodToken(token) || !Number.isFinite(c.admittedAt)) continue;
+        if (!kept.some((k) => k.tokenKey === c.tokenKey)) kept.push({ tokenKey: c.tokenKey, admittedAt: c.admittedAt });
+      }
+      if (kept.length > 0) next.set(tenant, kept);
+    }
+  };
+
+  /**
+   * THE RESEARCH ITEMS FOR REVIEW CANDIDATES, paid only for coins a file
+   * actually carried: a candidate a full file turned away (signalsFor) would
+   * be research nobody reads.
+   *
+   *   DISCOVERY priority. The leader's queue pays for it like any discovery
+   *   item: the discovery share, the background research cap, behind held
+   *   coins, watches and a due cohort refresh.
+   *
+   *   AT MOST ONCE PER COIN PER REVIEW_CANDIDATES.refreshEveryMs ON THIS
+   *   REPLICA, measured from when it was last queued here, never by a clock
+   *   bucket: a bucket would queue a coin named seconds before a boundary
+   *   again seconds after it. The evidence revision is the 30-minute bucket
+   *   the item is queued in, so replicas and owners asking in one bucket
+   *   coalesce into one row, and a coin queued again (30 minutes on) is always
+   *   a new revision, so a fresh read.
+   *
+   * No tenant is written on the row: which coins one owner's review looks at
+   * is that owner's business. Without a key nothing is queued (it could only
+   * fail its attempts).
+   */
+  const queueCandidateResearch = async (now: number): Promise<void> => {
+    for (const [k, at] of candidateQueued) if (now - at >= REVIEW_CANDIDATES.refreshEveryMs || at > now) candidateQueued.delete(k);
+    for (const t of [...candidateFiled.keys()]) if (!candidatesNow.has(t)) candidateFiled.delete(t);
+    if (!configured()) return;
+    const bucket = Math.floor(now / REVIEW_CANDIDATES.refreshEveryMs);
+    for (const [tenant, list] of candidatesNow) {
+      const filed = candidateFiled.get(tenant);
+      if (!filed) continue;
+      for (const c of list) {
+        if (!filed.has(c.tokenKey) || candidateQueued.has(c.tokenKey)) continue;
+        candidateQueued.set(c.tokenKey, now);
+        try {
+          await enqueueResearch(db, c.tokenKey, evidenceRevOf([`review-candidate:${bucket}`]), RESEARCH_PRIORITY.discovery, [], now);
+          counters.candidatesQueued++;
+        } catch (e) {
+          // Asked again next pass.
+          candidateQueued.delete(c.tokenKey);
+          noteFailure("research-enqueue", e);
+        }
+      }
+    }
+  };
+
   // ── publication drafts (every replica, its roster) and the outbox (leader) ──
 
   const latestBasis = async (tenant: string, kind: PublicationKind, tokenKey: string): Promise<{ contentRev: number; basis: ContentBasis } | null> => {
@@ -1892,6 +2039,11 @@ export function makeFomoPass(deps: FomoPassDeps): FomoPass {
    *                     tail began (≤ TAIL_SIGNAL_SCAN per tail), at discovery
    *                     priority like dependencies: a tail asks for a look,
    *                     not for precedence over the cohort
+   *   candidate         coins THIS owner's own review named
+   *                     (syncReviewCandidates), at discovery priority, with
+   *                     their dossier and lens and no triggers; a coin that
+   *                     is only a candidate has up to CANDIDATE_SIGNAL_RESERVE
+   *                     places, taken from the lowest-ranked discovery coins
    *
    * Nothing of any other owner's: no other owner's holdings, watches or
    * dependencies reach the file, as a coin, a reason or a trigger. A coin
@@ -1939,10 +2091,43 @@ export function makeFomoPass(deps: FomoPassDeps): FomoPass {
       for (const a of await recentActiveTokens(db, since, TAIL_SIGNAL_SCAN, { userIds: [t.userId] })) add(a.tokenKey, "discovery", "tailed", null, a.newestAt, null);
     }
     const tailTriggers = tailTriggerSince(tails, ctx.cohort, now);
-
-    const ordered = [...cand.entries()]
-      .sort((x, y) => PRIORITY_ORDER[x[1].priority] - PRIORITY_ORDER[y[1].priority] || y[1].lastSeenAt - x[1].lastSeenAt || (x[0] < y[0] ? -1 : 1))
-      .slice(0, MAX_CHILD_SIGNALS);
+    // THIS TENANT'S OWN REVIEW CANDIDATES (syncReviewCandidates: its agent is
+    // allowlisted and its research is on), at discovery priority. Naming a
+    // coin is not activity: the `candidate` reason never moves lastSeenAt
+    // (-Infinity when it is the only reason), so a candidate that is also a
+    // thesis, dependency or tailed coin ranks by that activity alone and never
+    // above a coin the cohort bought more recently. The review's admission
+    // time only orders candidate-only coins among themselves.
+    for (const c of candidatesNow.get(tenant) ?? []) {
+      add(c.tokenKey, "discovery", "candidate", null, Number.NEGATIVE_INFINITY, null);
+      const entry = cand.get(c.tokenKey);
+      if (entry) entry.admittedAt = Math.max(entry.admittedAt ?? Number.NEGATIVE_INFINITY, c.admittedAt);
+    }
+    const candidateOnly = (c: Candidate): boolean => c.reasons.size === 1 && c.reasons.has("candidate");
+    const entries = [...cand.entries()];
+    const others = entries
+      .filter(([, c]) => !candidateOnly(c))
+      .sort((x, y) => PRIORITY_ORDER[x[1].priority] - PRIORITY_ORDER[y[1].priority] || y[1].lastSeenAt - x[1].lastSeenAt || (x[0] < y[0] ? -1 : 1));
+    const namedOnly = entries
+      .filter(([, c]) => candidateOnly(c))
+      .sort((x, y) => (y[1].admittedAt ?? 0) - (x[1].admittedAt ?? 0) || (x[0] < y[0] ? -1 : 1));
+    // ROOM FOR CANDIDATES (CANDIDATE_SIGNAL_RESERVE). A full file keeps up to
+    // that many candidate-only coins by leaving out its lowest-ranked
+    // discovery coins (the cohort's oldest), never a held coin or a watch.
+    // In the file they come right after held coins and watches, so the 2 MB
+    // fit (child-file.ts fitToLimit, which cuts from the end) reaches every
+    // other discovery coin first. What is still turned away is counted, and
+    // queueCandidateResearch pays only for what the file carried.
+    const protectedCount = others.filter(([, c]) => c.priority !== "discovery").length;
+    const reserve = Math.min(namedOnly.length, CANDIDATE_SIGNAL_RESERVE, Math.max(0, MAX_CHILD_SIGNALS - protectedCount));
+    const keptOthers = others.slice(0, MAX_CHILD_SIGNALS - reserve);
+    const keptNamed = namedOnly.slice(0, Math.max(0, MAX_CHILD_SIGNALS - keptOthers.length));
+    counters.candidatesLeftOut += namedOnly.length - keptNamed.length;
+    const ordered = [
+      ...keptOthers.filter(([, c]) => c.priority !== "discovery"),
+      ...keptNamed,
+      ...keptOthers.filter(([, c]) => c.priority === "discovery"),
+    ];
     if (ordered.length === 0) return [];
 
     const tracked = firstTracked.get(tenant) ?? new Map<string, number>();
@@ -1965,7 +2150,12 @@ export function makeFomoPass(deps: FomoPassDeps): FomoPass {
         const w = tailTriggers.get(e.trader.userId);
         return w !== undefined && e.observedAt >= w.observedSince && inTail(e, w.eventSince);
       };
-      const kept = events.filter((e) => cohortIds.has(e.trader.userId) || ownDeps.has(e.trader.userId) || tailedBuyer(e)).slice(0, MAX_SIGNAL_TRIGGERS);
+      // A coin that is only a review candidate carries NO triggers: it is in
+      // the file for its dossier and lens, and nothing on it may count as
+      // breadth (the child does not assess it for following either).
+      const kept = candidateOnly(c)
+        ? []
+        : events.filter((e) => cohortIds.has(e.trader.userId) || ownDeps.has(e.trader.userId) || tailedBuyer(e)).slice(0, MAX_SIGNAL_TRIGGERS);
       const triggers = kept.map(asTraderEvent);
       // THE TRIGGERS ONLY HER TAIL ADMITTED (a buy by a tailed trader who is
       // neither in the cohort nor one of her own position dependencies), by
@@ -2207,6 +2397,8 @@ export function makeFomoPass(deps: FomoPassDeps): FomoPass {
         deps.writeChildFile(deps.childHome(tenant), file);
         fileWritten.set(tenant, { at: now, key });
         counters.childFiles++;
+        // What this file carried is what candidate research may be paid for.
+        candidateFiled.set(tenant, new Set(file.signals.filter((s) => s.reasons.includes("candidate")).map((s) => s.token.key)));
       } catch (e) {
         noteFailure("child-file", e);
       }
@@ -2234,6 +2426,7 @@ export function makeFomoPass(deps: FomoPassDeps): FomoPass {
       cohortWaitingOnBudget,
       research: { done: counters.researchDone, retried: counters.researchRetried, failed: counters.researchFailed },
       childFilesWritten: counters.childFiles,
+      reviewCandidates: { queued: counters.candidatesQueued, leftOut: counters.candidatesLeftOut },
       drafts: { admitted: counters.draftsAdmitted, duplicate: counters.draftsDuplicate },
       senderCalls: counters.senderCalls,
       lastPassAt,
@@ -2255,6 +2448,9 @@ export function makeFomoPass(deps: FomoPassDeps): FomoPass {
         (h.cohortWaitingOnBudget ? " (refresh waiting on the budget)" : "") +
         `, research ${h.research.done} done ${h.research.retried} retried ${h.research.failed} failed` +
         `, ${h.childFilesWritten} child file(s), ${h.drafts.admitted} draft(s) held by policy, sender calls ${h.senderCalls}` +
+        (h.reviewCandidates.queued || h.reviewCandidates.leftOut
+          ? `, review candidates ${h.reviewCandidates.queued} queued ${h.reviewCandidates.leftOut} left out of full files`
+          : "") +
         (h.lastFailure ? `, last failure in ${h.lastFailure.step} ${ago(h.lastFailure.at, now)}` : ""),
     );
   };
@@ -2327,12 +2523,14 @@ export function makeFomoPass(deps: FomoPassDeps): FomoPass {
         fleetRunning = null;
       });
     }
+    await step("review-candidates", () => syncReviewCandidates(rosterIn, now));
     await step("child-files", () => writeChildFiles(roster, now));
+    await step("review-candidate-research", () => queueCandidateResearch(now));
     await step("drafts", () => runDrafts(roster, now));
     // A tenant whose lease moved away is not ours to remember; if it comes
     // back, its route and file are written afresh.
     const here = new Set(roster);
-    for (const m of [accessCache, routeWritten, heldWritten, fileWritten, firstTracked, assessmentSeen] as Map<string, unknown>[]) {
+    for (const m of [accessCache, routeWritten, heldWritten, fileWritten, firstTracked, assessmentSeen, candidateFiled] as Map<string, unknown>[]) {
       for (const t of [...m.keys()]) if (!here.has(t)) m.delete(t);
     }
     lastPassAt = now;

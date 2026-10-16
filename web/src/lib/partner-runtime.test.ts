@@ -45,6 +45,22 @@ function dependencies() {
 }
 
 describe("consented partner runtime", () => {
+  it("passes only this tenant's saved brief outside financial state", async () => {
+    let seen = false;
+    const adapter = createPartnerRuntime({
+      ...dependencies(), facts: async () => undefined,
+      settings: async () => response({ ...settings, values: { ...settings.values, agentBrief: "Verified project research, in a casual voice." } }),
+      reply: async (body, options) => {
+        seen = true;
+        assert.equal(options?.agentBrief, "Verified project research, in a casual voice.");
+        assert.doesNotMatch(body.state as string, /Verified project research|other-owner-brief/);
+        return { reply: "I will explain what I can verify." };
+      },
+    });
+    await adapter.replyToPartner(TENANT, { message: "Hello", agentBrief: "other-owner-brief" } as never);
+    assert.ok(seen);
+  });
+
   it("uses the consented agent's exact ledger reply instead of caller-supplied trade state", async () => {
     const adapter = createPartnerRuntime({ ...dependencies(), reply: generateAgentReply,
       facts: async (body, account) => {

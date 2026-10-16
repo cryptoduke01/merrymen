@@ -54,6 +54,35 @@ export function energyModeOf(raw: string | undefined): EnergyMode {
   return "off";
 }
 
+const ACCOUNT_ADDRESS = /^0x[0-9a-fA-F]{40}$/;
+const ZERO_ACCOUNT = `0x${"0".repeat(40)}`;
+
+/**
+ * Operator-only MERRYMEN_ENERGY_EXEMPT_ACCOUNTS. Exact smart-account addresses,
+ * never names, owners, prefixes or `all`. An invalid list exempts nobody.
+ */
+export function energyExemptAccountsOf(raw: string | undefined): readonly string[] {
+  if (!raw?.trim()) return [];
+  const accounts = raw.split(",").map((value) => value.trim());
+  if (accounts.some((account) => !ACCOUNT_ADDRESS.test(account) || account.toLowerCase() === ZERO_ACCOUNT)) return [];
+  return [...new Set(accounts.map((account) => account.toLowerCase()))];
+}
+
+/**
+ * Use the armed grant's verified smart account, not tenant-controlled identity
+ * metadata. Exemption means observe: keep the real holding level and durable
+ * usage counters, but withhold no work for energy. Every trading wall remains
+ * independent, and removing the exemption resumes against today's counts.
+ */
+export function energyModeForAccount(
+  mode: EnergyMode,
+  smartAccount: string,
+  exemptAccounts: readonly string[],
+): EnergyMode {
+  if (mode !== "enforce" || !ACCOUNT_ADDRESS.test(smartAccount)) return mode;
+  return exemptAccounts.includes(smartAccount.toLowerCase()) ? "observe" : mode;
+}
+
 /** The UTC calendar day of a moment, 'YYYY-MM-DD'. The allowance resets at 00:00 UTC. */
 export function utcDay(nowSec: number): string {
   return new Date(Math.floor(nowSec) * 1000).toISOString().slice(0, 10);

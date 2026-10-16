@@ -1,7 +1,7 @@
 import { Board } from "./Board";
 import { PerformanceChart } from "../DitherChart";
 import { useState } from "react";
-import { MessagesSquare, Search } from "lucide-react";
+import { ArrowUpRight, ChartNoAxesCombined, MessagesSquare, Search } from "lucide-react";
 import { useGroupChatSupported } from "../groupchat";
 import {
   coinPrice,
@@ -17,6 +17,7 @@ import {
 } from "../live";
 import { Coin, Face, MovingFigure, NameBlock, Pill } from "../ui";
 import { AgentStrip } from "../AgentStrip";
+import Link from "../Link";
 import { usd, usdParts } from "@/lib/format";
 import { pausedRecovery } from "../recovery-view";
 
@@ -36,6 +37,7 @@ export function Home({
   hasAgent,
   read,
   retired = null,
+  retiredAgents = [],
 }: {
   tokens: LiveToken[];
   agents: LiveAgent[];
@@ -67,6 +69,7 @@ export function Home({
   read: import("../live").ReadState;
   /** Accounts the board folded into a count. See Board. */
   retired?: number | null;
+  retiredAgents?: import("../live").RetiredAgent[];
 }) {
   // A count we do not have sorts last and filters out — it is not a zero, but
   // it is also not evidence that anybody bought anything, so an unread row does
@@ -166,6 +169,11 @@ export function Home({
           </div>
         )}
         <button type="button" className="home-deposit" onClick={onDeposit}>{mine ? "Deposit" : "Set up your agent"}<span aria-hidden="true">↗</span></button>
+        {mine && <Link className="owner-trades-link" href="/agent#trades">
+          <ChartNoAxesCombined size={20} aria-hidden="true"/>
+          <span><strong>Trades &amp; P&amp;L</strong></span>
+          <ArrowUpRight size={18} aria-hidden="true"/>
+        </Link>}
         {mine && (
           <PerformanceChart
             balance values={mine.history ?? []}
@@ -185,7 +193,7 @@ export function Home({
           A reading, not a second set of controls: it says what the settings
           say and links to them. It renders nothing for a visitor with no
           agent, who has no bot to connect and no strategy to run. */}
-      <AgentStrip hasAgent={hasAgent} recovery={mine?.recovery} funds={mine?.recoveryFunds}/>
+      <AgentStrip hasAgent={hasAgent} recovery={mine?.recovery} funds={mine?.recoveryFunds} agentDown={mine?.agentDown}/>
 
       {/*
         THE LEADERBOARD, NOT A SECOND COPY OF IT.
@@ -205,6 +213,7 @@ export function Home({
         preview
         read={read}
         retired={retired}
+        retiredAgents={retiredAgents}
         agents={agents}
         theses={theses}
         mine={mine}

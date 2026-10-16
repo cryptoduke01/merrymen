@@ -119,6 +119,7 @@ const REASONS: Record<Reason, true> = {
   "early-discovery": true,
   "robinhood-thesis": true,
   tailed: true,
+  candidate: true,
 };
 
 const STANCES: Record<DossierClaim["stance"], true> = { supporting: true, opposing: true, neutral: true };

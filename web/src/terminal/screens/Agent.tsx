@@ -25,6 +25,7 @@ import {
   type ChatMessage,
 } from "../account";
 import { ageOf, money, pctPts, type LiveMine, type LiveToken } from "../live";
+import { positionLabel, tokenForPosition } from "../position-token";
 import { strategyName } from "../strategy";
 import { Coin, Empty, Face } from "../ui";
 import { NameChip } from "../NameChip";
@@ -67,6 +68,8 @@ export function Agent({
   energy,
   account,
   chainId,
+  followTradeLinks = false,
+  routePath,
 }: {
   mine: LiveMine;
   tokens: LiveToken[];
@@ -120,6 +123,10 @@ export function Agent({
   account?: string | null;
   /** The grant's chain: $MERRYMEN sent to the account only counts on Robinhood Chain. */
   chainId?: number | null;
+  /** Only the route's Agent follows #trades; the floating chat stays independent. */
+  followTradeLinks?: boolean;
+  /** The route may change between /chat and /agent without remounting this screen. */
+  routePath?: string;
 }) {
   const ask = chat.draft;
   const setAsk = chat.setDraft;
@@ -137,6 +144,10 @@ export function Agent({
   const running = chat.confirming;
   const [expanded, setExpanded] = useState(false);
   const [view, setView] = useState<"positions" | "trades">("positions");
+  const linkedPortfolio = useRef(false);
+  const portfolioMounted = useRef(false);
+  const portfolioOpener = useRef<HTMLElement | null>(null);
+  const portfolioSummary = useRef<HTMLButtonElement>(null);
   const viewport = useRef<HTMLElement>(null);
   const input = useRef<HTMLTextAreaElement>(null);
   const portfolio = useRef<HTMLDialogElement>(null);
@@ -192,11 +203,64 @@ export function Agent({
     observer.observe(node);
     return () => observer.disconnect();
   }, []);
+  // The owner shortcut opens the existing portfolio, with all of its normal
+  // evidence and export gates. Hash history controls only a linked opening;
+  // browsing to an unrelated anchor must not close a manually opened panel.
+  useEffect(() => {
+    if (!followTradeLinks) return;
+    const syncPortfolio = () => {
+      const requested = ["/agent", "/chat"].includes(window.location.pathname) && window.location.hash === "#trades";
+      if (requested) {
+        linkedPortfolio.current = true;
+        setView("trades");
+        setExpanded(true);
+      } else if (linkedPortfolio.current) {
+        linkedPortfolio.current = false;
+        setExpanded(false);
+      }
+    };
+    syncPortfolio();
+    window.addEventListener("hashchange", syncPortfolio);
+    window.addEventListener("popstate", syncPortfolio);
+    return () => {
+      window.removeEventListener("hashchange", syncPortfolio);
+      window.removeEventListener("popstate", syncPortfolio);
+    };
+  }, [followTradeLinks, routePath]);
+  const closePortfolio = () => {
+    linkedPortfolio.current = false;
+    setExpanded(false);
+    if (followTradeLinks && ["/agent", "/chat"].includes(window.location.pathname) && window.location.hash === "#trades") {
+      // Keep query parameters and Next's history state, and do not add another
+      // Back stop. A later mount must not reopen a panel the owner dismissed.
+      window.history.replaceState(window.history.state, "", window.location.pathname + window.location.search);
+    }
+  };
   useEffect(() => {
     const dialog = portfolio.current;
-    if (expanded && !dialog?.open) dialog?.showModal();
-    if (!expanded && dialog?.open) dialog.close();
+    if (!dialog) return;
+    if (expanded && !dialog.open) {
+      const focused = document.activeElement;
+      portfolioOpener.current = focused instanceof HTMLElement && focused !== document.body && !dialog.contains(focused)
+        ? focused : portfolioSummary.current;
+      dialog.showModal();
+    }
+    if (!expanded) {
+      if (dialog.open) dialog.close();
+      const opener = portfolioOpener.current;
+      portfolioOpener.current = null;
+      if (opener?.isConnected) opener.focus({ preventScroll: true });
+    }
   }, [expanded]);
+  useEffect(() => {
+    portfolioMounted.current = true;
+    const dialog = portfolio.current;
+    return () => {
+      portfolioMounted.current = false;
+      if (dialog?.open) dialog.close();
+      if (portfolioOpener.current?.isConnected) portfolioOpener.current.focus({ preventScroll: true });
+    };
+  }, []);
   // App mounts this screen only after it has a confirmed agent and a readable
   // owner book. Loading and failed account reads remain on AccountEntry; neither
   // is evidence that the owner has no agent.
@@ -560,7 +624,6 @@ export function Agent({
   const silence = notRunningNote(displayedAutonomy);
   return (
     <div className="desk-page">
-      <RecoveryNotice recovery={recovery}/>
       {/* WHAT IS STOPPING THIS AGENT, ON THE SCREEN ITS OWNER OPENS.
           The sentence existed — status-line.ts has had a testnet branch for
           months — but it renders on /you, and an owner who thinks their agent
@@ -667,9 +730,10 @@ export function Agent({
         <button
           type="button"
           className="portfolio-summary"
+          ref={portfolioSummary}
           aria-expanded={expanded}
           aria-controls="agent-portfolio"
-          onClick={() => setExpanded((value) => !value)}
+          onClick={() => expanded ? closePortfolio() : setExpanded(true)}
         >
           <div>
             <span className={recovery ? "account-label recovery-balance-label" : "account-label"}>{recovery ? "Last recorded agent balance" : "Agent balance"}</span>
@@ -705,8 +769,8 @@ export function Agent({
           className="portfolio-dialog"
           id="agent-portfolio"
           aria-labelledby="portfolio-title"
-          onClose={() => setExpanded(false)}
-          onCancel={() => setExpanded(false)}
+          onClose={(event) => { if (portfolioMounted.current && !event.currentTarget.open) closePortfolio(); }}
+          onCancel={(event) => { event.preventDefault(); closePortfolio(); }}
         >
           <header className="portfolio-dialog-header">
             <div>
@@ -718,7 +782,7 @@ export function Agent({
             <button
               type="button"
               aria-label="Close portfolio"
-              onClick={() => setExpanded(false)}
+              onClick={closePortfolio}
             >
               <X size={20} />
             </button>
@@ -762,9 +826,8 @@ export function Agent({
                   <Empty compact kind="positions" title={recovery ? "Saved positions pending reconciliation." : "No positions reported yet."}/>
                 )}
                 {positions.map((p) => {
-                  const token = tokens.find(
-                    (t) => t.symbol.toUpperCase() === p.symbol.toUpperCase(),
-                  );
+                  const token = tokenForPosition(p, tokens);
+                  const label = positionLabel(p);
                   // The value AND the %, never one standing in for the other:
                   // the small line prints the coin's name when it is listed, so
                   // this is the only place on the row the money figure can be.
@@ -773,13 +836,13 @@ export function Agent({
                     <button
                       type="button"
                       className="desk-position"
-                      key={p.symbol}
+                      key={p.token ?? p.symbol}
                       disabled={!token}
                       onClick={() => token && onToken(token.id)}
                     >
-                      <Coin symbol={p.symbol} logo={token?.logo ?? ""} />
+                      <Coin symbol={label.replace(/^\$/, "")} logo={token?.logo ?? ""} />
                       <span>
-                        <strong>{p.symbol}</strong>
+                        <strong title={p.token ?? undefined}>{label}</strong>
                         {/* The coin's name when it is listed. Not the detail: that is
                             printed on the right now, and would read twice. */}
                         {token?.name ? <small>{token.name}</small> : null}
@@ -848,6 +911,13 @@ export function Agent({
           setAway(isAway);
         }}
       >
+        {/* THE RECOVERY CARD SCROLLS WITH THE THREAD, like the announcements
+            below. Pinned as the page's first child, its four parts were the
+            tallest thing on a phone's Chat tab and the conversation got two
+            lines — "chatting on mobile is a headache". What must not be
+            scrolled past stays pinned: the RECOVERING pill in the header, and
+            "Last recorded agent balance · Reconciliation pending" on the figure. */}
+        <RecoveryNotice recovery={recovery}/>
         {!recovery && <TrencherAnnouncement hasAgent={!!mine} />}
         {/* ANNOUNCEMENTS SCROLL WITH THE CHAT, rather than standing on top of it.
             Pinned above the conversation, these came straight out of the only

@@ -71,7 +71,8 @@ export function publicFactRequest(text: string, names: readonly string[] = []): 
   const ownWhy = /\bwhy\b/iu.test(s) && /\b(?:you|u)\b.*\b(?:buy|bought|sell|sold|trade[ds]?)\b/iu.test(s);
   if ((ownTrade.test(s) || ownWhy) && /\b(?:didn'?t|did not|haven'?t|have not|not|never|couldn'?t|could not|can'?t|cannot|won'?t)\b/iu.test(s)) return { kind: "site", topic: "attempts" };
   const symbol = /\b(?:buy|bought|sell|sold|trade[ds]?)\s+\$?([a-z][a-z0-9]{1,15})\b/iu.exec(raw)?.[1];
-  const named = symbol && !/^(?:today|yesterday|it|that|this|anything|any|some|the|a|in|on|for)$/i.test(symbol) ? symbol : undefined;
+  // Never a word of time or habit: "what have you bought lately?" names no coin called "lately".
+  const named = symbol && !/^(?:today|yesterday|it|that|this|anything|any|some|the|a|in|on|for|lately|recently|these|now|right|so|usually|mostly|tonight|earlier|before|again|anymore|more|much|stuff|coins?|tokens?|with|when|and|or|at|to|from|since)$/i.test(symbol) ? symbol : undefined;
   const side = /\b(?:buy|bought)\b/iu.test(s) && !/\b(?:sell|sold)\b/iu.test(s) ? "buy" as const
     : /\b(?:sell|sold)\b/iu.test(s) && !/\b(?:buy|bought)\b/iu.test(s) ? "sell" as const : undefined;
   if (ownTrade.test(s) && /\b(?:yesterday|week|month|earlier|last|ago)\b/iu.test(s)) return { kind: "site", topic: "trades" };

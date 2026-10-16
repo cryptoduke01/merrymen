@@ -231,19 +231,23 @@ function memoryCounters(): FollowCounters & { taken: number; day: string } {
   return c;
 }
 
-function recordingBroker(): FomoBroker & { reports: BrokerReport[] } {
+function recordingBroker(): FomoBroker & { reports: BrokerReport[]; answer: () => Promise<boolean | void> } {
   const reports: BrokerReport[] = [];
-  return {
+  const b: FomoBroker & { reports: BrokerReport[]; answer: () => Promise<boolean | void> } = {
     reports,
+    /** What the orchestrator answers a report: accepted, unless a test says otherwise. */
+    answer: async () => true,
     async call(tool) {
       return brokerFailureEnvelope(tool, "not-configured", "not configured", T0);
     },
     memory: { get: async () => null, set: async () => {}, clear: async () => {} },
     async report(r) {
       reports.push(r);
+      return b.answer();
     },
     configured: () => true,
   };
+  return b;
 }
 
 interface HarnessOpts {
@@ -260,6 +264,8 @@ interface HarnessOpts {
   now?: number;
   /** Fomo off in this process (childFomoOff). */
   off?: () => boolean;
+  /** The agent (its smart account) live() names; "0xagent" by default, which no allowlist can name. */
+  agentId?: string;
 }
 
 /** The tenant's durable store as the broker memory API holds it, with failure switches. */
@@ -329,7 +335,7 @@ function harness(o: HarnessOpts = {}) {
   const entrySecs = new Map<string, number>();
   const symbol = (a: string) => `T${a.toLowerCase().slice(-11).toUpperCase()}`;
   const live = (): FomoLiveFacts => ({
-    agentId: "0xagent",
+    agentId: o.agentId ?? "0xagent",
     settings: { ...state.settings },
     rail: state.rail,
     paused: state.paused,
@@ -1709,6 +1715,130 @@ describe("reports", () => {
     h.tick([{ token: coin(7), symbol: "T7", decimals: 18, valueUsdg6: U(3), price8: P(1), priceStale: false }]);
     assert.equal(h.reports().length, 0);
   });
+
+  describe("review candidates (fomo/review-candidates.ts)", () => {
+    const AGENT = `0x${"5e".repeat(20)}`;
+    const LISTED = { MERRYMEN_DECISION_RESEARCH_ACCOUNTS: `0x${"aa".repeat(20)}, ${AGENT.toUpperCase().replace("0X", "0x")}` };
+    const sent = (h: ReturnType<typeof harness>) =>
+      h.reports().filter((r): r is Extract<BrokerReport, { kind: "review-candidates" }> => r.kind === "review-candidates");
+    const liveAgent = () => harness({ agentId: AGENT, live: { rail: "live" } });
+
+    it("go out for a live fast-Trencher agent on the research allowlist, as Robinhood keys, never a held coin or cash", () => {
+      const h = liveAgent();
+      h.tick([{ token: coin(3), symbol: "T3", decimals: 18, valueUsdg6: U(3), price8: P(1), priceStale: false }]);
+      const n = h.child.reportReviewCandidates([coin(1), coin(2).toUpperCase().replace("0X", "0x"), coin(1), coin(3), CASH.USDG, "not-an-address"], LISTED);
+      assert.equal(n, 2);
+      assert.deepEqual(sent(h).map((r) => r.tokenKeys), [[`eip155:4663:${coin(1)}`, `eip155:4663:${coin(2)}`]]);
+      assert.equal(sent(h)[0]!.atMs, T0);
+      // Every report the child sends is one the orchestrator accepts.
+      assert.ok(validateBrokerReport(sent(h)[0], TENANT).ok);
+    });
+
+    it("send each coin once per window and at most ten new coins a window", () => {
+      const h = liveAgent();
+      h.tick();
+      const twelve = Array.from({ length: 12 }, (_, i) => coin(10 + i));
+      assert.equal(h.child.reportReviewCandidates(twelve, LISTED), 10);
+      h.t.now += 60_000;
+      assert.equal(h.child.reportReviewCandidates(twelve, LISTED), 0, "the same coins inside the window are not re-sent, and the window is full");
+      h.t.now += 10 * 60_000;
+      const again = h.child.reportReviewCandidates(twelve, LISTED);
+      assert.equal(again, 10);
+      assert.deepEqual(sent(h)[1]!.tokenKeys.slice(0, 2), [coin(20), coin(21)].map((c) => `eip155:4663:${c}`), "the two that waited go first");
+      assert.equal(sent(h).length, 2);
+    });
+
+    it("a report the orchestrator did not accept gives its coins back, so the next review sends them again", async () => {
+      const turn = () => new Promise((r) => setImmediate(r));
+      const rk = (c: string) => `eip155:4663:${c}`;
+      const answers: [string, () => Promise<boolean | void>][] = [
+        ["refused, rate-limited, timed out or unanswered", async () => false],
+        ["a wrapper that cannot tell", async () => undefined],
+        ["a broker that rejects after all", async () => Promise.reject(new Error("closed"))],
+      ];
+      for (const [why, answer] of answers) {
+        const h = liveAgent();
+        h.tick();
+        const b = h.broker as ReturnType<typeof recordingBroker>;
+        b.answer = answer;
+        assert.equal(h.child.reportReviewCandidates([coin(1), coin(2)], LISTED), 2, why);
+        await turn();
+        h.t.now += 60_000;
+        b.answer = async () => true;
+        assert.equal(h.child.reportReviewCandidates([coin(1), coin(2), coin(3)], LISTED), 3, `${why}: sent again inside the window`);
+        assert.deepEqual([...sent(h)[1]!.tokenKeys].sort(), [coin(1), coin(2), coin(3)].map(rk).sort(), why);
+        await turn();
+        h.t.now += 60_000;
+        assert.equal(h.child.reportReviewCandidates([coin(1), coin(2), coin(3)], LISTED), 0, `${why}: accepted, so not again inside its window`);
+      }
+      // A report still in flight keeps its coins: the next review does not send them twice.
+      const h = liveAgent();
+      h.tick();
+      const b = h.broker as ReturnType<typeof recordingBroker>;
+      let answer: (v: boolean) => void = () => {};
+      b.answer = () => new Promise<boolean>((r) => (answer = r));
+      assert.equal(h.child.reportReviewCandidates([coin(1)], LISTED), 1);
+      await turn();
+      assert.equal(h.child.reportReviewCandidates([coin(1)], LISTED), 0, "in flight: not sent twice");
+      answer(false);
+      await turn();
+      b.answer = async () => true;
+      assert.equal(h.child.reportReviewCandidates([coin(1)], LISTED), 1, "and once it fails, it goes again");
+      // A broker that throws outright gives the room back at once.
+      const thrower = liveAgent();
+      thrower.tick();
+      (thrower.broker as ReturnType<typeof recordingBroker>).report = () => {
+        throw new Error("synchronous");
+      };
+      assert.equal(thrower.child.reportReviewCandidates([coin(1)], LISTED), 0);
+      (thrower.broker as ReturnType<typeof recordingBroker>).report = async () => true;
+      assert.equal(thrower.child.reportReviewCandidates([coin(1)], LISTED), 1);
+    });
+
+    it("send nothing off the allowlist, on paper, off a fast Trencher, with research off, without a broker, or with Fomo off", () => {
+      const cases: [string, ReturnType<typeof harness>, NodeJS.ProcessEnv][] = [];
+      cases.push(["not listed", liveAgent(), {}]);
+      cases.push(["another account listed", liveAgent(), { MERRYMEN_DECISION_RESEARCH_ACCOUNTS: `0x${"aa".repeat(20)}` }]);
+      cases.push(["paper", harness({ agentId: AGENT, live: { rail: "paper" } }), LISTED]);
+      const notFast = liveAgent();
+      notFast.state.settings.trencherFast = false;
+      cases.push(["not fast", notFast, LISTED]);
+      const quiet = liveAgent();
+      quiet.state.settings.monitoring = false;
+      quiet.state.settings.follow = false;
+      cases.push(["monitoring and follow off", quiet, LISTED]);
+      const noData = liveAgent();
+      noData.state.settings.dataAccess = false;
+      cases.push(["data access off", noData, LISTED]);
+      cases.push(["no broker", harness({ agentId: AGENT, live: { rail: "live" }, broker: null }), LISTED]);
+      cases.push(["fomo off", harness({ agentId: AGENT, live: { rail: "live" }, off: () => true }), LISTED]);
+      for (const [why, h, env] of cases) {
+        h.tick();
+        assert.equal(h.child.reportReviewCandidates([coin(1)], env), 0, why);
+        assert.equal(sent(h).length, 0, why);
+      }
+    });
+
+    it("a coin that is only a candidate is never assessed, nominated or verify-asked; its lens still attaches", async () => {
+      const t1 = tok(coin(1));
+      const reads = { n: 0 };
+      // Cohort-shaped triggers on purpose: even a malformed file cannot turn a candidate into breadth.
+      const h = harness({ fetchImpl: healthFetch(["trader-flow"], reads), signals: [signal(t1, { reasons: ["candidate"] })] });
+      h.tick();
+      assert.deepEqual(h.assessmentsReported(), []);
+      assert.deepEqual(h.book.active(), []);
+      assert.deepEqual(h.child.verifyRequests(), []);
+      h.child.attachLens({}, coin(1), "https://brain.test");
+      await h.child.settled();
+      const s: Record<string, string> = {};
+      assert.equal(h.child.attachLens(s, coin(1), "https://brain.test"), true);
+      assert.equal(s["trader-flow"], LENS);
+      // The same coin with a cohort reason as well is assessed as before.
+      const both = harness({ signals: [signal(t1, { reasons: ["candidate", "cohort"] })] });
+      both.tick();
+      assert.equal(stateOf(both.assessmentsReported(), coin(1))?.state, "ENTRY_CANDIDATE");
+    });
+  });
 });
 
 // ─── The broker ─────────────────────────────────────────────────────────────
@@ -1901,6 +2031,17 @@ describe("index.ts wires the follow path's money rules", () => {
     assert.match(CODE, /fomoGroupPort: \(\) => tgFomoPort,\s*fomoOff,/);
     assert.equal((CODE.match(/processBrokerPort\(\)/g) ?? []).length, 1, "one channel, read once");
     assert.equal((CODE.match(/explorationScoutUse6\(\)/g) ?? []).length, 1, "the scout gate is the only reader");
+  });
+
+  it("the review names its entry candidates for research once, after it picks, never awaited and never a gate", () => {
+    const calls = CODE.match(/fomoChild\.reportReviewCandidates\(/g) ?? [];
+    assert.equal(calls.length, 1);
+    const pick = CODE.indexOf("const trenchCandidate = trenchBrain.candidate(");
+    const report = CODE.indexOf("fomoChild.reportReviewCandidates(");
+    assert.ok(pick > 0 && report > pick && report - pick < 600, "right after the review picks its coin");
+    const line = CODE.slice(report, CODE.indexOf("\n", report));
+    assert.match(line, /trenchEligible\.filter\(c => !market\.pausedTokens\.has\(c\.token\.toLowerCase\(\)\) && shouldEnter\(c, TRENCHER_FAST, /, "the review's own pause and entry screen");
+    assert.match(CODE.slice(CODE.lastIndexOf("\n", report) + 1, report), /^\s*$/, "a bare statement: not awaited, not a condition on the review");
   });
 
   it("self-hosted runs its own deep-research queue; hosted never builds a local runtime", () => {

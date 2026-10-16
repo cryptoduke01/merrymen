@@ -401,6 +401,8 @@ describe("createDirectBroker", () => {
       { ...DM, priority: "urgent" },
       { ...DM, conversationKey: "x".repeat(201) },
       { surface: "telegram-group", audience: "owner", conversationKey: null, priority: "interactive" },
+      // A public answer on X is never the owner's audience either.
+      { surface: "x-answer", audience: "owner", conversationKey: "x:111", priority: "interactive", groupId: "111" },
     ];
     for (const o of bad) {
       const env = await broker.call("fomo_get_rankings", {}, o as BrokerCallOptions);
@@ -515,6 +517,23 @@ describe("parseBrokerRequest and validateBrokerReport", () => {
     assert.equal(validateBrokerReport({ kind: "position-dependency", userId: "3f2a9c1e-5b6d-4e7f-8a9b-0c1d2e3f4a5b", tokenKey: RH_KEY, reason: "held", expiresAtMs: NOW + 1 }, ORCH_TENANT).ok, true);
     assert.equal(validateBrokerReport({ kind: "order", tokenKey: RH_KEY }, ORCH_TENANT).ok, false);
   });
+
+  it("takes review candidates as Robinhood keys only, at most ten, refusing the whole report on one bad key", () => {
+    const rh = (n: number) => `eip155:4663:0x${n.toString(16).padStart(2, "0").repeat(20)}`;
+    assert.deepEqual(validateBrokerReport({ kind: "review-candidates", tokenKeys: [RH_KEY, rh(2), RH_KEY], atMs: NOW, tenant: "0xevil" }, ORCH_TENANT), {
+      ok: true,
+      report: { kind: "review-candidates", tokenKeys: [RH_KEY, rh(2)], atMs: NOW },
+    });
+    const ten = Array.from({ length: 10 }, (_, i) => rh(i + 1));
+    assert.equal(validateBrokerReport({ kind: "review-candidates", tokenKeys: ten, atMs: NOW }, ORCH_TENANT).ok, true);
+    assert.equal(validateBrokerReport({ kind: "review-candidates", tokenKeys: [...ten, rh(11)], atMs: NOW }, ORCH_TENANT).ok, false, "more than ten");
+    assert.equal(validateBrokerReport({ kind: "review-candidates", tokenKeys: [], atMs: NOW }, ORCH_TENANT).ok, false, "an empty report says nothing");
+    assert.equal(validateBrokerReport({ kind: "review-candidates", tokenKeys: [RH_KEY, SOL_KEY], atMs: NOW }, ORCH_TENANT).ok, false, "not a chain a review acts on");
+    assert.equal(validateBrokerReport({ kind: "review-candidates", tokenKeys: [`eip155:4663:0x${"A1".repeat(20)}`], atMs: NOW }, ORCH_TENANT).ok, false, "not canonical");
+    assert.equal(validateBrokerReport({ kind: "review-candidates", tokenKeys: [`eip155:1:${A}`], atMs: NOW }, ORCH_TENANT).ok, false, "another network");
+    assert.equal(validateBrokerReport({ kind: "review-candidates", tokenKeys: [RH_KEY] }, ORCH_TENANT).ok, false, "no time");
+    assert.equal(validateBrokerReport({ kind: "review-candidates", tokenKeys: RH_KEY, atMs: NOW }, ORCH_TENANT).ok, false);
+  });
 });
 
 // ── IPC ─────────────────────────────────────────────────────────────────────
@@ -581,19 +600,21 @@ describe("IPC broker round trip", () => {
     pair.inject({ fomo: 1, id: "u7", op: "call", tool: "fomo_get_rankings", args: { blob: "x".repeat(17_000) }, opts: DM });
     pair.inject({ fomo: 1, id: "u8", op: "report", report: "not an object" });
     pair.inject({ fomo: 1, id: "u9", op: "memory-get", conversationKey: "" });
-    await waitFor(() => ["u1", "u2", "u3", "u4", "u5", "u6", "u7", "u8", "u9"].every((id) => pair.replyTo(id)));
+    // An X answer is the orchestrator's own surface: a child claiming it is refused, its audience right or not.
+    pair.inject({ fomo: 1, id: "u10", op: "call", tool: "fomo_get_rankings", args: {}, opts: { surface: "x-answer", audience: "group", conversationKey: "x:111", priority: "interactive", groupId: "111" } });
+    await waitFor(() => ["u1", "u2", "u3", "u4", "u5", "u6", "u7", "u8", "u9", "u10"].every((id) => pair.replyTo(id)));
     await flush();
     const err = (id: string) => pair.replyTo(id)!.error;
     assert.equal(err("u1"), "unknown-op");
     assert.equal(err("u2"), "unknown-tool");
-    for (const id of ["u3", "u4", "u5", "u6", "u9"]) assert.equal(err(id), "invalid-request", id);
+    for (const id of ["u3", "u4", "u5", "u6", "u9", "u10"]) assert.equal(err(id), "invalid-request", id);
     assert.equal(err("u7"), "request-too-large");
     assert.equal(err("u8"), "invalid-report");
-    // Exactly the nine replies above (beside the broker's own configured
+    // Exactly the ten replies above (beside the broker's own configured
     // query): nothing answered the foreign or id-less messages.
     const childIds = new Set(pair.wire.fromChild.map((m) => m.id));
     const injectedReplies = pair.wire.fromParent.filter((m) => !childIds.has(m.id));
-    assert.equal(injectedReplies.length, 9);
+    assert.equal(injectedReplies.length, 10);
     assert.ok(injectedReplies.every((m) => m.ok === false));
     assert.equal(svc.invocations.length, 0);
     assert.equal(svc.memoryCalls.length, 0);
@@ -702,6 +723,44 @@ describe("IPC broker round trip", () => {
     assert.equal(svc.reports[0]!.tenant, ORCH_TENANT);
     await broker.report({ kind: "held-tokens", tokenKeys: [RH_KEY, "eip155:4663:not-an-address"], atMs: NOW });
     assert.equal(svc.reports.length, 1, "a held-tokens report with a forged key is refused whole");
+    assert.equal(await broker.report({ kind: "review-candidates", tokenKeys: [RH_KEY, SOL_KEY], atMs: NOW }), false, "refused: not accepted");
+    assert.equal(svc.reports.length, 1, "a review-candidates report naming another chain is refused whole");
+    assert.equal(await broker.report({ kind: "review-candidates", tokenKeys: [RH_KEY], atMs: NOW }), true, "accepted");
+    assert.equal(svc.reports.length, 2);
+    assert.equal(svc.reports[1]!.tenant, ORCH_TENANT, "stamped with the child's own tenant");
+  });
+
+  it("a report resolves true only when the orchestrator accepted it: never on a full lane, a timeout or a closed channel", async () => {
+    const report: BrokerReport = { kind: "review-candidates", tokenKeys: [RH_KEY], atMs: NOW };
+    // The orchestrator's store lane: one in flight, the next refused as rate-limited.
+    const lane = setup({ maxInFlight: 1 });
+    await flush();
+    const slow = gate();
+    lane.svc.report = async () => {
+      await slow.wait;
+    };
+    const first = lane.broker.report(report);
+    await flush();
+    assert.equal(await lane.broker.report(report), false, "rate-limited");
+    slow.open();
+    assert.equal(await first, true);
+    // Nobody answering (a child spawned before the orchestrator's Fomo runtime attached).
+    const silent: BrokerPort = { send: () => true, onMessage: () => () => {}, connected: () => true };
+    const quiet = createIpcBroker(silent, { timeoutMs: 20 });
+    assert.equal(await quiet.report(report), false, "timed out");
+    quiet.close();
+    assert.equal(await quiet.report(report), false, "closed");
+    const gone: BrokerPort = { send: () => true, onMessage: () => () => {}, connected: () => false };
+    assert.equal(await createIpcBroker(gone).report(report), false, "disconnected");
+    // In process: refused, accepted, or the service failing.
+    const svc = new FakeService();
+    const direct = createDirectBroker(svc, ORCH_TENANT, { now: () => NOW });
+    assert.equal(await direct.report({ ...report, tokenKeys: [SOL_KEY] }), false);
+    assert.equal(await direct.report(report), true);
+    svc.report = async () => {
+      throw new Error("store down");
+    };
+    assert.equal(await direct.report(report), false);
   });
 
   it("fails fast as unavailable when disconnected, and on disconnect mid-request", async () => {

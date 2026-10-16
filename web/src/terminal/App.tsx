@@ -1,6 +1,6 @@
 "use client";
 import { performanceFromWire } from "./agent-performance";
-import { usePathname, useRouter } from "next/navigation";
+import { usePathname } from "next/navigation";
 import { AccountEntry, FundingPanel, LimitsPanel, requestJson, type AccountState } from "./HostedControls";
 import { SignOut } from "./SignOut";
 import {
@@ -26,6 +26,8 @@ import { pausedRecovery, recoveryAutonomy, recoveryFunds } from "./recovery-view
 import { workerSilentSince } from "./worker-stale";
 import { chatKeyFor } from "./chat-store";
 import { useChatController } from "./chat-controller";
+import { workerHeardFromOf } from "./chat-payload";
+import { agentDownOf } from "./agent-status";
 import { chatTape } from "./chat-thread";
 import "./chat.css";
 import {
@@ -55,6 +57,7 @@ import { Profile } from "./screens/Profile";
 import { glanceOfHow, thesisOfHow, type ProfileAgent } from "./profile-view";
 import "./profile.css";
 import { Search } from "./screens/Search";
+import { SearchDialog } from "./SearchDialog";
 import { Token } from "./screens/Token";
 import { You } from "./screens/You";
 import { TabIcon } from "./ui";
@@ -78,6 +81,7 @@ import "./skeleton.css";
 import { useLiveNews, useSoundPref } from "./live-news";
 import { SoundToggle } from "./SoundToggle";
 import { ticksOf } from "./ticker";
+import { goTo } from "./navigate";
 import { TickerStrip } from "@/components/shell/Ticker";
 import "./live-motion.css";
 
@@ -101,10 +105,10 @@ export function App() {
    */
   const [sources, setSources] = useState<LiveSources>(seedSources);
   const live = useMemo(() => liveOf(sources), [sources]);
-  const router = useRouter();
   const pathname = usePathname() ?? "/";
   const requestedScreen = useMemo(()=>screenForPath(pathname),[pathname]);
-  const setScreen = (next: Screen) => router.push(pathForScreen(next));
+  // In place, never a round trip — see navigate.ts.
+  const setScreen = (next: Screen) => goTo(pathForScreen(next));
   const [account, setAccount] = useState<AccountState|null>(null);
   /** Last complete account read, used to spot a cookie changed in another tab. */
   const confirmedSession = useRef<AccountState["session"] | null>(null);
@@ -318,12 +322,19 @@ export function App() {
   const [soundOn, toggleSound] = useSoundPref();
   useLiveNews({ theses: live.theses, read: live.reads.theses, soundOn });
 
+  // SEARCH OPENS OVER THE PAGE, not instead of it (SearchDialog). The /search
+  // route still renders the full screen for a link that arrives there.
+  const [searchOpen, setSearchOpen] = useState(false);
   const openScreen = (next: Screen) => {
+    if (next.kind === "search") {
+      setSearchOpen(true);
+      return;
+    }
     // There is nothing to fund before an agent exists, and the deposit panel
     // reads `account.status.grant` — so the guard stays, and it sends people to
     // the screen that can actually create one.
     if ((next.kind === "deposit" || next.kind === "withdraw") && !account?.status.exists) {
-      router.push("/you");
+      goTo("/you");
       return;
     }
     setScreen(next);
@@ -464,7 +475,20 @@ export function App() {
   }), recovery);
   // `recoveryFunds` from the same `account` as `recovery`, so the notice never
   // pairs one tenant's hold with another read's account or cash.
+  // `workerHeardFrom` from the same answer as the verdict: whether ANY beat
+  // ever landed, which IDLE alone cannot say — a never-started agent and one
+  // before its first pass both wear it. The chat needs the difference.
+  // See workerHeardFromOf: only an explicit null is "never", absent is unknown.
+  // `agentDown` from the same answer too, for the Telegram link-code wait on
+  // Home and in Settings. A recovery hold is its own reason: the held tenant
+  // is not admitted, nothing runs its worker, and the recovery listener links
+  // no new chat (agent-status.ts AgentDown).
+  // Settings can open before a portfolio exists or its feed answers. Its
+  // Telegram wait depends on the authoritative grants read alone.
+  const agentDown = recovery ? "recovery" as const : agentDownOf(account?.status, Date.now());
   const mine = account?.status.exists && ownerFeedReady && live.mine ? {...live.mine, statusLabel: autonomy.label, autonomy, recovery,
+    workerHeardFrom: workerHeardFromOf(account.status),
+    agentDown,
     ...(recovery ? { chg24: null, recoveryFunds: recoveryFunds(account.status) } : {})} : null;
   /**
    * Where the re-sign button goes — and, for wrong-chain, on WHICH network.
@@ -511,6 +535,7 @@ export function App() {
         <DesktopSidebar
           reads={live.reads}
           retired={live.retired}
+          retiredAgents={live.retiredAgents}
           mine={displayMine}
           hasAgent={!!mine}
           tokens={live.tokens}
@@ -559,7 +584,7 @@ export function App() {
         }} onExplore={section => { if (desktop) setSidebarSection(section); }} onQuestion={()=>{setChatDraft(current => current || "Explain my strategy and trading limits. Am I using paper or live trading?");goTab("agent");}}/>
         {!mine && !desktop && screen.kind !== "create" && screen.kind !== "groupchat" && <AccountEntry account={account} accountFailed={accountFailed} portfolio={portfolioRead} retrying={accountBusy} onRefresh={refreshAccount} onSignedIn={invalidateOwnerView}/>}
         {screen.kind === "create" && <CreateAgent account={account} accountFailed={accountFailed} retrying={accountBusy} onRefresh={refreshAccount} onSignedIn={invalidateOwnerView} onBack={()=>goTab("home")} onDone={()=>{refreshAccount();goTab("agent");}} onFund={grant=>{setAccount(current=>current?{...current,status:{...current.status,exists:true,grant}}:current);openScreen({kind:"deposit"});}}/>}
-        {screen.kind === "settings" && <Settings onFund={()=>openScreen({kind:"deposit"})} slug={mine?.slug ?? null} onSaved={chat.refreshSettings}/>}
+        {screen.kind === "settings" && <Settings onFund={()=>openScreen({kind:"deposit"})} slug={mine?.slug ?? null} onSaved={chat.refreshSettings} agentDown={agentDown}/>}
         {screen.kind === "grant" && <Wallet key={epoch}/>}
         {screen.kind === "tab" && screen.tab === "home" && (
           <Home
@@ -568,6 +593,7 @@ export function App() {
             theses={live.theses}
             read={live.reads.board}
             retired={live.retired}
+            retiredAgents={live.retiredAgents}
             mine={mine}
             tokenTab={tokenTab}
             onTokenTab={setTokenTab}
@@ -593,6 +619,8 @@ export function App() {
         )}
         {screen.kind === "tab" && screen.tab === "agent" && mine && (
           <Agent
+            followTradeLinks
+            routePath={pathname}
             mine={mine}
             tokens={live.tokens}
             stopped={stopped}
@@ -761,6 +789,15 @@ export function App() {
             onProfile={(slug) => openScreen({ kind: "profile", slug })}
           />
         )}
+        {searchOpen && (
+          <SearchDialog
+            tokens={live.tokens}
+            agents={live.agents}
+            onClose={() => setSearchOpen(false)}
+            onToken={(id) => { setSearchOpen(false); openScreen({ kind: "token", id }); }}
+            onProfile={(slug) => { setSearchOpen(false); openScreen({ kind: "profile", slug }); }}
+          />
+        )}
         {screen.kind === "limits" && (
           <LimitsPanel account={account} onClose={()=>goTab(tab)}/>
         )}
@@ -816,13 +853,13 @@ export function App() {
       {/* THE UNREAD DOT, ON DESKTOP. The tab bar that carries it is hidden at
           this width, so an answer that landed while the dock was closed would
           otherwise be told to nobody. One tap opens the dock on it. */}
-      {desktop && !chatDocked && mine && chat.unread && (
+      {desktop && !(screen.kind === "tab" && screen.tab === "agent") && !chatDocked && mine && chat.unread && (
         <button type="button" className="chat-unread-pill" onClick={() => setChatDocked(true)}>
           <i className="tab-unread" aria-hidden="true" />
           New from {mine.name}
         </button>
       )}
-      {desktop && chatDocked && mine && (
+      {desktop && !(screen.kind === "tab" && screen.tab === "agent") && chatDocked && mine && (
         <ChatDock title={mine.name} onClose={() => setChatDocked(false)}>
           <Agent
             mine={mine}
@@ -854,10 +891,12 @@ export function App() {
       {ticks.length > 0 && (
         <TickerStrip
           className="terminal-tape"
+          loop
           items={ticks.map((t) => ({
             key: t.id,
             href: pathForScreen({ kind: "token", id: t.id }),
             symbol: t.symbol,
+            logo: t.logo,
             priceUsd: t.priceUsd,
             volume24hUsd: t.volume24hUsd,
             halted: t.halted,
