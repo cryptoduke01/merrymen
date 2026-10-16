@@ -61,6 +61,7 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.110.0",
     "@modelcontextprotocol/server": "^2.1.0",
+    "@noble/curves": "1.9.7",
     "@noble/hashes": "^1.8.0",
     "@privy-io/node": "^0.34.0",
     "@privy-io/react-auth": "^3.46.0",
