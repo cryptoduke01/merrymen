@@ -197,7 +197,9 @@ desk rides. Memecoins only — an equity token on this chain is a wrapper, and
 ### CoinGecko Pro pacing (optional; unset keeps the old 3-second pace)
 
 How fast the Pro key (`MERRYMEN_COINGECKO_PRO_API_KEY`, read by the
-orchestrator's children and by web) may spend. Both services read the same two
+orchestrator's children, by the orchestrator itself for X answers' research,
+whose CoinGecko and index reads share the children's fleet lane, and by web)
+may spend. Both services read the same two
 names; set them on each. With a monthly figure set, a spacing below the floor
 that figure allows is raised to it (fleet lane 70% of the month, web 20%, 10%
 headroom), and said once at startup. On web, setting either one also paces
@@ -359,7 +361,7 @@ routes answer 404 and the section does not render.
 | `MERRYMEN_X_REDIRECT_URI` *(optional)* | web | an explicit callback instead of the one built from the origin (https, or http on loopback for local testing). It must still be this web service's own `/connect/x` page — the finish needs its session — and be registered on the X app byte for byte |
 | `MERRYMEN_XPOST` *(optional)* | orchestrator | `0` stops all posting. Owners can still connect and see their drafts; drafts stay pending while posting is off, and a casual one past its day is skipped as stale when it comes back |
 | `MERRYMEN_XPOST_REPLIES_APPROVED` *(optional)* | **web + orchestrator** | exactly `1` permits selective comment replies, and active owners' answers to tags, for every consenting owner. Exactly `active` permits them only for the agents in `MERRYMEN_XPOST_ACTIVE_TENANTS`, and every other owner sees replies as unavailable. Any other value is off, with a boot line naming the variable. `1` is for use only after written X approval, which has not been obtained for this deployment. On 2026-10-12 the owner (Milla) decided to set it to `active` on both services for the operator's own agent only, so Alan answers people who tag him. X's published automation rules ask for written approval for AI reply bots; an X staff answer on the developer forum says replies triggered by a mention do not need it, and Alan's request for clarification is pending. `1` (every owner) stays unset until written approval exists. Owners must also enable replies separately for their connected X account. The orchestrator records that consent itself for the operator's own agents (see `MERRYMEN_XPOST_ACTIVE_TENANTS`) |
-| `MERRYMEN_XPOST_ACTIVE_TENANTS` *(optional)* | **web + orchestrator, same value** | comma-separated tenant addresses of the **operator's own** agents (the operator is their owner; never list someone else's agent). Named agents get the active cadence (every buy and completed sale, about ten posts a day, 75 minutes apart) and, when replies are in scope, answer posts that tag them right away, with no ten-minute review and not held by the owner's night. Their mentions are read every fifteen seconds. The orchestrator also records their reply consent once, while posting is on, unless the owner turned replies off in Settings. The web reads it for the reply warning, so set it on both services. Entries that are not addresses are ignored, and a boot line names them by position. See [x-posting.md](x-posting.md) "Active owners" |
+| `MERRYMEN_XPOST_ACTIVE_TENANTS` *(optional)* | **web + orchestrator, same value** | comma-separated tenant addresses of the **operator's own** agents (the operator is their owner; never list someone else's agent). Named agents get the active cadence (every buy and completed sale, about ten posts a day, 75 minutes apart) and, when replies are in scope, answer posts that tag them, reply to them or quote one of their posts right away, with no ten-minute review, not held by the owner's night and with no opt-out line (replying or quoting is asking; a stop is still honoured). Their mentions are read every fifteen seconds. The orchestrator also records their reply consent once, while posting is on, unless the owner turned replies off in Settings. The web reads it for the reply warning, so set it on both services. Entries that are not addresses are ignored, and a boot line names them by position. See [x-posting.md](x-posting.md) "Active owners" |
 | `MERRYMEN_XPOST_REPLY_POLLS_PER_DAY` *(optional)* | orchestrator | fleet comment polls per UTC day, default `200`. `0` or an invalid value disables all polling, including the active agents'. Each poll may read up to eight pages of one hundred mentions and consume several X read requests. An active agent's fifteen-second polls use their own allowance of up to 6000 per X account per UTC day, and do not count against this one |
 | `MERRYMEN_XPOST_RESEARCH` *(optional; off)* | orchestrator | exactly `1` lets an active agent's answers to tags look things up first (public index on the fleet CoinGecko lane, the creator's description, its own history); see docs/x-posting.md "Research for answers" |
 | `MERRYMEN_XPOST_FOMO` *(optional)* | orchestrator | exactly `1`, with `MERRYMEN_XPOST_RESEARCH=1` and the Fomo pass on: answers may use Fomo's token activity and quick theses, paraphrased and attributed, capped by `MERRYMEN_FOMO_X_HOURLY_CREDITS` (default 3,000 per X account per hour) and a quarter of the owner's daily Fomo cap. Enterprise redistribution rights confirmed by the owner on 2026-10-12 (docs/fomo.md "Publication") |
@@ -418,12 +420,54 @@ empty. Replies require a fresh successful poll before sending and share the
 existing posting, quiet-hour and model budgets, with at least ten minutes
 under Coming up. An active owner's answers to tags have their own lane
 instead: due when drafted and sent on the pass that read the tag, not held by
-the owner's night, twenty seconds apart and 24 a day, and a tag that is only a
-greeting gets a casual line code built (see "Rollout: Alan's research lanes and X answers" below and
-[x-posting.md](x-posting.md) "Active owners"). There is no incoming-comment archive: only consent, reply
+the owner's night, twenty seconds apart, sixty a day per X account and six a
+person a rolling day, and a tag that is only a greeting gets a casual line
+code built (see "Answers to tags" below, "Rollout: Alan's research lanes and
+X answers", and [x-posting.md](x-posting.md) "Active owners"). There is no incoming-comment archive: only consent, reply
 target metadata, cursors and recipient opt-outs are persisted alongside the
 outgoing drafts. See [Posting on X](x-posting.md#selective-comment-replies) for
 selection, freshness and durable delivery rules.
+
+**Answers to tags (the owner's decisions of 2026-10-12).** Alan, the only
+active tenant, answers any question that passes the screens, in exactly one
+lane; the full rules are in [x-posting.md](x-posting.md) "Answers to tags:
+routing, voice and consent":
+
+| | asked | answered with |
+|---|---|---|
+| a) market | "how's the market", "market update", "is it a green day" and the like (a strict allowlist) | code's casual words and code's figures line: bitcoin, ether and solana's day on CoinGecko, and what's moving on Robinhood Chain |
+| b) coin facts | a major by name or ticker, "what's hot", a `$ticker` or a contract on the chain | the research and majors path, never confirming a buy by name |
+| c) itself | what it trades, how it trades, what it has been up to | a draft from its own public facts, told its buys only for the plain questions about what it trades |
+| d) chat | plain banter ("how are you", "who are you", "tell me a joke", "what do you think about ai agents") | a casual draft that states no fact it was not handed; "are you bullish?" and "wen moon" get code's non-committal line about itself |
+| e) advice | "should i buy X", "is X going up", a price target | code's playful decline, never naming or judging the coin |
+| f) refused | sherwood in any form, a model question off its allowlist, a steer, the house in trouble, distress, other handles, a reply under someone else's post, a quote of anyone else's post, a retweet, odd characters, links, every opt-out | nothing at all |
+
+The voice is a friend on crypto twitter: one or two short lines, lowercase
+welcome, at most one emoji, never a corporate deflection or a stock
+disclaimer (the gate refuses "i don't comment on", "as an ai", "not
+financial advice"). The model writes no digit; figures are only ever built
+by code from CoinGecko, GeckoTerminal, Fomo and Bitquery data.
+
+**Who counts as asking.** Whoever tags Alan, replies to him or quotes one of
+his own posts is giving consent, so his answers never say "Say stop to opt
+out." (the gate takes the notice off an answer and refuses any other opt-out
+wording). A reply is answered anywhere in a conversation rooted at one of his
+own posts or at a post he answered, when it replies to one of his own posted
+tweets (his answers included) or to the same person's own earlier post he
+answered; a reply under a third party's post is not. A quote is answered when
+it quotes one of his own posted tweets; a quote of anyone else's post and a
+retweet are not. Opt-out requests are honoured exactly as before: "stop",
+"unfollow me", "leave me alone" and the rest are recorded before anything is
+drafted, and that person is never answered again. Comment replies for any
+other owner still end with "Say stop to opt out.", and their warnings are
+unchanged.
+
+**Limits.** Six answers a person a rolling day (from two) and sixty a day per
+X account (from 24), under the per-person lock, the twenty-second gap and the
+fleet's day ceiling. The answers' model allowance stays 48 calls a day (code's
+own lines spend none), and the research, CoinGecko, Bitquery and Fomo budgets
+are unchanged. No trading cap, limit, guard, authentication or tenant
+isolation changes.
 
 ### Fomo research (read-only; works, honestly, without a key)
 
@@ -976,10 +1020,10 @@ for an account already on `MERRYMEN_DECISION_RESEARCH_ACCOUNTS` (step 1). This t
 | 4 | `MERRYMEN_BITQUERY_LANE`, `MERRYMEN_BITQUERY_POINTS_PER_DAY`, `MERRYMEN_BITQUERY_RPM` | orchestrator | unset (on, `25000`, `60`) | |
 | 4 | `MERRYMEN_GATEWAY_BITQUERY_POINTS_PER_DAY` | gateway | `12500`, set explicitly when its key shares the plan | A separate counter from the lane's `25000`: lane plus gateway is 37,500 points a day, sized by the operator to the plan. The gateway's 12,500 includes the public memescope's own 10,000 (at most 9,605 used, one refresh per 45 s, matching the Markets page's own 45 s poll); holders get the other 2,500, at most 750 a day each |
 | 4 | `MERRYMEN_FLOW_BROKER` | none | never set | The orchestrator writes it into each child that may ask, and removes an inherited copy |
-| 5 | `MERRYMEN_XPOST_ACTIVE_TENANTS` | web + orchestrator, same value | Alan's tenant address, from the deploy environment | The active cadence, his reply consent recorded by the orchestrator, and answers to tags sent right away. The web reads it for the reply warning |
+| 5 | `MERRYMEN_XPOST_ACTIVE_TENANTS` | web + orchestrator, same value | Alan's tenant address, from the deploy environment | The active cadence, his reply consent recorded by the orchestrator, and answers to tags, replies and quotes of his own posts sent right away, with no opt-out line, up to sixty a day and six a person a day. The web reads it for the reply warning |
 | 5 | `MERRYMEN_XPOST_REPLIES_APPROVED` | web + orchestrator, same value | `active` (the owner's decision of 2026-10-12, for the operator's own agent only; `1` stays unset until X's written approval) | Without it there are no comment replies and no answers to tags. On 2026-10-12 the owner (Milla) decided to set it to `active` on both services for the operator's own agent only, so Alan answers people who tag him. X's published automation rules ask for written approval for AI reply bots; an X staff answer on the developer forum says replies triggered by a mention do not need it, and Alan's request for clarification is pending. `1` (every owner) stays unset until written approval exists. |
 | 5 | `MERRYMEN_XPOST_REPLY_POLLS_PER_DAY` | orchestrator | unset (`200` for the fleet) | Alan's fifteen-second polls spend their own 6,000 per X account per UTC day |
-| 6 | `MERRYMEN_XPOST_RESEARCH` | orchestrator | `1` | Answers look things up first. Boot line `xpost: on — … answers look things up first`; with the Bitquery key also `xpost: answers may read onchain flow — up to 200 readings per UTC day …` |
+| 6 | `MERRYMEN_XPOST_RESEARCH` | orchestrator | `1` | Answers look things up first. Boot line `xpost: on — … answers look things up first`; with the Bitquery key also `xpost: answers may read onchain flow — up to 200 readings per UTC day …`. With the CoinGecko Pro key the orchestrator already holds, a coin asked by name or ticker (a major, ranked in CoinGecko's top 200) and "what's hot?" are answered too, with code's figures line after the words (x-posting.md "Market intel"); counts `answer-intent-major`, `answer-intent-hot`, `answer-figures` |
 | 6 | `MERRYMEN_XPOST_RESEARCH_PER_HOUR` | orchestrator | unset (`120`) | Public-index lookups per hour across X accounts |
 | 6 | `MERRYMEN_XPOST_FOMO` | orchestrator | `1` (Enterprise rights confirmed by the owner on 2026-10-12, [`fomo.md`](fomo.md) "Publication") | Paraphrased, attributed Fomo facts in answers |
 | 6 | `MERRYMEN_FOMO_X_HOURLY_CREDITS` | orchestrator | unset (`3000`) | Per X account per hour, and at most a quarter of the owner's daily Fomo cap |
@@ -994,8 +1038,8 @@ merging: each value is the operator's to set on the service named.
 
 **Rolling the orchestrator back past this release.** An older orchestrator
 reads an `answer` row as a casual post, with no reply target, and would
-publish a queued answer (a reply to one person, ending "Say stop to opt
-out.") as a standalone post on Alan's timeline the same day. So before
+publish a queued answer (a reply to one person) as a standalone post on
+Alan's timeline the same day. So before
 deploying an older orchestrator, empty the queue first. Either unset
 `MERRYMEN_XPOST_REPLIES_APPROVED` (or take Alan's tenant out of
 `MERRYMEN_XPOST_ACTIVE_TENANTS`) on the orchestrator and let one pass of this

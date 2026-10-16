@@ -69,10 +69,18 @@ export const REPLIES_PER_ROOT = 2;
  * the cadence's. Twenty seconds apart: they go out as soon as they are
  * drafted, on the pass that read the tag, and mentions are read every fifteen
  * seconds, so a few people tagging at once are each answered within a pass or
- * two of each other. The day's 24 and two a person a day are unchanged.
+ * two of each other.
+ *
+ * SIXTY A DAY (the owner's decision, 2026-10-12: whoever replies to it or
+ * quotes it is asking, and a person should be able to actually chat with it):
+ * up from 24, still a day allowance of its own per X account (taken at send
+ * time, `answerday:<xUserId>:<local day>`), still under the fleet's day
+ * ceiling (DEFAULT_FLEET_PER_DAY, 1000) and never spending the model
+ * allowance any faster (ANSWER_DRAFTS_PER_DAY is unchanged: code's own lines
+ * spend none). Answers exist only for the operator's active owners.
  */
 export const ANSWER_GAP_MS = 20_000;
-export const ANSWERS_PER_DAY = 24;
+export const ANSWERS_PER_DAY = 60;
 /**
  * An answer still waiting this long after it was drafted is no longer one:
  * the person was told it goes out right away, and a pause, an outage or the

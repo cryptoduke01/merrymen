@@ -371,6 +371,14 @@ export interface XReply {
    */
   quoted?: true;
   /**
+   * THE POST IT QUOTES, when a quote of exactly one post is all it refers to
+   * besides the post it replies to (a "quoted" reference, never a retweet).
+   * Set only beside `quoted`. A quote of one of this X account's own posts
+   * may be answered (replies.ts tagCandidate, the owner's decision of
+   * 2026-10-12: quoting it is consent); a quote of anyone else's never is.
+   */
+  quotedTweetId?: string;
+  /**
    * SHOWN WITH THE POST, NOT IN ITS TEXT (red-team review, 2026-10-12): a
    * poll, media, a card, or the rest of a long post (a note tweet, whose
    * `text` is cut short). A poll adds no link to the text, so "what model are
@@ -433,10 +441,15 @@ function parsedReply(item: unknown, now: number, excludeAuthorId: string, author
       typeof d.text !== "string" || !d.text.trim() || d.text.length > 4000 ||
       !Number.isFinite(createdAtMs) || createdAtMs <= 0 || createdAtMs > now) return null;
   if (parents.length && (typeof d.conversation_id !== "string" || d.id === d.conversation_id)) return null;
-  const quoted = refs.some((r) => r === null || typeof r !== "object" || r.type !== "replied_to");
+  const besides = refs.filter((r) => r === null || typeof r !== "object" || r.type !== "replied_to");
+  const quoted = besides.length > 0;
+  // Which post it quotes: only one reference besides its parent, of type "quoted", with an id X could have sent.
+  const only = besides.length === 1 ? besides[0] as Record<string, unknown> | null : null;
+  const quotedTweetId = only !== null && typeof only === "object" && only.type === "quoted" && typeof only.id === "string" && ID.test(only.id) ? only.id : null;
   const author = authors.get(d.author_id);
   return { id: d.id, text: d.text, authorId: d.author_id, conversationId: typeof d.conversation_id === "string" ? d.conversation_id : d.id,
     inReplyToTweetId: parents.length ? parents[0]!.id as string : "", createdAtMs, ...(quoted ? { quoted: true as const } : {}),
+    ...(quotedTweetId ? { quotedTweetId } : {}),
     ...(attachedTo(d) ? { attached: true as const } : {}), ...(author ? { author: { ...author } } : {}) };
 }
 

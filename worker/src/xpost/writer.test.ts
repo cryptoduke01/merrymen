@@ -739,6 +739,11 @@ describe("an active agent's answers and conversation memory", () => {
     assert.match(text, /on paper/);
     assert.match(text, /Never write the address/);
     assert.doesNotMatch(text, /\bgroq\b|\bqwen\b|\bgpt\b/i);
+    // NO OPT-OUT LINE (2026-10-12): not asked for, said not to add one, and what it said is shown without the one older answers carried.
+    assert.match(text, /mostly fresh launches for me/);
+    assert.doesNotMatch(text, /say stop to opt out|must end with/i);
+    assert.match(p.system, /no sign-off, no disclaimer and no opt-out line or notice of any kind/);
+    assert.match(p.system, /someone who tagged you, replied to you or quoted you/);
     assert.match(answerPrompt({ ...BASE, question: "", recentBuys: [], said: [], walletPublic: false }).prompt, /PASS/);
   });
 
@@ -935,9 +940,39 @@ describe("an active agent's answers and conversation memory", () => {
     assert.equal((gate("paper", "bought a couple with real money, on paper now. Say stop to opt out.") as { reason?: string }).reason, "mode-false");
   });
 
+  it("an answer sounds like a friend on crypto twitter, never a help desk, and states nothing it was not handed (2026-10-12)", () => {
+    for (const intent of [undefined, "chat", "coin", "own-trades"] as const) {
+      const text = all(answerPrompt({ ...BASE, question: "how's your day going?", recentBuys: [], said: [], walletPublic: false, ...(intent ? { intent } : {}) }));
+      assert.match(text, /Sound like a friend on crypto twitter texting back: one or two short lines/);
+      assert.match(text, /lowercase is fine, laid back/);
+      assert.match(text, /laid-back trader bot that merrymen built, and you can have a light mood or opinion about yourself/);
+      assert.match(text, /Never speak for merrymen or robinhood .*never tease news .*never judge the person asking, and never boast/);
+      // Handed nothing, it is told to leave the market, tokens, launches, teams, safety and money out (red-team 2026-10-12).
+      assert.match(text, /With nothing looked up below, leave out crypto, the market, the chain, coins, tokens, launches, teams, safety and anyone's money entirely/);
+      assert.doesNotMatch(text, /\n\nnull\n\n|\n\n\n\n/);
+      // A source named with nothing looked up is refused (gate:unlooked-source): the persona never hands it one.
+      assert.match(text, /Never name a source \(the index, coingecko, fomo, on-chain data, a project\) unless you looked something up and it is listed below\./);
+      assert.doesNotMatch(text.replace(/Never name a source[^.]*\./, ""), /on-chain trader/);
+      assert.match(text, /Light humour is welcome, never at the asker's expense, never forced/);
+      // The stock phrases are named, so the model knows what not to write; the gate refuses them anyway (gate.ts STOCK_PHRASE).
+      assert.match(text, /Never a corporate deflection or a stock disclaimer: no "i don't comment on", "as an ai", "as a bot", "i'm unable to", "not financial advice", "great question", "happy to help" or "feel free to"/);
+      assert.match(text, /shrug it off in a few casual words of your own, or PASS/);
+      assert.match(text, /Never state a fact you were not handed: no prices, no claims about coins, people, projects or events, no promises and no predictions/);
+      assert.doesNotMatch(text, /say plainly you don't share that/, "the old deflection is never suggested");
+      // The hard rules stay: no figure, no advice, at most one emoji, no hashtags.
+      assert.match(text, /No numbers at all: no digits/);
+      assert.match(text, /No advice and no call to action/);
+      assert.match(text, /No hashtags/);
+      assert.match(text, /You're an AI trading agent built by merrymen, where people set up AI trading agents of their own\./);
+    }
+    // Chat is pointed at banter about itself, never a coin, market, person, project or event.
+    assert.match(all(answerPrompt({ ...BASE, question: "tell me a joke", recentBuys: [], said: [], walletPublic: false, intent: "chat" })),
+      /It is just chat or banter: answer it the way a friend would[^"]*a joke is fine if it is about yourself\. Say nothing about any coin, market, person, project or event\./);
+  });
+
   it("an answer is very casual, and the writer is never told the sherwood name: only code's lines say it", () => {
     const text = all(answerPrompt({ ...BASE, question: "what model do you run on", recentBuys: [], said: [], walletPublic: false }));
-    assert.match(text, /texting a friend/);
+    assert.match(text, /texting back/);
     assert.match(text, /never at the asker's expense/);
     assert.equal(SHERWOOD_ON_X, "sherwood-1");
     assert.doesNotMatch(text, /sherwood/i);
@@ -997,13 +1032,14 @@ describe("an active agent's answers and conversation memory", () => {
     for (const line of lines) {
       assert.match(line, /merrymen/);
       assert.match(line, new RegExp(`new ${SHERWOOD_ON_X}\\b`));
-      assert.match(line, /Say stop to opt out\.$/);
+      assert.match(line, /\.$/);
+      assert.doesNotMatch(line, /opt out|\bstop\b/i, "no opt-out line on an answer (2026-10-12)");
       assert.doesNotMatch(line.replace(/\bsherwood-1\b/, ""), /\p{N}/u, "sherwood-1 is the only digit");
       assert.doesNotMatch(line, /\b(?:groq|qwen|gpt|llama|claude|openai|anthropic)\b/i);
       assert.equal(sherwoodClaimed(line), false, line);
       assert.equal(vocabularyRefusal(line), null, line);
     }
-    assert.match(modelAnswer("1", { lower: true }), /say stop to opt out\.$/);
+    assert.equal(modelAnswer("1", { lower: true }), modelAnswer("1", { lower: false }), "no notice, so nothing in a line turns on its casing");
     assert.equal(modelAnswer("1", { lower: true }), modelAnswer("1", { lower: true }), "the same mention, the same line");
     const all8 = modelAnswers("1", { lower: false });
     assert.equal(all8[0], modelAnswer("1", { lower: false }), "the mention's own line first");
@@ -1012,15 +1048,15 @@ describe("an active agent's answers and conversation memory", () => {
     const paper = modelAnswers("1", { lower: false }, { paper: true });
     assert.equal(new Set(paper).size, 8);
     for (const [i, line] of paper.entries()) {
-      assert.ok(line.startsWith(all8[i]!.replace(/\. Say stop to opt out\.$/, "")), line);
+      assert.ok(line.startsWith(all8[i]!.replace(/\.$/, "")), line);
       assert.match(line, /\bon paper\b/);
-      assert.match(line, /Say stop to opt out\.$/);
+      assert.doesNotMatch(line, /opt out/i);
       assert.doesNotMatch(line.replace(/\bsherwood-1\b/, ""), /\p{N}/u);
       assert.equal(sherwoodClaimed(line), false, line);
       assert.equal(vocabularyRefusal(line), null, line);
     }
-    // Weighed as the gate weighs a reply: without the notice every line ends with.
-    const bare = paper.map((l) => l.replace(/\. Say stop to opt out\.$/, ""));
+    // Weighed as the gate weighs a reply.
+    const bare = paper;
     for (let i = 0; i < bare.length; i++) {
       for (let j = i + 1; j < bare.length; j++) assert.ok(similarity(bare[i]!, bare[j]!) < 0.6, `${bare[i]} / ${bare[j]}`);
     }
@@ -1033,25 +1069,39 @@ describe("an active agent's answers and conversation memory", () => {
     const all8 = greetingAnswers("1", { lower: false });
     assert.equal(new Set(all8).size, 8, "the mention's own line first, then every other line, once");
     assert.deepEqual(greetingAnswers("1", { lower: false }), all8, "the same mention, the same order");
-    assert.match(greetingAnswers("1", { lower: true })[0]!, /say stop to opt out\.$/);
+    assert.equal(greetingAnswers("1", { lower: true })[0], all8[0], "no notice, so nothing in a line turns on its casing");
     const paper = greetingAnswers("1", { lower: false }, { paper: true });
     for (const [i, line] of [...all8, ...paper].entries()) {
-      assert.match(line, /Say stop to opt out\.$/);
+      assert.match(line, /\.$/);
+      assert.doesNotMatch(line, /opt out|\bstop\b/i, "no opt-out line on an answer (2026-10-12)");
       assert.doesNotMatch(line, /\p{N}|\$|@|#|https?:|0x/u, line);
       assert.doesNotMatch(line, /\b(?:pepe|bonk|wif|doge|shib|btc|eth|sol|bitcoin|solana|sherwood|merrymen|groq|qwen|gpt|claude|llama)\b/i, line);
       assert.doesNotMatch(line, /\b(?:bought|holding|hold|profit|loss|moon|pump|gem|buy|sell|price)\b/i, `${line}: no claim, no call`);
       assert.equal(sherwoodNamed(line), false, line);
       assert.equal(vocabularyRefusal(line), null, line);
       if (i >= 8) {
-        assert.ok(line.startsWith(all8[i - 8]!.replace(/\. Say stop to opt out\.$/, "")), line);
+        assert.ok(line.startsWith(all8[i - 8]!.replace(/\.$/, "")), line);
         assert.match(line, /\bon paper\b/, "a paper agent's line says paper");
       } else assert.doesNotMatch(line, /paper|practice/, "a live one's never does");
     }
-    // Weighed as the gate weighs a reply: without the notice every line ends with.
+    // Weighed as the gate weighs a reply.
     for (const set of [all8, paper]) {
-      const bare = set.map((l) => l.replace(/\. Say stop to opt out\.$/, ""));
+      const bare = set;
       for (let i = 0; i < bare.length; i++) {
         for (let j = i + 1; j < bare.length; j++) assert.ok(similarity(bare[i]!, bare[j]!) < 0.6, `${bare[i]} / ${bare[j]}`);
+      }
+    }
+  });
+
+  it("code's lines never carry an opt-out line, in either casing, live or on paper (the owner's decision, 2026-10-12)", () => {
+    for (const make of [modelAnswers, greetingAnswers]) {
+      for (const paper of [false, true]) {
+        const lines = make("1", { lower: false }, { paper });
+        assert.deepEqual(make("1", { lower: true }, { paper }), lines, "casing changes nothing");
+        for (const line of lines) {
+          assert.doesNotMatch(line, /opt out|\bstop\b|unsubscribe/i, line);
+          assert.match(line, /\.$/, line);
+        }
       }
     }
   });

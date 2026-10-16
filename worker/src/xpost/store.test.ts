@@ -16,6 +16,7 @@ import {
   ANSWER_LOOKED_UP,
   answerAuthorKey,
   answerAuthorSpent,
+  ANSWERS_PER_AUTHOR,
   repliesOffKey,
   cancelPost,
   cancelDisabledKind,
@@ -36,6 +37,8 @@ import {
   markRevoked,
   ownerCancel,
   ownRecentBodies,
+  ownThreadTweets,
+  ANSWER_PLAIN_THREAD,
   ownerSendTimesSince,
   tradeSendTimesSince,
   postingAccounts,
@@ -837,7 +840,7 @@ test("an owner's replies off is remembered, and a house consent never overrides 
   assert.equal(await readMeta(db, repliesOffKey(OWNER_B)), null, "the mark is per owner");
 });
 
-test("two owners on one X account answer one person at most twice a day between them, counted under one lock", async (t) => {
+test("two owners on one X account answer one person at most ANSWERS_PER_AUTHOR times a day between them, counted under one lock", async (t) => {
   const { db: base } = await open(t);
   for (const tenant of [OWNER_A, OWNER_B]) {
     await upsertAccount(base, DEK, { tenant, xUserId: "111", username: "r", tokens: TOKENS, nowMs: 1 });
@@ -863,15 +866,85 @@ test("two owners on one X account answer one person at most twice a day between 
   assert.match(locked.sql, /ON CONFLICT \(k\) DO UPDATE SET updated_at_ms = excluded\.updated_at_ms/, "an upsert that always takes the row");
   assert.ok(await readMeta(base, answerAuthorKey("111", "333")));
 
+  // Six a person a day (2026-10-12, up from two): all but the last, from either owner.
+  assert.equal(ANSWERS_PER_AUTHOR, 6);
+  for (let i = 2; i < ANSWERS_PER_AUTHOR; i++) assert.ok(await schedulePost(base, answer(i % 2 ? OWNER_B : OWNER_A, `71${i}`, 850 + i)), `answer ${i}`);
   // Two owners at once, one answer left: one of them writes it.
   const raced = await Promise.all([schedulePost(base, answer(OWNER_A, "702", 900)), schedulePost(base, answer(OWNER_B, "703", 900))]);
-  assert.equal(raced.filter((id) => id !== null).length, 1, "the X account's second answer to the person, from either owner");
-  assert.equal(await schedulePost(base, answer(OWNER_B, "704", 950)), null, "a third is refused whichever owner writes it");
+  assert.equal(raced.filter((id) => id !== null).length, 1, "the X account's last answer to the person, from either owner");
+  assert.equal(await schedulePost(base, answer(OWNER_B, "704", 950)), null, "one more is refused whichever owner writes it");
   assert.ok(await schedulePost(base, { ...answer(OWNER_B, "705", 960), replyAuthorId: "444" }), "another person is counted on their own");
   // The answer path's unlocked read says the same, before it spends anything on a draft.
   assert.equal(await answerAuthorSpent(base, "111", "333", 970), true);
   assert.equal(await answerAuthorSpent(base, "111", "444", 970), false);
   assert.equal(await answerAuthorSpent(base, "111", "333", 900 + 24 * 60 * 60_000), false, "a rolling day later they may ask again");
+});
+
+test("the conversations an X account is in: its posted top-level posts and answers, and who each answer replied to, posted rows only, newest first (2026-10-12)", async (t) => {
+  const { db } = await open(t);
+  await upsertAccount(db, DEK, { tenant: OWNER_A, xUserId: "111", username: "r", tokens: TOKENS, nowMs: 1 });
+  await setPosting(db, OWNER_A, { enabled: true, xUserId: "111" }, 2);
+  await setReplying(db, OWNER_A, true, "111", 3);
+  const sent = async (p: NewPost, tweet: string) => {
+    const id = (await schedulePost(db, p))!;
+    assert.ok(id, p.dedupeKey);
+    await claimPost(db, id, p.nowMs + 1);
+    await markPosted(db, id, tweet, p.nowMs + 2);
+  };
+  const answer = (tag: string, author: string, nowMs: number, over: Partial<NewPost> = {}): NewPost => post({ kind: "answer", dedupeKey: `answer:111:${tag}`,
+    body: `an answer to ${tag}`, replyToTweetId: tag, replyRootTweetId: tag, replyAuthorId: author, nowMs, dueAtMs: nowMs, ...over });
+  const none = { roots: new Set(), posts: new Set(), answered: new Map(), plain: new Set(), trade: new Set() };
+  assert.deepEqual(await ownThreadTweets(db, "111"), none, "nothing posted yet");
+
+  await sent(post({ kind: "intro", dedupeKey: "intro:a:111", body: "hello", nowMs: 10, dueAtMs: 10 }), "9001");
+  await sent(answer("500", "333", 20), "9501");
+  await sent(answer("510", "444", 30), "9511");
+  // Never posted: drafted and waiting, skipped, or failed. None of them is under anyone's post.
+  assert.ok(await schedulePost(db, answer("520", "555", 40)));
+  assert.ok(await schedulePost(db, answer("530", "666", 50, { status: "skipped", reason: "gate:hype" })));
+  const failed = (await schedulePost(db, answer("540", "777", 60)))!;
+  await claimPost(db, failed, 61);
+  await markFailed(db, failed, "uncertain", 62);
+
+  const own = await ownThreadTweets(db, "111");
+  assert.deepEqual([...own.roots], ["9001"], "its own top-level posts");
+  assert.deepEqual([...own.posts].sort(), ["9001", "9501", "9511"], "and its posted answers");
+  assert.deepEqual([...own.answered.entries()].sort(), [["500", "333"], ["510", "444"]], "each answered post, by its author");
+  // Another X account's are not its own.
+  assert.deepEqual(await ownThreadTweets(db, "222"), none);
+  // Bounded, newest first: with room for one answer, only the newest is known.
+  const one = await ownThreadTweets(db, "111", 1);
+  assert.deepEqual([...one.posts].sort(), ["9001", "9511"]);
+  assert.deepEqual([...one.answered.keys()], ["510"]);
+  // A post the caller's screen shuts (red-team review of 1ed46625: its own sherwood-1 line) is in none of them, nor the tag it answered.
+  const shut = await ownThreadTweets(db, "111", undefined, (body) => /\b510\b|hello/.test(body));
+  assert.deepEqual([...shut.roots], []);
+  assert.deepEqual([...shut.posts], ["9501"]);
+  assert.deepEqual([...shut.answered.entries()], [["500", "333"]]);
+  // What a follow-up sits under (red-team review of 1ed46625): its intro is plain chat, a buy post its own trade, an answer only when marked plain.
+  assert.deepEqual([...own.plain], ["9001"], "no answer marked plain yet: each closes its thread to all but a greeting");
+  assert.deepEqual([...own.trade], []);
+  await sent(post({ kind: "buy", dedupeKey: "buy:a:1", body: "grabbed some pepe", coin: "pepe", nowMs: 70, dueAtMs: 70 }), "9002");
+  await sent(answer("550", "888", 80, { coin: ANSWER_PLAIN_THREAD }), "9551");
+  await sent(answer("560", "999", 90, { coin: ANSWER_LOOKED_UP }), "9561");
+  const marked = await ownThreadTweets(db, "111");
+  assert.deepEqual([...marked.plain].sort(), ["550", "9001", "9551"], "the plain answer and the tag it answered");
+  assert.deepEqual([...marked.trade], ["9002"]);
+  assert.ok(marked.posts.has("9561") && !marked.plain.has("9561") && !marked.plain.has("560"), "a looked-up answer is its own post, never plain");
+  // A casual post the caller's trade screen reads as about a coin it bought sits with its buy posts (red-team review of daaae961:
+  // "still sitting in some pepe from earlier this week, fun ride so far" counted as plain, and a major's line went up under it).
+  await sent(post({ kind: "casual", dedupeKey: "casual:a:pepe", body: "still sitting in some pepe from earlier this week, fun ride so far", nowMs: 100, dueAtMs: 100 }), "9003");
+  await sent(post({ kind: "casual", dedupeKey: "casual:a:owls", body: "owls are underrated night shift workers", nowMs: 110, dueAtMs: 110 }), "9004");
+  const traded = await ownThreadTweets(db, "111", undefined, undefined, (body) => /\bpepe\b/.test(body));
+  assert.deepEqual([...traded.trade].sort(), ["9002", "9003"]);
+  assert.ok(traded.plain.has("9004") && !traded.plain.has("9003"), "the other casual post is still plain");
+  assert.ok(traded.roots.has("9003") && traded.posts.has("9003"), "and still its own post");
+  // And a casual post the caller's closed screen reads as coin or market talk is in neither: closed (red-team review of daaae961).
+  await sent(post({ kind: "casual", dedupeKey: "casual:a:chain", body: "picked up some pepe on robinhood chain lately, the curve looked early to me", nowMs: 120, dueAtMs: 120 }), "9005");
+  const closed = await ownThreadTweets(db, "111", undefined, undefined, (body) => /\bpepe\b/.test(body), (body) => /\bchain\b/.test(body));
+  assert.ok(!closed.plain.has("9005") && !closed.trade.has("9005"), "closed, more closed than its trade");
+  assert.ok(closed.roots.has("9005") && closed.posts.has("9005"), "and still its own post");
+  assert.ok(closed.trade.has("9003") && closed.plain.has("9004") && closed.plain.has("9001"), "the rest as they were, its hello plain");
 });
 
 test("turning replies off cancels only replies and opt-outs are durable across tenants sharing an account", async (t) => {

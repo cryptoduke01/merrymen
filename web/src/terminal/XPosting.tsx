@@ -139,10 +139,14 @@ const WARNING_BODY = [
  * cadence (worker/src/xpost/planner.ts ACTIVE_CADENCE): up to twelve a day,
  * passing thoughts through the day and a post for most coins it buys, with
  * no coin fold, seventy-five minutes apart. "A few a day at most" would
- * understate that. Pinned by x-posting.test.ts and iOS XPostingTests.
+ * understate that. And its answers may carry market figures Merrymen renders
+ * from public data (worker/src/xpost/figures.ts), so "never prices or
+ * amounts" would overstate what it leaves out (2026-10-12); every other
+ * owner's sentence is unchanged. Pinned by x-posting.test.ts and iOS
+ * XPostingTests.
  */
 const ACTIVE_WARNING_BODY = [
-  "It writes its own posts: a hello first, then a few passing thoughts a day and a post for most coins it buys, and why. It never posts trade alerts, error messages, prices or amounts. Your saved options can add public wallet or token addresses and completed sale results.",
+  "It writes its own posts: a hello first, then a few passing thoughts a day and a post for most coins it buys, and why. It never posts trade alerts or error messages, and its answers may carry market figures built from public data. Your saved options can add public wallet or token addresses and completed sale results.",
   "Posts go out on their own, up to 12 a day and at least an hour apart. Each one waits under Coming up for at least ten minutes first, and you can skip it there. Turn this off or disconnect X at any time.",
   WARNING_BODY[2],
 ] as const;
@@ -151,26 +155,38 @@ const warningYes = (handle: string) => `Let it post as ${handle}`;
  * THE REPLY WARNING SAYS EXACTLY WHAT IT TURNS ON, and that depends on the
  * agent. Most owners' replies are comments on its coin posts, inside the
  * posting cadence and the ten-minute review. An agent merrymen made active
- * (`repliesActive`, MERRYMEN_XPOST_ACTIVE_TENANTS) answers posts that tag it
- * instead — comments on its own posts arrive the same way — right away, in a
- * lane of its own, so its warning promises no review window it would not keep.
+ * (`repliesActive`, MERRYMEN_XPOST_ACTIVE_TENANTS) answers posts that tag it,
+ * reply to it or quote it instead — comments on its own posts arrive the same
+ * way — right away, in a lane of its own, so its warning promises no review
+ * window it would not keep. Replying to it or quoting it is asking (the
+ * owner's decision, 2026-10-12): its answers carry no opt-out line, and it
+ * never answers someone who asked it to stop.
  * Every sentence of both is pinned by x-posting.test.ts and iOS XPostingTests.
  */
 const replyWarningTitle = (handle: string) => `Reply to comments as ${handle}?`;
 const replyWarningLead = (handle: string, active: boolean) => active
-  ? `Your Merryman will reply as ${handle} to selected posts that tag it, including comments on its own posts.`
+  ? `Your Merryman will reply as ${handle} to selected posts that tag it, reply to it or quote it.`
   : `Your Merryman will reply as ${handle} to selected comments on its coin posts.`;
 const REPLY_WARNING_BODY = [
   "It chooses which comments to answer; it won’t reply to every comment. Replies share the same daily limit as posts.",
   "Each reply waits under Coming up for at least ten minutes first, with a link to the comment, and you can skip it there. Turn replies off at any time to cancel waiting replies.",
 ] as const;
+/**
+ * AN ACTIVE AGENT'S ANSWERS MAY CARRY MARKET FIGURES (2026-10-12): a coin's
+ * rank, price, market cap, volume or recent change, rendered by Merrymen from
+ * public data (CoinGecko, GeckoTerminal, Fomo, Bitquery) after the answer's
+ * own words, which still never hold a number (worker/src/xpost/figures.ts).
+ * So its warning says so; every other owner's is unchanged. Pinned by
+ * x-posting.test.ts and iOS XPostingTests.
+ */
 const ANSWER_WARNING_BODY = [
   "It chooses which posts to answer; it won’t answer every one. Answers go out right away: they don’t wait under Coming up, so you can’t skip one first.",
-  "Up to 24 answers a day on top of its posts, and at most two to one person a day. Anyone can reply stop to opt out. Turn replies off at any time to stop answering.",
+  "It answers people who tag it, reply to it or quote it, a few times a day each: up to 60 answers a day on top of its posts, and at most six to one person a day. Answers carry no opt-out line, and it never answers someone who asked it to stop. Turn replies off at any time to stop answering.",
+  "Answers may include market figures from public data (CoinGecko, GeckoTerminal, Fomo and Bitquery), such as a coin’s price, market cap, volume or recent change. Merrymen adds them as the data showed them; they are never advice.",
 ] as const;
 const replyWarningYes = (handle: string) => `Let it reply as ${handle}`;
 const replyHint = (handle: string, active: boolean) => active
-  ? `Selected posts that tag your Merryman and comments on its posts, answered as ${handle} right away, up to 24 a day on top of its posts.`
+  ? `Selected posts that tag your Merryman, reply to it or quote it, answered as ${handle} right away, up to 60 a day on top of its posts.`
   : `Selected comments on your Merryman’s coin posts, answered as ${handle}. Replies share the post limit and ten-minute review window.`;
 
 const KIND_LABEL: Record<XUpcomingPost["kind"], string> = { intro: "Hello post", casual: "Casual post", buy: "Buy post", sell: "Sale post", reply: "Comment reply", answer: "Answer to a tag" };
