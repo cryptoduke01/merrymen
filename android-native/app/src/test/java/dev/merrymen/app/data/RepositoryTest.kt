@@ -1,6 +1,7 @@
 package dev.merrymen.app.data
 
 import dev.merrymen.app.net.HTML_PAGE
+import dev.merrymen.app.net.CookieStores
 import dev.merrymen.app.net.Http
 import dev.merrymen.app.net.MemoryCookies
 import dev.merrymen.app.net.MemoryStore
@@ -11,9 +12,12 @@ import dev.merrymen.app.net.WebAuth
 import dev.merrymen.app.net.answer
 import dev.merrymen.app.net.origin
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import okhttp3.Cookie
 import okhttp3.HttpUrl.Companion.toHttpUrl
@@ -35,6 +39,8 @@ import java.net.ProxySelector
 import java.net.SocketAddress
 import java.net.URI
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * WHEN A WALLET'S STATE GOES, through the real Repository.
@@ -99,6 +105,182 @@ class RepositoryTest {
     repo.refreshIdentity()
     server.takeRequest()
     assertEquals("0xAAA", repo.signedIn.value)
+  }
+
+  @Test fun webCookieAdoptionRetriesAnUnconfirmedIdentityAndThenSwitchesOwners() = runBlocking {
+    signedInAsA()
+    var forgotten = 0
+    repo.addForgetHook { forgotten++ }
+    cookies.web["mm_session"] = "new-owner"
+    server.answer("""{"error":"temporarily unavailable"}""", code = 503)
+    assertFalse(repo.adoptWebSession(server.origin(), repo.serverTurn.value))
+    assertNull("new credentials must never act under the old published owner", repo.signedIn.value)
+    assertFalse(repo.identityKnown.value)
+    assertFalse(repo.canOfferSignIn.value)
+    server.takeRequest()
+    server.session("0xBBB")
+    assertTrue(repo.adoptWebSession(server.origin(), repo.serverTurn.value))
+    assertEquals("0xBBB", repo.signedIn.value)
+    assertEquals("the old owner is retained internally until the switch is confirmed", 1, forgotten)
+    assertTrue(sentCookies(server)!!.contains("mm_session=new-owner"))
+  }
+
+  @Test fun anOlderPreLoginReadCannotOverwriteSuccessfulWebAdoption() = runBlocking {
+    val oldReadStarted = CompletableDeferred<Unit>()
+    val releaseOldRead = CountDownLatch(1)
+    val reads = AtomicInteger()
+    server.dispatcher = object : Dispatcher() {
+      override fun dispatch(request: RecordedRequest): MockResponse {
+        val old = reads.incrementAndGet() == 1
+        if (old) {
+          oldReadStarted.complete(Unit)
+          releaseOldRead.await(5, TimeUnit.SECONDS)
+        }
+        return MockResponse().setHeader("content-type", "application/json")
+          .setBody(if (old) """{"hosted":true,"address":null}""" else """{"hosted":true,"address":"0xBBB"}""")
+      }
+    }
+    val old = launch { repo.refreshIdentity() }
+    try {
+      oldReadStarted.await()
+      cookies.web["mm_session"] = "new-owner"
+      assertTrue(repo.adoptWebSession(server.origin(), repo.serverTurn.value))
+      assertTrue("the older response is still waiting when adoption succeeds", old.isActive)
+      releaseOldRead.countDown()
+      old.join()
+      assertEquals("0xBBB", repo.signedIn.value)
+      assertTrue(repo.identityKnown.value)
+    } finally {
+      releaseOldRead.countDown()
+    }
+  }
+
+  @Test fun leavingTheWebViewAfterHarvestStillFinishesIdentityReconciliation() = runBlocking {
+    signedInAsA()
+    cookies.web["mm_session"] = "new-owner"
+    val checkStarted = CompletableDeferred<Unit>()
+    val releaseCheck = CountDownLatch(1)
+    server.dispatcher = object : Dispatcher() {
+      override fun dispatch(request: RecordedRequest): MockResponse {
+        checkStarted.complete(Unit)
+        releaseCheck.await(5, TimeUnit.SECONDS)
+        return MockResponse().setHeader("content-type", "application/json")
+          .setBody("""{"hosted":true,"address":"0xBBB"}""")
+      }
+    }
+    val adopting = launch { repo.adoptWebSession(server.origin(), repo.serverTurn.value) }
+    try {
+      checkStarted.await()
+      assertEquals("new-owner", jar.loadForRequest(server.url("/")).single().value)
+      assertNull(repo.signedIn.value)
+      adopting.cancel()
+      assertFalse("reconciliation outlives disposal of its screen", adopting.isCompleted)
+      releaseCheck.countDown()
+      adopting.join()
+      assertEquals("0xBBB", repo.signedIn.value)
+      assertTrue(repo.identityKnown.value)
+    } finally {
+      releaseCheck.countDown()
+    }
+  }
+
+  @Test fun aFailedAdoptionCanRecoverThroughTheShellAfterTheWebViewIsGone() = runBlocking {
+    signedInAsA()
+    cookies.web["mm_session"] = "new-owner"
+    server.answer("""{"error":"temporarily unavailable"}""", code = 503)
+    assertFalse(repo.adoptWebSession(server.origin(), repo.serverTurn.value))
+    server.session("0xBBB")
+    repo.askUntilKnown(pause = {})
+    assertEquals("0xBBB", repo.signedIn.value)
+    assertTrue(repo.identityKnown.value)
+  }
+
+  @Test fun aFailedWebCookieReadDoesNotAcknowledgeOrDeleteTheNativeSession() = runBlocking {
+    signedInAsA()
+    cookies.webRefuses = true
+    val requests = server.requestCount
+    assertFalse(repo.adoptWebSession(server.origin(), repo.serverTurn.value))
+    assertEquals(requests, server.requestCount)
+    assertEquals("abc", jar.loadForRequest(server.url("/")).single().value)
+    assertEquals("0xAAA", repo.signedIn.value)
+  }
+
+  @Test fun aWebLogoutRemovesTheNativeSessionBeforeCheckingIdentity() = runBlocking {
+    signedInAsA()
+    cookies.web.clear()
+    server.session(null)
+    assertTrue(repo.adoptWebSession(server.origin(), repo.serverTurn.value))
+    assertNull(sentCookies(server))
+    assertNull(repo.signedIn.value)
+  }
+
+  @Test fun aWebViewFromAnEarlierServerTurnCannotAdoptItsCookies() = runBlocking {
+    val openedAt = repo.serverTurn.value
+    val openedOrigin = server.origin()
+    cookies.web["mm_session"] = "old-server"
+    repo.setOrigin("https://another.example")
+    val requests = server.requestCount
+    assertFalse(repo.adoptWebSession(openedOrigin, openedAt))
+    assertEquals(requests, server.requestCount)
+    assertTrue(jar.loadForRequest(server.url("/")).isEmpty())
+  }
+
+  @Test fun signOutCannotBeUndoneByAWebCookieSnapshotAlreadyBeingHarvested() = runBlocking {
+    val snapshotRead = CompletableDeferred<Unit>()
+    val releaseSnapshot = CompletableDeferred<Unit>()
+    val blocking = object : CookieStores by cookies {
+      override suspend fun harvestChecked(origin: String): Boolean {
+        val snapshot = WebAuth.webCookies("mm_session=old-valid-bearer", origin.toHttpUrl())
+        snapshotRead.complete(Unit)
+        releaseSnapshot.await()
+        jar.saveFromResponse(origin.toHttpUrl(), snapshot)
+        return true
+      }
+    }
+    repo = Repository(repo.api, store, blocking)
+    signedInAsA()
+    val adopting = launch { repo.adoptWebSession(server.origin(), repo.serverTurn.value) }
+    snapshotRead.await()
+    server.answer("""{"ok":true}""")
+    val leaving = launch { repo.signOut() }
+    // The network logout completed while the snapshot still held the lock.
+    withContext(Dispatchers.IO) { server.takeRequest(5, TimeUnit.SECONDS) }
+    server.session("0xAAA")
+    releaseSnapshot.complete(Unit)
+    adopting.join()
+    leaving.join()
+    assertTrue(jar.loadForRequest(server.url("/")).isEmpty())
+    assertNull(repo.signedIn.value)
+  }
+
+  @Test fun anAdoptionQueuedBehindSignOutNeverHarvestsTheOldBrowserSession() = runBlocking {
+    val cleanupStarted = CompletableDeferred<Unit>()
+    val releaseCleanup = CompletableDeferred<Unit>()
+    var harvests = 0
+    val blocking = object : CookieStores by cookies {
+      override suspend fun forgetAll() {
+        cleanupStarted.complete(Unit)
+        releaseCleanup.await()
+        cookies.forgetAll()
+      }
+      override suspend fun harvestChecked(origin: String): Boolean {
+        harvests++
+        return cookies.harvestChecked(origin)
+      }
+    }
+    repo = Repository(repo.api, store, blocking)
+    signedInAsA()
+    server.answer("""{"ok":true}""")
+    val leaving = launch { repo.signOut() }
+    cleanupStarted.await()
+    val queued = async(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
+      repo.adoptWebSession(server.origin(), repo.serverTurn.value)
+    }
+    releaseCleanup.complete(Unit)
+    leaving.join()
+    assertFalse(queued.await())
+    assertEquals(0, harvests)
+    assertNull(repo.signedIn.value)
   }
 
   // ── sign-out ─────────────────────────────────────────────────────────────

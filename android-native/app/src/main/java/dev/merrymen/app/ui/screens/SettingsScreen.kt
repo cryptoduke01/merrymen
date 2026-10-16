@@ -62,7 +62,6 @@ import dev.merrymen.app.net.MerrymenApi
 import dev.merrymen.app.net.OriginCheck
 import dev.merrymen.app.net.ServerBound
 import dev.merrymen.app.net.SettingsRead
-import dev.merrymen.app.net.TelegramStatus
 import dev.merrymen.app.net.said
 import dev.merrymen.app.net.settingsRead
 import dev.merrymen.app.ui.LoadedBlock
@@ -418,7 +417,6 @@ fun SettingsScreen(nav: NavHostController) {
   // Keyed on both: another wallet's — or another server's — read, draft,
   // consent and notes never survive a change.
   var state by remember(form) { mutableStateOf<Loaded<SettingsRead>>(Loaded.Loading) }
-  var telegram by remember(form) { mutableStateOf<TelegramStatus?>(null) }
   var draft by remember(form) { mutableStateOf(SettingsDraft()) }
   var origin by remember { mutableStateOf("") }
   var note by remember(form) { mutableStateOf<String?>(null) }
@@ -442,7 +440,6 @@ fun SettingsScreen(nav: NavHostController) {
 
   suspend fun load() {
     state = readSettingsFor(c.api, signedIn, c.repo.hosted.value) { c.repo.refreshIdentity() }
-    telegram = (c.api.telegram() as? ApiResult.Ok)?.value
   }
 
   LaunchedEffect(form) {
@@ -526,7 +523,6 @@ fun SettingsScreen(nav: NavHostController) {
         SettingsForm(
           env = env,
           keys = read.keys,
-          telegram = telegram,
           hosted = hosted,
           draft = draft,
           onDraft = { draft = it; ownerChanged = false },
@@ -665,6 +661,16 @@ fun SettingsScreen(nav: NavHostController) {
           }
         }
       }
+
+      // Available even signed out or when the server cannot load settings.
+      PanelSectionHeading("Privacy and account")
+      PolicyLinks()
+      PolicyLink("Request account deletion", ACCOUNT_DELETION_URL, Modifier.fillMaxWidth())
+      NoteLine(
+        "Request account and associated data deletion through support@merrymen.dev. " +
+          "Support may ask you to verify account ownership. Deleting account data stops your hosted agent. " +
+          "Public blockchain records cannot be erased.",
+      )
     }
     Spacer(Modifier.height(LocalBottomInset.current))
   }
