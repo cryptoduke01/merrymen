@@ -1,0 +1,57 @@
+{
+ "about": "Shared answers for brain/onchain_ids.py and packages/core/src/ids.ts onchainIdsIn. tests/test_onchain_ids.py and worker/src/brain-client-onchain-ids.test.ts both read this file, so the two detectors cannot part. The Solana values are the USDG mint, the system program, and a public key, a signature and a 64-byte keypair from the all-0x05 test seed that packages/core/src/ids.test.ts also uses.",
+ "cases": [
+  {"text": "bought 2u1tszSeqZ3qBWF3uNGPFc8TzMk2tdiwknnRMWGWjGWH at the open",
+   "hits": [{"family": "solana", "shape": "address", "value": "2u1tszSeqZ3qBWF3uNGPFc8TzMk2tdiwknnRMWGWjGWH"}]},
+  {"text": "landed as 3NGW7mkqWR84fuKhxiUmVTJg8AehpcEQHKZcivruB5449akQiFvm2Ej6AvJGLnfwW15Cb2wn1D6UAFMJtXh6tigd before the close",
+   "hits": [{"family": "solana", "shape": "hash", "value": "3NGW7mkqWR84fuKhxiUmVTJg8AehpcEQHKZcivruB5449akQiFvm2Ej6AvJGLnfwW15Cb2wn1D6UAFMJtXh6tigd"}]},
+  {"text": "exported 6pc4LiB8KHAPvbUbkozrTcPL5zXspYBdATv5raNDyVbpoz75fGXT3N41QtwPtrdu4wMT1tyRu2125Uyu92AnxEC by mistake",
+   "hits": [{"family": "solana", "shape": "hash", "value": "6pc4LiB8KHAPvbUbkozrTcPL5zXspYBdATv5raNDyVbpoz75fGXT3N41QtwPtrdu4wMT1tyRu2125Uyu92AnxEC"}]},
+  {"text": "the system program 11111111111111111111111111111111 owns it",
+   "hits": [{"family": "solana", "shape": "address", "value": "11111111111111111111111111111111"}]},
+  {"text": "ca:2u1tszSeqZ3qBWF3uNGPFc8TzMk2tdiwknnRMWGWjGWH_v2",
+   "hits": [{"family": "solana", "shape": "address", "value": "2u1tszSeqZ3qBWF3uNGPFc8TzMk2tdiwknnRMWGWjGWH"}]},
+  {"text": "2u1tszSeqZ3qBWF3uNGPFc8TzMk2tdiwknnRMWGWjGWH,3NGW7mkqWR84fuKhxiUmVTJg8AehpcEQHKZcivruB5449akQiFvm2Ej6AvJGLnfwW15Cb2wn1D6UAFMJtXh6tigd",
+   "hits": [
+    {"family": "solana", "shape": "address", "value": "2u1tszSeqZ3qBWF3uNGPFc8TzMk2tdiwknnRMWGWjGWH"},
+    {"family": "solana", "shape": "hash", "value": "3NGW7mkqWR84fuKhxiUmVTJg8AehpcEQHKZcivruB5449akQiFvm2Ej6AvJGLnfwW15Cb2wn1D6UAFMJtXh6tigd"}
+   ]},
+  {"text": "chart at https://solscan.io/token/2u1tszSeqZ3qBWF3uNGPFc8TzMk2tdiwknnRMWGWjGWH) for now",
+   "hits": [
+    {"family": "solana", "shape": "link", "value": "https://solscan.io/token/2u1tszSeqZ3qBWF3uNGPFc8TzMk2tdiwknnRMWGWjGWH"},
+    {"family": "solana", "shape": "address", "value": "2u1tszSeqZ3qBWF3uNGPFc8TzMk2tdiwknnRMWGWjGWH"}
+   ]},
+  {"text": "SOLSCAN.IO/account/8SFqwqnq4whPhs8icwHA2hQg3hUoN1qrCLK1SBx3WKwe",
+   "hits": [
+    {"family": "solana", "shape": "link", "value": "SOLSCAN.IO/account/8SFqwqnq4whPhs8icwHA2hQg3hUoN1qrCLK1SBx3WKwe"},
+    {"family": "solana", "shape": "address", "value": "8SFqwqnq4whPhs8icwHA2hQg3hUoN1qrCLK1SBx3WKwe"}
+   ]},
+  {"text": "explorer.solana.com/tx/3NGW7mkqWR84fuKhxiUmVTJg8AehpcEQHKZcivruB5449akQiFvm2Ej6AvJGLnfwW15Cb2wn1D6UAFMJtXh6tigd?cluster=devnet",
+   "hits": [
+    {"family": "solana", "shape": "link", "value": "explorer.solana.com/tx/3NGW7mkqWR84fuKhxiUmVTJg8AehpcEQHKZcivruB5449akQiFvm2Ej6AvJGLnfwW15Cb2wn1D6UAFMJtXh6tigd?cluster=devnet"},
+    {"family": "solana", "shape": "hash", "value": "3NGW7mkqWR84fuKhxiUmVTJg8AehpcEQHKZcivruB5449akQiFvm2Ej6AvJGLnfwW15Cb2wn1D6UAFMJtXh6tigd"}
+   ]},
+  {"text": "orb.helius.dev/ and solana.fm/tx/x then www.solanabeach.io/>",
+   "hits": [
+    {"family": "solana", "shape": "link", "value": "orb.helius.dev/"},
+    {"family": "solana", "shape": "link", "value": "solana.fm/tx/x"},
+    {"family": "solana", "shape": "link", "value": "www.solanabeach.io/"}
+   ]},
+  {"text": "router 0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168 tx 0xAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAb",
+   "hits": [
+    {"family": "evm", "shape": "address", "value": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168"},
+    {"family": "evm", "shape": "hash", "value": "0xAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAb"}
+   ]},
+  {"text": "0x11111111111111111111111111111111111111111", "hits": []},
+  {"text": "AHQXemtAHQXemtAHQXemtAHQXemtAHQXemtAHQXemtA", "hits": []},
+  {"text": "2345678923456789234567892345678923456789", "hits": []},
+  {"text": "02u1tszSeqZ3qBWF3uNGPFc8TzMk2tdiwknnRMWGWjGWH", "hits": []},
+  {"text": "2u1tszSeqZ3qBWF3uNGPFc8TzMk2tdiwknnRMWGWjGWHl", "hits": []},
+  {"text": "2u1tszSeqZ3qBWF3uNGPFc8TzMk2tdiwknnRMWGWjGWH2u1tszSeqZ3qBWF3uNGPFc8TzMk2tdiwknnRMWGWjGWHa", "hits": []},
+  {"text": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "hits": []},
+  {"text": "PEPE pumped 40% on the week", "hits": []},
+  {"text": "supercalifragilisticexpialidociousandmorewordsjoined", "hits": []},
+  {"text": "merrymen:meme dec_9f2c4b7a1e3d5f60 [ref:d3fa91cr2c1] up to 30 minutes", "hits": []},
+  {"text": "", "hits": []}
+ ]
+}
