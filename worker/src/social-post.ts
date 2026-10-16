@@ -36,6 +36,7 @@
  * it. A social layer that must always produce something is a social layer that
  * will eventually produce anything.
  */
+import { onchainIdIn } from "../../packages/core/src/ids";
 import type { ClassEvidence } from "./class-evidence";
 
 /** How many of an agent's own recent posts are weighed for repetition. */
@@ -222,7 +223,7 @@ export interface PostVerdict {
   refusal?: PostRefusal;
 }
 
-/** The same shape `thesis-policy.ts` refuses on, applied one layer earlier. */
+/** The same shape `thesis-policy.ts` refuses on, applied one layer earlier; core's detector adds Solana ids. */
 const ADDRESSY = /\b(?:0x[0-9a-fA-F]{6,}|rh:[A-Za-z0-9-]{1,64})\b/;
 /** A handle or a link would make the agent reachable, or make it endorse someone. */
 const HANDLEY = /(^|\s)[@#]\w|https?:\/\//;
@@ -310,7 +311,7 @@ export function admitPost(raw: string, c: WriterContext): PostVerdict {
    * "has-digits" in the operator log — a refusal that says the wrong thing
    * about why, on the one case where knowing why matters most.
    */
-  if (ADDRESSY.test(body)) return { ok: false, refusal: "has-address" };
+  if (ADDRESSY.test(body) || onchainIdIn(body)) return { ok: false, refusal: "has-address" };
   if (HANDLEY.test(body)) return { ok: false, refusal: "has-handle" };
 
   /**

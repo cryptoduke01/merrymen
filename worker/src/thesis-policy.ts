@@ -20,8 +20,10 @@
  * POLICY is the worst option available: the two readers drift into different
  * ideas of what may be published, and the drift stays invisible until
  * something private appears on a page. So it moved, and web/src/lib/thesis.ts
- * is a re-export. The module has no imports at all, which is what made that
- * mechanical — it is pure, DB-free, fetch-free and env-free, as below.
+ * is a re-export. The module had no imports at all, which is what made that
+ * mechanical — it is pure, DB-free, fetch-free and env-free, as below. Its one
+ * import since is core's id detector (packages/core/src/ids.ts), which is all
+ * of those things too and which the browser already loads through core.
  *
  * This is the only gate between the decisions table and a page anybody can
  * read, and the decisions table was never built to be published. Three things
@@ -58,6 +60,7 @@
  * PURE. No database, no fetch, no environment. It takes a row and returns a
  * post or null, so the whole policy is testable as a table.
  */
+import { onchainIdIn } from "../../packages/core/src/ids";
 
 /** A joined decision + its outcome, exactly as the route selects it. */
 export interface ThesisRow {
@@ -681,8 +684,12 @@ export function markFigures(d: string): string {
  *
  * `rh:` is included because the brokerage rail's agent id embeds an account
  * number, and a reason that quoted one would publish it.
+ *
+ * A Solana key or signature has no 0x, so `addressy` also asks core's
+ * detector, which finds base58 ids and Solana explorer links.
  */
 const ADDRESSY = /\b(?:0x[0-9a-fA-F]{6,}|rh:[A-Za-z0-9-]{1,64})\b/;
+const addressy = (s: string): boolean => ADDRESSY.test(s) || onchainIdIn(s);
 
 /** Matches the `/why` truncation point, so no surface cuts one mid-word. */
 /**
@@ -734,11 +741,11 @@ export function clip(text: string, max: number = REASON_MAX): string {
 /**
  * The public id's shape, duplicated from identity-store's SLUG_RE on purpose.
  *
- * This module has NO IMPORTS — that is what let it move out of web/src/lib and
- * be read by the orchestrator as well as the browser — and importing a store
- * that reaches for node:fs and pg would end that immediately. A 16-character
- * base32 alphabet is not going to drift, and identity-store's own tests pin the
- * generator against exactly this shape.
+ * This module imports nothing but core's pure id detector — that is what let
+ * it move out of web/src/lib and be read by the orchestrator as well as the
+ * browser — and importing a store that reaches for node:fs and pg would end
+ * that immediately. A 16-character base32 alphabet is not going to drift, and
+ * identity-store's own tests pin the generator against exactly this shape.
  */
 const SLUG_SHAPE = /^[0-9a-hjkmnp-tv-z]{16}$/;
 
@@ -1259,7 +1266,7 @@ export function publishableThesis(row: ThesisRow): PublicThesis | null {
     // below and it is repeated here rather than deferred, because a post that
     // names an address must cost the POST and not the whole thesis: the trade
     // and our own sentence about it are still safe to publish.
-    post = ADDRESSY.test(body) || operationalNotice(body) ? null : body;
+    post = addressy(body) || operationalNotice(body) ? null : body;
   }
   // A dropped order's classified error is useful in the owner's ledger, but
   // cannot stand in for an investment view. Keep substantive reasoning even
@@ -1395,7 +1402,7 @@ export function publishableThesis(row: ThesisRow): PublicThesis | null {
   // that staying true.
   const displayName = nameOf(row);
   for (const s of [name, handle, head, reason, text, row.symbol ?? null, row.slug ?? null, displayName]) {
-    if (s && ADDRESSY.test(s)) return null;
+    if (s && addressy(s)) return null;
   }
 
   const action =
