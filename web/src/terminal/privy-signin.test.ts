@@ -30,6 +30,8 @@ let creations: number;
 let tokens: number;
 let logins: number;
 let loginOptions: unknown[];
+let oauthOptions: unknown[];
+let oauthStart: () => Promise<void>;
 let logouts: number;
 let completed: number;
 let requests: Call[];
@@ -84,6 +86,7 @@ before(() => {
           loginError = callbacks?.onError ?? (() => undefined);
           return { login };
         },
+        useLoginWithOAuth: () => ({ initOAuth: (options: unknown) => { oauthOptions.push(options); return oauthStart(); } }),
         useModalStatus: () => ({ isOpen: modalOpen }),
         getEmbeddedConnectedWallet: (list: Wallet[]) => list.find((item) => item.walletClientType === "privy") ?? null,
       };
@@ -111,6 +114,8 @@ beforeEach(() => {
   creations = tokens = logins = logouts = completed = 0;
   requests = [];
   loginOptions = [];
+  oauthOptions = [];
+  oauthStart = async () => {};
   signatures = [];
   create = never;
   accessToken = async () => "verified-owner-token";
@@ -364,6 +369,37 @@ describe("Privy sign-in wallet provisioning and proof", () => {
     assert.equal(requests.length, 0);
     await ui.click("Continue with X");
     assert.deepEqual(loginOptions, [{ loginMethods: ["email"] }, { loginMethods: ["twitter"] }]);
+  });
+
+  it("starts Android X directly and still requires the existing owner proof after authentication", async () => {
+    authenticated = false;
+    await ui.render(React.createElement(PrivySignIn, { onDone, directX: true }));
+    await ui.click("Continue with X");
+    assert.deepEqual(oauthOptions, [{ provider: "twitter" }]);
+    assert.deepEqual(loginOptions, [], "no redundant provider-choice modal");
+    assert.equal(creations, 0);
+    assert.equal(requests.length, 0);
+    assert.equal(completed, 0);
+    authenticated = true;
+    connectOwner();
+    await ui.render(React.createElement(PrivySignIn, { onDone, directX: true }));
+    await drain();
+    assert.equal(signatures.length, 1);
+    assert.equal(posts().length, 1);
+    assert.equal(completed, 1);
+  });
+
+  it("keeps email in the standard modal on Android and recovers failed direct X initialization", async () => {
+    authenticated = false;
+    oauthStart = async () => { throw new Error("provider unavailable"); };
+    await ui.render(React.createElement(PrivySignIn, { onDone, directX: true }));
+    await ui.click("Continue with X");
+    await drain();
+    assert.match(ui.container.textContent ?? "", /Sign-in didn't finish/);
+    await ui.click("Continue with email");
+    assert.deepEqual(loginOptions, [{ loginMethods: ["email"] }]);
+    assert.equal(requests.length, 0);
+    assert.equal(creations, 0);
   });
 
   it("explains the ownership signature without implying a trading permission", async () => {

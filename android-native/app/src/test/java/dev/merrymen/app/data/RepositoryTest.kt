@@ -378,6 +378,17 @@ class RepositoryTest {
 
   // ── a cold start ─────────────────────────────────────────────────────────
 
+  /** Independent startup reads can arrive in either order. Route by path. */
+  private fun startupReplies(address: String? = null) {
+    server.dispatcher = object : Dispatcher() {
+      override fun dispatch(request: RecordedRequest): MockResponse = when (request.path) {
+        "/api/version" -> MockResponse().setBody("""{"version":"0.21.0"}""")
+        "/api/auth/session" -> MockResponse().setBody("""{"hosted":true,"address":${address?.let { "\"$it\"" } ?: "null"}}""")
+        else -> MockResponse().setResponseCode(404)
+      }.setHeader("content-type", "application/json")
+    }
+  }
+
   @Test fun bootstrapDropsTheRetiredPasswordAndItsCookieFromBothStores() = runBlocking {
     // What a 0.1.0 install left behind: the password in prefs, and mm_gate —
     // whose value WAS the password — in the jar and in the WebView.
@@ -385,8 +396,7 @@ class RepositoryTest {
     store.cookieBlob = "mm_gate=beta-password\nmm_session=abc"
     cookies.web["mm_gate"] = "beta-password"
     cookies.web["mm_session"] = "abc"
-    server.answer("""{"version":"0.21.0"}""")
-    server.session("0xAAA")
+    startupReplies("0xAAA")
 
     assertEquals(Loaded.Value(Unit), repo.bootstrap())
 
@@ -398,7 +408,6 @@ class RepositoryTest {
     // A WebView that still holds it hands it back on the next page; the
     // hand-back refuses it.
     cookies.web["mm_gate"] = "beta-password"
-    server.session("0xAAA")
     repo.adoptWebSession()
     assertEquals("mm_session=abc", sentCookies(server))
     assertFalse(store.cookieBlob!!.contains("mm_gate"))
@@ -406,8 +415,7 @@ class RepositoryTest {
 
   @Test fun theWebViewIsWokenForTheRetiredCookieOnceNotOnEveryStart() = runBlocking {
     cookies.web["mm_gate"] = "beta-password"
-    server.answer("""{"version":"0.21.0"}""")
-    server.session(null)
+    startupReplies()
     repo.bootstrap()
     assertEquals(1, cookies.webExpiries)
     assertFalse(cookies.web.containsKey("mm_gate"))
@@ -417,8 +425,6 @@ class RepositoryTest {
     // alone — waking it cost the main thread on every cold start before Home.
     val here = "${server.origin()}/".toHttpUrl()
     jar.saveFromResponse(here, listOf(Cookie.parse(here, "mm_gate=beta-password; Path=/")!!))
-    server.answer("""{"version":"0.21.0"}""")
-    server.session(null)
     repo.bootstrap()
     assertEquals("a later start does not open the WebView's store", 1, cookies.webExpiries)
     assertTrue(jar.loadForRequest(here).none { it.name == "mm_gate" })
@@ -427,14 +433,11 @@ class RepositoryTest {
   @Test fun aWebViewThatRefusedIsAskedAgainOnTheNextStart() = runBlocking {
     cookies.web["mm_gate"] = "beta-password"
     cookies.webRefuses = true // missing, or mid-update
-    server.answer("""{"version":"0.21.0"}""")
-    server.session(null)
+    startupReplies()
     repo.bootstrap()
     assertFalse("nothing was done, so nothing is recorded", store.webViewGateExpired)
 
     cookies.webRefuses = false
-    server.answer("""{"version":"0.21.0"}""")
-    server.session(null)
     repo.bootstrap()
     assertEquals(2, cookies.webExpiries)
     assertFalse(cookies.web.containsKey("mm_gate"))

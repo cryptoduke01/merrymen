@@ -191,6 +191,8 @@ export interface ReadThesesOptions {
   symbol?: string;
   /** Per lane: at most this many trades AND at most this many views. */
   limit?: number;
+  /** Activity-only readers retain posts/outcomes/IDs but skip historical fill-return enrichment. */
+  figures?: boolean;
 }
 
 /** A group as the query returns it: the row the gate reads, and where it sits. */
@@ -483,7 +485,7 @@ export async function readTheses(opts: ReadThesesOptions = {}, readDb = withRead
     };
     for (const cols of ATTEMPTS) {
       try {
-        rows = await run(cols);
+        rows = await run(opts.figures === false ? { ...cols, fills: false } : cols);
         named = cols.named;
         break;
       } catch (error) {

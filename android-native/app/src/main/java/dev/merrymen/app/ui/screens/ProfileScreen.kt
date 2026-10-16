@@ -280,6 +280,11 @@ fun ProfileScreen(nav: NavHostController) {
           }
           AccountRow("Settings") { nav.navigate(Routes.SETTINGS) }
           AccountRow("Telegram") { nav.navigate(Routes.TELEGRAM) }
+          if (hosted == true) {
+            AccountRow("Connect to Claude") {
+              nav.navigate(Routes.web("/connect/mcp", "Connect to Claude"))
+            }
+          }
           if (book is OwnBook.Mine && (reads.grants as? Loaded.Value)?.value?.exists == true) {
             AccountRow("Trades & P&L") { nav.navigate(Routes.web("/agent#trades", "Trades & P&L")) }
           }

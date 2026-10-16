@@ -28,6 +28,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
@@ -163,20 +164,13 @@ fun Shell() {
   // every turn of the phone until the start had been asked for again. Saved,
   // the graph composes at once with the back stack it had.
   var start by rememberSaveable { mutableStateOf<String?>(null) }
+  var localReady by remember { mutableStateOf(false) }
   LaunchedEffect(Unit) {
-    // Already decided: a rotation, which the process outlived (the start is
-    // done, and this asks nothing), or a process the system ended and
-    // restored, which runs its one start now, behind the restored screens.
-    if (start != null) {
-      container.started()
-      return@LaunchedEffect
-    }
-    // A new reader can see the welcome immediately. Returning readers wait
-    // for cookie migration and identity before owner screens make requests.
-    val welcomed = container.session.welcomedNow()
-    if (!welcomed) start = Routes.WELCOME
-    container.started()
-    if (welcomed) start = Routes.HOME
+    // This also runs after process restoration: a saved route must never
+    // bypass credential migration. Server checks continue in the app scope.
+    container.locallyReady()
+    localReady = true
+    if (start == null) start = if (container.session.welcomedNow()) Routes.HOME else Routes.WELCOME
   }
 
   // UNTIL SOMEBODY SAYS WHO IS SIGNED IN, KEEP ASKING — while the app is in
@@ -186,6 +180,7 @@ fun Shell() {
   // again, and this starts over.
   val lifecycle = LocalLifecycleOwner.current.lifecycle
   LaunchedEffect(lifecycle) {
+    container.locallyReady()
     lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
       container.repo.identityKnown.collectLatest { known -> if (!known) container.repo.askUntilKnown() }
     }
@@ -231,7 +226,7 @@ fun Shell() {
         // Held back until the start screen is decided, so Home never flashes
         // behind the welcome page; the Box's own background covers that instant.
         val startRoute = start
-        if (startRoute != null) {
+        if (startRoute != null && localReady) {
           NavHost(navController = nav, startDestination = startRoute) { graph(nav) }
         } else {
           Column(
@@ -350,22 +345,23 @@ private fun UnreadDot(modifier: Modifier) {
 private fun NavGraphBuilder.graph(nav: NavHostController) {
   composable(Routes.HOME) { HomeScreen(nav) }
   composable(Routes.FEED) { FeedScreen(nav) }
-  composable(Routes.CHAT) { ChatScreen(nav) }
-  composable(Routes.ALPHA) { AlphaScreen(nav) }
-  composable(Routes.PROFILE) { ProfileScreen(nav) }
+  composable(Routes.CHAT) { AccountRoute(nav) { ChatScreen(nav) } }
+  composable(Routes.ALPHA) { AccountRoute(nav) { AlphaScreen(nav) } }
+  composable(Routes.PROFILE) { AccountRoute(nav) { ProfileScreen(nav) } }
 
   composable(Routes.MARKETS) { MarketsScreen(nav) }
   composable(Routes.SEARCH) { SearchScreen(nav) }
+  // The device's server address must remain editable while that server is down.
   composable(Routes.SETTINGS) { SettingsScreen(nav) }
-  composable(Routes.TELEGRAM) { TelegramScreen(nav) }
-  composable(Routes.CIRCLE) { CircleScreen(nav) }
+  composable(Routes.TELEGRAM) { AccountRoute(nav) { TelegramScreen(nav) } }
+  composable(Routes.CIRCLE) { AccountRoute(nav) { CircleScreen(nav) } }
   composable(Routes.LEADERBOARD) { LeaderboardScreen(nav) }
   composable(Routes.SIGN_IN) { SignInScreen(nav) }
   composable(Routes.WELCOME) { WelcomeScreen(nav) }
-  composable(Routes.PROPOSALS) { ProposalsScreen(nav) }
-  composable(Routes.TRADE) { TradeScreen(nav) }
-  composable(Routes.RISK) { RiskScreen(nav) }
-  composable(Routes.GROUPCHAT) { GroupChatScreen(nav) }
+  composable(Routes.PROPOSALS) { AccountRoute(nav) { ProposalsScreen(nav) } }
+  composable(Routes.TRADE) { AccountRoute(nav) { TradeScreen(nav) } }
+  composable(Routes.RISK) { AccountRoute(nav) { RiskScreen(nav) } }
+  composable(Routes.GROUPCHAT) { AccountRoute(nav) { GroupChatScreen(nav) } }
 
   composable(Routes.TOKEN) { back ->
     TokenDetailScreen(nav, back.arguments?.getString("address").orEmpty())
@@ -379,5 +375,33 @@ private fun NavGraphBuilder.graph(nav: NavHostController) {
       path = back.arguments?.getString("path").orEmpty(),
       title = back.arguments?.getString("title").orEmpty(),
     )
+  }
+}
+
+/** Public browsing is usable while the session is being checked. Private
+ * screens do not compose or start their requests until that check answers. */
+@Composable
+private fun AccountRoute(nav: NavHostController, content: @Composable () -> Unit) {
+  val repo = LocalContainer.current.repo
+  val known by repo.identityKnown.collectAsState()
+  val turn by repo.serverTurn.collectAsState()
+  if (known && turn % 2L == 0L) {
+    content()
+  } else {
+    Column(
+      Modifier.fillMaxSize().padding(horizontal = 24.dp),
+      verticalArrangement = Arrangement.Center,
+      horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+      CircularProgressIndicator(color = MerryColors.mint, modifier = Modifier.size(28.dp))
+      Text("Checking your account…", Modifier.padding(top = 16.dp), color = MerryColors.tx)
+      Text("You can explore agents and activity while we reconnect.", Modifier.padding(top = 8.dp), color = MerryColors.tx2)
+      TextButton(onClick = { nav.navigate(Routes.HOME) { launchSingleTop = true } }) {
+        Text("Explore Merrymen", color = MerryColors.mint)
+      }
+      TextButton(onClick = { nav.navigate(Routes.SETTINGS) { launchSingleTop = true } }) {
+        Text("Connection settings", color = MerryColors.tx2)
+      }
+    }
   }
 }
