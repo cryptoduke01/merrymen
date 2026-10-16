@@ -33,6 +33,7 @@ import {
 } from "../../packages/core/src/index";
 import { ensureHome, homePaths, merrymenHome } from "./home";
 import { wrapSqlite, makePgDb, type Db } from "./db";
+import { applyLedgerMigrations } from "./ledger-migrations";
 import { paperBrainCapital } from "./paper-brain-capital";
 export const getPaperBrainCapital = (agentId: string, epoch: number) => paperBrainCapital(getDb(), agentId, epoch);
 import { readDecisionLifecycle, type DecisionLifecycle } from "./decision-lifecycle";
@@ -1109,18 +1110,13 @@ function initSqlite(): Db {
  * schema would silently break the mirror's INSERT — caught, logged once,
  * invisible.
  *
- * Idempotent: CREATE TABLE IF NOT EXISTS, and each ALTER swallowed the way
- * initSqlite and initPostgres already swallow it.
+ * Existing columns are checked before issuing ALTER: PostgreSQL still takes
+ * an exclusive table lock for ADD COLUMN IF NOT EXISTS. Missing-column
+ * failures stop setup rather than leaving a partly migrated financial ledger.
  */
 export async function applyLedgerSchema(db: Db): Promise<void> {
   await execSchemaBatch(db);
-  for (const ddl of SQLITE_ALTERS) {
-    try {
-      await db.exec(ddl);
-    } catch {
-      // column already exists — the same no-op the two init paths rely on
-    }
-  }
+  await applyLedgerMigrations(db, SQLITE_ALTERS);
   await execReadIndexes(db);
 }
 
@@ -1159,16 +1155,7 @@ async function execSchemaBatch(db: Db): Promise<void> {
  *  Postgres dialect. Selected by DATABASE_URL, mirroring the grant store. */
 async function initPostgres(url: string): Promise<Db> {
   const d = await makePgDb(url);
-  await execSchemaBatch(d);
-  for (const ddl of SQLITE_ALTERS) {
-    try {
-      await d.exec(ddl);
-    } catch {
-      // ADD COLUMN IF NOT EXISTS makes a re-run a no-op; a genuine error still
-      // surfaces on the first real query rather than being masked here.
-    }
-  }
-  await execReadIndexes(d);
+  await applyLedgerSchema(d);
   console.error("[store] postgres ledger");
   return d;
 }
