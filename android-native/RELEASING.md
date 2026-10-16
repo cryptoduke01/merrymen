@@ -87,6 +87,13 @@ internal testing track, including public browsing, sign-in/sign-out, account
 switching, legal/support links, photos and the WebView handoff. Real-money
 transactions are not required for this validation.
 
+Open **Continue with email** and check that the email sheet and input are visible
+both before and after the keyboard opens. `WebFlow` must give every WebView
+`MATCH_PARENT` layout parameters before attachment: Chromium treats
+`WRAP_CONTENT` height as a zero CSS viewport even when Compose measures a
+nonzero view, hiding the hosted sign-in sheet. Also check all five complete tab
+labels on a 320dp-wide display with font scale 2.0, then restore device settings.
+
 Do not publish until the Console's account verification, app access, privacy,
 data safety, deletion, content rating, audience, financial features and any
 testing requirements are complete and accurate. Listing screenshots must come

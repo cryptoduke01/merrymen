@@ -7,12 +7,24 @@ for build, signing and device validation.
 
 ## Console status
 
-The Play account is a Personal account. On 2026-10-10, the Merrymen app entry
-was created (`4972707436414086495`), with package `dev.merrymen.app`, English
-(US), App, and Free. Internal Testing draft release `0.3.0` exists at
-track `4701451895307323530`, release `1`. Console reported one AAB uploaded
-and confirmed the draft changes were saved. Release validation and tester
-email selection remain unfinished; no Play install link exists yet.
+The Play account is a Personal account. The Merrymen app entry
+(`4972707436414086495`) uses package `dev.merrymen.app`, English (US), App,
+and Free. On 2026-10-16, internal-testing draft release `1` on track
+`4701451895307323530` was updated to **0.4.0 (code 4)**. Google accepted the
+signed AAB with its embedded ReTrace mapping, minimum API 26 and target API 36.
+The older code-3 bundle was removed from this draft and remains in the artifact
+library. The release name and English notes were saved; Console confirmed
+**Changes saved**. The first internal tester list is selected. Release preview reports zero errors and one warning for missing native debug
+symbols from bundled native libraries; ReTrace mapping is attached. The
+**Save and publish** action is enabled, but has not been used. No active Play
+install link has been confirmed.
+
+Rollout is held for the required Organization-account conversion. Google's
+[internal-testing guidance](https://support.google.com/googleplay/android-developer/answer/9845334)
+allows incomplete app setup but does not document an exception to the separate
+financial-services account-type requirement. An enabled publish action does not
+establish such an exception. This is the release decision during the pending
+conversion, not a claim that Console technically disables internal publishing.
 
 Google's [Play Console requirements](https://support.google.com/googleplay/android-developer/answer/10788890)
 require financial-services developers to register as an Organization. The
@@ -54,16 +66,28 @@ Tester addresses belong in Console, not in source control.
 
 ## Required evidence before public submission
 
-1. **Build and signing:** the SDK license has been accepted and API 36 build
-   tools installed. A dedicated upload key was generated outside source control
-   with its password in macOS Keychain. All 657 JVM tests passed; release lint
-   completed with no errors (35 warnings and 2 hints). Signed, minified APK/AAB
-   builds succeeded and the APK certificate matches the upload key. The APK
-   installed on an API 36 emulator. Interactive device validation is still
-   pending: this host's computer-use surface did not expose the emulator window.
+1. **Build and signing:** 0.4.0 (code 4), built from `5b2331f8`, passes all
+   692 JVM tests (none skipped), release lint (no errors, 35 warnings and 3 hints),
+   debug assembly, SDK dependency metadata generation and all nine release guards.
+   Signed, minified APK/AAB builds succeeded. The certificate matches the existing
+   upload key, held outside source control with its password in macOS Keychain;
+   the APK signature and all 109 AAB payload signatures verify. APK 16KB ZIP
+   alignment, all eight native ELF libraries and AAB 16KB configuration pass
+   structural checks; a 16KB runtime device has not been tested.
+   API 36 emulator checks use Android test tools explicitly authorized by the
+   owner. Device testing found and fixed a zero-height WebView CSS viewport that
+   hid the hosted email sign-in sheet, bottom system-bar overlap and clipped
+   navigation labels at 320dp with 2× text. The corrected debug build displays
+   the email sheet above the keyboard and all five full tab labels. Those fixes
+   have also been confirmed on the exact signed APK. Authenticated owner flows
+   remain outstanding; final device evidence is in `DEVICE-CHECKS.txt`.
    Certificate, source commit and artifact hashes are recorded in the local
    release folder's `README.txt` and `SHA256SUMS.txt`. An off-device key backup
-   and actual device checks remain outstanding.
+   and authenticated owner-flow checks remain outstanding.
+   Exact APK SHA-256:
+   `d8ce308088622cc7b2a7ad7dc8be535b5e73ef506af92ba5106a962abe19265c`.
+   Exact uploaded AAB SHA-256:
+   `95f257bee2830196afb0c4f6c7422fc3183dfff512a3bfd6fd7fc45fe2f68916`.
 2. **Privacy:** verify the published policy describes the current hosted
    service and Android/WebView behavior. The inspected published policy is
    older than the repository and contains stale claims about memory being
@@ -94,6 +118,19 @@ Tester addresses belong in Console, not in source control.
 Changes to hosted reporting, data handling or published policy need their own
 reviewed PR and approved deployment plan. This Android preparation does not
 authorize a production deployment or a Postgres mutation.
+
+## Observed server performance limit
+
+On 2026-10-16, the unauthenticated IRIDIUS token-detail request
+(`/api/tokens/0x28e3c0c404088f1a5d739221072ddf6ab4431022?window=1h&activity=1`)
+completed in 4.19 seconds, then an identical request exceeded a 45-second limit
+without returning response bytes. Discoveries returned in 1.44 seconds during
+the stall. A request without activity also took 21.61 seconds. This reproduces
+the device's intermittent timeout outside Android. The existing backend waits
+for serial pool-cache refreshes and sequential database reads; identifying the
+exact stalled stage needs server timing evidence. The Android read timeout
+remains 30 seconds with visible retry feedback. Local release evidence is in
+`SERVER-PERFORMANCE.txt`; no backend change was deployed during this preparation.
 
 ## Data Safety evidence to verify
 
