@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import { describe, it } from "node:test";
 
+import { SOLANA_USDG_MINT, TOKEN_2022_PROGRAM } from "../../packages/core/src/ids";
 import {
   formatRoi,
   formatUsdg,
@@ -227,6 +228,15 @@ describe("a trade row becomes a card only when it closed something knowable", ()
 
   it("a short address passed as the name still draws nothing", () => {
     assert.equal(pnlCardFromFill({ ...sell, target: "0x2ca2b5bd3b6635d630419c57a13c6b6a856ec96d" }, "0x020b…18b4"), null);
+  });
+
+  it("NEVER prints a Solana key as the coin either, as the target or as the name (Solana P0)", () => {
+    // A Solana row's target would be a program or a vault: base58, no 0x.
+    assert.equal(pnlCardFromFill({ ...sell, target: TOKEN_2022_PROGRAM }), null);
+    assert.equal(pnlCardFromFill({ ...sell, target: TOKEN_2022_PROGRAM }, SOLANA_USDG_MINT), null);
+    assert.equal(pnlCardFromFill({ ...sell, target: TOKEN_2022_PROGRAM }, "musebook")?.symbol, "musebook");
+    assert.equal(printableCoinName(SOLANA_USDG_MINT), null);
+    assert.equal(printableCoinName("musebook"), "musebook");
   });
 
   it("treats a realised zero as a real close, not as absent", () => {
