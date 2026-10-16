@@ -5,6 +5,8 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -172,7 +174,7 @@ fun SignInScreen(nav: NavHostController) {
     }
   }
 
-  Column(Modifier.fillMaxSize()) {
+  Column(Modifier.fillMaxSize().navigationBarsPadding().imePadding()) {
     WebHeader("Sign in", nav)
     val o = origin
     val pad = Modifier.padding(horizontal = PagePadH, vertical = 12.dp)
@@ -214,7 +216,7 @@ fun WebFlowScreen(nav: NavHostController, path: String, title: String) {
   val scope = rememberCoroutineScope()
   LaunchedEffect(Unit) { origin = c.repo.originNow() }
 
-  Column(Modifier.fillMaxSize()) {
+  Column(Modifier.fillMaxSize().navigationBarsPadding().imePadding()) {
     WebHeader(title.ifBlank { "merrymen" }, nav)
     val o = origin
     if (o != null) {

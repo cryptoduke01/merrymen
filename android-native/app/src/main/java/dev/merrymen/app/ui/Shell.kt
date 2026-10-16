@@ -50,6 +50,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.Dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
@@ -193,9 +194,11 @@ fun Shell() {
   val entry by nav.currentBackStackEntryAsState()
   val current = entry?.destination?.route
   val onTab = TABS.any { it.route == current }
-  val keyboardOpen = WindowInsets.ime.getBottom(LocalDensity.current) > 0
+  val density = LocalDensity.current
+  val keyboardOpen = WindowInsets.ime.getBottom(density) > 0
+  val barHeight = maxOf(64.dp, 48.dp + with(density) { 14.sp.toDp() })
   val bottomClearance = if (keyboardOpen) 12.dp else
-    BOTTOM_INSET + WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+    maxOf(BOTTOM_INSET, barHeight + 30.dp) + WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
   val chatUnread by container.chat.unread.collectAsState()
 
   // NOT A Scaffold BOTTOM BAR. The web's `.tabbar` is `position: fixed` and the
@@ -243,7 +246,7 @@ fun Shell() {
       }
     }
     if (onTab && !keyboardOpen) {
-      TabBar(current, chatUnread) { route ->
+      TabBar(current, chatUnread, barHeight) { route ->
         nav.navigate(route) {
           popUpTo(Routes.HOME) { saveState = true }
           launchSingleTop = true
@@ -256,14 +259,16 @@ fun Shell() {
 
 /** Labeled, touch-sized destinations with a selected state and unread feedback. */
 @Composable
-private fun TabBar(current: String?, chatUnread: Int, onSelect: (String) -> Unit) {
+private fun TabBar(current: String?, chatUnread: Int, height: Dp, onSelect: (String) -> Unit) {
+  // Large text needs both a taller line box and more of a compact phone's width.
+  val sidePadding = if (LocalDensity.current.fontScale > 1.3f) 8.dp else 20.dp
   Box(
     Modifier
       .fillMaxSize()
       // `bottom: max(10px, env(safe-area-inset-bottom))` — the max() is the
       // gesture bar, which is exactly what navigationBarsPadding supplies.
       .navigationBarsPadding()
-      .padding(horizontal = 20.dp, vertical = 10.dp),
+      .padding(horizontal = sidePadding, vertical = 10.dp),
     contentAlignment = Alignment.BottomCenter,
   ) {
     Row(
@@ -271,7 +276,7 @@ private fun TabBar(current: String?, chatUnread: Int, onSelect: (String) -> Unit
         // Use the available phone width so labels and touch targets have room.
         .widthIn(max = 380.dp)
         .fillMaxWidth()
-        .height(64.dp)
+        .height(height)
         .background(MerryColors.card.copy(alpha = 0.92f), RoundedCornerShape(26.dp))
         .border(1.dp, Color.White.copy(alpha = 0.10f), RoundedCornerShape(26.dp))
         .padding(3.dp)
@@ -309,7 +314,7 @@ private fun TabBar(current: String?, chatUnread: Int, onSelect: (String) -> Unit
               }
             }
             Text(
-              tab.label, color = tint, fontSize = 11.sp,
+              tab.label, color = tint, fontSize = 11.sp, lineHeight = 14.sp,
               fontWeight = if (on) FontWeight.SemiBold else FontWeight.Normal,
               maxLines = 1, modifier = Modifier.clearAndSetSemantics { },
             )
