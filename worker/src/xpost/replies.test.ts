@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { XReply } from "./client";
 import { greetingOnly, isAnswerOptOut, isReplyOptOut, plainAsk, replyCandidate, tagCandidate } from "./replies";
+import { base58Encode, SOLANA_USDG_MINT } from "../../../packages/core/src/ids";
 
 const CTX = { rootTweetId: "111", xUserId: "222", coin: "pepe" };
 /**
@@ -425,6 +426,17 @@ describe("tags an active agent may answer", () => {
     for (const text of ["should i buy zapx now?", "gm, should i buy pepe?", "hey alan, is $WOJAK a good buy?", "will $pepe go up?", "what should i buy?", "are you bullish?", "wen moon"]) {
       assert.ok(advised(tagCandidate(tag(`@alanaidale ${text}`), { xUserId: "222", username: "alanaidale", research: true })), text);
     }
+  });
+  it("a Solana key or signature is refused where a 0x run with research off is: link-or-secret (Solana P0)", () => {
+    // Only a 0x contract is taken out as a lookup key; a base58 one went on as words.
+    const sig = base58Encode(Uint8Array.from({ length: 64 }, (_, i) => (i * 37 + 11) & 0xff));
+    for (const research of [true, false]) {
+      for (const text of [`@Pine what is ${SOLANA_USDG_MINT}?`, `@Pine did you buy ${SOLANA_USDG_MINT}?`, `@Pine thoughts on ${SOLANA_USDG_MINT}...`, `@Pine what was ${sig} about?`]) {
+        assert.deepEqual(tagCandidate(tag(text), { ...ON, research }), { ok: false, reason: "link-or-secret" }, text);
+      }
+    }
+    // The comment path already refused any digit; still refused.
+    assert.equal(replyCandidate(comment(`Why did you pick ${SOLANA_USDG_MINT} here?`), CTX).ok, false);
   });
 });
 

@@ -1906,6 +1906,9 @@ describe("answer anything: every tag past the screens has a lane, and silence on
       assert.equal(classifyTag(text, { advice: true }).kind, "advice", text);
     }
     assert.equal(declinable("should i buy it?", CA), false, "never beside a contract");
+    // Nor beside a Solana one (Solana P0). The system program's id has no letters, so no word of it read as a name.
+    assert.equal(declinable("should i buy 2u1tszSeqZ3qBWF3uNGPFc8TzMk2tdiwknnRMWGWjGWH?"), false);
+    assert.equal(declinable(`should i buy ${"1".repeat(32)}?`), false);
   });
 
   it("its own mood is a strict allowlist too: a coin, a word more or another script and it is not one", () => {

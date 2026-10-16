@@ -1,4 +1,5 @@
 /** Select public comments conservatively. Pure: no model, credentials, trading state or I/O. */
+import { onchainIdIn } from "../../../packages/core/src/ids";
 import type { XReply } from "./client";
 import { checkAsk, checkAskText, checkTargetOf, type CheckFrom, type CheckTarget } from "./check";
 
@@ -111,6 +112,8 @@ export type ReplyCandidate =
   | { ok: false; reason: string };
 
 const LINK_OR_SECRET = /https?:|www\.|\b[a-z0-9-]+\.(?:com|net|org|io|dev|app|xyz|gg|co|me|ai)\b|0x[a-f0-9]{8,}|\b(?:sk-|gsk_|api[ _-]?key|seed phrase|private key|password|secret)\b/i;
+/** LINK_OR_SECRET, or a Solana key or signature (core's onchainIdIn): base58 has no 0x for the hex arm to see. */
+const linkOrSecret = (text: string): boolean => LINK_OR_SECRET.test(text) || onchainIdIn(text);
 const ABUSE_OR_SENSITIVE = /\b(?:fuck\w*|shit\w*|bitch\w*|idiot\w*|moron\w*|retard\w*|kill\w*|suicid\w*|rape\w*|porn\w*|sex\w*|nude\w*|terror\w*|nazi\w*|racis\w*|politic\w*|election\w*|president\w*|democrat\w*|republican\w*|religio\w*|christian\w*|muslim\w*|jew\w*|medical\w*|diagnos\w*|cancer|medication\w*|depress\w*)\b/i;
 /**
  * DISTRESS, HOWEVER IT IS PUT (red-team review, 2026-10-12): "i lost my life
@@ -258,7 +261,7 @@ export function replyCandidate(
   const text = withoutLeadingMentions(reply.text.normalize("NFKC")).replace(/\s+/g, " ").trim();
   if (text.length < 8 || text.length > XREPLY_MAX_COMMENT_CHARS || (text.match(/\p{L}+/gu) ?? []).length < 3) return no("low-signal");
   if (/[\u0000-\u001f\u007f«»<>]|\p{N}|[@#]|\p{Script=Cyrillic}|\p{Script=Han}/u.test(text)) return no("unsafe-text");
-  if (LINK_OR_SECRET.test(text)) return no("link-or-secret");
+  if (linkOrSecret(text)) return no("link-or-secret");
   if (ABUSE_OR_SENSITIVE.test(text)) return no("sensitive");
   if (DISTRESS.test(text) || STAKES.test(text)) return no("distress");
   if (SPAM_OR_INSTRUCTIONS.test(text)) return no("spam-or-instructions");
@@ -682,7 +685,7 @@ export function tagCandidate(reply: XReply, ctx: {
   if (BIDI.test(reply.text) || NON_ASCII_LETTER.test(bareLetters(text)) || ENCLOSED_LETTER.test(text)) return no("unsafe-text");
   // And no symbol written for a letter: only plain characters, one emoji at most (strayInTag).
   if (strayInTag(text)) return no("unsafe-text");
-  if (LINK_OR_SECRET.test(text)) return no("link-or-secret");
+  if (linkOrSecret(text)) return no("link-or-secret");
   if (ABUSE_OR_SENSITIVE.test(text)) return no("sensitive");
   // Before the advice flag: a "should i" about a life, or money or a home someone cannot lose, is never a decline's to answer (DISTRESS, STAKES, LIFE_STAKES).
   if (DISTRESS.test(text) || STAKES.test(text) || LIFE_STAKES.test(text)) return no("distress");
