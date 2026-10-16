@@ -30,7 +30,7 @@ test("activity and enriched feed keep separate single-flight memos and the same 
     return { source: "sqlite", theses: [{ postId: "same", realizedPct: opts?.figures === false ? null : 25 }], tradesComplete: true };
   });
   const request = new Request("https://example.test/api/theses?view=activity");
-  const [full, activity] = await Promise.all([GET(), GET(request)]);
+  const [full, activity] = await Promise.all([GET(new Request("https://app.merrymen.dev/api/theses")), GET(request)]);
   assert.equal(full.headers.get("cache-control"), THESES_CACHE_CONTROL);
   assert.equal(activity.headers.get("cache-control"), THESES_CACHE_CONTROL);
   assert.equal((await full.json()).theses[0].realizedPct, 25);
@@ -39,6 +39,6 @@ test("activity and enriched feed keep separate single-flight memos and the same 
   assert.equal(body.theses[0].realizedPct, null);
   assert.equal(body.theses[0].postId, "same");
   assert.deepEqual(calls, [undefined, { figures: false }]);
-  await Promise.all([GET(), GET(request)]);
+  await Promise.all([GET(new Request("https://app.merrymen.dev/api/theses")), GET(request)]);
   assert.equal(calls.length, 2, "one memo per response shape, no cross-contamination");
 });

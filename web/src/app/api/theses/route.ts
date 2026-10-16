@@ -65,8 +65,8 @@ export interface ThesesResponse {
 const theses = thesesMemo(() => readTheses());
 const activity = thesesMemo(() => readTheses({ figures: false }));
 
-export async function GET(req?: Request) {
-  const activityOnly = req && new URL(req.url).searchParams.get("view") === "activity";
+export async function GET(req: Request) {
+  const activityOnly = new URL(req.url).searchParams.get("view") === "activity";
   const r = await (activityOnly ? activity : theses).get();
   const response = activityOnly ? { ...r, figuresIncluded: false } : r;
   return NextResponse.json(response satisfies ThesesResponse, {

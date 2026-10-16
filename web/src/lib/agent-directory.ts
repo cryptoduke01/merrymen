@@ -3,12 +3,14 @@ import type { Db } from "../../../worker/src/db";
 import { getIdentityStore } from "@merrymen/identity-store";
 import { withReadDb } from "./ledger";
 import { inIncidentWindow, isRetired, notRunning as heldNotRunning, type AgentLifecycle } from "./retired-agent";
+import { discoveryTiming, type DiscoveryMeasure, type DiscoveryTiming } from "./discovery-timing";
 
 /** Shared with the full ranking so re-grants, recovery holds and retirement cannot drift. */
 export async function readDirectorySelection(
   db: Db,
   identities = () => getIdentityStore().all(),
   nowSec = () => Math.floor(Date.now() / 1000),
+  measure: DiscoveryMeasure = (_stage, read) => read(),
 ) {
   const slugFor = new Map<string, string>();
   const tenantFor = new Map<string, `0x${string}`>();
@@ -18,7 +20,7 @@ export async function readDirectorySelection(
   // worker, and the count of it would be built from data nobody read.
   let slugsRead = false;
   try {
-    for (const id of await identities()) {
+    for (const id of await measure("identities", identities)) {
       for (const a of id.accounts) {
         slugFor.set(a.toLowerCase(), id.slug);
         tenantFor.set(a.toLowerCase(), id.tenant);
@@ -43,10 +45,10 @@ export async function readDirectorySelection(
     // time choose among an identity's different accounts after a re-grant.
     let beat = "COALESCE(NULL, 0)";
     try {
-      await db.prepare("SELECT beat_at FROM agents WHERE 1 = 0").all();
+      await measure("heartbeat", () => db.prepare("SELECT beat_at FROM agents WHERE 1 = 0").all());
       beat = "COALESCE(beat_at, 0)";
     } catch { /* older ledgers have no heartbeat column */ }
-    rows = (await db
+    rows = (await measure("registrations", () => db
       .prepare(
         `WITH registrations AS (
            SELECT smart_account, name, x_handle, COALESCE(x_verified, 0) AS x_verified,
@@ -61,7 +63,7 @@ export async function readDirectorySelection(
            FROM registrations WHERE alias_rank = 1
           ORDER BY created_at DESC, LOWER(smart_account) ASC`,
       )
-      .all()) as typeof rows;
+      .all())) as typeof rows;
   } catch {
     // A failed selection is unread, including an older schema. It must not
     // become a successful empty directory or claim that nobody is here.
@@ -99,14 +101,14 @@ export async function readDirectorySelection(
     // units, and the incident window is judged against each account's own
     // beat. Never against a MAX over the fleet — one millisecond stamp in it
     // would move every other agent's verdict.
-    for (const l of (await db
+    for (const l of (await measure("lifecycle", () => db
       .prepare(
         `SELECT smart_account, mode, status,
                 CASE WHEN beat_at > 1e12 THEN beat_at / 1000 ELSE beat_at END AS beat_at,
                 expires_at
            FROM agents WHERE smart_account NOT LIKE 'rh:%'`,
       )
-      .all()) as (Lifecycle & { smart_account: string })[]) {
+      .all())) as (Lifecycle & { smart_account: string })[]) {
       life.set(l.smart_account, l);
     }
     // THE ACCOUNT'S OWN HOLD ROW, keyed by the tenant that owns it as well
@@ -119,9 +121,9 @@ export async function readDirectorySelection(
     const num = (v: unknown) => (v === null || v === undefined ? null : Number(v));
     const held = new Set<string>();
     try {
-      for (const h of (await db
+      for (const h of (await measure("holds", () => db
         .prepare(`SELECT tenant, smart_account, since_at FROM fleet_recovery_health WHERE held = 1`)
-        .all()) as { tenant: unknown; smart_account: unknown; since_at: unknown }[]) {
+        .all())) as { tenant: unknown; smart_account: unknown; since_at: unknown }[]) {
         if (!inIncidentWindow(num(h.since_at))) continue;
         held.add(`${String(h.tenant).toLowerCase()} ${String(h.smart_account).toLowerCase()}`);
       }
@@ -186,25 +188,35 @@ export async function readAgentDirectory(
   readDb = withReadDb,
   identities = () => getIdentityStore().all(),
   nowSec = () => Math.floor(Date.now() / 1000),
+  timing: DiscoveryTiming = discoveryTiming,
 ): Promise<AgentDirectory> {
-  return readDb(async (db) => {
-    const selected = db ? await readDirectorySelection(db, identities, nowSec) : null;
-    return {
-      source: selected ? "sqlite" : "none",
-      directory: true,
-      fetchedAt: nowSec() * 1000,
-      retired: selected?.retired ?? null,
-      agents: selected ? selected.rows.map((r) => ({
-        slug: selected.slugFor.get(r.smart_account.toLowerCase()) ?? null,
-        name: String(r.name ?? "Agent"),
-        handle: (r.x_handle ?? "").trim() || null,
-        handleVerified: Number(r.x_verified ?? 0) !== 0,
-        mode: r.mode,
-        notRunning: selected.notRunning.has(r.smart_account),
-        pnlBps: null, paperPnlBps: null, maxDdBps: null,
-        landed: null, filledPaper: null, refused: null,
-        unrankedWhy: "not-read",
-      })) : [],
-    };
-  });
+  // Stop acquisition timing at callback entry, before any directory query.
+  // A pending-stage log also survives an HTTP caller giving up before the read does.
+  const opened = timing.start("read-db");
+  try {
+    return await readDb(async (db) => {
+      opened("ok");
+      const selected = db ? await readDirectorySelection(db, identities, nowSec, timing.measure) : null;
+      return {
+        source: selected ? "sqlite" : "none",
+        directory: true,
+        fetchedAt: nowSec() * 1000,
+        retired: selected?.retired ?? null,
+        agents: selected ? selected.rows.map((r) => ({
+          slug: selected.slugFor.get(r.smart_account.toLowerCase()) ?? null,
+          name: String(r.name ?? "Agent"),
+          handle: (r.x_handle ?? "").trim() || null,
+          handleVerified: Number(r.x_verified ?? 0) !== 0,
+          mode: r.mode,
+          notRunning: selected.notRunning.has(r.smart_account),
+          pnlBps: null, paperPnlBps: null, maxDdBps: null,
+          landed: null, filledPaper: null, refused: null,
+          unrankedWhy: "not-read",
+        })) : [],
+      };
+    });
+  } catch (error) {
+    opened("error");
+    throw error;
+  }
 }
