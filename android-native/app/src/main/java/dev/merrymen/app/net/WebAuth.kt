@@ -441,6 +441,11 @@ fun WebFlow(
       }
 
       fun configure(view: WebView) {
+        // WebView treats WRAP_CONTENT height as a zero CSS viewport, even when
+        // Compose measures a fixed height. Declare this before attachment so
+        // viewport units and hosted sign-in dialogs use the visible height.
+        // Chromium AwLayoutSizer.updateLayoutSettings checks the raw params.
+        view.layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
         view.setBackgroundColor(android.graphics.Color.rgb(14, 15, 12))
         view.settings.javaScriptEnabled = true
         view.settings.domStorageEnabled = true
