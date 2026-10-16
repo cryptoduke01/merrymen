@@ -28,6 +28,7 @@
 import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { solanaSecretIn, solanaSecretsIn } from "../../../packages/core/src/ids";
 import { llmAgentTurn, type AgentMsg, type LlmCreds, type ToolSpec } from "../llm";
 import * as pcp from "../pc/platform";
 import { sendDocument, sendPhoto, type TelegramOpts } from "./api";
@@ -93,7 +94,7 @@ export function isDestructive(cmd: string): boolean {
 /** Secret-bearing paths the agent's FILE tools refuse even inside the files
  * root, and its shell refuses to name outright. Defense in depth, not a vault —
  * the durable control is redactSecrets() on all output, which is value-based. */
-const SENSITIVE_PATH = /\.merr|grant\.json|settings\.json|\.env(\.|$|\b)|\.ssh|id_[rd]sa|\.pem\b|\.key\b|keystore|wallet\.dat|mnemonic|seed\.txt|secret/i;
+const SENSITIVE_PATH = /\.merr|grant\.json|settings\.json|\.env(\.|$|\b)|\.ssh|id_[rd]sa|\.pem\b|\.key\b|keystore|wallet\.dat|mnemonic|seed\.txt|secret|\bid\.json|keypair\.json/i;
 
 export function isSensitivePath(p: string): boolean {
   return SENSITIVE_PATH.test(p);
@@ -125,11 +126,16 @@ const SECRET_SHAPES: RegExp[] = [
   /\beyJ[A-Za-z0-9_-]{15,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g, // JWTs
   /\b[0-9]{6,}:[A-Za-z0-9_-]{30,}/g, // Telegram bot tokens (id:hash)
 ];
+// Solana secret keys (a 64-byte keypair as base58, or the CLI's id.json byte
+// array) belong in this list too, but a shape alone would also take every
+// 64-byte transaction signature. So they are found by their own public key
+// (solanaSecretsIn) and stripped as values, first, so no shorter known value
+// can split one and leave the rest readable.
 
 /** Replace known secret values + secret-shaped blobs with a marker. */
 export function redactSecrets(text: string, knownSecrets: string[]): string {
   let out = text;
-  for (const s of knownSecrets) {
+  for (const s of [...solanaSecretsIn(text), ...knownSecrets]) {
     if (s && s.length >= 8) out = out.split(s).join("[redacted]");
   }
   for (const re of SECRET_SHAPES) out = out.replace(re, "[redacted]");
@@ -140,6 +146,7 @@ export function redactSecrets(text: string, knownSecrets: string[]): string {
  * refuse sending a file that would exfiltrate credentials). */
 export function containsSecret(text: string, knownSecrets: string[]): boolean {
   if (knownSecrets.some((s) => s && s.length >= 8 && text.includes(s))) return true;
+  if (solanaSecretIn(text)) return true;
   return SECRET_SHAPES.some((re) => {
     re.lastIndex = 0;
     return re.test(text);

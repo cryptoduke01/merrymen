@@ -2184,4 +2184,21 @@ describe("the orchestrator's wiring", () => {
     assert.ok(!/process\.env/.test(MINE));
     assert.ok(!/FOMO_API_KEY/.test(MINE));
   });
+
+  it("its own failure line scrubs every key name the pass's scrub does, api-key included", async () => {
+    process.env.MERRYMEN_HOME ??= path.join(tmpdir(), "mm-orchestrator-fomo-test-home");
+    const { fomoFailureText } = await import("./orchestrator");
+    for (const name of ["key", "apikey", "api_key", "api-key", "API-KEY", "Api_Key"]) {
+      const line = fomoFailureText(`pass failed — fetch https://mainnet.helius-rpc.com/?${name}=${KEY}&x=1 for ${T1}`);
+      assert.ok(!line.includes(KEY), name);
+      assert.ok(!line.includes(T1), name);
+      assert.ok(line.includes(`?${name}=***&x=1`), line);
+      assert.equal(line, scrubLogText(`pass failed — fetch https://mainnet.helius-rpc.com/?${name}=${KEY}&x=1 for ${T1}`), "the same line the pass would log");
+    }
+    // What it already scrubbed is unchanged: the same line, byte for byte.
+    assert.equal(fomoFailureText(`connect failed for ${STREAM_URL} (owner ${T1})`), "connect failed for wss://stream.test/ws/alerts?chain=robinhood&key=*** (owner 0x…)");
+    assert.equal(fomoFailureText("x".repeat(400)).length, 300);
+    const note = SRC.slice(SRC.indexOf("function noteFomoFailure("), SRC.indexOf("export function fomoFailureText("));
+    assert.match(note, /const clean = fomoFailureText\(text\);/, "noteFomoFailure logs through it");
+  });
 });

@@ -3,6 +3,8 @@ import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
+import { ed25519 } from "@noble/curves/ed25519";
+import { base58Encode } from "../../../packages/core/src/ids";
 import {
   agentShellVerdict,
   buildTools,
@@ -216,6 +218,46 @@ test("containsSecret detects a laundered secret file's bytes", () => {
   assert.equal(containsSecret('{"session":"0x' + "b".repeat(64) + '"}', []), true); // grant-shaped
   assert.equal(containsSecret("MYTOKEN=123456:AAExampleBotTokenValueHere_x", ["123456:AAExampleBotTokenValueHere_x"]), true);
   assert.equal(containsSecret("# My project notes\nBuild passes.", []), false);
+});
+
+/** A real Solana keypair: its base58 secret, the id.json file, and a real signature by it. */
+function solanaKeypair(seedByte: number) {
+  const seed = new Uint8Array(32).fill(seedByte);
+  const pub = ed25519.getPublicKey(seed);
+  const secret = new Uint8Array([...seed, ...pub]);
+  const sig = ed25519.sign(new TextEncoder().encode("merrymen"), seed);
+  return { b58: base58Encode(secret), idJson: JSON.stringify([...secret]), pub: base58Encode(pub), sig: base58Encode(sig) };
+}
+
+test("Solana secret keys are redacted and refused, as base58 or as an id.json byte array", () => {
+  const sol = solanaKeypair(5);
+  const pretty = JSON.stringify(JSON.parse(sol.idJson), null, 2);
+  const dump = `SOLANA_PRIVATE_KEY=${sol.b58}\n$ cat ~/.config/solana/id.json\n${sol.idJson}\n${pretty}\n`;
+  const red = redactSecrets(dump, []);
+  assert.ok(!red.includes(sol.b58), "base58 secret stripped");
+  assert.ok(!red.includes(sol.idJson) && !red.includes(pretty), "byte arrays stripped");
+  assert.equal(red, "SOLANA_PRIVATE_KEY=[redacted]\n$ cat ~/.config/solana/id.json\n[redacted]\n[redacted]\n");
+  for (const text of [sol.b58, sol.idJson, pretty]) assert.equal(containsSecret(`file: ${text}`, []), true);
+  // Stripped whole even when a known secret sits inside it.
+  assert.equal(redactSecrets(`k=${sol.b58}`, [sol.b58.slice(10, 30)]), "k=[redacted]");
+});
+
+test("Solana public ids are not secrets: a signature, an address, a mint stay readable", () => {
+  const sol = solanaKeypair(6);
+  const out = `tx ${sol.sig} from ${sol.pub} mint 2u1tszSeqZ3qBWF3uNGPFc8TzMk2tdiwknnRMWGWjGWH`;
+  assert.equal(redactSecrets(out, []), out);
+  assert.equal(containsSecret(out, []), false);
+  const notAKey = JSON.stringify(Array.from({ length: 64 }, (_, i) => (i * 37 + 11) % 256));
+  assert.equal(redactSecrets(notAKey, []), notAKey, "64 bytes that are no keypair");
+});
+
+test("the Solana CLI's keypair files are sensitive paths", () => {
+  for (const p of ["~/.config/solana/id.json", "id.json", "C:\\Users\\me\\.config\\solana\\id.json", "target/deploy/merrymen_vault-keypair.json", "deployer-keypair.json"]) {
+    assert.equal(isSensitivePath(p), true, `sensitive: ${p}`);
+  }
+  for (const p of ["paid.json", "src/uuid.json", "android/grid.json"]) assert.equal(isSensitivePath(p), false, `plain: ${p}`);
+  assert.equal(shellTouchesSecrets("cat ~/.config/solana/id.json"), true);
+  assert.equal(shellTouchesSecrets("solana-keygen pubkey target/deploy/merrymen_vault-keypair.json"), true);
 });
 
 test("send_file scans the WHOLE file — a secret past the old 200KB window is refused", async () => {
