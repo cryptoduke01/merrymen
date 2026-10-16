@@ -314,7 +314,7 @@ private fun TabBar(current: String?, chatUnread: Int, height: Dp, onSelect: (Str
               }
             }
             Text(
-              tab.label, color = tint, fontSize = 11.sp, lineHeight = 14.sp,
+              tab.label, color = tint, fontSize = 11.sp, lineHeight = 14.sp, letterSpacing = 0.sp,
               fontWeight = if (on) FontWeight.SemiBold else FontWeight.Normal,
               maxLines = 1, modifier = Modifier.clearAndSetSemantics { },
             )
