@@ -6,6 +6,7 @@ import { wrapSqlite, type Db } from "../../../worker/src/db";
 import { applyLedgerSchema } from "../../../worker/src/store";
 import { readAgentDirectory } from "./agent-directory";
 import { readLeaderboard } from "./read-leaderboard";
+import type { DiscoveryTiming, DiscoveryStage } from "./discovery-timing";
 
 const NOW = 2_000_000_000;
 async function fixture(active = 34, retired = 130) {
@@ -81,4 +82,45 @@ test("no database or unread selection is not a successful empty directory", asyn
     const result = await readAgentDirectory(fn => fn(wrapSqlite(raw)), async () => [], () => NOW);
     assert.equal(result.source, "none");
   } finally { raw.close(); }
+});
+
+test("directory diagnostics stop acquisition at callback entry and wrap only the five public reads", async () => {
+  const f = await fixture(1, 0);
+  const events: string[] = [];
+  const timing: DiscoveryTiming = {
+    start(stage) {
+      events.push(`start:${stage}`);
+      return outcome => { events.push(`${outcome}:${stage}`); };
+    },
+    async measure(stage: DiscoveryStage, read) {
+      events.push(`start:${stage}`);
+      try {
+        const result = await read();
+        events.push(`ok:${stage}`);
+        return result;
+      } catch (error) {
+        events.push(`error:${stage}`);
+        throw error;
+      }
+    },
+  };
+  try {
+    const directory = await readAgentDirectory(async fn => {
+      assert.deepEqual(events, ["start:read-db"], "opening is measured before the driver is available");
+      return fn(f.db);
+    }, async () => {
+      assert.deepEqual(events, ["start:read-db", "ok:read-db", "start:identities"]);
+      return f.identities();
+    }, () => NOW, timing);
+    assert.equal(directory.agents.length, 1);
+    assert.equal(directory.source, "sqlite");
+    assert.equal(directory.retired, 0);
+    // This ledger fixture lacks the optional recovery table. Its read still
+    // gets an error outcome, while the existing no-hold fallback keeps rows.
+    assert.deepEqual(events, [
+      ...["read-db", "identities", "heartbeat", "registrations", "lifecycle"]
+        .flatMap(stage => [`start:${stage}`, `ok:${stage}`]),
+      "start:holds", "error:holds",
+    ]);
+  } finally { f.raw.close(); }
 });

@@ -34,8 +34,8 @@ import { readAgentDirectory } from "@/lib/agent-directory";
  */
 export const dynamic = "force-dynamic";
 
-export async function GET(req?: Request) {
-  if (req && new URL(req.url).searchParams.get("view") === "directory") {
+export async function GET(req: Request) {
+  if (new URL(req.url).searchParams.get("view") === "directory") {
     const directory = await readAgentDirectory();
     return NextResponse.json(directory, {
       headers: { "Cache-Control": directory.source === "none" ? "no-store" : "public, max-age=5, s-maxage=15" },

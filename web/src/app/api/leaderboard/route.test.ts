@@ -42,11 +42,11 @@ function row(publicBook: boolean, equityUsdg: number | null = 1000.25, pnlUsdg: 
 const board = (agents: LeaderRow[]): LeaderboardRead => ({ source: "sqlite", retired: 0, retiredAgents: [], agents });
 
 /** Small shared-cache model honoring the response's actual Cache-Control. */
-function cdn(origin: () => Promise<Response>) {
+function cdn(origin: (request: Request) => Promise<Response>) {
   let stored: Response | null = null;
   return async () => {
     if (stored) return stored.clone();
-    const response = await origin();
+    const response = await origin(new Request("https://example.test/api/leaderboard"));
     const control = response.headers.get("cache-control") ?? "";
     if (!/(?:^|,)\s*no-store\s*(?:,|$)/i.test(control) && /\bpublic\b/i.test(control) && /\bs-maxage=60\b/.test(control)) {
       stored = response.clone();
@@ -93,7 +93,7 @@ test("directory requests never run financial reads and never cache an unread dir
 test("any public-book row disables storage even when its current dollars are zero or unavailable", async () => {
   for (const amount of [0, null]) {
     const GET = handler(async () => board([row(false), row(true, amount, amount)]));
-    const response = await GET();
+    const response = await GET(new Request("https://app.merrymen.dev/api/leaderboard"));
     assert.equal(response.headers.get("cache-control"), "no-store");
     const body = await response.json();
     assert.equal(body.agents[1].performance.equityUsdg, amount);
