@@ -1,5 +1,5 @@
 {
- "about": "Shared answers for brain/onchain_ids.py and packages/core/src/ids.ts onchainIdsIn. tests/test_onchain_ids.py and worker/src/brain-client-onchain-ids.test.ts both read this file, so the two detectors cannot part. The Solana values are the USDG mint, the system program, and a public key, a signature and a 64-byte keypair from the all-0x05 test seed that packages/core/src/ids.test.ts also uses.",
+ "about": "Shared answers for brain/onchain_ids.py and packages/core/src/ids.ts onchainIdsIn. tests/test_onchain_ids.py (CI's brain job) and worker/src/brain-client-onchain-ids.test.ts (CI's app tests) both read this file, so neither detector can change alone without a failing check. The Solana values are the USDG mint, the system program, and a public key, a signature and a 64-byte keypair from the all-0x05 test seed that packages/core/src/ids.test.ts also uses.",
  "cases": [
   {"text": "bought 2u1tszSeqZ3qBWF3uNGPFc8TzMk2tdiwknnRMWGWjGWH at the open",
    "hits": [{"family": "solana", "shape": "address", "value": "2u1tszSeqZ3qBWF3uNGPFc8TzMk2tdiwknnRMWGWjGWH"}]},

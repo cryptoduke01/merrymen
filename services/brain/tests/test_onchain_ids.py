@@ -38,6 +38,11 @@ LETTERS_32 = "AHQXemtAHQXemtAHQXemtAHQXemtAHQXemtAHQXemtA"
 # ── the detector ───────────────────────────────────────────────────────────
 
 
+def test_the_shared_cases_are_there():
+    # An empty list would parametrize into one skip, and a skip is green.
+    assert len(CASES) >= 20
+
+
 @pytest.mark.parametrize("case", CASES, ids=lambda c: c["text"][:40] or "empty")
 def test_the_detector_answers_as_ids_ts_does(case):
     got = [h._asdict() for h in onchain_ids_in(case["text"])]

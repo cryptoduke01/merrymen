@@ -32,6 +32,16 @@ describe("the detector Brain mirrors", () => {
     assert.ok(fixture.cases.length >= 20);
     for (const c of fixture.cases) assert.deepEqual(onchainIdsIn(c.text), c.hits, JSON.stringify(c.text));
   });
+
+  // This file checks only the ids.ts half. The Python half runs in CI's brain
+  // job, so that job must exist and must run Brain's suite.
+  it("has its Python half run by CI's brain job", () => {
+    const ci = readFileSync(new URL("../../.github/workflows/ci.yml", import.meta.url), "utf8");
+    const job = /^ {2}brain:\n((?: {4}.*\n|\n)*)/m.exec(ci)?.[1] ?? "";
+    assert.match(job, /uses: actions\/setup-python@[0-9a-f]{40}/);
+    assert.match(job, /working-directory: services\/brain\n\s+run: python -m pytest\b/);
+    assert.doesNotMatch(job, /continue-on-error|^\s+if:/m);
+  });
 });
 
 const now = Math.floor(Date.now() / 1000);

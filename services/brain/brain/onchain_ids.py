@@ -17,7 +17,9 @@ THE SAME RULES, pattern for pattern:
 A run made only of letters is prose, not a key: real keys and signatures carry
 digits, so a run without one is never flagged. The shape is enough; a match is
 never checked against a chain. tests/data/onchain_ids.json pins this file and
-ids.ts to the same answers, on both sides.
+ids.ts to the same answers: CI's brain job asserts it here, through
+tests/test_onchain_ids.py, and its app tests assert it for ids.ts, through
+worker/src/brain-client-onchain-ids.test.ts.
 
 Pure and self-contained: no I/O, no dependency.
 """
