@@ -50,7 +50,7 @@ import { createCoinFactsReader, FactsLimiter } from "./desk/facts";
 import { resolveByName } from "./desk/evidence";
 import { searchPools } from "./desk/gecko";
 import { DISCOVERY_SCREEN, fetchGeckoPoolsResult, geckoSource, screenPools, type GeckoFetch, type GeckoPool } from "./venues/geckoterminal";
-import { CASH, instrumentClassOf, STOCK_TOKENS } from "../../packages/core/src/index";
+import { CASH, instrumentClassOf, onchainIdIn, STOCK_TOKENS } from "../../packages/core/src/index";
 import type { FomoBroker } from "./fomo/contract";
 import type { TokenActivityData, TokenThesesData } from "./fomo/tools";
 import type { FomoEnvelope } from "./fomo/types";
@@ -634,7 +634,8 @@ const DECLINE_NAMES: ReadonlySet<string> = new Set(("bitcoin btc ethereum eth et
 export function declinable(text: unknown, address: string | null = null): boolean {
   if (typeof text !== "string" || address !== null) return false;
   const t = text.normalize("NFKC");
-  if (/0x[0-9a-f]{6,}/i.test(t)) return false;
+  // A contract names a coin: 0x hex, or a Solana key or signature (core's onchainIdIn).
+  if (/0x[0-9a-f]{6,}/i.test(t) || onchainIdIn(t)) return false;
   // Every $ and what follows it up to a space, whatever it holds ("$PEPE2", "$SANDY_HOOK"), and every word that might be a name.
   const tags = [...t.matchAll(/\$([^\s$]*)/g)].map((m) => m[1]!.toLowerCase().replace(/[.,!?;:'"’)]+$/u, ""));
   return [...tags, ...nameLikeWords(t)].every((n) => DECLINE_NAMES.has(n));

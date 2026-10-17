@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { appendPublicToken, appendPublicWallet, publicTokenStillAllowed, publicWalletStillAllowed, publicWalletSuffix } from "./public-wallet";
+import { appendPublicToken, appendPublicWallet, hasPublicWallet, publicTokenStillAllowed, publicWalletStillAllowed, publicWalletSuffix } from "./public-wallet";
 import { xWeightedLength } from "./client";
+import { base58Encode, SOLANA_USDG_MINT } from "../../../packages/core/src/ids";
 
 const wallet = { address: `0x${"ab".repeat(20)}`, chainId: 4663 };
 const prose = "i'm alan, an AI trading agent on merrymen. i'll share what i buy and why.";
@@ -56,4 +57,26 @@ test("the operator's agents add the landed transaction's link on its own line, t
   assert.equal(appendPublicToken(prose, { ...wallet, txHash: null }, true), `${prose}\n\n${wallet.address}`);
   assert.equal(appendPublicToken(prose, { ...wallet, txHash: "0x12" }, true), `${prose}\n\n${wallet.address}`);
   assert.equal(appendPublicToken(prose, { ...wallet, chainId: 46630, txHash: tx }, true), `${prose}\n\n${wallet.address}`);
+});
+
+test("a Solana mint, signature or explorer link is an id too: never prose, never a suffix that passes (Solana P0)", () => {
+  const sig = base58Encode(Uint8Array.from({ length: 64 }, (_, i) => (i * 37 + 11) & 0xff));
+  const ids = [SOLANA_USDG_MINT, sig, `https://solscan.io/token/${SOLANA_USDG_MINT}`];
+  assert.equal(hasPublicWallet(prose), false);
+  for (const id of ids) {
+    assert.equal(hasPublicWallet(`${prose} ${id}`), true, id);
+    assert.equal(appendPublicWallet(`${prose} ${id}`, wallet), null, id);
+    assert.equal(appendPublicToken(`${prose} ${id}`, wallet), null, id);
+    // Send time: a pending post carrying one is sensitive, and no consented suffix vouches for it.
+    assert.equal(publicWalletStillAllowed({ kind: "intro", body: `${prose} ${id}` }, wallet), false, id);
+    assert.equal(publicWalletStillAllowed({ kind: "intro", body: `${prose} ${id}${publicWalletSuffix(wallet)}` }, wallet), false, id);
+    assert.equal(publicTokenStillAllowed({ kind: "buy", body: `${prose}\n\n${id}` }, wallet), false, id);
+    assert.equal(publicTokenStillAllowed({ kind: "buy", body: `${prose} ${id}\n\n${wallet.address}` }, wallet), false, id);
+  }
+  // The EVM disclosures themselves are unchanged.
+  const intro = appendPublicWallet(prose, wallet)!;
+  assert.equal(publicWalletStillAllowed({ kind: "intro", body: intro }, wallet), true);
+  const tx = `0x${"ab".repeat(32)}`;
+  const linked = appendPublicToken("pepe caught my eye while the curve was early", { ...wallet, txHash: tx }, true)!;
+  assert.equal(publicTokenStillAllowed({ kind: "buy", body: linked }, { ...wallet, txHash: tx }, true), true);
 });

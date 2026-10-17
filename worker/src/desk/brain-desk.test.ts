@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { after, before, describe, it } from "node:test";
+import { base58Encode, SOLANA_USDG_MINT } from "../../../packages/core/src/ids";
 import { askBrainDesk, parseDeskAnalysis } from "./brain-desk";
 import { createDesk } from "./desk";
 
@@ -17,6 +18,15 @@ describe("Brain's desk answer", () => {
     assert.equal(parseDeskAnalysis({ read: "weak", stance: "cautious", watch: "", invalidation: "" }), null);
     assert.equal(parseDeskAnalysis({ read: "see 0x1234567890abcdef1234567890abcdef12345678 for more", stance: "cautious", watch: "", invalidation: "" }), null);
     assert.equal(parseDeskAnalysis({ read: "rsi 37.5 is weak, details at https://x.test", stance: "cautious", watch: "", invalidation: "" }), null);
+  });
+  it("refuses a Solana key or signature in any field, as a 0x address (Solana P0)", () => {
+    const sig = base58Encode(Uint8Array.from({ length: 64 }, (_, i) => (i * 37 + 11) & 0xff));
+    const read = "rsi 37.5 is weak and sellers lead.";
+    for (const id of [SOLANA_USDG_MINT, sig]) {
+      assert.equal(parseDeskAnalysis({ read: `${read} see ${id}`, stance: "cautious", watch: "", invalidation: "" }), null, id);
+      assert.equal(parseDeskAnalysis({ read, stance: "cautious", watch: `flows into ${id}`, invalidation: "" }), null, id);
+      assert.equal(parseDeskAnalysis({ read, stance: "cautious", watch: "", invalidation: `a dump from ${id}` }), null, id);
+    }
   });
 });
 

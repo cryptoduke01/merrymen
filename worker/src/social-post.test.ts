@@ -26,6 +26,7 @@ import {
   type WriterContext,
 } from "./social-post";
 import type { ClassEvidence } from "./class-evidence";
+import { base58Encode, SOLANA_USDG_MINT } from "../../packages/core/src/ids";
 
 const EVIDENCE: ClassEvidence = {
   act: "enter",
@@ -95,6 +96,15 @@ describe("a post may not carry a figure the agent was never given", () => {
     assert.equal(admitPost("Following 0xdeadbeefcafe into this one, looks early.", ctx()).refusal, "has-address");
     assert.equal(admitPost("Taking this after @someone flagged it, buyers look real.", ctx()).refusal, "has-handle");
     assert.equal(admitPost("More on this at https://example.com, liquidity is thin.", ctx()).refusal, "has-handle");
+  });
+
+  it("refuses a Solana id as an address, not as a digit (Solana P0)", () => {
+    // Every base58 id core's detector finds holds a digit, so without the
+    // address arm it was filed as "has-digits": refused, for the wrong reason.
+    assert.equal(admitPost(`Following ${SOLANA_USDG_MINT} into this one.`, ctx()).refusal, "has-address");
+    assert.equal(admitPost(`Seen on solscan.io/token/${SOLANA_USDG_MINT} today.`, ctx()).refusal, "has-address");
+    const sig = base58Encode(Uint8Array.from({ length: 64 }, (_, i) => (i * 37 + 11) & 0xff));
+    assert.equal(admitPost(`Saw ${sig} go by`, ctx()).refusal, "has-address");
   });
 });
 

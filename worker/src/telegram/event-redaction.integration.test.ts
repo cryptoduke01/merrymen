@@ -27,6 +27,7 @@ const { closeStoreForTest, initStore, addEvent } = await import("../store");
 const { readLlmState, readRecentEvents, readReport, redactAddresses } = await import("./reads");
 const { toolByName } = await import("./chat-tools");
 const { energyNotice } = await import("../energy-copy");
+const ids = await import("../../../packages/core/src/ids");
 
 const AGENT = "0x00000000000000000000000000000000000a9e17";
 const ACCOUNT = "0x5aFE00000000000000000000000000000000c0de";
@@ -132,6 +133,16 @@ describe("redactAddresses", () => {
     assert.equal(redactAddresses(`tx ${TX}`), `tx ${TX}`);
     assert.equal(redactAddresses("tx 0xa11ce, 12 0x-prefixed"), "tx 0xa11ce, 12 0x-prefixed", "short ids are not addresses");
     assert.equal(redactAddresses(`${ACCOUNT}${ACCOUNT.slice(2)}`), `${ACCOUNT}${ACCOUNT.slice(2)}`, "an 80-digit run is not an address");
+  });
+
+  it("replaces a Solana key the same way, and leaves a signature as it leaves a tx hash (Solana P0)", () => {
+    const { SOLANA_USDG_MINT, base58Encode } = ids;
+    const sig = base58Encode(Uint8Array.from({ length: 64 }, (_, i) => (i * 37 + 11) & 0xff));
+    assert.equal(redactAddresses(`send to ${SOLANA_USDG_MINT}.`), "send to [address].");
+    assert.equal(redactAddresses(`see https://solscan.io/account/${SOLANA_USDG_MINT}`), "see https://solscan.io/account/[address]");
+    assert.equal(redactAddresses(`to ${ACCOUNT} and ${SOLANA_USDG_MINT}`), "to [address] and [address]");
+    assert.equal(redactAddresses(`sig ${sig}`), `sig ${sig}`);
+    assert.equal(redactAddresses("Bought PEPE, the curve looked early."), "Bought PEPE, the curve looked early.");
   });
 
   it("is applied wherever event text is handed to a model — the why narration and the daily journal/digest", () => {

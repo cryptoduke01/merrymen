@@ -15,6 +15,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
+import { base58Encode, SOLANA_USDG_MINT } from "../../../packages/core/src/ids";
 import { everyBand } from "../class-evidence";
 import type { LlmCreds } from "../llm";
 import { traitsOf, type Disposition } from "../social-post";
@@ -2536,6 +2537,18 @@ describe("buildPrompt", () => {
           assert.ok(!text.toLowerCase().includes(secret.toLowerCase()), `${secret} in prompt for ${intent.kind}`);
         }
         assert.doesNotMatch(text, /0x[0-9a-f]{4,}/i);
+      }
+    }
+  });
+
+  it("never carries a Solana key or signature a quoted line held (Solana P0)", () => {
+    const sig = base58Encode(Uint8Array.from({ length: 64 }, (_, i) => (i * 37 + 11) & 0xff));
+    const said = `aped ${SOLANA_USDG_MINT}, tx ${sig}`;
+    const solTail: SpeakCtx["tail"] = [...tail, { name: "Pine Stoat's owner", author: "owner", body: said }];
+    for (const intent of [...intents, { kind: "reply", to: "Pine Stoat's owner", toAuthor: "owner", toOwnAgent: false, text: said } as Intent]) {
+      const { system, prompt } = buildPrompt(intent, { ...ctx, tail: solTail });
+      for (const text of [system, prompt]) {
+        assert.ok(!text.includes(SOLANA_USDG_MINT) && !text.includes(sig), `a Solana id in the prompt for ${intent.kind}`);
       }
     }
   });

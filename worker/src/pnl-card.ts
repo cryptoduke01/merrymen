@@ -29,6 +29,7 @@
 
 import { fileURLToPath } from "node:url";
 
+import { onchainIdIn } from "../../packages/core/src/ids";
 import { PNL_GLYPHS, PNL_GLYPH_EM } from "./pnl-glyphs";
 
 /** Template geometry, measured off `pnl/PNL.jpg` (1280x853). */
@@ -235,7 +236,10 @@ export function pnlCardFromFill(row: ClosedFillRow, coin?: string | null): PnlCa
   const named = (coin ?? "").trim();
   // Neither may be address-shaped: a resolver that could not name the coin
   // falls back to a short address, and that is exactly what must never be drawn.
-  const symbol = (/^0x/i.test(named) ? "" : named) || (/^0x/i.test(fromTarget) ? "" : fromTarget);
+  // A Solana key or program id has no 0x: core's detector catches a whole one,
+  // and a whole 0x address inside a longer name too.
+  const addressy = (s: string): boolean => /^0x/i.test(s) || onchainIdIn(s);
+  const symbol = (addressy(named) ? "" : named) || (addressy(fromTarget) ? "" : fromTarget);
   if (!symbol) return null;
 
   const proceeds = toBase(row.fill_cash_usdg);
@@ -268,11 +272,12 @@ export type LiveSellCard = { kind: "card"; card: PnlCardData } | { kind: "inelig
 
 /**
  * A coin's name fit to print: plain characters, not a contract address, not an
- * autonomous token id. Null otherwise.
+ * autonomous token id, and carrying no whole address (0x or Solana) anywhere
+ * in it. Null otherwise.
  */
 export function printableCoinName(value: string | null | undefined): string | null {
   const name = (value ?? "").trim();
-  return name && name.length <= 64 && /^[\x20-\x7e]+$/.test(name) && !/^0x/i.test(name) && !/^T[0-9A-F]{11}$/i.test(name) ? name : null;
+  return name && name.length <= 64 && /^[\x20-\x7e]+$/.test(name) && !/^0x/i.test(name) && !onchainIdIn(name) && !/^T[0-9A-F]{11}$/i.test(name) ? name : null;
 }
 
 /**
