@@ -585,7 +585,7 @@ export const ROUTE_COST = {
   following: { template: "/v2/users/{userId}/following", credits: 250, perPage: false, expensive: false, maxLimit: 300 },
   spotlight: { template: "/v2/users/{userId}/spotlight", credits: 250, perPage: false, expensive: false, maxLimit: null },
   theses: { template: "/v2/thesis", credits: 1_250, perPage: true, expensive: false, maxLimit: 100 },
-  thesesByToken: { template: "/v2/thesis/token/{address}", credits: 1_250, perPage: true, expensive: false, maxLimit: 100 },
+  thesesByToken: { template: "/v2/thesis/token/{address}", credits: 1_250, perPage: true, expensive: false, maxLimit: 200 },
   thesesByUser: { template: "/v2/thesis/user/{userId}", credits: 1_250, perPage: true, expensive: false, maxLimit: 100 },
   thesesByUserToken: { template: "/v2/thesis/user/{userId}/token/{address}", credits: 1_250, perPage: true, expensive: false, maxLimit: 100 },
   trade: { template: "/v2/trades/{tradeId}", credits: 250, perPage: false, expensive: false, maxLimit: null },
@@ -1808,11 +1808,20 @@ function normalizeTheses(body: Rec, ctx: ThesisContext): Norm<ThesesPage> {
     }
     const tok = obj(r.token);
     const chain = chainFromProvider(r.networkId ?? tok.networkId, r.chain ?? tok.chain);
+    const address = tok.address ?? r.tokenAddress ?? ctx.defaultAddress;
+    const token = tokenIdentity(chain, address);
+    // A trader/global thesis may omit its coin. An explicitly malformed or
+    // chain-incompatible address is different: never turn it into an unplaced
+    // thesis that a coin-scoped caller could mistake for evidence about its coin.
+    if (address !== null && address !== undefined && !token) {
+      dropped++;
+      continue;
+    }
     rows.push({
       id,
       tradeId: idOf(r.tradeId),
       author: { userId, handle: handleOf(r.handle), displayName: text(r.name, NAME_MAX), verified: null },
-      token: tokenIdentity(chain, tok.address ?? r.tokenAddress ?? ctx.defaultAddress),
+      token,
       tokenLabel: labelFrom(tok.symbol ?? r.symbol, tok.name),
       text: body_,
       likes: count(r.likes),
@@ -1834,7 +1843,7 @@ function normalizeTheses(body: Rec, ctx: ThesisContext): Norm<ThesesPage> {
       stale: bool(body.stale),
       ageSeconds: nonNeg(body.ageSeconds),
       pagesRequested: ctx.pagesRequested,
-      partial: bool(body.partial),
+      partial: dropped > 0 ? true : bool(body.partial),
       threshold: nonNeg(body.threshold),
       chainFilterRequested: ctx.filter?.slug ?? null,
       chainFilterHonoured: ctx.filter ? verifyChainFilter(ctx.filter.identity, rows.map((r) => r.token)).honoured : null,

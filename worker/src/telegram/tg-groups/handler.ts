@@ -175,6 +175,25 @@ const ROUTE_LEAVES_MS = 8 * SEC;
 const FOMO_THREAD_MS = 2 * 60 * MIN;
 /** The persona asking back which Fomo board or coin was meant. */
 const FOMO_ASK_BACK = /\b(?:fomo|theses|thesis|trending|top traders?|leaderboard|graduated|most held|robinhood)\b/iu;
+const FOMO_SELECTED_CHAIN = /^(?:robinhood(?: chain)?|rh|solana|sol|base|ethereum|eth|bsc|bnb)$/iu;
+/** Only trusted vocatives and plain answer filler; never remove trade verbs. */
+const researchSelectionText = (text: string, names: readonly string[]): string => {
+  let selected = text.trim().replace(/[.!?]+$/u, "").trim();
+  for (const name of [...names].sort((a, b) => b.length - a.length)) {
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const next = selected.replace(new RegExp(`^${escaped}(?:[,:]\\s*|\\s+)`, "iu"), "");
+    if (next !== selected) { selected = next; break; }
+  }
+  return selected.replace(/^(?:here(?: it is| is|'s)|this is (?:it|the (?:ca|contract|address))|(?:the )?(?:ca|contract|address)(?: is)?)\s*[:=-]?\s+/iu, "").trim();
+};
+/** A contract supplied on its own answers a question; it is not a trading instruction. */
+const contractSelection = (text: string): boolean => {
+  // Base58 mints are case-sensitive: do not use the chain regex's i flag.
+  const match = /^(?:0x[0-9a-fA-F]{40}|[1-9A-HJ-NP-Za-km-z]{32,44})(?:\s+on\s+(.+))?$/u.exec(text.trim().replace(/[.!?]+$/u, "").trim());
+  // An unfamiliar chain still cannot turn this answer into a trade. The
+  // research planner decides whether it can place that chain safely.
+  return !!match && (!match[1] || /^[a-z][a-z -]{0,40}$/iu.test(match[1]));
+};
 /** A routing call with less time than this is not worth making. */
 const ROUTE_MIN_BOX_MS = 1_500;
 /** How long someone's ask stays open for "i asked a question" to re-run it (decision D12). */
@@ -805,6 +824,10 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     if (!isMsgId(messageId)) return;
     fomoLines.set(msgKey(chatId, messageId), clock());
     if (persona) personaFomoLines.set(msgKey(chatId, messageId), true);
+    store.update(chatId, (room) => {
+      const line = room.lines.find((l) => l.own && l.messageId === messageId);
+      if (line) line.fomo = true;
+    });
   };
   /**
    * THE ONE COIN EACH OF ITS SINGLE-COIN FOMO ANSWERS WAS ABOUT, by message
@@ -1563,7 +1586,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     });
     if (!sent) return null;
     // A migrated chat has no message the old reply id means.
-    recordOwn(sent.chatId, sent.messageId, text, sent.chatId === chatId ? o.replyTo : undefined);
+    recordOwn(sent.chatId, sent.messageId, text, sent.chatId === chatId ? o.replyTo : undefined, undefined, sent.chatId === chatId ? o.threadId : undefined);
     // A line said under a permit that allowed a brag spends it, whatever its
     // words: the next brag waits even when this one was a paraphrase (review, 2026-10-09).
     if (ctx.collapse?.brag === true && (intent.kind === "answer" || intent.kind === "ambient")) noteBrag(sent.chatId, clock());
@@ -3065,6 +3088,35 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     // last slot; refused by the gate, it is dropped and the answer still goes.
     const last = tail !== undefined ? admitTgLine(tail, { agentName, kind: "research", recentOwn: [] }) : null;
     const end = last?.ok ? last.text : null;
+    // A thesis digest's closing block carries its claims label, source post
+    // dates, sample coverage and read limitations. Keep that whole block,
+    // along with copy age, before optional summary points or a moves notice.
+    const claimsAt = kept.findIndex((l) => l.startsWith("Their claims, not facts"));
+    if (claimsAt >= 0) {
+      const closing = kept.splice(claimsAt);
+      const required = [...closing, ...(age ? [age] : [])];
+      const frame = [...required, ...(end ? [end] : [])];
+      const slots = FOMO_MAX_LINES - frame.length;
+      const budget = FOMO_MAX_CHARS - frame.reduce((n, l) => n + l.length + 1, 0);
+      // When only a few lines remain, keep both sides together if the group
+      // gate permits it; shortening must not silently turn a mixed read bullish.
+      const forAt = kept.findIndex((l) => l.startsWith("For it:"));
+      if (kept.length > slots && forAt >= 0 && kept[forAt + 1]?.startsWith("Against it:")) {
+        const balanced = admitTgLine(`${kept[forAt]} ${kept[forAt + 1]}`, { agentName, kind: "research", recentOwn: [] });
+        if (balanced.ok) kept.splice(forAt, 2, balanced.text);
+      }
+      const out: string[] = [];
+      let used = 0;
+      for (let i = 0; i < kept.length; i++) {
+        const batch = [kept[i]!];
+        if (batch[0]!.startsWith("For it:") && kept[i + 1]?.startsWith("Against it:")) batch.push(kept[++i]!);
+        const chars = batch.reduce((n, l) => n + l.length + 1, 0);
+        if (out.length + batch.length > slots || used + chars > budget) break;
+        out.push(...batch);
+        used += chars;
+      }
+      return out.length ? [...out, ...frame].join("\n") : null;
+    }
     // What the room hears without the age: lines in order, within the caps.
     const slots = FOMO_MAX_LINES - (end ? 1 : 0);
     const budget = FOMO_MAX_CHARS - (end ? end.length + 1 : 0);
@@ -3120,7 +3172,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
   };
 
   /** A research read, time-boxed. "timeout" and "failed" are told apart from a plain "not research" (null). */
-  const readFomo = async (port: TgFomoPort, q: { text: string; request?: TgFomoRequest; owner?: boolean; fresh?: boolean; chatId: number; threadId?: number; selfNames?: readonly string[] }, ms: number): Promise<Awaited<ReturnType<TgFomoPort["ask"]>> | "timeout" | "failed"> => {
+  const readFomo = async (port: TgFomoPort, q: Parameters<TgFomoPort["ask"]>[0], ms: number): Promise<Awaited<ReturnType<TgFomoPort["ask"]>> | "timeout" | "failed"> => {
     if (ms <= 0) return "timeout";
     const ask = { ...q, timeoutMs: ms };
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -3219,9 +3271,24 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     // "check again"), in reply to it or right after it: read again, never
     // serve the same held "nothing here" (the AUTON incident, 2026-10-08).
     const fresh = pushbackOnFomo(j.msg, j.line.text, j.threadId);
+    // A reply to our published chart/story already identifies a public coin.
+    // Its contract comes from the persisted desk result, never the caption's
+    // project claims or another member's message. The desk reads Robinhood.
+    const quote = j.msg.replyTo;
+    const own = quote?.fromId === selfNow()?.id
+      ? store.room(chatId)?.lines.find((l) => l.own && l.messageId === quote?.messageId && l.threadId === j.threadId)
+      : undefined;
+    const deskCoin = own?.deskAsk;
+    const header = quote?.text?.split(/\r?\n/u)[0]?.trim().toUpperCase() ?? "";
+    const replyCoin = deskCoin?.kind === "coin" && "address" in deskCoin && /^0x[0-9a-f]{40}$/iu.test(deskCoin.address)
+      ? { address: deskCoin.address.toLowerCase(), chain: "robinhood" as const, ...(/^[A-Z0-9][A-Z0-9_-]{0,19}$/u.test(header) ? { symbol: header } : {}) }
+      : undefined;
+    const selection = researchSelectionText(j.line.text, selfNames);
+    const selected = !request && own?.fomo === true && (FOMO_SELECTED_CHAIN.test(selection) || contractSelection(selection));
     const r = await readFomo(port, {
-      text: j.line.text,
+      text: selected ? selection : j.line.text,
       ...(request ? { request } : {}),
+      ...(replyCoin ? { replyCoin } : {}),
       ...(owner ? { owner } : {}),
       ...(fresh ? { fresh } : {}),
       chatId,
@@ -3416,7 +3483,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
    * persona asking which board or coin they meant. What "pons" or
    * "trending" means there is in the line it answers.
    */
-  const repliesToOwnFomo = (j: LineJob): boolean => {
+  const repliesToOwnFomo = (j: Pick<LineJob, "msg" | "line">): boolean => {
     const me = selfNow();
     const q = j.msg.replyTo;
     if (!me || !q || q.fromId !== me.id || !isMsgId(q.messageId)) return false;
@@ -4219,7 +4286,13 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       // and a CA inside such a question is a subject to research, never a
       // nomination into trading (an information request never starts a trade).
       const fomoQuestion = j.fomo === true && !isInjection(text);
-      if (!rememberedAsk && !deskTicker && !deskResearch && !fomoQuestion && (cas.length > 0 || foreignMint || cashtags.length > 0)) {
+      // A restart, expired memory, disabled research port or evicted old line
+      // must never turn an address answering our question into a nomination,
+      // including natural answers such as "here it is" or our name + address.
+      // This only withholds a trade; it grants no research subject or authority.
+      const ownContractReply = j.addressed !== null && selfNow()?.id === j.msg.replyTo?.fromId
+        && isMsgId(j.msg.replyTo?.messageId) && contractSelection(researchSelectionText(text, selfNamesOf(selfNow())));
+      if (!rememberedAsk && !deskTicker && !deskResearch && !fomoQuestion && !ownContractReply && (cas.length > 0 || foreignMint || cashtags.length > 0)) {
         stageOf(chatId, "coin flow");
         const post = await flow.begin(chatId, j.line, {
           senderId: j.line.fromId,
@@ -4682,7 +4755,17 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
         // Right after a research answer, a pushback on it ("there has to be
         // thesis", "check again") goes back to the research, read again;
         // under another of its lines it is about that line (pushbackOnFomo).
-        const fomoAsk = fomoHere && (named || trendingAsk || (!venueMarket && !deskOwned && fomoRecent(chatId, threadId) && (fomoFollowUpOf(text, selfNamesOf(me)) || pushbackOnFomo(msg, text, threadId))));
+        // A chain or contract supplied under our own research clarification
+        // continues that read. In particular, a requested contract must never
+        // enter the coin nomination flow merely because it is an address.
+        const selection = researchSelectionText(text, selfNamesOf(me));
+        const ownResearch = addressed !== null && me && msg.replyTo?.fromId === me.id
+          && room.lines.some((l) => l.own && l.messageId === msg.replyTo?.messageId && l.threadId === threadId
+            && (l.fomo === true || repliesToOwnFomo({ msg, line })));
+        // Intent remains research after its context expires or the port goes
+        // offline. The read can ask again; the coin lane may never adopt it.
+        const replySelection = !!ownResearch && (FOMO_SELECTED_CHAIN.test(selection) || contractSelection(selection));
+        const fomoAsk = replySelection || (fomoHere && (named || trendingAsk || (!venueMarket && !deskOwned && fomoRecent(chatId, threadId) && (fomoFollowUpOf(text, selfNamesOf(me)) || pushbackOnFomo(msg, text, threadId)))));
         // WHAT HAPPENED TO A COIN, ASKED AS FACTS ("what happened to it", "why
         // did auton rug", "show me the data", "did the dev dump?"; Milla,
         // 2026-10-09). Only about the room's Fomo coin: the one the answer it

@@ -1176,6 +1176,42 @@ describe("theses → Thesis", () => {
     assert.equal(p.chainFilterHonoured, false);
   });
 
+  it("keeps the token response limit independent of page depth, up to the documented 200 rows", async () => {
+    const { client, sent } = harness(serveFixture("theses-token"));
+    await client.thesesByToken(PONS, { pages: 5, limit: 125, sort: "recent" });
+    await client.thesesByToken(PONS, { pages: 10, limit: 1000 });
+    assert.equal(query(sent[0]!).get("limit"), "125");
+    assert.equal(query(sent[0]!).get("pages"), "5");
+    assert.equal(query(sent[0]!).get("sort"), "recent");
+    assert.equal(query(sent[1]!).get("limit"), "200");
+  });
+
+  it("drops malformed and chain-incompatible explicit addresses instead of turning them into unplaced evidence", async () => {
+    const { client } = harness(serveFixture("theses-token", (b) => {
+      const rows = b.theses as Rec[];
+      for (const [i, address] of ["", "bad-address", MINT, 123].entries()) {
+        rows.push({ ...rows[0], id: `bad-${i}`, token: { symbol: "OTHER", address } });
+      }
+      rows.push({ ...rows[0], id: "missing-address", token: { symbol: "PONS" } });
+    }));
+    const p = ok(await client.thesesByToken(PONS, { network: "robinhood" }));
+    assert.equal(p.rows.length, 4);
+    assert.equal(p.dropped, 4);
+    assert.equal(p.partial, true);
+    assert.ok(p.rows.every((r) => r.token?.key === `eip155:4663:${PONS}`));
+    assert.ok(p.rows.some((r) => r.id === "missing-address"), "the token endpoint can omit the requested address");
+  });
+
+  it("retains a genuinely unplaced thesis in a trader's own feed", async () => {
+    const row = { ...(fixture("theses-token").theses as Rec[])[0]!, token: undefined, tokenAddress: undefined };
+    const { client } = harness(() => json({ theses: [row], totalAvailable: 1 }));
+    const p = ok(await client.thesesByUser(FRANK, { sort: "recent" }));
+    assert.equal(p.rows.length, 1);
+    assert.equal(p.rows[0]?.token, null);
+    assert.equal(p.dropped, 0);
+    assert.notEqual(p.partial, true);
+  });
+
   it("copies of one thesis share a family; a different claim does not", async () => {
     const { client } = harness(serveFixture("theses-token"));
     const [a, b, c] = ok(await client.thesesByToken(PONS)).rows;
@@ -1212,6 +1248,7 @@ describe("theses → Thesis", () => {
     const p = ok(await client.thesesByToken(PONS));
     assert.equal(p.rows.length, 3);
     assert.equal(p.dropped, 3);
+    assert.equal(p.partial, true);
   });
 
   it("thesis text is untrusted data, kept as data", async () => {

@@ -40,7 +40,7 @@ export interface ThesisReading {
   cues: ThesisCue[];
   /** Topics other than "other", in DOSSIER_TOPICS order. */
   topics: DossierTopic[];
-  /** WAITING_PHRASE keys the text names. */
+  /** WAITING_PHRASE keys with explicit, non-negated anticipation in the text. */
   waitingOn: string[];
 }
 
@@ -54,7 +54,6 @@ export const GROUP_PHRASE: Readonly<Record<string, string>> = Object.freeze({
   early: "it's still early",
   "strong community": "a strong community",
   breakout: "the chart setting up",
-  listing: "hopes of a listing",
   accumulating: "holders adding on dips",
   undervalued: "it looks undervalued",
   rug: "fears it could collapse",
@@ -62,7 +61,7 @@ export const GROUP_PHRASE: Readonly<Record<string, string>> = Object.freeze({
   "dev sold": "worries about the dev's wallet",
   "exit liquidity": "worries late buyers end up holding it",
   overvalued: "it looks overvalued",
-  unlock: "token unlocks ahead",
+  unlock: "concerns about token unlocks",
   "can't sell": "worries it can't be sold",
   scam: "trust worries",
 });
@@ -78,7 +77,8 @@ export const TOPIC_PHRASE: Readonly<Record<Exclude<DossierTopic, "other">, strin
 });
 
 /**
- * What holders say they are waiting on, by the words that name it. An
+ * What holders explicitly say they are waiting on. Merely mentioning an
+ * event (especially a completed or cancelled event) is not anticipation. An
  * airdrop is deliberately absent: "claim your airdrop" is the commonest lure
  * in a thesis feed, and a room must never hear one as something to wait for.
  */
@@ -100,6 +100,52 @@ const WAITING_WORDS: ReadonlyArray<readonly [string, RegExp]> = [
   ["announcement", /\b(?:announcements?|announcing|news\s+drops?)\b/],
 ];
 
+// Conservative by design: a mixed, denied, historical or questioning sentence
+// can still contribute neutral topics, but never a promise of a future event.
+// Read the entire sentence before its clauses so "waiting ... but cancelled"
+// cannot leave behind an unsupported catalyst when split at "but".
+const NOT_ANTICIPATION = /\b(?:no|not|never|neither|nor|without|nothing|nobody|none|cannot|can't|cant|won't|wont|isn't|isnt|aren't|arent|wasn't|wasnt|weren't|werent|don't|dont|doesn't|doesnt|didn't|didnt|hasn't|hasnt|haven't|havent|was|were|had|already|previously|yesterday|fake|false|unlikely|doubt(?:s|ed|ful)?|used\s+to|last\s+(?:week|month|year|monday|tuesday|wednesday|thursday|friday|saturday|sunday))\b/;
+const WITHDRAWN_EVENT = /\b(?:cancel(?:led|ed|lation)?|scrapped|abandoned|postponed|delayed|denied|fail(?:ed|ure)?|fell\s+through|called\s+off|ruled\s+out|stop(?:ped|ping)?|quit|gave\s+up|given\s+up|done\s+(?:waiting|awaiting)|no\s+longer)\b/;
+const ANTICIPATION_BEFORE = /\b(?:wait(?:ing)?\s+(?:for|on)|await(?:ing)?|hop(?:e|es|ing)\s+for|expect(?:ing)?|anticipat(?:e|ing)|looking\s+forward\s+to|upcoming|planned|scheduled)\b/g;
+const ANTICIPATION_AFTER = /^\s+(?:(?:is|are|remains?|still|now|currently|reportedly)\s+)*(?:planned|scheduled|expected|anticipated|upcoming|due|coming|soon|tomorrow|tonight|next\s+(?:week|month|year)|on\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday))\b/;
+const TIMED_EVENT = /^\s+(?:(?:drops?|lands?|ships?|happens?|starts?|goes\s+live)\s+)?(?:soon|tomorrow|tonight|next\s+(?:week|month|year)|(?:on\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday))\b/;
+
+function anticipatedEvents(text: string): string[] {
+  if (/\bairdrops?\b/.test(text)) return [];
+  const found = new Set<string>();
+  for (const sentence of text.match(/[^.!?;\n]+[.!?;\n]*/g) ?? []) {
+    if (sentence.includes("?")) continue;
+    if (NOT_ANTICIPATION.test(sentence) || WITHDRAWN_EVENT.test(sentence)) {
+      const named = WAITING_WORDS.filter(([, word]) => word.test(sentence));
+      for (const [key] of named) found.delete(key);
+      // A later correction can retract the preceding sentence's event without
+      // repeating its name: "Waiting for a listing. It has been cancelled."
+      if (named.length === 0 && (/\b(?:it|that|this|they|those)\b/.test(sentence) || WITHDRAWN_EVENT.test(sentence))) found.clear();
+      continue;
+    }
+    for (const clause of sentence.split(/[,;]|\b(?:but|however|although|though)\b/)) {
+      for (const [key, word] of WAITING_WORDS) {
+        for (const match of clause.matchAll(new RegExp(word.source, "g"))) {
+          const before = clause.slice(0, match.index);
+          const after = clause.slice(match.index + match[0].length);
+          const explicit = [...before.matchAll(ANTICIPATION_BEFORE)].some((marker) => {
+            const between = before.slice(marker.index + marker[0].length);
+            // Do not transfer "waiting for an update after the launch" to the
+            // launch, or a marker in a remote part of the sentence to this event.
+            return between.trim().split(/\s+/).length <= 6 && !/\b(?:after|before|since|because|once|if|when|then|despite|while)\b/.test(between);
+          });
+          const eventPredicate = /\bwill\s+$/.test(before) && /^(?:launch|update|upgrade|release|relist)$/.test(match[0]);
+          // A date may belong to a discussion or assessment of the event,
+          // rather than to the event itself ("discuss the listing tomorrow").
+          const discussing = /\b(?:discuss|discussing|assess|assessing|review|reviewing|debate|debating|talk\s+about|ask\s+about)\b/.test(before);
+          if (explicit || eventPredicate || (!discussing && (ANTICIPATION_AFTER.test(after) || TIMED_EVENT.test(after)))) found.add(key);
+        }
+      }
+    }
+  }
+  return WAITING_WORDS.map(([key]) => key).filter((key) => found.has(key));
+}
+
 /** Words of three letters or more: fewer than three left after redaction is content-free ("lfg", "send it"). */
 const CONTENT_WORD = /\p{L}{3,}/gu;
 const MIN_CONTENT_WORDS = 3;
@@ -114,16 +160,19 @@ export function contentFree(text: string): boolean {
 export function readThesisForDigest(text: string): ThesisReading {
   const t = typeof text === "string" ? text : "";
   const r = readThesisText(t);
+  const low = redactExecutables(t).toLowerCase().replace(/[‘’ʼ`]/g, "'");
+  const waitingOn = anticipatedEvents(low);
   const seen = new Set<string>();
   const cues: ThesisCue[] = [];
   for (const c of r.cues) {
     if (c.negated || seen.has(c.label)) continue;
+    // Anticipating a listing says nothing about the author's view of the coin:
+    // they may be waiting to sell. Convey it only as an event, never support.
+    if (c.label === "listing") continue;
     seen.add(c.label);
     cues.push({ label: c.label, stance: c.stance });
   }
   const topics = thesisTopics(t).filter((x): x is DossierTopic => x !== "other");
-  const low = redactExecutables(t).toLowerCase();
-  const waitingOn = /\bairdrops?\b/.test(low) ? [] : WAITING_WORDS.filter(([, re]) => re.test(low)).map(([k]) => k);
   return { cues, topics, waitingOn };
 }
 
@@ -226,8 +275,7 @@ export function digestTheses(views: readonly DigestThesis[]): ThesesDigest {
       .slice(0, ABOUT_MAX)
       .map(([t]) => TOPIC_PHRASE[t as Exclude<DossierTopic, "other">]);
   const forPhrases = ranked(forIt, FOR_MAX);
-  // A listing already said as a hope is not said again as something waited on.
-  const waitingKeys = ranked(waiting, WAITING_MAX + 1).filter((k) => !(k === "listing" && forPhrases.includes(GROUP_PHRASE.listing!)));
+  const waitingKeys = ranked(waiting, WAITING_MAX);
   return {
     theses: list.length,
     authors,
