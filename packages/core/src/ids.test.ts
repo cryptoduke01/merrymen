@@ -18,6 +18,7 @@ import {
   requireChain,
   sameId,
   solanaSecretIn,
+  solanaSecretsIn,
 } from "./ids";
 import { CASH } from "./tokens";
 
@@ -148,5 +149,16 @@ describe("Solana secret detection", () => {
     const random = Uint8Array.from({ length: 64 }, (_, i) => (i * 37 + 11) % 256);
     assert.equal(isSolanaKeypair(random), false);
     assert.equal(solanaSecretIn(`[${[...random].join(",")}]`), false);
+  });
+
+  it("solanaSecretsIn returns each secret exactly as written, and only secrets", () => {
+    const a = keypair(17);
+    const b = keypair(19);
+    const array = JSON.stringify([...b.secret], null, 2);
+    const text = `PRIVATE_KEY=${a.secretB58}\nsig ${a.sig} owner ${a.pub}\nid.json: ${array}`;
+    assert.deepEqual(solanaSecretsIn(text), [a.secretB58, array]);
+    for (const s of solanaSecretsIn(text)) assert.ok(text.includes(s));
+    assert.deepEqual(solanaSecretsIn(`sig ${a.sig}`), []);
+    for (const x of [null, undefined, 42, "", "short"]) assert.deepEqual(solanaSecretsIn(x), []);
   });
 });

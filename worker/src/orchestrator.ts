@@ -11625,12 +11625,20 @@ function attachFomoBroker(tenant: string, proc: ChildProcess): void {
 
 function noteFomoFailure(text: string): void {
   const now = Date.now();
-  // Never a tenant, never a URL with its key: the same scrub the pass uses for its own lines.
-  const clean = text.replace(/0x[0-9a-fA-F]{40}/g, "0x…").replace(/([?&](?:key|apikey|api_key)=)[^&\s]*/gi, "$1***").slice(0, 300);
+  const clean = fomoFailureText(text);
   if (!fomoLastFailure || fomoLastFailure.text !== clean || now - fomoLastFailure.at > 20 * 60_000) {
     fomoLastFailure = { text: clean, at: now };
     log(`fomo: ${clean}`);
   }
+}
+
+/**
+ * Never a tenant, never a URL with its key: the same scrub the pass uses for
+ * its own lines (redactUrl), `api-key=` included, the name Solana RPCs such as
+ * Helius take a key under.
+ */
+export function fomoFailureText(text: string): string {
+  return text.replace(/0x[0-9a-fA-F]{40}/g, "0x…").replace(/([?&](?:key|api[-_]?key)=)[^&\s]*/gi, "$1***").slice(0, 300);
 }
 
 /** Stop the stream and give up the fleet lease (FLEET_HALT, shutdown). The next pass after a halt builds a new one. */

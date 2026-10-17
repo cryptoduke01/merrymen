@@ -305,14 +305,20 @@ const BYTE_ARRAY_64 = /\[\s*(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\s*,\s*){63}(?:25[0-5
  * backstops (the hosted owner-key guard, the Telegram agent's secret screen).
  */
 export function solanaSecretIn(text: unknown): boolean {
-  if (typeof text !== "string" || text.length < 64) return false;
+  return solanaSecretsIn(text).length > 0;
+}
+
+/** Every Solana secret key in a text (solanaSecretIn), exactly as written, so a redactor can strip each one. */
+export function solanaSecretsIn(text: unknown): string[] {
+  if (typeof text !== "string" || text.length < 64) return [];
+  const found: string[] = [];
   for (const m of text.matchAll(BASE58_IN_TEXT)) {
     const b = base58Decode(m[0]);
-    if (b && b.length === 64 && isSolanaKeypair(b)) return true;
+    if (b && b.length === 64 && isSolanaKeypair(b)) found.push(m[0]);
   }
   for (const m of text.matchAll(BYTE_ARRAY_64)) {
     const nums = m[0].slice(1, -1).split(",").map((x) => Number(x.trim()));
-    if (nums.length === 64 && isSolanaKeypair(Uint8Array.from(nums))) return true;
+    if (nums.length === 64 && isSolanaKeypair(Uint8Array.from(nums))) found.push(m[0]);
   }
-  return false;
+  return found;
 }
