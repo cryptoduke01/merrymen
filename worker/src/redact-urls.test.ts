@@ -159,6 +159,15 @@ describe("redactUrls", () => {
       redactUrls("https://rpc.example.org/bundler/1c2d3e4f-5a6b-7c8d-9e0f-a1b2c3d4e5f6"),
       `https://rpc.example.org/${REDACTED}`,
     );
+    // Infura's shape, on a host this file has never heard of.
+    assert.equal(redactUrls(`https://rpc.example.org/v3/${"9f".repeat(16)}`), `https://rpc.example.org/${REDACTED}`);
+    // Etherscan-style APIs: the key is a parameter, and the parameter is enough.
+    assert.equal(
+      redactUrls("https://api.etherscan.io/v2/api?chainid=1&module=account&apikey=ABC123"),
+      `https://api.etherscan.io/${REDACTED}`,
+    );
+    // A public host's path is spared; a key in its query is not.
+    assert.equal(redactUrls("https://x.com/i/api?access_token=abc"), `https://x.com/${REDACTED}`);
   });
 
   it("always removes userinfo", () => {
@@ -176,6 +185,12 @@ describe("redactUrls", () => {
       "https://merrymen.dev/agents/alan?tab=trades",
       "https://web.example.com/_next/static/chunks/a1b2c3d4e5f6a7b8c9d0e1f2.js",
       "https://dexscreener.com/robinhood/0x1111111111111111111111111111111111111111",
+      `https://etherscan.io/tx/0x${"ef".repeat(32)}`,
+      // A news slug mixes letters and digits and is not a key.
+      "https://www.reuters.com/markets/us/fed-holds-rates-steady-signals-cut-2026-10-17/",
+      // Base58, mixed case and digits — a key's shape — on an explorer that is public.
+      "https://solscan.io/tx/5VERv8NMvzbJMEkV8xnrLkEaWRtSz9CosKDYjCJjBRnbJLgp8uirBgmQpjKhoR4tjF3ZpRzrFmBV6UjKdiSZkQUW",
+      "https://solscan.io/token/EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
     ]) {
       assert.equal(redactUrls(`see ${url} now`), `see ${url} now`, url);
     }

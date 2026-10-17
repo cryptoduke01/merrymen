@@ -62,20 +62,46 @@ const KEYED_HOSTS: readonly string[] = [
   "stackup.sh",
   "biconomy.io",
   "candide.dev",
-  "etherscan.io", // api.etherscan.io/…&apikey=<key>
+];
+
+/**
+ * Public pages whose PATH is an identifier people are meant to share — a
+ * Solana signature or mint in base58, a handle, a repository — and which the
+ * shape test below would otherwise take for a key. Their query is still
+ * checked by parameter name. (Etherscan-style APIs carry their key as
+ * `apikey=`, which that check removes on any host.)
+ */
+const PUBLIC_PATH_HOSTS: readonly string[] = [
+  "solscan.io",
+  "solana.fm",
+  "explorer.solana.com",
+  "dexscreener.com",
+  "geckoterminal.com",
+  "birdeye.so",
+  "x.com",
+  "twitter.com",
+  "t.me",
+  "github.com",
+  "youtube.com",
+  "youtu.be",
+  "merrymen.dev",
 ];
 
 /** Query parameter names that carry a credential, whatever host they are on. */
 const SECRET_PARAM = /(?:^|[-_])(?:api[-_]?key|apikey|key|dkey|token|access[-_]?token|secret|auth|authorization|password|passwd|pwd|sig|signature|credential|credentials)$/i;
 
 /**
- * A path segment or query value shaped like a credential: long, from the
- * base64url alphabet, with both letters and digits in it.
+ * A path segment or query value shaped like a credential: twenty or more
+ * characters that read as random — upper case, lower case and digits mixed
+ * (Alchemy, Pimlico and most base62/base64 keys), a run of bare hex of key
+ * length (Infura), or a UUID (project ids).
  *
  * NOT `0x…` hex, which is an address or a hash — public by construction, and
- * the whole content of an explorer link. A digits-only run is an id (a tweet,
- * a block number), and a letters-only run is a word. Only consulted for hosts
- * outside KEYED_HOSTS, whose path and query go whatever they look like.
+ * the whole content of an explorer link. NOT a slug: `fed-holds-rates-2026-10-17`
+ * mixes letters and digits, and a news link that lost its path to this test
+ * would be the first thing somebody switched it off for. A digits-only run is
+ * an id (a tweet, a block number). Only consulted for hosts outside
+ * KEYED_HOSTS, whose path and query go whatever they look like.
  */
 function looksLikeKey(s: string): boolean {
   let v = s;
@@ -88,28 +114,31 @@ function looksLikeKey(s: string): boolean {
   if (/^0x[0-9a-fA-F]+$/.test(v)) return false;
   // A file name with an extension (a hashed asset, an image) is not a key.
   if (/\.[A-Za-z0-9]{1,5}$/.test(v)) return false;
-  return /[0-9]/.test(v) && /[A-Za-z]/.test(v);
+  if (/[A-Z]/.test(v) && /[a-z]/.test(v) && /[0-9]/.test(v)) return true;
+  if (/^[0-9a-fA-F]{32,}$/.test(v)) return true;
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v);
 }
 
-function keyedHost(host: string): boolean {
+function hostIn(host: string, list: readonly string[]): boolean {
   const h = host.replace(/:\d+$/, "").replace(/\.$/, "").toLowerCase();
-  return KEYED_HOSTS.some((k) => h === k || h.endsWith(`.${k}`));
+  return list.some((k) => h === k || h.endsWith(`.${k}`));
 }
 
 /** Does this path-and-query carry anything credential-shaped? */
-function restLooksKeyed(rest: string): boolean {
+function restLooksKeyed(rest: string, publicPath: boolean): boolean {
   const hash = rest.indexOf("#");
   const noFrag = hash >= 0 ? rest.slice(0, hash) : rest;
   const q = noFrag.indexOf("?");
   const path = q >= 0 ? noFrag.slice(0, q) : noFrag;
   const query = q >= 0 ? noFrag.slice(q + 1) : "";
-  if (path.split("/").some(looksLikeKey)) return true;
+  if (!publicPath && path.split("/").some(looksLikeKey)) return true;
   for (const pair of query.split(/[&;]/)) {
     if (!pair) continue;
     const eq = pair.indexOf("=");
     const name = eq >= 0 ? pair.slice(0, eq) : pair;
     const value = eq >= 0 ? pair.slice(eq + 1) : "";
-    if (SECRET_PARAM.test(name) || looksLikeKey(value) || looksLikeKey(name)) return true;
+    if (SECRET_PARAM.test(name)) return true;
+    if (!publicPath && (looksLikeKey(value) || looksLikeKey(name))) return true;
   }
   return false;
 }
@@ -135,7 +164,7 @@ function redactOne(raw: string): string {
   const at = authority.lastIndexOf("@");
   const host = at >= 0 ? authority.slice(at + 1) : authority;
   const user = at >= 0 ? `${REDACTED}@` : "";
-  const hide = rest !== "" && rest !== "/" && (keyedHost(host) || restLooksKeyed(rest));
+  const hide = rest !== "" && rest !== "/" && (hostIn(host, KEYED_HOSTS) || restLooksKeyed(rest, hostIn(host, PUBLIC_PATH_HOSTS)));
   if (!user && !hide) return raw;
   return `${scheme}${user}${host}${hide ? `/${REDACTED}` : rest}${tail}`;
 }
