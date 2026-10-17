@@ -17,6 +17,15 @@ const HOST = "robinhood-mainnet.g.alchemy.com";
 const KEYED = `https://${HOST}/v2/${KEY}`;
 
 /**
+ * Any eight characters of the key, anywhere. A slice that cut the URL in half
+ * must not leave the half it kept.
+ */
+function leaksKey(text: string): boolean {
+  for (let i = 0; i + 8 <= KEY.length; i++) if (text.includes(KEY.slice(i, i + 8))) return true;
+  return false;
+}
+
+/**
  * Exactly how a child's read fails while the governor is declining: viem's
  * http transport calls the fetch, the fetch throws the declined marker, viem
  * wraps it as an HttpRequestError naming the transport's URL, and readContract
@@ -85,7 +94,7 @@ describe("redactUrls on the errors viem actually raises", () => {
     assert.ok(e.message.includes(KEY), "viem no longer puts the URL in its message — revisit this module");
     assert.ok(inspect(e).includes(KEY));
     for (const [where, text] of Object.entries(everyRendering(e))) {
-      assert.ok(!text.includes(KEY), `${where} still carries the key`);
+      assert.ok(!leaksKey(text), `${where} still carries the key`);
     }
     // And the host survives, because which provider failed is the useful part.
     assert.ok(redactUrls(e.message).includes(`URL: https://${HOST}/${REDACTED}`));
@@ -98,7 +107,7 @@ describe("redactUrls on the errors viem actually raises", () => {
     assert.ok((e as Error).message.includes(KEY));
     assert.ok(inspect(e, { depth: Infinity }).includes(KEY));
     for (const [where, text] of Object.entries(everyRendering(e))) {
-      assert.ok(!text.includes(KEY), `${where} still carries the key`);
+      assert.ok(!leaksKey(text), `${where} still carries the key`);
     }
     // Still recognisably the failure it was.
     assert.equal(classifyRpcError(e).kind, "declined");
@@ -115,7 +124,7 @@ describe("redactUrls on the errors viem actually raises", () => {
     // A Buffer written straight to the stream, as a pipe would.
     out.stream.write(Buffer.from(`raw ${KEYED}\n`));
     const text = out.text();
-    assert.ok(!text.includes(KEY), "the guarded stream wrote the key");
+    assert.ok(!leaksKey(text), "the guarded stream wrote the key");
     assert.ok(text.includes(HOST));
     assert.ok(text.includes(DECLINED_MARKER));
   });
