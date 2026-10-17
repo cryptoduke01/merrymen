@@ -12586,7 +12586,7 @@ export async function runOrchestrator(): Promise<void> {
  * Lines are reassembled across chunks before redacting: a `data` chunk ends
  * wherever the pipe's buffer did, and half a URL has no scheme left to find.
  */
-function relayChildOutput(stream: NodeJS.ReadableStream | null, sink: NodeJS.WriteStream, tag: string): void {
+export function relayChildOutput(stream: NodeJS.ReadableStream | null, sink: NodeJS.WriteStream, tag: string): void {
   if (!stream) return;
   const lines = lineRedactor();
   const write = (ls: string[]) => ls.filter((l) => l.trim()).forEach((l) => sink.write(`${tag} ${l}\n`));
