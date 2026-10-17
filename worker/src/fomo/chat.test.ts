@@ -232,6 +232,8 @@ describe("answerFomoQuestion", () => {
 
   it("C11: answering the which-chain question places the coin on that chain instead of asking again", async () => {
     for (const [answer, chain, address] of [
+      ["robinhood", "robinhood", PONS],
+      ["solana", "solana", FU2O],
       ["the one on robinhood", "robinhood", PONS],
       ["on solana", "solana", FU2O],
       ["I mean on robinhood", "robinhood", PONS],
@@ -253,6 +255,31 @@ describe("answerFomoQuestion", () => {
       const t = mem?.subjects.find((x) => x.kind === "token");
       assert.ok(t && t.kind === "token" && t.address === address, `${answer}: remembered ${JSON.stringify(t)}`);
     }
+  });
+
+  it("a same-chain ticker clarification accepts the contract without asking for the chosen chain again", async () => {
+    const s = await setup();
+    s.serve.set("/v2/tokens/search", () => json({ tokens: [
+      { symbol: "BOOMER", address: PONS, networkId: 4663 },
+      { symbol: "BOOMER", address: OTHER, networkId: 4663 },
+      { symbol: "BOOMER", address: FU2O, networkId: 1399811149 },
+    ] }));
+    const group = { audience: "group" as const, surface: "telegram-group" as const, groupId: "-100123" };
+    const first = await s.ask("what are the theses on $BOOMER", group);
+    assert.ok(first.handled && first.envelopes[0]!.status === "needs-clarification");
+    const narrowed = await s.ask("robinhood", group);
+    assert.ok(narrowed.handled);
+    assert.equal(narrowed.text, "Fomo lists different BOOMER tokens on Robinhood Chain. Reply with the contract address of the one you mean.");
+    assert.ok(!s.provider.some((p) => p.includes("/thesis/")));
+    const searches = s.provider.filter((p) => p.includes("/tokens/search")).length;
+    const result = await s.ask(PONS, group);
+    assert.ok(result.handled);
+    assert.deepEqual(s.brokerCalls.at(-1)!.args, { token: PONS, chain: "robinhood" });
+    assert.notEqual(result.envelopes[0]!.status, "needs-clarification");
+    assert.equal(s.provider.filter((p) => p.includes("/tokens/search")).length, searches);
+    const follow = await s.ask("what about the sellers?", group);
+    assert.ok(follow.handled);
+    assert.deepEqual(s.brokerCalls.at(-1)!.args, { token: PONS, chain: "robinhood", side: "sell" });
   });
 
   it("C8/C10: the agent's own names are never researched as a trader", async () => {

@@ -33,6 +33,8 @@ export interface TgLine {
   own?: boolean;
   /** Public research identity on our own answer, never a trade nomination. */
   deskAsk?: TgDeskAsk;
+  /** Our own Fomo answer or clarification. Retained so a later address reply stays read-only. */
+  fomo?: true;
   /** The Telegram forum topic this line belongs to. */
   threadId?: number;
 }
@@ -629,6 +631,8 @@ export interface TgFomoPort {
     text: string;
     /** A model's checked choice (route.ts): asked as its fixed question instead of the line's words. */
     request?: TgFomoRequest;
+    /** Exact public coin of an authenticated reply to our desk answer. The desk reads Robinhood only. */
+    replyCoin?: { address: string; chain: "robinhood"; symbol?: string };
     /** The asker is the owner (trusted sender id, never through a chat): her moves come back too. */
     owner?: boolean;
     /**

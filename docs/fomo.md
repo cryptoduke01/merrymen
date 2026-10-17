@@ -383,7 +383,10 @@ caps, policy, energy and rail.
 chat, background research and triggered reviews.
 
 - **Building.** Fetches are staged: one thesis page, expanding only when contested or
-  thin, and never "all theses". Copies collapse into evidence families. Merrymen's own
+  thin, and never "all theses". Token-thesis requests explicitly ask for recent order
+  and set the response limit alongside the requested page count (about 25 rows per
+  page, bounded by the provider's 200-row limit); extra pages must not silently hit
+  the provider's separate default limit of 50. Copies collapse into evidence families. Merrymen's own
   posts and echoes are excluded from independent confirmation. One well-supported
   objection outranks ten copies of one bullish post.
 - **Contents.** Source statements, observed actions, verified facts and inference are
@@ -1080,8 +1083,23 @@ Surface limits:
   code digest (`fomo/digest.ts`) says what they argue: one thesis per family, the coin's
   dev's own posts left out, content-free rows ("lfg") dropped, the lexicon's cues that are
   not negated in fixed phrases ("For it: it's still early, a strong community.", "Against
-  it: fears it could collapse, worries about the dev's wallet."), what most of it is about,
-  what holders wait on (never an airdrop), and "Their claims, not facts; newest 25 of 41."
+  it: fears it could collapse, worries about the dev's wallet."), the topics mentioned,
+  and what holders explicitly anticipate (never an airdrop). Mentioning a listing or
+  launch alone is not anticipation: denied, cancelled, historical and questioning
+  statements do not become future catalysts. A listing is a bullish hope only when
+  the text explicitly expresses anticipation. Unrecognized substantive text is not
+  dismissed as hype. Answers report the sample read and source-post dates, separate
+  from the age of the fetched copy; claims, coverage and freshness notices take
+  precedence over optional detail when shortening the answer.
+  Replies to the agent's own published coin story reuse its stored exact contract
+  and chain. A bare chain answers an unresolved chain question; it does not replace
+  an already resolved coin. Same-name tokens on one chain get a clear contract
+  request instead of repeating indistinguishable choices. Supplying that contract
+  stays read-only, including after a restart or expired conversation memory; it must
+  never become a coin nomination. Research-answer markers are persisted on the
+  agent's own messages and checked against the reply sender and forum topic.
+  If Fomo cannot supply a stable network identity, the answer states that lookup
+  limitation instead of merging same-address coins or asking for the same chain again.
   Milla, 2026-10-07 (D5): the group model may also put them in its own words
   (`tg-groups/theses.ts`): it reads at most twelve cleaned samples, fenced as data, and
   every phrase it writes is checked by code (no digit outside the coin's name, no number

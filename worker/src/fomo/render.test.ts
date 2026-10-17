@@ -10,7 +10,7 @@ import { admitTgLine } from "../telegram/tg-groups/gate";
 import { readThesisForDigest } from "./digest";
 import { resolveFamilies } from "./dossier";
 
-import { robinhoodChain, tokenIdentity } from "./identity";
+import { chainFromProvider, robinhoodChain, tokenIdentity } from "./identity";
 import type { FomoQuestionPlan } from "./intent";
 import {
   EVIDENCE_HEADER,
@@ -104,7 +104,7 @@ describe("renderEnvelope", () => {
   it("in a group: coin-level aggregates only — no handles, addresses, links, cashtags or quotes", () => {
     const text = renderEnvelope(env("fomo_get_token_theses", "ok", theses(INJECTION)), G);
     // What they argue in fixed words, never their words or counts (plan WP9, D6).
-    assert.ok(text.startsWith("What traders on Fomo are saying about PONS on Robinhood Chain (1 recent thesis from 1 trader):"), text);
+    assert.ok(text.startsWith("What traders on Fomo are saying about PONS on Robinhood Chain (1 thesis read from 1 trader):"), text);
     assert.doesNotMatch(text, /ignore|instructions|evidence famil|Merrymen's reading|supporting|opposing|neutral/);
     assert.ok(!/frankdegods|0x[0-9a-f]{6}|https?:|\$PONS|their words/.test(text), text);
     // The attribution is the owner's; a group has had its post about the source (Milla, 2026-10-07).
@@ -310,6 +310,18 @@ describe("renderEnvelope", () => {
     assert.equal(new Set([empty, failed, unavailable, budget, denied]).size, 5);
   });
 
+  it("an unconfirmed chain is a lookup limitation, not an outage or another chain question", () => {
+    const e = env("fomo_get_token_theses", "unavailable", null, {
+      reason: "token-network-unconfirmed", subject: null,
+      message: "Fomo found this coin but didn't confirm its network identity, so I couldn't safely read its information.",
+    });
+    const group = renderEnvelope(e, G);
+    assert.equal(group, "Fomo couldn't confirm this coin's chain, so I couldn't read its information reliably.");
+    assert.ok(admitTgLine(group, { agentName: "Shogun", kind: "research", recentOwn: [] }).ok);
+    assert.doesNotMatch(group, /couldn't reach|which chain|try again|\?/i);
+    assert.match(renderEnvelope(e, O), /didn't confirm its network identity/);
+  });
+
   it("discloses a stale copy's age and why it was not refreshed, and partial/capped coverage", () => {
     const stale = env("fomo_get_token_theses", "stale", theses(), {
       reason: "server-error",
@@ -336,6 +348,34 @@ describe("renderEnvelope", () => {
     assert.match(owner, /matches more than one: \$PONS on robinhood \(0x39db…0c0d\); \$PONS on solana \(Fu2oZo…pump\)\. Which one do you mean\?/);
     const group = renderEnvelope(e, G);
     assert.equal(group, "PONS matches more than one: PONS on robinhood; PONS on solana. Which one do you mean?");
+  });
+
+  it("explains same-chain ticker collisions instead of asking a group to choose between identical labels", () => {
+    const other = tokenIdentity(robinhoodChain(), `0x${"b2".repeat(20)}`)!;
+    const e = env("fomo_get_token_theses", "needs-clarification", null, {
+      subject: null,
+      candidates: [T, other].map((token) => ({
+        subject: { kind: "token" as const, token, label: { symbol: "BOOMER", name: null } }, match: "symbol",
+      })),
+    });
+    const group = renderEnvelope(e, G);
+    assert.equal(group, "Fomo lists different BOOMER tokens on Robinhood Chain. Reply with the contract address of the one you mean.");
+    assert.doesNotMatch(group, /Which one|0x|matches more than one:/);
+    assert.ok(admitTgLine(group, { agentName: "Shogun", kind: "research", recentOwn: [] }).ok);
+    const owner = renderEnvelope(e, O);
+    assert.match(owner, /0x39db…0c0d/);
+    assert.match(owner, /0xb2b2…b2b2/);
+  });
+
+  it("a shared display label never turns conflicting chain identities into one chain", () => {
+    const unplaced = tokenIdentity(chainFromProvider(8453, "robinhood"), T.address)!;
+    const e = env("fomo_get_token_theses", "needs-clarification", null, {
+      subject: null,
+      candidates: [T, unplaced].map((token) => ({
+        subject: { kind: "token" as const, token, label: { symbol: "BOOMER", name: null } }, match: "symbol",
+      })),
+    });
+    assert.equal(renderEnvelope(e, G), "Fomo found several matches for BOOMER. Reply with its contract address and chain.");
   });
 
   it("research answers separate their reading from the source's words and never claim 'no change' without a comparison", () => {
@@ -747,6 +787,23 @@ describe("a coin with no theses, in a room (review r2)", () => {
     });
   }
 
+  it("an incomplete read with no usable posts and no total is never presented as an empty record", () => {
+    for (const pageRows of [0, null, 25]) for (const cached of [false, true]) {
+      const base = env("fomo_get_token_theses", "partial", { ...none, pageRows });
+      const e: typeof base = { ...base,
+        coverage: { ...base.coverage, providerTotal: null, itemsReturned: 0, requested: cached ? { window: "24h" } : {}, missing: ["some posts"] },
+        freshness: { ...base.freshness, servedFrom: cached ? "cache" as const : "live" as const, cacheAgeMs: cached ? 180_000 : 0 },
+      };
+      for (const opts of [G, O]) {
+        const text = renderEnvelope(e, opts);
+        assert.match(text, /I couldn't get a complete thesis read for .*; no usable posts were returned\./);
+        assert.doesNotMatch(text, /No theses were returned|That is .*record|nobody has a view/);
+        if (cached) assert.match(text, /in that window/);
+        if (opts === G) for (const line of text.split("\n")) assert.ok(admitTgLine(line, research).ok, line);
+      }
+    }
+  });
+
   it("an empty read the provider marks not available, or one under a count it still holds, is never 'no theses' (the AUTON incident, 2026-10-08)", () => {
     const cov = (providerTotal: number | null) => ({ coverage: { requested: {}, achieved: {}, pagesRequested: 1, pagesReturned: 1, itemsReturned: 0, duplicatesRemoved: 0, providerTotal, capped: false, missing: [], notes: [] } });
     const unavailable = env("fomo_get_token_theses", "empty", { ...none, available: false, pageRows: 0 }, cov(null));
@@ -828,14 +885,14 @@ describe("a coin's theses in a room: what they argue, not counts (plan WP9 P1, D
   it("the rich fixture: for, against, what it is about, how much was read; every line through the gate as research", () => {
     const text = renderEnvelope(RICH, G);
     const lines = text.split("\n");
-    assert.equal(lines[0], "What traders on Fomo are saying about PONS on Robinhood Chain (25 recent theses from 20 traders):");
+    assert.equal(lines[0], "What traders on Fomo are saying about PONS on Robinhood Chain (25 theses read from 20 traders):");
     assert.match(lines[1]!, /^For it: it's still early, a strong community/);
     assert.match(lines[2]!, /^Against it: .*fears it could collapse/);
-    assert.match(lines[3]!, /^Most of it is about /);
-    assert.equal(lines[lines.length - 1], "Their claims, not facts; newest 25 of 41; the dev's own posts left out.");
+    assert.match(lines[3]!, /^Topics mentioned: /);
+    assert.equal(lines[lines.length - 1], "Their claims, not facts; read 25 of 41; the dev's own posts left out; posts: Oct 4, 2026 UTC.");
     assert.ok(lines.length <= 5, "room for the copy's age under the room's six-line cap");
     assert.doesNotMatch(text, FORBIDDEN);
-    assert.doesNotMatch(text, /More records exist/, "said once, as 'newest 25 of 41'");
+    assert.doesNotMatch(text, /More records exist/, "said once, as 'read 25 of 41'");
     for (const l of lines) {
       const v = admitTgLine(l, { agentName: "Shogun", kind: "research", recentOwn: [] });
       assert.ok(v.ok, `${l}: ${v.ok ? "" : v.reason}`);
@@ -851,11 +908,75 @@ describe("a coin's theses in a room: what they argue, not counts (plan WP9 P1, D
     }
   });
 
-  it("all hype and no cue says so, instead of '0 supporting, 0 opposing, 25 neutral'", () => {
+  it("unrecognized arguments are not characterized as hype instead of '0 supporting, 0 opposing, 25 neutral'", () => {
     const hype = rich.theses.slice(0, 2);
     const text = renderEnvelope(env("fomo_get_token_theses", "ok", richData(hype)), G);
-    assert.match(text, /\nMostly hype, with no case for or against that I can pick out\.\n/);
+    assert.match(text, /\nI couldn't reliably summarize the arguments in these posts\.\n/);
     assert.doesNotMatch(text, FORBIDDEN);
+  });
+
+  it("meaningful unfamiliar arguments get an honest summary limitation", () => {
+    const data = theses("The bridge audit uncovered a validator key compromise affecting redemption guarantees.");
+    const text = renderEnvelope(env("fomo_get_token_theses", "ok", data), G);
+    assert.match(text, /I couldn't reliably summarize the arguments in these posts\./);
+    assert.doesNotMatch(text, /hype|no case for or against|Most of it/);
+  });
+
+  it("freshly retrieved month-old posts show their source dates instead of claiming recency", () => {
+    const data = theses("Strong community and still early.");
+    data.theses[0]!.postedAt = NOW - 30 * 86_400_000;
+    const text = renderEnvelope(env("fomo_get_token_theses", "ok", data), G);
+    assert.match(text, /1 thesis read from 1 trader/);
+    assert.match(text, /posts: Sep 4, 2026 UTC/);
+    assert.doesNotMatch(text, /recent|newest|copy fetched|Data age/);
+  });
+
+  it("a 600-character digest reserves source dates, claims, coverage and stale-copy age before detail", () => {
+    const data = richData(rich.theses);
+    data.label = { symbol: "BOOMERLONGNAMETWENTYY", name: null };
+    data.theses = Array.from({ length: 25 }, (_,i) => ({ ...data.theses[0]!,
+      author: { userId: `u${i}`, handle: null }, family: `f${i}`, isDev: i === 24,
+      postedAt: NOW - (30 + i) * 86_400_000,
+      cues: [
+        { label: "strong community", stance: "supporting" as const }, { label: "accumulating", stance: "supporting" as const },
+        { label: "undervalued", stance: "supporting" as const }, { label: "breakout", stance: "supporting" as const },
+        { label: "exit liquidity", stance: "opposing" as const }, { label: "dev sold", stance: "opposing" as const }, { label: "honeypot", stance: "opposing" as const },
+      ], topics: ["supply", "momentum", "narrative"], waitingOn: ["partnership", "announcement"],
+    }));
+    const base = env("fomo_get_token_theses", "partial", data);
+    const e = { ...base,
+      freshness: { ...base.freshness, servedFrom: "stale-cache" as const, cacheAgeMs: 7_200_000, lastRefreshOutcome: "skipped-budget" as const },
+      coverage: { ...base.coverage, providerTotal: 4190, capped: true, missing: ["older posts"] },
+    };
+    const options = { ...G, maxChars: 600 };
+    const full = renderEnvelope(e, G);
+    assert.ok(full.length > 600, "the uncapped answer exercises shortening");
+    for (const text of [renderEnvelope(e, options), renderAnswer([e], null, options)]) {
+      assert.ok(text.length <= 600, text);
+      assert.match(text, /Their claims, not facts; read 25 of 4190/);
+      assert.match(text, /posts: Aug 11 to Sep 4, 2026 UTC/);
+      assert.match(text, /Data age: 2h/);
+      assert.match(text, /Not read: older posts/);
+      assert.match(text, /BOOMERLONGNAMETWENTYY on Robinhood Chain/);
+      assert.equal(text.includes("For it:"), text.includes("Against it:"), "a shortened mixed read preserves both sides or neither");
+      for (const line of text.split("\n")) assert.ok(admitTgLine(line, { agentName: "Shogun", kind: "research", recentOwn: [] }).ok, line);
+    }
+    for (const text of [renderEnvelope(e, { ...G, maxChars: 80 }), renderAnswer([e, e, e], null, { ...G, maxChars: 80 })]) {
+      assert.equal(text, "I couldn't fit this read and its limitations into one reply.");
+      assert.ok(text.length <= 80);
+      assert.doesNotMatch(text, /For it:|recent|Data age:|Their claims/);
+    }
+  });
+
+  it("a cap that fits only the bullish half omits both sides of a mixed read", () => {
+    const full = renderEnvelope(RICH, G).split("\n");
+    const maxChars = [full[0], full[1], full.at(-1)].join("\n").length;
+    for (const text of [renderEnvelope(RICH, { ...G, maxChars }), renderAnswer([RICH], null, { ...G, maxChars })]) {
+      assert.match(text, /PONS on Robinhood Chain/);
+      assert.match(text, /Their claims, not facts/);
+      assert.doesNotMatch(text, /For it:|Against it:/);
+      assert.ok(text.length <= maxChars);
+    }
   });
 
   it("every shape the room's digest can take passes the gate as research", () => {

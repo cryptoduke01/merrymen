@@ -205,6 +205,49 @@ const count = (raw: DatabaseSync, table: string): number => Number((raw.prepare(
 const NO_IDENTITY = [/@[A-Za-z0-9_]{2,}/, /0x[0-9a-fA-F]{6,}/, /https?:\/\//i, /\bfomo\.family\b/i, /\$[A-Za-z]/, /frankdegods|CryptoKaleo|0xdetweiler/i, /their words/];
 
 describe("createTgFomoPort", () => {
+  it("a reply to a published coin story carries its exact contract and chain past unrelated room memory", async () => {
+    const s = await setup();
+    const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
+    await port.ask({ text: "what is @CryptoKaleo holding on fomo?", chatId: GROUP });
+    s.calls.length = 0;
+    const address = "0x39dbed3a00000000000000000000000000000c0d";
+    const answer = await port.ask({ text: "what are fomo thesis saying about it", chatId: GROUP, replyCoin: { address, chain: "robinhood", symbol: "PONS" } });
+    assert.ok(answer && !answer.deflect);
+    assert.deepEqual(s.calls.map((c) => [c.tool, c.args]), [["fomo_get_token_theses", { token: address, chain: "robinhood" }]]);
+    assert.match(answer.text, /PONS on Robinhood Chain/);
+    assert.doesNotMatch(answer.text, /which chain|which coin|CryptoKaleo/i);
+    for (const re of NO_IDENTITY) assert.doesNotMatch(answer.text, re);
+  });
+
+  it("a routed same-symbol thesis ask uses the replied contract instead of re-resolving its ticker", async () => {
+    const s = await setup();
+    const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
+    const address = "0x39dbed3a00000000000000000000000000000c0d";
+    await port.ask({ text: "what are fomo theses saying about pons", chatId: GROUP,
+      request: { kind: "coin", symbol: "PONS", aspect: "theses" }, replyCoin: { address, chain: "robinhood", symbol: "PONS" } });
+    assert.deepEqual(s.calls.map((c) => [c.tool, c.args]), [["fomo_get_token_theses", { token: address, chain: "robinhood" }]]);
+  });
+
+  it("binding a coin pointer keeps the question's explicit time window", async () => {
+    const s = await setup();
+    const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
+    const address = "0x39dbed3a00000000000000000000000000000c0d";
+    await port.ask({ text: "what are the theses this week about it on fomo", chatId: GROUP, replyCoin: { address, chain: "robinhood", symbol: "PONS" } });
+    assert.deepEqual(s.calls.map((c) => [c.tool, c.args]), [["fomo_get_token_theses", { token: address, chain: "robinhood", window: "7d" }]]);
+  });
+
+  it("reply context never replaces another explicit coin, chain or trader", async () => {
+    const address = "0x39dbed3a00000000000000000000000000000c0d";
+    for (const text of ["what are the theses on $OTHER on fomo", "what are fomo theses saying about it on solana", "what are trader CryptoKaleo's theses on fomo", "who is buying other on fomo"]) {
+      const plain = await setup();
+      const replied = await setup();
+      const a = await createTgFomoPort(() => plain.broker, { now: () => NOW }).ask({ text, chatId: GROUP });
+      const b = await createTgFomoPort(() => replied.broker, { now: () => NOW }).ask({ text, chatId: GROUP, replyCoin: { address, chain: "robinhood", symbol: "PONS" } });
+      assert.deepEqual(replied.calls.map(({ tool, args }) => ({ tool, args })), plain.calls.map(({ tool, args }) => ({ tool, args })), text);
+      assert.equal(b?.text, a?.text, text);
+    }
+  });
+
   it("a group research question is a registered read with the group audience, the trusted chat id and a per-room key", async () => {
     const s = await setup();
     const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
@@ -221,7 +264,7 @@ describe("createTgFomoPort", () => {
     assert.deepEqual([...new Set(s.tenants)], [TENANT], "the tenant is the broker's, never the text's");
     for (const re of NO_IDENTITY) assert.doesNotMatch(a.text, re);
     // What they argue, never counts read as a verdict (plan WP9, D6).
-    assert.match(a.text, /^What traders on Fomo are saying about PONS on Robinhood Chain \(3 recent theses from 3 traders\):/);
+    assert.match(a.text, /^What traders on Fomo are saying about PONS on Robinhood Chain \(3 theses read from 3 traders\):/);
     assert.doesNotMatch(a.text, /evidence famil|Merrymen's reading|supporting|opposing|neutral/);
     assert.doesNotMatch(a.text, /Source:|fomoapi|not a (?:skill measure|measure of skill)/, "a group answer carries no source line (Milla, 2026-10-07)");
     assert.ok(!a.text.includes(FOMO_ATTRIBUTION));
@@ -1063,10 +1106,10 @@ describe("a coin's theses: the code digest, and material for the group model's p
     const a = await port.ask({ text: "what are people saying about $PONS on fomo?", chatId: GROUP });
     assert.ok(a && !a.deflect);
     const lines = a.text.split("\n");
-    assert.equal(lines[0], "What traders on Fomo are saying about PONS on Robinhood Chain (25 recent theses from 20 traders):");
+    assert.equal(lines[0], "What traders on Fomo are saying about PONS on Robinhood Chain (25 theses read from 20 traders):");
     assert.match(a.text, /\nFor it: it's still early, a strong community/);
     assert.match(a.text, /\nAgainst it: .*fears it could collapse/);
-    assert.match(a.text, /\nTheir claims, not facts; newest 25 of 41; the dev's own posts left out\./);
+    assert.match(a.text, /\nTheir claims, not facts; read 25 of 41; the dev's own posts left out; posts: Oct 4, 2026 UTC\./);
     assert.doesNotMatch(a.text, FORBIDDEN);
     assert.doesNotMatch(a.text, /evidence famil|Merrymen's reading|supporting|opposing|neutral/);
     for (const l of lines) assert.ok(admitTgLine(l, { agentName: "Pine", kind: "research", recentOwn: [] }).ok, l);
@@ -1457,7 +1500,7 @@ describe("a group research question, end to end", () => {
     await groups.drain();
     const first = tg.texts(GROUP);
     assert.equal(first.length, 1);
-    assert.match(first[0]!, /3 recent theses/);
+    assert.match(first[0]!, /3 theses read/);
     assert.doesNotMatch(first[0]!, /Source:|fomoapi|not a (?:skill measure|measure of skill)/);
     for (const re of NO_IDENTITY) assert.doesNotMatch(first[0]!, re);
     assert.equal(s.calls[0]!.opts.audience, "group");
@@ -1484,7 +1527,7 @@ describe("a group research question, end to end", () => {
       const out = tg.texts(GROUP);
       assert.equal(out.length, before + 1, line);
       assert.notEqual(out[out.length - 1], TG_FOMO_DEFLECTION, `${line}: the bot's handle was read as a trader`);
-      assert.match(out[out.length - 1]!, /3 recent theses/, line);
+      assert.match(out[out.length - 1]!, /3 theses read/, line);
       assert.equal(s.calls.length, looked + 1, line);
       assert.equal(s.calls[s.calls.length - 1]!.tool, "fomo_get_token_theses", line);
     }
@@ -2021,6 +2064,7 @@ describe("live 2026-10-07, 23:01-23:03 replayed through the real handler, port, 
     const stateRef: StateRef = { get: () => tstate, set: (x) => { tstate = x; } };
     const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
     const picks: Array<Record<string, unknown>> = [];
+    const coinActions: string[] = [];
     const replies: string[] = [];
     const routePrompts: string[] = [];
     globalThis.fetch = (async (_url: string, init: { body: string }) => {
@@ -2038,7 +2082,7 @@ describe("live 2026-10-07, 23:01-23:03 replayed through the real handler, port, 
       store,
       getCfg: () => ({ telegramGroupsEnabled: true, telegramGroupCoinsEnabled: true, telegramGroupsChattiness: "normal", telegramAllowlist: [OWNER_ID] }) as unknown as ResolvedConfig,
       stateRef,
-      port: () => coins,
+      port: () => ({ ...coins, look: async (address) => { coinActions.push("look"); return coins.look(address); }, nominate: (n) => { coinActions.push("nominate"); return coins.nominate(n); } }),
       fomo: () => port,
       self: () => SHOGUN,
       privacyOff: () => false,
@@ -2072,8 +2116,76 @@ describe("live 2026-10-07, 23:01-23:03 replayed through the real handler, port, 
       const out = tg.texts(GROUP).slice(before);
       return out.join("\n---\n");
     };
-    return { s, tg, picks, replies, routePrompts, logs, lastOwn, say };
+    return { s, tg, picks, replies, routePrompts, logs, lastOwn, say, coinActions };
   }
+
+  it("the story reply's singular thesis question is answered for its stored contract without another clarification", async () => {
+    const w = await world();
+    const address = "0x39dbed3a00000000000000000000000000000c0d";
+    store.addLine(GROUP, { messageId: 88, fromId: SHOGUN.id, name: "Shogun", text: "A public chart interpretation", atMs: w.s.clock.now, own: true, deskAsk: { kind: "coin", address } });
+    const said = await w.say("what are fomo thesis saying about it", { id: 88, text: "PONS\n\nPublished story: a coin story" });
+    assert.match(said, /PONS on Robinhood Chain/);
+    assert.doesNotMatch(said, /which chain|which coin/i);
+    assert.deepEqual(w.s.calls.map((c) => [c.tool, c.args]), [["fomo_get_token_theses", { token: address, chain: "robinhood" }]]);
+    assert.equal(w.routePrompts.length, 0);
+    assert.deepEqual(w.coinActions, []);
+  });
+
+  it("Telegram shortening keeps a thesis digest's claims, post dates, stale-copy age and partial coverage", async () => {
+    const w = await world({ theses: () => fixture("theses-token-rich") });
+    const original = w.s.broker.call;
+    w.s.broker.call = async (tool, args, opts) => {
+      const result = await original(tool, args, opts);
+      if (tool !== "fomo_get_token_theses") return result;
+      return { ...result, status: "partial", freshness: { ...result.freshness, servedFrom: "stale-cache", cacheAgeMs: 7_200_000, lastRefreshOutcome: "failed" },
+        coverage: { ...result.coverage, missing: ["older posts"] } };
+    };
+    const said = await w.say("shogun what are the theses on $PONS on fomo?");
+    assert.ok(said.split("\n").length <= 6, said);
+    assert.ok(said.length <= 700, said);
+    assert.match(said, /Their claims, not facts; read 25 of 41/);
+    assert.match(said, /posts: Oct 4, 2026 UTC/);
+    assert.match(said, /Data age: 2h/);
+    assert.match(said, /Not read: older posts/);
+    assert.match(said, /For it: .*Against it:/);
+    assert.doesNotMatch(said, /recent theses|newest 25/);
+    assert.deepEqual(w.coinActions, []);
+  });
+
+  for (const explicitChain of [false, true]) it(`a chain then contract answering a thesis clarification stay read-only research (explicit chain: ${explicitChain})`, async () => {
+    const base = fixture("tokens-search");
+    const first = (base.tokens as Rec[])[0]!;
+    const w = await world({ tokensSearch: () => ({ tokens: [first,
+      { ...first, address: "0x1111111111111111111111111111111111111111" },
+      { ...first, address: "AnsemAnsemAnsemAnsemAnsemAnsemAnsemAnsempump", networkId: 1399811149 },
+    ] }) });
+    const ambiguous = await w.say("shogun what are the theses on $PONS on fomo?");
+    assert.match(ambiguous, /more than one/i);
+    const narrowed = await w.say("robinhood", w.lastOwn());
+    assert.match(narrowed, /contract address/i);
+    assert.equal(w.s.calls.at(-1)?.args.chain, "robinhood");
+    const address = "0x39dbed3a00000000000000000000000000000c0d";
+    const answered = await w.say(`${address}${explicitChain ? " on robinhood" : ""}`, w.lastOwn());
+    assert.match(answered, /PONS on Robinhood Chain/);
+    assert.deepEqual(w.s.calls.at(-1)?.args, { token: address, chain: "robinhood" });
+    assert.equal(w.routePrompts.length, 0, "the deterministic planner handles both selections");
+    assert.deepEqual(w.coinActions, [], "a contract requested for research cannot nominate a trade");
+  });
+
+  for (const explicitChain of [false, true]) it(`a Solana mint answering a thesis clarification keeps its case and remains research (explicit chain: ${explicitChain})`, async () => {
+    const mint = "AnsemAnsemAnsemAnsemAnsemAnsemAnsemAnsempump";
+    const base = fixture("tokens-search");
+    const first = (base.tokens as Rec[])[1]!;
+    const w = await world({ tokensSearch: () => ({ tokens: [first,
+      { ...first, address: "Fu2oZoGxFtCDp29NKA4A89xcn255khq9xbxG7Mmtpump" },
+    ] }) });
+    const ambiguous = await w.say("shogun what are the theses on $ANSEM on solana on fomo?");
+    assert.match(ambiguous, /contract address/i);
+    await w.say(`${mint}${explicitChain ? " on solana" : ""}`, w.lastOwn());
+    assert.deepEqual(w.s.calls.at(-1)?.args, { token: mint, chain: "solana" });
+    assert.equal(w.routePrompts.length, 0);
+    assert.deepEqual(w.coinActions, []);
+  });
 
   it("'what about robinhood coins on fomo' under the board is the Robinhood Chain board itself: no offer, no routing call", async () => {
     const w = await world();
@@ -2742,7 +2854,7 @@ describe("the AUTON quotes, facts and rug banter (live 2026-10-09)", () => {
       // 2. "what are people saying about it on thesis on fomo" under it: the digest, one page read.
       const two = (await r.say("what are people saying about it on thesis on fomo", { under: r.lastOwn(), advanceMs: 30_000 })).join("\n");
       assert.match(two, /^What traders on Fomo are saying about AUTON on Solana \(/, two);
-      assert.match(two, /Their claims, not facts; newest \d+ of 4199/, two);
+      assert.match(two, /Their claims, not facts; read \d+ of 4199/, two);
       assert.equal(r.theses(), 1);
       const digest = r.lastOwn();
 

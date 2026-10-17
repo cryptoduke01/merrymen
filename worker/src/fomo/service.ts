@@ -57,6 +57,7 @@ import {
   durationText,
   eventTime,
   FEED_FLOOR_NOTE,
+  INCOMPLETE_THESES_PREFIX,
   parseWindowMs,
   planThesisFetch,
   readThesisText,
@@ -953,7 +954,8 @@ export function jobStatusAt(status: string, deadlineMs: number, now: number): st
 /** What a dossier's change check covered: two revisions are compared only over the same scope (features.ts changeSummary). */
 function changeScopeOf(d: CoinDossier): string {
   const stored = d.coverage.limitations.some((l) => l.startsWith(STALE_SNAPSHOT_PREFIX));
-  return `${d.coverage.windowRequested}|thesis-pages:${d.coverage.pagesReturned}|${stored ? "stored-copy" : "live"}`;
+  const incomplete = d.coverage.limitations.some((l) => l.startsWith(INCOMPLETE_THESES_PREFIX));
+  return `${d.coverage.windowRequested}|thesis-pages:${d.coverage.pagesReturned}|${stored ? "stored-copy" : "live"}|${incomplete ? "incomplete-theses" : "complete-theses"}`;
 }
 
 // ── The service ──────────────────────────────────────────────────────────
@@ -1533,13 +1535,16 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
     }),
     thesesByToken: (t: TokenIdentity, pages: number): ReadSpec<ThesesPage> => {
       const network = thesisNetworkOf(t);
+      // `pages` controls upstream fetch depth; `limit` separately caps the
+      // returned rows (default 50). Both must grow for a wider read to arrive.
+      const limit = Math.min(pages * THESIS_PAGE_SIZE, ROUTE_COST.thesesByToken.maxLimit);
       return {
         name: "theses",
         route: "thesesByToken",
-        params: { address: t.address, network, pages },
+        params: { address: t.address, network, pages, limit, sort: "recent" },
         pages,
         cls: "theses",
-        call: (c) => c.thesesByToken(t.address, { network, ...(pages > 1 ? { pages } : {}) }),
+        call: (c) => c.thesesByToken(t.address, { network, limit, sort: "recent", ...(pages > 1 ? { pages } : {}) }),
         revive: R.theses,
         empty: (d) => d.rows.length === 0,
       };
@@ -1547,9 +1552,9 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
     thesesByUser: (userId: string, limit: number): ReadSpec<ThesesPage> => ({
       name: "theses",
       route: "thesesByUser",
-      params: { userId, limit },
+      params: { userId, limit, sort: "recent" },
       cls: "theses",
-      call: (c) => c.thesesByUser(userId, { limit }),
+      call: (c) => c.thesesByUser(userId, { limit, sort: "recent" }),
       revive: R.theses,
       // A trader's empty page is as short-lived as a coin's (review on #306).
       empty: (d) => d.rows.length === 0,
@@ -1622,9 +1627,12 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
       if (!t) {
         return { ok: false, status: "needs-clarification", reason: "address-chain-mismatch", message: `That address can't be on ${chain.slug ?? "that chain"}. Which chain is it on?`, candidates: [] };
       }
-      return { ok: true, token: t, label: await knownLabel(t), match: "exact-address-on-chain", marketCapUsd: null };
+      // A named network without a documented number still needs placement.
+      // Keeping the search row's numeric identity lets later evidence match it
+      // without guessing a number or merging the same contract across chains.
+      if (chain.networkId !== null) return { ok: true, token: t, label: await knownLabel(t), match: "exact-address-on-chain", marketCapUsd: null };
     }
-    // An address with no chain, or a ticker: ask the provider where it lives.
+    // An address without a numbered chain, or a ticker: ask the provider where it lives.
     // Search answers are identity data and cached for an hour, shared by every caller.
     // Resolution is identity, not the answer's retrieval: it is metered but not counted as a page of the answer.
     let searchMode: FreshnessMode = mode === "force-refresh" ? "prefer-fresh" : mode;
@@ -1638,6 +1646,13 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
       ref.kind === "address"
         ? rows.filter((r) => sameAddress(r.token.address, ref.value))
         : rows.filter((r) => (r.label.symbol ?? "").replace(/^\$/, "").toUpperCase() === ref.value);
+    // Unnumbered identities share the legacy `?:address` key across chains.
+    // They must not become a resolved coin or a shared dossier, even when one
+    // row happens to be last in the search list. Keep numbered matches strict.
+    const scopedMatches = chain ? matches.filter((m) => chainMatches(chain, m.token)) : matches;
+    if (scopedMatches.some((m) => m.token.chain.networkId === null)) {
+      return { ok: false, status: "unavailable", reason: "token-network-unconfirmed", message: "Fomo found this coin but didn't confirm its network identity, so I couldn't safely read its information.", candidates: [] };
+    }
     const unique = [...new Map(matches.map((m) => [m.token.key, m])).values()];
     const onChain = chain ? unique.filter((m) => chainMatches(chain, m.token)) : unique;
     if (onChain.length === 1) {
@@ -1660,7 +1675,7 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
       };
     }
     if (ref.kind === "address") {
-      return { ok: false, status: "not-found", reason: "address-not-placed", message: "I could not place that address on any chain Fomo reports. Which chain is it on?", candidates: [] };
+      return { ok: false, status: "not-found", reason: "address-not-placed", message: chain ? `I couldn't find this contract on ${chain.slug} in Fomo's data.` : "I could not place that address on any chain Fomo reports. Which chain is it on?", candidates: [] };
     }
     if (chain && unique.length > 0) {
       return { ok: false, status: "not-found", reason: "symbol-not-on-chain", message: `No coin with the ticker ${ref.value} was found on ${chain.slug}.`, candidates: [] };
@@ -1861,7 +1876,6 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
       const r = await resolveToken(ic.cc, a, args.query as TokenRef, args.chain, "prefer-fresh");
       if (!r.ok) return fromFail(ic, a, "profile", "prefer-fresh", r);
       a.achieved = { chain: r.token.chain.slug, networkId: r.token.chain.networkId };
-      if (r.token.chain.networkId === null) a.note("The provider gave no network id for this coin; it is never treated as executable.");
       return finish(ic, a, {
         cls: "profile",
         mode: "prefer-fresh",
@@ -2217,13 +2231,14 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
     // An EMPTY first page is never "capped": it tells nothing about pages 2-3, and the provider's
     // `pages` reads 1..N again, so a page that came back empty under a count would buy a 3-page
     // read that comes back empty too (review on #306).
-    const capped = page.rows.length > 0 && (page.rows.length >= THESIS_PAGE_SIZE || (total !== null && total > page.rows.length));
-    const firstStances = page.rows.map((x) => readThesisText(x.text).stance);
+    const placed = page.rows.filter((x) => x.token?.key === t.key);
+    const capped = placed.length > 0 && (page.rows.length >= THESIS_PAGE_SIZE || (total !== null && total > page.rows.length));
+    const firstStances = placed.map((x) => readThesisText(x.text).stance);
     const plan = planThesisFetch(
       await previousDossier(t),
       {
         capped,
-        uniqueAuthors: new Set(page.rows.map((x) => x.author.userId)).size,
+        uniqueAuthors: new Set(placed.map((x) => x.author.userId)).size,
         providerTotal: total,
         contested: firstStances.includes("supporting") && firstStances.includes("opposing") ? true : undefined,
       },
@@ -2299,11 +2314,14 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
         const t = token;
         // Robinhood is fetched without a network parameter (the provider's enum lacks it), so the rows decide.
         const off = rows.filter((x) => x.token !== null && x.token.key !== t.key).length;
-        rows = rows.filter((x) => x.token === null || x.token.key === t.key);
+        const unplaced = rows.filter((x) => x.token === null).length;
+        rows = rows.filter((x) => x.token?.key === t.key);
         if (off > 0) {
           honoured = false;
           a.note(`${off} thesis row(s) were about a coin on another chain and were removed.`);
         }
+        if (unplaced > 0) a.note(`${unplaced} thesis row(s) could not be placed on this coin and were removed.`);
+        if (off > 0 || unplaced > 0) a.partial = true;
       }
       if (trader) {
         const u = trader.userId;
@@ -2313,6 +2331,7 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
       if (winMs !== null) rows = rows.filter((x) => x.postedAt !== null && x.postedAt >= ic.now - winMs);
       // A stored thesis snapshot (page.stale) is labelled, with its age, by finish() from the section's provider flags.
       if (page.partial === true) a.partial = true;
+      if (page.dropped > 0) a.note(`${page.dropped} invalid thesis row(s) were removed; this read is incomplete.`);
       if (page.totalAvailable !== null && page.totalAvailable > rows.length && !a.capped && !trader) a.capped = true;
     }
     rows.sort((x, y) => (y.postedAt ?? 0) - (x.postedAt ?? 0));
@@ -2787,6 +2806,9 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
     label: TokenLabel,
     o: { depth: "quick" | "standard" | "deep"; mode: FreshnessMode },
   ): Promise<RefreshOutcome> {
+    if (token.chain.networkId === null) {
+      return { dossier: null, changed: false, status: "unavailable", reason: "token-network-unconfirmed", checked: false, usage: { providerCalls: 0, cacheHits: 0, creditsCharged: 0 }, notes: ["Fomo has not confirmed this coin's network identity; its research cannot safely be retrieved yet."] };
+    }
     const before = a.sections.length;
     const notes: string[] = [];
     const say = (n: string): void => {
@@ -2817,7 +2839,7 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
      * or stored as a baseline for later "changes since" (the AUTON incident,
      * 2026-10-08; review on #306). The feed and stats are not read for it.
      */
-    if (th.rows.length === 0 && (page.available === false || (page.totalAvailable ?? 0) > 0)) {
+    if (!th.rows.some((x) => x.token?.key === token.key) && (page.available === false || (page.totalAvailable ?? 0) > 0 || page.partial === true || th.rows.length > 0)) {
       say("The provider didn't return the theses just now.");
       return { dossier: previous, changed: false, status: previous ? "stale" : "partial", reason: "theses-not-ready", checked: false, usage: usageNow(), notes };
     }
@@ -2839,7 +2861,7 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
      * back theses it no longer serves. Never more is carried than the provider
      * now says exist, and a carry makes the refresh "stale" ("carried-pages").
      */
-    let carried: { pages: number; retrievedAt: number } | null = null;
+    let carried: { pages: number; retrievedAt: number; partial: boolean } | null = null;
     const deeperPages = previous?.coverage.pagesReturned ?? 0;
     const freshTotal = page.totalAvailable;
     if (th.capped && th.pages < deeperPages && (freshTotal === null || freshTotal > th.rows.length)) {
@@ -2850,7 +2872,7 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
         const rows = [...th.rows, ...(freshTotal === null ? extra : extra.slice(0, Math.max(0, freshTotal - th.rows.length)))];
         const total = freshTotal ?? deeper.page.totalAvailable;
         th = { ...th, rows, pages: deeperPages, capped: rows.length >= deeperPages * THESIS_PAGE_SIZE || (total !== null && total > rows.length) };
-        carried = { pages: deeperPages, retrievedAt: deeper.retrievedAt };
+        carried = { pages: deeperPages, retrievedAt: deeper.retrievedAt, partial: deeper.page.partial === true };
         say(`Thesis pages 2-${deeperPages} are carried from a deeper read ${agoText(cc.now - deeper.retrievedAt)}; only the first page was read again.`);
       }
     }
@@ -2908,6 +2930,8 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
     }
     const cohort = await cohortSnapshot(cc.now);
     const events = dedupeEvents([...local, ...rest]).events;
+    const thesisIncomplete = page.partial === true || carried?.partial === true || th.rows.some((x) => x.token?.key !== token.key);
+    if (thesisIncomplete) say("Some thesis rows were missing or could not be placed on this coin; this read is incomplete.");
     const built = buildDossier({
       token,
       label: fillLabel(label, th.rows.map((x) => ({ token: x.token, label: x.tokenLabel })), token.key),
@@ -2921,6 +2945,7 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
         stale: carried ? true : page.stale,
         ageSeconds: carried ? Math.max(0, Math.round((cc.now - carried.retrievedAt) / 1000)) : page.ageSeconds,
         chainFilterHonoured: page.chainFilterHonoured,
+        partial: thesisIncomplete,
       },
       events,
       cohortUserIds: cohort.ids,
@@ -2954,13 +2979,13 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
     // Carried pages are a stored copy, not this read: the refresh says so ("carried-pages"), never ok-fresh.
     // Added last, so a failed or stale read above still names the reason.
     if (carried) a.add({ ...localSection("carried-theses", true, carried.retrievedAt, "stale-cache"), status: "stale", reason: "carried-pages" });
-    const anyMissing = a.sections.slice(before).some((s) => s.data === null) || activityRead === false || activityIncomplete;
+    const anyMissing = a.sections.slice(before).some((s) => s.data === null) || activityRead === false || activityIncomplete || thesisIncomplete;
     const anyStale = a.sections.slice(before).some((s) => s.status === "stale");
     const status: ResultStatus = anyMissing ? "partial" : anyStale ? "stale" : "ok";
-    const reason = status === "ok" ? null : a.sections.slice(before).find((s) => s.status !== "ok")?.reason ?? (activityIncomplete ? "activity-incomplete" : null);
+    const reason = status === "ok" ? null : a.sections.slice(before).find((s) => s.status !== "ok")?.reason ?? (activityIncomplete ? "activity-incomplete" : thesisIncomplete ? "theses-incomplete" : null);
     // "Checked" supports a change claim (or "no change"): every input was read just now, completely. Carried pages
     // are not re-read, but they make this a stored-copy scope, which compares only with another (changeScopeOf).
-    const checked = thesisLive && activityRead === true && !activityIncomplete;
+    const checked = thesisLive && activityRead === true && !activityIncomplete && !thesisIncomplete;
     return { dossier, changed, status, reason, checked, usage: usageNow(), notes };
   }
 

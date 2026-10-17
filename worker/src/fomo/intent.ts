@@ -1342,6 +1342,20 @@ export function classifyFomoQuestion(text: string, ctx: FomoQuestionContext): Fo
   const cohort = COHORT.test(c);
   const memTokens = rememberedSubjects(memory, "token", ctx.now);
   const memTraders = rememberedSubjects(memory, "trader", ctx.now);
+  // After an unplaced coin read, "robinhood" is enough to answer the chain
+  // question. Limit this to one fresh, chain-less subject and a read intent:
+  // a chain word alone must never resume a watch or switch a resolved coin.
+  const pendingToken = memTokens.length === 1 && memTokens[0]!.kind === "token" ? memTokens[0]! : null;
+  if (ws.length === 1 && ex.tokens.length === 0 && ex.traders.length === 0
+    && /^[a-z]+$/i.test(ws[0]!.bare) && pendingToken && !pendingToken.chain
+    && memory?.lastIntent && SUBJECT_NEEDS[memory.lastIntent].token === 1
+    && memory.lastIntent !== "watch" && memory.lastIntent !== "unwatch") {
+    const slug = chainSlug(c);
+    if (slug) {
+      ex.chains = [slug];
+      ex.consumed.add(0);
+    }
+  }
   const deixisText = c.replace(TIME_PHRASES, " ");
   const tokenDeixis = TOKEN_DEIXIS.test(deixisText);
   const tokenDeixisWeak = TOKEN_DEIXIS_WEAK.test(deixisText);
@@ -1537,6 +1551,18 @@ export function classifyFomoQuestion(text: string, ctx: FomoQuestionContext): Fo
   }
 
   const need = SUBJECT_NEEDS[intent];
+
+  // A bare address after a same-chain ticker ambiguity completes that read.
+  // Keep the chain the user just chose, but never carry it across a correction,
+  // an explicit new question/chain, a resolved coin, or a mutation.
+  const suppliedToken = explicitTokens.length === 1 ? explicitTokens[0]! : null;
+  if (fromMemory && pureFollowUp && !detected && !correction && !mutation
+    && need.token === 1 && ex.chains.length === 0
+    && suppliedToken?.address && !suppliedToken.chain
+    && pendingToken?.symbol && pendingToken.chain && !pendingToken.address) {
+    suppliedToken.chain = pendingToken.chain;
+    ex.chains = [pendingToken.chain];
+  }
 
   // Two chains, or an address that cannot live on the named chain, change
   // which coin the answer is about.
