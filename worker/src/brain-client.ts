@@ -24,8 +24,7 @@
  * — there is no code path from here to any of them, and that absence is the
  * shadow-mode guarantee rather than a flag someone could flip.
  */
-import type { PortfolioSnapshot } from "../../packages/core/src/index";
-import { onchainIdIn } from "../../packages/core/src/ids";
+import { onchainIdIn, onchainIdsIn, type PortfolioSnapshot } from "../../packages/core/src/index";
 import { strategyTermsWire, type StrategyTerms } from "./strategy-terms";
 
 /**
@@ -163,10 +162,25 @@ const MAX_BYTES = 256 * 1024;
  * Brain EMITTING one, and this stops the worker ACCEPTING one from a service
  * that might one day be a different build than we think. A defence that lives
  * only on the far side of a network boundary is a defence you cannot audit from
- * here. A Solana key or signature (core's onchainIdIn) counts as an address.
+ * here.
+ *
+ * SOLANA IDS TOO. A base58 key or signature, or a Solana explorer link, by the
+ * shared detector (packages/core/src/ids.ts onchainIdsIn), which Brain mirrors
+ * in services/brain/brain/onchain_ids.py. A second pass after the 0x patterns,
+ * so a decision they refuse is refused in the same words as before.
  */
 const ADDRESS = /0x[0-9a-fA-F]{40}/;
 const HEXBLOB = /0x[0-9a-fA-F]{16,}/;
+const SOLANA_SHAPE = {
+  address: "a Solana address",
+  hash: "a Solana signature or secret key",
+  link: "a Solana explorer link",
+} as const;
+
+function solanaIdIn(v: string): string | null {
+  const hit = onchainIdsIn(v).find((h) => h.family === "solana");
+  return hit ? SOLANA_SHAPE[hit.shape] : null;
+}
 
 function carriesExecutable(d: BrainDecision): string | null {
   const fields: [string, string][] = [
@@ -186,8 +200,13 @@ function carriesExecutable(d: BrainDecision): string | null {
   ];
   for (const [name, v] of fields) {
     if (typeof v !== "string") continue;
-    if (ADDRESS.test(v) || onchainIdIn(v)) return `${name} carries an address`;
+    if (ADDRESS.test(v)) return `${name} carries an address`;
     if (HEXBLOB.test(v)) return `${name} carries a hex blob`;
+  }
+  for (const [name, v] of fields) {
+    if (typeof v !== "string") continue;
+    const solana = solanaIdIn(v);
+    if (solana) return `${name} carries ${solana}`;
   }
   return null;
 }
@@ -381,7 +400,10 @@ export async function decide(cfg: BrainConfig, args: DecideArgs, deps: DecideDep
   // never a 422 that would cost the review. The probe is consulted only when a
   // caller supplied terms, so a request without them reads nothing new.
   const probe = deps.capabilities ?? brainCapabilities;
-  const terms = args.strategyTerms ? strategyTermsWire(args.strategyTerms) : null;
+  const wire = args.strategyTerms ? strategyTermsWire(args.strategyTerms) : null;
+  // Brain's bounds now refuse a Solana id in either field too (schemas.py
+  // `_reject_executable`), and strategyTermsWire checks only the 0x shapes.
+  const terms = wire && !onchainIdIn(wire.strategy_terms) && !onchainIdIn(wire.horizon) ? wire : null;
   const sendTerms = terms !== null && probe.advertises(cfg.url, STRATEGY_TERMS_CAPABILITY);
   const delivery: StrategyTermsDelivery | undefined = args.strategyTerms ? (sendTerms ? "sent" : "withheld") : undefined;
 

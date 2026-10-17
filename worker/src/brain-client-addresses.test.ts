@@ -73,7 +73,8 @@ describe("a Brain decision carrying an address", () => {
         assert.equal(result.ok, false, JSON.stringify(fields));
         if (!result.ok) {
           assert.equal(result.kind, "malformed");
-          assert.match(result.detail, /carries an address/);
+          // A 0x address in its old words; a Solana id named for what it is (the Solana pass after them).
+          assert.match(result.detail, /carries (?:an address|a Solana (?:address|signature or secret key))/);
         }
       }
     });
