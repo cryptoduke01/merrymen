@@ -241,8 +241,9 @@ export function guardStdio(streams: NodeJS.WriteStream[] = [process.stdout, proc
     const write = s.write.bind(s) as (...a: unknown[]) => boolean;
     s.write = ((chunk: unknown, ...rest: unknown[]) => {
       if (typeof chunk === "string") return write(redactUrls(chunk), ...rest);
-      if (chunk instanceof Uint8Array) {
-        const text = Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength).toString("utf8");
+      const bytes = chunk instanceof Uint8Array ? Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength) : null;
+      if (bytes?.includes("://")) {
+        const text = bytes.toString("utf8");
         const safe = redactUrls(text);
         if (safe !== text) {
           // The encoding argument described the bytes; the text is UTF-8 now.
