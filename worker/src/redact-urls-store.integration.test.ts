@@ -22,7 +22,7 @@ process.env.MERRYMEN_HOME = HOME;
 // sqlite, whatever the shell running the suite points at.
 delete process.env.DATABASE_URL;
 
-const { closeStoreForTest, initStore, addEvent, addTrade } = await import("./store");
+const { closeStoreForTest, initStore, addEvent, addTrade, addDecision, enqueueCommand, finishCommand } = await import("./store");
 const { homePaths } = await import("./home");
 const { DatabaseSync } = await import("node:sqlite");
 const { AUTONOMY_TRADE_FUNNEL_SQL, autonomyLines, foldFunnel } = await import("./autonomy-funnel");
@@ -97,6 +97,22 @@ describe("the store's free text", () => {
     const text = autonomyLines(1, funnel, []).join("\n");
     assert.match(text, /autonomy\| 1h refusals — couldn't submit: HTTP request failed\. URL: https:\/\/robinhood-mainnet/);
     assert.ok(!leaksKey(text));
+  });
+
+  it("a decision's reason and a command's receipt lose the key too", async () => {
+    const e = new HttpRequestError({ url: KEYED, details: "merrymen-rpc-declined: not sent" });
+    await addDecision({ id: "d-redact", agent_id: AGENT, source: "brain-shadow", reason: `no decision (provider): ${e.message}`, dropped_rule: `couldn't submit: ${e.message}` });
+    const [d] = rows<{ reason: string; dropped_rule: string }>("SELECT reason, dropped_rule FROM decisions WHERE id = ?", "d-redact");
+    assert.ok(d, "the decision was written");
+    assert.ok(!leaksKey(d.reason) && !leaksKey(d.dropped_rule), "the decision carries the key");
+    assert.ok(d.reason.includes(HOST));
+
+    assert.equal(await enqueueCommand(AGENT, "c-redact", "probe"), true);
+    // Longer than the 500-character receipt, with the URL across the cut.
+    await finishCommand("c-redact", `${"x".repeat(470)} ${e.message}`);
+    const [c] = rows<{ result: string }>("SELECT result FROM agent_commands WHERE id = ?", "c-redact");
+    assert.ok(c, "the command was finished");
+    assert.ok(!leaksKey(c.result), "the receipt carries the key");
   });
 
   it("a row written before the fix is redacted when the refusals line reads it back", () => {

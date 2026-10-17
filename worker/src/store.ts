@@ -1442,8 +1442,10 @@ export async function addDecision(row: DecisionRow): Promise<void> {
         row.symbol ?? null,
         row.action ?? null,
         row.size_usdg ?? null,
-        row.reason ?? null,
-        row.dropped_rule ?? null,
+        // Free text that can be a caught error's (`no decision (…): <error>`),
+        // and the decision feed is public. See redact-urls.ts.
+        row.reason == null ? null : redactUrls(row.reason),
+        row.dropped_rule == null ? null : redactUrls(row.dropped_rule),
         row.signals_json ?? null,
         row.hold_kind ?? null,
         row.evidence_json ?? null,
@@ -2880,7 +2882,9 @@ export async function finishCommand(id: string, result: string): Promise<void> {
   try {
     await getDb()
       .prepare("UPDATE agent_commands SET done_at = unixepoch(), result = ? WHERE id = ?")
-      .run(result.slice(0, 500), id);
+      // The owner's receipt for a command, and a failed one is an error's text.
+      // Redacted before the cut, so no half of a key is left (redact-urls.ts).
+      .run(redactUrls(result).slice(0, 500), id);
   } catch {
     /* the command ran; losing its receipt must not re-run it */
   }

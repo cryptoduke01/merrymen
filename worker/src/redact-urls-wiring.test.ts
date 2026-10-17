@@ -76,3 +76,37 @@ describe("the entry points guard their own output first", () => {
     assert.match(orch, /fileURLToPath\(import\.meta\.url\) === path\.resolve\(process\.argv\[1\]\)\) \{\s*guardStdio\(\);\s*void runOrchestrator\(\);/);
   });
 });
+
+describe("the other places a caught error leaves the process", () => {
+  /** The unredacted idiom, which none of these sites may use any more. */
+  const RAW = /e instanceof Error \? e\.message : String\(e\)/;
+
+  it("the Telegram replies, the LLM tool results and the recovery reasons", () => {
+    const service = source("telegram/service.ts");
+    assert.match(service, /const m = errorText\(e\);\s*deps\.note\("warn", `Telegram: \$\{cmd\.kind\} failed/);
+    assert.match(service, /`🚫 that failed: \$\{esc\(errorText\(e\)\.slice\(0, 200\)\)\}`/);
+    assert.match(source("telegram/answer.ts"), /That lookup failed \(\$\{e instanceof Error \? errorText\(e\)/);
+    const agent = source("telegram/agent.ts");
+    assert.match(agent, /impl\.exec\(use\.input\)\.catch\(\(e: unknown\) => `error: \$\{errorText\(e\)\}`\)/);
+    assert.match(agent, /const m = errorText\(e\);\s*deps\.note\("warn", `Telegram agent: failed/);
+    assert.match(source("strategist/desk.ts"), /`that could not be read: \$\{errorText\(e\)\}`/);
+    const recover = source("recover.ts");
+    assert.match(recover, /could not check the class vault: \$\{errorText\(e\)\}/);
+    assert.match(recover, /const why = errorText\(e\);/);
+    assert.match(recover, /const msg = errorText\(e\);/);
+  });
+
+  it("the web routes that hand a chain error to the browser", () => {
+    const web = (f: string) => codeOf(readFileSync(new URL(`../../web/src/app/api/${f}`, import.meta.url), "utf8"));
+    assert.match(web("recover/route.ts"), /const msg = \(e: unknown\) => errorText\(e\);/);
+    const circle = web("circle/route.ts");
+    assert.match(circle, /error: errorText\(e\),/);
+    assert.doesNotMatch(circle, RAW);
+    assert.match(web("grants/route.ts"), /derivationUnreachable\(errorText\(e\)\)/);
+  });
+
+  it("the hold process and the recovery-replies role guard their own output", () => {
+    assert.match(source("telegram-hold.ts"), /guardStdio\(\);\s*const tgState = createStateRef\(\);/);
+    assert.match(source("recovery-replies.ts"), /pathToFileURL\(process\.argv\[1\]\)\.href\) \{\s*guardStdio\(\);/);
+  });
+});
