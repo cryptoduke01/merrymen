@@ -2360,7 +2360,9 @@ export async function hasChainFlow(
   try {
     const row = await getDb()
       .prepare("SELECT 1 AS n FROM flows WHERE agent_id = ? AND tx_hash = ? AND log_index = ? LIMIT 1")
-      .get(agentId, txHash.toLowerCase(), logIndex);
+      // The spelling insertFlowWithJournal wrote it under (ledgerTxHash): a
+      // plain toLowerCase() would miss a signature booked as written.
+      .get(agentId, ledgerTxHash(txHash), logIndex);
     return row !== undefined && row !== null;
   } catch (e) {
     console.error("[store] flow lookup failed:", e);
@@ -2381,7 +2383,10 @@ export async function hasFlowForTx(agentId: string, txHash: string): Promise<boo
   try {
     const row = await getDb()
       .prepare("SELECT 1 AS n FROM flows WHERE agent_id = ? AND tx_hash = ? LIMIT 1")
-      .get(agentId, txHash.toLowerCase());
+      // The spelling insertFlowWithJournal wrote it under (ledgerTxHash). A
+      // plain toLowerCase() misses a signature booked as written, and the
+      // resolver would then book the same transfer a second time.
+      .get(agentId, ledgerTxHash(txHash));
     return row !== undefined && row !== null;
   } catch (e) {
     console.error("[store] flow-for-tx lookup failed:", e);
