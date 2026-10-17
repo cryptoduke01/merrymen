@@ -20,6 +20,7 @@ import {
   derivationUnreachable,
   duplicateWallPermissions,
   isHostedMode,
+  isRobinhoodChainId,
   type Derivation,
   type EnergyStatus,
   type StoredGrant,
@@ -161,6 +162,26 @@ export async function POST(req: Request) {
           "install it — the agent would be unable to make any trade at all. It usually means the page was " +
           "open from before an update: reload and sign again.",
         duplicates,
+      },
+      { status: 400 },
+    );
+  }
+
+  // ── A GRANT FOR A CHAIN THIS PRODUCT DOES NOT RUN ON ─────────────────────
+  //
+  // Nothing checked chainId before, and what reads it downstream (chainForId,
+  // the derivation, the balance reads) turns any id but the testnet into
+  // mainnet: a grant naming chain 1, a Solana grant or one with no chainId at
+  // all was accepted and read as Robinhood Chain. Every grant our signers make
+  // carries 4663 or 46630 (chain.id), so this refuses only what they never
+  // send. For every mode, before the hosted checks read the id, and pure, so
+  // it burns no nonce.
+  if (!isRobinhoodChainId(grant.chainId)) {
+    const named = grant.chainId === undefined ? "names no chain" : `is for chain ${JSON.stringify(grant.chainId).slice(0, 64)}`;
+    return NextResponse.json(
+      {
+        error: `this grant ${named}, and Merrymen only runs on Robinhood Chain (4663) and its testnet (46630). Nothing was saved.`,
+        code: "unsupported_chain",
       },
       { status: 400 },
     );
