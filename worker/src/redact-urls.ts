@@ -33,6 +33,8 @@
  * PURE except `guardStdio`, which patches the two streams it is given.
  */
 
+import { StringDecoder } from "node:string_decoder";
+
 /** What a removed credential reads as. The same marker redactSecrets uses. */
 export const REDACTED = "[redacted]";
 
@@ -169,9 +171,11 @@ export function errorText(e: unknown): string {
  */
 export function lineRedactor(maxHeld = 64 * 1024): { push(chunk: Buffer | string): string[]; flush(): string[] } {
   let held = "";
+  // A multi-byte character split across chunks is held too, not garbled.
+  const decoder = new StringDecoder("utf8");
   return {
     push(chunk) {
-      held += String(chunk);
+      held += typeof chunk === "string" ? chunk : decoder.write(chunk);
       const parts = held.split(/\r?\n/);
       held = parts.pop() ?? "";
       if (held.length > maxHeld) {
@@ -181,7 +185,7 @@ export function lineRedactor(maxHeld = 64 * 1024): { push(chunk: Buffer | string
       return parts.map(redactUrls);
     },
     flush() {
-      const rest = held;
+      const rest = held + decoder.end();
       held = "";
       return rest ? [redactUrls(rest)] : [];
     },

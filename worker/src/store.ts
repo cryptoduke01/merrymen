@@ -50,6 +50,7 @@ import { admitCapitalFlow, tradingModeOf, type TradingMode } from "./paper-bound
 import { DERIVED_ID } from "./thesis-policy";
 // The coin's name a fill is stored with — see fillSymbolOfRow.
 import { fillSymbolFor, nonCashLeg } from "./token-label";
+import { redactUrls } from "./redact-urls";
 import { completePersonalMemoryForget, recordPersonalMemoryForget } from "./personal-memory-ferry";
 
 let driver: Db | null = null;
@@ -3202,9 +3203,12 @@ export async function addEvent(
   message: string,
 ): Promise<void> {
   try {
+    // An event is the owner's dashboard and the mirror's copy of it, and its
+    // message is often a caught error's text — which names the RPC URL, key
+    // and all, whenever viem raised it (redact-urls.ts).
     await getDb()
       .prepare("INSERT INTO events (agent_id, level, message) VALUES (?, ?, ?)")
-      .run(agentId, level, message);
+      .run(agentId, level, redactUrls(message));
   } catch (e) {
     console.error("[store] event insert failed:", e);
   }
@@ -3291,6 +3295,10 @@ async function fillSymbolOfRow(row: TradeRow): Promise<string | null> {
  * the reservation release drop it.
  */
 export async function addTrade(row: TradeRow): Promise<boolean> {
+  // reject_rule is free text on the `couldn't submit: <error>` path, and the
+  // error is viem's, URL and key included. Redacted before anything reads the
+  // row, so the hash chain and both writes below see the same value.
+  if (row.reject_rule) row = { ...row, reject_rule: redactUrls(row.reject_rule) };
   try {
     const epoch = await epochOf(row.agent_id);
     // Before any write, and outside the journal's transaction: two reads at most.
