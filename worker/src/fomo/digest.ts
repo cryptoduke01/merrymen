@@ -54,7 +54,6 @@ export const GROUP_PHRASE: Readonly<Record<string, string>> = Object.freeze({
   early: "it's still early",
   "strong community": "a strong community",
   breakout: "the chart setting up",
-  listing: "hopes of a listing",
   accumulating: "holders adding on dips",
   undervalued: "it looks undervalued",
   rug: "fears it could collapse",
@@ -107,7 +106,7 @@ const WAITING_WORDS: ReadonlyArray<readonly [string, RegExp]> = [
 // cannot leave behind an unsupported catalyst when split at "but".
 const NOT_ANTICIPATION = /\b(?:no|not|never|neither|nor|without|nothing|nobody|none|cannot|can't|cant|won't|wont|isn't|isnt|aren't|arent|wasn't|wasnt|weren't|werent|don't|dont|doesn't|doesnt|didn't|didnt|hasn't|hasnt|haven't|havent|was|were|had|already|previously|yesterday|fake|false|unlikely|doubt(?:s|ed|ful)?|used\s+to|last\s+(?:week|month|year|monday|tuesday|wednesday|thursday|friday|saturday|sunday))\b/;
 const WITHDRAWN_EVENT = /\b(?:cancel(?:led|ed|lation)?|scrapped|abandoned|postponed|delayed|denied|fail(?:ed|ure)?|fell\s+through|called\s+off|ruled\s+out|stop(?:ped|ping)?|quit|gave\s+up|given\s+up|done\s+(?:waiting|awaiting)|no\s+longer)\b/;
-const ANTICIPATION_BEFORE = /\b(?:wait(?:ing)?\s+(?:for|on)|await(?:ing)?|hop(?:e|es|ing)\s+for|expect(?:ing)?|anticipat(?:e|ing)|looking\s+forward\s+to|upcoming|planned|scheduled|will)\b/g;
+const ANTICIPATION_BEFORE = /\b(?:wait(?:ing)?\s+(?:for|on)|await(?:ing)?|hop(?:e|es|ing)\s+for|expect(?:ing)?|anticipat(?:e|ing)|looking\s+forward\s+to|upcoming|planned|scheduled)\b/g;
 const ANTICIPATION_AFTER = /^\s+(?:(?:is|are|remains?|still|now|currently|reportedly)\s+)*(?:planned|scheduled|expected|anticipated|upcoming|due|coming|soon|tomorrow|tonight|next\s+(?:week|month|year)|on\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday))\b/;
 const TIMED_EVENT = /^\s+(?:(?:drops?|lands?|ships?|happens?|starts?|goes\s+live)\s+)?(?:soon|tomorrow|tonight|next\s+(?:week|month|year)|(?:on\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday))\b/;
 
@@ -135,7 +134,11 @@ function anticipatedEvents(text: string): string[] {
             // launch, or a marker in a remote part of the sentence to this event.
             return between.trim().split(/\s+/).length <= 6 && !/\b(?:after|before|since|because|once|if|when|then|despite|while)\b/.test(between);
           });
-          if (explicit || ANTICIPATION_AFTER.test(after) || TIMED_EVENT.test(after)) found.add(key);
+          const eventPredicate = /\bwill\s+$/.test(before) && /^(?:launch|update|upgrade|release|relist)$/.test(match[0]);
+          // A date may belong to a discussion or assessment of the event,
+          // rather than to the event itself ("discuss the listing tomorrow").
+          const discussing = /\b(?:discuss|discussing|assess|assessing|review|reviewing|debate|debating|talk\s+about|ask\s+about)\b/.test(before);
+          if (explicit || eventPredicate || (!discussing && (ANTICIPATION_AFTER.test(after) || TIMED_EVENT.test(after)))) found.add(key);
         }
       }
     }
@@ -163,9 +166,9 @@ export function readThesisForDigest(text: string): ThesisReading {
   const cues: ThesisCue[] = [];
   for (const c of r.cues) {
     if (c.negated || seen.has(c.label)) continue;
-    // A bare "listing" or "listed" is not a bullish hope. Use the same
-    // prospective evidence as the waiting-on line, including post-event denial.
-    if (c.label === "listing" && !waitingOn.includes("listing")) continue;
+    // Anticipating a listing says nothing about the author's view of the coin:
+    // they may be waiting to sell. Convey it only as an event, never support.
+    if (c.label === "listing") continue;
     seen.add(c.label);
     cues.push({ label: c.label, stance: c.stance });
   }
@@ -272,8 +275,7 @@ export function digestTheses(views: readonly DigestThesis[]): ThesesDigest {
       .slice(0, ABOUT_MAX)
       .map(([t]) => TOPIC_PHRASE[t as Exclude<DossierTopic, "other">]);
   const forPhrases = ranked(forIt, FOR_MAX);
-  // A listing already said as a hope is not said again as something waited on.
-  const waitingKeys = ranked(waiting, WAITING_MAX + 1).filter((k) => !(k === "listing" && forPhrases.includes(GROUP_PHRASE.listing!)));
+  const waitingKeys = ranked(waiting, WAITING_MAX);
   return {
     theses: list.length,
     authors,

@@ -1086,8 +1086,8 @@ Surface limits:
   it: fears it could collapse, worries about the dev's wallet."), the topics mentioned,
   and what holders explicitly anticipate (never an airdrop). Mentioning a listing or
   launch alone is not anticipation: denied, cancelled, historical and questioning
-  statements do not become future catalysts. A listing is a bullish hope only when
-  the text explicitly expresses anticipation. Unrecognized substantive text is not
+  statements do not become future catalysts. An anticipated listing is reported as
+  an event, without inferring support for the coin. Unrecognized substantive text is not
   dismissed as hype. Answers report the sample read and source-post dates, separate
   from the age of the fetched copy; claims, coverage and freshness notices take
   precedence over optional detail when shortening the answer.
