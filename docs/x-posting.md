@@ -431,9 +431,9 @@ the count, with the kind of post it was, so a slot that went nowhere is read
 in the deploy log without a database query:
 
 ```
-[orchestrator] xpost: sent 1, not-posted 2 (insight no-draft:groq-429, buy gate:too-short)
-[orchestrator] xpost: drafted-buy 1, not-posted 1 (casual no-draft:timeout)
-[orchestrator] xpost: answer-skipped 1 (gate:opt-out-said), reply-read-ok 1
+[orchestrator] xpost: not-posted 1 (insight no-draft:groq-429)
+[orchestrator] xpost: sent 1, not-posted 1 (buy gate:too-short)
+[orchestrator] xpost: answer-skipped 1 (gate:opt-out-said)
 ```
 
 The kind is the intent's (`intro`, `buy`, `sell`, `casual`, `recap`), or
