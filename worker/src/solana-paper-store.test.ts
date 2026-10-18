@@ -1,0 +1,543 @@
+import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { execFile, spawn } from "node:child_process";
+import { promisify } from "node:util";
+import { DatabaseSync } from "node:sqlite";
+import { test, type TestContext } from "node:test";
+import { CHAINS, SOLANA_USDG_MINT, base58Encode, canonicalId } from "../../packages/core/src/ids";
+import type { SolanaPaperLimits, SolanaQuote, SolanaSwapIntent } from "../../packages/core/src/solana";
+import {
+  SOLANA_PAPER_MAX_POSITIONS, SolanaPaperStore, SolanaPaperStoreError,
+  solanaPaperIntentFingerprint, type SolanaPaperCommit,
+} from "./solana-paper-store";
+
+const NOW = 1_000_000;
+const OWNER = base58Encode(new Uint8Array(32).fill(20));
+const OTHER = base58Encode(new Uint8Array(32).fill(21));
+const TOKEN = "So11111111111111111111111111111111111111112";
+const TOKEN2 = base58Encode(new Uint8Array(32).fill(22));
+const U64_MAX = "18446744073709551615";
+const limits = (overrides: Partial<SolanaPaperLimits> = {}): SolanaPaperLimits => ({
+  perTradeUsdg: "1000", dailyUsdg: "10000", maxOpsPerDay: 100,
+  maxDrawdownBps: 2000, expiresAtMs: NOW + 7 * 86_400_000, ...overrides,
+});
+function intent(requestId = "buy", amountRaw = "100", side: "buy" | "sell" = "buy", token = TOKEN): SolanaSwapIntent {
+  return {
+    kind: "spl-swap", chain: CHAINS.solana, mode: "paper", requestId,
+    inputMint: side === "buy" ? SOLANA_USDG_MINT : token,
+    outputMint: side === "buy" ? token : SOLANA_USDG_MINT,
+    amountRaw, slippageBps: 100,
+  };
+}
+function quote(order: SolanaSwapIntent, outAmount = "200", nowMs = NOW, minOutAmount = outAmount): SolanaQuote {
+  return {
+    source: "jupiter", inputMint: order.inputMint, outputMint: order.outputMint,
+    inAmount: order.amountRaw, outAmount, minOutAmount, slippageBps: order.slippageBps,
+    contextSlot: 10, quotedAtMs: nowMs, expiresAtMs: nowMs + 20_000,
+  };
+}
+function mark(amountRaw = "200", out = "100", nowMs = NOW, token = TOKEN): SolanaQuote {
+  return quote(intent("mark", amountRaw, "sell", token), out, nowMs);
+}
+function commitArgs(overrides: Partial<SolanaPaperCommit> = {}): SolanaPaperCommit {
+  const order = overrides.intent ?? intent();
+  const entryQuote = overrides.quote ?? quote(order);
+  const exitIntent = intent("entry-exit-check", entryQuote.minOutAmount, "sell", order.outputMint);
+  exitIntent.slippageBps = order.slippageBps;
+  return {
+    owner: OWNER, intent: order, quote: entryQuote, tokenDecimals: 9,
+    buyExitQuote: order.inputMint === SOLANA_USDG_MINT ? quote(exitIntent, order.amountRaw, overrides.nowMs ?? NOW) : undefined,
+    safetyObservedAtMs: overrides.nowMs ?? NOW,
+    marks: [], expectedVersion: 0, nowMs: NOW, ...overrides,
+  };
+}
+function fixture(t: TestContext) {
+  const directory = mkdtempSync(join(tmpdir(), "merrymen-solana-paper-"));
+  const file = join(directory, "solana-paper.sqlite");
+  const stores: SolanaPaperStore[] = [];
+  let nowMs = NOW;
+  t.after(() => {
+    for (const store of stores) { try { store.close(); } catch { /* explicitly closed in reopen cases */ } }
+    rmSync(directory, { recursive: true, force: true });
+  });
+  const open = () => { const store = new SolanaPaperStore(file, { now: () => nowMs }); stores.push(store); return store; };
+  return { file, open, store: open(), setNow: (value: number) => { nowMs = value; } };
+}
+const errorCode = (code: SolanaPaperStoreError["code"]) => (error: unknown) => {
+  assert.ok(error instanceof SolanaPaperStoreError);
+  assert.equal(error.code, code);
+  return true;
+};
+
+test("standalone schema uses WAL and rejects an unrelated ledger without changing its mode", (t) => {
+  const { file, store } = fixture(t);
+  store.create(OWNER, "1000", limits(), NOW);
+  const raw = new DatabaseSync(file);
+  assert.equal(raw.prepare("PRAGMA journal_mode").get()!.journal_mode, "wal");
+  assert.deepEqual(raw.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all().map((r) => r.name), ["solana_paper_books", "solana_paper_trades"]);
+  raw.close();
+  const unrelated = file + ".live";
+  const live = new DatabaseSync(unrelated);
+  live.exec("CREATE TABLE agents(id TEXT); INSERT INTO agents VALUES ('untouched');");
+  assert.throws(() => new SolanaPaperStore(unrelated), errorCode("incompatible_database"));
+  assert.equal(live.prepare("PRAGMA journal_mode").get()!.journal_mode, "delete");
+  assert.equal(live.prepare("SELECT id FROM agents").get()!.id, "untouched");
+  live.close();
+});
+
+test("creation fixes paper/mainnet identity, copies policy, and cannot reset an existing book", (t) => {
+  const { store } = fixture(t);
+  const policy = limits();
+  const book = store.create(OWNER, "1000", policy, NOW);
+  policy.dailyUsdg = "99999";
+  book.cashRaw = "99999";
+  const persisted = store.get(OWNER)!;
+  assert.equal(persisted.mode, "paper");
+  assert.equal(persisted.chain, CHAINS.solana);
+  assert.equal(persisted.agentId, `sol:${OWNER}`);
+  assert.equal(persisted.cashRaw, "1000");
+  assert.equal(persisted.limits.dailyUsdg, "10000");
+  assert.equal(store.get(OTHER), null);
+  assert.throws(() => store.create(OWNER, "9000", limits(), NOW), errorCode("book_exists"));
+});
+
+test("invalid owner, numeric amounts and malformed policy fail before creating a book", (t) => {
+  const { store } = fixture(t);
+  for (const owner of ["", "0x" + "ab".repeat(20), " " + OWNER, OWNER + " "]) {
+    assert.throws(() => store.create(owner, "1000", limits(), NOW), errorCode("invalid_input"));
+  }
+  for (const raw of ["0", "01", "-1", "1.2", "18446744073709551616", 1000] as string[]) {
+    assert.throws(() => store.create(OWNER, raw, limits(), NOW), errorCode("invalid_input"));
+  }
+  assert.throws(() => store.create(OWNER, "1000", limits({ expiresAtMs: NOW }), NOW), errorCode("invalid_input"));
+  assert.equal(store.get(OWNER), null);
+});
+
+test("u64 precision stays exact above Number.MAX_SAFE_INTEGER and fills use minimum output", (t) => {
+  const { store } = fixture(t);
+  store.create(OWNER, U64_MAX, limits({ perTradeUsdg: U64_MAX, dailyUsdg: U64_MAX }), NOW);
+  const order = intent("large", "9007199254740993");
+  const receipt = store.commit(commitArgs({ intent: order, quote: quote(order, "9007199254741993", NOW, "9007199254740993") }));
+  assert.equal(receipt.outputAmountRaw, "9007199254740993");
+  assert.equal(receipt.execution, "simulated");
+  assert.equal(receipt.excludesNetworkFeesAndRent, true);
+  assert.equal("signature" in receipt, false);
+  assert.equal("txHash" in receipt, false);
+  assert.equal(store.get(OWNER)!.cashRaw, (BigInt(U64_MAX) - 9007199254740993n).toString());
+  assert.equal(store.get(OWNER)!.positions[0]!.amountRaw, "9007199254740993");
+  assert.equal(store.get(OWNER)!.positions[0]!.costBasisUsdgRaw, "9007199254740993");
+});
+
+test("a committed request replays identically after reopen despite stale quote, expired policy, or old version", (t) => {
+  const { store, open } = fixture(t);
+  store.create(OWNER, "1000", limits(), NOW);
+  const args = commitArgs();
+  const receipt = store.commit(args);
+  store.close();
+  const reopened = open();
+  const retried = reopened.commit({ ...args, quote: undefined as unknown as SolanaQuote, expectedVersion: -1, nowMs: NOW + 99 * 86_400_000 });
+  assert.deepEqual(retried, receipt);
+  assert.deepEqual(reopened.findTrade(OWNER, "buy"), receipt);
+  assert.equal(reopened.get(OWNER)!.version, 1);
+  assert.equal(reopened.get(OWNER)!.cashRaw, "900");
+  assert.equal(reopened.get(OWNER)!.trades.length, 1);
+});
+
+test("request reuse is bound to every canonical intent field and ignores object property ordering", (t) => {
+  const { store } = fixture(t);
+  store.create(OWNER, "1000", limits(), NOW);
+  const args = commitArgs();
+  store.commit(args);
+  for (const changed of [
+    { ...args.intent, amountRaw: "101" },
+    { ...args.intent, slippageBps: 99 },
+    { ...args.intent, outputMint: TOKEN2 },
+    intent("buy", "100", "sell"),
+  ]) assert.throws(() => store.commit({ ...args, intent: changed }), errorCode("request_conflict"));
+  const reversed = Object.fromEntries(Object.entries(args.intent).reverse()) as unknown as SolanaSwapIntent;
+  assert.equal(solanaPaperIntentFingerprint(reversed), solanaPaperIntentFingerprint(args.intent));
+  assert.equal(store.commit({ ...args, intent: reversed }).version, 1);
+});
+
+test("owner scope and case-sensitive public keys cannot share balances or replay records", (t) => {
+  const { store } = fixture(t);
+  const caseOwner = OWNER.replace(/[A-Z]/, (letter) => letter.toLowerCase());
+  assert.notEqual(caseOwner, OWNER);
+  assert.equal(canonicalId(CHAINS.solana, "account", caseOwner), caseOwner);
+  for (const owner of [OWNER, OTHER, caseOwner]) store.create(owner, "1000", limits(), NOW);
+  store.commit(commitArgs());
+  assert.equal(store.get(OTHER)!.cashRaw, "1000");
+  assert.equal(store.get(caseOwner)!.cashRaw, "1000");
+  assert.equal(store.findTrade(OTHER, "buy"), null);
+  assert.equal(store.findTrade(caseOwner, "buy"), null);
+  store.commit(commitArgs({ owner: OTHER }));
+  store.commit(commitArgs({ owner: caseOwner }));
+  assert.equal(store.get(OWNER)!.version, 1);
+  assert.equal(store.get(OTHER)!.version, 1);
+  assert.equal(store.get(caseOwner)!.version, 1);
+});
+
+test("separate handles serialize stale versions and recheck caps before accepting a retry", (t) => {
+  const { store, open } = fixture(t);
+  const otherHandle = open();
+  store.create(OWNER, "2000", limits({ perTradeUsdg: "600", dailyUsdg: "1000" }), NOW);
+  const first = intent("first", "600");
+  store.commit(commitArgs({ intent: first, quote: quote(first, "600") }));
+  const second = intent("second", "600");
+  const args = commitArgs({ intent: second, quote: quote(second, "600"), marks: [mark("600", "600")] });
+  assert.throws(() => otherHandle.commit(args), errorCode("version_conflict"));
+  assert.throws(() => otherHandle.commit({ ...args, expectedVersion: 1 }), errorCode("daily_limit"));
+  assert.equal(store.get(OWNER)!.cashRaw, "1400");
+  assert.equal(otherHandle.findTrade(OWNER, "second"), null);
+});
+
+test("simultaneous separate processes cannot both spend one book version", async (t) => {
+  const { store, file } = fixture(t);
+  store.create(OWNER, "1000", limits({ perTradeUsdg: "600", dailyUsdg: "600" }), NOW);
+  const script = `
+    import { SolanaPaperStore } from ${JSON.stringify(new URL("./solana-paper-store.ts", import.meta.url).href)};
+    const store = new SolanaPaperStore(process.argv[1], { now: () => ${NOW} });
+    try { process.stdout.write(JSON.stringify({ receipt: store.commit(JSON.parse(process.argv[2])) })); }
+    catch (error) { process.stdout.write(JSON.stringify({ code: error.code })); }
+    finally { store.close(); }
+  `;
+  const run = promisify(execFile);
+  const outputs = await Promise.all(["first", "second"].map(async (id) => {
+    const order = intent(id, "600");
+    const args = commitArgs({ intent: order, quote: quote(order, "600") });
+    const { stdout } = await run(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", script, file, JSON.stringify(args)],
+      { env: { PATH: process.env.PATH, HOME: process.env.HOME }, timeout: 10_000 });
+    return JSON.parse(stdout);
+  }));
+  assert.equal(outputs.filter((result) => result.receipt).length, 1);
+  assert.equal(outputs.filter((result) => result.code === "version_conflict").length, 1);
+  assert.equal(store.get(OWNER)!.cashRaw, "400");
+  assert.equal(store.get(OWNER)!.trades.length, 1);
+});
+
+test("process death immediately after commit preserves receipt and prevents a duplicate fill", async (t) => {
+  const { store, file } = fixture(t);
+  store.create(OWNER, "1000", limits(), NOW);
+  const script = `
+    import { SolanaPaperStore } from ${JSON.stringify(new URL("./solana-paper-store.ts", import.meta.url).href)};
+    const store = new SolanaPaperStore(process.argv[1], { now: () => ${NOW} });
+    store.commit(JSON.parse(process.argv[2]));
+    process.kill(process.pid, "SIGKILL");
+  `;
+  await assert.rejects(promisify(execFile)(process.execPath,
+    ["--import", "tsx", "--input-type=module", "--eval", script, file, JSON.stringify(commitArgs())],
+    { env: { PATH: process.env.PATH, HOME: process.env.HOME }, timeout: 10_000 }),
+    (error: unknown) => (error as NodeJS.ErrnoException & { signal: string }).signal === "SIGKILL");
+  assert.equal(store.findTrade(OWNER, "buy")!.version, 1);
+  assert.equal(store.commit(commitArgs()).version, 1);
+  assert.equal(store.get(OWNER)!.cashRaw, "900");
+  assert.equal(store.get(OWNER)!.trades.length, 1);
+});
+
+test("write-lock contention cannot preserve expired quotes, limits or mint safety observations", async (t) => {
+  const { file } = fixture(t);
+  const store = new SolanaPaperStore(file);
+  t.after(() => store.close());
+  for (const [index, kind] of ["entry", "exit", "limits", "safety"].entries()) {
+    const owner = [OWNER, OTHER, TOKEN2, TOKEN][index]!;
+    const created = Date.now();
+    store.create(owner, "1000", limits({ expiresAtMs: created + (kind === "limits" ? 1000 : 60_000) }), created);
+    const script = `
+      import { DatabaseSync } from 'node:sqlite';
+      const db = new DatabaseSync(process.argv[1]);
+      db.exec('BEGIN IMMEDIATE');
+      process.stdout.write('locked');
+      setTimeout(() => { db.exec('ROLLBACK'); db.close(); }, 1500);
+    `;
+    const locker = spawn(process.execPath, ["--input-type=module", "--eval", script, file], {
+      env: { PATH: process.env.PATH, HOME: process.env.HOME }, stdio: ["ignore", "pipe", "pipe"],
+    });
+    t.after(() => { if (locker.exitCode === null) locker.kill("SIGKILL"); });
+    const finished = new Promise<void>((resolve, reject) => {
+      locker.once("error", reject);
+      locker.once("exit", (code) => code === 0 ? resolve() : reject(new Error("Lock fixture failed")));
+    });
+    await new Promise<void>((resolve, reject) => {
+      locker.once("error", reject);
+      locker.stdout.once("data", () => resolve());
+    });
+    const prepared = Date.now();
+    const args = commitArgs({ owner, nowMs: prepared, quote: quote(intent(), "200", prepared) });
+    if (kind === "entry") args.quote.expiresAtMs = prepared + 500;
+    if (kind === "exit") args.buyExitQuote!.expiresAtMs = prepared + 500;
+    if (kind === "safety") args.safetyObservedAtMs = prepared - 29_500;
+    assert.throws(() => store.commit(args), errorCode(kind === "limits" ? "expired" : kind === "safety" ? "stale_safety" : "invalid_quote"));
+    await finished;
+    assert.equal(store.get(owner)!.version, 0);
+    assert.equal(store.findTrade(owner, "buy"), null);
+  }
+});
+
+test("authoritative commit time controls receipt timestamps and rejects future preparation", (t) => {
+  const { store, setNow } = fixture(t);
+  store.create(OWNER, "1000", limits(), NOW);
+  assert.throws(() => store.commit(commitArgs({ nowMs: NOW + 1 })), errorCode("invalid_input"));
+  setNow(NOW + 100);
+  assert.equal(store.commit(commitArgs()).createdAtMs, NOW + 100);
+  assert.equal(store.get(OWNER)!.updatedAtMs, NOW + 100);
+});
+
+test("fresh mint safety evidence is required for new buys and exits, but not durable replay", (t) => {
+  const { store } = fixture(t);
+  store.create(OWNER, "1000", limits(), NOW);
+  const args = commitArgs();
+  for (const safetyObservedAtMs of [undefined, -1, NOW + 1, NOW - 30_000, 0.5] as number[]) {
+    assert.throws(() => store.commit({ ...args, safetyObservedAtMs }), errorCode("stale_safety"));
+  }
+  const receipt = store.commit(args);
+  assert.equal(receipt.safetyObservedAtMs, NOW);
+  assert.deepEqual(store.commit({ ...args, safetyObservedAtMs: undefined as unknown as number }), receipt);
+  const sell = intent("exit", "200", "sell");
+  assert.throws(() => store.commit(commitArgs({ intent: sell, quote: quote(sell, "100"), expectedVersion: 1, safetyObservedAtMs: NOW - 30_000 })), errorCode("stale_safety"));
+});
+
+test("database failure after receipt insertion rolls back the receipt, balance, position and version together", (t) => {
+  const { store, file } = fixture(t);
+  store.create(OWNER, "1000", limits(), NOW);
+  const before = store.get(OWNER);
+  const raw = new DatabaseSync(file);
+  raw.exec("CREATE TRIGGER fail_book_update BEFORE UPDATE ON solana_paper_books BEGIN SELECT RAISE(ABORT, 'injected write failure'); END;");
+  assert.throws(() => store.commit(commitArgs()), /injected write failure/);
+  assert.deepEqual(store.get(OWNER), before);
+  assert.equal(store.findTrade(OWNER, "buy"), null);
+  raw.exec("DROP TRIGGER fail_book_update");
+  raw.close();
+  assert.equal(store.commit(commitArgs()).version, 1);
+});
+
+test("per-trade, operation and rolling daily caps cover buys and sells", (t) => {
+  const { store } = fixture(t);
+  store.create(OWNER, "1000", limits({ perTradeUsdg: "100", dailyUsdg: "200", maxOpsPerDay: 2 }), NOW);
+  assert.throws(() => store.commit(commitArgs({ intent: intent("over", "101"), quote: quote(intent("over", "101")) })), errorCode("per_trade_limit"));
+  store.commit(commitArgs());
+  const highSell = intent("high-sell", "200", "sell");
+  assert.throws(() => store.commit(commitArgs({ intent: highSell, quote: quote(highSell, "101", NOW, "100"), expectedVersion: 1 })), errorCode("per_trade_limit"));
+  const sell = intent("sell", "200", "sell");
+  store.commit(commitArgs({ intent: sell, quote: quote(sell, "100", NOW, "99"), expectedVersion: 1 }));
+  const third = intent("third", "1");
+  assert.throws(() => store.commit(commitArgs({ intent: third, quote: quote(third, "1"), expectedVersion: 2 })), errorCode("operation_limit"));
+  assert.equal(store.get(OWNER)!.cashRaw, "999");
+  assert.equal(store.get(OWNER)!.trades[0]!.notionalUsdgRaw, "100");
+});
+
+test("degraded exits retain daily, operation and expiry limits", (t) => {
+  const { store, setNow } = fixture(t);
+  const owners = [OWNER, OTHER, TOKEN2];
+  const policies = [limits({ dailyUsdg: "1000" }), limits({ maxOpsPerDay: 1 }), limits({ expiresAtMs: NOW + 100 })];
+  for (let i = 0; i < owners.length; i++) {
+    const owner = owners[i]!;
+    store.create(owner, "1000", policies[i]!, NOW);
+    store.commit(commitArgs({ owner }));
+    const sell = intent("exit", "200", "sell");
+    const nowMs = i === 2 ? NOW + 100 : NOW;
+    setNow(nowMs);
+    const args = commitArgs({ owner, intent: sell, quote: quote(sell, i === 0 ? "901" : "100", nowMs), expectedVersion: 1, nowMs });
+    assert.throws(() => store.commit(args), errorCode(["daily_limit", "operation_limit", "expired"][i] as SolanaPaperStoreError["code"]));
+    assert.equal(store.get(owner)!.positions[0]!.amountRaw, "200");
+    assert.equal(store.findTrade(owner, "exit"), null);
+  }
+});
+
+test("24-hour caps expire exactly at the rolling boundary without a calendar-day reset", (t) => {
+  const { store, setNow } = fixture(t);
+  store.create(OWNER, "1000", limits({ perTradeUsdg: "100", dailyUsdg: "100", maxOpsPerDay: 1 }), NOW);
+  store.commit(commitArgs());
+  const order = intent("next", "10");
+  const next = NOW + 86_400_000;
+  const args = commitArgs({ intent: order, quote: quote(order, "20", next), marks: [mark("200", "100", next)], expectedVersion: 1, nowMs: next });
+  setNow(next - 1);
+  assert.throws(() => store.commit(commitArgs({ ...args, quote: quote(order, "20", next - 1), buyExitQuote: mark("20", "10", next - 1), safetyObservedAtMs: next - 1, nowMs: next - 1 })), errorCode("operation_limit"));
+  setNow(next);
+  assert.equal(store.commit(args).version, 2);
+});
+
+test("monotonic time and immutable expiry prevent cap bypass; duplicate requests remain readable", (t) => {
+  const { store, setNow } = fixture(t);
+  store.create(OWNER, "1000", limits({ expiresAtMs: NOW + 100 }), NOW);
+  const order = intent("first");
+  setNow(NOW + 1);
+  store.commit(commitArgs({ intent: order, quote: quote(order, "200", NOW + 1), nowMs: NOW + 1 }));
+  const second = intent("second");
+  setNow(NOW);
+  assert.throws(() => store.commit(commitArgs({ intent: second, expectedVersion: 1 })), errorCode("clock_rollback"));
+  setNow(NOW + 100);
+  assert.throws(() => store.commit(commitArgs({ intent: second, expectedVersion: 1, nowMs: NOW + 100 })), errorCode("expired"));
+  assert.equal(store.commit(commitArgs({ intent: order, nowMs: NOW + 100 })).version, 1);
+});
+
+test("invalid/stale/mismatched quotes never change the book", (t) => {
+  const { store } = fixture(t);
+  store.create(OWNER, "1000", limits(), NOW);
+  const args = commitArgs();
+  for (const bad of [
+    { ...args.quote, inputMint: TOKEN2 }, { ...args.quote, inAmount: "101" },
+    { ...args.quote, expiresAtMs: NOW }, { ...args.quote, quotedAtMs: NOW + 1 },
+    { ...args.quote, minOutAmount: "1" }, { ...args.quote, contextSlot: 0 },
+  ]) assert.throws(() => store.commit({ ...args, quote: bad }), errorCode("invalid_quote"));
+  assert.equal(store.get(OWNER)!.version, 0);
+});
+
+test("new buys require fresh exact-size exit evidence and supported token decimals", (t) => {
+  const { store } = fixture(t);
+  store.create(OWNER, "1000", limits(), NOW);
+  const args = commitArgs();
+  for (const buyExitQuote of [undefined, { ...args.buyExitQuote!, inAmount: "199" }, { ...args.buyExitQuote!, expiresAtMs: NOW }]) {
+    assert.throws(() => store.commit({ ...args, buyExitQuote }), errorCode("invalid_quote"));
+  }
+  assert.throws(() => store.commit({ ...args, tokenDecimals: 19 }), errorCode("invalid_input"));
+  assert.deepEqual(store.commit(args).buyExitQuote, args.buyExitQuote);
+});
+
+test("buys require exactly one fresh full-position mark for every holding", (t) => {
+  const { store } = fixture(t);
+  store.create(OWNER, "1000", limits(), NOW);
+  store.commit(commitArgs());
+  const next = intent("next");
+  const args = commitArgs({ intent: next, quote: quote(next), expectedVersion: 1 });
+  for (const marks of [
+    [], [mark("199")], [mark("200", "100", NOW - 30_000)],
+    [mark("200", "100", NOW, TOKEN2)], [mark(), mark()],
+  ]) assert.throws(() => store.commit({ ...args, marks }), errorCode("invalid_marks"));
+  assert.equal(store.commit({ ...args, marks: [mark()] }).version, 2);
+});
+
+test("an exit with supplied stale or partial marks rejects rather than silently downgrading", (t) => {
+  const { store } = fixture(t);
+  store.create(OWNER, "1000", limits(), NOW);
+  store.commit(commitArgs());
+  const second = intent("second", "100", "buy", TOKEN2);
+  store.commit(commitArgs({ intent: second, quote: quote(second), marks: [mark()], expectedVersion: 1 }));
+  const sell = intent("exit", "200", "sell");
+  const args = commitArgs({ intent: sell, quote: quote(sell, "100"), expectedVersion: 2 });
+  assert.throws(() => store.commit({ ...args, marks: [mark()] }), errorCode("invalid_marks"));
+  assert.throws(() => store.commit({ ...args, marks: [mark("200", "100", NOW - 30_000), mark("200", "100", NOW, TOKEN2)] }), errorCode("invalid_marks"));
+  assert.equal(store.commit(args).version, 3);
+  assert.equal(store.get(OWNER)!.positions[0]!.mint, TOKEN2);
+});
+
+test("drawdown blocks buys but permits a loss-cutting sell even when unrelated marks are unavailable", (t) => {
+  const { store } = fixture(t);
+  store.create(OWNER, "1000", limits(), NOW);
+  const buy = intent("buy", "500");
+  store.commit(commitArgs({ intent: buy, quote: quote(buy, "1000") }));
+  const next = intent("blocked", "100");
+  const args = commitArgs({ intent: next, quote: quote(next), marks: [mark("1000", "100")], expectedVersion: 1 });
+  assert.throws(() => store.commit(args), errorCode("drawdown_limit"));
+  assert.equal(store.get(OWNER)!.hwmRaw, "1000");
+  const sell = intent("exit", "1000", "sell");
+  const receipt = store.commit(commitArgs({ intent: sell, quote: quote(sell, "100"), expectedVersion: 1, marks: [] }));
+  assert.equal(receipt.realizedPnlRaw, "-400");
+  assert.equal(store.get(OWNER)!.cashRaw, "600");
+  assert.equal(store.get(OWNER)!.hwmRaw, "1000");
+  assert.deepEqual(store.get(OWNER)!.positions, []);
+});
+
+test("drawdown at the exact configured boundary blocks buys while allowing an exit", (t) => {
+  const { store } = fixture(t);
+  store.create(OWNER, "1000", limits(), NOW);
+  const buy = intent("buy", "500");
+  store.commit(commitArgs({ intent: buy, quote: quote(buy, "1000") }));
+  const next = intent("boundary", "1");
+  assert.throws(() => store.commit(commitArgs({ intent: next, quote: quote(next, "1"), marks: [mark("1000", "300")], expectedVersion: 1 })), errorCode("drawdown_limit"));
+  const sell = intent("exit", "1000", "sell");
+  assert.equal(store.commit(commitArgs({ intent: sell, quote: quote(sell, "300"), expectedVersion: 1 })).version, 2);
+});
+
+test("partial basis allocation leaves integer dust for the full exit, which clears it exactly", (t) => {
+  const { store } = fixture(t);
+  store.create(OWNER, "1000", limits(), NOW);
+  const buy = intent("buy", "10");
+  store.commit(commitArgs({ intent: buy, quote: quote(buy, "3") }));
+  const partial = intent("partial", "1", "sell");
+  const first = store.commit(commitArgs({ intent: partial, quote: quote(partial, "4"), expectedVersion: 1 }));
+  assert.equal(first.realizedPnlRaw, "1");
+  assert.deepEqual(store.get(OWNER)!.positions, [{ mint: TOKEN, decimals: 9, amountRaw: "2", costBasisUsdgRaw: "7" }]);
+  const exit = intent("exit", "2", "sell");
+  const second = store.commit(commitArgs({ intent: exit, quote: quote(exit, "7"), expectedVersion: 2 }));
+  assert.equal(second.realizedPnlRaw, "0");
+  const book = store.get(OWNER)!;
+  assert.deepEqual(book.positions, []);
+  assert.equal(book.cashRaw, "1001");
+  assert.equal(book.realizedPnlRaw, "1");
+  assert.equal(book.hwmRaw, "1001");
+});
+
+test("insufficient cash, overselling and changed decimals fail without recording a request", (t) => {
+  const { store } = fixture(t);
+  store.create(OWNER, "100", limits(), NOW);
+  const over = intent("cash", "101");
+  assert.throws(() => store.commit(commitArgs({ intent: over, quote: quote(over) })), errorCode("insufficient_balance"));
+  store.commit(commitArgs());
+  const sell = intent("sell", "201", "sell");
+  assert.throws(() => store.commit(commitArgs({ intent: sell, quote: quote(sell, "100"), expectedVersion: 1 })), errorCode("insufficient_balance"));
+  const buy = intent("decimals", "1");
+  assert.throws(() => store.commit(commitArgs({ intent: buy, quote: quote(buy), expectedVersion: 1, tokenDecimals: 6 })), errorCode("decimals_conflict"));
+  assert.equal(store.get(OWNER)!.version, 1);
+  assert.equal(store.findTrade(OWNER, "cash"), null);
+  assert.equal(store.findTrade(OWNER, "sell"), null);
+});
+
+test("cash and token balance overflow reject atomically even when the quote itself fits u64", (t) => {
+  const { store } = fixture(t);
+  store.create(OWNER, U64_MAX, limits({ perTradeUsdg: U64_MAX, dailyUsdg: U64_MAX }), NOW);
+  const buy = intent("buy", "1");
+  store.commit(commitArgs({ intent: buy, quote: quote(buy, U64_MAX) }));
+  const add = intent("overflow-token", "1");
+  assert.throws(() => store.commit(commitArgs({ intent: add, quote: quote(add, "1"), marks: [mark(U64_MAX, "1")], expectedVersion: 1 })), errorCode("balance_overflow"));
+  const sell = intent("overflow-cash", "1", "sell");
+  assert.throws(() => store.commit(commitArgs({ intent: sell, quote: quote(sell, "2"), expectedVersion: 1 })), errorCode("balance_overflow"));
+  assert.equal(store.get(OWNER)!.version, 1);
+  assert.equal(store.get(OWNER)!.positions[0]!.amountRaw, U64_MAX);
+});
+
+test("complete marked profits raise high water; a later decline uses that durable peak", (t) => {
+  const { store } = fixture(t);
+  store.create(OWNER, "1000", limits(), NOW);
+  store.commit(commitArgs());
+  const next = intent("next", "100");
+  store.commit(commitArgs({ intent: next, quote: quote(next), marks: [mark("200", "1100")], expectedVersion: 1 }));
+  assert.equal(store.get(OWNER)!.hwmRaw, "2000");
+  const third = intent("third", "1");
+  assert.throws(() => store.commit(commitArgs({ intent: third, quote: quote(third), marks: [mark("400", "700")], expectedVersion: 2 })), errorCode("drawdown_limit"));
+});
+
+test("open-position bound limits complete valuation cost while still permitting exits", (t) => {
+  const { store } = fixture(t);
+  store.create(OWNER, "10000", limits(), NOW);
+  for (let i = 0; i < SOLANA_PAPER_MAX_POSITIONS; i++) {
+    const token = base58Encode(new Uint8Array(32).fill(50 + i));
+    const order = intent(`buy-${i}`, "1", "buy", token);
+    const book = store.get(OWNER)!;
+    store.commit(commitArgs({ intent: order, quote: quote(order, "1"), expectedVersion: book.version,
+      marks: book.positions.map((position) => mark(position.amountRaw, "1", NOW, position.mint)) }));
+  }
+  const extra = intent("extra", "1");
+  assert.throws(() => store.commit(commitArgs({ intent: extra, quote: quote(extra, "1"), expectedVersion: SOLANA_PAPER_MAX_POSITIONS })), errorCode("position_limit"));
+  const exit = intent("exit", "1", "sell", store.get(OWNER)!.positions[0]!.mint);
+  store.commit(commitArgs({ intent: exit, quote: quote(exit, "1"), expectedVersion: SOLANA_PAPER_MAX_POSITIONS }));
+  assert.equal(store.get(OWNER)!.positions.length, SOLANA_PAPER_MAX_POSITIONS - 1);
+});
+
+test("snapshots bound history to 100 but old receipts remain durable for replay", (t) => {
+  const { store, open } = fixture(t);
+  store.create(OWNER, "1000", limits({ maxOpsPerDay: 1000 }), NOW);
+  for (let i = 0; i < 102; i++) {
+    const order = intent(`trade-${i}`, "1", i % 2 === 0 ? "buy" : "sell");
+    store.commit(commitArgs({ intent: order, quote: quote(order, "1"), expectedVersion: i }));
+  }
+  assert.equal(store.get(OWNER)!.trades.length, 100);
+  assert.equal(store.get(OWNER)!.trades[0]!.requestId, "trade-101");
+  store.close();
+  const reopened = open();
+  const original = intent("trade-0", "1");
+  assert.equal(reopened.findTrade(OWNER, "trade-0")!.version, 1);
+  assert.equal(reopened.commit(commitArgs({ intent: original, quote: quote(original, "1") })).version, 1);
+  assert.equal(reopened.get(OWNER)!.version, 102);
+});
