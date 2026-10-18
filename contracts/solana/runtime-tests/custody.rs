@@ -1,0 +1,734 @@
+//! Runtime tests use ephemeral generated keys and synthetic pools, never network wallets.
+use anchor_lang::prelude::*;
+use anchor_lang::solana_program::{
+    entrypoint::ProgramResult, program_option::COption, program_pack::Pack,
+};
+use anchor_lang::{AccountDeserialize, InstructionData, ToAccountMetas};
+use anchor_spl::{
+    associated_token::spl_associated_token_account::get_associated_token_address_with_program_id,
+    token_2022::spl_token_2022,
+};
+use base64::Engine;
+use merrymen_vault::{self as vault, Vault, JUPITER, SHARED_ROUTE, USDG, WSOL};
+use solana_program_test::{processor, ProgramTest, ProgramTestContext};
+use solana_sdk::program::invoke_signed;
+use solana_sdk::{
+    account::Account,
+    instruction::{AccountMeta, Instruction},
+    signature::{Keypair, Signer},
+    transaction::Transaction,
+};
+
+fn mock_jupiter(_program: &Pubkey, a: &[AccountInfo], data: &[u8]) -> ProgramResult {
+    assert!(a[2].is_signer);
+    assert!(!a.iter().any(|x| x.owner == &vault::ID));
+    let requested = u64::from_le_bytes(data[data.len() - 19..data.len() - 11].try_into().unwrap());
+    let input = if data[8] == 2 {
+        requested - 10
+    } else {
+        requested
+    };
+    let output = match data[8] {
+        1 => 1,
+        3 => 100,
+        4 => 101,
+        _ => 200,
+    };
+    let buy = *a[7].key == USDG;
+    let input_program = if buy { &a[10] } else { &a[0] };
+    let output_program = if buy { &a[0] } else { &a[10] };
+    let ix = spl_token_2022::instruction::transfer_checked(
+        input_program.key,
+        a[3].key,
+        a[7].key,
+        a[4].key,
+        a[2].key,
+        &[],
+        input,
+        if buy { 6 } else { 9 },
+    )?;
+    invoke_signed(
+        &ix,
+        &[
+            a[3].clone(),
+            a[7].clone(),
+            a[4].clone(),
+            a[2].clone(),
+            input_program.clone(),
+        ],
+        &[],
+    )?;
+    let (_, bump) = Pubkey::find_program_address(&[b"authority", &[0]], &JUPITER);
+    let ix = spl_token_2022::instruction::transfer_checked(
+        output_program.key,
+        a[5].key,
+        a[8].key,
+        a[6].key,
+        a[1].key,
+        &[],
+        output,
+        if buy { 9 } else { 6 },
+    )?;
+    invoke_signed(
+        &ix,
+        &[
+            a[5].clone(),
+            a[8].clone(),
+            a[6].clone(),
+            a[1].clone(),
+            output_program.clone(),
+        ],
+        &[&[b"authority", &[0], &[bump]]],
+    )
+}
+fn account(owner: Pubkey, data: Vec<u8>, extra: u64) -> Account {
+    Account {
+        lamports: Rent::default().minimum_balance(data.len()) + extra,
+        data,
+        owner,
+        executable: false,
+        rent_epoch: 0,
+    }
+}
+fn mint(program: Pubkey, decimals: u8) -> Account {
+    let m = spl_token_2022::state::Mint {
+        mint_authority: COption::None,
+        supply: 1000000,
+        decimals,
+        is_initialized: true,
+        freeze_authority: COption::None,
+    };
+    let mut d = vec![0; 82];
+    spl_token_2022::state::Mint::pack(m, &mut d).unwrap();
+    account(program, d, 0)
+}
+fn token(program: Pubkey, mint: Pubkey, owner: Pubkey, amount: u64) -> Account {
+    let rent = Rent::default().minimum_balance(165);
+    let native = mint == WSOL;
+    let a = spl_token_2022::state::Account {
+        mint,
+        owner,
+        amount,
+        delegate: COption::None,
+        state: spl_token_2022::state::AccountState::Initialized,
+        is_native: if native {
+            COption::Some(rent)
+        } else {
+            COption::None
+        },
+        delegated_amount: 0,
+        close_authority: COption::None,
+    };
+    let mut d = vec![0; 165];
+    spl_token_2022::state::Account::pack(a, &mut d).unwrap();
+    account(program, d, if native { amount } else { 0 })
+}
+fn ata(owner: &Pubkey, mint: &Pubkey, program: &Pubkey) -> Pubkey {
+    get_associated_token_address_with_program_id(owner, mint, program)
+}
+struct Fixture {
+    ctx: ProgramTestContext,
+    owner: Keypair,
+    session: Keypair,
+    vault: Pubkey,
+    input: Pubkey,
+    output: Pubkey,
+    pool_input: Pubkey,
+    pool_output: Pubkey,
+    authority: Pubkey,
+    last_logs: Vec<String>,
+    last_fee: u64,
+}
+impl Fixture {
+    async fn new() -> Self {
+        let owner = Keypair::new();
+        let session = Keypair::new();
+        let (vault, _) =
+            Pubkey::find_program_address(&[b"vault", owner.pubkey().as_ref()], &vault::ID);
+        let (authority, _) = Pubkey::find_program_address(&[b"authority", &[0]], &JUPITER);
+        let input = ata(&vault, &USDG, &spl_token_2022::ID);
+        let output = ata(&vault, &WSOL, &anchor_spl::token::ID);
+        let pool_input = Pubkey::new_unique();
+        let pool_output = Pubkey::new_unique();
+        let mut pt = ProgramTest::new("merrymen_vault", vault::ID, None);
+        // BPF_OUT_DIR makes this same suite exercise the compiled SBF custody program.
+        pt.prefer_bpf(false); // Mock Jupiter stays native; custody and bundled token programs use SBF.
+                              // Use ProgramTest’s bundled real SBF Token, Token-2022 and ATA programs.
+        pt.add_program("mock_jupiter", JUPITER, processor!(mock_jupiter));
+        pt.add_account(
+            owner.pubkey(),
+            account(anchor_lang::system_program::ID, vec![], 100_000_000),
+        );
+        pt.add_account(
+            session.pubkey(),
+            account(anchor_lang::system_program::ID, vec![], 1_000_000),
+        );
+        pt.add_account(USDG, mint(spl_token_2022::ID, 6));
+        pt.add_account(WSOL, mint(anchor_spl::token::ID, 9));
+        pt.add_account(input, token(spl_token_2022::ID, USDG, vault, 1000));
+        pt.add_account(output, token(anchor_spl::token::ID, WSOL, vault, 0));
+        pt.add_account(pool_input, token(spl_token_2022::ID, USDG, authority, 1000));
+        pt.add_account(
+            pool_output,
+            token(anchor_spl::token::ID, WSOL, authority, 10000),
+        );
+        pt.add_account(
+            authority,
+            account(anchor_lang::system_program::ID, vec![], 1),
+        );
+        pt.add_account(
+            ata(&owner.pubkey(), &USDG, &spl_token_2022::ID),
+            token(spl_token_2022::ID, USDG, owner.pubkey(), 0),
+        );
+        pt.add_account(
+            ata(&owner.pubkey(), &WSOL, &anchor_spl::token::ID),
+            token(anchor_spl::token::ID, WSOL, owner.pubkey(), 0),
+        );
+        let ctx = pt.start_with_context().await;
+        let mut f = Self {
+            ctx,
+            owner,
+            session,
+            vault,
+            input,
+            output,
+            pool_input,
+            pool_output,
+            authority,
+            last_logs: Vec::new(),
+            last_fee: 0,
+        };
+        let init = Instruction {
+            program_id: vault::ID,
+            accounts: vault::accounts::InitializeVault {
+                vault: f.vault,
+                owner: f.owner.pubkey(),
+                system_program: anchor_lang::system_program::ID,
+            }
+            .to_account_metas(None),
+            data: vault::instruction::InitializeVault {}.data(),
+        };
+        let session = f.session_ix(100, 150);
+        f.owner_send(vec![init, session]).await.unwrap();
+        f
+    }
+    fn session_ix(&self, per_trade: u64, daily: u64) -> Instruction {
+        Instruction {
+            program_id: vault::ID,
+            accounts: vault::accounts::OwnerAuthority {
+                vault: self.vault,
+                owner: self.owner.pubkey(),
+            }
+            .to_account_metas(None),
+            data: vault::instruction::CreateSession {
+                session: self.session.pubkey(),
+                per_trade,
+                daily,
+                max_ops: 10,
+                expires_at: 4_000_000_000,
+            }
+            .data(),
+        }
+    }
+    async fn owner_send(
+        &mut self,
+        ix: Vec<Instruction>,
+    ) -> std::result::Result<(), solana_program_test::BanksClientError> {
+        let hash = self.ctx.banks_client.get_latest_blockhash().await.unwrap();
+        let tx = Transaction::new_signed_with_payer(
+            &ix,
+            Some(&self.ctx.payer.pubkey()),
+            &[&self.ctx.payer, &self.owner],
+            hash,
+        );
+        self.ctx.banks_client.process_transaction(tx).await
+    }
+    async fn swap(
+        &mut self,
+        ix: Instruction,
+    ) -> std::result::Result<(), solana_program_test::BanksClientError> {
+        let hash = self.ctx.banks_client.get_latest_blockhash().await.unwrap();
+        let tx = Transaction::new_signed_with_payer(
+            &[ix],
+            Some(&self.ctx.payer.pubkey()),
+            &[&self.ctx.payer, &self.session],
+            hash,
+        );
+        self.last_fee = self
+            .ctx
+            .banks_client
+            .get_fee_for_message(tx.message.clone())
+            .await?
+            .expect("a fresh signed message has a fee estimate");
+        let result = self
+            .ctx
+            .banks_client
+            .process_transaction_with_metadata(tx)
+            .await?;
+        self.last_logs = result.metadata.map(|m| m.log_messages).unwrap_or_default();
+        result.result.map_err(Into::into)
+    }
+    fn swap_event(&self) -> vault::SwapExecuted {
+        let data = self
+            .last_logs
+            .iter()
+            .filter_map(|line| line.strip_prefix("Program data: "))
+            .filter_map(|data| base64::engine::general_purpose::STANDARD.decode(data).ok())
+            .find(|data| data.len() == 208 && data[..8] == [150, 166, 26, 225, 28, 89, 38, 79])
+            .expect("successful swap emits its custody event");
+        vault::SwapExecuted::deserialize(&mut &data[8..]).unwrap()
+    }
+    async fn state(&mut self) -> Vault {
+        let a = self
+            .ctx
+            .banks_client
+            .get_account(self.vault)
+            .await
+            .unwrap()
+            .unwrap();
+        Vault::try_deserialize(&mut a.data.as_slice()).unwrap()
+    }
+    async fn balance(&mut self, key: Pubkey) -> u64 {
+        let a = self
+            .ctx
+            .banks_client
+            .get_account(key)
+            .await
+            .unwrap()
+            .unwrap();
+        spl_token_2022::state::Account::unpack(&a.data)
+            .unwrap()
+            .amount
+    }
+    async fn swap_ix(&mut self, seq: u64, epoch: u64, mode: u8) -> Instruction {
+        let clock: Clock = self.ctx.banks_client.get_sysvar().await.unwrap();
+        let (swap, _) = Pubkey::find_program_address(
+            &[b"swap", self.vault.as_ref(), &seq.to_le_bytes()],
+            &vault::ID,
+        );
+        let buy = mode < 3;
+        let (
+            input_mint,
+            output_mint,
+            input_program,
+            output_program,
+            vault_input,
+            vault_output,
+            pool_input,
+            pool_output,
+            quote,
+        ) = if buy {
+            (
+                USDG,
+                WSOL,
+                spl_token_2022::ID,
+                anchor_spl::token::ID,
+                self.input,
+                self.output,
+                self.pool_input,
+                self.pool_output,
+                200u64,
+            )
+        } else {
+            (
+                WSOL,
+                USDG,
+                anchor_spl::token::ID,
+                spl_token_2022::ID,
+                self.output,
+                self.input,
+                self.pool_output,
+                self.pool_input,
+                100u64,
+            )
+        };
+        let temp = ata(&swap, &input_mint, &input_program);
+        let mut accounts = vault::accounts::ExecuteSwap {
+            vault: self.vault,
+            session_signer: self.session.pubkey(),
+            fee_payer: self.ctx.payer.pubkey(),
+            input_mint,
+            output_mint,
+            vault_input,
+            vault_output,
+            swap_authority: swap,
+            temp_input: temp,
+            input_token_program: input_program,
+            output_token_program: output_program,
+            jupiter_program: JUPITER,
+            associated_token_program: anchor_spl::associated_token::ID,
+            system_program: anchor_lang::system_program::ID,
+            owner_refund: ata(&self.owner.pubkey(), &input_mint, &input_program),
+        }
+        .to_account_metas(None);
+        accounts.extend([
+            AccountMeta::new_readonly(anchor_spl::token::ID, false),
+            AccountMeta::new_readonly(self.authority, false),
+            AccountMeta::new_readonly(swap, false),
+            AccountMeta::new(temp, false),
+            AccountMeta::new(pool_input, false),
+            AccountMeta::new(pool_output, false),
+            AccountMeta::new(vault_output, false),
+            AccountMeta::new_readonly(input_mint, false),
+            AccountMeta::new_readonly(output_mint, false),
+            AccountMeta::new_readonly(JUPITER, false),
+            AccountMeta::new_readonly(spl_token_2022::ID, false),
+        ]);
+        let mut route_data = vec![0; 32];
+        route_data[..8].copy_from_slice(&SHARED_ROUTE);
+        route_data[8] = mode;
+        route_data[13..21].copy_from_slice(&100u64.to_le_bytes());
+        route_data[21..29].copy_from_slice(&quote.to_le_bytes());
+        route_data[29..31].copy_from_slice(&100u16.to_le_bytes());
+        Instruction {
+            program_id: vault::ID,
+            accounts,
+            data: vault::instruction::ExecuteSwap {
+                expected_seq: seq,
+                session_epoch: epoch,
+                amount_in: 100,
+                min_out: quote * 99 / 100,
+                deadline: clock.unix_timestamp + 29,
+                slippage_bps: 100,
+                route_data,
+            }
+            .data(),
+        }
+    }
+}
+#[tokio::test]
+#[ignore = "requires the compiled custody SBF artifact; run contracts/solana/test.sh"]
+async fn successful_cpi_is_bounded_replay_safe_and_budget_survives_session_replacement() {
+    let mut f = Fixture::new().await;
+    let ix = f.swap_ix(0, 1, 0).await;
+    let temp = ix.accounts[8].pubkey;
+    f.swap(ix).await.unwrap();
+    assert_eq!(f.balance(f.input).await, 900);
+    assert_eq!(f.balance(f.output).await, 200);
+    assert!(f
+        .ctx
+        .banks_client
+        .get_account(temp)
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(f.state().await.seq, 1);
+    let stale = f.swap_ix(0, 1, 0).await;
+    assert!(f.swap(stale).await.is_err());
+    let session = f.session_ix(100, 150);
+    f.owner_send(vec![session]).await.unwrap();
+    let state = f.state().await;
+    assert_eq!(state.seq, 1);
+    assert_eq!(state.session_epoch, 2);
+    assert_eq!(state.debits.len(), 1);
+    let too_much = f.swap_ix(1, 2, 0).await;
+    assert!(f.swap(too_much).await.is_err());
+    assert_eq!(f.balance(f.input).await, 900);
+}
+#[tokio::test]
+#[ignore = "requires the compiled custody SBF artifact; run contracts/solana/test.sh"]
+async fn failed_output_and_authority_smuggling_roll_back_every_balance_and_sequence() {
+    let mut f = Fixture::new().await;
+    let bad = f.swap_ix(0, 1, 1).await;
+    assert!(f.swap(bad).await.is_err());
+    assert_eq!(f.balance(f.input).await, 1000);
+    assert_eq!(f.balance(f.output).await, 0);
+    assert_eq!(f.state().await.seq, 0);
+    let mut bad = f.swap_ix(0, 1, 0).await;
+    bad.accounts.push(AccountMeta::new(f.input, false));
+    assert!(f.swap(bad).await.is_err());
+    let mut bad = f.swap_ix(0, 1, 0).await;
+    bad.accounts
+        .push(AccountMeta::new_readonly(f.session.pubkey(), true));
+    assert!(f.swap(bad).await.is_err());
+    assert_eq!(f.balance(f.input).await, 1000);
+}
+
+#[tokio::test]
+#[ignore = "requires the compiled custody SBF artifact; run contracts/solana/test.sh"]
+async fn donations_and_route_dust_return_to_custody_without_resetting_budget() {
+    let mut f = Fixture::new().await;
+    let ix = f.swap_ix(0, 1, 2).await;
+    let temp = ix.accounts[8].pubkey;
+    let authority = ix.accounts[7].pubkey;
+    f.ctx
+        .set_account(&temp, &token(spl_token_2022::ID, USDG, authority, 7).into());
+    f.swap(ix).await.unwrap();
+    assert_eq!(f.balance(f.input).await, 910);
+    let event = f
+        .last_logs
+        .iter()
+        .filter_map(|line| line.strip_prefix("Program data: "))
+        .filter_map(|data| base64::engine::general_purpose::STANDARD.decode(data).ok())
+        .find(|data| data.len() == 208 && data[..8] == [150, 166, 26, 225, 28, 89, 38, 79])
+        .unwrap();
+    let amount_in = u64::from_le_bytes(event[184..192].try_into().unwrap());
+    assert_eq!(amount_in, 1000 - f.balance(f.input).await);
+    assert_eq!(amount_in, 90);
+
+    assert_eq!(
+        f.balance(ata(&f.owner.pubkey(), &USDG, &spl_token_2022::ID))
+            .await,
+        7
+    );
+    assert_eq!(f.balance(f.output).await, 200);
+    assert_eq!(f.state().await.debits[0].notional, 100);
+}
+
+#[tokio::test]
+#[ignore = "requires the compiled custody SBF artifact; run contracts/solana/test.sh"]
+async fn system_prefunding_is_initialized_and_only_preexisting_lamports_offset_the_fee() {
+    // Cover a top-up below token rent and excess funding above token rent.
+    // Both deposits are ordinary owner-signed system transfers, not injected token state.
+    for prefunding in [900_000, Rent::default().minimum_balance(165) + 1234] {
+        let mut f = Fixture::new().await;
+        let ix = f.swap_ix(0, 1, 0).await;
+        let temp = ix.accounts[8].pubkey;
+        f.owner_send(vec![solana_sdk::system_instruction::transfer(
+            &f.owner.pubkey(),
+            &temp,
+            prefunding,
+        )])
+        .await
+        .unwrap();
+        let before = f.ctx.banks_client.get_account(temp).await.unwrap().unwrap();
+        assert_eq!(before.owner, anchor_lang::system_program::ID);
+        assert!(before.data.is_empty());
+        assert_eq!(before.lamports, prefunding);
+        let payer_before = f
+            .ctx
+            .banks_client
+            .get_balance(f.ctx.payer.pubkey())
+            .await
+            .unwrap();
+        let owner_refund = ix.accounts[14].pubkey;
+        let owner_lamports = f.ctx.banks_client.get_balance(owner_refund).await.unwrap();
+
+        f.swap(ix).await.unwrap();
+
+        assert!(f
+            .ctx
+            .banks_client
+            .get_account(temp)
+            .await
+            .unwrap()
+            .is_none());
+        let payer_after = f
+            .ctx
+            .banks_client
+            .get_balance(f.ctx.payer.pubkey())
+            .await
+            .unwrap();
+        assert_eq!(payer_after, payer_before - f.last_fee + prefunding);
+        assert_eq!(f.balance(owner_refund).await, 0);
+        assert_eq!(
+            f.ctx.banks_client.get_balance(owner_refund).await.unwrap(),
+            owner_lamports
+        );
+        assert_eq!(f.balance(f.input).await, 900);
+        assert_eq!(f.balance(f.output).await, 200);
+        let event = f.swap_event();
+        assert_eq!(event.input_mint, USDG);
+        assert_eq!(event.amount_in, 1000 - f.balance(f.input).await);
+        assert_eq!(event.amount_out, f.balance(f.output).await);
+        assert_eq!(f.state().await.seq, 1);
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires the compiled custody SBF artifact; run contracts/solana/test.sh"]
+async fn wsol_donation_moves_native_backing_to_owner_and_only_remaining_lamports_refund_payer() {
+    let mut f = Fixture::new().await;
+    let buy = f.swap_ix(0, 1, 0).await;
+    f.swap(buy).await.unwrap();
+    let session = f.session_ix(100, 500);
+    f.owner_send(vec![session]).await.unwrap();
+    let sell = f.swap_ix(1, 2, 3).await;
+    let temp = sell.accounts[8].pubkey;
+    let swap = sell.accounts[7].pubkey;
+    let refund = sell.accounts[14].pubkey;
+    let donated_tokens = 7;
+    let unsynced_lamports = 13;
+    f.owner_send(vec![
+        anchor_spl::associated_token::spl_associated_token_account::instruction::create_associated_token_account_idempotent(
+            &f.owner.pubkey(), &swap, &WSOL, &anchor_spl::token::ID,
+        ),
+        solana_sdk::system_instruction::transfer(&f.owner.pubkey(), &temp, donated_tokens),
+        spl_token_2022::instruction::sync_native(&anchor_spl::token::ID, &temp).unwrap(),
+        // An unsynced native transfer changes lamports, not the stored token amount.
+        solana_sdk::system_instruction::transfer(&f.owner.pubkey(), &temp, unsynced_lamports),
+    ]).await.unwrap();
+    let before = f.ctx.banks_client.get_account(temp).await.unwrap().unwrap();
+    let tokens = spl_token_2022::state::Account::unpack(&before.data).unwrap();
+    assert_eq!(before.owner, anchor_spl::token::ID);
+    assert_eq!(tokens.owner, swap);
+    assert_eq!(tokens.mint, WSOL);
+    assert_eq!(tokens.amount, donated_tokens);
+    let reserve = match tokens.is_native {
+        COption::Some(reserve) => reserve,
+        _ => panic!("WSOL requires its native reserve"),
+    };
+    assert_eq!(
+        before.lamports,
+        reserve + donated_tokens + unsynced_lamports
+    );
+    let payer_before = f
+        .ctx
+        .banks_client
+        .get_balance(f.ctx.payer.pubkey())
+        .await
+        .unwrap();
+    let refund_before = f.ctx.banks_client.get_balance(refund).await.unwrap();
+    let vault_input_before = f.ctx.banks_client.get_balance(f.output).await.unwrap();
+
+    f.swap(sell).await.unwrap();
+
+    assert!(f
+        .ctx
+        .banks_client
+        .get_account(temp)
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(f.balance(refund).await, donated_tokens);
+    assert_eq!(
+        f.ctx.banks_client.get_balance(refund).await.unwrap(),
+        refund_before + donated_tokens
+    );
+    let payer_after = f
+        .ctx
+        .banks_client
+        .get_balance(f.ctx.payer.pubkey())
+        .await
+        .unwrap();
+    // This is exactly the settlement verifier's pre-lamports minus pre-token rule.
+    assert_eq!(
+        payer_after,
+        payer_before - f.last_fee + before.lamports - tokens.amount
+    );
+    assert_eq!(
+        f.ctx.banks_client.get_balance(f.output).await.unwrap(),
+        vault_input_before - 100
+    );
+    assert_eq!(f.balance(f.output).await, 100);
+    assert_eq!(f.balance(f.input).await, 1000);
+    let event = f.swap_event();
+    assert_eq!(event.input_mint, WSOL);
+    assert_eq!(event.amount_in, 200 - f.balance(f.output).await);
+    assert_eq!(event.amount_out, f.balance(f.input).await - 900);
+    assert_eq!(f.state().await.seq, 2);
+    assert_eq!(f.state().await.debits[1].notional, 100);
+}
+#[tokio::test]
+#[ignore = "requires the compiled custody SBF artifact; run contracts/solana/test.sh"]
+async fn sell_checks_actual_cash_proceeds_and_breaker_only_owner_can_reset() {
+    let mut f = Fixture::new().await;
+    let buy = f.swap_ix(0, 1, 0).await;
+    f.swap(buy).await.unwrap();
+    let new_session = f.session_ix(100, 500);
+    f.owner_send(vec![new_session]).await.unwrap();
+    let breaker = |authority, paused| Instruction {
+        program_id: vault::ID,
+        accounts: vault::accounts::BreakerAuthority {
+            vault: f.vault,
+            authority,
+        }
+        .to_account_metas(None),
+        data: vault::instruction::SetBreaker { paused }.data(),
+    };
+    let pause = breaker(f.session.pubkey(), true);
+    let unpause = breaker(f.session.pubkey(), false);
+    f.swap(pause).await.unwrap();
+    assert!(f.swap(unpause).await.is_err());
+    let bad_buy = f.swap_ix(1, 2, 0).await;
+    assert!(f.swap(bad_buy).await.is_err());
+    let excessive = f.swap_ix(1, 2, 4).await;
+    assert!(f.swap(excessive).await.is_err());
+    assert_eq!(f.balance(f.input).await, 900);
+    assert_eq!(f.balance(f.output).await, 200);
+    let sell = f.swap_ix(1, 2, 3).await;
+    f.swap(sell).await.unwrap();
+    assert_eq!(f.balance(f.input).await, 1000);
+    assert_eq!(f.balance(f.output).await, 100);
+    assert_eq!(f.state().await.seq, 2);
+}
+#[tokio::test]
+#[ignore = "requires the compiled custody SBF artifact; run contracts/solana/test.sh"]
+async fn owner_recovery_works_after_revoke_and_cannot_redirect_to_other_owner() {
+    let mut f = Fixture::new().await;
+    let revoke = Instruction {
+        program_id: vault::ID,
+        accounts: vault::accounts::OwnerAuthority {
+            vault: f.vault,
+            owner: f.owner.pubkey(),
+        }
+        .to_account_metas(None),
+        data: vault::instruction::RevokeAll {}.data(),
+    };
+    f.owner_send(vec![revoke]).await.unwrap();
+    let bad = f.swap_ix(0, 1, 0).await;
+    assert!(f.swap(bad).await.is_err());
+    let destination = ata(&f.owner.pubkey(), &USDG, &spl_token_2022::ID);
+    f.ctx.set_account(
+        &destination,
+        &token(spl_token_2022::ID, USDG, f.owner.pubkey(), 0).into(),
+    );
+    let mut withdraw = Instruction {
+        program_id: vault::ID,
+        accounts: vault::accounts::Withdraw {
+            vault: f.vault,
+            owner: f.owner.pubkey(),
+            mint: USDG,
+            vault_token: f.input,
+            owner_token: destination,
+            token_program: spl_token_2022::ID,
+        }
+        .to_account_metas(None),
+        data: vault::instruction::Withdraw { amount: 1000 }.data(),
+    };
+    let good = withdraw.clone();
+    withdraw.accounts[4].pubkey = f.pool_input;
+    assert!(f.owner_send(vec![withdraw]).await.is_err());
+    f.owner_send(vec![good]).await.unwrap();
+    assert_eq!(f.balance(f.input).await, 0);
+    assert_eq!(f.balance(destination).await, 1000);
+    assert_eq!(f.state().await.seq, 1);
+}
+
+#[tokio::test]
+#[ignore = "requires the compiled custody SBF artifact; run contracts/solana/test.sh"]
+async fn native_recovery_preserves_rent_and_requires_owner() {
+    let mut f = Fixture::new().await;
+    let reserve = f.ctx.banks_client.get_balance(f.vault).await.unwrap();
+    let deposit = solana_sdk::system_instruction::transfer(&f.owner.pubkey(), &f.vault, 100);
+    f.owner_send(vec![deposit]).await.unwrap();
+    let withdraw = |owner, amount| Instruction {
+        program_id: vault::ID,
+        accounts: vault::accounts::OwnerNativeWithdraw {
+            vault: f.vault,
+            owner,
+        }
+        .to_account_metas(None),
+        data: vault::instruction::WithdrawSol { amount }.data(),
+    };
+    let bad = withdraw(f.session.pubkey(), 100);
+    let excessive = withdraw(f.owner.pubkey(), 101);
+    let good = withdraw(f.owner.pubkey(), 100);
+    assert!(f.swap(bad).await.is_err());
+    assert!(f.owner_send(vec![excessive]).await.is_err());
+    f.owner_send(vec![good]).await.unwrap();
+    assert_eq!(
+        f.ctx.banks_client.get_balance(f.vault).await.unwrap(),
+        reserve
+    );
+    assert_eq!(f.state().await.seq, 1);
+}
+
+#[test]
+#[ignore = "run with complete custody verification suite"]
+fn jupiter_discriminator_matches_official_anchor_method() {
+    assert_eq!(
+        SHARED_ROUTE,
+        solana_sdk::hash::hash(b"global:shared_accounts_route").to_bytes()[..8]
+    );
+}

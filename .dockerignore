@@ -23,3 +23,5 @@ tenant-settings
 *.log
 contracts/artifacts
 contracts/cache
+contracts/solana/target
+contracts/solana/runtime-tests/target

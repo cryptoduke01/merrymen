@@ -1,0 +1,94 @@
+# Bounded Solana custody (local source and tests)
+
+This directory contains an actual Anchor 0.32.1 custody program and a shared ABI
+in `packages/core/src/solana-live.ts`. It is **not deployed**. The declared public
+program ID is a local test identity only. A live runtime must explicitly configure
+an immutable deployment, verify its executable bytes against the reviewed SBF
+binary hash, and verify the finalized owner/session state before enabling trades.
+The runtime hash covers the entire ProgramData executable region after its
+45-byte loader metadata, including allocation padding. The local `.so` hash is
+the same only for an exact-sized allocation; otherwise the release process must
+verify artifact bytes and known zero padding before recording the region hash.
+The source does not include a deployment wallet or any owner/session private key.
+
+## Authority and execution
+
+The vault PDA is derived from `["vault", owner]`. Only the owner can initialize,
+replace a session, revoke all sessions, clear the breaker or withdraw custody
+assets. `withdraw_sol` also recovers native SOL accidentally sent to the vault,
+while preserving its rent reserve and permanent sequence/history. Token withdrawals require the owner's canonical token account, remain available
+when paused/expired/revoked and increment the sequence to invalidate prepared
+swaps. `OwnerWithdrawal` identifies the amount, mint and consumed sequence.
+
+A session is a signing public key with a positive per-trade cap, a
+rolling 24-hour USDG cap, at most 96 operations per rolling day, and an expiry.
+Replacing a session increments its epoch; it preserves the sequence, debit
+history and breaker. Revocation removes session authority and sets the breaker.
+The session can set the sticky breaker but only the owner can clear it. A breaker
+blocks buys; exits remain subject to all caps, expiry, sequence and output checks.
+There is no on-chain portfolio price oracle: drawdown valuation is a worker
+responsibility and must fail closed when marks are stale or unproven.
+
+Every swap binds the expected sequence and session epoch. A distinct fee payer
+pays the transaction and temporary-account rent; it never receives custody
+signing authority. The program transfers exactly the authorized amount to the
+input ATA of a per-sequence PDA `["swap", vault, seq_le_u64]`. That PDA is the
+**only** signer forwarded to a Jupiter CPI. Vault state, owner, session, fee payer,
+source custody ATA, owner refund ATA, and other custody-owned token accounts are forbidden in the
+CPI account list. The single allowed custody token account is the destination
+ATA, which Jupiter can credit but cannot debit without the vault signer.
+
+The program pins Jupiter's v6 program ID and accepts only its ExactIn
+`sharedAccountsRoute` discriminator, bound input, output floor, zero platform fee
+and at most 100 bps slippage. Jupiter validates the remainder of the route data.
+The input amount exposed to CPI is bounded independently of route internals.
+Output is measured from actual custody balance deltas. Unspent input returns to
+the vault, the temporary ATA closes and refunds its rent to the fee payer. Prior
+unsolicited deposits to the temporary ATA are refunded to the owner’s canonical
+input ATA before measuring input, so a publicly predictable address does not create a donation denial of
+service. Success increments the sequence and emits `SwapExecuted`; any failed
+check rolls back the CPI, balances, debit history and sequence atomically.
+
+Buy budgets conservatively charge the full authorized USDG input even when dust
+returns. Sell budgets charge actual USDG received, with a preflight check of the
+guaranteed minimum and a final atomic check of actual proceeds. Both directions
+consume the global operation budget. Session replacement never replenishes it.
+
+## Initial live asset scope
+
+This first live version supports **USDG ↔ wrapped SOL only**. USDG is pinned to
+its mainnet Token-2022 mint with six decimals. Wrapped SOL is pinned to the
+classic SPL token mint with nine decimals. It does not yet authorize arbitrary
+memecoins or other SPL/Token-2022 assets. General-token support requires a new
+reviewed program version and matching runtime checks.
+
+USDG's known issuer-controlled mint/freeze/permanent-delegate and confidential
+configuration authorities are an explicit cash-token trust assumption. Metadata
+and known non-fee issuer extensions are accepted; active or scheduled nonzero
+transfer fees, configured transfer hooks and unknown extensions fail closed.
+This assumption does not permit arbitrary token issuers. Custody/source/output
+accounts must be unfrozen and have no delegate or close authority.
+
+## Local verification
+
+```
+cargo test --manifest-path contracts/solana/Cargo.toml --lib
+cargo-build-sbf --manifest-path contracts/solana/programs/merrymen-vault/Cargo.toml \
+  --sbf-out-dir contracts/solana/target/deploy
+BPF_OUT_DIR="$PWD/contracts/solana/target/deploy" \
+  cargo test --manifest-path contracts/solana/runtime-tests/Cargo.toml --test custody -- --ignored
+node --import tsx --test packages/core/src/solana-live.test.ts
+```
+
+The runtime tests are explicitly ignored by plain `cargo test` because Anchor
+0.32.1 cannot run its CPIs in the native processor. The separate runtime-tests
+workspace keeps the current host SVM dependencies out of the SBF Rust1.84 build. `test.sh` builds the SBF
+artifact and runs these required tests. A missing artifact is an error.
+
+The runtime harness uses generated, unfunded local identities, synthetic token
+accounts, ProgramTest’s bundled real SBF SPL/Token-2022/ATA programs and a pinned
+mock Jupiter processor. It exercises SPL/Token-2022 CPIs,
+authority exclusion, atomic rollback, sequence replay and session replacement.
+It is not evidence of a mainnet Jupiter fill. An actual mainnet deployment,
+external security review, production immutable-binary verification and an
+owner-authorized funded acceptance trade remain separate release gates.
