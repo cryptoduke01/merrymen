@@ -1,4 +1,4 @@
-import { solanaSecretIn } from "./ids";
+import { secretScanBudget, solanaSecretIn, type SecretScanBudget } from "./ids";
 
 /**
  * Hosted mode — the single switch that turns merrymen from a self-hosted
@@ -87,8 +87,11 @@ export function carriesOwnerKey(obj: unknown): boolean {
  * object it holds: base64 shares most of base58's alphabet, so runs of the
  * blob's own text are base58 candidates that mean nothing. Anything there that
  * is not a ZeroDev blob is scanned as written.
+ *
+ * Every scan in one walk shares one budget (secretScanBudget), so key-shaped
+ * runs split across many strings cannot make the walk read each of them.
  */
-function carriesSolanaSecret(obj: unknown): boolean {
+function carriesSolanaSecret(obj: unknown, budget: SecretScanBudget = secretScanBudget()): boolean {
   let found = false;
   let blob: object | null = null;
   let json: string;
@@ -99,13 +102,13 @@ function carriesSolanaSecret(obj: unknown): boolean {
         blob = zeroDevParams(val);
         if (blob !== null) return undefined;
       }
-      if (solanaSecretIn(val)) found = true;
+      if (solanaSecretIn(val, budget)) found = true;
       return val;
     });
   } catch {
     return false;
   }
-  return found || solanaSecretIn(json) || (blob !== null && carriesSolanaSecret(blob));
+  return found || solanaSecretIn(json, budget) || (blob !== null && carriesSolanaSecret(blob, budget));
 }
 
 /**

@@ -111,6 +111,23 @@ describe("a real grant carrying a Solana secret key is refused", () => {
     assert.equal(carriesOwnerKey({ ...g, serialized: SOL.b58 }), true);
   });
 
+  it("and a hostile grant is read in bounded time", async () => {
+    const g = (await minted)[0]!;
+    // Any signed-in user reaches this from POST /api/grants. A label of small
+    // byte values that fails at its end once backtracked for seconds per value.
+    const label = `[${[...Array(22).fill("11"), ...Array(41).fill("1"), "999"].join(",")}]`;
+    let started = performance.now();
+    assert.equal(carriesOwnerKey({ ...g, label }), false);
+    assert.ok(performance.now() - started < 250, `label took ${Math.round(performance.now() - started)} ms`);
+
+    // Key-shaped runs split across fields share the walk's one cap, and past it
+    // the grant is refused rather than read run by run.
+    const fields = Object.fromEntries(Array.from({ length: 2_000 }, (_, i) => [`f${i}`, SOL.sig]));
+    started = performance.now();
+    assert.equal(carriesOwnerKey({ ...g, ...fields }), true);
+    assert.ok(performance.now() - started < 1_000, `fields took ${Math.round(performance.now() - started)} ms`);
+  });
+
   it("and halts the hosted boot", async () => {
     const grants = await minted;
     process.env.MERRYMEN_HOSTED = "1";

@@ -296,29 +296,67 @@ export function isSolanaKeypair(bytes: Uint8Array): boolean {
   }
 }
 
-/** A JSON array of exactly 64 byte values: the Solana CLI's id.json shape. */
-const BYTE_ARRAY_64 = /\[\s*(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\s*,\s*){63}(?:25[0-5]|2[0-4]\d|1?\d?\d)\s*\]/g;
+/**
+ * A JSON array of exactly 64 byte values: the Solana CLI's id.json shape.
+ *
+ * Each value has ONE way to match. `1?\d?\d` read "11" as 1+1 or as 11, so a
+ * long array of small values that failed at its end backtracked through every
+ * split, doubling per value: a 150-byte text held the process for seconds.
+ * JSON writes no leading zeros, so `[1-9]?\d` loses nothing.
+ */
+const BYTE = String.raw`(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)`;
+const BYTE_ARRAY_64 = new RegExp(String.raw`\[\s*(?:${BYTE}\s*,\s*){63}${BYTE}\s*\]`, "g");
+
+/**
+ * How many key-shaped candidates one scan reads. Reading one costs a base58
+ * decode, and a keypair check an ed25519 scalar multiplication (about 0.4 ms),
+ * so an uncapped scan let a text of 64-byte runs hold the process for seconds
+ * per megabyte. Past the cap every further candidate counts as a secret
+ * unread: a false alarm on a text no owner sends, never a key let through.
+ */
+const SECRET_CANDIDATES = 256;
+
+/** The candidates a secret scan may still read. Hand one to several scans to cap them together. */
+export type SecretScanBudget = { left: number };
+
+/** A fresh budget of SECRET_CANDIDATES candidates. */
+export function secretScanBudget(): SecretScanBudget {
+  return { left: SECRET_CANDIDATES };
+}
 
 /**
  * Whether a text carries a Solana secret key: a base58 string or a JSON byte
  * array decoding to a 64-byte keypair (isSolanaKeypair). For the secret
  * backstops (the hosted owner-key guard, the Telegram agent's secret screen).
  */
-export function solanaSecretIn(text: unknown): boolean {
-  return solanaSecretsIn(text).length > 0;
+export function solanaSecretIn(text: unknown, budget?: SecretScanBudget): boolean {
+  return solanaSecretsIn(text, budget).length > 0;
 }
 
-/** Every Solana secret key in a text (solanaSecretIn), exactly as written, so a redactor can strip each one. */
-export function solanaSecretsIn(text: unknown): string[] {
+/**
+ * Every Solana secret key in a text (solanaSecretIn), exactly as written, so a
+ * redactor can strip each one. A candidate past the budget is returned as a
+ * secret without being read (SECRET_CANDIDATES).
+ */
+export function solanaSecretsIn(text: unknown, budget: SecretScanBudget = secretScanBudget()): string[] {
   if (typeof text !== "string" || text.length < 64) return [];
   const found: string[] = [];
   for (const m of text.matchAll(BASE58_IN_TEXT)) {
-    const b = base58Decode(m[0]);
-    if (b && b.length === 64 && isSolanaKeypair(b)) found.push(m[0]);
+    // 64 bytes never encode shorter than 64 characters, so a shorter run (an
+    // address) is no candidate and costs nothing.
+    if (m[0].length < 64) continue;
+    if (budget.left-- <= 0) found.push(m[0]);
+    else {
+      const b = base58Decode(m[0]);
+      if (b && b.length === 64 && isSolanaKeypair(b)) found.push(m[0]);
+    }
   }
   for (const m of text.matchAll(BYTE_ARRAY_64)) {
-    const nums = m[0].slice(1, -1).split(",").map((x) => Number(x.trim()));
-    if (nums.length === 64 && isSolanaKeypair(Uint8Array.from(nums))) found.push(m[0]);
+    if (budget.left-- <= 0) found.push(m[0]);
+    else {
+      const nums = m[0].slice(1, -1).split(",").map((x) => Number(x.trim()));
+      if (nums.length === 64 && isSolanaKeypair(Uint8Array.from(nums))) found.push(m[0]);
+    }
   }
   return found;
 }
