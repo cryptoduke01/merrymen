@@ -9,7 +9,7 @@ import { SETTINGS_DEFAULTS } from "../../../packages/core/src/index";
 import { everyBand } from "../class-evidence";
 import type { LlmCreds } from "../llm";
 import { similarity } from "../social-post";
-import { admitXPost, vocabularyRefusal, withoutDisclosure, XPOST_MAX_CHARS, type BaseGate } from "./gate";
+import { admitXPost, sourceNamed, vocabularyRefusal, withoutDisclosure, XPOST_MAX_CHARS, type BaseGate } from "./gate";
 import {
   BUY_GLOSS,
   INTRO_NEXT,
@@ -24,14 +24,17 @@ import {
   SHERWOOD_ON_X,
   buyPrompt,
   casualPrompt,
+  checkPrompt,
   describeXpostCreds,
   draft,
   greetingAnswers,
   introPrompt,
   introTemplate,
+  insightPrompt,
   modelAnswer,
   modelAnswers,
   replyPrompt,
+  sellPrompt,
   sherwoodClaimed,
   sherwoodMentioned,
   sherwoodNamed,
@@ -1220,5 +1223,41 @@ describe("an active agent's answers and conversation memory", () => {
     const talked = ["people keep asking how i pick launches, honestly it's mostly patience"];
     assert.match(all(casualPrompt({ ...CASUAL, tradeTalk: true, talked })), /answering people/);
     assert.doesNotMatch(all(casualPrompt({ ...CASUAL, tradeTalk: false, talked })), /answering people/);
+  });
+});
+
+describe("an active owner is told never to name the chain (the owner, 2026-10-18)", () => {
+  const RULE = /Never name the chain you trade on or any data provider, even if someone else did\./;
+  /** Every prompt kind an active owner is drafted with, for these facts. */
+  const prompts = (f: WriterFacts): [string, Prompt][] => [
+    ["intro", introPrompt(f)],
+    ["buy", buyPrompt({ ...BUY, ...f })],
+    ["sell", sellPrompt({ ...f, coin: "pepe", paper: false, outcome: "profit" })],
+    ["casual", casualPrompt({ ...CASUAL, ...f })],
+    ["trade-talk", casualPrompt({ ...CASUAL, ...f, tradeTalk: true })],
+    ["insight", insightPrompt({ ...f, read: ["the big coins are all up a little on the day"] })!],
+    ["reply", replyPrompt({ ...f, parentBody: "picked up pepe, the curve looked early", comment: "why pepe?", coin: "pepe", paper: true })],
+    ["answer", answerPrompt({ ...f, question: "how's your day going?", recentBuys: [], said: [], walletPublic: false })],
+    ["answer, looked up", answerPrompt({ ...f, question: "thoughts on this coin?", recentBuys: [], said: [], walletPublic: false, intent: "coin", research: ["the public index shows liquidity is thin"] })],
+    ["check", checkPrompt({ ...f, question: "larp check?", research: ["looks real", "the site is up"] })],
+  ];
+  it("every prompt kind says it for an active owner, and names neither the chain nor a provider in saying it", () => {
+    for (const [kind, p] of prompts({ ...BASE, house: true })) {
+      assert.match(p.system, RULE, kind);
+      assert.equal(sourceNamed(all(p)), false, kind);
+      // The rule names neither: what the model is shown, it repeats ("robinhood" alone is the house-claim rule's, as before).
+      for (const line of p.system.split("\n").filter((l) => RULE.test(l))) assert.doesNotMatch(line, /robin|hood|gecko|bitquery/i, kind);
+    }
+  });
+  it("every other owner's prompts are as before", () => {
+    for (const [kind, p] of prompts(BASE)) {
+      assert.doesNotMatch(all(p), RULE, kind);
+      assert.equal(sourceNamed(all(p)), false, kind);
+    }
+    // The rule is the one line the flag adds.
+    const lines = (p: Prompt) => p.system.split("\n");
+    for (const [[kind, house], [, plain]] of prompts({ ...BASE, house: true }).map((h, i) => [h, prompts(BASE)[i]!] as const)) {
+      assert.deepEqual(lines(house).filter((l) => !RULE.test(l)), lines(plain), kind);
+    }
   });
 });

@@ -177,7 +177,8 @@ export interface XGateCtx {
   /**
    * AN ACTIVE OWNER'S POST (MERRYMEN_XPOST_ACTIVE_TENANTS: the house's own
    * agents), whatever its kind (the owner's teammate, 2026-10-13): it never
-   * names a data provider, coingecko, geckoterminal or bitquery, on its
+   * names a data provider, coingecko, geckoterminal or bitquery, nor the
+   * chain by its name, robinhood chain (the owner, 2026-10-18), on its
    * letters (sourceNamed), and is refused as source-named, a model's draft
    * or code's own line alike. Every other owner's posts are judged as before.
    */
@@ -427,7 +428,8 @@ const LEET: Readonly<Record<string, string>> = Object.freeze({
 /**
  * STROKES WRITTEN FOR A LETTER, read as it before lettersOf drops them
  * (red-team review, 2026-10-12): "s|-|erwood", "sher\/\/ood", "sherwoo|)",
- * "she|2wood", "sherw()()d". Only for finding sherwood (sherwoodMentioned).
+ * "she|2wood", "sherw()()d". Only for finding sherwood (sherwoodMentioned)
+ * and a source named (sourceNamed: "r()binhood chain").
  */
 const STROKES: readonly (readonly [RegExp, string])[] = [
   [/\\\/\\\//g, "w"], [/\\\//g, "v"], [/\|-\|/g, "h"], [/\]-\[/g, "h"], [/\}\{/g, "h"],
@@ -564,11 +566,19 @@ export function merrymenMentioned(text: unknown): boolean {
  * spelled in look-alikes or digits ("coin gecko", "C0inGecko", "bit-query").
  * "gecko" alone is enough: no trading post needs the lizard. What an active
  * owner's post may never say (XGateCtx.house, "source-named").
+ *
+ * AND THE CHAIN BY ITS NAME (the owner, 2026-10-18): "robinhood chain",
+ * "robin hood chain", "r0binhood chain", "robinhood's chain", "r()binhood
+ * chain". The i may be a 1, a bar or an l, which lettersOf drops or keeps
+ * as l, so it is optional there; strokes are read as sherwood's are.
+ * "robinhood" ALONE IS NOT: it stays an everyday word of a tag (words.ts
+ * TAG_WORDS), and the house as the subject of a claim is houseClaimed's to
+ * refuse. Only "robinhood" with "chain" straight after it is a name.
  */
-const SOURCE_LETTERS = /gecko|g+e+c+k+o+t+e+r+m|b+i+t+q+u+e+r+y|bitqry/;
+const SOURCE_LETTERS = /gecko|g+e+c+k+o+t+e+r+m|b+i+t+q+u+e+r+y|bitqry|r+o+b+[il]*n+h+o+d+s?(?:the)?c+h+a+[il]*n/;
 export function sourceNamed(text: unknown): boolean {
   if (typeof text !== "string") return false;
-  return [lettersOf(text), lettersOf(text, { leet: true })].some((r) => SOURCE_LETTERS.test(r));
+  return [lettersOf(text), lettersOf(text, { leet: true }), lettersOf(withStrokes(text), { leet: true })].some((r) => SOURCE_LETTERS.test(r));
 }
 
 /**
@@ -1984,7 +1994,7 @@ export function admitXPost(raw: unknown, given: XGateCtx, baseGate: BaseGate): X
   if (hidesCharacters(tidied)) return refuse("hidden-chars");
   // Nothing written for a letter, read before any sherwood check (strayCharacter).
   if (ctx.kind === "reply" && strayCharacter(tidied)) return refuse("charset");
-  // An active owner's post never names a data provider (XGateCtx.house).
+  // An active owner's post never names a data provider or the chain (XGateCtx.house).
   if (ctx.house === true && sourceNamed(tidied)) return refuse("source-named");
   // A reply never says sherwood runs it, whoever drafted it (see SHERWOOD_NAME).
   if (ctx.kind === "reply" && sherwoodClaimed(tidied)) return refuse("sherwood-claim");

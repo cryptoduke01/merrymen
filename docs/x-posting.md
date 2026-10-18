@@ -1576,8 +1576,22 @@ other owner's agent, and its posting and reply warnings, are unchanged.
   bitquery or "robinhood chain". The X gate refuses any active owner's post,
   a draft or code's own line, of any kind, that names coingecko,
   geckoterminal or bitquery on its letters ("coin gecko", "C0inGecko", "bit
-  query": `sourceNamed`, `XGateCtx.house`), as `source-named`. Every other
-  owner's posts are judged as before.
+  query": `sourceNamed`, `XGateCtx.house`), as `source-named`. **And the
+  chain by its name** (the owner, 2026-10-18): "robinhood chain", "robin
+  hood chain", "r0binhood chain", "robinhood's chain", "r()binhood chain"
+  are refused the same way. "robinhood" alone is not a name here (it stays
+  an everyday word of a tag, and the house as the subject of a claim is
+  `house-claim`'s); only "robinhood" with "chain" straight after it is. Every
+  prompt an active owner is drafted with (intro, buy, sale, casual, insight,
+  reply, answer, larp check) carries one more rule, "Never name the chain
+  you trade on or any data provider, even if someone else did.", which
+  names neither (`WriterFacts.house`). `xpost/chain-unnamed.test.ts` holds
+  every code pool, and the strings of the modules that hold them and the
+  prompts, to the same screen. Not held to it, on purpose: the intro's
+  public-wallet disclosure (" Wallet (Robinhood Chain): 0x…") and a buy's
+  explorer link (`robinhoodchain.blockscout.com`), trusted suffixes code
+  puts on after the gate. Every other owner's posts and prompts are as
+  before.
 - **Composition** (`withFigures`, in `writeAnswer`): the words are drafted
   digit-free, or for what's hot and a major built by code (above), and the X gate judges
   them unchanged. Only AFTER the gate admitted them, and only for an active

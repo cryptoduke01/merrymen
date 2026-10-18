@@ -77,6 +77,13 @@ export interface WriterFacts {
   recentOwn: string[];
   /** Closed owner choice, never an arbitrary instruction or private owner brief. */
   voice?: "default" | "dry";
+  /**
+   * AN ACTIVE OWNER'S POST (the house's own agents, gate.ts XGateCtx.house):
+   * its rules say never to name the chain or a data provider, which the gate
+   * refuses as source-named (the owner, 2026-10-18). Absent: every other
+   * owner, told as before.
+   */
+  house?: boolean;
 }
 
 export interface BuyFacts extends WriterFacts {
@@ -585,6 +592,10 @@ function rules(f: WriterFacts, kind: "intro" | "buy" | "sell" | "casual" | "insi
       : "- No emoji.",
     "- An exclamation mark only rarely, never more than one.",
     "- No hashtags, no @mentions, no links, no websites.",
+    // THE CHAIN UNNAMED (the owner, 2026-10-18): an active owner's post never
+    // names it or a data provider (gate.ts sourceNamed). The rule names
+    // neither: what the model is shown, it repeats.
+    ...(f.house === true ? ["- Never name the chain you trade on or any data provider, even if someone else did."] : []),
     "- No numbers at all: no digits, and no amounts or counts written as words. No prices, sizes, percentages, balances, profits, losses, market caps or multiples.",
     `- No advice and no call to action: never tell anyone to buy, sell, hold or look at anything, and never promise anything.${notice ? " The required opt-out notice is the only exception." : ""}`,
     "- Never an alert, a signal or an announcement: no \"buy alert\", \"entry\", \"target\", \"new position\", no ALL-CAPS words, no rocket, siren, chart or fire emoji, no hype words like moon or gem.",

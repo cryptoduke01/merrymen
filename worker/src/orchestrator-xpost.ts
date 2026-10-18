@@ -2103,6 +2103,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // recent posts", beside "You trade with real money". It is shown what it
       // already said (`said`, filtered by money and kind), as its recent posts too.
       const facts = writerFacts(f, day, said);
+      // Only an active owner answers: told never to name the chain (XGateCtx.house).
+      facts.house = true;
       const social = undrafted ? null : await deps.socialProfile?.(account.tenant);
       const walletPublic = !!social?.publicWallet && social.publicWallet.address.toLowerCase() === f.agentId.toLowerCase();
       // ONE BUNDLE, AT MOST, for this answer — and only with research on.
@@ -2614,6 +2616,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
     const facts = writerFacts(f, day, shownOwn);
     const social = await deps.socialProfile?.(account.tenant);
     if (social?.xVoice === "dry") facts.voice = "dry";
+    // An active owner's prompt says never to name the chain, as its gate refuses it (XGateCtx.house).
+    if (active.has(account.tenant.toLowerCase())) facts.house = true;
     const wallet = intent.kind === "intro" && social?.publicWallet && social.publicWallet.address.toLowerCase() === f.agentId.toLowerCase()
       ? social.publicWallet : null;
     const gate: XGateCtx = {

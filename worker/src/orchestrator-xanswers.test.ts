@@ -230,6 +230,14 @@ test("no opt-out line on any answer, a person's first or their fifth, a greeting
   assert.ok(w.sends.slice(sent).every((s) => (s.reply as { in_reply_to_tweet_id: string }).in_reply_to_tweet_id !== "100000000000000508"), "nothing to someone who said stop");
 });
 
+test("an answer's prompt says never to name the chain or a data provider, as its gate refuses either (the owner, 2026-10-18)", async (t) => {
+  const w = await world(t);
+  w.setInbox([tag({ id: "100000000000000521", conversation_id: "100000000000000521", created_at: new Date(NOW - 10_000).toISOString(), text: "@pine_stoat what can you do?" })]);
+  await w.step(NOW);
+  assert.ok(w.systems.length > 0, "the answer was drafted");
+  for (const system of w.systems) assert.match(system, /Never name the chain you trade on or any data provider, even if someone else did\./);
+});
+
 test("a skipped answer says why in the pass's line, as its row keeps it: the model's failure or the gate's code, never its words (2026-10-17)", async (t) => {
   const cases: [string, NonNullable<Parameters<typeof world>[1]>["answer"], string][] = [
     ["a PASS", "PASS", "no-draft:pass"],
@@ -2794,14 +2802,15 @@ test("a market answer never names a coin nothing looked up, credited to the inde
   assert.deepEqual(major.asked(), []);
   assert.doesNotMatch(String(major.sends[0]?.text ?? ""), /bitcoin/);
   // A drafted coin answer (a tagged contract, looked up on the index) names nothing it was not handed.
-  for (const draft of ["per the index, bonk is ripping on robinhood chain right now, not a call.", "the public index shows liquidity is thin, wif and bonk are doing even better.",
-    "the public index shows liquidity is thin, brett looks healthier."]) {
+  for (const draft of ["per the index, bonk is ripping on robinhood chain right now, not a call.", "per the index, bonk is ripping right now, not a call.",
+    "the public index shows liquidity is thin, wif and bonk are doing even better.", "the public index shows liquidity is thin, brett looks healthier."]) {
     const w = await world(t, { env: RESEARCH_ON, research: fakeResearch().research, answer: `${draft} Say stop to opt out.` });
     w.setInbox([tag({ text: ASK_CA })]);
     await w.step();
     const [row] = await w.answers();
     assert.equal(row!.status, "skipped", draft);
-    assert.equal(row!.reason, "gate:unlooked-name", draft);
+    // The chain named is refused before anything reads the name it credits (the owner, 2026-10-18: gate.ts sourceNamed).
+    assert.equal(row!.reason, /robinhood chain/.test(draft) ? "gate:source-named" : "gate:unlooked-name", draft);
     assert.deepEqual(w.sends, [], draft);
   }
   // Restating what it was handed still goes out.

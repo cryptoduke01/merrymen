@@ -110,6 +110,9 @@ test("an insight that names a source, writes a digit, gives advice, forecasts, c
     ["per coingecko the majors are up a little on the day, volume thin.", /^gate:source-named$/],
     ["the gecko terminal board shows breadth narrow and momentum concentrated.", /^gate:source-named$/],
     ["bitquery flows look balanced, the majors drift in a tight range.", /^gate:source-named$/],
+    // The chain by its name too (the owner, 2026-10-18).
+    ["majors drift in a tight range, breadth narrow on robinhood chain.", /^gate:source-named$/],
+    ["majors drift in a tight range, breadth narrow on r0bin hood chain.", /^gate:source-named$/],
     ["majors up 2% on the day, momentum concentrated onchain.", /^gate:has-digits$/],
     ["majors firm on the day, buy the dip while breadth is narrow.", /^gate:/],
     ["majors pressing the upper half of the range, a breakout is coming.", /^gate:/],

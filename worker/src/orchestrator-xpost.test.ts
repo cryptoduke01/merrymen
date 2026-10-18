@@ -286,6 +286,8 @@ interface World {
   dek: Buffer;
   tweets: string[];
   prompts: string[];
+  /** Each draft's system prompt, beside its prompt. */
+  systems: string[];
   fetch: FetchLike;
 }
 
@@ -310,7 +312,7 @@ async function world(t: { after(fn: () => void): void }, consentAtMs: number, sc
     const text = JSON.stringify({ data: { id: String(1840000000000000000n + BigInt(tweets.length)) } });
     return { status: 201, headers: { get: () => null }, text: async () => text };
   };
-  return { db, dek, tweets, prompts: [], fetch };
+  return { db, dek, tweets, prompts: [], systems: [], fetch };
 }
 
 function call(over: Partial<CallFact>): CallFact {
@@ -376,8 +378,9 @@ function poster(
       renderCard: over.renderCard,
       publicProjectDescription: over.publicProjectDescription,
       ...(over.draftTimeoutMs ? { draftTimeoutMs: over.draftTimeoutMs } : {}),
-      llm: async (_creds, { prompt }) => {
+      llm: async (_creds, { system, prompt }) => {
         w.prompts.push(prompt);
+        w.systems.push(system);
         return answer(prompt);
       },
     },
@@ -413,6 +416,18 @@ describe("owner-scoped public wallet intros", () => {
       await p.step(w.db, ROSTER, new Map(), T0 + 10 * MIN);
       assert.equal(w.tweets.length, 0);
       assert.equal((await rows(w))[0]?.reason, "context-changed");
+    });
+  }
+});
+
+describe("an active owner is told never to name the chain (the owner, 2026-10-18)", () => {
+  const T0 = Date.UTC(2026, 8, 28, 8, 0);
+  for (const active of [true, false]) {
+    it(`${active ? "an active owner's" : "every other owner's"} prompt ${active ? "says so" : "is as before"}`, async (t) => {
+      const w = await world(t, T0);
+      await poster(w, { active }).step(w.db, ROSTER, new Map(), T0);
+      assert.ok(w.systems.length > 0, "something was drafted");
+      for (const system of w.systems) assert.equal(/Never name the chain you trade on or any data provider/.test(system), active);
     });
   }
 });
