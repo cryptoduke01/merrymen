@@ -31,8 +31,9 @@ SYSTEM_PROGRAM = "1" * 32
 SIG = "3NGW7mkqWR84fuKhxiUmVTJg8AehpcEQHKZcivruB5449akQiFvm2Ej6AvJGLnfwW15Cb2wn1D6UAFMJtXh6tigd"
 #: The 64-byte keypair of the all-0x05 test seed: a secret key is a signature's length.
 KEYPAIR = "6pc4LiB8KHAPvbUbkozrTcPL5zXspYBdATv5raNDyVbpoz75fGXT3N41QtwPtrdu4wMT1tyRu2125Uyu92AnxEC"
-#: Letters only, and 32 bytes when decoded: the shape of a key, the spelling of prose.
-LETTERS_32 = "AHQXemtAHQXemtAHQXemtAHQXemtAHQXemtAHQXemtA"
+#: A real ed25519 public key with no digits (ids.test.ts pins its test seed).
+LETTERS_32 = "EEuxbXvdXfvgGiFWKYyEksxzabPKjwhYTNvGXFitaqqT"
+LETTERS_64 = "A" * 87
 
 
 # ── the detector ───────────────────────────────────────────────────────────
@@ -55,7 +56,7 @@ def test_base58_decodes_lengths_and_leading_zeros():
     assert len(base58_decode(MINT)) == 32
     assert len(base58_decode(SIG)) == 64 and len(base58_decode(KEYPAIR)) == 64
     assert base58_decode("1") == b"\x00" and base58_decode("2") == b"\x01" and base58_decode("21") == b"\x3a"
-    assert len(base58_decode(LETTERS_32)) == 32, "the prose rule, not the length, is what lets this pass"
+    assert len(base58_decode(LETTERS_32)) == 32 and len(base58_decode(LETTERS_64)) == 64
 
 
 @pytest.mark.parametrize("s", ["0abc", "Oabc", "Iabc", "labc", "", "a b", "z" * 129])
@@ -85,6 +86,8 @@ SOLANA_POISON = [
     (f"exported {KEYPAIR}", "Solana signature- or key-shaped"),
     (f"owned by {SYSTEM_PROGRAM}", "Solana address-shaped"),
     ("see solscan.io/token/ for the chart", "Solana explorer link"),
+    (f"owned by {LETTERS_32}", "Solana address-shaped"),
+    (f"signature {LETTERS_64}", "Solana signature- or key-shaped"),
 ]
 
 
@@ -129,13 +132,16 @@ def test_the_desk_policy_cannot_carry_a_solana_id():
     # 32 ones is a phrase by the horizon's alphabet and a key by its shape.
     with pytest.raises(ValidationError, match="Solana address-shaped"):
         pulse_memecoin(horizon=SYSTEM_PROGRAM)
+    with pytest.raises(ValidationError, match="Solana address-shaped"):
+        pulse_memecoin(strategy_terms=f"Route via {LETTERS_32}.")
+    with pytest.raises(ValidationError, match="Solana signature"):
+        pulse_memecoin(strategy_terms=f"Replay {LETTERS_64}.")
 
 
 # ── what stays as it was ───────────────────────────────────────────────────
 
 
 @pytest.mark.parametrize("text", [
-    LETTERS_32,
     "PEPE pumped 40% on the week; 41 buys / 22 sells from 37 distinct buyers.",
     "Held MEME for 20 minutes; exited flat after volume faded.",
     "[ref:d3fa91cr2c1] reports two tracked wallets added",

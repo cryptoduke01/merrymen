@@ -266,8 +266,8 @@ export function onchainIdsIn(text: unknown): OnchainIdHit[] {
   for (const m of text.matchAll(SOLANA_LINK)) hits.push({ family: "solana", shape: "link", value: m[0] });
   for (const m of text.matchAll(BASE58_IN_TEXT)) {
     const s = m[0];
-    // A word made only of letters is prose, not a key: real keys and signatures carry digits.
-    if (!/[1-9]/.test(s)) continue;
+    // Base58 keys and signatures can contain letters only. Decode every
+    // candidate; treating the absence of digits as prose bypasses the guards.
     const b = base58Decode(s);
     if (b?.length === 32) hits.push({ family: "solana", shape: "address", value: s });
     else if (b?.length === 64) hits.push({ family: "solana", shape: "hash", value: s });

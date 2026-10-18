@@ -20,8 +20,9 @@ import { trencherStrategyTerms, type StrategyTerms } from "./strategy-terms";
 
 const MINT = "2u1tszSeqZ3qBWF3uNGPFc8TzMk2tdiwknnRMWGWjGWH";
 const SIG = "3NGW7mkqWR84fuKhxiUmVTJg8AehpcEQHKZcivruB5449akQiFvm2Ej6AvJGLnfwW15Cb2wn1D6UAFMJtXh6tigd";
-/** Letters only, and 32 bytes when decoded: the shape of a key, the spelling of prose. */
-const LETTERS_32 = "AHQXemtAHQXemtAHQXemtAHQXemtAHQXemtAHQXemtA";
+/** A real ed25519 public key with no digits (ids.test.ts pins its test seed). */
+const LETTERS_32 = "EEuxbXvdXfvgGiFWKYyEksxzabPKjwhYTNvGXFitaqqT";
+const LETTERS_64 = "A".repeat(87);
 const EVM = `0x${"ab".repeat(20)}`;
 
 describe("the detector Brain mirrors", () => {
@@ -106,6 +107,8 @@ describe("a decision carrying a Solana id", () => {
       [{ risks: ["fine", "see solscan.io/token/ for the chart"] }, "risks[1] carries a Solana explorer link"],
       [{ invalidation: [`owned by ${"1".repeat(32)}`] }, "invalidation[0] carries a Solana address"],
       [{ evidence: [{ source: "s", ref: SIG, claim: "c" }] }, "evidence[0].ref carries a Solana signature or secret key"],
+      [{ thesis: `owned by ${LETTERS_32}` }, "thesis carries a Solana address"],
+      [{ evidence: [{ source: "s", ref: LETTERS_64, claim: "c" }] }, "evidence[0].ref carries a Solana signature or secret key"],
     ];
     for (const [decision, why] of cases) {
       const r = await answered(decision);
@@ -125,7 +128,7 @@ describe("a decision carrying a Solana id", () => {
 
   it("leaves prose and today's ids alone", async () => {
     const r = await answered({
-      thesis: `${LETTERS_32} PEPE pumped 40% on the week; 41 buys / 22 sells.`,
+      thesis: "PEPE pumped 40% on the week; 41 buys / 22 sells.",
       evidence: [{ source: "trader-flow", ref: "[ref:d3fa91cr2c1]", claim: "two tracked wallets added" }],
       risks: ["e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"],
     });
@@ -146,7 +149,7 @@ describe("a desk policy carrying a Solana id", () => {
       },
       invalidate: () => {},
     };
-    for (const forged of [forge(`Route via ${MINT}.`), forge("terms", "1".repeat(32)), forge(`see solscan.io/tx/${SIG}`)]) {
+    for (const forged of [forge(`Route via ${MINT}.`), forge("terms", "1".repeat(32)), forge(`see solscan.io/tx/${SIG}`), forge(`Route via ${LETTERS_32}.`), forge(`Replay ${LETTERS_64}.`)]) {
       const r = await decide({ url, token: "t" }, args({ strategyTerms: forged }), { capabilities });
       assert.ok(r.ok);
       assert.equal(r.strategyTerms, "withheld");

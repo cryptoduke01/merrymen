@@ -131,6 +131,21 @@ describe("on-chain id detection", () => {
       assert.equal(onchainIdIn(t), false, t);
     }
   });
+
+  it("detects letters-only public keys and signature encodings", () => {
+    // A real ed25519 public key with no digits, from a deterministic test seed.
+    const seed = new Uint8Array(32);
+    new DataView(seed.buffer).setUint32(0, 4900, true);
+    const pub = base58Encode(ed25519.getPublicKey(seed));
+    assert.equal(pub, "EEuxbXvdXfvgGiFWKYyEksxzabPKjwhYTNvGXFitaqqT");
+    const signature = "A".repeat(87);
+    assert.equal(canonicalId(CHAINS.solana, "account", pub), pub);
+    assert.equal(canonicalId(CHAINS.solana, "op", signature), signature);
+    assert.deepEqual(onchainIdsIn(`owner ${pub}, signature ${signature}`), [
+      { family: "solana", shape: "address", value: pub },
+      { family: "solana", shape: "hash", value: signature },
+    ]);
+  });
 });
 
 describe("Solana secret detection", () => {

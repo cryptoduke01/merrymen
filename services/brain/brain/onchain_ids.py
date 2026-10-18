@@ -14,9 +14,9 @@ THE SAME RULES, pattern for pattern:
            a secret key, which is the same length); and links to the Solana
            explorers.
 
-A run made only of letters is prose, not a key: real keys and signatures carry
-digits, so a run without one is never flagged. The shape is enough; a match is
-never checked against a chain. tests/data/onchain_ids.json pins this file and
+A run made only of letters can still be a key or signature, so every candidate
+is decoded. The shape is enough; a match is never checked against a chain.
+tests/data/onchain_ids.json pins this file and
 ids.ts to the same answers: CI's brain job asserts it here, through
 tests/test_onchain_ids.py, and its app tests assert it for ids.ts, through
 worker/src/brain-client-onchain-ids.test.ts.
@@ -68,7 +68,6 @@ _SOLANA_LINK = re.compile(
     f"[^{_JS_SPACE})>\\]]*",
     re.IGNORECASE | re.ASCII,
 )
-_DIGIT = re.compile(r"[1-9]")
 
 
 def onchain_ids_in(text: object) -> list[OnchainIdHit]:
@@ -86,8 +85,6 @@ def onchain_ids_in(text: object) -> list[OnchainIdHit]:
         hits.append(OnchainIdHit("solana", "link", m[0]))
     for m in _BASE58_IN_TEXT.finditer(text):
         s = m[0]
-        if not _DIGIT.search(s):
-            continue
         b = base58_decode(s)
         if b is not None and len(b) == 32:
             hits.append(OnchainIdHit("solana", "address", s))

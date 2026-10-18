@@ -61,7 +61,8 @@ test("the operator's agents add the landed transaction's link on its own line, t
 
 test("a Solana mint, signature or explorer link is an id too: never prose, never a suffix that passes (Solana P0)", () => {
   const sig = base58Encode(Uint8Array.from({ length: 64 }, (_, i) => (i * 37 + 11) & 0xff));
-  const ids = [SOLANA_USDG_MINT, sig, `https://solscan.io/token/${SOLANA_USDG_MINT}`];
+  const ids = [SOLANA_USDG_MINT, sig, `https://solscan.io/token/${SOLANA_USDG_MINT}`,
+    "EEuxbXvdXfvgGiFWKYyEksxzabPKjwhYTNvGXFitaqqT", "A".repeat(87)];
   assert.equal(hasPublicWallet(prose), false);
   for (const id of ids) {
     assert.equal(hasPublicWallet(`${prose} ${id}`), true, id);

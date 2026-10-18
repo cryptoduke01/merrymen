@@ -43,7 +43,12 @@
     {"family": "evm", "shape": "hash", "value": "0xAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAb"}
    ]},
   {"text": "0x11111111111111111111111111111111111111111", "hits": []},
-  {"text": "AHQXemtAHQXemtAHQXemtAHQXemtAHQXemtAHQXemtA", "hits": []},
+  {"text": "AHQXemtAHQXemtAHQXemtAHQXemtAHQXemtAHQXemtA",
+   "hits": [{"family": "solana", "shape": "address", "value": "AHQXemtAHQXemtAHQXemtAHQXemtAHQXemtAHQXemtA"}]},
+  {"text": "owned by EEuxbXvdXfvgGiFWKYyEksxzabPKjwhYTNvGXFitaqqT",
+   "hits": [{"family": "solana", "shape": "address", "value": "EEuxbXvdXfvgGiFWKYyEksxzabPKjwhYTNvGXFitaqqT"}]},
+  {"text": "signature AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "hits": [{"family": "solana", "shape": "hash", "value": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}]},
   {"text": "2345678923456789234567892345678923456789", "hits": []},
   {"text": "02u1tszSeqZ3qBWF3uNGPFc8TzMk2tdiwknnRMWGWjGWH", "hits": []},
   {"text": "2u1tszSeqZ3qBWF3uNGPFc8TzMk2tdiwknnRMWGWjGWHl", "hits": []},
