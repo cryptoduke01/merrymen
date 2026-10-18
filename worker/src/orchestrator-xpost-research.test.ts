@@ -461,7 +461,8 @@ describe("words from measurements: digit-free, attributed, and through the X gat
     for (const mode of ["live", "paper", null] as const) {
       const paper = mode === "paper";
       const lines = greetingAnswers("1", { lower: false }, { paper });
-      assert.equal(lines.length, 8);
+      // A hundred and forty-four since 2026-10-18 (casual.ts GREETING_SLOTS).
+      assert.equal(lines.length, 144);
       for (const line of lines) {
         const others = [...lines.filter((l) => l !== line), ...modelAnswers("1", { lower: false }, { paper })];
         const v = admitXPost(line, { kind: "reply", answer: true, agentName: "Alan", mode, coins: [], recentOwn: others, recentFleet: others }, (r, c) => admitAgentLine(r, c));
@@ -1849,11 +1850,15 @@ describe("answer anything: every tag past the screens has a lane, and silence on
       assert.equal(houseTroubleAsk(text), false, text);
     }
     for (const text of ["how are you?", "hey, how are you doing today?", "who are you", "what are you exactly?", "tell me a joke", "gm, how's it going?",
-      "what do you think about ai agents?", "what do you do for fun?"]) {
+      "what do you think about ai agents?", "what do you do for fun?",
+      // "alan" said to it, at the start or the end, is an address (the owner's ask, 2026-10-18).
+      "hey alan, how are you?", "how's it going alan?", "alan, how are you?", "yo alan how have you been", "how are you doing today, alan?"]) {
       assert.equal(banterAsk(text), true, text);
     }
-    for (const text of ["hey alan, how are you?", "how are you, trump fan?", "my dad just died, any words for me?", "what's merrymen?", "how are you? lost everything today",
-      "tell me a joke about merrymen", "how are you 🚀", "you bought chump today, right?", "", null]) {
+    for (const text of ["how are you, trump fan?", "my dad just died, any words for me?", "what's merrymen?", "how are you? lost everything today",
+      "tell me a joke about merrymen", "how are you 🚀", "you bought chump today, right?", "", null,
+      // His name anywhere else, or glued to more, is still no banter: what the tag is about, not who it is said to.
+      "alan's token?", "how is alan's token?", "who made alan?", "how are you alan's fans?", "alan alan how are you?", "how's alan?"]) {
       assert.equal(banterAsk(text), false, String(text));
     }
   });

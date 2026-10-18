@@ -56,6 +56,8 @@ import { asksAboutACoin, coinTalkIn, deicticPickIn, houseTalkIn, marketTalkIn, n
 import { activeTenantsOf, repliesAllowedFor, repliesScopeOf } from "./xpost/scope";
 import {
   ANSWER_LOOKED_UP,
+  ANSWER_PLAIN_THREAD,
+  ANSWER_THREAD_DONE,
   answerAuthorSpent,
   answersWaiting,
   cancelPost,
@@ -64,6 +66,7 @@ import {
   duePosts,
   ensureXpostSchema,
   failInterrupted,
+  fleetXUserIds,
   getAccount,
   introPostsOf,
   keyStatus,
@@ -105,7 +108,7 @@ import { appendSaleOutcome, hasSaleOutcome } from "./xpost/sale-outcome";
 import { saleLines } from "./xpost/sale-words";
 import { admitFiguresLine, cleanTicker, figuresTickers, withFigures, type FiguresSpec } from "./xpost/figures";
 import { hotAnswers, hotNoneAnswers, hotUnreadAnswers, insightFacts, majorAnswers, majorUnreadAnswers, marketAnswers, type HotRead, type MajorRead, type MarketRead } from "./xpost/market";
-import { selfAnswers, tradesAnswers } from "./xpost/casual";
+import { chatAnswers, declineAnswers, greetingAnswers, reactionAnswers, selfAnswers, tradesAnswers, vibeAnswers } from "./xpost/casual";
 import { recapFigures, recapLines, recapStillHolds } from "./xpost/recap";
 import { accusationIn, CHECK_VOCABULARY, checkAnswers, type CheckRead } from "./xpost/check";
 
@@ -149,6 +152,31 @@ const ANSWERS_PER_POLL = 3;
  * day of drafts is still at most this many of the fleet's DEFAULT_LLM_PER_DAY.
  */
 export const ANSWER_DRAFTS_PER_DAY = 48;
+/**
+ * SMALL TALK, ANSWERED AGAIN AND COUNTED APART (the owner's decision,
+ * 2026-10-18): a greeting, a thanks for praise, banter, its mood and the
+ * playful decline. Each is one of code's lines, on top of every answer cap
+ * (ANSWERS_PER_DAY, ANSWERS_PER_AUTHOR, the twenty-second gap, three a
+ * poll), and held to three more, each an allowance taken before the row is
+ * written and given back when the gate refuses every line:
+ *
+ *   - `smalltalk-author:<xUserId>:<authorId>:<utc day>`: two a person a day,
+ *     one for a name that looks like a bot's (LIKELY_BOT);
+ *   - `smalltalk-thread:<xUserId>:<conversationId>:<utc day>`: four a thread;
+ *   - `smalltalk-day:<xUserId>:<local day>`: thirty, so the day's sixty keep
+ *     room for questions.
+ */
+export const SMALLTALK_PER_AUTHOR = 2;
+export const SMALLTALK_PER_BOT = 1;
+export const SMALLTALK_PER_THREAD = 4;
+export const SMALLTALK_PER_DAY = 30;
+/**
+ * A HANDLE OR A NAME THAT LOOKS LIKE A BOT'S (2026-10-18): a heuristic only,
+ * to keep two bots from thanking each other all day. An author X did not
+ * name is held to it too. Every fleet account is never answered at all
+ * (store.ts fleetXUserIds).
+ */
+const LIKELY_BOT = /bot|agent|gpt|\bai\b/i;
 const MAX_REPLY_POLLS_PER_PASS = 2;
 /** Plans are drafted at most this often; sends run every pass. */
 const PLAN_EVERY_MS = MIN;
@@ -189,11 +217,11 @@ const TEMPLATE_TRIES = 8;
 /** Send outcomes after which the post may exist on X: they keep their unit of the fleet's ceiling. */
 const MAY_BE_ON_X: ReadonlySet<SendOutcome> = new Set<SendOutcome>(["posted", "uncertain", "fault"]);
 /**
- * WHAT A TAG MAY BE READ AS AND STILL GET CODE'S STRATEGY OR BUYS LINE
- * (red-team review of daaae961): chat, a question about its trades, or one
- * about what it can do or how to get an agent. Banter gets no line at all
- * since 2026-10-13 (writeAnswer's smallTalk): "what do you do?", both banter
- * and what it can do, is answered as what it can do.
+ * WHAT A TAG MAY BE READ AS AND STILL GET CODE'S BANTER, STRATEGY OR BUYS
+ * LINE (red-team review of daaae961): chat, a question about its trades, or
+ * one about what it can do or how to get an agent ("what do you do?" is both
+ * banter and what it can do, and gets banter's line again since 2026-10-18).
+ * Anything else a banter-shaped tag was read as keeps its own way.
  */
 const CHAT_LINE_KINDS: ReadonlySet<string> = new Set(["chat", "own-trades", "capabilities", "onboarding"]);
 /** Log counters that describe a standing condition rather than something that happened. */
@@ -1678,13 +1706,19 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         }
         // The batch is the X account's: another owner on it may have been
         // polled, so this owner's own scope is asked again.
-        if (model && answerDrafts < MAX_ANSWER_DRAFTS_PER_PASS && comments.has(account.xUserId) && repliesFor(account.tenant)
+        // An active agent answers tags (and comments on any of its posts)
+        // through one path, so one post is never answered twice.
+        // A poll's batch is seen once (the cursor moves on), so an active
+        // agent works through a few of its tags, not only the first.
+        const isActive = active.has(account.tenant.toLowerCase());
+        // CODE'S LINES NEED NO MODEL (2026-10-18): an active agent's batch is
+        // worked through with the writer down, unconfigured or its allowance
+        // spent, and only what would be drafted waits (writeAnswer's
+        // `drafting`); a greeting, a thanks, the market or the model question
+        // still goes out. Every other owner's comment replies are all drafts,
+        // and still need the model.
+        if ((model || isActive) && answerDrafts < MAX_ANSWER_DRAFTS_PER_PASS && comments.has(account.xUserId) && repliesFor(account.tenant)
           && await repliesEnabledFor(shared, account.tenant, account.xUserId)) {
-          // An active agent answers tags (and comments on any of its posts)
-          // through one path, so one post is never answered twice.
-          // A poll's batch is seen once (the cursor moves on), so an active
-          // agent works through a few of its tags, not only the first.
-          const isActive = active.has(account.tenant.toLowerCase());
           // WHAT IT ALREADY SAID is what X published: posted rows only. A
           // draft still under Coming up — this pass's own answers included —
           // may yet be skipped, so it stays in recentOwn (not to be echoed)
@@ -1704,10 +1738,14 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
             : [];
           // The tags this pass already counted as passed over: each is read again on every turn below.
           const passedOver = new Set<string>();
+          // Whether an answer may still be drafted on this pass: the model's
+          // allowance as read at the pass's start, and set false by writeAnswer
+          // the moment the fleet's is found spent.
+          const drafting = { ok: model };
           for (let i = 0; i < (isActive ? ANSWERS_PER_POLL : 1) && answerDrafts < MAX_ANSWER_DRAFTS_PER_PASS; i++) {
             const result = isActive
               // Its OWN posts only: another owner posting on the same X account is not its history.
-              ? await writeAnswer(shared, account, f, comments.get(account.xUserId)!, z.tz, at, recentOwn, shownOwn, recentFleet, said, posts.filter((p) => p.tenant === account.tenant), bump, nowMs + SEND_BUDGET_MS, passedOver)
+              ? await writeAnswer(shared, account, f, comments.get(account.xUserId)!, z.tz, at, recentOwn, shownOwn, recentFleet, said, posts.filter((p) => p.tenant === account.tenant), bump, nowMs + SEND_BUDGET_MS, passedOver, drafting)
               : await writeReply(shared, account, f, comments.get(account.xUserId)!, z.tz, at, recentOwn, shownOwn, recentFleet);
             if (!result) break;
             answerDrafts++;
@@ -1720,6 +1758,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
               recentFleet.unshift(result.body);
             }
           }
+          if (!drafting.ok) model = false;
         }
       } catch (e) {
         bump("owner-failed");
@@ -1770,6 +1809,13 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
    * left for the next day's); a person already answered
    * ANSWERS_PER_AUTHOR times in the rolling day is passed over, and the next person's tag is
    * answered instead of the batch stopping at theirs.
+   *
+   * CODE'S LINES WITHOUT A MODEL (2026-10-18). A tag answered in code's
+   * words (a greeting, a thanks, banter, its mood, a decline, the model
+   * question, its strategy or buys, the market, what's hot, a major) is
+   * answered with the writer unconfigured, down or its allowance spent
+   * (`drafting.ok` false): only a tag that would be drafted is passed over,
+   * before anything is taken for it (`answer-unanswered-no-model`).
    */
   async function writeAnswer(
     shared: Db, account: XAccount, f: AgentFacts, comments: XReply[], tz: string | null,
@@ -1777,8 +1823,10 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
     bump: (k: string, n?: number, detail?: string) => void = () => {}, sendBy = Number.POSITIVE_INFINITY,
     /** The tags of this batch already counted as passed over on this pass (planPass): each is counted once, not once a turn. */
     passedOver: Set<string> = new Set(),
+    /** Whether a draft may still be made on this pass (planPass): set false here when the fleet's model allowance is found spent. */
+    drafting: { ok: boolean } = { ok: creds !== null },
   ): Promise<{ body: string | null; lookedUp?: boolean; why?: string } | null> {
-    if (!creds) return null;
+    if (!creds) drafting.ok = false;
     const nowMs = at();
     const consentAt = await replyConsentAt(shared, account.tenant, account.xUserId);
     if (consentAt === null) return null;
@@ -1841,7 +1889,12 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
     const closedBody = (body: string): boolean => /\$[a-z]/i.test(body) || coinTalkIn(body, f.name) || asksAboutACoin(body) || marketTalkIn(body);
     const threads = ordered.some((c) => c.conversationId !== c.id || c.inReplyToTweetId !== "" || c.quoted === true)
       ? await ownThreadTweets(shared, account.xUserId, undefined, shut, tradeBody, closedBody)
-      : { roots: new Set<string>(), posts: new Set<string>(), answered: new Map<string, string>(), plain: new Set<string>(), trade: new Set<string>() };
+      : { roots: new Set<string>(), posts: new Set<string>(), answered: new Map<string, string>(), plain: new Set<string>(), trade: new Set<string>(), done: new Set<string>() };
+    // NEVER ANOTHER OF THE FLEET'S AGENTS (2026-10-18): an author who is any
+    // tenant's X account is answered by nothing, whatever it said, so two of
+    // the fleet's agents can never talk to each other in a loop. Read once a
+    // call, only when the batch holds a tag from someone else.
+    const fleet = ordered.some((c) => c.authorId !== account.xUserId) ? await fleetXUserIds(shared) : new Set<string>();
     // WHY A TAG GOT NOTHING, AS A COUNT (2026-10-18): a tag passed over with no
     // row was silent, so the log could not say why mentions went unanswered.
     // Each is counted once a pass (this runs a few times over one batch), as
@@ -1853,6 +1906,10 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
     };
     for (const comment of ordered) {
       if (comment.createdAtMs < consentAt || nowMs - comment.createdAtMs > REPLY_STALE_MS) continue;
+      if (comment.authorId !== account.xUserId && fleet.has(comment.authorId)) {
+        passOver(comment, "answer-refused-fleet-agent");
+        continue;
+      }
       const candidate = tagCandidate(comment, { xUserId: account.xUserId, research: research !== null, username: account.username,
         ownRoots: threads.roots, ownPosts: threads.posts, answered: threads.answered, plain: threads.plain, trade: threads.trade, checks });
       // Refused by the tag screens: answer-refused-<the screen's reason> (replies.ts tagCandidate).
@@ -1871,18 +1928,43 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       const checked = candidate.check ?? null;
       const classified: TagIntent = checked ? { kind: "check", target: checked.target }
         : classifyTag(candidate.text, { address: candidate.address ?? null, advice: candidate.advice === true });
-      // NO SMALL TALK (the owner's teammate, 2026-10-13: "do not respond to
-      // normal conversations"). A greeting and nothing else ("hiii", "gm":
-      // replies.ts greetingOnly), its own mood ("are you bullish?", "wen
-      // moon": vibe), advice or a forecast asked for ("should i buy pepe":
-      // advice, once declined in a playful line) and banter ("how are you",
-      // "tell me a joke": banterAsk) are answered by nothing: no row, no model
-      // call, no lookup. What is answered: how's the market, a coin's facts (a
-      // major by name or ticker, a $ticker or a contract of the chain), what's
-      // hot, its own trading or strategy, the model question on its allowlist,
-      // and what it can do or how to get an agent.
-      const smallTalk = candidate.greeting === true || classified.kind === "vibe" || classified.kind === "advice"
-        || (classified.kind === "chat" && banterAsk(candidate.text));
+      // SMALL TALK, ANSWERED AGAIN IN CODE'S WORDS (the owner's decision,
+      // 2026-10-18, reversing "no small talk" of 2026-10-13): a greeting and
+      // nothing else ("hiii", "gm": replies.ts greetingOnly), praise and
+      // nothing else ("nice trade", "congrats": reactionOnly), banter ("how
+      // are you", "how's it going alan": banterAsk), its own mood ("are you
+      // bullish?", "wen moon": vibe) and advice asked ("should i buy pepe":
+      // a playful decline). Never a draft, never a lookup, no model call: a
+      // line of code's own (xpost/casual.ts), through the gate as any answer.
+      // A greeting or a thanks is code's own reading of a whole tag, so code's
+      // classifier must read it as plain chat too, or it is answered by
+      // nothing (fail closed).
+      const banter = CHAT_LINE_KINDS.has(classified.kind) && banterAsk(candidate.text);
+      const smallKind: "greeting" | "reaction" | "banter" | "vibe" | "advice" | null = candidate.greeting === true ? "greeting"
+        : candidate.reaction === true ? "reaction" : classified.kind === "vibe" ? "vibe" : classified.kind === "advice" ? "advice" : banter ? "banter" : null;
+      // WHAT IT SITS UNDER, FOR SMALL TALK (2026-10-18). The posts a reply
+      // or a quote sits under (as tagCandidate reads them: the parent and the
+      // conversation's root, and what it quotes), and whether each one it
+      // answers directly is one of its own top-level posts (its hello, a
+      // casual post, a buy) rather than one of its answers.
+      const replying = !(comment.conversationId === comment.id && comment.inReplyToTweetId === "");
+      const underIds = [...(replying ? [comment.inReplyToTweetId, comment.conversationId] : []), ...(comment.quoted === true ? [String(comment.quotedTweetId ?? "")] : [])];
+      const directIds = [...(replying ? [comment.inReplyToTweetId] : []), ...(comment.quoted === true ? [String(comment.quotedTweetId ?? "")] : [])];
+      const underPost = directIds.length > 0 && directIds.every((id) => threads.roots.has(id));
+      // SMALL TALK IS AT MOST TWO OF ITS ANSWERS DEEP (2026-10-18): under a
+      // small-talk answer that ended its thread, or the tag it answered
+      // (store.ts ANSWER_THREAD_DONE), nothing at all.
+      const threadDone = underIds.some((id) => threads.done.has(id));
+      // WHERE EACH IS ANSWERED. A greeting or a thanks anywhere a reply may
+      // be answered (top level; under a plain post or answer; under its own
+      // buy, sale or recap; under a market post or a closed answer, once).
+      // Banter, its mood and a decline only at top level or as a plain
+      // follow-up: their meaning is the post they sit under, and code never
+      // reads it (red-team review of 1ed46625: "wen moon" quoting its ZAPX
+      // buy post got a mood line, a yes about the coin).
+      const smallHere = smallKind === "greeting" || smallKind === "reaction" ? classified.kind === "chat"
+        : smallKind !== null && (candidate.followUp === undefined || candidate.followUp === "plain");
+      const smallHeld = smallKind !== null && (threadDone || !smallHere);
       // SHERWOOD IN ANY FORM INCLUDES A HANDLE ("@SherwoodToken"), read on the
       // tag as posted with only its own handle set aside; and the model line
       // never goes under a reply prefix that names anyone else (red-team 2026-10-12).
@@ -1916,12 +1998,13 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // was planned from the start", "they will be fine, it is not that bad" and
       // "they are coming for everyone next". Only one of the plain questions
       // about what it trades (generalTradesQuestion), or about how it trades
-      // and what it has been up to (selfAsk), is answered (in code's words
-      // since the red-team review of daaae961, below); any other chat tag, a
-      // person, a group or an event among them, and since 2026-10-13 banter
-      // too (smallTalk above), is answered by nothing: no row, no model call.
-      const chatAllowed = (text: string): boolean => generalTradesQuestion(text) || selfAsk(text);
-      const unbanteredChat = classified.kind === "chat" && !chatAllowed(candidate.text);
+      // and what it has been up to (selfAsk), or banter on its allowlist
+      // (banterAsk, answered again since 2026-10-18: smallKind above), is
+      // answered (in code's words since the red-team review of daaae961);
+      // any other chat tag, a person, a group or an event among them, is
+      // answered by nothing: no row, no model call.
+      const chatAllowed = (text: string): boolean => banterAsk(text) || generalTradesQuestion(text) || selfAsk(text);
+      const unbanteredChat = classified.kind === "chat" && smallKind === null && !chatAllowed(candidate.text);
       // BANTER, HOW IT TRADES AND WHAT IT BOUGHT, IN CODE'S WORDS, NEVER A
       // DRAFT (red-team review of daaae961, 2026-10-12). Drafted, those three
       // allowlists posted, word for word and with no review, "doing good, i'm
@@ -1936,18 +2019,19 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // allowlists are whole tags, so their answers are code's lines too: how
       // it trades or what it is up to its strategy by name and what its rules
       // are like (selfAnswers), and what it bought lately the coins it bought
-      // with the money it trades with now (tradesAnswers). No model call, no
-      // lookup. Banter's friendly line is gone with banter (smallTalk). What it
-      // bought is never said under a reply prefix that names anyone else (as
-      // `general` below): that tag is answered by nothing.
+      // with the money it trades with now (tradesAnswers), and banter a
+      // friendly line about itself (xpost/casual.ts chatAnswers, through
+      // smallKind above). No model call, no lookup. What it bought is never
+      // said under a reply prefix that names anyone else (as `general`
+      // below): that tag is answered by nothing.
       const methodAsk = generalTradesQuestion(candidate.text) && /^(?:(?:gm|yo|hey|hi|ser|fren|bro|alan)[\s,!.]+){0,2}how\b/.test(plainAsk(candidate.text) ?? "");
-      const chatKind: "self" | "trades" | null = !CHAT_LINE_KINDS.has(classified.kind) ? null
+      const chatKind: "self" | "trades" | null = smallKind !== null || !CHAT_LINE_KINDS.has(classified.kind) ? null
         : selfAsk(candidate.text) || methodAsk ? "self" : generalTradesQuestion(candidate.text) ? "trades" : null;
       const tradesElsewhere = chatKind === "trades" && candidate.otherHandles === true;
       // A TOP-LEVEL TAG: no reply under a post, no quote of one. Code never
       // reads the post a reply sits under, so a line whose meaning is that
-      // post's goes only under a top-level tag (tradeMarket below; a decline
-      // and its mood were held to the same rule until they went, 2026-10-13).
+      // post's goes only under a top-level tag (tradeMarket below; a decline,
+      // its mood and banter go also under a plain post, smallHere above).
       const topLevelTag = comment.conversationId === comment.id && comment.inReplyToTweetId === "" && comment.quoted !== true;
       // A FOLLOW-UP KEEPS WHAT ITS THREAD WAS ABOUT (red-team review of
       // 1ed46625, 2026-10-12). Under its decline to "should i buy $SCAM?",
@@ -1959,10 +2043,10 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // on its own words alone. Now a reply or a quote under anything but
       // plain chat (tagCandidate followUp "closed": a decline, its mood, a
       // market line, a coin's answer, an answer told its buys, a comment
-      // reply) is answered by nothing (a greeting there was answered until
-      // greetings went, 2026-10-13): no draft, no buys, no exact path, no code
-      // line whose meaning is the thread's.
-      const closedFollowUp = candidate.followUp === "closed";
+      // reply) is answered only with a greeting or a thanks, once (since
+      // 2026-10-18, as before 2026-10-13: ANSWER_THREAD_DONE above): no draft,
+      // no buys, no exact path, no code line whose meaning is the thread's.
+      const closedFollowUp = candidate.followUp === "closed" && smallKind !== "greeting" && smallKind !== "reaction";
       // NO MARKET LINE UNDER ITS OWN BUY OR SELL POST (red-team review of
       // 1ed46625, 2026-10-12). Alan bought a Robinhood-chain "PEPE" and
       // posted "grabbed some $PEPE on robinhood chain with real money"; a
@@ -1992,7 +2076,10 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // (candidate.otherHandles), as the model line never does; and a market,
       // hot or major line goes only to an author X named (comment.author), so
       // the coins it shows can be read against who is asking (authorShows below).
-      const codeLineElsewhere = candidate.otherHandles === true && marketKind;
+      // NOR SMALL TALK UNDER ANOTHER HANDLE (2026-10-18): a greeting or a
+      // thanks never gets that far (tagCandidate), and banter, its mood and a
+      // decline are answered by nothing there, as before 2026-10-13.
+      const codeLineElsewhere = candidate.otherHandles === true && (marketKind || smallKind !== null);
       const marketToUnread = marketKind && !author;
       // A CHECK NEVER UNDER SHERWOOD OR THE HOUSE (2026-10-13): a post, a quoted
       // post, an author or a target that names sherwood in any form or merrymen
@@ -2002,7 +2089,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       const checkHouse = checked !== null && [checkTarget, ...(comment.context ?? []).flatMap((c) => [c.text, c.author?.username ?? "", c.author?.name ?? "", c.author?.url ?? ""])]
         .some((t) => sherwoodMentioned(t) || sherwoodNamed(t) || merrymenMentioned(t));
       const asked: TagIntent = sherwoodTagged || authorSherwood || (classified.kind === "model" && (candidate.otherHandles || !namedClean))
-        || smallTalk || unreadWord || unflaggedAdvice || unbanteredChat || closedFollowUp
+        || smallHeld || unreadWord || unflaggedAdvice || unbanteredChat || closedFollowUp
         || tradeMarket || codeLineElsewhere || marketToUnread || tradesElsewhere || checkHouse ? { kind: "unanswered" } : classified;
       // SHERWOOD IN ANY FORM, OR A MODEL QUESTION OFF THE ALLOWLIST, is
       // answered by nothing: the model line under "sherwood TGE soon?" reads
@@ -2015,7 +2102,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         // model question to an unread name, a word in a major's place).
         const why = sherwoodTagged || authorSherwood || checkHouse ? "sherwood"
           : (classified.kind === "model" && candidate.otherHandles === true) || codeLineElsewhere || tradesElsewhere ? "other-handle"
-          : smallTalk ? "smalltalk" : closedFollowUp ? "closed-followup" : tradeMarket ? "market-under-post" : unbanteredChat ? "chat" : "other";
+          : smallHeld && threadDone ? "thread-done" : smallHeld ? "smalltalk" : closedFollowUp ? "closed-followup" : tradeMarket ? "market-under-post" : unbanteredChat ? "chat" : "other";
         passOver(comment, `answer-unanswered-${why}`);
         continue;
       }
@@ -2033,8 +2120,9 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // casual words (xpost/market.ts marketAnswers) and code's figures, read
       // or not; the same reasons as what's hot.
       const marketCoded = asked.kind === "market";
-      // No model call at all for these: no allowance, no question read.
-      const undrafted = templated || hotCoded || marketCoded || chatKind !== null;
+      // No model call at all for these: no allowance, no question read. Small
+      // talk is code's own line too (smallKind above).
+      const undrafted = templated || hotCoded || marketCoded || chatKind !== null || smallKind !== null;
       // NO DRAFT UNDER OR QUOTING ITS OWN BUY OR SELL POST (red-team review of
       // daaae961, 2026-10-12). Quoting its posted "grabbed some pepe with real
       // money, the curve looked early" (and replying under it), "how are
@@ -2062,11 +2150,45 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         bump("answer-unusable");
         continue;
       }
+      // NOTHING TO DRAFT WITH (2026-10-18): the writer unconfigured, or the
+      // fleet's model allowance spent. A tag code would answer in its own
+      // words still goes on; one that would be drafted is passed over here,
+      // before any lookup or allowance is taken for it.
+      if (!undrafted && !drafting.ok) {
+        passOver(comment, "answer-unanswered-no-model");
+        continue;
+      }
       const dedupeKey = `answer:${account.xUserId}:${comment.id}`;
       if (await keyStatus(shared, dedupeKey) !== null || await keyStatus(shared, `reply:${account.xUserId}:${comment.id}`) !== null) continue;
       if (await answerAuthorSpent(shared, account.xUserId, comment.authorId, nowMs)) {
         bump("answer-author-spent");
         continue;
+      }
+      // SMALL TALK'S OWN CAPS (2026-10-18: SMALLTALK_PER_AUTHOR, _PER_THREAD,
+      // _PER_DAY), each taken atomically across replicas before the row is
+      // written, and every one given back when no line stands (below). A name
+      // that looks like a bot's, or no name X handed over, gets one a day.
+      const smallKeys: string[] = [];
+      if (smallKind !== null) {
+        const botLike = !author || LIKELY_BOT.test(author.username) || LIKELY_BOT.test(author.name);
+        const caps: [string, number, string][] = [
+          [`smalltalk-author:${account.xUserId}:${comment.authorId}:${utcDay(nowMs)}`, botLike ? SMALLTALK_PER_BOT : SMALLTALK_PER_AUTHOR, "answer-smalltalk-author-spent"],
+          [`smalltalk-thread:${account.xUserId}:${comment.conversationId}:${utcDay(nowMs)}`, SMALLTALK_PER_THREAD, "answer-smalltalk-thread-spent"],
+          [`smalltalk-day:${account.xUserId}:${localDay(tz, nowMs)}`, SMALLTALK_PER_DAY, "answer-smalltalk-day-spent"],
+        ];
+        let spent: string | null = null;
+        for (const [key, limit, why] of caps) {
+          if (!(await takeAllowance(shared, key, limit, nowMs))) {
+            spent = why;
+            break;
+          }
+          smallKeys.push(key);
+        }
+        if (spent !== null) {
+          for (const key of smallKeys) await returnAllowance(shared, key, at());
+          passOver(comment, spent);
+          continue;
+        }
       }
       // NO OPT-OUT LINE (the owner's decision, 2026-10-12): whoever tagged it,
       // replied to it or quoted it asked to be answered, and that is their
@@ -2092,8 +2214,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // exact path, as it never gets the model line.
       const otherHandles = candidate.otherHandles === true;
       const general = !coinNamed && !otherHandles && generalTradesQuestion(candidate.text);
-      // Nothing is looked up for its strategy or its buys.
-      const intent = research && chatKind === null ? asked : null;
+      // Nothing is looked up for its strategy, its buys or small talk.
+      const intent = research && chatKind === null && smallKind === null ? asked : null;
       const answerKey = `llm-answers:${account.xUserId}:${utcDay(nowMs)}`;
       // THE DAY'S LARP CHECKS, counted before anything is read: a check past
       // the count is answered by nothing (the tag is passed over, no row).
@@ -2101,14 +2223,19 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         bump("answer-checks-spent");
         continue;
       }
+      // A DRAFT'S ALLOWANCES SPENT (2026-10-18): that tag is passed over and
+      // the batch goes on, so a later tag code answers in its own words still
+      // is; the fleet's spent stops every draft for the rest of the pass.
       if (!undrafted) {
         if (!(await takeAllowance(shared, answerKey, ANSWER_DRAFTS_PER_DAY, nowMs))) {
-          bump("answer-drafts-spent");
-          return null;
+          passOver(comment, "answer-drafts-spent");
+          continue;
         }
         if (!(await takeAllowance(shared, `llm:${utcDay(nowMs)}`, llmPerDay, nowMs))) {
           await returnAllowance(shared, answerKey, at());
-          return null;
+          drafting.ok = false;
+          passOver(comment, "answer-unanswered-no-model");
+          continue;
         }
       }
       const day = localDay(tz, nowMs);
@@ -2221,6 +2348,25 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       const chatLines = chatKind === "self" ? selfAnswers(facts.strategy, comment.id, facts.style, lineOpts)
         : chatKind === "trades" ? tradesAnswers(tradeNames, comment.id, facts.style, lineOpts) : [];
       if (chatLines.length) bump(`answer-chat-${chatKind}`);
+      // SMALL TALK IN CODE'S WORDS (2026-10-18): a hello back, a thanks,
+      // banter's friendly line, its mood, or the playful decline, for advice
+      // tagCandidate itself flagged (the advice screens read the tag; any
+      // other way to the decline put a joke under a question about people).
+      const smallLines = smallKind === "greeting" ? greetingAnswers(comment.id, facts.style, lineOpts)
+        : smallKind === "reaction" ? reactionAnswers(comment.id, facts.style, lineOpts)
+        : smallKind === "banter" ? chatAnswers(comment.id, facts.style, lineOpts)
+        : smallKind === "vibe" ? vibeAnswers(comment.id, facts.style, lineOpts)
+        : smallKind === "advice" && candidate.advice === true ? declineAnswers(comment.id, facts.style, lineOpts) : [];
+      // Never a draft in their place: a kind with no lines of its own is answered by nothing.
+      if (smallKind !== null && smallLines.length === 0) {
+        for (const key of smallKeys) await returnAllowance(shared, key, at());
+        passOver(comment, "answer-unanswered-smalltalk");
+        continue;
+      }
+      // Counted once a line stands and its row is written (below), as before 2026-10-13: answered-greeting,
+      // answer-casual-vibe, answer-casual-advice, answer-chat-banter; and answered-reaction.
+      const smallCount = smallKind === "greeting" ? "answered-greeting" : smallKind === "reaction" ? "answered-reaction" : smallKind === "banter" ? "answer-chat-banter"
+        : smallKind !== null ? `answer-casual-${smallKind}` : null;
       // NO MODEL WORDS BESIDE A LINE OF COINS (red-team 2026-10-12): the gate
       // read a "what's hot?" draft before code put "$CHUMP 24h +41.2%" after
       // it, so "if i had to pick one it'd be the first", "these are my plays"
@@ -2253,15 +2399,17 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         await returnAllowance(shared, `llm:${utcDay(nowMs)}`, at());
       }
       if (market.length) bump("answer-code-words");
-      const coded = templated || market.length > 0 || chatLines.length > 0;
-      // CODE'S LINES, the model question's, a market answer's, its strategy or
-      // its buys, this mention's own first: one it already said is a repeat to
+      const coded = templated || market.length > 0 || chatLines.length > 0 || smallLines.length > 0;
+      // CODE'S LINES, the model question's, small talk's, a market answer's, its
+      // strategy or its buys, this mention's own first: one it already said is a repeat to
       // the gate, so the next is tried rather than none, and when all have been
       // said lately, none. A paper agent's lines say paper: it is gated as a
       // paper reply.
-      const lines = templated ? modelAnswers(comment.id, facts.style, lineOpts) : chatLines.length ? chatLines : market;
+      const lines = templated ? modelAnswers(comment.id, facts.style, lineOpts) : smallLines.length ? smallLines : chatLines.length ? chatLines : market;
       const out: DraftResult = coded
         ? { ok: true, text: lines[0]! }
+        // No writer: never reached (a tag that would be drafted was passed over above, `drafting`), and nothing drafted if it were.
+        : creds === null ? { ok: false, reason: "error" }
         // A LARP CHECK IN ITS OWN VOICE (writer.ts checkPrompt): the take code reached, texted back casually.
         : asked.kind === "check"
         ? await tryDraft(creds, checkPrompt({ ...facts, question: candidate.text, research: looked?.research ?? [], ...(looked?.creatorClaim ? { creatorClaim: looked.creatorClaim } : {}) }),
@@ -2457,20 +2605,33 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // MARKED BY WHAT IT WAS HANDED, not by what the model wrote: an answer
       // given anything looked up is never handed on (ANSWER_LOOKED_UP).
       const lookedUp = !!looked && (looked.research.length > 0 || !!looked.creatorClaim || lined !== null);
-      // AND BY WHAT KIND OF EXCHANGE IT WAS (red-team review of 1ed46625): a
-      // greeting or banter was one a follow-up may be chatted under
-      // (ANSWER_PLAIN_THREAD, still read on older rows); neither is answered
-      // since 2026-10-13, so every answer closes its thread.
+      // AND BY WHAT KIND OF EXCHANGE IT WAS (red-team review of 1ed46625;
+      // again since 2026-10-18). A greeting, a thanks or banter as the first
+      // exchange (a top-level tag, or under one of its own plain posts) is a
+      // thread a follow-up may be chatted under (ANSWER_PLAIN_THREAD). Any
+      // other small talk ends its thread (ANSWER_THREAD_DONE): under a
+      // plain-thread answer, under its own buy, sale, recap or market post,
+      // or a greeting or a thanks under a closed answer; but its mood or a
+      // decline as the first exchange closes it as every other answer does,
+      // so a greeting may still be said once under it. Small talk is so at
+      // most two of its answers deep in any thread.
+      const smallFirst = candidate.followUp === undefined || (candidate.followUp === "plain" && underPost);
+      const plainThread = !!body && !lookedUp && smallFirst && (smallKind === "greeting" || smallKind === "reaction" || smallKind === "banter");
+      const threadEnds = !!body && smallKind !== null && !plainThread && !(smallFirst && (smallKind === "vibe" || smallKind === "advice"));
       const reason = body ? null : claimed ? "gate:sherwood-claim" : named || postsName ? "gate:sherwood-drafted" : unlooked ? "gate:unlooked-source"
         : unlookedCoin ? "gate:unlooked-coin" : untrusted ? "gate:trust-talk" : pointed ? "gate:deictic-pick" : accused ? "gate:accusation"
         : verdict && !verdict.ok ? `gate:${verdict.reason}` : out.ok ? "no-draft" : `no-draft:${out.reason}`;
       const id = await schedulePost(shared, {
         tenant: account.tenant, xUserId: account.xUserId, kind: "answer", dedupeKey, body: body ?? "",
-        coin: lookedUp ? ANSWER_LOOKED_UP : null, decisionId: null, dueAtMs: finishedAt, nowMs: finishedAt,
+        coin: lookedUp ? ANSWER_LOOKED_UP : plainThread ? ANSWER_PLAIN_THREAD : threadEnds ? ANSWER_THREAD_DONE : null, decisionId: null, dueAtMs: finishedAt, nowMs: finishedAt,
         replyToTweetId: comment.id, replyRootTweetId: comment.id, replyAuthorId: comment.authorId,
         status: body ? "scheduled" : "skipped",
         reason,
       });
+      // SMALL TALK'S CAPS BACK when no line stood (every one refused, a repeat
+      // of what it said lately) or no row was written: nothing will go out.
+      if (smallKeys.length && (!body || id === null)) for (const key of smallKeys) await returnAllowance(shared, key, at());
+      if (smallCount && body && id !== null) bump(smallCount);
       return id === null ? null : { body, lookedUp, ...(reason ? { why: reason } : {}) };
     }
     return null;

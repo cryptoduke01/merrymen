@@ -1366,7 +1366,12 @@ export async function ownRootTweetIds(db: Db, xUserId: string, limit = 2000): Pr
  * Anything else in `posts` or `answered` (a decline, its mood, a market
  * line, a coin's answer, an answer told its buys, a comment reply on a buy
  * post, any answer from before the mark) is closed: a follow-up under it is
- * answered with a greeting or nothing (orchestrator-xpost.ts writeAnswer).
+ * answered with a greeting, a thanks or nothing (orchestrator-xpost.ts
+ * writeAnswer).
+ *
+ *   - `done`: each small-talk answer that ended its thread
+ *     (ANSWER_THREAD_DONE), with the tag it answered: nothing at all is
+ *     answered under either, not even a greeting (2026-10-18).
  */
 export interface OwnThreads {
   roots: Set<string>;
@@ -1374,15 +1379,27 @@ export interface OwnThreads {
   answered: Map<string, string>;
   plain: Set<string>;
   trade: Set<string>;
+  done: Set<string>;
 }
 
 /**
  * AN ANSWER A FOLLOW-UP MAY BE CHATTED UNDER, by its row's `coin` (which no
- * answer otherwise uses but ANSWER_LOOKED_UP): a greeting, or banter handed
- * nothing and told none of its buys, under a tag that was itself top level or
- * plain (orchestrator-xpost.ts writeAnswer). Absent: closed.
+ * answer otherwise uses but ANSWER_LOOKED_UP): a greeting, a thanks or
+ * banter, handed nothing and told none of its buys, under a tag that was
+ * itself top level or under one of its own plain posts (orchestrator-xpost.ts
+ * writeAnswer). Absent: closed.
  */
 export const ANSWER_PLAIN_THREAD = "plain-thread";
+
+/**
+ * SMALL TALK THAT ENDED ITS THREAD (2026-10-18), by its row's `coin`: a
+ * greeting, a thanks, banter, its mood or a decline answered under one of
+ * its plain-thread answers, under its own buy, sale, recap or market post,
+ * or under any closed answer. Nothing is answered under it, or under the tag
+ * it answered (OwnThreads.done), so small talk is at most two of its answers
+ * deep in any thread, and a greeting under a closed answer is answered once.
+ */
+export const ANSWER_THREAD_DONE = "thread-done";
 
 /**
  * `trade`: the caller's screen for an intro or casual post that is about a
@@ -1404,7 +1421,7 @@ export async function ownThreadTweets(db: Db, xUserId: string, limit = 2000, shu
         LIMIT ?`,
     )
     .all(String(xUserId), max)) as { tweet_id: unknown; body: unknown; kind: unknown }[];
-  const roots = new Set<string>(), plain = new Set<string>(), traded = new Set<string>();
+  const roots = new Set<string>(), plain = new Set<string>(), traded = new Set<string>(), done = new Set<string>();
   for (const r of tops) {
     const tweet = String(r.tweet_id ?? "");
     if (tweet === "" || shut(String(r.body ?? ""))) continue;
@@ -1434,8 +1451,27 @@ export async function ownThreadTweets(db: Db, xUserId: string, limit = 2000, shu
       if (tweet !== "") plain.add(tweet);
       if (to !== "") plain.add(to);
     }
+    if (r.kind === "answer" && r.coin === ANSWER_THREAD_DONE) {
+      if (tweet !== "") done.add(tweet);
+      if (to !== "") done.add(to);
+    }
   }
-  return { roots, posts, answered, plain, trade: traded };
+  return { roots, posts, answered, plain, trade: traded, done };
+}
+
+/**
+ * EVERY X ACCOUNT THE FLEET POSTS FROM (2026-10-18): each tenant's connected
+ * X user and the one its owner consented for, whatever its status. An active
+ * agent never answers any of them, so two of the fleet's agents can never
+ * talk to each other in a loop on X. Bounded, as every read here is.
+ */
+export async function fleetXUserIds(db: Db, limit = 5000): Promise<Set<string>> {
+  const rows = (await db
+    .prepare(`SELECT x_user_id, consent_x_user_id FROM xpost_accounts LIMIT ?`)
+    .all(int(Math.max(1, Math.min(20000, limit))))) as { x_user_id: unknown; consent_x_user_id: unknown }[];
+  const out = new Set<string>();
+  for (const r of rows) for (const id of [r.x_user_id, r.consent_x_user_id]) if (typeof id === "string" && id !== "") out.add(id);
+  return out;
 }
 
 /**

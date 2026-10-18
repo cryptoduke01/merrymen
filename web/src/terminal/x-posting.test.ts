@@ -169,7 +169,7 @@ describe("comment reply consent", () => {
     const dialog = ui.container.querySelector("dialog")?.textContent ?? "";
     assert.match(dialog, new RegExp(`reply as @${HANDLE} to selected posts that tag it, reply to it or quote it\\.`));
     assert.match(dialog, /Answers go out right away: they don’t wait under Coming up/);
-    assert.match(dialog, /It answers questions about the market, coins, how it trades and what it can do, never small talk, from people who tag it, reply to it or quote it, a few times a day each: up to 60 answers a day on top of its posts, and at most six to one person a day\./);
+    assert.match(dialog, /It answers questions about the market, coins, how it trades and what it can do, and a hello, a thanks or a bit of chat in a short line of its own, from people who tag it, reply to it or quote it, a few times a day each: up to 60 answers a day on top of its posts, and at most six to one person a day\./);
     assert.match(dialog, /Answers carry no opt-out line, and it never answers someone who asked it to stop\./);
     // No promise to anyone that they can reply stop (the owner's decision, 2026-10-12): replying or quoting is asking.
     assert.doesNotMatch(dialog, /Anyone can reply stop|can reply stop to opt out|after 30 days/);
@@ -807,7 +807,7 @@ describe("the warning keeps its words", () => {
       "Each reply waits under Coming up for at least ten minutes first, with a link to the comment, and you can skip it there. Turn replies off at any time to cancel waiting replies.",
       "Your Merryman will reply as ${handle} to selected posts that tag it, reply to it or quote it.",
       "It chooses which posts to answer; it won’t answer every one. Answers go out right away: they don’t wait under Coming up, so you can’t skip one first.",
-      "It answers questions about the market, coins, how it trades and what it can do, never small talk, from people who tag it, reply to it or quote it, a few times a day each: up to 60 answers a day on top of its posts, and at most six to one person a day. Answers carry no opt-out line, and it never answers someone who asked it to stop. Turn replies off at any time to stop answering.",
+      "It answers questions about the market, coins, how it trades and what it can do, and a hello, a thanks or a bit of chat in a short line of its own, from people who tag it, reply to it or quote it, a few times a day each: up to 60 answers a day on top of its posts, and at most six to one person a day. Answers carry no opt-out line, and it never answers someone who asked it to stop. Turn replies off at any time to stop answering.",
       "Answers may include market figures from public data (CoinGecko, GeckoTerminal, Fomo and Bitquery), such as a coin’s price, market cap, volume or recent change. Merrymen adds them as the data showed them; they are never advice.",
       "Let it reply as ${handle}",
     ]) {

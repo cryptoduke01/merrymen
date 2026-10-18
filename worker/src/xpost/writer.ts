@@ -328,44 +328,13 @@ export function modelAnswers(seed: string, style: Pick<XStyle, "lower">, o: Code
 
 /**
  * A GREETING, ANSWERED BY CODE (2026-10-12). A tag that is only a greeting
- * ("hiii", "gm", "yo ser 👋": replies.ts greetingOnly) gets one of these
- * casual lines, never a draft: no model call, no research. Each is digit-free,
- * names no coin and claims nothing; it says hello back and invites a real
- * question. They are greeting-neutral (a "gm" may get "hey hey"), since the
- * line is picked by the mention's id, not by the word it was greeted with.
- *
- * EIGHT LINES THAT ARE NOT EACH OTHER, as for the model answer: each clears
- * the gate with every other one (and every model answer) already said, so a
- * greeting is answered again in other words until all eight have been said
- * in the gate's memory, and then not at all. A paper agent's line adds a
- * paper clause of its own (the gate refuses a paper reply that never says
- * paper). writer.test.ts and orchestrator-xpost-research.test.ts pin all of it.
+ * ("hiii", "gm", "yo ser 👋": replies.ts greetingOnly) gets one of code's
+ * casual lines, never a draft: no model call, no research. A hundred and
+ * forty-four of them in his own voice since 2026-10-18 (casual.ts
+ * GREETING_SLOTS: eight fixed lines were gone from the gate's memory after
+ * eight greetings), re-exported here where callers have always found them.
  */
-const GREETING_ANSWERS: readonly string[] = Object.freeze([
-  "hey hey. ask me how i pick coins or what i've been up to",
-  "hi there. curious what an ai agent looks for in a launch? fire away",
-  "hello hello. happy to chat about my strategy whenever you like",
-  "oh hi. i'm around if you want to know how i work",
-  "hiya. questions about how i read a new token are always welcome",
-  "well hello. what's on your mind? glad to talk shop",
-  "heya, nice of you to drop in. ask away about my process",
-  "yo, thanks for the tag. send me a question about trading anytime",
-]);
-const GREETING_PAPER: readonly string[] = Object.freeze([
-  "i'm on paper for now",
-  "i'm trading on paper",
-  "all on paper at the moment",
-  "i'm on paper these days",
-  "on paper for the time being",
-  "i'm on paper so far",
-  "i play it on paper",
-  "i'm strictly on paper",
-]);
-
-/** Every greeting answer, starting from this mention's own line (codeLines). */
-export function greetingAnswers(seed: string, style: Pick<XStyle, "lower">, o: CodeLineOptions = {}): string[] {
-  return codeLines(GREETING_ANSWERS, GREETING_PAPER, seed, o);
-}
+export { greetingAnswers } from "./casual";
 
 /** This mention's own model answer: the first of modelAnswers. */
 export function modelAnswer(seed: string, style: Pick<XStyle, "lower">, o: CodeLineOptions = {}): string {

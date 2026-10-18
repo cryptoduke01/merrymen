@@ -1271,30 +1271,33 @@ describe("an active agent's answers and conversation memory", () => {
     }
   });
 
-  it("a greeting's answer is code's: eight casual lines, picked by the mention, digit-free, naming no coin and claiming nothing", () => {
+  it("a greeting's answer is code's: a hundred and forty-four casual lines, picked by the mention, digit-free, naming no coin and claiming nothing (2026-10-18)", () => {
     const lines = new Set<string>();
-    for (let i = 0; i < 200; i++) lines.add(greetingAnswers(`10000000000000${i}`, { lower: false })[0]!);
-    assert.equal(lines.size, 8, "every line is reachable");
-    const all8 = greetingAnswers("1", { lower: false });
-    assert.equal(new Set(all8).size, 8, "the mention's own line first, then every other line, once");
-    assert.deepEqual(greetingAnswers("1", { lower: false }), all8, "the same mention, the same order");
-    assert.equal(greetingAnswers("1", { lower: true })[0], all8[0], "no notice, so nothing in a line turns on its casing");
+    for (let i = 0; i < 2000; i++) lines.add(greetingAnswers(`10000000000000${i}`, { lower: false })[0]!);
+    assert.ok(lines.size > 120, `most lines are reachable as a mention's own first: ${lines.size}`);
+    const every = greetingAnswers("1", { lower: false });
+    assert.equal(every.length, 144);
+    assert.equal(new Set(every).size, 144, "the mention's own line first, then every other line, once");
+    assert.deepEqual(greetingAnswers("1", { lower: false }), every, "the same mention, the same order");
+    assert.equal(greetingAnswers("1", { lower: true })[0], every[0], "no notice, so nothing in a line turns on its casing");
     const paper = greetingAnswers("1", { lower: false }, { paper: true });
-    for (const [i, line] of [...all8, ...paper].entries()) {
-      assert.match(line, /\.$/);
+    for (const [i, line] of [...every, ...paper].entries()) {
+      // His house voice: lowercase, no full stop at the end, like a text.
+      assert.doesNotMatch(line, /\.$/);
+      assert.equal(line, line.toLowerCase());
       assert.doesNotMatch(line, /opt out|\bstop\b/i, "no opt-out line on an answer (2026-10-12)");
       assert.doesNotMatch(line, /\p{N}|\$|@|#|https?:|0x/u, line);
       assert.doesNotMatch(line, /\b(?:pepe|bonk|wif|doge|shib|btc|eth|sol|bitcoin|solana|sherwood|merrymen|groq|qwen|gpt|claude|llama)\b/i, line);
       assert.doesNotMatch(line, /\b(?:bought|holding|hold|profit|loss|moon|pump|gem|buy|sell|price)\b/i, `${line}: no claim, no call`);
       assert.equal(sherwoodNamed(line), false, line);
       assert.equal(vocabularyRefusal(line), null, line);
-      if (i >= 8) {
-        assert.ok(line.startsWith(all8[i - 8]!.replace(/\.$/, "")), line);
-        assert.match(line, /\bon paper\b/, "a paper agent's line says paper");
+      if (i >= 144) {
+        assert.ok(line.startsWith(`${every[i - 144]!}. `), line);
+        assert.match(line, /\bpaper\b|\bpractice money\b/, "a paper agent's line says paper");
       } else assert.doesNotMatch(line, /paper|practice/, "a live one's never does");
     }
     // Weighed as the gate weighs a reply.
-    for (const set of [all8, paper]) {
+    for (const set of [every, paper]) {
       const bare = set;
       for (let i = 0; i < bare.length; i++) {
         for (let j = i + 1; j < bare.length; j++) assert.ok(similarity(bare[i]!, bare[j]!) < 0.6, `${bare[i]} / ${bare[j]}`);
@@ -1309,7 +1312,9 @@ describe("an active agent's answers and conversation memory", () => {
         assert.deepEqual(make("1", { lower: true }, { paper }), lines, "casing changes nothing");
         for (const line of lines) {
           assert.doesNotMatch(line, /opt out|\bstop\b|unsubscribe/i, line);
-          assert.match(line, /\.$/, line);
+          // The model line ends with a full stop; a greeting, in his house voice since 2026-10-18, with none.
+          if (make === modelAnswers) assert.match(line, /\.$/, line);
+          else assert.doesNotMatch(line, /\.$/, line);
         }
       }
     }

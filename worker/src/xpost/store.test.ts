@@ -39,6 +39,8 @@ import {
   ownRecentBodies,
   ownThreadTweets,
   ANSWER_PLAIN_THREAD,
+  ANSWER_THREAD_DONE,
+  fleetXUserIds,
   ownerSendTimesSince,
   tradeSendTimesSince,
   recapPostsOf,
@@ -894,7 +896,7 @@ test("the conversations an X account is in: its posted top-level posts and answe
   };
   const answer = (tag: string, author: string, nowMs: number, over: Partial<NewPost> = {}): NewPost => post({ kind: "answer", dedupeKey: `answer:111:${tag}`,
     body: `an answer to ${tag}`, replyToTweetId: tag, replyRootTweetId: tag, replyAuthorId: author, nowMs, dueAtMs: nowMs, ...over });
-  const none = { roots: new Set(), posts: new Set(), answered: new Map(), plain: new Set(), trade: new Set() };
+  const none = { roots: new Set(), posts: new Set(), answered: new Map(), plain: new Set(), trade: new Set(), done: new Set() };
   assert.deepEqual(await ownThreadTweets(db, "111"), none, "nothing posted yet");
 
   await sent(post({ kind: "intro", dedupeKey: "intro:a:111", body: "hello", nowMs: 10, dueAtMs: 10 }), "9001");
@@ -946,6 +948,24 @@ test("the conversations an X account is in: its posted top-level posts and answe
   assert.ok(!closed.plain.has("9005") && !closed.trade.has("9005"), "closed, more closed than its trade");
   assert.ok(closed.roots.has("9005") && closed.posts.has("9005"), "and still its own post");
   assert.ok(closed.trade.has("9003") && closed.plain.has("9004") && closed.plain.has("9001"), "the rest as they were, its hello plain");
+  // SMALL TALK THAT ENDED ITS THREAD (2026-10-18): the answer and the tag it answered, in `done` alone; never plain.
+  assert.deepEqual([...closed.done], [], "nothing has ended its thread yet");
+  await sent(answer("570", "321", 130, { coin: ANSWER_THREAD_DONE }), "9571");
+  assert.ok(await schedulePost(db, answer("580", "322", 140, { coin: ANSWER_THREAD_DONE })), "drafted, never posted");
+  const done = await ownThreadTweets(db, "111");
+  assert.deepEqual([...done.done].sort(), ["570", "9571"]);
+  assert.ok(done.posts.has("9571") && !done.plain.has("9571") && !done.plain.has("570"), "its own post, never plain");
+  assert.ok(!done.done.has("580"), "posted rows only");
+});
+
+test("every X account the fleet posts from, whatever its status: what an active agent never answers (2026-10-18)", async (t) => {
+  const { db } = await open(t);
+  assert.deepEqual(await fleetXUserIds(db), new Set());
+  await upsertAccount(db, DEK, { tenant: OWNER_A, xUserId: "111", username: "a", tokens: TOKENS, nowMs: 1 });
+  await upsertAccount(db, DEK, { tenant: OWNER_B, xUserId: "222", username: "b", tokens: TOKENS, nowMs: 1 });
+  await setPosting(db, OWNER_A, { enabled: true, xUserId: "111" }, 2);
+  // Posting off, never consented: still one of the fleet's.
+  assert.deepEqual([...(await fleetXUserIds(db))].sort(), ["111", "222"]);
 });
 
 test("turning replies off cancels only replies and opt-outs are durable across tenants sharing an account", async (t) => {

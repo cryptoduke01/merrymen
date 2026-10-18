@@ -28,7 +28,7 @@ import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
 import { STRATEGY_SPOKEN } from "../groupchat/templates";
-import { chatAnswers, declineAnswers, selfAnswers, tradesAnswers, vibeAnswers } from "./casual";
+import { chatAnswers, declineAnswers, reactionAnswers, selfAnswers, tradesAnswers, vibeAnswers } from "./casual";
 import { checkAnswers, checkPhrases, type CheckRead, type CheckSignal, type CheckVerdict } from "./check";
 import { sourceNamed } from "./gate";
 import { hotAnswers, hotNoneAnswers, hotUnreadAnswers, insightFacts, majorAnswers, majorUnreadAnswers, marketAnswers, type HotRead, type MajorRead, type MarketRead, type Move } from "./market";
@@ -101,7 +101,7 @@ describe("code's own words never name the chain or a data provider (the owner, 2
     for (const seed of seeds) {
       for (const paper of [false, true]) {
         const o = { paper };
-        lines.push(...declineAnswers(seed, style, o), ...vibeAnswers(seed, style, o), ...chatAnswers(seed, style, o));
+        lines.push(...declineAnswers(seed, style, o), ...vibeAnswers(seed, style, o), ...chatAnswers(seed, style, o), ...reactionAnswers(seed, style, o));
         for (const s of strategies) lines.push(...selfAnswers(s, seed, style, o));
         for (const coins of [[], ["pepe"], ["pepe", "bonk"]]) lines.push(...tradesAnswers(coins, seed, style, o));
         lines.push(...greetingAnswers(seed, style, o), ...modelAnswers(seed, style, o), modelAnswer(seed, style, o));
