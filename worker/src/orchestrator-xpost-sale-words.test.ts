@@ -63,6 +63,13 @@ describe("a win's own words", () => {
     }
   });
 
+  it("the real gate refuses a sale's timing, amount or holding, which no line says (trade-wording review, 2026-10-18)", () => {
+    for (const text of [
+      "just sold some casino from the stack", "sold some casino, still holding the rest", "sold casino, rest of the bag stays put",
+      "sold half of my casino here", "sold casino at the top of the range", "sold casino into strength, still in some",
+    ]) assert.equal(admit(text, "Casino").ok, false, text);
+  });
+
   it("fits whole in an active owner's post, result line, tx link and contract included (review of the wins branch)", () => {
     for (const coin of ["PEPE", "CAPITOL", "IGNITION", "ALTAI", "MOON"]) {
       for (const gain of [0.1, 12.4, 99]) assert.ok(saleLines(coin, "s").every((l) => whole(l, gain) !== null), `${coin} at +${gain}%: every line fits`);

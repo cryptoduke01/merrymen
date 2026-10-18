@@ -38,6 +38,53 @@ describe("sale prose and deterministic gross outcome", () => {
     assert.equal(appendSaleOutcome("x".repeat(280), "profit"), null);
   });
 
+  it("refuses where the price was, how much went and what is left, read with \"sold\" still in (trade-wording review, 2026-10-18)", () => {
+    // The six a probe of the real gate admitted.
+    for (const text of [
+      "just sold some casino from the stack", "sold some casino, still holding the rest", "sold casino, rest of the bag stays put",
+      "sold half of my casino here", "sold casino at the top of the range", "sold casino into strength, still in some",
+    ]) assert.equal(admitXPost(text, { ...gate, coins: ["Casino"] }, base).ok, false, text);
+    // Each screen on its own.
+    for (const [text, reason] of [
+      ["just sold pepe, receipt is filed", "alert"],
+      ["sold pepe at a level i liked there", "sale-timing"],
+      // The coin taken out still leaves "sold at".
+      ["sold Pepe at the desk, back to work", "sale-timing"],
+      ["sold pepe near the highs of the range", "sale-timing"],
+      ["sold pepe into strength, receipt filed", "sale-timing"],
+      ["sold pepe into the dip, receipt filed", "sale-timing"],
+      ["sold pepe a while ago, receipt filed", "sale-timing"],
+      ["flipped pepe and sold it, receipt filed", "sale-timing"],
+      ["sold some pepe, receipt filed", "sale-amount"],
+      ["sold a chunk of pepe, receipt filed", "sale-amount"],
+      ["sold a bit of pepe, receipt filed", "sale-amount"],
+      ["sold a piece of pepe, receipt filed", "sale-amount"],
+      ["sold a quarter of the pepe", "sale-amount"],
+      ["sold the whole pepe bag, receipt filed", "sale-amount"],
+      ["sold all my pepe, receipt filed", "sale-amount"],
+      ["sold pepe, trimmed and filed away", "sale-amount"],
+      ["sold pepe for a grand, receipt filed", "quantity"],
+      ["sold pepe, what's left stays on the desk", "sale-holding"],
+      ["sold pepe, rest of it stays put", "sale-holding"],
+      ["sold pepe, still in it", "sale-holding"],
+      ["sold pepe, holding the other one", "sale-holding"],
+      ["sold pepe, i’ll buy again later", "sale-holding"],
+      ["sold pepe, next one i grab is coming", "sale-holding"],
+    ] as const) {
+      const v = admitXPost(text, gate, base);
+      assert.equal(v.ok ? "ok" : v.reason, reason, text);
+    }
+    // What a sale may still say.
+    for (const text of [
+      "sold pepe. keeping the notes for my next decision.", "i sold pepe, receipt filed.", "ok, pepe sold. receipt's below",
+      "pepe sold, back to digging around", "and that's pepe sold. carrying on",
+    ]) assert.equal(admitXPost(text, gate, base).ok, true, text);
+    // A coin called what a screen reads is a name, read with the coin taken out.
+    assert.equal(admitXPost("sold Half, receipt filed and noted", { ...gate, coins: ["Half"] }, base).ok, true);
+    assert.equal(admitXPost("sold Top Cat, receipt filed and noted", { ...gate, coins: ["Top Cat"] }, base).ok, true);
+    assert.deepEqual(admitXPost("sold Top Cat at the top", { ...gate, coins: ["Top Cat"] }, base), { ok: false, reason: "sale-timing" });
+  });
+
   it("never hands outcome or money to the model and reserves room for verified suffixes", () => {
     const a = sellPrompt({ ...facts, coin: "Pepe", paper: false, outcome: "profit" });
     const b = sellPrompt({ ...facts, coin: "Pepe", paper: false, outcome: "loss" });

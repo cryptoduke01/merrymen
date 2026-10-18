@@ -2021,6 +2021,33 @@ The private `agentBrief` never enters an X prompt.
   or estimated cost basis means neutral sale commentary with no result claim.
   There is no claim of net profitability or of selling early; those require
   evidence this path does not have.
+- **What a sale's words may not say (2026-10-18).** The sale gate takes
+  "sold" out before the vocabulary screens, so "just sold" and "sold at" were
+  never read as alerts, and a sale was not held to the holding screens a
+  casual post is. A probe of the real gate let through "just sold some casino
+  from the stack", "sold casino, rest of the bag stays put", "sold half of my
+  casino here" and "sold casino at the top of the range". A sale's words, read
+  with the coin and the agent's name taken out, are now refused when they:
+  - read as an alert or a price claim with "sold" left in (`alert`,
+    `market`): "just sold", "sold at";
+  - say where the price was or when (`sale-timing`): "sold PEPE at", "sold
+    the top", "near the highs", "into strength", "into the dip", "a while
+    ago", "flipped";
+  - say how much went, part or whole (`sale-amount`, and `quantity` for an
+    amount in words): "half", "a quarter", "a chunk of", "some", "a bit of",
+    "a piece of", "most", "trimmed", "all", "the whole", or the bag or the
+    position itself;
+  - say something is left or kept, or a buy is coming (`sale-holding`):
+    "still in", "holding", "the rest", "stays put", "what's left", "a
+    runner", "i'll buy again", the casual post's holding and buy-to-come
+    screens included.
+
+  A receipt shows that a sale landed, never where the price was, how much of
+  the position went, or what is left. Stricter only: every line of code's
+  sale words (`sale-words.ts`) still clears, and a refused model sentence on
+  an active owner's win falls back to them as before
+  (`sale-code-words:gate:sale-amount` and so on). The model's sale prompt is
+  unchanged.
 
 ### The profit card on a sale (2026-10-13)
 

@@ -1251,6 +1251,37 @@ export function hotBuyClaimed(text: unknown): boolean {
 const REPLY_CURRENT_POSITION = /\b(?:(?:i|we)\s+(?:(?:still|currently|already|also)\s+)?(?:have|keep|maintain|carry)\s+(?:an?\s+)?(?:(?:open|small|little|long)\s+)?(?:positions?|stakes?|bags?|exposure|holdings)|(?:i(?:'ve| have)|we(?:'ve| have))\s+(?:still\s+|already\s+)?got\s+(?:an?\s+)?(?:positions?|stakes?|bags?|exposure|holdings)|(?:my|our)\s+(?:position|stake|bag|exposure|holding)\s+(?:is|remains|stays))\b/i;
 
 /**
+ * WHAT A SALE'S OWN WORDS SAID PAST EVERY SCREEN (trade-wording review,
+ * 2026-10-18). The sale path takes "sold" out before the vocabulary screens,
+ * so "just sold" and "sold at" were never read as the alert they are, and a
+ * sale was never held to the holding screens a casual post is. A probe of the
+ * real gate admitted "just sold some casino from the stack", "sold some
+ * casino, still holding the rest", "sold casino, rest of the bag stays put",
+ * "sold half of my casino here", "sold casino at the top of the range" and
+ * "sold casino into strength, still in some". A receipt shows that a sale
+ * landed: never where the price was, how much of the position went, or what
+ * is left (a partial sale is possible, so neither "some" nor "all" is known).
+ * Read on the words with the coin and the agent taken out, so a coin called
+ * "Half" or "Top Cat" is a name, and "sold PEPE at" reads as "sold at".
+ * Refused as sale-timing, sale-amount and sale-holding; code's own sale
+ * words (sale-words.ts) say none of these.
+ */
+/** Where the price was, or when: "sold at", "sold the top", "near the highs", "into strength", "into the pump", "just now", "a minute ago", "flipped". */
+const SALE_TIMING = new RegExp([
+  String.raw`\bsold\s+(?:(?:in|out)\s+)?at\b`,
+  String.raw`\bsold\s+(?:the|a|its)\s+(?:very\s+|local\s+)?(?:tops?|bottoms?|highs?|lows?|peaks?)\b`,
+  String.raw`\b(?:at|near|off|from|around)\s+(?:the\s+|its\s+|a\s+|this\s+|that\s+)?(?:very\s+|local\s+|recent\s+)?(?:tops?|bottoms?|highs?|lows?|peaks?)\b`,
+  String.raw`\b(?:strength|weakness)\b`,
+  String.raw`\binto\s+(?:the\s+|a\s+|this\s+|that\s+|its\s+)?(?:pump|dump|rally|dip|bounce|spike|rip|run[\s-]?up|move)\b`,
+  String.raw`\bjust\s+(?:now|sold)\b|\bago\b`,
+  String.raw`\bflip(?:s|ped|ping)?\b`,
+].join("|"), "i");
+/** How much of it, part or whole: "half", "a quarter", "a chunk of", "some", "a bit of", "a piece of", "most", "trimmed", "all", "the whole", "everything", or the bag or position itself. */
+const SALE_AMOUNT = /\b(?:half|halves|quarters?|thirds?|chunks?|some|bits?|pieces?|parts?|partial(?:ly)?|portions?|slices?|sliver|fraction|most|majority|bulk|few|little|lots?|trim(?:s|med|ming)?|all|whole|entire(?:ly)?|everything|fully|completely|bags?|stack|positions?|stakes?|holdings|exposure)\b/i;
+/** What is left or kept: "still in", "still got", "holding", "held", "the rest", "rest of the bag", "stays put", "what's left", "leftovers", "a runner". */
+const SALE_HOLDING = /\b(?:still\s+(?:holding|hodling|in|have|has|got|own|owns|hold|holds|carry|carrying|keep|keeping|sitting|riding|long|bagging)|hold(?:s|ing)?|held|hodl\w*|rest|remainder|remaining|remains|leftovers?|left|stay(?:s|ed|ing)?\s+put|runners?)\b/i;
+
+/**
  * PROFIT, LOSS, SIZE AND EXITS. The writer is shown what the agent BOUGHT —
  * never a price, a size, a sell, or how a coin has done since — so a post that
  * claims a gain, a loss, a stake, a size or a sale made it up, on a real
@@ -1972,6 +2003,7 @@ export const OPT_OUT_SAID = /\b(?:say|reply|replying|type|send|text|dm|tweet|wri
  * handle · link · markup · emoji · exclaim · caps · ops · alert · hype · pnl ·
  * market · human-claim · points-back · coin-unsaid · paper-unsaid · mode-false · undisclosed · intro-no-trading ·
  * opt-out-unsaid · opt-out-said · reply-current-or-action · sherwood-claim · bought-named · buy-claim · unlooked-name · stock-phrase ·
+ * sale-unsaid · sale-result · sale-timing · sale-amount · sale-holding · sale-length ·
  * cashtags · fleet-repeat · seed-echo — plus whatever the base gate says (has-digits,
  * quantity, repeat, unvouched-ticker, address, secret…).
  *
@@ -2074,7 +2106,16 @@ function admitMasked(tidied: string, ctx: XGateCtx, baseGate: BaseGate, agentNam
   if (vocab) return refuse(vocab);
   if (ctx.kind === "sell") {
     if (!/\bsold\b/i.test(own)) return refuse("sale-unsaid");
+    // THE ALERT AND THE PRICE READ WITH "SOLD" STILL IN (SALE_TIMING): "just sold", "sold at".
+    const sale = own.normalize("NFKC").replace(/[’‘]/g, "'");
+    if (ALERT.test(sale) || ALERT_CAPS.test(sale) || ALERT_EMOJI.test(sale)) return refuse("alert");
+    if (MARKET.test(sale)) return refuse("market");
     if (/\b(?:jeet\w*|early|late|afterwards|afterward|since|continued|kept|rallied|pumped|dumped|mooned|timing|timed|won|win\w*|los[st]\w*|flat|break[ -]?even|green|red|victory|relie[fv]\w*|regret\w*|pleased|happy|sad|glad|proud|celebrat\w*|ouch|painful|hurt|finest|mistake|success\w*|paid off|worked|thesis|right|wrong|nice|lucky|luck|fortunately|unfortunately|closed|exited|out|because|due to)\b/i.test(own)) return refuse("sale-result");
+    if (SALE_TIMING.test(sale)) return refuse("sale-timing");
+    if (SALE_AMOUNT.test(sale)) return refuse("sale-amount");
+    if (amountSaid(sale)) return refuse("quantity");
+    // Nothing left or kept, and no buy to come: what a casual post is held to (REPLY_CURRENT_OR_ACTION, HOT_BUY_CLAIM), and SALE_HOLDING.
+    if (SALE_HOLDING.test(sale) || REPLY_CURRENT_OR_ACTION.test(sale) || REPLY_CURRENT_POSITION.test(sale) || hotBuyClaimed(sale)) return refuse("sale-holding");
     if (text.length > 90) return refuse("sale-length");
   }
   const namesCoin = coins.some((c) => mentions(text, c));

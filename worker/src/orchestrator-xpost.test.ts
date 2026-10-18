@@ -523,14 +523,14 @@ describe("receipt-backed sale posts", () => {
     const w = await world(t, T0);
     await ready(w);
     const p = poster(w, {
-      answer: () => "i sold some pepe.", facts: factsOf([], "live"),
+      answer: () => "i sold pepe, receipt filed.", facts: factsOf([], "live"),
       socialProfile: async () => ({ xTradeResults: true, currentAgent: { address: AGENT, chainId: 4663 } }),
       saleResults: async () => [sale],
     });
     await p.step(w.db, ROSTER, new Map(), T0 + MIN);
     const post = (await rows(w)).find((r) => r.kind === "sell")!;
     assert.ok(post);
-    assert.equal(post.body, "i sold some pepe.\ngross gain before fees and gas. pleased with that part.");
+    assert.equal(post.body, "i sold pepe, receipt filed.\ngross gain before fees and gas. pleased with that part.");
     assert.ok(w.prompts.every((prompt) => !prompt.includes("gross gain")), "the model is not asked to infer profitability");
     assert.equal(w.tweets.length, 0);
     await p.step(w.db, ROSTER, new Map(), post.dueAtMs);
@@ -562,7 +562,7 @@ describe("receipt-backed sale posts", () => {
       const results: PlanSell[] = [over.result ?? WIN];
       const p = poster(w, {
         active: over.active ?? true,
-        answer: () => over.answer ?? "i sold some pepe.", facts: factsOf([], "live"),
+        answer: () => over.answer ?? "i sold pepe, receipt filed.", facts: factsOf([], "live"),
         ...(over.llmPerDay === undefined ? {} : { llmPerDay: over.llmPerDay }),
         fetch: xWithMedia(calls, over.upload),
         socialProfile: async () => ({ xTradeResults: true, currentAgent: { address: AGENT, chainId: 4663 } }),
@@ -643,7 +643,7 @@ describe("receipt-backed sale posts", () => {
         const w = await world(t, T0, MEDIA);
         await ready(w);
         const p = poster(w, {
-          active: true, answer: () => "i sold some pepe.", facts: factsOf([], "live"),
+          active: true, answer: () => "i sold pepe, receipt filed.", facts: factsOf([], "live"),
           socialProfile: async () => ({ xTradeResults: true, currentAgent: { address: AGENT, chainId: 4663 } }),
           saleResults: async () => [result],
         });
@@ -657,7 +657,7 @@ describe("receipt-backed sale posts", () => {
       // The model passing; a model sentence too long to fit beside the link; and a long ticker at a five-figure gain, where
       // many of code's lines run long too and the next is tried until one fits.
       // And a name no line can carry (too long beside a five-figure gain; a number word the gate reads as a quantity): its ticker is said.
-      for (const [answer, name, symbol, gainPct, said] of [["PASS", "Pepe", "PEPE", 12.4, "Pepe"], ["sold some pepe today, the swap went through and the receipt is filed away.", "Pepe", "PEPE", 12.4, "Pepe"],
+      for (const [answer, name, symbol, gainPct, said] of [["PASS", "Pepe", "PEPE", 12.4, "Pepe"], ["sold pepe today, the swap went through and the receipt is filed away.", "Pepe", "PEPE", 12.4, "Pepe"],
         ["PASS", "Pudgy Penguin Club", "PUDGY", 12345, null], ["PASS", "Wrapped Robinhood Ether", "WETH", 12345, "WETH"], ["PASS", "Million", "MM", 12.4, "MM"],
         // A long name and no ticker the gate can say: its two-part lines (third review).
         ["PASS", "Wrapped Robinhood Ethers", "WETH2", 12345, "Wrapped Robinhood Ethers"]] as const) {
@@ -695,7 +695,7 @@ describe("receipt-backed sale posts", () => {
         const [words, result] = post.body.split("\n");
         assert.match(words!, /\bsold\b/);
         assert.match(words!, /\b(?:PEPE|Pepe)\b/);
-        assert.doesNotMatch(words!, /i sold some pepe/, "not the model's");
+        assert.doesNotMatch(words!, /i sold pepe, receipt filed/, "not the model's");
         assert.equal(result, "+40% gross gain before fees and gas. pleased with that part.");
         assert.equal(sent.status, "posted");
         assert.equal(calls.filter((c) => c.url.endsWith("/2/media/upload")).length, 1);
@@ -705,7 +705,7 @@ describe("receipt-backed sale posts", () => {
 
     it("a win's line says whose words it went in, and why code's stood in: the model's reason, never any words (2026-10-18)", async (t) => {
       const cases: [string, Parameters<typeof poster>[1], string, string | null][] = [
-        ["the model's sentence", { answer: () => "i sold some pepe." }, "drafted-sell-model", null],
+        ["the model's sentence", { answer: () => "i sold pepe, receipt filed." }, "drafted-sell-model", null],
         ["a PASS", { answer: () => "PASS" }, "drafted-sell-code", "no-draft:pass"],
         ["a provider's refusal", { answer: () => { throw new Error("groq 429 — rate_limit_exceeded: Rate limit reached in organization org_private"); } }, "drafted-sell-code", "no-draft:groq-429"],
         ["a refused draft", { answer: () => "sold pepe, pleased with that win." }, "drafted-sell-code", "gate:sale-result"],
@@ -760,7 +760,7 @@ describe("receipt-backed sale posts", () => {
       let allowed = true;
       let evidence: PlanSell[] = [sale];
       const p = poster(w, {
-        answer: () => "i sold some pepe.", facts: factsOf([], "live"),
+        answer: () => "i sold pepe, receipt filed.", facts: factsOf([], "live"),
         socialProfile: async () => ({ xTradeResults: allowed, currentAgent: { address: AGENT, chainId: 4663 } }),
         saleResults: async () => evidence,
       });
