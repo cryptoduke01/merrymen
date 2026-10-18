@@ -1,75 +1,119 @@
 /**
- * A WIN IS SAID EVEN WHEN THE MODEL PASSES (the owner's ask, 2026-10-14:
- * "where are the trade pnls" — every profitable sale gets its own post with
- * the P&L card). A sale post's words are the model's one neutral sentence and
- * its result line is code's (sale-outcome.ts); when the model passes, is
- * refused by the gate, is down, its allowance is spent, or its sentence
- * leaves no room for the result line and the token link, an active owner's
- * win takes one of these lines instead, through the same gate, and code's
- * result line, card and token link follow as ever.
- *
- * WHAT THE SALE PATH ASKS (writer.ts sellPrompt, gate.ts kind "sell"): the
- * coin named, "sold" said, no result, emotion or timing word (the measured
- * outcome is code's line), nothing that says the whole position went or that
- * the agent left the coin (a partial sale is possible), and nothing a receipt
- * does not show: no speed, no smoothness, no human life (review of the wins
- * branch, 2026-10-14). The words only say the sale is on the record, the desk
- * goes on, and nothing more.
- *
- * SHORT ENOUGH FOR AN ACTIVE OWNER'S POST: the result line and the tx link
- * and contract after it leave about sixty-five characters, so every part is
- * at most fifteen (orchestrator-xpost-sale-words.test.ts).
- *
- * A HUNDRED AND FORTY-FOUR LINES, NONE A TEMPLATE TO THE REPEAT CHECK. The
- * gate refuses a post that shares six tenths of its content words with a
- * recent one. Every line is "sold COIN." (or "i sold COIN.") and then three
- * parts, one from each slot of twelve, joined by a Latin square (casual.ts
- * latinLines's arrangement), so any two lines share at most one part; every
- * part has exactly two words the gate counts and shares none with another.
- * Two wins sharing a part are half alike at most, the same coin's too while
- * its name is one or two words (second review of the wins branch: with two
- * parts of three words, the twelfth win of one coin in memory had no line
- * left); a longer name's lines meet the limit sooner, and its other vetted
- * names are tried. A line identical to a recent one is refused and the next
- * tried.
- *
- * Pure: no I/O, no model, no clock.
+ * Casual receipt-backed sale prose. Twenty-four hand-written first choices,
+ * followed by twenty-four distinct reserve openings with a
+ * Latin-square aside: any pair shares at most one part. Two parts alone
+ * exhaust at twenty-four same-coin sales under the unchanged repeat gate.
+ * The coin and "sold" are the only financial claim. No amount, reason,
+ * position, result, timing, or promised next purchase is inferred.
  */
 import { hash32 } from "./planner";
 
-/** What the sale put on the record, how the desk goes on, and what else was noted: twelve each, none a claim a receipt does not show. */
-export const SALE_PARTS: readonly [readonly string[], readonly string[], readonly string[]] = Object.freeze([
-  Object.freeze(["receipt saved", "ledger updated", "history noted", "swap settled", "journal note", "books show it", "tally amended", "record made",
-    "archive copy", "log marked", "report filed", "sheet posted"]),
-  Object.freeze(["desk running", "terminal open", "radar sweeping", "scanner busy", "screens lit", "search goes", "routine intact", "list refreshed",
-    "engine ticking", "feed updating", "monitors awake", "charts redraw"]),
-  // Third review of the wins branch: "rules followed", "calm operations", "tidy habits", "basic hygiene", "steady state",
-  // "standard fare" and "nothing further" claimed a quality or an end no receipt shows; these only note the record.
-  Object.freeze(["time stamped", "hash stored", "process repeats", "cycle resumes", "slot cleared", "counter ticked", "block included",
-    "date logged", "reference added", "pair tagged", "queue advanced", "status recorded"]),
-]) as unknown as readonly [readonly string[], readonly string[], readonly string[]];
+/** First choices sound like an ordinary short message. The larger reserve
+ * below remains available when the unchanged repeat gate rejects familiar ones. */
+export const SALE_SHORT_LINES = [
+  "ok, sold {coin}. back to my notes.",
+  "quick update, {coin} sold. carrying on.",
+  "anyway, sold {coin}. plenty of tabs open.",
+  "{coin} sold. back to digging around.",
+  "so, {coin} sold. notes before more scrolling.",
+  "and there it is: sold {coin}. carrying on.",
+  "small update from me: sold {coin}. back to the tabs.",
+  "adding this here: {coin} sold. back to the notes.",
+  "for the diary: sold {coin}. reading resumes.",
+  "a note from the desk: {coin} sold. digging continues.",
+  "that happened: sold {coin}. back to the notebook.",
+  "on the record: {coin} sold. plenty to read.",
+  "update filed: sold {coin}. back to browsing.",
+  "okay then, {coin} sold. following my curiosity.",
+  "between the tabs: sold {coin}. back to my reading.",
+  "with that noted, {coin} sold. carrying on.",
+  "one for the notes: sold {coin}. browsing continues.",
+  "the short version: {coin} sold. back to the tabs.",
+  "putting that here: {coin} sold. more reading for me.",
+  "oh, and {coin} sold. back to the notebook.",
+  "news from my tabs: sold {coin}. carrying on.",
+  "my notebook says {coin} sold. back to browsing.",
+  "well, sold {coin}. back to my reading.",
+  "brief interruption: {coin} sold. back to the reading list.",
+] as const;
 
-/**
- * Every sale line for this coin, this post's own first (by its key): the
- * hundred and forty-four of three parts, or (`parts` 2) the same pairs of a
- * record and a desk part alone, shorter, for a name too long for three beside
- * an active owner's tx link and contract (third review of the wins branch: a
- * name of twenty characters or more had no line that fit). The caller tries
- * each, whole, until one fits: every name's three-part lines first.
- */
-export function saleLines(coin: string, seed: string, parts: 2 | 3 = 3): string[] {
+export const SALE_LEADS = [
+  "brief note here: sold {coin}.",
+  "tiny desk update: {coin} sold.",
+  "casual trade memo: sold {coin}.",
+  "plain words version: {coin} sold.",
+  "hello dear diary: sold {coin}.",
+  "typing a sale footnote: {coin} sold.",
+  "another tab scribble: sold {coin}.",
+  "pardon the feed interruption: {coin} sold.",
+  "sidebar for curious readers: sold {coin}.",
+  "letting the timeline know: {coin} sold.",
+  "leaving a journal mark: sold {coin}.",
+  "putting the record online: {coin} sold.",
+  "adding the receipt details: sold {coin}.",
+  "making a public annotation: {coin} sold.",
+  "keeping a swap bookmark: sold {coin}.",
+  "writing a short dispatch: {coin} sold.",
+  "filing a token mention: sold {coin}.",
+  "posting a chat blurb: {coin} sold.",
+  "sharing a dull caption: sold {coin}.",
+  "bringing a trading tidbit: {coin} sold.",
+  "logging an ordinary bulletin: sold {coin}.",
+  "noting the latest deal: {coin} sold.",
+  "spelling the exchange recap: sold {coin}.",
+  "giving the log context: {coin} sold.",
+] as const;
+
+export const SALE_TAILS = [
+  "back to digging around",
+  "carrying on, nosy as ever",
+  "resuming my usual browsing",
+  "poking the reading list",
+  "returning to open notebook",
+  "arranging scattered thoughts",
+  "bot with endless questions",
+  "off to untangle more threads",
+  "quiet rummaging continues",
+  "chasing occasional tangents",
+  "odd rabbit holes",
+  "following stubborn curiosity",
+  "doing my regular homework",
+  "leafing different pages",
+  "revisiting untidy scratchpad",
+  "sifting interesting scraps",
+  "pondering finer points",
+  "predictably nosey again",
+  "exploring a lengthy detour",
+  "tending digital notes",
+  "checking sprawling glossary",
+  "a robot sorting loose ends",
+  "scanning unfamiliar corners",
+  "scenic research route",
+] as const;
+
+export const SALE_ASIDES = [
+  "tabs beckon", "brain whirring", "screens glowing", "terminal humming",
+  "many puzzles", "plenty to ponder", "thought bubbles", "search resumes",
+  "daily routine", "phrases gather", "memos grow", "ideas circling",
+  "ongoing ramble", "documents await", "serial scribbler", "modest interlude",
+  "links abound", "habitual work", "mental doodles", "mildly absorbed",
+  "margins filling", "fond distraction", "idle musings", "gentle drift",
+] as const;
+
+/** Kept as a tuple for exhaustive part and overlap tests. */
+export const SALE_PARTS = [SALE_LEADS, SALE_TAILS, SALE_ASIDES] as const;
+
+/** Every candidate is tried whole through the real gate and disclosure budget. */
+export function saleLines(coin: string, seed: string, _legacyParts?: 2 | 3): string[] {
   const name = String(coin ?? "").replace(/\s+/g, " ").trim();
-  const [record, desk, close] = SALE_PARTS;
-  const n = record.length, cells = n * n;
-  if (!name || n === 0 || desk.length !== n || close.length !== n) return [];
-  // A stride sharing no factor with the cell count visits every line once.
-  const stride = 79, start = hash32(`sale-words|${seed}`) % cells;
-  const out: string[] = [];
-  for (let t = 0; t < cells; t++) {
-    const k = (start + t * stride) % cells;
+  if (!name) return [];
+  const n = SALE_LEADS.length, cells = n * n;
+  const start = hash32(`sale-words|${seed}`) % cells;
+  const first = hash32(`sale-short|${seed}`) % SALE_SHORT_LINES.length;
+  const short = Array.from({ length: SALE_SHORT_LINES.length }, (_, i) => SALE_SHORT_LINES[(first + i * 7) % SALE_SHORT_LINES.length]!.replace("{coin}", name));
+  return [...short, ...Array.from({ length: cells }, (_, i) => {
+    const k = (start + i * 79) % cells;
     const a = k % n, b = Math.floor(k / n), c = (a + b) % n;
-    const opener = `${a % 2 ? "i sold" : "sold"} ${name}.`;
-    out.push(parts === 2 ? `${opener} ${record[a]}, ${desk[b]}.` : `${opener} ${record[a]}, ${desk[b]}, ${close[c]}.`);
-  }
-  return out;
+    return `${SALE_LEADS[a]!.replace("{coin}", name)} ${SALE_TAILS[b]}, ${SALE_ASIDES[c]}.`;
+  })];
 }

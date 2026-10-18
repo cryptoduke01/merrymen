@@ -476,6 +476,16 @@ export interface XReply {
    * prompt. Absent when X expanded neither (or the tag refers to neither).
    */
   context?: XContext[];
+  /**
+   * WHAT IT SITS UNDER WAS NOT READ (2026-10-18): the post it replies to or
+   * quotes, or that post's author, is missing from what X expanded — deleted,
+   * protected, or from a suspended account, which X reports as an error
+   * beside the page (readMentions). Read only by tagCandidate: no larp check
+   * is taken of such a tag, since a check speaks about what it sits under and
+   * screens that post and its author first. Every other screen reads it as
+   * before. Absent when everything it refers to was read, or it refers to none.
+   */
+  contextUnread?: true;
 }
 
 /** A post a tag replies to or quotes, as X expanded it. Untrusted: a stranger wrote every field. */
@@ -604,11 +614,17 @@ function parsedReply(item: unknown, now: number, excludeAuthorId: string, expand
   const links = linksOf(d.entities);
   // What it sits under, parent first: each post X expanded, with its author's handle and profile link when X sent them.
   const context: XContext[] = [];
+  // Any of them, or its author, X did not hand over: what it sits under is unread (XReply.contextUnread).
+  let unread = false;
   for (const r of [...parents, ...besides.filter((b) => b !== null && typeof b === "object" && b.type === "quoted")]) {
     const ref = r as Record<string, unknown>;
     const t = typeof ref.id === "string" ? expanded.tweets.get(ref.id) : undefined;
-    if (!t) continue;
+    if (!t) {
+      unread = true;
+      continue;
+    }
     const who = authors.get(t.authorId);
+    if (!who) unread = true;
     const url = expanded.profiles.get(t.authorId);
     context.push({ id: ref.id as string, relation: ref.type === "quoted" ? "quoted" : "replied_to", text: t.text, links: t.links, authorId: t.authorId,
       ...(who || url ? { author: { username: who?.username ?? "", name: who?.name ?? "", ...(url ? { url } : {}) } } : {}) });
@@ -617,14 +633,59 @@ function parsedReply(item: unknown, now: number, excludeAuthorId: string, expand
     inReplyToTweetId: parents.length ? parents[0]!.id as string : "", createdAtMs, ...(quoted ? { quoted: true as const } : {}),
     ...(quotedTweetId ? { quotedTweetId } : {}),
     ...(attachedTo(d) ? { attached: true as const } : {}), ...(author ? { author: { ...author } } : {}),
-    ...(links.length ? { links } : {}), ...(context.length ? { context } : {}) };
+    ...(links.length ? { links } : {}), ...(context.length ? { context } : {}), ...(unread ? { contextUnread: true as const } : {}) };
+}
+
+/**
+ * WHAT X COULD NOT EXPAND, AND NOTHING ELSE (2026-10-18). Mentions expand the
+ * posts a tag refers to and their authors (the larp check, 2026-10-13), and X
+ * answers a page with one of them deleted, protected or suspended with the
+ * page whole and an `errors` entry beside it. Read as a failed page, one such
+ * tag held every answer and every STOP behind it: the cursor stayed, and the
+ * same page failed every thirty minutes. Only these are read past: each
+ * entry's `parameter` is an expansion this read asks for, its `resource_type`
+ * the kind that expansion names, its `resource_id` (and `value`, when sent) an
+ * id, never one of the page's own mentions, and a missing post one a mention
+ * on the page refers to. Any other error, or any entry off this shape, still
+ * fails the page.
+ */
+const EXPANSION_MISSES: ReadonlyMap<string, "tweet" | "user"> = new Map([
+  ["referenced_tweets.id", "tweet"],
+  ["referenced_tweets.id.author_id", "user"],
+  ["author_id", "user"],
+]);
+
+function onlyExpansionMisses(errors: unknown, data: readonly unknown[]): boolean {
+  if (!Array.isArray(errors) || errors.length === 0) return false;
+  const mentions = new Set<string>();
+  const referred = new Set<string>();
+  for (const item of data) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return false;
+    const d = item as Record<string, unknown>;
+    if (typeof d.id === "string") mentions.add(d.id);
+    for (const r of Array.isArray(d.referenced_tweets) ? d.referenced_tweets : []) {
+      const id = r !== null && typeof r === "object" ? (r as Record<string, unknown>).id : undefined;
+      if (typeof id === "string") referred.add(id);
+    }
+  }
+  return errors.every((e) => {
+    if (!e || typeof e !== "object" || Array.isArray(e)) return false;
+    const r = e as Record<string, unknown>;
+    const kind = typeof r.parameter === "string" ? EXPANSION_MISSES.get(r.parameter) : undefined;
+    const id = r.resource_id;
+    return kind !== undefined && r.resource_type === kind && typeof id === "string" && ID.test(id) && (r.value === undefined || r.value === id)
+      && !mentions.has(id) && (kind !== "tweet" || referred.has(id));
+  });
 }
 
 /**
  * Read the authenticated account's mentions, including replies in old threads,
  * so a STOP on a previous bot reply is seen before choosing any new reply.
  * A partial batch is never success: a failed page, repeated cursor, malformed
- * reply or more than the endpoint's eight hundred mentions fails closed.
+ * reply or more than the endpoint's eight hundred mentions fails closed. A
+ * page whose only errors are posts or authors X could not expand is whole:
+ * its tags are all there, and a tag that lost what it sits under says so
+ * (XReply.contextUnread, onlyExpansionMisses).
  */
 export async function readMentions(
   accessToken: string,
@@ -662,7 +723,9 @@ export async function readMentions(
     if (!meta || typeof meta !== "object" || Array.isArray(meta)) return fail("invalid", res.status);
     const m = meta as Record<string, unknown>;
     const data = read.value.data === undefined && m.result_count === 0 ? [] : read.value.data;
-    if (!Array.isArray(data) || data.length > 100 || m.result_count !== data.length || Array.isArray(read.value.errors)) return fail("invalid", res.status);
+    if (!Array.isArray(data) || data.length > 100 || m.result_count !== data.length) return fail("invalid", res.status);
+    // A partial page fails, unless all X could not do was expand what a tag refers to (onlyExpansionMisses).
+    if (read.value.errors !== undefined && !onlyExpansionMisses(read.value.errors, data)) return fail("invalid", res.status);
     const expanded: Expanded = { authors: authorsOf(read.value.includes), profiles: profileLinksOf(read.value.includes), tweets: referencedOf(read.value.includes) };
     for (const item of data) {
       if (!item || typeof item !== "object" || Array.isArray(item)) return fail("invalid", res.status);

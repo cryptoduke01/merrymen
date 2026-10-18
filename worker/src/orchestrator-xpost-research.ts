@@ -671,9 +671,20 @@ const BANTER_SHAPES = [
 ];
 const BANTER_ALLOWED = new RegExp(`^${BANTER_GREETING}(?:${BANTER_SHAPES.join("|")})$`, "u");
 const BANTER_NEVER = /\b(?:money|funds?|savings|hack\w*|scam\w*|rug\w*|ponzi|steal\w*|stole\w*|los[st]\w*|lose|death|dead|died|die|dying|tokens?|tge|launch\w*|merrymen|robinhood|alan)\b/;
+/**
+ * "ALAN" SAID TO HIM, NOT ABOUT HIM (the owner's ask, 2026-10-18): "how's it
+ * going alan?" and "hey alan, how are you?" were never banter, because
+ * BANTER_NEVER holds his name. His name as an address is taken off first:
+ * at the start, after at most two greeting words, followed by a space or a
+ * comma; or at the very end, after a space or a comma. Anywhere else, or
+ * glued to more ("alan's token?"), it stays, and BANTER_NEVER still refuses
+ * the tag.
+ */
+const BANTER_ALAN = /^((?:(?:gm|yo|hey|hi|hello|ser|fren|bro|sup)[\s,!.]+){0,2})alan[\s,!.:-]+|[\s,]+alan$/;
 export function banterAsk(text: unknown): boolean {
-  const plain = plainAsk(text);
-  return plain !== null && !sherwoodMentioned(text) && !BANTER_NEVER.test(plain) && BANTER_ALLOWED.test(plain);
+  const said = plainAsk(text);
+  const plain = said === null ? null : said.replace(BANTER_ALAN, "$1").trim();
+  return plain !== null && plain !== "" && !sherwoodMentioned(text) && !BANTER_NEVER.test(plain) && BANTER_ALLOWED.test(plain);
 }
 
 /**
@@ -1124,6 +1135,8 @@ export interface ResearchBundle {
    * when neither was.
    */
   insight?: InsightRead;
+  /** Day and week evidence for a focused insight, separate from the market answer. */
+  insightWeekFigures?: FiguresSpec;
   /**
    * What the answer turned out to be about, when that is not what the tag was
    * read as: a ticker on the coin list that is no major (a copycat, unranked,
@@ -2282,8 +2295,10 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
           ...(pools ? [{ kind: "pools" as const, coins: pools.coins.map((c) => ({ symbol: c.symbol, change24hPct: c.change24hPct })) }] : []),
           ...(crowd ? [crowd] : []),
         ];
+        const insightWeekFigures: FiguresSpec = big && insight?.day && insight.week
+          ? big.map((m) => ({ kind: "major" as const, symbol: m.symbol, change24hPct: m.change24hPct, change7dPct: m.change7dPct })) : [];
         notes.push("market");
-        return { facts, ...(figures.length ? { figures } : {}), ...(hot.shownNames?.length ? { shownNames: hot.shownNames } : {}), market: read, ...(insight ? { insight } : {}),
+        return { facts, ...(insightWeekFigures.length ? { insightWeekFigures } : {}), ...(figures.length ? { figures } : {}), ...(hot.shownNames?.length ? { shownNames: hot.shownNames } : {}), market: read, ...(insight ? { insight } : {}),
           ...(hot.hot ? { hot: hot.hot } : {}), lookups, notes };
       };
       const i = input.intent;

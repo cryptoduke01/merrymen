@@ -32,7 +32,7 @@
  * Pure: no I/O, no model, no provider, no clock.
  */
 import { CASUAL_PAPER, latinLines } from "./casual";
-import { signedPercent } from "./figures";
+import { renderFiguresLine, signedPercent, type FiguresSpec } from "./figures";
 import type { CodeLineOptions } from "./replies";
 
 /** A day's move as code reads it: which way, and how far, by code's own thresholds. Never a figure. */
@@ -471,4 +471,188 @@ export function insightFacts(r: InsightRead | null | undefined): string[] {
     if (n > 0 && r.crowd !== null && r.crowd > 0) out.push(`fomo traders are most active in ${r.crowd === 1 ? "one" : "a couple"} of those trending coins`);
   }
   return out.filter((x): x is string => x !== null);
+}
+
+export type InsightFocus = "day" | "day-week" | "lead" | "crowd" | "quiet";
+export interface InsightSelection {
+  focus: InsightFocus;
+  /** Only this focus's supported facts reach the model. */
+  read: string[];
+  figures: FiguresSpec;
+  fullFigures: FiguresSpec;
+}
+
+function focusFacts(r: InsightRead, focus: InsightFocus): string[] {
+  if (focus === "day") return [bigCoinsSaid(r.day, "on the day")].filter((x): x is string => x !== null);
+  if (focus === "day-week") return [bigCoinsSaid(r.day, "on the day"), bigCoinsSaid(r.week, "on the week")].filter((x): x is string => x !== null);
+  if (focus === "quiet") return r.chain?.coins === 0 ? ["nothing on the chain's trending list clears the activity floors"] : [];
+  if (focus === "crowd") return r.chain && r.chain.coins > 0 && r.crowd !== null && r.crowd > 0
+    ? [`fomo traders are most active in ${r.crowd === 1 ? "one" : "a couple"} of the chain's trending coins`] : [];
+  if (!r.chain || r.chain.coins < 1 || !r.chain.lead) return [];
+  const m = r.chain.lead;
+  return [`the first coin on the trending list is ${m.dir === "flat" ? "flat" : `${m.dir} ${m.size ?? "a little"}`} on the day`];
+}
+
+function insightHash(seed: string): number {
+  let h = 0;
+  for (const c of seed) h = (Math.imul(h, 31) + c.charCodeAt(0)) >>> 0;
+  return h;
+}
+
+/** Choose from evidence actually available. Replaying a slot makes the same choice;
+ * adjacent slots choose different focuses whenever more than one is available.
+ * A week comparison needs its own numerical evidence, not just the day's line.
+ */
+export function selectInsight(r: InsightRead, figures: FiguresSpec, o: { tenant: string; day: string; slot: number; weekFigures?: FiguresSpec; preferHot?: boolean }): InsightSelection | null {
+  const available = (["day", "day-week", "lead", "crowd", "quiet"] as const).filter((focus) =>
+    focusFacts(r, focus).length > 0 && (focus !== "day-week" || !!r.day && !!r.week && !!o.weekFigures?.length));
+  const hot = available.filter((f) => f === "lead" || f === "crowd" || f === "quiet");
+  const focuses = o.preferHot && hot.length ? hot : available;
+  if (!focuses.length) return null;
+  // A seeded daily permutation covers every supported focus before repeating;
+  // picking a fresh hash after excluding the last can starve some focuses.
+  const ordered = [...focuses].sort((a, b) => insightHash(`${o.tenant.toLowerCase()}|${o.day}|${a}`) - insightHash(`${o.tenant.toLowerCase()}|${o.day}|${b}`));
+  const slot = Number.isSafeInteger(o.slot) ? Math.max(0, o.slot) : 0;
+  const focus = ordered[(insightHash(`${o.tenant.toLowerCase()}|${o.day}`) + slot) % ordered.length]!;
+  const trimmed: FiguresSpec = focus === "day-week" ? o.weekFigures!
+    : focus === "day" ? figures.filter((s) => s.kind === "majors")
+    : focus === "lead" ? figures.filter((s) => s.kind === "pools").map((s) => s.kind === "pools" ? { ...s, coins: s.coins.slice(0, 1) } : s)
+    : focus === "crowd" ? figures.filter((s) => s.kind === "crowd")
+    : figures;
+  return { focus, read: focusFacts(r, focus), figures: renderFiguresLine(trimmed) ? trimmed : figures, fullFigures: figures };
+}
+
+// These leads name the act of reading, never a new market claim. Each has a
+// different content-word opener, so the strict same-opener gate has room to work.
+const INSIGHT_LEADS = [
+  "quick tape glance", "tiny market update", "little screen check", "daily board glance",
+  "current chart snapshot", "brief ticker rundown", "fresh market read", "small data detour",
+  "another tape check", "latest screen scribble", "short board update", "casual market peek",
+  "passing chart glance", "rough tape sketch", "plain market picture", "simple screen summary",
+  "briefly scanning prices", "quietly reading data", "currently checking charts", "loosely summarising moves",
+  "quickly reviewing activity", "casually browsing tickers", "slowly parsing prices", "calmly noting changes",
+] as const;
+const INSIGHT_ASIDES = [
+  "just reading along", "keeping the wording plain", "bot at the screen", "nothing fancy here",
+  "that's the snapshot", "a glance between tabs", "leaving the crystal ball alone", "sticking to what showed up",
+  "scribbling in the margin", "a small note from me", "there's the short version", "putting the tape into words",
+  "no grand speech attached", "less poetry, more reading", "a little screen time", "the bot equivalent of a glance",
+  "keeping the commentary brief", "not a dramatic monologue", "that's my screen check", "a pause for the rundown",
+  "a few words from the desk", "nothing to dress up", "leaving the fanfare aside", "no big story here",
+] as const;
+const INSIGHT_ENDINGS = [
+  "anyway", "for now", "as read", "that's all", "there we are", "so it goes", "plainly enough", "keeping it simple",
+  "end of note", "small update over", "back to the tabs", "enough typing", "words kept short", "read and noted", "message complete", "screen check done",
+  "moving along", "fairly brief", "a tiny dispatch", "no extra spin", "reporting what appeared", "stopping there", "leaving it there", "that'll do",
+] as const;
+
+
+function majorsWords(m: MarketRead["majors"], when: "day" | "week", variant: number): string {
+  if (!m) return "";
+  const i = variant % MAJORS_SUBJECT.length;
+  const subjects = ["majors", "the heavyweights", "big coins", "large caps", "the giants", "the bellwethers", "the leaders", "the old guard"];
+  const mixed = ["show mixed moves", "went different ways", "are up and down", "have no shared direction", "show a split picture", "are pointing both ways", "do not agree on direction", "have mixed changes"];
+  const flat = ["are flat", "show no change", "are unchanged", "show flat moves", "have no change to show", "stayed level", "are level", "have flat changes"];
+  const words = m.dir === "mixed" ? mixed[i] : m.dir === "flat" ? flat[i] : MAJORS_MOVED[m.dir]["size" in m ? m.size : "uneven"][i];
+  return `${subjects[i]} ${words?.replace(/ today$| so far$| lately$/g, "")} on the ${when}`;
+}
+function focusedWords(r: InsightRead, focus: InsightFocus, variant: number): string {
+  const i = variant % 8;
+  if (focus === "day") return majorsWords(r.day, "day", i);
+  if (focus === "day-week") return `${majorsWords(r.day, "day", i)}; ${majorsWords(r.week, "week", (i + 3) % 8)}`;
+  if (focus === "lead") {
+    const subjects = ["the first trending coin", "the index leader", "the top listed mover", "the leading listing", "the first name on the board", "the top trending listing", "the lead coin", "the first screener listing"];
+    const m = r.chain!.lead!;
+    const moved: MoveWords[] = [
+      { little: ["up a little", "down a little"], fair: ["up a fair bit", "down a fair bit"], sharp: ["up sharply", "down sharply"], flat: "flat" },
+      { little: ["slightly higher", "slightly lower"], fair: ["noticeably higher", "noticeably lower"], sharp: ["steeply higher", "steeply lower"], flat: "unchanged" },
+      { little: ["a touch higher", "a touch lower"], fair: ["moderately higher", "moderately lower"], sharp: ["sharply higher", "sharply lower"], flat: "level" },
+      { little: ["up mildly", "down mildly"], fair: ["up by a fair amount", "down by a fair amount"], sharp: ["up by a sharp amount", "down by a sharp amount"], flat: "flat" },
+      { little: ["a little higher", "a little lower"], fair: ["a fair bit higher", "a fair bit lower"], sharp: ["considerably higher", "considerably lower"], flat: "unchanged" },
+      { little: ["higher by a little", "lower by a little"], fair: ["higher by a fair bit", "lower by a fair bit"], sharp: ["higher by a steep amount", "lower by a steep amount"], flat: "level" },
+      { little: ["up slightly", "down slightly"], fair: ["up noticeably", "down noticeably"], sharp: ["up steeply", "down steeply"], flat: "flat" },
+      { little: ["mildly higher", "mildly lower"], fair: ["higher by a noticeable amount", "lower by a noticeable amount"], sharp: ["higher by a sharp amount", "lower by a sharp amount"], flat: "unchanged" },
+    ];
+    return `${subjects[i]} is ${said(m, moved[i]!)} on the day`;
+  }
+  if (focus === "quiet") return [
+    "nothing on the trending list clears the activity floors", "no listed mover passes the activity checks", "the chain's filtered trending list is empty",
+    "the screener has no listings past its activity floors", "no trending names meet the activity cutoff", "the filtered movers board has no listings",
+    "the activity screen leaves the trending list empty", "no coins clear the trending activity floors",
+  ][i]!;
+  const count = r.crowd === 1 ? "one" : "a couple";
+  const names = r.crowd === 1 ? "a single name" : "a couple of names";
+  return [
+    `fomo traders are most active in ${count} of the chain's trending coins`,
+    `the fomo crowd is busiest in ${count} of the trending names`,
+    `${names} on the trending board ${r.crowd === 1 ? "overlaps" : "overlap"} fomo's busiest coins`,
+    `fomo's busiest coins include ${count} of the chain's movers`,
+    `the trending board shares ${names} with fomo's busiest coins`,
+    `fomo activity is heaviest in ${count} of the trending coins`,
+    `${count} of the chain's movers ${r.crowd === 1 ? "appears" : "appear"} among fomo's busiest coins`,
+    `the fomo activity read overlaps ${names} on the trending list`,
+  ][i]!;
+}
+
+/** A code-only fallback from typed bands. No model text enters this path. A
+ * claim is included only if focusFacts can substantiate it from this read.
+ * The full gate still judges every candidate; figures are added separately.
+ */
+export function insightLines(read: InsightRead, seed: string, o: { paper?: boolean; focus?: InsightFocus } = {}): string[] {
+  const focus = o.focus ?? (read.day ? "day" : read.chain?.lead ? "lead" : read.chain?.coins === 0 ? "quiet" : "crowd");
+  const facts = focusFacts(read, focus);
+  if (!facts.length) return [];
+  const heads = INSIGHT_LEADS.map((lead, i) => `${lead}: ${focusedWords(read, focus, i)}`);
+  // Insight prose describes public data, not the agent's money; no paper
+  // disclosure is needed, and one would misleadingly qualify the public read.
+  return latinLines([heads, INSIGHT_ASIDES, INSIGHT_ENDINGS], seed,
+    (head, aside, ending) => `${head}. ${aside}; ${ending}.`);
+}
+
+/** Drafts may rearrange supported positive clauses and vetted neutral asides.
+ * Matching a bag of direction words is insufficient: "not up", "sideways",
+ * "deep bids" or "participation is heavy" would invent a different read.
+ * Anything outside this closed clause grammar uses the code fallback.
+ */
+export function insightDraftSupported(text: string, read: InsightRead, focus: InsightFocus): boolean {
+  const normalize = (s: string) => s.toLowerCase().replace(/[’‘]/g, "'").replace(/\s+/g, " ").trim();
+  const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  let remaining = normalize(text);
+  const groups: string[][] = focus === "day-week"
+    ? [supportedDayClauses(read.day, "day"), supportedDayClauses(read.week, "week")]
+    : focus === "day" ? [supportedDayClauses(read.day, "day")]
+    : [focusFacts(read, focus).length ? [...focusFacts(read, focus), ...Array.from({ length: 8 }, (_, i) => focusedWords(read, focus, i))] : []];
+  for (const clauses of groups) {
+    let matched = false;
+    for (const claim of [...new Set(clauses.map(normalize))].sort((a, b) => b.length - a.length)) {
+      // A boundary cannot turn "not up" or "maybe majors" into an assertion:
+      // any surrounding qualification stays in the remainder and is refused.
+      const pattern = new RegExp(`(?<![a-z])${escape(claim)}(?![a-z])`, "g");
+      remaining = remaining.replace(pattern, () => { matched = true; return " "; });
+    }
+    if (!matched) return false;
+  }
+  const neutral = [...INSIGHT_LEADS, ...INSIGHT_ASIDES, ...INSIGHT_ENDINGS,
+    "well", "okay", "ok", "meh", "honestly", "there we are", "just a bot reading the tape", "bot at the screen"];
+  for (const aside of [...new Set(neutral.map(normalize))].sort((a, b) => b.length - a.length)) {
+    remaining = remaining.replace(new RegExp(`(?<![a-z])${escape(aside)}(?![a-z])`, "g"), " ");
+  }
+  return !remaining.replace(/\b(?:and|while|whereas|but)\b/g, "").replace(/[\s.,;:!?—–-]/g, "");
+}
+
+function supportedDayClauses(m: MarketRead["majors"], when: "day" | "week"): string[] {
+  if (!m) return [];
+  const predicates: string[] = m.dir === "mixed" ? ["mixed", "split", "up and down", "split, some up and some down"]
+    : m.dir === "flat" ? ["flat", "unchanged"]
+    : [m.dir, m.dir === "up" ? "higher" : "lower", m.dir === "up" ? "green" : "red",
+      ...("size" in m && m.size !== "uneven" ? [`${m.dir} ${m.size}`] : ["up" === m.dir ? "up by uneven amounts" : "down by uneven amounts"])];
+  const facts = [bigCoinsSaid(m, `on the ${when}`)!, ...Array.from({ length: 8 }, (_, i) => majorsWords(m, when, i))];
+  const times = when === "day" ? ["on the day", "today"] : ["on the week", "this week"];
+  for (const subject of ["majors", "the majors", "big coins", "the big coins"]) for (const copula of ["", "are ", "are all "]) {
+    for (const predicate of predicates) for (const time of times) facts.push(`${subject} ${copula}${predicate} ${time}`);
+  }
+  // A week clause may omit its repeated subject after the day's supported
+  // majors clause. This form is only used by the day-versus-week focus.
+  if (when === "week") for (const predicate of predicates) facts.push(`the week is ${predicate}`, `the week stays ${predicate}`);
+  return facts;
 }

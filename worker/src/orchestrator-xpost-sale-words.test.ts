@@ -1,60 +1,49 @@
-/**
- * A WIN'S OWN WORDS WHEN THE MODEL'S ARE NOT THERE (the owner's ask,
- * 2026-10-14). Every line clears the real gate as a sale, names the coin, says
- * sold and nothing a receipt does not show; it fits whole in an active owner's
- * post beside the result line, tx link and contract; no two wins of different
- * coins read as one template. Here beside the orchestrator because the real
- * gate takes the room's line screen (groupchat/policy.ts), which only the
- * orchestrator may import.
- */
+/** Exhaustive sale-pool checks use the same room gate and suffixes as production. */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { admitAgentLine } from "./groupchat/policy";
 import { REPEAT_LIMIT, similarity } from "./social-post";
 import { admitXPost } from "./xpost/gate";
-import { appendPublicToken } from "./xpost/public-wallet";
-import { appendSaleOutcome } from "./xpost/sale-outcome";
-import { SALE_PARTS, saleLines } from "./xpost/sale-words";
+import { openerKey } from "./xpost/memory";
+import { appendPublicToken, publicTokenSuffix } from "./xpost/public-wallet";
+import { appendSaleOutcome, hasSaleOutcome, saleWordBudget } from "./xpost/sale-outcome";
+import { SALE_PARTS, SALE_SHORT_LINES, saleLines } from "./xpost/sale-words";
 
-const counted = (t: string) => t.toLowerCase().replace(/[^a-z\s]/g, " ").split(/\s+/).filter((w) => w.length > 2 && similarity(w, w) > 0);
-const admit = (line: string, coin: string, recentOwn: string[] = []) =>
-  admitXPost(line, { kind: "sell", agentName: "Alan Al Dale", mode: "live", coins: [coin], recentOwn, recentFleet: [], house: true }, (r, c) => admitAgentLine(r, c));
-/** An active owner's landed sale: the tx link and the contract after code's result line. */
+const counted = (text: string) => text.replace(/\{coin\}|\bsold\b/g, "").toLowerCase().replace(/[^a-z\s]/g, " ").split(/\s+/).filter((w) => w.length > 2 && similarity(w, w) > 0);
+const admit = (line: string, coin: string, recentOwn: string[] = [], recentFleet: string[] = []) =>
+  admitXPost(line, { kind: "sell", agentName: "Alan Al Dale", mode: "live", coins: [coin], recentOwn, recentFleet, recentOpeners: recentOwn.slice(0, 8), house: true }, admitAgentLine);
 const TOKEN = { address: `0x${"ab".repeat(20)}`, chainId: 4663, txHash: `0x${"cd".repeat(32)}` };
+const suffix = publicTokenSuffix(TOKEN, true)!;
 const whole = (line: string, gainPct: number) => {
-  const said = appendSaleOutcome(line, "profit", gainPct);
+  const said = appendSaleOutcome(line, "profit", gainPct, { seed: line, suffix });
   return said ? appendPublicToken(said, TOKEN, true) : null;
 };
 
-describe("a win's own words", () => {
-  it("a hundred and forty-four lines of three parts, this post's own first, and the same pairs with two; the same set for every key", () => {
+describe("varied receipt-backed sale fallbacks", () => {
+  it("walks 24 natural first choices and 576 reserve candidates once, from a deterministic receipt-specific starting point", () => {
     const a = saleLines("WISP", "sell:a"), b = saleLines("WISP", "sell:b");
-    assert.equal(a.length, 144);
-    assert.equal(new Set(a).size, 144);
+    assert.equal(a.length, 600);
+    assert.equal(new Set(a).size, 600);
     assert.deepEqual([...a].sort(), [...b].sort());
     assert.notEqual(a[0], b[0]);
-    const parts = (l: string) => l.split(". ")[1]!.split(", ").length;
-    const two = saleLines("WISP", "sell:a", 2);
-    assert.ok(a.every((l) => parts(l) === 3) && two.length === 144 && new Set(two).size === 144 && two.every((l) => parts(l) === 2));
+    assert.deepEqual(a, saleLines("WISP", "sell:a"));
     assert.deepEqual(saleLines("", "sell:a"), []);
+    assert.ok(saleLines("Pudgy  Penguin", "x").every((line) => line.includes("Pudgy Penguin")));
   });
 
-  it("opens with 'sold COIN' or 'i sold COIN' alone; every part two counted words, none shared, short", () => {
-    for (const line of saleLines("WISP", "x")) assert.match(line, /^(?:i )?sold WISP\. /);
-    assert.equal(saleLines("Pudgy  Penguin", "x")[0]!.includes("Pudgy Penguin."), true, "a name's spaces tidied");
-    const seen = new Map<string, string>();
-    for (const part of SALE_PARTS.flat()) {
-      const words = counted(part);
-      assert.equal(words.length, 2, part);
-      assert.ok(part.length <= 15, `${part}: ${part.length}`);
-      for (const w of words) {
-        assert.ok(!seen.has(w), `"${w}" is in "${part}" and "${seen.get(w)}"`);
-        seen.set(w, part);
-      }
-    }
+  it("has 24 distinct openers and independently distinctive parts", () => {
+    assert.ok(new Set(saleLines("WISP", "x").map((line) => openerKey(line, ["WISP"]))).size >= 24);
+    const short = new Set(SALE_SHORT_LINES.map((line) => line.replace("{coin}", "WISP")));
+    assert.equal(short.size, 24);
+    assert.ok(saleLines("WISP", "x").slice(0, 24).every((line) => short.has(line)));
+    const sets = SALE_PARTS.flat().map((part) => new Set(counted(part)));
+    SALE_PARTS.flat().forEach((part, i) => {
+      const unique = [...sets[i]!].filter((word) => sets.every((other, j) => i === j || !other.has(word)));
+      assert.ok(unique.length >= (i < 48 ? 3 : 2), `${part}: only ${unique.join(", ")}`);
+    });
   });
 
-  it("every line clears the real gate as a sale", () => {
+  it("every candidate clears the real gate across normal, multiple-word and digit-containing coin names", () => {
     for (const coin of ["CAPITOL", "WISP", "IGNITION", "ALTAI", "INDEX", "Pudgy Penguin", "MOON", "T57F813C4571"]) {
       for (const line of saleLines(coin, `sell:${coin}`)) {
         const v = admit(line, coin);
@@ -63,50 +52,50 @@ describe("a win's own words", () => {
     }
   });
 
-  it("fits whole in an active owner's post, result line, tx link and contract included (review of the wins branch)", () => {
-    for (const coin of ["PEPE", "CAPITOL", "IGNITION", "ALTAI", "MOON"]) {
-      for (const gain of [0.1, 12.4, 99]) assert.ok(saleLines(coin, "s").every((l) => whole(l, gain) !== null), `${coin} at +${gain}%: every line fits`);
-    }
-    // A name of twenty-four characters, the longest a name may be, still fits at a five-figure gain, by its two-part lines (third review).
-    assert.ok(!saleLines("Wrapped Robinhood Ethers", "s").some((l) => whole(l, 12345) !== null), "three parts do not fit");
-    assert.ok(saleLines("Wrapped Robinhood Ethers", "s", 2).some((l) => admit(l, "Wrapped Robinhood Ethers").ok && whole(l, 12345) !== null));
-    // A four-figure gain or a long name leaves fewer, at least a quarter: the writer tries the next, then the coin's other names.
-    for (const coin of ["IGNITION", "Pudgy Penguin", "T57F813C4571"]) {
-      const fit = saleLines(coin, "s").filter((l) => whole(l, 1234) !== null).length;
-      assert.ok(fit >= 36, `${coin} at +1,234%: ${fit} fit`);
-    }
-  });
-
-  it("says nothing a receipt does not show: no result, timing, speed or quality word, no whole position, no leaving the coin, no human life", () => {
+  it("keeps timing, quantity, position and outcome claims outside the prose pool", () => {
+    for (const text of [
+      "just sold some casino from the stack", "sold some casino, still holding the rest", "sold casino, rest of the bag stays put",
+      "sold half of my casino here", "sold casino at the top of the range", "sold casino into strength, still in some",
+    ]) assert.equal(admit(text, "Casino").ok, false, text);
     for (const line of saleLines("WISP", "x")) {
       assert.match(line, /\bsold\b/);
       assert.match(line, /\bWISP\b/);
-      assert.doesNotMatch(line, /\p{N}|%|\$|@|#|https?:|\b(?:profit|gain|loss|green|red|win|won|up|down|all|closed|exited|out|early|late|pleased|nice)\b/iu, line);
-      assert.doesNotMatch(line, /\b(?:just|now|then|today|fast|quick\w*|prompt\w*|smooth\w*|fine|safe\w*|neat\w*|proper\w*|clean\w*|moving on|next|elsewhere|fresh|is sold|coffee|eyes|me|calm\w*|tidy|hygiene|rules?|steady|standard|further|nothing)\b/i, line);
+      assert.doesNotMatch(line, /\p{N}|%|\$|@|#|https?:|\b(?:profit|gain|loss|green|red|win|won|all|closed|exited|out|early|late|pleased|nice|remaining|left|still in|holding|rest|bag|half|some|quarter)\b/iu, line);
+      assert.doesNotMatch(line, /receipt's below/i, "no promise of a link on owners who do not share one");
     }
   });
 
-  it("thirty wins of one coin in memory still leave a line: two lines share at most one part, half alike even for the same coin (second review)", () => {
-    const said: string[] = [];
-    for (let i = 0; i < 30; i++) {
-      const line = saleLines("PEPE", `sell:${i}`).find((l) => admit(l, "PEPE", said).ok);
-      assert.ok(line, `win ${i + 1}`);
-      said.push(line!);
-    }
-  });
-
-  it("two wins of different coins are never one template: sharing a part is under the repeat limit, a coin-swapped copy is refused and the next line taken", () => {
-    const parts = (line: string) => SALE_PARTS.map((slot) => slot.findIndex((p) => line.includes(p)));
-    for (const [x, y] of [["CAPITOL", "WISP"], ["T57F813C4571", "T99A"]] as const) {
-      const a = saleLines(x, "s"), b = saleLines(y, "s");
-      for (const p of a) for (const q of b) {
-        const shared = parts(p).filter((v, i) => v === parts(q)[i]).length;
-        if (shared < 2) assert.ok(similarity(p, q) < REPEAT_LIMIT, `${p} | ${q} → ${similarity(p, q)}`);
+  it("every short-label candidate fits a five-figure gain plus the complete raw explorer URL and CA", () => {
+    for (const coin of ["PEPE", "CAPITOL", "IGNITION", "ALTAI", "MOON"]) {
+      for (const line of saleLines(coin, "s")) {
+        const body = whole(line, 12345);
+        assert.ok(body, line);
+        assert.ok(body.length <= 280);
+        assert.equal(hasSaleOutcome(body, "profit", 12345), true);
       }
     }
-    const said = saleLines("CAPITOL", "s")[0]!.replace("CAPITOL", "WISP");
-    assert.equal(admit(said, "WISP", [said]).ok, false);
-    const first = saleLines("WISP", "s").find((l) => admit(l, "WISP", [said]).ok);
-    assert.ok(first && first !== said);
+    for (const coin of ["Wrapped Robinhood Ethers", "Pudgy Penguin", "T57F813C4571"]) {
+      const fitting = saleLines(coin, "s").filter((line) => line.length <= saleWordBudget("profit", 12345, suffix, 4) && admit(line, coin).ok && whole(line, 12345));
+      assert.ok(fitting.length >= 24, `${coin}: ${fitting.length} candidates fit`);
+    }
+  });
+
+  it("a hundred same-coin wins remain possible with the long repeat history and eight-opener window", () => {
+    const said: string[] = [];
+    for (let i = 0; i < 100; i++) {
+      const line = saleLines("PEPE", `sell:${i}`).find((candidate) => admit(candidate, "PEPE", said).ok && whole(candidate, 12345));
+      assert.ok(line, `win ${i + 1}`);
+      assert.ok(said.every((prior) => similarity(line!, prior) < REPEAT_LIMIT));
+      said.unshift(line!);
+    }
+  });
+
+  it("coin-swapped copies and recent fleet lines are refused; another opener remains available", () => {
+    const prior = saleLines("CAPITOL", "s")[0]!.replace("CAPITOL", "WISP");
+    assert.equal(admit(prior, "WISP", [prior]).ok, false);
+    assert.equal(admit(prior, "WISP", [], [prior]).ok, false);
+    const next = saleLines("WISP", "s").find((line) => admit(line, "WISP", [prior], [prior]).ok);
+    assert.ok(next);
+    assert.notEqual(openerKey(next, ["WISP"]), openerKey(prior, ["WISP"]));
   });
 });

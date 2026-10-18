@@ -1547,6 +1547,25 @@ describe("an active owner's post never names a data provider (the owner's teamma
   it("only for an active owner: every other owner's posts are judged as before", () => {
     assert.equal(reason("coingecko shows volume thin across the board, a quiet one", { kind: "casual", mode: "live" }), "ok");
   });
+  it("nor the chain by its name, however spelled, in every kind of post (the owner, 2026-10-18)", () => {
+    for (const text of ["quiet afternoon on robinhood chain, nothing doing", "slow one over on Robinhood Chain for me", "robin hood chain is sleepy, i'm just watching",
+      "r0binhood chain feels sleepy, i'm just watching", "R0B1NH00D CHAIN is sleepy, i'm just watching", "rob1nhood cha1n is sleepy, i'm just watching",
+      "robinhood's chain is sleepy, i'm just watching", "r()binhood chain is sleepy, i'm just watching", "robin-hood-chain is sleepy, i'm just watching"]) {
+      for (const kind of ["casual", "intro", "buy", "sell"] as const) assert.equal(reason(text, { ...house, kind }), "source-named", `${kind}: ${text}`);
+      // A reply reads strokes written for a letter first ("r()binhood": charset), and refuses them before this screen.
+      for (const drafted of [false, true]) {
+        const why = reason(`${text}.`, { ...house, kind: "reply", answer: true, drafted });
+        assert.ok(why === "source-named" || (why === "charset" && text.includes("()")), `answer${drafted ? " (drafted)" : ""}: ${text}: ${why}`);
+      }
+      // Every other owner's posts are judged as before: never source-named.
+      for (const kind of ["casual", "intro", "buy", "sell"] as const) assert.notEqual(reason(text, { mode: "live", kind }), "source-named", `not house, ${kind}: ${text}`);
+    }
+    // The same line for another owner passes, as it did.
+    assert.equal(reason("quiet afternoon on robinhood chain, nothing doing", { kind: "casual", mode: "live" }), "ok");
+    // "robinhood" alone is not the chain's name, and "the chain" names nothing.
+    assert.equal(reason("quiet afternoon on the chain, nothing doing", { ...house, kind: "casual" }), "ok");
+    assert.notEqual(reason("robinhood is a big name, nothing doing here", { ...house, kind: "casual" }), "source-named");
+  });
   it("an insight post is held to every screen a drafted answer is: no call, forecast, level, holding or amount in any words (2026-10-13)", () => {
     const insight: Partial<XGateCtx> = { ...house, kind: "casual", insight: true, buys: "none" };
     for (const ok of ["majors drifting in a tight range, breadth narrow and liquidity thin", "risk-off tone on the majors, momentum concentrated in the chain's trending names"]) {

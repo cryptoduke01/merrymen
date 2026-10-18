@@ -23,47 +23,29 @@ import { latinLines } from "./casual";
 import { cleanTicker, renderFiguresLine, TRADED_MAX, type FiguresSection, type FiguresSpec } from "./figures";
 import { recapCoverOf, sellKey, type PlanCall, type PlanIntent, type PlanSell } from "./planner";
 
-/**
- * A HUNDRED WAYS TO SAY "A RECAP FOLLOWS" (two reviews of the recap branch,
- * 2026-10-14: with eight fixed lines the ninth recap was a repeat of one of
- * the last eight to the gate and recaps stopped; with sixty-four of uneven
- * length, a paper agent or a busy fleet still ran out, since the gate weighs
- * shared words against the shorter post and a short part shared was half a
- * line). Three slots of ten, joined by a Latin square (casual.ts latinLines),
- * so any two lines share at most one part; every part three or four content
- * words, no word in two parts, so a shared part is never near the repeat
- * limit (the worst pair is under half, paper clause included: recap.test.ts).
- * No coin, no result word (green, profit, loss), no time of day, no pointing
- * word the gate reads as a call, no source word (on-chain) that marks a post
- * as research. No side of the trade (third review, 2026-10-14: "a flurry of
- * buys and sells" opened a tenth of the recaps that counted buys alone, sales
- * the owner may not have opted to post), and nothing only real money has
- * (receipts, settlement, fills), since a paper agent's recap says these too.
- * No size either way (fourth review, 2026-10-14): a recap may say one trade a
- * single post could not, and "heavy action across the book" above "recap: 1
- * buy" was untrue; the figures line says how many.
- */
-export const RECAP_SLOTS: readonly [readonly string[], readonly string[], readonly string[]] = Object.freeze([
-  Object.freeze(["an update on the trading desk", "checking in on the order book", "where the strategy currently stands", "a catch up on the engine's work",
-    "keeping everyone posted", "for the sake of transparency", "the session under review", "a status report on the portfolio",
-    "a peek behind the curtain", "a glimpse into the machine"]),
-  Object.freeze(["here is the quick recap", "the full rundown follows", "a tidy summary of it all", "the tape in short form", "the running tally laid out",
-    "the whole scorecard at a glance", "a brief look back over it", "the condensed version of events", "the highlights reel in numbers", "the wrap sheet put together"]),
-  Object.freeze(["straight from the logbook itself", "logged exactly as landed", "no spin attached whatsoever", "noted plainly for the record", "nothing more to add on it",
-    "accounted for without shortcuts", "minus any fluff or filler", "that about covers everything worth saying", "precisely what the ledger shows", "served up fresh and unedited"]),
-]) as unknown as readonly [readonly string[], readonly string[], readonly string[]];
+/** Short conversational leads and independent tails. Selection walks every cell;
+ * the real repeat and opener gates, not a template's index, decide what is fresh. */
+export const RECAP_SLOTS: readonly [readonly string[], readonly string[], readonly string[]] = [
+  ["ok, quick trade catchup", "rounding up the latest activity", "here comes the desk rundown", "flipping through the running tally",
+    "a plain update from the logbook", "the recap has entered chat", "keeping tabs on the paperwork", "putting the ledger into words",
+    "pulling together the recorded bits", "back with the accounting notes", "time for the condensed version", "bookmarking the current chapter",
+    "opening the summary drawer", "collecting the details in public", "letting the record speak", "bringing the scattered notes together",
+    "zooming out to the overview", "turning the page to the totals", "leaving a checkpoint for the timeline", "making room for the breakdown",
+    "gathering the latest notes on activity", "unpacking the trading notebook", "filing the catchup without ceremony", "stopping by with the scorecard"],
+  ["the numbers can do the talking", "no dramatic soundtrack required", "less narration, more actual detail", "a bit of reading for the curious",
+    "nothing dressed up for the occasion", "keeping the commentary pretty short", "the unglamorous part gets a mention", "a tidy place for the loose ends",
+    "no plot twist added for effect", "the arithmetic gets the microphone", "leaving the adjectives at the door", "straight from what was recorded",
+    "the boring details deserve daylight", "without the motivational speech", "putting the spectacle on mute", "no essay needed alongside",
+    "the evidence keeps its own voice", "without inventing a grand narrative", "the useful stuff fits underneath", "no confetti in the footnotes",
+    "skipping the theatrical introduction", "just the facts in readable form", "without turning bookkeeping into folklore", "a compact read for passing visitors"],
+  [],
+];
 
-/**
- * ONE PAPER CLAUSE, A SINGLE WORD OF ITS OWN (second review, 2026-10-14): the
- * casual posts' paper sentences share "paper", "trades", "desk" and "book"
- * among themselves and with these parts, and each paper recap that went out
- * blocked six to eight others. "on paper" adds one word to every paper line.
- */
-const RECAP_PAPER = "on paper";
-
-/** Every recap line, this recap's own first (by its key), a paper agent's with its paper clause. */
+/** Every lead/tail pair, deterministically shuffled, with an explicit paper disclosure. */
 export function recapLines(seed: string, o: { paper?: boolean } = {}): string[] {
-  return latinLines(RECAP_SLOTS, seed, (a, b, c) => `${a}. ${b}, ${c}${o.paper === true ? `, ${RECAP_PAPER}` : ""}.`);
+  // A third equal slot lets latinLines enumerate every lead/tail pair exactly once.
+  const slots = [RECAP_SLOTS[0], RECAP_SLOTS[1], RECAP_SLOTS[0].map(() => "")] as const;
+  return latinLines(slots, seed, (a, b) => `${a}. ${b}${o.paper === true ? ", on paper" : ""}.`);
 }
 
 /** A trade's ticker as the figures line may show it: its symbol, else its name, when either is one. */
