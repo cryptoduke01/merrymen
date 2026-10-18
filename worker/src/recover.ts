@@ -656,7 +656,9 @@ export async function planRecovery(opts: {
       // could not be asked, and an owner reading it would not know whether the
       // empty list they are looking at covers one vault or none.
       unreadable.push(`class vault factory ${u.factory}`);
-      classNote = `the class vault factory at ${u.factory} could not be read (${u.why}), so this list may be short`;
+      // This failure was returned by findClassVaults, so it never reaches the
+      // catch below. The note also leaves through the recovery route's JSON.
+      classNote = `the class vault factory at ${u.factory} could not be read (${errorText(u.why)}), so this list may be short`;
     }
     for (const candidate of lookup.candidates) {
       const head = await publicClient.getBlockNumber();

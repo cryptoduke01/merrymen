@@ -3,9 +3,12 @@ import { Console } from "node:console";
 import { Writable } from "node:stream";
 import { describe, it } from "node:test";
 import { inspect } from "node:util";
+import { fileURLToPath } from "node:url";
+import { build } from "esbuild";
 import { ContractFunctionExecutionError, HttpRequestError, createPublicClient, erc20Abi, http } from "viem";
 import { classifyRpcError, DECLINED_MARKER } from "./rpc-error";
-import { REDACTED, errorText, guardStdio, lineRedactor, redactUrls } from "./redact-urls";
+import { REDACTED, errorText, redactUrls } from "./redact-urls";
+import { guardStdio, lineRedactor } from "./redact-stdio";
 
 /**
  * A made-up key in the shape Alchemy issues: 32 characters of base64url. It is
@@ -139,6 +142,20 @@ describe("redactUrls on the errors viem actually raises", () => {
 });
 
 describe("redactUrls", () => {
+  it("can be bundled for the browser without Node builtins", async () => {
+    const result = await build({
+      entryPoints: [fileURLToPath(new URL("./redact-urls.ts", import.meta.url))],
+      bundle: true,
+      platform: "browser",
+      format: "esm",
+      write: false,
+    });
+    const output = result.outputFiles[0];
+    assert.ok(output, "the browser bundle was produced");
+    const bundled = await import(`data:text/javascript;base64,${Buffer.from(output.text).toString("base64")}`);
+    assert.equal(bundled.errorText(new Error(`URL: ${KEYED}`)), `URL: https://${HOST}/${REDACTED}`);
+  });
+
   it("keeps scheme and host, drops path and query, for keyed providers", () => {
     assert.equal(redactUrls(`URL: ${KEYED}`), `URL: https://${HOST}/${REDACTED}`);
     assert.equal(
@@ -224,6 +241,21 @@ describe("lineRedactor", () => {
 
   it("releases an unterminated line once it is too long to hold", () => {
     const r = lineRedactor(16);
-    assert.deepEqual(r.push(`${"x".repeat(20)}`), ["x".repeat(20)]);
+    assert.deepEqual(r.push(`${"x".repeat(20)}`), [`${"x".repeat(20)} [truncated]`]);
+    assert.deepEqual(r.push("discarded tail\nnext\n"), ["next"]);
+  });
+
+  it("never emits the bare tail of a URL split at the held-line limit", () => {
+    const r = lineRedactor(64);
+    const first = r.push(`${"x".repeat(64)} ${KEYED.slice(0, -16)}`);
+    assert.deepEqual(first, [`${"x".repeat(64)} https://${HOST}/${REDACTED} [truncated]`]);
+    assert.deepEqual(r.push(KEYED.slice(-16)), []);
+    assert.deepEqual(r.push(`\nnext ${KEYED}\n`), [`next https://${HOST}/${REDACTED}`]);
+    assert.deepEqual(r.flush(), []);
+
+    const ended = lineRedactor(16);
+    ended.push(`${"x".repeat(20)} ${KEYED.slice(0, -16)}`);
+    ended.push(KEYED.slice(-16));
+    assert.deepEqual(ended.flush(), []);
   });
 });

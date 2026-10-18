@@ -1,6 +1,7 @@
 import { EVIDENCE_BUDGET_MS, brainEvidence, readPoolEvidence } from "./venues/pool-evidence";
 import { upsertRefusal, type RefusalRow } from "./venues/refusal-rows";
-import { errorText, guardStdio } from "./redact-urls";
+import { errorText } from "./redact-urls";
+import { guardStdio } from "./redact-stdio";
 /**
  * merrymen worker — the 24/7 loop.
  *

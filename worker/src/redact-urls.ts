@@ -30,10 +30,8 @@
  * A rule that redacted those would be switched off by the first person it got
  * in the way of.
  *
- * PURE except `guardStdio`, which patches the two streams it is given.
+ * Pure and browser-safe. Node stream adapters live in redact-stdio.ts.
  */
-
-import { StringDecoder } from "node:string_decoder";
 
 /** What a removed credential reads as. The same marker redactSecrets uses. */
 export const REDACTED = "[redacted]";
@@ -187,72 +185,4 @@ export function redactUrls(text: string): string {
  */
 export function errorText(e: unknown): string {
   return redactUrls(e instanceof Error ? e.message : String(e));
-}
-
-/**
- * Split a byte stream into whole lines, so a URL is never redacted in two
- * halves. A `data` chunk ends wherever the pipe's buffer did, and the second
- * half of a split URL has no scheme for `redactUrls` to find.
- *
- * `push` returns the complete lines in this chunk, redacted; the remainder is
- * held for the next. `flush` returns what is left when the stream ends. A
- * line longer than `maxHeld` is released (redacted) rather than held forever.
- */
-export function lineRedactor(maxHeld = 64 * 1024): { push(chunk: Buffer | string): string[]; flush(): string[] } {
-  let held = "";
-  // A multi-byte character split across chunks is held too, not garbled.
-  const decoder = new StringDecoder("utf8");
-  return {
-    push(chunk) {
-      held += typeof chunk === "string" ? chunk : decoder.write(chunk);
-      const parts = held.split(/\r?\n/);
-      held = parts.pop() ?? "";
-      if (held.length > maxHeld) {
-        parts.push(held);
-        held = "";
-      }
-      return parts.map(redactUrls);
-    },
-    flush() {
-      const rest = held + decoder.end();
-      held = "";
-      return rest ? [redactUrls(rest)] : [];
-    },
-  };
-}
-
-type Write = NodeJS.WriteStream["write"];
-const GUARDED = Symbol.for("merrymen.redactUrls.guarded");
-
-/**
- * Route everything this process writes to stdout and stderr through
- * `redactUrls` — `console.*` of an error object included, since console
- * formats it (stack, `url: '…'`, metaMessages, cause chain) to a string and
- * then calls the stream's `write`.
- *
- * Installed once at each production entry point, before anything can fail.
- * Idempotent. A Buffer is decoded only when it may hold a URL, and written
- * untouched when nothing in it changed.
- */
-export function guardStdio(streams: NodeJS.WriteStream[] = [process.stdout, process.stderr]): void {
-  for (const stream of streams) {
-    const s = stream as NodeJS.WriteStream & { [GUARDED]?: true };
-    if (s[GUARDED]) continue;
-    const write = s.write.bind(s) as (...a: unknown[]) => boolean;
-    s.write = ((chunk: unknown, ...rest: unknown[]) => {
-      if (typeof chunk === "string") return write(redactUrls(chunk), ...rest);
-      const bytes = chunk instanceof Uint8Array ? Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength) : null;
-      if (bytes?.includes("://")) {
-        const text = bytes.toString("utf8");
-        const safe = redactUrls(text);
-        if (safe !== text) {
-          // The encoding argument described the bytes; the text is UTF-8 now.
-          const cb = rest.find((a) => typeof a === "function");
-          return cb ? write(safe, "utf8", cb) : write(safe, "utf8");
-        }
-      }
-      return write(chunk, ...rest);
-    }) as Write;
-    s[GUARDED] = true;
-  }
 }

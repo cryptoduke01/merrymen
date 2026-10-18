@@ -43,7 +43,7 @@ import { wrapSqlite } from "./db";
 import { restorePaperCheckpoint, recordPaperRecoveryHealth } from "./paper-checkpoint";
 import { FLEET_RECOVERY_SCHEMA, recordFleetRecoveryHold, recordFleetSourceVerified, readFleetRecoveryHold, readFleetCommandRefusal, readFleetCommandBoundary, withFleetRecoveryLock, type RecoveryCause } from "./fleet-recovery";
 import { AUTONOMY_HOLDS_SQL, AUTONOMY_TRADE_FUNNEL_SQL, FLEET_RAILS_SQL, autonomyLines, fleetRails, foldFunnel, railsLine, type AgentRailRow, type FleetRails } from "./autonomy-funnel";
-import { guardStdio, lineRedactor } from "./redact-urls";
+import { guardStdio, lineRedactor } from "./redact-stdio";
 import { commitOf, heartbeatClock, heartbeatCounts, lastShutdownOf, writeFleetHeartbeat, type FleetSnapshot, type HeartbeatCounts, type LastShutdown } from "./fleet-heartbeat";
 import { recoveryCommandRefused, writeRecoveryCommandBarrier } from "./recovery-command-barrier";
 import { repairHistoricalFills } from "./history-fill-repair";
