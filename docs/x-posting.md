@@ -448,9 +448,9 @@ When the model gives no draft, the reason says which way (`writer.ts`
 | Reason | What happened |
 |---|---|
 | `no-draft:pass` | the model answered PASS |
-| `no-draft:empty` | an empty answer (or only quotes) |
+| `no-draft:empty` | an empty answer (or only quotes, or thinking left open: an unclosed `<think>`, or a closer with no opener) |
 | `no-draft:out-of-tokens` | a reasoning model spent `maxTokens` before writing (`finish_reason: length`) |
-| `no-draft:timeout` | no answer within the draft timeout (20 s) |
+| `no-draft:timeout` | no answer within the draft timeout (20 s); the request is cancelled |
 | `no-draft:<provider>-<status>` | the provider refused, e.g. `no-draft:groq-429` (rate limit), `groq-400`, `groq-503`. Only the provider's id from config and the HTTP status; never the provider's message |
 | `no-draft:network` | the request never reached the provider |
 | `no-draft:error` | anything else thrown |
@@ -507,6 +507,40 @@ sentence that passed but did not fit beside the result line and the link).
 
 Observability only: no screen, rule, gate, cap or allowance changed.
 
+### How the writer calls its model (2026-10-18)
+
+The X writer's model call has its own settings (`writer.ts` `tryDraft`),
+passed to `llmText` per call. Every other caller (trading, the strategist,
+the scout, the room) sends exactly what it sent before.
+
+- **Temperature.** `MERRYMEN_XPOST_TEMPERATURE`, a number from 0 to 2,
+  default 0.6 (`llmText`'s own, so unset changes nothing). Anything else is
+  named in a boot line and the default applies. One draft per slot is still
+  all there is, and the gate judges it the same way: a hotter draft is only
+  refused more often.
+- **Reasoning off for the qwen3 family.** The default writer model,
+  `qwen/qwen3.8-27b`, reasons before it answers and is not on `llm.ts`'s
+  shared quiet-reasoning list, so a fixed 400-token budget could be spent
+  thinking: no draft, or an unclosed `<think>` the gate refused as markup.
+  The writer now sends `reasoning_effort: "none"` for any qwen3 model on an
+  OpenAI-compatible provider. On a 400 that names the field it steps down
+  once, to the cheapest effort the refusal names (`minimal` or `low`) or to
+  no field, and remembers that for the model (not the URL: Groq takes "none"
+  for qwen3 and refuses it for gpt-oss). One retry, never a loop: if the
+  step is refused too, the call fails (`no-draft:groq-400`) and the next
+  call starts one step lower.
+- **Budget.** 200 tokens with reasoning asked off; 700 otherwise, and 700 as
+  soon as a stepped-down call may reason.
+- **Thinking taken out.** A closed `<think>` block is removed before the
+  PASS and empty checks. Any tag left over (an opener with no closer, a
+  closer with no opener) means no draft, `no-draft:empty`, and none of the
+  text around it is kept.
+- **The timeout cancels the call.** At 20 s the pass stops waiting and the
+  request is aborted.
+
+The Anthropic transport sends no temperature, as before, and keeps its own
+thinking switch. No screen, gate, cap or allowance changed.
+
 ## Configuration
 
 | Var | Where | Default | Meaning |
@@ -522,6 +556,7 @@ Observability only: no screen, rule, gate, cap or allowance changed.
 | `MERRYMEN_XPOST_LLM_PROVIDER` | orchestrator | `groq` | `groq`, `anthropic` or `openai` (OpenAI-compatible). A provider other than Groq receives the writer's inputs, so it must be named in the privacy policy (`site/components/PrivacyPolicyDoc.tsx`, section 5) before it is deployed |
 | `MERRYMEN_XPOST_MODEL` | orchestrator | `qwen/qwen3.8-27b` (groq), `claude-opus-5` (anthropic) | the writer's model; required for `openai` |
 | `MERRYMEN_XPOST_LLM_BASE_URL` | orchestrator | — | the https `…/v1` base, required for `openai` |
+| `MERRYMEN_XPOST_TEMPERATURE` | orchestrator | 0.6 | the writer's sampling temperature, a number from 0 to 2; anything else is named in a boot line and the default applies. OpenAI-compatible providers only. See "How the writer calls its model" |
 | `MERRYMEN_XPOST_SHARE_HOUSE_KEY` | orchestrator | unset | `1` lets the writer use a fleet key, its own or the room's; otherwise a fleet key is refused |
 | `MERRYMEN_XPOST_LLM_PER_DAY` | orchestrator | 400 | model calls per UTC day across the fleet; `0` = intro templates only; unreadable = none. An active owner's answers also stop at 48 a day per X account |
 | `MERRYMEN_XPOST_PER_DAY` | orchestrator | 3 | posts per X account per local day (at most two of them buy posts); `0` = off; unreadable = the default |

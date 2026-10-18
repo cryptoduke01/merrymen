@@ -94,7 +94,7 @@ import {
   type XAccount,
   type XPost,
 } from "./xpost/store";
-import { answerPrompt, answerQuestion, buyPrompt, casualPrompt, checkPrompt, INSIGHT_VOCABULARY, insightPrompt, introPrompt, introTemplate, modelAnswers, replyPrompt, sellPrompt, sherwoodClaimed, sherwoodMentioned, sherwoodNamed, tryDraft, xpostModel, xpostModelWarning, type AnswerIntentKind, type DraftResult, type WriterFacts, type XStyle } from "./xpost/writer";
+import { answerPrompt, answerQuestion, buyPrompt, casualPrompt, checkPrompt, INSIGHT_VOCABULARY, insightPrompt, introPrompt, introTemplate, modelAnswers, replyPrompt, sellPrompt, sherwoodClaimed, sherwoodMentioned, sherwoodNamed, tryDraft, XPOST_TEMPERATURE_DEFAULT, xpostModel, xpostModelWarning, type AnswerIntentKind, type DraftResult, type WriterFacts, type XStyle } from "./xpost/writer";
 import { appendPublicToken, appendPublicWallet, hasPublicWallet, publicTokenStillAllowed, publicWalletStillAllowed, type PublicWallet } from "./xpost/public-wallet";
 import { readPublicProjectDescription } from "./orchestrator-xpost-project";
 import { banterAsk, boughtNames, carriesResearch, classifyTag, createXResearch, generalTradesQuestion, MARKET_MAJORS, modelNamed, namesACoin, ownCoinTicker, sayable, selfAsk, unshowableName, type ResearchBundle, type TagIntent, type XResearch } from "./orchestrator-xpost-research";
@@ -277,6 +277,12 @@ export interface XPostEnv {
   /** MERRYMEN_XPOST_CHECKS_PER_DAY: larp checks a UTC day across X accounts. Absent: DEFAULT_CHECKS_PER_DAY. */
   checksPerDay?: number;
   replyPollsPerDay?: number;
+  /**
+   * MERRYMEN_XPOST_TEMPERATURE: the X writer's sampling temperature, 0 to 2
+   * (xpost/writer.ts tryDraft). Absent: XPOST_TEMPERATURE_DEFAULT, 0.6 —
+   * llmText's own, so unset changes nothing.
+   */
+  temperature?: number;
   /** One boot line per value that was set and could not be honoured as written. */
   notes: string[];
 }
@@ -360,6 +366,13 @@ export function xpostEnv(env: Record<string, string | undefined> = process.env):
   const checksRaw = env.MERRYMEN_XPOST_CHECKS_PER_DAY?.trim();
   const checksPerDay = checksRaw ? count(checksRaw) : null;
   if (checksRaw && checksPerDay === null) notes.push("xpost: ignoring MERRYMEN_XPOST_CHECKS_PER_DAY — it is not a count of checks; the default applies");
+  // THE WRITER'S TEMPERATURE: a number from 0 to 2, the range providers take.
+  // Anything else is said by name and the default applies — a value a
+  // provider refuses would cost every draft, not just change its wording.
+  const tempRaw = env.MERRYMEN_XPOST_TEMPERATURE?.trim();
+  const tempN = tempRaw ? Number(tempRaw) : NaN;
+  const temperature = tempRaw && Number.isFinite(tempN) && tempN >= 0 && tempN <= 2 ? tempN : null;
+  if (tempRaw && temperature === null) notes.push(`xpost: ignoring MERRYMEN_XPOST_TEMPERATURE — it is not a number from 0 to 2; drafts keep the default of ${XPOST_TEMPERATURE_DEFAULT}`);
   return { off: null, perDay, fleetPerDay, llmPerDay, notes,
     ...(replies.scope !== "off" ? { repliesApproved: true } : {}),
     ...(replies.scope === "active" ? { repliesActiveOnly: true } : {}),
@@ -370,6 +383,7 @@ export function xpostEnv(env: Record<string, string | undefined> = process.env):
     ...(research && checksAsked ? { checks: true } : {}),
     ...(checksPerDay !== null ? { checksPerDay } : {}),
     ...(replyRaw ? { replyPollsPerDay: replyPollsPerDay ?? 0 } : {}),
+    ...(temperature !== null ? { temperature } : {}),
   };
 }
 
@@ -961,6 +975,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
   // LARP CHECKS (xpost/check.ts): only with research, only when switched on, at most this many a UTC day across X accounts.
   const checks = research !== null && o.knobs.checks === true;
   const checksPerDay = o.knobs.checksPerDay ?? DEFAULT_CHECKS_PER_DAY;
+  /** The writer's sampling temperature; undefined is the writer's default (tryDraft). */
+  const temperature = o.knobs.temperature;
 
   let lastPlanAt = Number.NEGATIVE_INFINITY;
   /** The tenant the last plan pass's draft cap cut it short at; "" when it reached everyone. */
@@ -2249,9 +2265,9 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         // A LARP CHECK IN ITS OWN VOICE (writer.ts checkPrompt): the take code reached, texted back casually.
         : asked.kind === "check"
         ? await tryDraft(creds, checkPrompt({ ...facts, question: candidate.text, research: looked?.research ?? [], ...(looked?.creatorClaim ? { creatorClaim: looked.creatorClaim } : {}) }),
-          { call: deps.llm, timeoutMs: deps.draftTimeoutMs })
+          { call: deps.llm, timeoutMs: deps.draftTimeoutMs, temperature })
         : await tryDraft(creds, answerPrompt({ ...facts, question: candidate.text, recentBuys: buys, boughtLately: boughtKind(f),
-          said: said.map(withoutReplyOptOut), walletPublic, coinNamed, general, ...(looked ?? {}) }), { call: deps.llm, timeoutMs: deps.draftTimeoutMs });
+          said: said.map(withoutReplyOptOut), walletPublic, coinNamed, general, ...(looked ?? {}) }), { call: deps.llm, timeoutMs: deps.draftTimeoutMs, temperature });
       const raw = out.ok ? out.text : null;
       const mode = f.mode === "idle" ? null : f.mode;
       // AN ANSWER NOT TOLD ITS BUYS, BACKSTOPPED AT THE GATE (red-team 2026-10-12):
@@ -2494,7 +2510,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       const facts = writerFacts(f, localDay(tz, nowMs), shownOwn);
       const paper = fill.paper;
       const prompt = replyPrompt({ ...facts, parentBody: parent.body, comment: candidate.text, coin: coin.label, paper });
-      const out = await tryDraft(creds, prompt, { call: deps.llm, timeoutMs: deps.draftTimeoutMs });
+      const out = await tryDraft(creds, prompt, { call: deps.llm, timeoutMs: deps.draftTimeoutMs, temperature });
       const raw = out.ok ? out.text : null;
       // A drafted reply never names sherwood: only an answer's code-built line
       // does. Read on its letters, in the draft and in what would be posted.
@@ -2748,7 +2764,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         // PASS, an empty answer, an error or a timeout alike spend the key, so
         // a model outage costs posts, never a loop of calls on the allowance;
         // which one it was is kept (no-draft:timeout, no-draft:groq-429).
-        const out = await tryDraft(creds, prompt, { call: deps.llm, timeoutMs: deps.draftTimeoutMs });
+        const out = await tryDraft(creds, prompt, { call: deps.llm, timeoutMs: deps.draftTimeoutMs, temperature });
         if (!out.ok) reason = `no-draft:${out.reason}`;
         else {
           const v = admitXPost(out.text, gate, BASE_GATE);

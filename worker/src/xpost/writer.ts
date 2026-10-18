@@ -39,7 +39,7 @@
  * be the same few sentences on every account on the fleet.
  */
 import { SETTINGS_DEFAULTS } from "../../../packages/core/src/index";
-import { llmText, type LlmCreds } from "../llm";
+import { llmText, REASONING_ON_MIN_TOKENS, type LlmCreds } from "../llm";
 import { hash32, type SaleOutcome } from "./planner";
 import { namedIn, SHERWOOD_NAME, sherwoodClaimed, sherwoodMentioned, sherwoodNamed, unreadableLetter } from "./gate";
 import { withoutFiguresLine } from "./figures";
@@ -1469,6 +1469,69 @@ export function xpostModelWarning(creds: LlmCreds | null, env: Env): string | nu
 const PASS_LINE = /^[^\p{L}\p{N}]*pass(?![\p{L}\p{N}_])/iu;
 
 /**
+ * HOW THE WRITER CALLS ITS MODEL (2026-10-18) — its own settings, and nobody
+ * else's: llmText's defaults stay what trading, the strategist and the scout
+ * send.
+ *
+ * TEMPERATURE: MERRYMEN_XPOST_TEMPERATURE (orchestrator-xpost.ts xpostEnv), or
+ * 0.6 — llmText's own — so an unset knob changes nothing. One draft per slot
+ * is still all there is; a hotter draft is only more often refused, and the
+ * gate judges it exactly as before. Read on the OpenAI-compatible transport
+ * only (llm.ts says why).
+ *
+ * REASONING OFF FOR THE QWEN3 FAMILY. The default writer model
+ * (qwen/qwen3.8-27b, trading's too) reasons before it answers and is not on
+ * llm.ts's shared quiet-reasoning list, so a fixed 400-token budget could be
+ * spent thinking: no draft at all, or an unclosed <think> the gate refused as
+ * markup. Groq's qwen3 takes `reasoning_effort: "none"`; the writer asks for
+ * it per call, and on a 400 that names the field llmText steps down ONCE (to
+ * the cheapest effort the refusal names, or to no field) and remembers it for
+ * that model — never a loop.
+ *
+ * THE BUDGET FOLLOWS THE REASONING: 200 tokens with it asked off — a post is
+ * far shorter, and a small cap bounds what a runaway answer costs — and 700
+ * otherwise (REASONING_ON_MIN_TOKENS, the floor llmText itself raises a
+ * stepped-down call to), so a model that may think still has room to write.
+ */
+export const XPOST_TEMPERATURE_DEFAULT = 0.6;
+/** The budget with reasoning asked off. */
+const QUIET_TOKENS = 200;
+/** The qwen3 family as providers name it: "qwen/qwen3.8-27b", "qwen3-32b", "Qwen3.5-9B". Not qwen2.5. */
+const QWEN3 = /(?:^|[^a-z0-9])qwen-?3(?![0-9])/i;
+
+/** Does the writer ask this model for no reasoning? The qwen3 family, on the OpenAI-compatible transport. */
+export function asksReasoningOff(creds: LlmCreds): boolean {
+  return creds.transport === "openai" && QWEN3.test(String(creds.model ?? ""));
+}
+
+/** The temperature a draft is sampled at: the operator's, when it is one a provider takes (0 to 2), or the default. */
+export function draftTemperature(t: number | undefined): number {
+  return typeof t === "number" && Number.isFinite(t) && t >= 0 && t <= 2 ? t : XPOST_TEMPERATURE_DEFAULT;
+}
+
+/**
+ * Every thinking pair seen in the wild — `<think>` or `<|think|>`, closed by
+ * `</think>`, `<|/think|>` or `<|endthink|>` — and any such tag left over once
+ * the pairs are gone. The room's telegram/interpreter.ts stripThinkingBlock
+ * reads the same tags; this directory may not import it (boundary.test.ts).
+ */
+const THINK_PAIR = /<\|?think\|?>[\s\S]*?(?:<\/\|?think\|?>|<\|\/think\|>|<\|endthink\|>)/gi;
+const THINK_LEFT = /<\s*\/?\s*\|?\s*\/?\s*(?:think|endthink)\b|\b(?:think|endthink)\s*\|?\s*>/i;
+
+/**
+ * THE ANSWER WITH THE MODEL'S THINKING TAKEN OUT: closed blocks removed, and
+ * "" — no draft, `empty` — when any think tag is left over. FAIL CLOSED, the
+ * room's tidyTgLine rule: an opener with no closer is the budget running out
+ * mid-thought, and what sits before it, or after a closer with no opener,
+ * cannot be told apart from the thinking, so none of it is ever posted. The
+ * gate would refuse the tag as markup anyway; this says why instead.
+ */
+export function withoutThinking(raw: string): string {
+  const s = String(raw ?? "").replace(THINK_PAIR, " ");
+  return THINK_LEFT.test(s) ? "" : s;
+}
+
+/**
  * WHY THERE IS NO DRAFT, as an operator code (stored as `no-draft:<code>` and
  * said in the pass's count line): `pass`, `empty` (an empty answer),
  * `out-of-tokens` (a reasoning model spent the budget before writing),
@@ -1514,31 +1577,49 @@ function missOf(creds: LlmCreds, e: unknown): DraftMiss {
  * (line breaks stay), so the gate's own tidying and judging still see what the
  * model wrote.
  *
- * THE TIMEOUT DOES NOT CANCEL THE CALL. llmText takes no signal; the race only
- * stops the pass from waiting, and the losing promise is caught so it cannot
- * surface later as an unhandled rejection.
+ * ITS THINKING IS TAKEN OUT FIRST (withoutThinking): a closed block goes, and
+ * one left open is no draft (`empty`), never the text around it.
+ *
+ * THE TIMEOUT CANCELS THE CALL: the race stops the pass from waiting, and the
+ * same moment aborts the request (llmText's `signal`), so a slow provider is
+ * not left writing an answer nobody will read. The aborted call's rejection
+ * lands on the losing promise, which is caught so it cannot surface later as
+ * an unhandled rejection.
  */
 export async function tryDraft(
   creds: LlmCreds,
   prompt: Prompt,
-  opts: { timeoutMs?: number; call?: typeof llmText } = {},
+  opts: { timeoutMs?: number; call?: typeof llmText; temperature?: number } = {},
 ): Promise<DraftResult> {
   let timer: ReturnType<typeof setTimeout> | undefined;
+  const abort = new AbortController();
   try {
     const call = opts.call ?? llmText;
     const timeoutMs = typeof opts.timeoutMs === "number" && opts.timeoutMs > 0 ? opts.timeoutMs : 20_000;
+    const off = asksReasoningOff(creds);
+    const request: Parameters<typeof llmText>[1] = {
+      system: prompt.system,
+      prompt: prompt.prompt,
+      maxTokens: off ? QUIET_TOKENS : REASONING_ON_MIN_TOKENS,
+      temperature: draftTemperature(opts.temperature),
+      ...(off ? { reasoning: "off" as const } : {}),
+      signal: abort.signal,
+    };
     const answer = Promise.resolve()
-      .then(() => call(creds, { system: prompt.system, prompt: prompt.prompt, maxTokens: 400 }))
+      .then(() => call(creds, request))
       .then(
         (v): DraftResult => (typeof v === "string" ? { ok: true, text: v } : { ok: false, reason: "empty" }),
         (e): DraftResult => ({ ok: false, reason: missOf(creds, e) }),
       );
     const timeout = new Promise<DraftResult>((resolve) => {
-      timer = setTimeout(() => resolve({ ok: false, reason: "timeout" }), timeoutMs);
+      timer = setTimeout(() => {
+        resolve({ ok: false, reason: "timeout" });
+        abort.abort();
+      }, timeoutMs);
     });
     const out = await Promise.race([answer, timeout]);
     if (!out.ok) return out;
-    const text = out.text.trim().replace(/^["'“”‘’`]+|["'“”‘’`]+$/g, "").trim();
+    const text = withoutThinking(out.text).trim().replace(/^["'“”‘’`]+|["'“”‘’`]+$/g, "").trim();
     if (text === "") return { ok: false, reason: "empty" };
     if (PASS_LINE.test(text)) return { ok: false, reason: "pass" };
     return { ok: true, text };
@@ -1553,7 +1634,7 @@ export async function tryDraft(
 export async function draft(
   creds: LlmCreds,
   prompt: Prompt,
-  opts: { timeoutMs?: number; call?: typeof llmText } = {},
+  opts: { timeoutMs?: number; call?: typeof llmText; temperature?: number } = {},
 ): Promise<string | null> {
   const out = await tryDraft(creds, prompt, opts);
   return out.ok ? out.text : null;

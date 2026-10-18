@@ -167,6 +167,20 @@ describe("xpostEnv reads the knobs the way an operator means them", () => {
     }
   });
 
+  it("MERRYMEN_XPOST_TEMPERATURE is a number from 0 to 2; anything else keeps the writer's default and says so by name", () => {
+    assert.equal(xpostEnv({ MERRYMEN_XPOST_TEMPERATURE: " 0.8 " }).temperature, 0.8);
+    assert.equal(xpostEnv({ MERRYMEN_XPOST_TEMPERATURE: "0" }).temperature, 0);
+    assert.equal(xpostEnv({ MERRYMEN_XPOST_TEMPERATURE: "2" }).temperature, 2);
+    assert.ok(!("temperature" in xpostEnv({ MERRYMEN_XPOST_TEMPERATURE: "" })), "set-but-blank is unset");
+    for (const v of ["hot", "-0.1", "2.5", "0,8", "gsk_pasted_key_by_mistake"]) {
+      const k = xpostEnv({ MERRYMEN_XPOST_TEMPERATURE: v });
+      assert.equal(k.off, null, v);
+      assert.ok(!("temperature" in k), v);
+      assert.deepEqual(k.notes, ["xpost: ignoring MERRYMEN_XPOST_TEMPERATURE — it is not a number from 0 to 2; drafts keep the default of 0.6"], v);
+      assert.ok(!k.notes.join(" ").includes(v), "said by name, never by value");
+    }
+  });
+
   it("an unreadable spend knob fails closed and says so", () => {
     for (const v of ["1,000", "-5", "many"]) {
       assert.match(xpostEnv({ MERRYMEN_XPOST_FLEET_PER_DAY: v }).off ?? "", /MERRYMEN_XPOST_FLEET_PER_DAY is set but .*nothing is posted/);
@@ -341,6 +355,10 @@ function poster(
     answer?: (prompt: string) => string | Promise<string>;
     /** How long a draft is waited for. Default: the writer's own. */
     draftTimeoutMs?: number;
+    /** MERRYMEN_XPOST_TEMPERATURE, as xpostEnv read it. */
+    temperature?: number;
+    /** Each model call's settings (everything but the words and the signal), in order. */
+    llmOpts?: unknown[];
     llmPerDay?: number;
     fleetPerDay?: number;
     perDay?: number;
@@ -363,7 +381,8 @@ function poster(
     ((prompt: string) => (/very first post/.test(prompt) ? INTRO : /What happened: you bought/.test(prompt) ? BUY : "slow afternoons make me weirdly calm, nothing to prove"));
   return makeXPoster({
     creds: over.creds === undefined ? CREDS : over.creds,
-    knobs: { ...xpostEnv(over.active ? { MERRYMEN_XPOST_ACTIVE_TENANTS: TENANT } : {}), llmPerDay: over.llmPerDay, fleetPerDay: over.fleetPerDay, perDay: over.perDay },
+    knobs: { ...xpostEnv(over.active ? { MERRYMEN_XPOST_ACTIVE_TENANTS: TENANT } : {}), llmPerDay: over.llmPerDay, fleetPerDay: over.fleetPerDay, perDay: over.perDay,
+      ...(over.temperature !== undefined ? { temperature: over.temperature } : {}) },
     app: APP,
     dek: w.dek,
     deps: {
@@ -378,9 +397,10 @@ function poster(
       renderCard: over.renderCard,
       publicProjectDescription: over.publicProjectDescription,
       ...(over.draftTimeoutMs ? { draftTimeoutMs: over.draftTimeoutMs } : {}),
-      llm: async (_creds, { system, prompt }) => {
+      llm: async (_creds, { system, prompt, signal: _signal, ...rest }) => {
         w.prompts.push(prompt);
         w.systems.push(system);
+        over.llmOpts?.push(rest);
         return answer(prompt);
       },
     },
@@ -908,6 +928,22 @@ describe("one step after another", () => {
       // The whole line, exactly: the kind and the code, and nothing of the draft or the provider's message.
       assert.equal(log, `xpost: sent 1, not-posted 1 (buy ${reason})`, what);
       assert.deepEqual((await rows(w)).map((x) => [x.kind, x.status, x.reason]), [["intro", "posted", null], ["buy", "skipped", reason]], what);
+    }
+  });
+
+  it("every draft is sampled at MERRYMEN_XPOST_TEMPERATURE, or the writer's 0.6; the qwen3 family is asked for no reasoning", async (t) => {
+    const cases: [Parameters<typeof poster>[1], unknown][] = [
+      [{}, { maxTokens: 700, temperature: 0.6 }],
+      [{ temperature: 0.8 }, { maxTokens: 700, temperature: 0.8 }],
+      [{ temperature: 0.8, creds: { ...CREDS, model: "qwen/qwen3.8-27b" } }, { maxTokens: 200, temperature: 0.8, reasoning: "off" }],
+    ];
+    for (const [over, want] of cases) {
+      const w = await world(t, T0);
+      const llmOpts: unknown[] = [];
+      const p = poster(w, { ...over, llmOpts, calls: [call({ decisionId: "d-pepe", atSec: (T0 + 2 * MIN) / 1000 })] });
+      await p.step(w.db, ROSTER, new Map(), T0 + MIN);
+      await p.step(w.db, ROSTER, new Map(), T0 + 11 * MIN);
+      assert.deepEqual(llmOpts, [want, want], "the intro and the buy");
     }
   });
 

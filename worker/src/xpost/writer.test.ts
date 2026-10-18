@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { SETTINGS_DEFAULTS } from "../../../packages/core/src/index";
 import { everyBand } from "../class-evidence";
-import type { LlmCreds } from "../llm";
+import { resetReasoningRefusalsForTest, type LlmCreds } from "../llm";
 import { similarity } from "../social-post";
 import { admitXPost, sourceNamed, vocabularyRefusal, withoutDisclosure, XPOST_MAX_CHARS, type BaseGate } from "./gate";
 import {
@@ -18,7 +18,9 @@ import {
   INTRO_WHAT_IDLE,
   XPOST_ANTHROPIC_DEFAULT_MODEL,
   XPOST_GROQ_DEFAULT_MODEL,
+  XPOST_TEMPERATURE_DEFAULT,
   answerPrompt,
+  asksReasoningOff,
   answerQuestion,
   coinNamedIn,
   SHERWOOD_ON_X,
@@ -27,6 +29,7 @@ import {
   checkPrompt,
   describeXpostCreds,
   draft,
+  draftTemperature,
   greetingAnswers,
   introPrompt,
   introTemplate,
@@ -39,6 +42,7 @@ import {
   sherwoodMentioned,
   sherwoodNamed,
   tryDraft,
+  withoutThinking,
   xpostCreds,
   xpostModel,
   xpostModelWarning,
@@ -636,13 +640,15 @@ describe("a draft is the model's answer, or null — never a throw", () => {
   it("hands the prompt over and returns the text it judged: trimmed, its wrapping quotes off, nothing inside touched", async () => {
     const seen: unknown[] = [];
     const out = await draft(ROOM, P, {
-      call: async (creds, opts) => {
+      call: async (creds, { signal, ...opts }) => {
+        assert.ok(signal instanceof AbortSignal, "the call can be cancelled");
         seen.push([creds.model, opts]);
         return '  "quiet day on the curve"\n';
       },
     });
     assert.equal(out, "quiet day on the curve");
-    assert.deepEqual(seen, [["room-model", { system: "sys", prompt: "go", maxTokens: 400 }]]);
+    // Not a qwen3 model: no reasoning asked off, and room to think (REASONING_ON_MIN_TOKENS).
+    assert.deepEqual(seen, [["room-model", { system: "sys", prompt: "go", maxTokens: 700, temperature: 0.6 }]]);
     assert.equal(await draft(ROOM, P, { call: async () => "“first line\n\nsecond line”" }), "first line\n\nsecond line", "line breaks are the gate's to judge");
   });
 
@@ -704,6 +710,153 @@ describe("a draft is the model's answer, or null — never a throw", () => {
       }
     } finally {
       globalThis.fetch = realFetch;
+    }
+  });
+
+  it("takes the model's thinking out: a closed block goes, one left open is no draft — never the text around it", async () => {
+    // Pure: closed pairs in every spelling go; any tag left over empties it.
+    assert.equal(withoutThinking("<think>weighing it</think>quiet day on the curve").trim(), "quiet day on the curve");
+    assert.equal(withoutThinking("<|think|>hmm<|/think|> quiet day").trim(), "quiet day");
+    assert.equal(withoutThinking("<|think|>hmm<|endthink|> quiet day").trim(), "quiet day");
+    assert.equal(withoutThinking("<THINK>a</think>one <think>b</think>two").replace(/\s+/g, " ").trim(), "one two");
+    assert.equal(withoutThinking("<think>the user wants a post about"), "", "an unclosed opener: the budget ran out mid-thought");
+    assert.equal(withoutThinking("quiet day <think>should i say more"), "", "what came before an unclosed opener is not kept");
+    assert.equal(withoutThinking("weighing it</think>quiet day"), "", "a closer with no opener: the thinking sits in front of it");
+    assert.equal(withoutThinking("<think>a</think>quiet <think>b"), "", "a second, unclosed block");
+    assert.equal(withoutThinking("< think >x"), "", "spaced tags count");
+    assert.equal(withoutThinking("i think the tape is quiet"), "i think the tape is quiet", "the word is not a tag");
+    assert.equal(withoutThinking("thinking about soup"), "thinking about soup");
+    // Through tryDraft: the reason is `empty`, and the words never come back.
+    type Call = NonNullable<NonNullable<Parameters<typeof tryDraft>[2]>["call"]>;
+    const why = async (call: Call) => {
+      const out = await tryDraft(ROOM, P, { call });
+      return out.ok ? `text:${out.text}` : out.reason;
+    };
+    assert.equal(await why(async () => "<think>the user wants a casual post, maybe about"), "empty");
+    assert.equal(await why(async () => "quiet day <think>more"), "empty");
+    assert.equal(await why(async () => "<think>ok</think>\n\n\"quiet day on the curve\""), "text:quiet day on the curve");
+    assert.equal(await why(async () => "<think>ok</think>PASS"), "pass");
+    assert.equal(await why(async () => "<think>ok</think>  "), "empty");
+  });
+
+  it("a timeout aborts the call it gave up on, and the abort surfaces nowhere", async () => {
+    let signal: AbortSignal | undefined;
+    const out = await tryDraft(ROOM, P, {
+      timeoutMs: 20,
+      call: (_creds, opts) => {
+        signal = opts.signal;
+        return new Promise<string>((_, reject) => opts.signal?.addEventListener("abort", () => reject(new DOMException("This operation was aborted", "AbortError"))));
+      },
+    });
+    assert.deepEqual(out, { ok: false, reason: "timeout" });
+    assert.equal(signal?.aborted, true, "the request is cancelled, not left running");
+    // Through llmText's own fetch: the signal reaches the request.
+    const realFetch = globalThis.fetch;
+    let seen: AbortSignal | null | undefined;
+    globalThis.fetch = ((_url: string, init: RequestInit) => {
+      seen = init.signal;
+      return new Promise<Response>((_, reject) => init.signal?.addEventListener("abort", () => reject(new DOMException("This operation was aborted", "AbortError"))));
+    }) as typeof fetch;
+    try {
+      assert.deepEqual(await tryDraft(ROOM, P, { timeoutMs: 20 }), { ok: false, reason: "timeout" });
+      assert.equal(seen?.aborted, true);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    // A call that answers in time is never aborted.
+    let kept: AbortSignal | undefined;
+    await tryDraft(ROOM, P, { call: async (_c, o) => { kept = o.signal; return "quiet day on the curve"; } });
+    assert.equal(kept?.aborted, false);
+  });
+
+  it("samples at the operator's temperature, or 0.6 — llmText's own — when unset or out of range", async () => {
+    assert.equal(XPOST_TEMPERATURE_DEFAULT, 0.6);
+    const sent: unknown[] = [];
+    const call: NonNullable<NonNullable<Parameters<typeof tryDraft>[2]>["call"]> = async (_c, o) => {
+      sent.push(o.temperature);
+      return "quiet day on the curve";
+    };
+    for (const t of [undefined, 0.8, 0, 2, -0.1, 2.5, Number.NaN, Number.POSITIVE_INFINITY]) await tryDraft(ROOM, P, { call, ...(t !== undefined ? { temperature: t } : {}) });
+    assert.deepEqual(sent, [0.6, 0.8, 0, 2, 0.6, 0.6, 0.6, 0.6]);
+    assert.equal(draftTemperature(undefined), 0.6);
+    assert.equal(draftTemperature(1.1), 1.1);
+  });
+
+  it("asks the qwen3 family for no reasoning, with a 200-token budget; any other model keeps room to think", async () => {
+    for (const model of ["qwen/qwen3.8-27b", "qwen3-32b", "Qwen3.5-9B", "qwen/qwen3-thinking", "qwen-3-14b"]) {
+      assert.equal(asksReasoningOff({ ...ROOM, model }), true, model);
+    }
+    for (const model of ["room-model", "qwen/qwen2.5-32b", "qwen30-x", "llama-3.3-70b-versatile", "openai/gpt-oss-120b", "myqwen3"]) {
+      assert.equal(asksReasoningOff({ ...ROOM, model }), false, model);
+    }
+    assert.equal(asksReasoningOff({ ...ROOM, provider: "anthropic", transport: "anthropic", baseUrl: "", model: "qwen3-32b" }), false, "the anthropic transport has its own thinking switch");
+    const seen: unknown[] = [];
+    const call: NonNullable<NonNullable<Parameters<typeof tryDraft>[2]>["call"]> = async (_c, { signal: _s, ...o }) => {
+      seen.push(o);
+      return "quiet day on the curve";
+    };
+    await tryDraft({ ...ROOM, model: XPOST_GROQ_DEFAULT_MODEL }, P, { call, temperature: 0.8 });
+    await tryDraft({ ...ROOM, model: "llama-3.3-70b-versatile" }, P, { call, temperature: 0.8 });
+    assert.deepEqual(seen, [
+      { system: "sys", prompt: "go", maxTokens: 200, temperature: 0.8, reasoning: "off" },
+      { system: "sys", prompt: "go", maxTokens: 700, temperature: 0.8 },
+    ]);
+  });
+
+  it("sends the qwen hint to the provider, and steps down ONCE on a 400 that names it — never a loop", async () => {
+    const realFetch = globalThis.fetch;
+    const QWEN: LlmCreds = { ...ROOM, model: XPOST_GROQ_DEFAULT_MODEL };
+    const bodies: Record<string, unknown>[] = [];
+    const ok = (content: string) => new Response(JSON.stringify({ choices: [{ finish_reason: "stop", message: { content } }] }), { status: 200 });
+    const refuse = (message: string) => new Response(JSON.stringify({ error: { message, type: "invalid_request_error" } }), { status: 400 });
+    const serve = (answer: (body: Record<string, unknown>) => Response) =>
+      (async (_url: string, init: RequestInit) => {
+        const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+        bodies.push(body);
+        return answer(body);
+      }) as typeof fetch;
+    resetReasoningRefusalsForTest();
+    try {
+      // Taken: one request, the hint and the small budget on it.
+      globalThis.fetch = serve(() => ok("quiet day on the curve"));
+      assert.deepEqual(await tryDraft(QWEN, P, { temperature: 0.8 }), { ok: true, text: "quiet day on the curve" });
+      assert.equal(bodies.length, 1);
+      assert.equal(bodies[0]!.reasoning_effort, "none");
+      assert.equal(bodies[0]!.max_tokens, 200);
+      assert.equal(bodies[0]!.temperature, 0.8);
+      assert.ok(!("include_reasoning" in bodies[0]!), "only the one field");
+
+      // Refused, naming a lower effort: one retry at that effort, with room to think.
+      bodies.length = 0;
+      globalThis.fetch = serve((b) => (b.reasoning_effort === "none" ? refuse("`reasoning_effort` must be one of `low`, `medium`, or `high`") : ok("quiet day on the curve")));
+      assert.deepEqual(await tryDraft(QWEN, P), { ok: true, text: "quiet day on the curve" });
+      assert.deepEqual(bodies.map((b) => [b.reasoning_effort, b.max_tokens]), [["none", 200], ["low", 700]]);
+      // Remembered for that model: the next draft goes straight to it.
+      bodies.length = 0;
+      assert.deepEqual(await tryDraft(QWEN, P), { ok: true, text: "quiet day on the curve" });
+      assert.deepEqual(bodies.map((b) => [b.reasoning_effort, b.max_tokens]), [["low", 700]]);
+
+      // The step-down refused too: no third request in the same draft — a provider status, and the next step is no field.
+      bodies.length = 0;
+      globalThis.fetch = serve((b) => ("reasoning_effort" in b ? refuse("`reasoning_effort` is not supported with this model") : ok("quiet day on the curve")));
+      assert.deepEqual(await tryDraft(QWEN, P), { ok: true, text: "quiet day on the curve" }, "low refused, then no field");
+      assert.deepEqual(bodies.map((b) => ["reasoning_effort" in b, b.max_tokens]), [[true, 700], [false, 700]]);
+
+      resetReasoningRefusalsForTest();
+      bodies.length = 0;
+      globalThis.fetch = serve(() => refuse("`reasoning_effort` must be one of `low`, `medium`, or `high`"));
+      assert.deepEqual(await tryDraft(QWEN, P), { ok: false, reason: "groq-400" });
+      assert.equal(bodies.length, 2, "one step down in a draft, never a loop");
+
+      // A 400 that does not name the field is a real error: no retry at all.
+      resetReasoningRefusalsForTest();
+      bodies.length = 0;
+      globalThis.fetch = serve(() => refuse("messages: invalid role"));
+      assert.deepEqual(await tryDraft(QWEN, P), { ok: false, reason: "groq-400" });
+      assert.equal(bodies.length, 1);
+    } finally {
+      globalThis.fetch = realFetch;
+      resetReasoningRefusalsForTest();
     }
   });
 });
