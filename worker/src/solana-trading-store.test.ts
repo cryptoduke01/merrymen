@@ -1,0 +1,296 @@
+import test, { type TestContext } from "node:test";
+import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
+import { DatabaseSync } from "node:sqlite";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { base58Encode, CHAINS, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM } from "../../packages/core/src/ids";
+import { SOLANA_CLASSIC_TOKEN_PROGRAM, SOLANA_WRAPPED_SOL_MINT, SOLANA_VAULT_LOCAL_TEST_PROGRAM } from "../../packages/core/src/solana-live";
+import { SqlSolanaBindingStore } from "../../web/src/lib/solana-binding-store";
+import { makePgDb, wrapSqlite, type Db } from "./db";
+import { ensureSolanaTradingSchema, SolanaTradingStore, type SolanaPreparedSetup } from "./solana-trading-store";
+import type { SolanaLiveSettlement, SolanaSignedSubmission } from "./solana-executor";
+import { createSolanaPaperService } from "./solana-paper-service";
+
+const key = (n: number) => base58Encode(new Uint8Array(32).fill(n));
+const TENANT = `0x${"11".repeat(20)}` as const, OTHER = `0x${"22".repeat(20)}` as const;
+const OWNER = key(20), VAULT = key(21), SESSION = key(22), PROGRAM = SOLANA_VAULT_LOCAL_TEST_PROGRAM;
+const NOW = 1_000_000, CASH = 100_000_000n;
+const limits = { perTradeUsdg: "10000000", dailyUsdg: "50000000", maxOpsPerDay: 20, maxDrawdownBps: 2000, expiresAtMs: NOW + 3_600_000 };
+const dek = Buffer.alloc(32, 3), sessionSeed = Buffer.alloc(32, 4).toString("base64");
+const strategy = { enabled: true, targetSolBps: 5000, rebalanceBps: 500, tradeUsdgRaw: "1000000", intervalSeconds: 60 };
+function submission(id = "trade-1", seq = "0"): SolanaSignedSubmission {
+  const quote = { source: "jupiter" as const, inputMint: SOLANA_USDG_MINT, outputMint: SOLANA_WRAPPED_SOL_MINT,
+    inAmount: "1000000", outAmount: "2000000", minOutAmount: "1980000", slippageBps: 100, contextSlot: 1000, quotedAtMs: NOW, expiresAtMs: NOW + 30000 };
+  return { version: 1, intent: { kind: "spl-swap", chain: CHAINS.solana, mode: "live", requestId: id, owner: OWNER, vault: VAULT,
+    inputMint: quote.inputMint, outputMint: quote.outputMint, amountRaw: quote.inAmount, slippageBps: 100 }, programId: PROGRAM,
+    session: SESSION, feePayer: key(23), sessionEpoch: "1", vaultSequence: seq, signature: `test-signature-${id}`,
+    signedTransactionBase64: "dGVzdC1zaWduZWQ=", messageBase64: "dGVzdC1tZXNzYWdl", loadedAddresses: { writable: [], readonly: [] },
+    recentBlockhash: key(24), lastValidBlockHeight: "1200", minContextSlot: 1000, minOutAmount: quote.minOutAmount,
+    quotedOutAmount: quote.outAmount, inputTokenAccount: key(25), outputTokenAccount: key(26), inputTokenProgram: TOKEN_2022_PROGRAM,
+    outputTokenProgram: SOLANA_CLASSIC_TOKEN_PROGRAM, inputBalanceBefore: CASH.toString(), outputBalanceBefore: "0", maxFeeLamports: "3000000",
+    feeLamports: "10000", rentLamports: "2039280", preparedAtMs: NOW, safetyObservedAtMs: NOW, quote,
+    risk: { observedAtMs: NOW, slot: 1000, notionalUsdg: "1000000", equityUsdg: CASH.toString(), peakEquityUsdg: CASH.toString(), cashUsdg: CASH.toString(), wsolRaw: "0" } };
+}
+function settlement(s: SolanaSignedSubmission, status: "finalized" | "failed" = "finalized"): SolanaLiveSettlement {
+  return { status, signature: s.signature, slot: 1001, feeLamports: "10000", amountIn: status === "failed" ? "0" : "600000",
+    amountOut: status === "failed" ? "0" : "1980000", finalizedAtMs: NOW + 1 };
+}
+function expired(s: SolanaSignedSubmission): SolanaLiveSettlement {
+  return { status: "expired", signature: s.signature, slot: 1001, feeLamports: null, amountIn: "0", amountOut: "0", finalizedAtMs: NOW + 1,
+    expiryProof: { vaultSequence: s.vaultSequence, sessionEpoch: s.sessionEpoch, blockHeight: "1201", reason: "blockhash-expired" } };
+}
+function setup(kind: "session" | "revoke" | "withdraw" | "resume-buys" = "session"): SolanaPreparedSetup {
+  return { kind, transactionBase64: "dGVzdA==", messageBase64: "dGVzdA==", blockhash: key(30), lastValidBlockHeight: "1200",
+    programId: PROGRAM, vault: VAULT, session: SESSION, limits, preparedAtMs: NOW, expiresAtMs: NOW + 30000 };
+}
+async function saveSignedSetup(store: SolanaTradingStore, prepared = setup(), signature = "owner-registration") {
+  await store.saveSetup(prepared); const signed = { ...prepared, signature, signedTransactionBase64: "c2lnbmVk", status: "pending" as const };
+  await store.saveSetup(signed); return signed;
+}
+async function fixture(t: TestContext, dialect: "sqlite" | "postgres" = "sqlite") {
+  const clock = { value: NOW }; let db: Db;
+  const root = mkdtempSync(path.join(tmpdir(), "solana-trading-test-")); t.after(() => rmSync(root, { recursive: true, force: true }));
+  const filename = path.join(root, "ledger.sqlite"); let raw: DatabaseSync | undefined;
+  if (dialect === "postgres") {
+    const url = new URL(process.env.MERRYMEN_TEST_PG_URL!); const schema = `solana_test_${randomUUID().replaceAll("-", "")}`;
+    const admin = await makePgDb(url.toString()); await admin.exec(`CREATE SCHEMA ${schema}`);
+    url.searchParams.set("options", `-c search_path=${schema}`); db = await makePgDb(url.toString());
+    t.after(async () => { await admin.exec(`DROP SCHEMA ${schema} CASCADE`); });
+  } else { raw = new DatabaseSync(filename); raw.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL"); db = wrapSqlite(raw); t.after(() => raw?.close()); }
+  const binding = new SqlSolanaBindingStore(async () => db, dialect, () => clock.value);
+  await binding.bind(TENANT, "did:privy:test", OWNER); await binding.settings(TENANT, OWNER, 0, "live", limits);
+  await ensureSolanaTradingSchema(db, dialect === "postgres");
+  const store = new SolanaTradingStore(db, { tenant: TENANT, owner: OWNER }, () => clock.value);
+  const registered = { programId: PROGRAM, vault: VAULT, session: SESSION, sessionEpoch: "1", registrationSignature: "owner-registration", registeredAtMs: NOW };
+  await saveSignedSetup(store); await store.finishSetup("owner-registration", "finalized");
+  await store.registerSession(registered, sessionSeed, dek);
+  return { db, store, binding, clock, registered, reopen() {
+    raw!.close(); raw = new DatabaseSync(filename); db = wrapSqlite(raw);
+    return new SolanaTradingStore(db, { tenant: TENANT, owner: OWNER }, () => clock.value);
+  } };
+}
+
+for (const dialect of ["sqlite", "postgres"] as const) {
+  const options = dialect === "postgres" && !process.env.MERRYMEN_TEST_PG_URL ? { skip: "Set MERRYMEN_TEST_PG_URL to an isolated PostgreSQL test database." } : {};
+  test(`${dialect}: concurrent admissions reserve one sequence and remain idempotent across lost response`, options, async t => {
+    const f = await fixture(t, dialect), first = submission(), second = submission("other");
+    const results = await Promise.all([f.store.recordSigned(first), f.store.recordSigned(second)]);
+    assert.equal(results.filter(Boolean).length, 1);
+    const pending = await f.store.pending(); assert.equal(pending.length, 1);
+    assert.equal(await f.store.recordSigned(pending[0]!.submission), false);
+    assert.equal(await f.store.recordSigned(submission("fresh-blockhash", "1")), false);
+    assert.equal((await f.store.liveBook())!.cashRaw, CASH.toString());
+  });
+  test(`${dialect}: finalized actual deltas book once; failure releases sequence only for a new request`, options, async t => {
+    const f = await fixture(t, dialect), failed = submission("failed");
+    await f.store.recordSigned(failed); await f.store.settle(OWNER, failed.intent.requestId, failed.signature, settlement(failed, "failed"));
+    assert.equal(await f.store.recordSigned(failed), false);
+    const actual = submission("actual"); actual.risk.slot = 1001; assert.equal(await f.store.recordSigned(actual), true);
+    const receipt = settlement(actual); await f.store.settle(OWNER, actual.intent.requestId, actual.signature, receipt);
+    await f.store.settle(OWNER, actual.intent.requestId, actual.signature, { ...receipt, finalizedAtMs: NOW + 2 });
+    const book = (await f.store.liveBook())!;
+    assert.equal(book.cashRaw, "99400000"); assert.equal(book.wsolRaw, "1980000");
+    assert.equal(book.costBasisUsdgRaw, "600000"); assert.equal(book.networkFeesLamports, "20000");
+    await assert.rejects(f.store.settle(OWNER, actual.intent.requestId, actual.signature, { ...receipt, amountOut: "1980001" }));
+    const duplicate = submission("duplicate-sequence"); duplicate.risk.slot = 1001;
+    duplicate.risk.cashUsdg = "99400000"; duplicate.risk.wsolRaw = "1980000";
+    assert.equal(await f.store.recordSigned(duplicate), false);
+  });
+  test(`${dialect}: proven expiry releases notional and sequence but records unknown fees once and never reuses the request`, options, async t => {
+    const f = await fixture(t, dialect), original = submission();
+    await f.store.recordSigned(original);
+    const proof = expired(original);
+    assert.equal(proof.status, "expired"); if (proof.status !== "expired") assert.fail();
+    await assert.rejects(f.store.settle(OWNER, original.intent.requestId, original.signature,
+      { ...proof, expiryProof: { ...proof.expiryProof, vaultSequence: "1" } }), /expiry evidence/);
+    await assert.rejects(f.store.settle(OWNER, original.intent.requestId, original.signature,
+      { ...proof, expiryProof: { ...proof.expiryProof, blockHeight: "1200" } }), /expiry evidence/);
+    await f.store.settle(OWNER, original.intent.requestId, original.signature, proof);
+    await f.store.settle(OWNER, original.intent.requestId, original.signature, proof);
+    const book = (await f.store.liveBook())!;
+    assert.equal(book.cashRaw, CASH.toString()); assert.equal(book.wsolRaw, "0");
+    assert.equal(book.networkFeesLamports, "0"); assert.equal(book.unresolvedFeeCount, 1); assert.equal(book.reservedUnknownFeeLamports, "10000");
+    assert.equal((await f.store.pending()).length, 0); assert.equal(await f.store.recordSigned(original), false);
+    // Entire daily token allowance is available again, while the operation remains recorded.
+    await f.binding.settings(TENANT, OWNER, 1, "live", { ...limits, perTradeUsdg: "1000000", dailyUsdg: "1000000" });
+    const next = submission("new-request"); next.risk.slot = 1001;
+    assert.equal(await f.store.recordSigned(next), true); assert.equal((await f.store.history()).length, 2);
+  });
+  test(`${dialect}: current limits and autonomous consent are rechecked under admission lock`, options, async t => {
+    const f = await fixture(t, dialect);
+    let binding = (await f.binding.get(TENANT))!;
+    binding = await f.binding.strategy(TENANT, OWNER, binding.revision, strategy);
+    const automatic = new SolanaTradingStore(f.db, f.store.scope, () => f.clock.value, { autonomousRevision: binding.revision });
+    await f.binding.strategy(TENANT, OWNER, binding.revision, { ...strategy, enabled: false });
+    await assert.rejects(automatic.recordSigned(submission()), /strategy/);
+    binding = (await f.binding.get(TENANT))!;
+    await f.binding.settings(TENANT, OWNER, binding.revision, "live", { ...limits, perTradeUsdg: "999999" });
+    await assert.rejects(f.store.recordSigned(submission()), /per-trade/);
+    binding = (await f.binding.get(TENANT))!;
+    await f.binding.settings(TENANT, OWNER, binding.revision, "paper", limits);
+    await assert.rejects(f.store.recordSigned(submission()), /enabled/);
+    assert.equal((await f.store.pending()).length, 0);
+  });
+  test(`${dialect}: strategy trade cap remains binding below the account limit after a sell quote moves`, options, async t => {
+    const f = await fixture(t, dialect), first = submission();
+    await f.store.recordSigned(first); await f.store.settle(OWNER, first.intent.requestId, first.signature, settlement(first));
+    const binding = await f.binding.strategy(TENANT, OWNER, 1, strategy);
+    const automatic = new SolanaTradingStore(f.db, f.store.scope, () => NOW, { autonomousRevision: binding.revision });
+    const sell = submission("oversized-exit", "1"); sell.intent.inputMint = SOLANA_WRAPPED_SOL_MINT; sell.intent.outputMint = SOLANA_USDG_MINT;
+    sell.quote = { ...sell.quote, inputMint: sell.intent.inputMint, outputMint: sell.intent.outputMint, outAmount: "1005000", minOutAmount: "994950" };
+    sell.risk = { ...sell.risk, slot: 1001, cashUsdg: "99400000", wsolRaw: "1980000", notionalUsdg: "1005000" };
+    await assert.rejects(automatic.recordSigned(sell), /strategy trade limit/);
+    assert.equal((await f.store.pending()).length, 0);
+  });
+  test(`${dialect}: stale marks, fee cap, tenant/owner confusion and session replacement cannot admit`, options, async t => {
+    const f = await fixture(t, dialect);
+    for (const alter of [(s: SolanaSignedSubmission) => { s.safetyObservedAtMs -= 30000; },
+      (s: SolanaSignedSubmission) => { s.risk.observedAtMs += 1; },
+      (s: SolanaSignedSubmission) => { s.rentLamports = "3000000"; },
+      (s: SolanaSignedSubmission) => { s.sessionEpoch = "2"; },
+      (s: SolanaSignedSubmission) => { s.intent.owner = key(90); }]) {
+      const s = submission(); alter(s); await assert.rejects(f.store.recordSigned(s));
+    }
+    const crossTenant = new SolanaTradingStore(f.db, { tenant: OTHER, owner: OWNER }, () => NOW);
+    await assert.rejects(crossTenant.recordSigned(submission())); await assert.rejects(crossTenant.sessionSeed(dek));
+    await assert.rejects(f.store.get(key(90), "trade-1"));
+    assert.equal(await f.store.sessionSeed(dek), sessionSeed);
+    const stored = await f.db.prepare("SELECT sealed_seed FROM solana_runtime_sessions").get() as { sealed_seed: string };
+    assert.ok(!stored.sealed_seed.includes(sessionSeed));
+  });
+}
+
+test("SQLite durable signed bytes and reservation survive close/reopen without a replacement transaction", async t => {
+  const f = await fixture(t); const s = submission(); await f.store.recordSigned(s);
+  const reopened = f.reopen(); const persisted = await reopened.get(OWNER, s.intent.requestId);
+  assert.equal(persisted!.status, "pending"); assert.deepEqual(persisted!.submission, s);
+  assert.equal(await reopened.recordSigned(submission("replacement", "1")), false);
+});
+test("owner revocation stays available during an ambiguous trade; terminal status and session activation cannot be forged", async t => {
+  const f = await fixture(t), s = submission(); await f.store.recordSigned(s);
+  await assert.rejects(f.store.saveSetup(setup("withdraw")), /pending/);
+  const revoke = await saveSignedSetup(f.store, setup("revoke"), "revoke");
+  await f.store.finishSetup(revoke.signature, "finalized"); await f.store.finishSetup(revoke.signature, "finalized");
+  await assert.rejects(f.store.finishSetup(revoke.signature, "failed"), /cannot be changed/);
+  await assert.rejects(f.store.registerSession(f.registered, sessionSeed, dek), /exact finalized/);
+  assert.equal((await f.store.pending()).length, 1);
+});
+test("owner expiry records exact finalized proof atomically and cannot be rebound", async t => {
+  const f = await fixture(t);
+  await saveSignedSetup(f.store, { ...setup("withdraw"), priorVaultExisted: true, priorSequence: "0", priorSessionEpoch: "1" }, "expired-owner");
+  const proof = { reason: "blockhash-expired" as const, blockHeight: "1201", vaultSequence: "0", sessionEpoch: "1", slot: 1002 };
+  await assert.rejects(f.store.finishSetup("expired-owner", "failed", 1002, { ...proof, blockHeight: "1200" }), /expiry evidence/);
+  await assert.rejects(f.store.finishSetup("expired-owner", "failed", 1002, { ...proof, vaultSequence: "1" }), /expiry evidence/);
+  await f.store.finishSetup("expired-owner", "failed", 1002, proof);
+  assert.deepEqual((await f.store.setup())!.expiryProof, proof);
+  await f.store.finishSetup("expired-owner", "failed", 1002, proof);
+  await assert.rejects(f.store.finishSetup("expired-owner", "failed", 1002, { ...proof, blockHeight: "1202" }), /cannot be changed/);
+  assert.equal(await f.store.liveBook(), null);
+});
+test("paper admission also checks the locked strategy cap against a moved sell quote", async t => {
+  const f = await fixture(t); await f.binding.settings(TENANT, OWNER, 1, "paper", limits);
+  await f.store.createPaper(CASH.toString(), limits);
+  const binding = await f.binding.strategy(TENANT, OWNER, 2, strategy);
+  const automatic = new SolanaTradingStore(f.db, f.store.scope, () => NOW, { autonomousRevision: binding.revision });
+  const service = createSolanaPaperService(automatic.paper(), {
+    async readMint(mint) { return { address: mint, program: mint === SOLANA_USDG_MINT ? TOKEN_2022_PROGRAM : SOLANA_CLASSIC_TOKEN_PROGRAM,
+      decimals: mint === SOLANA_USDG_MINT ? 6 : 9, slot: 1000, observedAtMs: NOW, buyBlockedReasons: [] }; },
+    async quote(intent) { return { source: "jupiter", inputMint: intent.inputMint, outputMint: intent.outputMint, inAmount: intent.amountRaw,
+      outAmount: intent.inputMint === SOLANA_USDG_MINT ? "2000000" : "1005000", minOutAmount: intent.inputMint === SOLANA_USDG_MINT ? "1980000" : "994950",
+      slippageBps: intent.slippageBps, contextSlot: 1000, quotedAtMs: NOW, expiresAtMs: NOW + 30000 }; },
+  }, () => NOW, { owner: OWNER });
+  const intent = { kind: "spl-swap", chain: CHAINS.solana, mode: "paper", requestId: "initial-buy", inputMint: SOLANA_USDG_MINT,
+    outputMint: SOLANA_WRAPPED_SOL_MINT, amountRaw: "1000000", slippageBps: 100 };
+  const buy = await service.trade(OWNER, intent);
+  await assert.rejects(service.trade(OWNER, { ...intent, requestId: "oversized-exit", inputMint: SOLANA_WRAPPED_SOL_MINT,
+    outputMint: SOLANA_USDG_MINT, amountRaw: buy.outputAmountRaw }), /strategy trade limit/);
+  const snapshot = (await automatic.paper().get(OWNER))!;
+  assert.equal(snapshot.version, 1); assert.equal(snapshot.trades.length, 1); assert.equal(snapshot.positions[0]!.amountRaw, buy.outputAmountRaw);
+});
+test("shutdown while waiting for the database lock prevents new paper and live admission", async t => {
+  for (const mode of ["paper", "live"] as const) {
+    const f = await fixture(t);
+    let revision = 1;
+    if (mode === "paper") {
+      await f.binding.settings(TENANT, OWNER, revision++, "paper", limits);
+      await f.store.createPaper(CASH.toString(), limits);
+    }
+    const binding = await f.binding.strategy(TENANT, OWNER, revision, strategy);
+    const controller = new AbortController();
+    const automatic = new SolanaTradingStore(f.db, f.store.scope, () => NOW, { autonomousRevision: binding.revision, signal: controller.signal });
+    let unlock!: () => void, entered!: () => void;
+    const acquired = new Promise<void>(resolve => { entered = resolve; });
+    const blocked = new Promise<void>(resolve => { unlock = resolve; });
+    const held = f.db.tx(async () => { entered(); await blocked; }); await acquired;
+    const s = submission();
+    const { owner: _owner, vault: _vault, ...liveIntent } = s.intent;
+    const attempt = mode === "live" ? automatic.recordSigned(s) : automatic.paper().commit({ owner: OWNER,
+      intent: { ...liveIntent, mode: "paper" }, quote: s.quote, safetyObservedAtMs: NOW, tokenDecimals: 9, marks: [],
+      buyExitQuote: { ...s.quote, inputMint: SOLANA_WRAPPED_SOL_MINT, outputMint: SOLANA_USDG_MINT,
+        inAmount: s.quote.minOutAmount, outAmount: "1000000", minOutAmount: "990000" }, expectedVersion: 0, nowMs: NOW });
+    controller.abort(); unlock(); await held;
+    await assert.rejects(Promise.resolve(attempt), /shutdown/);
+    assert.equal((await f.store.pending()).length, 0);
+    if (mode === "paper") assert.equal((await automatic.paper().get(OWNER))!.version, 0);
+    else assert.equal(await f.store.liveBook(), null);
+  }
+});
+test("finalized deposits adjust cashflow/HWM once; owner withdrawals remove actual holdings and basis without inventing P&L", async t => {
+  const f = await fixture(t), s = submission(); await f.store.recordSigned(s);
+  await assert.rejects(f.store.reconcileCashDeposit({ cashUsdg: "110000000", wsolRaw: "0", slot: 1001, observedAtMs: NOW, commitment: "finalized" }), /pending/);
+  await f.store.settle(OWNER, s.intent.requestId, s.signature, settlement(s));
+  const deposit = { cashUsdg: "109400000", wsolRaw: "1980000", slot: 1002, observedAtMs: NOW, commitment: "finalized" as const };
+  await f.store.reconcileCashDeposit(deposit); await f.store.reconcileCashDeposit(deposit);
+  assert.equal((await f.store.liveBook())!.hwmRaw, "110000000");
+  await assert.rejects(f.store.reconcileCashDeposit({ ...deposit, cashUsdg: "109400001", slot: 1000 }), /finalized USDG/);
+  await assert.rejects(f.store.reconcileCashDeposit({ ...deposit, wsolRaw: "1980001" }), /finalized USDG/);
+  await saveSignedSetup(f.store, { ...setup("withdraw"), mint: SOLANA_USDG_MINT, amountRaw: "1000000" }, "withdraw-cash");
+  await assert.rejects(f.store.finishSetup("withdraw-cash", "finalized"), /slot/);
+  await f.store.finishSetup("withdraw-cash", "finalized", 1003); await f.store.finishSetup("withdraw-cash", "finalized", 1003);
+  let book = (await f.store.liveBook())!; assert.equal(book.cashRaw, "108400000"); assert.equal(book.hwmRaw, "109000000");
+  await saveSignedSetup(f.store, { ...setup("withdraw"), mint: SOLANA_WRAPPED_SOL_MINT, amountRaw: "990000" }, "withdraw-sol");
+  await f.store.finishSetup("withdraw-sol", "finalized", 1004);
+  book = (await f.store.liveBook())!; assert.equal(book.wsolRaw, "990000"); assert.equal(book.costBasisUsdgRaw, "300000");
+  assert.equal(book.realizedPnlUsdgRaw, "0"); assert.equal(book.hwmRaw, "109000000");
+  const rows = await f.db.prepare("SELECT * FROM solana_runtime_cashflows").all(); assert.equal(rows.length, 3);
+});
+test("drawdown refusal commits a sticky buy pause, survives reopening and still permits reducing the position", async t => {
+  const f = await fixture(t), first = submission(); await f.store.recordSigned(first);
+  await f.store.settle(OWNER, first.intent.requestId, first.signature, settlement(first));
+  // A previous portfolio valuation established this historical peak.
+  const history = (await f.store.liveBook())!; history.hwmRaw = "200000000";
+  await f.db.prepare("UPDATE solana_runtime_live_books SET book_json=? WHERE tenant=? AND owner=?").run(JSON.stringify(history), TENANT, OWNER);
+  const next = submission("drawdown-buy", "1"); next.risk.slot = 1001; next.risk.cashUsdg = "99400000"; next.risk.wsolRaw = "1980000";
+  next.risk.peakEquityUsdg = "200000000";
+  await assert.rejects(f.store.recordSigned(next), /persisted.*drawdown/);
+  assert.equal((await f.store.liveBook())!.buyPaused, true); assert.equal((await f.store.pending()).length, 0);
+  const reopened = f.reopen(); next.risk.equityUsdg = "200000000";
+  await assert.rejects(reopened.recordSigned(next), /persisted.*drawdown/);
+  const sell = structuredClone(next); sell.intent.requestId = "exit"; sell.signature = "exit-signature";
+  sell.intent.inputMint = SOLANA_WRAPPED_SOL_MINT; sell.intent.outputMint = SOLANA_USDG_MINT; sell.intent.amountRaw = "990000";
+  sell.quote = { ...sell.quote, inputMint: sell.intent.inputMint, outputMint: sell.intent.outputMint, inAmount: "990000", outAmount: "1000000", minOutAmount: "990000" };
+  sell.minOutAmount = sell.quote.minOutAmount; sell.quotedOutAmount = sell.quote.outAmount;
+  assert.equal(await reopened.recordSigned(sell), true);
+  assert.equal((await reopened.liveBook())!.buyPaused, true);
+  await reopened.settle(OWNER, sell.intent.requestId, sell.signature, { ...settlement(sell), amountIn: "990000", amountOut: "1000000" });
+  await saveSignedSetup(reopened, setup("resume-buys"), "resume-failed");
+  assert.equal((await reopened.liveBook())!.buyPaused, true);
+  await reopened.finishSetup("resume-failed", "failed");
+  assert.equal((await reopened.liveBook())!.buyPaused, true);
+  await saveSignedSetup(reopened, setup("resume-buys"), "resume-owner-approved");
+  await reopened.finishSetup("resume-owner-approved", "finalized");
+  assert.equal((await reopened.liveBook())!.buyPaused, false);
+  assert.equal((await reopened.liveBook())!.hwmRaw, "200000000");
+});
+test("failed and expired attempts still consume the daily operation cap and successful notional remains conservatively reserved", async t => {
+  for (const status of ["finalized", "failed", "expired"] as const) {
+    const f = await fixture(t); await f.binding.settings(TENANT, OWNER, 1, "live", { ...limits, dailyUsdg: "10000000", maxOpsPerDay: 1 });
+    const first = submission(); await f.store.recordSigned(first);
+    await f.store.settle(OWNER, first.intent.requestId, first.signature, status === "expired" ? expired(first) : settlement(first, status));
+    const next = submission("too-many", status === "finalized" ? "1" : "0"); next.risk.slot = 1001;
+    if (status === "finalized") { next.risk.cashUsdg = "99400000"; next.risk.wsolRaw = "1980000"; }
+    await assert.rejects(f.store.recordSigned(next), /daily limit/);
+  }
+});

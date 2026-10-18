@@ -1,0 +1,356 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { createKeyPairFromPrivateKeyBytes, getAddressFromPublicKey, getBase58Encoder, getBase58Decoder,
+  getTransactionDecoder, getCompiledTransactionMessageDecoder, verifySignature } from "@solana/kit";
+import { CHAINS, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM } from "../../packages/core/src/ids";
+import { deriveSolanaVaultAddress, deriveSolanaSwapAuthority, deriveSolanaAta, SOLANA_VAULT_LOCAL_TEST_PROGRAM,
+  SOLANA_VAULT_ACCOUNT_SIZE, SOLANA_VAULT_DISCRIMINATOR, SOLANA_SWAP_EVENT_DISCRIMINATOR,
+  SOLANA_CLASSIC_TOKEN_PROGRAM, SOLANA_WRAPPED_SOL_MINT } from "../../packages/core/src/solana-live";
+import { createSolanaExecutor, reconcileSolanaSubmission, type SolanaLiveRecord, type SolanaSignedSubmission, type SolanaExecutorOptions } from "./solana-executor";
+import { settleSolanaReceipt, solanaVaultEvents } from "./solana-settlement";
+import { JUPITER_SWAP_PROGRAM, type JupiterCpiRoute } from "./solana-live-market";
+import type { SolanaLiveRead, SolanaLiveRpc } from "./solana-live-rpc";
+import { createSolanaLiveRpc } from "./solana-live-rpc";
+import { SOLANA_MAINNET_GENESIS_HASH } from "./solana-rpc";
+
+const key = (n: number) => getBase58Decoder().decode(new Uint8Array(32).fill(n));
+const keyBytes = (value: string) => Buffer.from(getBase58Encoder().encode(value));
+const PROGRAM = SOLANA_VAULT_LOCAL_TEST_PROGRAM;
+const LOADER = "BPFLoaderUpgradeab1e11111111111111111111111";
+const SYSTEM = "11111111111111111111111111111111";
+const SLOT = 1000;
+const NOW = 1_000_000;
+const CASH = 1_000_000_000n;
+function token(mint: string, owner: string, amount: bigint): Buffer {
+  const bytes = Buffer.alloc(165); keyBytes(mint).copy(bytes, 0); keyBytes(owner).copy(bytes, 32);
+  bytes.writeBigUInt64LE(amount, 64); bytes[108] = 1; return bytes;
+}
+function rpcAccount(data: Buffer, owner: string, executable = false, lamports = 100_000_000) {
+  return { owner, executable, lamports, data: [data.toString("base64"), "base64"], space: data.length };
+}
+function state(owner: string, session: string, seq = 0n, overrides: { paused?: boolean; expiry?: bigint } = {}): Buffer {
+  const bytes = Buffer.alloc(SOLANA_VAULT_ACCOUNT_SIZE); Buffer.from(SOLANA_VAULT_DISCRIMINATOR).copy(bytes);
+  let offset = 8; bytes[offset++] = 1; bytes[offset++] = 255;
+  for (const value of [owner, session]) { keyBytes(value).copy(bytes, offset); offset += 32; }
+  for (const value of [1n, seq, overrides.expiry ?? 10_000n, 100_000_000n, CASH]) { bytes.writeBigUInt64LE(value, offset); offset += 8; }
+  bytes.writeUInt16LE(96, offset); offset += 2; bytes[offset] = Number(overrides.paused ?? false); return bytes;
+}
+function event(submission: SolanaSignedSubmission, amountIn = 1_000_000n, amountOut = 2_000_000n): string {
+  const bytes = Buffer.alloc(208); Buffer.from(SOLANA_SWAP_EVENT_DISCRIMINATOR).copy(bytes); let offset = 8;
+  for (const value of [submission.intent.vault, submission.intent.owner, submission.session]) { keyBytes(value).copy(bytes, offset); offset += 32; }
+  for (const value of [BigInt(submission.sessionEpoch), BigInt(submission.vaultSequence)]) { bytes.writeBigUInt64LE(value, offset); offset += 8; }
+  for (const value of [submission.intent.inputMint, submission.intent.outputMint]) { keyBytes(value).copy(bytes, offset); offset += 32; }
+  for (const value of [amountIn, amountOut, 1000n]) { bytes.writeBigUInt64LE(value, offset); offset += 8; }
+  return bytes.toString("base64");
+}
+async function fixture() {
+  const sessionKeyPair = await createKeyPairFromPrivateKeyBytes(new Uint8Array(32).fill(11));
+  const feePayerKeyPair = await createKeyPairFromPrivateKeyBytes(new Uint8Array(32).fill(12));
+  const session = await getAddressFromPublicKey(sessionKeyPair.publicKey), feePayer = await getAddressFromPublicKey(feePayerKeyPair.publicKey);
+  const owner = key(20), vault = await deriveSolanaVaultAddress(PROGRAM, owner);
+  const input = await deriveSolanaAta(vault, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM);
+  const output = await deriveSolanaAta(vault, SOLANA_WRAPPED_SOL_MINT, SOLANA_CLASSIC_TOKEN_PROGRAM);
+  const swap = await deriveSolanaSwapAuthority(PROGRAM, vault, 0n);
+  const temp = await deriveSolanaAta(swap, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM);
+  const ownerRefund = await deriveSolanaAta(owner, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM);
+  const programDataAddress = key(31), binary = Buffer.from("audited-vault-test-binary");
+  const program = Buffer.alloc(36); program.writeUInt32LE(2); keyBytes(programDataAddress).copy(program, 4);
+  const programData = Buffer.alloc(45 + binary.length); programData.writeUInt32LE(3); binary.copy(programData, 45);
+  const clock = { value: NOW };
+  const controls = { upgradeable: false, paused: false, failSend: false, simulationError: false, persistError: false,
+    conflict: false, finalized: false, wrongSignature: false, fee: 10_000, riskWrongBalance: false, mintReason: false,
+    riskDelay: 0, substituteCpi: false, badLookup: false, goodLookup: false, stateEpochAfter: false, badRefund: false, tempDonation: false };
+  let record: SolanaLiveRecord | null = null;
+  const calls: string[] = [];
+  const quote = { source: "jupiter" as const, inputMint: SOLANA_USDG_MINT, outputMint: SOLANA_WRAPPED_SOL_MINT,
+    inAmount: "1000000", outAmount: "2000000", minOutAmount: "1980000", slippageBps: 100,
+    contextSlot: SLOT, quotedAtMs: NOW, expiresAtMs: NOW + 30_000 };
+  const data = Buffer.alloc(36); createHash("sha256").update("global:shared_accounts_route").digest().subarray(0, 8).copy(data);
+  data.writeUInt32LE(1, 9); data[14] = 100; data[16] = 1;
+  data.writeBigUInt64LE(1_000_000n, 17); data.writeBigUInt64LE(2_000_000n, 25); data.writeUInt16LE(100, 33);
+  const route: JupiterCpiRoute = { quote, dataBase64: data.toString("base64"), lookupTableAddresses: [], accounts:
+    [SOLANA_CLASSIC_TOKEN_PROGRAM, key(40), swap, temp, key(41), key(42), output, SOLANA_USDG_MINT, SOLANA_WRAPPED_SOL_MINT, JUPITER_SWAP_PROGRAM, TOKEN_2022_PROGRAM]
+      .map((address, index) => ({ address, isSigner: index === 2, isWritable: [3,4,5,6].includes(index) })) };
+  const response = (value: unknown) => ({ context: { slot: SLOT }, value });
+  const receipt = (submission: SolanaSignedSubmission, failed = false) => {
+    const tx = getTransactionDecoder().decode(Buffer.from(submission.signedTransactionBase64, "base64"));
+    const message = getCompiledTransactionMessageDecoder().decode(tx.messageBytes);
+    const keys = [...message.staticAccounts, ...submission.loadedAddresses.writable, ...submission.loadedAddresses.readonly];
+    const tempIndex = keys.indexOf(temp);
+    const balances = Array.from({ length: keys.length }, (_, index) => index === 0 ? 100_000_000 : index === tempIndex ? (controls.tempDonation ? 2_039_280 : 0) : 1_000_000);
+    const tokenRow = (account: string, mint: string, programId: string, amount: bigint) => ({ accountIndex: keys.indexOf(account),
+      mint, owner: vault, programId, uiTokenAmount: { amount: amount.toString(), decimals: mint === SOLANA_USDG_MINT ? 6 : 9 } });
+    return { version: 0, slot: SLOT + 1, transaction: [submission.signedTransactionBase64, "base64"], meta: {
+      err: failed ? { InstructionError: [2, { Custom: 1 }] } : null, fee: 10_000,
+      preBalances: balances, postBalances: balances.map((n, i) => i === 0 ? n - 10_000 + (!failed && controls.tempDonation ? 2_039_280 : 0) : i === tempIndex && !failed ? 0 : n), loadedAddresses: structuredClone(submission.loadedAddresses),
+      preTokenBalances: [tokenRow(input, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM, CASH), tokenRow(output, SOLANA_WRAPPED_SOL_MINT, SOLANA_CLASSIC_TOKEN_PROGRAM, 0n)],
+      postTokenBalances: [tokenRow(input, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM, failed ? CASH : CASH - 1_000_000n),
+        tokenRow(output, SOLANA_WRAPPED_SOL_MINT, SOLANA_CLASSIC_TOKEN_PROGRAM, failed ? 0n : 2_000_000n)],
+      logMessages: [`Program ${PROGRAM} invoke [1]`, ...(failed ? [] : [`Program data: ${event(submission)}`]),
+        `Program ${PROGRAM} ${failed ? "failed: custom program error: 0x1" : "success"}`],
+    } };
+  };
+  const read: SolanaLiveRead = async (method, params = []) => {
+    calls.push(method);
+    switch (method) {
+      case "getSlot": return SLOT;
+      case "getAccountInfo": {
+        const [key, config] = params as [string, { dataSlice?: { offset: number; length: number } }];
+        if (key === PROGRAM) return response(rpcAccount(program, LOADER, true));
+        if (key === programDataAddress) {
+          const bytes = Buffer.from(programData); bytes[12] = Number(controls.upgradeable);
+          const slice = config.dataSlice!;
+          return response({ ...rpcAccount(bytes.subarray(slice.offset, slice.offset + slice.length), LOADER), space: bytes.length });
+        }
+        if (key === "AddressLookupTab1e1111111111111111111111111") return response(rpcAccount(Buffer.alloc(56), SYSTEM));
+        if (key === getBase58Decoder().decode(new Uint8Array(32).fill(61))) {
+          const table = Buffer.alloc(56 + 32 * route.accounts.length); table.writeUInt32LE(1);
+          table.writeBigUInt64LE((1n << 64n) - 1n, 4); table.writeBigUInt64LE(BigInt(SLOT - 1), 12);
+          route.accounts.forEach((a, i) => keyBytes(a.address).copy(table, 56 + i * 32));
+          return response(rpcAccount(table, "AddressLookupTab1e1111111111111111111111111"));
+        }
+        throw new Error("Unexpected fixture account");
+      }
+      case "getMultipleAccounts": {
+        const keys = params[0] as string[];
+        if (keys[0] === vault) { assert.equal(keys[4], ownerRefund); return response([rpcAccount(state(owner, session, 0n, { paused: controls.paused }), PROGRAM),
+          rpcAccount(token(SOLANA_USDG_MINT, vault, CASH), TOKEN_2022_PROGRAM), rpcAccount(token(SOLANA_WRAPPED_SOL_MINT, vault, 0n), SOLANA_CLASSIC_TOKEN_PROGRAM),
+          rpcAccount(Buffer.alloc(0), SYSTEM), rpcAccount(token(SOLANA_USDG_MINT, controls.badRefund ? key(90) : owner, 0n), TOKEN_2022_PROGRAM)]); }
+        return response(keys.map(value => value === output ? rpcAccount(token(SOLANA_WRAPPED_SOL_MINT, vault, 0n), SOLANA_CLASSIC_TOKEN_PROGRAM)
+          : value === temp && controls.tempDonation ? rpcAccount(Buffer.alloc(0), SYSTEM, false, 2_039_280) : null));
+      }
+      case "getMinimumBalanceForRentExemption": return 2_039_280;
+      case "getLatestBlockhash": return response({ blockhash: key(50), lastValidBlockHeight: 1200 });
+      case "getFeeForMessage": return response(controls.fee);
+      case "simulateTransaction": {
+        const tx = getTransactionDecoder().decode(Buffer.from(params[0] as string, "base64"));
+        assert.equal(Object.keys(tx.signatures).length, 2);
+        assert.ok(Object.values(tx.signatures).every(signature => signature === null));
+        const vaultAfter = state(owner, session, 1n); if (controls.stateEpochAfter) vaultAfter.writeBigUInt64LE(2n, 74);
+        return response({ err: controls.simulationError ? { InstructionError: [2, "Custom"] } : null, unitsConsumed: 200_000,
+          accounts: [rpcAccount(vaultAfter, PROGRAM), rpcAccount(token(SOLANA_USDG_MINT, vault, CASH - 1_000_000n), TOKEN_2022_PROGRAM),
+            rpcAccount(token(SOLANA_WRAPPED_SOL_MINT, vault, 2_000_000n), SOLANA_CLASSIC_TOKEN_PROGRAM), rpcAccount(Buffer.alloc(0), SYSTEM, false, 99_990_000 + (controls.tempDonation ? 2_039_280 : 0))] });
+      }
+      case "getSignatureStatuses": return response([controls.finalized ? { confirmationStatus: "finalized", slot: SLOT + 1, err: null } : null]);
+      case "getTransaction": assert.ok(record); return receipt(record.submission);
+      default: throw new Error(`Unexpected fixture method ${method}`);
+    }
+  };
+  const rpc: SolanaLiveRpc = { read: operation => operation(read), async send(wire) {
+    calls.push("send"); assert.ok(record, "transaction must be durable before broadcast");
+    assert.equal(record.submission.signedTransactionBase64, wire);
+    if (controls.failSend) throw new Error("lost HTTP response");
+    return controls.wrongSignature ? "different" : record.submission.signature;
+  } };
+  const options: SolanaExecutorOptions = { programId: PROGRAM, programBinarySha256: createHash("sha256").update(binary).digest("hex"),
+    sessionKeyPair, feePayerKeyPair, rpc, now: () => clock.value, maxFeeLamports: "3000000",
+    market: { async readMint(mint) { return { address: mint, program: mint === SOLANA_USDG_MINT ? TOKEN_2022_PROGRAM : SOLANA_CLASSIC_TOKEN_PROGRAM,
+      decimals: mint === SOLANA_USDG_MINT ? 6 : 9, slot: SLOT, observedAtMs: NOW, buyBlockedReasons: controls.mintReason ? ["transfer-fee"] : [] }; },
+      async build() {
+        if (controls.substituteCpi) route.accounts = route.accounts.map((a, i) => i === 6 ? { ...a, address: key(60) } : a);
+        if (controls.badLookup) route.lookupTableAddresses = ["AddressLookupTab1e1111111111111111111111111"];
+        if (controls.goodLookup) route.lookupTableAddresses = [key(61)];
+        return route;
+      } },
+    journal: { async get() { return record; }, async recordSigned(submission) {
+      calls.push("persist"); if (controls.persistError) throw new Error("disk fsync failed"); if (controls.conflict) return false;
+      record = { submission, status: "pending" }; return true;
+    }, async settle(_owner, _id, signature, settlement) {
+      assert.equal(signature, record!.submission.signature); record = { submission: record!.submission, status: settlement.status, settlement };
+    } },
+    async assessRisk() {
+      clock.value += controls.riskDelay;
+      return { observedAtMs: clock.value, slot: SLOT, notionalUsdg: "1000000", equityUsdg: CASH.toString(), peakEquityUsdg: CASH.toString(),
+        cashUsdg: controls.riskWrongBalance ? "1" : CASH.toString(), wsolRaw: "0" };
+    } };
+  const intent = { kind: "spl-swap", chain: CHAINS.solana, mode: "live", requestId: "actual-test-1", owner, vault,
+    inputMint: SOLANA_USDG_MINT, outputMint: SOLANA_WRAPPED_SOL_MINT, amountRaw: "1000000", slippageBps: 100 };
+  return { options, intent, controls, calls, clock, receipt, session, feePayer, ownerRefund, route, read, getRecord: () => record };
+}
+
+test("builds real two-signer v0 bytes, verifies them, persists before one send and settles actual finalized deltas", async () => {
+  const f = await fixture(); const executor = createSolanaExecutor(f.options);
+  const pending = await executor.execute(f.intent);
+  assert.equal(pending.status, "pending");
+  assert.equal(f.calls.filter(call => call === "send").length, 1);
+  assert.ok(f.calls.indexOf("persist") < f.calls.indexOf("send"));
+  const tx = getTransactionDecoder().decode(Buffer.from(pending.submission.signedTransactionBase64, "base64"));
+  assert.ok(await verifySignature(f.options.sessionKeyPair.publicKey, tx.signatures[f.session]!, tx.messageBytes));
+  assert.ok(await verifySignature(f.options.feePayerKeyPair.publicKey, tx.signatures[f.feePayer]!, tx.messageBytes));
+  const compiled = getCompiledTransactionMessageDecoder().decode(tx.messageBytes);
+  assert.equal(compiled.version, 0);
+  assert.equal(compiled.staticAccounts[compiled.instructions[2]!.accountIndices![14]!], f.ownerRefund);
+  const count = f.calls.length; assert.deepEqual(await executor.execute(f.intent), pending); assert.equal(f.calls.length, count);
+  assert.equal((await executor.reconcile(f.intent.owner, f.intent.requestId))?.status, "pending");
+  f.controls.finalized = true;
+  const finalized = await executor.reconcile(f.intent.owner, f.intent.requestId);
+  assert.equal(finalized?.status, "finalized");
+  assert.equal(finalized?.settlement?.amountIn, "1000000"); assert.equal(finalized?.settlement?.amountOut, "2000000");
+  assert.equal(finalized?.settlement?.feeLamports, "10000");
+});
+
+test("lost send response and mismatched returned signature stay durable pending, never re-sign or resend", async () => {
+  for (const mode of ["failSend", "wrongSignature"] as const) {
+    const f = await fixture(); f.controls[mode] = true; const executor = createSolanaExecutor(f.options);
+    const first = await executor.execute(f.intent); assert.equal(first.status, "pending");
+    assert.deepEqual(await executor.execute(f.intent), first);
+    f.clock.value += 120_000;
+    assert.equal((await executor.reconcile(f.intent.owner, f.intent.requestId))?.status, "pending");
+    assert.equal(f.calls.filter(call => call === "send").length, 1);
+    assert.equal(f.calls.filter(call => call === "getLatestBlockhash").length, 1);
+  }
+});
+
+test("crash recovery releases a sequence only when finalized vault state proves execution impossible; fees stay unknown", async () => {
+  for (const mode of ["expired", "revoked", "advanced", "not-expired", "wrong-owner", "wrong-program", "old-slot", "receipt-present"] as const) {
+    const f = await fixture(); f.controls.failSend = true;
+    const executor = createSolanaExecutor(f.options); const original = await executor.execute(f.intent);
+    const proofReads: string[] = [];
+    const read: SolanaLiveRead = async (method, params) => {
+      proofReads.push(method);
+      if (method === "getSignatureStatuses") return { context: { slot: SLOT }, value: [null] };
+      if (method === "getTransaction") return mode === "receipt-present" ? f.receipt(original.submission) : null;
+      if (method === "getBlockHeight") { assert.deepEqual(params, [{ commitment: "finalized", minContextSlot: SLOT }]); return ["revoked", "not-expired"].includes(mode) ? 1199 : 1201; }
+      if (method === "getSlot") { assert.equal((params![0] as { commitment: string }).commitment, "finalized"); return SLOT + 2; }
+      if (method === "getAccountInfo") {
+        assert.deepEqual(params, [f.intent.vault, { encoding: "base64", commitment: "finalized", minContextSlot: SLOT + 2 }]);
+        const bytes = state(mode === "wrong-owner" ? key(90) : f.intent.owner, f.session, mode === "advanced" ? 1n : 0n);
+        if (mode === "revoked") bytes.writeBigUInt64LE(2n, 74);
+        return { context: { slot: mode === "old-slot" ? SLOT : SLOT + 2 }, value: rpcAccount(bytes, mode === "wrong-program" ? key(91) : PROGRAM) };
+      }
+      return assert.fail(`Unexpected proof read ${method}`);
+    };
+    const rpc: SolanaLiveRpc = { read: callback => callback(read), send: async () => assert.fail("reconciliation cannot submit") };
+    if (["wrong-owner", "wrong-program", "old-slot"].includes(mode)) {
+      await assert.rejects(reconcileSolanaSubmission(rpc, f.options.journal, f.intent.owner, f.intent.requestId, () => NOW + 1));
+      assert.equal(f.getRecord()!.status, "pending"); continue;
+    }
+    const result = await reconcileSolanaSubmission(rpc, f.options.journal, f.intent.owner, f.intent.requestId, () => NOW + 1);
+    if (["expired", "revoked"].includes(mode)) {
+      assert.equal(result!.status, "expired"); assert.equal(result!.settlement!.feeLamports, null);
+      assert.equal(result!.settlement!.amountIn, "0"); assert.equal(result!.settlement!.amountOut, "0");
+      assert.deepEqual(await executor.execute(f.intent), result);
+      assert.ok(proofReads.indexOf("getBlockHeight") < proofReads.indexOf("getSlot"));
+      assert.ok(proofReads.indexOf("getSlot") < proofReads.indexOf("getAccountInfo"));
+    } else assert.equal(result!.status, "pending", mode);
+    assert.equal(f.calls.filter(call => call === "send").length, 1);
+  }
+});
+
+test("RPC-verified lookup tables compile real v0 account indices and are bound to finalized token evidence", async () => {
+  const f = await fixture(); f.controls.goodLookup = true;
+  const executor = createSolanaExecutor(f.options); const pending = await executor.execute(f.intent);
+  assert.ok(pending.submission.loadedAddresses.writable.length > 0);
+  assert.ok(pending.submission.loadedAddresses.readonly.length > 0);
+  f.controls.finalized = true;
+  assert.equal((await executor.reconcile(f.intent.owner, f.intent.requestId))?.status, "finalized");
+  const raw = f.receipt(pending.submission);
+  raw.meta.loadedAddresses.writable = raw.meta.loadedAddresses.writable.map((value, index) => index === 0 ? key(90) : value);
+  assert.throws(() => settleSolanaReceipt(pending.submission, raw, { confirmationStatus: "finalized", slot: SLOT + 1, err: null }, NOW + 1));
+});
+test("a System-owned prefunded temporary ATA can initialize and its refund is distinct from actual transaction fees", async () => {
+  const f = await fixture(); f.controls.tempDonation = true;
+  const executor = createSolanaExecutor(f.options); await executor.execute(f.intent); f.controls.finalized = true;
+  const settled = await executor.reconcile(f.intent.owner, f.intent.requestId);
+  assert.equal(settled!.status, "finalized"); assert.equal(settled!.settlement!.feeLamports, "10000");
+  assert.equal(settled!.settlement!.amountIn, "1000000");
+});
+
+test("refuses unsafe authority, mutation, simulation, fees, stale safety and risk evidence before persistence or send", async () => {
+  for (const mode of ["upgradeable", "paused", "simulationError", "riskWrongBalance", "mintReason", "substituteCpi", "badLookup", "stateEpochAfter", "badRefund"] as const) {
+    const f = await fixture(); f.controls[mode] = true;
+    await assert.rejects(createSolanaExecutor(f.options).execute(f.intent));
+    assert.ok(!f.calls.includes("persist"), mode); assert.ok(!f.calls.includes("send"), mode);
+  }
+  for (const change of [(f: Awaited<ReturnType<typeof fixture>>) => { f.controls.fee = 2_000_000; },
+    (f: Awaited<ReturnType<typeof fixture>>) => { f.controls.riskDelay = 30_000; },
+    (f: Awaited<ReturnType<typeof fixture>>) => { f.options.programBinarySha256 = "0".repeat(64); },
+    (f: Awaited<ReturnType<typeof fixture>>) => { f.options.feePayerKeyPair = f.options.sessionKeyPair; }]) {
+    const f = await fixture(); change(f); await assert.rejects(createSolanaExecutor(f.options).execute(f.intent));
+    assert.ok(!f.calls.includes("persist")); assert.ok(!f.calls.includes("send"));
+  }
+});
+
+test("durability failure or atomic sequence conflict prevents submission", async () => {
+  for (const mode of ["persistError", "conflict"] as const) {
+    const f = await fixture(); f.controls[mode] = true;
+    await assert.rejects(createSolanaExecutor(f.options).execute(f.intent));
+    assert.ok(!f.calls.includes("send"));
+  }
+});
+test("shutdown before work or during risk prevents admission; shutdown during commit preserves signed bytes without sending", async () => {
+  for (const phase of ["before", "risk", "commit", "genesis"] as const) {
+    const f = await fixture(), controller = new AbortController(); f.options.signal = controller.signal;
+    const network: string[] = [];
+    if (phase === "before") controller.abort("private abort reason");
+    if (phase === "risk") {
+      const assess = f.options.assessRisk;
+      f.options.assessRisk = async input => { const result = await assess(input); controller.abort(); return result; };
+    }
+    if (phase === "commit") {
+      const commit = f.options.journal.recordSigned;
+      f.options.journal.recordSigned = async submission => { const result = await commit(submission); controller.abort(); return result; };
+    }
+    if (phase === "genesis") {
+      const transport = createSolanaLiveRpc({ env: { MERRYMEN_SOLANA_RPC_MAINNET: "https://rpc.example/" }, fetch: async (_url, init) => {
+        const body = JSON.parse(init!.body as string); network.push(body.method);
+        assert.equal(body.method, "getGenesisHash"); controller.abort();
+        assert.equal(init!.signal!.aborted, true);
+        return Response.json({ jsonrpc: "2.0", id: body.id, result: SOLANA_MAINNET_GENESIS_HASH });
+      } });
+      f.options.rpc = { ...f.options.rpc, send: transport.send };
+    }
+    const executor = createSolanaExecutor(f.options);
+    if (phase === "before" || phase === "risk") {
+      await assert.rejects(executor.execute(f.intent), /cancelled/);
+      assert.equal(f.getRecord(), null); assert.ok(!f.calls.includes("persist"));
+      if (phase === "before") assert.equal(f.calls.length, 0);
+    } else {
+      const result = await executor.execute(f.intent);
+      assert.equal(result.status, "pending"); assert.equal(f.getRecord()!.submission.signature, result.submission.signature);
+      assert.ok(result.submission.signedTransactionBase64.length > 0);
+    }
+    assert.ok(!f.calls.includes("send")); assert.ok(!network.includes("sendTransaction"));
+  }
+});
+
+test("same request cannot be rebound to another amount and paper is never accepted by live executor", async () => {
+  const f = await fixture(); const executor = createSolanaExecutor(f.options);
+  await assert.rejects(executor.execute({ ...f.intent, mode: "paper" }));
+  await executor.execute(f.intent);
+  await assert.rejects(executor.execute({ ...f.intent, amountRaw: "2" }));
+  assert.equal(f.calls.filter(call => call === "send").length, 1);
+});
+
+test("settlement refuses forged events, wrong bytes, token deltas and nonfinalized evidence", async () => {
+  const f = await fixture(); const pending = await createSolanaExecutor(f.options).execute(f.intent);
+  const status = { confirmationStatus: "finalized", slot: SLOT + 1, err: null };
+  for (const change of [
+    (r: ReturnType<typeof f.receipt>) => { r.transaction[0] = "forged"; },
+    (r: ReturnType<typeof f.receipt>) => { r.meta.postTokenBalances[1]!.uiTokenAmount.amount = "1"; },
+    (r: ReturnType<typeof f.receipt>) => { r.meta.logMessages[1] = `Program data: ${event(pending.submission, 1n, 2n)}`; },
+    (r: ReturnType<typeof f.receipt>) => { r.meta.logMessages = [`Program ${JUPITER_SWAP_PROGRAM} invoke [1]`, `Program data: ${event(pending.submission)}`, `Program ${JUPITER_SWAP_PROGRAM} success`]; },
+    (r: ReturnType<typeof f.receipt>) => { r.meta.postBalances[0]!--; },
+    (r: ReturnType<typeof f.receipt>) => { r.meta.preTokenBalances[0]!.owner = key(90); },
+  ]) {
+    const raw = f.receipt(pending.submission); change(raw);
+    assert.throws(() => settleSolanaReceipt(pending.submission, raw, status, NOW + 1));
+  }
+  assert.throws(() => settleSolanaReceipt(pending.submission, f.receipt(pending.submission), { ...status, confirmationStatus: "confirmed" }, NOW + 1));
+  const failed = f.receipt(pending.submission, true);
+  assert.equal(settleSolanaReceipt(pending.submission, failed, { ...status, err: failed.meta.err }, NOW + 1).status, "failed");
+  for (const err of [undefined, false, 0, {}, [], "invented-error", { InstructionError: [256, { Custom: 1 }] },
+    { InstructionError: [2, { Custom: -1 }] }, { InstructionError: [2, {}] }, { DuplicateInstruction: "2" },
+    { InsufficientFundsForRent: { account_index: 0, extra: true } }]) {
+    const malformed = { ...failed, meta: { ...failed.meta, err } };
+    assert.throws(() => settleSolanaReceipt(pending.submission, malformed, { ...status, err }, NOW + 1));
+  }
+  for (const err of ["InsufficientFundsForFee", { InstructionError: [2, "InvalidArgument"] },
+    { DuplicateInstruction: 2 }, { InsufficientFundsForRent: { account_index: 0 } }]) {
+    const recognized = { ...failed, meta: { ...failed.meta, err } };
+    assert.equal(settleSolanaReceipt(pending.submission, recognized, { ...status, err }, NOW + 1).status, "failed");
+  }
+  assert.throws(() => settleSolanaReceipt(pending.submission, failed, { confirmationStatus: "finalized", slot: SLOT + 1 }, NOW + 1));
+  assert.throws(() => solanaVaultEvents([`Program ${PROGRAM} invoke [1]`, "Log truncated"], PROGRAM));
+});

@@ -1,0 +1,462 @@
+/** Tenant-bound Solana paper books and live broadcast journal, on SQLite or Postgres. */
+import { CHAINS, SOLANA_USDG_MINT, canonicalId } from "../../packages/core/src/ids";
+import { parseSolanaRawAmount, solanaPaperAgentId, validateSolanaPaperLimits, validateSolanaQuote,
+  type SolanaPaperLimits } from "../../packages/core/src/solana";
+import { SOLANA_WRAPPED_SOL_MINT } from "../../packages/core/src/solana-live";
+import type { Db } from "./db";
+import { openSecret, sealSecret } from "./store-crypto";
+import { applySolanaPaperCommit, solanaPaperIntentFingerprint, type SolanaPaperBook,
+  type SolanaPaperCommit, type SolanaPaperReceipt, type SolanaPaperSnapshot } from "./solana-paper-store";
+import type { SolanaPaperLedger } from "./solana-paper-service";
+import type { SolanaLiveJournal, SolanaLiveRecord, SolanaLiveSettlement, SolanaSignedSubmission } from "./solana-executor";
+
+export interface SolanaAccountScope { tenant: string; owner: string }
+export class SolanaTradingStoreError extends Error {
+  constructor(message: string) { super(message); this.name = "SolanaTradingStoreError"; }
+}
+export interface SolanaTradingBinding extends SolanaAccountScope {
+  requestedMode: "paper" | "live"; limits: SolanaPaperLimits | null; revision: number;
+}
+export interface SolanaRegisteredSession {
+  programId: string; vault: string; session: string; sessionEpoch: string;
+  registrationSignature: string; registeredAtMs: number;
+}
+export interface SolanaLiveBook {
+  hwmRaw: string; cashRaw: string; wsolRaw: string;
+  costBasisUsdgRaw: string; realizedPnlUsdgRaw: string; networkFeesLamports: string;
+  unresolvedFeeCount?: number; reservedUnknownFeeLamports?: string;
+  slot: number; updatedAtMs: number;
+  buyPaused?: boolean;
+}
+export interface SolanaOwnerExpiryProof {
+  reason: "blockhash-expired"; blockHeight: string; vaultSequence: string | null; sessionEpoch: string | null; slot: number;
+}
+export interface SolanaPreparedSetup {
+  transactionBase64: string; messageBase64: string; blockhash: string; lastValidBlockHeight: string;
+  programId: string; vault: string; session: string; limits: SolanaPaperLimits;
+  preparedAtMs: number; expiresAtMs: number; signature?: string; signedTransactionBase64?: string;
+  kind?: "session" | "revoke" | "withdraw" | "resume-buys";
+  mint?: string; amountRaw?: string;
+  status?: "pending" | "finalized" | "failed";
+  expiryProof?: SolanaOwnerExpiryProof;
+  priorSequence?: string; priorSessionEpoch?: string; priorVaultExisted?: boolean;
+}
+const DAY = 86_400_000;
+const SCHEMA = `
+CREATE TABLE IF NOT EXISTS solana_runtime_worker_heartbeat (
+ worker TEXT PRIMARY KEY, last_seen_at_ms BIGINT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS solana_runtime_paper_books (
+ tenant TEXT NOT NULL, owner TEXT NOT NULL, book_json TEXT NOT NULL, PRIMARY KEY(tenant,owner)
+);
+CREATE TABLE IF NOT EXISTS solana_runtime_paper_trades (
+ tenant TEXT NOT NULL, owner TEXT NOT NULL, request_id TEXT NOT NULL, fingerprint TEXT NOT NULL,
+ created_at_ms BIGINT NOT NULL, notional_raw TEXT NOT NULL, receipt_json TEXT NOT NULL,
+ PRIMARY KEY(tenant,owner,request_id)
+);
+CREATE INDEX IF NOT EXISTS solana_runtime_paper_window ON solana_runtime_paper_trades(tenant,owner,created_at_ms);
+CREATE TABLE IF NOT EXISTS solana_runtime_sessions (
+ tenant TEXT NOT NULL, owner TEXT NOT NULL, record_json TEXT NOT NULL, sealed_seed TEXT NOT NULL,
+ PRIMARY KEY(tenant,owner)
+);
+CREATE TABLE IF NOT EXISTS solana_runtime_setups (
+ tenant TEXT NOT NULL, owner TEXT NOT NULL, setup_json TEXT NOT NULL, PRIMARY KEY(tenant,owner)
+);
+CREATE TABLE IF NOT EXISTS solana_runtime_live_books (
+ tenant TEXT NOT NULL, owner TEXT NOT NULL, book_json TEXT NOT NULL, PRIMARY KEY(tenant,owner)
+);
+CREATE TABLE IF NOT EXISTS solana_runtime_cashflows (
+ evidence_id TEXT PRIMARY KEY, tenant TEXT NOT NULL, owner TEXT NOT NULL, kind TEXT NOT NULL,
+ mint TEXT NOT NULL, amount_raw TEXT NOT NULL, created_at_ms BIGINT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS solana_runtime_submissions (
+ tenant TEXT NOT NULL, owner TEXT NOT NULL, request_id TEXT NOT NULL, vault TEXT NOT NULL,
+ sequence TEXT NOT NULL, signature TEXT NOT NULL UNIQUE, status TEXT NOT NULL CHECK(status IN ('pending','finalized','failed','expired')),
+ created_at_ms BIGINT NOT NULL, notional_raw TEXT NOT NULL, submission_json TEXT NOT NULL, settlement_json TEXT,
+ PRIMARY KEY(tenant,owner,request_id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS solana_runtime_live_sequence ON solana_runtime_submissions(vault,sequence) WHERE status IN ('pending','finalized');
+CREATE UNIQUE INDEX IF NOT EXISTS solana_runtime_live_pending ON solana_runtime_submissions(vault) WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS solana_runtime_live_window ON solana_runtime_submissions(tenant,owner,created_at_ms);
+`;
+function refuse(message: string): never { throw new SolanaTradingStoreError(message); }
+function clock(now: () => number): number { const n = now(); if (!Number.isSafeInteger(n) || n < 0) refuse("Invalid Solana runtime clock."); return n; }
+function key(value: string): void { if (canonicalId(CHAINS.solana, "account", value) !== value) refuse("Invalid Solana account key."); }
+function raw(value: string, zero = true): bigint { return parseSolanaRawAmount(value, zero); }
+function rowJson<T>(row: unknown, column: string): T | null {
+  if (!row) return null;
+  const data = (row as Record<string, unknown>)[column];
+  if (typeof data !== "string") refuse("Invalid stored Solana data.");
+  return JSON.parse(data) as T;
+}
+function record(row: unknown): SolanaLiveRecord | null {
+  if (!row) return null;
+  const r = row as { submission_json: string; status: SolanaLiveRecord["status"]; settlement_json: string | null };
+  return { submission: JSON.parse(r.submission_json), status: r.status, ...(r.settlement_json ? { settlement: JSON.parse(r.settlement_json) } : {}) };
+}
+const ready = new WeakMap<Db, Promise<void>>();
+export async function ensureSolanaTradingSchema(db: Db, postgres = false): Promise<void> {
+  let promise = ready.get(db);
+  if (!promise) {
+    promise = (postgres ? db.tx(async tx => { await tx.prepare("SELECT pg_advisory_xact_lock(?)").get(1_297_691_984); await tx.exec(SCHEMA); }) : db.exec(SCHEMA))
+      .catch(error => { ready.delete(db); throw error; });
+    ready.set(db, promise);
+  }
+  return promise;
+}
+
+/** The scope comes from an authenticated wallet binding, never request owner fields. */
+export class SolanaTradingStore implements SolanaLiveJournal {
+  constructor(readonly db: Db, readonly scope: SolanaAccountScope, private readonly now: () => number = Date.now,
+    private readonly admission?: { autonomousRevision: number; signal?: AbortSignal }) {
+    if (!/^0x[0-9a-f]{40}$/.test(scope.tenant)) refuse("Invalid authenticated Solana tenant.");
+    solanaPaperAgentId(scope.owner);
+  }
+  private checkAdmissionSignal(): void {
+    if (this.admission?.signal?.aborted) refuse("Solana trading admission stopped during shutdown.");
+  }
+  private async autonomousIn(db: Db, binding: SolanaTradingBinding): Promise<bigint | null> {
+    this.checkAdmissionSignal();
+    if (!this.admission) return null;
+    if (!Number.isSafeInteger(this.admission.autonomousRevision) || this.admission.autonomousRevision < 0 ||
+        binding.revision !== this.admission.autonomousRevision) refuse("The autonomous Solana strategy changed before admission.");
+    const row = await db.prepare("SELECT strategy_json FROM solana_wallet_bindings WHERE tenant=? AND owner=? AND chain=?")
+      .get(this.scope.tenant, this.scope.owner, CHAINS.solana) as { strategy_json: string | null } | undefined;
+    const strategy = row?.strategy_json ? JSON.parse(row.strategy_json) : null;
+    if (strategy?.enabled !== true) refuse("The autonomous Solana strategy is no longer enabled.");
+    return raw(strategy.tradeUsdgRaw, false);
+  }
+  private owner(owner: string): void { if (owner !== this.scope.owner) refuse("Solana owner does not match the authenticated account."); }
+  private async bindingIn(db: Db, lock: boolean): Promise<SolanaTradingBinding> {
+    const { tenant, owner } = this.scope;
+    // A first statement write acquires both SQLite's writer lock and Postgres's
+    // row lock. Settings changes take this same row lock, fencing admission.
+    if (lock) {
+      const locked = await db.prepare("UPDATE solana_wallet_bindings SET revision=revision WHERE tenant=? AND owner=? AND chain=?")
+        .run(tenant, owner, CHAINS.solana);
+      if (locked.changes !== 1) refuse("The authenticated Solana wallet binding is missing.");
+    }
+    const row = await db.prepare("SELECT requested_mode,limits_json,revision FROM solana_wallet_bindings WHERE tenant=? AND owner=? AND chain=?")
+      .get(tenant, owner, CHAINS.solana) as { requested_mode: "paper" | "live"; limits_json: string | null; revision: number | string } | undefined;
+    if (!row || !["paper", "live"].includes(row.requested_mode)) refuse("The authenticated Solana wallet binding is missing.");
+    return { tenant, owner, requestedMode: row.requested_mode, limits: row.limits_json ? JSON.parse(row.limits_json) : null, revision: Number(row.revision) };
+  }
+  binding(): Promise<SolanaTradingBinding> { return this.bindingIn(this.db, false); }
+  async createPaper(initialCashRaw: string, limits: SolanaPaperLimits): Promise<SolanaPaperSnapshot> {
+    raw(initialCashRaw, false);
+    return this.db.tx(async tx => {
+      const binding = await this.bindingIn(tx, true);
+      if (binding.requestedMode !== "paper") refuse("Paper trading is not the selected Solana mode.");
+      const now = clock(this.now), policy = validateSolanaPaperLimits(limits, now);
+      if (!binding.limits || JSON.stringify(validateSolanaPaperLimits(binding.limits, now)) !== JSON.stringify(policy)) {
+        refuse("The Solana trading limits changed before paper book creation. Refresh and try again.");
+      }
+      const { tenant, owner } = this.scope;
+      const existing = await tx.prepare("SELECT book_json FROM solana_runtime_paper_books WHERE tenant=? AND owner=?").get(tenant, owner);
+      if (existing) refuse("This Solana paper book already exists and cannot be refilled or reset.");
+      const book: SolanaPaperBook = { owner, agentId: solanaPaperAgentId(owner), chain: CHAINS.solana, mode: "paper", version: 0,
+        initialCashRaw, cashRaw: initialCashRaw, hwmRaw: initialCashRaw, realizedPnlRaw: "0", limits: policy,
+        positions: [], createdAtMs: now, updatedAtMs: now };
+      await tx.prepare("INSERT INTO solana_runtime_paper_books(tenant,owner,book_json) VALUES(?,?,?)").run(tenant, owner, JSON.stringify(book));
+      return { ...book, trades: [] };
+    });
+  }
+  paper(): SolanaPaperLedger {
+    const { tenant, owner } = this.scope;
+    return {
+      get: async requested => {
+        this.owner(requested); const binding = await this.binding();
+        const rows = await this.db.prepare(`SELECT b.book_json,t.receipt_json FROM solana_runtime_paper_books b
+          LEFT JOIN solana_runtime_paper_trades t ON t.tenant=b.tenant AND t.owner=b.owner
+          WHERE b.tenant=? AND b.owner=? ORDER BY t.created_at_ms DESC,t.request_id DESC LIMIT 100`).all(tenant, owner) as Array<{ book_json: string; receipt_json: string | null }>;
+        if (!rows.length) return null;
+        return { ...JSON.parse(rows[0]!.book_json), ...(binding.limits ? { limits: binding.limits } : {}), trades: rows.filter(r => r.receipt_json !== null).map(r => JSON.parse(r.receipt_json!)) } as SolanaPaperSnapshot;
+      },
+      findTrade: async (requested, id) => {
+        this.owner(requested); await this.binding();
+        return rowJson<SolanaPaperReceipt>(await this.db.prepare("SELECT receipt_json FROM solana_runtime_paper_trades WHERE tenant=? AND owner=? AND request_id=?").get(tenant, owner, id), "receipt_json");
+      },
+      commit: async input => {
+        this.owner(input.owner);
+        const fingerprint = solanaPaperIntentFingerprint(input.intent);
+        return this.db.tx(async tx => {
+          const binding = await this.bindingIn(tx, true);
+          const prior = await tx.prepare("SELECT fingerprint,receipt_json FROM solana_runtime_paper_trades WHERE tenant=? AND owner=? AND request_id=?").get(tenant, owner, input.intent.requestId) as { fingerprint: string; receipt_json: string } | undefined;
+          if (prior) { if (prior.fingerprint !== fingerprint) refuse("The Solana request ID belongs to another intent."); return JSON.parse(prior.receipt_json) as SolanaPaperReceipt; }
+          const strategyCap = await this.autonomousIn(tx, binding);
+          if (binding.requestedMode !== "paper") refuse("Paper trading is not the selected Solana mode.");
+          const now = clock(this.now);
+          const book = rowJson<SolanaPaperBook>(await tx.prepare("SELECT book_json FROM solana_runtime_paper_books WHERE tenant=? AND owner=?").get(tenant, owner), "book_json");
+          if (!book) refuse("Create a Solana paper book first.");
+          if (!binding.limits) refuse("Save the current Solana trading limits first.");
+          book.limits = validateSolanaPaperLimits(binding.limits, now);
+          const recent = await tx.prepare("SELECT notional_raw FROM solana_runtime_paper_trades WHERE tenant=? AND owner=? AND created_at_ms>?").all(tenant, owner, now - DAY) as Array<{ notional_raw: string }>;
+          const result = applySolanaPaperCommit(book, input, recent.map(r => r.notional_raw), now);
+          if (strategyCap !== null && raw(result.receipt.notionalUsdgRaw, false) > strategyCap) refuse("The autonomous Solana strategy trade limit would be exceeded.");
+          this.checkAdmissionSignal();
+          await tx.prepare("INSERT INTO solana_runtime_paper_trades(tenant,owner,request_id,fingerprint,created_at_ms,notional_raw,receipt_json) VALUES(?,?,?,?,?,?,?)")
+            .run(tenant, owner, input.intent.requestId, fingerprint, now, result.receipt.notionalUsdgRaw, JSON.stringify(result.receipt));
+          await tx.prepare("UPDATE solana_runtime_paper_books SET book_json=? WHERE tenant=? AND owner=?").run(JSON.stringify(result.book), tenant, owner);
+          return result.receipt;
+        });
+      },
+    };
+  }
+  async liveBook(): Promise<SolanaLiveBook | null> {
+    await this.binding();
+    return rowJson(await this.db.prepare("SELECT book_json FROM solana_runtime_live_books WHERE tenant=? AND owner=?").get(this.scope.tenant, this.scope.owner), "book_json");
+  }
+  /** Caller obtains this snapshot from finalized RPC; never accept request JSON here. */
+  async reconcileCashDeposit(snapshot: { cashUsdg: string; wsolRaw: string; slot: number; observedAtMs: number; commitment: "finalized" }): Promise<void> {
+    await this.db.tx(async tx => {
+      await this.bindingIn(tx, true);
+      const { tenant, owner } = this.scope, now = clock(this.now);
+      if (snapshot.commitment !== "finalized" || !Number.isSafeInteger(snapshot.slot) || snapshot.slot < 1 ||
+          !Number.isSafeInteger(snapshot.observedAtMs) || snapshot.observedAtMs > now || now - snapshot.observedAtMs >= 30_000) refuse("A fresh finalized Solana balance snapshot is required.");
+      const cash = raw(snapshot.cashUsdg); raw(snapshot.wsolRaw);
+      if (await tx.prepare("SELECT 1 FROM solana_runtime_submissions WHERE vault IN (SELECT vault FROM solana_runtime_submissions WHERE tenant=? AND owner=?) AND status='pending'").get(tenant, owner)) refuse("Resolve pending Solana trades before reconciling deposits.");
+      const setup = rowJson<SolanaPreparedSetup>(await tx.prepare("SELECT setup_json FROM solana_runtime_setups WHERE tenant=? AND owner=?").get(tenant, owner), "setup_json");
+      if (setup?.signature && setup.status !== "finalized" && setup.status !== "failed") refuse("Resolve the pending owner transaction before reconciling deposits.");
+      const book = rowJson<SolanaLiveBook>(await tx.prepare("SELECT book_json FROM solana_runtime_live_books WHERE tenant=? AND owner=?").get(tenant, owner), "book_json");
+      if (!book) return;
+      if (snapshot.slot < book.slot || now < book.updatedAtMs || snapshot.wsolRaw !== book.wsolRaw || cash < raw(book.cashRaw)) refuse("Only a finalized USDG deposit can be reconciled automatically.");
+      const amount = cash - raw(book.cashRaw); if (amount === 0n) return;
+      const hwm = raw(book.hwmRaw) + amount; raw(hwm.toString());
+      const evidenceId = `deposit:${owner}:${snapshot.slot}:${snapshot.cashUsdg}`;
+      const inserted = await tx.prepare("INSERT INTO solana_runtime_cashflows(evidence_id,tenant,owner,kind,mint,amount_raw,created_at_ms) VALUES(?,?,?,'deposit',?,?,?) ON CONFLICT DO NOTHING")
+        .run(evidenceId, tenant, owner, SOLANA_USDG_MINT, amount.toString(), now);
+      if (inserted.changes !== 1) refuse("Deposit evidence was already used with different accounting state.");
+      book.cashRaw = cash.toString(); book.hwmRaw = hwm.toString(); book.slot = snapshot.slot; book.updatedAtMs = now;
+      await tx.prepare("UPDATE solana_runtime_live_books SET book_json=? WHERE tenant=? AND owner=?").run(JSON.stringify(book), tenant, owner);
+    });
+  }
+  async session(): Promise<SolanaRegisteredSession | null> {
+    await this.binding();
+    return rowJson(await this.db.prepare("SELECT record_json FROM solana_runtime_sessions WHERE tenant=? AND owner=?").get(this.scope.tenant, this.scope.owner), "record_json");
+  }
+  async sessionSeed(dek: Buffer): Promise<string | null> {
+    const session = await this.session(); if (!session) return null;
+    const row = await this.db.prepare("SELECT sealed_seed FROM solana_runtime_sessions WHERE tenant=? AND owner=?").get(this.scope.tenant, this.scope.owner) as { sealed_seed: string };
+    const prefix = this.seedPrefix(session);
+    const plain = openSecret(row.sealed_seed, dek);
+    if (!plain.startsWith(prefix)) refuse("The encrypted session does not match this Solana account.");
+    return plain.slice(prefix.length);
+  }
+  private seedPrefix(session: SolanaRegisteredSession): string {
+    return `solana-session/v1 ${this.scope.tenant} ${this.scope.owner} ${session.programId} ${session.vault} ${session.session} ${session.sessionEpoch}\n`;
+  }
+  async registerSession(session: SolanaRegisteredSession, seed: string, dek: Buffer): Promise<void> {
+    for (const value of [session.programId, session.vault, session.session]) key(value);
+    return this.db.tx(async tx => {
+      await this.bindingIn(tx, true);
+      const setup = rowJson<SolanaPreparedSetup>(await tx.prepare("SELECT setup_json FROM solana_runtime_setups WHERE tenant=? AND owner=?")
+        .get(this.scope.tenant, this.scope.owner), "setup_json");
+      if (!setup || (setup.kind ?? "session") !== "session" || setup.status !== "finalized" ||
+          setup.signature !== session.registrationSignature || setup.programId !== session.programId ||
+          setup.vault !== session.vault || setup.session !== session.session) refuse("Register only the exact finalized owner-approved session.");
+      if (await tx.prepare("SELECT 1 FROM solana_runtime_submissions WHERE tenant=? AND owner=? AND status='pending'").get(this.scope.tenant, this.scope.owner)) refuse("Resolve the pending Solana trade before replacing its session.");
+      await tx.prepare(`INSERT INTO solana_runtime_sessions(tenant,owner,record_json,sealed_seed) VALUES(?,?,?,?)
+        ON CONFLICT(tenant,owner) DO UPDATE SET record_json=excluded.record_json,sealed_seed=excluded.sealed_seed`)
+        .run(this.scope.tenant, this.scope.owner, JSON.stringify(session), sealSecret(this.seedPrefix(session) + seed, dek));
+      await tx.prepare("DELETE FROM solana_runtime_setups WHERE tenant=? AND owner=?")
+        .run(this.scope.tenant, this.scope.owner);
+    });
+  }
+  async pending(): Promise<SolanaLiveRecord[]> {
+    await this.binding();
+    const rows = await this.db.prepare("SELECT * FROM solana_runtime_submissions WHERE tenant=? AND owner=? AND status='pending' ORDER BY created_at_ms").all(this.scope.tenant, this.scope.owner);
+    return rows.map(r => record(r)!);
+  }
+  async history(): Promise<SolanaLiveRecord[]> {
+    await this.binding();
+    return (await this.db.prepare("SELECT * FROM solana_runtime_submissions WHERE tenant=? AND owner=? ORDER BY created_at_ms DESC,request_id DESC LIMIT 100")
+      .all(this.scope.tenant, this.scope.owner)).map(r => record(r)!);
+  }
+  async get(owner: string, requestId: string): Promise<SolanaLiveRecord | null> {
+    this.owner(owner); await this.binding();
+    return record(await this.db.prepare("SELECT * FROM solana_runtime_submissions WHERE tenant=? AND owner=? AND request_id=?").get(this.scope.tenant, owner, requestId));
+  }
+  async recordSigned(s: SolanaSignedSubmission): Promise<boolean> {
+    this.owner(s.intent.owner);
+    let drawdownRefused = false;
+    const accepted = await this.db.tx(async tx => {
+      const binding = await this.bindingIn(tx, true);
+      const { tenant, owner } = this.scope;
+      if (await tx.prepare("SELECT 1 FROM solana_runtime_submissions WHERE tenant=? AND owner=? AND request_id=?").get(tenant, owner, s.intent.requestId)) return false;
+      const strategyCap = await this.autonomousIn(tx, binding);
+      if (binding.requestedMode !== "live" || !binding.limits) refuse("Live Solana trading has not been enabled for this account.");
+      const ownerSetup = rowJson<SolanaPreparedSetup>(await tx.prepare("SELECT setup_json FROM solana_runtime_setups WHERE tenant=? AND owner=?").get(tenant, owner), "setup_json");
+      if (ownerSetup?.signature && ownerSetup.status !== "finalized" && ownerSetup.status !== "failed") refuse("Resolve the pending owner transaction before trading.");
+      const now = clock(this.now), limits = validateSolanaPaperLimits(binding.limits, now);
+      const session = rowJson<SolanaRegisteredSession>(await tx.prepare("SELECT record_json FROM solana_runtime_sessions WHERE tenant=? AND owner=?").get(tenant, owner), "record_json");
+      if (!session || s.programId !== session.programId || s.intent.vault !== session.vault || s.session !== session.session || s.sessionEpoch !== session.sessionEpoch) refuse("The Solana session changed before submission.");
+      if (await tx.prepare("SELECT 1 FROM solana_runtime_submissions WHERE vault=? AND status='pending'").get(session.vault)) return false;
+      if (s.intent.mode !== "live" || s.intent.chain !== CHAINS.solana || s.intent.kind !== "spl-swap") refuse("Invalid live Solana intent.");
+      const { owner: _owner, vault: _vault, ...paperIntent } = s.intent;
+      validateSolanaQuote(s.quote, { ...paperIntent, mode: "paper" }, now);
+      if (![s.preparedAtMs, s.risk.observedAtMs, s.safetyObservedAtMs].every(t => Number.isSafeInteger(t) && t <= now && now - t < 30_000)) refuse("Solana risk evidence expired before durable admission.");
+      if (![s.risk.slot, s.minContextSlot].every(t => Number.isSafeInteger(t) && t > 0) || s.risk.slot < s.minContextSlot) refuse("Solana risk evidence is not from the current account read.");
+      const buying = s.intent.inputMint === SOLANA_USDG_MINT;
+      if ((buying ? s.intent.outputMint : s.intent.inputMint) !== SOLANA_WRAPPED_SOL_MINT) refuse("This live vault supports USDG and wrapped SOL only.");
+      const notional = raw(buying ? s.intent.amountRaw : s.quote.outAmount, false);
+      if (strategyCap !== null && notional > strategyCap) refuse("The autonomous Solana strategy trade limit would be exceeded.");
+      if (raw(s.risk.notionalUsdg, false) !== notional || notional > raw(limits.perTradeUsdg, false)) refuse("The Solana per-trade limit would be exceeded.");
+      if (raw(s.feeLamports) + raw(s.rentLamports) > raw(s.maxFeeLamports, false)) refuse("The Solana fee and rent budget would be exceeded.");
+      const recent = await tx.prepare("SELECT notional_raw,status FROM solana_runtime_submissions WHERE tenant=? AND owner=? AND created_at_ms>?").all(tenant, owner, now - DAY) as Array<{ notional_raw: string; status: string }>;
+      // Failed transactions still spend network fees and consume an attempt.
+      // Their token notional is released only after canonical failure evidence.
+      if (recent.length >= limits.maxOpsPerDay || recent.reduce((n, r) => n + (["failed", "expired"].includes(r.status) ? 0n : BigInt(r.notional_raw)), 0n) + notional > raw(limits.dailyUsdg, false)) refuse("The Solana rolling daily limit would be exceeded.");
+      let book = rowJson<SolanaLiveBook>(await tx.prepare("SELECT book_json FROM solana_runtime_live_books WHERE tenant=? AND owner=?").get(tenant, owner), "book_json");
+      const equity = raw(s.risk.equityUsdg), peak = raw(s.risk.peakEquityUsdg), cash = raw(s.risk.cashUsdg), wsol = raw(s.risk.wsolRaw);
+      if (book && (book.cashRaw !== s.risk.cashUsdg || book.wsolRaw !== s.risk.wsolRaw)) refuse("Vault balances changed outside recorded trades. Reconcile owner transfers before trading again.");
+      if (book && (now < book.updatedAtMs || s.risk.slot < book.slot)) refuse("Solana portfolio evidence moved backwards.");
+      if (!book && wsol !== 0n) refuse("The initial Solana live book must start in USDG; existing token cost basis is unknown.");
+      const hwm = [book ? raw(book.hwmRaw) : 0n, peak, equity].reduce((a, b) => a > b ? a : b);
+      if ((buying ? cash : wsol) < raw(s.intent.amountRaw, false)) refuse("Insufficient real Solana vault balance.");
+      if (!book) book = { hwmRaw: hwm.toString(), cashRaw: cash.toString(), wsolRaw: wsol.toString(), costBasisUsdgRaw: "0", realizedPnlUsdgRaw: "0", networkFeesLamports: "0", slot: s.risk.slot, updatedAtMs: now };
+      else book.hwmRaw = hwm.toString();
+      if (buying && (book.buyPaused || hwm === 0n || (hwm - equity) * 10_000n >= hwm * BigInt(limits.maxDrawdownBps))) {
+        // This refusal must commit the breaker. Throwing inside this transaction
+        // would roll the pause back and silently re-arm the next price rebound.
+        book.buyPaused = true; book.updatedAtMs = now;
+        await tx.prepare(`INSERT INTO solana_runtime_live_books(tenant,owner,book_json) VALUES(?,?,?)
+          ON CONFLICT(tenant,owner) DO UPDATE SET book_json=excluded.book_json`).run(tenant, owner, JSON.stringify(book));
+        drawdownRefused = true; return false;
+      }
+      this.checkAdmissionSignal();
+      const inserted = await tx.prepare(`INSERT INTO solana_runtime_submissions(tenant,owner,request_id,vault,sequence,signature,status,created_at_ms,notional_raw,submission_json)
+        VALUES(?,?,?,?,?,?,'pending',?,?,?) ON CONFLICT DO NOTHING`).run(tenant, owner, s.intent.requestId, s.intent.vault, s.vaultSequence, s.signature, now, notional.toString(), JSON.stringify(s));
+      if (inserted.changes !== 1) return false;
+      await tx.prepare(`INSERT INTO solana_runtime_live_books(tenant,owner,book_json) VALUES(?,?,?)
+        ON CONFLICT(tenant,owner) DO UPDATE SET book_json=excluded.book_json`).run(tenant, owner, JSON.stringify(book));
+      return true;
+    });
+    if (drawdownRefused) refuse("The persisted Solana drawdown breaker blocks additional buys until owner review.");
+    return accepted;
+  }
+  async settle(owner: string, requestId: string, signature: string, settlement: SolanaLiveSettlement): Promise<void> {
+    this.owner(owner);
+    return this.db.tx(async tx => {
+      await this.bindingIn(tx, true);
+      const { tenant } = this.scope;
+      const prior = record(await tx.prepare("SELECT * FROM solana_runtime_submissions WHERE tenant=? AND owner=? AND request_id=?").get(tenant, owner, requestId));
+      if (!prior || prior.submission.signature !== signature || settlement.signature !== signature) refuse("Solana settlement does not match the reserved transaction.");
+      if (prior.status !== "pending") {
+        if (JSON.stringify({ ...prior.settlement, finalizedAtMs: 0 }) !== JSON.stringify({ ...settlement, finalizedAtMs: 0 })) refuse("Solana settlement already exists with different evidence.");
+        return;
+      }
+      if (!["finalized", "failed", "expired"].includes(settlement.status) || !Number.isSafeInteger(settlement.slot) || settlement.slot < prior.submission.minContextSlot) refuse("Invalid finalized Solana settlement.");
+      const book = rowJson<SolanaLiveBook>(await tx.prepare("SELECT book_json FROM solana_runtime_live_books WHERE tenant=? AND owner=?").get(tenant, owner), "book_json");
+      if (!book) refuse("The Solana live accounting book is missing.");
+      const input = raw(settlement.amountIn), output = raw(settlement.amountOut);
+      if (settlement.status === "expired") {
+        const proof = settlement.expiryProof;
+        if (settlement.feeLamports !== null || input !== 0n || output !== 0n || !proof ||
+            proof.vaultSequence !== prior.submission.vaultSequence || raw(proof.sessionEpoch) < raw(prior.submission.sessionEpoch) ||
+            !(proof.reason === "session-revoked" && raw(proof.sessionEpoch) > raw(prior.submission.sessionEpoch) ||
+              proof.reason === "blockhash-expired" && raw(proof.blockHeight) > raw(prior.submission.lastValidBlockHeight))) refuse("Invalid Solana expiry evidence.");
+        book.unresolvedFeeCount = (book.unresolvedFeeCount ?? 0) + 1;
+        book.reservedUnknownFeeLamports = (raw(book.reservedUnknownFeeLamports ?? "0") + raw(prior.submission.feeLamports)).toString();
+      } else {
+        const fee = raw(settlement.feeLamports);
+        if (fee > raw(prior.submission.feeLamports) || fee > raw(prior.submission.maxFeeLamports)) refuse("Finalized Solana fees exceed the reserved budget.");
+        book.networkFeesLamports = (raw(book.networkFeesLamports) + fee).toString();
+      }
+      if (settlement.status === "finalized") {
+        if (input === 0n || input > raw(prior.submission.intent.amountRaw) || output < raw(prior.submission.minOutAmount)) refuse("Solana settlement violates the reserved swap bounds.");
+        if (prior.submission.intent.inputMint === SOLANA_USDG_MINT) {
+          book.cashRaw = (raw(book.cashRaw) - input).toString(); book.wsolRaw = (raw(book.wsolRaw) + output).toString();
+          book.costBasisUsdgRaw = (BigInt(book.costBasisUsdgRaw) + input).toString();
+        } else {
+          const held = raw(book.wsolRaw); if (input > held || held === 0n) refuse("Solana settlement exceeds the recorded position.");
+          const basis = input === held ? BigInt(book.costBasisUsdgRaw) : BigInt(book.costBasisUsdgRaw) * input / held;
+          book.wsolRaw = (held - input).toString(); book.cashRaw = (raw(book.cashRaw) + output).toString();
+          book.costBasisUsdgRaw = (BigInt(book.costBasisUsdgRaw) - basis).toString();
+          book.realizedPnlUsdgRaw = (BigInt(book.realizedPnlUsdgRaw) + output - basis).toString();
+        }
+        raw(book.cashRaw); raw(book.wsolRaw);
+        if (raw(book.cashRaw) > raw(book.hwmRaw)) book.hwmRaw = book.cashRaw;
+      } else if (input !== 0n || output !== 0n) refuse("A failed Solana transaction cannot book token movements.");
+      book.slot = settlement.slot; book.updatedAtMs = clock(this.now);
+      await tx.prepare("UPDATE solana_runtime_live_books SET book_json=? WHERE tenant=? AND owner=?").run(JSON.stringify(book), tenant, owner);
+      await tx.prepare("UPDATE solana_runtime_submissions SET status=?,settlement_json=? WHERE tenant=? AND owner=? AND request_id=? AND status='pending'")
+        .run(settlement.status, JSON.stringify(settlement), tenant, owner, requestId);
+    });
+  }
+  async setup(): Promise<SolanaPreparedSetup | null> {
+    await this.binding();
+    return rowJson(await this.db.prepare("SELECT setup_json FROM solana_runtime_setups WHERE tenant=? AND owner=?").get(this.scope.tenant, this.scope.owner), "setup_json");
+  }
+  async saveSetup(setup: SolanaPreparedSetup): Promise<boolean> {
+    return this.db.tx(async tx => {
+      const binding = await this.bindingIn(tx, true);
+      const previous = rowJson<SolanaPreparedSetup>(await tx.prepare("SELECT setup_json FROM solana_runtime_setups WHERE tenant=? AND owner=?").get(this.scope.tenant, this.scope.owner), "setup_json");
+      if (previous?.signature && previous.status !== "finalized" && previous.status !== "failed") {
+        if (previous.signature === setup.signature && previous.signedTransactionBase64 === setup.signedTransactionBase64) return false;
+        refuse("Resolve the previously submitted Solana setup before creating another.");
+      }
+      if (setup.signature) {
+        if (!previous || previous.messageBase64 !== setup.messageBase64 || previous.preparedAtMs !== setup.preparedAtMs) refuse("The prepared owner transaction changed. Review and sign again.");
+        if (clock(this.now) >= previous.expiresAtMs) refuse("The prepared owner transaction expired before submission.");
+        if ((setup.kind ?? "session") === "session" && (binding.requestedMode !== "live" || JSON.stringify(binding.limits) !== JSON.stringify(setup.limits))) refuse("The live permission settings changed. Review and sign again.");
+      }
+      if (setup.kind !== "revoke" && await tx.prepare("SELECT 1 FROM solana_runtime_submissions WHERE tenant=? AND owner=? AND status='pending'").get(this.scope.tenant, this.scope.owner)) refuse("Resolve the pending Solana trade before an owner transaction.");
+      await tx.prepare(`INSERT INTO solana_runtime_setups(tenant,owner,setup_json) VALUES(?,?,?)
+        ON CONFLICT(tenant,owner) DO UPDATE SET setup_json=excluded.setup_json`).run(this.scope.tenant, this.scope.owner, JSON.stringify(setup));
+      return true;
+    });
+  }
+  async finishSetup(signature: string, status: "finalized" | "failed", finalizedSlot?: number, expiryProof?: SolanaOwnerExpiryProof): Promise<void> {
+    await this.db.tx(async tx => {
+      await this.bindingIn(tx, true);
+      const setup = rowJson<SolanaPreparedSetup>(await tx.prepare("SELECT setup_json FROM solana_runtime_setups WHERE tenant=? AND owner=?").get(this.scope.tenant, this.scope.owner), "setup_json");
+      if (!setup || setup.signature !== signature) refuse("Owner confirmation does not match the saved transaction.");
+      if (setup.status === "finalized" || setup.status === "failed") {
+        if (setup.status !== status) refuse("Finalized owner transaction outcomes cannot be changed.");
+        if (JSON.stringify(setup.expiryProof ?? null) !== JSON.stringify(expiryProof ?? null)) refuse("Finalized owner expiry evidence cannot be changed.");
+        return;
+      }
+      if (expiryProof) {
+        if (status !== "failed" || expiryProof.reason !== "blockhash-expired" || raw(expiryProof.blockHeight) <= raw(setup.lastValidBlockHeight) ||
+            !Number.isSafeInteger(expiryProof.slot) || expiryProof.slot < 1 || finalizedSlot !== expiryProof.slot ||
+            !(setup.priorVaultExisted === false && expiryProof.vaultSequence === null && expiryProof.sessionEpoch === null ||
+              setup.priorVaultExisted === true && expiryProof.vaultSequence === setup.priorSequence && expiryProof.sessionEpoch === setup.priorSessionEpoch)) refuse("Invalid owner transaction expiry evidence.");
+        setup.expiryProof = structuredClone(expiryProof);
+      }
+      if (status === "finalized" && setup.kind === "resume-buys") {
+        const book = rowJson<SolanaLiveBook>(await tx.prepare("SELECT book_json FROM solana_runtime_live_books WHERE tenant=? AND owner=?")
+          .get(this.scope.tenant, this.scope.owner), "book_json");
+        if (book) {
+          book.buyPaused = false;
+          await tx.prepare("UPDATE solana_runtime_live_books SET book_json=? WHERE tenant=? AND owner=?")
+            .run(JSON.stringify(book), this.scope.tenant, this.scope.owner);
+        }
+      }
+      if (status === "finalized" && setup.kind === "withdraw") {
+        if (!setup.mint || !setup.amountRaw || ![SOLANA_USDG_MINT, SOLANA_WRAPPED_SOL_MINT].includes(setup.mint)) refuse("Invalid finalized withdrawal accounting.");
+        const amount = raw(setup.amountRaw, false), { tenant, owner } = this.scope;
+        const book = rowJson<SolanaLiveBook>(await tx.prepare("SELECT book_json FROM solana_runtime_live_books WHERE tenant=? AND owner=?").get(tenant, owner), "book_json");
+        if (book) {
+          if (!Number.isSafeInteger(finalizedSlot) || finalizedSlot! < book.slot) refuse("Finalized withdrawal slot is required for durable accounting.");
+          if (setup.mint === SOLANA_USDG_MINT) {
+            if (amount > raw(book.cashRaw)) refuse("Finalized withdrawal exceeds the recorded cash balance.");
+            book.cashRaw = (raw(book.cashRaw) - amount).toString();
+            const peak = raw(book.hwmRaw); book.hwmRaw = (peak > amount ? peak - amount : 0n).toString();
+          } else {
+            const held = raw(book.wsolRaw); if (amount > held || held === 0n) refuse("Finalized withdrawal exceeds the recorded SOL position.");
+            const basis = amount === held ? BigInt(book.costBasisUsdgRaw) : BigInt(book.costBasisUsdgRaw) * amount / held;
+            book.wsolRaw = (held - amount).toString(); book.costBasisUsdgRaw = (BigInt(book.costBasisUsdgRaw) - basis).toString();
+            // No fabricated sale proceeds or P&L. Keep HWM conservative until a later owner review.
+          }
+          book.updatedAtMs = clock(this.now); book.slot = finalizedSlot!;
+          const inserted = await tx.prepare("INSERT INTO solana_runtime_cashflows(evidence_id,tenant,owner,kind,mint,amount_raw,created_at_ms) VALUES(?,?,?,'withdraw',?,?,?) ON CONFLICT DO NOTHING")
+            .run(signature, tenant, owner, setup.mint, amount.toString(), book.updatedAtMs);
+          if (inserted.changes !== 1) refuse("Withdrawal evidence was already accounted.");
+          await tx.prepare("UPDATE solana_runtime_live_books SET book_json=? WHERE tenant=? AND owner=?").run(JSON.stringify(book), tenant, owner);
+        }
+      }
+      setup.status = status;
+      await tx.prepare("UPDATE solana_runtime_setups SET setup_json=? WHERE tenant=? AND owner=?").run(JSON.stringify(setup), this.scope.tenant, this.scope.owner);
+    });
+  }
+}
