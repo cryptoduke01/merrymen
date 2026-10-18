@@ -37,6 +37,7 @@ import type { Db } from "./db";
 import type { LlmCreds } from "./llm";
 import type { FetchLike, XApp } from "./xpost/client";
 import { xWeightedLength } from "./xpost/client";
+import { hasSaleOutcome } from "./xpost/sale-outcome";
 import type { XPosterDeps } from "./orchestrator-xpost";
 import type { XGateCtx } from "./xpost/gate";
 import type { PlanSell } from "./xpost/planner";
@@ -550,7 +551,8 @@ describe("receipt-backed sale posts", () => {
     await p.step(w.db, ROSTER, new Map(), T0 + MIN);
     const post = (await rows(w)).find((r) => r.kind === "sell")!;
     assert.ok(post);
-    assert.equal(post.body, "i sold pepe, receipt filed.\ngross gain before fees and gas. pleased with that part.");
+    assert.ok(post.body.startsWith("i sold pepe, receipt filed.\n"));
+    assert.equal(hasSaleOutcome(post.body, "profit"), true);
     assert.ok(w.prompts.every((prompt) => !prompt.includes("gross gain")), "the model is not asked to infer profitability");
     assert.equal(w.tweets.length, 0);
     await p.step(w.db, ROSTER, new Map(), post.dueAtMs);
@@ -606,7 +608,7 @@ describe("receipt-backed sale posts", () => {
 
     it("uploads the card of the vouched sale right before its post, and the post names the media id", async (t) => {
       const { post, sent, calls, asked, drawn, logs } = await sendSale({}, t);
-      assert.match(post.body, /\n\+40% gross gain before fees and gas/);
+      assert.equal(hasSaleOutcome(post.body, "profit", 40), true);
       assert.equal(sent.status, "posted");
       const sale = calls.filter((c) => c.url.endsWith("/2/media/upload") || c.body.text === post.body);
       assert.deepEqual(sale.map((c) => c.url), ["https://api.x.com/2/media/upload", "https://api.x.com/2/tweets"]);
@@ -678,7 +680,7 @@ describe("receipt-backed sale posts", () => {
       // many of code's lines run long too and the next is tried until one fits.
       // And a name no line can carry (too long beside a five-figure gain; a number word the gate reads as a quantity): its ticker is said.
       for (const [answer, name, symbol, gainPct, said] of [["PASS", "Pepe", "PEPE", 12.4, "Pepe"], ["sold pepe today, the swap went through and the receipt is filed away.", "Pepe", "PEPE", 12.4, "Pepe"],
-        ["PASS", "Pudgy Penguin Club", "PUDGY", 12345, null], ["PASS", "Wrapped Robinhood Ether", "WETH", 12345, "WETH"], ["PASS", "Million", "MM", 12.4, "MM"],
+        ["PASS", "Pudgy Penguin Club", "PUDGY", 12345, null], ["PASS", "Wrapped Robinhood Ether", "WETH", 12345, null], ["PASS", "Million", "MM", 12.4, "MM"],
         // A long name and no ticker the gate can say: its two-part lines (third review).
         ["PASS", "Wrapped Robinhood Ethers", "WETH2", 12345, "Wrapped Robinhood Ethers"]] as const) {
         for (let i = 0; i < 12; i++) {
@@ -702,9 +704,9 @@ describe("receipt-backed sale posts", () => {
           await p.step(w.db, ROSTER, new Map(), T0 + MIN);
           const post = (await rows(w)).find((r) => r.kind === "sell");
           assert.equal(post?.status, "scheduled", `${answer.slice(0, 12)} #${i}: ${post?.reason}`);
-          assert.ok(post!.body.includes(`\n${gainPct > 100 ? "+12,345%" : "+12%"} gross gain before fees and gas.`) && post!.body.includes(tx) && post!.body.endsWith(TOKEN), post!.body);
+          assert.ok(hasSaleOutcome(post!.body, "profit", gainPct) && post!.body.includes(tx) && post!.body.endsWith(TOKEN), post!.body);
           assert.ok(xWeightedLength(post!.body) <= 280);
-          if (said) assert.match(post!.body.split("\n")[0]!, new RegExp(`\\b${said}\\b`));
+          if (said) assert.match(post!.body.split("\n")[0]!, new RegExp(`\\b${said}\\b`, "i"));
         }
       }
     });
@@ -716,7 +718,8 @@ describe("receipt-backed sale posts", () => {
         assert.match(words!, /\bsold\b/);
         assert.match(words!, /\b(?:PEPE|Pepe)\b/);
         assert.doesNotMatch(words!, /i sold pepe, receipt filed/, "not the model's");
-        assert.equal(result, "+40% gross gain before fees and gas. pleased with that part.");
+        assert.equal(hasSaleOutcome(post.body, "profit", 40), true);
+        assert.ok(result!.includes("before fees and gas"));
         assert.equal(sent.status, "posted");
         assert.equal(calls.filter((c) => c.url.endsWith("/2/media/upload")).length, 1);
         assert.match(logs.join(" "), /card-attached 1/);

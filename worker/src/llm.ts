@@ -652,7 +652,11 @@ export async function llmText(
       messages: [{ role: "user", content: opts.prompt }],
     }, { signal: opts.signal }));
     const t = res.content.find((b) => b.type === "text");
-    return t && t.type === "text" ? t.text.trim() : "";
+    const text = t && t.type === "text" ? t.text.trim() : "";
+    if (!text && res.stop_reason === "max_tokens") {
+      throw new Error(`${creds.provider} ${creds.model} ran out of tokens before writing a reply — raise maxTokens or pick a model that does not reason`);
+    }
+    return text;
   }
 
   const off = opts.reasoning === "off";

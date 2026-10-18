@@ -85,11 +85,14 @@ export type ReplyCandidate =
    * answered by a draft, never by code's model line (red-team 2026-10-12).
    * `greeting`: set by tagCandidate when the tag, after its leading handles,
    * is only a greeting (greetingOnly). Answered with a code-built line
-   * (casual.ts greetingAnswers), never a draft.
+   * (casual.ts greetingAnswers); the optional small-talk lane may draft only
+   * under a top-level tag or plain own post, with this line as fallback.
    * `reaction`: set by tagCandidate when the tag, after its leading handles,
    * is only praise for him or his trade (reactionOnly, 2026-10-18), never in
-   * a quote. Answered with a code-built thanks (casual.ts reactionAnswers),
-   * never a draft.
+   * a quote. Code-built thanks (casual.ts reactionAnswers) is the default
+   * and the fallback for the optional small-talk lane.
+   * `questionResponse`: a whole-tag response to code's exact own timeline
+   * question. Code-only acknowledgement, with a terminal thread marker.
    * `advice`: set by tagCandidate when the tag asks for advice or a forecast
    * in any words its advice screens know (the owner's decision, 2026-10-12:
    * a playful decline instead of silence). Never drafted and never looked up
@@ -103,7 +106,7 @@ export type ReplyCandidate =
    * buys). The worst of the post it replies to, the conversation's root and
    * the post it quotes.
    */
-  | { ok: true; text: string; address?: string; otherHandles?: true; greeting?: true; reaction?: true; advice?: true; followUp?: FollowUp;
+  | { ok: true; text: string; address?: string; otherHandles?: true; greeting?: true; reaction?: true; questionResponse?: true; advice?: true; followUp?: FollowUp;
       /**
        * A LARP CHECK (xpost/check.ts, 2026-10-13): the tag asked one of the
        * plain ways ("larp check", "is this real?") and code found one clear
@@ -407,6 +410,37 @@ export function reactionOnly(text: unknown): boolean {
   return reactionWords(text) !== null;
 }
 
+// Drafted small talk is a much smaller subject than a researched answer.
+// The general reply vocabulary includes market, time and operational words;
+// those made plausible boasts and forecasts pass earlier red-team reviews.
+// Use a closed conversational vocabulary here, in addition to the full gate.
+// Unknown words fall back to a vetted code line, never to a broader draft.
+const SMALLTALK_DRAFT_WORDS = new Set(`
+  a am an and appreciate appreciated are as at be being bit bot but by chat chatting cheers company conversation
+  curious curiosity dry easy feeling for friendly fren friend glad good greeting
+  grateful greetings happy hello hey hi how huh humor humour i i'm in is keeping kind little
+  me mellow mood my myself nice of on okay ok open ordinary over paper pleasant
+  pretty quite rather reply replying saying simple small software some still
+  talking thanks thank the things to warm well words yeah yep yo just here doing
+  low key sense slightly staying thankful usual very with welcome
+`.trim().split(/\s+/));
+
+/** Output guard for the opt-in small-talk lane; never used to loosen a gate. */
+export function smalltalkDraftSafe(text: string): boolean {
+  const words = text.toLowerCase().replace(/[’‘]/g, "'").match(/[a-z]+(?:'[a-z]+)?/g) ?? [];
+  return !/[?]/.test(text) && words.length >= 4 && words.every((word) => SMALLTALK_DRAFT_WORDS.has(word));
+}
+
+/** A finite answer to one of code's own nonfinancial timeline questions.
+ * The caller must independently verify its exact posted parent. */
+export function timelineResponseOnly(text: unknown): boolean {
+  if (typeof text !== "string") return false;
+  const plain = plainAsk(text);
+  if (plain === null || /[?0-9]/.test(text)) return false;
+  const words = plain.replace(/[.!]{1,3}$/, "");
+  return /^(?:yes|no|yeah|yep|nope|maybe|(?:i (?:(?:would|might) )?(?:prefer|pick|choose) |i'd (?:pick|choose) |my (?:pick|choice) is )?(?:(?:a|the) )?(?:notes|notebooks?|spreadsheets?|sketch(?:es)?|paragraphs?|diagrams?|metaphors?|plain text|footnotes|folders|brackets|glossar(?:y|ies)|tiny details|overall picture))$/.test(words);
+}
+
 /**
  * LETTERS THAT ARE SYMBOLS TO UNICODE: the negative circled and negative
  * squared Latin capitals (🅐, 🅰), which NFKC does not fold and no letter
@@ -657,6 +691,8 @@ export function tagCandidate(reply: XReply, ctx: {
   trade?: ReadonlySet<string>;
   /** MERRYMEN_XPOST_CHECKS=1 (with research): a larp check may be taken (`ReplyCandidate.check`). */
   checks?: boolean;
+  /** Only a direct, unquoted reply under an exact own posted timeline question. */
+  timelineQuestion?: boolean;
 }): ReplyCandidate {
   const no = (reason: string): ReplyCandidate => ({ ok: false, reason });
   if (!reply.id || !reply.authorId || !ctx.xUserId) return no("invalid");
@@ -729,7 +765,8 @@ export function tagCandidate(reply: XReply, ctx: {
   // for. Like a greeting it skips only the signal and asked screens.
   const reacted = !greeting && !address && !others(lead) && reply.quoted !== true ? reactionWords(text) : null;
   const reaction = reacted !== null;
-  if (!greeting && !reaction && (bare.length < 4 || text.length > XREPLY_MAX_COMMENT_CHARS || (bare.match(/\p{L}+/gu) ?? []).length < 2)) return no("low-signal");
+  const questionResponse = ctx.timelineQuestion === true && !topLevel && reply.quoted !== true && !address && !others(lead) && followUp === "plain" && timelineResponseOnly(text);
+  if (!greeting && !reaction && !questionResponse && (bare.length < 4 || text.length > XREPLY_MAX_COMMENT_CHARS || (bare.match(/\p{L}+/gu) ?? []).length < 2)) return no("low-signal");
   if (/[\u0000-\u001f\u007f«»<>#]|\p{Script=Cyrillic}|\p{Script=Han}/u.test(text)) return no("unsafe-text");
   // Only letters code can read, and no text that runs backwards on screen.
   if (BIDI.test(reply.text) || NON_ASCII_LETTER.test(bareLetters(text)) || ENCLOSED_LETTER.test(text)) return no("unsafe-text");
@@ -751,7 +788,7 @@ export function tagCandidate(reply: XReply, ctx: {
   // whole tag is only "are you bullish?" or "wen moon", its own mood
   // (orchestrator-xpost-research.ts vibeAsk). Nothing is looked up for it.
   // A statement asks nothing, advice-shaped or not (red-team 2026-10-12): read before the flag.
-  if (!greeting && !reaction && !ASKED.test(text)) return no("not-asked");
+  if (!greeting && !reaction && !questionResponse && !ASKED.test(text)) return no("not-asked");
   const asksAdvice = ADVICE_REQUEST.test(advice) || /^(?:please\s+)?(?:buy|sell|hold|ape|pump|dump)\b/i.test(text) || WHAT_TO_BUY.test(advice);
   // A shill, however it starts, is no question; nor is advice about what it buys itself (ADVICE_ASKED, OWN_BUYING_ASK).
   if (asksAdvice && !ADVICE_ASKED.test(text)) return no("advice-statement");
@@ -761,5 +798,5 @@ export function tagCandidate(reply: XReply, ctx: {
   // Only one plain question, with no claim or rumour beside it (plainAdviceAsk): anything else, nothing.
   if (asksAdvice && !plainAdviceAsk(text)) return no("advice-clause");
   return { ok: true, text, ...(address ? { address } : {}), ...(others(lead) ? { otherHandles: true as const } : {}), ...(greeting ? { greeting: true as const } : {}),
-    ...(reaction ? { reaction: true as const } : {}), ...(asksAdvice ? { advice: true as const } : {}), ...(followUp ? { followUp } : {}) };
+    ...(reaction ? { reaction: true as const } : {}), ...(questionResponse ? { questionResponse: true as const } : {}), ...(asksAdvice ? { advice: true as const } : {}), ...(followUp ? { followUp } : {}) };
 }

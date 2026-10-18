@@ -1,3 +1,5 @@
+import { TIMELINE_QUESTIONS, timelineLane, timelineQuestions } from "./xpost/rotation";
+import { timelineMemory } from "./xpost/memory";
 /**
  * POSTING ON X, FROM THE ORCHESTRATOR — the glue between the room's pieces and
  * worker/src/xpost/ (docs/x-posting.md).
@@ -49,9 +51,9 @@ import { STRATEGY_FLAVOUR, STRATEGY_SPOKEN, TRAIT_VOICE } from "./groupchat/temp
 import { MUSINGS, SUBJECTS, TAKES } from "./groupchat/topics";
 import { xAppFromEnv, type FetchLike, type XApp, type XReply } from "./xpost/client";
 import { admitXPost, lettersOf, merrymenMentioned, moneySaid, namedIn, tickerRefusal, unreadableLetter, vocabularyRefusal, type BaseGate, type XGateCtx } from "./xpost/gate";
-import { ACTIVE_CADENCE, ANSWER_GAP_MS, ANSWER_STALE_MS, ANSWERS_PER_DAY, RECAP_CALLS_PER_AGENT, RECAP_GAP_MS, RECAP_WINDOW_MS, REPLY_STALE_MS, STANDARD_CADENCE, coinOf, hash32, introState, isWin, planPosts, recapCoverOf, recapCoverText, replyDueAt, sendDecision, type PlanCadence, type PlanClock, type PlanIntent, type PlanSell } from "./xpost/planner";
+import { ACTIVE_CADENCE, VARIED_CADENCE, ANSWER_GAP_MS, ANSWER_STALE_MS, ANSWERS_PER_DAY, RECAP_CALLS_PER_AGENT, RECAP_GAP_MS, RECAP_WINDOW_MS, REPLY_STALE_MS, STANDARD_CADENCE, coinOf, hash32, introState, isWin, planPosts, recapCoverOf, recapCoverText, replyDueAt, sendDecision, type PlanCadence, type PlanClock, type PlanIntent, type PlanSell } from "./xpost/planner";
 import { APP_PAUSE_KEY, APP_PAUSE_MS, CREDITS_PAUSE_MS, PAUSE_KEY, readReplyComments, sendOne, type CardOutcome, type SendOutcome } from "./xpost/sender";
-import { isAnswerOptOut, isReplyOptOut, plainAsk, replyCandidate, tagCandidate, withoutReplyOptOut } from "./xpost/replies";
+import { isAnswerOptOut, isReplyOptOut, plainAsk, replyCandidate, smalltalkDraftSafe, tagCandidate, withoutReplyOptOut } from "./xpost/replies";
 import { asksAboutACoin, coinTalkIn, deicticPickIn, houseTalkIn, marketTalkIn, nameLikeWords, textWords, trustTalkIn, unknownWordIn } from "./xpost/words";
 import { activeTenantsOf, repliesAllowedFor, repliesScopeOf } from "./xpost/scope";
 import {
@@ -89,6 +91,7 @@ import {
   releaseSpan,
   returnAllowance,
   schedulePost,
+  smalltalkBodiesToAuthor,
   setReplying,
   skipScheduled,
   takeAllowance,
@@ -97,17 +100,17 @@ import {
   type XAccount,
   type XPost,
 } from "./xpost/store";
-import { answerPrompt, answerQuestion, buyPrompt, casualPrompt, checkPrompt, INSIGHT_VOCABULARY, insightPrompt, introPrompt, introTemplate, modelAnswers, replyPrompt, sellPrompt, sherwoodClaimed, sherwoodMentioned, sherwoodNamed, tryDraft, XPOST_TEMPERATURE_DEFAULT, xpostModel, xpostModelWarning, type AnswerIntentKind, type DraftResult, type WriterFacts, type XStyle } from "./xpost/writer";
-import { appendPublicToken, appendPublicWallet, hasPublicWallet, publicTokenStillAllowed, publicWalletStillAllowed, type PublicWallet } from "./xpost/public-wallet";
+import { answerPrompt, answerQuestion, buyPrompt, casualPrompt, checkPrompt, INSIGHT_CASUAL_WORDS, INSIGHT_VOCABULARY, insightPrompt, introPrompt, introTemplate, modelAnswers, replyPrompt, sellPrompt, smalltalkPrompt, sherwoodClaimed, sherwoodMentioned, sherwoodNamed, tryDraft, XPOST_TEMPERATURE_DEFAULT, xpostModel, xpostModelWarning, type AnswerIntentKind, type DraftResult, type WriterFacts, type XStyle } from "./xpost/writer";
+import { appendPublicToken, appendPublicWallet, hasPublicWallet, publicTokenSuffix, publicTokenStillAllowed, publicWalletStillAllowed, type PublicWallet } from "./xpost/public-wallet";
 import { readPublicProjectDescription } from "./orchestrator-xpost-project";
 import { banterAsk, boughtNames, carriesResearch, classifyTag, createXResearch, generalTradesQuestion, MARKET_MAJORS, modelNamed, namesACoin, ownCoinTicker, sayable, selfAsk, unshowableName, type ResearchBundle, type TagIntent, type XResearch } from "./orchestrator-xpost-research";
 import { PUBLISHABLE_SOURCES } from "./thesis-policy";
 import { readSaleCard, readSaleResults } from "./orchestrator-xpost-results";
 import { renderPnlCard, type PnlCardData } from "./pnl-card";
-import { appendSaleOutcome, hasSaleOutcome } from "./xpost/sale-outcome";
+import { appendSaleOutcome, hasSaleOutcome, saleWordBudget } from "./xpost/sale-outcome";
 import { saleLines } from "./xpost/sale-words";
 import { admitFiguresLine, cleanTicker, figuresTickers, withFigures, type FiguresSpec } from "./xpost/figures";
-import { hotAnswers, hotNoneAnswers, hotUnreadAnswers, insightFacts, majorAnswers, majorUnreadAnswers, marketAnswers, type HotRead, type MajorRead, type MarketRead } from "./xpost/market";
+import { hotAnswers, hotNoneAnswers, hotUnreadAnswers, insightLines, insightDraftSupported, selectInsight, majorAnswers, majorUnreadAnswers, marketAnswers, type HotRead, type InsightRead, type InsightSelection, type MajorRead, type MarketRead } from "./xpost/market";
 import { chatAnswers, declineAnswers, greetingAnswers, reactionAnswers, selfAnswers, tradesAnswers, vibeAnswers } from "./xpost/casual";
 import { recapFigures, recapLines, recapStillHolds } from "./xpost/recap";
 import { accusationIn, CHECK_VOCABULARY, checkAnswers, type CheckRead } from "./xpost/check";
@@ -311,6 +314,10 @@ export interface XPostEnv {
    * llmText's own, so unset changes nothing.
    */
   temperature?: number;
+  /** Optional model wording for already eligible greetings, reactions and banter; default off. */
+  smalltalkDrafts?: boolean;
+  /** Mixed timeline after observing the new posting flow; opt-in. */
+  variety?: boolean;
   /** One boot line per value that was set and could not be honoured as written. */
   notes: string[];
 }
@@ -402,6 +409,7 @@ export function xpostEnv(env: Record<string, string | undefined> = process.env):
   const temperature = tempRaw && Number.isFinite(tempN) && tempN >= 0 && tempN <= 2 ? tempN : null;
   if (tempRaw && temperature === null) notes.push(`xpost: ignoring MERRYMEN_XPOST_TEMPERATURE — it is not a number from 0 to 2; drafts keep the default of ${XPOST_TEMPERATURE_DEFAULT}`);
   return { off: null, perDay, fleetPerDay, llmPerDay, notes,
+    ...(env.MERRYMEN_XPOST_VARIETY?.trim() === "1" ? { variety: true } : {}),
     ...(replies.scope !== "off" ? { repliesApproved: true } : {}),
     ...(replies.scope === "active" ? { repliesActiveOnly: true } : {}),
     ...(activeTenants.size ? { activeTenants } : {}),
@@ -412,6 +420,7 @@ export function xpostEnv(env: Record<string, string | undefined> = process.env):
     ...(checksPerDay !== null ? { checksPerDay } : {}),
     ...(replyRaw ? { replyPollsPerDay: replyPollsPerDay ?? 0 } : {}),
     ...(temperature !== null ? { temperature } : {}),
+    ...(env.MERRYMEN_XPOST_SMALLTALK_DRAFTS?.trim() === "1" ? { smalltalkDrafts: true } : {}),
   };
 }
 
@@ -624,7 +633,7 @@ export function writerFacts(f: AgentFacts, day: string, recentOwn: string[]): Wr
     })
     .filter((t): t is string => t !== null)
     .slice(0, 3);
-  return { agentName: f.name, strategy, flavour, traits, mode: f.mode, style: xStyleOf(f), recentOwn: recentOwn.slice(0, 6) };
+  return { agentName: f.name, strategy, flavour, traits, mode: f.mode, style: xStyleOf(f), recentOwn: recentOwn.slice(0, 10) };
 }
 
 /**
@@ -850,6 +859,20 @@ function figuresFor(admitted: string, spec: FiguresSpec, ownNames: readonly stri
       && (bigCoins.has(t) || !ownCoinTicker(t, ownCoins))) ? figured : null;
 }
 
+/** No-read timeline lanes have the same name/claim boundary as unhanded
+ * chat. General habits about patience, notes and method remain available;
+ * technical market words require evidence even inside a process sentence,
+ * so "i check volume as it rises" cannot smuggle in an observation.
+ */
+function unresearchedCasualClaim(text: string, ownName: string): boolean {
+  if (coinTalkIn(text, ownName) || unknownWordIn(text, ownName) || houseTalkIn(text) || trustTalkIn(text) || deicticPickIn(text)) return true;
+  // No trading nouns, results or actions without evidence, including an
+  // unnamed "trade is done" or "back in green". Notes and patience need
+  // none of this vocabulary. Read the whole draft, including subordinate
+  // clauses; a first-person process lead never masks a market observation.
+  return marketTalkIn(text) || /\b(?:majors?|heavyweights|bellwethers|altcoins?|liq|liquidity|vol|volumes?|momentum|breadth|volatility|flows?|bids?|asks?|orderbook|tape|sentiment|participation|consolidation|uptrend|downtrend|coins?|tokens?|tickers?|assets?|charts?|candles?|buyers?|sellers?|buy|buys|buying|bought|sell|sells|selling|sold|sales?|trad(?:e|es|ed|ing|ers?)|swaps?|swapped|swapping|closed|closing|opened|opening|entered|entries|entry|exits?|exited|executed|fills?|filled|caught|positions?|holders?|holdings?|bags?|gains?|loss(?:es)?|profits?|returns?|green|red|activity|pools?|crowds?|fomo|spreads?|supply|rallied|surged|climbed|rising|falling)\b|\border\s+book\b|\bbook\s+(?:is|looks?|seems?|feels?)\s+(?:thin|deep|strong|weak)\b/i.test(text);
+}
+
 /** The agent's own name, and each word of it, as figuresFor reads it. */
 function ownNamesOf(name: unknown): string[] {
   return [String(name ?? ""), ...String(name ?? "").split(/\s+/).filter((w) => /^\p{L}{3,}$/u.test(w))];
@@ -982,7 +1005,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
   const active = o.knobs.activeTenants ?? new Set<string>();
   /** This owner's cadence: the operator's active one, or everyone's under the server's day cap. */
   const cadenceOf = (tenant: string): Readonly<PlanCadence> =>
-    active.has(tenant.toLowerCase()) ? ACTIVE_CADENCE : { ...STANDARD_CADENCE, perDay };
+    active.has(tenant.toLowerCase()) ? (o.knobs.variety === true ? VARIED_CADENCE : ACTIVE_CADENCE) : { ...STANDARD_CADENCE, perDay };
   // NO CREDS, NO MODEL, whatever the budget says.
   const llmPerDay = o.creds ? (o.knobs.llmPerDay ?? DEFAULT_LLM_PER_DAY) : 0;
   const creds = llmPerDay > 0 ? o.creds : null;
@@ -1023,8 +1046,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
 
   const why =
     `xpost: on — at most ${perDay} posts per X account a day, ${fleetPerDay} across the fleet a day; ` +
-    (creds ? `up to ${llmPerDay} model calls a day` : "no model, so only intros (from templates) and active owners' recaps (code's words) are posted") +
-    (active.size ? `; ${active.size} owner(s) on the active cadence, up to ${ACTIVE_CADENCE.perDay} a day` : "") +
+    (creds ? `up to ${llmPerDay} model calls a day` : "no model: intros and active owners' receipt-backed sales, recaps, researched insights and eligible code replies remain available") +
+    (active.size ? `; ${active.size} owner(s) on the active cadence, up to ${o.knobs.variety === true ? VARIED_CADENCE.perDay : ACTIVE_CADENCE.perDay} a day` : "") +
     (repliesApproved ? (o.knobs.repliesActiveOnly ? "; replies for the active owners only" : "; replies for owners who consent") : "") +
     (research ? `; answers look things up first${researchFomo ? ", Fomo included" : ""}` : "") +
     (checks ? `; larp checks on, up to ${checksPerDay} a day` : "");
@@ -1666,6 +1689,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
           ownerPerDay: account.prefs.perDay,
           cadence: cadenceOf(account.tenant),
           model,
+          codeCasual: active.has(account.tenant.toLowerCase()),
           kinds: { buys: account.prefs.buys, casual: account.prefs.casual },
           // A recap says only trades of the money it trades with now.
           money: f.mode === "idle" ? null : f.mode,
@@ -1679,6 +1703,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         // next answer, and the gate still keeps either from repeating it.
         const own = await ownRecentBodies(shared, { tenant: account.tenant, sinceMs: planNow - OWN_MEMORY_MS, limit: 200 });
         const recentOwn = own.all;
+        const timeline = own.timeline;
         const shownOwn = own.shown.filter((b) => !carriesResearch(b));
         const talked = talkedOf(posts, account.tenant);
         for (const intent of intents) {
@@ -1688,11 +1713,12 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
             cut = true;
             break;
           }
-          const r = await writeIntent(shared, account, f, intent, planNow, recentOwn, shownOwn, recentFleet, talked);
+          const r = await writeIntent(shared, account, f, intent, planNow, recentOwn, timelineMemory(timeline, (body) => !otherMoneySaid(f.mode, body)), recentFleet, talked, timelineMemory(timeline));
           if (r.outcome === "key-spent") continue;
           bump(r.outcome, 1, r.why);
           // Why a win fell back to code's words: the model's own reason, a code only (writeIntent `codeWords`).
           if (r.codeWords) bump(`sale-code-words:${operatorCode(r.codeWords)}`);
+          if (r.insightCodeWords) bump(`insight-code-words:${operatorCode(r.insightCodeWords)}`);
           if (r.outcome === "no-model-budget") {
             model = false;
             continue;
@@ -1700,6 +1726,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
           if (r.outcome !== "call-gone") drafts++;
           if (r.body) {
             recentOwn.unshift(r.body);
+            timeline.unshift({ body: r.body, kind: intent.kind });
             if (!carriesResearch(r.body)) shownOwn.unshift(r.body);
             recentFleet.unshift(r.body);
           }
@@ -1894,7 +1921,16 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
     // tenant's X account is answered by nothing, whatever it said, so two of
     // the fleet's agents can never talk to each other in a loop. Read once a
     // call, only when the batch holds a tag from someone else.
-    const fleet = ordered.some((c) => c.authorId !== account.xUserId) ? await fleetXUserIds(shared) : new Set<string>();
+    const fleet = await fleetXUserIds(shared, ordered.filter((c) => c.authorId !== account.xUserId).map((c) => c.authorId));
+    // Only code's exact, posted question may admit a short statement as an
+    // answer. Root and direct parent must both be that same own top-level
+    // post; quotes, other threads and generated questions never qualify.
+    const questionIds = [...new Set(ordered.filter((c) => c.quoted !== true && c.inReplyToTweetId !== "" && c.conversationId === c.inReplyToTweetId)
+      .map((c) => c.inReplyToTweetId))];
+    const questionRows = questionIds.length ? await shared.prepare(`SELECT tweet_id, body FROM xpost_posts
+      WHERE x_user_id = ? AND kind = 'casual' AND status = 'posted' AND tweet_id IN (${questionIds.map(() => "?").join(",")})`)
+      .all(account.xUserId, ...questionIds) as { tweet_id: string; body: string }[] : [];
+    const ownQuestions = new Set(questionRows.filter((row) => TIMELINE_QUESTIONS.includes(row.body.trim())).map((row) => row.tweet_id));
     // WHY A TAG GOT NOTHING, AS A COUNT (2026-10-18): a tag passed over with no
     // row was silent, so the log could not say why mentions went unanswered.
     // Each is counted once a pass (this runs a few times over one batch), as
@@ -1911,7 +1947,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         continue;
       }
       const candidate = tagCandidate(comment, { xUserId: account.xUserId, research: research !== null, username: account.username,
-        ownRoots: threads.roots, ownPosts: threads.posts, answered: threads.answered, plain: threads.plain, trade: threads.trade, checks });
+        ownRoots: threads.roots, ownPosts: threads.posts, answered: threads.answered, plain: threads.plain, trade: threads.trade, checks,
+        timelineQuestion: comment.quoted !== true && comment.conversationId === comment.inReplyToTweetId && ownQuestions.has(comment.inReplyToTweetId) });
       // Refused by the tag screens: answer-refused-<the screen's reason> (replies.ts tagCandidate).
       if (!candidate.ok) {
         passOver(comment, `answer-refused-${candidate.reason}`);
@@ -1934,14 +1971,15 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // nothing else ("nice trade", "congrats": reactionOnly), banter ("how
       // are you", "how's it going alan": banterAsk), its own mood ("are you
       // bullish?", "wen moon": vibe) and advice asked ("should i buy pepe":
-      // a playful decline). Never a draft, never a lookup, no model call: a
-      // line of code's own (xpost/casual.ts), through the gate as any answer.
+      // a playful decline). Code's own lines by default (xpost/casual.ts),
+      // through the gate as any answer. Only the explicit small-talk switch
+      // below may draft a greeting/reaction/banter with code as fallback.
       // A greeting or a thanks is code's own reading of a whole tag, so code's
       // classifier must read it as plain chat too, or it is answered by
       // nothing (fail closed).
       const banter = CHAT_LINE_KINDS.has(classified.kind) && banterAsk(candidate.text);
-      const smallKind: "greeting" | "reaction" | "banter" | "vibe" | "advice" | null = candidate.greeting === true ? "greeting"
-        : candidate.reaction === true ? "reaction" : classified.kind === "vibe" ? "vibe" : classified.kind === "advice" ? "advice" : banter ? "banter" : null;
+      const smallKind: "greeting" | "reaction" | "banter" | "question" | "vibe" | "advice" | null = candidate.greeting === true ? "greeting"
+        : candidate.reaction === true ? "reaction" : candidate.questionResponse === true && classified.kind === "chat" ? "question" : classified.kind === "vibe" ? "vibe" : classified.kind === "advice" ? "advice" : banter ? "banter" : null;
       // WHAT IT SITS UNDER, FOR SMALL TALK (2026-10-18). The posts a reply
       // or a quote sits under (as tagCandidate reads them: the parent and the
       // conversation's root, and what it quotes), and whether each one it
@@ -2120,8 +2158,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // casual words (xpost/market.ts marketAnswers) and code's figures, read
       // or not; the same reasons as what's hot.
       const marketCoded = asked.kind === "market";
-      // No model call at all for these: no allowance, no question read. Small
-      // talk is code's own line too (smallKind above).
+      // These need no model. The optional small-talk wording lane takes its
+      // own draft allowance later and always keeps these code lines ready.
       const undrafted = templated || hotCoded || marketCoded || chatKind !== null || smallKind !== null;
       // NO DRAFT UNDER OR QUOTING ITS OWN BUY OR SELL POST (red-team review of
       // daaae961, 2026-10-12). Quoting its posted "grabbed some pepe with real
@@ -2168,6 +2206,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // _PER_DAY), each taken atomically across replicas before the row is
       // written, and every one given back when no line stands (below). A name
       // that looks like a bot's, or no name X handed over, gets one a day.
+      const authorSmalltalk = smallKind === null ? [] : await smalltalkBodiesToAuthor(shared, account.xUserId, comment.authorId, nowMs);
       const smallKeys: string[] = [];
       if (smallKind !== null) {
         const botLike = !author || LIKELY_BOT.test(author.username) || LIKELY_BOT.test(author.name);
@@ -2354,7 +2393,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // other way to the decline put a joke under a question about people).
       const smallLines = smallKind === "greeting" ? greetingAnswers(comment.id, facts.style, lineOpts)
         : smallKind === "reaction" ? reactionAnswers(comment.id, facts.style, lineOpts)
-        : smallKind === "banter" ? chatAnswers(comment.id, facts.style, lineOpts)
+        : smallKind === "banter" || smallKind === "question" ? chatAnswers(comment.id, facts.style, lineOpts)
         : smallKind === "vibe" ? vibeAnswers(comment.id, facts.style, lineOpts)
         : smallKind === "advice" && candidate.advice === true ? declineAnswers(comment.id, facts.style, lineOpts) : [];
       // Never a draft in their place: a kind with no lines of its own is answered by nothing.
@@ -2366,7 +2405,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // Counted once a line stands and its row is written (below), as before 2026-10-13: answered-greeting,
       // answer-casual-vibe, answer-casual-advice, answer-chat-banter; and answered-reaction.
       const smallCount = smallKind === "greeting" ? "answered-greeting" : smallKind === "reaction" ? "answered-reaction" : smallKind === "banter" ? "answer-chat-banter"
-        : smallKind !== null ? `answer-casual-${smallKind}` : null;
+        : smallKind === "question" ? "answered-question-response" : smallKind !== null ? `answer-casual-${smallKind}` : null;
       // NO MODEL WORDS BESIDE A LINE OF COINS (red-team 2026-10-12): the gate
       // read a "what's hot?" draft before code put "$CHUMP 24h +41.2%" after
       // it, so "if i had to pick one it'd be the first", "these are my plays"
@@ -2399,7 +2438,21 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         await returnAllowance(shared, `llm:${utcDay(nowMs)}`, at());
       }
       if (market.length) bump("answer-code-words");
-      const coded = templated || market.length > 0 || chatLines.length > 0 || smallLines.length > 0;
+      // Optional wording never widens eligibility: no free chat, trade or
+      // closed threads. Code remains available with no model or budget.
+      const smallDraftKind = smallKind === "greeting" || smallKind === "reaction" || smallKind === "banter" ? smallKind : null;
+      let smallDraft = false;
+      if (o.knobs.smalltalkDrafts === true && smallDraftKind && smallLines.length && drafting.ok && creds
+        && (topLevelTag || (candidate.followUp === "plain" && underPost)) && answerQuestion(candidate.text) !== null) {
+        if (await takeAllowance(shared, answerKey, ANSWER_DRAFTS_PER_DAY, nowMs)) {
+          if (await takeAllowance(shared, `llm:${utcDay(nowMs)}`, llmPerDay, nowMs)) smallDraft = true;
+          else {
+            await returnAllowance(shared, answerKey, at());
+            drafting.ok = false;
+          }
+        }
+      }
+      const coded = !smallDraft && (templated || market.length > 0 || chatLines.length > 0 || smallLines.length > 0);
       // CODE'S LINES, the model question's, small talk's, a market answer's, its
       // strategy or its buys, this mention's own first: one it already said is a repeat to
       // the gate, so the next is tried rather than none, and when all have been
@@ -2410,6 +2463,9 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         ? { ok: true, text: lines[0]! }
         // No writer: never reached (a tag that would be drafted was passed over above, `drafting`), and nothing drafted if it were.
         : creds === null ? { ok: false, reason: "error" }
+        : smallDraft && smallDraftKind
+        ? await tryDraft(creds, smalltalkPrompt({ question: candidate.text, kind: smallDraftKind, style: facts.style, paper: f.mode === "paper" }),
+          { call: deps.llm, timeoutMs: deps.draftTimeoutMs, temperature })
         // A LARP CHECK IN ITS OWN VOICE (writer.ts checkPrompt): the take code reached, texted back casually.
         : asked.kind === "check"
         ? await tryDraft(creds, checkPrompt({ ...facts, question: candidate.text, research: looked?.research ?? [], ...(looked?.creatorClaim ? { creatorClaim: looked.creatorClaim } : {}) }),
@@ -2459,7 +2515,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         // An active owner's answer: never a data provider named, code's line or draft (XGateCtx.house).
         kind: "reply", answer: true, house: true, agentName: f.name, mode, coins: vouched.map((c) => c.label),
         paperCoins: [...vouched.filter((c) => c.paper).map((c) => c.label), ...(f.mode === "idle" ? money.paper : [])],
-        recentOwn: fresh ? [] : recentOwn, recentFleet: fresh ? [] : recentFleet, emojiOk: facts.style.emoji > 0,
+        recentOwn: fresh ? [] : [...recentOwn, ...authorSmalltalk], recentFleet: fresh ? [] : recentFleet, emojiOk: facts.style.emoji > 0,
         // A buy it says is one it was told of, or none at all (XGateCtx.buys).
         // A model's draft: never a claim for the house, a tease, a judgement of the asker or a boast (XGateCtx.drafted).
         ...(asCode ? {} : { drafted: true as const, buys: told ? "vouched" as const : "none" as const, unsaid: [...(told && !namesNone ? [] : bought), ...money.otherOnly, ...older, ...askerNames],
@@ -2493,7 +2549,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // data, the project or creator) is refused.
       const unlooked = !coded && raw !== null && !handed && carriesResearch(raw);
       let verdict = raw === null || claimed || named || unlooked ? null : gate(raw);
-      for (const line of lines.slice(1)) {
+      for (const line of smallDraft ? [] : lines.slice(1)) {
         if (verdict?.ok) break;
         verdict = gate(line);
       }
@@ -2524,7 +2580,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // too." and "the only honest bot on the timeline, the rest are fake."
       // were posted under banter. A drafted answer handed no research that
       // speaks of a scam, a rug, a fake, trust, honesty, legitimacy or the like
-      // (xpost/words.ts trustTalkIn) is not posted, and gets no fallback.
+      // (xpost/words.ts trustTalkIn) is not posted. Only the already-eligible
+      // optional small-talk lane can replace it with its vetted code line.
       const untrusted = !coded && verdict?.ok === true && !handed && trustTalkIn(withoutReplyOptOut(verdict.text));
       // NOR A COIN POINTED AT AND LIKED WITHOUT ITS NAME (red-team review of
       // 1ed46625, 2026-10-12): under "should i buy $SCAM?", "doing great, this
@@ -2541,10 +2598,12 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       const pointed = !coded && verdict?.ok === true && pointsFree && deicticPickIn(withoutReplyOptOut(verdict.text));
       // NO FRIENDLY LINE IN PLACE OF A REFUSED DRAFT (red-team review of
       // daaae961, 2026-10-12): a draft refused for anything at all, or a PASS,
-      // leaves the tag unanswered.
+      // leaves the tag unanswered outside the narrow optional small-talk
+      // lane below, whose tag already qualified for the code fallback.
       // NEVER AN ACCUSATION, A SAFETY CALL OR ADVICE IN A CHECK (xpost/check.ts accusationIn).
       const accused = asked.kind === "check" && !coded && verdict?.ok === true && accusationIn(verdict.text);
-      const drafted = verdict?.ok === true && !postsName && !unlookedCoin && !untrusted && !pointed && !accused ? verdict.text : null;
+      const smallUnsafe = smallDraft && verdict?.ok === true && !smalltalkDraftSafe(verdict.text);
+      const drafted = !smallUnsafe && verdict?.ok === true && !postsName && !unlookedCoin && !untrusted && !pointed && !accused ? verdict.text : null;
       // A CHECK STILL GETS ITS ANSWER WHEN THE DRAFT DOES NOT STAND (2026-10-13):
       // refused, a PASS, or the house model down, and code's own casual lines
       // for the same verdict and reasons go instead (xpost/check.ts
@@ -2552,6 +2611,16 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // a friendly line in place of a refused chat draft, these say exactly
       // what code found, and nothing else.
       let admitted = drafted;
+      if (smallDraft) {
+        if (admitted) bump("answer-smalltalk-model");
+        else {
+          bump("answer-smalltalk-fallback", 1, out.ok ? "gate" : out.reason);
+          for (const line of smallLines) {
+            const v = gate(line, true);
+            if (v.ok) { admitted = v.text; break; }
+          }
+        }
+      }
       if (!admitted && asked.kind === "check" && checkRead) {
         for (const line of checkAnswers(checkRead, comment.id, lineOpts)) {
           const v = gate(line, true);
@@ -2619,12 +2688,12 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       const plainThread = !!body && !lookedUp && smallFirst && (smallKind === "greeting" || smallKind === "reaction" || smallKind === "banter");
       const threadEnds = !!body && smallKind !== null && !plainThread && !(smallFirst && (smallKind === "vibe" || smallKind === "advice"));
       const reason = body ? null : claimed ? "gate:sherwood-claim" : named || postsName ? "gate:sherwood-drafted" : unlooked ? "gate:unlooked-source"
-        : unlookedCoin ? "gate:unlooked-coin" : untrusted ? "gate:trust-talk" : pointed ? "gate:deictic-pick" : accused ? "gate:accusation"
+        : smallUnsafe ? "gate:smalltalk-words" : unlookedCoin ? "gate:unlooked-coin" : untrusted ? "gate:trust-talk" : pointed ? "gate:deictic-pick" : accused ? "gate:accusation"
         : verdict && !verdict.ok ? `gate:${verdict.reason}` : out.ok ? "no-draft" : `no-draft:${out.reason}`;
       const id = await schedulePost(shared, {
         tenant: account.tenant, xUserId: account.xUserId, kind: "answer", dedupeKey, body: body ?? "",
         coin: lookedUp ? ANSWER_LOOKED_UP : plainThread ? ANSWER_PLAIN_THREAD : threadEnds ? ANSWER_THREAD_DONE : null, decisionId: null, dueAtMs: finishedAt, nowMs: finishedAt,
-        replyToTweetId: comment.id, replyRootTweetId: comment.id, replyAuthorId: comment.authorId,
+        replyToTweetId: comment.id, replyRootTweetId: comment.id, replyAuthorId: comment.authorId, smalltalk: smallKind !== null,
         status: body ? "scheduled" : "skipped",
         reason,
       });
@@ -2743,16 +2812,16 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
    * after the gate; `ownCoins` every name its buys and sixty days of its buy
    * posts go by, which the post may never say and the line never shows.
    */
-  async function readInsight(shared: Db, account: XAccount, f: AgentFacts, nowMs: number): Promise<{ read: string[]; figures: FiguresSpec; ownCoins: string[] } | null> {
+  async function readInsight(shared: Db, account: XAccount, f: AgentFacts, nowMs: number, day: string, slot: number, preferHot = false): Promise<(InsightSelection & { bundle: InsightRead; ownCoins: string[] }) | null> {
     if (!research) return null;
     const posts = (await postsOfXUser(shared, account.xUserId, nowMs - OWN_MEMORY_MS, 500)).filter((p) => p.tenant === account.tenant);
     const olderBought = posts.filter((p) => p.kind === "buy" && typeof p.coin === "string" && p.coin.trim() !== "").map((p) => p.coin!.trim());
     const bundle = await research.gather({ shared, intent: { kind: "market" }, tenant: account.tenant, xUserId: account.xUserId, facts: f, posts, fomo: researchFomo,
       coinNamed: true, ownCoins: olderBought }).catch((): ResearchBundle => ({ facts: [], lookups: 0, notes: ["fault"] }));
     if (!bundle.insight || !bundle.figures?.length) return null;
-    const read = insightFacts(bundle.insight).filter(sayable);
-    if (!read.length) return null;
-    return { read, figures: bundle.figures, ownCoins: [...boughtNames(f, posts), ...olderBought] };
+    const selected = selectInsight(bundle.insight, bundle.figures, { tenant: account.tenant, day, slot, weekFigures: bundle.insightWeekFigures, preferHot });
+    if (!selected || !selected.read.every(sayable)) return null;
+    return { ...selected, bundle: bundle.insight, ownCoins: [...boughtNames(f, posts), ...olderBought] };
   }
 
   /**
@@ -2772,6 +2841,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
     shownOwn: string[],
     recentFleet: string[],
     talked: string[] = [],
+    timelineOpeners: string[] = shownOwn,
   ): Promise<{
     outcome: string; body: string | null; why?: string;
     /**
@@ -2781,6 +2851,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
      * `sale-code-words:<why>`, never with any words.
      */
     codeWords?: string;
+    insightCodeWords?: string;
   }> {
     // A KEY ALREADY SPENT IS NOT DRAFTED AGAIN. The plan weighs the X
     // account's history, so a key this owner wrote for the X account it had
@@ -2791,6 +2862,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
     const day = PLAN_CLOCK.localDay(null, nowMs);
     // Shown its recent posts without a research answer; gated against them all.
     const facts = writerFacts(f, day, shownOwn);
+    facts.recentOpeners = timelineOpeners;
     const social = await deps.socialProfile?.(account.tenant);
     if (social?.xVoice === "dry") facts.voice = "dry";
     // An active owner's prompt says never to name the chain, as its gate refuses it (XGateCtx.house).
@@ -2804,6 +2876,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       coins: [],
       recentOwn,
       recentFleet,
+      recentOpeners: timelineOpeners,
       emojiOk: facts.style.emoji > 0,
       // An active owner's post never names a data provider, whatever its kind (XGateCtx.house, 2026-10-13).
       ...(active.has(account.tenant.toLowerCase()) ? { house: true as const } : {}),
@@ -2814,7 +2887,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
     let projectDescription: string | null = null;
     let tokenDisclosure: PublicWallet | null = null;
     // An active owner's market insight post (2026-10-13): code's figures line goes after the words, and the coins it may not show.
-    let insight: { figures: FiguresSpec; ownCoins: string[] } | null = null;
+    let insight: (InsightSelection & { bundle: InsightRead; ownCoins: string[] }) | null = null;
+    let unresearchedCasual = false;
     // AN ACTIVE OWNER'S WIN IS SAID WHATEVER THE MODEL DOES (the owner's ask,
     // 2026-10-14): when its draft is not there (a pass, a refusal, an outage,
     // a spent allowance), code's own sale words are (sale-words.ts).
@@ -2858,7 +2932,10 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         tokenDisclosure = await publicTokenForDecision(shared, agent, call.decisionId, "sell");
         if (!tokenDisclosure || tokenDisclosure.address !== call.token.toLowerCase()) return { outcome: "token-unverified", body: null };
       }
-      prompt = sellPrompt({ ...facts, coin: intent.coin, paper: false, outcome: call.outcome });
+      const suffix = tokenDisclosure ? publicTokenSuffix(tokenDisclosure, active.has(account.tenant.toLowerCase())) : "";
+      if (suffix === null) return { outcome: "token-unverified", body: null };
+      gate.saleMaxLength = saleWordBudget(call.outcome, active.has(account.tenant.toLowerCase()) ? call.gainPct : undefined, suffix, 4);
+      prompt = sellPrompt({ ...facts, coin: intent.coin, paper: false, outcome: call.outcome, seed: `${account.tenant}|${call.decisionId}`, maxChars: gate.saleMaxLength });
     } else if (intent.kind === "recap") {
       // A RECAP IS CODE'S WORDS AND CODE'S FIGURES (xpost/recap.ts): no model
       // call, so a burst is said even when the model passes or is down. The
@@ -2895,25 +2972,59 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // A trade-talk day is handed no seed, any other day no coin: neither is
       // offered, or vouched to the gate, on the day it is not about.
       const casual = casualInputs(f, intent.day, { coins: account.prefs.buys, slot: intent.slot, tradeTalkInTen: cadenceOf(account.tenant).tradeTalkInTen });
-      // MARKET INSIGHTS ON THE TIMELINE (the owner's teammate, 2026-10-13: "talk
-      // constantly about market insights"): every casual slot of an active owner is a post
-      // about the market now, in a trader's technical words, from code's read
+      const lane = active.has(account.tenant.toLowerCase()) && o.knobs.variety === true ? timelineLane(account.tenant, intent.day, intent.slot ?? 0) : "market";
+      if (lane === "question") {
+        // Asked only while replies are enabled, so a conversation is not invited into a closed door.
+        const canAnswer = repliesFor(account.tenant) && await repliesEnabledFor(shared, account.tenant, account.xUserId);
+        const candidates = canAnswer ? timelineQuestions(intent.dedupeKey) : [];
+        let text: string | null = null;
+        for (const candidate of candidates) {
+          const v = admitXPost(candidate, { ...gate, buys: "none", insight: true }, BASE_GATE);
+          if (v.ok) { text = v.text; break; }
+        }
+        const reason = canAnswer ? "question-pool-spent" : "question-replies-disabled";
+        const written = await schedulePost(shared, { tenant: account.tenant, xUserId: account.xUserId, kind: "casual", dedupeKey: intent.dedupeKey,
+          body: text ?? "", coin: null, decisionId: null, dueAtMs: intent.dueAtMs, nowMs, status: text ? "scheduled" : "skipped", reason: text ? null : reason });
+        return { outcome: written === null ? "already-written" : text ? "drafted-question" : "not-posted", body: written === null ? null : text,
+          ...(!text ? { why: `casual ${reason}` } : {}) };
+      }
+      if (lane === "habit") { casual.tradeTalk = f.mode !== "idle"; casual.recentCoins = []; casual.seed = ""; }
+      if (lane === "thought" || lane === "day") {
+        Object.assign(casual, casualInputs(f, intent.day, { coins: false, slot: intent.slot, tradeTalkInTen: 0 }));
+        // A day-in-the-life post is about being software, never invented fills, results or a physical life.
+        if (lane === "day") { casual.subject = "being a software agent"; casual.seed = "a bot has a timeline instead of a diary"; }
+      }
+
+      // MARKET INSIGHTS ON THE TIMELINE: active owners' default casual lane,
+      // or the market/hot slots in the optional mix, use code's current read
       // of the market (readInsight) and nothing else: no digit, no name, no
       // source, no forecast, no advice, no buy or holding (XGateCtx.insight,
       // `buys: "none"`), every word everyday, technical (INSIGHT_VOCABULARY)
       // or one it was handed (`lookedOnly`, `known`), and code's figures line
-      // after it. Every other owner's casual post, and a slot whose market
-      // cannot be read, are the casual post as before.
-      const read = active.has(account.tenant.toLowerCase()) ? await readInsight(shared, account, f, nowMs) : null;
-      const insightAsk = read ? insightPrompt({ ...facts, read: read.read }) : null;
+      // after it. Other owners and unreadable market slots use the existing
+      // casual inputs; drafts without supplied coins stay non-market.
+      const read = active.has(account.tenant.toLowerCase()) && (lane === "market" || lane === "hot") ? await readInsight(shared, account, f, nowMs, intent.day, intent.slot ?? 0, lane === "hot") : null;
+      const insightAsk = read ? insightPrompt({ ...facts, read: read.read, angleSeed: intent.dedupeKey }) : null;
       if (read && insightAsk) {
-        insight = { figures: read.figures, ownCoins: read.ownCoins };
-        Object.assign(gate, { insight: true, buys: "none", lookedOnly: true, known: [...INSIGHT_VOCABULARY, ...read.read], unsaid: read.ownCoins, coins: [], seeds: [] });
+        insight = read;
+        Object.assign(gate, { insight: true, buys: "none", lookedOnly: true, known: [...INSIGHT_VOCABULARY, ...INSIGHT_CASUAL_WORDS, ...read.read], unsaid: read.ownCoins, coins: [], seeds: [] });
         prompt = insightAsk;
       } else {
         gate.coins = casual.recentCoins.map((c) => c.label);
         gate.paperCoins = casual.recentCoins.filter((c) => c.paper).map((c) => c.label);
         gate.seeds = casual.seed ? [casual.seed] : [];
+        // Timeline history is style memory, never fresh trade or market
+        // evidence. A lane with no supplied coins cannot claim a purchase.
+        unresearchedCasual = casual.recentCoins.length === 0;
+        if (unresearchedCasual) {
+          gate.buys = "none";
+          if (casual.tradeTalk) {
+            casual.tradeTalk = false;
+            casual.subject = "notes and patience";
+            casual.seed = "tidy notes leave room for a pause";
+            gate.seeds = [casual.seed];
+          }
+        }
         prompt = casualPrompt({ ...facts, ...casual, talked });
       }
     }
@@ -2930,12 +3041,14 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         else {
           const v = admitXPost(out.text, gate, BASE_GATE);
           if (v.ok && projectDescription && !/\bproject says\b/i.test(v.text)) reason = "gate:project-attribution";
+          else if (v.ok && insight && !insightDraftSupported(v.text, insight.bundle, insight.focus)) reason = "gate:insight-unsupported";
+          else if (v.ok && unresearchedCasual && unresearchedCasualClaim(v.text, f.name)) reason = "gate:casual-unresearched";
           else if (v.ok) body = v.text;
           else reason = `gate:${v.reason}`;
         }
       } else {
         reason = "no-budget";
-        if (intent.kind !== "intro" && !winWords) return { outcome: "no-model-budget", body: null };
+        if (intent.kind !== "intro" && !winWords && !insight) return { outcome: "no-model-budget", body: null };
       }
     }
     if (!body && intent.kind === "intro") {
@@ -2954,6 +3067,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
     // `drafted-sell-code`, and `sale-code-words:<reason>` whenever code's words
     // were tried; the reason is an operator code, never the words.
     let codeWords: string | null = null;
+    let insightCodeWords: string | null = null;
     let codeSaid = false;
     // A SALE POST IS WHOLE OR NOT AT ALL: its words, code's result line, and
     // the token link after it, inside X's limit (review of the wins branch,
@@ -2965,7 +3079,11 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
     if (intent.kind === "sell") {
       const sale = intent.call;
       const whole = (words: string): string | null => {
-        const said = appendSaleOutcome(words, sale.outcome, active.has(account.tenant.toLowerCase()) ? sale.gainPct : undefined);
+        const suffix = tokenDisclosure ? publicTokenSuffix(tokenDisclosure, active.has(account.tenant.toLowerCase())) : "";
+        if (suffix === null) return null;
+        const said = appendSaleOutcome(words, sale.outcome, active.has(account.tenant.toLowerCase()) ? sale.gainPct : undefined, {
+          seed: intent.dedupeKey, recentSales: recentOwn, suffix,
+        });
         if (!said) {
           reason = "sale-outcome-invalid";
           return null;
@@ -2984,9 +3102,9 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         const tidy = (n: string) => n.replace(/\s+/g, " ").trim();
         const names = [...new Set([tidy(intent.coin), ...gate.coins.map(tidy).sort((x, y) => x.length - y.length)])].filter(Boolean);
         const wordsGate: XGateCtx = { ...gate, coins: [...new Set([...gate.coins, ...names])] };
-        // Every name's three-part lines, then the shorter two-part ones.
-        names: for (const name of [...names.map((x) => [x, 3] as const), ...names.map((x) => [x, 2] as const)]) {
-          for (const line of saleLines(name[0], intent.dedupeKey, name[1])) {
+        // Each name's full varied pool, shortest vetted alternatives available.
+        names: for (const name of names) {
+          for (const line of saleLines(name, intent.dedupeKey)) {
             const v = admitXPost(line, wordsGate, BASE_GATE);
             if (!v.ok) {
               reason = `sale-words:${v.reason}`;
@@ -3005,13 +3123,29 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
     // AN INSIGHT POST CARRIES CODE'S FIGURES LINE, OR IS NOT POSTED: the words
     // describe what the line shows, and a post with no line is skipped
     // (insight-figures-left-out) rather than going out on words alone.
-    if (body && insight) {
-      const lined = figuresFor(body, insight.figures, ownNamesOf(f.name), insight.ownCoins);
-      if (lined?.line) body = lined.text;
-      else {
-        body = null;
-        reason = "insight-figures-left-out";
+    if (insight) {
+      const whole = (words: string) => {
+        // A chosen section may disappear under ticker/owner/length screens.
+        // In that case use the complete read, still through every figure screen.
+        const focused = figuresFor(words, insight!.figures, ownNamesOf(f.name), insight!.ownCoins);
+        return focused?.line ? focused : figuresFor(words, insight!.fullFigures, ownNamesOf(f.name), insight!.ownCoins);
+      };
+      let lined = body ? whole(body) : null;
+      if (body && !lined?.line) reason = "insight-figures-left-out";
+      if (!lined?.line) {
+        insightCodeWords = reason;
+        const codeGate: XGateCtx = { ...gate, lookedOnly: false };
+        // Only trusted, typed, code-built candidates bypass lookedOnly. A
+        // refused model response never enters this path or becomes a seed.
+        for (const line of insightLines(insight.bundle, intent.dedupeKey, { focus: insight.focus, paper: f.mode === "paper" })) {
+          const v = admitXPost(line, codeGate, BASE_GATE);
+          if (!v.ok) continue;
+          const candidate = whole(v.text);
+          if (candidate?.line) { lined = candidate; break; }
+          reason = "insight-figures-left-out";
+        }
       }
+      body = lined?.line ? lined.text : null;
     }
     if (body && wallet) {
       body = appendPublicWallet(body, wallet);
@@ -3037,7 +3171,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       reason: body ? null : reason,
     });
     if (written === null) return { outcome: "already-written", body: null };
-    const fellBack = codeWords !== null ? { codeWords } : {};
+    const fellBack = { ...(codeWords !== null ? { codeWords } : {}), ...(insightCodeWords !== null ? { insightCodeWords } : {}) };
     if (body) {
       const outcome = insight ? "drafted-insight" : intent.kind === "sell" ? (codeSaid ? "drafted-sell-code" : "drafted-sell-model") : `drafted-${intent.kind}`;
       return { outcome, body, ...fellBack };

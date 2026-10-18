@@ -261,6 +261,9 @@ export const ACTIVE_CADENCE: Readonly<PlanCadence> = Object.freeze({
   recap: true,
 });
 
+/** More casual opportunities within the twelve-post ceiling the owner consented to. */
+export const VARIED_CADENCE: Readonly<PlanCadence> = Object.freeze({ ...ACTIVE_CADENCE, casualPerDay: 10 });
+
 /** What the planner asks of time. The glue binds it to the owner-local clock the room also uses. */
 export interface PlanClock {
   /** "YYYY-MM-DD" in `tz`, UTC when tz is null or unusable. */
@@ -351,6 +354,8 @@ export interface PlanInput {
   ownerPerDay?: number | null;
   /** Whether posts that need a model (buy, casual) may be planned at all. */
   model?: boolean;
+  /** Active timeline pools can write without a model; buy drafting still requires one. */
+  codeCasual?: boolean;
   /** The kinds the owner lets it post (XPostPrefs). Absent, or a field absent, is on. */
   kinds?: Partial<Pick<XPostPrefs, "buys" | "casual">>;
   /** How often this account posts. Absent is STANDARD_CADENCE; `perDay`, when given, still sets the ceiling. */
@@ -764,7 +769,7 @@ export function planPosts(input: PlanInput): PlanIntent[] {
   const today = dayOf(now);
   const minutes = clock.localMinutes(tz, now);
   const slotsToday = Math.max(1, Math.floor(cadence.casualPerDay));
-  if (modelOk && !asleep && input.kinds?.casual !== false && minutes !== null) {
+  if ((modelOk || input.codeCasual === true) && !asleep && input.kinds?.casual !== false && minutes !== null) {
     const [start, end] = tz ? cadence.casualWindowLocal : cadence.casualWindowUtc;
     const quiet = hash32(`casual|${key(tenant)}|${today}`) % 10 < cadence.casualQuietDaysInTen;
     const width = Math.floor((end - start) / slotsToday);

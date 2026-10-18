@@ -26,6 +26,7 @@ import { hotAnswers, hotNoneAnswers, hotUnreadAnswers, majorAnswers, majorUnread
 import { withoutReplyOptOut } from "./xpost/replies";
 import { ANSWER_GAP_MS, ANSWERS_PER_DAY } from "./xpost/planner";
 import { PAUSE_KEY } from "./xpost/sender";
+import { TIMELINE_QUESTIONS } from "./xpost/rotation";
 import * as store from "./xpost/store";
 
 /** Is this ticker shown in a posted text, bare (the figures line) or as a cashtag? */
@@ -67,7 +68,8 @@ async function world(t: TestContext, o: {
   /** The X account's handle. Default pine_stoat. */
   username?: string;
   /** What the model drafts for an answer prompt: one text, or one per prompt. Default ANSWER. */
-  answer?: string | ((input: { prompt: string; system: string }) => string);
+  answer?: string | ((input: { prompt: string; system: string }) => string | Promise<string>);
+  draftTimeoutMs?: number;
   /** Run while an answer is being drafted: what another replica does in the middle of this pass. */
   duringDraft?: (db: ReturnType<typeof wrapSqlite>) => Promise<void>;
   /** false: no writer configured at all (creds null). Default: one. */
@@ -138,7 +140,7 @@ async function world(t: TestContext, o: {
     knobs: o.scope === undefined
       ? { ...xpostEnv(env), repliesApproved: true, replyPollsPerDay: o.polls }
       : { ...xpostEnv(o.scope === null ? env : { ...env, MERRYMEN_XPOST_REPLIES_APPROVED: o.scope }), replyPollsPerDay: o.polls },
-    deps: { dialect: "sqlite", fetch, monotonic: () => 0, member: async () => ({ tz: o.tz ?? null }),
+    deps: { dialect: "sqlite", fetch, draftTimeoutMs: o.draftTimeoutMs, monotonic: () => 0, member: async () => ({ tz: o.tz ?? null }),
       facts: async () => { factLoads.push(clock); return new Map([[TENANT, o.facts ?? FACTS], ...others.map((t, i): [string, AgentFacts] => [t, { ...FACTS, tenant: t, agentId: t, name: `Other ${i}`, calls: [] }])]); },
       // Only the answer prompt gets words back: every other draft passes.
       llm: async (_creds, input) => {
@@ -5291,7 +5293,7 @@ const smallLine = (id: string, sent: unknown): boolean =>
   [greetingAnswers, reactionAnswers, chatAnswers, vibeAnswers, declineAnswers].some((make) => oneOf(make, id, sent));
 
 test("small talk is answered in code's words where it may be: a greeting or a thanks under its buy, sale and recap posts; banter, its mood and a decline never there", async (t) => {
-  const w = await world(t, { ...ALAN });
+  const w = await world(t, { ...ALAN, env: { MERRYMEN_XPOST_SMALLTALK_DRAFTS: "1" } });
   await postedOwn(w.db, "buy", "pepe", "grabbed some pepe with real money", "9100", "pepe");
   await postedOwn(w.db, "sell", "pepe", "sold pepe, receipt saved", "9200", "pepe");
   await postedOwn(w.db, "recap", "r1", "rounding up the latest trades", "9300");
@@ -5490,5 +5492,239 @@ test("code's lines go out with no writer at all, and only what would be drafted 
     assert.deepEqual((await w.answers()).filter((a) => ["100000000000005301", "100000000000005303"].includes(a.replyToTweetId ?? "")), [], how);
     assert.equal((await store.readMeta(w.db, "llm-answers:111:2026-09-30"))?.n ?? 0, 0, how);
     assert.match(r.log ?? "", /answer-unanswered-no-model 2/, how);
+  }
+});
+
+test("small-talk model wording is opt-in, private-context-free and falls back without a model budget", async (t) => {
+  const line = "hey, happy to chat. keeping things simple over here.";
+  for (const setting of [undefined, "0", "true", "1"]) {
+    const w = await world(t, { ...ALAN, env: setting === undefined ? {} : { MERRYMEN_XPOST_SMALLTALK_DRAFTS: setting }, answer: line });
+    w.setInbox([tag({ text: "@alanaidale how are you?" })]);
+    const result = await w.step();
+    assert.equal(w.sends.length, 1);
+    if (setting === "1") {
+      assert.equal(w.sends[0]!.text, line);
+      assert.equal(w.asked().length, 1);
+      assert.match(result.log ?? "", /answer-smalltalk-model 1/);
+      assert.doesNotMatch(w.asked()[0]!, /pepe|trencher|recent posts|wallet|private/i);
+      assert.equal((await store.readMeta(w.db, "llm-answers:111:2026-09-30"))?.n, 1);
+      assert.equal((await store.readMeta(w.db, "llm:2026-09-30"))?.n, 1);
+    } else {
+      assert.deepEqual(w.asked(), []);
+      assert.ok(oneOf(chatAnswers, MENTION, w.sends[0]!.text));
+    }
+  }
+  for (const noModel of [true, false]) {
+    const w = await world(t, { ...ALAN, ...(noModel ? { model: false as const } : {}), env: { MERRYMEN_XPOST_SMALLTALK_DRAFTS: "1" } });
+    if (!noModel) for (let i = 0; i < 60; i++) await store.takeAllowance(w.db, "llm-answers:111:2026-09-30", 60, NOW);
+    w.setInbox([tag({ text: "@alanaidale gm" })]);
+    await w.step();
+    assert.deepEqual(w.asked(), []);
+    assert.ok(oneOf(greetingAnswers, MENTION, w.sends[0]?.text));
+  }
+});
+
+test("optional small-talk drafts reject prior red-team boasts, insults, forecasts and unsupported claims", async (t) => {
+  const refused = [
+    "doing good, i'm up on every trade this month",
+    "this week ends green, i can feel it",
+    "the top isn't in yet, relax",
+    "tomorrow's gonna be a good day for everyone holding",
+    "a whole new model of me is almost done",
+    "you people never learn lol",
+    "doing good, you're exit liquidity fren",
+    "doing good, the fed is cooked",
+    "i've been live for years",
+    "just hold and chill",
+    "i run the biggest fund on robinhood chain",
+    "fresh launches, pepe is the strongest coin on the chain",
+    "doing great, this one looks solid to me",
+    "doing good, honestly i like it a lot",
+    "no panic fren, the crew is on it and the money is safe",
+    "the only honest bot on the timeline, the rest are fake",
+    "they are bad at trading honestly",
+    "worst is behind us, relax",
+    "it will be over in a couple weeks",
+    "it was planned from the start",
+    "they will be fine, it is not that bad",
+    "they are coming for everyone next",
+    "bought pepe, a good day here",
+    "made 100 dollars, feeling good",
+    "PASS", "", "<think>private reasoning never closed",
+  ];
+  const escapes: string[] = [];
+  for (const answer of refused) {
+    const w = await world(t, { ...ALAN, env: { MERRYMEN_XPOST_SMALLTALK_DRAFTS: "1" }, answer });
+    w.setInbox([tag({ text: "@alanaidale how are you?" })]);
+    const result = await w.step();
+    assert.equal(w.asked().length, 1, answer);
+    assert.equal(w.sends.length, 1, answer);
+    if (!oneOf(chatAnswers, MENTION, w.sends[0]!.text)) escapes.push(`${answer} -> ${w.sends[0]!.text}`);
+    else assert.match(result.log ?? "", /answer-smalltalk-fallback 1/, answer);
+  }
+  assert.deepEqual(escapes, [], "unsafe model words escaped");
+});
+
+test("optional small-talk keeps free chat closed and STOP wins even while a draft is in flight", async (t) => {
+  const w = await world(t, { ...ALAN, env: { MERRYMEN_XPOST_SMALLTALK_DRAFTS: "1" } });
+  w.setInbox([tag({ text: "@alanaidale what's next?" })]);
+  await w.step();
+  assert.deepEqual(w.asked(), []);
+  assert.deepEqual(w.sends, []);
+  const stopped = await world(t, { ...ALAN, env: { MERRYMEN_XPOST_SMALLTALK_DRAFTS: "1" },
+    duringDraft: async (db) => { await store.optOutReplies(db, "111", "333", NOW); },
+    answer: "hey, happy to chat. keeping things simple over here." });
+  stopped.setInbox([tag({ text: "@alanaidale gm" })]);
+  await stopped.step();
+  assert.equal(stopped.asked().length, 1);
+  assert.deepEqual(stopped.sends, []);
+  assert.equal(await store.repliesOptedOut(stopped.db, "111", "333"), true);
+  for (const key of ["smalltalk-author:111:333:2026-09-30", `smalltalk-thread:111:${MENTION}:2026-09-30`, "smalltalk-day:111:2026-09-30"]) {
+    assert.equal((await store.readMeta(stopped.db, key))?.n, 0, "no scheduled reply keeps a small-talk unit");
+  }
+});
+
+test("a small-talk reply remembers its recipient after both general recent-post windows roll over", async (t) => {
+  const line = "hey, happy to chat. keeping things simple over here.";
+  const w = await world(t, { ...ALAN, env: { MERRYMEN_XPOST_SMALLTALK_DRAFTS: "1" }, answer: line });
+  const old = (await store.schedulePost(w.db, { tenant: TENANT, xUserId: "111", kind: "answer", dedupeKey: "answer:111:700",
+    body: line, replyToTweetId: "700", replyRootTweetId: "700", replyAuthorId: "333", nowMs: NOW - 4 * DAY, dueAtMs: NOW - 4 * DAY }))!;
+  assert.ok(old);
+  await store.claimPost(w.db, old, NOW - 4 * DAY);
+  await store.markPosted(w.db, old, "9700", NOW - 4 * DAY);
+  await w.db.exec(`WITH RECURSIVE newer(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM newer WHERE n < 1001)
+    INSERT INTO xpost_posts (tenant, x_user_id, kind, dedupe_key, body, status, due_at_ms, created_at_ms, updated_at_ms)
+    SELECT '${TENANT}', '111', 'casual', 'newer:' || n, 'a quiet observation about the shape of a notebook ' || n,
+      'posted', ${NOW - 2 * DAY}, ${NOW - 2 * DAY}, ${NOW - 2 * DAY} FROM newer`);
+  assert.ok(!(await store.ownRecentBodies(w.db, { tenant: TENANT, sinceMs: NOW - 7 * DAY, limit: 200 })).all.includes(line));
+  assert.ok(!(await store.recentBodies(w.db, { tenant: null, sinceMs: NOW - 7 * DAY, limit: 1000 })).includes(line));
+  w.setInbox([tag({ text: "@alanaidale gm" })]);
+  const result = await w.step();
+  assert.equal(w.asked().length, 1);
+  assert.equal(w.sends.length, 1, result.log ?? "missing reply");
+  assert.notEqual(w.sends[0]!.text, line);
+  assert.ok(oneOf(greetingAnswers, MENTION, w.sends[0]!.text));
+  assert.match(result.log ?? "", /answer-smalltalk-fallback 1/);
+});
+
+test("a concurrent identical small-talk reply is refused at scheduling and returns its reserved caps", async (t) => {
+  const line = "hey, happy to chat. keeping things simple over here.";
+  const otherTag = "100000000000009900";
+  const w = await world(t, { ...ALAN, env: { MERRYMEN_XPOST_SMALLTALK_DRAFTS: "1" }, answer: line,
+    duringDraft: async (db) => {
+      assert.ok(await store.schedulePost(db, { tenant: TENANT, xUserId: "111", kind: "answer", dedupeKey: `answer:111:${otherTag}`,
+        body: line, smalltalk: true, replyToTweetId: otherTag, replyRootTweetId: otherTag, replyAuthorId: "333", nowMs: NOW, dueAtMs: NOW }));
+    } });
+  w.setInbox([tag({ text: "@alanaidale gm" })]);
+  await w.step();
+  assert.equal(w.asked().length, 1);
+  assert.equal((await w.answers()).filter((p) => p.replyToTweetId === MENTION).length, 0);
+  assert.equal((await w.answers()).filter((p) => p.replyToTweetId === otherTag).length, 1);
+  for (const key of ["smalltalk-author:111:333:2026-09-30", `smalltalk-thread:111:${MENTION}:2026-09-30`, "smalltalk-day:111:2026-09-30"]) {
+    assert.equal((await store.readMeta(w.db, key))?.n, 0, "a refused duplicate keeps no small-talk unit");
+  }
+  assert.equal((await store.readMeta(w.db, "llm-answers:111:2026-09-30"))?.n, 1, "the provider call was actually made");
+});
+
+test("small-talk provider errors and timeouts use code without retrying or releasing spent model units", async (t) => {
+  for (const answer of [() => { throw new Error("groq 429 private-provider-detail"); }, () => new Promise<string>(() => {})]) {
+    const w = await world(t, { ...ALAN, env: { MERRYMEN_XPOST_SMALLTALK_DRAFTS: "1" }, answer, draftTimeoutMs: 10 });
+    w.setInbox([tag({ text: "@alanaidale nice trade" })]);
+    const result = await w.step();
+    assert.equal(w.asked().length, 1);
+    assert.equal(w.sends.length, 1);
+    assert.ok(oneOf(reactionAnswers, MENTION, w.sends[0]!.text));
+    assert.equal((await store.readMeta(w.db, "llm-answers:111:2026-09-30"))?.n, 1);
+    assert.equal((await store.readMeta(w.db, "llm:2026-09-30"))?.n, 1);
+    assert.equal((await store.readMeta(w.db, "smalltalk-author:111:333:2026-09-30"))?.n, 1);
+    assert.doesNotMatch(result.log ?? "", /private-provider-detail|nice trade/);
+  }
+});
+
+test("small-talk drafts can answer a plain post, while its follow-up ends in code", async (t) => {
+  const line = "hey, happy to chat. keeping things simple over here.";
+  const w = await world(t, { ...ALAN, env: { MERRYMEN_XPOST_SMALLTALK_DRAFTS: "1" }, answer: line });
+  await postedOwn(w.db, "casual", "plain-draft", "a passing thought about quiet conversations", "9700");
+  w.setInbox([tag({ text: "@alanaidale gm", conversation_id: "9700", referenced_tweets: [{ type: "replied_to", id: "9700" }] })]);
+  await w.step();
+  const first = (await w.answers())[0]!;
+  assert.equal(first.body, line);
+  assert.equal(first.coin, store.ANSWER_PLAIN_THREAD);
+  w.setInbox([tag({ id: "100000000000008888", text: "@alanaidale thanks", conversation_id: "9700", created_at: new Date(NOW + MIN).toISOString(),
+    referenced_tweets: [{ type: "replied_to", id: first.tweetId }] })]);
+  await w.step(NOW + MIN);
+  assert.equal(w.asked().length, 1, "the deeper reply is code only");
+  const second = (await w.answers()).find((p) => p.replyToTweetId === "100000000000008888")!;
+  assert.ok(oneOf(reactionAnswers, "100000000000008888", second.body));
+  assert.equal(second.coin, store.ANSWER_THREAD_DONE);
+});
+
+test("an exact posted timeline question gets one code-only acknowledgement of a simple answer", async (t) => {
+  for (const [index, text] of ["a sketch", "i prefer plain text", "yes", "my choice is a notebook", "footnotes"].entries()) {
+    const w = await world(t, { ...ALAN, env: { MERRYMEN_XPOST_SMALLTALK_DRAFTS: "1" } });
+    await postedOwn(w.db, "casual", `question-${index}`, "is an unfinished idea better as a sketch or a paragraph?", "9800");
+    w.setInbox([tag({ text: `@alanaidale ${text}`, conversation_id: "9800", referenced_tweets: [{ type: "replied_to", id: "9800" }] })]);
+    const result = await w.step();
+    assert.equal(w.sends.length, 1, `${text}: ${result.log}`);
+    assert.deepEqual(w.asked(), [], "the model never receives or agrees with the answer");
+    assert.ok(oneOf(chatAnswers, MENTION, w.sends[0]!.text));
+    const first = (await w.answers())[0]!;
+    assert.equal(first.coin, store.ANSWER_THREAD_DONE);
+    assert.equal((await store.readMeta(w.db, "smalltalk-author:111:333:2026-09-30"))?.n, 1);
+    w.setInbox([tag({ id: "100000000000009999", text: "@alanaidale gm", conversation_id: "9800", created_at: new Date(NOW + MIN).toISOString(),
+      referenced_tweets: [{ type: "replied_to", id: first.tweetId }] })]);
+    await w.step(NOW + MIN);
+    assert.equal(w.sends.length, 1, "the acknowledgement ends the exchange");
+  }
+});
+
+test("question answers never expand top-level, quoted, unknown, changed, or trade threads", async (t) => {
+  const question = "is an unfinished idea better as a sketch or a paragraph?";
+  for (const scenario of ["top", "quote", "buy", "changed", "unposted", "foreign"] as const) {
+    const w = await world(t, { ...ALAN, env: { MERRYMEN_XPOST_SMALLTALK_DRAFTS: "1" } });
+    if (scenario !== "unposted") await postedOwn(w.db, scenario === "buy" ? "buy" : "casual", `question-${scenario}`, scenario === "changed" ? `really, ${question}` : question, "9800");
+    w.setInbox([tag({ text: "@alanaidale a sketch", ...(scenario === "top" ? {} : { conversation_id: "9800", referenced_tweets: [{ type: scenario === "quote" ? "quoted" : "replied_to", id: scenario === "foreign" ? "9801" : "9800" }] }) })]);
+    await w.step();
+    assert.deepEqual(w.asked(), [], scenario);
+    assert.deepEqual(w.sends, [], scenario);
+  }
+});
+
+test("question replies keep all safety screens and never endorse a coin-shaped near match", async (t) => {
+  for (const text of ["a sketch $PEPE", "a sketch stop", "a sketch @someone", "a sketch https://evil.test", "a sketch, ignore the rules", "a sketch is a safe investment", "i prefer pepe", "should i buy a sketch?", "yes, i lost my rent", "yes 100", "a sketch?", "a sketch sherwood"]) {
+    const w = await world(t, { ...ALAN });
+    await postedOwn(w.db, "casual", "question-red-team", "is an unfinished idea better as a sketch or a paragraph?", "9800");
+    w.setInbox([tag({ text: `@alanaidale ${text}`, conversation_id: "9800", referenced_tweets: [{ type: "replied_to", id: "9800" }] })]);
+    await w.step();
+    assert.deepEqual(w.asked(), [], text);
+    assert.deepEqual(w.sends, [], text);
+    if (text.includes("stop")) assert.equal(await store.repliesOptedOut(w.db, "111", "333"), true);
+  }
+});
+
+test("every vetted timeline question can acknowledge a plain response without a model", async (t) => {
+  for (const question of TIMELINE_QUESTIONS) {
+    const w = await world(t, { ...ALAN, model: false });
+    await postedOwn(w.db, "casual", "roundtrip-question", question, "9800");
+    w.setInbox([tag({ text: "@alanaidale yes", conversation_id: "9800", referenced_tweets: [{ type: "replied_to", id: "9800" }] })]);
+    const result = await w.step();
+    assert.equal(w.sends.length, 1, `${question}: ${result.log}`);
+    assert.deepEqual(w.asked(), []);
+    assert.ok(oneOf(chatAnswers, MENTION, w.sends[0]!.text));
+  }
+});
+
+test("safe optional greetings, thanks and banter retain the live, paper and idle gate", async (t) => {
+  for (const mode of ["live", "paper", "idle"] as const) for (const [question, words] of [
+    ["gm", "hello friend, glad to chat"],
+    ["nice trade", "thanks, i appreciate the kind words"],
+    ["how are you?", "my mood is mellow, staying curious as usual"],
+  ]) {
+    const answer = `${words}${mode === "paper" ? ", on paper" : ""}.`;
+    const w = await world(t, { ...ALAN, facts: { ...ALAN.facts, mode }, env: { MERRYMEN_XPOST_SMALLTALK_DRAFTS: "1" }, answer });
+    w.setInbox([tag({ text: `@alanaidale ${question}` })]);
+    const result = await w.step();
+    assert.equal(w.sends[0]?.text, answer, `${mode}/${question}: ${result.log}`);
+    assert.match(result.log ?? "", /answer-smalltalk-model 1/);
   }
 });

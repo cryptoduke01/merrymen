@@ -27,15 +27,15 @@ import path from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
-import { STRATEGY_SPOKEN } from "../groupchat/templates";
-import { chatAnswers, declineAnswers, reactionAnswers, selfAnswers, tradesAnswers, vibeAnswers } from "./casual";
-import { checkAnswers, checkPhrases, type CheckRead, type CheckSignal, type CheckVerdict } from "./check";
-import { sourceNamed } from "./gate";
-import { hotAnswers, hotNoneAnswers, hotUnreadAnswers, insightFacts, majorAnswers, majorUnreadAnswers, marketAnswers, type HotRead, type MajorRead, type MarketRead, type Move } from "./market";
-import { recapLines } from "./recap";
-import { appendSaleOutcome } from "./sale-outcome";
-import { saleLines } from "./sale-words";
-import { greetingAnswers, introTemplate, modelAnswer, modelAnswers } from "./writer";
+import { STRATEGY_SPOKEN } from "./groupchat/templates";
+import { chatAnswers, declineAnswers, reactionAnswers, selfAnswers, tradesAnswers, vibeAnswers } from "./xpost/casual";
+import { checkAnswers, checkPhrases, type CheckRead, type CheckSignal, type CheckVerdict } from "./xpost/check";
+import { sourceNamed } from "./xpost/gate";
+import { hotAnswers, hotNoneAnswers, hotUnreadAnswers, insightFacts, majorAnswers, majorUnreadAnswers, marketAnswers, type HotRead, type MajorRead, type MarketRead, type Move } from "./xpost/market";
+import { recapLines } from "./xpost/recap";
+import { appendSaleOutcome } from "./xpost/sale-outcome";
+import { saleLines } from "./xpost/sale-words";
+import { greetingAnswers, introTemplate, modelAnswer, modelAnswers } from "./xpost/writer";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
@@ -43,7 +43,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const POOL_FILES = [
   "xpost/casual.ts", "xpost/market.ts", "xpost/check.ts", "xpost/sale-words.ts", "xpost/sale-outcome.ts", "xpost/recap.ts",
   "xpost/writer.ts", "xpost/replies.ts", "orchestrator-xpost.ts", "orchestrator-xpost-check.ts",
-].map((f) => path.join(HERE, "..", f));
+].map((f) => path.join(HERE, f));
 
 /** Every string literal, template string and template piece in a source, comments left out. */
 function literalsIn(name: string, src: string): string[] {

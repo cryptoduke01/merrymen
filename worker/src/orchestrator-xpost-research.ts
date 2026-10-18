@@ -1135,6 +1135,8 @@ export interface ResearchBundle {
    * when neither was.
    */
   insight?: InsightRead;
+  /** Day and week evidence for a focused insight, separate from the market answer. */
+  insightWeekFigures?: FiguresSpec;
   /**
    * What the answer turned out to be about, when that is not what the tag was
    * read as: a ticker on the coin list that is no major (a copycat, unranked,
@@ -2293,8 +2295,10 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
           ...(pools ? [{ kind: "pools" as const, coins: pools.coins.map((c) => ({ symbol: c.symbol, change24hPct: c.change24hPct })) }] : []),
           ...(crowd ? [crowd] : []),
         ];
+        const insightWeekFigures: FiguresSpec = big && insight?.day && insight.week
+          ? big.map((m) => ({ kind: "major" as const, symbol: m.symbol, change24hPct: m.change24hPct, change7dPct: m.change7dPct })) : [];
         notes.push("market");
-        return { facts, ...(figures.length ? { figures } : {}), ...(hot.shownNames?.length ? { shownNames: hot.shownNames } : {}), market: read, ...(insight ? { insight } : {}),
+        return { facts, ...(insightWeekFigures.length ? { insightWeekFigures } : {}), ...(figures.length ? { figures } : {}), ...(hot.shownNames?.length ? { shownNames: hot.shownNames } : {}), market: read, ...(insight ? { insight } : {}),
           ...(hot.hot ? { hot: hot.hot } : {}), lookups, notes };
       };
       const i = input.intent;

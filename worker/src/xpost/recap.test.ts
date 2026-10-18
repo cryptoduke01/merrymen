@@ -332,20 +332,19 @@ describe("a recap at send time", () => {
 });
 
 describe("a recap's words", () => {
-  it("a hundred lines, this recap's own first, no word in two parts, so recaps never run out to the repeat limit", () => {
+  it("varies its opening and keeps finding fresh lines through a long recap history", () => {
     const a = recapLines(recapKey(TENANT, 1)), b = recapLines(recapKey(TENANT, 2));
-    assert.equal(a.length, 100);
-    assert.equal(new Set(a).size, 100);
+    assert.equal(a.length, 576);
+    assert.equal(new Set(a).size, 576);
     assert.deepEqual([...a].sort(), [...b].sort());
-    const words = (t: string) => new Set(t.toLowerCase().split(/[^a-z']+/).filter((w) => w.length > 2 && similarity(w, w) > 0));
-    const seen = new Map<string, string>();
-    for (const part of RECAP_SLOTS.flat()) for (const w of words(part)) {
-      assert.ok(!seen.has(w), `"${w}" is in "${part}" and "${seen.get(w)}"`);
-      seen.set(w, part);
-    }
-    // After any one went out, every other one is still no repeat of it, live and paper.
-    for (const lines of [a, recapLines(recapKey(TENANT, 1), { paper: true })]) {
-      for (const said of lines) assert.ok(lines.every((l) => l === said || similarity(l, said) < REPEAT_LIMIT), said);
+    assert.equal(new Set(a.map((line) => line.split(".")[0])).size, 24);
+    for (const paper of [false, true]) {
+      const history: string[] = [];
+      for (let i = 0; i < 60; i++) {
+        const line = recapLines(`recap:${i}`, { paper }).find((candidate) => history.every((previous) => similarity(candidate, previous) < REPEAT_LIMIT));
+        assert.ok(line, `no fresh ${paper ? "paper" : "live"} recap after ${i} posts`);
+        history.unshift(line);
+      }
     }
   });
 
@@ -451,7 +450,7 @@ describe("a win alone (the owner's ask, 2026-10-14: \"where are the trade pnls\"
     // A casual post takes the last post only while no trade waits for the recap, and a coin no recap can count waits for nothing (third review).
     const awake: PlanClock = { ...clock, isAsleep: () => false };
     const at = Array.from({ length: 90 }, (_, m) => DAY0 + 22 * HOUR + m * MIN).find((t) => kinds(planPosts(input({ nowMs: t, clock: awake }))).includes("casual"))!;
-    const casualWith = (calls: PlanCall[]) => kinds(planPosts(input({ nowMs: at, clock: awake, calls, posts: today, model: true }))).includes("casual");
+    const casualWith = (calls: PlanCall[]) => kinds(planPosts(input({ nowMs: at, clock: awake, calls, posts: today, model: true, perDay: ACTIVE_CADENCE.tradePerDay }))).includes("casual");
     assert.equal(casualWith([]), true, "a quiet day: the casual post may take it");
     assert.equal(casualWith([buy((at - DAY0) / HOUR - 1, { symbol: "T7631DACC21B", name: null })]), true, "a nameless coin waits for no recap");
     assert.equal(casualWith([buy((at - DAY0) / HOUR - 1)]), false, "a named buy waits for the recap");

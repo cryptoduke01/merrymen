@@ -591,35 +591,22 @@ is their owner. Never list someone else's agent. Being named means:
   greeting, praise ("nice trade", "congrats"), banter, its mood and advice
   asked each get one of code's lines in its house voice, within caps of
   their own (see "Small talk, answered again" below);
-- **market insights in its casual slots** (the owner's teammate,
-  2026-10-13: "talk constantly about market insights"). Every casual slot is
-  a post about the market now, one each slot; buy and sale posts are
-  unchanged, and a slot whose market cannot be read is the casual post as
-  before. Code reads the same bundle "how's the
-  market?" reads (`readInsight`: the big coins' day and week, read from the
-  figures as the line rounds them, the chain's movers past the floors and
-  the first one's day, how many of them Fomo traders bought most), within the
-  same research allowances and its twelve seconds. The model is handed only
-  code's words for that read (`market.ts insightFacts`: "the big coins are
-  all up a little on the day", "a few coins on the chain's trending list
-  clear the activity floors"; no digit, no name, no source) and asked for one
-  or two lines in a trader's technical words (momentum, volume, liquidity,
-  rotation, breadth, risk-on and risk-off, consolidation, a range and where
-  things sit in it, said in words: `writer.ts insightPrompt`). The X gate
-  holds the draft to every screen a drafted answer is (`XGateCtx.insight`:
-  advice, a call, a forecast, a level, an entry, the house's claims and an
-  amount in words are refused as `hype`, `house-claim` or `quantity`), to no
-  buy or holding at all (`buys: "none"`), to no coin its buys go by
-  (`unsaid`), to no source (`source-named`), no digit (`has-digits`), and to
-  every word being everyday, technical (`INSIGHT_VOCABULARY`) or one of the
-  facts it was handed (`lookedOnly`, `unlooked-name`). Code puts its figures
-  line after the admitted words (`figuresFor`, the same screens as an
-  answer's line); a post whose line cannot be put in is skipped
-  (`insight-figures-left-out`), never posted on words alone. Research off,
-  or nothing read: the casual post as before. Logged as `drafted-insight`.
-  The gate refuses "breakout", "bullish", "bearish", "support level",
-  "bounce" and "rotating into" in any post, so the prompt steers clear of
-  them rather than the gate being loosened;
+- **focused market insights in its casual slots.** Code selects one supported
+  focus per slot: the big coins' day, day versus week, the lead screened mover,
+  Fomo overlap, or an empty screened list. Selection is deterministic across
+  replicas and rotates available focuses. Only that focus's words and matching
+  figures are used; week comparisons carry the same read's week figures.
+  The prompt asks for plain casual language and an occasional dry aside, not a
+  fixed "majors / breadth / momentum" report. Digits, sources, advice, forecasts,
+  unsupported coin names and holding claims remain refused. A further
+  `insightDraftSupported` check refuses invented volume, liquidity, breadth,
+  ranges, the wrong direction or magnitude, and claims outside the focus.
+  Missing or refused drafts try code's own factual lines with the full safety,
+  repeat and opener gates. This also works without writer credentials or budget.
+  Code adds the figures after admission; no renderable figures means no insight
+  post. Research off or unreadable still falls back to the ordinary casual path.
+  Counts distinguish `drafted-insight-model`, `drafted-insight-code`, and
+  `insight-code-words:<reason>`. No draft or provider error text is logged;
 - **reply consent recorded by the orchestrator.** When replies are in scope
   (`MERRYMEN_XPOST_REPLIES_APPROVED` is `1` or `active`) and the agent's X
   posting is on for its connected account, the orchestrator records reply
@@ -637,9 +624,9 @@ Named owners are on `ACTIVE_CADENCE` (`worker/src/xpost/planner.ts`)
 instead of the standard one:
 
 - **About ten posts a day.** Eight casual slots split 09:00–23:30 owner-local
-  (the same hours in UTC when no zone is known), no quiet days, seven slots in
-  ten about how it trades. Later slots roll their own seed, habit and
-  trade-talk dice, and keys `casual:<tenant>:<day>:<slot>` (slot 0 keeps the
+  (the same hours in UTC when no zone is known), no quiet days. With research
+  available these are focused market insights; otherwise the ordinary casual
+  selector applies. Later slots roll their own seeds and keys `casual:<tenant>:<day>:<slot>` (slot 0 keeps the
   historic key).
 - **Every buy and completed sale**, up to twelve posts a day in all. There is
   no three-day coin fold (`coinFoldMs: 0`): a rebuy of a coin it posted about
@@ -1838,7 +1825,7 @@ cadence is as before.
   (`RECAP_CALLS_PER_AGENT`: a busy paper basket passes 180 in four hours). Its key carries its
   newest trade and a hash of the trades it covers, so a refused recap's key
   never blocks a recap of more. Its words are code's, never a model's (a
-  hundred lines, three slots of ten, any two sharing at most one part, no
+  pool of 576 lead/tail combinations with 24 distinct openings, no
   side of the trade, no size and nothing only real money has, a paper agent's with
   "on paper"), so a recap goes out even when the model passes or the model
   allowance is spent; its figures line says the rest:
@@ -1864,12 +1851,11 @@ cadence is as before.
 - A recap is a trade post: it shares the day's trade allowance, is
   cancelled with buy posts when the owner turns those off, shows in Coming
   up as "Trade recap", and a reply under it is a reply under its trades.
-- **Sized for one active agent.** The hundred lines are shared by every
-  active agent and both monies, and the gate refuses a line the fleet said
-  in fourteen days. One agent's recaps, at least four hours apart, take a
-  little over two weeks to use them all; two agents bursting every day would
-  run out in about eight days and every recap after would be refused. Grow
-  the set (another slot) before a second active tenant trades like Alan.
+- **Variety stays bounded.** Every candidate still passes the unchanged own
+  and fleet repeat thresholds, plus the last-eight-openers check. The selector
+  walks the pool when a candidate repeats. Tests exercise sixty consecutive
+  recaps and forty through the complete real gate. A busy fleet may still
+  exhaust the pool: that skips a post rather than relaxing a screen.
 
 ### A win gets its own post; a loss is the recap's (2026-10-14)
 
@@ -1877,13 +1863,13 @@ Alan's first night under the recap posted his twenty trades as one line,
 "recap: 10 buys, 10 sells (4 green, 6 red), best +4.1%", and the owner
 asked where the trade PnLs were. (Every sale post of that night had been
 drafted and refused as `gate:too-short`: the model wrote "sold some PEPE."
-and the gate wants four words. The prompt now asks for five to twelve words
-under sixty characters.) On the active cadence, trading live money, a sale
+and the gate wants four words. The current prompt asks for a short casual
+line within the actual room left by the verified suffix.) On the active cadence, trading live money, a sale
 now goes out alone only when it is a win:
 
 - **A win** (planner.ts `isWin`): a sale its receipts measured as a profit,
   with a gain big enough to show at one decimal. Its post leads with code's
-  result line ("+12% gross gain before fees and gas…"), attaches its P&L
+  result line (for example, "+12% gross before fees and gas"), attaches its P&L
   card when the X grant has `media.write` (reconnect X once if it does not),
   and ends with the tx link and contract, as every sale post did.
 - **First in the queue, inside the horizon.** Sales are planned before buys,
@@ -1891,22 +1877,24 @@ now goes out alone only when it is a win:
   out held every slot the recap could reach until the losses aged out of its
   window. About five wins in six hours fit; a win that cannot get its own
   post while six hours fresh is still counted by a recap.
-- **Said whatever the model does.** A win needs no model. When the model's
-  sentence is not there (a pass, a refusal, an outage, a spent allowance) or
-  does not fit beside the result line, tx link and contract (about sixty-five
-  characters are left), code's own line is used (xpost/sale-words.ts, e.g.
-  "sold IGNITION. receipt saved, desk running, nothing further."): the first
-  the gate admits that fits whole, for the coin's name and then its other
-  vetted names (a ticker when the name is too long or reads as a quantity).
-  They say the sale is on the record and the desk goes on, and nothing a
-  receipt does not show (no timing, speed or quality, no whole position, no
-  leaving the coin, no human life). A hundred and forty-four lines of three
-  two-word parts, any two sharing at most one part, so two wins are never one
-  template to the repeat check, of different coins or of the same coin with
-  a name of one or two words; then the same lines with two parts, for a name
-  too long for three. A win whose only name is long and that the model cannot
-  word may still find none that fits, and is counted by a recap. An active
-  owner's win needs no model whether or not its buy posts are on.
+- **Said whatever the model does.** A win needs no model. The writer gets only
+  the sale's coin, a neutral wording angle and its real character budget. Profit
+  and loss produce identical prompts: code supplies the result afterwards.
+  Missing, refused or oversized drafts try 24 short, hand-written sale lines
+  first, then 576 reserve combinations: 600 candidates with varied openings,
+  walking both pools under the unchanged repeat gate.
+  Every line says sold without inventing timing, quantity, remaining holdings,
+  a complete exit, a reason, or a result. Long labels may use another vetted
+  name; if none fits, the sale remains available to the recap.
+- **Varied results, still receipt-backed.** Six tags retain "gross" and
+  "before fees and gas". Optional code reactions depend on the fresh gain band;
+  gains below one percent get no upbeat reaction. The last ten sale reactions
+  are avoided, and a bare tag remains available when room or variety runs out.
+  Losses and flat results use separate exact pools. Send-time validation accepts
+  only a complete exact tag/reaction for the freshly replayed result, or the
+  corresponding legacy line for an already queued post. Changed figures or
+  incompatible reactions withhold it. Explorer URLs still use the conservative
+  existing length calculation; no unverified URL-count shortcut is enabled.
 - **Counted by the recap too.** A recap counts every sale of its window,
   wins included ("4 green" counts every win), and a win a recap counted
   still goes out alone while it is fresh: no win waits on its own post to be
@@ -2239,6 +2227,60 @@ The original at-most-once claim, review window, account gap and daily limits
 continue to apply; buy and sale posts share the existing trade-post ceiling.
 An introduction posted manually is not automatically imported into the queue:
 the owner should skip a duplicate introduction under Coming up.
+
+## Casual voice rollout (2026-10-18)
+
+The continuation includes PR #346 and the first five voice commits. Mention
+pages containing only recognized missing-expansion errors remain readable;
+unread parent context cannot authorize a larp check. STOP processing, reply
+consent, cross-tenant account checks and at-most-once sending are unchanged.
+
+Timeline prompts use up to ten recent buy, sale, recap and casual posts after
+filtering. Code removes sale results, figures, transaction links and contract
+addresses; replies and researched answers never enter this voice memory.
+Posts about the other money mode are excluded before taking ten. Repeat checks
+still see the full original history. `same-opener` rejects the first two content
+words matching any of the last eight timeline openings, masking coin labels.
+Replies cannot crowd that window out. Pool selectors try another candidate;
+no similarity threshold is reduced.
+
+Two staged switches start **off**:
+
+| Setting | Effect when exactly `1` |
+| --- | --- |
+| `MERRYMEN_XPOST_VARIETY` | Active owners rotate market 40%, hot 15%, software day 15%, a vetted question 10%, trading habit 10%, and passing thought 10%. Ten casual opportunities within the existing twelve-post daily timeline ceiling; the trade limit, 75-minute gap, review window, owner preference and fleet cap still apply. A quiet slot is not a posting quota. |
+| `MERRYMEN_XPOST_SMALLTALK_DRAFTS` | Already eligible greetings, reactions and banter at top level or directly under plain posts may use a model. Trade/closed threads and arbitrary free chat stay out. The complete draft gate, post-gate coin/house/trust/market/deictic checks and a closed conversational vocabulary all apply. PASS, errors, exhausted budget or unsafe wording use the vetted code reply. |
+
+The mixed timeline's questions are code-written and require reply consent.
+Only a finite whole-tag response to an exact own posted question gets the
+contextual acknowledgement; that exchange closes. This does not make arbitrary
+chat, financial suggestions, quotes or replies to other accounts eligible.
+The software-day lane is about being software, never an invented physical day,
+trade count or result. Hot slots focus on the screened mover or crowd evidence.
+The draft design proposed fifteen timeline posts a day; this implementation
+keeps twelve because that is the ceiling the current web and native consent
+screens promise. Ten casual opportunities may yield fewer published posts.
+
+Small talk remains inside the existing sixty-answer ceiling, with at most
+thirty small-talk replies per local day, two per author per UTC day (one for
+likely bots), four per conversation per UTC day, the twenty-second gap and
+three answers per poll. Fleet author lookup checks the actual candidate IDs
+without truncating the account table. A stop received while drafting still
+blocks scheduling and returns unused small-talk reservations.
+The same small-talk line cannot be scheduled to the same person again for
+seven days, across owners sharing an X account. This check runs under the
+existing author lock and counts scheduled, sending, posted and failed rows
+conservatively; canceled and skipped rows do not block it. Its exact-match
+check does not depend on the recent-history limit.
+
+Before enabling the staged switches, reconnect a rejected X grant in Settings,
+verify the account and posting choices, and observe the new reason counters.
+A separate permitted writer key/model prevents trading and posting from sharing
+rate limits. This change neither reconnects an account nor changes production
+configuration. Roll back the mixed timeline or model small talk by unsetting
+its switch; the safer code fallbacks, source ban, receipt checks and STOP handling
+remain in place. Application changes require Milla's review; no automatic merge
+or deployment is authorized by these notes.
 
 ## Known limits
 

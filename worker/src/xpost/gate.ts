@@ -1,3 +1,4 @@
+import { openerKey } from "./memory";
 /**
  * THE DOOR EVERY X POST GOES THROUGH — docs/x-posting.md rule 2, as code.
  *
@@ -81,6 +82,8 @@ export interface XGateCtx {
   kind: XPostKind;
   /** Trusted result is appended after the model's neutral sale line is gated. */
   sellOutcome?: SaleOutcome;
+  /** Exact weighted room after the sale result and verified token disclosure. */
+  saleMaxLength?: number;
   /** The agent's own name: stripped as a label, allowed in the text, and never read as shouting. */
   agentName: string;
   /**
@@ -99,6 +102,8 @@ export interface XGateCtx {
   recentOwn: string[];
   /** Every account's recent bodies: a draft that echoes one is not this agent's own. */
   recentFleet: string[];
+  /** Newest timeline posts only; replies never displace the eight-opener window. */
+  recentOpeners?: string[];
   /** The phrase a casual draft was seeded with: a copy of it is not the agent's own words either. */
   seeds?: string[];
   /** The agent's style never uses emoji: a draft with one is not in its voice. Default: allowed (at most one). */
@@ -1872,6 +1877,19 @@ function unlookedName(text: string, coins: readonly string[], known: readonly st
   return textWords(text).some((w) => /^[a-z]{3,}$/.test(w) && !wordForms(w).some((f) => ok.has(f)) && !BUY_FILLER.has(w) && !BUY_OBJECT.has(w) && !answerWord(w));
 }
 
+/** Insight-only grammatical exemptions. Require a market subject at a
+ * clause boundary, a complete predicate, and no object that could be a
+ * coin. Only the acquisition/holding screens use the masked clause; every
+ * other screen still sees the original words.
+ */
+function withoutInsightMarketPredicates(text: string): string {
+  const start = String.raw`(^|[.!?;:]\s*|\b(?:and|while|but)\s+)`;
+  const end = String.raw`(?=\s*(?:[.!?;,:]|$|\b(?:and|while|but)\b))`;
+  const range = new RegExp(start + String.raw`((?:the\s+)?(?:majors|big\s+coins|volume|activity|prices)\s+(?:(?:is|are)\s+)?)(?:still\s+)?in\s+(?:(?:a|the|its|their)\s+)?(?:(?:tight|wide|narrow|lower|upper|top|bottom)\s+)?(?:end\s+of\s+(?:the\s+)?)?range` + end, "gi");
+  const picking = new RegExp(start + String.raw`((?:the\s+)?(?:volume|activity)\s+(?:(?:is|are)\s+)?)(?:still\s+)?picking\s+up(?:\s+(?:today|right\s+now|on\s+the\s+day))?` + end, "gi");
+  return text.replace(range, "$1$2rangebound").replace(picking, "$1$2increasing");
+}
+
 function buyClaimed(text: string, vouched: readonly string[] | null): boolean {
   if (vouched === null) return BAG.test(text) || new RegExp(ACQUIRED.source, "i").test(text) || OWNED_ACT.test(text) || OWNED_SHAPE.test(text);
   const names = vouched.map((c) => c.trim().toLowerCase().replace(/^\$/, "")).filter((c) => c !== "");
@@ -2059,11 +2077,15 @@ function admitMasked(tidied: string, ctx: XGateCtx, baseGate: BaseGate, agentNam
   const base = baseGate(tidied, baseCtx);
   if (!base.ok) return base;
   const text = base.text;
+  if (["buy", "sell", "recap", "casual"].includes(ctx.kind) && ctx.recentOpeners) {
+    const key = openerKey(text, coins);
+    if (key && ctx.recentOpeners.slice(0, 8).some((previous) => openerKey(previous, coins) === key)) return refuse("same-opener");
+  }
   // Never a coin it bought, in an answer that was never told what it bought.
   const unsaid = strings(ctx.unsaid);
   if (unsaid.length && namedIn(ctx.kind === "reply" ? withoutReplyOptOut(text) : text, unsaid)) return refuse("bought-named");
   // Nor a buy it was not told of.
-  if (ctx.buys !== undefined && buyClaimed(ctx.kind === "reply" ? withoutReplyOptOut(text) : text, ctx.buys === "none" ? null : coins)) return refuse("buy-claim");
+  if (ctx.buys !== undefined && buyClaimed(ctx.kind === "reply" ? withoutReplyOptOut(text) : ctx.kind === "casual" && ctx.insight === true ? withoutInsightMarketPredicates(text) : text, ctx.buys === "none" ? null : coins)) return refuse("buy-claim");
   // Told its buys: no word that could be another coin's name (XGateCtx.known).
   if (ctx.buys === "vouched" && ctx.known !== undefined && unvouchedWord(withoutNames(ctx.kind === "reply" ? withoutReplyOptOut(text) : text, [agentName]), coins, strings(ctx.known))) return refuse("buy-claim");
   // Handed what it looked up and told none of its buys: no name it was not handed either (XGateCtx.lookedOnly).
@@ -2116,7 +2138,7 @@ function admitMasked(tidied: string, ctx: XGateCtx, baseGate: BaseGate, agentNam
     if (amountSaid(sale)) return refuse("quantity");
     // Nothing left or kept, and no buy to come: what a casual post is held to (REPLY_CURRENT_OR_ACTION, HOT_BUY_CLAIM), and SALE_HOLDING.
     if (SALE_HOLDING.test(sale) || REPLY_CURRENT_OR_ACTION.test(sale) || REPLY_CURRENT_POSITION.test(sale) || hotBuyClaimed(sale)) return refuse("sale-holding");
-    if (text.length > 90) return refuse("sale-length");
+    if ((ctx.saleMaxLength !== undefined && !Number.isFinite(ctx.saleMaxLength)) || xWeightedLength(text) > Math.max(0, Math.min(X_MAX_WEIGHTED, ctx.saleMaxLength ?? 180))) return refuse("sale-length");
   }
   const namesCoin = coins.some((c) => mentions(text, c));
   if ((namesCoin || ctx.kind === "reply") && COIN_ADVICE.test(own)) return refuse("hype");
@@ -2126,6 +2148,8 @@ function admitMasked(tidied: string, ctx: XGateCtx, baseGate: BaseGate, agentNam
   // A drafted answer never forecasts a coin, named or pointed at (draftedForecast).
   if (ctx.kind === "reply" && ctx.answer === true && ctx.drafted === true && draftedForecast(withoutReplyOptOut(own))) return refuse("hype");
   // AN INSIGHT POST IS HELD TO EVERY SCREEN A DRAFTED ANSWER IS (XGateCtx.insight).
+  if (ctx.kind === "casual" && /\b(?:tell|ask|urge|encourage)\s+(?:everyone|people|others|them|followers)\s+to\s+(?:buy|sell|hold|ape|invest)\b/i.test(own)) return refuse("hype");
+  if (ctx.kind === "casual" && /\?/.test(own) && /\b(?:buy|buying|sell|selling|hold|holding|ape|aping|invest|investing)\b/i.test(own)) return refuse("hype");
   if (ctx.kind === "casual" && ctx.insight === true) {
     if (COIN_ADVICE.test(own) || REPLY_ADVICE.test(own) || ANSWER_PREDICTION.test(own) || ANSWER_CALL.test(own.trim()) || draftedForecast(own)) return refuse("hype");
     if (houseClaimed(own) || deciderClaimed(own)) return refuse("house-claim");
@@ -2139,7 +2163,7 @@ function admitMasked(tidied: string, ctx: XGateCtx, baseGate: BaseGate, agentNam
   if (ctx.kind === "reply" && (REPLY_CURRENT_OR_ACTION.test(own) || REPLY_CURRENT_POSITION.test(own))) return refuse("reply-current-or-action");
   // A casual post, and a drafted answer, never ties its buys to what's hot, nor lines up its next one; a casual post never says a buy to come or a holding either (HOT_BUY_CLAIM).
   if (ctx.kind === "casual" && (REPLY_CURRENT_OR_ACTION.test(own) || REPLY_CURRENT_POSITION.test(own))) return refuse("reply-current-or-action");
-  if ((ctx.kind === "casual" || (ctx.kind === "reply" && ctx.answer === true && ctx.drafted === true)) && hotBuyClaimed(own)) return refuse("reply-current-or-action");
+  if ((ctx.kind === "casual" || (ctx.kind === "reply" && ctx.answer === true && ctx.drafted === true)) && hotBuyClaimed(ctx.kind === "casual" && ctx.insight === true ? withoutInsightMarketPredicates(own) : own)) return refuse("reply-current-or-action");
   // No amount, price or multiple in words the base gate's list misses (AMOUNT_WORDS).
   if (ctx.kind === "reply" && amountSaid(withoutReplyOptOut(own))) return refuse("quantity");
   if (shouts(own)) return refuse("caps");
