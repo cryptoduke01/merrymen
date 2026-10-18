@@ -565,3 +565,28 @@ describe("red-team review of a964a74c: what the answer path answers by nothing (
   });
 });
 
+
+describe("no larp check with what it sits under unread (2026-10-18)", () => {
+  const CA = "0x86aF99052DB086a66aF7D764bB04d3abb81b485F";
+  const ctx = { xUserId: "222", username: "alanaidale", research: true, checks: true };
+  // Under a project's post, in a stranger's thread: a check is the only way such a tag is answered.
+  const under = (o: Partial<XReply> = {}) => comment(`@proj @alanaidale ${CA} larp check`, { id: "500", conversationId: "490", inReplyToTweetId: "490", ...o });
+  const read = [{ id: "490", relation: "replied_to" as const, text: `we're live, CA ${CA}`, links: ["https://acme.example"], authorId: "9", author: { username: "proj", name: "Proj" } }];
+  it("a tag whose post or author X did not hand over is no check, and goes on to be read as any other tag", () => {
+    const checked = tagCandidate(under({ context: read }), ctx);
+    assert.ok(checked.ok && checked.check, "read: a check of the tag's own contract");
+    for (const o of [{ contextUnread: true as const }, { context: read, contextUnread: true as const }]) {
+      const v = tagCandidate(under(o), ctx);
+      assert.ok(!(v.ok && v.check), JSON.stringify(o));
+      assert.deepEqual(v, { ok: false, reason: "not-own-thread" }, "in someone else's thread, as any tag");
+    }
+    // A quote of a post X did not hand over: refused as a quote, as any other.
+    const quote = comment(`@alanaidale is this real?`, { id: "501", conversationId: "501", inReplyToTweetId: "", quoted: true, quotedTweetId: "491", contextUnread: true });
+    assert.deepEqual(tagCandidate(quote, ctx), { ok: false, reason: "quoted" });
+    // Checks off, nothing changes: unread or not, the same reading.
+    assert.deepEqual(tagCandidate(under({ contextUnread: true }), { ...ctx, checks: false }), tagCandidate(under({ context: read }), { ...ctx, checks: false }));
+  });
+  it("every other screen still reads it: a STOP is a STOP, under an unread post too", () => {
+    assert.deepEqual(tagCandidate(under({ text: "@alanaidale stop", contextUnread: true }), ctx), { ok: false, reason: "opt-out" });
+  });
+});

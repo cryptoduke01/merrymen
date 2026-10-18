@@ -201,6 +201,11 @@ const CONDITIONS: ReadonlySet<string> = new Set(["no-model-budget", "zone-unread
 /** The most reasons said after one count; the rest are counted, not named. */
 const WHYS_SAID = 4;
 
+/** An operator code as the log says it: lowercase letters, digits, ":", "-", "_", one space at most between words, at most 64 characters. */
+function operatorCode(why: string): string {
+  return why.toLowerCase().replace(/\s+/g, " ").replace(/[^a-z0-9:_ -]+/g, "").replace(/ +/g, " ").trim().slice(0, 64) || "unknown";
+}
+
 /**
  * A count's reasons as the log says them: " (insight no-draft:timeout, buy
  * gate:too-short x2)". Operator codes only, and held to their alphabet here
@@ -211,7 +216,7 @@ const WHYS_SAID = 4;
 export function whyText(whys: ReadonlyMap<string, number> | undefined): string {
   if (!whys?.size) return "";
   const said = [...whys].slice(0, WHYS_SAID).map(([why, n]) => {
-    const code = why.toLowerCase().replace(/\s+/g, " ").replace(/[^a-z0-9:_ -]+/g, "").replace(/ +/g, " ").trim().slice(0, 64) || "unknown";
+    const code = operatorCode(why);
     return n > 1 ? `${code} x${n}` : code;
   });
   const more = whys.size - said.length;
@@ -1642,6 +1647,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
           const r = await writeIntent(shared, account, f, intent, planNow, recentOwn, shownOwn, recentFleet, talked);
           if (r.outcome === "key-spent") continue;
           bump(r.outcome, 1, r.why);
+          // Why a win fell back to code's words: the model's own reason, a code only (writeIntent `codeWords`).
+          if (r.codeWords) bump(`sale-code-words:${operatorCode(r.codeWords)}`);
           if (r.outcome === "no-model-budget") {
             model = false;
             continue;
@@ -1679,10 +1686,12 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
             ? (await recentBodies(shared, { tenant: account.tenant, sinceMs: at() - OWN_MEMORY_MS, limit: 20, posted: true, exceptLookedUp: true, kinds: ["intro", "casual", "reply", "answer"] }))
               .filter((b) => !carriesResearch(b) && !otherMoneySaid(f.mode, b))
             : [];
+          // The tags this pass already counted as passed over: each is read again on every turn below.
+          const passedOver = new Set<string>();
           for (let i = 0; i < (isActive ? ANSWERS_PER_POLL : 1) && answerDrafts < MAX_ANSWER_DRAFTS_PER_PASS; i++) {
             const result = isActive
               // Its OWN posts only: another owner posting on the same X account is not its history.
-              ? await writeAnswer(shared, account, f, comments.get(account.xUserId)!, z.tz, at, recentOwn, shownOwn, recentFleet, said, posts.filter((p) => p.tenant === account.tenant), bump, nowMs + SEND_BUDGET_MS)
+              ? await writeAnswer(shared, account, f, comments.get(account.xUserId)!, z.tz, at, recentOwn, shownOwn, recentFleet, said, posts.filter((p) => p.tenant === account.tenant), bump, nowMs + SEND_BUDGET_MS, passedOver)
               : await writeReply(shared, account, f, comments.get(account.xUserId)!, z.tz, at, recentOwn, shownOwn, recentFleet);
             if (!result) break;
             answerDrafts++;
@@ -1749,7 +1758,9 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
   async function writeAnswer(
     shared: Db, account: XAccount, f: AgentFacts, comments: XReply[], tz: string | null,
     at: () => number, recentOwn: string[], shownOwn: string[], recentFleet: string[], said: string[], posts: readonly XPost[] = [],
-    bump: (k: string, n?: number) => void = () => {}, sendBy = Number.POSITIVE_INFINITY,
+    bump: (k: string, n?: number, detail?: string) => void = () => {}, sendBy = Number.POSITIVE_INFINITY,
+    /** The tags of this batch already counted as passed over on this pass (planPass): each is counted once, not once a turn. */
+    passedOver: Set<string> = new Set(),
   ): Promise<{ body: string | null; lookedUp?: boolean; why?: string } | null> {
     if (!creds) return null;
     const nowMs = at();
@@ -1815,11 +1826,28 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
     const threads = ordered.some((c) => c.conversationId !== c.id || c.inReplyToTweetId !== "" || c.quoted === true)
       ? await ownThreadTweets(shared, account.xUserId, undefined, shut, tradeBody, closedBody)
       : { roots: new Set<string>(), posts: new Set<string>(), answered: new Map<string, string>(), plain: new Set<string>(), trade: new Set<string>() };
+    // WHY A TAG GOT NOTHING, AS A COUNT (2026-10-18): a tag passed over with no
+    // row was silent, so the log could not say why mentions went unanswered.
+    // Each is counted once a pass (this runs a few times over one batch), as
+    // an operator code only: never the tag's words, its author or a handle.
+    const passOver = (comment: XReply, why: string): void => {
+      if (passedOver.has(comment.id)) return;
+      passedOver.add(comment.id);
+      bump(operatorCode(why));
+    };
     for (const comment of ordered) {
       if (comment.createdAtMs < consentAt || nowMs - comment.createdAtMs > REPLY_STALE_MS) continue;
       const candidate = tagCandidate(comment, { xUserId: account.xUserId, research: research !== null, username: account.username,
         ownRoots: threads.roots, ownPosts: threads.posts, answered: threads.answered, plain: threads.plain, trade: threads.trade, checks });
-      if (!candidate.ok || await repliesOptedOut(shared, account.xUserId, comment.authorId)) continue;
+      // Refused by the tag screens: answer-refused-<the screen's reason> (replies.ts tagCandidate).
+      if (!candidate.ok) {
+        passOver(comment, `answer-refused-${candidate.reason}`);
+        continue;
+      }
+      if (await repliesOptedOut(shared, account.xUserId, comment.authorId)) {
+        passOver(comment, "answer-refused-author-opted-out");
+        continue;
+      }
       // READ BY CODE FIRST, research on or off: the allowlist's plain model
       // question is answered from a code-built line (writer.ts modelAnswers)
       // and spends no model call. Only research gathers anything for what it
@@ -1965,7 +1993,14 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // as Merrymen confirming a token, and a draft is never asked about the
       // model. No row, no draft, nothing spent. Fail closed.
       if (asked.kind === "unanswered") {
-        bump("answer-unanswered");
+        // WHICH RULE, AS A COUNT (2026-10-18): answer-unanswered-<the first of
+        // these that holds>; "other" is a reading of the tag itself (an
+        // injection, the house in trouble, advice code may not decline, a
+        // model question to an unread name, a word in a major's place).
+        const why = sherwoodTagged || authorSherwood || checkHouse ? "sherwood"
+          : (classified.kind === "model" && candidate.otherHandles === true) || codeLineElsewhere || tradesElsewhere ? "other-handle"
+          : smallTalk ? "smalltalk" : closedFollowUp ? "closed-followup" : tradeMarket ? "market-under-post" : unbanteredChat ? "chat" : "other";
+        passOver(comment, `answer-unanswered-${why}`);
         continue;
       }
       // CODE'S OWN LINE, NEVER A DRAFT: the model question's.
@@ -1998,7 +2033,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // "own-trade") is answered only with code's own lines; anything that
       // would be drafted is answered by nothing: no row, no model call.
       if (candidate.followUp === "own-trade" && !undrafted) {
-        bump("answer-unanswered");
+        passOver(comment, "answer-unanswered-own-trade-draft");
         continue;
       }
       // DECIDED BEFORE ANYTHING IS SPENT: a question the writer could not read
@@ -2123,13 +2158,13 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
           await returnAllowance(shared, answerKey, at());
           await returnAllowance(shared, `llm:${utcDay(nowMs)}`, at());
         }
-        bump("answer-unanswered");
+        bump("answer-unanswered-research");
         const skippedAt = at();
         const id = await schedulePost(shared, {
           tenant: account.tenant, xUserId: account.xUserId, kind: "answer", dedupeKey, body: "", coin: null, decisionId: null, dueAtMs: skippedAt, nowMs: skippedAt,
           replyToTweetId: comment.id, replyRootTweetId: comment.id, replyAuthorId: comment.authorId, status: "skipped", reason: "research:unanswered",
         });
-        return id === null ? null : { body: null };
+        return id === null ? null : { body: null, why: "research:unanswered" };
       }
       // NEVER A COIN'S OWN ACCOUNT SHOWN ITS COIN (red-team review of 1ed46625,
       // 2026-10-12): "ZapXOfficial · ZAPX | stealth launch, LP burned" asked
@@ -2156,7 +2191,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
           tenant: account.tenant, xUserId: account.xUserId, kind: "answer", dedupeKey, body: "", coin: null, decisionId: null, dueAtMs: skippedAt, nowMs: skippedAt,
           replyToTweetId: comment.id, replyRootTweetId: comment.id, replyAuthorId: comment.authorId, status: "skipped", reason: "research:author-ticker",
         });
-        return id === null ? null : { body: null };
+        return id === null ? null : { body: null, why: "research:author-ticker" };
       }
       // ITS STRATEGY, ITS BUYS, IN CODE'S WORDS (chatKind above). Its
       // buys: those of the money it trades with now, newest first, never a
@@ -2558,7 +2593,16 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
     shownOwn: string[],
     recentFleet: string[],
     talked: string[] = [],
-  ): Promise<{ outcome: string; body: string | null; why?: string }> {
+  ): Promise<{
+    outcome: string; body: string | null; why?: string;
+    /**
+     * A win that fell back to code's sale words (sale-words.ts): why the
+     * model's were not there, as the row would have kept it (`no-draft:pass`,
+     * `gate:sale-result`, `no-model`, `sale-outcome-invalid`). Counted as
+     * `sale-code-words:<why>`, never with any words.
+     */
+    codeWords?: string;
+  }> {
     // A KEY ALREADY SPENT IS NOT DRAFTED AGAIN. The plan weighs the X
     // account's history, so a key this owner wrote for the X account it had
     // connected earlier (today's casual key, say) is not in it and comes back
@@ -2723,6 +2767,13 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         else reason = `template:${v.reason}`;
       }
     }
+    // WHOSE WORDS A SALE WENT OUT IN, AND WHY NOT THE MODEL'S (2026-10-18): every
+    // win was counted "drafted-sell" whoever wrote it, and the model's reason
+    // was dropped when code's words stood in. Now `drafted-sell-model` or
+    // `drafted-sell-code`, and `sale-code-words:<reason>` whenever code's words
+    // were tried; the reason is an operator code, never the words.
+    let codeWords: string | null = null;
+    let codeSaid = false;
     // A SALE POST IS WHOLE OR NOT AT ALL: its words, code's result line, and
     // the token link after it, inside X's limit (review of the wins branch,
     // 2026-10-14: an active owner's tx link and contract leave about sixty-five
@@ -2745,6 +2796,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       };
       let post = body ? whole(body) : null;
       if (!post && winWords) {
+        codeWords = reason;
         // The coin's label first, then its other vetted names, shortest first
         // (second review of the wins branch: a long name, a name with a number
         // word or doubled spaces had no line, though its ticker would).
@@ -2760,7 +2812,10 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
               continue;
             }
             post = whole(v.text);
-            if (post) break names;
+            if (post) {
+              codeSaid = true;
+              break names;
+            }
           }
         }
       }
@@ -2801,8 +2856,12 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       reason: body ? null : reason,
     });
     if (written === null) return { outcome: "already-written", body: null };
-    if (body) return { outcome: insight ? "drafted-insight" : `drafted-${intent.kind}`, body };
+    const fellBack = codeWords !== null ? { codeWords } : {};
+    if (body) {
+      const outcome = insight ? "drafted-insight" : intent.kind === "sell" ? (codeSaid ? "drafted-sell-code" : "drafted-sell-model") : `drafted-${intent.kind}`;
+      return { outcome, body, ...fellBack };
+    }
     // The skip says why in the pass's line: the kind and the reason the row keeps, an operator code only.
-    return { outcome: "not-posted", body: null, why: `${insight ? "insight" : intent.kind} ${reason}` };
+    return { outcome: "not-posted", body: null, why: `${insight ? "insight" : intent.kind} ${reason}`, ...fellBack };
   }
 }

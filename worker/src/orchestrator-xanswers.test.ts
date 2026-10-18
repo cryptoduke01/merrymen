@@ -100,6 +100,8 @@ async function world(t: TestContext, o: {
   const factLoads: number[] = [];
   let clock = NOW;
   let garbled = false;
+  /** Beside the page: the posts X expanded, and the errors it sent with it (an expansion it could not make). */
+  let beside: { tweets?: Record<string, unknown>[]; errors?: unknown[] } = {};
   /** X's answer to a read of the mentions instead of the inbox: a 429 with its reset, or a 402. */
   let refuseRead: { status: 429; resetSec: number } | { status: 402 } | null = null;
   // Who X says wrote each tag (expansions=author_id): an ordinary reader by default; null leaves an author out.
@@ -118,7 +120,8 @@ async function world(t: TestContext, o: {
       }
       // A page that does not add up, as X's answer past its eight hundred mentions reads to the client.
       if (garbled) return { status: 200, headers: { get: () => null }, text: async () => JSON.stringify({ data: inbox, meta: { result_count: inbox.length + 1 } }) };
-      return { status: 200, headers: { get: () => null }, text: async () => JSON.stringify({ data: inbox, includes: { users: users() }, meta: { result_count: inbox.length } }) };
+      return { status: 200, headers: { get: () => null }, text: async () => JSON.stringify({ data: inbox, includes: { users: users(), ...(beside.tweets ? { tweets: beside.tweets } : {}) },
+        ...(beside.errors ? { errors: beside.errors } : {}), meta: { result_count: inbox.length } }) };
     }
     assert.equal(url, "https://api.x.com/2/tweets");
     sends.push(JSON.parse(init.body ?? "{}"));
@@ -150,6 +153,7 @@ async function world(t: TestContext, o: {
   const answers = async () => (await store.postsOf(db, TENANT, 0)).filter((p) => p.kind === "answer");
   const asked = () => prompts.filter((p) => /Untrusted question/.test(p));
   return { db, step, answers, asked, systems, everySystem, sends, reads, readers, factLoads, setInbox: (v: Record<string, unknown>[]) => { inbox = v; }, garble: (on: boolean) => { garbled = on; },
+    setBeside: (v: typeof beside) => { beside = v; },
     refuseRead: (v: typeof refuseRead) => { refuseRead = v; },
     setAuthors: (v: Record<string, { username: string; name: string } | null>) => { authors = new Map(Object.entries(v)); } };
 }
@@ -508,6 +512,84 @@ test("an active account whose mentions cannot be read waits thirty minutes, not 
   await w.step(NOW + 30 * MIN + 15_000);
   assert.equal(w.reads.length, 2, "read again at the fleet's pace");
   assert.equal(w.reads.at(-1), NOW + 30 * MIN + 15_000);
+});
+
+test("a STOP in a page X could not fully expand is recorded, the cursor moves past it, and the rest is answered on that pass (2026-10-18)", async (t) => {
+  // A tag under a post someone deleted: X sends the page whole, with an error for the post it could not expand.
+  const GONE = "100000000000000300";
+  const missing = { value: GONE, detail: `Could not find tweet with referenced_tweets.id: [${GONE}].`, title: "Not Found Error", resource_type: "tweet",
+    parameter: "referenced_tweets.id", resource_id: GONE, type: "https://api.twitter.com/2/problems/resource-not-found" };
+  const inbox = [
+    tag({ id: "100000000000000301", conversation_id: GONE, author_id: "333", created_at: new Date(NOW - 2 * MIN).toISOString(), text: "@pine_stoat stop",
+      referenced_tweets: [{ type: "replied_to", id: GONE }] }),
+    tag({ id: "100000000000000302", conversation_id: "100000000000000302", author_id: "444", text: "@pine_stoat what can i ask you?" }),
+  ];
+  const w = await world(t);
+  w.setInbox(inbox);
+  w.setBeside({ errors: [missing] });
+  const r = await w.step();
+  assert.equal(await store.repliesOptedOut(w.db, "111", "333"), true, "the STOP is recorded");
+  assert.equal((await store.readMeta(w.db, "reply-cursor:111"))?.v, "100000000000000302", "and the cursor moved past the page");
+  assert.ok(Number((await store.readMeta(w.db, "reply-backoff:111"))?.v ?? 0) <= NOW, "no thirty-minute hold");
+  assert.deepEqual(w.sends, [{ text: ANSWER, reply: { in_reply_to_tweet_id: "100000000000000302" } }], "the other tag answered on that pass");
+  assert.doesNotMatch(r.log ?? "", /reply-read-invalid|active-reply-read-held/);
+  assert.match(r.log ?? "", /\breply-opt-out 1\b/);
+
+  // Any other error beside the page still fails it closed, as before: nothing recorded, the cursor kept, the read held.
+  const held = await world(t);
+  held.setInbox(inbox);
+  held.setBeside({ errors: [{ ...missing, parameter: "pinned_tweet_id" }] });
+  const h = await held.step();
+  assert.equal(await store.repliesOptedOut(held.db, "111", "333"), false);
+  assert.equal(await store.readMeta(held.db, "reply-cursor:111"), null);
+  assert.ok(Number((await store.readMeta(held.db, "reply-backoff:111"))?.v) >= NOW + 30 * MIN);
+  assert.match(h.log ?? "", /reply-read-invalid 1.*active-reply-read-held 1|active-reply-read-held 1.*reply-read-invalid 1/);
+  assert.deepEqual(held.sends, []);
+});
+
+test("why a tag got nothing is counted once a pass, by the screen or the rule that held it, and the line never carries its words (2026-10-18)", async (t) => {
+  const BUY_POST = "900000000000000777";
+  let clock = NOW;
+  const at = (n: number, text: string, over: Record<string, unknown> = {}) => {
+    const id = `1000000000000004${String(n).padStart(2, "0")}`;
+    return tag({ id, conversation_id: id, author_id: `6${String(n).padStart(2, "0")}`, created_at: new Date(clock - (60 - n) * 1000).toISOString(), text, ...over });
+  };
+  const under = (post: string) => ({ conversation_id: post, referenced_tweets: [{ type: "replied_to", id: post }] });
+  const w = await world(t);
+  await postedBuy(w.db, "fill-pepe", "pepe", "grabbed some pepe, the curve looked early", 3 * HOUR, BUY_POST);
+  // Refused by the tag screens; held by a rule after them; and one plain question last, answered.
+  w.setInbox([
+    at(1, "@pine_stoat zebra crossing ahead"),
+    at(2, "@pine_stoat zz"),
+    at(3, "@pine_stoat check zebra.example.com?"),
+    at(4, "@pine_stoat @zebra_fan what can you do?"),
+    at(5, "@pine_stoat gm"),
+    at(6, "@pine_stoat is sherwood giraffe live?"),
+    at(7, "@pine_stoat what do you make of zebras and giraffes?"),
+    at(8, "@pine_stoat what can you do?", under(BUY_POST)),
+    at(9, "@pine_stoat how's the market?", under(BUY_POST)),
+    at(10, "@pine_stoat stop"),
+    at(11, "@pine_stoat what can you do?", { author_id: "610" }),
+    at(12, "@pine_stoat what can i ask you?"),
+  ]);
+  const r = await w.step(clock);
+  const log = r.log ?? "";
+  for (const counted of ["answer-refused-not-asked 1", "answer-refused-low-signal 1", "answer-refused-link-or-secret 1", "answer-refused-handle 1",
+    "answer-unanswered-smalltalk 1", "answer-unanswered-sherwood 1", "answer-unanswered-chat 1", "answer-unanswered-own-trade-draft 1",
+    "answer-unanswered-market-under-post 1", "answer-refused-opt-out 1", "answer-refused-author-opted-out 1", "drafted-answer 1"]) {
+    assert.match(log, new RegExp(`(?:^|[ ,:])${counted}(?:,|$)`), `${counted} in: ${log}`);
+  }
+  assert.deepEqual(w.sends.map((s) => (s.reply as { in_reply_to_tweet_id: string }).in_reply_to_tweet_id), ["100000000000000412"]);
+  // Counts and codes only: no word of a tag, no handle, no author.
+  assert.doesNotMatch(log, /zebra|giraffe|crossing|pine_stoat|reader_|\b6\d\d\b|what can|\?/i);
+
+  // A reply under one of its answers: every answer closes its thread, so nothing, counted as such.
+  const answered = (await w.answers()).find((a) => a.status === "posted")!;
+  clock = NOW + MIN;
+  w.setInbox([at(20, "@pine_stoat what else can you do?", { ...under(answered.tweetId!), conversation_id: "100000000000000412" })]);
+  const next = await w.step(clock);
+  assert.match(next.log ?? "", /\banswer-unanswered-closed-followup 1\b/);
+  assert.equal(w.sends.length, 1);
 });
 
 test("an owner the operator did not make active answers no tags", async (t) => {

@@ -688,6 +688,28 @@ describe("receipt-backed sale posts", () => {
       });
     }
 
+    it("a win's line says whose words it went in, and why code's stood in: the model's reason, never any words (2026-10-18)", async (t) => {
+      const cases: [string, Parameters<typeof poster>[1], string, string | null][] = [
+        ["the model's sentence", { answer: () => "i sold some pepe." }, "drafted-sell-model", null],
+        ["a PASS", { answer: () => "PASS" }, "drafted-sell-code", "no-draft:pass"],
+        ["a provider's refusal", { answer: () => { throw new Error("groq 429 — rate_limit_exceeded: Rate limit reached in organization org_private"); } }, "drafted-sell-code", "no-draft:groq-429"],
+        ["a refused draft", { answer: () => "sold pepe, pleased with that win." }, "drafted-sell-code", "gate:sale-result"],
+        ["no model allowance at all", { llmPerDay: 0 }, "drafted-sell-code", "no-model"],
+      ];
+      for (const [what, over, outcome, why] of cases) {
+        const w = await world(t, T0, MEDIA);
+        await ready(w);
+        const p = poster(w, { active: true, facts: factsOf([], "live"), socialProfile: async () => ({ xTradeResults: true, currentAgent: { address: AGENT, chainId: 4663 } }),
+          saleResults: async () => [WIN], ...over });
+        const log = (await p.step(w.db, ROSTER, new Map(), T0 + MIN)).log ?? "";
+        assert.equal((await rows(w)).find((r) => r.kind === "sell")?.status, "scheduled", what);
+        assert.match(log, new RegExp(`(?:: |, )${outcome} 1(?:,|$)`), `${what}: ${log}`);
+        if (why) assert.match(log, new RegExp(`(?:: |, )sale-code-words:${why} 1(?:,|$)`), `${what}: ${log}`);
+        else assert.doesNotMatch(log, /sale-code-words/, what);
+        assert.doesNotMatch(log, /drafted-sell [0-9]|pepe|sold|gross|pleased|rate_limit|org_private/i, `${what}: ${log}`);
+      }
+    });
+
     it("a sale the ledger no longer draws a card for, or one that cannot be drawn, posts as text", async (t) => {
       const none = await sendSale({ card: async () => null }, t);
       assert.equal(none.sent.status, "posted");

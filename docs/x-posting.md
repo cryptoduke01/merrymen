@@ -463,6 +463,50 @@ Every other reason is unchanged: `gate:<code>` (the gate's refusal, e.g.
 `no-budget`. This is observability only: no gate, screen or allowance
 changed. Rows written before this release keep a bare `no-draft`.
 
+### Why a tag got nothing, and whose words a sale went in (2026-10-18)
+
+A tag an active agent passes over leaves no row, so until now the log could
+not say why mentions went unanswered. Each is now counted once a pass (the
+batch is read up to three times a pass), by the screen or the rule that held
+it, as an operator code only: never the tag's words, its author or a handle.
+
+- `answer-refused-<reason>`: refused by the tag screens (`replies.ts`
+  `tagCandidate`), e.g. `answer-refused-not-asked`, `-low-signal`,
+  `-handle`, `-quoted`, `-attached`, `-not-own-thread`, `-unsafe-text`,
+  `-link-or-secret`, `-sensitive`, `-distress`, `-spam-or-instructions`,
+  `-advice-request`, `-advice-clause`, `-opt-out` (the tag says stop), and
+  `answer-refused-author-opted-out` (its author said stop before).
+- `answer-unanswered-<cause>`: past the screens, held by a rule, the first of
+  these that holds: `sherwood` (in the tag, its author's name, or what a
+  check sits under), `other-handle` (a code line under a prefix naming
+  someone else), `smalltalk` (a greeting, banter, its mood, advice),
+  `closed-followup`, `market-under-post` (a market, hot or major question
+  that is not a top-level tag), `chat` (chat off the allowlists), `other`
+  (an injection, the house in trouble, advice code may not decline, a model
+  question to an unread name, a word in a major's place),
+  `own-trade-draft` (something that would be drafted, under its own buy or
+  sell post), and `research` (research read it as nothing to answer; that
+  one keeps a skipped row, `research:unanswered`).
+
+A win's post says whose words it went out in: `drafted-sell-model` (the
+model's sentence stood) or `drafted-sell-code` (code's sale words,
+`sale-words.ts`), and every other owner's sale is `drafted-sell-model`.
+Whenever code's words were tried, `sale-code-words:<reason>` says why the
+model's were not there, as the row would have kept it:
+`sale-code-words:no-draft:pass`, `sale-code-words:gate:sale-result`,
+`sale-code-words:no-model`, `sale-code-words:no-budget`, or
+`sale-code-words:sale-outcome-invalid` / `token-disclosure-invalid` (a
+sentence that passed but did not fit beside the result line and the link).
+
+```
+[orchestrator] xpost: reply-opt-out 1, answer-refused-not-asked 1, answer-refused-low-signal 1, answer-refused-link-or-secret 1, answer-refused-handle 1, answer-unanswered-smalltalk 1, answer-unanswered-sherwood 1, answer-unanswered-chat 1, answer-unanswered-own-trade-draft 1, answer-unanswered-market-under-post 1, answer-refused-opt-out 1, answer-refused-author-opted-out 1, drafted-answer 1, sent 1
+[orchestrator] xpost: drafted-sell-model 1
+[orchestrator] xpost: drafted-sell-code 1, sale-code-words:no-draft:pass 1
+[orchestrator] xpost: drafted-sell-code 1, sale-code-words:gate:sale-result 1
+```
+
+Observability only: no screen, rule, gate, cap or allowance changed.
+
 ## Configuration
 
 | Var | Where | Default | Meaning |
@@ -623,6 +667,12 @@ to the mention itself. They go out **right away**:
   poll then waits the fleet's thirty minutes (`reply-backoff:<xUserId>`,
   logged as `active-reply-read-held`), not fifteen seconds, so a stuck cursor
   costs eight pages every half hour rather than every fifteen seconds. A
+  page whose only errors are posts or authors X could not expand (a tag
+  under a deleted or protected post, or a suspended account's) is no
+  malformed page (2026-10-18): it is read whole, its STOPs recorded and the
+  cursor moved on, and those tags are marked as sitting under something
+  unread (`contextUnread`, so no larp check is taken of them). Any other
+  error beside a page still fails it as above. A
   backlog past 800 never clears on its own, and nothing is answered or opted out meanwhile. The
   operator's fix is to move the cursor to a recent mention on the shared
   database, `UPDATE xpost_meta SET v = '<id of a recent mention>' WHERE k =
@@ -791,7 +841,8 @@ to the mention itself. They go out **right away**:
   allowance for the day is not spent. Logged as `answered-greeting`.
 - **Sherwood in any form, and every other model question, gets no answer at
   all**: no row, no draft, no allowance (`unanswered`, counted as
-  `answer-unanswered`). Sherwood is found on the tag's letters alone
+  `answer-unanswered-sherwood`, or `answer-unanswered-other` for a model
+  question that names no sherwood). Sherwood is found on the tag's letters alone
   (`sherwoodMentioned` in `gate.ts`), so "$SHERWOODINU", "sherwood-1",
   "sherw00d", "s h e r w o o d", "sher<zero-width>wood", small capitals,
   a Greek "ο" and "sherwod" all count. Anyone can launch `$SHERWOOD`, and
@@ -1751,7 +1802,10 @@ screens, which exist because code never read what a tag sits under; a check
 reads exactly that, and speaks only of the one target it found. Opt-outs,
 abuse, sensitive topics and distress are read on the tag and on the post
 under it as before. Never under a post, quote, author or target that names
-sherwood in any form or merrymen. At most `MERRYMEN_XPOST_CHECKS_PER_DAY`
+sherwood in any form or merrymen. Never when X did not hand over the post
+the tag replies to or quotes, or that post's author (deleted, protected or
+suspended; `XReply.contextUnread`, 2026-10-18): those screens could not read
+it, so the tag is read as any other tag. At most `MERRYMEN_XPOST_CHECKS_PER_DAY`
 (default 80) a UTC day across X accounts, counted before anything is read,
 and inside the answer caps (sixty a day, six a person).
 

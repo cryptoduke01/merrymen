@@ -624,8 +624,10 @@ export function tagCandidate(reply: XReply, ctx: {
   // whatever the post under it says is refused here when it is abuse, a
   // sensitive topic or distress, and the orchestrator refuses one that names
   // sherwood or merrymen. With no clear target, the tag goes on to be read as
-  // any other.
-  if (ctx.checks === true && checkAsk(reply.text, ctx.username)) {
+  // any other. NOR WITH WHAT IT SITS UNDER UNREAD (XReply.contextUnread,
+  // 2026-10-18): a post or an author X did not hand over is one those screens
+  // never read, so no check is taken; the tag goes on to be read as any other.
+  if (ctx.checks === true && reply.contextUnread !== true && checkAsk(reply.text, ctx.username)) {
     const found = checkTargetOf(reply, { ownId: ctx.xUserId, ownPosts: ctx.ownPosts });
     if (found) {
       const under = (reply.context ?? []).map((c) => c.text).join("\n");
