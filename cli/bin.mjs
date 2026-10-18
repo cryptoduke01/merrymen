@@ -361,7 +361,7 @@ async function welcome() {
 async function maybeFirstRun(cmd) {
   // The paper command has machine-readable output and must not initialize
   // unrelated EVM onboarding state just to inspect a mint or show help.
-  if (cmd === "solana-paper") return;
+  if (cmd === "solana-paper" || cmd === "solana-agent") return;
   if (existsSync(WELCOMED)) return;
   try {
     ensureHome();
@@ -1645,10 +1645,11 @@ switch (cmd) {
   case "preflight":
     preflightCmd();
     break;
-  case "solana-paper": {
+  case "solana-paper":
+  case "solana-agent": {
     // Use the Node executable directly: Windows .cmd wrappers need a shell,
     // which must never interpolate owner-supplied command arguments.
-    const child = spawn(process.execPath, ["--import", "tsx", path.join(ROOT, "worker", "src", "solana-paper-cli.ts"), ...rest], {
+    const child = spawn(process.execPath, ["--import", "tsx", path.join(ROOT, "worker", "src", cmd === "solana-agent" ? "solana-agent-cli.ts" : "solana-paper-cli.ts"), ...rest], {
       cwd: ROOT,
       stdio: "inherit",
       shell: false,
@@ -1700,6 +1701,7 @@ switch (cmd) {
   ${bold("merrymen selftest")}       fire one arrow through the whole pipeline
   ${bold("merrymen preflight")}      can it actually trade? balances, chain, caps, sizing
   ${bold("merrymen solana-paper")}   local Solana paper book and quotes (--help)
+  ${bold("merrymen solana-agent")}   run explicitly enabled Solana strategies
   ${bold("merrymen export")}         write the hash-chained audit journal (stdout)
   ${bold("merrymen verify")}         check an export — reads only the file you hand it
   ${bold("merrymen service")}        start on login, survive reboots (install/uninstall/status)

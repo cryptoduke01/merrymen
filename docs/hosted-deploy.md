@@ -680,7 +680,7 @@ runs `scripts/container-start.sh`, which `exec`s the role's package.json start
 script itself: no npm and no `sh -c` on the start path.
 
 - **The roles:** `start:web` (or the variable unset), `start:orchestrator`,
-  `start:recovery-replies`. Anything else — **including the variable set but
+  `start:recovery-replies`, and the separate `start:solana`. Anything else — **including the variable set but
   empty** — is refused with exit 64 and nothing starts. To get the web role,
   delete the variable; do not clear it.
 - **Leave each service's Start Command empty.** One set in Railway would replace
@@ -709,6 +709,21 @@ script itself: no npm and no `sh -c` on the start path.
 
 1. **web** — new service from this repo. Leave `MERRYMEN_START` unset → runs the Next dashboard. Set the web env above, then add the custom domain (`app.merrymen.dev`) and follow its DNS record.
 2. **orchestrator** — a second service from the same repo. Set `MERRYMEN_START=start:orchestrator`. Set the orchestrator env above. It needs **no public domain**.
+
+The optional Solana worker uses an explicit, separate `start:solana` role;
+none of the RH roles starts it. Its hosted guard requires
+`MERRYMEN_SOLANA_SERVICE_ID` to match `RAILWAY_SERVICE_ID`, rejects a match with
+the configured RH `MERRYMEN_FLEET_SERVICE_ID`, and requires `DATABASE_URL` plus
+the image's `MERRYMEN_IMAGE=dockerfile-v1` marker. The web and Solana worker must
+share their Solana authority/accounting database and encryption configuration.
+The direct CLI applies the same hosted checks; `--help` only prints usage.
+Local development can use `npm run start:solana`, which reads an optional
+ignored `.env.solana.local`. Selecting this role does not deploy the vault
+program or authorize trading: each account must explicitly enable its strategy,
+and live execution still requires the verified immutable program and finalized
+owner-approved session. The app displays **Waiting for Solana worker** when an
+enabled strategy has no recent worker heartbeat. Adding this role does not
+provision or start a hosted service.
 
 ## 5b. The AI gateway (its own Railway project)
 

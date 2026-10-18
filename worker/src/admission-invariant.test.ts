@@ -122,10 +122,14 @@ describe("every way this worker moves money runs inside processIntentLocked", ()
     for (const i of at) assert.ok(inside(owner, i), `worker/src/index.ts:${lineOf(i)} installs a key outside installKeyAlone`);
   });
 
-  it("AND NO OTHER WORKER MODULE SENDS: the executor's own file and the key-install booking are the only others that call it", () => {
+  it("AND NO UNGATED WORKER MODULE SENDS: RH uses this funnel and the Solana sibling uses its durable tenant gate", () => {
     // key-install-accounting.ts's installKeyRecorded is the booking around
     // executor.installKey; it is called from installKeyAlone alone (above).
-    const ALLOWED = new Set(["executor.ts", "key-install-accounting.ts", "index.ts"]);
+    // Solana has a separate owner namespace and on-chain authority. Its one
+    // application caller is pinned below; it must never enter the EVM funnel.
+    // Behavioral tests in solana-app-runtime/trading-store also exercise lost
+    // responses, mode/strategy races and committed-before-broadcast ordering.
+    const ALLOWED = new Set(["executor.ts", "key-install-accounting.ts", "index.ts", "solana-app-runtime.ts"]);
     // Every spelling of a send, not only the dotted call. Other modules use
     // the bare word `execute` in prose and in ABI strings, so here it is the
     // shapes of a call that are matched: a dotted member (`.execute(`,
@@ -155,6 +159,29 @@ describe("every way this worker moves money runs inside processIntentLocked", ()
     };
     walk(HERE);
     assert.deepEqual(offenders, [], `these modules can send without passing the admission gate: ${offenders.join(", ")}`);
+  });
+
+  it("the Solana sibling cannot borrow RH execution or broadcast before its own durable gate", () => {
+    const app = codeOf(readFileSync(path.join(HERE, "solana-app-runtime.ts"), "utf8"));
+    const executor = codeOf(readFileSync(path.join(HERE, "solana-executor.ts"), "utf8"));
+    const agent = codeOf(readFileSync(path.join(HERE, "solana-agent.ts"), "utf8"));
+    assert.doesNotMatch(app, /createAgentExecutor|installKeyRecorded|installKey/);
+    assert.equal((app.match(/createSolanaExecutor\(/g) ?? []).length, 1);
+    assert.equal((app.match(/\.execute\(/g) ?? []).length, 1);
+    assert.match(app, /journal: s,/);
+    assert.match(app, /const s = await store\(scope, input\.autonomousRevision, input\.signal\)/);
+    const admission = executor.indexOf("await options.journal.recordSigned(submission)");
+    const send = executor.indexOf("await options.rpc.send(");
+    assert.ok(admission > 0 && send > admission);
+    assert.equal((executor.match(/options\.rpc\.send\(/g) ?? []).length, 1);
+    assert.match(executor.slice(admission, send), /return fail\("conflict"\)/);
+    const savedOwner = app.indexOf("const first = await s.saveSetup(signed)");
+    const ownerSend = app.indexOf("await rpc().send(");
+    assert.ok(savedOwner > 0 && ownerSend > savedOwner);
+    assert.match(app.slice(savedOwner, ownerSend), /if \(first\)/);
+    assert.equal((app.match(/rpc\(\)\.send\(/g) ?? []).length, 1);
+    assert.doesNotMatch(agent, /createSolanaExecutor|signTransaction|\.send\(/);
+    assert.match(agent, /runtime\.trade\(scope, \{ mode: row\.requested_mode, intent, autonomousRevision: Number\(row\.revision\), signal: options\.signal \}\)/);
   });
 
   it("and the executor is built in one place, which hands it to `active` — the funnel's own handle", () => {

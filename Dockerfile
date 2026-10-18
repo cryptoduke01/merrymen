@@ -1,8 +1,9 @@
-# Hosted merrymen — ONE image, TWO services, THREE roles.
+# Hosted merrymen — ONE image, FOUR explicit roles.
 #
 # The same image runs the Next.js dashboard (the web service), or — on the
 # orchestrator service — the process-per-tenant supervisor or the recovery reply
-# listener. The role is picked by the MERRYMEN_START env var per service, and it
+# listener. A separate Solana service can run the explicitly enabled Solana
+# strategies. The role is picked by MERRYMEN_START per service, and it
 # is scripts/container-start.sh that reads it, holds it to an allowlist and execs
 # the role, under tini (the ENTRYPOINT/CMD at the bottom; docs/hosted-deploy.md).
 # railway.json deliberately sets NO startCommand and NO healthcheck, so this one
@@ -10,7 +11,7 @@
 # the orchestrator, which serves no HTTP, is never failed by a path healthcheck it
 # can't answer. All need the whole monorepo present: the web build resolves
 # packages/core + worker from source via tsconfig paths (next.config
-# externalDir), and the other two run worker/src directly with tsx at runtime.
+# externalDir), and the worker roles run worker/src directly with tsx at runtime.
 #
 # node:22 (not alpine) for glibc + a node new enough for the built-in node:sqlite
 # the worker uses (>= 22.12).
@@ -97,10 +98,11 @@ ENV NODE_ENV=production
 # by asking, rather than by guessing from the process tree.
 ENV MERRYMEN_IMAGE=dockerfile-v1
 
-# ONE image, THREE roles, selected by MERRYMEN_START (a Railway per-service var):
+# ONE image, FOUR roles, selected by MERRYMEN_START (a Railway per-service var):
 #   web service          → MERRYMEN_START unset → start:web (the Next dashboard)
 #   orchestrator service → MERRYMEN_START=start:orchestrator (the per-tenant supervisor)
 #                          or start:recovery-replies (the recovery reply listener)
+#   Solana service       → MERRYMEN_START=start:solana (bounded Solana strategies)
 # Still an npm script NAME, never a command: scripts/container-start.sh runs only
 # an allowlist of them, and refuses an empty or unknown value with exit 64 —
 # never an arbitrary shell command, and never the wrong role running green.

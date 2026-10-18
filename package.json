@@ -42,6 +42,7 @@
     "doctor": "node cli/bin.mjs doctor",
     "check:solana-rpc": "node --env-file=.env.solana.local --import tsx worker/src/solana-rpc-check.ts",
     "solana:paper": "node --env-file-if-exists=.env.solana.local --import tsx worker/src/solana-paper-cli.ts",
+    "start:solana": "node --env-file-if-exists=.env.solana.local --import tsx worker/src/solana-agent-cli.ts",
     "status": "node cli/bin.mjs status",
     "export": "node cli/bin.mjs export",
     "verify": "node cli/bin.mjs verify",
