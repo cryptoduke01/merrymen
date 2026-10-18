@@ -21,7 +21,9 @@ test("start redacts both child pipes, split URL chunks and native fatal errors",
   for (const dir of ["cli", "worker/src", "web/.next", "node_modules/.bin"]) {
     mkdirSync(path.join(fixture, dir), { recursive: true });
   }
-  for (const file of ["cli/bin.mjs", "cli/atomic-write.mjs", "cli/service.mjs", "cli/ui.mjs", "worker/src/redact-urls.ts", "worker/src/redact-stdio.ts"]) {
+  // Keep the shipped ESM marker: Node 22 otherwise treats the copied worker
+  // files as CommonJS and cannot resolve their extensionless TypeScript imports.
+  for (const file of ["cli/bin.mjs", "cli/atomic-write.mjs", "cli/service.mjs", "cli/ui.mjs", "worker/package.json", "worker/src/redact-urls.ts", "worker/src/redact-stdio.ts"]) {
     copyFileSync(path.join(root, file), path.join(fixture, file));
   }
   symlinkSync(path.join(root, "node_modules/tsx"), path.join(fixture, "node_modules/tsx"), process.platform === "win32" ? "junction" : "dir");
