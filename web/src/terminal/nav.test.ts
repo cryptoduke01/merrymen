@@ -78,6 +78,12 @@ describe("the five tabs", () => {
 });
 
 describe("routing", () => {
+  it("Solana round-trips to its dedicated route without adding a sixth tab", () => {
+    assert.deepEqual(screenForPath("/solana"), { kind: "solana" });
+    assert.equal(pathForScreen({ kind: "solana" }), "/solana");
+    assert.ok(existsSync(join(ROOT, "web/src/app/(app)/solana/page.tsx")));
+    assert.equal(TABS.length, 5);
+  });
   it("every tab round-trips through its path", () => {
     for (const t of TABS) {
       const path = pathForScreen({ kind: "tab", tab: t.id });

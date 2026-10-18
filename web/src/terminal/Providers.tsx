@@ -79,7 +79,7 @@ export function Providers({ locale, children }: { locale: LocaleTag; children: R
         appearance: {
           theme: "dark",
           accentColor: "#c8ff00",
-          walletChainType: "ethereum-only",
+          walletChainType: "ethereum-and-solana",
           // AN ABSOLUTE URL TO A FILE THAT EXISTS, AND ONE THE GATE LETS
           // THROUGH. The modal renders in an auth.privy.io iframe, so a
           // relative path resolves against THEIR origin, and the gate cookie is
