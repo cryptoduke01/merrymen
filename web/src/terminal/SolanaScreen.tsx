@@ -11,7 +11,7 @@ import { requestJson } from "./request-json";
 import { SignIn } from "./HostedControls";
 import { SolanaAutomation } from "./SolanaAutomation";
 import { outcomeAfterRefusal, refusedByServer, signatureOf, SolanaOwnerActions, type OwnerRecord } from "./SolanaOwnerActions";
-import { SolanaRecovery } from "./SolanaRecovery";
+import { ownerKeyExportEnabled, SolanaRecovery } from "./SolanaRecovery";
 import { PermissionTerms, permissionExpiry, permissionMatchesLimits, readPermissionTransaction } from "./SolanaPermission";
 import { deriveSolanaVaultAddress } from "../../../packages/core/src/solana-live";
 import { solanaUnits as units, displaySolanaAmount as display } from "../lib/solana-amounts";
@@ -287,6 +287,8 @@ function ConnectedSolana() {
     setRegistration(null); await refresh();
   };
   const liveBook = status?.runtime?.live.book;
+  // A vault the server has read, funded or registered: what an owner key backup protects.
+  const live = status?.runtime?.live, vaultSeen = !!live && (!!live.balances || !!live.book || !!live.session);
   if (!signer.authenticated) return <div className="solana-card"><p>Sign in with the same account you use for Robinhood Chain.</p><SignIn onDone={() => { void refresh().catch(() => undefined); }} /></div>;
   return <>
     {error && <p role="alert" className="solana-error">{error}</p>}
@@ -362,9 +364,9 @@ function ConnectedSolana() {
       </form>
       <SolanaAutomation key={`strategy-${signer.did}`} binding={binding} api={api} refresh={refresh} workerOnline={status?.runtime?.automation?.workerOnline ?? false} />
       <SolanaOwnerActions key={`owner-${signer.did}`} available={sameWallet && !!status?.runtime?.live.programId} api={api} sign={signer.signSetup} refresh={refresh} readRecord={readRecord} />
+      {/* Off by default; only the bound owner of a vault the server has read. */}
+      {ownerKeyExportEnabled() && sameWallet && vaultSeen && signer.address && <SolanaRecovery key={`recovery-${signer.did}`} owner={signer.address}
+        programId={live?.programId ?? null} vault={live?.vault ?? null} exportKey={signer.exportKey} />}
     </>}
-    {/* Also when the Solana status cannot be loaded: recovery must not depend on this server. */}
-    {signer.address && (binding ? sameWallet : status === null) && <SolanaRecovery key={`recovery-${signer.did}`} owner={signer.address}
-      programId={status?.runtime?.live.programId ?? null} vault={status?.runtime?.live.vault ?? null} exportKey={signer.exportKey} />}
   </>;
 }

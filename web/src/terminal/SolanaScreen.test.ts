@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import Module, { createRequire } from "node:module";
 import { afterEach, before, beforeEach, test, mock } from "node:test";
+import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import React, { act } from "react";
 import { ed25519 } from "@noble/curves/ed25519";
@@ -723,35 +724,63 @@ test("receipts show the minimum the recorded trade enforced, not the earlier pre
   assert.match(ui.container.textContent!, /Simulated output: 0\.00999 wrapped SOL, against a quoted minimum of 0\.00995 wrapped SOL\./);
 });
 
-test("the owner can export their key and find the recovery tool even when Solana status cannot load", async () => {
-  respond = async () => { throw new Error("Merrymen is down"); };
-  await render();
-  const text = () => ui.container.textContent!;
-  assert.match(text(), /Can't reach merrymen right now/);
-  assert.match(text(), /Recover without Merrymen/);
-  assert.match(text(), /Anyone who has this key controls your owner wallet and everything in your vault/);
-  assert.match(text(), /Merrymen never sees it and will never ask for it/);
-  assert.match(text(), /merrymen solana-recover/);
-  assert.match(text(), /reads the exported key from a file or from standard input/);
-  // Export needs an explicit acknowledgement first.
-  assert.equal(button("Export owner key with Privy").disabled, true);
-  const acknowledge = [...ui.container.querySelectorAll("label")].find((item) => item.textContent?.includes("anyone with this key can take my funds"))!.querySelector("input")!;
-  await act(async () => { acknowledge.click(); });
-  await ui.click("Export owner key with Privy");
-  assert.equal(exportCount, 1);
-  assert.match(text(), /export window is closed/);
-  assert.equal(button("Export owner key with Privy").disabled, true, "acknowledged again before another export");
-  assert.equal(signCount, 0);
+const EXPORT_FLAG = "NEXT_PUBLIC_MERRYMEN_SOLANA_OWNER_KEY_EXPORT";
+/** A live owner whose vault the server has read: what key export can protect. */
+function liveVault() {
+  state = initial("live");
+  Object.assign(state.runtime.live, { programId: PROGRAM, vault: "Vau1tAddress1111111111111111111111111111111", balances: { slot: 9, cashUsdg: "0", wsolRaw: "0" } });
+}
+const exportCard = () => [...ui.container.querySelectorAll(".solana-card")].find((item) => [...item.querySelectorAll("button")].some((b) => b.textContent === "Export owner key with Privy"));
+async function withExportFlag(value: string | undefined, run: () => Promise<void>) {
+  const before = process.env[EXPORT_FLAG];
+  if (value === undefined) delete process.env[EXPORT_FLAG]; else process.env[EXPORT_FLAG] = value;
+  try { await run(); } finally { if (before === undefined) delete process.env[EXPORT_FLAG]; else process.env[EXPORT_FLAG] = before; }
+}
+test("owner key export is off unless the deployment turns it on, even for a live vault", async () => {
+  for (const value of [undefined, "", "0", "true"]) await withExportFlag(value, async () => {
+    liveVault(); await render();
+    assert.equal(!!exportCard(), false, String(value));
+    assert.doesNotMatch(ui.container.textContent!, /Export owner key|solana-recover|recovery tool/);
+    await ui.close(); ui = testDom();
+  });
+  assert.equal(exportCount, 0);
 });
-
-test("recovery shows the bound vault and program, and is not offered for a different connected wallet", async () => {
-  state = initial("live"); Object.assign(state.runtime.live, { programId: PROGRAM, vault: "Vau1tAddress1111111111111111111111111111111" });
-  await render();
-  const card = [...ui.container.querySelectorAll(".solana-card")].find((item) => item.textContent?.startsWith("Recover without Merrymen"))!;
-  assert.ok(card.textContent!.includes(`Vault program: ${PROGRAM}`));
-  assert.ok(card.textContent!.includes("Vault: Vau1tAddress1111111111111111111111111111111"));
-  assert.ok(card.textContent!.includes(`Owner wallet: ${OWNER}`));
-  state.binding.owner = base58Encode(new Uint8Array(32).fill(5));
-  await ui.click("Refresh account");
-  assert.ok(!ui.container.textContent!.includes("Recover without Merrymen"));
+test("with export turned on, it is offered only to the bound owner of a vault the server has read", async () => {
+  await withExportFlag("1", async () => {
+    // Paper only: no vault to protect, so no reason to handle the key.
+    await render(); assert.equal(!!exportCard(), false);
+    // Status could not load: nothing shows that a vault exists.
+    respond = async () => { throw new Error("Merrymen is down"); };
+    await ui.click("Refresh account"); assert.equal(!!exportCard(), false);
+    respond = async (path) => { if (path === "status") return json(state); throw new Error("Unexpected fixture route"); };
+    liveVault(); await ui.click("Refresh account");
+    const card = exportCard()!;
+    assert.ok(card.textContent!.includes(`Vault program: ${PROGRAM}`));
+    assert.ok(card.textContent!.includes("Vault: Vau1tAddress1111111111111111111111111111111"));
+    assert.ok(card.textContent!.includes(`Owner wallet: ${OWNER}`));
+    assert.match(card.textContent!, /Anyone who has this key controls your owner wallet and everything in your vault/);
+    assert.match(card.textContent!, /Merrymen never sees it and will never ask for it/);
+    assert.match(card.textContent!, /any app or person offering to recover your funds/);
+    // Export needs an explicit acknowledgement each time.
+    assert.equal(button("Export owner key with Privy").disabled, true);
+    const acknowledge = [...card.querySelectorAll("label")].find((item) => item.textContent?.includes("anyone with this key can take my funds"))!.querySelector("input")!;
+    await act(async () => { acknowledge.click(); });
+    await ui.click("Export owner key with Privy");
+    assert.equal(exportCount, 1);
+    assert.match(ui.container.textContent!, /export window is closed/);
+    assert.equal(button("Export owner key with Privy").disabled, true, "acknowledged again before another export");
+    assert.equal(signCount, 0);
+    // Never for a different connected wallet.
+    state.binding.owner = base58Encode(new Uint8Array(32).fill(5));
+    await ui.click("Refresh account");
+    assert.equal(!!exportCard(), false);
+  });
+});
+test("the export card never names a merrymen command that cli/bin.mjs does not register", async () => {
+  const cli = readFileSync(fileURLToPath(new URL("../../../cli/bin.mjs", import.meta.url)), "utf8");
+  await withExportFlag("1", async () => {
+    liveVault(); await render();
+    const text = exportCard()!.textContent!;
+    for (const [, command] of text.matchAll(/merrymen ([a-z][a-z0-9-]*)/g)) assert.ok(cli.includes(`case "${command}"`), `merrymen ${command} is not a registered command`);
+  });
 });
