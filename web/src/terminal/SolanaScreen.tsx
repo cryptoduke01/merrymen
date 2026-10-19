@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ed25519 } from "@noble/curves/ed25519";
 import { CHAINS, SOLANA_USDG_MINT, base58Encode } from "../../../packages/core/src/ids";
-import type { SolanaPaperLimits, SolanaQuote } from "../../../packages/core/src/solana";
+import { SOLANA_QUOTE_MAX_AGE_MS, type SolanaPaperLimits, type SolanaQuote } from "../../../packages/core/src/solana";
 import type { SolanaPaperSnapshot } from "../../../worker/src/solana-paper-store";
 import type { SolanaBinding } from "@/lib/solana-binding-store";
 import { privyEnabled } from "@/lib/privy-client";
@@ -28,7 +28,11 @@ type RuntimeStatus = {
 };
 type Status = { binding: SolanaBinding | null; runtime: RuntimeStatus | null };
 type Setup = { transactionBase64: string; programId: string; vault: string; session: string; expiresAtMs: number };
-type Receipt = { mode?: string; requestId?: string; signature?: string; status?: string; state?: string };
+type Receipt = { mode?: string; requestId?: string; signature?: string; status?: string; state?: string;
+  intent?: { outputMint?: string }; minOutAmount?: string; quotedOutAmount?: string; quote?: { minOutAmount?: string }; outputAmountRaw?: string };
+/** A preview is only good for its quote's lifetime, and only for the exact trade it quoted. */
+type Preview = { quote: SolanaQuote; key: string; deadline: number };
+const RAW = /^(0|[1-9][0-9]*)$/;
 function base64(bytes: Uint8Array): string { return btoa(String.fromCharCode(...bytes)); }
 function fromBase64(value: string): Uint8Array { return Uint8Array.from(atob(value), (byte) => byte.charCodeAt(0)); }
 /** The saved expiry is absolute; the form shows the whole hours left, so an untouched form matches it. */
@@ -53,7 +57,8 @@ function ConnectedSolana() {
   const [perTradeSol, setPerTradeSol] = useState("0.1"), [dailySol, setDailySol] = useState("0.5");
   const [ops, setOps] = useState("20"), [drawdown, setDrawdown] = useState("20"), [duration, setDuration] = useState("24");
   const [initialCash, setInitialCash] = useState("1000"), [side, setSide] = useState<"buy" | "sell">("buy"), [amount, setAmount] = useState("1");
-  const [preview, setPreview] = useState<SolanaQuote | null>(null), [receipt, setReceipt] = useState<Receipt | null>(null);
+  const [preview, setPreview] = useState<Preview | null>(null), [receipt, setReceipt] = useState<Receipt | null>(null);
+  const [, setQuoteClock] = useState(0);
   const [registration, setRegistration] = useState<{ signature?: string; secret: string; signedTransactionBase64: string; limits: SolanaPaperLimits } | null>(null);
   const [savedDuration, setSavedDuration] = useState<string | null>(null);
   const request = useRef<{ key: string; id: string } | null>(null);
@@ -144,6 +149,45 @@ function ConnectedSolana() {
     return null;
   };
   const invalidate = () => { setPreview(null); setReceipt(null); request.current = null; };
+  // Re-render when the previewed quote expires, so its minimum stops being offered.
+  useEffect(() => {
+    if (!preview) return;
+    const wait = preview.deadline - Date.now();
+    if (wait <= 0) return;
+    const timer = setTimeout(() => setQuoteClock((tick) => tick + 1), wait + 1);
+    return () => clearTimeout(timer);
+  }, [preview]);
+  const quoteFresh = !!preview && Date.now() < preview.deadline;
+  const previewTrade = async () => {
+    const intent = tradeIntent(), key = request.current!.key;
+    // Timed on this clock from before the request, so a skewed device clock
+    // cannot stretch the quote's lifetime and latency only shortens it.
+    const started = Date.now();
+    const result = await api<{ preview: SolanaQuote | { quote: SolanaQuote } }>("intent", { action: "preview", mode, intent });
+    const quote = "quote" in result.preview ? result.preview.quote : result.preview;
+    if (quote.inputMint !== intent.inputMint || quote.outputMint !== intent.outputMint || quote.inAmount !== intent.amountRaw || !RAW.test(quote.minOutAmount)) throw new Error("The preview does not match this trade. Preview again.");
+    const lifetime = Math.min(SOLANA_QUOTE_MAX_AGE_MS, Math.max(0, quote.expiresAtMs - quote.quotedAtMs));
+    setPreview({ quote, key, deadline: started + lifetime }); setReceipt(null);
+  };
+  const placeTrade = async () => {
+    const intent = tradeIntent();
+    // Only the quote the owner just saw, for exactly this trade: an expired or
+    // different preview needs a new one before anything is sent.
+    if (!preview || Date.now() >= preview.deadline || preview.key !== request.current?.key) {
+      setPreview(null); throw new Error("This quote expired. Preview the trade again to see a current minimum before placing it.");
+    }
+    const result = await api<{ receipt: Receipt }>("intent", { action: "trade", mode, intent }); setReceipt(result.receipt); await refresh();
+  };
+  const tokenLabel = (mint: string) => mint === SOLANA_USDG_MINT ? "USDG" : "wrapped SOL";
+  /** What the recorded trade itself guaranteed, not the earlier preview. */
+  const receiptAmounts = (trade: Receipt): string | null => {
+    const out = trade.intent?.outputMint ?? (side === "buy" ? WSOL : SOLANA_USDG_MINT), decimals = out === SOLANA_USDG_MINT ? 6 : 9, label = tokenLabel(out);
+    if (trade.mode === "paper" && trade.outputAmountRaw && RAW.test(trade.outputAmountRaw) && trade.quote?.minOutAmount && RAW.test(trade.quote.minOutAmount))
+      return `Simulated output: ${display(trade.outputAmountRaw, decimals)} ${label}, against a quoted minimum of ${display(trade.quote.minOutAmount, decimals)} ${label}.`;
+    if (trade.mode !== "paper" && trade.minOutAmount && RAW.test(trade.minOutAmount) && trade.quotedOutAmount && RAW.test(trade.quotedOutAmount))
+      return `Quoted output: ${display(trade.quotedOutAmount, decimals)} ${label}. Minimum enforced on chain: ${display(trade.minOutAmount, decimals)} ${label}.`;
+    return null;
+  };
   const tradeIntent = () => {
     const amountRaw = units(amount, side === "buy" ? 6 : 9);
     const key = JSON.stringify([mode, side, amountRaw]);
@@ -268,19 +312,17 @@ function ConnectedSolana() {
         {!registration && binding.limits && registerBlock() && <p role="status">{registerBlock()}</p>}
         <button disabled={busy || !sameWallet || !binding.limits || !status?.runtime?.live.programId || (!registration && !!registerBlock())} onClick={() => void act(setupLive)}>{registration ? "Finish permission registration" : "Register bounded trading permission"}</button>
       </div>}
-      <form className="solana-card" onSubmit={(event) => { event.preventDefault(); void act(async () => {
-        const result = await api<{ preview: SolanaQuote | { quote: SolanaQuote } }>("intent", { action: "preview", mode, intent: tradeIntent() });
-        setPreview("quote" in result.preview ? result.preview.quote : result.preview); setReceipt(null);
-      }); }}><h2>USDG ↔ wrapped SOL</h2>
+      <form className="solana-card" onSubmit={(event) => { event.preventDefault(); void act(previewTrade); }}><h2>USDG ↔ wrapped SOL</h2>
         <label>Direction<select disabled={busy} value={side} onChange={(e) => { setSide(e.target.value as "buy" | "sell"); invalidate(); }}><option value="buy">Buy wrapped SOL</option><option value="sell">Sell wrapped SOL</option></select></label>
         <label>{side === "buy" ? "USDG to spend" : "Wrapped SOL to sell"}<input disabled={busy} inputMode="decimal" value={amount} onChange={(e) => { setAmount(e.target.value); invalidate(); }} /></label>
         <p>Slippage limit: 0.5%. Saved mode: {binding.requestedMode}.</p>
         <button disabled={busy || !!receipt || mode !== binding.requestedMode || !binding.limits || (mode === "live" && !(side === "sell" ? status?.runtime?.live.canExit : status?.runtime?.live.ready))}>Preview trade</button>
-        {preview && <><p>Minimum received: {display(preview.minOutAmount, side === "buy" ? 9 : 6)} {side === "buy" ? "wrapped SOL" : "USDG"}.</p>
-          <button type="button" disabled={busy || !!receipt || mode !== binding.requestedMode} onClick={() => void act(async () => {
-            const result = await api<{ receipt: Receipt }>("intent", { action: "trade", mode, intent: tradeIntent() }); setReceipt(result.receipt); await refresh();
-          })}>{mode === "paper" ? "Simulate trade" : "Place live trade"}</button></>}
+        {preview && (receipt || quoteFresh ? <><p>Minimum received: {display(preview.quote.minOutAmount, preview.quote.outputMint === SOLANA_USDG_MINT ? 6 : 9)} {tokenLabel(preview.quote.outputMint)}.</p>
+          {!receipt && <p>This quote is valid for about {Math.max(1, Math.round((preview.deadline - Date.now()) / 1000))} seconds. The trade is quoted again when placed, with the same 0.5% slippage limit; the receipt shows the minimum actually enforced.</p>}
+          <button type="button" disabled={busy || !!receipt || !quoteFresh || mode !== binding.requestedMode} onClick={() => void act(placeTrade)}>{mode === "paper" ? "Simulate trade" : "Place live trade"}</button></>
+          : <p role="status">This quote expired. Preview again to see a current minimum before trading.</p>)}
         {receipt && <p role="status">{receipt.mode === "paper" ? "Simulated trade recorded." : `Live request recorded${receipt.status ? `: ${receipt.status}` : ""}.`} {receipt.signature && <a target="_blank" rel="noreferrer" href={`https://solscan.io/tx/${encodeURIComponent(receipt.signature)}`}>View transaction</a>}</p>}
+        {receipt && receiptAmounts(receipt) && <p>{receiptAmounts(receipt)}</p>}
         {receipt && <button type="button" className="solana-secondary" disabled={busy} onClick={invalidate}>Start a new trade</button>}
       </form>
       <SolanaAutomation key={`strategy-${signer.did}`} binding={binding} api={api} refresh={refresh} workerOnline={status?.runtime?.automation?.workerOnline ?? false} />

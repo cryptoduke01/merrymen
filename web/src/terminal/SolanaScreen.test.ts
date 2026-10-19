@@ -468,3 +468,68 @@ test("a confirmed permission that cannot be activated drops its session key inst
   assert.match(ui.container.textContent!, /does not match the signed limits\. This permission could not be activated, so its session key has been discarded/);
   assert.equal(button("Register bounded trading permission").disabled, false);
 });
+
+const quoteFor = (lifetimeMs: number, quotedAtMs = Date.now()) => ({ source: "jupiter", inputMint: SOLANA_USDG_MINT, outputMint: OWNER, inAmount: "1000000", outAmount: "10000000",
+  minOutAmount: "9950000", slippageBps: 50, contextSlot: 1, quotedAtMs, expiresAtMs: quotedAtMs + lifetimeMs });
+test("a previewed minimum expires with its quote and the trade needs a new preview", async () => {
+  state.runtime.paper = paper;
+  let lifetime = 200;
+  const trades: Record<string, unknown>[] = [];
+  respond = async (path, body) => {
+    if (path === "status") return json(state);
+    if (path === "intent" && body?.action === "preview") return json({ preview: { quote: quoteFor(lifetime) } });
+    if (path === "intent" && body?.action === "trade") { trades.push(body); return json({ receipt: { mode: "paper", requestId: (body.intent as { requestId: string }).requestId } }); }
+    throw new Error("Unexpected fixture route");
+  };
+  await render(); await ui.click("Preview trade");
+  assert.match(ui.container.textContent!, /Minimum received: 0\.00995 wrapped SOL/);
+  assert.equal(button("Simulate trade").disabled, false);
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 300)); });
+  // The quote's lifetime has passed: its minimum is no longer offered and nothing can be traded on it.
+  assert.ok(!ui.container.textContent!.includes("Minimum received"));
+  assert.match(ui.container.textContent!, /This quote expired\. Preview again/);
+  assert.equal([...ui.container.querySelectorAll("button")].some((item) => item.textContent === "Simulate trade"), false);
+  assert.equal(trades.length, 0);
+  lifetime = 20_000;
+  await ui.click("Preview trade"); await ui.click("Simulate trade");
+  assert.equal(trades.length, 1);
+});
+
+test("a quote that is already past its expiry never offers a trade, whatever the device clock says", async () => {
+  state.runtime.paper = paper;
+  respond = async (path, body) => {
+    if (path === "status") return json(state);
+    // Server clock ten minutes ahead of the device; the quote itself has no lifetime left.
+    if (path === "intent" && body?.action === "preview") return json({ preview: { quote: quoteFor(0, Date.now() + 600_000) } });
+    throw new Error("Unexpected fixture route");
+  };
+  await render(); await ui.click("Preview trade");
+  assert.match(ui.container.textContent!, /This quote expired/);
+  assert.equal(calls.some((call) => call.body?.action === "trade"), false);
+});
+
+test("receipts show the minimum the recorded trade enforced, not the earlier preview", async () => {
+  state = initial("live"); Object.assign(state.runtime.live, { ready: true, canExit: true, programId: PROGRAM });
+  let sent: Record<string, unknown> | undefined;
+  respond = async (path, body) => {
+    if (path === "status") return json(state);
+    if (path === "intent" && body?.action === "preview") return json({ preview: { quote: quoteFor(20_000) } });
+    if (path === "intent" && body?.action === "trade") {
+      sent = body;
+      return json({ receipt: { mode: "live", requestId: (body.intent as { requestId: string }).requestId, status: "pending", intent: { outputMint: OWNER }, minOutAmount: "9900000", quotedOutAmount: "9940000" } });
+    }
+    throw new Error("Unexpected fixture route");
+  };
+  await render(); await ui.click("Preview trade"); await ui.click("Place live trade");
+  assert.ok(sent);
+  assert.match(ui.container.textContent!, /Quoted output: 0\.00994 wrapped SOL\. Minimum enforced on chain: 0\.0099 wrapped SOL\./);
+  state = initial("paper"); state.runtime.paper = paper;
+  respond = async (path, body) => {
+    if (path === "status") return json(state);
+    if (path === "intent" && body?.action === "preview") return json({ preview: { quote: quoteFor(20_000) } });
+    if (path === "intent" && body?.action === "trade") return json({ receipt: { mode: "paper", requestId: "r", intent: { outputMint: OWNER }, quote: { minOutAmount: "9950000" }, outputAmountRaw: "9990000" } });
+    throw new Error("Unexpected fixture route");
+  };
+  await ui.click("Refresh account"); await ui.click("Start a new trade"); await ui.click("Preview trade"); await ui.click("Simulate trade");
+  assert.match(ui.container.textContent!, /Simulated output: 0\.00999 wrapped SOL, against a quoted minimum of 0\.00995 wrapped SOL\./);
+});
