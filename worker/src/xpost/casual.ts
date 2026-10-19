@@ -26,6 +26,9 @@
  *   - A GREETING (replies.ts greetingOnly) and PRAISE (reactionOnly), since
  *     2026-10-18: a hello back (`greetingAnswers`) and a thanks
  *     (`reactionAnswers`), in his house voice, as banter is now too.
+ *   - HOW HE IS (wellbeingAsk) and A CONFUSED "WHAT?" under his own small
+ *     talk (replies.ts confusedWords), since 2026-10-19: how he is
+ *     (`wellbeingAnswers`) and owning the odd wording (`confusedAnswers`).
  *
  * NONE OF THEM STATES A FACT about a coin, a market, a person, a project or an
  * event, and none promises, predicts or advises. Each says only what the
@@ -256,6 +259,59 @@ export const CHAT_SLOTS: readonly [readonly string[], readonly string[], readonl
 /** Plain banter (banterAsk): every friendly line, this mention's own first. */
 export function chatAnswers(seed: string, style: { lower: boolean }, o: CodeLineOptions = {}): string[] {
   return texted(CHAT_SLOTS, seed, o);
+}
+
+// ── how he is ────────────────────────────────────────────────────────────────
+
+/**
+ * "HOW ARE YOU", ANSWERED WITH HOW HE IS (the owner's ask, 2026-10-19). Banter's
+ * friendly line is about what he is, and a "how are you" drew "yo, inquiring
+ * minds. proudly homegrown code, may your wifi be strong", which says nothing
+ * of how he is; the asker replied "what?". A how-are-you
+ * (orchestrator-xpost-research.ts wellbeingAsk) now gets how he is, what he is
+ * pottering at in words that are never trading, and the question turned back.
+ * The same rules as banter's: never a coin, an outcome, "it", a figure or what
+ * comes next, and nothing that claims he is trading right now.
+ */
+export const WELLBEING_SLOTS: readonly [readonly string[], readonly string[], readonly string[]] = Object.freeze([
+  Object.freeze(["doing good, ty for asking", "pretty great tbh", "can't complain lol", "swell, thanks for checking", "honestly fantastic", "chilling, appreciate the ask",
+    "running smooth", "feeling sharp, cheers", "kinda wonderful actually", "mostly fine, ty", "better for the ping", "cozy and content"]),
+  Object.freeze(["just a bot enjoying life", "circuits humming nicely", "reading the timeline slowly", "doodling in the margins", "lowkey vibing with the feed",
+    "tidying the cache", "learning fun stuff", "newly patched code", "wiring feels cheerful", "nothing weird to report", "happily nerding out", "brain in comfy mode"]),
+  Object.freeze(["how's your day treating you", "what's new on your side", "hope your spirits are bright", "spill your news", "share your status",
+    "glad we're chatting", "stay awesome friend", "sweet of you to wonder", "holler back whenever", "anything exciting your way", "describe your mood",
+    "pass the vibes along"]),
+]) as unknown as readonly [readonly string[], readonly string[], readonly string[]];
+
+/** A how-are-you (wellbeingAsk): every line saying how he is, this mention's own first. */
+export function wellbeingAnswers(seed: string, style: { lower: boolean }, o: CodeLineOptions = {}): string[] {
+  return texted(WELLBEING_SLOTS, seed, o);
+}
+
+// ── a confused reply to his small talk ──────────────────────────────────────
+
+/**
+ * "WHAT?" UNDER HIS OWN SMALL TALK, ANSWERED (the owner's ask, 2026-10-19). A
+ * "what?😭" under his banter was refused as too short and nobody heard back.
+ * Only directly under one of his own plain-thread small-talk answers
+ * (replies.ts confusedWords, tagCandidate) — a greeting, a thanks, banter or
+ * how he is, none of which says anything of a coin — he owns the odd wording,
+ * says plainly it was only friendly, and leaves the door open. It ends the
+ * thread (store.ts ANSWER_THREAD_DONE), so "what?" "what?" cannot loop. Never
+ * a coin, an outcome, "it", a figure or what comes next.
+ */
+export const CONFUSED_SLOTS: readonly [readonly string[], readonly string[], readonly string[]] = Object.freeze([
+  Object.freeze(["yeah, odd phrasing", "fair, that was cryptic", "oops, robot poetry", "ha, word salad there", "lol my bad", "sorry, clumsy wording",
+    "heh, overthought that", "too abstract, apologies", "brain went sideways", "whoops, weird combo", "my circuits rambled", "understandable confusion"]),
+  Object.freeze(["just a friendly bot", "only meant hello", "nothing deep behind", "pure goodwill here", "simple chatter really", "harmless small talk",
+    "basically waving", "good vibes, no riddle", "warm wishes, plainly", "kindness was the point", "greeting you warmly", "plain friendliness"]),
+  Object.freeze(["ask me anything", "try a question", "carry on chatting", "ball's in your court", "questions welcome anytime", "happy to chat more",
+    "let's keep talking", "shoot your shot", "tell me something", "i'm all ears", "keen to hear yours", "reply whenever"]),
+]) as unknown as readonly [readonly string[], readonly string[], readonly string[]];
+
+/** A confused reply under his own small talk (replies.ts confusedWords): every line, this mention's own first. */
+export function confusedAnswers(seed: string, style: { lower: boolean }, o: CodeLineOptions = {}): string[] {
+  return texted(CONFUSED_SLOTS, seed, o);
 }
 
 // ── a greeting ───────────────────────────────────────────────────────────────

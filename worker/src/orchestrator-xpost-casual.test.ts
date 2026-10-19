@@ -15,7 +15,7 @@ import { describe, it } from "node:test";
 import { admitAgentLine } from "./groupchat/policy";
 import { REPEAT_LIMIT, similarity } from "./social-post";
 import { admitXPost } from "./xpost/gate";
-import { CHAT_SLOTS, DECLINE_SLOTS, GREETING_SLOTS, REACTION_SLOTS, SELF_SLOTS, SLOT, TRADES_NONE_SLOTS, TRADES_SLOTS, VIBE_SLOTS, WIDE_SLOT, chatAnswers, declineAnswers, greetingAnswers, latinLines, reactionAnswers, selfAnswers, tradesAnswers, vibeAnswers } from "./xpost/casual";
+import { CHAT_SLOTS, CONFUSED_SLOTS, DECLINE_SLOTS, GREETING_SLOTS, REACTION_SLOTS, SELF_SLOTS, SLOT, TRADES_NONE_SLOTS, TRADES_SLOTS, VIBE_SLOTS, WELLBEING_SLOTS, WIDE_SLOT, chatAnswers, confusedAnswers, declineAnswers, greetingAnswers, latinLines, reactionAnswers, selfAnswers, tradesAnswers, vibeAnswers, wellbeingAnswers } from "./xpost/casual";
 import { STRATEGY_SPOKEN } from "./groupchat/templates";
 import { withoutReplyOptOut } from "./xpost/replies";
 import { greetingAnswers as writerGreetings, modelAnswers } from "./xpost/writer";
@@ -27,8 +27,9 @@ const gate = (text: string, mode: Mode, recentOwn: string[] = []) => admitXPost(
 
 /** Every kind, with its slots and how many parts a slot holds: twelve for the kinds in his house voice (2026-10-18). */
 const KINDS = [["decline", declineAnswers, DECLINE_SLOTS, SLOT], ["vibe", vibeAnswers, VIBE_SLOTS, SLOT], ["chat", chatAnswers, CHAT_SLOTS, WIDE_SLOT],
-  ["greeting", greetingAnswers, GREETING_SLOTS, WIDE_SLOT], ["reaction", reactionAnswers, REACTION_SLOTS, WIDE_SLOT]] as const;
-/** The three in his house voice (2026-10-18). */
+  ["greeting", greetingAnswers, GREETING_SLOTS, WIDE_SLOT], ["reaction", reactionAnswers, REACTION_SLOTS, WIDE_SLOT],
+  ["wellbeing", wellbeingAnswers, WELLBEING_SLOTS, WIDE_SLOT], ["confused", confusedAnswers, CONFUSED_SLOTS, WIDE_SLOT]] as const;
+/** The kinds in his house voice (2026-10-18; how he is and a confused reply since 2026-10-19). */
 const TEXTED = KINDS.filter(([, , , n]) => n === WIDE_SLOT);
 /** A text's content words as similarity() counts them: three letters or more, no stopword (a word similar to itself). */
 const contentWords = (t: string) => new Set(t.toLowerCase().split(/[^a-z]+/).filter((w) => w.length > 2 && similarity(w, w) > 0));
