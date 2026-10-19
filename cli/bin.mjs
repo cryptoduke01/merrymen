@@ -361,7 +361,7 @@ async function welcome() {
 async function maybeFirstRun(cmd) {
   // The paper command has machine-readable output and must not initialize
   // unrelated EVM onboarding state just to inspect a mint or show help.
-  if (cmd === "solana-paper" || cmd === "solana-agent") return;
+  if (cmd === "solana-paper" || cmd === "solana-agent" || cmd === "solana-recover") return;
   if (existsSync(WELCOMED)) return;
   try {
     ensureHome();
@@ -1654,10 +1654,14 @@ switch (cmd) {
     preflightCmd();
     break;
   case "solana-paper":
-  case "solana-agent": {
+  case "solana-agent":
+  case "solana-recover": {
     // Use the Node executable directly: Windows .cmd wrappers need a shell,
     // which must never interpolate owner-supplied command arguments.
-    const child = spawn(process.execPath, ["--import", "tsx", path.join(ROOT, "worker", "src", cmd === "solana-agent" ? "solana-agent-cli.ts" : "solana-paper-cli.ts"), ...rest], {
+    // solana-recover reads the owner's key from a file or the inherited stdin,
+    // never from these arguments.
+    const entry = { "solana-agent": "solana-agent-cli.ts", "solana-paper": "solana-paper-cli.ts", "solana-recover": "solana-recover-cli.ts" }[cmd];
+    const child = spawn(process.execPath, ["--import", "tsx", path.join(ROOT, "worker", "src", entry), ...rest], {
       cwd: ROOT,
       stdio: "inherit",
       shell: false,
@@ -1722,6 +1726,7 @@ switch (cmd) {
   ${bold("merrymen preflight")}      can it actually trade? balances, chain, caps, sizing
   ${bold("merrymen solana-paper")}   local Solana paper book and quotes (--help)
   ${bold("merrymen solana-agent")}   run explicitly enabled Solana strategies
+  ${bold("merrymen solana-recover")} withdraw your Solana vault with your own key (--help)
   ${bold("merrymen export")}         write the hash-chained audit journal (stdout)
   ${bold("merrymen verify")}         check an export — reads only the file you hand it
   ${bold("merrymen service")}        start on login, survive reboots (install/uninstall/status)

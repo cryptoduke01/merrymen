@@ -1,0 +1,527 @@
+/**
+ * Owner recovery against an in-process fake mainnet. Nothing leaves the test:
+ * every RPC call is answered by FakeChain, which decodes each sent
+ * transaction, verifies the owner's signature, and applies the vault
+ * program's own account constraints (contracts/solana lib.rs: revoke_all,
+ * withdraw, withdraw_sol) plus the ATA and SyncNative semantics recovery uses.
+ */
+import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { Readable } from "node:stream";
+import { afterEach, describe, it } from "node:test";
+import { ed25519 } from "@noble/curves/ed25519";
+import { getCompiledTransactionMessageDecoder, getTransactionDecoder } from "@solana/kit";
+import { base58Decode, base58Encode, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM } from "../../packages/core/src/ids";
+import {
+  buildRevokeSolanaSessionsInstruction, buildWithdrawSolanaNativeInstruction, buildWithdrawSolanaVaultInstruction,
+  deriveSolanaAta, deriveSolanaVaultAddress, SOLANA_ASSOCIATED_TOKEN_PROGRAM, SOLANA_CLASSIC_TOKEN_PROGRAM,
+  SOLANA_SYSTEM_PROGRAM, SOLANA_VAULT_ACCOUNT_SIZE, SOLANA_VAULT_DISCRIMINATOR, SOLANA_WRAPPED_SOL_MINT,
+} from "../../packages/core/src/solana-live";
+import { readSolanaOwnerKey, SolanaRecoverError, type SolanaRecoveryResult } from "./solana-recover";
+import { runSolanaRecoverCommand, type SolanaRecoverCommandDeps } from "./solana-recover-command";
+import { SOLANA_MAINNET_GENESIS_HASH, SolanaRpcError } from "./solana-rpc";
+
+const RPC = "https://rpc.example.test/?api-key=fixture-rpc-secret";
+const key = (fill: number) => base58Encode(new Uint8Array(32).fill(fill));
+const PROGRAM = key(71);
+const SESSION = key(72);
+const SEED = new Uint8Array(32).map((_, i) => (i * 37 + 11) & 255);
+const OWNER = base58Encode(ed25519.getPublicKey(SEED));
+const SECRET64 = new Uint8Array([...SEED, ...ed25519.getPublicKey(SEED)]);
+const SECRET_BASE58 = base58Encode(SECRET64);
+const SECRET_JSON = JSON.stringify([...SECRET64]);
+const OTHER_SEED = new Uint8Array(32).fill(5);
+const OTHER_OWNER = base58Encode(ed25519.getPublicKey(OTHER_SEED));
+
+const rent = (size: number) => BigInt(size + 128) * 6_960n;
+const DISC = {
+  revoke: [147, 196, 234, 31, 86, 199, 8, 234], withdraw: [183, 18, 70, 156, 148, 109, 161, 34],
+  withdrawSol: [145, 131, 74, 136, 65, 137, 42, 38],
+};
+type Account = { owner: string; lamports: bigint; data: Buffer; executable?: boolean };
+type Decoded = { program: string; accounts: { address: string; signer: boolean; writable: boolean }[]; data: Buffer };
+
+function vaultData(owner: string, session: string, fields: { epoch?: bigint; seq?: bigint; expiresAt?: bigint; paused?: boolean } = {}): Buffer {
+  const data = Buffer.alloc(SOLANA_VAULT_ACCOUNT_SIZE);
+  Buffer.from(SOLANA_VAULT_DISCRIMINATOR).copy(data, 0);
+  data[8] = 2; data[9] = 254;
+  Buffer.from(base58Decode(owner)!).copy(data, 10);
+  Buffer.from(base58Decode(session)!).copy(data, 42);
+  data.writeBigUInt64LE(fields.epoch ?? 3n, 74); data.writeBigUInt64LE(fields.seq ?? 40n, 82);
+  data.writeBigInt64LE(fields.expiresAt ?? 1_900_000_000n, 90);
+  data.writeBigUInt64LE(25_000_000n, 98); data.writeBigUInt64LE(100_000_000n, 106);
+  data.writeBigUInt64LE(1_000_000_000n, 114); data.writeBigUInt64LE(4_000_000_000n, 122);
+  data.writeUInt16LE(20, 130); data[132] = fields.paused ? 1 : 0; data.writeUInt32LE(0, 133);
+  return data;
+}
+function tokenData(mint: string, authority: string, amount: bigint, options: { nativeReserve?: bigint; frozen?: boolean; size?: number } = {}): Buffer {
+  const data = Buffer.alloc(options.size ?? 165);
+  Buffer.from(base58Decode(mint)!).copy(data, 0);
+  Buffer.from(base58Decode(authority)!).copy(data, 32);
+  data.writeBigUInt64LE(amount, 64);
+  data[108] = options.frozen ? 2 : 1;
+  if (options.nativeReserve !== undefined) { data.writeUInt32LE(1, 109); data.writeBigUInt64LE(options.nativeReserve, 113); }
+  if (data.length > 165) data[165] = 2;
+  return data;
+}
+
+/** A fake mainnet that executes recovery transactions with the program's constraints. */
+class FakeChain {
+  accounts = new Map<string, Account>();
+  slot = 1_000; height = 5_000;
+  genesis = SOLANA_MAINNET_GENESIS_HASH;
+  sent: { signature: string; instructions: Decoded[] }[] = [];
+  calls: string[] = [];
+  statuses = new Map<string, { slot: number; err: unknown; polls: number }>();
+  /** Per-send behavior, in order: land (default), drop (never lands) or fail (lands with an error). */
+  behaviors: ("land" | "drop" | "fail" | "reject")[] = [];
+  /** Runs before each send executes, e.g. a session trade racing the revoke. */
+  beforeSend?: (index: number) => void;
+  /** Statuses report "confirmed" this many times before "finalized". */
+  confirmedPolls = 1;
+  vault = "";
+
+  async setup(options: { session?: string; usdg?: bigint; wsol?: bigint; unsynced?: bigint; solExcess?: bigint; ownerLamports?: bigint;
+    frozenUsdg?: boolean; noWsolAccount?: boolean; ownerAtas?: boolean } = {}) {
+    this.vault = await deriveSolanaVaultAddress(PROGRAM, OWNER);
+    this.accounts.set(this.vault, { owner: PROGRAM, lamports: rent(SOLANA_VAULT_ACCOUNT_SIZE) + (options.solExcess ?? 3_000_000n), data: vaultData(OWNER, options.session ?? SESSION) });
+    const usdgAta = await deriveSolanaAta(this.vault, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM);
+    this.accounts.set(usdgAta, { owner: TOKEN_2022_PROGRAM, lamports: rent(170), data: tokenData(SOLANA_USDG_MINT, this.vault, options.usdg ?? 12_345_678n, { size: 170, frozen: options.frozenUsdg }) });
+    if (!options.noWsolAccount) {
+      const wsolAta = await deriveSolanaAta(this.vault, SOLANA_WRAPPED_SOL_MINT, SOLANA_CLASSIC_TOKEN_PROGRAM);
+      const wsol = options.wsol ?? 500_000_000n;
+      this.accounts.set(wsolAta, { owner: SOLANA_CLASSIC_TOKEN_PROGRAM, lamports: rent(165) + wsol + (options.unsynced ?? 100_000_000n),
+        data: tokenData(SOLANA_WRAPPED_SOL_MINT, this.vault, wsol, { nativeReserve: rent(165) }) });
+    }
+    this.accounts.set(OWNER, { owner: SOLANA_SYSTEM_PROGRAM, lamports: options.ownerLamports ?? 50_000_000n, data: Buffer.alloc(0) });
+    if (options.ownerAtas) {
+      for (const [mint, program, size] of [[SOLANA_USDG_MINT, TOKEN_2022_PROGRAM, 170], [SOLANA_WRAPPED_SOL_MINT, SOLANA_CLASSIC_TOKEN_PROGRAM, 165]] as const) {
+        this.accounts.set(await deriveSolanaAta(OWNER, mint, program), { owner: program, lamports: rent(size),
+          data: tokenData(mint, OWNER, 0n, { size, ...(mint === SOLANA_WRAPPED_SOL_MINT ? { nativeReserve: rent(165) } : {}) }) });
+      }
+    }
+    return this;
+  }
+  token(address: string) { const a = this.accounts.get(address); return a ? a.data.readBigUInt64LE(64) : null; }
+  vaultField() { const d = this.accounts.get(this.vault)!.data; return { session: base58Encode(d.subarray(42, 74)), epoch: d.readBigUInt64LE(74), paused: d[132] === 1, expiresAt: d.readBigInt64LE(90), seq: d.readBigUInt64LE(82) }; }
+
+  fetch: typeof fetch = async (input, init) => {
+    assert.equal(String(input), RPC, "only the RPC the owner supplied is contacted");
+    const body = JSON.parse(String(init?.body));
+    this.calls.push(body.method);
+    const reply = (result: unknown) => new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, result }));
+    const error = () => new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, error: { code: -32002, message: "simulation failed" } }));
+    const encode = (a: Account | undefined) => a ? { owner: a.owner, lamports: Number(a.lamports), data: [a.data.toString("base64"), "base64"],
+      executable: !!a.executable, rentEpoch: 0, space: a.data.length } : null;
+    const p = body.params ?? [];
+    switch (body.method) {
+      case "getGenesisHash": return reply(this.genesis);
+      case "getSlot": {
+        const options = p[0] as { commitment?: string; minContextSlot?: number } | undefined;
+        const current = options?.commitment === "finalized" ? this.slot - 32 : this.slot;
+        // Like a real RPC: a context floor above the requested commitment's tip is an error.
+        if ((options?.minContextSlot ?? 0) > current) return error();
+        return reply(current);
+      }
+      case "getBlockHeight": return reply(this.height);
+      case "getMinimumBalanceForRentExemption": return reply(Number(rent(p[0])));
+      case "getMultipleAccounts": return reply({ context: { slot: this.slot }, value: (p[0] as string[]).map((k) => encode(this.accounts.get(k))) });
+      case "getAccountInfo": {
+        const account = this.accounts.get(p[0]), slice = p[1]?.dataSlice as { offset: number; length: number } | undefined;
+        const value = encode(account && slice ? { ...account, data: account.data.subarray(slice.offset, slice.offset + slice.length) } : account);
+        return reply({ context: { slot: this.slot }, value: value && account ? { ...value, space: account.data.length } : value });
+      }
+      case "getLatestBlockhash": return reply({ context: { slot: this.slot }, value: { blockhash: key(90 + this.sent.length), lastValidBlockHeight: this.height + 150 } });
+      case "getSignatureStatuses": {
+        const status = this.statuses.get(p[0][0]);
+        if (!status) { this.height += 200; this.slot += 200; return reply({ context: { slot: this.slot }, value: [null] }); }
+        const finalized = status.polls++ >= this.confirmedPolls;
+        // Once a slot is reported finalized, the finalized tip has reached it.
+        if (finalized) this.slot = Math.max(this.slot, status.slot + 32);
+        return reply({ context: { slot: this.slot }, value: [{ slot: status.slot, confirmations: finalized ? null : 1, err: status.err,
+          confirmationStatus: finalized ? "finalized" : "confirmed" }] });
+      }
+      case "sendTransaction": {
+        const index = this.sent.length;
+        this.beforeSend?.(index);
+        const { signature, instructions } = this.decode(String(p[0]));
+        this.sent.push({ signature, instructions });
+        const behavior = this.behaviors[index] ?? "land";
+        if (behavior === "drop") return reply(signature);
+        if (behavior === "reject") return error();
+        const snapshot = new Map([...this.accounts].map(([k, v]) => [k, { ...v, data: Buffer.from(v.data) }]));
+        try { for (const ix of instructions) this.execute(ix); }
+        catch { this.accounts = snapshot; return error(); }
+        if (behavior === "fail") { this.accounts = snapshot; this.statuses.set(signature, { slot: ++this.slot, err: { InstructionError: [0, { Custom: 6000 }] }, polls: 0 }); }
+        else {
+          this.accounts.get(OWNER)!.lamports -= 5_000n;
+          this.statuses.set(signature, { slot: ++this.slot, err: null, polls: 0 });
+        }
+        this.height += 2;
+        return reply(signature);
+      }
+      default: throw new Error(`unexpected RPC method ${body.method}`);
+    }
+  };
+
+  decode(wire: string): { signature: string; instructions: Decoded[] } {
+    const tx = getTransactionDecoder().decode(Buffer.from(wire, "base64"));
+    const message = getCompiledTransactionMessageDecoder().decode(tx.messageBytes);
+    const { numSignerAccounts, numReadonlySignerAccounts, numReadonlyNonSignerAccounts } = message.header;
+    const keys = message.staticAccounts.map(String);
+    assert.equal(keys[0], OWNER, "the owner pays the fees");
+    assert.deepEqual(Object.keys(tx.signatures), keys.slice(0, numSignerAccounts));
+    assert.equal(numSignerAccounts, 1, "the owner is the only signer");
+    for (const signer of keys.slice(0, numSignerAccounts)) {
+      const bytes = tx.signatures[signer as keyof typeof tx.signatures];
+      assert.ok(bytes && ed25519.verify(new Uint8Array(bytes), new Uint8Array(tx.messageBytes), base58Decode(signer)!), "valid owner signature");
+    }
+    const role = (i: number) => ({ signer: i < numSignerAccounts,
+      writable: i < numSignerAccounts - numReadonlySignerAccounts || (i >= numSignerAccounts && i < keys.length - numReadonlyNonSignerAccounts) });
+    const instructions = message.instructions.map((ix) => ({ program: keys[ix.programAddressIndex]!,
+      accounts: (ix.accountIndices ?? []).map((i) => ({ address: keys[i]!, ...role(i) })), data: Buffer.from(ix.data ?? []) }));
+    const first = tx.signatures[keys[0] as keyof typeof tx.signatures]!;
+    return { signature: base58Encode(new Uint8Array(first)), instructions };
+  }
+
+  /** Program semantics, failing like the real programs would. */
+  execute(ix: Decoded) {
+    const need = (ok: boolean, why: string) => { if (!ok) throw new Error(why); };
+    const acct = (i: number, writable = false, signer = false) => {
+      const meta = ix.accounts[i]; need(!!meta, "missing account");
+      need(!writable || meta!.writable, "account must be writable"); need(!signer || meta!.signer, "account must sign");
+      return meta!.address;
+    };
+    const atas = this.atas;
+    if (ix.program === SOLANA_ASSOCIATED_TOKEN_PROGRAM) {
+      need(ix.data.length === 1 && ix.data[0] === 1, "only CreateIdempotent");
+      const payer = acct(0, true, true), ata = acct(1, true), wallet = acct(2), mint = acct(3), program = acct(5);
+      need(acct(4) === SOLANA_SYSTEM_PROGRAM, "system program");
+      need(atas.get(`${wallet}:${mint}:${program}`) === ata, "ATA address");
+      if (this.accounts.has(ata)) return;
+      const size = program === TOKEN_2022_PROGRAM ? 170 : 165;
+      this.accounts.get(payer)!.lamports -= rent(size);
+      this.accounts.set(ata, { owner: program, lamports: rent(size),
+        data: tokenData(mint, wallet, 0n, { size, ...(mint === SOLANA_WRAPPED_SOL_MINT ? { nativeReserve: rent(165) } : {}) }) });
+      return;
+    }
+    if (ix.program === SOLANA_CLASSIC_TOKEN_PROGRAM) {
+      need(ix.data.length === 1 && ix.data[0] === 17 && ix.accounts.length === 1, "only SyncNative");
+      const native = this.accounts.get(acct(0, true))!;
+      need(native.data.readUInt32LE(109) === 1, "native account");
+      native.data.writeBigUInt64LE(native.lamports - native.data.readBigUInt64LE(113), 64);
+      return;
+    }
+    need(ix.program === PROGRAM, "unexpected program");
+    const disc = [...ix.data.subarray(0, 8)];
+    const vaultKey = acct(0, true), vault = this.accounts.get(vaultKey)!;
+    need(vaultKey === this.vault, "vault PDA seeds");
+    const owner = acct(1, disc.join() === DISC.withdrawSol.join(), true);
+    need(base58Encode(vault.data.subarray(10, 42)) === owner, "has_one owner");
+    const bumpSeq = () => vault.data.writeBigUInt64LE(vault.data.readBigUInt64LE(82) + 1n, 82);
+    if (disc.join() === DISC.revoke.join()) {
+      need(ix.accounts.length === 2, "revoke accounts");
+      vault.data.writeBigUInt64LE(vault.data.readBigUInt64LE(74) + 1n, 74);
+      Buffer.alloc(32).copy(vault.data, 42); vault.data.writeBigInt64LE(0n, 90); vault.data[132] = 1;
+      return;
+    }
+    const amount = ix.data.readBigUInt64LE(8);
+    need(amount > 0n, "amount");
+    if (disc.join() === DISC.withdrawSol.join()) {
+      need(amount <= vault.lamports - rent(vault.data.length), "withdraw_sol above the rent reserve");
+      vault.lamports -= amount; this.accounts.get(owner)!.lamports += amount; bumpSeq();
+      return;
+    }
+    need(disc.join() === DISC.withdraw.join() && ix.accounts.length === 6, "withdraw");
+    const mint = acct(2), vaultTokenKey = acct(3, true), ownerTokenKey = acct(4, true), program = acct(5);
+    need(atas.get(`${vaultKey}:${mint}:${program}`) === vaultTokenKey, "vault_token is the vault ATA");
+    need(atas.get(`${owner}:${mint}:${program}`) === ownerTokenKey, "owner_token is the owner ATA");
+    const from = this.accounts.get(vaultTokenKey), to = this.accounts.get(ownerTokenKey);
+    need(!!from && !!to, "token accounts exist");
+    need(from!.data[108] === 1 && to!.data[108] === 1, "not frozen");
+    const balance = from!.data.readBigUInt64LE(64);
+    need(amount <= balance, "insufficient funds");
+    from!.data.writeBigUInt64LE(balance - amount, 64);
+    to!.data.writeBigUInt64LE(to!.data.readBigUInt64LE(64) + amount, 64);
+    if (mint === SOLANA_WRAPPED_SOL_MINT) { from!.lamports -= amount; to!.lamports += amount; }
+    bumpSeq();
+  }
+  atas = new Map<string, string>();
+  async indexAtas() {
+    for (const wallet of [OWNER, this.vault]) {
+      for (const [mint, program] of [[SOLANA_USDG_MINT, TOKEN_2022_PROGRAM], [SOLANA_WRAPPED_SOL_MINT, SOLANA_CLASSIC_TOKEN_PROGRAM]] as const) {
+        this.atas.set(`${wallet}:${mint}:${program}`, await deriveSolanaAta(wallet, mint, program));
+      }
+    }
+    return this;
+  }
+}
+
+const cleanup: (() => void)[] = [];
+afterEach(() => { while (cleanup.length) cleanup.pop()!(); });
+function keyFile(contents: string, mode = 0o600): string {
+  const dir = mkdtempSync(path.join(tmpdir(), "solana-recover-"));
+  cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, "owner-key.txt");
+  writeFileSync(file, contents, { mode });
+  chmodSync(file, mode);
+  return file;
+}
+async function chain(options: Parameters<FakeChain["setup"]>[0] = {}) {
+  return (await (await new FakeChain().setup(options)).indexAtas());
+}
+async function run(fake: FakeChain, args: string[], extra: Partial<SolanaRecoverCommandDeps> = {}) {
+  const out: string[] = [], warnings: string[] = [];
+  const deps: SolanaRecoverCommandDeps = { fetch: fake.fetch, log: (l) => out.push(l), warn: (l) => warnings.push(l), sleep: async () => {}, pollMs: 0, ...extra };
+  try {
+    const result = await runSolanaRecoverCommand(args, deps);
+    return { result: result as SolanaRecoveryResult, out: out.join("\n"), warnings: warnings.join("\n"), error: null as unknown };
+  } catch (error) {
+    return { result: null, out: out.join("\n"), warnings: warnings.join("\n"), error };
+  }
+}
+function noSecrets(...texts: string[]) {
+  for (const text of texts) {
+    assert.ok(!text.includes(SECRET_BASE58), "the secret key was printed");
+    assert.ok(!text.includes(base58Encode(SEED)), "the secret seed was printed");
+    assert.ok(!text.includes(SECRET_JSON.slice(1, 40)), "the secret key array was printed");
+    assert.ok(!text.includes("fixture-rpc-secret"), "the RPC URL's API key was printed");
+  }
+}
+const base = ["--program", PROGRAM, "--rpc", RPC];
+
+describe("owner key input", () => {
+  it("accepts a wallet export, a seed and a solana-keygen array, and they name the same owner", async () => {
+    for (const text of [SECRET_BASE58, `  ${SECRET_BASE58}\n`, base58Encode(SEED), SECRET_JSON, `${SECRET_JSON}\n`]) {
+      const { owner, keyPair } = await readSolanaOwnerKey(text);
+      assert.equal(owner, OWNER);
+      assert.equal(keyPair.privateKey.extractable, false, "the imported key cannot be exported again");
+    }
+  });
+  it("refuses a key whose public half does not match, and anything else, without echoing it", async () => {
+    const mismatched = base58Encode(new Uint8Array([...SEED, ...ed25519.getPublicKey(OTHER_SEED)]));
+    for (const text of [mismatched, "", "not a key", SECRET_BASE58.slice(0, 60), JSON.stringify([...SECRET64.slice(0, 63)]),
+      JSON.stringify([...SECRET64.slice(0, 63), 256]), "x".repeat(5000), `0x${Buffer.from(SECRET64).toString("hex")}`]) {
+      await assert.rejects(readSolanaOwnerKey(text), (error: unknown) => {
+        assert.ok(error instanceof SolanaRecoverError);
+        assert.match(error.message, /does not contain a Solana secret key/);
+        noSecrets(error.message, String(error.stack)); assert.ok(!text || !error.message.includes(text.slice(0, 20)));
+        return true;
+      });
+    }
+  });
+});
+
+describe("solana-recover", () => {
+  it("plans from a public key alone: reads only, signs and sends nothing", async () => {
+    const fake = await chain();
+    const { result, out, error } = await run(fake, [...base, "--owner", OWNER]);
+    assert.equal(error, null, String(error));
+    assert.equal(result!.sent, false);
+    assert.equal(fake.sent.length, 0);
+    assert.ok(!fake.calls.includes("sendTransaction") && !fake.calls.includes("getLatestBlockhash"));
+    assert.match(out, /PLAN ONLY\. Nothing was signed or sent; add --send/);
+    assert.match(out, new RegExp(`Vault:\\s+${fake.vault}`));
+    assert.match(out, /USDG\s+12\.345678/);
+    assert.match(out, /WSOL\s+0\.6 \(includes 0\.1 unsynced\)/);
+    assert.match(out, /SOL\s+0\.003 above the vault account's rent reserve/);
+    assert.match(out, /1\. revoke_all/);
+    assert.match(out, /2\. withdraw 12\.345678 USDG, 0\.6 WSOL, 0\.003 SOL to the owner/);
+    noSecrets(out);
+  });
+
+  it("revokes alone and finalized, then withdraws every unit to the owner from finalized balances", async () => {
+    const fake = await chain();
+    fake.confirmedPolls = 2;
+    // The session trades while the revoke is in flight: step 2 must use the
+    // post-revoke balances, not the plan's.
+    fake.beforeSend = (index) => {
+      if (index !== 0) return;
+      const usdg = fake.atas.get(`${fake.vault}:${SOLANA_USDG_MINT}:${TOKEN_2022_PROGRAM}`)!;
+      fake.accounts.get(usdg)!.data.writeBigUInt64LE(2_345_678n, 64);
+    };
+    const file = keyFile(`${SECRET_BASE58}\n`);
+    const { result, out, warnings, error } = await run(fake, [...base, "--key-file", file, "--send"]);
+    assert.equal(error, null, String(error));
+    assert.equal(fake.sent.length, 2, "exactly two transactions");
+
+    const [revoke, withdraw] = fake.sent;
+    const expectedRevoke = buildRevokeSolanaSessionsInstruction({ programAddress: PROGRAM, vault: fake.vault, owner: OWNER });
+    assert.equal(revoke!.instructions.length, 1, "revoke_all is sent alone");
+    assert.deepEqual([...revoke!.instructions[0]!.data], [...expectedRevoke.data!]);
+    assert.deepEqual(revoke!.instructions[0]!.accounts.map((a) => a.address), [fake.vault, OWNER]);
+    assert.equal(result!.revoke?.status, "finalized");
+
+    const ownerUsdg = await deriveSolanaAta(OWNER, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM);
+    const ownerWsol = await deriveSolanaAta(OWNER, SOLANA_WRAPPED_SOL_MINT, SOLANA_CLASSIC_TOKEN_PROGRAM);
+    const vaultUsdg = await deriveSolanaAta(fake.vault, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM);
+    const vaultWsol = await deriveSolanaAta(fake.vault, SOLANA_WRAPPED_SOL_MINT, SOLANA_CLASSIC_TOKEN_PROGRAM);
+    assert.deepEqual(withdraw!.instructions.map((ix) => ix.program), [SOLANA_ASSOCIATED_TOKEN_PROGRAM, PROGRAM,
+      SOLANA_ASSOCIATED_TOKEN_PROGRAM, SOLANA_CLASSIC_TOKEN_PROGRAM, PROGRAM, PROGRAM]);
+    const usdgIx = buildWithdrawSolanaVaultInstruction({ programAddress: PROGRAM, vault: fake.vault, owner: OWNER, mint: SOLANA_USDG_MINT,
+      vaultToken: vaultUsdg, ownerToken: ownerUsdg, tokenProgram: TOKEN_2022_PROGRAM, amount: 2_345_678n });
+    const wsolIx = buildWithdrawSolanaVaultInstruction({ programAddress: PROGRAM, vault: fake.vault, owner: OWNER, mint: SOLANA_WRAPPED_SOL_MINT,
+      vaultToken: vaultWsol, ownerToken: ownerWsol, tokenProgram: SOLANA_CLASSIC_TOKEN_PROGRAM, amount: 600_000_000n });
+    const solIx = buildWithdrawSolanaNativeInstruction({ programAddress: PROGRAM, vault: fake.vault, owner: OWNER, amount: 3_000_000n });
+    for (const [index, built] of [[1, usdgIx], [4, wsolIx], [5, solIx]] as const) {
+      assert.deepEqual([...withdraw!.instructions[index]!.data], [...built.data!], `instruction ${index} matches the packages/core builder`);
+      assert.deepEqual(withdraw!.instructions[index]!.accounts.map((a) => a.address), built.accounts!.map((a) => String(a.address)));
+    }
+
+    // Everything moved to the owner; only rent stays.
+    assert.equal(fake.token(vaultUsdg), 0n);
+    assert.equal(fake.token(vaultWsol), 0n);
+    assert.equal(fake.accounts.get(vaultWsol)!.lamports, rent(165));
+    assert.equal(fake.accounts.get(fake.vault)!.lamports, rent(SOLANA_VAULT_ACCOUNT_SIZE));
+    assert.equal(fake.token(ownerUsdg), 2_345_678n);
+    assert.equal(fake.token(ownerWsol), 600_000_000n);
+    assert.deepEqual({ session: fake.vaultField().session, paused: fake.vaultField().paused, expiresAt: fake.vaultField().expiresAt },
+      { session: SOLANA_SYSTEM_PROGRAM, paused: true, expiresAt: 0n });
+    assert.match(out, /Step 2 \(withdraw\): 2\.345678 USDG, 0\.6 WSOL, 0\.003 SOL, from finalized slot/);
+    assert.match(out, /Left in the vault: 0 USDG, 0 WSOL, 0 SOL above rent/);
+    assert.match(out, /Delete the exported key file now/);
+    assert.equal(warnings, "");
+    noSecrets(out, warnings);
+
+    // Running again finds nothing to do and sends nothing.
+    const again = await run(fake, [...base, "--key-file", file, "--send"]);
+    assert.equal(again.error, null, String(again.error));
+    assert.equal(fake.sent.length, 2);
+    assert.match(again.out, /revoke_all: not needed/);
+    assert.match(again.out, /nothing left to withdraw/);
+  });
+
+  it("reads the key from standard input, and refuses a terminal", async () => {
+    const fake = await chain({ session: SOLANA_SYSTEM_PROGRAM, ownerAtas: true });
+    const piped = await run(fake, [...base, "--key-file", "-", "--send"], { stdin: Readable.from([Buffer.from(SECRET_JSON)]) });
+    assert.equal(piped.error, null, String(piped.error));
+    assert.equal(fake.sent.length, 1, "no revoke is needed without a session; one withdrawal");
+    assert.doesNotMatch(piped.out, /Delete the exported key file/);
+    noSecrets(piped.out);
+    const terminal = Object.assign(Readable.from([]), { isTTY: true });
+    const refused = await run(fake, [...base, "--key-file", "-", "--send"], { stdin: terminal });
+    assert.match(String((refused.error as Error).message), /Standard input is a terminal/);
+  });
+
+  it("never takes a key from the command line, and warns when one was pasted there", async () => {
+    for (const [args, leaked] of [
+      [[...base, "--key", SECRET_BASE58, "--send"], true], [[...base, SECRET_BASE58], true], [[...base, "--owner", SECRET_BASE58], true],
+      [[...base, "--secret-key", "x"], false], [[...base, "--owner", OWNER, "--owner", OWNER], false], [[...base, "--send", "yes"], false],
+    ] as const) {
+      const fake = await chain();
+      const { error, out } = await run(fake, [...args]);
+      assert.ok(error instanceof SolanaRecoverError, String(error));
+      assert.match(error.message, /never from the command line/);
+      assert.equal(/clear it from your shell history/.test(error.message), leaked, args.join(" ").slice(0, 40));
+      noSecrets(error.message, out);
+      assert.deepEqual(fake.calls, [], "refused before any network call");
+    }
+  });
+
+  it("refuses to send without a key, or with a key for a different owner, before any network call", async () => {
+    const fake = await chain();
+    const noKey = await run(fake, [...base, "--owner", OWNER, "--send"]);
+    assert.match((noKey.error as Error).message, /--send needs --key-file/);
+    const mismatch = await run(fake, [...base, "--owner", OTHER_OWNER, "--key-file", keyFile(SECRET_BASE58), "--send"]);
+    assert.match((mismatch.error as Error).message, new RegExp(`The key belongs to ${OWNER}, not to --owner ${OTHER_OWNER}`));
+    for (const args of [["--rpc", RPC, "--owner", OWNER], ["--program", PROGRAM, "--owner", OWNER], [...base], [...base, "--owner", OWNER, "--program-sha256", "ABC"]]) {
+      assert.ok((await run(fake, args)).error instanceof SolanaRecoverError, args.join(" "));
+    }
+    const insecure = await run(fake, ["--program", PROGRAM, "--rpc", "http://rpc.example.test/", "--owner", OWNER]);
+    assert.ok(insecure.error instanceof SolanaRpcError);
+    assert.deepEqual(fake.calls, []);
+  });
+
+  it("warns about a key file other users can read", { skip: process.platform === "win32" }, async () => {
+    const fake = await chain();
+    const { warnings, error } = await run(fake, [...base, "--key-file", keyFile(SECRET_BASE58, 0o644)]);
+    assert.equal(error, null, String(error));
+    assert.match(warnings, /can be read by other users/);
+  });
+
+  it("stops after a revoke that expires or fails, and never sends the withdrawal", async () => {
+    for (const behavior of ["drop", "fail"] as const) {
+      const fake = await chain();
+      fake.behaviors = [behavior];
+      const before = fake.token(fake.atas.get(`${fake.vault}:${SOLANA_USDG_MINT}:${TOKEN_2022_PROGRAM}`)!);
+      const { error, out } = await run(fake, [...base, "--key-file", keyFile(SECRET_BASE58), "--send"]);
+      assert.ok(error instanceof SolanaRecoverError, String(error));
+      assert.match(error.message, behavior === "drop" ? /expired without landing.*Nothing after it was sent/ : /failed on chain.*Nothing after it was sent/);
+      assert.equal(fake.sent.length, 1, "the withdrawal was not sent");
+      assert.equal(fake.token(fake.atas.get(`${fake.vault}:${SOLANA_USDG_MINT}:${TOKEN_2022_PROGRAM}`)!), before);
+      noSecrets(out, error.message);
+    }
+  });
+
+  it("refuses a missing vault, a foreign program account, a non-mainnet RPC and an owner with no SOL", async () => {
+    const wrongProgram = await chain();
+    const missing = await run(wrongProgram, ["--program", key(73), "--rpc", RPC, "--owner", OWNER]);
+    assert.match((missing.error as Error).message, /No Merrymen vault exists for owner .* under program/);
+    const foreign = await chain();
+    foreign.accounts.get(foreign.vault)!.owner = key(74);
+    assert.match(((await run(foreign, [...base, "--owner", OWNER])).error as Error).message, /not an account of the given program/);
+    const devnet = await chain();
+    devnet.genesis = "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG";
+    const wrongNetwork = await run(devnet, [...base, "--key-file", keyFile(SECRET_BASE58), "--send"]);
+    assert.ok(wrongNetwork.error instanceof SolanaRpcError && wrongNetwork.error.code === "wrong-network");
+    assert.equal(devnet.sent.length, 0);
+    const broke = await chain({ ownerLamports: 0n });
+    const noFees = await run(broke, [...base, "--key-file", keyFile(SECRET_BASE58), "--send"]);
+    assert.match((noFees.error as Error).message, /no SOL for fees/);
+    assert.equal(broke.sent.length, 0);
+  });
+
+  it("reports a transaction the RPC refuses, or one that does not finalize in time, and sends nothing after it", async () => {
+    const refused = await chain();
+    refused.behaviors = ["land", "reject"];
+    const vaultUsdg = refused.atas.get(`${refused.vault}:${SOLANA_USDG_MINT}:${TOKEN_2022_PROGRAM}`)!;
+    const rejected = await run(refused, [...base, "--key-file", keyFile(SECRET_BASE58), "--send"]);
+    assert.match((rejected.error as Error).message, /Step 2 \(withdraw\) was not confirmed as submitted .* run the command again/);
+    assert.equal(refused.sent.length, 2);
+    assert.equal(refused.token(vaultUsdg), 12_345_678n, "a refused withdrawal moves nothing");
+    const slow = await chain();
+    slow.confirmedPolls = 1_000;
+    const pending = await run(slow, [...base, "--key-file", keyFile(SECRET_BASE58), "--send"], { maxWaitMs: 0 });
+    assert.match((pending.error as Error).message, /Step 1 \(revoke_all\) is not finalized yet .* re-reads the chain first/);
+    assert.equal(slow.sent.length, 1, "nothing is sent while the revoke is unconfirmed");
+  });
+
+  it("verifies the deployed program binary when a SHA-256 is given, before signing anything", async () => {
+    const LOADER = "BPFLoaderUpgradeab1e11111111111111111111111";
+    const binary = Buffer.from("merrymen-vault-fixture-binary".repeat(10));
+    const setupProgram = (fake: FakeChain, immutable: boolean) => {
+      const dataAddress = key(75);
+      const program = Buffer.alloc(36); program.writeUInt32LE(2, 0); Buffer.from(base58Decode(dataAddress)!).copy(program, 4);
+      fake.accounts.set(PROGRAM, { owner: LOADER, lamports: 1n, data: program, executable: true });
+      const header = Buffer.alloc(45); header.writeUInt32LE(3, 0); header[12] = immutable ? 0 : 1;
+      fake.accounts.set(dataAddress, { owner: LOADER, lamports: 1n, data: Buffer.concat([header, binary]) });
+    };
+    const sha = createHash("sha256").update(binary).digest("hex");
+    const good = await chain({ session: SOLANA_SYSTEM_PROGRAM });
+    setupProgram(good, true);
+    const verified = await run(good, [...base, "--owner", OWNER, "--program-sha256", sha]);
+    assert.equal(verified.error, null, String(verified.error));
+    assert.match(verified.out, /Program binary verified/);
+    for (const [immutable, hash] of [[true, "0".repeat(64)], [false, sha]] as const) {
+      const fake = await chain();
+      setupProgram(fake, immutable);
+      const { error } = await run(fake, [...base, "--key-file", keyFile(SECRET_BASE58), "--send", "--program-sha256", hash]);
+      assert.match((error as Error).message, /not the immutable binary with the given SHA-256/);
+      assert.equal(fake.sent.length, 0);
+      assert.ok(!fake.calls.includes("getMultipleAccounts"), "verification comes before the plan");
+    }
+  });
+
+  it("skips a frozen USDG account with a note and still recovers the rest; no WSOL account means no WSOL step", async () => {
+    const fake = await chain({ frozenUsdg: true, noWsolAccount: true, session: SOLANA_SYSTEM_PROGRAM });
+    const { error, out } = await run(fake, [...base, "--key-file", keyFile(SECRET_BASE58), "--send"]);
+    assert.equal(error, null, String(error));
+    assert.match(out, /frozen by the issuer/);
+    assert.equal(fake.sent.length, 1);
+    assert.deepEqual(fake.sent[0]!.instructions.map((ix) => ix.program), [PROGRAM], "only withdraw_sol");
+    assert.equal(fake.accounts.get(fake.vault)!.lamports, rent(SOLANA_VAULT_ACCOUNT_SIZE));
+  });
+});
