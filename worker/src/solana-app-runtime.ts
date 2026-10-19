@@ -482,8 +482,6 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
           if ([scope.owner, vault, session?.session].includes(feePayer)) fail("The network fee payer must be separate from the owner, vault and session.", "configuration");
           await verifyDeployment(cfg);
           const low = feePayerLow(), vaultCash = await deriveSolanaAta(vault, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM);
-          // What the executor needs for one swap: both signatures and the rent of the
-          // temporary input account it opens (and closes, refunding the payer).
           const ownerCash = await deriveSolanaAta(scope.owner, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM), ownerWsol = await deriveSolanaAta(scope.owner, SOLANA_WRAPPED_SOL_MINT, SOLANA_CLASSIC_TOKEN_PROGRAM);
           const vaultWsol = await deriveSolanaAta(vault, SOLANA_WRAPPED_SOL_MINT, SOLANA_CLASSIC_TOKEN_PROGRAM);
           const payerState = await rpc().read(async read => {
@@ -491,6 +489,8 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
             const native = vaultAccount && vaultAccount.owner === cfg.programId ? vaultAccount.lamports - await rentFor(read, vaultAccount.data.length) : 0n;
             if (payerAccount && (payerAccount.owner !== SOLANA_SYSTEM_PROGRAM || payerAccount.executable || payerAccount.data.length))
               fail("The separate network fee payer must be a plain system account.", "configuration");
+            // What the executor needs for one swap: both signatures and the rent of the
+            // temporary input account it opens (and closes, refunding the payer).
             return { lamports: payerAccount?.lamports ?? 0n,
               exitMinimum: await rentFor(read, CLASSIC_TOKEN_ACCOUNT_SIZE) + SWAP_SIGNATURE_FEES,
               buyMinimum: await rentFor(read, cashAccount ? cashAccount.data.length : TOKEN_2022_ACCOUNT_SIZE_BOUND) + SWAP_SIGNATURE_FEES,
