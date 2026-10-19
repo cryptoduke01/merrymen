@@ -14,6 +14,14 @@
  * move more than the vault holds: a stale amount fails the whole transaction.
  * About 0.0165 SOL of vault and vault token account rent stays locked, since
  * the program has no close instruction.
+ *
+ * The program is trusted only once verified. The owner is the fee payer, so
+ * the owner key is a writable signer inside every instruction of the program
+ * it signs for: a look-alike program could move the owner's SOL and the
+ * tokens in the owner USDG and WSOL accounts that step 2 passes writable.
+ * --send therefore signs only for a released program (SOLANA_VAULT_RELEASES,
+ * verified by default) or, with --unlisted-program, for one whose immutable
+ * binary matches the owner's --program-sha256, after a warning and a pause.
  */
 import {
   address, appendTransactionMessageInstructions, compileTransaction, createKeyPairFromBytes,
@@ -42,6 +50,44 @@ const NO_SESSION = SOLANA_SYSTEM_PROGRAM;
 const SYNC_NATIVE = 17;
 const CREATE_IDEMPOTENT = 1;
 export const SOLANA_RECOVER_KEY_MAX_BYTES = 4096;
+
+/** A released Merrymen vault program and the SHA-256 of its deployed binary (ProgramData bytes after the 45-byte header). */
+export interface SolanaVaultRelease { readonly programId: string; readonly sha256: string }
+/**
+ * Released vault programs, verified by default. Empty until the program is
+ * deployed: until then --send needs --program-sha256 and --unlisted-program.
+ * A release adds its program ID and reviewed binary hash here.
+ */
+export const SOLANA_VAULT_RELEASES: readonly SolanaVaultRelease[] = Object.freeze([]);
+/** Pause after the unlisted-program warning, before anything is signed. */
+export const SOLANA_RECOVER_UNLISTED_DELAY_MS = 15_000;
+
+export interface SolanaRecoveryProgramTrust { listed: boolean; sha256?: string }
+/**
+ * Decides, before any RPC call or signature, which binary the program must
+ * match. A released program is checked against its released hash. Signing
+ * for any other program needs the owner's --program-sha256 and the explicit
+ * --unlisted-program; a plan only reads, so it may name any program.
+ */
+export function solanaRecoveryProgramTrust(options: { programId: string; send: boolean; programSha256?: string;
+  allowUnlistedProgram?: boolean; releases?: readonly SolanaVaultRelease[] }): SolanaRecoveryProgramTrust {
+  canonical(options.programId, "program ID");
+  const releases = options.releases ?? SOLANA_VAULT_RELEASES;
+  const release = releases.find((r) => r.programId === options.programId);
+  if (release) {
+    if (options.programSha256 !== undefined && options.programSha256 !== release.sha256) {
+      fail("--program-sha256 differs from the released binary of this program. Nothing was signed or sent.");
+    }
+    return { listed: true, sha256: release.sha256 };
+  }
+  if (options.send && (options.programSha256 === undefined || !options.allowUnlistedProgram)) {
+    fail(`Program ${options.programId} is not a released Merrymen vault program${releases.length ? "" : " (none is released yet)"}. `
+      + "Nothing was signed or sent. The owner key signs every instruction of the program you name, so a look-alike program could take "
+      + "the SOL in this wallet and the tokens in its USDG and WSOL accounts. If someone sent you this command, stop: Merrymen never asks for it. "
+      + "To recover from a program you deployed or audited yourself, add --program-sha256 with its binary hash and --unlisted-program.");
+  }
+  return { listed: false, sha256: options.programSha256 };
+}
 
 function object(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -332,8 +378,12 @@ export interface SolanaRecoveryOptions {
   owner: string;
   keyPair?: CryptoKeyPair;
   send: boolean;
-  /** Optional: verify the deployed, immutable program binary before signing. */
+  /** The immutable program binary's SHA-256. A released program is checked against its own hash. */
   programSha256?: string;
+  /** Sign for a program that is not a listed release, once its binary matches programSha256. */
+  allowUnlistedProgram?: boolean;
+  /** Released programs; defaults to SOLANA_VAULT_RELEASES. */
+  releases?: readonly SolanaVaultRelease[];
 }
 export interface SolanaRecoveryResult {
   sent: boolean;
@@ -347,18 +397,32 @@ export async function runSolanaRecovery(options: SolanaRecoveryOptions, io: Sola
   const { rpc, programId, owner } = options;
   canonical(programId, "program ID"); canonical(owner, "owner");
   if (options.send && !options.keyPair) fail("Sending needs the owner's key (--key-file).");
-  if (options.programSha256 !== undefined) {
-    try { await verifySolanaVaultDeployment(rpc, programId, options.programSha256); }
+  // Before any RPC call: nothing is signed for a program that is not verified.
+  const trust = solanaRecoveryProgramTrust(options);
+  if (trust.sha256 !== undefined) {
+    // Immutable (no upgrade authority) and hash-matched, so it cannot change before the sends.
+    try { await verifySolanaVaultDeployment(rpc, programId, trust.sha256); }
     catch (error) {
       if (error instanceof SolanaRpcError) throw error;
-      fail("The program at that address is not the immutable binary with the given SHA-256.");
+      fail(trust.listed ? "The program at that address is not the immutable released binary. Nothing was signed or sent."
+        : "The program at that address is not the immutable binary with the given SHA-256. Nothing was signed or sent.");
     }
-    io.log("Program binary verified against the given SHA-256.");
+    io.log(trust.listed ? "Program binary verified: the released Merrymen vault program, immutable, SHA-256 matches."
+      : "Program binary verified against the given SHA-256 (immutable). It is NOT a released Merrymen vault program.");
+  } else {
+    io.log("Program binary NOT VERIFIED: not a released Merrymen vault program and no --program-sha256 given. This plan only reads; --send refuses it.");
   }
   const plan = await readSolanaRecoveryState(rpc, programId, owner, "confirmed");
   for (const line of describeSolanaRecovery(plan, options.send)) io.log(line);
   if (!options.send) return { sent: false, plan };
   if (plan.ownerLamports === 0n) fail(`The owner wallet has no SOL for fees. Send a little SOL (0.01 is plenty) to ${owner} and run again.`);
+  if (!trust.listed) {
+    io.log(`WARNING: ${programId} is not a released Merrymen vault program. Your key is about to sign instructions of this program,`);
+    io.log("which can take the SOL in this wallet and the tokens in its USDG and WSOL accounts. Merrymen support never asks you to");
+    io.log(`use --unlisted-program. Continue only if you deployed or audited this program yourself. Press Ctrl+C now to stop;`);
+    io.log(`signing starts in ${SOLANA_RECOVER_UNLISTED_DELAY_MS / 1000} seconds.`);
+    await io.sleep(SOLANA_RECOVER_UNLISTED_DELAY_MS);
+  }
 
   const result: SolanaRecoveryResult = { sent: true, plan };
   // The plan's confirmed slot may be ahead of the finalized tip, and an RPC

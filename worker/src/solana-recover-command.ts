@@ -2,7 +2,10 @@
 import { readFileSync, statSync } from "node:fs";
 import { base58Decode } from "../../packages/core/src/ids";
 import { createSolanaLiveRpc } from "./solana-live-rpc";
-import { readSolanaOwnerKey, runSolanaRecovery, SOLANA_RECOVER_KEY_MAX_BYTES, SolanaRecoverError, type SolanaRecoveryResult } from "./solana-recover";
+import {
+  readSolanaOwnerKey, runSolanaRecovery, SOLANA_RECOVER_KEY_MAX_BYTES, SolanaRecoverError, solanaRecoveryProgramTrust,
+  type SolanaRecoveryResult, type SolanaVaultRelease,
+} from "./solana-recover";
 
 export const SOLANA_RECOVER_HELP = `Solana vault recovery: withdraw everything from your Merrymen Solana vault
 with your own wallet key, without the Merrymen app or server.
@@ -12,7 +15,16 @@ solana-recover --program PROGRAM_ID --rpc HTTPS_URL --owner PUBLIC_KEY
 solana-recover --program PROGRAM_ID --rpc HTTPS_URL --key-file PATH --send
     Sign and send. Use --key-file - to read the key from standard input,
     for example: pbpaste | merrymen solana-recover ... --key-file - --send
-Options: --program-sha256 HEX verifies the deployed program binary first.
+Options: --program-sha256 HEX checks the deployed program binary first.
+
+--send signs only for a released Merrymen vault program, whose immutable
+binary is checked against its released hash first. Your key signs every
+instruction of the program you name, and a look-alike program could take
+the SOL in your wallet and the tokens in its USDG and WSOL accounts. For a
+program you deployed or audited yourself, add --program-sha256 HEX and
+--unlisted-program: the binary must match, and the tool warns and waits
+before signing. If someone sent you a command with --unlisted-program,
+stop: Merrymen never asks for it.
 
 Steps: (1) revoke_all, alone, waiting until it is finalized, so no session
 key can trade; (2) from finalized balances, create your USDG and WSOL token
@@ -29,7 +41,7 @@ next to your vault in Merrymen (the owner of the vault account). The RPC
 must be a mainnet-beta HTTPS endpoint you trust; the owner pays the fees.`;
 
 const VALUE_FLAGS = new Set(["program", "rpc", "key-file", "owner", "program-sha256"]);
-const BOOLEAN_FLAGS = new Set(["send"]);
+const BOOLEAN_FLAGS = new Set(["send", "unlisted-program"]);
 
 /** True for text that decodes as a 64-byte secret key, in either export format. */
 function looksLikeSecret(value: string): boolean {
@@ -72,6 +84,8 @@ export interface SolanaRecoverCommandDeps {
   sleep?: (ms: number) => Promise<void>;
   maxWaitMs?: number;
   pollMs?: number;
+  /** Released programs; defaults to SOLANA_VAULT_RELEASES. */
+  releases?: readonly SolanaVaultRelease[];
 }
 
 async function readKeyText(source: string, deps: SolanaRecoverCommandDeps): Promise<string> {
@@ -109,6 +123,9 @@ export async function runSolanaRecoverCommand(args: readonly string[], deps: Sol
   if (!keyFile && !expectedOwner) throw new SolanaRecoverError("Give --owner PUBLIC_KEY for a plan, or --key-file to derive it from your key.");
   const sha = text("program-sha256");
   if (sha !== undefined && !/^[a-f0-9]{64}$/.test(sha)) throw new SolanaRecoverError("--program-sha256 must be 64 lowercase hex characters.");
+  const allowUnlistedProgram = flags["unlisted-program"] === true;
+  // Refuse an unverifiable program before the key is read or the RPC is contacted.
+  solanaRecoveryProgramTrust({ programId, send, programSha256: sha, allowUnlistedProgram, releases: deps.releases });
   // The RPC URL can carry an API key: it is validated, used, and never printed.
   const rpc = createSolanaLiveRpc({ env: { MERRYMEN_SOLANA_RPC_MAINNET: rpcUrl }, fetch: deps.fetch, timeoutMs: 15_000 });
 
@@ -120,7 +137,8 @@ export async function runSolanaRecoverCommand(args: readonly string[], deps: Sol
     }
   }
   const log = deps.log ?? ((line: string) => console.log(line));
-  const result = await runSolanaRecovery({ rpc, programId, owner: key?.owner ?? expectedOwner!, keyPair: key?.keyPair, send, programSha256: sha },
+  const result = await runSolanaRecovery({ rpc, programId, owner: key?.owner ?? expectedOwner!, keyPair: key?.keyPair, send, programSha256: sha,
+    allowUnlistedProgram, releases: deps.releases },
     { log, sleep: deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms))), maxWaitMs: deps.maxWaitMs, pollMs: deps.pollMs });
   if (keyFile && keyFile !== "-") log("Delete the exported key file now: anyone who has it controls this wallet.");
   return result;

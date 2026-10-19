@@ -67,6 +67,7 @@ test("merrymen solana-recover help works offline and creates nothing", t => {
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /^Solana vault recovery: withdraw everything from your Merrymen Solana vault/);
     assert.match(result.stdout, /never from the command line/);
+    assert.match(result.stdout, /If someone sent you a command with --unlisted-program,\nstop: Merrymen never asks for it\./);
   }
   assert.equal(existsSync(home), false, "no EVM onboarding or home directory");
   assert.deepEqual(attempts(), []);
@@ -85,19 +86,31 @@ test("a key pasted into the arguments is refused without being echoed or used", 
 
 test("the key reaches the recovery child through standard input, and is checked before any request", t => {
   const { run, attempts } = fixture(t);
-  const bad = run(["--program", PROGRAM, "--rpc", RPC, "--key-file", "-", "--send"], "not a key\n");
+  const unlisted = ["--program-sha256", "a".repeat(64), "--unlisted-program"];
+  const bad = run(["--program", PROGRAM, "--rpc", RPC, "--key-file", "-", "--send", ...unlisted], "not a key\n");
   assert.equal(bad.status, 1);
   assert.match(bad.stderr, /does not contain a Solana secret key/);
   assert.deepEqual(attempts(), []);
-  const mismatch = run(["--program", PROGRAM, "--rpc", RPC, "--key-file", "-", "--owner", PROGRAM, "--send"], `${SECRET}\n`);
+  const mismatch = run(["--program", PROGRAM, "--rpc", RPC, "--key-file", "-", "--owner", PROGRAM, "--send", ...unlisted], `${SECRET}\n`);
   assert.equal(mismatch.status, 1);
   assert.match(mismatch.stderr, new RegExp(`The key belongs to ${OWNER}`));
   assert.deepEqual(attempts(), []);
 });
 
+test("a send for a program that is not released is refused before any request", t => {
+  const { run, attempts } = fixture(t);
+  for (const extra of [[], ["--program-sha256", "a".repeat(64)], ["--unlisted-program"]]) {
+    const result = run(["--program", PROGRAM, "--rpc", RPC, "--key-file", "-", "--send", ...extra], `${SECRET}\n`);
+    assert.equal(result.status, 1);
+    assert.equal(result.stdout, "");
+    assert.match(result.stderr, /is not a released Merrymen vault program \(none is released yet\)\. Nothing was signed or sent\./);
+  }
+  assert.deepEqual(attempts(), [], "refused before any network request");
+});
+
 test("with the network down, a send stops on a fixed message and only the supplied RPC is tried", t => {
   const { run, attempts } = fixture(t);
-  const result = run(["--program", PROGRAM, "--rpc", RPC, "--key-file", "-", "--send"], `${SECRET}\n`);
+  const result = run(["--program", PROGRAM, "--rpc", RPC, "--key-file", "-", "--send", "--program-sha256", "a".repeat(64), "--unlisted-program"], `${SECRET}\n`);
   assert.equal(result.status, 1);
   assert.match(result.stderr, /^Solana read failed; check connectivity and endpoint configuration\.\n$/);
   const tried = attempts();

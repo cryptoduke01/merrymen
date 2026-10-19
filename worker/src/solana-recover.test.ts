@@ -42,6 +42,11 @@ const DISC = {
   withdrawSol: [145, 131, 74, 136, 65, 137, 42, 38],
 };
 type Account = { owner: string; lamports: bigint; data: Buffer; executable?: boolean };
+const LOADER = "BPFLoaderUpgradeab1e11111111111111111111111";
+const BINARY = Buffer.from("merrymen-vault-fixture-binary".repeat(10));
+const BINARY_SHA = createHash("sha256").update(BINARY).digest("hex");
+/** Tests run as if PROGRAM were a released program with BINARY deployed, unless they say otherwise. */
+const RELEASED = [{ programId: PROGRAM, sha256: BINARY_SHA }];
 type Decoded = { program: string; accounts: { address: string; signer: boolean; writable: boolean }[]; data: Buffer };
 
 function vaultData(owner: string, session: string, fields: { epoch?: bigint; seq?: bigint; expiresAt?: bigint; paused?: boolean } = {}): Buffer {
@@ -83,11 +88,15 @@ class FakeChain {
   /** Statuses report "confirmed" this many times before "finalized". */
   confirmedPolls = 1;
   vault = "";
+  constructor(readonly program: string = PROGRAM) {}
 
   async setup(options: { session?: string; usdg?: bigint; wsol?: bigint; unsynced?: bigint; solExcess?: bigint; ownerLamports?: bigint;
-    frozenUsdg?: boolean; noWsolAccount?: boolean; ownerAtas?: boolean } = {}) {
-    this.vault = await deriveSolanaVaultAddress(PROGRAM, OWNER);
-    this.accounts.set(this.vault, { owner: PROGRAM, lamports: rent(SOLANA_VAULT_ACCOUNT_SIZE) + (options.solExcess ?? 3_000_000n), data: vaultData(OWNER, options.session ?? SESSION) });
+    frozenUsdg?: boolean; noWsolAccount?: boolean; ownerAtas?: boolean;
+    /** The program account: an immutable deployment (default), an upgradeable one, or none at all. */
+    deployment?: "immutable" | "upgradeable" | "none"; binary?: Buffer } = {}) {
+    if ((options.deployment ?? "immutable") !== "none") this.deploy(options.deployment === "upgradeable", options.binary ?? BINARY);
+    this.vault = await deriveSolanaVaultAddress(this.program, OWNER);
+    this.accounts.set(this.vault, { owner: this.program, lamports: rent(SOLANA_VAULT_ACCOUNT_SIZE) + (options.solExcess ?? 3_000_000n), data: vaultData(OWNER, options.session ?? SESSION) });
     const usdgAta = await deriveSolanaAta(this.vault, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM);
     this.accounts.set(usdgAta, { owner: TOKEN_2022_PROGRAM, lamports: rent(170), data: tokenData(SOLANA_USDG_MINT, this.vault, options.usdg ?? 12_345_678n, { size: 170, frozen: options.frozenUsdg }) });
     if (!options.noWsolAccount) {
@@ -104,6 +113,14 @@ class FakeChain {
       }
     }
     return this;
+  }
+  /** An upgradeable-loader program account and its ProgramData (immutable when the upgrade authority is None). */
+  deploy(upgradeable: boolean, binary: Buffer) {
+    const dataAddress = key(75);
+    const program = Buffer.alloc(36); program.writeUInt32LE(2, 0); Buffer.from(base58Decode(dataAddress)!).copy(program, 4);
+    this.accounts.set(this.program, { owner: LOADER, lamports: 1n, data: program, executable: true });
+    const header = Buffer.alloc(45); header.writeUInt32LE(3, 0); header[12] = upgradeable ? 1 : 0;
+    this.accounts.set(dataAddress, { owner: LOADER, lamports: 1n, data: Buffer.concat([header, binary]) });
   }
   token(address: string) { const a = this.accounts.get(address); return a ? a.data.readBigUInt64LE(64) : null; }
   vaultField() { const d = this.accounts.get(this.vault)!.data; return { session: base58Encode(d.subarray(42, 74)), epoch: d.readBigUInt64LE(74), paused: d[132] === 1, expiresAt: d.readBigInt64LE(90), seq: d.readBigUInt64LE(82) }; }
@@ -215,7 +232,7 @@ class FakeChain {
       native.data.writeBigUInt64LE(native.lamports - native.data.readBigUInt64LE(113), 64);
       return;
     }
-    need(ix.program === PROGRAM, "unexpected program");
+    need(ix.program === this.program, "unexpected program");
     const disc = [...ix.data.subarray(0, 8)];
     const vaultKey = acct(0, true), vault = this.accounts.get(vaultKey)!;
     need(vaultKey === this.vault, "vault PDA seeds");
@@ -275,7 +292,8 @@ async function chain(options: Parameters<FakeChain["setup"]>[0] = {}) {
 }
 async function run(fake: FakeChain, args: string[], extra: Partial<SolanaRecoverCommandDeps> = {}) {
   const out: string[] = [], warnings: string[] = [];
-  const deps: SolanaRecoverCommandDeps = { fetch: fake.fetch, log: (l) => out.push(l), warn: (l) => warnings.push(l), sleep: async () => {}, pollMs: 0, ...extra };
+  const deps: SolanaRecoverCommandDeps = { fetch: fake.fetch, log: (l) => out.push(l), warn: (l) => warnings.push(l), sleep: async () => {}, pollMs: 0,
+    releases: RELEASED, ...extra };
   try {
     const result = await runSolanaRecoverCommand(args, deps);
     return { result: result as SolanaRecoveryResult, out: out.join("\n"), warnings: warnings.join("\n"), error: null as unknown };
@@ -490,32 +508,6 @@ describe("solana-recover", () => {
     assert.equal(slow.sent.length, 1, "nothing is sent while the revoke is unconfirmed");
   });
 
-  it("verifies the deployed program binary when a SHA-256 is given, before signing anything", async () => {
-    const LOADER = "BPFLoaderUpgradeab1e11111111111111111111111";
-    const binary = Buffer.from("merrymen-vault-fixture-binary".repeat(10));
-    const setupProgram = (fake: FakeChain, immutable: boolean) => {
-      const dataAddress = key(75);
-      const program = Buffer.alloc(36); program.writeUInt32LE(2, 0); Buffer.from(base58Decode(dataAddress)!).copy(program, 4);
-      fake.accounts.set(PROGRAM, { owner: LOADER, lamports: 1n, data: program, executable: true });
-      const header = Buffer.alloc(45); header.writeUInt32LE(3, 0); header[12] = immutable ? 0 : 1;
-      fake.accounts.set(dataAddress, { owner: LOADER, lamports: 1n, data: Buffer.concat([header, binary]) });
-    };
-    const sha = createHash("sha256").update(binary).digest("hex");
-    const good = await chain({ session: SOLANA_SYSTEM_PROGRAM });
-    setupProgram(good, true);
-    const verified = await run(good, [...base, "--owner", OWNER, "--program-sha256", sha]);
-    assert.equal(verified.error, null, String(verified.error));
-    assert.match(verified.out, /Program binary verified/);
-    for (const [immutable, hash] of [[true, "0".repeat(64)], [false, sha]] as const) {
-      const fake = await chain();
-      setupProgram(fake, immutable);
-      const { error } = await run(fake, [...base, "--key-file", keyFile(SECRET_BASE58), "--send", "--program-sha256", hash]);
-      assert.match((error as Error).message, /not the immutable binary with the given SHA-256/);
-      assert.equal(fake.sent.length, 0);
-      assert.ok(!fake.calls.includes("getMultipleAccounts"), "verification comes before the plan");
-    }
-  });
-
   it("skips a frozen USDG account with a note and still recovers the rest; no WSOL account means no WSOL step", async () => {
     const fake = await chain({ frozenUsdg: true, noWsolAccount: true, session: SOLANA_SYSTEM_PROGRAM });
     const { error, out } = await run(fake, [...base, "--key-file", keyFile(SECRET_BASE58), "--send"]);
@@ -524,5 +516,95 @@ describe("solana-recover", () => {
     assert.equal(fake.sent.length, 1);
     assert.deepEqual(fake.sent[0]!.instructions.map((ix) => ix.program), [PROGRAM], "only withdraw_sol");
     assert.equal(fake.accounts.get(fake.vault)!.lamports, rent(SOLANA_VAULT_ACCOUNT_SIZE));
+  });
+});
+
+describe("solana-recover program trust", () => {
+  const send = () => [...base, "--key-file", keyFile(SECRET_BASE58), "--send"];
+
+  it("refuses --send for a program that is not released unless both --program-sha256 and --unlisted-program are given, before any RPC call", async () => {
+    for (const deployment of ["none", "immutable"] as const) {
+      for (const extra of [[], ["--program-sha256", BINARY_SHA], ["--unlisted-program"]]) {
+        const fake = await chain({ deployment });
+        const { error, out } = await run(fake, [...send(), ...extra], { releases: [] });
+        assert.ok(error instanceof SolanaRecoverError, String(error));
+        assert.match(error.message, new RegExp(`Program ${PROGRAM} is not a released Merrymen vault program \\(none is released yet\\)\\. Nothing was signed or sent`));
+        assert.match(error.message, /take the SOL in this wallet and the tokens in its USDG and WSOL accounts/);
+        assert.match(error.message, /add --program-sha256 with its binary hash and --unlisted-program/);
+        assert.deepEqual(fake.calls, [], "refused before any RPC call");
+        assert.equal(fake.sent.length, 0);
+        noSecrets(out, error.message);
+      }
+    }
+    // The shipped release list: until the program is released, the bare command
+    // a support scam would hand out signs nothing, even for a program that does not exist.
+    const fake = await chain({ deployment: "none" });
+    const shipped = await run(fake, send(), { releases: undefined });
+    assert.match((shipped.error as Error).message, /is not a released Merrymen vault program/);
+    assert.deepEqual(fake.calls, []);
+    assert.equal(fake.sent.length, 0);
+    const listed = await chain();
+    const other = await run(listed, send(), { releases: [{ programId: key(76), sha256: BINARY_SHA }] });
+    assert.match((other.error as Error).message, /is not a released Merrymen vault program\. Nothing was signed/);
+    assert.deepEqual(listed.calls, []);
+  });
+
+  it("with --unlisted-program, refuses a missing, upgradeable or different binary before signing", async () => {
+    for (const [deployment, sha] of [["none", BINARY_SHA], ["upgradeable", BINARY_SHA], ["immutable", "0".repeat(64)]] as const) {
+      const fake = await chain({ deployment });
+      const { error } = await run(fake, [...send(), "--program-sha256", sha, "--unlisted-program"], { releases: [] });
+      assert.match((error as Error).message, /not the immutable binary with the given SHA-256\. Nothing was signed or sent/, deployment);
+      assert.equal(fake.sent.length, 0);
+      assert.ok(!fake.calls.includes("getMultipleAccounts") && !fake.calls.includes("getLatestBlockhash"), "verification comes before the plan");
+    }
+  });
+
+  it("with --unlisted-program and a matching immutable binary, warns and pauses before the first signature", async () => {
+    const fake = await chain();
+    const pauses: { ms: number; callsBefore: string[] }[] = [];
+    const { error, out } = await run(fake, [...send(), "--program-sha256", BINARY_SHA, "--unlisted-program"],
+      { releases: [], sleep: async (ms) => { pauses.push({ ms, callsBefore: [...fake.calls] }); } });
+    assert.equal(error, null, String(error));
+    assert.equal(fake.sent.length, 2);
+    assert.match(out, /verified against the given SHA-256 \(immutable\)\. It is NOT a released Merrymen vault program/);
+    assert.match(out, new RegExp(`WARNING: ${PROGRAM} is not a released Merrymen vault program`));
+    assert.match(out, /Merrymen support never asks you to\nuse --unlisted-program/);
+    assert.equal(pauses[0]!.ms, 15_000);
+    assert.ok(!pauses[0]!.callsBefore.includes("getLatestBlockhash") && !pauses[0]!.callsBefore.includes("sendTransaction"), "paused before signing");
+    assert.ok(out.indexOf("WARNING") < out.indexOf("Step 1 (revoke_all): sending"));
+  });
+
+  it("verifies a released program by default, and refuses a different hash or binary at that address before signing", async () => {
+    const fake = await chain();
+    const verified = await run(fake, send());
+    assert.equal(verified.error, null, String(verified.error));
+    assert.match(verified.out, /Program binary verified: the released Merrymen vault program, immutable, SHA-256 matches/);
+    assert.doesNotMatch(verified.out, /WARNING/);
+    assert.ok(fake.calls.indexOf("getAccountInfo") < fake.calls.indexOf("getMultipleAccounts"), "verified before the plan");
+
+    const wrongHash = await chain();
+    const differs = await run(wrongHash, [...send(), "--program-sha256", "0".repeat(64)]);
+    assert.match((differs.error as Error).message, /differs from the released binary of this program\. Nothing was signed or sent/);
+    assert.deepEqual(wrongHash.calls, []);
+    for (const options of [{ binary: Buffer.from("look-alike program") }, { deployment: "upgradeable" as const }]) {
+      const swapped = await chain(options);
+      const { error } = await run(swapped, [...send(), "--unlisted-program"]);
+      assert.match((error as Error).message, /not the immutable released binary\. Nothing was signed or sent/);
+      assert.equal(swapped.sent.length, 0);
+      assert.ok(!swapped.calls.includes("getLatestBlockhash"));
+    }
+  });
+
+  it("plans for any program, says when its binary is not verified, and checks it when a hash is given", async () => {
+    const fake = await chain({ deployment: "none" });
+    const plan = await run(fake, [...base, "--owner", OWNER], { releases: [] });
+    assert.equal(plan.error, null, String(plan.error));
+    assert.match(plan.out, /Program binary NOT VERIFIED: not a released Merrymen vault program and no --program-sha256 given/);
+    assert.equal(fake.sent.length, 0);
+    const checked = await chain({ session: SOLANA_SYSTEM_PROGRAM });
+    const verified = await run(checked, [...base, "--owner", OWNER, "--program-sha256", BINARY_SHA], { releases: [] });
+    assert.equal(verified.error, null, String(verified.error));
+    assert.match(verified.out, /Program binary verified against the given SHA-256/);
+    assert.ok(!checked.calls.includes("getLatestBlockhash"));
   });
 });
