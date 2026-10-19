@@ -264,6 +264,73 @@ test("finalized deposits adjust cashflow/HWM once; owner withdrawals remove actu
   assert.equal(book.realizedPnlUsdgRaw, "0"); assert.equal(book.hwmRaw, "109000000");
   const rows = await f.db.prepare("SELECT * FROM solana_runtime_cashflows").all(); assert.equal(rows.length, 3);
 });
+/** An executable WSOL→USDG exit quote and the $500 Pyth bound for a withdrawal of `amountRaw`, read at `at`. */
+function withdrawValuation(amountRaw: string, at = NOW, outAmount = (BigInt(amountRaw) / 2n).toString(), usdPerSol?: bigint) {
+  const intent = { inputMint: SOLANA_WRAPPED_SOL_MINT, outputMint: SOLANA_USDG_MINT, amountRaw, slippageBps: 50 };
+  return { quote: { source: "jupiter" as const, inputMint: intent.inputMint, outputMint: intent.outputMint, inAmount: amountRaw, outAmount,
+    minOutAmount: (BigInt(outAmount) * 9_950n / 10_000n).toString(), slippageBps: 50, contextSlot: 1000, quotedAtMs: at, expiresAtMs: at + 30_000 },
+    reference: pythBound(intent, at, usdPerSol) };
+}
+/** The audit's book: 8 USDG cash plus 0.022 WSOL (11 USDG at $500), peak 20 USDG. */
+async function auditBook(f: Awaited<ReturnType<typeof fixture>>, extra: Record<string, string> = {}) {
+  await f.db.prepare("INSERT INTO solana_runtime_live_books(tenant,owner,book_json) VALUES(?,?,?)").run(TENANT, OWNER, JSON.stringify({ hwmRaw: "20000000",
+    cashRaw: "8000000", wsolRaw: "22000000", costBasisUsdgRaw: "12000000", realizedPnlUsdgRaw: "0", networkFeesLamports: "0", slot: 1001, updatedAtMs: NOW, ...extra }));
+}
+const wsolWithdraw = (amountRaw: string, valuation?: object) => ({ ...setup("withdraw"), priorVaultExisted: true, priorSequence: "0", priorSessionEpoch: "1",
+  mint: SOLANA_WRAPPED_SOL_MINT, amountRaw, ...(valuation ? { withdrawValuation: valuation } : {}) }) as SolanaPreparedSetup;
+
+test("a WSOL withdrawal lowers the high-water mark by what it was worth, so withdrawn capital is not booked as a drawdown (audit accounting F3)", async t => {
+  const f = await fixture(t); await auditBook(f);
+  // Jupiter's executable minimum (10.945 USDG) is below the reference (11 USDG): the lower one is taken.
+  await saveSignedSetup(f.store, wsolWithdraw("22000000", withdrawValuation("22000000")), "withdraw-all-sol");
+  await f.store.finishSetup("withdraw-all-sol", "finalized", 1002);
+  const book = (await f.store.liveBook())!;
+  assert.equal(book.wsolRaw, "0"); assert.equal(book.costBasisUsdgRaw, "0");
+  assert.equal(book.cashRaw, "8000000", "no invented sale proceeds"); assert.equal(book.realizedPnlUsdgRaw, "0", "no invented P&L");
+  assert.equal(book.hwmRaw, (20_000_000n - 10_945_000n).toString());
+  // The next buy sees 8 USDG against a 9.055 USDG peak (11.6%), inside the 20% breaker; before this it saw 8 against 20 (60%).
+  const buy = submission("after-withdraw", "1"); buy.risk = { ...buy.risk, slot: 1002, cashUsdg: "8000000", wsolRaw: "0", equityUsdg: "8000000", peakEquityUsdg: book.hwmRaw };
+  assert.equal(await f.store.recordSigned(buy), true);
+  assert.notEqual((await f.store.liveBook())!.buyPaused, true);
+});
+
+test("a WSOL withdrawal valuation that is missing, stale, altered or one-sided never lowers the peak by more than the WSOL was worth", async t => {
+  const amount = "22000000";
+  const stale = withdrawValuation(amount, NOW - 121_000);
+  for (const [label, valuation] of [
+    ["no valuation", undefined],
+    ["quote for another amount", { ...withdrawValuation(amount), quote: withdrawValuation("21000000").quote }],
+    ["reference for another amount", { ...withdrawValuation(amount), reference: withdrawValuation("21000000").reference }],
+    ["stale evidence", stale],
+    ["edited reference", { ...withdrawValuation(amount), reference: { ...withdrawValuation(amount).reference, referenceOut: "99000000" } }],
+    ["no reference", { quote: withdrawValuation(amount).quote }],
+  ] as const) {
+    const f = await fixture(t); await auditBook(f);
+    await saveSignedSetup(f.store, wsolWithdraw(amount, valuation), "withdraw");
+    await f.store.finishSetup("withdraw", "finalized", 1002);
+    assert.equal((await f.store.liveBook())!.hwmRaw, "20000000", label);
+  }
+  // A Jupiter quote five times the reference lowers the peak by the reference value only.
+  const high = await fixture(t); await auditBook(high);
+  await saveSignedSetup(high.store, wsolWithdraw(amount, withdrawValuation(amount, NOW, "55000000")), "withdraw");
+  await high.store.finishSetup("withdraw", "finalized", 1002);
+  assert.equal((await high.store.liveBook())!.hwmRaw, "9000000");
+  // The signed save keeps the valuation checked at prepare time, whatever it is handed.
+  const swapped = await fixture(t); await auditBook(swapped);
+  const prepared = wsolWithdraw(amount, withdrawValuation(amount));
+  await swapped.store.saveSetup(prepared);
+  await swapped.store.saveSetup({ ...prepared, withdrawValuation: withdrawValuation(amount, NOW, "55000000", 250_000_000_000n),
+    signature: "withdraw", signedTransactionBase64: "c2lnbmVk", status: "pending" });
+  assert.deepEqual((await swapped.store.setup())!.withdrawValuation, prepared.withdrawValuation);
+  // Quarantined WSOL leaves first and never counted toward the peak: only the position's share of the value comes off.
+  const mixed = await fixture(t); await auditBook(mixed, { quarantinedWsolRaw: "2000000" });
+  await saveSignedSetup(mixed.store, wsolWithdraw("13000000", withdrawValuation("13000000")), "withdraw");
+  await mixed.store.finishSetup("withdraw", "finalized", 1002);
+  const book = (await mixed.store.liveBook())!;
+  assert.equal(book.quarantinedWsolRaw, "0"); assert.equal(book.wsolRaw, "11000000");
+  assert.equal(book.hwmRaw, (20_000_000n - 6_467_500n * 11n / 13n).toString());
+});
+
 test("drawdown refusal commits a sticky buy pause, survives reopening and still permits reducing the position", async t => {
   const f = await fixture(t), first = submission(); await f.store.recordSigned(first);
   await f.store.settle(OWNER, first.intent.requestId, first.signature, settlement(first));

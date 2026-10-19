@@ -1,7 +1,7 @@
 /** Tenant-bound Solana paper books and live broadcast journal, on SQLite or Postgres. */
 import { CHAINS, SOLANA_USDG_MINT, canonicalId } from "../../packages/core/src/ids";
-import { parseSolanaRawAmount, requireSolanaLiveSellLimits, solanaPaperAgentId, validateSolanaAccountLimits, validateSolanaQuote,
-  type SolanaPaperLimits } from "../../packages/core/src/solana";
+import { parseSolanaRawAmount, parseSolanaSwapIntent, requireSolanaLiveSellLimits, solanaPaperAgentId, validateSolanaAccountLimits, validateSolanaQuote,
+  type SolanaPaperLimits, type SolanaQuote } from "../../packages/core/src/solana";
 import { SOLANA_SYSTEM_PROGRAM, SOLANA_WRAPPED_SOL_MINT } from "../../packages/core/src/solana-live";
 import type { Db } from "./db";
 import { openSecret, sealSecret } from "./store-crypto";
@@ -54,9 +54,36 @@ export interface SolanaPreparedSetup {
    * zero-basis quarantine only as far as the withdrawal needs it.
    */
   syncedWsolRaw?: string;
+  /**
+   * WSOL withdraw only: what the withdrawn amount was worth when prepared. Checked
+   * fresh when the unsigned setup is saved; the signed save keeps that copy.
+   * Without it, a WSOL withdrawal leaves the high-water mark where it was.
+   */
+  withdrawValuation?: SolanaWithdrawValuation;
   status?: "pending" | "finalized" | "failed";
   expiryProof?: SolanaOwnerExpiryProof;
   priorSequence?: string; priorSessionEpoch?: string; priorVaultExisted?: boolean;
+}
+/**
+ * An executable WSOL→USDG exit quote for the withdrawal amount and the
+ * independent Pyth bound for the same amount, both read when it was prepared.
+ */
+export interface SolanaWithdrawValuation { quote: SolanaQuote; reference: SolanaReferenceBound }
+/**
+ * The lower of the two: neither Jupiter nor the reference can raise it alone, so
+ * the high-water mark never drops by more than the withdrawn WSOL was worth.
+ * Null when either is missing, malformed, stale or for another amount.
+ */
+export function solanaWithdrawValueUsdg(valuation: SolanaWithdrawValuation | undefined, amountRaw: string | undefined, nowMs: number): bigint | null {
+  if (!valuation || typeof valuation !== "object") return null;
+  try {
+    const intent = parseSolanaSwapIntent({ kind: "spl-swap", chain: CHAINS.solana, mode: "paper", requestId: "withdraw-valuation",
+      inputMint: SOLANA_WRAPPED_SOL_MINT, outputMint: SOLANA_USDG_MINT, amountRaw, slippageBps: valuation.quote?.slippageBps });
+    validateSolanaQuote(valuation.quote, intent, nowMs);
+    const bound = verifySolanaReferenceBound(valuation.reference, intent, nowMs);
+    const quoted = parseSolanaRawAmount(valuation.quote.minOutAmount), reference = parseSolanaRawAmount(bound.referenceOut);
+    return quoted < reference ? quoted : reference;
+  } catch { return null; }
 }
 const DAY = 86_400_000;
 /**
@@ -495,6 +522,14 @@ export class SolanaTradingStore implements SolanaLiveJournal {
         if (clock(this.now) >= previous.expiresAtMs) refuse("The prepared owner transaction expired before submission.");
         if ((setup.kind ?? "session") === "session" && (binding.requestedMode !== "live" || JSON.stringify(binding.limits) !== JSON.stringify(setup.limits))) refuse("The live permission settings changed. Review and sign again.");
       }
+      // A WSOL withdrawal's valuation is checked once, fresh, as prepared; the signed
+      // save keeps that checked copy, whatever it is handed. A bad one is dropped,
+      // never a reason to block the owner's withdrawal.
+      const { withdrawValuation: offered, ...plain } = setup;
+      const valuation = setup.kind !== "withdraw" || setup.mint !== SOLANA_WRAPPED_SOL_MINT ? undefined
+        : setup.signature ? previous?.withdrawValuation
+        : solanaWithdrawValueUsdg(offered, setup.amountRaw, clock(this.now)) !== null ? offered : undefined;
+      setup = valuation ? { ...plain, withdrawValuation: structuredClone(valuation) } : plain;
       // A session's limits become the on-chain permission: never more operations than
       // the program allows, never a permission longer than Merrymen grants.
       if ((setup.kind ?? "session") === "session") validateSolanaAccountLimits(setup.limits, clock(this.now));
@@ -565,8 +600,17 @@ export class SolanaTradingStore implements SolanaLiveJournal {
             if (fromPosition > 0n) {
               const basis = fromPosition === held ? BigInt(book.costBasisUsdgRaw) : BigInt(book.costBasisUsdgRaw) * fromPosition / held;
               book.wsolRaw = (held - fromPosition).toString(); book.costBasisUsdgRaw = (BigInt(book.costBasisUsdgRaw) - basis).toString();
+              // Capital out, as for USDG: the high-water mark drops by what the withdrawn
+              // position was worth when prepared (its share of the valuation, floor 0).
+              // Without a valuation it stays put, the conservative direction.
+              const valuation = setup.withdrawValuation;
+              if (valuation) {
+                const quoted = raw(valuation.quote.minOutAmount), reference = raw(valuation.reference.referenceOut);
+                const out = (quoted < reference ? quoted : reference) * fromPosition / amount, peak = raw(book.hwmRaw);
+                book.hwmRaw = (peak > out ? peak - out : 0n).toString();
+              }
             }
-            // No fabricated sale proceeds or P&L. Keep HWM conservative until a later owner review.
+            // No fabricated sale proceeds or P&L.
           }
           book.updatedAtMs = clock(this.now); book.slot = finalizedSlot!;
           const inserted = await tx.prepare("INSERT INTO solana_runtime_cashflows(evidence_id,tenant,owner,kind,mint,amount_raw,created_at_ms) VALUES(?,?,?,'withdraw',?,?,?) ON CONFLICT DO NOTHING")
