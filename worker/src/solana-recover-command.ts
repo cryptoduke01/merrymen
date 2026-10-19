@@ -55,7 +55,8 @@ function parse(args: readonly string[]): Record<string, string | true> {
     if (BOOLEAN_FLAGS.has(key)) { flags[key] = true; continue; }
     const value = args[i + 1];
     if (!VALUE_FLAGS.has(key) || value === undefined || value.startsWith("--") || !value.length || value.length > 2048) refuse();
-    if (key !== "key-file" && looksLikeSecret(value!)) refuse();
+    // A key pasted where a value belongs (even as the --key-file path) is refused unread.
+    if (looksLikeSecret(value!)) refuse();
     flags[key] = value!;
     i++;
   }

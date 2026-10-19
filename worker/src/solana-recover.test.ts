@@ -409,6 +409,7 @@ describe("solana-recover", () => {
   it("never takes a key from the command line, and warns when one was pasted there", async () => {
     for (const [args, leaked] of [
       [[...base, "--key", SECRET_BASE58, "--send"], true], [[...base, SECRET_BASE58], true], [[...base, "--owner", SECRET_BASE58], true],
+      [[...base, "--key-file", SECRET_BASE58, "--send"], true], [[...base, "--key-file", SECRET_JSON], true],
       [[...base, "--secret-key", "x"], false], [[...base, "--owner", OWNER, "--owner", OWNER], false], [[...base, "--send", "yes"], false],
     ] as const) {
       const fake = await chain();
