@@ -52,8 +52,9 @@ export function signatureOf(signedTransactionBase64: string): string | null {
  *
  * "unknown": the record could not be read, so the bytes stay.
  * "unheld": the server's owner transaction is not these bytes. They were
- * never saved, or were resolved and then replaced by a newer one; either
- * way resubmitting them can never be checked or sent again.
+ * never saved (the server saves before it broadcasts, so they never reached
+ * Solana), or were resolved and then replaced by a newer one (their outcome
+ * stays on Solana). Either way dropping them cannot lose or duplicate one.
  * Otherwise the server holds them, with this outcome.
  */
 export async function outcomeAfterRefusal(readRecord: () => Promise<OwnerRecord>, signature: string | null):
