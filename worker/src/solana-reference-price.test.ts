@@ -99,6 +99,28 @@ test("refuses stale, future, uncertain, partial, foreign and malformed price acc
   assert.throws(() => parsePythSolUsd(null, 1000, NOW), SolanaReferencePriceError);
 });
 
+test("refuses a receiver account of another type and an executable account, each otherwise a valid SOL/USD update", () => {
+  const good = { publishTimeMs: NOW - 1_000 };
+  // Each case differs from an accepted account in that one field only: the
+  // level byte is Full, the feed id, price, times and length are all valid,
+  // so only the discriminator or the executable guard can refuse it.
+  assert.doesNotThrow(() => parsePythSolUsd(pythAccount({ ...good, accountType: "PriceUpdateV2", executable: false }), 1000, NOW));
+  for (const accountType of ["EncodedVaa", "TwapUpdate", "Config", "PriceUpdateV1", "priceUpdateV2"]) {
+    const other = pythAccount({ ...good, accountType });
+    assert.equal(Buffer.from(other.data[0] as string, "base64")[40], 1, accountType);
+    assert.throws(() => parsePythSolUsd(other, 1000, NOW), SolanaReferencePriceError, accountType);
+  }
+  for (const executable of [true, undefined, "false", 0, null]) {
+    assert.throws(() => parsePythSolUsd(pythAccount({ ...good, executable }), 1000, NOW), SolanaReferencePriceError, String(executable));
+  }
+  const missing: Record<string, unknown> = pythAccount(good); delete missing.executable;
+  assert.throws(() => parsePythSolUsd(missing, 1000, NOW), SolanaReferencePriceError);
+  // The real mainnet bytes are refused the same way once marked executable.
+  const real = pythSnapshotResult(PYTH_SOL_USD_MAINNET_SNAPSHOT);
+  assert.doesNotThrow(() => parsePythSolUsd(real.value, real.context.slot, PYTH_SOL_USD_MAINNET_SNAPSHOT.fetchedAtMs));
+  assert.throws(() => parsePythSolUsd({ ...real.value, executable: true }, real.context.slot, PYTH_SOL_USD_MAINNET_SNAPSHOT.fetchedAtMs), SolanaReferencePriceError);
+});
+
 test("values both directions at the reference and floors guaranteed output by the tolerance", () => {
   const reference = pythReference(NOW); // $500 per SOL
   const s = solanaReferenceBound(sell, reference, 300);

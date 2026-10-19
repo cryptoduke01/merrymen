@@ -9,11 +9,15 @@ import { PYTH_RECEIVER_PROGRAM, PYTH_SOL_USD_ACCOUNT, PYTH_SOL_USD_FEED_ID, sola
 export interface PythFixture {
   price?: bigint; conf?: bigint; exponent?: number; publishTimeMs: number; postedSlot?: bigint;
   feedId?: string; level?: number; owner?: string; length?: number;
+  /** The Anchor account name whose discriminator leads the data. Default: PriceUpdateV2. */
+  accountType?: string;
+  /** What getAccountInfo reports for `executable`. Default: false. */
+  executable?: unknown;
 }
 /** A PriceUpdateV2 account as getAccountInfo returns it (base64). Default: $500.00000000/SOL. */
 export function pythAccount(f: PythFixture) {
   const data = Buffer.alloc(f.length ?? 134);
-  createHash("sha256").update("account:PriceUpdateV2").digest().subarray(0, 8).copy(data);
+  createHash("sha256").update(`account:${f.accountType ?? "PriceUpdateV2"}`).digest().subarray(0, 8).copy(data);
   data[40] = f.level ?? 1;
   Buffer.from(f.feedId ?? PYTH_SOL_USD_FEED_ID, "hex").copy(data, 41);
   data.writeBigInt64LE(f.price ?? 50_000_000_000n, 73);
@@ -21,7 +25,8 @@ export function pythAccount(f: PythFixture) {
   data.writeInt32LE(f.exponent ?? -8, 89);
   data.writeBigInt64LE(BigInt(Math.floor(f.publishTimeMs / 1000)), 93);
   data.writeBigUInt64LE(f.postedSlot ?? 999n, 125);
-  return { owner: f.owner ?? PYTH_RECEIVER_PROGRAM, executable: false, lamports: 1_000_000, data: [data.toString("base64"), "base64"], space: data.length };
+  return { owner: f.owner ?? PYTH_RECEIVER_PROGRAM, executable: Object.hasOwn(f, "executable") ? f.executable : false, lamports: 1_000_000,
+    data: [data.toString("base64"), "base64"], space: data.length };
 }
 /** A reference read at `slot`, published at `nowMs`, at `usdPerSol` (8 decimals). */
 export function pythReference(nowMs: number, usdPerSol = 50_000_000_000n, slot = 1000): SolanaReferencePrice {
