@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import {
   address, appendTransactionMessageInstructions, compileTransaction, compressTransactionMessageUsingAddressLookupTables,
   createTransactionMessage, getAddressFromPublicKey, getBase58Decoder, getBase64EncodedWireTransaction, getCompiledTransactionMessageDecoder,
-  getSignatureFromTransaction, setTransactionMessageFeePayer, setTransactionMessageLifetimeUsingBlockhash,
+  getSignatureFromTransaction, getTransactionDecoder, setTransactionMessageFeePayer, setTransactionMessageLifetimeUsingBlockhash,
   signTransaction, type AddressesByLookupTableAddress, type Blockhash, type Instruction,
 } from "@solana/kit";
 import { CHAINS, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM } from "../../packages/core/src/ids";
@@ -14,7 +14,7 @@ import {
   SOLANA_WRAPPED_SOL_MINT, type SolanaVaultState,
 } from "../../packages/core/src/solana-live";
 import { validateJupiterCpi, type JupiterCpiRoute, type SolanaCpiBuildRequest } from "./solana-live-market";
-import { readSolanaEachProvider, readSolanaQuorum, type SolanaLiveRead, type SolanaLiveRpc } from "./solana-live-rpc";
+import { readSolanaEachProvider, readSolanaPriorityFee, readSolanaQuorum, type SolanaLiveRead, type SolanaLiveRpc } from "./solana-live-rpc";
 import { solanaReferenceNotional, verifySolanaReferenceBound, type SolanaReferenceBound } from "./solana-reference-price";
 import { isSolanaTransactionError, settleSolanaReceipt, type SolanaVaultEvidence } from "./solana-settlement";
 
@@ -161,7 +161,14 @@ export interface SolanaExecutorOptions {
   market: { build(request: SolanaCpiBuildRequest): Promise<JupiterCpiRoute>; readMint(address: string): Promise<SolanaMint> };
   journal: SolanaLiveJournal;
   maxFeeLamports: string;
+  /** Lowest compute-unit price (micro-lamports) ever paid. Default 0. */
   computeUnitPriceMicroLamports?: string;
+  /**
+   * Highest compute-unit price. The price follows recent fees on this swap's
+   * writable accounts up to this, and the whole fee plus rent always stays
+   * within maxFeeLamports. Default SOLANA_DEFAULT_MAX_COMPUTE_UNIT_PRICE.
+   */
+  maxComputeUnitPriceMicroLamports?: string;
   assessRisk(input: { intent: SolanaLiveIntent; quote: SolanaQuote; vaultState: SolanaVaultState;
     slot: number; observedAtMs: number }): Promise<SolanaLiveRiskEvidence>;
   now?: () => number;
@@ -171,6 +178,10 @@ const UPGRADEABLE_LOADER = "BPFLoaderUpgradeab1e11111111111111111111111";
 const LOOKUP_PROGRAM = "AddressLookupTab1e1111111111111111111111111";
 const COMPUTE_PROGRAM = "ComputeBudget111111111111111111111111111111";
 const U64_MAX = (1n << 64n) - 1n;
+/** 1 lamport per compute unit: about 0.00024 SOL on a typical 240k-unit swap. */
+export const SOLANA_DEFAULT_MAX_COMPUTE_UNIT_PRICE = 1_000_000n;
+/** Base fee for the two signatures (fee payer and session) every swap carries. */
+const SIGNATURE_FEES = 10_000n;
 async function readRawAccount(rpc: SolanaLiveRead, key: string, slot: number) {
   return account(context(await rpc("getAccountInfo", [key, { encoding: "base64", commitment: "confirmed", minContextSlot: slot }]), slot).value);
 }
@@ -247,6 +258,20 @@ export async function readSolanaVaultBalances(rpc: SolanaLiveRpc, vault: string,
       wsolRaw: tokenBalance(account(result.value[1]), SOLANA_WRAPPED_SOL_MINT, vault, SOLANA_CLASSIC_TOKEN_PROGRAM).toString() };
   });
 }
+/** The signed execute_swap's deadline (unix ms). From then on the program refuses these bytes. */
+function signedDeadlineMs(submission: SolanaSignedSubmission): number {
+  let data: Buffer | undefined;
+  try {
+    const message = getCompiledTransactionMessageDecoder().decode(getTransactionDecoder().decode(Buffer.from(submission.signedTransactionBase64, "base64")).messageBytes);
+    const swaps = message.instructions.filter(ix => message.staticAccounts[ix.programAddressIndex] === submission.programId);
+    if (swaps.length === 1 && swaps[0]!.data) data = Buffer.from(swaps[0]!.data);
+  } catch { return fail(); }
+  // discriminator, expected_seq, session_epoch, amount_in, min_out, then deadline (i64).
+  if (!data || data.length < 48) return fail();
+  const deadline = data.readBigInt64LE(40);
+  if (deadline <= 0n || deadline > BigInt(Math.floor(Number.MAX_SAFE_INTEGER / 1000))) return fail();
+  return Number(deadline) * 1000;
+}
 /** A finalized read of this submission's vault at or after `minContextSlot`. */
 async function readFinalizedVault(read: SolanaLiveRead, submission: SolanaSignedSubmission, owner: string, minContextSlot: number): Promise<SolanaVaultEvidence> {
   const evidence = context(await read("getAccountInfo", [submission.intent.vault, {
@@ -308,7 +333,10 @@ function observationKey(observation: SolanaObservation): string {
  *
  * A fill, failure or expiry is booked only when both independent providers
  * derive the same outcome (readSolanaQuorum); any disagreement or provider error
- * leaves the record pending.
+ * leaves the record pending. While neither provider has seen the signature and
+ * the signed deadline has not passed, the saved bytes are rebroadcast once per
+ * call: never re-signed, so a dropped send survives a restart and still lands
+ * at most once.
  */
 export async function reconcileSolanaSubmission(
   rpc: SolanaLiveRpc, journal: SolanaLiveJournal, owner: string, requestId: string, now: () => number = Date.now,
@@ -319,10 +347,15 @@ export async function reconcileSolanaSubmission(
   if (await deriveSolanaVaultAddress(submission.programId, owner) !== submission.intent.vault) return fail();
   const nowMs = now();
   const quorum = await readSolanaQuorum(rpc, read => observeSolanaSubmission(read, submission, owner, nowMs), observationKey);
-  if (!quorum.agreed || !quorum.value.settlement) return record;
-  const settlement = quorum.value.settlement;
-  await journal.settle(owner, requestId, submission.signature, settlement);
-  return { submission, status: settlement.status, settlement };
+  if (quorum.agreed && quorum.value.settlement) {
+    const settlement = quorum.value.settlement;
+    await journal.settle(owner, requestId, submission.signature, settlement);
+    return { submission, status: settlement.status, settlement };
+  }
+  if (quorum.values.every(item => !item.seen && !item.settlement) && Number.isSafeInteger(nowMs) && nowMs < signedDeadlineMs(submission)) {
+    try { await rpc.send(submission.signedTransactionBase64, submission.minContextSlot, undefined, { untilMs: 0 }); } catch { /* Still pending. */ }
+  }
+  return record;
 }
 function computeInstructions(units: number, price: bigint): Instruction[] {
   const limit = Buffer.alloc(5); limit[0] = 2; limit.writeUInt32LE(units, 1);
@@ -334,7 +367,9 @@ function computeInstructions(units: number, price: bigint): Instruction[] {
 export function createSolanaExecutor(options: SolanaExecutorOptions) {
   const now = options.now ?? Date.now;
   const cap = parseSolanaRawAmount(options.maxFeeLamports);
-  const price = parseSolanaRawAmount(options.computeUnitPriceMicroLamports ?? "0", true);
+  const minPrice = parseSolanaRawAmount(options.computeUnitPriceMicroLamports ?? "0", true);
+  const maxPrice = parseSolanaRawAmount(options.maxComputeUnitPriceMicroLamports ?? SOLANA_DEFAULT_MAX_COMPUTE_UNIT_PRICE.toString(), true);
+  if (maxPrice < minPrice) fail("fee-cap");
   address(options.programId);
   if (!/^[a-f0-9]{64}$/.test(options.programBinarySha256)) fail("unsafe-program");
   const identity = Promise.all([getAddressFromPublicKey(options.sessionKeyPair.publicKey), getAddressFromPublicKey(options.feePayerKeyPair.publicKey)]);
@@ -457,9 +492,9 @@ export function createSolanaExecutor(options: SolanaExecutorOptions) {
           sessionEpoch: snapshot.state.sessionEpoch, amountIn: BigInt(intent.amountRaw), minOut: BigInt(route.quote.minOutAmount),
           deadline, slippageBps: intent.slippageBps, routeData: Buffer.from(route.dataBase64, "base64"),
           routeAccounts: route.accounts.map(meta => ({ address: meta.address, role: meta.isWritable ? 1 : 0 })) });
-        const compile = (units: number) => {
+        const compile = (units: number, unitPrice: bigint) => {
           const msg = setTransactionMessageLifetimeUsingBlockhash({ blockhash: recentBlockhash, lastValidBlockHeight },
-            setTransactionMessageFeePayer(feePayer, appendTransactionMessageInstructions([...computeInstructions(units, price), swap], createTransactionMessage({ version: 0 }))));
+            setTransactionMessageFeePayer(feePayer, appendTransactionMessageInstructions([...computeInstructions(units, unitPrice), swap], createTransactionMessage({ version: 0 }))));
           const transaction = compileTransaction(compressTransactionMessageUsingAddressLookupTables(msg, alts));
           if (Buffer.from(getBase64EncodedWireTransaction(transaction), "base64").length > 1232) return fail("unsafe-route");
           return transaction;
@@ -483,8 +518,20 @@ export function createSolanaExecutor(options: SolanaExecutorOptions) {
           if (units < 1 || units > 1_400_000) return fail("simulation");
           return units;
         };
-        const estimate = await simulate(compile(1_400_000));
-        const transaction = compile(Math.min(1_400_000, Math.ceil(estimate * 1.2)));
+        const units = Math.min(1_400_000, Math.ceil(await simulate(compile(1_400_000, 0n)) * 1.2));
+        // A bounded priority fee: recent prices on the accounts this swap writes,
+        // between the configured minimum and maximum, and never more than the
+        // fee budget left after the temporary account's rent.
+        const budget = cap - snapshot.rent - SIGNATURE_FEES;
+        const affordable = budget > 0n ? budget * 1_000_000n / BigInt(units) : 0n;
+        if (affordable < minPrice) return fail("fee-cap");
+        const writable = [intent.vault, inputTokenAccount, outputTokenAccount, snapshot.tempInput, feePayer,
+          ...(snapshot.refundAccount ? [snapshot.refundAccount] : []), ...route.accounts.filter(meta => meta.isWritable).map(meta => meta.address)];
+        // The estimate is advisory: a provider that cannot answer it must not
+        // block an exit, so the swap then pays the configured minimum.
+        let recent = minPrice;
+        try { recent = await readSolanaPriorityFee(rpc, writable, { minimum: minPrice, maximum: maxPrice }); } catch { /* Minimum price. */ }
+        const transaction = compile(units, recent > affordable ? affordable : recent);
         const feeResult = context(await rpc("getFeeForMessage", [Buffer.from(transaction.messageBytes).toString("base64"),
           { commitment: "confirmed", minContextSlot: slot }]), slot);
         const fee = BigInt(integer(feeResult.value));
@@ -498,7 +545,7 @@ export function createSolanaExecutor(options: SolanaExecutorOptions) {
             const value = alts[lookup.lookupTableAddress]?.[index]; if (!value) return fail("unsafe-route"); return value;
           }));
         }
-        return { transaction, fee, recentBlockhash, lastValidBlockHeight, slot, loadedAddresses };
+        return { transaction, fee, recentBlockhash, lastValidBlockHeight, slot, loadedAddresses, deadline };
       });
       checkAbort();
       const risk = await options.assessRisk({ intent, quote: route.quote, vaultState: snapshot.state,
@@ -539,9 +586,11 @@ export function createSolanaExecutor(options: SolanaExecutorOptions) {
         return fail("conflict");
       }
       // Every send result, including a mismatched signature or lost response, is
-      // pending until finalized network evidence proves its outcome. No resend.
+      // pending until finalized network evidence proves its outcome. The transport
+      // rebroadcasts these exact bytes to both providers until they are seen or
+      // the signed deadline passes; nothing is ever re-signed.
       if (!options.signal?.aborted) {
-        try { await options.rpc.send(submission.signedTransactionBase64, submission.minContextSlot, options.signal); } catch { /* Durable pending. */ }
+        try { await options.rpc.send(submission.signedTransactionBase64, submission.minContextSlot, options.signal, { untilMs: Number(prepared.deadline) * 1000 }); } catch { /* Durable pending. */ }
       }
       return { submission, status: "pending" };
     },

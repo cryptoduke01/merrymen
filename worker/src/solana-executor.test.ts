@@ -10,7 +10,7 @@ import { deriveSolanaVaultAddress, deriveSolanaSwapAuthority, deriveSolanaAta, S
 import { createSolanaExecutor, reconcileSolanaSubmission, verifySolanaVaultDeployment, type SolanaLiveRecord, type SolanaSignedSubmission, type SolanaExecutorOptions } from "./solana-executor";
 import { settleSolanaReceipt, solanaVaultEvents } from "./solana-settlement";
 import { JUPITER_SWAP_PROGRAM, type JupiterCpiRoute } from "./solana-live-market";
-import type { SolanaLiveRead, SolanaLiveRpc } from "./solana-live-rpc";
+import type { SolanaLiveRead, SolanaLiveRpc, SolanaSendOptions } from "./solana-live-rpc";
 import { createSolanaLiveRpc } from "./solana-live-rpc";
 import { SOLANA_MAINNET_GENESIS_HASH } from "./solana-rpc";
 import { pythBound } from "./solana-reference-price-fixture";
@@ -66,10 +66,12 @@ async function fixture() {
     refundMissing: false, refundDelegate: false, tempTokens: 0n,
     // Pyth SOL/USD with 8 decimals; the fixture route buys 0.002 SOL per USDG, i.e. $500.
     referencePrice: 50_000_000_000n, referenceAgeMs: 0, forgeFloor: false,
+    // Recent prioritization fees (micro-lamports per CU) the RPC reports for the swap's writable accounts.
+    priorityFees: [] as number[], priorityError: false,
     // The vault's finalized sequence after the receipt slot, and the second provider's own view.
     vaultSeqAfter: 1n, fallback: null as SolanaLiveRead | null };
   let record: SolanaLiveRecord | null = null;
-  const calls: string[] = [];
+  const calls: string[] = [], sendOptions: (SolanaSendOptions | undefined)[] = [], priorityReads: unknown[] = [];
   const quote = { source: "jupiter" as const, inputMint: SOLANA_USDG_MINT, outputMint: SOLANA_WRAPPED_SOL_MINT,
     inAmount: "1000000", outAmount: "2000000", minOutAmount: "1980000", slippageBps: 100,
     contextSlot: SLOT, quotedAtMs: NOW, expiresAtMs: NOW + 30_000 };
@@ -150,6 +152,10 @@ async function fixture() {
       case "getMinimumBalanceForRentExemption": return 2_039_280;
       case "getLatestBlockhash": return response({ blockhash: key(50), lastValidBlockHeight: 1200 });
       case "getFeeForMessage": return response(controls.fee);
+      case "getRecentPrioritizationFees":
+        priorityReads.push(params[0]);
+        if (controls.priorityError) throw new Error("method not found");
+        return controls.priorityFees.map((prioritizationFee, index) => ({ slot: SLOT - index, prioritizationFee }));
       case "simulateTransaction": {
         const tx = getTransactionDecoder().decode(Buffer.from(params[0] as string, "base64"));
         assert.equal(Object.keys(tx.signatures).length, 2);
@@ -166,8 +172,8 @@ async function fixture() {
   };
   const rpc: SolanaLiveRpc = { read: operation => operation(read),
     readEach: async operation => [await operation(read), await operation(controls.fallback ?? read)],
-    async send(wire) {
-    calls.push("send"); assert.ok(record, "transaction must be durable before broadcast");
+    async send(wire, _slot, _signal, options) {
+    calls.push("send"); sendOptions.push(options); assert.ok(record, "transaction must be durable before broadcast");
     assert.equal(record.submission.signedTransactionBase64, wire);
     if (controls.failSend) throw new Error("lost HTTP response");
     return controls.wrongSignature ? "different" : record.submission.signature;
@@ -196,8 +202,8 @@ async function fixture() {
     } };
   const intent = { kind: "spl-swap", chain: CHAINS.solana, mode: "live", requestId: "actual-test-1", owner, vault,
     inputMint: SOLANA_USDG_MINT, outputMint: SOLANA_WRAPPED_SOL_MINT, amountRaw: "1000000", slippageBps: 100 };
-  return { options, intent, controls, calls, clock, receipt, session, feePayer, ownerRefund, route, read,
-    programData, programDataAddress, getRecord: () => record };
+  return { options, intent, controls, calls, clock, receipt, session, feePayer, ownerRefund, route, read, sendOptions, priorityReads,
+    temp, input, output, programData, programDataAddress, getRecord: () => record };
 }
 /** The account the signed execute_swap passes in the owner_refund slot (index 14). */
 function refundSlot(submission: SolanaSignedSubmission): string {
@@ -213,6 +219,8 @@ test("builds real two-signer v0 bytes, verifies them, persists before one send a
   const pending = await executor.execute(f.intent);
   assert.equal(pending.status, "pending");
   assert.equal(f.calls.filter(call => call === "send").length, 1);
+  // The transport may rebroadcast these bytes until the signed deadline: the quote's expiry, in whole seconds.
+  assert.deepEqual(f.sendOptions, [{ untilMs: Math.floor((NOW + 30_000) / 1000) * 1000 }]);
   assert.ok(f.calls.indexOf("persist") < f.calls.indexOf("send"));
   const tx = getTransactionDecoder().decode(Buffer.from(pending.submission.signedTransactionBase64, "base64"));
   assert.ok(await verifySignature(f.options.sessionKeyPair.publicKey, tx.signatures[f.session]!, tx.messageBytes));
@@ -243,10 +251,11 @@ test("lost send response and mismatched returned signature stay durable pending,
 });
 
 test("crash recovery releases a sequence only when finalized vault state proves execution impossible; fees stay unknown", async () => {
-  for (const mode of ["expired", "revoked", "advanced", "not-expired", "wrong-owner", "wrong-program", "old-slot", "receipt-present"] as const) {
+  const deadline = Math.floor((NOW + 30_000) / 1000) * 1000;
+  for (const mode of ["expired", "revoked", "advanced", "not-expired", "not-expired-late", "wrong-owner", "wrong-program", "old-slot", "receipt-present"] as const) {
     const f = await fixture(); f.controls.failSend = true;
     const executor = createSolanaExecutor(f.options); const original = await executor.execute(f.intent);
-    const proofReads: string[] = [];
+    const proofReads: string[] = [], resent: string[] = [];
     const read: SolanaLiveRead = async (method, params) => {
       proofReads.push(method);
       if (method === "getSignatureStatuses") return { context: { slot: SLOT }, value: [null] };
@@ -254,7 +263,7 @@ test("crash recovery releases a sequence only when finalized vault state proves 
       if (method === "getEpochInfo") {
         // Slot and height from one finalized bank.
         assert.deepEqual(params, [{ commitment: "finalized", minContextSlot: SLOT }]);
-        return { absoluteSlot: SLOT + 2, blockHeight: ["revoked", "not-expired"].includes(mode) ? 1199 : 1201, epoch: 1, slotIndex: SLOT + 2, slotsInEpoch: 432_000 };
+        return { absoluteSlot: SLOT + 2, blockHeight: ["revoked", "not-expired", "not-expired-late"].includes(mode) ? 1199 : 1201, epoch: 1, slotIndex: SLOT + 2, slotsInEpoch: 432_000 };
       }
       if (method === "getAccountInfo") {
         assert.deepEqual(params, [f.intent.vault, { encoding: "base64", commitment: "finalized", minContextSlot: SLOT + 2 }]);
@@ -265,12 +274,17 @@ test("crash recovery releases a sequence only when finalized vault state proves 
       return assert.fail(`Unexpected proof read ${method}`);
     };
     const rpc: SolanaLiveRpc = { read: callback => callback(read), readEach: async callback => [await callback(read), await callback(read)],
-      send: async () => assert.fail("reconciliation cannot submit") };
+      send: async (wire, slot, _signal, options) => {
+        // Reconciliation may only rebroadcast the saved bytes, one round at a time.
+        assert.equal(wire, original.submission.signedTransactionBase64); assert.equal(slot, SLOT); assert.deepEqual(options, { untilMs: 0 });
+        resent.push(wire); return original.submission.signature;
+      } };
+    const now = () => mode === "not-expired-late" ? deadline : NOW + 1;
     if (["wrong-owner", "wrong-program", "old-slot"].includes(mode)) {
-      await assert.rejects(reconcileSolanaSubmission(rpc, f.options.journal, f.intent.owner, f.intent.requestId, () => NOW + 1));
-      assert.equal(f.getRecord()!.status, "pending"); continue;
+      await assert.rejects(reconcileSolanaSubmission(rpc, f.options.journal, f.intent.owner, f.intent.requestId, now));
+      assert.equal(f.getRecord()!.status, "pending"); assert.equal(resent.length, 0); continue;
     }
-    const result = await reconcileSolanaSubmission(rpc, f.options.journal, f.intent.owner, f.intent.requestId, () => NOW + 1);
+    const result = await reconcileSolanaSubmission(rpc, f.options.journal, f.intent.owner, f.intent.requestId, now);
     assert.ok(!proofReads.includes("getBlockHeight") && !proofReads.includes("getSlot"), mode);
     if (["expired", "revoked"].includes(mode)) {
       assert.equal(result!.status, "expired"); assert.equal(result!.settlement!.feeLamports, null);
@@ -280,6 +294,8 @@ test("crash recovery releases a sequence only when finalized vault state proves 
       assert.deepEqual(await executor.execute(f.intent), result);
       assert.ok(proofReads.indexOf("getEpochInfo") < proofReads.indexOf("getAccountInfo"));
     } else assert.equal(result!.status, "pending", mode);
+    // Only a signature nobody has seen, inside its signed deadline, is rebroadcast.
+    assert.equal(resent.length, mode === "not-expired" ? 1 : 0, mode);
     assert.equal(f.calls.filter(call => call === "send").length, 1);
   }
 });
@@ -621,4 +637,47 @@ test("truncated logs keep strict provenance: a failed receipt needs no logs, a v
   // Complete logs still need exactly one matching event, evidence or not.
   raw.meta.logMessages = [`Program ${PROGRAM} invoke [1]`, `Program ${PROGRAM} success`];
   assert.throws(() => settleSolanaReceipt(pending.submission, raw, status, NOW + 1, evidence));
+});
+
+/** The compute-unit limit and price the signed swap carries. */
+function computeBudget(submission: SolanaSignedSubmission): { units: number; price: bigint } {
+  const tx = getTransactionDecoder().decode(Buffer.from(submission.signedTransactionBase64, "base64"));
+  const compiled = getCompiledTransactionMessageDecoder().decode(tx.messageBytes);
+  const [limit, price] = compiled.instructions.slice(0, 2).map(ix => Buffer.from(ix.data!));
+  assert.equal(compiled.staticAccounts[compiled.instructions[0]!.programAddressIndex], "ComputeBudget111111111111111111111111111111");
+  assert.equal(limit![0], 2); assert.equal(price![0], 3);
+  return { units: limit!.readUInt32LE(1), price: price!.readBigUInt64LE(1) };
+}
+
+test("swaps pay a bounded priority fee from recent fees on the accounts they write (audit G2-1)", async () => {
+  const cases: Array<{ fees: number[]; min?: string; max?: string; maxFee?: string; error?: boolean; price: bigint }> = [
+    { fees: [], price: 0n },
+    { fees: [0, 5_000, 100, 200], price: 200n }, // 75th percentile, nearest rank
+    { fees: [10 ** 12], price: 1_000_000n }, // the default maximum
+    { fees: [10 ** 12], max: "40000", price: 40_000n },
+    { fees: [], min: "50", price: 50n },
+    { fees: [10], error: true, min: "7", price: 7n }, // an unanswered estimate pays the minimum
+    // 2,100,000 lamports leaves 50,720 after rent and signatures: 211,333 per unit at 240,000 units.
+    { fees: [10 ** 12], maxFee: "2100000", price: 211_333n },
+  ];
+  for (const item of cases) {
+    const f = await fixture(); f.controls.priorityFees = item.fees; f.controls.priorityError = !!item.error;
+    if (item.min) f.options.computeUnitPriceMicroLamports = item.min;
+    if (item.max) f.options.maxComputeUnitPriceMicroLamports = item.max;
+    if (item.maxFee) f.options.maxFeeLamports = item.maxFee;
+    const pending = await createSolanaExecutor(f.options).execute(f.intent);
+    const label = `fees=${item.fees} min=${item.min} max=${item.max} maxFee=${item.maxFee} error=${item.error}`;
+    assert.deepEqual(computeBudget(pending.submission), { units: 240_000, price: item.price }, label);
+    assert.ok(BigInt(pending.submission.feeLamports) + BigInt(pending.submission.rentLamports) <= BigInt(pending.submission.maxFeeLamports));
+    const accounts = f.priorityReads[0] as string[];
+    for (const writable of [f.intent.vault, f.input, f.output, f.temp, f.feePayer, ...f.route.accounts.filter(meta => meta.isWritable).map(meta => meta.address)]) {
+      assert.ok(accounts.includes(writable), writable);
+    }
+  }
+  const f = await fixture();
+  assert.throws(() => createSolanaExecutor({ ...f.options, computeUnitPriceMicroLamports: "2", maxComputeUnitPriceMicroLamports: "1" }), /fee-cap/);
+  // A minimum the fee budget cannot carry is refused before anything is signed.
+  const g = await fixture(); g.options.computeUnitPriceMicroLamports = "300000"; g.options.maxFeeLamports = "2100000";
+  await assert.rejects(createSolanaExecutor(g.options).execute(g.intent), /fee-cap/);
+  assert.ok(!g.calls.includes("persist"));
 });
