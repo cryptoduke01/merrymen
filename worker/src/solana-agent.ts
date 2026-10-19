@@ -97,8 +97,9 @@ export function createSolanaAgent(options: SolanaAgentOptions) {
             if (!status.paper || status.paper.positions.some(p => p.mint !== SOLANA_WRAPPED_SOL_MINT)) { results.push({ owner: row.owner, outcome: "held" }); continue; }
             cashRaw = status.paper.cashRaw; wsolRaw = status.paper.positions.find(p => p.mint === SOLANA_WRAPPED_SOL_MINT)?.amountRaw ?? "0";
           } else {
-            if (!status.live.balances || status.live.pending.length || (!status.live.ready && !status.live.canExit)) { results.push({ owner: row.owner, outcome: "held" }); continue; }
-            cashRaw = status.live.balances.cashUsdg; wsolRaw = status.live.balances.wsolRaw;
+            if (!status.live.balances || !status.live.tradable || status.live.pending.length || (!status.live.ready && !status.live.canExit)) { results.push({ owner: row.owner, outcome: "held" }); continue; }
+            // The book's amounts, never the chain's: quarantined SOL is not the strategy's to sell.
+            cashRaw = status.live.tradable.cashUsdg; wsolRaw = status.live.tradable.wsolRaw;
           }
           let solValueUsdgRaw = "0";
           if (BigInt(wsolRaw) > 0n) {

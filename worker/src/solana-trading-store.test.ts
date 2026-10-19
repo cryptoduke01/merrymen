@@ -245,13 +245,14 @@ test("shutdown while waiting for the database lock prevents new paper and live a
 });
 test("finalized deposits adjust cashflow/HWM once; owner withdrawals remove actual holdings and basis without inventing P&L", async t => {
   const f = await fixture(t), s = submission(); await f.store.recordSigned(s);
-  await assert.rejects(f.store.reconcileCashDeposit({ cashUsdg: "110000000", wsolRaw: "0", slot: 1001, observedAtMs: NOW, commitment: "finalized" }), /pending/);
+  await assert.rejects(f.store.reconcileExternalInflows({ cashUsdg: "110000000", wsolRaw: "0", slot: 1001, observedAtMs: NOW, commitment: "finalized" }), /pending/);
   await f.store.settle(OWNER, s.intent.requestId, s.signature, settlement(s));
   const deposit = { cashUsdg: "109400000", wsolRaw: "1980000", slot: 1002, observedAtMs: NOW, commitment: "finalized" as const };
-  await f.store.reconcileCashDeposit(deposit); await f.store.reconcileCashDeposit(deposit);
+  await f.store.reconcileExternalInflows(deposit); await f.store.reconcileExternalInflows(deposit);
   assert.equal((await f.store.liveBook())!.hwmRaw, "110000000");
-  await assert.rejects(f.store.reconcileCashDeposit({ ...deposit, cashUsdg: "109400001", slot: 1000 }), /finalized USDG/);
-  await assert.rejects(f.store.reconcileCashDeposit({ ...deposit, wsolRaw: "1980001" }), /finalized USDG/);
+  await assert.rejects(f.store.reconcileExternalInflows({ ...deposit, cashUsdg: "109400001", slot: 1000 }), /finalized inflows/);
+  await assert.rejects(f.store.reconcileExternalInflows({ ...deposit, cashUsdg: "109399999" }), /below the recorded book/);
+  await assert.rejects(f.store.reconcileExternalInflows({ ...deposit, wsolRaw: "1979999" }), /below the recorded book/);
   // The settled trade ran at sequence 0, so the vault was at 1 when this was prepared.
   await saveSignedSetup(f.store, { ...setup("withdraw"), priorVaultExisted: true, priorSequence: "1", priorSessionEpoch: "1", mint: SOLANA_USDG_MINT, amountRaw: "1000000" }, "withdraw-cash");
   await assert.rejects(f.store.finishSetup("withdraw-cash", "finalized"), /slot/);
@@ -419,4 +420,46 @@ test("no trade is admitted while a withdrawal is prepared, and a stale withdrawa
   // The trade ran at sequence 0: a withdrawal still claiming sequence 0 read stale state.
   await assert.rejects(f.store.saveSetup({ ...withdraw, preparedAtMs: f.clock.value, expiresAtMs: f.clock.value + 60_000 }), /vault changed/);
   assert.equal(await f.store.saveSetup({ ...withdraw, priorSequence: "1", preparedAtMs: f.clock.value, expiresAtMs: f.clock.value + 60_000 }), true);
+});
+
+test("one raw WSOL sent to the vault is quarantined at zero basis, outside equity, the HWM and the position (audit dust)", async t => {
+  const f = await fixture(t), s = submission(); await f.store.recordSigned(s);
+  await f.store.settle(OWNER, s.intent.requestId, s.signature, settlement(s));
+  const before = (await f.store.liveBook())!;
+  const dusted = { cashUsdg: "99400000", wsolRaw: "1980001", slot: 1002, observedAtMs: NOW, commitment: "finalized" as const };
+  await f.store.reconcileExternalInflows(dusted); await f.store.reconcileExternalInflows(dusted);
+  let book = (await f.store.liveBook())!;
+  assert.equal(book.quarantinedWsolRaw, "1"); assert.equal(book.wsolRaw, before.wsolRaw);
+  assert.equal(book.hwmRaw, before.hwmRaw); assert.equal(book.costBasisUsdgRaw, before.costBasisUsdgRaw); assert.equal(book.realizedPnlUsdgRaw, "0");
+  const flows = await f.db.prepare("SELECT kind,mint,amount_raw FROM solana_runtime_cashflows ORDER BY kind").all() as Array<{ kind: string; mint: string; amount_raw: string }>;
+  assert.deepEqual(flows.map(r => ({ kind: r.kind, mint: r.mint, amount_raw: r.amount_raw })), [{ kind: "quarantine", mint: SOLANA_WRAPPED_SOL_MINT, amount_raw: "1" }]);
+  // A USDG deposit and more dust in one finalized read: capital-in and quarantine, booked once each.
+  await f.store.reconcileExternalInflows({ ...dusted, cashUsdg: "109400000", wsolRaw: "1980003", slot: 1003 });
+  book = (await f.store.liveBook())!;
+  assert.equal(book.quarantinedWsolRaw, "3"); assert.equal(book.cashRaw, "109400000"); assert.equal(book.hwmRaw, (BigInt(before.hwmRaw) + 10_000_000n).toString());
+  // The owner can take it out: a WSOL withdrawal spends quarantine first, at zero basis.
+  await saveSignedSetup(f.store, { ...setup("withdraw"), priorVaultExisted: true, priorSequence: "1", priorSessionEpoch: "1", mint: SOLANA_WRAPPED_SOL_MINT, amountRaw: "5" }, "sweep");
+  await f.store.finishSetup("sweep", "finalized", 1004);
+  book = (await f.store.liveBook())!;
+  assert.equal(book.quarantinedWsolRaw, "0"); assert.equal(book.wsolRaw, "1979998");
+  assert.equal(book.costBasisUsdgRaw, (600000n - 600000n * 2n / 1980000n).toString()); assert.equal(book.hwmRaw, (BigInt(before.hwmRaw) + 10_000_000n).toString());
+});
+
+test("an unbooked excess never blocks admission, a shortfall does, and no sale reaches quarantined SOL", async t => {
+  const f = await fixture(t), s = submission(); await f.store.recordSigned(s);
+  await f.store.settle(OWNER, s.intent.requestId, s.signature, settlement(s));
+  // Dust that finality has not booked yet: the sale sizes against the book alone.
+  assert.equal(await f.store.recordSigned(sale("with-dust", "1", "1000000", { slot: 1001, cash: "99400001", wsol: "1980001" })), true);
+  const g = await fixture(t), first = submission(); await g.store.recordSigned(first);
+  await g.store.settle(OWNER, first.intent.requestId, first.signature, settlement(first));
+  await assert.rejects(g.store.recordSigned(sale("whole-chain", "1", "1980001", { slot: 1001, cash: "99400000", wsol: "1980001" })), /quarantined SOL is not traded/);
+  await assert.rejects(g.store.recordSigned(sale("short", "1", "1000000", { slot: 1001, cash: "99400000", wsol: "1979999" })), /below the recorded book/);
+  await assert.rejects(g.store.recordSigned(sale("short-cash", "1", "1000000", { slot: 1001, cash: "99399999", wsol: "1980000" })), /below the recorded book/);
+});
+
+test("a first live book on a vault that already holds WSOL starts with it quarantined instead of refusing forever", async t => {
+  const f = await fixture(t), s = submission(); s.risk.wsolRaw = "7";
+  assert.equal(await f.store.recordSigned(s), true);
+  const book = (await f.store.liveBook())!;
+  assert.equal(book.wsolRaw, "0"); assert.equal(book.quarantinedWsolRaw, "7"); assert.equal(book.costBasisUsdgRaw, "0");
 });

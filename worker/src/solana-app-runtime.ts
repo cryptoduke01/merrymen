@@ -25,8 +25,8 @@ import { readSolanaReferencePrice, solanaReferenceBound, solanaReferenceNotional
   SolanaReferencePriceError } from "./solana-reference-price";
 import { getSolanaRuntimeDb } from "./solana-runtime-db";
 import { isSolanaTransactionError } from "./solana-settlement";
-import { ensureSolanaTradingSchema, OPERATOR_HOLD, solanaOwnerExpiryProven, SolanaTradingStore, type SolanaAccountScope,
-  type SolanaPreparedSetup } from "./solana-trading-store";
+import { ensureSolanaTradingSchema, OPERATOR_HOLD, solanaOwnerExpiryProven, solanaQuarantinedWsol, SolanaTradingStore, type SolanaAccountScope,
+  type SolanaLiveBook, type SolanaPreparedSetup } from "./solana-trading-store";
 
 export class SolanaAppRuntimeError extends Error {
   constructor(readonly code: "configuration" | "permission" | "invalid" | "pending", message: string) {
@@ -53,6 +53,13 @@ function publicTrade(record: SolanaLiveRecord) {
   const { intent, signature, preparedAtMs, minOutAmount, quotedOutAmount } = record.submission;
   return { mode: "live" as const, requestId: intent.requestId, intent, signature, status: record.status,
     preparedAtMs, minOutAmount, quotedOutAmount, settlement: record.settlement ?? null };
+}
+/** Chain balances at or above the book: an excess waits to be booked, a shortfall stops trading. */
+function shortOfBook(book: SolanaLiveBook, chain: { cashUsdg: string; wsolRaw: string }): boolean {
+  return BigInt(chain.cashUsdg) < BigInt(book.cashRaw) || BigInt(chain.wsolRaw) < BigInt(book.wsolRaw) + solanaQuarantinedWsol(book);
+}
+function aboveBook(book: SolanaLiveBook, chain: { cashUsdg: string; wsolRaw: string }): boolean {
+  return BigInt(chain.cashUsdg) > BigInt(book.cashRaw) || BigInt(chain.wsolRaw) > BigInt(book.wsolRaw) + solanaQuarantinedWsol(book);
 }
 function tokenProgram(mint: string): string {
   if (mint === SOLANA_USDG_MINT) return TOKEN_2022_PROGRAM;
@@ -94,6 +101,12 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
   function intent(raw: unknown, mode: "paper" | "live"): SolanaSwapIntent {
     if (!object(raw) || raw.mode !== mode || Object.hasOwn(raw, "owner") || Object.hasOwn(raw, "vault")) fail("Invalid Solana trade request.");
     return parseSolanaSwapIntent({ ...raw, mode: "paper" });
+  }
+  /** What the session may trade: the book once it exists; before that, chain cash and no SOL. */
+  async function tradableIn(s: SolanaTradingStore, balances: { cashUsdg: string; wsolRaw: string } | null) {
+    const book = await s.liveBook();
+    if (book) return { cashUsdg: book.cashRaw, wsolRaw: book.wsolRaw, quarantinedWsolRaw: solanaQuarantinedWsol(book).toString() };
+    return balances ? { cashUsdg: balances.cashUsdg, wsolRaw: "0", quarantinedWsolRaw: balances.wsolRaw } : null;
   }
   async function reconcile(s: SolanaTradingStore) {
     for (const pending of await s.pending()) {
@@ -215,10 +228,15 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
         balances = await readSolanaVaultBalances(rpc(), vault, live.slot);
         cashTokenAccount = await deriveSolanaAta(vault, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM);
         const book = await s.liveBook();
-        if (book && balances.cashUsdg !== book.cashRaw && balances.wsolRaw === book.wsolRaw && BigInt(balances.cashUsdg) >= BigInt(book.cashRaw)) {
+        // A USDG deposit or anyone's WSOL transfer is booked from finalized state:
+        // capital-in for USDG, zero-basis quarantine for WSOL. Neither blocks exits.
+        if (book && !shortOfBook(book, balances) && aboveBook(book, balances) && !(await s.pending()).length) {
           const observedAtMs = now();
           const finalized = await readSolanaVaultBalances(rpc(), vault, book.slot, "finalized");
-          await s.reconcileCashDeposit({ ...finalized, observedAtMs, commitment: "finalized" });
+          // Unbooked excess is never traded or valued, so failing to book it now (an
+          // owner transaction is pending, say) must not block exits; it retries next read.
+          try { if (!shortOfBook(book, finalized) && aboveBook(book, finalized)) await s.reconcileExternalInflows({ ...finalized, observedAtMs, commitment: "finalized" }); }
+          catch { /* Retried on the next status read. */ }
         }
         if (!session || session.programId !== programId || session.vault !== vault || live.state.session !== session.session || live.state.sessionEpoch.toString() !== session.sessionEpoch) blockers.push("Register an owner-approved live trading permission.");
         else {
@@ -228,8 +246,7 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
         }
         const currentBook = await s.liveBook();
         if (currentBook?.buyPaused) blockers.push("The buying drawdown breaker is paused; exits remain available.");
-        if (currentBook && (currentBook.cashRaw !== balances.cashUsdg || currentBook.wsolRaw !== balances.wsolRaw)) blockers.push("Vault balances changed outside recorded trades; reconcile capital transfers before trading.");
-        if (!currentBook && balances.wsolRaw !== "0") blockers.push("Start the live book with USDG; the cost basis of existing SOL is unknown.");
+        if (currentBook && shortOfBook(currentBook, balances)) blockers.push("Vault balances are below recorded trades; reconcile capital transfers before trading.");
         if (live.state.expiresAt * 1000n <= BigInt(now())) blockers.push("The on-chain trading permission has expired.");
         if (live.state.paused) blockers.push("The on-chain buying breaker is paused; exits remain available.");
       } catch (error) { blockers.push(error instanceof SolanaAppRuntimeError ? error.message : "The configured vault, balances or live permissions could not be verified."); }
@@ -247,7 +264,7 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
         automation: { workerOnline: lastSeenAtMs !== null && lastSeenAtMs <= now() && now() - lastSeenAtMs < 90_000, lastSeenAtMs },
         paper: await s.paper().get(scope.owner), limits: binding.limits,
         live: { ready: blockers.length === 0, canExit: blockers.every(item => ["The on-chain buying breaker is paused; exits remain available.", "The buying drawdown breaker is paused; exits remain available."].includes(item)), blockers, programId, vault, cashTokenAccount, session: session?.session ?? null,
-          balances, book: await s.liveBook(), pending, history: (await s.history()).map(publicTrade),
+          balances, tradable: await tradableIn(s, balances), book: await s.liveBook(), pending, history: (await s.history()).map(publicTrade),
           ownerTransaction: ownerTransaction?.signature ? { signature: ownerTransaction.signature, status: ownerTransaction.status, kind: ownerTransaction.kind } : null } };
     },
     async setupPaper(scope: SolanaAccountScope, input: { initialCashRaw: string; limits: SolanaPaperLimits }) {
@@ -285,10 +302,12 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
           const observedAtMs = now(), balances = await readSolanaVaultBalances(liveRpc, vault, slot);
           const makeExit = (amountRaw: string, requestId: string) => parseSolanaSwapIntent({ kind: "spl-swap", chain: CHAINS.solana,
             mode: "paper", requestId, inputMint: SOLANA_WRAPPED_SOL_MINT, outputMint: SOLANA_USDG_MINT, amountRaw, slippageBps: current.slippageBps });
-          const held = BigInt(balances.wsolRaw), cash = BigInt(balances.cashUsdg);
+          // Equity is the book's: unbooked or quarantined tokens are never valued.
+          const tradable = (await tradableIn(s, balances))!;
+          const held = BigInt(tradable.wsolRaw), cash = BigInt(tradable.cashUsdg);
           const evidence: Array<{ intent: SolanaSwapIntent; quote: typeof quote }> = [];
           let equity = cash;
-          if (held > 0n && current.inputMint === SOLANA_USDG_MINT) { const markIntent = makeExit(balances.wsolRaw, "live-portfolio-mark");
+          if (held > 0n && current.inputMint === SOLANA_USDG_MINT) { const markIntent = makeExit(tradable.wsolRaw, "live-portfolio-mark");
             const mark = await quotes.quote(markIntent); validateSolanaQuote(mark, markIntent, now()); evidence.push({ intent: markIntent, quote: mark }); equity += BigInt(mark.minOutAmount); }
           // Independent of Jupiter: the build quote's guaranteed output is checked
           // against Pyth SOL/USD, and a sell is charged at least its reference value.
@@ -362,9 +381,11 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
         if (book) {
           const observedAtMs = now();
           const finalized = await readSolanaVaultBalances(rpc(), vault, book.slot, "finalized");
-          await s.reconcileCashDeposit({ ...finalized, observedAtMs, commitment: "finalized" });
-          book = await s.liveBook();
-          if (amount > BigInt(input.mint === SOLANA_USDG_MINT ? book!.cashRaw : book!.wsolRaw)) fail("The withdrawal exceeds the reconciled vault balance.");
+          // Book any inflow first, so a stranger's WSOL can be withdrawn instead of blocking the owner.
+          if (aboveBook(book, finalized)) await s.reconcileExternalInflows({ ...finalized, observedAtMs, commitment: "finalized" });
+          book = (await s.liveBook())!;
+          const available = input.mint === SOLANA_USDG_MINT ? BigInt(book.cashRaw) : BigInt(book.wsolRaw) + solanaQuarantinedWsol(book);
+          if (amount > available) fail("The withdrawal exceeds the reconciled vault balance.");
         }
         instructions.push(await createAta(scope.owner, scope.owner, input.mint), buildWithdrawSolanaVaultInstruction({ programAddress: cfg.programId, vault, owner: scope.owner,
           mint: input.mint, tokenProgram: program, vaultToken: await deriveSolanaAta(vault, input.mint, program), ownerToken: await deriveSolanaAta(scope.owner, input.mint, program), amount }));

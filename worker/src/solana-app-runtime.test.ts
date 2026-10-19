@@ -6,7 +6,8 @@ import { createKeyPairFromPrivateKeyBytes, getAddressFromPublicKey, getBase58Dec
   getBase64EncodedWireTransaction, getTransactionDecoder, signTransaction } from "@solana/kit";
 import { CHAINS, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM } from "../../packages/core/src/ids";
 import { SOLANA_CLASSIC_TOKEN_PROGRAM, SOLANA_VAULT_ACCOUNT_SIZE, SOLANA_VAULT_DISCRIMINATOR,
-  SOLANA_VAULT_LOCAL_TEST_PROGRAM, SOLANA_WRAPPED_SOL_MINT, deriveSolanaVaultAddress } from "../../packages/core/src/solana-live";
+  SOLANA_VAULT_LOCAL_TEST_PROGRAM, SOLANA_WRAPPED_SOL_MINT, deriveSolanaAta, deriveSolanaVaultAddress } from "../../packages/core/src/solana-live";
+import { sealSecret } from "./store-crypto";
 import { SqlSolanaBindingStore } from "../../web/src/lib/solana-binding-store";
 import { wrapSqlite } from "./db";
 import { createSolanaAppRuntime } from "./solana-app-runtime";
@@ -34,7 +35,12 @@ async function fixture() {
   await bindings.settings(TENANT, owner, 0, "paper", limits);
   const dataAddress = key(41), binary = Buffer.from("runtime-tested-binary"), program = Buffer.alloc(36), programData = Buffer.alloc(45 + binary.length);
   program.writeUInt32LE(2); keyBytes(dataAddress).copy(program, 4); programData.writeUInt32LE(3); binary.copy(programData, 45);
-  const controls = { initialized: false, finalized: false, failed: false, malformed: false, sends: 0, signed: "", signature: "", failSend: true, height: 4900, sequence: 0n, epoch: 1n };
+  const controls = { initialized: false, finalized: false, failed: false, malformed: false, sends: 0, signed: "", signature: "", failSend: true, height: 4900, sequence: 0n, epoch: 1n,
+    cash: 0n, wsol: 0n };
+  const cashAta = await deriveSolanaAta(vault, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM), wsolAta = await deriveSolanaAta(vault, SOLANA_WRAPPED_SOL_MINT, SOLANA_CLASSIC_TOKEN_PROGRAM);
+  const tokenAccount = (mint: string, amount: bigint) => {
+    const b = Buffer.alloc(165); keyBytes(mint).copy(b, 0); keyBytes(vault).copy(b, 32); b.writeBigUInt64LE(amount, 64); b[108] = 1; return b;
+  };
   const state = () => {
     const b = Buffer.alloc(SOLANA_VAULT_ACCOUNT_SIZE); Buffer.from(SOLANA_VAULT_DISCRIMINATOR).copy(b); let p = 8;
     b[p++] = 2; b[p++] = 255;
@@ -55,6 +61,10 @@ async function fixture() {
       }
       if (params[0] === vault) return response(controls.initialized ? account(state()) : null);
       return response(account(Buffer.alloc(0), "11111111111111111111111111111111"));
+    }
+    if (method === "getMultipleAccounts") {
+      assert.deepEqual(params[0], [cashAta, wsolAta]);
+      return response([account(tokenAccount(SOLANA_USDG_MINT, controls.cash), TOKEN_2022_PROGRAM), account(tokenAccount(SOLANA_WRAPPED_SOL_MINT, controls.wsol), SOLANA_CLASSIC_TOKEN_PROGRAM)]);
     }
     if (method === "getLatestBlockhash") return response({ blockhash: key(42), lastValidBlockHeight: 5000 });
     if (method === "getSignatureStatuses") return response([controls.finalized ? { confirmationStatus: "finalized", slot: 1000, ...(controls.malformed ? {} : { err: controls.failed ? { InstructionError: [0, "InvalidArgument"] } : null }) } : null]);
@@ -82,7 +92,14 @@ async function fixture() {
   const sign = async (wire: string) => getBase64EncodedWireTransaction(await signTransaction([ownerKeys], getTransactionDecoder().decode(Buffer.from(wire, "base64"))));
   const live = async () => { const binding = (await bindings.get(TENANT))!; await bindings.settings(TENANT, owner, binding.revision, "live", limits); };
   const trade = { kind: "spl-swap", chain: CHAINS.solana, mode: "paper", requestId: "runtime-test", inputMint: SOLANA_USDG_MINT, outputMint: SOLANA_WRAPPED_SOL_MINT, amountRaw: "1000000", slippageBps: 50 };
-  return { raw, db, clock, scope, owner, session, sessionSeed, controls, bindings, app, sign, live, trade, env, rpc, market };
+  /** A registered session for the initialized vault, as activateLive leaves it. */
+  const registered = async () => {
+    await ensureSolanaTradingSchema(db);
+    const record = { programId: PROGRAM, vault, session, sessionEpoch: controls.epoch.toString(), registrationSignature: key(43), registeredAtMs: clock.now };
+    await db.prepare("INSERT INTO solana_runtime_sessions(tenant,owner,record_json,sealed_seed) VALUES(?,?,?,?)").run(TENANT, owner, JSON.stringify(record),
+      sealSecret(`solana-session/v1 ${TENANT} ${owner} ${PROGRAM} ${vault} ${session} ${record.sessionEpoch}\n` + sessionSeed.toString("base64"), Buffer.alloc(32, 30)));
+  };
+  return { raw, db, clock, scope, owner, session, sessionSeed, controls, bindings, app, sign, live, trade, env, rpc, market, registered };
 }
 
 test("authenticated paper execution is durable and never calls transaction submission", async () => {
@@ -281,5 +298,31 @@ test("a dropped resume-buys resolves after expiry and leaves the off-chain break
     f.controls.height = 5001; f.controls.sequence = 3n;
     assert.equal((await f.app.submitOwnerAction(f.scope, { signedTransactionBase64 })).status, "failed");
     await f.app.prepareOwnerAction(f.scope, { action: "revoke" });
+  } finally { f.raw.close(); }
+});
+
+test("one raw WSOL sent to the vault no longer freezes exits or owner withdrawals (audit dust)", async () => {
+  const f = await fixture();
+  try {
+    await f.live(); f.controls.initialized = true; await f.registered();
+    const book = { hwmRaw: "100000000", cashRaw: "90000000", wsolRaw: "50000000", costBasisUsdgRaw: "10000000", realizedPnlUsdgRaw: "0",
+      networkFeesLamports: "10000", slot: 900, updatedAtMs: 999_000 };
+    await f.db.prepare("INSERT INTO solana_runtime_live_books(tenant,owner,book_json) VALUES(?,?,?)").run(TENANT, f.owner, JSON.stringify(book));
+    // Anyone can transfer one base unit of WSOL (or SOL then SyncNative) to the vault's token account.
+    f.controls.cash = 90_000_000n; f.controls.wsol = 50_000_001n;
+    const status = await f.app.status(f.scope);
+    assert.equal(status.live.canExit, true, status.live.blockers.join(" | "));
+    assert.ok(!status.live.blockers.some(b => /balances/.test(b)));
+    assert.deepEqual(status.live.tradable, { cashUsdg: "90000000", wsolRaw: "50000000", quarantinedWsolRaw: "1" });
+    const booked = (await new SolanaTradingStore(f.db, f.scope).liveBook())!;
+    assert.equal(booked.quarantinedWsolRaw, "1"); assert.equal(booked.wsolRaw, "50000000"); assert.equal(booked.hwmRaw, "100000000");
+    // Both in-app withdrawals prepare, and the WSOL one can take the stranger's unit too.
+    await f.app.prepareOwnerAction(f.scope, { action: "withdraw", mint: SOLANA_USDG_MINT, amountRaw: "1000000" });
+    await f.app.prepareOwnerAction(f.scope, { action: "withdraw", mint: SOLANA_WRAPPED_SOL_MINT, amountRaw: "50000001" });
+    await assert.rejects(f.app.prepareOwnerAction(f.scope, { action: "withdraw", mint: SOLANA_WRAPPED_SOL_MINT, amountRaw: "50000002" }), /exceeds/);
+    // A balance below the book still blocks: that is never a stranger's gift.
+    f.controls.wsol = 49_999_999n;
+    const short = await f.app.status(f.scope);
+    assert.equal(short.live.canExit, false); assert.match(short.live.blockers.join(" "), /below recorded trades/);
   } finally { f.raw.close(); }
 });

@@ -28,7 +28,15 @@ export interface SolanaLiveBook {
   unresolvedFeeCount?: number; reservedUnknownFeeLamports?: string;
   slot: number; updatedAtMs: number;
   buyPaused?: boolean;
+  /**
+   * WSOL that reached the vault outside recorded trades (anyone can send it).
+   * Zero cost basis, never traded, and excluded from equity, P&L and the
+   * high-water mark. The owner can withdraw it; withdrawals spend it first.
+   */
+  quarantinedWsolRaw?: string;
 }
+/** The WSOL the session may trade: the recorded position, never quarantined WSOL. */
+export function solanaQuarantinedWsol(book: Pick<SolanaLiveBook, "quarantinedWsolRaw">): bigint { return BigInt(book.quarantinedWsolRaw ?? "0"); }
 export interface SolanaOwnerExpiryProof {
   reason: "blockhash-expired"; blockHeight: string; vaultSequence: string | null; sessionEpoch: string | null; slot: number;
 }
@@ -242,27 +250,44 @@ export class SolanaTradingStore implements SolanaLiveJournal {
     await this.binding();
     return rowJson(await this.db.prepare("SELECT book_json FROM solana_runtime_live_books WHERE tenant=? AND owner=?").get(this.scope.tenant, this.scope.owner), "book_json");
   }
-  /** Caller obtains this snapshot from finalized RPC; never accept request JSON here. */
-  async reconcileCashDeposit(snapshot: { cashUsdg: string; wsolRaw: string; slot: number; observedAtMs: number; commitment: "finalized" }): Promise<void> {
+  /**
+   * Book inflows that arrived outside recorded trades, from a fresh finalized
+   * snapshot: USDG as owner capital (raising the high-water mark), WSOL as
+   * zero-basis quarantine. A balance below the book is never reconciled here.
+   * Caller obtains this snapshot from finalized RPC; never accept request JSON here.
+   */
+  async reconcileExternalInflows(snapshot: { cashUsdg: string; wsolRaw: string; slot: number; observedAtMs: number; commitment: "finalized" }): Promise<void> {
     await this.db.tx(async tx => {
       await this.bindingIn(tx, true);
       const { tenant, owner } = this.scope, now = clock(this.now);
       if (snapshot.commitment !== "finalized" || !Number.isSafeInteger(snapshot.slot) || snapshot.slot < 1 ||
           !Number.isSafeInteger(snapshot.observedAtMs) || snapshot.observedAtMs > now || now - snapshot.observedAtMs >= 30_000) refuse("A fresh finalized Solana balance snapshot is required.");
-      const cash = raw(snapshot.cashUsdg); raw(snapshot.wsolRaw);
+      const cash = raw(snapshot.cashUsdg), wsol = raw(snapshot.wsolRaw);
       if (await tx.prepare("SELECT 1 FROM solana_runtime_submissions WHERE vault IN (SELECT vault FROM solana_runtime_submissions WHERE tenant=? AND owner=?) AND status='pending'").get(tenant, owner)) refuse("Resolve pending Solana trades before reconciling deposits.");
       const setup = rowJson<SolanaPreparedSetup>(await tx.prepare("SELECT setup_json FROM solana_runtime_setups WHERE tenant=? AND owner=?").get(tenant, owner), "setup_json");
       if (setup?.signature && setup.status !== "finalized" && setup.status !== "failed") refuse("Resolve the pending owner transaction before reconciling deposits.");
       const book = rowJson<SolanaLiveBook>(await tx.prepare("SELECT book_json FROM solana_runtime_live_books WHERE tenant=? AND owner=?").get(tenant, owner), "book_json");
       if (!book) return;
-      if (snapshot.slot < book.slot || now < book.updatedAtMs || snapshot.wsolRaw !== book.wsolRaw || cash < raw(book.cashRaw)) refuse("Only a finalized USDG deposit can be reconciled automatically.");
-      const amount = cash - raw(book.cashRaw); if (amount === 0n) return;
-      const hwm = raw(book.hwmRaw) + amount; raw(hwm.toString());
-      const evidenceId = `deposit:${owner}:${snapshot.slot}:${snapshot.cashUsdg}`;
-      const inserted = await tx.prepare("INSERT INTO solana_runtime_cashflows(evidence_id,tenant,owner,kind,mint,amount_raw,created_at_ms) VALUES(?,?,?,'deposit',?,?,?) ON CONFLICT DO NOTHING")
-        .run(evidenceId, tenant, owner, SOLANA_USDG_MINT, amount.toString(), now);
-      if (inserted.changes !== 1) refuse("Deposit evidence was already used with different accounting state.");
-      book.cashRaw = cash.toString(); book.hwmRaw = hwm.toString(); book.slot = snapshot.slot; book.updatedAtMs = now;
+      const recordedWsol = raw(book.wsolRaw) + solanaQuarantinedWsol(book);
+      if (snapshot.slot < book.slot || now < book.updatedAtMs || cash < raw(book.cashRaw) || wsol < recordedWsol) refuse("Only finalized inflows can be reconciled automatically; a vault balance is below the recorded book.");
+      const deposit = cash - raw(book.cashRaw), donated = wsol - recordedWsol;
+      if (deposit === 0n && donated === 0n) return;
+      const flow = async (evidenceId: string, kind: "deposit" | "quarantine", mint: string, amount: bigint) => {
+        const inserted = await tx.prepare("INSERT INTO solana_runtime_cashflows(evidence_id,tenant,owner,kind,mint,amount_raw,created_at_ms) VALUES(?,?,?,?,?,?,?) ON CONFLICT DO NOTHING")
+          .run(evidenceId, tenant, owner, kind, mint, amount.toString(), now);
+        if (inserted.changes !== 1) refuse("Inflow evidence was already used with different accounting state.");
+      };
+      if (deposit > 0n) {
+        const hwm = raw(book.hwmRaw) + deposit; raw(hwm.toString());
+        await flow(`deposit:${owner}:${snapshot.slot}:${snapshot.cashUsdg}`, "deposit", SOLANA_USDG_MINT, deposit);
+        book.cashRaw = cash.toString(); book.hwmRaw = hwm.toString();
+      }
+      // Unsolicited WSOL is held aside at zero basis: never traded, valued or added to the high-water mark.
+      if (donated > 0n) {
+        await flow(`quarantine:${owner}:${snapshot.slot}:${snapshot.wsolRaw}`, "quarantine", SOLANA_WRAPPED_SOL_MINT, donated);
+        book.quarantinedWsolRaw = (solanaQuarantinedWsol(book) + donated).toString(); raw(book.quarantinedWsolRaw);
+      }
+      book.slot = snapshot.slot; book.updatedAtMs = now;
       await tx.prepare("UPDATE solana_runtime_live_books SET book_json=? WHERE tenant=? AND owner=?").run(JSON.stringify(book), tenant, owner);
     });
   }
@@ -365,12 +390,17 @@ export class SolanaTradingStore implements SolanaLiveJournal {
       if (sold > 0n && soldToday + sold > sellLimits.dailyWsol) refuse("The Solana rolling daily SOL sell limit would be exceeded.");
       let book = rowJson<SolanaLiveBook>(await tx.prepare("SELECT book_json FROM solana_runtime_live_books WHERE tenant=? AND owner=?").get(tenant, owner), "book_json");
       const equity = raw(s.risk.equityUsdg), peak = raw(s.risk.peakEquityUsdg), cash = raw(s.risk.cashUsdg), wsol = raw(s.risk.wsolRaw);
-      if (book && (book.cashRaw !== s.risk.cashUsdg || book.wsolRaw !== s.risk.wsolRaw)) refuse("Vault balances changed outside recorded trades. Reconcile owner transfers before trading again.");
+      // Only a shortfall against the book stops trading. Anyone can send tokens to
+      // a vault, so an excess is never traded or valued: it waits to be booked as
+      // a deposit or quarantine, and admission sizes against the book alone.
+      if (book && (cash < raw(book.cashRaw) || wsol < raw(book.wsolRaw) + solanaQuarantinedWsol(book))) refuse("Vault balances are below the recorded book. Reconcile owner transfers before trading again.");
       if (book && (now < book.updatedAtMs || s.risk.slot < book.slot)) refuse("Solana portfolio evidence moved backwards.");
-      if (!book && wsol !== 0n) refuse("The initial Solana live book must start in USDG; existing token cost basis is unknown.");
       const hwm = [book ? raw(book.hwmRaw) : 0n, peak, equity].reduce((a, b) => a > b ? a : b);
-      if ((buying ? cash : wsol) < raw(s.intent.amountRaw, false)) refuse("Insufficient real Solana vault balance.");
-      if (!book) book = { hwmRaw: hwm.toString(), cashRaw: cash.toString(), wsolRaw: wsol.toString(), costBasisUsdgRaw: "0", realizedPnlUsdgRaw: "0", networkFeesLamports: "0", slot: s.risk.slot, updatedAtMs: now };
+      const tradable = buying ? (book ? raw(book.cashRaw) : cash) : (book ? raw(book.wsolRaw) : 0n);
+      if (tradable < raw(s.intent.amountRaw, false)) refuse(buying ? "Insufficient real Solana vault balance." : "The sale exceeds the recorded SOL position; quarantined SOL is not traded.");
+      // A first book on a vault that already holds WSOL starts with it quarantined: its cost basis is unknown.
+      if (!book) book = { hwmRaw: hwm.toString(), cashRaw: cash.toString(), wsolRaw: "0", costBasisUsdgRaw: "0", realizedPnlUsdgRaw: "0", networkFeesLamports: "0", slot: s.risk.slot, updatedAtMs: now,
+        ...(wsol > 0n ? { quarantinedWsolRaw: wsol.toString() } : {}) };
       else book.hwmRaw = hwm.toString();
       if (buying && (book.buyPaused || hwm === 0n || (hwm - equity) * 10_000n >= hwm * BigInt(limits.maxDrawdownBps))) {
         // This refusal must commit the breaker. Throwing inside this transaction
@@ -505,9 +535,15 @@ export class SolanaTradingStore implements SolanaLiveJournal {
             book.cashRaw = (raw(book.cashRaw) - amount).toString();
             const peak = raw(book.hwmRaw); book.hwmRaw = (peak > amount ? peak - amount : 0n).toString();
           } else {
-            const held = raw(book.wsolRaw); if (amount > held || held === 0n) refuse("Finalized withdrawal exceeds the recorded SOL position.");
-            const basis = amount === held ? BigInt(book.costBasisUsdgRaw) : BigInt(book.costBasisUsdgRaw) * amount / held;
-            book.wsolRaw = (held - amount).toString(); book.costBasisUsdgRaw = (BigInt(book.costBasisUsdgRaw) - basis).toString();
+            const held = raw(book.wsolRaw), aside = solanaQuarantinedWsol(book);
+            if (amount > held + aside) refuse("Finalized withdrawal exceeds the recorded SOL position.");
+            // Quarantined WSOL leaves first: zero basis, no effect on the position or the high-water mark.
+            const fromAside = amount < aside ? amount : aside, fromPosition = amount - fromAside;
+            if (aside > 0n) book.quarantinedWsolRaw = (aside - fromAside).toString();
+            if (fromPosition > 0n) {
+              const basis = fromPosition === held ? BigInt(book.costBasisUsdgRaw) : BigInt(book.costBasisUsdgRaw) * fromPosition / held;
+              book.wsolRaw = (held - fromPosition).toString(); book.costBasisUsdgRaw = (BigInt(book.costBasisUsdgRaw) - basis).toString();
+            }
             // No fabricated sale proceeds or P&L. Keep HWM conservative until a later owner review.
           }
           book.updatedAtMs = clock(this.now); book.slot = finalizedSlot!;

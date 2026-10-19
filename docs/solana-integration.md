@@ -187,11 +187,17 @@ never ran. Resuming buys changes neither; a wrong "failed" leaves only the
 off-chain breaker paused, so expiry alone resolves it. Moved state that could be
 the transaction itself leaves it pending.
 
-The live book starts with USDG only. A fresh finalized increase in USDG with
-unchanged WSOL and no unresolved operation is booked once as capital-in, not
-profit, and raises the high-water mark. Direct WSOL deposits have no established
-cost basis and are rejected by the trading book. Unexplained balance changes
-hold trading until reconciled.
+The live book starts with USDG only. A fresh finalized increase in USDG with no
+unresolved operation is booked once as capital-in, not profit, and raises the
+high-water mark. WSOL that reaches the vault outside recorded trades (anyone can
+send it, and the audit showed one raw unit froze exits and withdrawals) is
+booked once as **quarantined** capital: zero cost basis, never traded or valued,
+and excluded from equity, P&L and the high-water mark. A first book on a vault
+that already holds WSOL starts with that WSOL quarantined. The session trades
+only the recorded position; owner WSOL withdrawals may take quarantined WSOL
+and spend it first. Admission and exits size against the book, so an excess
+that finality has not booked yet blocks nothing. A balance **below** the book
+is never a gift; it holds trading and exits until reconciled.
 
 The app supports owner-signed revocation, USDG/WSOL withdrawal and resuming
 buys. Withdrawals return tokens to the owner's canonical account and remain

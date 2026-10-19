@@ -254,3 +254,11 @@ test("live limits carry the owner's SOL sell bounds in lamports; paper limits do
   assert.equal("perTradeWsol" in (saved[1]!.limits as Record<string, unknown>), false);
   assert.equal(signCount, 0);
 });
+
+test("wrapped SOL sent by someone else is shown held aside, not as trading performance", async () => {
+  state = initial("live");
+  Object.assign(state.runtime.live, { canExit: true, balances: { slot: 9, cashUsdg: "90000000", wsolRaw: "50000001" },
+    book: { realizedPnlUsdgRaw: "0", networkFeesLamports: "10000", quarantinedWsolRaw: "1" } });
+  await render();
+  assert.match(ui.container.textContent!, /0\.000000001 wrapped SOL arrived outside your recorded trades\. It is held aside/);
+});
