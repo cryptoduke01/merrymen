@@ -7,7 +7,7 @@ import { CHAINS, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM } from "../../packages/cor
 import { deriveSolanaVaultAddress, deriveSolanaSwapAuthority, deriveSolanaAta, SOLANA_VAULT_LOCAL_TEST_PROGRAM,
   SOLANA_VAULT_ACCOUNT_SIZE, SOLANA_VAULT_DISCRIMINATOR, SOLANA_SWAP_EVENT_DISCRIMINATOR,
   SOLANA_CLASSIC_TOKEN_PROGRAM, SOLANA_WRAPPED_SOL_MINT } from "../../packages/core/src/solana-live";
-import { createSolanaExecutor, reconcileSolanaSubmission, type SolanaLiveRecord, type SolanaSignedSubmission, type SolanaExecutorOptions } from "./solana-executor";
+import { createSolanaExecutor, reconcileSolanaSubmission, verifySolanaVaultDeployment, type SolanaLiveRecord, type SolanaSignedSubmission, type SolanaExecutorOptions } from "./solana-executor";
 import { settleSolanaReceipt, solanaVaultEvents } from "./solana-settlement";
 import { JUPITER_SWAP_PROGRAM, type JupiterCpiRoute } from "./solana-live-market";
 import type { SolanaLiveRead, SolanaLiveRpc } from "./solana-live-rpc";
@@ -65,7 +65,9 @@ async function fixture() {
     // The owner's input ATA closed or delegated, and tokens already sitting in the temporary input ATA.
     refundMissing: false, refundDelegate: false, tempTokens: 0n,
     // Pyth SOL/USD with 8 decimals; the fixture route buys 0.002 SOL per USDG, i.e. $500.
-    referencePrice: 50_000_000_000n, referenceAgeMs: 0, forgeFloor: false };
+    referencePrice: 50_000_000_000n, referenceAgeMs: 0, forgeFloor: false,
+    // The second provider's own view; null means it agrees with the first.
+    fallback: null as SolanaLiveRead | null };
   let record: SolanaLiveRecord | null = null;
   const calls: string[] = [];
   const quote = { source: "jupiter" as const, inputMint: SOLANA_USDG_MINT, outputMint: SOLANA_WRAPPED_SOL_MINT,
@@ -87,7 +89,7 @@ async function fixture() {
   const tempLamports = () => controls.tempDonation || controls.tempTokens > 0n ? 2_039_280 : 0;
   const tempAccount = () => controls.tempTokens > 0n ? rpcAccount(token(SOLANA_USDG_MINT, swap, controls.tempTokens), TOKEN_2022_PROGRAM, false, 2_039_280)
     : controls.tempDonation ? rpcAccount(Buffer.alloc(0), SYSTEM, false, 2_039_280) : null;
-  const receipt = (submission: SolanaSignedSubmission, failed = false) => {
+  const receipt = (submission: SolanaSignedSubmission, failed = false, amountOut = 2_000_000n) => {
     const tx = getTransactionDecoder().decode(Buffer.from(submission.signedTransactionBase64, "base64"));
     const message = getCompiledTransactionMessageDecoder().decode(tx.messageBytes);
     const keys = [...message.staticAccounts, ...submission.loadedAddresses.writable, ...submission.loadedAddresses.readonly];
@@ -101,8 +103,8 @@ async function fixture() {
       preTokenBalances: [tokenRow(input, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM, CASH), tokenRow(output, SOLANA_WRAPPED_SOL_MINT, SOLANA_CLASSIC_TOKEN_PROGRAM, 0n),
         ...(controls.tempTokens > 0n ? [{ ...tokenRow(temp, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM, controls.tempTokens), owner: swap }] : [])],
       postTokenBalances: [tokenRow(input, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM, failed ? CASH : CASH - 1_000_000n),
-        tokenRow(output, SOLANA_WRAPPED_SOL_MINT, SOLANA_CLASSIC_TOKEN_PROGRAM, failed ? 0n : 2_000_000n)],
-      logMessages: [`Program ${PROGRAM} invoke [1]`, ...(failed ? [] : [`Program data: ${event(submission)}`]),
+        tokenRow(output, SOLANA_WRAPPED_SOL_MINT, SOLANA_CLASSIC_TOKEN_PROGRAM, failed ? 0n : amountOut)],
+      logMessages: [`Program ${PROGRAM} invoke [1]`, ...(failed ? [] : [`Program data: ${event(submission, 1_000_000n, amountOut)}`]),
         `Program ${PROGRAM} ${failed ? "failed: custom program error: 0x1" : "success"}`],
     } };
   };
@@ -157,7 +159,9 @@ async function fixture() {
       default: throw new Error(`Unexpected fixture method ${method}`);
     }
   };
-  const rpc: SolanaLiveRpc = { read: operation => operation(read), async send(wire) {
+  const rpc: SolanaLiveRpc = { read: operation => operation(read),
+    readEach: async operation => [await operation(read), await operation(controls.fallback ?? read)],
+    async send(wire) {
     calls.push("send"); assert.ok(record, "transaction must be durable before broadcast");
     assert.equal(record.submission.signedTransactionBase64, wire);
     if (controls.failSend) throw new Error("lost HTTP response");
@@ -187,7 +191,8 @@ async function fixture() {
     } };
   const intent = { kind: "spl-swap", chain: CHAINS.solana, mode: "live", requestId: "actual-test-1", owner, vault,
     inputMint: SOLANA_USDG_MINT, outputMint: SOLANA_WRAPPED_SOL_MINT, amountRaw: "1000000", slippageBps: 100 };
-  return { options, intent, controls, calls, clock, receipt, session, feePayer, ownerRefund, route, read, getRecord: () => record };
+  return { options, intent, controls, calls, clock, receipt, session, feePayer, ownerRefund, route, read,
+    programData, programDataAddress, getRecord: () => record };
 }
 /** The account the signed execute_swap passes in the owner_refund slot (index 14). */
 function refundSlot(submission: SolanaSignedSubmission): string {
@@ -254,7 +259,8 @@ test("crash recovery releases a sequence only when finalized vault state proves 
       }
       return assert.fail(`Unexpected proof read ${method}`);
     };
-    const rpc: SolanaLiveRpc = { read: callback => callback(read), send: async () => assert.fail("reconciliation cannot submit") };
+    const rpc: SolanaLiveRpc = { read: callback => callback(read), readEach: async callback => [await callback(read), await callback(read)],
+      send: async () => assert.fail("reconciliation cannot submit") };
     if (["wrong-owner", "wrong-program", "old-slot"].includes(mode)) {
       await assert.rejects(reconcileSolanaSubmission(rpc, f.options.journal, f.intent.owner, f.intent.requestId, () => NOW + 1));
       assert.equal(f.getRecord()!.status, "pending"); continue;
@@ -294,7 +300,8 @@ test("an expiry proof never pairs a current block height with a lagging node's s
       }
       return assert.fail(`Unexpected read ${method}`);
     };
-    const rpc: SolanaLiveRpc = { read: callback => callback(read), send: async wire => wire };
+    const rpc: SolanaLiveRpc = { read: callback => callback(read), readEach: async callback => [await callback(read), await callback(read)],
+      send: async wire => wire };
     const result = await reconcileSolanaSubmission(rpc, f.options.journal, f.intent.owner, f.intent.requestId, () => NOW + 1);
     assert.equal(result!.status, "pending", bank); assert.equal(f.getRecord()!.status, "pending", bank);
   }
@@ -402,7 +409,8 @@ test("shutdown before work or during risk prevents admission; shutdown during co
       f.options.journal.recordSigned = async submission => { const result = await commit(submission); controller.abort(); return result; };
     }
     if (phase === "genesis") {
-      const transport = createSolanaLiveRpc({ env: { MERRYMEN_SOLANA_RPC_MAINNET: "https://rpc.example/" }, fetch: async (_url, init) => {
+      const transport = createSolanaLiveRpc({ env: { MERRYMEN_SOLANA_RPC_MAINNET: "https://rpc.example/",
+        MERRYMEN_SOLANA_RPC_MAINNET_FALLBACK: "https://fallback.example/" }, fetch: async (_url, init) => {
         const body = JSON.parse(init!.body as string); network.push(body.method);
         assert.equal(body.method, "getGenesisHash"); controller.abort();
         assert.equal(init!.signal!.aborted, true);
@@ -462,4 +470,91 @@ test("settlement refuses forged events, wrong bytes, token deltas and nonfinaliz
   }
   assert.throws(() => settleSolanaReceipt(pending.submission, failed, { confirmationStatus: "finalized", slot: SLOT + 1 }, NOW + 1));
   assert.throws(() => solanaVaultEvents([`Program ${PROGRAM} invoke [1]`, "Log truncated"], PROGRAM));
+});
+
+/** A second provider's view of the fixture, with selected reads replaced. */
+function provider(f: Awaited<ReturnType<typeof fixture>>, overrides: Partial<Record<string, (params: readonly unknown[]) => unknown>>): SolanaLiveRead {
+  return async (method, params = []) => overrides[method] ? overrides[method]!(params) : f.read(method, params);
+}
+
+test("a fill is booked only when both providers return the same finalized receipt (audit G3-1)", async () => {
+  // The primary withholds nothing but forges; the honest fallback has never seen the signature.
+  const f = await fixture(); const executor = createSolanaExecutor(f.options);
+  const pending = await executor.execute(f.intent); f.controls.finalized = true;
+  f.controls.fallback = provider(f, { getSignatureStatuses: () => ({ context: { slot: SLOT }, value: [null] }), getTransaction: () => null,
+    getEpochInfo: () => ({ absoluteSlot: SLOT + 2, blockHeight: 1199 }),
+    getAccountInfo: () => ({ context: { slot: SLOT + 2 }, value: rpcAccount(state(f.intent.owner, f.session, 0n), PROGRAM) }) });
+  assert.equal((await executor.reconcile(f.intent.owner, f.intent.requestId))?.status, "pending");
+  assert.equal(f.getRecord()!.status, "pending");
+  // Both providers return internally consistent receipts with different fills.
+  f.controls.fallback = provider(f, { getTransaction: () => f.receipt(pending.submission, false, 2_500_000n) });
+  assert.equal((await executor.reconcile(f.intent.owner, f.intent.requestId))?.status, "pending");
+  // A provider that cannot answer leaves it pending too.
+  f.controls.fallback = provider(f, { getTransaction: () => { throw new Error("provider down"); } });
+  await assert.rejects(executor.reconcile(f.intent.owner, f.intent.requestId));
+  assert.equal(f.getRecord()!.status, "pending");
+  // A transport with only one provider can never book.
+  const single = { ...f.options.rpc }; delete single.readEach;
+  await assert.rejects(reconcileSolanaSubmission(single, f.options.journal, f.intent.owner, f.intent.requestId, () => NOW + 1), /two independent RPC providers/);
+  assert.equal(f.getRecord()!.status, "pending");
+  f.controls.fallback = null;
+  const settled = await executor.reconcile(f.intent.owner, f.intent.requestId);
+  assert.equal(settled?.status, "finalized"); assert.equal(settled?.settlement?.amountOut, "2000000");
+});
+
+test("an expiry is booked only when both providers prove it; their heights may differ (audit G3-1)", async () => {
+  const proof = (blockHeight: number) => ({ getSignatureStatuses: () => ({ context: { slot: SLOT }, value: [null] }), getTransaction: () => null,
+    getEpochInfo: () => ({ absoluteSlot: SLOT + 2, blockHeight }) });
+  for (const [primary, fallback, expected] of [[1201, 1199, "pending"], [1201, 1300, "expired"]] as const) {
+    const f = await fixture(); f.controls.failSend = true; const executor = createSolanaExecutor(f.options);
+    await executor.execute(f.intent);
+    const view = (height: number, seq = 0n) => provider(f, { ...proof(height),
+      getAccountInfo: () => ({ context: { slot: SLOT + 2 }, value: rpcAccount(state(f.intent.owner, f.session, seq), PROGRAM) }) });
+    const rpc: SolanaLiveRpc = { read: callback => callback(view(primary)), readEach: async callback => [await callback(view(primary)), await callback(view(fallback))],
+      send: async wire => wire };
+    const result = await reconcileSolanaSubmission(rpc, f.options.journal, f.intent.owner, f.intent.requestId, () => NOW + 1);
+    assert.equal(result!.status, expected);
+    if (result!.settlement?.status === "expired") assert.equal(result!.settlement.expiryProof.blockHeight, "1201");
+  }
+  // The fallback saw the sequence move: the swap may have landed.
+  const f = await fixture(); f.controls.failSend = true; const executor = createSolanaExecutor(f.options);
+  await executor.execute(f.intent);
+  const view = (seq: bigint) => provider(f, { ...proof(1201),
+    getAccountInfo: () => ({ context: { slot: SLOT + 2 }, value: rpcAccount(state(f.intent.owner, f.session, seq), PROGRAM) }) });
+  const rpc: SolanaLiveRpc = { read: callback => callback(view(0n)), readEach: async callback => [await callback(view(0n)), await callback(view(1n))], send: async wire => wire };
+  assert.equal((await reconcileSolanaSubmission(rpc, f.options.journal, f.intent.owner, f.intent.requestId, () => NOW + 1))!.status, "pending");
+});
+
+test("the vault program must verify as immutable and audited on both providers before anything is signed (audit G3-5)", async () => {
+  for (const lie of ["upgradeable", "substituted"] as const) {
+    const f = await fixture();
+    f.controls.fallback = provider(f, { getAccountInfo: params => {
+      const [address, config] = params as [string, { dataSlice: { offset: number; length: number } }];
+      if (address !== f.programDataAddress) return f.read("getAccountInfo", params);
+      const bytes = Buffer.from(f.programData); if (lie === "upgradeable") bytes[12] = 1; else bytes[bytes.length - 1]! ^= 1;
+      return { context: { slot: SLOT }, value: { ...rpcAccount(bytes.subarray(config.dataSlice.offset, config.dataSlice.offset + config.dataSlice.length), LOADER), space: bytes.length } };
+    } });
+    await assert.rejects(verifySolanaVaultDeployment(f.options.rpc, PROGRAM, f.options.programBinarySha256), /unsafe-program/, lie);
+    await assert.rejects(createSolanaExecutor(f.options).execute(f.intent), /unsafe-program/, lie);
+    assert.ok(!f.calls.includes("persist") && !f.calls.includes("send"), lie);
+  }
+});
+
+test("a verified immutable deployment is cached per provider pair; failures are not", async () => {
+  const f = await fixture(); let slices = 0;
+  const counting: SolanaLiveRead = async (method, params = []) => {
+    if (method === "getAccountInfo" && (params[0] === PROGRAM || params[0] === f.programDataAddress)) slices++;
+    return f.read(method, params);
+  };
+  const rpc: SolanaLiveRpc = { providerKey: `cache-test-${Math.random()}`, read: callback => callback(counting),
+    readEach: async callback => [await callback(counting), await callback(counting)], send: async wire => wire };
+  await assert.rejects(verifySolanaVaultDeployment(rpc, PROGRAM, "0".repeat(64)), /unsafe-program/);
+  const failed = slices;
+  await assert.rejects(verifySolanaVaultDeployment(rpc, PROGRAM, "0".repeat(64)), /unsafe-program/);
+  assert.equal(slices, failed * 2, "a failure is checked again");
+  slices = 0;
+  assert.deepEqual(await verifySolanaVaultDeployment(rpc, PROGRAM, f.options.programBinarySha256), { slot: SLOT });
+  const verified = slices; assert.ok(verified >= 4, "both providers read the program and its data");
+  assert.deepEqual(await verifySolanaVaultDeployment(rpc, PROGRAM, f.options.programBinarySha256), { slot: SLOT });
+  assert.equal(slices, verified, "the second check is served from the cache");
 });

@@ -1,7 +1,16 @@
-/** Live RPC transport. Reads may fail over; a signed submission is sent ONCE. */
+/**
+ * Live RPC transport. Two providers on different hostnames are required, and
+ * every session with either one first proves it serves mainnet-beta.
+ *
+ * - read: one provider's answer, failing over to the other on transport errors.
+ * - readEach / readSolanaQuorum: every provider's answer. Booking a fill or an
+ *   expiry needs both to agree; one provider's word is never enough.
+ * - send: a signed submission is sent ONCE, to the primary.
+ */
+import { createHmac, randomBytes } from "node:crypto";
 import { getCompiledTransactionMessageDecoder, getTransactionDecoder, isFullySignedTransaction, isSignature } from "@solana/kit";
 import {
-  readSolanaJson, readSolanaMainnetRpcConfig, SOLANA_MAINNET_GENESIS_HASH,
+  readSolanaJson, readSolanaLiveRpcConfig, SOLANA_MAINNET_GENESIS_HASH,
   SolanaRpcError, withSolanaReadDeadline,
 } from "./solana-rpc";
 
@@ -12,13 +21,58 @@ export type SolanaLiveReadMethod = typeof READ_METHODS[number];
 export type SolanaLiveRead = (method: SolanaLiveReadMethod, params?: readonly unknown[]) => Promise<unknown>;
 export interface SolanaLiveRpc {
   read<T>(operation: (rpc: SolanaLiveRead) => Promise<T>): Promise<T>;
+  /**
+   * Runs `operation` once against every configured provider (primary first),
+   * each in its own mainnet-verified session. Rejects if any provider fails.
+   * The production transport always has two; use readSolanaQuorum to compare.
+   */
+  readEach?<T>(operation: (rpc: SolanaLiveRead) => Promise<T>): Promise<T[]>;
   send(signedTransactionBase64: string, minContextSlot: number, signal?: AbortSignal): Promise<string>;
+  /** In-process cache key for this provider pair. Not derived reversibly from the URLs. */
+  readonly providerKey?: string;
+}
+
+const PROCESS_SALT = randomBytes(32);
+
+/** Every provider's answer. A hand-built transport without readEach counts as one provider. */
+export async function readSolanaEachProvider<T>(rpc: SolanaLiveRpc, operation: (rpc: SolanaLiveRead) => Promise<T>): Promise<T[]> {
+  if (typeof rpc.readEach !== "function") return [await rpc.read(operation)];
+  const values = await rpc.readEach(operation);
+  if (!Array.isArray(values) || values.length < 1) throw new SolanaRpcError("no-quorum");
+  return values;
+}
+
+export type SolanaQuorum<T> =
+  | { agreed: true; value: T; values: readonly T[] }
+  | { agreed: false; values: readonly T[] };
+/**
+ * Quorum read for anything that books money or frees a reservation.
+ *
+ * Runs `operation` independently on every provider (at least two, or it throws
+ * "no-quorum") and compares the answers by `key`. `agreed` is true only when
+ * every key is identical; `value` is then the primary's answer. Disagreement is
+ * not an error: the caller keeps the record pending and asks again later. A
+ * provider that errors makes the whole read reject, which also keeps it pending.
+ *
+ * Choose `key` to cover everything the booking depends on and nothing that
+ * legitimately differs between providers (for example, each provider's own
+ * current block height in an expiry proof).
+ */
+export async function readSolanaQuorum<T>(
+  rpc: SolanaLiveRpc, operation: (rpc: SolanaLiveRead) => Promise<T>, key: (value: T) => string = value => JSON.stringify(value),
+): Promise<SolanaQuorum<T>> {
+  if (typeof rpc.readEach !== "function") throw new SolanaRpcError("no-quorum");
+  const values = await rpc.readEach(operation);
+  if (!Array.isArray(values) || values.length < 2) throw new SolanaRpcError("no-quorum");
+  const keys = values.map(key);
+  return keys.every(item => item === keys[0]) ? { agreed: true, value: values[0]!, values } : { agreed: false, values };
 }
 
 export function createSolanaLiveRpc(options: {
   env?: Readonly<Record<string, string | undefined>>; fetch?: typeof globalThis.fetch; timeoutMs?: number;
 } = {}): SolanaLiveRpc {
-  const config = readSolanaMainnetRpcConfig(options.env);
+  const config = readSolanaLiveRpcConfig(options.env);
+  const endpoints = [config.url, config.fallbackUrl] as const;
   const request = options.fetch ?? globalThis.fetch;
   const endpoint = async <T>(url: string, operation: (rpc: (method: string, params?: readonly unknown[]) => Promise<unknown>) => Promise<T>, cancellation?: AbortSignal) =>
     withSolanaReadDeadline(async deadlineSignal => {
@@ -46,17 +100,21 @@ export function createSolanaLiveRpc(options: {
       checkAbort();
       return operation(rpc);
     }, options.timeoutMs ?? 10_000);
+  const reader = (url: string) => <T>(operation: (rpc: SolanaLiveRead) => Promise<T>) => endpoint(url, rpc => operation((method, params) => {
+    if (!(READ_METHODS as readonly string[]).includes(method)) throw new SolanaRpcError("unsupported-method");
+    return rpc(method, params);
+  }));
   return {
+    providerKey: createHmac("sha256", PROCESS_SALT).update(`${config.url}\n${config.fallbackUrl}`).digest("hex"),
     async read(operation) {
-      const run = (url: string) => endpoint(url, rpc => operation((method, params) => {
-        if (!(READ_METHODS as readonly string[]).includes(method)) throw new SolanaRpcError("unsupported-method");
-        return rpc(method, params);
-      }));
-      try { return await run(config.url); }
+      try { return await reader(config.url)(operation); }
       catch (error) {
-        if (!config.fallbackUrl || !(error instanceof SolanaRpcError) || error.code === "unsupported-method") throw error;
-        return run(config.fallbackUrl);
+        if (!(error instanceof SolanaRpcError) || error.code === "unsupported-method") throw error;
+        return reader(config.fallbackUrl)(operation);
       }
+    },
+    async readEach(operation) {
+      return Promise.all(endpoints.map(url => reader(url)(operation)));
     },
     async send(wire, minContextSlot, signal) {
       if (signal?.aborted) throw new SolanaRpcError("cancelled");

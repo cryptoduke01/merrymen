@@ -14,7 +14,7 @@ import {
   SOLANA_WRAPPED_SOL_MINT, type SolanaVaultState,
 } from "../../packages/core/src/solana-live";
 import { validateJupiterCpi, type JupiterCpiRoute, type SolanaCpiBuildRequest } from "./solana-live-market";
-import type { SolanaLiveRead, SolanaLiveRpc } from "./solana-live-rpc";
+import { readSolanaEachProvider, readSolanaQuorum, type SolanaLiveRead, type SolanaLiveRpc } from "./solana-live-rpc";
 import { solanaReferenceNotional, verifySolanaReferenceBound, type SolanaReferenceBound } from "./solana-reference-price";
 import { isSolanaTransactionError, settleSolanaReceipt } from "./solana-settlement";
 
@@ -199,13 +199,32 @@ async function verifyDeployment(rpc: SolanaLiveRead, programId: string, hash: st
   }
   if (digest.digest("hex") !== hash) return fail("unsafe-program");
 }
+const DEPLOYMENT_CACHE_MS = 10 * 60_000;
+const verifiedDeployments = new Map<string, number>();
+/**
+ * Verifies the vault program on EVERY provider: owned by the upgradeable loader
+ * with no upgrade authority, and ProgramData's executable bytes hash to the
+ * audited build. One lying provider cannot hide an upgradeable or substituted
+ * program. An immutable program can never change or close, so a success is
+ * cached per provider pair for ten minutes; failures are never cached.
+ */
 export async function verifySolanaVaultDeployment(rpc: SolanaLiveRpc, programId: string, binarySha256: string): Promise<{ slot: number }> {
-  return rpc.read(async read => {
+  const cacheKey = rpc.providerKey ? `${rpc.providerKey}\n${programId}\n${binarySha256}` : undefined;
+  const verifiedAt = cacheKey === undefined ? undefined : verifiedDeployments.get(cacheKey);
+  const at = Date.now();
+  if (verifiedAt !== undefined && at >= verifiedAt && at - verifiedAt < DEPLOYMENT_CACHE_MS) {
+    const slot = integer(await rpc.read(read => read("getSlot", [{ commitment: "confirmed" }])));
+    if (slot < 1) return fail();
+    return { slot };
+  }
+  const slots = await readSolanaEachProvider(rpc, async read => {
     const slot = integer(await read("getSlot", [{ commitment: "confirmed" }]));
     if (slot < 1) return fail();
     await verifyDeployment(read, programId, binarySha256, slot);
-    return { slot };
+    return slot;
   });
+  if (cacheKey !== undefined) verifiedDeployments.set(cacheKey, at);
+  return { slot: slots[0]! };
 }
 export async function readSolanaVaultState(rpc: SolanaLiveRpc, programId: string, owner: string): Promise<{ vault: string; slot: number; state: SolanaVaultState }> {
   const vault = await deriveSolanaVaultAddress(programId, owner);
@@ -228,48 +247,75 @@ export async function readSolanaVaultBalances(rpc: SolanaLiveRpc, vault: string,
       wsolRaw: tokenBalance(account(result.value[1]), SOLANA_WRAPPED_SOL_MINT, vault, SOLANA_CLASSIC_TOKEN_PROGRAM).toString() };
   });
 }
-/** Resolves signed submissions without loading signing keys or requiring live mode. */
+/** A finalized read of this submission's vault at or after `minContextSlot`. */
+async function readFinalizedVault(read: SolanaLiveRead, submission: SolanaSignedSubmission, owner: string, minContextSlot: number): Promise<{ slot: number; state: SolanaVaultState }> {
+  const evidence = context(await read("getAccountInfo", [submission.intent.vault, {
+    encoding: "base64", commitment: "finalized", minContextSlot,
+  }]), minContextSlot);
+  const vault = account(evidence.value);
+  if (vault.owner !== submission.programId || vault.executable) return fail();
+  const state = decodeSolanaVaultAccount(vault.data);
+  if (state.owner !== owner || state.sessionEpoch < BigInt(submission.sessionEpoch)) return fail();
+  return { slot: evidence.slot, state };
+}
+/** One provider's view. `seen`: that provider has a status, a receipt or a moved sequence for it. */
+interface SolanaObservation { settlement: SolanaLiveSettlement | null; seen: boolean }
+async function observeSolanaSubmission(read: SolanaLiveRead, submission: SolanaSignedSubmission, owner: string, nowMs: number): Promise<SolanaObservation> {
+  const result = context(await read("getSignatureStatuses", [[submission.signature], { searchTransactionHistory: true }]), submission.minContextSlot);
+  if (!Array.isArray(result.value) || result.value.length !== 1) return fail();
+  const status = result.value[0];
+  if (status !== null && (!object(status) || !["processed", "confirmed", "finalized"].includes(String(status.confirmationStatus)) ||
+    !Object.hasOwn(status, "err") || !isSolanaTransactionError(status.err))) return fail();
+  const receipt = await read("getTransaction", [submission.signature, { commitment: "finalized", encoding: "base64", maxSupportedTransactionVersion: 0 }]);
+  if (object(status) && status.confirmationStatus === "finalized") {
+    return receipt === null ? { settlement: null, seen: true } : { settlement: settleSolanaReceipt(submission, receipt, status, nowMs), seen: true };
+  }
+  if (status !== null || receipt !== null) return { settlement: null, seen: true };
+  // A missing receipt alone proves nothing. The finalized slot and block height
+  // come from ONE bank (getEpochInfo), and the vault is read at or after that
+  // slot. If that bank's height is past lastValidBlockHeight, any block that
+  // could hold these bytes is at an earlier slot, so an unchanged sequence there
+  // proves they never ran. Separate height and slot reads can be served by
+  // different nodes behind one URL and pair a current height with a stale slot.
+  const info = await read("getEpochInfo", [{ commitment: "finalized", minContextSlot: submission.minContextSlot }]);
+  if (!object(info)) return fail();
+  const proofSlot = integer(info.absoluteSlot), blockHeight = integer(info.blockHeight);
+  if (proofSlot < submission.minContextSlot) return fail();
+  const evidence = await readFinalizedVault(read, submission, owner, proofSlot);
+  if (evidence.state.seq !== BigInt(submission.vaultSequence)) return { settlement: null, seen: true };
+  const revoked = evidence.state.sessionEpoch > BigInt(submission.sessionEpoch);
+  if (!revoked && BigInt(blockHeight) <= BigInt(submission.lastValidBlockHeight)) return { settlement: null, seen: false };
+  if (!Number.isSafeInteger(nowMs) || nowMs < submission.preparedAtMs) return fail();
+  return { seen: false, settlement: { status: "expired", signature: submission.signature, slot: evidence.slot, feeLamports: null,
+    amountIn: "0", amountOut: "0", finalizedAtMs: nowMs, expiryProof: { vaultSequence: evidence.state.seq.toString(),
+      sessionEpoch: evidence.state.sessionEpoch.toString(), blockHeight: blockHeight.toString(), reason: revoked ? "session-revoked" : "blockhash-expired" } } };
+}
+/** What both providers must agree on. An expiry's height is each provider's own and may differ. */
+function observationKey(observation: SolanaObservation): string {
+  const settlement = observation.settlement;
+  if (!settlement) return "pending";
+  if (settlement.status === "expired") return JSON.stringify([settlement.status, settlement.signature,
+    settlement.expiryProof.vaultSequence, settlement.expiryProof.sessionEpoch, settlement.expiryProof.reason]);
+  return JSON.stringify(settlement);
+}
+/**
+ * Resolves signed submissions without loading signing keys or requiring live mode.
+ *
+ * A fill, failure or expiry is booked only when both independent providers
+ * derive the same outcome (readSolanaQuorum); any disagreement or provider error
+ * leaves the record pending.
+ */
 export async function reconcileSolanaSubmission(
   rpc: SolanaLiveRpc, journal: SolanaLiveJournal, owner: string, requestId: string, now: () => number = Date.now,
 ): Promise<SolanaLiveRecord | null> {
   const record = await journal.get(owner, requestId);
   if (!record || record.status !== "pending") return record;
   const submission = record.submission;
-  const settlement = await rpc.read(async (read): Promise<SolanaLiveSettlement | null> => {
-    const result = context(await read("getSignatureStatuses", [[submission.signature], { searchTransactionHistory: true }]), submission.minContextSlot);
-    if (!Array.isArray(result.value) || result.value.length !== 1) return fail();
-    const status = result.value[0];
-    if (status !== null && (!object(status) || !["processed", "confirmed", "finalized"].includes(String(status.confirmationStatus)) ||
-      !Object.hasOwn(status, "err") || !isSolanaTransactionError(status.err))) return fail();
-    const receipt = await read("getTransaction", [submission.signature, { commitment: "finalized", encoding: "base64", maxSupportedTransactionVersion: 0 }]);
-    if (object(status) && status.confirmationStatus === "finalized") return receipt === null ? null : settleSolanaReceipt(submission, receipt, status, now());
-    if (receipt !== null) return null;
-    // A missing receipt alone proves nothing. The finalized slot and block height
-    // come from ONE bank (getEpochInfo), and the vault is read at or after that
-    // slot. If that bank's height is past lastValidBlockHeight, any block that
-    // could hold these bytes is at an earlier slot, so an unchanged sequence there
-    // proves they never ran. Separate height and slot reads can be served by
-    // different nodes behind one URL and pair a current height with a stale slot.
-    const info = await read("getEpochInfo", [{ commitment: "finalized", minContextSlot: submission.minContextSlot }]);
-    if (!object(info)) return fail();
-    const finalizedSlot = integer(info.absoluteSlot), blockHeight = integer(info.blockHeight);
-    if (finalizedSlot < submission.minContextSlot || await deriveSolanaVaultAddress(submission.programId, owner) !== submission.intent.vault) return fail();
-    const evidence = context(await read("getAccountInfo", [submission.intent.vault, {
-      encoding: "base64", commitment: "finalized", minContextSlot: finalizedSlot,
-    }]), finalizedSlot);
-    const vault = account(evidence.value);
-    if (vault.owner !== submission.programId || vault.executable) return fail();
-    const state = decodeSolanaVaultAccount(vault.data);
-    if (state.owner !== owner || state.sessionEpoch < BigInt(submission.sessionEpoch)) return fail();
-    if (state.seq !== BigInt(submission.vaultSequence)) return null;
-    const revoked = state.sessionEpoch > BigInt(submission.sessionEpoch);
-    if (!revoked && BigInt(blockHeight) <= BigInt(submission.lastValidBlockHeight)) return null;
-    const finalizedAtMs = integer(now()); if (finalizedAtMs < submission.preparedAtMs) return fail();
-    return { status: "expired", signature: submission.signature, slot: evidence.slot, feeLamports: null,
-      amountIn: "0", amountOut: "0", finalizedAtMs, expiryProof: { vaultSequence: state.seq.toString(),
-        sessionEpoch: state.sessionEpoch.toString(), blockHeight: blockHeight.toString(), reason: revoked ? "session-revoked" : "blockhash-expired" } };
-  });
-  if (!settlement) return record;
+  if (await deriveSolanaVaultAddress(submission.programId, owner) !== submission.intent.vault) return fail();
+  const nowMs = now();
+  const quorum = await readSolanaQuorum(rpc, read => observeSolanaSubmission(read, submission, owner, nowMs), observationKey);
+  if (!quorum.agreed || !quorum.value.settlement) return record;
+  const settlement = quorum.value.settlement;
   await journal.settle(owner, requestId, submission.signature, settlement);
   return { submission, status: settlement.status, settlement };
 }
@@ -318,10 +364,12 @@ export function createSolanaExecutor(options: SolanaExecutorOptions) {
       }
       if (intent.inputMint === SOLANA_USDG_MINT && (inputMint.buyBlockedReasons.length || outputMint.buyBlockedReasons.length)) return fail("unsafe-route");
       const safetyObservedAtMs = Math.min(inputMint.observedAtMs, outputMint.observedAtMs);
+      // Every provider must agree the program is the immutable audited build.
+      await verifySolanaVaultDeployment(options.rpc, options.programId, options.programBinarySha256);
+      checkAbort();
       const snapshot = await options.rpc.read(async rpc => {
         const slot = integer(await rpc("getSlot", [{ commitment: "confirmed" }]));
         if (slot < 1) return fail();
-        await verifyDeployment(rpc, options.programId, options.programBinarySha256, slot);
         const result = context(await rpc("getMultipleAccounts", [[intent.vault, inputTokenAccount, outputTokenAccount, feePayer],
           { encoding: "base64", commitment: "confirmed", minContextSlot: slot }]), slot);
         if (!Array.isArray(result.value) || result.value.length !== 4) return fail();
