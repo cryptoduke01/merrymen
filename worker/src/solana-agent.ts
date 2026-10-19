@@ -152,7 +152,7 @@ export function createSolanaAgent(options: SolanaAgentOptions) {
           if (options.signal?.aborted) break;
           // Already admitted under this ID (another worker got there first): a replay submits nothing.
           if (await admitted(scope, intent.requestId)) { results.push({ owner: row.owner, outcome: "replayed" }); continue; }
-          await options.runtime.trade(scope, { mode: row.requested_mode, intent, autonomousRevision: revision, signal: options.signal });
+          await options.runtime.trade(scope, { mode: row.requested_mode, intent, autonomousRevision: Number(row.revision), signal: options.signal });
           results.push({ owner: row.owner, outcome: "submitted" });
         } catch { results.push({ owner: row.owner, outcome: "unavailable" }); }
       }
