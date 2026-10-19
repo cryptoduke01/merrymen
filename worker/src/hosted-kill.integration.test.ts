@@ -30,7 +30,7 @@ process.env.MERRYMEN_HOSTED = "1";
 delete process.env.DATABASE_URL;
 process.env.MERRYMEN_STORE_DEK = Buffer.alloc(32, 5).toString("base64");
 
-const { reconcile, childHome, adoptChildForTest, honourPendingKills, setKillConfirmForTest } = await import("./orchestrator");
+const { reconcile, childHome, adoptChildForTest, honourPendingKills, setKillConfirmForTest, setSolanaKillForTest } = await import("./orchestrator");
 const { getGrantStore } = await import("./grant-store");
 const { KILL_CLOCK_SLACK_SEC, KILL_REQUEST_PREFIX, killHosted, killRequested, honourKillRequest, writeKillRequest } = await import("./kill-request");
 const { loadArmableGrant, loadGrantFile } = await import("./grant");
@@ -67,6 +67,13 @@ const store = getGrantStore();
 const confirmed: string[] = [];
 setKillConfirmForTest(async (t) => {
   confirmed.push(t);
+});
+/** Every Solana strategy stop the kill asked for; `solanaDown` makes it fail. */
+const solanaStops: string[] = [];
+let solanaDown = false;
+setSolanaKillForTest(async (t) => {
+  solanaStops.push(t);
+  if (solanaDown) throw new Error("solana bindings unavailable");
 });
 const home = () => childHome(TENANT);
 const grantFile = () => path.join(home(), "grant.json");
@@ -108,6 +115,8 @@ beforeEach(async () => {
   await reconcile();
   rmSync(home(), { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   confirmed.length = 0;
+  solanaStops.length = 0;
+  solanaDown = false;
 });
 
 describe("a hosted Telegram kill, then a reconcile", () => {
@@ -182,6 +191,28 @@ describe("a hosted Telegram kill, then a reconcile", () => {
     await reconcile();
     assert.equal(await store.get(TENANT), null, "the next pass carries it out");
     assert.deepEqual(proc.signals.slice(0, 1), ["SIGTERM"]);
+    assert.deepEqual(confirmed, [TENANT]);
+  });
+
+  it("A KILL IS NOT DONE WHILE THE SOLANA STRATEGY STILL RUNS: no ✅, the request stays pending, the next pass finishes it", async () => {
+    // The separate Solana worker reads only the tenant's binding, so removing
+    // the RH grant alone left autonomous Solana trading on (audit 2026-10-18).
+    const proc = await armedTenant(grantAt(nowSec() - 3600));
+    childKill();
+    solanaDown = true;
+    await honourPendingKills();
+    await reconcile();
+    assert.deepEqual(solanaStops, [TENANT, TENANT], "every pass tries to stop Solana first");
+    assert.ok(await store.get(TENANT), "the grant is kept while the kill is incomplete");
+    assert.equal(killRequested(home()), true, "the request stays pending, so nothing arms");
+    assert.equal(existsSync(grantFile()), false, "and the child's copy is not written back");
+    assert.deepEqual(confirmed, [], "no ✅ while Solana could still trade");
+    assert.deepEqual(proc.signals, []);
+
+    solanaDown = false;
+    await honourPendingKills();
+    assert.equal(await store.get(TENANT), null, "the next pass stops Solana and then removes the grant");
+    assert.deepEqual(solanaStops.at(-1), TENANT);
     assert.deepEqual(confirmed, [TENANT]);
   });
 

@@ -19,19 +19,21 @@ use anchor_spl::{
     token_interface::{self, CloseAccount, Mint, TokenAccount, TokenInterface, TransferChecked},
 };
 pub mod risk;
-use risk::Debit;
+use risk::{Debit, Limits};
 declare_id!("EUzYVniKtgNNgFweMtRA9vciTWtE8MDTRfh6ai6VvXoU");
 pub const USDG: Pubkey = pubkey!("2u1tszSeqZ3qBWF3uNGPFc8TzMk2tdiwknnRMWGWjGWH");
 pub const WSOL: Pubkey = pubkey!("So11111111111111111111111111111111111111112");
 pub const JUPITER: Pubkey = pubkey!("JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4");
 pub const SHARED_ROUTE: [u8; 8] = [193, 32, 155, 51, 65, 214, 156, 129];
+/// Layout 2 adds the owner-signed WSOL input caps; layout 1 vaults are refused.
+pub const VERSION: u8 = 2;
 
 #[program]
 pub mod merrymen_vault {
     use super::*;
     pub fn initialize_vault(ctx: Context<InitializeVault>) -> Result<()> {
         let v = &mut ctx.accounts.vault;
-        v.version = 1;
+        v.version = VERSION;
         v.bump = ctx.bumps.vault;
         v.owner = ctx.accounts.owner.key();
         v.session = Pubkey::default();
@@ -40,6 +42,8 @@ pub mod merrymen_vault {
         v.expires_at = 0;
         v.per_trade = 0;
         v.daily = 0;
+        v.per_trade_wsol = 0;
+        v.daily_wsol = 0;
         v.max_ops = 0;
         v.paused = false;
         v.debits = Vec::new();
@@ -50,15 +54,22 @@ pub mod merrymen_vault {
         session: Pubkey,
         per_trade: u64,
         daily: u64,
+        per_trade_wsol: u64,
+        daily_wsol: u64,
         max_ops: u16,
         expires_at: i64,
     ) -> Result<()> {
         let v = &mut ctx.accounts.vault;
         let now = Clock::get()?.unix_timestamp;
-        require!(
-            risk::limits(per_trade, daily, max_ops, expires_at, now).is_ok(),
-            VaultError::RiskLimit
-        );
+        let limits = Limits {
+            per_trade,
+            daily,
+            per_trade_wsol,
+            daily_wsol,
+            max_ops,
+            expiry: expires_at,
+        };
+        require!(risk::limits(&limits, now).is_ok(), VaultError::RiskLimit);
         require!(
             session != Pubkey::default() && session != v.owner && session != v.key(),
             VaultError::Authority
@@ -67,6 +78,8 @@ pub mod merrymen_vault {
         v.session = session;
         v.per_trade = per_trade;
         v.daily = daily;
+        v.per_trade_wsol = per_trade_wsol;
+        v.daily_wsol = daily_wsol;
         v.max_ops = max_ops;
         v.expires_at = expires_at;
         // Neither the monotonic sequence, rolling spend history nor sticky breaker resets here.
@@ -162,7 +175,7 @@ pub mod merrymen_vault {
         let now = Clock::get()?.unix_timestamp;
         let a = &mut ctx.accounts;
         require!(
-            a.vault.version == 1
+            a.vault.version == VERSION
                 && a.vault.session == a.session_signer.key()
                 && a.vault.session_epoch == session_epoch,
             VaultError::Authority
@@ -196,18 +209,17 @@ pub mod merrymen_vault {
         check_account(&a.vault_input)?;
         check_account(&a.vault_output)?;
         check_account(&a.temp_input)?;
-        // Preflight sells using their guaranteed cash output; actual cash output is checked again.
-        let provisional = if buy { amount_in } else { min_out };
-        risk::record(
-            &a.vault.debits,
-            provisional,
-            a.vault.per_trade,
-            a.vault.daily,
-            a.vault.max_ops,
-            a.vault.expires_at,
-            now,
-        )
-        .map_err(|_| error!(VaultError::RiskLimit))?;
+        // Sells are bounded on input: the full WSOL amount made available is charged
+        // against the owner's WSOL caps, so a dust quote cannot empty the position.
+        // Their guaranteed cash output is preflighted here and actual output after.
+        let limits = a.vault.limits();
+        let (provisional, wsol) = if buy {
+            (amount_in, 0)
+        } else {
+            (min_out, amount_in)
+        };
+        risk::record(&a.vault.debits, provisional, wsol, &limits, now)
+            .map_err(|_| error!(VaultError::RiskLimit))?;
         check_route(&route_data, amount_in, min_out, slippage_bps)?;
         check_route_accounts(ctx.remaining_accounts, a)?;
         let vault_key = a.vault.key();
@@ -298,18 +310,15 @@ pub mod merrymen_vault {
             spent > 0 && spent <= amount_in && received >= min_out,
             VaultError::Amount
         );
-        // Buy budgets conservatively charge the full amount made available, even if dust returns.
-        let notional = if buy { amount_in } else { received };
-        let debits = risk::record(
-            &a.vault.debits,
-            notional,
-            a.vault.per_trade,
-            a.vault.daily,
-            a.vault.max_ops,
-            a.vault.expires_at,
-            now,
-        )
-        .map_err(|_| error!(VaultError::RiskLimit))?;
+        // Budgets conservatively charge the full input made available, even if dust returns:
+        // USDG for a buy, WSOL for a sell. A sell's cash proceeds stay charged to the USDG caps.
+        let (notional, wsol) = if buy {
+            (amount_in, 0)
+        } else {
+            (received, amount_in)
+        };
+        let debits = risk::record(&a.vault.debits, notional, wsol, &limits, now)
+            .map_err(|_| error!(VaultError::RiskLimit))?;
         a.vault.debits = debits;
         a.vault.seq = expected_seq.checked_add(1).ok_or(VaultError::Overflow)?;
         emit!(SwapExecuted {
@@ -484,12 +493,25 @@ pub struct Vault {
     pub expires_at: i64,
     pub per_trade: u64,
     pub daily: u64,
+    /// Lamports of WSOL one sell may put in, and over the rolling 24 hours.
+    pub per_trade_wsol: u64,
+    pub daily_wsol: u64,
     pub max_ops: u16,
     pub paused: bool,
     pub debits: Vec<Debit>,
 }
 impl Vault {
-    pub const SPACE: usize = 8 + 2 + 64 + 40 + 2 + 1 + 4 + 96 * 16;
+    pub const SPACE: usize = 8 + 2 + 64 + 56 + 2 + 1 + 4 + 96 * 24;
+    pub fn limits(&self) -> Limits {
+        Limits {
+            per_trade: self.per_trade,
+            daily: self.daily,
+            per_trade_wsol: self.per_trade_wsol,
+            daily_wsol: self.daily_wsol,
+            max_ops: self.max_ops,
+            expiry: self.expires_at,
+        }
+    }
 }
 #[derive(Accounts)]
 pub struct InitializeVault<'info> {
@@ -622,7 +644,7 @@ mod tests {
     #[test]
     fn account_layout_matches_typescript() {
         let v = Vault {
-            version: 1,
+            version: VERSION,
             bump: 0,
             owner: Pubkey::default(),
             session: Pubkey::default(),
@@ -631,20 +653,24 @@ mod tests {
             expires_at: 0,
             per_trade: 0,
             daily: 0,
+            per_trade_wsol: 0,
+            daily_wsol: 0,
             max_ops: 0,
             paused: false,
             debits: vec![
                 Debit {
                     timestamp: 0,
-                    notional: 0
+                    notional: 0,
+                    wsol: 0
                 };
                 96
             ],
         };
         let mut bytes = Vec::new();
         v.try_serialize(&mut bytes).unwrap();
-        assert_eq!(bytes.len(), 1657);
-        assert_eq!(Vault::SPACE, 1657);
+        // packages/core/src/solana-live.ts SOLANA_VAULT_ACCOUNT_SIZE must match.
+        assert_eq!(bytes.len(), 2441);
+        assert_eq!(Vault::SPACE, 2441);
     }
     #[test]
     fn route_amounts_and_floor() {

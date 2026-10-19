@@ -7,23 +7,26 @@ import {
 } from "@solana/kit";
 import { ed25519 } from "@noble/curves/ed25519";
 import { CHAINS, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM, base58Decode } from "../../packages/core/src/ids";
-import { parseSolanaRawAmount, parseSolanaSwapIntent, validateSolanaPaperLimits, validateSolanaQuote,
+import { parseSolanaRawAmount, parseSolanaSwapIntent, requireSolanaLiveSellLimits, validateSolanaPaperLimits, validateSolanaQuote,
   type SolanaPaperLimits, type SolanaSwapIntent } from "../../packages/core/src/solana";
 import {
   buildCreateSolanaSessionInstruction, buildInitializeSolanaVaultInstruction, buildRevokeSolanaSessionsInstruction,
   buildWithdrawSolanaVaultInstruction, buildSetSolanaBreakerInstruction, decodeSolanaVaultAccount, deriveSolanaAta, deriveSolanaVaultAddress,
-  SOLANA_ASSOCIATED_TOKEN_PROGRAM, SOLANA_CLASSIC_TOKEN_PROGRAM, SOLANA_SYSTEM_PROGRAM, SOLANA_WRAPPED_SOL_MINT,
+  SOLANA_ASSOCIATED_TOKEN_PROGRAM, SOLANA_CLASSIC_TOKEN_PROGRAM, SOLANA_SYSTEM_PROGRAM, SOLANA_VAULT_ACCOUNT_SIZE, SOLANA_WRAPPED_SOL_MINT,
 } from "../../packages/core/src/solana-live";
 import type { Db } from "./db";
 import { createSolanaExecutor, parseSolanaLiveIntent, readSolanaVaultBalances, readSolanaVaultState,
-  reconcileSolanaSubmission, verifySolanaVaultDeployment, type SolanaLiveRecord } from "./solana-executor";
+  reconcileSolanaSubmission, SolanaExecutionError, verifySolanaVaultDeployment, type SolanaLiveRecord } from "./solana-executor";
 import { createSolanaLiveMarket } from "./solana-live-market";
 import { createSolanaLiveRpc, type SolanaLiveRpc } from "./solana-live-rpc";
 import { createSolanaMarket } from "./solana-market";
 import { createSolanaPaperService, type SolanaPaperMarket } from "./solana-paper-service";
+import { readSolanaReferencePrice, solanaReferenceBound, solanaReferenceNotional, solanaReferenceToleranceBps,
+  SolanaReferencePriceError } from "./solana-reference-price";
 import { getSolanaRuntimeDb } from "./solana-runtime-db";
 import { isSolanaTransactionError } from "./solana-settlement";
-import { ensureSolanaTradingSchema, SolanaTradingStore, type SolanaAccountScope, type SolanaPreparedSetup } from "./solana-trading-store";
+import { ensureSolanaTradingSchema, OPERATOR_HOLD, solanaOwnerExpiryProven, solanaQuarantinedWsol, SolanaTradingStore, type SolanaAccountScope,
+  type SolanaLiveBook, type SolanaPreparedSetup } from "./solana-trading-store";
 
 export class SolanaAppRuntimeError extends Error {
   constructor(readonly code: "configuration" | "permission" | "invalid" | "pending", message: string) {
@@ -50,6 +53,13 @@ function publicTrade(record: SolanaLiveRecord) {
   const { intent, signature, preparedAtMs, minOutAmount, quotedOutAmount } = record.submission;
   return { mode: "live" as const, requestId: intent.requestId, intent, signature, status: record.status,
     preparedAtMs, minOutAmount, quotedOutAmount, settlement: record.settlement ?? null };
+}
+/** Chain balances at or above the book: an excess waits to be booked, a shortfall stops trading. */
+function shortOfBook(book: SolanaLiveBook, chain: { cashUsdg: string; wsolRaw: string }): boolean {
+  return BigInt(chain.cashUsdg) < BigInt(book.cashRaw) || BigInt(chain.wsolRaw) < BigInt(book.wsolRaw) + solanaQuarantinedWsol(book);
+}
+function aboveBook(book: SolanaLiveBook, chain: { cashUsdg: string; wsolRaw: string }): boolean {
+  return BigInt(chain.cashUsdg) > BigInt(book.cashRaw) || BigInt(chain.wsolRaw) > BigInt(book.wsolRaw) + solanaQuarantinedWsol(book);
 }
 function tokenProgram(mint: string): string {
   if (mint === SOLANA_USDG_MINT) return TOKEN_2022_PROGRAM;
@@ -92,6 +102,12 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
     if (!object(raw) || raw.mode !== mode || Object.hasOwn(raw, "owner") || Object.hasOwn(raw, "vault")) fail("Invalid Solana trade request.");
     return parseSolanaSwapIntent({ ...raw, mode: "paper" });
   }
+  /** What the session may trade: the book once it exists; before that, chain cash and no SOL. */
+  async function tradableIn(s: SolanaTradingStore, balances: { cashUsdg: string; wsolRaw: string } | null) {
+    const book = await s.liveBook();
+    if (book) return { cashUsdg: book.cashRaw, wsolRaw: book.wsolRaw, quarantinedWsolRaw: solanaQuarantinedWsol(book).toString() };
+    return balances ? { cashUsdg: balances.cashUsdg, wsolRaw: "0", quarantinedWsolRaw: balances.wsolRaw } : null;
+  }
   async function reconcile(s: SolanaTradingStore) {
     for (const pending of await s.pending()) {
       await reconcileSolanaSubmission(rpc(), s, s.scope.owner, pending.submission.intent.requestId, now);
@@ -119,13 +135,17 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
         const snapshot = await read("getAccountInfo", [setup.vault, { encoding: "base64", commitment: "finalized", minContextSlot: slot }]);
         if (!object(snapshot) || !object(snapshot.context) || integer(snapshot.context.slot) < slot || !Object.hasOwn(snapshot, "value")) fail("Invalid owner expiry evidence.");
         let sequence: string | null = null, epoch: string | null = null;
-        if (setup.priorVaultExisted) {
+        if (snapshot.value !== null) {
           if (!object(snapshot.value) || snapshot.value.owner !== setup.programId || snapshot.value.executable !== false || !Array.isArray(snapshot.value.data)
             || snapshot.value.data[1] !== "base64" || typeof snapshot.value.data[0] !== "string") return "pending" as const;
-          const current = decodeSolanaVaultAccount(encoded(snapshot.value.data[0], 2048));
+          const current = decodeSolanaVaultAccount(encoded(snapshot.value.data[0], SOLANA_VAULT_ACCOUNT_SIZE));
+          if (current.owner !== s.scope.owner) return "pending" as const;
           sequence = current.seq.toString(); epoch = current.sessionEpoch.toString();
-          if (current.owner !== s.scope.owner || sequence !== setup.priorSequence || epoch !== setup.priorSessionEpoch) return "pending" as const;
-        } else if (snapshot.value !== null) return "pending" as const;
+        } else if (setup.priorVaultExisted) return "pending" as const;
+        // Only state this kind of transaction must have changed proves it never ran.
+        // Trades advance the sequence independently, so a revoke or session is
+        // proven by its epoch alone, never wedged by a trade that landed meanwhile.
+        if (!solanaOwnerExpiryProven(setup, sequence, epoch)) return "pending" as const;
         confirmedSlot = integer(snapshot.context.slot);
         expiryProof = { reason: "blockhash-expired", blockHeight: String(blockHeight), vaultSequence: sequence, sessionEpoch: epoch, slot: confirmedSlot };
         return "failed" as const;
@@ -208,10 +228,15 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
         balances = await readSolanaVaultBalances(rpc(), vault, live.slot);
         cashTokenAccount = await deriveSolanaAta(vault, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM);
         const book = await s.liveBook();
-        if (book && balances.cashUsdg !== book.cashRaw && balances.wsolRaw === book.wsolRaw && BigInt(balances.cashUsdg) >= BigInt(book.cashRaw)) {
+        // A USDG deposit or anyone's WSOL transfer is booked from finalized state:
+        // capital-in for USDG, zero-basis quarantine for WSOL. Neither blocks exits.
+        if (book && !shortOfBook(book, balances) && aboveBook(book, balances) && !(await s.pending()).length) {
           const observedAtMs = now();
           const finalized = await readSolanaVaultBalances(rpc(), vault, book.slot, "finalized");
-          await s.reconcileCashDeposit({ ...finalized, observedAtMs, commitment: "finalized" });
+          // Unbooked excess is never traded or valued, so failing to book it now (an
+          // owner transaction is pending, say) must not block exits; it retries next read.
+          try { if (!shortOfBook(book, finalized) && aboveBook(book, finalized)) await s.reconcileExternalInflows({ ...finalized, observedAtMs, commitment: "finalized" }); }
+          catch { /* Retried on the next status read. */ }
         }
         if (!session || session.programId !== programId || session.vault !== vault || live.state.session !== session.session || live.state.sessionEpoch.toString() !== session.sessionEpoch) blockers.push("Register an owner-approved live trading permission.");
         else {
@@ -221,14 +246,15 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
         }
         const currentBook = await s.liveBook();
         if (currentBook?.buyPaused) blockers.push("The buying drawdown breaker is paused; exits remain available.");
-        if (currentBook && (currentBook.cashRaw !== balances.cashUsdg || currentBook.wsolRaw !== balances.wsolRaw)) blockers.push("Vault balances changed outside recorded trades; reconcile capital transfers before trading.");
-        if (!currentBook && balances.wsolRaw !== "0") blockers.push("Start the live book with USDG; the cost basis of existing SOL is unknown.");
+        if (currentBook && shortOfBook(currentBook, balances)) blockers.push("Vault balances are below recorded trades; reconcile capital transfers before trading.");
         if (live.state.expiresAt * 1000n <= BigInt(now())) blockers.push("The on-chain trading permission has expired.");
         if (live.state.paused) blockers.push("The on-chain buying breaker is paused; exits remain available.");
       } catch (error) { blockers.push(error instanceof SolanaAppRuntimeError ? error.message : "The configured vault, balances or live permissions could not be verified."); }
       if (!env.MERRYMEN_JUPITER_API_KEY) blockers.push("Configure Jupiter quote access.");
+      if (await s.operatorHeld()) blockers.push(OPERATOR_HOLD);
       if (binding.requestedMode !== "live") blockers.push("Live mode is not selected.");
       if (!binding.limits || binding.limits.expiresAtMs <= now()) blockers.push("Save current Solana trading limits.");
+      else if (binding.requestedMode === "live" && (binding.limits.perTradeWsol === undefined || binding.limits.dailyWsol === undefined)) blockers.push("Save per-trade and daily SOL sell limits for live trading.");
       const pending = (await s.pending()).map(publicTrade);
       if (pending.length) blockers.push("A live trade is awaiting final confirmation.");
       const ownerTransaction = await s.setup();
@@ -239,7 +265,7 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
         automation: { workerOnline: lastSeenAtMs !== null && lastSeenAtMs <= now() && now() - lastSeenAtMs < 90_000, lastSeenAtMs },
         paper: await s.paper().get(scope.owner), limits: binding.limits,
         live: { ready: blockers.length === 0, canExit: blockers.every(item => ["The on-chain buying breaker is paused; exits remain available.", "The buying drawdown breaker is paused; exits remain available."].includes(item)), blockers, programId, vault, cashTokenAccount, session: session?.session ?? null,
-          balances, book: await s.liveBook(), pending, history: (await s.history()).map(publicTrade),
+          balances, tradable: await tradableIn(s, balances), book: await s.liveBook(), pending, history: (await s.history()).map(publicTrade),
           ownerTransaction: ownerTransaction?.signature ? { signature: ownerTransaction.signature, status: ownerTransaction.status, kind: ownerTransaction.kind } : null } };
     },
     async setupPaper(scope: SolanaAccountScope, input: { initialCashRaw: string; limits: SolanaPaperLimits }) {
@@ -265,6 +291,8 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       }
       const cfg = config(), secret = await s.sessionSeed(dek());
       if (!secret) fail("Register an owner-approved live trading permission first.", "permission");
+      let toleranceBps: number;
+      try { toleranceBps = solanaReferenceToleranceBps(env); } catch { return fail("The independent SOL price tolerance is misconfigured.", "configuration"); }
       const sessionKeyPair = await createKeyPairFromPrivateKeyBytes(seed(secret, "The stored trading permission cannot be opened."));
       const vault = await deriveSolanaVaultAddress(cfg.programId, scope.owner), liveRpc = rpc(), quotes = market();
       const executor = createSolanaExecutor({ programId: cfg.programId, programBinarySha256: cfg.hash,
@@ -275,17 +303,22 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
           const observedAtMs = now(), balances = await readSolanaVaultBalances(liveRpc, vault, slot);
           const makeExit = (amountRaw: string, requestId: string) => parseSolanaSwapIntent({ kind: "spl-swap", chain: CHAINS.solana,
             mode: "paper", requestId, inputMint: SOLANA_WRAPPED_SOL_MINT, outputMint: SOLANA_USDG_MINT, amountRaw, slippageBps: current.slippageBps });
-          const held = BigInt(balances.wsolRaw), cash = BigInt(balances.cashUsdg);
+          // Equity is the book's: unbooked or quarantined tokens are never valued.
+          const tradable = (await tradableIn(s, balances))!;
+          const held = BigInt(tradable.wsolRaw), cash = BigInt(tradable.cashUsdg);
           const evidence: Array<{ intent: SolanaSwapIntent; quote: typeof quote }> = [];
           let equity = cash;
-          if (held > 0n && current.inputMint === SOLANA_USDG_MINT) { const markIntent = makeExit(balances.wsolRaw, "live-portfolio-mark");
+          if (held > 0n && current.inputMint === SOLANA_USDG_MINT) { const markIntent = makeExit(tradable.wsolRaw, "live-portfolio-mark");
             const mark = await quotes.quote(markIntent); validateSolanaQuote(mark, markIntent, now()); evidence.push({ intent: markIntent, quote: mark }); equity += BigInt(mark.minOutAmount); }
-          if (current.inputMint === SOLANA_USDG_MINT) { const exitIntent = makeExit(quote.minOutAmount, "live-entry-exit");
-            const exit = await quotes.quote(exitIntent); validateSolanaQuote(exit, exitIntent, now()); evidence.push({ intent: exitIntent, quote: exit }); }
+          // Independent of Jupiter: the build quote's guaranteed output is checked
+          // against Pyth SOL/USD, and a sell is charged at least its reference value.
+          let reference: ReturnType<typeof solanaReferenceBound>;
+          try { reference = solanaReferenceBound(current, await liveRpc.read(read => readSolanaReferencePrice(read, slot, now())), toleranceBps); }
+          catch (error) { if (error instanceof SolanaReferencePriceError) throw new SolanaExecutionError("risk"); throw error; }
           const previous = await s.liveBook(), peak = previous ? BigInt(previous.hwmRaw) : equity;
           for (const item of evidence) validateSolanaQuote(item.quote, item.intent, now());
-          return { observedAtMs, slot: balances.slot, notionalUsdg: current.inputMint === SOLANA_USDG_MINT ? current.amountRaw : quote.outAmount,
-            equityUsdg: equity.toString(), peakEquityUsdg: (peak > equity ? peak : equity).toString(), cashUsdg: balances.cashUsdg, wsolRaw: balances.wsolRaw };
+          return { observedAtMs, slot: balances.slot, notionalUsdg: solanaReferenceNotional(current, quote.outAmount, reference).toString(),
+            equityUsdg: equity.toString(), peakEquityUsdg: (peak > equity ? peak : equity).toString(), cashUsdg: balances.cashUsdg, wsolRaw: balances.wsolRaw, reference };
         },
       });
       return publicTrade(await executor.execute({ ...parsed, mode: "live", owner: scope.owner, vault }));
@@ -295,6 +328,8 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       dek(); const feePayer = await getAddressFromPublicKey((await payer()).publicKey), session = address(input.sessionPublicKey);
       const vault = await deriveSolanaVaultAddress(cfg.programId, scope.owner);
       if (binding.requestedMode !== "live" || JSON.stringify(binding.limits) !== JSON.stringify(limits)) fail("Save the reviewed live trading limits first.", "permission");
+      let sell: ReturnType<typeof requireSolanaLiveSellLimits>;
+      try { sell = requireSolanaLiveSellLimits(limits); } catch { return fail("Save per-trade and daily SOL sell limits before registering live trading.", "permission"); }
       if (new Set([scope.owner, session, vault, feePayer]).size !== 4) fail("Owner, session, vault and fee payer must be separate accounts.");
       const deployment = await verifySolanaVaultDeployment(rpc(), cfg.programId, cfg.hash);
       const prior = await rpc().read(async read => {
@@ -302,15 +337,16 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
         if (!object(found) || !object(found.context) || integer(found.context.slot) < deployment.slot || !Object.hasOwn(found, "value")) fail("The vault account could not be read.");
         if (found.value === null) return null;
         if (!object(found.value) || found.value.owner !== cfg.programId || !Array.isArray(found.value.data) || typeof found.value.data[0] !== "string" || found.value.data[1] !== "base64"
-          || decodeSolanaVaultAccount(encoded(found.value.data[0], 2048)).owner !== scope.owner) fail("The vault account does not match this owner.");
-        return decodeSolanaVaultAccount(encoded(found.value.data[0], 2048));
+          || decodeSolanaVaultAccount(encoded(found.value.data[0], SOLANA_VAULT_ACCOUNT_SIZE)).owner !== scope.owner) fail("The vault account does not match this owner.");
+        return decodeSolanaVaultAccount(encoded(found.value.data[0], SOLANA_VAULT_ACCOUNT_SIZE));
       });
       const instructions: Instruction[] = [];
       if (!prior) instructions.push(buildInitializeSolanaVaultInstruction({ programAddress: cfg.programId, vault, owner: scope.owner }));
       instructions.push(await createAta(scope.owner, vault, SOLANA_USDG_MINT), await createAta(scope.owner, vault, SOLANA_WRAPPED_SOL_MINT),
         await createAta(scope.owner, scope.owner, SOLANA_USDG_MINT), await createAta(scope.owner, scope.owner, SOLANA_WRAPPED_SOL_MINT),
         buildCreateSolanaSessionInstruction({ programAddress: cfg.programId, vault, owner: scope.owner, session,
-          perTrade: BigInt(limits.perTradeUsdg), daily: BigInt(limits.dailyUsdg), maxOps: limits.maxOpsPerDay, expiresAt: BigInt(Math.floor(limits.expiresAtMs / 1000)) }));
+          perTrade: BigInt(limits.perTradeUsdg), daily: BigInt(limits.dailyUsdg), perTradeWsol: sell.perTradeWsol, dailyWsol: sell.dailyWsol,
+          maxOps: limits.maxOpsPerDay, expiresAt: BigInt(Math.floor(limits.expiresAtMs / 1000)) }));
       return prepareOwner(s, instructions, { kind: "session", programId: cfg.programId, vault, session, limits,
         priorVaultExisted: prior !== null, priorSequence: prior?.seq.toString() ?? "0", priorSessionEpoch: prior?.sessionEpoch.toString() ?? "0" });
     },
@@ -327,6 +363,7 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       const live = await readSolanaVaultState(rpc(), cfg.programId, scope.owner);
       if (live.vault !== setup.vault || live.state.session !== session || live.state.perTrade !== BigInt(setup.limits.perTradeUsdg)
         || live.state.daily !== BigInt(setup.limits.dailyUsdg) || live.state.maxOps !== setup.limits.maxOpsPerDay
+        || live.state.perTradeWsol !== BigInt(setup.limits.perTradeWsol ?? "0") || live.state.dailyWsol !== BigInt(setup.limits.dailyWsol ?? "0")
         || live.state.expiresAt !== BigInt(Math.floor(setup.limits.expiresAtMs / 1000)) || live.state.expiresAt * 1000n <= BigInt(now())) fail("The current vault permission does not match the signed limits.");
       await s.registerSession({ programId: cfg.programId, vault: setup.vault, session, sessionEpoch: live.state.sessionEpoch.toString(),
         registrationSignature: input.signature, registeredAtMs: now() }, input.sessionSecretKey, dek());
@@ -345,9 +382,11 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
         if (book) {
           const observedAtMs = now();
           const finalized = await readSolanaVaultBalances(rpc(), vault, book.slot, "finalized");
-          await s.reconcileCashDeposit({ ...finalized, observedAtMs, commitment: "finalized" });
-          book = await s.liveBook();
-          if (amount > BigInt(input.mint === SOLANA_USDG_MINT ? book!.cashRaw : book!.wsolRaw)) fail("The withdrawal exceeds the reconciled vault balance.");
+          // Book any inflow first, so a stranger's WSOL can be withdrawn instead of blocking the owner.
+          if (aboveBook(book, finalized)) await s.reconcileExternalInflows({ ...finalized, observedAtMs, commitment: "finalized" });
+          book = (await s.liveBook())!;
+          const available = input.mint === SOLANA_USDG_MINT ? BigInt(book.cashRaw) : BigInt(book.wsolRaw) + solanaQuarantinedWsol(book);
+          if (amount > available) fail("The withdrawal exceeds the reconciled vault balance.");
         }
         instructions.push(await createAta(scope.owner, scope.owner, input.mint), buildWithdrawSolanaVaultInstruction({ programAddress: cfg.programId, vault, owner: scope.owner,
           mint: input.mint, tokenProgram: program, vaultToken: await deriveSolanaAta(vault, input.mint, program), ownerToken: await deriveSolanaAta(scope.owner, input.mint, program), amount }));

@@ -13,6 +13,7 @@ import { JUPITER_SWAP_PROGRAM, type JupiterCpiRoute } from "./solana-live-market
 import type { SolanaLiveRead, SolanaLiveRpc } from "./solana-live-rpc";
 import { createSolanaLiveRpc } from "./solana-live-rpc";
 import { SOLANA_MAINNET_GENESIS_HASH } from "./solana-rpc";
+import { pythBound } from "./solana-reference-price-fixture";
 
 const key = (n: number) => getBase58Decoder().decode(new Uint8Array(32).fill(n));
 const keyBytes = (value: string) => Buffer.from(getBase58Encoder().encode(value));
@@ -31,9 +32,9 @@ function rpcAccount(data: Buffer, owner: string, executable = false, lamports = 
 }
 function state(owner: string, session: string, seq = 0n, overrides: { paused?: boolean; expiry?: bigint } = {}): Buffer {
   const bytes = Buffer.alloc(SOLANA_VAULT_ACCOUNT_SIZE); Buffer.from(SOLANA_VAULT_DISCRIMINATOR).copy(bytes);
-  let offset = 8; bytes[offset++] = 1; bytes[offset++] = 255;
+  let offset = 8; bytes[offset++] = 2; bytes[offset++] = 255;
   for (const value of [owner, session]) { keyBytes(value).copy(bytes, offset); offset += 32; }
-  for (const value of [1n, seq, overrides.expiry ?? 10_000n, 100_000_000n, CASH]) { bytes.writeBigUInt64LE(value, offset); offset += 8; }
+  for (const value of [1n, seq, overrides.expiry ?? 10_000n, 100_000_000n, CASH, 5_000_000_000n, 50_000_000_000n]) { bytes.writeBigUInt64LE(value, offset); offset += 8; }
   bytes.writeUInt16LE(96, offset); offset += 2; bytes[offset] = Number(overrides.paused ?? false); return bytes;
 }
 function event(submission: SolanaSignedSubmission, amountIn = 1_000_000n, amountOut = 2_000_000n): string {
@@ -60,7 +61,9 @@ async function fixture() {
   const clock = { value: NOW };
   const controls = { upgradeable: false, paused: false, failSend: false, simulationError: false, persistError: false,
     conflict: false, finalized: false, wrongSignature: false, fee: 10_000, riskWrongBalance: false, mintReason: false,
-    riskDelay: 0, substituteCpi: false, badLookup: false, goodLookup: false, stateEpochAfter: false, badRefund: false, tempDonation: false };
+    riskDelay: 0, substituteCpi: false, badLookup: false, goodLookup: false, stateEpochAfter: false, badRefund: false, tempDonation: false,
+    // Pyth SOL/USD with 8 decimals; the fixture route buys 0.002 SOL per USDG, i.e. $500.
+    referencePrice: 50_000_000_000n, referenceAgeMs: 0, forgeFloor: false };
   let record: SolanaLiveRecord | null = null;
   const calls: string[] = [];
   const quote = { source: "jupiter" as const, inputMint: SOLANA_USDG_MINT, outputMint: SOLANA_WRAPPED_SOL_MINT,
@@ -159,10 +162,11 @@ async function fixture() {
     }, async settle(_owner, _id, signature, settlement) {
       assert.equal(signature, record!.submission.signature); record = { submission: record!.submission, status: settlement.status, settlement };
     } },
-    async assessRisk() {
+    async assessRisk({ intent }) {
       clock.value += controls.riskDelay;
+      const reference = pythBound(intent, clock.value - controls.referenceAgeMs, controls.referencePrice, SLOT);
       return { observedAtMs: clock.value, slot: SLOT, notionalUsdg: "1000000", equityUsdg: CASH.toString(), peakEquityUsdg: CASH.toString(),
-        cashUsdg: controls.riskWrongBalance ? "1" : CASH.toString(), wsolRaw: "0" };
+        cashUsdg: controls.riskWrongBalance ? "1" : CASH.toString(), wsolRaw: "0", reference: controls.forgeFloor ? { ...reference, minOutFloor: "1" } : reference };
     } };
   const intent = { kind: "spl-swap", chain: CHAINS.solana, mode: "live", requestId: "actual-test-1", owner, vault,
     inputMint: SOLANA_USDG_MINT, outputMint: SOLANA_WRAPPED_SOL_MINT, amountRaw: "1000000", slippageBps: 100 };
@@ -272,6 +276,21 @@ test("refuses unsafe authority, mutation, simulation, fees, stale safety and ris
   }
 });
 
+test("a build quote below the independent price floor is never signed, persisted or sent", async () => {
+  // At $250/SOL, 1 USDG should buy 0.004 SOL; the route guarantees 0.00198, about half.
+  for (const change of [(f: Awaited<ReturnType<typeof fixture>>) => { f.controls.referencePrice = 25_000_000_000n; },
+    (f: Awaited<ReturnType<typeof fixture>>) => { f.controls.forgeFloor = true; },
+    (f: Awaited<ReturnType<typeof fixture>>) => { f.controls.referenceAgeMs = 121_000; }]) {
+    const f = await fixture(); change(f);
+    await assert.rejects(createSolanaExecutor(f.options).execute(f.intent), /refused: risk/);
+    assert.ok(!f.calls.includes("persist")); assert.ok(!f.calls.includes("send"));
+  }
+  // Within the 3% tolerance of a $510 reference the same route is still admitted.
+  const f = await fixture(); f.controls.referencePrice = 51_000_000_000n;
+  assert.equal((await createSolanaExecutor(f.options).execute(f.intent)).status, "pending");
+  // 1 USDG is 0.001960784 SOL at $510; 97% of that is the floor the route clears.
+  assert.equal(f.getRecord()!.submission.risk.reference.minOutFloor, "1901960");
+});
 test("durability failure or atomic sequence conflict prevents submission", async () => {
   for (const mode of ["persistError", "conflict"] as const) {
     const f = await fixture(); f.controls[mode] = true;

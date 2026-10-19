@@ -69,9 +69,13 @@ The vault PDA uses `["vault", owner]`. The owner alone initializes it, replaces
 sessions, revokes authority, clears the on-chain breaker and withdraws assets.
 Session replacement increments its epoch without resetting the sequence,
 rolling spend history or breaker. The program enforces a positive per-trade
-USDG limit, rolling 24-hour USDG limit, at most 96 operations per rolling day,
-expiry, expected sequence and expected session epoch. Both buys and exits are
-subject to those bounds; exit attempts cannot bypass caps or expiry.
+USDG limit, rolling 24-hour USDG limit, owner-signed per-trade and rolling 24-hour
+WSOL input limits, at most 96 operations per rolling day, expiry, expected
+sequence and expected session epoch. Both buys and exits are subject to those
+bounds; exit attempts cannot bypass caps or expiry. Sells are charged their full
+WSOL input as well as their USDG proceeds, so a session or quote cannot sell the
+position for dust: the worst a compromised session can do in a day is spend the
+signed daily USDG on buys and the signed daily WSOL on sells.
 
 For each swap, the program transfers exactly the authorized input to the token
 account of `["swap", vault, sequence]`. Only that per-sequence authority signs the
@@ -90,6 +94,24 @@ at most 100 bps slippage. Its discriminator is independently tested against
 SHA-256 of the Anchor instruction name. The worker also validates route quantity
 conservation, intermediate balances, allocation and cycles. Unknown instruction
 forms, unrelated setup/cleanup instructions or account substitutions fail closed.
+
+Every live trade, manual or automatic, also clears an **independent price
+floor**. Jupiter supplies the route and quote; Pyth's SOL/USD price account, read
+through the configured Solana RPC, supplies the reference (`worker/src/solana-reference-price.ts`).
+The reference must be owned by the Pyth receiver program, fully verified, the
+SOL/USD feed, at most 120 seconds old and within 1% confidence. The signed
+minimum output may not be more than `MERRYMEN_SOLANA_REFERENCE_TOLERANCE_BPS`
+below the reference (default 300, bounded 50–1000, and always above the trade's
+own slippage). A sell is charged against the USDG limits at the larger of its
+quoted and reference value, so a low quote cannot understate it. USDG is taken
+as $1: a depeg beyond the tolerance refuses trading rather than guessing. The
+executor checks the floor before signing and admission re-verifies it from the
+persisted submission. Off-chain admission also enforces the per-trade and
+rolling daily SOL sell limits the owner saved, which the vault enforces again
+on-chain. The pinned account, receiver program, feed id and `PriceUpdateV2`
+layout were taken from Pyth's documentation without reading mainnet; confirm
+them on mainnet before live. Any mismatch, stale or missing price refuses the
+trade.
 
 Two buy breakers have different roles:
 
@@ -153,13 +175,29 @@ That proves no successful swap; it does **not** prove that no failed attempt
 paid a fee. Such records retain `feeLamports: null`, an unresolved-fee count and
 a reserved fee allowance. The UI identifies incomplete fee totals. Contradictory
 or insufficient evidence leaves the request pending and holds new exposure.
-Owner-operation expiry uses its own finalized lifetime and unchanged-state proof.
+Owner-operation expiry uses its own finalized lifetime and a proof from only the
+state that kind of transaction must change. A revoke or session registration
+always increments the session epoch, so an unchanged epoch proves it never ran,
+however many trades advanced the sequence meanwhile (before this, one trade
+landing during a dropped revoke left every owner control stuck). A withdrawal
+increments the sequence, so admission refuses session trades while one is
+prepared or pending, and preparing one refuses if any trade is pending or has
+run at or after the sequence it read. An unchanged sequence then proves it
+never ran. Resuming buys changes neither; a wrong "failed" leaves only the
+off-chain breaker paused, so expiry alone resolves it. Moved state that could be
+the transaction itself leaves it pending.
 
-The live book starts with USDG only. A fresh finalized increase in USDG with
-unchanged WSOL and no unresolved operation is booked once as capital-in, not
-profit, and raises the high-water mark. Direct WSOL deposits have no established
-cost basis and are rejected by the trading book. Unexplained balance changes
-hold trading until reconciled.
+The live book starts with USDG only. A fresh finalized increase in USDG with no
+unresolved operation is booked once as capital-in, not profit, and raises the
+high-water mark. WSOL that reaches the vault outside recorded trades (anyone can
+send it, and the audit showed one raw unit froze exits and withdrawals) is
+booked once as **quarantined** capital: zero cost basis, never traded or valued,
+and excluded from equity, P&L and the high-water mark. A first book on a vault
+that already holds WSOL starts with that WSOL quarantined. The session trades
+only the recorded position; owner WSOL withdrawals may take quarantined WSOL
+and spend it first. Admission and exits size against the book, so an excess
+that finality has not booked yet blocks nothing. A balance **below** the book
+is never a gift; it holds trading and exits until reconciled.
 
 The app supports owner-signed revocation, USDG/WSOL withdrawal and resuming
 buys. Withdrawals return tokens to the owner's canonical account and remain
@@ -225,6 +263,26 @@ Docker image marker, and rejects using the configured RH fleet service. See
 [hosted deployment](hosted-deploy.md) for role provisioning. This documentation
 records configuration requirements; no service has been deployed by this work.
 
+**Stopping it.** "Kill all agents" on `/you` and Telegram `/kill` turn the
+tenant's Solana strategy off as well as removing the RH grant: the strategy is
+saved disabled with a revision bump, which also refuses any autonomous admission
+already in flight. A self-hosted kill stops every strategy in the local accounts
+file. If the Solana write fails the kill is not reported done: the web returns
+"Kill incomplete" and a retry is safe, and the orchestrator keeps the Telegram
+request pending (nothing arms, no ✅) and retries on its next pass. A kill does
+not revoke the on-chain session; the owner's revoke does that.
+
+An **operator hold** stops all new Solana trades, paper or live, manual or
+automatic, for one tenant or everyone, within one worker tick and without a
+redeploy. Receipt recovery and owner revoke, withdraw and resume transactions
+continue. Holds live in the shared database:
+
+```sh
+npm run solana:hold -- set 0xTENANT --reason "incident 42"   # or: set all --reason "…"
+npm run solana:hold -- list
+npm run solana:hold -- release 0xTENANT                      # or: release all
+```
+
 ## Private configuration and deployment verification
 
 [`.env.solana.example`](../.env.solana.example) contains placeholders only. The
@@ -264,7 +322,9 @@ records; the encryption key belongs in the secret environment, not the database.
 
 Live configuration additionally requires an explicit vault program ID,
 `MERRYMEN_SOLANA_VAULT_SHA256`, `MERRYMEN_STORE_DEK`, a distinct
-`MERRYMEN_SOLANA_FEE_PAYER_SEED`, and fee limits. Both key settings are canonical
+`MERRYMEN_SOLANA_FEE_PAYER_SEED`, and fee limits. `MERRYMEN_SOLANA_REFERENCE_TOLERANCE_BPS`
+optionally widens or narrows the independent price floor; a malformed value
+refuses live trades. Both key settings are canonical
 base64 encodings of 32 bytes. There is no owner-key configuration. Default
 execution fee-plus-rent allowance is 5,000,000 lamports and compute-unit price
 is zero micro-lamports; the executor validates the estimate and actual receipt
@@ -277,6 +337,8 @@ padding**. A local `.so` hash is interchangeable only for an exact-sized
 allocation. A release must verify the reviewed artifact bytes and any known
 zero padding before recording that region hash. The program ID declared in
 `contracts/solana` is a local test identity, not an existing production deployment.
+Account layout version 2 (the WSOL input caps) changed the program, so every
+artifact and region hash recorded before it is obsolete.
 
 ## Verification evidence and remaining release gates
 

@@ -36,6 +36,7 @@ import { getSettingsStore } from "@merrymen/settings-store";
 import { ledgerHasAgent, mintAndNameAgent } from "@/lib/first-name";
 import { deriveKernelAccountAddress } from "@/lib/derive-account";
 import { archiveCurrentGrant, GrantArchiveError, removeSelfHostedGrant } from "@/lib/grant-archive";
+import { stopLocalSolanaForKill, stopSolanaForKill } from "../../../../../worker/src/solana-kill";
 import { readFleetRecoveryView, type FleetRecoveryView } from "../../../../../worker/src/fleet-recovery";
 import { resolveConfig } from "../../../../../worker/src/settings";
 import { workerStale as workerStaleOf } from "@/terminal/worker-stale";
@@ -508,7 +509,7 @@ export async function DELETE(req: Request) {
       }
     }
     await getGrantStore().remove(tenant);
-    return NextResponse.json({ ok: true });
+    return solanaKilled(() => stopSolanaForKill(tenant));
   }
   // The kill switch destroys the session key, NOT the wallet — archived first.
   // The web's Start over removes it the same way, from /api/grants/discard.
@@ -517,6 +518,20 @@ export async function DELETE(req: Request) {
   } catch (e) {
     if (e instanceof GrantArchiveError) return NextResponse.json({ error: e.message, paused: e.paused }, { status: 409 });
     throw e;
+  }
+  return solanaKilled(() => stopLocalSolanaForKill());
+}
+
+/**
+ * "Kill all agents" stops autonomous Solana trading too: the strategy is turned
+ * off with a revision bump that fences any admission already in flight. A kill
+ * that could not do that is reported incomplete, never as done. A retry is safe.
+ */
+async function solanaKilled(stop: () => Promise<unknown>): Promise<NextResponse> {
+  try { await stop(); }
+  catch {
+    return NextResponse.json({ error: "Kill incomplete: your Robinhood Chain agent is stopped, but your Solana strategy could not be stopped yet. Try the kill again.",
+      ownerFacing: true, solana: "not-stopped" }, { status: 503 });
   }
   return NextResponse.json({ ok: true });
 }

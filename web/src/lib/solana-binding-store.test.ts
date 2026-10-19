@@ -4,6 +4,10 @@ import { test, type TestContext } from "node:test";
 import { base58Encode } from "../../../packages/core/src/ids";
 import type { SolanaPaperLimits } from "../../../packages/core/src/solana";
 import { wrapSqlite, translateSchema, type Db } from "../../../worker/src/db";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { stopLocalSolanaForKill, stopSolanaForKill } from "../../../worker/src/solana-kill";
 import { SqlSolanaBindingStore, SolanaBindingError, validateSolanaStrategy } from "./solana-binding-store";
 
 const TENANT = `0x${"11".repeat(20)}` as const, OTHER = `0x${"22".repeat(20)}` as const;
@@ -113,4 +117,64 @@ test("Postgres binding initialization applies the driver migration translation o
   assert.equal(await store.get(TENANT), null);
   assert.ok(statements.includes("ALTER TABLE solana_wallet_bindings ADD COLUMN IF NOT EXISTS strategy_json TEXT"));
   assert.ok(statements.every((sql) => !sql.includes("IF NOT EXISTS IF NOT EXISTS")));
+});
+
+test("a kill turns the strategy off with a revision bump, and is a no-op when there is nothing to stop", async (t) => {
+  const store = fixture(t);
+  assert.equal(await store.disableForKill(TENANT), false, "no binding");
+  await store.bind(TENANT, "did:privy:alice", OWNER);
+  assert.equal(await store.disableForKill(TENANT), false, "no strategy");
+  await store.settings(TENANT, OWNER, 0, "paper", limits);
+  const on = await store.strategy(TENANT, OWNER, 1, strategy);
+  assert.equal(await store.disableForKill(TENANT), true);
+  const off = (await store.get(TENANT))!;
+  assert.deepEqual(off.strategy, { ...strategy, enabled: false }, "the owner's settings are kept, switched off");
+  assert.equal(off.revision, on.revision + 1, "the bump fences admission that captured the old revision");
+  assert.equal(await store.disableForKill(TENANT), false, "already off: no second bump");
+  assert.equal((await store.get(TENANT))!.revision, off.revision);
+  assert.deepEqual(await store.strategyTenants(), [TENANT]);
+  await assert.rejects(store.disableForKill("0xABC" as `0x${string}`), SolanaBindingError);
+});
+test("an unreadable saved strategy is cleared by a kill rather than trusted", async (t) => {
+  const raw = new DatabaseSync(":memory:"); t.after(() => raw.close());
+  const store = new SqlSolanaBindingStore(async () => wrapSqlite(raw), "sqlite", () => NOW);
+  await store.bind(TENANT, "did:privy:alice", OWNER);
+  raw.prepare("UPDATE solana_wallet_bindings SET strategy_json = ? WHERE tenant = ?").run("{ not json", TENANT);
+  assert.equal(await store.disableForKill(TENANT), true);
+  assert.equal((raw.prepare("SELECT strategy_json FROM solana_wallet_bindings").get() as { strategy_json: string | null }).strategy_json, null);
+});
+test("the kill helpers stop the named tenant, or every local strategy self-hosted, and fail loudly", async (t) => {
+  const saved = { home: process.env.MERRYMEN_HOME, hosted: process.env.MERRYMEN_HOSTED, db: process.env.DATABASE_URL };
+  const home = mkdtempSync(path.join(tmpdir(), "solana-kill-"));
+  t.after(() => {
+    for (const [key, value] of [["MERRYMEN_HOME", saved.home], ["MERRYMEN_HOSTED", saved.hosted], ["DATABASE_URL", saved.db]] as const) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+    rmSync(home, { recursive: true, force: true });
+  });
+  process.env.MERRYMEN_HOME = home; delete process.env.DATABASE_URL; delete process.env.MERRYMEN_HOSTED;
+  const store = fixture(t), calls: string[] = [];
+  const spy = Object.assign(Object.create(store), { disableForKill: async (tenant: `0x${string}`) => { calls.push(tenant); return store.disableForKill(tenant); } });
+  // Self-hosted with no accounts file: Solana never ran, nothing to stop, and no file is created.
+  assert.equal(await stopSolanaForKill(TENANT, spy), "none");
+  assert.equal(await stopLocalSolanaForKill(spy), "none");
+  assert.equal(existsSync(path.join(home, "solana-accounts.sqlite")), false); assert.deepEqual(calls, []);
+  // Hosted without the shared database: Solana cannot run there either.
+  process.env.MERRYMEN_HOSTED = "1";
+  assert.equal(await stopSolanaForKill(TENANT, spy), "none");
+  await assert.rejects(stopLocalSolanaForKill(spy), /names its tenant/);
+  // With a database every strategy is turned off, and a failure is thrown, never swallowed.
+  process.env.DATABASE_URL = "postgres://127.0.0.1:1/never-connected";
+  for (const tenant of [TENANT, OTHER]) {
+    await store.bind(tenant, `did:privy:${tenant.slice(2, 8)}`, tenant === TENANT ? OWNER : SECOND);
+    await store.settings(tenant, tenant === TENANT ? OWNER : SECOND, 0, "paper", limits);
+    await store.strategy(tenant, tenant === TENANT ? OWNER : SECOND, 1, strategy);
+  }
+  assert.equal(await stopSolanaForKill(TENANT, spy), "stopped");
+  assert.equal((await store.get(OTHER))!.strategy!.enabled, true, "a hosted kill stops only its own tenant");
+  delete process.env.MERRYMEN_HOSTED;
+  assert.equal(await stopLocalSolanaForKill(spy), "stopped");
+  assert.equal((await store.get(OTHER))!.strategy!.enabled, false);
+  const broken = Object.assign(Object.create(store), { disableForKill: async () => { throw new Error("database unavailable"); } });
+  await assert.rejects(stopSolanaForKill(TENANT, broken), /database unavailable/);
 });

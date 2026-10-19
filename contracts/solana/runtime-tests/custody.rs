@@ -213,6 +213,15 @@ impl Fixture {
         f
     }
     fn session_ix(&self, per_trade: u64, daily: u64) -> Instruction {
+        self.session_caps_ix(per_trade, daily, 100, 300)
+    }
+    fn session_caps_ix(
+        &self,
+        per_trade: u64,
+        daily: u64,
+        per_trade_wsol: u64,
+        daily_wsol: u64,
+    ) -> Instruction {
         Instruction {
             program_id: vault::ID,
             accounts: vault::accounts::OwnerAuthority {
@@ -224,6 +233,8 @@ impl Fixture {
                 session: self.session.pubkey(),
                 per_trade,
                 daily,
+                per_trade_wsol,
+                daily_wsol,
                 max_ops: 10,
                 expires_at: 4_000_000_000,
             }
@@ -394,6 +405,56 @@ impl Fixture {
             }
             .data(),
         }
+    }
+    /// Any swap shape: session-chosen amount, quote, minimum and slippage.
+    #[allow(clippy::too_many_arguments)]
+    async fn custom_ix(
+        &mut self,
+        seq: u64,
+        epoch: u64,
+        buy: bool,
+        amount_in: u64,
+        quote: u64,
+        min_out: u64,
+        bps: u16,
+        mode: u8,
+    ) -> Instruction {
+        let mut ix = self.swap_ix(seq, epoch, if buy { 0 } else { 3 }).await;
+        let n = ix.data.len();
+        // ExecuteSwap data: disc, expected_seq, session_epoch, amount_in, min_out, deadline,
+        // slippage_bps, then the route bytes (u32 length + 32 bytes) at the end.
+        ix.data[24..32].copy_from_slice(&amount_in.to_le_bytes());
+        ix.data[32..40].copy_from_slice(&min_out.to_le_bytes());
+        ix.data[48..50].copy_from_slice(&bps.to_le_bytes());
+        let route = n - 32;
+        ix.data[route + 8] = mode;
+        ix.data[route + 13..route + 21].copy_from_slice(&amount_in.to_le_bytes());
+        ix.data[route + 21..route + 29].copy_from_slice(&quote.to_le_bytes());
+        ix.data[route + 29..route + 31].copy_from_slice(&bps.to_le_bytes());
+        ix
+    }
+    async fn hold_wsol(&mut self, amount: u64) {
+        self.ctx.set_account(
+            &self.output,
+            &token(anchor_spl::token::ID, WSOL, self.vault, amount).into(),
+        );
+        assert_eq!(self.balance(self.output).await, amount);
+    }
+}
+/// The custody program's own error, not a token or runtime failure.
+fn vault_error(
+    result: std::result::Result<(), solana_program_test::BanksClientError>,
+    expected: vault::VaultError,
+) -> bool {
+    use solana_sdk::{instruction::InstructionError, transaction::TransactionError};
+    // Covers both a processed failure and a preflight simulation failure.
+    match result {
+        Ok(()) => false,
+        Err(e) => matches!(
+            e.unwrap(),
+            TransactionError::InstructionError(0, InstructionError::Custom(code))
+                if code == 6000 + expected as u32
+        ),
     }
 }
 #[tokio::test]
@@ -731,4 +792,129 @@ fn jupiter_discriminator_matches_official_anchor_method() {
         SHARED_ROUTE,
         solana_sdk::hash::hash(b"global:shared_accounts_route").to_bytes()[..8]
     );
+}
+
+#[tokio::test]
+#[ignore = "requires the compiled custody SBF artifact; run contracts/solana/test.sh"]
+async fn dust_priced_full_exit_is_refused_by_the_wsol_input_cap() {
+    // Audit VAULT-1: 5000 raw WSOL, a session-chosen quote of 1 and min_out of 1 used to
+    // empty custody for 1 micro-USDG, charged 1 against per_trade=100/daily=150.
+    let mut f = Fixture::new().await;
+    f.hold_wsol(5_000).await;
+    let dust = f.custom_ix(0, 1, false, 5_000, 1, 1, 0, 1).await;
+    assert!(vault_error(
+        f.swap(dust).await,
+        vault::VaultError::RiskLimit
+    ));
+    // The fair-priced full exit is refused as before (and now on input too).
+    let fair = f.custom_ix(0, 1, false, 5_000, 200, 198, 100, 0).await;
+    assert!(vault_error(
+        f.swap(fair).await,
+        vault::VaultError::RiskLimit
+    ));
+    // Just over the per-trade WSOL cap of 100 is refused even at a dust price.
+    let over = f.custom_ix(0, 1, false, 101, 1, 1, 0, 1).await;
+    assert!(vault_error(
+        f.swap(over).await,
+        vault::VaultError::RiskLimit
+    ));
+    assert_eq!(f.balance(f.output).await, 5_000);
+    assert_eq!(f.balance(f.input).await, 1_000);
+    let state = f.state().await;
+    assert_eq!(state.seq, 0);
+    assert!(state.debits.is_empty());
+}
+
+#[tokio::test]
+#[ignore = "requires the compiled custody SBF artifact; run contracts/solana/test.sh"]
+async fn a_session_paused_breaker_does_not_reopen_the_dust_exit() {
+    // Sells stay available while buys are paused, so the input cap must hold there too.
+    let mut f = Fixture::new().await;
+    f.hold_wsol(5_000).await;
+    let pause = Instruction {
+        program_id: vault::ID,
+        accounts: vault::accounts::BreakerAuthority {
+            vault: f.vault,
+            authority: f.session.pubkey(),
+        }
+        .to_account_metas(None),
+        data: vault::instruction::SetBreaker { paused: true }.data(),
+    };
+    f.swap(pause).await.unwrap();
+    assert!(f.state().await.paused);
+    let dust = f.custom_ix(0, 1, false, 5_000, 1, 1, 0, 1).await;
+    assert!(vault_error(
+        f.swap(dust).await,
+        vault::VaultError::RiskLimit
+    ));
+    assert_eq!(f.balance(f.output).await, 5_000);
+    // An exit within the cap still works while paused.
+    let exit = f.custom_ix(0, 1, false, 100, 1, 1, 0, 1).await;
+    f.swap(exit).await.unwrap();
+    assert_eq!(f.balance(f.output).await, 4_900);
+}
+
+#[tokio::test]
+#[ignore = "requires the compiled custody SBF artifact; run contracts/solana/test.sh"]
+async fn sells_record_their_input_and_the_rolling_wsol_budget_survives_replacement() {
+    let mut f = Fixture::new().await;
+    f.hold_wsol(5_000).await;
+    // Generous cash caps so only the WSOL caps can refuse: 100 per sell, 250 a day.
+    let caps = f.session_caps_ix(1_000, 10_000, 100, 250);
+    f.owner_send(vec![caps]).await.unwrap();
+    let first = f.custom_ix(0, 2, false, 100, 1, 1, 0, 1).await;
+    f.swap(first).await.unwrap();
+    let state = f.state().await;
+    assert_eq!(state.debits.len(), 1);
+    assert_eq!(state.debits[0].wsol, 100);
+    assert_eq!(state.debits[0].notional, 1);
+    let second = f.custom_ix(1, 2, false, 100, 1, 1, 0, 1).await;
+    f.swap(second).await.unwrap();
+    let third = f.custom_ix(2, 2, false, 100, 1, 1, 0, 1).await;
+    assert!(vault_error(
+        f.swap(third).await,
+        vault::VaultError::RiskLimit
+    ));
+    let rest = f.custom_ix(2, 2, false, 50, 1, 1, 0, 1).await;
+    f.swap(rest).await.unwrap();
+    assert_eq!(f.balance(f.output).await, 4_750);
+    // A replacement session never resets the rolling WSOL history.
+    let replacement = f.session_caps_ix(1_000, 10_000, 100, 250);
+    f.owner_send(vec![replacement]).await.unwrap();
+    let after = f.custom_ix(3, 3, false, 1, 1, 1, 0, 1).await;
+    assert!(vault_error(
+        f.swap(after).await,
+        vault::VaultError::RiskLimit
+    ));
+    let state = f.state().await;
+    assert_eq!(state.seq, 3);
+    assert_eq!(state.debits.iter().map(|d| d.wsol).sum::<u64>(), 250);
+    // Buys charge cash only.
+    let buy = f.swap_ix(3, 3, 0).await;
+    f.swap(buy).await.unwrap();
+    assert_eq!(f.state().await.debits.last().unwrap().wsol, 0);
+}
+
+#[tokio::test]
+#[ignore = "requires the compiled custody SBF artifact; run contracts/solana/test.sh"]
+async fn a_session_without_a_wsol_input_bound_cannot_be_created() {
+    let mut f = Fixture::new().await;
+    for (per_trade_wsol, daily_wsol) in [(0, 0), (0, 100), (200, 100)] {
+        let bad = f.session_caps_ix(100, 150, per_trade_wsol, daily_wsol);
+        let hash = f.ctx.banks_client.get_latest_blockhash().await.unwrap();
+        let tx = Transaction::new_signed_with_payer(
+            &[bad],
+            Some(&f.ctx.payer.pubkey()),
+            &[&f.ctx.payer, &f.owner],
+            hash,
+        );
+        assert!(vault_error(
+            f.ctx.banks_client.process_transaction(tx).await,
+            vault::VaultError::RiskLimit
+        ));
+    }
+    let state = f.state().await;
+    assert_eq!(state.session_epoch, 1);
+    assert_eq!((state.per_trade_wsol, state.daily_wsol), (100, 300));
+    assert_eq!(state.version, vault::VERSION);
 }

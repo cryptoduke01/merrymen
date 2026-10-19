@@ -8,6 +8,7 @@ import {
   parseSolanaRawAmount,
   parseSolanaSwapIntent,
   solanaPaperAgentId,
+  requireSolanaLiveSellLimits,
   validateSolanaPaperLimits,
   validateSolanaQuote,
   type SolanaPaperLimits,
@@ -161,6 +162,18 @@ describe("Solana paper limits", () => {
       delete missing[key];
       assert.throws(() => validateSolanaPaperLimits(missing, NOW));
     }
+  });
+  it("keeps SOL sell limits paired, positive and ordered, and requires them for live", () => {
+    const capped = limits({ perTradeWsol: "250000000", dailyWsol: "1000000000" });
+    assert.deepEqual(validateSolanaPaperLimits(capped, NOW), capped);
+    assert.deepEqual(requireSolanaLiveSellLimits(capped), { perTradeWsol: 250_000_000n, dailyWsol: 1_000_000_000n });
+    for (const patch of [{ perTradeWsol: "1" }, { dailyWsol: "1" }, { perTradeWsol: "0", dailyWsol: "1" },
+      { perTradeWsol: "2", dailyWsol: "1" }, { perTradeWsol: "1", dailyWsol: "1.5" }, { perTradeWsol: 1 as unknown as string, dailyWsol: "1" }]) {
+      assert.throws(() => validateSolanaPaperLimits({ ...limits(), ...patch }, NOW), SolanaPaperValidationError);
+    }
+    // Paper accounts saved before the SOL sell limits still validate, but cannot go live.
+    assert.deepEqual(validateSolanaPaperLimits(limits(), NOW), limits());
+    assert.throws(() => requireSolanaLiveSellLimits(limits()), /SOL sell limits/);
   });
 });
 

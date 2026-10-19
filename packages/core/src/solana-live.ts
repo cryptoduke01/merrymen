@@ -23,7 +23,9 @@ export const SOLANA_JUPITER_SHARED_ROUTE_DISCRIMINATOR = Uint8Array.from([
   193, 32, 155, 51, 65, 214, 156, 129,
 ]);
 export const SOLANA_VAULT_MAX_DAILY_OPS = 96;
-export const SOLANA_VAULT_ACCOUNT_SIZE = 1657;
+/** Account layout version 2 adds the owner-signed WSOL input caps. */
+export const SOLANA_VAULT_VERSION = 2;
+export const SOLANA_VAULT_ACCOUNT_SIZE = 2441;
 export const SOLANA_VAULT_DISCRIMINATOR = Uint8Array.from([
   211, 8, 232, 43, 2, 152, 117, 119,
 ]);
@@ -143,9 +145,12 @@ export interface SolanaVaultState {
   expiresAt: bigint;
   perTrade: bigint;
   daily: bigint;
+  /** Lamports of WSOL a single sell may put in, and over the rolling 24 hours. */
+  perTradeWsol: bigint;
+  dailyWsol: bigint;
   maxOps: number;
   paused: boolean;
-  debits: { timestamp: bigint; notional: bigint }[];
+  debits: { timestamp: bigint; notional: bigint; wsol: bigint }[];
 }
 export interface SolanaSwapExecutedEvent {
   vault: string;
@@ -223,11 +228,13 @@ export function decodeSolanaVaultAccount(bytes: Uint8Array): SolanaVaultState {
     expiresAt = r.i64(),
     perTrade = r.u64(),
     daily = r.u64(),
+    perTradeWsol = r.u64(),
+    dailyWsol = r.u64(),
     maxOps = r.u16(),
     paused = r.u8(),
     count = r.u32();
   if (
-    version !== 1 ||
+    version !== SOLANA_VAULT_VERSION ||
     paused > 1 ||
     maxOps > SOLANA_VAULT_MAX_DAILY_OPS ||
     count > SOLANA_VAULT_MAX_DAILY_OPS
@@ -236,6 +243,7 @@ export function decodeSolanaVaultAccount(bytes: Uint8Array): SolanaVaultState {
   const debits = Array.from({ length: count }, () => ({
     timestamp: r.i64(),
     notional: r.u64(),
+    wsol: r.u64(),
   }));
   // Anchor does not clear old Vec capacity on shrink. Ignore unused allocated bytes.
   return {
@@ -248,6 +256,8 @@ export function decodeSolanaVaultAccount(bytes: Uint8Array): SolanaVaultState {
     expiresAt,
     perTrade,
     daily,
+    perTradeWsol,
+    dailyWsol,
     maxOps,
     paused: paused === 1,
     debits,
@@ -291,12 +301,18 @@ export function buildCreateSolanaSessionInstruction(p: {
   session: string;
   perTrade: bigint;
   daily: bigint;
+  perTradeWsol: bigint;
+  dailyWsol: bigint;
   maxOps: number;
   expiresAt: bigint;
 }): Instruction {
   if (
     p.perTrade <= 0n ||
     p.perTrade > p.daily ||
+    typeof p.perTradeWsol !== "bigint" ||
+    typeof p.dailyWsol !== "bigint" ||
+    p.perTradeWsol <= 0n ||
+    p.perTradeWsol > p.dailyWsol ||
     p.maxOps < 1 ||
     p.maxOps > SOLANA_VAULT_MAX_DAILY_OPS ||
     p.session === p.owner ||
@@ -310,6 +326,8 @@ export function buildCreateSolanaSessionInstruction(p: {
     pubkey(p.session),
     int(p.perTrade),
     int(p.daily),
+    int(p.perTradeWsol),
+    int(p.dailyWsol),
     u16(p.maxOps),
     int(p.expiresAt, true),
   );

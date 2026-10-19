@@ -85,6 +85,7 @@ import {
 } from "./fleet-drain";
 import { getGrantStore } from "./grant-store";
 import { KILL_DONE_TEXT, honourKillRequest, killRequested, writeKillRequest, type KillOutcome } from "./kill-request";
+import { stopSolanaForKill } from "./solana-kill";
 import { CONTROLS_ARMED_FILE, CONTROL_RECEIPTS_SCHEMA, LEGACY_EVENTS_BOT, armOwnerControls, durablePauseLifted, readControlsEvidence, type ControlScope } from "./recovery-reply-arm";
 import { hostedRecipient, telegramSend } from "./mcp/notify";
 import { getIdentityStore } from "./identity-store";
@@ -6044,13 +6045,25 @@ export function setKillConfirmForTest(fn: (tenant: `0x${string}`) => Promise<voi
 }
 
 /**
+ * A Telegram kill stops the tenant's Solana strategy as well as its grant
+ * (the separate Solana worker reads only the binding). It throws when it
+ * cannot, and the kill then stays pending.
+ */
+let stopSolana: (tenant: `0x${string}`) => Promise<unknown> = (tenant) => stopSolanaForKill(tenant);
+/** Test seam: replace the Solana stop. */
+export function setSolanaKillForTest(fn: (tenant: `0x${string}`) => Promise<unknown>): void {
+  stopSolana = fn;
+}
+
+/**
  * Carry out one tenant's pending Telegram kill, if it has one. Called from
  * reconcile, from the three-second order ferry and on shutdown. They can
  * overlap, which is safe: the DELETE is conditional and atomic, so exactly
- * one call sees `removed` and confirms to the owner.
+ * one call sees `removed` and confirms to the owner. The Solana stop runs
+ * first on every pass and is idempotent.
  */
 async function honourKill(tenant: `0x${string}`, nowSec: number): Promise<KillOutcome> {
-  const k = await honourKillRequest(getGrantStore(), tenant, childHome(tenant), nowSec);
+  const k = await honourKillRequest(getGrantStore(), tenant, childHome(tenant), nowSec, () => stopSolana(tenant));
   if (k.outcome === "revoked" && k.removed) {
     log(`${tenant}: Telegram kill honoured — grant removed from the store`);
     void confirmKillDone(tenant);
@@ -6062,7 +6075,7 @@ async function honourKill(tenant: `0x${string}`, nowSec: number): Promise<KillOu
     await forgetTgGroups(tenant);
   }
   if (k.outcome === "superseded") log(`${tenant}: a grant signed after the Telegram kill replaces it — arming that one`);
-  if (k.outcome === "failed") log(`${tenant}: Telegram kill pending, could not remove the grant yet (${k.error}) — nothing arms meanwhile`);
+  if (k.outcome === "failed") log(`${tenant}: Telegram kill pending, not carried out yet (${k.error}) — nothing arms meanwhile`);
   return k;
 }
 

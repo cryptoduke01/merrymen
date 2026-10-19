@@ -229,3 +229,36 @@ test("live buying breaker leaves authenticated exits available and displays actu
   assert.match(ui.container.textContent!, /123\.456789 USDG/); assert.match(ui.container.textContent!, /1\.2 wrapped SOL/);
   assert.match(ui.container.textContent!, /-1\.500001 USDG/); assert.match(ui.container.textContent!, /0\.000005 SOL/);
 });
+
+test("live limits carry the owner's SOL sell bounds in lamports; paper limits do not", async () => {
+  state = initial("live");
+  state.binding.limits = { ...limits, perTradeWsol: "250000000", dailyWsol: "1000000000" } as typeof limits;
+  const saved: Array<Record<string, unknown>> = [];
+  respond = async (path, body) => {
+    if (path === "status") return json(state);
+    if (path === "settings") { saved.push(body!); return json({ binding: state.binding }); }
+    throw new Error("Unexpected fixture route");
+  };
+  await render();
+  assert.match(ui.container.textContent!, /Sales are limited to 0\.25 SOL per trade and 1 SOL per 24 hours/);
+  const consent = ui.container.querySelector("input[type=checkbox]") as HTMLInputElement;
+  await act(async () => { consent.click(); });
+  await ui.click("Save Solana mode and limits");
+  const live = saved[0]!.limits as Record<string, unknown>;
+  assert.equal(live.perTradeWsol, "250000000"); assert.equal(live.dailyWsol, "1000000000");
+  state = initial("paper");
+  await ui.click("Refresh account");
+  const paperRadio = [...ui.container.querySelectorAll("input[type=radio]")][0] as HTMLInputElement;
+  await act(async () => { paperRadio.click(); });
+  await ui.click("Save Solana mode and limits");
+  assert.equal("perTradeWsol" in (saved[1]!.limits as Record<string, unknown>), false);
+  assert.equal(signCount, 0);
+});
+
+test("wrapped SOL sent by someone else is shown held aside, not as trading performance", async () => {
+  state = initial("live");
+  Object.assign(state.runtime.live, { canExit: true, balances: { slot: 9, cashUsdg: "90000000", wsolRaw: "50000001" },
+    book: { realizedPnlUsdgRaw: "0", networkFeesLamports: "10000", quarantinedWsolRaw: "1" } });
+  await render();
+  assert.match(ui.container.textContent!, /0\.000000001 wrapped SOL arrived outside your recorded trades\. It is held aside/);
+});

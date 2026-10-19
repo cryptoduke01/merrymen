@@ -12,26 +12,31 @@ import { makePgDb, wrapSqlite, type Db } from "./db";
 import { ensureSolanaTradingSchema, SolanaTradingStore, type SolanaPreparedSetup } from "./solana-trading-store";
 import type { SolanaLiveSettlement, SolanaSignedSubmission } from "./solana-executor";
 import { createSolanaPaperService } from "./solana-paper-service";
+import { pythBound } from "./solana-reference-price-fixture";
+import { releaseSolanaOperatorHold, setSolanaOperatorHold } from "./solana-operator-hold";
 
 const key = (n: number) => base58Encode(new Uint8Array(32).fill(n));
 const TENANT = `0x${"11".repeat(20)}` as const, OTHER = `0x${"22".repeat(20)}` as const;
 const OWNER = key(20), VAULT = key(21), SESSION = key(22), PROGRAM = SOLANA_VAULT_LOCAL_TEST_PROGRAM;
 const NOW = 1_000_000, CASH = 100_000_000n;
-const limits = { perTradeUsdg: "10000000", dailyUsdg: "50000000", maxOpsPerDay: 20, maxDrawdownBps: 2000, expiresAtMs: NOW + 3_600_000 };
+const limits = { perTradeUsdg: "10000000", dailyUsdg: "50000000", maxOpsPerDay: 20, maxDrawdownBps: 2000, expiresAtMs: NOW + 3_600_000,
+  perTradeWsol: "50000000", dailyWsol: "120000000" };
 const dek = Buffer.alloc(32, 3), sessionSeed = Buffer.alloc(32, 4).toString("base64");
 const strategy = { enabled: true, targetSolBps: 5000, rebalanceBps: 500, tradeUsdgRaw: "1000000", intervalSeconds: 60 };
 function submission(id = "trade-1", seq = "0"): SolanaSignedSubmission {
   const quote = { source: "jupiter" as const, inputMint: SOLANA_USDG_MINT, outputMint: SOLANA_WRAPPED_SOL_MINT,
     inAmount: "1000000", outAmount: "2000000", minOutAmount: "1980000", slippageBps: 100, contextSlot: 1000, quotedAtMs: NOW, expiresAtMs: NOW + 30000 };
-  return { version: 1, intent: { kind: "spl-swap", chain: CHAINS.solana, mode: "live", requestId: id, owner: OWNER, vault: VAULT,
-    inputMint: quote.inputMint, outputMint: quote.outputMint, amountRaw: quote.inAmount, slippageBps: 100 }, programId: PROGRAM,
+  const intent = { kind: "spl-swap" as const, chain: CHAINS.solana, mode: "live" as const, requestId: id, owner: OWNER, vault: VAULT,
+    inputMint: quote.inputMint, outputMint: quote.outputMint, amountRaw: quote.inAmount, slippageBps: 100 };
+  return { version: 1, intent, programId: PROGRAM,
     session: SESSION, feePayer: key(23), sessionEpoch: "1", vaultSequence: seq, signature: `test-signature-${id}`,
     signedTransactionBase64: "dGVzdC1zaWduZWQ=", messageBase64: "dGVzdC1tZXNzYWdl", loadedAddresses: { writable: [], readonly: [] },
     recentBlockhash: key(24), lastValidBlockHeight: "1200", minContextSlot: 1000, minOutAmount: quote.minOutAmount,
     quotedOutAmount: quote.outAmount, inputTokenAccount: key(25), outputTokenAccount: key(26), inputTokenProgram: TOKEN_2022_PROGRAM,
     outputTokenProgram: SOLANA_CLASSIC_TOKEN_PROGRAM, inputBalanceBefore: CASH.toString(), outputBalanceBefore: "0", maxFeeLamports: "3000000",
     feeLamports: "10000", rentLamports: "2039280", preparedAtMs: NOW, safetyObservedAtMs: NOW, quote,
-    risk: { observedAtMs: NOW, slot: 1000, notionalUsdg: "1000000", equityUsdg: CASH.toString(), peakEquityUsdg: CASH.toString(), cashUsdg: CASH.toString(), wsolRaw: "0" } };
+    risk: { observedAtMs: NOW, slot: 1000, notionalUsdg: "1000000", equityUsdg: CASH.toString(), peakEquityUsdg: CASH.toString(), cashUsdg: CASH.toString(), wsolRaw: "0",
+      reference: pythBound(intent, NOW) } };
 }
 function settlement(s: SolanaSignedSubmission, status: "finalized" | "failed" = "finalized"): SolanaLiveSettlement {
   return { status, signature: s.signature, slot: 1001, feeLamports: "10000", amountIn: status === "failed" ? "0" : "600000",
@@ -140,7 +145,8 @@ for (const dialect of ["sqlite", "postgres"] as const) {
     const automatic = new SolanaTradingStore(f.db, f.store.scope, () => NOW, { autonomousRevision: binding.revision });
     const sell = submission("oversized-exit", "1"); sell.intent.inputMint = SOLANA_WRAPPED_SOL_MINT; sell.intent.outputMint = SOLANA_USDG_MINT;
     sell.quote = { ...sell.quote, inputMint: sell.intent.inputMint, outputMint: sell.intent.outputMint, outAmount: "1005000", minOutAmount: "994950" };
-    sell.risk = { ...sell.risk, slot: 1001, cashUsdg: "99400000", wsolRaw: "1980000", notionalUsdg: "1005000" };
+    sell.minOutAmount = sell.quote.minOutAmount; sell.quotedOutAmount = sell.quote.outAmount;
+    sell.risk = { ...sell.risk, slot: 1001, cashUsdg: "99400000", wsolRaw: "1980000", notionalUsdg: "1005000", reference: pythBound(sell.intent, NOW) };
     await assert.rejects(automatic.recordSigned(sell), /strategy trade limit/);
     assert.equal((await f.store.pending()).length, 0);
   });
@@ -239,18 +245,20 @@ test("shutdown while waiting for the database lock prevents new paper and live a
 });
 test("finalized deposits adjust cashflow/HWM once; owner withdrawals remove actual holdings and basis without inventing P&L", async t => {
   const f = await fixture(t), s = submission(); await f.store.recordSigned(s);
-  await assert.rejects(f.store.reconcileCashDeposit({ cashUsdg: "110000000", wsolRaw: "0", slot: 1001, observedAtMs: NOW, commitment: "finalized" }), /pending/);
+  await assert.rejects(f.store.reconcileExternalInflows({ cashUsdg: "110000000", wsolRaw: "0", slot: 1001, observedAtMs: NOW, commitment: "finalized" }), /pending/);
   await f.store.settle(OWNER, s.intent.requestId, s.signature, settlement(s));
   const deposit = { cashUsdg: "109400000", wsolRaw: "1980000", slot: 1002, observedAtMs: NOW, commitment: "finalized" as const };
-  await f.store.reconcileCashDeposit(deposit); await f.store.reconcileCashDeposit(deposit);
+  await f.store.reconcileExternalInflows(deposit); await f.store.reconcileExternalInflows(deposit);
   assert.equal((await f.store.liveBook())!.hwmRaw, "110000000");
-  await assert.rejects(f.store.reconcileCashDeposit({ ...deposit, cashUsdg: "109400001", slot: 1000 }), /finalized USDG/);
-  await assert.rejects(f.store.reconcileCashDeposit({ ...deposit, wsolRaw: "1980001" }), /finalized USDG/);
-  await saveSignedSetup(f.store, { ...setup("withdraw"), mint: SOLANA_USDG_MINT, amountRaw: "1000000" }, "withdraw-cash");
+  await assert.rejects(f.store.reconcileExternalInflows({ ...deposit, cashUsdg: "109400001", slot: 1000 }), /finalized inflows/);
+  await assert.rejects(f.store.reconcileExternalInflows({ ...deposit, cashUsdg: "109399999" }), /below the recorded book/);
+  await assert.rejects(f.store.reconcileExternalInflows({ ...deposit, wsolRaw: "1979999" }), /below the recorded book/);
+  // The settled trade ran at sequence 0, so the vault was at 1 when this was prepared.
+  await saveSignedSetup(f.store, { ...setup("withdraw"), priorVaultExisted: true, priorSequence: "1", priorSessionEpoch: "1", mint: SOLANA_USDG_MINT, amountRaw: "1000000" }, "withdraw-cash");
   await assert.rejects(f.store.finishSetup("withdraw-cash", "finalized"), /slot/);
   await f.store.finishSetup("withdraw-cash", "finalized", 1003); await f.store.finishSetup("withdraw-cash", "finalized", 1003);
   let book = (await f.store.liveBook())!; assert.equal(book.cashRaw, "108400000"); assert.equal(book.hwmRaw, "109000000");
-  await saveSignedSetup(f.store, { ...setup("withdraw"), mint: SOLANA_WRAPPED_SOL_MINT, amountRaw: "990000" }, "withdraw-sol");
+  await saveSignedSetup(f.store, { ...setup("withdraw"), priorVaultExisted: true, priorSequence: "2", priorSessionEpoch: "1", mint: SOLANA_WRAPPED_SOL_MINT, amountRaw: "990000" }, "withdraw-sol");
   await f.store.finishSetup("withdraw-sol", "finalized", 1004);
   book = (await f.store.liveBook())!; assert.equal(book.wsolRaw, "990000"); assert.equal(book.costBasisUsdgRaw, "300000");
   assert.equal(book.realizedPnlUsdgRaw, "0"); assert.equal(book.hwmRaw, "109000000");
@@ -271,7 +279,7 @@ test("drawdown refusal commits a sticky buy pause, survives reopening and still 
   const sell = structuredClone(next); sell.intent.requestId = "exit"; sell.signature = "exit-signature";
   sell.intent.inputMint = SOLANA_WRAPPED_SOL_MINT; sell.intent.outputMint = SOLANA_USDG_MINT; sell.intent.amountRaw = "990000";
   sell.quote = { ...sell.quote, inputMint: sell.intent.inputMint, outputMint: sell.intent.outputMint, inAmount: "990000", outAmount: "1000000", minOutAmount: "990000" };
-  sell.minOutAmount = sell.quote.minOutAmount; sell.quotedOutAmount = sell.quote.outAmount;
+  sell.minOutAmount = sell.quote.minOutAmount; sell.quotedOutAmount = sell.quote.outAmount; sell.risk.reference = pythBound(sell.intent, NOW);
   assert.equal(await reopened.recordSigned(sell), true);
   assert.equal((await reopened.liveBook())!.buyPaused, true);
   await reopened.settle(OWNER, sell.intent.requestId, sell.signature, { ...settlement(sell), amountIn: "990000", amountOut: "1000000" });
@@ -294,3 +302,169 @@ test("failed and expired attempts still consume the daily operation cap and succ
     await assert.rejects(f.store.recordSigned(next), /daily limit/);
   }
 });
+
+/** A WSOL→USDG sell at $500/SOL against the current book, bounded by a fresh reference. */
+function sale(id: string, seq: string, amountRaw: string, book: { slot: number; cash: string; wsol: string }, outAmount?: string) {
+  const s = submission(id, seq), out = outAmount ?? (BigInt(amountRaw) / 2n).toString();
+  s.intent = { ...s.intent, inputMint: SOLANA_WRAPPED_SOL_MINT, outputMint: SOLANA_USDG_MINT, amountRaw };
+  s.quote = { ...s.quote, inputMint: SOLANA_WRAPPED_SOL_MINT, outputMint: SOLANA_USDG_MINT, inAmount: amountRaw, outAmount: out,
+    minOutAmount: (BigInt(out) * 9_900n / 10_000n).toString() };
+  s.minOutAmount = s.quote.minOutAmount; s.quotedOutAmount = out;
+  s.risk = { ...s.risk, slot: book.slot, cashUsdg: book.cash, wsolRaw: book.wsol, reference: pythBound(s.intent, NOW) };
+  s.risk.notionalUsdg = (BigInt(out) > BigInt(s.risk.reference.valueUsdg) ? out : s.risk.reference.valueUsdg);
+  return s;
+}
+
+test("admission re-checks the independent price floor and charges a cheap sell at its reference value", async t => {
+  const f = await fixture(t), first = submission(); await f.store.recordSigned(first);
+  await f.store.settle(OWNER, first.intent.requestId, first.signature, settlement(first));
+  const book = { slot: 1001, cash: "99400000", wsol: "1980000" };
+  // An edited floor, a floor from another trade or a stale price is refused before anything is reserved.
+  for (const forge of [(s: SolanaSignedSubmission) => { s.risk.reference = { ...s.risk.reference, minOutFloor: "1" }; },
+    (s: SolanaSignedSubmission) => { s.risk.reference = pythBound(first.intent, NOW); },
+    (s: SolanaSignedSubmission) => { s.risk.reference = pythBound(s.intent, NOW - 121_000); },
+    (s: SolanaSignedSubmission) => { delete (s.risk as Partial<typeof s.risk>).reference; }]) {
+    const forged = sale("forged", "1", "1000000", book); forge(forged);
+    await assert.rejects(f.store.recordSigned(forged), /independent SOL price evidence/);
+  }
+  // A dust quote cannot sign: its guaranteed output is far below the $500 floor.
+  await assert.rejects(f.store.recordSigned(sale("dust", "1", "1000000", book, "100")), /below the independent SOL price floor/);
+  // 2% under the reference passes the 3% floor, but is charged at the full reference value.
+  const cheap = sale("cheap", "1", "1000000", book, "490000");
+  assert.equal(cheap.risk.notionalUsdg, "500000");
+  assert.equal(await f.store.recordSigned(cheap), true);
+  const row = await f.db.prepare("SELECT notional_raw FROM solana_runtime_submissions WHERE request_id='cheap'").get() as { notional_raw: string };
+  assert.equal(row.notional_raw, "500000");
+  assert.equal((await f.store.pending()).length, 1);
+});
+
+test("live sells are bounded by the signed per-trade and rolling daily SOL sell limits", async t => {
+  const f = await fixture(t), first = submission(); await f.store.recordSigned(first);
+  await f.store.settle(OWNER, first.intent.requestId, first.signature, settlement(first));
+  const revision = (await f.binding.get(TENANT))!.revision;
+  await f.binding.settings(TENANT, OWNER, revision, "live", { ...limits, perTradeWsol: "1000000", dailyWsol: "1500000" });
+  await assert.rejects(f.store.recordSigned(sale("too-big", "1", "1000001", { slot: 1001, cash: "99400000", wsol: "1980000" })), /per-trade SOL sell limit/);
+  const one = sale("sell-1", "1", "1000000", { slot: 1001, cash: "99400000", wsol: "1980000" });
+  assert.equal(await f.store.recordSigned(one), true);
+  await f.store.settle(OWNER, one.intent.requestId, one.signature, { status: "finalized", signature: one.signature, slot: 1002, feeLamports: "10000",
+    amountIn: "1000000", amountOut: "500000", finalizedAtMs: NOW + 1 });
+  const after = { slot: 1002, cash: "99900000", wsol: "980000" };
+  await assert.rejects(f.store.recordSigned(sale("sell-2", "2", "600000", after)), /daily SOL sell limit/);
+  assert.equal(await f.store.recordSigned(sale("sell-3", "2", "500000", after)), true);
+});
+
+test("a live binding saved without SOL sell limits admits no trade", async t => {
+  const f = await fixture(t), revision = (await f.binding.get(TENANT))!.revision;
+  const { perTradeWsol: _p, dailyWsol: _d, ...unbounded } = limits;
+  await f.binding.settings(TENANT, OWNER, revision, "live", unbounded);
+  await assert.rejects(f.store.recordSigned(submission()), /SOL sell limits/);
+  assert.equal((await f.store.pending()).length, 0);
+});
+
+
+
+test("each owner transaction kind is proven expired only by state it must change", async t => {
+  const proof = (vaultSequence: string | null, sessionEpoch: string | null) => ({ reason: "blockhash-expired" as const, blockHeight: "1201", vaultSequence, sessionEpoch, slot: 1002 });
+  const prior = { priorVaultExisted: true, priorSequence: "5", priorSessionEpoch: "1" };
+  for (const [kind, accepted, refused] of [
+    // A trade landing advanced the sequence: a revoke is still proven by its epoch.
+    ["revoke", proof("6", "1"), proof("5", "2")],
+    ["session", proof("6", "1"), proof("5", "2")],
+    // A withdrawal moves the sequence; the epoch is irrelevant.
+    ["withdraw", proof("5", "2"), proof("6", "1")],
+  ] as const) {
+    const f = await fixture(t);
+    await saveSignedSetup(f.store, { ...setup(kind), ...prior, ...(kind === "withdraw" ? { mint: SOLANA_USDG_MINT, amountRaw: "1" } : {}) }, `${kind}-dropped`);
+    await assert.rejects(f.store.finishSetup(`${kind}-dropped`, "failed", 1002, refused), /expiry evidence/, kind);
+    await f.store.finishSetup(`${kind}-dropped`, "failed", 1002, accepted);
+    assert.equal((await f.store.setup())!.status, "failed");
+  }
+  // A session that would have created the vault: absent, or created with epoch 0 by something else.
+  const f = await fixture(t);
+  await saveSignedSetup(f.store, { ...setup("session"), priorVaultExisted: false, priorSequence: "0", priorSessionEpoch: "0" }, "first-session");
+  await assert.rejects(f.store.finishSetup("first-session", "failed", 1002, proof("0", "1")), /expiry evidence/);
+  await f.store.finishSetup("first-session", "failed", 1002, proof(null, null));
+});
+
+
+
+test("an unbooked excess never blocks admission, a shortfall does, and no sale reaches quarantined SOL", async t => {
+  const f = await fixture(t), s = submission(); await f.store.recordSigned(s);
+  await f.store.settle(OWNER, s.intent.requestId, s.signature, settlement(s));
+  // Dust that finality has not booked yet: the sale sizes against the book alone.
+  assert.equal(await f.store.recordSigned(sale("with-dust", "1", "1000000", { slot: 1001, cash: "99400001", wsol: "1980001" })), true);
+  const g = await fixture(t), first = submission(); await g.store.recordSigned(first);
+  await g.store.settle(OWNER, first.intent.requestId, first.signature, settlement(first));
+  await assert.rejects(g.store.recordSigned(sale("whole-chain", "1", "1980001", { slot: 1001, cash: "99400000", wsol: "1980001" })), /quarantined SOL is not traded/);
+  await assert.rejects(g.store.recordSigned(sale("short", "1", "1000000", { slot: 1001, cash: "99400000", wsol: "1979999" })), /below the recorded book/);
+  await assert.rejects(g.store.recordSigned(sale("short-cash", "1", "1000000", { slot: 1001, cash: "99399999", wsol: "1980000" })), /below the recorded book/);
+});
+
+test("a first live book on a vault that already holds WSOL starts with it quarantined instead of refusing forever", async t => {
+  const f = await fixture(t), s = submission(); s.risk.wsolRaw = "7";
+  assert.equal(await f.store.recordSigned(s), true);
+  const book = (await f.store.liveBook())!;
+  assert.equal(book.wsolRaw, "0"); assert.equal(book.quarantinedWsolRaw, "7"); assert.equal(book.costBasisUsdgRaw, "0");
+});
+
+// The new admission and accounting SQL runs on both dialects; CI runs these against PostgreSQL.
+for (const dialect of ["sqlite", "postgres"] as const) {
+  const options = dialect === "postgres" && !process.env.MERRYMEN_TEST_PG_URL ? { skip: "Set MERRYMEN_TEST_PG_URL to an isolated PostgreSQL test database." } : {};
+  test(`${dialect}: an operator hold refuses live admission, manual or automatic, while owner actions continue`, options, async t => {
+    const f = await fixture(t, dialect);
+    await setSolanaOperatorHold(f.db, TENANT, "incident", NOW);
+    await assert.rejects(f.store.recordSigned(submission()), /operator hold/);
+    const binding = await f.binding.strategy(TENANT, OWNER, 1, strategy);
+    await assert.rejects(new SolanaTradingStore(f.db, f.store.scope, () => NOW, { autonomousRevision: binding.revision }).recordSigned(submission("auto")), /operator hold/);
+    assert.equal((await f.store.pending()).length, 0);
+    // Revocation (and any owner transaction) is still prepared and saved.
+    assert.equal(await f.store.saveSetup(setup("revoke")), true);
+    await releaseSolanaOperatorHold(f.db, TENANT);
+    await setSolanaOperatorHold(f.db, "*", "fleet-wide", NOW);
+    await assert.rejects(f.store.recordSigned(submission("everyone")), /operator hold/);
+  });
+  test(`${dialect}: a kill fences a live autonomous admission that captured the strategy before it`, options, async t => {
+    const f = await fixture(t, dialect), binding = await f.binding.strategy(TENANT, OWNER, 1, strategy);
+    const automatic = new SolanaTradingStore(f.db, f.store.scope, () => NOW, { autonomousRevision: binding.revision });
+    assert.equal(await f.binding.disableForKill(TENANT), true);
+    await assert.rejects(automatic.recordSigned(submission()), /strategy changed/);
+    assert.equal((await f.store.pending()).length, 0);
+  });
+  test(`${dialect}: no trade is admitted while a withdrawal is prepared, and a stale withdrawal cannot be prepared`, options, async t => {
+    const f = await fixture(t, dialect);
+    const withdraw = { ...setup("withdraw"), priorVaultExisted: true, priorSequence: "0", priorSessionEpoch: "1", mint: SOLANA_USDG_MINT, amountRaw: "1" };
+    await f.store.saveSetup(withdraw);
+    await assert.rejects(f.store.recordSigned(submission()), /prepared owner withdrawal/);
+    // Once its signing window lapses it can no longer be submitted, so trading resumes.
+    f.clock.value = withdraw.expiresAtMs;
+    const later = submission("later"); later.preparedAtMs = later.safetyObservedAtMs = later.risk.observedAtMs = later.quote.quotedAtMs = f.clock.value;
+    later.quote.expiresAtMs = f.clock.value + 30_000; later.risk.reference = pythBound(later.intent, f.clock.value);
+    assert.equal(await f.store.recordSigned(later), true);
+    await f.store.settle(OWNER, later.intent.requestId, later.signature, { ...settlement(later), finalizedAtMs: f.clock.value + 1 });
+    // The trade ran at sequence 0: a withdrawal still claiming sequence 0 read stale state.
+    await assert.rejects(f.store.saveSetup({ ...withdraw, preparedAtMs: f.clock.value, expiresAtMs: f.clock.value + 60_000 }), /vault changed/);
+    assert.equal(await f.store.saveSetup({ ...withdraw, priorSequence: "1", preparedAtMs: f.clock.value, expiresAtMs: f.clock.value + 60_000 }), true);
+  });
+  test(`${dialect}: one raw WSOL sent to the vault is quarantined at zero basis, outside equity, the HWM and the position (audit dust)`, options, async t => {
+    const f = await fixture(t, dialect), s = submission(); await f.store.recordSigned(s);
+    await f.store.settle(OWNER, s.intent.requestId, s.signature, settlement(s));
+    const before = (await f.store.liveBook())!;
+    const dusted = { cashUsdg: "99400000", wsolRaw: "1980001", slot: 1002, observedAtMs: NOW, commitment: "finalized" as const };
+    await f.store.reconcileExternalInflows(dusted); await f.store.reconcileExternalInflows(dusted);
+    let book = (await f.store.liveBook())!;
+    assert.equal(book.quarantinedWsolRaw, "1"); assert.equal(book.wsolRaw, before.wsolRaw);
+    assert.equal(book.hwmRaw, before.hwmRaw); assert.equal(book.costBasisUsdgRaw, before.costBasisUsdgRaw); assert.equal(book.realizedPnlUsdgRaw, "0");
+    const flows = await f.db.prepare("SELECT kind,mint,amount_raw FROM solana_runtime_cashflows ORDER BY kind").all() as Array<{ kind: string; mint: string; amount_raw: string }>;
+    assert.deepEqual(flows.map(r => ({ kind: r.kind, mint: r.mint, amount_raw: r.amount_raw })), [{ kind: "quarantine", mint: SOLANA_WRAPPED_SOL_MINT, amount_raw: "1" }]);
+    // A USDG deposit and more dust in one finalized read: capital-in and quarantine, booked once each.
+    await f.store.reconcileExternalInflows({ ...dusted, cashUsdg: "109400000", wsolRaw: "1980003", slot: 1003 });
+    book = (await f.store.liveBook())!;
+    assert.equal(book.quarantinedWsolRaw, "3"); assert.equal(book.cashRaw, "109400000"); assert.equal(book.hwmRaw, (BigInt(before.hwmRaw) + 10_000_000n).toString());
+    // The owner can take it out: a WSOL withdrawal spends quarantine first, at zero basis.
+    await saveSignedSetup(f.store, { ...setup("withdraw"), priorVaultExisted: true, priorSequence: "1", priorSessionEpoch: "1", mint: SOLANA_WRAPPED_SOL_MINT, amountRaw: "5" }, "sweep");
+    await f.store.finishSetup("sweep", "finalized", 1004);
+    book = (await f.store.liveBook())!;
+    assert.equal(book.quarantinedWsolRaw, "0"); assert.equal(book.wsolRaw, "1979998");
+    assert.equal(book.costBasisUsdgRaw, (600000n - 600000n * 2n / 1980000n).toString()); assert.equal(book.hwmRaw, (BigInt(before.hwmRaw) + 10_000_000n).toString());
+  });
+}

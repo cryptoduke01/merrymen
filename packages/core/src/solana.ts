@@ -25,6 +25,13 @@ export interface SolanaPaperLimits {
   maxOpsPerDay: number;
   maxDrawdownBps: number;
   expiresAtMs: number;
+  /**
+   * Integer lamports of wrapped SOL one sell may put in, and over the rolling
+   * 24 hours. Live vault sessions require both: the vault charges every sell's
+   * input against them, so a dust quote cannot empty the position.
+   */
+  perTradeWsol?: string;
+  dailyWsol?: string;
 }
 
 export interface SolanaSwapIntent {
@@ -62,12 +69,12 @@ export interface SolanaMint {
   buyBlockedReasons: readonly string[];
 }
 
-function record(value: unknown, keys: readonly string[], label: string): Record<string, unknown> {
+function record(value: unknown, keys: readonly string[], label: string, optional: readonly string[] = []): Record<string, unknown> {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     throw new SolanaPaperValidationError(`${label} must be an object`);
   }
   const input = value as Record<string, unknown>;
-  if (Object.keys(input).some((key) => !keys.includes(key)) || keys.some((key) => !Object.hasOwn(input, key))) {
+  if (Object.keys(input).some((key) => !keys.includes(key) && !optional.includes(key)) || keys.some((key) => !Object.hasOwn(input, key))) {
     throw new SolanaPaperValidationError(`${label} has missing or unsupported fields`);
   }
   return input;
@@ -127,18 +134,34 @@ export function parseSolanaSwapIntent(value: unknown): SolanaSwapIntent {
 
 export function validateSolanaPaperLimits(value: unknown, nowMs: number): SolanaPaperLimits {
   timestamp(nowMs, "nowMs");
-  const input = record(value, ["perTradeUsdg", "dailyUsdg", "maxOpsPerDay", "maxDrawdownBps", "expiresAtMs"], "Solana paper limits");
+  const input = record(value, ["perTradeUsdg", "dailyUsdg", "maxOpsPerDay", "maxDrawdownBps", "expiresAtMs"], "Solana paper limits", ["perTradeWsol", "dailyWsol"]);
   const perTrade = parseSolanaRawAmount(input.perTradeUsdg);
   const daily = parseSolanaRawAmount(input.dailyUsdg);
   if (perTrade > daily) throw new SolanaPaperValidationError("Solana per-trade limit must not exceed the daily limit");
   const expiresAtMs = timestamp(input.expiresAtMs, "expiresAtMs");
   if (expiresAtMs <= nowMs) throw new SolanaPaperValidationError("Solana paper limits have expired");
+  if (Object.hasOwn(input, "perTradeWsol") !== Object.hasOwn(input, "dailyWsol")) {
+    throw new SolanaPaperValidationError("Solana SOL sell limits need both a per-trade and a daily amount");
+  }
+  const wsol = Object.hasOwn(input, "perTradeWsol");
+  if (wsol && parseSolanaRawAmount(input.perTradeWsol) > parseSolanaRawAmount(input.dailyWsol)) {
+    throw new SolanaPaperValidationError("Solana per-trade SOL sell limit must not exceed the daily SOL sell limit");
+  }
   return {
     perTradeUsdg: input.perTradeUsdg as string, dailyUsdg: input.dailyUsdg as string,
     maxOpsPerDay: integer(input.maxOpsPerDay, 1, Number.MAX_SAFE_INTEGER, "maxOpsPerDay"),
     maxDrawdownBps: integer(input.maxDrawdownBps, 1, 10_000, "maxDrawdownBps"),
     expiresAtMs,
+    ...(wsol ? { perTradeWsol: input.perTradeWsol as string, dailyWsol: input.dailyWsol as string } : {}),
   };
+}
+
+/** Live vault sessions are bounded on sell input; refuse limits that would leave it open. */
+export function requireSolanaLiveSellLimits(limits: SolanaPaperLimits): { perTradeWsol: bigint; dailyWsol: bigint } {
+  if (limits.perTradeWsol === undefined || limits.dailyWsol === undefined) {
+    throw new SolanaPaperValidationError("Live Solana trading needs per-trade and daily SOL sell limits");
+  }
+  return { perTradeWsol: parseSolanaRawAmount(limits.perTradeWsol), dailyWsol: parseSolanaRawAmount(limits.dailyWsol) };
 }
 
 /** Revalidate even typed callers: a network response or stored JSON can lie. */

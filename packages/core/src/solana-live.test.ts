@@ -87,16 +87,27 @@ describe("Solana live shared ABI", () => {
       session,
       perTrade: 9007199254740993n,
       daily: 9007199254740999n,
+      perTradeWsol: 250_000_000n,
+      dailyWsol: 1_000_000_000n,
       maxOps: 96,
       expiresAt: 2000000000n,
     });
+    // Argument order is the program's: session, per_trade, daily,
+    // per_trade_wsol, daily_wsol, max_ops, expires_at.
     assert.deepEqual(
-      Array.from(ix.data!.slice(0, 8)),
-      Array.from(disc("global:create_session")),
-    );
-    assert.equal(
-      new DataView(Uint8Array.from(ix.data!).buffer).getBigUint64(40, true),
-      9007199254740993n,
+      Array.from(ix.data!),
+      Array.from(
+        join(
+          disc("global:create_session"),
+          key(session),
+          u64(9007199254740993n),
+          u64(9007199254740999n),
+          u64(250_000_000n),
+          u64(1_000_000_000n),
+          Uint8Array.of(96, 0),
+          u64(2000000000n),
+        ),
+      ),
     );
     assert.deepEqual(
       ix.accounts!.map((a) => a.role),
@@ -126,17 +137,41 @@ describe("Solana live shared ABI", () => {
           session,
           perTrade: 2n,
           daily: 1n,
+          perTradeWsol: 1n,
+          dailyWsol: 1n,
           maxOps: 1,
           expiresAt: 100n,
         }),
       live.SolanaVaultValidationError,
     );
+    // A session with no WSOL input bound would let sells drain the position.
+    for (const [perTradeWsol, dailyWsol] of [
+      [0n, 1n],
+      [2n, 1n],
+    ] as const) {
+      assert.throws(
+        () =>
+          live.buildCreateSolanaSessionInstruction({
+            programAddress,
+            vault: programAddress,
+            owner,
+            session,
+            perTrade: 1n,
+            daily: 1n,
+            perTradeWsol,
+            dailyWsol,
+            maxOps: 1,
+            expiresAt: 100n,
+          }),
+        live.SolanaVaultValidationError,
+      );
+    }
   });
   it("decodes bounded vault data including retained Anchor Vec capacity", () => {
     const data = new Uint8Array(live.SOLANA_VAULT_ACCOUNT_SIZE);
     const prefix = join(
       disc("account:Vault"),
-      Uint8Array.of(1, 254),
+      Uint8Array.of(2, 254),
       key(owner),
       key(session),
       u64(2n),
@@ -144,10 +179,13 @@ describe("Solana live shared ABI", () => {
       u64(2000000000n),
       u64(1000000n),
       u64(2000000n),
+      u64(300n),
+      u64(900n),
       Uint8Array.of(96, 0, 1),
       Uint8Array.of(1, 0, 0, 0),
       u64(100n),
       u64(200n),
+      u64(300n),
     );
     data.set(prefix);
     data[data.length - 1] = 42;
@@ -157,15 +195,30 @@ describe("Solana live shared ABI", () => {
     assert.deepEqual(live.decodeSolanaVaultAccount(padded.subarray(19)), value);
     assert.equal(value.seq, 9007199254740993n);
     assert.equal(value.paused, true);
-    assert.deepEqual(value.debits, [{ timestamp: 100n, notional: 200n }]);
+    assert.equal(value.perTradeWsol, 300n);
+    assert.equal(value.dailyWsol, 900n);
+    assert.deepEqual(value.debits, [
+      { timestamp: 100n, notional: 200n, wsol: 300n },
+    ]);
+    // Version 1 accounts have no WSOL caps and must never be read as capped.
+    const v1 = data.slice();
+    v1[8] = 1;
+    assert.throws(
+      () => live.decodeSolanaVaultAccount(v1),
+      live.SolanaVaultValidationError,
+    );
+    assert.throws(
+      () => live.decodeSolanaVaultAccount(data.slice(0, 1657)),
+      live.SolanaVaultValidationError,
+    );
     const wrongCount = data.slice();
-    wrongCount[117] = 97;
+    wrongCount[133] = 97;
     assert.throws(
       () => live.decodeSolanaVaultAccount(wrongCount),
       live.SolanaVaultValidationError,
     );
     const wrongBool = data.slice();
-    wrongBool[116] = 2;
+    wrongBool[132] = 2;
     assert.throws(
       () => live.decodeSolanaVaultAccount(wrongBool),
       live.SolanaVaultValidationError,

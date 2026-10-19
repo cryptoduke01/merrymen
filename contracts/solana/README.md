@@ -21,7 +21,9 @@ when paused/expired/revoked and increment the sequence to invalidate prepared
 swaps. `OwnerWithdrawal` identifies the amount, mint and consumed sequence.
 
 A session is a signing public key with a positive per-trade cap, a
-rolling 24-hour USDG cap, at most 96 operations per rolling day, and an expiry.
+rolling 24-hour USDG cap, a positive per-trade and rolling 24-hour **WSOL input**
+cap (lamports, per-trade ≤ daily), at most 96 operations per rolling day, and an
+expiry. All of these are owner-signed in `create_session`.
 Replacing a session increments its epoch; it preserves the sequence, debit
 history and breaker. Revocation removes session authority and sets the breaker.
 The session can set the sticky breaker but only the owner can clear it. A breaker
@@ -50,9 +52,19 @@ service. Success increments the sequence and emits `SwapExecuted`; any failed
 check rolls back the CPI, balances, debit history and sequence atomically.
 
 Buy budgets conservatively charge the full authorized USDG input even when dust
-returns. Sell budgets charge actual USDG received, with a preflight check of the
-guaranteed minimum and a final atomic check of actual proceeds. Both directions
-consume the global operation budget. Session replacement never replenishes it.
+returns. Sells are bounded on input: the full authorized WSOL input is charged
+against the WSOL caps, so a session-chosen dust quote cannot sell more than the
+owner signed for, whatever it is priced at (the 2026-10-18 audit's VAULT-1, where
+one sell emptied the position for 1 micro-USDG). Sell proceeds are still charged
+against the USDG caps too, with a preflight check of the guaranteed minimum and a
+final atomic check of actual proceeds. Both directions consume the global
+operation budget. Session replacement never replenishes any of them.
+
+Account layout version 2 (2441 bytes) carries the WSOL caps and a `wsol` field on
+every debit. The program refuses to execute against a version 1 vault, and the
+TypeScript decoder refuses to read one. Changing the layout changed the program:
+every artifact hash recorded before it (`9bb352ad…`, `53c9a7ba…`, `ee04ea0e…`,
+`dfb7617c…`) describes a binary that will never ship.
 
 ## Initial live asset scope
 
