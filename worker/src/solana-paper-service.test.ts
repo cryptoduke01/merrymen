@@ -7,6 +7,8 @@ import { CHAINS, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM, base58Encode } from "../.
 import type { SolanaMint, SolanaQuote, SolanaSwapIntent } from "../../packages/core/src/solana";
 import { SolanaPaperStore } from "./solana-paper-store";
 import { createSolanaPaperService, type SolanaPaperMarket } from "./solana-paper-service";
+import { createSolanaMarket, SolanaMarketError } from "./solana-market";
+import { SOLANA_MAINNET_GENESIS_HASH } from "./solana-rpc";
 import { paperUsdgRaw, runSolanaPaperCommand } from "./solana-paper-command";
 
 const OWNER = base58Encode(new Uint8Array(32).fill(7));
@@ -172,6 +174,96 @@ describe("Solana paper service", () => {
     } finally {
       if (saved === undefined) delete process.env.MERRYMEN_HOSTED; else process.env.MERRYMEN_HOSTED = saved;
     }
+  });
+});
+
+describe("Solana paper dust", () => {
+  /**
+   * The audit's case through the real Jupiter quote validation: a cheap
+   * 6-decimal token at 1,000 units per micro-USDG, floor arithmetic, a fixed
+   * clock. RPC and Jupiter are answered in-process; nothing leaves the test.
+   */
+  function dustHarness() {
+    const home = mkdtempSync(path.join(tmpdir(), "solana-paper-dust-"));
+    const store = new SolanaPaperStore(path.join(home, "paper.sqlite"), { now: () => NOW });
+    cleanup.push(() => { try { store.close(); } catch {} rmSync(home, { recursive: true, force: true }); });
+    const CHEAP = base58Encode(new Uint8Array(32).fill(9));
+    const SLOT = 300_000_000;
+    const quotes: string[] = [];
+    /** Raw amounts Jupiter is unavailable for. */
+    const down = new Set<string>();
+    const fetcher: typeof fetch = async (input, init) => {
+      const url = new URL(String(input));
+      if (url.origin === "https://api.jup.ag") {
+        const q = url.searchParams, amount = BigInt(q.get("amount")!), slippage = BigInt(q.get("slippageBps")!);
+        quotes.push(`${q.get("inputMint") === CHEAP ? "sell" : "buy"}:${amount}`);
+        if (down.has(q.get("amount")!)) return new Response("unavailable", { status: 503 });
+        const out = q.get("inputMint") === SOLANA_USDG_MINT ? amount * 1000n : amount / 1000n;
+        const route = [{ percent: 100, swapInfo: { ammKey: OTHER, inputMint: q.get("inputMint"), outputMint: q.get("outputMint"),
+          inAmount: amount.toString(), outAmount: out.toString() } }];
+        return new Response(JSON.stringify({ inputMint: q.get("inputMint"), outputMint: q.get("outputMint"), inAmount: amount.toString(),
+          outAmount: out.toString(), otherAmountThreshold: (out * (10_000n - slippage) / 10_000n).toString(), swapMode: "ExactIn",
+          slippageBps: Number(slippage), contextSlot: SLOT, routePlan: route }));
+      }
+      const body = JSON.parse(String(init?.body));
+      const result = body.method === "getGenesisHash" ? SOLANA_MAINNET_GENESIS_HASH : body.method === "getSlot" ? SLOT : null;
+      return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, result }));
+    };
+    const real = createSolanaMarket({ env: { MERRYMEN_SOLANA_RPC_MAINNET: "https://rpc.example.test/", MERRYMEN_JUPITER_API_KEY: "fixture-key" }, fetch: fetcher, now: () => NOW });
+    const market: SolanaPaperMarket = {
+      readMint: async (address) => ({ address, program: address === SOLANA_USDG_MINT ? TOKEN_2022_PROGRAM : TOKEN_PROGRAM,
+        decimals: 6, slot: SLOT, observedAtMs: NOW, buyBlockedReasons: [] }),
+      quote: (intent) => real.quote(intent),
+    };
+    store.create(OWNER, "1000000000", { perTradeUsdg: "25000000", dailyUsdg: "100000000", maxOpsPerDay: 20, maxDrawdownBps: 1000, expiresAtMs: NOW + 86_400_000 }, NOW);
+    const service = createSolanaPaperService(store, market, () => NOW);
+    const order = (requestId: string, side: "buy" | "sell", amountRaw: string): SolanaSwapIntent => ({
+      kind: "spl-swap", chain: CHAINS.solana, mode: "paper", requestId, amountRaw, slippageBps: 100,
+      inputMint: side === "buy" ? SOLANA_USDG_MINT : CHEAP, outputMint: side === "buy" ? CHEAP : SOLANA_USDG_MINT,
+    });
+    return { store, service, order, quotes, down, CHEAP };
+  }
+
+  it("a partial sell's unquotable remainder no longer blocks buys; it is valued at zero and recorded", async () => {
+    const h = dustHarness();
+    const buy = await h.service.trade(OWNER, h.order("buy-1", "buy", "1000000"));
+    assert.equal(buy.outputAmountRaw, "990000000");
+    await h.service.trade(OWNER, h.order("sell-most", "sell", (990_000_000n - 901n).toString()));
+    assert.deepEqual(h.store.get(OWNER)!.positions.map((p) => p.amountRaw), ["901"]);
+    const before = h.store.get(OWNER)!;
+
+    const next = await h.service.trade(OWNER, h.order("buy-2", "buy", "1000000"));
+    assert.equal(next.side, "buy");
+    assert.deepEqual(next.zeroValuedMints, [h.CHEAP], "the dust valuation is recorded on the receipt");
+    assert.ok(h.quotes.includes("sell:901"), "the dust was quoted at its exact size, not skipped");
+    const after = h.store.get(OWNER)!;
+    assert.equal(after.hwmRaw, before.hwmRaw, "zero never raises the peak");
+    assert.deepEqual(after.positions.map((p) => p.amountRaw), [(901n + 990_000_000n).toString()], "the dust joins the new lot");
+  });
+
+  it("dust alone cannot be sold, and says so, while a failed mark still blocks every buy", async () => {
+    const h = dustHarness();
+    await h.service.trade(OWNER, h.order("buy-1", "buy", "1000000"));
+    await h.service.trade(OWNER, h.order("sell-most", "sell", (990_000_000n - 901n).toString()));
+    await assert.rejects(h.service.trade(OWNER, h.order("sell-dust", "sell", "901")),
+      (error: unknown) => error instanceof SolanaMarketError && error.code === "zero-output" && /too small to trade/.test(error.message));
+    // A position whose mark fails for any other reason is never valued at zero.
+    // Here the dust's own mark is unavailable, not zero: the buy is refused.
+    const before = h.store.get(OWNER)!;
+    h.down.add("901");
+    await assert.rejects(h.service.trade(OWNER, h.order("buy-2", "buy", "1000000")), (error: unknown) => !(error instanceof SolanaMarketError && error.code === "zero-output"));
+    assert.deepEqual(h.store.get(OWNER), before);
+    h.down.clear();
+    assert.deepEqual((await h.service.trade(OWNER, h.order("buy-2", "buy", "1000000"))).zeroValuedMints, [h.CHEAP]);
+  });
+
+  it("an entry whose exit would be dust is still refused as a one-way buy", async () => {
+    const h = dustHarness();
+    const before = h.store.get(OWNER)!;
+    // 1 micro-USDG buys 990 units, whose exit quotes nothing.
+    await assert.rejects(h.service.trade(OWNER, h.order("tiny", "buy", "1")),
+      (error: unknown) => error instanceof SolanaMarketError && error.code === "zero-output");
+    assert.deepEqual(h.store.get(OWNER), before);
   });
 });
 

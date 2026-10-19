@@ -256,6 +256,23 @@ describe("Jupiter paper quotes", () => {
       await assert.rejects(fixture({ quote: rawQuote({ otherAmountThreshold }) }).market.quote(INTENT), safeError);
     }
   });
+  it("reports a well-formed quote with no minimum output as dust, distinct from an invalid quote", async () => {
+    // 1 raw unit at 1% slippage floors to 0, as does an output of 0.
+    for (const outAmount of ["0", "1"]) {
+      await assert.rejects(fixture({ quote: rawQuote({ outAmount, otherAmountThreshold: "0", routePlan: [] }) }).market.quote(INTENT), marketError("zero-output"));
+    }
+    // Anything else about the answer wrong, or an output whose floor is not
+    // zero, stays an invalid quote: dust is never inferred from a bad reply.
+    for (const override of [
+      { outAmount: "2", otherAmountThreshold: "0" }, { outAmount: "0", otherAmountThreshold: "1" },
+      { outAmount: "0", otherAmountThreshold: "0", inputMint: OTHER }, { outAmount: "0", otherAmountThreshold: "0", inAmount: "999999" },
+      { outAmount: "0", otherAmountThreshold: "0", slippageBps: 50 }, { outAmount: "0", otherAmountThreshold: "0", swapMode: "ExactOut" },
+      { outAmount: "0", otherAmountThreshold: "0", error: "no route" }, { outAmount: "-1", otherAmountThreshold: "0" },
+      { outAmount: 0, otherAmountThreshold: "0" }, { outAmount: "0", otherAmountThreshold: 0 },
+    ]) {
+      await assert.rejects(fixture({ quote: rawQuote(override) }).market.quote(INTENT), marketError("invalid-quote"), JSON.stringify(override));
+    }
+  });
   it("requires an actual connected route; supports split and multi-hop quotes", async () => {
     const route = rawQuote().routePlan;
     for (const mutate of [

@@ -608,3 +608,40 @@ test("a renewal changes only the limits it names, validates them, and never rese
   assert.throws(() => store.commit({ ...nextArgs, intent: intent("big", "51"), quote: quote(intent("big", "51"), "20", NOW + 10), expectedVersion: 3 }), errorCode("per_trade_limit"));
   assert.equal(store.commit({ ...nextArgs, expectedVersion: 3 }).version, 4);
 });
+
+test("a held mint valued at zero is checked against the book and can only tighten the drawdown limit", (t) => {
+  const { store } = fixture(t);
+  // limits(): 20% drawdown. 250 of 1000 cash buys 1000 units of TOKEN.
+  store.create(OWNER, "1000", limits(), NOW);
+  store.commit(commitArgs({ intent: intent("dust", "250"), quote: quote(intent("dust", "250"), "1000") }));
+  const next = intent("next", "10");
+  const args = (extra: Partial<SolanaPaperCommit>) => commitArgs({ intent: next, quote: quote(next, "20"), expectedVersion: 1, ...extra });
+  for (const extra of [
+    { zeroValuedMints: [TOKEN2] }, { zeroValuedMints: [TOKEN, TOKEN] }, { zeroValuedMints: [TOKEN], marks: [mark("1000", "200")] },
+    { zeroValuedMints: "TOKEN" as unknown as string[] }, { zeroValuedMints: [] }, { zeroValuedMints: [7 as unknown as string] },
+  ] as Partial<SolanaPaperCommit>[]) {
+    assert.throws(() => store.commit(args(extra)), errorCode("invalid_marks"), JSON.stringify(extra));
+  }
+  // Marked at 200, equity is 950 of a 1000 peak; valued at zero it is 750, a
+  // 25% drawdown, so the zero valuation blocks a buy that a mark would allow.
+  assert.throws(() => store.commit(args({ zeroValuedMints: [TOKEN] })), errorCode("drawdown_limit"));
+  assert.equal(store.get(OWNER)!.hwmRaw, "1000");
+  assert.equal(store.get(OWNER)!.version, 1);
+  const marked = store.commit(args({ marks: [mark("1000", "200")] }));
+  assert.equal(marked.zeroValuedMints, undefined);
+});
+
+test("dust valued at zero lets a buy proceed and is recorded on the receipt", (t) => {
+  const { store } = fixture(t);
+  store.create(OWNER, "1000", limits(), NOW);
+  store.commit(commitArgs());
+  // A partial sell leaves 1 raw unit, which no route will buy back.
+  const partial = intent("partial", "199", "sell");
+  store.commit(commitArgs({ intent: partial, quote: quote(partial, "99"), expectedVersion: 1 }));
+  const next = intent("next", "100", "buy", TOKEN2);
+  const receipt = store.commit(commitArgs({ intent: next, quote: quote(next, "50"), zeroValuedMints: [TOKEN], expectedVersion: 2 }));
+  assert.deepEqual(receipt.zeroValuedMints, [TOKEN]);
+  assert.deepEqual(store.findTrade(OWNER, "next")!.zeroValuedMints, [TOKEN]);
+  assert.deepEqual(store.get(OWNER)!.positions.map((p) => [p.mint, p.amountRaw]), [[TOKEN, "1"], [TOKEN2, "50"]]);
+  assert.equal(store.get(OWNER)!.hwmRaw, "1000", "a zero valuation never raises the peak");
+});

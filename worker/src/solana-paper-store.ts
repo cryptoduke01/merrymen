@@ -68,6 +68,8 @@ export interface SolanaPaperReceipt {
   safetyObservedAtMs: number;
   /** Recorded buy exit evidence; this is not an executed exit. */
   buyExitQuote?: SolanaQuote;
+  /** Held mints valued at zero for this decision: no route returned any output for them. */
+  zeroValuedMints?: string[];
   side: "buy" | "sell";
   createdAtMs: number;
   version: number;
@@ -111,6 +113,13 @@ export interface SolanaPaperCommit {
   tokenDecimals: number;
   /** All current positions at exact full size, or [] for an exit during outage. */
   marks: SolanaQuote[];
+  /**
+   * Held mints whose full-size exit quote returned no output at all (dust).
+   * Each is valued at zero, the most conservative value: it can only lower
+   * equity, so it never raises the peak or loosens the drawdown limit. Never
+   * use it for a mark that failed; a failed mark blocks the buy.
+   */
+  zeroValuedMints?: string[];
   expectedVersion: number;
   /** Preparation timestamp only; risk checks use the store clock after locking. */
   nowMs: number;
@@ -360,15 +369,24 @@ export function applySolanaPaperCommit(bookInput: SolanaPaperBook, input: Solana
   if (recentNotionals.length >= book.limits.maxOpsPerDay) fail("operation_limit");
   if (recentNotionals.reduce((sum, raw) => sum + BigInt(raw), 0n) + notional > BigInt(book.limits.dailyUsdg)) fail("daily_limit");
 
+  const zeroValued = input.zeroValuedMints ?? [];
+  if (!Array.isArray(zeroValued) || zeroValued.length > SOLANA_PAPER_MAX_POSITIONS || new Set(zeroValued).size !== zeroValued.length
+    || zeroValued.some((mint) => !book.positions.some((held) => held.mint === mint))) fail("invalid_marks");
+
   const cashBefore = BigInt(book.cashRaw);
   let equityBefore = cashBefore;
   // Explicit degraded exit mode: [] permits selling without other assets'
   // feeds. Partial or stale marks never silently masquerade as a full book.
-  const completeMarks = side === "buy" || input.marks.length > 0;
+  const completeMarks = side === "buy" || input.marks.length > 0 || zeroValued.length > 0;
   if (completeMarks) {
-    if (input.marks.length !== book.positions.length) fail("invalid_marks");
+    if (input.marks.length + zeroValued.length !== book.positions.length) fail("invalid_marks");
     for (const held of book.positions) {
       const mark = input.marks.find((quote) => quote.inputMint === held.mint);
+      if (zeroValued.includes(held.mint)) {
+        // Dust no route will buy is worth nothing here, never an extrapolation.
+        if (mark) fail("invalid_marks");
+        continue;
+      }
       if (!mark) fail("invalid_marks");
       const markIntent: SolanaSwapIntent = {
         kind: "spl-swap", chain: CHAINS.solana, mode: "paper", requestId: "mark",
@@ -424,6 +442,7 @@ export function applySolanaPaperCommit(bookInput: SolanaPaperBook, input: Solana
     quote: structuredClone(input.quote), side, createdAtMs: nowMs, version: book.version,
     safetyObservedAtMs: input.safetyObservedAtMs,
     ...(side === "buy" ? { buyExitQuote: structuredClone(input.buyExitQuote!) } : {}),
+    ...(zeroValued.length ? { zeroValuedMints: [...zeroValued] } : {}),
     inputAmountRaw: amountIn.toString(), outputAmountRaw: amountOut.toString(),
     notionalUsdgRaw: notional.toString(), realizedPnlRaw: realized.toString(),
   };

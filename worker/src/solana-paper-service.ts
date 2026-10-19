@@ -10,6 +10,7 @@ import {
   type SolanaQuote,
   type SolanaSwapIntent,
 } from "../../packages/core/src/solana";
+import { SolanaMarketError } from "./solana-market";
 import { solanaPaperIntentFingerprint, type SolanaPaperCommit, type SolanaPaperReceipt, type SolanaPaperSnapshot } from "./solana-paper-store";
 
 const TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
@@ -113,13 +114,24 @@ export function createSolanaPaperService(
     if (exitQuote && exitIntent) validateSolanaQuote(exitQuote, exitIntent, now());
     // Existing holdings must have current executable-sized exit quotes before
     // another buy. An unrelated illiquid holding must not stop an exit.
-    const marks = valuePortfolio && buying ? await mapBounded(book.positions, (position, index) =>
-      market.quote(parseSolanaSwapIntent({
-        kind: "spl-swap", chain: CHAINS.solana, mode: "paper", requestId: `mark-${index}`,
-        inputMint: position.mint, outputMint: SOLANA_USDG_MINT,
-        amountRaw: position.amountRaw, slippageBps: intent.slippageBps,
-      }))) : [];
-    return { intent, quote, exitQuote, inputMint, outputMint, marks, version: book.version };
+    const quoted = valuePortfolio && buying ? await mapBounded(book.positions, async (position, index) => {
+      try {
+        return await market.quote(parseSolanaSwapIntent({
+          kind: "spl-swap", chain: CHAINS.solana, mode: "paper", requestId: `mark-${index}`,
+          inputMint: position.mint, outputMint: SOLANA_USDG_MINT,
+          amountRaw: position.amountRaw, slippageBps: intent.slippageBps,
+        }));
+      } catch (error) {
+        // Dust no route will buy (a partial sell's remainder) is valued at
+        // zero and recorded, rather than blocking every later buy. Any other
+        // failure, an outage included, still blocks: never a zero valuation.
+        if (error instanceof SolanaMarketError && error.code === "zero-output") return null;
+        throw error;
+      }
+    }) : [];
+    const marks = quoted.filter((mark): mark is SolanaQuote => mark !== null);
+    const zeroValuedMints = book.positions.filter((_, index) => quoted[index] === null).map((position) => position.mint);
+    return { intent, quote, exitQuote, inputMint, outputMint, marks, zeroValuedMints, version: book.version };
   }
 
   return {
@@ -151,6 +163,7 @@ export function createSolanaPaperService(
       }
       return store.commit({
         owner, intent, quote: prepared.quote, marks: prepared.marks,
+        ...(prepared.zeroValuedMints.length ? { zeroValuedMints: prepared.zeroValuedMints } : {}),
         buyExitQuote: prepared.exitQuote ?? undefined,
         safetyObservedAtMs: Math.min(prepared.inputMint.observedAtMs, prepared.outputMint.observedAtMs),
         tokenDecimals: intent.inputMint === SOLANA_USDG_MINT ? prepared.outputMint.decimals : prepared.inputMint.decimals,
