@@ -77,19 +77,35 @@ function tokenData(mint: string, authority: string, amount: bigint, options: { n
 }
 
 /** A fake mainnet that executes recovery transactions with the program's constraints. */
+/** Blocks the finalized commitment trails the tip by. */
+const FINALITY_LAG = 32;
+type Behavior = "land" | "drop" | "fail" | "reject" | "late";
 class FakeChain {
   accounts = new Map<string, Account>();
   slot = 1_000; height = 5_000;
   genesis = SOLANA_MAINNET_GENESIS_HASH;
+  /** Distinct transactions, in the order first submitted. Rebroadcasts of the same bytes are counted in `broadcasts`. */
   sent: { signature: string; instructions: Decoded[]; wire: string }[] = [];
+  broadcasts = 0;
   calls: string[] = [];
   statuses = new Map<string, { slot: number; err: unknown; polls: number }>();
-  /** Per-send behavior, in order: land (default), drop (never lands) or fail (lands with an error). */
-  behaviors: ("land" | "drop" | "fail" | "reject")[] = [];
-  /** Runs before each send executes, e.g. a session trade racing the revoke. */
+  /**
+   * Per transaction, in the order first submitted: land (default, at once), drop
+   * (accepted, never lands), fail (lands with an error), reject (refused every
+   * time, as by a failed simulation) or late (accepted, lands one block before
+   * its blockhash expires). Rebroadcasts of identical bytes are the same transaction.
+   */
+  behaviors: Behavior[] = [];
+  behaviorOf = new Map<string, Behavior>();
+  pending = new Map<string, { instructions: Decoded[]; landAt: number; lastValid: number }>();
+  /** Last valid block height of every blockhash handed out. */
+  blockhashes = new Map<string, number>();
+  /** Runs before each new transaction executes, e.g. a session trade racing the revoke. */
   beforeSend?: (index: number) => void;
-  /** Statuses report "confirmed" this many times before "finalized". */
+  /** Statuses report "confirmed" to this many owner polls before "finalized". */
   confirmedPolls = 1;
+  /** Never report "finalized". */
+  holdFinality = false;
   vault = "";
   constructor(readonly program: string = PROGRAM) {}
 
@@ -126,6 +142,28 @@ class FakeChain {
     this.accounts.set(dataAddress, { owner: LOADER, lamports: 1n, data: Buffer.concat([header, binary]) });
   }
   token(address: string) { const a = this.accounts.get(address); return a ? a.data.readBigUInt64LE(64) : null; }
+  /** Time passes: about one block per 400 ms, at least one block per wait. Late transactions land when their block comes. */
+  tick(ms: number) {
+    for (let blocks = Math.max(1, Math.ceil(ms / 400)); blocks > 0; blocks--) {
+      this.slot++; this.height++;
+      for (const [signature, tx] of this.pending) {
+        if (this.height > tx.lastValid) { this.pending.delete(signature); continue; }
+        if (this.height >= tx.landAt) { this.pending.delete(signature); this.land(signature, tx.instructions, "land"); }
+      }
+    }
+  }
+  /** Executes a transaction in a block. Returns false when it cannot pass simulation. */
+  land(signature: string, instructions: Decoded[], behavior: "land" | "fail"): boolean {
+    const snapshot = new Map([...this.accounts].map(([k, v]) => [k, { ...v, data: Buffer.from(v.data) }]));
+    let err: unknown = null;
+    try { for (const ix of instructions) this.execute(ix); }
+    catch { this.accounts = snapshot; err = { InstructionError: [0, { Custom: 1 }] }; }
+    if (behavior === "fail") { this.accounts = snapshot; err = { InstructionError: [0, { Custom: 6000 }] }; }
+    if (err === null) this.accounts.get(OWNER)!.lamports -= 5_000n;
+    this.statuses.set(signature, { slot: ++this.slot, err, polls: 0 });
+    this.height++;
+    return true;
+  }
   vaultField() { const d = this.accounts.get(this.vault)!.data; return { session: base58Encode(d.subarray(42, 74)), epoch: d.readBigUInt64LE(74), paused: d[132] === 1, expiresAt: d.readBigInt64LE(90), seq: d.readBigUInt64LE(82) }; }
 
   fetch: typeof fetch = async (input, init) => {
@@ -146,7 +184,11 @@ class FakeChain {
         if ((options?.minContextSlot ?? 0) > current) return error();
         return reply(current);
       }
-      case "getBlockHeight": return reply(this.height);
+      case "getBlockHeight": return reply((p[0] as { commitment?: string } | undefined)?.commitment === "finalized" ? this.height - FINALITY_LAG : this.height);
+      case "isBlockhashValid": {
+        const lastValid = this.blockhashes.get(String(p[0]));
+        return reply({ context: { slot: this.slot }, value: lastValid !== undefined && this.height <= lastValid });
+      }
       case "getMinimumBalanceForRentExemption": return reply(Number(rent(p[0])));
       case "getMultipleAccounts": return reply({ context: { slot: this.slot }, value: (p[0] as string[]).map((k) => encode(this.accounts.get(k))) });
       case "getAccountInfo": {
@@ -154,40 +196,57 @@ class FakeChain {
         const value = encode(account && slice ? { ...account, data: account.data.subarray(slice.offset, slice.offset + slice.length) } : account);
         return reply({ context: { slot: this.slot }, value: value && account ? { ...value, space: account.data.length } : value });
       }
-      case "getLatestBlockhash": return reply({ context: { slot: this.slot }, value: { blockhash: key(90 + this.sent.length), lastValidBlockHeight: this.height + 150 } });
+      case "getLatestBlockhash": {
+        const blockhash = key(90 + this.sent.length);
+        this.blockhashes.set(blockhash, this.height + 150);
+        return reply({ context: { slot: this.slot }, value: { blockhash, lastValidBlockHeight: this.height + 150 } });
+      }
       case "getSignatureStatuses": {
         const status = this.statuses.get(p[0][0]);
-        if (!status) { this.height += 200; this.slot += 200; return reply({ context: { slot: this.slot }, value: [null] }); }
-        const finalized = status.polls++ >= this.confirmedPolls;
+        if (!status) return reply({ context: { slot: this.slot }, value: [null] });
+        // Only the owner tool's polls (with history search) count; the transport's rebroadcast checks do not.
+        const polls = p[1]?.searchTransactionHistory === true ? status.polls++ : status.polls;
+        const finalized = !this.holdFinality && polls >= this.confirmedPolls;
         // Once a slot is reported finalized, the finalized tip has reached it.
         if (finalized) this.slot = Math.max(this.slot, status.slot + 32);
         return reply({ context: { slot: this.slot }, value: [{ slot: status.slot, confirmations: finalized ? null : 1, err: status.err,
           confirmationStatus: finalized ? "finalized" : "confirmed" }] });
       }
       case "sendTransaction": {
-        const index = this.sent.length;
-        this.beforeSend?.(index);
-        const { signature, instructions } = this.decode(String(p[0]));
-        this.sent.push({ signature, instructions, wire: String(p[0]) });
-        const behavior = this.behaviors[index] ?? "land";
-        if (behavior === "drop") return reply(signature);
+        this.broadcasts++;
+        const wire = String(p[0]);
+        const { signature, instructions, blockhash } = this.decode(wire);
+        if (!this.behaviorOf.has(signature)) {
+          const index = this.sent.length;
+          this.beforeSend?.(index);
+          this.sent.push({ signature, instructions, wire });
+          this.behaviorOf.set(signature, this.behaviors[index] ?? "land");
+        }
+        const behavior = this.behaviorOf.get(signature)!;
+        // Like a real RPC with preflight: a copy that already landed, or one
+        // whose blockhash expired, is refused.
+        if (this.statuses.has(signature)) return error();
+        const lastValid = this.blockhashes.get(blockhash);
+        if (lastValid === undefined || this.height > lastValid) return error();
         if (behavior === "reject") return error();
+        if (behavior === "drop") return reply(signature);
+        if (behavior === "late") {
+          if (!this.pending.has(signature)) this.pending.set(signature, { instructions, landAt: lastValid - 1, lastValid });
+          return reply(signature);
+        }
+        // Simulation first: a transaction that would fail is refused, not landed.
         const snapshot = new Map([...this.accounts].map(([k, v]) => [k, { ...v, data: Buffer.from(v.data) }]));
         try { for (const ix of instructions) this.execute(ix); }
         catch { this.accounts = snapshot; return error(); }
-        if (behavior === "fail") { this.accounts = snapshot; this.statuses.set(signature, { slot: ++this.slot, err: { InstructionError: [0, { Custom: 6000 }] }, polls: 0 }); }
-        else {
-          this.accounts.get(OWNER)!.lamports -= 5_000n;
-          this.statuses.set(signature, { slot: ++this.slot, err: null, polls: 0 });
-        }
-        this.height += 2;
+        this.accounts = snapshot;
+        this.land(signature, instructions, behavior);
         return reply(signature);
       }
       default: throw new Error(`unexpected RPC method ${body.method}`);
     }
   };
 
-  decode(wire: string): { signature: string; instructions: Decoded[] } {
+  decode(wire: string): { signature: string; instructions: Decoded[]; blockhash: string } {
     const tx = getTransactionDecoder().decode(Buffer.from(wire, "base64"));
     const message = getCompiledTransactionMessageDecoder().decode(tx.messageBytes);
     const { numSignerAccounts, numReadonlySignerAccounts, numReadonlyNonSignerAccounts } = message.header;
@@ -204,7 +263,7 @@ class FakeChain {
     const instructions = message.instructions.map((ix) => ({ program: keys[ix.programAddressIndex]!,
       accounts: (ix.accountIndices ?? []).map((i) => ({ address: keys[i]!, ...role(i) })), data: Buffer.from(ix.data ?? []) }));
     const first = tx.signatures[keys[0] as keyof typeof tx.signatures]!;
-    return { signature: base58Encode(new Uint8Array(first)), instructions };
+    return { signature: base58Encode(new Uint8Array(first)), instructions, blockhash: String(message.lifetimeToken) };
   }
 
   /** Program semantics, failing like the real programs would. */
@@ -295,8 +354,9 @@ async function chain(options: Parameters<FakeChain["setup"]>[0] = {}) {
 }
 async function run(fake: FakeChain, args: string[], extra: Partial<SolanaRecoverCommandDeps> = {}) {
   const out: string[] = [], warnings: string[] = [];
-  const deps: SolanaRecoverCommandDeps = { fetch: fake.fetch, log: (l) => out.push(l), warn: (l) => warnings.push(l), sleep: async () => {}, pollMs: 0,
-    releases: RELEASED, ...extra };
+  // Waits are fake time: they advance the chain instead of the clock.
+  const deps: SolanaRecoverCommandDeps = { fetch: fake.fetch, log: (l) => out.push(l), warn: (l) => warnings.push(l), sleep: async (ms) => fake.tick(ms),
+    pollMs: 2_000, releases: RELEASED, ...extra };
   try {
     const result = await runSolanaRecoverCommand(args, deps);
     return { result: result as SolanaRecoveryResult, out: out.join("\n"), warnings: warnings.join("\n"), error: null as unknown };
@@ -473,9 +533,29 @@ describe("solana-recover", () => {
       assert.ok(error instanceof SolanaRecoverError, String(error));
       assert.match(error.message, behavior === "drop" ? /expired without landing.*Nothing after it was sent/ : /failed on chain.*Nothing after it was sent/);
       assert.equal(fake.sent.length, 1, "the withdrawal was not sent");
+      if (behavior === "drop") assert.ok(fake.broadcasts > 2, "the same signed revoke was rebroadcast until its blockhash expired");
       assert.equal(fake.token(fake.atas.get(`${fake.vault}:${SOLANA_USDG_MINT}:${TOKEN_2022_PROGRAM}`)!), before);
       noSecrets(out, error.message);
     }
+  });
+
+  it("rebroadcasts the same signed bytes until they land, and never signs a step twice", async () => {
+    const fake = await chain();
+    fake.behaviors = ["late", "late"];
+    const { error, out } = await run(fake, [...base, "--key-file", keyFile(SECRET_BASE58), "--send"]);
+    assert.equal(error, null, String(error));
+    assert.equal(fake.sent.length, 2, "one revoke and one withdrawal, each signed once");
+    assert.ok(fake.broadcasts > 4, "both were rebroadcast while pending");
+    assert.match(out, /Step 1 \(revoke_all\): finalized/);
+    assert.match(out, /Left in the vault: 0 USDG, 0 WSOL, 0 SOL above rent/);
+  });
+
+  it("reports a refusal from the first broadcast at once, without rebroadcasting it", async () => {
+    const fake = await chain({ session: SOLANA_SYSTEM_PROGRAM });
+    fake.behaviors = ["reject"];
+    const { error } = await run(fake, [...base, "--key-file", keyFile(SECRET_BASE58), "--send"]);
+    assert.match((error as Error).message, /Step 2 \(withdraw\) was not confirmed as submitted/);
+    assert.equal(fake.broadcasts, 1);
   });
 
   it("refuses a missing vault, a foreign program account, a non-mainnet RPC and an owner with no SOL", async () => {
@@ -505,7 +585,7 @@ describe("solana-recover", () => {
     assert.equal(refused.sent.length, 2);
     assert.equal(refused.token(vaultUsdg), 12_345_678n, "a refused withdrawal moves nothing");
     const slow = await chain();
-    slow.confirmedPolls = 1_000;
+    slow.holdFinality = true;
     const pending = await run(slow, [...base, "--key-file", keyFile(SECRET_BASE58), "--send"], { maxWaitMs: 0 });
     assert.match((pending.error as Error).message, /Step 1 \(revoke_all\) is not finalized yet .* re-reads the chain first/);
     assert.equal(slow.sent.length, 1, "nothing is sent while the revoke is unconfirmed");
@@ -613,6 +693,18 @@ describe("solana-recover program trust", () => {
       assert.match((error as Error).message, /not the immutable released binary\. Nothing was signed or sent/);
       assert.equal(swapped.sent.length, 0);
       assert.ok(!swapped.calls.includes("getLatestBlockhash"));
+    }
+  });
+
+  it("verifies the binary afresh on every run, even after a success through the same RPC in this process", async () => {
+    const good = await chain();
+    assert.equal((await run(good, send())).error, null);
+    for (const options of [{ deployment: "upgradeable" as const }, { binary: Buffer.from("look-alike program") }, { deployment: "none" as const }]) {
+      const swapped = await chain(options);
+      const { error } = await run(swapped, send());
+      assert.match((error as Error).message, /not the immutable released binary\. Nothing was signed or sent/, JSON.stringify(options));
+      assert.equal(swapped.sent.length, 0);
+      assert.ok(swapped.calls.includes("getAccountInfo"), "the program account was read again");
     }
   });
 

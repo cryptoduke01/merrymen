@@ -341,7 +341,11 @@ export interface SolanaRecoveryIo {
 }
 type Outcome = { signature: string; status: "finalized"; slot: number };
 
-/** Sign one owner transaction, send it once, and wait until it is finalized or provably expired. */
+/**
+ * Sign one owner transaction once, submit it, and wait until it is finalized
+ * or provably expired. Only these signed bytes are ever sent: a rebroadcast of
+ * identical bytes can land at most once, and nothing is signed again here.
+ */
 async function sendAndFinalize(rpc: SolanaLiveRpc, keyPair: CryptoKeyPair, owner: string, instructions: Instruction[], label: string, io: SolanaRecoveryIo): Promise<Outcome> {
   const block = await latestBlock(rpc);
   const compiled = compileTransaction(setTransactionMessageLifetimeUsingBlockhash(
@@ -351,18 +355,23 @@ async function sendAndFinalize(rpc: SolanaLiveRpc, keyPair: CryptoKeyPair, owner
   const signature = getSignatureFromTransaction(signed);
   const wire = getBase64EncodedWireTransaction(signed);
   if (Buffer.from(wire, "base64").length > 1232) fail("The recovery transaction is too large.");
+  const deadline = Date.now() + (io.maxWaitMs ?? 150_000);
   io.log(`${label}: sending ${signature}`);
-  // Sent once, with preflight simulation. No automatic resend: an unknown
-  // outcome is resolved by reading the chain, never by signing again here.
+  // First a single round with preflight simulation, so a refusal is reported
+  // at once instead of after the blockhash's whole lifetime.
   let sent: string;
-  try { sent = await rpc.send(wire, block.slot); }
+  try { sent = await rpc.send(wire, block.slot, undefined, { untilMs: 0 }); }
   catch (error) {
     if (!(error instanceof SolanaRpcError)) throw error;
     fail(`${label} was not confirmed as submitted (${signature}): the RPC refused it, for example in its simulation, or its answer `
       + "could not be read. Nothing after it was sent. Wait about two minutes, then run the command again: it re-reads the chain before sending anything.");
   }
   if (sent !== signature) fail("The Solana RPC answered with a different signature. Check an explorer before running again.");
-  const deadline = Date.now() + (io.maxWaitMs ?? 150_000);
+  // Accepted: rebroadcast the same bytes until the RPC sees them confirmed or
+  // the blockhash expires, which helps them land under congestion. Whatever
+  // this phase reports, the outcome is decided below from the chain alone.
+  try { await rpc.send(wire, block.slot, undefined, { untilMs: deadline }); }
+  catch (error) { if (!(error instanceof SolanaRpcError)) throw error; }
   for (;;) {
     type Status = { kind: "failed" } | { kind: "finalized"; slot: number } | { kind: "waiting"; expired: boolean };
     const status = await rpc.read(async (read): Promise<Status> => {
@@ -415,8 +424,16 @@ export async function runSolanaRecovery(options: SolanaRecoveryOptions, io: Sola
   // Before any RPC call: nothing is signed for a program that is not verified.
   const trust = solanaRecoveryProgramTrust(options);
   if (trust.sha256 !== undefined) {
-    // Immutable (no upgrade authority) and hash-matched, so it cannot change before the sends.
-    try { await verifySolanaVaultDeployment(rpc, programId, trust.sha256); }
+    // Immutable (no upgrade authority) and hash-matched, so it cannot change
+    // before the sends. Read fresh on every run: a transport without a
+    // providerKey never consults the executor's in-process success cache, so
+    // an earlier verification in this process cannot vouch for this one.
+    const uncached: SolanaLiveRpc = {
+      read: (operation) => rpc.read(operation),
+      ...(typeof rpc.readEach === "function" ? { readEach: (operation) => rpc.readEach!(operation) } : {}),
+      send: () => fail("Program verification never sends a transaction."),
+    };
+    try { await verifySolanaVaultDeployment(uncached, programId, trust.sha256); }
     catch (error) {
       if (error instanceof SolanaRpcError) throw error;
       fail(trust.listed ? "The program at that address is not the immutable released binary. Nothing was signed or sent."

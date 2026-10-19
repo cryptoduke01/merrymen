@@ -30,8 +30,10 @@ Steps: (1) revoke_all, alone, waiting until it is finalized, so no session
 key can trade; (2) from finalized balances, create your USDG and WSOL token
 accounts if needed and withdraw all USDG, all WSOL and the vault's spare
 SOL to your wallet. Funds only ever move from the vault to the owner.
-Nothing is sent without --send. Each transaction is sent once; if one does
-not finalize, run the command again: it re-reads the chain first.
+Nothing is sent without --send. Each transaction is signed once; the same
+signed bytes are rebroadcast until it lands or its blockhash expires, so it
+can land at most once. If one does not finalize, run the command again: it
+re-reads the chain first.
 
 The key is your exported Solana wallet secret key (base58, or a
 solana-keygen JSON file). It is read only from the file or standard input,
@@ -81,6 +83,7 @@ export interface SolanaRecoverCommandDeps {
   /** Standard input, read only for --key-file -. */
   stdin?: AsyncIterable<Buffer | string> & { isTTY?: boolean };
   fetch?: typeof globalThis.fetch;
+  /** Waits: the unlisted-program pause, status polls and the transport's rebroadcast interval. */
   sleep?: (ms: number) => Promise<void>;
   maxWaitMs?: number;
   pollMs?: number;
@@ -127,7 +130,8 @@ export async function runSolanaRecoverCommand(args: readonly string[], deps: Sol
   // Refuse an unverifiable program before the key is read or the RPC is contacted.
   solanaRecoveryProgramTrust({ programId, send, programSha256: sha, allowUnlistedProgram, releases: deps.releases });
   // The RPC URL can carry an API key: it is validated, used, and never printed.
-  const rpc = createSolanaLiveRpc({ env: { MERRYMEN_SOLANA_RPC_MAINNET: rpcUrl }, fetch: deps.fetch, timeoutMs: 15_000, singleEndpoint: true });
+  const rpc = createSolanaLiveRpc({ env: { MERRYMEN_SOLANA_RPC_MAINNET: rpcUrl }, fetch: deps.fetch, timeoutMs: 15_000, singleEndpoint: true,
+    ...(deps.sleep ? { sleep: deps.sleep } : {}) });
 
   let key: Awaited<ReturnType<typeof readSolanaOwnerKey>> | undefined;
   if (keyFile) {
