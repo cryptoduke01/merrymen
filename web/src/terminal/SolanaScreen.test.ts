@@ -548,6 +548,29 @@ test("a 4xx on a re-check of an accepted permission keeps its bytes and session 
   assert.equal(base58Encode(ed25519.getPublicKey(seed)), sessionPublicKey);
 });
 
+test("a refused permission retry the server holds no record of is cleared without claiming it was never sent", async () => {
+  state = initial("live"); state.runtime.live.programId = PROGRAM;
+  const saved = liveLimits(); state.binding.limits = saved;
+  let submits = 0;
+  respond = async (path, body) => {
+    if (path === "status") return json(state);
+    if (path === "setup" && body?.stage === "prepare") return json({ setup: await permissionTransaction(String(body.sessionPublicKey), saved) });
+    if (path === "setup" && body?.stage === "submit") {
+      if (++submits === 1) throw new Error("Lost response");
+      return refusal("The prepared owner transaction expired before submission.");
+    }
+    throw new Error("Unexpected fixture route");
+  };
+  await render(); await press("Register bounded trading permission");
+  assert.ok(button("Finish permission registration"));
+  await press("Finish permission registration");
+  const text = ui.container.textContent!;
+  assert.doesNotMatch(text, /not accepted|nothing was activated/);
+  assert.match(text, /expired before submission\. The server holds no record of this signed permission, so it and its session key were cleared from this page\. Refresh to check whether a permission is active/);
+  assert.equal(button("Register bounded trading permission").disabled, false);
+  assert.equal(signCount, 1); assert.equal(calls.some((call) => call.body?.stage === "activate"), false);
+});
+
 test("a confirmed permission whose activation is refused keeps its session key while the server holds it", async () => {
   state = initial("live"); state.runtime.live.programId = PROGRAM;
   const saved = liveLimits(); state.binding.limits = saved;

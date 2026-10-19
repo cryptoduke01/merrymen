@@ -261,9 +261,10 @@ function ConnectedSolana() {
       if (outcome === "unknown") throw new Error(`${e.message} An earlier submission of this signed permission may already be on Solana, so it and its session key were kept. Finish permission registration again shortly.`);
       if (outcome === "pending") throw new Error(`${e.message} The server holds this signed permission and still records it as awaiting final confirmation, so its session key was kept. Finish permission registration again shortly.`);
       if (outcome === "unheld") {
-        // Only this page holds the session key, so nothing it could activate was activated.
+        // Resubmitting can never be checked or sent again; whether an earlier
+        // submission landed is the server's status to show, not this page's guess.
         setRegistration(null);
-        throw new Error(`${e.message} The server holds no record of this signed permission, so it and its session key were cleared and nothing was activated. Register again to review and sign a new permission.`);
+        throw new Error(`${e.message} The server holds no record of this signed permission, so it and its session key were cleared from this page. Refresh to check whether a permission is active, then register again if needed.`);
       }
       submitted = { signature: pending.signature!, status: outcome };
     }
