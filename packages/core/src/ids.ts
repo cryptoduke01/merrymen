@@ -253,17 +253,83 @@ const EVM_IN_TEXT = /0x[0-9a-fA-F]{64}(?![0-9a-fA-F])|0x[0-9a-fA-F]{40}(?![0-9a-
 const BASE58_IN_TEXT = /(?<![0-9A-Za-z])[1-9A-HJ-NP-Za-km-z]{32,88}(?![0-9A-Za-z])/g;
 const SOLANA_LINK = /\b(?:https?:\/\/)?(?:www\.)?(?:solscan\.io|explorer\.solana\.com|solana\.fm|solanabeach\.io|orb\.helius\.dev)\/[^\s)>\]]*/gi;
 
+/** A maximal run of base58 characters, wherever it sits (the glued scan). */
+const BASE58_RUN = /[1-9A-HJ-NP-Za-km-z]{32,}/g;
+function hexDigit(code: number): boolean {
+  return (code >= 48 && code <= 57) || (code >= 65 && code <= 70) || (code >= 97 && code <= 102);
+}
+/**
+ * Base58 decodes one glued scan may spend. Each costs up to about 88 × 64
+ * steps; past the cap every further candidate run counts as an id unread: a
+ * false alarm on a text no one writes, never an id let through.
+ */
+const GLUED_DECODES = 4_096;
+
+export interface OnchainIdScan {
+  /**
+   * Also find an id glued to the text around it ("CA<mint>", "<mint>is"): any
+   * window of a longer base58 run that decodes to exactly 32 or 64 bytes. The
+   * hit's value is the whole run, so a redactor strips all of it. Windows of
+   * hex digits alone (hashes, long numbers) are never ids. Off by default:
+   * services/brain/tests/data/onchain_ids.json pins the default to Brain's
+   * Python mirror, which treats a run inside a longer word as no id.
+   */
+  glued?: boolean;
+}
+
+function base58Shape(s: string): "address" | "hash" | null {
+  const b = base58Decode(s);
+  return b?.length === 32 ? "address" : b?.length === 64 ? "hash" : null;
+}
+
+/**
+ * The shape of an id inside `run`, "unread" once the budget is spent, or null.
+ * 58^42 < 2^248 and 58^86 < 2^504, so a window shorter than 43 (or 87)
+ * characters reaches 32 (or 64) bytes only through leading zero bytes, which
+ * base58 writes as leading "1"s: other short windows are skipped undecoded.
+ */
+function gluedShape(run: string, budget: { left: number }): "address" | "hash" | "unread" | null {
+  // nonHex[i]: characters before i that are not hex digits, so a window of hex alone is skipped in O(1).
+  const nonHex = new Uint32Array(run.length + 1);
+  for (let i = 0; i < run.length; i++) nonHex[i + 1] = nonHex[i]! + (hexDigit(run.charCodeAt(i)) ? 0 : 1);
+  for (const [min, max, full, shape] of [[86, 88, 87, 64], [32, 44, 43, 32]] as const) {
+    for (let start = 0; start + min <= run.length; start++) {
+      for (let length = min; length <= max && start + length <= run.length; length++) {
+        if (length < full && run[start] !== "1") continue;
+        if (nonHex[start + length] === nonHex[start]) continue;
+        if (budget.left-- <= 0) return "unread";
+        if (base58Decode(run.slice(start, start + length))?.length === shape) return shape === 64 ? "hash" : "address";
+      }
+    }
+  }
+  return null;
+}
+
 /**
  * Every on-chain id in a text: EVM addresses and hashes, base58 runs that
  * decode to a 32-byte key or a 64-byte signature, and Solana explorer links.
  * For the backstops that must never publish, or hand a model, an id it did
  * not mean to: the shape is enough, a match is never checked against a chain.
+ * `glued` also finds ids written against neighbouring letters or digits.
  */
-export function onchainIdsIn(text: unknown): OnchainIdHit[] {
+export function onchainIdsIn(text: unknown, scan: OnchainIdScan = {}): OnchainIdHit[] {
   if (typeof text !== "string" || text.length === 0) return [];
   const hits: OnchainIdHit[] = [];
   for (const m of text.matchAll(EVM_IN_TEXT)) hits.push({ family: "evm", shape: m[0].length === 66 ? "hash" : "address", value: m[0] });
   for (const m of text.matchAll(SOLANA_LINK)) hits.push({ family: "solana", shape: "link", value: m[0] });
+  if (scan.glued) {
+    const budget = { left: GLUED_DECODES };
+    for (const m of text.matchAll(BASE58_RUN)) {
+      // "0x" opens hex: its x is the prefix's, never part of a base58 id.
+      const s = m[0][0] === "x" && m.index! > 0 && text[m.index! - 1] === "0" ? m[0].slice(1) : m[0];
+      if (s.length < 32) continue;
+      // A whole run that is a key or signature, as below, wherever it sits; else look inside it.
+      const whole = s.length <= 88 ? base58Shape(s) : null;
+      const inside = whole ?? (s.length > 32 ? gluedShape(s, budget) : null);
+      if (inside) hits.push({ family: "solana", shape: inside === "hash" ? "hash" : "address", value: s });
+    }
+    return hits;
+  }
   for (const m of text.matchAll(BASE58_IN_TEXT)) {
     const s = m[0];
     // Base58 keys and signatures can contain letters only. Decode every
@@ -276,8 +342,8 @@ export function onchainIdsIn(text: unknown): OnchainIdHit[] {
 }
 
 /** Whether a text carries any on-chain id (onchainIdsIn). */
-export function onchainIdIn(text: unknown): boolean {
-  return onchainIdsIn(text).length > 0;
+export function onchainIdIn(text: unknown, scan: OnchainIdScan = {}): boolean {
+  return onchainIdsIn(text, scan).length > 0;
 }
 
 /**

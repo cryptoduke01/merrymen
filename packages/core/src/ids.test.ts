@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { readFileSync } from "node:fs";
 import { ed25519 } from "@noble/curves/ed25519";
 import {
   CHAINS,
@@ -146,6 +147,80 @@ describe("on-chain id detection", () => {
       { family: "solana", shape: "address", value: pub },
       { family: "solana", shape: "hash", value: signature },
     ]);
+  });
+});
+
+describe("glued on-chain id detection (audit regressions F3)", () => {
+  const SIG = "3NGW7mkqWR84fuKhxiUmVTJg8AehpcEQHKZcivruB5449akQiFvm2Ej6AvJGLnfwW15Cb2wn1D6UAFMJtXh6tigd";
+  const glued = { glued: true };
+
+  it("finds a mint or signature written against neighbouring letters or digits, and returns the whole run", () => {
+    for (const [text, value, shape] of [
+      [`grab it CA${SOLANA_USDG_MINT} now`, `CA${SOLANA_USDG_MINT}`, "address"],
+      [`${SOLANA_USDG_MINT}is the one`, `${SOLANA_USDG_MINT}is`, "address"],
+      [`0${SOLANA_USDG_MINT}`, SOLANA_USDG_MINT, "address"],
+      [`${SOLANA_USDG_MINT}l`, SOLANA_USDG_MINT, "address"],
+      [`${SOLANA_USDG_MINT}x`, `${SOLANA_USDG_MINT}x`, "address"],
+      // 89 characters: long enough to hide a signature, so that is the shape reported.
+      [`${SOLANA_USDG_MINT}${SOLANA_USDG_MINT}a`, `${SOLANA_USDG_MINT}${SOLANA_USDG_MINT}a`, "hash"],
+      [`tx${SIG}done`, `tx${SIG}done`, "hash"],
+      [`0x${SOLANA_USDG_MINT}`, SOLANA_USDG_MINT, "address"],
+    ] as const) {
+      // The default scan, pinned to Brain's mirror, misses each of these.
+      assert.deepEqual(onchainIdsIn(text).filter((h) => h.family === "solana"), [], text);
+      assert.deepEqual(onchainIdsIn(text, glued), [{ family: "solana", shape, value }], text);
+      assert.equal(onchainIdIn(text, glued), true);
+      assert.ok(text.split(value).join("[address]").indexOf(SOLANA_USDG_MINT.slice(0, 20)) < 0, "a redactor strips the whole id");
+    }
+  });
+
+  it("finds everything the default scan finds", () => {
+    const { sig, pub, secretB58 } = keypair(5);
+    for (const text of [`bought ${SOLANA_USDG_MINT} at ${EVM} tx ${EVM_HASH} sig ${sig} https://solscan.io/tx/${sig}`,
+      `owner ${pub}, ${"A".repeat(87)}`, `the system program 11111111111111111111111111111111 owns it`, `exported ${secretB58}`,
+      `ca:${SOLANA_USDG_MINT}_v2`, `${SOLANA_USDG_MINT},${sig}`]) {
+      const strict = onchainIdsIn(text, glued);
+      for (const hit of onchainIdsIn(text)) assert.ok(strict.some((h) => h.value === hit.value && h.shape === hit.shape), `${text}: ${hit.value}`);
+    }
+  });
+
+  it("differs from the default scan Brain mirrors only on the shared fixture's glued cases", () => {
+    const fixture = JSON.parse(readFileSync(new URL("../../../services/brain/tests/data/onchain_ids.json", import.meta.url), "utf8")) as
+      { cases: { text: string; hits: { family: string; shape: string; value: string }[] }[] };
+    const changed: string[] = [];
+    for (const c of fixture.cases) {
+      const strict = onchainIdsIn(c.text, glued);
+      for (const hit of c.hits) assert.ok(strict.some((h) => h.value === hit.value && h.shape === hit.shape), `${c.text}: ${hit.value}`);
+      if (JSON.stringify(strict) !== JSON.stringify(c.hits)) changed.push(c.text);
+    }
+    assert.deepEqual(changed, [`0${SOLANA_USDG_MINT}`, `${SOLANA_USDG_MINT}l`, `${SOLANA_USDG_MINT}${SOLANA_USDG_MINT}a`]);
+  });
+
+  it("leaves prose, tickers, hex digests, long numbers and other base58 alone", () => {
+    for (const text of [
+      "the market is quiet today", "PEPE pumped 40% on the week", "$SOL $BONK $WIF $JUP and $USDG",
+      "supercalifragilisticexpialidociousandmorewordsjoined", "merrymen:meme dec_9f2c4b7a1e3d5f60 [ref:d3fa91cr2c1] up to 30 minutes",
+      "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "abcdef123456789".repeat(5),
+      "ABCDEF123456789abcdef".repeat(4), "2345678923456789234567892345678923456789", "9".repeat(120),
+      "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa paid", "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq",
+      "#BuyTheDipAndHoldForeverBecauseSolanaIsTheFuture", "0x11111111111111111111111111111111111111111", "",
+      `0x${"Ab".repeat(30)}`, `0x${"cafe".repeat(20)}`,
+    ]) assert.deepEqual(onchainIdsIn(text, glued), [], text);
+  });
+
+  it("reads a megabyte of long base58 runs in bounded time and fails closed past its budget", () => {
+    // Runs that hold no 43- or 44-character key window: short of one, or hex alone.
+    const noKey = Array.from({ length: 30_000 }, (_, i) => (i % 3 ? "1" + "z".repeat(31 + (i % 10)) : "abcdef12345".repeat(9))).join(" ");
+    assert.ok(noKey.length > 1_000_000);
+    assert.deepEqual(onchainIdsIn(noKey.slice(0, 5_000), glued), [], "none of these runs holds an id");
+    let started = performance.now();
+    assert.ok(onchainIdsIn(noKey, glued).length > 0, "past the decode budget, the remaining runs are refused unread");
+    assert.ok(performance.now() - started < 2_000, `took ${Math.round(performance.now() - started)} ms`);
+    const keyLike = Array.from({ length: 12_000 }, (_, i) => `${base58Encode(Uint8Array.from({ length: 64 }, (_, j) => (i * 7 + j * 13 + 1) % 256))}x${i}`).join(" ");
+    assert.ok(keyLike.length > 1_000_000);
+    started = performance.now();
+    assert.equal(onchainIdIn(keyLike, glued), true);
+    assert.ok(performance.now() - started < 2_000, `took ${Math.round(performance.now() - started)} ms`);
   });
 });
 
