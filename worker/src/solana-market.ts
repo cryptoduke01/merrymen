@@ -90,6 +90,8 @@ function mintFromRpc(raw: unknown, mint: string, minSlot: number, observedAtMs: 
   if (mint === SOLANA_USDG_MINT && !trustedCash) return invalidMint();
   const reasons = new Set<string>();
   if (info.freezeAuthority !== null && !trustedCash) reasons.add("freeze-authority");
+  // A live mint authority can inflate supply after the buy and dilute every holder.
+  if (info.mintAuthority !== null && !trustedCash) reasons.add("mint-authority");
   const seen = new Set<string>();
   for (const extension of list) {
     if (!object(extension) || typeof extension.extension !== "string" || seen.has(extension.extension)) return invalidMint();
@@ -103,6 +105,8 @@ function mintFromRpc(raw: unknown, mint: string, minSlot: number, observedAtMs: 
       case "transferHook":
         if (!object(state) || !authority(state.programId) || !authority(state.authority)) return invalidMint();
         if (state.programId !== null) reasons.add("transfer-hook");
+        // A disabled hook whose authority remains can point at any program later.
+        else if (state.authority !== null && !trustedCash) reasons.add("transfer-hook-authority");
         break;
       case "transferFeeConfig": {
         if (!object(state) || !authority(state.transferFeeConfigAuthority) || !authority(state.withdrawWithheldAuthority)) return invalidMint();
