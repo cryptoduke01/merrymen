@@ -21,8 +21,10 @@ import {
   deriveSolanaAta, deriveSolanaVaultAddress, SOLANA_ASSOCIATED_TOKEN_PROGRAM, SOLANA_CLASSIC_TOKEN_PROGRAM,
   SOLANA_SYSTEM_PROGRAM, SOLANA_VAULT_ACCOUNT_SIZE, SOLANA_VAULT_DISCRIMINATOR, SOLANA_WRAPPED_SOL_MINT,
 } from "../../packages/core/src/solana-live";
+import { SOLANA_VAULT_RELEASES as CORE_SOLANA_VAULT_RELEASES } from "../../packages/core/src/solana-live";
 import {
-  readSolanaOwnerKey, SolanaRecoverError, solanaRecoveryRevokeInstructions, solanaRecoveryWithdrawInstructions, type SolanaRecoveryResult,
+  readSolanaOwnerKey, SOLANA_VAULT_RELEASES, SolanaRecoverError, solanaRecoveryProgramTrust, solanaRecoveryRevokeInstructions,
+  solanaRecoveryWithdrawInstructions, type SolanaRecoveryResult,
 } from "./solana-recover";
 import { runSolanaRecoverCommand, type SolanaRecoverCommandDeps } from "./solana-recover-command";
 import { SOLANA_MAINNET_GENESIS_HASH, SolanaRpcError } from "./solana-rpc";
@@ -706,6 +708,24 @@ describe("solana-recover program trust", () => {
       assert.equal(swapped.sent.length, 0);
       assert.ok(swapped.calls.includes("getAccountInfo"), "the program account was read again");
     }
+  });
+
+  it("pins releases in packages/core: the tool's default list is the shared one, frozen and well formed", () => {
+    assert.equal(SOLANA_VAULT_RELEASES, CORE_SOLANA_VAULT_RELEASES, "the recovery tool trusts exactly the packages/core release pin");
+    assert.ok(Object.isFrozen(CORE_SOLANA_VAULT_RELEASES));
+    const ids = new Set<string>();
+    for (const release of CORE_SOLANA_VAULT_RELEASES) {
+      assert.ok(Object.isFrozen(release), "each release entry is frozen");
+      assert.deepEqual(Object.keys(release).sort(), ["programId", "sha256"]);
+      const bytes = base58Decode(release.programId);
+      assert.ok(bytes?.length === 32 && base58Encode(bytes) === release.programId, `${release.programId} is a canonical program ID`);
+      assert.match(release.sha256, /^[a-f0-9]{64}$/);
+      assert.ok(!ids.has(release.programId), "one hash per program");
+      ids.add(release.programId);
+    }
+    // With no option, the trust decision reads the core list.
+    for (const release of CORE_SOLANA_VAULT_RELEASES) assert.deepEqual(solanaRecoveryProgramTrust({ programId: release.programId, send: true }), { listed: true, sha256: release.sha256 });
+    if (!CORE_SOLANA_VAULT_RELEASES.length) assert.throws(() => solanaRecoveryProgramTrust({ programId: PROGRAM, send: true }), /none is released yet/);
   });
 
   it("plans for any program, says when its binary is not verified, and checks it when a hash is given", async () => {

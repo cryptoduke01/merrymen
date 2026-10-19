@@ -33,7 +33,7 @@ import { base58Decode, base58Encode, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM } from
 import {
   buildRevokeSolanaSessionsInstruction, buildWithdrawSolanaNativeInstruction, buildWithdrawSolanaVaultInstruction,
   decodeSolanaVaultAccount, deriveSolanaAta, deriveSolanaVaultAddress, SOLANA_ASSOCIATED_TOKEN_PROGRAM,
-  SOLANA_CLASSIC_TOKEN_PROGRAM, SOLANA_SYSTEM_PROGRAM, SOLANA_WRAPPED_SOL_MINT, type SolanaVaultState,
+  SOLANA_CLASSIC_TOKEN_PROGRAM, SOLANA_SYSTEM_PROGRAM, SOLANA_VAULT_RELEASES, SOLANA_WRAPPED_SOL_MINT, type SolanaVaultState,
 } from "../../packages/core/src/solana-live";
 import { verifySolanaVaultDeployment } from "./solana-executor";
 import type { SolanaLiveRead, SolanaLiveRpc } from "./solana-live-rpc";
@@ -52,13 +52,14 @@ const CREATE_IDEMPOTENT = 1;
 export const SOLANA_RECOVER_KEY_MAX_BYTES = 4096;
 
 /** A released Merrymen vault program and the SHA-256 of its deployed binary (ProgramData bytes after the 45-byte header). */
-export interface SolanaVaultRelease { readonly programId: string; readonly sha256: string }
+export type SolanaVaultRelease = (typeof SOLANA_VAULT_RELEASES)[number];
 /**
- * Released vault programs, verified by default. Empty until the program is
- * deployed: until then --send needs --program-sha256 and --unlisted-program.
- * A release adds its program ID and reviewed binary hash here.
+ * Released vault programs, verified by default: the shared pin in
+ * packages/core, so the app and this raw-key tool trust the same program.
+ * Empty until the program is released: until then --send needs
+ * --program-sha256 and --unlisted-program.
  */
-export const SOLANA_VAULT_RELEASES: readonly SolanaVaultRelease[] = Object.freeze([]);
+export { SOLANA_VAULT_RELEASES };
 /** Pause after the unlisted-program warning, before anything is signed. */
 export const SOLANA_RECOVER_UNLISTED_DELAY_MS = 15_000;
 
