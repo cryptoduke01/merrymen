@@ -192,9 +192,118 @@ jobs:
         env:
           PG_CONTAINER: ${{ job.services.postgres.id }}
 
+  # THE SOLANA VAULT PROGRAM. contracts/solana is the custody: owner-only
+  # withdrawals, session caps, sequence replay protection and the Jupiter
+  # CPI's signer exclusion. Until these jobs, its native tests, SBF build and
+  # custody runtime tests ran only when someone ran test.sh by hand, so a change
+  # that broke them merged green and a release hash could come from an artifact
+  # nothing had tested. Both jobs feed `app`, the required check.
+  #
+  # The toolchain is pinned in scripts/ci/solana-toolchain.env, and every
+  # download is checked against a size and SHA-256 before it is unpacked.
+  # platform-tools go where cargo-build-sbf looks for them, because its own
+  # download of them is not checked against anything.
+  solana-test:
+    name: solana · test
+    # The release artifact comes from this job, so the image is a fixed
+    # release rather than ubuntu-latest. A hosted runner has no digest to pin.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    outputs:
+      sha256: ${{ steps.record.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+
+      # The scripts below, and the shape of these jobs, have tests of their own.
+      - name: CI script tests
+        run: node --test scripts/ci/solana-ci.test.mjs
+
+      - name: Install the verified toolchain
+        run: scripts/ci/solana-toolchain.sh install "$RUNNER_TEMP/solana-toolchain"
+
+      # A canonical path: under a symlinked CARGO_HOME rustc cannot shorten
+      # registry paths, and the binary embeds them and stops reproducing.
+      - name: Cargo home
+        run: echo "CARGO_HOME=$(realpath -m "$RUNNER_TEMP/cargo-home")" >> "$GITHUB_ENV"
+
+      # Crates and the host test build only. The SBF build always starts from
+      # source, so the artifact is never assembled from a cached object.
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ${{ env.CARGO_HOME }}/registry/index
+            ${{ env.CARGO_HOME }}/registry/cache
+            ${{ env.CARGO_HOME }}/git/db
+            contracts/solana/target/debug
+          key: solana-cargo-${{ runner.os }}-${{ hashFiles('scripts/ci/solana-toolchain.env') }}-${{ hashFiles('contracts/solana/Cargo.lock', 'contracts/solana/runtime-tests/Cargo.lock') }}
+          restore-keys: solana-cargo-${{ runner.os }}-${{ hashFiles('scripts/ci/solana-toolchain.env') }}-
+
+      # Native unit tests, the SBF build, then the custody runtime tests against
+      # that exact .so. test.sh is the one recipe, so whatever it gains, CI runs.
+      # The two variables shrink the cached host build. Neither touches the
+      # release profile the SBF artifact is built with.
+      - name: Test
+        run: contracts/solana/test.sh
+        env:
+          CARGO_INCREMENTAL: "0"
+          CARGO_PROFILE_DEV_DEBUG: "0"
+
+      - name: Nothing unverified was fetched
+        run: scripts/ci/solana-toolchain.sh check
+
+      - name: Program ID and hash
+        id: record
+        run: |
+          sha=$(node scripts/ci/solana-program-record.mjs contracts/solana contracts/solana/target/deploy/merrymen_vault.so contracts/solana/target/deploy/merrymen_vault.build.json)
+          echo "sha256=$sha" >> "$GITHUB_OUTPUT"
+
+      # A release takes its artifact from here, never from a laptop. Only named
+      # files: target/deploy also holds a throwaway program keypair.
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: merrymen-vault-sbf
+          path: |
+            contracts/solana/target/deploy/merrymen_vault.so
+            contracts/solana/target/deploy/merrymen_vault.build.json
+          if-no-files-found: error
+
+  # The same program built again on another runner, from `git archive` at
+  # another path, with a fresh CARGO_HOME. `app` requires the two hashes to be
+  # equal, so the tested artifact is shown to come from the source and the
+  # pinned toolchain alone. In parallel, not after: it adds no wall time.
+  solana-rebuild:
+    name: solana · rebuild
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      sha256: ${{ steps.record.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+
+      - name: Install the verified toolchain
+        run: scripts/ci/solana-toolchain.sh install "$RUNNER_TEMP/solana-toolchain"
+
+      - name: Rebuild elsewhere
+        id: record
+        run: |
+          so=$(scripts/ci/solana-rebuild.sh "$RUNNER_TEMP/solana-rebuild")
+          sha=$(node scripts/ci/solana-program-record.mjs "$RUNNER_TEMP/solana-rebuild/src/contracts/solana" "$so" "$RUNNER_TEMP/merrymen_vault.build.json")
+          echo "sha256=$sha" >> "$GITHUB_OUTPUT"
+
+      - name: Nothing unverified was fetched
+        run: scripts/ci/solana-toolchain.sh check
+
   app:
     name: app
-    needs: [app-typecheck, app-build, app-test, app-postgres]
+    needs: [app-typecheck, app-build, app-test, app-postgres, solana-test, solana-rebuild]
     # Runs even when a part failed, so the required check reports a failure
     # rather than being skipped (a skipped required check never passes).
     if: always()
@@ -202,12 +311,23 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Every part passed
+        # Through env, not interpolated into the script: they are job outputs.
+        env:
+          VAULT_TESTED_SHA256: ${{ needs.solana-test.outputs.sha256 }}
+          VAULT_REBUILT_SHA256: ${{ needs.solana-rebuild.outputs.sha256 }}
         run: |
-          echo "typecheck: ${{ needs.app-typecheck.result }}, build: ${{ needs.app-build.result }}, tests: ${{ needs.app-test.result }}, postgres: ${{ needs.app-postgres.result }}"
+          echo "typecheck: ${{ needs.app-typecheck.result }}, build: ${{ needs.app-build.result }}, tests: ${{ needs.app-test.result }}, postgres: ${{ needs.app-postgres.result }}, solana test: ${{ needs.solana-test.result }}, solana rebuild: ${{ needs.solana-rebuild.result }}"
           test "${{ needs.app-typecheck.result }}" = success
           test "${{ needs.app-build.result }}" = success
           test "${{ needs.app-test.result }}" = success
           test "${{ needs.app-postgres.result }}" = success
+          test "${{ needs.solana-test.result }}" = success
+          test "${{ needs.solana-rebuild.result }}" = success
+          # The vault binary that passed the custody tests is the one the
+          # independent rebuild produced, byte for byte.
+          echo "vault artifact: tested $VAULT_TESTED_SHA256, rebuilt $VAULT_REBUILT_SHA256"
+          [[ "$VAULT_TESTED_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::no vault artifact hash from solana · test"; exit 1; }
+          test "$VAULT_TESTED_SHA256" = "$VAULT_REBUILT_SHA256" || { echo "::error::the rebuilt vault artifact differs from the tested one"; exit 1; }
 
   contracts:
     name: contracts
