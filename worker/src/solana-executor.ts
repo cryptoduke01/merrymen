@@ -94,8 +94,11 @@ export interface SolanaLiveJournal {
 }
 
 export class SolanaExecutionError extends Error {
-  constructor(readonly code: "invalid-intent" | "invalid-state" | "unsafe-program" | "unsafe-route" | "simulation" | "fee-cap" | "risk" | "conflict" | "cancelled") {
-    super(`Solana live execution refused: ${code}.`); this.name = "SolanaExecutionError";
+  constructor(readonly code: "invalid-intent" | "invalid-state" | "unsafe-program" | "unsafe-route" | "simulation" | "fee-cap" | "risk" | "conflict" | "cancelled" | "owner-refund") {
+    super(code === "owner-refund"
+      ? "Solana live execution refused: owner-refund. Tokens were sent to this swap's temporary account; the vault returns them to the owner's own token account for that mint, which is closed or unsafe. The owner must reopen it before this swap can run."
+      : `Solana live execution refused: ${code}.`);
+    this.name = "SolanaExecutionError";
   }
 }
 function fail(code: SolanaExecutionError["code"] = "invalid-state"): never { throw new SolanaExecutionError(code); }
@@ -123,6 +126,11 @@ function tokenBalance(raw: Account, mint: string, authority: string, program: st
       getBase58Decoder().decode(data.subarray(32, 64)) !== authority ||
       data[108] !== 1 || data.readUInt32LE(72) !== 0 || data.readBigUInt64LE(121) !== 0n || data.readUInt32LE(129) !== 0) return fail();
   return data.readBigUInt64LE(64);
+}
+/** Tokens already in a swap's temporary input ATA. A System-owned prefunded address holds lamports only. */
+function pendingDonation(raw: Account, mint: string, authority: string, program: string): bigint {
+  if (raw.owner === "11111111111111111111111111111111" && !raw.executable && raw.data.length === 0) return 0n;
+  return tokenBalance(raw, mint, authority, program);
 }
 function paperIntent(intent: SolanaLiveIntent) {
   return parseSolanaSwapIntent({ kind: intent.kind, chain: intent.chain, mode: "paper", requestId: intent.requestId,
@@ -310,20 +318,34 @@ export function createSolanaExecutor(options: SolanaExecutorOptions) {
         const slot = integer(await rpc("getSlot", [{ commitment: "confirmed" }]));
         if (slot < 1) return fail();
         await verifyDeployment(rpc, options.programId, options.programBinarySha256, slot);
-        const result = context(await rpc("getMultipleAccounts", [[intent.vault, inputTokenAccount, outputTokenAccount, feePayer, ownerRefund],
+        const result = context(await rpc("getMultipleAccounts", [[intent.vault, inputTokenAccount, outputTokenAccount, feePayer],
           { encoding: "base64", commitment: "confirmed", minContextSlot: slot }]), slot);
-        if (!Array.isArray(result.value) || result.value.length !== 5) return fail();
-        const [vault, input, output, payer, refund] = result.value.map(account) as [Account, Account, Account, Account, Account];
+        if (!Array.isArray(result.value) || result.value.length !== 4) return fail();
+        const [vault, input, output, payer] = result.value.map(account) as [Account, Account, Account, Account];
         if (vault.owner !== options.programId || vault.executable || payer.owner !== "11111111111111111111111111111111" || payer.executable || payer.data.length) return fail();
         const state = decodeSolanaVaultAccount(vault.data);
         if (state.owner !== intent.owner || state.session !== session || (state.paused && intent.inputMint === SOLANA_USDG_MINT) || state.expiresAt * 1000n <= BigInt(observedAtMs) ||
             state.seq === U64_MAX || state.maxOps < 1 || state.perTrade <= 0n || state.daily < state.perTrade) return fail();
         const inputBalance = tokenBalance(input, intent.inputMint, intent.vault, inputProgram);
         const outputBalance = tokenBalance(output, intent.outputMint, intent.vault, outputProgram);
-        tokenBalance(refund, intent.inputMint, intent.owner, inputProgram);
         if (inputBalance < BigInt(intent.amountRaw)) return fail();
+        // The vault needs the owner's input ATA only to return tokens already in this
+        // sequence's temporary ATA. An owner who closed it (unwrapping WSOL, reclaiming
+        // rent) must not block exits, so it is passed only when a donation waits, and
+        // then it must exist and be safe or the swap is refused before anything is signed.
+        const swapAuthority = await deriveSolanaSwapAuthority(options.programId, intent.vault, state.seq);
+        const tempInput = await deriveSolanaAta(swapAuthority, intent.inputMint, inputProgram);
+        const waiting = context(await rpc("getMultipleAccounts", [[tempInput, ownerRefund],
+          { encoding: "base64", commitment: "confirmed", minContextSlot: slot }]), slot);
+        if (!Array.isArray(waiting.value) || waiting.value.length !== 2) return fail();
+        const donation = waiting.value[0] === null ? 0n : pendingDonation(account(waiting.value[0]), intent.inputMint, swapAuthority, inputProgram);
+        let refundAccount: string | null = null;
+        if (donation > 0n) {
+          try { tokenBalance(account(waiting.value[1]), intent.inputMint, intent.owner, inputProgram); } catch { return fail("owner-refund"); }
+          refundAccount = ownerRefund;
+        }
         const rent = BigInt(integer(await rpc("getMinimumBalanceForRentExemption", [input.data.length, { commitment: "confirmed" }])));
-        return { slot: result.slot, state, inputBalance, outputBalance, payerBalance: payer.lamports, rent };
+        return { slot: result.slot, state, inputBalance, outputBalance, payerBalance: payer.lamports, rent, swapAuthority, tempInput, refundAccount };
       });
       checkAbort();
       // Mirror the vault's owner-signed WSOL input caps before asking for a route.
@@ -332,8 +354,7 @@ export function createSolanaExecutor(options: SolanaExecutorOptions) {
         const used = snapshot.state.debits.filter(d => d.timestamp > cutoff).reduce((sum, d) => sum + d.wsol, 0n);
         if (amount > snapshot.state.perTradeWsol || used + amount > snapshot.state.dailyWsol) return fail("risk");
       }
-      const swapAuthority = await deriveSolanaSwapAuthority(options.programId, intent.vault, snapshot.state.seq);
-      const tempInput = await deriveSolanaAta(swapAuthority, intent.inputMint, inputProgram);
+      const { swapAuthority, tempInput } = snapshot;
       const buildRequest: SolanaCpiBuildRequest = { ...intent, swapAuthority, sourceTokenAccount: tempInput,
         destinationTokenAccount: outputTokenAccount, inputTokenProgram: inputProgram, outputTokenProgram: outputProgram };
       const route = await options.market.build(buildRequest);
@@ -374,7 +395,7 @@ export function createSolanaExecutor(options: SolanaExecutorOptions) {
         const deadline = BigInt(Math.floor(Math.min(route.quote.expiresAtMs, Number(snapshot.state.expiresAt * 1000n)) / 1000));
         const swap = buildExecuteSolanaSwapInstruction({ programAddress: options.programId, vault: intent.vault,
           sessionSigner: session, feePayer, inputMint: intent.inputMint, outputMint: intent.outputMint,
-          vaultInput: inputTokenAccount, vaultOutput: outputTokenAccount, swapAuthority, tempInput, ownerRefund,
+          vaultInput: inputTokenAccount, vaultOutput: outputTokenAccount, swapAuthority, tempInput, ownerRefund: snapshot.refundAccount,
           inputTokenProgram: inputProgram, outputTokenProgram: outputProgram, expectedSeq: snapshot.state.seq,
           sessionEpoch: snapshot.state.sessionEpoch, amountIn: BigInt(intent.amountRaw), minOut: BigInt(route.quote.minOutAmount),
           deadline, slippageBps: intent.slippageBps, routeData: Buffer.from(route.dataBase64, "base64"),

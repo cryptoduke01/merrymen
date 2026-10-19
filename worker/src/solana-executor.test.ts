@@ -62,6 +62,8 @@ async function fixture() {
   const controls = { upgradeable: false, paused: false, failSend: false, simulationError: false, persistError: false,
     conflict: false, finalized: false, wrongSignature: false, fee: 10_000, riskWrongBalance: false, mintReason: false,
     riskDelay: 0, substituteCpi: false, badLookup: false, goodLookup: false, stateEpochAfter: false, badRefund: false, tempDonation: false,
+    // The owner's input ATA closed or delegated, and tokens already sitting in the temporary input ATA.
+    refundMissing: false, refundDelegate: false, tempTokens: 0n,
     // Pyth SOL/USD with 8 decimals; the fixture route buys 0.002 SOL per USDG, i.e. $500.
     referencePrice: 50_000_000_000n, referenceAgeMs: 0, forgeFloor: false };
   let record: SolanaLiveRecord | null = null;
@@ -76,18 +78,28 @@ async function fixture() {
     [SOLANA_CLASSIC_TOKEN_PROGRAM, key(40), swap, temp, key(41), key(42), output, SOLANA_USDG_MINT, SOLANA_WRAPPED_SOL_MINT, JUPITER_SWAP_PROGRAM, TOKEN_2022_PROGRAM]
       .map((address, index) => ({ address, isSigner: index === 2, isWritable: [3,4,5,6].includes(index) })) };
   const response = (value: unknown) => ({ context: { slot: SLOT }, value });
+  const refundAccount = () => {
+    if (controls.refundMissing) return null;
+    const bytes = token(SOLANA_USDG_MINT, controls.badRefund ? key(90) : owner, 0n);
+    if (controls.refundDelegate) { bytes.writeUInt32LE(1, 72); keyBytes(key(91)).copy(bytes, 76); }
+    return rpcAccount(bytes, TOKEN_2022_PROGRAM);
+  };
+  const tempLamports = () => controls.tempDonation || controls.tempTokens > 0n ? 2_039_280 : 0;
+  const tempAccount = () => controls.tempTokens > 0n ? rpcAccount(token(SOLANA_USDG_MINT, swap, controls.tempTokens), TOKEN_2022_PROGRAM, false, 2_039_280)
+    : controls.tempDonation ? rpcAccount(Buffer.alloc(0), SYSTEM, false, 2_039_280) : null;
   const receipt = (submission: SolanaSignedSubmission, failed = false) => {
     const tx = getTransactionDecoder().decode(Buffer.from(submission.signedTransactionBase64, "base64"));
     const message = getCompiledTransactionMessageDecoder().decode(tx.messageBytes);
     const keys = [...message.staticAccounts, ...submission.loadedAddresses.writable, ...submission.loadedAddresses.readonly];
     const tempIndex = keys.indexOf(temp);
-    const balances = Array.from({ length: keys.length }, (_, index) => index === 0 ? 100_000_000 : index === tempIndex ? (controls.tempDonation ? 2_039_280 : 0) : 1_000_000);
+    const balances = Array.from({ length: keys.length }, (_, index) => index === 0 ? 100_000_000 : index === tempIndex ? tempLamports() : 1_000_000);
     const tokenRow = (account: string, mint: string, programId: string, amount: bigint) => ({ accountIndex: keys.indexOf(account),
       mint, owner: vault, programId, uiTokenAmount: { amount: amount.toString(), decimals: mint === SOLANA_USDG_MINT ? 6 : 9 } });
     return { version: 0, slot: SLOT + 1, transaction: [submission.signedTransactionBase64, "base64"], meta: {
       err: failed ? { InstructionError: [2, { Custom: 1 }] } : null, fee: 10_000,
-      preBalances: balances, postBalances: balances.map((n, i) => i === 0 ? n - 10_000 + (!failed && controls.tempDonation ? 2_039_280 : 0) : i === tempIndex && !failed ? 0 : n), loadedAddresses: structuredClone(submission.loadedAddresses),
-      preTokenBalances: [tokenRow(input, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM, CASH), tokenRow(output, SOLANA_WRAPPED_SOL_MINT, SOLANA_CLASSIC_TOKEN_PROGRAM, 0n)],
+      preBalances: balances, postBalances: balances.map((n, i) => i === 0 ? n - 10_000 + (!failed ? tempLamports() : 0) : i === tempIndex && !failed ? 0 : n), loadedAddresses: structuredClone(submission.loadedAddresses),
+      preTokenBalances: [tokenRow(input, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM, CASH), tokenRow(output, SOLANA_WRAPPED_SOL_MINT, SOLANA_CLASSIC_TOKEN_PROGRAM, 0n),
+        ...(controls.tempTokens > 0n ? [{ ...tokenRow(temp, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM, controls.tempTokens), owner: swap }] : [])],
       postTokenBalances: [tokenRow(input, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM, failed ? CASH : CASH - 1_000_000n),
         tokenRow(output, SOLANA_WRAPPED_SOL_MINT, SOLANA_CLASSIC_TOKEN_PROGRAM, failed ? 0n : 2_000_000n)],
       logMessages: [`Program ${PROGRAM} invoke [1]`, ...(failed ? [] : [`Program data: ${event(submission)}`]),
@@ -117,11 +129,16 @@ async function fixture() {
       }
       case "getMultipleAccounts": {
         const keys = params[0] as string[];
-        if (keys[0] === vault) { assert.equal(keys[4], ownerRefund); return response([rpcAccount(state(owner, session, 0n, { paused: controls.paused }), PROGRAM),
-          rpcAccount(token(SOLANA_USDG_MINT, vault, CASH), TOKEN_2022_PROGRAM), rpcAccount(token(SOLANA_WRAPPED_SOL_MINT, vault, 0n), SOLANA_CLASSIC_TOKEN_PROGRAM),
-          rpcAccount(Buffer.alloc(0), SYSTEM), rpcAccount(token(SOLANA_USDG_MINT, controls.badRefund ? key(90) : owner, 0n), TOKEN_2022_PROGRAM)]); }
+        if (keys[0] === vault) {
+          const accounts = [rpcAccount(state(owner, session, 0n, { paused: controls.paused }), PROGRAM),
+            rpcAccount(token(SOLANA_USDG_MINT, vault, CASH), TOKEN_2022_PROGRAM), rpcAccount(token(SOLANA_WRAPPED_SOL_MINT, vault, 0n), SOLANA_CLASSIC_TOKEN_PROGRAM),
+            rpcAccount(Buffer.alloc(0), SYSTEM)];
+          if (keys.length === 5) { assert.equal(keys[4], ownerRefund); accounts.push(refundAccount()!); }
+          return response(accounts);
+        }
+        if (keys.length === 2 && keys[0] === temp) { assert.equal(keys[1], ownerRefund); return response([tempAccount(), refundAccount()]); }
         return response(keys.map(value => value === output ? rpcAccount(token(SOLANA_WRAPPED_SOL_MINT, vault, 0n), SOLANA_CLASSIC_TOKEN_PROGRAM)
-          : value === temp && controls.tempDonation ? rpcAccount(Buffer.alloc(0), SYSTEM, false, 2_039_280) : null));
+          : value === temp ? tempAccount() : null));
       }
       case "getMinimumBalanceForRentExemption": return 2_039_280;
       case "getLatestBlockhash": return response({ blockhash: key(50), lastValidBlockHeight: 1200 });
@@ -172,6 +189,14 @@ async function fixture() {
     inputMint: SOLANA_USDG_MINT, outputMint: SOLANA_WRAPPED_SOL_MINT, amountRaw: "1000000", slippageBps: 100 };
   return { options, intent, controls, calls, clock, receipt, session, feePayer, ownerRefund, route, read, getRecord: () => record };
 }
+/** The account the signed execute_swap passes in the owner_refund slot (index 14). */
+function refundSlot(submission: SolanaSignedSubmission): string {
+  const tx = getTransactionDecoder().decode(Buffer.from(submission.signedTransactionBase64, "base64"));
+  const compiled = getCompiledTransactionMessageDecoder().decode(tx.messageBytes);
+  const keys = [...compiled.staticAccounts, ...submission.loadedAddresses.writable, ...submission.loadedAddresses.readonly];
+  const swap = compiled.instructions.find(ix => keys[ix.programAddressIndex] === PROGRAM)!;
+  return keys[swap.accountIndices![14]!]!;
+}
 
 test("builds real two-signer v0 bytes, verifies them, persists before one send and settles actual finalized deltas", async () => {
   const f = await fixture(); const executor = createSolanaExecutor(f.options);
@@ -184,7 +209,8 @@ test("builds real two-signer v0 bytes, verifies them, persists before one send a
   assert.ok(await verifySignature(f.options.feePayerKeyPair.publicKey, tx.signatures[f.feePayer]!, tx.messageBytes));
   const compiled = getCompiledTransactionMessageDecoder().decode(tx.messageBytes);
   assert.equal(compiled.version, 0);
-  assert.equal(compiled.staticAccounts[compiled.instructions[2]!.accountIndices![14]!], f.ownerRefund);
+  // No donation waits in the temporary account, so the owner's ATA is left out.
+  assert.equal(compiled.staticAccounts[compiled.instructions[2]!.accountIndices![14]!], PROGRAM);
   const count = f.calls.length; assert.deepEqual(await executor.execute(f.intent), pending); assert.equal(f.calls.length, count);
   assert.equal((await executor.reconcile(f.intent.owner, f.intent.requestId))?.status, "pending");
   f.controls.finalized = true;
@@ -261,8 +287,40 @@ test("a System-owned prefunded temporary ATA can initialize and its refund is di
   assert.equal(settled!.settlement!.amountIn, "1000000");
 });
 
+test("an owner who closed or delegated their input ATA still trades when no donation waits (audit VAULT-2)", async () => {
+  for (const mode of ["refundMissing", "refundDelegate", "badRefund"] as const) {
+    const f = await fixture(); f.controls[mode] = true; const executor = createSolanaExecutor(f.options);
+    const pending = await executor.execute(f.intent);
+    assert.equal(pending.status, "pending", mode);
+    assert.equal(refundSlot(pending.submission), PROGRAM, mode);
+    assert.equal(f.calls.filter(call => call === "send").length, 1);
+    f.controls.finalized = true;
+    assert.equal((await executor.reconcile(f.intent.owner, f.intent.requestId))?.status, "finalized", mode);
+  }
+});
+
+test("a donation in the temporary ATA passes the owner's ATA for its refund and never inflates the receipt", async () => {
+  const f = await fixture(); f.controls.tempTokens = 7n; const executor = createSolanaExecutor(f.options);
+  const pending = await executor.execute(f.intent);
+  assert.equal(pending.status, "pending");
+  assert.equal(refundSlot(pending.submission), f.ownerRefund);
+  f.controls.finalized = true;
+  const settled = await executor.reconcile(f.intent.owner, f.intent.requestId);
+  assert.equal(settled?.status, "finalized");
+  assert.equal(settled?.settlement?.amountIn, "1000000"); assert.equal(settled?.settlement?.feeLamports, "10000");
+});
+
+test("a donation with the owner's ATA closed, delegated or foreign fails closed with owner-refund before persistence or send", async () => {
+  for (const mode of ["refundMissing", "refundDelegate", "badRefund"] as const) {
+    const f = await fixture(); f.controls.tempTokens = 7n; f.controls[mode] = true;
+    await assert.rejects(createSolanaExecutor(f.options).execute(f.intent), /refused: owner-refund/, mode);
+    assert.ok(!f.calls.includes("persist"), mode); assert.ok(!f.calls.includes("send"), mode);
+    assert.ok(!f.calls.includes("simulateTransaction"), mode);
+  }
+});
+
 test("refuses unsafe authority, mutation, simulation, fees, stale safety and risk evidence before persistence or send", async () => {
-  for (const mode of ["upgradeable", "paused", "simulationError", "riskWrongBalance", "mintReason", "substituteCpi", "badLookup", "stateEpochAfter", "badRefund"] as const) {
+  for (const mode of ["upgradeable", "paused", "simulationError", "riskWrongBalance", "mintReason", "substituteCpi", "badLookup", "stateEpochAfter"] as const) {
     const f = await fixture(); f.controls[mode] = true;
     await assert.rejects(createSolanaExecutor(f.options).execute(f.intent));
     assert.ok(!f.calls.includes("persist"), mode); assert.ok(!f.calls.includes("send"), mode);

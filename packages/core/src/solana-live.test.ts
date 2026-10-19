@@ -309,4 +309,55 @@ describe("Solana live shared ABI", () => {
       3n,
     );
   });
+  it("encodes a left-out owner refund account as Anchor's absent optional account", () => {
+    // Audit VAULT-2: the owner's input ATA is needed only to return a donation, so an
+    // owner who closed it must not block swaps. Absent is the program ID, read-only.
+    const base = {
+      programAddress,
+      vault: owner,
+      sessionSigner: session,
+      feePayer,
+      inputMint: SOLANA_USDG_MINT,
+      outputMint: live.SOLANA_WRAPPED_SOL_MINT,
+      vaultInput: owner,
+      vaultOutput: owner,
+      swapAuthority: owner,
+      tempInput: owner,
+      inputTokenProgram: TOKEN_2022_PROGRAM,
+      outputTokenProgram: live.SOLANA_CLASSIC_TOKEN_PROGRAM,
+      expectedSeq: 3n,
+      sessionEpoch: 4n,
+      amountIn: 5n,
+      minOut: 6n,
+      deadline: 100n,
+      slippageBps: 100,
+      routeData: new Uint8Array(32),
+      routeAccounts: Array.from({ length: 11 }, () => ({
+        address: owner,
+        role: 1 as const,
+      })),
+    };
+    const absent = live.buildExecuteSolanaSwapInstruction({
+      ...base,
+      ownerRefund: null,
+    });
+    assert.deepEqual(absent.accounts![14], { address: programAddress, role: 0 });
+    const present = live.buildExecuteSolanaSwapInstruction({
+      ...base,
+      ownerRefund: feePayer,
+    });
+    assert.deepEqual(present.accounts![14], { address: feePayer, role: 1 });
+    assert.deepEqual(absent.data, present.data);
+    assert.equal(absent.accounts!.length, 26);
+    // An explicit program ID would be a writable program account, and a route
+    // shorter than the program's 32-byte minimum can never execute.
+    for (const bad of [
+      { ...base, ownerRefund: programAddress },
+      { ...base, ownerRefund: null, routeData: new Uint8Array(31) },
+    ])
+      assert.throws(
+        () => live.buildExecuteSolanaSwapInstruction(bad),
+        live.SolanaVaultValidationError,
+      );
+  });
 });

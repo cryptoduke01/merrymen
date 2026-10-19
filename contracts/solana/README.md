@@ -36,9 +36,11 @@ pays the transaction and temporary-account rent; it never receives custody
 signing authority. The program transfers exactly the authorized amount to the
 input ATA of a per-sequence PDA `["swap", vault, seq_le_u64]`. That PDA is the
 **only** signer forwarded to a Jupiter CPI. Vault state, owner, session, fee payer,
-source custody ATA, owner refund ATA, and other custody-owned token accounts are forbidden in the
-CPI account list. The single allowed custody token account is the destination
-ATA, which Jupiter can credit but cannot debit without the vault signer.
+source custody ATA, any token account owned by the vault owner (including the
+owner refund ATA, whether or not it was passed), and other custody-owned token
+accounts are forbidden in the CPI account list. The single allowed custody token
+account is the destination ATA, which Jupiter can credit but cannot debit
+without the vault signer.
 
 The program pins Jupiter's v6 program ID and accepts only its ExactIn
 `sharedAccountsRoute` discriminator, bound input, output floor, zero platform fee
@@ -48,7 +50,13 @@ Output is measured from actual custody balance deltas. Unspent input returns to
 the vault, the temporary ATA closes and refunds its rent to the fee payer. Prior
 unsolicited deposits to the temporary ATA are refunded to the owner’s canonical
 input ATA before measuring input, so a publicly predictable address does not create a donation denial of
-service. Success increments the sequence and emits `SwapExecuted`; any failed
+service and a donation never counts as trade input. The owner refund ATA is an
+optional account (the client passes the program ID to leave it out): it is
+needed only when such a donation is waiting. An owner who closes their own USDG
+or WSOL account, for example by unwrapping WSOL in a wallet, therefore no longer
+blocks buys or exits. If a donation is waiting and the refund account is absent,
+the swap fails closed with `RefundAccount` (6010); the fee payer never creates
+owner accounts. Success increments the sequence and emits `SwapExecuted`; any failed
 check rolls back the CPI, balances, debit history and sequence atomically.
 
 Buy budgets conservatively charge the full authorized USDG input even when dust

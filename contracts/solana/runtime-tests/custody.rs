@@ -138,6 +138,9 @@ struct Fixture {
     authority: Pubkey,
     last_logs: Vec<String>,
     last_fee: u64,
+    /// Makes every session transaction unique, so a resent identical instruction is
+    /// judged by the program rather than refused by the runtime as already processed.
+    nonce: u32,
 }
 impl Fixture {
     async fn new() -> Self {
@@ -197,6 +200,7 @@ impl Fixture {
             authority,
             last_logs: Vec::new(),
             last_fee: 0,
+            nonce: 0,
         };
         let init = Instruction {
             program_id: vault::ID,
@@ -259,8 +263,13 @@ impl Fixture {
         ix: Instruction,
     ) -> std::result::Result<(), solana_program_test::BanksClientError> {
         let hash = self.ctx.banks_client.get_latest_blockhash().await.unwrap();
+        self.nonce += 1;
+        // Appended, so the instruction under test keeps index 0; the price stays zero.
+        let unique = solana_sdk::compute_budget::ComputeBudgetInstruction::set_compute_unit_limit(
+            1_000_000 + self.nonce,
+        );
         let tx = Transaction::new_signed_with_payer(
-            &[ix],
+            &[ix, unique],
             Some(&self.ctx.payer.pubkey()),
             &[&self.ctx.payer, &self.session],
             hash,
@@ -307,9 +316,13 @@ impl Fixture {
             .await
             .unwrap()
             .unwrap();
-        spl_token_2022::state::Account::unpack(&a.data)
-            .unwrap()
-            .amount
+        // Accounts created by the ATA program for Token-2022 carry extensions.
+        spl_token_2022::extension::StateWithExtensions::<spl_token_2022::state::Account>::unpack(
+            &a.data,
+        )
+        .unwrap()
+        .base
+        .amount
     }
     async fn swap_ix(&mut self, seq: u64, epoch: u64, mode: u8) -> Instruction {
         let clock: Clock = self.ctx.banks_client.get_sysvar().await.unwrap();
@@ -369,7 +382,8 @@ impl Fixture {
             jupiter_program: JUPITER,
             associated_token_program: anchor_spl::associated_token::ID,
             system_program: anchor_lang::system_program::ID,
-            owner_refund: ata(&self.owner.pubkey(), &input_mint, &input_program),
+            // Like the executor, pass the owner's refund ATA only for a waiting donation.
+            owner_refund: None,
         }
         .to_account_metas(None);
         accounts.extend([
@@ -433,6 +447,46 @@ impl Fixture {
         ix.data[route + 29..route + 31].copy_from_slice(&bps.to_le_bytes());
         ix
     }
+    /// Passes the owner's canonical input ATA in the optional refund slot.
+    fn with_refund(&self, mut ix: Instruction) -> Instruction {
+        let refund = ata(
+            &self.owner.pubkey(),
+            &ix.accounts[3].pubkey,
+            &ix.accounts[9].pubkey,
+        );
+        ix.accounts[14] = AccountMeta::new(refund, false);
+        ix
+    }
+    /// Unsolicited tokens already in a swap's temporary input ATA.
+    fn donate(&mut self, ix: &Instruction, amount: u64) {
+        let (temp, authority) = (ix.accounts[8].pubkey, ix.accounts[7].pubkey);
+        let (mint, program) = (ix.accounts[3].pubkey, ix.accounts[9].pubkey);
+        self.ctx
+            .set_account(&temp, &token(program, mint, authority, amount).into());
+    }
+    /// The owner closes an empty token account of theirs, as a wallet unwrap or rent reclaim does.
+    async fn owner_closes(&mut self, mint: Pubkey, program: Pubkey) {
+        let account = ata(&self.owner.pubkey(), &mint, &program);
+        let close = spl_token_2022::instruction::close_account(
+            &program,
+            &account,
+            &self.owner.pubkey(),
+            &self.owner.pubkey(),
+            &[],
+        )
+        .unwrap();
+        self.owner_send(vec![close]).await.unwrap();
+        assert!(self
+            .ctx
+            .banks_client
+            .get_account(account)
+            .await
+            .unwrap()
+            .is_none());
+    }
+    async fn exists(&mut self, key: Pubkey) -> bool {
+        self.ctx.banks_client.get_account(key).await.unwrap().is_some()
+    }
     async fn hold_wsol(&mut self, amount: u64) {
         self.ctx.set_account(
             &self.output,
@@ -446,17 +500,36 @@ fn vault_error(
     result: std::result::Result<(), solana_program_test::BanksClientError>,
     expected: vault::VaultError,
 ) -> bool {
+    custom_error(result, 6000 + expected as u32)
+}
+/// A specific custom error code, such as an Anchor account constraint (2000-3999).
+fn custom_error(
+    result: std::result::Result<(), solana_program_test::BanksClientError>,
+    expected: u32,
+) -> bool {
     use solana_sdk::{instruction::InstructionError, transaction::TransactionError};
     // Covers both a processed failure and a preflight simulation failure.
     match result {
         Ok(()) => false,
-        Err(e) => matches!(
-            e.unwrap(),
-            TransactionError::InstructionError(0, InstructionError::Custom(code))
-                if code == 6000 + expected as u32
-        ),
+        Err(e) => {
+            let e = e.unwrap();
+            let matched = matches!(
+                e,
+                TransactionError::InstructionError(0, InstructionError::Custom(code))
+                    if code == expected
+            );
+            if !matched {
+                eprintln!("expected custom error {expected}, got {e:?}");
+            }
+            matched
+        }
     }
 }
+/// Anchor 0.32 account-constraint codes used below.
+const ANCHOR_SEEDS: u32 = 2006;
+const ANCHOR_ASSOCIATED: u32 = 2009;
+const ANCHOR_TOKEN_OWNER: u32 = 2015;
+const ANCHOR_NOT_INITIALIZED: u32 = 3012;
 #[tokio::test]
 #[ignore = "requires the compiled custody SBF artifact; run contracts/solana/test.sh"]
 async fn successful_cpi_is_bounded_replay_safe_and_budget_survives_session_replacement() {
@@ -510,10 +583,8 @@ async fn failed_output_and_authority_smuggling_roll_back_every_balance_and_seque
 async fn donations_and_route_dust_return_to_custody_without_resetting_budget() {
     let mut f = Fixture::new().await;
     let ix = f.swap_ix(0, 1, 2).await;
-    let temp = ix.accounts[8].pubkey;
-    let authority = ix.accounts[7].pubkey;
-    f.ctx
-        .set_account(&temp, &token(spl_token_2022::ID, USDG, authority, 7).into());
+    let ix = f.with_refund(ix);
+    f.donate(&ix, 7);
     f.swap(ix).await.unwrap();
     assert_eq!(f.balance(f.input).await, 910);
     let event = f
@@ -562,7 +633,9 @@ async fn system_prefunding_is_initialized_and_only_preexisting_lamports_offset_t
             .get_balance(f.ctx.payer.pubkey())
             .await
             .unwrap();
-        let owner_refund = ix.accounts[14].pubkey;
+        // System-owned lamports are not a token donation, so no refund account is passed.
+        assert_eq!(ix.accounts[14].pubkey, vault::ID);
+        let owner_refund = ata(&f.owner.pubkey(), &USDG, &spl_token_2022::ID);
         let owner_lamports = f.ctx.banks_client.get_balance(owner_refund).await.unwrap();
 
         f.swap(ix).await.unwrap();
@@ -605,6 +678,7 @@ async fn wsol_donation_moves_native_backing_to_owner_and_only_remaining_lamports
     let session = f.session_ix(100, 500);
     f.owner_send(vec![session]).await.unwrap();
     let sell = f.swap_ix(1, 2, 3).await;
+    let sell = f.with_refund(sell);
     let temp = sell.accounts[8].pubkey;
     let swap = sell.accounts[7].pubkey;
     let refund = sell.accounts[14].pubkey;
@@ -917,4 +991,109 @@ async fn a_session_without_a_wsol_input_bound_cannot_be_created() {
     assert_eq!(state.session_epoch, 1);
     assert_eq!((state.per_trade_wsol, state.daily_wsol), (100, 300));
     assert_eq!(state.version, vault::VERSION);
+}
+
+#[tokio::test]
+#[ignore = "requires the compiled custody SBF artifact; run contracts/solana/test.sh"]
+async fn an_owner_who_closed_their_token_accounts_can_still_buy_and_exit() {
+    // Audit VAULT-2: unwrapping WSOL in a wallet closes the owner's WSOL ATA. That used to
+    // fail every later sell, including stop-loss exits, with AccountNotInitialized.
+    let mut f = Fixture::new().await;
+    f.owner_closes(USDG, spl_token_2022::ID).await;
+    f.owner_closes(WSOL, anchor_spl::token::ID).await;
+    let buy = f.swap_ix(0, 1, 0).await;
+    assert_eq!(buy.accounts[14], AccountMeta::new_readonly(vault::ID, false));
+    f.swap(buy).await.unwrap();
+    assert_eq!((f.balance(f.input).await, f.balance(f.output).await), (900, 200));
+    let caps = f.session_ix(100, 500);
+    f.owner_send(vec![caps]).await.unwrap();
+    let sell = f.swap_ix(1, 2, 3).await;
+    f.swap(sell).await.unwrap();
+    assert_eq!((f.balance(f.input).await, f.balance(f.output).await), (1000, 100));
+    let event = f.swap_event();
+    assert_eq!((event.input_mint, event.amount_in, event.amount_out), (WSOL, 100, 100));
+    assert_eq!(f.state().await.seq, 2);
+}
+
+#[tokio::test]
+#[ignore = "requires the compiled custody SBF artifact; run contracts/solana/test.sh"]
+async fn a_donation_without_the_owners_refund_account_fails_closed_and_is_never_traded() {
+    let mut f = Fixture::new().await;
+    let refund = ata(&f.owner.pubkey(), &USDG, &spl_token_2022::ID);
+    let ix = f.swap_ix(0, 1, 0).await;
+    let temp = ix.accounts[8].pubkey;
+    f.donate(&ix, 7);
+    // Left out: the program refuses rather than counting the donation as trade input.
+    assert!(vault_error(
+        f.swap(ix.clone()).await,
+        vault::VaultError::RefundAccount
+    ));
+    // The owner's account closed: it cannot be passed either, and nobody else's may stand in.
+    f.owner_closes(USDG, spl_token_2022::ID).await;
+    let closed = f.with_refund(ix.clone());
+    assert!(custom_error(f.swap(closed).await, ANCHOR_NOT_INITIALIZED));
+    assert!(vault_error(
+        f.swap(ix.clone()).await,
+        vault::VaultError::RefundAccount
+    ));
+    let stranger = Pubkey::new_unique();
+    let stranger_ata = ata(&stranger, &USDG, &spl_token_2022::ID);
+    f.ctx.set_account(
+        &stranger_ata,
+        &token(spl_token_2022::ID, USDG, stranger, 0).into(),
+    );
+    let mut foreign = ix.clone();
+    foreign.accounts[14] = AccountMeta::new(stranger_ata, false);
+    assert!(custom_error(f.swap(foreign).await, ANCHOR_TOKEN_OWNER));
+    // An owner-held token account that is not the canonical ATA is refused too.
+    let side = Pubkey::new_unique();
+    f.ctx.set_account(
+        &side,
+        &token(spl_token_2022::ID, USDG, f.owner.pubkey(), 0).into(),
+    );
+    let mut noncanonical = ix.clone();
+    noncanonical.accounts[14] = AccountMeta::new(side, false);
+    assert!(custom_error(f.swap(noncanonical).await, ANCHOR_ASSOCIATED));
+    assert_eq!(f.balance(temp).await, 7);
+    assert_eq!(f.balance(f.input).await, 1000);
+    let state = f.state().await;
+    assert_eq!(state.seq, 0);
+    assert!(state.debits.is_empty());
+    // Reopening the account lets the same sequence run; the donation goes to the owner
+    // and the receipt counts only custody's own input.
+    f.owner_send(vec![
+        anchor_spl::associated_token::spl_associated_token_account::instruction::create_associated_token_account_idempotent(
+            &f.owner.pubkey(), &f.owner.pubkey(), &USDG, &spl_token_2022::ID,
+        ),
+    ])
+    .await
+    .unwrap();
+    let reopened = f.with_refund(ix);
+    f.swap(reopened).await.unwrap();
+    assert_eq!(f.balance(refund).await, 7);
+    assert_eq!(f.balance(f.input).await, 900);
+    assert!(!f.exists(temp).await);
+    let event = f.swap_event();
+    assert_eq!((event.amount_in, event.amount_out), (100, 200));
+    assert_eq!(f.state().await.debits[0].notional, 100);
+}
+
+#[tokio::test]
+#[ignore = "requires the compiled custody SBF artifact; run contracts/solana/test.sh"]
+async fn the_route_never_reaches_the_owners_token_accounts_whether_or_not_refund_is_passed() {
+    let mut f = Fixture::new().await;
+    let owner_usdg = ata(&f.owner.pubkey(), &USDG, &spl_token_2022::ID);
+    let owner_wsol = ata(&f.owner.pubkey(), &WSOL, &anchor_spl::token::ID);
+    for refund in [false, true] {
+        for target in [owner_usdg, owner_wsol] {
+            let mut ix = f.swap_ix(0, 1, 0).await;
+            if refund {
+                ix = f.with_refund(ix);
+            }
+            ix.accounts.push(AccountMeta::new(target, false));
+            assert!(vault_error(f.swap(ix).await, vault::VaultError::Route));
+        }
+    }
+    assert_eq!(f.balance(f.input).await, 1000);
+    assert_eq!(f.state().await.seq, 0);
 }
