@@ -541,3 +541,70 @@ test("snapshots bound history to 100 but old receipts remain durable for replay"
   assert.equal(reopened.commit(commitArgs({ intent: original, quote: quote(original, "1") })).version, 1);
   assert.equal(reopened.get(OWNER)!.version, 102);
 });
+
+test("an owner renewal revives an expired book without refilling it, resetting it or rewriting its receipts", (t) => {
+  const { store, setNow, open } = fixture(t);
+  const DAY = 86_400_000;
+  store.create(OWNER, "1000", limits({ perTradeUsdg: "500", dailyUsdg: "1000", maxOpsPerDay: 5, expiresAtMs: NOW + DAY }), NOW);
+  store.commit(commitArgs());
+  // Day one ends: the position can no longer be sold and init is refused.
+  setNow(NOW + DAY);
+  const sell = intent("exit", "150", "sell");
+  const sellArgs = (nowMs: number, expectedVersion: number) =>
+    commitArgs({ intent: sell, quote: quote(sell, "90", nowMs), safetyObservedAtMs: nowMs, expectedVersion, nowMs });
+  assert.throws(() => store.commit(sellArgs(NOW + DAY, 1)), errorCode("expired"));
+  assert.throws(() => store.create(OWNER, "1000", limits({ expiresAtMs: NOW + 9 * DAY }), NOW + DAY), errorCode("book_exists"));
+  const before = store.get(OWNER)!;
+
+  const renewed = store.renew(OWNER, { expiresAtMs: NOW + 8 * DAY });
+  const { limits: _old, version: _v, updatedAtMs: _u, ...kept } = before;
+  const { limits: renewedLimits, version, updatedAtMs, ...after } = renewed;
+  assert.deepEqual(after, kept, "cash, initial cash, peak, P&L, positions and receipts are untouched");
+  assert.deepEqual(renewedLimits, { ...before.limits, expiresAtMs: NOW + 8 * DAY }, "omitted limits keep their values");
+  assert.equal(version, before.version + 1);
+  assert.equal(updatedAtMs, NOW + DAY);
+  assert.deepEqual(open().get(OWNER), renewed, "the renewal is durable");
+
+  // The stranded position can be sold again, against the renewed version.
+  assert.throws(() => store.commit(sellArgs(NOW + DAY, 1)), errorCode("version_conflict"));
+  const exit = store.commit(sellArgs(NOW + DAY, 2));
+  assert.equal(exit.side, "sell");
+  assert.equal(store.get(OWNER)!.trades.length, 2);
+  assert.equal(store.get(OWNER)!.initialCashRaw, "1000");
+});
+
+test("a renewal changes only the limits it names, validates them, and never resets the rolling caps", (t) => {
+  const { store, setNow } = fixture(t);
+  store.create(OWNER, "1000", limits({ perTradeUsdg: "500", dailyUsdg: "1000", maxOpsPerDay: 5 }), NOW);
+  store.commit(commitArgs());
+  const before = store.get(OWNER)!;
+  setNow(NOW + 10);
+  for (const [renewal, code] of [
+    [{ expiresAtMs: NOW + 10 }, null],
+    [{ expiresAtMs: NOW + 10_000, perTradeUsdg: "1001" }, null],
+    [{ expiresAtMs: NOW + 10_000, maxDrawdownBps: 10_001 }, null],
+    [{ expiresAtMs: NOW + 10_000, maxOpsPerDay: 0 }, null],
+    [{ expiresAtMs: NOW + 10_000, cashRaw: "999999" }, "invalid_input"],
+    [{ expiresAtMs: NOW + 10_000, initialCashRaw: "999999" }, "invalid_input"],
+    [{ expiresAtMs: NOW + 10_000, perTradeWsol: "1" }, "invalid_input"],
+    [{ perTradeUsdg: "1" }, "invalid_input"],
+  ] as const) {
+    assert.throws(() => store.renew(OWNER, renewal as never), code ? errorCode(code) : /Solana/, JSON.stringify(renewal));
+    assert.deepEqual(store.get(OWNER), before, `${JSON.stringify(renewal)} changed the book`);
+  }
+  assert.throws(() => store.renew(OTHER, { expiresAtMs: NOW + 10_000 }), errorCode("book_missing"));
+  assert.throws(() => store.renew(OWNER, { expiresAtMs: NOW + 10_000 }, NOW + 11), errorCode("invalid_input"));
+  setNow(NOW - 1);
+  assert.throws(() => store.renew(OWNER, { expiresAtMs: NOW + 10_000 }), errorCode("clock_rollback"));
+  setNow(NOW + 10);
+
+  const tightened = store.renew(OWNER, { expiresAtMs: NOW + 10_000, maxOpsPerDay: 1, perTradeUsdg: "50" });
+  assert.deepEqual(tightened.limits, { ...before.limits, expiresAtMs: NOW + 10_000, maxOpsPerDay: 1, perTradeUsdg: "50" });
+  // The trade made before the renewal still counts toward the 24-hour window.
+  const next = intent("next", "10");
+  const nextArgs = commitArgs({ intent: next, quote: quote(next, "20", NOW + 10), marks: [mark("200", "100", NOW + 10)], safetyObservedAtMs: NOW + 10, expectedVersion: 2, nowMs: NOW + 10 });
+  assert.throws(() => store.commit(nextArgs), errorCode("operation_limit"));
+  assert.equal(store.renew(OWNER, { expiresAtMs: NOW + 10_000, maxOpsPerDay: 2 }).version, 3);
+  assert.throws(() => store.commit({ ...nextArgs, intent: intent("big", "51"), quote: quote(intent("big", "51"), "20", NOW + 10), expectedVersion: 3 }), errorCode("per_trade_limit"));
+  assert.equal(store.commit({ ...nextArgs, expectedVersion: 3 }).version, 4);
+});

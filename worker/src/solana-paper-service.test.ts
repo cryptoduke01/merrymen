@@ -207,6 +207,39 @@ describe("Solana paper command", () => {
     assert.deepEqual(retry, receipt);
   });
 
+  it("renews an expired book's limits so a stranded position can be sold, without touching its balances", async () => {
+    const h = harness();
+    const buy = await h.service.trade(OWNER, h.intent());
+    h.clock.value = NOW + 86_400_000;
+    const deps = { openStore: () => new SolanaPaperStore(h.file, { now: () => h.clock.value }), market: () => h.market, now: () => h.clock.value };
+    const sell = ["trade", "--owner", OWNER, "--input", SOL, "--output", SOLANA_USDG_MINT, "--amount-raw", buy.outputAmountRaw, "--request-id", "sell-1"];
+    await assert.rejects(runSolanaPaperCommand(sell, deps), /limits have expired/);
+    const before = h.store.get(OWNER)!;
+    const renewed = await runSolanaPaperCommand(["renew", "--owner", OWNER, "--expires-days", "3", "--per-trade", "20"], deps) as typeof before;
+    assert.deepEqual(renewed.limits, { ...before.limits, perTradeUsdg: "20000000", expiresAtMs: h.clock.value + 3 * 86_400_000 });
+    for (const field of ["initialCashRaw", "cashRaw", "hwmRaw", "realizedPnlRaw", "positions", "trades", "createdAtMs"] as const) {
+      assert.deepEqual(renewed[field], before[field], field);
+    }
+    assert.equal(renewed.version, before.version + 1);
+    const exit = await runSolanaPaperCommand(sell, deps) as { side: string; version: number };
+    assert.equal(exit.side, "sell");
+    assert.equal(h.store.get(OWNER)!.positions.length, 0);
+  });
+
+  it("parses every renewal option before opening the book, and offers no way to add cash", async () => {
+    let opens = 0;
+    const deps = { openStore: () => { opens++; throw new Error("should not open"); } };
+    for (const args of [
+      ["renew", "--owner", OWNER, "--cash", "5000"], ["renew", "--owner", OWNER, "--expires-days", "0"],
+      ["renew", "--owner", OWNER, "--expires-days", "366"], ["renew", "--owner", OWNER, "--per-trade", "50", "--daily", "10"],
+      ["renew", "--owner", OWNER, "--max-ops", "0"], ["renew", "--owner", OWNER, "--drawdown-bps", "0"],
+      ["renew", "--owner", OWNER, "--per-trade", "1e3"], ["renew"],
+    ]) await assert.rejects(runSolanaPaperCommand(args, deps), Error, args.join(" "));
+    assert.equal(opens, 0);
+    const h = harness();
+    await assert.rejects(runSolanaPaperCommand(["renew", "--owner", OTHER], { openStore: () => new SolanaPaperStore(h.file, { now: () => NOW }), now: () => NOW }), /does not exist/);
+  });
+
   it("help has no filesystem or provider effects and explains omitted execution costs", async () => {
     const text = await runSolanaPaperCommand(["--help"], { openStore: () => { assert.fail(); } });
     assert.match(String(text), /network fees and rent are excluded/i);

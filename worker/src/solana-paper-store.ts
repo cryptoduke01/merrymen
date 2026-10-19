@@ -94,6 +94,10 @@ export interface SolanaPaperSnapshot {
   updatedAtMs: number;
 }
 export type SolanaPaperBook = Omit<SolanaPaperSnapshot, "trades">;
+/** A renewal names a new expiry; any limit it omits keeps its current value. */
+export type SolanaPaperLimitsRenewal = { expiresAtMs: number }
+  & Partial<Pick<SolanaPaperLimits, "perTradeUsdg" | "dailyUsdg" | "maxOpsPerDay" | "maxDrawdownBps">>;
+const RENEWAL_FIELDS = new Set(["expiresAtMs", "perTradeUsdg", "dailyUsdg", "maxOpsPerDay", "maxDrawdownBps"]);
 type Book = SolanaPaperBook;
 export interface SolanaPaperCommit {
   owner: string;
@@ -225,6 +229,39 @@ export class SolanaPaperStore {
       this.db.prepare("INSERT INTO solana_paper_books(owner, version, book_json) VALUES (?, ?, ?)")
         .run(owner, 0, JSON.stringify(book));
       return { ...book, trades: [] };
+    });
+  }
+
+  /**
+   * Owner-run renewal of an existing book's limits, the only way to continue a
+   * book whose limits expired. It replaces `limits` and nothing else: cash,
+   * initial cash, the high-water mark, realized P&L, positions and every
+   * receipt stay as they were, so a renewal can neither refill nor reset a
+   * book. The new limits pass the same validation as creation, and the rolling
+   * 24-hour caps keep counting trades made before the renewal. The version
+   * advances, so a trade quoted against the old limits must be quoted again.
+   */
+  renew(owner: string, renewal: SolanaPaperLimitsRenewal, preparedAtMs = this.now()): SolanaPaperSnapshot {
+    ownerKey(owner);
+    timestamp(preparedAtMs);
+    if (!renewal || typeof renewal !== "object" || Array.isArray(renewal)
+      || Object.keys(renewal).some((key) => !RENEWAL_FIELDS.has(key)) || !Object.hasOwn(renewal, "expiresAtMs")) fail("invalid_input");
+    const changes = Object.fromEntries(Object.entries(renewal).filter(([, value]) => value !== undefined));
+    return this.transaction(() => {
+      const book = this.readBook(owner);
+      if (!book) fail("book_missing");
+      const nowMs = this.now();
+      timestamp(nowMs);
+      if (preparedAtMs > nowMs) fail("invalid_input");
+      if (nowMs < book.updatedAtMs) fail("clock_rollback");
+      if (book.version === Number.MAX_SAFE_INTEGER) fail("version_conflict");
+      // Validation errors keep their own message: they say which limit is wrong.
+      const limits = validateSolanaPaperLimits({ ...book.limits, ...changes }, nowMs);
+      const renewed: Book = { ...book, limits, version: book.version + 1, updatedAtMs: nowMs };
+      const update = this.db.prepare("UPDATE solana_paper_books SET version = ?, book_json = ? WHERE owner = ? AND version = ?")
+        .run(renewed.version, JSON.stringify(renewed), owner, book.version);
+      if (update.changes !== 1) fail("version_conflict");
+      return this.get(owner)!;
     });
   }
 
