@@ -11,6 +11,7 @@ import { requestJson } from "./request-json";
 import { SignIn } from "./HostedControls";
 import { SolanaAutomation } from "./SolanaAutomation";
 import { refusedByServer, SolanaOwnerActions } from "./SolanaOwnerActions";
+import { SolanaRecovery } from "./SolanaRecovery";
 import { PermissionTerms, permissionExpiry, permissionMatchesLimits, readPermissionTransaction } from "./SolanaPermission";
 import { deriveSolanaVaultAddress } from "../../../packages/core/src/solana-live";
 import { solanaUnits as units, displaySolanaAmount as display } from "../lib/solana-amounts";
@@ -328,5 +329,8 @@ function ConnectedSolana() {
       <SolanaAutomation key={`strategy-${signer.did}`} binding={binding} api={api} refresh={refresh} workerOnline={status?.runtime?.automation?.workerOnline ?? false} />
       <SolanaOwnerActions key={`owner-${signer.did}`} available={sameWallet && !!status?.runtime?.live.programId} api={api} sign={signer.signSetup} refresh={refresh} />
     </>}
+    {/* Also when the Solana status cannot be loaded: recovery must not depend on this server. */}
+    {signer.address && (binding ? sameWallet : status === null) && <SolanaRecovery key={`recovery-${signer.did}`} owner={signer.address}
+      programId={status?.runtime?.live.programId ?? null} vault={status?.runtime?.live.vault ?? null} exportKey={signer.exportKey} />}
   </>;
 }

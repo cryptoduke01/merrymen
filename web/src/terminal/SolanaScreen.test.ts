@@ -44,7 +44,7 @@ let testDom: typeof import("./test-dom").testDom, json: typeof import("./test-do
 let ui: ReturnType<typeof testDom>;
 let state: ReturnType<typeof initial>;
 let calls: Array<{ path: string; body: Record<string, unknown> | undefined }>;
-let signCount: number;
+let signCount: number, exportCount = 0;
 let signerDid = "did:privy:alice";
 let respond: (path: string, body: Record<string, unknown> | undefined) => Promise<Response>;
 const originalFetch = globalThis.fetch;
@@ -71,6 +71,7 @@ before(async () => {
         ready: true, authenticated: true, did: signerDid, address: OWNER, ambiguous: false,
         getAccessToken: async () => "fixture-token", create: async () => {}, signBinding: async () => "fixture-signature",
         signSetup: async () => { signCount++; return Uint8Array.from([1, 2, 3]); },
+        exportKey: async () => { exportCount++; },
       }) };
     }
     return original.call(this, id, parent, isMain);
@@ -79,7 +80,7 @@ before(async () => {
   finally { intercept.mock.restore(); }
 });
 beforeEach(() => {
-  ui = testDom(); signerDid = "did:privy:alice"; state = initial(); calls = []; signCount = 0;
+  ui = testDom(); signerDid = "did:privy:alice"; state = initial(); calls = []; signCount = 0; exportCount = 0;
   respond = async (path) => { if (path === "status") return json(state); throw new Error("Unexpected fixture route"); };
   globalThis.fetch = async (url, init) => {
     assert.equal(new Headers(init?.headers).get("authorization"), "Bearer fixture-token");
@@ -532,4 +533,37 @@ test("receipts show the minimum the recorded trade enforced, not the earlier pre
   };
   await ui.click("Refresh account"); await ui.click("Start a new trade"); await ui.click("Preview trade"); await ui.click("Simulate trade");
   assert.match(ui.container.textContent!, /Simulated output: 0\.00999 wrapped SOL, against a quoted minimum of 0\.00995 wrapped SOL\./);
+});
+
+test("the owner can export their key and find the recovery tool even when Solana status cannot load", async () => {
+  respond = async () => { throw new Error("Merrymen is down"); };
+  await render();
+  const text = () => ui.container.textContent!;
+  assert.match(text(), /Can't reach merrymen right now/);
+  assert.match(text(), /Recover without Merrymen/);
+  assert.match(text(), /Anyone who has this key controls your owner wallet and everything in your vault/);
+  assert.match(text(), /Merrymen never sees it and will never ask for it/);
+  assert.match(text(), /merrymen solana-recover/);
+  assert.match(text(), /reads the exported key from a file or from standard input/);
+  // Export needs an explicit acknowledgement first.
+  assert.equal(button("Export owner key with Privy").disabled, true);
+  const acknowledge = [...ui.container.querySelectorAll("label")].find((item) => item.textContent?.includes("anyone with this key can take my funds"))!.querySelector("input")!;
+  await act(async () => { acknowledge.click(); });
+  await ui.click("Export owner key with Privy");
+  assert.equal(exportCount, 1);
+  assert.match(text(), /export window is closed/);
+  assert.equal(button("Export owner key with Privy").disabled, true, "acknowledged again before another export");
+  assert.equal(signCount, 0);
+});
+
+test("recovery shows the bound vault and program, and is not offered for a different connected wallet", async () => {
+  state = initial("live"); Object.assign(state.runtime.live, { programId: PROGRAM, vault: "Vau1tAddress1111111111111111111111111111111" });
+  await render();
+  const card = [...ui.container.querySelectorAll(".solana-card")].find((item) => item.textContent?.startsWith("Recover without Merrymen"))!;
+  assert.ok(card.textContent!.includes(`Vault program: ${PROGRAM}`));
+  assert.ok(card.textContent!.includes("Vault: Vau1tAddress1111111111111111111111111111111"));
+  assert.ok(card.textContent!.includes(`Owner wallet: ${OWNER}`));
+  state.binding.owner = base58Encode(new Uint8Array(32).fill(5));
+  await ui.click("Refresh account");
+  assert.ok(!ui.container.textContent!.includes("Recover without Merrymen"));
 });
