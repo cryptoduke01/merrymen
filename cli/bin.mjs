@@ -1662,11 +1662,23 @@ switch (cmd) {
       stdio: "inherit",
       shell: false,
     });
+    // A pid-based stop (kill, a supervisor, nohup) reaches only this process.
+    // Forward it, and exit only from the child's exit, so a stopped command
+    // never leaves the worker trading as an orphan. Windows has no POSIX
+    // signals: its console delivers Ctrl+C to the child directly, while
+    // child.kill there would terminate the child abruptly instead.
+    if (process.platform !== "win32") {
+      for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
+        process.on(signal, () => {
+          if (child.exitCode === null && child.signalCode === null) child.kill(signal);
+        });
+      }
+    }
     child.on("error", () => {
       bad("Could not start the Solana command. Check the local runtime installation.");
       process.exitCode = 1;
     });
-    child.on("exit", (code) => process.exit(code ?? 1));
+    child.on("exit", (code, signal) => process.exit(code ?? 128 + (os.constants.signals[signal] ?? 0)));
     break;
   }
   case "export":
