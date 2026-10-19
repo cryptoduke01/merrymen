@@ -9,7 +9,8 @@ import { SolanaSettlementError } from "../../../worker/src/solana-settlement";
 import { SolanaAppRuntimeError } from "../../../worker/src/solana-app-runtime";
 import { SolanaMarketError } from "../../../worker/src/solana-market";
 import { SolanaRpcError } from "../../../worker/src/solana-rpc";
-import { solanaRequestBody, solanaResponse } from "./solana-api";
+import { SolanaTradingStoreError } from "../../../worker/src/solana-trading-store";
+import { OWNER_OUTCOME_UNKNOWN, solanaRequestBody, solanaResponse } from "./solana-api";
 import { SolanaWebError } from "./solana-auth";
 
 const flag = process.env.MERRYMEN_SOLANA;
@@ -114,4 +115,26 @@ test("every paper refusal the worker raises has a fixed owner answer, and the fi
   // An unlisted message is never reflected.
   const unknown = await solanaResponse(async () => { throw new SolanaPaperServiceError("constructor"); });
   assert.equal(unknown.status, 503); assert.equal((await unknown.json()).error, OUTAGE);
+});
+
+test("failures to use Solana's answer about a saved owner transaction are an unknown outcome, never a 4xx refusal", async () => {
+  // Each message is still raised by the worker after the owner's bytes were saved (ownerStatus, finishSetup).
+  const raised = ["solana-app-runtime.ts", "solana-trading-store.ts"].map((file) => readFileSync(fileURLToPath(new URL(`../../../worker/src/${file}`, import.meta.url)), "utf8")).join("\n");
+  assert.ok(OWNER_OUTCOME_UNKNOWN.size >= 13);
+  for (const message of OWNER_OUTCOME_UNKNOWN) {
+    assert.ok(raised.includes(JSON.stringify(message)), `still raised: ${message}`);
+    for (const error of [new SolanaAppRuntimeError("invalid", message), new SolanaTradingStoreError(message)]) {
+      const response = await solanaResponse(async () => { throw error; });
+      const body = await response.json() as { error: string; ownerFacing: boolean };
+      assert.equal(response.status, 503, `${error.name}: ${message}`);
+      assert.match(body.error, /could not be confirmed or recorded yet\. Nothing new was sent\. A transaction you already submitted stays saved and may still complete/);
+      assert.equal(body.ownerFacing, true);
+      ownerSafe(body.error);
+    }
+  }
+  // A refusal before anything is saved still says what it is.
+  const expired = await solanaResponse(async () => { throw new SolanaTradingStoreError("The prepared owner transaction expired before submission."); });
+  assert.equal(expired.status, 409); assert.equal((await expired.json()).error, "The prepared owner transaction expired before submission.");
+  const signature = await solanaResponse(async () => { throw new SolanaAppRuntimeError("invalid", "The owner signature or reviewed transaction does not match."); });
+  assert.equal(signature.status, 400);
 });

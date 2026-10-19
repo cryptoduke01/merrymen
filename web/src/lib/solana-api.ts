@@ -87,6 +87,35 @@ const PAPER_REFUSALS: ReadonlyMap<string, readonly [number, string]> = new Map(O
   "The Solana paper owner does not match this authenticated account.": [403, "Your sign-in does not match this Solana account."],
   "Solana mint evidence is missing, stale or inconsistent.": [503, "Token safety data is temporarily unavailable. Nothing was recorded. Try again shortly."],
 } satisfies Record<string, readonly [number, string]>));
+/**
+ * SOLANA'S ANSWER ABOUT A SAVED OWNER TRANSACTION COULD NOT BE USED: AN UNKNOWN OUTCOME.
+ *
+ * The page resubmits signed owner and permission bytes to learn their outcome,
+ * and the server answers that retry from the transaction it already saved and
+ * broadcast: ownerStatus reading the RPC's confirmation, finishSetup booking
+ * the outcome. These failures happen after the broadcast and say nothing about
+ * the bytes, which may still finalize. Answered as a 4xx they read as a
+ * refusal of the owner's request ("not accepted"); they are an unknown outcome,
+ * so they keep the cautious 503 with a fixed text. "Invalid Solana confirmation
+ * data." also covers a malformed RPC answer before anything is saved, where
+ * unavailable is just as true. The test pins that the worker still raises each.
+ */
+export const OWNER_OUTCOME_UNKNOWN: ReadonlySet<string> = new Set([
+  "Invalid Solana confirmation data.",
+  "Invalid owner transaction confirmation.",
+  "Invalid owner expiry evidence.",
+  "Owner confirmation does not match the saved transaction.",
+  "Owner transaction confirmations disagree.",
+  "Finalized owner transaction outcomes cannot be changed.",
+  "Finalized owner expiry evidence cannot be changed.",
+  "Invalid owner transaction expiry evidence.",
+  "Invalid finalized withdrawal accounting.",
+  "Finalized withdrawal slot is required for durable accounting.",
+  "Finalized withdrawal exceeds the recorded cash balance.",
+  "Finalized withdrawal exceeds the recorded SOL position.",
+  "Withdrawal evidence was already accounted.",
+]);
+const OUTCOME_UNKNOWN = "Solana's answer about your owner transaction could not be confirmed or recorded yet. Nothing new was sent. A transaction you already submitted stays saved and may still complete, so its outcome is unknown: refresh to check it before signing anything else.";
 /** Deployment problems, answered as plainly unavailable. */
 const PAPER_SETUP = new Set([
   "Solana paper trading is local-only until hosted tenant binding is implemented.",
@@ -108,6 +137,7 @@ export async function solanaResponse(action: () => Promise<unknown>) {
     else if (error instanceof SolanaWebError) { status = error.status; message = error.message; }
     else if (error instanceof SolanaBindingError) { status = error.code === "invalid" ? 400 : 409; message = error.message; }
     else if (error instanceof SolanaPaperValidationError || error instanceof SolanaPaperStoreError) { status = 400; message = error.message; }
+    else if ((error instanceof SolanaAppRuntimeError || error instanceof SolanaTradingStoreError) && OWNER_OUTCOME_UNKNOWN.has(error.message)) message = OUTCOME_UNKNOWN;
     else if (error instanceof SolanaAppRuntimeError) { status = error.code === "invalid" ? 400 : 409; message = error.message; }
     else if (error instanceof SolanaTradingStoreError) { status = 409; message = error.message; }
     else if (error instanceof SolanaExecutionError && Object.hasOwn(EXECUTION_REFUSALS, error.code)) [status, message] = EXECUTION_REFUSALS[error.code]!;
