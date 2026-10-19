@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { join as pathJoin } from "node:path";
 import {
   base58Decode,
   base58Encode,
@@ -359,5 +361,39 @@ describe("Solana live shared ABI", () => {
         () => live.buildExecuteSolanaSwapInstruction(bad),
         live.SolanaVaultValidationError,
       );
+  });
+});
+
+const CONTRACT = pathJoin(import.meta.dirname, "..", "..", "..", "contracts", "solana");
+const contractFile = (p: string) => readFileSync(pathJoin(CONTRACT, p), "utf8");
+/** Active `key = value` lines of one TOML table, comments dropped. */
+function tomlTable(text: string, table: string): Map<string, string> {
+  const out = new Map<string, string>();
+  let inside = false;
+  for (const raw of text.split("\n")) {
+    const line = raw.replace(/#.*$/, "").trim();
+    if (line.startsWith("[")) inside = line === `[${table}]`;
+    else if (inside && line.includes("=")) {
+      const at = line.indexOf("=");
+      out.set(line.slice(0, at).trim(), line.slice(at + 1).trim());
+    }
+  }
+  return out;
+}
+
+describe("Solana custody build configuration", () => {
+  it("claims no LTO the build cannot apply and keeps overflow checks", () => {
+    // Audit GAP4-5: cargo never runs LTO on a cdylib/rlib pair, so `lto = "fat"` beside
+    // crate-type ["cdylib", "lib"] was silently ignored. Real LTO needs a cdylib-only build.
+    const workspace = contractFile("Cargo.toml");
+    const program = contractFile("programs/merrymen-vault/Cargo.toml");
+    const crateTypes = tomlTable(program, "lib").get("crate-type");
+    assert.equal(crateTypes, '["cdylib", "lib"]');
+    for (const text of [workspace, program])
+      for (const table of ["profile.release", "profile.release.package.merrymen-vault"])
+        assert.equal(tomlTable(text, table).has("lto"), false, `${table} sets lto`);
+    const release = tomlTable(workspace, "profile.release");
+    assert.equal(release.get("overflow-checks"), "true");
+    assert.equal(release.get("codegen-units"), "1");
   });
 });
