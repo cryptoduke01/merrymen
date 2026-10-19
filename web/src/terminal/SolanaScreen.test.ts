@@ -354,3 +354,117 @@ test("a prepared permission that encodes anything but the shown limits never rea
   assert.match(ui.container.textContent!, /The prepared permission does not match what this page shows\. Nothing was signed/);
   assert.equal(calls.filter((call) => call.path === "setup" && call.body?.stage === "submit").length, 0);
 });
+
+const refusal = (error: string, status = 409) => json({ error, ownerFacing: true }, status);
+test("a refused owner submission discards the stale signed bytes and leaves Revoke usable", async () => {
+  state.runtime.live.programId = OWNER;
+  respond = async (path, body) => {
+    if (path === "status") return json(state);
+    if (path === "owner" && body?.stage === "prepare") return json({ prepared: { transactionBase64: "AQID" } });
+    if (path === "owner" && body?.stage === "submit") {
+      const prepared = calls.filter((call) => call.path === "owner" && call.body?.stage === "prepare");
+      if (prepared.at(-1)!.body!.action === "withdraw") return refusal("The prepared owner transaction expired before submission.");
+      return json({ result: { signature: "revoke-proof", status: "finalized" } });
+    }
+    throw new Error("Unexpected fixture route");
+  };
+  await render(); await ui.click("Withdraw to my wallet");
+  assert.equal(signCount, 1);
+  assert.match(ui.container.textContent!, /expired before submission\. This signed withdrawal was not accepted and has been discarded/);
+  assert.equal([...ui.container.querySelectorAll("button")].some((item) => item.textContent === "Check existing owner transaction"), false);
+  assert.equal(button("Revoke all Solana sessions").disabled, false);
+  assert.equal(button("Withdraw to my wallet").disabled, false);
+  await ui.click("Revoke all Solana sessions");
+  assert.equal(signCount, 2);
+  const owner = calls.filter((call) => call.path === "owner").map((call) => call.body!.stage === "prepare" ? `prepare:${call.body!.action}` : "submit");
+  assert.deepEqual(owner, ["prepare:withdraw", "submit", "prepare:revoke", "submit"]);
+  assert.match(ui.container.textContent!, /Owner transaction: finalized/);
+});
+
+test("an unknown withdrawal outcome keeps its bytes for checking but never holds back Revoke", async () => {
+  state.runtime.live.programId = OWNER;
+  let lost = true;
+  respond = async (path, body) => {
+    if (path === "status") return json(state);
+    if (path === "owner" && body?.stage === "prepare") return json({ prepared: { transactionBase64: "AQID" } });
+    if (path === "owner" && body?.stage === "submit") {
+      if (lost) { lost = false; throw new Error("Lost response"); }
+      return json({ result: { signature: "revoke-proof", status: "pending" } });
+    }
+    throw new Error("Unexpected fixture route");
+  };
+  await render(); await ui.click("Withdraw to my wallet");
+  assert.equal(button("Check existing owner transaction").disabled, false);
+  assert.equal(button("Withdraw to my wallet").disabled, true);
+  assert.equal(button("Ask wallet to resume buys").disabled, true);
+  assert.equal(button("Revoke all Solana sessions").disabled, false);
+  await ui.click("Revoke all Solana sessions");
+  // A fresh revocation was prepared and signed; the withdrawal bytes were not resent as a revoke.
+  assert.equal(signCount, 2);
+  assert.deepEqual(calls.filter((call) => call.path === "owner").map((call) => call.body!.stage === "prepare" ? `prepare:${call.body!.action}` : "submit"),
+    ["prepare:withdraw", "submit", "prepare:revoke", "submit"]);
+  assert.match(ui.container.textContent!, /A signed revocation has no confirmed outcome yet/);
+});
+
+test("a refused permission submit discards the signed bytes and the next click prepares a fresh one", async () => {
+  state = initial("live"); state.runtime.live.programId = PROGRAM;
+  const saved = liveLimits(); state.binding.limits = saved;
+  const sessions: string[] = [];
+  let activation: Record<string, unknown> | undefined;
+  respond = async (path, body) => {
+    if (path === "status") return json(state);
+    if (path === "setup" && body?.stage === "prepare") { sessions.push(String(body.sessionPublicKey)); return json({ setup: await permissionTransaction(sessions.at(-1)!, saved) }); }
+    if (path === "setup" && body?.stage === "submit") {
+      if (sessions.length === 1) return refusal("The prepared owner transaction expired before submission.");
+      return json({ registration: { signature: "fixture-chain-signature", status: "finalized" } });
+    }
+    if (path === "setup" && body?.stage === "activate") { activation = body; return json({ live: { registered: true } }); }
+    throw new Error("Unexpected fixture route");
+  };
+  await render(); await press("Register bounded trading permission");
+  assert.equal(signCount, 1);
+  assert.match(ui.container.textContent!, /expired before submission\. The signed permission was not accepted, so it has been discarded/);
+  // Not "Finish permission registration": retrying the refused bytes could never succeed.
+  await press("Register bounded trading permission");
+  assert.equal(signCount, 2); assert.equal(sessions.length, 2);
+  assert.equal(calls.filter((call) => call.path === "setup" && call.body?.stage === "submit").length, 2);
+  const seed = Buffer.from(String(activation!.sessionSecretKey), "base64");
+  assert.equal(base58Encode(ed25519.getPublicKey(seed)), sessions[1]);
+});
+
+test("a registration that later fails on chain is discarded instead of being activated forever", async () => {
+  state = initial("live"); state.runtime.live.programId = PROGRAM;
+  const saved = liveLimits(); state.binding.limits = saved;
+  let outcome = "pending";
+  respond = async (path, body) => {
+    if (path === "status") return json(state);
+    if (path === "setup" && body?.stage === "prepare") return json({ setup: await permissionTransaction(String(body.sessionPublicKey), saved) });
+    if (path === "setup" && body?.stage === "submit") return json({ registration: { signature: "fixture-chain-signature", status: outcome } });
+    if (path === "setup" && body?.stage === "activate") return refusal("The permission transaction failed. Prepare a new permission.");
+    throw new Error("Unexpected fixture route");
+  };
+  await render(); await press("Register bounded trading permission");
+  assert.match(ui.container.textContent!, /awaiting final confirmation/);
+  assert.equal(calls.some((call) => call.body?.stage === "activate"), false);
+  outcome = "failed";
+  await press("Finish permission registration");
+  assert.match(ui.container.textContent!, /The permission transaction failed\. No session was activated/);
+  assert.equal(calls.some((call) => call.body?.stage === "activate"), false);
+  assert.equal(button("Register bounded trading permission").disabled, false);
+  assert.equal(signCount, 1);
+});
+
+test("a confirmed permission that cannot be activated drops its session key instead of retrying", async () => {
+  state = initial("live"); state.runtime.live.programId = PROGRAM;
+  const saved = liveLimits(); state.binding.limits = saved;
+  respond = async (path, body) => {
+    if (path === "status") return json(state);
+    if (path === "setup" && body?.stage === "prepare") return json({ setup: await permissionTransaction(String(body.sessionPublicKey), saved) });
+    if (path === "setup" && body?.stage === "submit") return json({ registration: { signature: "fixture-chain-signature", status: "finalized" } });
+    if (path === "setup" && body?.stage === "activate") return refusal("The current vault permission does not match the signed limits.", 400);
+    throw new Error("Unexpected fixture route");
+  };
+  await render(); await press("Register bounded trading permission");
+  assert.match(ui.container.textContent!, /does not match the signed limits\. This permission could not be activated, so its session key has been discarded/);
+  assert.equal(button("Register bounded trading permission").disabled, false);
+});

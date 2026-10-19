@@ -10,7 +10,7 @@ import { useSolanaOwner } from "./useSolanaOwner";
 import { requestJson } from "./request-json";
 import { SignIn } from "./HostedControls";
 import { SolanaAutomation } from "./SolanaAutomation";
-import { SolanaOwnerActions } from "./SolanaOwnerActions";
+import { refusedByServer, SolanaOwnerActions } from "./SolanaOwnerActions";
 import { PermissionTerms, permissionExpiry, permissionMatchesLimits, readPermissionTransaction } from "./SolanaPermission";
 import { deriveSolanaVaultAddress } from "../../../packages/core/src/solana-live";
 import { solanaUnits as units, displaySolanaAmount as display } from "../lib/solana-amounts";
@@ -183,12 +183,28 @@ function ConnectedSolana() {
         setRegistration(pending);
       } finally { seed.fill(0); }
     }
-    if (!pending.signature) {
-      const { registration: submitted } = await api<{ registration: { signature: string; status: string } }>("setup", { stage: "submit", signedTransactionBase64: pending.signedTransactionBase64 });
-      if (submitted.status === "failed") { setRegistration(null); throw new Error("The permission transaction failed. No session was activated."); }
-      pending = { ...pending, signature: submitted.signature }; setRegistration(pending);
+    // Submitting the saved bytes again is idempotent: the server reports the
+    // outcome of the transaction it saved, and refuses bytes it never accepted
+    // (the prepare window passed, or the saved limits changed). Retrying a
+    // refusal can never succeed, so refused bytes and their seed are dropped.
+    let submitted: { signature: string; status: string };
+    try {
+      ({ registration: submitted } = await api<{ registration: { signature: string; status: string } }>("setup", { stage: "submit", signedTransactionBase64: pending.signedTransactionBase64 }));
+    } catch (e) {
+      if (!refusedByServer(e)) throw e;
+      setRegistration(null);
+      throw new Error(`${e.message} The signed permission was not accepted, so it has been discarded and nothing was activated. Register again to review and sign a new permission.`);
     }
-    await api("setup", { stage: "activate", signature: pending.signature, sessionSecretKey: pending.secret });
+    if (submitted.status === "failed") { setRegistration(null); throw new Error("The permission transaction failed. No session was activated. Register again to sign a new permission."); }
+    pending = { ...pending, signature: submitted.signature }; setRegistration(pending);
+    if (submitted.status !== "finalized") throw new Error("The permission is awaiting final confirmation on Solana. Keep this page open and finish registration in a moment.");
+    try { await api("setup", { stage: "activate", signature: pending.signature, sessionSecretKey: pending.secret }); }
+    catch (e) {
+      if (!refusedByServer(e)) throw e;
+      // The confirmed permission cannot be activated with this session key.
+      setRegistration(null);
+      throw new Error(`${e.message} This permission could not be activated, so its session key has been discarded. Register again to sign a new permission.`);
+    }
     setRegistration(null); await refresh();
   };
   const liveBook = status?.runtime?.live.book;
