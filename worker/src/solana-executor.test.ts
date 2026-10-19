@@ -29,11 +29,11 @@ function token(mint: string, owner: string, amount: bigint): Buffer {
 function rpcAccount(data: Buffer, owner: string, executable = false, lamports = 100_000_000) {
   return { owner, executable, lamports, data: [data.toString("base64"), "base64"], space: data.length };
 }
-function state(owner: string, session: string, seq = 0n, overrides: { paused?: boolean; expiry?: bigint } = {}): Buffer {
+function state(owner: string, session: string, seq = 0n, overrides: { paused?: boolean; expiry?: bigint; perTradeWsol?: bigint } = {}): Buffer {
   const bytes = Buffer.alloc(SOLANA_VAULT_ACCOUNT_SIZE); Buffer.from(SOLANA_VAULT_DISCRIMINATOR).copy(bytes);
-  let offset = 8; bytes[offset++] = 1; bytes[offset++] = 255;
+  let offset = 8; bytes[offset++] = 2; bytes[offset++] = 255;
   for (const value of [owner, session]) { keyBytes(value).copy(bytes, offset); offset += 32; }
-  for (const value of [1n, seq, overrides.expiry ?? 10_000n, 100_000_000n, CASH]) { bytes.writeBigUInt64LE(value, offset); offset += 8; }
+  for (const value of [1n, seq, overrides.expiry ?? 10_000n, 100_000_000n, CASH, overrides.perTradeWsol ?? 5_000_000_000n, 50_000_000_000n]) { bytes.writeBigUInt64LE(value, offset); offset += 8; }
   bytes.writeUInt16LE(96, offset); offset += 2; bytes[offset] = Number(overrides.paused ?? false); return bytes;
 }
 function event(submission: SolanaSignedSubmission, amountIn = 1_000_000n, amountOut = 2_000_000n): string {

@@ -69,9 +69,13 @@ The vault PDA uses `["vault", owner]`. The owner alone initializes it, replaces
 sessions, revokes authority, clears the on-chain breaker and withdraws assets.
 Session replacement increments its epoch without resetting the sequence,
 rolling spend history or breaker. The program enforces a positive per-trade
-USDG limit, rolling 24-hour USDG limit, at most 96 operations per rolling day,
-expiry, expected sequence and expected session epoch. Both buys and exits are
-subject to those bounds; exit attempts cannot bypass caps or expiry.
+USDG limit, rolling 24-hour USDG limit, owner-signed per-trade and rolling 24-hour
+WSOL input limits, at most 96 operations per rolling day, expiry, expected
+sequence and expected session epoch. Both buys and exits are subject to those
+bounds; exit attempts cannot bypass caps or expiry. Sells are charged their full
+WSOL input as well as their USDG proceeds, so a session or quote cannot sell the
+position for dust: the worst a compromised session can do in a day is spend the
+signed daily USDG on buys and the signed daily WSOL on sells.
 
 For each swap, the program transfers exactly the authorized input to the token
 account of `["swap", vault, sequence]`. Only that per-sequence authority signs the
@@ -269,6 +273,8 @@ padding**. A local `.so` hash is interchangeable only for an exact-sized
 allocation. A release must verify the reviewed artifact bytes and any known
 zero padding before recording that region hash. The program ID declared in
 `contracts/solana` is a local test identity, not an existing production deployment.
+Account layout version 2 (the WSOL input caps) changed the program, so every
+artifact and region hash recorded before it is obsolete.
 
 ## Verification evidence and remaining release gates
 

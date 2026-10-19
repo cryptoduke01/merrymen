@@ -18,7 +18,8 @@ const TENANT = "0x1111111111111111111111111111111111111111";
 const PROGRAM = SOLANA_VAULT_LOCAL_TEST_PROGRAM, LOADER = "BPFLoaderUpgradeab1e11111111111111111111111";
 const key = (n: number) => getBase58Decoder().decode(new Uint8Array(32).fill(n));
 const keyBytes = (value: string) => Buffer.from(getBase58Encoder().encode(value));
-const limits = { perTradeUsdg: "10000000", dailyUsdg: "50000000", maxOpsPerDay: 10, maxDrawdownBps: 2000, expiresAtMs: 4_600_000 };
+const limits = { perTradeUsdg: "10000000", dailyUsdg: "50000000", maxOpsPerDay: 10, maxDrawdownBps: 2000, expiresAtMs: 4_600_000,
+  perTradeWsol: "100000000", dailyWsol: "500000000" };
 function account(data: Buffer, owner = PROGRAM, executable = false) {
   return { owner, executable, lamports: 100_000_000, data: [data.toString("base64"), "base64"], space: data.length };
 }
@@ -36,9 +37,10 @@ async function fixture() {
   const controls = { initialized: false, finalized: false, failed: false, malformed: false, sends: 0, signed: "", signature: "", failSend: true, height: 4900, sequence: 0n };
   const state = () => {
     const b = Buffer.alloc(SOLANA_VAULT_ACCOUNT_SIZE); Buffer.from(SOLANA_VAULT_DISCRIMINATOR).copy(b); let p = 8;
-    b[p++] = 1; b[p++] = 255;
+    b[p++] = 2; b[p++] = 255;
     for (const value of [owner, session]) { keyBytes(value).copy(b, p); p += 32; }
-    for (const value of [1n, controls.sequence, BigInt(limits.expiresAtMs / 1000), BigInt(limits.perTradeUsdg), BigInt(limits.dailyUsdg)]) { b.writeBigUInt64LE(value, p); p += 8; }
+    for (const value of [1n, controls.sequence, BigInt(limits.expiresAtMs / 1000), BigInt(limits.perTradeUsdg), BigInt(limits.dailyUsdg),
+      BigInt(limits.perTradeWsol), BigInt(limits.dailyWsol)]) { b.writeBigUInt64LE(value, p); p += 8; }
     b.writeUInt16LE(limits.maxOpsPerDay, p); return b;
   };
   const response = (value: unknown) => ({ context: { slot: 1000 }, value });
