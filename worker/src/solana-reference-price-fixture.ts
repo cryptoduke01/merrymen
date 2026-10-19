@@ -3,8 +3,8 @@
  * reads recorded once (below). Tests never touch the network.
  */
 import { createHash } from "node:crypto";
-import { PYTH_RECEIVER_PROGRAM, PYTH_SOL_USD_ACCOUNT, PYTH_SOL_USD_FEED_ID, solanaReferenceBound, type SolanaReferenceBound,
-  type SolanaReferencePrice } from "./solana-reference-price";
+import { PYTH_RECEIVER_PROGRAM, PYTH_SOL_USD_FEED_ID, SOLANA_PYTH_DEFAULT_GENERATION, SOLANA_PYTH_FEEDS, solanaReferenceBound,
+  type SolanaPythGeneration, type SolanaReferenceBound, type SolanaReferencePrice } from "./solana-reference-price";
 
 export interface PythFixture {
   price?: bigint; conf?: bigint; exponent?: number; publishTimeMs: number; postedSlot?: bigint;
@@ -28,9 +28,10 @@ export function pythAccount(f: PythFixture) {
   return { owner: f.owner ?? PYTH_RECEIVER_PROGRAM, executable: Object.hasOwn(f, "executable") ? f.executable : false, lamports: 1_000_000,
     data: [data.toString("base64"), "base64"], space: data.length };
 }
-/** A reference read at `slot`, published at `nowMs`, at `usdPerSol` (8 decimals). */
-export function pythReference(nowMs: number, usdPerSol = 50_000_000_000n, slot = 1000): SolanaReferencePrice {
-  return { source: "pyth", account: PYTH_SOL_USD_ACCOUNT, feedId: PYTH_SOL_USD_FEED_ID,
+/** A reference read at `slot` from `generation`'s account, published at `nowMs`, at `usdPerSol` (8 decimals). */
+export function pythReference(nowMs: number, usdPerSol = 50_000_000_000n, slot = 1000,
+  generation: SolanaPythGeneration = SOLANA_PYTH_DEFAULT_GENERATION): SolanaReferencePrice {
+  return { source: "pyth", account: SOLANA_PYTH_FEEDS[generation].account, feedId: PYTH_SOL_USD_FEED_ID,
     price: usdPerSol.toString(), conf: "10000000", exponent: -8, publishTimeMs: Math.floor(nowMs / 1000) * 1000, postedSlot: slot - 1, slot };
 }
 export function pythBound(intent: Parameters<typeof solanaReferenceBound>[0], nowMs: number, usdPerSol?: bigint, slot?: number, toleranceBps = 300): SolanaReferenceBound {
@@ -66,7 +67,8 @@ export const PYTH_SOL_USD_MAINNET_SNAPSHOT: PythMainnetSnapshot = {
 /**
  * The same feed's shard-0 account under Pyth's upgraded (2026-08-26) programs,
  * read straight after the snapshot above: owned by rec2HH…, at the PDA of
- * pyt2F4…. Not accepted by this module; kept to show the layout matches.
+ * pyt2F4…. Accepted only when the "upgraded" generation is selected
+ * (MERRYMEN_SOLANA_PYTH_GENERATION=upgraded); refused under "current".
  */
 export const PYTH_SOL_USD_UPGRADED_MAINNET_SNAPSHOT: PythMainnetSnapshot = {
   rpc: "https://api.mainnet-beta.solana.com",
