@@ -986,7 +986,7 @@ test("the conversations an X account is in: its posted top-level posts and answe
   };
   const answer = (tag: string, author: string, nowMs: number, over: Partial<NewPost> = {}): NewPost => post({ kind: "answer", dedupeKey: `answer:111:${tag}`,
     body: `an answer to ${tag}`, replyToTweetId: tag, replyRootTweetId: tag, replyAuthorId: author, nowMs, dueAtMs: nowMs, ...over });
-  const none = { roots: new Set(), posts: new Set(), answered: new Map(), plain: new Set(), trade: new Set(), done: new Set() };
+  const none = { roots: new Set(), posts: new Set(), answered: new Map(), plain: new Set(), trade: new Set(), done: new Set(), small: new Map() };
   assert.deepEqual(await ownThreadTweets(db, "111"), none, "nothing posted yet");
 
   await sent(post({ kind: "intro", dedupeKey: "intro:a:111", body: "hello", nowMs: 10, dueAtMs: 10 }), "9001");
@@ -1022,6 +1022,8 @@ test("the conversations an X account is in: its posted top-level posts and answe
   await sent(answer("560", "999", 90, { coin: ANSWER_LOOKED_UP }), "9561");
   const marked = await ownThreadTweets(db, "111");
   assert.deepEqual([...marked.plain].sort(), ["550", "9001", "9551"], "the plain answer and the tag it answered");
+  // Its own plain-thread answer, by its tweet, to the tag it answered (2026-10-19): only its answers, never the tags or its posts.
+  assert.deepEqual([...marked.small.entries()], [["9551", "550"]]);
   assert.deepEqual([...marked.trade], ["9002"]);
   assert.ok(marked.posts.has("9561") && !marked.plain.has("9561") && !marked.plain.has("560"), "a looked-up answer is its own post, never plain");
   // A casual post the caller's trade screen reads as about a coin it bought sits with its buy posts (red-team review of daaae961:

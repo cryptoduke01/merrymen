@@ -1401,6 +1401,14 @@ export async function ownRootTweetIds(db: Db, xUserId: string, limit = 2000): Pr
  *   - `done`: each small-talk answer that ended its thread
  *     (ANSWER_THREAD_DONE), with the tag it answered: nothing at all is
  *     answered under either, not even a greeting (2026-10-18).
+ *
+ *   - `small`: each of its own plain-thread answers (ANSWER_PLAIN_THREAD: a
+ *     greeting, a thanks, banter or how it is, the first exchange of a plain
+ *     thread), by its tweet, to the tag it answered (2026-10-19). Only its
+ *     answers, never the tags: a confused reply is read only directly under
+ *     one (replies.ts confusedWords), and what's hot or the market is
+ *     answered under one only in a thread rooted at that same tag
+ *     (orchestrator-xpost.ts tradeMarket).
  */
 export interface OwnThreads {
   roots: Set<string>;
@@ -1409,6 +1417,7 @@ export interface OwnThreads {
   plain: Set<string>;
   trade: Set<string>;
   done: Set<string>;
+  small: Map<string, string>;
 }
 
 /**
@@ -1471,6 +1480,7 @@ export async function ownThreadTweets(db: Db, xUserId: string, limit = 2000, shu
     .all(String(xUserId), max)) as { tweet_id: unknown; body: unknown; kind: unknown; coin: unknown; reply_to_tweet_id: unknown; author_id: unknown }[];
   const posts = new Set(roots);
   const answered = new Map<string, string>();
+  const small = new Map<string, string>();
   for (const r of rows) {
     const tweet = String(r.tweet_id ?? ""), to = String(r.reply_to_tweet_id ?? ""), author = String(r.author_id ?? "");
     if (shut(String(r.body ?? ""))) continue;
@@ -1479,13 +1489,14 @@ export async function ownThreadTweets(db: Db, xUserId: string, limit = 2000, shu
     if (r.kind === "answer" && r.coin === ANSWER_PLAIN_THREAD) {
       if (tweet !== "") plain.add(tweet);
       if (to !== "") plain.add(to);
+      if (tweet !== "" && to !== "") small.set(tweet, to);
     }
     if (r.kind === "answer" && r.coin === ANSWER_THREAD_DONE) {
       if (tweet !== "") done.add(tweet);
       if (to !== "") done.add(to);
     }
   }
-  return { roots, posts, answered, plain, trade: traded, done };
+  return { roots, posts, answered, plain, trade: traded, done, small };
 }
 
 /**

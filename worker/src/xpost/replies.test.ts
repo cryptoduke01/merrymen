@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { XReply } from "./client";
-import { greetingOnly, isAnswerOptOut, isReplyOptOut, plainAsk, reactionOnly, replyCandidate, tagCandidate } from "./replies";
+import { confusedWords, greetingOnly, isAnswerOptOut, isReplyOptOut, plainAsk, reactionOnly, replyCandidate, tagCandidate } from "./replies";
 
 const CTX = { rootTweetId: "111", xUserId: "222", coin: "pepe" };
 /**
@@ -650,3 +650,44 @@ describe("no larp check with what it sits under unread (2026-10-18)", () => {
     assert.deepEqual(tagCandidate(under({ text: "@alanaidale stop", contextUnread: true }), ctx), { ok: false, reason: "opt-out" });
   });
 });
+
+describe("a confused reply straight under its own small talk (the owner's ask, 2026-10-19)", () => {
+  // 801 is its plain-thread small-talk answer to the top-level tag 800; 999 its own hello; 802 one of its closed answers, to 700.
+  const own = { xUserId: "222", username: "pine_stoat", ownRoots: new Set(["999"]), ownPosts: new Set(["999", "801", "802"]),
+    answered: new Map([["800", "333"], ["700", "333"]]), plain: new Set(["999", "800", "801"]), smallAnswers: new Set(["801"]) };
+  const under = (text: string, parent: string, over: Partial<XReply> = {}) =>
+    comment(text, { id: "900", authorId: "333", conversationId: "800", inReplyToTweetId: parent, ...over });
+
+  it("is read on a strict allowlist of whole tags: one word or phrase of confusion, a short ?, ! or ., and two emoji at most", () => {
+    for (const text of ["what", "what?", "what??", "what?!", "WHAT?", "wat", "wut", "huh", "huh?", "hm", "hmm", "hmmm?", "wdym", "wym?", "what do you mean?",
+      "what do u mean", "what does that mean?", "come again?", "say what?", "lol what", "lmao what?", "i'm confused", "im lost", "i am confused", "what, alan?",
+      "?", "??", "???", "what?😭", "huh 😭😭", "what? 🤔"]) {
+      assert.notEqual(confusedWords(text), null, text);
+    }
+    for (const text of ["what is this", "what's hot?", "what coin", "huh $PEPE", "what? 😭😭😭", "😭", "what 2", "????", "what @bob", "what www.x.io",
+      "wh\u0430t", "what do you mean by pepe?", "huh, should i sell?", "", null, 7]) {
+      assert.equal(confusedWords(text), null, String(text));
+    }
+  });
+
+  it("is a candidate only straight under one of its own plain-thread small-talk answers, marked as such", () => {
+    assert.deepEqual(tagCandidate(under("@pine_stoat what?😭", "801"), own), { ok: true, text: "what?😭", confused: true, followUp: "plain" });
+    assert.deepEqual(tagCandidate(under("@pine_stoat huh", "801"), own), { ok: true, text: "huh", confused: true, followUp: "plain" });
+    // A real question there is read as one, never as confusion.
+    assert.deepEqual(tagCandidate(under("@pine_stoat whats trending rn?", "801"), own), { ok: true, text: "whats trending rn?", followUp: "plain" });
+  });
+
+  it("anywhere else a \"what?\" is about something code never read: refused as before", () => {
+    // At top level, under its own hello, under a closed answer of its own.
+    assert.deepEqual(tagCandidate(comment("@pine_stoat what?", { id: "900", conversationId: "900", inReplyToTweetId: "" }), own), { ok: false, reason: "low-signal" });
+    assert.deepEqual(tagCandidate(under("@pine_stoat what?", "999", { conversationId: "999" }), own), { ok: false, reason: "low-signal" });
+    assert.deepEqual(tagCandidate(under("@pine_stoat what?", "802", { conversationId: "700" }), own), { ok: false, reason: "low-signal" });
+    // A quote of its small talk, another handle in the prefix, or the asker's own earlier tag rather than its answer.
+    assert.deepEqual(tagCandidate(under("@pine_stoat what?", "801", { quoted: true, quotedTweetId: "801" }), own), { ok: false, reason: "low-signal" });
+    assert.deepEqual(tagCandidate(under("@bob @pine_stoat what?", "801"), own), { ok: false, reason: "low-signal" });
+    assert.deepEqual(tagCandidate(under("@pine_stoat what?", "800"), own), { ok: false, reason: "low-signal" });
+    // With no small-talk answers handed in, nothing is confusion.
+    assert.deepEqual(tagCandidate(under("@pine_stoat what?", "801"), { ...own, smallAnswers: undefined }), { ok: false, reason: "low-signal" });
+  });
+});
+
