@@ -414,10 +414,17 @@ export class SolanaTradingStore implements SolanaLiveJournal {
       if (raw(s.risk.notionalUsdg, false) !== notional || notional > raw(limits.perTradeUsdg, false)) refuse("The Solana per-trade limit would be exceeded.");
       if (raw(s.feeLamports) + raw(s.rentLamports) > raw(s.maxFeeLamports, false)) refuse("The Solana fee and rent budget would be exceeded.");
       const recent = await tx.prepare("SELECT notional_raw,status,submission_json FROM solana_runtime_submissions WHERE tenant=? AND owner=? AND created_at_ms>?").all(tenant, owner, now - DAY) as Array<{ notional_raw: string; status: string; submission_json: string }>;
-      // Failed transactions still spend network fees and consume an attempt.
-      // Their token notional is released only after canonical failure evidence.
+      // Failed transactions landed, spent network fees and consume an operation;
+      // a pending one counts until finalized evidence proves what it did. A proven
+      // expiry never landed, and the program never counted it: it leaves the
+      // operation budget, so dropped packets cannot lock exits for a day. Token
+      // notional is released only after canonical failure or expiry evidence.
+      const operations = recent.filter(r => r.status !== "expired"), dropped = recent.length - operations.length;
       const counted = recent.filter(r => !["failed", "expired"].includes(r.status));
-      if (recent.length >= limits.maxOpsPerDay || counted.reduce((n, r) => n + BigInt(r.notional_raw), 0n) + notional > raw(limits.dailyUsdg, false)) refuse("The Solana rolling daily limit would be exceeded.");
+      if (operations.length >= limits.maxOpsPerDay || counted.reduce((n, r) => n + BigInt(r.notional_raw), 0n) + notional > raw(limits.dailyUsdg, false)) refuse("The Solana rolling daily limit would be exceeded.");
+      // Dropped attempts get a budget of their own, the same size, so a provider
+      // that drops every packet cannot keep the worker re-signing without end.
+      if (dropped >= limits.maxOpsPerDay) refuse("Too many Solana transactions expired without landing in the last 24 hours. Trading resumes as they leave the window.");
       const soldToday = counted.reduce((n, r) => {
         const prior = (JSON.parse(r.submission_json) as SolanaSignedSubmission).intent;
         return prior.inputMint === SOLANA_WRAPPED_SOL_MINT ? n + raw(prior.amountRaw, false) : n;

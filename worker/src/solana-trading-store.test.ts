@@ -359,15 +359,44 @@ test("drawdown refusal commits a sticky buy pause, survives reopening and still 
   assert.equal((await reopened.liveBook())!.buyPaused, false);
   assert.equal((await reopened.liveBook())!.hwmRaw, "200000000");
 });
-test("failed and expired attempts still consume the daily operation cap and successful notional remains conservatively reserved", async t => {
-  for (const status of ["finalized", "failed", "expired"] as const) {
+test("finalized and failed attempts consume the daily operation cap and successful notional remains conservatively reserved", async t => {
+  for (const status of ["pending", "finalized", "failed"] as const) {
     const f = await fixture(t); await f.binding.settings(TENANT, OWNER, 1, "live", { ...limits, dailyUsdg: "10000000", maxOpsPerDay: 1 });
     const first = submission(); await f.store.recordSigned(first);
-    await f.store.settle(OWNER, first.intent.requestId, first.signature, status === "expired" ? expired(first) : settlement(first, status));
+    if (status !== "pending") await f.store.settle(OWNER, first.intent.requestId, first.signature, settlement(first, status));
+    else await f.db.prepare("UPDATE solana_runtime_submissions SET vault=? WHERE request_id=?").run(key(77), first.intent.requestId);
     const next = submission("too-many", status === "finalized" ? "1" : "0"); next.risk.slot = 1001;
     if (status === "finalized") { next.risk.cashUsdg = "99400000"; next.risk.wsolRaw = "1980000"; }
-    await assert.rejects(f.store.recordSigned(next), /daily limit/);
+    await assert.rejects(f.store.recordSigned(next), /daily limit/, status);
   }
+});
+
+test("a proven-expired attempt releases its operation, so dropped packets cannot lock exits for a day (audit G2-3)", async t => {
+  const f = await fixture(t), first = submission(); await f.binding.settings(TENANT, OWNER, 1, "live", { ...limits, maxOpsPerDay: 2 });
+  await f.store.recordSigned(first); await f.store.settle(OWNER, first.intent.requestId, first.signature, settlement(first));
+  const book = { slot: 1001, cash: "99400000", wsol: "1980000" };
+  // One executed operation of two: the first exit is dropped and proven expired.
+  const dropped = sale("exit-1", "1", "1000000", book); await f.store.recordSigned(dropped);
+  await f.store.settle(OWNER, dropped.intent.requestId, dropped.signature, expired(dropped));
+  // The retry is admitted: the program never counted the dropped one.
+  const retry = sale("exit-2", "1", "1000000", book); assert.equal(await f.store.recordSigned(retry), true);
+  await f.store.settle(OWNER, retry.intent.requestId, retry.signature, { ...settlement(retry), slot: 1002, amountIn: "1000000", amountOut: "500000" });
+  // Two executed operations now: the budget is spent.
+  await assert.rejects(f.store.recordSigned(sale("exit-3", "2", "500000", { slot: 1002, cash: "99900000", wsol: "980000" })), /daily limit/);
+  // Dropped attempts have a budget of their own, the same size.
+  const g = await fixture(t); await g.binding.settings(TENANT, OWNER, 1, "live", { ...limits, maxOpsPerDay: 2 });
+  for (const id of ["drop-1", "drop-2"]) {
+    const s = submission(id); s.risk.slot = 1001; assert.equal(await g.store.recordSigned(s), true); await g.store.settle(OWNER, id, s.signature, expired(s));
+  }
+  const third = submission("drop-3"); third.risk.slot = 1001;
+  await assert.rejects(g.store.recordSigned(third), /expired without landing/);
+  assert.equal((await g.store.pending()).length, 0);
+  // Later, the dropped attempts leave the window and trading resumes.
+  g.clock.value = NOW + 86_400_001;
+  const later = submission("later"); later.preparedAtMs = later.safetyObservedAtMs = later.risk.observedAtMs = later.quote.quotedAtMs = g.clock.value;
+  later.quote.expiresAtMs = g.clock.value + 30_000; later.risk.reference = pythBound(later.intent, g.clock.value); later.risk.slot = 1001;
+  await g.binding.settings(TENANT, OWNER, 2, "live", { ...limits, maxOpsPerDay: 2, expiresAtMs: g.clock.value + 3_600_000 });
+  assert.equal(await g.store.recordSigned(later), true);
 });
 
 /** A WSOL→USDG sell at $500/SOL against the current book, bounded by a fresh reference. */
