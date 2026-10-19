@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { ed25519 } from "@noble/curves/ed25519";
+import { NextRequest } from "next/server";
 import { base58Encode } from "../../../packages/core/src/ids";
 import { authenticateSolana, solanaBindingMessage, verifySolanaBindingSignature, SolanaWebError, type SolanaAuthDependencies } from "./solana-auth";
 
@@ -48,4 +49,34 @@ test("browser cross-origin requests cannot mutate a bound Solana account", async
 test("a delayed token from a different login cannot satisfy the browser's expected identity", async () => {
   await assert.rejects(authenticateSolana(request({ "x-merrymen-privy-did": "did:privy:bob" }), dependencies()), (e: unknown) => e instanceof SolanaWebError && e.status === 403);
   assert.deepEqual(await authenticateSolana(request({ "x-merrymen-privy-did": principal.did }), dependencies()), principal);
+});
+test("a page opened at 127.0.0.1 is same-origin, while other loopback ports, rebinding names and real hosts are not", async () => {
+  const configured = process.env.MERRYMEN_PUBLIC_ORIGIN;
+  delete process.env.MERRYMEN_PUBLIC_ORIGIN;
+  try {
+    // Next rewrites a loopback req.url to localhost, exactly as the route sees it.
+    const local = (origin: string, host: string, url = "http://127.0.0.1:3000/api/solana/settings") =>
+      new NextRequest(url, { method: "POST", headers: { authorization: "Bearer fixture", origin, host } }) as unknown as Request;
+    assert.equal(local("http://127.0.0.1:3000", "127.0.0.1:3000").url, "http://localhost:3000/api/solana/settings");
+    assert.deepEqual(await authenticateSolana(local("http://127.0.0.1:3000", "127.0.0.1:3000"), dependencies()), principal);
+    assert.deepEqual(await authenticateSolana(local("http://localhost:3000", "localhost:3000"), dependencies()), principal);
+    assert.deepEqual(await authenticateSolana(local("http://[::1]:3000", "[::1]:3000", "http://[::1]:3000/api/solana/settings"), dependencies()), principal);
+    for (const [origin, host] of [
+      ["http://127.0.0.1:4000", "127.0.0.1:3000"], // another local service
+      ["http://127.0.0.2:3000", "127.0.0.1:3000"],
+      ["http://evil.example:3000", "evil.example:3000"], // DNS rebinding to loopback
+      ["https://127.0.0.1:3000", "127.0.0.1:3000"], // scheme differs
+      ["null", "127.0.0.1:3000"],
+      ["http://127.0.0.1:3000/path", "127.0.0.1:3000"],
+    ]) await assert.rejects(authenticateSolana(local(origin!, host!), dependencies()), (e: unknown) => e instanceof SolanaWebError && e.status === 403, `${origin} via ${host}`);
+    // A real host never trusts the Host header.
+    const real = new NextRequest("https://app.example.test/api/solana/settings", { method: "POST", headers: { authorization: "Bearer fixture", origin: "https://evil.example", host: "evil.example" } }) as unknown as Request;
+    await assert.rejects(authenticateSolana(real, dependencies()), (e: unknown) => e instanceof SolanaWebError && e.status === 403);
+    // A configured public origin stays exact, even for loopback.
+    process.env.MERRYMEN_PUBLIC_ORIGIN = "https://app.example.test";
+    await assert.rejects(authenticateSolana(local("http://127.0.0.1:3000", "127.0.0.1:3000"), dependencies()), (e: unknown) => e instanceof SolanaWebError && e.status === 403);
+    assert.deepEqual(await authenticateSolana(local("https://app.example.test", "127.0.0.1:3000"), dependencies()), principal);
+  } finally {
+    if (configured === undefined) delete process.env.MERRYMEN_PUBLIC_ORIGIN; else process.env.MERRYMEN_PUBLIC_ORIGIN = configured;
+  }
 });

@@ -11,7 +11,7 @@ let hook: Hook;
 let ui: ReturnType<typeof testDom>;
 let did: string, authenticated: boolean, ready: boolean;
 let wallets: Array<{ address: string }>, accounts: Array<Record<string, unknown>>;
-let signed: string[], creates: number;
+let signed: string[], creates: number, exported: Array<{ address: string } | undefined>;
 let signing: (input: { wallet: { address: string } }) => Promise<{ signature: Uint8Array }>;
 const OWNER = "So11111111111111111111111111111111111111112";
 before(() => {
@@ -23,6 +23,7 @@ before(() => {
       if (id === "@privy-io/react-auth") return { usePrivy: () => ({ authenticated, ready: true, user: { id: did, linkedAccounts: accounts }, getAccessToken: async () => "token" }) };
       if (id === "@privy-io/react-auth/solana") return {
         useWallets: () => ({ wallets, ready }), useCreateWallet: () => ({ createWallet: async () => { creates++; return {}; } }),
+        useExportWallet: () => ({ exportWallet: async (options?: { address: string }) => { exported.push(options); } }),
         useSignMessage: () => ({ signMessage: signing }), useSignTransaction: () => ({ signTransaction: async (input: { wallet: { address: string } }) => {
           const result = await signing(input); return { signedTransaction: result.signature };
         } }),
@@ -36,7 +37,7 @@ before(() => {
 function Probe() { hook = useSolanaOwner(); return React.createElement("span", null, hook.address ?? "none"); }
 const render = () => ui.render(React.createElement(Probe));
 beforeEach(() => {
-  ui = testDom(); did = "did:privy:alice"; authenticated = true; ready = true; creates = 0; signed = [];
+  ui = testDom(); did = "did:privy:alice"; authenticated = true; ready = true; creates = 0; signed = []; exported = [];
   wallets = [{ address: "external" }, { address: OWNER }];
   accounts = [{ type: "wallet", chainType: "solana", walletClientType: "privy", address: OWNER }];
   signing = async (input) => { signed.push(input.wallet.address); return { signature: new Uint8Array(64).fill(4) }; };
@@ -70,4 +71,15 @@ test("wallet creation is deduplicated per identity and signed-out users cannot c
   await Promise.all([hook.create(), hook.create()]); assert.equal(creates, 1);
   authenticated = false; await render(); await assert.rejects(hook.create());
   assert.equal(hook.address, null);
+});
+test("key export opens Privy's window for the exact embedded owner only", async () => {
+  await render();
+  await hook.exportKey();
+  assert.deepEqual(exported, [{ address: OWNER }]);
+  // Never an implicit "first wallet" export: Privy's default with no address.
+  wallets.push({ address: "second" }); accounts.push({ type: "wallet", chainType: "solana", walletClientType: "privy", address: "second" });
+  await render(); await assert.rejects(hook.exportKey(), /account changed/);
+  accounts = [{ type: "wallet", chainType: "solana", walletClientType: "privy", address: OWNER }]; wallets = [{ address: OWNER }];
+  authenticated = false; await render(); await assert.rejects(hook.exportKey());
+  assert.deepEqual(exported, [{ address: OWNER }]);
 });

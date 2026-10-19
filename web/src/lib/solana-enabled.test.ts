@@ -113,3 +113,104 @@ describe("the Solana switch", () => {
     assert.equal(app.match(/aria-label="Trading networks"/g)?.length, 1, "no second, ungated switch");
   });
 });
+
+/**
+ * PRIVY FOLLOWS THE SAME SWITCH.
+ *
+ * Off: the provider is configured as it was before Solana (Ethereum wallets,
+ * no Solana RPC). On: Privy's own hosted Solana RPC plugin is registered, so
+ * its embedded-wallet signing screen can render. Without an RPC, react-auth's
+ * accessor throws "No RPC configuration found for chain solana:mainnet" while
+ * that screen renders and the owner can never approve a permission, a revoke
+ * or a withdrawal. No app-supplied RPC URL is configured, so the server's
+ * keyed endpoint cannot reach the browser.
+ */
+describe("Privy's Solana configuration", () => {
+  type Config = { appearance?: { walletChainType?: string }; plugins?: Array<{ id: symbol; getDefaultRpcs?: (input: { appId: string }) => Record<string, unknown> }>; solana?: unknown };
+  let Providers: (props: { locale: "en"; solana?: boolean; children?: unknown }) => unknown;
+  let renderToStaticMarkup: (node: unknown) => string;
+  let createElement: (type: unknown, props: unknown) => unknown;
+  let defaultSolanaRpcsPlugin: () => { id: symbol };
+  const configs: Config[] = [];
+  const reactGlobal = globalThis as { React?: unknown };
+  let previousReact: unknown;
+  after(() => { reactGlobal.React = previousReact; });
+  before(() => {
+    const file = join(WEB, "terminal/Providers.tsx");
+    const loader = Module as unknown as { _load: (id: string, parent: { filename?: string }, isMain: boolean) => unknown };
+    const original = loader._load;
+    const interception = mock.method(loader, "_load", function (this: typeof loader, id: string, parent: { filename?: string }, isMain: boolean) {
+      if (parent?.filename === file) {
+        if (id === "@privy-io/react-auth") return { PrivyProvider: ({ config, children }: { config: Config; children: unknown }) => { configs.push(config); return children; } };
+        if (id === "@/lib/privy-client") return { PRIVY_APP_ID: "fixture-app-id", privyEnabled: () => true };
+        if (id === "./OwnerClock") return { OwnerClock: () => null };
+      }
+      return original.call(this, id, parent, isMain);
+    });
+    try {
+      const load = createRequire(import.meta.url);
+      Providers = (load(file) as { Providers: typeof Providers }).Providers;
+      renderToStaticMarkup = (load("react-dom/server") as { renderToStaticMarkup: typeof renderToStaticMarkup }).renderToStaticMarkup;
+      const react = load("react") as { createElement: typeof createElement };
+      createElement = react.createElement;
+      // tsx compiles JSX to React.createElement, as test-dom.ts provides for screens.
+      previousReact = reactGlobal.React;
+      reactGlobal.React = react;
+      defaultSolanaRpcsPlugin = (load("@privy-io/react-auth/solana") as { defaultSolanaRpcsPlugin: typeof defaultSolanaRpcsPlugin }).defaultSolanaRpcsPlugin;
+    } finally {
+      interception.mock.restore();
+    }
+  });
+  const configFor = (solana: boolean | undefined) => {
+    configs.length = 0;
+    renderToStaticMarkup(createElement(Providers, solana === undefined ? { locale: "en" } : { locale: "en", solana }));
+    assert.equal(configs.length, 1);
+    return configs[0]!;
+  };
+
+  it("off (and by default): Ethereum wallets only and no Solana RPC", () => {
+    for (const solana of [false, undefined]) {
+      const config = configFor(solana);
+      assert.equal(config.appearance?.walletChainType, "ethereum-only");
+      assert.equal(config.plugins, undefined);
+      assert.equal(config.solana, undefined);
+    }
+  });
+
+  it("on: Solana wallets plus Privy's hosted RPC, never an app-supplied endpoint", () => {
+    const config = configFor(true);
+    assert.equal(config.appearance?.walletChainType, "ethereum-and-solana");
+    assert.equal(config.solana, undefined, "no solana.rpcs: an app-supplied URL is where a keyed endpoint would leak");
+    assert.equal(config.plugins?.length, 1);
+    assert.equal(config.plugins![0]!.id, defaultSolanaRpcsPlugin().id);
+    const rpcs = config.plugins![0]!.getDefaultRpcs!({ appId: "fixture-app-id" }) as Record<string, { rpc?: unknown; rpcSubscriptions?: unknown }>;
+    // @solana/kit clients are lazy proxies: building them sends nothing.
+    assert.ok(rpcs["solana:mainnet"]?.rpc, "a mainnet RPC client");
+    assert.ok(rpcs["solana:mainnet"]?.rpcSubscriptions, "a mainnet subscriptions client");
+  });
+
+  it("the installed react-auth falls back to that plugin before it throws for a missing RPC", () => {
+    // If a Privy upgrade drops this fallback, the signing screen breaks again
+    // with nothing else failing: the screen tests mock Privy.
+    const dist = join(WEB, "../../node_modules/@privy-io/react-auth/dist/esm");
+    const accessor = readdirSync(dist).filter((name) => name.endsWith(".mjs")).map((name) => readFileSync(join(dist, name), "utf8"))
+      .find((source) => source.includes("No RPC configuration found for chain"));
+    assert.ok(accessor, "react-auth's Solana RPC accessor moved");
+    assert.match(accessor, /\.solanaRpcs\[e\]\?\?t\?\.\[e\]/, "configured RPCs first, then the plugin's defaults");
+    assert.match(accessor, /getDefaultRpcs\(\{appId:/);
+  });
+
+  it("only the terminal layout turns it on, from the server switch", () => {
+    assert.match(readFileSync(join(WEB, "app/(app)/layout.tsx"), "utf8"), /<Providers locale=\{locale\} solana=\{solanaEnabled\(\)\}>/);
+    const others: string[] = [];
+    const walk = (dir: string) => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const full = join(dir, entry.name);
+        if (entry.isDirectory()) walk(full);
+        else if (/\.tsx?$/.test(entry.name) && !full.endsWith(join("(app)", "layout.tsx")) && /<Providers\b[^>]*\bsolana\b/.test(readFileSync(full, "utf8"))) others.push(full);
+      }
+    };
+    walk(join(WEB, "app"));
+    assert.deepEqual(others, []);
+  });
+});

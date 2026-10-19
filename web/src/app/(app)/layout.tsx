@@ -38,7 +38,7 @@ export default async function AppLayout() {
   const jar = await cookies();
   const locale = normalizeLocale(jar.get(LOCALE_COOKIE)?.value) ?? DEFAULT_LOCALE;
   return (
-    <Providers locale={locale}>
+    <Providers locale={locale} solana={solanaEnabled()}>
       <App solana={solanaEnabled()} />
     </Providers>
   );

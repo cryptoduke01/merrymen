@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ed25519 } from "@noble/curves/ed25519";
 import { CHAINS, SOLANA_USDG_MINT, base58Encode } from "../../../packages/core/src/ids";
-import type { SolanaPaperLimits, SolanaQuote } from "../../../packages/core/src/solana";
+import { SOLANA_QUOTE_MAX_AGE_MS, type SolanaPaperLimits, type SolanaQuote } from "../../../packages/core/src/solana";
 import type { SolanaPaperSnapshot } from "../../../worker/src/solana-paper-store";
 import type { SolanaBinding } from "@/lib/solana-binding-store";
 import { privyEnabled } from "@/lib/privy-client";
@@ -10,7 +10,10 @@ import { useSolanaOwner } from "./useSolanaOwner";
 import { requestJson } from "./request-json";
 import { SignIn } from "./HostedControls";
 import { SolanaAutomation } from "./SolanaAutomation";
-import { SolanaOwnerActions } from "./SolanaOwnerActions";
+import { outcomeAfterRefusal, refusedByServer, signatureOf, SolanaOwnerActions, type OwnerRecord } from "./SolanaOwnerActions";
+import { ownerKeyExportEnabled, SolanaRecovery } from "./SolanaRecovery";
+import { PermissionTerms, permissionExpiry, permissionMatchesLimits, readPermissionTransaction } from "./SolanaPermission";
+import { deriveSolanaVaultAddress } from "../../../packages/core/src/solana-live";
 import { solanaUnits as units, displaySolanaAmount as display } from "../lib/solana-amounts";
 import "./SolanaScreen.css";
 
@@ -26,9 +29,18 @@ type RuntimeStatus = {
 };
 type Status = { binding: SolanaBinding | null; runtime: RuntimeStatus | null };
 type Setup = { transactionBase64: string; programId: string; vault: string; session: string; expiresAtMs: number };
-type Receipt = { mode?: string; requestId?: string; signature?: string; status?: string; state?: string };
+type Receipt = { mode?: string; requestId?: string; signature?: string; status?: string; state?: string;
+  intent?: { outputMint?: string }; minOutAmount?: string; quotedOutAmount?: string; quote?: { minOutAmount?: string }; outputAmountRaw?: string };
+/** A preview is only good for its quote's lifetime, and only for the exact trade it quoted. */
+type Preview = { quote: SolanaQuote; key: string; deadline: number };
+const RAW = /^(0|[1-9][0-9]*)$/;
 function base64(bytes: Uint8Array): string { return btoa(String.fromCharCode(...bytes)); }
 function fromBase64(value: string): Uint8Array { return Uint8Array.from(atob(value), (byte) => byte.charCodeAt(0)); }
+/** The saved expiry is absolute; the form shows the whole hours left, so an untouched form matches it. */
+function hoursLeft(expiresAtMs: number): string {
+  const remaining = expiresAtMs - Date.now();
+  return remaining > 0 ? String(Math.min(168, Math.max(1, Math.ceil(remaining / 3_600_000)))) : "24";
+}
 
 export function SolanaScreen() {
   return <section className="solana-screen" aria-labelledby="solana-title">
@@ -46,8 +58,11 @@ function ConnectedSolana() {
   const [perTradeSol, setPerTradeSol] = useState("0.1"), [dailySol, setDailySol] = useState("0.5");
   const [ops, setOps] = useState("20"), [drawdown, setDrawdown] = useState("20"), [duration, setDuration] = useState("24");
   const [initialCash, setInitialCash] = useState("1000"), [side, setSide] = useState<"buy" | "sell">("buy"), [amount, setAmount] = useState("1");
-  const [preview, setPreview] = useState<SolanaQuote | null>(null), [receipt, setReceipt] = useState<Receipt | null>(null);
-  const [registration, setRegistration] = useState<{ signature?: string; secret: string; signedTransactionBase64: string } | null>(null);
+  const [preview, setPreview] = useState<Preview | null>(null), [receipt, setReceipt] = useState<Receipt | null>(null);
+  const [, setQuoteClock] = useState(0);
+  // `signature` is what the server records these bytes by; `sent`: an earlier submission reached the server, or may have.
+  const [registration, setRegistration] = useState<{ signature: string | null; sent: boolean; secret: string; signedTransactionBase64: string; limits: SolanaPaperLimits } | null>(null);
+  const [savedDuration, setSavedDuration] = useState<string | null>(null);
   const request = useRef<{ key: string; id: string } | null>(null);
   const accountEpoch = useRef(0), inFlight = useRef(false);
   const statusRevision = useRef<number | null>(null);
@@ -69,10 +84,11 @@ function ConnectedSolana() {
     if (requestedIdentity !== identity.current || requestedEpoch !== accountEpoch.current) throw new Error("Your signing account changed. Refresh before continuing.");
     return result;
   }, []);
-  const refresh = useCallback(async (signal?: AbortSignal) => {
+  /** Reads and shows the account; returns what it read, or null if the account changed meanwhile. */
+  const load = useCallback(async (signal?: AbortSignal): Promise<Status | null> => {
     const epoch = accountEpoch.current;
     const next = await api<Status>("status", undefined, signal);
-    if (epoch !== accountEpoch.current || signal?.aborted) return;
+    if (epoch !== accountEpoch.current || signal?.aborted) return null;
     if (statusRevision.current !== null && statusRevision.current !== next.binding?.revision) setPreview(null);
     statusRevision.current = next.binding?.revision ?? null;
     setStatus(next);
@@ -84,9 +100,19 @@ function ConnectedSolana() {
         if (next.binding.limits.perTradeWsol && next.binding.limits.dailyWsol) {
           setPerTradeSol(display(next.binding.limits.perTradeWsol, 9)); setDailySol(display(next.binding.limits.dailyWsol, 9));
         }
-      }
+        const hours = hoursLeft(next.binding.limits.expiresAtMs);
+        setDuration(hours); setSavedDuration(hours);
+      } else setSavedDuration(null);
     }
+    return next;
   }, [api]);
+  const refresh = useCallback(async (signal?: AbortSignal) => { await load(signal); }, [load]);
+  /** The server's saved owner transaction, read afresh: which signed bytes it holds, and their outcome. */
+  const readRecord = useCallback(async (): Promise<OwnerRecord> => {
+    const next = await load();
+    if (!next) throw new Error("Your signing account changed. Refresh before continuing.");
+    return next.runtime?.live.ownerTransaction ?? null;
+  }, [load]);
   useEffect(() => {
     accountEpoch.current++;
     setStatus(null); setError(""); setConsent(false); setPreview(null); setReceipt(null); setRegistration(null); request.current = null; statusRevision.current = null;
@@ -114,7 +140,65 @@ function ConnectedSolana() {
     if (sell.perTradeWsol && BigInt(sell.perTradeWsol) > BigInt(sell.dailyWsol)) throw new Error("The SOL sold per trade cannot exceed the SOL sold per 24 hours.");
     return { perTradeUsdg: units(perTrade, 6), dailyUsdg: units(daily, 6), maxOpsPerDay, maxDrawdownBps, expiresAtMs: Date.now() + Math.floor(hours * 3_600_000), ...sell };
   };
+  /** The form shows exactly the saved mode and limits: nothing typed is waiting to be saved. */
+  const formMatchesSaved = (): boolean => {
+    const saved = binding?.limits;
+    if (!binding || !saved || mode !== binding.requestedMode || duration !== savedDuration) return false;
+    try {
+      return units(perTrade, 6) === saved.perTradeUsdg && units(daily, 6) === saved.dailyUsdg && Number(ops) === saved.maxOpsPerDay
+        && units(drawdown, 2) === String(saved.maxDrawdownBps)
+        && (mode !== "live" || (units(perTradeSol, 9) === saved.perTradeWsol && units(dailySol, 9) === saved.dailyWsol));
+    } catch { return false; }
+  };
+  /** Why a new permission cannot be registered with what the page shows, or null. */
+  const registerBlock = (): string | null => {
+    const saved = binding?.limits;
+    if (!saved) return "Save live mode and its limits before registering a trading permission.";
+    if (saved.expiresAtMs <= Date.now()) return `Your saved limits expired at ${permissionExpiry(saved.expiresAtMs)}. Save new limits before registering.`;
+    if (!saved.perTradeWsol || !saved.dailyWsol) return "Save how much SOL a live trade and a live day may sell before registering.";
+    if (!formMatchesSaved()) return "The form has unsaved changes. A permission is always signed with your saved limits: save your changes, or refresh to discard them, before registering.";
+    return null;
+  };
   const invalidate = () => { setPreview(null); setReceipt(null); request.current = null; };
+  // Re-render when the previewed quote expires, so its minimum stops being offered.
+  useEffect(() => {
+    if (!preview) return;
+    const wait = preview.deadline - Date.now();
+    if (wait <= 0) return;
+    const timer = setTimeout(() => setQuoteClock((tick) => tick + 1), wait + 1);
+    return () => clearTimeout(timer);
+  }, [preview]);
+  const quoteFresh = !!preview && Date.now() < preview.deadline;
+  const previewTrade = async () => {
+    const intent = tradeIntent(), key = request.current!.key;
+    // Timed on this clock from before the request, so a skewed device clock
+    // cannot stretch the quote's lifetime and latency only shortens it.
+    const started = Date.now();
+    const result = await api<{ preview: SolanaQuote | { quote: SolanaQuote } }>("intent", { action: "preview", mode, intent });
+    const quote = "quote" in result.preview ? result.preview.quote : result.preview;
+    if (quote.inputMint !== intent.inputMint || quote.outputMint !== intent.outputMint || quote.inAmount !== intent.amountRaw || !RAW.test(quote.minOutAmount)) throw new Error("The preview does not match this trade. Preview again.");
+    const lifetime = Math.min(SOLANA_QUOTE_MAX_AGE_MS, Math.max(0, quote.expiresAtMs - quote.quotedAtMs));
+    setPreview({ quote, key, deadline: started + lifetime }); setReceipt(null);
+  };
+  const placeTrade = async () => {
+    const intent = tradeIntent();
+    // Only the quote the owner just saw, for exactly this trade: an expired or
+    // different preview needs a new one before anything is sent.
+    if (!preview || Date.now() >= preview.deadline || preview.key !== request.current?.key) {
+      setPreview(null); throw new Error("This quote expired. Preview the trade again to see a current minimum before placing it.");
+    }
+    const result = await api<{ receipt: Receipt }>("intent", { action: "trade", mode, intent }); setReceipt(result.receipt); await refresh();
+  };
+  const tokenLabel = (mint: string) => mint === SOLANA_USDG_MINT ? "USDG" : "wrapped SOL";
+  /** What the recorded trade itself guaranteed, not the earlier preview. */
+  const receiptAmounts = (trade: Receipt): string | null => {
+    const out = trade.intent?.outputMint ?? (side === "buy" ? WSOL : SOLANA_USDG_MINT), decimals = out === SOLANA_USDG_MINT ? 6 : 9, label = tokenLabel(out);
+    if (trade.mode === "paper" && trade.outputAmountRaw && RAW.test(trade.outputAmountRaw) && trade.quote?.minOutAmount && RAW.test(trade.quote.minOutAmount))
+      return `Simulated output: ${display(trade.outputAmountRaw, decimals)} ${label}, against a quoted minimum of ${display(trade.quote.minOutAmount, decimals)} ${label}.`;
+    if (trade.mode !== "paper" && trade.minOutAmount && RAW.test(trade.minOutAmount) && trade.quotedOutAmount && RAW.test(trade.quotedOutAmount))
+      return `Quoted output: ${display(trade.quotedOutAmount, decimals)} ${label}. Minimum enforced on chain: ${display(trade.minOutAmount, decimals)} ${label}.`;
+    return null;
+  };
   const tradeIntent = () => {
     const amountRaw = units(amount, side === "buy" ? 6 : 9);
     const key = JSON.stringify([mode, side, amountRaw]);
@@ -131,30 +215,81 @@ function ConnectedSolana() {
     await api("bind", { owner, nonce: challenge.nonce, signature }); await refresh();
   };
   const setupLive = async () => {
-    if (!sameWallet) throw new Error("Connect the Solana wallet bound to this account.");
+    if (!sameWallet || !binding) throw new Error("Connect the Solana wallet bound to this account.");
     let pending = registration;
+    if (pending && pending.limits.expiresAtMs <= Date.now()) {
+      // The vault refuses to activate an expired permission, so its key can never be used.
+      setRegistration(null);
+      throw new Error(`This permission expired at ${permissionExpiry(pending.limits.expiresAtMs)} before it was activated, so its session key has been discarded. Register again to sign a new permission.`);
+    }
     if (!pending) {
+      // Exactly the saved limits shown in the live card; the server encodes the saved ones.
+      const shown = binding.limits, programId = status?.runtime?.live.programId, blocked = registerBlock();
+      if (blocked || !shown || !programId) throw new Error(blocked ?? "Wait for the vault program to be verified before registering.");
+      const vault = await deriveSolanaVaultAddress(programId, binding.owner);
       const seed = crypto.getRandomValues(new Uint8Array(32));
       try {
         const sessionPublicKey = base58Encode(ed25519.getPublicKey(seed));
         const { setup } = await api<{ setup: Setup }>("setup", { stage: "prepare", sessionPublicKey });
         if (setup.session !== sessionPublicKey) throw new Error("The prepared permission names a different session. Nothing was signed.");
-        const signed = await signer.signSetup(fromBase64(setup.transactionBase64));
-        pending = { secret: base64(seed), signedTransactionBase64: base64(signed) };
+        if (setup.programId !== programId || setup.vault !== vault) throw new Error("The prepared permission names a different vault. Nothing was signed.");
+        // The wallet only opens for bytes that encode what this page showed.
+        const terms = readPermissionTransaction(setup.transactionBase64, { owner: binding.owner, programId, vault, session: sessionPublicKey });
+        if (!permissionMatchesLimits(terms, shown)) throw new Error("The prepared permission does not match the saved limits shown on this page. Nothing was signed. Refresh and review your limits.");
+        const signed = base64(await signer.signSetup(fromBase64(setup.transactionBase64)));
+        pending = { secret: base64(seed), signedTransactionBase64: signed, signature: signatureOf(signed), sent: false, limits: shown };
         // Keep the bounded session seed and exact signed bytes before submit:
         // a lost response must retry this registration, never create a new one.
         setRegistration(pending);
       } finally { seed.fill(0); }
     }
-    if (!pending.signature) {
-      const { registration: submitted } = await api<{ registration: { signature: string; status: string } }>("setup", { stage: "submit", signedTransactionBase64: pending.signedTransactionBase64 });
-      if (submitted.status === "failed") { setRegistration(null); throw new Error("The permission transaction failed. No session was activated."); }
-      pending = { ...pending, signature: submitted.signature }; setRegistration(pending);
+    // Submitting the saved bytes again is idempotent: the server reports the
+    // outcome of the transaction it saved. A refusal of the first submission
+    // proves the server never saved them, so they and their seed are dropped.
+    // A refused retry is decided by the server's record, never assumed to be
+    // "not accepted": the bytes may already be broadcast (refusedByServer).
+    let submitted: { signature: string; status: string };
+    try {
+      ({ registration: submitted } = await api<{ registration: { signature: string; status: string } }>("setup", { stage: "submit", signedTransactionBase64: pending.signedTransactionBase64 }));
+    } catch (e) {
+      if (!refusedByServer(e)) { setRegistration({ ...pending, sent: true }); throw e; }
+      if (!pending.sent) {
+        setRegistration(null);
+        throw new Error(`${e.message} The signed permission was not accepted, so it has been discarded and nothing was activated. Register again to review and sign a new permission.`);
+      }
+      const outcome = await outcomeAfterRefusal(readRecord, pending.signature);
+      if (outcome === "unknown") throw new Error(`${e.message} An earlier submission of this signed permission may already be on Solana, so it and its session key were kept. Finish permission registration again shortly.`);
+      if (outcome === "pending") throw new Error(`${e.message} The server holds this signed permission and still records it as awaiting final confirmation, so its session key was kept. Finish permission registration again shortly.`);
+      if (outcome === "unheld") {
+        // Resubmitting can never be checked or sent again; whether an earlier
+        // submission landed is the server's status to show, not this page's guess.
+        setRegistration(null);
+        throw new Error(`${e.message} The server holds no record of this signed permission, so it and its session key were cleared from this page. Refresh to check whether a permission is active, then register again if needed.`);
+      }
+      submitted = { signature: pending.signature!, status: outcome };
     }
-    await api("setup", { stage: "activate", signature: pending.signature, sessionSecretKey: pending.secret });
+    if (submitted.status === "failed") { setRegistration(null); throw new Error("The permission transaction failed. No session was activated. Register again to sign a new permission."); }
+    pending = { ...pending, signature: submitted.signature, sent: true }; setRegistration(pending);
+    if (submitted.status !== "finalized") throw new Error("The permission is awaiting final confirmation on Solana. Keep this page open and finish registration in a moment.");
+    try { await api("setup", { stage: "activate", signature: pending.signature, sessionSecretKey: pending.secret }); }
+    catch (e) {
+      if (!refusedByServer(e)) throw e;
+      // The server answers activation from its record of this permission and
+      // the vault as its RPC sees it, which can lag the finalized permission.
+      // The key is dropped only when the server no longer holds the permission.
+      const outcome = await outcomeAfterRefusal(readRecord, pending.signature);
+      if (outcome === "failed") { setRegistration(null); throw new Error("The permission transaction failed. No session was activated. Register again to sign a new permission."); }
+      if (outcome === "unheld") {
+        setRegistration(null);
+        throw new Error(`${e.message} The server no longer holds this permission, so it cannot be activated and its session key has been discarded. Register again to sign a new permission.`);
+      }
+      throw new Error(`${e.message} This permission is confirmed on Solana but is not active yet, so its session key was kept. Finish permission registration again shortly.`);
+    }
     setRegistration(null); await refresh();
   };
   const liveBook = status?.runtime?.live.book;
+  // A vault the server has read, funded or registered: what an owner key backup protects.
+  const live = status?.runtime?.live, vaultSeen = !!live && (!!live.balances || !!live.book || !!live.session);
   if (!signer.authenticated) return <div className="solana-card"><p>Sign in with the same account you use for Robinhood Chain.</p><SignIn onDone={() => { void refresh().catch(() => undefined); }} /></div>;
   return <>
     {error && <p role="alert" className="solana-error">{error}</p>}
@@ -199,7 +334,7 @@ function ConnectedSolana() {
         <p>{status?.runtime?.live.ready ? "Registered permission ready." : "Live trading is not active yet."}</p>
         {binding.limits?.perTradeWsol && binding.limits.dailyWsol && <p>Sales are limited to {display(binding.limits.perTradeWsol, 9)} SOL per trade and {display(binding.limits.dailyWsol, 9)} SOL per 24 hours, whatever the price.</p>}
         {!!status?.runtime?.live.blockers.length && <ul>{status.runtime.live.blockers.map((blocker) => <li key={blocker}>{blocker}</li>)}</ul>}
-        {status?.runtime?.live.vault && <p>Vault: <span className="solana-address">{status.runtime.live.vault}</span></p>}
+        {status?.runtime?.live.vault && <p>Vault: <span className="solana-address">{status.runtime.live.vault}</span>{status.runtime.live.programId && <> · Program: <span className="solana-address">{status.runtime.live.programId}</span></>}</p>}
         {status?.runtime?.live.cashTokenAccount && (status.runtime.live.ready || status.runtime.live.canExit) && <div><h3>Fund the Solana vault</h3><p>Send USDG on Solana to this verified USDG token account:</p><p className="solana-address">{status.runtime.live.cashTokenAccount}</p><p>Deposit USDG only. Direct wrapped SOL deposits have no recorded cost basis and cannot be traded by this session.</p></div>}
         {status?.runtime?.live.balances && <><p className="solana-value">{display(status.runtime.live.balances.cashUsdg)} USDG</p><p>{display(status.runtime.live.balances.wsolRaw, 9)} wrapped SOL · observed at slot {status.runtime.live.balances.slot}</p></>}
         {liveBook && <p>Recorded realized P&amp;L: {display(liveBook.realizedPnlUsdgRaw)} USDG. Network fees: {display(liveBook.networkFeesLamports, 9)} SOL.</p>}
@@ -209,26 +344,30 @@ function ConnectedSolana() {
         {!!status?.runtime?.live.pending.length && <p role="status">{status.runtime.live.pending.length} trade(s) awaiting final confirmation. Refresh to reconcile the saved request.</p>}
         {!!status?.runtime?.live.history?.length && <details><summary>Recent live requests</summary><ul>{status.runtime.live.history.slice(0, 20).map((trade) => <li key={trade.requestId}>{trade.requestId}: {trade.status}{trade.signature && <> · <a target="_blank" rel="noreferrer" href={`https://solscan.io/tx/${encodeURIComponent(trade.signature)}`}>Transaction</a></>}</li>)}</ul></details>}
         <p>The initial live market is USDG ↔ wrapped SOL. Deposit only after the program and vault have been verified.</p>
+        {registration ? <PermissionTerms heading="The permission you signed" limits={registration.limits} />
+          : binding.limits && <PermissionTerms heading="Your wallet will be asked to sign these saved limits" limits={binding.limits} />}
         {registration && <p>Keep this page open while finalization completes. Retry activation with the existing registration.</p>}
-        <button disabled={busy || !sameWallet || !binding.limits || !status?.runtime?.live.programId} onClick={() => void act(setupLive)}>{registration ? "Finish permission registration" : "Register bounded trading permission"}</button>
+        {!registration && binding.limits && registerBlock() && <p role="status">{registerBlock()}</p>}
+        <button disabled={busy || !sameWallet || !binding.limits || !status?.runtime?.live.programId || (!registration && !!registerBlock())} onClick={() => void act(setupLive)}>{registration ? "Finish permission registration" : "Register bounded trading permission"}</button>
       </div>}
-      <form className="solana-card" onSubmit={(event) => { event.preventDefault(); void act(async () => {
-        const result = await api<{ preview: SolanaQuote | { quote: SolanaQuote } }>("intent", { action: "preview", mode, intent: tradeIntent() });
-        setPreview("quote" in result.preview ? result.preview.quote : result.preview); setReceipt(null);
-      }); }}><h2>USDG ↔ wrapped SOL</h2>
+      <form className="solana-card" onSubmit={(event) => { event.preventDefault(); void act(previewTrade); }}><h2>USDG ↔ wrapped SOL</h2>
         <label>Direction<select disabled={busy} value={side} onChange={(e) => { setSide(e.target.value as "buy" | "sell"); invalidate(); }}><option value="buy">Buy wrapped SOL</option><option value="sell">Sell wrapped SOL</option></select></label>
         <label>{side === "buy" ? "USDG to spend" : "Wrapped SOL to sell"}<input disabled={busy} inputMode="decimal" value={amount} onChange={(e) => { setAmount(e.target.value); invalidate(); }} /></label>
         <p>Slippage limit: 0.5%. Saved mode: {binding.requestedMode}.</p>
         <button disabled={busy || !!receipt || mode !== binding.requestedMode || !binding.limits || (mode === "live" && !(side === "sell" ? status?.runtime?.live.canExit : status?.runtime?.live.ready))}>Preview trade</button>
-        {preview && <><p>Minimum received: {display(preview.minOutAmount, side === "buy" ? 9 : 6)} {side === "buy" ? "wrapped SOL" : "USDG"}.</p>
-          <button type="button" disabled={busy || !!receipt || mode !== binding.requestedMode} onClick={() => void act(async () => {
-            const result = await api<{ receipt: Receipt }>("intent", { action: "trade", mode, intent: tradeIntent() }); setReceipt(result.receipt); await refresh();
-          })}>{mode === "paper" ? "Simulate trade" : "Place live trade"}</button></>}
+        {preview && (receipt || quoteFresh ? <><p>Minimum received: {display(preview.quote.minOutAmount, preview.quote.outputMint === SOLANA_USDG_MINT ? 6 : 9)} {tokenLabel(preview.quote.outputMint)}.</p>
+          {!receipt && <p>This quote is valid for about {Math.max(1, Math.round((preview.deadline - Date.now()) / 1000))} seconds. The trade is quoted again when placed, with the same 0.5% slippage limit; the receipt shows the minimum actually enforced.</p>}
+          <button type="button" disabled={busy || !!receipt || !quoteFresh || mode !== binding.requestedMode} onClick={() => void act(placeTrade)}>{mode === "paper" ? "Simulate trade" : "Place live trade"}</button></>
+          : <p role="status">This quote expired. Preview again to see a current minimum before trading.</p>)}
         {receipt && <p role="status">{receipt.mode === "paper" ? "Simulated trade recorded." : `Live request recorded${receipt.status ? `: ${receipt.status}` : ""}.`} {receipt.signature && <a target="_blank" rel="noreferrer" href={`https://solscan.io/tx/${encodeURIComponent(receipt.signature)}`}>View transaction</a>}</p>}
+        {receipt && receiptAmounts(receipt) && <p>{receiptAmounts(receipt)}</p>}
         {receipt && <button type="button" className="solana-secondary" disabled={busy} onClick={invalidate}>Start a new trade</button>}
       </form>
       <SolanaAutomation key={`strategy-${signer.did}`} binding={binding} api={api} refresh={refresh} workerOnline={status?.runtime?.automation?.workerOnline ?? false} />
-      <SolanaOwnerActions key={`owner-${signer.did}`} available={sameWallet && !!status?.runtime?.live.programId} api={api} sign={signer.signSetup} refresh={refresh} />
+      <SolanaOwnerActions key={`owner-${signer.did}`} available={sameWallet && !!status?.runtime?.live.programId} api={api} sign={signer.signSetup} refresh={refresh} readRecord={readRecord} />
+      {/* Off by default; only the bound owner of a vault the server has read. */}
+      {ownerKeyExportEnabled() && sameWallet && vaultSeen && signer.address && <SolanaRecovery key={`recovery-${signer.did}`} owner={signer.address}
+        programId={live?.programId ?? null} vault={live?.vault ?? null} exportKey={signer.exportKey} />}
     </>}
   </>;
 }

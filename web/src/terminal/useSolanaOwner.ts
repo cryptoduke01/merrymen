@@ -1,7 +1,7 @@
 "use client";
 import { useRef } from "react";
 import { usePrivy } from "@privy-io/react-auth";
-import { useWallets, useCreateWallet, useSignMessage, useSignTransaction } from "@privy-io/react-auth/solana";
+import { useWallets, useCreateWallet, useExportWallet, useSignMessage, useSignTransaction } from "@privy-io/react-auth/solana";
 import { base58Encode } from "../../../packages/core/src/ids";
 
 const creations = new Map<string, Promise<unknown>>();
@@ -12,6 +12,7 @@ export function useSolanaOwner() {
   const { createWallet } = useCreateWallet();
   const { signMessage } = useSignMessage();
   const { signTransaction } = useSignTransaction();
+  const { exportWallet } = useExportWallet();
   const linked = authenticated ? user?.linkedAccounts.filter((account) => account.type === "wallet"
     && account.chainType === "solana" && (account.walletClientType === "privy" || account.walletClientType === "privy-v2")) ?? [] : [];
   const matches = wallets.filter((wallet) => linked.some((account) => account.type === "wallet" && account.address === wallet.address));
@@ -47,6 +48,15 @@ export function useSolanaOwner() {
       const result = await signTransaction({ wallet: wallet!, transaction: bytes, chain: "solana:mainnet" });
       requireCurrent();
       return result.signedTransaction;
+    },
+    /**
+     * Opens Privy's own export window for exactly this owner wallet, so the
+     * owner can recover the vault without Merrymen. The key is shown in an
+     * iframe on Privy's domain; this page never receives it.
+     */
+    async exportKey() {
+      requireCurrent();
+      await exportWallet({ address: wallet!.address });
     },
   };
 }
