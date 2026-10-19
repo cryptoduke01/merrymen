@@ -2,8 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import { createHash } from "node:crypto";
-import { createKeyPairFromPrivateKeyBytes, getAddressFromPublicKey, getBase58Decoder, getBase58Encoder,
-  getBase64EncodedWireTransaction, getTransactionDecoder, signTransaction } from "@solana/kit";
+import { createKeyPairFromPrivateKeyBytes, getAddressFromPublicKey, getBase58Decoder, getBase58Encoder, getBase64EncodedWireTransaction,
+  getCompiledTransactionMessageDecoder, getTransactionDecoder, signTransaction } from "@solana/kit";
 import { CHAINS, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM } from "../../packages/core/src/ids";
 import { SOLANA_CLASSIC_TOKEN_PROGRAM, SOLANA_VAULT_ACCOUNT_SIZE, SOLANA_VAULT_DISCRIMINATOR,
   SOLANA_VAULT_LOCAL_TEST_PROGRAM, SOLANA_WRAPPED_SOL_MINT, deriveSolanaAta, deriveSolanaVaultAddress } from "../../packages/core/src/solana-live";
@@ -712,5 +712,116 @@ test("status shows what the owner wallet needs to revoke and withdraw, and warns
     assert.equal(status.live.ready, true, "an owner warning never blocks the worker");
     f.controls.ownerLamports = 0;
     assert.match((await f.app.status(f.scope)).live.warnings.join(" "), /too little to revoke or withdraw/);
+  } finally { f.raw.close(); }
+});
+
+/** The prepared transaction's instructions: program, accounts and data. */
+function instructionsOf(transactionBase64: string) {
+  const message = getCompiledTransactionMessageDecoder().decode(getTransactionDecoder().decode(Buffer.from(transactionBase64, "base64")).messageBytes);
+  return message.instructions.map(ix => ({ program: message.staticAccounts[ix.programAddressIndex] as string,
+    accounts: (ix.accountIndices ?? []).map(i => message.staticAccounts[i] as string), data: Buffer.from(ix.data ?? []) }));
+}
+const WITHDRAW_SOL = Buffer.from([145, 131, 74, 136, 65, 137, 42, 38]);
+/** SQLite rows as plain objects. */
+const rows = async (f: Fixture, sql: string) => (await f.db.prepare(sql).all() as object[]).map(row => ({ ...row }));
+/** Both providers see the owner transaction finalized and the vault's sequence moved. */
+const landOwner = (f: Fixture) => { f.controls.finalized = true; f.controls.sequence += 1n; };
+
+test("the owner can withdraw native SOL held by the vault account itself (audit G1-4)", async () => {
+  const f = await fixture();
+  try {
+    await readyLive(f); f.controls.sequence = 4n;
+    f.controls.vaultNativeLamports = 100; // sent straight to the vault PDA
+    const status = await f.app.status(f.scope);
+    assert.deepEqual(status.live.recoverable, { nativeLamports: "100", unsyncedWsolLamports: "0" });
+    await assert.rejects(f.app.prepareOwnerAction(f.scope, { action: "withdraw-sol", amountRaw: "101" }), /native SOL above its rent reserve \(0\.0000001 SOL\)/);
+    await assert.rejects(f.app.prepareOwnerAction(f.scope, { action: "withdraw-sol", amountRaw: "0" }));
+    await assert.rejects(f.app.prepareOwnerAction(f.scope, { action: "withdraw-sol", mint: SOLANA_WRAPPED_SOL_MINT, amountRaw: "100" }), /supported owner action/);
+    const prepared = await f.app.prepareOwnerAction(f.scope, { action: "withdraw-sol", amountRaw: "100" });
+    const [withdraw, ...rest] = instructionsOf(prepared.transactionBase64);
+    assert.deepEqual(rest, []); assert.equal(withdraw!.program, PROGRAM);
+    assert.deepEqual(withdraw!.data, Buffer.concat([WITHDRAW_SOL, Buffer.from([100, 0, 0, 0, 0, 0, 0, 0])])); assert.deepEqual(withdraw!.accounts, [f.vault, f.owner]);
+    const saved = (await new SolanaTradingStore(f.db, f.scope).setup())!;
+    assert.equal(saved.kind, "withdraw-sol"); assert.equal(saved.amountRaw, "100"); assert.equal(saved.priorSequence, "4");
+    const signedTransactionBase64 = await f.sign(prepared.transactionBase64);
+    await f.app.submitOwnerAction(f.scope, { signedTransactionBase64 });
+    landOwner(f);
+    assert.equal((await f.app.submitOwnerAction(f.scope, { signedTransactionBase64 })).status, "finalized");
+    assert.deepEqual(await rows(f, "SELECT kind,mint,amount_raw FROM solana_runtime_cashflows"), [{ kind: "withdraw-sol", mint: SYSTEM, amount_raw: "100" }]);
+  } finally { f.raw.close(); }
+});
+
+test("a dropped native SOL withdrawal resolves on an unchanged sequence, and no trade can move it in between (audit G1-4)", async () => {
+  const f = await fixture();
+  try {
+    await readyLive(f); f.controls.sequence = 4n; f.controls.vaultNativeLamports = 100;
+    const prepared = await f.app.prepareOwnerAction(f.scope, { action: "withdraw-sol", amountRaw: "100" });
+    // A prepared withdrawal's expiry is proven by its sequence, so admission holds trades meanwhile.
+    const store = new SolanaTradingStore(f.db, f.scope, () => f.clock.now);
+    await assert.rejects(store.recordSigned({ intent: { owner: f.owner, requestId: "trade-during-withdraw-sol" } } as never), /prepared owner withdrawal/);
+    const signedTransactionBase64 = await f.sign(prepared.transactionBase64);
+    await f.app.submitOwnerAction(f.scope, { signedTransactionBase64 });
+    f.controls.height = 5001;
+    assert.equal((await f.app.submitOwnerAction(f.scope, { signedTransactionBase64 })).status, "failed");
+    assert.equal((await store.setup())!.expiryProof!.vaultSequence, "4");
+    assert.deepEqual(await f.db.prepare("SELECT * FROM solana_runtime_cashflows").all(), []);
+    // A trade at or after the read sequence makes a prepared withdrawal stale.
+    await pendingTrade(f, "4"); await landTrade(f, "4");
+    await assert.rejects(f.app.prepareOwnerAction(f.scope, { action: "withdraw-sol", amountRaw: "100" }), /vault changed/);
+  } finally { f.raw.close(); }
+});
+
+test("a WSOL withdrawal syncs native SOL sent straight to the vault's WSOL account and can take it (audit G1-4)", async () => {
+  const f = await fixture();
+  try {
+    await readyLive(f); f.controls.sequence = 2n; f.controls.cash = 90_000_000n;
+    const book = { hwmRaw: "90000000", cashRaw: "90000000", wsolRaw: "0", costBasisUsdgRaw: "0", realizedPnlUsdgRaw: "0", networkFeesLamports: "0", slot: 900, updatedAtMs: 999_000 };
+    await f.db.prepare("INSERT INTO solana_runtime_live_books(tenant,owner,book_json) VALUES(?,?,?)").run(TENANT, f.owner, JSON.stringify(book));
+    // Without SyncNative these 13 lamports are not WSOL: the old app could never withdraw them.
+    f.controls.unsyncedWsolLamports = 13;
+    assert.equal((await f.app.status(f.scope)).live.recoverable?.unsyncedWsolLamports, "13");
+    await assert.rejects(f.app.prepareOwnerAction(f.scope, { action: "withdraw", mint: SOLANA_WRAPPED_SOL_MINT, amountRaw: "14" }), /exceeds/);
+    const prepared = await f.app.prepareOwnerAction(f.scope, { action: "withdraw", mint: SOLANA_WRAPPED_SOL_MINT, amountRaw: "13" });
+    const [sync, create, withdraw] = instructionsOf(prepared.transactionBase64);
+    assert.deepEqual(sync, { program: SOLANA_CLASSIC_TOKEN_PROGRAM, accounts: [f.wsolAta], data: Buffer.from([17]) }, "SyncNative runs before the withdrawal");
+    assert.equal(create!.program, "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"); assert.equal(withdraw!.program, PROGRAM);
+    assert.equal((await new SolanaTradingStore(f.db, f.scope).setup())!.syncedWsolRaw, "13");
+    const signedTransactionBase64 = await f.sign(prepared.transactionBase64);
+    await f.app.submitOwnerAction(f.scope, { signedTransactionBase64 });
+    f.controls.unsyncedWsolLamports = 0; landOwner(f);
+    assert.equal((await f.app.submitOwnerAction(f.scope, { signedTransactionBase64 })).status, "finalized");
+    const after = (await new SolanaTradingStore(f.db, f.scope).liveBook())!;
+    assert.equal(after.wsolRaw, "0"); assert.equal(after.quarantinedWsolRaw, "0"); assert.equal(after.cashRaw, "90000000"); assert.equal(after.hwmRaw, "90000000");
+    const flows = await rows(f, "SELECT kind,mint,amount_raw FROM solana_runtime_cashflows ORDER BY kind");
+    assert.deepEqual(flows, [{ kind: "quarantine", mint: SOLANA_WRAPPED_SOL_MINT, amount_raw: "13" }, { kind: "withdraw", mint: SOLANA_WRAPPED_SOL_MINT, amount_raw: "13" }]);
+    // Nothing unsynced: no SyncNative instruction.
+    f.controls.finalized = false;
+    const plain = await f.app.prepareOwnerAction(f.scope, { action: "withdraw", mint: SOLANA_USDG_MINT, amountRaw: "1" });
+    assert.ok(!instructionsOf(plain.transactionBase64).some(ix => ix.program === SOLANA_CLASSIC_TOKEN_PROGRAM));
+  } finally { f.raw.close(); }
+});
+
+test("lamports someone else syncs and the app books before the owner signs are not booked twice (audit G1-4)", async () => {
+  const f = await fixture();
+  try {
+    await readyLive(f); f.controls.sequence = 2n; f.controls.cash = 90_000_000n;
+    const book = { hwmRaw: "90000000", cashRaw: "90000000", wsolRaw: "0", costBasisUsdgRaw: "0", realizedPnlUsdgRaw: "0", networkFeesLamports: "0", slot: 900, updatedAtMs: 999_000 };
+    await f.db.prepare("INSERT INTO solana_runtime_live_books(tenant,owner,book_json) VALUES(?,?,?)").run(TENANT, f.owner, JSON.stringify(book));
+    f.controls.unsyncedWsolLamports = 13;
+    const prepared = await f.app.prepareOwnerAction(f.scope, { action: "withdraw", mint: SOLANA_WRAPPED_SOL_MINT, amountRaw: "13" });
+    // Anyone may call SyncNative. A status read then books the 13 as quarantined WSOL.
+    f.controls.unsyncedWsolLamports = 0; f.controls.wsol = 13n;
+    await f.app.status(f.scope);
+    assert.equal((await new SolanaTradingStore(f.db, f.scope).liveBook())!.quarantinedWsolRaw, "13");
+    const signedTransactionBase64 = await f.sign(prepared.transactionBase64);
+    await f.app.submitOwnerAction(f.scope, { signedTransactionBase64 });
+    f.controls.wsol = 0n; landOwner(f);
+    assert.equal((await f.app.submitOwnerAction(f.scope, { signedTransactionBase64 })).status, "finalized");
+    const after = (await new SolanaTradingStore(f.db, f.scope).liveBook())!;
+    assert.equal(after.quarantinedWsolRaw, "0", "the book matches the chain: nothing left over, nothing double counted");
+    const flows = await rows(f, "SELECT kind,amount_raw FROM solana_runtime_cashflows ORDER BY kind");
+    assert.deepEqual(flows, [{ kind: "quarantine", amount_raw: "13" }, { kind: "withdraw", amount_raw: "13" }]);
+    f.controls.finalized = false;
+    assert.ok(!(await f.app.status(f.scope)).live.blockers.some(b => /below recorded/.test(b)));
   } finally { f.raw.close(); }
 });

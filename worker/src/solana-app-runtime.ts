@@ -12,7 +12,7 @@ import { parseSolanaRawAmount, parseSolanaSwapIntent, requireSolanaLiveSellLimit
   type SolanaPaperLimits, type SolanaSwapIntent } from "../../packages/core/src/solana";
 import {
   buildCreateSolanaSessionInstruction, buildInitializeSolanaVaultInstruction, buildRevokeSolanaSessionsInstruction,
-  buildWithdrawSolanaVaultInstruction, buildSetSolanaBreakerInstruction, decodeSolanaVaultAccount, deriveSolanaAta, deriveSolanaVaultAddress,
+  buildWithdrawSolanaNativeInstruction, buildWithdrawSolanaVaultInstruction, buildSetSolanaBreakerInstruction, decodeSolanaVaultAccount, deriveSolanaAta, deriveSolanaVaultAddress,
   SOLANA_ASSOCIATED_TOKEN_PROGRAM, SOLANA_CLASSIC_TOKEN_PROGRAM, SOLANA_SYSTEM_PROGRAM, SOLANA_VAULT_ACCOUNT_SIZE, SOLANA_VAULT_LOCAL_TEST_PROGRAM,
   SOLANA_WRAPPED_SOL_MINT,
 } from "../../packages/core/src/solana-live";
@@ -95,6 +95,22 @@ function chainAccount(raw: unknown): ChainAccount {
 /** Lamports an account can pay fees with: only a plain system account can be a fee payer. */
 function payable(account: ChainAccount): bigint {
   return account && account.owner === SOLANA_SYSTEM_PROGRAM && !account.executable && account.data.length === 0 ? account.lamports : 0n;
+}
+/**
+ * Native lamports in a WSOL token account beyond its rent reserve and token
+ * amount: SOL sent straight to it without SyncNative. Not a valid native WSOL
+ * account of `holder`: 0.
+ */
+function unsyncedWsolLamports(account: ChainAccount, holder: string): bigint {
+  const data = account?.data;
+  if (!account || !data || account.owner !== SOLANA_CLASSIC_TOKEN_PROGRAM || account.executable || data.length < 165 || data[108] !== 1 || data.readUInt32LE(109) !== 1
+    || getBase58Decoder().decode(data.subarray(0, 32)) !== SOLANA_WRAPPED_SOL_MINT || getBase58Decoder().decode(data.subarray(32, 64)) !== holder) return 0n;
+  const excess = account.lamports - data.readBigUInt64LE(113) - data.readBigUInt64LE(64);
+  return excess > 0n ? excess : 0n;
+}
+/** The classic token program's permissionless SyncNative: unsynced lamports become WSOL. */
+function syncNative(tokenAccount: string): Instruction {
+  return { programAddress: address(SOLANA_CLASSIC_TOKEN_PROGRAM), accounts: [{ address: address(tokenAccount), role: 1 }], data: Uint8Array.of(17) };
 }
 /** Confirmed accounts in one call; a missing account is null. */
 async function readAccounts(read: SolanaLiveRead, keys: readonly string[]): Promise<ChainAccount[]> {
@@ -284,9 +300,9 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
     const current = decodeSolanaVaultAccount(encoded(found.value.data[0], SOLANA_VAULT_ACCOUNT_SIZE));
     if (current.owner !== s.scope.owner) return mismatch();
     const kind = setup.kind ?? "session";
-    // A session or revoke always moves the epoch; a withdrawal always moves the sequence.
+    // A session or revoke always moves the epoch; either withdrawal always moves the sequence.
     if ((kind === "session" || kind === "revoke") && (setup.priorSessionEpoch === undefined || current.sessionEpoch <= BigInt(setup.priorSessionEpoch))) mismatch();
-    if (kind === "withdraw" && (setup.priorSequence === undefined || current.seq <= BigInt(setup.priorSequence))) mismatch();
+    if ((kind === "withdraw" || kind === "withdraw-sol") && (setup.priorSequence === undefined || current.seq <= BigInt(setup.priorSequence))) mismatch();
   }
   /**
    * No receipt: proven never run only when this provider's finalized bank is past
@@ -457,6 +473,7 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       let balances: { slot: number; cashUsdg: string; wsolRaw: string } | null = null;
       let feePayerView: { lamports: string; exitMinimumLamports: string; buyMinimumLamports: string; lowLamports: string; level: FeePayerLevel } | null = null;
       let ownerWallet: { lamports: string; revokeLamports: string; withdrawLamports: string } | null = null;
+      let recoverable: { nativeLamports: string; unsyncedWsolLamports: string } | null = null;
       try {
         const cfg = config(); programId = cfg.programId; vault = await deriveSolanaVaultAddress(programId, scope.owner);
         if (!liveReads) { if (binding.requestedMode === "live") blockers.push("Live vault state was not read."); }
@@ -468,16 +485,21 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
           // What the executor needs for one swap: both signatures and the rent of the
           // temporary input account it opens (and closes, refunding the payer).
           const ownerCash = await deriveSolanaAta(scope.owner, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM), ownerWsol = await deriveSolanaAta(scope.owner, SOLANA_WRAPPED_SOL_MINT, SOLANA_CLASSIC_TOKEN_PROGRAM);
+          const vaultWsol = await deriveSolanaAta(vault, SOLANA_WRAPPED_SOL_MINT, SOLANA_CLASSIC_TOKEN_PROGRAM);
           const payerState = await rpc().read(async read => {
-            const [payerAccount, cashAccount] = await readAccounts(read, [feePayer, vaultCash]);
+            const [payerAccount, cashAccount, vaultAccount, wsolAccount] = await readAccounts(read, [feePayer, vaultCash, vault!, vaultWsol]);
+            const native = vaultAccount && vaultAccount.owner === cfg.programId ? vaultAccount.lamports - await rentFor(read, vaultAccount.data.length) : 0n;
             if (payerAccount && (payerAccount.owner !== SOLANA_SYSTEM_PROGRAM || payerAccount.executable || payerAccount.data.length))
               fail("The separate network fee payer must be a plain system account.", "configuration");
             return { lamports: payerAccount?.lamports ?? 0n,
               exitMinimum: await rentFor(read, CLASSIC_TOKEN_ACCOUNT_SIZE) + SWAP_SIGNATURE_FEES,
               buyMinimum: await rentFor(read, cashAccount ? cashAccount.data.length : TOKEN_2022_ACCOUNT_SIZE_BOUND) + SWAP_SIGNATURE_FEES,
               // What the owner needs to revoke (no account opened) or withdraw (may open its own token account).
-              owner: await ownerCost(read, scope.owner, vault!, [{ address: ownerCash, size: "usdg" }, { address: ownerWsol, size: CLASSIC_TOKEN_ACCOUNT_SIZE }]) };
+              owner: await ownerCost(read, scope.owner, vault!, [{ address: ownerCash, size: "usdg" }, { address: ownerWsol, size: CLASSIC_TOKEN_ACCOUNT_SIZE }]),
+              // Owner-recoverable SOL outside the book: withdraw-sol, and the SyncNative a WSOL withdrawal runs.
+              recoverable: { nativeLamports: (native > 0n ? native : 0n).toString(), unsyncedWsolLamports: unsyncedWsolLamports(wsolAccount ?? null, vault!).toString() } };
           });
+          recoverable = payerState.recoverable;
           const revokeNeeds = payerState.owner.base, withdrawNeeds = payerState.owner.rents.reduce((most, item) => item > most ? item : most, 0n) + payerState.owner.base;
           ownerWallet = { lamports: payerState.owner.held.toString(), revokeLamports: revokeNeeds.toString(), withdrawLamports: withdrawNeeds.toString() };
           if (payerState.owner.held < revokeNeeds) warnings.push(`Your owner wallet holds ${sol(payerState.owner.held)} SOL, too little to revoke or withdraw (at least ${sol(revokeNeeds)} SOL to revoke, up to ${sol(withdrawNeeds)} SOL to withdraw). Keep some SOL there so you can act in an emergency.`);
@@ -531,7 +553,7 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       return { chain: CHAINS.solana, owner: scope.owner, requestedMode: binding.requestedMode,
         automation: { workerOnline: lastSeenAtMs !== null && lastSeenAtMs <= now() && now() - lastSeenAtMs < 90_000, lastSeenAtMs },
         paper: await s.paper().get(scope.owner), limits: binding.limits,
-        live: { ready: blockers.length === 0, canExit: blockers.every(item => exitSafe.has(item)), blockers, warnings, feePayer: feePayerView, ownerWallet, programId, vault, cashTokenAccount, session: session?.session ?? null,
+        live: { ready: blockers.length === 0, canExit: blockers.every(item => exitSafe.has(item)), blockers, warnings, feePayer: feePayerView, ownerWallet, recoverable, programId, vault, cashTokenAccount, session: session?.session ?? null,
           balances, tradable: await tradableIn(s, balances), book: await s.liveBook(), pending, history: (await s.history()).map(publicTrade),
           ownerTransaction: ownerTransaction?.signature ? { signature: ownerTransaction.signature, status: ownerTransaction.status, kind: ownerTransaction.kind } : null } };
     },
@@ -642,36 +664,71 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
         registrationSignature: input.signature, registeredAtMs: now() }, input.sessionSecretKey, dek());
       return { registered: true, session, vault: setup.vault };
     },
-    async prepareOwnerAction(scope: SolanaAccountScope, input: { action: "revoke" | "withdraw" | "resume-buys"; mint?: string; amountRaw?: string }) {
+    /**
+     * Owner recovery transactions, signed by the owner (also the fee payer):
+     * - revoke, resume-buys;
+     * - withdraw { mint, amountRaw }: USDG or WSOL to the owner's token account,
+     *   bounded by the reconciled book. A WSOL withdrawal first runs SyncNative
+     *   when native SOL sits unsynced in the vault's WSOL account, and may take it too;
+     * - withdraw-sol { amountRaw }: native lamports from the vault account above
+     *   its rent reserve (withdraw_sol), to the owner's wallet.
+     */
+    async prepareOwnerAction(scope: SolanaAccountScope, input: { action: "revoke" | "withdraw" | "withdraw-sol" | "resume-buys"; mint?: string; amountRaw?: string }) {
       const s = await store(scope), cfg = config();
       if (input.action !== "revoke") await reconcile(s);
       await verifyDeployment(cfg);
       const { vault, state } = await readSolanaVaultState(rpc(), cfg.programId, scope.owner), instructions: Instruction[] = [], creates: OwnerCreate[] = [];
+      const details: { syncedWsolRaw?: string } = {};
       if (input.action === "revoke") instructions.push(buildRevokeSolanaSessionsInstruction({ programAddress: cfg.programId, vault, owner: scope.owner }));
       else if (input.action === "resume-buys") instructions.push(buildSetSolanaBreakerInstruction({ programAddress: cfg.programId, vault, authority: scope.owner, paused: false }));
       else if (input.action === "withdraw" && input.mint && input.amountRaw) {
         const program = tokenProgram(input.mint), amount = parseSolanaRawAmount(input.amountRaw);
         let book = await s.liveBook();
+        // Native SOL sent straight to the vault's WSOL account is the owner's too:
+        // SyncNative (permissionless) turns it into WSOL inside this transaction.
+        let synced = 0n;
+        if (input.mint === SOLANA_WRAPPED_SOL_MINT) {
+          const wsolAccount = await deriveSolanaAta(vault, SOLANA_WRAPPED_SOL_MINT, SOLANA_CLASSIC_TOKEN_PROGRAM);
+          synced = await rpc().read(async read => {
+            const found = await read("getAccountInfo", [wsolAccount, { encoding: "base64", commitment: "finalized", minContextSlot: book?.slot ?? 1 }]);
+            if (!object(found) || !object(found.context) || !Object.hasOwn(found, "value")) fail("The vault's wrapped SOL account could not be read.");
+            return unsyncedWsolLamports(chainAccount(found.value), vault);
+          });
+          if (synced > 0n) { instructions.push(syncNative(wsolAccount)); details.syncedWsolRaw = synced.toString(); }
+        }
         if (book) {
           const observedAtMs = now();
           const finalized = await readSolanaVaultBalances(rpc(), vault, book.slot, "finalized");
           // Book any inflow first, so a stranger's WSOL can be withdrawn instead of blocking the owner.
           if (aboveBook(book, finalized)) await s.reconcileExternalInflows({ ...finalized, observedAtMs, commitment: "finalized" });
           book = (await s.liveBook())!;
-          const available = input.mint === SOLANA_USDG_MINT ? BigInt(book.cashRaw) : BigInt(book.wsolRaw) + solanaQuarantinedWsol(book);
+          const available = input.mint === SOLANA_USDG_MINT ? BigInt(book.cashRaw) : BigInt(book.wsolRaw) + solanaQuarantinedWsol(book) + synced;
           if (amount > available) fail("The withdrawal exceeds the reconciled vault balance.");
         }
         const ownerToken = await deriveSolanaAta(scope.owner, input.mint, program);
         creates.push({ address: ownerToken, size: input.mint === SOLANA_USDG_MINT ? "usdg" : CLASSIC_TOKEN_ACCOUNT_SIZE });
         instructions.push(await createAta(scope.owner, scope.owner, input.mint), buildWithdrawSolanaVaultInstruction({ programAddress: cfg.programId, vault, owner: scope.owner,
           mint: input.mint, tokenProgram: program, vaultToken: await deriveSolanaAta(vault, input.mint, program), ownerToken, amount }));
+      } else if (input.action === "withdraw-sol" && input.mint === undefined && input.amountRaw) {
+        const amount = parseSolanaRawAmount(input.amountRaw);
+        // Native SOL is never booked; the program allows anything above the vault account's own rent reserve.
+        const available = await rpc().read(async read => {
+          const found = await read("getAccountInfo", [vault, { encoding: "base64", commitment: "finalized" }]);
+          if (!object(found) || !object(found.context)) fail("The vault account could not be read.");
+          const account = chainAccount(found.value);
+          if (!account || account.owner !== cfg.programId) fail("The vault account could not be read.");
+          const excess = account.lamports - await rentFor(read, account.data.length);
+          return excess > 0n ? excess : 0n;
+        });
+        if (amount > available) fail(`The withdrawal exceeds the vault's native SOL above its rent reserve (${sol(available)} SOL).`);
+        instructions.push(buildWithdrawSolanaNativeInstruction({ programAddress: cfg.programId, vault, owner: scope.owner, amount }));
       } else fail("Choose a supported owner action and a positive withdrawal amount.");
       // Owner recovery remains available with expired/revoked worker permission.
       const limits = { perTradeUsdg: state.perTrade.toString(), dailyUsdg: state.daily.toString(), maxOpsPerDay: state.maxOps,
         maxDrawdownBps: 1, expiresAtMs: Number(state.expiresAt * 1000n) };
       return prepareOwner(s, instructions, { kind: input.action, programId: cfg.programId, vault, session: state.session, limits,
         priorVaultExisted: true, priorSequence: state.seq.toString(), priorSessionEpoch: state.sessionEpoch.toString(),
-        ...(input.action === "withdraw" ? { mint: input.mint, amountRaw: input.amountRaw } : {}) }, creates);
+        ...(input.action === "withdraw" ? { mint: input.mint, amountRaw: input.amountRaw, ...details } : input.action === "withdraw-sol" ? { amountRaw: input.amountRaw } : {}) }, creates);
     },
     submitOwnerAction: (scope: SolanaAccountScope, input: { signedTransactionBase64: string }) => submitOwner(scope, input, "owner"),
   };

@@ -2,7 +2,7 @@
 import { CHAINS, SOLANA_USDG_MINT, canonicalId } from "../../packages/core/src/ids";
 import { parseSolanaRawAmount, requireSolanaLiveSellLimits, solanaPaperAgentId, validateSolanaPaperLimits, validateSolanaQuote,
   type SolanaPaperLimits } from "../../packages/core/src/solana";
-import { SOLANA_WRAPPED_SOL_MINT } from "../../packages/core/src/solana-live";
+import { SOLANA_SYSTEM_PROGRAM, SOLANA_WRAPPED_SOL_MINT } from "../../packages/core/src/solana-live";
 import type { Db } from "./db";
 import { openSecret, sealSecret } from "./store-crypto";
 import { applySolanaPaperCommit, solanaPaperIntentFingerprint, type SolanaPaperBook,
@@ -44,8 +44,16 @@ export interface SolanaPreparedSetup {
   transactionBase64: string; messageBase64: string; blockhash: string; lastValidBlockHeight: string;
   programId: string; vault: string; session: string; limits: SolanaPaperLimits;
   preparedAtMs: number; expiresAtMs: number; signature?: string; signedTransactionBase64?: string;
-  kind?: "session" | "revoke" | "withdraw" | "resume-buys";
+  kind?: "session" | "revoke" | "withdraw" | "withdraw-sol" | "resume-buys";
+  /** withdraw: the token and amount; withdraw-sol: the lamports taken from the vault account above its rent reserve. */
   mint?: string; amountRaw?: string;
+  /**
+   * WSOL withdraw only: native lamports that sat unsynced in the vault's WSOL
+   * account at prepare time (finalized read). The same transaction runs
+   * SyncNative first, so at least this much became WSOL; it is booked as
+   * zero-basis quarantine only as far as the withdrawal needs it.
+   */
+  syncedWsolRaw?: string;
   status?: "pending" | "finalized" | "failed";
   expiryProof?: SolanaOwnerExpiryProof;
   priorSequence?: string; priorSessionEpoch?: string; priorVaultExisted?: boolean;
@@ -57,8 +65,8 @@ const DAY = 86_400_000;
  * - revoke always increments the session epoch;
  * - session (with any vault initialization in the same transaction) always
  *   increments the epoch, and the epoch of a vault that does not exist is 0;
- * - withdraw increments the sequence, and admission refuses session trades
- *   while one is prepared or pending, so nothing else can advance it;
+ * - withdraw and withdraw-sol increment the sequence, and admission refuses
+ *   session trades while one is prepared or pending, so nothing else can advance it;
  * - resume-buys changes neither; a wrong "failed" only leaves the off-chain
  *   breaker paused, which is the conservative direction.
  */
@@ -70,7 +78,7 @@ export function solanaOwnerExpiryProven(setup: Pick<SolanaPreparedSetup, "kind" 
   switch (setup.kind ?? "session") {
     case "revoke": return setup.priorVaultExisted && sessionEpoch === setup.priorSessionEpoch;
     case "session": return (sessionEpoch ?? "0") === setup.priorSessionEpoch;
-    case "withdraw": return setup.priorVaultExisted && vaultSequence === setup.priorSequence;
+    case "withdraw": case "withdraw-sol": return setup.priorVaultExisted && vaultSequence === setup.priorSequence;
     case "resume-buys": return setup.priorVaultExisted;
     default: return false;
   }
@@ -352,7 +360,7 @@ export class SolanaTradingStore implements SolanaLiveJournal {
       const now = clock(this.now), limits = validateSolanaPaperLimits(binding.limits, now);
       // A prepared withdrawal's expiry is proven by an unchanged sequence, so no
       // trade may advance it between preparing and signing either.
-      if (ownerSetup?.kind === "withdraw" && !ownerSetup.signature && now < ownerSetup.expiresAtMs) refuse("Finish or let lapse the prepared owner withdrawal before trading.");
+      if ((ownerSetup?.kind === "withdraw" || ownerSetup?.kind === "withdraw-sol") && !ownerSetup.signature && now < ownerSetup.expiresAtMs) refuse("Finish or let lapse the prepared owner withdrawal before trading.");
       const session = rowJson<SolanaRegisteredSession>(await tx.prepare("SELECT record_json FROM solana_runtime_sessions WHERE tenant=? AND owner=?").get(tenant, owner), "record_json");
       if (!session || s.programId !== session.programId || s.intent.vault !== session.vault || s.session !== session.session || s.sessionEpoch !== session.sessionEpoch) refuse("The Solana session changed before submission.");
       if (await tx.prepare("SELECT 1 FROM solana_runtime_submissions WHERE vault=? AND status='pending'").get(session.vault)) return false;
@@ -488,7 +496,7 @@ export class SolanaTradingStore implements SolanaLiveJournal {
         if ((setup.kind ?? "session") === "session" && (binding.requestedMode !== "live" || JSON.stringify(binding.limits) !== JSON.stringify(setup.limits))) refuse("The live permission settings changed. Review and sign again.");
       }
       if (setup.kind !== "revoke" && await tx.prepare("SELECT 1 FROM solana_runtime_submissions WHERE tenant=? AND owner=? AND status='pending'").get(this.scope.tenant, this.scope.owner)) refuse("Resolve the pending Solana trade before an owner transaction.");
-      if (setup.kind === "withdraw") {
+      if (setup.kind === "withdraw" || setup.kind === "withdraw-sol") {
         if (setup.priorSequence === undefined) refuse("Prepare the withdrawal again.");
         const trades = await tx.prepare("SELECT sequence,status FROM solana_runtime_submissions WHERE vault=? AND status IN ('pending','finalized')").all(setup.vault) as Array<{ sequence: string; status: string }>;
         // Its sequence was read before this lock; a trade at or after it means the read is stale.
@@ -535,8 +543,19 @@ export class SolanaTradingStore implements SolanaLiveJournal {
             book.cashRaw = (raw(book.cashRaw) - amount).toString();
             const peak = raw(book.hwmRaw); book.hwmRaw = (peak > amount ? peak - amount : 0n).toString();
           } else {
-            const held = raw(book.wsolRaw), aside = solanaQuarantinedWsol(book);
-            if (amount > held + aside) refuse("Finalized withdrawal exceeds the recorded SOL position.");
+            const held = raw(book.wsolRaw);
+            let aside = solanaQuarantinedWsol(book);
+            // Native lamports this transaction synced into WSOL (SyncNative) join the
+            // zero-basis quarantine, only as far as the withdrawal needs them and never
+            // past what prepare measured. Any a later read already booked is not added again.
+            const synced = raw(setup.syncedWsolRaw ?? "0"), over = amount > held + aside ? amount - held - aside : 0n;
+            if (over > synced) refuse("Finalized withdrawal exceeds the recorded SOL position.");
+            if (over > 0n) {
+              const inserted = await tx.prepare("INSERT INTO solana_runtime_cashflows(evidence_id,tenant,owner,kind,mint,amount_raw,created_at_ms) VALUES(?,?,?,'quarantine',?,?,?) ON CONFLICT DO NOTHING")
+                .run(`sync:${signature}`, tenant, owner, SOLANA_WRAPPED_SOL_MINT, over.toString(), clock(this.now));
+              if (inserted.changes !== 1) refuse("Withdrawal evidence was already accounted.");
+              aside += over;
+            }
             // Quarantined WSOL leaves first: zero basis, no effect on the position or the high-water mark.
             const fromAside = amount < aside ? amount : aside, fromPosition = amount - fromAside;
             if (aside > 0n) book.quarantinedWsolRaw = (aside - fromAside).toString();
@@ -552,6 +571,13 @@ export class SolanaTradingStore implements SolanaLiveJournal {
           if (inserted.changes !== 1) refuse("Withdrawal evidence was already accounted.");
           await tx.prepare("UPDATE solana_runtime_live_books SET book_json=? WHERE tenant=? AND owner=?").run(JSON.stringify(book), tenant, owner);
         }
+      }
+      if (status === "finalized" && setup.kind === "withdraw-sol") {
+        // Native SOL in the vault account is never part of the book; keep the evidence once.
+        if (!setup.amountRaw || setup.mint !== undefined) refuse("Invalid finalized withdrawal accounting.");
+        const inserted = await tx.prepare("INSERT INTO solana_runtime_cashflows(evidence_id,tenant,owner,kind,mint,amount_raw,created_at_ms) VALUES(?,?,?,'withdraw-sol',?,?,?) ON CONFLICT DO NOTHING")
+          .run(signature, this.scope.tenant, this.scope.owner, SOLANA_SYSTEM_PROGRAM, raw(setup.amountRaw, false).toString(), clock(this.now));
+        if (inserted.changes !== 1) refuse("Withdrawal evidence was already accounted.");
       }
       setup.status = status;
       await tx.prepare("UPDATE solana_runtime_setups SET setup_json=? WHERE tenant=? AND owner=?").run(JSON.stringify(setup), this.scope.tenant, this.scope.owner);
