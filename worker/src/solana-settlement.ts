@@ -1,5 +1,5 @@
 import { address, getTransactionDecoder, getCompiledTransactionMessageDecoder } from "@solana/kit";
-import { decodeSolanaSwapEvent, SOLANA_WRAPPED_SOL_MINT, type SolanaSwapExecutedEvent } from "../../packages/core/src/solana-live";
+import { decodeSolanaSwapEvent, SOLANA_WRAPPED_SOL_MINT, type SolanaSwapExecutedEvent, type SolanaVaultState } from "../../packages/core/src/solana-live";
 import { parseSolanaRawAmount } from "../../packages/core/src/solana";
 import type { SolanaLiveSettlement, SolanaSignedSubmission } from "./solana-executor";
 
@@ -62,12 +62,22 @@ export function isSolanaTransactionError(value: unknown): boolean {
   return false;
 }
 
-/** Only events emitted while the verified vault program is the active frame count. */
-export function solanaVaultEvents(raw: unknown, programId: string): SolanaSwapExecutedEvent[] {
+/**
+ * Agave stops recording a transaction's logs at 10,000 bytes and appends this
+ * line. The vault's event is emitted last, after Jupiter's and the token
+ * program's logs, so it is the first thing a long route loses.
+ */
+const LOG_TRUNCATED = "Log truncated";
+function parseVaultLogs(raw: unknown, programId: string, allowIncomplete: boolean): { events: SolanaSwapExecutedEvent[]; complete: boolean } {
+  // getTransaction returns null logs when the node did not record them.
+  if (raw === null || raw === undefined) return allowIncomplete ? { events: [], complete: false } : fail();
   if (!Array.isArray(raw) || raw.length > 2048) return fail();
+  const truncated = raw.at(-1) === LOG_TRUNCATED;
+  if (truncated && !allowIncomplete) return fail();
+  const lines = truncated ? raw.slice(0, -1) : raw;
   const stack: string[] = [], events: SolanaSwapExecutedEvent[] = [];
-  for (const line of raw) {
-    if (typeof line !== "string" || line.length > 8192 || line === "Log truncated") return fail();
+  for (const line of lines) {
+    if (typeof line !== "string" || line.length > 8192 || line === LOG_TRUNCATED) return fail();
     const invoke = /^Program ([1-9A-HJ-NP-Za-km-z]+) invoke \[(\d+)\]$/.exec(line);
     if (invoke) {
       if (Number(invoke[2]) !== stack.length + 1) return fail();
@@ -83,12 +93,30 @@ export function solanaVaultEvents(raw: unknown, programId: string): SolanaSwapEx
       events.push(decodeSolanaSwapEvent(bytes));
     }
   }
-  if (stack.length) return fail();
-  return events;
+  // A truncated log stops mid-frame; a complete one must close every frame.
+  if (!truncated && stack.length) return fail();
+  return { events, complete: !truncated };
 }
+/** Only events emitted while the verified vault program is the active frame count. Complete logs only. */
+export function solanaVaultEvents(raw: unknown, programId: string): SolanaSwapExecutedEvent[] {
+  return parseVaultLogs(raw, programId, false).events;
+}
+/** A finalized read of the vault account at or after the receipt's slot. */
+export interface SolanaVaultEvidence { address: string; slot: number; state: SolanaVaultState }
 
-/** getTransaction must have been requested at finalized; status is independently finalized. */
-export function settleSolanaReceipt(submission: SolanaSignedSubmission, raw: unknown, status: unknown, nowMs: number): SolanaLiveSettlement {
+/**
+ * getTransaction must have been requested at finalized; status is independently finalized.
+ *
+ * A success is booked from the exact signed bytes (one execute_swap pinned to
+ * this sequence, epoch and amounts; transactions are atomic), meta.err === null
+ * and the vault token accounts' balance rows, which the runtime never truncates.
+ * The vault's own event must also agree whenever the logs are complete. When
+ * the logs were truncated at the runtime's cap or not recorded, `vault` is
+ * required instead: a finalized read at or after the receipt slot whose
+ * sequence has moved past the one these bytes consumed. A failure never needs
+ * logs. Missing evidence throws, which keeps the record pending.
+ */
+export function settleSolanaReceipt(submission: SolanaSignedSubmission, raw: unknown, status: unknown, nowMs: number, vault?: SolanaVaultEvidence): SolanaLiveSettlement {
   if (!object(raw) || !object(raw.meta) || !object(status) || status.confirmationStatus !== "finalized" ||
       !Number.isSafeInteger(nowMs) || nowMs < submission.preparedAtMs ||
       !Array.isArray(raw.transaction) || raw.transaction.length !== 2 || raw.transaction[1] !== "base64" || raw.transaction[0] !== submission.signedTransactionBase64 ||
@@ -153,20 +181,27 @@ export function settleSolanaReceipt(submission: SolanaSignedSubmission, raw: unk
   const inputAfter = token(meta.postTokenBalances, submission.inputTokenAccount, submission.intent.inputMint, submission.inputTokenProgram);
   const outputBefore = token(meta.preTokenBalances, submission.outputTokenAccount, submission.intent.outputMint, submission.outputTokenProgram);
   const outputAfter = token(meta.postTokenBalances, submission.outputTokenAccount, submission.intent.outputMint, submission.outputTokenProgram);
-  const events = solanaVaultEvents(meta.logMessages, submission.programId);
   if (meta.err !== null) {
+    // Logs are never needed to book a failure: the bytes did not change the vault.
     if (inputBefore !== inputAfter || outputBefore !== outputAfter) return fail();
     return { status: "failed", signature: submission.signature, slot, feeLamports: fee.toString(),
       amountIn: "0", amountOut: "0", finalizedAtMs: nowMs };
   }
-  if (events.length !== 1) return fail();
-  const event = events[0]!;
   const amountIn = inputBefore - inputAfter, amountOut = outputAfter - outputBefore;
-  if (amountIn <= 0n || amountIn > BigInt(submission.intent.amountRaw) || amountOut < BigInt(submission.minOutAmount) ||
-      event.vault !== submission.intent.vault || event.owner !== submission.intent.owner || event.session !== submission.session ||
-      event.sessionEpoch.toString() !== submission.sessionEpoch || event.seq.toString() !== submission.vaultSequence ||
-      event.inputMint !== submission.intent.inputMint || event.outputMint !== submission.intent.outputMint ||
-      event.amountIn !== amountIn || event.amountOut !== amountOut || event.timestamp < 0n) return fail();
+  if (amountIn <= 0n || amountIn > BigInt(submission.intent.amountRaw) || amountOut < BigInt(submission.minOutAmount)) return fail();
+  const logs = parseVaultLogs(meta.logMessages, submission.programId, true);
+  if (logs.complete ? logs.events.length !== 1 : logs.events.length > 1) return fail();
+  for (const event of logs.events) {
+    if (event.vault !== submission.intent.vault || event.owner !== submission.intent.owner || event.session !== submission.session ||
+        event.sessionEpoch.toString() !== submission.sessionEpoch || event.seq.toString() !== submission.vaultSequence ||
+        event.inputMint !== submission.intent.inputMint || event.outputMint !== submission.intent.outputMint ||
+        event.amountIn !== amountIn || event.amountOut !== amountOut || event.timestamp < 0n) return fail();
+  }
+  if (vault !== undefined || !logs.complete) {
+    if (!object(vault) || vault.address !== submission.intent.vault || !Number.isSafeInteger(vault.slot) || vault.slot < slot ||
+        !object(vault.state) || vault.state.owner !== submission.intent.owner ||
+        vault.state.seq <= BigInt(submission.vaultSequence) || vault.state.sessionEpoch < BigInt(submission.sessionEpoch)) return fail();
+  }
   return { status: "finalized", signature: submission.signature, slot, feeLamports: fee.toString(),
     amountIn: amountIn.toString(), amountOut: amountOut.toString(), finalizedAtMs: nowMs };
 }

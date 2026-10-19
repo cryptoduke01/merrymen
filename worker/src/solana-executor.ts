@@ -16,7 +16,7 @@ import {
 import { validateJupiterCpi, type JupiterCpiRoute, type SolanaCpiBuildRequest } from "./solana-live-market";
 import { readSolanaEachProvider, readSolanaQuorum, type SolanaLiveRead, type SolanaLiveRpc } from "./solana-live-rpc";
 import { solanaReferenceNotional, verifySolanaReferenceBound, type SolanaReferenceBound } from "./solana-reference-price";
-import { isSolanaTransactionError, settleSolanaReceipt } from "./solana-settlement";
+import { isSolanaTransactionError, settleSolanaReceipt, type SolanaVaultEvidence } from "./solana-settlement";
 
 export interface SolanaLiveIntent {
   kind: "spl-swap"; chain: typeof CHAINS.solana; mode: "live";
@@ -248,7 +248,7 @@ export async function readSolanaVaultBalances(rpc: SolanaLiveRpc, vault: string,
   });
 }
 /** A finalized read of this submission's vault at or after `minContextSlot`. */
-async function readFinalizedVault(read: SolanaLiveRead, submission: SolanaSignedSubmission, owner: string, minContextSlot: number): Promise<{ slot: number; state: SolanaVaultState }> {
+async function readFinalizedVault(read: SolanaLiveRead, submission: SolanaSignedSubmission, owner: string, minContextSlot: number): Promise<SolanaVaultEvidence> {
   const evidence = context(await read("getAccountInfo", [submission.intent.vault, {
     encoding: "base64", commitment: "finalized", minContextSlot,
   }]), minContextSlot);
@@ -256,7 +256,7 @@ async function readFinalizedVault(read: SolanaLiveRead, submission: SolanaSigned
   if (vault.owner !== submission.programId || vault.executable) return fail();
   const state = decodeSolanaVaultAccount(vault.data);
   if (state.owner !== owner || state.sessionEpoch < BigInt(submission.sessionEpoch)) return fail();
-  return { slot: evidence.slot, state };
+  return { address: submission.intent.vault, slot: evidence.slot, state };
 }
 /** One provider's view. `seen`: that provider has a status, a receipt or a moved sequence for it. */
 interface SolanaObservation { settlement: SolanaLiveSettlement | null; seen: boolean }
@@ -268,7 +268,12 @@ async function observeSolanaSubmission(read: SolanaLiveRead, submission: SolanaS
     !Object.hasOwn(status, "err") || !isSolanaTransactionError(status.err))) return fail();
   const receipt = await read("getTransaction", [submission.signature, { commitment: "finalized", encoding: "base64", maxSupportedTransactionVersion: 0 }]);
   if (object(status) && status.confirmationStatus === "finalized") {
-    return receipt === null ? { settlement: null, seen: true } : { settlement: settleSolanaReceipt(submission, receipt, status, nowMs), seen: true };
+    if (receipt === null) return { settlement: null, seen: true };
+    // A success is cross-checked against the vault's finalized sequence, which
+    // is also what books it when the receipt's logs were truncated.
+    const vault = object(receipt) && object(receipt.meta) && receipt.meta.err === null
+      ? await readFinalizedVault(read, submission, owner, integer(receipt.slot)) : undefined;
+    return { settlement: settleSolanaReceipt(submission, receipt, status, nowMs, vault), seen: true };
   }
   if (status !== null || receipt !== null) return { settlement: null, seen: true };
   // A missing receipt alone proves nothing. The finalized slot and block height

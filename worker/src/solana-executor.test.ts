@@ -66,8 +66,8 @@ async function fixture() {
     refundMissing: false, refundDelegate: false, tempTokens: 0n,
     // Pyth SOL/USD with 8 decimals; the fixture route buys 0.002 SOL per USDG, i.e. $500.
     referencePrice: 50_000_000_000n, referenceAgeMs: 0, forgeFloor: false,
-    // The second provider's own view; null means it agrees with the first.
-    fallback: null as SolanaLiveRead | null };
+    // The vault's finalized sequence after the receipt slot, and the second provider's own view.
+    vaultSeqAfter: 1n, fallback: null as SolanaLiveRead | null };
   let record: SolanaLiveRecord | null = null;
   const calls: string[] = [];
   const quote = { source: "jupiter" as const, inputMint: SOLANA_USDG_MINT, outputMint: SOLANA_WRAPPED_SOL_MINT,
@@ -105,7 +105,7 @@ async function fixture() {
       postTokenBalances: [tokenRow(input, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM, failed ? CASH : CASH - 1_000_000n),
         tokenRow(output, SOLANA_WRAPPED_SOL_MINT, SOLANA_CLASSIC_TOKEN_PROGRAM, failed ? 0n : amountOut)],
       logMessages: [`Program ${PROGRAM} invoke [1]`, ...(failed ? [] : [`Program data: ${event(submission, 1_000_000n, amountOut)}`]),
-        `Program ${PROGRAM} ${failed ? "failed: custom program error: 0x1" : "success"}`],
+        `Program ${PROGRAM} ${failed ? "failed: custom program error: 0x1" : "success"}`] as string[] | null,
     } };
   };
   const read: SolanaLiveRead = async (method, params = []) => {
@@ -121,6 +121,11 @@ async function fixture() {
           return response({ ...rpcAccount(bytes.subarray(slice.offset, slice.offset + slice.length), LOADER), space: bytes.length });
         }
         if (key === "AddressLookupTab1e1111111111111111111111111") return response(rpcAccount(Buffer.alloc(56), SYSTEM));
+        if (key === vault) {
+          // Finalized evidence after the receipt (slot SLOT + 1).
+          assert.deepEqual(config, { encoding: "base64", commitment: "finalized", minContextSlot: SLOT + 1 });
+          return { context: { slot: SLOT + 2 }, value: rpcAccount(state(owner, session, controls.vaultSeqAfter), PROGRAM) };
+        }
         if (key === getBase58Decoder().decode(new Uint8Array(32).fill(61))) {
           const table = Buffer.alloc(56 + 32 * route.accounts.length); table.writeUInt32LE(1);
           table.writeBigUInt64LE((1n << 64n) - 1n, 4); table.writeBigUInt64LE(BigInt(SLOT - 1), 12);
@@ -446,7 +451,7 @@ test("settlement refuses forged events, wrong bytes, token deltas and nonfinaliz
   for (const change of [
     (r: ReturnType<typeof f.receipt>) => { r.transaction[0] = "forged"; },
     (r: ReturnType<typeof f.receipt>) => { r.meta.postTokenBalances[1]!.uiTokenAmount.amount = "1"; },
-    (r: ReturnType<typeof f.receipt>) => { r.meta.logMessages[1] = `Program data: ${event(pending.submission, 1n, 2n)}`; },
+    (r: ReturnType<typeof f.receipt>) => { r.meta.logMessages![1] = `Program data: ${event(pending.submission, 1n, 2n)}`; },
     (r: ReturnType<typeof f.receipt>) => { r.meta.logMessages = [`Program ${JUPITER_SWAP_PROGRAM} invoke [1]`, `Program data: ${event(pending.submission)}`, `Program ${JUPITER_SWAP_PROGRAM} success`]; },
     (r: ReturnType<typeof f.receipt>) => { r.meta.postBalances[0]!--; },
     (r: ReturnType<typeof f.receipt>) => { r.meta.preTokenBalances[0]!.owner = key(90); },
@@ -557,4 +562,63 @@ test("a verified immutable deployment is cached per provider pair; failures are 
   const verified = slices; assert.ok(verified >= 4, "both providers read the program and its data");
   assert.deepEqual(await verifySolanaVaultDeployment(rpc, PROGRAM, f.options.programBinarySha256), { slot: SLOT });
   assert.equal(slices, verified, "the second check is served from the cache");
+});
+
+test("a finalized swap whose logs were truncated or not recorded settles from its token deltas and the vault's finalized sequence (audit execution F2)", async () => {
+  const truncated = [`Program ${PROGRAM} invoke [1]`, `Program ${TOKEN_2022_PROGRAM} invoke [2]`, `Program ${TOKEN_2022_PROGRAM} success`,
+    `Program ${JUPITER_SWAP_PROGRAM} invoke [2]`, "Program log: Instruction: SharedAccountsRoute", "Log truncated"];
+  for (const logs of [truncated, null]) {
+    const f = await fixture(); const executor = createSolanaExecutor(f.options);
+    const pending = await executor.execute(f.intent); f.controls.finalized = true;
+    const raw = f.receipt(pending.submission); raw.meta.logMessages = logs;
+    const status = { confirmationStatus: "finalized", slot: SLOT + 1, err: null };
+    const evidence = { address: f.intent.vault, slot: SLOT + 2, state: (await import("../../packages/core/src/solana-live")).decodeSolanaVaultAccount(state(f.intent.owner, f.session, 1n)) };
+    // Without the vault's finalized sequence it stays unsettled, as before.
+    assert.throws(() => settleSolanaReceipt(pending.submission, raw, status, NOW + 1));
+    for (const bad of [{ ...evidence, slot: SLOT }, { ...evidence, address: key(90) },
+      { ...evidence, state: { ...evidence.state, seq: 0n } }, { ...evidence, state: { ...evidence.state, owner: key(90) } }]) {
+      assert.throws(() => settleSolanaReceipt(pending.submission, raw, status, NOW + 1, bad));
+    }
+    const settled = settleSolanaReceipt(pending.submission, raw, status, NOW + 1, evidence);
+    assert.equal(settled.status, "finalized"); assert.equal(settled.amountIn, "1000000"); assert.equal(settled.amountOut, "2000000");
+    // Token rows still bound the fill.
+    const short = structuredClone(raw); short.meta.postTokenBalances[1]!.uiTokenAmount.amount = "1";
+    assert.throws(() => settleSolanaReceipt(pending.submission, short, status, NOW + 1, evidence));
+    // End to end: both providers serve the truncated receipt and the advanced vault.
+    f.controls.fallback = provider(f, { getTransaction: () => raw });
+    const through = { ...f.options.rpc, read: f.options.rpc.read, readEach: async <T,>(callback: (read: SolanaLiveRead) => Promise<T>) =>
+      [await callback(provider(f, { getTransaction: () => raw })), await callback(f.controls.fallback!)] };
+    const booked = await reconcileSolanaSubmission(through, f.options.journal, f.intent.owner, f.intent.requestId, () => NOW + 1);
+    assert.equal(booked!.status, "finalized"); assert.equal(booked!.settlement!.amountOut, "2000000");
+  }
+  // The vault's sequence did not move: never booked.
+  const f = await fixture(); const executor = createSolanaExecutor(f.options);
+  const pending = await executor.execute(f.intent); f.controls.finalized = true; f.controls.vaultSeqAfter = 0n;
+  const raw = f.receipt(pending.submission); raw.meta.logMessages = truncated;
+  f.controls.fallback = provider(f, { getTransaction: () => raw });
+  const through = { ...f.options.rpc, readEach: async <T,>(callback: (read: SolanaLiveRead) => Promise<T>) =>
+    [await callback(f.controls.fallback!), await callback(f.controls.fallback!)] };
+  await assert.rejects(reconcileSolanaSubmission(through, f.options.journal, f.intent.owner, f.intent.requestId, () => NOW + 1));
+  assert.equal(f.getRecord()!.status, "pending");
+});
+
+test("truncated logs keep strict provenance: a failed receipt needs no logs, a visible event must still match", async () => {
+  const f = await fixture(); const pending = await createSolanaExecutor(f.options).execute(f.intent);
+  const status = { confirmationStatus: "finalized", slot: SLOT + 1, err: null };
+  const evidence = { address: f.intent.vault, slot: SLOT + 2, state: (await import("../../packages/core/src/solana-live")).decodeSolanaVaultAccount(state(f.intent.owner, f.session, 1n)) };
+  const failed = f.receipt(pending.submission, true);
+  for (const logs of [[`Program ${PROGRAM} invoke [1]`, "Log truncated"], null]) {
+    failed.meta.logMessages = logs;
+    assert.equal(settleSolanaReceipt(pending.submission, failed, { ...status, err: failed.meta.err }, NOW + 1).status, "failed");
+  }
+  const raw = f.receipt(pending.submission);
+  // A forged event before the cut still disagrees with the token rows.
+  raw.meta.logMessages = [`Program ${PROGRAM} invoke [1]`, `Program data: ${event(pending.submission, 1_000_000n, 3_000_000n)}`, "Log truncated"];
+  assert.throws(() => settleSolanaReceipt(pending.submission, raw, status, NOW + 1, evidence));
+  // The marker only ever ends a log.
+  raw.meta.logMessages = [`Program ${PROGRAM} invoke [1]`, "Log truncated", `Program ${PROGRAM} success`];
+  assert.throws(() => settleSolanaReceipt(pending.submission, raw, status, NOW + 1, evidence));
+  // Complete logs still need exactly one matching event, evidence or not.
+  raw.meta.logMessages = [`Program ${PROGRAM} invoke [1]`, `Program ${PROGRAM} success`];
+  assert.throws(() => settleSolanaReceipt(pending.submission, raw, status, NOW + 1, evidence));
 });
