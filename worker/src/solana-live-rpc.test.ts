@@ -95,15 +95,17 @@ test("send broadcasts the identical bytes to both providers and rebroadcasts a d
     }
     if (body.method === "getSignatureStatuses") {
       assert.deepEqual(body.params, [[tx.signature]]);
-      const landed = rounds["fallback.example"]! >= 3 && host === "fallback.example";
-      return Response.json({ jsonrpc: "2.0", id: body.id, result: { context: { slot: 9 }, value: [landed ? { confirmationStatus: "processed", err: null } : null] } });
+      // Processed after round 2 (its fork may still be dropped), confirmed after round 3.
+      const status = host !== "fallback.example" || rounds[host]! < 2 ? null
+        : { confirmationStatus: rounds[host]! >= 3 ? "confirmed" : "processed", confirmations: 0, err: null };
+      return Response.json({ jsonrpc: "2.0", id: body.id, result: { context: { slot: 9 }, value: [status] } });
     }
     assert.equal(body.method, "isBlockhashValid"); assert.deepEqual(body.params, [BLOCKHASH, { commitment: "processed", minContextSlot: 5 }]);
     return Response.json({ jsonrpc: "2.0", id: body.id, result: { context: { slot: 9 }, value: true } });
   } });
   assert.equal(await rpc.send(tx.wire, 5, undefined, { untilMs: 30_000 }), tx.signature);
   const sends = calls.filter(call => call.method === "sendTransaction");
-  assert.equal(sends.length, 6, "three rounds to both providers, stopping once the signature is seen");
+  assert.equal(sends.length, 6, "three rounds to both providers, stopping once the signature is confirmed");
   assert.deepEqual(new Set(sends.map(call => call.host)), new Set(["primary.example", "fallback.example"]));
   for (const call of sends) {
     assert.equal(call.params[0], tx.wire, "never anything but the saved bytes");

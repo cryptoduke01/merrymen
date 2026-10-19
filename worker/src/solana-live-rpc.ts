@@ -6,8 +6,8 @@
  * - readEach / readSolanaQuorum: every provider's answer. Booking a fill or an
  *   expiry needs both to agree; one provider's word is never enough.
  * - send: the identical signed bytes to both providers, rebroadcast until the
- *   signature is seen, the blockhash is no longer valid or the caller's window
- *   ends. The bytes are never re-signed, so a rebroadcast can land at most once.
+ *   signature is confirmed, the blockhash is no longer valid or the caller's
+ *   window ends. The bytes are never re-signed, so a rebroadcast can land at most once.
  */
 import { createHmac, randomBytes } from "node:crypto";
 import {
@@ -28,7 +28,7 @@ export interface SolanaSendOptions {
   /**
    * Keep rebroadcasting the same bytes until this wall-clock time (ms). One round
    * is always sent; 0 sends exactly one round. Without it the window is
-   * SOLANA_DEFAULT_REBROADCAST_MS. A signature seen on chain or an expired
+   * SOLANA_DEFAULT_REBROADCAST_MS. A confirmed signature or an expired
    * blockhash ends it sooner.
    */
   untilMs?: number;
@@ -202,13 +202,14 @@ export function createSolanaLiveRpc(options: {
         if (now() >= until) break;
         await sleep(Math.min(interval, Math.max(1, until - now())), signal);
         if (signal?.aborted) throw new SolanaRpcError("cancelled");
-        // Stop once any provider has seen the signature, or every provider says
-        // the blockhash can no longer land. Unanswered checks just rebroadcast.
+        // Stop once any provider reports the signature confirmed (a processed
+        // block can still be abandoned with its fork), or every provider says the
+        // blockhash can no longer land. Unanswered checks just rebroadcast.
         const checks = await Promise.allSettled(endpoints.map(url => endpoint(url, async rpc => {
           const statuses = await rpc("getSignatureStatuses", [[signature]]);
-          const seen = !!statuses && typeof statuses === "object" && Array.isArray((statuses as { value?: unknown }).value) &&
-            (statuses as { value: unknown[] }).value.length === 1 && (statuses as { value: unknown[] }).value[0] !== null;
-          if (seen) return "seen" as const;
+          const value = statuses && typeof statuses === "object" ? (statuses as { value?: unknown }).value : undefined;
+          const status = Array.isArray(value) && value.length === 1 ? value[0] as { confirmationStatus?: unknown } | null : null;
+          if (status && typeof status === "object" && ["confirmed", "finalized"].includes(String(status.confirmationStatus))) return "seen" as const;
           const valid = await rpc("isBlockhashValid", [blockhash, { commitment: "processed", minContextSlot }]);
           return valid && typeof valid === "object" && (valid as { value?: unknown }).value === false ? "expired" as const : "pending" as const;
         }, signal)));
