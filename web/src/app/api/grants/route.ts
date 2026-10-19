@@ -39,6 +39,7 @@ import { archiveCurrentGrant, GrantArchiveError, removeSelfHostedGrant } from "@
 import { stopLocalSolanaForKill, stopSolanaForKill } from "../../../../../worker/src/solana-kill";
 import { readFleetRecoveryView, type FleetRecoveryView } from "../../../../../worker/src/fleet-recovery";
 import { resolveConfig } from "../../../../../worker/src/settings";
+import { errorText } from "../../../../../worker/src/redact-urls";
 import { workerStale as workerStaleOf } from "@/terminal/worker-stale";
 
 const DATA_DIR = merrymenHome();
@@ -397,7 +398,8 @@ export async function POST(req: Request) {
     try {
       derived = await deriveKernelAccountAddress(grant.owner as `0x${string}`, grant.chainId);
     } catch (e) {
-      derived = derivationUnreachable(e instanceof Error ? e.message : String(e));
+      // A live eth_call: its error is viem's, and names the RPC URL with its key.
+      derived = derivationUnreachable(errorText(e));
     }
     if (!derived.ok) {
       // `zero` and `malformed` are the chain answering wrongly, not the client

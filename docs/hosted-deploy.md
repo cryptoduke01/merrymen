@@ -373,6 +373,7 @@ routes answer 404 and the section does not render.
 | `MERRYMEN_XPOST_LLM_PROVIDER` *(optional)* | orchestrator | `groq` (default), `anthropic` (default model `claude-opus-5`), or `openai` for any OpenAI-compatible endpoint. **A provider other than Groq receives the writer's inputs: name it in the privacy policy (`site/components/PrivacyPolicyDoc.tsx`, section 5) before deploying it** |
 | `MERRYMEN_XPOST_MODEL` *(optional)* | orchestrator | the writer's model; default `qwen/qwen3.8-27b` on Groq. Required for `openai` |
 | `MERRYMEN_XPOST_LLM_BASE_URL` *(optional)* | orchestrator | the `…/v1` base for `openai` (https) |
+| `MERRYMEN_XPOST_TEMPERATURE` *(optional)* | orchestrator | the writer's sampling temperature, a number from 0 to 2, default `0.6`; anything else keeps the default and the boot log names the variable. OpenAI-compatible providers only (docs/x-posting.md "How the writer calls its model") |
 | `MERRYMEN_XPOST_LLM_PER_DAY` *(optional)* | orchestrator | model calls per UTC day across the fleet, default `400`; `0` means template intros only |
 | `MERRYMEN_XPOST_PER_DAY` *(optional)* | orchestrator | posts per X account per local day, default `3` (at most two of them buy posts); `0` switches posting off |
 | `MERRYMEN_XPOST_FLEET_PER_DAY` *(optional)* | orchestrator | posts per UTC day across the fleet, default `1000` (X's app ceiling is 10,000 per 24 h, and each post costs money); `0` switches posting off |

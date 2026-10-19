@@ -601,6 +601,12 @@ function openBrowser(url) {
 async function start() {
   ensureHome();
   warnIfOldNode();
+  // Node's fatal exception printer bypasses a child's stream.write guard.
+  // Redact again at the parent pipe, including URLs split between chunks.
+  // Load TypeScript only for start; setup/help also work before dependencies
+  // are installed, and supported Node 22 versions do not all strip types.
+  const { tsImport } = await import("tsx/esm/api");
+  const { lineRedactor } = await tsImport("../worker/src/redact-stdio.ts", import.meta.url);
   const noOpen = process.argv.includes("--no-open");
   // Bind localhost-only by default: the dashboard has no login and holds your
   // trading controls, so it must not be reachable from the LAN. Opt into
@@ -650,15 +656,17 @@ async function start() {
     const startedAt = Date.now();
     const child = toolSpawn(spec.bin, spec.args, { cwd: spec.cwd });
     children.add(child);
-    const pipe = (stream, sink) =>
-      stream.on("data", (chunk) => {
-        const text = String(chunk);
-        if (spec.name === "tavern" && /Ready|started server|Local:/i.test(text)) openOnce();
-        text
-          .split(/\r?\n/)
-          .filter((l) => l.trim())
-          .forEach((l) => sink.write(`${dim(`[${spec.name}]`)} ${l}\n`));
-      });
+    const pipe = (stream, sink) => {
+      const lines = lineRedactor();
+      const emit = (batch) => {
+        for (const line of batch) {
+          if (spec.name === "tavern" && /Ready|started server|Local:/i.test(line)) openOnce();
+          if (line.trim()) sink.write(`${dim(`[${spec.name}]`)} ${line}\n`);
+        }
+      };
+      stream.on("data", (chunk) => emit(lines.push(chunk)));
+      stream.on("end", () => emit(lines.flush()));
+    };
     pipe(child.stdout, process.stdout);
     pipe(child.stderr, process.stderr);
     child.on("exit", (code) => {

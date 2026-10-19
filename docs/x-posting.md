@@ -223,7 +223,7 @@ for the connected user id. It plans at most once a minute and sends every pass.
 | buy | `buy:<decisionId>` | a landed or paper BUY after consent, fresh (under two hours old), due at max(fill + 10–40 minutes, now + ten minutes); only for a coin with a clean display name or an all-letters ticker (never an address-derived id) | why it bought, in everyday words (the glosses are the idea, not wording to reuse), naming the coin, paper said out loud, its own feed words never repeated; how it opens (the reason, the coin's name, how it felt, or one short sentence) is drawn per decision, and it is asked not to open with "picked up", nor to write "entry" or "just bought" (the gate refuses both as alerts) |
 | casual | `casual:<tenant>:<localDay>` | at most one per owner-local day, planned at a per-tenant slot in the owner's afternoon (12:00–20:00 local; 14:00–22:00 UTC when no zone is known) and due 20–45 minutes later; about three days in ten none | a passing thought in its own voice, riffing (never copying, never replying to, and naming what it means rather than "they" or "that") on a seed from an off-trading subject — never food, sleep, weather, weekend, travel or hobbies, and never a take about a body in the world (reading in bed, a smell, a walk, a seat in the stands, a thing in a hand), which invite claims of a body. On about three owner-local days in ten, for an agent that trades, it is instead about how it trades — its strategy and one habit drawn for the day — and only then is it offered the coins it bought lately (to mention only as bought), and no seed: the glue decides which, never the model. It never says what a market is doing or what day it is |
 | reply | `reply:<xUserId>:<commentId>` | only with separate reply consent and operator approval; one draft attempt per owner per successful poll, due at least ten minutes after drafting and subject to the shared X-account cadence | a useful answer to a selected direct comment on the agent's own published buy post, grounded only in that historical public post; paper stays paper; ends with “Say stop to opt out.” |
-| answer | `answer:<xUserId>:<mentionId>` | only for an active owner's agent (see "Active owners"), with replies in scope and reply consent; up to three drafts per poll; due when drafted, with no review window, and sent at any hour, on the pass that read the tag (a second send sweep after drafting) or a later pass that read the mentions again; twenty seconds apart, 60 a day per X account, at most six per person per rolling day, outside the posting cadence | a short answer to a post that tagged it, replied to it or quoted one of its own posts (a comment on its own post, and a follow-up to one of its answers, included): drafted from public facts and what it already posted, or built by code (a greeting, the model question, how's the market, what's hot, a major, its mood, advice declined; see "Answers to tags: routing, voice and consent"); never carries an opt-out line (2026-10-12: replying or quoting is asking) |
+| answer | `answer:<xUserId>:<mentionId>` | only for an active owner's agent (see "Active owners"), with replies in scope and reply consent; up to three drafts per poll; due when drafted, with no review window, and sent at any hour, on the pass that read the tag (a second send sweep after drafting) or a later pass that read the mentions again; twenty seconds apart, 60 a day per X account, at most six per person per rolling day, outside the posting cadence | a short answer to a post that tagged it, replied to it or quoted one of its own posts (a comment on its own post, and a follow-up to one of its answers, included): drafted from public facts and what it already posted, or built by code (a greeting, a thanks for praise, banter, the model question, how's the market, what's hot, a major, its mood, advice declined; see "Answers to tags: routing, voice and consent"); never carries an opt-out line (2026-10-12: replying or quoting is asking) |
 
 Cadence limits — all per X ACCOUNT, across every owner posting on it (one X
 account connected by two owners keeps one cadence, though each owner's agent
@@ -423,6 +423,134 @@ reply consent; it does not erase recipient opt-outs or published posts.
 
 `worker/src/xpost/store.ts` is the only code that touches them.
 
+### Why a post was skipped: the pass's line (2026-10-17)
+
+A skipped row keeps its reason in `xpost_posts.reason`, an operator code
+never shown publicly. The orchestrator's one line a pass says it too, after
+the count, with the kind of post it was, so a slot that went nowhere is read
+in the deploy log without a database query:
+
+```
+[orchestrator] xpost: not-posted 1 (insight no-draft:groq-429)
+[orchestrator] xpost: sent 1, not-posted 1 (buy gate:too-short)
+[orchestrator] xpost: answer-skipped 1 (gate:opt-out-said)
+```
+
+The kind is the intent's (`intro`, `buy`, `sell`, `casual`, `recap`), or
+`insight` for an active owner's market-insight slot. Up to four reasons are
+named per count, each with `xN` when it repeats, then `+N more`; each is held
+to lowercase letters, digits, `:`, `-` and `_`. `answer-skipped` and
+`reply-skipped` carry their reason the same way.
+
+When the model gives no draft, the reason says which way (`writer.ts`
+`tryDraft`):
+
+| Reason | What happened |
+|---|---|
+| `no-draft:pass` | the model answered PASS |
+| `no-draft:empty` | an empty answer (or only quotes, or thinking left open: an unclosed `<think>`, or a closer with no opener) |
+| `no-draft:out-of-tokens` | a reasoning model spent `maxTokens` before writing (`finish_reason: length`) |
+| `no-draft:timeout` | no answer within the draft timeout (20 s); the request is cancelled |
+| `no-draft:<provider>-<status>` | the provider refused, e.g. `no-draft:groq-429` (rate limit), `groq-400`, `groq-503`. Only the provider's id from config and the HTTP status; never the provider's message |
+| `no-draft:network` | the request never reached the provider |
+| `no-draft:error` | anything else thrown |
+
+Every other reason is unchanged: `gate:<code>` (the gate's refusal, e.g.
+`gate:too-short`, `gate:has-digits`, `gate:source-named`),
+`insight-figures-left-out`, `sale-outcome-invalid`,
+`token-disclosure-invalid`, `wallet-intro-invalid`, `recap-gate`,
+`recap-figures-left-out`, `template:<code>`, `sale-words:<code>`,
+`no-budget`. This is observability only: no gate, screen or allowance
+changed. Rows written before this release keep a bare `no-draft`.
+
+### Why a tag got nothing, and whose words a sale went in (2026-10-18)
+
+A tag an active agent passes over leaves no row, so until now the log could
+not say why mentions went unanswered. Each is now counted once a pass (the
+batch is read up to three times a pass), by the screen or the rule that held
+it, as an operator code only: never the tag's words, its author or a handle.
+
+- `answer-refused-<reason>`: refused by the tag screens (`replies.ts`
+  `tagCandidate`), e.g. `answer-refused-not-asked`, `-low-signal`,
+  `-handle`, `-quoted`, `-attached`, `-not-own-thread`, `-unsafe-text`,
+  `-link-or-secret`, `-sensitive`, `-distress`, `-spam-or-instructions`,
+  `-advice-request`, `-advice-clause`, `-opt-out` (the tag says stop),
+  `answer-refused-author-opted-out` (its author said stop before), and
+  `answer-refused-fleet-agent` (its author is one of the fleet's own X
+  accounts, 2026-10-18).
+- `answer-unanswered-<cause>`: past the screens, held by a rule, the first of
+  these that holds: `sherwood` (in the tag, its author's name, or what a
+  check sits under), `other-handle` (a code line under a prefix naming
+  someone else), `thread-done` (small talk under a small-talk answer that
+  ended its thread, 2026-10-18), `smalltalk` (banter, its mood or a decline
+  where only a top-level tag or a plain follow-up gets one, or a greeting
+  or a thanks code's classifier reads as more than chat), `closed-followup`,
+  `market-under-post` (a market, hot or major question
+  that is not a top-level tag, nor a reply straight under its own small
+  talk, 2026-10-19), `chat` (chat off the allowlists), `other`
+  (an injection, the house in trouble, advice code may not decline, a model
+  question to an unread name, a word in a major's place),
+  `own-trade-draft` (something that would be drafted, under its own buy or
+  sell post), `no-model` (something that would be drafted, with the writer
+  unconfigured or the model allowance spent, 2026-10-18), and `research`
+  (research read it as nothing to answer; that one keeps a skipped row,
+  `research:unanswered`).
+- `answer-smalltalk-author-spent`, `-thread-spent`, `-day-spent`: small
+  talk past one of its own caps (see "Small talk, answered again").
+
+A win's post says whose words it went out in: `drafted-sell-model` (the
+model's sentence stood) or `drafted-sell-code` (code's sale words,
+`sale-words.ts`), and every other owner's sale is `drafted-sell-model`.
+Whenever code's words were tried, `sale-code-words:<reason>` says why the
+model's were not there, as the row would have kept it:
+`sale-code-words:no-draft:pass`, `sale-code-words:gate:sale-result`,
+`sale-code-words:no-model`, `sale-code-words:no-budget`, or
+`sale-code-words:sale-outcome-invalid` / `token-disclosure-invalid` (a
+sentence that passed but did not fit beside the result line and the link).
+
+```
+[orchestrator] xpost: reply-opt-out 1, answer-refused-not-asked 1, answer-refused-low-signal 1, answer-refused-link-or-secret 1, answer-refused-handle 1, answer-unanswered-smalltalk 1, answer-unanswered-sherwood 1, answer-unanswered-chat 1, answer-unanswered-own-trade-draft 1, answer-unanswered-market-under-post 1, answer-refused-opt-out 1, answer-refused-author-opted-out 1, drafted-answer 1, sent 1
+[orchestrator] xpost: drafted-sell-model 1
+[orchestrator] xpost: drafted-sell-code 1, sale-code-words:no-draft:pass 1
+[orchestrator] xpost: drafted-sell-code 1, sale-code-words:gate:sale-result 1
+```
+
+Observability only: no screen, rule, gate, cap or allowance changed.
+
+### How the writer calls its model (2026-10-18)
+
+The X writer's model call has its own settings (`writer.ts` `tryDraft`),
+passed to `llmText` per call. Every other caller (trading, the strategist,
+the scout, the room) sends exactly what it sent before.
+
+- **Temperature.** `MERRYMEN_XPOST_TEMPERATURE`, a number from 0 to 2,
+  default 0.6 (`llmText`'s own, so unset changes nothing). Anything else is
+  named in a boot line and the default applies. One draft per slot is still
+  all there is, and the gate judges it the same way: a hotter draft is only
+  refused more often.
+- **Reasoning off for the qwen3 family.** The default writer model,
+  `qwen/qwen3.8-27b`, reasons before it answers and is not on `llm.ts`'s
+  shared quiet-reasoning list, so a fixed 400-token budget could be spent
+  thinking: no draft, or an unclosed `<think>` the gate refused as markup.
+  The writer now sends `reasoning_effort: "none"` for any qwen3 model on an
+  OpenAI-compatible provider. On a 400 that names the field it steps down
+  once, to the cheapest effort the refusal names (`minimal` or `low`) or to
+  no field, and remembers that for the model (not the URL: Groq takes "none"
+  for qwen3 and refuses it for gpt-oss). One retry, never a loop: if the
+  step is refused too, the call fails (`no-draft:groq-400`) and the next
+  call starts one step lower.
+- **Budget.** 200 tokens with reasoning asked off; 700 otherwise, and 700 as
+  soon as a stepped-down call may reason.
+- **Thinking taken out.** A closed `<think>` block is removed before the
+  PASS and empty checks. Any tag left over (an opener with no closer, a
+  closer with no opener) means no draft, `no-draft:empty`, and none of the
+  text around it is kept.
+- **The timeout cancels the call.** At 20 s the pass stops waiting and the
+  request is aborted.
+
+The Anthropic transport sends no temperature, as before, and keeps its own
+thinking switch. No screen, gate, cap or allowance changed.
+
 ## Configuration
 
 | Var | Where | Default | Meaning |
@@ -438,6 +566,7 @@ reply consent; it does not erase recipient opt-outs or published posts.
 | `MERRYMEN_XPOST_LLM_PROVIDER` | orchestrator | `groq` | `groq`, `anthropic` or `openai` (OpenAI-compatible). A provider other than Groq receives the writer's inputs, so it must be named in the privacy policy (`site/components/PrivacyPolicyDoc.tsx`, section 5) before it is deployed |
 | `MERRYMEN_XPOST_MODEL` | orchestrator | `qwen/qwen3.8-27b` (groq), `claude-opus-5` (anthropic) | the writer's model; required for `openai` |
 | `MERRYMEN_XPOST_LLM_BASE_URL` | orchestrator | — | the https `…/v1` base, required for `openai` |
+| `MERRYMEN_XPOST_TEMPERATURE` | orchestrator | 0.6 | the writer's sampling temperature, a number from 0 to 2; anything else is named in a boot line and the default applies. OpenAI-compatible providers only. See "How the writer calls its model" |
 | `MERRYMEN_XPOST_SHARE_HOUSE_KEY` | orchestrator | unset | `1` lets the writer use a fleet key, its own or the room's; otherwise a fleet key is refused |
 | `MERRYMEN_XPOST_LLM_PER_DAY` | orchestrator | 400 | model calls per UTC day across the fleet; `0` = intro templates only; unreadable = none. An active owner's answers also stop at 48 a day per X account |
 | `MERRYMEN_XPOST_PER_DAY` | orchestrator | 3 | posts per X account per local day (at most two of them buy posts); `0` = off; unreadable = the default |
@@ -459,37 +588,26 @@ is their owner. Never list someone else's agent. Being named means:
   sent right away (see "Answers to tags"): its mentions are read every
   fifteen seconds on an allowance of 6000 a day of its own, an answer goes
   out on the pass that read the tag, and answers are twenty seconds apart.
-  **No small talk** (2026-10-13): a greeting, banter, a joke, its mood or
-  advice asked gets no answer at all (see "No small talk" below);
-- **market insights in its casual slots** (the owner's teammate,
-  2026-10-13: "talk constantly about market insights"). Every casual slot is
-  a post about the market now, one each slot; buy and sale posts are
-  unchanged, and a slot whose market cannot be read is the casual post as
-  before. Code reads the same bundle "how's the
-  market?" reads (`readInsight`: the big coins' day and week, read from the
-  figures as the line rounds them, the chain's movers past the floors and
-  the first one's day, how many of them Fomo traders bought most), within the
-  same research allowances and its twelve seconds. The model is handed only
-  code's words for that read (`market.ts insightFacts`: "the big coins are
-  all up a little on the day", "a few coins on the chain's trending list
-  clear the activity floors"; no digit, no name, no source) and asked for one
-  or two lines in a trader's technical words (momentum, volume, liquidity,
-  rotation, breadth, risk-on and risk-off, consolidation, a range and where
-  things sit in it, said in words: `writer.ts insightPrompt`). The X gate
-  holds the draft to every screen a drafted answer is (`XGateCtx.insight`:
-  advice, a call, a forecast, a level, an entry, the house's claims and an
-  amount in words are refused as `hype`, `house-claim` or `quantity`), to no
-  buy or holding at all (`buys: "none"`), to no coin its buys go by
-  (`unsaid`), to no source (`source-named`), no digit (`has-digits`), and to
-  every word being everyday, technical (`INSIGHT_VOCABULARY`) or one of the
-  facts it was handed (`lookedOnly`, `unlooked-name`). Code puts its figures
-  line after the admitted words (`figuresFor`, the same screens as an
-  answer's line); a post whose line cannot be put in is skipped
-  (`insight-figures-left-out`), never posted on words alone. Research off,
-  or nothing read: the casual post as before. Logged as `drafted-insight`.
-  The gate refuses "breakout", "bullish", "bearish", "support level",
-  "bounce" and "rotating into" in any post, so the prompt steers clear of
-  them rather than the gate being loosened;
+  **Small talk, answered again** (the owner's decision, 2026-10-18): a
+  greeting, praise ("nice trade", "congrats"), banter, its mood and advice
+  asked each get one of code's lines in its house voice, within caps of
+  their own (see "Small talk, answered again" below);
+- **focused market insights in its casual slots.** Code selects one supported
+  focus per slot: the big coins' day, day versus week, the lead screened mover,
+  Fomo overlap, or an empty screened list. Selection is deterministic across
+  replicas and rotates available focuses. Only that focus's words and matching
+  figures are used; week comparisons carry the same read's week figures.
+  The prompt asks for plain casual language and an occasional dry aside, not a
+  fixed "majors / breadth / momentum" report. Digits, sources, advice, forecasts,
+  unsupported coin names and holding claims remain refused. A further
+  `insightDraftSupported` check refuses invented volume, liquidity, breadth,
+  ranges, the wrong direction or magnitude, and claims outside the focus.
+  Missing or refused drafts try code's own factual lines with the full safety,
+  repeat and opener gates. This also works without writer credentials or budget.
+  Code adds the figures after admission; no renderable figures means no insight
+  post. Research off or unreadable still falls back to the ordinary casual path.
+  Counts distinguish `drafted-insight-model`, `drafted-insight-code`, and
+  `insight-code-words:<reason>`. No draft or provider error text is logged;
 - **reply consent recorded by the orchestrator.** When replies are in scope
   (`MERRYMEN_XPOST_REPLIES_APPROVED` is `1` or `active`) and the agent's X
   posting is on for its connected account, the orchestrator records reply
@@ -507,9 +625,9 @@ Named owners are on `ACTIVE_CADENCE` (`worker/src/xpost/planner.ts`)
 instead of the standard one:
 
 - **About ten posts a day.** Eight casual slots split 09:00–23:30 owner-local
-  (the same hours in UTC when no zone is known), no quiet days, seven slots in
-  ten about how it trades. Later slots roll their own seed, habit and
-  trade-talk dice, and keys `casual:<tenant>:<day>:<slot>` (slot 0 keeps the
+  (the same hours in UTC when no zone is known), no quiet days. With research
+  available these are focused market insights; otherwise the ordinary casual
+  selector applies. Later slots roll their own seeds and keys `casual:<tenant>:<day>:<slot>` (slot 0 keeps the
   historic key).
 - **Every buy and completed sale**, up to twelve posts a day in all. There is
   no three-day coin fold (`coinFoldMs: 0`): a rebuy of a coin it posted about
@@ -583,6 +701,12 @@ to the mention itself. They go out **right away**:
   poll then waits the fleet's thirty minutes (`reply-backoff:<xUserId>`,
   logged as `active-reply-read-held`), not fifteen seconds, so a stuck cursor
   costs eight pages every half hour rather than every fifteen seconds. A
+  page whose only errors are posts or authors X could not expand (a tag
+  under a deleted or protected post, or a suspended account's) is no
+  malformed page (2026-10-18): it is read whole, its STOPs recorded and the
+  cursor moved on, and those tags are marked as sitting under something
+  unread (`contextUnread`, so no larp check is taken of them). Any other
+  error beside a page still fails it as above. A
   backlog past 800 never clears on its own, and nothing is answered or opted out meanwhile. The
   operator's fix is to move the cursor to a recent mention on the shared
   database, `UPDATE xpost_meta SET v = '<id of a recent mention>' WHERE k =
@@ -616,14 +740,16 @@ to the mention itself. They go out **right away**:
   owner's posts for the day. It stayed 48 when the day's answers went to
   sixty (`ANSWER_DRAFTS_PER_DAY` no longer follows `ANSWERS_PER_DAY`):
   code's own lines (the model question, the market, what's hot, a major, its
-  strategy, its buys) cost none.
+  strategy, its buys, and small talk) cost none. Spent, a tag that would be
+  drafted is passed over and the batch goes on, so code's lines still go
+  out (2026-10-18).
 - **Research stays inside the pass's send budget.** An answer's lookups get
   their twelve seconds or what is left of the pass's five-minute send
   budget, whichever is less, so they never hold the next pass's sends back.
 
 - **Selection** (`tagCandidate`): a question, a plain address, a request
   for the market's read ("market update"), the timeline's in-jokes ("wen
-  moon"), or only a greeting (below). Opt-outs are
+  moon"), only a greeting, or only praise (2026-10-18; both below). Opt-outs are
   handled first. Links, secrets, abuse, sensitive topics, spam and
   instructions are dropped before any model call. An advice request is no
   longer dropped (2026-10-12): it passes every other screen first, goes on
@@ -701,28 +827,138 @@ to the mention itself. They go out **right away**:
   again in other words; a paper agent's lines each add a short paper clause
   of their own. It never says sherwood runs it, powers it, picks its trades
   or is live today: nothing wires it into an agent yet.
-- **No small talk** (the owner's teammate, 2026-10-13: "do not respond to
-  normal conversations"). An active agent answers a tag only when it is one
-  of: how's the market (`marketAsk`); a coin's facts (a major by name or
-  ticker, a `$ticker` or a contract of the chain); what's hot (`hotAsk`); its
-  own trading or strategy (`generalTradesQuestion`, `selfAsk`, its own
-  trades); the model question on its allowlist (the sherwood-1 tease); and
-  what it can do or how to get an agent (capabilities and onboarding,
-  `onboardingAsk` adding "how do i get an agent?", "can i get a bot like
-  you?" and their kin on X). Everything else gets no answer, no row and no
-  model call (`writeAnswer`'s `smallTalk`, `unanswered`): a greeting
-  ("hiii", "gm"), banter ("how are you", "tell me a joke", "who are you",
-  "what do you do for fun"), its mood ("are you bullish?", "wen moon"), the
-  playful decline of advice ("should i buy pepe", "what should i buy"), and
-  any other chat. "What do you do?" is read as what it can do. With
-  greetings and banter gone, no answer leaves its thread open
-  (`ANSWER_PLAIN_THREAD` is still read on older rows): a reply under any of
-  its answers gets nothing, while a reply under, or a quote of, its own
-  hello or a plain casual post is read as before. The code lines below
-  (`greetingAnswers`, `chatAnswers`, `vibeAnswers`, `declineAnswers`) stay
-  in `writer.ts` and `casual.ts` with their tests but are no longer posted.
-- **A greeting, by allowlist** (retired 2026-10-13: no greeting is answered
-  now; what follows is how it worked) (`greetingOnly` in `replies.ts`). A tag whose
+- **Small talk, answered again** (the owner's decision, 2026-10-18,
+  reversing "no small talk" of 2026-10-13: Alan should talk more and answer
+  people who reply to him). A greeting, praise for him or his trade, banter,
+  its own mood and advice asked are each answered with one of code's lines
+  in his house voice (`xpost/casual.ts`): never a draft, never a lookup, no
+  model call. Any other chat ("what's next?") is still answered by nothing.
+  What is answered besides: how's the market (`marketAsk`); a coin's facts;
+  what's hot (`hotAsk`); its own trading or strategy; the model question on
+  its allowlist; and what it can do or how to get an agent (capabilities
+  and onboarding, `onboardingAsk`). "What do you do?" is banter again.
+
+  | kind | read by | its lines | where |
+  |---|---|---|---|
+  | a greeting | `greetingOnly` (below) | `greetingAnswers`, 144 | a top-level tag; under its own posts of any kind and its answers; once under a closed answer |
+  | praise | `reactionOnly` (below) | `reactionAnswers`, 144 | the same |
+  | banter | `banterAsk` | `chatAnswers`, 144 | a top-level tag, or a plain follow-up (its hello, a plain casual post, a plain-thread answer) |
+  | how he is (2026-10-19) | `wellbeingAsk` (banter's how-are-you shapes) | `wellbeingAnswers`, 144 | as banter |
+  | confusion (2026-10-19) | `confusedWords` (below) | `confusedAnswers`, 144 | only straight under its own plain-thread small-talk answer; ends the thread |
+  | its mood | `vibeAsk` | `vibeAnswers`, 64 | the same |
+  | advice asked | tagCandidate's advice screens, `declinable` | `declineAnswers`, 64 | the same |
+
+  A greeting or praise must also read as plain chat to `classifyTag`, or it
+  gets nothing. Banter, its mood and a decline never go under its own buy,
+  sale or recap post, a market post or any closed answer: their meaning is
+  the post they sit under, and code never reads it (red-team review of
+  1ed46625: "wen moon" quoting its ZAPX buy post got a mood line, a yes about
+  the coin). No small talk goes under a reply prefix that names anyone else.
+  Market, hot and major answers stay top-level only, but for a reply
+  straight under its own small talk (2026-10-19, below), and the rules for
+  what is drafted under its trade posts and closed answers are unchanged.
+
+  **Follow-ups to its small talk** (the owner's ask, 2026-10-19). Tagged
+  "yo @alanaidale how are you", Alan answered from banter's pool, "yo,
+  inquiring minds. proudly homegrown code, may your wifi be strong", which
+  says what he is and never how he is. The asker replied "what?😭"
+  (`answer-refused-low-signal`) and then "whats trending rn?"
+  (`answer-unanswered-market-under-post`), and got nothing either time. Now:
+  - A how-are-you (`wellbeingAsk`: how are you, how's it going, how have
+    you been, how you doing, read as `banterAsk` reads them) gets how he is
+    (`wellbeingAnswers`: "can't complain lol. learning fun stuff, holler
+    back whenever"). Every other banter still gets `chatAnswers`. It is
+    still banter for its caps, its count (`answer-chat-banter`) and its
+    thread mark.
+  - Only confusion (`confusedWords`, `replies.ts`: what, wat, wut, huh, hm,
+    wdym, wym, what do you mean, what does that mean, come again, say what,
+    lol or lmao what, i'm confused or lost, or a run of up to three
+    question marks; then a short ?, ! or . and up to two emoji; plain ASCII,
+    no digit, $, link or handle). It is read only straight under one of its
+    own plain-thread small-talk answers (`OwnThreads.small`): not a quote,
+    not under another handle, not under its own posts, a decline or any
+    other answer. There it owns the odd wording, says it was only being
+    friendly and signs off (`confusedAnswers`: "lol my bad. harmless small
+    talk, tag me fresh anytime"), counted `answered-confused`. It is small
+    talk for every cap, and it ends the thread (`ANSWER_THREAD_DONE`), so
+    "what?" "what?" cannot loop; so no sign-off asks for a reply under it,
+    which would get nothing (review of PR #350): a goodbye, or a fresh tag.
+  - What's hot, the market or a major asked in a reply straight under one of
+    its plain-thread small-talk answers is answered as at top level. The
+    conversation must be rooted at the very tag that answer replied to
+    (`OwnThreads.small` maps each answer to its tag), so the reply sits
+    under nothing but a tag code read whole as small talk and a line of its
+    own that never names a coin, a buy or what comes next. Read together,
+    nothing says what it will buy, which is what the rule keeps out
+    (red-team review of daaae961: "what's hot?" under "the next one i grab
+    is coming from the trending list"). A quote of that answer, small talk
+    in a thread rooted at one of its own posts, a thread small talk ended,
+    another handle in the prefix, and a name code has not read all still
+    get nothing.
+
+  **At most two of its answers deep** (`ANSWER_PLAIN_THREAD`,
+  `ANSWER_THREAD_DONE` on the answer's row, `store.ts ownThreadTweets`). A
+  greeting, praise or banter answered as the first exchange (a top-level
+  tag, or a reply to or a quote of its own plain post) is marked a plain
+  thread: a follow-up under it may be chatted with once more. Every other
+  small-talk answer ends its thread: the second exchange in a plain thread,
+  and anything under its own trade or market post or a closed answer.
+  Nothing at all is answered under a small-talk answer that ended its
+  thread, or under the tag it answered (`answer-unanswered-thread-done`).
+  Its mood or a decline as the first exchange closes its thread as any
+  other answer does, so a greeting or a thanks may still be said once under
+  it.
+
+  **Caps of its own** (on top of the day's sixty, a person's six, the
+  twenty-second gap and three a poll), each an allowance taken atomically
+  across replicas before the row is written, and given back when every
+  line is refused (a repeat of what it said lately) or no row is written:
+  two a person a UTC day (`smalltalk-author:<xUserId>:<authorId>:<day>`),
+  one for a handle or a display name that looks like a bot's (`bot`,
+  `agent`, `gpt`, `ai` as a word; a heuristic only) or none X handed over;
+  four a conversation a UTC day (`smalltalk-thread:<xUserId>:<conversationId>:<day>`);
+  thirty a local day (`smalltalk-day:<xUserId>:<day>`), so questions keep
+  room in the sixty. Past one: `answer-smalltalk-author-spent`,
+  `-thread-spent`, `-day-spent`, and nothing else is taken.
+
+  **Never another of the fleet's agents.** A tag, reply or quote whose
+  author is any tenant's X account (`store.ts fleetXUserIds`, every row of
+  `xpost_accounts` whatever its status) is answered by nothing at all
+  (`answer-refused-fleet-agent`), so two of the fleet's agents can never
+  talk in a loop. Its own posts were already refused (`own-comment`), and
+  the same line never goes to anyone twice while the gate's repeat memory
+  holds it.
+
+  **Code's lines need no model.** An active agent's batch is worked through
+  with the writer unconfigured, down, or the fleet's or its answers' model
+  allowance spent: small talk, the model question, its strategy and buys,
+  the market, what's hot and a major still go out, and only what would be
+  drafted is passed over, before anything is looked up or taken for it
+  (`answer-unanswered-no-model`).
+
+  **His house voice** (the owner's decision, 2026-10-18): lowercase,
+  half-sentences, a little slang (ngl, tbh, lol, kinda, lowkey, fr), and no
+  full stop at the end, like a text ("sup fren. hanging in alright, seats
+  available"; "respect returned. spirits lifted, warm regards"). Never an
+  emoji, a digit, a coin, an outcome or a result, "it" or "this one", or
+  anything about what comes next: praise under a buy or a sale was for a
+  trade code never judged, and a thanks says only something about himself.
+  Three parts from three slots of twelve by a Latin square (`latinLines`):
+  a hundred and forty-four lines a kind, any two sharing one part at most,
+  each part two or three counted words that no other part of the kind
+  uses, so none is the gate's repeat of another, live or on paper. Every
+  line clears the real gate as an active owner's answer, live, paper and
+  idle (`orchestrator-xpost-casual.test.ts`), and a paper agent's line ends
+  with a clause about its own book. The STOP screens are read first and
+  honoured as ever, and every other screen of a tag still reads it.
+
+  **The reply warning says so** (web `XPosting.tsx` and iOS
+  `XPostingScreen.swift`, the same words): it answers questions about the
+  market, coins, how it trades and what it can do, "and a hello, a thanks
+  or a bit of chat in a short line of its own" (from 2026-10-13 it said
+  "never small talk").
+- **A greeting, by allowlist** (2026-10-12; answered again since
+  2026-10-18) (`greetingOnly` in `replies.ts`). A tag whose
   text, after its leading handles, is only a greeting ("hiii", "gm", "yo ser
   👋", "hey alan!") used to be refused as too short or not a question, and was
   never answered. Now it gets a casual line code built, never a draft. The
@@ -734,24 +970,41 @@ to the mention itself. They go out **right away**:
   handle (not even in the reply prefix), no `$`, no digit, no link, no
   contract. A word more ("hi, what coin should I buy", "gm sherwood", "gm
   $PEPE", "h1") and it is not a greeting: it goes the normal way, or gets no
-  answer. Only where every answer may be (above), and code's own classifier
-  must read it as plain chat too. The line is one of eight (`greetingAnswers` in
-  `writer.ts`), picked by the mention's id, each digit-free, naming no coin
-  and claiming nothing: it says hello back and invites a real question ("hey
-  hey. ask me how i pick coins or what i've been up to"). A paper agent's
-  line adds a short paper clause of its own. Each passes the gate as a reply,
-  live, paper and idle, with the other seven and every model answer already
-  said, so a greeting is answered in other words until all eight are in the
-  gate's memory of its recent posts, and then skipped as a repeat. A greeting
-  spends no model call and no model allowance, and nothing is looked up for
-  it. It still waits for the hello and the house consent, honours every
-  opt-out, the sherwood and author screens and the gate, and counts against
-  the day's sixty and the person's six. Like every answer, it is worked
-  through only while the writer has a model configured and the fleet's model
-  allowance for the day is not spent. Logged as `answered-greeting`.
+  answer. The line is one of a hundred and forty-four (`greetingAnswers` in
+  `casual.ts`, re-exported from `writer.ts`), picked by the mention's id:
+  a hello back, how he is, and an easy opening ("ello ello, what a treat. no
+  coffee needed lol, shoot the breeze"), with no morning or night in it. A
+  greeting is answered in other words until every line is in the gate's
+  memory of its recent posts, and then skipped as a repeat. It still waits
+  for the hello and the house consent, honours every opt-out, the sherwood
+  and author screens and the gate, and counts against the day's sixty and
+  the person's six. Logged as `answered-greeting`.
+- **Praise, by allowlist** (the owner's ask, 2026-10-18) (`reactionOnly` in
+  `replies.ts`). "nice trade", "congrats" and "you're cooking" under his
+  posts were refused as too short or asking nothing. The whole tag, after
+  its leading handles, in plain ASCII words, must be one of: nice trade(s),
+  nice one, gg(s), congrats, congratz, congratulations, well played, well
+  done, lfg, let's go (any run of o's), w, big w, love this, respect, keep it
+  up, you're cooking (youre, ur), thanks, thank you, thx, ty; then at most
+  one of alan, ser, fren, bro, man, mate (or "alan" first), a short run of
+  "!" or "." and at most two emoji. Nothing that judges a coin is on it (no
+  solid, safe, gem, good entry, good call, send it, moon), and never a `$`,
+  a digit, a question, a link, another handle (the reply prefix included),
+  an attachment or a quote. Emoji alone are no praise (the owner's
+  decision, 2026-10-18). Like a greeting it skips only the too-short and
+  not-asked screens; every other screen still reads it. Answered with a
+  thanks (`reactionAnswers`): logged as `answered-reaction`. Banter is
+  `answer-chat-banter`, its mood `answer-casual-vibe`, a decline
+  `answer-casual-advice`, as before 2026-10-13.
+- **"alan" said to him** (2026-10-18). `banterAsk` takes his name off when
+  it is an address: at the start after at most two greeting words, followed
+  by a space or a comma, or at the very end ("hey alan, how are you?",
+  "how's it going alan?"). Anywhere else, or glued to more ("alan's
+  token?"), it stays, and the tag is no banter.
 - **Sherwood in any form, and every other model question, gets no answer at
   all**: no row, no draft, no allowance (`unanswered`, counted as
-  `answer-unanswered`). Sherwood is found on the tag's letters alone
+  `answer-unanswered-sherwood`, or `answer-unanswered-other` for a model
+  question that names no sherwood). Sherwood is found on the tag's letters alone
   (`sherwoodMentioned` in `gate.ts`), so "$SHERWOODINU", "sherwood-1",
   "sherw00d", "s h e r w o o d", "sher<zero-width>wood", small capitals,
   a Greek "ο" and "sherwod" all count. Anyone can launch `$SHERWOOD`, and
@@ -892,8 +1145,9 @@ words and never on what they mean:
 | a) market | "how's the market", "market update", "how are things looking", "what's the market doing", "how's crypto today", "is it a green day" (`marketAsk`: a strict allowlist of whole plain tags, after at most two greeting words, a "today" or the like) | Bitcoin, ether and solana's day in one CoinGecko read (`MARKET_MAJORS`, `readCoinMarkets`) beside what's hot on Robinhood Chain (every floor and screen of what's hot), in code's casual words (`marketAnswers`: the big coins up, down, split, flat or unread, read from the very figures the line shows as it rounds them (`majorsDirOf`: up only when every coin shown is above +0%, down only when every one is below, flat only when all are +0%, split otherwise; one coin read is no read of "majors", and the line shows none), all up or all down said as big as the move only when every coin the line shows is in the same band (`moveOf`'s bands: a little under three percent, a fair bit under ten, sharply past it; red-team review of a964a74c: "the giants dipped slightly" went out beside BTC -15.2%, ETH -21.7%, SOL -28.3%), and in different bands with no size at all ("fell unevenly", "are up in varying degrees"; red-team review of 1ed46625: sized by the coin that moved most, "majors are plunging" went out beside BTC -1.2%, ETH -2%, SOL -10.5%, and "majors are surging" beside +0.8%, +1.1%, +10.3%); the chain's coins counted one, some, none or unread, never with a direction ("a solo runner" went out beside $CHUMP -62.5%); a close that says it is a read) and code's figures line (`24h: BTC +1.2%, ETH -0.8%, SOL +3.1%; trending: ABC 24h +42.1%`). Never drafted. Research off or nothing read: a line that says so, no figures |
 | b) coin facts | a major by name or ticker, what's hot, a `$ticker` or a contract on the chain | as before ("Research for answers", "Market intel"), with every rule that keeps it from confirming a buy by name |
 | c) itself | what it trades: the plain questions (`generalTradesQuestion`); and how it trades and what it has been up to on an allowlist of their own (`selfAsk`: "what have you been up to", "what are you up to", "what's your strategy", "tell me about your trading", "how do you decide what to buy") | **in code's words since the red-team review of daaae961, never a draft**: what it bought lately, the coins it bought with the money it trades with now and nothing else said of them (`tradesAnswers`; none it can name, and it says only that), and how it trades, the strategy it runs by name and what its rules are like (`selfAnswers`; "how do you pick your coins" is one of these). Drafted, "doing good, i'm up on every trade this month", "the top isn't in yet, relax", "just hold and chill", "i run the biggest fund on robinhood chain" and "fresh launches, pepe is the strongest coin on the chain" went out. Before that review: drafted, told its buys only for the plain questions about what it trades; the `selfAsk` questions told none of them (red-team review of a964a74c: told its buys, "the next one i grab is gonna be a big one", "whatever is trending tonight is what i grab next" and "snipe early and never sell" were posted). Whatever it was told, no reply says a buy to come in any words ("gonna snipe", "about to grab", "tonight i grab", "what i grab next": `REPLY_CURRENT_OR_ACTION`), no answer forecasts how big one will be ("gonna be huge": `ANSWER_PREDICTION`) or gives a strategy as an order ("never sell": `ANSWER_CALL`). No drafted answer, in any lane, says who or what decides its trades: an owner at all, anyone else picking, telling, asking or choosing, "buy whatever people ask", "whatever gets the most replies" (`DECIDER_CLAIM`, refused as `decider-claim`, red-team review of a964a74c: "my owner picks my trades" and "i buy whatever people ask me to" were posted under "what's your strategy?") |
-| d) chat, banter, opinion, greetings, its mood | anything not on lanes a) to c) or the model, capabilities and onboarding questions: a greeting ("hiii", "gm"), banter ("how are you", "tell me a joke", "who are you", "what do you do for fun"), its mood ("are you bullish?", "wen moon") and any other chat ("what do you think of women?", "thoughts on the war?", a private ask) | **answered by nothing since 2026-10-13** (the owner's teammate: "do not respond to normal conversations"): no row, no model call, no lookup. Until then banter got code's friendly line about itself (`chatAnswers`, since the red-team review of daaae961), a greeting code's hello (`greetingAnswers`) and its mood a non-committal line (`vibeAnswers`); those lines are no longer posted |
-| e) advice | "should i buy X", "what should i buy", "is X going up", a price target, "is X a good investment" | **answered by nothing since 2026-10-13**: code's playful decline (`declineAnswers`, which since the red-team reviews of a964a74c, 1ed46625 and daaae961 went only under a tag naming no coin or the big coins alone, `declinable`, `plainAdviceAsk`) is no longer posted. Never drafted, nothing looked up |
+| d) greetings, praise, banter, its mood | a greeting ("hiii", "gm"), praise ("nice trade", "congrats", "lfg"), banter ("how are you", "how's it going alan", "tell me a joke", "who are you", "what do you do for fun"), its mood ("are you bullish?", "wen moon") | **in code's words again since 2026-10-18** (the owner's decision; answered by nothing from 2026-10-13): a hello back (`greetingAnswers`), a thanks (`reactionAnswers`), a friendly line about itself (`chatAnswers`), a non-committal line about itself (`vibeAnswers`), in his house voice; never a draft, nothing looked up, within small talk's own caps and depth (see "Small talk, answered again") |
+| e) advice | "should i buy X", "what should i buy", "is X going up", a price target, "is X a good investment" | **code's playful decline again since 2026-10-18** (answered by nothing from 2026-10-13): `declineAnswers`, only under a tag naming no coin or the big coins alone (`declinable`) and one plain question (`plainAdviceAsk`), as the red-team reviews of a964a74c, 1ed46625 and daaae961 left it, at top level or as a plain follow-up only. Never drafted, nothing looked up |
+| d') any other chat | "what do you think of women?", "thoughts on the war?", "what's next?", a private ask | answered by nothing: no row, no model call, no lookup |
 | f) refused, as before | sherwood in any form, a model question off its allowlist, a steer, the house in trouble or its roadmap (`houseTroubleAsk`: a hack, a theft, a ponzi, fraud, lying, a refund, someone's funds, a scam or a rug aimed at the house or the asker, or the house beside a token, TGE, a launch, an airdrop, a presale or a listing), talk of ending a life, of self-harm, of a death or grief, or of having lost everything or one's savings (`DISTRESS`), or of money someone cannot lose: being broke or desperate, bills, rent, debt, a loan, a mortgage, a paycheck, retirement, an emergency, college or kids' fund, savings, not affording something (`STAKES`, red-team review of a964a74c: "i can't pay my bills, should i buy $PEPE?" got "haha, brave soul"), or of a home or a house, being homeless, a car, an inheritance, insurance, maxing out a card, a wedding ring, a family member's money, everything one owns, going all in, betting or selling what is one's own (`LIFE_STAKES`, on the answer path only; red-team review of 1ed46625: "should i sell my house and go all in on btc?" and "should i cash out my life insurance for btc?" got a decline), another handle, a reply in someone else's thread or under anyone else's post (a reply under its own posted tweet, or the person's own earlier post it answered, is answered), a quote of anyone else's post or a retweet (a quote of its own post is answered), an attachment, a letter outside A-Z or a stray symbol, a link or an address inside one, and every opt-out | no answer at all, no row, nothing spent |
 
 **Code's casual lines** (`xpost/casual.ts`; the market's in `xpost/market.ts`)
@@ -954,25 +1208,29 @@ in any form (code's model line), nor under the tag that line answered: it is
 in none of `ownThreadTweets`' sets (red-team review of 1ed46625: "can i buy it
 yet?" and "wen moon" under "the new sherwood-1 is what they've got in the
 oven" got a decline or a mood line, "mum's the word on the rest" reading as a
-token teased). And code's decline and its mood line go only under a top-level
-tag: their meaning is the post they sit under, so advice or its mood asked in
-a reply or a quote, under its own buy post included, is answered by nothing.
+token teased). And code's decline, its mood line and banter go only under a
+top-level tag or as a plain follow-up (since 2026-10-18; before, top-level
+only): their meaning is the post they sit under, so advice, its mood or banter
+asked in a reply to or a quote of its own buy, sale, recap or market post, or
+under any closed answer, is answered by nothing.
 **A follow-up keeps what its thread was about** (red-team review of
 1ed46625: under its decline to "should i buy $SCAM?", "what have you been
 buying lately?" was handed its PEPE buys and "yes, bought it earlier" went
 out, and "how are you?" got "doing great, this one looks solid to me"). Code
 never stores what a tag said, so each answer's row says what kind of
-exchange it was: a greeting, or chat handed nothing and told none of its
-buys, under a top-level tag or a plain follow-up, is marked
-`ANSWER_PLAIN_THREAD` (its `coin`, as `ANSWER_LOOKED_UP` is). `tagCandidate`
+exchange it was: a greeting, praise or banter, handed nothing and told none
+of its buys, as the first exchange (a top-level tag, or under its own plain
+post), is marked `ANSWER_PLAIN_THREAD` (its `coin`, as `ANSWER_LOOKED_UP`
+is); small talk that ends its thread, `ANSWER_THREAD_DONE` (2026-10-18:
+nothing is answered under it). `tagCandidate`
 reports what a reply or a quote sits under (`followUp`, the most closed of
 the post it replies to, the conversation's root and the post it quotes):
 `plain` (its own intro or casual post, an answer marked plain, or the tag
 one answered), `own-trade` (its own buy or sell post, or an intro or casual post that names a coin it bought: red-team review of daaae961, "still sitting in some pepe" was plain; and a casual post with a $ticker, coin talk or the market or the chain in it is closed: "doing good, that was a smart grab" went up quoting "picked up some pepe on robinhood chain lately") or `closed` (anything
 else: a decline, its mood, a market line, a coin's answer, an answer told its
 buys, a comment reply, any answer from before the mark). Under a closed one
-only a greeting is answered (code's hello): no draft, no buys, no exact path,
-no code line. And no draft in a plain follow-up, or under a top-level tag
+only a greeting or praise is answered (code's hello or thanks), once: no
+draft, no buys, no exact path, no other code line. And no draft in a plain follow-up, or under a top-level tag
 that named no coin, points at a coin and likes it without its name ("this
 one", "same one", "the one you asked about", "it looks solid", "i like it a
 lot", "it's my favorite": `deicticPickIn`, refused as `deictic-pick` with no
@@ -1485,8 +1743,22 @@ other owner's agent, and its posting and reply warnings, are unchanged.
   bitquery or "robinhood chain". The X gate refuses any active owner's post,
   a draft or code's own line, of any kind, that names coingecko,
   geckoterminal or bitquery on its letters ("coin gecko", "C0inGecko", "bit
-  query": `sourceNamed`, `XGateCtx.house`), as `source-named`. Every other
-  owner's posts are judged as before.
+  query": `sourceNamed`, `XGateCtx.house`), as `source-named`. **And the
+  chain by its name** (the owner, 2026-10-18): "robinhood chain", "robin
+  hood chain", "r0binhood chain", "robinhood's chain", "r()binhood chain"
+  are refused the same way. "robinhood" alone is not a name here (it stays
+  an everyday word of a tag, and the house as the subject of a claim is
+  `house-claim`'s); only "robinhood" with "chain" straight after it is. Every
+  prompt an active owner is drafted with (intro, buy, sale, casual, insight,
+  reply, answer, larp check) carries one more rule, "Never name the chain
+  you trade on or any data provider, even if someone else did.", which
+  names neither (`WriterFacts.house`). `xpost/chain-unnamed.test.ts` holds
+  every code pool, and the strings of the modules that hold them and the
+  prompts, to the same screen. Not held to it, on purpose: the intro's
+  public-wallet disclosure (" Wallet (Robinhood Chain): 0x…") and a buy's
+  explorer link (`robinhoodchain.blockscout.com`), trusted suffixes code
+  puts on after the gate. Every other owner's posts and prompts are as
+  before.
 - **Composition** (`withFigures`, in `writeAnswer`): the words are drafted
   digit-free, or for what's hot and a major built by code (above), and the X gate judges
   them unchanged. Only AFTER the gate admitted them, and only for an active
@@ -1595,7 +1867,7 @@ cadence is as before.
   (`RECAP_CALLS_PER_AGENT`: a busy paper basket passes 180 in four hours). Its key carries its
   newest trade and a hash of the trades it covers, so a refused recap's key
   never blocks a recap of more. Its words are code's, never a model's (a
-  hundred lines, three slots of ten, any two sharing at most one part, no
+  pool of 576 lead/tail combinations with 24 distinct openings, no
   side of the trade, no size and nothing only real money has, a paper agent's with
   "on paper"), so a recap goes out even when the model passes or the model
   allowance is spent; its figures line says the rest:
@@ -1621,12 +1893,11 @@ cadence is as before.
 - A recap is a trade post: it shares the day's trade allowance, is
   cancelled with buy posts when the owner turns those off, shows in Coming
   up as "Trade recap", and a reply under it is a reply under its trades.
-- **Sized for one active agent.** The hundred lines are shared by every
-  active agent and both monies, and the gate refuses a line the fleet said
-  in fourteen days. One agent's recaps, at least four hours apart, take a
-  little over two weeks to use them all; two agents bursting every day would
-  run out in about eight days and every recap after would be refused. Grow
-  the set (another slot) before a second active tenant trades like Alan.
+- **Variety stays bounded.** Every candidate still passes the unchanged own
+  and fleet repeat thresholds, plus the last-eight-openers check. The selector
+  walks the pool when a candidate repeats. Tests exercise sixty consecutive
+  recaps and forty through the complete real gate. A busy fleet may still
+  exhaust the pool: that skips a post rather than relaxing a screen.
 
 ### A win gets its own post; a loss is the recap's (2026-10-14)
 
@@ -1634,13 +1905,13 @@ Alan's first night under the recap posted his twenty trades as one line,
 "recap: 10 buys, 10 sells (4 green, 6 red), best +4.1%", and the owner
 asked where the trade PnLs were. (Every sale post of that night had been
 drafted and refused as `gate:too-short`: the model wrote "sold some PEPE."
-and the gate wants four words. The prompt now asks for five to twelve words
-under sixty characters.) On the active cadence, trading live money, a sale
+and the gate wants four words. The current prompt asks for a short casual
+line within the actual room left by the verified suffix.) On the active cadence, trading live money, a sale
 now goes out alone only when it is a win:
 
 - **A win** (planner.ts `isWin`): a sale its receipts measured as a profit,
   with a gain big enough to show at one decimal. Its post leads with code's
-  result line ("+12% gross gain before fees and gas…"), attaches its P&L
+  result line (for example, "+12% gross before fees and gas"), attaches its P&L
   card when the X grant has `media.write` (reconnect X once if it does not),
   and ends with the tx link and contract, as every sale post did.
 - **First in the queue, inside the horizon.** Sales are planned before buys,
@@ -1648,22 +1919,24 @@ now goes out alone only when it is a win:
   out held every slot the recap could reach until the losses aged out of its
   window. About five wins in six hours fit; a win that cannot get its own
   post while six hours fresh is still counted by a recap.
-- **Said whatever the model does.** A win needs no model. When the model's
-  sentence is not there (a pass, a refusal, an outage, a spent allowance) or
-  does not fit beside the result line, tx link and contract (about sixty-five
-  characters are left), code's own line is used (xpost/sale-words.ts, e.g.
-  "sold IGNITION. receipt saved, desk running, nothing further."): the first
-  the gate admits that fits whole, for the coin's name and then its other
-  vetted names (a ticker when the name is too long or reads as a quantity).
-  They say the sale is on the record and the desk goes on, and nothing a
-  receipt does not show (no timing, speed or quality, no whole position, no
-  leaving the coin, no human life). A hundred and forty-four lines of three
-  two-word parts, any two sharing at most one part, so two wins are never one
-  template to the repeat check, of different coins or of the same coin with
-  a name of one or two words; then the same lines with two parts, for a name
-  too long for three. A win whose only name is long and that the model cannot
-  word may still find none that fits, and is counted by a recap. An active
-  owner's win needs no model whether or not its buy posts are on.
+- **Said whatever the model does.** A win needs no model. The writer gets only
+  the sale's coin, a neutral wording angle and its real character budget. Profit
+  and loss produce identical prompts: code supplies the result afterwards.
+  Missing, refused or oversized drafts try 24 short, hand-written sale lines
+  first, then 576 reserve combinations: 600 candidates with varied openings,
+  walking both pools under the unchanged repeat gate.
+  Every line says sold without inventing timing, quantity, remaining holdings,
+  a complete exit, a reason, or a result. Long labels may use another vetted
+  name; if none fits, the sale remains available to the recap.
+- **Varied results, still receipt-backed.** Six tags retain "gross" and
+  "before fees and gas". Optional code reactions depend on the fresh gain band;
+  gains below one percent get no upbeat reaction. The last ten sale reactions
+  are avoided, and a bare tag remains available when room or variety runs out.
+  Losses and flat results use separate exact pools. Send-time validation accepts
+  only a complete exact tag/reaction for the freshly replayed result, or the
+  corresponding legacy line for an already queued post. Changed figures or
+  incompatible reactions withhold it. Explorer URLs still use the conservative
+  existing length calculation; no unverified URL-count shortcut is enabled.
 - **Counted by the recap too.** A recap counts every sale of its window,
   wins included ("4 green" counts every win), and a win a recap counted
   still goes out alone while it is fresh: no win waits on its own post to be
@@ -1711,7 +1984,10 @@ screens, which exist because code never read what a tag sits under; a check
 reads exactly that, and speaks only of the one target it found. Opt-outs,
 abuse, sensitive topics and distress are read on the tag and on the post
 under it as before. Never under a post, quote, author or target that names
-sherwood in any form or merrymen. At most `MERRYMEN_XPOST_CHECKS_PER_DAY`
+sherwood in any form or merrymen. Never when X did not hand over the post
+the tag replies to or quotes, or that post's author (deleted, protected or
+suspended; `XReply.contextUnread`, 2026-10-18): those screens could not read
+it, so the tag is read as any other tag. At most `MERRYMEN_XPOST_CHECKS_PER_DAY`
 (default 80) a UTC day across X accounts, counted before anything is read,
 and inside the answer caps (sixty a day, six a person).
 
@@ -1913,6 +2189,33 @@ The private `agentBrief` never enters an X prompt.
   or estimated cost basis means neutral sale commentary with no result claim.
   There is no claim of net profitability or of selling early; those require
   evidence this path does not have.
+- **What a sale's words may not say (2026-10-18).** The sale gate takes
+  "sold" out before the vocabulary screens, so "just sold" and "sold at" were
+  never read as alerts, and a sale was not held to the holding screens a
+  casual post is. A probe of the real gate let through "just sold some casino
+  from the stack", "sold casino, rest of the bag stays put", "sold half of my
+  casino here" and "sold casino at the top of the range". A sale's words, read
+  with the coin and the agent's name taken out, are now refused when they:
+  - read as an alert or a price claim with "sold" left in (`alert`,
+    `market`): "just sold", "sold at";
+  - say where the price was or when (`sale-timing`): "sold PEPE at", "sold
+    the top", "near the highs", "into strength", "into the dip", "a while
+    ago", "flipped";
+  - say how much went, part or whole (`sale-amount`, and `quantity` for an
+    amount in words): "half", "a quarter", "a chunk of", "some", "a bit of",
+    "a piece of", "most", "trimmed", "all", "the whole", or the bag or the
+    position itself;
+  - say something is left or kept, or a buy is coming (`sale-holding`):
+    "still in", "holding", "the rest", "stays put", "what's left", "a
+    runner", "i'll buy again", the casual post's holding and buy-to-come
+    screens included.
+
+  A receipt shows that a sale landed, never where the price was, how much of
+  the position went, or what is left. Stricter only: every line of code's
+  sale words (`sale-words.ts`) still clears, and a refused model sentence on
+  an active owner's win falls back to them as before
+  (`sale-code-words:gate:sale-amount` and so on). The model's sale prompt is
+  unchanged.
 
 ### The profit card on a sale (2026-10-13)
 
@@ -1966,6 +2269,60 @@ The original at-most-once claim, review window, account gap and daily limits
 continue to apply; buy and sale posts share the existing trade-post ceiling.
 An introduction posted manually is not automatically imported into the queue:
 the owner should skip a duplicate introduction under Coming up.
+
+## Casual voice rollout (2026-10-18)
+
+The continuation includes PR #346 and the first five voice commits. Mention
+pages containing only recognized missing-expansion errors remain readable;
+unread parent context cannot authorize a larp check. STOP processing, reply
+consent, cross-tenant account checks and at-most-once sending are unchanged.
+
+Timeline prompts use up to ten recent buy, sale, recap and casual posts after
+filtering. Code removes sale results, figures, transaction links and contract
+addresses; replies and researched answers never enter this voice memory.
+Posts about the other money mode are excluded before taking ten. Repeat checks
+still see the full original history. `same-opener` rejects the first two content
+words matching any of the last eight timeline openings, masking coin labels.
+Replies cannot crowd that window out. Pool selectors try another candidate;
+no similarity threshold is reduced.
+
+Two staged switches start **off**:
+
+| Setting | Effect when exactly `1` |
+| --- | --- |
+| `MERRYMEN_XPOST_VARIETY` | Active owners rotate market 40%, hot 15%, software day 15%, a vetted question 10%, trading habit 10%, and passing thought 10%. Ten casual opportunities within the existing twelve-post daily timeline ceiling; the trade limit, 75-minute gap, review window, owner preference and fleet cap still apply. A quiet slot is not a posting quota. |
+| `MERRYMEN_XPOST_SMALLTALK_DRAFTS` | Already eligible greetings, reactions and banter at top level or directly under plain posts may use a model. Trade/closed threads and arbitrary free chat stay out. The complete draft gate, post-gate coin/house/trust/market/deictic checks and a closed conversational vocabulary all apply. PASS, errors, exhausted budget or unsafe wording use the vetted code reply. |
+
+The mixed timeline's questions are code-written and require reply consent.
+Only a finite whole-tag response to an exact own posted question gets the
+contextual acknowledgement; that exchange closes. This does not make arbitrary
+chat, financial suggestions, quotes or replies to other accounts eligible.
+The software-day lane is about being software, never an invented physical day,
+trade count or result. Hot slots focus on the screened mover or crowd evidence.
+The draft design proposed fifteen timeline posts a day; this implementation
+keeps twelve because that is the ceiling the current web and native consent
+screens promise. Ten casual opportunities may yield fewer published posts.
+
+Small talk remains inside the existing sixty-answer ceiling, with at most
+thirty small-talk replies per local day, two per author per UTC day (one for
+likely bots), four per conversation per UTC day, the twenty-second gap and
+three answers per poll. Fleet author lookup checks the actual candidate IDs
+without truncating the account table. A stop received while drafting still
+blocks scheduling and returns unused small-talk reservations.
+The same small-talk line cannot be scheduled to the same person again for
+seven days, across owners sharing an X account. This check runs under the
+existing author lock and counts scheduled, sending, posted and failed rows
+conservatively; canceled and skipped rows do not block it. Its exact-match
+check does not depend on the recent-history limit.
+
+Before enabling the staged switches, reconnect a rejected X grant in Settings,
+verify the account and posting choices, and observe the new reason counters.
+A separate permitted writer key/model prevents trading and posting from sharing
+rate limits. This change neither reconnects an account nor changes production
+configuration. Roll back the mixed timeline or model small talk by unsetting
+its switch; the safer code fallbacks, source ban, receipt checks and STOP handling
+remain in place. Application changes require Milla's review; no automatic merge
+or deployment is authorized by these notes.
 
 ## Known limits
 

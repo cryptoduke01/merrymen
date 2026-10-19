@@ -83,6 +83,7 @@ const MIN_FINGERPRINT_CHARS = 20;
 
 /** Prefix of the coverage limitation that marks a stored, not live, thesis read. */
 export const STALE_SNAPSHOT_PREFIX = "Stored snapshot:";
+export const INCOMPLETE_THESES_PREFIX = "Incomplete thesis read:";
 
 export const FEED_FLOOR_NOTE =
   "The activity feed only carries positions above roughly $3,000, so smaller fills are invisible and these counts are a floor, not a census.";
@@ -731,6 +732,8 @@ export interface ThesisCoverageInput {
   stale: boolean | null;
   ageSeconds: number | null;
   chainFilterHonoured: boolean | null;
+  /** The provider or normalizer omitted rows, so this cannot establish a complete change check. */
+  partial?: boolean;
 }
 
 export interface BuildDossierInput {
@@ -832,7 +835,7 @@ export function buildDossier(input: BuildDossierInput): { dossier: CoinDossier; 
       continue;
     }
     seenIds.add(t.id);
-    if (t.token && t.token.key !== token.key) {
+    if (t.token?.key !== token.key) {
       offToken++;
       continue;
     }
@@ -1122,6 +1125,7 @@ export function buildDossier(input: BuildDossierInput): { dossier: CoinDossier; 
   if (!routeContext.length) missingSections.push("route-context");
 
   const limitations: string[] = [];
+  if (tc.partial === true || offToken > 0) limitations.push(`${INCOMPLETE_THESES_PREFIX} some rows were missing or could not be placed on this coin.`);
   if (tc.capped) {
     limitations.push(
       tc.providerTotal !== null && tc.providerTotal > theses.length
@@ -1261,7 +1265,7 @@ export function buildDossier(input: BuildDossierInput): { dossier: CoinDossier; 
       ids: evidence.map((e) => e.id),
       stats: statsSignature(input.stats),
       window: input.window,
-      coverage: [tc.capped, tc.stale, tc.pagesRequested, tc.pagesReturned, tc.providerTotal, tc.chainFilterHonoured, input.activityRead ?? null],
+      coverage: [tc.capped, tc.stale, tc.pagesRequested, tc.pagesReturned, tc.providerTotal, tc.chainFilterHonoured, input.activityRead ?? null, tc.partial === true || offToken > 0],
       circular: theses.filter((t) => circularFamilies.has(familyOf(t))).map((t) => t.id),
       cohort: [...new Set(inWindow.map((e) => e.trader.userId).filter((u) => input.cohortUserIds.has(u)))].sort(),
       market: marketContext,

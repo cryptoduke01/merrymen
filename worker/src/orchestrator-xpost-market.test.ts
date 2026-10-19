@@ -258,3 +258,43 @@ describe("code's market words name no source (the owner's teammate, 2026-10-13)"
     }
   });
 });
+
+// Timeline fallback: exact typed market bands with independent opener variety.
+describe("code insight posts", () => {
+  it("every candidate in every direction/size/focus band passes the complete prose gate in live and paper mode", async () => {
+    const { insightLines } = await import("./xpost/market");
+    const { openerKey } = await import("./xpost/memory");
+    const majors: NonNullable<MarketRead["majors"]>[] = [{ dir: "flat" }, { dir: "mixed" },
+      ...(["up", "down"] as const).flatMap((dir) => (["a little", "a fair bit", "sharply", "uneven"] as const).map((size) => ({ dir, size })))];
+    const base = { day: majors[0]!, week: majors[1]!, chain: { coins: 1, lead: { dir: "flat" as const, size: null } }, crowd: 1 };
+    const cases = [
+      ...majors.flatMap((day, i) => [{ read: { ...base, day }, focus: "day" as const }, { read: { ...base, day, week: majors[(i + 1) % majors.length]! }, focus: "day-week" as const }]),
+      ...MOVES.filter((m): m is Move => m !== null).map((lead) => ({ read: { ...base, chain: { coins: 1, lead } }, focus: "lead" as const })),
+      ...[1, 2].map((crowd) => ({ read: { ...base, crowd }, focus: "crowd" as const })),
+      { read: { ...base, chain: { coins: 0, lead: null }, crowd: 0 }, focus: "quiet" as const },
+    ];
+    for (const { read, focus } of cases) for (const paper of [false, true]) {
+      const lines = insightLines(read, "sample", { focus, paper });
+      assert.equal(lines.length, 576);
+      assert.equal(new Set(lines).size, 576);
+      assert.ok(new Set(lines.map((line) => openerKey(line))).size >= 24);
+      for (const line of lines) {
+        const v = admitXPost(line, { kind: "casual", insight: true, house: true, buys: "none", lookedOnly: false,
+          agentName: "Alan Al Dale", mode: paper ? "paper" : "live", coins: [], recentOwn: [], recentFleet: [] }, admitAgentLine);
+        assert.ok(v.ok, `${focus}: ${line} → ${v.ok ? "" : v.reason}`);
+        assert.doesNotMatch(line, /\p{N}|\$|https?:|coingecko|bitquery|robinhood|bitcoin|ethereum|solana/iu);
+      }
+    }
+  });
+  it("fallback selection walks past recently used openers and repeated prose", async () => {
+    const { insightLines } = await import("./xpost/market");
+    const { openerKey } = await import("./xpost/memory");
+    const read = { day: { dir: "up" as const, size: "a little" as const }, week: null, chain: null, crowd: null };
+    const lines = insightLines(read, "repeat");
+    const recent = lines.filter((line, i) => lines.findIndex((other) => openerKey(other) === openerKey(line)) === i).slice(0, 8);
+    const line = lines.find((candidate) => admitXPost(candidate, { kind: "casual", insight: true, house: true, buys: "none",
+      agentName: "Alan Al Dale", mode: "live", coins: [], recentOwn: recent, recentOpeners: recent, recentFleet: [] }, admitAgentLine).ok);
+    assert.ok(line);
+    assert.ok(!recent.some((old) => openerKey(old) === openerKey(line!)));
+  });
+});

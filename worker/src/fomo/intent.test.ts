@@ -319,6 +319,11 @@ const FINDINGS: FindingRow[] = [
 
   // C11: a chain named in answer to "which one?" places the remembered coin and keeps that chain.
   { id: "C11", mem: "pending", text: "on base", intent: "token-sellers", calls: [["fomo_get_token_activity", { token: "PEPE", chain: "base", side: "sell" }]] },
+  { id: "C11", mem: "pending", text: "robinhood", intent: "token-sellers", calls: [["fomo_get_token_activity", { token: "PEPE", chain: "robinhood", side: "sell" }]] },
+  { id: "C11", mem: "pending", text: "base", intent: "token-sellers", calls: [["fomo_get_token_activity", { token: "PEPE", chain: "base", side: "sell" }]] },
+  { id: "C11", mem: "pending", text: "solana", intent: "token-sellers", calls: [["fomo_get_token_activity", { token: "PEPE", chain: "solana", side: "sell" }]] },
+  { id: "C11", mem: "pendingAddr", text: "Robinhood", intent: "token-theses", calls: [["fomo_get_token_theses", { token: A, chain: "robinhood" }]] },
+  { id: "C11", mem: "pendingAddr", text: "solana", intent: "token-theses", clarify: "That address can't be on Solana. Which chain is it on?" },
   { id: "C11", mem: "pending", text: "the one on base", intent: "token-sellers", calls: [["fomo_get_token_activity", { token: "PEPE", chain: "base", side: "sell" }]] },
   { id: "C11", mem: "pending", text: "base chain", intent: "token-sellers", calls: [["fomo_get_token_activity", { token: "PEPE", chain: "base", side: "sell" }]] },
   { id: "C11", mem: "pending", text: "I mean on base", intent: "token-sellers", calls: [["fomo_get_token_activity", { token: "PEPE", chain: "base", side: "sell" }]] },
@@ -455,6 +460,30 @@ describe("review findings, planned", () => {
     const p2 = classifyFomoQuestion("refresh it", { memory: step.memory, now: NOW + 30_000 });
     assert.ok(p2);
     assert.deepEqual(p2.toolCalls, [{ tool: "fomo_get_token_activity", args: { token: "PEPE", chain: "base", side: "sell", freshness: "force-refresh" } }]);
+  });
+
+  it("a bare chain answer only completes a fresh unplaced coin read, never a mutation or a different resolved coin", () => {
+    for (const memory of [null, MEMORIES.token!, { ...PENDING, updatedAt: NOW - 31 * 60_000 }, { ...PENDING, lastIntent: "watch" as const }, { ...PENDING, lastIntent: "unwatch" as const }]) {
+      const p = classifyFomoQuestion("robinhood", { memory, now: NOW });
+      assert.ok(!p || p.toolCalls.length === 0, JSON.stringify(p));
+    }
+    const p = classifyFomoQuestion("$SOL", { memory: PENDING, now: NOW });
+    assert.deepEqual(p?.toolCalls, [{ tool: "fomo_get_token_activity", args: { token: "SOL", side: "sell" } }]);
+  });
+
+  it("only a bare contract clarification inherits the pending ticker's chain", () => {
+    const memory = mem({ subjects: [{ kind: "token", symbol: "BOOMER", chain: "robinhood" }], lastIntent: "token-theses" });
+    assert.deepEqual(classifyFomoQuestion(A, { memory, now: NOW })?.toolCalls,
+      [{ tool: "fomo_get_token_theses", args: { token: A, chain: "robinhood" } }]);
+    for (const text of [`no I meant ${A}`, `what are the theses on ${A}`]) {
+      assert.deepEqual(classifyFomoQuestion(text, { memory, now: NOW })?.toolCalls,
+        [{ tool: "fomo_get_token_theses", args: { token: A } }], text);
+    }
+    assert.deepEqual(classifyFomoQuestion(`${A} on base`, { memory, now: NOW })?.toolCalls,
+      [{ tool: "fomo_get_token_theses", args: { token: A, chain: "base" } }]);
+    const mismatch = classifyFomoQuestion(MINT, { memory, now: NOW });
+    assert.match(mismatch?.clarification ?? "", /That address can't be on Robinhood/);
+    assert.deepEqual(mismatch?.toolCalls, []);
   });
 
   it("R9: a crowd question that says 'they' neither uses nor re-remembers the last trader, so the next one is not captured either", () => {

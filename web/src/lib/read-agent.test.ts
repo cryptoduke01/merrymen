@@ -518,3 +518,29 @@ test("flows that are not read draw no growth line and no drawdown, whatever stop
     assert.equal(failed.maxDdBps, null);
   } finally { raw.close(); }
 });
+
+test("profile summary answers from the current registration without any financial or history read", async (t) => {
+  const { profileSummaryOf } = await import("./read-agent");
+  const { raw, db } = await ledger();
+  try {
+    const statements: string[] = [];
+    const light: Db = {
+      prepare(sql) {
+        statements.push(sql);
+        assert.doesNotMatch(sql, /\b(?:trades|equity|flows|positions|tenant_settings)\b/i);
+        return db.prepare(sql);
+      },
+      exec: sql => db.exec(sql), tx: fn => db.tx(fn),
+    };
+    const start = performance.now();
+    const p = await profileSummaryOf(light, identity);
+    t.diagnostic(`Profile identity summary: ${(performance.now() - start).toFixed(2)}ms / ${statements.length} ledger query; no history, settings or book read.`);
+    assert.equal(p?.name, "Shogun");
+    assert.equal(p?.summary, true);
+    assert.equal(p?.joinedAt, T0 - 86_400);
+    assert.equal(statements.length, 1);
+    assert.doesNotMatch(JSON.stringify(p), /smart_account|owner_address|equity|pnl|landed|holdings|publicBook/);
+    const failed: Db = { ...light, prepare() { throw new Error("unread"); } };
+    await assert.rejects(profileSummaryOf(failed, identity), /unread/, "failed reads cannot become not-found");
+  } finally { raw.close(); }
+});

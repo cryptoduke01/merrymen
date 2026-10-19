@@ -33,6 +33,7 @@ import {
 } from "../../packages/core/src/index";
 import { ensureHome, homePaths, merrymenHome } from "./home";
 import { wrapSqlite, makePgDb, type Db } from "./db";
+import { applyLedgerMigrations } from "./ledger-migrations";
 import { paperBrainCapital } from "./paper-brain-capital";
 export const getPaperBrainCapital = (agentId: string, epoch: number) => paperBrainCapital(getDb(), agentId, epoch);
 import { readDecisionLifecycle, type DecisionLifecycle } from "./decision-lifecycle";
@@ -49,6 +50,7 @@ import { admitCapitalFlow, tradingModeOf, type TradingMode } from "./paper-bound
 import { DERIVED_ID } from "./thesis-policy";
 // The coin's name a fill is stored with — see fillSymbolOfRow.
 import { fillSymbolFor, nonCashLeg } from "./token-label";
+import { redactUrls } from "./redact-urls";
 import { completePersonalMemoryForget, recordPersonalMemoryForget } from "./personal-memory-ferry";
 
 let driver: Db | null = null;
@@ -1142,18 +1144,13 @@ function initSqlite(): Db {
  * schema would silently break the mirror's INSERT — caught, logged once,
  * invisible.
  *
- * Idempotent: CREATE TABLE IF NOT EXISTS, and each ALTER swallowed the way
- * initSqlite and initPostgres already swallow it.
+ * Existing columns are checked before issuing ALTER: PostgreSQL still takes
+ * an exclusive table lock for ADD COLUMN IF NOT EXISTS. Missing-column
+ * failures stop setup rather than leaving a partly migrated financial ledger.
  */
 export async function applyLedgerSchema(db: Db): Promise<void> {
   await execSchemaBatch(db);
-  for (const ddl of SQLITE_ALTERS) {
-    try {
-      await db.exec(ddl);
-    } catch {
-      // column already exists — the same no-op the two init paths rely on
-    }
-  }
+  await applyLedgerMigrations(db, SQLITE_ALTERS);
   await execReadIndexes(db);
 }
 
@@ -1192,16 +1189,7 @@ async function execSchemaBatch(db: Db): Promise<void> {
  *  Postgres dialect. Selected by DATABASE_URL, mirroring the grant store. */
 async function initPostgres(url: string): Promise<Db> {
   const d = await makePgDb(url);
-  await execSchemaBatch(d);
-  for (const ddl of SQLITE_ALTERS) {
-    try {
-      await d.exec(ddl);
-    } catch {
-      // ADD COLUMN IF NOT EXISTS makes a re-run a no-op; a genuine error still
-      // surfaces on the first real query rather than being masked here.
-    }
-  }
-  await execReadIndexes(d);
+  await applyLedgerSchema(d);
   console.error("[store] postgres ledger");
   return d;
 }
@@ -1487,8 +1475,10 @@ export async function addDecision(row: DecisionRow): Promise<void> {
         row.symbol ?? null,
         row.action ?? null,
         row.size_usdg ?? null,
-        row.reason ?? null,
-        row.dropped_rule ?? null,
+        // Free text that can be a caught error's (`no decision (…): <error>`),
+        // and the decision feed is public. See redact-urls.ts.
+        row.reason == null ? null : redactUrls(row.reason),
+        row.dropped_rule == null ? null : redactUrls(row.dropped_rule),
         row.signals_json ?? null,
         row.hold_kind ?? null,
         row.evidence_json ?? null,
@@ -2932,7 +2922,9 @@ export async function finishCommand(id: string, result: string): Promise<void> {
   try {
     await getDb()
       .prepare("UPDATE agent_commands SET done_at = unixepoch(), result = ? WHERE id = ?")
-      .run(result.slice(0, 500), id);
+      // The owner's receipt for a command, and a failed one is an error's text.
+      // Redacted before the cut, so no half of a key is left (redact-urls.ts).
+      .run(redactUrls(result).slice(0, 500), id);
   } catch {
     /* the command ran; losing its receipt must not re-run it */
   }
@@ -3255,9 +3247,12 @@ export async function addEvent(
   message: string,
 ): Promise<void> {
   try {
+    // An event is the owner's dashboard and the mirror's copy of it, and its
+    // message is often a caught error's text — which names the RPC URL, key
+    // and all, whenever viem raised it (redact-urls.ts).
     await getDb()
       .prepare("INSERT INTO events (agent_id, level, message) VALUES (?, ?, ?)")
-      .run(agentId, level, message);
+      .run(agentId, level, redactUrls(message));
   } catch (e) {
     console.error("[store] event insert failed:", e);
   }
@@ -3344,6 +3339,10 @@ async function fillSymbolOfRow(row: TradeRow): Promise<string | null> {
  * the reservation release drop it.
  */
 export async function addTrade(row: TradeRow): Promise<boolean> {
+  // reject_rule is free text on the `couldn't submit: <error>` path, and the
+  // error is viem's, URL and key included. Redacted before anything reads the
+  // row, so the hash chain and both writes below see the same value.
+  if (row.reject_rule) row = { ...row, reject_rule: redactUrls(row.reject_rule) };
   try {
     const epoch = await epochOf(row.agent_id);
     // Before any write, and outside the journal's transaction: two reads at most.

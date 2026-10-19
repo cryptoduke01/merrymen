@@ -22,7 +22,7 @@ process.env.MERRYMEN_X_CLIENT_SECRET = "x-client-secret-never-to-a-child";
 process.env.MERRYMEN_XPOST_LLM_KEY = "gsk_x_only_key_never_to_a_child";
 
 const { childEnv } = await import("./orchestrator");
-const { X_MUSINGS, X_TAKES, casualInputs, casualSeed, makeXPoster, talkedOf, tradeTalkDay, writerFacts, xpostEnv, xpostSetup } = await import("./orchestrator-xpost");
+const { X_MUSINGS, X_TAKES, casualInputs, casualSeed, makeXPoster, talkedOf, tradeTalkDay, whyText, writerFacts, xpostEnv, xpostSetup } = await import("./orchestrator-xpost");
 const { TRAIT_VOICE } = await import("./groupchat/templates");
 const { admitAgentLine } = await import("./groupchat/policy");
 const { isAsleep } = await import("./groupchat/clock");
@@ -37,6 +37,7 @@ import type { Db } from "./db";
 import type { LlmCreds } from "./llm";
 import type { FetchLike, XApp } from "./xpost/client";
 import { xWeightedLength } from "./xpost/client";
+import { hasSaleOutcome } from "./xpost/sale-outcome";
 import type { XPosterDeps } from "./orchestrator-xpost";
 import type { XGateCtx } from "./xpost/gate";
 import type { PlanSell } from "./xpost/planner";
@@ -167,6 +168,20 @@ describe("xpostEnv reads the knobs the way an operator means them", () => {
     }
   });
 
+  it("MERRYMEN_XPOST_TEMPERATURE is a number from 0 to 2; anything else keeps the writer's default and says so by name", () => {
+    assert.equal(xpostEnv({ MERRYMEN_XPOST_TEMPERATURE: " 0.8 " }).temperature, 0.8);
+    assert.equal(xpostEnv({ MERRYMEN_XPOST_TEMPERATURE: "0" }).temperature, 0);
+    assert.equal(xpostEnv({ MERRYMEN_XPOST_TEMPERATURE: "2" }).temperature, 2);
+    assert.ok(!("temperature" in xpostEnv({ MERRYMEN_XPOST_TEMPERATURE: "" })), "set-but-blank is unset");
+    for (const v of ["hot", "-0.1", "2.5", "0,8", "gsk_pasted_key_by_mistake"]) {
+      const k = xpostEnv({ MERRYMEN_XPOST_TEMPERATURE: v });
+      assert.equal(k.off, null, v);
+      assert.ok(!("temperature" in k), v);
+      assert.deepEqual(k.notes, ["xpost: ignoring MERRYMEN_XPOST_TEMPERATURE — it is not a number from 0 to 2; drafts keep the default of 0.6"], v);
+      assert.ok(!k.notes.join(" ").includes(v), "said by name, never by value");
+    }
+  });
+
   it("an unreadable spend knob fails closed and says so", () => {
     for (const v of ["1,000", "-5", "many"]) {
       assert.match(xpostEnv({ MERRYMEN_XPOST_FLEET_PER_DAY: v }).off ?? "", /MERRYMEN_XPOST_FLEET_PER_DAY is set but .*nothing is posted/);
@@ -286,6 +301,8 @@ interface World {
   dek: Buffer;
   tweets: string[];
   prompts: string[];
+  /** Each draft's system prompt, beside its prompt. */
+  systems: string[];
   fetch: FetchLike;
 }
 
@@ -310,7 +327,7 @@ async function world(t: { after(fn: () => void): void }, consentAtMs: number, sc
     const text = JSON.stringify({ data: { id: String(1840000000000000000n + BigInt(tweets.length)) } });
     return { status: 201, headers: { get: () => null }, text: async () => text };
   };
-  return { db, dek, tweets, prompts: [], fetch };
+  return { db, dek, tweets, prompts: [], systems: [], fetch };
 }
 
 function call(over: Partial<CallFact>): CallFact {
@@ -335,7 +352,14 @@ function poster(
     others?: Record<string, CallFact[]>;
     tz?: string | null;
     creds?: LlmCreds | null;
-    answer?: (prompt: string) => string;
+    /** The model's answer: a text, a throw (a provider's failure), or a promise that never settles (a timeout). */
+    answer?: (prompt: string) => string | Promise<string>;
+    /** How long a draft is waited for. Default: the writer's own. */
+    draftTimeoutMs?: number;
+    /** MERRYMEN_XPOST_TEMPERATURE, as xpostEnv read it. */
+    temperature?: number;
+    /** Each model call's settings (everything but the words and the signal), in order. */
+    llmOpts?: unknown[];
     llmPerDay?: number;
     fleetPerDay?: number;
     perDay?: number;
@@ -358,7 +382,8 @@ function poster(
     ((prompt: string) => (/very first post/.test(prompt) ? INTRO : /What happened: you bought/.test(prompt) ? BUY : "slow afternoons make me weirdly calm, nothing to prove"));
   return makeXPoster({
     creds: over.creds === undefined ? CREDS : over.creds,
-    knobs: { ...xpostEnv(over.active ? { MERRYMEN_XPOST_ACTIVE_TENANTS: TENANT } : {}), llmPerDay: over.llmPerDay, fleetPerDay: over.fleetPerDay, perDay: over.perDay },
+    knobs: { ...xpostEnv(over.active ? { MERRYMEN_XPOST_ACTIVE_TENANTS: TENANT } : {}), llmPerDay: over.llmPerDay, fleetPerDay: over.fleetPerDay, perDay: over.perDay,
+      ...(over.temperature !== undefined ? { temperature: over.temperature } : {}) },
     app: APP,
     dek: w.dek,
     deps: {
@@ -372,8 +397,11 @@ function poster(
       saleCard: over.saleCard,
       renderCard: over.renderCard,
       publicProjectDescription: over.publicProjectDescription,
-      llm: async (_creds, { prompt }) => {
+      ...(over.draftTimeoutMs ? { draftTimeoutMs: over.draftTimeoutMs } : {}),
+      llm: async (_creds, { system, prompt, signal: _signal, ...rest }) => {
         w.prompts.push(prompt);
+        w.systems.push(system);
+        over.llmOpts?.push(rest);
         return answer(prompt);
       },
     },
@@ -409,6 +437,18 @@ describe("owner-scoped public wallet intros", () => {
       await p.step(w.db, ROSTER, new Map(), T0 + 10 * MIN);
       assert.equal(w.tweets.length, 0);
       assert.equal((await rows(w))[0]?.reason, "context-changed");
+    });
+  }
+});
+
+describe("an active owner is told never to name the chain (the owner, 2026-10-18)", () => {
+  const T0 = Date.UTC(2026, 8, 28, 8, 0);
+  for (const active of [true, false]) {
+    it(`${active ? "an active owner's" : "every other owner's"} prompt ${active ? "says so" : "is as before"}`, async (t) => {
+      const w = await world(t, T0);
+      await poster(w, { active }).step(w.db, ROSTER, new Map(), T0);
+      assert.ok(w.systems.length > 0, "something was drafted");
+      for (const system of w.systems) assert.equal(/Never name the chain you trade on or any data provider/.test(system), active);
     });
   }
 });
@@ -471,7 +511,7 @@ describe("owner-scoped token contracts", () => {
         },
         answer: () => scenario === "attributed" ? "pepe's project says it helps people share art. i bought on paper because the pool was deep." : BUY,
       });
-      await p.step(w.db, ROSTER, new Map(), T0 + MIN);
+      const log = (await p.step(w.db, ROSTER, new Map(), T0 + MIN)).log ?? "";
       const post = (await rows(w)).find((r) => r.kind === "buy")!;
       assert.ok(post);
       assert.equal(reads, scenario === "balanced" ? 0 : 1);
@@ -481,6 +521,7 @@ describe("owner-scoped token contracts", () => {
       if (scenario === "unattributed") {
         assert.equal(post.status, "skipped");
         assert.equal(post.reason, "gate:project-attribution");
+        assert.match(log, /\bnot-posted 1 \(buy gate:project-attribution\)/);
       } else {
         assert.equal(post.status, "scheduled");
         assert.match(post.body, /\n\n0x[0-9a-f]{40}$/);
@@ -503,14 +544,15 @@ describe("receipt-backed sale posts", () => {
     const w = await world(t, T0);
     await ready(w);
     const p = poster(w, {
-      answer: () => "i sold some pepe.", facts: factsOf([], "live"),
+      answer: () => "i sold pepe, receipt filed.", facts: factsOf([], "live"),
       socialProfile: async () => ({ xTradeResults: true, currentAgent: { address: AGENT, chainId: 4663 } }),
       saleResults: async () => [sale],
     });
     await p.step(w.db, ROSTER, new Map(), T0 + MIN);
     const post = (await rows(w)).find((r) => r.kind === "sell")!;
     assert.ok(post);
-    assert.equal(post.body, "i sold some pepe.\ngross gain before fees and gas. pleased with that part.");
+    assert.ok(post.body.startsWith("i sold pepe, receipt filed.\n"));
+    assert.equal(hasSaleOutcome(post.body, "profit"), true);
     assert.ok(w.prompts.every((prompt) => !prompt.includes("gross gain")), "the model is not asked to infer profitability");
     assert.equal(w.tweets.length, 0);
     await p.step(w.db, ROSTER, new Map(), post.dueAtMs);
@@ -542,7 +584,7 @@ describe("receipt-backed sale posts", () => {
       const results: PlanSell[] = [over.result ?? WIN];
       const p = poster(w, {
         active: over.active ?? true,
-        answer: () => over.answer ?? "i sold some pepe.", facts: factsOf([], "live"),
+        answer: () => over.answer ?? "i sold pepe, receipt filed.", facts: factsOf([], "live"),
         ...(over.llmPerDay === undefined ? {} : { llmPerDay: over.llmPerDay }),
         fetch: xWithMedia(calls, over.upload),
         socialProfile: async () => ({ xTradeResults: true, currentAgent: { address: AGENT, chainId: 4663 } }),
@@ -566,7 +608,7 @@ describe("receipt-backed sale posts", () => {
 
     it("uploads the card of the vouched sale right before its post, and the post names the media id", async (t) => {
       const { post, sent, calls, asked, drawn, logs } = await sendSale({}, t);
-      assert.match(post.body, /\n\+40% gross gain before fees and gas/);
+      assert.equal(hasSaleOutcome(post.body, "profit", 40), true);
       assert.equal(sent.status, "posted");
       const sale = calls.filter((c) => c.url.endsWith("/2/media/upload") || c.body.text === post.body);
       assert.deepEqual(sale.map((c) => c.url), ["https://api.x.com/2/media/upload", "https://api.x.com/2/tweets"]);
@@ -623,7 +665,7 @@ describe("receipt-backed sale posts", () => {
         const w = await world(t, T0, MEDIA);
         await ready(w);
         const p = poster(w, {
-          active: true, answer: () => "i sold some pepe.", facts: factsOf([], "live"),
+          active: true, answer: () => "i sold pepe, receipt filed.", facts: factsOf([], "live"),
           socialProfile: async () => ({ xTradeResults: true, currentAgent: { address: AGENT, chainId: 4663 } }),
           saleResults: async () => [result],
         });
@@ -637,8 +679,8 @@ describe("receipt-backed sale posts", () => {
       // The model passing; a model sentence too long to fit beside the link; and a long ticker at a five-figure gain, where
       // many of code's lines run long too and the next is tried until one fits.
       // And a name no line can carry (too long beside a five-figure gain; a number word the gate reads as a quantity): its ticker is said.
-      for (const [answer, name, symbol, gainPct, said] of [["PASS", "Pepe", "PEPE", 12.4, "Pepe"], ["sold some pepe today, the swap went through and the receipt is filed away.", "Pepe", "PEPE", 12.4, "Pepe"],
-        ["PASS", "Pudgy Penguin Club", "PUDGY", 12345, null], ["PASS", "Wrapped Robinhood Ether", "WETH", 12345, "WETH"], ["PASS", "Million", "MM", 12.4, "MM"],
+      for (const [answer, name, symbol, gainPct, said] of [["PASS", "Pepe", "PEPE", 12.4, "Pepe"], ["sold pepe today, the swap went through and the receipt is filed away.", "Pepe", "PEPE", 12.4, "Pepe"],
+        ["PASS", "Pudgy Penguin Club", "PUDGY", 12345, null], ["PASS", "Wrapped Robinhood Ether", "WETH", 12345, null], ["PASS", "Million", "MM", 12.4, "MM"],
         // A long name and no ticker the gate can say: its two-part lines (third review).
         ["PASS", "Wrapped Robinhood Ethers", "WETH2", 12345, "Wrapped Robinhood Ethers"]] as const) {
         for (let i = 0; i < 12; i++) {
@@ -662,9 +704,9 @@ describe("receipt-backed sale posts", () => {
           await p.step(w.db, ROSTER, new Map(), T0 + MIN);
           const post = (await rows(w)).find((r) => r.kind === "sell");
           assert.equal(post?.status, "scheduled", `${answer.slice(0, 12)} #${i}: ${post?.reason}`);
-          assert.ok(post!.body.includes(`\n${gainPct > 100 ? "+12,345%" : "+12%"} gross gain before fees and gas.`) && post!.body.includes(tx) && post!.body.endsWith(TOKEN), post!.body);
+          assert.ok(hasSaleOutcome(post!.body, "profit", gainPct) && post!.body.includes(tx) && post!.body.endsWith(TOKEN), post!.body);
           assert.ok(xWeightedLength(post!.body) <= 280);
-          if (said) assert.match(post!.body.split("\n")[0]!, new RegExp(`\\b${said}\\b`));
+          if (said) assert.match(post!.body.split("\n")[0]!, new RegExp(`\\b${said}\\b`, "i"));
         }
       }
     });
@@ -675,13 +717,36 @@ describe("receipt-backed sale posts", () => {
         const [words, result] = post.body.split("\n");
         assert.match(words!, /\bsold\b/);
         assert.match(words!, /\b(?:PEPE|Pepe)\b/);
-        assert.doesNotMatch(words!, /i sold some pepe/, "not the model's");
-        assert.equal(result, "+40% gross gain before fees and gas. pleased with that part.");
+        assert.doesNotMatch(words!, /i sold pepe, receipt filed/, "not the model's");
+        assert.equal(hasSaleOutcome(post.body, "profit", 40), true);
+        assert.ok(result!.includes("before fees and gas"));
         assert.equal(sent.status, "posted");
         assert.equal(calls.filter((c) => c.url.endsWith("/2/media/upload")).length, 1);
         assert.match(logs.join(" "), /card-attached 1/);
       });
     }
+
+    it("a win's line says whose words it went in, and why code's stood in: the model's reason, never any words (2026-10-18)", async (t) => {
+      const cases: [string, Parameters<typeof poster>[1], string, string | null][] = [
+        ["the model's sentence", { answer: () => "i sold pepe, receipt filed." }, "drafted-sell-model", null],
+        ["a PASS", { answer: () => "PASS" }, "drafted-sell-code", "no-draft:pass"],
+        ["a provider's refusal", { answer: () => { throw new Error("groq 429 — rate_limit_exceeded: Rate limit reached in organization org_private"); } }, "drafted-sell-code", "no-draft:groq-429"],
+        ["a refused draft", { answer: () => "sold pepe, pleased with that win." }, "drafted-sell-code", "gate:sale-result"],
+        ["no model allowance at all", { llmPerDay: 0 }, "drafted-sell-code", "no-model"],
+      ];
+      for (const [what, over, outcome, why] of cases) {
+        const w = await world(t, T0, MEDIA);
+        await ready(w);
+        const p = poster(w, { active: true, facts: factsOf([], "live"), socialProfile: async () => ({ xTradeResults: true, currentAgent: { address: AGENT, chainId: 4663 } }),
+          saleResults: async () => [WIN], ...over });
+        const log = (await p.step(w.db, ROSTER, new Map(), T0 + MIN)).log ?? "";
+        assert.equal((await rows(w)).find((r) => r.kind === "sell")?.status, "scheduled", what);
+        assert.match(log, new RegExp(`(?:: |, )${outcome} 1(?:,|$)`), `${what}: ${log}`);
+        if (why) assert.match(log, new RegExp(`(?:: |, )sale-code-words:${why} 1(?:,|$)`), `${what}: ${log}`);
+        else assert.doesNotMatch(log, /sale-code-words/, what);
+        assert.doesNotMatch(log, /drafted-sell [0-9]|pepe|sold|gross|pleased|rate_limit|org_private/i, `${what}: ${log}`);
+      }
+    });
 
     it("a sale the ledger no longer draws a card for, or one that cannot be drawn, posts as text", async (t) => {
       const none = await sendSale({ card: async () => null }, t);
@@ -718,7 +783,7 @@ describe("receipt-backed sale posts", () => {
       let allowed = true;
       let evidence: PlanSell[] = [sale];
       const p = poster(w, {
-        answer: () => "i sold some pepe.", facts: factsOf([], "live"),
+        answer: () => "i sold pepe, receipt filed.", facts: factsOf([], "live"),
         socialProfile: async () => ({ xTradeResults: allowed, currentAgent: { address: AGENT, chainId: 4663 } }),
         saleResults: async () => evidence,
       });
@@ -836,10 +901,66 @@ describe("one step after another", () => {
     assert.equal((await rows(w))[0]?.status, "scheduled", "the template stood in");
     await p.step(w.db, ROSTER, new Map(), T0 + 11 * MIN);
     const r = await rows(w);
-    assert.deepEqual(r.map((x) => [x.kind, x.status, x.reason]), [["intro", "posted", null], ["buy", "skipped", "no-draft"]]);
+    assert.deepEqual(r.map((x) => [x.kind, x.status, x.reason]), [["intro", "posted", null], ["buy", "skipped", "no-draft:pass"]]);
     assert.equal(r[1]?.body, "", "nothing refused is kept");
     await p.step(w.db, ROSTER, new Map(), T0 + 13 * MIN);
     assert.equal(w.prompts.length, 2, "the skipped buy is not drafted again");
+  });
+
+  it("a skipped slot says why in the pass's line: its kind and the code its row keeps, never the draft or the provider's words", async (t) => {
+    const cases: [string, Parameters<typeof poster>[1], string][] = [
+      ["a PASS", { answer: (p) => (/very first post/.test(p) ? INTRO : "PASS") }, "no-draft:pass"],
+      ["an empty answer", { answer: (p) => (/very first post/.test(p) ? INTRO : "  ") }, "no-draft:empty"],
+      ["a provider's refusal", { answer: (p) => {
+        if (/very first post/.test(p)) return INTRO;
+        throw new Error("groq 429 — rate_limit_exceeded: Rate limit reached for model m in organization org_private on tokens per day");
+      } }, "no-draft:groq-429"],
+      ["a reasoning model out of tokens", { answer: (p) => {
+        if (/very first post/.test(p)) return INTRO;
+        throw new Error("groq m ran out of tokens before writing a reply (spent 400 on reasoning) — raise maxTokens or pick a model that does not reason");
+      } }, "no-draft:out-of-tokens"],
+      ["a timeout", { draftTimeoutMs: 20, answer: (p) => (/very first post/.test(p) ? INTRO : new Promise<string>(() => {})) }, "no-draft:timeout"],
+      ["a draft too short", { answer: (p) => (/very first post/.test(p) ? INTRO : "pepe, paper") }, "gate:too-short"],
+      ["an alert", { answer: (p) => (/very first post/.test(p) ? INTRO : "BUY ALERT: picked up pepe on paper, curve early") }, "gate:alert"],
+    ];
+    for (const [what, over, reason] of cases) {
+      const w = await world(t, T0);
+      const p = poster(w, { ...over, calls: [call({ decisionId: "d-pepe", atSec: (T0 + 2 * MIN) / 1000 })] });
+      await p.step(w.db, ROSTER, new Map(), T0 + MIN);
+      const log = (await p.step(w.db, ROSTER, new Map(), T0 + 11 * MIN)).log;
+      // The whole line, exactly: the kind and the code, and nothing of the draft or the provider's message.
+      assert.equal(log, `xpost: sent 1, not-posted 1 (buy ${reason})`, what);
+      assert.deepEqual((await rows(w)).map((x) => [x.kind, x.status, x.reason]), [["intro", "posted", null], ["buy", "skipped", reason]], what);
+    }
+  });
+
+  it("every draft is sampled at MERRYMEN_XPOST_TEMPERATURE, or the writer's 0.6; the qwen3 family is asked for no reasoning", async (t) => {
+    const cases: [Parameters<typeof poster>[1], unknown][] = [
+      [{}, { maxTokens: 700, temperature: 0.6 }],
+      [{ temperature: 0.8 }, { maxTokens: 700, temperature: 0.8 }],
+      [{ temperature: 0.8, creds: { ...CREDS, model: "qwen/qwen3.8-27b" } }, { maxTokens: 200, temperature: 0.8, reasoning: "off" }],
+    ];
+    for (const [over, want] of cases) {
+      const w = await world(t, T0);
+      const llmOpts: unknown[] = [];
+      const p = poster(w, { ...over, llmOpts, calls: [call({ decisionId: "d-pepe", atSec: (T0 + 2 * MIN) / 1000 })] });
+      await p.step(w.db, ROSTER, new Map(), T0 + MIN);
+      await p.step(w.db, ROSTER, new Map(), T0 + 11 * MIN);
+      assert.deepEqual(llmOpts, [want, want], "the intro and the buy");
+    }
+  });
+
+  it("a pass's reasons are said once each, counted, at most four, and held to an operator code's letters", () => {
+    assert.equal(whyText(undefined), "");
+    assert.equal(whyText(new Map()), "");
+    assert.equal(whyText(new Map([["casual no-draft:timeout", 1]])), " (casual no-draft:timeout)");
+    assert.equal(whyText(new Map([["insight no-draft:groq-429", 2], ["buy gate:too-short", 1]])), " (insight no-draft:groq-429 x2, buy gate:too-short)");
+    const many = new Map(["a", "b", "c", "d", "e", "f"].map((k) => [`casual gate:${k}`, 1]));
+    assert.equal(whyText(many), " (casual gate:a, casual gate:b, casual gate:c, casual gate:d, +2 more)");
+    // Whatever reached it, nothing but a code's alphabet is said, and never more than sixty-four characters of one.
+    assert.equal(whyText(new Map([["Buy gate:<b>\"$PEPE\"</b>\n@you https://x.co/?k=1", 1]])), " (buy gate:bpepeb you https:xcok1)");
+    assert.equal(whyText(new Map([["x".repeat(200), 1]])), ` (${"x".repeat(64)})`);
+    assert.equal(whyText(new Map([["$$$", 1]])), " (unknown)");
   });
 
   it("a draft the gate refuses is written off with its reason, and never posted", async (t) => {

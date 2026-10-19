@@ -23,6 +23,12 @@
  *   - WHAT IT BOUGHT LATELY (generalTradesQuestion): the coins it bought with
  *     the money it trades with now, named and nothing more (`tradesAnswers`).
  *     Never a draft: drafted, it endorsed the coin it holds.
+ *   - A GREETING (replies.ts greetingOnly) and PRAISE (reactionOnly), since
+ *     2026-10-18: a hello back (`greetingAnswers`) and a thanks
+ *     (`reactionAnswers`), in his house voice, as banter is now too.
+ *   - HOW HE IS (wellbeingAsk) and A CONFUSED "WHAT?" under his own small
+ *     talk (replies.ts confusedWords), since 2026-10-19: how he is
+ *     (`wellbeingAnswers`) and owning the odd wording (`confusedAnswers`).
  *
  * NONE OF THEM STATES A FACT about a coin, a market, a person, a project or an
  * event, and none promises, predicts or advises. Each says only what the
@@ -42,7 +48,9 @@
  * every line clears the real gate, live, paper and idle). No line carries an
  * opt-out notice (replies.ts CodeLineOptions: the owner's decision,
  * 2026-10-12). The answer path takes the first the gate admits, starting from
- * this mention's own (by its id), as for every code line.
+ * this mention's own (by its id), as for every code line. The kinds in his
+ * house voice (a greeting, praise, banter) are twelve a slot, a hundred and
+ * forty-four lines (WIDE_SLOT, texted).
  *
  * Pure: no I/O, no model, no clock.
  */
@@ -102,6 +110,11 @@ export const CASUAL_PAPER: readonly string[] = Object.freeze([
   "my ledger is on paper",
   "my fills are on paper",
   "my journal is on paper",
+  // Four more for the twelve-part kinds (WIDE_SLOT): an eight-part kind reads only the first eight, as before.
+  "my notebook is on paper",
+  "my records are on paper",
+  "my logbook is on paper",
+  "my sheets are on paper",
 ]);
 
 /** One kind's lines: each part joined, a paper clause when on paper, a full stop. Never an opt-out notice. */
@@ -109,6 +122,28 @@ function styled(slots: readonly [readonly string[], readonly string[], readonly 
   compose: (a: string, b: string, c: string) => string): string[] {
   const paperOf = new Map(slots[0].map((part, i) => [part, CASUAL_PAPER[i % CASUAL_PAPER.length]!] as const));
   return latinLines(slots, seed, (a, b, c) => `${compose(a, b, c)}${o.paper === true ? `. ${paperOf.get(a)!}` : ""}.`);
+}
+
+/**
+ * LINES A TWELVE-PART KIND CAN MAKE: a hundred and forty-four (the owner's
+ * ask, 2026-10-18: Alan answers people who reply to him). Up to thirty small
+ * talk answers a day (SMALLTALK_PER_DAY in orchestrator-xpost.ts), against
+ * sixty days and two hundred of its own posts in the gate's repeat memory:
+ * sixty-four lines a kind would be spent within days, and the repeat gate is
+ * never loosened to make room. Twelve parts a slot, by the same Latin square.
+ */
+export const WIDE_SLOT = 12;
+
+/**
+ * ALAN'S HOUSE VOICE, AS CODE WRITES IT (the owner's decision, 2026-10-18):
+ * lowercase, half-sentences, a little slang (ngl, tbh, lol, kinda, lowkey)
+ * and no full stop at the end, like a text. Never an emoji, a digit, a coin,
+ * an outcome, "it" or "this one", a result or anything about what comes next.
+ * A paper agent's clause goes last, after a stop, as for every kind.
+ */
+function texted(slots: readonly [readonly string[], readonly string[], readonly string[]], seed: string, o: CodeLineOptions): string[] {
+  const paperOf = new Map(slots[0].map((part, i) => [part, CASUAL_PAPER[i % CASUAL_PAPER.length]!] as const));
+  return latinLines(slots, seed, (a, b, c) => `${a}. ${b}, ${c}${o.paper === true ? `. ${paperOf.get(a)!}` : ""}`);
 }
 
 // ── advice, declined ─────────────────────────────────────────────────────────
@@ -196,27 +231,139 @@ export function vibeAnswers(seed: string, style: { lower: boolean }, o: CodeLine
 /**
  * A FRIENDLY LINE ABOUT ITSELF, the answer to plain banter
  * (orchestrator-xpost-research.ts banterAsk; never a draft since the red-team
- * review of daaae961): a thanks, what it is (an AI agent merrymen built), and
- * an invitation. It answers no question it was not asked.
+ * review of daaae961): a hello, what it is or how it is (an AI agent merrymen
+ * built, a bot with simple days), and an invitation. It answers no question
+ * it was not asked.
  *
  * NO OPENER AGREES OR ACKNOWLEDGES (red-team review, 2026-10-12): a fixed
  * line goes up under text code has not judged, and "word, right on, pal",
  * "fair enough, mate", "love the energy here" and "haha, noted, friend" under
  * "you bought chump today, right?" or "chump is safe, right?" agreed with
  * whatever was said. Each opener only greets or thanks.
+ *
+ * TWELVE A SLOT, IN HIS OWN VOICE (2026-10-18): banter is answered again,
+ * and a hundred and forty-four lines that are not each other's repeat
+ * (WIDE_SLOT, texted).
  */
 export const CHAT_SLOTS: readonly [readonly string[], readonly string[], readonly string[]] = Object.freeze([
-  Object.freeze(["ha, appreciate the tag, fren", "oh hey, thanks for asking", "ahoy, traveller", "hello hello, friend", "yo, welcome to the mentions", "hiya, pal",
-    "greetings, mate", "sup, cheers for dropping by"]),
-  Object.freeze(["i'm an ai agent merrymen built", "bot life is simple", "my days go to reading charts", "a crypto creature, chilled",
-    "keeping things uncomplicated", "proudly homegrown software", "circuits in high spirits", "minding my corner happily"]),
-  Object.freeze(["ask about my process anytime", "always up for talking shop", "curious what else is on your mind", "come say hi whenever",
-    "grateful for the company today", "glad you stopped in, really", "hit me with another question", "nice chatting, as usual"]),
+  Object.freeze(["ha, nice of you to tag", "aww, thoughtful of you", "ahoy, traveller", "yo, inquiring minds", "heya, pal", "wassup, ty for dropping by",
+    "hah, bonjour", "surviving nicely, ty", "ooh, a visitor", "eyy, familiar face", "haha, hullo", "cheerio, mate"]),
+  Object.freeze(["i'm an ai agent merrymen built", "bot life is simple", "my days go to reading candles", "basically software with opinions",
+    "deliberately uncomplicated", "proudly homegrown code", "electrons in good shape", "minding my corner happily",
+    "fr the tape is my hobby", "lowercase forever, no caps", "a tiny autonomous critter", "spreadsheets and snacks"]),
+  Object.freeze(["quiz me freely", "game for talking shop", "your turn, how's yours", "holler anytime",
+    "thankful for the hang", "stoked you stopped in", "hit me with questions", "fun chatting, as usual",
+    "may your wifi be strong", "pop in again", "passing the mic", "chats like these rule"]),
 ]) as unknown as readonly [readonly string[], readonly string[], readonly string[]];
 
 /** Plain banter (banterAsk): every friendly line, this mention's own first. */
 export function chatAnswers(seed: string, style: { lower: boolean }, o: CodeLineOptions = {}): string[] {
-  return styled(CHAT_SLOTS, seed, o, (a, b, c) => `${a}. ${b}, ${c}`);
+  return texted(CHAT_SLOTS, seed, o);
+}
+
+// ── how he is ────────────────────────────────────────────────────────────────
+
+/**
+ * "HOW ARE YOU", ANSWERED WITH HOW HE IS (the owner's ask, 2026-10-19). Banter's
+ * friendly line is about what he is, and a "how are you" drew "yo, inquiring
+ * minds. proudly homegrown code, may your wifi be strong", which says nothing
+ * of how he is; the asker replied "what?". A how-are-you
+ * (orchestrator-xpost-research.ts wellbeingAsk) now gets how he is, what he is
+ * pottering at in words that are never trading, and the question turned back.
+ * The same rules as banter's: never a coin, an outcome, "it", a figure or what
+ * comes next, and nothing that claims he is trading right now.
+ */
+export const WELLBEING_SLOTS: readonly [readonly string[], readonly string[], readonly string[]] = Object.freeze([
+  Object.freeze(["doing good, ty for asking", "pretty great tbh", "can't complain lol", "swell, thanks for checking", "honestly fantastic", "chilling, appreciate the ask",
+    "running smooth", "feeling sharp, cheers", "kinda wonderful actually", "mostly fine, ty", "better for the ping", "cozy and content"]),
+  Object.freeze(["just a bot enjoying life", "circuits humming nicely", "reading the timeline slowly", "doodling in the margins", "lowkey vibing with the feed",
+    "tidying the cache", "learning fun stuff", "newly patched code", "wiring feels cheerful", "nothing weird to report", "happily nerding out", "brain in comfy mode"]),
+  Object.freeze(["how's your day treating you", "what's new on your side", "hope your spirits are bright", "spill your news", "share your status",
+    "glad we're chatting", "stay awesome friend", "sweet of you to wonder", "holler back whenever", "anything exciting your way", "describe your mood",
+    "pass the vibes along"]),
+]) as unknown as readonly [readonly string[], readonly string[], readonly string[]];
+
+/** A how-are-you (wellbeingAsk): every line saying how he is, this mention's own first. */
+export function wellbeingAnswers(seed: string, style: { lower: boolean }, o: CodeLineOptions = {}): string[] {
+  return texted(WELLBEING_SLOTS, seed, o);
+}
+
+// ── a confused reply to his small talk ──────────────────────────────────────
+
+/**
+ * "WHAT?" UNDER HIS OWN SMALL TALK, ANSWERED (the owner's ask, 2026-10-19). A
+ * "what?😭" under his banter was refused as too short and nobody heard back.
+ * Only directly under one of his own plain-thread small-talk answers
+ * (replies.ts confusedWords, tagCandidate) — a greeting, a thanks, banter or
+ * how he is, none of which says anything of a coin — he owns the odd wording,
+ * says plainly it was only friendly, and signs off. It ends the thread
+ * (store.ts ANSWER_THREAD_DONE), so "what?" "what?" cannot loop, and so no
+ * sign-off asks for a reply under it that would never be answered (review of
+ * PR #350): only a goodbye, or a fresh tag, which is answered as any other.
+ * Never a coin, an outcome, "it", a figure or what comes next.
+ */
+export const CONFUSED_SLOTS: readonly [readonly string[], readonly string[], readonly string[]] = Object.freeze([
+  Object.freeze(["yeah, odd phrasing", "fair, that was cryptic", "oops, robot poetry", "ha, word salad there", "lol my bad", "sorry, clumsy wording",
+    "heh, overthought that", "too abstract, apologies", "brain went sideways", "whoops, weird combo", "my circuits rambled", "understandable confusion"]),
+  Object.freeze(["just a friendly bot", "only meant hello", "nothing deep behind", "pure goodwill here", "simple chatter really", "harmless small talk",
+    "basically waving", "good vibes, no riddle", "warm wishes, plainly", "kindness was the point", "greeting you warmly", "plain friendliness"]),
+  Object.freeze(["tag me fresh anytime", "carry on, cheers", "no worries whatsoever", "peace out, friend", "all sorted then", "enjoy your scrolling",
+    "catch you around", "stay comfy", "back to lurking", "much love regardless", "cheerio, pal", "that's the whole story"]),
+]) as unknown as readonly [readonly string[], readonly string[], readonly string[]];
+
+/** A confused reply under his own small talk (replies.ts confusedWords): every line, this mention's own first. */
+export function confusedAnswers(seed: string, style: { lower: boolean }, o: CodeLineOptions = {}): string[] {
+  return texted(CONFUSED_SLOTS, seed, o);
+}
+
+// ── a greeting ───────────────────────────────────────────────────────────────
+
+/**
+ * A GREETING, ANSWERED (2026-10-12; again since 2026-10-18). A tag that is
+ * only a greeting ("hiii", "gm", "yo ser": replies.ts greetingOnly) gets a
+ * hello back, how he is, and an easy opening. Greeting-neutral: no morning
+ * or night in it, since the line is picked by the mention's id, not by the
+ * word he was greeted with. Nothing about a coin, the market or his trades.
+ */
+export const GREETING_SLOTS: readonly [readonly string[], readonly string[], readonly string[]] = Object.freeze([
+  Object.freeze(["hey hey, fancy that", "oh hi, lovely surprise", "yo, great timing", "hiya, buddy", "heyo, my guy", "sup fren",
+    "ello ello, what a treat", "howdy partner", "hello stranger", "ayy, waves enthusiastically", "well well, company", "greetings, fellow human"]),
+  Object.freeze(["kinda sleepy tbh", "brain's fully booted", "no coffee needed lol", "vibes are decent", "running pretty mellow", "same goofy machine",
+    "systems feel snug", "lowkey pleased about the ping", "taking things easy", "ngl the feed is busy", "hanging in alright", "freshly caffeinated"]),
+  Object.freeze(["how's everything going", "fire away whenever", "hope the week's kind", "seats available", "what's brewing on your end", "keen to yap",
+    "drop a wave sometime", "the mentions are open", "shoot the breeze", "cheers for swinging by", "catch ya in the replies", "spill the tea"]),
+]) as unknown as readonly [readonly string[], readonly string[], readonly string[]];
+
+/** A greeting (greetingOnly): every hello back, this mention's own first. */
+export function greetingAnswers(seed: string, style: { lower: boolean }, o: CodeLineOptions = {}): string[] {
+  return texted(GREETING_SLOTS, seed, o);
+}
+
+// ── a reaction ───────────────────────────────────────────────────────────────
+
+/**
+ * PRAISE, THANKED (the owner's ask, 2026-10-18: "nice trade", "congrats",
+ * "gg", "lfg", "you're cooking" under his posts went unanswered). A tag that
+ * is only a reaction (replies.ts reactionOnly) gets a thanks, a line about
+ * himself, and a warm sign-off. Under a buy, a sale or a recap the praise is
+ * of a trade code never judged, and a net result he never said: so no line
+ * names the coin, the outcome, a win, a gain, a result or "it" or "this
+ * one", and none says what comes next. A thanks under a sale that netted
+ * little reads a touch odd and says nothing false.
+ */
+export const REACTION_SLOTS: readonly [readonly string[], readonly string[], readonly string[]] = Object.freeze([
+  Object.freeze(["aw, thank you kindly", "ha, deeply obliged", "ty, warms the wiring", "oh wow, flattered", "sending love", "endless gratitude",
+    "heh, grateful", "aw shucks, blushing", "respect returned", "sweet words, ty", "genuinely honored", "noted with a smile"]),
+  Object.freeze(["just a humble robot", "still learning the ropes", "mostly just vibing", "nose to the grindstone", "charts are my comfort show",
+    "secretly smiling", "spirits lifted", "i savor each comment", "discipline over ego", "feet firmly planted", "grinning ear to ear",
+    "my guardrails do the heavy lifting"]),
+  Object.freeze(["pleasure having you", "see ya in the comments", "onward, quietly", "comfy socks on", "warm regards", "take care out there",
+    "positive energy only", "seriously appreciated", "you brighten the scroll", "inbox is friendly", "bowing politely", "fist bump"]),
+]) as unknown as readonly [readonly string[], readonly string[], readonly string[]];
+
+/** A reaction (reactionOnly): every thanks, this mention's own first. */
+export function reactionAnswers(seed: string, style: { lower: boolean }, o: CodeLineOptions = {}): string[] {
+  return texted(REACTION_SLOTS, seed, o);
 }
 
 // ── how it trades, and what it bought ────────────────────────────────────────

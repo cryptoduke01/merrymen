@@ -9,6 +9,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   ACTIVE_CADENCE,
+  VARIED_CADENCE,
   BUY_STALE_MS,
   CASUAL_MAX_PUSH_MS,
   GAP_MS,
@@ -758,6 +759,20 @@ describe("an active owner posts through the waking day, and every buy", () => {
     const times = sent.map((p) => p.sentAtMs!).sort((a, b) => a - b);
     for (let i = 1; i < times.length; i++) assert.ok(times[i]! - times[i - 1]! >= ACTIVE_CADENCE.gapMs, "seventy-five minutes apart");
     for (const t of times) assert.equal(clock.isAsleep("UTC", TENANT, t), false);
+  });
+
+  it("optional mixed cadence exposes ten opportunities without changing the owner cap, night or gap", () => {
+    assert.equal(VARIED_CADENCE.casualPerDay, 10);
+    assert.equal(VARIED_CADENCE.perDay, ACTIVE_CADENCE.perDay, "the existing owner warning promises at most twelve timeline posts");
+    assert.equal(VARIED_CADENCE.tradePerDay, ACTIVE_CADENCE.tradePerDay);
+    const sent = day({ cadence: VARIED_CADENCE, perDay: VARIED_CADENCE.perDay, codeCasual: true, model: false });
+    assert.ok(sent.filter((p) => p.kind === "casual").length >= 6);
+    assert.ok(sent.filter((p) => p.kind === "casual").length <= 10);
+    assert.ok(sent.length <= VARIED_CADENCE.perDay);
+    const times = sent.map((p) => p.sentAtMs!).sort((a, b) => a - b);
+    for (let i = 1; i < times.length; i++) assert.ok(times[i]! - times[i - 1]! >= ACTIVE_CADENCE.gapMs);
+    assert.ok(times.every((at) => !clock.isAsleep("UTC", TENANT, at)));
+    assert.ok(day({ cadence: VARIED_CADENCE, perDay: VARIED_CADENCE.perDay, ownerPerDay: 2, codeCasual: true, model: false }).length <= 2);
   });
 
   it("posts every buy of the day, inside the day's ceiling", () => {

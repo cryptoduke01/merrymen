@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { XReply } from "./client";
-import { greetingOnly, isAnswerOptOut, isReplyOptOut, plainAsk, replyCandidate, tagCandidate } from "./replies";
+import { confusedWords, greetingOnly, isAnswerOptOut, isReplyOptOut, plainAsk, reactionOnly, replyCandidate, tagCandidate } from "./replies";
 import { base58Encode, SOLANA_USDG_MINT } from "../../../packages/core/src/ids";
 
 const CTX = { rootTweetId: "111", xUserId: "222", coin: "pepe" };
@@ -488,6 +488,66 @@ describe("a tag that is only a greeting (2026-10-12)", () => {
   });
 });
 
+describe("a tag that is only praise for him or his trade (the owner's ask, 2026-10-18)", () => {
+  // Its hello (999) is plain, its buy post (900) its own trade (store.ts ownThreadTweets).
+  const own = { xUserId: "222", username: "alanaidale", ownRoots: new Set(["999", "900"]), plain: new Set(["999"]), trade: new Set(["900"]) };
+  const top = (text: string, over: Partial<XReply> = {}) => comment(text, { id: "700", conversationId: "700", inReplyToTweetId: "", ...over });
+  const ALLOWED = ["nice trade", "nice trades", "nice one", "gg", "ggs", "congrats", "congratz", "congratulations", "well played", "well done", "lfg", "let's go",
+    "lets go", "lets gooooo", "let’s go", "w", "big w", "W", "Big W", "love this", "respect", "keep it up", "you're cooking", "youre cooking", "ur cooking",
+    "thanks", "thank you", "thx", "ty", "thanks alan", "ty ser", "gg fren", "congrats, bro", "nice one man", "alan, nice trade", "alan nice one",
+    "nice trade!", "LFG!!!", "respect.", "congrats 🔥", "nice trade 🔥🔥", "w 🫡🏽", "ｇｇ"];
+
+  it("is read on a strict allowlist of whole tags: one phrase, at most one address, a short ! or . and two emoji", () => {
+    for (const text of ALLOWED) assert.equal(reactionOnly(text), true, text);
+    for (const text of ["nice", "lol nice", "good bot", "solid entry", "good entry", "good call", "safe", "gem", "send it", "moon", "to the moon", "nice trade sir",
+      "nice trade $PEPE", "nice trade 2x", "gg 2", "w?", "nice trade?", "congrats, should i buy?", "nice trade, what's next?", "nice trade @friend", "gm sherwood",
+      "nice trade https://x.co", "🔥🔥", "🔥", "nice trade 🔥🔥🔥", "nіce trade", "nice\u200btrade", "nice trade alan ser", "w w", "keep going", "", null, 7]) {
+      assert.equal(reactionOnly(text), false, String(text));
+    }
+  });
+
+  it("a reaction is a candidate, marked as one: top level, under its own plain post, under its own buy post", () => {
+    for (const text of ALLOWED) {
+      const v = tagCandidate(top(`@alanaidale ${text}`), own);
+      assert.ok(v.ok && v.reaction === true && v.greeting === undefined && v.advice === undefined, `${text}: ${JSON.stringify(v)}`);
+    }
+    assert.deepEqual(tagCandidate(top("@alanaidale nice trade", { conversationId: "999", inReplyToTweetId: "999" }), own),
+      { ok: true, text: "nice trade", reaction: true, followUp: "plain" });
+    assert.deepEqual(tagCandidate(top("@alanaidale congrats", { conversationId: "900", inReplyToTweetId: "900" }), own),
+      { ok: true, text: "congrats", reaction: true, followUp: "own-trade" });
+  });
+
+  it("refused as reactions: a stop, another handle, a $, a digit, a question, a coin judged, sherwood, another alphabet, an attachment, a quote", () => {
+    const no = (text: string, over: Partial<XReply> = {}) => tagCandidate(top(text, over), own);
+    // A stop is an opt-out first, however friendly.
+    assert.deepEqual(no("@alanaidale nice trade stop"), { ok: false, reason: "opt-out" });
+    assert.deepEqual(no("@alanaidale thanks, now leave me alone"), { ok: false, reason: "opt-out" });
+    assert.deepEqual(no("@alanaidale nice trade @friend"), { ok: false, reason: "handle" });
+    // X's reply prefix naming someone else: never code's thanks, and praise alone asks nothing.
+    assert.deepEqual(no("@bob @alanaidale nice trade", { conversationId: "999", inReplyToTweetId: "999" }), { ok: false, reason: "not-asked" });
+    for (const text of ["@alanaidale nice trade $PEPE", "@alanaidale solid entry", "@alanaidale good call", "@alanaidale nice trade sir"]) {
+      assert.deepEqual(no(text), { ok: false, reason: "not-asked" }, text);
+    }
+    assert.deepEqual(no("@alanaidale gg 2"), { ok: false, reason: "low-signal" });
+    for (const text of ["@alanaidale congrats, should i buy?", "@alanaidale gm sherwood", "@alanaidale nice trade?"]) {
+      const v = no(text);
+      assert.ok(!(v.ok && v.reaction === true), `${text}: ${JSON.stringify(v)}`);
+    }
+    assert.deepEqual(no("@alanaidale nіce trade"), { ok: false, reason: "unsafe-text" }, "a Cyrillic i");
+    assert.deepEqual(no("@alanaidale nice trade 🔥🔥🔥"), { ok: false, reason: "unsafe-text" }, "a third emoji");
+    assert.deepEqual(no("@alanaidale 🔥🔥"), { ok: false, reason: "low-signal" }, "emoji alone are no reaction (the owner's decision, 2026-10-18)");
+    assert.deepEqual(no("@alanaidale nice trade", { attached: true }), { ok: false, reason: "attached" });
+    assert.deepEqual(no("@alanaidale nice trade", { quoted: true, quotedTweetId: "123" }), { ok: false, reason: "quoted" });
+    // A quote even of its own post is no reaction: what the card shows beside it is not code's to thank for.
+    assert.deepEqual(no("@alanaidale nice trade", { quoted: true, quotedTweetId: "900" }), { ok: false, reason: "not-asked" });
+    // Never in someone else's thread or under a stranger's reply, as for any tag.
+    assert.deepEqual(no("@alanaidale nice trade", { conversationId: "5", inReplyToTweetId: "5" }), { ok: false, reason: "not-own-thread" });
+    // An address is never praise.
+    const v = tagCandidate(top(`@alanaidale nice trade 0x${"ab12".repeat(10)}`), { ...own, research: true });
+    assert.ok(!(v.ok && v.reaction === true), JSON.stringify(v));
+  });
+});
+
 describe("advice is declined only when asked, and never about its own buying (red-team 2026-10-12)", () => {
   const tag = (text: string) => comment(text, { conversationId: "333", inReplyToTweetId: "" });
   const ON = { xUserId: "222", username: "alanaidale", research: true };
@@ -574,6 +634,72 @@ describe("red-team review of a964a74c: what the answer path answers by nothing (
     // Every other owner's comment replies are screened as before: a comment asking advice was never answered, and a plain one still is.
     assert.equal(replyCandidate(comment("why did you pick this coin, i almost sold my car for it"), CTX).ok, true);
     assert.ok(advised(at("should i buy btc?")), "a plain coin's advice is still flagged");
+  });
+});
+
+
+describe("no larp check with what it sits under unread (2026-10-18)", () => {
+  const CA = "0x86aF99052DB086a66aF7D764bB04d3abb81b485F";
+  const ctx = { xUserId: "222", username: "alanaidale", research: true, checks: true };
+  // Under a project's post, in a stranger's thread: a check is the only way such a tag is answered.
+  const under = (o: Partial<XReply> = {}) => comment(`@proj @alanaidale ${CA} larp check`, { id: "500", conversationId: "490", inReplyToTweetId: "490", ...o });
+  const read = [{ id: "490", relation: "replied_to" as const, text: `we're live, CA ${CA}`, links: ["https://acme.example"], authorId: "9", author: { username: "proj", name: "Proj" } }];
+  it("a tag whose post or author X did not hand over is no check, and goes on to be read as any other tag", () => {
+    const checked = tagCandidate(under({ context: read }), ctx);
+    assert.ok(checked.ok && checked.check, "read: a check of the tag's own contract");
+    for (const o of [{ contextUnread: true as const }, { context: read, contextUnread: true as const }]) {
+      const v = tagCandidate(under(o), ctx);
+      assert.ok(!(v.ok && v.check), JSON.stringify(o));
+      assert.deepEqual(v, { ok: false, reason: "not-own-thread" }, "in someone else's thread, as any tag");
+    }
+    // A quote of a post X did not hand over: refused as a quote, as any other.
+    const quote = comment(`@alanaidale is this real?`, { id: "501", conversationId: "501", inReplyToTweetId: "", quoted: true, quotedTweetId: "491", contextUnread: true });
+    assert.deepEqual(tagCandidate(quote, ctx), { ok: false, reason: "quoted" });
+    // Checks off, nothing changes: unread or not, the same reading.
+    assert.deepEqual(tagCandidate(under({ contextUnread: true }), { ...ctx, checks: false }), tagCandidate(under({ context: read }), { ...ctx, checks: false }));
+  });
+  it("every other screen still reads it: a STOP is a STOP, under an unread post too", () => {
+    assert.deepEqual(tagCandidate(under({ text: "@alanaidale stop", contextUnread: true }), ctx), { ok: false, reason: "opt-out" });
+  });
+});
+
+describe("a confused reply straight under its own small talk (the owner's ask, 2026-10-19)", () => {
+  // 801 is its plain-thread small-talk answer to the top-level tag 800; 999 its own hello; 802 one of its closed answers, to 700.
+  const own = { xUserId: "222", username: "pine_stoat", ownRoots: new Set(["999"]), ownPosts: new Set(["999", "801", "802"]),
+    answered: new Map([["800", "333"], ["700", "333"]]), plain: new Set(["999", "800", "801"]), smallAnswers: new Set(["801"]) };
+  const under = (text: string, parent: string, over: Partial<XReply> = {}) =>
+    comment(text, { id: "900", authorId: "333", conversationId: "800", inReplyToTweetId: parent, ...over });
+
+  it("is read on a strict allowlist of whole tags: one word or phrase of confusion, a short ?, ! or ., and two emoji at most", () => {
+    for (const text of ["what", "what?", "what??", "what?!", "WHAT?", "wat", "wut", "huh", "huh?", "hm", "hmm", "hmmm?", "wdym", "wym?", "what do you mean?",
+      "what do u mean", "what does that mean?", "come again?", "say what?", "lol what", "lmao what?", "i'm confused", "im lost", "i am confused", "what, alan?",
+      "?", "??", "???", "what?😭", "huh 😭😭", "what? 🤔"]) {
+      assert.notEqual(confusedWords(text), null, text);
+    }
+    for (const text of ["what is this", "what's hot?", "what coin", "huh $PEPE", "what? 😭😭😭", "😭", "what 2", "????", "what @bob", "what www.x.io",
+      "wh\u0430t", "what do you mean by pepe?", "huh, should i sell?", "", null, 7]) {
+      assert.equal(confusedWords(text), null, String(text));
+    }
+  });
+
+  it("is a candidate only straight under one of its own plain-thread small-talk answers, marked as such", () => {
+    assert.deepEqual(tagCandidate(under("@pine_stoat what?😭", "801"), own), { ok: true, text: "what?😭", confused: true, followUp: "plain" });
+    assert.deepEqual(tagCandidate(under("@pine_stoat huh", "801"), own), { ok: true, text: "huh", confused: true, followUp: "plain" });
+    // A real question there is read as one, never as confusion.
+    assert.deepEqual(tagCandidate(under("@pine_stoat whats trending rn?", "801"), own), { ok: true, text: "whats trending rn?", followUp: "plain" });
+  });
+
+  it("anywhere else a \"what?\" is about something code never read: refused as before", () => {
+    // At top level, under its own hello, under a closed answer of its own.
+    assert.deepEqual(tagCandidate(comment("@pine_stoat what?", { id: "900", conversationId: "900", inReplyToTweetId: "" }), own), { ok: false, reason: "low-signal" });
+    assert.deepEqual(tagCandidate(under("@pine_stoat what?", "999", { conversationId: "999" }), own), { ok: false, reason: "low-signal" });
+    assert.deepEqual(tagCandidate(under("@pine_stoat what?", "802", { conversationId: "700" }), own), { ok: false, reason: "low-signal" });
+    // A quote of its small talk, another handle in the prefix, or the asker's own earlier tag rather than its answer.
+    assert.deepEqual(tagCandidate(under("@pine_stoat what?", "801", { quoted: true, quotedTweetId: "801" }), own), { ok: false, reason: "low-signal" });
+    assert.deepEqual(tagCandidate(under("@bob @pine_stoat what?", "801"), own), { ok: false, reason: "low-signal" });
+    assert.deepEqual(tagCandidate(under("@pine_stoat what?", "800"), own), { ok: false, reason: "low-signal" });
+    // With no small-talk answers handed in, nothing is confusion.
+    assert.deepEqual(tagCandidate(under("@pine_stoat what?", "801"), { ...own, smallAnswers: undefined }), { ok: false, reason: "low-signal" });
   });
 });
 

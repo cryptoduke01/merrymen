@@ -35,6 +35,7 @@ import { sendDocument, sendPhoto, type TelegramOpts } from "./api";
 import { resolveInRoot, shellAllowed } from "./pc";
 import { getName } from "../soul";
 import { describeLlmFailure, isLlmProviderFailure } from "../llm-failure";
+import { errorText } from "../redact-urls";
 
 // ── pure guards (unit-tested directly) ───────────────────────────────────────
 
@@ -573,7 +574,7 @@ export async function runAgentTask(task: string, deps: AgentRunDeps): Promise<vo
         }
         const impl = byName.get(use.name);
         const output = impl
-          ? await impl.exec(use.input).catch((e: unknown) => `error: ${e instanceof Error ? e.message : String(e)}`)
+          ? await impl.exec(use.input).catch((e: unknown) => `error: ${errorText(e)}`)
           : `error: unknown tool ${use.name}`;
         results.push({ id: use.id, name: use.name, output });
       }
@@ -581,7 +582,7 @@ export async function runAgentTask(task: string, deps: AgentRunDeps): Promise<vo
     }
     await deps.send(`⏸️ hit the ${deps.cfg.maxSteps}-step budget. Send another /agent task to continue, or raise the budget in the dashboard.`);
   } catch (e) {
-    const m = e instanceof Error ? e.message : String(e);
+    const m = errorText(e);
     deps.note("warn", `Telegram agent: failed — ${m.slice(0, 200)}`);
     // The agent loop IS model calls, so a provider refusal is the common
     // failure here. Same rule as the interpreter and the command path.

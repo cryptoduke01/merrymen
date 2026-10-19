@@ -30,6 +30,7 @@ import {
   getEmbeddedConnectedWallet,
   useCreateWallet,
   useLogin,
+  useLoginWithOAuth,
   useModalStatus,
   usePrivy,
   useWallets,
@@ -62,7 +63,7 @@ interface Attempt {
   createdAddress?: string;
 }
 
-export function PrivySignIn({ onDone }: { onDone: () => void }) {
+export function PrivySignIn({ onDone, directX = false }: { onDone: () => void; directX?: boolean }) {
   const { ready, authenticated, getAccessToken, user, logout } = usePrivy();
   const { wallets, ready: walletsReady } = useWallets();
   const { createWallet } = useCreateWallet();
@@ -105,6 +106,16 @@ export function PrivySignIn({ onDone }: { onDone: () => void }) {
       setPhase("error");
     },
   });
+  const oauthFailed = useCallback(() => {
+    if (!mounted.current) return;
+    cancelAttempt();
+    setError("Sign-in didn't finish. Try again.");
+    setPhase("error");
+  }, [cancelAttempt]);
+  // Privy's supported headless entry removes the redundant provider-choice
+  // modal on Android. The hook also finishes the saved PKCE flow on return;
+  // wallet provisioning and ownership proof below remain the same path.
+  const { initOAuth } = useLoginWithOAuth({ onError: oauthFailed });
 
   useEffect(() => {
     mounted.current = true;
@@ -226,7 +237,10 @@ export function PrivySignIn({ onDone }: { onDone: () => void }) {
       refresh((value) => value + 1);
     } else {
       setPhase("authorising");
-      try { login({ loginMethods: [method] }); } catch { setError("Sign-in didn't finish. Try again."); setPhase("error"); }
+      try {
+        if (directX && method === "twitter") void initOAuth({ provider: "twitter" }).catch(oauthFailed);
+        else login({ loginMethods: [method] });
+      } catch { oauthFailed(); }
     }
   }
 

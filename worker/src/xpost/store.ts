@@ -875,6 +875,8 @@ export interface NewPost {
   replyAuthorId?: string;
   dueAtMs: number;
   nowMs: number;
+  /** Small-talk only: reserve the wording for this author for seven days. Not persisted as a new field. */
+  smalltalk?: boolean;
   /**
    * "skipped" records a decision NOT to post under this key — a draft the gate
    * refused, a model that said PASS — so the key is spent and the same buy or
@@ -939,6 +941,20 @@ export async function schedulePost(db: Db, p: NewPost): Promise<number | null> {
         ON CONFLICT (k) DO UPDATE SET updated_at_ms = excluded.updated_at_ms`)
         .run(answerAuthorKey(p.xUserId, p.replyAuthorId!), int(p.nowMs));
       if (await answersToAuthor(tx, p.xUserId, p.replyAuthorId!, p.nowMs) >= ANSWERS_PER_AUTHOR) return null;
+      // The general 200-post memory can roll over in a few busy days. Under
+      // the same author lock, prevent two replicas or two owners sharing an
+      // account from scheduling the identical small-talk line for a week.
+      // Failed sends may exist on X; cancellation and deliberate skips do not.
+      if (p.smalltalk === true && p.status !== "skipped" && p.body.trim() !== "") {
+        const duplicate = await tx.prepare(`SELECT sent.id FROM xpost_posts sent
+          JOIN xpost_reply_targets r ON r.post_id = sent.id
+          WHERE sent.x_user_id = ? AND sent.kind = 'answer' AND r.author_id = ?
+            AND sent.status IN ('scheduled', 'sending', 'posted', 'failed')
+            AND COALESCE(sent.sent_at_ms, sent.created_at_ms) >= ?
+            AND LOWER(TRIM(sent.body)) = ? LIMIT 1`)
+          .get(p.xUserId, p.replyAuthorId!, int(p.nowMs - SMALLTALK_WORD_WINDOW_MS), p.body.trim().toLowerCase());
+        if (duplicate) return null;
+      }
       const id = await insertPost(tx, p);
       if (id === null) return null;
       await tx.prepare(`INSERT INTO xpost_reply_targets (post_id, reply_to_tweet_id, root_tweet_id, author_id) VALUES (?, ?, ?, ?)`)
@@ -959,6 +975,19 @@ export async function schedulePost(db: Db, p: NewPost): Promise<number | null> {
  */
 export const ANSWERS_PER_AUTHOR = 6;
 const ANSWER_AUTHOR_WINDOW_MS = 24 * 60 * 60_000;
+const SMALLTALK_WORD_WINDOW_MS = 7 * ANSWER_AUTHOR_WINDOW_MS;
+
+/** Per-person public answer memory, independent of the busy account's latest 200 posts. */
+export async function smalltalkBodiesToAuthor(db: Db, xUserId: string, authorId: string, nowMs: number): Promise<string[]> {
+  const rows = await db.prepare(`SELECT sent.body FROM xpost_posts sent
+    JOIN xpost_reply_targets r ON r.post_id = sent.id
+    WHERE sent.x_user_id = ? AND sent.kind = 'answer' AND r.author_id = ?
+      AND sent.status IN ('scheduled', 'sending', 'posted', 'failed')
+      AND COALESCE(sent.sent_at_ms, sent.created_at_ms) >= ? AND sent.body <> ''
+    ORDER BY COALESCE(sent.sent_at_ms, sent.created_at_ms) DESC, sent.id DESC LIMIT 256`)
+    .all(xUserId, authorId, int(nowMs - SMALLTALK_WORD_WINDOW_MS)) as { body: string }[];
+  return rows.map((row) => row.body);
+}
 
 /** Answers this X account wrote to one person in the rolling day before `nowMs`, whatever became of them. */
 async function answersToAuthor(db: Db, xUserId: string, authorId: string, nowMs: number): Promise<number> {
@@ -1366,7 +1395,20 @@ export async function ownRootTweetIds(db: Db, xUserId: string, limit = 2000): Pr
  * Anything else in `posts` or `answered` (a decline, its mood, a market
  * line, a coin's answer, an answer told its buys, a comment reply on a buy
  * post, any answer from before the mark) is closed: a follow-up under it is
- * answered with a greeting or nothing (orchestrator-xpost.ts writeAnswer).
+ * answered with a greeting, a thanks or nothing (orchestrator-xpost.ts
+ * writeAnswer).
+ *
+ *   - `done`: each small-talk answer that ended its thread
+ *     (ANSWER_THREAD_DONE), with the tag it answered: nothing at all is
+ *     answered under either, not even a greeting (2026-10-18).
+ *
+ *   - `small`: each of its own plain-thread answers (ANSWER_PLAIN_THREAD: a
+ *     greeting, a thanks, banter or how it is, the first exchange of a plain
+ *     thread), by its tweet, to the tag it answered (2026-10-19). Only its
+ *     answers, never the tags: a confused reply is read only directly under
+ *     one (replies.ts confusedWords), and what's hot or the market is
+ *     answered under one only in a thread rooted at that same tag
+ *     (orchestrator-xpost.ts tradeMarket).
  */
 export interface OwnThreads {
   roots: Set<string>;
@@ -1374,15 +1416,28 @@ export interface OwnThreads {
   answered: Map<string, string>;
   plain: Set<string>;
   trade: Set<string>;
+  done: Set<string>;
+  small: Map<string, string>;
 }
 
 /**
  * AN ANSWER A FOLLOW-UP MAY BE CHATTED UNDER, by its row's `coin` (which no
- * answer otherwise uses but ANSWER_LOOKED_UP): a greeting, or banter handed
- * nothing and told none of its buys, under a tag that was itself top level or
- * plain (orchestrator-xpost.ts writeAnswer). Absent: closed.
+ * answer otherwise uses but ANSWER_LOOKED_UP): a greeting, a thanks or
+ * banter, handed nothing and told none of its buys, under a tag that was
+ * itself top level or under one of its own plain posts (orchestrator-xpost.ts
+ * writeAnswer). Absent: closed.
  */
 export const ANSWER_PLAIN_THREAD = "plain-thread";
+
+/**
+ * SMALL TALK THAT ENDED ITS THREAD (2026-10-18), by its row's `coin`: a
+ * greeting, a thanks, banter, its mood or a decline answered under one of
+ * its plain-thread answers, under its own buy, sale, recap or market post,
+ * or under any closed answer. Nothing is answered under it, or under the tag
+ * it answered (OwnThreads.done), so small talk is at most two of its answers
+ * deep in any thread, and a greeting under a closed answer is answered once.
+ */
+export const ANSWER_THREAD_DONE = "thread-done";
 
 /**
  * `trade`: the caller's screen for an intro or casual post that is about a
@@ -1404,7 +1459,7 @@ export async function ownThreadTweets(db: Db, xUserId: string, limit = 2000, shu
         LIMIT ?`,
     )
     .all(String(xUserId), max)) as { tweet_id: unknown; body: unknown; kind: unknown }[];
-  const roots = new Set<string>(), plain = new Set<string>(), traded = new Set<string>();
+  const roots = new Set<string>(), plain = new Set<string>(), traded = new Set<string>(), done = new Set<string>();
   for (const r of tops) {
     const tweet = String(r.tweet_id ?? "");
     if (tweet === "" || shut(String(r.body ?? ""))) continue;
@@ -1425,6 +1480,7 @@ export async function ownThreadTweets(db: Db, xUserId: string, limit = 2000, shu
     .all(String(xUserId), max)) as { tweet_id: unknown; body: unknown; kind: unknown; coin: unknown; reply_to_tweet_id: unknown; author_id: unknown }[];
   const posts = new Set(roots);
   const answered = new Map<string, string>();
+  const small = new Map<string, string>();
   for (const r of rows) {
     const tweet = String(r.tweet_id ?? ""), to = String(r.reply_to_tweet_id ?? ""), author = String(r.author_id ?? "");
     if (shut(String(r.body ?? ""))) continue;
@@ -1433,9 +1489,37 @@ export async function ownThreadTweets(db: Db, xUserId: string, limit = 2000, shu
     if (r.kind === "answer" && r.coin === ANSWER_PLAIN_THREAD) {
       if (tweet !== "") plain.add(tweet);
       if (to !== "") plain.add(to);
+      if (tweet !== "" && to !== "") small.set(tweet, to);
+    }
+    if (r.kind === "answer" && r.coin === ANSWER_THREAD_DONE) {
+      if (tweet !== "") done.add(tweet);
+      if (to !== "") done.add(to);
     }
   }
-  return { roots, posts, answered, plain, trade: traded };
+  return { roots, posts, answered, plain, trade: traded, done, small };
+}
+
+/**
+ * EVERY X ACCOUNT THE FLEET POSTS FROM (2026-10-18): each tenant's connected
+ * X user and the one its owner consented for, whatever its status. An active
+ * agent never answers any of them, so two of the fleet's agents can never
+ * talk to each other in a loop on X. Bounded, as every read here is.
+ */
+export async function fleetXUserIds(db: Db, candidates?: readonly string[]): Promise<Set<string>> {
+  const out = new Set<string>();
+  // Bound the caller's mention batch, not the fleet. Truncating the account
+  // table let agents outside its first page answer each other indefinitely.
+  const ids = candidates === undefined ? null : [...new Set(candidates.filter((id) => /^\d+$/.test(id)))];
+  if (ids?.length === 0) return out;
+  const batches = ids === null ? [null] : Array.from({ length: Math.ceil(ids.length / 200) }, (_, i) => ids.slice(i * 200, (i + 1) * 200));
+  for (const batch of batches) {
+    const placeholders = batch?.map(() => "?").join(",");
+    const where = batch ? ` WHERE x_user_id IN (${placeholders}) OR consent_x_user_id IN (${placeholders})` : "";
+    const rows = await db.prepare(`SELECT x_user_id, consent_x_user_id FROM xpost_accounts${where}`)
+      .all(...(batch ? [...batch, ...batch] : [])) as { x_user_id: unknown; consent_x_user_id: unknown }[];
+    for (const r of rows) for (const id of [r.x_user_id, r.consent_x_user_id]) if (typeof id === "string" && id !== "") out.add(id);
+  }
+  return out;
 }
 
 /**
@@ -1517,7 +1601,7 @@ export async function recentBodies(db: Db, opts: {
  * something looked up (ANSWER_LOOKED_UP), what a prompt may be shown as its
  * recent posts. Newest first.
  */
-export async function ownRecentBodies(db: Db, opts: { tenant: string; sinceMs: number; limit: number }): Promise<{ all: string[]; shown: string[] }> {
+export async function ownRecentBodies(db: Db, opts: { tenant: string; sinceMs: number; limit: number }): Promise<{ all: string[]; shown: string[]; timeline: { body: string; kind: XPostKind }[] }> {
   const lim = int(Math.max(1, Math.min(2000, opts.limit)));
   const rows = (await db
     .prepare(
@@ -1526,6 +1610,13 @@ export async function ownRecentBodies(db: Db, opts: { tenant: string; sinceMs: n
         ORDER BY created_at_ms DESC, id DESC LIMIT ?`,
     )
     .all(tenantKey(opts.tenant), int(opts.sinceMs), lim)) as { body: unknown; kind: unknown; coin: unknown }[];
+  // Replies keep their existing repeat-memory bound, but cannot displace the
+  // timeline's own latest posts from the prompt or same-opener window.
+  const timelineRows = (await db.prepare(`SELECT body, kind FROM xpost_posts
+    WHERE tenant = ? AND status IN ('scheduled', 'sending', 'posted') AND created_at_ms >= ?
+      AND kind IN ('buy', 'sell', 'recap', 'casual')
+    ORDER BY created_at_ms DESC, id DESC LIMIT ?`).all(tenantKey(opts.tenant), int(opts.sinceMs), lim)) as { body: unknown; kind: unknown }[];
+  const timeline = timelineRows.map((r) => ({ body: String(r.body ?? ""), kind: r.kind as XPostKind })).filter((r) => r.body !== "");
   const all: string[] = [], shown: string[] = [];
   for (const r of rows) {
     const body = String(r.body ?? "");
@@ -1533,7 +1624,7 @@ export async function ownRecentBodies(db: Db, opts: { tenant: string; sinceMs: n
     all.push(body);
     if (!(r.kind === "answer" && r.coin === ANSWER_LOOKED_UP)) shown.push(body);
   }
-  return { all, shown };
+  return { all, shown, timeline };
 }
 
 const X_ID = /^\d{1,25}$/;

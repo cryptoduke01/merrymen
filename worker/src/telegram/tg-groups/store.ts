@@ -240,6 +240,7 @@ function parseLine(v: unknown): TgLine | null {
   };
   if (isInt(v.replyTo)) line.replyTo = v.replyTo;
   if (v.own === true) line.own = true;
+  if (line.own && v.fomo === true) line.fomo = true;
   if (isInt(v.threadId) && v.threadId > 0) line.threadId = v.threadId;
   // Only our own research answers carry this reference. Disk metadata is
   // still untrusted: validate its closed shape and bounded lookup key.

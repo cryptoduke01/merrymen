@@ -551,7 +551,7 @@ test("a kind-off change preserves an in-flight successful post as sent, never re
 
 // ── the profit card (2026-10-13) ────────────────────────────────────────────
 
-const SALE = "sold the pepe.\n+40% gross gain before fees and gas. pleased with that part.";
+const SALE = "brief note here: sold pepe. back to digging around.\n+40% gross before fees and gas. a welcome surprise";
 const CARD_PNG = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 7, 7, 7]);
 const MEDIA_SCOPE = "tweet.read tweet.write users.read offline.access media.write";
 const uploaded = (id = "1880028106020515840"): Reply => ({ status: 200, body: { data: { id, media_key: `3_${id}` } } });

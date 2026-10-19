@@ -460,6 +460,79 @@ test("what a tag sits under is read for a larp check: its words, its links and i
   assert.deepEqual(b!.context?.map((x) => [x.relation, x.text.startsWith("the whole long post"), x.links, x.author]), [["quoted", true, ["https://acme.example"], undefined]]);
   assert.equal(c!.context, undefined);
   assert.equal(c!.links, undefined);
+  // What X did not hand over is marked unread: the unexpanded parent, and the quoted post whose author X sent no profile for.
+  assert.deepEqual([a!.contextUnread, b!.contextUnread, c!.contextUnread], [undefined, true, true]);
+});
+
+/** X's own error for a post it could not expand beside a page: deleted, protected, or from a suspended account. */
+const missing = (id: string, over: Record<string, unknown> = {}) => ({ value: id, detail: `Could not find tweet with referenced_tweets.id: [${id}].`, title: "Not Found Error",
+  resource_type: "tweet", parameter: "referenced_tweets.id", resource_id: id, type: "https://api.twitter.com/2/problems/resource-not-found", ...over });
+
+test("a page whose only errors are posts or authors X could not expand is read whole, and those tags say what they sit under is unread (2026-10-18)", async () => {
+  const body = { data: [
+    // A STOP and a question under a post someone deleted; a quote of a protected post; a reply whose parent's author is suspended; a plain one.
+    mention("300", { text: "@alanaidale stop", conversation_id: "390", referenced_tweets: [{ type: "replied_to", id: "390" }] }),
+    mention("299", { text: "@alanaidale is this real?", conversation_id: "299", referenced_tweets: [{ type: "quoted", id: "391" }] }),
+    mention("298", { text: "@alanaidale larp check", conversation_id: "392", referenced_tweets: [{ type: "replied_to", id: "392" }] }),
+    mention("297"),
+  ], includes: {
+    users: [{ id: "222", username: "reader", name: "A Reader" }, { id: "555", username: "op", name: "Original Poster" }],
+    tweets: [{ id: "392", author_id: "556", text: "we are live" }, { id: "100", author_id: "555", text: "gm" }],
+  }, errors: [
+    missing("390"),
+    missing("391", { title: "Authorization Error", detail: "Sorry, you are not authorized to see the Tweet with referenced_tweets.id: [391].", type: "https://api.twitter.com/2/problems/not-authorized-for-resource" }),
+    { value: "556", detail: "User has been suspended: [556].", title: "Forbidden", resource_type: "user", parameter: "referenced_tweets.id.author_id", resource_id: "556", type: "https://api.twitter.com/2/problems/resource-not-found" },
+  ], meta: { result_count: 4 } };
+  const r = await readMentions("token", "111", { nowMs: MENTION_NOW, fetch: scripted(200, body) });
+  assert.equal(r.ok, true, "read whole, its STOP with it");
+  if (!r.ok) return;
+  assert.deepEqual(r.value.replies.map((x) => [x.id, x.text, x.contextUnread ?? false]),
+    [["300", "@alanaidale stop", true], ["299", "@alanaidale is this real?", true], ["298", "@alanaidale larp check", true], ["297", "why this coin?", false]]);
+  assert.equal(r.value.newestId, "300");
+  assert.equal(r.value.replies[0]!.context, undefined, "nothing of a post X did not send");
+  assert.deepEqual(r.value.replies[2]!.context?.map((c) => [c.id, c.author]), [["392", undefined]], "the post, with no author X did not send");
+  assert.deepEqual(r.value.replies[3]!.context?.map((c) => [c.id, c.author?.username]), [["100", "op"]]);
+  // A tag's own author X could not expand: read whole, the author unknown.
+  const author = await readMentions("token", "111", { nowMs: MENTION_NOW, fetch: scripted(200, { data: [mention("300", { author_id: "777" })], meta: { result_count: 1 },
+    errors: [{ value: "777", detail: "Could not find user with author_id: [777].", title: "Not Found Error", resource_type: "user", parameter: "author_id", resource_id: "777" }] }) });
+  assert.equal(author.ok, true);
+  if (author.ok) assert.equal(author.value.replies[0]!.author, undefined);
+});
+
+test("any other error beside a page still fails it closed, as does an expansion miss off its shape (2026-10-18)", async () => {
+  // 301 replies to 300, so a miss naming 300 is one a tag refers to, and still a post on the page.
+  const page = (errors: unknown, data = [mention("300"), mention("301", { referenced_tweets: [{ type: "replied_to", id: "300" }] })]) => ({ data, meta: { result_count: data.length }, errors });
+  assert.equal((await readMentions("token", "111", { nowMs: MENTION_NOW, fetch: scripted(200, page([missing("100")])) })).ok, true, "the shape that is read past");
+  const cases: [string, unknown][] = [
+    ["no shape at all", [{ detail: "partial read" }]],
+    ["a parameter this read never asked for", [missing("100", { parameter: "pinned_tweet_id" })]],
+    ["a tweet it says it could not find, that is on the page", [missing("300")]],
+    ["a post no tag on the page refers to", [missing("390")]],
+    ["the wrong kind for the expansion", [missing("100", { resource_type: "user" })]],
+    ["a user miss named as a tweet", [{ value: "555", resource_type: "tweet", parameter: "referenced_tweets.id.author_id", resource_id: "555" }]],
+    ["an id that is no id", [missing("abc")]],
+    ["a value that is not the id", [missing("100", { value: "101" })]],
+    ["no id", [missing("100", { resource_id: undefined })]],
+    ["one miss beside one other error", [missing("100"), { title: "Internal Error", detail: "partial read" }]],
+    ["an empty list", []],
+    ["not a list", { detail: "partial read" }],
+    ["null", null],
+    ["an entry that is no object", ["referenced_tweets.id"]],
+  ];
+  for (const [what, errors] of cases) {
+    assert.equal((await readMentions("token", "111", { nowMs: MENTION_NOW, fetch: scripted(200, page(errors)) })).ok, false, what);
+  }
+  // The checks that stay: a malformed tag beside a miss, and the eight hundred.
+  assert.equal((await readMentions("token", "111", { nowMs: MENTION_NOW, fetch: scripted(200, page([missing("100")], [mention("300", { created_at: "not time" })])) })).ok, false);
+  assert.equal((await readMentions("token", "111", { nowMs: MENTION_NOW, fetch: scripted(200, page([missing("100")], [mention("300")])) })).ok, true);
+  let calls = 0;
+  const flood = await readMentions("token", "111", { nowMs: MENTION_NOW, fetch: async (u, i) => {
+    calls++;
+    const data = Array.from({ length: 100 }, (_, k) => mention(String(100000 - calls * 100 - k)));
+    return scripted(200, { data, meta: { result_count: 100, next_token: `page-${calls}` }, errors: [missing("100")] })(u, i);
+  } });
+  assert.equal(flood.ok, false, "past eight hundred mentions, misses or not");
+  assert.equal(calls, 8);
 });
 
 test("mentions fail closed for incomplete pages, broken reply metadata and repeated cursors", async () => {

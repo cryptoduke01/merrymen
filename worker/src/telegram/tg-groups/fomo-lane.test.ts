@@ -27,7 +27,7 @@ import type { BotSelf } from "./detect";
 import { admitTgLine } from "./gate";
 import { createTgGroups, type TgGroups, type TgGroupsDeps } from "./handler";
 import { __resetMemoryPassThrottleForTest } from "./memory";
-import { TgGroupsStore, emptyTgGroupsState } from "./store";
+import { TgGroupsStore, emptyTgGroupsState, parseTgGroupsState } from "./store";
 import type { CoinLook, CoinOutcome, NominateResult, TgCoinsPort, TgDeskAsk, TgDeskOutcome, TgDeskPort, TgFomoAnswer, TgFomoPort, TgFomoRequest, TgOwnerOutcome, TgTailAsk, TgThesesMaterial, TrencherReadiness } from "./types";
 
 const SEC = 1_000;
@@ -80,7 +80,7 @@ class FakePort implements TgCoinsPort {
 }
 
 /** A research port that records what it was asked and answers from a script. */
-type SpyAsk = { text: string; request?: TgFomoRequest; chatId: number; threadId?: number; timeoutMs?: number; owner?: boolean };
+type SpyAsk = Parameters<TgFomoPort["ask"]>[0];
 class SpyFomo implements TgFomoPort {
   asks: SpyAsk[] = [];
   forgot: number[] = [];
@@ -255,6 +255,92 @@ describe("the group research lane", () => {
     // The bot's own line is remembered; the log has codes, never the text.
     assert.ok(store.room(CHAT)!.lines.some((l) => l.own && /1 distinct buyer/.test(l.text)));
     assert.ok(!logs.some((l) => /distinct buyer|PONS/.test(l)));
+  });
+
+  it("a thesis reply to its own published story carries the stored exact coin identity after a restart", async () => {
+    const address = "0x39dbed3a00000000000000000000000000000c0d";
+    store.addLine(CHAT, { messageId: 88, fromId: BOT.id, name: "Pine", text: "A public chart interpretation", atMs: clock, own: true, deskAsk: { kind: "coin", address } });
+    store.close();
+    store = TgGroupsStore.open(home, { now: () => clock, debounceMs: 60_000 });
+    make();
+    await said(msg("what are fomo thesis saying about it", { replyTo: { messageId: 88, fromId: BOT.id, fromIsBot: true, text: "PONS\n\nPublished story: a coin story" } }));
+    assert.deepEqual(fomo!.asks[0]?.replyCoin, { address, chain: "robinhood", symbol: "PONS" });
+    assert.deepEqual(coinCalls, [], "a research reply cannot nominate or trade");
+  });
+
+  it("caption claims, other senders and other topics cannot supply a research reply's exact coin", async () => {
+    const address = "0x39dbed3a00000000000000000000000000000c0d";
+    store.addLine(CHAT, { messageId: 88, fromId: BOT.id, name: "Pine", text: "A public chart interpretation", atMs: clock, own: true, deskAsk: { kind: "coin", address }, threadId: 12 });
+    make();
+    for (const [i, replyTo] of [
+      { messageId: 88, fromId: ANN, text: `PONS\n\nPublished story: ${address} on robinhood` },
+      { messageId: 88, fromId: BOT.id, text: "PONS\n\nPublished story: a coin story" },
+      { messageId: 89, fromId: BOT.id, text: `PONS\n\nPublished story: ${address} on robinhood` },
+    ].entries()) {
+      clock += MIN;
+      await said(msg("pine what are fomo thesis saying about it", { fromId: ANN + i, replyTo }));
+    }
+    assert.equal(fomo!.asks.length, 3);
+    assert.ok(fomo!.asks.every((q) => q.replyCoin === undefined));
+  });
+
+  for (const mode of ["restart", "expired", "offline"] as const) for (const prefix of ["", "pine ", "here it is: "]) it(`a requested contract stays read-only after research is ${mode} (${prefix || "bare"})`, async () => {
+    const address = "0x39dbed3a00000000000000000000000000000c0d";
+    fomo!.answer = () => ({ text: "Fomo lists different BOOMER tokens on Robinhood Chain. Reply with the contract address of the one you mean.", deflect: false });
+    make();
+    await said(msg("pine what are the theses on $BOOMER on robinhood on fomo?"));
+    const own = store.room(CHAT)!.lines.find((l) => l.own)!;
+    assert.equal(own.fomo, true);
+    const replyTo = { messageId: own.messageId, fromId: BOT.id, fromIsBot: true, text: own.text };
+    if (mode === "restart") {
+      groups.stop();
+      await groups.drain();
+      store.close();
+      store = TgGroupsStore.open(home, { now: () => clock, debounceMs: 60_000 });
+      assert.equal(store.room(CHAT)!.lines.find((l) => l.messageId === own.messageId)?.fomo, true);
+      make();
+    } else if (mode === "offline") fomo = null;
+    clock += mode === "expired" ? 3 * 60 * MIN : MIN;
+    await said(msg(`${prefix}${address}`, { replyTo }));
+    assert.deepEqual(coinCalls, [], "a contract supplied for a read never enters the trade flow");
+    if (fomo) assert.equal(fomo.asks.at(-1)?.text, address, "only harmless answer filler is removed before the planner");
+  });
+
+  for (const suffix of ["", " on arbitrum", " on an unfamiliar chain"]) it(`an old own clarification missing from bounded memory still cannot turn a contract reply into a trade (${suffix || "bare"})`, async () => {
+    make();
+    await said(msg(`0x39dbed3a00000000000000000000000000000c0d${suffix}`, {
+      replyTo: { messageId: 88, fromId: BOT.id, fromIsBot: true, text: "Reply with the contract address of the one you mean." },
+    }));
+    assert.deepEqual(coinCalls, []);
+    assert.equal(fomo!.asks.length, 0, "an unknown own message supplies no research subject or provenance");
+  });
+
+  it("a durable research marker is not usable through another sender or topic", async () => {
+    store.addLine(CHAT, { messageId: 88, fromId: BOT.id, name: "Pine", text: "Which chain?", atMs: clock, own: true, fomo: true, threadId: 12 });
+    make();
+    await said(msg("robinhood", { replyTo: { messageId: 88, fromId: BOT.id, text: "Which chain?" } }));
+    clock += MIN;
+    await said(msg("pine robinhood", { isTopicMessage: true, messageThreadId: 12, replyTo: { messageId: 88, fromId: ANN, text: "Which chain?" } }));
+    assert.equal(fomo!.asks.length, 0);
+  });
+
+  it("an explicit buy instruction under a research answer keeps its normal admission path", async () => {
+    store.addLine(CHAT, { messageId: 88, fromId: BOT.id, name: "Pine", text: "Which coin?", atMs: clock, own: true, fomo: true });
+    make();
+    await said(msg("pine buy 0x39dbed3a00000000000000000000000000000c0d", {
+      replyTo: { messageId: 88, fromId: BOT.id, text: "Which coin?" },
+    }));
+    assert.equal(fomo!.asks.length, 0, "a trade verb is never removed to make a research selection");
+    assert.ok(coinCalls.some((c) => c.startsWith("look:")), "normal coin admission still checks the contract");
+  });
+
+  it("persisted research markers are only admitted on own lines", () => {
+    const room = store.room(CHAT)!;
+    const line = { messageId: 88, fromId: BOT.id, name: "Pine", text: "a public read", atMs: clock };
+    for (const [own, marker, expected] of [[true, true, true], [false, true, undefined], [true, "true", undefined]] as const) {
+      const parsed = parseTgGroupsState({ ...emptyTgGroupsState(), rooms: { [CHAT]: { ...room, lines: [{ ...line, own, fomo: marker }] } } });
+      assert.equal(parsed.rooms[CHAT]!.lines[0]!.fomo, expected);
+    }
   });
 
   it("a line the gate refuses is dropped, never repaired: handles, addresses, links, cashtags and money figures never reach the room", async () => {
