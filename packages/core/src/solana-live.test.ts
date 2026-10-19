@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { createHash, createPrivateKey, createPublicKey } from "node:crypto";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { join as pathJoin } from "node:path";
 import { address, getProgramDerivedAddress } from "@solana/kit";
 import {
@@ -760,5 +761,75 @@ describe("Solana custody instruction fixture", () => {
       execute.data.slice(0, 16),
       Buffer.from(disc("global:execute_swap")).toString("hex"),
     );
+  });
+});
+
+/** The reviewed build inputs, hashed exactly as contracts/solana/build.sh --source-digest. */
+function contractSourceDigest(): string {
+  const sha = (data: Buffer | string) =>
+    createHash("sha256").update(data).digest("hex");
+  const walk = (dir: string): string[] =>
+    readdirSync(pathJoin(CONTRACT, dir), { withFileTypes: true }).flatMap(
+      (e) =>
+        e.isDirectory()
+          ? walk(`${dir}/${e.name}`)
+          : e.isFile() && e.name.endsWith(".rs")
+            ? [`${dir}/${e.name}`]
+            : [],
+    );
+  const files = [
+    "Cargo.toml",
+    "Cargo.lock",
+    "build.sh",
+    "programs/merrymen-vault/Cargo.toml",
+    ...walk("programs/merrymen-vault/src"),
+  ].sort();
+  return sha(
+    files
+      .map((f) => `${sha(readFileSync(pathJoin(CONTRACT, f)))}  ${f}\n`)
+      .join(""),
+  );
+}
+
+describe("Solana custody build manifest", () => {
+  it("records a pinned, reproduced artifact for the current program source", () => {
+    // Audit GAP4-2: tie the reviewed source to a toolchain-pinned artifact hash. A
+    // program change without build.sh --record leaves every manifest stale here.
+    const dir = pathJoin(CONTRACT, "build-manifests");
+    const files = readdirSync(dir).filter((f) => f.endsWith(".json"));
+    assert.ok(files.length > 0, "no build manifest recorded");
+    const script = contractFile("build.sh");
+    const pin = (name: string) =>
+      script.match(new RegExp(`^${name}="([^"]+)"$`, "m"))?.[1];
+    const declared = contractFile("programs/merrymen-vault/src/lib.rs").match(
+      /^declare_id!\("([1-9A-HJ-NP-Za-km-z]+)"\);$/m,
+    )?.[1];
+    const digest = contractSourceDigest();
+    for (const file of files) {
+      const m = JSON.parse(readFileSync(pathJoin(dir, file), "utf8"));
+      assert.equal(
+        m.source.digest,
+        digest,
+        `${file} is stale: run contracts/solana/build.sh --record`,
+      );
+      assert.equal(`${m.toolchain.host}.json`, file);
+      assert.equal(m.program.declaredId, declared);
+      assert.equal(m.toolchain.agave, pin("AGAVE_VERSION"));
+      assert.equal(m.toolchain.platformTools, pin("PLATFORM_TOOLS_VERSION"));
+      assert.equal(m.toolchain.arch, pin("SBF_ARCH"));
+      assert.equal(m.toolchain.rustSourceCommit, pin("RUST_SOURCE_COMMIT"));
+      assert.match(m.artifact.sha256, /^[0-9a-f]{64}$/);
+      assert.ok(Number.isSafeInteger(m.artifact.bytes) && m.artifact.bytes > 0);
+    }
+  });
+  it("hashes the source exactly as build.sh does", (t) => {
+    const run = spawnSync(
+      "bash",
+      [pathJoin(CONTRACT, "build.sh"), "--source-digest"],
+      { encoding: "utf8" },
+    );
+    if (run.error) return t.skip("bash is not available");
+    assert.equal(run.status, 0, run.stderr);
+    assert.equal(run.stdout.trim(), contractSourceDigest());
   });
 });
