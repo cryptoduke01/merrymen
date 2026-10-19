@@ -241,8 +241,11 @@ test("crash recovery releases a sequence only when finalized vault state proves 
       proofReads.push(method);
       if (method === "getSignatureStatuses") return { context: { slot: SLOT }, value: [null] };
       if (method === "getTransaction") return mode === "receipt-present" ? f.receipt(original.submission) : null;
-      if (method === "getBlockHeight") { assert.deepEqual(params, [{ commitment: "finalized", minContextSlot: SLOT }]); return ["revoked", "not-expired"].includes(mode) ? 1199 : 1201; }
-      if (method === "getSlot") { assert.equal((params![0] as { commitment: string }).commitment, "finalized"); return SLOT + 2; }
+      if (method === "getEpochInfo") {
+        // Slot and height from one finalized bank.
+        assert.deepEqual(params, [{ commitment: "finalized", minContextSlot: SLOT }]);
+        return { absoluteSlot: SLOT + 2, blockHeight: ["revoked", "not-expired"].includes(mode) ? 1199 : 1201, epoch: 1, slotIndex: SLOT + 2, slotsInEpoch: 432_000 };
+      }
       if (method === "getAccountInfo") {
         assert.deepEqual(params, [f.intent.vault, { encoding: "base64", commitment: "finalized", minContextSlot: SLOT + 2 }]);
         const bytes = state(mode === "wrong-owner" ? key(90) : f.intent.owner, f.session, mode === "advanced" ? 1n : 0n);
@@ -257,14 +260,43 @@ test("crash recovery releases a sequence only when finalized vault state proves 
       assert.equal(f.getRecord()!.status, "pending"); continue;
     }
     const result = await reconcileSolanaSubmission(rpc, f.options.journal, f.intent.owner, f.intent.requestId, () => NOW + 1);
+    assert.ok(!proofReads.includes("getBlockHeight") && !proofReads.includes("getSlot"), mode);
     if (["expired", "revoked"].includes(mode)) {
       assert.equal(result!.status, "expired"); assert.equal(result!.settlement!.feeLamports, null);
       assert.equal(result!.settlement!.amountIn, "0"); assert.equal(result!.settlement!.amountOut, "0");
+      assert.equal(result!.settlement!.slot, SLOT + 2);
+      assert.equal(result!.settlement!.status === "expired" && result!.settlement!.expiryProof.blockHeight, mode === "expired" ? "1201" : "1199");
       assert.deepEqual(await executor.execute(f.intent), result);
-      assert.ok(proofReads.indexOf("getBlockHeight") < proofReads.indexOf("getSlot"));
-      assert.ok(proofReads.indexOf("getSlot") < proofReads.indexOf("getAccountInfo"));
+      assert.ok(proofReads.indexOf("getEpochInfo") < proofReads.indexOf("getAccountInfo"));
     } else assert.equal(result!.status, "pending", mode);
     assert.equal(f.calls.filter(call => call === "send").length, 1);
+  }
+});
+
+test("an expiry proof never pairs a current block height with a lagging node's slot (audit execution F1)", async () => {
+  // One RPC URL load-balances two nodes. The swap landed at SLOT + 1 and the
+  // current node has finalized it; the lagging node's finalized bank is SLOT.
+  const nodes = { current: { slot: SLOT + 5, height: 1201, seq: 1n }, lagging: { slot: SLOT, height: 1199, seq: 0n } } as const;
+  for (const bank of ["current", "lagging"] as const) {
+    const f = await fixture(); f.controls.failSend = true;
+    await createSolanaExecutor(f.options).execute(f.intent);
+    const read: SolanaLiveRead = async (method, params) => {
+      const config = (params?.at(-1) ?? {}) as { minContextSlot?: number };
+      if (method === "getSignatureStatuses") return { context: { slot: nodes.lagging.slot }, value: [null] };
+      if (method === "getTransaction") return null;
+      if (method === "getBlockHeight") return nodes.current.height;
+      if (method === "getSlot") return nodes.lagging.slot;
+      if (method === "getEpochInfo") return { absoluteSlot: nodes[bank].slot, blockHeight: nodes[bank].height, epoch: 1, slotIndex: 0, slotsInEpoch: 432_000 };
+      if (method === "getAccountInfo") {
+        // The balancer may route to any node whose finalized bank reaches minContextSlot.
+        const node = (config.minContextSlot ?? 0) <= nodes.lagging.slot ? nodes.lagging : nodes.current;
+        return { context: { slot: node.slot }, value: rpcAccount(state(f.intent.owner, f.session, node.seq), PROGRAM) };
+      }
+      return assert.fail(`Unexpected read ${method}`);
+    };
+    const rpc: SolanaLiveRpc = { read: callback => callback(read), send: async wire => wire };
+    const result = await reconcileSolanaSubmission(rpc, f.options.journal, f.intent.owner, f.intent.requestId, () => NOW + 1);
+    assert.equal(result!.status, "pending", bank); assert.equal(f.getRecord()!.status, "pending", bank);
   }
 });
 

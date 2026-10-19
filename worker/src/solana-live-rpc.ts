@@ -6,7 +6,7 @@ import {
 } from "./solana-rpc";
 
 const READ_METHODS = ["getAccountInfo", "getMultipleAccounts", "getSlot", "getLatestBlockhash",
-  "getBlockHeight", "isBlockhashValid", "getFeeForMessage", "getMinimumBalanceForRentExemption", "simulateTransaction",
+  "getBlockHeight", "getEpochInfo", "isBlockhashValid", "getFeeForMessage", "getMinimumBalanceForRentExemption", "simulateTransaction",
   "getSignatureStatuses", "getTransaction"] as const;
 export type SolanaLiveReadMethod = typeof READ_METHODS[number];
 export type SolanaLiveRead = (method: SolanaLiveReadMethod, params?: readonly unknown[]) => Promise<unknown>;

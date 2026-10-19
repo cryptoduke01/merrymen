@@ -244,11 +244,15 @@ export async function reconcileSolanaSubmission(
     const receipt = await read("getTransaction", [submission.signature, { commitment: "finalized", encoding: "base64", maxSupportedTransactionVersion: 0 }]);
     if (object(status) && status.confirmationStatus === "finalized") return receipt === null ? null : settleSolanaReceipt(submission, receipt, status, now());
     if (receipt !== null) return null;
-    // A missing receipt alone proves nothing. Read finalized height FIRST, then
-    // a finalized account at/after a later finalized slot: its monotonic sequence
-    // proves no successful swap occurred before the signed lifetime ended.
-    const blockHeight = integer(await read("getBlockHeight", [{ commitment: "finalized", minContextSlot: submission.minContextSlot }]));
-    const finalizedSlot = integer(await read("getSlot", [{ commitment: "finalized", minContextSlot: submission.minContextSlot }]));
+    // A missing receipt alone proves nothing. The finalized slot and block height
+    // come from ONE bank (getEpochInfo), and the vault is read at or after that
+    // slot. If that bank's height is past lastValidBlockHeight, any block that
+    // could hold these bytes is at an earlier slot, so an unchanged sequence there
+    // proves they never ran. Separate height and slot reads can be served by
+    // different nodes behind one URL and pair a current height with a stale slot.
+    const info = await read("getEpochInfo", [{ commitment: "finalized", minContextSlot: submission.minContextSlot }]);
+    if (!object(info)) return fail();
+    const finalizedSlot = integer(info.absoluteSlot), blockHeight = integer(info.blockHeight);
     if (finalizedSlot < submission.minContextSlot || await deriveSolanaVaultAddress(submission.programId, owner) !== submission.intent.vault) return fail();
     const evidence = context(await read("getAccountInfo", [submission.intent.vault, {
       encoding: "base64", commitment: "finalized", minContextSlot: finalizedSlot,
