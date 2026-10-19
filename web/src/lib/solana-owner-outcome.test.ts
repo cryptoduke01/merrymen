@@ -59,28 +59,36 @@ async function fixture() {
     b.writeUInt16LE(limits.maxOpsPerDay, p); return b;
   };
   const response = (value: unknown) => ({ context: { slot: 1000 }, value });
+  const SYSTEM = "11111111111111111111111111111111";
+  // What the runtime reads for an owner transaction: the vault and its token
+  // accounts, the owner wallet that pays (a plain system account) and any account
+  // the transaction opens (missing here, so its rent is counted).
+  const accountFor = (k: unknown) => k === vault ? (controls.initialized ? account(state()) : null)
+    : k === cashAta ? account(tokenAccount(SOLANA_USDG_MINT, controls.cash), TOKEN_2022_PROGRAM)
+    : k === wsolAta ? account(tokenAccount(SOLANA_WRAPPED_SOL_MINT, controls.wsol), SOLANA_CLASSIC_TOKEN_PROGRAM)
+    : k === owner ? account(Buffer.alloc(0), SYSTEM)
+    : null;
   const read: SolanaLiveRead = async (method, params = []) => {
     if (method === "getSlot") return 1000;
-    if (method === "getBlockHeight") return controls.height;
+    // The owner expiry proof reads its finalized slot and height from one bank.
+    if (method === "getEpochInfo") return { absoluteSlot: 1000, blockHeight: controls.height, epoch: 2, slotIndex: 1000, slotsInEpoch: 432_000 };
+    if (method === "getMinimumBalanceForRentExemption") return (128 + (params[0] as number)) * 6960;
     if (method === "getAccountInfo") {
       if (params[0] === PROGRAM) return response(account(program, LOADER, true));
       if (params[0] === dataAddress) {
         const slice = (params[1] as { dataSlice: { offset: number; length: number } }).dataSlice;
         return response({ ...account(programData.subarray(slice.offset, slice.offset + slice.length), LOADER), space: programData.length });
       }
-      if (params[0] === vault) return response(controls.initialized ? account(state()) : null);
-      return response(account(Buffer.alloc(0), "11111111111111111111111111111111"));
+      return response(accountFor(params[0]) ?? (params[0] === vault ? null : account(Buffer.alloc(0), SYSTEM)));
     }
-    if (method === "getMultipleAccounts") {
-      assert.deepEqual(params[0], [cashAta, wsolAta]);
-      return response([account(tokenAccount(SOLANA_USDG_MINT, controls.cash), TOKEN_2022_PROGRAM), account(tokenAccount(SOLANA_WRAPPED_SOL_MINT, controls.wsol), SOLANA_CLASSIC_TOKEN_PROGRAM)]);
-    }
+    if (method === "getMultipleAccounts") return response((params[0] as string[]).map(accountFor));
     if (method === "getLatestBlockhash") return response({ blockhash: key(42), lastValidBlockHeight: 5000 });
     if (method === "getSignatureStatuses") return response([controls.finalized ? { confirmationStatus: "finalized", slot: 1000, ...(controls.malformed ? {} : { err: controls.failed ? { InstructionError: [0, "InvalidArgument"] } : null }) } : null]);
     if (method === "getTransaction") return controls.finalized ? { version: 0, slot: 1000, transaction: [controls.signed, "base64"], meta: controls.malformed ? {} : { err: controls.failed ? { InstructionError: [0, "InvalidArgument"] } : null } } : null;
     throw new Error(`Unexpected test RPC ${method}`);
   };
-  const rpc: SolanaLiveRpc = { read: fn => fn(read), send: async wire => {
+  // Two independent providers that agree: owner outcomes are booked only on both.
+  const rpc: SolanaLiveRpc = { read: fn => fn(read), readEach: async fn => [await fn(read), await fn(read)], send: async wire => {
     controls.sends++;
     const saved = await new SolanaTradingStore(db, scope, () => clock.now).setup();
     assert.equal(saved?.signedTransactionBase64, wire, "exact bytes committed before RPC send");
@@ -155,12 +163,14 @@ test("a finalized withdrawal the book cannot record yet is an unknown outcome on
     const prepared = await f.app.prepareOwnerAction(f.scope, { action: "withdraw", mint: SOLANA_USDG_MINT, amountRaw: "1000000" });
     const signedTransactionBase64 = await f.sign(prepared.transactionBase64);
     assert.equal((await asPage(() => f.app.submitOwnerAction(f.scope, { signedTransactionBase64 }))).status, 200);
-    // The book moved past the withdrawal's slot before its outcome was read; the withdrawal itself finalized.
+    // The book moved past the withdrawal's slot before its outcome was read; the withdrawal itself
+    // finalized, and the finalized vault shows its mark (a withdrawal always advances the sequence).
     await f.db.prepare("UPDATE solana_runtime_live_books SET book_json=? WHERE tenant=? AND owner=?").run(JSON.stringify({ ...book, slot: 1001 }), TENANT, f.owner);
-    f.controls.finalized = true;
+    f.controls.finalized = true; f.controls.sequence = 1n;
     const retry = await asPage(() => f.app.submitOwnerAction(f.scope, { signedTransactionBase64 }));
     assert.equal(retry.status, 503); assert.match(retry.error!, UNKNOWN);
     assert.equal(retry.refusal, false);
+    assert.equal((await new SolanaTradingStore(f.db, f.scope).setup())!.status, "pending", "the server still holds the broadcast withdrawal");
   } finally { f.raw.close(); }
 });
 
