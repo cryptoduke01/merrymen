@@ -588,6 +588,8 @@ test("a renewal changes only the limits it names, validates them, and never rese
     [{ expiresAtMs: NOW + 10_000, initialCashRaw: "999999" }, "invalid_input"],
     [{ expiresAtMs: NOW + 10_000, perTradeWsol: "1" }, "invalid_input"],
     [{ perTradeUsdg: "1" }, "invalid_input"],
+    [{ expiresAtMs: undefined, perTradeUsdg: "1" }, "invalid_input"],
+    [{ expiresAtMs: String(NOW + 10_000) }, "invalid_input"],
   ] as const) {
     assert.throws(() => store.renew(OWNER, renewal as never), code ? errorCode(code) : /Solana/, JSON.stringify(renewal));
     assert.deepEqual(store.get(OWNER), before, `${JSON.stringify(renewal)} changed the book`);

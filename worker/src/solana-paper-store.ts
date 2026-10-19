@@ -254,7 +254,7 @@ export class SolanaPaperStore {
     ownerKey(owner);
     timestamp(preparedAtMs);
     if (!renewal || typeof renewal !== "object" || Array.isArray(renewal)
-      || Object.keys(renewal).some((key) => !RENEWAL_FIELDS.has(key)) || !Object.hasOwn(renewal, "expiresAtMs")) fail("invalid_input");
+      || Object.keys(renewal).some((key) => !RENEWAL_FIELDS.has(key)) || typeof renewal.expiresAtMs !== "number") fail("invalid_input");
     const changes = Object.fromEntries(Object.entries(renewal).filter(([, value]) => value !== undefined));
     return this.transaction(() => {
       const book = this.readBook(owner);
