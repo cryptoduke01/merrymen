@@ -106,6 +106,16 @@ describe("a post may not carry a figure the agent was never given", () => {
     const sig = base58Encode(Uint8Array.from({ length: 64 }, (_, i) => (i * 37 + 11) & 0xff));
     assert.equal(admitPost(`Saw ${sig} go by`, ctx()).refusal, "has-address");
   });
+
+  it("refuses a Solana id glued to the words around it as an address (audit regressions F3)", () => {
+    // A letters-only key has no digit for the digit check to see, so glued to a word it was published.
+    const letters = "EEuxbXvdXfvgGiFWKYyEksxzabPKjwhYTNvGXFitaqqT";
+    assert.equal(admitPost(`Watching ca${letters} while the curve stays early.`, ctx()).refusal, "has-address");
+    assert.equal(admitPost(`Watching ${letters}ish things while the curve stays early.`, ctx()).refusal, "has-address");
+    // One with digits was refused, but as "has-digits": the wrong reason, on the case where it matters most.
+    assert.equal(admitPost(`Grab it CA${SOLANA_USDG_MINT} before the curve fills up.`, ctx()).refusal, "has-address");
+    assert.equal(admitPost(`Following ${SOLANA_USDG_MINT}is the move here.`, ctx()).refusal, "has-address");
+  });
 });
 
 describe("not posting is a normal outcome", () => {

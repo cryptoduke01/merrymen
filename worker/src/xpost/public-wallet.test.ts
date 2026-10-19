@@ -81,3 +81,23 @@ test("a Solana mint, signature or explorer link is an id too: never prose, never
   const linked = appendPublicToken("pepe caught my eye while the curve was early", { ...wallet, txHash: tx }, true)!;
   assert.equal(publicTokenStillAllowed({ kind: "buy", body: linked }, { ...wallet, txHash: tx }, true), true);
 });
+
+test("a Solana id glued to the words around it is an id too: never prose, never a suffix that passes (audit regressions F3)", () => {
+  const sig = base58Encode(Uint8Array.from({ length: 64 }, (_, i) => (i * 37 + 11) & 0xff));
+  const letters = "EEuxbXvdXfvgGiFWKYyEksxzabPKjwhYTNvGXFitaqqT";
+  for (const glued of [`grab it CA${SOLANA_USDG_MINT}`, `${SOLANA_USDG_MINT}is the one`, `0x${SOLANA_USDG_MINT}`, `ca${letters}`, `tx${sig}done`, `ser${"A".repeat(87)}`]) {
+    assert.equal(hasPublicWallet(`${prose} ${glued}`), true, glued);
+    assert.equal(appendPublicWallet(`${prose} ${glued}`, wallet), null, glued);
+    assert.equal(appendPublicToken(`${prose} ${glued}`, wallet), null, glued);
+    assert.equal(publicWalletStillAllowed({ kind: "intro", body: `${prose} ${glued}${publicWalletSuffix(wallet)}` }, wallet), false, glued);
+    assert.equal(publicTokenStillAllowed({ kind: "buy", body: `${prose} ${glued}\n\n${wallet.address}` }, wallet), false, glued);
+  }
+  // Ordinary posts are not ids: tickers, hashtags, links, a long number, hex split at its zeros, filler.
+  for (const text of [`${prose} $SOL $BONK #BuyTheDip https://x.com/merrymen/status/1845123456789012345`,
+    "commit 6fde6ce70efd0bc3e0c60538ccf57431cf76c354a617bd6c5a1f8198d4342cfa landed, supply 63971511409728546707420640415976470808777",
+    `hahaha${"ha".repeat(50)} what a day`]) {
+    assert.equal(hasPublicWallet(text), false, text);
+  }
+  // The EVM disclosures themselves are unchanged.
+  assert.equal(publicWalletStillAllowed({ kind: "intro", body: appendPublicWallet(prose, wallet)! }, wallet), true);
+});

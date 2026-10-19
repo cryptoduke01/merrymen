@@ -17,10 +17,11 @@ const TOKEN_MARKER = " CA (";
 /**
  * An id anywhere in the text: a 0x run as before, or any id core's detector
  * finds (a Solana key or signature, a Solana explorer link). Solana ids carry
- * no 0x, so the hex rule alone let one through as ordinary prose.
+ * no 0x, so the hex rule alone let one through as ordinary prose. The glued
+ * scan: "CA<mint>" or "<mint>is" is an id too (audit regressions F3).
  */
 function idInText(text: string): boolean {
-  return ADDRESS_IN_TEXT.test(text) || onchainIdIn(text);
+  return ADDRESS_IN_TEXT.test(text) || onchainIdIn(text, { glued: true });
 }
 
 /** Unknown networks and malformed accounts fail closed instead of borrowing a chain label. */

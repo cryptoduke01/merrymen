@@ -311,7 +311,8 @@ export function admitPost(raw: string, c: WriterContext): PostVerdict {
    * "has-digits" in the operator log — a refusal that says the wrong thing
    * about why, on the one case where knowing why matters most.
    */
-  if (ADDRESSY.test(body) || onchainIdIn(body)) return { ok: false, refusal: "has-address" };
+  // Glued too: "CA<mint>" or "<mint>is" is an address (audit regressions F3).
+  if (ADDRESSY.test(body) || onchainIdIn(body, { glued: true })) return { ok: false, refusal: "has-address" };
   if (HANDLEY.test(body)) return { ok: false, refusal: "has-handle" };
 
   /**
