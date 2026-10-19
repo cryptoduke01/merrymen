@@ -361,27 +361,7 @@ test("a live binding saved without SOL sell limits admits no trade", async t => 
   assert.equal((await f.store.pending()).length, 0);
 });
 
-test("an operator hold refuses live admission, manual or automatic, while owner actions continue", async t => {
-  const f = await fixture(t);
-  await setSolanaOperatorHold(f.db, TENANT, "incident", NOW);
-  await assert.rejects(f.store.recordSigned(submission()), /operator hold/);
-  const binding = await f.binding.strategy(TENANT, OWNER, 1, strategy);
-  await assert.rejects(new SolanaTradingStore(f.db, f.store.scope, () => NOW, { autonomousRevision: binding.revision }).recordSigned(submission("auto")), /operator hold/);
-  assert.equal((await f.store.pending()).length, 0);
-  // Revocation (and any owner transaction) is still prepared and saved.
-  assert.equal(await f.store.saveSetup(setup("revoke")), true);
-  await releaseSolanaOperatorHold(f.db, TENANT);
-  await setSolanaOperatorHold(f.db, "*", "fleet-wide", NOW);
-  await assert.rejects(f.store.recordSigned(submission("everyone")), /operator hold/);
-});
 
-test("a kill fences a live autonomous admission that captured the strategy before it", async t => {
-  const f = await fixture(t), binding = await f.binding.strategy(TENANT, OWNER, 1, strategy);
-  const automatic = new SolanaTradingStore(f.db, f.store.scope, () => NOW, { autonomousRevision: binding.revision });
-  assert.equal(await f.binding.disableForKill(TENANT), true);
-  await assert.rejects(automatic.recordSigned(submission()), /strategy changed/);
-  assert.equal((await f.store.pending()).length, 0);
-});
 
 test("each owner transaction kind is proven expired only by state it must change", async t => {
   const proof = (vaultSequence: string | null, sessionEpoch: string | null) => ({ reason: "blockhash-expired" as const, blockHeight: "1201", vaultSequence, sessionEpoch, slot: 1002 });
@@ -406,44 +386,7 @@ test("each owner transaction kind is proven expired only by state it must change
   await f.store.finishSetup("first-session", "failed", 1002, proof(null, null));
 });
 
-test("no trade is admitted while a withdrawal is prepared, and a stale withdrawal cannot be prepared", async t => {
-  const f = await fixture(t);
-  const withdraw = { ...setup("withdraw"), priorVaultExisted: true, priorSequence: "0", priorSessionEpoch: "1", mint: SOLANA_USDG_MINT, amountRaw: "1" };
-  await f.store.saveSetup(withdraw);
-  await assert.rejects(f.store.recordSigned(submission()), /prepared owner withdrawal/);
-  // Once its signing window lapses it can no longer be submitted, so trading resumes.
-  f.clock.value = withdraw.expiresAtMs;
-  const later = submission("later"); later.preparedAtMs = later.safetyObservedAtMs = later.risk.observedAtMs = later.quote.quotedAtMs = f.clock.value;
-  later.quote.expiresAtMs = f.clock.value + 30_000; later.risk.reference = pythBound(later.intent, f.clock.value);
-  assert.equal(await f.store.recordSigned(later), true);
-  await f.store.settle(OWNER, later.intent.requestId, later.signature, { ...settlement(later), finalizedAtMs: f.clock.value + 1 });
-  // The trade ran at sequence 0: a withdrawal still claiming sequence 0 read stale state.
-  await assert.rejects(f.store.saveSetup({ ...withdraw, preparedAtMs: f.clock.value, expiresAtMs: f.clock.value + 60_000 }), /vault changed/);
-  assert.equal(await f.store.saveSetup({ ...withdraw, priorSequence: "1", preparedAtMs: f.clock.value, expiresAtMs: f.clock.value + 60_000 }), true);
-});
 
-test("one raw WSOL sent to the vault is quarantined at zero basis, outside equity, the HWM and the position (audit dust)", async t => {
-  const f = await fixture(t), s = submission(); await f.store.recordSigned(s);
-  await f.store.settle(OWNER, s.intent.requestId, s.signature, settlement(s));
-  const before = (await f.store.liveBook())!;
-  const dusted = { cashUsdg: "99400000", wsolRaw: "1980001", slot: 1002, observedAtMs: NOW, commitment: "finalized" as const };
-  await f.store.reconcileExternalInflows(dusted); await f.store.reconcileExternalInflows(dusted);
-  let book = (await f.store.liveBook())!;
-  assert.equal(book.quarantinedWsolRaw, "1"); assert.equal(book.wsolRaw, before.wsolRaw);
-  assert.equal(book.hwmRaw, before.hwmRaw); assert.equal(book.costBasisUsdgRaw, before.costBasisUsdgRaw); assert.equal(book.realizedPnlUsdgRaw, "0");
-  const flows = await f.db.prepare("SELECT kind,mint,amount_raw FROM solana_runtime_cashflows ORDER BY kind").all() as Array<{ kind: string; mint: string; amount_raw: string }>;
-  assert.deepEqual(flows.map(r => ({ kind: r.kind, mint: r.mint, amount_raw: r.amount_raw })), [{ kind: "quarantine", mint: SOLANA_WRAPPED_SOL_MINT, amount_raw: "1" }]);
-  // A USDG deposit and more dust in one finalized read: capital-in and quarantine, booked once each.
-  await f.store.reconcileExternalInflows({ ...dusted, cashUsdg: "109400000", wsolRaw: "1980003", slot: 1003 });
-  book = (await f.store.liveBook())!;
-  assert.equal(book.quarantinedWsolRaw, "3"); assert.equal(book.cashRaw, "109400000"); assert.equal(book.hwmRaw, (BigInt(before.hwmRaw) + 10_000_000n).toString());
-  // The owner can take it out: a WSOL withdrawal spends quarantine first, at zero basis.
-  await saveSignedSetup(f.store, { ...setup("withdraw"), priorVaultExisted: true, priorSequence: "1", priorSessionEpoch: "1", mint: SOLANA_WRAPPED_SOL_MINT, amountRaw: "5" }, "sweep");
-  await f.store.finishSetup("sweep", "finalized", 1004);
-  book = (await f.store.liveBook())!;
-  assert.equal(book.quarantinedWsolRaw, "0"); assert.equal(book.wsolRaw, "1979998");
-  assert.equal(book.costBasisUsdgRaw, (600000n - 600000n * 2n / 1980000n).toString()); assert.equal(book.hwmRaw, (BigInt(before.hwmRaw) + 10_000_000n).toString());
-});
 
 test("an unbooked excess never blocks admission, a shortfall does, and no sale reaches quarantined SOL", async t => {
   const f = await fixture(t), s = submission(); await f.store.recordSigned(s);
@@ -463,3 +406,65 @@ test("a first live book on a vault that already holds WSOL starts with it quaran
   const book = (await f.store.liveBook())!;
   assert.equal(book.wsolRaw, "0"); assert.equal(book.quarantinedWsolRaw, "7"); assert.equal(book.costBasisUsdgRaw, "0");
 });
+
+// The new admission and accounting SQL runs on both dialects; CI runs these against PostgreSQL.
+for (const dialect of ["sqlite", "postgres"] as const) {
+  const options = dialect === "postgres" && !process.env.MERRYMEN_TEST_PG_URL ? { skip: "Set MERRYMEN_TEST_PG_URL to an isolated PostgreSQL test database." } : {};
+  test(`${dialect}: an operator hold refuses live admission, manual or automatic, while owner actions continue`, options, async t => {
+    const f = await fixture(t, dialect);
+    await setSolanaOperatorHold(f.db, TENANT, "incident", NOW);
+    await assert.rejects(f.store.recordSigned(submission()), /operator hold/);
+    const binding = await f.binding.strategy(TENANT, OWNER, 1, strategy);
+    await assert.rejects(new SolanaTradingStore(f.db, f.store.scope, () => NOW, { autonomousRevision: binding.revision }).recordSigned(submission("auto")), /operator hold/);
+    assert.equal((await f.store.pending()).length, 0);
+    // Revocation (and any owner transaction) is still prepared and saved.
+    assert.equal(await f.store.saveSetup(setup("revoke")), true);
+    await releaseSolanaOperatorHold(f.db, TENANT);
+    await setSolanaOperatorHold(f.db, "*", "fleet-wide", NOW);
+    await assert.rejects(f.store.recordSigned(submission("everyone")), /operator hold/);
+  });
+  test(`${dialect}: a kill fences a live autonomous admission that captured the strategy before it`, options, async t => {
+    const f = await fixture(t, dialect), binding = await f.binding.strategy(TENANT, OWNER, 1, strategy);
+    const automatic = new SolanaTradingStore(f.db, f.store.scope, () => NOW, { autonomousRevision: binding.revision });
+    assert.equal(await f.binding.disableForKill(TENANT), true);
+    await assert.rejects(automatic.recordSigned(submission()), /strategy changed/);
+    assert.equal((await f.store.pending()).length, 0);
+  });
+  test(`${dialect}: no trade is admitted while a withdrawal is prepared, and a stale withdrawal cannot be prepared`, options, async t => {
+    const f = await fixture(t, dialect);
+    const withdraw = { ...setup("withdraw"), priorVaultExisted: true, priorSequence: "0", priorSessionEpoch: "1", mint: SOLANA_USDG_MINT, amountRaw: "1" };
+    await f.store.saveSetup(withdraw);
+    await assert.rejects(f.store.recordSigned(submission()), /prepared owner withdrawal/);
+    // Once its signing window lapses it can no longer be submitted, so trading resumes.
+    f.clock.value = withdraw.expiresAtMs;
+    const later = submission("later"); later.preparedAtMs = later.safetyObservedAtMs = later.risk.observedAtMs = later.quote.quotedAtMs = f.clock.value;
+    later.quote.expiresAtMs = f.clock.value + 30_000; later.risk.reference = pythBound(later.intent, f.clock.value);
+    assert.equal(await f.store.recordSigned(later), true);
+    await f.store.settle(OWNER, later.intent.requestId, later.signature, { ...settlement(later), finalizedAtMs: f.clock.value + 1 });
+    // The trade ran at sequence 0: a withdrawal still claiming sequence 0 read stale state.
+    await assert.rejects(f.store.saveSetup({ ...withdraw, preparedAtMs: f.clock.value, expiresAtMs: f.clock.value + 60_000 }), /vault changed/);
+    assert.equal(await f.store.saveSetup({ ...withdraw, priorSequence: "1", preparedAtMs: f.clock.value, expiresAtMs: f.clock.value + 60_000 }), true);
+  });
+  test(`${dialect}: one raw WSOL sent to the vault is quarantined at zero basis, outside equity, the HWM and the position (audit dust)`, options, async t => {
+    const f = await fixture(t, dialect), s = submission(); await f.store.recordSigned(s);
+    await f.store.settle(OWNER, s.intent.requestId, s.signature, settlement(s));
+    const before = (await f.store.liveBook())!;
+    const dusted = { cashUsdg: "99400000", wsolRaw: "1980001", slot: 1002, observedAtMs: NOW, commitment: "finalized" as const };
+    await f.store.reconcileExternalInflows(dusted); await f.store.reconcileExternalInflows(dusted);
+    let book = (await f.store.liveBook())!;
+    assert.equal(book.quarantinedWsolRaw, "1"); assert.equal(book.wsolRaw, before.wsolRaw);
+    assert.equal(book.hwmRaw, before.hwmRaw); assert.equal(book.costBasisUsdgRaw, before.costBasisUsdgRaw); assert.equal(book.realizedPnlUsdgRaw, "0");
+    const flows = await f.db.prepare("SELECT kind,mint,amount_raw FROM solana_runtime_cashflows ORDER BY kind").all() as Array<{ kind: string; mint: string; amount_raw: string }>;
+    assert.deepEqual(flows.map(r => ({ kind: r.kind, mint: r.mint, amount_raw: r.amount_raw })), [{ kind: "quarantine", mint: SOLANA_WRAPPED_SOL_MINT, amount_raw: "1" }]);
+    // A USDG deposit and more dust in one finalized read: capital-in and quarantine, booked once each.
+    await f.store.reconcileExternalInflows({ ...dusted, cashUsdg: "109400000", wsolRaw: "1980003", slot: 1003 });
+    book = (await f.store.liveBook())!;
+    assert.equal(book.quarantinedWsolRaw, "3"); assert.equal(book.cashRaw, "109400000"); assert.equal(book.hwmRaw, (BigInt(before.hwmRaw) + 10_000_000n).toString());
+    // The owner can take it out: a WSOL withdrawal spends quarantine first, at zero basis.
+    await saveSignedSetup(f.store, { ...setup("withdraw"), priorVaultExisted: true, priorSequence: "1", priorSessionEpoch: "1", mint: SOLANA_WRAPPED_SOL_MINT, amountRaw: "5" }, "sweep");
+    await f.store.finishSetup("sweep", "finalized", 1004);
+    book = (await f.store.liveBook())!;
+    assert.equal(book.quarantinedWsolRaw, "0"); assert.equal(book.wsolRaw, "1979998");
+    assert.equal(book.costBasisUsdgRaw, (600000n - 600000n * 2n / 1980000n).toString()); assert.equal(book.hwmRaw, (BigInt(before.hwmRaw) + 10_000_000n).toString());
+  });
+}
