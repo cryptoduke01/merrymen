@@ -7,11 +7,12 @@
  */
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
 import { afterEach, describe, it } from "node:test";
+import { fileURLToPath } from "node:url";
 import { ed25519 } from "@noble/curves/ed25519";
 import { getCompiledTransactionMessageDecoder, getTransactionDecoder } from "@solana/kit";
 import { base58Decode, base58Encode, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM } from "../../packages/core/src/ids";
@@ -20,7 +21,9 @@ import {
   deriveSolanaAta, deriveSolanaVaultAddress, SOLANA_ASSOCIATED_TOKEN_PROGRAM, SOLANA_CLASSIC_TOKEN_PROGRAM,
   SOLANA_SYSTEM_PROGRAM, SOLANA_VAULT_ACCOUNT_SIZE, SOLANA_VAULT_DISCRIMINATOR, SOLANA_WRAPPED_SOL_MINT,
 } from "../../packages/core/src/solana-live";
-import { readSolanaOwnerKey, SolanaRecoverError, type SolanaRecoveryResult } from "./solana-recover";
+import {
+  readSolanaOwnerKey, SolanaRecoverError, solanaRecoveryRevokeInstructions, solanaRecoveryWithdrawInstructions, type SolanaRecoveryResult,
+} from "./solana-recover";
 import { runSolanaRecoverCommand, type SolanaRecoverCommandDeps } from "./solana-recover-command";
 import { SOLANA_MAINNET_GENESIS_HASH, SolanaRpcError } from "./solana-rpc";
 
@@ -78,7 +81,7 @@ class FakeChain {
   accounts = new Map<string, Account>();
   slot = 1_000; height = 5_000;
   genesis = SOLANA_MAINNET_GENESIS_HASH;
-  sent: { signature: string; instructions: Decoded[] }[] = [];
+  sent: { signature: string; instructions: Decoded[]; wire: string }[] = [];
   calls: string[] = [];
   statuses = new Map<string, { slot: number; err: unknown; polls: number }>();
   /** Per-send behavior, in order: land (default), drop (never lands) or fail (lands with an error). */
@@ -165,7 +168,7 @@ class FakeChain {
         const index = this.sent.length;
         this.beforeSend?.(index);
         const { signature, instructions } = this.decode(String(p[0]));
-        this.sent.push({ signature, instructions });
+        this.sent.push({ signature, instructions, wire: String(p[0]) });
         const behavior = this.behaviors[index] ?? "land";
         if (behavior === "drop") return reply(signature);
         if (behavior === "reject") return error();
@@ -606,5 +609,59 @@ describe("solana-recover program trust", () => {
     assert.equal(verified.error, null, String(verified.error));
     assert.match(verified.out, /Program binary verified against the given SHA-256/);
     assert.ok(!checked.calls.includes("getLatestBlockhash"));
+  });
+});
+
+/**
+ * The owner recovery transactions that contracts/solana/runtime-tests/tests/recovery.rs
+ * executes against the compiled vault program and solana-program-test's bundled SPL Token,
+ * Token-2022 and ATA programs: the exact bytes this tool signs and sends for a funded vault
+ * with a live session and no owner token accounts yet.
+ */
+const VAULT_PROGRAM_ID = "EUzYVniKtgNNgFweMtRA9vciTWtE8MDTRfh6ai6VvXoU"; // declare_id! in contracts/solana
+const RECOVERY_FIXTURE = fileURLToPath(new URL("../../contracts/solana/runtime-tests/fixtures/recovery-transactions.txt", import.meta.url));
+const FUNDED = { usdg: 12_345_678n, wsol: 500_000_000n, unsynced: 100_000_000n, solExcess: 3_000_000n };
+
+async function recoveryFixture(): Promise<string> {
+  const fake = await (await new FakeChain(VAULT_PROGRAM_ID).setup(FUNDED)).indexAtas();
+  const { result, error } = await run(fake, ["--program", VAULT_PROGRAM_ID, "--rpc", RPC, "--key-file", keyFile(SECRET_BASE58), "--send"],
+    { releases: [{ programId: VAULT_PROGRAM_ID, sha256: BINARY_SHA }] });
+  assert.equal(error, null, String(error));
+  assert.equal(fake.sent.length, 2);
+  const [revoke, withdraw] = fake.sent as [FakeChain["sent"][number], FakeChain["sent"][number]];
+  // The sent transactions carry exactly the exported step builders' instructions.
+  const shape = (ixs: { program: string; accounts: string[]; data: number[] }[]) => ixs;
+  for (const [sent, built] of [[revoke, solanaRecoveryRevokeInstructions(result!.plan)], [withdraw, solanaRecoveryWithdrawInstructions(result!.plan)]] as const) {
+    assert.deepEqual(shape(sent.instructions.map((ix) => ({ program: ix.program, accounts: ix.accounts.map((a) => a.address), data: [...ix.data] }))),
+      shape(built.map((ix) => ({ program: String(ix.programAddress), accounts: (ix.accounts ?? []).map((a) => String(a.address)), data: [...(ix.data ?? [])] }))));
+  }
+  assert.equal(withdraw.instructions.length, 6, "two CreateIdempotent, SyncNative, two withdraws and withdraw_sol");
+  return [
+    "# merrymen solana-recover, as signed and sent by worker/src/solana-recover.ts for a vault with a live",
+    "# session, USDG, synced and unsynced WSOL, spare SOL, and no owner token accounts yet. Written by",
+    "# worker/src/solana-recover.test.ts (MERRYMEN_WRITE_SOLANA_RECOVERY_FIXTURE=1 rewrites it) and executed",
+    "# by tests/recovery.rs against the compiled program. The owner seed is a public test key.",
+    `program ${VAULT_PROGRAM_ID}`,
+    `owner ${OWNER}`,
+    `owner_seed_hex ${Buffer.from(SEED).toString("hex")}`,
+    `session ${SESSION}`,
+    `vault ${fake.vault}`,
+    `usdg_raw ${FUNDED.usdg}`,
+    `wsol_synced_raw ${FUNDED.wsol}`,
+    `wsol_unsynced_lamports ${FUNDED.unsynced}`,
+    `sol_excess_lamports ${FUNDED.solExcess}`,
+    `revoke_tx ${revoke.wire}`,
+    `withdraw_tx ${withdraw.wire}`,
+    "",
+  ].join("\n");
+}
+
+describe("solana-recover runtime fixture", () => {
+  it("holds the tool's current recovery transactions for the compiled-program test", async () => {
+    const expected = await recoveryFixture();
+    assert.equal(await recoveryFixture(), expected, "the fixture is deterministic");
+    if (process.env.MERRYMEN_WRITE_SOLANA_RECOVERY_FIXTURE === "1") writeFileSync(RECOVERY_FIXTURE, expected);
+    assert.equal(readFileSync(RECOVERY_FIXTURE, "utf8"), expected,
+      "contracts/solana/runtime-tests/fixtures/recovery-transactions.txt is stale: rerun with MERRYMEN_WRITE_SOLANA_RECOVERY_FIXTURE=1 and run contracts/solana/test.sh");
   });
 });
