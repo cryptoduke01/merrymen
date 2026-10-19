@@ -94,6 +94,20 @@ describe("the CI jobs", () => {
     assert.match(test, /CARGO_HOME=\$\(realpath /);
   });
 
+  it("gives test.sh no environment override that build.sh refuses", () => {
+    // build.sh stops on RUSTFLAGS, CARGO_ENCODED_RUSTFLAGS, CARGO_BUILD_RUSTFLAGS,
+    // CARGO_BUILD_TARGET_DIR and any CARGO_PROFILE_* or CARGO_TARGET_* variable:
+    // set anywhere in the job, the vault build fails before it starts.
+    const build = readFileSync(join(repo, "contracts/solana/build.sh"), "utf8");
+    assert.match(build, /for name in RUSTFLAGS CARGO_ENCODED_RUSTFLAGS CARGO_BUILD_RUSTFLAGS CARGO_BUILD_TARGET_DIR; do/);
+    assert.match(build, /\^CARGO_\(PROFILE\|TARGET\)_\[A-Z0-9_\]\+=/);
+    const refused = /^\s+(RUSTFLAGS|CARGO_ENCODED_RUSTFLAGS|CARGO_BUILD_RUSTFLAGS|CARGO_BUILD_TARGET_DIR|CARGO_PROFILE_[A-Z0-9_]+|CARGO_TARGET_[A-Z0-9_]+):/m;
+    assert.doesNotMatch(test, refused);
+    assert.doesNotMatch(test, /(RUSTFLAGS|CARGO_BUILD_TARGET_DIR|CARGO_PROFILE_[A-Z0-9_]+|CARGO_TARGET_[A-Z0-9_]+)=/);
+    const top = /^env:\n((?: {2}.*\n)*)/m.exec(ci)?.[1] ?? "";
+    assert.doesNotMatch(top, refused);
+  });
+
   it("uploads only the artifact and its record, never the throwaway keypair beside them", () => {
     const upload = /uses: actions\/upload-artifact@\S+.*\n((?: {8}.*\n)*)/.exec(test)?.[1] ?? "";
     assert.match(upload, /if-no-files-found: error/);

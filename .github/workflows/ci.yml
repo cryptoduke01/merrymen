@@ -244,13 +244,14 @@ jobs:
 
       # Native unit tests, the SBF build, then the custody runtime tests against
       # that exact .so. test.sh is the one recipe, so whatever it gains, CI runs.
-      # The two variables shrink the cached host build. Neither touches the
-      # release profile the SBF artifact is built with.
+      # CARGO_INCREMENTAL shrinks the cached host build; the release profile the
+      # SBF artifact is built with is never incremental anyway. No CARGO_PROFILE_*,
+      # CARGO_TARGET_* or RUSTFLAGS here: build.sh refuses them, because they
+      # would change the artifact without changing the reviewed source.
       - name: Test
         run: contracts/solana/test.sh
         env:
           CARGO_INCREMENTAL: "0"
-          CARGO_PROFILE_DEV_DEBUG: "0"
 
       - name: Nothing unverified was fetched
         run: scripts/ci/solana-toolchain.sh check
