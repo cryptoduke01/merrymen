@@ -324,6 +324,13 @@ test("a WSOL withdrawal valuation that is missing, stale, altered or one-sided n
   await swapped.store.saveSetup({ ...prepared, withdrawValuation: withdrawValuation(amount, NOW, "55000000", 250_000_000_000n),
     signature: "withdraw", signedTransactionBase64: "c2lnbmVk", status: "pending" });
   assert.deepEqual((await swapped.store.setup())!.withdrawValuation, prepared.withdrawValuation);
+  // A stored valuation that cannot be read never blocks booking the withdrawal; the peak stays.
+  const corrupt = await fixture(t); await auditBook(corrupt);
+  const signed = await saveSignedSetup(corrupt.store, wsolWithdraw(amount, withdrawValuation(amount)), "withdraw");
+  await corrupt.db.prepare("UPDATE solana_runtime_setups SET setup_json=? WHERE tenant=?").run(JSON.stringify({ ...signed,
+    withdrawValuation: { quote: { minOutAmount: "-1" }, reference: {} } }), TENANT);
+  await corrupt.store.finishSetup("withdraw", "finalized", 1002);
+  assert.equal((await corrupt.store.liveBook())!.wsolRaw, "0"); assert.equal((await corrupt.store.liveBook())!.hwmRaw, "20000000");
   // Quarantined WSOL leaves first and never counted toward the peak: only the position's share of the value comes off.
   const mixed = await fixture(t); await auditBook(mixed, { quarantinedWsolRaw: "2000000" });
   await saveSignedSetup(mixed.store, wsolWithdraw("13000000", withdrawValuation("13000000")), "withdraw");

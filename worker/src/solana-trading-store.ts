@@ -85,6 +85,14 @@ export function solanaWithdrawValueUsdg(valuation: SolanaWithdrawValuation | und
     return quoted < reference ? quoted : reference;
   } catch { return null; }
 }
+/** A valuation saveSetup already checked; one that cannot be read never blocks booking the withdrawal. */
+function storedWithdrawValue(valuation: SolanaWithdrawValuation | undefined): bigint | null {
+  if (!valuation) return null;
+  try {
+    const quoted = parseSolanaRawAmount(valuation.quote.minOutAmount), reference = parseSolanaRawAmount(valuation.reference.referenceOut);
+    return quoted < reference ? quoted : reference;
+  } catch { return null; }
+}
 const DAY = 86_400_000;
 /**
  * Whether finalized vault state after a blockhash expired proves this owner
@@ -655,10 +663,9 @@ export class SolanaTradingStore implements SolanaLiveJournal {
               // Capital out, as for USDG: the high-water mark drops by what the withdrawn
               // position was worth when prepared (its share of the valuation, floor 0).
               // Without a valuation it stays put, the conservative direction.
-              const valuation = setup.withdrawValuation;
-              if (valuation) {
-                const quoted = raw(valuation.quote.minOutAmount), reference = raw(valuation.reference.referenceOut);
-                const out = (quoted < reference ? quoted : reference) * fromPosition / amount, peak = raw(book.hwmRaw);
+              const value = storedWithdrawValue(setup.withdrawValuation);
+              if (value !== null) {
+                const out = value * fromPosition / amount, peak = raw(book.hwmRaw);
                 book.hwmRaw = (peak > out ? peak - out : 0n).toString();
               }
             }
