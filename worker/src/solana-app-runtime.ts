@@ -254,6 +254,7 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       if (await s.operatorHeld()) blockers.push(OPERATOR_HOLD);
       if (binding.requestedMode !== "live") blockers.push("Live mode is not selected.");
       if (!binding.limits || binding.limits.expiresAtMs <= now()) blockers.push("Save current Solana trading limits.");
+      else if (binding.requestedMode === "live" && (binding.limits.perTradeWsol === undefined || binding.limits.dailyWsol === undefined)) blockers.push("Save per-trade and daily SOL sell limits for live trading.");
       const pending = (await s.pending()).map(publicTrade);
       if (pending.length) blockers.push("A live trade is awaiting final confirmation.");
       const ownerTransaction = await s.setup();

@@ -326,3 +326,14 @@ test("one raw WSOL sent to the vault no longer freezes exits or owner withdrawal
     assert.equal(short.live.canExit, false); assert.match(short.live.blockers.join(" "), /below recorded trades/);
   } finally { f.raw.close(); }
 });
+
+test("a live binding saved before SOL sell limits existed is shown as not ready, not silently refused", async () => {
+  const f = await fixture();
+  try {
+    const { perTradeWsol: _p, dailyWsol: _d, ...unbounded } = limits;
+    const binding = (await f.bindings.get(TENANT))!; await f.bindings.settings(TENANT, f.owner, binding.revision, "live", unbounded);
+    const status = await f.app.status(f.scope);
+    assert.equal(status.live.ready, false); assert.match(status.live.blockers.join(" "), /SOL sell limits/);
+    await assert.rejects(f.app.prepareLive(f.scope, { limits: unbounded, sessionPublicKey: f.session }), /SOL sell limits/);
+  } finally { f.raw.close(); }
+});
