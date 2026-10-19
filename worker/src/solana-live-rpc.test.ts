@@ -31,6 +31,21 @@ test("live trading refuses to start without an independent fallback on a differe
   assert.throws(() => createSolanaLiveRpc({ env: { ...env, MERRYMEN_SOLANA_RPC_MAINNET_FALLBACK: "http://fallback.example/" } }), /HTTPS/);
   assert.ok(createSolanaLiveRpc({ env }).providerKey);
 });
+test("an owner-run single endpoint talks only to that provider and never borrows a fallback", async () => {
+  const seen: string[] = [];
+  const rpc = createSolanaLiveRpc({ env, singleEndpoint: true, fetch: async (url, init) => {
+    const body = JSON.parse(init!.body as string); const host = new URL(String(url)).hostname;
+    seen.push(`${host}:${body.method}`);
+    return Response.json({ jsonrpc: "2.0", id: body.id, result: body.method === "getGenesisHash" ? SOLANA_MAINNET_GENESIS_HASH : host });
+  } });
+  assert.equal(await rpc.read(read => read("getSlot")), "primary.example");
+  assert.deepEqual(await rpc.readEach!(read => read("getSlot")), ["primary.example"]);
+  await assert.rejects(readSolanaQuorum(rpc, read => read("getSlot")), SolanaRpcError);
+  assert.ok(seen.every(value => value.startsWith("primary.example:")), seen.join());
+  const down = createSolanaLiveRpc({ env: { MERRYMEN_SOLANA_RPC_MAINNET: env.MERRYMEN_SOLANA_RPC_MAINNET }, singleEndpoint: true,
+    fetch: async () => { throw new Error("offline"); } });
+  await assert.rejects(down.read(read => read("getSlot")), error => error instanceof SolanaRpcError && error.code === "network");
+});
 test("read failover independently verifies mainnet; read callback cannot submit", async () => {
   const seen: string[] = [];
   const rpc = createSolanaLiveRpc({ env, fetch: async (url, init) => {

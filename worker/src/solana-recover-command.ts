@@ -127,7 +127,7 @@ export async function runSolanaRecoverCommand(args: readonly string[], deps: Sol
   // Refuse an unverifiable program before the key is read or the RPC is contacted.
   solanaRecoveryProgramTrust({ programId, send, programSha256: sha, allowUnlistedProgram, releases: deps.releases });
   // The RPC URL can carry an API key: it is validated, used, and never printed.
-  const rpc = createSolanaLiveRpc({ env: { MERRYMEN_SOLANA_RPC_MAINNET: rpcUrl }, fetch: deps.fetch, timeoutMs: 15_000 });
+  const rpc = createSolanaLiveRpc({ env: { MERRYMEN_SOLANA_RPC_MAINNET: rpcUrl }, fetch: deps.fetch, timeoutMs: 15_000, singleEndpoint: true });
 
   let key: Awaited<ReturnType<typeof readSolanaOwnerKey>> | undefined;
   if (keyFile) {

@@ -15,7 +15,7 @@ import {
   isFullySignedTransaction, isSignature,
 } from "@solana/kit";
 import {
-  readSolanaJson, readSolanaLiveRpcConfig, SOLANA_MAINNET_GENESIS_HASH,
+  readSolanaJson, readSolanaLiveRpcConfig, readSolanaMainnetRpcConfig, SOLANA_MAINNET_GENESIS_HASH,
   SolanaRpcError, withSolanaReadDeadline,
 } from "./solana-rpc";
 
@@ -115,9 +115,17 @@ export function createSolanaLiveRpc(options: {
   env?: Readonly<Record<string, string | undefined>>; fetch?: typeof globalThis.fetch; timeoutMs?: number;
   /** Rebroadcast pacing, injectable for tests. */
   now?: () => number; sleep?: (ms: number, signal?: AbortSignal) => Promise<void>; rebroadcastIntervalMs?: number;
+  /**
+   * Owner-run tools (merrymen solana-recover) talk only to the one endpoint the
+   * owner chose. The live runtime never sets this: it needs two providers.
+   */
+  singleEndpoint?: boolean;
 } = {}): SolanaLiveRpc {
-  const config = readSolanaLiveRpcConfig(options.env);
-  const endpoints = [config.url, config.fallbackUrl] as const;
+  const config = options.singleEndpoint
+    ? { url: readSolanaMainnetRpcConfig(options.env).url, fallbackUrl: undefined }
+    : readSolanaLiveRpcConfig(options.env);
+  const fallbackUrl = config.fallbackUrl;
+  const endpoints = fallbackUrl ? [config.url, fallbackUrl] : [config.url];
   const request = options.fetch ?? globalThis.fetch;
   const now = options.now ?? Date.now;
   const interval = options.rebroadcastIntervalMs ?? 2_000;
@@ -158,12 +166,12 @@ export function createSolanaLiveRpc(options: {
     return rpc(method, params);
   }));
   return {
-    providerKey: createHmac("sha256", PROCESS_SALT).update(`${config.url}\n${config.fallbackUrl}`).digest("hex"),
+    providerKey: createHmac("sha256", PROCESS_SALT).update(`${config.url}\n${fallbackUrl ?? ""}`).digest("hex"),
     async read(operation) {
       try { return await reader(config.url)(operation); }
       catch (error) {
-        if (!(error instanceof SolanaRpcError) || error.code === "unsupported-method") throw error;
-        return reader(config.fallbackUrl)(operation);
+        if (!fallbackUrl || !(error instanceof SolanaRpcError) || error.code === "unsupported-method") throw error;
+        return reader(fallbackUrl)(operation);
       }
     },
     async readEach(operation) {
