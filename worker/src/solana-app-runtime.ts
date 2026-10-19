@@ -16,11 +16,13 @@ import {
 } from "../../packages/core/src/solana-live";
 import type { Db } from "./db";
 import { createSolanaExecutor, parseSolanaLiveIntent, readSolanaVaultBalances, readSolanaVaultState,
-  reconcileSolanaSubmission, verifySolanaVaultDeployment, type SolanaLiveRecord } from "./solana-executor";
+  reconcileSolanaSubmission, SolanaExecutionError, verifySolanaVaultDeployment, type SolanaLiveRecord } from "./solana-executor";
 import { createSolanaLiveMarket } from "./solana-live-market";
 import { createSolanaLiveRpc, type SolanaLiveRpc } from "./solana-live-rpc";
 import { createSolanaMarket } from "./solana-market";
 import { createSolanaPaperService, type SolanaPaperMarket } from "./solana-paper-service";
+import { readSolanaReferencePrice, solanaReferenceBound, solanaReferenceNotional, solanaReferenceToleranceBps,
+  SolanaReferencePriceError } from "./solana-reference-price";
 import { getSolanaRuntimeDb } from "./solana-runtime-db";
 import { isSolanaTransactionError } from "./solana-settlement";
 import { ensureSolanaTradingSchema, SolanaTradingStore, type SolanaAccountScope, type SolanaPreparedSetup } from "./solana-trading-store";
@@ -265,6 +267,8 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       }
       const cfg = config(), secret = await s.sessionSeed(dek());
       if (!secret) fail("Register an owner-approved live trading permission first.", "permission");
+      let toleranceBps: number;
+      try { toleranceBps = solanaReferenceToleranceBps(env); } catch { return fail("The independent SOL price tolerance is misconfigured.", "configuration"); }
       const sessionKeyPair = await createKeyPairFromPrivateKeyBytes(seed(secret, "The stored trading permission cannot be opened."));
       const vault = await deriveSolanaVaultAddress(cfg.programId, scope.owner), liveRpc = rpc(), quotes = market();
       const executor = createSolanaExecutor({ programId: cfg.programId, programBinarySha256: cfg.hash,
@@ -280,12 +284,15 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
           let equity = cash;
           if (held > 0n && current.inputMint === SOLANA_USDG_MINT) { const markIntent = makeExit(balances.wsolRaw, "live-portfolio-mark");
             const mark = await quotes.quote(markIntent); validateSolanaQuote(mark, markIntent, now()); evidence.push({ intent: markIntent, quote: mark }); equity += BigInt(mark.minOutAmount); }
-          if (current.inputMint === SOLANA_USDG_MINT) { const exitIntent = makeExit(quote.minOutAmount, "live-entry-exit");
-            const exit = await quotes.quote(exitIntent); validateSolanaQuote(exit, exitIntent, now()); evidence.push({ intent: exitIntent, quote: exit }); }
+          // Independent of Jupiter: the build quote's guaranteed output is checked
+          // against Pyth SOL/USD, and a sell is charged at least its reference value.
+          let reference: ReturnType<typeof solanaReferenceBound>;
+          try { reference = solanaReferenceBound(current, await liveRpc.read(read => readSolanaReferencePrice(read, slot, now())), toleranceBps); }
+          catch (error) { if (error instanceof SolanaReferencePriceError) throw new SolanaExecutionError("risk"); throw error; }
           const previous = await s.liveBook(), peak = previous ? BigInt(previous.hwmRaw) : equity;
           for (const item of evidence) validateSolanaQuote(item.quote, item.intent, now());
-          return { observedAtMs, slot: balances.slot, notionalUsdg: current.inputMint === SOLANA_USDG_MINT ? current.amountRaw : quote.outAmount,
-            equityUsdg: equity.toString(), peakEquityUsdg: (peak > equity ? peak : equity).toString(), cashUsdg: balances.cashUsdg, wsolRaw: balances.wsolRaw };
+          return { observedAtMs, slot: balances.slot, notionalUsdg: solanaReferenceNotional(current, quote.outAmount, reference).toString(),
+            equityUsdg: equity.toString(), peakEquityUsdg: (peak > equity ? peak : equity).toString(), cashUsdg: balances.cashUsdg, wsolRaw: balances.wsolRaw, reference };
         },
       });
       return publicTrade(await executor.execute({ ...parsed, mode: "live", owner: scope.owner, vault }));

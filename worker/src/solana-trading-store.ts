@@ -1,6 +1,6 @@
 /** Tenant-bound Solana paper books and live broadcast journal, on SQLite or Postgres. */
 import { CHAINS, SOLANA_USDG_MINT, canonicalId } from "../../packages/core/src/ids";
-import { parseSolanaRawAmount, solanaPaperAgentId, validateSolanaPaperLimits, validateSolanaQuote,
+import { parseSolanaRawAmount, requireSolanaLiveSellLimits, solanaPaperAgentId, validateSolanaPaperLimits, validateSolanaQuote,
   type SolanaPaperLimits } from "../../packages/core/src/solana";
 import { SOLANA_WRAPPED_SOL_MINT } from "../../packages/core/src/solana-live";
 import type { Db } from "./db";
@@ -9,6 +9,7 @@ import { applySolanaPaperCommit, solanaPaperIntentFingerprint, type SolanaPaperB
   type SolanaPaperCommit, type SolanaPaperReceipt, type SolanaPaperSnapshot } from "./solana-paper-store";
 import type { SolanaPaperLedger } from "./solana-paper-service";
 import type { SolanaLiveJournal, SolanaLiveRecord, SolanaLiveSettlement, SolanaSignedSubmission } from "./solana-executor";
+import { solanaReferenceNotional, verifySolanaReferenceBound, type SolanaReferenceBound } from "./solana-reference-price";
 
 export interface SolanaAccountScope { tenant: string; owner: string }
 export class SolanaTradingStoreError extends Error {
@@ -298,14 +299,31 @@ export class SolanaTradingStore implements SolanaLiveJournal {
       if (![s.risk.slot, s.minContextSlot].every(t => Number.isSafeInteger(t) && t > 0) || s.risk.slot < s.minContextSlot) refuse("Solana risk evidence is not from the current account read.");
       const buying = s.intent.inputMint === SOLANA_USDG_MINT;
       if ((buying ? s.intent.outputMint : s.intent.inputMint) !== SOLANA_WRAPPED_SOL_MINT) refuse("This live vault supports USDG and wrapped SOL only.");
-      const notional = raw(buying ? s.intent.amountRaw : s.quote.outAmount, false);
+      // Re-check the independent price bound from the persisted evidence: the
+      // signed minimum may not be below its floor, and a sell is charged at least
+      // its reference value however low it was quoted.
+      let reference: SolanaReferenceBound;
+      try { reference = verifySolanaReferenceBound(s.risk.reference, s.intent, now); } catch { refuse("The independent SOL price evidence is missing, stale or altered."); }
+      if (reference.reference.slot < s.minContextSlot || s.minOutAmount !== s.quote.minOutAmount ||
+          raw(s.minOutAmount, false) < raw(reference.minOutFloor, false)) refuse("The guaranteed output is below the independent SOL price floor.");
+      const notional = solanaReferenceNotional(s.intent, s.quote.outAmount, reference);
       if (strategyCap !== null && notional > strategyCap) refuse("The autonomous Solana strategy trade limit would be exceeded.");
+      let sellLimits: ReturnType<typeof requireSolanaLiveSellLimits>;
+      try { sellLimits = requireSolanaLiveSellLimits(limits); } catch { refuse("Save per-trade and daily SOL sell limits before live trading."); }
+      const sold = buying ? 0n : raw(s.intent.amountRaw, false);
+      if (sold > sellLimits.perTradeWsol) refuse("The Solana per-trade SOL sell limit would be exceeded.");
       if (raw(s.risk.notionalUsdg, false) !== notional || notional > raw(limits.perTradeUsdg, false)) refuse("The Solana per-trade limit would be exceeded.");
       if (raw(s.feeLamports) + raw(s.rentLamports) > raw(s.maxFeeLamports, false)) refuse("The Solana fee and rent budget would be exceeded.");
-      const recent = await tx.prepare("SELECT notional_raw,status FROM solana_runtime_submissions WHERE tenant=? AND owner=? AND created_at_ms>?").all(tenant, owner, now - DAY) as Array<{ notional_raw: string; status: string }>;
+      const recent = await tx.prepare("SELECT notional_raw,status,submission_json FROM solana_runtime_submissions WHERE tenant=? AND owner=? AND created_at_ms>?").all(tenant, owner, now - DAY) as Array<{ notional_raw: string; status: string; submission_json: string }>;
       // Failed transactions still spend network fees and consume an attempt.
       // Their token notional is released only after canonical failure evidence.
-      if (recent.length >= limits.maxOpsPerDay || recent.reduce((n, r) => n + (["failed", "expired"].includes(r.status) ? 0n : BigInt(r.notional_raw)), 0n) + notional > raw(limits.dailyUsdg, false)) refuse("The Solana rolling daily limit would be exceeded.");
+      const counted = recent.filter(r => !["failed", "expired"].includes(r.status));
+      if (recent.length >= limits.maxOpsPerDay || counted.reduce((n, r) => n + BigInt(r.notional_raw), 0n) + notional > raw(limits.dailyUsdg, false)) refuse("The Solana rolling daily limit would be exceeded.");
+      const soldToday = counted.reduce((n, r) => {
+        const prior = (JSON.parse(r.submission_json) as SolanaSignedSubmission).intent;
+        return prior.inputMint === SOLANA_WRAPPED_SOL_MINT ? n + raw(prior.amountRaw, false) : n;
+      }, 0n);
+      if (sold > 0n && soldToday + sold > sellLimits.dailyWsol) refuse("The Solana rolling daily SOL sell limit would be exceeded.");
       let book = rowJson<SolanaLiveBook>(await tx.prepare("SELECT book_json FROM solana_runtime_live_books WHERE tenant=? AND owner=?").get(tenant, owner), "book_json");
       const equity = raw(s.risk.equityUsdg), peak = raw(s.risk.peakEquityUsdg), cash = raw(s.risk.cashUsdg), wsol = raw(s.risk.wsolRaw);
       if (book && (book.cashRaw !== s.risk.cashUsdg || book.wsolRaw !== s.risk.wsolRaw)) refuse("Vault balances changed outside recorded trades. Reconcile owner transfers before trading again.");

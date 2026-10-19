@@ -15,6 +15,7 @@ import {
 } from "../../packages/core/src/solana-live";
 import { validateJupiterCpi, type JupiterCpiRoute, type SolanaCpiBuildRequest } from "./solana-live-market";
 import type { SolanaLiveRead, SolanaLiveRpc } from "./solana-live-rpc";
+import { solanaReferenceNotional, verifySolanaReferenceBound, type SolanaReferenceBound } from "./solana-reference-price";
 import { isSolanaTransactionError, settleSolanaReceipt } from "./solana-settlement";
 
 export interface SolanaLiveIntent {
@@ -31,6 +32,8 @@ export interface SolanaLiveRiskEvidence {
   peakEquityUsdg: string;
   cashUsdg: string;
   wsolRaw: string;
+  /** Independent SOL price bound; the signed minimum output may not be below its floor. */
+  reference: SolanaReferenceBound;
 }
 export interface SolanaSignedSubmission {
   version: 1;
@@ -323,6 +326,12 @@ export function createSolanaExecutor(options: SolanaExecutorOptions) {
         return { slot: result.slot, state, inputBalance, outputBalance, payerBalance: payer.lamports, rent };
       });
       checkAbort();
+      // Mirror the vault's owner-signed WSOL input caps before asking for a route.
+      if (intent.inputMint === SOLANA_WRAPPED_SOL_MINT) {
+        const amount = BigInt(intent.amountRaw), cutoff = BigInt(Math.floor(observedAtMs / 1000)) - 86_400n;
+        const used = snapshot.state.debits.filter(d => d.timestamp > cutoff).reduce((sum, d) => sum + d.wsol, 0n);
+        if (amount > snapshot.state.perTradeWsol || used + amount > snapshot.state.dailyWsol) return fail("risk");
+      }
       const swapAuthority = await deriveSolanaSwapAuthority(options.programId, intent.vault, snapshot.state.seq);
       const tempInput = await deriveSolanaAta(swapAuthority, intent.inputMint, inputProgram);
       const buildRequest: SolanaCpiBuildRequest = { ...intent, swapAuthority, sourceTokenAccount: tempInput,
@@ -420,10 +429,15 @@ export function createSolanaExecutor(options: SolanaExecutorOptions) {
       const preparedAtMs = timestamp();
       validateSolanaQuote(route.quote, paperIntent(intent), preparedAtMs);
       if (preparedAtMs - safetyObservedAtMs >= 30_000) return fail("unsafe-route");
+      // The guaranteed output must clear the independent price floor; a bad,
+      // buggy or manipulated build quote cannot sign a sale for dust.
+      let reference: SolanaReferenceBound;
+      try { reference = verifySolanaReferenceBound(risk.reference, intent, preparedAtMs); } catch { return fail("risk"); }
+      if (reference.reference.slot < prepared.slot || BigInt(route.quote.minOutAmount) < BigInt(reference.minOutFloor)) return fail("risk");
       if (integer(risk.observedAtMs) > preparedAtMs || preparedAtMs - risk.observedAtMs >= 30_000 ||
           integer(risk.slot) < prepared.slot || risk.cashUsdg !== (intent.inputMint === SOLANA_USDG_MINT ? snapshot.inputBalance : snapshot.outputBalance).toString() ||
           risk.wsolRaw !== (intent.inputMint === SOLANA_WRAPPED_SOL_MINT ? snapshot.inputBalance : snapshot.outputBalance).toString() ||
-          parseSolanaRawAmount(risk.notionalUsdg) !== BigInt(intent.inputMint === SOLANA_USDG_MINT ? intent.amountRaw : route.quote.outAmount) ||
+          parseSolanaRawAmount(risk.notionalUsdg) !== solanaReferenceNotional(intent, route.quote.outAmount, reference) ||
           parseSolanaRawAmount(risk.peakEquityUsdg, true) < parseSolanaRawAmount(risk.equityUsdg, true)) return fail("risk");
       if (BigInt(risk.notionalUsdg) > snapshot.state.perTrade || BigInt(risk.notionalUsdg) > snapshot.state.daily) return fail("risk");
       checkAbort();

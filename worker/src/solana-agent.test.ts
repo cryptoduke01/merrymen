@@ -26,6 +26,16 @@ test("rebalance sells proportional real units, respects bands, and does not pret
   assert.equal(planSolanaRebalance({ ...input, cashRaw: "50000000", wsolRaw: "1000000000", solValueUsdgRaw: "50000000" }), null);
   assert.throws(() => planSolanaRebalance({ ...input, wsolRaw: "1000000000" }), /valuation/);
 });
+test("a rebalance sell never asks for more WSOL than the signed per-trade SOL limit", () => {
+  const capped = { ...limits, perTradeWsol: "20000000", dailyWsol: "100000000" };
+  const sell = planSolanaRebalance({ ...input, limits: capped, cashRaw: "0", wsolRaw: "1000000000", solValueUsdgRaw: "100000000" })!;
+  assert.equal(sell.inputMint, SOLANA_WRAPPED_SOL_MINT); assert.equal(sell.amountRaw, "20000000");
+  // A dust mark makes the whole position look like one cheap trade; the SOL limit still holds.
+  const dust = planSolanaRebalance({ ...input, limits: capped, cashRaw: "0", wsolRaw: "1000000000", solValueUsdgRaw: "1" })!;
+  assert.equal(dust.amountRaw, "20000000");
+  // Buys are bounded by the USDG limits as before.
+  assert.equal(planSolanaRebalance({ ...input, limits: capped })!.amountRaw, "5000000");
+});
 test("request identity is stable inside an interval and changes only at next interval or settings revision", () => {
   assert.equal(planSolanaRebalance(input)!.requestId, planSolanaRebalance({ ...input, nowMs: NOW + 1000 })!.requestId);
   assert.notEqual(planSolanaRebalance(input)!.requestId, planSolanaRebalance({ ...input, nowMs: NOW + 60000 })!.requestId);

@@ -7,6 +7,7 @@ import { getSolanaAppRuntime } from "./solana-app-runtime";
 import type { Db } from "./db";
 import { createSolanaMarket } from "./solana-market";
 import type { SolanaPaperMarket } from "./solana-paper-service";
+import { SOLANA_REFERENCE_DEFAULT_TOLERANCE_BPS, SOLANA_REFERENCE_MAX_TOLERANCE_BPS, solanaReferenceToleranceBps } from "./solana-reference-price";
 import { getSolanaRuntimeDb } from "./solana-runtime-db";
 import { ensureSolanaTradingSchema, type SolanaAccountScope } from "./solana-trading-store";
 
@@ -28,7 +29,9 @@ export function planSolanaRebalance(input: SolanaRebalanceInput) {
   if (deviation * 10_000n < equity * BigInt(strategy.rebalanceBps) || delta === 0n) return null;
   const notional = [deviation, BigInt(strategy.tradeUsdgRaw), BigInt(limits.perTradeUsdg)].reduce((a, b) => a < b ? a : b);
   const buying = delta > 0n;
-  const amount = buying ? (notional < cash ? notional : cash) : held * notional / value;
+  let amount = buying ? (notional < cash ? notional : cash) : held * notional / value;
+  // A sell never asks for more WSOL input than the owner signed for one trade.
+  if (!buying && limits.perTradeWsol !== undefined && amount > BigInt(limits.perTradeWsol)) amount = BigInt(limits.perTradeWsol);
   if (amount === 0n) return null;
   const requestId = `rebalance-${input.revision}-${Math.floor(input.nowMs / (strategy.intervalSeconds * 1000))}`;
   return { ...parseSolanaSwapIntent({ kind: "spl-swap", chain: CHAINS.solana, mode: "paper", requestId,
@@ -53,9 +56,14 @@ export async function boundSolanaRebalanceSell(
   return null;
 }
 type Runtime = Pick<ReturnType<typeof getSolanaAppRuntime>, "status" | "trade">;
-export interface SolanaAgentOptions { db: Db; runtime: Runtime; market: SolanaPaperMarket; now?: () => number; postgres?: boolean; signal?: AbortSignal }
+export interface SolanaAgentOptions {
+  db: Db; runtime: Runtime; market: SolanaPaperMarket; now?: () => number; postgres?: boolean; signal?: AbortSignal;
+  /** Live sells are charged at up to this much above their quote by the reference price; size below the cap by it. */
+  referenceToleranceBps?: number;
+}
 export function createSolanaAgent(options: SolanaAgentOptions) {
   const now = options.now ?? Date.now;
+  const headroom = BigInt(10_000 - (options.referenceToleranceBps ?? SOLANA_REFERENCE_DEFAULT_TOLERANCE_BPS));
   return {
     async tick() {
       await ensureSolanaTradingSchema(options.db, options.postgres);
@@ -96,7 +104,8 @@ export function createSolanaAgent(options: SolanaAgentOptions) {
             const mark = await options.market.quote(markIntent); validateSolanaQuote(mark, markIntent, now()); solValueUsdgRaw = mark.minOutAmount;
           }
           let intent = planSolanaRebalance({ cashRaw, wsolRaw, solValueUsdgRaw, limits, strategy, mode: row.requested_mode, revision: Number(row.revision), nowMs: now() });
-          if (intent) intent = await boundSolanaRebalanceSell(intent, [BigInt(strategy.tradeUsdgRaw), BigInt(limits.perTradeUsdg)].reduce((a, b) => a < b ? a : b), options.market, now);
+          const cap = [BigInt(strategy.tradeUsdgRaw), BigInt(limits.perTradeUsdg)].reduce((a, b) => a < b ? a : b);
+          if (intent) intent = await boundSolanaRebalanceSell(intent, row.requested_mode === "live" ? cap * headroom / 10_000n : cap, options.market, now);
           if (!intent) { results.push({ owner: row.owner, outcome: "held" }); continue; }
           if (row.requested_mode === "live" && !status.live.ready && intent.inputMint === SOLANA_USDG_MINT) { results.push({ owner: row.owner, outcome: "held" }); continue; }
           if (options.signal?.aborted) break;
@@ -115,7 +124,11 @@ export async function runSolanaAgent(signal: AbortSignal) {
   // Initialize the shared binding schema without inventing or registering a tenant.
   const bindings = new SqlSolanaBindingStore(async () => db, process.env.DATABASE_URL ? "postgres" : "sqlite");
   await bindings.get("0x0000000000000000000000000000000000000000");
-  const agent = createSolanaAgent({ db, runtime: getSolanaAppRuntime(), market: createSolanaMarket(), postgres: !!process.env.DATABASE_URL, signal });
+  // A malformed tolerance must not stop receipt recovery: live trades already
+  // refuse it in the runtime, so only size with the widest headroom here.
+  let referenceToleranceBps = SOLANA_REFERENCE_MAX_TOLERANCE_BPS;
+  try { referenceToleranceBps = solanaReferenceToleranceBps(process.env); } catch { /* Refused at trade time. */ }
+  const agent = createSolanaAgent({ db, runtime: getSolanaAppRuntime(), market: createSolanaMarket(), postgres: !!process.env.DATABASE_URL, signal, referenceToleranceBps });
   while (!signal.aborted) {
     try {
       const results = await agent.tick();

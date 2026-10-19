@@ -95,6 +95,24 @@ SHA-256 of the Anchor instruction name. The worker also validates route quantity
 conservation, intermediate balances, allocation and cycles. Unknown instruction
 forms, unrelated setup/cleanup instructions or account substitutions fail closed.
 
+Every live trade, manual or automatic, also clears an **independent price
+floor**. Jupiter supplies the route and quote; Pyth's SOL/USD price account, read
+through the configured Solana RPC, supplies the reference (`worker/src/solana-reference-price.ts`).
+The reference must be owned by the Pyth receiver program, fully verified, the
+SOL/USD feed, at most 120 seconds old and within 1% confidence. The signed
+minimum output may not be more than `MERRYMEN_SOLANA_REFERENCE_TOLERANCE_BPS`
+below the reference (default 300, bounded 50–1000, and always above the trade's
+own slippage). A sell is charged against the USDG limits at the larger of its
+quoted and reference value, so a low quote cannot understate it. USDG is taken
+as $1: a depeg beyond the tolerance refuses trading rather than guessing. The
+executor checks the floor before signing and admission re-verifies it from the
+persisted submission. Off-chain admission also enforces the per-trade and
+rolling daily SOL sell limits the owner saved, which the vault enforces again
+on-chain. The pinned account, receiver program, feed id and `PriceUpdateV2`
+layout were taken from Pyth's documentation without reading mainnet; confirm
+them on mainnet before live. Any mismatch, stale or missing price refuses the
+trade.
+
 Two buy breakers have different roles:
 
 - The **worker drawdown breaker** uses fresh executable exit quotes, cash and the
@@ -260,7 +278,9 @@ records; the encryption key belongs in the secret environment, not the database.
 
 Live configuration additionally requires an explicit vault program ID,
 `MERRYMEN_SOLANA_VAULT_SHA256`, `MERRYMEN_STORE_DEK`, a distinct
-`MERRYMEN_SOLANA_FEE_PAYER_SEED`, and fee limits. Both key settings are canonical
+`MERRYMEN_SOLANA_FEE_PAYER_SEED`, and fee limits. `MERRYMEN_SOLANA_REFERENCE_TOLERANCE_BPS`
+optionally widens or narrows the independent price floor; a malformed value
+refuses live trades. Both key settings are canonical
 base64 encodings of 32 bytes. There is no owner-key configuration. Default
 execution fee-plus-rent allowance is 5,000,000 lamports and compute-unit price
 is zero micro-lamports; the executor validates the estimate and actual receipt

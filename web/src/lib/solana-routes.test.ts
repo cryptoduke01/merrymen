@@ -64,11 +64,15 @@ test("live mode requires explicit separate consent and registration requires sav
   assert.equal((await post("settings", { mode: "live", limits, revision: 2 })).status, 400);
   assert.equal((await post("setup", { stage: "prepare", sessionPublicKey: owner })).status, 409);
   assert.deepEqual(calls, []);
-  assert.equal((await post("settings", { mode: "live", limits, revision: 2, liveConsent: true })).status, 200);
-  assert.deepEqual(calls.pop(), { method: "settings", args: [tenant, owner, 2, "live", limits] });
-  binding.requestedMode = "live";
+  // Live limits must say how much SOL a sale may put in, per trade and per day.
+  assert.equal((await post("settings", { mode: "live", limits, revision: 2, liveConsent: true })).status, 400);
+  assert.deepEqual(calls, []);
+  const live = { ...limits, perTradeWsol: "100000000", dailyWsol: "500000000" };
+  assert.equal((await post("settings", { mode: "live", limits: live, revision: 2, liveConsent: true })).status, 200);
+  assert.deepEqual(calls.pop(), { method: "settings", args: [tenant, owner, 2, "live", live] });
+  binding.requestedMode = "live"; binding.limits = live;
   assert.equal((await post("setup", { stage: "prepare", sessionPublicKey: owner })).status, 200);
-  assert.deepEqual(calls.pop(), { method: "prepareLive", args: [scope, { limits, sessionPublicKey: owner }] });
+  assert.deepEqual(calls.pop(), { method: "prepareLive", args: [scope, { limits: live, sessionPublicKey: owner }] });
 });
 test("strategy endpoint rejects excessive size and persists explicit enablement under the current revision", async () => {
   const strategy = { enabled: true, targetSolBps: 5000, rebalanceBps: 500, tradeUsdgRaw: "1000000", intervalSeconds: 60 };

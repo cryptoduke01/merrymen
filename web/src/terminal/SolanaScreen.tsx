@@ -43,6 +43,7 @@ function ConnectedSolana() {
   const [busy, setBusy] = useState(false), [error, setError] = useState("");
   const [mode, setMode] = useState<"paper" | "live">("paper"), [consent, setConsent] = useState(false);
   const [perTrade, setPerTrade] = useState("10"), [daily, setDaily] = useState("50");
+  const [perTradeSol, setPerTradeSol] = useState("0.1"), [dailySol, setDailySol] = useState("0.5");
   const [ops, setOps] = useState("20"), [drawdown, setDrawdown] = useState("20"), [duration, setDuration] = useState("24");
   const [initialCash, setInitialCash] = useState("1000"), [side, setSide] = useState<"buy" | "sell">("buy"), [amount, setAmount] = useState("1");
   const [preview, setPreview] = useState<SolanaQuote | null>(null), [receipt, setReceipt] = useState<Receipt | null>(null);
@@ -80,6 +81,9 @@ function ConnectedSolana() {
       if (next.binding.limits) {
         setPerTrade(display(next.binding.limits.perTradeUsdg)); setDaily(display(next.binding.limits.dailyUsdg));
         setOps(String(next.binding.limits.maxOpsPerDay)); setDrawdown(String(next.binding.limits.maxDrawdownBps / 100));
+        if (next.binding.limits.perTradeWsol && next.binding.limits.dailyWsol) {
+          setPerTradeSol(display(next.binding.limits.perTradeWsol, 9)); setDailySol(display(next.binding.limits.dailyWsol, 9));
+        }
       }
     }
   }, [api]);
@@ -105,7 +109,10 @@ function ConnectedSolana() {
     if (!Number.isInteger(maxOpsPerDay) || maxOpsPerDay < 1 || maxOpsPerDay > 96
       || !Number.isInteger(maxDrawdownBps) || maxDrawdownBps < 1 || maxDrawdownBps > 10_000
       || !Number.isFinite(hours) || hours <= 0 || hours > 168) throw new Error("Choose 1–96 trades per day, a drawdown of 0.01–100%, and a duration up to 168 hours.");
-    return { perTradeUsdg: units(perTrade, 6), dailyUsdg: units(daily, 6), maxOpsPerDay, maxDrawdownBps, expiresAtMs: Date.now() + Math.floor(hours * 3_600_000) };
+    // Live sessions bound every sale by the SOL it puts in, not only the USDG it returns.
+    const sell = mode === "live" ? { perTradeWsol: units(perTradeSol, 9), dailyWsol: units(dailySol, 9) } : {};
+    if (sell.perTradeWsol && BigInt(sell.perTradeWsol) > BigInt(sell.dailyWsol)) throw new Error("The SOL sold per trade cannot exceed the SOL sold per 24 hours.");
+    return { perTradeUsdg: units(perTrade, 6), dailyUsdg: units(daily, 6), maxOpsPerDay, maxDrawdownBps, expiresAtMs: Date.now() + Math.floor(hours * 3_600_000), ...sell };
   };
   const invalidate = () => { setPreview(null); setReceipt(null); request.current = null; };
   const tradeIntent = () => {
@@ -172,6 +179,10 @@ function ConnectedSolana() {
           <label>Trades per 24 hours<input type="number" min="1" max="96" value={ops} onChange={(e) => setOps(e.target.value)} /></label>
           <label>Maximum drawdown (%)<input inputMode="decimal" value={drawdown} onChange={(e) => setDrawdown(e.target.value)} /></label>
           <label>Permission duration (hours)<input type="number" min="1" max="168" value={duration} onChange={(e) => setDuration(e.target.value)} /></label>
+          {mode === "live" && <>
+            <label>SOL sold per trade<input inputMode="decimal" value={perTradeSol} onChange={(e) => setPerTradeSol(e.target.value)} /></label>
+            <label>SOL sold per 24 hours<input inputMode="decimal" value={dailySol} onChange={(e) => setDailySol(e.target.value)} /></label>
+          </>}
         </div>
         {mode === "live" && <label><input type="checkbox" checked={consent} onChange={(e) => setConsent(e.target.checked)} /> I authorize real Solana trades within these limits after registering the permission with my wallet.</label>}
         <button disabled={busy || (mode === "live" && !consent)}>Save Solana mode and limits</button>
@@ -186,6 +197,7 @@ function ConnectedSolana() {
             <button disabled={busy || !binding.limits} onClick={() => void act(async () => { await api("paper", { initialCashRaw: units(initialCash, 6) }); await refresh(); })}>Create paper portfolio</button></>}
       </div> : <div className="solana-card"><h2>Live permission</h2>
         <p>{status?.runtime?.live.ready ? "Registered permission ready." : "Live trading is not active yet."}</p>
+        {binding.limits?.perTradeWsol && binding.limits.dailyWsol && <p>Sales are limited to {display(binding.limits.perTradeWsol, 9)} SOL per trade and {display(binding.limits.dailyWsol, 9)} SOL per 24 hours, whatever the price.</p>}
         {!!status?.runtime?.live.blockers.length && <ul>{status.runtime.live.blockers.map((blocker) => <li key={blocker}>{blocker}</li>)}</ul>}
         {status?.runtime?.live.vault && <p>Vault: <span className="solana-address">{status.runtime.live.vault}</span></p>}
         {status?.runtime?.live.cashTokenAccount && (status.runtime.live.ready || status.runtime.live.canExit) && <div><h3>Fund the Solana vault</h3><p>Send USDG on Solana to this verified USDG token account:</p><p className="solana-address">{status.runtime.live.cashTokenAccount}</p><p>Deposit USDG only. Direct wrapped SOL deposits have no recorded cost basis and cannot be traded by this session.</p></div>}

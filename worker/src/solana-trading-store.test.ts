@@ -12,26 +12,30 @@ import { makePgDb, wrapSqlite, type Db } from "./db";
 import { ensureSolanaTradingSchema, SolanaTradingStore, type SolanaPreparedSetup } from "./solana-trading-store";
 import type { SolanaLiveSettlement, SolanaSignedSubmission } from "./solana-executor";
 import { createSolanaPaperService } from "./solana-paper-service";
+import { pythBound } from "./solana-reference-price-fixture";
 
 const key = (n: number) => base58Encode(new Uint8Array(32).fill(n));
 const TENANT = `0x${"11".repeat(20)}` as const, OTHER = `0x${"22".repeat(20)}` as const;
 const OWNER = key(20), VAULT = key(21), SESSION = key(22), PROGRAM = SOLANA_VAULT_LOCAL_TEST_PROGRAM;
 const NOW = 1_000_000, CASH = 100_000_000n;
-const limits = { perTradeUsdg: "10000000", dailyUsdg: "50000000", maxOpsPerDay: 20, maxDrawdownBps: 2000, expiresAtMs: NOW + 3_600_000 };
+const limits = { perTradeUsdg: "10000000", dailyUsdg: "50000000", maxOpsPerDay: 20, maxDrawdownBps: 2000, expiresAtMs: NOW + 3_600_000,
+  perTradeWsol: "50000000", dailyWsol: "120000000" };
 const dek = Buffer.alloc(32, 3), sessionSeed = Buffer.alloc(32, 4).toString("base64");
 const strategy = { enabled: true, targetSolBps: 5000, rebalanceBps: 500, tradeUsdgRaw: "1000000", intervalSeconds: 60 };
 function submission(id = "trade-1", seq = "0"): SolanaSignedSubmission {
   const quote = { source: "jupiter" as const, inputMint: SOLANA_USDG_MINT, outputMint: SOLANA_WRAPPED_SOL_MINT,
     inAmount: "1000000", outAmount: "2000000", minOutAmount: "1980000", slippageBps: 100, contextSlot: 1000, quotedAtMs: NOW, expiresAtMs: NOW + 30000 };
-  return { version: 1, intent: { kind: "spl-swap", chain: CHAINS.solana, mode: "live", requestId: id, owner: OWNER, vault: VAULT,
-    inputMint: quote.inputMint, outputMint: quote.outputMint, amountRaw: quote.inAmount, slippageBps: 100 }, programId: PROGRAM,
+  const intent = { kind: "spl-swap" as const, chain: CHAINS.solana, mode: "live" as const, requestId: id, owner: OWNER, vault: VAULT,
+    inputMint: quote.inputMint, outputMint: quote.outputMint, amountRaw: quote.inAmount, slippageBps: 100 };
+  return { version: 1, intent, programId: PROGRAM,
     session: SESSION, feePayer: key(23), sessionEpoch: "1", vaultSequence: seq, signature: `test-signature-${id}`,
     signedTransactionBase64: "dGVzdC1zaWduZWQ=", messageBase64: "dGVzdC1tZXNzYWdl", loadedAddresses: { writable: [], readonly: [] },
     recentBlockhash: key(24), lastValidBlockHeight: "1200", minContextSlot: 1000, minOutAmount: quote.minOutAmount,
     quotedOutAmount: quote.outAmount, inputTokenAccount: key(25), outputTokenAccount: key(26), inputTokenProgram: TOKEN_2022_PROGRAM,
     outputTokenProgram: SOLANA_CLASSIC_TOKEN_PROGRAM, inputBalanceBefore: CASH.toString(), outputBalanceBefore: "0", maxFeeLamports: "3000000",
     feeLamports: "10000", rentLamports: "2039280", preparedAtMs: NOW, safetyObservedAtMs: NOW, quote,
-    risk: { observedAtMs: NOW, slot: 1000, notionalUsdg: "1000000", equityUsdg: CASH.toString(), peakEquityUsdg: CASH.toString(), cashUsdg: CASH.toString(), wsolRaw: "0" } };
+    risk: { observedAtMs: NOW, slot: 1000, notionalUsdg: "1000000", equityUsdg: CASH.toString(), peakEquityUsdg: CASH.toString(), cashUsdg: CASH.toString(), wsolRaw: "0",
+      reference: pythBound(intent, NOW) } };
 }
 function settlement(s: SolanaSignedSubmission, status: "finalized" | "failed" = "finalized"): SolanaLiveSettlement {
   return { status, signature: s.signature, slot: 1001, feeLamports: "10000", amountIn: status === "failed" ? "0" : "600000",
@@ -140,7 +144,8 @@ for (const dialect of ["sqlite", "postgres"] as const) {
     const automatic = new SolanaTradingStore(f.db, f.store.scope, () => NOW, { autonomousRevision: binding.revision });
     const sell = submission("oversized-exit", "1"); sell.intent.inputMint = SOLANA_WRAPPED_SOL_MINT; sell.intent.outputMint = SOLANA_USDG_MINT;
     sell.quote = { ...sell.quote, inputMint: sell.intent.inputMint, outputMint: sell.intent.outputMint, outAmount: "1005000", minOutAmount: "994950" };
-    sell.risk = { ...sell.risk, slot: 1001, cashUsdg: "99400000", wsolRaw: "1980000", notionalUsdg: "1005000" };
+    sell.minOutAmount = sell.quote.minOutAmount; sell.quotedOutAmount = sell.quote.outAmount;
+    sell.risk = { ...sell.risk, slot: 1001, cashUsdg: "99400000", wsolRaw: "1980000", notionalUsdg: "1005000", reference: pythBound(sell.intent, NOW) };
     await assert.rejects(automatic.recordSigned(sell), /strategy trade limit/);
     assert.equal((await f.store.pending()).length, 0);
   });
@@ -271,7 +276,7 @@ test("drawdown refusal commits a sticky buy pause, survives reopening and still 
   const sell = structuredClone(next); sell.intent.requestId = "exit"; sell.signature = "exit-signature";
   sell.intent.inputMint = SOLANA_WRAPPED_SOL_MINT; sell.intent.outputMint = SOLANA_USDG_MINT; sell.intent.amountRaw = "990000";
   sell.quote = { ...sell.quote, inputMint: sell.intent.inputMint, outputMint: sell.intent.outputMint, inAmount: "990000", outAmount: "1000000", minOutAmount: "990000" };
-  sell.minOutAmount = sell.quote.minOutAmount; sell.quotedOutAmount = sell.quote.outAmount;
+  sell.minOutAmount = sell.quote.minOutAmount; sell.quotedOutAmount = sell.quote.outAmount; sell.risk.reference = pythBound(sell.intent, NOW);
   assert.equal(await reopened.recordSigned(sell), true);
   assert.equal((await reopened.liveBook())!.buyPaused, true);
   await reopened.settle(OWNER, sell.intent.requestId, sell.signature, { ...settlement(sell), amountIn: "990000", amountOut: "1000000" });
@@ -293,4 +298,62 @@ test("failed and expired attempts still consume the daily operation cap and succ
     if (status === "finalized") { next.risk.cashUsdg = "99400000"; next.risk.wsolRaw = "1980000"; }
     await assert.rejects(f.store.recordSigned(next), /daily limit/);
   }
+});
+
+/** A WSOL→USDG sell at $500/SOL against the current book, bounded by a fresh reference. */
+function sale(id: string, seq: string, amountRaw: string, book: { slot: number; cash: string; wsol: string }, outAmount?: string) {
+  const s = submission(id, seq), out = outAmount ?? (BigInt(amountRaw) / 2n).toString();
+  s.intent = { ...s.intent, inputMint: SOLANA_WRAPPED_SOL_MINT, outputMint: SOLANA_USDG_MINT, amountRaw };
+  s.quote = { ...s.quote, inputMint: SOLANA_WRAPPED_SOL_MINT, outputMint: SOLANA_USDG_MINT, inAmount: amountRaw, outAmount: out,
+    minOutAmount: (BigInt(out) * 9_900n / 10_000n).toString() };
+  s.minOutAmount = s.quote.minOutAmount; s.quotedOutAmount = out;
+  s.risk = { ...s.risk, slot: book.slot, cashUsdg: book.cash, wsolRaw: book.wsol, reference: pythBound(s.intent, NOW) };
+  s.risk.notionalUsdg = (BigInt(out) > BigInt(s.risk.reference.valueUsdg) ? out : s.risk.reference.valueUsdg);
+  return s;
+}
+
+test("admission re-checks the independent price floor and charges a cheap sell at its reference value", async t => {
+  const f = await fixture(t), first = submission(); await f.store.recordSigned(first);
+  await f.store.settle(OWNER, first.intent.requestId, first.signature, settlement(first));
+  const book = { slot: 1001, cash: "99400000", wsol: "1980000" };
+  // An edited floor, a floor from another trade or a stale price is refused before anything is reserved.
+  for (const forge of [(s: SolanaSignedSubmission) => { s.risk.reference = { ...s.risk.reference, minOutFloor: "1" }; },
+    (s: SolanaSignedSubmission) => { s.risk.reference = pythBound(first.intent, NOW); },
+    (s: SolanaSignedSubmission) => { s.risk.reference = pythBound(s.intent, NOW - 121_000); },
+    (s: SolanaSignedSubmission) => { delete (s.risk as Partial<typeof s.risk>).reference; }]) {
+    const forged = sale("forged", "1", "1000000", book); forge(forged);
+    await assert.rejects(f.store.recordSigned(forged), /independent SOL price evidence/);
+  }
+  // A dust quote cannot sign: its guaranteed output is far below the $500 floor.
+  await assert.rejects(f.store.recordSigned(sale("dust", "1", "1000000", book, "100")), /below the independent SOL price floor/);
+  // 2% under the reference passes the 3% floor, but is charged at the full reference value.
+  const cheap = sale("cheap", "1", "1000000", book, "490000");
+  assert.equal(cheap.risk.notionalUsdg, "500000");
+  assert.equal(await f.store.recordSigned(cheap), true);
+  const row = await f.db.prepare("SELECT notional_raw FROM solana_runtime_submissions WHERE request_id='cheap'").get() as { notional_raw: string };
+  assert.equal(row.notional_raw, "500000");
+  assert.equal((await f.store.pending()).length, 1);
+});
+
+test("live sells are bounded by the signed per-trade and rolling daily SOL sell limits", async t => {
+  const f = await fixture(t), first = submission(); await f.store.recordSigned(first);
+  await f.store.settle(OWNER, first.intent.requestId, first.signature, settlement(first));
+  const revision = (await f.binding.get(TENANT))!.revision;
+  await f.binding.settings(TENANT, OWNER, revision, "live", { ...limits, perTradeWsol: "1000000", dailyWsol: "1500000" });
+  await assert.rejects(f.store.recordSigned(sale("too-big", "1", "1000001", { slot: 1001, cash: "99400000", wsol: "1980000" })), /per-trade SOL sell limit/);
+  const one = sale("sell-1", "1", "1000000", { slot: 1001, cash: "99400000", wsol: "1980000" });
+  assert.equal(await f.store.recordSigned(one), true);
+  await f.store.settle(OWNER, one.intent.requestId, one.signature, { status: "finalized", signature: one.signature, slot: 1002, feeLamports: "10000",
+    amountIn: "1000000", amountOut: "500000", finalizedAtMs: NOW + 1 });
+  const after = { slot: 1002, cash: "99900000", wsol: "980000" };
+  await assert.rejects(f.store.recordSigned(sale("sell-2", "2", "600000", after)), /daily SOL sell limit/);
+  assert.equal(await f.store.recordSigned(sale("sell-3", "2", "500000", after)), true);
+});
+
+test("a live binding saved without SOL sell limits admits no trade", async t => {
+  const f = await fixture(t), revision = (await f.binding.get(TENANT))!.revision;
+  const { perTradeWsol: _p, dailyWsol: _d, ...unbounded } = limits;
+  await f.binding.settings(TENANT, OWNER, revision, "live", unbounded);
+  await assert.rejects(f.store.recordSigned(submission()), /SOL sell limits/);
+  assert.equal((await f.store.pending()).length, 0);
 });
