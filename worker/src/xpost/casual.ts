@@ -296,17 +296,19 @@ export function wellbeingAnswers(seed: string, style: { lower: boolean }, o: Cod
  * Only directly under one of his own plain-thread small-talk answers
  * (replies.ts confusedWords, tagCandidate) — a greeting, a thanks, banter or
  * how he is, none of which says anything of a coin — he owns the odd wording,
- * says plainly it was only friendly, and leaves the door open. It ends the
- * thread (store.ts ANSWER_THREAD_DONE), so "what?" "what?" cannot loop. Never
- * a coin, an outcome, "it", a figure or what comes next.
+ * says plainly it was only friendly, and signs off. It ends the thread
+ * (store.ts ANSWER_THREAD_DONE), so "what?" "what?" cannot loop, and so no
+ * sign-off asks for a reply under it that would never be answered (review of
+ * PR #350): only a goodbye, or a fresh tag, which is answered as any other.
+ * Never a coin, an outcome, "it", a figure or what comes next.
  */
 export const CONFUSED_SLOTS: readonly [readonly string[], readonly string[], readonly string[]] = Object.freeze([
   Object.freeze(["yeah, odd phrasing", "fair, that was cryptic", "oops, robot poetry", "ha, word salad there", "lol my bad", "sorry, clumsy wording",
     "heh, overthought that", "too abstract, apologies", "brain went sideways", "whoops, weird combo", "my circuits rambled", "understandable confusion"]),
   Object.freeze(["just a friendly bot", "only meant hello", "nothing deep behind", "pure goodwill here", "simple chatter really", "harmless small talk",
     "basically waving", "good vibes, no riddle", "warm wishes, plainly", "kindness was the point", "greeting you warmly", "plain friendliness"]),
-  Object.freeze(["ask me anything", "try a question", "carry on chatting", "ball's in your court", "questions welcome anytime", "happy to chat more",
-    "let's keep talking", "shoot your shot", "tell me something", "i'm all ears", "keen to hear yours", "reply whenever"]),
+  Object.freeze(["tag me fresh anytime", "carry on, cheers", "no worries whatsoever", "peace out, friend", "all sorted then", "enjoy your scrolling",
+    "catch you around", "stay comfy", "back to lurking", "much love regardless", "cheerio, pal", "that's the whole story"]),
 ]) as unknown as readonly [readonly string[], readonly string[], readonly string[]];
 
 /** A confused reply under his own small talk (replies.ts confusedWords): every line, this mention's own first. */

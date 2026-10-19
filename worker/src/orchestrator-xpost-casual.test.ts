@@ -187,6 +187,14 @@ describe("code's casual answers", () => {
     assert.ok(slang > 0 && slang < all.length / 2, String(slang));
   });
 
+  it("a confused reply ends its thread, so none of its lines asks for a reply under it (review of PR #350)", () => {
+    for (const paper of [false, true]) {
+      for (const line of confusedAnswers("17", { lower: true }, { paper })) {
+        assert.doesNotMatch(line, /\?|\b(?:ask me|ask away|reply|replies|questions?|tell me|hear (?:yours|from you)|keep talking|let'?s talk|chat more|your (?:turn|move|court)|shoot your|all ears|go on|holler)\b/, line);
+      }
+    }
+  });
+
   it("a paper agent's clause is about its own book: no pronoun or verb the tag's coin could take", () => {
     for (const [kind, make] of KINDS) {
       for (const line of make("11", { lower: true }, { paper: true })) {

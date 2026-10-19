@@ -878,10 +878,11 @@ to the mention itself. They go out **right away**:
     own plain-thread small-talk answers (`OwnThreads.small`): not a quote,
     not under another handle, not under its own posts, a decline or any
     other answer. There it owns the odd wording, says it was only being
-    friendly and leaves the door open (`confusedAnswers`: "lol my bad.
-    harmless small talk, keen to hear yours"), counted
-    `answered-confused`. It is small talk for every cap, and it ends the
-    thread (`ANSWER_THREAD_DONE`), so "what?" "what?" cannot loop.
+    friendly and signs off (`confusedAnswers`: "lol my bad. harmless small
+    talk, tag me fresh anytime"), counted `answered-confused`. It is small
+    talk for every cap, and it ends the thread (`ANSWER_THREAD_DONE`), so
+    "what?" "what?" cannot loop; so no sign-off asks for a reply under it,
+    which would get nothing (review of PR #350): a goodbye, or a fresh tag.
   - What's hot, the market or a major asked in a reply straight under one of
     its plain-thread small-talk answers is answered as at top level. The
     conversation must be rooted at the very tag that answer replied to
