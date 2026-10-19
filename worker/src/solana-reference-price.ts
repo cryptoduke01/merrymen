@@ -91,13 +91,26 @@ const DISCRIMINATOR = createHash("sha256").update("account:PriceUpdateV2").diges
 const PRICE_UPDATE_LEN = 134;
 const FULL = 1;
 
+/**
+ * Why a reference was refused. The account-read reasons (from `missing` to
+ * `posted-slot`) describe what the RPC served; `config` is a setting that
+ * names no generation or tolerance; `bound` and `evidence` are a trade or a
+ * stored bound that the reference cannot vouch for.
+ */
+export type SolanaReferenceRefusal = "config" | "input" | "response" | "rpc-slot" | "missing" | "foreign" | "layout" | "unverified" | "feed" |
+  "price" | "confidence" | "timestamp" | "stale" | "future" | "posted-slot" | "bound" | "evidence";
 export class SolanaReferencePriceError extends Error {
-  constructor() { super("The independent SOL price is unavailable or unproven; no live trade was admitted."); this.name = "SolanaReferencePriceError"; }
+  /** Numbers only (ages, slots), so they can go into a log line as they are. */
+  readonly detail: Readonly<Record<string, number>>;
+  constructor(readonly reason: SolanaReferenceRefusal, detail: Record<string, number> = {}) {
+    super("The independent SOL price is unavailable or unproven; no live trade was admitted.");
+    this.name = "SolanaReferencePriceError"; this.detail = Object.freeze({ ...detail });
+  }
 }
-function fail(): never { throw new SolanaReferencePriceError(); }
+function fail(reason: SolanaReferenceRefusal, detail?: Record<string, number>): never { throw new SolanaReferencePriceError(reason, detail); }
 function object(value: unknown): value is Record<string, unknown> { return !!value && typeof value === "object" && !Array.isArray(value); }
-function safe(value: unknown): number {
-  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) return fail(); return value;
+function safe(value: unknown, reason: SolanaReferenceRefusal): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) return fail(reason); return value;
 }
 
 type Env = Readonly<Record<string, string | undefined>>;
@@ -110,11 +123,11 @@ export function solanaPythGeneration(env: Env): SolanaPythGeneration {
   const raw = env.MERRYMEN_SOLANA_PYTH_GENERATION;
   if (raw === undefined || raw === "") return SOLANA_PYTH_DEFAULT_GENERATION;
   if (raw === "current" || raw === "upgraded") return raw;
-  return fail();
+  return fail("config");
 }
 /** One generation's pinned identities; anything that is not a generation is refused. */
 export function solanaPythFeed(generation: SolanaPythGeneration): Readonly<SolanaPythFeed> {
-  if (generation !== "current" && generation !== "upgraded") return fail();
+  if (generation !== "current" && generation !== "upgraded") return fail("config");
   return SOLANA_PYTH_FEEDS[generation];
 }
 /** Callers that hold no env of their own read the process's, as the runtime does by default. */
@@ -144,7 +157,7 @@ export interface SolanaReferenceBound {
  */
 export async function derivePythPriceFeedAccount(feedIdHex: string, shard: number = PYTH_SPONSORED_SHARD,
   program: string = PYTH_PUSH_ORACLE_PROGRAM): Promise<string> {
-  if (typeof feedIdHex !== "string" || !/^[0-9a-f]{64}$/.test(feedIdHex) || !Number.isSafeInteger(shard) || shard < 0 || shard > 0xffff) return fail();
+  if (typeof feedIdHex !== "string" || !/^[0-9a-f]{64}$/.test(feedIdHex) || !Number.isSafeInteger(shard) || shard < 0 || shard > 0xffff) return fail("input");
   const seed = new Uint8Array(2); new DataView(seed.buffer).setUint16(0, shard, true);
   return (await getProgramDerivedAddress({ programAddress: address(program), seeds: [seed, Buffer.from(feedIdHex, "hex")] }))[0];
 }
@@ -154,46 +167,118 @@ export async function derivePythPriceFeedAccount(feedIdHex: string, shard: numbe
  * owned by `generation`'s receiver, and read from that generation's account.
  */
 export function parsePythSolUsd(raw: unknown, contextSlot: number, nowMs: number, generation: SolanaPythGeneration = configuredGeneration()): SolanaReferencePrice {
-  safe(contextSlot); safe(nowMs);
+  safe(contextSlot, "input"); safe(nowMs, "input");
   const feed = solanaPythFeed(generation);
-  if (!object(raw) || raw.owner !== feed.receiverProgram || raw.executable !== false ||
-      !Array.isArray(raw.data) || raw.data[1] !== "base64" || typeof raw.data[0] !== "string") return fail();
+  // A closed or never-created account: the RPC answers `value: null`.
+  if (raw === null) return fail("missing");
+  if (!object(raw) || raw.owner !== feed.receiverProgram || raw.executable !== false) return fail("foreign");
+  if (!Array.isArray(raw.data) || raw.data[1] !== "base64" || typeof raw.data[0] !== "string") return fail("layout");
   const data = Buffer.from(raw.data[0], "base64");
-  if (data.toString("base64") !== raw.data[0] || data.length !== PRICE_UPDATE_LEN || !data.subarray(0, 8).equals(DISCRIMINATOR)) return fail();
+  if (data.toString("base64") !== raw.data[0] || data.length !== PRICE_UPDATE_LEN || !data.subarray(0, 8).equals(DISCRIMINATOR)) return fail("layout");
   // Partial verification has fewer guardian signatures behind it; only Full counts.
-  if (data[40] !== FULL) return fail();
+  if (data[40] !== FULL) return fail("unverified");
   const feedId = data.subarray(41, 73).toString("hex");
-  if (feedId !== PYTH_SOL_USD_FEED_ID) return fail();
+  if (feedId !== PYTH_SOL_USD_FEED_ID) return fail("feed");
   const price = data.readBigInt64LE(73), conf = data.readBigUInt64LE(81), exponent = data.readInt32LE(89);
   const publishTime = data.readBigInt64LE(93), postedSlot = data.readBigUInt64LE(125);
-  if (price <= 0n || exponent < -12 || exponent > 0 || conf * 10_000n > price * BigInt(SOLANA_REFERENCE_MAX_CONF_BPS)) return fail();
-  if (publishTime <= 0n || publishTime > BigInt(Number.MAX_SAFE_INTEGER) / 1000n) return fail();
-  const publishTimeMs = Number(publishTime) * 1000;
-  if (publishTimeMs > nowMs + SOLANA_REFERENCE_MAX_FUTURE_MS || nowMs - publishTimeMs > SOLANA_REFERENCE_MAX_AGE_MS) return fail();
-  if (postedSlot < 1n || postedSlot > BigInt(contextSlot)) return fail();
+  if (price <= 0n || exponent < -12 || exponent > 0) return fail("price");
+  if (conf * 10_000n > price * BigInt(SOLANA_REFERENCE_MAX_CONF_BPS)) return fail("confidence");
+  if (publishTime <= 0n || publishTime > BigInt(Number.MAX_SAFE_INTEGER) / 1000n) return fail("timestamp");
+  const publishTimeMs = Number(publishTime) * 1000, ageMs = nowMs - publishTimeMs;
+  if (publishTimeMs > nowMs + SOLANA_REFERENCE_MAX_FUTURE_MS) return fail("future", { ageMs, contextSlot });
+  if (ageMs > SOLANA_REFERENCE_MAX_AGE_MS) return fail("stale", { ageMs, maxAgeMs: SOLANA_REFERENCE_MAX_AGE_MS, contextSlot });
+  if (postedSlot < 1n || postedSlot > BigInt(contextSlot)) return fail("posted-slot", { contextSlot });
   return { source: "pyth", account: feed.account, feedId, price: price.toString(), conf: conf.toString(), exponent,
     publishTimeMs, postedSlot: Number(postedSlot), slot: contextSlot };
 }
 
+/** Where the [alert] and recovery lines go. A sink that throws is ignored: logging never changes an outcome. */
+export interface SolanaReferenceAlertSink { alert(line: string): void; info(line: string): void }
+/** Tracks refused reference reads in one process and says when to tell an operator. */
+export interface SolanaReferenceAlerts {
+  refused(event: { error: SolanaReferencePriceError; generation: string; nowMs: number }): void;
+  read(event: { generation: SolanaPythGeneration; nowMs: number }): void;
+}
+/** While reads keep being refused for the same reason, the [alert] is repeated at most this often. */
+export const SOLANA_REFERENCE_ALERT_REPEAT_MS = 60_000;
+/**
+ * The first refused read says one `[alert] solana-reference-price refused:`
+ * line at once; later refusals for the same reason are counted and said again
+ * at most every `repeatMs`, and a new reason is said at once. The next good
+ * read says one recovery line and clears the count. Every field is a constant
+ * or a number, so nothing the RPC served is ever echoed into the log.
+ */
+export function createSolanaReferenceAlerts(sink: SolanaReferenceAlertSink = {
+  alert: line => console.error(line), info: line => console.log(line),
+}, repeatMs: number = SOLANA_REFERENCE_ALERT_REPEAT_MS): SolanaReferenceAlerts {
+  type Failing = { reason: SolanaReferenceRefusal; sinceMs: number | null; saidAtMs: number | null; unsaid: number; refused: number };
+  let failing: Failing | null = null;
+  const say = (kind: "alert" | "info", line: string) => { try { sink[kind](line); } catch { /* Logging never changes an outcome. */ } };
+  // A clock that stepped back since the first refusal gives no honest duration.
+  const forMs = (nowMs: number | null) => nowMs !== null && failing?.sinceMs != null && nowMs >= failing.sinceMs ? nowMs - failing.sinceMs : "unknown";
+  const clock = (nowMs: unknown) => typeof nowMs === "number" && Number.isSafeInteger(nowMs) ? nowMs : null;
+  return {
+    refused({ error, generation, nowMs }) {
+      const at = clock(nowMs);
+      if (failing && failing.reason === error.reason && at !== null && failing.saidAtMs !== null && at >= failing.saidAtMs &&
+          at - failing.saidAtMs < repeatMs) { failing.unsaid++; failing.refused++; return; }
+      const suppressed = failing?.unsaid ?? 0;
+      failing = { reason: error.reason, sinceMs: failing ? failing.sinceMs : at, saidAtMs: at, unsaid: 0, refused: (failing?.refused ?? 0) + 1 };
+      const known = generation === "current" || generation === "upgraded";
+      const fields = [`reason=${error.reason}`, `generation=${known ? generation : "invalid"}`,
+        ...(known ? [`account=${SOLANA_PYTH_FEEDS[generation].account}`] : []),
+        ...Object.entries(error.detail).filter(([, v]) => typeof v === "number" && Number.isFinite(v)).map(([k, v]) => `${k}=${v}`),
+        `failingForMs=${forMs(at)}`, `refused=${failing.refused}`, `suppressed=${suppressed}`];
+      say("alert", `[alert] solana-reference-price refused: ${fields.join(" ")} — no live Solana trade is admitted until a fresh, fully verified ` +
+        `SOL/USD price is read (max age ${SOLANA_REFERENCE_MAX_AGE_MS / 1000} s, about two missed Pyth heartbeats)`);
+    },
+    read({ generation, nowMs }) {
+      if (!failing) return;
+      say("info", `[solana-reference-price] read again: generation=${generation} account=${SOLANA_PYTH_FEEDS[generation].account} ` +
+        `after refused=${failing.refused} failingForMs=${forMs(clock(nowMs))}`);
+      failing = null;
+    },
+  };
+}
+/** This process's alerts: what the runtime's reads report to unless a caller passes its own. */
+const processReferenceAlerts = createSolanaReferenceAlerts();
+
 /**
  * Read the reference at or after `minContextSlot` from `generation`'s pinned
  * account (default: MERRYMEN_SOLANA_PYTH_GENERATION). Never touches Jupiter.
+ * A refusal (stale, missing, foreign, unverified, misconfigured …) is
+ * reported to `alerts` (default: this process's, logged as an [alert]) and
+ * rethrown; an RPC transport error is rethrown untouched, since the caller
+ * may fail over to the other provider.
  */
 export async function readSolanaReferencePrice(read: SolanaLiveRead, minContextSlot: number, nowMs: number,
-  options: { generation?: SolanaPythGeneration } = {}): Promise<SolanaReferencePrice> {
-  const generation = options.generation ?? configuredGeneration(), feed = solanaPythFeed(generation);
-  const result = await read("getAccountInfo", [feed.account, { encoding: "base64", commitment: "confirmed", minContextSlot }]);
-  if (!object(result) || !object(result.context) || !Object.hasOwn(result, "value")) return fail();
-  const slot = safe(result.context.slot);
-  if (slot < minContextSlot) return fail();
-  return parsePythSolUsd(result.value, slot, nowMs, generation);
+  options: { generation?: SolanaPythGeneration; alerts?: SolanaReferenceAlerts } = {}): Promise<SolanaReferencePrice> {
+  const alerts = options.alerts ?? processReferenceAlerts;
+  let generation: SolanaPythGeneration | undefined, price: SolanaReferencePrice;
+  try {
+    // A setting that names no generation is refused here, and said as generation=invalid.
+    const chosen = options.generation ?? configuredGeneration(), feed = solanaPythFeed(chosen);
+    generation = chosen;
+    const result = await read("getAccountInfo", [feed.account, { encoding: "base64", commitment: "confirmed", minContextSlot }]);
+    if (!object(result) || !object(result.context) || !Object.hasOwn(result, "value")) return fail("response");
+    const slot = safe(result.context.slot, "response");
+    if (slot < minContextSlot) return fail("rpc-slot", { contextSlot: slot, minContextSlot });
+    price = parsePythSolUsd(result.value, slot, nowMs, chosen);
+  } catch (error) {
+    if (error instanceof SolanaReferencePriceError) {
+      try { alerts.refused({ error, generation: generation ?? "invalid", nowMs }); } catch { /* Still refused. */ }
+    }
+    throw error;
+  }
+  try { alerts.read({ generation, nowMs }); } catch { /* Still a good read. */ }
+  return price;
 }
 
 export function solanaReferenceToleranceBps(env: Env): number {
   const raw = env.MERRYMEN_SOLANA_REFERENCE_TOLERANCE_BPS;
   if (raw === undefined || raw === "") return SOLANA_REFERENCE_DEFAULT_TOLERANCE_BPS;
   const value = Number(raw);
-  if (!/^[0-9]+$/.test(raw) || value < SOLANA_REFERENCE_MIN_TOLERANCE_BPS || value > SOLANA_REFERENCE_MAX_TOLERANCE_BPS) return fail();
+  if (!/^[0-9]+$/.test(raw) || value < SOLANA_REFERENCE_MIN_TOLERANCE_BPS || value > SOLANA_REFERENCE_MAX_TOLERANCE_BPS) return fail("config");
   return value;
 }
 
@@ -205,9 +290,9 @@ export function solanaReferenceToleranceBps(env: Env): number {
 export function solanaReferenceBound(intent: { inputMint: string; outputMint: string; amountRaw: string; slippageBps: number },
   reference: SolanaReferencePrice, toleranceBps: number): SolanaReferenceBound {
   if (!Number.isSafeInteger(toleranceBps) || toleranceBps < SOLANA_REFERENCE_MIN_TOLERANCE_BPS || toleranceBps > SOLANA_REFERENCE_MAX_TOLERANCE_BPS ||
-      !Number.isSafeInteger(intent.slippageBps) || intent.slippageBps < 0 || toleranceBps <= intent.slippageBps) return fail();
+      !Number.isSafeInteger(intent.slippageBps) || intent.slippageBps < 0 || toleranceBps <= intent.slippageBps) return fail("bound");
   const amount = parseSolanaRawAmount(intent.amountRaw), price = BigInt(reference.price), exponent = reference.exponent;
-  if (price <= 0n || !Number.isSafeInteger(exponent) || exponent < -12 || exponent > 0) return fail();
+  if (price <= 0n || !Number.isSafeInteger(exponent) || exponent < -12 || exponent > 0) return fail("bound");
   // USDG has 6 decimals and wrapped SOL 9, so one lamport is worth price × 10^(exponent - 3) micro-USDG.
   const scale = 10n ** BigInt(3 - exponent);
   let referenceOut: bigint, valueUsdg: bigint;
@@ -215,11 +300,11 @@ export function solanaReferenceBound(intent: { inputMint: string; outputMint: st
     referenceOut = amount * price / scale; valueUsdg = referenceOut;
   } else if (intent.inputMint === SOLANA_USDG_MINT && intent.outputMint === SOLANA_WRAPPED_SOL_MINT) {
     referenceOut = amount * scale / price; valueUsdg = amount;
-  } else return fail();
+  } else return fail("bound");
   // A trade too small to value at the reference cannot be bounded by it.
-  if (referenceOut <= 0n) return fail();
+  if (referenceOut <= 0n) return fail("bound");
   const minOutFloor = referenceOut * BigInt(10_000 - toleranceBps) / 10_000n;
-  if (minOutFloor <= 0n) return fail();
+  if (minOutFloor <= 0n) return fail("bound");
   return { reference: structuredClone(reference), toleranceBps, referenceOut: referenceOut.toString(), minOutFloor: minOutFloor.toString(), valueUsdg: valueUsdg.toString() };
 }
 
@@ -233,16 +318,16 @@ export function solanaReferenceBound(intent: { inputMint: string; outputMint: st
 export function verifySolanaReferenceBound(bound: SolanaReferenceBound, intent: Parameters<typeof solanaReferenceBound>[0], nowMs: number,
   generation: SolanaPythGeneration = configuredGeneration()): SolanaReferenceBound {
   const feed = solanaPythFeed(generation);
-  if (!object(bound) || !object(bound.reference)) return fail();
+  if (!object(bound) || !object(bound.reference)) return fail("evidence");
   const r = bound.reference;
-  try { address(r.account); } catch { return fail(); }
+  try { address(r.account); } catch { return fail("evidence"); }
   if (r.source !== "pyth" || r.account !== feed.account || r.feedId !== PYTH_SOL_USD_FEED_ID ||
       typeof r.price !== "string" || typeof r.conf !== "string" || !/^[1-9][0-9]{0,18}$/.test(r.price) || !/^(0|[1-9][0-9]{0,19})$/.test(r.conf) ||
-      BigInt(r.conf) * 10_000n > BigInt(r.price) * BigInt(SOLANA_REFERENCE_MAX_CONF_BPS)) return fail();
-  safe(r.publishTimeMs); safe(r.postedSlot); safe(r.slot); safe(nowMs);
-  if (r.postedSlot < 1 || r.postedSlot > r.slot || r.publishTimeMs > nowMs + SOLANA_REFERENCE_MAX_FUTURE_MS || nowMs - r.publishTimeMs > SOLANA_REFERENCE_MAX_AGE_MS) return fail();
+      BigInt(r.conf) * 10_000n > BigInt(r.price) * BigInt(SOLANA_REFERENCE_MAX_CONF_BPS)) return fail("evidence");
+  safe(r.publishTimeMs, "evidence"); safe(r.postedSlot, "evidence"); safe(r.slot, "evidence"); safe(nowMs, "input");
+  if (r.postedSlot < 1 || r.postedSlot > r.slot || r.publishTimeMs > nowMs + SOLANA_REFERENCE_MAX_FUTURE_MS || nowMs - r.publishTimeMs > SOLANA_REFERENCE_MAX_AGE_MS) return fail("evidence");
   const expected = solanaReferenceBound(intent, r, bound.toleranceBps);
-  if (expected.referenceOut !== bound.referenceOut || expected.minOutFloor !== bound.minOutFloor || expected.valueUsdg !== bound.valueUsdg) return fail();
+  if (expected.referenceOut !== bound.referenceOut || expected.minOutFloor !== bound.minOutFloor || expected.valueUsdg !== bound.valueUsdg) return fail("evidence");
   return expected;
 }
 

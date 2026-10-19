@@ -4,15 +4,18 @@ import { address, getBase58Decoder } from "@solana/kit";
 import { SOLANA_USDG_MINT } from "../../packages/core/src/ids";
 import { SOLANA_WRAPPED_SOL_MINT } from "../../packages/core/src/solana-live";
 import { PYTH_PUSH_ORACLE_PROGRAM, PYTH_RECEIVER_PROGRAM, PYTH_SOL_USD_ACCOUNT, PYTH_SOL_USD_FEED_ID, PYTH_SPONSORED_SHARD,
-  SOLANA_PYTH_DEFAULT_GENERATION, SOLANA_PYTH_FEEDS, derivePythPriceFeedAccount, parsePythSolUsd, readSolanaReferencePrice,
-  solanaPythFeed, solanaPythGeneration, solanaReferenceBound, solanaReferenceNotional, solanaReferenceToleranceBps,
-  verifySolanaReferenceBound, SolanaReferencePriceError, type SolanaPythGeneration } from "./solana-reference-price";
+  SOLANA_PYTH_DEFAULT_GENERATION, SOLANA_PYTH_FEEDS, SOLANA_REFERENCE_ALERT_REPEAT_MS, createSolanaReferenceAlerts, derivePythPriceFeedAccount,
+  parsePythSolUsd, readSolanaReferencePrice, solanaPythFeed, solanaPythGeneration, solanaReferenceBound, solanaReferenceNotional,
+  solanaReferenceToleranceBps, verifySolanaReferenceBound, SolanaReferencePriceError, type SolanaPythGeneration,
+  type SolanaReferenceRefusal } from "./solana-reference-price";
 import { PYTH_SOL_USD_MAINNET_SNAPSHOT, PYTH_SOL_USD_UPGRADED_MAINNET_SNAPSHOT, pythAccount, pythReference,
   pythSnapshotResult } from "./solana-reference-price-fixture";
 
 const NOW = 1_790_000_000_000;
 const sell = { inputMint: SOLANA_WRAPPED_SOL_MINT, outputMint: SOLANA_USDG_MINT, amountRaw: "1000000000", slippageBps: 50 };
 const buy = { inputMint: SOLANA_USDG_MINT, outputMint: SOLANA_WRAPPED_SOL_MINT, amountRaw: "25000000", slippageBps: 50 };
+/** For reads that are meant to be refused: their alerts are tested below, not printed here. */
+const quiet = createSolanaReferenceAlerts({ alert() {}, info() {} });
 
 test("the pinned Pyth identities are canonical public keys", () => {
   for (const value of [PYTH_RECEIVER_PROGRAM, PYTH_PUSH_ORACLE_PROGRAM, PYTH_SOL_USD_ACCOUNT]) assert.equal(address(value), value);
@@ -143,7 +146,8 @@ test("with the upgraded generation selected, the real upgraded account is read a
   // The current account's real bytes are refused under "upgraded", even when served for the upgraded address,
   // and so are the upgraded bytes relabelled to the current receiver.
   assert.throws(() => parsePythSolUsd(current.value, current.context.slot, snap.fetchedAtMs, "upgraded"), SolanaReferencePriceError);
-  await assert.rejects(readSolanaReferencePrice(async () => current, snap.minContextSlot, snap.fetchedAtMs, { generation: "upgraded" }), SolanaReferencePriceError);
+  await assert.rejects(readSolanaReferencePrice(async () => current, snap.minContextSlot, snap.fetchedAtMs, { generation: "upgraded", alerts: quiet }),
+    SolanaReferencePriceError);
   assert.throws(() => parsePythSolUsd({ ...result.value, owner: SOLANA_PYTH_FEEDS.current.receiverProgram }, result.context.slot, snap.fetchedAtMs, "upgraded"),
     SolanaReferencePriceError);
   // Freshness and slot checks are the generation-independent ones.
@@ -176,7 +180,7 @@ test("without an explicit generation, reads and checks follow MERRYMEN_SOLANA_PY
   // A setting that names no generation reads nothing and refuses.
   process.env.MERRYMEN_SOLANA_PYTH_GENERATION = "Upgraded";
   rpc = served(both);
-  await assert.rejects(readSolanaReferencePrice(rpc.read, min, at), SolanaReferencePriceError);
+  await assert.rejects(readSolanaReferencePrice(rpc.read, min, at, { alerts: quiet }), SolanaReferencePriceError);
   assert.deepEqual(rpc.asked, []);
   assert.throws(() => verifySolanaReferenceBound(bound, sell, at), SolanaReferencePriceError);
   assert.throws(() => parsePythSolUsd(upgraded.value, upgraded.context.slot, at), SolanaReferencePriceError);
@@ -189,7 +193,8 @@ test("reads a fresh, fully verified SOL/USD update at or after the trade's slot"
   }, 1000, NOW);
   assert.deepEqual(calls, [["getAccountInfo", [PYTH_SOL_USD_ACCOUNT, { encoding: "base64", commitment: "confirmed", minContextSlot: 1000 }]]]);
   assert.equal(price.price, "50000000000"); assert.equal(price.exponent, -8); assert.equal(price.slot, 1001);
-  await assert.rejects(readSolanaReferencePrice(async () => ({ context: { slot: 999 }, value: pythAccount({ publishTimeMs: NOW }) }), 1000, NOW), SolanaReferencePriceError);
+  await assert.rejects(readSolanaReferencePrice(async () => ({ context: { slot: 999 }, value: pythAccount({ publishTimeMs: NOW }) }), 1000, NOW, { alerts: quiet }),
+    SolanaReferencePriceError);
 });
 
 test("refuses stale, future, uncertain, partial, foreign and malformed price accounts", () => {
@@ -270,4 +275,137 @@ test("the tolerance setting defaults to 3% and refuses out-of-range or malformed
   for (const value of ["49", "1001", "3e2", "-300", "300.5", " 300"]) {
     assert.throws(() => solanaReferenceToleranceBps({ MERRYMEN_SOLANA_REFERENCE_TOLERANCE_BPS: value }), SolanaReferencePriceError, value);
   }
+});
+
+// The operator alert: two missed ~53 s heartbeats stop every live trade, so a
+// refused read has to be said where an operator can alert on it.
+function recorder() {
+  const lines: Array<[kind: "alert" | "info", line: string]> = [];
+  return { lines, sink: { alert: (line: string) => { lines.push(["alert", line]); }, info: (line: string) => { lines.push(["info", line]); } } };
+}
+const served = (value: unknown, slot = 1001) => async () => ({ context: { slot }, value });
+const TAIL = " — no live Solana trade is admitted until a fresh, fully verified SOL/USD price is read (max age 120 s, about two missed Pyth heartbeats)";
+const CURRENT = SOLANA_PYTH_FEEDS.current.account;
+async function refusal(promise: Promise<unknown>, reason: SolanaReferenceRefusal): Promise<SolanaReferencePriceError> {
+  let caught: unknown;
+  await assert.rejects(promise, error => { caught = error; return error instanceof SolanaReferencePriceError && error.reason === reason; }, reason);
+  return caught as SolanaReferencePriceError;
+}
+
+test("a stale reference read is one structured [alert], repeated at most once a minute while it lasts, and cleared by the next good read", async () => {
+  const rec = recorder(), alerts = createSolanaReferenceAlerts(rec.sink), options = { generation: "current" as const, alerts };
+  const said = () => rec.lines.length; // a call, so one count assertion does not narrow the next
+  const stale = (at: number) => readSolanaReferencePrice(served(pythAccount({ publishTimeMs: NOW - 180_000 })), 1000, at, options);
+  await readSolanaReferencePrice(served(pythAccount({ publishTimeMs: NOW - 1_000 })), 1000, NOW, options);
+  assert.deepEqual(rec.lines.slice(), [], "a good read with nothing refused before says nothing");
+  const error = await refusal(stale(NOW), "stale");
+  assert.deepEqual(error.detail, { ageMs: 180_000, maxAgeMs: 120_000, contextSlot: 1001 });
+  assert.deepEqual(rec.lines, [["alert", `[alert] solana-reference-price refused: reason=stale generation=current account=${CURRENT} ageMs=180000 ` +
+    `maxAgeMs=120000 contextSlot=1001 failingForMs=0 refused=1 suppressed=0${TAIL}`]]);
+  // Every trade in the next minute is still refused, but counted rather than said.
+  for (const at of [NOW + 1, NOW + 10_000, NOW + SOLANA_REFERENCE_ALERT_REPEAT_MS - 1]) await refusal(stale(at), "stale");
+  assert.equal(said(), 1);
+  await refusal(stale(NOW + SOLANA_REFERENCE_ALERT_REPEAT_MS), "stale");
+  assert.deepEqual(rec.lines.at(-1), ["alert", `[alert] solana-reference-price refused: reason=stale generation=current account=${CURRENT} ageMs=240000 ` +
+    `maxAgeMs=120000 contextSlot=1001 failingForMs=60000 refused=5 suppressed=3${TAIL}`]);
+  // A new reason is said at once: Pyth closing the account looks like this.
+  await refusal(readSolanaReferencePrice(served(null), 1000, NOW + 61_000, options), "missing");
+  assert.deepEqual(rec.lines.at(-1), ["alert", `[alert] solana-reference-price refused: reason=missing generation=current account=${CURRENT} ` +
+    `failingForMs=61000 refused=6 suppressed=0${TAIL}`]);
+  // The next good read says so once, and the count starts again.
+  const price = await readSolanaReferencePrice(served(pythAccount({ publishTimeMs: NOW + 60_000 })), 1000, NOW + 62_000, options);
+  assert.equal(price.price, "50000000000");
+  assert.deepEqual(rec.lines.at(-1), ["info", `[solana-reference-price] read again: generation=current account=${CURRENT} after refused=6 failingForMs=62000`]);
+  await readSolanaReferencePrice(served(pythAccount({ publishTimeMs: NOW + 60_000 })), 1000, NOW + 62_500, options);
+  assert.equal(said(), 4);
+  await refusal(stale(NOW + 63_000), "stale");
+  assert.deepEqual(rec.lines.at(-1), ["alert", `[alert] solana-reference-price refused: reason=stale generation=current account=${CURRENT} ageMs=243000 ` +
+    `maxAgeMs=120000 contextSlot=1001 failingForMs=0 refused=1 suppressed=0${TAIL}`]);
+  // A clock that stepped back is said at once, with no duration rather than a negative one.
+  await refusal(stale(NOW), "stale");
+  assert.deepEqual(rec.lines.at(-1), ["alert", `[alert] solana-reference-price refused: reason=stale generation=current account=${CURRENT} ageMs=180000 ` +
+    `maxAgeMs=120000 contextSlot=1001 failingForMs=unknown refused=2 suppressed=0${TAIL}`]);
+  assert.deepEqual(rec.lines.map(([kind]) => kind), ["alert", "alert", "alert", "info", "alert", "alert"]);
+});
+
+test("every kind of refused read is said with its reason, the generation and the account, and never echoes what the RPC served", async t => {
+  const said = async (reason: SolanaReferenceRefusal, read: () => Promise<unknown>, min = 1000, generation: SolanaPythGeneration = "current") => {
+    const rec = recorder();
+    await refusal(readSolanaReferencePrice(read as never, min, NOW, { generation, alerts: createSolanaReferenceAlerts(rec.sink) }), reason);
+    assert.equal(rec.lines.length, 1, reason); assert.equal(rec.lines[0]![0], "alert", reason);
+    return rec.lines[0]![1];
+  };
+  const good = { publishTimeMs: NOW - 1_000 };
+  const lineFor = (reason: string, fields: string, generation = "current") =>
+    `[alert] solana-reference-price refused: reason=${reason} generation=${generation} account=${SOLANA_PYTH_FEEDS[generation as SolanaPythGeneration].account} ` +
+    `${fields}failingForMs=0 refused=1 suppressed=0${TAIL}`;
+  assert.equal(await said("foreign", served(pythAccount({ ...good, owner: "11111111111111111111111111111111" }))), lineFor("foreign", ""));
+  assert.equal(await said("foreign", served(pythAccount({ ...good, executable: true }))), lineFor("foreign", ""));
+  assert.equal(await said("layout", served(pythAccount({ ...good, accountType: "TwapUpdate" }))), lineFor("layout", ""));
+  assert.equal(await said("unverified", served(pythAccount({ ...good, level: 0 }))), lineFor("unverified", ""));
+  assert.equal(await said("feed", served(pythAccount({ ...good, feedId: "22".repeat(32) }))), lineFor("feed", ""));
+  assert.equal(await said("confidence", served(pythAccount({ ...good, conf: 500_000_001n }))), lineFor("confidence", ""));
+  assert.equal(await said("price", served(pythAccount({ ...good, price: -1n }))), lineFor("price", ""));
+  assert.equal(await said("future", served(pythAccount({ publishTimeMs: NOW + 6_000 }))), lineFor("future", "ageMs=-6000 contextSlot=1001 "));
+  assert.equal(await said("posted-slot", served(pythAccount({ ...good, postedSlot: 1002n }))), lineFor("posted-slot", "contextSlot=1001 "));
+  assert.equal(await said("rpc-slot", served(pythAccount(good), 999)), lineFor("rpc-slot", "contextSlot=999 minContextSlot=1000 "));
+  assert.equal(await said("response", async () => ({ value: null })), lineFor("response", ""));
+  // The upgraded generation names its own account.
+  assert.equal(await said("stale", served({ ...pythAccount({ publishTimeMs: NOW - 121_000 }), owner: SOLANA_PYTH_FEEDS.upgraded.receiverProgram }), 1000, "upgraded"),
+    lineFor("stale", "ageMs=121000 maxAgeMs=120000 contextSlot=1001 ", "upgraded"));
+  // A setting that names no generation reads nothing, and is said without echoing the value.
+  const saved = Object.hasOwn(process.env, "MERRYMEN_SOLANA_PYTH_GENERATION") ? process.env.MERRYMEN_SOLANA_PYTH_GENERATION : undefined;
+  t.after(() => { if (saved === undefined) delete process.env.MERRYMEN_SOLANA_PYTH_GENERATION; else process.env.MERRYMEN_SOLANA_PYTH_GENERATION = saved; });
+  process.env.MERRYMEN_SOLANA_PYTH_GENERATION = "upgraded\n[alert] forged";
+  const rec = recorder(); let reads = 0;
+  await refusal(readSolanaReferencePrice(async () => { reads++; return {}; }, 1000, NOW, { alerts: createSolanaReferenceAlerts(rec.sink) }), "config");
+  assert.equal(reads, 0);
+  assert.deepEqual(rec.lines, [["alert", `[alert] solana-reference-price refused: reason=config generation=invalid failingForMs=0 refused=1 suppressed=0${TAIL}`]]);
+  const forged = recorder();
+  await refusal(readSolanaReferencePrice(async () => ({}), 1000, NOW, { generation: "evil\n" as SolanaPythGeneration, alerts: createSolanaReferenceAlerts(forged.sink) }), "config");
+  assert.deepEqual(forged.lines, rec.lines);
+});
+
+test("the alert tracker names only pinned generations and finite numbers, whoever calls it", () => {
+  const rec = recorder(), alerts = createSolanaReferenceAlerts(rec.sink);
+  alerts.refused({ error: new SolanaReferencePriceError("stale", { ageMs: Number.NaN, maxAgeMs: Number.POSITIVE_INFINITY, contextSlot: 7 }),
+    generation: "upgraded\n[alert] forged", nowMs: NOW });
+  assert.deepEqual(rec.lines, [["alert", `[alert] solana-reference-price refused: reason=stale generation=invalid contextSlot=7 failingForMs=0 refused=1 suppressed=0${TAIL}`]]);
+});
+
+test("an RPC transport error is not a refusal: it is rethrown untouched and not said, so the caller can fail over", async () => {
+  const rec = recorder(), alerts = createSolanaReferenceAlerts(rec.sink), transport = new Error("network");
+  await assert.rejects(readSolanaReferencePrice(async () => { throw transport; }, 1000, NOW, { generation: "current", alerts }), error => error === transport);
+  assert.deepEqual(rec.lines.slice(), []);
+  // Nor does it count toward, or clear, a refusal.
+  await refusal(readSolanaReferencePrice(served(null), 1000, NOW, { generation: "current", alerts }), "missing");
+  await assert.rejects(readSolanaReferencePrice(async () => { throw transport; }, 1000, NOW + 1, { generation: "current", alerts }), error => error === transport);
+  await readSolanaReferencePrice(served(pythAccount({ publishTimeMs: NOW })), 1000, NOW + 2, { generation: "current", alerts });
+  assert.deepEqual(rec.lines.map(([kind, line]) => [kind, line.split(" — ")[0]]), [
+    ["alert", `[alert] solana-reference-price refused: reason=missing generation=current account=${CURRENT} failingForMs=0 refused=1 suppressed=0`],
+    ["info", `[solana-reference-price] read again: generation=current account=${CURRENT} after refused=1 failingForMs=2`]]);
+});
+
+test("a log sink or alert tracker that throws never changes what a read returns or refuses", async () => {
+  const broken = createSolanaReferenceAlerts({ alert: () => { throw new Error("log down"); }, info: () => { throw new Error("log down"); } });
+  const throwing = { refused: () => { throw new Error("tracker down"); }, read: () => { throw new Error("tracker down"); } };
+  for (const alerts of [broken, throwing]) {
+    await refusal(readSolanaReferencePrice(served(pythAccount({ publishTimeMs: NOW - 121_000 })), 1000, NOW, { generation: "current", alerts }), "stale");
+    const price = await readSolanaReferencePrice(served(pythAccount({ publishTimeMs: NOW })), 1000, NOW, { generation: "current", alerts });
+    assert.equal(price.price, "50000000000");
+  }
+});
+
+test("without an alerts option, a refused read is said on this process's stderr as the [alert] line", async t => {
+  const errors = t.mock.method(console, "error", () => {}), infos = t.mock.method(console, "log", () => {});
+  const options = { generation: "current" as const };
+  // A good read first clears anything an earlier test left refused in this process.
+  await readSolanaReferencePrice(served(pythAccount({ publishTimeMs: NOW })), 1000, NOW, options);
+  const before = errors.mock.callCount();
+  await refusal(readSolanaReferencePrice(served(pythAccount({ publishTimeMs: NOW - 125_000 })), 1000, NOW, options), "stale");
+  assert.equal(errors.mock.callCount(), before + 1);
+  assert.deepEqual(errors.mock.calls.at(-1)!.arguments, [`[alert] solana-reference-price refused: reason=stale generation=current account=${CURRENT} ` +
+    `ageMs=125000 maxAgeMs=120000 contextSlot=1001 failingForMs=0 refused=1 suppressed=0${TAIL}`]);
+  await readSolanaReferencePrice(served(pythAccount({ publishTimeMs: NOW })), 1000, NOW + 1_000, options);
+  assert.deepEqual(infos.mock.calls.at(-1)!.arguments, [`[solana-reference-price] read again: generation=current account=${CURRENT} after refused=1 failingForMs=1000`]);
 });

@@ -18,7 +18,7 @@ import { createSolanaAgent } from "./solana-agent";
 import { createSolanaAppRuntime } from "./solana-app-runtime";
 import type { SolanaSignedSubmission } from "./solana-executor";
 import type { SolanaLiveRead, SolanaLiveRpc } from "./solana-live-rpc";
-import { PYTH_SOL_USD_ACCOUNT } from "./solana-reference-price";
+import { PYTH_SOL_USD_ACCOUNT, readSolanaReferencePrice } from "./solana-reference-price";
 import { pythAccount } from "./solana-reference-price-fixture";
 import { SOLANA_MAINNET_GENESIS_HASH } from "./solana-rpc";
 import { ensureSolanaTradingSchema } from "./solana-trading-store";
@@ -213,10 +213,21 @@ test("D: a manual buy built at 1% of fair is refused", async t => {
   assert.deepEqual(await f.submissions(), []); assert.equal(f.sends.length, 0);
 });
 
+/** The reference-price [alert] lines this process said while `run` ran. */
+async function referenceAlerts(t: TestContext, run: () => Promise<unknown>): Promise<string[]> {
+  const errors = t.mock.method(console, "error"), from = errors.mock.callCount();
+  try { await run(); } finally { errors.mock.restore(); }
+  return errors.mock.calls.slice(from).map(call => String(call.arguments[0])).filter(line => line.startsWith("[alert] solana-reference-price"));
+}
+
 test("a fair manual sell is admitted once, with its reference floor recorded, and a 2%-cheap fill is charged at the reference", async t => {
   const fair = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" } });
-  const placed = await fair.app.trade(fair.scope, { mode: "live", intent: manual(SOLANA_WRAPPED_SOL_MINT, "100000000", "fair-sell") });
-  assert.equal("status" in placed && placed.status, "pending");
+  let placed: Awaited<ReturnType<typeof fair.app.trade>> | undefined;
+  // A fresh reference says nothing to the operator.
+  assert.deepEqual(await referenceAlerts(t, async () => {
+    placed = await fair.app.trade(fair.scope, { mode: "live", intent: manual(SOLANA_WRAPPED_SOL_MINT, "100000000", "fair-sell") });
+  }), []);
+  assert.ok(placed && "status" in placed && placed.status === "pending");
   const [row] = await fair.submissions();
   assert.equal(row!.notional_raw, "15000000");
   assert.equal(row!.submission.risk.reference.minOutFloor, "14550000");
@@ -235,8 +246,13 @@ test("a sell above the signed per-trade SOL limit is refused before any route is
   assert.deepEqual(await f.submissions(), []); assert.equal(f.sends.length, 0);
 });
 
-test("a stale independent price refuses even a fair live trade", async t => {
+test("a stale independent price refuses even a fair live trade, and says the [alert] an operator pages on", async t => {
   const f = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" }, pythAgeMs: 180_000 });
-  await assert.rejects(f.app.trade(f.scope, { mode: "live", intent: manual(SOLANA_WRAPPED_SOL_MINT, "100000000", "stale-sell") }), /refused: risk/);
+  // A good read first clears anything an earlier test left refused in this process, so this refusal is said at once.
+  await readSolanaReferencePrice(async () => ({ context: { slot: SLOT }, value: pythAccount({ publishTimeMs: NOW }) }), SLOT, NOW);
+  const said = await referenceAlerts(t, () =>
+    assert.rejects(f.app.trade(f.scope, { mode: "live", intent: manual(SOLANA_WRAPPED_SOL_MINT, "100000000", "stale-sell") }), /refused: risk/));
+  assert.deepEqual(said.map(line => line.split(" — ")[0]), [`[alert] solana-reference-price refused: reason=stale generation=current ` +
+    `account=${PYTH_SOL_USD_ACCOUNT} ageMs=180000 maxAgeMs=120000 contextSlot=${SLOT} failingForMs=0 refused=1 suppressed=0`]);
   assert.deepEqual(await f.submissions(), []); assert.equal(f.sends.length, 0);
 });
