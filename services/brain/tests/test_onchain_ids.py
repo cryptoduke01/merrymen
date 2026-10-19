@@ -2,11 +2,12 @@
 BASE58 IN THE BACKSTOP: a Solana id is refused wherever an 0x one is.
 
 Three groups. The detector gives the same answers as packages/core/src/ids.ts,
-case for case, from a fixture both languages read. `_reject_executable` refuses
-a Solana key, signature or explorer link in every field it already screened,
-model output and desk-policy input alike. And everything it accepted before
-that carries no Solana id is accepted still, with every EVM refusal in its old
-words.
+case for case and in both scans, from a fixture both languages read.
+`_reject_executable` refuses a Solana key, signature or explorer link in every
+field it already screened, model output and desk-policy input alike, and with
+the glued scan (audit regressions F3) one written against the text around it.
+And everything it accepted before that carries no Solana id is accepted still,
+with every EVM refusal in its old words.
 
 No model is called and nothing leaves the process.
 """
@@ -14,12 +15,13 @@ No model is called and nothing leaves the process.
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
-from brain.onchain_ids import base58_decode, onchain_id_in, onchain_ids_in
+from brain.onchain_ids import GLUED_DECODES, base58_decode, onchain_id_in, onchain_ids_in
 from brain.schemas import BrainDecision, Cost, DeskAnalysis, Evidence
 
 from test_prompt_snapshot import pulse_memecoin
@@ -49,6 +51,51 @@ def test_the_detector_answers_as_ids_ts_does(case):
     got = [h._asdict() for h in onchain_ids_in(case["text"])]
     assert got == case["hits"]
     assert onchain_id_in(case["text"]) is bool(case["hits"])
+
+
+@pytest.mark.parametrize("case", CASES, ids=lambda c: c["text"][:40] or "empty")
+def test_the_glued_scan_answers_as_ids_ts_does(case):
+    want = case.get("glued", case["hits"])
+    got = [h._asdict() for h in onchain_ids_in(case["text"], glued=True)]
+    assert got == want
+    assert onchain_id_in(case["text"], glued=True) is bool(want)
+    # The glued scan finds everything the default finds.
+    for hit in case["hits"]:
+        assert hit in got
+
+
+def test_the_fixture_pins_glued_ids_the_default_misses():
+    # An empty list would leave the glued scan pinned only where it agrees.
+    glued_only = [c for c in CASES if "glued" in c and c["glued"] and not c["hits"]]
+    assert len(glued_only) >= 8
+
+
+def _base58_encode(b: bytes) -> str:
+    n = int.from_bytes(b, "big")
+    out = ""
+    while n:
+        n, r = divmod(n, 58)
+        out = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"[r] + out
+    return "1" * (len(b) - len(b.lstrip(b"\x00"))) + out
+
+
+def test_the_glued_scan_is_bounded_and_fails_closed_past_its_budget():
+    # ids.test.ts builds the same text. Runs that hold no 43- or 44-character
+    # key window: short of one, or hex alone.
+    no_key = " ".join(("1" + "z" * (31 + i % 10)) if i % 3 else "abcdef12345" * 9 for i in range(30_000))
+    assert len(no_key) > 1_000_000
+    assert onchain_ids_in(no_key[:5_000], glued=True) == [], "none of these runs holds an id"
+    started = time.monotonic()
+    assert onchain_ids_in(no_key, glued=True), "past the decode budget, the remaining runs are refused unread"
+    assert time.monotonic() - started < 10
+    key_like = " ".join(
+        _base58_encode(bytes((i * 7 + j * 13 + 1) % 256 for j in range(64))) + f"x{i}" for i in range(12_000)
+    )
+    assert len(key_like) > 1_000_000
+    started = time.monotonic()
+    assert onchain_id_in(key_like, glued=True)
+    assert time.monotonic() - started < 10
+    assert GLUED_DECODES == 4096
 
 
 def test_base58_decodes_lengths_and_leading_zeros():
@@ -88,6 +135,12 @@ SOLANA_POISON = [
     ("see solscan.io/token/ for the chart", "Solana explorer link"),
     (f"owned by {LETTERS_32}", "Solana address-shaped"),
     (f"signature {LETTERS_64}", "Solana signature- or key-shaped"),
+    # Glued to the text around them (audit regressions F3).
+    (f"grab it CA{MINT} now", "Solana address-shaped"),
+    (f"{MINT}is the one", "Solana address-shaped"),
+    (f"0{MINT} and {MINT}l", "Solana address-shaped"),
+    (f"tx{SIG}done", "Solana signature- or key-shaped"),
+    (f"key:0x{KEYPAIR}", "Solana signature- or key-shaped"),
 ]
 
 
@@ -136,6 +189,10 @@ def test_the_desk_policy_cannot_carry_a_solana_id():
         pulse_memecoin(strategy_terms=f"Route via {LETTERS_32}.")
     with pytest.raises(ValidationError, match="Solana signature"):
         pulse_memecoin(strategy_terms=f"Replay {LETTERS_64}.")
+    with pytest.raises(ValidationError, match="Solana address-shaped"):
+        pulse_memecoin(strategy_terms=f"Route via CA{MINT}.")
+    with pytest.raises(ValidationError, match="Solana signature"):
+        pulse_memecoin(strategy_terms=f"Replay tx{SIG}.")
 
 
 # ── what stays as it was ───────────────────────────────────────────────────
@@ -147,6 +204,12 @@ def test_the_desk_policy_cannot_carry_a_solana_id():
     "[ref:d3fa91cr2c1] reports two tracked wallets added",
     "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     "supercalifragilisticexpialidociousandmorewordsjoined",
+    # Hex split at its zeros, and long numbers, are never an id glued to anything.
+    "6fde6ce70efd0bc3e0c60538ccf57431cf76c354a617bd6c5a1f8198d4342cfa",
+    "02D20BBD7E394AD5999A4CEBABAC9619732C343A4CAC99470C03E23BA2BDC2BC",
+    "supply 63971511409728546707420640415976470808777281049430980144558505433936508649475518010444363585908687133263558897911835323323191563463575735092780586118530448",
+    "$SOL $BONK $WIF $JUP and $USDG, #BuyTheDipAndHoldForeverBecauseSolanaIsTheFuture",
+    "read https://x.com/merrymen/status/1845123456789012345 and 1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa",
 ])
 def test_prose_and_todays_ids_still_pass(text):
     d = BrainDecision(**_decision(thesis=text, risks=[text], evidence=[Evidence(source="s", ref=text, claim=text)]))

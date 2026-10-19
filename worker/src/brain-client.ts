@@ -167,10 +167,13 @@ const MAX_BYTES = 256 * 1024;
  * SOLANA IDS TOO. A base58 key or signature, or a Solana explorer link, by the
  * shared detector (packages/core/src/ids.ts onchainIdsIn), which Brain mirrors
  * in services/brain/brain/onchain_ids.py. A second pass after the 0x patterns,
- * so a decision they refuse is refused in the same words as before.
+ * so a decision they refuse is refused in the same words as before. The glued
+ * scan, as Brain's `_reject_executable` reads it: "CA<mint>" or "<mint>is" is
+ * an id too (audit regressions F3).
  */
 const ADDRESS = /0x[0-9a-fA-F]{40}/;
 const HEXBLOB = /0x[0-9a-fA-F]{16,}/;
+const GLUED = { glued: true } as const;
 const SOLANA_SHAPE = {
   address: "a Solana address",
   hash: "a Solana signature or secret key",
@@ -178,7 +181,7 @@ const SOLANA_SHAPE = {
 } as const;
 
 function solanaIdIn(v: string): string | null {
-  const hit = onchainIdsIn(v).find((h) => h.family === "solana");
+  const hit = onchainIdsIn(v, GLUED).find((h) => h.family === "solana");
   return hit ? SOLANA_SHAPE[hit.shape] : null;
 }
 
@@ -401,9 +404,10 @@ export async function decide(cfg: BrainConfig, args: DecideArgs, deps: DecideDep
   // caller supplied terms, so a request without them reads nothing new.
   const probe = deps.capabilities ?? brainCapabilities;
   const wire = args.strategyTerms ? strategyTermsWire(args.strategyTerms) : null;
-  // Brain's bounds now refuse a Solana id in either field too (schemas.py
-  // `_reject_executable`), and strategyTermsWire checks only the 0x shapes.
-  const terms = wire && !onchainIdIn(wire.strategy_terms) && !onchainIdIn(wire.horizon) ? wire : null;
+  // Brain's bounds now refuse a Solana id in either field too, glued ones
+  // included (schemas.py `_reject_executable`), and strategyTermsWire checks
+  // only the 0x shapes.
+  const terms = wire && !onchainIdIn(wire.strategy_terms, GLUED) && !onchainIdIn(wire.horizon, GLUED) ? wire : null;
   const sendTerms = terms !== null && probe.advertises(cfg.url, STRATEGY_TERMS_CAPABILITY);
   const delivery: StrategyTermsDelivery | undefined = args.strategyTerms ? (sendTerms ? "sent" : "withheld") : undefined;
 

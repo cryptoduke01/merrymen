@@ -184,16 +184,42 @@ describe("glued on-chain id detection (audit regressions F3)", () => {
     }
   });
 
-  it("differs from the default scan Brain mirrors only on the shared fixture's glued cases", () => {
+  it("answers every shared case as Brain's Python mirror does, in both scans", () => {
     const fixture = JSON.parse(readFileSync(new URL("../../../services/brain/tests/data/onchain_ids.json", import.meta.url), "utf8")) as
-      { cases: { text: string; hits: { family: string; shape: string; value: string }[] }[] };
+      { cases: { text: string; hits: { family: string; shape: string; value: string }[]; glued?: { family: string; shape: string; value: string }[] }[] };
     const changed: string[] = [];
     for (const c of fixture.cases) {
       const strict = onchainIdsIn(c.text, glued);
+      assert.deepEqual(onchainIdsIn(c.text), c.hits, c.text);
+      assert.deepEqual(strict, c.glued ?? c.hits, c.text);
       for (const hit of c.hits) assert.ok(strict.some((h) => h.value === hit.value && h.shape === hit.shape), `${c.text}: ${hit.value}`);
-      if (JSON.stringify(strict) !== JSON.stringify(c.hits)) changed.push(c.text);
+      if (c.glued) changed.push(c.text);
     }
-    assert.deepEqual(changed, [`0${SOLANA_USDG_MINT}`, `${SOLANA_USDG_MINT}l`, `${SOLANA_USDG_MINT}${SOLANA_USDG_MINT}a`]);
+    // The glued cases the default misses, among them the three it pinned as no id before.
+    for (const t of [`0${SOLANA_USDG_MINT}`, `${SOLANA_USDG_MINT}l`, `${SOLANA_USDG_MINT}${SOLANA_USDG_MINT}a`, `grab it CA${SOLANA_USDG_MINT} now`]) assert.ok(changed.includes(t), t);
+  });
+
+  it("never reads hex split at its zeros, a long number or filler as an id glued to anything", () => {
+    // Each run between zeros is hex alone, and some are 43 or 44 characters that decode to 32 bytes:
+    // read as glued ids, every digest, EVM hash and long number like these was withheld.
+    for (const text of [
+      "6fde6ce70efd0bc3e0c60538ccf57431cf76c354a617bd6c5a1f8198d4342cfa",
+      "| `MERRYMEN_ADOPT_HOME_HALT_SHA256` | `6fde6ce70efd0bc3e0c60538ccf57431cf76c354a617bd6c5a1f8198d4342cfa` |",
+      "02D20BBD7E394AD5999A4CEBABAC9619732C343A4CAC99470C03E23BA2BDC2BC",
+      "supply 63971511409728546707420640415976470808777281049430980144558505433936508649475518010444363585908687133263558897911835323323191563463575735092780586118530448 ok",
+    ]) assert.deepEqual(onchainIdsIn(text, glued), [], text);
+    const tx = "0x177286bb17374e1f47a767a43d99c674b38c4f54c8e00bb2042998a8fd1b4a4c";
+    assert.deepEqual(onchainIdsIn(`tx ${tx}`, glued), [{ family: "evm", shape: "hash", value: tx }]);
+    // Filler, one to four characters repeated (a length test's padding, "hahaha"): 87 x's decode to 64 bytes.
+    for (const text of ["x".repeat(220), `${"x".repeat(2_500)}`, "ha".repeat(60), `${"abc".repeat(40)}!`, "wxyz".repeat(30)]) {
+      assert.deepEqual(onchainIdsIn(text, glued), [], text.slice(0, 12));
+    }
+    // ...but a letters-only signature glued to a letter is still one.
+    assert.deepEqual(onchainIdsIn(`${"A".repeat(87)}h`, glued), [{ family: "solana", shape: "hash", value: `${"A".repeat(87)}h` }]);
+    // A standalone run is read exactly as the default reads it, hex alone or not.
+    const hexKey = "abcdef123456789abcdef123456789abcdef1234567";
+    assert.deepEqual(onchainIdsIn(`digest ${hexKey} ok`, glued), onchainIdsIn(`digest ${hexKey} ok`));
+    assert.deepEqual(onchainIdsIn(`digest ${hexKey} ok`, glued), [{ family: "solana", shape: "address", value: hexKey }]);
   });
 
   it("leaves prose, tickers, hex digests, long numbers and other base58 alone", () => {
