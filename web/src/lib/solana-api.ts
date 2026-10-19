@@ -7,6 +7,7 @@ import { SolanaAppRuntimeError } from "../../../worker/src/solana-app-runtime";
 import { SolanaTradingStoreError } from "../../../worker/src/solana-trading-store";
 import { authenticateSolana, SolanaWebError } from "./solana-auth";
 import { getSolanaBindingStore, SolanaBindingError } from "./solana-binding-store";
+import { solanaEnabled } from "./solana-enabled";
 
 export async function solanaRequestBody(req: Request, allowed: readonly string[]): Promise<Record<string, unknown>> {
   if (!req.body) throw new SolanaWebError(400, "A JSON request is required.");
@@ -33,18 +34,40 @@ export async function solanaContext(req: Request) {
   if (binding.did !== principal.did) throw new SolanaWebError(403, "Your sign-in does not match this Solana account.");
   return { principal, store, binding, scope: { tenant: principal.tenant, owner: binding.owner } };
 }
+const NOT_AVAILABLE = "Solana trading is not available.";
+
+/**
+ * An error about this deployment's setup rather than the request: missing or
+ * invalid Jupiter, RPC, vault, fee-payer or key settings. The owner can do
+ * nothing about it, and its text names settings (MERRYMEN_JUPITER_API_KEY is
+ * required…), so it is answered as plainly unavailable.
+ */
+function setupError(error: unknown): boolean {
+  if (error instanceof SolanaMarketError) return error.code === "missing-jupiter-key" || error.code === "invalid-jupiter-key";
+  if (error instanceof SolanaRpcError) return ["missing-config", "invalid-config", "invalid-fallback", "invalid-timeout"].includes(error.code);
+  return error instanceof SolanaAppRuntimeError && error.code === "configuration";
+}
+
+/**
+ * Every /api/solana route answers through this. With Solana off for this
+ * deployment (solanaEnabled) it refuses before the action runs: no sign-in,
+ * no body, no database.
+ */
 export async function solanaResponse(action: () => Promise<unknown>) {
-  try { return NextResponse.json(await action(), { headers: { "Cache-Control": "private, no-store" } }); }
+  const headers = { "Cache-Control": "private, no-store" };
+  if (!solanaEnabled()) return NextResponse.json({ error: NOT_AVAILABLE, ownerFacing: true }, { status: 404, headers });
+  try { return NextResponse.json(await action(), { headers }); }
   catch (error) {
     let status = 503, message = "Solana is temporarily unavailable. Nothing was confirmed; refresh to check existing requests before retrying.";
-    if (error instanceof SolanaWebError) { status = error.status; message = error.message; }
+    if (setupError(error)) message = NOT_AVAILABLE;
+    else if (error instanceof SolanaWebError) { status = error.status; message = error.message; }
     else if (error instanceof SolanaBindingError) { status = error.code === "invalid" ? 400 : 409; message = error.message; }
     else if (error instanceof SolanaPaperValidationError || error instanceof SolanaPaperStoreError) { status = 400; message = error.message; }
-    else if (error instanceof SolanaAppRuntimeError) { status = error.code === "invalid" ? 400 : error.code === "configuration" ? 503 : 409; message = error.message; }
+    else if (error instanceof SolanaAppRuntimeError) { status = error.code === "invalid" ? 400 : 409; message = error.message; }
     else if (error instanceof SolanaTradingStoreError) { status = 409; message = error.message; }
     else if (error instanceof SolanaMarketError || error instanceof SolanaRpcError) message = error.message;
     // Unknown provider/storage errors are never reflected: they may contain
     // endpoints, API keys, sealed session keys, SQL values or wallet material.
-    return NextResponse.json({ error: message, ownerFacing: true }, { status, headers: { "Cache-Control": "private, no-store" } });
+    return NextResponse.json({ error: message, ownerFacing: true }, { status, headers });
   }
 }

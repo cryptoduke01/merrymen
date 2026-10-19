@@ -96,7 +96,7 @@ function subscribeDesktop(onChange: () => void) {
   return () => media.removeEventListener("change", onChange);
 }
 
-export function App() {
+export function App({ solana = false }: { solana?: boolean }) {
   const bodyRef = useRef<HTMLDivElement>(null);
   /**
    * THE LATEST ANSWER OF EVERY READ, and the screens drawn from them.
@@ -109,7 +109,7 @@ export function App() {
   const [sources, setSources] = useState<LiveSources>(seedSources);
   const live = useMemo(() => liveOf(sources), [sources]);
   const pathname = usePathname() ?? "/";
-  const requestedScreen = useMemo(()=>screenForPath(pathname),[pathname]);
+  const requestedScreen = useMemo(()=>screenForPath(pathname, solana),[pathname, solana]);
   // In place, never a round trip — see navigate.ts.
   const setScreen = (next: Screen) => goTo(pathForScreen(next));
   const [account, setAccount] = useState<AccountState|null>(null);
@@ -560,7 +560,7 @@ export function App() {
             visitor, signed in or not. It takes no props on purpose: it reads
             nothing of the account, and nothing here reads it. */}
         <ServiceNotice />
-        <nav aria-label="Trading networks" className="solana-network-nav"><a href="/home" aria-current={screen.kind !== "solana" ? "page" : undefined}>Robinhood Chain</a><a href="/solana" aria-current={screen.kind === "solana" ? "page" : undefined}>Solana</a></nav>
+        {solana && <nav aria-label="Trading networks" className="solana-network-nav"><a href="/home" aria-current={screen.kind !== "solana" ? "page" : undefined}>Robinhood Chain</a><a href="/solana" aria-current={screen.kind === "solana" ? "page" : undefined}>Solana</a></nav>}
         {/* THE ONE PROMPT THAT FIRES BEFORE THE FIRST REFUSAL, rather than
             after it. Every other re-sign surface answers a question the
             WORKER asked — expired, uncovered, dead policy — and none of them

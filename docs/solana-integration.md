@@ -244,6 +244,14 @@ the following from the repository root so its server receives the same values
 node --env-file=.env.solana.local node_modules/next/dist/bin/next dev web -H 127.0.0.1 -p 3100
 ```
 
+The web surface is off unless the web server has `MERRYMEN_SOLANA=1`
+([`solana-enabled.ts`](../web/src/lib/solana-enabled.ts)). Without it the
+network switch and the `/solana` screen are not rendered, `/solana` answers 404,
+and every `/api/solana` route answers 404 before sign-in, body parsing or any
+database read. Leave it unset on the hosted web service until the release gates
+below are signed off. Errors about missing or invalid Solana settings reach the
+user only as "Solana trading is not available."
+
 Hosted web and worker services receive these values through their secret
 environments; the private file is not part of their image.
 

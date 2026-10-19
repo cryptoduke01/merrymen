@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import Module, { createRequire } from "node:module";
-import { before, beforeEach, mock, test } from "node:test";
+import { after, before, beforeEach, mock, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import * as api from "./solana-api";
 import * as auth from "./solana-auth";
@@ -15,7 +15,11 @@ let calls: Array<{ method: string; args: unknown[] }>;
 let deny = false;
 const routes: Record<string, (req: Request) => Promise<Response>> = {};
 const methods = ["setupPaper", "preview", "trade", "prepareLive", "submitSetup", "activateLive", "prepareOwnerAction", "submitOwnerAction"];
+// These exercise a deployment that offers Solana; solana-enabled.test.ts covers one that does not.
+const flag = process.env.MERRYMEN_SOLANA;
+after(() => { if (flag === undefined) delete process.env.MERRYMEN_SOLANA; else process.env.MERRYMEN_SOLANA = flag; });
 before(() => {
+  process.env.MERRYMEN_SOLANA = "1";
   const directory = fileURLToPath(new URL("../app/api/solana/", import.meta.url));
   const loader = Module as unknown as { _load: (id: string, parent: { filename?: string }, isMain: boolean) => unknown };
   const original = loader._load;

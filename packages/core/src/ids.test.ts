@@ -17,6 +17,7 @@ import {
   onchainIdsIn,
   requireChain,
   sameId,
+  secretScanBudget,
   solanaSecretIn,
   solanaSecretsIn,
 } from "./ids";
@@ -175,5 +176,46 @@ describe("Solana secret detection", () => {
     for (const s of solanaSecretsIn(text)) assert.ok(text.includes(s));
     assert.deepEqual(solanaSecretsIn(`sig ${a.sig}`), []);
     for (const x of [null, undefined, 42, "", "short"]) assert.deepEqual(solanaSecretsIn(x), []);
+  });
+
+  it("reads a near-miss byte array in linear time", () => {
+    // Values 10-19 once matched two ways each, so an array that failed at its
+    // end backtracked 2^k times: k=20 took about half a second, k=63 forever.
+    // 22 is enough to fail this on the old pattern in seconds rather than hang.
+    const nearMiss = (value: string, sep: string, last: string) => `[${[...Array(22).fill(value), ...Array(41).fill("1")].join(sep)}${sep}${last}]`;
+    const nearMisses = [
+      nearMiss("11", ",", "999"),
+      nearMiss("19", " , ", "256"),
+      `[${Array(64).fill("10").join(",")}`,
+      `${"[11,".repeat(2_000)}999]`,
+    ];
+    const started = performance.now();
+    for (const text of nearMisses) assert.deepEqual(solanaSecretsIn(text), []);
+    assert.ok(performance.now() - started < 250, `took ${Math.round(performance.now() - started)} ms`);
+  });
+
+  it("caps the candidates it reads, and counts what it did not read as a secret", () => {
+    const distinct = Array.from({ length: 150 }, (_, i) => keypair(i).sig);
+    const sigs = [...distinct, ...distinct];
+    const { secretB58 } = keypair(29);
+    const found = solanaSecretsIn([...sigs, secretB58].join(" "));
+    assert.equal(found.length, 300 - 256 + 1, "the first 256 are read; the rest, the key included, are refused unread");
+    assert.equal(found.at(-1), secretB58, "a key past the cap is never let through");
+    assert.deepEqual(solanaSecretsIn(sigs.slice(0, 256).join(" ")), [], "up to the cap, signatures stay signatures");
+    const addresses = Array.from({ length: 1_000 }, (_, i) => keypair(i % 150).pub).join(" ");
+    assert.deepEqual(solanaSecretsIn(`${addresses} ${secretB58}`), [secretB58], "an address is too short to be a candidate");
+
+    const budget = secretScanBudget();
+    for (const sig of sigs.slice(0, 256)) assert.equal(solanaSecretIn(sig, budget), false);
+    assert.equal(solanaSecretIn(sigs[256], budget), true, "scans sharing a budget are capped together");
+  });
+
+  it("reads a megabyte of key-shaped text in bounded time", () => {
+    const runs = Array.from({ length: 64 }, (_, i) => base58Encode(Uint8Array.from({ length: 64 }, (_, j) => (i * 7 + j * 13 + 1) % 256)));
+    const text = Array.from({ length: 12_000 }, (_, i) => (i % 2 ? runs[i % 64] : `[${Array(64).fill(i % 200).join(",")}]`)).join(" ");
+    assert.ok(text.length > 1_000_000);
+    const started = performance.now();
+    assert.equal(solanaSecretIn(text), true, "past the cap it fails closed");
+    assert.ok(performance.now() - started < 1_000, `took ${Math.round(performance.now() - started)} ms`);
   });
 });
