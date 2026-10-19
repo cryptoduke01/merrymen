@@ -23,9 +23,12 @@ const PROGRAM = key(77), LOADER = "BPFLoaderUpgradeab1e11111111111111111111111";
 const keyBytes = (value: string) => Buffer.from(getBase58Encoder().encode(value));
 const limits = { perTradeUsdg: "10000000", dailyUsdg: "50000000", maxOpsPerDay: 10, maxDrawdownBps: 2000, expiresAtMs: 4_600_000,
   perTradeWsol: "100000000", dailyWsol: "500000000" };
-function account(data: Buffer, owner = PROGRAM, executable = false) {
-  return { owner, executable, lamports: 100_000_000, data: [data.toString("base64"), "base64"], space: data.length };
+function account(data: Buffer, owner = PROGRAM, executable = false, lamports = 100_000_000) {
+  return { owner, executable, lamports, data: [data.toString("base64"), "base64"], space: data.length };
 }
+/** Mainnet's rent-exempt minimum: (128 + size) bytes at 3,480 lamports per byte-year, for two years. */
+const rentExempt = (size: number) => (128 + size) * 6960;
+const SYSTEM = "11111111111111111111111111111111";
 async function fixture(options: { declared?: string } = {}) {
   const raw = new DatabaseSync(":memory:"), db = wrapSqlite(raw), clock = { now: 1_000_000 };
   const ownerKeys = await createKeyPairFromPrivateKeyBytes(new Uint8Array(32).fill(21));
@@ -39,10 +42,15 @@ async function fixture(options: { declared?: string } = {}) {
   const dataAddress = key(41), binary = Buffer.concat([Buffer.from("runtime-tested-binary"), keyBytes(options.declared ?? PROGRAM)]), program = Buffer.alloc(36), programData = Buffer.alloc(45 + binary.length);
   program.writeUInt32LE(2); keyBytes(dataAddress).copy(program, 4); programData.writeUInt32LE(3); binary.copy(programData, 45);
   const controls = { initialized: false, finalized: false, failed: false, malformed: false, sends: 0, signed: "", signature: "", failSend: true, height: 4900, sequence: 0n, epoch: 1n,
-    cash: 0n, wsol: 0n };
+    cash: 0n, wsol: 0n, feePayerLamports: 100_000_000, ownerLamports: 100_000_000, ownerAtas: false, vaultNativeLamports: 0, unsyncedWsolLamports: 0 };
   const cashAta = await deriveSolanaAta(vault, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM), wsolAta = await deriveSolanaAta(vault, SOLANA_WRAPPED_SOL_MINT, SOLANA_CLASSIC_TOKEN_PROGRAM);
-  const tokenAccount = (mint: string, amount: bigint) => {
-    const b = Buffer.alloc(165); keyBytes(mint).copy(b, 0); keyBytes(vault).copy(b, 32); b.writeBigUInt64LE(amount, 64); b[108] = 1; return b;
+  const ownerCashAta = await deriveSolanaAta(owner, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM), ownerWsolAta = await deriveSolanaAta(owner, SOLANA_WRAPPED_SOL_MINT, SOLANA_CLASSIC_TOKEN_PROGRAM);
+  const feePayer = await getAddressFromPublicKey((await createKeyPairFromPrivateKeyBytes(new Uint8Array(32).fill(31))).publicKey);
+  // USDG accounts are Token-2022 with the ATA program's ImmutableOwner extension (170 bytes); WSOL accounts are native (165).
+  const tokenAccount = (mint: string, amount: bigint, holder = vault) => {
+    const usdg = mint === SOLANA_USDG_MINT, b = Buffer.alloc(usdg ? 170 : 165); keyBytes(mint).copy(b, 0); keyBytes(holder).copy(b, 32); b.writeBigUInt64LE(amount, 64); b[108] = 1;
+    if (usdg) { b[165] = 2; b.writeUInt16LE(7, 166); } else { b.writeUInt32LE(1, 109); b.writeBigUInt64LE(BigInt(rentExempt(165)), 113); }
+    return b;
   };
   const state = () => {
     const b = Buffer.alloc(SOLANA_VAULT_ACCOUNT_SIZE); Buffer.from(SOLANA_VAULT_DISCRIMINATOR).copy(b); let p = 8;
@@ -55,23 +63,29 @@ async function fixture(options: { declared?: string } = {}) {
   const response = (value: unknown) => ({ context: { slot: 1000 }, value });
   // Every RPC read, in order: what a status or owner action costs.
   const calls: Array<{ method: string; key: unknown }> = [];
+  const accountFor = (k: unknown) => k === vault ? (controls.initialized ? account(state(), PROGRAM, false, rentExempt(SOLANA_VAULT_ACCOUNT_SIZE) + controls.vaultNativeLamports) : null)
+    : k === cashAta ? account(tokenAccount(SOLANA_USDG_MINT, controls.cash), TOKEN_2022_PROGRAM, false, rentExempt(170))
+    : k === wsolAta ? account(tokenAccount(SOLANA_WRAPPED_SOL_MINT, controls.wsol), SOLANA_CLASSIC_TOKEN_PROGRAM, false, rentExempt(165) + Number(controls.wsol) + controls.unsyncedWsolLamports)
+    : k === feePayer ? (controls.feePayerLamports ? account(Buffer.alloc(0), SYSTEM, false, controls.feePayerLamports) : null)
+    : k === owner ? (controls.ownerLamports ? account(Buffer.alloc(0), SYSTEM, false, controls.ownerLamports) : null)
+    : k === ownerCashAta ? (controls.ownerAtas ? account(tokenAccount(SOLANA_USDG_MINT, 0n, owner), TOKEN_2022_PROGRAM, false, rentExempt(170)) : null)
+    : k === ownerWsolAta ? (controls.ownerAtas ? account(tokenAccount(SOLANA_WRAPPED_SOL_MINT, 0n, owner), SOLANA_CLASSIC_TOKEN_PROGRAM, false, rentExempt(165)) : null)
+    : null;
   const read: SolanaLiveRead = async (method, params = []) => {
     calls.push({ method, key: params[0] });
     if (method === "getSlot") return 1000;
     if (method === "getBlockHeight") return controls.height;
+    if (method === "getMinimumBalanceForRentExemption") return rentExempt(params[0] as number);
     if (method === "getAccountInfo") {
       if (params[0] === PROGRAM) return response(account(program, LOADER, true));
       if (params[0] === dataAddress) {
         const slice = (params[1] as { dataSlice: { offset: number; length: number } }).dataSlice;
         return response({ ...account(programData.subarray(slice.offset, slice.offset + slice.length), LOADER), space: programData.length });
       }
-      if (params[0] === vault) return response(controls.initialized ? account(state()) : null);
-      return response(account(Buffer.alloc(0), "11111111111111111111111111111111"));
+      if (params[0] === vault) return response(accountFor(vault));
+      return response(accountFor(params[0]) ?? account(Buffer.alloc(0), SYSTEM));
     }
-    if (method === "getMultipleAccounts") {
-      assert.deepEqual(params[0], [cashAta, wsolAta]);
-      return response([account(tokenAccount(SOLANA_USDG_MINT, controls.cash), TOKEN_2022_PROGRAM), account(tokenAccount(SOLANA_WRAPPED_SOL_MINT, controls.wsol), SOLANA_CLASSIC_TOKEN_PROGRAM)]);
-    }
+    if (method === "getMultipleAccounts") return response((params[0] as string[]).map(accountFor));
     if (method === "getLatestBlockhash") return response({ blockhash: key(42), lastValidBlockHeight: 5000 });
     if (method === "getSignatureStatuses") return response([controls.finalized ? { confirmationStatus: "finalized", slot: 1000, ...(controls.malformed ? {} : { err: controls.failed ? { InstructionError: [0, "InvalidArgument"] } : null }) } : null]);
     if (method === "getTransaction") return controls.finalized ? { version: 0, slot: 1000, transaction: [controls.signed, "base64"], meta: controls.malformed ? {} : { err: controls.failed ? { InstructionError: [0, "InvalidArgument"] } : null } } : null;
@@ -107,7 +121,7 @@ async function fixture(options: { declared?: string } = {}) {
     await db.prepare("INSERT INTO solana_runtime_sessions(tenant,owner,record_json,sealed_seed) VALUES(?,?,?,?)").run(TENANT, owner, JSON.stringify(record),
       sealSecret(`solana-session/v1 ${TENANT} ${owner} ${PROGRAM} ${vault} ${session} ${record.sessionEpoch}\n` + sessionSeed.toString("base64"), Buffer.alloc(32, 30)));
   };
-  return { raw, db, clock, scope, owner, session, sessionSeed, controls, bindings, app, runtime, sign, live, trade, env, rpc, market, registered, programData, dataAddress, calls };
+  return { raw, db, clock, scope, owner, session, sessionSeed, controls, bindings, app, runtime, sign, live, trade, env, rpc, market, registered, programData, dataAddress, calls, feePayer, vault, cashAta, wsolAta, ownerCashAta, ownerWsolAta };
 }
 
 test("authenticated paper execution is durable and never calls transaction submission", async () => {
@@ -450,5 +464,72 @@ test("a long worker tick keeps its heartbeat fresh (audit agent-deploy F3)", asy
     const beat = await f.db.prepare("SELECT last_seen_at_ms FROM solana_runtime_worker_heartbeat WHERE worker='solana'").get() as { last_seen_at_ms: number };
     assert.ok(f.clock.now - started >= 100_000);
     assert.ok(f.clock.now - Number(beat.last_seen_at_ms) < 90_000, "the UI would otherwise show the worker offline");
+  } finally { f.raw.close(); }
+});
+
+/** A live account the worker could trade: registered session, live binding, initialized vault. */
+async function readyLive(f: Awaited<ReturnType<typeof fixture>>) { await f.live(); f.controls.initialized = true; await f.registered(); }
+
+test("a shared fee payer below the per-transaction fee cap still lets every tenant trade and exit; operators get one alert (audit G2-4)", async () => {
+  const f = await fixture(), lines: string[] = [];
+  try {
+    await readyLive(f);
+    const app = f.runtime({ log: line => lines.push(line) });
+    assert.equal((await app.status(f.scope)).live.ready, true);
+    assert.equal(lines.length, 0, "nothing to say while the payer is funded");
+    // Ordinary fee burn: under the 5,000,000-lamport cap, far above what one swap needs.
+    f.controls.feePayerLamports = 3_000_000;
+    const status = await app.status(f.scope);
+    assert.equal(status.live.ready, true, status.live.blockers.join(" | ")); assert.equal(status.live.canExit, true);
+    assert.equal(status.live.feePayer?.level, "low"); assert.equal(status.live.feePayer?.lamports, "3000000");
+    assert.equal(status.live.feePayer?.lowLamports, "20000000", "default warning: four times the fee cap");
+    assert.match(status.live.warnings.join(" "), /fee payer is low \(0\.003 SOL/);
+    assert.equal(lines.length, 1); assert.match(lines[0]!, /^\[alert\] Solana fee payer is low: /);
+    const event = JSON.parse(lines[0]!.slice(lines[0]!.indexOf("{")));
+    assert.deepEqual({ solana: event.solana, kind: event.kind, feePayer: event.feePayer, lamports: event.lamports }, { solana: "alert", kind: "fee-payer-low", feePayer: f.feePayer, lamports: "3000000" });
+    assert.ok(!lines[0]!.includes(f.owner) && !lines[0]!.includes(TENANT), "no tenant identity in operator logs");
+    await app.status(f.scope); await app.status(f.scope);
+    assert.equal(lines.length, 1, "repeated reads do not repeat the alert");
+    f.clock.now += 10 * 60_000;
+    await app.status(f.scope);
+    assert.equal(lines.length, 2, "an unresolved alert is repeated every ten minutes");
+  } finally { f.raw.close(); }
+});
+
+test("the fee payer gates buys and exits only on what one swap actually needs (audit G2-4)", async () => {
+  const f = await fixture(), lines: string[] = [];
+  try {
+    await readyLive(f);
+    const app = f.runtime({ log: line => lines.push(line) });
+    const exitNeeds = rentExempt(165) + 10_000, buyNeeds = rentExempt(170) + 10_000;
+    f.controls.feePayerLamports = buyNeeds;
+    assert.equal((await app.status(f.scope)).live.ready, true, "exactly a buy's worth still trades");
+    f.controls.feePayerLamports = buyNeeds - 1;
+    let status = await app.status(f.scope);
+    assert.equal(status.live.ready, false); assert.equal(status.live.canExit, true, "exits stay open");
+    assert.match(status.live.blockers.join(" "), /enough for exits, not for buys/); assert.equal(status.live.feePayer?.level, "buys-blocked");
+    assert.equal(status.live.feePayer?.exitMinimumLamports, String(exitNeeds)); assert.equal(status.live.feePayer?.buyMinimumLamports, String(buyNeeds));
+    f.controls.feePayerLamports = exitNeeds - 1;
+    status = await app.status(f.scope);
+    assert.equal(status.live.canExit, false); assert.match(status.live.blockers.join(" "), /below the 0\.00204928 SOL one exit needs/);
+    f.controls.feePayerLamports = 0; // a drained payer account no longer exists
+    assert.equal((await app.status(f.scope)).live.feePayer?.level, "exits-blocked");
+    f.controls.feePayerLamports = 100_000_000;
+    assert.equal((await app.status(f.scope)).live.ready, true);
+    assert.deepEqual(lines.map(line => JSON.parse(line.slice(line.indexOf("{"))).kind ?? JSON.parse(line.slice(line.indexOf("{"))).solana),
+      ["fee-payer-low", "fee-payer-buys-blocked", "fee-payer-exits-blocked", "fee-payer-ok"], "one line per change of level");
+    assert.ok(lines.slice(0, 3).every(line => line.startsWith("[alert] ")) && !lines[3]!.startsWith("[alert]"));
+  } finally { f.raw.close(); }
+});
+
+test("the fee payer warning threshold is explicit configuration (audit G2-4)", async () => {
+  const f = await fixture();
+  try {
+    await readyLive(f); f.controls.feePayerLamports = 3_000_000;
+    const quiet = f.runtime({ env: { ...f.env, MERRYMEN_SOLANA_FEE_PAYER_LOW_LAMPORTS: "2500000" }, log: () => {} });
+    const status = await quiet.status(f.scope);
+    assert.equal(status.live.feePayer?.level, "ok"); assert.deepEqual(status.live.warnings, []); assert.equal(status.live.feePayer?.lowLamports, "2500000");
+    const broken = f.runtime({ env: { ...f.env, MERRYMEN_SOLANA_FEE_PAYER_LOW_LAMPORTS: "lots" }, log: () => {} });
+    assert.match((await broken.status(f.scope)).live.blockers.join(" "), /warning threshold is misconfigured/);
   } finally { f.raw.close(); }
 });

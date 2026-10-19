@@ -68,6 +68,34 @@ function tokenProgram(mint: string): string {
   if (mint === SOLANA_WRAPPED_SOL_MINT) return SOLANA_CLASSIC_TOKEN_PROGRAM;
   return fail("Live Solana trading currently supports USDG and wrapped SOL.");
 }
+/** The two signatures (fee payer and session) every swap pays for. */
+const SWAP_SIGNATURE_FEES = 10_000n;
+/** A classic token account, like the temporary WSOL account an exit opens and closes. */
+const CLASSIC_TOKEN_ACCOUNT_SIZE = 165;
+/** Upper bound for a Token-2022 USDG token account whose size cannot be read yet (before the vault's own exists). */
+const TOKEN_2022_ACCOUNT_SIZE_BOUND = 300;
+/** An unchanged fee payer alert is logged again after this long. */
+const FEE_PAYER_ALERT_REPEAT_MS = 10 * 60_000;
+/** Lamports as SOL, exact, for owner- and operator-facing text. */
+function sol(lamports: bigint): string {
+  const fraction = (lamports % 1_000_000_000n).toString().padStart(9, "0").replace(/0+$/, "");
+  return `${lamports / 1_000_000_000n}${fraction ? `.${fraction}` : ""}`;
+}
+type ChainAccount = { owner: string; executable: boolean; lamports: bigint; data: Buffer } | null;
+function chainAccount(raw: unknown): ChainAccount {
+  if (raw === null) return null;
+  if (!object(raw) || typeof raw.owner !== "string" || typeof raw.executable !== "boolean" || !Array.isArray(raw.data) || raw.data[1] !== "base64"
+    || typeof raw.data[0] !== "string" || typeof raw.lamports !== "number" || !Number.isSafeInteger(raw.lamports) || raw.lamports < 0) return fail("Invalid Solana account data.");
+  const data = Buffer.from(raw.data[0], "base64");
+  if (data.toString("base64") !== raw.data[0]) return fail("Invalid Solana account data.");
+  return { owner: raw.owner, executable: raw.executable, lamports: BigInt(raw.lamports), data };
+}
+/** Confirmed accounts in one call; a missing account is null. */
+async function readAccounts(read: SolanaLiveRead, keys: readonly string[]): Promise<ChainAccount[]> {
+  const result = await read("getMultipleAccounts", [keys, { encoding: "base64", commitment: "confirmed" }]);
+  if (!object(result) || !object(result.context) || !Array.isArray(result.value) || result.value.length !== keys.length) return fail("Invalid Solana account data.");
+  return result.value.map(chainAccount);
+}
 async function createAta(owner: string, authority: string, mint: string): Promise<Instruction> {
   const program = tokenProgram(mint);
   return { programAddress: address(SOLANA_ASSOCIATED_TOKEN_PROGRAM), data: Uint8Array.of(1), accounts: [
@@ -129,6 +157,8 @@ async function requireDeclaredProgramId(rpc: SolanaLiveRpc, programId: string, b
 export interface SolanaAppRuntimeOptions {
   db?: Db; env?: Readonly<Record<string, string | undefined>>; now?: () => number;
   rpc?: SolanaLiveRpc; market?: SolanaPaperMarket;
+  /** Operator log lines (fee payer alerts). Default: stderr. Never carries keys, signed bytes or tenant identities. */
+  log?: (line: string) => void;
   /**
    * Test harnesses only: accept the local test program id and a binary that does
    * not embed the configured id. It defaults to true only when a test transport
@@ -181,6 +211,43 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
   function dek() { return seed(env.MERRYMEN_STORE_DEK, "Configure a 32-byte encryption key before registering live trading."); }
   async function payer() {
     return createKeyPairFromPrivateKeyBytes(seed(env.MERRYMEN_SOLANA_FEE_PAYER_SEED, "Configure the separate Solana network fee payer before live trading."));
+  }
+  const log = options.log ?? ((line: string) => { process.stderr.write(`${line}\n`); });
+  // Rent-exempt minimums by account size. They change only by feature activation; reread every window.
+  const rents = new Map<number, { lamports: bigint; atMs: number }>();
+  async function rentFor(read: SolanaLiveRead, size: number): Promise<bigint> {
+    const at = now(), hit = rents.get(size);
+    if (hit && at >= hit.atMs && at - hit.atMs < SOLANA_DEPLOYMENT_RECHECK_MS) return hit.lamports;
+    const value = await read("getMinimumBalanceForRentExemption", [size, { commitment: "confirmed" }]);
+    if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) fail("Invalid Solana rent data.");
+    rents.set(size, { lamports: BigInt(value), atMs: at });
+    return BigInt(value);
+  }
+  /**
+   * The shared fee payer's warning level. Below the low watermark it is only a
+   * warning; below what one buy needs, buying pauses; below what one exit needs,
+   * every tenant's exits stop. The executor itself refuses anything the payer
+   * cannot fund, so these levels never block a trade it would sign.
+   */
+  function feePayerLow(): bigint {
+    const maxFee = parseSolanaRawAmount(env.MERRYMEN_SOLANA_MAX_FEE_LAMPORTS ?? "5000000");
+    const raw = env.MERRYMEN_SOLANA_FEE_PAYER_LOW_LAMPORTS;
+    if (raw === undefined) return maxFee * 4n;
+    try { return parseSolanaRawAmount(raw); } catch { return fail("The fee payer warning threshold is misconfigured.", "configuration"); }
+  }
+  type FeePayerLevel = "ok" | "low" | "buys-blocked" | "exits-blocked";
+  let feePayerAlert: { level: FeePayerLevel; atMs: number } | undefined;
+  /** One structured line per change of level, repeated every FEE_PAYER_ALERT_REPEAT_MS while it is not ok. */
+  function reportFeePayer(level: FeePayerLevel, details: Record<string, string>) {
+    const at = now(), last = feePayerAlert;
+    if (level === "ok") {
+      if (last && last.level !== "ok") log(JSON.stringify({ solana: "fee-payer-ok", ...details }));
+      feePayerAlert = { level, atMs: at }; return;
+    }
+    if (last && last.level === level && at >= last.atMs && at - last.atMs < FEE_PAYER_ALERT_REPEAT_MS) return;
+    feePayerAlert = { level, atMs: at };
+    const what = level === "low" ? "is low" : level === "buys-blocked" ? "cannot fund buys" : "cannot fund exits: every tenant's exits are blocked";
+    log(`[alert] Solana fee payer ${what}: ${JSON.stringify({ solana: "alert", kind: `fee-payer-${level}`, ...details })}`);
   }
   function paperService(s: SolanaTradingStore) { return createSolanaPaperService(s.paper(), market(), now, { owner: s.scope.owner }); }
   function intent(raw: unknown, mode: "paper" | "live"): SolanaSwapIntent {
@@ -296,7 +363,10 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
      * binding read that way is never shown as ready.
      */
     async status(scope: SolanaAccountScope, statusOptions: { liveReads?: boolean } = {}) {
-      const s = await store(scope), binding = await s.binding(), blockers: string[] = [];
+      const s = await store(scope), binding = await s.binding(), blockers: string[] = [], warnings: string[] = [];
+      // Blockers that stop buying but leave exits open.
+      const exitSafe = new Set<string>();
+      const buysOnly = (message: string) => { blockers.push(message); exitSafe.add(message); };
       const liveReads = statusOptions.liveReads ?? (binding.requestedMode === "live" || !!(await s.session()) || !!(await s.liveBook())
         || !!(await s.setup()) || (await s.pending()).length > 0);
       if (liveReads) {
@@ -309,6 +379,7 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       const session = await s.session();
       let programId: string | null = null, vault: string | null = null, cashTokenAccount: string | null = null;
       let balances: { slot: number; cashUsdg: string; wsolRaw: string } | null = null;
+      let feePayerView: { lamports: string; exitMinimumLamports: string; buyMinimumLamports: string; lowLamports: string; level: FeePayerLevel } | null = null;
       try {
         const cfg = config(); programId = cfg.programId; vault = await deriveSolanaVaultAddress(programId, scope.owner);
         if (!liveReads) { if (binding.requestedMode === "live") blockers.push("Live vault state was not read."); }
@@ -316,12 +387,25 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
           dek(); const feePayer = await getAddressFromPublicKey((await payer()).publicKey);
           if ([scope.owner, vault, session?.session].includes(feePayer)) fail("The network fee payer must be separate from the owner, vault and session.", "configuration");
           await verifyDeployment(cfg);
-          const feeBudget = parseSolanaRawAmount(env.MERRYMEN_SOLANA_MAX_FEE_LAMPORTS ?? "5000000");
-          await rpc().read(async read => {
-            const account = await read("getAccountInfo", [feePayer, { encoding: "base64", commitment: "confirmed" }]);
-            if (!object(account) || !object(account.value) || account.value.owner !== SOLANA_SYSTEM_PROGRAM || BigInt(integer(account.value.lamports)) < feeBudget)
-              fail("The separate network fee payer needs SOL for transaction fees and temporary account rent.", "configuration");
+          const low = feePayerLow(), vaultCash = await deriveSolanaAta(vault, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM);
+          // What the executor needs for one swap: both signatures and the rent of the
+          // temporary input account it opens (and closes, refunding the payer).
+          const payerState = await rpc().read(async read => {
+            const [payerAccount, cashAccount] = await readAccounts(read, [feePayer, vaultCash]);
+            if (payerAccount && (payerAccount.owner !== SOLANA_SYSTEM_PROGRAM || payerAccount.executable || payerAccount.data.length))
+              fail("The separate network fee payer must be a plain system account.", "configuration");
+            return { lamports: payerAccount?.lamports ?? 0n,
+              exitMinimum: await rentFor(read, CLASSIC_TOKEN_ACCOUNT_SIZE) + SWAP_SIGNATURE_FEES,
+              buyMinimum: await rentFor(read, cashAccount ? cashAccount.data.length : TOKEN_2022_ACCOUNT_SIZE_BOUND) + SWAP_SIGNATURE_FEES };
           });
+          const level: FeePayerLevel = payerState.lamports < payerState.exitMinimum ? "exits-blocked" : payerState.lamports < payerState.buyMinimum ? "buys-blocked"
+            : payerState.lamports < low ? "low" : "ok";
+          feePayerView = { lamports: payerState.lamports.toString(), exitMinimumLamports: payerState.exitMinimum.toString(),
+            buyMinimumLamports: payerState.buyMinimum.toString(), lowLamports: low.toString(), level };
+          reportFeePayer(level, { feePayer, ...feePayerView });
+          if (level === "exits-blocked") blockers.push(`The shared network fee payer holds ${sol(payerState.lamports)} SOL, below the ${sol(payerState.exitMinimum)} SOL one exit needs. Trading and automated exits are paused until an operator funds it.`);
+          else if (level === "buys-blocked") buysOnly(`The shared network fee payer holds ${sol(payerState.lamports)} SOL: enough for exits, not for buys (${sol(payerState.buyMinimum)} SOL). Buying is paused until an operator funds it; exits remain available.`);
+          else if (level === "low") warnings.push(`The shared network fee payer is low (${sol(payerState.lamports)} SOL; operators are alerted below ${sol(low)} SOL). Trading continues.`);
           const live = await readSolanaVaultState(rpc(), programId, scope.owner);
           balances = await readSolanaVaultBalances(rpc(), vault, live.slot);
           cashTokenAccount = await deriveSolanaAta(vault, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM);
@@ -343,10 +427,10 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
               fail("The saved trading permission cannot be opened.", "configuration");
           }
           const currentBook = await s.liveBook();
-          if (currentBook?.buyPaused) blockers.push("The buying drawdown breaker is paused; exits remain available.");
+          if (currentBook?.buyPaused) buysOnly("The buying drawdown breaker is paused; exits remain available.");
           if (currentBook && shortOfBook(currentBook, balances)) blockers.push("Vault balances are below recorded trades; reconcile capital transfers before trading.");
           if (live.state.expiresAt * 1000n <= BigInt(now())) blockers.push("The on-chain trading permission has expired.");
-          if (live.state.paused) blockers.push("The on-chain buying breaker is paused; exits remain available.");
+          if (live.state.paused) buysOnly("The on-chain buying breaker is paused; exits remain available.");
         }
       } catch (error) { blockers.push(error instanceof SolanaAppRuntimeError ? error.message : "The configured vault, balances or live permissions could not be verified."); }
       if (!env.MERRYMEN_JUPITER_API_KEY) blockers.push("Configure Jupiter quote access.");
@@ -363,7 +447,7 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       return { chain: CHAINS.solana, owner: scope.owner, requestedMode: binding.requestedMode,
         automation: { workerOnline: lastSeenAtMs !== null && lastSeenAtMs <= now() && now() - lastSeenAtMs < 90_000, lastSeenAtMs },
         paper: await s.paper().get(scope.owner), limits: binding.limits,
-        live: { ready: blockers.length === 0, canExit: blockers.every(item => ["The on-chain buying breaker is paused; exits remain available.", "The buying drawdown breaker is paused; exits remain available."].includes(item)), blockers, programId, vault, cashTokenAccount, session: session?.session ?? null,
+        live: { ready: blockers.length === 0, canExit: blockers.every(item => exitSafe.has(item)), blockers, warnings, feePayer: feePayerView, programId, vault, cashTokenAccount, session: session?.session ?? null,
           balances, tradable: await tradableIn(s, balances), book: await s.liveBook(), pending, history: (await s.history()).map(publicTrade),
           ownerTransaction: ownerTransaction?.signature ? { signature: ownerTransaction.signature, status: ownerTransaction.status, kind: ownerTransaction.kind } : null } };
     },
