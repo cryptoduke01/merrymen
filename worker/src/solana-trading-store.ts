@@ -79,8 +79,17 @@ CREATE TABLE IF NOT EXISTS solana_runtime_submissions (
 CREATE UNIQUE INDEX IF NOT EXISTS solana_runtime_live_sequence ON solana_runtime_submissions(vault,sequence) WHERE status IN ('pending','finalized');
 CREATE UNIQUE INDEX IF NOT EXISTS solana_runtime_live_pending ON solana_runtime_submissions(vault) WHERE status = 'pending';
 CREATE INDEX IF NOT EXISTS solana_runtime_live_window ON solana_runtime_submissions(tenant,owner,created_at_ms);
+CREATE TABLE IF NOT EXISTS solana_operator_holds (
+ scope TEXT PRIMARY KEY, reason TEXT NOT NULL, created_at_ms BIGINT NOT NULL
+);
 `;
+/** An operator hold stops every new Solana trade for a tenant, or for everyone ('*'). Owner actions stay open. */
+export const SOLANA_OPERATOR_HOLD_ALL = "*";
+export async function solanaOperatorHeld(db: Db, tenant: string): Promise<boolean> {
+  return !!await db.prepare("SELECT 1 FROM solana_operator_holds WHERE scope IN (?,?)").get(tenant, SOLANA_OPERATOR_HOLD_ALL);
+}
 function refuse(message: string): never { throw new SolanaTradingStoreError(message); }
+export const OPERATOR_HOLD = "An operator hold stops Solana trading for this account. Owner withdrawals and revocation still work.";
 function clock(now: () => number): number { const n = now(); if (!Number.isSafeInteger(n) || n < 0) refuse("Invalid Solana runtime clock."); return n; }
 function key(value: string): void { if (canonicalId(CHAINS.solana, "account", value) !== value) refuse("Invalid Solana account key."); }
 function raw(value: string, zero = true): bigint { return parseSolanaRawAmount(value, zero); }
@@ -184,6 +193,7 @@ export class SolanaTradingStore implements SolanaLiveJournal {
           const binding = await this.bindingIn(tx, true);
           const prior = await tx.prepare("SELECT fingerprint,receipt_json FROM solana_runtime_paper_trades WHERE tenant=? AND owner=? AND request_id=?").get(tenant, owner, input.intent.requestId) as { fingerprint: string; receipt_json: string } | undefined;
           if (prior) { if (prior.fingerprint !== fingerprint) refuse("The Solana request ID belongs to another intent."); return JSON.parse(prior.receipt_json) as SolanaPaperReceipt; }
+          if (await solanaOperatorHeld(tx, tenant)) refuse(OPERATOR_HOLD);
           const strategyCap = await this.autonomousIn(tx, binding);
           if (binding.requestedMode !== "paper") refuse("Paper trading is not the selected Solana mode.");
           const now = clock(this.now);
@@ -203,6 +213,7 @@ export class SolanaTradingStore implements SolanaLiveJournal {
       },
     };
   }
+  async operatorHeld(): Promise<boolean> { return solanaOperatorHeld(this.db, this.scope.tenant); }
   async liveBook(): Promise<SolanaLiveBook | null> {
     await this.binding();
     return rowJson(await this.db.prepare("SELECT book_json FROM solana_runtime_live_books WHERE tenant=? AND owner=?").get(this.scope.tenant, this.scope.owner), "book_json");
@@ -284,6 +295,7 @@ export class SolanaTradingStore implements SolanaLiveJournal {
       const binding = await this.bindingIn(tx, true);
       const { tenant, owner } = this.scope;
       if (await tx.prepare("SELECT 1 FROM solana_runtime_submissions WHERE tenant=? AND owner=? AND request_id=?").get(tenant, owner, s.intent.requestId)) return false;
+      if (await solanaOperatorHeld(tx, tenant)) refuse(OPERATOR_HOLD);
       const strategyCap = await this.autonomousIn(tx, binding);
       if (binding.requestedMode !== "live" || !binding.limits) refuse("Live Solana trading has not been enabled for this account.");
       const ownerSetup = rowJson<SolanaPreparedSetup>(await tx.prepare("SELECT setup_json FROM solana_runtime_setups WHERE tenant=? AND owner=?").get(tenant, owner), "setup_json");

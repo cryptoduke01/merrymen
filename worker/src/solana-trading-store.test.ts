@@ -13,6 +13,7 @@ import { ensureSolanaTradingSchema, SolanaTradingStore, type SolanaPreparedSetup
 import type { SolanaLiveSettlement, SolanaSignedSubmission } from "./solana-executor";
 import { createSolanaPaperService } from "./solana-paper-service";
 import { pythBound } from "./solana-reference-price-fixture";
+import { releaseSolanaOperatorHold, setSolanaOperatorHold } from "./solana-operator-hold";
 
 const key = (n: number) => base58Encode(new Uint8Array(32).fill(n));
 const TENANT = `0x${"11".repeat(20)}` as const, OTHER = `0x${"22".repeat(20)}` as const;
@@ -355,5 +356,27 @@ test("a live binding saved without SOL sell limits admits no trade", async t => 
   const { perTradeWsol: _p, dailyWsol: _d, ...unbounded } = limits;
   await f.binding.settings(TENANT, OWNER, revision, "live", unbounded);
   await assert.rejects(f.store.recordSigned(submission()), /SOL sell limits/);
+  assert.equal((await f.store.pending()).length, 0);
+});
+
+test("an operator hold refuses live admission, manual or automatic, while owner actions continue", async t => {
+  const f = await fixture(t);
+  await setSolanaOperatorHold(f.db, TENANT, "incident", NOW);
+  await assert.rejects(f.store.recordSigned(submission()), /operator hold/);
+  const binding = await f.binding.strategy(TENANT, OWNER, 1, strategy);
+  await assert.rejects(new SolanaTradingStore(f.db, f.store.scope, () => NOW, { autonomousRevision: binding.revision }).recordSigned(submission("auto")), /operator hold/);
+  assert.equal((await f.store.pending()).length, 0);
+  // Revocation (and any owner transaction) is still prepared and saved.
+  assert.equal(await f.store.saveSetup(setup("revoke")), true);
+  await releaseSolanaOperatorHold(f.db, TENANT);
+  await setSolanaOperatorHold(f.db, "*", "fleet-wide", NOW);
+  await assert.rejects(f.store.recordSigned(submission("everyone")), /operator hold/);
+});
+
+test("a kill fences a live autonomous admission that captured the strategy before it", async t => {
+  const f = await fixture(t), binding = await f.binding.strategy(TENANT, OWNER, 1, strategy);
+  const automatic = new SolanaTradingStore(f.db, f.store.scope, () => NOW, { autonomousRevision: binding.revision });
+  assert.equal(await f.binding.disableForKill(TENANT), true);
+  await assert.rejects(automatic.recordSigned(submission()), /strategy changed/);
   assert.equal((await f.store.pending()).length, 0);
 });

@@ -1,8 +1,10 @@
 /** Chain-scoped wallet bindings. Existing RH tenant identities remain unchanged. */
+import { existsSync } from "node:fs";
+import { isHostedMode } from "../../../packages/core/src/hosted";
 import { CHAINS } from "../../../packages/core/src/ids";
 import { parseSolanaRawAmount, solanaPaperAgentId, validateSolanaPaperLimits, type SolanaPaperLimits } from "../../../packages/core/src/solana";
 import type { Db } from "../../../worker/src/db";
-import { getSolanaRuntimeDb } from "../../../worker/src/solana-runtime-db";
+import { getSolanaRuntimeDb, solanaRuntimeDbFile } from "../../../worker/src/solana-runtime-db";
 
 export type SolanaRequestedMode = "paper" | "live";
 export interface SolanaStrategy {
@@ -36,6 +38,10 @@ export interface SolanaBindingStore {
   bind(tenant: `0x${string}`, did: string, owner: string): Promise<SolanaBinding>;
   settings(tenant: `0x${string}`, owner: string, revision: number, mode: SolanaRequestedMode, limits: SolanaPaperLimits): Promise<SolanaBinding>;
   strategy(tenant: `0x${string}`, owner: string, revision: number, value: SolanaStrategy): Promise<SolanaBinding>;
+  /** Kill switch: turn the tenant's autonomous strategy off. True when it was on. */
+  disableForKill(tenant: `0x${string}`): Promise<boolean>;
+  /** Every tenant with a saved strategy, on or off. */
+  strategyTenants(): Promise<`0x${string}`[]>;
 }
 const SCHEMA = `CREATE TABLE IF NOT EXISTS solana_wallet_bindings (
   tenant TEXT PRIMARY KEY, did TEXT NOT NULL, chain TEXT NOT NULL,
@@ -132,6 +138,50 @@ export class SqlSolanaBindingStore implements SolanaBindingStore {
     if (saved.changes !== 1) throw new SolanaBindingError("stale");
     return (await this.get(tenant))!;
   }
+  async strategyTenants(): Promise<`0x${string}`[]> {
+    const rows = await (await this.database()).prepare("SELECT tenant FROM solana_wallet_bindings WHERE strategy_json IS NOT NULL ORDER BY tenant").all() as Array<{ tenant: string }>;
+    return rows.map((row) => { tenantKey(row.tenant); return row.tenant; });
+  }
+  async disableForKill(tenant: `0x${string}`): Promise<boolean> {
+    tenantKey(tenant);
+    const nowMs = this.now();
+    if (!Number.isSafeInteger(nowMs) || nowMs < 0) throw new SolanaBindingError("invalid");
+    const db = await this.database();
+    return db.tx(async (tx) => {
+      // The same row lock trade admission takes. The revision bump below fences
+      // any autonomous admission already in flight, whatever revision it read.
+      const locked = await tx.prepare("UPDATE solana_wallet_bindings SET revision = revision WHERE tenant = ?").run(tenant);
+      if (locked.changes !== 1) return false;
+      const row = await tx.prepare("SELECT strategy_json FROM solana_wallet_bindings WHERE tenant = ?").get(tenant) as { strategy_json: string | null };
+      if (!row.strategy_json) return false;
+      let strategy: SolanaStrategy | null = null;
+      try { strategy = validateSolanaStrategy(JSON.parse(row.strategy_json)); } catch { /* Unreadable: cleared below. */ }
+      if (strategy && !strategy.enabled) return false;
+      await tx.prepare("UPDATE solana_wallet_bindings SET strategy_json = ?, revision = revision + 1, updated_at_ms = ? WHERE tenant = ?")
+        .run(strategy ? JSON.stringify({ ...strategy, enabled: false }) : null, nowMs, tenant);
+      return true;
+    });
+  }
+}
+
+/**
+ * "Kill all agents" and Telegram /kill stop the tenant's Solana strategy too.
+ * Throws when it cannot be stopped, so the caller reports the kill incomplete.
+ * Without a database there is nothing that could trade: hosted Solana refuses
+ * to run without the shared database, and a self-hosted install that never
+ * used Solana has no accounts file (none is created here).
+ */
+export async function stopSolanaForKill(tenant: `0x${string}`, store: SolanaBindingStore = getSolanaBindingStore()): Promise<"stopped" | "none"> {
+  if (!process.env.DATABASE_URL && (isHostedMode() || !existsSync(solanaRuntimeDbFile()))) return "none";
+  return await store.disableForKill(tenant) ? "stopped" : "none";
+}
+/** Self-hosted is one owner's install: its kill stops every local strategy. */
+export async function stopLocalSolanaForKill(store: SolanaBindingStore = getSolanaBindingStore()): Promise<"stopped" | "none"> {
+  if (isHostedMode()) throw new Error("A hosted kill names its tenant.");
+  if (!process.env.DATABASE_URL && !existsSync(solanaRuntimeDbFile())) return "none";
+  let stopped = false;
+  for (const tenant of await store.strategyTenants()) stopped = await store.disableForKill(tenant) || stopped;
+  return stopped ? "stopped" : "none";
 }
 
 /** Lazy: importing a route never opens a database or writes a schema. */

@@ -3,11 +3,12 @@ import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import { CHAINS, SOLANA_USDG_MINT } from "../../packages/core/src/ids";
 import { SOLANA_WRAPPED_SOL_MINT } from "../../packages/core/src/solana-live";
-import { SqlSolanaBindingStore } from "../../web/src/lib/solana-binding-store";
+import { SqlSolanaBindingStore, stopSolanaForKill } from "../../web/src/lib/solana-binding-store";
 import { createSolanaAppRuntime } from "./solana-app-runtime";
 import { boundSolanaRebalanceSell, createSolanaAgent, planSolanaRebalance } from "./solana-agent";
 import { wrapSqlite } from "./db";
 import type { SolanaPaperMarket } from "./solana-paper-service";
+import { runSolanaHoldCommand } from "./solana-operator-hold";
 import { ensureSolanaTradingSchema } from "./solana-trading-store";
 
 const NOW = 1_000_000;
@@ -164,4 +165,71 @@ test("process shutdown during an in-flight status or market read never admits a 
       assert.equal((await actual.status(scope)).paper!.trades.length, initialTrades + 1);
     } finally { release(); raw.close(); }
   });
+});
+
+/** A paper account with an enabled strategy, its runtime and a counting trade wrapper. */
+async function killFixture(t: import("node:test").TestContext) {
+  const raw = new DatabaseSync(":memory:"), db = wrapSqlite(raw); t.after(() => raw.close());
+  const tenant = "0x1111111111111111111111111111111111111111" as const, owner = SOLANA_WRAPPED_SOL_MINT, scope = { tenant, owner };
+  const bindings = new SqlSolanaBindingStore(async () => db, "sqlite", () => NOW);
+  const market: SolanaPaperMarket = {
+    readMint: async mint => ({ address: mint, program: mint === SOLANA_USDG_MINT ? "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb" : "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+      decimals: mint === SOLANA_USDG_MINT ? 6 : 9, slot: 10, observedAtMs: NOW, buyBlockedReasons: [] }),
+    quote: async i => ({ source: "jupiter", inputMint: i.inputMint, outputMint: i.outputMint, inAmount: i.amountRaw,
+      outAmount: i.amountRaw, minOutAmount: (BigInt(i.amountRaw) * 995n / 1000n).toString(), slippageBps: i.slippageBps,
+      contextSlot: 10, quotedAtMs: NOW, expiresAtMs: NOW + 30000 }),
+  };
+  const rpc = { read: async () => { throw new Error("No live RPC in a paper worker test"); }, send: async () => { throw new Error("Must never send"); } };
+  await bindings.bind(tenant, "did:privy:kill", owner);
+  await bindings.settings(tenant, owner, 0, "paper", limits);
+  const actual = createSolanaAppRuntime({ db, env: {}, market, rpc, now: () => NOW });
+  await actual.setupPaper(scope, { initialCashRaw: input.cashRaw, limits });
+  await bindings.strategy(tenant, owner, 1, strategy);
+  const trades = async () => (await actual.status(scope)).paper!.trades.length;
+  return { db, tenant, scope, bindings, market, actual, trades };
+}
+
+test("a kill stops the Solana worker: kill, tick, no trade (audit 2026-10-18)", async t => {
+  const f = await killFixture(t);
+  // Hosted with the shared database: the kill names the tenant.
+  const saved = { db: process.env.DATABASE_URL, hosted: process.env.MERRYMEN_HOSTED };
+  process.env.DATABASE_URL = "postgres://127.0.0.1:1/never-connected"; process.env.MERRYMEN_HOSTED = "1";
+  t.after(() => { for (const [k, v] of [["DATABASE_URL", saved.db], ["MERRYMEN_HOSTED", saved.hosted]] as const) { if (v === undefined) delete process.env[k]; else process.env[k] = v; } });
+  assert.equal(await stopSolanaForKill(f.tenant, f.bindings), "stopped");
+  assert.deepEqual(await createSolanaAgent({ db: f.db, runtime: f.actual, market: f.market, now: () => NOW }).tick(), []);
+  assert.equal(await f.trades(), 0);
+});
+
+test("a kill that lands mid-tick is fenced at admission by the revision bump", async t => {
+  const f = await killFixture(t);
+  let tradeCalls = 0;
+  const runtime: Pick<typeof f.actual, "status" | "trade"> = {
+    // The worker has read the enabled strategy and its revision; the kill lands now.
+    status: async scope => { const status = await f.actual.status(scope); await f.bindings.disableForKill(f.tenant); return status; },
+    trade: async (...args) => { tradeCalls++; return f.actual.trade(...args); },
+  };
+  assert.deepEqual((await createSolanaAgent({ db: f.db, runtime, market: f.market, now: () => NOW }).tick()).map(r => r.outcome), ["unavailable"]);
+  assert.equal(tradeCalls, 1, "the worker asked to trade with the revision it read");
+  assert.equal(await f.trades(), 0, "and admission refused it");
+});
+
+test("an operator hold stops the worker and every new trade, for one tenant or all, until released", async t => {
+  const f = await killFixture(t);
+  await assert.rejects(runSolanaHoldCommand(f.db, ["set", "0xABC", "--reason", "x"], NOW), /tenant address/);
+  await assert.rejects(runSolanaHoldCommand(f.db, ["set", f.tenant, "--reason", "two\nlines"], NOW), /one-line reason/);
+  await assert.rejects(runSolanaHoldCommand(f.db, ["set", f.tenant], NOW), /Usage/);
+  for (const target of [f.tenant, "all"]) {
+    assert.match(await runSolanaHoldCommand(f.db, ["set", target, "--reason", "incident 42"], NOW), /held/);
+    assert.match(await runSolanaHoldCommand(f.db, ["list"], NOW), /incident 42/);
+    assert.deepEqual((await createSolanaAgent({ db: f.db, runtime: f.actual, market: f.market, now: () => NOW }).tick()).map(r => r.outcome), ["held"]);
+    // A manual trade is refused too, and the status says why.
+    await assert.rejects(f.actual.trade(f.scope, { mode: "paper", intent: { kind: "spl-swap", chain: CHAINS.solana, mode: "paper", requestId: `manual-${target}`,
+      inputMint: SOLANA_USDG_MINT, outputMint: SOLANA_WRAPPED_SOL_MINT, amountRaw: "1000000", slippageBps: 50 } }), /operator hold/);
+    assert.match((await f.actual.status(f.scope)).live.blockers.join(" "), /operator hold/);
+    assert.equal(await f.trades(), 0);
+    assert.match(await runSolanaHoldCommand(f.db, ["release", target], NOW), /released/);
+  }
+  assert.match(await runSolanaHoldCommand(f.db, ["list"], NOW), /No Solana operator holds/);
+  assert.deepEqual((await createSolanaAgent({ db: f.db, runtime: f.actual, market: f.market, now: () => NOW }).tick()).map(r => r.outcome), ["submitted"]);
+  assert.equal(await f.trades(), 1);
 });

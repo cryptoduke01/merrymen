@@ -9,7 +9,7 @@ import { createSolanaMarket } from "./solana-market";
 import type { SolanaPaperMarket } from "./solana-paper-service";
 import { SOLANA_REFERENCE_DEFAULT_TOLERANCE_BPS, SOLANA_REFERENCE_MAX_TOLERANCE_BPS, solanaReferenceToleranceBps } from "./solana-reference-price";
 import { getSolanaRuntimeDb } from "./solana-runtime-db";
-import { ensureSolanaTradingSchema, type SolanaAccountScope } from "./solana-trading-store";
+import { ensureSolanaTradingSchema, SOLANA_OPERATOR_HOLD_ALL, type SolanaAccountScope } from "./solana-trading-store";
 
 export interface SolanaRebalanceInput {
   cashRaw: string; wsolRaw: string; solValueUsdgRaw: string; limits: SolanaPaperLimits;
@@ -80,6 +80,8 @@ export function createSolanaAgent(options: SolanaAgentOptions) {
       }
       const rows = await options.db.prepare("SELECT tenant,owner,requested_mode,limits_json,strategy_json,revision FROM solana_wallet_bindings WHERE chain=? AND strategy_json IS NOT NULL ORDER BY tenant")
         .all(CHAINS.solana) as Array<{ tenant: string; owner: string; requested_mode: "paper" | "live"; limits_json: string | null; strategy_json: string; revision: number }>;
+      // Operator holds are read after receipt recovery, which they never stop.
+      const holds = new Set((await options.db.prepare("SELECT scope FROM solana_operator_holds").all() as Array<{ scope: string }>).map(h => h.scope));
       const results: Array<{ owner: string; outcome: "held" | "submitted" | "unavailable" }> = [];
       for (const row of rows) {
         if (options.signal?.aborted) break;
@@ -87,6 +89,7 @@ export function createSolanaAgent(options: SolanaAgentOptions) {
         try {
           const strategy = validateSolanaStrategy(JSON.parse(row.strategy_json));
           if (!strategy.enabled || !row.limits_json) continue;
+          if (holds.has(SOLANA_OPERATOR_HOLD_ALL) || holds.has(row.tenant)) { results.push({ owner: row.owner, outcome: "held" }); continue; }
           const limits = validateSolanaPaperLimits(JSON.parse(row.limits_json), now());
           const status = recovered.get(scope.tenant) ?? await options.runtime.status(scope);
           let cashRaw: string, wsolRaw: string;

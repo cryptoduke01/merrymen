@@ -25,7 +25,7 @@ import { readSolanaReferencePrice, solanaReferenceBound, solanaReferenceNotional
   SolanaReferencePriceError } from "./solana-reference-price";
 import { getSolanaRuntimeDb } from "./solana-runtime-db";
 import { isSolanaTransactionError } from "./solana-settlement";
-import { ensureSolanaTradingSchema, SolanaTradingStore, type SolanaAccountScope, type SolanaPreparedSetup } from "./solana-trading-store";
+import { ensureSolanaTradingSchema, OPERATOR_HOLD, SolanaTradingStore, type SolanaAccountScope, type SolanaPreparedSetup } from "./solana-trading-store";
 
 export class SolanaAppRuntimeError extends Error {
   constructor(readonly code: "configuration" | "permission" | "invalid" | "pending", message: string) {
@@ -229,6 +229,7 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
         if (live.state.paused) blockers.push("The on-chain buying breaker is paused; exits remain available.");
       } catch (error) { blockers.push(error instanceof SolanaAppRuntimeError ? error.message : "The configured vault, balances or live permissions could not be verified."); }
       if (!env.MERRYMEN_JUPITER_API_KEY) blockers.push("Configure Jupiter quote access.");
+      if (await s.operatorHeld()) blockers.push(OPERATOR_HOLD);
       if (binding.requestedMode !== "live") blockers.push("Live mode is not selected.");
       if (!binding.limits || binding.limits.expiresAtMs <= now()) blockers.push("Save current Solana trading limits.");
       const pending = (await s.pending()).map(publicTrade);

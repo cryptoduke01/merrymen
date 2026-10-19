@@ -247,6 +247,26 @@ Docker image marker, and rejects using the configured RH fleet service. See
 [hosted deployment](hosted-deploy.md) for role provisioning. This documentation
 records configuration requirements; no service has been deployed by this work.
 
+**Stopping it.** "Kill all agents" on `/you` and Telegram `/kill` turn the
+tenant's Solana strategy off as well as removing the RH grant: the strategy is
+saved disabled with a revision bump, which also refuses any autonomous admission
+already in flight. A self-hosted kill stops every strategy in the local accounts
+file. If the Solana write fails the kill is not reported done: the web returns
+"Kill incomplete" and a retry is safe, and the orchestrator keeps the Telegram
+request pending (nothing arms, no ✅) and retries on its next pass. A kill does
+not revoke the on-chain session; the owner's revoke does that.
+
+An **operator hold** stops all new Solana trades, paper or live, manual or
+automatic, for one tenant or everyone, within one worker tick and without a
+redeploy. Receipt recovery and owner revoke, withdraw and resume transactions
+continue. Holds live in the shared database:
+
+```sh
+npm run solana:hold -- set 0xTENANT --reason "incident 42"   # or: set all --reason "…"
+npm run solana:hold -- list
+npm run solana:hold -- release 0xTENANT                      # or: release all
+```
+
 ## Private configuration and deployment verification
 
 [`.env.solana.example`](../.env.solana.example) contains placeholders only. The

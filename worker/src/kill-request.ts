@@ -362,12 +362,19 @@ export type KillOutcome =
  * the whole home, and until then it keeps the child latched. If the wipe
  * fails, the leftover request is harmless: the next grant the owner signs is
  * stored after it, comes back `newer`, and supersedes it.
+ *
+ * `beforeRemove` stops what the grant does not cover (the tenant's Solana
+ * strategy). It runs on every pass that finds a readable request, before the
+ * grant is touched, so a kill is never reported done while it failed: the
+ * request stays pending, nothing arms, and the next pass retries. It also
+ * runs when the request turns out superseded; stopping is the safe direction.
  */
 export async function honourKillRequest(
   store: Pick<GrantStore, "removeUnlessNewer">,
   tenant: `0x${string}`,
   home: string,
   nowSec: number,
+  beforeRemove?: () => Promise<unknown>,
 ): Promise<KillOutcome> {
   const request = readKillRequest(home, nowSec);
   if (!request) return { outcome: "none" };
@@ -377,6 +384,11 @@ export async function honourKillRequest(
       request: { smartAccount: null, killedAt: nowSec, files: [] },
       error: "the kill state in this home cannot be read; nothing arms until it can",
     };
+  }
+  if (beforeRemove) {
+    try { await beforeRemove(); } catch (e) {
+      return { outcome: "failed", request, error: `the Solana strategy could not be stopped: ${e instanceof Error ? e.message : String(e)}` };
+    }
   }
   let result: "removed" | "absent" | "newer";
   try {
