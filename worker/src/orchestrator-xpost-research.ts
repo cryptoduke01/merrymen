@@ -688,6 +688,21 @@ export function banterAsk(text: unknown): boolean {
 }
 
 /**
+ * HOW HE IS, ASKED (the owner's ask, 2026-10-19): the first four of
+ * BANTER_SHAPES — how are you, how's it going, how have you been, how you
+ * doing — read exactly as banterAsk reads them. Only a tag banterAsk admits
+ * can be one, so this decides which of code's banter lines answers it
+ * (casual.ts wellbeingAnswers: how he is), never whether it is answered.
+ * Exported for tests.
+ */
+const WELLBEING_ALLOWED = new RegExp(`^${BANTER_GREETING}(?:${BANTER_SHAPES.slice(0, 4).join("|")})$`, "u");
+export function wellbeingAsk(text: unknown): boolean {
+  if (!banterAsk(text)) return false;
+  const plain = (plainAsk(text) ?? "").replace(BANTER_ALAN, "$1").trim();
+  return WELLBEING_ALLOWED.test(plain);
+}
+
+/**
  * THE HOUSE IN TROUBLE, OR ITS ROADMAP, IS ANSWERED BY NOTHING (red-team
  * review, 2026-10-12). Under "did merrymen get hacked? are my funds gone?",
  * "why did you guys steal my money?", "is this whole thing a ponzi?", "why

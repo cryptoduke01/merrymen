@@ -486,7 +486,8 @@ it, as an operator code only: never the tag's words, its author or a handle.
   where only a top-level tag or a plain follow-up gets one, or a greeting
   or a thanks code's classifier reads as more than chat), `closed-followup`,
   `market-under-post` (a market, hot or major question
-  that is not a top-level tag), `chat` (chat off the allowlists), `other`
+  that is not a top-level tag, nor a reply straight under its own small
+  talk, 2026-10-19), `chat` (chat off the allowlists), `other`
   (an injection, the house in trouble, advice code may not decline, a model
   question to an unread name, a word in a major's place),
   `own-trade-draft` (something that would be drafted, under its own buy or
@@ -842,6 +843,8 @@ to the mention itself. They go out **right away**:
   | a greeting | `greetingOnly` (below) | `greetingAnswers`, 144 | a top-level tag; under its own posts of any kind and its answers; once under a closed answer |
   | praise | `reactionOnly` (below) | `reactionAnswers`, 144 | the same |
   | banter | `banterAsk` | `chatAnswers`, 144 | a top-level tag, or a plain follow-up (its hello, a plain casual post, a plain-thread answer) |
+  | how he is (2026-10-19) | `wellbeingAsk` (banter's how-are-you shapes) | `wellbeingAnswers`, 144 | as banter |
+  | confusion (2026-10-19) | `confusedWords` (below) | `confusedAnswers`, 144 | only straight under its own plain-thread small-talk answer; ends the thread |
   | its mood | `vibeAsk` | `vibeAnswers`, 64 | the same |
   | advice asked | tagCandidate's advice screens, `declinable` | `declineAnswers`, 64 | the same |
 
@@ -851,8 +854,47 @@ to the mention itself. They go out **right away**:
   the post they sit under, and code never reads it (red-team review of
   1ed46625: "wen moon" quoting its ZAPX buy post got a mood line, a yes about
   the coin). No small talk goes under a reply prefix that names anyone else.
-  Market, hot and major answers stay top-level only, and the rules for what
-  is drafted under its trade posts and closed answers are unchanged.
+  Market, hot and major answers stay top-level only, but for a reply
+  straight under its own small talk (2026-10-19, below), and the rules for
+  what is drafted under its trade posts and closed answers are unchanged.
+
+  **Follow-ups to its small talk** (the owner's ask, 2026-10-19). Tagged
+  "yo @alanaidale how are you", Alan answered from banter's pool, "yo,
+  inquiring minds. proudly homegrown code, may your wifi be strong", which
+  says what he is and never how he is. The asker replied "what?😭"
+  (`answer-refused-low-signal`) and then "whats trending rn?"
+  (`answer-unanswered-market-under-post`), and got nothing either time. Now:
+  - A how-are-you (`wellbeingAsk`: how are you, how's it going, how have
+    you been, how you doing, read as `banterAsk` reads them) gets how he is
+    (`wellbeingAnswers`: "can't complain lol. learning fun stuff, holler
+    back whenever"). Every other banter still gets `chatAnswers`. It is
+    still banter for its caps, its count (`answer-chat-banter`) and its
+    thread mark.
+  - Only confusion (`confusedWords`, `replies.ts`: what, wat, wut, huh, hm,
+    wdym, wym, what do you mean, what does that mean, come again, say what,
+    lol or lmao what, i'm confused or lost, or a run of up to three
+    question marks; then a short ?, ! or . and up to two emoji; plain ASCII,
+    no digit, $, link or handle). It is read only straight under one of its
+    own plain-thread small-talk answers (`OwnThreads.small`): not a quote,
+    not under another handle, not under its own posts, a decline or any
+    other answer. There it owns the odd wording, says it was only being
+    friendly and signs off (`confusedAnswers`: "lol my bad. harmless small
+    talk, tag me fresh anytime"), counted `answered-confused`. It is small
+    talk for every cap, and it ends the thread (`ANSWER_THREAD_DONE`), so
+    "what?" "what?" cannot loop; so no sign-off asks for a reply under it,
+    which would get nothing (review of PR #350): a goodbye, or a fresh tag.
+  - What's hot, the market or a major asked in a reply straight under one of
+    its plain-thread small-talk answers is answered as at top level. The
+    conversation must be rooted at the very tag that answer replied to
+    (`OwnThreads.small` maps each answer to its tag), so the reply sits
+    under nothing but a tag code read whole as small talk and a line of its
+    own that never names a coin, a buy or what comes next. Read together,
+    nothing says what it will buy, which is what the rule keeps out
+    (red-team review of daaae961: "what's hot?" under "the next one i grab
+    is coming from the trending list"). A quote of that answer, small talk
+    in a thread rooted at one of its own posts, a thread small talk ended,
+    another handle in the prefix, and a name code has not read all still
+    get nothing.
 
   **At most two of its answers deep** (`ANSWER_PLAIN_THREAD`,
   `ANSWER_THREAD_DONE` on the answer's row, `store.ts ownThreadTweets`). A

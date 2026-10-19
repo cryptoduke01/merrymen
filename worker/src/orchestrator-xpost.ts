@@ -103,7 +103,7 @@ import {
 import { answerPrompt, answerQuestion, buyPrompt, casualPrompt, checkPrompt, INSIGHT_CASUAL_WORDS, INSIGHT_VOCABULARY, insightPrompt, introPrompt, introTemplate, modelAnswers, replyPrompt, sellPrompt, smalltalkPrompt, sherwoodClaimed, sherwoodMentioned, sherwoodNamed, tryDraft, XPOST_TEMPERATURE_DEFAULT, xpostModel, xpostModelWarning, type AnswerIntentKind, type DraftResult, type WriterFacts, type XStyle } from "./xpost/writer";
 import { appendPublicToken, appendPublicWallet, hasPublicWallet, publicTokenSuffix, publicTokenStillAllowed, publicWalletStillAllowed, type PublicWallet } from "./xpost/public-wallet";
 import { readPublicProjectDescription } from "./orchestrator-xpost-project";
-import { banterAsk, boughtNames, carriesResearch, classifyTag, createXResearch, generalTradesQuestion, MARKET_MAJORS, modelNamed, namesACoin, ownCoinTicker, sayable, selfAsk, unshowableName, type ResearchBundle, type TagIntent, type XResearch } from "./orchestrator-xpost-research";
+import { banterAsk, boughtNames, carriesResearch, classifyTag, createXResearch, generalTradesQuestion, MARKET_MAJORS, modelNamed, namesACoin, ownCoinTicker, sayable, selfAsk, unshowableName, wellbeingAsk, type ResearchBundle, type TagIntent, type XResearch } from "./orchestrator-xpost-research";
 import { PUBLISHABLE_SOURCES } from "./thesis-policy";
 import { readSaleCard, readSaleResults } from "./orchestrator-xpost-results";
 import { renderPnlCard, type PnlCardData } from "./pnl-card";
@@ -111,7 +111,7 @@ import { appendSaleOutcome, hasSaleOutcome, saleWordBudget } from "./xpost/sale-
 import { saleLines } from "./xpost/sale-words";
 import { admitFiguresLine, cleanTicker, figuresTickers, withFigures, type FiguresSpec } from "./xpost/figures";
 import { hotAnswers, hotNoneAnswers, hotUnreadAnswers, insightLines, insightDraftSupported, selectInsight, majorAnswers, majorUnreadAnswers, marketAnswers, type HotRead, type InsightRead, type InsightSelection, type MajorRead, type MarketRead } from "./xpost/market";
-import { chatAnswers, declineAnswers, greetingAnswers, reactionAnswers, selfAnswers, tradesAnswers, vibeAnswers } from "./xpost/casual";
+import { chatAnswers, confusedAnswers, declineAnswers, greetingAnswers, reactionAnswers, selfAnswers, tradesAnswers, vibeAnswers, wellbeingAnswers } from "./xpost/casual";
 import { recapFigures, recapLines, recapStillHolds } from "./xpost/recap";
 import { accusationIn, CHECK_VOCABULARY, checkAnswers, type CheckRead } from "./xpost/check";
 
@@ -1916,7 +1916,9 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
     const closedBody = (body: string): boolean => /\$[a-z]/i.test(body) || coinTalkIn(body, f.name) || asksAboutACoin(body) || marketTalkIn(body);
     const threads = ordered.some((c) => c.conversationId !== c.id || c.inReplyToTweetId !== "" || c.quoted === true)
       ? await ownThreadTweets(shared, account.xUserId, undefined, shut, tradeBody, closedBody)
-      : { roots: new Set<string>(), posts: new Set<string>(), answered: new Map<string, string>(), plain: new Set<string>(), trade: new Set<string>(), done: new Set<string>() };
+      : { roots: new Set<string>(), posts: new Set<string>(), answered: new Map<string, string>(), plain: new Set<string>(), trade: new Set<string>(), done: new Set<string>(), small: new Map<string, string>() };
+    // Its own plain-thread small-talk answers, by tweet: a confused reply is read only directly under one (replies.ts confusedWords).
+    const smallAnswers = new Set(threads.small.keys());
     // NEVER ANOTHER OF THE FLEET'S AGENTS (2026-10-18): an author who is any
     // tenant's X account is answered by nothing, whatever it said, so two of
     // the fleet's agents can never talk to each other in a loop. Read once a
@@ -1947,7 +1949,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         continue;
       }
       const candidate = tagCandidate(comment, { xUserId: account.xUserId, research: research !== null, username: account.username,
-        ownRoots: threads.roots, ownPosts: threads.posts, answered: threads.answered, plain: threads.plain, trade: threads.trade, checks,
+        ownRoots: threads.roots, ownPosts: threads.posts, answered: threads.answered, plain: threads.plain, trade: threads.trade, checks, smallAnswers,
         timelineQuestion: comment.quoted !== true && comment.conversationId === comment.inReplyToTweetId && ownQuestions.has(comment.inReplyToTweetId) });
       // Refused by the tag screens: answer-refused-<the screen's reason> (replies.ts tagCandidate).
       if (!candidate.ok) {
@@ -1978,8 +1980,9 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // classifier must read it as plain chat too, or it is answered by
       // nothing (fail closed).
       const banter = CHAT_LINE_KINDS.has(classified.kind) && banterAsk(candidate.text);
-      const smallKind: "greeting" | "reaction" | "banter" | "question" | "vibe" | "advice" | null = candidate.greeting === true ? "greeting"
-        : candidate.reaction === true ? "reaction" : candidate.questionResponse === true && classified.kind === "chat" ? "question" : classified.kind === "vibe" ? "vibe" : classified.kind === "advice" ? "advice" : banter ? "banter" : null;
+      // A CONFUSED REPLY ("what?", "huh", "wdym") directly under one of its own small-talk answers (2026-10-19): tagCandidate read where it sits.
+      const smallKind: "greeting" | "reaction" | "confused" | "banter" | "question" | "vibe" | "advice" | null = candidate.greeting === true ? "greeting"
+        : candidate.reaction === true ? "reaction" : candidate.confused === true ? "confused" : candidate.questionResponse === true && classified.kind === "chat" ? "question" : classified.kind === "vibe" ? "vibe" : classified.kind === "advice" ? "advice" : banter ? "banter" : null;
       // WHAT IT SITS UNDER, FOR SMALL TALK (2026-10-18). The posts a reply
       // or a quote sits under (as tagCandidate reads them: the parent and the
       // conversation's root, and what it quotes), and whether each one it
@@ -2000,7 +2003,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // follow-up: their meaning is the post they sit under, and code never
       // reads it (red-team review of 1ed46625: "wen moon" quoting its ZAPX
       // buy post got a mood line, a yes about the coin).
-      const smallHere = smallKind === "greeting" || smallKind === "reaction" ? classified.kind === "chat"
+      const smallHere = smallKind === "greeting" || smallKind === "reaction" || smallKind === "confused" ? classified.kind === "chat"
         : smallKind !== null && (candidate.followUp === undefined || candidate.followUp === "plain");
       const smallHeld = smallKind !== null && (threadDone || !smallHere);
       // SHERWOOD IN ANY FORM INCLUDES A HANDLE ("@SherwoodToken"), read on the
@@ -2104,8 +2107,21 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // "how's pepe doing?" got coingecko's top-thirty PEPE as the chain copy
       // it holds. Code never reads the post a reply sits under: what's hot,
       // how's the market and a major are answered only for a top-level tag.
+      // EXCEPT DIRECTLY UNDER ITS OWN SMALL TALK (the owner's ask, 2026-10-19):
+      // "whats trending rn?" under its "how are you" answer got nothing. A reply
+      // straight under one of its plain-thread small-talk answers (store.ts
+      // OwnThreads.small: a greeting, a thanks, banter or how it is, the first
+      // exchange of the thread), in a conversation rooted at the very tag that
+      // answer replied to, sits under nothing but small talk: lines that never
+      // name a coin, a buy or what comes next, under a tag code read whole as
+      // small talk. Read together, nothing in them says what it will buy. Not
+      // a quote; not under its own posts, a decline, a market line or anything
+      // else; and every other rule (another handle, a name code has not read,
+      // a thread small talk ended) still holds.
+      const underSmallTalk = !topLevelTag && comment.quoted !== true && comment.inReplyToTweetId !== ""
+        && threads.small.get(comment.inReplyToTweetId) === comment.conversationId && !threadDone;
       const marketKind = classified.kind === "major" || classified.kind === "hot" || classified.kind === "market";
-      const tradeMarket = marketKind && !topLevelTag;
+      const tradeMarket = marketKind && !topLevelTag && !underSmallTalk;
       // NO CODE LINE UNDER ANOTHER HANDLE, NOR A MARKET LINE TO A NAME CODE HAS
       // NOT READ (red-team review of 1ed46625, 2026-10-12). "@alanaidale
       // @ZapXOfficial are you bullish?" got "in a patient sort of way" under
@@ -2393,7 +2409,10 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // other way to the decline put a joke under a question about people).
       const smallLines = smallKind === "greeting" ? greetingAnswers(comment.id, facts.style, lineOpts)
         : smallKind === "reaction" ? reactionAnswers(comment.id, facts.style, lineOpts)
+        // HOW IT IS, FOR A HOW-ARE-YOU (2026-10-19): banter's friendly line said what it is, never how it is.
+        : smallKind === "banter" && wellbeingAsk(candidate.text) ? wellbeingAnswers(comment.id, facts.style, lineOpts)
         : smallKind === "banter" || smallKind === "question" ? chatAnswers(comment.id, facts.style, lineOpts)
+        : smallKind === "confused" ? confusedAnswers(comment.id, facts.style, lineOpts)
         : smallKind === "vibe" ? vibeAnswers(comment.id, facts.style, lineOpts)
         : smallKind === "advice" && candidate.advice === true ? declineAnswers(comment.id, facts.style, lineOpts) : [];
       // Never a draft in their place: a kind with no lines of its own is answered by nothing.
@@ -2404,7 +2423,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       }
       // Counted once a line stands and its row is written (below), as before 2026-10-13: answered-greeting,
       // answer-casual-vibe, answer-casual-advice, answer-chat-banter; and answered-reaction.
-      const smallCount = smallKind === "greeting" ? "answered-greeting" : smallKind === "reaction" ? "answered-reaction" : smallKind === "banter" ? "answer-chat-banter"
+      const smallCount = smallKind === "greeting" ? "answered-greeting" : smallKind === "reaction" ? "answered-reaction" : smallKind === "confused" ? "answered-confused"
+        : smallKind === "banter" ? "answer-chat-banter"
         : smallKind === "question" ? "answered-question-response" : smallKind !== null ? `answer-casual-${smallKind}` : null;
       // NO MODEL WORDS BESIDE A LINE OF COINS (red-team 2026-10-12): the gate
       // read a "what's hot?" draft before code put "$CHUMP 24h +41.2%" after

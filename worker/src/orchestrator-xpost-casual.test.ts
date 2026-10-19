@@ -15,7 +15,7 @@ import { describe, it } from "node:test";
 import { admitAgentLine } from "./groupchat/policy";
 import { REPEAT_LIMIT, similarity } from "./social-post";
 import { admitXPost } from "./xpost/gate";
-import { CHAT_SLOTS, DECLINE_SLOTS, GREETING_SLOTS, REACTION_SLOTS, SELF_SLOTS, SLOT, TRADES_NONE_SLOTS, TRADES_SLOTS, VIBE_SLOTS, WIDE_SLOT, chatAnswers, declineAnswers, greetingAnswers, latinLines, reactionAnswers, selfAnswers, tradesAnswers, vibeAnswers } from "./xpost/casual";
+import { CHAT_SLOTS, CONFUSED_SLOTS, DECLINE_SLOTS, GREETING_SLOTS, REACTION_SLOTS, SELF_SLOTS, SLOT, TRADES_NONE_SLOTS, TRADES_SLOTS, VIBE_SLOTS, WELLBEING_SLOTS, WIDE_SLOT, chatAnswers, confusedAnswers, declineAnswers, greetingAnswers, latinLines, reactionAnswers, selfAnswers, tradesAnswers, vibeAnswers, wellbeingAnswers } from "./xpost/casual";
 import { STRATEGY_SPOKEN } from "./groupchat/templates";
 import { withoutReplyOptOut } from "./xpost/replies";
 import { greetingAnswers as writerGreetings, modelAnswers } from "./xpost/writer";
@@ -27,8 +27,9 @@ const gate = (text: string, mode: Mode, recentOwn: string[] = []) => admitXPost(
 
 /** Every kind, with its slots and how many parts a slot holds: twelve for the kinds in his house voice (2026-10-18). */
 const KINDS = [["decline", declineAnswers, DECLINE_SLOTS, SLOT], ["vibe", vibeAnswers, VIBE_SLOTS, SLOT], ["chat", chatAnswers, CHAT_SLOTS, WIDE_SLOT],
-  ["greeting", greetingAnswers, GREETING_SLOTS, WIDE_SLOT], ["reaction", reactionAnswers, REACTION_SLOTS, WIDE_SLOT]] as const;
-/** The three in his house voice (2026-10-18). */
+  ["greeting", greetingAnswers, GREETING_SLOTS, WIDE_SLOT], ["reaction", reactionAnswers, REACTION_SLOTS, WIDE_SLOT],
+  ["wellbeing", wellbeingAnswers, WELLBEING_SLOTS, WIDE_SLOT], ["confused", confusedAnswers, CONFUSED_SLOTS, WIDE_SLOT]] as const;
+/** The kinds in his house voice (2026-10-18; how he is and a confused reply since 2026-10-19). */
 const TEXTED = KINDS.filter(([, , , n]) => n === WIDE_SLOT);
 /** A text's content words as similarity() counts them: three letters or more, no stopword (a word similar to itself). */
 const contentWords = (t: string) => new Set(t.toLowerCase().split(/[^a-z]+/).filter((w) => w.length > 2 && similarity(w, w) > 0));
@@ -184,6 +185,14 @@ describe("code's casual answers", () => {
     const all = TEXTED.flatMap(([, make]) => make("1", { lower: true }));
     const slang = all.filter((l) => /\b(?:ngl|tbh|lol|kinda|lowkey|fr|heh|haha)\b/.test(l)).length;
     assert.ok(slang > 0 && slang < all.length / 2, String(slang));
+  });
+
+  it("a confused reply ends its thread, so none of its lines asks for a reply under it (review of PR #350)", () => {
+    for (const paper of [false, true]) {
+      for (const line of confusedAnswers("17", { lower: true }, { paper })) {
+        assert.doesNotMatch(line, /\?|\b(?:ask me|ask away|reply|replies|questions?|tell me|hear (?:yours|from you)|keep talking|let'?s talk|chat more|your (?:turn|move|court)|shoot your|all ears|go on|holler)\b/, line);
+      }
+    }
   });
 
   it("a paper agent's clause is about its own book: no pronoun or verb the tag's coin could take", () => {

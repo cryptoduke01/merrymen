@@ -108,6 +108,14 @@ export type ReplyCandidate =
    */
   | { ok: true; text: string; address?: string; otherHandles?: true; greeting?: true; reaction?: true; questionResponse?: true; advice?: true; followUp?: FollowUp;
       /**
+       * `confused`: set by tagCandidate when the tag is only confusion
+       * (confusedWords, 2026-10-19) and sits directly under one of its own
+       * plain-thread small-talk answers (`smallAnswers`). Answered with
+       * code's own line (casual.ts confusedAnswers), never a draft, and it
+       * ends the thread.
+       */
+      confused?: true;
+      /**
        * A LARP CHECK (xpost/check.ts, 2026-10-13): the tag asked one of the
        * plain ways ("larp check", "is this real?") and code found one clear
        * thing to check. Set only with checks on (`ctx.checks`). Such a tag is
@@ -410,6 +418,33 @@ export function reactionOnly(text: unknown): boolean {
   return reactionWords(text) !== null;
 }
 
+/**
+ * A TAG THAT IS ONLY CONFUSION AT WHAT HE SAID (the owner's ask, 2026-10-19):
+ * "what?😭" under his banter was refused as too short, and the person who
+ * asked never heard back. A strict allowlist of whole tags, as for a greeting
+ * and praise: one of what, wat, wut, huh, hm, hmm, wdym, wym, what do you
+ * mean, what does that mean, come again, say what, lol what, lmao what, i'm
+ * confused, i'm lost (im, i am), or a run of question marks alone; then at
+ * most a run of "?", "!" or "." and two emoji. Plain ASCII words only
+ * (plainAsk), no digit, no $, no link, no handle.
+ *
+ * READ ONLY DIRECTLY UNDER ONE OF HIS OWN PLAIN-THREAD SMALL-TALK ANSWERS
+ * (tagCandidate's `smallAnswers`): there he knows what "what?" is about, a
+ * line of his that said nothing of a coin. Anywhere else a "what?" is about
+ * something code never read, and it gets nothing, as before. Returns the
+ * tag's words with its emoji taken off, or null.
+ */
+const CONFUSED_WORDS = String.raw`(?:what|wat|wut|huh|hm+|wdym|wym|what do (?:you|u) mean|what does that mean|come again|say what|(?:lol|lmao) what|(?:i'?m|i am) (?:confused|lost))`;
+const CONFUSED_ONLY = new RegExp(`^(?:${CONFUSED_WORDS}(?:,? alan)?(?:\\?{1,3}|!{1,3}|\\.{1,3}|\\?!)?|\\?{1,3})$`);
+export function confusedWords(text: unknown): string | null {
+  if (typeof text !== "string") return null;
+  const t = text.normalize("NFKC").replace(/[’‘]/g, "'").replace(/\s+/g, " ").trim().replace(REACTION_EMOJI, "").trim();
+  if (t === "" || /[0-9]/.test(t)) return null;
+  // A run of question marks has no letters for plainAsk to read; anything else is held to its plain-ASCII rule.
+  if (!/^\?{1,3}$/.test(t) && plainAsk(t) === null) return null;
+  return CONFUSED_ONLY.test(t.toLowerCase()) ? t : null;
+}
+
 // Drafted small talk is a much smaller subject than a researched answer.
 // The general reply vocabulary includes market, time and operational words;
 // those made plausible boasts and forecasts pass earlier red-team reviews.
@@ -693,6 +728,8 @@ export function tagCandidate(reply: XReply, ctx: {
   checks?: boolean;
   /** Only a direct, unquoted reply under an exact own posted timeline question. */
   timelineQuestion?: boolean;
+  /** Its own posted plain-thread small-talk answers (store.ts OwnThreads.small): a confused reply is read only directly under one. */
+  smallAnswers?: ReadonlySet<string>;
 }): ReplyCandidate {
   const no = (reason: string): ReplyCandidate => ({ ok: false, reason });
   if (!reply.id || !reply.authorId || !ctx.xUserId) return no("invalid");
@@ -766,14 +803,20 @@ export function tagCandidate(reply: XReply, ctx: {
   const reacted = !greeting && !address && !others(lead) && reply.quoted !== true ? reactionWords(text) : null;
   const reaction = reacted !== null;
   const questionResponse = ctx.timelineQuestion === true && !topLevel && reply.quoted !== true && !address && !others(lead) && followUp === "plain" && timelineResponseOnly(text);
-  if (!greeting && !reaction && !questionResponse && (bare.length < 4 || text.length > XREPLY_MAX_COMMENT_CHARS || (bare.match(/\p{L}+/gu) ?? []).length < 2)) return no("low-signal");
+  // ONLY CONFUSION, DIRECTLY UNDER ONE OF ITS OWN SMALL-TALK ANSWERS (confusedWords,
+  // 2026-10-19): a plain reply, no quote, no address, no other handle, in a plain thread.
+  // Like a greeting it skips only the signal and asked screens.
+  const puzzled = !greeting && !reaction && !questionResponse && !address && !others(lead) && reply.quoted !== true && !topLevel
+    && followUp === "plain" && parent !== "" && ctx.smallAnswers?.has(parent) === true ? confusedWords(text) : null;
+  const confused = puzzled !== null;
+  if (!greeting && !reaction && !questionResponse && !confused && (bare.length < 4 || text.length > XREPLY_MAX_COMMENT_CHARS || (bare.match(/\p{L}+/gu) ?? []).length < 2)) return no("low-signal");
   if (/[\u0000-\u001f\u007f«»<>#]|\p{Script=Cyrillic}|\p{Script=Han}/u.test(text)) return no("unsafe-text");
   // Only letters code can read, and no text that runs backwards on screen.
   if (BIDI.test(reply.text) || NON_ASCII_LETTER.test(bareLetters(text)) || ENCLOSED_LETTER.test(text)) return no("unsafe-text");
   // And no symbol written for a letter: only plain characters, one emoji at
   // most (strayInTag). A reaction's two trailing emoji were already read and
   // set aside by its allowlist; its words are held to the same rule.
-  if (strayInTag(reaction ? reacted : text)) return no("unsafe-text");
+  if (strayInTag(reaction ? reacted : confused ? puzzled : text)) return no("unsafe-text");
   if (LINK_OR_SECRET.test(text)) return no("link-or-secret");
   if (ABUSE_OR_SENSITIVE.test(text)) return no("sensitive");
   // Before the advice flag: a "should i" about a life, or money or a home someone cannot lose, is never a decline's to answer (DISTRESS, STAKES, LIFE_STAKES).
@@ -788,7 +831,7 @@ export function tagCandidate(reply: XReply, ctx: {
   // whole tag is only "are you bullish?" or "wen moon", its own mood
   // (orchestrator-xpost-research.ts vibeAsk). Nothing is looked up for it.
   // A statement asks nothing, advice-shaped or not (red-team 2026-10-12): read before the flag.
-  if (!greeting && !reaction && !questionResponse && !ASKED.test(text)) return no("not-asked");
+  if (!greeting && !reaction && !questionResponse && !confused && !ASKED.test(text)) return no("not-asked");
   const asksAdvice = ADVICE_REQUEST.test(advice) || /^(?:please\s+)?(?:buy|sell|hold|ape|pump|dump)\b/i.test(text) || WHAT_TO_BUY.test(advice);
   // A shill, however it starts, is no question; nor is advice about what it buys itself (ADVICE_ASKED, OWN_BUYING_ASK).
   if (asksAdvice && !ADVICE_ASKED.test(text)) return no("advice-statement");
@@ -798,5 +841,6 @@ export function tagCandidate(reply: XReply, ctx: {
   // Only one plain question, with no claim or rumour beside it (plainAdviceAsk): anything else, nothing.
   if (asksAdvice && !plainAdviceAsk(text)) return no("advice-clause");
   return { ok: true, text, ...(address ? { address } : {}), ...(others(lead) ? { otherHandles: true as const } : {}), ...(greeting ? { greeting: true as const } : {}),
-    ...(reaction ? { reaction: true as const } : {}), ...(questionResponse ? { questionResponse: true as const } : {}), ...(asksAdvice ? { advice: true as const } : {}), ...(followUp ? { followUp } : {}) };
+    ...(reaction ? { reaction: true as const } : {}), ...(questionResponse ? { questionResponse: true as const } : {}), ...(confused ? { confused: true as const } : {}),
+    ...(asksAdvice ? { advice: true as const } : {}), ...(followUp ? { followUp } : {}) };
 }

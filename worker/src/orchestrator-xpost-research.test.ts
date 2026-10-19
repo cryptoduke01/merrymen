@@ -44,6 +44,7 @@ import {
   MARKET_MAJORS,
   unshowableName,
   banterAsk,
+  wellbeingAsk,
   houseTroubleAsk,
   vibeAsk,
   majorPhrases,
@@ -1860,6 +1861,15 @@ describe("answer anything: every tag past the screens has a lane, and silence on
       // His name anywhere else, or glued to more, is still no banter: what the tag is about, not who it is said to.
       "alan's token?", "how is alan's token?", "who made alan?", "how are you alan's fans?", "alan alan how are you?", "how's alan?"]) {
       assert.equal(banterAsk(text), false, String(text));
+    }
+    // HOW IT IS (2026-10-19): the how-are-you shapes of banter, never anything banterAsk does not admit.
+    for (const text of ["how are you?", "yo how are you", "hey, how are you doing today?", "gm, how's it going?", "how's your day going?", "how have you been",
+      "how you doing", "hey alan, how are you?", "how's it going alan?", "how are you feeling today?"]) {
+      assert.equal(wellbeingAsk(text), true, text);
+    }
+    for (const text of ["who are you", "what are you exactly?", "tell me a joke", "what do you do for fun?", "what do you think about ai agents?",
+      "how are you? lost everything today", "how are you 🚀", "how's alan?", "what?", "", null]) {
+      assert.equal(wellbeingAsk(text), false, String(text));
     }
   });
 
