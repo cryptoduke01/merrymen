@@ -252,11 +252,12 @@ test("finalized deposits adjust cashflow/HWM once; owner withdrawals remove actu
   assert.equal((await f.store.liveBook())!.hwmRaw, "110000000");
   await assert.rejects(f.store.reconcileCashDeposit({ ...deposit, cashUsdg: "109400001", slot: 1000 }), /finalized USDG/);
   await assert.rejects(f.store.reconcileCashDeposit({ ...deposit, wsolRaw: "1980001" }), /finalized USDG/);
-  await saveSignedSetup(f.store, { ...setup("withdraw"), mint: SOLANA_USDG_MINT, amountRaw: "1000000" }, "withdraw-cash");
+  // The settled trade ran at sequence 0, so the vault was at 1 when this was prepared.
+  await saveSignedSetup(f.store, { ...setup("withdraw"), priorVaultExisted: true, priorSequence: "1", priorSessionEpoch: "1", mint: SOLANA_USDG_MINT, amountRaw: "1000000" }, "withdraw-cash");
   await assert.rejects(f.store.finishSetup("withdraw-cash", "finalized"), /slot/);
   await f.store.finishSetup("withdraw-cash", "finalized", 1003); await f.store.finishSetup("withdraw-cash", "finalized", 1003);
   let book = (await f.store.liveBook())!; assert.equal(book.cashRaw, "108400000"); assert.equal(book.hwmRaw, "109000000");
-  await saveSignedSetup(f.store, { ...setup("withdraw"), mint: SOLANA_WRAPPED_SOL_MINT, amountRaw: "990000" }, "withdraw-sol");
+  await saveSignedSetup(f.store, { ...setup("withdraw"), priorVaultExisted: true, priorSequence: "2", priorSessionEpoch: "1", mint: SOLANA_WRAPPED_SOL_MINT, amountRaw: "990000" }, "withdraw-sol");
   await f.store.finishSetup("withdraw-sol", "finalized", 1004);
   book = (await f.store.liveBook())!; assert.equal(book.wsolRaw, "990000"); assert.equal(book.costBasisUsdgRaw, "300000");
   assert.equal(book.realizedPnlUsdgRaw, "0"); assert.equal(book.hwmRaw, "109000000");
@@ -379,4 +380,43 @@ test("a kill fences a live autonomous admission that captured the strategy befor
   assert.equal(await f.binding.disableForKill(TENANT), true);
   await assert.rejects(automatic.recordSigned(submission()), /strategy changed/);
   assert.equal((await f.store.pending()).length, 0);
+});
+
+test("each owner transaction kind is proven expired only by state it must change", async t => {
+  const proof = (vaultSequence: string | null, sessionEpoch: string | null) => ({ reason: "blockhash-expired" as const, blockHeight: "1201", vaultSequence, sessionEpoch, slot: 1002 });
+  const prior = { priorVaultExisted: true, priorSequence: "5", priorSessionEpoch: "1" };
+  for (const [kind, accepted, refused] of [
+    // A trade landing advanced the sequence: a revoke is still proven by its epoch.
+    ["revoke", proof("6", "1"), proof("5", "2")],
+    ["session", proof("6", "1"), proof("5", "2")],
+    // A withdrawal moves the sequence; the epoch is irrelevant.
+    ["withdraw", proof("5", "2"), proof("6", "1")],
+  ] as const) {
+    const f = await fixture(t);
+    await saveSignedSetup(f.store, { ...setup(kind), ...prior, ...(kind === "withdraw" ? { mint: SOLANA_USDG_MINT, amountRaw: "1" } : {}) }, `${kind}-dropped`);
+    await assert.rejects(f.store.finishSetup(`${kind}-dropped`, "failed", 1002, refused), /expiry evidence/, kind);
+    await f.store.finishSetup(`${kind}-dropped`, "failed", 1002, accepted);
+    assert.equal((await f.store.setup())!.status, "failed");
+  }
+  // A session that would have created the vault: absent, or created with epoch 0 by something else.
+  const f = await fixture(t);
+  await saveSignedSetup(f.store, { ...setup("session"), priorVaultExisted: false, priorSequence: "0", priorSessionEpoch: "0" }, "first-session");
+  await assert.rejects(f.store.finishSetup("first-session", "failed", 1002, proof("0", "1")), /expiry evidence/);
+  await f.store.finishSetup("first-session", "failed", 1002, proof(null, null));
+});
+
+test("no trade is admitted while a withdrawal is prepared, and a stale withdrawal cannot be prepared", async t => {
+  const f = await fixture(t);
+  const withdraw = { ...setup("withdraw"), priorVaultExisted: true, priorSequence: "0", priorSessionEpoch: "1", mint: SOLANA_USDG_MINT, amountRaw: "1" };
+  await f.store.saveSetup(withdraw);
+  await assert.rejects(f.store.recordSigned(submission()), /prepared owner withdrawal/);
+  // Once its signing window lapses it can no longer be submitted, so trading resumes.
+  f.clock.value = withdraw.expiresAtMs;
+  const later = submission("later"); later.preparedAtMs = later.safetyObservedAtMs = later.risk.observedAtMs = later.quote.quotedAtMs = f.clock.value;
+  later.quote.expiresAtMs = f.clock.value + 30_000; later.risk.reference = pythBound(later.intent, f.clock.value);
+  assert.equal(await f.store.recordSigned(later), true);
+  await f.store.settle(OWNER, later.intent.requestId, later.signature, { ...settlement(later), finalizedAtMs: f.clock.value + 1 });
+  // The trade ran at sequence 0: a withdrawal still claiming sequence 0 read stale state.
+  await assert.rejects(f.store.saveSetup({ ...withdraw, preparedAtMs: f.clock.value, expiresAtMs: f.clock.value + 60_000 }), /vault changed/);
+  assert.equal(await f.store.saveSetup({ ...withdraw, priorSequence: "1", preparedAtMs: f.clock.value, expiresAtMs: f.clock.value + 60_000 }), true);
 });

@@ -25,7 +25,8 @@ import { readSolanaReferencePrice, solanaReferenceBound, solanaReferenceNotional
   SolanaReferencePriceError } from "./solana-reference-price";
 import { getSolanaRuntimeDb } from "./solana-runtime-db";
 import { isSolanaTransactionError } from "./solana-settlement";
-import { ensureSolanaTradingSchema, OPERATOR_HOLD, SolanaTradingStore, type SolanaAccountScope, type SolanaPreparedSetup } from "./solana-trading-store";
+import { ensureSolanaTradingSchema, OPERATOR_HOLD, solanaOwnerExpiryProven, SolanaTradingStore, type SolanaAccountScope,
+  type SolanaPreparedSetup } from "./solana-trading-store";
 
 export class SolanaAppRuntimeError extends Error {
   constructor(readonly code: "configuration" | "permission" | "invalid" | "pending", message: string) {
@@ -121,13 +122,17 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
         const snapshot = await read("getAccountInfo", [setup.vault, { encoding: "base64", commitment: "finalized", minContextSlot: slot }]);
         if (!object(snapshot) || !object(snapshot.context) || integer(snapshot.context.slot) < slot || !Object.hasOwn(snapshot, "value")) fail("Invalid owner expiry evidence.");
         let sequence: string | null = null, epoch: string | null = null;
-        if (setup.priorVaultExisted) {
+        if (snapshot.value !== null) {
           if (!object(snapshot.value) || snapshot.value.owner !== setup.programId || snapshot.value.executable !== false || !Array.isArray(snapshot.value.data)
             || snapshot.value.data[1] !== "base64" || typeof snapshot.value.data[0] !== "string") return "pending" as const;
           const current = decodeSolanaVaultAccount(encoded(snapshot.value.data[0], SOLANA_VAULT_ACCOUNT_SIZE));
+          if (current.owner !== s.scope.owner) return "pending" as const;
           sequence = current.seq.toString(); epoch = current.sessionEpoch.toString();
-          if (current.owner !== s.scope.owner || sequence !== setup.priorSequence || epoch !== setup.priorSessionEpoch) return "pending" as const;
-        } else if (snapshot.value !== null) return "pending" as const;
+        } else if (setup.priorVaultExisted) return "pending" as const;
+        // Only state this kind of transaction must have changed proves it never ran.
+        // Trades advance the sequence independently, so a revoke or session is
+        // proven by its epoch alone, never wedged by a trade that landed meanwhile.
+        if (!solanaOwnerExpiryProven(setup, sequence, epoch)) return "pending" as const;
         confirmedSlot = integer(snapshot.context.slot);
         expiryProof = { reason: "blockhash-expired", blockHeight: String(blockHeight), vaultSequence: sequence, sessionEpoch: epoch, slot: confirmedSlot };
         return "failed" as const;

@@ -43,6 +43,30 @@ export interface SolanaPreparedSetup {
   priorSequence?: string; priorSessionEpoch?: string; priorVaultExisted?: boolean;
 }
 const DAY = 86_400_000;
+/**
+ * Whether finalized vault state after a blockhash expired proves this owner
+ * transaction never ran. Each kind is judged only by state it must change:
+ * - revoke always increments the session epoch;
+ * - session (with any vault initialization in the same transaction) always
+ *   increments the epoch, and the epoch of a vault that does not exist is 0;
+ * - withdraw increments the sequence, and admission refuses session trades
+ *   while one is prepared or pending, so nothing else can advance it;
+ * - resume-buys changes neither; a wrong "failed" only leaves the off-chain
+ *   breaker paused, which is the conservative direction.
+ */
+export function solanaOwnerExpiryProven(setup: Pick<SolanaPreparedSetup, "kind" | "priorVaultExisted" | "priorSequence" | "priorSessionEpoch">,
+  vaultSequence: string | null, sessionEpoch: string | null): boolean {
+  if (setup.priorVaultExisted === undefined || setup.priorSequence === undefined || setup.priorSessionEpoch === undefined) return false;
+  if (setup.priorVaultExisted && (vaultSequence === null || sessionEpoch === null)) return false;
+  if ((vaultSequence === null) !== (sessionEpoch === null)) return false;
+  switch (setup.kind ?? "session") {
+    case "revoke": return setup.priorVaultExisted && sessionEpoch === setup.priorSessionEpoch;
+    case "session": return (sessionEpoch ?? "0") === setup.priorSessionEpoch;
+    case "withdraw": return setup.priorVaultExisted && vaultSequence === setup.priorSequence;
+    case "resume-buys": return setup.priorVaultExisted;
+    default: return false;
+  }
+}
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS solana_runtime_worker_heartbeat (
  worker TEXT PRIMARY KEY, last_seen_at_ms BIGINT NOT NULL
@@ -301,6 +325,9 @@ export class SolanaTradingStore implements SolanaLiveJournal {
       const ownerSetup = rowJson<SolanaPreparedSetup>(await tx.prepare("SELECT setup_json FROM solana_runtime_setups WHERE tenant=? AND owner=?").get(tenant, owner), "setup_json");
       if (ownerSetup?.signature && ownerSetup.status !== "finalized" && ownerSetup.status !== "failed") refuse("Resolve the pending owner transaction before trading.");
       const now = clock(this.now), limits = validateSolanaPaperLimits(binding.limits, now);
+      // A prepared withdrawal's expiry is proven by an unchanged sequence, so no
+      // trade may advance it between preparing and signing either.
+      if (ownerSetup?.kind === "withdraw" && !ownerSetup.signature && now < ownerSetup.expiresAtMs) refuse("Finish or let lapse the prepared owner withdrawal before trading.");
       const session = rowJson<SolanaRegisteredSession>(await tx.prepare("SELECT record_json FROM solana_runtime_sessions WHERE tenant=? AND owner=?").get(tenant, owner), "record_json");
       if (!session || s.programId !== session.programId || s.intent.vault !== session.vault || s.session !== session.session || s.sessionEpoch !== session.sessionEpoch) refuse("The Solana session changed before submission.");
       if (await tx.prepare("SELECT 1 FROM solana_runtime_submissions WHERE vault=? AND status='pending'").get(session.vault)) return false;
@@ -431,6 +458,12 @@ export class SolanaTradingStore implements SolanaLiveJournal {
         if ((setup.kind ?? "session") === "session" && (binding.requestedMode !== "live" || JSON.stringify(binding.limits) !== JSON.stringify(setup.limits))) refuse("The live permission settings changed. Review and sign again.");
       }
       if (setup.kind !== "revoke" && await tx.prepare("SELECT 1 FROM solana_runtime_submissions WHERE tenant=? AND owner=? AND status='pending'").get(this.scope.tenant, this.scope.owner)) refuse("Resolve the pending Solana trade before an owner transaction.");
+      if (setup.kind === "withdraw") {
+        if (setup.priorSequence === undefined) refuse("Prepare the withdrawal again.");
+        const trades = await tx.prepare("SELECT sequence,status FROM solana_runtime_submissions WHERE vault=? AND status IN ('pending','finalized')").all(setup.vault) as Array<{ sequence: string; status: string }>;
+        // Its sequence was read before this lock; a trade at or after it means the read is stale.
+        if (trades.some(t => t.status === "pending" || raw(t.sequence) >= raw(setup.priorSequence!))) refuse("The vault changed while the withdrawal was prepared. Prepare it again.");
+      }
       await tx.prepare(`INSERT INTO solana_runtime_setups(tenant,owner,setup_json) VALUES(?,?,?)
         ON CONFLICT(tenant,owner) DO UPDATE SET setup_json=excluded.setup_json`).run(this.scope.tenant, this.scope.owner, JSON.stringify(setup));
       return true;
@@ -449,8 +482,7 @@ export class SolanaTradingStore implements SolanaLiveJournal {
       if (expiryProof) {
         if (status !== "failed" || expiryProof.reason !== "blockhash-expired" || raw(expiryProof.blockHeight) <= raw(setup.lastValidBlockHeight) ||
             !Number.isSafeInteger(expiryProof.slot) || expiryProof.slot < 1 || finalizedSlot !== expiryProof.slot ||
-            !(setup.priorVaultExisted === false && expiryProof.vaultSequence === null && expiryProof.sessionEpoch === null ||
-              setup.priorVaultExisted === true && expiryProof.vaultSequence === setup.priorSequence && expiryProof.sessionEpoch === setup.priorSessionEpoch)) refuse("Invalid owner transaction expiry evidence.");
+            !solanaOwnerExpiryProven(setup, expiryProof.vaultSequence, expiryProof.sessionEpoch)) refuse("Invalid owner transaction expiry evidence.");
         setup.expiryProof = structuredClone(expiryProof);
       }
       if (status === "finalized" && setup.kind === "resume-buys") {

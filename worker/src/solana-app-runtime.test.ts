@@ -12,7 +12,7 @@ import { wrapSqlite } from "./db";
 import { createSolanaAppRuntime } from "./solana-app-runtime";
 import type { SolanaLiveRead, SolanaLiveRpc } from "./solana-live-rpc";
 import type { SolanaPaperMarket } from "./solana-paper-service";
-import { SolanaTradingStore } from "./solana-trading-store";
+import { ensureSolanaTradingSchema, SolanaTradingStore } from "./solana-trading-store";
 
 const TENANT = "0x1111111111111111111111111111111111111111";
 const PROGRAM = SOLANA_VAULT_LOCAL_TEST_PROGRAM, LOADER = "BPFLoaderUpgradeab1e11111111111111111111111";
@@ -34,12 +34,12 @@ async function fixture() {
   await bindings.settings(TENANT, owner, 0, "paper", limits);
   const dataAddress = key(41), binary = Buffer.from("runtime-tested-binary"), program = Buffer.alloc(36), programData = Buffer.alloc(45 + binary.length);
   program.writeUInt32LE(2); keyBytes(dataAddress).copy(program, 4); programData.writeUInt32LE(3); binary.copy(programData, 45);
-  const controls = { initialized: false, finalized: false, failed: false, malformed: false, sends: 0, signed: "", signature: "", failSend: true, height: 4900, sequence: 0n };
+  const controls = { initialized: false, finalized: false, failed: false, malformed: false, sends: 0, signed: "", signature: "", failSend: true, height: 4900, sequence: 0n, epoch: 1n };
   const state = () => {
     const b = Buffer.alloc(SOLANA_VAULT_ACCOUNT_SIZE); Buffer.from(SOLANA_VAULT_DISCRIMINATOR).copy(b); let p = 8;
     b[p++] = 2; b[p++] = 255;
     for (const value of [owner, session]) { keyBytes(value).copy(b, p); p += 32; }
-    for (const value of [1n, controls.sequence, BigInt(limits.expiresAtMs / 1000), BigInt(limits.perTradeUsdg), BigInt(limits.dailyUsdg),
+    for (const value of [controls.epoch, controls.sequence, BigInt(limits.expiresAtMs / 1000), BigInt(limits.perTradeUsdg), BigInt(limits.dailyUsdg),
       BigInt(limits.perTradeWsol), BigInt(limits.dailyWsol)]) { b.writeBigUInt64LE(value, p); p += 8; }
     b.writeUInt16LE(limits.maxOpsPerDay, p); return b;
   };
@@ -184,7 +184,53 @@ test("never-landed owner setup resolves only after finalized expiry and an uncha
   } finally { f.raw.close(); }
 });
 
-test("expiry does not resolve an ambiguous owner transaction when the vault sequence advanced", async () => {
+/** A live trade at `sequence`, pending as when the owner acts during it. */
+async function pendingTrade(f: Awaited<ReturnType<typeof fixture>>, sequence: string) {
+  await ensureSolanaTradingSchema(f.db);
+  await f.db.prepare("INSERT INTO solana_runtime_submissions(tenant,owner,request_id,vault,sequence,signature,status,created_at_ms,notional_raw,submission_json) VALUES(?,?,?,?,?,?,?,?,?,?)")
+    .run(f.scope.tenant, f.scope.owner, `trade-${sequence}`, await deriveSolanaVaultAddress(PROGRAM, f.owner), sequence, `tradesig${sequence}`, "pending", f.clock.now, "1000000",
+      JSON.stringify({ intent: { requestId: `trade-${sequence}` } }));
+}
+const landTrade = (f: Awaited<ReturnType<typeof fixture>>, sequence: string) =>
+  f.db.prepare("UPDATE solana_runtime_submissions SET status='finalized' WHERE request_id=?").run(`trade-${sequence}`);
+
+test("a revoke dropped while a trade lands resolves on its unchanged epoch and frees the owner controls (audit wedge)", async () => {
+  for (const tradeLands of [false, true]) {
+    const f = await fixture();
+    try {
+      await f.live(); f.controls.initialized = true; f.controls.sequence = 5n;
+      await pendingTrade(f, "5");
+      const prepared = await f.app.prepareOwnerAction(f.scope, { action: "revoke" });
+      const signedTransactionBase64 = await f.sign(prepared.transactionBase64);
+      assert.equal((await f.app.submitOwnerAction(f.scope, { signedTransactionBase64 })).status, "pending");
+      // The revoke's only send is lost. The trade lands: the sequence advances, the epoch does not.
+      if (tradeLands) { f.controls.sequence = 6n; await landTrade(f, "5"); }
+      f.controls.height = 5000;
+      assert.equal((await f.app.submitOwnerAction(f.scope, { signedTransactionBase64 })).status, "pending", "not expired yet");
+      f.controls.height = 5001;
+      assert.equal((await f.app.submitOwnerAction(f.scope, { signedTransactionBase64 })).status, "failed", `tradeLands=${tradeLands}`);
+      const saved = (await new SolanaTradingStore(f.db, f.scope).setup())!;
+      assert.equal(saved.expiryProof!.sessionEpoch, "1"); assert.equal(saved.expiryProof!.vaultSequence, tradeLands ? "6" : "5");
+      assert.equal(f.controls.sends, 1, "resolved without a replacement transaction");
+      // The owner can act again.
+      await f.app.prepareOwnerAction(f.scope, { action: "revoke" });
+    } finally { f.raw.close(); }
+  }
+});
+
+test("a revoke that did run is never booked failed, even with no receipt", async () => {
+  const f = await fixture();
+  try {
+    await f.live(); f.controls.initialized = true;
+    const prepared = await f.app.prepareOwnerAction(f.scope, { action: "revoke" });
+    const signedTransactionBase64 = await f.sign(prepared.transactionBase64);
+    await f.app.submitOwnerAction(f.scope, { signedTransactionBase64 });
+    f.controls.height = 5001; f.controls.epoch = 2n; // the epoch moved: it may have landed
+    assert.equal((await f.app.submitOwnerAction(f.scope, { signedTransactionBase64 })).status, "pending");
+  } finally { f.raw.close(); }
+});
+
+test("a session registration dropped while a trade advanced the vault resolves on the epoch alone", async () => {
   const f = await fixture();
   try {
     await f.live(); f.controls.initialized = true;
@@ -192,7 +238,48 @@ test("expiry does not resolve an ambiguous owner transaction when the vault sequ
     const signedTransactionBase64 = await f.sign(setup.transactionBase64);
     await f.app.submitSetup(f.scope, { signedTransactionBase64 });
     f.controls.height = 5001; f.controls.sequence = 1n;
-    assert.equal((await f.app.submitSetup(f.scope, { signedTransactionBase64 })).status, "pending");
+    assert.equal((await f.app.submitSetup(f.scope, { signedTransactionBase64 })).status, "failed");
     assert.equal(f.controls.sends, 1);
+    const again = await f.app.prepareLive(f.scope, { limits, sessionPublicKey: f.session });
+    const resigned = await f.sign(again.transactionBase64);
+    await f.app.submitSetup(f.scope, { signedTransactionBase64: resigned });
+    f.controls.height = 5002; f.controls.epoch = 2n; // a registration that ran always moves the epoch
+    assert.equal((await f.app.submitSetup(f.scope, { signedTransactionBase64: resigned })).status, "pending");
+  } finally { f.raw.close(); }
+});
+
+test("a dropped withdrawal resolves on an unchanged sequence, and no trade can move it in between", async () => {
+  const f = await fixture();
+  try {
+    await f.live(); f.controls.initialized = true; f.controls.sequence = 3n;
+    const prepared = await f.app.prepareOwnerAction(f.scope, { action: "withdraw", mint: SOLANA_USDG_MINT, amountRaw: "1000000" });
+    assert.equal((await new SolanaTradingStore(f.db, f.scope).setup())!.priorSequence, "3");
+    const signedTransactionBase64 = await f.sign(prepared.transactionBase64);
+    await f.app.submitOwnerAction(f.scope, { signedTransactionBase64 });
+    f.controls.height = 5001; f.controls.epoch = 2n; // the epoch is irrelevant to a withdrawal
+    assert.equal((await f.app.submitOwnerAction(f.scope, { signedTransactionBase64 })).status, "failed");
+    assert.equal((await new SolanaTradingStore(f.db, f.scope).setup())!.expiryProof!.vaultSequence, "3");
+  } finally { f.raw.close(); }
+  const g = await fixture();
+  try {
+    await g.live(); g.controls.initialized = true; g.controls.sequence = 3n;
+    const prepared = await g.app.prepareOwnerAction(g.scope, { action: "withdraw", mint: SOLANA_USDG_MINT, amountRaw: "1000000" });
+    const signedTransactionBase64 = await g.sign(prepared.transactionBase64);
+    await g.app.submitOwnerAction(g.scope, { signedTransactionBase64 });
+    g.controls.height = 5001; g.controls.sequence = 4n; // a moved sequence may be this withdrawal
+    assert.equal((await g.app.submitOwnerAction(g.scope, { signedTransactionBase64 })).status, "pending");
+  } finally { g.raw.close(); }
+});
+
+test("a dropped resume-buys resolves after expiry and leaves the off-chain breaker paused", async () => {
+  const f = await fixture();
+  try {
+    await f.live(); f.controls.initialized = true; f.controls.sequence = 2n;
+    const prepared = await f.app.prepareOwnerAction(f.scope, { action: "resume-buys" });
+    const signedTransactionBase64 = await f.sign(prepared.transactionBase64);
+    await f.app.submitOwnerAction(f.scope, { signedTransactionBase64 });
+    f.controls.height = 5001; f.controls.sequence = 3n;
+    assert.equal((await f.app.submitOwnerAction(f.scope, { signedTransactionBase64 })).status, "failed");
+    await f.app.prepareOwnerAction(f.scope, { action: "revoke" });
   } finally { f.raw.close(); }
 });

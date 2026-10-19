@@ -175,7 +175,17 @@ That proves no successful swap; it does **not** prove that no failed attempt
 paid a fee. Such records retain `feeLamports: null`, an unresolved-fee count and
 a reserved fee allowance. The UI identifies incomplete fee totals. Contradictory
 or insufficient evidence leaves the request pending and holds new exposure.
-Owner-operation expiry uses its own finalized lifetime and unchanged-state proof.
+Owner-operation expiry uses its own finalized lifetime and a proof from only the
+state that kind of transaction must change. A revoke or session registration
+always increments the session epoch, so an unchanged epoch proves it never ran,
+however many trades advanced the sequence meanwhile (before this, one trade
+landing during a dropped revoke left every owner control stuck). A withdrawal
+increments the sequence, so admission refuses session trades while one is
+prepared or pending, and preparing one refuses if any trade is pending or has
+run at or after the sequence it read. An unchanged sequence then proves it
+never ran. Resuming buys changes neither; a wrong "failed" leaves only the
+off-chain breaker paused, so expiry alone resolves it. Moved state that could be
+the transaction itself leaves it pending.
 
 The live book starts with USDG only. A fresh finalized increase in USDG with
 unchanged WSOL and no unresolved operation is booked once as capital-in, not
