@@ -353,6 +353,25 @@ test("live sells are bounded by the signed per-trade and rolling daily SOL sell 
   assert.equal(await f.store.recordSigned(sale("sell-3", "2", "500000", after)), true);
 });
 
+test("limits beyond the vault's 96 daily operations or a 168-hour permission are refused at save and never admitted (audit core-abi-3, web-auth F4)", async t => {
+  const f = await fixture(t), revision = (await f.binding.get(TENANT))!.revision;
+  const century = NOW + 100 * 365 * 86_400_000;
+  // The settings route and binding store refuse live-shaped limits with a validation error (400).
+  await assert.rejects(f.binding.settings(TENANT, OWNER, revision, "live", { ...limits, maxOpsPerDay: 1000 }), /Invalid Solana account settings/);
+  await assert.rejects(f.binding.settings(TENANT, OWNER, revision, "live", { ...limits, expiresAtMs: century }), /Invalid Solana account settings/);
+  // Stored limits that got past save anyway admit nothing and register no session.
+  for (const stored of [{ ...limits, maxOpsPerDay: 1000 }, { ...limits, expiresAtMs: century }]) {
+    await f.db.prepare("UPDATE solana_wallet_bindings SET limits_json=? WHERE tenant=?").run(JSON.stringify(stored), TENANT);
+    await assert.rejects(f.store.recordSigned(submission()), /between 1 and 96|168 hours/);
+    await assert.rejects(f.store.saveSetup({ ...setup("session"), limits: stored }), /between 1 and 96|168 hours/);
+  }
+  assert.equal((await f.store.pending()).length, 0);
+  // A paper account without SOL sell caps is bounded too, at book creation and at every trade.
+  const g = await fixture(t), paperLimits = { perTradeUsdg: limits.perTradeUsdg, dailyUsdg: limits.dailyUsdg, maxOpsPerDay: 1000, maxDrawdownBps: 2000, expiresAtMs: NOW + 3_600_000 };
+  await g.binding.settings(TENANT, OWNER, 1, "paper", paperLimits);
+  await assert.rejects(g.store.createPaper(CASH.toString(), paperLimits), /between 1 and 96/);
+});
+
 test("a live binding saved without SOL sell limits admits no trade", async t => {
   const f = await fixture(t), revision = (await f.binding.get(TENANT))!.revision;
   const { perTradeWsol: _p, dailyWsol: _d, ...unbounded } = limits;

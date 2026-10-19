@@ -1,6 +1,6 @@
 /** Tenant-bound Solana paper books and live broadcast journal, on SQLite or Postgres. */
 import { CHAINS, SOLANA_USDG_MINT, canonicalId } from "../../packages/core/src/ids";
-import { parseSolanaRawAmount, requireSolanaLiveSellLimits, solanaPaperAgentId, validateSolanaPaperLimits, validateSolanaQuote,
+import { parseSolanaRawAmount, requireSolanaLiveSellLimits, solanaPaperAgentId, validateSolanaAccountLimits, validateSolanaQuote,
   type SolanaPaperLimits } from "../../packages/core/src/solana";
 import { SOLANA_SYSTEM_PROGRAM, SOLANA_WRAPPED_SOL_MINT } from "../../packages/core/src/solana-live";
 import type { Db } from "./db";
@@ -197,8 +197,8 @@ export class SolanaTradingStore implements SolanaLiveJournal {
     return this.db.tx(async tx => {
       const binding = await this.bindingIn(tx, true);
       if (binding.requestedMode !== "paper") refuse("Paper trading is not the selected Solana mode.");
-      const now = clock(this.now), policy = validateSolanaPaperLimits(limits, now);
-      if (!binding.limits || JSON.stringify(validateSolanaPaperLimits(binding.limits, now)) !== JSON.stringify(policy)) {
+      const now = clock(this.now), policy = validateSolanaAccountLimits(limits, now);
+      if (!binding.limits || JSON.stringify(validateSolanaAccountLimits(binding.limits, now)) !== JSON.stringify(policy)) {
         refuse("The Solana trading limits changed before paper book creation. Refresh and try again.");
       }
       const { tenant, owner } = this.scope;
@@ -240,7 +240,7 @@ export class SolanaTradingStore implements SolanaLiveJournal {
           const book = rowJson<SolanaPaperBook>(await tx.prepare("SELECT book_json FROM solana_runtime_paper_books WHERE tenant=? AND owner=?").get(tenant, owner), "book_json");
           if (!book) refuse("Create a Solana paper book first.");
           if (!binding.limits) refuse("Save the current Solana trading limits first.");
-          book.limits = validateSolanaPaperLimits(binding.limits, now);
+          book.limits = validateSolanaAccountLimits(binding.limits, now);
           const recent = await tx.prepare("SELECT notional_raw FROM solana_runtime_paper_trades WHERE tenant=? AND owner=? AND created_at_ms>?").all(tenant, owner, now - DAY) as Array<{ notional_raw: string }>;
           const result = applySolanaPaperCommit(book, input, recent.map(r => r.notional_raw), now);
           if (strategyCap !== null && raw(result.receipt.notionalUsdgRaw, false) > strategyCap) refuse("The autonomous Solana strategy trade limit would be exceeded.");
@@ -357,7 +357,7 @@ export class SolanaTradingStore implements SolanaLiveJournal {
       if (binding.requestedMode !== "live" || !binding.limits) refuse("Live Solana trading has not been enabled for this account.");
       const ownerSetup = rowJson<SolanaPreparedSetup>(await tx.prepare("SELECT setup_json FROM solana_runtime_setups WHERE tenant=? AND owner=?").get(tenant, owner), "setup_json");
       if (ownerSetup?.signature && ownerSetup.status !== "finalized" && ownerSetup.status !== "failed") refuse("Resolve the pending owner transaction before trading.");
-      const now = clock(this.now), limits = validateSolanaPaperLimits(binding.limits, now);
+      const now = clock(this.now), limits = validateSolanaAccountLimits(binding.limits, now);
       // A prepared withdrawal's expiry is proven by an unchanged sequence, so no
       // trade may advance it between preparing and signing either.
       if ((ownerSetup?.kind === "withdraw" || ownerSetup?.kind === "withdraw-sol") && !ownerSetup.signature && now < ownerSetup.expiresAtMs) refuse("Finish or let lapse the prepared owner withdrawal before trading.");
@@ -495,6 +495,9 @@ export class SolanaTradingStore implements SolanaLiveJournal {
         if (clock(this.now) >= previous.expiresAtMs) refuse("The prepared owner transaction expired before submission.");
         if ((setup.kind ?? "session") === "session" && (binding.requestedMode !== "live" || JSON.stringify(binding.limits) !== JSON.stringify(setup.limits))) refuse("The live permission settings changed. Review and sign again.");
       }
+      // A session's limits become the on-chain permission: never more operations than
+      // the program allows, never a permission longer than Merrymen grants.
+      if ((setup.kind ?? "session") === "session") validateSolanaAccountLimits(setup.limits, clock(this.now));
       if (setup.kind !== "revoke" && await tx.prepare("SELECT 1 FROM solana_runtime_submissions WHERE tenant=? AND owner=? AND status='pending'").get(this.scope.tenant, this.scope.owner)) refuse("Resolve the pending Solana trade before an owner transaction.");
       if (setup.kind === "withdraw" || setup.kind === "withdraw-sol") {
         if (setup.priorSequence === undefined) refuse("Prepare the withdrawal again.");

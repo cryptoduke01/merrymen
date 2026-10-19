@@ -132,7 +132,36 @@ export function parseSolanaSwapIntent(value: unknown): SolanaSwapIntent {
   };
 }
 
+/**
+ * The vault program's daily operation cap (risk.rs MAX_OPS, solana-live
+ * SOLANA_VAULT_MAX_DAILY_OPS). A live session cannot be created above it.
+ */
+export const SOLANA_MAX_OPS_PER_DAY = 96;
+/** The longest trading permission Merrymen grants: 168 hours. */
+export const SOLANA_MAX_PERMISSION_MS = 168 * 3_600_000;
+/** A duration picked against the browser's clock may run this far past the cap. */
+export const SOLANA_PERMISSION_CLOCK_SKEW_MS = 5 * 60_000;
+
+/**
+ * Generic limit shape. Limits that carry SOL sell caps are the ones a live vault
+ * session is made from, so they must also fit the program and the permission
+ * cap (validateSolanaAccountLimits). The standalone paper CLI, which never sets
+ * sell caps, keeps its wider simulation ranges.
+ */
 export function validateSolanaPaperLimits(value: unknown, nowMs: number): SolanaPaperLimits {
+  return limitsWithin(value, nowMs, false);
+}
+
+/**
+ * Limits for a tenant's Solana account, paper or live: the generic shape, at
+ * most SOLANA_MAX_OPS_PER_DAY operations a day, and a permission that ends
+ * within SOLANA_MAX_PERMISSION_MS (plus clock skew) of now.
+ */
+export function validateSolanaAccountLimits(value: unknown, nowMs: number): SolanaPaperLimits {
+  return limitsWithin(value, nowMs, true);
+}
+
+function limitsWithin(value: unknown, nowMs: number, account: boolean): SolanaPaperLimits {
   timestamp(nowMs, "nowMs");
   const input = record(value, ["perTradeUsdg", "dailyUsdg", "maxOpsPerDay", "maxDrawdownBps", "expiresAtMs"], "Solana paper limits", ["perTradeWsol", "dailyWsol"]);
   const perTrade = parseSolanaRawAmount(input.perTradeUsdg);
@@ -147,9 +176,14 @@ export function validateSolanaPaperLimits(value: unknown, nowMs: number): Solana
   if (wsol && parseSolanaRawAmount(input.perTradeWsol) > parseSolanaRawAmount(input.dailyWsol)) {
     throw new SolanaPaperValidationError("Solana per-trade SOL sell limit must not exceed the daily SOL sell limit");
   }
+  const bounded = account || wsol;
+  const maxOpsPerDay = integer(input.maxOpsPerDay, 1, bounded ? SOLANA_MAX_OPS_PER_DAY : Number.MAX_SAFE_INTEGER, "maxOpsPerDay");
+  if (bounded && expiresAtMs > nowMs + SOLANA_MAX_PERMISSION_MS + SOLANA_PERMISSION_CLOCK_SKEW_MS) {
+    throw new SolanaPaperValidationError("Solana trading permission must end within 168 hours");
+  }
   return {
     perTradeUsdg: input.perTradeUsdg as string, dailyUsdg: input.dailyUsdg as string,
-    maxOpsPerDay: integer(input.maxOpsPerDay, 1, Number.MAX_SAFE_INTEGER, "maxOpsPerDay"),
+    maxOpsPerDay,
     maxDrawdownBps: integer(input.maxDrawdownBps, 1, 10_000, "maxDrawdownBps"),
     expiresAtMs,
     ...(wsol ? { perTradeWsol: input.perTradeWsol as string, dailyWsol: input.dailyWsol as string } : {}),

@@ -1,6 +1,6 @@
 /** Deterministic, opt-in USDG/SOL rebalancer. Both modes use the same admission boundary. */
 import { CHAINS, SOLANA_USDG_MINT } from "../../packages/core/src/ids";
-import { parseSolanaRawAmount, parseSolanaSwapIntent, validateSolanaPaperLimits, validateSolanaQuote, type SolanaPaperLimits } from "../../packages/core/src/solana";
+import { parseSolanaRawAmount, parseSolanaSwapIntent, validateSolanaAccountLimits, validateSolanaQuote, type SolanaPaperLimits } from "../../packages/core/src/solana";
 import { SOLANA_WRAPPED_SOL_MINT } from "../../packages/core/src/solana-live";
 import { SqlSolanaBindingStore, validateSolanaStrategy, type SolanaStrategy } from "../../web/src/lib/solana-binding-store";
 import { getSolanaAppRuntime } from "./solana-app-runtime";
@@ -17,7 +17,7 @@ export interface SolanaRebalanceInput {
 }
 /** Integer-only sizing against an executable full-position exit quote. */
 export function planSolanaRebalance(input: SolanaRebalanceInput) {
-  const strategy = validateSolanaStrategy(input.strategy), limits = validateSolanaPaperLimits(input.limits, input.nowMs);
+  const strategy = validateSolanaStrategy(input.strategy), limits = validateSolanaAccountLimits(input.limits, input.nowMs);
   if (!strategy.enabled) return null;
   if (!Number.isSafeInteger(input.revision) || input.revision < 0) throw new Error("Invalid Solana strategy revision.");
   const cash = parseSolanaRawAmount(input.cashRaw, true), held = parseSolanaRawAmount(input.wsolRaw, true), value = parseSolanaRawAmount(input.solValueUsdgRaw, true);
@@ -102,7 +102,7 @@ export function createSolanaAgent(options: SolanaAgentOptions) {
           const strategy = validateSolanaStrategy(JSON.parse(row.strategy_json));
           if (!strategy.enabled || !row.limits_json) continue;
           if (holds.has(SOLANA_OPERATOR_HOLD_ALL) || holds.has(row.tenant)) { results.push({ owner: row.owner, outcome: "held" }); continue; }
-          const limits = validateSolanaPaperLimits(JSON.parse(row.limits_json), now());
+          const limits = validateSolanaAccountLimits(JSON.parse(row.limits_json), now());
           // A paper strategy needs only its paper book: no chain reads, no vault verification.
           const status = recovered.get(scope.tenant) ?? await options.runtime.status(scope, row.requested_mode === "paper" ? { liveReads: false } : undefined);
           let cashRaw: string, wsolRaw: string;
