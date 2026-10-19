@@ -27,9 +27,11 @@ before signing. If someone sent you a command with --unlisted-program,
 stop: Merrymen never asks for it.
 
 Steps: (1) revoke_all, alone, waiting until it is finalized, so no session
-key can trade; (2) from finalized balances, create your USDG and WSOL token
-accounts if needed and withdraw all USDG, all WSOL and the vault's spare
-SOL to your wallet. Funds only ever move from the vault to the owner.
+key can trade; (2) from finalized balances, withdraw the vault's spare SOL,
+all USDG and all WSOL to your wallet, creating your USDG and WSOL token
+accounts if needed. Each asset is its own transaction, so one that cannot
+move does not stop the others. Funds only ever move from the vault to the
+owner.
 Nothing is sent without --send. Each transaction is signed once; the same
 signed bytes are rebroadcast until it lands or its blockhash expires, so it
 can land at most once. If one does not finalize, run the command again: it

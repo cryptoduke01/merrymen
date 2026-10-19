@@ -24,7 +24,7 @@ import {
 import { SOLANA_VAULT_RELEASES as CORE_SOLANA_VAULT_RELEASES } from "../../packages/core/src/solana-live";
 import {
   readSolanaOwnerKey, SOLANA_VAULT_RELEASES, SolanaRecoverError, solanaRecoveryProgramTrust, solanaRecoveryRevokeInstructions,
-  solanaRecoveryWithdrawInstructions, type SolanaRecoveryResult,
+  solanaRecoveryWithdrawLegs, type SolanaRecoveryResult,
 } from "./solana-recover";
 import { runSolanaRecoverCommand, type SolanaRecoverCommandDeps } from "./solana-recover-command";
 import { SOLANA_MAINNET_GENESIS_HASH, SolanaRpcError } from "./solana-rpc";
@@ -429,9 +429,9 @@ describe("solana-recover", () => {
     const file = keyFile(`${SECRET_BASE58}\n`);
     const { result, out, warnings, error } = await run(fake, [...base, "--key-file", file, "--send"]);
     assert.equal(error, null, String(error));
-    assert.equal(fake.sent.length, 2, "exactly two transactions");
+    assert.equal(fake.sent.length, 4, "the revoke, then one transaction per asset");
 
-    const [revoke, withdraw] = fake.sent;
+    const [revoke, solLeg, usdgLeg, wsolLeg] = fake.sent;
     const expectedRevoke = buildRevokeSolanaSessionsInstruction({ programAddress: PROGRAM, vault: fake.vault, owner: OWNER });
     assert.equal(revoke!.instructions.length, 1, "revoke_all is sent alone");
     assert.deepEqual([...revoke!.instructions[0]!.data], [...expectedRevoke.data!]);
@@ -442,17 +442,21 @@ describe("solana-recover", () => {
     const ownerWsol = await deriveSolanaAta(OWNER, SOLANA_WRAPPED_SOL_MINT, SOLANA_CLASSIC_TOKEN_PROGRAM);
     const vaultUsdg = await deriveSolanaAta(fake.vault, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM);
     const vaultWsol = await deriveSolanaAta(fake.vault, SOLANA_WRAPPED_SOL_MINT, SOLANA_CLASSIC_TOKEN_PROGRAM);
-    assert.deepEqual(withdraw!.instructions.map((ix) => ix.program), [SOLANA_ASSOCIATED_TOKEN_PROGRAM, PROGRAM,
-      SOLANA_ASSOCIATED_TOKEN_PROGRAM, SOLANA_CLASSIC_TOKEN_PROGRAM, PROGRAM, PROGRAM]);
+    // SOL first, then USDG, then WSOL; no transaction touches two assets.
+    assert.deepEqual(solLeg!.instructions.map((ix) => ix.program), [PROGRAM]);
+    assert.deepEqual(usdgLeg!.instructions.map((ix) => ix.program), [SOLANA_ASSOCIATED_TOKEN_PROGRAM, PROGRAM]);
+    assert.deepEqual(wsolLeg!.instructions.map((ix) => ix.program), [SOLANA_ASSOCIATED_TOKEN_PROGRAM, SOLANA_CLASSIC_TOKEN_PROGRAM, PROGRAM]);
     const usdgIx = buildWithdrawSolanaVaultInstruction({ programAddress: PROGRAM, vault: fake.vault, owner: OWNER, mint: SOLANA_USDG_MINT,
       vaultToken: vaultUsdg, ownerToken: ownerUsdg, tokenProgram: TOKEN_2022_PROGRAM, amount: 2_345_678n });
     const wsolIx = buildWithdrawSolanaVaultInstruction({ programAddress: PROGRAM, vault: fake.vault, owner: OWNER, mint: SOLANA_WRAPPED_SOL_MINT,
       vaultToken: vaultWsol, ownerToken: ownerWsol, tokenProgram: SOLANA_CLASSIC_TOKEN_PROGRAM, amount: 600_000_000n });
     const solIx = buildWithdrawSolanaNativeInstruction({ programAddress: PROGRAM, vault: fake.vault, owner: OWNER, amount: 3_000_000n });
-    for (const [index, built] of [[1, usdgIx], [4, wsolIx], [5, solIx]] as const) {
-      assert.deepEqual([...withdraw!.instructions[index]!.data], [...built.data!], `instruction ${index} matches the packages/core builder`);
-      assert.deepEqual(withdraw!.instructions[index]!.accounts.map((a) => a.address), built.accounts!.map((a) => String(a.address)));
+    for (const [sentIx, built] of [[usdgLeg!.instructions[1]!, usdgIx], [wsolLeg!.instructions[2]!, wsolIx], [solLeg!.instructions[0]!, solIx]] as const) {
+      assert.deepEqual([...sentIx.data], [...built.data!], "the instruction matches the packages/core builder");
+      assert.deepEqual(sentIx.accounts.map((a) => a.address), built.accounts!.map((a) => String(a.address)));
     }
+    assert.deepEqual(result!.withdrawals!.map((w) => [w.asset, w.amountRaw, w.outcome?.status, w.error]),
+      [["SOL", 3_000_000n, "finalized", undefined], ["USDG", 2_345_678n, "finalized", undefined], ["WSOL", 600_000_000n, "finalized", undefined]]);
 
     // Everything moved to the owner; only rent stays.
     assert.equal(fake.token(vaultUsdg), 0n);
@@ -463,7 +467,8 @@ describe("solana-recover", () => {
     assert.equal(fake.token(ownerWsol), 600_000_000n);
     assert.deepEqual({ session: fake.vaultField().session, paused: fake.vaultField().paused, expiresAt: fake.vaultField().expiresAt },
       { session: SOLANA_SYSTEM_PROGRAM, paused: true, expiresAt: 0n });
-    assert.match(out, /Step 2 \(withdraw\): 2\.345678 USDG, 0\.6 WSOL, 0\.003 SOL, from finalized slot/);
+    assert.match(out, /Step 2 \(withdraw\): 2\.345678 USDG, 0\.6 WSOL, 0\.003 SOL, from finalized slot \d+, one transaction per asset/);
+    assert.match(out, /One transaction per asset \(SOL, then USDG, then WSOL\)/);
     assert.match(out, /Left in the vault: 0 USDG, 0 WSOL, 0 SOL above rent/);
     assert.match(out, /Delete the exported key file now/);
     assert.equal(warnings, "");
@@ -472,7 +477,7 @@ describe("solana-recover", () => {
     // Running again finds nothing to do and sends nothing.
     const again = await run(fake, [...base, "--key-file", file, "--send"]);
     assert.equal(again.error, null, String(again.error));
-    assert.equal(fake.sent.length, 2);
+    assert.equal(fake.sent.length, 4);
     assert.match(again.out, /revoke_all: not needed/);
     assert.match(again.out, /nothing left to withdraw/);
   });
@@ -481,7 +486,7 @@ describe("solana-recover", () => {
     const fake = await chain({ session: SOLANA_SYSTEM_PROGRAM, ownerAtas: true });
     const piped = await run(fake, [...base, "--key-file", "-", "--send"], { stdin: Readable.from([Buffer.from(SECRET_JSON)]) });
     assert.equal(piped.error, null, String(piped.error));
-    assert.equal(fake.sent.length, 1, "no revoke is needed without a session; one withdrawal");
+    assert.equal(fake.sent.length, 3, "no revoke is needed without a session; one withdrawal per asset");
     assert.doesNotMatch(piped.out, /Delete the exported key file/);
     noSecrets(piped.out);
     const terminal = Object.assign(Readable.from([]), { isTTY: true });
@@ -546,17 +551,18 @@ describe("solana-recover", () => {
     fake.behaviors = ["late", "late"];
     const { error, out } = await run(fake, [...base, "--key-file", keyFile(SECRET_BASE58), "--send"]);
     assert.equal(error, null, String(error));
-    assert.equal(fake.sent.length, 2, "one revoke and one withdrawal, each signed once");
+    assert.equal(fake.sent.length, 4, "one revoke and three asset withdrawals, each signed once");
     assert.ok(fake.broadcasts > 4, "both were rebroadcast while pending");
     assert.match(out, /Step 1 \(revoke_all\): finalized/);
     assert.match(out, /Left in the vault: 0 USDG, 0 WSOL, 0 SOL above rent/);
   });
 
   it("reports a refusal from the first broadcast at once, without rebroadcasting it", async () => {
-    const fake = await chain({ session: SOLANA_SYSTEM_PROGRAM });
+    const fake = await chain();
     fake.behaviors = ["reject"];
     const { error } = await run(fake, [...base, "--key-file", keyFile(SECRET_BASE58), "--send"]);
-    assert.match((error as Error).message, /Step 2 \(withdraw\) was not confirmed as submitted/);
+    assert.match((error as Error).message, /Step 1 \(revoke_all\) was not confirmed as submitted/);
+    assert.equal(fake.sent.length, 1);
     assert.equal(fake.broadcasts, 1);
   });
 
@@ -578,14 +584,36 @@ describe("solana-recover", () => {
     assert.equal(broke.sent.length, 0);
   });
 
-  it("reports a transaction the RPC refuses, or one that does not finalize in time, and sends nothing after it", async () => {
-    const refused = await chain();
-    refused.behaviors = ["land", "reject"];
-    const vaultUsdg = refused.atas.get(`${refused.vault}:${SOLANA_USDG_MINT}:${TOKEN_2022_PROGRAM}`)!;
-    const rejected = await run(refused, [...base, "--key-file", keyFile(SECRET_BASE58), "--send"]);
-    assert.match((rejected.error as Error).message, /Step 2 \(withdraw\) was not confirmed as submitted .* run the command again/);
-    assert.equal(refused.sent.length, 2);
-    assert.equal(refused.token(vaultUsdg), 12_345_678n, "a refused withdrawal moves nothing");
+  it("one asset that cannot move, refused or failed on chain, does not stop the others", async () => {
+    for (const behavior of ["reject", "fail", "drop"] as const) {
+      const fake = await chain();
+      // The revoke and the SOL leg land; the USDG leg is blocked; the WSOL leg lands.
+      fake.behaviors = ["land", "land", behavior];
+      const vaultUsdg = fake.atas.get(`${fake.vault}:${SOLANA_USDG_MINT}:${TOKEN_2022_PROGRAM}`)!;
+      const vaultWsol = fake.atas.get(`${fake.vault}:${SOLANA_WRAPPED_SOL_MINT}:${SOLANA_CLASSIC_TOKEN_PROGRAM}`)!;
+      const { error, out } = await run(fake, [...base, "--key-file", keyFile(SECRET_BASE58), "--send"]);
+      assert.ok(error instanceof SolanaRecoverError, behavior);
+      assert.match(error.message, /Step 2 did not finish for 12\.345678 USDG; every other asset was withdrawn\..*run the command again/);
+      assert.match(out, behavior === "reject" ? /Step 2 \(USDG\): NOT withdrawn\. Step 2 \(USDG\) was not confirmed as submitted .*The other assets are sent separately/
+        : behavior === "fail" ? /Step 2 \(USDG\): NOT withdrawn\. Step 2 \(USDG\) failed on chain .*The other assets are sent separately/
+          : /Step 2 \(USDG\): NOT withdrawn\. Step 2 \(USDG\) expired without landing/);
+      assert.equal(fake.sent.length, 4, "the WSOL leg was still sent");
+      assert.equal(fake.token(vaultUsdg), 12_345_678n, "the blocked USDG stays in the vault");
+      assert.equal(fake.token(vaultWsol), 0n, "WSOL was withdrawn");
+      assert.equal(fake.accounts.get(fake.vault)!.lamports, rent(SOLANA_VAULT_ACCOUNT_SIZE), "spare SOL was withdrawn");
+      assert.match(out, /Left in the vault: 12\.345678 USDG, 0 WSOL, 0 SOL above rent/);
+      noSecrets(out, error.message);
+      // A rerun retries only what is left.
+      fake.behaviors = [];
+      const again = await run(fake, [...base, "--key-file", keyFile(SECRET_BASE58), "--send"]);
+      assert.equal(again.error, null, String(again.error));
+      assert.equal(fake.sent.length, 5);
+      assert.deepEqual(fake.sent[4]!.instructions.map((ix) => ix.program), [SOLANA_ASSOCIATED_TOKEN_PROGRAM, PROGRAM]);
+      assert.equal(fake.token(vaultUsdg), 0n);
+    }
+  });
+
+  it("reports a revoke that does not finalize in time, and sends nothing after it", async () => {
     const slow = await chain();
     slow.holdFinality = true;
     const pending = await run(slow, [...base, "--key-file", keyFile(SECRET_BASE58), "--send"], { maxWaitMs: 0 });
@@ -603,9 +631,9 @@ describe("solana-recover", () => {
     assert.equal(error, null, String(error));
     assert.match(out, new RegExp(`Note: USDG: your USDG account ${ownerUsdg} is frozen by the issuer`));
     assert.match(out, /2\. withdraw 0\.6 WSOL, 0\.003 SOL to the owner/);
-    assert.equal(fake.sent.length, 1);
-    assert.deepEqual(fake.sent[0]!.instructions.map((ix) => ix.program),
-      [SOLANA_ASSOCIATED_TOKEN_PROGRAM, SOLANA_CLASSIC_TOKEN_PROGRAM, PROGRAM, PROGRAM], "no USDG transfer into the frozen account");
+    assert.equal(fake.sent.length, 2);
+    assert.deepEqual(fake.sent.map((tx) => tx.instructions.map((ix) => ix.program)),
+      [[PROGRAM], [SOLANA_ASSOCIATED_TOKEN_PROGRAM, SOLANA_CLASSIC_TOKEN_PROGRAM, PROGRAM]], "no USDG transfer into the frozen account");
     assert.equal(fake.token(vaultUsdg), 12_345_678n, "USDG stays in the vault");
     assert.equal(fake.token(vaultWsol), 0n);
     assert.equal(fake.accounts.get(fake.vault)!.lamports, rent(SOLANA_VAULT_ACCOUNT_SIZE));
@@ -668,7 +696,7 @@ describe("solana-recover program trust", () => {
     const { error, out } = await run(fake, [...send(), "--program-sha256", BINARY_SHA, "--unlisted-program"],
       { releases: [], sleep: async (ms) => { pauses.push({ ms, callsBefore: [...fake.calls] }); } });
     assert.equal(error, null, String(error));
-    assert.equal(fake.sent.length, 2);
+    assert.equal(fake.sent.length, 4);
     assert.match(out, /verified against the given SHA-256 \(immutable\)\. It is NOT a released Merrymen vault program/);
     assert.match(out, new RegExp(`WARNING: ${PROGRAM} is not a released Merrymen vault program`));
     assert.match(out, /Merrymen support never asks you to\nuse --unlisted-program/);
@@ -757,18 +785,23 @@ async function recoveryFixture(): Promise<string> {
   const { result, error } = await run(fake, ["--program", VAULT_PROGRAM_ID, "--rpc", RPC, "--key-file", keyFile(SECRET_BASE58), "--send"],
     { releases: [{ programId: VAULT_PROGRAM_ID, sha256: BINARY_SHA }] });
   assert.equal(error, null, String(error));
-  assert.equal(fake.sent.length, 2);
-  const [revoke, withdraw] = fake.sent as [FakeChain["sent"][number], FakeChain["sent"][number]];
+  assert.equal(fake.sent.length, 4);
+  const [revoke, sol, usdg, wsol] = fake.sent as FakeChain["sent"][number][];
   // The sent transactions carry exactly the exported step builders' instructions.
+  const legs = solanaRecoveryWithdrawLegs(result!.plan);
+  assert.deepEqual(legs.map((leg) => leg.asset), ["SOL", "USDG", "WSOL"]);
   const shape = (ixs: { program: string; accounts: string[]; data: number[] }[]) => ixs;
-  for (const [sent, built] of [[revoke, solanaRecoveryRevokeInstructions(result!.plan)], [withdraw, solanaRecoveryWithdrawInstructions(result!.plan)]] as const) {
+  for (const [sent, built] of [[revoke!, solanaRecoveryRevokeInstructions(result!.plan)], [sol!, legs[0]!.instructions],
+    [usdg!, legs[1]!.instructions], [wsol!, legs[2]!.instructions]] as const) {
     assert.deepEqual(shape(sent.instructions.map((ix) => ({ program: ix.program, accounts: ix.accounts.map((a) => a.address), data: [...ix.data] }))),
       shape(built.map((ix) => ({ program: String(ix.programAddress), accounts: (ix.accounts ?? []).map((a) => String(a.address)), data: [...(ix.data ?? [])] }))));
   }
-  assert.equal(withdraw.instructions.length, 6, "two CreateIdempotent, SyncNative, two withdraws and withdraw_sol");
+  assert.deepEqual([sol!, usdg!, wsol!].map((tx) => tx.instructions.length), [1, 2, 3],
+    "withdraw_sol; CreateIdempotent and the USDG withdraw; CreateIdempotent, SyncNative and the WSOL withdraw");
   return [
     "# merrymen solana-recover, as signed and sent by worker/src/solana-recover.ts for a vault with a live",
-    "# session, USDG, synced and unsynced WSOL, spare SOL, and no owner token accounts yet. Written by",
+    "# session, USDG, synced and unsynced WSOL, spare SOL, and no owner token accounts yet: revoke_all, then",
+    "# one withdrawal transaction per asset (SOL, USDG, WSOL). Written by",
     "# worker/src/solana-recover.test.ts (MERRYMEN_WRITE_SOLANA_RECOVERY_FIXTURE=1 rewrites it) and executed",
     "# by tests/recovery.rs against the compiled program. The owner seed is a public test key.",
     `program ${VAULT_PROGRAM_ID}`,
@@ -780,8 +813,10 @@ async function recoveryFixture(): Promise<string> {
     `wsol_synced_raw ${FUNDED.wsol}`,
     `wsol_unsynced_lamports ${FUNDED.unsynced}`,
     `sol_excess_lamports ${FUNDED.solExcess}`,
-    `revoke_tx ${revoke.wire}`,
-    `withdraw_tx ${withdraw.wire}`,
+    `revoke_tx ${revoke!.wire}`,
+    `withdraw_sol_tx ${sol!.wire}`,
+    `withdraw_usdg_tx ${usdg!.wire}`,
+    `withdraw_wsol_tx ${wsol!.wire}`,
     "",
   ].join("\n");
 }
