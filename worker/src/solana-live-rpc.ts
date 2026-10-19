@@ -42,8 +42,17 @@ export interface SolanaLiveRpc {
    */
   readEach?<T>(operation: (rpc: SolanaLiveRead) => Promise<T>): Promise<T[]>;
   send(signedTransactionBase64: string, minContextSlot: number, signal?: AbortSignal, options?: SolanaSendOptions): Promise<string>;
-  /** In-process cache key for this provider pair. Not derived reversibly from the URLs. */
+  /**
+   * In-process cache key for this provider pair. Not derived reversibly from the
+   * URLs. Absent for an owner-run single endpoint: its checks are never reused.
+   */
   readonly providerKey?: string;
+  /**
+   * True only for createSolanaLiveRpc({ singleEndpoint: true }): an owner-run tool
+   * that talks to the one RPC the owner chose. It may verify a deployment on that
+   * one provider; nothing the live runtime books ever accepts it.
+   */
+  readonly singleEndpoint?: boolean;
 }
 
 export const SOLANA_DEFAULT_REBROADCAST_MS = 15_000;
@@ -117,7 +126,10 @@ export function createSolanaLiveRpc(options: {
   now?: () => number; sleep?: (ms: number, signal?: AbortSignal) => Promise<void>; rebroadcastIntervalMs?: number;
   /**
    * Owner-run tools (merrymen solana-recover) talk only to the one endpoint the
-   * owner chose. The live runtime never sets this: it needs two providers.
+   * owner chose. The live runtime never sets this: it needs two providers. Such
+   * a transport has no providerKey (no deployment check is reused) and, unless
+   * the caller asks for a window, sends one round: the tool resolves an unknown
+   * outcome by reading the chain.
    */
   singleEndpoint?: boolean;
 } = {}): SolanaLiveRpc {
@@ -169,7 +181,8 @@ export function createSolanaLiveRpc(options: {
     return rpc(method, params);
   }));
   return {
-    providerKey: createHmac("sha256", PROCESS_SALT).update(`${config.url}\n${fallbackUrl ?? ""}`).digest("hex"),
+    ...(options.singleEndpoint ? { singleEndpoint: true }
+      : { providerKey: createHmac("sha256", PROCESS_SALT).update(`${config.url}\n${fallbackUrl ?? ""}`).digest("hex") }),
     async read(operation) {
       try { return await reader(config.url)(operation); }
       catch (error) {
@@ -193,7 +206,7 @@ export function createSolanaLiveRpc(options: {
         signature = getSignatureFromTransaction(transaction); blockhash = message.lifetimeToken;
       } catch { throw new SolanaRpcError("malformed"); }
       const started = now();
-      const requested = sendOptions.untilMs ?? started + SOLANA_DEFAULT_REBROADCAST_MS;
+      const requested = sendOptions.untilMs ?? (options.singleEndpoint ? 0 : started + SOLANA_DEFAULT_REBROADCAST_MS);
       if (!Number.isSafeInteger(requested) || requested < 0) throw new SolanaRpcError("malformed");
       const until = Math.min(requested, started + MAX_REBROADCAST_MS);
       let accepted = false, lastError: unknown = new SolanaRpcError("network");

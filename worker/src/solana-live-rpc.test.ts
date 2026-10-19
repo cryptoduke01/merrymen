@@ -42,9 +42,25 @@ test("an owner-run single endpoint talks only to that provider and never borrows
   assert.deepEqual(await rpc.readEach!(read => read("getSlot")), ["primary.example"]);
   await assert.rejects(readSolanaQuorum(rpc, read => read("getSlot")), SolanaRpcError);
   assert.ok(seen.every(value => value.startsWith("primary.example:")), seen.join());
+  assert.equal(rpc.providerKey, undefined, "an owner-run check is never served from the process cache");
+  assert.equal(rpc.singleEndpoint, true); assert.equal(createSolanaLiveRpc({ env }).singleEndpoint, undefined);
   const down = createSolanaLiveRpc({ env: { MERRYMEN_SOLANA_RPC_MAINNET: env.MERRYMEN_SOLANA_RPC_MAINNET }, singleEndpoint: true,
     fetch: async () => { throw new Error("offline"); } });
   await assert.rejects(down.read(read => read("getSlot")), error => error instanceof SolanaRpcError && error.code === "network");
+});
+test("an owner-run single endpoint sends one round unless the caller asks for a window", async () => {
+  const tx = await signed();
+  for (const [options, expected] of [[undefined, 1], [{ untilMs: 5000 }, 3]] as const) {
+    const time = clock(); let sends = 0;
+    const rpc = createSolanaLiveRpc({ env, singleEndpoint: true, now: time.now, sleep: time.sleep, fetch: async (_url, init) => {
+      const body = JSON.parse(init!.body as string);
+      if (body.method === "getGenesisHash") return Response.json({ jsonrpc: "2.0", id: body.id, result: SOLANA_MAINNET_GENESIS_HASH });
+      if (body.method === "sendTransaction") { sends++; return Response.json({ jsonrpc: "2.0", id: body.id, error: { code: -32002, message: "simulation failed" } }); }
+      return Response.json({ jsonrpc: "2.0", id: body.id, result: { context: { slot: 1 }, value: body.method === "isBlockhashValid" ? true : [null] } });
+    } });
+    await assert.rejects(rpc.send(tx.wire, 1, undefined, options), SolanaRpcError);
+    assert.equal(sends, expected, JSON.stringify(options));
+  }
 });
 test("read failover independently verifies mainnet; read callback cannot submit", async () => {
   const seen: string[] = [];
