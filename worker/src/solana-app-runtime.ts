@@ -28,7 +28,7 @@ import { readSolanaReferencePrice, solanaReferenceBound, solanaReferenceNotional
 import { getSolanaRuntimeDb } from "./solana-runtime-db";
 import { isSolanaTransactionError } from "./solana-settlement";
 import { ensureSolanaTradingSchema, OPERATOR_HOLD, solanaOwnerExpiryProven, solanaQuarantinedWsol, SolanaTradingStore, type SolanaAccountScope,
-  type SolanaLiveBook, type SolanaOwnerExpiryProof, type SolanaPreparedSetup } from "./solana-trading-store";
+  type SolanaLiveBook, type SolanaOwnerExpiryProof, type SolanaPreparedSetup, type SolanaWithdrawValuation } from "./solana-trading-store";
 
 export class SolanaAppRuntimeError extends Error {
   constructor(readonly code: "configuration" | "permission" | "invalid" | "pending", message: string) {
@@ -76,6 +76,8 @@ const CLASSIC_TOKEN_ACCOUNT_SIZE = 165;
 const TOKEN_2022_ACCOUNT_SIZE_BOUND = 300;
 /** The signature fee per signer. Owner transactions carry one signature and no priority fee. */
 const LAMPORTS_PER_SIGNATURE = 5_000n;
+/** A WSOL withdrawal is valued as the agent marks and exits SOL: an exit quote at this slippage. */
+const WITHDRAW_VALUATION_SLIPPAGE_BPS = 50;
 /** An unchanged fee payer alert is logged again after this long. */
 const FEE_PAYER_ALERT_REPEAT_MS = 10 * 60_000;
 /** Lamports as SOL, exact, for owner- and operator-facing text. */
@@ -428,6 +430,25 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       programId: setup.programId, vault: setup.vault, session: setup.session, expiresAtMs: setup.expiresAtMs,
       ownerLamports: cost.held.toString(), requiredLamports: required.toString() };
   }
+  /**
+   * What withdrawing `amountRaw` of WSOL is worth now: an executable WSOL→USDG
+   * exit quote (the slippage the agent marks and exits with) and the independent
+   * Pyth bound for the same amount, read at a fresh slot. The store keeps the
+   * lower of the two, so neither source alone can lower the high-water mark by
+   * more than the SOL was worth. Anything unreadable or invalid returns
+   * undefined: the withdrawal still prepares and the high-water mark stays put,
+   * the conservative direction. Never a reason to block the owner.
+   */
+  async function wsolWithdrawValuation(amountRaw: string): Promise<SolanaWithdrawValuation | undefined> {
+    try {
+      const exit = parseSolanaSwapIntent({ kind: "spl-swap", chain: CHAINS.solana, mode: "paper", requestId: "withdraw-valuation",
+        inputMint: SOLANA_WRAPPED_SOL_MINT, outputMint: SOLANA_USDG_MINT, amountRaw, slippageBps: WITHDRAW_VALUATION_SLIPPAGE_BPS });
+      const toleranceBps = solanaReferenceToleranceBps(env);
+      const quote = await market().quote(exit); validateSolanaQuote(quote, exit, now());
+      const price = await rpc().read(async read => readSolanaReferencePrice(read, integer(await read("getSlot", [{ commitment: "confirmed" }])), now()));
+      return { quote, reference: solanaReferenceBound(exit, price, toleranceBps) };
+    } catch { return undefined; }
+  }
   async function submitOwner(scope: SolanaAccountScope, input: { signedTransactionBase64: string }, kind: "session" | "owner") {
     const s = await store(scope), setup = await s.setup();
     if (!setup || (kind === "session" ? (setup.kind ?? "session") !== "session" : setup.kind === "session" || !setup.kind)) fail("Prepare this owner transaction before signing it.");
@@ -669,7 +690,9 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
      * - revoke, resume-buys;
      * - withdraw { mint, amountRaw }: USDG or WSOL to the owner's token account,
      *   bounded by the reconciled book. A WSOL withdrawal first runs SyncNative
-     *   when native SOL sits unsynced in the vault's WSOL account, and may take it too;
+     *   when native SOL sits unsynced in the vault's WSOL account, and may take it too.
+     *   It also carries what the WSOL was worth when prepared, when that can be read,
+     *   so the high-water mark drops by it once the withdrawal lands;
      * - withdraw-sol { amountRaw }: native lamports from the vault account above
      *   its rent reserve (withdraw_sol), to the owner's wallet.
      */
@@ -678,7 +701,7 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       if (input.action !== "revoke") await reconcile(s);
       await verifyDeployment(cfg);
       const { vault, state } = await readSolanaVaultState(rpc(), cfg.programId, scope.owner), instructions: Instruction[] = [], creates: OwnerCreate[] = [];
-      const details: { syncedWsolRaw?: string } = {};
+      const details: { syncedWsolRaw?: string; withdrawValuation?: SolanaWithdrawValuation } = {};
       if (input.action === "revoke") instructions.push(buildRevokeSolanaSessionsInstruction({ programAddress: cfg.programId, vault, owner: scope.owner }));
       else if (input.action === "resume-buys") instructions.push(buildSetSolanaBreakerInstruction({ programAddress: cfg.programId, vault, authority: scope.owner, paused: false }));
       else if (input.action === "withdraw" && input.mint && input.amountRaw) {
@@ -704,6 +727,13 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
           book = (await s.liveBook())!;
           const available = input.mint === SOLANA_USDG_MINT ? BigInt(book.cashRaw) : BigInt(book.wsolRaw) + solanaQuarantinedWsol(book) + synced;
           if (amount > available) fail("The withdrawal exceeds the reconciled vault balance.");
+          // Capital out: what the withdrawn WSOL is worth lowers the high-water mark
+          // when it lands, as a USDG withdrawal does, so withdrawing is never a
+          // drawdown. Only the booked position can move it; quarantine has no value.
+          if (input.mint === SOLANA_WRAPPED_SOL_MINT && BigInt(book.wsolRaw) > 0n) {
+            const valuation = await wsolWithdrawValuation(input.amountRaw);
+            if (valuation) details.withdrawValuation = valuation;
+          }
         }
         const ownerToken = await deriveSolanaAta(scope.owner, input.mint, program);
         creates.push({ address: ownerToken, size: input.mint === SOLANA_USDG_MINT ? "usdg" : CLASSIC_TOKEN_ACCOUNT_SIZE });

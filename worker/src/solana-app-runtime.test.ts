@@ -15,6 +15,8 @@ import { createSolanaAppRuntime, SOLANA_DEPLOYMENT_RECHECK_MS } from "./solana-a
 import type { SolanaLiveRead, SolanaLiveRpc } from "./solana-live-rpc";
 import type { SolanaPaperMarket } from "./solana-paper-service";
 import { ensureSolanaTradingSchema, SolanaTradingStore } from "./solana-trading-store";
+import { PYTH_SOL_USD_ACCOUNT } from "./solana-reference-price";
+import { pythAccount } from "./solana-reference-price-fixture";
 
 const TENANT = "0x1111111111111111111111111111111111111111";
 const key = (n: number) => getBase58Decoder().decode(new Uint8Array(32).fill(n));
@@ -823,5 +825,93 @@ test("lamports someone else syncs and the app books before the owner signs are n
     assert.deepEqual(flows, [{ kind: "quarantine", amount_raw: "13" }, { kind: "withdraw", amount_raw: "13" }]);
     f.controls.finalized = false;
     assert.ok(!(await f.app.status(f.scope)).live.blockers.some(b => /below recorded/.test(b)));
+  } finally { f.raw.close(); }
+});
+
+/** SOL at $120: a WSOL→USDG quote pays 0.12 micro-USDG per lamport, and Pyth reads the same price. */
+const USD_PER_SOL = 12_000_000_000n;
+function pricedMarket(f: Fixture, failQuotes = false): SolanaPaperMarket {
+  return { ...f.market, quote: async intent => {
+    if (failQuotes) throw new Error("quote service unavailable");
+    const amount = BigInt(intent.amountRaw), out = intent.inputMint === SOLANA_WRAPPED_SOL_MINT ? amount * 12n / 100n : amount * 100n / 12n;
+    return { source: "jupiter", inputMint: intent.inputMint, outputMint: intent.outputMint, inAmount: intent.amountRaw, outAmount: out.toString(),
+      minOutAmount: (out * BigInt(10_000 - intent.slippageBps) / 10_000n).toString(), slippageBps: intent.slippageBps,
+      contextSlot: 1000, quotedAtMs: f.clock.now, expiresAtMs: f.clock.now + 30_000 };
+  } };
+}
+/** The primary provider also serves Pyth's SOL/USD account. */
+function servePyth(f: Fixture) {
+  f.providers.primary = async (method, params = []) => method === "getAccountInfo" && params[0] === PYTH_SOL_USD_ACCOUNT
+    ? f.response(pythAccount({ price: USD_PER_SOL, publishTimeMs: f.clock.now, postedSlot: 999n })) : f.read(method, params);
+}
+/** The audit's account: 8 USDG cash and 0.1 SOL (12 USDG at $120), high-water mark 20 USDG. */
+async function wsolCapital(f: Fixture) {
+  await readyLive(f); f.controls.sequence = 2n; f.controls.cash = 8_000_000n; f.controls.wsol = 100_000_000n; f.controls.ownerAtas = true;
+  const book = { hwmRaw: "20000000", cashRaw: "8000000", wsolRaw: "100000000", costBasisUsdgRaw: "12000000", realizedPnlUsdgRaw: "0",
+    networkFeesLamports: "0", slot: 900, updatedAtMs: 999_000 };
+  await f.db.prepare("INSERT INTO solana_runtime_live_books(tenant,owner,book_json) VALUES(?,?,?)").run(TENANT, f.owner, JSON.stringify(book));
+}
+/** The persisted breaker's own test (SolanaTradingStore.recordSigned): would the next buy trip it? */
+const breakerTrips = (hwm: bigint, equity: bigint) => hwm === 0n || (hwm - equity) * 10_000n >= hwm * BigInt(limits.maxDrawdownBps);
+
+test("withdrawing WSOL capital in the app lowers the high-water mark by its value, so the drawdown breaker stays armed, not tripped (accounting F3)", async () => {
+  const f = await fixture();
+  try {
+    await wsolCapital(f); servePyth(f);
+    const app = f.runtime({ market: pricedMarket(f) });
+    const prepared = await app.prepareOwnerAction(f.scope, { action: "withdraw", mint: SOLANA_WRAPPED_SOL_MINT, amountRaw: "100000000" });
+    const saved = (await new SolanaTradingStore(f.db, f.scope).setup())!;
+    // An executable exit quote (50 bps, as the agent exits) and the Pyth bound for the same amount.
+    assert.ok(saved.withdrawValuation, "the prepared WSOL withdrawal carries its valuation");
+    assert.equal(saved.withdrawValuation.quote.inAmount, "100000000"); assert.equal(saved.withdrawValuation.quote.slippageBps, 50);
+    assert.equal(saved.withdrawValuation.quote.minOutAmount, "11940000");
+    assert.equal(saved.withdrawValuation.reference.referenceOut, "12000000"); assert.equal(saved.withdrawValuation.reference.reference.slot, 1000);
+    const signedTransactionBase64 = await f.sign(prepared.transactionBase64);
+    await app.submitOwnerAction(f.scope, { signedTransactionBase64 });
+    f.controls.wsol = 0n; landOwner(f);
+    assert.equal((await app.submitOwnerAction(f.scope, { signedTransactionBase64 })).status, "finalized");
+    const after = (await new SolanaTradingStore(f.db, f.scope).liveBook())!;
+    assert.equal(after.wsolRaw, "0"); assert.equal(after.cashRaw, "8000000"); assert.equal(after.costBasisUsdgRaw, "0");
+    // It drops by the lower of the quote's guaranteed output and the reference: never more than the SOL was worth.
+    assert.equal(after.hwmRaw, String(20_000_000 - 11_940_000));
+    assert.equal(breakerTrips(BigInt(after.hwmRaw), BigInt(after.cashRaw)), false, "withdrawing capital is not a drawdown");
+    assert.notEqual(after.buyPaused, true);
+    assert.equal(breakerTrips(20_000_000n, 8_000_000n), true, "without the valuation the same withdrawal pauses buying");
+  } finally { f.raw.close(); }
+});
+
+test("a WSOL withdrawal whose value cannot be read still prepares and lands, and leaves the high-water mark where it was", async () => {
+  for (const unreadable of ["no quote", "no reference price", "a misconfigured reference tolerance"] as const) {
+    const f = await fixture();
+    try {
+      await wsolCapital(f);
+      if (unreadable !== "no reference price") servePyth(f);
+      const app = f.runtime({ market: pricedMarket(f, unreadable === "no quote"),
+        ...(unreadable === "a misconfigured reference tolerance" ? { env: { ...f.env, MERRYMEN_SOLANA_REFERENCE_TOLERANCE_BPS: "nonsense" } } : {}) });
+      const prepared = await app.prepareOwnerAction(f.scope, { action: "withdraw", mint: SOLANA_WRAPPED_SOL_MINT, amountRaw: "40000000" });
+      assert.equal((await new SolanaTradingStore(f.db, f.scope).setup())!.withdrawValuation, undefined, unreadable);
+      const signedTransactionBase64 = await f.sign(prepared.transactionBase64);
+      await app.submitOwnerAction(f.scope, { signedTransactionBase64 });
+      f.controls.wsol = 60_000_000n; landOwner(f);
+      assert.equal((await app.submitOwnerAction(f.scope, { signedTransactionBase64 })).status, "finalized", unreadable);
+      const after = (await new SolanaTradingStore(f.db, f.scope).liveBook())!;
+      assert.equal(after.wsolRaw, "60000000"); assert.equal(after.hwmRaw, "20000000", unreadable);
+    } finally { f.raw.close(); }
+  }
+});
+
+test("a WSOL withdrawal of quarantine alone asks no one for a price", async () => {
+  const f = await fixture();
+  try {
+    await readyLive(f); f.controls.sequence = 2n; f.controls.cash = 8_000_000n; f.controls.wsol = 5n;
+    const book = { hwmRaw: "8000000", cashRaw: "8000000", wsolRaw: "0", quarantinedWsolRaw: "5", costBasisUsdgRaw: "0", realizedPnlUsdgRaw: "0",
+      networkFeesLamports: "0", slot: 900, updatedAtMs: 999_000 };
+    await f.db.prepare("INSERT INTO solana_runtime_live_books(tenant,owner,book_json) VALUES(?,?,?)").run(TENANT, f.owner, JSON.stringify(book));
+    let quotes = 0;
+    servePyth(f);
+    const app = f.runtime({ market: { ...pricedMarket(f), quote: async intent => { quotes++; return pricedMarket(f).quote(intent); } } });
+    await app.prepareOwnerAction(f.scope, { action: "withdraw", mint: SOLANA_WRAPPED_SOL_MINT, amountRaw: "5" });
+    assert.equal(quotes, 0); assert.ok(!f.calls.some(call => call.key === PYTH_SOL_USD_ACCOUNT));
+    assert.equal((await new SolanaTradingStore(f.db, f.scope).setup())!.withdrawValuation, undefined);
   } finally { f.raw.close(); }
 });
