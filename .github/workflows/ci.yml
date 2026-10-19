@@ -203,8 +203,39 @@ jobs:
   # download is checked against a size and SHA-256 before it is unpacked.
   # platform-tools go where cargo-build-sbf looks for them, because its own
   # download of them is not checked against anything.
+  #
+  # ONLY WHEN THE VAULT COULD CHANGE. A pull request that lands nothing the
+  # vault jobs read (solana-paths.mjs: contracts/solana, scripts/ci, this file,
+  # the Solana worker and core sources) skips the toolchain download (about
+  # 1.6 GB across the two jobs) and the build. The jobs are not skipped: every
+  # step is, except a notice, so each still concludes `success`. A skipped job
+  # would fail the Kaka gate, which needs every job of the run to succeed
+  # (.github/kaka/gate.cjs greenJobs), and with it the docs-only automatic lane.
+  # `app` accepts a run without vault hashes only on solana · paths' decision.
+  # Pushes to main and manual runs always build.
+  solana-paths:
+    name: solana · paths
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.paths.outputs.run }}
+    steps:
+      # The test merge commit and both its parents: the base and the PR head.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 2
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+
+      - name: Solana-relevant changes
+        id: paths
+        run: node scripts/ci/solana-paths.mjs
+
   solana-test:
     name: solana · test
+    needs: [solana-paths]
     # The release artifact comes from this job, so the image is a fixed
     # release rather than ubuntu-latest. A hosted runner has no digest to pin.
     runs-on: ubuntu-24.04
@@ -212,27 +243,37 @@ jobs:
     outputs:
       sha256: ${{ steps.record.outputs.sha256 }}
     steps:
+      - name: Not needed for this change
+        if: needs.solana-paths.outputs.run != 'true'
+        run: echo "solana · paths found no Solana-relevant change, so the vault is not built or tested in this run."
+
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        if: needs.solana-paths.outputs.run == 'true'
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        if: needs.solana-paths.outputs.run == 'true'
         with:
           node-version: 22
 
       # The scripts below, and the shape of these jobs, have tests of their own.
       - name: CI script tests
+        if: needs.solana-paths.outputs.run == 'true'
         run: node --test scripts/ci/solana-ci.test.mjs
 
       - name: Install the verified toolchain
+        if: needs.solana-paths.outputs.run == 'true'
         run: scripts/ci/solana-toolchain.sh install "$RUNNER_TEMP/solana-toolchain"
 
       # A canonical path: under a symlinked CARGO_HOME rustc cannot shorten
       # registry paths, and the binary embeds them and stops reproducing.
       - name: Cargo home
+        if: needs.solana-paths.outputs.run == 'true'
         run: echo "CARGO_HOME=$(realpath -m "$RUNNER_TEMP/cargo-home")" >> "$GITHUB_ENV"
 
       # Crates and the host test build only. The SBF build always starts from
       # source, so the artifact is never assembled from a cached object.
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        if: needs.solana-paths.outputs.run == 'true'
         with:
           path: |
             ${{ env.CARGO_HOME }}/registry/index
@@ -250,6 +291,7 @@ jobs:
       # CARGO_TARGET_* or RUSTFLAGS here: build.sh refuses them, because they
       # would change the artifact without changing the reviewed source.
       - name: Test
+        if: needs.solana-paths.outputs.run == 'true'
         run: |
           set -o pipefail
           contracts/solana/test.sh 2>&1 | tee "$RUNNER_TEMP/solana-test.log"
@@ -261,13 +303,16 @@ jobs:
       # many tests as its source declares, none ignored or filtered out, so a
       # dropped #[ignore], an unnamed test file or a filter cannot pass quietly.
       - name: Every runtime test ran
+        if: needs.solana-paths.outputs.run == 'true'
         run: node scripts/ci/solana-runtime-tests.mjs "$RUNNER_TEMP/solana-test.log" contracts/solana/runtime-tests
 
       - name: Nothing unverified was fetched
+        if: needs.solana-paths.outputs.run == 'true'
         run: scripts/ci/solana-toolchain.sh check
 
       - name: Program ID and hash
         id: record
+        if: needs.solana-paths.outputs.run == 'true'
         run: |
           sha=$(node scripts/ci/solana-program-record.mjs contracts/solana contracts/solana/target/deploy/merrymen_vault.so contracts/solana/target/deploy/merrymen_vault.build.json)
           echo "sha256=$sha" >> "$GITHUB_OUTPUT"
@@ -275,6 +320,7 @@ jobs:
       # A release takes its artifact from here, never from a laptop. Only named
       # files: target/deploy also holds a throwaway program keypair.
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: needs.solana-paths.outputs.run == 'true'
         with:
           name: merrymen-vault-sbf
           path: |
@@ -288,33 +334,43 @@ jobs:
   # pinned toolchain alone. In parallel, not after: it adds no wall time.
   solana-rebuild:
     name: solana · rebuild
+    needs: [solana-paths]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     outputs:
       sha256: ${{ steps.record.outputs.sha256 }}
     steps:
+      - name: Not needed for this change
+        if: needs.solana-paths.outputs.run != 'true'
+        run: echo "solana · paths found no Solana-relevant change, so the vault is not rebuilt in this run."
+
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        if: needs.solana-paths.outputs.run == 'true'
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        if: needs.solana-paths.outputs.run == 'true'
         with:
           node-version: 22
 
       - name: Install the verified toolchain
+        if: needs.solana-paths.outputs.run == 'true'
         run: scripts/ci/solana-toolchain.sh install "$RUNNER_TEMP/solana-toolchain"
 
       - name: Rebuild elsewhere
         id: record
+        if: needs.solana-paths.outputs.run == 'true'
         run: |
           so=$(scripts/ci/solana-rebuild.sh "$RUNNER_TEMP/solana-rebuild")
           sha=$(node scripts/ci/solana-program-record.mjs "$RUNNER_TEMP/solana-rebuild/src/contracts/solana" "$so" "$RUNNER_TEMP/merrymen_vault.build.json")
           echo "sha256=$sha" >> "$GITHUB_OUTPUT"
 
       - name: Nothing unverified was fetched
+        if: needs.solana-paths.outputs.run == 'true'
         run: scripts/ci/solana-toolchain.sh check
 
   app:
     name: app
-    needs: [app-typecheck, app-build, app-test, app-postgres, solana-test, solana-rebuild]
+    needs: [app-typecheck, app-build, app-test, app-postgres, solana-paths, solana-test, solana-rebuild]
     # Runs even when a part failed, so the required check reports a failure
     # rather than being skipped (a skipped required check never passes).
     if: always()
@@ -324,21 +380,35 @@ jobs:
       - name: Every part passed
         # Through env, not interpolated into the script: they are job outputs.
         env:
+          SOLANA_BUILD: ${{ needs.solana-paths.outputs.run }}
           VAULT_TESTED_SHA256: ${{ needs.solana-test.outputs.sha256 }}
           VAULT_REBUILT_SHA256: ${{ needs.solana-rebuild.outputs.sha256 }}
         run: |
-          echo "typecheck: ${{ needs.app-typecheck.result }}, build: ${{ needs.app-build.result }}, tests: ${{ needs.app-test.result }}, postgres: ${{ needs.app-postgres.result }}, solana test: ${{ needs.solana-test.result }}, solana rebuild: ${{ needs.solana-rebuild.result }}"
+          echo "typecheck: ${{ needs.app-typecheck.result }}, build: ${{ needs.app-build.result }}, tests: ${{ needs.app-test.result }}, postgres: ${{ needs.app-postgres.result }}, solana paths: ${{ needs.solana-paths.result }} (build: $SOLANA_BUILD), solana test: ${{ needs.solana-test.result }}, solana rebuild: ${{ needs.solana-rebuild.result }}"
           test "${{ needs.app-typecheck.result }}" = success
           test "${{ needs.app-build.result }}" = success
           test "${{ needs.app-test.result }}" = success
           test "${{ needs.app-postgres.result }}" = success
+          test "${{ needs.solana-paths.result }}" = success
           test "${{ needs.solana-test.result }}" = success
           test "${{ needs.solana-rebuild.result }}" = success
-          # The vault binary that passed the custody tests is the one the
-          # independent rebuild produced, byte for byte.
           echo "vault artifact: tested $VAULT_TESTED_SHA256, rebuilt $VAULT_REBUILT_SHA256"
-          [[ "$VAULT_TESTED_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::no vault artifact hash from solana · test"; exit 1; }
-          test "$VAULT_TESTED_SHA256" = "$VAULT_REBUILT_SHA256" || { echo "::error::the rebuilt vault artifact differs from the tested one"; exit 1; }
+          case "$SOLANA_BUILD" in
+            true)
+              # The vault binary that passed the custody tests is the one the
+              # independent rebuild produced, byte for byte.
+              [[ "$VAULT_TESTED_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::no vault artifact hash from solana · test"; exit 1; }
+              test "$VAULT_TESTED_SHA256" = "$VAULT_REBUILT_SHA256" || { echo "::error::the rebuilt vault artifact differs from the tested one"; exit 1; }
+              ;;
+            false)
+              # No Solana-relevant change: neither job built, so neither has a hash.
+              test -z "$VAULT_TESTED_SHA256$VAULT_REBUILT_SHA256" || { echo "::error::a vault hash from a run solana · paths said needed no build"; exit 1; }
+              echo "no Solana-relevant change: the vault was not built in this run"
+              ;;
+            *)
+              echo "::error::solana · paths gave no decision ($SOLANA_BUILD)"; exit 1
+              ;;
+          esac
 
   contracts:
     name: contracts

@@ -25,6 +25,7 @@ import { fileURLToPath } from "node:url";
 
 import { anchorProgramIds, base58Decode, declaredProgramId, programRecord, readToolchain } from "./solana-program-record.mjs";
 import { checkRuntimeTests, countTests, parseResults, runtimeTargets } from "./solana-runtime-tests.mjs";
+import { decide, solanaPaths } from "./solana-paths.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = join(here, "..", "..");
@@ -38,6 +39,29 @@ const pins = Object.fromEntries(
 function job(name) {
   return new RegExp(`^ {2}${name}:\\n((?: {4}.*\\n|\\n)*)`, "m").exec(ci)?.[1] ?? "";
 }
+/** Every job id in ci.yml. */
+function jobIds() {
+  const jobs = /^jobs:\n([\s\S]*)$/m.exec(ci)?.[1] ?? "";
+  return [...jobs.matchAll(/^ {2}([a-z0-9-]+):$/gm)].map(m => m[1]);
+}
+/** A job's steps, each the text from its `      - ` line to the next. */
+function steps(body) {
+  const at = body.indexOf("    steps:\n");
+  if (at < 0) return [];
+  return body.slice(at + "    steps:\n".length).split(/^(?= {6}- )/m)
+    .map(t => t.replace(/^(?: {6}#.*\n|\n)+/, "").replace(/(?:\n {6}#.*|\n)+$/, ""))
+    .filter(t => t.startsWith("      - "));
+}
+/** The app job's aggregation script, as bash will run it once Actions fills in the needs results. */
+function appScript(results) {
+  const body = job("app");
+  const block = /run: \|\n((?: {10}.*\n|\n)*)/.exec(body)?.[1] ?? "";
+  return block.split("\n").map(l => l.slice(10)).join("\n")
+    .replace(/\$\{\{ needs\.([a-z0-9-]+)\.result \}\}/g, (_, id) => {
+      assert.ok(Object.hasOwn(results, id), `no result given for ${id}`);
+      return results[id];
+    });
+}
 
 const scratch = mkdtempSync(join(tmpdir(), "merrymen-solana-ci-"));
 after(() => rmSync(scratch, { recursive: true, force: true }));
@@ -48,11 +72,13 @@ const fresh = label => {
   return realpathSync(dir);
 };
 
-/** The environment for a script under test: never the real job's output files. */
+/**
+ * The environment for a script under test: none of the real job's GITHUB_*
+ * variables (its output files, event, ref or commit), only what a test passes.
+ */
 function env(extra = {}) {
-  const e = { ...process.env, ...extra };
-  for (const k of ["GITHUB_PATH", "GITHUB_ENV", "GITHUB_OUTPUT", "GITHUB_STEP_SUMMARY"]) delete e[k];
-  return e;
+  const e = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("GITHUB_")));
+  return { ...e, ...extra };
 }
 function run(cmd, args, extra = {}, cwd = repo) {
   return spawnSync(cmd, args, { cwd, env: env(extra), encoding: "utf8" });
@@ -141,22 +167,48 @@ describe("the CI jobs", () => {
     assert.doesNotMatch(rebuild, /actions\/cache@/, "the rebuild must not reuse anything cached");
   });
 
-  it("neither job can be skipped, softened or filtered away", () => {
+  it("neither job can be skipped, softened or filtered away: only their steps wait on solana · paths", () => {
     for (const body of [test, rebuild]) {
-      assert.doesNotMatch(body, /continue-on-error|^\s+if:/m);
+      assert.doesNotMatch(body, /continue-on-error/);
+      // No job-level `if:`: a skipped job never concludes success (see the Kaka test below).
+      assert.doesNotMatch(body, /^ {4}if:/m);
       assert.match(body, /^ {4}runs-on: ubuntu-24\.04$/m);
+      assert.match(body, /^ {4}needs: \[solana-paths\]$/m);
+      const [notice, ...rest] = steps(body);
+      // First, a notice that does nothing but say why nothing else ran.
+      assert.match(notice, /^ {6}- name: Not needed for this change\n {8}if: needs\.solana-paths\.outputs\.run != 'true'\n {8}run: echo "[^"$`]*"$/, notice);
+      assert.ok(rest.length >= 4);
+      // Every other step runs exactly when solana · paths said "true", under no other condition.
+      for (const step of rest) {
+        const conditions = [...step.matchAll(/^ {8}if: (.*)$/gm)].map(m => m[1]);
+        assert.deepEqual(conditions, ["needs.solana-paths.outputs.run == 'true'"], step);
+      }
     }
     const on = /^on:\n((?: {2}.*\n|\n)*)/m.exec(ci)?.[1] ?? "";
     assert.match(on, /^ {2}pull_request:/m);
+    // A workflow-level paths filter would skip the whole run, `app` included.
     assert.doesNotMatch(on, /paths/);
   });
 
-  it("app, the required check, needs both jobs and equal artifact hashes", () => {
+  it("solana · paths decides from the test merge commit and both its parents", () => {
+    const paths = job("solana-paths");
+    assert.ok(paths, "ci.yml has no solana-paths job");
+    assert.doesNotMatch(paths, /^ {4}(if|needs|continue-on-error):/m);
+    assert.match(paths, /^ {4}outputs:\n {6}run: \$\{\{ steps\.paths\.outputs\.run \}\}$/m);
+    const [checkout, , decide] = steps(paths);
+    assert.match(checkout, /uses: actions\/checkout@\S+.*\n {8}with:\n {10}fetch-depth: 2$/);
+    assert.doesNotMatch(checkout, /ref:/, "the default ref of a pull_request run is the test merge commit");
+    assert.match(decide, /^ {8}id: paths\n {8}run: node scripts\/ci\/solana-paths\.mjs$/m);
+  });
+
+  it("app, the required check, needs all three Solana jobs, and equal hashes whenever the vault was built", () => {
     const needs = /^ {4}needs: \[([^\]]*)\]$/m.exec(app)?.[1].split(",").map(s => s.trim()) ?? [];
-    assert.ok(needs.includes("solana-test") && needs.includes("solana-rebuild"), needs.join(","));
+    for (const id of ["solana-paths", "solana-test", "solana-rebuild"]) assert.ok(needs.includes(id), needs.join(","));
     assert.match(app, /^ {4}if: always\(\)$/m);
-    assert.match(app, /test "\$\{\{ needs\.solana-test\.result \}\}" = success/);
-    assert.match(app, /test "\$\{\{ needs\.solana-rebuild\.result \}\}" = success/);
+    for (const id of ["solana-paths", "solana-test", "solana-rebuild"]) {
+      assert.match(app, new RegExp(`test "\\$\\{\\{ needs\\.${id}\\.result \\}\\}" = success`));
+    }
+    assert.match(app, /SOLANA_BUILD: \$\{\{ needs\.solana-paths\.outputs\.run \}\}/);
     assert.match(app, /VAULT_TESTED_SHA256: \$\{\{ needs\.solana-test\.outputs\.sha256 \}\}/);
     assert.match(app, /VAULT_REBUILT_SHA256: \$\{\{ needs\.solana-rebuild\.outputs\.sha256 \}\}/);
     // Explicit exits: bash 3.2 does not apply errexit to a failing [[ ]].
@@ -166,7 +218,50 @@ describe("the CI jobs", () => {
     const at = app.indexOf("run: |");
     assert.ok(at >= 0);
     const script = app.slice(at);
-    assert.doesNotMatch(script, /\$\{\{ needs\.solana-[a-z]+\.outputs/);
+    assert.doesNotMatch(script, /\$\{\{ needs\.[a-z-]+\.outputs/);
+  });
+
+  it("app's script passes exactly the runs it should", () => {
+    const success = { "app-typecheck": "success", "app-build": "success", "app-test": "success", "app-postgres": "success", "solana-paths": "success", "solana-test": "success", "solana-rebuild": "success" };
+    const a = "a".repeat(64), b = "b".repeat(64);
+    const cases = [
+      ["the vault built, tested and rebuilt to the same bytes", {}, { SOLANA_BUILD: "true", VAULT_TESTED_SHA256: a, VAULT_REBUILT_SHA256: a }, 0],
+      ["no Solana-relevant change, and no hashes", {}, { SOLANA_BUILD: "false", VAULT_TESTED_SHA256: "", VAULT_REBUILT_SHA256: "" }, 0],
+      ["the vault built but no hash came out", {}, { SOLANA_BUILD: "true", VAULT_TESTED_SHA256: "", VAULT_REBUILT_SHA256: "" }, 1],
+      ["the rebuild differs", {}, { SOLANA_BUILD: "true", VAULT_TESTED_SHA256: a, VAULT_REBUILT_SHA256: b }, 1],
+      ["a short hash", {}, { SOLANA_BUILD: "true", VAULT_TESTED_SHA256: "abc", VAULT_REBUILT_SHA256: "abc" }, 1],
+      ["hashes from a run said to need no build", {}, { SOLANA_BUILD: "false", VAULT_TESTED_SHA256: a, VAULT_REBUILT_SHA256: a }, 1],
+      ["no decision from solana · paths", {}, { SOLANA_BUILD: "", VAULT_TESTED_SHA256: "", VAULT_REBUILT_SHA256: "" }, 1],
+      ["solana · paths failed", { "solana-paths": "failure" }, { SOLANA_BUILD: "", VAULT_TESTED_SHA256: "", VAULT_REBUILT_SHA256: "" }, 1],
+      ["solana · test skipped", { "solana-test": "skipped" }, { SOLANA_BUILD: "false", VAULT_TESTED_SHA256: "", VAULT_REBUILT_SHA256: "" }, 1],
+      ["solana · rebuild cancelled", { "solana-rebuild": "cancelled" }, { SOLANA_BUILD: "true", VAULT_TESTED_SHA256: a, VAULT_REBUILT_SHA256: a }, 1],
+      ["an app part failed on a docs-only run", { "app-test": "failure" }, { SOLANA_BUILD: "false", VAULT_TESTED_SHA256: "", VAULT_REBUILT_SHA256: "" }, 1],
+    ];
+    const dir = fresh("app");
+    for (const [label, results, vars, status] of cases) {
+      const file = join(dir, "app.sh");
+      writeFileSync(file, appScript({ ...success, ...results }));
+      // The shell Actions uses for a `run:` with no `shell:` key.
+      const r = run("bash", ["--noprofile", "--norc", "-e", file], vars);
+      assert.equal(r.status, status, `${label}: ${r.stdout}${r.stderr}`);
+    }
+  });
+
+  it("keeps the Kaka docs-only lane open: no job of the run can conclude skipped", async () => {
+    // gate.cjs merges only when every job of the PR's CI run concluded success.
+    const { createRequire } = await import("node:module");
+    const { greenJobs } = createRequire(import.meta.url)(join(repo, ".github/kaka/gate.cjs"));
+    const ids = jobIds();
+    assert.ok(ids.includes("solana-paths") && ids.includes("app"));
+    for (const id of ids) {
+      const conditions = [...job(id).matchAll(/^ {4}if: (.*)$/gm)].map(m => m[1]);
+      assert.deepEqual(conditions, id === "app" ? ["always()"] : [], `${id} has a job-level if`);
+    }
+    const names = ids.map(id => /^ {4}name: (.*)$/m.exec(job(id))?.[1] ?? id);
+    const docsOnly = names.map(name => ({ name, status: "completed", conclusion: "success" }));
+    assert.equal(greenJobs(docsOnly), true);
+    const skipped = docsOnly.map(j => (j.name.startsWith("solana ·") && j.name !== "solana · paths" ? { ...j, conclusion: "skipped" } : j));
+    assert.equal(greenJobs(skipped), false, "why the Solana jobs skip their steps, not themselves");
   });
 
   it("the scripts CI runs directly are executable", () => {
@@ -198,6 +293,124 @@ describe("the toolchain pins", () => {
 
   it("are what the build record names", () => {
     assert.deepEqual(readToolchain(pinsText), { agave: "v2.3.13", platformTools: "v1.48", platformToolsRustc: "1.84.1", arch: "v0", hostRust: pins.HOST_RUST });
+  });
+});
+
+describe("solana-paths.mjs", () => {
+  const script = join(here, "solana-paths.mjs");
+
+  it("counts the vault, its CI and the Solana worker and core sources, nothing else", () => {
+    const relevant = [
+      "contracts/solana/programs/merrymen-vault/src/risk.rs",
+      "contracts/solana/runtime-tests/fixtures/ts-instructions.json",
+      "contracts/solana/build-manifests/Linux-x86_64.json",
+      "scripts/ci/solana-toolchain.env",
+      "scripts/ci/fetch-verified.sh",
+      ".github/workflows/ci.yml",
+      "packages/core/src/solana-live.ts",
+      "packages/core/src/solana.ts",
+      "worker/src/solana-executor.ts",
+      "worker/src/solana-recover.ts",
+    ];
+    const unrelated = [
+      "README.md",
+      "docs/solana-integration.md",
+      "docs/hosted-deploy.md",
+      "web/src/app/globals.css",
+      "web/src/terminal/SolanaScreen.tsx",
+      "contracts/src/TrencherVault.sol",
+      "contracts/solanaish.txt",
+      "worker/src/trading.ts",
+      "packages/core/src/ids.ts",
+      ".github/workflows/android.yml",
+      ".github/kaka/gate.cjs",
+      "package.json",
+      "xcontracts/solana/a.rs",
+    ];
+    assert.deepEqual(solanaPaths([...relevant, ...unrelated]), relevant);
+  });
+
+  it("builds on every run that is not a pull request, and on any pull request it cannot bound", () => {
+    const never = () => assert.fail("no git call expected");
+    for (const event of ["push", "workflow_dispatch", "schedule", undefined, ""]) {
+      assert.equal(decide({ event, git: never }).run, true, String(event));
+    }
+    const git = (parents, diff) => args => (args[0] === "rev-list" ? ["head", ...parents].join(" ") + "\n" : diff);
+    assert.equal(decide({ event: "pull_request", git: git(["base"], "") }).run, true, "not a merge commit");
+    assert.equal(decide({ event: "pull_request", git: git(["a", "b", "c"], "") }).run, true, "an octopus");
+    const docs = decide({ event: "pull_request", git: git(["base", "head"], "docs/a.md\0README.md\0") });
+    assert.deepEqual([docs.run, docs.changed, docs.matched], [false, 2, []]);
+    const vault = decide({ event: "pull_request", git: git(["base", "head"], "docs/a.md\0contracts/solana/build.sh\0") });
+    assert.deepEqual([vault.run, vault.matched], [true, ["contracts/solana/build.sh"]]);
+    // The diff is taken against the first parent, the base branch.
+    const calls = [];
+    decide({ event: "pull_request", git: args => (calls.push(args), args[0] === "rev-list" ? "m base head\n" : "") });
+    assert.deepEqual(calls[1], ["diff", "--name-only", "--no-renames", "-z", "base", "HEAD"]);
+  });
+
+  it("as a command, on a depth-2 clone of a test merge commit: false only for a change the vault cannot see", () => {
+    const origin = fresh("origin");
+    const gitIn = (cwd, ...args) => {
+      const r = run("git", ["-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main", ...args], {
+        GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.invalid", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.invalid",
+      }, cwd);
+      assert.equal(r.status, 0, `git ${args.join(" ")}: ${r.stderr}`);
+      return r.stdout;
+    };
+    const put = (path, text) => {
+      mkdirSync(dirname(join(origin, path)), { recursive: true });
+      writeFileSync(join(origin, path), text);
+    };
+    gitIn(origin, "init", "-q");
+    put("README.md", "readme\n");
+    put("docs/guide.md", "guide\n");
+    put("contracts/solana/programs/merrymen-vault/src/lib.rs", "// vault\n");
+    gitIn(origin, "add", "-A");
+    gitIn(origin, "commit", "-q", "-m", "base");
+    let prs = 0;
+    /** A pull request branch off main, merged into main as GitHub's test merge commit would be. */
+    const decideFor = change => {
+      const branch = `pr-${++prs}`;
+      gitIn(origin, "checkout", "-q", "-b", branch, "main");
+      change();
+      gitIn(origin, "add", "-A");
+      gitIn(origin, "commit", "-q", "-m", branch);
+      gitIn(origin, "checkout", "-q", "main");
+      // main moves on meanwhile, so the merge commit differs from the PR head.
+      put(`main-${prs}.txt`, "main\n");
+      gitIn(origin, "add", "-A");
+      gitIn(origin, "commit", "-q", "-m", `main ${prs}`);
+      gitIn(origin, "checkout", "-q", "-b", `merge-${prs}`, "main");
+      gitIn(origin, "merge", "-q", "--no-ff", "-m", "test merge", branch);
+      const clone = fresh("clone");
+      gitIn(clone, "clone", "-q", "--depth", "2", "--branch", `merge-${prs}`, `file://${origin}`, ".");
+      gitIn(origin, "checkout", "-q", "main");
+      const out = join(clone, "github-output");
+      const r = run(process.execPath, [script], { GITHUB_EVENT_NAME: "pull_request", GITHUB_OUTPUT: out }, clone);
+      assert.equal(r.status, 0, r.stderr);
+      return { output: readFileSync(out, "utf8"), stdout: r.stdout };
+    };
+    const docs = decideFor(() => put("docs/guide.md", "better guide\n"));
+    assert.equal(docs.output, "run=false\n");
+    assert.match(docs.stdout, /^run=false \(none of the 1 changed path\(s\) is Solana-relevant\)$/m);
+    const vault = decideFor(() => put("contracts/solana/programs/merrymen-vault/src/lib.rs", "// changed\n"));
+    assert.equal(vault.output, "run=true\n");
+    assert.match(vault.stdout, /contracts\/solana\/programs\/merrymen-vault\/src\/lib\.rs/);
+    // A file moved out of contracts/solana is a vault change, so renames count on both sides.
+    const moved = decideFor(() => gitIn(origin, "mv", "contracts/solana/programs/merrymen-vault/src/lib.rs", "docs/lib.rs"));
+    assert.equal(moved.output, "run=true\n");
+    // Not a merge commit (the job checked out something else): build.
+    const plain = fresh("plain");
+    gitIn(plain, "clone", "-q", "--depth", "2", `file://${origin}`, ".");
+    const out = join(plain, "github-output");
+    const r = run(process.execPath, [script], { GITHUB_EVENT_NAME: "pull_request", GITHUB_OUTPUT: out }, plain);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(readFileSync(out, "utf8"), "run=true\n");
+    // Outside a git checkout it fails rather than guessing.
+    const bare = fresh("not-git");
+    const failed = run(process.execPath, [script], { GITHUB_EVENT_NAME: "pull_request", GIT_CEILING_DIRECTORIES: dirname(bare) }, bare);
+    assert.equal(failed.status, 1);
+    assert.match(failed.stderr, /::error::/);
   });
 });
 
