@@ -1,5 +1,6 @@
 /** Select public comments conservatively. Pure: no model, credentials, trading state or I/O. */
 import type { XReply } from "./client";
+import { checkAsk, checkAskText, checkTargetOf, type CheckFrom, type CheckTarget } from "./check";
 
 export const REPLY_OPT_OUT = "Say stop to opt out.";
 
@@ -84,7 +85,14 @@ export type ReplyCandidate =
    * answered by a draft, never by code's model line (red-team 2026-10-12).
    * `greeting`: set by tagCandidate when the tag, after its leading handles,
    * is only a greeting (greetingOnly). Answered with a code-built line
-   * (writer.ts greetingAnswers), never a draft.
+   * (casual.ts greetingAnswers); the optional small-talk lane may draft only
+   * under a top-level tag or plain own post, with this line as fallback.
+   * `reaction`: set by tagCandidate when the tag, after its leading handles,
+   * is only praise for him or his trade (reactionOnly, 2026-10-18), never in
+   * a quote. Code-built thanks (casual.ts reactionAnswers) is the default
+   * and the fallback for the optional small-talk lane.
+   * `questionResponse`: a whole-tag response to code's exact own timeline
+   * question. Code-only acknowledgement, with a terminal thread marker.
    * `advice`: set by tagCandidate when the tag asks for advice or a forecast
    * in any words its advice screens know (the owner's decision, 2026-10-12:
    * a playful decline instead of silence). Never drafted and never looked up
@@ -98,7 +106,15 @@ export type ReplyCandidate =
    * buys). The worst of the post it replies to, the conversation's root and
    * the post it quotes.
    */
-  | { ok: true; text: string; address?: string; otherHandles?: true; greeting?: true; advice?: true; followUp?: FollowUp }
+  | { ok: true; text: string; address?: string; otherHandles?: true; greeting?: true; reaction?: true; questionResponse?: true; advice?: true; followUp?: FollowUp;
+      /**
+       * A LARP CHECK (xpost/check.ts, 2026-10-13): the tag asked one of the
+       * plain ways ("larp check", "is this real?") and code found one clear
+       * thing to check. Set only with checks on (`ctx.checks`). Such a tag is
+       * answered under any post, quoted or not, with a card or not: what it is
+       * about is the target code read, never the post's words.
+       */
+      check?: { target: CheckTarget; from: CheckFrom } }
   | { ok: false; reason: string };
 
 const LINK_OR_SECRET = /https?:|www\.|\b[a-z0-9-]+\.(?:com|net|org|io|dev|app|xyz|gg|co|me|ai)\b|0x[a-f0-9]{8,}|\b(?:sk-|gsk_|api[ _-]?key|seed phrase|private key|password|secret)\b/i;
@@ -325,7 +341,7 @@ export function plainAsk(text: unknown): string | null {
  * A TAG THAT IS ONLY A GREETING (2026-10-12): "hiii", "gm", "yo ser 👋",
  * "hey alan!". The owner tagged Alan "hiii" and wanted the hello back as fast
  * as Telegram's; such a tag was refused as too short or not asked, and never
- * answered. Now it is answered with a casual line code built (writer.ts
+ * answered. Now it is answered with a casual line code built (casual.ts
  * greetingAnswers), never a draft, so a strict allowlist of whole tags decides
  * it, as for the model question: one greeting word — hi (any number of i),
  * hey, heyy, hello, helloo, yo, yoo, gm, gmgm, gn, sup, wassup, what's up,
@@ -350,6 +366,79 @@ export function greetingOnly(text: unknown): boolean {
   // Plain ASCII, the allowlists' own rule: anything else is a word more.
   if (t === "" || plainAsk(t) === null) return false;
   return GREETING_ONLY.test(t.toLowerCase());
+}
+
+/**
+ * A TAG THAT IS ONLY PRAISE FOR HIM OR HIS TRADE (the owner's ask,
+ * 2026-10-18): "nice trade", "congrats", "gg", "lfg", "you're cooking"
+ * under his posts were refused as too short or as asking nothing, and he
+ * never answered anyone who cheered him on. Now such a tag is thanked in a
+ * line code built (casual.ts reactionAnswers), never a draft, so a strict
+ * allowlist of whole tags decides it, as for a greeting: one of nice trade,
+ * nice trades, nice one, gg, ggs, congrats, congratz, congratulations, well
+ * played, well done, lfg, let's go (lets go, a run of o's), w, big w, love
+ * this, respect, keep it up, you're cooking (youre, ur), thanks,
+ * thank you, thx, ty; then at most one of alan, ser, fren, bro, man, mate
+ * (or "alan" first), then at most a short run of "!" or "." and two emoji.
+ *
+ * NOTHING THAT JUDGES A COIN: no solid, safe, gem, good entry, good call,
+ * send it or moon. Those say the coin is good, and his thanks under them
+ * would agree; they go the normal way, and are answered by nothing.
+ *
+ * NEVER WITH ANYTHING ELSE IN IT: plain ASCII words only (plainAsk: no
+ * symbol, no invisible character, no other alphabet), so no $, no link, no
+ * handle; no digit and no question mark. A tag of emoji alone is no
+ * reaction: there must be words (the owner's decision, 2026-10-18). The
+ * text handed in is the tag after its leading handles (tagCandidate); a
+ * quote, an attachment or another handle in the reply prefix is refused
+ * there. Fail closed: "nice trade sir" costs one thanks.
+ */
+const REACTION_WORDS = String.raw`(?:nice trades?|nice one|ggs?|congrat[sz]|congratulations|well played|well done|lfg|let'?s go+|w|big w|love this|respect|keep it up|(?:you'?re|ur) cooking|thanks|thank you|thx|ty)`;
+const REACTION_TO = String.raw`(?:alan|ser|fren|bro|man|mate)`;
+const REACTION_ONLY = new RegExp(`^(?:alan,? )?${REACTION_WORDS}(?:,? ${REACTION_TO})?(?:!{1,3}|\\.{1,3})?$`);
+/** At most two emoji at the very end, each with its presentation selector or skin tone: taken off before the words are read. */
+const REACTION_EMOJI = /(?:\s?\p{Extended_Pictographic}[\u{FE0F}\u{1F3FB}-\u{1F3FF}]{0,2}){1,2}$/u;
+/** The tag's words, its trailing emoji (two at most) taken off, or null when it is no reaction. */
+export function reactionWords(text: unknown): string | null {
+  if (typeof text !== "string") return null;
+  const t = text.normalize("NFKC").replace(/[’‘]/g, "'").replace(/\s+/g, " ").trim().replace(REACTION_EMOJI, "").trim();
+  // Plain ASCII, the allowlists' own rule: an emoji left over, a third one, is a word more.
+  if (t === "" || plainAsk(t) === null || /[0-9?]/.test(t)) return null;
+  return REACTION_ONLY.test(t.toLowerCase()) ? t : null;
+}
+export function reactionOnly(text: unknown): boolean {
+  return reactionWords(text) !== null;
+}
+
+// Drafted small talk is a much smaller subject than a researched answer.
+// The general reply vocabulary includes market, time and operational words;
+// those made plausible boasts and forecasts pass earlier red-team reviews.
+// Use a closed conversational vocabulary here, in addition to the full gate.
+// Unknown words fall back to a vetted code line, never to a broader draft.
+const SMALLTALK_DRAFT_WORDS = new Set(`
+  a am an and appreciate appreciated are as at be being bit bot but by chat chatting cheers company conversation
+  curious curiosity dry easy feeling for friendly fren friend glad good greeting
+  grateful greetings happy hello hey hi how huh humor humour i i'm in is keeping kind little
+  me mellow mood my myself nice of on okay ok open ordinary over paper pleasant
+  pretty quite rather reply replying saying simple small software some still
+  talking thanks thank the things to warm well words yeah yep yo just here doing
+  low key sense slightly staying thankful usual very with welcome
+`.trim().split(/\s+/));
+
+/** Output guard for the opt-in small-talk lane; never used to loosen a gate. */
+export function smalltalkDraftSafe(text: string): boolean {
+  const words = text.toLowerCase().replace(/[’‘]/g, "'").match(/[a-z]+(?:'[a-z]+)?/g) ?? [];
+  return !/[?]/.test(text) && words.length >= 4 && words.every((word) => SMALLTALK_DRAFT_WORDS.has(word));
+}
+
+/** A finite answer to one of code's own nonfinancial timeline questions.
+ * The caller must independently verify its exact posted parent. */
+export function timelineResponseOnly(text: unknown): boolean {
+  if (typeof text !== "string") return false;
+  const plain = plainAsk(text);
+  if (plain === null || /[?0-9]/.test(text)) return false;
+  const words = plain.replace(/[.!]{1,3}$/, "");
+  return /^(?:yes|no|yeah|yep|nope|maybe|(?:i (?:(?:would|might) )?(?:prefer|pick|choose) |i'd (?:pick|choose) |my (?:pick|choice) is )?(?:(?:a|the) )?(?:notes|notebooks?|spreadsheets?|sketch(?:es)?|paragraphs?|diagrams?|metaphors?|plain text|footnotes|folders|brackets|glossar(?:y|ies)|tiny details|overall picture))$/.test(words);
 }
 
 /**
@@ -600,12 +689,38 @@ export function tagCandidate(reply: XReply, ctx: {
   plain?: ReadonlySet<string>;
   /** Its own buy and sell posts (store.ts ownThreadTweets). */
   trade?: ReadonlySet<string>;
+  /** MERRYMEN_XPOST_CHECKS=1 (with research): a larp check may be taken (`ReplyCandidate.check`). */
+  checks?: boolean;
+  /** Only a direct, unquoted reply under an exact own posted timeline question. */
+  timelineQuestion?: boolean;
 }): ReplyCandidate {
   const no = (reason: string): ReplyCandidate => ({ ok: false, reason });
   if (!reply.id || !reply.authorId || !ctx.xUserId) return no("invalid");
   if (reply.authorId === ctx.xUserId) return no("own-comment");
   if (isAnswerOptOut(reply.text)) return no("opt-out");
   if (typeof reply.text !== "string") return no("invalid");
+  // A LARP CHECK, BEFORE THE THREAD, QUOTE AND CARD SCREENS (2026-10-13). Those
+  // screens exist because code never read the post a tag sits under; a check
+  // reads exactly that, and answers only about the one target code found in
+  // it, never about its words. The ask is a whole-tag allowlist (checkAsk);
+  // whatever the post under it says is refused here when it is abuse, a
+  // sensitive topic or distress, and the orchestrator refuses one that names
+  // sherwood or merrymen. With no clear target, the tag goes on to be read as
+  // any other. NOR WITH WHAT IT SITS UNDER UNREAD (XReply.contextUnread,
+  // 2026-10-18): a post or an author X did not hand over is one those screens
+  // never read, so no check is taken; the tag goes on to be read as any other.
+  if (ctx.checks === true && reply.contextUnread !== true && checkAsk(reply.text, ctx.username)) {
+    const found = checkTargetOf(reply, { ownId: ctx.xUserId, ownPosts: ctx.ownPosts });
+    if (found) {
+      const under = (reply.context ?? []).map((c) => c.text).join("\n");
+      if (ABUSE_OR_SENSITIVE.test(under)) return no("sensitive");
+      if (DISTRESS.test(under)) return no("distress");
+      const lead = /^(?:\s*@[a-z0-9_]{1,15}\b[\s,:-]*)+/i.exec(reply.text.normalize("NFKC"))?.[0] ?? "";
+      const own = String(ctx.username ?? "").trim().replace(/^@/, "").toLowerCase();
+      const others = [...lead.matchAll(HANDLE_AT)].some((m) => own === "" || m[1]!.toLowerCase() !== own);
+      return { ok: true, text: checkAskText(reply.text, ctx.username) || "larp check", check: found, ...(others ? { otherHandles: true as const } : {}) };
+    }
+  }
   const ownPost = (id: string): boolean => id !== "" && (ctx.ownRoots?.has(id) === true || ctx.ownPosts?.has(id) === true);
   // A quote only of its own posted tweet: what the card shows is its own words (XReply.quotedTweetId).
   if (reply.quoted === true && !(typeof reply.quotedTweetId === "string" && ownPost(reply.quotedTweetId))) return no("quoted");
@@ -645,12 +760,20 @@ export function tagCandidate(reply: XReply, ctx: {
   // signal screen and asking nothing, it is answered by code's own line;
   // every other screen below still reads it.
   const greeting = !address && !others(lead) && greetingOnly(text);
-  if (!greeting && (bare.length < 4 || text.length > XREPLY_MAX_COMMENT_CHARS || (bare.match(/\p{L}+/gu) ?? []).length < 2)) return no("low-signal");
+  // ONLY PRAISE (reactionOnly, 2026-10-18), on the same terms, and never in
+  // a quote: what a quote shows beside it is a card code does not answer
+  // for. Like a greeting it skips only the signal and asked screens.
+  const reacted = !greeting && !address && !others(lead) && reply.quoted !== true ? reactionWords(text) : null;
+  const reaction = reacted !== null;
+  const questionResponse = ctx.timelineQuestion === true && !topLevel && reply.quoted !== true && !address && !others(lead) && followUp === "plain" && timelineResponseOnly(text);
+  if (!greeting && !reaction && !questionResponse && (bare.length < 4 || text.length > XREPLY_MAX_COMMENT_CHARS || (bare.match(/\p{L}+/gu) ?? []).length < 2)) return no("low-signal");
   if (/[\u0000-\u001f\u007f«»<>#]|\p{Script=Cyrillic}|\p{Script=Han}/u.test(text)) return no("unsafe-text");
   // Only letters code can read, and no text that runs backwards on screen.
   if (BIDI.test(reply.text) || NON_ASCII_LETTER.test(bareLetters(text)) || ENCLOSED_LETTER.test(text)) return no("unsafe-text");
-  // And no symbol written for a letter: only plain characters, one emoji at most (strayInTag).
-  if (strayInTag(text)) return no("unsafe-text");
+  // And no symbol written for a letter: only plain characters, one emoji at
+  // most (strayInTag). A reaction's two trailing emoji were already read and
+  // set aside by its allowlist; its words are held to the same rule.
+  if (strayInTag(reaction ? reacted : text)) return no("unsafe-text");
   if (LINK_OR_SECRET.test(text)) return no("link-or-secret");
   if (ABUSE_OR_SENSITIVE.test(text)) return no("sensitive");
   // Before the advice flag: a "should i" about a life, or money or a home someone cannot lose, is never a decline's to answer (DISTRESS, STAKES, LIFE_STAKES).
@@ -665,7 +788,7 @@ export function tagCandidate(reply: XReply, ctx: {
   // whole tag is only "are you bullish?" or "wen moon", its own mood
   // (orchestrator-xpost-research.ts vibeAsk). Nothing is looked up for it.
   // A statement asks nothing, advice-shaped or not (red-team 2026-10-12): read before the flag.
-  if (!greeting && !ASKED.test(text)) return no("not-asked");
+  if (!greeting && !reaction && !questionResponse && !ASKED.test(text)) return no("not-asked");
   const asksAdvice = ADVICE_REQUEST.test(advice) || /^(?:please\s+)?(?:buy|sell|hold|ape|pump|dump)\b/i.test(text) || WHAT_TO_BUY.test(advice);
   // A shill, however it starts, is no question; nor is advice about what it buys itself (ADVICE_ASKED, OWN_BUYING_ASK).
   if (asksAdvice && !ADVICE_ASKED.test(text)) return no("advice-statement");
@@ -675,5 +798,5 @@ export function tagCandidate(reply: XReply, ctx: {
   // Only one plain question, with no claim or rumour beside it (plainAdviceAsk): anything else, nothing.
   if (asksAdvice && !plainAdviceAsk(text)) return no("advice-clause");
   return { ok: true, text, ...(address ? { address } : {}), ...(others(lead) ? { otherHandles: true as const } : {}), ...(greeting ? { greeting: true as const } : {}),
-    ...(asksAdvice ? { advice: true as const } : {}), ...(followUp ? { followUp } : {}) };
+    ...(reaction ? { reaction: true as const } : {}), ...(questionResponse ? { questionResponse: true as const } : {}), ...(asksAdvice ? { advice: true as const } : {}), ...(followUp ? { followUp } : {}) };
 }

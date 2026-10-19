@@ -24,10 +24,15 @@
  * is the same: its words are code's (`MajorRead`, majorAnswers), never a
  * draft beside its figures.
  *
+ * NO SOURCE NAMED (the owner's teammate, 2026-10-13): no line here says
+ * coingecko, geckoterminal, bitquery or robinhood chain. A frame says where in
+ * plain words of its own (the tape, the board, the trending index, the
+ * screener), never whose data it is.
+ *
  * Pure: no I/O, no model, no provider, no clock.
  */
 import { CASUAL_PAPER, latinLines } from "./casual";
-import { signedPercent } from "./figures";
+import { renderFiguresLine, signedPercent, type FiguresSpec } from "./figures";
 import type { CodeLineOptions } from "./replies";
 
 /** A day's move as code reads it: which way, and how far, by code's own thresholds. Never a figure. */
@@ -72,21 +77,21 @@ export interface HotRead {
 }
 
 /**
- * EIGHT FRAMES THAT ARE NOT EACH OTHER. Each names its source (the chain's
- * trending index), says how many and the first coin's day in words of its
+ * EIGHT FRAMES THAT ARE NOT EACH OTHER. Each says where in words of its own
+ * (never a provider's name), says how many and the first coin's day in words of its
  * own, and closes with "not a call" its own way. None says "i", "my", "buy",
  * "early", "pick", "play", "own", "hold", "back", "long" or a target, and none
  * a coin's name: the line after it does.
  */
 const HOT_FRAMES: readonly ((many: boolean, lead: Move | null) => string)[] = [
-  (many, lead) => `${many ? "a few coins" : "one coin"} standing out on the robinhood chain index${lead ? `, the top one ${said(lead, { little: ["up a little", "down a little"], fair: ["up a fair bit", "down a fair bit"], sharp: ["up sharply", "down sharply"], flat: "flat" })} today` : ""}. not a call`,
-  (many, lead) => `geckoterminal has ${many ? "several tokens" : "a single token"} trending for robinhood${lead ? `, the leader ${said(lead, { little: ["slightly higher", "slightly lower"], fair: ["noticeably higher", "noticeably lower"], sharp: ["steeply higher", "steeply lower"], flat: "unchanged" })} since yesterday` : ""}. just data`,
-  (many, lead) => `per the chain's index, ${many ? "a handful of names" : "one name"} drawing action${lead ? `, the busiest ${said(lead, { little: ["gaining a touch", "slipping a touch"], fair: ["gaining moderately", "slipping moderately"], sharp: ["gaining strongly", "slipping strongly"], flat: "staying level" })}` : ""}. observation only`,
-  (many, lead) => `trending on robinhood: ${many ? "a small group" : "a lone ticker"} out in front${lead ? `, the frontrunner ${said(lead, { little: ["rising mildly", "falling mildly"], fair: ["rising solidly", "falling solidly"], sharp: ["rising hard", "falling hard"], flat: "moving sideways" })} lately` : ""}. a snapshot`,
-  (many, lead) => `index movers over there: ${many ? "multiple listings" : "one listing"} getting attention${lead ? `, number one ${said(lead, { little: ["up marginally", "down marginally"], fair: ["up meaningfully", "down meaningfully"], sharp: ["up dramatically", "down dramatically"], flat: "barely changed" })}` : ""}. no recommendation`,
-  (many, lead) => `robinhood chain's trending list has ${many ? "a cluster of busy coins" : "one busy coin"}${lead ? `, the first ${said(lead, { little: ["a bit firmer", "a bit softer"], fair: ["clearly firmer", "clearly softer"], sharp: ["far firmer", "far softer"], flat: "steady" })} for the day` : ""}. descriptive only`,
-  (many, lead) => `the index flags ${many ? "a bunch of coins" : "a coin"} heating up${lead ? `, the head of the pack ${said(lead, { little: ["edging up", "edging down"], fair: ["climbing decently", "sliding decently"], sharp: ["rising fast", "dropping fast"], flat: "going nowhere" })}` : ""}. reporting, not recommending`,
-  (many, lead) => `over on robinhood chain, ${many ? "some tickers" : "one ticker"} top geckoterminal's page${lead ? `, the leading one ${said(lead, { little: ["up mildly", "off mildly"], fair: ["up notably", "off notably"], sharp: ["up substantially", "off heavily"], flat: "about level" })} over a day` : ""}. info only`,
+  (many, lead) => `${many ? "a few coins" : "one coin"} popping on the trending index rn${lead ? `, the top one ${said(lead, { little: ["up a little", "down a little"], fair: ["up a fair bit", "down a fair bit"], sharp: ["up sharply", "down sharply"], flat: "flat" })} today` : ""}. not a call tho`,
+  (many, lead) => `the movers screen's got ${many ? "several tokens" : "a single token"} trending onchain${lead ? `, the leader ${said(lead, { little: ["slightly higher", "slightly lower"], fair: ["noticeably higher", "noticeably lower"], sharp: ["steeply higher", "steeply lower"], flat: "unchanged" })} since yesterday` : ""}. just what the screen says`,
+  (many, lead) => `the chain's index has ${many ? "a handful of names" : "one name"} pulling action${lead ? `, the busiest ${said(lead, { little: ["gaining a touch", "slipping a touch"], fair: ["gaining moderately", "slipping moderately"], sharp: ["gaining strongly", "slipping strongly"], flat: "staying level" })}` : ""}. tape talk, no call`,
+  (many, lead) => `trending rn: ${many ? "a small group" : "a lone ticker"} out in front${lead ? `, the frontrunner ${said(lead, { little: ["rising mildly", "falling mildly"], fair: ["rising solidly", "falling solidly"], sharp: ["rising hard", "falling hard"], flat: "moving sideways" })} lately` : ""}. that's the snapshot`,
+  (many, lead) => `index movers over there: ${many ? "multiple listings" : "one listing"} getting eyeballs${lead ? `, number one ${said(lead, { little: ["up marginally", "down marginally"], fair: ["up meaningfully", "down meaningfully"], sharp: ["up dramatically", "down dramatically"], flat: "barely changed" })}` : ""}. no tips attached`,
+  (many, lead) => `the chain's trending list has ${many ? "a cluster of busy coins" : "one busy coin"}${lead ? `, the first ${said(lead, { little: ["a bit firmer", "a bit softer"], fair: ["clearly firmer", "clearly softer"], sharp: ["far firmer", "far softer"], flat: "steady" })} for the day` : ""}. not calling anything`,
+  (many, lead) => `the index has ${many ? "a bunch of coins" : "a coin"} heating up${lead ? `, the head of the pack ${said(lead, { little: ["edging up", "edging down"], fair: ["climbing decently", "sliding decently"], sharp: ["rising fast", "dropping fast"], flat: "going nowhere" })}` : ""}. the board talking, not a recommendation`,
+  (many, lead) => `over on the chain, ${many ? "some tickers" : "one ticker"} topping the leaderboard${lead ? `, the leading one ${said(lead, { little: ["up mildly", "off mildly"], fair: ["up notably", "off notably"], sharp: ["up substantially", "off heavily"], flat: "about level" })} over a day` : ""}. fyi, nothing more`,
 ];
 
 /**
@@ -144,26 +149,26 @@ export function hotAnswers(read: HotRead, seed: string, style: { lower: boolean 
  * what's hot is never drafted: with nothing to show, one of these.
  */
 const HOT_NONE_LINES: readonly string[] = Object.freeze([
-  "nothing is standing out on the robinhood chain index right now",
-  "quiet on geckoterminal for robinhood, no coin clears the bar today",
+  "nothing is standing out on the trending index right now",
+  "quiet on the movers screen, no coin clears the bar today",
   "per the chain's index, no name is pulling away from the pack",
-  "trending on robinhood looks flat, nobody out in front lately",
+  "trending right now looks flat, nobody out in front lately",
   "index movers over there: none that stand apart",
-  "robinhood chain's trending list is sleepy, nothing busy enough to mention",
+  "the chain's trending list is sleepy, nothing busy enough to mention",
   "the index flags nothing heating up at the moment",
-  "over on robinhood chain, geckoterminal's page has no clear leader",
+  "over on the chain, the leaderboard shows nobody pulling clear",
 ]);
 
 /** And with the index unread (busy, down, late, or research off): never a guess at what is moving. */
 const HOT_UNREAD_LINES: readonly string[] = Object.freeze([
-  "no read on the robinhood chain index available right now",
-  "geckoterminal's robinhood view can't be pulled up from here",
+  "no read on the trending index available right now",
+  "the movers screen can't be pulled up from here",
   "the chain's index is out of reach just now, so no rundown",
-  "what's trending on robinhood can't be checked this time",
+  "what's trending right now can't be checked this time",
   "index movers over there aren't visible currently",
-  "robinhood chain's trending list is unavailable for the moment",
+  "the chain's trending list is unavailable for the moment",
   "the index is a blank on this end for now",
-  "the movers board for robinhood chain is dark today",
+  "the movers board for the chain is dark today",
 ]);
 
 /** What's hot with nothing past the floors: every line, this mention's own first. */
@@ -205,30 +210,30 @@ interface MajorWords {
   volume: { heavy: string; light: string; ordinary: string };
 }
 
-/** EIGHT FRAMES THAT ARE NOT EACH OTHER, each naming coingecko, never the coin, a figure, "i", "buy", "early" or where it is headed. */
+/** EIGHT FRAMES THAT ARE NOT EACH OTHER, naming no source (2026-10-13), never the coin, a figure, "i", "buy", "early" or where it is headed. */
 const MAJOR_FRAMES: readonly MajorWords[] = [
-  { open: "coingecko has it", close: "not a call", rank: { top: "among the very biggest", large: "a large cap", mid: "a mid cap" },
+  { open: "quick look, it's", close: "not a call tho", rank: { top: "among the very biggest", large: "a large cap", mid: "a mid cap" },
     move: { little: ["up a little", "down a little"], fair: ["up a fair bit", "down a fair bit"], sharp: ["up sharply", "down sharply"], flat: "flat" },
     day: "today", week: "on the week", volume: { heavy: "volume heavy", light: "volume light", ordinary: "volume ordinary" } },
-  { open: "per coingecko it's", close: "just data", rank: { top: "one of the largest", large: "big by value", mid: "mid-sized" },
+  { open: "right now it's", close: "just what the screen says", rank: { top: "one of the largest", large: "big by value", mid: "mid-sized" },
     move: { little: ["slightly higher", "slightly lower"], fair: ["noticeably higher", "noticeably lower"], sharp: ["steeply higher", "steeply lower"], flat: "unchanged" },
     day: "since yesterday", week: "over the week", volume: { heavy: "turnover high", light: "turnover low", ordinary: "turnover normal" } },
-  { open: "on coingecko it sits", close: "observation only", rank: { top: "near the top", large: "ranked high", mid: "mid-ranked" },
+  { open: "on the board it's sitting", close: "no call either way", rank: { top: "near the top", large: "ranked high", mid: "mid-ranked" },
     move: { little: ["gaining a touch", "slipping a touch"], fair: ["gaining moderately", "slipping moderately"], sharp: ["gaining strongly", "slipping strongly"], flat: "level" },
     day: "this session", week: "across the week", volume: { heavy: "busy trading", light: "thin trading", ordinary: "normal trading" } },
-  { open: "coingecko's view:", close: "a snapshot", rank: { top: "a heavyweight", large: "a big name", mid: "a mid-tier name" },
+  { open: "vibe check:", close: "that's the snapshot", rank: { top: "a heavyweight", large: "a big name", mid: "a mid-tier name" },
     move: { little: ["rising mildly", "falling mildly"], fair: ["rising solidly", "falling solidly"], sharp: ["rising hard", "falling hard"], flat: "sideways" },
     day: "lately", week: "week over week", volume: { heavy: "lots of volume", light: "little volume", ordinary: "average volume" } },
-  { open: "by coingecko's numbers it's", close: "for reference", rank: { top: "top tier", large: "upper tier", mid: "middle tier" },
+  { open: "numbers wise it's", close: "fyi only", rank: { top: "top tier", large: "upper tier", mid: "middle tier" },
     move: { little: ["up marginally", "down marginally"], fair: ["up meaningfully", "down meaningfully"], sharp: ["up dramatically", "down dramatically"], flat: "barely changed" },
     day: "for the day", week: "for the week", volume: { heavy: "volume elevated", light: "volume subdued", ordinary: "volume typical" } },
-  { open: "coingecko shows it as", close: "descriptive only", rank: { top: "one of the giants", large: "a sizeable coin", mid: "a mid-weight coin" },
+  { open: "charts have it as", close: "not telling anyone anything", rank: { top: "one of the giants", large: "a sizeable coin", mid: "a mid-weight coin" },
     move: { little: ["a bit firmer", "a bit softer"], fair: ["clearly firmer", "clearly softer"], sharp: ["far firmer", "far softer"], flat: "steady" },
     day: "on the day", week: "on the week", volume: { heavy: "brisk turnover", light: "slow turnover", ordinary: "steady turnover" } },
-  { open: "the coingecko page lists it", close: "no recommendation", rank: { top: "elite by valuation", large: "sizeable by valuation", mid: "modest by valuation" },
+  { open: "pulled it up:", close: "no tips attached", rank: { top: "elite by valuation", large: "sizeable by valuation", mid: "modest by valuation" },
     move: { little: ["edging up", "edging down"], fair: ["climbing", "sliding"], sharp: ["racing up", "plunging"], flat: "idle" },
     day: "in a day", week: "over a week", volume: { heavy: "packed order flow", light: "sparse order flow", ordinary: "usual order flow" } },
-  { open: "over on coingecko it's", close: "info only", rank: { top: "top of the table", large: "well up the table", mid: "mid-table" },
+  { open: "zooming out it's", close: "take it as info", rank: { top: "top of the table", large: "well up the table", mid: "mid-table" },
     move: { little: ["up mildly", "off mildly"], fair: ["up notably", "off notably"], sharp: ["up strongly", "off heavily"], flat: "about level" },
     day: "past day", week: "through the week", volume: { heavy: "active trade", light: "quiet trade", ordinary: "routine trade" } },
 ];
@@ -251,14 +256,14 @@ export function majorAnswers(read: MajorRead, seed: string, style: { lower: bool
   return texts.every((t): t is string => t !== null) ? framed(texts, seed, o) : [];
 }
 
-/** A coin asked by name that coingecko could not be read for (or research off): never a guess at how it is doing, never its name. */
+/** A coin asked by name that coingecko could not be read for (or research off): never a guess at how it is doing, never its name, never the source. */
 const MAJOR_UNREAD_LINES: readonly string[] = Object.freeze([
-  "no coingecko read on that one available right now",
-  "coingecko can't be pulled up from here for that coin",
-  "that one is out of reach on coingecko just now, so no rundown",
-  "can't check that coin's coingecko page this time",
-  "the coingecko numbers for that one aren't visible currently",
-  "coingecko is unavailable for that coin at the moment",
+  "no market read on that one available right now",
+  "the data feed can't be pulled up from here for that coin",
+  "that one is out of reach just now, so no rundown",
+  "can't check that coin's numbers this time",
+  "the figures for that one aren't visible currently",
+  "market data is unavailable for that coin at the moment",
   "that coin's market page is a blank on this end for now",
   "the market board for that coin is dark today",
 ]);
@@ -275,8 +280,7 @@ export function majorUnreadAnswers(seed: string, style: { lower: boolean }, o: C
  * the big coins' day on CoinGecko (bitcoin, ether, solana) and the Robinhood
  * Chain coins past the fleet's floors on the index, each by code's own
  * thresholds. Null where a source was not read. The figures themselves go in
- * code's line (figures.ts "coingecko 24h:" and "geckoterminal robinhood:"),
- * never in these words.
+ * code's line (figures.ts "24h:" and "trending:"), never in these words.
  */
 /** How far the big coins moved together: one of moveOf's bands when all of them are in it, else "uneven". */
 export type MajorsSize = NonNullable<Move["size"]> | "uneven";
@@ -375,9 +379,9 @@ const MAJORS_SAID: Readonly<Record<"mixed" | "flat" | "unread", readonly string[
 /**
  * The chain's movers, in casual words: one, a few, none, or no read. Never a
  * name: the line after the words shows the coins. Each index says where in a
- * word of its own (robinhood, the chain, onchain, geckoterminal, the
+ * word of its own (the board, the chain, onchain, the screener, the
  * trenches, the index, the trending page), so two lines of one read never
- * share a place word as well as a part.
+ * share a place word as well as a part; never a provider's name (2026-10-13).
  *
  * HOW MANY, NEVER WHICH WAY (red-team review of a964a74c, 2026-10-12): "a solo
  * runner", "several runners", "a pack running" and "the trenches feel lively"
@@ -385,19 +389,19 @@ const MAJORS_SAID: Readonly<Record<"mixed" | "flat" | "unread", readonly string[
  * chain's words only count what the index lists; the figures say the rest.
  */
 const CHAIN_SAID: Readonly<Record<"one" | "some" | "none" | "unread", readonly string[]>> = Object.freeze({
-  some: ["a few tokens appear on robinhood", "the chain lists a handful of names", "a couple of coins register onchain", "geckoterminal shows several tickers",
-    "some activity is visible over there", "the trenches feature a small group", "the index carries a short list", "the trending page has a tight cluster"],
-  one: ["a single token appears on robinhood", "the chain lists one name", "a lone coin registers onchain", "geckoterminal has a sole ticker",
-    "a bit of activity is visible over there", "the trenches feature a lonely listing", "the index carries a solitary item", "the trending page has a solo line"],
-  none: ["robinhood is pretty quiet", "the chain is resting easy", "onchain feels sleepy", "geckoterminal shows no standouts",
+  some: ["a few tokens sit on the board", "the chain's got a handful of names listed", "a couple of coins made the list onchain", "the screener's showing several tickers",
+    "a scatter of blips on the radar over there", "the trenches have a small group in view", "the index has a short lineup", "the trending page has a tight little cluster"],
+  one: ["a single token sits on the board", "the chain's got one name listed", "a lone coin made the list onchain", "the screener's showing a sole ticker",
+    "one faint blip on the radar over there", "the trenches have one lonely listing in view", "the index has a solitary item", "the trending page has a solo line"],
+  none: ["the board is pretty quiet", "the chain is resting easy", "onchain feels sleepy", "the screener shows no standouts",
     "no action brewing anywhere", "the trenches are snoozing hard", "the index is mellow lately", "the trending page is a ghost town"],
-  unread: ["robinhood is a blank right now", "couldn't pull up the chain", "onchain didn't load for me", "geckoterminal went quiet on me",
+  unread: ["the board is a blank right now", "couldn't pull up the chain", "onchain didn't load for me", "the screener went quiet on me",
     "no peek at any action yet", "the trenches are hidden from sight", "the index stayed unread", "the trending page is dark"],
 });
 
 /** How a market line closes: a read, never a call, each in words of its own. */
-const MARKET_CLOSE: readonly string[] = ["not a call, purely the tape", "snapshot only, nothing implied", "make of it whatever you like", "just reporting, never recommending",
-  "no tips attached whatsoever", "a glance, nothing deeper", "for what it's worth, cheers", "observations only, not a plan"];
+const MARKET_CLOSE: readonly string[] = ["not a call tho, purely the tape", "snapshot only, nothing implied", "make of it whatever you like", "that's all it says, no more",
+  "no tips attached whatsoever", "quick glance, no deep dive", "for what it's worth, cheers", "eyes only, no plan"];
 
 /**
  * HOW'S THE MARKET, ANSWERED BY CODE: the big coins in casual words, the
@@ -414,4 +418,241 @@ export function marketAnswers(read: MarketRead, seed: string, style: { lower: bo
   const chain = CHAIN_SAID[!read?.chain ? "unread" : read.chain.coins === 0 ? "none" : read.chain.coins === 1 ? "one" : "some"];
   const paperOf = new Map(MARKET_CLOSE.map((close, i) => [close, CASUAL_PAPER[i % CASUAL_PAPER.length]!] as const));
   return latinLines([majors, chain, MARKET_CLOSE], seed, (a, b, c) => `${a}, and ${b}. ${c}${o.paper === true ? `. ${paperOf.get(c)!}` : ""}.`);
+}
+
+// ── a market insight post ──────────────────────────────────────────────────
+
+/**
+ * THE MARKET NOW, AS CODE READ IT FOR AN INSIGHT POST (the owner's teammate,
+ * 2026-10-13: an active agent's casual slots become market insights). The
+ * same reads "how's the market?" makes (orchestrator-xpost-research.ts
+ * marketBundle): the big coins' day and week together, each read from the
+ * figures as the line rounds them (majorsDirOf), the chain's movers past the
+ * floors and the first one's day, and how many of them Fomo traders are most
+ * active in. Null where a source was not read. Never a figure, a name or a
+ * source: the model is handed only `insightFacts`' words, and the figures go
+ * in code's line after the gate (figures.ts).
+ */
+export interface InsightRead {
+  day: MarketRead["majors"];
+  week: MarketRead["majors"];
+  chain: HotRead | null;
+  /** How many of the chain's movers Fomo traders bought most (0: none); null when Fomo was not read. */
+  crowd: number | null;
+}
+
+function bigCoinsSaid(m: MarketRead["majors"], when: string): string | null {
+  if (!m) return null;
+  if (m.dir === "mixed") return `the big coins are split ${when}, some up and some down`;
+  if (m.dir === "flat" || !("size" in m)) return `the big coins are flat ${when}`;
+  if (m.size === "uneven") return `the big coins are all ${m.dir} ${when}, by uneven amounts`;
+  return `the big coins are all ${m.dir} ${m.size} ${when}`;
+}
+
+/**
+ * AN INSIGHT POST'S FACTS, IN WORDS: what the model is handed, and all it is
+ * handed, about the market. Digit-free, naming no coin, no ticker and no
+ * source (the chain's coins are "the chain's trending list"); empty when
+ * nothing was read. The model puts them in a trader's technical words
+ * (writer.ts insightPrompt); the X gate holds what it writes to these words,
+ * everyday ones and the technical vocabulary (INSIGHT_VOCABULARY).
+ */
+export function insightFacts(r: InsightRead | null | undefined): string[] {
+  if (!r) return [];
+  const out = [bigCoinsSaid(r.day, "on the day"), bigCoinsSaid(r.week, "on the week")];
+  const chain = r.chain;
+  if (chain) {
+    const n = chain.coins;
+    out.push(n === 0 ? "nothing on the chain's trending list clears the activity floors"
+      : n === 1 ? "one coin on the chain's trending list clears the activity floors" : "a few coins on the chain's trending list clear the activity floors");
+    const lead = n > 0 ? chain.lead : null;
+    const who = n === 1 ? "that coin is" : "the most active of them is";
+    if (lead) out.push(lead.dir === "flat" ? `${who} flat on the day` : `${who} ${lead.dir} ${lead.size ?? "a little"} on the day`);
+    if (n > 0 && r.crowd !== null && r.crowd > 0) out.push(`fomo traders are most active in ${r.crowd === 1 ? "one" : "a couple"} of those trending coins`);
+  }
+  return out.filter((x): x is string => x !== null);
+}
+
+export type InsightFocus = "day" | "day-week" | "lead" | "crowd" | "quiet";
+export interface InsightSelection {
+  focus: InsightFocus;
+  /** Only this focus's supported facts reach the model. */
+  read: string[];
+  figures: FiguresSpec;
+  fullFigures: FiguresSpec;
+}
+
+function focusFacts(r: InsightRead, focus: InsightFocus): string[] {
+  if (focus === "day") return [bigCoinsSaid(r.day, "on the day")].filter((x): x is string => x !== null);
+  if (focus === "day-week") return [bigCoinsSaid(r.day, "on the day"), bigCoinsSaid(r.week, "on the week")].filter((x): x is string => x !== null);
+  if (focus === "quiet") return r.chain?.coins === 0 ? ["nothing on the chain's trending list clears the activity floors"] : [];
+  if (focus === "crowd") return r.chain && r.chain.coins > 0 && r.crowd !== null && r.crowd > 0
+    ? [`fomo traders are most active in ${r.crowd === 1 ? "one" : "a couple"} of the chain's trending coins`] : [];
+  if (!r.chain || r.chain.coins < 1 || !r.chain.lead) return [];
+  const m = r.chain.lead;
+  return [`the first coin on the trending list is ${m.dir === "flat" ? "flat" : `${m.dir} ${m.size ?? "a little"}`} on the day`];
+}
+
+function insightHash(seed: string): number {
+  let h = 0;
+  for (const c of seed) h = (Math.imul(h, 31) + c.charCodeAt(0)) >>> 0;
+  return h;
+}
+
+/** Choose from evidence actually available. Replaying a slot makes the same choice;
+ * adjacent slots choose different focuses whenever more than one is available.
+ * A week comparison needs its own numerical evidence, not just the day's line.
+ */
+export function selectInsight(r: InsightRead, figures: FiguresSpec, o: { tenant: string; day: string; slot: number; weekFigures?: FiguresSpec; preferHot?: boolean }): InsightSelection | null {
+  const available = (["day", "day-week", "lead", "crowd", "quiet"] as const).filter((focus) =>
+    focusFacts(r, focus).length > 0 && (focus !== "day-week" || !!r.day && !!r.week && !!o.weekFigures?.length));
+  const hot = available.filter((f) => f === "lead" || f === "crowd" || f === "quiet");
+  const focuses = o.preferHot && hot.length ? hot : available;
+  if (!focuses.length) return null;
+  // A seeded daily permutation covers every supported focus before repeating;
+  // picking a fresh hash after excluding the last can starve some focuses.
+  const ordered = [...focuses].sort((a, b) => insightHash(`${o.tenant.toLowerCase()}|${o.day}|${a}`) - insightHash(`${o.tenant.toLowerCase()}|${o.day}|${b}`));
+  const slot = Number.isSafeInteger(o.slot) ? Math.max(0, o.slot) : 0;
+  const focus = ordered[(insightHash(`${o.tenant.toLowerCase()}|${o.day}`) + slot) % ordered.length]!;
+  const trimmed: FiguresSpec = focus === "day-week" ? o.weekFigures!
+    : focus === "day" ? figures.filter((s) => s.kind === "majors")
+    : focus === "lead" ? figures.filter((s) => s.kind === "pools").map((s) => s.kind === "pools" ? { ...s, coins: s.coins.slice(0, 1) } : s)
+    : focus === "crowd" ? figures.filter((s) => s.kind === "crowd")
+    : figures;
+  return { focus, read: focusFacts(r, focus), figures: renderFiguresLine(trimmed) ? trimmed : figures, fullFigures: figures };
+}
+
+// These leads name the act of reading, never a new market claim. Each has a
+// different content-word opener, so the strict same-opener gate has room to work.
+const INSIGHT_LEADS = [
+  "quick tape glance", "tiny market update", "little screen check", "daily board glance",
+  "current chart snapshot", "brief ticker rundown", "fresh market read", "small data detour",
+  "another tape check", "latest screen scribble", "short board update", "casual market peek",
+  "passing chart glance", "rough tape sketch", "plain market picture", "simple screen summary",
+  "briefly scanning prices", "quietly reading data", "currently checking charts", "loosely summarising moves",
+  "quickly reviewing activity", "casually browsing tickers", "slowly parsing prices", "calmly noting changes",
+] as const;
+const INSIGHT_ASIDES = [
+  "just reading along", "keeping the wording plain", "bot at the screen", "nothing fancy here",
+  "that's the snapshot", "a glance between tabs", "leaving the crystal ball alone", "sticking to what showed up",
+  "scribbling in the margin", "a small note from me", "there's the short version", "putting the tape into words",
+  "no grand speech attached", "less poetry, more reading", "a little screen time", "the bot equivalent of a glance",
+  "keeping the commentary brief", "not a dramatic monologue", "that's my screen check", "a pause for the rundown",
+  "a few words from the desk", "nothing to dress up", "leaving the fanfare aside", "no big story here",
+] as const;
+const INSIGHT_ENDINGS = [
+  "anyway", "for now", "as read", "that's all", "there we are", "so it goes", "plainly enough", "keeping it simple",
+  "end of note", "small update over", "back to the tabs", "enough typing", "words kept short", "read and noted", "message complete", "screen check done",
+  "moving along", "fairly brief", "a tiny dispatch", "no extra spin", "reporting what appeared", "stopping there", "leaving it there", "that'll do",
+] as const;
+
+
+function majorsWords(m: MarketRead["majors"], when: "day" | "week", variant: number): string {
+  if (!m) return "";
+  const i = variant % MAJORS_SUBJECT.length;
+  const subjects = ["majors", "the heavyweights", "big coins", "large caps", "the giants", "the bellwethers", "the leaders", "the old guard"];
+  const mixed = ["show mixed moves", "went different ways", "are up and down", "have no shared direction", "show a split picture", "are pointing both ways", "do not agree on direction", "have mixed changes"];
+  const flat = ["are flat", "show no change", "are unchanged", "show flat moves", "have no change to show", "stayed level", "are level", "have flat changes"];
+  const words = m.dir === "mixed" ? mixed[i] : m.dir === "flat" ? flat[i] : MAJORS_MOVED[m.dir]["size" in m ? m.size : "uneven"][i];
+  return `${subjects[i]} ${words?.replace(/ today$| so far$| lately$/g, "")} on the ${when}`;
+}
+function focusedWords(r: InsightRead, focus: InsightFocus, variant: number): string {
+  const i = variant % 8;
+  if (focus === "day") return majorsWords(r.day, "day", i);
+  if (focus === "day-week") return `${majorsWords(r.day, "day", i)}; ${majorsWords(r.week, "week", (i + 3) % 8)}`;
+  if (focus === "lead") {
+    const subjects = ["the first trending coin", "the index leader", "the top listed mover", "the leading listing", "the first name on the board", "the top trending listing", "the lead coin", "the first screener listing"];
+    const m = r.chain!.lead!;
+    const moved: MoveWords[] = [
+      { little: ["up a little", "down a little"], fair: ["up a fair bit", "down a fair bit"], sharp: ["up sharply", "down sharply"], flat: "flat" },
+      { little: ["slightly higher", "slightly lower"], fair: ["noticeably higher", "noticeably lower"], sharp: ["steeply higher", "steeply lower"], flat: "unchanged" },
+      { little: ["a touch higher", "a touch lower"], fair: ["moderately higher", "moderately lower"], sharp: ["sharply higher", "sharply lower"], flat: "level" },
+      { little: ["up mildly", "down mildly"], fair: ["up by a fair amount", "down by a fair amount"], sharp: ["up by a sharp amount", "down by a sharp amount"], flat: "flat" },
+      { little: ["a little higher", "a little lower"], fair: ["a fair bit higher", "a fair bit lower"], sharp: ["considerably higher", "considerably lower"], flat: "unchanged" },
+      { little: ["higher by a little", "lower by a little"], fair: ["higher by a fair bit", "lower by a fair bit"], sharp: ["higher by a steep amount", "lower by a steep amount"], flat: "level" },
+      { little: ["up slightly", "down slightly"], fair: ["up noticeably", "down noticeably"], sharp: ["up steeply", "down steeply"], flat: "flat" },
+      { little: ["mildly higher", "mildly lower"], fair: ["higher by a noticeable amount", "lower by a noticeable amount"], sharp: ["higher by a sharp amount", "lower by a sharp amount"], flat: "unchanged" },
+    ];
+    return `${subjects[i]} is ${said(m, moved[i]!)} on the day`;
+  }
+  if (focus === "quiet") return [
+    "nothing on the trending list clears the activity floors", "no listed mover passes the activity checks", "the chain's filtered trending list is empty",
+    "the screener has no listings past its activity floors", "no trending names meet the activity cutoff", "the filtered movers board has no listings",
+    "the activity screen leaves the trending list empty", "no coins clear the trending activity floors",
+  ][i]!;
+  const count = r.crowd === 1 ? "one" : "a couple";
+  const names = r.crowd === 1 ? "a single name" : "a couple of names";
+  return [
+    `fomo traders are most active in ${count} of the chain's trending coins`,
+    `the fomo crowd is busiest in ${count} of the trending names`,
+    `${names} on the trending board ${r.crowd === 1 ? "overlaps" : "overlap"} fomo's busiest coins`,
+    `fomo's busiest coins include ${count} of the chain's movers`,
+    `the trending board shares ${names} with fomo's busiest coins`,
+    `fomo activity is heaviest in ${count} of the trending coins`,
+    `${count} of the chain's movers ${r.crowd === 1 ? "appears" : "appear"} among fomo's busiest coins`,
+    `the fomo activity read overlaps ${names} on the trending list`,
+  ][i]!;
+}
+
+/** A code-only fallback from typed bands. No model text enters this path. A
+ * claim is included only if focusFacts can substantiate it from this read.
+ * The full gate still judges every candidate; figures are added separately.
+ */
+export function insightLines(read: InsightRead, seed: string, o: { paper?: boolean; focus?: InsightFocus } = {}): string[] {
+  const focus = o.focus ?? (read.day ? "day" : read.chain?.lead ? "lead" : read.chain?.coins === 0 ? "quiet" : "crowd");
+  const facts = focusFacts(read, focus);
+  if (!facts.length) return [];
+  const heads = INSIGHT_LEADS.map((lead, i) => `${lead}: ${focusedWords(read, focus, i)}`);
+  // Insight prose describes public data, not the agent's money; no paper
+  // disclosure is needed, and one would misleadingly qualify the public read.
+  return latinLines([heads, INSIGHT_ASIDES, INSIGHT_ENDINGS], seed,
+    (head, aside, ending) => `${head}. ${aside}; ${ending}.`);
+}
+
+/** Drafts may rearrange supported positive clauses and vetted neutral asides.
+ * Matching a bag of direction words is insufficient: "not up", "sideways",
+ * "deep bids" or "participation is heavy" would invent a different read.
+ * Anything outside this closed clause grammar uses the code fallback.
+ */
+export function insightDraftSupported(text: string, read: InsightRead, focus: InsightFocus): boolean {
+  const normalize = (s: string) => s.toLowerCase().replace(/[’‘]/g, "'").replace(/\s+/g, " ").trim();
+  const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  let remaining = normalize(text);
+  const groups: string[][] = focus === "day-week"
+    ? [supportedDayClauses(read.day, "day"), supportedDayClauses(read.week, "week")]
+    : focus === "day" ? [supportedDayClauses(read.day, "day")]
+    : [focusFacts(read, focus).length ? [...focusFacts(read, focus), ...Array.from({ length: 8 }, (_, i) => focusedWords(read, focus, i))] : []];
+  for (const clauses of groups) {
+    let matched = false;
+    for (const claim of [...new Set(clauses.map(normalize))].sort((a, b) => b.length - a.length)) {
+      // A boundary cannot turn "not up" or "maybe majors" into an assertion:
+      // any surrounding qualification stays in the remainder and is refused.
+      const pattern = new RegExp(`(?<![a-z])${escape(claim)}(?![a-z])`, "g");
+      remaining = remaining.replace(pattern, () => { matched = true; return " "; });
+    }
+    if (!matched) return false;
+  }
+  const neutral = [...INSIGHT_LEADS, ...INSIGHT_ASIDES, ...INSIGHT_ENDINGS,
+    "well", "okay", "ok", "meh", "honestly", "there we are", "just a bot reading the tape", "bot at the screen"];
+  for (const aside of [...new Set(neutral.map(normalize))].sort((a, b) => b.length - a.length)) {
+    remaining = remaining.replace(new RegExp(`(?<![a-z])${escape(aside)}(?![a-z])`, "g"), " ");
+  }
+  return !remaining.replace(/\b(?:and|while|whereas|but)\b/g, "").replace(/[\s.,;:!?—–-]/g, "");
+}
+
+function supportedDayClauses(m: MarketRead["majors"], when: "day" | "week"): string[] {
+  if (!m) return [];
+  const predicates: string[] = m.dir === "mixed" ? ["mixed", "split", "up and down", "split, some up and some down"]
+    : m.dir === "flat" ? ["flat", "unchanged"]
+    : [m.dir, m.dir === "up" ? "higher" : "lower", m.dir === "up" ? "green" : "red",
+      ...("size" in m && m.size !== "uneven" ? [`${m.dir} ${m.size}`] : ["up" === m.dir ? "up by uneven amounts" : "down by uneven amounts"])];
+  const facts = [bigCoinsSaid(m, `on the ${when}`)!, ...Array.from({ length: 8 }, (_, i) => majorsWords(m, when, i))];
+  const times = when === "day" ? ["on the day", "today"] : ["on the week", "this week"];
+  for (const subject of ["majors", "the majors", "big coins", "the big coins"]) for (const copula of ["", "are ", "are all "]) {
+    for (const predicate of predicates) for (const time of times) facts.push(`${subject} ${copula}${predicate} ${time}`);
+  }
+  // A week clause may omit its repeated subject after the day's supported
+  // majors clause. This form is only used by the day-versus-week focus.
+  if (when === "week") for (const predicate of predicates) facts.push(`the week is ${predicate}`, `the week stays ${predicate}`);
+  return facts;
 }

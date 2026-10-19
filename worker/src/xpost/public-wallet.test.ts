@@ -31,11 +31,29 @@ test("wallet disclosure cannot migrate to another account, network, post kind or
 
 test("a token contract is confined to the exact trade network and cannot become a wallet intro", () => {
   const post = { kind: "buy", body: appendPublicToken("pepe caught my eye while the curve was early", wallet)! };
-  assert.ok(post.body.endsWith(` CA (Robinhood Chain): ${wallet.address}`));
+  assert.ok(post.body.endsWith(`\n\n${wallet.address}`), "the CA alone on the last line, no label, no chain");
+  assert.doesNotMatch(post.body, /Robinhood|CA \(/);
   assert.equal(publicTokenStillAllowed(post, wallet), true);
   assert.equal(publicTokenStillAllowed({ ...post, kind: "sell" }, wallet), true);
   assert.equal(publicTokenStillAllowed({ ...post, kind: "intro" }, wallet), false);
-  assert.equal(publicTokenStillAllowed(post, { ...wallet, chainId: 46630 }), false);
+  // The text names no chain any more; the chain is held where the token is read
+  // (orchestrator-xpost publicTokenForDecision refuses a decision on another chain).
+  assert.equal(publicTokenStillAllowed(post, { ...wallet, address: `0x${"cd".repeat(20)}` }), false, "another contract");
+  assert.equal(publicTokenStillAllowed(post, { ...wallet, chainId: 1 }), false, "a chain it never trades on");
   assert.equal(publicTokenStillAllowed(post, null), false);
   assert.equal(appendPublicToken(`${prose} ${wallet.address}`, wallet), null);
+});
+
+test("the operator's agents add the landed transaction's link on its own line, the CA still last (2026-10-13)", () => {
+  const tx = `0x${"ab".repeat(32)}`;
+  const prose = "pepe caught my eye while the curve was early";
+  const linked = appendPublicToken(prose, { ...wallet, txHash: tx }, true)!;
+  assert.equal(linked, `${prose}\n\nhttps://robinhoodchain.blockscout.com/tx/${tx}\n\n${wallet.address}`);
+  assert.equal(publicTokenStillAllowed({ kind: "buy", body: linked }, { ...wallet, txHash: tx }, true), true);
+  assert.equal(publicTokenStillAllowed({ kind: "buy", body: linked }, { ...wallet, txHash: tx }, false), false, "the link is part of what was consented");
+  // Without the flag, paper (no hash), a malformed hash or the testnet: no link, the CA alone.
+  assert.equal(appendPublicToken(prose, { ...wallet, txHash: tx }), `${prose}\n\n${wallet.address}`);
+  assert.equal(appendPublicToken(prose, { ...wallet, txHash: null }, true), `${prose}\n\n${wallet.address}`);
+  assert.equal(appendPublicToken(prose, { ...wallet, txHash: "0x12" }, true), `${prose}\n\n${wallet.address}`);
+  assert.equal(appendPublicToken(prose, { ...wallet, chainId: 46630, txHash: tx }, true), `${prose}\n\n${wallet.address}`);
 });

@@ -31,6 +31,8 @@ import {
   poolPriceUsable,
   readRoutedPrice,
   readSpotLeg,
+  readWethLeg,
+  type PoolPrice,
   type PriceGuard,
   type RefusalKind,
   type RoutedPrice,
@@ -88,6 +90,15 @@ interface CacheEntry {
   /** The raw route, unjudged. null = no pool found at all. */
   routed: RoutedPrice | null;
   fetchedAt: number;
+  /**
+   * When a refresh was last ATTEMPTED and did not replace the route. fetchedAt
+   * deliberately stays put on such a failure — it is what ages a route toward
+   * MAX_ROUTE_AGE_SEC — and the staleness test used to read it alone, so a
+   * route that failed once was re-read in full (~26 calls) on EVERY tick until
+   * it came back, and on every tick after it was retired too. The next attempt
+   * now waits a TTL from this, while the route keeps ageing from fetchedAt.
+   */
+  triedAt?: number;
 }
 
 export interface PoolPriceReader {
@@ -193,9 +204,14 @@ export function createPoolPriceReader(opts?: { ttlSec?: number; sampler?: SpotSa
       // Only the misses go to the network. A warm cache costs nothing.
       const stale = tokens.filter((t) => {
         const hit = cache.get(cacheKey(t));
-        return !hit || nowSec - hit.fetchedAt >= ttlSec;
+        return !hit || nowSec - Math.max(hit.fetchedAt, hit.triedAt ?? 0) >= ttlSec;
       });
       const refreshed = new Set<string>();
+      // ONE WETH/USDG read for the whole pass, shared by every two-hop route in
+      // it (pool-price.ts, readWethLeg). Started only if something is stale.
+      let wethLeg: Promise<PoolPrice | null> | undefined;
+      const sharedWethLeg = () =>
+        (wethLeg ??= readWethLeg(client, { weth: CASH.WETH as `0x${string}`, cash: CASH.USDG as `0x${string}`, cashDecimals: 6 }).catch(() => null));
 
       await Promise.all(
         stale.map(async (t) => {
@@ -213,11 +229,15 @@ export function createPoolPriceReader(opts?: { ttlSec?: number; sampler?: SpotSa
               // and is judged off the sampled series below — never off that
               // one spot reading.
               allowSpot: true,
+              wethLeg: sharedWethLeg(),
             });
           } catch {
             routed = null; // readRoutedPrice usually swallows its own errors anyway
           }
-          if (routed?.spotOnly && keepTwapOver(previous, routed, nowSec)) return;
+          if (routed?.spotOnly && keepTwapOver(previous, routed, nowSec)) {
+            previous!.triedAt = nowSec;
+            return;
+          }
           if (routed) {
             cache.set(key, { routed, fetchedAt: nowSec });
             // The full read's spot IS this tick's reading. A route with an
@@ -233,6 +253,7 @@ export function createPoolPriceReader(opts?: { ttlSec?: number; sampler?: SpotSa
           // do NOT touch fetchedAt: it keeps ageing, and MAX_ROUTE_AGE_SEC below
           // eventually retires it whichever of the two it actually was.
           if (!previous?.routed) cache.set(key, { routed: null, fetchedAt: nowSec });
+          else previous.triedAt = nowSec;
         }),
       );
 

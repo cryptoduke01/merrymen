@@ -476,6 +476,24 @@ describe("buildDossier: coverage and unknowns", () => {
     assert.ok(dossier.coverage.limitations.some((l) => /did not honour the chain filter; 1 row/.test(l)));
   });
 
+  it("an unplaced thesis never becomes evidence for the selected coin", () => {
+    const { dossier } = buildDossier(input({ theses: [thesis("placed", "strong community"), thesis("unplaced", "dev sold", { token: null })] }));
+    assert.equal(dossier.coverage.uniqueTheses, 1);
+    assert.equal(dossier.strongestOpposition, null);
+    assert.ok(!dossier.evidence.some((e) => e.id === "fomo:thesis/unplaced"));
+    assert.ok(dossier.coverage.limitations.some((l) => l.startsWith("Incomplete thesis read:")));
+  });
+
+  it("a partial read has durable coverage distinct from the same rows read completely", () => {
+    const rows = [thesis("placed", "strong community")];
+    const partial = buildDossier(input({ theses: rows, thesisCoverage: cov({ partial: true }) })).dossier;
+    const complete = buildDossier(input({ theses: rows, previous: partial, thesisCoverage: cov({ partial: false }) }));
+    assert.ok(partial.coverage.limitations.some((l) => l.startsWith("Incomplete thesis read:")));
+    assert.equal(complete.changed, true);
+    assert.notEqual(complete.dossier.inputsHash, partial.inputsHash);
+    assert.ok(!complete.dossier.coverage.limitations.some((l) => l.startsWith("Incomplete thesis read:")));
+  });
+
   it("carries exact versions and schema", () => {
     const { dossier } = buildDossier(input());
     assert.deepEqual(dossier.versions, { schema: DOSSIER_SCHEMA, prompt: null, model: null });

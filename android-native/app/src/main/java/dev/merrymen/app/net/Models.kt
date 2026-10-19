@@ -268,6 +268,10 @@ data class Thesis(
 @Serializable
 data class ThesesPage(
   val theses: List<Thesis> = emptyList(),
+  /** Older profile routes ignore ?view=activity and use this flag instead of source. */
+  val thesesRead: Boolean? = null,
+  /** False for the activity read, which omits historical fill-return enrichment. */
+  val figuresIncluded: Boolean? = null,
   /** "sqlite" or "none" — and "none" means the ledger could NOT BE READ, not that nobody posted. */
   val source: String? = null,
   /**
@@ -304,6 +308,10 @@ data class Position(
   @SerialName("stop_floor_bps") val stopFloorBps: Int? = null,
   /** The sentence that stop was graded for, written at entry. */
   @SerialName("stop_floor_why") val stopFloorWhy: String? = null,
+  /** Display identity only; [symbol] remains the ledger and order key. */
+  val token: String? = null,
+  /** Older feeds omit this field; explicit null means no verified display label. */
+  @SerialName("display_symbol") val displaySymbol: String? = symbol,
 ) {
   val priceStale: Boolean get() = priceStaleRaw != 0
 }
@@ -515,6 +523,7 @@ data class TokensPage(
  */
 @Serializable
 data class LeaderRow(
+  val performance: BookPerformance? = null,
   val slug: String? = null,
   val name: String? = null,
   val handle: String? = null,
@@ -537,11 +546,20 @@ data class LeaderRow(
   val paperPnlBps: Int? = null,
   /** Paper fills, the paper counterpart of [landed]. */
   val filledPaper: Int? = null,
+  /** Distinct swaps/curve trades, excluding vault moves and other operations. */
+  val paperFills: Int? = null,
+  val liveFills: Int? = null,
+  /** The public lifecycle read retained an agent whose worker is not running. */
+  val notRunning: Boolean = false,
 )
 
 @Serializable
 data class Leaderboard(
   val agents: List<LeaderRow> = emptyList(),
+  /** Identity/lifecycle only: returns and trade counts were not requested. */
+  val directory: Boolean = false,
+  /** When the server completed this directory selection, epoch milliseconds. */
+  val fetchedAt: Long? = null,
   /**
    * "sqlite" or "none", and "none" means THE LEDGER COULD NOT BE READ — not
    * that nobody has traded. The route answers `{source, agents}`; this type
@@ -552,6 +570,7 @@ data class Leaderboard(
   val source: String? = null,
   /** How many retired, quiet or expired accounts were folded out. Null when not counted. */
   val retired: Int? = null,
+  val retiredAgents: List<RetiredAgent> = emptyList(),
 )
 
 /**

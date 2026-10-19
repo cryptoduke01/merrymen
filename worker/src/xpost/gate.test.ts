@@ -1309,7 +1309,7 @@ describe("a figures line in an earlier post is never what makes, or unmakes, a r
     return c.recentOwn.some((p) => similarity(raw, p) >= REPEAT_LIMIT) ? { ok: false, reason: "repeat" } : { ok: true, text: raw };
   };
   const reply: Partial<XGateCtx> = { kind: "reply", mode: "live", coins: [] };
-  const LINE = "geckoterminal robinhood: trending $ABC 24h +4% vol ~$90k; fomo: most bought $ABC; coingecko: trending $PEPE, $WIF.";
+  const LINE = "trending: ABC 24h +4% vol ~$90k; fomo: most bought ABC; hot: PEPE, WIF.";
   it("words said before are still a repeat with a line after them, its own or the fleet's", () => {
     const said = `quiet hour on the robinhood chain index, nothing wild. ${LINE} Say stop to opt out.`;
     const draft = "quiet hour on the robinhood chain index, nothing wild. Say stop to opt out.";
@@ -1317,14 +1317,14 @@ describe("a figures line in an earlier post is never what makes, or unmakes, a r
     assert.equal(reason(draft, { ...reply, recentFleet: [said] }), "fleet-repeat");
   });
   it("new words beside an earlier answer's same figures are not a repeat, though the line alone would have made them one", () => {
-    const draft = "geckoterminal and coingecko both trending, fomo busy. Say stop to opt out.";
+    const draft = "trending and hot, fomo most bought. Say stop to opt out.";
     const earlier = `a calm one, honestly. ${LINE} Say stop to opt out.`;
     // Weighed with the line in, the shared source words alone would refuse it.
     assert.ok(similarity(draft, earlier) >= REPEAT_LIMIT);
     assert.equal(reason(draft, { ...reply, recentFleet: [earlier] }), "ok");
     assert.ok(admitXPost(draft, ctx({ ...reply, recentOwn: [earlier] }), repeating).ok);
     // A casual post is weighed against the fleet's answers the same way.
-    assert.equal(reason("geckoterminal and coingecko both trending, fomo busy", { kind: "casual", recentFleet: [earlier] }), "ok");
+    assert.equal(reason("trending and hot, fomo most bought", { kind: "casual", recentFleet: [earlier] }), "ok");
   });
 });
 
@@ -1522,5 +1522,66 @@ describe("red-team review of daaae961: a drafted answer never forecasts a coin, 
     // A casual line about how it trades, with nothing of the kind, still passes.
     assert.equal(reason("fresh launches with real buyers are my favourite kind of afternoon", casual), "ok");
     assert.equal(reason("picked up a little pepe this week, the curve looked early", casual), "ok");
+  });
+});
+
+describe("one cashtag at most: X refuses an API post with more (2026-10-13)", () => {
+  it("two cashtags are refused before X is asked; one is the gate's usual business", () => {
+    const buy = { kind: "buy" as const, mode: "live" as const, coins: ["pepe", "PEPE", "wif", "WIF"] };
+    assert.equal(reason("picked up $PEPE and $WIF, both curves looked early", buy), "cashtags");
+    assert.equal(reason("picked up $PEPE, the curve looked early", buy), "ok");
+    assert.equal(reason("picked up pepe and wif, both curves looked early", buy), "ok", "bare names are not cashtags");
+  });
+});
+
+describe("an active owner's post never names a data provider (the owner's teammate, 2026-10-13)", () => {
+  const house: Partial<XGateCtx> = { house: true, mode: "live" };
+  it("coingecko, geckoterminal and bitquery, however spelled, are refused as source-named in every kind of post", () => {
+    for (const text of ["per coingecko the majors are drifting sideways today", "coin gecko shows volume thin across the board", "C0inGecko has breadth narrow and liquidity thin",
+      "geckoterminal lists a busy little cluster on the chain", "gecko terminal shows rotation into small caps", "bitquery has flows balanced over the hour",
+      "bit query says buyers and sellers are even", "the gecko page says it's quiet"]) {
+      for (const kind of ["casual", "intro", "buy"] as const) assert.equal(reason(text, { ...house, kind }), "source-named", `${kind}: ${text}`);
+      assert.equal(reason(`${text}.`, { ...house, kind: "reply", answer: true }), "source-named", `answer: ${text}`);
+    }
+  });
+  it("only for an active owner: every other owner's posts are judged as before", () => {
+    assert.equal(reason("coingecko shows volume thin across the board, a quiet one", { kind: "casual", mode: "live" }), "ok");
+  });
+  it("nor the chain by its name, however spelled, in every kind of post (the owner, 2026-10-18)", () => {
+    for (const text of ["quiet afternoon on robinhood chain, nothing doing", "slow one over on Robinhood Chain for me", "robin hood chain is sleepy, i'm just watching",
+      "r0binhood chain feels sleepy, i'm just watching", "R0B1NH00D CHAIN is sleepy, i'm just watching", "rob1nhood cha1n is sleepy, i'm just watching",
+      "robinhood's chain is sleepy, i'm just watching", "r()binhood chain is sleepy, i'm just watching", "robin-hood-chain is sleepy, i'm just watching"]) {
+      for (const kind of ["casual", "intro", "buy", "sell"] as const) assert.equal(reason(text, { ...house, kind }), "source-named", `${kind}: ${text}`);
+      // A reply reads strokes written for a letter first ("r()binhood": charset), and refuses them before this screen.
+      for (const drafted of [false, true]) {
+        const why = reason(`${text}.`, { ...house, kind: "reply", answer: true, drafted });
+        assert.ok(why === "source-named" || (why === "charset" && text.includes("()")), `answer${drafted ? " (drafted)" : ""}: ${text}: ${why}`);
+      }
+      // Every other owner's posts are judged as before: never source-named.
+      for (const kind of ["casual", "intro", "buy", "sell"] as const) assert.notEqual(reason(text, { mode: "live", kind }), "source-named", `not house, ${kind}: ${text}`);
+    }
+    // The same line for another owner passes, as it did.
+    assert.equal(reason("quiet afternoon on robinhood chain, nothing doing", { kind: "casual", mode: "live" }), "ok");
+    // "robinhood" alone is not the chain's name, and "the chain" names nothing.
+    assert.equal(reason("quiet afternoon on the chain, nothing doing", { ...house, kind: "casual" }), "ok");
+    assert.notEqual(reason("robinhood is a big name, nothing doing here", { ...house, kind: "casual" }), "source-named");
+  });
+  it("an insight post is held to every screen a drafted answer is: no call, forecast, level, holding or amount in any words (2026-10-13)", () => {
+    const insight: Partial<XGateCtx> = { ...house, kind: "casual", insight: true, buys: "none" };
+    for (const ok of ["majors drifting in a tight range, breadth narrow and liquidity thin", "risk-off tone on the majors, momentum concentrated in the chain's trending names"]) {
+      assert.equal(reason(ok, insight), "ok", ok);
+    }
+    for (const [text, why] of [["majors firm, it's the play while breadth is narrow", "hype"], ["majors near the week's lows, a bounce from here looks likely", "hype"],
+      ["volume is thin, the next few days will be huge for the majors", "hype"], ["majors grinding higher, just buy and hold", "buy-claim"], ["breadth is narrow, the majors could keep climbing", "hype"],
+      ["majors up a little, and i'm holding some myself", "buy-claim"], ["majors grinding along, merrymen is cooking something soon", "house-claim"],
+      ["liquidity thin, a couple grand of volume on the chain", "quantity"]] as const) {
+      assert.equal(reason(text, insight), why, text);
+      // The same words in a plain casual post are judged as before.
+      assert.notEqual(reason(text, { ...house, kind: "casual" }), "source-named", text);
+    }
+  });
+  it("fomo keeps its attribution, and a post naming no provider passes", () => {
+    assert.equal(reason("fomo traders look busy and volume is thin, a quiet tape overall", { ...house, kind: "casual" }), "ok");
+    assert.equal(reason("majors drifting in a tight range, breadth narrow and liquidity thin", { ...house, kind: "casual" }), "ok");
   });
 });

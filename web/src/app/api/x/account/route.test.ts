@@ -345,11 +345,15 @@ describe("prefs — what it posts", () => {
     await connect(OWNER_A);
     await post(OWNER_A, { action: "enable", xUserId: X_USER.id, owner: OWNER_A });
     const buy = await draft(OWNER_A, { kind: "buy", coin: "frog", decisionId: "d1" });
+    // A recap names the coins it bought: it is a buy post's kind for this switch.
+    const recap = await draft(OWNER_A, { kind: "recap", coin: "buy:d1 buy:d2 buy:d3" });
     const casual = await draft(OWNER_A);
     const intro = await draft(OWNER_A, { kind: "intro" });
     await read(await post(OWNER_A, { action: "prefs", owner: OWNER_A, buys: false }));
     assert.equal(statusOf(buy), "cancelled");
     assert.equal((w.raw.prepare("SELECT reason FROM xpost_posts WHERE id = ?").get(buy) as { reason: string }).reason, "kind-off");
+    assert.equal(statusOf(recap), "cancelled");
+    assert.equal((w.raw.prepare("SELECT reason FROM xpost_posts WHERE id = ?").get(recap) as { reason: string }).reason, "kind-off");
     assert.equal(statusOf(casual), "scheduled");
     assert.equal(statusOf(intro), "scheduled", "the hello is not a kind the owner turns off");
     assert.equal((await getAccount(w.db, OWNER_A))?.posting, true, "posting itself stays on");
@@ -361,6 +365,7 @@ describe("prefs — what it posts", () => {
     await read(await post(OWNER_A, { action: "prefs", owner: OWNER_A, buys: false }));
     // Planned by a pass that read the account before the change landed.
     await draft(OWNER_A, { kind: "buy", coin: "frog", decisionId: "d9", body: "grabbed some frog on paper" });
+    await draft(OWNER_A, { kind: "recap", coin: "buy:d9 buy:d10 buy:d11", body: "busy stretch. recap: 3 buys." });
     await draft(OWNER_A, { body: "a thought that stays" });
     const body = await read<XAccountBody>(await get(OWNER_A));
     assert.deepEqual(body.upcoming.map((p) => p.body), ["a thought that stays"]);

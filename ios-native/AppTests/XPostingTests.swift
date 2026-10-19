@@ -22,7 +22,7 @@ final class XPostingTests: XCTestCase {
         XCTAssertEqual(XPostingAccount.replyWarning("robin_trades", active: true), [
             "Your Merryman will reply as @robin_trades to selected posts that tag it, reply to it or quote it.",
             "It chooses which posts to answer; it won’t answer every one. Answers go out right away: they don’t wait under Coming up, so you can’t skip one first.",
-            "It answers people who tag it, reply to it or quote it, a few times a day each: up to 60 answers a day on top of its posts, and at most six to one person a day. Answers carry no opt-out line, and it never answers someone who asked it to stop. Turn replies off at any time to stop answering.",
+            "It answers questions about the market, coins, how it trades and what it can do, and a hello, a thanks or a bit of chat in a short line of its own, from people who tag it, reply to it or quote it, a few times a day each: up to 60 answers a day on top of its posts, and at most six to one person a day. Answers carry no opt-out line, and it never answers someone who asked it to stop. Turn replies off at any time to stop answering.",
             "Answers may include market figures from public data (CoinGecko, GeckoTerminal, Fomo and Bitquery), such as a coin’s price, market cap, volume or recent change. Merrymen adds them as the data showed them; they are never advice."
         ].joined(separator: "\n\n"))
         XCTAssertTrue(XPostingAccount.replyHint("robin_trades", active: true).contains("right away"))
@@ -66,7 +66,7 @@ final class XPostingTests: XCTestCase {
     func testActiveAgentPostingWarningSaysHowMuchItPosts() {
         XCTAssertEqual(XPostingAccount.warning("robin_trades", active: true), [
             "Your Merryman will post from whichever X account is connected — right now that's @robin_trades.",
-            "It writes its own posts: a hello first, then a few passing thoughts a day and a post for most coins it buys, and why. It never posts trade alerts or error messages, and its answers may carry market figures built from public data.",
+            "It writes its own posts: a hello first, then a few reads on the market a day and a post for most coins it buys, and why. It never posts trade alerts or error messages, and its market reads and answers may carry market figures built from public data.",
             "Posts go out on their own, up to 12 a day and at least an hour apart. Each one waits under Coming up for at least ten minutes first, and you can skip it there. Turn this off or disconnect X at any time.",
             "X may label accounts that post automatically, and may ask an account to verify itself the first time it posts about crypto."
         ].joined(separator: "\n\n"))

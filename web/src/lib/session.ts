@@ -1182,8 +1182,71 @@ async function postGrant(grant: Grant): Promise<GrantHandoff> {
   }
 }
 
-/** Retry delivery of the same saved permission with fresh authentication, without signing again. */
-export { postGrant as retryGrantHandoff };
+export interface GrantRetryProof {
+  ownerSigner: OwnerSigner;
+  tenant: Address;
+  /** Recheck the current login and replacement journal after wallet approval. */
+  beforeSubmit: () => Promise<void>;
+}
+
+/** The stable permission metadata returned by owner-authenticated grant status. */
+export type GrantPermissionView = Partial<Omit<Grant, "owner" | "smartAccount" | "sessionKeyAddress" | "caps" | "serialized" | "demoSessionPrivateKey" | "demoOwnerPrivateKey">> & {
+  owner?: string; smartAccount?: string; sessionKeyAddress?: string;
+  caps?: Partial<GrantCaps>;
+};
+
+/** A matching session key alone does not establish matching signed bounds. */
+export function sameGrantPermission(a: GrantPermissionView | undefined, b: GrantPermissionView): boolean {
+  if (!a) return false;
+  const address = (value: unknown): value is string => typeof value === "string" && /^0x[0-9a-f]{40}$/i.test(value);
+  for (const key of ["owner", "smartAccount", "sessionKeyAddress"] as const) {
+    if (!address(a[key]) || !address(b[key]) || a[key].toLowerCase() !== b[key].toLowerCase()) return false;
+  }
+  for (const key of ["chainId", "grantedAt", "expiresAt"] as const) {
+    if (!Number.isFinite(a[key]) || !Number.isFinite(b[key]) || a[key] !== b[key]) return false;
+  }
+  for (const key of ["perTradeUsdg", "dailyUsdg", "expiryDays", "maxDrawdownPct", "maxOpsPerDay"] as const) {
+    if (!Number.isFinite(a.caps?.[key]) || !Number.isFinite(b.caps?.[key]) || a.caps?.[key] !== b.caps?.[key]) return false;
+  }
+  for (const key of ["grantFeatures", "grantTokens"] as const) {
+    const x = a[key], y = b[key];
+    if (x === undefined || y === undefined) { if (x !== y) return false; continue; }
+    if (!Array.isArray(x) || !Array.isArray(y) || x.some(value => typeof value !== "string") || y.some(value => typeof value !== "string")) return false;
+    const normalize = (values: string[]) => [...values].map(value => key === "grantTokens" ? value.toLowerCase() : value).sort();
+    if (JSON.stringify(normalize(x)) !== JSON.stringify(normalize(y))) return false;
+  }
+  for (const key of ["v4AdapterAddress", "ponsAdapterAddress", "ponsClassVaultAddress", "ponsClassVaultFactoryAddress", "trencherVaultAddress", "trencherFactoryAddress"] as const) {
+    const x = a[key], y = b[key];
+    if (x === undefined || y === undefined) { if (x !== y) return false; continue; }
+    if (!address(x) || !address(y) || x.toLowerCase() !== y.toLowerCase()) return false;
+  }
+  // Account-link nonces/signatures refresh at intake; ownership model and DID do not.
+  if (!a.binding || !b.binding) return a.binding === b.binding;
+  return (a.binding.version ?? "legacy-wallet-owner-v1") === (b.binding.version ?? "legacy-wallet-owner-v1") && a.binding.did === b.binding.did;
+}
+
+/**
+ * Retry the saved permission, refreshing only its one-time account-link proof.
+ * Intake consumes that proof before later chain/store work, so even a failed
+ * handoff may have spent it. The trading permission, key and limits stay exact;
+ * the owner confirms a fresh link instead of making a nonce replayable.
+ */
+export async function retryGrantHandoff(grant: Grant, proof?: GrantRetryProof): Promise<GrantHandoff> {
+  if (!grant.binding && !proof) return postGrant(grant);
+  if (!proof) return { ok: false, error: "Confirm this wallet's account link again before retrying activation." };
+  const { ownerSigner, tenant } = proof;
+  const version = grant.binding?.version ?? "legacy-wallet-owner-v1";
+  if (ownerSigner.binding !== version || ownerSigner.account.address.toLowerCase() !== grant.owner.toLowerCase()
+    || (ownerSigner.binding === "privy-did-owner-v1" && (grant.binding?.did !== ownerSigner.did || grant.owner.toLowerCase() !== tenant.toLowerCase()))) {
+    return { ok: false, error: "Your signing wallet changed. Return to the account that owns this saved wallet before retrying activation." };
+  }
+  const binding = await signBinding({ owner: grant.owner, smartAccount: grant.smartAccount, chainId: grant.chainId, ownerSigner, tenant });
+  await proof.beforeSubmit();
+  // Historical local binding evidence stays intact. Only the fresh intake
+  // claim changes, and an owner key must never accompany that hosted request.
+  const { demoOwnerPrivateKey: _ownerKey, ...publicGrant } = grant;
+  return postGrant({ ...publicGrant, binding });
+}
 
 /**
  * Create a BRAND-NEW agent wallet: a fresh owner key is generated in-browser

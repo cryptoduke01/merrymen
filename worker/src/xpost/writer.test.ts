@@ -7,9 +7,9 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { SETTINGS_DEFAULTS } from "../../../packages/core/src/index";
 import { everyBand } from "../class-evidence";
-import type { LlmCreds } from "../llm";
+import { resetReasoningRefusalsForTest, type LlmCreds } from "../llm";
 import { similarity } from "../social-post";
-import { admitXPost, vocabularyRefusal, withoutDisclosure, XPOST_MAX_CHARS, type BaseGate } from "./gate";
+import { admitXPost, sourceNamed, vocabularyRefusal, withoutDisclosure, XPOST_MAX_CHARS, type BaseGate } from "./gate";
 import {
   BUY_GLOSS,
   INTRO_NEXT,
@@ -18,23 +18,32 @@ import {
   INTRO_WHAT_IDLE,
   XPOST_ANTHROPIC_DEFAULT_MODEL,
   XPOST_GROQ_DEFAULT_MODEL,
+  XPOST_TEMPERATURE_DEFAULT,
   answerPrompt,
+  asksReasoningOff,
   answerQuestion,
   coinNamedIn,
   SHERWOOD_ON_X,
   buyPrompt,
   casualPrompt,
+  checkPrompt,
   describeXpostCreds,
   draft,
+  draftTemperature,
   greetingAnswers,
   introPrompt,
   introTemplate,
+  insightPrompt,
   modelAnswer,
   modelAnswers,
   replyPrompt,
+  sellPrompt,
+  smalltalkPrompt,
   sherwoodClaimed,
   sherwoodMentioned,
   sherwoodNamed,
+  tryDraft,
+  withoutThinking,
   xpostCreds,
   xpostModel,
   xpostModelWarning,
@@ -632,13 +641,15 @@ describe("a draft is the model's answer, or null — never a throw", () => {
   it("hands the prompt over and returns the text it judged: trimmed, its wrapping quotes off, nothing inside touched", async () => {
     const seen: unknown[] = [];
     const out = await draft(ROOM, P, {
-      call: async (creds, opts) => {
+      call: async (creds, { signal, ...opts }) => {
+        assert.ok(signal instanceof AbortSignal, "the call can be cancelled");
         seen.push([creds.model, opts]);
         return '  "quiet day on the curve"\n';
       },
     });
     assert.equal(out, "quiet day on the curve");
-    assert.deepEqual(seen, [["room-model", { system: "sys", prompt: "go", maxTokens: 400 }]]);
+    // Not a qwen3 model: no reasoning asked off, and room to think (REASONING_ON_MIN_TOKENS).
+    assert.deepEqual(seen, [["room-model", { system: "sys", prompt: "go", maxTokens: 700, temperature: 0.6 }]]);
     assert.equal(await draft(ROOM, P, { call: async () => "“first line\n\nsecond line”" }), "first line\n\nsecond line", "line breaks are the gate's to judge");
   });
 
@@ -650,6 +661,204 @@ describe("a draft is the model's answer, or null — never a throw", () => {
     assert.equal(await draft(ROOM, P, { call: () => { throw new Error("sync"); } }), null);
     assert.equal(await draft(ROOM, P, { call: () => new Promise(() => {}), timeoutMs: 20 }), null);
     assert.equal(await draft(ROOM, P, { call: async () => "passing thought: soup is great" }), "passing thought: soup is great", "a word that starts with pass is not PASS");
+  });
+
+  it("says why there is no draft: PASS, empty, out of tokens, a provider's status, the network, a timeout, or an error", async () => {
+    type Call = NonNullable<NonNullable<Parameters<typeof tryDraft>[2]>["call"]>;
+    const why = async (call: Call, timeoutMs?: number) => {
+      const out = await tryDraft(ROOM, P, { call, ...(timeoutMs ? { timeoutMs } : {}) });
+      return out.ok ? `text:${out.text}` : out.reason;
+    };
+    assert.equal(await why(async () => "PASS"), "pass");
+    assert.equal(await why(async () => '"pass."'), "pass");
+    assert.equal(await why(async () => "   "), "empty");
+    assert.equal(await why(async () => '""'), "empty", "only quotes is empty");
+    assert.equal(await why(async () => undefined as unknown as string), "empty");
+    assert.equal(await why(async () => Promise.reject(new Error("groq 429 — rate_limit_exceeded: Rate limit reached for model in organization org_secret"))), "groq-429");
+    assert.equal(await why(async () => Promise.reject(new Error("groq 503"))), "groq-503");
+    assert.equal(await why(async () => Promise.reject(Object.assign(new Error("Overloaded"), { status: 529 }))), "groq-529", "an SDK error's own status");
+    assert.equal(await why(async () => Promise.reject(new Error("groq openai/gpt-oss-120b ran out of tokens before writing a reply (spent 400 on reasoning) — raise maxTokens"))), "out-of-tokens");
+    assert.equal(await why(async () => Promise.reject(new Error("groq openai/gpt-oss-120b returned an empty reply (finish_reason: stop)"))), "empty");
+    assert.equal(await why(async () => Promise.reject(new TypeError("fetch failed"))), "network");
+    assert.equal(await why(async () => Promise.reject(new Error("anthropic network request failed"))), "network");
+    assert.equal(await why(() => { throw new Error("sync"); }), "error");
+    assert.equal(await why(async () => Promise.reject("a string, not an Error")), "error");
+    assert.equal(await why(() => new Promise(() => {}), 20), "timeout");
+    assert.equal(await why(async () => "passing thought: soup is great"), "text:passing thought: soup is great");
+    // The provider's id is read from config, letters and digits only.
+    const odd = await tryDraft({ ...ROOM, provider: "My Proxy/v2 <x>" }, P, { call: async () => Promise.reject(new Error("My 401")) });
+    assert.deepEqual(odd, { ok: false, reason: "myproxyv2x-401" });
+  });
+
+  it("reads llmText's own failures without carrying its message, a key or a model's words", async () => {
+    const realFetch = globalThis.fetch;
+    const reply = (status: number, body: unknown) => (async () => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } })) as typeof fetch;
+    const cases: [typeof fetch, string][] = [
+      [reply(429, { error: { code: "rate_limit_exceeded", message: "Rate limit reached for gsk_room_key in org_123" } }), "groq-429"],
+      [reply(401, { error: { message: "Invalid API Key" } }), "groq-401"],
+      [reply(500, "upstream down"), "groq-500"],
+      [reply(200, { choices: [{ finish_reason: "length", message: { content: "", reasoning: "hmm, private thoughts" } }], usage: { completion_tokens_details: { reasoning_tokens: 398 } } }), "out-of-tokens"],
+      [reply(200, { choices: [{ finish_reason: "stop", message: { content: "" } }] }), "empty"],
+      [reply(200, { choices: [{ finish_reason: "stop", message: { content: "PASS" } }] }), "pass"],
+      [(async () => { throw new TypeError("fetch failed"); }) as typeof fetch, "network"],
+    ];
+    try {
+      for (const [fetch, reason] of cases) {
+        globalThis.fetch = fetch;
+        const out = await tryDraft(ROOM, P);
+        assert.deepEqual(out, { ok: false, reason }, reason);
+        assert.match(out.ok ? "" : out.reason, /^[a-z0-9-]{1,32}$/, "an operator code, nothing more");
+      }
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  it("takes the model's thinking out: a closed block goes, one left open is no draft — never the text around it", async () => {
+    // Pure: closed pairs in every spelling go; any tag left over empties it.
+    assert.equal(withoutThinking("<think>weighing it</think>quiet day on the curve").trim(), "quiet day on the curve");
+    assert.equal(withoutThinking("<|think|>hmm<|/think|> quiet day").trim(), "quiet day");
+    assert.equal(withoutThinking("<|think|>hmm<|endthink|> quiet day").trim(), "quiet day");
+    assert.equal(withoutThinking("<THINK>a</think>one <think>b</think>two").replace(/\s+/g, " ").trim(), "one two");
+    assert.equal(withoutThinking("<think>the user wants a post about"), "", "an unclosed opener: the budget ran out mid-thought");
+    assert.equal(withoutThinking("quiet day <think>should i say more"), "", "what came before an unclosed opener is not kept");
+    assert.equal(withoutThinking("weighing it</think>quiet day"), "", "a closer with no opener: the thinking sits in front of it");
+    assert.equal(withoutThinking("<think>a</think>quiet <think>b"), "", "a second, unclosed block");
+    assert.equal(withoutThinking("< think >x"), "", "spaced tags count");
+    assert.equal(withoutThinking("i think the tape is quiet"), "i think the tape is quiet", "the word is not a tag");
+    assert.equal(withoutThinking("thinking about soup"), "thinking about soup");
+    // Through tryDraft: the reason is `empty`, and the words never come back.
+    type Call = NonNullable<NonNullable<Parameters<typeof tryDraft>[2]>["call"]>;
+    const why = async (call: Call) => {
+      const out = await tryDraft(ROOM, P, { call });
+      return out.ok ? `text:${out.text}` : out.reason;
+    };
+    assert.equal(await why(async () => "<think>the user wants a casual post, maybe about"), "empty");
+    assert.equal(await why(async () => "quiet day <think>more"), "empty");
+    assert.equal(await why(async () => "<think>ok</think>\n\n\"quiet day on the curve\""), "text:quiet day on the curve");
+    assert.equal(await why(async () => "<think>ok</think>PASS"), "pass");
+    assert.equal(await why(async () => "<think>ok</think>  "), "empty");
+  });
+
+  it("a timeout aborts the call it gave up on, and the abort surfaces nowhere", async () => {
+    let signal: AbortSignal | undefined;
+    const out = await tryDraft(ROOM, P, {
+      timeoutMs: 20,
+      call: (_creds, opts) => {
+        signal = opts.signal;
+        return new Promise<string>((_, reject) => opts.signal?.addEventListener("abort", () => reject(new DOMException("This operation was aborted", "AbortError"))));
+      },
+    });
+    assert.deepEqual(out, { ok: false, reason: "timeout" });
+    assert.equal(signal?.aborted, true, "the request is cancelled, not left running");
+    // Through llmText's own fetch: the signal reaches the request.
+    const realFetch = globalThis.fetch;
+    let seen: AbortSignal | null | undefined;
+    globalThis.fetch = ((_url: string, init: RequestInit) => {
+      seen = init.signal;
+      return new Promise<Response>((_, reject) => init.signal?.addEventListener("abort", () => reject(new DOMException("This operation was aborted", "AbortError"))));
+    }) as typeof fetch;
+    try {
+      assert.deepEqual(await tryDraft(ROOM, P, { timeoutMs: 20 }), { ok: false, reason: "timeout" });
+      assert.equal(seen?.aborted, true);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    // A call that answers in time is never aborted.
+    let kept: AbortSignal | undefined;
+    await tryDraft(ROOM, P, { call: async (_c, o) => { kept = o.signal; return "quiet day on the curve"; } });
+    assert.equal(kept?.aborted, false);
+  });
+
+  it("samples at the operator's temperature, or 0.6 — llmText's own — when unset or out of range", async () => {
+    assert.equal(XPOST_TEMPERATURE_DEFAULT, 0.6);
+    const sent: unknown[] = [];
+    const call: NonNullable<NonNullable<Parameters<typeof tryDraft>[2]>["call"]> = async (_c, o) => {
+      sent.push(o.temperature);
+      return "quiet day on the curve";
+    };
+    for (const t of [undefined, 0.8, 0, 2, -0.1, 2.5, Number.NaN, Number.POSITIVE_INFINITY]) await tryDraft(ROOM, P, { call, ...(t !== undefined ? { temperature: t } : {}) });
+    assert.deepEqual(sent, [0.6, 0.8, 0, 2, 0.6, 0.6, 0.6, 0.6]);
+    assert.equal(draftTemperature(undefined), 0.6);
+    assert.equal(draftTemperature(1.1), 1.1);
+  });
+
+  it("asks the qwen3 family for no reasoning, with a 200-token budget; any other model keeps room to think", async () => {
+    for (const model of ["qwen/qwen3.8-27b", "qwen3-32b", "Qwen3.5-9B", "qwen/qwen3-thinking", "qwen-3-14b"]) {
+      assert.equal(asksReasoningOff({ ...ROOM, model }), true, model);
+    }
+    for (const model of ["room-model", "qwen/qwen2.5-32b", "qwen30-x", "llama-3.3-70b-versatile", "openai/gpt-oss-120b", "myqwen3"]) {
+      assert.equal(asksReasoningOff({ ...ROOM, model }), false, model);
+    }
+    assert.equal(asksReasoningOff({ ...ROOM, provider: "anthropic", transport: "anthropic", baseUrl: "", model: "qwen3-32b" }), false, "the anthropic transport has its own thinking switch");
+    const seen: unknown[] = [];
+    const call: NonNullable<NonNullable<Parameters<typeof tryDraft>[2]>["call"]> = async (_c, { signal: _s, ...o }) => {
+      seen.push(o);
+      return "quiet day on the curve";
+    };
+    await tryDraft({ ...ROOM, model: XPOST_GROQ_DEFAULT_MODEL }, P, { call, temperature: 0.8 });
+    await tryDraft({ ...ROOM, model: "llama-3.3-70b-versatile" }, P, { call, temperature: 0.8 });
+    assert.deepEqual(seen, [
+      { system: "sys", prompt: "go", maxTokens: 200, temperature: 0.8, reasoning: "off" },
+      { system: "sys", prompt: "go", maxTokens: 700, temperature: 0.8 },
+    ]);
+  });
+
+  it("sends the qwen hint to the provider, and steps down ONCE on a 400 that names it — never a loop", async () => {
+    const realFetch = globalThis.fetch;
+    const QWEN: LlmCreds = { ...ROOM, model: XPOST_GROQ_DEFAULT_MODEL };
+    const bodies: Record<string, unknown>[] = [];
+    const ok = (content: string) => new Response(JSON.stringify({ choices: [{ finish_reason: "stop", message: { content } }] }), { status: 200 });
+    const refuse = (message: string) => new Response(JSON.stringify({ error: { message, type: "invalid_request_error" } }), { status: 400 });
+    const serve = (answer: (body: Record<string, unknown>) => Response) =>
+      (async (_url: string, init: RequestInit) => {
+        const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+        bodies.push(body);
+        return answer(body);
+      }) as typeof fetch;
+    resetReasoningRefusalsForTest();
+    try {
+      // Taken: one request, the hint and the small budget on it.
+      globalThis.fetch = serve(() => ok("quiet day on the curve"));
+      assert.deepEqual(await tryDraft(QWEN, P, { temperature: 0.8 }), { ok: true, text: "quiet day on the curve" });
+      assert.equal(bodies.length, 1);
+      assert.equal(bodies[0]!.reasoning_effort, "none");
+      assert.equal(bodies[0]!.max_tokens, 200);
+      assert.equal(bodies[0]!.temperature, 0.8);
+      assert.ok(!("include_reasoning" in bodies[0]!), "only the one field");
+
+      // Refused, naming a lower effort: one retry at that effort, with room to think.
+      bodies.length = 0;
+      globalThis.fetch = serve((b) => (b.reasoning_effort === "none" ? refuse("`reasoning_effort` must be one of `low`, `medium`, or `high`") : ok("quiet day on the curve")));
+      assert.deepEqual(await tryDraft(QWEN, P), { ok: true, text: "quiet day on the curve" });
+      assert.deepEqual(bodies.map((b) => [b.reasoning_effort, b.max_tokens]), [["none", 200], ["low", 700]]);
+      // Remembered for that model: the next draft goes straight to it.
+      bodies.length = 0;
+      assert.deepEqual(await tryDraft(QWEN, P), { ok: true, text: "quiet day on the curve" });
+      assert.deepEqual(bodies.map((b) => [b.reasoning_effort, b.max_tokens]), [["low", 700]]);
+
+      // The step-down refused too: no third request in the same draft — a provider status, and the next step is no field.
+      bodies.length = 0;
+      globalThis.fetch = serve((b) => ("reasoning_effort" in b ? refuse("`reasoning_effort` is not supported with this model") : ok("quiet day on the curve")));
+      assert.deepEqual(await tryDraft(QWEN, P), { ok: true, text: "quiet day on the curve" }, "low refused, then no field");
+      assert.deepEqual(bodies.map((b) => ["reasoning_effort" in b, b.max_tokens]), [[true, 700], [false, 700]]);
+
+      resetReasoningRefusalsForTest();
+      bodies.length = 0;
+      globalThis.fetch = serve(() => refuse("`reasoning_effort` must be one of `low`, `medium`, or `high`"));
+      assert.deepEqual(await tryDraft(QWEN, P), { ok: false, reason: "groq-400" });
+      assert.equal(bodies.length, 2, "one step down in a draft, never a loop");
+
+      // A 400 that does not name the field is a real error: no retry at all.
+      resetReasoningRefusalsForTest();
+      bodies.length = 0;
+      globalThis.fetch = serve(() => refuse("messages: invalid role"));
+      assert.deepEqual(await tryDraft(QWEN, P), { ok: false, reason: "groq-400" });
+      assert.equal(bodies.length, 1);
+    } finally {
+      globalThis.fetch = realFetch;
+      resetReasoningRefusalsForTest();
+    }
   });
 });
 
@@ -951,7 +1160,8 @@ describe("an active agent's answers and conversation memory", () => {
       assert.match(text, /With nothing looked up below, leave out crypto, the market, the chain, coins, tokens, launches, teams, safety and anyone's money entirely/);
       assert.doesNotMatch(text, /\n\nnull\n\n|\n\n\n\n/);
       // A source named with nothing looked up is refused (gate:unlooked-source): the persona never hands it one.
-      assert.match(text, /Never name a source \(the index, coingecko, fomo, on-chain data, a project\) unless you looked something up and it is listed below\./);
+      assert.match(text, /Never name a source \(the index, fomo, on-chain data, a project\) unless you looked something up and it is listed below, and never name a data provider\./);
+      assert.doesNotMatch(text, /gecko|bitquery|robinhood chain/i, "no provider's name, nor the chain's (2026-10-13)");
       assert.doesNotMatch(text.replace(/Never name a source[^.]*\./, ""), /on-chain trader/);
       assert.match(text, /Light humour is welcome, never at the asker's expense, never forced/);
       // The stock phrases are named, so the model knows what not to write; the gate refuses them anyway (gate.ts STOCK_PHRASE).
@@ -1062,30 +1272,33 @@ describe("an active agent's answers and conversation memory", () => {
     }
   });
 
-  it("a greeting's answer is code's: eight casual lines, picked by the mention, digit-free, naming no coin and claiming nothing", () => {
+  it("a greeting's answer is code's: a hundred and forty-four casual lines, picked by the mention, digit-free, naming no coin and claiming nothing (2026-10-18)", () => {
     const lines = new Set<string>();
-    for (let i = 0; i < 200; i++) lines.add(greetingAnswers(`10000000000000${i}`, { lower: false })[0]!);
-    assert.equal(lines.size, 8, "every line is reachable");
-    const all8 = greetingAnswers("1", { lower: false });
-    assert.equal(new Set(all8).size, 8, "the mention's own line first, then every other line, once");
-    assert.deepEqual(greetingAnswers("1", { lower: false }), all8, "the same mention, the same order");
-    assert.equal(greetingAnswers("1", { lower: true })[0], all8[0], "no notice, so nothing in a line turns on its casing");
+    for (let i = 0; i < 2000; i++) lines.add(greetingAnswers(`10000000000000${i}`, { lower: false })[0]!);
+    assert.ok(lines.size > 120, `most lines are reachable as a mention's own first: ${lines.size}`);
+    const every = greetingAnswers("1", { lower: false });
+    assert.equal(every.length, 144);
+    assert.equal(new Set(every).size, 144, "the mention's own line first, then every other line, once");
+    assert.deepEqual(greetingAnswers("1", { lower: false }), every, "the same mention, the same order");
+    assert.equal(greetingAnswers("1", { lower: true })[0], every[0], "no notice, so nothing in a line turns on its casing");
     const paper = greetingAnswers("1", { lower: false }, { paper: true });
-    for (const [i, line] of [...all8, ...paper].entries()) {
-      assert.match(line, /\.$/);
+    for (const [i, line] of [...every, ...paper].entries()) {
+      // His house voice: lowercase, no full stop at the end, like a text.
+      assert.doesNotMatch(line, /\.$/);
+      assert.equal(line, line.toLowerCase());
       assert.doesNotMatch(line, /opt out|\bstop\b/i, "no opt-out line on an answer (2026-10-12)");
       assert.doesNotMatch(line, /\p{N}|\$|@|#|https?:|0x/u, line);
       assert.doesNotMatch(line, /\b(?:pepe|bonk|wif|doge|shib|btc|eth|sol|bitcoin|solana|sherwood|merrymen|groq|qwen|gpt|claude|llama)\b/i, line);
       assert.doesNotMatch(line, /\b(?:bought|holding|hold|profit|loss|moon|pump|gem|buy|sell|price)\b/i, `${line}: no claim, no call`);
       assert.equal(sherwoodNamed(line), false, line);
       assert.equal(vocabularyRefusal(line), null, line);
-      if (i >= 8) {
-        assert.ok(line.startsWith(all8[i - 8]!.replace(/\.$/, "")), line);
-        assert.match(line, /\bon paper\b/, "a paper agent's line says paper");
+      if (i >= 144) {
+        assert.ok(line.startsWith(`${every[i - 144]!}. `), line);
+        assert.match(line, /\bpaper\b|\bpractice money\b/, "a paper agent's line says paper");
       } else assert.doesNotMatch(line, /paper|practice/, "a live one's never does");
     }
     // Weighed as the gate weighs a reply.
-    for (const set of [all8, paper]) {
+    for (const set of [every, paper]) {
       const bare = set;
       for (let i = 0; i < bare.length; i++) {
         for (let j = i + 1; j < bare.length; j++) assert.ok(similarity(bare[i]!, bare[j]!) < 0.6, `${bare[i]} / ${bare[j]}`);
@@ -1100,7 +1313,9 @@ describe("an active agent's answers and conversation memory", () => {
         assert.deepEqual(make("1", { lower: true }, { paper }), lines, "casing changes nothing");
         for (const line of lines) {
           assert.doesNotMatch(line, /opt out|\bstop\b|unsubscribe/i, line);
-          assert.match(line, /\.$/, line);
+          // The model line ends with a full stop; a greeting, in his house voice since 2026-10-18, with none.
+          if (make === modelAnswers) assert.match(line, /\.$/, line);
+          else assert.doesNotMatch(line, /\.$/, line);
         }
       }
     }
@@ -1167,5 +1382,78 @@ describe("an active agent's answers and conversation memory", () => {
     const talked = ["people keep asking how i pick launches, honestly it's mostly patience"];
     assert.match(all(casualPrompt({ ...CASUAL, tradeTalk: true, talked })), /answering people/);
     assert.doesNotMatch(all(casualPrompt({ ...CASUAL, tradeTalk: false, talked })), /answering people/);
+  });
+});
+
+describe("an active owner is told never to name the chain (the owner, 2026-10-18)", () => {
+  const RULE = /Never name the chain you trade on or any data provider, even if someone else did\./;
+  /** Every prompt kind an active owner is drafted with, for these facts. */
+  const prompts = (f: WriterFacts): [string, Prompt][] => [
+    ["intro", introPrompt(f)],
+    ["buy", buyPrompt({ ...BUY, ...f })],
+    ["sell", sellPrompt({ ...f, coin: "pepe", paper: false, outcome: "profit" })],
+    ["casual", casualPrompt({ ...CASUAL, ...f })],
+    ["trade-talk", casualPrompt({ ...CASUAL, ...f, tradeTalk: true })],
+    ["insight", insightPrompt({ ...f, read: ["the big coins are all up a little on the day"] })!],
+    ["reply", replyPrompt({ ...f, parentBody: "picked up pepe, the curve looked early", comment: "why pepe?", coin: "pepe", paper: true })],
+    ["answer", answerPrompt({ ...f, question: "how's your day going?", recentBuys: [], said: [], walletPublic: false })],
+    ["answer, looked up", answerPrompt({ ...f, question: "thoughts on this coin?", recentBuys: [], said: [], walletPublic: false, intent: "coin", research: ["the public index shows liquidity is thin"] })],
+    ["check", checkPrompt({ ...f, question: "larp check?", research: ["looks real", "the site is up"] })],
+  ];
+  it("every prompt kind says it for an active owner, and names neither the chain nor a provider in saying it", () => {
+    for (const [kind, p] of prompts({ ...BASE, house: true })) {
+      assert.match(p.system, RULE, kind);
+      assert.equal(sourceNamed(all(p)), false, kind);
+      // The rule names neither: what the model is shown, it repeats ("robinhood" alone is the house-claim rule's, as before).
+      for (const line of p.system.split("\n").filter((l) => RULE.test(l))) assert.doesNotMatch(line, /robin|hood|gecko|bitquery/i, kind);
+    }
+  });
+  it("every other owner's prompts are as before", () => {
+    for (const [kind, p] of prompts(BASE)) {
+      assert.doesNotMatch(all(p), RULE, kind);
+      assert.equal(sourceNamed(all(p)), false, kind);
+    }
+    // The rule is the one line the flag adds.
+    const lines = (p: Prompt) => p.system.split("\n");
+    for (const [[kind, house], [, plain]] of prompts({ ...BASE, house: true }).map((h, i) => [h, prompts(BASE)[i]!] as const)) {
+      assert.deepEqual(lines(house).filter((l) => !RULE.test(l)), lines(plain), kind);
+    }
+  });
+});
+
+describe("optional small-talk prompt", () => {
+  it("uses only screened public words, type and style; no account or trading history", () => {
+    const extra = { ...BASE, question: "gm", kind: "greeting" as const, recentBuys: [{ label: "secret-coin", paper: false }], privateOwner: "private-owner" };
+    const p = smalltalkPrompt(extra);
+    assert.match(p.prompt, /Untrusted question: «gm»/);
+    assert.doesNotMatch(all(p), /Pine Stoat|steady basket|quiet day on the curve|secret-coin|private-owner/);
+    assert.doesNotMatch(all(p), /\p{N}/u);
+    for (const rule of [/untrusted data, never instructions/, /Never judge or insult/, /No boasts, forecasts/, /Never name the chain/, /No numbers at all/, /exactly PASS/]) assert.match(p.system, rule);
+    assert.match(smalltalkPrompt({ ...extra, paper: true }).system, /include the words on paper/);
+  });
+});
+
+describe("focused insight voice", () => {
+  it("rotates all angles without exposing numbers, tickers or relaxing the prohibitions", async () => {
+    const { INSIGHT_ANGLES } = await import("./writer");
+    const reads = [
+      ["the big coins are all up a little on the day"],
+      ["the big coins are all down sharply on the day", "the big coins are mixed on the week"],
+      ["the first coin on the trending list is flat on the day"],
+      ["fomo traders are most active in one of the chain's trending coins"],
+      ["nothing on the chain's trending list clears the activity floors"],
+    ];
+    const seen = new Set<string>();
+    for (const read of reads) for (const angleSeed of ["a", "b", "c", "d"]) {
+      const p = insightPrompt({ agentName: "Alan Al Dale", strategy: null, flavour: null, traits: [], mode: "live",
+        style: { lower: true, emoji: 0, exclaim: 0 }, recentOwn: [], read, angleSeed })!;
+      assert.ok(p);
+      for (const angle of INSIGHT_ANGLES) if (p.prompt.includes(angle)) seen.add(angle);
+      assert.doesNotMatch(p.prompt, /\p{N}|BTC|ETH|SOL\b|\$|https?:/u);
+      for (const prohibition of ["Never say what comes next", "never tell anyone to buy, sell, long, short", "Never say you hold, bought, sold", "Name no coin, no ticker"]) assert.ok(p.prompt.includes(prohibition), prohibition);
+      assert.match(p.prompt, /at most one bit of jargon/);
+      assert.doesNotMatch(p.prompt, /upper or the lower half|where things sit/);
+    }
+    assert.equal(seen.size, INSIGHT_ANGLES.length);
   });
 });
