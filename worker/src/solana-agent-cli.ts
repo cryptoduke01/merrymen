@@ -12,8 +12,11 @@ if (args.length === 1 && ["--help", "-h"].includes(args[0]!)) {
     process.exitCode = EX_CONFIG;
   } else {
     const controller = new AbortController();
-    process.once("SIGINT", () => controller.abort());
-    process.once("SIGTERM", () => controller.abort());
+    // Stopping is idempotent. A terminal's Ctrl+C reaches this worker and the
+    // `merrymen solana-agent` parent, which forwards the same signal again; a
+    // second delivery must not kill the worker mid-tick with the default action.
+    // The current tick finishes, then the loop exits. SIGKILL still forces it.
+    for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.on(signal, () => controller.abort());
     runSolanaAgent(controller.signal).catch(() => {
       process.stderr.write("Solana worker could not start. Verify its private configuration and shared database.\n");
       process.exitCode = 1;

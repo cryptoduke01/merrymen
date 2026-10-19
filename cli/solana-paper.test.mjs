@@ -134,6 +134,23 @@ test("Solana CLI duplicate init cannot refill a book or replace its limits", t =
   noEvmFiles(home);
 });
 
+test("Solana CLI renew restarts a book's limits without refilling or resetting it", t => {
+  const { home, run } = fixture(t);
+  const created = successJson(run(["init", "--owner", OWNER, "--cash", "100", "--per-trade", "5", "--daily", "10", "--expires-days", "1"]));
+  refusal(run(["renew", "--owner", OWNER, "--cash", "999999"]), /Invalid, duplicate or unsupported Solana paper option/);
+  refusal(run(["renew", "--owner", OTHER_OWNER]), /book does not exist/);
+  refusal(run(["renew", "--owner", OWNER, "--per-trade", "50"]), /per-trade limit must not exceed the daily limit/);
+  assert.deepEqual(successJson(run(["status", "--owner", OWNER])), created, "refused renewals change nothing");
+  const startedAt = Date.now();
+  const renewed = successJson(run(["renew", "--owner", OWNER, "--expires-days", "30", "--daily", "20"]));
+  assert.deepEqual({ ...renewed, limits: null, version: null, updatedAtMs: null }, { ...created, limits: null, version: null, updatedAtMs: null });
+  assert.equal(renewed.version, created.version + 1);
+  assert.deepEqual({ ...renewed.limits, expiresAtMs: 0 }, { ...created.limits, dailyUsdg: "20000000", expiresAtMs: 0 });
+  assert.ok(renewed.limits.expiresAtMs >= startedAt + 30 * 86_400_000 && renewed.limits.expiresAtMs <= Date.now() + 30 * 86_400_000);
+  assert.deepEqual(successJson(run(["status", "--owner", OWNER])), renewed);
+  noEvmFiles(home);
+});
+
 test("Solana CLI owner labels select separate books without case folding or fallback", t => {
   const { run } = fixture(t);
   const created = successJson(run(["init", "--owner", OWNER, "--cash", "50"]));

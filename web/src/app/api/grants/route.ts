@@ -50,6 +50,46 @@ const HEARTBEAT_FILE = homePaths.heartbeat();
  * copy of this check, since it builds a filename from the address. */
 const isAddr = (v: unknown): v is `0x${string}` => typeof v === "string" && /^0x[0-9a-fA-F]{40}$/.test(v);
 
+/**
+ * BODY LIMITS. A grant is a serialized permission plus a few fields; partner
+ * activation (lib/partner-enrollment.ts) carries the same grant in at most
+ * 256 KiB, with the permission itself capped at 240,000 characters. Nothing a
+ * signer makes comes close. The kill switch's body is a few named fields.
+ * Every check below parses or scans the whole payload, so it is bounded first.
+ */
+const GRANT_BODY_MAX_BYTES = 256 * 1024;
+const GRANT_DELETE_BODY_MAX_BYTES = 8 * 1024;
+
+/**
+ * The body as text, or null when it is larger than `limit` bytes. Counted
+ * while it streams, so an oversized body is never held in memory whole; the
+ * declared length is refused first as the cheap case.
+ */
+async function readGrantBody(req: Request, limit: number): Promise<string | null> {
+  const declared = req.headers.get("content-length");
+  if (declared !== null && !(Number(declared) <= limit)) return null;
+  if (!req.body) return "";
+  const reader = req.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > limit) {
+        await reader.cancel().catch(() => undefined);
+        return null;
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return Buffer.concat(chunks, size).toString("utf8");
+}
+const tooLarge = () => NextResponse.json({ error: "That request is too large. Nothing was saved." }, { status: 413 });
+
 export interface AgentStatus {
   exists: boolean;
   /** Authenticated owner's source hold; independent of saved balances or old worker status. */
@@ -131,7 +171,13 @@ export interface AgentStatus {
 }
 
 export async function POST(req: Request) {
-  const grant = (await req.json()) as StoredGrant;
+  let text: string | null;
+  try { text = await readGrantBody(req, GRANT_BODY_MAX_BYTES); }
+  catch { return NextResponse.json({ error: "not a grant" }, { status: 400 }); }
+  if (text === null) return tooLarge();
+  let grant: StoredGrant;
+  try { grant = JSON.parse(text) as StoredGrant; }
+  catch { return NextResponse.json({ error: "not a grant" }, { status: 400 }); }
   if (!grant?.serialized || !isAddr(grant?.smartAccount)) {
     return NextResponse.json({ error: "not a grant" }, { status: 400 });
   }
@@ -488,7 +534,10 @@ export async function DELETE(req: Request) {
     const tenant = tenantOf(req);
     if (!tenant) return NextResponse.json({ error: "not signed in" }, { status: 401 });
     // A tab can switch logins while the owner's stop request is in flight.
-    const body = await req.json().catch(() => null) as { expectedTenant?: unknown; purpose?: unknown; expectedAccount?: unknown; expectedSession?: unknown } | null;
+    const text = await readGrantBody(req, GRANT_DELETE_BODY_MAX_BYTES).catch(() => "");
+    if (text === null) return NextResponse.json({ error: "That request is too large. Nothing was deleted." }, { status: 413 });
+    let body: { expectedTenant?: unknown; purpose?: unknown; expectedAccount?: unknown; expectedSession?: unknown } | null;
+    try { body = JSON.parse(text) as typeof body; } catch { body = null; }
     if (body?.expectedTenant !== undefined &&
         (typeof body.expectedTenant !== "string" || body.expectedTenant.toLowerCase() !== tenant.toLowerCase())) {
       return NextResponse.json({ error: "The signed-in account changed. Check the account before stopping it." }, { status: 409 });

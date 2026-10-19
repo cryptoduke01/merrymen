@@ -28,6 +28,7 @@ const ERRORS = {
   "invalid-mint": "Solana RPC did not return a supported initialized mint.",
   "stale-mint": "Solana mint context is outside the current slot bounds.",
   "invalid-quote": "Jupiter did not return a valid quote for the requested swap.",
+  "zero-output": "Jupiter quotes no output for this amount; it is too small to trade.",
   "stale-quote": "Jupiter quote context is outside the current slot bounds.",
 } as const;
 export class SolanaMarketError extends Error {
@@ -90,6 +91,8 @@ function mintFromRpc(raw: unknown, mint: string, minSlot: number, observedAtMs: 
   if (mint === SOLANA_USDG_MINT && !trustedCash) return invalidMint();
   const reasons = new Set<string>();
   if (info.freezeAuthority !== null && !trustedCash) reasons.add("freeze-authority");
+  // A live mint authority can inflate supply after the buy and dilute every holder.
+  if (info.mintAuthority !== null && !trustedCash) reasons.add("mint-authority");
   const seen = new Set<string>();
   for (const extension of list) {
     if (!object(extension) || typeof extension.extension !== "string" || seen.has(extension.extension)) return invalidMint();
@@ -103,6 +106,8 @@ function mintFromRpc(raw: unknown, mint: string, minSlot: number, observedAtMs: 
       case "transferHook":
         if (!object(state) || !authority(state.programId) || !authority(state.authority)) return invalidMint();
         if (state.programId !== null) reasons.add("transfer-hook");
+        // A disabled hook whose authority remains can point at any program later.
+        else if (state.authority !== null && !trustedCash) reasons.add("transfer-hook-authority");
         break;
       case "transferFeeConfig": {
         if (!object(state) || !authority(state.transferFeeConfigAuthority) || !authority(state.withdrawWithheldAuthority)) return invalidMint();
@@ -224,6 +229,20 @@ export function validSolanaJupiterRoute(value: unknown, intent: SolanaSwapIntent
   return visited === nodes.size;
 }
 
+/**
+ * A well-formed answer for exactly this swap whose minimum output is nothing:
+ * the amount is too small for any route to return a unit (dust). This is a
+ * definite answer about the amount, unlike an outage or a malformed quote,
+ * and it is never a fill: callers may only value such a holding at zero.
+ */
+function zeroOutputQuote(raw: unknown, intent: SolanaSwapIntent): boolean {
+  if (!object(raw) || Object.hasOwn(raw, "error") || raw.swapMode !== "ExactIn" ||
+    raw.inputMint !== intent.inputMint || raw.outputMint !== intent.outputMint || raw.inAmount !== intent.amountRaw ||
+    raw.slippageBps !== intent.slippageBps || !unsigned(raw.outAmount) || raw.otherAmountThreshold !== "0") return false;
+  // The slippage floor of the quoted output must itself round to zero.
+  return BigInt(raw.outAmount) * BigInt(10_000 - intent.slippageBps) < 10_000n;
+}
+
 export type SolanaMarket = {
   readMint(address: string): Promise<SolanaMint>;
   quote(intent: SolanaSwapIntent): Promise<SolanaQuote>;
@@ -269,6 +288,7 @@ export function createSolanaMarket(options: MarketOptions = {}): SolanaMarket {
         catch { throw new SolanaRpcError(signal.aborted ? "timeout" : "network"); }
         return readSolanaJson(response, signal);
       }, options.timeoutMs);
+      if (zeroOutputQuote(raw, intent)) throw new SolanaMarketError("zero-output");
       if (!object(raw) || Object.hasOwn(raw, "error") || raw.swapMode !== "ExactIn" ||
         raw.inputMint !== intent.inputMint || raw.outputMint !== intent.outputMint || raw.inAmount !== intent.amountRaw ||
         raw.slippageBps !== intent.slippageBps || !unsigned(raw.outAmount, true) ||

@@ -154,7 +154,7 @@ describe("Token-2022 buy screening", () => {
   it("permits passive and disabled extensions without treating missing fields as disabled", async () => {
     const extensions = [feeExtension(fee(0, Number(18446744073709551615n))),
       { extension: "permanentDelegate", state: { delegate: null } },
-      { extension: "transferHook", state: { authority: OTHER, programId: null } },
+      { extension: "transferHook", state: { authority: null, programId: null } },
       { extension: "defaultAccountState", state: { accountState: "initialized" } },
       { extension: "metadataPointer", state: { authority: OTHER, metadataAddress: TOKEN } },
       { extension: "mintCloseAuthority", state: { closeAuthority: OTHER } }];
@@ -169,6 +169,22 @@ describe("Token-2022 buy screening", () => {
       await assert.rejects(fixture({ mint: token2022Mint([extension]) }).market.readMint(TOKEN), marketError("invalid-mint"));
     }
   });
+  it("blocks an active mint authority and a hook authority that can enable a hook later", async () => {
+    // Supply can be inflated at any time while a mint authority exists.
+    const inflatable = rawMint(); inflatable.value.data.parsed.info.mintAuthority = OTHER;
+    assert.deepEqual((await fixture({ mint: inflatable }).market.readMint(TOKEN)).buyBlockedReasons, ["mint-authority"]);
+    const both = rawMint(); both.value.data.parsed.info.mintAuthority = OTHER; both.value.data.parsed.info.freezeAuthority = OTHER;
+    assert.deepEqual((await fixture({ mint: both }).market.readMint(TOKEN)).buyBlockedReasons, ["freeze-authority", "mint-authority"]);
+    // A disabled hook with an authority is one instruction away from an arbitrary transfer program.
+    const dormant = token2022Mint([{ extension: "transferHook", state: { authority: OTHER, programId: null } }]);
+    assert.deepEqual((await fixture({ mint: dormant }).market.readMint(TOKEN)).buyBlockedReasons, ["transfer-hook-authority"]);
+    const inflatableHook = token2022Mint([{ extension: "transferHook", state: { authority: OTHER, programId: null } }]);
+    inflatableHook.value.data.parsed.info.mintAuthority = OTHER;
+    assert.deepEqual((await fixture({ mint: inflatableHook }).market.readMint(TOKEN)).buyBlockedReasons, ["mint-authority", "transfer-hook-authority"]);
+    // Neither power can be renounced back into safety by a null program alone.
+    const locked = token2022Mint([{ extension: "transferHook", state: { authority: null, programId: null } }]);
+    assert.deepEqual((await fixture({ mint: locked }).market.readMint(TOKEN)).buyBlockedReasons, []);
+  });
   it("permits known USDG issuer powers but still rejects activated hooks or transfer fees", async () => {
     const extensions = [{ extension: "permanentDelegate", state: { delegate: OTHER } }, feeExtension(),
       { extension: "transferHook", state: { authority: OTHER, programId: null } },
@@ -176,6 +192,8 @@ describe("Token-2022 buy screening", () => {
         withdrawWithheldAuthorityElgamalPubkey: Buffer.alloc(32).toString("base64"), harvestToMintEnabled: true,
         withheldAmount: Buffer.alloc(64).toString("base64") } }];
     const mint = token2022Mint(extensions, true); mint.value.data.parsed.info.freezeAuthority = OTHER;
+    // The configured cash issuer mints USDG; that power is not a reason to refuse cash.
+    mint.value.data.parsed.info.mintAuthority = OTHER;
     assert.deepEqual((await fixture({ mint }).market.readMint(SOLANA_USDG_MINT)).buyBlockedReasons, []);
     for (const [ext, reason] of [[feeExtension(fee(), fee(10, 100)), "transfer-fee"],
       [{ extension: "transferHook", state: { authority: OTHER, programId: OTHER } }, "transfer-hook"]] as const) {
@@ -236,6 +254,23 @@ describe("Jupiter paper quotes", () => {
     }
     for (const otherAmountThreshold of ["1979999", "2000001"]) {
       await assert.rejects(fixture({ quote: rawQuote({ otherAmountThreshold }) }).market.quote(INTENT), safeError);
+    }
+  });
+  it("reports a well-formed quote with no minimum output as dust, distinct from an invalid quote", async () => {
+    // 1 raw unit at 1% slippage floors to 0, as does an output of 0.
+    for (const outAmount of ["0", "1"]) {
+      await assert.rejects(fixture({ quote: rawQuote({ outAmount, otherAmountThreshold: "0", routePlan: [] }) }).market.quote(INTENT), marketError("zero-output"));
+    }
+    // Anything else about the answer wrong, or an output whose floor is not
+    // zero, stays an invalid quote: dust is never inferred from a bad reply.
+    for (const override of [
+      { outAmount: "2", otherAmountThreshold: "0" }, { outAmount: "0", otherAmountThreshold: "1" },
+      { outAmount: "0", otherAmountThreshold: "0", inputMint: OTHER }, { outAmount: "0", otherAmountThreshold: "0", inAmount: "999999" },
+      { outAmount: "0", otherAmountThreshold: "0", slippageBps: 50 }, { outAmount: "0", otherAmountThreshold: "0", swapMode: "ExactOut" },
+      { outAmount: "0", otherAmountThreshold: "0", error: "no route" }, { outAmount: "-1", otherAmountThreshold: "0" },
+      { outAmount: 0, otherAmountThreshold: "0" }, { outAmount: "0", otherAmountThreshold: 0 },
+    ]) {
+      await assert.rejects(fixture({ quote: rawQuote(override) }).market.quote(INTENT), marketError("invalid-quote"), JSON.stringify(override));
     }
   });
   it("requires an actual connected route; supports split and multi-hop quotes", async () => {

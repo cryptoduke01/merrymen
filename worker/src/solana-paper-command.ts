@@ -4,7 +4,7 @@ import { CHAINS } from "../../packages/core/src/ids";
 import { parseSolanaRawAmount, parseSolanaSwapIntent, solanaPaperAgentId, validateSolanaPaperLimits } from "../../packages/core/src/solana";
 import { merrymenHome } from "./home";
 import { createSolanaMarket } from "./solana-market";
-import { SolanaPaperStore } from "./solana-paper-store";
+import { SolanaPaperStore, type SolanaPaperLimitsRenewal } from "./solana-paper-store";
 import { assertSolanaPaperLocalMode, createSolanaPaperService, type SolanaPaperMarket } from "./solana-paper-service";
 
 export class SolanaPaperCommandError extends Error {
@@ -15,6 +15,8 @@ export const SOLANA_PAPER_HELP = `Solana paper trading — local simulation; no 
 
 init --owner PUBLIC_KEY [--cash 1000] [--per-trade 25] [--daily 100]
      [--max-ops 20] [--drawdown-bps 1000] [--expires-days 7]
+renew --owner PUBLIC_KEY [--expires-days 7] [--per-trade USDG] [--daily USDG]
+      [--max-ops N] [--drawdown-bps N]
 status --owner PUBLIC_KEY
 inspect-mint --mint MINT
 quote --owner PUBLIC_KEY --input MINT --output MINT --amount-raw INTEGER
@@ -25,7 +27,10 @@ trade --owner PUBLIC_KEY --input MINT --output MINT --amount-raw INTEGER
 Each swap must have exactly one Solana USDG leg. Raw amounts use token base
 units (USDG has 6 decimals). Reuse a trade's request ID after interruption;
 it returns the saved receipt without applying another fill. Never reset a
-book by repeating init: an existing book is refused.
+book by repeating init: an existing book is refused. Once limits expire, the
+owner can renew them: renew restarts the expiry from now and changes only the
+limits given (others are kept). It never changes cash, positions, P&L or
+receipts, and the rolling 24-hour limits still count earlier trades.
 
 Quotes require MERRYMEN_SOLANA_RPC_MAINNET and MERRYMEN_JUPITER_API_KEY.
 An optional MERRYMEN_SOLANA_RPC_MAINNET_FALLBACK provides independent RPC
@@ -36,6 +41,8 @@ minimum output; network fees and rent are excluded.`;
 
 const FLAGS: Record<string, readonly string[]> = {
   init: ["owner", "cash", "per-trade", "daily", "max-ops", "drawdown-bps", "expires-days"],
+  // Deliberately no --cash: a renewal can never refill a book.
+  renew: ["owner", "per-trade", "daily", "max-ops", "drawdown-bps", "expires-days"],
   status: ["owner"],
   "inspect-mint": ["mint"],
   quote: ["owner", "input", "output", "amount-raw", "slippage-bps"],
@@ -79,6 +86,22 @@ function numberOption(value: string, maximum: number): number {
     throw new SolanaPaperCommandError("Numeric options must be bounded nonnegative integers.");
   }
   return Number(value);
+}
+
+/** Parse and bound every renewal option before a writable book is opened. */
+function renewalOf(flags: Record<string, string>, nowMs: number): SolanaPaperLimitsRenewal {
+  const days = numberOption(flags["expires-days"] ?? "7", 365);
+  if (days < 1) throw new SolanaPaperCommandError("Renewed limits must last at least one day (--expires-days 1 or more).");
+  const renewal: SolanaPaperLimitsRenewal = { expiresAtMs: nowMs + days * 86_400_000 };
+  if (flags["per-trade"] !== undefined) renewal.perTradeUsdg = paperUsdgRaw(flags["per-trade"]);
+  if (flags.daily !== undefined) renewal.dailyUsdg = paperUsdgRaw(flags.daily);
+  if (renewal.perTradeUsdg !== undefined && renewal.dailyUsdg !== undefined && BigInt(renewal.perTradeUsdg) > BigInt(renewal.dailyUsdg)) {
+    throw new SolanaPaperCommandError("The per-trade limit must not exceed the daily limit.");
+  }
+  if (flags["max-ops"] !== undefined) renewal.maxOpsPerDay = numberOption(flags["max-ops"], 100_000);
+  if (flags["drawdown-bps"] !== undefined) renewal.maxDrawdownBps = numberOption(flags["drawdown-bps"], 10_000);
+  if (renewal.maxOpsPerDay === 0 || renewal.maxDrawdownBps === 0) throw new SolanaPaperCommandError("Operation and drawdown limits must be at least 1.");
+  return renewal;
 }
 
 function openPaperStore(): SolanaPaperStore {
@@ -132,9 +155,11 @@ export async function runSolanaPaperCommand(args: readonly string[], deps: Solan
     expiresAtMs: createdAt + days * 86_400_000,
   }, createdAt) : null;
   const initialCash = command === "init" ? paperUsdgRaw(flags.cash ?? "1000") : null;
+  const renewal = command === "renew" ? renewalOf(flags, createdAt) : null;
   const store = (deps.openStore ?? openPaperStore)();
   try {
     if (command === "init") return store.create(owner, initialCash!, limits!, createdAt);
+    if (command === "renew") return store.renew(owner, renewal!, createdAt);
     if (command === "status") {
       const book = store.get(owner);
       if (!book) throw new SolanaPaperCommandError("No Solana paper book exists for this owner.");

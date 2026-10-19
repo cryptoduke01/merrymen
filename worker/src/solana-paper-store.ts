@@ -68,6 +68,8 @@ export interface SolanaPaperReceipt {
   safetyObservedAtMs: number;
   /** Recorded buy exit evidence; this is not an executed exit. */
   buyExitQuote?: SolanaQuote;
+  /** Held mints valued at zero for this decision: no route returned any output for them. */
+  zeroValuedMints?: string[];
   side: "buy" | "sell";
   createdAtMs: number;
   version: number;
@@ -94,6 +96,10 @@ export interface SolanaPaperSnapshot {
   updatedAtMs: number;
 }
 export type SolanaPaperBook = Omit<SolanaPaperSnapshot, "trades">;
+/** A renewal names a new expiry; any limit it omits keeps its current value. */
+export type SolanaPaperLimitsRenewal = { expiresAtMs: number }
+  & Partial<Pick<SolanaPaperLimits, "perTradeUsdg" | "dailyUsdg" | "maxOpsPerDay" | "maxDrawdownBps">>;
+const RENEWAL_FIELDS = new Set(["expiresAtMs", "perTradeUsdg", "dailyUsdg", "maxOpsPerDay", "maxDrawdownBps"]);
 type Book = SolanaPaperBook;
 export interface SolanaPaperCommit {
   owner: string;
@@ -107,6 +113,13 @@ export interface SolanaPaperCommit {
   tokenDecimals: number;
   /** All current positions at exact full size, or [] for an exit during outage. */
   marks: SolanaQuote[];
+  /**
+   * Held mints whose full-size exit quote returned no output at all (dust).
+   * Each is valued at zero, the most conservative value: it can only lower
+   * equity, so it never raises the peak or loosens the drawdown limit. Never
+   * use it for a mark that failed; a failed mark blocks the buy.
+   */
+  zeroValuedMints?: string[];
   expectedVersion: number;
   /** Preparation timestamp only; risk checks use the store clock after locking. */
   nowMs: number;
@@ -228,6 +241,39 @@ export class SolanaPaperStore {
     });
   }
 
+  /**
+   * Owner-run renewal of an existing book's limits, the only way to continue a
+   * book whose limits expired. It replaces `limits` and nothing else: cash,
+   * initial cash, the high-water mark, realized P&L, positions and every
+   * receipt stay as they were, so a renewal can neither refill nor reset a
+   * book. The new limits pass the same validation as creation, and the rolling
+   * 24-hour caps keep counting trades made before the renewal. The version
+   * advances, so a trade quoted against the old limits must be quoted again.
+   */
+  renew(owner: string, renewal: SolanaPaperLimitsRenewal, preparedAtMs = this.now()): SolanaPaperSnapshot {
+    ownerKey(owner);
+    timestamp(preparedAtMs);
+    if (!renewal || typeof renewal !== "object" || Array.isArray(renewal)
+      || Object.keys(renewal).some((key) => !RENEWAL_FIELDS.has(key)) || typeof renewal.expiresAtMs !== "number") fail("invalid_input");
+    const changes = Object.fromEntries(Object.entries(renewal).filter(([, value]) => value !== undefined));
+    return this.transaction(() => {
+      const book = this.readBook(owner);
+      if (!book) fail("book_missing");
+      const nowMs = this.now();
+      timestamp(nowMs);
+      if (preparedAtMs > nowMs) fail("invalid_input");
+      if (nowMs < book.updatedAtMs) fail("clock_rollback");
+      if (book.version === Number.MAX_SAFE_INTEGER) fail("version_conflict");
+      // Validation errors keep their own message: they say which limit is wrong.
+      const limits = validateSolanaPaperLimits({ ...book.limits, ...changes }, nowMs);
+      const renewed: Book = { ...book, limits, version: book.version + 1, updatedAtMs: nowMs };
+      const update = this.db.prepare("UPDATE solana_paper_books SET version = ?, book_json = ? WHERE owner = ? AND version = ?")
+        .run(renewed.version, JSON.stringify(renewed), owner, book.version);
+      if (update.changes !== 1) fail("version_conflict");
+      return this.get(owner)!;
+    });
+  }
+
   get(owner: string): SolanaPaperSnapshot | null {
     ownerKey(owner);
     // One read statement supplies book + trades under the same SQLite snapshot.
@@ -323,15 +369,24 @@ export function applySolanaPaperCommit(bookInput: SolanaPaperBook, input: Solana
   if (recentNotionals.length >= book.limits.maxOpsPerDay) fail("operation_limit");
   if (recentNotionals.reduce((sum, raw) => sum + BigInt(raw), 0n) + notional > BigInt(book.limits.dailyUsdg)) fail("daily_limit");
 
+  const zeroValued = input.zeroValuedMints ?? [];
+  if (!Array.isArray(zeroValued) || zeroValued.length > SOLANA_PAPER_MAX_POSITIONS || new Set(zeroValued).size !== zeroValued.length
+    || zeroValued.some((mint) => !book.positions.some((held) => held.mint === mint))) fail("invalid_marks");
+
   const cashBefore = BigInt(book.cashRaw);
   let equityBefore = cashBefore;
   // Explicit degraded exit mode: [] permits selling without other assets'
   // feeds. Partial or stale marks never silently masquerade as a full book.
-  const completeMarks = side === "buy" || input.marks.length > 0;
+  const completeMarks = side === "buy" || input.marks.length > 0 || zeroValued.length > 0;
   if (completeMarks) {
-    if (input.marks.length !== book.positions.length) fail("invalid_marks");
+    if (input.marks.length + zeroValued.length !== book.positions.length) fail("invalid_marks");
     for (const held of book.positions) {
       const mark = input.marks.find((quote) => quote.inputMint === held.mint);
+      if (zeroValued.includes(held.mint)) {
+        // Dust no route will buy is worth nothing here, never an extrapolation.
+        if (mark) fail("invalid_marks");
+        continue;
+      }
       if (!mark) fail("invalid_marks");
       const markIntent: SolanaSwapIntent = {
         kind: "spl-swap", chain: CHAINS.solana, mode: "paper", requestId: "mark",
@@ -387,6 +442,7 @@ export function applySolanaPaperCommit(bookInput: SolanaPaperBook, input: Solana
     quote: structuredClone(input.quote), side, createdAtMs: nowMs, version: book.version,
     safetyObservedAtMs: input.safetyObservedAtMs,
     ...(side === "buy" ? { buyExitQuote: structuredClone(input.buyExitQuote!) } : {}),
+    ...(zeroValued.length ? { zeroValuedMints: [...zeroValued] } : {}),
     inputAmountRaw: amountIn.toString(), outputAmountRaw: amountOut.toString(),
     notionalUsdgRaw: notional.toString(), realizedPnlRaw: realized.toString(),
   };
