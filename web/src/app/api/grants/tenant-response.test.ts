@@ -124,6 +124,19 @@ it("permission replacement uses the authenticated tenant and retains the destruc
   assert.deepEqual(removed, []);
 });
 
+it("an oversized stop body is refused with 413 before it is parsed, and nothing is stopped or removed", async () => {
+  const big = { expectedTenant: A, purpose: "delete-agent", pad: "x".repeat(8 * 1024) };
+  const response = await DELETE(replacementRequest(big));
+  assert.equal(response.status, 413);
+  assert.match(((await response.json()) as { error: string }).error, /too large\. Nothing was deleted/);
+  assert.deepEqual(removed, []); assert.deepEqual(replacements, []); assert.deepEqual(solanaStopped, []);
+  // Just under the limit is an ordinary stop.
+  const fits = { expectedTenant: A, purpose: "delete-agent", pad: "" };
+  fits.pad = "x".repeat(8 * 1024 - JSON.stringify(fits).length);
+  assert.equal((await DELETE(replacementRequest(fits))).status, 200);
+  assert.deepEqual(removed, [A]);
+});
+
 it("a legacy open renewal tab's bare DELETE cannot erase its agent or group approvals", async () => {
   const response = await DELETE(replacementRequest({ expectedTenant: A }));
   assert.equal(response.status, 400);
