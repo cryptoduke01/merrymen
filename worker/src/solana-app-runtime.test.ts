@@ -52,11 +52,11 @@ async function fixture(options: { declared?: string } = {}) {
     if (usdg) { b[165] = 2; b.writeUInt16LE(7, 166); } else { b.writeUInt32LE(1, 109); b.writeBigUInt64LE(BigInt(rentExempt(165)), 113); }
     return b;
   };
-  const state = () => {
+  const state = (epoch = controls.epoch, sequence = controls.sequence) => {
     const b = Buffer.alloc(SOLANA_VAULT_ACCOUNT_SIZE); Buffer.from(SOLANA_VAULT_DISCRIMINATOR).copy(b); let p = 8;
     b[p++] = 2; b[p++] = 255;
     for (const value of [owner, session]) { keyBytes(value).copy(b, p); p += 32; }
-    for (const value of [controls.epoch, controls.sequence, BigInt(limits.expiresAtMs / 1000), BigInt(limits.perTradeUsdg), BigInt(limits.dailyUsdg),
+    for (const value of [epoch, sequence, BigInt(limits.expiresAtMs / 1000), BigInt(limits.perTradeUsdg), BigInt(limits.dailyUsdg),
       BigInt(limits.perTradeWsol), BigInt(limits.dailyWsol)]) { b.writeBigUInt64LE(value, p); p += 8; }
     b.writeUInt16LE(limits.maxOpsPerDay, p); return b;
   };
@@ -75,6 +75,7 @@ async function fixture(options: { declared?: string } = {}) {
     calls.push({ method, key: params[0] });
     if (method === "getSlot") return 1000;
     if (method === "getBlockHeight") return controls.height;
+    if (method === "getEpochInfo") return { absoluteSlot: 1000, blockHeight: controls.height, epoch: 2, slotIndex: 1000, slotsInEpoch: 432_000 };
     if (method === "getMinimumBalanceForRentExemption") return rentExempt(params[0] as number);
     if (method === "getAccountInfo") {
       if (params[0] === PROGRAM) return response(account(program, LOADER, true));
@@ -91,8 +92,11 @@ async function fixture(options: { declared?: string } = {}) {
     if (method === "getTransaction") return controls.finalized ? { version: 0, slot: 1000, transaction: [controls.signed, "base64"], meta: controls.malformed ? {} : { err: controls.failed ? { InstructionError: [0, "InvalidArgument"] } : null } } : null;
     throw new Error(`Unexpected test RPC ${method}`);
   };
-  const rpc: SolanaLiveRpc = { read: fn => fn(read), send: async wire => {
-    controls.sends++;
+  // Two independent providers. Both answer honestly unless a test replaces one.
+  const providers: { primary: SolanaLiveRead | null; fallback: SolanaLiveRead | null } = { primary: null, fallback: null };
+  const sent: string[] = [];
+  const rpc: SolanaLiveRpc = { read: fn => fn(providers.primary ?? read), readEach: async fn => [await fn(providers.primary ?? read), await fn(providers.fallback ?? read)], send: async wire => {
+    controls.sends++; sent.push(wire);
     const saved = await new SolanaTradingStore(db, scope, () => clock.now).setup();
     assert.equal(saved?.signedTransactionBase64, wire, "exact bytes committed before RPC send");
     controls.signed = wire; controls.signature = saved!.signature!;
@@ -121,7 +125,8 @@ async function fixture(options: { declared?: string } = {}) {
     await db.prepare("INSERT INTO solana_runtime_sessions(tenant,owner,record_json,sealed_seed) VALUES(?,?,?,?)").run(TENANT, owner, JSON.stringify(record),
       sealSecret(`solana-session/v1 ${TENANT} ${owner} ${PROGRAM} ${vault} ${session} ${record.sessionEpoch}\n` + sessionSeed.toString("base64"), Buffer.alloc(32, 30)));
   };
-  return { raw, db, clock, scope, owner, session, sessionSeed, controls, bindings, app, runtime, sign, live, trade, env, rpc, market, registered, programData, dataAddress, calls, feePayer, vault, cashAta, wsolAta, ownerCashAta, ownerWsolAta };
+  return { raw, db, clock, scope, owner, session, sessionSeed, controls, bindings, app, runtime, sign, live, trade, env, rpc, market, registered, programData, dataAddress, calls, feePayer, vault, cashAta, wsolAta, ownerCashAta, ownerWsolAta,
+    read, providers, sent, state, response };
 }
 
 test("authenticated paper execution is durable and never calls transaction submission", async () => {
@@ -150,7 +155,7 @@ test("live configuration failure never falls back to a paper fill", async () => 
   } finally { f.raw.close(); }
 });
 
-test("owner setup persists exact signed bytes before send and survives a lost response without rebroadcast", async () => {
+test("owner setup persists exact signed bytes before send and survives a lost response with no replacement transaction", async () => {
   const f = await fixture();
   try {
     await f.live(); const setup = await f.app.prepareLive(f.scope, { limits, sessionPublicKey: f.session });
@@ -158,14 +163,16 @@ test("owner setup persists exact signed bytes before send and survives a lost re
     const first = await f.app.submitSetup(f.scope, { signedTransactionBase64 });
     assert.equal(first.status, "pending"); assert.equal(f.controls.sends, 1);
     const restarted = f.runtime();
-    assert.deepEqual(await restarted.submitSetup(f.scope, { signedTransactionBase64 }), first); assert.equal(f.controls.sends, 1);
+    // Unseen by both providers with its blockhash still valid: the same bytes go out again.
+    assert.deepEqual(await restarted.submitSetup(f.scope, { signedTransactionBase64 }), first); assert.equal(f.controls.sends, 2);
+    assert.deepEqual(new Set(f.sent), new Set([signedTransactionBase64]), "only the owner's saved bytes are ever sent");
     f.controls.initialized = true; f.controls.finalized = true;
     await assert.rejects(restarted.activateLive(f.scope, { signature: first.signature, sessionSecretKey: Buffer.alloc(32, 99).toString("base64") }), /does not match/);
     await restarted.activateLive(f.scope, { signature: first.signature, sessionSecretKey: f.sessionSeed.toString("base64") });
     const stored = await f.db.prepare("SELECT sealed_seed FROM solana_runtime_sessions").get() as { sealed_seed: string };
     assert.ok(!stored.sealed_seed.includes(f.sessionSeed.toString("base64")));
     assert.equal((await new SolanaTradingStore(f.db, f.scope).session())!.session, f.session);
-    assert.equal(f.controls.sends, 1);
+    assert.equal(f.controls.sends, 2, "a finalized transaction is not sent again");
   } finally { f.raw.close(); }
 });
 
@@ -214,11 +221,12 @@ test("never-landed owner setup resolves only after finalized expiry and an uncha
     await f.app.submitSetup(f.scope, { signedTransactionBase64 });
     f.controls.height = 5000;
     assert.equal((await f.app.submitSetup(f.scope, { signedTransactionBase64 })).status, "pending");
+    assert.equal(f.controls.sends, 2, "rebroadcast while its blockhash can still land");
     f.controls.height = 5001;
     assert.equal((await f.app.submitSetup(f.scope, { signedTransactionBase64 })).status, "failed");
     const saved = await new SolanaTradingStore(f.db, f.scope).setup();
     assert.equal(saved!.expiryProof!.blockHeight, "5001"); assert.equal(saved!.expiryProof!.vaultSequence, null);
-    assert.equal(f.controls.sends, 1);
+    assert.equal(f.controls.sends, 2, "never after it expired"); assert.deepEqual(new Set(f.sent), new Set([signedTransactionBase64]));
     await f.app.prepareLive(f.scope, { limits, sessionPublicKey: f.session });
   } finally { f.raw.close(); }
 });
@@ -250,7 +258,7 @@ test("a revoke dropped while a trade lands resolves on its unchanged epoch and f
       assert.equal((await f.app.submitOwnerAction(f.scope, { signedTransactionBase64 })).status, "failed", `tradeLands=${tradeLands}`);
       const saved = (await new SolanaTradingStore(f.db, f.scope).setup())!;
       assert.equal(saved.expiryProof!.sessionEpoch, "1"); assert.equal(saved.expiryProof!.vaultSequence, tradeLands ? "6" : "5");
-      assert.equal(f.controls.sends, 1, "resolved without a replacement transaction");
+      assert.deepEqual(new Set(f.sent), new Set([signedTransactionBase64]), "resolved without a replacement transaction");
       // The owner can act again.
       await f.app.prepareOwnerAction(f.scope, { action: "revoke" });
     } finally { f.raw.close(); }
@@ -531,5 +539,115 @@ test("the fee payer warning threshold is explicit configuration (audit G2-4)", a
     assert.equal(status.live.feePayer?.level, "ok"); assert.deepEqual(status.live.warnings, []); assert.equal(status.live.feePayer?.lowLamports, "2500000");
     const broken = f.runtime({ env: { ...f.env, MERRYMEN_SOLANA_FEE_PAYER_LOW_LAMPORTS: "lots" }, log: () => {} });
     assert.match((await broken.status(f.scope)).live.blockers.join(" "), /warning threshold is misconfigured/);
+  } finally { f.raw.close(); }
+});
+
+type Fixture = Awaited<ReturnType<typeof fixture>>;
+/** A provider that kept the owner's signed bytes and reports them finalized, with a vault forged to match. */
+const withholding = (f: Fixture): SolanaLiveRead => async (method, params = []) => {
+  if (method === "getSignatureStatuses") return f.response([{ confirmationStatus: "finalized", slot: 1000, err: null }]);
+  if (method === "getTransaction") return { version: 0, slot: 1000, transaction: [f.controls.signed, "base64"], meta: { err: null } };
+  if (method === "getAccountInfo" && params[0] === f.vault) return f.response(account(f.state(f.controls.epoch + 1n, f.controls.sequence + 1n)));
+  return f.read(method, params);
+};
+
+test("a provider that withholds a revoke and reports it finalized cannot finish it (audit G3-2)", async () => {
+  const f = await fixture();
+  try {
+    await readyLive(f);
+    const prepared = await f.app.prepareOwnerAction(f.scope, { action: "revoke" });
+    const signedTransactionBase64 = await f.sign(prepared.transactionBase64);
+    await f.app.submitOwnerAction(f.scope, { signedTransactionBase64 });
+    f.providers.primary = withholding(f);
+    assert.equal((await f.app.submitOwnerAction(f.scope, { signedTransactionBase64 })).status, "pending");
+    const status = await f.app.status(f.scope);
+    assert.equal(status.live.ownerTransaction?.status, "pending"); assert.match(status.live.blockers.join(" "), /owner transaction is awaiting/);
+    assert.equal((await new SolanaTradingStore(f.db, f.scope).setup())!.status, "pending", "the owner is not told the session was revoked");
+    // It never landed: once both providers' finalized banks pass its blockhash, the owner can act again.
+    f.providers.primary = null; f.controls.height = 5001;
+    assert.equal((await f.app.submitOwnerAction(f.scope, { signedTransactionBase64 })).status, "failed");
+    await f.app.prepareOwnerAction(f.scope, { action: "revoke" });
+  } finally { f.raw.close(); }
+});
+
+test("a withheld withdrawal reported finalized by one provider books no capital out (audit G3-2)", async () => {
+  const f = await fixture();
+  try {
+    await readyLive(f); f.controls.sequence = 3n; f.controls.cash = 90_000_000n;
+    const book = { hwmRaw: "90000000", cashRaw: "90000000", wsolRaw: "0", costBasisUsdgRaw: "0", realizedPnlUsdgRaw: "0", networkFeesLamports: "0", slot: 900, updatedAtMs: 999_000 };
+    await f.db.prepare("INSERT INTO solana_runtime_live_books(tenant,owner,book_json) VALUES(?,?,?)").run(TENANT, f.owner, JSON.stringify(book));
+    const prepared = await f.app.prepareOwnerAction(f.scope, { action: "withdraw", mint: SOLANA_USDG_MINT, amountRaw: "1000000" });
+    const signedTransactionBase64 = await f.sign(prepared.transactionBase64);
+    await f.app.submitOwnerAction(f.scope, { signedTransactionBase64 });
+    f.providers.primary = withholding(f);
+    assert.equal((await f.app.submitOwnerAction(f.scope, { signedTransactionBase64 })).status, "pending");
+    await f.app.status(f.scope);
+    assert.equal((await new SolanaTradingStore(f.db, f.scope).liveBook())!.cashRaw, "90000000", "the book still holds the cash");
+    assert.deepEqual(await f.db.prepare("SELECT * FROM solana_runtime_cashflows").all(), []);
+    // An honest fallback that sees the same landed withdrawal finishes it.
+    f.providers.fallback = withholding(f);
+    assert.equal((await f.app.submitOwnerAction(f.scope, { signedTransactionBase64 })).status, "finalized");
+    assert.equal((await new SolanaTradingStore(f.db, f.scope).liveBook())!.cashRaw, "89000000");
+  } finally { f.raw.close(); }
+});
+
+test("a finalized owner receipt whose vault effect is missing is not believed (audit G3-2)", async () => {
+  const f = await fixture();
+  try {
+    await readyLive(f);
+    const prepared = await f.app.prepareOwnerAction(f.scope, { action: "revoke" });
+    const signedTransactionBase64 = await f.sign(prepared.transactionBase64);
+    await f.app.submitOwnerAction(f.scope, { signedTransactionBase64 });
+    f.controls.finalized = true; // both providers show the receipt, but the epoch never moved
+    await assert.rejects(f.app.submitOwnerAction(f.scope, { signedTransactionBase64 }), /vault state/);
+    assert.match((await f.app.status(f.scope)).live.blockers.join(" "), /Owner transaction confirmation is unavailable/);
+    assert.equal((await new SolanaTradingStore(f.db, f.scope).setup())!.status, "pending");
+    f.controls.epoch = 2n;
+    assert.equal((await f.app.submitOwnerAction(f.scope, { signedTransactionBase64 })).status, "finalized");
+  } finally { f.raw.close(); }
+});
+
+test("an owner expiry proof takes its slot and height from one bank, so a stale slot cannot hide a landed revoke (audit execution F1, owner half)", async () => {
+  const f = await fixture();
+  try {
+    await readyLive(f);
+    const prepared = await f.app.prepareOwnerAction(f.scope, { action: "revoke" });
+    const signedTransactionBase64 = await f.sign(prepared.transactionBase64);
+    await f.app.submitOwnerAction(f.scope, { signedTransactionBase64 });
+    // Behind each URL: a current node answers heights, a lagging one slots and signatures.
+    // The revoke landed at slot 950, so vault snapshots older than that still show epoch 1.
+    const loadBalanced: SolanaLiveRead = async (method, params = []) => {
+      if (method === "getBlockHeight") return 5001;
+      if (method === "getSlot") return 900;
+      if (method === "getEpochInfo") return { absoluteSlot: 1000, blockHeight: 5001, epoch: 2, slotIndex: 1000, slotsInEpoch: 432_000 };
+      if (method === "getAccountInfo" && params[0] === f.vault) {
+        const min = (params[1] as { minContextSlot?: number }).minContextSlot ?? 0;
+        return min <= 950 ? { context: { slot: Math.max(900, min) }, value: account(f.state(1n)) } : { context: { slot: 1000 }, value: account(f.state(2n)) };
+      }
+      return f.read(method, params);
+    };
+    f.providers.primary = loadBalanced; f.providers.fallback = loadBalanced;
+    assert.equal((await f.app.submitOwnerAction(f.scope, { signedTransactionBase64 })).status, "pending", "a revoke that ran is never recorded as failed");
+    assert.equal((await new SolanaTradingStore(f.db, f.scope).setup())!.status, "pending");
+  } finally { f.raw.close(); }
+});
+
+test("an unseen owner transaction is sent again, as the same bytes, only while its blockhash can land (audit G2-1, owner half)", async () => {
+  const f = await fixture();
+  try {
+    await readyLive(f);
+    const prepared = await f.app.prepareOwnerAction(f.scope, { action: "revoke" });
+    const signedTransactionBase64 = await f.sign(prepared.transactionBase64);
+    await f.app.submitOwnerAction(f.scope, { signedTransactionBase64 });
+    assert.equal(f.controls.sends, 1);
+    await f.app.status(f.scope);
+    assert.equal(f.controls.sends, 2, "neither provider has it: rebroadcast");
+    f.providers.fallback = async (method, params = []) => method === "getSignatureStatuses" ? f.response([{ confirmationStatus: "processed", slot: 1000, err: null }]) : f.read(method, params);
+    await f.app.status(f.scope);
+    assert.equal(f.controls.sends, 2, "a provider has seen it: nothing to resend");
+    f.providers.fallback = null; f.controls.height = 5001;
+    assert.equal((await f.app.submitOwnerAction(f.scope, { signedTransactionBase64 })).status, "failed");
+    assert.equal(f.controls.sends, 2, "an expired blockhash is never resent");
+    assert.deepEqual(new Set(f.sent), new Set([signedTransactionBase64]));
   } finally { f.raw.close(); }
 });
