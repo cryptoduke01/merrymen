@@ -442,9 +442,7 @@ export function buildExecuteSolanaSwapInstruction(
     meta(SOLANA_JUPITER_PROGRAM, 0),
     meta(SOLANA_ASSOCIATED_TOKEN_PROGRAM, 0),
     meta(SOLANA_SYSTEM_PROGRAM, 0),
-    p.ownerRefund === null
-      ? meta(p.programAddress, 0)
-      : meta(p.ownerRefund, 1),
+    p.ownerRefund === null ? meta(p.programAddress, 0) : meta(p.ownerRefund, 1),
   ];
   const routes = p.routeAccounts.map((a) =>
     meta(a.address, (a.role & 1) as 0 | 1),

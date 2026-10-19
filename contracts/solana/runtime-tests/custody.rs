@@ -1806,3 +1806,235 @@ async fn the_route_cannot_carry_the_fee_payer_vault_state_owner_wallet_or_other_
     assert!(vault_error(f.swap(ix).await, vault::VaultError::Route));
     f.untouched().await;
 }
+
+// ---- TypeScript-built instructions against the compiled program (audit core-abi-4). ----
+
+/// Written by packages/core/src/solana-live.test.ts from the TypeScript builders, which
+/// also checks that it is current. Nothing here rebuilds an instruction.
+const TS_FIXTURE: &str = include_str!("fixtures/ts-instructions.json");
+fn fixture_key(value: &serde_json::Value) -> Pubkey {
+    value
+        .as_str()
+        .expect("base58 key")
+        .parse()
+        .expect("valid key")
+}
+fn fixture_instruction(step: &serde_json::Value) -> Instruction {
+    let hex = step["data"].as_str().unwrap();
+    let data = (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+        .collect();
+    let accounts = step["accounts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| AccountMeta {
+            pubkey: fixture_key(&a["pubkey"]),
+            is_signer: a["signer"].as_bool().unwrap(),
+            is_writable: a["writable"].as_bool().unwrap(),
+        })
+        .collect();
+    Instruction {
+        program_id: fixture_key(&step["programId"]),
+        accounts,
+        data,
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires the compiled custody SBF artifact; run contracts/solana/test.sh"]
+async fn typescript_built_instructions_run_against_the_compiled_program() {
+    let fx: serde_json::Value = serde_json::from_str(TS_FIXTURE).unwrap();
+    let key = |name: &str| fixture_key(&fx["keys"][name]);
+    let seeded =
+        |name: &str| Keypair::new_from_array([fx["seeds"][name].as_u64().unwrap() as u8; 32]);
+    let (owner, session, fee_payer) = (seeded("owner"), seeded("session"), seeded("feePayer"));
+    let t22 = spl_token_2022::ID;
+    let classic = anchor_spl::token::ID;
+    // The TypeScript derivations agree with the program's and the token programs'.
+    assert_eq!(fixture_key(&fx["program"]), vault::ID);
+    assert_eq!(owner.pubkey(), key("owner"));
+    assert_eq!(session.pubkey(), key("session"));
+    assert_eq!(fee_payer.pubkey(), key("feePayer"));
+    let (vault_key, _) =
+        Pubkey::find_program_address(&[b"vault", owner.pubkey().as_ref()], &vault::ID);
+    assert_eq!(vault_key, key("vault"));
+    assert_eq!(ata(&vault_key, &USDG, &t22), key("vaultUsdg"));
+    assert_eq!(ata(&vault_key, &WSOL, &classic), key("vaultWsol"));
+    assert_eq!(ata(&owner.pubkey(), &USDG, &t22), key("ownerUsdg"));
+    let (authority, _) = Pubkey::find_program_address(&[b"authority", &[0]], &JUPITER);
+    assert_eq!(authority, key("jupiterAuthority"));
+    for (seq, input, program) in [(0u64, USDG, t22), (1, WSOL, classic), (2, USDG, t22)] {
+        let (swap, _) = Pubkey::find_program_address(
+            &[b"swap", vault_key.as_ref(), &seq.to_le_bytes()],
+            &vault::ID,
+        );
+        assert_eq!(swap, key(&format!("swap{seq}")));
+        assert_eq!(ata(&swap, &input, &program), key(&format!("temp{seq}")));
+    }
+    let (vault_usdg, vault_wsol, owner_usdg) =
+        (key("vaultUsdg"), key("vaultWsol"), key("ownerUsdg"));
+
+    let mut pt = ProgramTest::new("merrymen_vault", vault::ID, None);
+    pt.prefer_bpf(false);
+    pt.add_program("mock_jupiter", JUPITER, processor!(mock_jupiter));
+    let system = anchor_lang::system_program::ID;
+    pt.add_account(owner.pubkey(), account(system, vec![], 100_000_000));
+    pt.add_account(session.pubkey(), account(system, vec![], 1_000_000));
+    pt.add_account(fee_payer.pubkey(), account(system, vec![], 1_000_000_000));
+    pt.add_account(USDG, mint(t22, 6));
+    pt.add_account(WSOL, mint(classic, 9));
+    pt.add_account(vault_usdg, token(t22, USDG, vault_key, 1000));
+    pt.add_account(vault_wsol, token(classic, WSOL, vault_key, 0));
+    pt.add_account(owner_usdg, token(t22, USDG, owner.pubkey(), 0));
+    pt.add_account(key("poolUsdg"), token(t22, USDG, authority, 1000));
+    pt.add_account(key("poolWsol"), token(classic, WSOL, authority, 10000));
+    pt.add_account(authority, account(system, vec![], 1));
+    let mut ctx = pt.start_with_context().await;
+    let mut clock: Clock = ctx.banks_client.get_sysvar().await.unwrap();
+    clock.unix_timestamp = fx["now"].as_i64().unwrap();
+    ctx.set_sysvar(&clock);
+
+    async fn read_state(ctx: &mut ProgramTestContext, key: Pubkey) -> Vault {
+        let a = ctx.banks_client.get_account(key).await.unwrap().unwrap();
+        Vault::try_deserialize(&mut a.data.as_slice()).unwrap()
+    }
+    async fn amount(ctx: &mut ProgramTestContext, key: Pubkey) -> u64 {
+        let a = ctx.banks_client.get_account(key).await.unwrap().unwrap();
+        spl_token_2022::extension::StateWithExtensions::<spl_token_2022::state::Account>::unpack(
+            &a.data,
+        )
+        .unwrap()
+        .base
+        .amount
+    }
+    let mut names = Vec::new();
+    for step in fx["steps"].as_array().unwrap() {
+        let name = step["name"].as_str().unwrap();
+        names.push(name.to_string());
+        let ix = fixture_instruction(step);
+        match name {
+            "execute_swap_buy_refund" => {
+                let temp = key("temp2");
+                ctx.set_account(&temp, &token(t22, USDG, key("swap2"), 7).into());
+            }
+            "withdraw_sol" => {
+                let mut lamports = ctx
+                    .banks_client
+                    .get_account(vault_key)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                lamports.lamports += 1000;
+                ctx.set_account(&vault_key, &lamports.into());
+            }
+            _ => {}
+        }
+        let signers: Vec<&Keypair> = step["signers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| match s.as_str().unwrap() {
+                "owner" => &owner,
+                "session" => &session,
+                "feePayer" => &fee_payer,
+                other => panic!("unknown signer {other}"),
+            })
+            .collect();
+        // A swap is paid by its own fee payer, as in production; owner steps by the cluster.
+        let payer = if signers.iter().any(|s| s.pubkey() == fee_payer.pubkey()) {
+            fee_payer.insecure_clone()
+        } else {
+            ctx.payer.insecure_clone()
+        };
+        let mut all = vec![&payer];
+        all.extend(signers.into_iter().filter(|s| s.pubkey() != payer.pubkey()));
+        let hash = ctx.banks_client.get_latest_blockhash().await.unwrap();
+        let tx = Transaction::new_signed_with_payer(&[ix], Some(&payer.pubkey()), &all, hash);
+        let result = ctx.banks_client.process_transaction(tx).await;
+        assert!(result.is_ok(), "{name}: {result:?}");
+        let state = read_state(&mut ctx, vault_key).await;
+        let (usdg, wsol) = (
+            amount(&mut ctx, vault_usdg).await,
+            amount(&mut ctx, vault_wsol).await,
+        );
+        match name {
+            "initialize_vault" => assert_eq!(
+                (state.owner, state.version),
+                (owner.pubkey(), vault::VERSION)
+            ),
+            "create_session" => {
+                assert_eq!((state.session, state.session_epoch), (session.pubkey(), 1));
+                assert_eq!(
+                    (
+                        state.per_trade,
+                        state.daily,
+                        state.per_trade_wsol,
+                        state.daily_wsol
+                    ),
+                    (100, 300, 100, 300)
+                );
+                assert_eq!(
+                    (state.max_ops, state.expires_at),
+                    (10, clock.unix_timestamp + 86_400)
+                );
+            }
+            "execute_swap_buy" => assert_eq!((usdg, wsol, state.seq), (900, 200, 1)),
+            "execute_swap_sell" => assert_eq!((usdg, wsol, state.seq), (1000, 100, 2)),
+            "set_breaker_session_pause" => assert!(state.paused),
+            "set_breaker_owner_clear" => assert!(!state.paused),
+            "execute_swap_buy_refund" => {
+                assert_eq!((usdg, wsol, state.seq), (900, 300, 3));
+                assert_eq!(amount(&mut ctx, owner_usdg).await, 7);
+                assert_eq!(state.debits.iter().map(|d| d.notional).sum::<u64>(), 300);
+            }
+            "withdraw" => {
+                assert_eq!((usdg, state.seq), (850, 4));
+                assert_eq!(amount(&mut ctx, owner_usdg).await, 57);
+            }
+            "withdraw_sol" => {
+                let info = ctx
+                    .banks_client
+                    .get_account(vault_key)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    info.lamports,
+                    Rent::default().minimum_balance(info.data.len())
+                );
+                assert_eq!(state.seq, 5);
+            }
+            "revoke_all" => {
+                assert_eq!((state.session, state.session_epoch), (Pubkey::default(), 2));
+                assert!(state.paused);
+            }
+            other => panic!("unexpected fixture step {other}"),
+        }
+    }
+    assert_eq!(
+        names,
+        [
+            "initialize_vault",
+            "create_session",
+            "execute_swap_buy",
+            "execute_swap_sell",
+            "set_breaker_session_pause",
+            "set_breaker_owner_clear",
+            "execute_swap_buy_refund",
+            "withdraw",
+            "withdraw_sol",
+            "revoke_all",
+        ]
+    );
+    // Every temporary swap account closed again.
+    for temp in ["temp0", "temp1", "temp2"] {
+        assert!(ctx
+            .banks_client
+            .get_account(key(temp))
+            .await
+            .unwrap()
+            .is_none());
+    }
+}
