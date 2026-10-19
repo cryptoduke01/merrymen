@@ -50,6 +50,14 @@ export interface CoinFacts {
    * failed read is unread, never "none".
    */
   info: "read" | "failed" | "not-asked";
+  /**
+   * THE TOKEN'S OWN LINKS AS THE INDEX LISTS THEM, when the info was read: its
+   * https websites (at most three) and its X handle. What the project says
+   * about itself, never something checked: read only by the X agent's larp
+   * check, which scans the site to see whether it names this very token
+   * (orchestrator-xpost-check.ts). Absent when the info was not read.
+   */
+  links?: { websites: string[]; twitter: string | null };
   /** How many pools the index listed for the coin. */
   poolsSeen: number;
 }

@@ -43,6 +43,7 @@ import { wrapSqlite } from "./db";
 import { restorePaperCheckpoint, recordPaperRecoveryHealth } from "./paper-checkpoint";
 import { FLEET_RECOVERY_SCHEMA, recordFleetRecoveryHold, recordFleetSourceVerified, readFleetRecoveryHold, readFleetCommandRefusal, readFleetCommandBoundary, withFleetRecoveryLock, type RecoveryCause } from "./fleet-recovery";
 import { AUTONOMY_HOLDS_SQL, AUTONOMY_TRADE_FUNNEL_SQL, FLEET_RAILS_SQL, autonomyLines, fleetRails, foldFunnel, railsLine, type AgentRailRow, type FleetRails } from "./autonomy-funnel";
+import { guardStdio, lineRedactor } from "./redact-stdio";
 import { commitOf, heartbeatClock, heartbeatCounts, lastShutdownOf, writeFleetHeartbeat, type FleetSnapshot, type HeartbeatCounts, type LastShutdown } from "./fleet-heartbeat";
 import { recoveryCommandRefused, writeRecoveryCommandBarrier } from "./recovery-command-barrier";
 import { repairHistoricalFills } from "./history-fill-repair";
@@ -863,6 +864,9 @@ const CHILD_SECRET_STRIP = [
   // outright, and there is no "but then the fetch fails" pressure to ever
   // remove it. See research/hey.ts.
   "MERRYMEN_HEY_API_KEY",
+  // THE LARP CHECK'S GITHUB TOKEN (orchestrator-xpost-check.ts): read only by
+  // this process, for an X answer. No child reads GitHub at all.
+  "MERRYMEN_GITHUB_TOKEN",
   // THE FOMO DATA KEY, under both names an operator might set (the house's and
   // the provider's own docs'). Same reason as the two above: a child holding it
   // could leak it into a prompt, a decision row or a log line. A hosted child
@@ -4821,15 +4825,8 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
     // the Bitquery lane is on and its account is on the research allowlist.
     attachFlowBroker(flowRuntimeNow().service, tenant, proc, smartAccount, log);
     const tag = `[${tenant.slice(0, 8)}]`;
-    const pipe = (stream: NodeJS.ReadableStream | null, sink: NodeJS.WriteStream) =>
-      stream?.on("data", (c: Buffer) =>
-        String(c)
-          .split(/\r?\n/)
-          .filter((l) => l.trim())
-          .forEach((l) => sink.write(`${tag} ${l}\n`)),
-      );
-    pipe(proc.stdout, process.stdout);
-    pipe(proc.stderr, process.stderr);
+    relayChildOutput(proc.stdout, process.stdout, tag);
+    relayChildOutput(proc.stderr, process.stderr, tag);
 
     log(`${tenant} spawn requested (pid ${proc.pid ?? "pending"}) — tick ${tickSeconds}s, watchdog ${staleSec}s`);
     tenantAlertSaid.delete(tenant);
@@ -5199,15 +5196,8 @@ async function startHolderProcess(held: Holder): Promise<void> {
   }
   watchHolder(held, holderProc);
   const tag = `[${tenant.slice(0, 8)} hold]`;
-  const pipe = (stream: NodeJS.ReadableStream | null, sink: NodeJS.WriteStream) =>
-    stream?.on("data", (c: Buffer) =>
-      String(c)
-        .split(/\r?\n/)
-        .filter((l) => l.trim())
-        .forEach((l) => sink.write(`${tag} ${l}\n`)),
-    );
-  pipe(holderProc.stdout, process.stdout);
-  pipe(holderProc.stderr, process.stderr);
+  relayChildOutput(holderProc.stdout, process.stdout, tag);
+  relayChildOutput(holderProc.stderr, process.stderr, tag);
   log(`${tenant} held (pid ${holderProc.pid ?? "pending"}) — trading stays off, the bot answers`);
 }
 
@@ -11283,6 +11273,24 @@ function startXPostPass(): void {
   });
 }
 
+/**
+ * THE LARP CHECK'S READERS IN THIS PROCESS: the research browser
+ * (MERRYMEN_BROWSER_URL and _TOKEN, the same service discovery reads through,
+ * never public) and an optional GitHub token. Without a browser a check still
+ * reads GitHub and the index, and says it could not see the site; that is
+ * said once, at boot.
+ */
+let larpBrowserNoted = false;
+function larpCheckDeps(): { browser: { baseUrl: string; token: string } | null; githubToken?: string } {
+  const url = process.env.MERRYMEN_BROWSER_URL?.trim() ?? "", token = process.env.MERRYMEN_BROWSER_TOKEN?.trim() ?? "";
+  const github = process.env.MERRYMEN_GITHUB_TOKEN?.trim() ?? "";
+  if ((!url || !token) && !larpBrowserNoted) {
+    larpBrowserNoted = true;
+    log("xpost: larp checks are on but MERRYMEN_BROWSER_URL / MERRYMEN_BROWSER_TOKEN are not both set — no site is scanned, only GitHub and the index are read");
+  }
+  return { browser: url && token ? { baseUrl: url, token } : null, ...(github ? { githubToken: github } : {}) };
+}
+
 async function runXPostPass(boot: XPostSetup): Promise<void> {
   try {
     if (!xPoster) {
@@ -11337,6 +11345,11 @@ async function runXPostPass(boot: XPostSetup): Promise<void> {
               fomo: (tenant) => (fomoRuntime && !xAnswerFomoCapped() ? createDirectBroker(fomoRuntime.service, tenant.toLowerCase(), { log }) : null),
               fomoUsable: async (tenant) => !!fomoRuntime && !xAnswerFomoCapped() && (await fomoAccessFor(tenant)).dataAccess === true,
               ...xAnswerFlow(),
+              // THE LARP CHECK (orchestrator-xpost-check.ts), only with
+              // MERRYMEN_XPOST_CHECKS=1: the research browser this process
+              // already holds the address and token of, over the private
+              // network, and GitHub (MERRYMEN_GITHUB_TOKEN optional).
+              ...(boot.knobs.checks ? { check: larpCheckDeps() } : {}),
             }),
           } : {}),
         },
@@ -12560,8 +12573,32 @@ export async function runOrchestrator(): Promise<void> {
   }
 }
 
+/**
+ * A CHILD'S OUTPUT, INTO THIS PROCESS'S LOG — WHOLE LINES, REDACTED.
+ *
+ * Every child's stdout and stderr reach the deployment's log through here, so
+ * this is the one place that sees all of it, including what a child prints
+ * before its own guard is installed or when it dies (Node writes a fatal
+ * error's stack to the descriptor, not through `process.stderr.write`). A viem
+ * error names the RPC URL it was built with, key and all; redact-urls.ts takes
+ * the key out and keeps the host.
+ *
+ * Lines are reassembled across chunks before redacting: a `data` chunk ends
+ * wherever the pipe's buffer did, and half a URL has no scheme left to find.
+ */
+export function relayChildOutput(stream: NodeJS.ReadableStream | null, sink: NodeJS.WriteStream, tag: string): void {
+  if (!stream) return;
+  const lines = lineRedactor();
+  const write = (ls: string[]) => ls.filter((l) => l.trim()).forEach((l) => sink.write(`${tag} ${l}\n`));
+  stream.on("data", (c: Buffer) => write(lines.push(c)));
+  stream.on("end", () => write(lines.flush()));
+}
+
 // Run when invoked directly (`tsx worker/src/orchestrator.ts`); importing it for
 // tests does not trip this, so the pure helpers above stay unit-testable.
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
+  // Before the first line is printed. A viem error names the read RPC's URL,
+  // and the provider's key is in it — see redact-urls.ts.
+  guardStdio();
   void runOrchestrator();
 }

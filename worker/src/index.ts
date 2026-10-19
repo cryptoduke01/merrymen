@@ -1,5 +1,7 @@
 import { EVIDENCE_BUDGET_MS, brainEvidence, readPoolEvidence } from "./venues/pool-evidence";
 import { upsertRefusal, type RefusalRow } from "./venues/refusal-rows";
+import { errorText } from "./redact-urls";
+import { guardStdio } from "./redact-stdio";
 /**
  * merrymen worker — the 24/7 loop.
  *
@@ -520,7 +522,7 @@ import {
 } from "./class-active";
 import { ACTIVITY_GATE, MAX_ACTIVITY_BLOCKS, readCurveActivity } from "./venues/pons-activity";
 import type { CurveLeg } from "./strategist/proposals";
-import { mainnetClient, readAccountBalances, readClassCustody, readMarketSafety, setMainnetRpc } from "./snapshot";
+import { mainnetClient, mainnetPoolClient, readAccountBalances, readClassCustody, readMarketSafety, setMainnetRpc } from "./snapshot";
 import { applyFill } from "./basis";
 import {
   addDecision,
@@ -730,6 +732,9 @@ const keyInstallTriedAt = new WeakMap<AgentExecutor, number>();
 const KEY_INSTALL_RETRY_MS = KEY_INSTALL_HOLD_MS;
 
 async function main() {
+  // FIRST, before anything can fail and print viem's error — which names the
+  // read RPC's URL, and with it the provider's key. See redact-urls.ts.
+  guardStdio();
   await initStore();
   const selftest = process.argv.includes("--selftest");
 
@@ -5551,7 +5556,8 @@ async function main() {
   // watchTokens is read through a closure because the owner can change the watch
   // set mid-run — capturing the array once would freeze the universe.
   const depthReader = createDepthReader({
-    client: mainnetClient(),
+    // A getter, so a settings change that moves the RPC moves depth with it.
+    client: mainnetPoolClient,
     tokens: () => watchTokens,
     cash: CASH.USDG as `0x${string}`,
     cashDecimals: USDG_DECIMALS,
@@ -5696,8 +5702,9 @@ async function main() {
     }
     const { quotes, refused } = await poolPrices.read({
       // Pools live on MAINNET, like the feeds — a testnet grant still values its
-      // book against the real market rather than against nothing.
-      client: mainnetClient(),
+      // book against the real market rather than against nothing. The pool
+      // client packs a pass's reads into aggregate3 calls (snapshot.ts).
+      client: mainnetPoolClient(),
       tokens: feedless,
       guard: {
         minLiquidityUsdg: usdg(cfg.minPoolLiquidityUsdg),
@@ -10886,7 +10893,10 @@ async function main() {
         }
       }
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
+      // Redacted at the source: this text becomes the event, the reject_rule
+      // and the `autonomy| 1h refusals` line, and a viem error carries the RPC
+      // URL. Sliced below, so a key cut in half must already be gone.
+      const msg = errorText(e);
       console.error(`[execute] ${intent.kind} failed:`, msg);
 
       // ── WE DO NOT KNOW ──────────────────────────────────────────────────
@@ -15363,7 +15373,7 @@ async function main() {
   // Shared by the regular tick and the command tick: a command tick that
   // throws is the same silence, one owner's order closer to them.
   const tickFailed = async (e: unknown) => {
-    const msg = e instanceof Error ? e.message : String(e);
+    const msg = errorText(e);
     console.error("[tick]", e);
     if (active && msg !== lastTickError) {
       lastTickError = msg;

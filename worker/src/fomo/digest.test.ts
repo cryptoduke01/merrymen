@@ -99,12 +99,75 @@ describe("digestTheses", () => {
     assert.deepEqual(d.about, ["the story behind it"]);
   });
 
-  it("never waits on an airdrop, and a listing hoped for is not waited on twice", () => {
+  it("never waits on an airdrop, and conveys a hoped-for listing as an event without inferring support", () => {
     assert.deepEqual(readThesisForDigest("claim the airdrop before the listing").waitingOn, []);
-    assert.deepEqual(readThesisForDigest("roadmap drops friday, then the launch").waitingOn, ["roadmap", "launch"]);
-    const d = digestTheses([view("if the robinhood app lists it, a listing sends it", 1)]);
-    assert.ok(d.forIt.includes("hopes of a listing"));
-    assert.ok(!d.waitingOn.includes("a listing"));
+    assert.deepEqual(readThesisForDigest("roadmap drops friday, then the launch").waitingOn, ["roadmap"]);
+    const d = digestTheses([view("holders are hoping for a listing on the app", 1)]);
+    assert.deepEqual(d.forIt, []);
+    assert.deepEqual(d.waitingOn, ["a listing"]);
+  });
+
+  it("does not turn denied, cancelled, completed or merely mentioned events into catalysts", () => {
+    for (const text of [
+      "No listing is planned and no launch is expected this year",
+      "The listing is not happening and the launch was cancelled",
+      "Holders were waiting for a listing but it got cancelled",
+      "We are waiting for an update but it has been delayed",
+      "The partnership was announced last week and the launch already happened",
+      "The coin listed yesterday after the release",
+      "A listing, a roadmap, a launch, a partnership and an update were discussed",
+      "Is a listing expected soon? Is the launch coming tomorrow?",
+      "There is no reason to expect the listing or launch",
+      "The planned listing has been scrapped",
+      "Waiting for a listing. The listing has been cancelled",
+      "Waiting for a launch. It was cancelled yesterday",
+      "Waiting for a listing. Cancelled.",
+      "We stopped waiting for a listing",
+      "The listing planned last Friday fell through",
+      "I expect the listing to fail",
+    ]) {
+      const reading = readThesisForDigest(text);
+      assert.deepEqual(reading.waitingOn, [], text);
+      assert.ok(!reading.cues.some((c) => c.label === "listing"), text);
+      assert.deepEqual(digestTheses([view(text, 1)]).forIt, [], text);
+    }
+  });
+
+  it("keeps explicit anticipation attached to the event it describes", () => {
+    for (const [text, expected] of [
+      ["Traders are waiting for a listing and a launch", ["listing", "launch"]],
+      ["The launch is scheduled for next week", ["launch"]],
+      ["An update is expected soon", ["update"]],
+      ["Looking forward to the roadmap", ["roadmap"]],
+      ["The team will launch next month", ["launch"]],
+      ["launch next week they say", ["launch"]],
+      ["Waiting for an update after the launch", ["update"]],
+      ["A listing is cancelled. Holders are waiting for a launch", ["launch"]],
+    ] as const) assert.deepEqual(readThesisForDigest(text).waitingOn, expected, text);
+  });
+
+  it("does not turn intentions to sell or discuss an event into support for the coin", () => {
+    for (const text of [
+      "we will sell at the listing next week",
+      "we will sell at the listing",
+      "we will discuss the listing",
+      "I expect the listing next week and will sell into it",
+      "The listing is scheduled for next week",
+      "I expect a listing next week",
+      "Waiting for a listing to sell my tokens",
+    ]) {
+      const d = digestTheses([view(text, 1)]);
+      assert.deepEqual(d.forIt, [], text);
+    }
+    assert.deepEqual(readThesisForDigest("we will discuss the listing").waitingOn, []);
+    assert.deepEqual(readThesisForDigest("we will discuss a listing next week").waitingOn, []);
+    assert.deepEqual(readThesisForDigest("we will assess the listing tomorrow").waitingOn, []);
+    assert.deepEqual(readThesisForDigest("the team will launch").waitingOn, ["launch"]);
+    const cached = view("the listing is expected next week", 1, {
+      cues: [{ label: "listing", stance: "supporting" }], topics: [], waitingOn: ["listing"],
+    });
+    assert.deepEqual(digestTheses([cached]).forIt, []);
+    assert.deepEqual(digestTheses([cached]).waitingOn, ["a listing"]);
   });
 
   it("is deterministic and survives odd input", () => {

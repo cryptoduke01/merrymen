@@ -85,7 +85,7 @@ const COPY = {
     "Let your Merryman post on X in its own words — a hello when it starts, the odd casual thought, and now and then a coin it bought and why. Optional settings below add public addresses and completed sale results. No trade alerts, error messages or return promises.",
   /** The same, for an agent merrymen made active (`repliesActive`): it posts on the active cadence. */
   blurbActive:
-    "Let your Merryman post on X in its own words — a hello when it starts, a few passing thoughts a day, and most coins it buys and why. Optional settings below add public addresses and completed sale results. No trade alerts, error messages or return promises.",
+    "Let your Merryman post on X in its own words — a hello when it starts, a few reads on the market a day, and most coins it buys and why. Optional settings below add public addresses and completed sale results. No trade alerts, error messages or return promises.",
   connect: "Connect X account",
   reconnect: "Reconnect X account",
   caption:
@@ -141,12 +141,14 @@ const WARNING_BODY = [
  * no coin fold, seventy-five minutes apart. "A few a day at most" would
  * understate that. And its answers may carry market figures Merrymen renders
  * from public data (worker/src/xpost/figures.ts), so "never prices or
- * amounts" would overstate what it leaves out (2026-10-12); every other
- * owner's sentence is unchanged. Pinned by x-posting.test.ts and iOS
+ * amounts" would overstate what it leaves out (2026-10-12); and its casual
+ * slots are reads on the market with those figures since 2026-10-13
+ * (worker/src/orchestrator-xpost.ts readInsight), so "passing thoughts" would
+ * too. Every other owner's sentence is unchanged. Pinned by x-posting.test.ts and iOS
  * XPostingTests.
  */
 const ACTIVE_WARNING_BODY = [
-  "It writes its own posts: a hello first, then a few passing thoughts a day and a post for most coins it buys, and why. It never posts trade alerts or error messages, and its answers may carry market figures built from public data. Your saved options can add public wallet or token addresses and completed sale results.",
+  "It writes its own posts: a hello first, then a few reads on the market a day and a post for most coins it buys, and why. It never posts trade alerts or error messages, and its market reads and answers may carry market figures built from public data. Your saved options can add public wallet or token addresses and completed sale results.",
   "Posts go out on their own, up to 12 a day and at least an hour apart. Each one waits under Coming up for at least ten minutes first, and you can skip it there. Turn this off or disconnect X at any time.",
   WARNING_BODY[2],
 ] as const;
@@ -181,7 +183,7 @@ const REPLY_WARNING_BODY = [
  */
 const ANSWER_WARNING_BODY = [
   "It chooses which posts to answer; it won’t answer every one. Answers go out right away: they don’t wait under Coming up, so you can’t skip one first.",
-  "It answers people who tag it, reply to it or quote it, a few times a day each: up to 60 answers a day on top of its posts, and at most six to one person a day. Answers carry no opt-out line, and it never answers someone who asked it to stop. Turn replies off at any time to stop answering.",
+  "It answers questions about the market, coins, how it trades and what it can do, and a hello, a thanks or a bit of chat in a short line of its own, from people who tag it, reply to it or quote it, a few times a day each: up to 60 answers a day on top of its posts, and at most six to one person a day. Answers carry no opt-out line, and it never answers someone who asked it to stop. Turn replies off at any time to stop answering.",
   "Answers may include market figures from public data (CoinGecko, GeckoTerminal, Fomo and Bitquery), such as a coin’s price, market cap, volume or recent change. Merrymen adds them as the data showed them; they are never advice.",
 ] as const;
 const replyWarningYes = (handle: string) => `Let it reply as ${handle}`;
@@ -189,7 +191,7 @@ const replyHint = (handle: string, active: boolean) => active
   ? `Selected posts that tag your Merryman, reply to it or quote it, answered as ${handle} right away, up to 60 a day on top of its posts.`
   : `Selected comments on your Merryman’s coin posts, answered as ${handle}. Replies share the post limit and ten-minute review window.`;
 
-const KIND_LABEL: Record<XUpcomingPost["kind"], string> = { intro: "Hello post", casual: "Casual post", buy: "Buy post", sell: "Sale post", reply: "Comment reply", answer: "Answer to a tag" };
+const KIND_LABEL: Record<XUpcomingPost["kind"], string> = { intro: "Hello post", casual: "Casual post", buy: "Buy post", sell: "Sale post", reply: "Comment reply", answer: "Answer to a tag", recap: "Trade recap" };
 const commentUrl = (post: XUpcomingPost | XRecentPost) => /^\d{1,25}$/.test(post.replyToTweetId ?? "")
   ? `https://x.com/i/status/${post.replyToTweetId}` : null;
 

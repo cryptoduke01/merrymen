@@ -59,6 +59,7 @@ import { collapseOf, type CoinFacts, type CoinFactsReader, type FactsNetwork } f
 import type { OpportunitiesData, RankingsData, ResearchCoinData, ThesisView, TokenActivityData, TokenThesesData } from "./fomo/tools";
 import type { FomoEnvelope, ResolvedSubject, TokenIdentity, TokenLabel } from "./fomo/types";
 import { admitTgLine, quoteNotEnglish, tgLineReadings, tgQuoteLeetReadings } from "./telegram/tg-groups/gate";
+import { chainExcluded, chainIn } from "./telegram/tg-groups/route";
 import {
   ABOUT_MERRYMEN,
   AT_THE_READER,
@@ -287,6 +288,38 @@ export function looseCoin(text: string, plan: FomoQuestionPlan): boolean {
   // after PONS): the planner has it right. Any other remembered coin is the
   // wrong subject for a line that names a different one.
   return !plan.toolCalls.some((c) => typeof c.args.token === "string" && c.args.token.toLowerCase() === word);
+}
+
+/** Bind an explicit reply's coin pointer before room memory can supply a different coin. */
+function repliedCoinText(q: Parameters<TgFomoPort["ask"]>[0], text: string, now: number, selfNames: string[]): string | null {
+  const coin = q.replyCoin;
+  if (!coin || coin.chain !== "robinhood" || !/^0x[0-9a-f]{40}$/iu.test(coin.address)) return null;
+  const lineChain = chainIn(q.text);
+  if (chainExcluded(q.text) || (lineChain && lineChain !== coin.chain)) return null;
+  const plan = classifyFomoQuestion(text, { memory: null, now, selfNames });
+  if (!plan || !COIN_SUBJECT_INTENTS.has(plan.intent)) return null;
+  const identity = `${coin.address.toLowerCase()} on robinhood`;
+  let bound: string;
+  if (q.request?.kind === "coin") {
+    // A routed ticker can reuse this reply's contract only when its caption
+    // names the same coin and the request does not choose a different chain.
+    const symbol = q.request.symbol.replace(/^\$+/, "").toUpperCase();
+    if (!TICKER.test(symbol) || symbol !== coin.symbol?.toUpperCase() || (q.request.chain && q.request.chain !== coin.chain)) return null;
+    const direct = classifyFomoQuestion(q.text, { memory: null, now, selfNames });
+    if (direct?.subjects.some((s) => s.kind !== "token" || (s.address ? s.address.toLowerCase() !== coin.address.toLowerCase() : s.symbol?.toUpperCase() !== symbol))) return null;
+    bound = text.replace(`$${symbol}`, identity);
+  } else {
+    // Explicit names/traders always win. A loose name belongs to the router;
+    // merely mentioning Fomo under a chart is not a request about that coin.
+    const pointer = /\b(?:it|(?:this|that)(?:\s+(?:coin|token|one))?)\b(?!\s+(?:week|month|year|day|hour)\b)/iu;
+    if (plan.subjects.length || looseCoin(text, plan) || !pointer.test(text)) return null;
+    bound = text.replace(pointer, identity);
+  }
+  // Re-plan through the normal vocabulary and require the exact one coin.
+  const checked = classifyFomoQuestion(bound, { memory: null, now, selfNames });
+  const subject = checked?.subjects[0];
+  return checked?.intent === plan.intent && checked.subjects.length === 1 && subject?.kind === "token"
+    && subject.address?.toLowerCase() === coin.address.toLowerCase() && subject.chain === coin.chain ? bound : null;
 }
 
 // ─── A trader the planner could not place ───────────────────────────────────
@@ -1076,14 +1109,16 @@ export function createTgFomoPort(broker: () => FomoBroker | null, opts: TgFomoPo
         if (q.request?.kind === "coin" && q.request.aspect === "facts") return await factsAnswer(q, q.request);
         let text = q.request ? requestText(q.request) : typeof q.text === "string" ? q.text : null;
         if (!text || !text.trim()) return null;
-        /** The words as asked (a line, or the request's fixed question): what looseCoin and looseTrader read. */
-        const asked: string = text;
         const b = brokerNow();
         const t = now();
         // The bot's own @username and names (trusted: from getMe and the
         // soul, via the handler), so "@thisbot theses on $PONS?" is a coin
         // question and not a question about a trader called thisbot.
         const selfNames = selfNamesOf(q.selfNames);
+        const replied = repliedCoinText(q, text, t, selfNames);
+        if (replied) text = replied;
+        /** The words as asked, with only an authenticated reply's coin pointer resolved. */
+        const asked: string = text;
         // A line (never a routed request, whose coin or trader the router
         // grounded) is left to the router when it asks about a coin the
         // planner could not place (looseCoin), or names another trader than
@@ -1104,7 +1139,7 @@ export function createTgFomoPort(broker: () => FomoBroker | null, opts: TgFomoPo
         // holds, when it is the one asked about (same symbol, and chain when one
         // was named), is asked about as "it", so the read is that token's own
         // kept copy and never a search by symbol across every chain.
-        if (q.request?.kind === "coin" && q.request.aspect === "theses") {
+        if (!replied && q.request?.kind === "coin" && q.request.aspect === "theses") {
           const said = await rememberedThesesText(bounded.broker, conversationKey, q.request, t);
           if (said) text = said;
         }
@@ -1120,6 +1155,7 @@ export function createTgFomoPort(broker: () => FomoBroker | null, opts: TgFomoPo
           groupId: String(q.chatId),
           maxChars,
           selfNames,
+          ...(replied ? { ignoreMemory: true } : {}),
           ...(wanted ? { wanted } : {}),
           ...(q.fresh === true ? { retryEmpty: true } : {}),
           sayableHandle: sayableTraderHandle,

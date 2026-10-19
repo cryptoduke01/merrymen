@@ -66,8 +66,10 @@ import { normalisedTag, plainAsk, withoutReplyOptOut } from "./xpost/replies";
 import { takeAllowance, type XPost } from "./xpost/store";
 import { coinNamedIn, type AnswerIntentKind } from "./xpost/writer";
 import { asksAboutACoin, everydayWord, nameLikeWords } from "./xpost/words";
-import { cleanTicker, neverAnsweredName, type FiguresSection, type FiguresSpec } from "./xpost/figures";
-import { majorsDirOf, moveOf, type HotRead, type MajorRead, type MarketRead } from "./xpost/market";
+import { cleanTicker, neverAnsweredName, withoutFiguresLine, type FiguresSection, type FiguresSpec } from "./xpost/figures";
+import { majorsDirOf, moveOf, type HotRead, type InsightRead, type MajorRead, type MarketRead } from "./xpost/market";
+import { assessCheck, checkFigures, checkPhrases, type CheckRead, type CheckTarget } from "./xpost/check";
+import { CHECK_BUDGET_MS, createLarpChecker, type LarpChecker, type LarpCheckerDeps } from "./orchestrator-xpost-check";
 import { coinQuery, LISTINGS_MAX, MAJORS_MAX_RANK, pickMajor, readChainListings, readCoinMarket, readCoinMarkets, readCoinTrending, readTopCoins, searchCoinList, type ChainListing, type ChainListingsRead, type CoinHit, type CoinMarket, type CoinMarketRead, type CoinMarketsRead, type CoinSearchRead, type CoinTopRead, type CoinTrendingRead } from "./venues/coingecko-coins";
 
 const MIN = 60_000;
@@ -136,6 +138,14 @@ export type TagIntent =
   | { kind: "advice" }
   /** The allowlist's plain "what model are you" (modelQuestion): code's own line, never a draft. */
   | { kind: "model" }
+  /**
+   * A LARP CHECK (xpost/check.ts, 2026-10-13): "larp check", "is this real?"
+   * on a tag that sits under a project's post or carries a site or a
+   * contract. Never read by classifyTag: tagCandidate finds it before any
+   * other reading (ReplyCandidate.check), and research reads the target with
+   * the larp checker (orchestrator-xpost-check.ts).
+   */
+  | { kind: "check"; target: CheckTarget }
   | { kind: "chat" }
   /**
    * Answered by nothing at all: no row, no draft, no allowance. A tag that
@@ -661,9 +671,20 @@ const BANTER_SHAPES = [
 ];
 const BANTER_ALLOWED = new RegExp(`^${BANTER_GREETING}(?:${BANTER_SHAPES.join("|")})$`, "u");
 const BANTER_NEVER = /\b(?:money|funds?|savings|hack\w*|scam\w*|rug\w*|ponzi|steal\w*|stole\w*|los[st]\w*|lose|death|dead|died|die|dying|tokens?|tge|launch\w*|merrymen|robinhood|alan)\b/;
+/**
+ * "ALAN" SAID TO HIM, NOT ABOUT HIM (the owner's ask, 2026-10-18): "how's it
+ * going alan?" and "hey alan, how are you?" were never banter, because
+ * BANTER_NEVER holds his name. His name as an address is taken off first:
+ * at the start, after at most two greeting words, followed by a space or a
+ * comma; or at the very end, after a space or a comma. Anywhere else, or
+ * glued to more ("alan's token?"), it stays, and BANTER_NEVER still refuses
+ * the tag.
+ */
+const BANTER_ALAN = /^((?:(?:gm|yo|hey|hi|hello|ser|fren|bro|sup)[\s,!.]+){0,2})alan[\s,!.:-]+|[\s,]+alan$/;
 export function banterAsk(text: unknown): boolean {
-  const plain = plainAsk(text);
-  return plain !== null && !sherwoodMentioned(text) && !BANTER_NEVER.test(plain) && BANTER_ALLOWED.test(plain);
+  const said = plainAsk(text);
+  const plain = said === null ? null : said.replace(BANTER_ALAN, "$1").trim();
+  return plain !== null && plain !== "" && !sherwoodMentioned(text) && !BANTER_NEVER.test(plain) && BANTER_ALLOWED.test(plain);
 }
 
 /**
@@ -692,6 +713,29 @@ export function houseTroubleAsk(text: unknown): boolean {
   if (typeof text !== "string") return false;
   const t = normalisedTag(text).replace(/[’‘]/g, "'");
   return HOUSE_TROUBLE.test(t) || (HOUSE_WORD.test(t) && ROADMAP_WORD.test(t));
+}
+
+/**
+ * HOW TO GET AN AGENT, ASKED PLAINLY (the owner's teammate, 2026-10-13: "how
+ * do i get an agent" is one of the few questions an active agent answers on
+ * X). The Telegram groups' reader (publicFactRequest) knows "get my own
+ * agent" and "an agent like you"; these whole plain tags (plainAsk) are read
+ * as onboarding too, after at most two greeting words: how or where do i get,
+ * make, build, set up or create an agent (or a bot, my own, an ai trading
+ * one), and can i get one. A word more, and it is not on the list. Exported
+ * for tests.
+ */
+const AGENT_NOUN = String.raw`(?:an?|my own|my|one|an ai|a trading|an ai trading) ?(?:ai |trading |ai trading )?(?:agent|bot)(?: like (?:you|u|yours|this one)| of my own| too)?`;
+const ONBOARDING_SHAPES = [
+  `(?:how|where) (?:do|can|could|would) i (?:get|make|build|set up|setup|create|start) ${AGENT_NOUN}`,
+  `how (?:to|does one|do you|do u) (?:get|make|build|set up|setup|create|start) ${AGENT_NOUN}`,
+  `can i (?:get|have|make|build|set up|create) ${AGENT_NOUN}`,
+  `how do i get (?:one|one of you|started)`,
+];
+const ONBOARDING_ALLOWED = new RegExp(`^${GREETING}(?:${ONBOARDING_SHAPES.join("|")})$`, "u");
+export function onboardingAsk(text: unknown): boolean {
+  const plain = plainAsk(text);
+  return plain !== null && !sherwoodMentioned(text) && ONBOARDING_ALLOWED.test(plain);
 }
 
 /** Words that set one coin against another. */
@@ -742,6 +786,8 @@ export function classifyTag(text: string, o: { address?: string | null; advice?:
   const asked = publicFactRequest(t);
   if (asked?.kind === "site" && asked.topic === "capabilities") return { kind: "capabilities" };
   if (asked?.kind === "site" && asked.topic === "onboarding") return { kind: "onboarding" };
+  // HOW TO GET AN AGENT, ON THE X ALLOWLIST'S PLAIN SHAPES (onboardingAsk, 2026-10-13).
+  if (address === null && onboardingAsk(t)) return { kind: "onboarding" };
   // "HOW'S THE MARKET?", ON THE ALLOWLIST'S PLAIN SHAPES (marketAsk): the big coins' day and the chain's movers.
   if (address === null && marketAsk(t)) return { kind: "market" };
   // "WHAT'S HOT?", ON THE ALLOWLIST'S PLAIN SHAPES (hotAsk): an overview, no coin named.
@@ -877,6 +923,9 @@ export const RESEARCH_BUDGET = Object.freeze({ maxLookups: 6, totalMs: 12_000, r
  * lookup past either is not made, and the answer goes without it.
  */
 export const X_LOOKUPS_PER_ACCOUNT = 8;
+/** A larp check's index reads, per X account per ten minutes and across accounts per hour: a check may try four chains and a site's own contract. */
+export const CHECK_LOOKUPS_PER_ACCOUNT = 30;
+export const CHECK_LOOKUPS_PER_HOUR = 120;
 export const DEFAULT_X_LOOKUPS_PER_HOUR = 120;
 
 /** The limiter's key for an X account: X ids are too long for a safe integer, so a hash of one. */
@@ -975,6 +1024,13 @@ export interface XResearchDeps {
   fleetHome?: string;
   /** Index lookups per hour across X accounts. Default DEFAULT_X_LOOKUPS_PER_HOUR. */
   lookupsPerHour?: number;
+  /**
+   * THE LARP CHECK'S READERS (orchestrator-xpost-check.ts): the research
+   * browser and the GitHub token, only with MERRYMEN_XPOST_CHECKS=1. The
+   * checker reads the index through this research's own coin facts and
+   * limiter. Absent: a check is answered by nothing.
+   */
+  check?: Omit<LarpCheckerDeps, "coinFacts">;
   now?: () => number;
 }
 
@@ -1072,6 +1128,16 @@ export interface ResearchBundle {
    */
   market?: MarketRead;
   /**
+   * THE MARKET NOW FOR AN ACTIVE OWNER'S INSIGHT POST (xpost/market.ts
+   * InsightRead, 2026-10-13): the market read's big coins' day, their week
+   * too, the chain's movers and how many of them Fomo traders bought most.
+   * Set beside `market` whenever the big coins or the chain were read; absent
+   * when neither was.
+   */
+  insight?: InsightRead;
+  /** Day and week evidence for a focused insight, separate from the market answer. */
+  insightWeekFigures?: FiguresSpec;
+  /**
    * What the answer turned out to be about, when that is not what the tag was
    * read as: a ticker on the coin list that is no major (a copycat, unranked,
    * past the rank cap) goes on as a coin of the chain. Absent: the tag's own.
@@ -1084,6 +1150,11 @@ export interface ResearchBundle {
    * The orchestrator drafts nothing and skips the tag.
    */
   unanswered?: true;
+  /**
+   * A LARP CHECK AS CODE READ IT (xpost/check.ts assessCheck): the verdict and
+   * its reasons, for code's own casual lines when the draft does not stand.
+   */
+  check?: CheckRead;
   /** Lookups made (the budget counts these). */
   lookups: number;
   /** What happened, by stable word, for the pass's counts. Never a coin, a person or an address. */
@@ -1115,10 +1186,16 @@ export function sayable(s: unknown): s is string {
  * bitquery, which the market phrases and the figures line name. A post that
  * says one carries research; a draft that cites one with nothing looked up
  * is refused (orchestrator-xpost.ts, gate:unlooked-source).
+ *
+ * AND "THE MARKET DATA", the words a major's phrases say where the provider's
+ * name used to be (2026-10-13). AND CODE'S FIGURES LINE ITSELF (2026-10-13): the line names no source any
+ * more ("ETH #2, ~$3.4k, …", "24h: BTC +1.2%, …"), so a post that ends in one
+ * (figures.ts withoutFiguresLine) carries research by the line alone: an
+ * answer's, and an active owner's market insight post's.
  */
-const RESEARCH_SOURCE = /\b(?:index|fomo|on[\s-]?chain|chain data|project|creator|contract|coin\s?gecko|gecko\s?terminal|bit\s?query)\b/i;
+const RESEARCH_SOURCE = /\b(?:index|fomo|on[\s-]?chain|chain data|market data|project|creator|contract|coin\s?gecko|gecko\s?terminal|bit\s?query)\b/i;
 export function carriesResearch(body: unknown): boolean {
-  return typeof body === "string" && RESEARCH_SOURCE.test(body);
+  return typeof body === "string" && (RESEARCH_SOURCE.test(body) || withoutFiguresLine(body) !== body);
 }
 
 /** A promise held to `ms`, or `fallback`. Never throws; its timer never holds a shutdown. */
@@ -1259,22 +1336,23 @@ function moveWords(pct: number | null, when: string): string | null {
 /**
  * A MAJOR'S MARKET, IN WORDS (2026-10-12): where it ranks, how the day and the
  * week went, how busy its trading is against its size, each from CoinGecko's
- * numbers by code's own thresholds and with "coingecko" in it. Never a
+ * numbers by code's own thresholds, said as "the market data" and never by
+ * the provider's name (the owner's teammate, 2026-10-13). Never a
  * figure, never its name (the asker named it; the answer calls it "it"), and
  * nothing about whether to buy it. The figures themselves go in code's line
  * (xpost/figures.ts), never to the model.
  */
 export function majorPhrases(m: Pick<CoinMarket, "rank" | "marketCapUsd" | "volume24hUsd" | "change24hPct" | "change7dPct">): string[] {
   const out: string[] = [];
-  if (m.rank !== null) out.push(m.rank <= 10 ? "coingecko ranks it among the very biggest coins" : m.rank <= 50 ? "coingecko ranks it a large cap" : "coingecko ranks it a mid cap");
+  if (m.rank !== null) out.push(m.rank <= 10 ? "the market data ranks it among the very biggest coins" : m.rank <= 50 ? "the market data ranks it a large cap" : "the market data ranks it a mid cap");
   const day = moveWords(m.change24hPct, "today");
-  if (day) out.push(`coingecko shows it ${day}`);
+  if (day) out.push(`the market data shows it ${day}`);
   const week = moveWords(m.change7dPct, "on the week");
-  if (week) out.push(`coingecko shows it ${week}`);
+  if (week) out.push(`the market data shows it ${week}`);
   const vol = m.volume24hUsd, cap = m.marketCapUsd;
   if (vol !== null && cap !== null && Number.isFinite(vol) && Number.isFinite(cap) && cap > 0 && vol >= 0) {
     const turnover = vol / cap;
-    out.push(turnover >= 0.1 ? "trading volume looks heavy on coingecko" : turnover <= 0.02 ? "trading volume looks light on coingecko" : "trading volume looks ordinary on coingecko");
+    out.push(turnover >= 0.1 ? "trading volume looks heavy in the market data" : turnover <= 0.02 ? "trading volume looks light in the market data" : "trading volume looks ordinary in the market data");
   }
   return out.filter(sayable);
 }
@@ -1583,7 +1661,7 @@ export function hotScreen(pools: readonly GeckoPool[]): HotCoin[] {
 }
 
 /** Said when the index shows nothing past the floors. */
-export const HOT_NONE = "nothing is standing out on the robinhood chain index right now";
+export const HOT_NONE = "nothing is standing out on the chain's index right now";
 
 /**
  * WHAT'S HOT, IN WORDS: how many coins stand out (one, a couple, a few), which
@@ -1595,7 +1673,7 @@ export const HOT_NONE = "nothing is standing out on the robinhood chain index ri
 export function hotPhrases(o: { changes: readonly (number | null)[]; crowd: number; trending: number }): string[] {
   const n = o.changes.length;
   if (n === 0) return [HOT_NONE].filter(sayable);
-  const out = [`the robinhood chain index shows ${n === 1 ? "one coin" : n === 2 ? "a couple of coins" : "a few coins"} standing out right now`];
+  const out = [`the chain's index shows ${n === 1 ? "one coin" : n === 2 ? "a couple of coins" : "a few coins"} standing out right now`];
   const known = o.changes.filter((c): c is number => c !== null && Number.isFinite(c));
   if (known.length) {
     const up = known.filter((c) => c > 0).length, down = known.filter((c) => c < 0).length;
@@ -1603,12 +1681,12 @@ export function hotPhrases(o: { changes: readonly (number | null)[]; crowd: numb
     else out.push(up === known.length ? "on the index they're all up on the day" : down === known.length ? "on the index they're all down on the day" : "on the index they're a mix of up and down on the day");
   }
   if (o.crowd > 0) out.push(`fomo traders are most active in ${o.crowd === 1 ? "one coin" : "a couple of coins"} the index has trending`);
-  if (o.trending > 0) out.push(`coingecko's global trending list has ${o.trending === 1 ? "a big name" : "a few big names"} on it`);
+  if (o.trending > 0) out.push(`the global trending index has ${o.trending === 1 ? "a big name" : "a few big names"} on it`);
   return out.filter(sayable);
 }
 
 /** What it can do, said by code: only what is wired, and always that a tag never orders a trade. */
-export function capabilityPhrases(o: { fomo: boolean; flow: boolean }): string[] {
+export function capabilityPhrases(o: { fomo: boolean; flow: boolean; check?: boolean }): string[] {
   // Short enough to stand in a whole answer with the opt-out notice (the test says it through the gate).
   const said = o.flow
     ? `a coin's ticker or contract and you'll say what the public index and on-chain data show${o.fomo ? ", and what fomo traders say" : ""}`
@@ -1616,6 +1694,8 @@ export function capabilityPhrases(o: { fomo: boolean; flow: boolean }): string[]
   return [
     "you trade for your owner on merrymen and post your buys on X",
     `people can tag you with ${said}, in words`,
+    // THE LARP CHECK, only while it is wired (MERRYMEN_XPOST_CHECKS=1).
+    ...(o.check ? ["people can tag you under a project's post with larp check, and you scan its site and github and say whether there's a real build behind it"] : []),
     "you never take trade orders from a tag",
   ].filter(sayable);
 }
@@ -1638,7 +1718,10 @@ function ownMoney(mode: AgentFacts["mode"], paper: boolean): boolean {
 
 /** A buy post as the model may read it: its prose, without the CA or wallet suffix and the opt-out. */
 function ownPostProse(body: string): string {
-  return withoutReplyOptOut(String(body ?? "").split(/ (?:CA|Wallet) \(/)[0] ?? "").replace(/\s+/g, " ").trim();
+  // The trusted lines code appends: the older " CA (chain): 0x…" / " Wallet (…)"
+  // suffixes, and since 2026-10-13 a blank line then the tx link and the bare CA.
+  const text = String(body ?? "").replace(/(?:\n\nhttps:\/\/robinhoodchain\.blockscout\.com\/tx\/0x[0-9a-fA-F]{64})?\n\n0x[0-9a-fA-F]{40}$/, "");
+  return withoutReplyOptOut(text.split(/ (?:CA|Wallet) \(/)[0] ?? "").replace(/\s+/g, " ").trim();
 }
 
 /**
@@ -1661,7 +1744,9 @@ const TRENCHER_ID = /^T[0-9A-F]{11}$/;
 
 /** A buy post's own contract, from the CA suffix the pipeline adds (public-wallet.ts appendPublicToken), or null. */
 function postContract(body: string): string | null {
-  const m = / CA \([^)]*\): (0x[0-9a-fA-F]{40})\b/.exec(String(body ?? ""));
+  const text = String(body ?? "");
+  // Alone on the last line after a blank one (2026-10-13), or the older " CA (chain): 0x…" suffix.
+  const m = /\n\n(0x[0-9a-fA-F]{40})$/.exec(text) ?? / CA \([^)]*\): (0x[0-9a-fA-F]{40})\b/.exec(text);
   return m ? m[1]!.toLowerCase() : null;
 }
 
@@ -1839,6 +1924,13 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
   const lane = d.fleetHome ? { fleetHome: d.fleetHome } : undefined;
   const limiter = new FactsLimiter({ now, perChat: X_LOOKUPS_PER_ACCOUNT, chatWindowMs: 10 * MIN, perAgent: d.lookupsPerHour ?? DEFAULT_X_LOOKUPS_PER_HOUR, agentWindowMs: HOUR });
   const coinFacts = d.coinFacts ?? createCoinFactsReader({ now, limiter, ...(lane ? { lane } : {}) });
+  // A LARP CHECK'S INDEX READS ON A LIMITER OF THEIR OWN (live run, 2026-10-13):
+  // a 0x contract is looked for on up to four chains, and on the answers'
+  // eight reads per ten minutes two checks spent the account's share and the
+  // next was "index busy". Checks are already held to their own day's count
+  // (MERRYMEN_XPOST_CHECKS_PER_DAY); the reads share the fleet lane and its memo.
+  const checkFacts = d.coinFacts ?? createCoinFactsReader({ now, limiter: new FactsLimiter({ now, perChat: CHECK_LOOKUPS_PER_ACCOUNT, chatWindowMs: 10 * MIN, perAgent: CHECK_LOOKUPS_PER_HOUR, agentWindowMs: HOUR }), ...(lane ? { lane } : {}) });
+  const checker: LarpChecker | null = d.check ? createLarpChecker({ ...d.check, coinFacts: checkFacts, now }) : null;
   const resolveTicker = d.resolveTicker ?? (async (ticker: string, timeoutMs: number): Promise<string | null> => {
     const found = await searchPools(ticker, timeoutMs, undefined, lane);
     if (found.failed) return null;
@@ -2188,8 +2280,12 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
         const majorsRead = big ? majorsDirOf(big.map((m) => m.change24hPct)) : null;
         const chainRead: HotRead | null = hot.hot ?? null;
         const read: MarketRead = { majors: majorsRead, chain: chainRead };
+        // And for an insight post: the week as the day is read (majorsDirOf), and Fomo's most bought among the chain's movers.
+        const crowdShown = hot.figures?.find((x): x is Extract<FiguresSection, { kind: "crowd" }> => x.kind === "crowd")?.symbols.length ?? 0;
+        const insight: InsightRead | null = majorsRead || chainRead
+          ? { day: majorsRead, week: big ? majorsDirOf(big.map((m) => m.change7dPct)) : null, chain: chainRead, crowd: input.fomo ? crowdShown : null } : null;
         const facts = [
-          ...(majorsRead ? [`coingecko shows the big coins ${majorsRead.dir === "up" ? "mostly up" : majorsRead.dir === "down" ? "mostly down" : majorsRead.dir === "mixed" ? "split" : "flat"} today`] : []),
+          ...(majorsRead ? [`the market data shows the big coins ${majorsRead.dir === "up" ? "mostly up" : majorsRead.dir === "down" ? "mostly down" : majorsRead.dir === "mixed" ? "split" : "flat"} today`] : []),
           ...hot.facts,
         ].filter(sayable);
         const pools = hot.figures?.find((x): x is Extract<FiguresSection, { kind: "pools" }> => x.kind === "pools");
@@ -2199,8 +2295,11 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
           ...(pools ? [{ kind: "pools" as const, coins: pools.coins.map((c) => ({ symbol: c.symbol, change24hPct: c.change24hPct })) }] : []),
           ...(crowd ? [crowd] : []),
         ];
+        const insightWeekFigures: FiguresSpec = big && insight?.day && insight.week
+          ? big.map((m) => ({ kind: "major" as const, symbol: m.symbol, change24hPct: m.change24hPct, change7dPct: m.change7dPct })) : [];
         notes.push("market");
-        return { facts, ...(figures.length ? { figures } : {}), ...(hot.shownNames?.length ? { shownNames: hot.shownNames } : {}), market: read, ...(hot.hot ? { hot: hot.hot } : {}), lookups, notes };
+        return { facts, ...(insightWeekFigures.length ? { insightWeekFigures } : {}), ...(figures.length ? { figures } : {}), ...(hot.shownNames?.length ? { shownNames: hot.shownNames } : {}), market: read, ...(insight ? { insight } : {}),
+          ...(hot.hot ? { hot: hot.hot } : {}), lookups, notes };
       };
       const i = input.intent;
       const f = input.facts;
@@ -2209,7 +2308,24 @@ export function createXResearch(d: XResearchDeps = {}): XResearch {
       try {
         switch (i.kind) {
           case "capabilities":
-            return { facts: capabilityPhrases({ fomo: (await fomoFor()) !== null, flow: !!d.flow }), lookups, notes };
+            return { facts: capabilityPhrases({ fomo: (await fomoFor()) !== null, flow: !!d.flow, check: checker !== null }), lookups, notes };
+          case "check": {
+            // ITS OWN BUDGET, NOT THE ANSWER'S TWELVE SECONDS: a real page has
+            // to load in a real browser (orchestrator-xpost-check.ts
+            // CHECK_BUDGET_MS), still held to what the caller has left.
+            if (!checker) {
+              notes.push("check-off");
+              return { facts: [], unanswered: true, lookups, notes };
+            }
+            const run = await checker.check(i.target, { budgetMs: Math.min(CHECK_BUDGET_MS, input.budgetMs ?? CHECK_BUDGET_MS), chatId: xAccountKey(input.xUserId) });
+            const read = assessCheck(run.evidence);
+            notes.push(...run.notes, `check-${read.verdict}`);
+            // The site's own line about itself: the project's unverified claim, screened as a creator's description is.
+            const claim = creatorClaim(run.claim);
+            if (run.claim && !claim) notes.push("claim-refused");
+            const figures = checkFigures(run.evidence);
+            return { facts: checkPhrases(read).filter(sayable), claim, check: read, ...(figures.length ? { figures } : {}), lookups: lookups + run.lookups, notes };
+          }
           case "onboarding":
             return { facts: ONBOARDING_PHRASES.filter(sayable), lookups, notes };
           case "model":

@@ -599,6 +599,12 @@ export async function readRoutedPrice(
      * Off by default, so every caller written before it keeps "TWAP or null".
      */
     allowSpot?: boolean;
+    /**
+     * The WETH/USDG leg, already read — see `readWethLeg`. It is the same pool
+     * for every token, so a caller pricing many tokens at once reads it once
+     * and hands every token the same answer. Omitted, it is read here.
+     */
+    wethLeg?: Promise<PoolPrice | null>;
   },
 ): Promise<RoutedPrice | null> {
   const windowSec = args.windowSec ?? DEFAULT_TWAP_WINDOW_SEC;
@@ -626,13 +632,7 @@ export async function readRoutedPrice(
         }),
     isWeth
       ? Promise.resolve(null)
-      : readPoolPrice(client, {
-          token: args.weth,
-          tokenDecimals: wethDecimals,
-          cash: args.cash,
-          cashDecimals: args.cashDecimals,
-          windowSec,
-        }),
+      : (args.wethLeg ?? readWethLeg(client, { weth: args.weth, wethDecimals, cash: args.cash, cashDecimals: args.cashDecimals, windowSec })),
   ]);
 
   const directRoute: RoutedPrice | null =
@@ -693,6 +693,25 @@ export async function readRoutedPrice(
   // new pool leaves the coin refused as too thin — exactly what every such
   // coin was before sampling existed.
   return twapRoute ?? spotRoute(direct, leg, wethLeg, args.tokenDecimals);
+}
+
+/**
+ * The WETH/USDG leg of every two-hop route: the same pool whichever token is
+ * being priced. It used to be searched and read again for each token — about
+ * thirteen calls a token, half of a routed read — for an answer every token in
+ * the pass shared. A pass now reads it once (pool-prices.ts) and passes it in.
+ */
+export function readWethLeg(
+  client: PublicClient,
+  args: { weth: `0x${string}`; wethDecimals?: number; cash: `0x${string}`; cashDecimals: number; windowSec?: number },
+): Promise<PoolPrice | null> {
+  return readPoolPrice(client, {
+    token: args.weth,
+    tokenDecimals: args.wethDecimals ?? 18,
+    cash: args.cash,
+    cashDecimals: args.cashDecimals,
+    windowSec: args.windowSec ?? DEFAULT_TWAP_WINDOW_SEC,
+  });
 }
 
 /**

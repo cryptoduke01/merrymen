@@ -5,6 +5,8 @@
  */
 import type { ToolDef } from "../tool";
 import { AGENT_TOOLS } from "./agents";
+import { AGENT_SETTINGS_TOOLS } from "./agent-settings";
+import { ONBOARDING_TOOLS } from "./onboarding";
 import { PORTFOLIO_TOOLS } from "./portfolio";
 import { DECISIONS_TOOLS } from "./decisions";
 import { MARKET_TOOLS } from "./market";
@@ -21,7 +23,9 @@ import { withAppMeta } from "../apps";
 
 // withAppMeta attaches the MCP Apps view (ui:// resource) to the tools that have one.
 export const ALL_TOOLS: readonly ToolDef[] = withAppMeta([
+  ...ONBOARDING_TOOLS,
   ...AGENT_TOOLS,
+  ...AGENT_SETTINGS_TOOLS,
   ...PORTFOLIO_TOOLS,
   ...DECISIONS_TOOLS,
   ...MARKET_TOOLS,

@@ -25,7 +25,7 @@ import { homePaths } from "../home";
 import { BROKER_LIMITS } from "./broker";
 import { FomoBudget, MemoryAllowance, UsageMeter, type FomoBudgetConfig } from "./budget";
 import type { FomoAccess } from "./contract";
-import { robinhoodChain, tokenIdentity } from "./identity";
+import { chainFromUserText, robinhoodChain, tokenIdentity } from "./identity";
 import { createFomoClient, expectedCredits } from "./provider";
 import {
   BACKGROUND_RESEARCH_CAP,
@@ -314,6 +314,122 @@ describe("fomo_resolve_subject", () => {
     assert.equal(rh.subject?.kind === "token" && rh.subject.token.key, PONS_KEY);
   });
 
+  it("keeps distinct same-ticker contracts on one chain ambiguous until an address is supplied", async () => {
+    const h = await harness();
+    const other = "0x" + "ab".repeat(20);
+    h.routes.set("tokens-search", () => json({ tokens: [
+      { symbol: "BOOMER", address: PONS, networkId: 4663, marketCapUsd: 2_080_000 },
+      { symbol: "BOOMER", address: other, networkId: 4663, marketCapUsd: 1 },
+      { symbol: "BOOMER", address: FU2O, networkId: 1399811149 },
+    ] }));
+    const group = { audience: "group" as const, surface: "telegram-group" as const, groupId: "-100123" };
+    const ambiguous = await h.invoke<TokenThesesData>("fomo_get_token_theses", { token: "BOOMER", chain: "robinhood" }, group);
+    assert.equal(ambiguous.status, "needs-clarification");
+    assert.equal(ambiguous.subject, null);
+    assert.equal(ambiguous.data, null);
+    assert.deepEqual(ambiguous.candidates.map((c) => c.subject.kind === "token" ? c.subject.token.key : null), [PONS_KEY, `eip155:4663:${other}`]);
+    assert.equal(h.count("/v2/thesis/token/"), 0, "a chain hint and market cap do not select a same-ticker contract");
+
+    const chosen = await h.invoke<TokenThesesData>("fomo_get_token_theses", { token: PONS, chain: "robinhood" }, group);
+    assert.equal(chosen.subject?.kind === "token" && chosen.subject.token.key, PONS_KEY);
+    assert.notEqual(chosen.status, "needs-clarification");
+    assert.equal(h.count("/v2/tokens/search"), 1, "the supplied address and chain need no second search");
+    assert.equal(h.count(`/v2/thesis/token/${PONS}`), 1, "only the selected contract's theses are read");
+  });
+
+  it("deduplicates repeated provider identities without treating a ticker and chain as identity", async () => {
+    const h = await harness();
+    h.routes.set("tokens-search", () => json({ tokens: [
+      { symbol: "BOOMER", address: PONS, networkId: 4663 },
+      { symbol: "BOOMER", address: "0x" + PONS.slice(2).toUpperCase(), networkId: 4663 },
+    ] }));
+    const env = await h.invoke<ResolveData>("fomo_resolve_subject", { query: "BOOMER", chain: "robinhood" });
+    assert.equal(env.status, "ok");
+    assert.equal(env.subject?.kind === "token" && env.subject.token.key, PONS_KEY);
+    assert.deepEqual(env.candidates, []);
+    assert.equal(h.count("/v2/tokens/search"), 1);
+  });
+
+  for (const [chain, networkId, parameter] of [["base", 8453, "base"], ["eth", 1, "eth"], ["bsc", 56, "bnb"]] as const) {
+    it(`keeps the provider's ${chain} identity through a ticker, chain and contract follow-up`, async () => {
+      const h = await harness();
+      const networks = [8453, 1, 56];
+      h.routes.set("tokens-search", () => json({ tokens: networks.map((id) => ({ symbol: "PONS", address: PONS, networkId: id })) }));
+      h.routes.set("thesis-token", (u) => {
+        assert.equal(u.searchParams.get("network"), parameter);
+        const row = (fixture("theses-token").theses as Rec[])[0]!;
+        return json({ totalAvailable: 3, theses: networks.map((id) => ({ ...row, id: `th-${id}`, chain: undefined, networkId: id })) });
+      });
+      const ambiguous = await h.invoke<ResolveData>("fomo_resolve_subject", { query: PONS });
+      assert.equal(ambiguous.status, "needs-clarification");
+      assert.equal(ambiguous.candidates.length, 3, "the same address on three numbered networks stays three coins");
+      for (const ref of ["PONS", PONS]) {
+        const answer = await h.invoke<TokenThesesData>("fomo_get_token_theses", { token: ref, chain });
+        assert.equal(answer.subject?.kind === "token" && answer.subject.token.key, `eip155:${networkId}:${PONS}`);
+        assert.deepEqual(answer.data?.theses.map((t) => t.evidenceId), [`fomo:thesis/th-${networkId}`]);
+        assert.equal(answer.status, "partial", "the two other-chain rows were removed, not merged");
+      }
+      assert.equal(h.count("/v2/tokens/search"), 2, "address placement and ticker placement each reuse their own search cache");
+      assert.equal(h.count("/v2/thesis/token/"), 1, "the contract follow-up shares the ticker's correctly keyed evidence");
+    });
+  }
+
+  it("rejects an incompatible address before trying to place an unnumbered named chain", async () => {
+    const h = await harness();
+    const answer = await h.invoke<ResolveData>("fomo_resolve_subject", { query: FU2O, chain: "base" });
+    assert.equal(answer.status, "needs-clarification");
+    assert.equal(answer.reason, "address-chain-mismatch");
+    assert.equal(h.calls.length, 0);
+  });
+
+  it("never chooses between same-address unnumbered chains or asks for the chain again", async () => {
+    const h = await harness();
+    h.routes.set("tokens-search", () => json({ tokens: ["base", "eth"].map((chain) => ({ symbol: "PONS", address: PONS, chain })) }));
+    for (const chain of [undefined, "base", "eth"]) {
+      const answer = await h.invoke<TokenThesesData>("fomo_get_token_theses", { token: PONS, ...(chain ? { chain } : {}) });
+      assert.equal(answer.status, "unavailable");
+      assert.equal(answer.reason, "token-network-unconfirmed");
+      assert.equal(answer.subject, null);
+      assert.equal(answer.data, null);
+      assert.deepEqual(answer.candidates, []);
+      assert.match(answer.message ?? "", /didn't confirm its network identity/);
+      assert.doesNotMatch(answer.message ?? "", /Which chain|Which one/);
+    }
+    assert.equal(h.count("/v2/tokens/search"), 1);
+    assert.equal(h.count("/v2/thesis/token/"), 0);
+  });
+
+  it("separate unnumbered coin lookups and direct dossier jobs cannot share an authoritative key", async () => {
+    const h = await harness();
+    h.routes.set("tokens-search", (u) => {
+      const symbol = u.searchParams.get("q");
+      return json({ tokens: [{ symbol, address: PONS, chain: symbol === "BASECOIN" ? "base" : "eth" }] });
+    });
+    for (const [symbol, chain] of [["BASECOIN", "base"], ["ETHCOIN", "eth"]] as const) {
+      const answer = await h.invoke<ResearchCoinData>("fomo_research_coin", { token: symbol, chain, depth: "quick" });
+      assert.equal(answer.status, "unavailable");
+      assert.equal(answer.reason, "token-network-unconfirmed");
+      assert.equal(answer.subject, null);
+      const token = tokenIdentity(chainFromUserText(chain)!, PONS)!;
+      const direct = await h.service.refreshDossierAs({ tenant: OWNER, surface: "app-chat", priority: "interactive" }, token, { symbol, name: null }, { depth: "quick", now: NOW });
+      assert.equal(direct.status, "unavailable");
+      assert.equal(direct.dossier, null);
+      assert.equal(direct.usage.providerCalls, 0);
+      assert.equal(await store.latestDossier(h.db, token.key), null);
+    }
+    assert.equal(h.count("/v2/tokens/search"), 2);
+    assert.equal(h.calls.length, 2, "no thesis, activity or stats read is made for either unconfirmed identity");
+  });
+
+  it("an address absent on an explicit chain does not ask for the same chain again", async () => {
+    const h = await harness();
+    const answer = await h.invoke<ResolveData>("fomo_resolve_subject", { query: PONS, chain: "base" });
+    assert.equal(answer.status, "not-found");
+    assert.equal(answer.reason, "address-not-placed");
+    assert.match(answer.message ?? "", /couldn't find this contract on base/);
+    assert.doesNotMatch(answer.message ?? "", /Which chain/);
+  });
+
   it("places an address by the network the provider returned, and asks for the chain when it cannot", async () => {
     const h = await harness();
     const placed = await h.invoke<ResolveData>("fomo_resolve_subject", { query: PONS });
@@ -396,6 +512,88 @@ describe("trader tools", () => {
 });
 
 describe("token tools", () => {
+  it("requests newest theses explicitly for coin and trader reads", async () => {
+    const h = await harness();
+    await h.invoke("fomo_get_token_theses", { token: PONS, chain: "robinhood" });
+    await h.invoke("fomo_get_token_theses", { trader: KALEO });
+    const urls = h.calls.filter((c) => c.includes("/v2/thesis/")).map((c) => new URL(c, "https://fixture.invalid"));
+    assert.equal(urls.length, 2);
+    assert.ok(urls.every((u) => u.searchParams.get("sort") === "recent"));
+    assert.equal(urls[0]?.searchParams.get("limit"), "25");
+  });
+
+  it("excludes malformed thesis identities from coin answers and reports the partial read", async () => {
+    const h = await harness();
+    h.routes.set("thesis-token", () => {
+      const rows = fixture("theses-token").theses as Rec[];
+      return json({ totalAvailable: 3, theses: [rows[0], { ...rows[1], token: { address: FU2O } }, { ...rows[2], token: { address: "broken" } }] });
+    });
+    const answer = await h.invoke<TokenThesesData>("fomo_get_token_theses", { token: PONS, chain: "robinhood" });
+    assert.equal(answer.status, "partial");
+    assert.deepEqual(answer.data?.theses.map((t) => t.evidenceId), ["fomo:thesis/th-0001"]);
+    assert.equal(answer.data?.uniqueAuthors, 1);
+    assert.ok(answer.coverage.notes.some((n) => /2 invalid thesis row/.test(n)));
+  });
+
+  it("excludes an unplaced cached thesis from both the coin list and dossier", async () => {
+    const h = await harness();
+    await h.invoke("fomo_get_token_theses", { token: PONS, chain: "robinhood" });
+    const key = cacheKeyOf("thesesByToken", { address: PONS, network: "robinhood", pages: 1, limit: 25, sort: "recent" });
+    const cached = await store.cacheGet(h.db, key);
+    assert.ok(cached);
+    const payload = cached.payload as Rec;
+    (payload.rows as Rec[])[0]!.token = null;
+    await store.cachePut(h.db, { cacheKey: key, dataClass: "theses", payload, retrievedAtMs: NOW, providerAsOfMs: null });
+    const answer = await h.invoke<TokenThesesData>("fomo_get_token_theses", { token: PONS, chain: "robinhood" });
+    assert.equal(answer.status, "partial");
+    assert.equal(answer.data?.theses.length, 2);
+    const research = await h.invoke<ResearchCoinData>("fomo_research_coin", { token: PONS, chain: "robinhood", depth: "quick" });
+    assert.equal(research.status, "partial");
+    assert.equal(research.data?.coverage.uniqueTheses, 2);
+    assert.ok(research.data?.coverage.limitations.some((n) => n.startsWith("Incomplete thesis read:")));
+    assert.ok(!research.evidence.some((e) => e.id === "fomo:thesis/th-0001"));
+  });
+
+  it("does not compare a complete dossier against an earlier incomplete thesis read", async () => {
+    const h = await harness();
+    let partial = true;
+    h.routes.set("thesis-token", () => {
+      const rows = fixture("theses-token").theses as Rec[];
+      return json({ totalAvailable: partial ? 4 : 3, theses: partial ? [...rows, { ...rows[0], id: "malformed", token: { address: "broken" } }] : rows });
+    });
+    await streamIsCurrent(h);
+    const first = await h.invoke<ResearchCoinData>("fomo_research_coin", { token: PONS, chain: "robinhood", depth: "quick" });
+    assert.equal(first.status, "partial");
+    assert.equal(first.reason, "theses-incomplete");
+    assert.equal(first.data?.coverage.uniqueTheses, 3);
+    assert.ok(first.data?.coverage.limitations.some((n) => n.startsWith("Incomplete thesis read:")));
+    partial = false;
+    h.clock.now += 31 * 60_000;
+    await streamIsCurrent(h);
+    const complete = await h.invoke<ResearchCoinData>("fomo_research_coin", { token: PONS, chain: "robinhood", depth: "quick", since_revision: first.data!.revision });
+    assert.equal(complete.status, "ok");
+    assert.equal(complete.data?.changes?.comparable, false);
+    assert.equal(complete.data?.changes?.reason, "different-scope");
+    assert.ok(!complete.data?.coverage.limitations.some((n) => n.startsWith("Incomplete thesis read:")));
+  });
+
+  it("an all-malformed thesis response preserves the previous research instead of recording no claims", async () => {
+    const h = await harness();
+    await streamIsCurrent(h);
+    const first = await h.invoke<ResearchCoinData>("fomo_research_coin", { token: PONS, chain: "robinhood", depth: "quick" });
+    assert.ok(first.data);
+    const before = h.calls.length;
+    h.routes.set("thesis-token", () => json({ totalAvailable: 0, theses: [{ ...(fixture("theses-token").theses as Rec[])[0], token: { address: FU2O } }] }));
+    h.clock.now += 31 * 60_000;
+    const failed = await h.invoke<ResearchCoinData>("fomo_research_coin", { token: PONS, chain: "robinhood", depth: "quick", since_revision: first.data.revision });
+    assert.equal(failed.status, "stale");
+    assert.equal(failed.reason, "theses-not-ready");
+    assert.equal(failed.data?.revision, first.data.revision);
+    assert.equal(failed.data?.coverage.uniqueTheses, first.data.coverage.uniqueTheses);
+    assert.equal(failed.data?.changes?.comparable, false);
+    assert.equal(h.calls.length, before + 1, "no feed or stats reads are bought for unusable thesis evidence");
+  });
+
   it("fomo_get_token_theses: excerpts sanitised and marked, stance counts, capped coverage", async () => {
     const h = await harness();
     const env = await h.invoke<TokenThesesData>("fomo_get_token_theses", { token: "PONS" });
@@ -1493,15 +1691,36 @@ describe("a shallower read never replaces a deeper one as a change (C4)", () => 
     const h = await harness();
     h.routes.set("thesis-token", (u) => {
       const pages = Number(u.searchParams.get("pages") ?? "1");
-      return json({ totalAvailable: 125, source: "live", theses: Array.from({ length: 25 * pages }, (_, i) => thesis(i)) }, 200, { "x-credits-cost": "1250" });
+      const limit = Number(u.searchParams.get("limit") ?? "50");
+      assert.equal(u.searchParams.get("sort"), "recent");
+      return json({ totalAvailable: 125, source: "live", theses: Array.from({ length: Math.min(125, 25 * pages, limit) }, (_, i) => thesis(i)) }, 200, { "x-credits-cost": String(1250 * pages) });
     });
     const token = tokenIdentity(robinhoodChain(), PONS)!;
     const deep = await h.service.refreshDossierAs({ tenant: OWNER, surface: "app-chat", priority: "interactive" }, token, { symbol: "PONS", name: null }, { depth: "deep", now: h.clock.now });
     assert.ok(deep.dossier);
     assert.equal(deep.dossier.coverage.pagesReturned, 5);
+    assert.equal(deep.dossier.coverage.uniqueTheses, 125, "the output limit grows beyond the vendor's default 50-row cap");
+    assert.deepEqual(h.calls.filter((c) => c.includes("/thesis/token/")).map((c) => new URL(c, "https://fixture.invalid").searchParams.get("limit")), ["25", "125"]);
     assert.ok(deep.dossier.strongestOpposition, "the deep read found the objection");
     return { h, deep: deep.dossier };
   };
+
+  it("a contested standard read returns all three requested pages beyond the default response cap", async () => {
+    const h = await harness();
+    h.routes.set("thesis-token", (u) => {
+      const pages = Number(u.searchParams.get("pages") ?? "1");
+      const limit = Number(u.searchParams.get("limit") ?? "50");
+      assert.equal(u.searchParams.get("sort"), "recent");
+      const rows = Array.from({ length: Math.min(125, 25 * pages, limit) }, (_, i) => thesis(i));
+      rows[0]!.text = "dev sold everything, this is a rug";
+      return json({ totalAvailable: 125, source: "live", theses: rows }, 200, { "x-credits-cost": String(1250 * pages) });
+    });
+    const answer = await h.invoke<TokenThesesData>("fomo_get_token_theses", { token: PONS, chain: "robinhood", depth: "standard", limit: 50 });
+    assert.equal(answer.coverage.achieved.theses, 75);
+    assert.equal(answer.data?.theses.length, 50, "the requested display count does not limit the evidence gathered");
+    assert.equal(answer.usage.creditsCharged, 5000, "one page then three pages are charged as requested");
+    assert.deepEqual(h.calls.filter((c) => c.includes("/thesis/token/")).map((c) => new URL(c, "https://fixture.invalid").searchParams.get("limit")), ["25", "75"]);
+  });
 
   it("carries the deeper pages from the shared cache and refuses to compare different depths", async () => {
     const { h, deep } = await deepHarness();
@@ -1520,6 +1739,22 @@ describe("a shallower read never replaces a deeper one as a change (C4)", () => 
     assert.equal(latest?.strongestOpposition?.claimKey, deep.strongestOpposition!.claimKey, "the shared latest revision did not lose the objection");
     const text = renderEnvelope(quick, { audience: "owner", maxChars: 4000, now: h.clock.now });
     assert.ok(!/No longer present|no longer an objection/i.test(text), text);
+  });
+
+  it("carried deeper pages retain their incomplete-coverage flag", async () => {
+    const { h, deep } = await deepHarness();
+    const key = cacheKeyOf("thesesByToken", { address: PONS, network: "robinhood", pages: 5, limit: 125, sort: "recent" });
+    const cached = await store.cacheGet(h.db, key);
+    assert.ok(cached);
+    const payload = { ...(cached.payload as Rec), partial: true, dropped: 1 };
+    await store.cachePut(h.db, { cacheKey: key, dataClass: "theses", payload, retrievedAtMs: NOW, providerAsOfMs: null });
+    h.clock.now += 31 * 60_000;
+    await streamIsCurrent(h);
+    const quick = await h.invoke<ResearchCoinData>("fomo_research_coin", { token: PONS, chain: "robinhood", depth: "quick", since_revision: deep.revision });
+    assert.equal(quick.status, "partial");
+    assert.equal(quick.data?.coverage.uniqueTheses, 125);
+    assert.ok(quick.data?.coverage.limitations.some((n) => n.startsWith("Incomplete thesis read:")));
+    assert.equal(quick.data?.changes?.comparable, false);
   });
 
   it("with no deeper copy left to carry, the narrower revision is never compared as a change", async () => {
@@ -1555,7 +1790,8 @@ describe("a shallower read never replaces a deeper one as a change (C4)", () => 
     // Still more than a page, but fewer than the deeper copy holds.
     h.routes.set("thesis-token", (u) => {
       const pages = Number(u.searchParams.get("pages") ?? "1");
-      return json({ totalAvailable: 60, source: "live", theses: Array.from({ length: Math.min(60, 25 * pages) }, (_, i) => thesis(i)) }, 200, { "x-credits-cost": "1250" });
+      const limit = Number(u.searchParams.get("limit") ?? "50");
+      return json({ totalAvailable: 60, source: "live", theses: Array.from({ length: Math.min(60, 25 * pages, limit) }, (_, i) => thesis(i)) }, 200, { "x-credits-cost": String(1250 * pages) });
     });
     h.clock.now += 40 * 60_000;
     const quick = await h.invoke<ResearchCoinData>("fomo_research_coin", { token: PONS, chain: "robinhood", depth: "quick" });

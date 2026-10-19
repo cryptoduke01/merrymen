@@ -91,7 +91,7 @@ struct XPostingScreen: View {
             Card(hero: true) {
                 Text("Posting on X").font(.title2.bold())
                 Text(account.repliesActive
-                     ? "Let your Merryman post on X in its own words — a hello when it starts, a few passing thoughts a day, and most coins it buys and why. No trade alerts, no error messages, no numbers."
+                     ? "Let your Merryman post on X in its own words — a hello when it starts, a few reads on the market a day, and most coins it buys and why. No trade alerts, no error messages."
                      : "Let your Merryman post on X in its own words — a hello when it starts, the odd casual thought, and now and then a coin it bought and why. No trade alerts, no error messages, no numbers.").foregroundStyle(.secondary)
                 if account.available { connectButton("Connect X account") }
                 else { Label("Posting on X isn't available right now.", systemImage: "exclamationmark.circle").font(.subheadline).foregroundStyle(.secondary) }
@@ -378,7 +378,7 @@ struct XPostingAccount: Equatable {
             return [
                 "Your Merryman will reply as @\(handle) to selected posts that tag it, reply to it or quote it.",
                 "It chooses which posts to answer; it won’t answer every one. Answers go out right away: they don’t wait under Coming up, so you can’t skip one first.",
-                "It answers people who tag it, reply to it or quote it, a few times a day each: up to 60 answers a day on top of its posts, and at most six to one person a day. Answers carry no opt-out line, and it never answers someone who asked it to stop. Turn replies off at any time to stop answering.",
+                "It answers questions about the market, coins, how it trades and what it can do, and a hello, a thanks or a bit of chat in a short line of its own, from people who tag it, reply to it or quote it, a few times a day each: up to 60 answers a day on top of its posts, and at most six to one person a day. Answers carry no opt-out line, and it never answers someone who asked it to stop. Turn replies off at any time to stop answering.",
                 "Answers may include market figures from public data (CoinGecko, GeckoTerminal, Fomo and Bitquery), such as a coin’s price, market cap, volume or recent change. Merrymen adds them as the data showed them; they are never advice."
             ].joined(separator: "\n\n")
         }
@@ -423,7 +423,7 @@ struct XPostingAccount: Equatable {
         [
             "Your Merryman will post from whichever X account is connected — right now that's @\(handle).",
             active
-                ? "It writes its own posts: a hello first, then a few passing thoughts a day and a post for most coins it buys, and why. It never posts trade alerts or error messages, and its answers may carry market figures built from public data."
+                ? "It writes its own posts: a hello first, then a few reads on the market a day and a post for most coins it buys, and why. It never posts trade alerts or error messages, and its market reads and answers may carry market figures built from public data."
                 : "It writes its own posts: a hello first, then the odd casual thought and now and then a coin it bought and why. It never posts trade alerts, error messages, prices or amounts.",
             active
                 ? "Posts go out on their own, up to 12 a day and at least an hour apart. Each one waits under Coming up for at least ten minutes first, and you can skip it there. Turn this off or disconnect X at any time."

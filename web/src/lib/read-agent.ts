@@ -293,7 +293,7 @@ type AgentRow = {
  * Every account this tenant has held: a re-grant must not split an agent's
  * history into two strangers.
  */
-async function agentRowOf(db: Db, identity: ProfileIdentity): Promise<AgentRow | null> {
+async function agentRowOf(db: Db, identity: ProfileIdentity, strict = false): Promise<AgentRow | null> {
   const accounts = identity.accounts.map((a) => a.toLowerCase());
   if (accounts.length === 0) return null;
   const inList = accounts.map(() => "?").join(", ");
@@ -315,9 +315,40 @@ async function agentRowOf(db: Db, identity: ProfileIdentity): Promise<AgentRow |
       )
       .get(...accounts)) as AgentRow | undefined;
     return row ?? null;
-  } catch {
+  } catch (error) {
+    if (strict) throw error;
     return null;
   }
+}
+
+export type AgentSummary = Pick<AgentProfile, "slug" | "name" | "handle" | "handleVerified" | "mode" | "beatAt" | "joinedAt"> & { summary: true };
+
+/** Identity first: no settings, ledger history, return calculation or dollar fields. */
+export async function profileSummaryOf(db: Db, identity: ProfileIdentity): Promise<AgentSummary | null> {
+  const row = await agentRowOf(db, identity, true);
+  return row ? {
+    summary: true,
+    slug: identity.slug,
+    name: String(row.name ?? "Agent"),
+    handle: (row.x_handle ?? "").trim() || null,
+    handleVerified: Number(row.x_verified ?? 0) !== 0,
+    mode: String(row.mode ?? "idle"),
+    beatAt: row.beat_at ? Number(row.beat_at) : null,
+    joinedAt: joinedAtOf(identity.createdAt),
+  } : null;
+}
+
+export async function readAgentSummary(
+  slug: string,
+  readDb = withReadDb,
+  lookup = (id: string) => getIdentityStore().bySlug(id),
+): Promise<AgentSummary | null> {
+  const identity = await lookup(slug);
+  if (!identity) return null;
+  return readDb(async (db) => {
+    if (!db) throw new Error("Agent directory unavailable");
+    return profileSummaryOf(db, identity);
+  });
 }
 
 /**

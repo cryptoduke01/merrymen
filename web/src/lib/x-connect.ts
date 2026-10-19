@@ -363,7 +363,8 @@ export function accountBody(
   // A kind the owner turned off is not coming up, even a draft planned in the
   // instant they changed it: the send-time check cancels it (planner.ts
   // sendDecision `kind-off`), so it never goes out.
-  const allowed = (k: XPostKind) => (k === "buy" ? account.prefs.buys : k === "casual" ? account.prefs.casual : true);
+  // A recap names the coins it bought: shown only while buy posts are on.
+  const allowed = (k: XPostKind) => (k === "buy" || k === "recap" ? account.prefs.buys : k === "casual" ? account.prefs.casual : true);
   const upcoming = mine
     .filter((p) => p.status === "scheduled" && allowed(p.kind))
     .sort((a, b) => a.dueAtMs - b.dueAtMs || a.id - b.id)

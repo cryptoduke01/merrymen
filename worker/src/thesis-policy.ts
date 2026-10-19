@@ -628,7 +628,10 @@ export function estimatedBasis(t: string): string {
  * sell is estimated exactly when that first one is at or before it, which is
  * the EXISTS this replaced. One pass over those accounts' histories, through
  * `trades_agent_time`, per statement — no index is added (the rule on
- * `trades`), and none is needed.
+ * `trades`), and none is needed. MATERIALIZED is an execution boundary here:
+ * PostgreSQL can otherwise inline basis_quote below the per-decision join and
+ * rescan the entire quote history for every decision when it expects no quotes.
+ * Both supported engines understand the hint; the rows and proof are unchanged.
  *
  * `since` is the read's own window, widened by a day so a trade written a
  * moment before its decision's clock is still in scope (and one that is not
@@ -648,7 +651,7 @@ export function basisScope(opts: { since: number; accounts?: readonly string[] |
         SELECT DISTINCT br.agent_id AS agent_id FROM trades br
          WHERE br.basis_source = 'receipt' AND COALESCE(br.fill_side, 'sell') <> 'buy' AND br.created_at > ?
            ${only}
-      ), basis_quote AS (
+      ), basis_quote AS MATERIALIZED (
         SELECT bq.agent_id AS agent_id, LOWER(bq.buy_token) AS tok, MIN(bq.created_at) AS first_at
           FROM trades bq
          WHERE bq.basis_source = 'quote' AND bq.agent_id IN (SELECT agent_id FROM basis_read)

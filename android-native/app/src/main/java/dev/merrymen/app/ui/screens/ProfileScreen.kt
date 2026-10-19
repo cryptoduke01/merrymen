@@ -141,19 +141,24 @@ fun ProfileScreen(nav: NavHostController) {
   val signedIn by c.repo.signedIn.collectAsState()
   val hosted by c.repo.hosted.collectAsState()
   val canOfferSignIn by c.repo.canOfferSignIn.collectAsState()
-  val reads = remember(signedIn) { OwnReads() }
+  val serverTurn by c.repo.serverTurn.collectAsState()
+  val reads = remember(signedIn, serverTurn) { OwnReads() }
   var nowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
-  var refreshing by remember { mutableStateOf(false) }
+  var refreshing by remember(signedIn, serverTurn) { mutableStateOf(false) }
   val scope = rememberCoroutineScope()
   val lifecycle = LocalLifecycleOwner.current.lifecycle
 
-  suspend fun load() {
-    reads.load(c.api, signedIn, c.repo.hosted.value, withStrip = false, nowMs = { System.currentTimeMillis() }) {
-      c.repo.refreshIdentity()
-    }
+  suspend fun load(afterChange: Boolean = false) {
+    reads.load(
+      c.api, signedIn, c.repo.hosted.value, withStrip = false,
+      nowMs = { System.currentTimeMillis() },
+      afterChange = afterChange,
+      isCurrent = { c.repo.signedIn.value == signedIn && c.repo.serverTurn.value == serverTurn },
+    ) { c.repo.refreshIdentity() }
     nowMs = System.currentTimeMillis()
   }
-  LaunchedEffect(signedIn, lifecycle) {
+  LaunchedEffect(signedIn, serverTurn, lifecycle) {
+    if (!c.api.servers.holds(serverTurn)) return@LaunchedEffect
     lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
       while (true) {
         load()
@@ -170,8 +175,11 @@ fun ProfileScreen(nav: NavHostController) {
     onRefresh = {
       scope.launch {
         refreshing = true
-        load()
-        refreshing = false
+        try {
+          load()
+        } finally {
+          refreshing = false
+        }
       }
     },
     state = pull,
@@ -239,7 +247,7 @@ fun ProfileScreen(nav: NavHostController) {
             AccountPerson(signedIn, g)
             AccountBalance(book.feed, g, nav)
             YourAgent(book.feed, g, nav)
-            AccountNameChip(c.api, book.feed.agent, reads.readFor, hosted, onNamed = { scope.launch { load() } })
+            AccountNameChip(c.api, book.feed.agent, reads.readFor, hosted, onNamed = { scope.launch { load(afterChange = true) } })
             // PICTURES ARE HOSTED-ONLY and belong to an agent that exists: the
             // route answers 404 self-hosted, and a picture needs a slug to
             // belong to. The owner they are for is the one this page was read for.
@@ -272,6 +280,14 @@ fun ProfileScreen(nav: NavHostController) {
           }
           AccountRow("Settings") { nav.navigate(Routes.SETTINGS) }
           AccountRow("Telegram") { nav.navigate(Routes.TELEGRAM) }
+          if (hosted == true) {
+            AccountRow("Connect to Claude") {
+              nav.navigate(Routes.web("/connect/mcp", "Connect to Claude"))
+            }
+          }
+          if (book is OwnBook.Mine && (reads.grants as? Loaded.Value)?.value?.exists == true) {
+            AccountRow("Trades & P&L") { nav.navigate(Routes.web("/agent#trades", "Trades & P&L")) }
+          }
           AccountRow("The Merry Circle") { nav.navigate(Routes.CIRCLE) }
           AccountRow("Create an agent") {
             nav.navigate(Routes.web("/create", "Create an agent"))

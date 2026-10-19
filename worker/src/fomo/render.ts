@@ -294,6 +294,7 @@ function groupStatusLead(env: FomoEnvelope, now: number): string | null {
     case "failed":
       return GROUP_FOMO_UNREACHED;
     case "unavailable":
+      if (env.reason === "token-network-unconfirmed") return "Fomo couldn't confirm this coin's chain, so I couldn't read its information reliably.";
       return env.reason === "not-configured" ? FOMO_GROUP_OFF : GROUP_FOMO_UNREACHED;
     case "not-authorized":
       return FOMO_GROUP_OFF;
@@ -344,13 +345,24 @@ function plainReason(r: string): string {
 
 function clarificationText(cands: readonly SubjectCandidate[], msg: string | null, audience: Audience): string {
   if (!cands.length) return msg ?? "Which one do you mean?";
+  const first = cands[0]!.subject;
+  // A room cannot see contract addresses. Distinct coins on the same chain
+  // otherwise collapse to one label, leaving no possible answer to "which?".
+  if (audience === "group" && first.kind === "token" && cands.length > 1
+    && cands.every((c) => c.subject.kind === "token"
+      && coin(c.subject.token, c.subject.label, audience) === coin(first.token, first.label, audience))) {
+    const sameChain = first.token.chain.networkId !== null && cands.every((c) => c.subject.kind === "token"
+      && c.subject.token.chain.namespace === first.token.chain.namespace
+      && c.subject.token.chain.networkId === first.token.chain.networkId);
+    if (!sameChain) return `Fomo found several matches for ${sym(first.label, audience) ?? "that coin"}. Reply with its contract address and chain.`;
+    return `Fomo lists different ${sym(first.label, audience) ?? "unnamed"} tokens on ${chainLabel(first.token.chain.slug)}. Reply with the contract address of the one you mean.`;
+  }
   const opts = cands.slice(0, 5).map((c) => {
     const s = c.subject;
     if (s.kind === "token") return coin(s.token, s.label, audience);
     if (s.kind === "trader") return audience === "owner" ? trader(s.trader) : "a trader";
     return "the market";
   });
-  const first = cands[0]!.subject;
   const what = first.kind === "token" ? sym(first.label, audience) ?? "That coin" : "That name";
   return `${what} matches more than one: ${[...new Set(opts)].join("; ")}. Which one do you mean?`;
 }
@@ -393,7 +405,7 @@ function coverageLine(env: FomoEnvelope, audience: Audience = "owner"): string |
   const parts: string[] = [];
   if (env.status === "partial" && c.missing.length) parts.push(`Not read: ${c.missing.slice(0, 3).join(", ")}.`);
   else if (env.status === "partial" && env.reason !== "deep-research-queued") parts.push("Part of this could not be read.");
-  // A room's thesis digest says "newest 25 of 41" itself, and has no counts to call a floor.
+  // A room's thesis digest says "read 25 of 41" itself, and has no counts to call a floor.
   if (c.capped && !(audience === "group" && env.tool === "fomo_get_token_theses")) parts.push("More records exist than were read, so counts are a floor.");
   // Notes that change what the answer means: limits, removed rows, transfers that are not trades, stored copies, unread parts.
   // About one trader, a room never hears a note that says where Merrymen's
@@ -685,33 +697,51 @@ export const GROUP_THESES_TAIL = "Their claims, not facts";
 
 /**
  * A COIN'S THESES AS A ROOM HEARS THEM (digest.ts, plan WP9 P1): what they
- * argue for and against, what most of it is about and what holders wait on,
+ * argue for and against, the topics mentioned and what holders wait on,
  * in fixed phrases, never their words; no stance counts and no "evidence
  * families" (Milla, 2026-10-07). How much was read, and that it is claims,
  * closes it. At most five lines, so a room's line cap still leaves the
  * copy's age (from the limits) in the answer.
  */
+function thesisPostDates(theses: readonly TokenThesesData["theses"][number][]): string {
+  const dates = theses.flatMap((t) => {
+    const at = t.postedAt;
+    return finite(at) && !Number.isNaN(new Date(at).getTime()) ? [new Date(at).toISOString().slice(0, 10)] : [];
+  }).sort();
+  if (!dates.length) return "post dates unavailable";
+  const first = dates[0]!;
+  const last = dates[dates.length - 1]!;
+  const readable = (day: string, year = true): string => {
+    const date = new Date(`${day}T00:00:00Z`);
+    const month = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][date.getUTCMonth()];
+    return `${month} ${date.getUTCDate()}${year ? `, ${date.getUTCFullYear()}` : ""}`;
+  };
+  const unknown = theses.length - dates.length;
+  const range = last === first ? readable(first) : `${readable(first, first.slice(0, 4) !== last.slice(0, 4))} to ${readable(last)}`;
+  return `posts: ${range} UTC${unknown ? ` (${unknown} undated)` : ""}`;
+}
+
 function groupTheses(env: FomoEnvelope<TokenThesesData>, d: TokenThesesData, total: number): string[] {
   const dg = digestTheses(d.theses);
   const name = sym(d.label, "group") ?? "this coin";
   const where = d.token ? ` on ${chainLabel(d.token.chain.slug)}` : "";
-  const out = [`${GROUP_THESES_HEAD}${name}${where} (${plural(dg.theses, "recent thesis", "recent theses")} from ${plural(dg.authors, "trader", "traders")}):`];
+  const out = [`${GROUP_THESES_HEAD}${name}${where} (${plural(dg.theses, "thesis", "theses")} read from ${plural(dg.authors, "trader", "traders")}):`];
   if (dg.forIt.length) out.push(`For it: ${listWords(dg.forIt)}.`);
   if (dg.against.length) out.push(`Against it: ${listWords(dg.against)}.`);
   const waiting = dg.waitingOn.length ? `some are waiting on ${listWords(dg.waitingOn)}` : "";
   const cases = dg.forIt.length > 0 || dg.against.length > 0;
   if (dg.about.length) {
-    const lead = cases ? "Most of it is about " : "No clear case for or against; most of it is about ";
-    out.push(`${lead}${listWords(dg.about)}${waiting ? `, and ${waiting}` : ""}.`);
+    out.push(`Topics mentioned: ${listWords(dg.about)}${waiting ? `; ${waiting}` : ""}.`);
   } else if (!cases) {
-    out.push(waiting ? `No clear case for or against; ${waiting}.` : "Mostly hype, with no case for or against that I can pick out.");
+    out.push(waiting ? `${waiting.charAt(0).toUpperCase()}${waiting.slice(1)}.` : "I couldn't reliably summarize the arguments in these posts.");
   } else if (waiting) {
     out.push(`${waiting.charAt(0).toUpperCase()}${waiting.slice(1)}.`);
   }
   const of = Math.max(total, finite(env.coverage.providerTotal) ? env.coverage.providerTotal : 0);
   const parts = [GROUP_THESES_TAIL];
-  if (of > dg.theses) parts.push(`newest ${dg.theses} of ${of}`);
+  if (of > dg.theses) parts.push(`read ${dg.theses} of ${of}`);
   if (dg.devPosts > 0) parts.push("the dev's own posts left out");
+  parts.push(thesisPostDates(d.theses));
   out.push(`${parts.join("; ")}.`);
   return out;
 }
@@ -744,6 +774,10 @@ function bodyTheses(env: FomoEnvelope<TokenThesesData>, audience: Audience, now:
       const line = `The provider didn't return the theses on ${subject} just now${count}.${retry}`;
       return [audience === "group" ? roomNote(line) : line];
     }
+    // Malformed or unplaceable posts can leave no usable rows without a
+    // known total, including an incomplete stored copy. That cannot establish
+    // an empty record for the requested coin or window.
+    if (env.status === "partial") return [`I couldn't get a complete thesis read for ${subject}${windowed ? " in that window" : ""}; no usable posts were returned.`];
     const line = `No theses were returned for ${subject}${env.coverage.requested.window ? ` in that window` : ""}. That is the provider's record, not proof nobody has a view.`;
     // A room hears "Fomo's record": the gate reads "the provider" as plumbing, and with it refused a coin with no theses heard "ask me in a direct message".
     return [audience === "group" ? roomNote(line) : line];
@@ -1224,13 +1258,29 @@ function rowAnswerLines(envs: readonly FomoEnvelope[], plan: FomoQuestionPlan, a
 }
 
 /** Cut at a line boundary, keeping the tail (attribution) intact. */
-function fit(lines: string[], tail: string[], maxChars: number): string {
+function fit(lines: string[], tail: string[], maxChars: number, disclosures: readonly string[] = []): string {
   const max = Math.max(80, Math.floor(maxChars));
-  const tailText = tail.join("\n");
+  // Limits and claim labels change the meaning of everything above them.
+  // Reserve them before optional details; the Telegram handler cannot
+  // recover a stale-data warning already removed by this earlier cap.
+  const protectedLines = [...new Set(disclosures)];
+  const ending = [...protectedLines, ...tail];
+  const tailText = ending.join("\n");
   const budget = max - (tailText ? tailText.length + 1 : 0);
+  const first = lines.find((l) => l.trim() && !protectedLines.includes(l));
+  if (protectedLines.length && (!first || first.length > budget)) {
+    // No finding is safer than a fragment stripped of the qualification
+    // that makes it true. This also covers small callers and compound reads.
+    return "I couldn't fit this read and its limitations into one reply.";
+  }
   const kept: string[] = [];
   let used = 0;
-  for (const l of lines) {
+  for (let i = 0; i < lines.length; i++) {
+    let l = lines[i]!;
+    if (protectedLines.includes(l)) continue;
+    // A mixed read must keep both sides or neither. Cutting after the first
+    // optional line must not silently turn it into a bullish-only summary.
+    if (l.startsWith("For it:") && lines[i + 1]?.startsWith("Against it:")) l += `\n${lines[++i]}`;
     const add = (kept.length ? 1 : 0) + l.length;
     if (used + add > budget) {
       if (kept.length === 0) kept.push(l.slice(0, Math.max(0, budget - 1)) + "…");
@@ -1239,7 +1289,7 @@ function fit(lines: string[], tail: string[], maxChars: number): string {
     kept.push(l);
     used += add;
   }
-  return [...kept, ...tail].join("\n").slice(0, max);
+  return [...kept, ...ending].join("\n").slice(0, max);
 }
 
 function finalize(text: string, audience: Audience): string {
@@ -1252,11 +1302,13 @@ function withSayable(view: View, opts: RenderOptions): View {
 }
 
 export function renderEnvelope(env: FomoEnvelope, opts: RenderOptions): string {
-  const lines = envelopeLines(env, opts.audience, opts.now, withSayable(NO_VIEW, opts));
+  const parts = envelopeParts(env, opts.audience, opts.now, withSayable(NO_VIEW, opts));
+  const lines = [...parts.main, ...parts.limits];
   const deflected = lines.length === 1 && lines[0] === GROUP_DM_DEFLECTION;
   // The attribution is the owner's; a group has had its post about the source (Milla, 2026-10-07).
   const tail = deflected || env.status === "needs-clarification" || opts.audience === "group" ? [] : [FOMO_ATTRIBUTION];
-  return finalize(fit(lines, tail, opts.maxChars), opts.audience);
+  const disclosures = opts.audience === "group" ? [...parts.main.filter((l) => l.startsWith(GROUP_THESES_TAIL)), ...parts.limits] : [];
+  return finalize(fit(lines, tail, opts.maxChars, disclosures), opts.audience);
 }
 
 /**
@@ -1270,18 +1322,24 @@ export function renderAnswer(envs: readonly FomoEnvelope[], plan: FomoQuestionPl
   if (opts.audience === "group" && envs.some(needsDirectMessage)) return GROUP_DM_DEFLECTION;
   const view = withSayable(viewOf(plan), opts);
   const lines: string[] = [];
-  if (plan?.rowAsk) lines.push(...rowAnswerLines(envs, plan, opts.audience, opts.now, view));
+  const disclosures: string[] = [];
+  if (plan?.rowAsk) {
+    lines.push(...rowAnswerLines(envs, plan, opts.audience, opts.now, view));
+    if (opts.audience === "group") disclosures.push(...envs.flatMap((env) => envelopeParts(env, opts.audience, opts.now, view).limits));
+  }
   else {
     envs.forEach((env, i) => {
       if (i > 0) lines.push("");
-      lines.push(...envelopeLines(env, opts.audience, opts.now, view));
+      const parts = envelopeParts(env, opts.audience, opts.now, view);
+      lines.push(...parts.main, ...parts.limits);
+      if (opts.audience === "group") disclosures.push(...parts.main.filter((l) => l.startsWith(GROUP_THESES_TAIL)), ...parts.limits);
     });
   }
   const anyAnswered = envs.some((e) => e.status !== "needs-clarification");
   const tail: string[] = [];
   if (plan?.analysisRequested && !plan.infoOnly) tail.push(NOT_PERMISSION_LINE);
   if (anyAnswered && opts.audience === "owner") tail.push(FOMO_ATTRIBUTION);
-  return finalize(fit(lines, tail, opts.maxChars), opts.audience);
+  return finalize(fit(lines, tail, opts.maxChars, disclosures), opts.audience);
 }
 
 // ── Evidence for a composing model ───────────────────────────────────────

@@ -8,8 +8,14 @@
  * is held to its own grammar here, so nothing but what these functions render
  * can ever stand where it stands.
  *
- *   coingecko: $BTC #1, ~$97k, mcap ~$1.9T, vol ~$41B, 24h +1.2%, 7d -3.4%.
- *   geckoterminal robinhood: trending $ABC 24h +42.1% vol ~$1.2M; fomo: most bought $ABC.
+ *   BTC #1, ~$97k, mcap ~$1.9T, vol ~$41B, 24h +1.2%, 7d -3.4%.
+ *   trending: ABC 24h +42.1% vol ~$1.2M; fomo: most bought ABC.
+ *
+ * NO SOURCE NAMED (the owner's teammate, 2026-10-13): the line never says
+ * coingecko, geckoterminal or bitquery, and nothing else posted by an active
+ * owner does either (gate.ts XGateCtx.house, "source-named"). Fomo's own
+ * section keeps "fomo:": the owner holds Enterprise rights to paraphrased,
+ * attributed Fomo facts.
  *
  * WHAT GOES IN IS TYPED DATA, NEVER TEXT. A provider's numbers, and of its
  * words only a ticker that passes `cleanTicker`: A-Z, two to ten letters,
@@ -27,14 +33,14 @@
  *   percent  an explicit sign, then at most one decimal (below 100) or a whole
  *            number, then %: +1.2%, -38%, +0%.
  *   rank     #1 to #999.
- *   sections "coingecko:" (one coin's rank, price, market cap, 24h volume,
- *            24h and 7d change), "coingecko 24h:" (up to three big coins,
- *            each its day's change: the market overview, 2026-10-12),
- *            "geckoterminal robinhood: trending" (up to
- *            three coins, each its 24h change and volume), "fomo: most bought"
- *            (up to two tickers), "coingecko: trending" (up to three
- *            tickers), "bitquery: 1h" (buys and sells in money), joined by
- *            "; ", ending with ".". At most six figures in all: a handful.
+ *   sections a ticker alone at the head (one coin's rank, price, market
+ *            cap, 24h volume, 24h and 7d change), "24h:" (up to three big
+ *            coins, each its day's change: the market overview, 2026-10-12),
+ *            "trending:" (up to three of the chain's coins, each its 24h
+ *            change and volume), "fomo: most bought" (up to two tickers),
+ *            "hot:" (up to three tickers of the global trending list), "1h"
+ *            (a coin's buys and sells in money), joined by "; ", ending with
+ *            ".". At most six figures in all: a handful.
  *
  * TOO LONG FOR X, FIELDS GO FIRST, THEN THE LINE (`withFigures`): the least
  * telling field is dropped, then the next, and when no form of the line fits
@@ -62,6 +68,10 @@ export const POOLS_MAX = 3;
 export const MAJORS_MAX = 3;
 export const CROWD_MAX = 2;
 export const TRENDING_MAX = 3;
+/** Coins a recap's line names. */
+export const TRADED_MAX = 3;
+/** The most trades of one side a recap counts: past this it is no recap but a feed. */
+const RECAP_COUNT_MAX = 999;
 
 /**
  * WORDS A TICKER MAY NOT SPELL, read on its letters. Merrymen's own names and
@@ -185,7 +195,7 @@ const TICKER_REFUSED = new RegExp([...HOUSE_NAMES, ...HOUSE_PRODUCTS, ...ABUSE_A
 /**
  * The house's own names and its own products' ("fomo", "trencher": red-team
  * 2026-10-12), a model's, a slur, a hate code or a political name: what no
- * line of the house's answers under. The sources it names (coingecko,
+ * line of the house's answers under. The sources it reads (coingecko,
  * bitquery, pons) are no such name.
  */
 const NEVER_ANSWERED = new RegExp([...HOUSE_NAMES, ...HOUSE_OWN_PRODUCTS, ...ABUSE_AND_POLITICS, ...TRAGEDY_AND_NOTORIETY].join("|"));
@@ -272,9 +282,14 @@ export function neverAnsweredName(raw: unknown): boolean {
   return NEVER_ANSWERED.test(lower) || TICKER_REFUSED_WHOLE.has(lower.toUpperCase()) || SKELETON_REFUSED.test(skeletonOf(lower));
 }
 
-/** Every ticker a rendered line shows, without its $. */
+/**
+ * Every ticker a rendered line shows. Tickers are bare capitals: X refuses an
+ * API post with more than one cashtag, so the line never writes a $ before a
+ * ticker; every other word in the grammar is lower case, and a unit (the M of
+ * ~$1.2M) always follows a digit.
+ */
 export function figuresTickers(line: unknown): string[] {
-  return typeof line === "string" ? [...line.matchAll(/(?<![~\w])\$([A-Z]{2,10})\b/g)].map((m) => m[1]!) : [];
+  return typeof line === "string" ? [...line.matchAll(/(?<![\w~$.])([A-Z]{2,10})(?!\w)/g)].map((m) => m[1]!) : [];
 }
 
 const UNITS: readonly [number, string][] = [[1e3, "k"], [1e6, "M"], [1e9, "B"], [1e12, "T"]];
@@ -323,6 +338,37 @@ export function signedPercent(v: unknown): string | null {
   return `${sign}${Number.isInteger(abs) ? String(abs) : abs.toFixed(1)}%`;
 }
 
+/** Whole days as a span: "3d", "2w", "5mo", "2y". Null for anything that is not a whole, sane number of days. */
+function spanOf(days: unknown): string | null {
+  if (typeof days !== "number" || !Number.isFinite(days) || days < 1 || days > 36_500) return null;
+  const d = Math.floor(days);
+  if (d < 14) return `${d}d`;
+  if (d < 60) return `${Math.round(d / 7)}w`;
+  if (d < 730) return `${Math.min(99, Math.round(d / 30))}mo`;
+  return `${Math.min(99, Math.round(d / 365))}y`;
+}
+/** Days since: "today" under a day, else a span and "ago". */
+function agoOf(days: unknown): string | null {
+  if (typeof days !== "number" || !Number.isFinite(days) || days < 0) return null;
+  if (days < 1) return "today";
+  const span = spanOf(days);
+  return span ? `${span} ago` : null;
+}
+/** Commits in the window: "1 commit", "14 commits", "100+ commits" when the page filled. */
+function commitsOf(n: unknown, partial: boolean): string | null {
+  if (typeof n !== "number" || !Number.isInteger(n) || n < 0 || n > 100) return null;
+  // A full page is a floor however it was flagged: never "100 commits", always "100+".
+  if (partial || n >= 100) return n >= 100 ? "100+ commits" : `${n} commit${n === 1 ? "" : "s"}`;
+  return `${n} commit${n === 1 ? "" : "s"}`;
+}
+function starsOf(n: unknown): string | null {
+  return typeof n === "number" && Number.isInteger(n) && n >= 1 && n <= 999_999 ? `${n} star${n === 1 ? "" : "s"}` : null;
+}
+/** A share of supply, whole percent, 0 to 100. */
+function shareOf(v: unknown): string | null {
+  return typeof v === "number" && Number.isFinite(v) && v >= 0 && v <= 100 ? `${Math.round(v)}%` : null;
+}
+
 /** A market-cap rank: #1 to #999. */
 export function rankOf(v: unknown): string | null {
   return typeof v === "number" && Number.isInteger(v) && v >= 1 && v <= 999 ? `#${v}` : null;
@@ -332,9 +378,9 @@ export function rankOf(v: unknown): string | null {
 
 /** One section of the line: what one source showed, as numbers and tickers only. */
 export type FiguresSection =
-  /** A coin by name or ticker, from CoinGecko's markets: "coingecko: $BTC #1, ~$97k, mcap …". */
+  /** A coin by name or ticker, from CoinGecko's markets: "BTC #1, ~$97k, mcap …". */
   | { kind: "major"; symbol: string; rank?: number | null; priceUsd?: number | null; marketCapUsd?: number | null; volume24hUsd?: number | null; change24hPct?: number | null; change7dPct?: number | null }
-  /** The big coins' day, from CoinGecko's markets: "coingecko 24h: $BTC +1.2%, $ETH -0.8%, $SOL +3.1%" (the market overview). */
+  /** The big coins' day, from CoinGecko's markets: "24h: BTC +1.2%, ETH -0.8%, SOL +3.1%" (the market overview). */
   | { kind: "majors"; coins: { symbol: string; change24hPct?: number | null }[] }
   /** Robinhood Chain coins trending on GeckoTerminal that cleared the fleet's floors. */
   | { kind: "pools"; coins: { symbol: string; change24hPct?: number | null; volume24hUsd?: number | null }[] }
@@ -343,7 +389,25 @@ export type FiguresSection =
   /** CoinGecko's own trending list, by ticker only. */
   | { kind: "trending"; symbols: string[] }
   /** One coin's last hour of onchain flow, from Bitquery: buys and sells in money. */
-  | { kind: "flow"; buyUsd?: number | null; sellUsd?: number | null };
+  | { kind: "flow"; buyUsd?: number | null; sellUsd?: number | null }
+  /**
+   * A PROJECT'S GITHUB, as a larp check read it (research/github.ts): days
+   * since its last push, commits in thirty days (a floor when `commitsPartial`),
+   * stars, and the repo's age in days. Names no coin, so it may stand beside a
+   * drafted answer, as a coin's flow may.
+   */
+  | { kind: "git"; pushedDaysAgo: number | null; commits30d?: number | null; commitsPartial?: boolean; stars?: number | null; repoAgeDays?: number | null }
+  /** A coin's holders as the index counts them: the top ten's share and the creator's. Names no coin. */
+  | { kind: "holders"; top10Pct: number | null; creatorPct?: number | null }
+  /**
+   * AN ACTIVE AGENT'S RECAP OF A BURST OF TRADES (planner.ts planRecap,
+   * 2026-10-14): how many buys and sales, how many of the sales closed in
+   * profit and at a loss (receipt-backed outcomes only), and the best measured
+   * gain among them. Counts of its own trades, never a balance or a size.
+   */
+  | { kind: "recap"; buys: number; sells: number; wins?: number | null; losses?: number | null; bestPct?: number | null }
+  /** The coins a recap's trades were in, by ticker, newest first, at most TRADED_MAX. */
+  | { kind: "traded"; symbols: string[] };
 
 export type FiguresSpec = readonly FiguresSection[];
 
@@ -365,7 +429,11 @@ type Shown =
   | { kind: "pools"; coins: { ticker: string; d1: string | null; vol: string | null }[] }
   | { kind: "crowd"; tickers: string[] }
   | { kind: "trending"; tickers: string[] }
-  | { kind: "flow"; buys: string | null; sells: string | null };
+  | { kind: "flow"; buys: string | null; sells: string | null }
+  | { kind: "git"; pushed: string; commits: string | null; stars: string | null; age: string | null }
+  | { kind: "holders"; top10: string; creator: string | null }
+  | { kind: "recap"; buys: number; sells: number; wl: { w: number; l: number } | null; best: string | null }
+  | { kind: "traded"; tickers: string[] };
 
 /** What of a spec can be shown: unclean tickers, unshowable numbers and empty sections out; the caps applied. */
 function shownOf(spec: FiguresSpec): Shown[] {
@@ -405,6 +473,28 @@ function shownOf(spec: FiguresSpec): Shown[] {
       const buys = compactMoney(s.buyUsd), sells = compactMoney(s.sellUsd);
       // Both sides or neither: one side alone is half a picture.
       if (buys && sells) out.push({ kind: "flow", buys, sells });
+    } else if (s.kind === "git") {
+      // The last push or no section: the push is what "is it alive" means.
+      const pushed = agoOf(s.pushedDaysAgo);
+      if (!pushed) continue;
+      const age = spanOf(s.repoAgeDays);
+      out.push({ kind: "git", pushed, commits: commitsOf(s.commits30d, s.commitsPartial === true), stars: starsOf(s.stars), age });
+    } else if (s.kind === "holders") {
+      const top10 = shareOf(s.top10Pct);
+      if (top10) out.push({ kind: "holders", top10, creator: shareOf(s.creatorPct) });
+    } else if (s.kind === "recap") {
+      const count = (v: unknown): number => (typeof v === "number" && Number.isInteger(v) && v >= 0 && v <= RECAP_COUNT_MAX ? v : 0);
+      const buys = count(s.buys), sells = count(s.sells), w = count(s.wins), l = count(s.losses);
+      // GREEN AND RED ONLY WHEN EVERY SALE COUNTED HAS A MEASURED OUTCOME
+      // (review of the recap branch, 2026-10-14): "3 sells (1 green, 0 red)"
+      // beside two sales nobody measured reads as none of them lost.
+      const wl = sells > 0 && w + l === sells ? { w, l } : null;
+      // A best gain too small to show at one decimal is none, never "+0%" beside a green (third review, 2026-10-14; sale-outcome.ts gainFigure).
+      const best = typeof s.bestPct === "number" && s.bestPct >= 0.05 && wl && wl.w > 0 ? signedPercent(s.bestPct) : null;
+      if (buys + sells > 0) out.push({ kind: "recap", buys, sells, wl, best });
+    } else if (s.kind === "traded") {
+      const list = tickers(Array.isArray(s.symbols) ? s.symbols : [], TRADED_MAX);
+      if (list.length) out.push({ kind: "traded", tickers: list });
     }
   }
   return capFigures(out);
@@ -416,6 +506,9 @@ function figuresIn(s: Shown): number {
     case "majors": return s.coins.length;
     case "pools": return s.coins.reduce((n, c) => n + (c.d1 ? 1 : 0) + (c.vol ? 1 : 0), 0);
     case "flow": return 2;
+    case "git": return [s.pushed, s.commits, s.stars, s.age].filter((x) => x !== null).length;
+    case "holders": return s.creator === null ? 1 : 2;
+    case "recap": return (s.buys > 0 ? 1 : 0) + (s.sells > 0 ? 1 : 0) + (s.best ? 1 : 0);
     default: return 0;
   }
 }
@@ -436,20 +529,33 @@ function capFigures(list: Shown[]): Shown[] {
 function renderSection(s: Shown): string {
   switch (s.kind) {
     case "major": {
-      const head = `coingecko: $${s.ticker}${s.rank ? ` ${s.rank}` : ""}`;
+      const head = `${s.ticker}${s.rank ? ` ${s.rank}` : ""}`;
       const rest = [s.price, s.mcap ? `mcap ${s.mcap}` : null, s.vol ? `vol ${s.vol}` : null, s.d1 ? `24h ${s.d1}` : null, s.d7 ? `7d ${s.d7}` : null].filter((x): x is string => x !== null);
       return [head, ...rest].join(", ");
     }
     case "majors":
-      return `coingecko 24h: ${s.coins.map((c) => `$${c.ticker} ${c.d1}`).join(", ")}`;
+      return `24h: ${s.coins.map((c) => `${c.ticker} ${c.d1}`).join(", ")}`;
     case "pools":
-      return `geckoterminal robinhood: trending ${s.coins.map((c) => [`$${c.ticker}`, c.d1 ? `24h ${c.d1}` : null, c.vol ? `vol ${c.vol}` : null].filter((x): x is string => x !== null).join(" ")).join(", ")}`;
+      return `trending: ${s.coins.map((c) => [c.ticker, c.d1 ? `24h ${c.d1}` : null, c.vol ? `vol ${c.vol}` : null].filter((x): x is string => x !== null).join(" ")).join(", ")}`;
     case "crowd":
-      return `fomo: most bought ${s.tickers.map((t) => `$${t}`).join(", ")}`;
+      return `fomo: most bought ${s.tickers.join(", ")}`;
     case "trending":
-      return `coingecko: trending ${s.tickers.map((t) => `$${t}`).join(", ")}`;
+      return `hot: ${s.tickers.join(", ")}`;
     case "flow":
-      return `bitquery: 1h buys ${s.buys}, sells ${s.sells}`;
+      return `1h buys ${s.buys}, sells ${s.sells}`;
+    case "git":
+      return [`github: last push ${s.pushed}`, s.commits ? `${s.commits} in 30d` : null, s.stars, s.age ? `repo ${s.age} old` : null].filter((x): x is string => x !== null).join(", ");
+    case "holders":
+      return `top10 hold ${s.top10}${s.creator ? `, creator ${s.creator}` : ""}`;
+    case "recap": {
+      const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? "" : "s"}`;
+      const parts = [s.buys > 0 ? plural(s.buys, "buy") : null,
+        s.sells > 0 ? `${plural(s.sells, "sell")}${s.wl ? ` (${s.wl.w} green, ${s.wl.l} red)` : ""}` : null,
+        s.best ? `best ${s.best}` : null].filter((x): x is string => x !== null);
+      return `recap: ${parts.join(", ")}`;
+    }
+    case "traded":
+      return `traded ${s.tickers.join(", ")}`;
   }
 }
 
@@ -465,20 +571,42 @@ export function renderFiguresLine(spec: FiguresSpec): string | null {
 
 // ── the grammar ─────────────────────────────────────────────────────────────
 
-const T = String.raw`\$[A-Z]{2,10}`;
+// A ticker, bare: X refuses an API post with more than one cashtag
+// (docs.x.com, "Posts created via the API are limited to a maximum of 1
+// cashtag"), so the line never writes one.
+const T = String.raw`[A-Z]{2,10}`;
 const MONEY = String.raw`~\$(?:[1-9]\.[1-9]|[1-9]\d{0,2})[kMBT]`;
 const PCT = String.raw`[+-](?:0|[1-9]\d{0,4})(?:\.[1-9])?%`;
 const RANK = String.raw`#[1-9]\d{0,2}`;
 // A coin with no figure is never rendered, so the grammar refuses one: after
-// the ticker a field must follow (the lookahead), whichever it is.
-const MAJOR = String.raw`coingecko: ${T}(?=[ ,])(?: ${RANK})?(?:, ${MONEY})?(?:, mcap ${MONEY})?(?:, vol ${MONEY})?(?:, 24h ${PCT})?(?:, 7d ${PCT})?`;
-const MAJORS = String.raw`coingecko 24h: ${T} ${PCT}(?:, ${T} ${PCT}){0,${MAJORS_MAX - 1}}`;
+// the ticker a field must follow (the lookahead), whichever it is. Every other
+// section opens with a word of its own in lower case or a digit, so a ticker
+// at the head of a section is always a major's.
+const MAJOR = String.raw`${T}(?=[ ,])(?: ${RANK})?(?:, ${MONEY})?(?:, mcap ${MONEY})?(?:, vol ${MONEY})?(?:, 24h ${PCT})?(?:, 7d ${PCT})?`;
+const MAJORS = String.raw`24h: ${T} ${PCT}(?:, ${T} ${PCT}){0,${MAJORS_MAX - 1}}`;
 const POOL = String.raw`${T}(?= )(?: 24h ${PCT})?(?: vol ${MONEY})?`;
-const POOLS = String.raw`geckoterminal robinhood: trending ${POOL}(?:, ${POOL}){0,${POOLS_MAX - 1}}`;
+const POOLS = String.raw`trending: ${POOL}(?:, ${POOL}){0,${POOLS_MAX - 1}}`;
 const CROWD = String.raw`fomo: most bought ${T}(?:, ${T}){0,${CROWD_MAX - 1}}`;
-const TRENDING = String.raw`coingecko: trending ${T}(?:, ${T}){0,${TRENDING_MAX - 1}}`;
-const FLOW = String.raw`bitquery: 1h buys ${MONEY}, sells ${MONEY}`;
-const SECTION = `(?:${MAJOR}|${MAJORS}|${POOLS}|${CROWD}|${TRENDING}|${FLOW})`;
+const TRENDING = String.raw`hot: ${T}(?:, ${T}){0,${TRENDING_MAX - 1}}`;
+const FLOW = String.raw`1h buys ${MONEY}, sells ${MONEY}`;
+// A larp check's GitHub and holders (2026-10-13): spans in whole days, weeks, months or years, shares in whole percent.
+const SPAN = String.raw`[1-9]\d?(?:d|w|mo|y)`;
+const SHARE = String.raw`(?:100|[1-9]?\d)%`;
+const GIT = String.raw`github: last push (?:today|${SPAN} ago)(?:, (?:(?:0|[1-9]\d?) commits?|100\+ commits) in 30d)?(?:, [1-9]\d{0,5} stars?)?(?:, repo ${SPAN} old)?`;
+const HOLDERS = String.raw`top10 hold ${SHARE}(?:, creator ${SHARE})?`;
+// A recap's counts (2026-10-14): buys, then sales with their green and red, then the best gain; at least one side.
+const COUNT = String.raw`[1-9]\d{0,2}`, COUNT0 = String.raw`(?:0|[1-9]\d{0,2})`;
+// The best gain only after measured sales with at least one green, never
+// beside buys alone or a red-only run; and "traded" only right after a recap,
+// never alone, so an ordinary sentence ending "traded ETH." is never read as
+// a figures line (review of the recap branch, 2026-10-14).
+const R_BUYS = String.raw`${COUNT} buys?`;
+// A best gain is a gain: signed plus, never minus, never "+0%".
+const GAIN = String.raw`\+(?:0\.[1-9]|[1-9]\d{0,4}(?:\.[1-9])?)%`;
+const R_SELLS = String.raw`${COUNT} sells?(?: \((?:${COUNT} green, ${COUNT0} red\)(?:, best ${GAIN})?|0 green, ${COUNT} red\)))?`;
+const TRADED = String.raw`traded ${T}(?:, ${T}){0,${TRADED_MAX - 1}}`;
+const RECAP = String.raw`recap: (?:${R_BUYS}(?:, ${R_SELLS})?|${R_SELLS})(?:; ${TRADED})?`;
+const SECTION = `(?:${MAJOR}|${MAJORS}|${POOLS}|${CROWD}|${TRENDING}|${FLOW}|${GIT}|${HOLDERS}|${RECAP})`;
 /** The line, whole: one to five sections joined by "; ", ending with a full stop. Nothing else. */
 const LINE = String.raw`${SECTION}(?:; ${SECTION}){0,4}\.`;
 export const FIGURES_LINE = new RegExp(`^${LINE}$`);
@@ -505,7 +633,7 @@ export function admitFiguresLine(line: unknown): line is string {
 /** Each shorter form of a section list, least telling field first, down to one field; never the empty list. */
 function* shorter(list: Shown[]): Generator<Shown[]> {
   let cur = list.map((s) => (s.kind === "pools" || s.kind === "majors" ? { ...s, coins: s.coins.map((c) => ({ ...c })) } : { ...s })) as Shown[];
-  const emit = (next: Shown[]) => { cur = next.filter((s) => figuresIn(s) > 0 || s.kind === "crowd" || s.kind === "trending"); return cur; };
+  const emit = (next: Shown[]) => { cur = next.filter((s) => figuresIn(s) > 0 || s.kind === "crowd" || s.kind === "trending" || s.kind === "traded"); return cur; };
   const pools = (): Extract<Shown, { kind: "pools" }> | undefined => cur.find((s): s is Extract<Shown, { kind: "pools" }> => s.kind === "pools");
   const fewerCoins = (down: number) => { const p = pools()!; return emit(cur.map((s) => (s === p ? { ...p, coins: p.coins.slice(0, down) } : s))); };
   const without = (kind: "trending" | "crowd") => (cur.some((s) => s.kind === kind) && cur.length > 1 ? emit(cur.filter((s) => s.kind !== kind)) : null);
@@ -535,6 +663,20 @@ function* shorter(list: Shown[]): Generator<Shown[]> {
   while ((majors()?.coins.length ?? 0) > 1) {
     const m = majors()!;
     yield emit(cur.map((s) => (s === m ? { ...m, coins: m.coins.slice(0, -1) } : s)));
+  }
+  // A recap's line: the coins go first, then the best gain; the counts stay.
+  const traded = cur.find((s) => s.kind === "traded");
+  if (traded && cur.length > 1) yield emit(cur.filter((s) => s !== traded));
+  const recap = cur.find((s): s is Extract<Shown, { kind: "recap" }> => s.kind === "recap");
+  if (recap?.best) yield emit(cur.map((s) => (s === recap ? { ...recap, best: null } : s)));
+  // A larp check's line: the holders go whole first (the repo is what was
+  // checked), then the repo's age, its stars and its commits; the last push stays.
+  const holders = cur.find((s) => s.kind === "holders");
+  if (holders && cur.length > 1) yield emit(cur.filter((s) => s !== holders));
+  for (const field of ["age", "stars", "commits"] as const) {
+    const g = cur.find((s): s is Extract<Shown, { kind: "git" }> => s.kind === "git");
+    if (!g || g[field] === null) continue;
+    yield emit(cur.map((s) => (s === g ? { ...g, [field]: null } : s)));
   }
 }
 
@@ -569,14 +711,14 @@ export function withFigures(admitted: string, spec: FiguresSpec | null | undefin
   const lead = /[.!?…]$/.test(words) ? words : `${words}.`;
   const full = shownOf(spec);
   if (!full.length) return none;
-  const total = full.reduce((n, s) => n + figuresIn(s) + (s.kind === "crowd" || s.kind === "trending" ? s.tickers.length : 0), 0);
+  const total = full.reduce((n, s) => n + figuresIn(s) + (s.kind === "crowd" || s.kind === "trending" || s.kind === "traded" ? s.tickers.length : 0), 0);
   const tries: Shown[][] = [full, ...shorter(full)];
   for (const t of tries) {
     const line = renderShown(t);
     if (line === null || !admitFiguresLine(line)) continue;
     const text = m ? `${lead} ${line} ${m[1]!}` : `${lead} ${line}`;
     if (xWeightedLength(text) > X_MAX_WEIGHTED) continue;
-    const kept = t.reduce((n, s) => n + figuresIn(s) + (s.kind === "crowd" || s.kind === "trending" ? s.tickers.length : 0), 0);
+    const kept = t.reduce((n, s) => n + figuresIn(s) + (s.kind === "crowd" || s.kind === "trending" || s.kind === "traded" ? s.tickers.length : 0), 0);
     return { text, line, dropped: total - kept };
   }
   return none;
