@@ -242,16 +242,26 @@ jobs:
           key: solana-cargo-${{ runner.os }}-${{ hashFiles('scripts/ci/solana-toolchain.env') }}-${{ hashFiles('contracts/solana/Cargo.lock', 'contracts/solana/runtime-tests/Cargo.lock') }}
           restore-keys: solana-cargo-${{ runner.os }}-${{ hashFiles('scripts/ci/solana-toolchain.env') }}-
 
-      # Native unit tests, the SBF build, then the custody runtime tests against
-      # that exact .so. test.sh is the one recipe, so whatever it gains, CI runs.
+      # Native unit tests, the SBF build, then the custody and recovery runtime
+      # tests against that exact .so. test.sh is the one recipe, so whatever it
+      # gains, CI runs; it passes cargo-build-sbf exactly the pinned flags.
       # CARGO_INCREMENTAL shrinks the cached host build; the release profile the
       # SBF artifact is built with is never incremental anyway. No CARGO_PROFILE_*,
       # CARGO_TARGET_* or RUSTFLAGS here: build.sh refuses them, because they
       # would change the artifact without changing the reviewed source.
       - name: Test
-        run: contracts/solana/test.sh
+        run: |
+          set -o pipefail
+          contracts/solana/test.sh 2>&1 | tee "$RUNNER_TEMP/solana-test.log"
         env:
           CARGO_INCREMENTAL: "0"
+
+      # "test result: ok" also prints when nothing ran. Every runtime target
+      # (custody.rs, each tests/*.rs) must have run once and passed exactly as
+      # many tests as its source declares, none ignored or filtered out, so a
+      # dropped #[ignore], an unnamed test file or a filter cannot pass quietly.
+      - name: Every runtime test ran
+        run: node scripts/ci/solana-runtime-tests.mjs "$RUNNER_TEMP/solana-test.log" contracts/solana/runtime-tests
 
       - name: Nothing unverified was fetched
         run: scripts/ci/solana-toolchain.sh check

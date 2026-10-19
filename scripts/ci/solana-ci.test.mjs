@@ -24,6 +24,7 @@ import { after, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { anchorProgramIds, base58Decode, declaredProgramId, programRecord, readToolchain } from "./solana-program-record.mjs";
+import { checkRuntimeTests, countTests, parseResults, runtimeTargets } from "./solana-runtime-tests.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = join(here, "..", "..");
@@ -83,7 +84,8 @@ describe("the CI jobs", () => {
       "run: node --test scripts/ci/solana-ci.test.mjs",
       "run: scripts/ci/solana-toolchain.sh install ",
       "uses: actions/cache@",
-      "run: contracts/solana/test.sh",
+      "contracts/solana/test.sh 2>&1 | tee \"$RUNNER_TEMP/solana-test.log\"",
+      "run: node scripts/ci/solana-runtime-tests.mjs \"$RUNNER_TEMP/solana-test.log\" contracts/solana/runtime-tests",
       "run: scripts/ci/solana-toolchain.sh check",
       "node scripts/ci/solana-program-record.mjs contracts/solana contracts/solana/target/deploy/merrymen_vault.so ",
       "uses: actions/upload-artifact@",
@@ -92,6 +94,8 @@ describe("the CI jobs", () => {
     for (let i = 1; i < order.length; i++) assert.ok(order[i - 1][1] < order[i][1], `${order[i - 1][0]} must come before ${order[i][0]}`);
     assert.match(test, /^ {4}outputs:\n {6}sha256: \$\{\{ steps\.record\.outputs\.sha256 \}\}$/m);
     assert.match(test, /CARGO_HOME=\$\(realpath /);
+    // Without pipefail the step would take tee's status, and a failing test.sh would pass.
+    assert.match(test, /run: \|\n {10}set -o pipefail\n {10}contracts\/solana\/test\.sh 2>&1 \| tee "\$RUNNER_TEMP\/solana-test\.log"\n/);
   });
 
   it("gives test.sh no environment override that build.sh refuses", () => {
@@ -194,6 +198,111 @@ describe("the toolchain pins", () => {
 
   it("are what the build record names", () => {
     assert.deepEqual(readToolchain(pinsText), { agave: "v2.3.13", platformTools: "v1.48", platformToolsRustc: "1.84.1", arch: "v0", hostRust: pins.HOST_RUST });
+  });
+});
+
+describe("test.sh, the one vault test recipe", () => {
+  const testSh = readFileSync(join(repo, "contracts/solana/test.sh"), "utf8");
+  const buildSh = readFileSync(join(repo, "contracts/solana/build.sh"), "utf8");
+  const rebuildSh = readFileSync(join(here, "solana-rebuild.sh"), "utf8");
+  const commands = testSh.split("\n").filter(l => l && !l.startsWith("#"));
+
+  it("runs the native tests, then build.sh, then every runtime target against that artifact, ignored or not", () => {
+    const lib = commands.findIndex(l => /^cargo test --locked .*--manifest-path "\$script_dir\/Cargo\.toml" --lib$/.test(l));
+    const build = commands.indexOf('"$script_dir/build.sh" "$@"');
+    const runtime = commands.findIndex(l => l.includes('--manifest-path "$script_dir/runtime-tests/Cargo.toml"'));
+    assert.ok(lib >= 0 && lib < build && build < runtime, commands.join("\n"));
+    const line = commands[runtime];
+    assert.ok(line.startsWith('BPF_OUT_DIR="$script_dir/target/deploy" CARGO_TARGET_DIR="$script_dir/target" cargo test --locked '), line);
+    // custody and the owner recovery transactions, and --include-ignored rather
+    // than --ignored: a test whose #[ignore] is dropped still runs.
+    assert.match(line, / --test custody --test recovery -- --include-ignored$/);
+    assert.doesNotMatch(testSh, /-- --ignored\b/);
+    assert.match(testSh, /^set -euo pipefail$/m);
+  });
+
+  it("builds with exactly the toolchain and flags scripts/ci/solana-toolchain.env pins, as the rebuild does", () => {
+    const pin = name => new RegExp(`^${name}="([^"]+)"$`, "m").exec(buildSh)?.[1];
+    assert.equal(`v${pin("AGAVE_VERSION")}`, pins.AGAVE_VERSION);
+    assert.equal(pin("PLATFORM_TOOLS_VERSION"), pins.PLATFORM_TOOLS_VERSION);
+    assert.equal(pin("SBF_ARCH"), pins.SBF_ARCH);
+    assert.equal(pin("RUSTC_VERSION"), `rustc ${pins.PLATFORM_TOOLS_RUSTC}-dev`);
+    // The cargo-build-sbf arguments, in order, with build.sh's extra arguments
+    // (none in CI) removed: the same as solana-rebuild.sh's.
+    const flags = text => (/cargo-build-sbf"? \\\n([\s\S]*?-- --locked)/.exec(text)?.[1] ?? "")
+      .replace(/\\\n/g, " ").replace(/\$\{extra_args\[@\]\+"\$\{extra_args\[@\]\}"\}/, "").split(/\s+/).filter(Boolean);
+    const built = flags(buildSh.replaceAll('"$build_sbf"', "cargo-build-sbf"));
+    const rebuilt = flags(rebuildSh);
+    assert.deepEqual(built.filter(f => !f.startsWith('"$')), ["--tools-version", "--arch", "--manifest-path", "--sbf-out-dir", "--", "--locked"]);
+    assert.deepEqual(built.slice(0, 4), ['--tools-version', '"$PLATFORM_TOOLS_VERSION"', "--arch", '"$SBF_ARCH"']);
+    assert.deepEqual(rebuilt.filter(f => !f.startsWith('"$')), built.filter(f => !f.startsWith('"$')));
+    assert.deepEqual(rebuilt.slice(0, 4), built.slice(0, 4));
+    assert.doesNotMatch(buildSh + rebuildSh + testSh, /--force-tools-install|cargo-test-sbf/);
+  });
+});
+
+describe("solana-runtime-tests.mjs", () => {
+  const script = join(here, "solana-runtime-tests.mjs");
+  const runtimeDir = join(repo, "contracts/solana/runtime-tests");
+  const result = (n, { failed = 0, ignored = 0, filtered = 0, status = failed ? "FAILED" : "ok" } = {}) =>
+    `test result: ${status}. ${n} passed; ${failed} failed; ${ignored} ignored; 0 measured; ${filtered} filtered out; finished in 1.00s`;
+  const target = (path, body) => [`     Running ${path} (contracts/solana/target/debug/deps/x-0123456789abcdef)`, "", "[INFO solana_program_test] noise on stderr", body, ""].join("\n");
+  const lib = [target("unittests src/lib.rs", "running 14 tests\n" + result(14))];
+  const sources = { "custody.rs": "#[tokio::test]\n#[ignore = \"x\"]\nasync fn a() {}\n#[tokio::test]\nasync fn b() {}\n", "tests/recovery.rs": "#[tokio::test]\nasync fn c() {}\n" };
+  const targets = [{ name: "custody", path: "custody.rs" }, { name: "recovery", path: "tests/recovery.rs" }];
+  const good = [...lib, target("custody.rs", "running 2 tests\n" + result(2)), target("tests/recovery.rs", "running 1 test\n" + result(1))].join("\n");
+
+  it("finds the committed runtime targets: custody.rs and every tests/*.rs", () => {
+    const testFiles = readdirSync(join(runtimeDir, "tests")).filter(f => f.endsWith(".rs")).sort();
+    const found = runtimeTargets(readFileSync(join(runtimeDir, "Cargo.toml"), "utf8"), testFiles);
+    assert.deepEqual(found.slice(0, 2), targets);
+    assert.equal(found.length, 1 + testFiles.length);
+    assert.deepEqual(runtimeTargets("[package]\nautotests = false\n", ["x.rs"]), []);
+    assert.ok(countTests(readFileSync(join(runtimeDir, "custody.rs"), "utf8")) >= 25);
+    assert.ok(countTests(readFileSync(join(runtimeDir, "tests/recovery.rs"), "utf8")) >= 1);
+    assert.equal(countTests("#[test]\nfn a() {}\n#[tokio::test(flavor = \"multi_thread\")]\nasync fn b() {}\n// #[test] in a comment\n"), 2);
+  });
+
+  it("passes only when each target ran once and passed exactly its test functions", () => {
+    assert.deepEqual(checkRuntimeTests({ log: good, targets, sources }).map(c => [c.name, c.passed]), [["custody", 2], ["recovery", 1]]);
+    assert.equal(parseResults(good).get("unittests src/lib.rs").passed, 14);
+  });
+
+  it("fails a run that skipped, filtered, ignored or failed any runtime test", () => {
+    const cases = {
+      // `-- --ignored` after a test lost its #[ignore]: it is filtered out, not run.
+      "a dropped #[ignore] under --ignored": [[...lib, target("custody.rs", result(1, { filtered: 1 })), target("tests/recovery.rs", result(1))], /1 filtered out/],
+      "an ignored test": [[...lib, target("custody.rs", result(1, { ignored: 1 })), target("tests/recovery.rs", result(1))], /1 ignored/],
+      "fewer tests than the source has": [[...lib, target("custody.rs", result(1)), target("tests/recovery.rs", result(1))], /1 passed, but custody\.rs has 2/],
+      "a target test.sh does not name": [[...lib, target("custody.rs", result(2))], /recovery \(tests\/recovery\.rs\) never ran/],
+      "a failure": [[...lib, target("custody.rs", result(1, { failed: 1 })), target("tests/recovery.rs", result(1))], /1 failed/],
+      "no result line": [[...lib, target("custody.rs", "running 2 tests\nerror: test failed, to rerun pass `--test custody`"), target("tests/recovery.rs", result(1))], /printed no test result/],
+      "a target run twice": [[...lib, target("custody.rs", result(2)), target("custody.rs", result(2)), target("tests/recovery.rs", result(1))], /ran more than once/],
+    };
+    for (const [label, [parts, error]] of Object.entries(cases)) {
+      assert.throws(() => checkRuntimeTests({ log: parts.join("\n"), targets, sources }), error, label);
+    }
+    assert.throws(() => checkRuntimeTests({ log: good, targets: [], sources }), /no test targets/);
+    assert.throws(() => checkRuntimeTests({ log: good, targets, sources: { ...sources, "tests/recovery.rs": "fn c() {}\n" } }), /no #\[test\]/);
+  });
+
+  it("as a command: reads the log and the runtime-tests directory, exit 1 on a gap", () => {
+    const dir = fresh("runtime");
+    mkdirSync(join(dir, "tests"));
+    writeFileSync(join(dir, "Cargo.toml"), "[package]\nname = \"t\"\n\n[[test]]\nname = \"custody\"\npath = \"custody.rs\"\n");
+    writeFileSync(join(dir, "custody.rs"), sources["custody.rs"]);
+    writeFileSync(join(dir, "tests/recovery.rs"), sources["tests/recovery.rs"]);
+    const log = join(dir, "test.log");
+    writeFileSync(log, good);
+    const ok = run(process.execPath, [script, log, dir]);
+    assert.equal(ok.status, 0, ok.stderr);
+    assert.match(ok.stdout, /^custody: all 2 runtime tests in custody\.rs ran and passed$/m);
+    assert.match(ok.stdout, /^recovery: all 1 runtime tests in tests\/recovery\.rs ran and passed$/m);
+    writeFileSync(join(dir, "tests/withdrawals.rs"), "#[tokio::test]\nasync fn d() {}\n");
+    const missing = run(process.execPath, [script, log, dir]);
+    assert.equal(missing.status, 1);
+    assert.match(missing.stderr, /::error::runtime test target withdrawals \(tests\/withdrawals\.rs\) never ran; test\.sh must pass --test withdrawals/);
+    assert.equal(run(process.execPath, [script, log]).status, 2);
   });
 });
 
