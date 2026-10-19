@@ -8,7 +8,8 @@ import test, { type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import { createHash } from "node:crypto";
-import { createKeyPairFromPrivateKeyBytes, getAddressFromPublicKey, getBase58Decoder, getBase58Encoder } from "@solana/kit";
+import { createKeyPairFromPrivateKeyBytes, getAddressFromPublicKey, getBase58Decoder, getBase58Encoder, getCompiledTransactionMessageDecoder,
+  getTransactionDecoder } from "@solana/kit";
 import { CHAINS, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM } from "../../packages/core/src/ids";
 import { SOLANA_CLASSIC_TOKEN_PROGRAM, SOLANA_JUPITER_SHARED_ROUTE_DISCRIMINATOR, SOLANA_VAULT_ACCOUNT_SIZE, SOLANA_VAULT_DISCRIMINATOR,
   SOLANA_VAULT_LOCAL_TEST_PROGRAM, SOLANA_WRAPPED_SOL_MINT, deriveSolanaAta, deriveSolanaVaultAddress } from "../../packages/core/src/solana-live";
@@ -50,7 +51,8 @@ function mintJson(mint: string) {
       supply: "1000000000000", freezeAuthority: null, mintAuthority: null } } } } };
 }
 
-async function fixture(t: TestContext, opts: { cash: bigint; wsol: bigint; mark: "fair" | "dust"; build: Build; strategy?: Record<string, unknown>; pythAgeMs?: number }) {
+async function fixture(t: TestContext, opts: { cash: bigint; wsol: bigint; mark: "fair" | "dust"; build: Build; strategy?: Record<string, unknown>; pythAgeMs?: number;
+  env?: Record<string, string>; priorityFees?: number[] }) {
   const net = { lastBuild: null as null | { amount: bigint; out: bigint; min: bigint; input: string }, urls: [] as string[] };
   t.mock.method(globalThis, "fetch", async (input: unknown, init?: RequestInit) => {
     const url = String(input); net.urls.push(url.split("?")[0]!);
@@ -125,6 +127,7 @@ async function fixture(t: TestContext, opts: { cash: bigint; wsol: bigint; mark:
       case "getMinimumBalanceForRentExemption": return 2_039_280;
       case "getLatestBlockhash": return response({ blockhash: key(42), lastValidBlockHeight: 5000 });
       case "getFeeForMessage": return response(10_000);
+      case "getRecentPrioritizationFees": return opts.priorityFees ? opts.priorityFees.map((prioritizationFee, i) => ({ slot: SLOT - i, prioritizationFee })) : assert.fail("no fee estimate");
       case "getSignatureStatuses": return response([null]);
       case "getTransaction": return null;
       case "simulateTransaction": {
@@ -154,7 +157,7 @@ async function fixture(t: TestContext, opts: { cash: bigint; wsol: bigint; mark:
   const market = { readMint, quote };
   const env = { MERRYMEN_SOLANA_VAULT_PROGRAM: PROGRAM, MERRYMEN_SOLANA_VAULT_SHA256: createHash("sha256").update(binary).digest("hex"),
     MERRYMEN_STORE_DEK: Buffer.alloc(32, 30).toString("base64"), MERRYMEN_SOLANA_FEE_PAYER_SEED: Buffer.alloc(32, 31).toString("base64"),
-    MERRYMEN_JUPITER_API_KEY: "fixture-not-a-key", MERRYMEN_SOLANA_RPC_MAINNET: RPC };
+    MERRYMEN_JUPITER_API_KEY: "fixture-not-a-key", MERRYMEN_SOLANA_RPC_MAINNET: RPC, ...opts.env };
   const bindings = new SqlSolanaBindingStore(async () => db, "sqlite", () => clock.now);
   await bindings.bind(TENANT, "did:privy:owner", owner);
   await bindings.settings(TENANT, owner, 0, "live", limits);
@@ -173,6 +176,12 @@ async function fixture(t: TestContext, opts: { cash: bigint; wsol: bigint; mark:
     Array<{ request_id: string; notional_raw: string; submission_json: string }>).map(r => ({ ...r, submission: JSON.parse(r.submission_json) as SolanaSignedSubmission }));
   const agent = () => createSolanaAgent({ db, runtime: app, market, now: () => clock.now });
   return { app, scope, sends, submissions, agent, net };
+}
+/** The compute-unit limit and price a signed swap carries (ComputeBudget instructions 2 and 3). */
+function computeBudget(submission: SolanaSignedSubmission): { units: number; price: bigint } {
+  const message = getCompiledTransactionMessageDecoder().decode(getTransactionDecoder().decode(Buffer.from(submission.signedTransactionBase64, "base64")).messageBytes);
+  const budget = message.instructions.filter(ix => message.staticAccounts[ix.programAddressIndex] === "ComputeBudget111111111111111111111111111111").map(ix => Buffer.from(ix.data!));
+  return { units: budget.find(d => d[0] === 2)!.readUInt32LE(1), price: budget.find(d => d[0] === 3)!.readBigUInt64LE(1) };
 }
 const manual = (inputMint: string, amountRaw: string, requestId: string) => ({ kind: "spl-swap", chain: CHAINS.solana, mode: "live", requestId, inputMint,
   outputMint: inputMint === SOLANA_USDG_MINT ? SOLANA_WRAPPED_SOL_MINT : SOLANA_USDG_MINT, amountRaw, slippageBps: 50 });
@@ -241,4 +250,30 @@ test("a stale independent price refuses even a fair live trade", async t => {
   const f = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" }, pythAgeMs: 180_000 });
   await assert.rejects(f.app.trade(f.scope, { mode: "live", intent: manual(SOLANA_WRAPPED_SOL_MINT, "100000000", "stale-sell") }), /refused: risk/);
   assert.deepEqual(await f.submissions(), []); assert.equal(f.sends.length, 0);
+});
+
+test("a compute-unit price minimum above the default maximum still exits; the maximum is its own setting, refused clearly when below the minimum", async t => {
+  // The minimum used to be the fixed price: set alone above 1,000,000 it must not block exits.
+  const alone = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" },
+    env: { MERRYMEN_SOLANA_COMPUTE_UNIT_PRICE_MICROLAMPORTS: "2000000" } });
+  await alone.app.trade(alone.scope, { mode: "live", intent: manual(SOLANA_WRAPPED_SOL_MINT, "100000000", "exit-at-minimum") });
+  assert.equal(alone.sends.length, 1);
+  assert.equal(computeBudget((await alone.submissions())[0]!.submission).price, 2_000_000n);
+  // The explicit maximum bounds what recent fees would otherwise pay.
+  const capped = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" }, priorityFees: [9_000_000],
+    env: { MERRYMEN_SOLANA_COMPUTE_UNIT_PRICE_MICROLAMPORTS: "1000", MERRYMEN_SOLANA_MAX_COMPUTE_UNIT_PRICE_MICROLAMPORTS: "3000" } });
+  await capped.app.trade(capped.scope, { mode: "live", intent: manual(SOLANA_WRAPPED_SOL_MINT, "100000000", "exit-capped") });
+  assert.equal(computeBudget((await capped.submissions())[0]!.submission).price, 3000n);
+  // A maximum below the minimum is a configuration refusal, before any quote, signature or send.
+  const misconfigured: Record<string, string>[] = [{ MERRYMEN_SOLANA_COMPUTE_UNIT_PRICE_MICROLAMPORTS: "2000", MERRYMEN_SOLANA_MAX_COMPUTE_UNIT_PRICE_MICROLAMPORTS: "1000" },
+    { MERRYMEN_SOLANA_MAX_COMPUTE_UNIT_PRICE_MICROLAMPORTS: "lots" }];
+  for (const env of misconfigured) {
+    const bad = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" }, env });
+    await assert.rejects(bad.app.trade(bad.scope, { mode: "live", intent: manual(SOLANA_WRAPPED_SOL_MINT, "100000000", "exit-misconfigured") }),
+      error => error instanceof Error && error.name === "SolanaAppRuntimeError" && (error as Error & { code: string }).code === "configuration" && /compute-unit price settings are misconfigured/.test(error.message));
+    assert.ok(!bad.net.urls.some(url => url.startsWith("https://api.jup.ag/")), JSON.stringify(env));
+    assert.equal(bad.sends.length, 0); assert.deepEqual(await bad.submissions(), []);
+    const status = await bad.app.status(bad.scope);
+    assert.match(status.live.blockers.join(" "), /compute-unit price settings are misconfigured/); assert.equal(status.live.canExit, false);
+  }
 });

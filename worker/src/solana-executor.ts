@@ -166,7 +166,10 @@ export interface SolanaExecutorOptions {
   /**
    * Highest compute-unit price. The price follows recent fees on this swap's
    * writable accounts up to this, and the whole fee plus rent always stays
-   * within maxFeeLamports. Default SOLANA_DEFAULT_MAX_COMPUTE_UNIT_PRICE.
+   * within maxFeeLamports. Default: the larger of
+   * SOLANA_DEFAULT_MAX_COMPUTE_UNIT_PRICE and the minimum, so a minimum that
+   * used to be the fixed price keeps working alone. An explicit maximum below
+   * the minimum is refused (the app runtime refuses it first, as configuration).
    */
   maxComputeUnitPriceMicroLamports?: string;
   assessRisk(input: { intent: SolanaLiveIntent; quote: SolanaQuote; vaultState: SolanaVaultState;
@@ -392,7 +395,9 @@ export function createSolanaExecutor(options: SolanaExecutorOptions) {
   const now = options.now ?? Date.now;
   const cap = parseSolanaRawAmount(options.maxFeeLamports);
   const minPrice = parseSolanaRawAmount(options.computeUnitPriceMicroLamports ?? "0", true);
-  const maxPrice = parseSolanaRawAmount(options.maxComputeUnitPriceMicroLamports ?? SOLANA_DEFAULT_MAX_COMPUTE_UNIT_PRICE.toString(), true);
+  const maxPrice = options.maxComputeUnitPriceMicroLamports === undefined
+    ? (minPrice > SOLANA_DEFAULT_MAX_COMPUTE_UNIT_PRICE ? minPrice : SOLANA_DEFAULT_MAX_COMPUTE_UNIT_PRICE)
+    : parseSolanaRawAmount(options.maxComputeUnitPriceMicroLamports, true);
   if (maxPrice < minPrice) fail("fee-cap");
   address(options.programId);
   if (!/^[a-f0-9]{64}$/.test(options.programBinarySha256)) fail("unsafe-program");

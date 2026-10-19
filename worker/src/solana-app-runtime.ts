@@ -17,7 +17,7 @@ import {
 } from "../../packages/core/src/solana-live";
 import type { Db } from "./db";
 import { createSolanaExecutor, parseSolanaLiveIntent, readSolanaVaultBalances, readSolanaVaultState,
-  reconcileSolanaSubmission, SolanaExecutionError, verifySolanaVaultDeployment, type SolanaLiveRecord } from "./solana-executor";
+  reconcileSolanaSubmission, SOLANA_DEFAULT_MAX_COMPUTE_UNIT_PRICE, SolanaExecutionError, verifySolanaVaultDeployment, type SolanaLiveRecord } from "./solana-executor";
 import { createSolanaLiveMarket } from "./solana-live-market";
 import { createSolanaLiveRpc, readSolanaQuorum, type SolanaLiveRead, type SolanaLiveRpc } from "./solana-live-rpc";
 import { createSolanaMarket } from "./solana-market";
@@ -160,6 +160,26 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
     // The local test build's id is never a live deployment.
     if (programId === SOLANA_VAULT_LOCAL_TEST_PROGRAM && !localTest) fail("The configured Solana vault program is the local test id, which is never used for live trading.", "configuration");
     return { programId, hash };
+  }
+  /**
+   * Swap compute-unit price bounds, in micro-lamports.
+   * MERRYMEN_SOLANA_COMPUTE_UNIT_PRICE_MICROLAMPORTS is the minimum (default 0;
+   * it used to be the fixed price, so it keeps working alone).
+   * MERRYMEN_SOLANA_MAX_COMPUTE_UNIT_PRICE_MICROLAMPORTS is the maximum, by
+   * default the larger of SOLANA_DEFAULT_MAX_COMPUTE_UNIT_PRICE and the minimum.
+   * A maximum set below the minimum, or an unreadable value, is refused here as
+   * configuration (a status blocker), never as a fee refusal at an exit.
+   */
+  function computeUnitPrices(): { minimum: string; maximum: string } {
+    const read = (value: string | undefined, fallback: bigint): bigint => {
+      if (value === undefined) return fallback;
+      try { return parseSolanaRawAmount(value, true); } catch { return fail("The Solana compute-unit price settings are misconfigured: each must be a whole number of micro-lamports.", "configuration"); }
+    };
+    const minimum = read(env.MERRYMEN_SOLANA_COMPUTE_UNIT_PRICE_MICROLAMPORTS, 0n);
+    const maximum = read(env.MERRYMEN_SOLANA_MAX_COMPUTE_UNIT_PRICE_MICROLAMPORTS,
+      minimum > SOLANA_DEFAULT_MAX_COMPUTE_UNIT_PRICE ? minimum : SOLANA_DEFAULT_MAX_COMPUTE_UNIT_PRICE);
+    if (maximum < minimum) fail("The Solana compute-unit price settings are misconfigured: the maximum is below the minimum. Live trading and exits stay refused until an operator fixes them.", "configuration");
+    return { minimum: minimum.toString(), maximum: maximum.toString() };
   }
   // The last successful deployment check, and one in flight so concurrent callers share it.
   let verified: { key: string; atMs: number } | undefined;
@@ -453,6 +473,7 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       let recoverable: { nativeLamports: string; unsyncedWsolLamports: string } | null = null;
       try {
         const cfg = config(); programId = cfg.programId; vault = await deriveSolanaVaultAddress(programId, scope.owner);
+        computeUnitPrices();
         if (!liveReads) { if (binding.requestedMode === "live") blockers.push("Live vault state was not read."); }
         else {
           dek(); const feePayer = await getAddressFromPublicKey((await payer()).publicKey);
@@ -557,7 +578,7 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
         if (JSON.stringify(expected) !== JSON.stringify(prior.submission.intent)) fail("The request ID already belongs to a different live trade.");
         return publicTrade(await reconcileSolanaSubmission(rpc(), s, scope.owner, parsed.requestId, now) ?? prior);
       }
-      const cfg = config(), secret = await s.sessionSeed(dek());
+      const cfg = config(), prices = computeUnitPrices(), secret = await s.sessionSeed(dek());
       if (!secret) fail("Register an owner-approved live trading permission first.", "permission");
       let toleranceBps: number;
       try { toleranceBps = solanaReferenceToleranceBps(env); } catch { return fail("The independent SOL price tolerance is misconfigured.", "configuration"); }
@@ -566,7 +587,7 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       const executor = createSolanaExecutor({ programId: cfg.programId, programBinarySha256: cfg.hash,
         sessionKeyPair, feePayerKeyPair: await payer(), rpc: liveRpc, market: createSolanaLiveMarket({ env, rpc: liveRpc, now }),
         journal: s, maxFeeLamports: env.MERRYMEN_SOLANA_MAX_FEE_LAMPORTS ?? "5000000", now, signal: input.signal,
-        computeUnitPriceMicroLamports: env.MERRYMEN_SOLANA_COMPUTE_UNIT_PRICE_MICROLAMPORTS ?? "0",
+        computeUnitPriceMicroLamports: prices.minimum, maxComputeUnitPriceMicroLamports: prices.maximum,
         assessRisk: async ({ intent: current, quote, slot }) => {
           const observedAtMs = now(), balances = await readSolanaVaultBalances(liveRpc, vault, slot);
           const makeExit = (amountRaw: string, requestId: string) => parseSolanaSwapIntent({ kind: "spl-swap", chain: CHAINS.solana,

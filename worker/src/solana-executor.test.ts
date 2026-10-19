@@ -711,6 +711,13 @@ test("swaps pay a bounded priority fee from recent fees on the accounts they wri
   assert.ok(!g.calls.includes("persist"));
 });
 
+test("a minimum compute-unit price above the default maximum is not a construction refusal; an explicit maximum below it is", async () => {
+  const f = await fixture();
+  const executor = createSolanaExecutor({ ...f.options, computeUnitPriceMicroLamports: "2000000" });
+  assert.equal((await executor.execute(f.intent)).status, "pending");
+  assert.throws(() => createSolanaExecutor({ ...f.options, computeUnitPriceMicroLamports: "2000000", maxComputeUnitPriceMicroLamports: "1000000" }), /fee-cap/);
+});
+
 test("a fee payer that can fund a swap only at a lower priority price pays that price instead of refusing it (status gates exits on rent and signatures)", async () => {
   // What status() calls one swap's minimum for these fixture rents: the temporary account's rent and both signatures.
   const RENT = 2_039_280n, minimum = RENT + 10_000n;
