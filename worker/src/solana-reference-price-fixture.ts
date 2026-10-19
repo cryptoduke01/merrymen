@@ -1,6 +1,9 @@
-/** Synthetic Pyth SOL/USD accounts for tests. No network data. */
+/**
+ * Pyth SOL/USD accounts for tests: synthetic builders, and two real mainnet
+ * reads recorded once (below). Tests never touch the network.
+ */
 import { createHash } from "node:crypto";
-import { PYTH_RECEIVER_PROGRAM, PYTH_SOL_USD_FEED_ID, solanaReferenceBound, type SolanaReferenceBound,
+import { PYTH_RECEIVER_PROGRAM, PYTH_SOL_USD_ACCOUNT, PYTH_SOL_USD_FEED_ID, solanaReferenceBound, type SolanaReferenceBound,
   type SolanaReferencePrice } from "./solana-reference-price";
 
 export interface PythFixture {
@@ -22,9 +25,56 @@ export function pythAccount(f: PythFixture) {
 }
 /** A reference read at `slot`, published at `nowMs`, at `usdPerSol` (8 decimals). */
 export function pythReference(nowMs: number, usdPerSol = 50_000_000_000n, slot = 1000): SolanaReferencePrice {
-  return { source: "pyth", account: "7UVimffxr9ow1uXYxsr4LHAcV58mLzhmwaeKvJ1pjLiE", feedId: PYTH_SOL_USD_FEED_ID,
+  return { source: "pyth", account: PYTH_SOL_USD_ACCOUNT, feedId: PYTH_SOL_USD_FEED_ID,
     price: usdPerSol.toString(), conf: "10000000", exponent: -8, publishTimeMs: Math.floor(nowMs / 1000) * 1000, postedSlot: slot - 1, slot };
 }
 export function pythBound(intent: Parameters<typeof solanaReferenceBound>[0], nowMs: number, usdPerSol?: bigint, slot?: number, toleranceBps = 300): SolanaReferenceBound {
   return solanaReferenceBound(intent, pythReference(nowMs, usdPerSol, slot), toleranceBps);
+}
+
+/**
+ * Real Solana mainnet reads, recorded read-only on 2026-10-19 from the public
+ * endpoint https://api.mainnet-beta.solana.com (no API key, no transaction).
+ * `minContextSlot` came from getSlot (commitment confirmed) sent at
+ * `requestedAtMs`; `request` is the getAccountInfo call that followed, the same
+ * call `readSolanaReferencePrice` makes; `response` is the RPC's JSON answer,
+ * verbatim; `fetchedAtMs` is the local clock when it arrived.
+ */
+export interface PythMainnetSnapshot {
+  rpc: string; account: string; requestedAtMs: number; fetchedAtMs: number; minContextSlot: number;
+  request: { method: "getAccountInfo"; params: [string, { encoding: "base64"; commitment: "confirmed"; minContextSlot: number }] };
+  response: string;
+}
+
+/** The pinned, current-generation SOL/USD feed account (shard 0, owned by rec5EK…). */
+export const PYTH_SOL_USD_MAINNET_SNAPSHOT: PythMainnetSnapshot = {
+  rpc: "https://api.mainnet-beta.solana.com",
+  account: "7UVimffxr9ow1uXYxsr4LHAcV58mLzhmwaeKvJ1pjLiE",
+  requestedAtMs: 1_792_380_064_144,
+  fetchedAtMs: 1_792_380_065_220,
+  minContextSlot: 458_681_623,
+  request: { method: "getAccountInfo", params: ["7UVimffxr9ow1uXYxsr4LHAcV58mLzhmwaeKvJ1pjLiE",
+    { encoding: "base64", commitment: "confirmed", minContextSlot: 458_681_623 }] },
+  response: '{"jsonrpc":"2.0","result":{"context":{"apiVersion":"4.3.0","slot":458681624},"value":{"data":["IvEjY51+9M1gMUcENA3t3zcf1CRyFI8kjp0abRpesqw6zYt/1dayQwHvDYtv2izrpB2hXUCV0do5Kg0vjtDGx7wPTPrIwoC1bTec0nICAAAA8DEyAAAAAAD4////oIzVagAAAACfjNVqAAAAAHwyyXECAAAAEistAAAAAAAY7VYbAAAAAAA=","base64"],"executable":false,"lamports":1825031,"owner":"rec5EKMGg6MxZYaMdyBfgwp4d5rB9T1VQH5pJv5LtFJ","rentEpoch":18446744073709551615,"space":134}},"id":2}',
+};
+
+/**
+ * The same feed's shard-0 account under Pyth's upgraded (2026-08-26) programs,
+ * read straight after the snapshot above: owned by rec2HH…, at the PDA of
+ * pyt2F4…. Not accepted by this module; kept to show the layout matches.
+ */
+export const PYTH_SOL_USD_UPGRADED_MAINNET_SNAPSHOT: PythMainnetSnapshot = {
+  rpc: "https://api.mainnet-beta.solana.com",
+  account: "7AviUf9nL62mcxNbQGKm4nKDQnPjswo6c5MX4D57HmyE",
+  requestedAtMs: 1_792_380_064_144,
+  fetchedAtMs: 1_792_380_065_477,
+  minContextSlot: 458_681_623,
+  request: { method: "getAccountInfo", params: ["7AviUf9nL62mcxNbQGKm4nKDQnPjswo6c5MX4D57HmyE",
+    { encoding: "base64", commitment: "confirmed", minContextSlot: 458_681_623 }] },
+  response: '{"jsonrpc":"2.0","result":{"context":{"apiVersion":"4.3.0","slot":458681625},"value":{"data":["IvEjY51+9M1bsRWwDdII6qyfKmvtWLaGyH3c9S5trfFYcCJDMhaezQHvDYtv2izrpB2hXUCV0do5Kg0vjtDGx7wPTPrIwoC1bcHP0nICAAAAIEIxAAAAAAD4////n4zVagAAAACejNVqAAAAAI4gyXECAAAAuyotAAAAAAAZ7VYbAAAAAAA=","base64"],"executable":false,"lamports":1823520,"owner":"rec2HHDDnjLfj4kE7VyEtFA1HPGQLK33259532cRyHp","rentEpoch":18446744073709551615,"space":134}},"id":3}',
+};
+
+/** The JSON-RPC `result` of a recorded read: `{ context: { slot }, value }`. */
+export function pythSnapshotResult(snapshot: PythMainnetSnapshot): { context: { slot: number }; value: Record<string, unknown> } {
+  return (JSON.parse(snapshot.response) as { result: { context: { slot: number }; value: Record<string, unknown> } }).result;
 }

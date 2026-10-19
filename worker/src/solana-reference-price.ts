@@ -4,12 +4,23 @@
  * live trade whose guaranteed output is far below what SOL is worth is refused,
  * whatever Jupiter quoted, and a sell is charged at least what it is worth.
  *
- * The account, owner program, feed id and PriceUpdateV2 layout are pinned from
- * Pyth's documentation and were NOT read from mainnet when this was written.
- * Confirm them on mainnet before live; any mismatch fails closed.
+ * The account, owner program, feed id and PriceUpdateV2 layout were checked
+ * against Solana mainnet on 2026-10-19 with read-only RPC reads (slot
+ * 458681200 and later): the receiver and push-oracle programs exist and are
+ * executable, the account is the push oracle's shard-0 address for the SOL/USD
+ * feed id, is owned by the receiver, carries the PriceUpdateV2 discriminator,
+ * is fully verified, and decodes here to a fresh price with exponent -8.
+ * `PYTH_SOL_USD_MAINNET_SNAPSHOT` in the fixture file holds those bytes.
+ * Any mismatch, stale or missing price still fails closed.
+ *
+ * These are the pre-upgrade ("current") Pyth Core addresses. Pyth's
+ * 2026-08-26 Core upgrade added a second generation of programs on Solana with
+ * their own feed accounts; the current account was still updated on its
+ * heartbeat when checked. Moving to the upgraded generation is a deliberate
+ * change of all three addresses, never a silent fallback.
  */
 import { createHash } from "node:crypto";
-import { address } from "@solana/kit";
+import { address, getProgramDerivedAddress } from "@solana/kit";
 import { SOLANA_USDG_MINT } from "../../packages/core/src/ids";
 import { parseSolanaRawAmount } from "../../packages/core/src/solana";
 import { SOLANA_WRAPPED_SOL_MINT } from "../../packages/core/src/solana-live";
@@ -17,10 +28,24 @@ import type { SolanaLiveRead } from "./solana-live-rpc";
 
 /** Pyth Solana Receiver: owner of every posted PriceUpdateV2 account. */
 export const PYTH_RECEIVER_PROGRAM = "rec5EKMGg6MxZYaMdyBfgwp4d5rB9T1VQH5pJv5LtFJ";
-/** Pyth's sponsored SOL/USD price feed account (shard 0). */
-export const PYTH_SOL_USD_ACCOUNT = "7UVimffxr9ow1uXYxsr4LHAcV58mLzhmwaeKvJ1pjLiE";
+/** Pyth push oracle ("Price Feed" program): its PDAs are the sponsored price feed accounts. */
+export const PYTH_PUSH_ORACLE_PROGRAM = "pythWSnswVUd12oZpeFP8e9CVaEqJg25g1Vtc2biRsT";
+/** Pyth sponsors shard 0 of each feed; other shards are posted by whoever pays for them. */
+export const PYTH_SPONSORED_SHARD = 0;
+/** Crypto.SOL/USD. */
 export const PYTH_SOL_USD_FEED_ID = "ef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d";
-/** Sponsored feeds post on a heartbeat and on price moves; older than this is unproven. */
+/**
+ * Pyth's sponsored SOL/USD price feed account: the push oracle's PDA for shard 0
+ * and the feed id (`derivePythPriceFeedAccount`). Pinned so admission stays
+ * synchronous; a test re-derives it. Pinning matters: anyone can post a fully
+ * verified PriceUpdateV2 owned by the receiver to an account of their own.
+ */
+export const PYTH_SOL_USD_ACCOUNT = "7UVimffxr9ow1uXYxsr4LHAcV58mLzhmwaeKvJ1pjLiE";
+/**
+ * Sponsored feeds post on a heartbeat and on price moves; older than this is unproven.
+ * Pyth documents a 55 s heartbeat or 0.5% move for SOL/USD; mainnet showed a post every
+ * 52-53 s, so this allows about two heartbeats.
+ */
 export const SOLANA_REFERENCE_MAX_AGE_MS = 120_000;
 export const SOLANA_REFERENCE_MAX_FUTURE_MS = 5_000;
 /** Confidence interval at most 1% of price. */
@@ -31,6 +56,7 @@ export const SOLANA_REFERENCE_MAX_TOLERANCE_BPS = 1_000;
 const DISCRIMINATOR = createHash("sha256").update("account:PriceUpdateV2").digest().subarray(0, 8);
 // 8 discriminator + 32 write authority + 2 verification level (1 when Full) + 32 feed id
 // + price i64, conf u64, exponent i32, publish/prev publish i64, ema price i64, ema conf u64, posted slot u64.
+// The account is sized for Partial (2 level bytes), so a Full update leaves its last byte unused.
 const PRICE_UPDATE_LEN = 134;
 const FULL = 1;
 
@@ -58,6 +84,18 @@ export interface SolanaReferenceBound {
   minOutFloor: string;
   /** USDG notional at the reference: a buy's input, a sell's reference proceeds. */
   valueUsdg: string;
+}
+
+/**
+ * A push-oracle price feed account: the PDA of `program` for seeds
+ * [shard as u16 little-endian, 32-byte feed id]. This reproduces Pyth's published
+ * shard-0 address for SOL/USD and every SOL/USD feed account read on mainnet.
+ */
+export async function derivePythPriceFeedAccount(feedIdHex: string, shard: number = PYTH_SPONSORED_SHARD,
+  program: string = PYTH_PUSH_ORACLE_PROGRAM): Promise<string> {
+  if (typeof feedIdHex !== "string" || !/^[0-9a-f]{64}$/.test(feedIdHex) || !Number.isSafeInteger(shard) || shard < 0 || shard > 0xffff) return fail();
+  const seed = new Uint8Array(2); new DataView(seed.buffer).setUint16(0, shard, true);
+  return (await getProgramDerivedAddress({ programAddress: address(program), seeds: [seed, Buffer.from(feedIdHex, "hex")] }))[0];
 }
 
 /** Parse and check one PriceUpdateV2 account as returned by getAccountInfo base64. */

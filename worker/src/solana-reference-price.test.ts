@@ -1,18 +1,74 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { address } from "@solana/kit";
+import { address, getBase58Decoder } from "@solana/kit";
 import { SOLANA_USDG_MINT } from "../../packages/core/src/ids";
 import { SOLANA_WRAPPED_SOL_MINT } from "../../packages/core/src/solana-live";
-import { PYTH_RECEIVER_PROGRAM, PYTH_SOL_USD_ACCOUNT, parsePythSolUsd, readSolanaReferencePrice, solanaReferenceBound,
-  solanaReferenceNotional, solanaReferenceToleranceBps, verifySolanaReferenceBound, SolanaReferencePriceError } from "./solana-reference-price";
-import { pythAccount, pythReference } from "./solana-reference-price-fixture";
+import { PYTH_PUSH_ORACLE_PROGRAM, PYTH_RECEIVER_PROGRAM, PYTH_SOL_USD_ACCOUNT, PYTH_SOL_USD_FEED_ID, PYTH_SPONSORED_SHARD,
+  derivePythPriceFeedAccount, parsePythSolUsd, readSolanaReferencePrice, solanaReferenceBound, solanaReferenceNotional,
+  solanaReferenceToleranceBps, verifySolanaReferenceBound, SolanaReferencePriceError } from "./solana-reference-price";
+import { PYTH_SOL_USD_MAINNET_SNAPSHOT, PYTH_SOL_USD_UPGRADED_MAINNET_SNAPSHOT, pythAccount, pythReference,
+  pythSnapshotResult } from "./solana-reference-price-fixture";
 
 const NOW = 1_790_000_000_000;
 const sell = { inputMint: SOLANA_WRAPPED_SOL_MINT, outputMint: SOLANA_USDG_MINT, amountRaw: "1000000000", slippageBps: 50 };
 const buy = { inputMint: SOLANA_USDG_MINT, outputMint: SOLANA_WRAPPED_SOL_MINT, amountRaw: "25000000", slippageBps: 50 };
 
 test("the pinned Pyth identities are canonical public keys", () => {
-  for (const value of [PYTH_RECEIVER_PROGRAM, PYTH_SOL_USD_ACCOUNT]) assert.equal(address(value), value);
+  for (const value of [PYTH_RECEIVER_PROGRAM, PYTH_PUSH_ORACLE_PROGRAM, PYTH_SOL_USD_ACCOUNT]) assert.equal(address(value), value);
+});
+
+// Pyth's upgraded (2026-08-26) push oracle. Not used by the module; a second real derivation to check against.
+const UPGRADED_PUSH_ORACLE = "pyt2F414BA6dPttK6RddPZUdHfapoBN24GL5wbrPCou";
+
+test("the pinned account is the push oracle's sponsored shard-0 PDA for the SOL/USD feed id", async () => {
+  assert.equal(PYTH_SPONSORED_SHARD, 0);
+  assert.equal(await derivePythPriceFeedAccount(PYTH_SOL_USD_FEED_ID), PYTH_SOL_USD_ACCOUNT);
+  assert.equal(await derivePythPriceFeedAccount(PYTH_SOL_USD_FEED_ID, PYTH_SPONSORED_SHARD, PYTH_PUSH_ORACLE_PROGRAM), PYTH_SOL_USD_ACCOUNT);
+  // Each of these was read on mainnet on 2026-10-19: a SOL/USD PriceUpdateV2 owned by its generation's receiver.
+  assert.equal(await derivePythPriceFeedAccount(PYTH_SOL_USD_FEED_ID, 1), "6bWEn5B8eJCRAek5acd3R7d4Sx3e7JWvt84srqqfYgt");
+  assert.equal(await derivePythPriceFeedAccount(PYTH_SOL_USD_FEED_ID, 0, UPGRADED_PUSH_ORACLE), PYTH_SOL_USD_UPGRADED_MAINNET_SNAPSHOT.account);
+  assert.equal(await derivePythPriceFeedAccount(PYTH_SOL_USD_FEED_ID, 1, UPGRADED_PUSH_ORACLE), "GGdMnioYUC8qFWrWXJP2n3YHAns49MJW87CeuT7sgvrf");
+  for (const [feed, shard] of [[PYTH_SOL_USD_FEED_ID.toUpperCase(), 0], [`0x${PYTH_SOL_USD_FEED_ID}`, 0], [PYTH_SOL_USD_FEED_ID.slice(2), 0],
+    [PYTH_SOL_USD_FEED_ID, -1], [PYTH_SOL_USD_FEED_ID, 65_536], [PYTH_SOL_USD_FEED_ID, 0.5]] as const) {
+    await assert.rejects(derivePythPriceFeedAccount(feed, shard), SolanaReferencePriceError, `${feed} ${shard}`);
+  }
+});
+
+test("decodes a real mainnet SOL/USD account read with this module's own call", async () => {
+  const snap = PYTH_SOL_USD_MAINNET_SNAPSHOT, result = pythSnapshotResult(snap);
+  assert.equal(snap.account, PYTH_SOL_USD_ACCOUNT);
+  const calls: unknown[] = [];
+  const price = await readSolanaReferencePrice(async (method, params) => { calls.push([method, params]); return result; }, snap.minContextSlot, snap.fetchedAtMs);
+  assert.deepEqual(calls, [[snap.request.method, snap.request.params]]);
+  // $105.16339767 per SOL, ±3 bps, published 1.2 s before the answer arrived.
+  assert.deepEqual(price, { source: "pyth", account: PYTH_SOL_USD_ACCOUNT, feedId: PYTH_SOL_USD_FEED_ID, price: "10516339767", conf: "3289584",
+    exponent: -8, publishTimeMs: 1_792_380_064_000, postedSlot: 458_681_624, slot: 458_681_624 });
+  // The bytes the decoder skips agree with the push-oracle layout: the PDA is its own
+  // write authority, the level is Full (one byte), and the byte left for Partial is unused.
+  const data = Buffer.from((result.value.data as [string, string])[0], "base64");
+  assert.equal(getBase58Decoder().decode(data.subarray(8, 40)), PYTH_SOL_USD_ACCOUNT);
+  assert.equal(data[40], 1); assert.equal(data[133], 0);
+  assert.equal(data.readBigInt64LE(101), 1_792_380_063n); // previous publish time
+  assert.equal(data.readBigInt64LE(109), 10_498_945_660n); // EMA price, $104.99
+  // What it bounds: 1 SOL sold is worth 105.163397 USDG; 25 USDG buys 0.237725297 SOL.
+  const sell1 = solanaReferenceBound(sell, price, 300), buy25 = solanaReferenceBound(buy, price, 300);
+  assert.deepEqual([sell1.referenceOut, sell1.minOutFloor], ["105163397", "102008495"]);
+  assert.deepEqual([buy25.referenceOut, buy25.minOutFloor], ["237725297", "230593538"]);
+  // The same real bytes go stale 120 s after publication.
+  assert.doesNotThrow(() => parsePythSolUsd(result.value, result.context.slot, price.publishTimeMs + 120_000));
+  assert.throws(() => parsePythSolUsd(result.value, result.context.slot, price.publishTimeMs + 120_001), SolanaReferencePriceError);
+  // And a context slot before the post is refused.
+  assert.throws(() => parsePythSolUsd(result.value, 458_681_623, snap.fetchedAtMs), SolanaReferencePriceError);
+});
+
+test("a real upgraded-generation account shares the layout but is refused in place of the pinned one", () => {
+  const snap = PYTH_SOL_USD_UPGRADED_MAINNET_SNAPSHOT, result = pythSnapshotResult(snap);
+  assert.notEqual(snap.account, PYTH_SOL_USD_ACCOUNT);
+  assert.equal(result.value.owner, "rec2HHDDnjLfj4kE7VyEtFA1HPGQLK33259532cRyHp");
+  assert.throws(() => parsePythSolUsd(result.value, result.context.slot, snap.fetchedAtMs), SolanaReferencePriceError);
+  // Relabelled to the pinned owner, the same decoder reads it, and it agrees with the current feed to 0.01 bp.
+  const decoded = parsePythSolUsd({ ...result.value, owner: PYTH_RECEIVER_PROGRAM }, result.context.slot, snap.fetchedAtMs);
+  assert.deepEqual([decoded.price, decoded.exponent, decoded.publishTimeMs, decoded.postedSlot], ["10516352961", -8, 1_792_380_063_000, 458_681_625]);
 });
 
 test("reads a fresh, fully verified SOL/USD update at or after the trade's slot", async () => {
