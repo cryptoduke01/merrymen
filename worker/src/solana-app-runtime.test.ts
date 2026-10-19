@@ -651,3 +651,66 @@ test("an unseen owner transaction is sent again, as the same bytes, only while i
     assert.deepEqual(new Set(f.sent), new Set([signedTransactionBase64]));
   } finally { f.raw.close(); }
 });
+
+// An owner transaction's floor: one signature fee plus the wallet's own rent-exempt minimum.
+const OWNER_BASE = 5_000 + rentExempt(0);
+
+test("an owner without SOL for the fee is told before signing, and nothing is prepared (audit G1-5)", async () => {
+  const f = await fixture();
+  try {
+    await readyLive(f);
+    f.controls.ownerLamports = 0; // spent on setup rent
+    await assert.rejects(f.app.prepareOwnerAction(f.scope, { action: "revoke" }), /owner wallet holds 0 SOL\. This transaction needs at least 0\.00089588 SOL/);
+    assert.equal(await new SolanaTradingStore(f.db, f.scope).setup(), null);
+    f.controls.ownerLamports = OWNER_BASE - 1;
+    await assert.rejects(f.app.prepareOwnerAction(f.scope, { action: "resume-buys" }), /needs at least/);
+    f.controls.ownerLamports = OWNER_BASE;
+    const prepared = await f.app.prepareOwnerAction(f.scope, { action: "revoke" });
+    assert.equal(prepared.requiredLamports, String(OWNER_BASE)); assert.equal(prepared.ownerLamports, String(OWNER_BASE));
+  } finally { f.raw.close(); }
+});
+
+test("a withdrawal that opens the owner's token account counts its rent, and setup counts every account it opens (audit G1-5)", async () => {
+  const f = await fixture();
+  try {
+    await readyLive(f);
+    const usdgNeeds = OWNER_BASE + rentExempt(170);
+    f.controls.ownerLamports = usdgNeeds - 1;
+    await assert.rejects(f.app.prepareOwnerAction(f.scope, { action: "withdraw", mint: SOLANA_USDG_MINT, amountRaw: "1" }), /rent for the token accounts it opens/);
+    f.controls.ownerLamports = usdgNeeds;
+    assert.equal((await f.app.prepareOwnerAction(f.scope, { action: "withdraw", mint: SOLANA_USDG_MINT, amountRaw: "1" })).requiredLamports, String(usdgNeeds));
+  } finally { f.raw.close(); }
+  const g = await fixture();
+  try {
+    await g.live(); g.controls.ownerAtas = true; g.controls.ownerLamports = OWNER_BASE;
+    g.controls.initialized = true;
+    // With its token accounts open, a withdrawal costs only the fee.
+    assert.equal((await g.app.prepareOwnerAction(g.scope, { action: "withdraw", mint: SOLANA_WRAPPED_SOL_MINT, amountRaw: "1" })).requiredLamports, String(OWNER_BASE));
+  } finally { g.raw.close(); }
+  const h = await fixture();
+  try {
+    await h.live();
+    // A first setup opens the vault and the owner's two token accounts (the fixture's vault token accounts already exist).
+    const setupNeeds = OWNER_BASE + rentExempt(SOLANA_VAULT_ACCOUNT_SIZE) + rentExempt(170) + rentExempt(165);
+    h.controls.ownerLamports = setupNeeds - 1;
+    await assert.rejects(h.app.prepareLive(h.scope, { limits, sessionPublicKey: h.session }), /needs at least/);
+    h.controls.ownerLamports = setupNeeds;
+    assert.equal((await h.app.prepareLive(h.scope, { limits, sessionPublicKey: h.session })).requiredLamports, String(setupNeeds));
+  } finally { h.raw.close(); }
+});
+
+test("status shows what the owner wallet needs to revoke and withdraw, and warns when it is short (audit G1-5)", async () => {
+  const f = await fixture();
+  try {
+    await readyLive(f);
+    let status = await f.app.status(f.scope);
+    assert.deepEqual(status.live.ownerWallet, { lamports: "100000000", revokeLamports: String(OWNER_BASE), withdrawLamports: String(OWNER_BASE + rentExempt(170)) });
+    assert.deepEqual(status.live.warnings, []);
+    f.controls.ownerLamports = OWNER_BASE;
+    status = await f.app.status(f.scope);
+    assert.match(status.live.warnings.join(" "), /enough to revoke, but a withdrawal may need up to 0\.00296996 SOL/);
+    assert.equal(status.live.ready, true, "an owner warning never blocks the worker");
+    f.controls.ownerLamports = 0;
+    assert.match((await f.app.status(f.scope)).live.warnings.join(" "), /too little to revoke or withdraw/);
+  } finally { f.raw.close(); }
+});

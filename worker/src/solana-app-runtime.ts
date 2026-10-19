@@ -74,6 +74,8 @@ const SWAP_SIGNATURE_FEES = 10_000n;
 const CLASSIC_TOKEN_ACCOUNT_SIZE = 165;
 /** Upper bound for a Token-2022 USDG token account whose size cannot be read yet (before the vault's own exists). */
 const TOKEN_2022_ACCOUNT_SIZE_BOUND = 300;
+/** The signature fee per signer. Owner transactions carry one signature and no priority fee. */
+const LAMPORTS_PER_SIGNATURE = 5_000n;
 /** An unchanged fee payer alert is logged again after this long. */
 const FEE_PAYER_ALERT_REPEAT_MS = 10 * 60_000;
 /** Lamports as SOL, exact, for owner- and operator-facing text. */
@@ -89,6 +91,10 @@ function chainAccount(raw: unknown): ChainAccount {
   const data = Buffer.from(raw.data[0], "base64");
   if (data.toString("base64") !== raw.data[0]) return fail("Invalid Solana account data.");
   return { owner: raw.owner, executable: raw.executable, lamports: BigInt(raw.lamports), data };
+}
+/** Lamports an account can pay fees with: only a plain system account can be a fee payer. */
+function payable(account: ChainAccount): bigint {
+  return account && account.owner === SOLANA_SYSTEM_PROGRAM && !account.executable && account.data.length === 0 ? account.lamports : 0n;
 }
 /** Confirmed accounts in one call; a missing account is null. */
 async function readAccounts(read: SolanaLiveRead, keys: readonly string[]): Promise<ChainAccount[]> {
@@ -363,15 +369,38 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
     }
     return { signature, status: "pending" };
   }
+  /** An account an owner transaction creates if it is missing, paid by the owner. "usdg": a USDG (Token-2022) token account. */
+  type OwnerCreate = { address: string; size: number | "usdg" };
+  /**
+   * What the owner wallet must hold to send an owner transaction (it is the fee
+   * payer): `base` is the signature fee plus the wallet's own rent-exempt
+   * minimum, since a fee payer may not be left with a non-zero balance below
+   * it; `rents[i]` is the rent of creates[i] if it does not exist yet, else 0.
+   * A USDG account's size is read from an existing one (they share the mint's
+   * extensions), with an upper bound before any exists.
+   */
+  async function ownerCost(read: SolanaLiveRead, owner: string, vault: string, creates: readonly OwnerCreate[]) {
+    const usdg = [await deriveSolanaAta(vault, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM), await deriveSolanaAta(owner, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM)];
+    const accounts = await readAccounts(read, [owner, ...usdg, ...creates.map(item => item.address)]);
+    const usdgSize = accounts[1]?.data.length ?? accounts[2]?.data.length ?? TOKEN_2022_ACCOUNT_SIZE_BOUND;
+    const base = LAMPORTS_PER_SIGNATURE + await rentFor(read, 0), rents: bigint[] = [];
+    for (const [index, item] of creates.entries()) rents.push(accounts[3 + index] === null ? await rentFor(read, item.size === "usdg" ? usdgSize : item.size) : 0n);
+    return { held: payable(accounts[0]!), base, rents };
+  }
   async function prepareOwner(s: SolanaTradingStore, instructions: Instruction[], details: Omit<SolanaPreparedSetup,
-    "transactionBase64" | "messageBase64" | "blockhash" | "lastValidBlockHeight" | "preparedAtMs" | "expiresAtMs">) {
+    "transactionBase64" | "messageBase64" | "blockhash" | "lastValidBlockHeight" | "preparedAtMs" | "expiresAtMs">, creates: readonly OwnerCreate[] = []) {
     const previous = await s.setup();
     if (previous?.signature && previous.status !== "failed" && previous.status !== "finalized") fail("Refresh the pending owner transaction before preparing another.", "pending");
-    const block = await rpc().read(async read => {
+    const { block, cost } = await rpc().read(async read => {
       const result = await read("getLatestBlockhash", [{ commitment: "confirmed" }]);
       if (!object(result) || !object(result.value) || typeof result.value.blockhash !== "string") fail("Invalid Solana blockhash response.");
-      return { blockhash: address(result.value.blockhash) as unknown as Blockhash, lastValidBlockHeight: BigInt(integer(result.value.lastValidBlockHeight)) };
+      return { block: { blockhash: address(result.value.blockhash) as unknown as Blockhash, lastValidBlockHeight: BigInt(integer(result.value.lastValidBlockHeight)) },
+        cost: await ownerCost(read, s.scope.owner, details.vault, creates) };
     });
+    // The owner pays: refuse before anything is saved or signed rather than let
+    // a transaction that cannot pay its fee sit pending until its blockhash expires.
+    const required = cost.rents.reduce((sum, item) => sum + item, cost.base);
+    if (cost.held < required) fail(`Your owner wallet holds ${sol(cost.held)} SOL. This transaction needs at least ${sol(required)} SOL: its network fee${cost.rents.some(item => item > 0n) ? ", rent for the token accounts it opens" : ""} and the wallet's own minimum balance. Send SOL to your owner wallet, then prepare it again.`);
     const tx = compileTransaction(setTransactionMessageLifetimeUsingBlockhash(block,
       setTransactionMessageFeePayer(address(s.scope.owner), appendTransactionMessageInstructions(instructions, createTransactionMessage({ version: 0 })))));
     const transactionBase64 = getBase64EncodedWireTransaction(tx); encoded(transactionBase64);
@@ -380,7 +409,8 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       blockhash: block.blockhash, lastValidBlockHeight: block.lastValidBlockHeight.toString(), preparedAtMs, expiresAtMs: preparedAtMs + 60_000 };
     await s.saveSetup(setup);
     return { transactionBase64, blockhash: setup.blockhash, lastValidBlockHeight: setup.lastValidBlockHeight,
-      programId: setup.programId, vault: setup.vault, session: setup.session, expiresAtMs: setup.expiresAtMs };
+      programId: setup.programId, vault: setup.vault, session: setup.session, expiresAtMs: setup.expiresAtMs,
+      ownerLamports: cost.held.toString(), requiredLamports: required.toString() };
   }
   async function submitOwner(scope: SolanaAccountScope, input: { signedTransactionBase64: string }, kind: "session" | "owner") {
     const s = await store(scope), setup = await s.setup();
@@ -426,6 +456,7 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       let programId: string | null = null, vault: string | null = null, cashTokenAccount: string | null = null;
       let balances: { slot: number; cashUsdg: string; wsolRaw: string } | null = null;
       let feePayerView: { lamports: string; exitMinimumLamports: string; buyMinimumLamports: string; lowLamports: string; level: FeePayerLevel } | null = null;
+      let ownerWallet: { lamports: string; revokeLamports: string; withdrawLamports: string } | null = null;
       try {
         const cfg = config(); programId = cfg.programId; vault = await deriveSolanaVaultAddress(programId, scope.owner);
         if (!liveReads) { if (binding.requestedMode === "live") blockers.push("Live vault state was not read."); }
@@ -436,14 +467,21 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
           const low = feePayerLow(), vaultCash = await deriveSolanaAta(vault, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM);
           // What the executor needs for one swap: both signatures and the rent of the
           // temporary input account it opens (and closes, refunding the payer).
+          const ownerCash = await deriveSolanaAta(scope.owner, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM), ownerWsol = await deriveSolanaAta(scope.owner, SOLANA_WRAPPED_SOL_MINT, SOLANA_CLASSIC_TOKEN_PROGRAM);
           const payerState = await rpc().read(async read => {
             const [payerAccount, cashAccount] = await readAccounts(read, [feePayer, vaultCash]);
             if (payerAccount && (payerAccount.owner !== SOLANA_SYSTEM_PROGRAM || payerAccount.executable || payerAccount.data.length))
               fail("The separate network fee payer must be a plain system account.", "configuration");
             return { lamports: payerAccount?.lamports ?? 0n,
               exitMinimum: await rentFor(read, CLASSIC_TOKEN_ACCOUNT_SIZE) + SWAP_SIGNATURE_FEES,
-              buyMinimum: await rentFor(read, cashAccount ? cashAccount.data.length : TOKEN_2022_ACCOUNT_SIZE_BOUND) + SWAP_SIGNATURE_FEES };
+              buyMinimum: await rentFor(read, cashAccount ? cashAccount.data.length : TOKEN_2022_ACCOUNT_SIZE_BOUND) + SWAP_SIGNATURE_FEES,
+              // What the owner needs to revoke (no account opened) or withdraw (may open its own token account).
+              owner: await ownerCost(read, scope.owner, vault!, [{ address: ownerCash, size: "usdg" }, { address: ownerWsol, size: CLASSIC_TOKEN_ACCOUNT_SIZE }]) };
           });
+          const revokeNeeds = payerState.owner.base, withdrawNeeds = payerState.owner.rents.reduce((most, item) => item > most ? item : most, 0n) + payerState.owner.base;
+          ownerWallet = { lamports: payerState.owner.held.toString(), revokeLamports: revokeNeeds.toString(), withdrawLamports: withdrawNeeds.toString() };
+          if (payerState.owner.held < revokeNeeds) warnings.push(`Your owner wallet holds ${sol(payerState.owner.held)} SOL, too little to revoke or withdraw (at least ${sol(revokeNeeds)} SOL to revoke, up to ${sol(withdrawNeeds)} SOL to withdraw). Keep some SOL there so you can act in an emergency.`);
+          else if (payerState.owner.held < withdrawNeeds) warnings.push(`Your owner wallet holds ${sol(payerState.owner.held)} SOL: enough to revoke, but a withdrawal may need up to ${sol(withdrawNeeds)} SOL to open your token account. Keep some SOL there so you can act in an emergency.`);
           const level: FeePayerLevel = payerState.lamports < payerState.exitMinimum ? "exits-blocked" : payerState.lamports < payerState.buyMinimum ? "buys-blocked"
             : payerState.lamports < low ? "low" : "ok";
           feePayerView = { lamports: payerState.lamports.toString(), exitMinimumLamports: payerState.exitMinimum.toString(),
@@ -493,7 +531,7 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       return { chain: CHAINS.solana, owner: scope.owner, requestedMode: binding.requestedMode,
         automation: { workerOnline: lastSeenAtMs !== null && lastSeenAtMs <= now() && now() - lastSeenAtMs < 90_000, lastSeenAtMs },
         paper: await s.paper().get(scope.owner), limits: binding.limits,
-        live: { ready: blockers.length === 0, canExit: blockers.every(item => exitSafe.has(item)), blockers, warnings, feePayer: feePayerView, programId, vault, cashTokenAccount, session: session?.session ?? null,
+        live: { ready: blockers.length === 0, canExit: blockers.every(item => exitSafe.has(item)), blockers, warnings, feePayer: feePayerView, ownerWallet, programId, vault, cashTokenAccount, session: session?.session ?? null,
           balances, tradable: await tradableIn(s, balances), book: await s.liveBook(), pending, history: (await s.history()).map(publicTrade),
           ownerTransaction: ownerTransaction?.signature ? { signature: ownerTransaction.signature, status: ownerTransaction.status, kind: ownerTransaction.kind } : null } };
     },
@@ -577,8 +615,13 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
         buildCreateSolanaSessionInstruction({ programAddress: cfg.programId, vault, owner: scope.owner, session,
           perTrade: BigInt(limits.perTradeUsdg), daily: BigInt(limits.dailyUsdg), perTradeWsol: sell.perTradeWsol, dailyWsol: sell.dailyWsol,
           maxOps: limits.maxOpsPerDay, expiresAt: BigInt(Math.floor(limits.expiresAtMs / 1000)) }));
+      const [vaultCash, vaultWsol, ownerCash, ownerWsol] = await Promise.all([deriveSolanaAta(vault, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM),
+        deriveSolanaAta(vault, SOLANA_WRAPPED_SOL_MINT, SOLANA_CLASSIC_TOKEN_PROGRAM), deriveSolanaAta(scope.owner, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM),
+        deriveSolanaAta(scope.owner, SOLANA_WRAPPED_SOL_MINT, SOLANA_CLASSIC_TOKEN_PROGRAM)]);
       return prepareOwner(s, instructions, { kind: "session", programId: cfg.programId, vault, session, limits,
-        priorVaultExisted: prior !== null, priorSequence: prior?.seq.toString() ?? "0", priorSessionEpoch: prior?.sessionEpoch.toString() ?? "0" });
+        priorVaultExisted: prior !== null, priorSequence: prior?.seq.toString() ?? "0", priorSessionEpoch: prior?.sessionEpoch.toString() ?? "0" },
+      [{ address: vault, size: SOLANA_VAULT_ACCOUNT_SIZE }, { address: vaultCash, size: "usdg" }, { address: vaultWsol, size: CLASSIC_TOKEN_ACCOUNT_SIZE },
+        { address: ownerCash, size: "usdg" }, { address: ownerWsol, size: CLASSIC_TOKEN_ACCOUNT_SIZE }]);
     },
     submitSetup: (scope: SolanaAccountScope, input: { signedTransactionBase64: string }) => submitOwner(scope, input, "session"),
     async activateLive(scope: SolanaAccountScope, input: { signature: string; sessionSecretKey: string }) {
@@ -603,7 +646,7 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       const s = await store(scope), cfg = config();
       if (input.action !== "revoke") await reconcile(s);
       await verifyDeployment(cfg);
-      const { vault, state } = await readSolanaVaultState(rpc(), cfg.programId, scope.owner), instructions: Instruction[] = [];
+      const { vault, state } = await readSolanaVaultState(rpc(), cfg.programId, scope.owner), instructions: Instruction[] = [], creates: OwnerCreate[] = [];
       if (input.action === "revoke") instructions.push(buildRevokeSolanaSessionsInstruction({ programAddress: cfg.programId, vault, owner: scope.owner }));
       else if (input.action === "resume-buys") instructions.push(buildSetSolanaBreakerInstruction({ programAddress: cfg.programId, vault, authority: scope.owner, paused: false }));
       else if (input.action === "withdraw" && input.mint && input.amountRaw) {
@@ -618,15 +661,17 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
           const available = input.mint === SOLANA_USDG_MINT ? BigInt(book.cashRaw) : BigInt(book.wsolRaw) + solanaQuarantinedWsol(book);
           if (amount > available) fail("The withdrawal exceeds the reconciled vault balance.");
         }
+        const ownerToken = await deriveSolanaAta(scope.owner, input.mint, program);
+        creates.push({ address: ownerToken, size: input.mint === SOLANA_USDG_MINT ? "usdg" : CLASSIC_TOKEN_ACCOUNT_SIZE });
         instructions.push(await createAta(scope.owner, scope.owner, input.mint), buildWithdrawSolanaVaultInstruction({ programAddress: cfg.programId, vault, owner: scope.owner,
-          mint: input.mint, tokenProgram: program, vaultToken: await deriveSolanaAta(vault, input.mint, program), ownerToken: await deriveSolanaAta(scope.owner, input.mint, program), amount }));
+          mint: input.mint, tokenProgram: program, vaultToken: await deriveSolanaAta(vault, input.mint, program), ownerToken, amount }));
       } else fail("Choose a supported owner action and a positive withdrawal amount.");
       // Owner recovery remains available with expired/revoked worker permission.
       const limits = { perTradeUsdg: state.perTrade.toString(), dailyUsdg: state.daily.toString(), maxOpsPerDay: state.maxOps,
         maxDrawdownBps: 1, expiresAtMs: Number(state.expiresAt * 1000n) };
       return prepareOwner(s, instructions, { kind: input.action, programId: cfg.programId, vault, session: state.session, limits,
         priorVaultExisted: true, priorSequence: state.seq.toString(), priorSessionEpoch: state.sessionEpoch.toString(),
-        ...(input.action === "withdraw" ? { mint: input.mint, amountRaw: input.amountRaw } : {}) });
+        ...(input.action === "withdraw" ? { mint: input.mint, amountRaw: input.amountRaw } : {}) }, creates);
     },
     submitOwnerAction: (scope: SolanaAccountScope, input: { signedTransactionBase64: string }) => submitOwner(scope, input, "owner"),
   };
