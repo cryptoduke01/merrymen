@@ -531,11 +531,17 @@ export function createSolanaExecutor(options: SolanaExecutorOptions) {
         // block an exit, so the swap then pays the configured minimum.
         let recent = minPrice;
         try { recent = await readSolanaPriorityFee(rpc, writable, { minimum: minPrice, maximum: maxPrice }); } catch { /* Minimum price. */ }
-        const transaction = compile(units, recent > affordable ? affordable : recent);
+        const unitPrice = recent > affordable ? affordable : recent;
+        const transaction = compile(units, unitPrice);
         const feeResult = context(await rpc("getFeeForMessage", [Buffer.from(transaction.messageBytes).toString("base64"),
           { commitment: "confirmed", minContextSlot: slot }]), slot);
-        const fee = BigInt(integer(feeResult.value));
-        if (fee < 10_000n || fee + snapshot.rent > cap || snapshot.payerBalance < fee + snapshot.rent) return fail("fee-cap");
+        const quoted = BigInt(integer(feeResult.value));
+        // The runtime charges both signatures plus ceil(price * limit / 1e6). Never
+        // reserve less, even from a provider that leaves the priority fee out:
+        // a receipt above the reservation could never be settled.
+        const charged = SIGNATURE_FEES + (unitPrice * BigInt(units) + 999_999n) / 1_000_000n;
+        const fee = quoted > charged ? quoted : charged;
+        if (quoted < 10_000n || fee + snapshot.rent > cap || snapshot.payerBalance < fee + snapshot.rent) return fail("fee-cap");
         await simulate(transaction); // Recheck the exact message that will be signed.
         const compiled = getCompiledTransactionMessageDecoder().decode(transaction.messageBytes);
         if (compiled.version !== 0) return fail();

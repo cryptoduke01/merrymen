@@ -668,6 +668,9 @@ test("swaps pay a bounded priority fee from recent fees on the accounts they wri
     const pending = await createSolanaExecutor(f.options).execute(f.intent);
     const label = `fees=${item.fees} min=${item.min} max=${item.max} maxFee=${item.maxFee} error=${item.error}`;
     assert.deepEqual(computeBudget(pending.submission), { units: 240_000, price: item.price }, label);
+    // The fixture's getFeeForMessage reports only the 10,000 signature fee; the
+    // reservation still covers what the runtime will charge.
+    assert.equal(pending.submission.feeLamports, (10_000n + (item.price * 240_000n + 999_999n) / 1_000_000n).toString(), label);
     assert.ok(BigInt(pending.submission.feeLamports) + BigInt(pending.submission.rentLamports) <= BigInt(pending.submission.maxFeeLamports));
     const accounts = f.priorityReads[0] as string[];
     for (const writable of [f.intent.vault, f.input, f.output, f.temp, f.feePayer, ...f.route.accounts.filter(meta => meta.isWritable).map(meta => meta.address)]) {
