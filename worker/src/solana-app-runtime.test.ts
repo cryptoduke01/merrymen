@@ -16,15 +16,16 @@ import type { SolanaPaperMarket } from "./solana-paper-service";
 import { ensureSolanaTradingSchema, SolanaTradingStore } from "./solana-trading-store";
 
 const TENANT = "0x1111111111111111111111111111111111111111";
-const PROGRAM = SOLANA_VAULT_LOCAL_TEST_PROGRAM, LOADER = "BPFLoaderUpgradeab1e11111111111111111111111";
 const key = (n: number) => getBase58Decoder().decode(new Uint8Array(32).fill(n));
+// A production-style program id: the runtimes below run every live deployment check.
+const PROGRAM = key(77), LOADER = "BPFLoaderUpgradeab1e11111111111111111111111";
 const keyBytes = (value: string) => Buffer.from(getBase58Encoder().encode(value));
 const limits = { perTradeUsdg: "10000000", dailyUsdg: "50000000", maxOpsPerDay: 10, maxDrawdownBps: 2000, expiresAtMs: 4_600_000,
   perTradeWsol: "100000000", dailyWsol: "500000000" };
 function account(data: Buffer, owner = PROGRAM, executable = false) {
   return { owner, executable, lamports: 100_000_000, data: [data.toString("base64"), "base64"], space: data.length };
 }
-async function fixture() {
+async function fixture(options: { declared?: string } = {}) {
   const raw = new DatabaseSync(":memory:"), db = wrapSqlite(raw), clock = { now: 1_000_000 };
   const ownerKeys = await createKeyPairFromPrivateKeyBytes(new Uint8Array(32).fill(21));
   const sessionSeed = Buffer.alloc(32, 22), sessionKeys = await createKeyPairFromPrivateKeyBytes(sessionSeed);
@@ -33,7 +34,8 @@ async function fixture() {
   const bindings = new SqlSolanaBindingStore(async () => db, "sqlite", () => clock.now);
   await bindings.bind(TENANT, "did:privy:owner", owner);
   await bindings.settings(TENANT, owner, 0, "paper", limits);
-  const dataAddress = key(41), binary = Buffer.from("runtime-tested-binary"), program = Buffer.alloc(36), programData = Buffer.alloc(45 + binary.length);
+  // The binary declares PROGRAM: declare_id! embeds its 32 bytes.
+  const dataAddress = key(41), binary = Buffer.concat([Buffer.from("runtime-tested-binary"), keyBytes(options.declared ?? PROGRAM)]), program = Buffer.alloc(36), programData = Buffer.alloc(45 + binary.length);
   program.writeUInt32LE(2); keyBytes(dataAddress).copy(program, 4); programData.writeUInt32LE(3); binary.copy(programData, 45);
   const controls = { initialized: false, finalized: false, failed: false, malformed: false, sends: 0, signed: "", signature: "", failSend: true, height: 4900, sequence: 0n, epoch: 1n,
     cash: 0n, wsol: 0n };
@@ -88,7 +90,9 @@ async function fixture() {
   };
   const env = { MERRYMEN_SOLANA_VAULT_PROGRAM: PROGRAM, MERRYMEN_SOLANA_VAULT_SHA256: createHash("sha256").update(binary).digest("hex"),
     MERRYMEN_STORE_DEK: Buffer.alloc(32, 30).toString("base64"), MERRYMEN_SOLANA_FEE_PAYER_SEED: Buffer.alloc(32, 31).toString("base64"), MERRYMEN_JUPITER_API_KEY: "fixture" };
-  const app = createSolanaAppRuntime({ db, rpc, market, env, now: () => clock.now });
+  const runtime = (overrides: Partial<Parameters<typeof createSolanaAppRuntime>[0]> = {}) =>
+    createSolanaAppRuntime({ db, rpc, market, env, now: () => clock.now, localTestDeployment: false, ...overrides });
+  const app = runtime();
   const sign = async (wire: string) => getBase64EncodedWireTransaction(await signTransaction([ownerKeys], getTransactionDecoder().decode(Buffer.from(wire, "base64"))));
   const live = async () => { const binding = (await bindings.get(TENANT))!; await bindings.settings(TENANT, owner, binding.revision, "live", limits); };
   const trade = { kind: "spl-swap", chain: CHAINS.solana, mode: "paper", requestId: "runtime-test", inputMint: SOLANA_USDG_MINT, outputMint: SOLANA_WRAPPED_SOL_MINT, amountRaw: "1000000", slippageBps: 50 };
@@ -99,7 +103,7 @@ async function fixture() {
     await db.prepare("INSERT INTO solana_runtime_sessions(tenant,owner,record_json,sealed_seed) VALUES(?,?,?,?)").run(TENANT, owner, JSON.stringify(record),
       sealSecret(`solana-session/v1 ${TENANT} ${owner} ${PROGRAM} ${vault} ${session} ${record.sessionEpoch}\n` + sessionSeed.toString("base64"), Buffer.alloc(32, 30)));
   };
-  return { raw, db, clock, scope, owner, session, sessionSeed, controls, bindings, app, sign, live, trade, env, rpc, market, registered };
+  return { raw, db, clock, scope, owner, session, sessionSeed, controls, bindings, app, runtime, sign, live, trade, env, rpc, market, registered, programData, dataAddress };
 }
 
 test("authenticated paper execution is durable and never calls transaction submission", async () => {
@@ -120,7 +124,7 @@ test("live configuration failure never falls back to a paper fill", async () => 
   try {
     await f.app.setupPaper(f.scope, { initialCashRaw: "100000000", limits });
     await f.live();
-    const app = createSolanaAppRuntime({ db: f.db, rpc: f.rpc, market: f.market, env: {}, now: () => f.clock.now });
+    const app = f.runtime({ env: {} });
     await assert.rejects(app.trade(f.scope, { mode: "live", intent: { ...f.trade, mode: "live" } }), /immutable Solana vault/);
     const book = await new SolanaTradingStore(f.db, f.scope).paper().get(f.owner);
     assert.equal(book!.cashRaw, "100000000"); assert.equal(book!.trades.length, 0); assert.equal(f.controls.sends, 0);
@@ -135,7 +139,7 @@ test("owner setup persists exact signed bytes before send and survives a lost re
     const signedTransactionBase64 = await f.sign(setup.transactionBase64);
     const first = await f.app.submitSetup(f.scope, { signedTransactionBase64 });
     assert.equal(first.status, "pending"); assert.equal(f.controls.sends, 1);
-    const restarted = createSolanaAppRuntime({ db: f.db, rpc: f.rpc, market: f.market, env: f.env, now: () => f.clock.now });
+    const restarted = f.runtime();
     assert.deepEqual(await restarted.submitSetup(f.scope, { signedTransactionBase64 }), first); assert.equal(f.controls.sends, 1);
     f.controls.initialized = true; f.controls.finalized = true;
     await assert.rejects(restarted.activateLive(f.scope, { signature: first.signature, sessionSecretKey: Buffer.alloc(32, 99).toString("base64") }), /does not match/);
@@ -336,4 +340,40 @@ test("a live binding saved before SOL sell limits existed is shown as not ready,
     assert.equal(status.live.ready, false); assert.match(status.live.blockers.join(" "), /SOL sell limits/);
     await assert.rejects(f.app.prepareLive(f.scope, { limits: unbounded, sessionPublicKey: f.session }), /SOL sell limits/);
   } finally { f.raw.close(); }
+});
+
+test("the local test program id is never accepted for live trading (audit GAP4-3)", async () => {
+  const f = await fixture();
+  try {
+    await f.live();
+    const app = f.runtime({ env: { ...f.env, MERRYMEN_SOLANA_VAULT_PROGRAM: SOLANA_VAULT_LOCAL_TEST_PROGRAM } });
+    const status = await app.status(f.scope);
+    assert.equal(status.live.ready, false); assert.match(status.live.blockers.join(" "), /local test id/);
+    await assert.rejects(app.prepareLive(f.scope, { limits, sessionPublicKey: f.session }), /local test id/);
+    await assert.rejects(app.prepareOwnerAction(f.scope, { action: "revoke" }), /local test id/);
+    // Only a harness that asks for the local build accepts its id.
+    const harness = f.runtime({ env: { ...f.env, MERRYMEN_SOLANA_VAULT_PROGRAM: SOLANA_VAULT_LOCAL_TEST_PROGRAM }, localTestDeployment: true });
+    assert.doesNotMatch((await harness.status(f.scope)).live.blockers.join(" "), /local test id/);
+    assert.equal(f.controls.sends, 0);
+  } finally { f.raw.close(); }
+});
+
+test("an audited binary built for another program id is refused before any owner transaction (audit GAP4-3)", async () => {
+  // Immutable and hash-matching, but its declare_id is the local test id.
+  const f = await fixture({ declared: SOLANA_VAULT_LOCAL_TEST_PROGRAM });
+  try {
+    await f.live(); f.controls.initialized = true;
+    const status = await f.app.status(f.scope);
+    assert.equal(status.live.ready, false); assert.match(status.live.blockers.join(" "), /different program id/);
+    await assert.rejects(f.app.prepareLive(f.scope, { limits, sessionPublicKey: f.session }), /different program id/);
+    await assert.rejects(f.app.prepareOwnerAction(f.scope, { action: "revoke" }), /different program id/);
+    assert.equal(await new SolanaTradingStore(f.db, f.scope).setup(), null, "nothing was prepared for the owner to sign");
+  } finally { f.raw.close(); }
+  // The same deployment check passes for the build that declares the configured id.
+  const g = await fixture();
+  try {
+    await g.live();
+    assert.doesNotMatch((await g.app.status(g.scope)).live.blockers.join(" "), /program id/);
+    await g.app.prepareLive(g.scope, { limits, sessionPublicKey: g.session });
+  } finally { g.raw.close(); }
 });

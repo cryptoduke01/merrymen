@@ -6,19 +6,21 @@ import {
   setTransactionMessageLifetimeUsingBlockhash, type Blockhash, type Instruction,
 } from "@solana/kit";
 import { ed25519 } from "@noble/curves/ed25519";
+import { createHash } from "node:crypto";
 import { CHAINS, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM, base58Decode } from "../../packages/core/src/ids";
 import { parseSolanaRawAmount, parseSolanaSwapIntent, requireSolanaLiveSellLimits, validateSolanaPaperLimits, validateSolanaQuote,
   type SolanaPaperLimits, type SolanaSwapIntent } from "../../packages/core/src/solana";
 import {
   buildCreateSolanaSessionInstruction, buildInitializeSolanaVaultInstruction, buildRevokeSolanaSessionsInstruction,
   buildWithdrawSolanaVaultInstruction, buildSetSolanaBreakerInstruction, decodeSolanaVaultAccount, deriveSolanaAta, deriveSolanaVaultAddress,
-  SOLANA_ASSOCIATED_TOKEN_PROGRAM, SOLANA_CLASSIC_TOKEN_PROGRAM, SOLANA_SYSTEM_PROGRAM, SOLANA_VAULT_ACCOUNT_SIZE, SOLANA_WRAPPED_SOL_MINT,
+  SOLANA_ASSOCIATED_TOKEN_PROGRAM, SOLANA_CLASSIC_TOKEN_PROGRAM, SOLANA_SYSTEM_PROGRAM, SOLANA_VAULT_ACCOUNT_SIZE, SOLANA_VAULT_LOCAL_TEST_PROGRAM,
+  SOLANA_WRAPPED_SOL_MINT,
 } from "../../packages/core/src/solana-live";
 import type { Db } from "./db";
 import { createSolanaExecutor, parseSolanaLiveIntent, readSolanaVaultBalances, readSolanaVaultState,
   reconcileSolanaSubmission, SolanaExecutionError, verifySolanaVaultDeployment, type SolanaLiveRecord } from "./solana-executor";
 import { createSolanaLiveMarket } from "./solana-live-market";
-import { createSolanaLiveRpc, type SolanaLiveRpc } from "./solana-live-rpc";
+import { createSolanaLiveRpc, type SolanaLiveRead, type SolanaLiveRpc } from "./solana-live-rpc";
 import { createSolanaMarket } from "./solana-market";
 import { createSolanaPaperService, type SolanaPaperMarket } from "./solana-paper-service";
 import { readSolanaReferencePrice, solanaReferenceBound, solanaReferenceNotional, solanaReferenceToleranceBps,
@@ -74,12 +76,68 @@ async function createAta(owner: string, authority: string, mint: string): Promis
     { address: address(SOLANA_SYSTEM_PROGRAM), role: 0 }, { address: address(program), role: 0 },
   ] };
 }
+const UPGRADEABLE_LOADER = "BPFLoaderUpgradeab1e11111111111111111111111";
+const PROGRAM_DATA_SLICE = 98_304;
+/** (program id, binary hash) pairs whose bytes are proven to declare that id. A fact about the bytes, kept for the process. */
+const declaredProgramIds = new Set<string>();
+/**
+ * The audited binary must be built for the configured program id. declare_id!
+ * embeds the id's 32 bytes in the executable region; a build for any other id
+ * (the local test id, say) fails every instruction with
+ * DeclaredProgramIdMismatch, and an immutable deployment can never be fixed.
+ * The region read here is hashed again, so a provider cannot answer with other
+ * bytes than the ones verifySolanaVaultDeployment checked on every provider.
+ */
+async function requireDeclaredProgramId(rpc: SolanaLiveRpc, programId: string, binarySha256: string): Promise<void> {
+  const cacheKey = `${programId}\n${binarySha256}`;
+  if (declaredProgramIds.has(cacheKey)) return;
+  const id = base58Decode(programId);
+  if (!id || id.length !== 32) fail("The configured Solana vault program is invalid.", "configuration");
+  const refused = (): never => fail("The configured Solana vault program could not be read.", "configuration");
+  const accountAt = async (read: SolanaLiveRead, key: string, slot: number, dataSlice?: { offset: number; length: number }) => {
+    const raw = await read("getAccountInfo", [key, { encoding: "base64", commitment: "confirmed", minContextSlot: slot, ...(dataSlice ? { dataSlice } : {}) }]);
+    if (!object(raw) || !object(raw.context) || typeof raw.context.slot !== "number" || raw.context.slot < slot || !object(raw.value)) return refused();
+    const value = raw.value;
+    if (value.owner !== UPGRADEABLE_LOADER || !Array.isArray(value.data) || value.data[1] !== "base64" || typeof value.data[0] !== "string") return refused();
+    const data = Buffer.from(value.data[0], "base64");
+    if (data.toString("base64") !== value.data[0]) return refused();
+    return { data, executable: value.executable, space: value.space };
+  };
+  const region = await rpc.read(async read => {
+    const slot = await read("getSlot", [{ commitment: "confirmed" }]);
+    if (typeof slot !== "number" || !Number.isSafeInteger(slot) || slot < 1) return refused();
+    const program = await accountAt(read, programId, slot);
+    if (program.executable !== true || program.data.length !== 36 || program.data.readUInt32LE(0) !== 2) return refused();
+    const dataAddress = getBase58Decoder().decode(program.data.subarray(4));
+    const header = await accountAt(read, dataAddress, slot, { offset: 0, length: 45 });
+    const space = header.space;
+    if (typeof space !== "number" || !Number.isSafeInteger(space) || space <= 45 || space > 2_097_152) return refused();
+    const chunks: Buffer[] = [];
+    for (let offset = 45; offset < space; offset += PROGRAM_DATA_SLICE) {
+      const length = Math.min(PROGRAM_DATA_SLICE, space - offset), chunk = await accountAt(read, dataAddress, slot, { offset, length });
+      if (chunk.space !== space || chunk.data.length !== length) return refused();
+      chunks.push(chunk.data);
+    }
+    return Buffer.concat(chunks);
+  });
+  if (createHash("sha256").update(region).digest("hex") !== binarySha256) refused();
+  if (region.indexOf(Buffer.from(id)) < 0) fail("The configured Solana vault binary is built for a different program id. Deploy the build whose declare_id is the configured program.", "configuration");
+  declaredProgramIds.add(cacheKey);
+}
 export interface SolanaAppRuntimeOptions {
   db?: Db; env?: Readonly<Record<string, string | undefined>>; now?: () => number;
   rpc?: SolanaLiveRpc; market?: SolanaPaperMarket;
+  /**
+   * Test harnesses only: accept the local test program id and a binary that does
+   * not embed the configured id. It defaults to true only when a test transport
+   * is injected (`rpc`), which production never does; getSolanaAppRuntime()
+   * always runs the full checks.
+   */
+  localTestDeployment?: boolean;
 }
 export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
   const env = options.env ?? process.env, now = options.now ?? Date.now;
+  const localTest = options.localTestDeployment ?? options.rpc !== undefined;
   const rpc = () => options.rpc ?? createSolanaLiveRpc({ env });
   const market = () => options.market ?? createSolanaMarket({ env, now });
   async function store(scope: SolanaAccountScope, autonomousRevision?: number, signal?: AbortSignal) {
@@ -91,7 +149,15 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
     const programId = env.MERRYMEN_SOLANA_VAULT_PROGRAM, hash = env.MERRYMEN_SOLANA_VAULT_SHA256;
     if (!programId || !hash || !/^[a-f0-9]{64}$/.test(hash)) fail("An audited immutable Solana vault deployment and its binary hash must be configured.", "configuration");
     try { address(programId); } catch { fail("The configured Solana vault program is invalid.", "configuration"); }
+    // The local test build's id is never a live deployment.
+    if (programId === SOLANA_VAULT_LOCAL_TEST_PROGRAM && !localTest) fail("The configured Solana vault program is the local test id, which is never used for live trading.", "configuration");
     return { programId, hash };
+  }
+  /** The immutable audited deployment on every provider, built for the configured id. */
+  async function verifyDeployment(cfg: { programId: string; hash: string }) {
+    const live = rpc(), deployment = await verifySolanaVaultDeployment(live, cfg.programId, cfg.hash);
+    if (!localTest) await requireDeclaredProgramId(live, cfg.programId, cfg.hash);
+    return deployment;
   }
   function dek() { return seed(env.MERRYMEN_STORE_DEK, "Configure a 32-byte encryption key before registering live trading."); }
   async function payer() {
@@ -217,7 +283,7 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
         const cfg = config(); programId = cfg.programId; vault = await deriveSolanaVaultAddress(programId, scope.owner);
         dek(); const feePayer = await getAddressFromPublicKey((await payer()).publicKey);
         if ([scope.owner, vault, session?.session].includes(feePayer)) fail("The network fee payer must be separate from the owner, vault and session.", "configuration");
-        await verifySolanaVaultDeployment(rpc(), cfg.programId, cfg.hash);
+        await verifyDeployment(cfg);
         const feeBudget = parseSolanaRawAmount(env.MERRYMEN_SOLANA_MAX_FEE_LAMPORTS ?? "5000000");
         await rpc().read(async read => {
           const account = await read("getAccountInfo", [feePayer, { encoding: "base64", commitment: "confirmed" }]);
@@ -331,7 +397,7 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       let sell: ReturnType<typeof requireSolanaLiveSellLimits>;
       try { sell = requireSolanaLiveSellLimits(limits); } catch { return fail("Save per-trade and daily SOL sell limits before registering live trading.", "permission"); }
       if (new Set([scope.owner, session, vault, feePayer]).size !== 4) fail("Owner, session, vault and fee payer must be separate accounts.");
-      const deployment = await verifySolanaVaultDeployment(rpc(), cfg.programId, cfg.hash);
+      const deployment = await verifyDeployment(cfg);
       const prior = await rpc().read(async read => {
         const found = await read("getAccountInfo", [vault, { encoding: "base64", commitment: "confirmed", minContextSlot: deployment.slot }]);
         if (!object(found) || !object(found.context) || integer(found.context.slot) < deployment.slot || !Object.hasOwn(found, "value")) fail("The vault account could not be read.");
@@ -359,7 +425,7 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       if (!setup || (setup.kind ?? "session") !== "session" || setup.signature !== input.signature || setup.session !== session || setup.programId !== cfg.programId) fail("The signed permission does not match this session key.");
       const status = await ownerStatus(s, setup);
       if (status.status !== "finalized") fail(status.status === "failed" ? "The permission transaction failed. Prepare a new permission." : "The permission is awaiting final confirmation.", "pending");
-      await verifySolanaVaultDeployment(rpc(), cfg.programId, cfg.hash);
+      await verifyDeployment(cfg);
       const live = await readSolanaVaultState(rpc(), cfg.programId, scope.owner);
       if (live.vault !== setup.vault || live.state.session !== session || live.state.perTrade !== BigInt(setup.limits.perTradeUsdg)
         || live.state.daily !== BigInt(setup.limits.dailyUsdg) || live.state.maxOps !== setup.limits.maxOpsPerDay
@@ -372,7 +438,7 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
     async prepareOwnerAction(scope: SolanaAccountScope, input: { action: "revoke" | "withdraw" | "resume-buys"; mint?: string; amountRaw?: string }) {
       const s = await store(scope), cfg = config();
       if (input.action !== "revoke") await reconcile(s);
-      await verifySolanaVaultDeployment(rpc(), cfg.programId, cfg.hash);
+      await verifyDeployment(cfg);
       const { vault, state } = await readSolanaVaultState(rpc(), cfg.programId, scope.owner), instructions: Instruction[] = [];
       if (input.action === "revoke") instructions.push(buildRevokeSolanaSessionsInstruction({ programAddress: cfg.programId, vault, owner: scope.owner }));
       else if (input.action === "resume-buys") instructions.push(buildSetSolanaBreakerInstruction({ programAddress: cfg.programId, vault, authority: scope.owner, paused: false }));
@@ -402,4 +468,4 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
   };
 }
 let runtime: ReturnType<typeof createSolanaAppRuntime> | undefined;
-export function getSolanaAppRuntime() { return runtime ??= createSolanaAppRuntime(); }
+export function getSolanaAppRuntime() { return runtime ??= createSolanaAppRuntime({ localTestDeployment: false }); }
