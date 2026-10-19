@@ -511,7 +511,9 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
             if (payerAccount && (payerAccount.owner !== SOLANA_SYSTEM_PROGRAM || payerAccount.executable || payerAccount.data.length))
               fail("The separate network fee payer must be a plain system account.", "configuration");
             // What the executor needs for one swap: both signatures and the rent of the
-            // temporary input account it opens (and closes, refunding the payer).
+            // temporary input account it opens (and closes, refunding the payer). It
+            // pays a priority fee only from what the payer holds beyond that, at no
+            // less than MERRYMEN_SOLANA_COMPUTE_UNIT_PRICE_MICROLAMPORTS (default 0).
             return { lamports: payerAccount?.lamports ?? 0n,
               exitMinimum: await rentFor(read, CLASSIC_TOKEN_ACCOUNT_SIZE) + SWAP_SIGNATURE_FEES,
               buyMinimum: await rentFor(read, cashAccount ? cashAccount.data.length : TOKEN_2022_ACCOUNT_SIZE_BOUND) + SWAP_SIGNATURE_FEES,

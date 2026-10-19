@@ -521,8 +521,12 @@ export function createSolanaExecutor(options: SolanaExecutorOptions) {
         const units = Math.min(1_400_000, Math.ceil(await simulate(compile(1_400_000, 0n)) * 1.2));
         // A bounded priority fee: recent prices on the accounts this swap writes,
         // between the configured minimum and maximum, and never more than the
-        // fee budget left after the temporary account's rent.
-        const budget = cap - snapshot.rent - SIGNATURE_FEES;
+        // fee budget left after the temporary account's rent. The budget is also
+        // what the shared fee payer holds: a payer that can fund the swap only at
+        // a lower price pays that price, never a refusal while status shows exits
+        // as available (it gates on rent and signatures alone).
+        const funds = snapshot.payerBalance < cap ? snapshot.payerBalance : cap;
+        const budget = funds - snapshot.rent - SIGNATURE_FEES;
         const affordable = budget > 0n ? budget * 1_000_000n / BigInt(units) : 0n;
         if (affordable < minPrice) return fail("fee-cap");
         const writable = [intent.vault, inputTokenAccount, outputTokenAccount, snapshot.tempInput, feePayer,

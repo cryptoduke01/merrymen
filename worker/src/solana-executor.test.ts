@@ -68,6 +68,8 @@ async function fixture() {
     referencePrice: 50_000_000_000n, referenceAgeMs: 0, forgeFloor: false,
     // Recent prioritization fees (micro-lamports per CU) the RPC reports for the swap's writable accounts.
     priorityFees: [] as number[], priorityError: false,
+    // What the shared network fee payer holds.
+    payerLamports: 100_000_000,
     // The vault's finalized sequence after the receipt slot, and the second provider's own view.
     vaultSeqAfter: 1n, fallback: null as SolanaLiveRead | null };
   let record: SolanaLiveRecord | null = null;
@@ -141,7 +143,7 @@ async function fixture() {
         if (keys[0] === vault) {
           const accounts = [rpcAccount(state(owner, session, 0n, { paused: controls.paused }), PROGRAM),
             rpcAccount(token(SOLANA_USDG_MINT, vault, CASH), TOKEN_2022_PROGRAM), rpcAccount(token(SOLANA_WRAPPED_SOL_MINT, vault, 0n), SOLANA_CLASSIC_TOKEN_PROGRAM),
-            rpcAccount(Buffer.alloc(0), SYSTEM)];
+            rpcAccount(Buffer.alloc(0), SYSTEM, false, controls.payerLamports)];
           if (keys.length === 5) { assert.equal(keys[4], ownerRefund); accounts.push(refundAccount()!); }
           return response(accounts);
         }
@@ -683,4 +685,38 @@ test("swaps pay a bounded priority fee from recent fees on the accounts they wri
   const g = await fixture(); g.options.computeUnitPriceMicroLamports = "300000"; g.options.maxFeeLamports = "2100000";
   await assert.rejects(createSolanaExecutor(g.options).execute(g.intent), /fee-cap/);
   assert.ok(!g.calls.includes("persist"));
+});
+
+test("a fee payer that can fund a swap only at a lower priority price pays that price instead of refusing it (status gates exits on rent and signatures)", async () => {
+  // What status() calls one swap's minimum for these fixture rents: the temporary account's rent and both signatures.
+  const RENT = 2_039_280n, minimum = RENT + 10_000n;
+  // Congestion: recent fees of 1,000,000 micro-lamports per CU would cost 240,000 lamports at 240,000 units.
+  const cases: Array<{ payer: bigint; min?: string; price: bigint }> = [
+    // 100,000 lamports above the minimum: 416,666 per unit is all it can fund.
+    { payer: minimum + 100_000n, price: 416_666n },
+    // Exactly the minimum: the swap still goes, with no priority fee.
+    { payer: minimum, price: 0n },
+    // Plenty: the recent price, as before.
+    { payer: 100_000_000n, price: 1_000_000n },
+    // A configured minimum the payer can carry: the clamp never goes below it.
+    { payer: minimum + 100_000n, min: "400000", price: 416_666n },
+  ];
+  for (const item of cases) {
+    const f = await fixture(); f.controls.priorityFees = [1_000_000]; f.controls.payerLamports = Number(item.payer);
+    if (item.min) f.options.computeUnitPriceMicroLamports = item.min;
+    const label = `payer=${item.payer} min=${item.min}`;
+    const pending = await createSolanaExecutor(f.options).execute(f.intent);
+    assert.deepEqual(computeBudget(pending.submission), { units: 240_000, price: item.price }, label);
+    const fee = BigInt(pending.submission.feeLamports), rent = BigInt(pending.submission.rentLamports);
+    assert.equal(rent, RENT, label);
+    assert.ok(fee + rent <= item.payer, `${label}: the payer funds what it signs`);
+    assert.ok(fee + rent <= BigInt(pending.submission.maxFeeLamports), label);
+  }
+  // Below the minimum, or a configured minimum price it cannot fund: refused before anything is signed.
+  for (const item of [{ payer: minimum - 1n }, { payer: minimum + 100_000n, min: "500000" }]) {
+    const f = await fixture(); f.controls.priorityFees = []; f.controls.payerLamports = Number(item.payer);
+    if (item.min) f.options.computeUnitPriceMicroLamports = item.min;
+    await assert.rejects(createSolanaExecutor(f.options).execute(f.intent), /fee-cap/, `payer=${item.payer} min=${item.min}`);
+    assert.ok(!f.calls.includes("persist"));
+  }
 });
