@@ -217,6 +217,9 @@ struct Fixture {
     /// Makes every session transaction unique, so a resent identical instruction is
     /// judged by the program rather than refused by the runtime as already processed.
     nonce: u32,
+    /// The fixture's session expiry: the longest the program grants from the start
+    /// clock (create_session refuses one more than 7 days ahead).
+    expiry: i64,
 }
 impl Fixture {
     async fn new() -> Self {
@@ -264,6 +267,8 @@ impl Fixture {
             token(anchor_spl::token::ID, WSOL, owner.pubkey(), 0),
         );
         let ctx = pt.start_with_context().await;
+        let clock: Clock = ctx.banks_client.get_sysvar().await.unwrap();
+        let expiry = clock.unix_timestamp + vault::risk::MAX_SESSION;
         let mut f = Self {
             ctx,
             owner,
@@ -277,6 +282,7 @@ impl Fixture {
             last_logs: Vec::new(),
             last_fee: 0,
             nonce: 0,
+            expiry,
         };
         let init = Instruction {
             program_id: vault::ID,
@@ -310,7 +316,7 @@ impl Fixture {
             daily,
             per_trade_wsol,
             daily_wsol,
-            4_000_000_000,
+            self.expiry,
         )
     }
     async fn owner_send(
@@ -636,7 +642,7 @@ impl Fixture {
             150,
             100,
             300,
-            4_000_000_000,
+            self.expiry,
         );
         self.send_as(vec![init, create], &owner).await.unwrap();
         Tenant {
@@ -1592,7 +1598,7 @@ async fn another_tenants_session_owner_or_custody_cannot_touch_this_vault() {
             150,
             100,
             300,
-            4_000_000_000,
+            f.expiry,
         ),
         Instruction {
             program_id: vault::ID,
@@ -1669,6 +1675,99 @@ async fn another_tenants_session_owner_or_custody_cannot_touch_this_vault() {
         (f.balance(f.input).await, f.balance(f.output).await),
         (1000, 0)
     );
+}
+
+#[tokio::test]
+#[ignore = "requires the compiled custody SBF artifact; run contracts/solana/test.sh"]
+async fn create_session_refuses_an_expiry_more_than_seven_days_ahead_and_changes_nothing() {
+    // web-auth F4: the server never prepares a longer session, and the program refuses
+    // one signed anywhere else. The cap runs from the cluster clock at create_session.
+    let mut f = Fixture::new().await;
+    let owner = f.owner.insecure_clone();
+    let now = f.now().await + 3 * 86_400;
+    f.set_time(now).await;
+    let latest = now + vault::risk::MAX_SESSION + vault::risk::SESSION_CLOCK_ALLOWANCE;
+    assert_eq!(latest - now, 7 * 86_400 + 15 * 60);
+    let before = f.state().await;
+    let (vault_key, session_key) = (f.vault, f.session.pubkey());
+    let session_with = |expiry| {
+        create_session_ix(
+            vault_key,
+            owner.pubkey(),
+            session_key,
+            100,
+            150,
+            100,
+            300,
+            expiry,
+        )
+    };
+    for expiry in [latest + 1, now + 30 * 86_400, 4_000_000_000, i64::MAX] {
+        let ix = session_with(expiry);
+        assert!(
+            vault_error(f.send_as(vec![ix], &owner).await, vault::VaultError::RiskLimit),
+            "expiry {expiry}"
+        );
+        // The refused replacement leaves the running session exactly as it was.
+        let state = f.state().await;
+        assert_eq!(
+            (state.session, state.session_epoch, state.expires_at, state.seq),
+            (before.session, before.session_epoch, before.expires_at, before.seq),
+        );
+    }
+    // A fresh vault cannot start with one either: the whole transaction rolls back.
+    let tenant_owner = Keypair::new();
+    let (tenant_vault, _) =
+        Pubkey::find_program_address(&[b"vault", tenant_owner.pubkey().as_ref()], &vault::ID);
+    f.ctx.set_account(
+        &tenant_owner.pubkey(),
+        &account(anchor_lang::system_program::ID, vec![], 100_000_000).into(),
+    );
+    let init = Instruction {
+        program_id: vault::ID,
+        accounts: vault::accounts::InitializeVault {
+            vault: tenant_vault,
+            owner: tenant_owner.pubkey(),
+            system_program: anchor_lang::system_program::ID,
+        }
+        .to_account_metas(None),
+        data: vault::instruction::InitializeVault {}.data(),
+    };
+    let long = create_session_ix(
+        tenant_vault,
+        tenant_owner.pubkey(),
+        Keypair::new().pubkey(),
+        100,
+        150,
+        100,
+        300,
+        latest + 1,
+    );
+    let refused = f.send_as(vec![init, long], &tenant_owner).await;
+    assert!(
+        matches!(
+            refused.map_err(|e| e.unwrap()),
+            Err(solana_sdk::transaction::TransactionError::InstructionError(
+                1,
+                solana_sdk::instruction::InstructionError::Custom(code)
+            )) if code == 6000 + vault::VaultError::RiskLimit as u32
+        ),
+        "a too-long first session must fail with RiskLimit"
+    );
+    assert!(!f.exists(tenant_vault).await);
+    // Exactly at the cap is allowed, and the session is replaced as usual.
+    let ix = session_with(latest);
+    f.send_as(vec![ix], &owner).await.unwrap();
+    let state = f.state().await;
+    assert_eq!(state.expires_at, latest);
+    assert_eq!(state.session_epoch, before.session_epoch + 1);
+    assert_eq!(state.seq, before.seq);
+    // The new session trades, and stops at the expiry it was given.
+    let buy = f.swap_ix(0, state.session_epoch, 0).await;
+    f.swap(buy).await.unwrap();
+    f.set_time(latest).await;
+    let buy = f.swap_ix(1, state.session_epoch, 0).await;
+    assert!(vault_error(f.swap(buy).await, vault::VaultError::RiskLimit));
 }
 
 #[tokio::test]

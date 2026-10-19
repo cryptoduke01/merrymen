@@ -183,6 +183,50 @@ describe("the toolchain pins", () => {
   });
 });
 
+describe("the program's session cap", () => {
+  // web-auth F4: the server grants at most 168 hours (plus clock skew) and the
+  // program refuses a create_session ending later than 7 days plus its clock
+  // allowance. If the two drifted, either the program would accept longer
+  // sessions than the server means to, or refuse ones the server prepared.
+  const risk = readFileSync(join(repo, "contracts/solana/programs/merrymen-vault/src/risk.rs"), "utf8");
+  const core = readFileSync(join(repo, "packages/core/src/solana.ts"), "utf8");
+  /** A product of integer literals and constants already read, as these files write them. */
+  const product = (text, known) => text.split("*").map(t => t.trim()).reduce((n, t) => {
+    if (/^\d[\d_]*$/.test(t)) return n * Number(t.replaceAll("_", ""));
+    assert.ok(Object.hasOwn(known, t), `unknown term ${t}`);
+    return n * known[t];
+  }, 1);
+  const rustConst = (name, known) => {
+    const m = new RegExp(`^pub const ${name}: i64 = ([^;]+);$`, "m").exec(risk);
+    assert.ok(m, `risk.rs has no i64 ${name}`);
+    return product(m[1], known);
+  };
+  const tsConst = name => {
+    const m = new RegExp(`^export const ${name} = ([^;]+);$`, "m").exec(core);
+    assert.ok(m, `solana.ts has no ${name}`);
+    return product(m[1], {});
+  };
+
+  it("is the server's 168 hours, with an allowance wider than the server's clock skew", () => {
+    const DAY = rustConst("DAY", {});
+    assert.equal(DAY, 86_400);
+    const maxSession = rustConst("MAX_SESSION", { DAY });
+    const allowance = rustConst("SESSION_CLOCK_ALLOWANCE", { DAY });
+    assert.equal(maxSession * 1000, tsConst("SOLANA_MAX_PERMISSION_MS"));
+    assert.equal(maxSession, 7 * 86_400);
+    const skewMs = tsConst("SOLANA_PERMISSION_CLOCK_SKEW_MS");
+    assert.ok(allowance * 1000 > skewMs, "a session the server accepts at its skew limit must still fit on-chain");
+    assert.ok(allowance <= 3_600, "the allowance stays small");
+  });
+
+  it("is applied by create_session, not by every trade", () => {
+    const lib = readFileSync(join(repo, "contracts/solana/programs/merrymen-vault/src/lib.rs"), "utf8");
+    const create = /pub fn create_session\([\s\S]*?\n {4}\}\n/.exec(lib)?.[0] ?? "";
+    assert.match(create, /require!\(risk::session\(&limits, now\)\.is_ok\(\), VaultError::RiskLimit\);/);
+    assert.equal((lib.match(/risk::session\(/g) ?? []).length, 1);
+  });
+});
+
 describe("fetch-verified.sh", () => {
   const script = join(here, "fetch-verified.sh");
   // A curl that logs its arguments and "downloads" $PAYLOAD to --output.

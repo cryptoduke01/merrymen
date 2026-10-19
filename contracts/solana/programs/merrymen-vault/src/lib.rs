@@ -69,7 +69,8 @@ pub mod merrymen_vault {
             max_ops,
             expiry: expires_at,
         };
-        require!(risk::limits(&limits, now).is_ok(), VaultError::RiskLimit);
+        // Valid limits and an expiry within risk::MAX_SESSION (plus the clock allowance) of now.
+        require!(risk::session(&limits, now).is_ok(), VaultError::RiskLimit);
         require!(
             session != Pubkey::default() && session != v.owner && session != v.key(),
             VaultError::Authority

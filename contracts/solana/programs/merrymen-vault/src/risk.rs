@@ -1,6 +1,16 @@
 use anchor_lang::prelude::*;
 pub const MAX_OPS: usize = 96;
 pub const DAY: i64 = 86_400;
+/// The longest session an owner can sign: 7 days, the 168 hours the server grants
+/// (packages/core/src/solana.ts SOLANA_MAX_PERMISSION_MS). web-auth F4: the cap
+/// holds on-chain too, so a create_session signed outside Merrymen cannot hand a
+/// hot session key a longer life.
+pub const MAX_SESSION: i64 = 7 * DAY;
+/// How far past MAX_SESSION an expiry may sit. A duration is picked against the
+/// owner's and the server's clocks, not the cluster's; the server allows 5 minutes
+/// of skew (SOLANA_PERMISSION_CLOCK_SKEW_MS) and this leaves 10 more for a cluster
+/// clock running behind.
+pub const SESSION_CLOCK_ALLOWANCE: i64 = 15 * 60;
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug, PartialEq, Eq)]
 pub struct Debit {
     pub timestamp: i64,
@@ -31,6 +41,7 @@ pub enum RiskError {
     WsolDaily,
     Operations,
     Overflow,
+    SessionTooLong,
 }
 pub fn limits(l: &Limits, now: i64) -> std::result::Result<(), RiskError> {
     if l.per_trade == 0
@@ -44,6 +55,19 @@ pub fn limits(l: &Limits, now: i64) -> std::result::Result<(), RiskError> {
     }
     if now < 0 || l.expiry <= now {
         return Err(RiskError::Expired);
+    }
+    Ok(())
+}
+/// The bounds create_session accepts: valid limits, and an expiry no later than
+/// MAX_SESSION plus SESSION_CLOCK_ALLOWANCE after the cluster clock. Only a new
+/// session is held to the cap; a running session is judged by `limits` alone.
+pub fn session(l: &Limits, now: i64) -> std::result::Result<(), RiskError> {
+    limits(l, now)?;
+    let latest = now
+        .checked_add(MAX_SESSION + SESSION_CLOCK_ALLOWANCE)
+        .ok_or(RiskError::Overflow)?;
+    if l.expiry > latest {
+        return Err(RiskError::SessionTooLong);
     }
     Ok(())
 }
@@ -159,6 +183,36 @@ mod tests {
             record(&old, 50, 0, &caps(60, 100, 10, 2000), 11),
             Err(RiskError::Daily)
         );
+    }
+    #[test]
+    fn a_new_session_ends_within_seven_days_and_the_clock_allowance() {
+        let now = 1_800_000_000;
+        let latest = now + 7 * 86_400 + 15 * 60;
+        assert_eq!(session(&caps(5, 100, 1, latest), now), Ok(()));
+        assert_eq!(session(&caps(5, 100, 1, now + 1), now), Ok(()));
+        for expiry in [latest + 1, now + 30 * 86_400, 4_000_000_000, i64::MAX] {
+            assert_eq!(
+                session(&caps(5, 100, 1, expiry), now),
+                Err(RiskError::SessionTooLong),
+                "expiry {expiry}"
+            );
+        }
+        // The cap is measured from the cluster clock when the session is created.
+        assert_eq!(session(&caps(5, 100, 1, latest + 1), now + 1), Ok(()));
+        // The ordinary limits still apply first: an expired or invalid session is refused as before.
+        assert_eq!(session(&caps(5, 100, 1, now), now), Err(RiskError::Expired));
+        assert_eq!(session(&caps(10, 5, 1, now + 1), now), Err(RiskError::InvalidLimits));
+        // A clock near i64::MAX cannot overflow its way past the cap.
+        assert_eq!(
+            session(&caps(5, 100, 1, i64::MAX), i64::MAX - 1),
+            Err(RiskError::Overflow)
+        );
+    }
+    #[test]
+    fn a_running_session_is_not_held_to_the_creation_cap() {
+        // record judges trades by the signed limits only; the cap is create_session's.
+        let l = caps(100, 100, 4, 4_000_000_000);
+        assert_eq!(record(&[], 1, 0, &l, 2).unwrap().len(), 1);
     }
     #[test]
     fn a_session_without_a_wsol_input_bound_is_refused() {
