@@ -4,14 +4,43 @@ import { afterEach, before, beforeEach, test, mock } from "node:test";
 import { fileURLToPath } from "node:url";
 import React, { act } from "react";
 import { ed25519 } from "@noble/curves/ed25519";
+import { address, appendTransactionMessageInstructions, compileTransaction, createTransactionMessage, getBase64EncodedWireTransaction,
+  setTransactionMessageFeePayer, setTransactionMessageLifetimeUsingBlockhash, type Blockhash, type Instruction } from "@solana/kit";
 import { base58Encode, CHAINS, SOLANA_USDG_MINT } from "../../../packages/core/src/ids";
-import { deferred, json, testDom } from "./test-dom";
+import { buildCreateSolanaSessionInstruction, buildInitializeSolanaVaultInstruction, deriveSolanaVaultAddress, SOLANA_VAULT_LOCAL_TEST_PROGRAM } from "../../../packages/core/src/solana-live";
+import { JSDOM } from "jsdom";
 
 const OWNER = "So11111111111111111111111111111111111111112";
 const TENANT = `0x${"11".repeat(20)}`;
 const limits = { perTradeUsdg: "10000000", dailyUsdg: "50000000", maxOpsPerDay: 20, maxDrawdownBps: 2000, expiresAtMs: Date.now() + 3_600_000 };
 const paper = { cashRaw: "1000000000", positions: [] };
+const PROGRAM = SOLANA_VAULT_LOCAL_TEST_PROGRAM;
+/** Saved live limits: 10 USDG a trade, 50 a day, 0.25/1 SOL sold, 7 days. */
+const liveLimits = () => ({ ...limits, perTradeWsol: "250000000", dailyWsol: "1000000000", expiresAtMs: Date.now() + 168 * 3_600_000 });
+/** The registration the server prepares from the saved limits, as real wire bytes. */
+async function permissionTransaction(session: string, signed: ReturnType<typeof liveLimits>, extra: Instruction[] = []) {
+  const vault = await deriveSolanaVaultAddress(PROGRAM, OWNER);
+  const instructions = [buildInitializeSolanaVaultInstruction({ programAddress: PROGRAM, vault, owner: OWNER }),
+    buildCreateSolanaSessionInstruction({ programAddress: PROGRAM, vault, owner: OWNER, session, perTrade: BigInt(signed.perTradeUsdg), daily: BigInt(signed.dailyUsdg),
+      perTradeWsol: BigInt(signed.perTradeWsol), dailyWsol: BigInt(signed.dailyWsol), maxOps: signed.maxOpsPerDay, expiresAt: BigInt(Math.floor(signed.expiresAtMs / 1000)) }), ...extra];
+  const message = setTransactionMessageLifetimeUsingBlockhash({ blockhash: address("11111111111111111111111111111111") as unknown as Blockhash, lastValidBlockHeight: 1n },
+    setTransactionMessageFeePayer(address(OWNER), appendTransactionMessageInstructions(instructions, createTransactionMessage({ version: 0 }))));
+  return { transactionBase64: getBase64EncodedWireTransaction(compileTransaction(message)), vault, programId: PROGRAM, session, expiresAtMs: Date.now() + 60_000 };
+}
+/** Types into the input whose label starts with `label`, the way a person does. */
+async function type(label: string, value: string) {
+  const input = [...ui.container.querySelectorAll("label")].find((item) => item.textContent?.startsWith(label))!.querySelector("input")!;
+  const setter = Object.getOwnPropertyDescriptor(ui.dom.window.HTMLInputElement.prototype, "value")!.set!;
+  await act(async () => { setter.call(input, value); input.dispatchEvent(new ui.dom.window.Event("input", { bubbles: true })); });
+}
+/** Clicks, then lets work outside React's microtasks (WebCrypto for the vault address) finish. */
+async function press(text: string) {
+  await ui.click(text);
+  for (let i = 0; i < 20; i++) await act(async () => { await new Promise((resolve) => setTimeout(resolve, 1)); });
+}
+const field = (label: string) => [...ui.container.querySelectorAll("label")].find((item) => item.textContent?.startsWith(label))!.querySelector("input")!.value;
 let SolanaScreen: typeof import("./SolanaScreen").SolanaScreen;
+let testDom: typeof import("./test-dom").testDom, json: typeof import("./test-dom").json, deferred: typeof import("./test-dom").deferred;
 let ui: ReturnType<typeof testDom>;
 let state: ReturnType<typeof initial>;
 let calls: Array<{ path: string; body: Record<string, unknown> | undefined }>;
@@ -24,7 +53,12 @@ function initial(mode: "paper" | "live" = "paper") {
     runtime: { owner: OWNER, requestedMode: mode, paper: null as typeof paper | null, limits,
       live: { ready: false, blockers: ["Deploy and verify the vault program before enabling live trading."], programId: null as string | null, vault: null, session: null, pending: [] } } };
 }
-before(() => {
+before(async () => {
+  // React DOM checks input-event support when it first loads. Supply a DOM
+  // before importing the harness so typing exercises real React onChange.
+  const boot = new JSDOM("<!doctype html><p></p>", { pretendToBeVisual: true });
+  Object.assign(globalThis as Record<string, unknown>, { window: boot.window, document: boot.window.document });
+  ({ testDom, json, deferred } = await import("./test-dom"));
   const path = fileURLToPath(new URL("./SolanaScreen.tsx", import.meta.url));
   const loader = Module as unknown as { _load: (id: string, parent: { filename?: string }, isMain: boolean) => unknown };
   const original = loader._load;
@@ -103,7 +137,8 @@ test("an uncertain paper response retries the same request ID instead of creatin
 });
 
 test("registration retries the same signed bytes and bounded seed after an unknown submit outcome", async () => {
-  state = initial("live"); state.runtime.live.programId = OWNER;
+  state = initial("live"); state.runtime.live.programId = PROGRAM;
+  const saved = liveLimits(); state.binding.limits = saved;
   let sessionPublicKey = "";
   const submissions: unknown[] = [];
   let activation: Record<string, unknown> | undefined;
@@ -111,7 +146,7 @@ test("registration retries the same signed bytes and bounded seed after an unkno
     if (path === "status") return json(state);
     if (path === "setup" && body?.stage === "prepare") {
       sessionPublicKey = String(body.sessionPublicKey);
-      return json({ setup: { transactionBase64: "AQID", session: sessionPublicKey, vault: OWNER, programId: OWNER, expiresAtMs: limits.expiresAtMs } });
+      return json({ setup: await permissionTransaction(sessionPublicKey, saved) });
     }
     if (path === "setup" && body?.stage === "submit") {
       submissions.push(body.signedTransactionBase64);
@@ -121,9 +156,9 @@ test("registration retries the same signed bytes and bounded seed after an unkno
     if (path === "setup" && body?.stage === "activate") { activation = body; state.runtime.live.ready = true; return json({ live: { ready: true } }); }
     throw new Error("Unexpected fixture route");
   };
-  await render(); await ui.click("Register bounded trading permission");
+  await render(); await press("Register bounded trading permission");
   assert.equal(signCount, 1); assert.equal(activation, undefined);
-  await ui.click("Finish permission registration");
+  await press("Finish permission registration");
   assert.equal(signCount, 1); assert.deepEqual(submissions, ["AQID", "AQID"]);
   assert.ok(activation);
   const seed = Buffer.from(String((activation as Record<string, unknown>).sessionSecretKey), "base64");
@@ -261,4 +296,61 @@ test("wrapped SOL sent by someone else is shown held aside, not as trading perfo
     book: { realizedPnlUsdgRaw: "0", networkFeesLamports: "10000", quarantinedWsolRaw: "1" } });
   await render();
   assert.match(ui.container.textContent!, /0\.000000001 wrapped SOL arrived outside your recorded trades\. It is held aside/);
+});
+
+test("the live card shows the saved limits and signed expiry, and unsaved edits block registration", async () => {
+  state = initial("live"); state.runtime.live.programId = PROGRAM;
+  const saved = liveLimits(); state.binding.limits = saved;
+  respond = async (path, body) => {
+    if (path === "status") return json(state);
+    if (path === "setup" && body?.stage === "prepare") return json({ setup: await permissionTransaction(String(body.sessionPublicKey), saved) });
+    throw new Error("Unexpected fixture route");
+  };
+  await render();
+  const text = () => ui.container.textContent!;
+  // The duration is the saved one, not a 24-hour default; the expiry is the instant signed on chain.
+  assert.equal(field("Permission duration"), "168");
+  assert.match(text(), /Your wallet will be asked to sign these saved limits/);
+  assert.match(text(), /10 USDG per trade and 50 USDG per 24 hours/);
+  assert.match(text(), /0\.25 SOL sold per trade and 1 SOL sold per 24 hours/);
+  assert.ok(text().includes(`Expires ${new Date(Math.floor(saved.expiresAtMs / 1000) * 1000).toISOString().slice(0, 19).replace("T", " ")} UTC`));
+  assert.equal(button("Register bounded trading permission").disabled, false);
+  // Lower the per-trade limit without saving: the page must not offer to sign the old 10 USDG.
+  await type("USDG per trade", "1");
+  assert.equal(button("Register bounded trading permission").disabled, true);
+  assert.match(text(), /The form has unsaved changes/);
+  assert.match(text(), /10 USDG per trade/);
+  await type("USDG per trade", "10");
+  await type("Permission duration", "24");
+  assert.equal(button("Register bounded trading permission").disabled, true);
+  await type("Permission duration", "168");
+  assert.equal(button("Register bounded trading permission").disabled, false);
+  assert.equal(signCount, 0); assert.equal(calls.some((call) => call.path === "setup"), false);
+});
+
+test("a prepared permission that encodes anything but the shown limits never reaches the wallet", async () => {
+  state = initial("live"); state.runtime.live.programId = PROGRAM;
+  const saved = liveLimits(); state.binding.limits = saved;
+  let prepared: (session: string) => Promise<unknown> = async (session) => permissionTransaction(session, { ...saved, perTradeUsdg: "20000000", dailyUsdg: "60000000" });
+  respond = async (path, body) => {
+    if (path === "status") return json(state);
+    if (path === "setup" && body?.stage === "prepare") return json({ setup: await prepared(String(body.sessionPublicKey)) });
+    throw new Error("Unexpected fixture route");
+  };
+  await render();
+  await press("Register bounded trading permission");
+  assert.equal(signCount, 0);
+  assert.match(ui.container.textContent!, /does not match the saved limits shown on this page\. Nothing was signed/);
+  // A different expiry, or an extra instruction (an owner SOL transfer), is refused the same way.
+  prepared = async (session) => permissionTransaction(session, { ...saved, expiresAtMs: saved.expiresAtMs + 3_600_000 });
+  await press("Register bounded trading permission");
+  assert.equal(signCount, 0);
+  assert.match(ui.container.textContent!, /does not match the saved limits shown on this page\. Nothing was signed/);
+  const transfer: Instruction = { programAddress: address("11111111111111111111111111111111"), data: Uint8Array.of(2, 0, 0, 0, 0, 202, 154, 59, 0, 0, 0, 0),
+    accounts: [{ address: address(OWNER), role: 3 }, { address: address(base58Encode(new Uint8Array(32).fill(9))), role: 1 }] };
+  prepared = async (session) => permissionTransaction(session, saved, [transfer]);
+  await press("Register bounded trading permission");
+  assert.equal(signCount, 0);
+  assert.match(ui.container.textContent!, /The prepared permission does not match what this page shows\. Nothing was signed/);
+  assert.equal(calls.filter((call) => call.path === "setup" && call.body?.stage === "submit").length, 0);
 });

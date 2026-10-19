@@ -11,6 +11,8 @@ import { requestJson } from "./request-json";
 import { SignIn } from "./HostedControls";
 import { SolanaAutomation } from "./SolanaAutomation";
 import { SolanaOwnerActions } from "./SolanaOwnerActions";
+import { PermissionTerms, permissionExpiry, permissionMatchesLimits, readPermissionTransaction } from "./SolanaPermission";
+import { deriveSolanaVaultAddress } from "../../../packages/core/src/solana-live";
 import { solanaUnits as units, displaySolanaAmount as display } from "../lib/solana-amounts";
 import "./SolanaScreen.css";
 
@@ -29,6 +31,11 @@ type Setup = { transactionBase64: string; programId: string; vault: string; sess
 type Receipt = { mode?: string; requestId?: string; signature?: string; status?: string; state?: string };
 function base64(bytes: Uint8Array): string { return btoa(String.fromCharCode(...bytes)); }
 function fromBase64(value: string): Uint8Array { return Uint8Array.from(atob(value), (byte) => byte.charCodeAt(0)); }
+/** The saved expiry is absolute; the form shows the whole hours left, so an untouched form matches it. */
+function hoursLeft(expiresAtMs: number): string {
+  const remaining = expiresAtMs - Date.now();
+  return remaining > 0 ? String(Math.min(168, Math.max(1, Math.ceil(remaining / 3_600_000)))) : "24";
+}
 
 export function SolanaScreen() {
   return <section className="solana-screen" aria-labelledby="solana-title">
@@ -47,7 +54,8 @@ function ConnectedSolana() {
   const [ops, setOps] = useState("20"), [drawdown, setDrawdown] = useState("20"), [duration, setDuration] = useState("24");
   const [initialCash, setInitialCash] = useState("1000"), [side, setSide] = useState<"buy" | "sell">("buy"), [amount, setAmount] = useState("1");
   const [preview, setPreview] = useState<SolanaQuote | null>(null), [receipt, setReceipt] = useState<Receipt | null>(null);
-  const [registration, setRegistration] = useState<{ signature?: string; secret: string; signedTransactionBase64: string } | null>(null);
+  const [registration, setRegistration] = useState<{ signature?: string; secret: string; signedTransactionBase64: string; limits: SolanaPaperLimits } | null>(null);
+  const [savedDuration, setSavedDuration] = useState<string | null>(null);
   const request = useRef<{ key: string; id: string } | null>(null);
   const accountEpoch = useRef(0), inFlight = useRef(false);
   const statusRevision = useRef<number | null>(null);
@@ -84,7 +92,9 @@ function ConnectedSolana() {
         if (next.binding.limits.perTradeWsol && next.binding.limits.dailyWsol) {
           setPerTradeSol(display(next.binding.limits.perTradeWsol, 9)); setDailySol(display(next.binding.limits.dailyWsol, 9));
         }
-      }
+        const hours = hoursLeft(next.binding.limits.expiresAtMs);
+        setDuration(hours); setSavedDuration(hours);
+      } else setSavedDuration(null);
     }
   }, [api]);
   useEffect(() => {
@@ -114,6 +124,25 @@ function ConnectedSolana() {
     if (sell.perTradeWsol && BigInt(sell.perTradeWsol) > BigInt(sell.dailyWsol)) throw new Error("The SOL sold per trade cannot exceed the SOL sold per 24 hours.");
     return { perTradeUsdg: units(perTrade, 6), dailyUsdg: units(daily, 6), maxOpsPerDay, maxDrawdownBps, expiresAtMs: Date.now() + Math.floor(hours * 3_600_000), ...sell };
   };
+  /** The form shows exactly the saved mode and limits: nothing typed is waiting to be saved. */
+  const formMatchesSaved = (): boolean => {
+    const saved = binding?.limits;
+    if (!binding || !saved || mode !== binding.requestedMode || duration !== savedDuration) return false;
+    try {
+      return units(perTrade, 6) === saved.perTradeUsdg && units(daily, 6) === saved.dailyUsdg && Number(ops) === saved.maxOpsPerDay
+        && units(drawdown, 2) === String(saved.maxDrawdownBps)
+        && (mode !== "live" || (units(perTradeSol, 9) === saved.perTradeWsol && units(dailySol, 9) === saved.dailyWsol));
+    } catch { return false; }
+  };
+  /** Why a new permission cannot be registered with what the page shows, or null. */
+  const registerBlock = (): string | null => {
+    const saved = binding?.limits;
+    if (!saved) return "Save live mode and its limits before registering a trading permission.";
+    if (saved.expiresAtMs <= Date.now()) return `Your saved limits expired at ${permissionExpiry(saved.expiresAtMs)}. Save new limits before registering.`;
+    if (!saved.perTradeWsol || !saved.dailyWsol) return "Save how much SOL a live trade and a live day may sell before registering.";
+    if (!formMatchesSaved()) return "The form has unsaved changes. A permission is always signed with your saved limits: save your changes, or refresh to discard them, before registering.";
+    return null;
+  };
   const invalidate = () => { setPreview(null); setReceipt(null); request.current = null; };
   const tradeIntent = () => {
     const amountRaw = units(amount, side === "buy" ? 6 : 9);
@@ -131,16 +160,24 @@ function ConnectedSolana() {
     await api("bind", { owner, nonce: challenge.nonce, signature }); await refresh();
   };
   const setupLive = async () => {
-    if (!sameWallet) throw new Error("Connect the Solana wallet bound to this account.");
+    if (!sameWallet || !binding) throw new Error("Connect the Solana wallet bound to this account.");
     let pending = registration;
     if (!pending) {
+      // Exactly the saved limits shown in the live card; the server encodes the saved ones.
+      const shown = binding.limits, programId = status?.runtime?.live.programId, blocked = registerBlock();
+      if (blocked || !shown || !programId) throw new Error(blocked ?? "Wait for the vault program to be verified before registering.");
+      const vault = await deriveSolanaVaultAddress(programId, binding.owner);
       const seed = crypto.getRandomValues(new Uint8Array(32));
       try {
         const sessionPublicKey = base58Encode(ed25519.getPublicKey(seed));
         const { setup } = await api<{ setup: Setup }>("setup", { stage: "prepare", sessionPublicKey });
         if (setup.session !== sessionPublicKey) throw new Error("The prepared permission names a different session. Nothing was signed.");
+        if (setup.programId !== programId || setup.vault !== vault) throw new Error("The prepared permission names a different vault. Nothing was signed.");
+        // The wallet only opens for bytes that encode what this page showed.
+        const terms = readPermissionTransaction(setup.transactionBase64, { owner: binding.owner, programId, vault, session: sessionPublicKey });
+        if (!permissionMatchesLimits(terms, shown)) throw new Error("The prepared permission does not match the saved limits shown on this page. Nothing was signed. Refresh and review your limits.");
         const signed = await signer.signSetup(fromBase64(setup.transactionBase64));
-        pending = { secret: base64(seed), signedTransactionBase64: base64(signed) };
+        pending = { secret: base64(seed), signedTransactionBase64: base64(signed), limits: shown };
         // Keep the bounded session seed and exact signed bytes before submit:
         // a lost response must retry this registration, never create a new one.
         setRegistration(pending);
@@ -199,7 +236,7 @@ function ConnectedSolana() {
         <p>{status?.runtime?.live.ready ? "Registered permission ready." : "Live trading is not active yet."}</p>
         {binding.limits?.perTradeWsol && binding.limits.dailyWsol && <p>Sales are limited to {display(binding.limits.perTradeWsol, 9)} SOL per trade and {display(binding.limits.dailyWsol, 9)} SOL per 24 hours, whatever the price.</p>}
         {!!status?.runtime?.live.blockers.length && <ul>{status.runtime.live.blockers.map((blocker) => <li key={blocker}>{blocker}</li>)}</ul>}
-        {status?.runtime?.live.vault && <p>Vault: <span className="solana-address">{status.runtime.live.vault}</span></p>}
+        {status?.runtime?.live.vault && <p>Vault: <span className="solana-address">{status.runtime.live.vault}</span>{status.runtime.live.programId && <> · Program: <span className="solana-address">{status.runtime.live.programId}</span></>}</p>}
         {status?.runtime?.live.cashTokenAccount && (status.runtime.live.ready || status.runtime.live.canExit) && <div><h3>Fund the Solana vault</h3><p>Send USDG on Solana to this verified USDG token account:</p><p className="solana-address">{status.runtime.live.cashTokenAccount}</p><p>Deposit USDG only. Direct wrapped SOL deposits have no recorded cost basis and cannot be traded by this session.</p></div>}
         {status?.runtime?.live.balances && <><p className="solana-value">{display(status.runtime.live.balances.cashUsdg)} USDG</p><p>{display(status.runtime.live.balances.wsolRaw, 9)} wrapped SOL · observed at slot {status.runtime.live.balances.slot}</p></>}
         {liveBook && <p>Recorded realized P&amp;L: {display(liveBook.realizedPnlUsdgRaw)} USDG. Network fees: {display(liveBook.networkFeesLamports, 9)} SOL.</p>}
@@ -209,8 +246,11 @@ function ConnectedSolana() {
         {!!status?.runtime?.live.pending.length && <p role="status">{status.runtime.live.pending.length} trade(s) awaiting final confirmation. Refresh to reconcile the saved request.</p>}
         {!!status?.runtime?.live.history?.length && <details><summary>Recent live requests</summary><ul>{status.runtime.live.history.slice(0, 20).map((trade) => <li key={trade.requestId}>{trade.requestId}: {trade.status}{trade.signature && <> · <a target="_blank" rel="noreferrer" href={`https://solscan.io/tx/${encodeURIComponent(trade.signature)}`}>Transaction</a></>}</li>)}</ul></details>}
         <p>The initial live market is USDG ↔ wrapped SOL. Deposit only after the program and vault have been verified.</p>
+        {registration ? <PermissionTerms heading="The permission you signed" limits={registration.limits} />
+          : binding.limits && <PermissionTerms heading="Your wallet will be asked to sign these saved limits" limits={binding.limits} />}
         {registration && <p>Keep this page open while finalization completes. Retry activation with the existing registration.</p>}
-        <button disabled={busy || !sameWallet || !binding.limits || !status?.runtime?.live.programId} onClick={() => void act(setupLive)}>{registration ? "Finish permission registration" : "Register bounded trading permission"}</button>
+        {!registration && binding.limits && registerBlock() && <p role="status">{registerBlock()}</p>}
+        <button disabled={busy || !sameWallet || !binding.limits || !status?.runtime?.live.programId || (!registration && !!registerBlock())} onClick={() => void act(setupLive)}>{registration ? "Finish permission registration" : "Register bounded trading permission"}</button>
       </div>}
       <form className="solana-card" onSubmit={(event) => { event.preventDefault(); void act(async () => {
         const result = await api<{ preview: SolanaQuote | { quote: SolanaQuote } }>("intent", { action: "preview", mode, intent: tradeIntent() });
