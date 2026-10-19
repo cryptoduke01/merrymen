@@ -163,6 +163,26 @@ test("rebroadcast stops at the caller's window, when every provider says the blo
     assert.equal(rounds, { window: 3, expired: 1, default: 8, "wrong-signature": 30 }[scenario], scenario);
   }
 });
+test("a JSON-RPC error answer, such as a refused preflight, is the provider's refusal ('rpc'), never 'malformed', and keeps none of its text", async () => {
+  const tx = await signed(), time = clock();
+  const answer = (id: unknown, method: string) => method === "getGenesisHash" ? { jsonrpc: "2.0", id, result: SOLANA_MAINNET_GENESIS_HASH }
+    : { jsonrpc: "2.0", id, error: { code: -32002, message: "Transaction simulation failed: secret-primary insufficient funds", data: { logs: ["secret-primary"] } } };
+  const rpc = createSolanaLiveRpc({ env, now: time.now, sleep: time.sleep, fetch: async (_url, init) => {
+    const body = JSON.parse(init!.body as string); return Response.json(answer(body.id, body.method));
+  } });
+  await assert.rejects(rpc.send(tx.wire, 1, undefined, { untilMs: 0 }), error => {
+    assert.ok(error instanceof SolanaRpcError); assert.equal(error.code, "rpc"); assert.ok(!error.message.includes("secret")); return true;
+  });
+  await assert.rejects(rpc.read(read => read("getSlot")), error => error instanceof SolanaRpcError && error.code === "rpc");
+  // An answer with neither a result nor an error, or for another request, is still malformed.
+  for (const bad of [(id: unknown) => ({ jsonrpc: "2.0", id }), (id: unknown) => ({ jsonrpc: "2.0", id: Number(id) + 1, error: { code: 1 } })]) {
+    const odd = createSolanaLiveRpc({ env: { MERRYMEN_SOLANA_RPC_MAINNET: env.MERRYMEN_SOLANA_RPC_MAINNET }, singleEndpoint: true, fetch: async (_url, init) => {
+      const body = JSON.parse(init!.body as string);
+      return Response.json(body.method === "getGenesisHash" ? { jsonrpc: "2.0", id: body.id, result: SOLANA_MAINNET_GENESIS_HASH } : bad(body.id));
+    } });
+    await assert.rejects(odd.read(read => read("getSlot")), error => error instanceof SolanaRpcError && error.code === "malformed");
+  }
+});
 test("rejects unsigned garbage before network and wrong genesis before send", async () => {
   const tx = await signed(); let calls = 0;
   const rpc = createSolanaLiveRpc({ env, fetch: async (_url, init) => {

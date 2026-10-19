@@ -153,8 +153,11 @@ export function createSolanaLiveRpc(options: {
         checkAbort();
         if (!value || typeof value !== "object" || Array.isArray(value)) throw new SolanaRpcError("malformed");
         const data = value as Record<string, unknown>;
-        if (data.id !== id || data.jsonrpc !== "2.0" || !Object.hasOwn(data, "result")) throw new SolanaRpcError("malformed");
+        if (data.id !== id || data.jsonrpc !== "2.0") throw new SolanaRpcError("malformed");
+        // A JSON-RPC error carries no result: a refused preflight is the provider's
+        // answer ("rpc"), not an unreadable one. Its text is never kept.
         if (Object.hasOwn(data, "error")) throw new SolanaRpcError("rpc");
+        if (!Object.hasOwn(data, "result")) throw new SolanaRpcError("malformed");
         return data.result;
       };
       if (await rpc("getGenesisHash") !== SOLANA_MAINNET_GENESIS_HASH) throw new SolanaRpcError("wrong-network");
