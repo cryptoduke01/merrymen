@@ -7,10 +7,10 @@ import { CHAINS, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM } from "../../packages/cor
 import { deriveSolanaVaultAddress, deriveSolanaSwapAuthority, deriveSolanaAta, SOLANA_VAULT_LOCAL_TEST_PROGRAM,
   SOLANA_VAULT_ACCOUNT_SIZE, SOLANA_VAULT_DISCRIMINATOR, SOLANA_SWAP_EVENT_DISCRIMINATOR,
   SOLANA_CLASSIC_TOKEN_PROGRAM, SOLANA_WRAPPED_SOL_MINT } from "../../packages/core/src/solana-live";
-import { createSolanaExecutor, reconcileSolanaSubmission, type SolanaLiveRecord, type SolanaSignedSubmission, type SolanaExecutorOptions } from "./solana-executor";
+import { createSolanaExecutor, reconcileSolanaSubmission, verifySolanaVaultDeployment, type SolanaLiveRecord, type SolanaSignedSubmission, type SolanaExecutorOptions } from "./solana-executor";
 import { settleSolanaReceipt, solanaVaultEvents } from "./solana-settlement";
 import { JUPITER_SWAP_PROGRAM, type JupiterCpiRoute } from "./solana-live-market";
-import type { SolanaLiveRead, SolanaLiveRpc } from "./solana-live-rpc";
+import type { SolanaLiveRead, SolanaLiveRpc, SolanaSendOptions } from "./solana-live-rpc";
 import { createSolanaLiveRpc } from "./solana-live-rpc";
 import { SOLANA_MAINNET_GENESIS_HASH } from "./solana-rpc";
 import { pythBound } from "./solana-reference-price-fixture";
@@ -62,10 +62,18 @@ async function fixture() {
   const controls = { upgradeable: false, paused: false, failSend: false, simulationError: false, persistError: false,
     conflict: false, finalized: false, wrongSignature: false, fee: 10_000, riskWrongBalance: false, mintReason: false,
     riskDelay: 0, substituteCpi: false, badLookup: false, goodLookup: false, stateEpochAfter: false, badRefund: false, tempDonation: false,
+    // The owner's input ATA closed or delegated, and tokens already sitting in the temporary input ATA.
+    refundMissing: false, refundDelegate: false, tempTokens: 0n,
     // Pyth SOL/USD with 8 decimals; the fixture route buys 0.002 SOL per USDG, i.e. $500.
-    referencePrice: 50_000_000_000n, referenceAgeMs: 0, forgeFloor: false };
+    referencePrice: 50_000_000_000n, referenceAgeMs: 0, forgeFloor: false,
+    // Recent prioritization fees (micro-lamports per CU) the RPC reports for the swap's writable accounts.
+    priorityFees: [] as number[], priorityError: false,
+    // What the shared network fee payer holds.
+    payerLamports: 100_000_000,
+    // The vault's finalized sequence after the receipt slot, and the second provider's own view.
+    vaultSeqAfter: 1n, fallback: null as SolanaLiveRead | null };
   let record: SolanaLiveRecord | null = null;
-  const calls: string[] = [];
+  const calls: string[] = [], sendOptions: (SolanaSendOptions | undefined)[] = [], priorityReads: unknown[] = [];
   const quote = { source: "jupiter" as const, inputMint: SOLANA_USDG_MINT, outputMint: SOLANA_WRAPPED_SOL_MINT,
     inAmount: "1000000", outAmount: "2000000", minOutAmount: "1980000", slippageBps: 100,
     contextSlot: SLOT, quotedAtMs: NOW, expiresAtMs: NOW + 30_000 };
@@ -76,22 +84,32 @@ async function fixture() {
     [SOLANA_CLASSIC_TOKEN_PROGRAM, key(40), swap, temp, key(41), key(42), output, SOLANA_USDG_MINT, SOLANA_WRAPPED_SOL_MINT, JUPITER_SWAP_PROGRAM, TOKEN_2022_PROGRAM]
       .map((address, index) => ({ address, isSigner: index === 2, isWritable: [3,4,5,6].includes(index) })) };
   const response = (value: unknown) => ({ context: { slot: SLOT }, value });
-  const receipt = (submission: SolanaSignedSubmission, failed = false) => {
+  const refundAccount = () => {
+    if (controls.refundMissing) return null;
+    const bytes = token(SOLANA_USDG_MINT, controls.badRefund ? key(90) : owner, 0n);
+    if (controls.refundDelegate) { bytes.writeUInt32LE(1, 72); keyBytes(key(91)).copy(bytes, 76); }
+    return rpcAccount(bytes, TOKEN_2022_PROGRAM);
+  };
+  const tempLamports = () => controls.tempDonation || controls.tempTokens > 0n ? 2_039_280 : 0;
+  const tempAccount = () => controls.tempTokens > 0n ? rpcAccount(token(SOLANA_USDG_MINT, swap, controls.tempTokens), TOKEN_2022_PROGRAM, false, 2_039_280)
+    : controls.tempDonation ? rpcAccount(Buffer.alloc(0), SYSTEM, false, 2_039_280) : null;
+  const receipt = (submission: SolanaSignedSubmission, failed = false, amountOut = 2_000_000n) => {
     const tx = getTransactionDecoder().decode(Buffer.from(submission.signedTransactionBase64, "base64"));
     const message = getCompiledTransactionMessageDecoder().decode(tx.messageBytes);
     const keys = [...message.staticAccounts, ...submission.loadedAddresses.writable, ...submission.loadedAddresses.readonly];
     const tempIndex = keys.indexOf(temp);
-    const balances = Array.from({ length: keys.length }, (_, index) => index === 0 ? 100_000_000 : index === tempIndex ? (controls.tempDonation ? 2_039_280 : 0) : 1_000_000);
+    const balances = Array.from({ length: keys.length }, (_, index) => index === 0 ? 100_000_000 : index === tempIndex ? tempLamports() : 1_000_000);
     const tokenRow = (account: string, mint: string, programId: string, amount: bigint) => ({ accountIndex: keys.indexOf(account),
       mint, owner: vault, programId, uiTokenAmount: { amount: amount.toString(), decimals: mint === SOLANA_USDG_MINT ? 6 : 9 } });
     return { version: 0, slot: SLOT + 1, transaction: [submission.signedTransactionBase64, "base64"], meta: {
       err: failed ? { InstructionError: [2, { Custom: 1 }] } : null, fee: 10_000,
-      preBalances: balances, postBalances: balances.map((n, i) => i === 0 ? n - 10_000 + (!failed && controls.tempDonation ? 2_039_280 : 0) : i === tempIndex && !failed ? 0 : n), loadedAddresses: structuredClone(submission.loadedAddresses),
-      preTokenBalances: [tokenRow(input, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM, CASH), tokenRow(output, SOLANA_WRAPPED_SOL_MINT, SOLANA_CLASSIC_TOKEN_PROGRAM, 0n)],
+      preBalances: balances, postBalances: balances.map((n, i) => i === 0 ? n - 10_000 + (!failed ? tempLamports() : 0) : i === tempIndex && !failed ? 0 : n), loadedAddresses: structuredClone(submission.loadedAddresses),
+      preTokenBalances: [tokenRow(input, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM, CASH), tokenRow(output, SOLANA_WRAPPED_SOL_MINT, SOLANA_CLASSIC_TOKEN_PROGRAM, 0n),
+        ...(controls.tempTokens > 0n ? [{ ...tokenRow(temp, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM, controls.tempTokens), owner: swap }] : [])],
       postTokenBalances: [tokenRow(input, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM, failed ? CASH : CASH - 1_000_000n),
-        tokenRow(output, SOLANA_WRAPPED_SOL_MINT, SOLANA_CLASSIC_TOKEN_PROGRAM, failed ? 0n : 2_000_000n)],
-      logMessages: [`Program ${PROGRAM} invoke [1]`, ...(failed ? [] : [`Program data: ${event(submission)}`]),
-        `Program ${PROGRAM} ${failed ? "failed: custom program error: 0x1" : "success"}`],
+        tokenRow(output, SOLANA_WRAPPED_SOL_MINT, SOLANA_CLASSIC_TOKEN_PROGRAM, failed ? 0n : amountOut)],
+      logMessages: [`Program ${PROGRAM} invoke [1]`, ...(failed ? [] : [`Program data: ${event(submission, 1_000_000n, amountOut)}`]),
+        `Program ${PROGRAM} ${failed ? "failed: custom program error: 0x1" : "success"}`] as string[] | null,
     } };
   };
   const read: SolanaLiveRead = async (method, params = []) => {
@@ -107,6 +125,11 @@ async function fixture() {
           return response({ ...rpcAccount(bytes.subarray(slice.offset, slice.offset + slice.length), LOADER), space: bytes.length });
         }
         if (key === "AddressLookupTab1e1111111111111111111111111") return response(rpcAccount(Buffer.alloc(56), SYSTEM));
+        if (key === vault) {
+          // Finalized evidence after the receipt (slot SLOT + 1).
+          assert.deepEqual(config, { encoding: "base64", commitment: "finalized", minContextSlot: SLOT + 1 });
+          return { context: { slot: SLOT + 2 }, value: rpcAccount(state(owner, session, controls.vaultSeqAfter), PROGRAM) };
+        }
         if (key === getBase58Decoder().decode(new Uint8Array(32).fill(61))) {
           const table = Buffer.alloc(56 + 32 * route.accounts.length); table.writeUInt32LE(1);
           table.writeBigUInt64LE((1n << 64n) - 1n, 4); table.writeBigUInt64LE(BigInt(SLOT - 1), 12);
@@ -117,15 +140,24 @@ async function fixture() {
       }
       case "getMultipleAccounts": {
         const keys = params[0] as string[];
-        if (keys[0] === vault) { assert.equal(keys[4], ownerRefund); return response([rpcAccount(state(owner, session, 0n, { paused: controls.paused }), PROGRAM),
-          rpcAccount(token(SOLANA_USDG_MINT, vault, CASH), TOKEN_2022_PROGRAM), rpcAccount(token(SOLANA_WRAPPED_SOL_MINT, vault, 0n), SOLANA_CLASSIC_TOKEN_PROGRAM),
-          rpcAccount(Buffer.alloc(0), SYSTEM), rpcAccount(token(SOLANA_USDG_MINT, controls.badRefund ? key(90) : owner, 0n), TOKEN_2022_PROGRAM)]); }
+        if (keys[0] === vault) {
+          const accounts = [rpcAccount(state(owner, session, 0n, { paused: controls.paused }), PROGRAM),
+            rpcAccount(token(SOLANA_USDG_MINT, vault, CASH), TOKEN_2022_PROGRAM), rpcAccount(token(SOLANA_WRAPPED_SOL_MINT, vault, 0n), SOLANA_CLASSIC_TOKEN_PROGRAM),
+            rpcAccount(Buffer.alloc(0), SYSTEM, false, controls.payerLamports)];
+          if (keys.length === 5) { assert.equal(keys[4], ownerRefund); accounts.push(refundAccount()!); }
+          return response(accounts);
+        }
+        if (keys.length === 2 && keys[0] === temp) { assert.equal(keys[1], ownerRefund); return response([tempAccount(), refundAccount()]); }
         return response(keys.map(value => value === output ? rpcAccount(token(SOLANA_WRAPPED_SOL_MINT, vault, 0n), SOLANA_CLASSIC_TOKEN_PROGRAM)
-          : value === temp && controls.tempDonation ? rpcAccount(Buffer.alloc(0), SYSTEM, false, 2_039_280) : null));
+          : value === temp ? tempAccount() : null));
       }
       case "getMinimumBalanceForRentExemption": return 2_039_280;
       case "getLatestBlockhash": return response({ blockhash: key(50), lastValidBlockHeight: 1200 });
       case "getFeeForMessage": return response(controls.fee);
+      case "getRecentPrioritizationFees":
+        priorityReads.push(params[0]);
+        if (controls.priorityError) throw new Error("method not found");
+        return controls.priorityFees.map((prioritizationFee, index) => ({ slot: SLOT - index, prioritizationFee }));
       case "simulateTransaction": {
         const tx = getTransactionDecoder().decode(Buffer.from(params[0] as string, "base64"));
         assert.equal(Object.keys(tx.signatures).length, 2);
@@ -140,8 +172,10 @@ async function fixture() {
       default: throw new Error(`Unexpected fixture method ${method}`);
     }
   };
-  const rpc: SolanaLiveRpc = { read: operation => operation(read), async send(wire) {
-    calls.push("send"); assert.ok(record, "transaction must be durable before broadcast");
+  const rpc: SolanaLiveRpc = { read: operation => operation(read),
+    readEach: async operation => [await operation(read), await operation(controls.fallback ?? read)],
+    async send(wire, _slot, _signal, options) {
+    calls.push("send"); sendOptions.push(options); assert.ok(record, "transaction must be durable before broadcast");
     assert.equal(record.submission.signedTransactionBase64, wire);
     if (controls.failSend) throw new Error("lost HTTP response");
     return controls.wrongSignature ? "different" : record.submission.signature;
@@ -170,7 +204,16 @@ async function fixture() {
     } };
   const intent = { kind: "spl-swap", chain: CHAINS.solana, mode: "live", requestId: "actual-test-1", owner, vault,
     inputMint: SOLANA_USDG_MINT, outputMint: SOLANA_WRAPPED_SOL_MINT, amountRaw: "1000000", slippageBps: 100 };
-  return { options, intent, controls, calls, clock, receipt, session, feePayer, ownerRefund, route, read, getRecord: () => record };
+  return { options, intent, controls, calls, clock, receipt, session, feePayer, ownerRefund, route, read, sendOptions, priorityReads,
+    temp, input, output, programData, programDataAddress, getRecord: () => record };
+}
+/** The account the signed execute_swap passes in the owner_refund slot (index 14). */
+function refundSlot(submission: SolanaSignedSubmission): string {
+  const tx = getTransactionDecoder().decode(Buffer.from(submission.signedTransactionBase64, "base64"));
+  const compiled = getCompiledTransactionMessageDecoder().decode(tx.messageBytes);
+  const keys = [...compiled.staticAccounts, ...submission.loadedAddresses.writable, ...submission.loadedAddresses.readonly];
+  const swap = compiled.instructions.find(ix => keys[ix.programAddressIndex] === PROGRAM)!;
+  return keys[swap.accountIndices![14]!]!;
 }
 
 test("builds real two-signer v0 bytes, verifies them, persists before one send and settles actual finalized deltas", async () => {
@@ -178,13 +221,16 @@ test("builds real two-signer v0 bytes, verifies them, persists before one send a
   const pending = await executor.execute(f.intent);
   assert.equal(pending.status, "pending");
   assert.equal(f.calls.filter(call => call === "send").length, 1);
+  // The transport may rebroadcast these bytes until the signed deadline: the quote's expiry, in whole seconds.
+  assert.deepEqual(f.sendOptions, [{ untilMs: Math.floor((NOW + 30_000) / 1000) * 1000 }]);
   assert.ok(f.calls.indexOf("persist") < f.calls.indexOf("send"));
   const tx = getTransactionDecoder().decode(Buffer.from(pending.submission.signedTransactionBase64, "base64"));
   assert.ok(await verifySignature(f.options.sessionKeyPair.publicKey, tx.signatures[f.session]!, tx.messageBytes));
   assert.ok(await verifySignature(f.options.feePayerKeyPair.publicKey, tx.signatures[f.feePayer]!, tx.messageBytes));
   const compiled = getCompiledTransactionMessageDecoder().decode(tx.messageBytes);
   assert.equal(compiled.version, 0);
-  assert.equal(compiled.staticAccounts[compiled.instructions[2]!.accountIndices![14]!], f.ownerRefund);
+  // No donation waits in the temporary account, so the owner's ATA is left out.
+  assert.equal(compiled.staticAccounts[compiled.instructions[2]!.accountIndices![14]!], PROGRAM);
   const count = f.calls.length; assert.deepEqual(await executor.execute(f.intent), pending); assert.equal(f.calls.length, count);
   assert.equal((await executor.reconcile(f.intent.owner, f.intent.requestId))?.status, "pending");
   f.controls.finalized = true;
@@ -207,16 +253,20 @@ test("lost send response and mismatched returned signature stay durable pending,
 });
 
 test("crash recovery releases a sequence only when finalized vault state proves execution impossible; fees stay unknown", async () => {
-  for (const mode of ["expired", "revoked", "advanced", "not-expired", "wrong-owner", "wrong-program", "old-slot", "receipt-present"] as const) {
+  const deadline = Math.floor((NOW + 30_000) / 1000) * 1000;
+  for (const mode of ["expired", "revoked", "advanced", "not-expired", "not-expired-late", "wrong-owner", "wrong-program", "old-slot", "receipt-present"] as const) {
     const f = await fixture(); f.controls.failSend = true;
     const executor = createSolanaExecutor(f.options); const original = await executor.execute(f.intent);
-    const proofReads: string[] = [];
+    const proofReads: string[] = [], resent: string[] = [];
     const read: SolanaLiveRead = async (method, params) => {
       proofReads.push(method);
       if (method === "getSignatureStatuses") return { context: { slot: SLOT }, value: [null] };
       if (method === "getTransaction") return mode === "receipt-present" ? f.receipt(original.submission) : null;
-      if (method === "getBlockHeight") { assert.deepEqual(params, [{ commitment: "finalized", minContextSlot: SLOT }]); return ["revoked", "not-expired"].includes(mode) ? 1199 : 1201; }
-      if (method === "getSlot") { assert.equal((params![0] as { commitment: string }).commitment, "finalized"); return SLOT + 2; }
+      if (method === "getEpochInfo") {
+        // Slot and height from one finalized bank.
+        assert.deepEqual(params, [{ commitment: "finalized", minContextSlot: SLOT }]);
+        return { absoluteSlot: SLOT + 2, blockHeight: ["revoked", "not-expired", "not-expired-late"].includes(mode) ? 1199 : 1201, epoch: 1, slotIndex: SLOT + 2, slotsInEpoch: 432_000 };
+      }
       if (method === "getAccountInfo") {
         assert.deepEqual(params, [f.intent.vault, { encoding: "base64", commitment: "finalized", minContextSlot: SLOT + 2 }]);
         const bytes = state(mode === "wrong-owner" ? key(90) : f.intent.owner, f.session, mode === "advanced" ? 1n : 0n);
@@ -225,20 +275,58 @@ test("crash recovery releases a sequence only when finalized vault state proves 
       }
       return assert.fail(`Unexpected proof read ${method}`);
     };
-    const rpc: SolanaLiveRpc = { read: callback => callback(read), send: async () => assert.fail("reconciliation cannot submit") };
+    const rpc: SolanaLiveRpc = { read: callback => callback(read), readEach: async callback => [await callback(read), await callback(read)],
+      send: async (wire, slot, _signal, options) => {
+        // Reconciliation may only rebroadcast the saved bytes, one round at a time.
+        assert.equal(wire, original.submission.signedTransactionBase64); assert.equal(slot, SLOT); assert.deepEqual(options, { untilMs: 0 });
+        resent.push(wire); return original.submission.signature;
+      } };
+    const now = () => mode === "not-expired-late" ? deadline : NOW + 1;
     if (["wrong-owner", "wrong-program", "old-slot"].includes(mode)) {
-      await assert.rejects(reconcileSolanaSubmission(rpc, f.options.journal, f.intent.owner, f.intent.requestId, () => NOW + 1));
-      assert.equal(f.getRecord()!.status, "pending"); continue;
+      await assert.rejects(reconcileSolanaSubmission(rpc, f.options.journal, f.intent.owner, f.intent.requestId, now));
+      assert.equal(f.getRecord()!.status, "pending"); assert.equal(resent.length, 0); continue;
     }
-    const result = await reconcileSolanaSubmission(rpc, f.options.journal, f.intent.owner, f.intent.requestId, () => NOW + 1);
+    const result = await reconcileSolanaSubmission(rpc, f.options.journal, f.intent.owner, f.intent.requestId, now);
+    assert.ok(!proofReads.includes("getBlockHeight") && !proofReads.includes("getSlot"), mode);
     if (["expired", "revoked"].includes(mode)) {
       assert.equal(result!.status, "expired"); assert.equal(result!.settlement!.feeLamports, null);
       assert.equal(result!.settlement!.amountIn, "0"); assert.equal(result!.settlement!.amountOut, "0");
+      assert.equal(result!.settlement!.slot, SLOT + 2);
+      assert.equal(result!.settlement!.status === "expired" && result!.settlement!.expiryProof.blockHeight, mode === "expired" ? "1201" : "1199");
       assert.deepEqual(await executor.execute(f.intent), result);
-      assert.ok(proofReads.indexOf("getBlockHeight") < proofReads.indexOf("getSlot"));
-      assert.ok(proofReads.indexOf("getSlot") < proofReads.indexOf("getAccountInfo"));
+      assert.ok(proofReads.indexOf("getEpochInfo") < proofReads.indexOf("getAccountInfo"));
     } else assert.equal(result!.status, "pending", mode);
+    // Only a signature nobody has seen, inside its signed deadline, is rebroadcast.
+    assert.equal(resent.length, mode === "not-expired" ? 1 : 0, mode);
     assert.equal(f.calls.filter(call => call === "send").length, 1);
+  }
+});
+
+test("an expiry proof never pairs a current block height with a lagging node's slot (audit execution F1)", async () => {
+  // One RPC URL load-balances two nodes. The swap landed at SLOT + 1 and the
+  // current node has finalized it; the lagging node's finalized bank is SLOT.
+  const nodes = { current: { slot: SLOT + 5, height: 1201, seq: 1n }, lagging: { slot: SLOT, height: 1199, seq: 0n } } as const;
+  for (const bank of ["current", "lagging"] as const) {
+    const f = await fixture(); f.controls.failSend = true;
+    await createSolanaExecutor(f.options).execute(f.intent);
+    const read: SolanaLiveRead = async (method, params) => {
+      const config = (params?.at(-1) ?? {}) as { minContextSlot?: number };
+      if (method === "getSignatureStatuses") return { context: { slot: nodes.lagging.slot }, value: [null] };
+      if (method === "getTransaction") return null;
+      if (method === "getBlockHeight") return nodes.current.height;
+      if (method === "getSlot") return nodes.lagging.slot;
+      if (method === "getEpochInfo") return { absoluteSlot: nodes[bank].slot, blockHeight: nodes[bank].height, epoch: 1, slotIndex: 0, slotsInEpoch: 432_000 };
+      if (method === "getAccountInfo") {
+        // The balancer may route to any node whose finalized bank reaches minContextSlot.
+        const node = (config.minContextSlot ?? 0) <= nodes.lagging.slot ? nodes.lagging : nodes.current;
+        return { context: { slot: node.slot }, value: rpcAccount(state(f.intent.owner, f.session, node.seq), PROGRAM) };
+      }
+      return assert.fail(`Unexpected read ${method}`);
+    };
+    const rpc: SolanaLiveRpc = { read: callback => callback(read), readEach: async callback => [await callback(read), await callback(read)],
+      send: async wire => wire };
+    const result = await reconcileSolanaSubmission(rpc, f.options.journal, f.intent.owner, f.intent.requestId, () => NOW + 1);
+    assert.equal(result!.status, "pending", bank); assert.equal(f.getRecord()!.status, "pending", bank);
   }
 });
 
@@ -261,8 +349,40 @@ test("a System-owned prefunded temporary ATA can initialize and its refund is di
   assert.equal(settled!.settlement!.amountIn, "1000000");
 });
 
+test("an owner who closed or delegated their input ATA still trades when no donation waits (audit VAULT-2)", async () => {
+  for (const mode of ["refundMissing", "refundDelegate", "badRefund"] as const) {
+    const f = await fixture(); f.controls[mode] = true; const executor = createSolanaExecutor(f.options);
+    const pending = await executor.execute(f.intent);
+    assert.equal(pending.status, "pending", mode);
+    assert.equal(refundSlot(pending.submission), PROGRAM, mode);
+    assert.equal(f.calls.filter(call => call === "send").length, 1);
+    f.controls.finalized = true;
+    assert.equal((await executor.reconcile(f.intent.owner, f.intent.requestId))?.status, "finalized", mode);
+  }
+});
+
+test("a donation in the temporary ATA passes the owner's ATA for its refund and never inflates the receipt", async () => {
+  const f = await fixture(); f.controls.tempTokens = 7n; const executor = createSolanaExecutor(f.options);
+  const pending = await executor.execute(f.intent);
+  assert.equal(pending.status, "pending");
+  assert.equal(refundSlot(pending.submission), f.ownerRefund);
+  f.controls.finalized = true;
+  const settled = await executor.reconcile(f.intent.owner, f.intent.requestId);
+  assert.equal(settled?.status, "finalized");
+  assert.equal(settled?.settlement?.amountIn, "1000000"); assert.equal(settled?.settlement?.feeLamports, "10000");
+});
+
+test("a donation with the owner's ATA closed, delegated or foreign fails closed with owner-refund before persistence or send", async () => {
+  for (const mode of ["refundMissing", "refundDelegate", "badRefund"] as const) {
+    const f = await fixture(); f.controls.tempTokens = 7n; f.controls[mode] = true;
+    await assert.rejects(createSolanaExecutor(f.options).execute(f.intent), /refused: owner-refund/, mode);
+    assert.ok(!f.calls.includes("persist"), mode); assert.ok(!f.calls.includes("send"), mode);
+    assert.ok(!f.calls.includes("simulateTransaction"), mode);
+  }
+});
+
 test("refuses unsafe authority, mutation, simulation, fees, stale safety and risk evidence before persistence or send", async () => {
-  for (const mode of ["upgradeable", "paused", "simulationError", "riskWrongBalance", "mintReason", "substituteCpi", "badLookup", "stateEpochAfter", "badRefund"] as const) {
+  for (const mode of ["upgradeable", "paused", "simulationError", "riskWrongBalance", "mintReason", "substituteCpi", "badLookup", "stateEpochAfter"] as const) {
     const f = await fixture(); f.controls[mode] = true;
     await assert.rejects(createSolanaExecutor(f.options).execute(f.intent));
     assert.ok(!f.calls.includes("persist"), mode); assert.ok(!f.calls.includes("send"), mode);
@@ -312,7 +432,8 @@ test("shutdown before work or during risk prevents admission; shutdown during co
       f.options.journal.recordSigned = async submission => { const result = await commit(submission); controller.abort(); return result; };
     }
     if (phase === "genesis") {
-      const transport = createSolanaLiveRpc({ env: { MERRYMEN_SOLANA_RPC_MAINNET: "https://rpc.example/" }, fetch: async (_url, init) => {
+      const transport = createSolanaLiveRpc({ env: { MERRYMEN_SOLANA_RPC_MAINNET: "https://rpc.example/",
+        MERRYMEN_SOLANA_RPC_MAINNET_FALLBACK: "https://fallback.example/" }, fetch: async (_url, init) => {
         const body = JSON.parse(init!.body as string); network.push(body.method);
         assert.equal(body.method, "getGenesisHash"); controller.abort();
         assert.equal(init!.signal!.aborted, true);
@@ -348,7 +469,7 @@ test("settlement refuses forged events, wrong bytes, token deltas and nonfinaliz
   for (const change of [
     (r: ReturnType<typeof f.receipt>) => { r.transaction[0] = "forged"; },
     (r: ReturnType<typeof f.receipt>) => { r.meta.postTokenBalances[1]!.uiTokenAmount.amount = "1"; },
-    (r: ReturnType<typeof f.receipt>) => { r.meta.logMessages[1] = `Program data: ${event(pending.submission, 1n, 2n)}`; },
+    (r: ReturnType<typeof f.receipt>) => { r.meta.logMessages![1] = `Program data: ${event(pending.submission, 1n, 2n)}`; },
     (r: ReturnType<typeof f.receipt>) => { r.meta.logMessages = [`Program ${JUPITER_SWAP_PROGRAM} invoke [1]`, `Program data: ${event(pending.submission)}`, `Program ${JUPITER_SWAP_PROGRAM} success`]; },
     (r: ReturnType<typeof f.receipt>) => { r.meta.postBalances[0]!--; },
     (r: ReturnType<typeof f.receipt>) => { r.meta.preTokenBalances[0]!.owner = key(90); },
@@ -372,4 +493,230 @@ test("settlement refuses forged events, wrong bytes, token deltas and nonfinaliz
   }
   assert.throws(() => settleSolanaReceipt(pending.submission, failed, { confirmationStatus: "finalized", slot: SLOT + 1 }, NOW + 1));
   assert.throws(() => solanaVaultEvents([`Program ${PROGRAM} invoke [1]`, "Log truncated"], PROGRAM));
+});
+
+/** A second provider's view of the fixture, with selected reads replaced. */
+function provider(f: Awaited<ReturnType<typeof fixture>>, overrides: Partial<Record<string, (params: readonly unknown[]) => unknown>>): SolanaLiveRead {
+  return async (method, params = []) => overrides[method] ? overrides[method]!(params) : f.read(method, params);
+}
+
+test("a fill is booked only when both providers return the same finalized receipt (audit G3-1)", async () => {
+  // The primary withholds nothing but forges; the honest fallback has never seen the signature.
+  const f = await fixture(); const executor = createSolanaExecutor(f.options);
+  const pending = await executor.execute(f.intent); f.controls.finalized = true;
+  f.controls.fallback = provider(f, { getSignatureStatuses: () => ({ context: { slot: SLOT }, value: [null] }), getTransaction: () => null,
+    getEpochInfo: () => ({ absoluteSlot: SLOT + 2, blockHeight: 1199 }),
+    getAccountInfo: () => ({ context: { slot: SLOT + 2 }, value: rpcAccount(state(f.intent.owner, f.session, 0n), PROGRAM) }) });
+  assert.equal((await executor.reconcile(f.intent.owner, f.intent.requestId))?.status, "pending");
+  assert.equal(f.getRecord()!.status, "pending");
+  // Both providers return internally consistent receipts with different fills.
+  f.controls.fallback = provider(f, { getTransaction: () => f.receipt(pending.submission, false, 2_500_000n) });
+  assert.equal((await executor.reconcile(f.intent.owner, f.intent.requestId))?.status, "pending");
+  // A provider that cannot answer leaves it pending too.
+  f.controls.fallback = provider(f, { getTransaction: () => { throw new Error("provider down"); } });
+  await assert.rejects(executor.reconcile(f.intent.owner, f.intent.requestId));
+  assert.equal(f.getRecord()!.status, "pending");
+  // A transport with only one provider can never book.
+  const single = { ...f.options.rpc }; delete single.readEach;
+  await assert.rejects(reconcileSolanaSubmission(single, f.options.journal, f.intent.owner, f.intent.requestId, () => NOW + 1), /two independent RPC providers/);
+  assert.equal(f.getRecord()!.status, "pending");
+  f.controls.fallback = null;
+  const settled = await executor.reconcile(f.intent.owner, f.intent.requestId);
+  assert.equal(settled?.status, "finalized"); assert.equal(settled?.settlement?.amountOut, "2000000");
+});
+
+test("an expiry is booked only when both providers prove it; their heights may differ (audit G3-1)", async () => {
+  const proof = (blockHeight: number) => ({ getSignatureStatuses: () => ({ context: { slot: SLOT }, value: [null] }), getTransaction: () => null,
+    getEpochInfo: () => ({ absoluteSlot: SLOT + 2, blockHeight }) });
+  for (const [primary, fallback, expected] of [[1201, 1199, "pending"], [1201, 1300, "expired"]] as const) {
+    const f = await fixture(); f.controls.failSend = true; const executor = createSolanaExecutor(f.options);
+    await executor.execute(f.intent);
+    const view = (height: number, seq = 0n) => provider(f, { ...proof(height),
+      getAccountInfo: () => ({ context: { slot: SLOT + 2 }, value: rpcAccount(state(f.intent.owner, f.session, seq), PROGRAM) }) });
+    const rpc: SolanaLiveRpc = { read: callback => callback(view(primary)), readEach: async callback => [await callback(view(primary)), await callback(view(fallback))],
+      send: async wire => wire };
+    const result = await reconcileSolanaSubmission(rpc, f.options.journal, f.intent.owner, f.intent.requestId, () => NOW + 1);
+    assert.equal(result!.status, expected);
+    if (result!.settlement?.status === "expired") assert.equal(result!.settlement.expiryProof.blockHeight, "1201");
+  }
+  // The fallback saw the sequence move: the swap may have landed.
+  const f = await fixture(); f.controls.failSend = true; const executor = createSolanaExecutor(f.options);
+  await executor.execute(f.intent);
+  const view = (seq: bigint) => provider(f, { ...proof(1201),
+    getAccountInfo: () => ({ context: { slot: SLOT + 2 }, value: rpcAccount(state(f.intent.owner, f.session, seq), PROGRAM) }) });
+  const rpc: SolanaLiveRpc = { read: callback => callback(view(0n)), readEach: async callback => [await callback(view(0n)), await callback(view(1n))], send: async wire => wire };
+  assert.equal((await reconcileSolanaSubmission(rpc, f.options.journal, f.intent.owner, f.intent.requestId, () => NOW + 1))!.status, "pending");
+});
+
+test("the vault program must verify as immutable and audited on both providers before anything is signed (audit G3-5)", async () => {
+  for (const lie of ["upgradeable", "substituted"] as const) {
+    const f = await fixture();
+    f.controls.fallback = provider(f, { getAccountInfo: params => {
+      const [address, config] = params as [string, { dataSlice: { offset: number; length: number } }];
+      if (address !== f.programDataAddress) return f.read("getAccountInfo", params);
+      const bytes = Buffer.from(f.programData); if (lie === "upgradeable") bytes[12] = 1; else bytes[bytes.length - 1]! ^= 1;
+      return { context: { slot: SLOT }, value: { ...rpcAccount(bytes.subarray(config.dataSlice.offset, config.dataSlice.offset + config.dataSlice.length), LOADER), space: bytes.length } };
+    } });
+    await assert.rejects(verifySolanaVaultDeployment(f.options.rpc, PROGRAM, f.options.programBinarySha256), /unsafe-program/, lie);
+    await assert.rejects(createSolanaExecutor(f.options).execute(f.intent), /unsafe-program/, lie);
+    assert.ok(!f.calls.includes("persist") && !f.calls.includes("send"), lie);
+  }
+});
+
+test("a verified immutable deployment is cached per provider pair; failures are not", async () => {
+  const f = await fixture(); let slices = 0;
+  const counting: SolanaLiveRead = async (method, params = []) => {
+    if (method === "getAccountInfo" && (params[0] === PROGRAM || params[0] === f.programDataAddress)) slices++;
+    return f.read(method, params);
+  };
+  const rpc: SolanaLiveRpc = { providerKey: `cache-test-${Math.random()}`, read: callback => callback(counting),
+    readEach: async callback => [await callback(counting), await callback(counting)], send: async wire => wire };
+  await assert.rejects(verifySolanaVaultDeployment(rpc, PROGRAM, "0".repeat(64)), /unsafe-program/);
+  const failed = slices;
+  await assert.rejects(verifySolanaVaultDeployment(rpc, PROGRAM, "0".repeat(64)), /unsafe-program/);
+  assert.equal(slices, failed * 2, "a failure is checked again");
+  slices = 0;
+  assert.deepEqual(await verifySolanaVaultDeployment(rpc, PROGRAM, f.options.programBinarySha256), { slot: SLOT });
+  const verified = slices; assert.ok(verified >= 4, "both providers read the program and its data");
+  assert.deepEqual(await verifySolanaVaultDeployment(rpc, PROGRAM, f.options.programBinarySha256), { slot: SLOT });
+  assert.equal(slices, verified, "the second check is served from the cache");
+});
+
+test("a finalized swap whose logs were truncated or not recorded settles from its token deltas and the vault's finalized sequence (audit execution F2)", async () => {
+  const truncated = [`Program ${PROGRAM} invoke [1]`, `Program ${TOKEN_2022_PROGRAM} invoke [2]`, `Program ${TOKEN_2022_PROGRAM} success`,
+    `Program ${JUPITER_SWAP_PROGRAM} invoke [2]`, "Program log: Instruction: SharedAccountsRoute", "Log truncated"];
+  for (const logs of [truncated, null]) {
+    const f = await fixture(); const executor = createSolanaExecutor(f.options);
+    const pending = await executor.execute(f.intent); f.controls.finalized = true;
+    const raw = f.receipt(pending.submission); raw.meta.logMessages = logs;
+    const status = { confirmationStatus: "finalized", slot: SLOT + 1, err: null };
+    const evidence = { address: f.intent.vault, slot: SLOT + 2, state: (await import("../../packages/core/src/solana-live")).decodeSolanaVaultAccount(state(f.intent.owner, f.session, 1n)) };
+    // Without the vault's finalized sequence it stays unsettled, as before.
+    assert.throws(() => settleSolanaReceipt(pending.submission, raw, status, NOW + 1));
+    for (const bad of [{ ...evidence, slot: SLOT }, { ...evidence, address: key(90) },
+      { ...evidence, state: { ...evidence.state, seq: 0n } }, { ...evidence, state: { ...evidence.state, owner: key(90) } }]) {
+      assert.throws(() => settleSolanaReceipt(pending.submission, raw, status, NOW + 1, bad));
+    }
+    const settled = settleSolanaReceipt(pending.submission, raw, status, NOW + 1, evidence);
+    assert.equal(settled.status, "finalized"); assert.equal(settled.amountIn, "1000000"); assert.equal(settled.amountOut, "2000000");
+    // Token rows still bound the fill.
+    const short = structuredClone(raw); short.meta.postTokenBalances[1]!.uiTokenAmount.amount = "1";
+    assert.throws(() => settleSolanaReceipt(pending.submission, short, status, NOW + 1, evidence));
+    // End to end: both providers serve the truncated receipt and the advanced vault.
+    f.controls.fallback = provider(f, { getTransaction: () => raw });
+    const through = { ...f.options.rpc, read: f.options.rpc.read, readEach: async <T,>(callback: (read: SolanaLiveRead) => Promise<T>) =>
+      [await callback(provider(f, { getTransaction: () => raw })), await callback(f.controls.fallback!)] };
+    const booked = await reconcileSolanaSubmission(through, f.options.journal, f.intent.owner, f.intent.requestId, () => NOW + 1);
+    assert.equal(booked!.status, "finalized"); assert.equal(booked!.settlement!.amountOut, "2000000");
+  }
+  // The vault's sequence did not move: never booked.
+  const f = await fixture(); const executor = createSolanaExecutor(f.options);
+  const pending = await executor.execute(f.intent); f.controls.finalized = true; f.controls.vaultSeqAfter = 0n;
+  const raw = f.receipt(pending.submission); raw.meta.logMessages = truncated;
+  f.controls.fallback = provider(f, { getTransaction: () => raw });
+  const through = { ...f.options.rpc, readEach: async <T,>(callback: (read: SolanaLiveRead) => Promise<T>) =>
+    [await callback(f.controls.fallback!), await callback(f.controls.fallback!)] };
+  await assert.rejects(reconcileSolanaSubmission(through, f.options.journal, f.intent.owner, f.intent.requestId, () => NOW + 1));
+  assert.equal(f.getRecord()!.status, "pending");
+});
+
+test("truncated logs keep strict provenance: a failed receipt needs no logs, a visible event must still match", async () => {
+  const f = await fixture(); const pending = await createSolanaExecutor(f.options).execute(f.intent);
+  const status = { confirmationStatus: "finalized", slot: SLOT + 1, err: null };
+  const evidence = { address: f.intent.vault, slot: SLOT + 2, state: (await import("../../packages/core/src/solana-live")).decodeSolanaVaultAccount(state(f.intent.owner, f.session, 1n)) };
+  const failed = f.receipt(pending.submission, true);
+  for (const logs of [[`Program ${PROGRAM} invoke [1]`, "Log truncated"], null]) {
+    failed.meta.logMessages = logs;
+    assert.equal(settleSolanaReceipt(pending.submission, failed, { ...status, err: failed.meta.err }, NOW + 1).status, "failed");
+  }
+  const raw = f.receipt(pending.submission);
+  // A forged event before the cut still disagrees with the token rows.
+  raw.meta.logMessages = [`Program ${PROGRAM} invoke [1]`, `Program data: ${event(pending.submission, 1_000_000n, 3_000_000n)}`, "Log truncated"];
+  assert.throws(() => settleSolanaReceipt(pending.submission, raw, status, NOW + 1, evidence));
+  // The marker only ever ends a log.
+  raw.meta.logMessages = [`Program ${PROGRAM} invoke [1]`, "Log truncated", `Program ${PROGRAM} success`];
+  assert.throws(() => settleSolanaReceipt(pending.submission, raw, status, NOW + 1, evidence));
+  // Complete logs still need exactly one matching event, evidence or not.
+  raw.meta.logMessages = [`Program ${PROGRAM} invoke [1]`, `Program ${PROGRAM} success`];
+  assert.throws(() => settleSolanaReceipt(pending.submission, raw, status, NOW + 1, evidence));
+});
+
+/** The compute-unit limit and price the signed swap carries. */
+function computeBudget(submission: SolanaSignedSubmission): { units: number; price: bigint } {
+  const tx = getTransactionDecoder().decode(Buffer.from(submission.signedTransactionBase64, "base64"));
+  const compiled = getCompiledTransactionMessageDecoder().decode(tx.messageBytes);
+  const [limit, price] = compiled.instructions.slice(0, 2).map(ix => Buffer.from(ix.data!));
+  assert.equal(compiled.staticAccounts[compiled.instructions[0]!.programAddressIndex], "ComputeBudget111111111111111111111111111111");
+  assert.equal(limit![0], 2); assert.equal(price![0], 3);
+  return { units: limit!.readUInt32LE(1), price: price!.readBigUInt64LE(1) };
+}
+
+test("swaps pay a bounded priority fee from recent fees on the accounts they write (audit G2-1)", async () => {
+  const cases: Array<{ fees: number[]; min?: string; max?: string; maxFee?: string; error?: boolean; price: bigint }> = [
+    { fees: [], price: 0n },
+    { fees: [0, 5_000, 100, 200], price: 200n }, // 75th percentile, nearest rank
+    { fees: [10 ** 12], price: 1_000_000n }, // the default maximum
+    { fees: [10 ** 12], max: "40000", price: 40_000n },
+    { fees: [], min: "50", price: 50n },
+    { fees: [10], error: true, min: "7", price: 7n }, // an unanswered estimate pays the minimum
+    // 2,100,000 lamports leaves 50,720 after rent and signatures: 211,333 per unit at 240,000 units.
+    { fees: [10 ** 12], maxFee: "2100000", price: 211_333n },
+  ];
+  for (const item of cases) {
+    const f = await fixture(); f.controls.priorityFees = item.fees; f.controls.priorityError = !!item.error;
+    if (item.min) f.options.computeUnitPriceMicroLamports = item.min;
+    if (item.max) f.options.maxComputeUnitPriceMicroLamports = item.max;
+    if (item.maxFee) f.options.maxFeeLamports = item.maxFee;
+    const pending = await createSolanaExecutor(f.options).execute(f.intent);
+    const label = `fees=${item.fees} min=${item.min} max=${item.max} maxFee=${item.maxFee} error=${item.error}`;
+    assert.deepEqual(computeBudget(pending.submission), { units: 240_000, price: item.price }, label);
+    // The fixture's getFeeForMessage reports only the 10,000 signature fee; the
+    // reservation still covers what the runtime will charge.
+    assert.equal(pending.submission.feeLamports, (10_000n + (item.price * 240_000n + 999_999n) / 1_000_000n).toString(), label);
+    assert.ok(BigInt(pending.submission.feeLamports) + BigInt(pending.submission.rentLamports) <= BigInt(pending.submission.maxFeeLamports));
+    const accounts = f.priorityReads[0] as string[];
+    for (const writable of [f.intent.vault, f.input, f.output, f.temp, f.feePayer, ...f.route.accounts.filter(meta => meta.isWritable).map(meta => meta.address)]) {
+      assert.ok(accounts.includes(writable), writable);
+    }
+  }
+  const f = await fixture();
+  assert.throws(() => createSolanaExecutor({ ...f.options, computeUnitPriceMicroLamports: "2", maxComputeUnitPriceMicroLamports: "1" }), /fee-cap/);
+  // A minimum the fee budget cannot carry is refused before anything is signed.
+  const g = await fixture(); g.options.computeUnitPriceMicroLamports = "300000"; g.options.maxFeeLamports = "2100000";
+  await assert.rejects(createSolanaExecutor(g.options).execute(g.intent), /fee-cap/);
+  assert.ok(!g.calls.includes("persist"));
+});
+
+test("a fee payer that can fund a swap only at a lower priority price pays that price instead of refusing it (status gates exits on rent and signatures)", async () => {
+  // What status() calls one swap's minimum for these fixture rents: the temporary account's rent and both signatures.
+  const RENT = 2_039_280n, minimum = RENT + 10_000n;
+  // Congestion: recent fees of 1,000,000 micro-lamports per CU would cost 240,000 lamports at 240,000 units.
+  const cases: Array<{ payer: bigint; min?: string; price: bigint }> = [
+    // 100,000 lamports above the minimum: 416,666 per unit is all it can fund.
+    { payer: minimum + 100_000n, price: 416_666n },
+    // Exactly the minimum: the swap still goes, with no priority fee.
+    { payer: minimum, price: 0n },
+    // Plenty: the recent price, as before.
+    { payer: 100_000_000n, price: 1_000_000n },
+    // A configured minimum the payer can carry: the clamp never goes below it.
+    { payer: minimum + 100_000n, min: "400000", price: 416_666n },
+  ];
+  for (const item of cases) {
+    const f = await fixture(); f.controls.priorityFees = [1_000_000]; f.controls.payerLamports = Number(item.payer);
+    if (item.min) f.options.computeUnitPriceMicroLamports = item.min;
+    const label = `payer=${item.payer} min=${item.min}`;
+    const pending = await createSolanaExecutor(f.options).execute(f.intent);
+    assert.deepEqual(computeBudget(pending.submission), { units: 240_000, price: item.price }, label);
+    const fee = BigInt(pending.submission.feeLamports), rent = BigInt(pending.submission.rentLamports);
+    assert.equal(rent, RENT, label);
+    assert.ok(fee + rent <= item.payer, `${label}: the payer funds what it signs`);
+    assert.ok(fee + rent <= BigInt(pending.submission.maxFeeLamports), label);
+  }
+  // Below the minimum, or a configured minimum price it cannot fund: refused before anything is signed.
+  for (const item of [{ payer: minimum - 1n }, { payer: minimum + 100_000n, min: "500000" }]) {
+    const f = await fixture(); f.controls.priorityFees = []; f.controls.payerLamports = Number(item.payer);
+    if (item.min) f.options.computeUnitPriceMicroLamports = item.min;
+    await assert.rejects(createSolanaExecutor(f.options).execute(f.intent), /fee-cap/, `payer=${item.payer} min=${item.min}`);
+    assert.ok(!f.calls.includes("persist"));
+  }
 });

@@ -6,7 +6,7 @@ export const SOLANA_RESPONSE_LIMIT_BYTES = 262_144;
 const ERROR_MESSAGES = {
   "missing-config": "MERRYMEN_SOLANA_RPC_MAINNET is required.",
   "invalid-config": "Solana RPC endpoints must be HTTPS URLs without user information or fragments.",
-  "invalid-fallback": "Solana RPC fallback must use a different hostname from the primary endpoint.",
+  "invalid-fallback": "Live Solana trading needs MERRYMEN_SOLANA_RPC_MAINNET_FALLBACK: an independent mainnet provider on a different hostname from the primary endpoint.",
   "invalid-timeout": "Solana RPC timeout must be between 1 and 30000 milliseconds.",
   timeout: "Solana read timed out.",
   network: "Solana read failed; check connectivity and endpoint configuration.",
@@ -19,6 +19,7 @@ const ERROR_MESSAGES = {
   unhealthy: "Solana RPC did not report healthy status.",
   "unsupported-method": "Only allowlisted read-only Solana RPC methods are supported.",
   cancelled: "Solana submission was cancelled before completion.",
+  "no-quorum": "Live Solana settlement needs the same answer from two independent RPC providers.",
 } as const;
 
 export class SolanaRpcError extends Error {
@@ -30,6 +31,8 @@ export class SolanaRpcError extends Error {
 }
 
 export type SolanaMainnetRpcConfig = Readonly<{ url: string; fallbackUrl?: string }>;
+/** Live trading's providers: both are always present and on different hostnames. */
+export type SolanaLiveRpcConfig = Readonly<{ url: string; fallbackUrl: string }>;
 function endpoint(raw: string): string {
   let url: URL;
   try { url = new URL(raw); } catch { throw new SolanaRpcError("invalid-config"); }
@@ -47,8 +50,22 @@ export function readSolanaMainnetRpcConfig(
   const fallback = source.MERRYMEN_SOLANA_RPC_MAINNET_FALLBACK?.trim();
   if (!fallback) return { url };
   const fallbackUrl = endpoint(fallback);
-  if (new URL(url).hostname === new URL(fallbackUrl).hostname) throw new SolanaRpcError("invalid-fallback");
+  // A trailing dot names the same host ("rpc.example." is "rpc.example").
+  const host = (value: string) => new URL(value).hostname.replace(/\.$/, "");
+  if (host(url) === host(fallbackUrl)) throw new SolanaRpcError("invalid-fallback");
   return { url, fallbackUrl };
+}
+/**
+ * Live trading refuses to run on one provider's word. Settlement, expiry and the
+ * vault deployment are confirmed by two providers on different hostnames, each
+ * of which proves it serves mainnet-beta on every session.
+ */
+export function readSolanaLiveRpcConfig(
+  source: Readonly<Record<string, string | undefined>> = env,
+): SolanaLiveRpcConfig {
+  const config = readSolanaMainnetRpcConfig(source);
+  if (!config.fallbackUrl) throw new SolanaRpcError("invalid-fallback");
+  return { url: config.url, fallbackUrl: config.fallbackUrl };
 }
 
 /** Bounds both connection and response streaming, even when an injected fetch ignores abort. */

@@ -17,6 +17,10 @@ export async function POST(req: Request) {
     if (body.stage === "prepare" && body.action === "withdraw" && typeof body.mint === "string" && typeof body.amountRaw === "string") {
       return { prepared: await app.prepareOwnerAction(scope, { action: "withdraw", mint: body.mint, amountRaw: body.amountRaw }) };
     }
+    // Native SOL held by the vault account itself (above its rent reserve), in lamports.
+    if (body.stage === "prepare" && body.action === "withdraw-sol" && body.mint === undefined && typeof body.amountRaw === "string") {
+      return { prepared: await app.prepareOwnerAction(scope, { action: "withdraw-sol", amountRaw: body.amountRaw }) };
+    }
     if (body.stage === "submit" && typeof body.signedTransactionBase64 === "string") {
       return { result: await app.submitOwnerAction(scope, { signedTransactionBase64: body.signedTransactionBase64 }) };
     }

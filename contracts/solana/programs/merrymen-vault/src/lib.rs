@@ -230,13 +230,19 @@ pub mod merrymen_vault {
         let vault_bump = [a.vault.bump];
         let vault_seeds: &[&[u8]] = &[b"vault", owner.as_ref(), &vault_bump];
         // A public PDA can receive unsolicited tokens. Refund donations to the owner before funding so they
-        // cannot deny service or enlarge the amount entrusted to the route.
+        // cannot deny service or enlarge the amount entrusted to the route. The owner's input ATA is needed
+        // only then: an owner who closed it (unwrapping WSOL, reclaiming rent) must not block every swap.
+        // A donation with no refund account fails closed rather than being counted as trade input.
         if a.temp_input.amount > 0 {
+            let refund = a
+                .owner_refund
+                .as_ref()
+                .ok_or(error!(VaultError::RefundAccount))?;
             transfer(
                 &a.input_token_program,
                 &a.temp_input,
                 &a.input_mint,
-                &a.owner_refund,
+                refund,
                 a.swap_authority.to_account_info(),
                 a.temp_input.amount,
                 swap_seeds,
@@ -465,17 +471,21 @@ fn check_route_accounts(remaining: &[AccountInfo], a: &ExecuteSwap) -> Result<()
                 && key != a.session_signer.key()
                 && key != a.fee_payer.key()
                 && key != a.vault_input.key()
-                && key != a.owner_refund.key()
+                && a.owner_refund.as_ref().map_or(true, |r| key != r.key())
                 && info.owner != &crate::ID,
             VaultError::Route
         );
         if info.owner == &anchor_spl::token::ID || info.owner == &spl_token_2022::ID {
             let data = info.try_borrow_data()?;
-            // Token accounts have the same first165 bytes in both supported programs.
-            if data.len() >= 165
-                && Pubkey::new_from_array(data[32..64].try_into().unwrap()) == a.vault.key()
-            {
-                require_keys_eq!(key, a.vault_output.key(), VaultError::Route);
+            // Token accounts have the same first 165 bytes in both supported programs.
+            if data.len() >= 165 {
+                let authority = Pubkey::new_from_array(data[32..64].try_into().unwrap());
+                if authority == a.vault.key() {
+                    require_keys_eq!(key, a.vault_output.key(), VaultError::Route);
+                }
+                // The owner's token accounts stay out of the route whether or not the
+                // refund account was passed, so an omitted refund ATA is still excluded.
+                require!(authority != a.vault.owner, VaultError::Route);
             }
         }
     }
@@ -581,8 +591,10 @@ pub struct ExecuteSwap<'info> {
     pub jupiter_program: UncheckedAccount<'info>,
     pub associated_token_program: Program<'info, AssociatedToken>,
     pub system_program: Program<'info, System>,
+    /// The owner's canonical input ATA. Required only when `temp_input` already holds a
+    /// donation; otherwise the client passes this program's ID to leave it out.
     #[account(mut,associated_token::mint=input_mint,associated_token::authority=vault.owner,associated_token::token_program=input_token_program)]
-    pub owner_refund: InterfaceAccount<'info, TokenAccount>,
+    pub owner_refund: Option<InterfaceAccount<'info, TokenAccount>>,
 }
 #[event]
 pub struct SwapExecuted {
@@ -636,6 +648,9 @@ pub enum VaultError {
     Route,
     #[msg("Integer overflow")]
     Overflow,
+    /// Appended so earlier codes keep their numbers: 6010.
+    #[msg("A donation is waiting in the swap account and the owner's refund account is missing")]
+    RefundAccount,
 }
 
 #[cfg(test)]

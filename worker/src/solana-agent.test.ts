@@ -15,7 +15,7 @@ import { ensureSolanaTradingSchema } from "./solana-trading-store";
 const NOW = 1_000_000;
 const limits = { perTradeUsdg: "10000000", dailyUsdg: "100000000", maxOpsPerDay: 20, maxDrawdownBps: 2000, expiresAtMs: NOW + 1000000 };
 const strategy = { enabled: true, targetSolBps: 5000, rebalanceBps: 500, tradeUsdgRaw: "5000000", intervalSeconds: 60 };
-const input = { cashRaw: "100000000", wsolRaw: "0", solValueUsdgRaw: "0", limits, strategy, mode: "paper" as const, revision: 3, nowMs: NOW };
+const input = { cashRaw: "100000000", wsolRaw: "0", solValueUsdgRaw: "0", limits, strategy, mode: "paper" as const, revision: 3, nowMs: NOW, attempt: 0 };
 test("rebalance sizes integer buys to the strictest cap without using floating point", () => {
   const buy = planSolanaRebalance(input)!;
   assert.equal(buy.inputMint, SOLANA_USDG_MINT); assert.equal(buy.amountRaw, "5000000");
@@ -38,10 +38,12 @@ test("a rebalance sell never asks for more WSOL than the signed per-trade SOL li
   // Buys are bounded by the USDG limits as before.
   assert.equal(planSolanaRebalance({ ...input, limits: capped })!.amountRaw, "5000000");
 });
-test("request identity is stable inside an interval and changes only at next interval or settings revision", () => {
-  assert.equal(planSolanaRebalance(input)!.requestId, planSolanaRebalance({ ...input, nowMs: NOW + 1000 })!.requestId);
-  assert.notEqual(planSolanaRebalance(input)!.requestId, planSolanaRebalance({ ...input, nowMs: NOW + 60000 })!.requestId);
-  assert.notEqual(planSolanaRebalance(input)!.requestId, planSolanaRebalance({ ...input, revision: 4 })!.requestId);
+test("request identity names the settings revision and the attempt, never the clock", () => {
+  assert.equal(planSolanaRebalance(input)!.requestId, "rebalance-3-0");
+  assert.equal(planSolanaRebalance({ ...input, nowMs: NOW + 999_000 })!.requestId, "rebalance-3-0", "16 one-minute intervals later");
+  assert.equal(planSolanaRebalance({ ...input, attempt: 1 })!.requestId, "rebalance-3-1");
+  assert.equal(planSolanaRebalance({ ...input, revision: 4, attempt: 7 })!.requestId, "rebalance-4-7");
+  for (const attempt of [-1, 0.5, NaN]) assert.throws(() => planSolanaRebalance({ ...input, attempt }), /attempt/);
   assert.equal(planSolanaRebalance({ ...input, strategy: { ...strategy, enabled: false } }), null);
   assert.throws(() => planSolanaRebalance({ ...input, nowMs: limits.expiresAtMs }), /expired/);
 });
@@ -233,4 +235,125 @@ test("an operator hold stops the worker and every new trade, for one tenant or a
   assert.match(await runSolanaHoldCommand(f.db, ["list"], NOW), /No Solana operator holds/);
   assert.deepEqual((await createSolanaAgent({ db: f.db, runtime: f.actual, market: f.market, now: () => NOW }).tick()).map(r => r.outcome), ["submitted"]);
   assert.equal(await f.trades(), 1);
+});
+
+const TENANT = "0x1111111111111111111111111111111111111111" as const, OWNER = SOLANA_WRAPPED_SOL_MINT;
+/** A paper account on a shared clock, with status, quote and trade calls counted. */
+async function paperAccount(t: import("node:test").TestContext, interval = 86_400, targetSolBps = strategy.targetSolBps) {
+  const raw = new DatabaseSync(":memory:"), db = wrapSqlite(raw); t.after(() => raw.close());
+  const clock = { now: NOW }, calls = { status: 0, quote: 0, trade: 0 }, scope = { tenant: TENANT, owner: OWNER };
+  const bindings = new SqlSolanaBindingStore(async () => db, "sqlite", () => clock.now);
+  const market: SolanaPaperMarket = {
+    readMint: async mint => ({ address: mint, program: mint === SOLANA_USDG_MINT ? "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb" : "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+      decimals: mint === SOLANA_USDG_MINT ? 6 : 9, slot: 10, observedAtMs: clock.now, buyBlockedReasons: [] }),
+    quote: async i => { calls.quote++; return { source: "jupiter", inputMint: i.inputMint, outputMint: i.outputMint, inAmount: i.amountRaw,
+      outAmount: i.amountRaw, minOutAmount: (BigInt(i.amountRaw) * 995n / 1000n).toString(), slippageBps: i.slippageBps,
+      contextSlot: 10, quotedAtMs: clock.now, expiresAtMs: clock.now + 30000 }; },
+  };
+  const rpc = { read: async () => { throw new Error("No live RPC in a paper worker test"); }, send: async () => { throw new Error("Must never send"); } };
+  const paperLimits = { ...limits, expiresAtMs: NOW + 7 * 86_400_000 - 1 };
+  await bindings.bind(TENANT, "did:privy:interval", OWNER);
+  await bindings.settings(TENANT, OWNER, 0, "paper", paperLimits);
+  const actual = createSolanaAppRuntime({ db, env: {}, market, rpc, now: () => clock.now });
+  await actual.setupPaper(scope, { initialCashRaw: input.cashRaw, limits: paperLimits });
+  await bindings.strategy(TENANT, OWNER, 1, { ...strategy, intervalSeconds: interval, targetSolBps });
+  const runtime: Pick<typeof actual, "status" | "trade"> = {
+    status: async (...args) => { calls.status++; return actual.status(...args); },
+    trade: async (...args) => { calls.trade++; return actual.trade(...args); },
+  };
+  const agent = () => createSolanaAgent({ db, runtime, market, now: () => clock.now });
+  const trades = async () => (await actual.status(scope)).paper!.trades.map(trade => trade.requestId);
+  return { db, clock, calls, scope, bindings, market, actual, runtime, agent, trades };
+}
+
+test("the strategy interval is a durable minimum spacing between attempts, not a clock bucket (audit agent-deploy F2)", async t => {
+  // The audit's run: a daily strategy traded at boundary-30s and again at the boundary, 30 s apart.
+  const f = await paperAccount(t), boundary = Math.ceil(NOW / 86_400_000) * 86_400_000;
+  f.clock.now = boundary - 30_000;
+  const agent = f.agent();
+  assert.deepEqual((await agent.tick()).map(r => r.outcome), ["submitted"]);
+  f.clock.now = boundary;
+  const before = { ...f.calls };
+  assert.deepEqual((await agent.tick()).map(r => r.outcome), ["waiting"]);
+  assert.deepEqual(f.calls, before, "no status read, quote or trade until the interval is due");
+  // A restarted worker reads the same durable schedule.
+  assert.deepEqual((await f.agent().tick()).map(r => r.outcome), ["waiting"]);
+  assert.deepEqual(await f.trades(), ["rebalance-2-0"]);
+  // Admission enforces the spacing itself: a fresh request inside the interval is refused under the lock.
+  const early = planSolanaRebalance({ ...input, limits: { ...limits, expiresAtMs: f.clock.now + 60_000 }, revision: 2, attempt: 1, nowMs: f.clock.now })!;
+  await assert.rejects(f.actual.trade(f.scope, { mode: "paper", intent: early, autonomousRevision: 2 }), /not due/);
+  // One full interval after the last attempt the strategy checks, and trades, again.
+  f.clock.now = boundary - 30_000 + 86_400_000;
+  assert.deepEqual((await agent.tick()).map(r => r.outcome), ["submitted"]);
+  assert.deepEqual(await f.trades(), ["rebalance-2-1", "rebalance-2-0"]);
+  // Manual trades cannot take the strategy's request IDs.
+  await assert.rejects(f.actual.trade(f.scope, { mode: "paper", intent: { ...early, requestId: "rebalance-2-2" } }), /belong to the autonomous strategy/);
+});
+
+test("a strategy in band is not re-checked, re-read or re-quoted until its interval passes", async t => {
+  // An all-USDG account with a 0% SOL target: nothing to do.
+  const f = await paperAccount(t, 3_600, 0);
+  const agent = f.agent();
+  assert.deepEqual((await agent.tick()).map(r => r.outcome), ["held"]);
+  const after = { ...f.calls };
+  f.clock.now += 15_000;
+  assert.deepEqual((await agent.tick()).map(r => r.outcome), ["waiting"]);
+  assert.deepEqual(f.calls, after);
+  f.clock.now += 3_600_000;
+  assert.deepEqual((await agent.tick()).map(r => r.outcome), ["held"]);
+  assert.equal(f.calls.status, after.status + 1, "checked again once the interval passed");
+});
+
+test("an attempt another worker already admitted is reported as a replay, not a submission (audit agent-deploy F5)", async t => {
+  const f = await paperAccount(t);
+  // A second worker admits this account's attempt while the first is reading status.
+  const racing: Pick<typeof f.actual, "status" | "trade"> = {
+    status: async (...args) => {
+      const status = await f.actual.status(...args);
+      await createSolanaAgent({ db: f.db, runtime: f.actual, market: f.market, now: () => f.clock.now }).tick();
+      return status;
+    },
+    trade: async (...args) => { f.calls.trade++; return f.actual.trade(...args); },
+  };
+  assert.deepEqual((await createSolanaAgent({ db: f.db, runtime: racing, market: f.market, now: () => f.clock.now }).tick()).map(r => r.outcome), ["replayed"]);
+  assert.equal(f.calls.trade, 0, "nothing was sent to admission");
+  assert.deepEqual(await f.trades(), ["rebalance-2-0"]);
+});
+
+test("a proven-expired live attempt is retried at once under a fresh request ID, never the expired one (audit G2-2)", async t => {
+  const raw = new DatabaseSync(":memory:"), db = wrapSqlite(raw); t.after(() => raw.close());
+  const clock = { now: NOW }, scope = { tenant: TENANT, owner: OWNER }, sent: string[] = [];
+  const bindings = new SqlSolanaBindingStore(async () => db, "sqlite", () => clock.now);
+  await bindings.bind(TENANT, "did:privy:retry", OWNER);
+  await bindings.settings(TENANT, OWNER, 0, "live", { ...limits, perTradeWsol: "100000000", dailyWsol: "1000000000" });
+  await bindings.strategy(TENANT, OWNER, 1, { ...strategy, intervalSeconds: 86_400 });
+  await ensureSolanaTradingSchema(db);
+  let pending: unknown[] = [];
+  // Admission as the store records it: one pending submission and its attempt, written together.
+  const runtime = {
+    status: async () => ({ paper: null, live: { balances: {}, tradable: { cashUsdg: "100000000", wsolRaw: "0" }, pending, ready: true, canExit: true, blockers: [] } }),
+    trade: async (_scope: unknown, request: { intent: { requestId: string } }) => {
+      const id = request.intent.requestId; sent.push(id);
+      await db.prepare(`INSERT INTO solana_runtime_submissions(tenant,owner,request_id,vault,sequence,signature,status,created_at_ms,notional_raw,submission_json)
+        VALUES(?,?,?,?,?,?,'pending',?,?,?)`).run(TENANT, OWNER, id, "vault", String(sent.length), `sig-${id}`, clock.now, "5000000", "{}");
+      await db.prepare("INSERT INTO solana_runtime_autonomous_attempts(tenant,owner,request_id,attempted_at_ms) VALUES(?,?,?,?)").run(TENANT, OWNER, id, clock.now);
+      return {};
+    },
+  } as unknown as Parameters<typeof createSolanaAgent>[0]["runtime"];
+  const market: SolanaPaperMarket = { readMint: async () => { throw new Error("unused"); }, quote: async () => { throw new Error("a buy needs no quote"); } };
+  const agent = createSolanaAgent({ db, runtime, market, now: () => clock.now });
+  assert.deepEqual((await agent.tick()).map(r => r.outcome), ["submitted"]);
+  pending = [{}];
+  clock.now += 60_000;
+  assert.deepEqual((await agent.tick()).map(r => r.outcome), ["waiting"], "a pending attempt keeps the interval");
+  // Finalized evidence proves the packet was dropped.
+  await db.prepare("UPDATE solana_runtime_submissions SET status='expired' WHERE request_id=?").run("rebalance-2-0"); pending = [];
+  clock.now += 60_000;
+  assert.deepEqual((await agent.tick()).map(r => r.outcome), ["submitted"], "retried within the same daily interval");
+  assert.deepEqual(sent, ["rebalance-2-0", "rebalance-2-1"]);
+  // A retry that landed (or failed on chain) keeps the interval again.
+  await db.prepare("UPDATE solana_runtime_submissions SET status='finalized' WHERE request_id=?").run("rebalance-2-1");
+  clock.now += 60_000;
+  assert.deepEqual((await agent.tick()).map(r => r.outcome), ["waiting"]);
+  assert.deepEqual(sent, ["rebalance-2-0", "rebalance-2-1"]);
 });

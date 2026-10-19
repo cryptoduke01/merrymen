@@ -391,7 +391,12 @@ export interface ExecuteSolanaSwapParameters {
   vaultOutput: string;
   swapAuthority: string;
   tempInput: string;
-  ownerRefund: string;
+  /**
+   * The owner's input-mint ATA, or null to leave it out. The program needs it only to
+   * return tokens already sitting in `tempInput` (a donation), and fails closed without it.
+   * Null encodes Anchor's absent optional account: the vault program ID, read-only.
+   */
+  ownerRefund: string | null;
   inputTokenProgram: string;
   outputTokenProgram: string;
   expectedSeq: bigint;
@@ -411,10 +416,13 @@ export function buildExecuteSolanaSwapInstruction(
     p.amountIn <= 0n ||
     p.minOut <= 0n ||
     p.slippageBps > 100 ||
-    p.routeData.length < 28 ||
+    // The program reads the route's last 19 bytes after an 8-byte discriminator
+    // and refuses anything shorter than 32 bytes.
+    p.routeData.length < 32 ||
     p.routeData.length > 2048 ||
     p.routeAccounts.length < 11 ||
-    p.routeAccounts.length > 64
+    p.routeAccounts.length > 64 ||
+    p.ownerRefund === p.programAddress
   )
     throw new SolanaVaultValidationError("Invalid Solana swap");
   const length = new Uint8Array(4);
@@ -434,7 +442,7 @@ export function buildExecuteSolanaSwapInstruction(
     meta(SOLANA_JUPITER_PROGRAM, 0),
     meta(SOLANA_ASSOCIATED_TOKEN_PROGRAM, 0),
     meta(SOLANA_SYSTEM_PROGRAM, 0),
-    meta(p.ownerRefund, 1),
+    p.ownerRefund === null ? meta(p.programAddress, 0) : meta(p.ownerRefund, 1),
   ];
   const routes = p.routeAccounts.map((a) =>
     meta(a.address, (a.role & 1) as 0 | 1),

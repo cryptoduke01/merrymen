@@ -1,8 +1,8 @@
 /** Tenant-bound Solana paper books and live broadcast journal, on SQLite or Postgres. */
 import { CHAINS, SOLANA_USDG_MINT, canonicalId } from "../../packages/core/src/ids";
-import { parseSolanaRawAmount, requireSolanaLiveSellLimits, solanaPaperAgentId, validateSolanaPaperLimits, validateSolanaQuote,
-  type SolanaPaperLimits } from "../../packages/core/src/solana";
-import { SOLANA_WRAPPED_SOL_MINT } from "../../packages/core/src/solana-live";
+import { parseSolanaRawAmount, parseSolanaSwapIntent, requireSolanaLiveSellLimits, solanaPaperAgentId, validateSolanaAccountLimits, validateSolanaQuote,
+  type SolanaPaperLimits, type SolanaQuote } from "../../packages/core/src/solana";
+import { SOLANA_SYSTEM_PROGRAM, SOLANA_WRAPPED_SOL_MINT } from "../../packages/core/src/solana-live";
 import type { Db } from "./db";
 import { openSecret, sealSecret } from "./store-crypto";
 import { applySolanaPaperCommit, solanaPaperIntentFingerprint, type SolanaPaperBook,
@@ -44,11 +44,54 @@ export interface SolanaPreparedSetup {
   transactionBase64: string; messageBase64: string; blockhash: string; lastValidBlockHeight: string;
   programId: string; vault: string; session: string; limits: SolanaPaperLimits;
   preparedAtMs: number; expiresAtMs: number; signature?: string; signedTransactionBase64?: string;
-  kind?: "session" | "revoke" | "withdraw" | "resume-buys";
+  kind?: "session" | "revoke" | "withdraw" | "withdraw-sol" | "resume-buys";
+  /** withdraw: the token and amount; withdraw-sol: the lamports taken from the vault account above its rent reserve. */
   mint?: string; amountRaw?: string;
+  /**
+   * WSOL withdraw only: native lamports that sat unsynced in the vault's WSOL
+   * account at prepare time (finalized read). The same transaction runs
+   * SyncNative first, so at least this much became WSOL; it is booked as
+   * zero-basis quarantine only as far as the withdrawal needs it.
+   */
+  syncedWsolRaw?: string;
+  /**
+   * WSOL withdraw only: what the withdrawn amount was worth when prepared. Checked
+   * fresh when the unsigned setup is saved; the signed save keeps that copy.
+   * Without it, a WSOL withdrawal leaves the high-water mark where it was.
+   */
+  withdrawValuation?: SolanaWithdrawValuation;
   status?: "pending" | "finalized" | "failed";
   expiryProof?: SolanaOwnerExpiryProof;
   priorSequence?: string; priorSessionEpoch?: string; priorVaultExisted?: boolean;
+}
+/**
+ * An executable WSOL→USDG exit quote for the withdrawal amount and the
+ * independent Pyth bound for the same amount, both read when it was prepared.
+ */
+export interface SolanaWithdrawValuation { quote: SolanaQuote; reference: SolanaReferenceBound }
+/**
+ * The lower of the two: neither Jupiter nor the reference can raise it alone, so
+ * the high-water mark never drops by more than the withdrawn WSOL was worth.
+ * Null when either is missing, malformed, stale or for another amount.
+ */
+export function solanaWithdrawValueUsdg(valuation: SolanaWithdrawValuation | undefined, amountRaw: string | undefined, nowMs: number): bigint | null {
+  if (!valuation || typeof valuation !== "object") return null;
+  try {
+    const intent = parseSolanaSwapIntent({ kind: "spl-swap", chain: CHAINS.solana, mode: "paper", requestId: "withdraw-valuation",
+      inputMint: SOLANA_WRAPPED_SOL_MINT, outputMint: SOLANA_USDG_MINT, amountRaw, slippageBps: valuation.quote?.slippageBps });
+    validateSolanaQuote(valuation.quote, intent, nowMs);
+    const bound = verifySolanaReferenceBound(valuation.reference, intent, nowMs);
+    const quoted = parseSolanaRawAmount(valuation.quote.minOutAmount), reference = parseSolanaRawAmount(bound.referenceOut);
+    return quoted < reference ? quoted : reference;
+  } catch { return null; }
+}
+/** A valuation saveSetup already checked; one that cannot be read never blocks booking the withdrawal. */
+function storedWithdrawValue(valuation: SolanaWithdrawValuation | undefined): bigint | null {
+  if (!valuation) return null;
+  try {
+    const quoted = parseSolanaRawAmount(valuation.quote.minOutAmount), reference = parseSolanaRawAmount(valuation.reference.referenceOut);
+    return quoted < reference ? quoted : reference;
+  } catch { return null; }
 }
 const DAY = 86_400_000;
 /**
@@ -57,8 +100,8 @@ const DAY = 86_400_000;
  * - revoke always increments the session epoch;
  * - session (with any vault initialization in the same transaction) always
  *   increments the epoch, and the epoch of a vault that does not exist is 0;
- * - withdraw increments the sequence, and admission refuses session trades
- *   while one is prepared or pending, so nothing else can advance it;
+ * - withdraw and withdraw-sol increment the sequence, and admission refuses
+ *   session trades while one is prepared or pending, so nothing else can advance it;
  * - resume-buys changes neither; a wrong "failed" only leaves the off-chain
  *   breaker paused, which is the conservative direction.
  */
@@ -70,7 +113,7 @@ export function solanaOwnerExpiryProven(setup: Pick<SolanaPreparedSetup, "kind" 
   switch (setup.kind ?? "session") {
     case "revoke": return setup.priorVaultExisted && sessionEpoch === setup.priorSessionEpoch;
     case "session": return (sessionEpoch ?? "0") === setup.priorSessionEpoch;
-    case "withdraw": return setup.priorVaultExisted && vaultSequence === setup.priorSequence;
+    case "withdraw": case "withdraw-sol": return setup.priorVaultExisted && vaultSequence === setup.priorSequence;
     case "resume-buys": return setup.priorVaultExisted;
     default: return false;
   }
@@ -111,6 +154,11 @@ CREATE TABLE IF NOT EXISTS solana_runtime_submissions (
 CREATE UNIQUE INDEX IF NOT EXISTS solana_runtime_live_sequence ON solana_runtime_submissions(vault,sequence) WHERE status IN ('pending','finalized');
 CREATE UNIQUE INDEX IF NOT EXISTS solana_runtime_live_pending ON solana_runtime_submissions(vault) WHERE status = 'pending';
 CREATE INDEX IF NOT EXISTS solana_runtime_live_window ON solana_runtime_submissions(tenant,owner,created_at_ms);
+CREATE TABLE IF NOT EXISTS solana_runtime_autonomous_attempts (
+ tenant TEXT NOT NULL, owner TEXT NOT NULL, request_id TEXT NOT NULL, attempted_at_ms BIGINT NOT NULL,
+ PRIMARY KEY(tenant,owner,request_id)
+);
+CREATE INDEX IF NOT EXISTS solana_runtime_autonomous_window ON solana_runtime_autonomous_attempts(tenant,owner,attempted_at_ms);
 CREATE TABLE IF NOT EXISTS solana_operator_holds (
  scope TEXT PRIMARY KEY, reason TEXT NOT NULL, created_at_ms BIGINT NOT NULL
 );
@@ -121,6 +169,30 @@ export async function solanaOperatorHeld(db: Db, tenant: string): Promise<boolea
   return !!await db.prepare("SELECT 1 FROM solana_operator_holds WHERE scope IN (?,?)").get(tenant, SOLANA_OPERATOR_HOLD_ALL);
 }
 function refuse(message: string): never { throw new SolanaTradingStoreError(message); }
+/** Request IDs the autonomous strategy owns: rebalance-<settings revision>-<attempt>. Manual trades may not use them. */
+export const SOLANA_AUTONOMOUS_REQUEST_PREFIX = "rebalance-";
+export interface SolanaAutonomousSchedule {
+  /** Autonomous attempts admitted so far, proven-expired ones included: the next attempt's index, never reused. */
+  attempt: number;
+  /** When the next attempt may be admitted: one interval after the last that was not proven expired (0 if none). */
+  dueAtMs: number;
+}
+/**
+ * The autonomous strategy's durable schedule for one account. intervalSeconds is
+ * a minimum spacing between admitted attempts, whatever process admitted them. A
+ * proven-expired attempt never landed, so a fresh one may follow it at once.
+ */
+export async function solanaAutonomousSchedule(db: Db, scope: SolanaAccountScope, intervalSeconds: number): Promise<SolanaAutonomousSchedule> {
+  if (!Number.isSafeInteger(intervalSeconds) || intervalSeconds < 1) refuse("Invalid autonomous Solana strategy interval.");
+  const row = await db.prepare(`SELECT COUNT(*) AS attempts,
+      MAX(CASE WHEN s.status IS NULL OR s.status <> 'expired' THEN a.attempted_at_ms END) AS last_at
+    FROM solana_runtime_autonomous_attempts a
+    LEFT JOIN solana_runtime_submissions s ON s.tenant=a.tenant AND s.owner=a.owner AND s.request_id=a.request_id
+    WHERE a.tenant=? AND a.owner=?`).get(scope.tenant, scope.owner) as { attempts: number | string; last_at: number | string | null } | undefined;
+  const attempt = Number(row?.attempts ?? 0), last = row?.last_at === null || row?.last_at === undefined ? null : Number(row.last_at);
+  if (!Number.isSafeInteger(attempt) || attempt < 0 || (last !== null && !Number.isSafeInteger(last))) refuse("Invalid stored Solana data.");
+  return { attempt, dueAtMs: last === null ? 0 : last + intervalSeconds * 1000 };
+}
 export const OPERATOR_HOLD = "An operator hold stops Solana trading for this account. Owner withdrawals and revocation still work.";
 function clock(now: () => number): number { const n = now(); if (!Number.isSafeInteger(n) || n < 0) refuse("Invalid Solana runtime clock."); return n; }
 function key(value: string): void { if (canonicalId(CHAINS.solana, "account", value) !== value) refuse("Invalid Solana account key."); }
@@ -166,7 +238,19 @@ export class SolanaTradingStore implements SolanaLiveJournal {
       .get(this.scope.tenant, this.scope.owner, CHAINS.solana) as { strategy_json: string | null } | undefined;
     const strategy = row?.strategy_json ? JSON.parse(row.strategy_json) : null;
     if (strategy?.enabled !== true) refuse("The autonomous Solana strategy is no longer enabled.");
+    // The interval is a durable minimum spacing, checked under the same lock that admits.
+    const { dueAtMs } = await solanaAutonomousSchedule(db, this.scope, strategy.intervalSeconds);
+    if (clock(this.now) < dueAtMs) refuse("The autonomous Solana strategy is not due yet: its interval has not passed since the last attempt.");
     return raw(strategy.tradeUsdgRaw, false);
+  }
+  /** Manual trades never take the strategy's request IDs, so its next attempt can never collide with one. */
+  private checkRequestOwner(requestId: string): void {
+    if (!this.admission && requestId.startsWith(SOLANA_AUTONOMOUS_REQUEST_PREFIX)) refuse("Request IDs starting with rebalance- belong to the autonomous strategy.");
+  }
+  /** An admitted autonomous trade records its attempt in the same transaction. */
+  private async recordAttemptIn(db: Db, requestId: string, now: number): Promise<void> {
+    if (this.admission) await db.prepare("INSERT INTO solana_runtime_autonomous_attempts(tenant,owner,request_id,attempted_at_ms) VALUES(?,?,?,?)")
+      .run(this.scope.tenant, this.scope.owner, requestId, now);
   }
   private owner(owner: string): void { if (owner !== this.scope.owner) refuse("Solana owner does not match the authenticated account."); }
   private async bindingIn(db: Db, lock: boolean): Promise<SolanaTradingBinding> {
@@ -189,8 +273,8 @@ export class SolanaTradingStore implements SolanaLiveJournal {
     return this.db.tx(async tx => {
       const binding = await this.bindingIn(tx, true);
       if (binding.requestedMode !== "paper") refuse("Paper trading is not the selected Solana mode.");
-      const now = clock(this.now), policy = validateSolanaPaperLimits(limits, now);
-      if (!binding.limits || JSON.stringify(validateSolanaPaperLimits(binding.limits, now)) !== JSON.stringify(policy)) {
+      const now = clock(this.now), policy = validateSolanaAccountLimits(limits, now);
+      if (!binding.limits || JSON.stringify(validateSolanaAccountLimits(binding.limits, now)) !== JSON.stringify(policy)) {
         refuse("The Solana trading limits changed before paper book creation. Refresh and try again.");
       }
       const { tenant, owner } = this.scope;
@@ -226,19 +310,21 @@ export class SolanaTradingStore implements SolanaLiveJournal {
           const prior = await tx.prepare("SELECT fingerprint,receipt_json FROM solana_runtime_paper_trades WHERE tenant=? AND owner=? AND request_id=?").get(tenant, owner, input.intent.requestId) as { fingerprint: string; receipt_json: string } | undefined;
           if (prior) { if (prior.fingerprint !== fingerprint) refuse("The Solana request ID belongs to another intent."); return JSON.parse(prior.receipt_json) as SolanaPaperReceipt; }
           if (await solanaOperatorHeld(tx, tenant)) refuse(OPERATOR_HOLD);
+          this.checkRequestOwner(input.intent.requestId);
           const strategyCap = await this.autonomousIn(tx, binding);
           if (binding.requestedMode !== "paper") refuse("Paper trading is not the selected Solana mode.");
           const now = clock(this.now);
           const book = rowJson<SolanaPaperBook>(await tx.prepare("SELECT book_json FROM solana_runtime_paper_books WHERE tenant=? AND owner=?").get(tenant, owner), "book_json");
           if (!book) refuse("Create a Solana paper book first.");
           if (!binding.limits) refuse("Save the current Solana trading limits first.");
-          book.limits = validateSolanaPaperLimits(binding.limits, now);
+          book.limits = validateSolanaAccountLimits(binding.limits, now);
           const recent = await tx.prepare("SELECT notional_raw FROM solana_runtime_paper_trades WHERE tenant=? AND owner=? AND created_at_ms>?").all(tenant, owner, now - DAY) as Array<{ notional_raw: string }>;
           const result = applySolanaPaperCommit(book, input, recent.map(r => r.notional_raw), now);
           if (strategyCap !== null && raw(result.receipt.notionalUsdgRaw, false) > strategyCap) refuse("The autonomous Solana strategy trade limit would be exceeded.");
           this.checkAdmissionSignal();
           await tx.prepare("INSERT INTO solana_runtime_paper_trades(tenant,owner,request_id,fingerprint,created_at_ms,notional_raw,receipt_json) VALUES(?,?,?,?,?,?,?)")
             .run(tenant, owner, input.intent.requestId, fingerprint, now, result.receipt.notionalUsdgRaw, JSON.stringify(result.receipt));
+          await this.recordAttemptIn(tx, input.intent.requestId, now);
           await tx.prepare("UPDATE solana_runtime_paper_books SET book_json=? WHERE tenant=? AND owner=?").run(JSON.stringify(result.book), tenant, owner);
           return result.receipt;
         });
@@ -345,14 +431,15 @@ export class SolanaTradingStore implements SolanaLiveJournal {
       const { tenant, owner } = this.scope;
       if (await tx.prepare("SELECT 1 FROM solana_runtime_submissions WHERE tenant=? AND owner=? AND request_id=?").get(tenant, owner, s.intent.requestId)) return false;
       if (await solanaOperatorHeld(tx, tenant)) refuse(OPERATOR_HOLD);
+      this.checkRequestOwner(s.intent.requestId);
       const strategyCap = await this.autonomousIn(tx, binding);
       if (binding.requestedMode !== "live" || !binding.limits) refuse("Live Solana trading has not been enabled for this account.");
       const ownerSetup = rowJson<SolanaPreparedSetup>(await tx.prepare("SELECT setup_json FROM solana_runtime_setups WHERE tenant=? AND owner=?").get(tenant, owner), "setup_json");
       if (ownerSetup?.signature && ownerSetup.status !== "finalized" && ownerSetup.status !== "failed") refuse("Resolve the pending owner transaction before trading.");
-      const now = clock(this.now), limits = validateSolanaPaperLimits(binding.limits, now);
+      const now = clock(this.now), limits = validateSolanaAccountLimits(binding.limits, now);
       // A prepared withdrawal's expiry is proven by an unchanged sequence, so no
       // trade may advance it between preparing and signing either.
-      if (ownerSetup?.kind === "withdraw" && !ownerSetup.signature && now < ownerSetup.expiresAtMs) refuse("Finish or let lapse the prepared owner withdrawal before trading.");
+      if ((ownerSetup?.kind === "withdraw" || ownerSetup?.kind === "withdraw-sol") && !ownerSetup.signature && now < ownerSetup.expiresAtMs) refuse("Finish or let lapse the prepared owner withdrawal before trading.");
       const session = rowJson<SolanaRegisteredSession>(await tx.prepare("SELECT record_json FROM solana_runtime_sessions WHERE tenant=? AND owner=?").get(tenant, owner), "record_json");
       if (!session || s.programId !== session.programId || s.intent.vault !== session.vault || s.session !== session.session || s.sessionEpoch !== session.sessionEpoch) refuse("The Solana session changed before submission.");
       if (await tx.prepare("SELECT 1 FROM solana_runtime_submissions WHERE vault=? AND status='pending'").get(session.vault)) return false;
@@ -379,10 +466,17 @@ export class SolanaTradingStore implements SolanaLiveJournal {
       if (raw(s.risk.notionalUsdg, false) !== notional || notional > raw(limits.perTradeUsdg, false)) refuse("The Solana per-trade limit would be exceeded.");
       if (raw(s.feeLamports) + raw(s.rentLamports) > raw(s.maxFeeLamports, false)) refuse("The Solana fee and rent budget would be exceeded.");
       const recent = await tx.prepare("SELECT notional_raw,status,submission_json FROM solana_runtime_submissions WHERE tenant=? AND owner=? AND created_at_ms>?").all(tenant, owner, now - DAY) as Array<{ notional_raw: string; status: string; submission_json: string }>;
-      // Failed transactions still spend network fees and consume an attempt.
-      // Their token notional is released only after canonical failure evidence.
+      // Failed transactions landed, spent network fees and consume an operation;
+      // a pending one counts until finalized evidence proves what it did. A proven
+      // expiry never landed, and the program never counted it: it leaves the
+      // operation budget, so dropped packets cannot lock exits for a day. Token
+      // notional is released only after canonical failure or expiry evidence.
+      const operations = recent.filter(r => r.status !== "expired"), dropped = recent.length - operations.length;
       const counted = recent.filter(r => !["failed", "expired"].includes(r.status));
-      if (recent.length >= limits.maxOpsPerDay || counted.reduce((n, r) => n + BigInt(r.notional_raw), 0n) + notional > raw(limits.dailyUsdg, false)) refuse("The Solana rolling daily limit would be exceeded.");
+      if (operations.length >= limits.maxOpsPerDay || counted.reduce((n, r) => n + BigInt(r.notional_raw), 0n) + notional > raw(limits.dailyUsdg, false)) refuse("The Solana rolling daily limit would be exceeded.");
+      // Dropped attempts get a budget of their own, the same size, so a provider
+      // that drops every packet cannot keep the worker re-signing without end.
+      if (dropped >= limits.maxOpsPerDay) refuse("Too many Solana transactions expired without landing in the last 24 hours. Trading resumes as they leave the window.");
       const soldToday = counted.reduce((n, r) => {
         const prior = (JSON.parse(r.submission_json) as SolanaSignedSubmission).intent;
         return prior.inputMint === SOLANA_WRAPPED_SOL_MINT ? n + raw(prior.amountRaw, false) : n;
@@ -414,6 +508,7 @@ export class SolanaTradingStore implements SolanaLiveJournal {
       const inserted = await tx.prepare(`INSERT INTO solana_runtime_submissions(tenant,owner,request_id,vault,sequence,signature,status,created_at_ms,notional_raw,submission_json)
         VALUES(?,?,?,?,?,?,'pending',?,?,?) ON CONFLICT DO NOTHING`).run(tenant, owner, s.intent.requestId, s.intent.vault, s.vaultSequence, s.signature, now, notional.toString(), JSON.stringify(s));
       if (inserted.changes !== 1) return false;
+      await this.recordAttemptIn(tx, s.intent.requestId, now);
       await tx.prepare(`INSERT INTO solana_runtime_live_books(tenant,owner,book_json) VALUES(?,?,?)
         ON CONFLICT(tenant,owner) DO UPDATE SET book_json=excluded.book_json`).run(tenant, owner, JSON.stringify(book));
       return true;
@@ -487,8 +582,19 @@ export class SolanaTradingStore implements SolanaLiveJournal {
         if (clock(this.now) >= previous.expiresAtMs) refuse("The prepared owner transaction expired before submission.");
         if ((setup.kind ?? "session") === "session" && (binding.requestedMode !== "live" || JSON.stringify(binding.limits) !== JSON.stringify(setup.limits))) refuse("The live permission settings changed. Review and sign again.");
       }
+      // A WSOL withdrawal's valuation is checked once, fresh, as prepared; the signed
+      // save keeps that checked copy, whatever it is handed. A bad one is dropped,
+      // never a reason to block the owner's withdrawal.
+      const { withdrawValuation: offered, ...plain } = setup;
+      const valuation = setup.kind !== "withdraw" || setup.mint !== SOLANA_WRAPPED_SOL_MINT ? undefined
+        : setup.signature ? previous?.withdrawValuation
+        : solanaWithdrawValueUsdg(offered, setup.amountRaw, clock(this.now)) !== null ? offered : undefined;
+      setup = valuation ? { ...plain, withdrawValuation: structuredClone(valuation) } : plain;
+      // A session's limits become the on-chain permission: never more operations than
+      // the program allows, never a permission longer than Merrymen grants.
+      if ((setup.kind ?? "session") === "session") validateSolanaAccountLimits(setup.limits, clock(this.now));
       if (setup.kind !== "revoke" && await tx.prepare("SELECT 1 FROM solana_runtime_submissions WHERE tenant=? AND owner=? AND status='pending'").get(this.scope.tenant, this.scope.owner)) refuse("Resolve the pending Solana trade before an owner transaction.");
-      if (setup.kind === "withdraw") {
+      if (setup.kind === "withdraw" || setup.kind === "withdraw-sol") {
         if (setup.priorSequence === undefined) refuse("Prepare the withdrawal again.");
         const trades = await tx.prepare("SELECT sequence,status FROM solana_runtime_submissions WHERE vault=? AND status IN ('pending','finalized')").all(setup.vault) as Array<{ sequence: string; status: string }>;
         // Its sequence was read before this lock; a trade at or after it means the read is stale.
@@ -535,16 +641,35 @@ export class SolanaTradingStore implements SolanaLiveJournal {
             book.cashRaw = (raw(book.cashRaw) - amount).toString();
             const peak = raw(book.hwmRaw); book.hwmRaw = (peak > amount ? peak - amount : 0n).toString();
           } else {
-            const held = raw(book.wsolRaw), aside = solanaQuarantinedWsol(book);
-            if (amount > held + aside) refuse("Finalized withdrawal exceeds the recorded SOL position.");
+            const held = raw(book.wsolRaw);
+            let aside = solanaQuarantinedWsol(book);
+            // Native lamports this transaction synced into WSOL (SyncNative) join the
+            // zero-basis quarantine, only as far as the withdrawal needs them and never
+            // past what prepare measured. Any a later read already booked is not added again.
+            const synced = raw(setup.syncedWsolRaw ?? "0"), over = amount > held + aside ? amount - held - aside : 0n;
+            if (over > synced) refuse("Finalized withdrawal exceeds the recorded SOL position.");
+            if (over > 0n) {
+              const inserted = await tx.prepare("INSERT INTO solana_runtime_cashflows(evidence_id,tenant,owner,kind,mint,amount_raw,created_at_ms) VALUES(?,?,?,'quarantine',?,?,?) ON CONFLICT DO NOTHING")
+                .run(`sync:${signature}`, tenant, owner, SOLANA_WRAPPED_SOL_MINT, over.toString(), clock(this.now));
+              if (inserted.changes !== 1) refuse("Withdrawal evidence was already accounted.");
+              aside += over;
+            }
             // Quarantined WSOL leaves first: zero basis, no effect on the position or the high-water mark.
             const fromAside = amount < aside ? amount : aside, fromPosition = amount - fromAside;
             if (aside > 0n) book.quarantinedWsolRaw = (aside - fromAside).toString();
             if (fromPosition > 0n) {
               const basis = fromPosition === held ? BigInt(book.costBasisUsdgRaw) : BigInt(book.costBasisUsdgRaw) * fromPosition / held;
               book.wsolRaw = (held - fromPosition).toString(); book.costBasisUsdgRaw = (BigInt(book.costBasisUsdgRaw) - basis).toString();
+              // Capital out, as for USDG: the high-water mark drops by what the withdrawn
+              // position was worth when prepared (its share of the valuation, floor 0).
+              // Without a valuation it stays put, the conservative direction.
+              const value = storedWithdrawValue(setup.withdrawValuation);
+              if (value !== null) {
+                const out = value * fromPosition / amount, peak = raw(book.hwmRaw);
+                book.hwmRaw = (peak > out ? peak - out : 0n).toString();
+              }
             }
-            // No fabricated sale proceeds or P&L. Keep HWM conservative until a later owner review.
+            // No fabricated sale proceeds or P&L.
           }
           book.updatedAtMs = clock(this.now); book.slot = finalizedSlot!;
           const inserted = await tx.prepare("INSERT INTO solana_runtime_cashflows(evidence_id,tenant,owner,kind,mint,amount_raw,created_at_ms) VALUES(?,?,?,'withdraw',?,?,?) ON CONFLICT DO NOTHING")
@@ -552,6 +677,13 @@ export class SolanaTradingStore implements SolanaLiveJournal {
           if (inserted.changes !== 1) refuse("Withdrawal evidence was already accounted.");
           await tx.prepare("UPDATE solana_runtime_live_books SET book_json=? WHERE tenant=? AND owner=?").run(JSON.stringify(book), tenant, owner);
         }
+      }
+      if (status === "finalized" && setup.kind === "withdraw-sol") {
+        // Native SOL in the vault account is never part of the book; keep the evidence once.
+        if (!setup.amountRaw || setup.mint !== undefined) refuse("Invalid finalized withdrawal accounting.");
+        const inserted = await tx.prepare("INSERT INTO solana_runtime_cashflows(evidence_id,tenant,owner,kind,mint,amount_raw,created_at_ms) VALUES(?,?,?,'withdraw-sol',?,?,?) ON CONFLICT DO NOTHING")
+          .run(signature, this.scope.tenant, this.scope.owner, SOLANA_SYSTEM_PROGRAM, raw(setup.amountRaw, false).toString(), clock(this.now));
+        if (inserted.changes !== 1) refuse("Withdrawal evidence was already accounted.");
       }
       setup.status = status;
       await tx.prepare("UPDATE solana_runtime_setups SET setup_json=? WHERE tenant=? AND owner=?").run(JSON.stringify(setup), this.scope.tenant, this.scope.owner);

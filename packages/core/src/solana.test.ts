@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { CHAINS, SOLANA_USDG_MINT, base58Encode } from "./ids";
+import { SOLANA_VAULT_MAX_DAILY_OPS } from "./solana-live";
 import {
+  SOLANA_MAX_OPS_PER_DAY,
+  SOLANA_MAX_PERMISSION_MS,
+  SOLANA_PERMISSION_CLOCK_SKEW_MS,
   SOLANA_QUOTE_MAX_AGE_MS,
   SOLANA_SLIPPAGE_BPS_MAX,
   SolanaPaperValidationError,
@@ -9,6 +13,7 @@ import {
   parseSolanaSwapIntent,
   solanaPaperAgentId,
   requireSolanaLiveSellLimits,
+  validateSolanaAccountLimits,
   validateSolanaPaperLimits,
   validateSolanaQuote,
   type SolanaPaperLimits,
@@ -174,6 +179,30 @@ describe("Solana paper limits", () => {
     // Paper accounts saved before the SOL sell limits still validate, but cannot go live.
     assert.deepEqual(validateSolanaPaperLimits(limits(), NOW), limits());
     assert.throws(() => requireSolanaLiveSellLimits(limits()), /SOL sell limits/);
+  });
+
+  it("refuses at save the live operation count and permission length the vault cannot honour (audit core-abi-3, web-auth F4)", () => {
+    assert.equal(SOLANA_MAX_OPS_PER_DAY, SOLANA_VAULT_MAX_DAILY_OPS, "the program's cap");
+    const live = limits({ perTradeWsol: "250000000", dailyWsol: "1000000000" });
+    const latest = NOW + SOLANA_MAX_PERMISSION_MS + SOLANA_PERMISSION_CLOCK_SKEW_MS;
+    // Live-shaped limits (with SOL sell caps) go through validateSolanaPaperLimits in the settings route: a 400, not a 503 at setup.
+    for (const check of [validateSolanaPaperLimits, validateSolanaAccountLimits]) {
+      assert.equal(check({ ...live, maxOpsPerDay: SOLANA_MAX_OPS_PER_DAY }, NOW).maxOpsPerDay, 96);
+      for (const maxOpsPerDay of [97, 1000, Number.MAX_SAFE_INTEGER]) {
+        assert.throws(() => check({ ...live, maxOpsPerDay }, NOW), (e: unknown) => e instanceof SolanaPaperValidationError && /between 1 and 96/.test(e.message));
+      }
+      assert.equal(check({ ...live, expiresAtMs: NOW + SOLANA_MAX_PERMISSION_MS }, NOW).expiresAtMs, NOW + SOLANA_MAX_PERMISSION_MS);
+      assert.equal(check({ ...live, expiresAtMs: latest }, NOW).expiresAtMs, latest, "a browser clock a few minutes ahead");
+      for (const expiresAtMs of [latest + 1, NOW + 100 * 365 * 86_400_000]) {
+        assert.throws(() => check({ ...live, expiresAtMs }, NOW), (e: unknown) => e instanceof SolanaPaperValidationError && /168 hours/.test(e.message));
+      }
+    }
+    // A tenant's account is bounded with or without sell caps; the standalone paper CLI (no sell caps) is not.
+    assert.throws(() => validateSolanaAccountLimits(limits({ maxOpsPerDay: 97 }), NOW), /between 1 and 96/);
+    assert.throws(() => validateSolanaAccountLimits(limits({ expiresAtMs: latest + 1 }), NOW), /168 hours/);
+    assert.equal(validateSolanaPaperLimits(limits({ maxOpsPerDay: 100_000, expiresAtMs: NOW + 365 * 86_400_000 }), NOW).maxOpsPerDay, 100_000);
+    // Rechecking stored limits later only moves the end closer.
+    assert.doesNotThrow(() => validateSolanaAccountLimits({ ...live, expiresAtMs: latest }, NOW + 60_000));
   });
 });
 

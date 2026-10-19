@@ -36,9 +36,11 @@ pays the transaction and temporary-account rent; it never receives custody
 signing authority. The program transfers exactly the authorized amount to the
 input ATA of a per-sequence PDA `["swap", vault, seq_le_u64]`. That PDA is the
 **only** signer forwarded to a Jupiter CPI. Vault state, owner, session, fee payer,
-source custody ATA, owner refund ATA, and other custody-owned token accounts are forbidden in the
-CPI account list. The single allowed custody token account is the destination
-ATA, which Jupiter can credit but cannot debit without the vault signer.
+source custody ATA, any token account owned by the vault owner (including the
+owner refund ATA, whether or not it was passed), and other custody-owned token
+accounts are forbidden in the CPI account list. The single allowed custody token
+account is the destination ATA, which Jupiter can credit but cannot debit
+without the vault signer.
 
 The program pins Jupiter's v6 program ID and accepts only its ExactIn
 `sharedAccountsRoute` discriminator, bound input, output floor, zero platform fee
@@ -48,7 +50,13 @@ Output is measured from actual custody balance deltas. Unspent input returns to
 the vault, the temporary ATA closes and refunds its rent to the fee payer. Prior
 unsolicited deposits to the temporary ATA are refunded to the owner’s canonical
 input ATA before measuring input, so a publicly predictable address does not create a donation denial of
-service. Success increments the sequence and emits `SwapExecuted`; any failed
+service and a donation never counts as trade input. The owner refund ATA is an
+optional account (the client passes the program ID to leave it out): it is
+needed only when such a donation is waiting. An owner who closes their own USDG
+or WSOL account, for example by unwrapping WSOL in a wallet, therefore no longer
+blocks buys or exits. If a donation is waiting and the refund account is absent,
+the swap fails closed with `RefundAccount` (6010); the fee payer never creates
+owner accounts. Success increments the sequence and emits `SwapExecuted`; any failed
 check rolls back the CPI, balances, debit history and sequence atomically.
 
 Buy budgets conservatively charge the full authorized USDG input even when dust
@@ -84,21 +92,46 @@ accounts must be unfrozen and have no delegate or close authority.
 ## Local verification
 
 ```
-cargo test --manifest-path contracts/solana/Cargo.toml --lib
-cargo-build-sbf --manifest-path contracts/solana/programs/merrymen-vault/Cargo.toml \
-  --sbf-out-dir contracts/solana/target/deploy
-BPF_OUT_DIR="$PWD/contracts/solana/target/deploy" \
-  cargo test --manifest-path contracts/solana/runtime-tests/Cargo.toml --test custody -- --ignored
+PATH="<agave 2.3.13>/bin:$PATH" contracts/solana/test.sh   # add --offline without network
 node --import tsx --test packages/core/src/solana-live.test.ts
 ```
+
+`test.sh` runs the native unit tests, then `build.sh`, then the runtime tests against the
+artifact it just built. `build.sh` is the only supported build recipe:
+
+- It requires `cargo-build-sbf` 2.3.13 and platform-tools v1.48 (rustc 1.84.1-dev, LLVM
+  19.1.7, anza-xyz/rust `293a1b6c`) and always passes `--tools-version v1.48 --arch v0`
+  and `--locked`. Any other toolchain, an `lto` setting, or ambient `RUSTFLAGS`,
+  `CARGO_PROFILE_*` or `CARGO_TARGET_*` overrides stop the build.
+- It resolves `CARGO_HOME` and the source directory to physical paths. cargo-build-sbf
+  remaps rustc's canonical working directory, so a symlinked `CARGO_HOME` (macOS `/tmp`)
+  left absolute registry paths in the binary and changed its hash (audit GAP4-2).
+- It compares the artifact with `build-manifests/<uname -s>-<uname -m>.json`. Same source
+  and a different artifact is an error. `build.sh --record` builds a second copy of the
+  source in another directory, requires identical bytes, and writes that host's
+  manifest: source digest, declared program ID, toolchain, artifact bytes and sha256.
+  Platform-tools embeds its own build paths, so macOS and Linux artifacts differ; the
+  release artifact must come from the pinned Linux CI build and its own manifest.
+- `build.sh --source-digest` prints the digest of the reviewed inputs (workspace and
+  program manifests, `Cargo.lock`, `build.sh` and the program sources). The TypeScript
+  suite recomputes it and fails while any recorded manifest is stale.
+
+The deployed ProgramData region hash equals the manifest sha256 only for an exact-size
+allocation; otherwise hash the artifact followed by its zero padding (see above).
+
+The TypeScript suite also writes `runtime-tests/fixtures/ts-instructions.json` from the
+shared ABI builders (`MERRYMEN_WRITE_SOLANA_ABI_FIXTURE=1` rewrites it) and fails while it
+is stale. `custody.rs` executes those exact bytes and account metas against the compiled
+program, so the TypeScript ABI is tested against the real program, not only Anchor's
+Rust client.
 
 The runtime tests are explicitly ignored by plain `cargo test` because Anchor
 0.32.1 cannot run its CPIs in the native processor. The separate runtime-tests
 workspace keeps the current host SVM dependencies out of the SBF Rust1.84 build. `test.sh` builds the SBF
 artifact and runs these required tests. A missing artifact is an error.
 
-The runtime harness uses generated, unfunded local identities, synthetic token
-accounts, ProgramTest’s bundled real SBF SPL/Token-2022/ATA programs and a pinned
+The runtime harness uses generated or fixed-seed, unfunded local identities, synthetic
+token accounts (including real Token-2022 mints with extensions), ProgramTest’s bundled real SBF SPL/Token-2022/ATA programs and a pinned
 mock Jupiter processor. It exercises SPL/Token-2022 CPIs,
 authority exclusion, atomic rollback, sequence replay and session replacement.
 It is not evidence of a mainnet Jupiter fill. An actual mainnet deployment,
