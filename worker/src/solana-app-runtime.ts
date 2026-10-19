@@ -6,7 +6,6 @@ import {
   setTransactionMessageLifetimeUsingBlockhash, type Blockhash, type Instruction,
 } from "@solana/kit";
 import { ed25519 } from "@noble/curves/ed25519";
-import { createHash } from "node:crypto";
 import { CHAINS, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM, base58Decode } from "../../packages/core/src/ids";
 import { parseSolanaRawAmount, parseSolanaSwapIntent, requireSolanaLiveSellLimits, validateSolanaPaperLimits, validateSolanaQuote,
   type SolanaPaperLimits, type SolanaSwapIntent } from "../../packages/core/src/solana";
@@ -128,66 +127,19 @@ async function createAta(owner: string, authority: string, mint: string): Promis
     { address: address(SOLANA_SYSTEM_PROGRAM), role: 0 }, { address: address(program), role: 0 },
   ] };
 }
-const UPGRADEABLE_LOADER = "BPFLoaderUpgradeab1e11111111111111111111111";
-const PROGRAM_DATA_SLICE = 98_304;
 /** How long a successful vault deployment check is reused before it runs again. Failures are never reused. */
 export const SOLANA_DEPLOYMENT_RECHECK_MS = 10 * 60_000;
-/** (program id, binary hash) pairs whose bytes are proven to declare that id. A fact about the bytes, kept for the process. */
-const declaredProgramIds = new Set<string>();
-/**
- * The audited binary must be built for the configured program id. declare_id!
- * embeds the id's 32 bytes in the executable region; a build for any other id
- * (the local test id, say) fails every instruction with
- * DeclaredProgramIdMismatch, and an immutable deployment can never be fixed.
- * The region read here is hashed again, so a provider cannot answer with other
- * bytes than the ones verifySolanaVaultDeployment checked on every provider.
- */
-async function requireDeclaredProgramId(rpc: SolanaLiveRpc, programId: string, binarySha256: string): Promise<void> {
-  const cacheKey = `${programId}\n${binarySha256}`;
-  if (declaredProgramIds.has(cacheKey)) return;
-  const id = base58Decode(programId);
-  if (!id || id.length !== 32) fail("The configured Solana vault program is invalid.", "configuration");
-  const refused = (): never => fail("The configured Solana vault program could not be read.", "configuration");
-  const accountAt = async (read: SolanaLiveRead, key: string, slot: number, dataSlice?: { offset: number; length: number }) => {
-    const raw = await read("getAccountInfo", [key, { encoding: "base64", commitment: "confirmed", minContextSlot: slot, ...(dataSlice ? { dataSlice } : {}) }]);
-    if (!object(raw) || !object(raw.context) || typeof raw.context.slot !== "number" || raw.context.slot < slot || !object(raw.value)) return refused();
-    const value = raw.value;
-    if (value.owner !== UPGRADEABLE_LOADER || !Array.isArray(value.data) || value.data[1] !== "base64" || typeof value.data[0] !== "string") return refused();
-    const data = Buffer.from(value.data[0], "base64");
-    if (data.toString("base64") !== value.data[0]) return refused();
-    return { data, executable: value.executable, space: value.space };
-  };
-  const region = await rpc.read(async read => {
-    const slot = await read("getSlot", [{ commitment: "confirmed" }]);
-    if (typeof slot !== "number" || !Number.isSafeInteger(slot) || slot < 1) return refused();
-    const program = await accountAt(read, programId, slot);
-    if (program.executable !== true || program.data.length !== 36 || program.data.readUInt32LE(0) !== 2) return refused();
-    const dataAddress = getBase58Decoder().decode(program.data.subarray(4));
-    const header = await accountAt(read, dataAddress, slot, { offset: 0, length: 45 });
-    const space = header.space;
-    if (typeof space !== "number" || !Number.isSafeInteger(space) || space <= 45 || space > 2_097_152) return refused();
-    const chunks: Buffer[] = [];
-    for (let offset = 45; offset < space; offset += PROGRAM_DATA_SLICE) {
-      const length = Math.min(PROGRAM_DATA_SLICE, space - offset), chunk = await accountAt(read, dataAddress, slot, { offset, length });
-      if (chunk.space !== space || chunk.data.length !== length) return refused();
-      chunks.push(chunk.data);
-    }
-    return Buffer.concat(chunks);
-  });
-  if (createHash("sha256").update(region).digest("hex") !== binarySha256) refused();
-  if (region.indexOf(Buffer.from(id)) < 0) fail("The configured Solana vault binary is built for a different program id. Deploy the build whose declare_id is the configured program.", "configuration");
-  declaredProgramIds.add(cacheKey);
-}
 export interface SolanaAppRuntimeOptions {
   db?: Db; env?: Readonly<Record<string, string | undefined>>; now?: () => number;
   rpc?: SolanaLiveRpc; market?: SolanaPaperMarket;
   /** Operator log lines (fee payer alerts). Default: stderr. Never carries keys, signed bytes or tenant identities. */
   log?: (line: string) => void;
   /**
-   * Test harnesses only: accept the local test program id and a binary that does
-   * not embed the configured id. It defaults to true only when a test transport
-   * is injected (`rpc`), which production never does; getSolanaAppRuntime()
-   * always runs the full checks.
+   * Test harnesses only: accept the local test program id, and let status and
+   * owner actions accept a binary that does not embed the configured id (the
+   * executor still refuses one before signing a trade). It defaults to true only
+   * when a test transport is injected (`rpc`), which production never does;
+   * getSolanaAppRuntime() always runs the full checks.
    */
   localTestDeployment?: boolean;
 }
@@ -225,8 +177,12 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
     verified = undefined; // Expired, or the configuration changed: only a fresh success counts.
     if (verifying?.key === key) return verifying.done;
     const done = (async () => {
-      await verifySolanaVaultDeployment(live, cfg.programId, cfg.hash);
-      if (!localTest) await requireDeclaredProgramId(live, cfg.programId, cfg.hash);
+      // The audited binary must be built for the configured id: declare_id! embeds its
+      // 32 bytes, and a build for any other id (the local test id, say) fails every
+      // instruction, which an immutable deployment can never fix. The executor
+      // refuses such a binary too; here the owner hears why before any setup.
+      const { declaresProgramId } = await verifySolanaVaultDeployment(live, cfg.programId, cfg.hash);
+      if (!localTest && !declaresProgramId) fail("The configured Solana vault binary is built for a different program id. Deploy the build whose declare_id is the configured program.", "configuration");
       verified = { key, atMs: at };
     })();
     verifying = { key, done };

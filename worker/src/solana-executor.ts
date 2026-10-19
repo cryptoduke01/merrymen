@@ -2,7 +2,7 @@ import type { SolanaQuote } from "../../packages/core/src/solana";
 import { createHash } from "node:crypto";
 import {
   address, appendTransactionMessageInstructions, compileTransaction, compressTransactionMessageUsingAddressLookupTables,
-  createTransactionMessage, getAddressFromPublicKey, getBase58Decoder, getBase64EncodedWireTransaction, getCompiledTransactionMessageDecoder,
+  createTransactionMessage, getAddressFromPublicKey, getBase58Decoder, getBase58Encoder, getBase64EncodedWireTransaction, getCompiledTransactionMessageDecoder,
   getSignatureFromTransaction, getTransactionDecoder, setTransactionMessageFeePayer, setTransactionMessageLifetimeUsingBlockhash,
   signTransaction, type AddressesByLookupTableAddress, type Blockhash, type Instruction,
 } from "@solana/kit";
@@ -185,8 +185,18 @@ const SIGNATURE_FEES = 10_000n;
 async function readRawAccount(rpc: SolanaLiveRead, key: string, slot: number) {
   return account(context(await rpc("getAccountInfo", [key, { encoding: "base64", commitment: "confirmed", minContextSlot: slot }]), slot).value);
 }
-async function verifyDeployment(rpc: SolanaLiveRead, programId: string, hash: string, slot: number): Promise<void> {
+const PROGRAM_DATA_SLICE = 98_304;
+/**
+ * The immutable deployment's executable bytes hash to `hash`. Returns whether
+ * those hashed bytes also hold the program id's 32 bytes: declare_id! embeds
+ * them, and a build for any other id fails every instruction with
+ * DeclaredProgramIdMismatch. The search carries 31 bytes across slices, so an
+ * id split by a slice boundary is still found.
+ */
+async function verifyDeployment(rpc: SolanaLiveRead, programId: string, hash: string, slot: number): Promise<{ declaresProgramId: boolean }> {
   address(programId);
+  const id = Buffer.from(getBase58Encoder().encode(programId));
+  if (id.length !== 32) return fail("unsafe-program");
   if (!/^[a-f0-9]{64}$/.test(hash)) return fail("unsafe-program");
   const program = await readRawAccount(rpc, programId, slot);
   if (program.owner !== UPGRADEABLE_LOADER || !program.executable || program.data.length !== 36 || program.data.readUInt32LE(0) !== 2) return fail("unsafe-program");
@@ -202,40 +212,54 @@ async function verifyDeployment(rpc: SolanaLiveRead, programId: string, hash: st
   const header = await readSlice(0, 45);
   if (header.data.length !== 45 || header.data.readUInt32LE(0) !== 3 || header.data[12] !== 0 || header.space <= 45 || header.space > 2_097_152) return fail("unsafe-program");
   const digest = createHash("sha256");
-  for (let offset = 45; offset < header.space; offset += 98_304) {
-    const length = Math.min(98_304, header.space - offset);
+  let carry = Buffer.alloc(0), declaresProgramId = false;
+  for (let offset = 45; offset < header.space; offset += PROGRAM_DATA_SLICE) {
+    const length = Math.min(PROGRAM_DATA_SLICE, header.space - offset);
     const chunk = await readSlice(offset, length);
     if (chunk.space !== header.space || chunk.data.length !== length) return fail("unsafe-program");
     digest.update(chunk.data);
+    const window = Buffer.concat([carry, chunk.data]);
+    if (!declaresProgramId && window.indexOf(id) >= 0) declaresProgramId = true;
+    carry = window.subarray(Math.max(0, window.length - (id.length - 1)));
   }
   if (digest.digest("hex") !== hash) return fail("unsafe-program");
+  return { declaresProgramId };
 }
 const DEPLOYMENT_CACHE_MS = 10 * 60_000;
-const verifiedDeployments = new Map<string, number>();
+const verifiedDeployments = new Map<string, { atMs: number; declaresProgramId: boolean }>();
 /**
  * Verifies the vault program on EVERY provider: owned by the upgradeable loader
  * with no upgrade authority, and ProgramData's executable bytes hash to the
  * audited build. One lying provider cannot hide an upgradeable or substituted
  * program. An immutable program can never change or close, so a success is
  * cached per provider pair for ten minutes; failures are never cached.
+ *
+ * `declaresProgramId`: the hashed bytes embed the program id (declare_id!).
+ * With `requireDeclaredProgramId` a binary built for another id is refused as
+ * unsafe-program; the executor always asks for it.
  */
-export async function verifySolanaVaultDeployment(rpc: SolanaLiveRpc, programId: string, binarySha256: string): Promise<{ slot: number }> {
+export async function verifySolanaVaultDeployment(rpc: SolanaLiveRpc, programId: string, binarySha256: string,
+  options: { requireDeclaredProgramId?: boolean } = {}): Promise<{ slot: number; declaresProgramId: boolean }> {
   const cacheKey = rpc.providerKey ? `${rpc.providerKey}\n${programId}\n${binarySha256}` : undefined;
-  const verifiedAt = cacheKey === undefined ? undefined : verifiedDeployments.get(cacheKey);
+  const cached = cacheKey === undefined ? undefined : verifiedDeployments.get(cacheKey);
   const at = Date.now();
-  if (verifiedAt !== undefined && at >= verifiedAt && at - verifiedAt < DEPLOYMENT_CACHE_MS) {
+  let result: { slot: number; declaresProgramId: boolean };
+  if (cached !== undefined && at >= cached.atMs && at - cached.atMs < DEPLOYMENT_CACHE_MS) {
     const slot = integer(await rpc.read(read => read("getSlot", [{ commitment: "confirmed" }])));
     if (slot < 1) return fail();
-    return { slot };
+    result = { slot, declaresProgramId: cached.declaresProgramId };
+  } else {
+    const views = await readSolanaEachProvider(rpc, async read => {
+      const slot = integer(await read("getSlot", [{ commitment: "confirmed" }]));
+      if (slot < 1) return fail();
+      return { slot, ...await verifyDeployment(read, programId, binarySha256, slot) };
+    });
+    // The bytes are pinned by the hash, so every provider must find the same.
+    result = { slot: views[0]!.slot, declaresProgramId: views.every(view => view.declaresProgramId) };
+    if (cacheKey !== undefined) verifiedDeployments.set(cacheKey, { atMs: at, declaresProgramId: result.declaresProgramId });
   }
-  const slots = await readSolanaEachProvider(rpc, async read => {
-    const slot = integer(await read("getSlot", [{ commitment: "confirmed" }]));
-    if (slot < 1) return fail();
-    await verifyDeployment(read, programId, binarySha256, slot);
-    return slot;
-  });
-  if (cacheKey !== undefined) verifiedDeployments.set(cacheKey, at);
-  return { slot: slots[0]! };
+  if (options.requireDeclaredProgramId && !result.declaresProgramId) return fail("unsafe-program");
+  return result;
 }
 export async function readSolanaVaultState(rpc: SolanaLiveRpc, programId: string, owner: string): Promise<{ vault: string; slot: number; state: SolanaVaultState }> {
   const vault = await deriveSolanaVaultAddress(programId, owner);
@@ -404,8 +428,8 @@ export function createSolanaExecutor(options: SolanaExecutorOptions) {
       }
       if (intent.inputMint === SOLANA_USDG_MINT && (inputMint.buyBlockedReasons.length || outputMint.buyBlockedReasons.length)) return fail("unsafe-route");
       const safetyObservedAtMs = Math.min(inputMint.observedAtMs, outputMint.observedAtMs);
-      // Every provider must agree the program is the immutable audited build.
-      await verifySolanaVaultDeployment(options.rpc, options.programId, options.programBinarySha256);
+      // Every provider must agree the program is the immutable audited build, built for this id.
+      await verifySolanaVaultDeployment(options.rpc, options.programId, options.programBinarySha256, { requireDeclaredProgramId: true });
       checkAbort();
       const snapshot = await options.rpc.read(async rpc => {
         const slot = integer(await rpc("getSlot", [{ commitment: "confirmed" }]));

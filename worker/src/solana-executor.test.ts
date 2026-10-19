@@ -45,7 +45,9 @@ function event(submission: SolanaSignedSubmission, amountIn = 1_000_000n, amount
   for (const value of [amountIn, amountOut, 1000n]) { bytes.writeBigUInt64LE(value, offset); offset += 8; }
   return bytes.toString("base64");
 }
-async function fixture() {
+/** The audited test build: declare_id! embeds the program id's 32 bytes in the executable region. */
+const DECLARING_BINARY = Buffer.concat([Buffer.from("audited-vault-test-binary"), keyBytes(PROGRAM)]);
+async function fixture(fixtureOptions: { binary?: Buffer } = {}) {
   const sessionKeyPair = await createKeyPairFromPrivateKeyBytes(new Uint8Array(32).fill(11));
   const feePayerKeyPair = await createKeyPairFromPrivateKeyBytes(new Uint8Array(32).fill(12));
   const session = await getAddressFromPublicKey(sessionKeyPair.publicKey), feePayer = await getAddressFromPublicKey(feePayerKeyPair.publicKey);
@@ -55,7 +57,7 @@ async function fixture() {
   const swap = await deriveSolanaSwapAuthority(PROGRAM, vault, 0n);
   const temp = await deriveSolanaAta(swap, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM);
   const ownerRefund = await deriveSolanaAta(owner, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM);
-  const programDataAddress = key(31), binary = Buffer.from("audited-vault-test-binary");
+  const programDataAddress = key(31), binary = fixtureOptions.binary ?? DECLARING_BINARY;
   const program = Buffer.alloc(36); program.writeUInt32LE(2); keyBytes(programDataAddress).copy(program, 4);
   const programData = Buffer.alloc(45 + binary.length); programData.writeUInt32LE(3); binary.copy(programData, 45);
   const clock = { value: NOW };
@@ -563,6 +565,28 @@ test("the vault program must verify as immutable and audited on both providers b
   }
 });
 
+test("a binary that hashes right but is built for another program id is never signed for (audit GAP4-3, executor half)", async () => {
+  // Immutable and hash-matching, but its declare_id is another program's.
+  const other = await fixture({ binary: Buffer.concat([Buffer.from("audited-vault-test-binary"), keyBytes(key(99))]) });
+  const verdict = await verifySolanaVaultDeployment(other.options.rpc, PROGRAM, other.options.programBinarySha256);
+  assert.equal(verdict.declaresProgramId, false, "without the requirement the check only reports it");
+  await assert.rejects(verifySolanaVaultDeployment(other.options.rpc, PROGRAM, other.options.programBinarySha256, { requireDeclaredProgramId: true }), /unsafe-program/);
+  await assert.rejects(createSolanaExecutor(other.options).execute(other.intent), /unsafe-program/);
+  assert.ok(!other.calls.includes("persist") && !other.calls.includes("send"));
+  // The id's bytes split across two ProgramData slices (98,304 bytes each) are still found.
+  for (const at of [98_304 - 1, 98_304 - 16, 98_304 - 31, 98_304, 2 * 98_304 - 5]) {
+    const binary = Buffer.alloc(2 * 98_304 + 64, 7); keyBytes(PROGRAM).copy(binary, at);
+    const split = await fixture({ binary });
+    assert.equal((await verifySolanaVaultDeployment(split.options.rpc, PROGRAM, split.options.programBinarySha256, { requireDeclaredProgramId: true })).declaresProgramId, true, String(at));
+  }
+  // Bytes outside the hashed region (the 45-byte ProgramData header) do not count.
+  const absent = Buffer.alloc(2 * 98_304 + 64, 7); keyBytes(PROGRAM).subarray(1).copy(absent, 98_304 - 15);
+  const near = await fixture({ binary: absent });
+  assert.equal((await verifySolanaVaultDeployment(near.options.rpc, PROGRAM, near.options.programBinarySha256)).declaresProgramId, false, "31 of 32 bytes is not the id");
+  const good = await fixture();
+  assert.equal((await createSolanaExecutor(good.options).execute(good.intent)).status, "pending");
+});
+
 test("a verified immutable deployment is cached per provider pair; failures are not", async () => {
   const f = await fixture(); let slices = 0;
   const counting: SolanaLiveRead = async (method, params = []) => {
@@ -576,9 +600,9 @@ test("a verified immutable deployment is cached per provider pair; failures are 
   await assert.rejects(verifySolanaVaultDeployment(rpc, PROGRAM, "0".repeat(64)), /unsafe-program/);
   assert.equal(slices, failed * 2, "a failure is checked again");
   slices = 0;
-  assert.deepEqual(await verifySolanaVaultDeployment(rpc, PROGRAM, f.options.programBinarySha256), { slot: SLOT });
+  assert.deepEqual(await verifySolanaVaultDeployment(rpc, PROGRAM, f.options.programBinarySha256), { slot: SLOT, declaresProgramId: true });
   const verified = slices; assert.ok(verified >= 4, "both providers read the program and its data");
-  assert.deepEqual(await verifySolanaVaultDeployment(rpc, PROGRAM, f.options.programBinarySha256), { slot: SLOT });
+  assert.deepEqual(await verifySolanaVaultDeployment(rpc, PROGRAM, f.options.programBinarySha256), { slot: SLOT, declaresProgramId: true });
   assert.equal(slices, verified, "the second check is served from the cache");
 });
 
