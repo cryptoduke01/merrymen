@@ -7,7 +7,8 @@ import { wrapSqlite, translateSchema, type Db } from "../../../worker/src/db";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { SqlSolanaBindingStore, SolanaBindingError, stopLocalSolanaForKill, stopSolanaForKill, validateSolanaStrategy } from "./solana-binding-store";
+import { stopLocalSolanaForKill, stopSolanaForKill } from "../../../worker/src/solana-kill";
+import { SqlSolanaBindingStore, SolanaBindingError, validateSolanaStrategy } from "./solana-binding-store";
 
 const TENANT = `0x${"11".repeat(20)}` as const, OTHER = `0x${"22".repeat(20)}` as const;
 const OWNER = base58Encode(new Uint8Array(32).fill(20)), SECOND = base58Encode(new Uint8Array(32).fill(21));

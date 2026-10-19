@@ -1,0 +1,25 @@
+/** Kill switches reach the separate Solana worker through the tenant's binding. */
+import { existsSync } from "node:fs";
+import { isHostedMode } from "../../packages/core/src/hosted";
+import { getSolanaBindingStore, type SolanaBindingStore } from "../../web/src/lib/solana-binding-store";
+import { solanaRuntimeDbFile } from "./solana-runtime-db";
+
+/**
+ * "Kill all agents" and Telegram /kill stop the tenant's Solana strategy too.
+ * Throws when it cannot be stopped, so the caller reports the kill incomplete.
+ * Without a database there is nothing that could trade: hosted Solana refuses
+ * to run without the shared database, and a self-hosted install that never
+ * used Solana has no accounts file (none is created here).
+ */
+export async function stopSolanaForKill(tenant: `0x${string}`, store: SolanaBindingStore = getSolanaBindingStore()): Promise<"stopped" | "none"> {
+  if (!process.env.DATABASE_URL && (isHostedMode() || !existsSync(solanaRuntimeDbFile()))) return "none";
+  return await store.disableForKill(tenant) ? "stopped" : "none";
+}
+/** Self-hosted is one owner's install: its kill stops every local strategy. */
+export async function stopLocalSolanaForKill(store: SolanaBindingStore = getSolanaBindingStore()): Promise<"stopped" | "none"> {
+  if (isHostedMode()) throw new Error("A hosted kill names its tenant.");
+  if (!process.env.DATABASE_URL && !existsSync(solanaRuntimeDbFile())) return "none";
+  let stopped = false;
+  for (const tenant of await store.strategyTenants()) stopped = await store.disableForKill(tenant) || stopped;
+  return stopped ? "stopped" : "none";
+}
