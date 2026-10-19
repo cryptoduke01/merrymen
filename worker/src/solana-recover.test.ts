@@ -511,6 +511,24 @@ describe("solana-recover", () => {
     assert.equal(slow.sent.length, 1, "nothing is sent while the revoke is unconfirmed");
   });
 
+  it("skips USDG when the owner's own USDG account is frozen, and still recovers WSOL and SOL", async () => {
+    const fake = await chain({ session: SOLANA_SYSTEM_PROGRAM, ownerAtas: true });
+    const ownerUsdg = await deriveSolanaAta(OWNER, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM);
+    const vaultUsdg = await deriveSolanaAta(fake.vault, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM);
+    const vaultWsol = await deriveSolanaAta(fake.vault, SOLANA_WRAPPED_SOL_MINT, SOLANA_CLASSIC_TOKEN_PROGRAM);
+    fake.accounts.get(ownerUsdg)!.data[108] = 2; // the issuer froze the owner's USDG account
+    const { error, out } = await run(fake, [...base, "--key-file", keyFile(SECRET_BASE58), "--send"]);
+    assert.equal(error, null, String(error));
+    assert.match(out, new RegExp(`Note: USDG: your USDG account ${ownerUsdg} is frozen by the issuer`));
+    assert.match(out, /2\. withdraw 0\.6 WSOL, 0\.003 SOL to the owner/);
+    assert.equal(fake.sent.length, 1);
+    assert.deepEqual(fake.sent[0]!.instructions.map((ix) => ix.program),
+      [SOLANA_ASSOCIATED_TOKEN_PROGRAM, SOLANA_CLASSIC_TOKEN_PROGRAM, PROGRAM, PROGRAM], "no USDG transfer into the frozen account");
+    assert.equal(fake.token(vaultUsdg), 12_345_678n, "USDG stays in the vault");
+    assert.equal(fake.token(vaultWsol), 0n);
+    assert.equal(fake.accounts.get(fake.vault)!.lamports, rent(SOLANA_VAULT_ACCOUNT_SIZE));
+  });
+
   it("skips a frozen USDG account with a note and still recovers the rest; no WSOL account means no WSOL step", async () => {
     const fake = await chain({ frozenUsdg: true, noWsolAccount: true, session: SOLANA_SYSTEM_PROGRAM });
     const { error, out } = await run(fake, [...base, "--key-file", keyFile(SECRET_BASE58), "--send"]);

@@ -155,6 +155,14 @@ function tokenAccount(raw: RawAccount, program: string, mint: string, authority:
   if (nativeTag > 1) fail("A vault token account is malformed.");
   return { amount: data.readBigUInt64LE(64), frozen: state === 2, nativeReserve: nativeTag === 1 ? data.readBigUInt64LE(113) : null };
 }
+/**
+ * True when the owner's token account exists and is frozen: a transfer into it
+ * fails, and would take the whole step 2 transaction down with it. Anything
+ * else at the ATA address is left to CreateIdempotent and the program.
+ */
+function ownerAccountFrozen(raw: RawAccount | null | undefined, program: string): boolean {
+  return !!raw && raw.owner === program && !raw.executable && raw.data.length >= 165 && raw.data[108] === 2;
+}
 
 export interface SolanaRecoveryState {
   owner: string;
@@ -165,9 +173,10 @@ export interface SolanaRecoveryState {
   vaultState: SolanaVaultState;
   /** True while a session key is set: it can still trade until revoked. */
   sessionActive: boolean;
-  usdg: { vaultAccount: string; ownerAccount: string; exists: boolean; frozen: boolean; amountRaw: bigint; ownerAccountExists: boolean };
+  usdg: { vaultAccount: string; ownerAccount: string; exists: boolean; frozen: boolean; amountRaw: bigint; ownerAccountExists: boolean; ownerAccountFrozen: boolean };
   /** WSOL withdrawable after SyncNative: account lamports above its rent-exempt reserve. */
-  wsol: { vaultAccount: string; ownerAccount: string; exists: boolean; frozen: boolean; amountRaw: bigint; unsyncedRaw: bigint; ownerAccountExists: boolean };
+  wsol: { vaultAccount: string; ownerAccount: string; exists: boolean; frozen: boolean; amountRaw: bigint; unsyncedRaw: bigint; ownerAccountExists: boolean;
+    ownerAccountFrozen: boolean };
   /** Native SOL in the vault account above the rent reserve withdraw_sol keeps. */
   sol: { lamports: bigint; reserve: bigint; excess: bigint };
   ownerLamports: bigint;
@@ -206,9 +215,11 @@ export async function readSolanaRecoveryState(rpc: SolanaLiveRpc, programId: str
     return {
       owner, programId, vault, slot: integer(result.context.slot), commitment, vaultState,
       sessionActive: vaultState.session !== NO_SESSION,
-      usdg: { vaultAccount: vaultUsdg, ownerAccount: ownerUsdg, exists: !!usdg, frozen: !!usdg?.frozen, amountRaw: usdg?.amount ?? 0n, ownerAccountExists: !!ownerUsdgRaw },
+      usdg: { vaultAccount: vaultUsdg, ownerAccount: ownerUsdg, exists: !!usdg, frozen: !!usdg?.frozen, amountRaw: usdg?.amount ?? 0n, ownerAccountExists: !!ownerUsdgRaw,
+        ownerAccountFrozen: ownerAccountFrozen(ownerUsdgRaw, TOKEN_2022_PROGRAM) },
       wsol: { vaultAccount: vaultWsol, ownerAccount: ownerWsol, exists: !!wsol, frozen: !!wsol?.frozen, amountRaw: wsolWithdrawable,
-        unsyncedRaw: wsol ? wsolWithdrawable - wsol.amount : 0n, ownerAccountExists: !!ownerWsolRaw },
+        unsyncedRaw: wsol ? wsolWithdrawable - wsol.amount : 0n, ownerAccountExists: !!ownerWsolRaw,
+        ownerAccountFrozen: ownerAccountFrozen(ownerWsolRaw, SOLANA_CLASSIC_TOKEN_PROGRAM) },
       sol: { lamports: vaultRaw.lamports, reserve, excess: vaultRaw.lamports > reserve ? vaultRaw.lamports - reserve : 0n },
       ownerLamports: ownerRaw?.lamports ?? 0n,
     };
@@ -231,11 +242,15 @@ export interface SolanaRecoveryWithdrawal { usdgRaw: bigint; wsolRaw: bigint; so
 /** What step 2 withdraws from a state: every unit a withdrawal can move. */
 export function solanaRecoveryWithdrawal(state: SolanaRecoveryState): SolanaRecoveryWithdrawal {
   const skipped: string[] = [];
+  // A frozen account on either side fails its transfer, and with it every other
+  // withdrawal in the same transaction: skip that asset, recover the rest.
   if (state.usdg.frozen) skipped.push("USDG: the vault's USDG account is frozen by the issuer, so it cannot be withdrawn.");
+  else if (state.usdg.ownerAccountFrozen && state.usdg.amountRaw > 0n) skipped.push(`USDG: your USDG account ${state.usdg.ownerAccount} is frozen by the issuer, so USDG cannot be withdrawn to it.`);
   if (state.wsol.frozen) skipped.push("WSOL: the vault's WSOL account is frozen, so it cannot be withdrawn.");
+  else if (state.wsol.ownerAccountFrozen && state.wsol.amountRaw > 0n) skipped.push(`WSOL: your WSOL account ${state.wsol.ownerAccount} is frozen, so WSOL cannot be withdrawn to it.`);
   return {
-    usdgRaw: state.usdg.frozen ? 0n : state.usdg.amountRaw,
-    wsolRaw: state.wsol.frozen ? 0n : state.wsol.amountRaw,
+    usdgRaw: state.usdg.frozen || state.usdg.ownerAccountFrozen ? 0n : state.usdg.amountRaw,
+    wsolRaw: state.wsol.frozen || state.wsol.ownerAccountFrozen ? 0n : state.wsol.amountRaw,
     solLamports: state.sol.excess, skipped,
   };
 }
