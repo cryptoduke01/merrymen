@@ -38,7 +38,9 @@ export interface SolanaLiveRpc {
   /**
    * Runs `operation` once against every configured provider (primary first),
    * each in its own mainnet-verified session. Rejects if any provider fails.
-   * The production transport always has two; use readSolanaQuorum to compare.
+   * The live transport always has two; use readSolanaQuorum to compare. Optional
+   * only so a narrow test double can omit it: without it every quorum or
+   * every-provider read refuses with "no-quorum".
    */
   readEach?<T>(operation: (rpc: SolanaLiveRead) => Promise<T>): Promise<T[]>;
   send(signedTransactionBase64: string, minContextSlot: number, signal?: AbortSignal, options?: SolanaSendOptions): Promise<string>;
@@ -59,11 +61,21 @@ export const SOLANA_DEFAULT_REBROADCAST_MS = 15_000;
 const MAX_REBROADCAST_MS = 120_000;
 const PROCESS_SALT = randomBytes(32);
 
-/** Every provider's answer. A hand-built transport without readEach counts as one provider. */
+/**
+ * Every provider's answer, for checks one lying provider must not pass alone
+ * (the vault deployment). At least two providers, or "no-quorum": a transport
+ * without readEach, or with one provider behind it, is refused. The only
+ * exception is an owner-run single endpoint (createSolanaLiveRpc's
+ * singleEndpoint), which checks against the one RPC its owner chose.
+ */
 export async function readSolanaEachProvider<T>(rpc: SolanaLiveRpc, operation: (rpc: SolanaLiveRead) => Promise<T>): Promise<T[]> {
-  if (typeof rpc.readEach !== "function") return [await rpc.read(operation)];
+  const single = rpc.singleEndpoint === true;
+  if (typeof rpc.readEach !== "function") {
+    if (!single) throw new SolanaRpcError("no-quorum");
+    return [await rpc.read(operation)];
+  }
   const values = await rpc.readEach(operation);
-  if (!Array.isArray(values) || values.length < 1) throw new SolanaRpcError("no-quorum");
+  if (!Array.isArray(values) || values.length < (single ? 1 : 2)) throw new SolanaRpcError("no-quorum");
   return values;
 }
 

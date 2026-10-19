@@ -140,7 +140,8 @@ async function fixture(t: TestContext, opts: { cash: bigint; wsol: bigint; mark:
       default: return assert.fail(`unexpected live RPC ${method}`);
     }
   };
-  const rpc: SolanaLiveRpc = { read: fn => fn(read), send: async wire => { sends.push(wire); return "sent"; } };
+  // Two agreeing providers, as the live transport always has: deployment checks and bookings need both.
+  const rpc: SolanaLiveRpc = { read: fn => fn(read), readEach: async fn => [await fn(read), await fn(read)], send: async wire => { sends.push(wire); return "sent"; } };
   const quote = async (i: { inputMint: string; outputMint: string; amountRaw: string; slippageBps: number }) => {
     const out = opts.mark === "dust" ? 1n : fairOut(i.inputMint, BigInt(i.amountRaw));
     return { source: "jupiter" as const, inputMint: i.inputMint, outputMint: i.outputMint, inAmount: i.amountRaw, outAmount: out.toString(),

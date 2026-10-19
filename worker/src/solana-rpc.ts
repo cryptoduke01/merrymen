@@ -19,7 +19,7 @@ const ERROR_MESSAGES = {
   unhealthy: "Solana RPC did not report healthy status.",
   "unsupported-method": "Only allowlisted read-only Solana RPC methods are supported.",
   cancelled: "Solana submission was cancelled before completion.",
-  "no-quorum": "Live Solana settlement needs the same answer from two independent RPC providers.",
+  "no-quorum": "Live Solana trading needs the same answer from two independent RPC providers.",
 } as const;
 
 export class SolanaRpcError extends Error {

@@ -3,11 +3,31 @@ import assert from "node:assert/strict";
 import { createKeyPairFromPrivateKeyBytes, getAddressFromPublicKey, createTransactionMessage,
   setTransactionMessageFeePayer, setTransactionMessageLifetimeUsingBlockhash, compileTransaction,
   signTransaction, getBase64EncodedWireTransaction, getSignatureFromTransaction, blockhash } from "@solana/kit";
-import { createSolanaLiveRpc, readSolanaPriorityFee, readSolanaQuorum, type SolanaLiveRead, type SolanaLiveRpc } from "./solana-live-rpc";
+import { createSolanaLiveRpc, readSolanaEachProvider, readSolanaPriorityFee, readSolanaQuorum, type SolanaLiveRead, type SolanaLiveRpc } from "./solana-live-rpc";
+import { verifySolanaVaultDeployment } from "./solana-executor";
+import { getBase58Decoder, getBase58Encoder } from "@solana/kit";
+import { createHash } from "node:crypto";
 import { SOLANA_MAINNET_GENESIS_HASH, SolanaRpcError } from "./solana-rpc";
 const env = { MERRYMEN_SOLANA_RPC_MAINNET: "https://primary.example/?api-key=secret-primary",
   MERRYMEN_SOLANA_RPC_MAINNET_FALLBACK: "https://fallback.example/?api-key=secret-fallback" };
 const BLOCKHASH = "11111111111111111111111111111111";
+const key32 = (n: number) => getBase58Decoder().decode(new Uint8Array(32).fill(n));
+/** An immutable upgradeable-loader deployment whose binary declares its own program id. */
+function deployment() {
+  const programId = key32(61), dataAddress = key32(62), LOADER = "BPFLoaderUpgradeab1e11111111111111111111111";
+  const binary = Buffer.concat([Buffer.from("vault-binary"), Buffer.from(getBase58Encoder().encode(programId))]);
+  const program = Buffer.alloc(36); program.writeUInt32LE(2); Buffer.from(getBase58Encoder().encode(dataAddress)).copy(program, 4);
+  const programData = Buffer.alloc(45 + binary.length); programData.writeUInt32LE(3); binary.copy(programData, 45);
+  const value = (data: Buffer, executable: boolean, space: number) => ({ owner: LOADER, executable, lamports: 1, data: [data.toString("base64"), "base64"], space });
+  const read: SolanaLiveRead = async (method, params = []) => {
+    if (method === "getSlot") return 5;
+    assert.equal(method, "getAccountInfo");
+    if (params[0] === programId) return { context: { slot: 5 }, value: value(program, true, 36) };
+    const slice = (params[1] as { dataSlice: { offset: number; length: number } }).dataSlice;
+    return { context: { slot: 5 }, value: value(programData.subarray(slice.offset, slice.offset + slice.length), false, programData.length) };
+  };
+  return { programId, read, sha256: createHash("sha256").update(binary).digest("hex") };
+}
 async function signed() {
   const pair = await createKeyPairFromPrivateKeyBytes(new Uint8Array(32).fill(7));
   const payer = await getAddressFromPublicKey(pair.publicKey);
@@ -111,6 +131,32 @@ test("readSolanaQuorum needs at least two providers and compares by the caller's
   assert.equal(quorum.agreed, true);
   assert.deepEqual(quorum.agreed && quorum.value, { height: 1, outcome: "expired" });
   assert.equal((await readSolanaQuorum(pair, async () => ({ height: 0, outcome: "" }))).agreed, false);
+});
+test("checks every provider must pass refuse a transport with fewer than two, except an owner-run single endpoint", async () => {
+  const read: SolanaLiveRead = async () => 7;
+  const noEach: SolanaLiveRpc = { read: callback => callback(read), send: async wire => wire };
+  const lonely: SolanaLiveRpc = { ...noEach, readEach: async callback => [await callback(read)] };
+  const pair: SolanaLiveRpc = { ...noEach, readEach: async callback => [await callback(read), await callback(read)] };
+  for (const rpc of [noEach, lonely, { ...pair, readEach: async () => [] }]) {
+    await assert.rejects(readSolanaEachProvider(rpc, r => r("getSlot")), error => error instanceof SolanaRpcError && error.code === "no-quorum");
+  }
+  assert.deepEqual(await readSolanaEachProvider(pair, r => r("getSlot")), [7, 7]);
+  // The deployment check a live runtime runs refuses one provider's word, even for a valid immutable deployment.
+  const deployed = deployment();
+  const lonelyDeployed: SolanaLiveRpc = { read: callback => callback(deployed.read), readEach: async callback => [await callback(deployed.read)], send: async wire => wire };
+  await assert.rejects(verifySolanaVaultDeployment(lonelyDeployed, deployed.programId, deployed.sha256), error => error instanceof SolanaRpcError && error.code === "no-quorum");
+  const pairDeployed: SolanaLiveRpc = { ...lonelyDeployed, readEach: async callback => [await callback(deployed.read), await callback(deployed.read)] };
+  assert.equal((await verifySolanaVaultDeployment(pairDeployed, deployed.programId, deployed.sha256)).slot, 5);
+  assert.equal((await verifySolanaVaultDeployment({ ...lonelyDeployed, singleEndpoint: true }, deployed.programId, deployed.sha256)).slot, 5);
+  // An owner-run single endpoint checks against the one RPC its owner chose.
+  for (const owned of [{ ...noEach, singleEndpoint: true }, { ...lonely, singleEndpoint: true }]) {
+    assert.deepEqual(await readSolanaEachProvider(owned, r => r("getSlot")), [7]);
+  }
+  const single = createSolanaLiveRpc({ env, singleEndpoint: true, fetch: async (_url, init) => {
+    const body = JSON.parse(init!.body as string);
+    return Response.json({ jsonrpc: "2.0", id: body.id, result: body.method === "getGenesisHash" ? SOLANA_MAINNET_GENESIS_HASH : 9 });
+  } });
+  assert.deepEqual(await readSolanaEachProvider(single, r => r("getSlot")), [9]);
 });
 test("send broadcasts the identical bytes to both providers and rebroadcasts a dropped send until it is seen (audit G2-1)", async () => {
   const tx = await signed(), time = clock(), calls: Call[] = [];
