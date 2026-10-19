@@ -78,6 +78,8 @@ async function createAta(owner: string, authority: string, mint: string): Promis
 }
 const UPGRADEABLE_LOADER = "BPFLoaderUpgradeab1e11111111111111111111111";
 const PROGRAM_DATA_SLICE = 98_304;
+/** How long a successful vault deployment check is reused before it runs again. Failures are never reused. */
+export const SOLANA_DEPLOYMENT_RECHECK_MS = 10 * 60_000;
 /** (program id, binary hash) pairs whose bytes are proven to declare that id. A fact about the bytes, kept for the process. */
 const declaredProgramIds = new Set<string>();
 /**
@@ -153,11 +155,28 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
     if (programId === SOLANA_VAULT_LOCAL_TEST_PROGRAM && !localTest) fail("The configured Solana vault program is the local test id, which is never used for live trading.", "configuration");
     return { programId, hash };
   }
-  /** The immutable audited deployment on every provider, built for the configured id. */
-  async function verifyDeployment(cfg: { programId: string; hash: string }) {
-    const live = rpc(), deployment = await verifySolanaVaultDeployment(live, cfg.programId, cfg.hash);
-    if (!localTest) await requireDeclaredProgramId(live, cfg.programId, cfg.hash);
-    return deployment;
+  // The last successful deployment check, and one in flight so concurrent callers share it.
+  let verified: { key: string; atMs: number } | undefined;
+  let verifying: { key: string; done: Promise<void> } | undefined;
+  /**
+   * The immutable audited deployment on every provider, built for the configured
+   * id. Upgrade authority None means the bytes can never change or close, so a
+   * success is reused for SOLANA_DEPLOYMENT_RECHECK_MS, keyed by the provider
+   * pair, program id and hash: any configuration change checks again. A failure
+   * is never remembered; the next call checks again.
+   */
+  async function verifyDeployment(cfg: { programId: string; hash: string }): Promise<void> {
+    const live = rpc(), key = JSON.stringify([live.providerKey ?? null, cfg.programId, cfg.hash, localTest]), at = now();
+    if (verified?.key === key && at >= verified.atMs && at - verified.atMs < SOLANA_DEPLOYMENT_RECHECK_MS) return;
+    verified = undefined; // Expired, or the configuration changed: only a fresh success counts.
+    if (verifying?.key === key) return verifying.done;
+    const done = (async () => {
+      await verifySolanaVaultDeployment(live, cfg.programId, cfg.hash);
+      if (!localTest) await requireDeclaredProgramId(live, cfg.programId, cfg.hash);
+      verified = { key, atMs: at };
+    })();
+    verifying = { key, done };
+    try { await done; } finally { if (verifying?.done === done) verifying = undefined; }
   }
   function dek() { return seed(env.MERRYMEN_STORE_DEK, "Configure a 32-byte encryption key before registering live trading."); }
   async function payer() {
@@ -269,52 +288,66 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
     return { signature, status: "pending" as const };
   }
   return {
-    async status(scope: SolanaAccountScope) {
+    /**
+     * The account's paper and live state. Chain reads happen only for a live
+     * binding or an account that already has live state (a session, a live book,
+     * an owner transaction or a pending trade); a paper-only account costs no RPC.
+     * `liveReads: false` skips them (the worker's paper strategies); a live
+     * binding read that way is never shown as ready.
+     */
+    async status(scope: SolanaAccountScope, statusOptions: { liveReads?: boolean } = {}) {
       const s = await store(scope), binding = await s.binding(), blockers: string[] = [];
-      try { await reconcile(s); } catch { blockers.push("Pending trade confirmation is unavailable; its reservation remains held."); }
-      const setup = await s.setup();
-      if (setup?.signature && setup.status !== "finalized" && setup.status !== "failed") {
-        try { await ownerStatus(s, setup); } catch { blockers.push("Owner transaction confirmation is unavailable."); }
+      const liveReads = statusOptions.liveReads ?? (binding.requestedMode === "live" || !!(await s.session()) || !!(await s.liveBook())
+        || !!(await s.setup()) || (await s.pending()).length > 0);
+      if (liveReads) {
+        try { await reconcile(s); } catch { blockers.push("Pending trade confirmation is unavailable; its reservation remains held."); }
+        const setup = await s.setup();
+        if (setup?.signature && setup.status !== "finalized" && setup.status !== "failed") {
+          try { await ownerStatus(s, setup); } catch { blockers.push("Owner transaction confirmation is unavailable."); }
+        }
       }
       const session = await s.session();
       let programId: string | null = null, vault: string | null = null, cashTokenAccount: string | null = null;
       let balances: { slot: number; cashUsdg: string; wsolRaw: string } | null = null;
       try {
         const cfg = config(); programId = cfg.programId; vault = await deriveSolanaVaultAddress(programId, scope.owner);
-        dek(); const feePayer = await getAddressFromPublicKey((await payer()).publicKey);
-        if ([scope.owner, vault, session?.session].includes(feePayer)) fail("The network fee payer must be separate from the owner, vault and session.", "configuration");
-        await verifyDeployment(cfg);
-        const feeBudget = parseSolanaRawAmount(env.MERRYMEN_SOLANA_MAX_FEE_LAMPORTS ?? "5000000");
-        await rpc().read(async read => {
-          const account = await read("getAccountInfo", [feePayer, { encoding: "base64", commitment: "confirmed" }]);
-          if (!object(account) || !object(account.value) || account.value.owner !== SOLANA_SYSTEM_PROGRAM || BigInt(integer(account.value.lamports)) < feeBudget)
-            fail("The separate network fee payer needs SOL for transaction fees and temporary account rent.", "configuration");
-        });
-        const live = await readSolanaVaultState(rpc(), programId, scope.owner);
-        balances = await readSolanaVaultBalances(rpc(), vault, live.slot);
-        cashTokenAccount = await deriveSolanaAta(vault, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM);
-        const book = await s.liveBook();
-        // A USDG deposit or anyone's WSOL transfer is booked from finalized state:
-        // capital-in for USDG, zero-basis quarantine for WSOL. Neither blocks exits.
-        if (book && !shortOfBook(book, balances) && aboveBook(book, balances) && !(await s.pending()).length) {
-          const observedAtMs = now();
-          const finalized = await readSolanaVaultBalances(rpc(), vault, book.slot, "finalized");
-          // Unbooked excess is never traded or valued, so failing to book it now (an
-          // owner transaction is pending, say) must not block exits; it retries next read.
-          try { if (!shortOfBook(book, finalized) && aboveBook(book, finalized)) await s.reconcileExternalInflows({ ...finalized, observedAtMs, commitment: "finalized" }); }
-          catch { /* Retried on the next status read. */ }
-        }
-        if (!session || session.programId !== programId || session.vault !== vault || live.state.session !== session.session || live.state.sessionEpoch.toString() !== session.sessionEpoch) blockers.push("Register an owner-approved live trading permission.");
+        if (!liveReads) { if (binding.requestedMode === "live") blockers.push("Live vault state was not read."); }
         else {
-          const storedSeed = await s.sessionSeed(dek());
-          if (!storedSeed || await getAddressFromPublicKey((await createKeyPairFromPrivateKeyBytes(seed(storedSeed, "The session cannot be opened."))).publicKey) !== session.session)
-            fail("The saved trading permission cannot be opened.", "configuration");
+          dek(); const feePayer = await getAddressFromPublicKey((await payer()).publicKey);
+          if ([scope.owner, vault, session?.session].includes(feePayer)) fail("The network fee payer must be separate from the owner, vault and session.", "configuration");
+          await verifyDeployment(cfg);
+          const feeBudget = parseSolanaRawAmount(env.MERRYMEN_SOLANA_MAX_FEE_LAMPORTS ?? "5000000");
+          await rpc().read(async read => {
+            const account = await read("getAccountInfo", [feePayer, { encoding: "base64", commitment: "confirmed" }]);
+            if (!object(account) || !object(account.value) || account.value.owner !== SOLANA_SYSTEM_PROGRAM || BigInt(integer(account.value.lamports)) < feeBudget)
+              fail("The separate network fee payer needs SOL for transaction fees and temporary account rent.", "configuration");
+          });
+          const live = await readSolanaVaultState(rpc(), programId, scope.owner);
+          balances = await readSolanaVaultBalances(rpc(), vault, live.slot);
+          cashTokenAccount = await deriveSolanaAta(vault, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM);
+          const book = await s.liveBook();
+          // A USDG deposit or anyone's WSOL transfer is booked from finalized state:
+          // capital-in for USDG, zero-basis quarantine for WSOL. Neither blocks exits.
+          if (book && !shortOfBook(book, balances) && aboveBook(book, balances) && !(await s.pending()).length) {
+            const observedAtMs = now();
+            const finalized = await readSolanaVaultBalances(rpc(), vault, book.slot, "finalized");
+            // Unbooked excess is never traded or valued, so failing to book it now (an
+            // owner transaction is pending, say) must not block exits; it retries next read.
+            try { if (!shortOfBook(book, finalized) && aboveBook(book, finalized)) await s.reconcileExternalInflows({ ...finalized, observedAtMs, commitment: "finalized" }); }
+            catch { /* Retried on the next status read. */ }
+          }
+          if (!session || session.programId !== programId || session.vault !== vault || live.state.session !== session.session || live.state.sessionEpoch.toString() !== session.sessionEpoch) blockers.push("Register an owner-approved live trading permission.");
+          else {
+            const storedSeed = await s.sessionSeed(dek());
+            if (!storedSeed || await getAddressFromPublicKey((await createKeyPairFromPrivateKeyBytes(seed(storedSeed, "The session cannot be opened."))).publicKey) !== session.session)
+              fail("The saved trading permission cannot be opened.", "configuration");
+          }
+          const currentBook = await s.liveBook();
+          if (currentBook?.buyPaused) blockers.push("The buying drawdown breaker is paused; exits remain available.");
+          if (currentBook && shortOfBook(currentBook, balances)) blockers.push("Vault balances are below recorded trades; reconcile capital transfers before trading.");
+          if (live.state.expiresAt * 1000n <= BigInt(now())) blockers.push("The on-chain trading permission has expired.");
+          if (live.state.paused) blockers.push("The on-chain buying breaker is paused; exits remain available.");
         }
-        const currentBook = await s.liveBook();
-        if (currentBook?.buyPaused) blockers.push("The buying drawdown breaker is paused; exits remain available.");
-        if (currentBook && shortOfBook(currentBook, balances)) blockers.push("Vault balances are below recorded trades; reconcile capital transfers before trading.");
-        if (live.state.expiresAt * 1000n <= BigInt(now())) blockers.push("The on-chain trading permission has expired.");
-        if (live.state.paused) blockers.push("The on-chain buying breaker is paused; exits remain available.");
       } catch (error) { blockers.push(error instanceof SolanaAppRuntimeError ? error.message : "The configured vault, balances or live permissions could not be verified."); }
       if (!env.MERRYMEN_JUPITER_API_KEY) blockers.push("Configure Jupiter quote access.");
       if (await s.operatorHeld()) blockers.push(OPERATOR_HOLD);
@@ -397,10 +430,11 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       let sell: ReturnType<typeof requireSolanaLiveSellLimits>;
       try { sell = requireSolanaLiveSellLimits(limits); } catch { return fail("Save per-trade and daily SOL sell limits before registering live trading.", "permission"); }
       if (new Set([scope.owner, session, vault, feePayer]).size !== 4) fail("Owner, session, vault and fee payer must be separate accounts.");
-      const deployment = await verifyDeployment(cfg);
+      await verifyDeployment(cfg);
       const prior = await rpc().read(async read => {
-        const found = await read("getAccountInfo", [vault, { encoding: "base64", commitment: "confirmed", minContextSlot: deployment.slot }]);
-        if (!object(found) || !object(found.context) || integer(found.context.slot) < deployment.slot || !Object.hasOwn(found, "value")) fail("The vault account could not be read.");
+        const slot = integer(await read("getSlot", [{ commitment: "confirmed" }]));
+        const found = await read("getAccountInfo", [vault, { encoding: "base64", commitment: "confirmed", minContextSlot: slot }]);
+        if (!object(found) || !object(found.context) || integer(found.context.slot) < slot || !Object.hasOwn(found, "value")) fail("The vault account could not be read.");
         if (found.value === null) return null;
         if (!object(found.value) || found.value.owner !== cfg.programId || !Array.isArray(found.value.data) || typeof found.value.data[0] !== "string" || found.value.data[1] !== "base64"
           || decodeSolanaVaultAccount(encoded(found.value.data[0], SOLANA_VAULT_ACCOUNT_SIZE)).owner !== scope.owner) fail("The vault account does not match this owner.");

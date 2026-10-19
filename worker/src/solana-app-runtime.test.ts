@@ -10,7 +10,8 @@ import { SOLANA_CLASSIC_TOKEN_PROGRAM, SOLANA_VAULT_ACCOUNT_SIZE, SOLANA_VAULT_D
 import { sealSecret } from "./store-crypto";
 import { SqlSolanaBindingStore } from "../../web/src/lib/solana-binding-store";
 import { wrapSqlite } from "./db";
-import { createSolanaAppRuntime } from "./solana-app-runtime";
+import { createSolanaAgent } from "./solana-agent";
+import { createSolanaAppRuntime, SOLANA_DEPLOYMENT_RECHECK_MS } from "./solana-app-runtime";
 import type { SolanaLiveRead, SolanaLiveRpc } from "./solana-live-rpc";
 import type { SolanaPaperMarket } from "./solana-paper-service";
 import { ensureSolanaTradingSchema, SolanaTradingStore } from "./solana-trading-store";
@@ -52,7 +53,10 @@ async function fixture(options: { declared?: string } = {}) {
     b.writeUInt16LE(limits.maxOpsPerDay, p); return b;
   };
   const response = (value: unknown) => ({ context: { slot: 1000 }, value });
+  // Every RPC read, in order: what a status or owner action costs.
+  const calls: Array<{ method: string; key: unknown }> = [];
   const read: SolanaLiveRead = async (method, params = []) => {
+    calls.push({ method, key: params[0] });
     if (method === "getSlot") return 1000;
     if (method === "getBlockHeight") return controls.height;
     if (method === "getAccountInfo") {
@@ -103,7 +107,7 @@ async function fixture(options: { declared?: string } = {}) {
     await db.prepare("INSERT INTO solana_runtime_sessions(tenant,owner,record_json,sealed_seed) VALUES(?,?,?,?)").run(TENANT, owner, JSON.stringify(record),
       sealSecret(`solana-session/v1 ${TENANT} ${owner} ${PROGRAM} ${vault} ${session} ${record.sessionEpoch}\n` + sessionSeed.toString("base64"), Buffer.alloc(32, 30)));
   };
-  return { raw, db, clock, scope, owner, session, sessionSeed, controls, bindings, app, runtime, sign, live, trade, env, rpc, market, registered, programData, dataAddress };
+  return { raw, db, clock, scope, owner, session, sessionSeed, controls, bindings, app, runtime, sign, live, trade, env, rpc, market, registered, programData, dataAddress, calls };
 }
 
 test("authenticated paper execution is durable and never calls transaction submission", async () => {
@@ -376,4 +380,75 @@ test("an audited binary built for another program id is refused before any owner
     assert.doesNotMatch((await g.app.status(g.scope)).live.blockers.join(" "), /program id/);
     await g.app.prepareLive(g.scope, { limits, sessionPublicKey: g.session });
   } finally { g.raw.close(); }
+});
+
+/** Reads of the vault program's ProgramData: the expensive part of a deployment check. */
+const programDataReads = (f: Awaited<ReturnType<typeof fixture>>) => f.calls.filter(c => c.method === "getAccountInfo" && c.key === f.dataAddress).length;
+
+test("a live status verifies the vault binary once per recheck window, not on every call (audit web-auth F1, agent-deploy F3)", async () => {
+  const f = await fixture();
+  try {
+    await f.live(); f.controls.initialized = true; await f.registered();
+    await f.app.status(f.scope);
+    const first = programDataReads(f);
+    assert.ok(first > 0, "the first status checks the deployment");
+    for (let i = 0; i < 5; i++) await f.app.status(f.scope);
+    assert.equal(programDataReads(f), first, "later status calls reuse the successful check");
+    f.clock.now += SOLANA_DEPLOYMENT_RECHECK_MS;
+    await f.app.status(f.scope);
+    assert.ok(programDataReads(f) > first, "the check runs again once the window passes");
+  } finally { f.raw.close(); }
+});
+
+test("a deployment check is redone when its configuration changes, and a failure is never reused (audit web-auth F1)", async () => {
+  const f = await fixture();
+  try {
+    await f.live(); f.controls.initialized = true; await f.registered();
+    const env: Record<string, string | undefined> = { ...f.env };
+    const app = f.runtime({ env });
+    assert.doesNotMatch((await app.status(f.scope)).live.blockers.join(" "), /could not be verified/);
+    const verifiedReads = programDataReads(f);
+    env.MERRYMEN_SOLANA_VAULT_SHA256 = "00".repeat(32);
+    for (let i = 0; i < 2; i++) assert.match((await app.status(f.scope)).live.blockers.join(" "), /could not be verified/, "a changed hash is checked, and refused");
+    const refusedReads = programDataReads(f);
+    assert.ok(refusedReads > verifiedReads);
+    env.MERRYMEN_SOLANA_VAULT_SHA256 = f.env.MERRYMEN_SOLANA_VAULT_SHA256;
+    assert.doesNotMatch((await app.status(f.scope)).live.blockers.join(" "), /could not be verified/);
+    assert.ok(programDataReads(f) > refusedReads, "restoring the hash checks again rather than trusting an old result");
+  } finally { f.raw.close(); }
+});
+
+test("a paper-only status, and the worker's paper strategy, make no RPC reads at all (audit web-auth F1, agent-deploy F3)", async () => {
+  const f = await fixture();
+  try {
+    await f.app.setupPaper(f.scope, { initialCashRaw: "100000000", limits });
+    const status = await f.app.status(f.scope);
+    assert.ok(status.paper); assert.equal(status.live.programId, PROGRAM, "the configured program is still shown");
+    assert.deepEqual(f.calls, []);
+    // A paper strategy on an account that also has a live book: the worker reads only the paper book.
+    await f.db.prepare("INSERT INTO solana_runtime_live_books(tenant,owner,book_json) VALUES(?,?,?)").run(TENANT, f.owner, JSON.stringify({ hwmRaw: "0", cashRaw: "0", wsolRaw: "0",
+      costBasisUsdgRaw: "0", realizedPnlUsdgRaw: "0", networkFeesLamports: "0", slot: 900, updatedAtMs: 999_000 }));
+    const binding = (await f.bindings.get(TENANT))!;
+    await f.bindings.strategy(TENANT, f.owner, binding.revision, { enabled: true, targetSolBps: 5000, rebalanceBps: 100, tradeUsdgRaw: "1000000", intervalSeconds: 60 } as never);
+    const agent = createSolanaAgent({ db: f.db, runtime: f.app, market: f.market, now: () => f.clock.now });
+    assert.deepEqual((await agent.tick()).map(r => r.outcome), ["submitted"]);
+    assert.deepEqual(f.calls, [], "no vault verification or chain read for a paper strategy");
+    assert.ok((await f.app.status(f.scope)).live.blockers.length > 0);
+  } finally { f.raw.close(); }
+});
+
+test("a long worker tick keeps its heartbeat fresh (audit agent-deploy F3)", async () => {
+  const f = await fixture();
+  try {
+    await f.app.setupPaper(f.scope, { initialCashRaw: "100000000", limits });
+    const binding = (await f.bindings.get(TENANT))!;
+    await f.bindings.strategy(TENANT, f.owner, binding.revision, { enabled: true, targetSolBps: 5000, rebalanceBps: 100, tradeUsdgRaw: "1000000", intervalSeconds: 60 } as never);
+    const started = f.clock.now;
+    // Each status takes 100 s of wall time, as a slow provider would.
+    const slow = { status: async (...args: Parameters<typeof f.app.status>) => { f.clock.now += 100_000; return f.app.status(...args); }, trade: f.app.trade };
+    await createSolanaAgent({ db: f.db, runtime: slow, market: f.market, now: () => f.clock.now }).tick();
+    const beat = await f.db.prepare("SELECT last_seen_at_ms FROM solana_runtime_worker_heartbeat WHERE worker='solana'").get() as { last_seen_at_ms: number };
+    assert.ok(f.clock.now - started >= 100_000);
+    assert.ok(f.clock.now - Number(beat.last_seen_at_ms) < 90_000, "the UI would otherwise show the worker offline");
+  } finally { f.raw.close(); }
 });

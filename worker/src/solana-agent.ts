@@ -61,13 +61,23 @@ export interface SolanaAgentOptions {
   /** Live sells are charged at up to this much above their quote by the reference price; size below the cap by it. */
   referenceToleranceBps?: number;
 }
+/** The heartbeat is written at least this often during a tick; the UI shows the worker offline after 90 s. */
+const HEARTBEAT_REFRESH_MS = 30_000;
 export function createSolanaAgent(options: SolanaAgentOptions) {
   const now = options.now ?? Date.now;
   const headroom = BigInt(10_000 - (options.referenceToleranceBps ?? SOLANA_REFERENCE_DEFAULT_TOLERANCE_BPS));
   return {
     async tick() {
       await ensureSolanaTradingSchema(options.db, options.postgres);
-      await options.db.prepare("INSERT INTO solana_runtime_worker_heartbeat(worker,last_seen_at_ms) VALUES('solana',?) ON CONFLICT(worker) DO UPDATE SET last_seen_at_ms=excluded.last_seen_at_ms").run(now());
+      // Refreshed as the tick goes, so a long tick never shows the worker as offline.
+      let beatAtMs = now();
+      const beat = async (force = false) => {
+        const at = now();
+        if (!force && at - beatAtMs < HEARTBEAT_REFRESH_MS) return;
+        beatAtMs = at;
+        await options.db.prepare("INSERT INTO solana_runtime_worker_heartbeat(worker,last_seen_at_ms) VALUES('solana',?) ON CONFLICT(worker) DO UPDATE SET last_seen_at_ms=excluded.last_seen_at_ms").run(at);
+      };
+      await beat(true);
       // Disabling a strategy never disables receipt recovery. Confirmation is
       // read-only and must keep working after mode changes or key rotation.
       const unsettled = await options.db.prepare("SELECT DISTINCT tenant,owner FROM solana_runtime_submissions WHERE status='pending'").all() as SolanaAccountScope[];
@@ -77,6 +87,7 @@ export function createSolanaAgent(options: SolanaAgentOptions) {
         if (options.signal?.aborted) break;
         if (recovered.has(scope.tenant)) continue;
         try { recovered.set(scope.tenant, await options.runtime.status({ tenant: scope.tenant, owner: scope.owner })); } catch { /* Retry next tick; no replacement transaction. */ }
+        await beat();
       }
       const rows = await options.db.prepare("SELECT tenant,owner,requested_mode,limits_json,strategy_json,revision FROM solana_wallet_bindings WHERE chain=? AND strategy_json IS NOT NULL ORDER BY tenant")
         .all(CHAINS.solana) as Array<{ tenant: string; owner: string; requested_mode: "paper" | "live"; limits_json: string | null; strategy_json: string; revision: number }>;
@@ -85,13 +96,15 @@ export function createSolanaAgent(options: SolanaAgentOptions) {
       const results: Array<{ owner: string; outcome: "held" | "submitted" | "unavailable" }> = [];
       for (const row of rows) {
         if (options.signal?.aborted) break;
+        await beat();
         const scope: SolanaAccountScope = { tenant: row.tenant, owner: row.owner };
         try {
           const strategy = validateSolanaStrategy(JSON.parse(row.strategy_json));
           if (!strategy.enabled || !row.limits_json) continue;
           if (holds.has(SOLANA_OPERATOR_HOLD_ALL) || holds.has(row.tenant)) { results.push({ owner: row.owner, outcome: "held" }); continue; }
           const limits = validateSolanaPaperLimits(JSON.parse(row.limits_json), now());
-          const status = recovered.get(scope.tenant) ?? await options.runtime.status(scope);
+          // A paper strategy needs only its paper book: no chain reads, no vault verification.
+          const status = recovered.get(scope.tenant) ?? await options.runtime.status(scope, row.requested_mode === "paper" ? { liveReads: false } : undefined);
           let cashRaw: string, wsolRaw: string;
           if (row.requested_mode === "paper") {
             if (!status.paper || status.paper.positions.some(p => p.mint !== SOLANA_WRAPPED_SOL_MINT)) { results.push({ owner: row.owner, outcome: "held" }); continue; }
@@ -117,6 +130,7 @@ export function createSolanaAgent(options: SolanaAgentOptions) {
           results.push({ owner: row.owner, outcome: "submitted" });
         } catch { results.push({ owner: row.owner, outcome: "unavailable" }); }
       }
+      await beat();
       return results;
     },
   };
