@@ -9,7 +9,7 @@ import { base58Encode, CHAINS, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM } from "../.
 import { SOLANA_CLASSIC_TOKEN_PROGRAM, SOLANA_WRAPPED_SOL_MINT, SOLANA_VAULT_LOCAL_TEST_PROGRAM } from "../../packages/core/src/solana-live";
 import { SqlSolanaBindingStore } from "../../web/src/lib/solana-binding-store";
 import { makePgDb, wrapSqlite, type Db } from "./db";
-import { ensureSolanaTradingSchema, SolanaTradingStore, type SolanaPreparedSetup } from "./solana-trading-store";
+import { ensureSolanaTradingSchema, solanaAutonomousSchedule, SolanaTradingStore, type SolanaPreparedSetup } from "./solana-trading-store";
 import type { SolanaLiveSettlement, SolanaSignedSubmission } from "./solana-executor";
 import { createSolanaPaperService } from "./solana-paper-service";
 import { pythBound } from "./solana-reference-price-fixture";
@@ -200,16 +200,18 @@ test("paper admission also checks the locked strategy cap against a moved sell q
   await f.store.createPaper(CASH.toString(), limits);
   const binding = await f.binding.strategy(TENANT, OWNER, 2, strategy);
   const automatic = new SolanaTradingStore(f.db, f.store.scope, () => NOW, { autonomousRevision: binding.revision });
-  const service = createSolanaPaperService(automatic.paper(), {
+  const market: Parameters<typeof createSolanaPaperService>[1] = {
     async readMint(mint) { return { address: mint, program: mint === SOLANA_USDG_MINT ? TOKEN_2022_PROGRAM : SOLANA_CLASSIC_TOKEN_PROGRAM,
       decimals: mint === SOLANA_USDG_MINT ? 6 : 9, slot: 1000, observedAtMs: NOW, buyBlockedReasons: [] }; },
     async quote(intent) { return { source: "jupiter", inputMint: intent.inputMint, outputMint: intent.outputMint, inAmount: intent.amountRaw,
       outAmount: intent.inputMint === SOLANA_USDG_MINT ? "2000000" : "1005000", minOutAmount: intent.inputMint === SOLANA_USDG_MINT ? "1980000" : "994950",
       slippageBps: intent.slippageBps, contextSlot: 1000, quotedAtMs: NOW, expiresAtMs: NOW + 30000 }; },
-  }, () => NOW, { owner: OWNER });
+  };
+  const service = createSolanaPaperService(automatic.paper(), market, () => NOW, { owner: OWNER });
   const intent = { kind: "spl-swap", chain: CHAINS.solana, mode: "paper", requestId: "initial-buy", inputMint: SOLANA_USDG_MINT,
     outputMint: SOLANA_WRAPPED_SOL_MINT, amountRaw: "1000000", slippageBps: 100 };
-  const buy = await service.trade(OWNER, intent);
+  // The owner's own buy; the strategy's first attempt is the exit.
+  const buy = await createSolanaPaperService(f.store.paper(), market, () => NOW, { owner: OWNER }).trade(OWNER, intent);
   await assert.rejects(service.trade(OWNER, { ...intent, requestId: "oversized-exit", inputMint: SOLANA_WRAPPED_SOL_MINT,
     outputMint: SOLANA_USDG_MINT, amountRaw: buy.outputAmountRaw }), /strategy trade limit/);
   const snapshot = (await automatic.paper().get(OWNER))!;
@@ -468,6 +470,33 @@ test("limits beyond the vault's 96 daily operations or a 168-hour permission are
   await assert.rejects(g.store.createPaper(CASH.toString(), paperLimits), /between 1 and 96/);
 });
 
+test("autonomous admission is spaced by the strategy interval under the lock, except after a proven expiry (audit agent-deploy F2, G2-2)", async t => {
+  for (const outcome of ["expired", "finalized", "failed"] as const) {
+    const f = await fixture(t), binding = await f.binding.strategy(TENANT, OWNER, 1, { ...strategy, intervalSeconds: 3_600 });
+    const automatic = new SolanaTradingStore(f.db, f.store.scope, () => f.clock.value, { autonomousRevision: binding.revision });
+    const first = submission("rebalance-2-0");
+    assert.equal(await automatic.recordSigned(first), true);
+    await f.store.settle(OWNER, first.intent.requestId, first.signature, outcome === "expired" ? expired(first) : settlement(first, outcome));
+    const retry = submission("rebalance-2-1", outcome === "finalized" ? "1" : "0"); retry.risk.slot = 1001;
+    if (outcome === "finalized") { retry.risk.cashUsdg = "99400000"; retry.risk.wsolRaw = "1980000"; }
+    if (outcome === "expired") {
+      assert.equal(await automatic.recordSigned(retry), true, "a dropped packet is retried at once");
+      assert.equal(await automatic.recordSigned(first), false, "the expired request is never re-admitted");
+    } else await assert.rejects(automatic.recordSigned(retry), /not due/, outcome);
+  }
+  // The interval passes: due again.
+  const f = await fixture(t), binding = await f.binding.strategy(TENANT, OWNER, 1, { ...strategy, intervalSeconds: 60 });
+  const automatic = new SolanaTradingStore(f.db, f.store.scope, () => f.clock.value, { autonomousRevision: binding.revision });
+  const first = submission("rebalance-2-0"); await automatic.recordSigned(first);
+  await f.store.settle(OWNER, first.intent.requestId, first.signature, settlement(first, "failed"));
+  f.clock.value = NOW + 60_000;
+  const later = submission("rebalance-2-1"); later.preparedAtMs = later.safetyObservedAtMs = later.risk.observedAtMs = later.quote.quotedAtMs = f.clock.value;
+  later.quote.expiresAtMs = f.clock.value + 30_000; later.risk.reference = pythBound(later.intent, f.clock.value); later.risk.slot = 1001;
+  assert.equal(await automatic.recordSigned(later), true);
+  // A manual live trade may not take a strategy request ID.
+  await assert.rejects(f.store.recordSigned(submission("rebalance-9-9")), /belong to the autonomous strategy/);
+});
+
 test("a live binding saved without SOL sell limits admits no trade", async t => {
   const f = await fixture(t), revision = (await f.binding.get(TENANT))!.revision;
   const { perTradeWsol: _p, dailyWsol: _d, ...unbounded } = limits;
@@ -559,6 +588,20 @@ for (const dialect of ["sqlite", "postgres"] as const) {
     // The trade ran at sequence 0: a withdrawal still claiming sequence 0 read stale state.
     await assert.rejects(f.store.saveSetup({ ...withdraw, preparedAtMs: f.clock.value, expiresAtMs: f.clock.value + 60_000 }), /vault changed/);
     assert.equal(await f.store.saveSetup({ ...withdraw, priorSequence: "1", preparedAtMs: f.clock.value, expiresAtMs: f.clock.value + 60_000 }), true);
+  });
+  test(`${dialect}: the durable autonomous schedule counts every attempt and spaces all but proven expiries`, options, async t => {
+    const f = await fixture(t, dialect), binding = await f.binding.strategy(TENANT, OWNER, 1, { ...strategy, intervalSeconds: 3_600 });
+    assert.deepEqual(await solanaAutonomousSchedule(f.db, f.store.scope, 3_600), { attempt: 0, dueAtMs: 0 });
+    const automatic = new SolanaTradingStore(f.db, f.store.scope, () => f.clock.value, { autonomousRevision: binding.revision });
+    const first = submission("rebalance-2-0"); assert.equal(await automatic.recordSigned(first), true);
+    assert.deepEqual(await solanaAutonomousSchedule(f.db, f.store.scope, 3_600), { attempt: 1, dueAtMs: NOW + 3_600_000 });
+    await f.store.settle(OWNER, first.intent.requestId, first.signature, expired(first));
+    assert.deepEqual(await solanaAutonomousSchedule(f.db, f.store.scope, 3_600), { attempt: 1, dueAtMs: 0 });
+    const retry = submission("rebalance-2-1"); retry.risk.slot = 1001; assert.equal(await automatic.recordSigned(retry), true);
+    assert.deepEqual(await solanaAutonomousSchedule(f.db, f.store.scope, 3_600), { attempt: 2, dueAtMs: NOW + 3_600_000 });
+    // Expired attempts leave the operation budget (G2-3) and their own budget is counted on this dialect too.
+    await f.store.settle(OWNER, retry.intent.requestId, retry.signature, expired(retry));
+    const third = submission("rebalance-2-2"); third.risk.slot = 1001; assert.equal(await automatic.recordSigned(third), true);
   });
   test(`${dialect}: one raw WSOL sent to the vault is quarantined at zero basis, outside equity, the HWM and the position (audit dust)`, options, async t => {
     const f = await fixture(t, dialect), s = submission(); await f.store.recordSigned(s);

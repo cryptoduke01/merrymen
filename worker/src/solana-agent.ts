@@ -9,17 +9,21 @@ import { createSolanaMarket } from "./solana-market";
 import type { SolanaPaperMarket } from "./solana-paper-service";
 import { SOLANA_REFERENCE_DEFAULT_TOLERANCE_BPS, SOLANA_REFERENCE_MAX_TOLERANCE_BPS, solanaReferenceToleranceBps } from "./solana-reference-price";
 import { getSolanaRuntimeDb } from "./solana-runtime-db";
-import { ensureSolanaTradingSchema, SOLANA_OPERATOR_HOLD_ALL, type SolanaAccountScope } from "./solana-trading-store";
+import { ensureSolanaTradingSchema, SOLANA_AUTONOMOUS_REQUEST_PREFIX, SOLANA_OPERATOR_HOLD_ALL, solanaAutonomousSchedule,
+  type SolanaAccountScope } from "./solana-trading-store";
 
 export interface SolanaRebalanceInput {
   cashRaw: string; wsolRaw: string; solValueUsdgRaw: string; limits: SolanaPaperLimits;
   strategy: SolanaStrategy; mode: "paper" | "live"; revision: number; nowMs: number;
+  /** The account's next autonomous attempt index (solanaAutonomousSchedule): each attempt has its own request ID. */
+  attempt: number;
 }
 /** Integer-only sizing against an executable full-position exit quote. */
 export function planSolanaRebalance(input: SolanaRebalanceInput) {
   const strategy = validateSolanaStrategy(input.strategy), limits = validateSolanaAccountLimits(input.limits, input.nowMs);
   if (!strategy.enabled) return null;
   if (!Number.isSafeInteger(input.revision) || input.revision < 0) throw new Error("Invalid Solana strategy revision.");
+  if (!Number.isSafeInteger(input.attempt) || input.attempt < 0) throw new Error("Invalid Solana strategy attempt.");
   const cash = parseSolanaRawAmount(input.cashRaw, true), held = parseSolanaRawAmount(input.wsolRaw, true), value = parseSolanaRawAmount(input.solValueUsdgRaw, true);
   if ((held === 0n) !== (value === 0n)) throw new Error("A current executable SOL valuation is required.");
   const equity = cash + value;
@@ -33,7 +37,8 @@ export function planSolanaRebalance(input: SolanaRebalanceInput) {
   // A sell never asks for more WSOL input than the owner signed for one trade.
   if (!buying && limits.perTradeWsol !== undefined && amount > BigInt(limits.perTradeWsol)) amount = BigInt(limits.perTradeWsol);
   if (amount === 0n) return null;
-  const requestId = `rebalance-${input.revision}-${Math.floor(input.nowMs / (strategy.intervalSeconds * 1000))}`;
+  // Never an earlier attempt's ID: a proven-expired request is never re-sent, a new attempt is a new request.
+  const requestId = `${SOLANA_AUTONOMOUS_REQUEST_PREFIX}${input.revision}-${input.attempt}`;
   return { ...parseSolanaSwapIntent({ kind: "spl-swap", chain: CHAINS.solana, mode: "paper", requestId,
     inputMint: buying ? SOLANA_USDG_MINT : SOLANA_WRAPPED_SOL_MINT, outputMint: buying ? SOLANA_WRAPPED_SOL_MINT : SOLANA_USDG_MINT,
     amountRaw: amount.toString(), slippageBps: 50 }), mode: input.mode };
@@ -63,9 +68,22 @@ export interface SolanaAgentOptions {
 }
 /** The heartbeat is written at least this often during a tick; the UI shows the worker offline after 90 s. */
 const HEARTBEAT_REFRESH_MS = 30_000;
+/**
+ * One tenant's tick outcome. waiting: its interval has not passed, so no status
+ * read or quote was made. replayed: the attempt was already admitted (by another
+ * worker), so nothing new was submitted.
+ */
+export type SolanaAgentOutcome = "held" | "waiting" | "submitted" | "replayed" | "unavailable";
 export function createSolanaAgent(options: SolanaAgentOptions) {
   const now = options.now ?? Date.now;
   const headroom = BigInt(10_000 - (options.referenceToleranceBps ?? SOLANA_REFERENCE_DEFAULT_TOLERANCE_BPS));
+  // When each tenant's strategy last found nothing to do (in band), by settings revision.
+  // Only provider load rides on this: admission spacing is durable in the store.
+  const checked = new Map<string, { revision: number; atMs: number }>();
+  const admitted = async (scope: SolanaAccountScope, requestId: string) => !!(
+    await options.db.prepare("SELECT 1 FROM solana_runtime_autonomous_attempts WHERE tenant=? AND owner=? AND request_id=?").get(scope.tenant, scope.owner, requestId) ??
+    await options.db.prepare("SELECT 1 FROM solana_runtime_paper_trades WHERE tenant=? AND owner=? AND request_id=?").get(scope.tenant, scope.owner, requestId) ??
+    await options.db.prepare("SELECT 1 FROM solana_runtime_submissions WHERE tenant=? AND owner=? AND request_id=?").get(scope.tenant, scope.owner, requestId));
   return {
     async tick() {
       await ensureSolanaTradingSchema(options.db, options.postgres);
@@ -93,7 +111,7 @@ export function createSolanaAgent(options: SolanaAgentOptions) {
         .all(CHAINS.solana) as Array<{ tenant: string; owner: string; requested_mode: "paper" | "live"; limits_json: string | null; strategy_json: string; revision: number }>;
       // Operator holds are read after receipt recovery, which they never stop.
       const holds = new Set((await options.db.prepare("SELECT scope FROM solana_operator_holds").all() as Array<{ scope: string }>).map(h => h.scope));
-      const results: Array<{ owner: string; outcome: "held" | "submitted" | "unavailable" }> = [];
+      const results: Array<{ owner: string; outcome: SolanaAgentOutcome }> = [];
       for (const row of rows) {
         if (options.signal?.aborted) break;
         await beat();
@@ -103,6 +121,12 @@ export function createSolanaAgent(options: SolanaAgentOptions) {
           if (!strategy.enabled || !row.limits_json) continue;
           if (holds.has(SOLANA_OPERATOR_HOLD_ALL) || holds.has(row.tenant)) { results.push({ owner: row.owner, outcome: "held" }); continue; }
           const limits = validateSolanaAccountLimits(JSON.parse(row.limits_json), now());
+          // The interval spaces attempts (durably) and checks: until it is due, no status read and no quote.
+          const revision = Number(row.revision), intervalMs = strategy.intervalSeconds * 1000, at = now();
+          const schedule = await solanaAutonomousSchedule(options.db, scope, strategy.intervalSeconds);
+          const last = checked.get(row.tenant);
+          if (at < schedule.dueAtMs || (last && last.revision === revision && at - last.atMs < intervalMs)) { results.push({ owner: row.owner, outcome: "waiting" }); continue; }
+          const inBand = () => { checked.set(row.tenant, { revision, atMs: at }); results.push({ owner: row.owner, outcome: "held" }); };
           // A paper strategy needs only its paper book: no chain reads, no vault verification.
           const status = recovered.get(scope.tenant) ?? await options.runtime.status(scope, row.requested_mode === "paper" ? { liveReads: false } : undefined);
           let cashRaw: string, wsolRaw: string;
@@ -120,13 +144,15 @@ export function createSolanaAgent(options: SolanaAgentOptions) {
               inputMint: SOLANA_WRAPPED_SOL_MINT, outputMint: SOLANA_USDG_MINT, amountRaw: wsolRaw, slippageBps: 50 });
             const mark = await options.market.quote(markIntent); validateSolanaQuote(mark, markIntent, now()); solValueUsdgRaw = mark.minOutAmount;
           }
-          let intent = planSolanaRebalance({ cashRaw, wsolRaw, solValueUsdgRaw, limits, strategy, mode: row.requested_mode, revision: Number(row.revision), nowMs: now() });
+          let intent = planSolanaRebalance({ cashRaw, wsolRaw, solValueUsdgRaw, limits, strategy, mode: row.requested_mode, revision, nowMs: now(), attempt: schedule.attempt });
           const cap = [BigInt(strategy.tradeUsdgRaw), BigInt(limits.perTradeUsdg)].reduce((a, b) => a < b ? a : b);
           if (intent) intent = await boundSolanaRebalanceSell(intent, row.requested_mode === "live" ? cap * headroom / 10_000n : cap, options.market, now);
-          if (!intent) { results.push({ owner: row.owner, outcome: "held" }); continue; }
+          if (!intent) { inBand(); continue; }
           if (row.requested_mode === "live" && !status.live.ready && intent.inputMint === SOLANA_USDG_MINT) { results.push({ owner: row.owner, outcome: "held" }); continue; }
           if (options.signal?.aborted) break;
-          await options.runtime.trade(scope, { mode: row.requested_mode, intent, autonomousRevision: Number(row.revision), signal: options.signal });
+          // Already admitted under this ID (another worker got there first): a replay submits nothing.
+          if (await admitted(scope, intent.requestId)) { results.push({ owner: row.owner, outcome: "replayed" }); continue; }
+          await options.runtime.trade(scope, { mode: row.requested_mode, intent, autonomousRevision: revision, signal: options.signal });
           results.push({ owner: row.owner, outcome: "submitted" });
         } catch { results.push({ owner: row.owner, outcome: "unavailable" }); }
       }
@@ -151,8 +177,9 @@ export async function runSolanaAgent(signal: AbortSignal) {
     try {
       const results = await agent.tick();
       // Counts only: no credentials, signed bytes or tenant identities in logs.
-      if (results.length) process.stdout.write(JSON.stringify({ solana: "tick", submitted: results.filter(r => r.outcome === "submitted").length,
-        held: results.filter(r => r.outcome === "held").length, unavailable: results.filter(r => r.outcome === "unavailable").length }) + "\n");
+      if (results.some(r => r.outcome !== "waiting")) process.stdout.write(JSON.stringify({ solana: "tick", submitted: results.filter(r => r.outcome === "submitted").length,
+        replayed: results.filter(r => r.outcome === "replayed").length, held: results.filter(r => r.outcome === "held").length,
+        waiting: results.filter(r => r.outcome === "waiting").length, unavailable: results.filter(r => r.outcome === "unavailable").length }) + "\n");
     } catch { process.stderr.write("Solana worker storage is unavailable; no new trades were admitted.\n"); }
     await new Promise<void>(resolve => {
       if (signal.aborted) return resolve();

@@ -146,6 +146,11 @@ CREATE TABLE IF NOT EXISTS solana_runtime_submissions (
 CREATE UNIQUE INDEX IF NOT EXISTS solana_runtime_live_sequence ON solana_runtime_submissions(vault,sequence) WHERE status IN ('pending','finalized');
 CREATE UNIQUE INDEX IF NOT EXISTS solana_runtime_live_pending ON solana_runtime_submissions(vault) WHERE status = 'pending';
 CREATE INDEX IF NOT EXISTS solana_runtime_live_window ON solana_runtime_submissions(tenant,owner,created_at_ms);
+CREATE TABLE IF NOT EXISTS solana_runtime_autonomous_attempts (
+ tenant TEXT NOT NULL, owner TEXT NOT NULL, request_id TEXT NOT NULL, attempted_at_ms BIGINT NOT NULL,
+ PRIMARY KEY(tenant,owner,request_id)
+);
+CREATE INDEX IF NOT EXISTS solana_runtime_autonomous_window ON solana_runtime_autonomous_attempts(tenant,owner,attempted_at_ms);
 CREATE TABLE IF NOT EXISTS solana_operator_holds (
  scope TEXT PRIMARY KEY, reason TEXT NOT NULL, created_at_ms BIGINT NOT NULL
 );
@@ -156,6 +161,30 @@ export async function solanaOperatorHeld(db: Db, tenant: string): Promise<boolea
   return !!await db.prepare("SELECT 1 FROM solana_operator_holds WHERE scope IN (?,?)").get(tenant, SOLANA_OPERATOR_HOLD_ALL);
 }
 function refuse(message: string): never { throw new SolanaTradingStoreError(message); }
+/** Request IDs the autonomous strategy owns: rebalance-<settings revision>-<attempt>. Manual trades may not use them. */
+export const SOLANA_AUTONOMOUS_REQUEST_PREFIX = "rebalance-";
+export interface SolanaAutonomousSchedule {
+  /** Autonomous attempts admitted so far, proven-expired ones included: the next attempt's index, never reused. */
+  attempt: number;
+  /** When the next attempt may be admitted: one interval after the last that was not proven expired (0 if none). */
+  dueAtMs: number;
+}
+/**
+ * The autonomous strategy's durable schedule for one account. intervalSeconds is
+ * a minimum spacing between admitted attempts, whatever process admitted them. A
+ * proven-expired attempt never landed, so a fresh one may follow it at once.
+ */
+export async function solanaAutonomousSchedule(db: Db, scope: SolanaAccountScope, intervalSeconds: number): Promise<SolanaAutonomousSchedule> {
+  if (!Number.isSafeInteger(intervalSeconds) || intervalSeconds < 1) refuse("Invalid autonomous Solana strategy interval.");
+  const row = await db.prepare(`SELECT COUNT(*) AS attempts,
+      MAX(CASE WHEN s.status IS NULL OR s.status <> 'expired' THEN a.attempted_at_ms END) AS last_at
+    FROM solana_runtime_autonomous_attempts a
+    LEFT JOIN solana_runtime_submissions s ON s.tenant=a.tenant AND s.owner=a.owner AND s.request_id=a.request_id
+    WHERE a.tenant=? AND a.owner=?`).get(scope.tenant, scope.owner) as { attempts: number | string; last_at: number | string | null } | undefined;
+  const attempt = Number(row?.attempts ?? 0), last = row?.last_at === null || row?.last_at === undefined ? null : Number(row.last_at);
+  if (!Number.isSafeInteger(attempt) || attempt < 0 || (last !== null && !Number.isSafeInteger(last))) refuse("Invalid stored Solana data.");
+  return { attempt, dueAtMs: last === null ? 0 : last + intervalSeconds * 1000 };
+}
 export const OPERATOR_HOLD = "An operator hold stops Solana trading for this account. Owner withdrawals and revocation still work.";
 function clock(now: () => number): number { const n = now(); if (!Number.isSafeInteger(n) || n < 0) refuse("Invalid Solana runtime clock."); return n; }
 function key(value: string): void { if (canonicalId(CHAINS.solana, "account", value) !== value) refuse("Invalid Solana account key."); }
@@ -201,7 +230,19 @@ export class SolanaTradingStore implements SolanaLiveJournal {
       .get(this.scope.tenant, this.scope.owner, CHAINS.solana) as { strategy_json: string | null } | undefined;
     const strategy = row?.strategy_json ? JSON.parse(row.strategy_json) : null;
     if (strategy?.enabled !== true) refuse("The autonomous Solana strategy is no longer enabled.");
+    // The interval is a durable minimum spacing, checked under the same lock that admits.
+    const { dueAtMs } = await solanaAutonomousSchedule(db, this.scope, strategy.intervalSeconds);
+    if (clock(this.now) < dueAtMs) refuse("The autonomous Solana strategy is not due yet: its interval has not passed since the last attempt.");
     return raw(strategy.tradeUsdgRaw, false);
+  }
+  /** Manual trades never take the strategy's request IDs, so its next attempt can never collide with one. */
+  private checkRequestOwner(requestId: string): void {
+    if (!this.admission && requestId.startsWith(SOLANA_AUTONOMOUS_REQUEST_PREFIX)) refuse("Request IDs starting with rebalance- belong to the autonomous strategy.");
+  }
+  /** An admitted autonomous trade records its attempt in the same transaction. */
+  private async recordAttemptIn(db: Db, requestId: string, now: number): Promise<void> {
+    if (this.admission) await db.prepare("INSERT INTO solana_runtime_autonomous_attempts(tenant,owner,request_id,attempted_at_ms) VALUES(?,?,?,?)")
+      .run(this.scope.tenant, this.scope.owner, requestId, now);
   }
   private owner(owner: string): void { if (owner !== this.scope.owner) refuse("Solana owner does not match the authenticated account."); }
   private async bindingIn(db: Db, lock: boolean): Promise<SolanaTradingBinding> {
@@ -261,6 +302,7 @@ export class SolanaTradingStore implements SolanaLiveJournal {
           const prior = await tx.prepare("SELECT fingerprint,receipt_json FROM solana_runtime_paper_trades WHERE tenant=? AND owner=? AND request_id=?").get(tenant, owner, input.intent.requestId) as { fingerprint: string; receipt_json: string } | undefined;
           if (prior) { if (prior.fingerprint !== fingerprint) refuse("The Solana request ID belongs to another intent."); return JSON.parse(prior.receipt_json) as SolanaPaperReceipt; }
           if (await solanaOperatorHeld(tx, tenant)) refuse(OPERATOR_HOLD);
+          this.checkRequestOwner(input.intent.requestId);
           const strategyCap = await this.autonomousIn(tx, binding);
           if (binding.requestedMode !== "paper") refuse("Paper trading is not the selected Solana mode.");
           const now = clock(this.now);
@@ -274,6 +316,7 @@ export class SolanaTradingStore implements SolanaLiveJournal {
           this.checkAdmissionSignal();
           await tx.prepare("INSERT INTO solana_runtime_paper_trades(tenant,owner,request_id,fingerprint,created_at_ms,notional_raw,receipt_json) VALUES(?,?,?,?,?,?,?)")
             .run(tenant, owner, input.intent.requestId, fingerprint, now, result.receipt.notionalUsdgRaw, JSON.stringify(result.receipt));
+          await this.recordAttemptIn(tx, input.intent.requestId, now);
           await tx.prepare("UPDATE solana_runtime_paper_books SET book_json=? WHERE tenant=? AND owner=?").run(JSON.stringify(result.book), tenant, owner);
           return result.receipt;
         });
@@ -380,6 +423,7 @@ export class SolanaTradingStore implements SolanaLiveJournal {
       const { tenant, owner } = this.scope;
       if (await tx.prepare("SELECT 1 FROM solana_runtime_submissions WHERE tenant=? AND owner=? AND request_id=?").get(tenant, owner, s.intent.requestId)) return false;
       if (await solanaOperatorHeld(tx, tenant)) refuse(OPERATOR_HOLD);
+      this.checkRequestOwner(s.intent.requestId);
       const strategyCap = await this.autonomousIn(tx, binding);
       if (binding.requestedMode !== "live" || !binding.limits) refuse("Live Solana trading has not been enabled for this account.");
       const ownerSetup = rowJson<SolanaPreparedSetup>(await tx.prepare("SELECT setup_json FROM solana_runtime_setups WHERE tenant=? AND owner=?").get(tenant, owner), "setup_json");
@@ -456,6 +500,7 @@ export class SolanaTradingStore implements SolanaLiveJournal {
       const inserted = await tx.prepare(`INSERT INTO solana_runtime_submissions(tenant,owner,request_id,vault,sequence,signature,status,created_at_ms,notional_raw,submission_json)
         VALUES(?,?,?,?,?,?,'pending',?,?,?) ON CONFLICT DO NOTHING`).run(tenant, owner, s.intent.requestId, s.intent.vault, s.vaultSequence, s.signature, now, notional.toString(), JSON.stringify(s));
       if (inserted.changes !== 1) return false;
+      await this.recordAttemptIn(tx, s.intent.requestId, now);
       await tx.prepare(`INSERT INTO solana_runtime_live_books(tenant,owner,book_json) VALUES(?,?,?)
         ON CONFLICT(tenant,owner) DO UPDATE SET book_json=excluded.book_json`).run(tenant, owner, JSON.stringify(book));
       return true;
