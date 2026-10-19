@@ -729,8 +729,8 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
           if (amount > available) fail("The withdrawal exceeds the reconciled vault balance.");
           // Capital out: what the withdrawn WSOL is worth lowers the high-water mark
           // when it lands, as a USDG withdrawal does, so withdrawing is never a
-          // drawdown. Only the booked position can move it; quarantine has no value.
-          if (input.mint === SOLANA_WRAPPED_SOL_MINT && BigInt(book.wsolRaw) > 0n) {
+          // drawdown. Only the booked position can move it: quarantine leaves first, at no value.
+          if (input.mint === SOLANA_WRAPPED_SOL_MINT && BigInt(book.wsolRaw) > 0n && amount > solanaQuarantinedWsol(book)) {
             const valuation = await wsolWithdrawValuation(input.amountRaw);
             if (valuation) details.withdrawValuation = valuation;
           }

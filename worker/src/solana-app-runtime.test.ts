@@ -901,17 +901,26 @@ test("a WSOL withdrawal whose value cannot be read still prepares and lands, and
 });
 
 test("a WSOL withdrawal of quarantine alone asks no one for a price", async () => {
-  const f = await fixture();
-  try {
-    await readyLive(f); f.controls.sequence = 2n; f.controls.cash = 8_000_000n; f.controls.wsol = 5n;
-    const book = { hwmRaw: "8000000", cashRaw: "8000000", wsolRaw: "0", quarantinedWsolRaw: "5", costBasisUsdgRaw: "0", realizedPnlUsdgRaw: "0",
-      networkFeesLamports: "0", slot: 900, updatedAtMs: 999_000 };
-    await f.db.prepare("INSERT INTO solana_runtime_live_books(tenant,owner,book_json) VALUES(?,?,?)").run(TENANT, f.owner, JSON.stringify(book));
-    let quotes = 0;
-    servePyth(f);
-    const app = f.runtime({ market: { ...pricedMarket(f), quote: async intent => { quotes++; return pricedMarket(f).quote(intent); } } });
-    await app.prepareOwnerAction(f.scope, { action: "withdraw", mint: SOLANA_WRAPPED_SOL_MINT, amountRaw: "5" });
-    assert.equal(quotes, 0); assert.ok(!f.calls.some(call => call.key === PYTH_SOL_USD_ACCOUNT));
-    assert.equal((await new SolanaTradingStore(f.db, f.scope).setup())!.withdrawValuation, undefined);
-  } finally { f.raw.close(); }
+  // No position at all, and a position the withdrawal never reaches: quarantined WSOL leaves first.
+  for (const position of ["0", "100000000"]) {
+    const f = await fixture();
+    try {
+      await readyLive(f); f.controls.sequence = 2n; f.controls.cash = 8_000_000n; f.controls.wsol = BigInt(position) + 5_000_000n;
+      const book = { hwmRaw: "8000000", cashRaw: "8000000", wsolRaw: position, quarantinedWsolRaw: "5000000", costBasisUsdgRaw: "0", realizedPnlUsdgRaw: "0",
+        networkFeesLamports: "0", slot: 900, updatedAtMs: 999_000 };
+      await f.db.prepare("INSERT INTO solana_runtime_live_books(tenant,owner,book_json) VALUES(?,?,?)").run(TENANT, f.owner, JSON.stringify(book));
+      let quotes = 0;
+      servePyth(f);
+      const app = f.runtime({ market: { ...pricedMarket(f), quote: async intent => { quotes++; return pricedMarket(f).quote(intent); } } });
+      await app.prepareOwnerAction(f.scope, { action: "withdraw", mint: SOLANA_WRAPPED_SOL_MINT, amountRaw: "5000000" });
+      assert.equal(quotes, 0, position); assert.ok(!f.calls.some(call => call.key === PYTH_SOL_USD_ACCOUNT), position);
+      assert.equal((await new SolanaTradingStore(f.db, f.scope).setup())!.withdrawValuation, undefined);
+      // One unit more reaches the position: then it is valued.
+      if (position !== "0") {
+        f.controls.finalized = false;
+        await app.prepareOwnerAction(f.scope, { action: "withdraw", mint: SOLANA_WRAPPED_SOL_MINT, amountRaw: "5000001" });
+        assert.equal(quotes, 1); assert.ok((await new SolanaTradingStore(f.db, f.scope).setup())!.withdrawValuation);
+      }
+    } finally { f.raw.close(); }
+  }
 });
