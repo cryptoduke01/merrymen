@@ -44,6 +44,7 @@ import { restorePaperCheckpoint, recordPaperRecoveryHealth } from "./paper-check
 import { FLEET_RECOVERY_SCHEMA, recordFleetRecoveryHold, recordFleetSourceVerified, readFleetRecoveryHold, readFleetCommandRefusal, readFleetCommandBoundary, withFleetRecoveryLock, type RecoveryCause } from "./fleet-recovery";
 import { AUTONOMY_HOLDS_SQL, AUTONOMY_TRADE_FUNNEL_SQL, FLEET_RAILS_SQL, autonomyLines, fleetRails, foldFunnel, railsLine, type AgentRailRow, type FleetRails } from "./autonomy-funnel";
 import { guardStdio, lineRedactor } from "./redact-stdio";
+import { redactUrls } from "./redact-urls";
 import { commitOf, heartbeatClock, heartbeatCounts, lastShutdownOf, writeFleetHeartbeat, type FleetSnapshot, type HeartbeatCounts, type LastShutdown } from "./fleet-heartbeat";
 import { recoveryCommandRefused, writeRecoveryCommandBarrier } from "./recovery-command-barrier";
 import { repairHistoricalFills } from "./history-fill-repair";
@@ -11711,12 +11712,15 @@ function noteFomoFailure(text: string): void {
 }
 
 /**
- * Never a tenant, never a URL with its key: the same scrub the pass uses for
- * its own lines (redactUrl), `api-key=` included, the name Solana RPCs such as
- * Helius take a key under.
+ * Never a tenant, never a URL with its key. redactUrls first (redact-urls.ts):
+ * a provider that keys its URL by path (Alchemy's /v2/<key>, Triton, Syndica)
+ * or by host keeps only scheme and host, so this line never relies on
+ * guardStdio alone if it is ever stored or sent elsewhere. Then the scrub the
+ * pass uses for its own lines (redactUrl), `api-key=` included, the name
+ * Solana RPCs such as Helius take a key under, for a key outside a URL.
  */
 export function fomoFailureText(text: string): string {
-  return text.replace(/0x[0-9a-fA-F]{40}/g, "0x…").replace(/([?&](?:key|api[-_]?key)=)[^&\s]*/gi, "$1***").slice(0, 300);
+  return redactUrls(text).replace(/0x[0-9a-fA-F]{40}/g, "0x…").replace(/([?&](?:key|api[-_]?key)=)[^&\s]*/gi, "$1***").slice(0, 300);
 }
 
 /** Stop the stream and give up the fleet lease (FLEET_HALT, shutdown). The next pass after a halt builds a new one. */
