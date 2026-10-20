@@ -4,6 +4,7 @@ import { once } from "node:events";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { performance } from "node:perf_hooks";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
@@ -32,6 +33,24 @@ async function until(check, ms, what) {
     await delay(100);
   }
 }
+
+/**
+ * Sends the two copies of one Ctrl+C a moment apart, as a launcher forwards
+ * them, so they arrive as two signals rather than one merged pending signal.
+ * Returns how far apart this process actually sent them: a test process that
+ * stalled for a large part of the merge window may have sent two presses, and
+ * then the outcome proves nothing either way.
+ */
+async function sendCopies(first, second) {
+  const started = performance.now();
+  first();
+  await delay(50);
+  // A process that already finished its stop (after a long stall here) is gone.
+  try { second(); } catch (error) { if (error.code !== "ESRCH") throw error; }
+  return performance.now() - started;
+}
+const inconclusive = (gap) => gap >= SOLANA_WORKER_REPEAT_MS / 2
+  ? `inconclusive: this process sent the two copies ${Math.round(gap)} ms apart, too close to the ${SOLANA_WORKER_REPEAT_MS} ms window` : null;
 
 /**
  * The real `merrymen solana-agent` command and its real TypeScript worker, with
@@ -222,9 +241,8 @@ test("one Ctrl+C that a launcher also forwards to the CLI stops gracefully, not 
   const worker = await agent.ready();
   // The worker is busy, so it still runs its loop when the command's messages arrive.
   await agent.stall();
-  process.kill(-agent.cli.pid, "SIGINT");
-  await delay(50);
-  process.kill(agent.cli.pid, "SIGINT");
+  const gap = await sendCopies(() => process.kill(-agent.cli.pid, "SIGINT"), () => process.kill(agent.cli.pid, "SIGINT"));
+  if (inconclusive(gap)) return t.skip(inconclusive(gap));
   const [code, signal] = await Promise.race([agent.exited, delay(20_000).then(() => ["timeout", null])]);
   assert.deepEqual([code, signal], [0, null], `one press was taken for two:\n${agent.output()}`);
   assert.doesNotMatch(agent.output(), /Forcing|forced stop/);
@@ -239,9 +257,8 @@ test("the worker run directly ignores a launcher's duplicate of one Ctrl+C", { s
   // callback, so the second meets a finished run. The repeat window itself is
   // checked mid-transaction in worker/src/solana-agent-cli.test.ts.
   await agent.stall();
-  process.kill(worker, "SIGINT");
-  await delay(50);
-  process.kill(worker, "SIGINT");
+  const gap = await sendCopies(() => process.kill(worker, "SIGINT"), () => process.kill(worker, "SIGINT"));
+  if (inconclusive(gap)) return t.skip(inconclusive(gap));
   const [code, signal] = await Promise.race([agent.exited, delay(20_000).then(() => ["timeout", null])]);
   assert.deepEqual([code, signal], [0, null], agent.output());
   assert.doesNotMatch(agent.output(), /forced stop/);

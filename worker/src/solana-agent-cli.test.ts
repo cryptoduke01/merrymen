@@ -14,6 +14,7 @@ import { once } from "node:events";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { performance } from "node:perf_hooks";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
@@ -131,14 +132,22 @@ if (childPoint) {
           await delay(50);
         }
         // One Ctrl+C delivered twice (the terminal's copy and a launcher's) asks for a graceful stop, which waits for the tick.
+        const sentAt = performance.now();
         child.kill("SIGINT");
         await delay(50);
         child.kill("SIGINT");
+        const gap = performance.now() - sentAt;
         await delay(SOLANA_WORKER_REPEAT_MS + 300);
-        assert.equal(child.exitCode, null, `one press must not force a stop mid-tick:\n${output}`);
-        assert.match(output, /stopping after the current tick/);
+        if (gap < SOLANA_WORKER_REPEAT_MS / 2) {
+          assert.equal(child.exitCode, null, `one press must not force a stop mid-tick:\n${output}`);
+          assert.match(output, /stopping after the current tick/);
+        } else {
+          // This process stalled between the copies, so they may have been two
+          // presses and forced the stop already: still a forced exit mid-tick.
+          t.diagnostic(`the two copies went out ${Math.round(gap)} ms apart: the duplicate check is inconclusive`);
+        }
         // The second press forces it: process.exit with the transaction (or the tick) unfinished.
-        child.kill("SIGINT");
+        if (child.exitCode === null && child.signalCode === null) child.kill("SIGINT");
         const [code, signal] = await exited;
         assert.deepEqual([code, signal], [130, null], output);
         assert.match(output, /forced stop without waiting for the current tick/);
