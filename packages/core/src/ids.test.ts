@@ -352,6 +352,36 @@ describe("glued on-chain id detection (audit regressions F3)", () => {
 });
 
 describe("Solana secret detection", () => {
+  /**
+   * A RUNAWAY SECRET SCAN FAILS BY NAME, as gluedScanFinishes does for the glued id scan: node:test
+   * cannot stop synchronous code, so run here, a scan that never returns hangs the suite and names no
+   * test. This runs solanaSecretsIn over `texts` in a child limited to SECRET_RUNAWAY_CPU_SECONDS of
+   * CPU time (ulimit -t: what the child spent, never what a loaded machine took from it), with a
+   * wall-clock backstop well past that. A healthy run costs about 1.5 s of CPU, tsx startup included.
+   */
+  const SECRET_RUNAWAY_CPU_SECONDS = 20;
+  function secretScanFinishes(texts: string[]): { ok: boolean; how: string } {
+    const script = [
+      'import { readFileSync } from "node:fs";',
+      `const { solanaSecretsIn } = await import(${JSON.stringify(new URL("./ids.ts", import.meta.url).href)});`,
+      'for (const text of JSON.parse(readFileSync(0, "utf8"))) solanaSecretsIn(text);',
+      'process.stdout.write("scanned");',
+    ].join("\n");
+    const node = [process.execPath, "--import", import.meta.resolve("tsx"), "--input-type=module", "-e", script];
+    const [file, ...args] = process.platform === "win32" ? node : ["/bin/sh", "-c", `ulimit -t ${SECRET_RUNAWAY_CPU_SECONDS} && exec "$@"`, "sh", ...node];
+    const child = spawnSync(file!, args, { input: JSON.stringify(texts), encoding: "utf8", timeout: 20 * SECRET_RUNAWAY_CPU_SECONDS * 1_000 });
+    if (child.status === 0 && child.stdout === "scanned") return { ok: true, how: "scanned" };
+    const how = child.error ? String(child.error) : child.signal ? `stopped by ${child.signal}` : `exit ${child.status}: ${child.stderr.slice(-400)}`;
+    return { ok: false, how };
+  }
+  /** Milliseconds of CPU time (user + system) `fn` spent in this process: what it cost, not what others took. */
+  const cpuMsOf = (fn: () => unknown): number => {
+    const started = process.cpuUsage();
+    fn();
+    const spent = process.cpuUsage(started);
+    return (spent.user + spent.system) / 1_000;
+  };
+
   it("flags a keypair as base58 or as an id.json byte array", () => {
     const { secret, secretB58 } = keypair(11);
     assert.equal(isSolanaKeypair(secret), true);
@@ -391,9 +421,14 @@ describe("Solana secret detection", () => {
       `[${Array(64).fill("10").join(",")}`,
       `${"[11,".repeat(2_000)}999]`,
     ];
-    const started = performance.now();
-    for (const text of nearMisses) assert.deepEqual(solanaSecretsIn(text), []);
-    assert.ok(performance.now() - started < 250, `took ${Math.round(performance.now() - started)} ms`);
+    // First, in a child the runner can stop: an exponential scan never returns, so run here it would hang
+    // the suite instead of failing (the old pattern ran a mutant past four minutes of CPU on these texts).
+    const runaway = secretScanFinishes(nearMisses);
+    assert.ok(runaway.ok, `the secret scan did not finish the near misses within ${SECRET_RUNAWAY_CPU_SECONDS} s of CPU time (${runaway.how})`);
+    // Then CPU time here (process.cpuUsage, user + system), never a wall clock: a loaded runner takes
+    // time from this process, not CPU. A scan that finishes but slowly (quadratic) fails this bound.
+    const spent = cpuMsOf(() => { for (const text of nearMisses) assert.deepEqual(solanaSecretsIn(text), []); });
+    assert.ok(spent < 250, `took ${Math.round(spent)} ms of CPU time`);
   });
 
   it("caps the candidates it reads, and counts what it did not read as a secret", () => {
@@ -416,8 +451,7 @@ describe("Solana secret detection", () => {
     const runs = Array.from({ length: 64 }, (_, i) => base58Encode(Uint8Array.from({ length: 64 }, (_, j) => (i * 7 + j * 13 + 1) % 256)));
     const text = Array.from({ length: 12_000 }, (_, i) => (i % 2 ? runs[i % 64] : `[${Array(64).fill(i % 200).join(",")}]`)).join(" ");
     assert.ok(text.length > 1_000_000);
-    const started = performance.now();
-    assert.equal(solanaSecretIn(text), true, "past the cap it fails closed");
-    assert.ok(performance.now() - started < 1_000, `took ${Math.round(performance.now() - started)} ms`);
+    const spent = cpuMsOf(() => assert.equal(solanaSecretIn(text), true, "past the cap it fails closed"));
+    assert.ok(spent < 1_000, `took ${Math.round(spent)} ms of CPU time`);
   });
 });
