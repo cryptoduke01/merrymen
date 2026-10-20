@@ -635,6 +635,14 @@ export function declinable(text: unknown, address: string | null = null): boolea
   if (typeof text !== "string" || address !== null) return false;
   const t = text.normalize("NFKC");
   // A contract names a coin: 0x hex, or a Solana key or signature (core's onchainIdIn).
+  // THE DEFAULT SCAN IS ENOUGH HERE, not the glued one the public backstops use
+  // (audit regressions F3). A key glued to a word ("CA<mint>", "<key>is") splits
+  // at its digits into runs of letters, and a run of three or more that is no
+  // everyday word is read by nameLikeWords below as a coin's name DECLINE_NAMES
+  // does not hold: the answer is false, nothing goes up, either way. A key with
+  // no such run would have to be ground to spell only everyday words and digits.
+  // And a decline is code's own line, which never quotes the tag; the reply is
+  // checked again at send (xpost/public-wallet.ts). The test pins the glued forms.
   if (/0x[0-9a-f]{6,}/i.test(t) || onchainIdIn(t)) return false;
   // Every $ and what follows it up to a space, whatever it holds ("$PEPE2", "$SANDY_HOOK"), and every word that might be a name.
   const tags = [...t.matchAll(/\$([^\s$]*)/g)].map((m) => m[1]!.toLowerCase().replace(/[.,!?;:'"’)]+$/u, ""));

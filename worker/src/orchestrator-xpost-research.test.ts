@@ -1924,6 +1924,13 @@ describe("answer anything: every tag past the screens has a lane, and silence on
     // Nor beside a Solana one (Solana P0). The system program's id has no letters, so no word of it read as a name.
     assert.equal(declinable("should i buy 2u1tszSeqZ3qBWF3uNGPFc8TzMk2tdiwknnRMWGWjGWH?"), false);
     assert.equal(declinable(`should i buy ${"1".repeat(32)}?`), false);
+    // Nor beside one glued to a word (audit regressions F3): on the default scan, its letters are read as a coin's name.
+    const letters = "EEuxbXvdXfvgGiFWKYyEksxzabPKjwhYTNvGXFitaqqT";
+    for (const text of ["should i buy CA2u1tszSeqZ3qBWF3uNGPFc8TzMk2tdiwknnRMWGWjGWH?", `should i buy ca${letters}?`, `is ${letters}is going up?`,
+      `should i buy CA ${letters}?`, "should i buy 2u1tszSeqZ3qBWF3uNGPFc8TzMk2tdiwknnRMWGWjGWHnow?"]) {
+      assert.equal(declinable(text), false, text);
+      assert.equal(classifyTag(text, { advice: true }).kind, "unanswered", text);
+    }
   });
 
   it("its own mood is a strict allowlist too: a coin, a word more or another script and it is not one", () => {
