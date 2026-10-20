@@ -1007,11 +1007,51 @@ test("Withdraw native SOL prepares the runtime's withdraw-sol in lamports, and s
   };
   await render();
   await type("Native SOL to withdraw", "1.5");
+  // Shown while the wallet is open on these bytes.
+  const wallet = deferred<Uint8Array>();
+  signedBytes = () => wallet.promise;
   await press("Withdraw native SOL");
   assert.equal(signCount, 1);
   assert.match(ui.container.textContent!, /The prepared native SOL withdrawal needs your owner wallet to hold at least 0\.00090588 SOL \(it holds 0\.01 SOL\): its network fee, a priority fee of 0\.00001 SOL so it lands under congestion/);
+  wallet.resolve(Uint8Array.from([1, 2, 3])); await settle();
   assert.match(ui.container.textContent!, /Owner transaction: finalized/);
   assert.deepEqual(calls.filter((call) => call.path === "owner").map((call) => call.body!.stage), ["prepare", "submit"]);
+});
+
+/** Lets the page finish what a settled promise started (submit, refresh). */
+async function settle() { for (let i = 0; i < 20; i++) await act(async () => { await new Promise((resolve) => setTimeout(resolve, 1)); }); }
+const COST = /needs your owner wallet to hold at least/;
+test("the owner-controls cost line describes only the action in flight: gone once it finishes, and after a refused prepare", async () => {
+  state.runtime.live.programId = PROGRAM;
+  let prepare: (body: Record<string, unknown>) => Promise<Response> = async (body) =>
+    json({ prepared: { transactionBase64: await ownerBytes(body, priorityFee(200_000, 50_000n)), requiredLamports: "905880", ownerLamports: "10000000" } });
+  respond = async (path, body) => {
+    if (path === "status") return json(state);
+    if (path === "owner" && body?.stage === "prepare") return prepare(body);
+    if (path === "owner" && body?.stage === "submit") return json({ result: { signature: "revoke-proof", status: "finalized" } });
+    throw new Error("Unexpected fixture route");
+  };
+  await render();
+  const wallet = deferred<Uint8Array>();
+  signedBytes = () => wallet.promise;
+  await press("Revoke all Solana sessions");
+  assert.match(ui.container.textContent!, /The prepared revocation needs your owner wallet to hold at least 0\.00090588 SOL \(it holds 0\.01 SOL\)/);
+  // The revocation completes: the line no longer describes anything the server is asking for.
+  wallet.resolve(Uint8Array.from([1, 2, 3])); await settle();
+  assert.match(ui.container.textContent!, /Owner transaction: finalized/);
+  assert.doesNotMatch(ui.container.textContent!, COST);
+  // A withdrawal the server refuses to prepare never shows the revocation's cost again.
+  prepare = async () => refusal("Refresh the pending owner transaction before preparing another.");
+  await press("Withdraw to my wallet");
+  assert.match(ui.container.textContent!, /Refresh the pending owner transaction before preparing another/);
+  assert.doesNotMatch(ui.container.textContent!, COST);
+  // Nor after the wallet is closed on a withdrawal it showed: those bytes are gone, and the next press prepares fresh ones.
+  prepare = async (body) => json({ prepared: { transactionBase64: await ownerBytes(body), requiredLamports: "2934280" } });
+  signedBytes = () => Promise.reject(new Error("The owner closed the wallet."));
+  await press("Withdraw to my wallet");
+  assert.match(ui.container.textContent!, /The owner closed the wallet\./);
+  assert.doesNotMatch(ui.container.textContent!, COST);
+  assert.equal(signCount, 2);
 });
 
 test("owner transaction bytes that do anything but what the owner asked never reach the wallet, and the fee shown is the one they carry", async () => {
@@ -1082,9 +1122,13 @@ test("owner transaction bytes that do anything but what the owner asked never re
   }
   // What the server really builds is signed: the fee shown is the one decoded from the bytes, not the server's claim.
   answer = async (body) => ({ transactionBase64: await ownerBytes(body, priorityFee(200_000, 50_000n)), requiredLamports: "905880" });
+  const wallet = deferred<Uint8Array>();
+  signedBytes = () => wallet.promise;
   await press("Revoke all Solana sessions");
   assert.equal(signCount, 1);
   assert.match(text(), /The prepared revocation needs your owner wallet to hold at least 0\.00090588 SOL: its network fee, a priority fee of 0\.00001 SOL so it lands under congestion/);
+  wallet.resolve(Uint8Array.from([1, 2, 3])); await settle();
+  signedBytes = () => Uint8Array.from([1, 2, 3]);
   // A wrapped SOL withdrawal that first wraps native SOL sent to the vault's wrapped SOL account.
   const mint = [...ui.container.querySelectorAll("label")].find((item) => item.textContent?.startsWith("Asset"))!.querySelector("select")!;
   await act(async () => { mint.value = SOLANA_WRAPPED_SOL_MINT; mint.dispatchEvent(new ui.dom.window.Event("change", { bubbles: true })); });

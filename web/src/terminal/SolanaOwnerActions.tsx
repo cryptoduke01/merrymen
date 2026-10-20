@@ -182,12 +182,13 @@ export function SolanaOwnerActions({ available, owner, programId, api, sign, ref
   const [result, setResult] = useState<ActionResult | null>(null), [busy, setBusy] = useState(false), [error, setError] = useState("");
   // Bytes cleared without a known outcome, linked so the owner can check Solana itself.
   const [cleared, setCleared] = useState<{ action: OwnerAction; signature: string } | null>(null);
-  // What the server said the last prepared transaction needs from the owner wallet.
+  // What the server said the prepared transaction in flight needs from the owner wallet: shown from
+  // the page's check until that run ends (signed and answered, refused or abandoned), never after.
   const [cost, setCost] = useState<{ action: OwnerAction; required: string; held: string | null; fee: string | null } | null>(null);
   const inFlight = useRef(false);
   const serverPending = serverTransaction?.status === "pending" ? serverTransaction : null;
   const run = (action: OwnerAction) => {
-    if (inFlight.current) return; inFlight.current = true; setBusy(true); setError("");
+    if (inFlight.current) return; inFlight.current = true; setBusy(true); setError(""); setCost(null);
     void (async () => {
       // Saved bytes are only ever resubmitted for their own action. Any other
       // action prepares fresh bytes; the server refuses that while the earlier
@@ -209,7 +210,6 @@ export function SolanaOwnerActions({ available, owner, programId, api, sign, ref
           throw e;
         }
         // The wallet only opens for bytes that do exactly what the owner asked; the fee shown is the one they carry.
-        setCost(null);
         const fee = await checkPreparedOwnerTransaction(prepared, request, { owner, programId });
         const required = sol(prepared.requiredLamports);
         setCost(required ? { action, required, held: sol(prepared.ownerLamports), fee: fee !== "0" ? sol(fee) : null } : null);
@@ -250,7 +250,7 @@ export function SolanaOwnerActions({ available, owner, programId, api, sign, ref
       if (next.status !== "pending") { setPending(null); if (!recorded) await refresh(); }
       else { setPending(accepted); await refresh().catch(() => undefined); }
     })().catch((e: unknown) => setError(e instanceof Error ? e.message : "The owner action did not finish. Retry the existing transaction."))
-      .finally(() => { inFlight.current = false; setBusy(false); });
+      .finally(() => { inFlight.current = false; setBusy(false); setCost(null); });
   };
   /** The server's pending record when this page does not hold its bytes (another device, a reload, a permission). */
   const check = () => {
