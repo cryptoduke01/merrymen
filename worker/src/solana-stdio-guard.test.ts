@@ -67,9 +67,17 @@ describe("the Solana entry points guard their own output", () => {
     t.after(() => rmSync(directory, { recursive: true, force: true }));
     const key = "3f9c2a71-5b0e-4d8a-9c6f-0e1d2b3a4c5d";
     const probe = path.join(directory, "probe.mjs");
-    // A preload runs before the entry; setImmediate fires once the entry has begun (its first await).
-    writeFileSync(probe, `setImmediate(() => { process.stderr.write("probe https://mainnet.helius-rpc.com/?api-key=${key}\\n"); `
-      + `process.stdout.write("probe https://acme.mainnet.rpcpool.com/plainlowercasetokenvalue0123\\n"); });\n`);
+    // A preload runs before the entry. On Node 22 tsx loads the entry's module
+    // graph asynchronously, so a single setImmediate can fire before any of the
+    // entry's code has run. The probe therefore waits, one event-loop turn at a
+    // time, until the entry has started and guarded both streams, then writes.
+    // If no guard ever appears it writes anyway after 20 s, unredacted, and the
+    // assertions below fail.
+    writeFileSync(probe, `const G = Symbol.for("merrymen.redactUrls.guarded"); const until = Date.now() + 20000;\n`
+      + `const write = () => { process.stderr.write("probe https://mainnet.helius-rpc.com/?api-key=${key}\\n"); `
+      + `process.stdout.write("probe https://acme.mainnet.rpcpool.com/plainlowercasetokenvalue0123\\n"); };\n`
+      + `const wait = () => (process.stdout[G] && process.stderr[G]) || Date.now() > until ? write() : setImmediate(wait);\n`
+      + `setImmediate(wait);\n`);
     const env: Record<string, string> = { MERRYMEN_HOME: path.join(directory, "home"), NO_COLOR: "1" };
     for (const name of ["PATH", "TMPDIR", "TEMP", "TMP", "SystemRoot"]) if (process.env[name] !== undefined) env[name] = process.env[name]!;
     const tsx = import.meta.resolve("tsx");
