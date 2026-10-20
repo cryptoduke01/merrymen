@@ -295,8 +295,9 @@ export interface OnchainIdScan {
    *
    * For the public and model-facing backstops. The callers, which this list
    * must name exactly: X posts (worker/src/xpost/public-wallet.ts), social
-   * takes (worker/src/social-post.ts admitPost), Brain's decisions and the desk
-   * policy sent to it (worker/src/brain-client.ts), Brain's own validator
+   * takes (worker/src/social-post.ts admitPost), published theses and their
+   * model posts (worker/src/thesis-policy.ts addressy), Brain's decisions and
+   * the desk policy sent to it (worker/src/brain-client.ts), Brain's own validator
    * (services/brain/brain/schemas.py `_reject_executable`), room prompts
    * (worker/src/groupchat/voice.ts scrubIds) and the soul's memory, notes and
    * journal (worker/src/soul.ts).
