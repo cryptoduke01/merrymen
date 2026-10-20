@@ -965,6 +965,13 @@ budget: 32 exact candidates for the whole grant (failing closed past them) and
 windows of 32 checks, 512 decodes and 32,768 starts, reading every string and
 property name once, so a 230 KB hostile body costs about 7 to 15 ms of CPU
 instead of 60 to 130 ms. POST /api/grants is not paced per tenant.
+The Telegram agent's secret list holds the Solana server secrets
+(`SOLANA_SECRET_SETTINGS` in `worker/src/telegram/agent.ts`: the fee payer's
+seed, the store DEK, the Jupiter key and the RPC URLs) from its environment and
+from a `.env.solana.local` in the working tree or `MERRYMEN_HOME`; any
+`MERRYMEN_…SEED/DEK/KEY/RPC…=value` line is redacted by shape, tool output
+passes through `redactUrls`, and the shell refuses a dotfile glob
+(`cat .e*.local`).
 
 **Output redaction.** Every Solana process (the `start:solana` worker and the
 paper, hold, resolve, recover and RPC-check CLIs) installs `guardStdio` before

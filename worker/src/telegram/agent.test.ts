@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -14,6 +14,7 @@ import {
   redactSecrets,
   runAgentTask,
   shellTouchesSecrets,
+  solanaSecretValues,
   type AgentConfig,
   type AgentRunDeps,
 } from "./agent";
@@ -478,6 +479,50 @@ test("loop: file write + read round-trip inside the root; secrets path refused",
     assert.equal(results.results[1]!.output, "# hi");
     assert.ok(results.results[2]!.output.startsWith("REFUSED")); // secrets
     assert.ok(results.results[3]!.output.startsWith("REFUSED")); // escape
+  } finally {
+    rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  }
+});
+
+// ── Solana server secrets (review finalise) ──────────────────────────────────
+
+test("a dotfile glob that can name .env.solana.local is refused; ordinary globs and commands are not", () => {
+  for (const cmd of ["cat .e*.local", "head -50 ./.en?.solana.local", "sed -n 1,99p .??v.solana.local", "cp .[e]nv.solana.local /tmp/x", "tail '.e*'"]) {
+    assert.equal(shellTouchesSecrets(cmd), true, cmd);
+  }
+  for (const cmd of ["ls -la", "ls *.md", "find . -name '*.ts'", "cat notes.md", "git log --oneline -5", "cp ./a?.txt b.txt", "cd .. && npm run build", "echo done?"]) {
+    assert.equal(shellTouchesSecrets(cmd), false, cmd);
+  }
+});
+
+test("the agent's secret list holds the Solana server secrets from the environment and .env.solana.local, and a read file loses them and its keyed URLs", async () => {
+  const root = temporaryRoot("mm-agent-solana-");
+  try {
+    const seed = Buffer.alloc(32, 9).toString("base64"), dek = Buffer.alloc(32, 4).toString("base64");
+    const rpc = "https://mainnet.helius-rpc.com/?api-key=0f0f0f0f-1111-2222-3333-444455556666";
+    const fallback = "https://example-rpc.rpcpool.com/abcdef0123456789abcdef0123456789";
+    const envFile = path.join(root, ".env.solana.local");
+    writeFileSync(envFile, [`MERRYMEN_SOLANA=1`, `MERRYMEN_SOLANA_RPC_MAINNET=${rpc}`, `export MERRYMEN_SOLANA_RPC_MAINNET_FALLBACK="${fallback}"`,
+      `MERRYMEN_JUPITER_API_KEY=jup-key-0123456789`, `MERRYMEN_STORE_DEK=${dek}`, `MERRYMEN_SOLANA_FEE_PAYER_SEED=${seed}`, `MERRYMEN_SOLANA_MAX_FEE_LAMPORTS=5000000`].join("\n"));
+    const secrets = solanaSecretValues({ MERRYMEN_STORE_DEK: dek, MERRYMEN_SOLANA_FEE_PAYER_SEED: "only-in-env-0123456789" }, [envFile, path.join(root, "missing")]);
+    for (const value of [seed, dek, rpc, fallback, "jup-key-0123456789", "only-in-env-0123456789"]) assert.ok(secrets.includes(value), value);
+    assert.ok(!secrets.includes("5000000") && !secrets.includes("1"), "settings that are not secrets are left alone");
+    // A copy the agent made under another name, and a keyed URL no setting names: neither reaches the model.
+    const stray = "https://mainnet.helius-rpc.com/?api-key=9999aaaa-bbbb-cccc-dddd-eeeeffff0000";
+    writeFileSync(path.join(root, "copy.txt"), `${readFileSync(envFile, "utf8")}\nlog: provider ${stray} timed out\nseed again ${seed}`);
+    const sent: string[] = [];
+    const seen: AgentMsg[][] = [];
+    const deps = makeDeps(baseCfg({ capabilities: new Set(["files"]), filesRoot: root, secrets }),
+      [{ text: "", toolUses: [{ id: "1", name: "read_file", input: { path: "copy.txt" } }] }, { text: "done", toolUses: [] }], sent, seen);
+    await runAgentTask("read the copy", deps);
+    const results = seen[1]!.find((m) => m.role === "tools");
+    assert.ok(results && results.role === "tools");
+    const output = results.results[0]!.output;
+    for (const value of [seed, dek, rpc, fallback, "jup-key-0123456789", "9999aaaa-bbbb-cccc-dddd-eeeeffff0000"]) assert.ok(!output.includes(value), `${value} reached the model`);
+    assert.match(output, /MERRYMEN_SOLANA=1/, "the rest of the file is still read");
+    // The setting's shape alone is enough for a value the list does not hold.
+    assert.equal(redactSecrets("MERRYMEN_SOLANA_FEE_PAYER_SEED=someOtherSeedValue123", []), "[redacted]");
+    assert.equal(containsSecret("MERRYMEN_JUPITER_API_KEY=abcdefgh12345", []), true);
   } finally {
     rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }

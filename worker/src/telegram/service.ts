@@ -22,13 +22,14 @@
  */
 
 import { existsSync, rmSync, writeFileSync } from "node:fs";
+import path from "node:path";
 // RELATIVE import only — the "@merrymen/core" alias exists solely in dev
 // tsconfigs; inside the installed package tsx can't resolve it and the worker
 // dies at startup (which silently kills Telegram). Never alias-import in worker/.
 import { PC_CAPABILITIES, PROPOSAL_PARAM, isHostedMode, parseTailRequest, saysTail, tailAsksToTake } from "../../../packages/core/src/index";
 import { patchSettingsFile, type ResolvedConfig } from "../settings";
 import { rememberChatSetting } from "./state";
-import { ensureHome, homePaths } from "../home";
+import { ensureHome, homePaths, merrymenHome } from "../home";
 import { loadGrantFile } from "../grant";
 import {
   answerCallbackQuery,
@@ -49,7 +50,7 @@ import {
   type TgCallback,
   type TgMessage,
 } from "./api";
-import { runAgentTask } from "./agent";
+import { runAgentTask, solanaSecretValues } from "./agent";
 import { SETTING_CONFIRM_TTL_SEC, TAIL_CONFIRM_TTL_SEC, executeCommand, type CommandDeps, type KillResult, type PendingAction } from "./executor";
 import {
   appliedManyText,
@@ -1769,6 +1770,8 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
         grant?.serialized,
         grant?.demoOwnerPrivateKey,
         grant?.demoSessionPrivateKey,
+        // Solana's server secrets, from the environment and a self-hosted .env.solana.local.
+        ...solanaSecretValues(process.env, [path.join(process.cwd(), ".env.solana.local"), path.join(merrymenHome(), ".env.solana.local")]),
       ].filter((s): s is string => typeof s === "string" && s.length >= 8);
       const stopFlag = { stopped: false };
       agentRuns.set(msg.chatId, stopFlag);

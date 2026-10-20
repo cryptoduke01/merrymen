@@ -35,7 +35,7 @@ import { sendDocument, sendPhoto, type TelegramOpts } from "./api";
 import { resolveInRoot, shellAllowed } from "./pc";
 import { getName } from "../soul";
 import { describeLlmFailure, isLlmProviderFailure } from "../llm-failure";
-import { errorText } from "../redact-urls";
+import { errorText, redactUrls } from "../redact-urls";
 
 // ── pure guards (unit-tested directly) ───────────────────────────────────────
 
@@ -105,6 +105,9 @@ export function isSensitivePath(p: string): boolean {
  * a glob/recursion likely aimed at the merrymen home (the known evasion). */
 export function shellTouchesSecrets(cmd: string): boolean {
   if (SENSITIVE_PATH.test(cmd)) return true;
+  // A glob over dotfiles (".e*.local", "./.en?.solana.local", ".??v.solana.local")
+  // names .env.solana.local without spelling it (review finalise).
+  if (/(?:^|[\s/'"=:;|&(<>])\.[^\s/'"]*[*?[]/.test(cmd)) return true;
   // The `for /r … in (set*.json / gr*.json)` and `dir /s … *.json` evasions read
   // secret files without naming them. Refuse recursive/glob scans for json/key/env.
   if (/\bfor\s+\/r\b/i.test(cmd) && /\.(json|key|pem|env)/i.test(cmd)) return true;
@@ -136,6 +139,9 @@ const SECRET_SHAPES: RegExp[] = [
   /\b(?:(?:sk|gsk|xai|pk|rk|npm|ghp|glpat)[-_]|AIza)[A-Za-z0-9_-]{16,4096}/g,
   /\beyJ[A-Za-z0-9_-]{15,65536}\.[A-Za-z0-9_-]{10,65536}\.[A-Za-z0-9_-]{10,65536}/g, // JWTs
   /\b[0-9]{6,32}:[A-Za-z0-9_-]{30,4096}/g, // Telegram bot tokens (id:hash)
+  // A Merrymen secret setting as written in an env file or a shell (.env.solana.local:
+  // the fee payer's seed, the store DEK, the Jupiter key, keyed RPC URLs), whatever its value.
+  /\bMERRYMEN_[A-Z0-9_]{0,64}(?:SEED|DEK|KEY|SECRET|TOKEN|RPC[A-Z0-9_]{0,32})[ \t]{0,16}=[ \t]{0,16}["']?[^\s"'#]{8,4096}/g,
 ];
 // Solana secret keys (a 64-byte keypair as base58, or the CLI's id.json byte
 // array) belong in this list too, but a shape alone would also take every
@@ -148,6 +154,37 @@ const SECRET_SHAPES: RegExp[] = [
  * goes to core's solanaSecretsIn (SecretScanBudget): absent, a full scan, as
  * every caller but the group-chat prompt quoting wants.
  */
+/**
+ * The Merrymen settings whose VALUES are secrets an agent tool must never
+ * return (review finalise): the Solana fee payer's seed (custody of its SOL),
+ * the store's data-encryption key, the Jupiter key and keyed RPC URLs.
+ */
+export const SOLANA_SECRET_SETTINGS = Object.freeze(["MERRYMEN_SOLANA_FEE_PAYER_SEED", "MERRYMEN_STORE_DEK", "MERRYMEN_JUPITER_API_KEY",
+  "MERRYMEN_SOLANA_RPC_MAINNET", "MERRYMEN_SOLANA_RPC_MAINNET_FALLBACK", "MERRYMEN_SOLANA_RESOLVE_THIRD_RPC", "MERRYMEN_SOLANA_RECOVER_RPC"]);
+/**
+ * Those settings' values for the agent's secret list: from this process's
+ * environment and from each env file in `files` that exists (.env.solana.local
+ * in the working tree and in MERRYMEN_HOME), so a value only that file holds is
+ * redacted however the agent reads it. Unreadable files are skipped.
+ */
+export function solanaSecretValues(env: NodeJS.ProcessEnv, files: readonly string[]): string[] {
+  const values = SOLANA_SECRET_SETTINGS.map((name) => env[name]);
+  for (const file of files) {
+    let text: string;
+    try { text = readFileSync(file, "utf8"); } catch { continue; }
+    for (const line of text.split(/\r?\n/)) {
+      const m = /^\s{0,16}(?:export\s{1,16})?([A-Z0-9_]{1,128})\s{0,16}=\s{0,16}(.{0,8192})$/.exec(line);
+      if (!m || !(SOLANA_SECRET_SETTINGS as readonly string[]).includes(m[1]!)) continue;
+      values.push(m[2]!.trim().replace(/^(["'])(.*)\1$/, "$2"));
+    }
+  }
+  return values.filter((value): value is string => typeof value === "string" && value.length >= 8);
+}
+/** Tool output on its way to the model: secret values and shapes out, then keyed URLs reduced to their host. */
+function safeOutput(text: string, knownSecrets: string[]): string {
+  return redactUrls(redactSecrets(text, knownSecrets));
+}
+
 export function redactSecrets(text: string, knownSecrets: string[], budget?: SecretScanBudget): string {
   let out = text;
   for (const s of [...solanaSecretsIn(text, budget), ...knownSecrets]) {
@@ -256,8 +293,8 @@ export function buildTools(cfg: AgentConfig, io: AgentIo): ToolImpl[] {
         const r = await pcp.runShell(cmd, { timeoutMs: SHELL_TIMEOUT_MS, cwd: io.cwd.value || undefined });
         const out = ((r.stdout || "") + (r.stderr ? "\n" + r.stderr : "")).trim();
         // Redact any secret VALUE the command may have read, however it read it.
-        const safe = redactSecrets(out || "(no output)", cfg.secrets);
-        return `exit ${r.code ?? "?"}${r.reason ? ` (${r.reason})` : ""}\nworking dir ${redactSecrets(io.cwd.value || "(unset)", cfg.secrets)}\n${safe}`;
+        const safe = safeOutput(out || "(no output)", cfg.secrets);
+        return `exit ${r.code ?? "?"}${r.reason ? ` (${r.reason})` : ""}\nworking dir ${safeOutput(io.cwd.value || "(unset)", cfg.secrets)}\n${safe}`;
       },
     });
   }
@@ -277,7 +314,7 @@ export function buildTools(cfg: AgentConfig, io: AgentIo): ToolImpl[] {
           if (!res.ok) return `REFUSED: ${res.reason}`;
           try {
             const raw = readFileSync(res.abs, "utf8");
-            const text = redactSecrets(raw, cfg.secrets);
+            const text = safeOutput(raw, cfg.secrets);
             return text.length > FILE_READ_CAP ? text.slice(0, FILE_READ_CAP) + "\n…(truncated)" : text;
           } catch (e) {
             return `error: ${e instanceof Error ? e.message : String(e)}`;
