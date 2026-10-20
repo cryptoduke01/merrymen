@@ -944,6 +944,12 @@ characters on both sides is not read. A scan that throws reads the whole text as
 a secret, and the Telegram agent's `send_file` refuses a file whose scan could
 not finish. Fresh scans of short texts are memoized per process by SHA-256
 digest (offsets only, no text). Both scans' linear-time tests measure CPU time.
+The hosted grant guard (`carriesOwnerKey`, run on every POST /api/grants and
+partner activation, Solana on or off) walks the grant once with a smaller
+budget: 32 exact candidates for the whole grant (failing closed past them) and
+windows of 32 checks, 512 decodes and 32,768 starts, reading every string and
+property name once, so a 230 KB hostile body costs about 7 to 15 ms of CPU
+instead of 60 to 130 ms. POST /api/grants is not paced per tenant.
 
 **Output redaction.** Every Solana process (the `start:solana` worker and the
 paper, hold, resolve, recover and RPC-check CLIs) installs `guardStdio` before

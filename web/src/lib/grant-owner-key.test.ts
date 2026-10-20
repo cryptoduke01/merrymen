@@ -152,6 +152,46 @@ describe("a real grant carrying a Solana secret key is refused", () => {
     assert.ok(spent < 1_000, `fields took ${Math.round(spent)} ms of CPU time`);
   });
 
+  it("reads each string once, so a grant reaches the walk's candidate cap only with that many key-shaped strings", async () => {
+    const g = (await minted)[0]!;
+    // 20 signatures (64 bytes each, no keypair): under the grant walk's cap of 32 when read once, over it when read twice.
+    const sigs = Array.from({ length: 20 }, (_, i) => base58Encode(ed25519.sign(new TextEncoder().encode(`m${i}`), new Uint8Array(32).fill(i + 1))));
+    assert.equal(carriesOwnerKey({ ...g, notes: sigs.join(" ") }), false);
+    assert.equal(carriesOwnerKey({ ...g, [sigs.join(" ")]: 1 }), false, "a property name is read once too");
+    // Past the cap the grant is refused, as before.
+    assert.equal(carriesOwnerKey({ ...g, notes: [...sigs, ...sigs].join(" ") }), true);
+    // A keypair is still found as a byte array, in a property name, and glued at a run's edge.
+    assert.equal(carriesOwnerKey({ ...g, caps: { ...g.caps, backup: SOL.bytes } }), true);
+    assert.equal(carriesOwnerKey({ ...g, [SOL.b58]: true }), true);
+    assert.equal(carriesOwnerKey({ ...g, label: `pk${SOL.b58}` }), true);
+  });
+
+  it("a 230 KB hostile grant costs a fraction of one default scan of its text (review finalise: 60 to 130 ms on every POST /api/grants)", async () => {
+    const g = (await minted)[0]!;
+    const B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+    const run = (n: number) => Array.from({ length: n }, () => B58[Math.floor(Math.random() * 58)]).join("");
+    const random64 = () => base58Encode(new Uint8Array(randomBytes(64)));
+    const hostile = (keys: number, runs: number) => ({ ...g, ...Object.fromEntries([...Array.from({ length: keys }, (_, i) => [`k${i}`, random64()]),
+      ...Array.from({ length: runs }, (_, i) => [`r${i}`, run(240)])]) });
+    const cpuMsOf = (fn: () => unknown): number => {
+      const started = process.cpuUsage();
+      fn();
+      const spent = process.cpuUsage(started);
+      return (spent.user + spent.system) / 1_000;
+    };
+    for (const [name, grant] of [["key-shaped and long runs", hostile(127, 900)], ["long runs only", hostile(0, 950)]] as const) {
+      const text = JSON.stringify(grant);
+      assert.ok(text.length > 230_000, name);
+      // CPU time, best of three, against the default scan of the same text (the walk read it twice before).
+      let walk = Infinity, once = Infinity;
+      for (let round = 0; round < 3; round++) {
+        walk = Math.min(walk, cpuMsOf(() => carriesOwnerKey(grant)));
+        once = Math.min(once, cpuMsOf(() => solanaSecretIn(text)));
+      }
+      assert.ok(walk < once / 2, `${name}: the grant walk took ${walk.toFixed(1)} ms of CPU, one default scan ${once.toFixed(1)} ms`);
+    }
+  });
+
   it("and halts the hosted boot", async () => {
     const grants = await minted;
     process.env.MERRYMEN_HOSTED = "1";

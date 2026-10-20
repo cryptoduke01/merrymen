@@ -1,4 +1,4 @@
-import { secretScanBudget, solanaSecretIn, type SecretScanBudget } from "./ids";
+import { solanaSecretIn, type SecretScanBudget } from "./ids";
 
 /**
  * Hosted mode — the single switch that turns merrymen from a self-hosted
@@ -88,27 +88,60 @@ export function carriesOwnerKey(obj: unknown): boolean {
  * blob's own text are base58 candidates that mean nothing. Anything there that
  * is not a ZeroDev blob is scanned as written.
  *
- * Every scan in one walk shares one budget (secretScanBudget), so key-shaped
+ * Every scan in one walk shares one budget (GRANT_SCAN_BUDGET), so key-shaped
  * runs split across many strings cannot make the walk read each of them.
+ *
+ * EACH STRING IS READ ONCE (review finalise, grant CPU): every string value and
+ * property name is read as text by the walk, then left out of the structure
+ * read after it (objects become [name, value] pairs and strings become ""), so
+ * that read finds only what no string holds, a JSON array of 64 byte values.
+ * Read twice, a hostile body cost twice the scan and reached the candidate cap
+ * at half the candidates.
  */
-function carriesSolanaSecret(obj: unknown, budget: SecretScanBudget = secretScanBudget()): boolean {
+function carriesSolanaSecret(obj: unknown, budget: SecretScanBudget = grantScanBudget()): boolean {
   let found = false;
   let blob: object | null = null;
+  let root = true;
+  const read = (text: string) => {
+    if (!found && solanaSecretIn(text, budget)) found = true;
+  };
   let json: string;
   try {
-    json = JSON.stringify(obj, function (this: unknown, k: string, val: unknown) {
-      if (typeof val !== "string") return val;
-      if (this === obj && k === "serialized") {
-        blob = zeroDevParams(val);
-        if (blob !== null) return undefined;
+    json = JSON.stringify(obj, (_k: string, val: unknown) => {
+      const top = root;
+      root = false;
+      if (typeof val === "string") {
+        read(val);
+        return "";
       }
-      if (solanaSecretIn(val, budget)) found = true;
-      return val;
+      if (val === null || typeof val !== "object" || Array.isArray(val)) return val;
+      let entries = Object.entries(val);
+      // The grant's own top-level ZeroDev blob is read decoded, below, instead of as written.
+      const serialized = top ? (val as Record<string, unknown>).serialized : undefined;
+      if (typeof serialized === "string") {
+        blob = zeroDevParams(serialized);
+        if (blob !== null) entries = entries.filter(([name]) => name !== "serialized");
+      }
+      return entries;
     });
   } catch {
     return false;
   }
   return found || solanaSecretIn(json, budget) || (blob !== null && carriesSolanaSecret(blob, budget));
+}
+
+/**
+ * What one grant's Solana secret walk may read: GRANT_SCAN_CANDIDATES exact
+ * candidates and a small window budget, together about 20 ms of CPU at most
+ * (review finalise: the default budget let any signed-in user spend 60 to 130
+ * ms of the web's one thread on every POST /api/grants, with Solana off). A
+ * real grant holds no base58 run a keypair's length, so the cap is never near;
+ * past it the grant is refused as carrying a secret. The windows still find a
+ * key glued to a few characters ("pk<key>"), read first, at a run's edges.
+ */
+const GRANT_SCAN_CANDIDATES = 32;
+function grantScanBudget(): SecretScanBudget {
+  return { left: GRANT_SCAN_CANDIDATES, windows: { checks: 32, decodes: 512, starts: 32_768 } };
 }
 
 /**
