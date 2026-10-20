@@ -11,7 +11,10 @@ import {
   type SolanaSwapIntent,
 } from "../../packages/core/src/solana";
 import { SolanaMarketError } from "./solana-market";
-import { solanaPaperIntentFingerprint, type SolanaPaperCommit, type SolanaPaperReceipt, type SolanaPaperSnapshot } from "./solana-paper-store";
+import {
+  solanaPaperIntentFingerprint, SolanaPaperStoreError, type SolanaPaperCommit, type SolanaPaperReceipt, type SolanaPaperSnapshot, type SolanaPaperWriteOff,
+  type SolanaPaperWriteOffRecord,
+} from "./solana-paper-store";
 
 const TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 
@@ -34,7 +37,12 @@ export interface SolanaPaperLedger {
   get(owner: string): SolanaPaperSnapshot | null | Promise<SolanaPaperSnapshot | null>;
   findTrade(owner: string, requestId: string): SolanaPaperReceipt | null | Promise<SolanaPaperReceipt | null>;
   commit(input: SolanaPaperCommit): SolanaPaperReceipt | Promise<SolanaPaperReceipt>;
+  /** Owner write-off of a dust lot; a ledger without it offers none. */
+  writeOff?(input: SolanaPaperWriteOff): (SolanaPaperSnapshot & { writtenOff: SolanaPaperWriteOffRecord }) | Promise<SolanaPaperSnapshot & { writtenOff: SolanaPaperWriteOffRecord }>;
 }
+
+/** Slippage for the write-off's full-size exit quote: the paper commands' default. */
+export const SOLANA_PAPER_WRITE_OFF_SLIPPAGE_BPS = 100;
 
 function requireFreshMint(mint: SolanaMint, expected: string, nowMs: number): void {
   if (!mint || mint.address !== expected || canonicalId(CHAINS.solana, "token", mint.address) !== expected
@@ -87,10 +95,16 @@ export function createSolanaPaperService(
     if (buying && BigInt(intent.amountRaw) > BigInt(book.cashRaw)) {
       throw new SolanaPaperServiceError("Insufficient simulated USDG for this buy.");
     }
+    let remainderIntent: SolanaSwapIntent | null = null;
     if (!buying) {
       const position = book.positions.find((p) => p.mint === intent.inputMint);
       if (!position || BigInt(intent.amountRaw) > BigInt(position.amountRaw)) {
         throw new SolanaPaperServiceError("Insufficient simulated token balance for this sell.");
+      }
+      const remainder = BigInt(position.amountRaw) - BigInt(intent.amountRaw);
+      if (remainder > 0n) {
+        remainderIntent = parseSolanaSwapIntent({ kind: "spl-swap", chain: CHAINS.solana, mode: "paper", requestId: "remainder-check",
+          inputMint: intent.inputMint, outputMint: SOLANA_USDG_MINT, amountRaw: remainder.toString(), slippageBps: intent.slippageBps });
       }
     }
     const [inputMint, outputMint] = await Promise.all([
@@ -112,6 +126,18 @@ export function createSolanaPaperService(
     }) : null;
     const exitQuote = exitIntent ? await market.quote(exitIntent) : null;
     if (exitQuote && exitIntent) validateSolanaQuote(exitQuote, exitIntent, now());
+    // A partial sell must leave something a route still buys back: dust no
+    // route will buy could never be sold and would hold a position slot.
+    let remainderQuote: SolanaQuote | null = null;
+    if (remainderIntent) {
+      try { remainderQuote = await market.quote(remainderIntent); }
+      catch (error) {
+        // A book rule the owner can act on, answered like the store's own refusals.
+        if (error instanceof SolanaMarketError && error.code === "zero-output") throw new SolanaPaperStoreError("remainder_unquoted");
+        throw error;
+      }
+      validateSolanaQuote(remainderQuote, remainderIntent, now());
+    }
     // Existing holdings must have current executable-sized exit quotes before
     // another buy. An unrelated illiquid holding must not stop an exit.
     const quoted = valuePortfolio && buying ? await mapBounded(book.positions, async (position, index) => {
@@ -131,7 +157,7 @@ export function createSolanaPaperService(
     }) : [];
     const marks = quoted.filter((mark): mark is SolanaQuote => mark !== null);
     const zeroValuedMints = book.positions.filter((_, index) => quoted[index] === null).map((position) => position.mint);
-    return { intent, quote, exitQuote, inputMint, outputMint, marks, zeroValuedMints, version: book.version };
+    return { intent, quote, exitQuote, remainderQuote, remainderIntent, inputMint, outputMint, marks, zeroValuedMints, version: book.version };
   }
 
   return {
@@ -161,14 +187,41 @@ export function createSolanaPaperService(
           outputMint: SOLANA_USDG_MINT, amountRaw: prepared.quote.minOutAmount,
         }, nowMs);
       }
+      if (prepared.remainderQuote && prepared.remainderIntent) validateSolanaQuote(prepared.remainderQuote, prepared.remainderIntent, nowMs);
       return store.commit({
         owner, intent, quote: prepared.quote, marks: prepared.marks,
         ...(prepared.zeroValuedMints.length ? { zeroValuedMints: prepared.zeroValuedMints } : {}),
+        ...(prepared.remainderQuote ? { remainderQuote: prepared.remainderQuote } : {}),
         buyExitQuote: prepared.exitQuote ?? undefined,
         safetyObservedAtMs: Math.min(prepared.inputMint.observedAtMs, prepared.outputMint.observedAtMs),
         tokenDecimals: intent.inputMint === SOLANA_USDG_MINT ? prepared.outputMint.decimals : prepared.inputMint.decimals,
         expectedVersion: prepared.version, nowMs,
       });
+    },
+    /**
+     * The owner's write-off of one dust lot. The whole lot is quoted back to
+     * USDG first: only the market's zero-output answer qualifies it. A lot a
+     * route still buys must be sold instead, and a failed quote (an outage)
+     * writes off nothing.
+     */
+    async writeOff(owner: string, mint: string) {
+      assertScope(owner);
+      solanaPaperAgentId(owner);
+      // Only the local book offers it; hosted tenant books do not (yet).
+      if (!store.writeOff) throw new Error("This Solana paper ledger has no owner write-off.");
+      const book = await store.get(owner);
+      if (!book) throw new SolanaPaperStoreError("book_missing");
+      const position = book.positions.find((p) => p.mint === mint);
+      if (!position) throw new SolanaPaperStoreError("no_position");
+      try {
+        await market.quote(parseSolanaSwapIntent({ kind: "spl-swap", chain: CHAINS.solana, mode: "paper", requestId: "write-off-check",
+          inputMint: mint, outputMint: SOLANA_USDG_MINT, amountRaw: position.amountRaw, slippageBps: SOLANA_PAPER_WRITE_OFF_SLIPPAGE_BPS }));
+      } catch (error) {
+        if (!(error instanceof SolanaMarketError && error.code === "zero-output")) throw error;
+        return store.writeOff({ owner, mint, amountRaw: position.amountRaw, zeroOutputObservedAtMs: now(), expectedVersion: book.version });
+      }
+      // A route still buys it back: not dust, so it is sold, not written off.
+      throw new SolanaPaperStoreError("not_dust");
     },
   };
 }

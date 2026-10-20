@@ -37,6 +37,9 @@ const ERRORS = {
   position_limit: "The Solana paper open-position limit would be exceeded",
   balance_overflow: "The Solana paper token balance would exceed u64",
   loosen_required: "Raising a Solana paper limit (per-trade, daily, operations or drawdown) needs --loosen; lowering one never does",
+  remainder_unquoted: "This Solana paper sell would leave a remainder that no route buys back; sell the whole position, or less of it",
+  not_dust: "Only a whole position that no route buys back right now can be written off; sell it instead",
+  no_position: "The Solana paper book holds no position in that mint",
 } as const;
 export class SolanaPaperStoreError extends Error {
   readonly code: keyof typeof ERRORS;
@@ -69,6 +72,8 @@ export interface SolanaPaperReceipt {
   safetyObservedAtMs: number;
   /** Recorded buy exit evidence; this is not an executed exit. */
   buyExitQuote?: SolanaQuote;
+  /** A partial sell's evidence that what it left can still be sold. */
+  remainderQuote?: SolanaQuote;
   /** Held mints valued at zero for this decision: no route returned any output for them. */
   zeroValuedMints?: string[];
   side: "buy" | "sell";
@@ -92,6 +97,8 @@ export interface SolanaPaperSnapshot {
   limits: SolanaPaperLimits;
   /** Every owner renewal of the limits, oldest first. Absent until the first renewal. */
   limitsHistory?: SolanaPaperLimitsChange[];
+  /** Dust lots the owner wrote off, oldest first. Absent until the first one. */
+  writeOffs?: SolanaPaperWriteOffRecord[];
   positions: SolanaPaperPosition[];
   /** Most recent 100, newest first. Durable replay records are never pruned. */
   trades: SolanaPaperReceipt[];
@@ -122,6 +129,34 @@ export interface SolanaPaperLimitsChange {
   /** Limits this renewal raised, which it could only do with `loosen`. */
   loosened: string[];
 }
+/**
+ * A dust lot the owner wrote off: removed from the positions with its whole
+ * remaining cost basis realized as a loss, so P&L shows what it cost. Cash,
+ * equity (the lot was already valued at zero) and the peak do not move.
+ */
+export interface SolanaPaperWriteOffRecord {
+  mint: string;
+  decimals: number;
+  amountRaw: string;
+  costBasisUsdgRaw: string;
+  /** Minus the cost basis. */
+  realizedPnlRaw: string;
+  /** When the market answered that no route buys the whole lot back. */
+  zeroOutputObservedAtMs: number;
+  writtenOffAtMs: number;
+  /** The book version the write-off produced. */
+  version: number;
+}
+/** An owner's write-off of one dust lot, with the market's zero-output answer for the whole lot as evidence. */
+export interface SolanaPaperWriteOff {
+  owner: string;
+  mint: string;
+  /** The whole lot: a write-off never splits a position. */
+  amountRaw: string;
+  zeroOutputObservedAtMs: number;
+  expectedVersion: number;
+}
+
 /** What a renewal changed, for the owner to read: each changed limit's old and new value. */
 export interface SolanaPaperRenewalReport {
   changes: Partial<Record<RenewableLimit, { from: string | number; to: string | number }>>;
@@ -137,6 +172,11 @@ export interface SolanaPaperCommit {
   safetyObservedAtMs: number;
   /** Required for a new buy: executable exit evidence for exactly minOut units. */
   buyExitQuote?: SolanaQuote;
+  /**
+   * Required for a partial sell: an executable quote back to USDG for exactly
+   * what the sell leaves, so a sell never leaves dust that no route buys back.
+   */
+  remainderQuote?: SolanaQuote;
   /** Decimals of the non-USDG mint, verified by the market client. */
   tokenDecimals: number;
   /** All current positions at exact full size, or [] for an exit during outage. */
@@ -368,6 +408,54 @@ export class SolanaPaperStore {
       return receipt;
     });
   }
+
+  /** The owner's write-off of one dust lot (applySolanaPaperWriteOff). */
+  writeOff(input: SolanaPaperWriteOff): SolanaPaperSnapshot & { writtenOff: SolanaPaperWriteOffRecord } {
+    const owner = ownerKey(input.owner);
+    return this.transaction(() => {
+      const existing = this.readBook(owner);
+      if (!existing) fail("book_missing");
+      const { book, record } = applySolanaPaperWriteOff(existing, input, this.now());
+      const update = this.db.prepare("UPDATE solana_paper_books SET version = ?, book_json = ? WHERE owner = ? AND version = ?")
+        .run(book.version, JSON.stringify(book), owner, input.expectedVersion);
+      if (update.changes !== 1) fail("version_conflict");
+      return { ...this.get(owner)!, writtenOff: record };
+    });
+  }
+}
+
+/**
+ * Pure write-off accounting, shared like applySolanaPaperCommit. Call under the
+ * book's write lock with a post-lock clock. Only a whole lot that the market
+ * just answered no route buys back (zero output, observed within the quote
+ * freshness window) can go: a failed or missing quote never qualifies, and the
+ * owner asks for each one. The lot leaves the positions (freeing its slot)
+ * with its whole cost basis realized as a loss; cash, the peak and the rolling
+ * trade caps do not move, and nothing is added to the trades.
+ */
+export function applySolanaPaperWriteOff(bookInput: SolanaPaperBook, input: SolanaPaperWriteOff,
+  nowMs: number): { book: SolanaPaperBook; record: SolanaPaperWriteOffRecord } {
+  ownerKey(input.owner);
+  timestamp(nowMs);
+  const book = structuredClone(bookInput);
+  if (input.owner !== book.owner) fail("invalid_input");
+  if (!Number.isSafeInteger(input.expectedVersion) || input.expectedVersion !== book.version || book.version === Number.MAX_SAFE_INTEGER) fail("version_conflict");
+  if (nowMs < book.updatedAtMs) fail("clock_rollback");
+  if (!Number.isSafeInteger(input.zeroOutputObservedAtMs) || input.zeroOutputObservedAtMs < 0 || input.zeroOutputObservedAtMs > nowMs
+    || nowMs - input.zeroOutputObservedAtMs >= SOLANA_QUOTE_MAX_AGE_MS) fail("stale_safety");
+  const position = book.positions.find((item) => item.mint === input.mint);
+  if (!position || typeof input.amountRaw !== "string" || input.amountRaw !== position.amountRaw) fail("not_dust");
+  const basis = BigInt(position.costBasisUsdgRaw);
+  book.positions = book.positions.filter((item) => item.mint !== input.mint);
+  book.realizedPnlRaw = (BigInt(book.realizedPnlRaw) - basis).toString();
+  book.version++;
+  book.updatedAtMs = nowMs;
+  const record: SolanaPaperWriteOffRecord = {
+    mint: position.mint, decimals: position.decimals, amountRaw: position.amountRaw, costBasisUsdgRaw: position.costBasisUsdgRaw,
+    realizedPnlRaw: (-basis).toString(), zeroOutputObservedAtMs: input.zeroOutputObservedAtMs, writtenOffAtMs: nowMs, version: book.version,
+  };
+  book.writeOffs = [...(book.writeOffs ?? []), record];
+  return { book, record };
 }
 
 /** Pure fill accounting shared by local CLI and tenant-bound SQLite/Postgres books.
@@ -450,6 +538,7 @@ export function applySolanaPaperCommit(bookInput: SolanaPaperBook, input: Solana
   if (side === "buy" && (hwm - equityBefore) * 10_000n >= hwm * BigInt(book.limits.maxDrawdownBps)) fail("drawdown_limit");
 
   let realized = 0n;
+  let remainderQuote: SolanaQuote | undefined;
   if (side === "buy") {
     if (amountIn > cashBefore) fail("insufficient_balance");
     book.cashRaw = balance(cashBefore - amountIn);
@@ -462,6 +551,15 @@ export function applySolanaPaperCommit(bookInput: SolanaPaperBook, input: Solana
   } else {
     if (!position || amountIn > BigInt(position.amountRaw)) fail("insufficient_balance");
     const heldAmount = BigInt(position.amountRaw);
+    if (amountIn < heldAmount) {
+      const remainderIntent: SolanaSwapIntent = {
+        kind: "spl-swap", chain: CHAINS.solana, mode: "paper", requestId: "remainder-check",
+        inputMint: tokenMint, outputMint: SOLANA_USDG_MINT, amountRaw: (heldAmount - amountIn).toString(), slippageBps: intent.slippageBps,
+      };
+      if (!input.remainderQuote) fail("remainder_unquoted");
+      checked("remainder_unquoted", () => validateSolanaQuote(input.remainderQuote!, remainderIntent, nowMs));
+      remainderQuote = structuredClone(input.remainderQuote);
+    }
     const heldBasis = BigInt(position.costBasisUsdgRaw);
     // Full exit explicitly consumes every remaining basis unit; partial
     // sells floor the allocated basis, retaining rounding dust in the lot.
@@ -490,6 +588,7 @@ export function applySolanaPaperCommit(bookInput: SolanaPaperBook, input: Solana
     safetyObservedAtMs: input.safetyObservedAtMs,
     ...(side === "buy" ? { buyExitQuote: structuredClone(input.buyExitQuote!) } : {}),
     ...(zeroValued.length ? { zeroValuedMints: [...zeroValued] } : {}),
+    ...(remainderQuote ? { remainderQuote } : {}),
     inputAmountRaw: amountIn.toString(), outputAmountRaw: amountOut.toString(),
     notionalUsdgRaw: notional.toString(), realizedPnlRaw: realized.toString(),
   };

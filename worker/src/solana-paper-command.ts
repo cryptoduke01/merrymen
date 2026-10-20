@@ -23,6 +23,7 @@ quote --owner PUBLIC_KEY --input MINT --output MINT --amount-raw INTEGER
       [--slippage-bps 100]
 trade --owner PUBLIC_KEY --input MINT --output MINT --amount-raw INTEGER
       --request-id UNIQUE_ID [--slippage-bps 100]
+write-off --owner PUBLIC_KEY --mint MINT
 
 Each swap must have exactly one Solana USDG leg. Raw amounts use token base
 units (USDG has 6 decimals). Reuse a trade's request ID after interruption;
@@ -36,6 +37,14 @@ per-trade, daily, max-ops or drawdown limit also needs --loosen. Every renewal
 is kept in the book's limitsHistory with the previous and new limits. renew
 never changes cash, positions, P&L or receipts, and the rolling 24-hour
 limits still count earlier trades.
+
+A partial sell must leave an amount that a route still buys back; one that
+would leave dust is refused (sell the whole position, or less of it). A
+position no route buys back at all (dust) can be written off: write-off
+quotes the whole position first and goes ahead only when Jupiter quotes no
+output for it. The lot leaves the book with its cost basis realized as a
+loss, cash and the peak stay as they are, and the book keeps the record in
+writeOffs.
 
 Quotes require MERRYMEN_SOLANA_RPC_MAINNET and MERRYMEN_JUPITER_API_KEY.
 An optional MERRYMEN_SOLANA_RPC_MAINNET_FALLBACK provides independent RPC
@@ -52,6 +61,7 @@ const FLAGS: Record<string, readonly string[]> = {
   "inspect-mint": ["mint"],
   quote: ["owner", "input", "output", "amount-raw", "slippage-bps"],
   trade: ["owner", "input", "output", "amount-raw", "slippage-bps", "request-id"],
+  "write-off": ["owner", "mint"],
 };
 
 /** Options that take no value. */
@@ -172,6 +182,8 @@ export async function runSolanaPaperCommand(args: readonly string[], deps: Solan
   }, createdAt) : null;
   const initialCash = command === "init" ? paperUsdgRaw(flags.cash ?? "1000") : null;
   const renewal = command === "renew" ? renewalOf(flags, createdAt) : null;
+  const writeOffMint = command === "write-off" ? required(flags, "mint") : null;
+  if (writeOffMint !== null) solanaPaperAgentId(writeOffMint);
   const store = (deps.openStore ?? openPaperStore)();
   try {
     if (command === "init") return store.create(owner, initialCash!, limits!, createdAt);
@@ -182,6 +194,7 @@ export async function runSolanaPaperCommand(args: readonly string[], deps: Solan
       return book;
     }
     const service = createSolanaPaperService(store, lazyMarket, now);
+    if (command === "write-off") return await service.writeOff(owner, writeOffMint!);
     return command === "quote" ? { mode: "paper", preview: await service.preview(owner, intent) }
       : await service.trade(owner, intent);
   } finally {

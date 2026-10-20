@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { CHAINS, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM, base58Encode } from "../../packages/core/src/ids";
 import type { SolanaMint, SolanaQuote, SolanaSwapIntent } from "../../packages/core/src/solana";
-import { SolanaPaperStore } from "./solana-paper-store";
+import { SolanaPaperStore, SolanaPaperStoreError } from "./solana-paper-store";
 import { createSolanaPaperService, type SolanaPaperMarket } from "./solana-paper-service";
 import { createSolanaMarket, SolanaMarketError } from "./solana-market";
 import { SOLANA_MAINNET_GENESIS_HASH } from "./solana-rpc";
@@ -127,9 +127,12 @@ describe("Solana paper service", () => {
     await h.service.trade(OWNER, h.intent("buy-2"));
     assert.ok(h.calls.some((c) => c.requestId.startsWith("mark-") && c.amountRaw === buy.outputAmountRaw));
     h.calls.length = 0;
+    const held = BigInt(h.store.get(OWNER)!.positions[0]!.amountRaw);
     await h.service.trade(OWNER, h.intent("sell-1", { inputMint: SOL, outputMint: SOLANA_USDG_MINT, amountRaw: buy.outputAmountRaw }));
-    assert.equal(h.calls.length, 1);
-    assert.equal(h.calls[0]!.requestId, "sell-1");
+    // The sell itself, and what it leaves of the same position: nothing else.
+    assert.deepEqual(h.calls.map((c) => [c.requestId, c.inputMint, c.amountRaw]),
+      [["sell-1", SOL, buy.outputAmountRaw], ["remainder-check", SOL, (held - BigInt(buy.outputAmountRaw)).toString()]]);
+    assert.ok(h.store.get(OWNER)!.trades[0]!.remainderQuote, "the receipt keeps the remainder evidence");
   });
 
   it("rechecks mint age after slow quote preparation", async () => {
@@ -192,13 +195,15 @@ describe("Solana paper dust", () => {
     const quotes: string[] = [];
     /** Raw amounts Jupiter is unavailable for. */
     const down = new Set<string>();
+    /** Sell amounts Jupiter quotes at this output instead: a market that has since moved. */
+    const moved = new Map<string, bigint>();
     const fetcher: typeof fetch = async (input, init) => {
       const url = new URL(String(input));
       if (url.origin === "https://api.jup.ag") {
         const q = url.searchParams, amount = BigInt(q.get("amount")!), slippage = BigInt(q.get("slippageBps")!);
         quotes.push(`${q.get("inputMint") === CHEAP ? "sell" : "buy"}:${amount}`);
         if (down.has(q.get("amount")!)) return new Response("unavailable", { status: 503 });
-        const out = q.get("inputMint") === SOLANA_USDG_MINT ? amount * 1000n : amount / 1000n;
+        const out = q.get("inputMint") === SOLANA_USDG_MINT ? amount * 1000n : moved.get(amount.toString()) ?? amount / 1000n;
         const route = [{ percent: 100, swapInfo: { ammKey: OTHER, inputMint: q.get("inputMint"), outputMint: q.get("outputMint"),
           inAmount: amount.toString(), outAmount: out.toString() } }];
         return new Response(JSON.stringify({ inputMint: q.get("inputMint"), outputMint: q.get("outputMint"), inAmount: amount.toString(),
@@ -221,15 +226,65 @@ describe("Solana paper dust", () => {
       kind: "spl-swap", chain: CHAINS.solana, mode: "paper", requestId, amountRaw, slippageBps: 100,
       inputMint: side === "buy" ? SOLANA_USDG_MINT : CHEAP, outputMint: side === "buy" ? CHEAP : SOLANA_USDG_MINT,
     });
-    return { store, service, order, quotes, down, CHEAP };
+    /**
+     * Dust from before partial sells had to leave a quotable remainder, or from
+     * a market that moved: 901 units were worth 2 micro-USDG when the sell left
+     * them, and no route buys them now.
+     */
+    const legacyDust = async () => {
+      await service.trade(OWNER, order("buy-1", "buy", "1000000"));
+      moved.set("901", 2n);
+      await service.trade(OWNER, order("sell-most", "sell", (990_000_000n - 901n).toString()));
+      moved.clear();
+      assert.deepEqual(store.get(OWNER)!.positions.map((p) => p.amountRaw), ["901"]);
+    };
+    return { store, service, order, quotes, down, CHEAP, legacyDust, market };
   }
 
-  it("a partial sell's unquotable remainder no longer blocks buys; it is valued at zero and recorded", async () => {
+  it("refuses a partial sell that would leave dust, and allows one that leaves a sellable amount", async () => {
     const h = dustHarness();
-    const buy = await h.service.trade(OWNER, h.order("buy-1", "buy", "1000000"));
-    assert.equal(buy.outputAmountRaw, "990000000");
-    await h.service.trade(OWNER, h.order("sell-most", "sell", (990_000_000n - 901n).toString()));
-    assert.deepEqual(h.store.get(OWNER)!.positions.map((p) => p.amountRaw), ["901"]);
+    await h.service.trade(OWNER, h.order("buy-1", "buy", "1000000"));
+    const before = h.store.get(OWNER)!;
+    // 901 units quote 0 micro-USDG at 1% slippage: no route buys them back.
+    await assert.rejects(h.service.trade(OWNER, h.order("sell-most", "sell", (990_000_000n - 901n).toString())),
+      (error: unknown) => error instanceof SolanaPaperStoreError && error.code === "remainder_unquoted"
+        && /would leave a remainder that no route buys back; sell the whole position, or less of it/.test(error.message));
+    assert.ok(h.quotes.includes("sell:901"), "the remainder was quoted at its exact size");
+    assert.deepEqual(h.store.get(OWNER), before, "nothing was filled");
+    // Preview tells the owner the same, before any trade.
+    await assert.rejects(h.service.preview(OWNER, h.order("preview", "sell", (990_000_000n - 901n).toString())), /would leave a remainder/);
+    // An outage while quoting the remainder refuses the partial sell too; a whole exit needs no remainder quote.
+    h.down.add("2000");
+    await assert.rejects(h.service.trade(OWNER, h.order("sell-most", "sell", (990_000_000n - 2000n).toString())),
+      (error: unknown) => !(error instanceof SolanaPaperStoreError) && !(error instanceof SolanaMarketError && error.code === "zero-output"));
+    h.down.clear();
+    const kept = await h.service.trade(OWNER, h.order("sell-most", "sell", (990_000_000n - 2000n).toString()));
+    assert.deepEqual([kept.remainderQuote?.inAmount, kept.remainderQuote?.outAmount], ["2000", "2"]);
+    await h.service.trade(OWNER, h.order("sell-rest", "sell", "2000"));
+    assert.deepEqual(h.store.get(OWNER)!.positions, []);
+  });
+
+  it("the store refuses a partial sell without current evidence that its remainder can be sold", async () => {
+    const h = dustHarness();
+    await h.service.trade(OWNER, h.order("buy-1", "buy", "1000000"));
+    const sell = h.order("sell-most", "sell", (990_000_000n - 2000n).toString());
+    const quote = await h.market.quote(sell);
+    const remainderIntent = h.order("remainder-check", "sell", "2000");
+    const remainder = await h.market.quote(remainderIntent);
+    const commit = { owner: OWNER, intent: sell, quote, marks: [], safetyObservedAtMs: NOW, tokenDecimals: 6, expectedVersion: 1, nowMs: NOW };
+    const before = h.store.get(OWNER)!;
+    for (const evidence of [undefined, { ...remainder, inAmount: "1999" }, { ...remainder, quotedAtMs: NOW - 30_000, expiresAtMs: NOW + 1 },
+      await h.market.quote(h.order("remainder-check", "sell", "3000"))]) {
+      assert.throws(() => h.store.commit({ ...commit, ...(evidence ? { remainderQuote: evidence } : {}) }),
+        (error: unknown) => error instanceof SolanaPaperStoreError && error.code === "remainder_unquoted");
+      assert.deepEqual(h.store.get(OWNER), before);
+    }
+    assert.equal(h.store.commit({ ...commit, remainderQuote: remainder }).side, "sell");
+  });
+
+  it("existing dust no longer blocks buys; it is valued at zero and recorded", async () => {
+    const h = dustHarness();
+    await h.legacyDust();
     const before = h.store.get(OWNER)!;
 
     const next = await h.service.trade(OWNER, h.order("buy-2", "buy", "1000000"));
@@ -243,8 +298,7 @@ describe("Solana paper dust", () => {
 
   it("dust alone cannot be sold, and says so, while a failed mark still blocks every buy", async () => {
     const h = dustHarness();
-    await h.service.trade(OWNER, h.order("buy-1", "buy", "1000000"));
-    await h.service.trade(OWNER, h.order("sell-most", "sell", (990_000_000n - 901n).toString()));
+    await h.legacyDust();
     await assert.rejects(h.service.trade(OWNER, h.order("sell-dust", "sell", "901")),
       (error: unknown) => error instanceof SolanaMarketError && error.code === "zero-output" && /too small to trade/.test(error.message));
     // A position whose mark fails for any other reason is never valued at zero.
@@ -255,6 +309,55 @@ describe("Solana paper dust", () => {
     assert.deepEqual(h.store.get(OWNER), before);
     h.down.clear();
     assert.deepEqual((await h.service.trade(OWNER, h.order("buy-2", "buy", "1000000"))).zeroValuedMints, [h.CHEAP]);
+  });
+
+  it("the owner can write off a dust lot: its slot is freed and its cost is realized, cash and peak unchanged", async () => {
+    const h = dustHarness();
+    await h.legacyDust();
+    const before = h.store.get(OWNER)!;
+    const lot = before.positions[0]!;
+    const result = await h.service.writeOff(OWNER, h.CHEAP);
+    assert.ok(h.quotes.includes("sell:901"), "the whole lot was quoted first");
+    assert.deepEqual(result.writtenOff, { mint: h.CHEAP, decimals: 6, amountRaw: "901", costBasisUsdgRaw: lot.costBasisUsdgRaw,
+      realizedPnlRaw: (-BigInt(lot.costBasisUsdgRaw)).toString(), zeroOutputObservedAtMs: NOW, writtenOffAtMs: NOW, version: before.version + 1 });
+    const after = h.store.get(OWNER)!;
+    assert.deepEqual(after.positions, [], "the slot is free");
+    assert.equal(after.realizedPnlRaw, (BigInt(before.realizedPnlRaw) - BigInt(lot.costBasisUsdgRaw)).toString(), "its cost is a realized loss");
+    assert.deepEqual([after.cashRaw, after.hwmRaw, after.initialCashRaw], [before.cashRaw, before.hwmRaw, before.initialCashRaw]);
+    assert.deepEqual(after.trades, before.trades, "not a trade: the rolling caps do not count it");
+    assert.deepEqual(after.writeOffs, [result.writtenOff], "kept in the book");
+    assert.equal(after.version, before.version + 1);
+    await assert.rejects(h.service.writeOff(OWNER, h.CHEAP), (error: unknown) => error instanceof SolanaPaperStoreError && error.code === "no_position");
+  });
+
+  it("refuses to write off a lot a route still buys, or one whose quote failed", async () => {
+    const h = dustHarness();
+    await h.service.trade(OWNER, h.order("buy-1", "buy", "1000000"));
+    const sellable = h.store.get(OWNER)!;
+    await assert.rejects(h.service.writeOff(OWNER, h.CHEAP), (error: unknown) => error instanceof SolanaPaperStoreError && error.code === "not_dust"
+      && /sell it instead/.test(error.message));
+    assert.deepEqual(h.store.get(OWNER), sellable);
+    await h.service.trade(OWNER, h.order("sell-most", "sell", (990_000_000n - 2000n).toString()));
+    h.down.add("2000");
+    const before = h.store.get(OWNER)!;
+    // An outage is never evidence of dust.
+    await assert.rejects(h.service.writeOff(OWNER, h.CHEAP), (error: unknown) => !(error instanceof SolanaPaperStoreError) && !(error instanceof SolanaMarketError && error.code === "zero-output"));
+    assert.deepEqual(h.store.get(OWNER), before);
+  });
+
+  it("the store writes off only a whole lot, on fresh zero-output evidence, at the book's version", async () => {
+    const h = dustHarness();
+    await h.legacyDust();
+    const before = h.store.get(OWNER)!;
+    const input = { owner: OWNER, mint: h.CHEAP, amountRaw: "901", zeroOutputObservedAtMs: NOW, expectedVersion: before.version };
+    for (const [change, code] of [
+      [{ amountRaw: "900" }, "not_dust"], [{ mint: OTHER }, "not_dust"], [{ zeroOutputObservedAtMs: NOW - 30_000 }, "stale_safety"],
+      [{ zeroOutputObservedAtMs: NOW + 1 }, "stale_safety"], [{ expectedVersion: before.version - 1 }, "version_conflict"],
+    ] as const) {
+      assert.throws(() => h.store.writeOff({ ...input, ...change }), (error: unknown) => error instanceof SolanaPaperStoreError && error.code === code, JSON.stringify(change));
+      assert.deepEqual(h.store.get(OWNER), before);
+    }
+    assert.equal(h.store.writeOff(input).positions.length, 0);
   });
 
   it("an entry whose exit would be dust is still refused as a one-way buy", async () => {
@@ -330,6 +433,23 @@ describe("Solana paper command", () => {
     assert.equal(opens, 0);
     const h = harness();
     await assert.rejects(runSolanaPaperCommand(["renew", "--owner", OTHER], { openStore: () => new SolanaPaperStore(h.file, { now: () => NOW }), now: () => NOW }), /does not exist/);
+  });
+
+  it("write-off needs an owner and a mint before opening the book, and refuses an offline quote", async () => {
+    let opens = 0;
+    const deps = { openStore: () => { opens++; throw new Error("should not open"); } };
+    for (const args of [["write-off", "--owner", OWNER], ["write-off", "--mint", SOL], ["write-off", "--owner", OWNER, "--mint", "not-a-mint"],
+      ["write-off", "--owner", OWNER, "--mint", SOL, "--amount-raw", "1"]]) {
+      await assert.rejects(runSolanaPaperCommand(args, deps), Error, args.join(" "));
+    }
+    assert.equal(opens, 0);
+    const h = harness();
+    await h.service.trade(OWNER, h.intent());
+    const before = h.store.get(OWNER)!;
+    const offline: SolanaPaperMarket = { readMint: async () => { throw new Error("offline"); }, quote: async () => { throw new Error("offline"); } };
+    await assert.rejects(runSolanaPaperCommand(["write-off", "--owner", OWNER, "--mint", SOL],
+      { openStore: () => new SolanaPaperStore(h.file, { now: () => NOW }), market: () => offline, now: () => NOW }), /offline/);
+    assert.deepEqual(h.store.get(OWNER), before);
   });
 
   it("help has no filesystem or provider effects and explains omitted execution costs", async () => {

@@ -41,6 +41,10 @@ function quote(order: SolanaSwapIntent, outAmount = "200", nowMs = NOW, minOutAm
 function mark(amountRaw = "200", out = "100", nowMs = NOW, token = TOKEN): SolanaQuote {
   return quote(intent("mark", amountRaw, "sell", token), out, nowMs);
 }
+/** A partial sell's evidence that what it leaves still has a route back to USDG. */
+function remainder(amountRaw: string, out = "1", nowMs = NOW, token = TOKEN): SolanaQuote {
+  return quote(intent("remainder-check", amountRaw, "sell", token), out, nowMs);
+}
 function commitArgs(overrides: Partial<SolanaPaperCommit> = {}): SolanaPaperCommit {
   const order = overrides.intent ?? intent();
   const entryQuote = overrides.quote ?? quote(order);
@@ -456,7 +460,7 @@ test("partial basis allocation leaves integer dust for the full exit, which clea
   const buy = intent("buy", "10");
   store.commit(commitArgs({ intent: buy, quote: quote(buy, "3") }));
   const partial = intent("partial", "1", "sell");
-  const first = store.commit(commitArgs({ intent: partial, quote: quote(partial, "4"), expectedVersion: 1 }));
+  const first = store.commit(commitArgs({ intent: partial, quote: quote(partial, "4"), remainderQuote: remainder("2"), expectedVersion: 1 }));
   assert.equal(first.realizedPnlRaw, "1");
   assert.deepEqual(store.get(OWNER)!.positions, [{ mint: TOKEN, decimals: 9, amountRaw: "2", costBasisUsdgRaw: "7" }]);
   const exit = intent("exit", "2", "sell");
@@ -492,7 +496,8 @@ test("cash and token balance overflow reject atomically even when the quote itse
   const add = intent("overflow-token", "1");
   assert.throws(() => store.commit(commitArgs({ intent: add, quote: quote(add, "1"), marks: [mark(U64_MAX, "1")], expectedVersion: 1 })), errorCode("balance_overflow"));
   const sell = intent("overflow-cash", "1", "sell");
-  assert.throws(() => store.commit(commitArgs({ intent: sell, quote: quote(sell, "2"), expectedVersion: 1 })), errorCode("balance_overflow"));
+  assert.throws(() => store.commit(commitArgs({ intent: sell, quote: quote(sell, "2"), remainderQuote: remainder((BigInt(U64_MAX) - 1n).toString()), expectedVersion: 1 })),
+    errorCode("balance_overflow"));
   assert.equal(store.get(OWNER)!.version, 1);
   assert.equal(store.get(OWNER)!.positions[0]!.amountRaw, U64_MAX);
 });
@@ -551,7 +556,7 @@ test("an owner renewal revives an expired book without refilling it, resetting i
   setNow(NOW + DAY);
   const sell = intent("exit", "150", "sell");
   const sellArgs = (nowMs: number, expectedVersion: number) =>
-    commitArgs({ intent: sell, quote: quote(sell, "90", nowMs), safetyObservedAtMs: nowMs, expectedVersion, nowMs });
+    commitArgs({ intent: sell, quote: quote(sell, "90", nowMs), remainderQuote: remainder("50", "30", nowMs), safetyObservedAtMs: nowMs, expectedVersion, nowMs });
   assert.throws(() => store.commit(sellArgs(NOW + DAY, 1)), errorCode("expired"));
   assert.throws(() => store.create(OWNER, "1000", limits({ expiresAtMs: NOW + 9 * DAY }), NOW + DAY), errorCode("book_exists"));
   const before = store.get(OWNER)!;
@@ -699,9 +704,11 @@ test("dust valued at zero lets a buy proceed and is recorded on the receipt", (t
   const { store } = fixture(t);
   store.create(OWNER, "1000", limits(), NOW);
   store.commit(commitArgs());
-  // A partial sell leaves 1 raw unit, which no route will buy back.
+  // A partial sell leaves 1 raw unit, which a route still bought back then
+  // (its remainder quote) but no longer does: dust from before the remainder
+  // rule, or from a market that moved.
   const partial = intent("partial", "199", "sell");
-  store.commit(commitArgs({ intent: partial, quote: quote(partial, "99"), expectedVersion: 1 }));
+  store.commit(commitArgs({ intent: partial, quote: quote(partial, "99"), remainderQuote: remainder("1"), expectedVersion: 1 }));
   const next = intent("next", "100", "buy", TOKEN2);
   const receipt = store.commit(commitArgs({ intent: next, quote: quote(next, "50"), zeroValuedMints: [TOKEN], expectedVersion: 2 }));
   assert.deepEqual(receipt.zeroValuedMints, [TOKEN]);
