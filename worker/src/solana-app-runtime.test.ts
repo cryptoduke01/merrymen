@@ -489,6 +489,44 @@ test("nothing is replayed after a crash between steps: a revocation saved beside
   } finally { f.raw.close(); }
 });
 
+test("a dropped withdrawal whose sequence moved off-server stays pending in the app, and the runtime's own observation carries the expiry evidence an operator books from (live-M2)", async () => {
+  const f = await fixture();
+  try {
+    await f.live(); f.controls.initialized = true; await f.registered(); f.controls.sequence = 3n; await cashBook(f);
+    const withdraw = await f.app.prepareOwnerAction(f.scope, { action: "withdraw", mint: SOLANA_USDG_MINT, amountRaw: "1000000" });
+    await f.app.submitOwnerAction(f.scope, { signedTransactionBase64: await f.sign(withdraw.transactionBase64) });
+    f.controls.height = 5001; f.controls.sequence = 4n;
+    assert.equal((await f.app.status(f.scope)).live.ownerTransaction?.status, "pending");
+    const setup = (await new SolanaTradingStore(f.db, f.scope).setup())!;
+    assert.deepEqual(await f.app.observeOwnerTransaction(f.read, f.owner, setup),
+      { outcome: "pending", seen: false, canLand: false, evidence: { blockHeight: "5001", vaultSequence: "4", sessionEpoch: "1", slot: 1000 } });
+    // With the sequence unchanged it is the app's own proof, as before.
+    f.controls.sequence = 3n;
+    assert.deepEqual(await f.app.observeOwnerTransaction(f.read, f.owner, setup),
+      { outcome: "expired", proof: { reason: "blockhash-expired", blockHeight: "5001", vaultSequence: "3", sessionEpoch: "1", slot: 1000 } });
+  } finally { f.raw.close(); }
+});
+
+test("an owner transaction's prior vault state is read no earlier than the slot the app last booked, so a lagging provider cannot make a dropped one unprovable (live-M2)", async () => {
+  const f = await fixture();
+  try {
+    await f.live(); f.controls.initialized = true; await f.registered(); await cashBook(f);
+    const reads: Array<{ method: string; minContextSlot?: number }> = [];
+    f.providers.primary = async (method, params = []) => {
+      if (method === "getAccountInfo" && params[0] === f.vault) reads.push({ method, minContextSlot: (params[1] as { minContextSlot?: number }).minContextSlot });
+      return f.read(method, params);
+    };
+    await f.db.prepare("UPDATE solana_runtime_live_books SET book_json=? WHERE tenant=?").run(JSON.stringify({ ...JSON.parse((await f.db.prepare("SELECT book_json FROM solana_runtime_live_books").get() as { book_json: string }).book_json), slot: 990 }), TENANT);
+    await f.app.prepareOwnerAction(f.scope, { action: "revoke" });
+    assert.deepEqual(reads.at(-1), { method: "getAccountInfo", minContextSlot: 990 });
+    // A provider still behind what the app booked is refused, never trusted as the prior state.
+    await f.db.prepare("UPDATE solana_runtime_live_books SET book_json=? WHERE tenant=?").run(JSON.stringify({ ...JSON.parse((await f.db.prepare("SELECT book_json FROM solana_runtime_live_books").get() as { book_json: string }).book_json), slot: 1005 }), TENANT);
+    await assert.rejects(f.app.prepareOwnerAction(f.scope, { action: "resume-buys" }));
+    await assert.rejects(f.app.prepareLive(f.scope, { limits, sessionPublicKey: f.session }), /could not be read/);
+    assert.deepEqual(reads.at(-1), { method: "getAccountInfo", minContextSlot: 1005 });
+  } finally { f.raw.close(); }
+});
+
 test("a revocation beside a pending permission registration: whichever lands, both resolve, and a registration with a landed revocation is never activated", async () => {
   for (const lands of ["revoke", "registration"] as const) {
     const f = await fixture();

@@ -461,18 +461,24 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       await reconcileSolanaSubmission(rpc(), s, s.scope.owner, pending.submission.intent.requestId, now);
     }
   }
+  /**
+   * `evidence` (pending only): the blockhash expired at this finalized height and
+   * the vault was read at this slot, but its state does not prove the transaction
+   * never ran (it moved for another reason). Shown to an operator (solana-resolve
+   * owner); never booked from by the app.
+   */
   type OwnerView =
-    | { outcome: "pending"; seen: boolean; canLand: boolean }
+    | { outcome: "pending"; seen: boolean; canLand: boolean; evidence?: Omit<SolanaOwnerExpiryProof, "reason"> }
     | { outcome: "finalized" | "failed"; slot: number; err: string }
     | { outcome: "expired"; proof: SolanaOwnerExpiryProof };
   /** A successful owner transaction always leaves this mark on the vault. Without it the receipt is not believed. */
-  async function requireOwnerEffect(read: SolanaLiveRead, s: SolanaTradingStore, setup: SolanaPreparedSetup, slot: number) {
+  async function requireOwnerEffect(read: SolanaLiveRead, owner: string, setup: SolanaPreparedSetup, slot: number) {
     const mismatch = (): never => fail("Owner confirmation does not match the vault state.");
     const found = await read("getAccountInfo", [setup.vault, { encoding: "base64", commitment: "finalized", minContextSlot: slot }]);
     if (!object(found) || !object(found.context) || integer(found.context.slot) < slot || !object(found.value) || found.value.owner !== setup.programId
       || found.value.executable !== false || !Array.isArray(found.value.data) || found.value.data[1] !== "base64" || typeof found.value.data[0] !== "string") return mismatch();
     const current = decodeSolanaVaultAccount(encoded(found.value.data[0], SOLANA_VAULT_ACCOUNT_SIZE));
-    if (current.owner !== s.scope.owner) return mismatch();
+    if (current.owner !== owner) return mismatch();
     const kind = setup.kind ?? "session";
     // A session or revoke always moves the epoch; either withdrawal always moves the sequence.
     if ((kind === "session" || kind === "revoke") && (setup.priorSessionEpoch === undefined || current.sessionEpoch <= BigInt(setup.priorSessionEpoch))) mismatch();
@@ -486,7 +492,7 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
    * one URL and pair a current height with a stale slot, whose vault snapshot
    * predates a transaction that did run.
    */
-  async function ownerExpiry(read: SolanaLiveRead, s: SolanaTradingStore, setup: SolanaPreparedSetup, seen: boolean, epochOffset = 0): Promise<OwnerView> {
+  async function ownerExpiry(read: SolanaLiveRead, owner: string, setup: SolanaPreparedSetup, seen: boolean, epochOffset = 0): Promise<OwnerView> {
     const info = await read("getEpochInfo", [{ commitment: "finalized" }]);
     if (!object(info)) fail("Invalid owner expiry evidence.");
     const proofSlot = integer(info.absoluteSlot), blockHeight = integer(info.blockHeight);
@@ -501,24 +507,25 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       if (!object(snapshot.value) || snapshot.value.owner !== setup.programId || snapshot.value.executable !== false || !Array.isArray(snapshot.value.data)
         || snapshot.value.data[1] !== "base64" || typeof snapshot.value.data[0] !== "string") return pending;
       const current = decodeSolanaVaultAccount(encoded(snapshot.value.data[0], SOLANA_VAULT_ACCOUNT_SIZE));
-      if (current.owner !== s.scope.owner) return pending;
+      if (current.owner !== owner) return pending;
       sequence = current.seq.toString(); epoch = current.sessionEpoch.toString();
     } else if (setup.priorVaultExisted) return pending;
+    const evidence = { blockHeight: String(blockHeight), vaultSequence: sequence, sessionEpoch: epoch, slot: integer(snapshot.context.slot) };
     // Only state this kind of transaction must have changed proves it never ran.
     // Trades advance the sequence independently, so a revoke or session is
     // proven by its epoch alone, never wedged by a trade that landed meanwhile.
     // A linked record in the other slot that ran moved the epoch once (solanaOwnerEpochOffset).
-    if (!solanaOwnerExpiryProven(setup, sequence, epoch, epochOffset)) return pending;
-    return { outcome: "expired", proof: { reason: "blockhash-expired", blockHeight: String(blockHeight), vaultSequence: sequence, sessionEpoch: epoch, slot: integer(snapshot.context.slot) } };
+    if (!solanaOwnerExpiryProven(setup, sequence, epoch, epochOffset)) return { ...pending, evidence };
+    return { outcome: "expired", proof: { reason: "blockhash-expired", ...evidence } };
   }
   /** One provider's view of a submitted owner transaction. */
-  async function observeOwner(read: SolanaLiveRead, s: SolanaTradingStore, setup: SolanaPreparedSetup, signature: string, epochOffset = 0): Promise<OwnerView> {
+  async function observeOwner(read: SolanaLiveRead, owner: string, setup: SolanaPreparedSetup, signature: string, epochOffset = 0): Promise<OwnerView> {
     const statuses = await read("getSignatureStatuses", [[signature], { searchTransactionHistory: true }]);
     if (!object(statuses) || !Array.isArray(statuses.value) || statuses.value.length !== 1) fail("Invalid owner transaction confirmation.");
     const state = statuses.value[0];
     if (state !== null && !object(state)) fail("Invalid owner transaction confirmation.");
     const tx = await read("getTransaction", [signature, { commitment: "finalized", encoding: "base64", maxSupportedTransactionVersion: 0 }]);
-    if (!object(state) || state.confirmationStatus !== "finalized") return tx !== null ? { outcome: "pending", seen: true, canLand: false } : ownerExpiry(read, s, setup, state !== null, epochOffset);
+    if (!object(state) || state.confirmationStatus !== "finalized") return tx !== null ? { outcome: "pending", seen: true, canLand: false } : ownerExpiry(read, owner, setup, state !== null, epochOffset);
     if (tx === null) return { outcome: "pending", seen: true, canLand: false };
     if (!object(tx) || tx.version !== 0 || !object(tx.meta) || !Object.hasOwn(tx.meta, "err") || !Object.hasOwn(state, "err")
       || !isSolanaTransactionError(tx.meta.err) || !isSolanaTransactionError(state.err)
@@ -528,7 +535,7 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
     // A failed receipt is terminal too; neither path may mint a new signature.
     if ((tx.meta.err === null) !== (state.err === null)) fail("Owner transaction confirmations disagree.");
     const slot = integer(tx.slot);
-    if (tx.meta.err === null) await requireOwnerEffect(read, s, setup, slot);
+    if (tx.meta.err === null) await requireOwnerEffect(read, owner, setup, slot);
     return { outcome: tx.meta.err === null ? "finalized" : "failed", slot, err: JSON.stringify(tx.meta.err) };
   }
   /** What both providers must agree on. Each provider's own expiry height and slot may differ. */
@@ -559,7 +566,7 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
     // revocation of it that finalized moved the epoch this record's expiry proof starts from.
     const partner = await (setup.beside !== undefined ? s.setup() : s.revokeSetup()).catch(unknown);
     const epochOffset = solanaOwnerEpochOffset(setup, partner);
-    const quorum = await readSolanaQuorum(live, read => observeOwner(read, s, setup, signature, epochOffset), ownerViewKey).catch(unknown);
+    const quorum = await readSolanaQuorum(live, read => observeOwner(read, s.scope.owner, setup, signature, epochOffset), ownerViewKey).catch(unknown);
     if (quorum.agreed && quorum.value.outcome !== "pending") {
       const view = quorum.value;
       if (view.outcome === "expired") { await s.finishSetup(signature, "failed", view.proof.slot, view.proof).catch(unknown); return { signature, status: "failed" }; }
@@ -631,6 +638,16 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       return await Promise.race([estimate, new Promise<null>(resolve => { timer = setTimeout(resolve, ownerFeeReadMs, null); })]);
     } catch { return null; }
     finally { abandoned = true; clearTimeout(timer); }
+  }
+  /**
+   * The earliest slot an owner transaction's prior vault state may be read at: the
+   * latest the app has booked (the live book's slot, the last owner transaction's
+   * finalized or expiry slot, in either slot). Undefined when nothing is booked.
+   */
+  async function ownerReadFloor(s: SolanaTradingStore): Promise<number | undefined> {
+    const slots = [(await s.liveBook())?.slot, ...[await s.setup(), await s.revokeSetup()].flatMap(item => [item?.finalizedSlot, item?.expiryProof?.slot])]
+      .filter((slot): slot is number => Number.isSafeInteger(slot) && slot! > 0);
+    return slots.length ? Math.max(...slots) : undefined;
   }
   async function prepareOwner(s: SolanaTradingStore, instructions: Instruction[], details: Omit<SolanaPreparedSetup,
     "transactionBase64" | "messageBase64" | "blockhash" | "lastValidBlockHeight" | "preparedAtMs" | "expiresAtMs">, creates: readonly OwnerCreate[] = []) {
@@ -974,8 +991,10 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       try { sell = requireSolanaLiveSellLimits(limits); } catch { return fail("Save per-trade and daily SOL sell limits before registering live trading.", "permission"); }
       if (new Set([scope.owner, session, vault, feePayer]).size !== 4) fail("Owner, session, vault and fee payer must be separate accounts.");
       await verifyDeployment(cfg);
+      const floor = await ownerReadFloor(s);
       const prior = await rpc().read(async read => {
-        const slot = integer(await read("getSlot", [{ commitment: "confirmed" }]));
+        // Never earlier than anything already booked (ownerReadFloor), nor than this provider's own current slot.
+        const slot = Math.max(integer(await read("getSlot", [{ commitment: "confirmed" }])), floor ?? 1);
         const found = await read("getAccountInfo", [vault, { encoding: "base64", commitment: "confirmed", minContextSlot: slot }]);
         if (!object(found) || !object(found.context) || integer(found.context.slot) < slot || !Object.hasOwn(found, "value")) fail("The vault account could not be read.");
         if (found.value === null) return null;
@@ -1037,7 +1056,11 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       const s = await store(scope), cfg = config();
       if (input.action !== "revoke") await reconcile(s);
       await verifyDeployment(cfg);
-      const { vault, state } = await readSolanaVaultState(rpc(), cfg.programId, scope.owner), instructions: Instruction[] = [], creates: OwnerCreate[] = [];
+      // The prior state this transaction's expiry is proven against, read no earlier than
+      // anything the app already booked: a lagging provider's stale vault would make a
+      // dropped transaction unprovable (live-M2).
+      const floor = await ownerReadFloor(s);
+      const { vault, state } = await readSolanaVaultState(rpc(), cfg.programId, scope.owner, floor), instructions: Instruction[] = [], creates: OwnerCreate[] = [];
       const details: { syncedWsolRaw?: string; withdrawValuation?: SolanaWithdrawValuation } = {};
       if (input.action === "revoke") instructions.push(buildRevokeSolanaSessionsInstruction({ programAddress: cfg.programId, vault, owner: scope.owner }));
       else if (input.action === "resume-buys") instructions.push(buildSetSolanaBreakerInstruction({ programAddress: cfg.programId, vault, authority: scope.owner, paused: false }));
@@ -1098,6 +1121,17 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
         ...(input.action === "withdraw" ? { mint: input.mint, amountRaw: input.amountRaw, ...details } : input.action === "withdraw-sol" ? { amountRaw: input.amountRaw } : {}) }, creates);
     },
     submitOwnerAction: (scope: SolanaAccountScope, input: { signedTransactionBase64: string }) => submitOwner(scope, input, "owner"),
+    /**
+     * Operator tooling only (npm run solana:resolve -- owner): one provider's view of
+     * a saved, signed owner transaction, derived exactly as ownerStatus derives it
+     * (receipt, vault effect, expiry proof), plus the evidence a pending one carries
+     * once its blockhash expired. `owner` is the binding's owner key. It reads only
+     * through `read`, writes nothing and sends nothing.
+     */
+    observeOwnerTransaction(read: SolanaLiveRead, owner: string, setup: SolanaPreparedSetup, epochOffset = 0) {
+      if (!setup.signature || !setup.signedTransactionBase64) return fail("The owner transaction has not been submitted.");
+      return observeOwner(read, owner, setup, setup.signature, epochOffset);
+    },
     /**
      * Whether `wsolRaw` of held SOL is dust a zero-output mark may value at zero
      * (solanaMarkDust): worth under SOLANA_MARK_DUST_MAX_USDG_RAW at the

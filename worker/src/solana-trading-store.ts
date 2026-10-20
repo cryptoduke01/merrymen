@@ -37,8 +37,19 @@ export interface SolanaLiveBook {
 }
 /** The WSOL the session may trade: the recorded position, never quarantined WSOL. */
 export function solanaQuarantinedWsol(book: Pick<SolanaLiveBook, "quarantinedWsolRaw">): bigint { return BigInt(book.quarantinedWsolRaw ?? "0"); }
+/**
+ * Why a submitted owner transaction is recorded as never having run.
+ * - blockhash-expired: both providers' finalized banks are past its last valid
+ *   height and the vault still shows the state it must have changed.
+ * - operator-no-receipt: an operator's recorded decision (npm run solana:resolve
+ *   -- owner book), only through finishSetupResolution: two providers on their
+ *   own hostnames are past its last valid height and neither, nor any other
+ *   consulted, has seen its signature, while the vault state moved for another
+ *   reason. `resolution` is that decision's id.
+ */
 export interface SolanaOwnerExpiryProof {
-  reason: "blockhash-expired"; blockHeight: string; vaultSequence: string | null; sessionEpoch: string | null; slot: number;
+  reason: "blockhash-expired" | "operator-no-receipt"; blockHeight: string; vaultSequence: string | null; sessionEpoch: string | null; slot: number;
+  resolution?: string;
 }
 export interface SolanaPreparedSetup {
   transactionBase64: string; messageBase64: string; blockhash: string; lastValidBlockHeight: string;
@@ -837,7 +848,24 @@ export class SolanaTradingStore implements SolanaLiveJournal {
     });
   }
   async finishSetup(signature: string, status: "finalized" | "failed", finalizedSlot?: number, expiryProof?: SolanaOwnerExpiryProof): Promise<void> {
-    await this.db.tx(async tx => {
+    await this.finishSetupWith(signature, status, finalizedSlot, expiryProof, null);
+  }
+  /**
+   * finishSetup, for an operator's recorded decision (solana-resolve.ts owner book):
+   * the same checks and booking, and in the same transaction the decision
+   * `resolutionId` (a row of solana_operator_owner_resolutions, still open) is
+   * marked booked. A decision is therefore marked booked if and only if it
+   * finished the owner transaction. Returns false, marking nothing, when the
+   * transaction is already finished with the same outcome (by the app or another
+   * run). Only this path accepts an operator-no-receipt expiry proof.
+   */
+  async finishSetupResolution(signature: string, status: "finalized" | "failed", finalizedSlot: number, expiryProof: SolanaOwnerExpiryProof | undefined, resolutionId: string): Promise<boolean> {
+    if (!resolutionId) refuse("The operator resolution to finish this owner transaction is not open.");
+    return this.finishSetupWith(signature, status, finalizedSlot, expiryProof, resolutionId);
+  }
+  private async finishSetupWith(signature: string, status: "finalized" | "failed", finalizedSlot: number | undefined, expiryProof: SolanaOwnerExpiryProof | undefined,
+    resolutionId: string | null): Promise<boolean> {
+    return this.db.tx(async tx => {
       await this.bindingIn(tx, true);
       const main = rowJson<SolanaPreparedSetup>(await tx.prepare("SELECT setup_json FROM solana_runtime_setups WHERE tenant=? AND owner=?").get(this.scope.tenant, this.scope.owner), "setup_json");
       const revoke = await this.revokeIn(tx);
@@ -847,13 +875,17 @@ export class SolanaTradingStore implements SolanaLiveJournal {
       if (!setup || setup.signature !== signature) refuse("Owner confirmation does not match the saved transaction.");
       if (setup.status === "finalized" || setup.status === "failed") {
         if (setup.status !== status) refuse("Finalized owner transaction outcomes cannot be changed.");
+        // An operator's decision never changes a recorded outcome: same outcome, nothing to book.
+        if (resolutionId !== null) return false;
         if (JSON.stringify(setup.expiryProof ?? null) !== JSON.stringify(expiryProof ?? null)) refuse("Finalized owner expiry evidence cannot be changed.");
-        return;
+        return false;
       }
       if (expiryProof) {
-        if (status !== "failed" || expiryProof.reason !== "blockhash-expired" || raw(expiryProof.blockHeight) <= raw(setup.lastValidBlockHeight) ||
-            !Number.isSafeInteger(expiryProof.slot) || expiryProof.slot < 1 || finalizedSlot !== expiryProof.slot ||
-            !solanaOwnerExpiryProven(setup, expiryProof.vaultSequence, expiryProof.sessionEpoch, solanaOwnerEpochOffset(setup, partner))) refuse("Invalid owner transaction expiry evidence.");
+        // An operator's no-receipt decision replaces the vault-state proof, and only with its own record (marked below).
+        const operator = expiryProof.reason === "operator-no-receipt";
+        if (status !== "failed" || (operator ? resolutionId === null || expiryProof.resolution !== resolutionId : expiryProof.reason !== "blockhash-expired")
+            || raw(expiryProof.blockHeight) <= raw(setup.lastValidBlockHeight) || !Number.isSafeInteger(expiryProof.slot) || expiryProof.slot < 1 || finalizedSlot !== expiryProof.slot
+            || (!operator && !solanaOwnerExpiryProven(setup, expiryProof.vaultSequence, expiryProof.sessionEpoch, solanaOwnerEpochOffset(setup, partner)))) refuse("Invalid owner transaction expiry evidence.");
         setup.expiryProof = structuredClone(expiryProof);
       }
       if (status === "finalized" && setup.kind === "resume-buys") {
@@ -934,6 +966,13 @@ export class SolanaTradingStore implements SolanaLiveJournal {
       setup.status = status;
       if (status === "finalized" && Number.isSafeInteger(finalizedSlot) && finalizedSlot! > 0) setup.finalizedSlot = finalizedSlot;
       await tx.prepare(`UPDATE ${inRevokeSlot ? "solana_runtime_owner_revokes" : "solana_runtime_setups"} SET setup_json=? WHERE tenant=? AND owner=?`).run(JSON.stringify(setup), this.scope.tenant, this.scope.owner);
+      if (resolutionId !== null) {
+        // Who finished it is part of finishing it: no mark, nothing finished (the transaction rolls back).
+        const marked = await tx.prepare(`UPDATE solana_operator_owner_resolutions SET booked_at_ms=? WHERE id=? AND tenant=? AND owner=? AND signature=? AND outcome=?
+          AND booked_at_ms IS NULL AND refusal IS NULL`).run(clock(this.now), resolutionId, this.scope.tenant, this.scope.owner, signature, status);
+        if (marked.changes !== 1) refuse("The operator resolution to finish this owner transaction is not open.");
+      }
+      return true;
     });
   }
 }
