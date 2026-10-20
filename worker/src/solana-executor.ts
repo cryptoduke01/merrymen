@@ -156,9 +156,20 @@ function tokenBalance(raw: Account, mint: string, authority: string, program: st
       data[108] !== 1 || data.readUInt32LE(72) !== 0 || data.readBigUInt64LE(121) !== 0n || data.readUInt32LE(129) !== 0) return fail();
   return data.readBigUInt64LE(64);
 }
-/** Tokens already in a swap's temporary input ATA. A System-owned prefunded address holds lamports only. */
-function pendingDonation(raw: Account, mint: string, authority: string, program: string): bigint {
-  if (raw.owner === "11111111111111111111111111111111" && !raw.executable && raw.data.length === 0) return 0n;
+/**
+ * Tokens already in a swap's temporary input ATA. A System-owned prefunded
+ * address holds lamports only, but for WSOL they become tokens: the swap's
+ * init_if_needed opens the native account over them, and InitializeAccount3
+ * sets its amount to the lamports above its rent-exempt reserve
+ * (`nativeReserve`), which the vault must then refund to the owner. Anyone can
+ * send those lamports, so a sell must see them as the donation they become.
+ */
+function pendingDonation(raw: Account, mint: string, authority: string, program: string, nativeReserve: bigint | null): bigint {
+  if (raw.owner === "11111111111111111111111111111111" && !raw.executable && raw.data.length === 0) {
+    if (mint !== SOLANA_WRAPPED_SOL_MINT || raw.lamports === 0n) return 0n;
+    if (nativeReserve === null) return fail();
+    return raw.lamports > nativeReserve ? raw.lamports - nativeReserve : 0n;
+  }
   return tokenBalance(raw, mint, authority, program);
 }
 /**
@@ -197,10 +208,13 @@ function ownerRefundProblem(raw: unknown, mint: string, owner: string, program: 
  * authority, frozen, another owner or mint) every swap from that mint at this
  * sequence is refused: owner-refund. A temporary account that is neither empty
  * nor this mint's token account of the swap authority is invalid-state.
+ * `nativeReserve` is the rent-exempt reserve of a 165-byte token account: for
+ * WSOL, lamports above it at a System-owned temporary address are a donation
+ * too (pendingDonation). Required when `mint` is WSOL and such lamports wait.
  */
-export function solanaPendingRefund(temp: unknown, ownerToken: unknown, mint: string, swapAuthority: string, owner: string, program: string):
-  { donation: bigint; ownerAccountUsable: boolean; ownerAccountProblem: SolanaOwnerRefundProblem | null } {
-  const donation = temp === null ? 0n : pendingDonation(account(temp), mint, swapAuthority, program);
+export function solanaPendingRefund(temp: unknown, ownerToken: unknown, mint: string, swapAuthority: string, owner: string, program: string,
+  nativeReserve: bigint | null = null): { donation: bigint; ownerAccountUsable: boolean; ownerAccountProblem: SolanaOwnerRefundProblem | null } {
+  const donation = temp === null ? 0n : pendingDonation(account(temp), mint, swapAuthority, program, nativeReserve);
   const ownerAccountProblem = ownerRefundProblem(ownerToken, mint, owner, program);
   return { donation, ownerAccountUsable: ownerAccountProblem === null, ownerAccountProblem };
 }
@@ -220,8 +234,12 @@ export async function readSolanaOwnerRefundBlocks(rpc: SolanaLiveRpc, programId:
     const result = context(await read("getMultipleAccounts", [keys, { encoding: "base64", commitment: "confirmed", minContextSlot }]), minContextSlot);
     if (!Array.isArray(result.value) || result.value.length !== keys.length) return fail();
     const accounts = result.value as unknown[];
+    // Lamports at the WSOL temporary address become a donation once the swap opens it there.
+    const wsolTemp = accounts[2] === null ? null : account(accounts[2]);
+    const nativeReserve = wsolTemp && wsolTemp.owner === "11111111111111111111111111111111" && wsolTemp.data.length === 0 && wsolTemp.lamports > 0n
+      ? BigInt(integer(await read("getMinimumBalanceForRentExemption", [165, { commitment: "confirmed" }]))) : null;
     return mints.flatMap(([mint, program], index) => {
-      const refund = solanaPendingRefund(accounts[2 * index], accounts[2 * index + 1], mint, swapAuthority, owner, program);
+      const refund = solanaPendingRefund(accounts[2 * index], accounts[2 * index + 1], mint, swapAuthority, owner, program, nativeReserve);
       return refund.donation > 0n && refund.ownerAccountProblem !== null ? [{ mint, problem: refund.ownerAccountProblem }] : [];
     });
   });
@@ -740,10 +758,11 @@ export function createSolanaExecutor(options: SolanaExecutorOptions) {
         const waiting = context(await rpc("getMultipleAccounts", [[tempInput, ownerRefund],
           { encoding: "base64", commitment: "confirmed", minContextSlot: slot }]), slot);
         if (!Array.isArray(waiting.value) || waiting.value.length !== 2) return fail();
-        const refund = solanaPendingRefund(waiting.value[0], waiting.value[1], intent.inputMint, swapAuthority, intent.owner, inputProgram);
+        // The temporary account has the vault input account's size, so this is its rent and, for WSOL, its native reserve.
+        const rent = BigInt(integer(await rpc("getMinimumBalanceForRentExemption", [input.data.length, { commitment: "confirmed" }])));
+        const refund = solanaPendingRefund(waiting.value[0], waiting.value[1], intent.inputMint, swapAuthority, intent.owner, inputProgram, rent);
         if (refund.donation > 0n && !refund.ownerAccountUsable) return fail("owner-refund");
         const refundAccount: string | null = refund.donation > 0n ? ownerRefund : null;
-        const rent = BigInt(integer(await rpc("getMinimumBalanceForRentExemption", [input.data.length, { commitment: "confirmed" }])));
         return { slot: result.slot, state, inputBalance, outputBalance, payerBalance: payer.lamports, rent, swapAuthority, tempInput, refundAccount };
       });
       checkAbort();

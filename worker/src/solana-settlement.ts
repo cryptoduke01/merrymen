@@ -163,6 +163,12 @@ export function settleSolanaReceipt(submission: SolanaSignedSubmission, raw: unk
       if (!object(row) || row.owner !== keys[swapIndex] || row.mint !== submission.intent.inputMint || row.programId !== submission.inputTokenProgram || !object(row.uiTokenAmount)) return fail();
       const donatedTokens = parseSolanaRawAmount(row.uiTokenAmount.amount, true);
       if (submission.intent.inputMint === SOLANA_WRAPPED_SOL_MINT) refund -= donatedTokens;
+    } else if (submission.intent.inputMint === SOLANA_WRAPPED_SOL_MINT) {
+      // Lamports sent to the System-owned address before the swap opened its native
+      // account there: everything above the rent-exempt reserve became WSOL the vault
+      // refunded to the owner; only the reserve came back to the fee payer on close.
+      const reserve = BigInt(submission.rentLamports);
+      if (refund > reserve) refund = reserve;
     }
     if (refund < 0n) return fail();
   }

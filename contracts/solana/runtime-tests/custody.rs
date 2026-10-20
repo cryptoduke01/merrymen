@@ -969,6 +969,70 @@ async fn wsol_donation_moves_native_backing_to_owner_and_only_remaining_lamports
 }
 #[tokio::test]
 #[ignore = "requires the compiled custody SBF artifact; run contracts/solana/test.sh"]
+async fn lamports_prefunding_a_sells_wsol_temp_become_a_donation_refunded_to_the_owner() {
+    // Anyone can send lamports to a future sell's temporary WSOL address while it is still
+    // System-owned. init_if_needed opens the native account over them, and InitializeAccount3
+    // makes everything above the rent reserve its token amount: a donation like any other.
+    let mut f = Fixture::new().await;
+    let buy = f.swap_ix(0, 1, 0).await;
+    f.swap(buy).await.unwrap();
+    let session = f.session_ix(100, 500);
+    f.owner_send(vec![session]).await.unwrap();
+    let reserve = Rent::default().minimum_balance(165);
+    let donated = 1234;
+    let sell = f.swap_ix(1, 2, 3).await;
+    let temp = sell.accounts[8].pubkey;
+    f.owner_send(vec![solana_sdk::system_instruction::transfer(
+        &f.owner.pubkey(),
+        &temp,
+        reserve + donated,
+    )])
+    .await
+    .unwrap();
+    let before = f.ctx.banks_client.get_account(temp).await.unwrap().unwrap();
+    assert_eq!(before.owner, anchor_lang::system_program::ID);
+    assert!(before.data.is_empty());
+    // Without the owner's refund account (what an executor that saw only lamports would
+    // pass) the sell fails closed, and nothing moves.
+    assert_eq!(sell.accounts[14].pubkey, vault::ID);
+    assert!(vault_error(
+        f.swap(sell.clone()).await,
+        vault::VaultError::RefundAccount
+    ));
+    assert_eq!(f.balance(f.output).await, 200);
+    assert_eq!(f.state().await.seq, 1);
+    // With it the sell lands: the donation reaches the owner's WSOL account, and the fee
+    // payer gets back only the reserve when the temporary account closes.
+    let sell = f.with_refund(sell);
+    let refund = sell.accounts[14].pubkey;
+    let refund_before = f.ctx.banks_client.get_balance(refund).await.unwrap();
+    let payer_before = f
+        .ctx
+        .banks_client
+        .get_balance(f.ctx.payer.pubkey())
+        .await
+        .unwrap();
+    f.swap(sell).await.unwrap();
+    assert!(!f.exists(temp).await);
+    assert_eq!(f.balance(refund).await, donated);
+    assert_eq!(
+        f.ctx.banks_client.get_balance(refund).await.unwrap(),
+        refund_before + donated
+    );
+    let payer_after = f
+        .ctx
+        .banks_client
+        .get_balance(f.ctx.payer.pubkey())
+        .await
+        .unwrap();
+    // worker/src/solana-settlement.ts books exactly this: the reserve, not the pre-balance.
+    assert_eq!(payer_after, payer_before - f.last_fee + reserve);
+    assert_eq!(f.balance(f.output).await, 100);
+    assert_eq!(f.balance(f.input).await, 1000);
+    assert_eq!(f.state().await.seq, 2);
+}
+#[tokio::test]
+#[ignore = "requires the compiled custody SBF artifact; run contracts/solana/test.sh"]
 async fn sell_checks_actual_cash_proceeds_and_breaker_only_owner_can_reset() {
     let mut f = Fixture::new().await;
     let buy = f.swap_ix(0, 1, 0).await;

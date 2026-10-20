@@ -209,7 +209,14 @@ swap fails closed with program error 6010 (`RefundAccount`), the executor report
 `owner-refund`, and status tells the owner what to do (reopen the account or
 withdraw a little of that token; revoke a delegate or close authority in the
 wallet; a frozen account cannot be fixed from Merrymen). The fee payer never
-creates owner accounts.
+creates owner accounts. Plain lamports sent to a sell's temporary WSOL address
+while it is still a System account are a donation too: the swap opens the
+native account over them and everything above its rent-exempt reserve becomes
+WSOL. The executor and status count that excess as a waiting donation (pass the
+owner's WSOL account, or refuse the exit as `owner-refund` with the status
+blocker), and settlement books only the reserve as returned to the fee payer
+(`custody.rs`
+`lamports_prefunding_a_sells_wsol_temp_become_a_donation_refunded_to_the_owner`).
 
 Jupiter's program is pinned. The accepted instruction is ExactIn
 `shared_accounts_route`, with bound input, output and slippage, zero platform fee

@@ -7,7 +7,8 @@ import { CHAINS, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM } from "../../packages/cor
 import { deriveSolanaVaultAddress, deriveSolanaSwapAuthority, deriveSolanaAta, SOLANA_VAULT_LOCAL_TEST_PROGRAM,
   SOLANA_VAULT_ACCOUNT_SIZE, SOLANA_VAULT_DISCRIMINATOR, SOLANA_SWAP_EVENT_DISCRIMINATOR,
   SOLANA_CLASSIC_TOKEN_PROGRAM, SOLANA_WRAPPED_SOL_MINT } from "../../packages/core/src/solana-live";
-import { createSolanaExecutor, observationKey, observeSolanaSubmission, reconcileSolanaSubmission, SOLANA_PROVIDER_SLOT_SKEW, solanaAgreedSettlement, solanaDebitWindowStart, SolanaExecutionError,
+import { createSolanaExecutor, observationKey, observeSolanaSubmission, readSolanaOwnerRefundBlocks, reconcileSolanaSubmission, SOLANA_PROVIDER_SLOT_SKEW, solanaAgreedSettlement,
+  solanaDebitWindowStart, SolanaExecutionError, solanaPendingRefund,
   solanaQuorumSlot, verifySolanaVaultDeployment, type SolanaLiveRecord, type SolanaSignedSubmission, type SolanaExecutorOptions } from "./solana-executor";
 import { settleSolanaReceipt, solanaVaultEvents } from "./solana-settlement";
 import { JUPITER_SWAP_PROGRAM, SolanaLiveMarketError, type JupiterCpiRoute } from "./solana-live-market";
@@ -460,6 +461,72 @@ test("a donation with the owner's ATA closed, delegated or foreign fails closed 
     assert.ok(!f.calls.includes("persist"), mode); assert.ok(!f.calls.includes("send"), mode);
     assert.ok(!f.calls.includes("simulateTransaction"), mode);
   }
+});
+
+test("lamports sent to a sell's System-owned WSOL temporary address are the donation they become: the owner's WSOL account is passed, or the exit is refused as owner-refund and status names it", async () => {
+  const RESERVE = 2_039_280n, swap = await deriveSolanaSwapAuthority(PROGRAM, key(70), 0n), owner = key(20);
+  const ownerWsol = (problem: "ok" | "missing" | "delegated") => {
+    if (problem === "missing") return null;
+    const bytes = token(SOLANA_WRAPPED_SOL_MINT, owner, 0n);
+    if (problem === "delegated") { bytes.writeUInt32LE(1, 72); keyBytes(key(91)).copy(bytes, 76); }
+    return rpcAccount(bytes, SOLANA_CLASSIC_TOKEN_PROGRAM);
+  };
+  const prefunded = (lamports: bigint) => rpcAccount(Buffer.alloc(0), SYSTEM, false, Number(lamports));
+  // rent + 1,234 lamports: the swap's init_if_needed opens a native account holding 1,234 WSOL there.
+  const open = solanaPendingRefund(prefunded(RESERVE + 1234n), ownerWsol("ok"), SOLANA_WRAPPED_SOL_MINT, swap, owner, SOLANA_CLASSIC_TOKEN_PROGRAM, RESERVE);
+  assert.deepEqual(open, { donation: 1234n, ownerAccountUsable: true, ownerAccountProblem: null });
+  const closed = solanaPendingRefund(prefunded(RESERVE + 1234n), ownerWsol("missing"), SOLANA_WRAPPED_SOL_MINT, swap, owner, SOLANA_CLASSIC_TOKEN_PROGRAM, RESERVE);
+  assert.deepEqual(closed, { donation: 1234n, ownerAccountUsable: false, ownerAccountProblem: "missing" });
+  // Up to the reserve the lamports only pay rent; USDG is never native, so its temporary address holds lamports only.
+  assert.equal(solanaPendingRefund(prefunded(RESERVE), ownerWsol("ok"), SOLANA_WRAPPED_SOL_MINT, swap, owner, SOLANA_CLASSIC_TOKEN_PROGRAM, RESERVE).donation, 0n);
+  assert.equal(solanaPendingRefund(prefunded(RESERVE + 1234n), null, SOLANA_USDG_MINT, swap, owner, TOKEN_2022_PROGRAM, RESERVE).donation, 0n);
+  // A WSOL reading without the reserve cannot decide, so it refuses rather than call it nothing.
+  assert.throws(() => solanaPendingRefund(prefunded(RESERVE + 1234n), ownerWsol("ok"), SOLANA_WRAPPED_SOL_MINT, swap, owner, SOLANA_CLASSIC_TOKEN_PROGRAM));
+
+  // Status: the same reading, with the owner's WSOL account closed or delegated, is an owner-refund blocker for exits.
+  const vault = key(70);
+  for (const [problem, blocks] of [["ok", []], ["missing", [{ mint: SOLANA_WRAPPED_SOL_MINT, problem: "missing" }]],
+    ["delegated", [{ mint: SOLANA_WRAPPED_SOL_MINT, problem: "delegated" }]]] as const) {
+    const wsolTemp = await deriveSolanaAta(swap, SOLANA_WRAPPED_SOL_MINT, SOLANA_CLASSIC_TOKEN_PROGRAM);
+    const ownerAta = await deriveSolanaAta(owner, SOLANA_WRAPPED_SOL_MINT, SOLANA_CLASSIC_TOKEN_PROGRAM);
+    const reads: string[] = [];
+    const rpc: SolanaLiveRpc = { read: operation => operation(async (method, params = []) => {
+      reads.push(method);
+      if (method === "getMinimumBalanceForRentExemption") { assert.equal(params[0], 165); return Number(RESERVE); }
+      assert.equal(method, "getMultipleAccounts");
+      return { context: { slot: SLOT }, value: (params[0] as string[]).map(k => k === wsolTemp ? prefunded(RESERVE + 1234n) : k === ownerAta ? ownerWsol(problem) : null) };
+    }), readEach: async () => { throw new Error("unused"); }, send: async () => { throw new Error("unused"); } };
+    assert.deepEqual(await readSolanaOwnerRefundBlocks(rpc, PROGRAM, vault, owner, 0n, SLOT), blocks, problem);
+    assert.ok(reads.includes("getMinimumBalanceForRentExemption"), problem);
+  }
+});
+
+test("a sell that refunded a System-prefunded WSOL temporary address's donation to the owner settles: only the reserve came back to the fee payer", async () => {
+  const f = await fixture(); const pending = await createSolanaExecutor(f.options).execute(f.intent);
+  const RESERVE = 2_039_280, DONATED = 1234;
+  // The buy fixture's bytes, read as the sell they would be: WSOL in from the vault's WSOL account, USDG out.
+  const sell: SolanaSignedSubmission = { ...pending.submission, intent: { ...pending.submission.intent, inputMint: SOLANA_WRAPPED_SOL_MINT, outputMint: SOLANA_USDG_MINT },
+    inputTokenAccount: f.output, outputTokenAccount: f.input, inputTokenProgram: SOLANA_CLASSIC_TOKEN_PROGRAM, outputTokenProgram: TOKEN_2022_PROGRAM,
+    minOutAmount: "1", rentLamports: String(RESERVE) };
+  const raw = f.receipt(pending.submission) as Omit<ReturnType<typeof f.receipt>, "meta"> & { meta: Omit<ReturnType<typeof f.receipt>["meta"], "preBalances" | "postBalances"> & { preBalances: number[]; postBalances: number[] } };
+  const tx = getTransactionDecoder().decode(Buffer.from(sell.signedTransactionBase64, "base64"));
+  const message = getCompiledTransactionMessageDecoder().decode(tx.messageBytes);
+  const keys = [...message.staticAccounts, ...sell.loadedAddresses.writable, ...sell.loadedAddresses.readonly];
+  const tempIndex = keys.indexOf(f.temp);
+  raw.meta.preBalances[tempIndex] = RESERVE + DONATED; raw.meta.postBalances[tempIndex] = 0;
+  // The fee payer paid the fee and got the reserve back when the vault closed the temporary account.
+  raw.meta.postBalances[0] = raw.meta.preBalances[0]! - 10_000 + RESERVE;
+  const row = (account: string, mint: string, programId: string, amount: bigint) => ({ accountIndex: keys.indexOf(account), mint, owner: f.intent.vault, programId,
+    uiTokenAmount: { amount: amount.toString(), decimals: mint === SOLANA_USDG_MINT ? 6 : 9 } });
+  raw.meta.preTokenBalances = [row(f.output, SOLANA_WRAPPED_SOL_MINT, SOLANA_CLASSIC_TOKEN_PROGRAM, 2_000_000n), row(f.input, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM, CASH)];
+  raw.meta.postTokenBalances = [row(f.output, SOLANA_WRAPPED_SOL_MINT, SOLANA_CLASSIC_TOKEN_PROGRAM, 1_000_000n), row(f.input, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM, CASH + 500_000n)];
+  raw.meta.logMessages = [`Program ${PROGRAM} invoke [1]`, `Program data: ${event(sell, 1_000_000n, 500_000n)}`, `Program ${PROGRAM} success`];
+  const status = { confirmationStatus: "finalized", slot: SLOT + 1, err: null };
+  const settled = settleSolanaReceipt(sell, raw, status, NOW + 1);
+  assert.equal(settled.status, "finalized"); assert.equal(settled.amountIn, "1000000"); assert.equal(settled.amountOut, "500000"); assert.equal(settled.feeLamports, "10000");
+  // Booking the whole pre-balance as refunded to the fee payer would not balance.
+  raw.meta.postBalances[0] = raw.meta.preBalances[0]! - 10_000 + RESERVE + DONATED;
+  assert.throws(() => settleSolanaReceipt(sell, raw, status, NOW + 1));
 });
 
 test("the exact message to be signed is simulated on every provider: one provider's passing simulation cannot vouch for a route alone", async () => {
