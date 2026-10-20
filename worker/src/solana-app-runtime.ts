@@ -806,11 +806,13 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
      * lot is quoted back to USDG first, and only the market's zero-output answer
      * qualifies it (createSolanaPaperService.writeOff). The trading store then
      * applies it under the tenant book lock. Answers the book after it and the
-     * write-off record.
+     * write-off record. An owner not in paper mode is refused before the paid
+     * quote; the store checks the mode again under the lock.
      */
     async writeOffPaper(scope: SolanaAccountScope, input: { mint: string }) {
       if (!object(input) || typeof input.mint !== "string" || canonicalId(CHAINS.solana, "token", input.mint) !== input.mint) fail("Invalid Solana token mint.");
       const s = await store(scope);
+      if ((await s.binding()).requestedMode !== "paper") fail("Paper trading is not the selected Solana mode.", "permission");
       const { writtenOff, ...paper } = await paperService(s).writeOff(scope.owner, input.mint);
       return { paper, writtenOff };
     },

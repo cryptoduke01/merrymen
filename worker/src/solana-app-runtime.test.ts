@@ -182,6 +182,31 @@ test("a hosted owner writes off a paper dust lot through the runtime: the answer
   } finally { f.raw.close(); }
 });
 
+test("an owner in live mode is refused a paper write-off before any quote is asked for", async () => {
+  const f = await fixture();
+  try {
+    await f.app.setupPaper(f.scope, { initialCashRaw: "100000000", limits });
+    await f.app.trade(f.scope, { mode: "paper", intent: f.trade });
+    await f.live();
+    // Even a lot that qualifies as dust: the store would refuse it too, but only after the paid quote.
+    let quotes = 0;
+    const counted: SolanaPaperMarket = { readMint: f.market.readMint, quote: async intent => {
+      quotes++;
+      if (intent.outputMint !== SOLANA_USDG_MINT) return f.market.quote(intent);
+      throw new SolanaMarketError("zero-output", { source: "jupiter", inputMint: intent.inputMint, outputMint: intent.outputMint, inAmount: intent.amountRaw,
+        outAmount: "0", minOutAmount: "0", slippageBps: intent.slippageBps, contextSlot: 1000, quotedAtMs: f.clock.now });
+    } };
+    const app = f.runtime({ market: counted });
+    const refused = await app.writeOffPaper(f.scope, { mint: SOLANA_WRAPPED_SOL_MINT }).then(() => assert.fail("must refuse"), (error: unknown) => error);
+    assert.match(String(refused), /Paper trading is not the selected Solana mode/);
+    assert.equal(quotes, 0, "no paid quote for a refused write-off");
+    // Answered as the store's own refusal would be: 409 with the same text.
+    assert.ok(refused instanceof SolanaAppRuntimeError && refused.code === "permission");
+    assert.equal((await new SolanaTradingStore(f.db, f.scope).paper().get(f.owner))!.positions.length, 1, "the old paper book is untouched");
+    assert.equal(f.controls.sends, 0);
+  } finally { f.raw.close(); }
+});
+
 test("live configuration failure never falls back to a paper fill", async () => {
   const f = await fixture();
   try {

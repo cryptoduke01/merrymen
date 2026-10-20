@@ -257,6 +257,13 @@ test("paper write-off refusals are 409s in fixed owner words; other book rules k
     assert.equal(response.status, 400, code);
     assert.equal((await response.json()).error, new SolanaPaperStoreError(code).message, code);
   }
+  // An owner not in paper mode: the runtime's early refusal (before the paid quote) and the store's own
+  // refusal under the lock answer alike, 409 with the same text.
+  const mode = "Paper trading is not the selected Solana mode.";
+  for (const error of [new SolanaAppRuntimeError("permission", mode), new SolanaTradingStoreError(mode)]) {
+    const response = await solanaResponse(async () => { throw error; });
+    assert.equal(response.status, 409, error.name); assert.deepEqual(await response.json(), { error: mode, ownerFacing: true }, error.name);
+  }
   // A ledger without a write-off is this deployment's shape: unavailable, never an outage or a refusal.
   const missing = await solanaResponse(async () => { throw new SolanaPaperServiceError("This Solana paper ledger has no owner write-off."); });
   assert.equal(missing.status, 503); assert.equal((await missing.json()).error, "Solana trading is not available.");
