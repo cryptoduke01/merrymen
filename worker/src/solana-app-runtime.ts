@@ -15,6 +15,7 @@ import {
   SOLANA_ASSOCIATED_TOKEN_PROGRAM, SOLANA_CLASSIC_TOKEN_PROGRAM, SOLANA_SYSTEM_PROGRAM, SOLANA_VAULT_ACCOUNT_SIZE, SOLANA_VAULT_LOCAL_TEST_PROGRAM,
   SOLANA_WRAPPED_SOL_MINT,
 } from "../../packages/core/src/solana-live";
+import { solanaVaultReleaseRefusal } from "../../packages/core/src/solana-live";
 import type { Db } from "./db";
 import { createSolanaExecutor, parseSolanaLiveIntent, readSolanaOwnerRefundBlocks, type SolanaOwnerRefundBlock, readSolanaVaultBalances, readSolanaVaultState, reconcileSolanaSubmission,
   SOLANA_DEFAULT_MAX_COMPUTE_UNIT_PRICE, solanaComputeBudgetInstructions, SolanaExecutionError, verifySolanaVaultDeployment, type SolanaLiveJournal, type SolanaLiveRecord } from "./solana-executor";
@@ -250,6 +251,8 @@ export interface SolanaAppRuntimeOptions {
    * getSolanaAppRuntime() always runs the full checks.
    */
   localTestDeployment?: boolean;
+  /** Test harnesses only: the released vault programs config() holds a live deployment to. Default SOLANA_VAULT_RELEASES. */
+  vaultReleases?: readonly { readonly programId: string; readonly sha256: string }[];
   /** How long an owner transaction waits for its best-effort priority-fee reads. Default SOLANA_OWNER_FEE_READ_MS. */
   ownerFeeReadMs?: number;
 }
@@ -265,12 +268,21 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
     const result = new SolanaTradingStore(db, scope, now, autonomousRevision === undefined ? undefined : { autonomousRevision, signal },
       () => solanaPythGeneration(env)); await result.binding(); return result;
   }
-  function config() {
+  /** The configured deployment, every check but the release pin's (config() adds it). Only status() uses it alone. */
+  function configured() {
     const programId = env.MERRYMEN_SOLANA_VAULT_PROGRAM, hash = env.MERRYMEN_SOLANA_VAULT_SHA256;
     if (!programId || !hash || !/^[a-f0-9]{64}$/.test(hash)) fail("An audited immutable Solana vault deployment and its binary hash must be configured.", "configuration");
     try { address(programId); } catch { fail("The configured Solana vault program is invalid.", "configuration"); }
     // The local test build's id is never a live deployment.
     if (programId === SOLANA_VAULT_LOCAL_TEST_PROGRAM && !localTest) fail("The configured Solana vault program is the local test id, which is never used for live trading.", "configuration");
+    return { programId, hash };
+  }
+  function config() {
+    const { programId, hash } = configured();
+    // Once a release is pinned (SOLANA_VAULT_RELEASES), only a listed program with its released
+    // binary hash, the one the owner recovery tool trusts, is a live deployment. Before any RPC.
+    const unreleased = localTest ? null : solanaVaultReleaseRefusal(programId, hash, options.vaultReleases);
+    if (unreleased) fail(unreleased, "configuration");
     return { programId, hash };
   }
   /**
@@ -741,7 +753,10 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       let ownerWallet: { lamports: string; revokeLamports: string; withdrawLamports: string } | null = null;
       let recoverable: { nativeLamports: string; unsyncedWsolLamports: string } | null = null;
       try {
-        const cfg = config(); programId = cfg.programId; vault = await deriveSolanaVaultAddress(programId, scope.owner);
+        // A program the release pin refuses is still shown with the owner's vault on it (the recovery
+        // card's read-only plan needs its id); config() then refuses it as configuration, before any RPC.
+        programId = configured().programId; vault = await deriveSolanaVaultAddress(programId, scope.owner);
+        const cfg = config();
         // Misconfigured swap prices refuse trading and exits (a full blocker), but the
         // vault, fee payer, owner wallet and recoverable SOL are still read and shown.
         try { computeUnitPrices(); } catch (error) { blockers.push(statusBlocker(error)); }

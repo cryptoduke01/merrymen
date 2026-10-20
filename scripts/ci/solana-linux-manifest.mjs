@@ -23,7 +23,8 @@
 // outcome and the release decision into <record.json> (the build record
 // solana-program-record.mjs wrote), adds both to the step summary, and prints
 // the artifact's release label on stdout for the upload's name. Only a run on
-// main whose build matches the committed manifest is candidate-unconfirmed
+// main whose build matches the committed manifest, and whose record says it
+// does not declare the local test program id, is candidate-unconfirmed
 // (solana-program-record.mjs releaseStatus); every other artifact, one whose
 // manifest differs, was deleted or was never committed included, is uploaded
 // as not-a-release. So bytes that fail the comparison still reach the owner,
@@ -44,12 +45,23 @@
 // manifest for the owner to review and commit. Committing it is what turns
 // the comparison on, and what lets a run on main be a release candidate.
 //
+// A manifest's own commit names the run and runner image it came from. The
+// manifest is image-free (differences() compares every field, and an image
+// update alone must not change it), and the run's artifact and summary
+// expire, so for an outcome where the owner may commit the uploaded manifest
+// (uncommitted, differs) report gives a Vault-Linux-Manifest line
+// (manifestTrailer) in the log, the step summary and the record, to end that
+// commit's message with. A later mismatch is then compared with the image
+// that built the committed manifest (RUNNER_IMAGE_NOTE).
+//
 // One case never gets this far: a committed manifest with the same source
 // digest as this build but another artifact. build.sh, run by test.sh in the
 // Test step, refuses it ("same source, different artifact"), so the job fails
 // before report and the upload, and hands over no new manifest. The reviewed
 // source did not change, so the toolchain or the build environment did; the
-// owner investigates that rather than committing a new manifest.
+// owner investigates that rather than committing a new manifest. The job's
+// first step (solana-program-record.mjs --runner-image) has already named the
+// runner image in the log and step summary, since no build record exists.
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
@@ -184,6 +196,21 @@ export function committedManifests(dir) {
   return { committed: at(head), parent: at(first) };
 }
 
+/** The git trailer token naming the run and runner image that built a committed Linux manifest. */
+export const MANIFEST_TRAILER = "Vault-Linux-Manifest";
+/**
+ * The line that ends the message of the commit adding `manifest`: the run
+ * (`run`, solana-program-record.mjs provenance) and runner image (`image`,
+ * the build record's runnerImage) that built it, and its artifact. Unknown
+ * parts say unknown.
+ */
+export function manifestTrailer({ manifest, run = null, image = null }) {
+  const v = value => (typeof value === "string" && value ? value : "unknown");
+  return `${MANIFEST_TRAILER}: run ${v(run?.runId)}.${v(run?.runAttempt)} of ${v(run?.repository)} `
+    + `(${v(run?.event)} on ${v(run?.ref)} at ${v(run?.commit)}), runner image ${v(image?.os)} ${v(image?.version)}, `
+    + `artifact ${manifest.artifact.sha256} (${manifest.artifact.bytes} bytes), source digest ${manifest.source.digest}`;
+}
+
 const USAGE = "usage: solana-linux-manifest.mjs verify <contracts/solana dir> <tested sha256> | "
   + "report <contracts/solana dir> <record.json> | compare <contracts/solana dir>";
 
@@ -194,7 +221,8 @@ export function outcomeLine({ status, manifest, problem = null }) {
   if (status === "uncommitted") {
     return `No ${LINUX_MANIFEST} is committed, so nothing was compared. This run recorded ${built}; `
       + "the manifest is in the uploaded vault artifact. Review it and commit it from a run whose app check passed: "
-      + "from then on CI fails whenever the pinned Linux build differs from it, and a run on main that matches it and passes app is a release.";
+      + "from then on CI fails whenever the pinned Linux build differs from it, and a run on main that matches it and passes app is a release, "
+      + "unless its program declares the local test program id: that build's manifest is a reproducibility baseline only.";
   }
   return `${problem} This run recorded ${built}.`;
 }
@@ -214,18 +242,32 @@ function report(dir, recorded, recordPath) {
   if (record?.sha256 !== result.manifest.artifact.sha256) {
     throw new Error(`the build record ${recordPath} is for artifact ${JSON.stringify(record?.sha256)}, the Linux manifest for ${result.manifest.artifact.sha256}`);
   }
-  const release = releaseStatus(provenance(process.env), result.status);
-  record.linuxManifest = { file: LINUX_MANIFEST, status: result.status, problem: result.problem };
+  // The record names the program and the local test id: a build of that id is never a candidate.
+  const run = provenance(process.env);
+  const release = releaseStatus(run, result.status, record);
+  // Only where the owner may commit the uploaded manifest: none committed, or this one differs.
+  const trailer = result.status === "uncommitted" || result.status === "differs"
+    ? manifestTrailer({ manifest: result.manifest, run, image: record.runnerImage })
+    : null;
+  record.linuxManifest = { file: LINUX_MANIFEST, status: result.status, problem: result.problem, commitTrailer: trailer };
   record.release = release;
   writeFileSync(recordPath, `${JSON.stringify(record, null, 2)}\n`);
   const line = outcomeLine(result);
-  const named = `The artifact is uploaded as ${release.label} (${release.reason}).`;
+  const named = `The artifact is uploaded as ${release.label} (${release.reason}).`
+    + (result.status === "differs" && record.runnerImage
+      ? ` This run's runner image: ${record.runnerImage.os ?? "unknown"} ${record.runnerImage.version ?? "unknown"} (not digest-pinned); `
+        + "if the program source and toolchain pins did not change, the image may have: investigate before committing anything."
+      : "");
   // stdout is the label alone; Actions reads workflow commands on stderr too.
   if (result.status === "matches") console.error(`${line} ${named}`);
   else if (result.status === "uncommitted") console.error(`::notice title=Linux build manifest::${line} ${named}`);
   else console.error(`::warning title=Linux build manifest::${line} ${named} The job's last step fails on this.`);
+  const commitWith = "If this manifest is committed (after review, never just to make the comparison pass), end that commit's message with this line, "
+    + "so a later mismatch can be compared with the run and runner image that built it:";
+  if (trailer !== null) console.error(`${commitWith} ${trailer}`);
   if (process.env.GITHUB_STEP_SUMMARY) {
-    appendFileSync(process.env.GITHUB_STEP_SUMMARY, ["### Linux build manifest", "", line, "", releaseLine(release), ""].join("\n"));
+    appendFileSync(process.env.GITHUB_STEP_SUMMARY, ["### Linux build manifest", "", line, "", releaseLine(release), "",
+      ...(trailer !== null ? [commitWith, "", `    ${trailer}`, ""] : [])].join("\n"));
   }
   process.stdout.write(`${release.label}\n`);
 }

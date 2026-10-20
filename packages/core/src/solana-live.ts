@@ -18,9 +18,32 @@ export const SOLANA_VAULT_LOCAL_TEST_PROGRAM =
  * (merrymen solana-recover) signs by default only for a program listed here,
  * after checking that its immutable binary matches. Empty until a release: a
  * release adds one frozen entry, reviewed, and it must match the deployment's
- * MERRYMEN_SOLANA_VAULT_PROGRAM and MERRYMEN_SOLANA_VAULT_PROGRAM_SHA256.
+ * MERRYMEN_SOLANA_VAULT_PROGRAM and MERRYMEN_SOLANA_VAULT_SHA256. Once any entry
+ * is listed, the live runtime refuses a configured program or SHA-256 that is
+ * not one listed pair (solanaVaultReleaseRefusal), so the app and the recovery
+ * tool trust the same program. Never the local test program.
  */
 export const SOLANA_VAULT_RELEASES: readonly { readonly programId: string; readonly sha256: string }[] = Object.freeze([]);
+/**
+ * Why a configured live deployment (program id and binary SHA-256, lowercase
+ * hex) is not a released vault, or null when it is listed together with that
+ * hash. While `releases` is empty nothing is released yet and every pair
+ * passes here: the deployment checks (immutable, hash-matching, built for its
+ * id, never the local test id) still apply.
+ */
+export function solanaVaultReleaseRefusal(
+  programId: string,
+  sha256: string,
+  releases: readonly { readonly programId: string; readonly sha256: string }[] = SOLANA_VAULT_RELEASES,
+): string | null {
+  if (releases.length === 0) return null;
+  const release = releases.find((r) => r.programId === programId);
+  if (!release)
+    return "The configured Solana vault program is not a released Merrymen vault program.";
+  if (release.sha256 !== sha256)
+    return "The configured Solana vault binary hash is not the released hash of that program.";
+  return null;
+}
 export const SOLANA_JUPITER_PROGRAM =
   "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4";
 export const SOLANA_ASSOCIATED_TOKEN_PROGRAM =
@@ -30,6 +53,65 @@ export const SOLANA_CLASSIC_TOKEN_PROGRAM =
   "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 export const SOLANA_WRAPPED_SOL_MINT =
   "So11111111111111111111111111111111111111112";
+/**
+ * The Token-2022 mint extensions the vault program's check_mint (lib.rs)
+ * accepts on the USDG mint, named as Agave's jsonParsed account reads name
+ * them. On a USDG mint with any other extension, a transfer fee above 0 bps
+ * (older or newer) or a transfer hook program, the program fails every swap,
+ * buys and exits alike, with VaultError::Mint (6005). The mainnet mint read on
+ * 2026-10-20 carries exactly these eight
+ * (contracts/solana/runtime-tests/fixtures/usdg-mainnet-mint.json).
+ */
+export const SOLANA_VAULT_USDG_MINT_EXTENSIONS: readonly string[] = Object.freeze([
+  "transferFeeConfig",
+  "transferHook",
+  "mintCloseAuthority",
+  "confidentialTransferMint",
+  "permanentDelegate",
+  "confidentialTransferFeeConfig",
+  "metadataPointer",
+  "tokenMetadata",
+]);
+/**
+ * Why the vault program's check_mint (lib.rs) refuses this USDG mint, or null
+ * when it accepts it. `info` is the mint as Agave's jsonParsed account read
+ * presents it (getAccountInfo's value.data.parsed.info, a UiMint). It mirrors
+ * the USDG branch of check_mint: initialized, 6 decimals, only the extensions
+ * in SOLANA_VAULT_USDG_MINT_EXTENSIONS, a transfer fee of 0 bps both older and
+ * newer (whatever its maximum or epoch), and no transfer hook program. A field
+ * it needs and cannot read is a refusal. The caller checks the mint's address
+ * (USDG) and owner (Token-2022). On a mint it refuses, the program fails every
+ * swap, buys and exits alike, with VaultError::Mint (6005), so the worker
+ * must sign none; the owner's withdraw never checks the mint.
+ */
+export function solanaVaultUsdgMintRefusal(info: unknown): string | null {
+  const record = (value: unknown): value is Record<string, unknown> =>
+    typeof value === "object" && value !== null && !Array.isArray(value);
+  if (!record(info) || info.isInitialized !== true) return "not-initialized";
+  if (info.decimals !== 6) return "decimals";
+  // Agave leaves out an empty extension list.
+  const extensions = info.extensions === undefined ? [] : info.extensions;
+  if (!Array.isArray(extensions)) return "unreadable";
+  const seen = new Set<string>();
+  for (const extension of extensions) {
+    if (!record(extension) || typeof extension.extension !== "string" || seen.has(extension.extension))
+      return "unreadable";
+    const name = extension.extension, state = extension.state;
+    seen.add(name);
+    if (!SOLANA_VAULT_USDG_MINT_EXTENSIONS.includes(name)) return `extension:${name}`;
+    if (name === "transferFeeConfig") {
+      if (!record(state)) return "unreadable";
+      for (const fee of [state.olderTransferFee, state.newerTransferFee]) {
+        if (!record(fee) || typeof fee.transferFeeBasisPoints !== "number") return "unreadable";
+        if (fee.transferFeeBasisPoints !== 0) return "transfer-fee";
+      }
+    } else if (name === "transferHook") {
+      if (!record(state)) return "unreadable";
+      if (state.programId !== null) return "transfer-hook";
+    }
+  }
+  return null;
+}
 export const SOLANA_JUPITER_SHARED_ROUTE_DISCRIMINATOR = Uint8Array.from([
   193, 32, 155, 51, 65, 214, 156, 129,
 ]);

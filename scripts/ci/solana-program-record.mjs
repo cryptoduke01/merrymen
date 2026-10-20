@@ -3,6 +3,12 @@
 // records what was built.
 //
 //   node scripts/ci/solana-program-record.mjs <contracts/solana dir> <program .so> <record.json>
+//   node scripts/ci/solana-program-record.mjs --runner-image
+//
+// --runner-image only names the runner image (runnerImageSection) on stdout
+// and in the step summary. ci.yml runs it first in solana · test and solana ·
+// rebuild, so a run that fails before any record is written still names the
+// image it ran on. It never fails on what it finds.
 //
 // Refuses (exit 1) unless:
 // - lib.rs declares exactly one program ID, a 32-byte base58 key;
@@ -14,6 +20,10 @@
 // Then it writes the record (ID, size, SHA-256, toolchain, the run that built
 // it, and whether that run can be a release) to <record.json>, adds it to the
 // GitHub step summary when there is one, and prints the SHA-256 on stdout.
+// The record also names the local test program id (SOLANA_VAULT_LOCAL_TEST_PROGRAM
+// in packages/core/src/solana-live.ts, read from this script's own checkout)
+// and whether the build declares it: the live runtime refuses that id, so such
+// a build is never a release, whatever its manifest says.
 //
 // A release artifact comes only from a CI run on refs/heads/main of
 // millw14/merrymen (a push to main or a manual run on main) whose pinned
@@ -22,9 +32,12 @@
 // another branch is not a candidate. This script cannot know the manifest
 // outcome yet, so its record always says not-a-release; in solana · test,
 // solana-linux-manifest.mjs report compares the manifest, rewrites the
-// record's release with releaseStatus(run, outcome), and gives ci.yml the
-// artifact name's label. That label is at most candidate-unconfirmed: the
-// upload happens before app has compared the rebuild's hash, so only
+// record's release with releaseStatus(run, outcome, record), and gives ci.yml
+// the artifact name's label. The third argument is the build record itself
+// (its programId and localTestId): a build that declares the local test
+// program id is never a candidate, and a record that does not name both ids
+// fails closed as not compared. That label is at most candidate-unconfirmed:
+// the upload happens before app has compared the rebuild's hash, so only
 // solana-release.mjs, in the job that runs after app passed, says release.
 import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
@@ -55,6 +68,30 @@ export function declaredProgramId(libRs) {
     throw new Error(`lib.rs must declare exactly one program ID with declare_id!("..."); found ${mentions} mention(s)`);
   }
   return found[0][1];
+}
+
+/** Where SOLANA_VAULT_LOCAL_TEST_PROGRAM is declared, relative to the repository root. */
+export const LOCAL_TEST_SOURCE = "packages/core/src/solana-live.ts";
+/**
+ * An assignment to SOLANA_VAULT_LOCAL_TEST_PROGRAM, compound ones (+=, ??=, ...) included,
+ * never a comparison (==, ===, !=, !==, <=, >=) or an arrow (=>): code that only reads the
+ * id is not a second assignment.
+ */
+const LOCAL_TEST_ASSIGNMENT = /\bSOLANA_VAULT_LOCAL_TEST_PROGRAM\s*(?:\*\*|<<|>>>|>>|&&|\|\||\?\?|[-+*/%&|^])?=(?![=>])/g;
+/** The local test program id: the one string SOLANA_VAULT_LOCAL_TEST_PROGRAM is assigned in LOCAL_TEST_SOURCE. */
+export function localTestProgramId(solanaLiveTs) {
+  const assigned = (solanaLiveTs.match(LOCAL_TEST_ASSIGNMENT) ?? []).length;
+  const found = [...solanaLiveTs.matchAll(/^export const SOLANA_VAULT_LOCAL_TEST_PROGRAM\s*=\s*"([^"]*)"\s*;/gm)];
+  if (assigned !== 1 || found.length !== 1) {
+    throw new Error(`${LOCAL_TEST_SOURCE} must assign SOLANA_VAULT_LOCAL_TEST_PROGRAM exactly once, to a string; found ${assigned} assignment(s)`);
+  }
+  const id = found[0][1];
+  if (base58Decode(id).length !== 32) throw new Error(`SOLANA_VAULT_LOCAL_TEST_PROGRAM ${id} is not a 32-byte key`);
+  return id;
+}
+/** The local test program id from the repository at `root` (default: this script's own checkout). */
+export function readLocalTestProgramId(root = join(dirname(fileURLToPath(import.meta.url)), "..", "..")) {
+  return localTestProgramId(readFileSync(join(root, LOCAL_TEST_SOURCE), "utf8"));
 }
 
 export function anchorProgramIds(anchorToml, program) {
@@ -123,6 +160,8 @@ export const RELEASE_RULE = `A release artifact comes only from a CI run on ${RE
   + `solana · test uploads such a run's bytes as merrymen-vault-sbf-${CANDIDATE_LABEL}-<commit>-run<id>.<attempt>, before app has decided; `
   + "solana · release, which runs only after app passed, confirms them with merrymen-vault-release-<commit>-run<id>.<attempt>, "
   + "a record naming that artifact and its SHA-256. Without that record the run is not a release. "
+  + "A build whose lib.rs declares the local test program id (SOLANA_VAULT_LOCAL_TEST_PROGRAM in packages/core/src/solana-live.ts) is never a release: "
+  + "the live runtime refuses that id, so its Linux manifest is a reproducibility baseline only. "
   + "CI never runs on a tag push, and a manual run on a tag or another branch is not a release candidate. "
   + "Every other artifact, every pull request run's included, is not a release artifact. "
   + "Confirm the run on GitHub itself (event, branch, commit, and that app passed): this record and the artifact names are written by the run and prove nothing alone.";
@@ -148,6 +187,44 @@ export function provenance(env) {
   };
 }
 
+/**
+ * Why a GitHub-hosted image is recorded rather than pinned. Exported for the
+ * tests and the step summary.
+ */
+export const RUNNER_IMAGE_NOTE = "GitHub-hosted runner image, named by release (ubuntu-24.04) but not digest-pinned: GitHub updates it in place. "
+  + "If the pinned Linux build stops matching the committed manifest while the program source and scripts/ci/solana-toolchain.env did not change, "
+  + "compare this image version with the one in the Vault-Linux-Manifest line of the commit that added the committed manifest "
+  + "(git log -1 -- contracts/solana/build-manifests/Linux-x86_64.json; the producing run's own artifact and summary expire) "
+  + "and investigate the toolchain and image; never commit a new manifest just to make the comparison pass.";
+
+/**
+ * The runner image that built an artifact: ImageOS and ImageVersion, which
+ * GitHub sets on its hosted runners (null elsewhere, or when malformed).
+ * ci.yml runs the vault jobs on ubuntu-24.04, a named image release with no
+ * digest to pin, so the record names the exact image version instead.
+ */
+export function runnerImage(env) {
+  const value = name => (typeof env?.[name] === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(env[name]) ? env[name] : null);
+  return { os: value("ImageOS"), version: value("ImageVersion"), digestPinned: false, note: RUNNER_IMAGE_NOTE };
+}
+/** The step summary's runner image line. */
+export function runnerImageLine(image) {
+  const named = image?.os || image?.version ? `\`${image.os ?? "unknown"}\` version \`${image.version ?? "unknown"}\`` : "unknown (no ImageOS or ImageVersion: not a GitHub-hosted runner)";
+  return `- runner image: ${named}, not digest-pinned. ${RUNNER_IMAGE_NOTE}`;
+}
+
+/**
+ * The step summary's runner image section, written by ci.yml's first vault
+ * step (--runner-image) before anything is built. When a committed manifest
+ * has this build's source digest but another artifact, build.sh fails the
+ * Test step ("same source, different artifact") before the build record or
+ * its summary exist: the toolchain or the image changed, and this section is
+ * then the run's only record of the image.
+ */
+export function runnerImageSection(env) {
+  return ["### Runner image", "", runnerImageLine(runnerImage(env)), ""].join("\n");
+}
+
 /** Why releaseStatus decided as it did, by the run and the Linux manifest outcome. */
 const RELEASE_REASONS = {
   matches: "a run on main whose pinned Linux build matched the committed manifest",
@@ -155,6 +232,13 @@ const RELEASE_REASONS = {
   differs: "its pinned Linux build differs from the committed manifest",
   removed: "the committed Linux build manifest was deleted",
 };
+
+/** Whether a build record's program declares the local test id: true, false, or null when either id is missing. */
+export function declaresLocalTestId(program) {
+  const id = typeof program?.programId === "string" && program.programId ? program.programId : null;
+  const local = typeof program?.localTestId === "string" && program.localTestId ? program.localTestId : null;
+  return id === null || local === null ? null : id === local;
+}
 
 /** A push or manual run on refs/heads/main of RELEASE_REPOSITORY. */
 export function fromMain(p) {
@@ -166,20 +250,27 @@ export function fromMain(p) {
 /**
  * Whether a run's artifact is a release candidate (RELEASE_RULE): a push or
  * manual run on refs/heads/main of RELEASE_REPOSITORY, and `linuxManifest`,
- * the outcome of solana-linux-manifest.mjs's comparison, is "matches". Any
- * other outcome, or none yet (null), is not-a-release. ci.yml names the
- * uploaded artifact with `label`, which is never more than
- * candidate-unconfirmed: whether the run is a release is decided after app
- * passed (solana-release.mjs).
+ * the outcome of solana-linux-manifest.mjs's comparison, is "matches", and
+ * `program` (the build record: programId, localTestId) declares another id
+ * than the local test program. Any other outcome, or none yet (null), a build
+ * of the local test id, and a record that does not name both ids, are
+ * not-a-release. ci.yml names the uploaded artifact with `label`, which is
+ * never more than candidate-unconfirmed: whether the run is a release is
+ * decided after app passed (solana-release.mjs).
  */
-export function releaseStatus(p, linuxManifest = null) {
+export function releaseStatus(p, linuxManifest = null, program = null) {
   const main = fromMain(p);
-  const candidate = main && linuxManifest === "matches";
+  const local = declaresLocalTestId(program);
+  const candidate = main && local === false && linuxManifest === "matches";
   const reason = !main
     ? `not a push or manual run on ${RELEASE_REF} of ${RELEASE_REPOSITORY}`
-    : linuxManifest === null
-      ? "its Linux build manifest has not been compared yet"
-      : RELEASE_REASONS[linuxManifest] ?? `an unknown Linux manifest outcome ${JSON.stringify(linuxManifest)}`;
+    : local === true
+      ? "it declares the local test program id, which the live runtime refuses"
+      : local === null
+        ? "its program id was not compared with the local test program id"
+        : linuxManifest === null
+          ? "its Linux build manifest has not been compared yet"
+          : RELEASE_REASONS[linuxManifest] ?? `an unknown Linux manifest outcome ${JSON.stringify(linuxManifest)}`;
   return { candidate, label: candidate ? CANDIDATE_LABEL : NOT_A_RELEASE_LABEL, reason, rule: RELEASE_RULE };
 }
 
@@ -191,7 +282,7 @@ export function releaseLine(release) {
   return `- release: ${verdict} (${release.reason}). ${release.rule}`;
 }
 
-export function programRecord({ libRs, anchorToml, so, toolchain = null, commit = null, run = null }) {
+export function programRecord({ libRs, anchorToml, so, localTestId = null, toolchain = null, commit = null, run = null, image = null }) {
   const programId = declaredProgramId(libRs);
   const key = base58Decode(programId);
   if (key.length !== 32) throw new Error(`declared program ID ${programId} is ${key.length} bytes, not 32`);
@@ -206,10 +297,16 @@ export function programRecord({ libRs, anchorToml, so, toolchain = null, commit 
   const programIdOccurrences = countOccurrences(so, key);
   if (programIdOccurrences === 0) throw new Error(`the artifact does not contain the declared program ID ${programId}`);
 
+  if (localTestId !== null && (typeof localTestId !== "string" || base58Decode(localTestId).length !== 32)) {
+    throw new Error(`the local test program ID ${JSON.stringify(localTestId)} is not a 32-byte key`);
+  }
   return {
     program: "merrymen_vault",
     programId,
     programIdOccurrences,
+    // SOLANA_VAULT_LOCAL_TEST_PROGRAM: a build that declares it is never a release.
+    localTestId,
+    declaresLocalTestId: declaresLocalTestId({ programId, localTestId }),
     bytes: so.length,
     sha256: createHash("sha256").update(so).digest("hex"),
     // The deployed ProgramData region is the artifact followed by zero
@@ -218,16 +315,24 @@ export function programRecord({ libRs, anchorToml, so, toolchain = null, commit 
     // (max-len - bytes) zero bytes.
     regionNote: "ProgramData region SHA-256 equals sha256 only for max-len == bytes",
     toolchain,
+    // The runner image (ImageOS, ImageVersion): named, not digest-pinned.
+    runnerImage: image,
     // GITHUB_SHA: the pushed commit, or a pull request's test merge commit.
     commit,
     provenance: run,
-    release: releaseStatus(run),
+    release: releaseStatus(run, null, { programId, localTestId }),
   };
 }
 
 function main(argv) {
+  if (argv.length === 1 && argv[0] === "--runner-image") {
+    const section = runnerImageSection(process.env);
+    process.stdout.write(`${runnerImageLine(runnerImage(process.env))}\n`);
+    if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, section);
+    return;
+  }
   if (argv.length !== 3) {
-    console.error("usage: solana-program-record.mjs <contracts/solana dir> <program .so> <record.json>");
+    console.error("usage: solana-program-record.mjs <contracts/solana dir> <program .so> <record.json> | --runner-image");
     process.exit(2);
   }
   const [programRoot, soPath, outPath] = argv;
@@ -237,9 +342,11 @@ function main(argv) {
     libRs: readFileSync(join(programRoot, "programs/merrymen-vault/src/lib.rs"), "utf8"),
     anchorToml: readFileSync(join(programRoot, "Anchor.toml"), "utf8"),
     so: readFileSync(soPath),
+    localTestId: readLocalTestProgramId(join(here, "..", "..")),
     toolchain: readToolchain(readFileSync(join(here, "solana-toolchain.env"), "utf8")),
     commit: run.commit,
     run,
+    image: runnerImage(process.env),
   });
   writeFileSync(outPath, `${JSON.stringify(record, null, 2)}\n`);
   if (process.env.GITHUB_STEP_SUMMARY) {
@@ -248,9 +355,13 @@ function main(argv) {
       "### merrymen_vault SBF artifact",
       "",
       `- program ID: \`${record.programId}\` (its 32 bytes appear ${record.programIdOccurrences} time(s) in the binary)`,
+      record.declaresLocalTestId
+        ? "- **the local test program ID** (SOLANA_VAULT_LOCAL_TEST_PROGRAM), which the live runtime refuses: never a release; its Linux manifest is a reproducibility baseline only"
+        : `- not the local test program ID \`${record.localTestId}\``,
       `- size: ${record.bytes} bytes`,
       `- SHA-256: \`${record.sha256}\``,
       `- toolchain: agave ${t.agave}, platform-tools ${t.platformTools} (rustc ${t.platformToolsRustc}), arch ${t.arch}`,
+      runnerImageLine(record.runnerImage),
       `- commit: ${record.commit ?? "unknown"}${run.pullRequestHead ? ` (test merge of pull request head ${run.pullRequestHead})` : ""}`,
       `- run: ${run.runId ?? "unknown"} attempt ${run.runAttempt ?? "?"}, ${run.event ?? "unknown event"} on ${run.ref ?? "unknown ref"} of ${run.repository ?? "unknown repository"}`,
       releaseLine(record.release),

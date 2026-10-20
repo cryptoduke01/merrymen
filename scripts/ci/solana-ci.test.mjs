@@ -25,13 +25,16 @@ import { after, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
-  anchorProgramIds, base58Decode, CANDIDATE_LABEL, candidateArtifactName, declaredProgramId, programRecord, provenance, readToolchain,
-  releaseLine, releaseStatus, RELEASE_RULE,
+  anchorProgramIds, base58Decode, CANDIDATE_LABEL, candidateArtifactName, declaredProgramId, declaresLocalTestId, LOCAL_TEST_SOURCE,
+  localTestProgramId, programRecord, provenance, readLocalTestProgramId, readToolchain, releaseLine, releaseStatus, RELEASE_RULE,
+  RUNNER_IMAGE_NOTE, runnerImage, runnerImageLine, runnerImageSection,
 } from "./solana-program-record.mjs";
-import { releaseArtifactName, releaseRecord } from "./solana-release.mjs";
+import { releaseArtifactName, releaseRecord, releaseSource } from "./solana-release.mjs";
 import { checkRuntimeTests, countTests, parseResults, runtimeTargets } from "./solana-runtime-tests.mjs";
 import { decide, solanaPaths } from "./solana-paths.mjs";
-import { ARTIFACT, assess, compareCommitted, differences, LINUX_HOST, LINUX_MANIFEST, verifyRecorded } from "./solana-linux-manifest.mjs";
+import {
+  ARTIFACT, assess, compareCommitted, differences, LINUX_HOST, LINUX_MANIFEST, MANIFEST_TRAILER, manifestTrailer, verifyRecorded,
+} from "./solana-linux-manifest.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = join(here, "..", "..");
@@ -105,6 +108,12 @@ function stub(dir, name, body) {
   return dir;
 }
 const sha256 = buf => createHash("sha256").update(buf).digest("hex");
+/** SOLANA_VAULT_LOCAL_TEST_PROGRAM, as the scripts read it from packages/core/src/solana-live.ts. */
+const LOCAL = readLocalTestProgramId();
+/** Another program ID (SPL Token's), standing in for a production declare_id. */
+const PRODUCTION = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+/** packages/core/src/solana-live.ts as the scripts parse it, declaring `id` as the local test program. */
+const solanaLive = id => `/** Local test identity only. */\nexport const SOLANA_VAULT_LOCAL_TEST_PROGRAM =\n  "${id}";\nexport const SOLANA_VAULT_RELEASES = [];\n`;
 
 describe("the CI jobs", () => {
   const test = job("solana-test");
@@ -121,6 +130,8 @@ describe("the CI jobs", () => {
     assert.ok(test, "ci.yml has no solana-test job");
     const order = [
       "uses: actions/checkout@",
+      // Before anything is built, so a run that fails in the Test step names its image.
+      "run: node scripts/ci/solana-program-record.mjs --runner-image\n",
       "run: node --test scripts/ci/solana-ci.test.mjs",
       "run: scripts/ci/solana-toolchain.sh install ",
       "uses: actions/cache@",
@@ -242,6 +253,27 @@ describe("the CI jobs", () => {
     assert.match(test, /^ {4}runs-on: ubuntu-24\.04$/m);
   });
 
+  it("both vault jobs name the runner image before anything is built, so a run that fails in the Test step still records it", () => {
+    // build.sh fails test.sh on a committed manifest with this source digest
+    // but another artifact, before the build record and its summary exist; an
+    // image update is one cause, so the image must already be named by then.
+    const step = [
+      "      - name: Runner image",
+      "        if: needs.solana-paths.outputs.run == 'true'",
+      "        run: node scripts/ci/solana-program-record.mjs --runner-image",
+    ].join("\n");
+    for (const [id, builds] of [["solana-test", "contracts/solana/test.sh 2>&1"], ["solana-rebuild", "so=$(scripts/ci/solana-rebuild.sh "]]) {
+      const all = steps(job(id));
+      const at = all.indexOf(step);
+      assert.ok(at >= 0, `${id} has no Runner image step`);
+      assert.equal(all.filter(st => st.includes("--runner-image")).length, 1, id);
+      // Right after checkout and setup-node: nothing before it can fail on the toolchain.
+      assert.deepEqual(all.slice(1, at).map(st => /uses: (actions\/[a-z-]+)@/.exec(st)?.[1] ?? st), ["actions/checkout", "actions/setup-node"], id);
+      assert.ok(at < all.findIndex(st => st.includes(builds)), `${id}: the image must be named before the build`);
+      assert.ok(at < all.findIndex(st => st.includes("solana-toolchain.sh install ")), `${id}: the image must be named before the toolchain install`);
+    }
+  });
+
   it("caches crates and the host test build, never the SBF build or its output", () => {
     const cache = /uses: actions\/cache@\S+.*\n((?: {8}.*\n)*)/.exec(test)?.[1] ?? "";
     const paths = [...cache.matchAll(/^ {12}(\S+)$/gm)].map(m => m[1]);
@@ -252,11 +284,12 @@ describe("the CI jobs", () => {
 
   it("solana · rebuild builds again from tracked source elsewhere and reports its hash", () => {
     assert.ok(rebuild, "ci.yml has no solana-rebuild job");
+    const image = rebuild.indexOf("run: node scripts/ci/solana-program-record.mjs --runner-image\n");
     const install = rebuild.indexOf("run: scripts/ci/solana-toolchain.sh install ");
     const build = rebuild.indexOf("so=$(scripts/ci/solana-rebuild.sh ");
-    const record = rebuild.indexOf("node scripts/ci/solana-program-record.mjs ");
+    const record = rebuild.indexOf("sha=$(node scripts/ci/solana-program-record.mjs ");
     const check = rebuild.indexOf("run: scripts/ci/solana-toolchain.sh check");
-    assert.ok(install >= 0 && install < build && build < record && record < check);
+    assert.ok(image >= 0 && image < install && install < build && build < record && record < check);
     assert.match(rebuild, /^ {4}outputs:\n {6}sha256: \$\{\{ steps\.record\.outputs\.sha256 \}\}$/m);
     assert.doesNotMatch(rebuild, /actions\/cache@/, "the rebuild must not reuse anything cached");
   });
@@ -1091,6 +1124,48 @@ describe("solana-program-record.mjs", () => {
     assert.equal(r.sha256, sha256(so));
     assert.equal(r.commit, "c0ffee");
     assert.equal(r.toolchain.platformTools, "v1.48");
+    // No local test ID given: the record says it was not compared, and is never a candidate.
+    assert.deepEqual([r.localTestId, r.declaresLocalTestId], [null, null]);
+    const main = { repository: "millw14/merrymen", event: "push", ref: "refs/heads/main" };
+    const named = programRecord({ libRs: libRs(TOKEN_PROGRAM), anchorToml: anchorToml(TOKEN_PROGRAM), so, localTestId: LOCAL, run: main });
+    assert.deepEqual([named.localTestId, named.declaresLocalTestId], [LOCAL, false]);
+    assert.equal(named.release.reason, "its Linux build manifest has not been compared yet");
+    // A build of the local test ID says so, and its release reason does too, whatever the manifest.
+    const test = programRecord({ libRs: libRs(LOCAL), anchorToml: anchorToml(LOCAL), so: elf(base58Decode(LOCAL)), localTestId: LOCAL, run: main });
+    assert.deepEqual([test.programId, test.declaresLocalTestId], [LOCAL, true]);
+    assert.deepEqual([test.release.candidate, test.release.reason], [false, "it declares the local test program id, which the live runtime refuses"]);
+  });
+
+  it("reads the local test program ID from packages/core/src/solana-live.ts, and nothing ambiguous", () => {
+    assert.equal(LOCAL_TEST_SOURCE, "packages/core/src/solana-live.ts");
+    assert.equal(base58Decode(LOCAL).length, 32);
+    assert.ok(readFileSync(join(repo, LOCAL_TEST_SOURCE), "utf8").includes(`export const SOLANA_VAULT_LOCAL_TEST_PROGRAM =\n  "${LOCAL}";`));
+    assert.equal(localTestProgramId(solanaLive(TOKEN_PROGRAM)), TOKEN_PROGRAM);
+    const refused = {
+      "assigned twice": `${solanaLive(TOKEN_PROGRAM)}SOLANA_VAULT_LOCAL_TEST_PROGRAM = "${LOCAL}";\n`,
+      "not a string": "export const SOLANA_VAULT_LOCAL_TEST_PROGRAM = other;\n",
+      "commented out only": `// export const SOLANA_VAULT_LOCAL_TEST_PROGRAM = "${LOCAL}";\n`,
+      "absent": "export const SOLANA_VAULT_RELEASES = [];\n",
+    };
+    for (const [label, text] of Object.entries(refused)) assert.throws(() => localTestProgramId(text), /must assign SOLANA_VAULT_LOCAL_TEST_PROGRAM exactly once/, label);
+    // Code that only reads the id (a comparison on either side, an arrow) is not a second assignment.
+    const reads = [
+      "export const isLocal = (id: string) => SOLANA_VAULT_LOCAL_TEST_PROGRAM === id;",
+      "export const isLocal = (id: string) => id === SOLANA_VAULT_LOCAL_TEST_PROGRAM;",
+      "if (SOLANA_VAULT_LOCAL_TEST_PROGRAM == id || SOLANA_VAULT_LOCAL_TEST_PROGRAM != id || SOLANA_VAULT_LOCAL_TEST_PROGRAM !== id) {}",
+      "const ordered = SOLANA_VAULT_LOCAL_TEST_PROGRAM <= id || SOLANA_VAULT_LOCAL_TEST_PROGRAM >= id;",
+      "const same = SOLANA_VAULT_LOCAL_TEST_PROGRAM => SOLANA_VAULT_LOCAL_TEST_PROGRAM;",
+    ];
+    for (const line of reads) assert.equal(localTestProgramId(`${solanaLive(TOKEN_PROGRAM)}${line}\n`), TOKEN_PROGRAM, line);
+    // A compound assignment is still a second assignment.
+    for (const op of ["+=", "??=", "||=", ">>="]) {
+      assert.throws(() => localTestProgramId(`${solanaLive(TOKEN_PROGRAM)}SOLANA_VAULT_LOCAL_TEST_PROGRAM ${op} "x";\n`), /found 2 assignment/, op);
+    }
+    assert.throws(() => localTestProgramId(solanaLive("1111")), /not a 32-byte key/);
+    assert.deepEqual([undefined, null, {}, { programId: LOCAL }, { localTestId: LOCAL }, { programId: "", localTestId: "" }].map(declaresLocalTestId),
+      [null, null, null, null, null, null]);
+    assert.equal(declaresLocalTestId({ programId: LOCAL, localTestId: LOCAL }), true);
+    assert.equal(declaresLocalTestId({ programId: PRODUCTION, localTestId: LOCAL }), false);
   });
 
   it("refuses an artifact or source that does not agree on one program ID", () => {
@@ -1104,6 +1179,7 @@ describe("solana-program-record.mjs", () => {
       "two declarations": [{ ...ok, libRs: `${libRs(TOKEN_PROGRAM)}declare_id!("${TOKEN_PROGRAM}");\n` }, /exactly one program ID/],
       "a commented-out declaration only": [{ ...ok, libRs: `// declare_id!("${TOKEN_PROGRAM}");\n` }, /exactly one program ID/],
       "a short key": [{ ...ok, libRs: libRs("1111"), anchorToml: anchorToml("1111") }, /not 32/],
+      "a malformed local test ID": [{ ...ok, localTestId: "1111" }, /local test program ID "1111" is not a 32-byte key/],
     };
     for (const [label, [input, error]] of Object.entries(refused)) assert.throws(() => programRecord(input), error, label);
   });
@@ -1119,8 +1195,10 @@ describe("solana-program-record.mjs", () => {
   it("marks a release candidate only for a push or manual run on refs/heads/main of millw14/merrymen whose Linux build matched the committed manifest", () => {
     const main = { repository: "millw14/merrymen", event: "push", ref: "refs/heads/main" };
     const candidates = [main, { ...main, event: "workflow_dispatch" }];
+    // The build record's program: another ID than the local test program.
+    const program = { programId: PRODUCTION, localTestId: LOCAL };
     for (const p of candidates) {
-      assert.deepEqual(releaseStatus(p, "matches"), {
+      assert.deepEqual(releaseStatus(p, "matches", program), {
         candidate: true, label: "candidate-unconfirmed", reason: "a run on main whose pinned Linux build matched the committed manifest", rule: RELEASE_RULE,
       }, JSON.stringify(p));
       // Any other outcome, or none yet, is not a release: the artifact's name
@@ -1134,9 +1212,22 @@ describe("solana-program-record.mjs", () => {
         matched: "an unknown Linux manifest outcome \"matched\"",
       };
       for (const [outcome, reason] of Object.entries(outcomes)) {
-        assert.deepEqual(releaseStatus(p, outcome === "null" ? null : outcome), { candidate: false, label: "not-a-release", reason, rule: RELEASE_RULE }, outcome);
+        assert.deepEqual(releaseStatus(p, outcome === "null" ? null : outcome, program), { candidate: false, label: "not-a-release", reason, rule: RELEASE_RULE }, outcome);
       }
       assert.equal(releaseStatus(p).label, "not-a-release", "the record step's own call, before any comparison");
+      // A build of the local test program ID is never a candidate, whatever its manifest
+      // says: the live runtime refuses that ID (its manifest is a reproducibility baseline).
+      for (const outcome of [null, "matches", "uncommitted", "differs", "removed"]) {
+        assert.deepEqual(releaseStatus(p, outcome, { programId: LOCAL, localTestId: LOCAL }), {
+          candidate: false, label: "not-a-release", reason: "it declares the local test program id, which the live runtime refuses", rule: RELEASE_RULE,
+        }, String(outcome));
+      }
+      // Nor is one whose record does not name both IDs.
+      for (const unchecked of [undefined, null, {}, { programId: PRODUCTION }, { localTestId: LOCAL }, { programId: "", localTestId: LOCAL }]) {
+        assert.deepEqual(releaseStatus(p, "matches", unchecked), {
+          candidate: false, label: "not-a-release", reason: "its program id was not compared with the local test program id", rule: RELEASE_RULE,
+        }, JSON.stringify(unchecked));
+      }
     }
     const others = [
       { ...main, event: "pull_request", ref: "refs/pull/7/merge" },
@@ -1155,21 +1246,72 @@ describe("solana-program-record.mjs", () => {
       null,
     ];
     for (const p of others) {
-      assert.deepEqual(releaseStatus(p, "matches"), {
-        candidate: false, label: "not-a-release", reason: "not a push or manual run on refs/heads/main of millw14/merrymen", rule: RELEASE_RULE,
-      }, JSON.stringify(p));
+      for (const named of [undefined, program]) {
+        assert.deepEqual(releaseStatus(p, "matches", named), {
+          candidate: false, label: "not-a-release", reason: "not a push or manual run on refs/heads/main of millw14/merrymen", rule: RELEASE_RULE,
+        }, JSON.stringify(p));
+      }
     }
     assert.match(RELEASE_RULE, /^A release artifact comes only from a CI run on refs\/heads\/main of millw14\/merrymen: a push to main, or a manual \(workflow_dispatch\) run on main, whose pinned Linux build matched the committed contracts\/solana\/build-manifests\/Linux-x86_64\.json and whose app check passed/);
     assert.match(RELEASE_RULE, /CI never runs on a tag push, and a manual run on a tag or another branch is not a release candidate\./);
     assert.doesNotMatch(RELEASE_RULE, /or a tag of/);
+    assert.match(RELEASE_RULE, /A build whose lib\.rs declares the local test program id \(SOLANA_VAULT_LOCAL_TEST_PROGRAM in packages\/core\/src\/solana-live\.ts\) is never a release: the live runtime refuses that id, so its Linux manifest is a reproducibility baseline only\./);
     // The verdict comes after app: solana · test's name is unconfirmed, the release record is solana · release's.
     assert.match(RELEASE_RULE, /solana · test uploads such a run's bytes as merrymen-vault-sbf-candidate-unconfirmed-<commit>-run<id>\.<attempt>, before app has decided; solana · release, which runs only after app passed, confirms them with merrymen-vault-release-<commit>-run<id>\.<attempt>/);
     assert.equal(CANDIDATE_LABEL, "candidate-unconfirmed");
     // No label releaseStatus can give says release on its own.
     for (const outcome of [null, "matches", "uncommitted", "differs", "removed"]) {
-      for (const p of [...candidates, ...others]) assert.match(releaseStatus(p, outcome).label, /^(candidate-unconfirmed|not-a-release)$/);
+      for (const p of [...candidates, ...others]) {
+        for (const named of [undefined, program, { programId: LOCAL, localTestId: LOCAL }]) {
+          assert.match(releaseStatus(p, outcome, named).label, /^(candidate-unconfirmed|not-a-release)$/);
+        }
+      }
     }
-    assert.match(releaseLine(releaseStatus(main, "matches")), /^- release: \*\*release candidate, unconfirmed until app passes\*\* \(/);
+    assert.match(releaseLine(releaseStatus(main, "matches", program)), /^- release: \*\*release candidate, unconfirmed until app passes\*\* \(/);
+  });
+
+  it("records the runner image by name and version, and says it is not digest-pinned", () => {
+    const image = { ImageOS: "ubuntu24", ImageVersion: "20251012.1.0" };
+    assert.deepEqual(runnerImage(image), { os: "ubuntu24", version: "20251012.1.0", digestPinned: false, note: RUNNER_IMAGE_NOTE });
+    for (const env of [{}, null, { ImageOS: "", ImageVersion: "" }, { ImageOS: "ubuntu 24", ImageVersion: "1\n2" }, { ImageOS: "-x", ImageVersion: "x".repeat(65) }]) {
+      const r = runnerImage(env);
+      assert.deepEqual([r.os, r.version, r.digestPinned], [null, null, false], JSON.stringify(env));
+    }
+    assert.match(RUNNER_IMAGE_NOTE, /^GitHub-hosted runner image, named by release \(ubuntu-24\.04\) but not digest-pinned: GitHub updates it in place\./);
+    assert.match(RUNNER_IMAGE_NOTE, /never commit a new manifest just to make the comparison pass\.$/);
+    // The baseline image is the one the committed manifest's own commit names, which outlives the run's artifact.
+    assert.ok(RUNNER_IMAGE_NOTE.includes(`the ${MANIFEST_TRAILER} line of the commit that added the committed manifest (git log -1 -- contracts/solana/${LINUX_MANIFEST};`), RUNNER_IMAGE_NOTE);
+    assert.equal(runnerImageLine(runnerImage(image)), `- runner image: \`ubuntu24\` version \`20251012.1.0\`, not digest-pinned. ${RUNNER_IMAGE_NOTE}`);
+    assert.equal(runnerImageLine(runnerImage({})), `- runner image: unknown (no ImageOS or ImageVersion: not a GitHub-hosted runner), not digest-pinned. ${RUNNER_IMAGE_NOTE}`);
+    const so = elf(TOKEN_BYTES);
+    const r = programRecord({ libRs: libRs(TOKEN_PROGRAM), anchorToml: anchorToml(TOKEN_PROGRAM), so, image: runnerImage(image) });
+    assert.deepEqual(r.runnerImage, runnerImage(image));
+    assert.equal(programRecord({ libRs: libRs(TOKEN_PROGRAM), anchorToml: anchorToml(TOKEN_PROGRAM), so }).runnerImage, null);
+    // Both vault builds run on that named image release, never on a floating label.
+    for (const id of ["solana-test", "solana-rebuild"]) assert.match(job(id), /^ {4}runs-on: ubuntu-24\.04$/m, id);
+  });
+
+  it("--runner-image names the image on stdout and in the step summary, and never fails on what it finds", () => {
+    const dir = fresh("runner-image");
+    const summary = join(dir, "summary.md");
+    const image = { ImageOS: "ubuntu24", ImageVersion: "20251012.1.0" };
+    const named = run(process.execPath, [script, "--runner-image"], { ...image, GITHUB_STEP_SUMMARY: summary });
+    assert.equal(named.status, 0, named.stderr);
+    assert.equal(named.stdout, `${runnerImageLine(runnerImage(image))}\n`);
+    assert.equal(readFileSync(summary, "utf8"), runnerImageSection(image));
+    assert.equal(runnerImageSection(image), `### Runner image\n\n${runnerImageLine(runnerImage(image))}\n`);
+    // Appends: the job's later summaries (the build record's) follow it.
+    const again = run(process.execPath, [script, "--runner-image"], { ImageOS: "", ImageVersion: "", GITHUB_STEP_SUMMARY: summary });
+    assert.equal(again.status, 0, again.stderr);
+    assert.equal(readFileSync(summary, "utf8"), runnerImageSection(image) + runnerImageSection({}));
+    assert.match(again.stdout, /^- runner image: unknown \(no ImageOS or ImageVersion: not a GitHub-hosted runner\), not digest-pinned\./);
+    // Without a step summary (a local run), stdout only.
+    const local = run(process.execPath, [script, "--runner-image"], { ...image, GITHUB_STEP_SUMMARY: "" });
+    assert.equal(local.status, 0, local.stderr);
+    assert.equal(local.stdout, named.stdout);
+    for (const args of [["--runner-image", "extra"], ["--runner-images"]]) {
+      assert.equal(run(process.execPath, [script, ...args], image).status, 2, args.join(" "));
+    }
   });
 
   it("records the run: event, ref, commit, the pull request head, workflow and run", () => {
@@ -1208,27 +1350,38 @@ describe("solana-program-record.mjs", () => {
       const record = JSON.parse(readFileSync(out, "utf8"));
       assert.equal(record.programId, TOKEN_PROGRAM);
       assert.equal(record.commit, "c0ffee");
+      // The local test ID comes from this script's own checkout, not from the program root.
+      assert.deepEqual([record.localTestId, record.declaresLocalTestId], [LOCAL, false]);
     }
     // A pull request run: its record and summary say it is not a release artifact.
     const summary = join(root, "summary.md");
     rmSync(out, { force: true });
     const pr = run(process.execPath, [script, root, so, out], {
       GITHUB_SHA: "c0ffee", GITHUB_REPOSITORY: "millw14/merrymen", GITHUB_EVENT_NAME: "pull_request", GITHUB_REF: "refs/pull/7/merge",
-      GITHUB_RUN_ID: "99", GITHUB_RUN_ATTEMPT: "1", GITHUB_STEP_SUMMARY: summary,
+      GITHUB_RUN_ID: "99", GITHUB_RUN_ATTEMPT: "1", GITHUB_STEP_SUMMARY: summary, ImageOS: "ubuntu24", ImageVersion: "20251012.1.0",
     });
     assert.equal(pr.status, 0, pr.stderr);
     const prRecord = JSON.parse(readFileSync(out, "utf8"));
     assert.deepEqual([prRecord.release.candidate, prRecord.release.label], [false, "not-a-release"]);
     assert.deepEqual([prRecord.provenance.event, prRecord.provenance.runId], ["pull_request", "99"]);
+    assert.deepEqual(prRecord.runnerImage, { os: "ubuntu24", version: "20251012.1.0", digestPinned: false, note: RUNNER_IMAGE_NOTE });
     const text = readFileSync(summary, "utf8");
     assert.match(text, /- run: 99 attempt 1, pull_request on refs\/pull\/7\/merge of millw14\/merrymen/);
+    assert.ok(text.includes(`- not the local test program ID \`${LOCAL}\`\n`), text);
+    assert.ok(text.includes(`${runnerImageLine(runnerImage({ ImageOS: "ubuntu24", ImageVersion: "20251012.1.0" }))}\n`), text);
     assert.match(text, /- release: \*\*not a release artifact\*\* \(not a push or manual run on refs\/heads\/main of millw14\/merrymen\)\. A release artifact comes only from a CI run on refs\/heads\/main of millw14\/merrymen: a push to main, or a manual \(workflow_dispatch\) run on main/);
     // A run on main: still not a release here. Only the Linux manifest
     // comparison (solana-linux-manifest.mjs report) can make it one.
     const mainSummary = join(root, "main-summary.md");
-    const mainRun = run(process.execPath, [script, root, so, out], { GITHUB_REPOSITORY: "millw14/merrymen", GITHUB_EVENT_NAME: "push", GITHUB_REF: "refs/heads/main", GITHUB_STEP_SUMMARY: mainSummary });
+    const mainRun = run(process.execPath, [script, root, so, out], {
+      GITHUB_REPOSITORY: "millw14/merrymen", GITHUB_EVENT_NAME: "push", GITHUB_REF: "refs/heads/main", GITHUB_STEP_SUMMARY: mainSummary, ImageOS: "", ImageVersion: "",
+    });
     assert.equal(mainRun.status, 0, mainRun.stderr);
-    assert.deepEqual(JSON.parse(readFileSync(out, "utf8")).release, releaseStatus({ repository: "millw14/merrymen", event: "push", ref: "refs/heads/main" }, null));
+    // Off a GitHub-hosted runner there is no image to name, and the record says so.
+    assert.deepEqual([JSON.parse(readFileSync(out, "utf8")).runnerImage.os, JSON.parse(readFileSync(out, "utf8")).runnerImage.version], [null, null]);
+    assert.match(readFileSync(mainSummary, "utf8"), /^- runner image: unknown \(no ImageOS or ImageVersion: not a GitHub-hosted runner\), not digest-pinned\./m);
+    assert.deepEqual(JSON.parse(readFileSync(out, "utf8")).release,
+      releaseStatus({ repository: "millw14/merrymen", event: "push", ref: "refs/heads/main" }, null, { programId: TOKEN_PROGRAM, localTestId: LOCAL }));
     assert.equal(JSON.parse(readFileSync(out, "utf8")).release.label, "not-a-release");
     assert.match(readFileSync(mainSummary, "utf8"), /- release: \*\*not a release artifact\*\* \(its Linux build manifest has not been compared yet\)\./);
     assert.doesNotMatch(readFileSync(mainSummary, "utf8"), /\*\*release candidate/);
@@ -1238,6 +1391,23 @@ describe("solana-program-record.mjs", () => {
     assert.deepEqual(JSON.parse(readFileSync(out, "utf8")).release, {
       candidate: false, label: "not-a-release", reason: "not a push or manual run on refs/heads/main of millw14/merrymen", rule: RELEASE_RULE,
     });
+
+    // A build of the local test program ID: the record and the summary say it is never a release.
+    const testRoot = fresh("program-local");
+    mkdirSync(join(testRoot, "programs/merrymen-vault/src"), { recursive: true });
+    writeFileSync(join(testRoot, "programs/merrymen-vault/src/lib.rs"), libRs(LOCAL));
+    writeFileSync(join(testRoot, "Anchor.toml"), anchorToml(LOCAL));
+    const testSo = join(testRoot, "merrymen_vault.so");
+    writeFileSync(testSo, elf(base58Decode(LOCAL)));
+    const testSummary = join(testRoot, "summary.md");
+    const testRun = run(process.execPath, [script, testRoot, testSo, out], {
+      GITHUB_REPOSITORY: "millw14/merrymen", GITHUB_EVENT_NAME: "push", GITHUB_REF: "refs/heads/main", GITHUB_STEP_SUMMARY: testSummary,
+    });
+    assert.equal(testRun.status, 0, testRun.stderr);
+    const testRecord = JSON.parse(readFileSync(out, "utf8"));
+    assert.deepEqual([testRecord.programId, testRecord.localTestId, testRecord.declaresLocalTestId], [LOCAL, LOCAL, true]);
+    assert.equal(testRecord.release.reason, "it declares the local test program id, which the live runtime refuses");
+    assert.match(readFileSync(testSummary, "utf8"), /^- \*\*the local test program ID\*\* \(SOLANA_VAULT_LOCAL_TEST_PROGRAM\), which the live runtime refuses: never a release; its Linux manifest is a reproducibility baseline only$/m);
 
     writeFileSync(so, elf(Buffer.alloc(32, 7)));
     const bad = run(process.execPath, [script, root, so, out]);
@@ -1262,10 +1432,22 @@ describe("solana-release.mjs", () => {
     VAULT_TESTED_SHA256: hash,
     VAULT_REBUILT_SHA256: hash,
   };
+  /** The checked-out commit's program: another ID than the local test program. */
+  const source = { programId: PRODUCTION, localTestId: LOCAL };
+  /** A repository root holding just what releaseSource reads: lib.rs and solana-live.ts. */
+  const checkout = declared => {
+    const root = fresh("release-source");
+    mkdirSync(join(root, "contracts/solana/programs/merrymen-vault/src"), { recursive: true });
+    mkdirSync(join(root, "packages/core/src"), { recursive: true });
+    writeFileSync(join(root, "contracts/solana/programs/merrymen-vault/src/lib.rs"), `use anchor_lang::prelude::*;\ndeclare_id!("${declared}");\n`);
+    writeFileSync(join(root, "packages/core/src/solana-live.ts"), solanaLive(LOCAL));
+    return root;
+  };
 
   it("confirms solana · test's candidate on main once the tested and rebuilt hashes agree", () => {
     for (const env of [candidate, { ...candidate, GITHUB_EVENT_NAME: "workflow_dispatch" }]) {
-      const r = releaseRecord(env);
+      const r = releaseRecord(env, source);
+      assert.equal(r.programId, PRODUCTION);
       assert.equal(r.sha256, hash);
       assert.equal(r.artifact, candidate.VAULT_ARTIFACT);
       assert.equal(r.commit, commit);
@@ -1274,7 +1456,7 @@ describe("solana-release.mjs", () => {
       assert.match(releaseLine(r.release), /^- release: \*\*release\*\* \(a run on main whose pinned Linux build matched the committed manifest and whose app check passed/);
     }
     // A re-run of app (attempt 2) keeps solana · test's upload from attempt 1.
-    assert.equal(releaseRecord({ ...candidate, GITHUB_RUN_ATTEMPT: "2" }).artifact, candidate.VAULT_ARTIFACT);
+    assert.equal(releaseRecord({ ...candidate, GITHUB_RUN_ATTEMPT: "2" }, source).artifact, candidate.VAULT_ARTIFACT);
   });
 
   it("refuses every run that is not a confirmed candidate on main", () => {
@@ -1298,29 +1480,50 @@ describe("solana-release.mjs", () => {
       "a short hash": [{ ...candidate, VAULT_TESTED_SHA256: "abc", VAULT_REBUILT_SHA256: "abc" }, /no vault artifact hash/],
       "a rebuild that differs": [{ ...candidate, VAULT_REBUILT_SHA256: "b".repeat(64) }, /the rebuilt vault artifact "b{64}" differs from the tested one a{64}/],
       "no rebuild hash": [{ ...candidate, VAULT_REBUILT_SHA256: "" }, /differs from the tested one/],
+      // A candidate on main whose source declares the local test program ID: the live
+      // runtime refuses that ID, so its bytes are never a release.
+      "the local test program": [candidate, /lib\.rs declares the local test program ID \S+ \(SOLANA_VAULT_LOCAL_TEST_PROGRAM\), which the live runtime refuses: its build is never a release/,
+        { programId: LOCAL, localTestId: LOCAL }],
+      "no source": [candidate, /the program ID was not compared with the local test program ID/, null],
+      "no local test ID": [candidate, /was not compared/, { programId: PRODUCTION }],
+      "no program ID": [candidate, /was not compared/, { programId: "", localTestId: LOCAL }],
     };
-    for (const [label, [env, error]] of Object.entries(refused)) assert.throws(() => releaseRecord(env), error, label);
+    for (const [label, [env, error, src = source]] of Object.entries(refused)) assert.throws(() => releaseRecord(env, src), error, label);
   });
 
   it("as a command: writes the record and the summary, or exits 1 having written nothing", () => {
     const dir = fresh("release");
     const out = join(dir, "merrymen_vault.release.json");
     const summary = join(dir, "summary.md");
-    const ok = run(process.execPath, [script, out], { ...candidate, GITHUB_STEP_SUMMARY: summary });
+    const released = checkout(PRODUCTION);
+    assert.deepEqual(releaseSource(released), source);
+    const ok = run(process.execPath, [script, out, released], { ...candidate, GITHUB_STEP_SUMMARY: summary });
     assert.equal(ok.status, 0, ok.stderr);
-    assert.deepEqual(JSON.parse(readFileSync(out, "utf8")), releaseRecord(candidate));
+    assert.deepEqual(JSON.parse(readFileSync(out, "utf8")), releaseRecord(candidate, source));
     assert.equal(ok.stdout, `merrymen-vault-release-${commit}-run123.1: ${candidate.VAULT_ARTIFACT} holds the release, SHA-256 ${hash}\n`);
     const text = readFileSync(summary, "utf8");
-    assert.match(text, /^### merrymen_vault release\n\n- record: `merrymen-vault-release-c{40}-run123\.1`\n- bytes: `merrymen-vault-sbf-candidate-unconfirmed-c{40}-run123\.1` \(target\/deploy\/merrymen_vault\.so\)\n- SHA-256: `a{64}` \(tested and rebuilt\)\n- release: \*\*release\*\* /);
+    assert.match(text, /^### merrymen_vault release\n\n- record: `merrymen-vault-release-c{40}-run123\.1`\n- program ID: `TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA` \(not the local test program ID\)\n- bytes: `merrymen-vault-sbf-candidate-unconfirmed-c{40}-run123\.1` \(target\/deploy\/merrymen_vault\.so\)\n- SHA-256: `a{64}` \(tested and rebuilt\)\n- release: \*\*release\*\* /);
     rmSync(out);
-    const pr = run(process.execPath, [script, out], { ...candidate, GITHUB_EVENT_NAME: "pull_request", GITHUB_REF: "refs/pull/7/merge" });
+    // A source that declares the local test program ID: exit 1, nothing written.
+    const local = run(process.execPath, [script, out, checkout(LOCAL)], candidate);
+    assert.equal(local.status, 1);
+    assert.match(local.stderr, /^::error::lib\.rs declares the local test program ID /m);
+    assert.equal(existsSync(out), false);
+    // By default it reads this checkout: refused exactly while lib.rs declares the local test ID.
+    const own = releaseSource();
+    assert.deepEqual(own, { programId: declaredProgramId(readFileSync(join(repo, "contracts/solana/programs/merrymen-vault/src/lib.rs"), "utf8")), localTestId: LOCAL });
+    const here = run(process.execPath, [script, out], candidate);
+    assert.equal(here.status, own.programId === LOCAL ? 1 : 0, here.stderr);
+    rmSync(out, { force: true });
+    const pr = run(process.execPath, [script, out, released], { ...candidate, GITHUB_EVENT_NAME: "pull_request", GITHUB_REF: "refs/pull/7/merge" });
     assert.equal(pr.status, 1);
     assert.match(pr.stderr, /^::error::not a push or manual run on refs\/heads\/main of millw14\/merrymen/m);
     assert.equal(existsSync(out), false);
-    const differs = run(process.execPath, [script, out], { ...candidate, VAULT_REBUILT_SHA256: "b".repeat(64) });
+    const differs = run(process.execPath, [script, out, released], { ...candidate, VAULT_REBUILT_SHA256: "b".repeat(64) });
     assert.equal(differs.status, 1);
     assert.equal(existsSync(out), false);
     assert.equal(run(process.execPath, [script], candidate).status, 2);
+    assert.equal(run(process.execPath, [script, out, released, "extra"], candidate).status, 2);
   });
 });
 
@@ -1486,10 +1689,10 @@ describe("solana-linux-manifest.mjs", () => {
     const mainRun = { GITHUB_REPOSITORY: "millw14/merrymen", GITHUB_EVENT_NAME: "push", GITHUB_REF: "refs/heads/main", GITHUB_SHA: "c".repeat(40) };
     const prRun = { GITHUB_REPOSITORY: "millw14/merrymen", GITHUB_EVENT_NAME: "pull_request", GITHUB_REF: "refs/pull/7/merge" };
     /** What the job holds after build.sh --record: this build's manifest, and the record step's record (its release not yet decided). */
-    const build = bytes => {
+    const build = (bytes, programId = PRODUCTION) => {
       writeFileSync(join(dir, ARTIFACT), bytes);
       writeFileSync(manifest, text(linux({ "artifact.sha256": sha256(bytes), "artifact.bytes": bytes.length })));
-      writeFileSync(recordPath, `${JSON.stringify({ program: "merrymen_vault", sha256: sha256(bytes), release: releaseStatus({}) }, null, 2)}\n`);
+      writeFileSync(recordPath, `${JSON.stringify({ program: "merrymen_vault", programId, localTestId: LOCAL, sha256: sha256(bytes), release: releaseStatus({}) }, null, 2)}\n`);
     };
     const report = (extra, summary = join(fresh("summary"), "summary.md")) => {
       const r = run(process.execPath, [script, "report", dir, recordPath], { ...extra, GITHUB_STEP_SUMMARY: summary });
@@ -1502,7 +1705,13 @@ describe("solana-linux-manifest.mjs", () => {
     assert.equal(none.status, 0, none.stderr);
     assert.equal(none.stdout, "not-a-release\n");
     assert.match(none.stderr, /^::notice title=Linux build manifest::No build-manifests\/Linux-x86_64\.json is committed.*The artifact is uploaded as not-a-release \(no Linux build manifest is committed yet\)\.$/m);
-    assert.deepEqual(none.record.linuxManifest, { file: LINUX_MANIFEST, status: "uncommitted", problem: null });
+    // The line to end the manifest's commit message with: the run and image that built it, which the artifact's expiry would lose.
+    const noneTrailer = manifestTrailer({ manifest: JSON.parse(readFileSync(manifest, "utf8")), run: provenance(mainRun), image: null });
+    assert.equal(noneTrailer, `${MANIFEST_TRAILER}: run unknown.unknown of millw14/merrymen (push on refs/heads/main at ${"c".repeat(40)}), `
+      + `runner image unknown unknown, artifact ${soSha} (${so.length} bytes), source digest ${darwin.source.digest}`);
+    assert.deepEqual(none.record.linuxManifest, { file: LINUX_MANIFEST, status: "uncommitted", problem: null, commitTrailer: noneTrailer });
+    assert.match(none.stderr, new RegExp(`^If this manifest is committed \\(after review, never just to make the comparison pass\\), end that commit's message with this line, .*: ${MANIFEST_TRAILER}: run unknown`, "m"));
+    assert.ok(none.summary.includes(`\n\n    ${noneTrailer}\n`), none.summary);
     assert.equal(none.record.release.label, "not-a-release");
     assert.equal(none.record.program, "merrymen_vault", "the rest of the record is kept");
 
@@ -1513,16 +1722,38 @@ describe("solana-linux-manifest.mjs", () => {
     const matches = report(mainRun);
     assert.equal(matches.status, 0, matches.stderr);
     assert.equal(matches.stdout, "candidate-unconfirmed\n");
-    assert.deepEqual(matches.record.release, releaseStatus({ repository: "millw14/merrymen", event: "push", ref: "refs/heads/main" }, "matches"));
+    assert.deepEqual(matches.record.release, releaseStatus({ repository: "millw14/merrymen", event: "push", ref: "refs/heads/main" }, "matches", { programId: PRODUCTION, localTestId: LOCAL }));
     assert.equal(matches.record.release.candidate, true);
     assert.match(matches.summary, /^### Linux build manifest\n\nThe pinned Linux build matches the committed build-manifests\/Linux-x86_64\.json: /);
     assert.match(matches.summary, /^- release: \*\*release candidate, unconfirmed until app passes\*\* \(a run on main whose pinned Linux build matched the committed manifest\)\. A release artifact comes only/m);
     assert.match(matches.stderr, /The artifact is uploaded as candidate-unconfirmed \(a run on main whose pinned Linux build matched the committed manifest\)\.$/m);
+    // Nothing to commit when it matches.
+    assert.equal(matches.record.linuxManifest.commitTrailer, null);
+    for (const out of [matches.stderr, matches.summary]) assert.ok(!out.includes(MANIFEST_TRAILER), out);
     build(so);
     const pr = report(prRun);
     assert.equal(pr.status, 0, pr.stderr);
     assert.equal(pr.stdout, "not-a-release\n");
     assert.equal(pr.record.linuxManifest.status, "matches");
+
+    // The same matching build on main, but of the local test program ID: not-a-release,
+    // so solana · release never runs for it. Its committed manifest is a baseline only.
+    build(so, LOCAL);
+    const local = report(mainRun);
+    assert.equal(local.status, 0, local.stderr);
+    assert.equal(local.stdout, "not-a-release\n");
+    assert.equal(local.record.linuxManifest.status, "matches");
+    assert.deepEqual([local.record.release.candidate, local.record.release.reason], [false, "it declares the local test program id, which the live runtime refuses"]);
+    assert.match(local.stderr, /The artifact is uploaded as not-a-release \(it declares the local test program id, which the live runtime refuses\)\.$/m);
+    // A record that does not name both IDs (an older record script) is never a candidate either.
+    build(so);
+    const record = JSON.parse(readFileSync(recordPath, "utf8"));
+    delete record.localTestId;
+    writeFileSync(recordPath, JSON.stringify(record));
+    const unchecked = report(mainRun);
+    assert.equal(unchecked.status, 0, unchecked.stderr);
+    assert.equal(unchecked.stdout, "not-a-release\n");
+    assert.equal(unchecked.record.release.reason, "its program id was not compared with the local test program id");
 
     // A main run whose build differs from the committed manifest: uploaded as
     // not-a-release, the step passes, and compare (the last step) fails.
@@ -1537,6 +1768,20 @@ describe("solana-linux-manifest.mjs", () => {
     assert.deepEqual([differs.record.release.candidate, differs.record.release.label], [false, "not-a-release"]);
     assert.match(differs.summary, /^- release: \*\*not a release artifact\*\* \(its pinned Linux build differs from the committed manifest\)/m);
     assert.equal(run(process.execPath, [script, "compare", dir]).status, 1);
+    // The warning names the runner image the record holds: it is not digest-pinned and may be what changed.
+    build(other);
+    const withImage = JSON.parse(readFileSync(recordPath, "utf8"));
+    withImage.runnerImage = runnerImage({ ImageOS: "ubuntu24", ImageVersion: "20251012.1.0" });
+    writeFileSync(recordPath, JSON.stringify(withImage));
+    const imaged = report(mainRun);
+    assert.equal(imaged.status, 0, imaged.stderr);
+    assert.match(imaged.stderr, /\(its pinned Linux build differs from the committed manifest\)\. This run's runner image: ubuntu24 20251012\.1\.0 \(not digest-pinned\); if the program source and toolchain pins did not change, the image may have: investigate before committing anything\. The job's last step fails on this\.$/m);
+    assert.deepEqual(imaged.record.runnerImage, withImage.runnerImage, "report keeps the record's image");
+    // A manifest that differs may be committed on purpose: its commit line names this run's image.
+    assert.equal(imaged.record.linuxManifest.commitTrailer,
+      manifestTrailer({ manifest: JSON.parse(readFileSync(manifest, "utf8")), run: provenance(mainRun), image: withImage.runnerImage }));
+    assert.match(imaged.record.linuxManifest.commitTrailer, /, runner image ubuntu24 20251012\.1\.0, artifact [0-9a-f]{64} \(/);
+    assert.ok(imaged.summary.includes(`\n\n    ${imaged.record.linuxManifest.commitTrailer}\n`), imaged.summary);
 
     // A main run that deleted the committed manifest: not-a-release too.
     gitIn("rm", "-q", "-f", "contracts/solana/build-manifests/Linux-x86_64.json");
@@ -1547,6 +1792,7 @@ describe("solana-linux-manifest.mjs", () => {
     assert.equal(removed.stdout, "not-a-release\n");
     assert.equal(removed.record.linuxManifest.status, "removed");
     assert.equal(removed.record.release.reason, "the committed Linux build manifest was deleted");
+    assert.equal(removed.record.linuxManifest.commitTrailer, null, "restored, not committed anew");
 
     // Errors fail the step, so nothing is uploaded: a record for another
     // artifact, a missing record, no recorded manifest.
@@ -1561,6 +1807,19 @@ describe("solana-linux-manifest.mjs", () => {
     assert.match(missing.stderr, /^::error::cannot read the build record/m);
     rmSync(manifest);
     assert.equal(run(process.execPath, [script, "report", dir, recordPath], mainRun).status, 1);
+  });
+
+  it("manifestTrailer names the run, runner image and artifact on one line, unknown parts as unknown", () => {
+    const m = linux({ "artifact.sha256": soSha, "artifact.bytes": so.length });
+    const run = { repository: "millw14/merrymen", event: "push", ref: "refs/heads/main", commit: "d".repeat(40), runId: "123", runAttempt: "2" };
+    assert.equal(manifestTrailer({ manifest: m, run, image: runnerImage({ ImageOS: "ubuntu24", ImageVersion: "20251012.1.0" }) }),
+      `Vault-Linux-Manifest: run 123.2 of millw14/merrymen (push on refs/heads/main at ${"d".repeat(40)}), runner image ubuntu24 20251012.1.0, `
+      + `artifact ${soSha} (${so.length} bytes), source digest ${m.source.digest}`);
+    assert.equal(manifestTrailer({ manifest: m }),
+      `Vault-Linux-Manifest: run unknown.unknown of unknown (unknown on unknown at unknown), runner image unknown unknown, `
+      + `artifact ${soSha} (${so.length} bytes), source digest ${m.source.digest}`);
+    // A git trailer: one line, "token: value".
+    assert.match(manifestTrailer({ manifest: m, run }), /^Vault-Linux-Manifest: [^\n]+$/);
   });
 
   it("assess: a manifest HEAD deleted while its first parent has one is removed, and fails the comparison", () => {

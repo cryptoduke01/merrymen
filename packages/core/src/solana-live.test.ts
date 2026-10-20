@@ -4,6 +4,7 @@ import { createHash, createPrivateKey, createPublicKey } from "node:crypto";
 import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join as pathJoin } from "node:path";
+import { pathToFileURL } from "node:url";
 import { address, getProgramDerivedAddress } from "@solana/kit";
 import {
   base58Decode,
@@ -378,6 +379,21 @@ const CONTRACT = pathJoin(
   "solana",
 );
 const contractFile = (p: string) => readFileSync(pathJoin(CONTRACT, p), "utf8");
+/**
+ * The program id lib.rs declares (declare_id!), parsed by CI's own build
+ * record (scripts/ci/solana-program-record.mjs declaredProgramId). The
+ * runtime fixtures below name it, so a reviewed declare_id change (the
+ * production id) only needs them rewritten, never this code changed.
+ * SOLANA_VAULT_LOCAL_TEST_PROGRAM stays the id the TS-only tests above use and
+ * the one the live runtime refuses.
+ */
+async function declaredVaultProgram(): Promise<string> {
+  const script = pathJoin(CONTRACT, "..", "..", "scripts", "ci", "solana-program-record.mjs");
+  const { declaredProgramId } = (await import(pathToFileURL(script).href)) as {
+    declaredProgramId(libRs: string): string;
+  };
+  return declaredProgramId(contractFile("programs/merrymen-vault/src/lib.rs"));
+}
 /** Active `key = value` lines of one TOML table, comments dropped. */
 function tomlTable(text: string, table: string): Map<string, string> {
   const out = new Map<string, string>();
@@ -458,7 +474,7 @@ function fixtureRoute(
   return data;
 }
 async function buildAbiFixture(): Promise<string> {
-  const program = programAddress;
+  const program = await declaredVaultProgram();
   const usdg = SOLANA_USDG_MINT;
   const wsol = live.SOLANA_WRAPPED_SOL_MINT;
   const classic = live.SOLANA_CLASSIC_TOKEN_PROGRAM;
@@ -687,6 +703,23 @@ describe("Solana custody instruction fixture", () => {
       "stale: rerun with MERRYMEN_WRITE_SOLANA_ABI_FIXTURE=1, then contracts/solana/test.sh",
     );
   });
+  it("names the program lib.rs declares, as the recovery transactions do", async () => {
+    // custody.rs and tests/recovery.rs run both fixtures against the compiled program and
+    // require its declare_id. A reviewed declare_id change (the production id) rewrites
+    // both: MERRYMEN_WRITE_SOLANA_ABI_FIXTURE=1 here and MERRYMEN_WRITE_SOLANA_RECOVERY_FIXTURE=1
+    // in worker/src/solana-recover.test.ts, then contracts/solana/test.sh and build.sh --record.
+    const declared = await declaredVaultProgram();
+    const abi = JSON.parse(readFileSync(ABI_FIXTURE, "utf8")) as {
+      program: string;
+      steps: { programId: string }[];
+    };
+    assert.equal(abi.program, declared);
+    for (const step of abi.steps) assert.equal(step.programId, declared);
+    const recovery = contractFile(
+      "runtime-tests/fixtures/recovery-transactions.txt",
+    );
+    assert.deepEqual(recovery.match(/^program \S+$/gm), [`program ${declared}`]);
+  });
   it("derives the seeded identities like ed25519", () => {
     // RFC 8032 test 1 secret key gives its public key; ours use the same derivation.
     const pkcs8 = Buffer.concat([
@@ -831,5 +864,159 @@ describe("Solana custody build manifest", () => {
     if (run.error) return t.skip("bash is not available");
     assert.equal(run.status, 0, run.stderr);
     assert.equal(run.stdout.trim(), contractSourceDigest());
+  });
+});
+
+describe("Solana vault USDG mint screen", () => {
+  it("names exactly the extensions lib.rs check_mint accepts, and every one the mainnet mint carries", () => {
+    const lib = contractFile("programs/merrymen-vault/src/lib.rs");
+    const start = lib.indexOf("fn check_mint(");
+    const end = lib.indexOf("\nfn ", start + 1);
+    assert.ok(start >= 0 && end > start, "check_mint not found in lib.rs");
+    const accepted = [
+      ...new Set(
+        [...lib.slice(start, end).matchAll(/ExtensionType::([A-Za-z]+)/g)].map(
+          (m) => m[1]![0]!.toLowerCase() + m[1]!.slice(1),
+        ),
+      ),
+    ].sort();
+    assert.deepEqual(accepted, [...live.SOLANA_VAULT_USDG_MINT_EXTENSIONS].sort());
+    assert.ok(Object.isFrozen(live.SOLANA_VAULT_USDG_MINT_EXTENSIONS));
+    const mainnet = JSON.parse(
+      contractFile("runtime-tests/fixtures/usdg-mainnet-mint.json"),
+    ) as { address: string; decoded: { extensions: string[] } };
+    assert.equal(mainnet.address, SOLANA_USDG_MINT);
+    for (const name of mainnet.decoded.extensions)
+      assert.ok(
+        live.SOLANA_VAULT_USDG_MINT_EXTENSIONS.includes(
+          name[0]!.toLowerCase() + name.slice(1),
+        ),
+        name,
+      );
+  });
+});
+
+describe("Solana vault USDG mint verdict (check_mint's USDG branch)", () => {
+  type AgaveAccount = { data: { parsed: { info: Record<string, unknown> } } };
+  const fixture = JSON.parse(contractFile("runtime-tests/fixtures/usdg-mainnet-mint.json")) as {
+    variants: { name: string; vault: "accepts" | "refuses"; sha256: string }[];
+  };
+  const agave = JSON.parse(contractFile("runtime-tests/fixtures/usdg-mainnet-mint.jsonparsed.json")) as {
+    variants: { name: string; sha256: string; address: string }[];
+    ledgerToolOutput: { accounts: { pubkey: string; account: AgaveAccount }[] };
+  };
+  /** The mint info Agave's decoder printed for a fixture variant. */
+  const info = (name: string): Record<string, unknown> => {
+    const variant = fixture.variants.find((v) => v.name === name)!;
+    const placed = agave.variants.find((v) => v.name === name && v.sha256 === variant.sha256)!;
+    return agave.ledgerToolOutput.accounts.find((a) => a.pubkey === placed.address)!.account.data.parsed.info;
+  };
+  const copy = (value: Record<string, unknown>) => JSON.parse(JSON.stringify(value)) as {
+    isInitialized?: unknown; decimals?: unknown; extensions?: { extension: string; state?: Record<string, any> }[] | unknown;
+  };
+  const ext = (mint: ReturnType<typeof copy>, name: string) =>
+    (mint.extensions as { extension: string; state: Record<string, any> }[]).find((e) => e.extension === name)!;
+
+  it("gives the compiled vault's verdict on every variant of the mainnet mint, as Agave decodes it", () => {
+    const reasons = new Map<string, string | null>([
+      ["as read", null],
+      ["a newer transfer fee of 25 bps with no maximum", "transfer-fee"],
+      ["a newer transfer fee of 25 bps with the largest maximum", "transfer-fee"],
+      ["a transfer hook program (the Memo program)", "transfer-hook"],
+      ["DefaultAccountState Initialized appended", "extension:defaultAccountState"],
+      ["GroupPointer appended (the issuer as authority, the mint as group)", "extension:groupPointer"],
+      ["9 decimals", "decimals"],
+    ]);
+    assert.deepEqual(fixture.variants.map((v) => v.name).sort(), [...reasons.keys()].sort());
+    for (const variant of fixture.variants) {
+      // custody.rs runs a buy and an exit through the compiled vault for each verdict.
+      const refusal = live.solanaVaultUsdgMintRefusal(info(variant.name));
+      assert.equal(refusal === null ? "accepts" : "refuses", variant.vault, variant.name);
+      assert.equal(refusal, reasons.get(variant.name), variant.name);
+    }
+  });
+  it("refuses any basis points older or newer, an unknown, repeated or unreadable extension, and fails closed", () => {
+    const read = () => copy(info("as read"));
+    assert.equal(live.solanaVaultUsdgMintRefusal(read()), null);
+    const refused: [string, (mint: ReturnType<typeof copy>) => void, string][] = [
+      ["an older fee of 1 bp", (m) => { ext(m, "transferFeeConfig").state.olderTransferFee.transferFeeBasisPoints = 1; }, "transfer-fee"],
+      ["a newer fee of 1 bp with no maximum", (m) => { ext(m, "transferFeeConfig").state.newerTransferFee.transferFeeBasisPoints = 1; }, "transfer-fee"],
+      ["basis points as text", (m) => { ext(m, "transferFeeConfig").state.newerTransferFee.transferFeeBasisPoints = "0"; }, "unreadable"],
+      ["no newer fee", (m) => { delete ext(m, "transferFeeConfig").state.newerTransferFee; }, "unreadable"],
+      ["a fee extension without state", (m) => { delete (ext(m, "transferFeeConfig") as { state?: unknown }).state; }, "unreadable"],
+      ["a hook program", (m) => { ext(m, "transferHook").state.programId = live.SOLANA_JUPITER_PROGRAM; }, "transfer-hook"],
+      ["a hook without its program field", (m) => { delete ext(m, "transferHook").state.programId; }, "transfer-hook"],
+      ["a hook extension without state", (m) => { delete (ext(m, "transferHook") as { state?: unknown }).state; }, "unreadable"],
+      ["an extension Agave cannot parse", (m) => { (m.extensions as unknown[]).push({ extension: "unparseableExtension" }); }, "extension:unparseableExtension"],
+      ["pausable", (m) => { (m.extensions as unknown[]).push({ extension: "pausableConfig", state: {} }); }, "extension:pausableConfig"],
+      ["a repeated extension", (m) => { (m.extensions as unknown[]).push(ext(m, "metadataPointer")); }, "unreadable"],
+      ["an untagged extension", (m) => { (m.extensions as unknown[]).push({ state: {} }); }, "unreadable"],
+      ["extensions that are not a list", (m) => { m.extensions = {}; }, "unreadable"],
+      ["an uninitialized mint", (m) => { m.isInitialized = false; }, "not-initialized"],
+      ["decimals as text", (m) => { m.decimals = "6"; }, "decimals"],
+    ];
+    for (const [label, change, reason] of refused) {
+      const mint = read();
+      change(mint);
+      assert.equal(live.solanaVaultUsdgMintRefusal(mint), reason, label);
+    }
+    // A hook authority, a fee authority and a fee maximum or epoch alone are accepted, as check_mint does.
+    const powers = read();
+    ext(powers, "transferFeeConfig").state.newerTransferFee = { epoch: 9999, maximumFee: 18446744073709552000, transferFeeBasisPoints: 0 };
+    assert.equal(live.solanaVaultUsdgMintRefusal(powers), null);
+    // Agave leaves out an empty extension list: a USDG mint with none is accepted.
+    const bare = read();
+    delete bare.extensions;
+    assert.equal(live.solanaVaultUsdgMintRefusal(bare), null);
+    for (const value of [undefined, null, [], "mint", 6]) assert.equal(live.solanaVaultUsdgMintRefusal(value), "not-initialized");
+  });
+  it("checks a field of exactly the extensions check_mint checks one of", () => {
+    const lib = contractFile("programs/merrymen-vault/src/lib.rs");
+    const body = lib.slice(lib.indexOf("fn check_mint("), lib.indexOf("\nfn ", lib.indexOf("fn check_mint(") + 1));
+    // The arms with a require! of their own; every other accepted extension is `=> {}`.
+    const checked = [...body.matchAll(/ExtensionType::([A-Za-z]+) => \{\s*\n\s*let /g)].map((m) => m[1]);
+    assert.deepEqual(checked, ["TransferFeeConfig", "TransferHook"]);
+    assert.match(body, /older_transfer_fee\.transfer_fee_basis_points\) == 0\s*&& u16::from\(fee\.newer_transfer_fee\.transfer_fee_basis_points\) == 0/);
+    assert.match(body, /Option::<Pubkey>::from\(hook\.program_id\)\.is_none\(\)/);
+    assert.match(body, /require!\(mint\.is_initialized, VaultError::Mint\)/);
+    assert.match(body, /mint\.key\(\) == USDG && program\.key\(\) == spl_token_2022::ID && mint\.decimals == 6/);
+  });
+});
+
+describe("Solana vault release pin", () => {
+  it("lists only well-formed releases, one per program, never the local test program", () => {
+    assert.ok(Object.isFrozen(live.SOLANA_VAULT_RELEASES));
+    const seen = new Set<string>();
+    for (const release of live.SOLANA_VAULT_RELEASES) {
+      const bytes = base58Decode(release.programId);
+      assert.ok(
+        bytes && bytes.length === 32 && base58Encode(bytes) === release.programId,
+        release.programId,
+      );
+      assert.notEqual(release.programId, live.SOLANA_VAULT_LOCAL_TEST_PROGRAM);
+      assert.match(release.sha256, /^[0-9a-f]{64}$/);
+      assert.ok(!seen.has(release.programId), `${release.programId} listed twice`);
+      seen.add(release.programId);
+    }
+  });
+  it("accepts only a listed program with its released hash, and checks nothing before a release", () => {
+    const listed = base58Encode(new Uint8Array(32).fill(8));
+    const other = base58Encode(new Uint8Array(32).fill(9));
+    const pin = [{ programId: listed, sha256: "1".repeat(64) }];
+    assert.equal(live.solanaVaultReleaseRefusal(listed, "1".repeat(64), pin), null);
+    assert.match(
+      live.solanaVaultReleaseRefusal(other, "1".repeat(64), pin) ?? "",
+      /^The configured Solana vault program is not a released Merrymen vault program\.$/,
+    );
+    assert.match(
+      live.solanaVaultReleaseRefusal(listed, "2".repeat(64), pin) ?? "",
+      /^The configured Solana vault binary hash is not the released hash of that program\.$/,
+    );
+    assert.equal(live.solanaVaultReleaseRefusal(other, "2".repeat(64), []), null);
+    // The shipped pin is the default.
+    assert.equal(
+      live.solanaVaultReleaseRefusal(other, "2".repeat(64)) === null,
+      live.SOLANA_VAULT_RELEASES.length === 0,
+    );
   });
 });

@@ -50,11 +50,19 @@ const DISC = {
 type Account = { owner: string; lamports: bigint; data: Buffer; executable?: boolean };
 const LOADER = "BPFLoaderUpgradeab1e11111111111111111111111";
 /**
+ * The contract's own program id: lib.rs's declare_id!, parsed by CI's build record
+ * (scripts/ci/solana-program-record.mjs). The runtime fixture at the end of this file names it,
+ * so a reviewed declare_id change (the production id) only rewrites that fixture.
+ */
+const { declaredProgramId } = await import(new URL("../../scripts/ci/solana-program-record.mjs", import.meta.url).href) as {
+  declaredProgramId(libRs: string): string };
+const VAULT_PROGRAM_ID = declaredProgramId(readFileSync(new URL("../../contracts/solana/programs/merrymen-vault/src/lib.rs", import.meta.url), "utf8"));
+/**
  * The deployed fixture binary. Like a real build it embeds its program id's 32 bytes (declare_id!): here
- * both ids the tests release, PROGRAM and the contract's own (VAULT_PROGRAM_ID, written out here because it is declared below).
+ * both ids the tests release, PROGRAM and the contract's own (VAULT_PROGRAM_ID).
  */
 const BINARY = Buffer.concat([Buffer.from("merrymen-vault-fixture-binary".repeat(10)), Buffer.from(base58Decode(PROGRAM)!),
-  Buffer.from(base58Decode("EUzYVniKtgNNgFweMtRA9vciTWtE8MDTRfh6ai6VvXoU")!)]);
+  Buffer.from(base58Decode(VAULT_PROGRAM_ID)!)]);
 const BINARY_SHA = createHash("sha256").update(BINARY).digest("hex");
 /** Tests run as if PROGRAM were a released program with BINARY deployed, unless they say otherwise. */
 const RELEASED = [{ programId: PROGRAM, sha256: BINARY_SHA }];
@@ -978,7 +986,6 @@ describe("solana-recover program trust", () => {
  * Token-2022 and ATA programs: the exact bytes this tool signs and sends for a funded vault
  * with a live session and no owner token accounts yet.
  */
-const VAULT_PROGRAM_ID = "EUzYVniKtgNNgFweMtRA9vciTWtE8MDTRfh6ai6VvXoU"; // declare_id! in contracts/solana
 const RECOVERY_FIXTURE = fileURLToPath(new URL("../../contracts/solana/runtime-tests/fixtures/recovery-transactions.txt", import.meta.url));
 const FUNDED = { usdg: 12_345_678n, wsol: 500_000_000n, unsynced: 100_000_000n, solExcess: 3_000_000n };
 
