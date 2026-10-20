@@ -1,7 +1,7 @@
 {
   "about": "Reviewed SBF build of merrymen_vault. Written by contracts/solana/build.sh --record; checked by packages/core/src/solana-live.test.ts.",
   "source": {
-    "digest": "0fd0275e602b57a05e75d4fc87b4c84ecb11eb06a72959b5267dc0b515a9f6c1",
+    "digest": "354b183a644b7dcdd7b5daaaae4bc9f02dee5309cedf3365e0c723e50113ad5a",
     "rule": "sha256 of the sorted lines <sha256>  <path> for Cargo.toml, Cargo.lock, build.sh, programs/merrymen-vault/Cargo.toml and programs/merrymen-vault/src/**/*.rs, relative to contracts/solana"
   },
   "program": {
@@ -21,8 +21,8 @@
   },
   "artifact": {
     "file": "target/deploy/merrymen_vault.so",
-    "bytes": 364712,
-    "sha256": "34b4fe229889fb6b8703eb44b408a481416186c3f1e379b8e36aa2908a21da7b",
+    "bytes": 364744,
+    "sha256": "562f0849c452f21e46d3d8c9c1237178062447d5c5be3d13fc2ae954aad7309e",
     "reproduced": "a second build from a copy in another directory, identical bytes"
   }
 }

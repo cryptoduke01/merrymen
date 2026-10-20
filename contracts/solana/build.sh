@@ -86,6 +86,27 @@ mkdir -p "${CARGO_HOME:-$HOME/.cargo}"
 CARGO_HOME="$(cd -- "${CARGO_HOME:-$HOME/.cargo}" && pwd -P)"
 export CARGO_HOME
 
+# Cargo reads .cargo/config.toml (and the legacy .cargo/config) in the directory it runs in
+# and in every parent, and cargo-build-sbf runs cargo in the program's directory. A
+# [profile.release] or [build] table in any of them (overflow-checks, opt-level, rustflags)
+# changes the artifact without changing the reviewed source, which the source digest does
+# not cover. Only $CARGO_HOME's own config.toml may apply; CI's is empty.
+refuse_cargo_config_above() {
+  local dir="$1" found
+  while :; do
+    for found in "$dir/.cargo/config.toml" "$dir/.cargo/config"; do
+      if { [ -e "$found" ] || [ -L "$found" ]; } && [ "$(cd -- "$dir/.cargo" && pwd -P)" != "$CARGO_HOME" ]; then
+        echo "error: remove $found for a reproducible build: cargo applies it to the vault build, and the source digest does not cover it" >&2
+        exit 1
+      fi
+    done
+    [ "$dir" != / ] || return 0
+    dir="$(dirname -- "$dir")"
+  done
+}
+refuse_cargo_config_above "$script_dir/programs/merrymen-vault"
+refuse_cargo_config_above "$(pwd -P)"
+
 build_sbf="${CARGO_BUILD_SBF:-cargo-build-sbf}"
 if ! command -v "$build_sbf" >/dev/null 2>&1; then
   echo "error: cargo-build-sbf $AGAVE_VERSION not found (install agave $AGAVE_VERSION and put its bin on PATH)" >&2
@@ -151,6 +172,7 @@ trap 'rm -rf "$second"' EXIT
 mkdir "$second/src"
 (cd "$script_dir" && tar --exclude=./target --exclude=./runtime-tests/target -cf - .) |
   (cd "$second/src" && tar -xf -)
+refuse_cargo_config_above "$second/src/programs/merrymen-vault"
 build_into "$second/src/programs/merrymen-vault/Cargo.toml" "$second/target" "$second/deploy"
 if ! cmp "$artifact" "$second/deploy/merrymen_vault.so"; then
   echo "error: two clean builds of the same source differ; nothing recorded" >&2
