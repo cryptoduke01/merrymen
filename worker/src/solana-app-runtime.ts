@@ -107,11 +107,11 @@ export const SOLANA_STATUS_FEE_PAYER_THRESHOLD_MISCONFIGURED = "The fee payer wa
  * Merrymen: an owner withdrawal made with the recovery tool or the owner's own
  * wallet, say. Trading and automated exits are held, never sized from a
  * balance that is not there (admission refuses a shortfall too); the owner's
- * revoke and withdrawals stay open. The agent says it to operators as an
+ * revoke and withdrawals of what the vault holds stay open. The agent says it to operators as an
  * [alert] (vault-below-book). Nothing books an outflow automatically.
  */
 export const SOLANA_STATUS_BELOW_BOOK = "Your vault holds less than its recorded trades: tokens left it outside Merrymen (for example a withdrawal made with the recovery tool or your own wallet). "
-  + "Trading and automated exits are held until the book is reconciled with the vault, so nothing trades on a balance that is not there. Revoking and withdrawing still work.";
+  + "Trading and automated exits are held until the book is reconciled with the vault, so nothing trades on a balance that is not there. Revoking, and withdrawing what the vault holds, still work.";
 /**
  * A failed live status read as the owner sees it. This module's own refusals,
  * and the two RPC problems only an operator can fix (no independent fallback
@@ -743,15 +743,16 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       priorityFeeLamports: (priority?.fee ?? 0n).toString(), computeUnitLimit: priority?.units ?? null };
   }
   /**
-   * The Pyth SOL/USD price as EVERY provider serves it, each read at or after a
-   * slot of its own (minContextSlot) or, without one, its own fresh confirmed
-   * slot. A refusal from either provider refuses the whole read: a lying or
-   * broken provider can withhold a price, never choose it. Callers take the
-   * stricter or the lower of the answers, whichever is conservative for them.
+   * The Pyth SOL/USD price as EVERY provider serves it, each read at or after
+   * its own fresh confirmed slot. A refusal from either provider refuses the
+   * whole read: a lying or broken provider can withhold a price, never choose
+   * it. Callers take the stricter or the lower of the answers, whichever is
+   * conservative for them. (A trade reads it beside its balances, at the
+   * prepared slot: assessRisk.)
    */
-  async function referencePrices(live: SolanaLiveRpc, generation: SolanaPythGeneration, minContextSlot?: number): Promise<SolanaReferencePrice[]> {
+  async function referencePrices(live: SolanaLiveRpc, generation: SolanaPythGeneration): Promise<SolanaReferencePrice[]> {
     return readSolanaEachProvider(live, async read =>
-      readSolanaReferencePrice(read, minContextSlot ?? integer(await read("getSlot", [{ commitment: "confirmed" }])), now(), { generation }));
+      readSolanaReferencePrice(read, integer(await read("getSlot", [{ commitment: "confirmed" }])), now(), { generation }));
   }
   /**
    * What withdrawing `amountRaw` of WSOL is worth now: an executable WSOL→USDG

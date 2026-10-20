@@ -439,8 +439,6 @@ export async function readSolanaVaultBalancesQuorum(rpc: SolanaLiveRpc, vault: s
   if (!views.agreed) return fail();
   return { slot: solanaQuorumSlot(views.values), cashUsdg: views.value.cashUsdg, wsolRaw: views.value.wsolRaw };
 }
-/** The signed execute_swap's deadline (unix ms). From then on the program refuses these bytes. */
-export function solanaSignedDeadlineMs(submission: SolanaSignedSubmission): number { return signedDeadlineMs(submission); }
 /** execute_swap runs only while the cluster clock is in [deadline - this, deadline): `deadline <= now + 30` (lib.rs). */
 export const SOLANA_SWAP_DEADLINE_WINDOW_SECONDS = 30n;
 /**
@@ -451,6 +449,7 @@ export const SOLANA_SWAP_DEADLINE_WINDOW_SECONDS = 30n;
 export function solanaDebitWindowStart(submission: SolanaSignedSubmission): bigint {
   return BigInt(Math.floor(signedDeadlineMs(submission) / 1000)) - SOLANA_SWAP_DEADLINE_WINDOW_SECONDS;
 }
+/** The signed execute_swap's deadline (unix ms). From then on the program refuses these bytes. */
 function signedDeadlineMs(submission: SolanaSignedSubmission): number {
   let data: Buffer | undefined;
   try {
