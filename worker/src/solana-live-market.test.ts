@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { getBase58Decoder } from "@solana/kit";
 import { SOLANA_USDG_MINT, TOKEN_2022_PROGRAM } from "../../packages/core/src/ids";
 import { SOLANA_CLASSIC_TOKEN_PROGRAM, SOLANA_WRAPPED_SOL_MINT } from "../../packages/core/src/solana-live";
-import { createSolanaLiveMarket, JUPITER_SWAP_PROGRAM, validateJupiterCpi } from "./solana-live-market";
+import { createSolanaLiveMarket, JUPITER_SWAP_PROGRAM, SolanaLiveMarketError, validateJupiterCpi } from "./solana-live-market";
 const key = (n: number) => getBase58Decoder().decode(new Uint8Array(32).fill(n));
 function fixture() {
   const request = { requestId: "route-1", inputMint: SOLANA_USDG_MINT, outputMint: SOLANA_WRAPPED_SOL_MINT,
@@ -71,5 +71,67 @@ test("stale chain context and incoherent quote graph never produce a CPI", async
       rpc: { read: callback => callback(async () => 1100), send: async () => assert.fail("must not submit") },
       fetch: async () => Response.json(++requests === 1 ? f.rawQuote : f.rawBuild) });
     await assert.rejects(market.build(f.request)); if (!stale) assert.equal(requests, 1);
+  }
+});
+
+const code = (expected: SolanaLiveMarketError["code"]) => (error: unknown) => error instanceof SolanaLiveMarketError && error.code === expected;
+test("every refusal says why: a missing or unusable key is configuration, and nothing is asked of Jupiter", async () => {
+  const f = fixture();
+  for (const apiKey of [undefined, "", "   ", "bad key", "x".repeat(1025), "caf\u00e9"]) {
+    let requests = 0;
+    const market = createSolanaLiveMarket({ env: { MERRYMEN_SOLANA_RPC_MAINNET: "https://rpc.example/", ...(apiKey === undefined ? {} : { MERRYMEN_JUPITER_API_KEY: apiKey }) },
+      now: () => 100_000, rpc: { read: callback => callback(async () => 1000), send: async () => assert.fail("must not submit") },
+      fetch: async () => { requests++; return Response.json(f.rawQuote); } });
+    await assert.rejects(market.build(f.request), code("configuration"), JSON.stringify(apiKey));
+    assert.equal(requests, 0, JSON.stringify(apiKey));
+  }
+});
+test("a route shape the vault does not take is 'route'; an unusable or inconsistent answer is 'provider'", () => {
+  const route: Array<(f: ReturnType<typeof fixture>) => void> = [
+    // Another Jupiter route instruction.
+    f => { createHash("sha256").update("global:route").digest().subarray(0, 8).copy(f.data); f.rawBuild.swapInstruction.data = f.data.toString("base64"); },
+    f => { createHash("sha256").update("global:exact_out_route").digest().subarray(0, 8).copy(f.data); f.rawBuild.swapInstruction.data = f.data.toString("base64"); },
+    // Too large for the vault.
+    f => { f.rawBuild.swapInstruction.accounts.push(...Array.from({ length: 54 }, (_, i) => ({ pubkey: key(100 + i), isSigner: false, isWritable: false }))); },
+    f => { f.rawBuild.addressLookupTableAddresses = Array.from({ length: 9 }, (_, i) => key(60 + i)); },
+    f => { f.data.writeUInt32LE(65, 9); f.rawBuild.swapInstruction.data = f.data.toString("base64"); },
+    f => { f.rawBuild.swapInstruction.data = Buffer.alloc(901, 1).toString("base64"); },
+  ];
+  const provider: Array<(f: ReturnType<typeof fixture>) => void> = [
+    f => { (f.rawBuild as Record<string, unknown>).swapInstruction = null; },
+    f => { f.rawBuild.swapInstruction.programId = key(40); },
+    f => { f.rawBuild.swapInstruction.accounts.length = 10; },
+    f => { f.rawBuild.swapInstruction.data = "not base64!"; },
+    f => { f.rawBuild.swapInstruction.data = f.data.subarray(0, 30).toString("base64"); },
+    f => { f.data.writeBigUInt64LE(1n, 17); f.rawBuild.swapInstruction.data = f.data.toString("base64"); },
+    f => { f.data.writeBigUInt64LE(1n, 25); f.rawBuild.swapInstruction.data = f.data.toString("base64"); },
+    f => { f.data.writeUInt16LE(200, 33); f.rawBuild.swapInstruction.data = f.data.toString("base64"); },
+    f => { f.data[35] = 1; f.rawBuild.swapInstruction.data = f.data.toString("base64"); },
+    f => { f.data.writeUInt32LE(0, 9); f.rawBuild.swapInstruction.data = f.data.toString("base64"); },
+    f => { f.data.writeUInt32LE(5, 9); f.rawBuild.swapInstruction.data = f.data.toString("base64"); },
+    f => { f.rawBuild.swapInstruction.accounts[2]!.pubkey = key(40); },
+    f => { f.rawBuild.swapInstruction.accounts[4]!.isSigner = true; },
+    f => { f.rawBuild.swapInstruction.accounts[5]!.pubkey = "not a key"; },
+    f => { f.rawBuild.swapInstruction.accounts[10]!.pubkey = JUPITER_SWAP_PROGRAM; },
+    f => { (f.rawBuild as Record<string, unknown>).addressLookupTableAddresses = null; },
+    f => { f.rawBuild.addressLookupTableAddresses = [key(30), key(30)]; },
+  ];
+  for (const [expected, mutations] of [["route", route], ["provider", provider]] as const) {
+    mutations.forEach((mutate, index) => {
+      const f = fixture(); mutate(f);
+      assert.throws(() => validateJupiterCpi(f.rawBuild, f.request, f.quote), code(expected), `${expected} ${index}`);
+    });
+  }
+});
+test("a quote outside the RPC's slot window, an incoherent quote graph or a fee are 'provider', never 'route'", async () => {
+  for (const problem of ["stale", "graph", "fee", "exact-out"] as const) {
+    const f = fixture();
+    if (problem === "graph") f.rawQuote.routePlan[0]!.swapInfo.inAmount = "1";
+    if (problem === "fee") (f.rawQuote as Record<string, unknown>).platformFee = { amount: "5", feeBps: 1 };
+    if (problem === "exact-out") f.rawQuote.swapMode = "ExactOut";
+    const market = createSolanaLiveMarket({ env: { MERRYMEN_SOLANA_RPC_MAINNET: "https://rpc.example/", MERRYMEN_JUPITER_API_KEY: "test-key" }, now: () => 100_000,
+      rpc: { read: callback => callback(async () => problem === "stale" ? 1100 : 1000), send: async () => assert.fail("must not submit") },
+      fetch: async url => Response.json(String(url).includes("/quote?") ? f.rawQuote : f.rawBuild) });
+    await assert.rejects(market.build(f.request), code("provider"), problem);
   }
 });

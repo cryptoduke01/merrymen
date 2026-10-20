@@ -153,22 +153,28 @@ test("failures to use Solana's answer about a saved owner transaction are an unk
   assert.equal(signature.status, 400);
 });
 
-test("a live route that cannot be built is not 'no supported route': setup is unavailable, anything else is a neutral retry", async () => {
+test("a live route that cannot be built is answered by the builder's code: setup is unavailable, a provider fault is a neutral retry, and only a route shape is 'no supported route'", async () => {
   const key = process.env.MERRYMEN_JUPITER_API_KEY;
   try {
-    // The builder raises the same codeless error for a missing or invalid key and for a bad answer.
-    for (const value of [undefined, "", "   ", "bad key", "x".repeat(1025)]) {
+    // The code decides, not this process's settings: each answer is the same whatever the key here says.
+    for (const value of [undefined, "", "bad key", "configured-key"]) {
       if (value === undefined) delete process.env.MERRYMEN_JUPITER_API_KEY; else process.env.MERRYMEN_JUPITER_API_KEY = value;
-      const response = await solanaResponse(async () => { throw new SolanaLiveMarketError(); });
-      assert.equal(response.status, 503, JSON.stringify(value));
-      assert.deepEqual(await response.json(), { error: "Solana trading is not available.", ownerFacing: true }, JSON.stringify(value));
+      const setup = await solanaResponse(async () => { throw new SolanaLiveMarketError("configuration"); });
+      assert.equal(setup.status, 503, JSON.stringify(value));
+      assert.deepEqual(await setup.json(), { error: "Solana trading is not available.", ownerFacing: true }, JSON.stringify(value));
+      const provider = await solanaResponse(async () => { throw new SolanaLiveMarketError("provider"); });
+      const neutral = await provider.json() as { error: string };
+      assert.equal(provider.status, 503, JSON.stringify(value));
+      assert.equal(neutral.error, "A route for this trade could not be prepared right now. Nothing was sent. Preview again shortly.");
+      assert.doesNotMatch(neutral.error, /no supported route|another amount/i); ownerSafe(neutral.error);
+      const route = await solanaResponse(async () => { throw new SolanaLiveMarketError("route"); });
+      assert.equal(route.status, 409, JSON.stringify(value));
+      assert.deepEqual(await route.json(), { error: "No supported route is available for this trade right now. Nothing was sent. Preview again or try another amount.", ownerFacing: true });
     }
-    process.env.MERRYMEN_JUPITER_API_KEY = "configured-key";
-    const response = await solanaResponse(async () => { throw new SolanaLiveMarketError(); });
-    const body = await response.json() as { error: string };
-    assert.equal(response.status, 503);
-    assert.equal(body.error, "A route for this trade could not be prepared right now. Nothing was sent. Preview again shortly.");
-    assert.doesNotMatch(body.error, /no supported route|another amount/i); ownerSafe(body.error);
+    // A code this layer does not know is never 'no supported route'.
+    const unknown = await solanaResponse(async () => { throw new SolanaLiveMarketError("something-new" as SolanaLiveMarketError["code"]); });
+    assert.equal(unknown.status, 503);
+    assert.doesNotMatch((await unknown.json()).error, /no supported route|not available/i);
   } finally { if (key === undefined) delete process.env.MERRYMEN_JUPITER_API_KEY; else process.env.MERRYMEN_JUPITER_API_KEY = key; }
 });
 
