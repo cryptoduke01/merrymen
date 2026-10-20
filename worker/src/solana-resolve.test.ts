@@ -1,10 +1,12 @@
 import test, { type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { address, appendTransactionMessageInstructions, compileTransaction, createTransactionMessage, getBase58Encoder, getBase64EncodedWireTransaction, setTransactionMessageFeePayer,
+  setTransactionMessageLifetimeUsingBlockhash, type Blockhash } from "@solana/kit";
 import { DatabaseSync } from "node:sqlite";
 import { readFileSync } from "node:fs";
 import { base58Encode, CHAINS, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM } from "../../packages/core/src/ids";
-import { SOLANA_CLASSIC_TOKEN_PROGRAM, SOLANA_VAULT_LOCAL_TEST_PROGRAM, SOLANA_WRAPPED_SOL_MINT } from "../../packages/core/src/solana-live";
+import { SOLANA_CLASSIC_TOKEN_PROGRAM, SOLANA_VAULT_ACCOUNT_SIZE, SOLANA_VAULT_DISCRIMINATOR, SOLANA_VAULT_LOCAL_TEST_PROGRAM, SOLANA_WRAPPED_SOL_MINT } from "../../packages/core/src/solana-live";
 import { SqlSolanaBindingStore } from "../../web/src/lib/solana-binding-store";
 import { makePgDb, wrapSqlite, type Db } from "./db";
 import type { SolanaLiveSettlement, SolanaObservation, SolanaSignedSubmission } from "./solana-executor";
@@ -152,6 +154,96 @@ test("an expiry two providers prove is booked only while no provider has seen th
   assert.equal((await f.store.get(OWNER, "stuck-1"))!.status, "expired");
   // The sequence is free again for a new trade.
   const next = submission("after-expiry"); next.risk.slot = 1001; assert.equal(await f.store.recordSigned(next), true);
+});
+
+test("an agreed expiry books the lowest finalized slot any agreeing provider read at, never one provider's own (audit live-M3)", async t => {
+  const f = await fixture(t);
+  const views = providers({ primary: { settlement: { ...expiry(f.pending, "1201"), slot: 1_000_001_001 }, seen: false },
+    fallback: { settlement: { ...expiry(f.pending, "1250"), slot: 1002 }, seen: false } });
+  const result = await resolveSolanaPendingTrade({ db: f.db, tenant: TENANT, requestId: "stuck-1", providers: views.list, observe: views.observe, now: () => f.clock.value,
+    book: { operator: "milla", reason: "dropped" } });
+  assert.equal(result.booked, true);
+  assert.equal((await f.store.get(OWNER, "stuck-1"))!.settlement!.slot, 1002);
+  assert.equal((await f.store.liveBook())!.slot, 1002);
+});
+
+/** Signed bytes (unsigned, which is all the deadline decoder reads) whose execute_swap carries `deadline` (unix seconds). */
+function bytesWithDeadline(deadline: bigint): string {
+  const data = Buffer.alloc(48); data.writeBigInt64LE(deadline, 40);
+  return getBase64EncodedWireTransaction(compileTransaction(setTransactionMessageLifetimeUsingBlockhash({ blockhash: key(24) as Blockhash, lastValidBlockHeight: 1200n },
+    setTransactionMessageFeePayer(address(key(23)), appendTransactionMessageInstructions([{ programAddress: address(PROGRAM), accounts: [], data }], createTransactionMessage({ version: 0 }))))));
+}
+/** The vault as a finalized getAccountInfo answer: sequence `seq`, epoch 1, and one debit per cluster timestamp. */
+function vaultAt(seq: bigint, debits: bigint[]) {
+  const b = Buffer.alloc(SOLANA_VAULT_ACCOUNT_SIZE); Buffer.from(SOLANA_VAULT_DISCRIMINATOR).copy(b); let p = 8; b[p++] = 2; b[p++] = 255;
+  for (const v of [OWNER, SESSION]) { Buffer.from(getBase58Encoder().encode(v)).copy(b, p); p += 32; }
+  for (const v of [1n, seq, 4_000n, 10_000_000n, 50_000_000n, 50_000_000n, 120_000_000n]) { b.writeBigUInt64LE(v, p); p += 8; }
+  b.writeUInt16LE(20, p); p += 2; p += 1; b.writeUInt32LE(debits.length, p); p += 4;
+  for (const timestamp of debits) { b.writeBigInt64LE(timestamp, p); b.writeBigUInt64LE(1_000_000n, p + 8); p += 24; }
+  return { owner: PROGRAM, executable: false, lamports: 10_000_000, data: [b.toString("base64"), "base64"], space: b.length };
+}
+/** A provider answering with the executor's own observation over a chain where the trade's blockhash expired and the vault is `vault`. */
+function chainProvider(label: string, vault: ReturnType<typeof vaultAt>): SolanaResolveProvider {
+  const read = async (method: string) => method === "getSignatureStatuses" ? { context: { slot: 1002 }, value: [null] } : method === "getTransaction" ? null
+    : method === "getEpochInfo" ? { absoluteSlot: 1300, blockHeight: 1250 } : method === "getAccountInfo" ? { context: { slot: 1300 }, value: vault } : assert.fail(method);
+  return { label, host: `${label}.example`, read: async operation => operation(read as never) };
+}
+
+test("a trade whose vault sequence moved for another reason is booked expired by the operator only on two providers' debit-log proof (audit live-M1)", async t => {
+  const f = await fixture(t);
+  // The stuck trade's signed bytes carry a deadline of unix 1030: it could have run only at a cluster time from 1000 to 1029.
+  const signed = { ...f.pending, signedTransactionBase64: bytesWithDeadline(1030n) };
+  await f.db.prepare("UPDATE solana_runtime_submissions SET submission_json=? WHERE request_id='stuck-1'").run(JSON.stringify(signed));
+  // An owner withdrawal outside Merrymen moved the sequence to 1; the debit log holds only a swap from long before.
+  const moved = vaultAt(1n, [500n]);
+  // One provider's log holds a debit inside the window: it may have run. Nothing is booked.
+  const disputed = await resolveSolanaPendingTrade({ db: f.db, tenant: TENANT, requestId: "stuck-1", now: () => f.clock.value,
+    providers: [chainProvider("primary", moved), chainProvider("fallback", vaultAt(1n, [1010n]))], book: { operator: "milla", reason: "recovery-tool withdrawal" } });
+  assert.equal(disputed.booked, false);
+  // The operator is told what that provider's vault shows, not that it saw the signature.
+  assert.match(disputed.lines.join("\n"), /fallback: pending: not seen, but the vault sequence moved to 1 outside this trade, and the vault's debit log holds a swap at or after 1970-01-01T00:16:40\.000Z, inside this trade's window: it may have run\. Look for its fill/);
+  assert.doesNotMatch(disputed.lines.join("\n"), /seen, not finalized/);
+  assert.match(disputed.lines.at(-1)!, /^A provider's vault shows its sequence moved and its debit log holds a swap inside this trade's window \(shown above\): the trade may have run\. Nothing is booked/);
+  // A third provider proving the expiry too changes nothing while that debit stands.
+  const outvoted = await resolveSolanaPendingTrade({ db: f.db, tenant: TENANT, requestId: "stuck-1", now: () => f.clock.value,
+    providers: [chainProvider("primary", moved), chainProvider("fallback", vaultAt(1n, [1010n])), chainProvider("operator's provider", moved)], book: { operator: "milla", reason: "outvote" } });
+  assert.equal(outvoted.booked, false); assert.match(outvoted.lines.at(-1)!, /the trade may have run/);
+  assert.equal((await f.store.get(OWNER, "stuck-1"))!.status, "pending"); assert.deepEqual(await resolutions(f.db), []);
+  // Both providers prove it: shown, then booked on the operator's record.
+  const both = [chainProvider("primary", moved), chainProvider("fallback", moved)];
+  const shown = await resolveSolanaPendingTrade({ db: f.db, tenant: TENANT, requestId: "stuck-1", now: () => f.clock.value, providers: both });
+  assert.match(shown.lines.join("\n"), /primary: never ran: blockhash expired at finalized height 1250; the vault sequence moved to 1 outside this trade, and the vault's debit log holds no swap at or after 1970-01-01T00:16:40\.000Z/);
+  assert.equal(shown.booked, false);
+  const booked = await resolveSolanaPendingTrade({ db: f.db, tenant: TENANT, requestId: "stuck-1", now: () => f.clock.value, providers: both,
+    book: { operator: "milla", reason: "recovery-tool withdrawal; checked the debit log" } });
+  assert.equal(booked.booked, true); assert.match(booked.lines.at(-1)!, /^Booked a proven expiry, recorded as decided by milla\.$/);
+  const record = (await f.store.get(OWNER, "stuck-1"))!;
+  assert.equal(record.status, "expired");
+  assert.ok(record.settlement?.status === "expired" && record.settlement.expiryProof.reason === "sequence-consumed" && record.settlement.expiryProof.debitWindowStart === "1000");
+  // Its unknown fee stays reserved, and the reservation is free for a new trade.
+  assert.equal((await f.store.liveBook())!.unresolvedFeeCount, 1);
+  const next = submission("after-consumed"); next.vaultSequence = "1"; next.risk.slot = 1300; assert.equal(await f.store.recordSigned(next), true);
+});
+
+test("the store re-checks a sequence-consumed proof against the reservation even on an operator's decision", async t => {
+  const f = await fixture(t);
+  const signed = { ...f.pending, signedTransactionBase64: bytesWithDeadline(1030n) };
+  await f.db.prepare("UPDATE solana_runtime_submissions SET submission_json=? WHERE request_id='stuck-1'").run(JSON.stringify(signed));
+  await ensureSolanaResolutionSchema(f.db, false);
+  const valid: SolanaLiveSettlement = { status: "expired", signature: signed.signature, slot: 1300, feeLamports: null, amountIn: "0", amountOut: "0", finalizedAtMs: NOW + 1,
+    expiryProof: { vaultSequence: "1", sessionEpoch: "1", blockHeight: "1250", reason: "sequence-consumed", debitWindowStart: "1000" } };
+  const proof = valid.status === "expired" ? valid.expiryProof : assert.fail();
+  const open = async (id: string) => f.db.prepare(`INSERT INTO solana_operator_resolutions(id,tenant,owner,request_id,signature,outcome,operator,reason,settlement_json,evidence_json,approved_at_ms)
+    VALUES(?,?,?,?,?,'expired','milla','test','{}','{}',?)`).run(id, TENANT, OWNER, "stuck-1", signed.signature, NOW);
+  for (const [label, forged] of [["another window", { ...proof, debitWindowStart: "999" }], ["no window", { ...proof, debitWindowStart: undefined }],
+    ["an unmoved sequence", { ...proof, vaultSequence: "0" }], ["a blockhash that could land", { ...proof, blockHeight: "1200" }]] as const) {
+    await open(label);
+    await assert.rejects(f.store.settleResolution(OWNER, "stuck-1", signed.signature, { ...valid, expiryProof: forged } as SolanaLiveSettlement, label), /Invalid Solana expiry evidence/, label);
+  }
+  assert.equal((await f.store.get(OWNER, "stuck-1"))!.status, "pending");
+  await open("valid");
+  assert.equal(await f.store.settleResolution(OWNER, "stuck-1", signed.signature, valid, "valid"), true);
+  assert.equal((await f.store.get(OWNER, "stuck-1"))!.status, "expired");
 });
 
 test("an expiry is not booked while a provider has a finalized status whose receipt cannot be read, until the operator sets that provider aside", async t => {
@@ -468,3 +560,64 @@ test("the npm script runs the resolve CLI with the Solana env file, like the hol
   const cli = readFileSync(new URL("./solana-resolve-cli.ts", import.meta.url), "utf8");
   assert.match(cli, /runSolanaResolveCommand\(process\.argv\.slice\(2\)/);
 });
+
+test("a moved-sequence view that cannot prove its expiry yet says why, and refuses the expiry without claiming the signature was seen", async t => {
+  const f = await fixture(t);
+  // Synthetic views: the trade signed at sequence 4; two providers prove from the debit log that it never ran.
+  await f.db.prepare("UPDATE solana_runtime_submissions SET submission_json=? WHERE request_id='stuck-1'").run(JSON.stringify({ ...f.pending, vaultSequence: "4" }));
+  const consumed = { ...expiry(f.pending), expiryProof: { vaultSequence: "5", sessionEpoch: "1", blockHeight: "1250", reason: "sequence-consumed", debitWindowStart: "1000" } } as SolanaLiveSettlement;
+  const cases: Array<[SolanaObservation, RegExp]> = [
+    [{ settlement: null, seen: true, sequenceMoved: { vaultSequence: "5", blockHeight: "1190", reason: "blockhash-live" } },
+      /fallback: pending: not seen, but the vault sequence moved to 5 outside this trade; its blockhash had not expired at finalized height 1190, so whether it ran is not settled yet: ask again/],
+    [{ settlement: null, seen: true, sequenceMoved: { vaultSequence: "3", blockHeight: "1250", reason: "behind" } },
+      /fallback: pending: not seen, and this provider's finalized vault is at sequence 3, before the one this trade was signed at/],
+    [{ settlement: null, seen: true, sequenceMoved: { vaultSequence: "5", blockHeight: "1250", reason: "not-asked" } },
+      /fallback: pending: not seen, but the vault sequence moved to 5 outside this trade; whether it ran was not checked/],
+  ];
+  for (const [view, text] of cases) {
+    const p = providers({ primary: { settlement: consumed, seen: false }, fallback: view, "operator's provider": { settlement: consumed, seen: false } });
+    const shown = await resolveSolanaPendingTrade({ db: f.db, tenant: TENANT, requestId: "stuck-1", providers: p.list, observe: p.observe, now: () => f.clock.value });
+    assert.match(shown.lines.join("\n"), text);
+    assert.equal(shown.decision?.book, false);
+    assert.match(shown.lines.at(-1)!, /^A provider's vault cannot prove yet that this trade never ran \(shown above\), so its expiry is not booked\. Nothing is booked; ask again later\.$/);
+  }
+  // A provider that saw the signature itself is still said to have seen it.
+  const p = providers({ primary: { settlement: consumed, seen: false }, fallback: seen, "operator's provider": { settlement: consumed, seen: false } });
+  const shown = await resolveSolanaPendingTrade({ db: f.db, tenant: TENANT, requestId: "stuck-1", providers: p.list, observe: p.observe, now: () => f.clock.value });
+  assert.match(shown.lines.join("\n"), /fallback: pending: seen, not finalized/); assert.match(shown.lines.at(-1)!, /^A provider has seen this signature/);
+  assert.equal((await f.store.get(OWNER, "stuck-1"))!.status, "pending");
+});
+
+for (const dialect of ["sqlite", "postgres"] as const) {
+  const options = dialect === "postgres" && !process.env.MERRYMEN_TEST_PG_URL ? { skip: "Set MERRYMEN_TEST_PG_URL to an isolated PostgreSQL test database." } : {};
+  test(`${dialect}: pending names every trade and signed owner transaction the pending-stuck alert counts, oldest first, from the database alone`, options, async t => {
+    const f = await fixture(t, dialect);
+    const OTHER = `0x${"22".repeat(20)}`, THIRD = `0x${"33".repeat(20)}`;
+    // A signed owner withdrawal pending since a minute before the trade (another tenant), one prepared but never signed, and a trade admitted later.
+    await f.db.prepare("INSERT INTO solana_runtime_setups(tenant,owner,setup_json) VALUES(?,?,?)").run(OTHER, key(40), JSON.stringify({ kind: "withdraw-sol", signature: "owner-sig-1",
+      signedTransactionBase64: "b3duZXItYnl0ZXM=", status: "pending", preparedAtMs: NOW - 60_000, priorSequence: "7" }));
+    await f.db.prepare("INSERT INTO solana_runtime_setups(tenant,owner,setup_json) VALUES(?,?,?)").run(THIRD, key(41), JSON.stringify({ kind: "revoke", preparedAtMs: NOW - 60_000 }));
+    await f.db.prepare(`INSERT INTO solana_runtime_submissions(tenant,owner,request_id,vault,sequence,signature,status,created_at_ms,notional_raw,submission_json)
+      VALUES(?,?,?,?,?,?,'pending',?,?,?)`).run(THIRD, key(41), "young-1", key(42), "3", "signature-young-1", NOW + 4 * 60_000, "1000000", "{}");
+    // No provider is configured, and none may be asked.
+    const deps = (at: number) => ({ db: f.db, postgres: f.postgres, env: {}, now: () => at, fetch: (async () => assert.fail("pending reads no provider")) as typeof fetch });
+    assert.equal(await runSolanaResolveCommand(["pending"], deps(NOW + 90_000)), "Nothing has been pending for over 3 minutes.");
+    const listed = await runSolanaResolveCommand(["pending"], deps(NOW + 5 * 60_000));
+    assert.deepEqual(listed.split("\n"), [
+      "Pending for over 3 minutes, oldest first (tenant, what, id, age, vault sequence):",
+      `  ${OTHER}\towner withdraw-sol transaction\towner-sig-1\tpending 6 min\tvault sequence 7\tnpm run solana:resolve -- owner show ${OTHER} owner-sig-1`,
+      `  ${TENANT}\tlive trade\tstuck-1\tpending 5 min\tvault sequence 0\tnpm run solana:resolve -- show ${TENANT} stuck-1`,
+    ]);
+    for (const secret of ["b3duZXItYnl0ZXM=", f.pending.signedTransactionBase64, f.pending.messageBase64]) assert.ok(!listed.includes(secret), secret);
+    // An hour on, the young trade is listed too, and ages read in hours.
+    assert.match(await runSolanaResolveCommand(["pending"], deps(NOW + 65 * 60_000)), /\tlive trade\tyoung-1\tpending 1 h 1 min\tvault sequence 3\t/);
+    // Booked trades and finished owner transactions are not listed.
+    await f.db.prepare("UPDATE solana_runtime_submissions SET status='expired'").run();
+    await f.db.prepare("DELETE FROM solana_runtime_setups WHERE tenant=?").run(OTHER);
+    assert.equal(await runSolanaResolveCommand(["pending"], deps(NOW + 65 * 60_000)), "Nothing has been pending for over 3 minutes.");
+    // It takes no tenant, id or flag.
+    for (const argv of [["pending", TENANT], ["pending", "--third-rpc"], ["pending", "--operator", "milla"]]) {
+      await assert.rejects(runSolanaResolveCommand(argv, deps(NOW)), (error: unknown) => error instanceof SolanaResolveError && error.message.startsWith("Usage:"), argv.join(" "));
+    }
+  });
+}

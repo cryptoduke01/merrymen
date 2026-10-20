@@ -8,6 +8,9 @@ import test, { type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import { createHash } from "node:crypto";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { createKeyPairFromPrivateKeyBytes, getAddressFromPublicKey, getBase58Decoder, getBase58Encoder, getCompiledTransactionMessageDecoder,
   getTransactionDecoder } from "@solana/kit";
 import { CHAINS, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM } from "../../packages/core/src/ids";
@@ -16,7 +19,7 @@ import { SOLANA_CLASSIC_TOKEN_PROGRAM, SOLANA_JUPITER_SHARED_ROUTE_DISCRIMINATOR
 import { SqlSolanaBindingStore } from "../../web/src/lib/solana-binding-store";
 import { wrapSqlite } from "./db";
 import { createSolanaAgent } from "./solana-agent";
-import { createSolanaAppRuntime, SOLANA_STATUS_DAILY_OPERATIONS_USED } from "./solana-app-runtime";
+import { createSolanaAppRuntime, SOLANA_STATUS_BELOW_BOOK, SOLANA_STATUS_DAILY_OPERATIONS_USED } from "./solana-app-runtime";
 import { createSolanaExecutor, type SolanaSignedSubmission } from "./solana-executor";
 import { createSolanaLiveMarket, SolanaLiveMarketError } from "./solana-live-market";
 import type { SolanaLiveRead, SolanaLiveRpc } from "./solana-live-rpc";
@@ -55,7 +58,7 @@ function mintJson(mint: string) {
 }
 
 async function fixture(t: TestContext, opts: { cash: bigint; wsol: bigint; mark: "fair" | "dust" | "zero" | "down"; build: Build; strategy?: Record<string, unknown>; pythAgeMs?: number;
-  env?: Record<string, string>; priorityFees?: number[] }) {
+  env?: Record<string, string>; priorityFees?: number[]; dbFile?: string }) {
   const net = { lastBuild: null as null | { amount: bigint; out: bigint; min: bigint; input: string }, urls: [] as string[] };
   t.mock.method(globalThis, "fetch", async (input: unknown, init?: RequestInit) => {
     const url = String(input); net.urls.push(url.split("?")[0]!);
@@ -88,7 +91,9 @@ async function fixture(t: TestContext, opts: { cash: bigint; wsol: bigint; mark:
     }
     return assert.fail(`unexpected network call ${url}`);
   });
-  const raw = new DatabaseSync(":memory:"), db = wrapSqlite(raw), clock = { now: NOW };
+  // `dbFile`: a database file a test can close and open again (reopen), as a restarted process would.
+  let raw = new DatabaseSync(opts.dbFile ?? ":memory:"), db = wrapSqlite(raw);
+  const clock = { now: NOW };
   t.after(() => raw.close());
   const sessionSeed = Buffer.alloc(32, 22), sessionKeys = await createKeyPairFromPrivateKeyBytes(sessionSeed);
   const owner = await getAddressFromPublicKey((await createKeyPairFromPrivateKeyBytes(new Uint8Array(32).fill(21))).publicKey);
@@ -153,7 +158,8 @@ async function fixture(t: TestContext, opts: { cash: bigint; wsol: bigint; mark:
       default: return assert.fail(`unexpected live RPC ${method}`);
     }
   };
-  // Two agreeing providers, as the live transport always has: deployment checks and bookings need both.
+  // Two agreeing providers, as the live transport always has: deployment checks, bookings and each trade's
+  // balance and Pyth reads need both (so a trade reads each Pyth account once per provider).
   const rpc: SolanaLiveRpc = { read: fn => fn(read), readEach: async fn => [await fn(read), await fn(read)], send: async wire => { sends.push(wire); return "sent"; } };
   const quote = async (i: { inputMint: string; outputMint: string; amountRaw: string; slippageBps: number }) => {
     // "zero": no route buys SOL back (Jupiter's zero-output answer); "down": the SOL quote fails otherwise.
@@ -190,9 +196,11 @@ async function fixture(t: TestContext, opts: { cash: bigint; wsol: bigint; mark:
     createSolanaAppRuntime({ db, rpc: via, market, env: { ...env, ...more }, now: () => clock.now, ...(log ? { log } : {}) }), app = runtime();
   const submissions = async () => (await db.prepare("SELECT request_id,notional_raw,submission_json FROM solana_runtime_submissions").all() as
     Array<{ request_id: string; notional_raw: string; submission_json: string }>).map(r => ({ ...r, submission: JSON.parse(r.submission_json) as SolanaSignedSubmission }));
-  const agent = (runtime: ReturnType<typeof createSolanaAppRuntime> = app) => createSolanaAgent({ db, runtime, market, now: () => clock.now });
+  const agent = (runtime: ReturnType<typeof createSolanaAppRuntime> = app, log?: (line: string) => void) => createSolanaAgent({ db, runtime, market, now: () => clock.now, ...(log ? { log } : {}) });
   // `rpc`, `env`, `clock`, `sessionKeys` and `vault` let a test build an executor of its own on this chain.
-  return { app, scope, sends, submissions, agent, net, runtime, served, pythReads, db, rpc, env, clock, sessionKeys, vault };
+  /** Close the database file and open it again: everything held in memory by earlier runtimes is gone. */
+  const reopen = () => { if (!opts.dbFile) assert.fail("reopen needs a database file"); raw.close(); raw = new DatabaseSync(opts.dbFile); db = wrapSqlite(raw); return db; };
+  return { app, scope, sends, submissions, agent, net, runtime, served, pythReads, get db() { return db; }, rpc, env, clock, sessionKeys, vault, vaultState, read, reopen, feePayer, cashAta, wsolAta };
 }
 /** The compute-unit limit and price a signed swap carries (ComputeBudget instructions 2 and 3). */
 function computeBudget(submission: SolanaSignedSubmission): { units: number; price: bigint } {
@@ -261,7 +269,7 @@ test("C3: the expired-attempt allowance setting reaches live admission, 0 by def
     const f = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" }, env });
     const placed = await f.app.trade(f.scope, { mode: "live", intent: manual(SOLANA_WRAPPED_SOL_MINT, "100000000", `allowance-${expected}`) });
     assert.ok("status" in placed && placed.status === "pending");
-    assert.deepEqual(admissions.splice(0), [{ expiredAttemptAllowance: expected }]);
+    assert.deepEqual(admissions.splice(0), [{ expiredAttemptAllowance: expected, referenceToleranceBps: 300 }]);
   }
   const bad = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" }, env: { MERRYMEN_SOLANA_EXPIRED_ATTEMPT_ALLOWANCE: "97" } });
   await assert.rejects(bad.app.trade(bad.scope, { mode: "live", intent: manual(SOLANA_WRAPPED_SOL_MINT, "100000000", "allowance-bad") }), /expired-attempt allowance setting is misconfigured/);
@@ -395,7 +403,7 @@ test("the runtime's own env picks the generation for the read, the executor's ch
   const f = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" } });
   const placed = await f.app.trade(f.scope, { mode: "live", intent: manual(SOLANA_WRAPPED_SOL_MINT, "100000000", "runtime-env-sell") });
   assert.equal("status" in placed && placed.status, "pending");
-  assert.deepEqual(f.pythReads, [CURRENT.account]);
+  assert.deepEqual(f.pythReads, [CURRENT.account, CURRENT.account]);
   const [row] = await f.submissions();
   assert.equal(row!.submission.risk.reference.reference.account, CURRENT.account); assert.equal(f.sends.length, 1);
 });
@@ -405,7 +413,7 @@ test("a WSOL withdrawal is valued from the runtime's generation, and a store kee
   const f = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" } });
   f.served.set(f.scope.owner, () => rpcAccount(Buffer.alloc(0), SYSTEM, false, 1_000_000_000)); // the owner pays for its own transaction
   await f.runtime({ MERRYMEN_SOLANA_PYTH_GENERATION: "upgraded" }).prepareOwnerAction(f.scope, { action: "withdraw", mint: SOLANA_WRAPPED_SOL_MINT, amountRaw: "100000000" });
-  assert.deepEqual(f.pythReads, [UPGRADED.account]);
+  assert.deepEqual(f.pythReads, [UPGRADED.account, UPGRADED.account]);
   const saved = (await new SolanaTradingStore(f.db, f.scope).setup())!;
   assert.equal(saved.withdrawValuation?.reference.reference.account, UPGRADED.account);
   assert.equal(saved.withdrawValuation?.reference.referenceOut, "15000000"); // 0.1 SOL at $150
@@ -440,7 +448,7 @@ test("a WSOL withdrawal still prepares while the Pyth generation setting names n
   const valued = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" } });
   valued.served.set(valued.scope.owner, () => rpcAccount(Buffer.alloc(0), SYSTEM, false, 1_000_000_000));
   await valued.runtime().prepareOwnerAction(valued.scope, { action: "withdraw", mint: SOLANA_WRAPPED_SOL_MINT, amountRaw: "100000000" });
-  assert.deepEqual(valued.pythReads, [CURRENT.account]);
+  assert.deepEqual(valued.pythReads, [CURRENT.account, CURRENT.account]);
   assert.equal((await new SolanaTradingStore(valued.db, valued.scope).setup())!.withdrawValuation?.reference.referenceOut, "15000000");
 });
 
@@ -536,7 +544,7 @@ test("with MERRYMEN_SOLANA_PYTH_GENERATION=upgraded, live trades are read, check
     assert.equal("status" in placed && placed.status, "pending", inputMint);
     // The runtime read the upgraded account and never the current one; the executor signed only
     // above that bound's floor, and the store admitted the bound as evidence from it.
-    assert.deepEqual(f.pythReads, [UPGRADED.account], inputMint);
+    assert.deepEqual(f.pythReads, [UPGRADED.account, UPGRADED.account], inputMint);
     const [row] = await f.submissions();
     assert.equal(row!.submission.risk.reference.reference.account, UPGRADED.account, inputMint);
     assert.ok(BigInt(row!.submission.minOutAmount) >= BigInt(row!.submission.risk.reference.minOutFloor), inputMint);
@@ -600,7 +608,7 @@ test("a retry of an admitted live trade returns it before any reference setting 
   assert.ok("status" in placed && placed.status === "pending");
   const [admitted] = await f.submissions();
   assert.equal(admitted!.submission.risk.reference.reference.account, CURRENT.account);
-  assert.deepEqual(f.pythReads, [CURRENT.account]);
+  assert.deepEqual(f.pythReads, [CURRENT.account, CURRENT.account]);
   const jupiter = () => f.net.urls.filter(url => url.startsWith("https://api.jup.ag/")).length, built = jupiter();
   // A setting that names no generation, the other generation, and a tolerance out of range: each would refuse a new trade.
   for (const more of [{ MERRYMEN_SOLANA_PYTH_GENERATION: "both" }, { MERRYMEN_SOLANA_PYTH_GENERATION: "upgraded" },
@@ -614,7 +622,7 @@ test("a retry of an admitted live trade returns it before any reference setting 
     assert.deepEqual([again.signature, again.status, again.requestId], [placed.signature, "pending", "admitted-then-retried"], label);
     assert.deepEqual(said, [], label);
     // No Pyth read (of either account), no Jupiter quote or build, no new submission.
-    assert.deepEqual(f.pythReads, [CURRENT.account], label);
+    assert.deepEqual(f.pythReads, [CURRENT.account, CURRENT.account], label);
     assert.equal(jupiter(), built, label);
     const rows = await f.submissions();
     assert.deepEqual(rows.map(row => row.submission.signature), [placed.signature], label);
@@ -663,6 +671,37 @@ test("the executor checks a fresh bound against its own generation, not the one 
   }
 });
 
+test("the configured reference tolerance reaches the executor's check and admission; a bound built at another is refused before signing", async t => {
+  // The runtime builds the bound at its own tolerance and hands that same number to the executor and the store.
+  const { SolanaTradingStore: Store } = await import("./solana-trading-store");
+  const admissions: unknown[] = [], recordSigned = Store.prototype.recordSigned;
+  t.mock.method(Store.prototype, "recordSigned", function (this: InstanceType<typeof Store>, ...args: Parameters<typeof recordSigned>) {
+    admissions.push(args[1]); return recordSigned.apply(this, args);
+  });
+  const wide = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" }, env: { MERRYMEN_SOLANA_REFERENCE_TOLERANCE_BPS: "500" } });
+  const placed = await wide.app.trade(wide.scope, { mode: "live", intent: manual(SOLANA_WRAPPED_SOL_MINT, "100000000", "tolerance-500") });
+  assert.ok("status" in placed && placed.status === "pending");
+  assert.equal((await wide.submissions())[0]!.submission.risk.reference.toleranceBps, 500);
+  assert.deepEqual(admissions.splice(0), [{ expiredAttemptAllowance: 0, referenceToleranceBps: 500 }]);
+  // An executor configured for 3% (or left at the default) refuses a fresh, self-consistent bound built at 10%: nothing is signed, recorded or sent.
+  const feePayerKeyPair = await createKeyPairFromPrivateKeyBytes(new Uint8Array(32).fill(31));
+  for (const configured of [300, undefined]) {
+    const f = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" } });
+    const recorded: SolanaSignedSubmission[] = [];
+    const executor = createSolanaExecutor({ programId: PROGRAM, programBinarySha256: f.env.MERRYMEN_SOLANA_VAULT_SHA256, ...(configured ? { referenceToleranceBps: configured } : {}),
+      sessionKeyPair: f.sessionKeys, feePayerKeyPair, rpc: f.rpc, market: createSolanaLiveMarket({ env: f.env, rpc: f.rpc, now: () => f.clock.now }),
+      journal: { get: async () => null, recordSigned: async submission => { recorded.push(submission); return true; }, settle: async () => assert.fail("nothing settles") },
+      maxFeeLamports: "5000000", now: () => f.clock.now,
+      assessRisk: async ({ intent, quote }) => {
+        const reference = solanaReferenceBound(intent, pythReference(f.clock.now, 15_000_000_000n, SLOT), 1000);
+        return { observedAtMs: f.clock.now, slot: SLOT, notionalUsdg: solanaReferenceNotional(intent, quote.outAmount, reference).toString(),
+          equityUsdg: "200000000", peakEquityUsdg: "200000000", cashUsdg: "50000000", wsolRaw: "1000000000", reference };
+      } });
+    await assert.rejects(executor.execute({ ...manual(SOLANA_WRAPPED_SOL_MINT, "100000000", "executor-tolerance"), owner: f.scope.owner, vault: f.vault }), /refused: risk/, String(configured));
+    assert.deepEqual(recorded, []); assert.equal(f.sends.length, 0);
+  }
+});
+
 test("a stale independent price refuses even a fair live trade, and says the [alert] an operator pages on", async t => {
   const f = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" }, pythAgeMs: 180_000 });
   // A good read first clears anything an earlier test left refused in this process, so this refusal is said at once.
@@ -698,4 +737,267 @@ test("a compute-unit price minimum above the default maximum still exits; the ma
     const status = await bad.app.status(bad.scope);
     assert.match(status.live.blockers.join(" "), /compute-unit price settings are misconfigured/); assert.equal(status.live.canExit, false);
   }
+});
+
+/**
+ * A transport over the fixture's chain whose primary and fallback answer through their own wrappers of the honest
+ * read: `primary` (default: honest) and `fallback` (default: honest). Each read session gets a fresh wrapped read.
+ */
+function split(f: Awaited<ReturnType<typeof fixture>>, primary: (read: SolanaLiveRead) => SolanaLiveRead = read => read,
+  fallback: (read: SolanaLiveRead) => SolanaLiveRead = read => read): SolanaLiveRpc {
+  const via = (wrap: (read: SolanaLiveRead) => SolanaLiveRead) => <T>(fn: (read: SolanaLiveRead) => Promise<T>) => f.rpc.read(read => fn(wrap(read)));
+  return { ...f.rpc, read: via(primary), readEach: async fn => [await via(primary)(fn), await via(fallback)(fn)] };
+}
+/** A provider that serves the current generation's SOL/USD account at `usdPerSol` (8 decimals), published `ageMs` ago. */
+const pythAt = (usdPerSol: bigint, ageMs = 0) => (read: SolanaLiveRead): SolanaLiveRead => async (method, params = []) =>
+  method === "getAccountInfo" && params[0] === CURRENT.account
+    ? { context: { slot: SLOT }, value: pythAccount({ price: usdPerSol, conf: usdPerSol / 10_000n, publishTimeMs: NOW - ageMs, owner: CURRENT.receiverProgram }) }
+    : read(method, params);
+
+test("one provider's Pyth price cannot lower a live trade's floor: the stricter of both providers' bounds applies, and either one's refusal refuses", async t => {
+  // Fair is $150. A sell built 10% cheap clears the floor only at a price at most about $139; a buy built to
+  // deliver 10% less SOL clears it only at a price of about $162 or more. One lying provider serves exactly that.
+  const cases = [
+    { label: "sell, primary lies low", input: SOLANA_WRAPPED_SOL_MINT, amount: "100000000", primary: pythAt(12_000_000_000n), fallback: undefined },
+    { label: "sell, fallback lies low", input: SOLANA_WRAPPED_SOL_MINT, amount: "100000000", primary: undefined, fallback: pythAt(12_000_000_000n) },
+    { label: "buy, primary lies high", input: SOLANA_USDG_MINT, amount: "25000000", primary: pythAt(17_000_000_000n), fallback: undefined },
+    { label: "buy, fallback lies high", input: SOLANA_USDG_MINT, amount: "25000000", primary: undefined, fallback: pythAt(17_000_000_000n) },
+  ];
+  for (const c of cases) {
+    const f = await fixture(t, { cash: 100_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "factor", num: 90n, den: 100n } });
+    await assert.rejects(f.runtime({}, split(f, c.primary, c.fallback)).trade(f.scope, { mode: "live", intent: manual(c.input, c.amount, "lying-pyth") }), /refused: risk/, c.label);
+    assert.deepEqual(await f.submissions(), [], c.label); assert.equal(f.sends.length, 0, c.label);
+    // The same 10%-cheap route with that price from both providers would be admitted: the honest provider's bound is what refused it.
+    const both = await fixture(t, { cash: 100_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "factor", num: 90n, den: 100n } });
+    const lie = (c.primary ?? c.fallback)!;
+    const placed = await both.runtime({}, split(both, lie, lie)).trade(both.scope, { mode: "live", intent: manual(c.input, c.amount, "lying-pyth") });
+    assert.ok("status" in placed && placed.status === "pending", c.label);
+  }
+  // A fair sell is admitted beside a provider that prices SOL low, and records (and is charged at) the stricter, honest bound.
+  const fair = await fixture(t, { cash: 100_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" } });
+  const placed = await fair.runtime({}, split(fair, pythAt(12_000_000_000n))).trade(fair.scope, { mode: "live", intent: manual(SOLANA_WRAPPED_SOL_MINT, "100000000", "beside-a-liar") });
+  assert.ok("status" in placed && placed.status === "pending");
+  const [row] = await fair.submissions();
+  assert.equal(row!.submission.risk.reference.reference.price, "15000000000"); assert.equal(row!.submission.risk.reference.minOutFloor, "14550000");
+  // A price either provider refuses (stale on the fallback alone) refuses the trade, whatever the other serves.
+  const stale = await fixture(t, { cash: 100_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" } });
+  await assert.rejects(stale.runtime({}, split(stale, undefined, pythAt(15_000_000_000n, 180_000))).trade(stale.scope, { mode: "live",
+    intent: manual(SOLANA_WRAPPED_SOL_MINT, "100000000", "stale-fallback") }), /refused: risk/);
+  assert.deepEqual(await stale.submissions(), []); assert.equal(stale.sends.length, 0);
+});
+
+test("one provider's Pyth price cannot make real SOL dust: a zero-output mark is dust only at every provider's price", async t => {
+  // 1 SOL is worth $150; a provider pricing SOL at a millionth of a cent would call it dust.
+  const f = await fixture(t, { cash: 100_000_000n, wsol: 1_000_000_000n, mark: "zero", build: { kind: "fair" } });
+  for (const [primary, fallback] of [[pythAt(1n), undefined], [undefined, pythAt(1n)]] as const) {
+    assert.equal(await f.runtime({}, split(f, primary, fallback)).solMarkDust("1000000000"), false);
+    await assert.rejects(f.runtime({}, split(f, primary, fallback)).trade(f.scope, { mode: "live", intent: manual(SOLANA_USDG_MINT, "25000000", "buy-beside-fake-dust") }),
+      (error: unknown) => error instanceof SolanaMarketError && error.code === "invalid-quote");
+  }
+  assert.equal(await f.runtime({}, split(f, pythAt(1n), pythAt(1n))).solMarkDust("1000000000"), true);
+  assert.equal(await f.app.solMarkDust("66666"), true); assert.equal(await f.app.solMarkDust("66667"), false);
+  assert.deepEqual(await f.submissions(), []); assert.equal(f.sends.length, 0);
+});
+
+test("a first live book's balances and slot come from both providers: a phantom balance is refused, and one provider's slot is never persisted", async t => {
+  const book = async (f: Awaited<ReturnType<typeof fixture>>) => JSON.parse((await f.db.prepare("SELECT book_json FROM solana_runtime_live_books").get() as { book_json: string }).book_json);
+  const fresh = async () => { const f = await fixture(t, { cash: 100_000_000n, wsol: 0n, mark: "fair", build: { kind: "fair" } });
+    await f.db.prepare("DELETE FROM solana_runtime_live_books").run(); return f; };
+  // The primary shows 900 USDG more than the chain holds, in the risk read: the first book would start from it.
+  const phantom = await fresh();
+  const cashAta = await deriveSolanaAta(phantom.vault, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM);
+  const inflate = (read: SolanaLiveRead): SolanaLiveRead => async (method, params = []) => {
+    const answer = await read(method, params) as { context: { slot: number }; value: unknown };
+    if (method !== "getMultipleAccounts" || (params[0] as string[]).length !== 2 || (params[0] as string[])[0] !== cashAta) return answer;
+    return { ...answer, value: [rpcAccount(token(SOLANA_USDG_MINT, phantom.vault, 1_000_000_000n), TOKEN_2022_PROGRAM), (answer.value as unknown[])[1]] };
+  };
+  await assert.rejects(phantom.runtime({}, split(phantom, inflate)).trade(phantom.scope, { mode: "live", intent: manual(SOLANA_USDG_MINT, "25000000", "phantom-first-book") }),
+    /refused: invalid-state/);
+  assert.deepEqual(await phantom.submissions(), []); assert.equal(phantom.sends.length, 0);
+  assert.equal(await phantom.db.prepare("SELECT book_json FROM solana_runtime_live_books").get(), undefined);
+  // One provider answering the balance read at a later slot: the book starts at the lowest slot either answered at.
+  const ahead = (by: number) => (read: SolanaLiveRead): SolanaLiveRead => async (method, params = []) => {
+    const answer = await read(method, params) as { context: { slot: number }; value: unknown };
+    return method === "getMultipleAccounts" && (params[0] as string[]).length === 2 ? { ...answer, context: { slot: answer.context.slot + by } } : answer;
+  };
+  const skewed = await fresh();
+  const placed = await skewed.runtime({}, split(skewed, ahead(100))).trade(skewed.scope, { mode: "live", intent: manual(SOLANA_USDG_MINT, "25000000", "skewed-first-book") });
+  assert.ok("status" in placed && placed.status === "pending");
+  assert.equal((await book(skewed)).slot, SLOT); assert.equal((await skewed.submissions())[0]!.submission.risk.slot, SLOT);
+  // A slot far beyond what the other provider has seen is one provider's invention: refused, and nothing is booked.
+  for (const [label, primary, fallback] of [["primary", ahead(1_000_000_000), undefined], ["fallback", undefined, ahead(1_000_000_000)]] as const) {
+    const inflated = await fresh();
+    await assert.rejects(inflated.runtime({}, split(inflated, primary, fallback)).trade(inflated.scope, { mode: "live", intent: manual(SOLANA_USDG_MINT, "25000000", "inflated") }),
+      /refused: invalid-state/, label);
+    assert.deepEqual(await inflated.submissions(), [], label); assert.equal(inflated.sends.length, 0, label);
+  }
+});
+
+test("a live trade reads the vault no earlier than the book and the latest finalized owner transaction, and every provider must show its sequence, so a lagging provider signs nothing", async t => {
+  // The fixture's providers answer at SLOT. A native SOL withdrawal finalized past it (withdraw-sol moves no book slot).
+  for (const [finalizedSlot, admitted] of [[SLOT + 500, false], [SLOT - 1, true]] as const) {
+    const f = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" } });
+    const vault = f.vault;
+    await f.db.prepare("INSERT INTO solana_runtime_setups(tenant,owner,setup_json) VALUES(?,?,?)").run(TENANT, f.scope.owner, JSON.stringify({
+      kind: "withdraw-sol", amountRaw: "1000", transactionBase64: "dGVzdA==", messageBase64: "dGVzdA==", blockhash: "11111111111111111111111111111111", lastValidBlockHeight: "800",
+      programId: PROGRAM, vault, session: "11111111111111111111111111111111", limits, preparedAtMs: NOW - 60_000, expiresAtMs: NOW - 1, signature: "owner-withdraw-sol",
+      signedTransactionBase64: "c2lnbmVk", status: "finalized", finalizedSlot, priorVaultExisted: true, priorSequence: "0", priorSessionEpoch: "1" }));
+    const trade = f.app.trade(f.scope, { mode: "live", intent: manual(SOLANA_WRAPPED_SOL_MINT, "100000000", "after-withdraw-sol") });
+    if (admitted) { const placed = await trade; assert.ok("status" in placed && placed.status === "pending"); assert.equal(f.sends.length, 1); continue; }
+    await assert.rejects(trade, /refused: invalid-state/);
+    assert.deepEqual(await f.submissions(), []); assert.equal(f.sends.length, 0);
+  }
+  // The owner then prepares another owner transaction and abandons it: the setup row, the only record of the withdrawal's
+  // slot, is replaced. The withdrawal consumed sequence 0, so the vault is at sequence 1; the primary still lags behind it
+  // (sequence 0 at SLOT) and the fallback has it. Every provider is asked for the vault's sequence at the prepared slot,
+  // so the lagging primary's snapshot signs nothing.
+  const replaced = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" } });
+  const abandoned = { kind: "resume-buys", transactionBase64: "dGVzdA==", messageBase64: "dGVzdA==", blockhash: "11111111111111111111111111111111", lastValidBlockHeight: "800",
+    programId: PROGRAM, vault: replaced.vault, session: "11111111111111111111111111111111", limits, preparedAtMs: NOW - 1_000, expiresAtMs: NOW + 59_000,
+    priorVaultExisted: true, priorSequence: "1", priorSessionEpoch: "1" };
+  await replaced.db.prepare("INSERT INTO solana_runtime_setups(tenant,owner,setup_json) VALUES(?,?,?)").run(TENANT, replaced.scope.owner, JSON.stringify(abandoned));
+  const current = (read: SolanaLiveRead): SolanaLiveRead => async (method, params = []) =>
+    method === "getAccountInfo" && params[0] === replaced.vault ? { context: { slot: SLOT }, value: rpcAccount(replaced.vaultState(1n), PROGRAM) } : read(method, params);
+  await assert.rejects(replaced.runtime({}, split(replaced, undefined, current)).trade(replaced.scope, { mode: "live", intent: manual(SOLANA_WRAPPED_SOL_MINT, "100000000", "after-abandoned-prepare") }),
+    /refused: invalid-state/);
+  assert.deepEqual(await replaced.submissions(), []); assert.equal(replaced.sends.length, 0);
+  // So does a provider showing the session revoked meanwhile (a later epoch at the same sequence).
+  const revokedEpoch = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" } });
+  const revoked = (read: SolanaLiveRead): SolanaLiveRead => async (method, params = []) => {
+    if (method !== "getAccountInfo" || params[0] !== revokedEpoch.vault) return read(method, params);
+    const bytes = revokedEpoch.vaultState(0n); bytes.writeBigUInt64LE(2n, 74); // discriminator, version, bump, owner, session: the epoch follows
+    return { context: { slot: SLOT }, value: rpcAccount(bytes, PROGRAM) };
+  };
+  await assert.rejects(revokedEpoch.runtime({}, split(revokedEpoch, undefined, revoked)).trade(revokedEpoch.scope, { mode: "live", intent: manual(SOLANA_WRAPPED_SOL_MINT, "100000000", "after-revoke") }),
+    /refused: invalid-state/);
+  assert.deepEqual(await revokedEpoch.submissions(), []); assert.equal(revokedEpoch.sends.length, 0);
+  // The book's own slot is a floor too.
+  const ahead = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" } });
+  const row = await ahead.db.prepare("SELECT book_json FROM solana_runtime_live_books").get() as { book_json: string };
+  await ahead.db.prepare("UPDATE solana_runtime_live_books SET book_json=?").run(JSON.stringify({ ...JSON.parse(row.book_json), slot: SLOT + 1 }));
+  await assert.rejects(ahead.app.trade(ahead.scope, { mode: "live", intent: manual(SOLANA_WRAPPED_SOL_MINT, "100000000", "behind-the-book") }), /refused: invalid-state/);
+  assert.deepEqual(await ahead.submissions(), []); assert.equal(ahead.sends.length, 0);
+});
+
+test("a live trade whose send fails after it is recorded survives a restart: a new runtime rebroadcasts the same bytes, signs nothing, and books the fill once (audit risk 44/49)", async t => {
+  const dir = mkdtempSync(path.join(tmpdir(), "solana-live-crash-")); t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const f = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" }, dbFile: path.join(dir, "runtime.sqlite") });
+  const signs = t.mock.method(crypto.subtle, "sign");
+  // The chain as both providers see it, from the moment the swap is signed.
+  const chain = { landed: false, sends: [] as string[], failSends: true };
+  const receiptOf = (submission: SolanaSignedSubmission) => {
+    const message = getCompiledTransactionMessageDecoder().decode(getTransactionDecoder().decode(Buffer.from(submission.signedTransactionBase64, "base64")).messageBytes);
+    const keys = [...message.staticAccounts] as string[];
+    const swap = message.instructions.find(ix => keys[ix.programAddressIndex] === PROGRAM)!;
+    const temp = swap.accountIndices![8]!, out = BigInt(submission.minOutAmount) + 1n, rent = 2_039_280;
+    const balances = keys.map((_, index) => index === 0 ? 100_000_000 : index === temp ? rent : 1_000_000);
+    const row = (account: string, mint: string, programId: string, amount: bigint) => ({ accountIndex: keys.indexOf(account), mint, owner: f.vault, programId,
+      uiTokenAmount: { amount: amount.toString(), decimals: mint === SOLANA_USDG_MINT ? 6 : 9 } });
+    return { version: 0, slot: SLOT + 1, transaction: [submission.signedTransactionBase64, "base64"], meta: { err: null, fee: 10_000, loadedAddresses: { writable: [], readonly: [] },
+      // The temporary account's rent goes back to the fee payer; the logs were not recorded, so the vault's finalized sequence books it.
+      preBalances: balances, postBalances: balances.map((n, index) => index === 0 ? n - 10_000 + rent : index === temp ? 0 : n),
+      preTokenBalances: [row(f.wsolAta, SOLANA_WRAPPED_SOL_MINT, SOLANA_CLASSIC_TOKEN_PROGRAM, 1_000_000_000n), row(f.cashAta, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM, 50_000_000n)],
+      postTokenBalances: [row(f.wsolAta, SOLANA_WRAPPED_SOL_MINT, SOLANA_CLASSIC_TOKEN_PROGRAM, 1_000_000_000n - BigInt(submission.intent.amountRaw)),
+        row(f.cashAta, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM, 50_000_000n + out)], logMessages: null } };
+  };
+  const recorded = async () => (await f.submissions())[0]?.submission;
+  const read: SolanaLiveRead = async (method, params = []) => {
+    const submission = await recorded();
+    if (method === "getEpochInfo") return { absoluteSlot: SLOT + 2, blockHeight: 900 };
+    if (method === "getSignatureStatuses") return { context: { slot: SLOT + 2 }, value: [chain.landed ? { confirmationStatus: "finalized", slot: SLOT + 1, err: null } : null] };
+    if (method === "getTransaction") return chain.landed ? receiptOf(submission!) : null;
+    const [key, config] = params as [string, { commitment?: string }];
+    if (method === "getAccountInfo" && key === f.vault && config?.commitment === "finalized") {
+      return { context: { slot: SLOT + 2 }, value: rpcAccount(f.vaultState(chain.landed ? 1n : 0n), PROGRAM) };
+    }
+    return f.read(method, params);
+  };
+  const transport: SolanaLiveRpc = { read: fn => fn(read), readEach: async fn => [await fn(read), await fn(read)],
+    send: async wire => { chain.sends.push(wire); if (chain.failSends) throw new Error("the process died before the send was answered"); return "sent"; } };
+  // The first process records and signs the swap, and its send fails.
+  const placed = await f.runtime({}, transport).trade(f.scope, { mode: "live", intent: manual(SOLANA_WRAPPED_SOL_MINT, "100000000", "crash-sell") });
+  assert.ok("status" in placed && placed.status === "pending");
+  const submission = (await recorded())!, signed = signs.mock.callCount();
+  assert.equal(signed, 2, "fee payer and session signed once each");
+  assert.deepEqual(chain.sends, [submission.signedTransactionBase64]);
+  // It restarts: the database file is opened again and a new runtime reads it. Unseen by both providers and inside its
+  // signed deadline, the recorded bytes are sent again exactly as signed; nothing is signed or recorded anew.
+  f.reopen(); chain.failSends = false;
+  const restarted = f.runtime({}, transport);
+  const status = await restarted.status(f.scope);
+  assert.deepEqual(status.live.pending.map(trade => [trade.requestId, trade.signature, trade.status]), [["crash-sell", submission.signature, "pending"]]);
+  assert.deepEqual(chain.sends, [submission.signedTransactionBase64, submission.signedTransactionBase64]);
+  assert.equal(signs.mock.callCount(), signed); assert.equal((await f.submissions()).length, 1);
+  // A retry of the same request returns the recorded trade: never a second signature.
+  const retried = await restarted.trade(f.scope, { mode: "live", intent: manual(SOLANA_WRAPPED_SOL_MINT, "100000000", "crash-sell") });
+  assert.ok("signature" in retried && retried.signature === submission.signature);
+  assert.equal(signs.mock.callCount(), signed);
+  // It landed. The worker's next tick (receipt recovery) books it on both providers' agreement, once.
+  chain.landed = true;
+  const sendsBefore = chain.sends.length;
+  await f.agent(restarted).tick();
+  const [row] = await f.submissions();
+  assert.equal(row!.submission.signature, submission.signature);
+  const booked = JSON.parse((await f.db.prepare("SELECT status,settlement_json FROM solana_runtime_submissions").get() as { settlement_json: string }).settlement_json);
+  assert.deepEqual([booked.status, booked.amountIn, booked.amountOut, booked.feeLamports, booked.slot], ["finalized", "100000000", (BigInt(submission.minOutAmount) + 1n).toString(), "10000", SLOT + 1]);
+  const book = async () => JSON.parse((await f.db.prepare("SELECT book_json FROM solana_runtime_live_books").get() as { book_json: string }).book_json);
+  const once = await book();
+  assert.deepEqual([once.wsolRaw, once.cashRaw, once.networkFeesLamports, once.slot], ["900000000", (50_000_000n + BigInt(submission.minOutAmount) + 1n).toString(), "10000", SLOT + 1]);
+  // Another restart, status read and tick change nothing: the fill is booked once, nothing more is sent or signed.
+  f.reopen();
+  await f.runtime({}, transport).status(f.scope); await f.agent(f.runtime({}, transport)).tick();
+  assert.deepEqual(await book(), once);
+  assert.equal(chain.sends.length, sendsBefore); assert.equal(signs.mock.callCount(), signed);
+});
+
+test("a provider a slot behind the prepared slot is asked again briefly at a trade's two-provider read before the trade is refused", async t => {
+  const { SolanaRpcError } = await import("./solana-rpc");
+  // The fallback answers "minimum context slot not reached" (a JSON-RPC error) `behind` times at the trade's balance read.
+  const lagging = (behind: number) => { let left = behind; return (read: SolanaLiveRead): SolanaLiveRead => async (method, params = []) => {
+    if (method === "getMultipleAccounts" && (params[0] as string[]).length === 2 && left > 0) { left--; throw new SolanaRpcError("rpc"); }
+    return read(method, params);
+  }; };
+  const caught = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" } });
+  const wrap = lagging(2);
+  const placed = await caught.runtime({}, split(caught, undefined, read => wrap(read))).trade(caught.scope, { mode: "live", intent: manual(SOLANA_WRAPPED_SOL_MINT, "100000000", "caught-up") });
+  assert.ok("status" in placed && placed.status === "pending"); assert.equal(caught.sends.length, 1);
+  // Still behind after every attempt: refused, nothing signed or sent.
+  const behind = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" } });
+  const stuck = lagging(100);
+  await assert.rejects(behind.runtime({}, split(behind, undefined, read => stuck(read))).trade(behind.scope, { mode: "live", intent: manual(SOLANA_WRAPPED_SOL_MINT, "100000000", "never-caught-up") }),
+    (error: unknown) => error instanceof SolanaRpcError && error.code === "rpc");
+  assert.deepEqual(await behind.submissions(), []); assert.equal(behind.sends.length, 0);
+});
+
+test("a live trade that landed is not called a vault below its book, nor paged as one, while it awaits final confirmation", async t => {
+  const f = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" }, strategy: { ...rebalance, targetSolBps: 7500 } });
+  // The chain as both providers see it: once landed, the confirmed vault holds the sale's result; finalized receipts come later.
+  const chain = { landed: false, finalized: false };
+  const recorded = async () => (await f.submissions())[0]?.submission;
+  const read: SolanaLiveRead = async (method, params = []) => {
+    const submission = await recorded();
+    if (method === "getSignatureStatuses" && chain.landed) return { context: { slot: SLOT + 2 }, value: [{ confirmationStatus: chain.finalized ? "finalized" : "confirmed", slot: SLOT + 1, err: null }] };
+    if (method === "getTransaction") return null;
+    const keys = params[0] as string[];
+    if (chain.landed && method === "getMultipleAccounts" && keys.length === 2 && keys[0] === f.cashAta && keys[1] === f.wsolAta) {
+      return { context: { slot: SLOT + 2 }, value: [rpcAccount(token(SOLANA_USDG_MINT, f.vault, 50_000_000n + BigInt(submission!.minOutAmount)), TOKEN_2022_PROGRAM),
+        rpcAccount(token(SOLANA_WRAPPED_SOL_MINT, f.vault, 1_000_000_000n - BigInt(submission!.intent.amountRaw)), SOLANA_CLASSIC_TOKEN_PROGRAM)] };
+    }
+    return f.read(method, params);
+  };
+  const transport: SolanaLiveRpc = { read: fn => fn(read), readEach: async fn => [await fn(read), await fn(read)], send: async () => "sent" };
+  const app = f.runtime({}, transport), lines: string[] = [];
+  const placed = await app.trade(f.scope, { mode: "live", intent: manual(SOLANA_WRAPPED_SOL_MINT, "100000000", "settling-sell") });
+  assert.ok("status" in placed && placed.status === "pending");
+  // Landed, confirmed but not finalized: the vault holds 0.1 SOL less than the book until both providers' receipts book the sale.
+  chain.landed = true;
+  const status = await app.status(f.scope);
+  assert.ok(status.live.blockers.includes("A live trade is awaiting final confirmation."), status.live.blockers.join(" | "));
+  assert.ok(!status.live.blockers.includes(SOLANA_STATUS_BELOW_BOOK), "its own landing is not tokens leaving outside Merrymen");
+  assert.equal(status.live.canExit, false, "trading and exits still wait for it");
+  // The worker's next tick holds the account for its pending trade and pages no operator to reconcile the book.
+  f.clock.now += 31_000;
+  await f.agent(app, line => lines.push(line)).tick();
+  assert.deepEqual(lines.filter(line => /vault-below-book/.test(line)), []);
+  assert.equal((await f.submissions())[0]!.submission.signature, (await recorded())!.signature);
 });

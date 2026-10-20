@@ -9,10 +9,14 @@ import { SolanaPaperValidationError } from "../../packages/core/src/solana";
 import { SOLANA_CLASSIC_TOKEN_PROGRAM, SOLANA_VAULT_ACCOUNT_SIZE, SOLANA_VAULT_DISCRIMINATOR,
   SOLANA_VAULT_LOCAL_TEST_PROGRAM, SOLANA_WRAPPED_SOL_MINT, deriveSolanaAta, deriveSolanaSwapAuthority, deriveSolanaVaultAddress } from "../../packages/core/src/solana-live";
 import { sealSecret } from "./store-crypto";
+// Aliased: the owner track imports the same constant by its own name.
+import { SOLANA_STATUS_BELOW_BOOK as STATUS_BELOW_BOOK } from "./solana-app-runtime";
+import { ensureSolanaShortfallSchema } from "./solana-resolve-shortfall";
 import { SqlSolanaBindingStore } from "../../web/src/lib/solana-binding-store";
 import { wrapSqlite } from "./db";
 import { createSolanaAgent } from "./solana-agent";
-import { createSolanaAppRuntime, SOLANA_DEPLOYMENT_RECHECK_MS, SolanaAppRuntimeError, solanaOwnerComputeUnitLimit, SOLANA_STATUS_NO_FALLBACK } from "./solana-app-runtime";
+import { createSolanaAppRuntime, SOLANA_DEPLOYMENT_RECHECK_MS, SolanaAppRuntimeError, solanaOwnerComputeUnitLimit, SOLANA_STATUS_BEHIND_BOOK, SOLANA_STATUS_FEE_PAYER_THRESHOLD_MISCONFIGURED,
+  SOLANA_STATUS_NO_FALLBACK } from "./solana-app-runtime";
 import { SolanaRpcError, withSolanaReadDeadline } from "./solana-rpc";
 import type { SolanaLiveRead, SolanaLiveRpc } from "./solana-live-rpc";
 import type { SolanaPaperMarket } from "./solana-paper-service";
@@ -435,7 +439,130 @@ test("one raw WSOL sent to the vault no longer freezes exits or owner withdrawal
     // A balance below the book still blocks: that is never a stranger's gift.
     f.controls.wsol = 49_999_999n;
     const short = await f.app.status(f.scope);
-    assert.equal(short.live.canExit, false); assert.match(short.live.blockers.join(" "), /below recorded trades/);
+    assert.equal(short.live.canExit, false); assert.ok(short.live.blockers.includes(STATUS_BELOW_BOOK));
+  } finally { f.raw.close(); }
+});
+
+test("below its book with a stranger's WSOL above it, status says so and books nothing, with no two-provider booking read (audit G3-3, mixed state)", async () => {
+  const f = await fixture();
+  try {
+    await f.live(); f.controls.initialized = true; await f.registered();
+    const book = { hwmRaw: "100000000", cashRaw: "90000000", wsolRaw: "50000000", costBasisUsdgRaw: "10000000", realizedPnlUsdgRaw: "0",
+      networkFeesLamports: "10000", slot: 900, updatedAtMs: 999_000 };
+    await f.db.prepare("INSERT INTO solana_runtime_live_books(tenant,owner,book_json) VALUES(?,?,?)").run(TENANT, f.owner, JSON.stringify(book));
+    // 20 USDG left with the recovery tool, then one raw WSOL from a stranger (anyone can send it).
+    f.controls.cash = 70_000_000n; f.controls.wsol = 50_000_001n;
+    // The second provider's finalized balance reads: asked only to book an inflow, which nothing short ever is.
+    let bookingReads = 0;
+    f.providers.fallback = async (method, params = []) => {
+      if (method === "getMultipleAccounts" && (params[0] as string[])[0] === f.cashAta && (params[1] as { commitment?: string }).commitment === "finalized") bookingReads++;
+      return f.read(method, params);
+    };
+    const status = await f.app.status(f.scope);
+    assert.ok(status.live.blockers.includes(STATUS_BELOW_BOOK)); assert.equal(status.live.canExit, false);
+    assert.deepEqual((await new SolanaTradingStore(f.db, f.scope).liveBook())!, book, "nothing is booked while a balance is short");
+    assert.equal(bookingReads, 0, "no two-provider read to book an inflow while a balance is short");
+  } finally { f.raw.close(); }
+});
+
+test("an in-app withdrawal that landed is not called a vault below its book while it awaits final confirmation, nor is a balance read from before the book", async () => {
+  const f = await fixture();
+  try {
+    await readyLive(f); f.controls.sequence = 3n; f.controls.cash = 90_000_000n;
+    const book = { hwmRaw: "90000000", cashRaw: "90000000", wsolRaw: "0", costBasisUsdgRaw: "0", realizedPnlUsdgRaw: "0", networkFeesLamports: "0", slot: 900, updatedAtMs: 999_000 };
+    await f.db.prepare("INSERT INTO solana_runtime_live_books(tenant,owner,book_json) VALUES(?,?,?)").run(TENANT, f.owner, JSON.stringify(book));
+    const prepared = await f.app.prepareOwnerAction(f.scope, { action: "withdraw", mint: SOLANA_USDG_MINT, amountRaw: "1000000" });
+    const signedTransactionBase64 = await f.sign(prepared.transactionBase64);
+    await f.app.submitOwnerAction(f.scope, { signedTransactionBase64 });
+    // It landed (confirmed, not finalized): the vault holds 1 USDG less than the book until both providers' finalized receipts book it.
+    f.controls.cash = 89_000_000n;
+    const settling = await f.app.status(f.scope);
+    assert.ok(settling.live.blockers.includes("An owner transaction is awaiting final confirmation."), settling.live.blockers.join(" | "));
+    assert.ok(!settling.live.blockers.includes(STATUS_BELOW_BOOK), "its own landing is not tokens leaving outside Merrymen");
+    assert.equal(settling.live.canExit, false, "trading and exits still wait for it");
+    // Finalized on both providers: booked, and the vault matches its book.
+    f.providers.primary = withholding(f); f.providers.fallback = withholding(f);
+    assert.equal((await f.app.submitOwnerAction(f.scope, { signedTransactionBase64 })).status, "finalized");
+    f.providers.primary = null; f.providers.fallback = null; f.controls.sequence = 4n;
+    assert.ok(!(await f.app.status(f.scope)).live.blockers.some(item => item === STATUS_BELOW_BOOK || item === SOLANA_STATUS_BEHIND_BOOK));
+    // Nothing settling, and the vault really short of its book: said as such.
+    f.controls.cash = 88_000_000n;
+    assert.ok((await f.app.status(f.scope)).live.blockers.includes(STATUS_BELOW_BOOK));
+    // A book recorded at a later slot than the balances read (a lagging provider): no shortfall can be shown, and trading still waits.
+    const later = (await new SolanaTradingStore(f.db, f.scope).liveBook())!;
+    await f.db.prepare("UPDATE solana_runtime_live_books SET book_json=? WHERE tenant=? AND owner=?").run(JSON.stringify({ ...later, slot: 1001 }), TENANT, f.owner);
+    const behind = await f.app.status(f.scope);
+    assert.ok(behind.live.blockers.includes(SOLANA_STATUS_BEHIND_BOOK)); assert.ok(!behind.live.blockers.includes(STATUS_BELOW_BOOK));
+    assert.equal(behind.live.ready, false);
+  } finally { f.raw.close(); }
+});
+
+test("a shortfall an operator wrote off frees automated exits again, with buying paused for the owner's review (audit G3-3)", async () => {
+  const f = await fixture();
+  try {
+    await readyLive(f); f.controls.cash = 70_000_000n; f.controls.wsol = 50_000_000n;
+    const book = { hwmRaw: "100000000", cashRaw: "90000000", wsolRaw: "50000000", costBasisUsdgRaw: "10000000", realizedPnlUsdgRaw: "0", networkFeesLamports: "0", slot: 900, updatedAtMs: 999_000 };
+    await f.db.prepare("INSERT INTO solana_runtime_live_books(tenant,owner,book_json) VALUES(?,?,?)").run(TENANT, f.owner, JSON.stringify(book));
+    const held = await f.app.status(f.scope);
+    assert.ok(held.live.blockers.includes(STATUS_BELOW_BOOK)); assert.equal(held.live.canExit, false);
+    // The operator's decision, recorded first by the resolve tool, then the write-off on two providers' reading.
+    await ensureSolanaShortfallSchema(f.db, false);
+    await f.db.prepare("INSERT INTO solana_operator_shortfalls(id,tenant,owner,slot,cash_usdg,wsol_raw,operator,reason,evidence_json,approved_at_ms) VALUES(?,?,?,?,?,?,?,?,?,?)")
+      .run("decision-1", TENANT, f.owner, 1000, "70000000", "50000000", "milla", "issuer seized 20 USDG", "{}", f.clock.now);
+    await new SolanaTradingStore(f.db, f.scope, () => f.clock.now).writeOffShortfall({ slot: 1000, cashUsdg: "70000000", wsolRaw: "50000000", observedAtMs: f.clock.now, commitment: "finalized" }, "decision-1");
+    const freed = await f.app.status(f.scope);
+    assert.ok(!freed.live.blockers.includes(STATUS_BELOW_BOOK), freed.live.blockers.join(" | "));
+    assert.equal(freed.live.canExit, true, freed.live.blockers.join(" | ")); assert.equal(freed.live.ready, false, "buying waits for the owner");
+    assert.ok(freed.live.blockers.includes("The buying drawdown breaker is paused; exits remain available."));
+    assert.deepEqual([freed.live.book!.cashRaw, freed.live.book!.hwmRaw, freed.live.book!.realizedPnlUsdgRaw], ["70000000", "100000000", "-20000000"]);
+  } finally { f.raw.close(); }
+});
+
+/** A provider that answers the vault's two-account balance read (USDG, WSOL) as `change` says, and everything else honestly. */
+function balanceRead(f: Fixture, change: (answer: { context: { slot: number }; value: unknown[] }) => unknown): SolanaLiveRead {
+  return async (method, params = []) => {
+    const answer = await f.read(method, params);
+    const keys = params[0] as string[];
+    return method === "getMultipleAccounts" && keys.length === 2 && keys[0] === f.cashAta && keys[1] === f.wsolAta
+      ? change(answer as { context: { slot: number }; value: unknown[] }) : answer;
+  };
+}
+
+test("a deposit is booked only from finalized balances both providers report, at the lowest slot either answered at (audit G3-3, live-M3)", async () => {
+  const f = await fixture();
+  try {
+    await readyLive(f);
+    const book = { hwmRaw: "100000000", cashRaw: "90000000", wsolRaw: "50000000", costBasisUsdgRaw: "10000000", realizedPnlUsdgRaw: "0",
+      networkFeesLamports: "10000", slot: 900, updatedAtMs: 999_000 };
+    await f.db.prepare("INSERT INTO solana_runtime_live_books(tenant,owner,book_json) VALUES(?,?,?)").run(TENANT, f.owner, JSON.stringify(book));
+    f.controls.cash = 90_000_000n; f.controls.wsol = 50_000_000n;
+    const booked = async () => (await new SolanaTradingStore(f.db, f.scope).liveBook())!;
+    // The primary alone shows a 10 USDG deposit (confirmed and finalized): nothing is booked, and trading is not blocked.
+    const phantom = (answer: { context: { slot: number }; value: unknown[] }) =>
+      ({ ...answer, value: [{ ...(answer.value[0] as object), data: [f.tokenAccount(SOLANA_USDG_MINT, 100_000_000n).toString("base64"), "base64"] }, answer.value[1]] });
+    f.providers.primary = balanceRead(f, phantom);
+    let status = await f.app.status(f.scope);
+    assert.equal(status.live.ready, true, status.live.blockers.join(" | "));
+    assert.deepEqual([(await booked()).cashRaw, (await booked()).hwmRaw, (await booked()).slot], ["90000000", "100000000", 900]);
+    // A real deposit both providers see is booked.
+    f.providers.primary = null; f.controls.cash = 100_000_000n;
+    status = await f.app.status(f.scope);
+    assert.deepEqual([(await booked()).cashRaw, (await booked()).hwmRaw, (await booked()).slot], ["100000000", "110000000", 1000]);
+    // One provider answering far ahead of what the other has finalized (its getSlot): the reading is refused, no slot is
+    // persisted, and trading continues. A deposit that came with it waits for an honest reading.
+    f.controls.cash = 105_000_000n;
+    for (const which of ["primary", "fallback"] as const) {
+      f.providers[which] = balanceRead(f, answer => ({ ...answer, context: { slot: answer.context.slot + 1_000_000_000 } }));
+      status = await f.app.status(f.scope);
+      assert.equal(status.live.ready, true, `${which}: ${status.live.blockers.join(" | ")}`);
+      assert.deepEqual([(await booked()).cashRaw, (await booked()).slot], ["100000000", 1000], which);
+      f.providers[which] = null;
+    }
+    // Honest skew between two providers books, at the lower of their slots.
+    f.providers.primary = balanceRead(f, answer => ({ ...answer, context: { slot: answer.context.slot + 100 } }));
+    status = await f.app.status(f.scope);
+    assert.deepEqual([(await booked()).cashRaw, (await booked()).slot], ["105000000", 1000]);
+    assert.equal(status.live.ready, true, status.live.blockers.join(" | "));
   } finally { f.raw.close(); }
 });
 
@@ -612,6 +739,34 @@ test("the fee payer gates buys and exits only on what one swap actually needs (a
   } finally { f.raw.close(); }
 });
 
+test("the worker's own fee payer check judges and says what status judges and says, through the same alert state (audit G2-4)", async () => {
+  const f = await fixture(), lines: string[] = [];
+  try {
+    await readyLive(f);
+    const app = f.runtime({ log: line => lines.push(line) });
+    assert.equal(await app.feePayerCheck({ vault: f.vault }), "ok"); assert.equal(lines.length, 0);
+    f.controls.feePayerLamports = 3_000_000;
+    assert.equal(await app.feePayerCheck({ vault: f.vault }), "low");
+    assert.equal(lines.length, 1); assert.match(lines[0]!, /^\[alert\] Solana fee payer is low: /);
+    // Status finds the same level: nothing more is said within the window.
+    assert.equal((await app.status(f.scope)).live.feePayer?.level, "low"); assert.equal(lines.length, 1);
+    // Exactly what a buy needs, with the vault's USDG account sizing it as status does; without a vault, the upper bound.
+    f.controls.feePayerLamports = rentExempt(170) + 10_000;
+    assert.equal(await app.feePayerCheck({ vault: f.vault }), "low"); assert.equal(await app.feePayerCheck(), "buys-blocked");
+    f.controls.feePayerLamports = rentExempt(165) + 9_999;
+    assert.equal(await app.feePayerCheck({ vault: f.vault }), "exits-blocked");
+    assert.match(lines.at(-1)!, /^\[alert\] Solana fee payer cannot fund exits: every tenant's exits are blocked: /);
+    assert.ok(lines.every(line => !line.includes(f.owner) && !line.includes(TENANT)), "no tenant identity");
+    // An unreadable threshold is evaluated in its own try here too: the fallback level, and its own [alert].
+    f.controls.feePayerLamports = 3_000_000;
+    const broken = f.runtime({ env: { ...f.env, MERRYMEN_SOLANA_FEE_PAYER_LOW_LAMPORTS: "lots" }, log: line => lines.push(line) });
+    assert.equal(await broken.feePayerCheck({ vault: f.vault }), "low");
+    assert.ok(lines.some(line => line.startsWith("[alert] solana fee-payer-threshold misconfigured")));
+    // Live trading not configured: there is nothing to check.
+    await assert.rejects(f.runtime({ env: { ...f.env, MERRYMEN_SOLANA_FEE_PAYER_SEED: "" } }).feePayerCheck(), /fee payer/);
+  } finally { f.raw.close(); }
+});
+
 test("the fee payer warning threshold is explicit configuration (audit G2-4)", async () => {
   const f = await fixture();
   try {
@@ -620,7 +775,8 @@ test("the fee payer warning threshold is explicit configuration (audit G2-4)", a
     const status = await quiet.status(f.scope);
     assert.equal(status.live.feePayer?.level, "ok"); assert.deepEqual(status.live.warnings, []); assert.equal(status.live.feePayer?.lowLamports, "2500000");
     const broken = f.runtime({ env: { ...f.env, MERRYMEN_SOLANA_FEE_PAYER_LOW_LAMPORTS: "lots" }, log: () => {} });
-    assert.match((await broken.status(f.scope)).live.blockers.join(" "), /warning threshold is misconfigured/);
+    const warned = await broken.status(f.scope);
+    assert.deepEqual(warned.live.blockers, []); assert.ok(warned.live.warnings.includes(SOLANA_STATUS_FEE_PAYER_THRESHOLD_MISCONFIGURED));
   } finally { f.raw.close(); }
 });
 
@@ -630,8 +786,8 @@ test("a misconfigured fee setting is a status blocker that still shows the vault
     await readyLive(f); f.controls.cash = 8_000_000n; f.controls.feePayerLamports = 3_000_000;
     const good = await f.app.status(f.scope);
     assert.equal(good.live.ready, true, good.live.blockers.join(" | "));
-    for (const [setting, value, blocker] of [["MERRYMEN_SOLANA_FEE_PAYER_LOW_LAMPORTS", "lots", /fee payer warning threshold is misconfigured/],
-      ["MERRYMEN_SOLANA_MAX_FEE_LAMPORTS", "lots", /network fee limit setting is misconfigured/], ["MERRYMEN_SOLANA_MAX_FEE_LAMPORTS", "0", /network fee limit setting is misconfigured/]] as const) {
+    for (const [setting, value, blocker] of [["MERRYMEN_SOLANA_MAX_FEE_LAMPORTS", "lots", /network fee limit setting is misconfigured/],
+      ["MERRYMEN_SOLANA_MAX_FEE_LAMPORTS", "0", /network fee limit setting is misconfigured/]] as const) {
       const app = f.runtime({ env: { ...f.env, [setting]: value }, log: () => {} });
       const status = await app.status(f.scope);
       assert.deepEqual(status.live.blockers.length, 1, status.live.blockers.join(" | "));
@@ -644,11 +800,38 @@ test("a misconfigured fee setting is a status blocker that still shows the vault
       assert.deepEqual({ ...status.live.feePayer, lowLamports: null }, { ...good.live.feePayer, lowLamports: null }, setting);
       assert.equal(good.live.feePayer?.level, "low"); assert.equal(status.live.feePayer?.lowLamports, null, "no configured threshold to show");
       assert.deepEqual(status.live.warnings, good.live.warnings, setting);
-      if (setting === "MERRYMEN_SOLANA_MAX_FEE_LAMPORTS") {
-        await rejectsWith(app.trade(f.scope, { mode: "live", intent: { ...f.trade, mode: "live", requestId: `fee-cap-${value}` } }), "configuration", blocker, value);
-      }
+      await rejectsWith(app.trade(f.scope, { mode: "live", intent: { ...f.trade, mode: "live", requestId: `fee-cap-${value}` } }), "configuration", blocker, value);
     }
     assert.equal((await new SolanaTradingStore(f.db, f.scope).pending()).length, 0); assert.equal(f.controls.sends, 0);
+  } finally { f.raw.close(); }
+});
+
+test("a misconfigured fee payer warning threshold refuses nothing: trading and exits continue, the owner sees a warning and operators an [alert] (audit live-M6)", async () => {
+  const f = await fixture(), lines: string[] = [];
+  try {
+    await readyLive(f); f.controls.cash = 8_000_000n; f.controls.feePayerLamports = 3_000_000;
+    const good = await f.app.status(f.scope);
+    for (const [label, more] of [["unreadable", { MERRYMEN_SOLANA_FEE_PAYER_LOW_LAMPORTS: "lots" }], ["zero", { MERRYMEN_SOLANA_FEE_PAYER_LOW_LAMPORTS: "0" }],
+      ["unreadable, with an unreadable fee cap", { MERRYMEN_SOLANA_FEE_PAYER_LOW_LAMPORTS: "lots", MERRYMEN_SOLANA_MAX_FEE_LAMPORTS: "lots" }]] as const) {
+      lines.length = 0;
+      const app = f.runtime({ env: { ...f.env, ...more }, log: line => lines.push(line) });
+      const status = await app.status(f.scope);
+      const capBroken = "MERRYMEN_SOLANA_MAX_FEE_LAMPORTS" in more;
+      // Only the fee cap (which trade() refuses) blocks; the threshold never does.
+      assert.deepEqual(status.live.blockers.map(b => /network fee limit/.test(b)), capBroken ? [true] : [], label);
+      assert.equal(status.live.ready, !capBroken, label); assert.equal(status.live.canExit, !capBroken, label);
+      assert.deepEqual(status.live.warnings, [SOLANA_STATUS_FEE_PAYER_THRESHOLD_MISCONFIGURED, ...good.live.warnings], label);
+      // The fee payer, vault, balances and owner wallet are read and shown; called low below four times the (default) fee cap.
+      assert.deepEqual(status.live.balances, good.live.balances, label); assert.deepEqual(status.live.ownerWallet, good.live.ownerWallet, label);
+      assert.deepEqual({ ...status.live.feePayer, lowLamports: null }, { ...good.live.feePayer, lowLamports: null }, label);
+      assert.equal(status.live.feePayer?.level, "low", label); assert.equal(status.live.feePayer?.lowLamports, null, label);
+      const alerts = lines.filter(line => line.startsWith("[alert] solana fee-payer-threshold misconfigured"));
+      assert.equal(alerts.length, 1, label); assert.ok(!alerts[0]!.includes("lots"), "the value is never echoed");
+      // Said at most once per ten minutes per process.
+      await app.status(f.scope); assert.equal(lines.filter(line => line.startsWith("[alert] solana fee-payer-threshold")).length, 1, label);
+      f.clock.now += 10 * 60_000; await app.status(f.scope);
+      assert.equal(lines.filter(line => line.startsWith("[alert] solana fee-payer-threshold")).length, 2, label);
+    }
   } finally { f.raw.close(); }
 });
 
@@ -947,10 +1130,11 @@ function pricedMarket(f: Fixture, failQuotes = false): SolanaPaperMarket {
       contextSlot: 1000, quotedAtMs: f.clock.now, expiresAtMs: f.clock.now + 30_000 };
   } };
 }
-/** The primary provider also serves Pyth's SOL/USD account. */
-function servePyth(f: Fixture) {
-  f.providers.primary = async (method, params = []) => method === "getAccountInfo" && params[0] === PYTH_SOL_USD_ACCOUNT
-    ? f.response(pythAccount({ price: USD_PER_SOL, publishTimeMs: f.clock.now, postedSlot: 999n })) : f.read(method, params);
+/** Both providers also serve Pyth's SOL/USD account (`fallbackPrice`: what the second one serves instead, when given). */
+function servePyth(f: Fixture, fallbackPrice?: bigint) {
+  const serving = (price: bigint): SolanaLiveRead => async (method, params = []) => method === "getAccountInfo" && params[0] === PYTH_SOL_USD_ACCOUNT
+    ? f.response(pythAccount({ price, publishTimeMs: f.clock.now, postedSlot: 999n })) : f.read(method, params);
+  f.providers.primary = serving(USD_PER_SOL); f.providers.fallback = serving(fallbackPrice ?? USD_PER_SOL);
 }
 /** The audit's account: 8 USDG cash and 0.1 SOL (12 USDG at $120), high-water mark 20 USDG. */
 async function wsolCapital(f: Fixture) {
@@ -986,6 +1170,26 @@ test("withdrawing WSOL capital in the app lowers the high-water mark by its valu
     assert.notEqual(after.buyPaused, true);
     assert.equal(breakerTrips(20_000_000n, 8_000_000n), true, "without the valuation the same withdrawal pauses buying");
   } finally { f.raw.close(); }
+});
+
+test("a WSOL withdrawal is valued at the lower of both providers' Pyth bounds: one provider cannot lower the high-water mark by more than the SOL was worth", async () => {
+  for (const [label, primary, fallback] of [["fallback low", USD_PER_SOL, 10_000_000_000n], ["primary low", 10_000_000_000n, USD_PER_SOL]] as const) {
+    const f = await fixture();
+    try {
+      await wsolCapital(f); servePyth(f);
+      // servePyth serves $120 from both; serve each provider's own price instead.
+      const serving = (price: bigint): SolanaLiveRead => async (method, params = []) => method === "getAccountInfo" && params[0] === PYTH_SOL_USD_ACCOUNT
+        ? f.response(pythAccount({ price, conf: price / 10_000n, publishTimeMs: f.clock.now, postedSlot: 999n })) : f.read(method, params);
+      f.providers.primary = serving(primary); f.providers.fallback = serving(fallback);
+      // A quote above both, so the reference is what the store keeps.
+      const app = f.runtime({ market: { ...pricedMarket(f), quote: async intent => ({ ...await pricedMarket(f).quote(intent), minOutAmount: "11999999" }) } });
+      await app.prepareOwnerAction(f.scope, { action: "withdraw", mint: SOLANA_WRAPPED_SOL_MINT, amountRaw: "100000000" });
+      const saved = (await new SolanaTradingStore(f.db, f.scope).setup())!;
+      // 0.1 SOL at $100, not at $120: the lower of the two providers' bounds.
+      assert.equal(saved.withdrawValuation?.reference.referenceOut, "10000000", label);
+      assert.equal(saved.withdrawValuation?.reference.reference.price, "10000000000", label);
+    } finally { f.raw.close(); }
+  }
 });
 
 test("a WSOL withdrawal whose value cannot be read still prepares and lands, and leaves the high-water mark where it was", async () => {

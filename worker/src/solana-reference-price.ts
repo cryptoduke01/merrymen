@@ -372,17 +372,47 @@ export function solanaReferenceBound(intent: { inputMint: string; outputMint: st
 }
 
 /**
+ * Of one trade's bounds, one per provider that served the reference (each read
+ * at or after the same slot), the stricter: the highest reference output. That
+ * is the higher floor for the guaranteed output (a buy is held to the lower SOL
+ * price, a sell to the higher) and, for a sell, the higher USDG value charged
+ * against the limits. A provider serving a fabricated price can therefore make a
+ * trade harder to admit, never easier. Ties keep the first (the primary's).
+ */
+export function solanaStrictestReferenceBound(bounds: readonly SolanaReferenceBound[]): SolanaReferenceBound {
+  if (!bounds.length) return fail("bound");
+  return bounds.reduce((best, bound) => parseSolanaRawAmount(bound.referenceOut) > parseSolanaRawAmount(best.referenceOut) ? bound : best);
+}
+/**
+ * Of several providers' bounds for one amount, the lowest reference output:
+ * what an owner withdrawal's valuation keeps, so that no one provider can lower
+ * the high-water mark by more than the SOL was worth.
+ */
+export function solanaLowestReferenceBound(bounds: readonly SolanaReferenceBound[]): SolanaReferenceBound {
+  if (!bounds.length) return fail("bound");
+  return bounds.reduce((low, bound) => parseSolanaRawAmount(bound.referenceOut) < parseSolanaRawAmount(low.referenceOut) ? bound : low);
+}
+
+/**
  * Recompute a stored bound from its own reference and the intent, and check it
  * is still fresh. Admission calls this so a bound can't be edited or replayed.
  * The reference must come from `generation`'s account (default:
  * SOLANA_PYTH_DEFAULT_GENERATION; the app runtime's executor and store pass the
  * one its env names): a bound read from the other generation is refused, never
  * translated.
+ *
+ * `toleranceBps`: the tolerance the bound must have been built with, the app
+ * runtime's MERRYMEN_SOLANA_REFERENCE_TOLERANCE_BPS (the executor and the store
+ * pass it, by default SOLANA_REFERENCE_DEFAULT_TOLERANCE_BPS). A bound carrying
+ * any other tolerance is refused, so evidence cannot widen its own floor. Left
+ * out, any tolerance in the allowed range is recomputed as before (the owner's
+ * withdrawal valuation, which only ever lowers the high-water mark less).
  */
 export function verifySolanaReferenceBound(bound: SolanaReferenceBound, intent: Parameters<typeof solanaReferenceBound>[0], nowMs: number,
-  generation: SolanaPythGeneration = SOLANA_PYTH_DEFAULT_GENERATION): SolanaReferenceBound {
+  generation: SolanaPythGeneration = SOLANA_PYTH_DEFAULT_GENERATION, toleranceBps?: number): SolanaReferenceBound {
   const feed = solanaPythFeed(generation);
   if (!object(bound) || !object(bound.reference)) return fail("evidence");
+  if (toleranceBps !== undefined && bound.toleranceBps !== toleranceBps) return fail("evidence");
   const r = bound.reference;
   try { address(r.account); } catch { return fail("evidence"); }
   if (r.source !== "pyth" || r.account !== feed.account || r.feedId !== PYTH_SOL_USD_FEED_ID ||

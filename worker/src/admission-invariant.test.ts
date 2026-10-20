@@ -170,10 +170,11 @@ describe("every way this worker moves money runs inside processIntentLocked", ()
     assert.equal((app.match(/\.execute\(/g) ?? []).length, 1);
     // The executor's durable gate is the tenant-scoped store `s`: every journal
     // method delegates to it, and recordSigned adds only the configured
-    // expired-attempt allowance (a number, never another store or a bypass).
+    // expired-attempt allowance and reference tolerance (numbers, never another store or a bypass).
     assert.equal((app.match(/const journal\b/g) ?? []).length, 1);
-    assert.match(app, /const journal: SolanaLiveJournal = \{ get: \(owner, requestId\) => s\.get\(owner, requestId\), settle: \(\.\.\.args\) => s\.settle\(\.\.\.args\),\s*recordSigned: submission => s\.recordSigned\(submission, \{ expiredAttemptAllowance: expiredAllowance \}\) \};/);
+    assert.match(app, /const journal: SolanaLiveJournal = \{ get: \(owner, requestId\) => s\.get\(owner, requestId\), settle: \(\.\.\.args\) => s\.settle\(\.\.\.args\),\s*recordSigned: submission => s\.recordSigned\(submission, \{ expiredAttemptAllowance: expiredAllowance, referenceToleranceBps: toleranceBps \}\) \};/);
     assert.match(app, /const expiredAllowance = expiredAttemptAllowance\(\);/);
+    assert.match(app, /const toleranceBps = referenceToleranceBps\(\);/);
     const executorOptions = app.slice(app.indexOf("createSolanaExecutor("), app.indexOf("assessRisk:", app.indexOf("createSolanaExecutor(")));
     assert.match(executorOptions, /\bjournal, maxFeeLamports\b/);
     assert.doesNotMatch(executorOptions, /journal:/);

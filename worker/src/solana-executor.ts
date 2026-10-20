@@ -16,8 +16,9 @@ import {
 } from "../../packages/core/src/solana-live";
 import { SolanaLiveMarketError, validateJupiterCpi, type JupiterCpiRoute, type SolanaCpiBuildRequest } from "./solana-live-market";
 import { readSolanaEachProvider, readSolanaPriorityFee, readSolanaQuorum, type SolanaLiveRead, type SolanaLiveRpc } from "./solana-live-rpc";
-import { solanaReferenceNotional, verifySolanaReferenceBound, type SolanaPythGeneration, type SolanaReferenceBound } from "./solana-reference-price";
+import { SOLANA_REFERENCE_DEFAULT_TOLERANCE_BPS, solanaReferenceNotional, verifySolanaReferenceBound, type SolanaPythGeneration, type SolanaReferenceBound } from "./solana-reference-price";
 import { isSolanaTransactionError, settleSolanaReceipt, type SolanaVaultEvidence } from "./solana-settlement";
+import { SolanaRpcError } from "./solana-rpc";
 
 export interface SolanaLiveIntent {
   kind: "spl-swap"; chain: typeof CHAINS.solana; mode: "live";
@@ -78,7 +79,12 @@ interface SolanaSettlementFields {
 export type SolanaLiveSettlement = SolanaSettlementFields & (
   { status: "finalized" | "failed"; feeLamports: string } |
   { status: "expired"; feeLamports: null; expiryProof: {
-    vaultSequence: string; sessionEpoch: string; blockHeight: string; reason: "blockhash-expired" | "session-revoked";
+    vaultSequence: string; sessionEpoch: string; blockHeight: string; reason: "blockhash-expired" | "session-revoked" | "sequence-consumed";
+    /**
+     * sequence-consumed only: the earliest cluster time (unix seconds) these bytes could have run at
+     * (solanaDebitWindowStart). The vault's debit log at the proof held no debit at or after it.
+     */
+    debitWindowStart?: string;
   } }
 );
 export interface SolanaLiveRecord {
@@ -266,6 +272,18 @@ export interface SolanaExecutorOptions {
   signal?: AbortSignal;
   /** The Pyth generation `assessRisk`'s reference must come from: the app runtime's MERRYMEN_SOLANA_PYTH_GENERATION. Default: SOLANA_PYTH_DEFAULT_GENERATION. */
   pythGeneration?: SolanaPythGeneration;
+  /** The tolerance `assessRisk`'s bound must carry: the app runtime's MERRYMEN_SOLANA_REFERENCE_TOLERANCE_BPS. Default: SOLANA_REFERENCE_DEFAULT_TOLERANCE_BPS. */
+  referenceToleranceBps?: number;
+  /**
+   * The lowest slot the vault snapshot a swap is signed against may come from:
+   * the app runtime passes its book's slot and the slot its latest owner
+   * transaction finalized at. A provider whose bank is behind it errors instead
+   * of answering with the vault from before them, so nothing is signed against
+   * a sequence an owner withdrawal already consumed (audit live-M1, trigger b).
+   * The app runtime's assessRisk also refuses unless every provider shows the
+   * snapshot's sequence and session epoch at the prepared slot. Default 1.
+   */
+  minSnapshotSlot?: number;
 }
 const UPGRADEABLE_LOADER = "BPFLoaderUpgradeab1e11111111111111111111111";
 const LOOKUP_PROGRAM = "AddressLookupTab1e1111111111111111111111111";
@@ -370,15 +388,93 @@ export async function readSolanaVaultState(rpc: SolanaLiveRpc, programId: string
     return { vault, slot: raw.slot, state };
   });
 }
+/** One provider's confirmed state of `owner`'s vault at or after `minContextSlot`, in its own read session. */
+export async function readSolanaVaultStateWith(read: SolanaLiveRead, programId: string, vault: string, owner: string, minContextSlot: number): Promise<SolanaVaultState> {
+  const raw = context(await read("getAccountInfo", [vault, { encoding: "base64", commitment: "confirmed", minContextSlot }]), minContextSlot);
+  const data = account(raw.value);
+  if (data.owner !== programId || data.executable) return fail();
+  const state = decodeSolanaVaultAccount(data.data);
+  if (state.owner !== owner) return fail();
+  return state;
+}
 export async function readSolanaVaultBalances(rpc: SolanaLiveRpc, vault: string, minContextSlot = 1, commitment: "confirmed" | "finalized" = "confirmed"): Promise<{ slot: number; cashUsdg: string; wsolRaw: string }> {
+  return rpc.read(read => readSolanaVaultBalancesWith(read, vault, minContextSlot, commitment));
+}
+/** One provider's answer for the vault's USDG and WSOL balances, at or after `minContextSlot`, in one read session. */
+export async function readSolanaVaultBalancesWith(read: SolanaLiveRead, vault: string, minContextSlot = 1, commitment: "confirmed" | "finalized" = "confirmed"): Promise<{ slot: number; cashUsdg: string; wsolRaw: string }> {
   const [cash, wsol] = await Promise.all([deriveSolanaAta(vault, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM),
     deriveSolanaAta(vault, SOLANA_WRAPPED_SOL_MINT, SOLANA_CLASSIC_TOKEN_PROGRAM)]);
-  return rpc.read(async read => {
-    const result = context(await read("getMultipleAccounts", [[cash, wsol], { encoding: "base64", commitment, minContextSlot }]), minContextSlot);
-    if (!Array.isArray(result.value) || result.value.length !== 2) return fail();
-    return { slot: result.slot, cashUsdg: tokenBalance(account(result.value[0]), SOLANA_USDG_MINT, vault, TOKEN_2022_PROGRAM).toString(),
-      wsolRaw: tokenBalance(account(result.value[1]), SOLANA_WRAPPED_SOL_MINT, vault, SOLANA_CLASSIC_TOKEN_PROGRAM).toString() };
-  });
+  const result = context(await read("getMultipleAccounts", [[cash, wsol], { encoding: "base64", commitment, minContextSlot }]), minContextSlot);
+  if (!Array.isArray(result.value) || result.value.length !== 2) return fail();
+  return { slot: result.slot, cashUsdg: tokenBalance(account(result.value[0]), SOLANA_USDG_MINT, vault, TOKEN_2022_PROGRAM).toString(),
+    wsolRaw: tokenBalance(account(result.value[1]), SOLANA_WRAPPED_SOL_MINT, vault, SOLANA_CLASSIC_TOKEN_PROGRAM).toString() };
+}
+/**
+ * How far one provider's context slot may run ahead of another provider's fresh
+ * slot at the same commitment: about a minute of honest skew between two
+ * providers' banks. A slot further ahead is one provider's invention.
+ */
+export const SOLANA_PROVIDER_SLOT_SKEW = 150;
+/**
+ * The slot a reading of several providers may persist (a book's slot, an expiry
+ * proof's slot): the LOWEST context slot any of them answered at, never one
+ * provider's own. `views[i].fresh` is provider i's fresh slot at the same
+ * commitment, read after its answer in the same session: a provider whose
+ * context slot runs more than SOLANA_PROVIDER_SLOT_SKEW ahead of another's
+ * fresh slot refuses the whole reading. A persisted slot is a floor every later
+ * read and admission must reach (minContextSlot = book.slot; "moved
+ * backwards"), so one provider's inflated slot would otherwise refuse every
+ * later trade and in-app withdrawal.
+ */
+export function solanaQuorumSlot(views: readonly { slot: number; fresh?: number }[]): number {
+  if (!views.length || views.some(view => !Number.isSafeInteger(view.slot) || view.slot < 1)) return fail();
+  const fresh = views.flatMap(view => view.fresh === undefined ? [] : [integer(view.fresh)]);
+  const highest = Math.max(...views.map(view => view.slot)), lowestFresh = fresh.length ? Math.min(...fresh) : Number.MAX_SAFE_INTEGER;
+  if (highest > lowestFresh + SOLANA_PROVIDER_SLOT_SKEW) return fail();
+  return Math.min(...views.map(view => view.slot));
+}
+/**
+ * The vault's balances as EVERY provider sees them (at least two), at or after
+ * `minContextSlot`: what booking an inflow may rest on. The providers must
+ * report the same balances, or the reading is refused (invalid-state: nothing
+ * is booked, ask again later). The slot is solanaQuorumSlot's: the lowest any
+ * provider answered at, refused when one runs ahead of another's fresh slot.
+ * One provider can therefore neither book a phantom deposit nor persist an
+ * inflated book slot.
+ */
+export async function readSolanaVaultBalancesQuorum(rpc: SolanaLiveRpc, vault: string, minContextSlot = 1, commitment: "confirmed" | "finalized" = "finalized"): Promise<{ slot: number; cashUsdg: string; wsolRaw: string }> {
+  const views = (await readSolanaQuorum(rpc, async read => {
+    const balances = await readSolanaVaultBalancesWith(read, vault, minContextSlot, commitment);
+    return { ...balances, fresh: integer(await read("getSlot", [{ commitment }])) };
+  }, view => JSON.stringify([view.cashUsdg, view.wsolRaw])));
+  if (!views.agreed) return fail();
+  return { slot: solanaQuorumSlot(views.values), cashUsdg: views.value.cashUsdg, wsolRaw: views.value.wsolRaw };
+}
+/**
+ * A read at a minimum context slot another provider chose (the primary's
+ * prepared slot, say): a provider a slot or two behind answers it as an RPC
+ * error rather than with older state, so it is asked again this many times,
+ * this far apart, inside its own read session, before its answer counts as
+ * unavailable. Any other error is thrown at once.
+ */
+export const SOLANA_CATCH_UP_ATTEMPTS = 5, SOLANA_CATCH_UP_MS = 400;
+export async function solanaCaughtUp<T>(operation: () => Promise<T>): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    try { return await operation(); } catch (error) {
+      if (attempt >= SOLANA_CATCH_UP_ATTEMPTS || !(error instanceof SolanaRpcError && error.code === "rpc")) throw error;
+      await new Promise(resolve => setTimeout(resolve, SOLANA_CATCH_UP_MS));
+    }
+  }
+}
+/** execute_swap runs only while the cluster clock is in [deadline - this, deadline): `deadline <= now + 30` (lib.rs). */
+export const SOLANA_SWAP_DEADLINE_WINDOW_SECONDS = 30n;
+/**
+ * The earliest cluster time (unix seconds) at which these signed bytes could
+ * have run: execute_swap refuses them unless now >= deadline - 30, so a landed
+ * swap's debit carries a timestamp at or after this.
+ */
+export function solanaDebitWindowStart(submission: SolanaSignedSubmission): bigint {
+  return BigInt(Math.floor(signedDeadlineMs(submission) / 1000)) - SOLANA_SWAP_DEADLINE_WINDOW_SECONDS;
 }
 /** The signed execute_swap's deadline (unix ms). From then on the program refuses these bytes. */
 function signedDeadlineMs(submission: SolanaSignedSubmission): number {
@@ -409,8 +505,53 @@ async function readFinalizedVault(read: SolanaLiveRead, submission: SolanaSigned
  * One provider's view. `seen`: that provider has a status, a receipt or a moved sequence for it.
  * Exported for the operator's resolution tool (solana-resolve.ts), which compares the same views.
  */
-export interface SolanaObservation { settlement: SolanaLiveSettlement | null; seen: boolean }
-export async function observeSolanaSubmission(read: SolanaLiveRead, submission: SolanaSignedSubmission, owner: string, nowMs: number): Promise<SolanaObservation> {
+export interface SolanaObservation {
+  settlement: SolanaLiveSettlement | null; seen: boolean;
+  /**
+   * Pending views only: no status or receipt, but this provider's finalized vault
+   * (at `blockHeight`) shows a sequence other than the signed one, which counts
+   * as seen because the move may be these bytes. `reason` says why that is not a
+   * proof they never ran (proveSequenceConsumed): "not-asked" (the worker never
+   * asks), "behind" (the vault is before the signed sequence), "blockhash-live"
+   * (the bank is not past lastValidBlockHeight yet), or "debit-in-window" (the
+   * debit log holds a swap at or after `debitWindowStart`, the earliest moment
+   * they could have run: they may have). Shown to the operator; never part of
+   * what providers must agree on (observationKey).
+   */
+  sequenceMoved?: { vaultSequence: string; blockHeight: string; reason: "not-asked" | "behind" | "blockhash-live" | "debit-in-window"; debitWindowStart?: string };
+}
+export interface SolanaObservationOptions {
+  /**
+   * The operator's resolution tool only (solana-resolve.ts): when the vault's
+   * sequence has moved past the signed one for some other reason (an owner
+   * withdrawal made outside Merrymen takes no expected sequence), prove from the
+   * vault's own debit log that these bytes never ran ("sequence-consumed"). The
+   * worker's automatic reconciliation never asks this: it keeps such a trade
+   * pending for an operator to review.
+   */
+  proveSequenceConsumed?: boolean;
+}
+/**
+ * SEQUENCE CONSUMED (audit live-M1). A landed execute_swap does exactly two
+ * things this proof reads: it advances the sequence by one, and it appends one
+ * Debit stamped with the cluster clock at which it ran, which execute_swap only
+ * allows inside [deadline - 30 s, deadline). The program rewrites the debit log
+ * only in execute_swap, keeping the debits of the last 24 hours and refusing to
+ * run with any debit newer than its own clock, so the newest swap's debit is
+ * always in the log. If these bytes had run, the log at any later finalized
+ * state therefore holds a debit at or after solanaDebitWindowStart: theirs, or a
+ * later swap's. A finalized vault, read at or after a bank past
+ * lastValidBlockHeight, whose sequence moved past the signed one (so these bytes
+ * can never run from now on) and whose log holds no such debit, proves they
+ * never ran. Like any expiry, its unknown fee stays reserved.
+ */
+function sequenceConsumed(submission: SolanaSignedSubmission, state: SolanaVaultState, blockHeight: number): boolean {
+  if (state.seq <= BigInt(submission.vaultSequence) || BigInt(blockHeight) <= BigInt(submission.lastValidBlockHeight)) return false;
+  const windowStart = solanaDebitWindowStart(submission);
+  return !state.debits.some(debit => debit.timestamp >= windowStart);
+}
+export async function observeSolanaSubmission(read: SolanaLiveRead, submission: SolanaSignedSubmission, owner: string, nowMs: number,
+  options: SolanaObservationOptions = {}): Promise<SolanaObservation> {
   const result = context(await read("getSignatureStatuses", [[submission.signature], { searchTransactionHistory: true }]), submission.minContextSlot);
   if (!Array.isArray(result.value) || result.value.length !== 1) return fail();
   const status = result.value[0];
@@ -437,13 +578,41 @@ export async function observeSolanaSubmission(read: SolanaLiveRead, submission: 
   const proofSlot = integer(info.absoluteSlot), blockHeight = integer(info.blockHeight);
   if (proofSlot < submission.minContextSlot) return fail();
   const evidence = await readFinalizedVault(read, submission, owner, proofSlot);
-  if (evidence.state.seq !== BigInt(submission.vaultSequence)) return { settlement: null, seen: true };
+  if (evidence.state.seq !== BigInt(submission.vaultSequence)) {
+    // A moved sequence may be these bytes landing; only the debit log can say they did not.
+    if (!options.proveSequenceConsumed || !sequenceConsumed(submission, evidence.state, blockHeight)) {
+      const moved = { vaultSequence: evidence.state.seq.toString(), blockHeight: blockHeight.toString() };
+      return { settlement: null, seen: true, sequenceMoved: !options.proveSequenceConsumed ? { ...moved, reason: "not-asked" }
+        : evidence.state.seq < BigInt(submission.vaultSequence) ? { ...moved, reason: "behind" }
+        : BigInt(blockHeight) <= BigInt(submission.lastValidBlockHeight) ? { ...moved, reason: "blockhash-live" }
+        : { ...moved, reason: "debit-in-window", debitWindowStart: solanaDebitWindowStart(submission).toString() } };
+    }
+    if (!Number.isSafeInteger(nowMs) || nowMs < submission.preparedAtMs) return fail();
+    return { seen: false, settlement: { status: "expired", signature: submission.signature, slot: evidence.slot, feeLamports: null,
+      amountIn: "0", amountOut: "0", finalizedAtMs: nowMs, expiryProof: { vaultSequence: evidence.state.seq.toString(),
+        sessionEpoch: evidence.state.sessionEpoch.toString(), blockHeight: blockHeight.toString(), reason: "sequence-consumed",
+        debitWindowStart: solanaDebitWindowStart(submission).toString() } } };
+  }
   const revoked = evidence.state.sessionEpoch > BigInt(submission.sessionEpoch);
   if (!revoked && BigInt(blockHeight) <= BigInt(submission.lastValidBlockHeight)) return { settlement: null, seen: false };
   if (!Number.isSafeInteger(nowMs) || nowMs < submission.preparedAtMs) return fail();
   return { seen: false, settlement: { status: "expired", signature: submission.signature, slot: evidence.slot, feeLamports: null,
     amountIn: "0", amountOut: "0", finalizedAtMs: nowMs, expiryProof: { vaultSequence: evidence.state.seq.toString(),
       sessionEpoch: evidence.state.sessionEpoch.toString(), blockHeight: blockHeight.toString(), reason: revoked ? "session-revoked" : "blockhash-expired" } } };
+}
+/**
+ * The settlement to book from providers that agree on it (observationKey). A
+ * fill or failure is identical everywhere, slot included. An expiry's slot is
+ * each provider's own finalized read, which the key leaves out and the book
+ * keeps as its slot (a floor for every later trade and read): the lowest of
+ * them is booked, never one provider's, so a provider answering far ahead
+ * cannot wedge the account. Its proof is the first (the primary's) otherwise.
+ */
+export function solanaAgreedSettlement(settlements: readonly SolanaLiveSettlement[]): SolanaLiveSettlement {
+  const [first] = settlements;
+  if (!first) return fail();
+  if (first.status !== "expired") return first;
+  return { ...first, slot: Math.min(...settlements.map(settlement => settlement.slot)) };
 }
 /** What both providers must agree on. An expiry's height is each provider's own and may differ. */
 export function observationKey(observation: SolanaObservation): string {
@@ -473,7 +642,7 @@ export async function reconcileSolanaSubmission(
   const nowMs = now();
   const quorum = await readSolanaQuorum(rpc, read => observeSolanaSubmission(read, submission, owner, nowMs), observationKey);
   if (quorum.agreed && quorum.value.settlement) {
-    const settlement = quorum.value.settlement;
+    const settlement = solanaAgreedSettlement(quorum.values.map(view => view.settlement!));
     await journal.settle(owner, requestId, submission.signature, settlement);
     return { submission, status: settlement.status, settlement };
   }
@@ -498,6 +667,8 @@ export function createSolanaExecutor(options: SolanaExecutorOptions) {
     ? (minPrice > SOLANA_DEFAULT_MAX_COMPUTE_UNIT_PRICE ? minPrice : SOLANA_DEFAULT_MAX_COMPUTE_UNIT_PRICE)
     : parseSolanaRawAmount(options.maxComputeUnitPriceMicroLamports, true);
   if (maxPrice < minPrice) fail("fee-cap");
+  const snapshotFloor = options.minSnapshotSlot ?? 1;
+  if (!Number.isSafeInteger(snapshotFloor) || snapshotFloor < 1) fail();
   address(options.programId);
   if (!/^[a-f0-9]{64}$/.test(options.programBinarySha256)) fail("unsafe-program");
   const identity = Promise.all([getAddressFromPublicKey(options.sessionKeyPair.publicKey), getAddressFromPublicKey(options.feePayerKeyPair.publicKey)]);
@@ -546,8 +717,9 @@ export function createSolanaExecutor(options: SolanaExecutorOptions) {
       await verifySolanaVaultDeployment(options.rpc, options.programId, options.programBinarySha256, { requireDeclaredProgramId: true });
       checkAbort();
       const snapshot = await options.rpc.read(async rpc => {
-        const slot = integer(await rpc("getSlot", [{ commitment: "confirmed" }]));
-        if (slot < 1) return fail();
+        const fresh = integer(await rpc("getSlot", [{ commitment: "confirmed" }]));
+        if (fresh < 1) return fail();
+        const slot = fresh > snapshotFloor ? fresh : snapshotFloor;
         const result = context(await rpc("getMultipleAccounts", [[intent.vault, inputTokenAccount, outputTokenAccount, feePayer],
           { encoding: "base64", commitment: "confirmed", minContextSlot: slot }]), slot);
         if (!Array.isArray(result.value) || result.value.length !== 4) return fail();
@@ -620,6 +792,8 @@ export function createSolanaExecutor(options: SolanaExecutorOptions) {
         }
         const blockhash = context(await rpc("getLatestBlockhash", [{ commitment: "confirmed", minContextSlot: slot }]), slot);
         if (!object(blockhash.value) || typeof blockhash.value.blockhash !== "string") return fail();
+        // Every provider simulates the signed message at or after the bank its blockhash came from (below).
+        const simulationSlot = Math.max(slot, blockhash.slot);
         let recentBlockhash: Blockhash;
         try { recentBlockhash = address(blockhash.value.blockhash) as unknown as Blockhash; } catch { return fail(); }
         const lastValidBlockHeight = BigInt(integer(blockhash.value.lastValidBlockHeight));
@@ -638,11 +812,12 @@ export function createSolanaExecutor(options: SolanaExecutorOptions) {
           if (Buffer.from(getBase64EncodedWireTransaction(transaction), "base64").length > 1232) return fail("unsafe-route");
           return transaction;
         };
-        const simulate = async (transaction: ReturnType<typeof compile>) => {
-          const sim = context(await rpc("simulateTransaction", [getBase64EncodedWireTransaction(transaction), {
-            encoding: "base64", commitment: "confirmed", minContextSlot: slot, sigVerify: false, replaceRecentBlockhash: false,
+        // `read`: the provider asked (this session's by default), at or after `at`.
+        const simulate = async (transaction: ReturnType<typeof compile>, read: SolanaLiveRead = rpc, at = slot) => {
+          const sim = context(await read("simulateTransaction", [getBase64EncodedWireTransaction(transaction), {
+            encoding: "base64", commitment: "confirmed", minContextSlot: at, sigVerify: false, replaceRecentBlockhash: false,
             accounts: { encoding: "base64", addresses: [intent.vault, inputTokenAccount, outputTokenAccount, feePayer] },
-          }]), slot);
+          }]), at);
           if (!object(sim.value) || sim.value.err !== null || !Array.isArray(sim.value.accounts) || sim.value.accounts.length !== 4) return fail("simulation");
           const [vault, input, output, payer] = sim.value.accounts.map(account) as [Account, Account, Account, Account];
           const state = decodeSolanaVaultAccount(vault.data);
@@ -685,7 +860,6 @@ export function createSolanaExecutor(options: SolanaExecutorOptions) {
         const charged = SIGNATURE_FEES + (unitPrice * BigInt(units) + 999_999n) / 1_000_000n;
         const fee = quoted > charged ? quoted : charged;
         if (quoted < 10_000n || fee + snapshot.rent > cap || snapshot.payerBalance < fee + snapshot.rent) return fail("fee-cap");
-        await simulate(transaction); // Recheck the exact message that will be signed.
         const compiled = getCompiledTransactionMessageDecoder().decode(transaction.messageBytes);
         if (compiled.version !== 0) return fail();
         const loadedAddresses: SolanaSignedSubmission["loadedAddresses"] = { writable: [], readonly: [] };
@@ -694,8 +868,15 @@ export function createSolanaExecutor(options: SolanaExecutorOptions) {
             const value = alts[lookup.lookupTableAddress]?.[index]; if (!value) return fail("unsafe-route"); return value;
           }));
         }
-        return { transaction, fee, recentBlockhash, lastValidBlockHeight, slot, loadedAddresses, deadline };
+        return { transaction, fee, recentBlockhash, lastValidBlockHeight, slot, loadedAddresses, deadline,
+          recheck: (read: SolanaLiveRead) => simulate(transaction, read, simulationSlot) };
       });
+      checkAbort();
+      // The exact message that will be signed, simulated again on EVERY provider, each in its own session: the
+      // sequence it consumes, what leaves the vault's input and reaches its output, and what the fee payer pays
+      // must pass the same checks on each, so one provider cannot vouch for a route alone. A provider a slot or
+      // two behind the blockhash's bank is asked again briefly (solanaCaughtUp); any refusal refuses the trade.
+      await readSolanaEachProvider(options.rpc, read => solanaCaughtUp(() => prepared.recheck(read)));
       checkAbort();
       const risk = await options.assessRisk({ intent, quote: route.quote, vaultState: snapshot.state,
         slot: prepared.slot, observedAtMs });
@@ -706,7 +887,7 @@ export function createSolanaExecutor(options: SolanaExecutorOptions) {
       // The guaranteed output must clear the independent price floor; a bad,
       // buggy or manipulated build quote cannot sign a sale for dust.
       let reference: SolanaReferenceBound;
-      try { reference = verifySolanaReferenceBound(risk.reference, intent, preparedAtMs, options.pythGeneration); } catch { return fail("risk"); }
+      try { reference = verifySolanaReferenceBound(risk.reference, intent, preparedAtMs, options.pythGeneration, options.referenceToleranceBps ?? SOLANA_REFERENCE_DEFAULT_TOLERANCE_BPS); } catch { return fail("risk"); }
       if (reference.reference.slot < prepared.slot || BigInt(route.quote.minOutAmount) < BigInt(reference.minOutFloor)) return fail("risk");
       if (integer(risk.observedAtMs) > preparedAtMs || preparedAtMs - risk.observedAtMs >= 30_000 ||
           integer(risk.slot) < prepared.slot || risk.cashUsdg !== (intent.inputMint === SOLANA_USDG_MINT ? snapshot.inputBalance : snapshot.outputBalance).toString() ||

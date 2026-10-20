@@ -5,13 +5,13 @@ import { CHAINS, SOLANA_USDG_MINT } from "../../packages/core/src/ids";
 import { SOLANA_WRAPPED_SOL_MINT } from "../../packages/core/src/solana-live";
 import { SqlSolanaBindingStore } from "../../web/src/lib/solana-binding-store";
 import { stopSolanaForKill } from "./solana-kill";
-import { createSolanaAppRuntime } from "./solana-app-runtime";
+import { createSolanaAppRuntime, SOLANA_STATUS_BELOW_BOOK } from "./solana-app-runtime";
 import { boundSolanaRebalanceSell, createSolanaAgent, planSolanaRebalance } from "./solana-agent";
 import { wrapSqlite } from "./db";
 import type { SolanaPaperMarket } from "./solana-paper-service";
 import { runSolanaHoldCommand } from "./solana-operator-hold";
 import { ensureSolanaTradingSchema, SOLANA_EXPIRED_ATTEMPTS_EXHAUSTED, SolanaTradingStoreError } from "./solana-trading-store";
-import { SOLANA_AGENT_ALERT_REPEAT_MS, solanaAccountRef } from "./solana-agent";
+import { SOLANA_AGENT_ALERT_REPEAT_MS, SOLANA_AGENT_FEE_PAYER_CHECK_MS, SOLANA_PENDING_STUCK_MS, solanaAccountRef } from "./solana-agent";
 import { SolanaMarketError } from "./solana-market";
 
 const NOW = 1_000_000;
@@ -506,4 +506,110 @@ test("the agent's SOL mark: a zero-output answer is dust planned as no position;
   }
   assert.equal(trades.length, 1, "no trade on any other mark failure");
   assert.equal(dustChecks.length, 2, "only a zero-output answer is checked for dust");
+});
+
+test("a live account whose vault holds less than its book is held, and says an [alert] with no tenant identity, once per repeat window", async t => {
+  const f = await expiryAccount(t, { maxOpsPerDay: 20, expired: 0 });
+  const below = { paper: null, live: { balances: {}, tradable: { cashUsdg: "100000000", wsolRaw: "0" }, pending: [], ready: false, canExit: false, blockers: [SOLANA_STATUS_BELOW_BOOK] } };
+  let status: unknown = below;
+  const runtime = { status: async () => status, trade: async () => { f.control.trades++; return {}; } } as unknown as Parameters<typeof createSolanaAgent>[0]["runtime"];
+  const market: SolanaPaperMarket = { readMint: async () => { throw new Error("unused"); }, quote: async () => { throw new Error("a buy needs no quote"); } };
+  const agent = createSolanaAgent({ db: f.db, runtime, market, now: () => f.clock.now, log: line => f.lines.push(line) });
+  assert.deepEqual((await agent.tick()).map(r => r.outcome), ["held"]);
+  assert.equal(f.control.trades, 0);
+  assert.equal(f.lines.length, 1);
+  assert.match(f.lines[0]!, /^\[alert\] Solana vault below its book: /);
+  // It names the remedies: the owner records their own withdrawals; anything else an operator finds and writes off with the
+  // shortfall tool, named by the account reference the alert carries (no tenant identity), as the plan of record says.
+  const account = solanaAccountRef({ tenant: TENANT, owner: OWNER });
+  assert.match(f.lines[0]!, /If the owner withdrew with their own key \(the recovery tool or another wallet\), they record those withdrawals under Owner controls/);
+  assert.ok(f.lines[0]!.includes(`npm run solana:resolve -- shortfall show ${account} shows both providers' balances beside the book, and shortfall book writes an explained `
+    + `shortfall off as a loss (docs/solana-integration.md, "A vault below its book")`), f.lines[0]);
+  assert.deepEqual(fieldsOf(f.lines[0]!), { solana: "alert", kind: "vault-below-book", account: solanaAccountRef({ tenant: TENANT, owner: OWNER }) });
+  assert.ok(!f.lines[0]!.includes(TENANT) && !f.lines[0]!.includes(OWNER));
+  f.clock.now += 60_000; await agent.tick(); assert.equal(f.lines.length, 1, "said once per repeat window");
+  f.clock.now += SOLANA_AGENT_ALERT_REPEAT_MS; await agent.tick(); assert.equal(f.lines.length, 2);
+  // Reconciled: trading resumes, and a later shortfall is said at once.
+  status = { ...below, live: { ...below.live, ready: true, canExit: true, blockers: [] } };
+  f.clock.now += 60_000; assert.deepEqual((await agent.tick()).map(r => r.outcome), ["submitted"]); assert.equal(f.lines.length, 2);
+  status = below; f.clock.now += 60_000; await agent.tick(); assert.equal(f.lines.length, 3);
+});
+
+test("a below-book blocker beside the account's own trade or owner transaction awaiting final confirmation pages no one", async t => {
+  const f = await expiryAccount(t, { maxOpsPerDay: 20, expired: 0 });
+  const below = { paper: null, live: { balances: {}, tradable: { cashUsdg: "100000000", wsolRaw: "0" }, pending: [] as unknown[], ready: false, canExit: false,
+    blockers: [SOLANA_STATUS_BELOW_BOOK], ownerTransaction: null as null | { status: string } } };
+  let status: unknown = { ...below, live: { ...below.live, pending: [{ requestId: "settling", status: "pending" }] } };
+  const runtime = { status: async () => status, trade: async () => { f.control.trades++; return {}; } } as unknown as Parameters<typeof createSolanaAgent>[0]["runtime"];
+  const market: SolanaPaperMarket = { readMint: async () => { throw new Error("unused"); }, quote: async () => { throw new Error("unused"); } };
+  const agent = createSolanaAgent({ db: f.db, runtime, market, now: () => f.clock.now, log: line => f.lines.push(line) });
+  // A trade that landed leaves the vault short of its book until it is booked: held for it, and no [alert].
+  assert.deepEqual((await agent.tick()).map(r => r.outcome), ["held"]);
+  // So does an owner withdrawal that landed and awaits its receipts.
+  status = { ...below, live: { ...below.live, ownerTransaction: { status: "pending" } } };
+  f.clock.now += 60_000; assert.deepEqual((await agent.tick()).map(r => r.outcome), ["held"]);
+  assert.deepEqual(f.lines, []); assert.equal(f.control.trades, 0);
+  // Short with nothing of its own settling: said.
+  status = below; f.clock.now += 60_000; await agent.tick();
+  assert.equal(f.lines.filter(line => /vault-below-book/.test(line)).length, 1);
+  // Something settles again: the repeat window is cleared, so a shortfall left once it is booked is said at once.
+  status = { ...below, live: { ...below.live, ownerTransaction: { status: "pending" } } }; f.clock.now += 60_000; await agent.tick();
+  status = below; f.clock.now += 60_000; await agent.tick();
+  assert.equal(f.lines.filter(line => /vault-below-book/.test(line)).length, 2);
+});
+
+test("trades and owner transactions still pending three minutes on say one [alert] with counts only, after recovery, until none is", async t => {
+  const raw = new DatabaseSync(":memory:"), db = wrapSqlite(raw); t.after(() => raw.close());
+  const clock = { now: NOW }, lines: string[] = [];
+  await new SqlSolanaBindingStore(async () => db, "sqlite", () => clock.now).get(TENANT); await ensureSolanaTradingSchema(db);
+  const pending = (id: string, at: number) => db.prepare(`INSERT INTO solana_runtime_submissions(tenant,owner,request_id,vault,sequence,signature,status,created_at_ms,notional_raw,submission_json)
+    VALUES(?,?,?,?,?,?,'pending',?,?,?)`).run(TENANT, OWNER, id, `vault-${id}`, "0", `sig-${id}`, at, "5000000", "{}");
+  let recovered = 0;
+  const runtime = { status: async () => { recovered++; throw new Error("providers disagree"); }, trade: async () => assert.fail("no strategy") } as unknown as Parameters<typeof createSolanaAgent>[0]["runtime"];
+  const market: SolanaPaperMarket = { readMint: async () => { throw new Error("unused"); }, quote: async () => { throw new Error("unused"); } };
+  const agent = createSolanaAgent({ db, runtime, market, now: () => clock.now, log: line => lines.push(line) });
+  // A trade admitted a minute ago is not stuck yet.
+  await pending("young", clock.now - 60_000);
+  await agent.tick(); assert.equal(lines.length, 0); assert.equal(recovered, 1, "recovery was tried first");
+  clock.now += SOLANA_PENDING_STUCK_MS;
+  // And a signed owner transaction prepared over three minutes ago (another tenant), with an unsigned one that is not pending.
+  await db.prepare("INSERT INTO solana_runtime_setups(tenant,owner,setup_json) VALUES(?,?,?)").run(`0x${"22".repeat(20)}`, OWNER,
+    JSON.stringify({ signature: "owner-sig", status: "pending", preparedAtMs: clock.now - SOLANA_PENDING_STUCK_MS - 5_000 }));
+  await db.prepare("INSERT INTO solana_runtime_setups(tenant,owner,setup_json) VALUES(?,?,?)").run(`0x${"33".repeat(20)}`, OWNER,
+    JSON.stringify({ status: undefined, preparedAtMs: 0 }));
+  await agent.tick();
+  assert.equal(lines.length, 1); assert.match(lines[0]!, /^\[alert\] Solana transactions stuck pending: /);
+  // The line carries counts only; the operator gets the names from the resolve tool's pending listing.
+  assert.match(lines[0]!, /npm run solana:resolve -- pending names each one \(tenant, id, age, vault sequence\)/);
+  assert.deepEqual(fieldsOf(lines[0]!), { solana: "alert", kind: "pending-stuck", trades: 1, ownerTransactions: 1, oldestAgeMs: SOLANA_PENDING_STUCK_MS + 60_000 });
+  for (const secret of [TENANT, OWNER, "sig-young", "owner-sig", "vault-young"]) assert.ok(!lines[0]!.includes(secret), secret);
+  clock.now += 15_000; await agent.tick(); assert.equal(lines.length, 1, "said once per repeat window");
+  clock.now += SOLANA_AGENT_ALERT_REPEAT_MS; await agent.tick(); assert.equal(lines.length, 2);
+  // Booked at last: nothing more is said, and a later stuck one is said at once.
+  await db.prepare("UPDATE solana_runtime_submissions SET status='expired'").run();
+  await db.prepare("DELETE FROM solana_runtime_setups").run();
+  clock.now += 15_000; await agent.tick(); assert.equal(lines.length, 2);
+  await pending("later", clock.now - SOLANA_PENDING_STUCK_MS);
+  clock.now += 15_000; await agent.tick(); assert.equal(lines.length, 3);
+  assert.deepEqual(fieldsOf(lines[2]!), { solana: "alert", kind: "pending-stuck", trades: 1, ownerTransactions: 0, oldestAgeMs: SOLANA_PENDING_STUCK_MS + 15_000 });
+});
+
+test("the agent reads the shared fee payer itself every ten minutes while a live permission is registered, and a failed check changes nothing", async t => {
+  const raw = new DatabaseSync(":memory:"), db = wrapSqlite(raw); t.after(() => raw.close());
+  const clock = { now: NOW }, checks: unknown[] = [];
+  await new SqlSolanaBindingStore(async () => db, "sqlite", () => clock.now).get(TENANT); await ensureSolanaTradingSchema(db);
+  let fail = false;
+  const runtime = { status: async () => assert.fail("no status"), trade: async () => assert.fail("no trade"),
+    feePayerCheck: async (input: unknown) => { checks.push(input); if (fail) throw new Error("rpc down"); return "ok"; } } as unknown as Parameters<typeof createSolanaAgent>[0]["runtime"];
+  const market: SolanaPaperMarket = { readMint: async () => { throw new Error("unused"); }, quote: async () => { throw new Error("unused"); } };
+  const agent = createSolanaAgent({ db, runtime, market, now: () => clock.now });
+  // No live permission anywhere: nothing to check, and no provider is asked.
+  await agent.tick(); assert.deepEqual(checks, []);
+  await db.prepare("INSERT INTO solana_runtime_sessions(tenant,owner,record_json,sealed_seed) VALUES(?,?,?,?)").run(TENANT, OWNER, JSON.stringify({ vault: "vault-of-record" }), "sealed");
+  await agent.tick(); assert.deepEqual(checks, [{ vault: "vault-of-record" }]);
+  clock.now += 15_000; await agent.tick(); assert.equal(checks.length, 1, "once per interval");
+  clock.now += SOLANA_AGENT_FEE_PAYER_CHECK_MS; fail = true;
+  assert.deepEqual(await agent.tick(), [], "a failed check changes no outcome");
+  assert.equal(checks.length, 2);
+  clock.now += 15_000; await agent.tick(); assert.equal(checks.length, 2, "a failed check waits for the interval too");
 });

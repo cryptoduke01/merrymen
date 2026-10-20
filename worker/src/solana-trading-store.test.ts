@@ -1,6 +1,8 @@
 import test, { type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { address, appendTransactionMessageInstructions, compileTransaction, createTransactionMessage, getBase64EncodedWireTransaction, setTransactionMessageFeePayer,
+  setTransactionMessageLifetimeUsingBlockhash, type Blockhash } from "@solana/kit";
 import { DatabaseSync } from "node:sqlite";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -17,6 +19,8 @@ import { SolanaMarketError } from "./solana-market";
 import { SolanaPaperStoreError, type SolanaPaperWriteOff } from "./solana-paper-store";
 import { pythBound } from "./solana-reference-price-fixture";
 import { releaseSolanaOperatorHold, setSolanaOperatorHold } from "./solana-operator-hold";
+import type { SolanaLiveBook } from "./solana-trading-store";
+import { ensureSolanaShortfallSchema } from "./solana-resolve-shortfall";
 
 const key = (n: number) => base58Encode(new Uint8Array(32).fill(n));
 const TENANT = `0x${"11".repeat(20)}` as const, OTHER = `0x${"22".repeat(20)}` as const;
@@ -474,6 +478,23 @@ test("the expired-attempt allowance setting defaults to 0 and accepts only a who
   }
 });
 
+/** Signed bytes (unsigned, which is all the store and the deadline decoder read) whose execute_swap carries `deadline` (unix seconds). */
+function bytesWithDeadline(deadline: bigint): string {
+  const data = Buffer.alloc(48); data.writeBigInt64LE(deadline, 40);
+  return getBase64EncodedWireTransaction(compileTransaction(setTransactionMessageLifetimeUsingBlockhash({ blockhash: key(24) as Blockhash, lastValidBlockHeight: 1200n },
+    setTransactionMessageFeePayer(address(key(23)), appendTransactionMessageInstructions([{ programAddress: address(PROGRAM), accounts: [], data }], createTransactionMessage({ version: 0 }))))));
+}
+
+test("an expiry proven from the vault's debit log (sequence-consumed) is never booked by automatic settlement", async t => {
+  const f = await fixture(t), pending = submission("consumed");
+  pending.signedTransactionBase64 = bytesWithDeadline(1030n);
+  assert.equal(await f.store.recordSigned(pending), true);
+  const consumed: SolanaLiveSettlement = { status: "expired", signature: pending.signature, slot: 1001, feeLamports: null, amountIn: "0", amountOut: "0", finalizedAtMs: NOW + 1,
+    expiryProof: { vaultSequence: "1", sessionEpoch: "1", blockHeight: "1201", reason: "sequence-consumed", debitWindowStart: "1000" } };
+  await assert.rejects(f.store.settle(OWNER, "consumed", pending.signature, consumed), /Invalid Solana expiry evidence/);
+  assert.equal((await f.store.get(OWNER, "consumed"))!.status, "pending");
+});
+
 /** A WSOL→USDG sell at $500/SOL against the current book, bounded by a fresh reference. */
 function sale(id: string, seq: string, amountRaw: string, book: { slot: number; cash: string; wsol: string }, outAmount?: string) {
   const s = submission(id, seq), out = outAmount ?? (BigInt(amountRaw) / 2n).toString();
@@ -508,6 +529,105 @@ test("admission re-checks the independent price floor and charges a cheap sell a
   assert.equal(row.notional_raw, "500000");
   assert.equal((await f.store.pending()).length, 1);
 });
+
+test("admission re-checks the price bound against the configured tolerance, not the one the evidence carries", async t => {
+  const f = await fixture(t), first = submission(); await f.store.recordSigned(first);
+  await f.store.settle(OWNER, first.intent.requestId, first.signature, settlement(first));
+  const book = { slot: 1001, cash: "99400000", wsol: "1980000" };
+  // A sell bounded at 10% instead of 3%: consistent with itself, and its minimum clears its own (lower) floor.
+  const wide = (id: string) => { const s = sale(id, "1", "1000000", book, "480000"); s.risk.reference = pythBound(s.intent, NOW, undefined, undefined, 1000);
+    s.risk.notionalUsdg = s.risk.reference.valueUsdg; return s; };
+  await assert.rejects(f.store.recordSigned(wide("wide-default")), /independent SOL price evidence/);
+  await assert.rejects(f.store.recordSigned(wide("wide-300"), { referenceToleranceBps: 300 }), /independent SOL price evidence/);
+  assert.deepEqual(await f.store.pending(), []);
+  // The same evidence under a runtime configured for 10% is admitted.
+  assert.equal(await f.store.recordSigned(wide("wide-1000"), { referenceToleranceBps: 1000 }), true);
+});
+
+for (const dialect of ["sqlite", "postgres"] as const) {
+  const options = dialect === "postgres" && !process.env.MERRYMEN_TEST_PG_URL ? { skip: "Set MERRYMEN_TEST_PG_URL to an isolated PostgreSQL test database." } : {};
+  /** A live book written straight into the store, and an operator's write-off decision recorded on `snapshot` (as the resolve tool records it first). */
+  const shortfallAccount = async (t: TestContext, book: Record<string, unknown>) => {
+    const f = await fixture(t, dialect); await ensureSolanaShortfallSchema(f.db, dialect === "postgres");
+    await f.db.prepare("INSERT INTO solana_runtime_live_books(tenant,owner,book_json) VALUES(?,?,?)").run(TENANT, OWNER, JSON.stringify(book));
+    const decide = async (snapshot: { slot: number; cashUsdg: string; wsolRaw: string }) => {
+      const id = randomUUID();
+      await f.db.prepare("INSERT INTO solana_operator_shortfalls(id,tenant,owner,slot,cash_usdg,wsol_raw,operator,reason,evidence_json,approved_at_ms) VALUES(?,?,?,?,?,?,?,?,?,?)")
+        .run(id, TENANT, OWNER, snapshot.slot, snapshot.cashUsdg, snapshot.wsolRaw, "milla", "issuer seized 20 USDG", "{}", f.clock.value);
+      return id;
+    };
+    const flows = async () => (await f.db.prepare("SELECT kind,mint,amount_raw FROM solana_runtime_cashflows ORDER BY evidence_id").all() as Array<{ kind: string; mint: string; amount_raw: string }>)
+      .map(row => [row.kind, row.mint, row.amount_raw]);
+    const booked = async (id: string) => (await f.db.prepare("SELECT booked_at_ms FROM solana_operator_shortfalls WHERE id=?").get(id) as { booked_at_ms: number | string | null }).booked_at_ms;
+    return { ...f, decide, flows, booked };
+  };
+  const base = { hwmRaw: "120000000", cashRaw: "90000000", wsolRaw: "50000000", costBasisUsdgRaw: "10000000", realizedPnlUsdgRaw: "0", networkFeesLamports: "0",
+    quarantinedWsolRaw: "5000000", slot: 1000, updatedAtMs: NOW - 1000 };
+
+  test(`${dialect}: an operator's shortfall write-off books a loss once, only under its own recorded decision, keeps the high-water mark and pauses buying`, options, async t => {
+    const f = await shortfallAccount(t, base);
+    const reading = { slot: 1005, cashUsdg: "70000000", wsolRaw: "40000000" }, snapshot = { ...reading, observedAtMs: NOW, commitment: "finalized" as const };
+    // A decision recorded on another reading, or none at all, books nothing.
+    for (const id of [await f.decide({ ...reading, cashUsdg: "70000001" }), randomUUID()]) {
+      await assert.rejects(f.store.writeOffShortfall(snapshot, id), /decision to write off this shortfall is not open/);
+    }
+    assert.deepEqual(await f.store.liveBook(), base); assert.deepEqual(await f.flows(), []);
+    const id = await f.decide(reading), result = await f.store.writeOffShortfall(snapshot, id);
+    // 20 USDG gone; 15 WSOL short: the 5 quarantined (zero basis) first, then 10 of the 50 held, at a fifth of its 10 USDG basis.
+    assert.deepEqual(result.lost, { usdgRaw: "20000000", wsolRaw: "10000000", quarantinedWsolRaw: "5000000", costBasisUsdgRaw: "2000000" });
+    assert.deepEqual(result.inflow, { usdgRaw: "0", quarantinedWsolRaw: "0" });
+    const after = (await f.store.liveBook())! as SolanaLiveBook & { balancesSlot?: number };
+    assert.deepEqual([after.cashRaw, after.wsolRaw, after.quarantinedWsolRaw, after.costBasisUsdgRaw, after.realizedPnlUsdgRaw, after.hwmRaw, after.buyPaused, after.slot, after.balancesSlot],
+      ["70000000", "40000000", "0", "8000000", "-22000000", "120000000", true, 1005, 1005]);
+    assert.deepEqual(await f.flows(), [["write-off", SOLANA_WRAPPED_SOL_MINT, "15000000"], ["write-off", SOLANA_USDG_MINT, "20000000"]].sort((a, b) =>
+      `write-off:${OWNER}:1005:${a[1]}`.localeCompare(`write-off:${OWNER}:1005:${b[1]}`)));
+    assert.equal(Number(await f.booked(id)), NOW);
+    // Once: the same reading finds nothing short, so a second decision on it books nothing.
+    const again = await f.decide(reading);
+    await assert.rejects(f.store.writeOffShortfall(snapshot, again), /Nothing is short/);
+    assert.deepEqual(await f.store.liveBook(), after); assert.equal(await f.booked(again), null);
+  });
+
+  test(`${dialect}: a shortfall write-off waits for the account's own pending trade, owner transaction or prepared withdrawal, and never books a stale or older reading`, options, async t => {
+    const f = await shortfallAccount(t, { ...base, quarantinedWsolRaw: "0", slot: 999 });
+    const reading = { slot: 1005, cashUsdg: "70000000", wsolRaw: "50000000" }, snapshot = { ...reading, observedAtMs: NOW, commitment: "finalized" as const };
+    const id = await f.decide(reading);
+    // A trade admitted before the shortfall and still pending: its landing may be what the vault lacks.
+    await f.db.prepare(`INSERT INTO solana_runtime_submissions(tenant,owner,request_id,vault,sequence,signature,status,created_at_ms,notional_raw,submission_json)
+      VALUES(?,?,?,?,?,?,'pending',?,?,?)`).run(TENANT, OWNER, "settling", VAULT, "0", "signature-settling", NOW, "1000000", "{}");
+    await assert.rejects(f.store.writeOffShortfall(snapshot, id), /pending Solana trade/);
+    await f.db.prepare("UPDATE solana_runtime_submissions SET status='failed' WHERE request_id='settling'").run();
+    await saveSignedSetup(f.store, setup("revoke"), "owner-revoke");
+    await assert.rejects(f.store.writeOffShortfall(snapshot, id), /pending owner transaction/);
+    await f.store.finishSetup("owner-revoke", "finalized", 1002);
+    await f.store.saveSetup({ ...setup("withdraw"), mint: SOLANA_USDG_MINT, amountRaw: "80000000", priorSequence: "1" });
+    await assert.rejects(f.store.writeOffShortfall(snapshot, id), /prepared owner withdrawal/);
+    f.clock.value = NOW + 30_000; // the prepared withdrawal lapsed
+    // A reading taken before the book's last change, or no longer fresh, is read again.
+    const failed = (await f.store.liveBook())!;
+    await assert.rejects(f.store.writeOffShortfall({ ...snapshot, slot: failed.slot - 1, observedAtMs: f.clock.value }, id), /moved after these balances were read/);
+    await assert.rejects(f.store.writeOffShortfall({ ...snapshot, observedAtMs: f.clock.value - 60_000 }, id), /fresh finalized/);
+    assert.deepEqual(await f.store.liveBook(), failed); assert.deepEqual(await f.flows(), []); assert.equal(await f.booked(id), null);
+    await f.store.writeOffShortfall({ ...snapshot, observedAtMs: f.clock.value }, id);
+    assert.equal((await f.store.liveBook())!.cashRaw, "70000000"); assert.notEqual(await f.booked(id), null);
+  });
+
+  test(`${dialect}: an asset above its book in the same reading is booked as status books an inflow; a quarantine-only shortfall pauses nothing`, options, async t => {
+    // USDG short, WSOL above: the USDG is a loss, the extra WSOL zero-basis quarantine.
+    const f = await shortfallAccount(t, base);
+    const mixed = { slot: 1005, cashUsdg: "85000000", wsolRaw: "55000007" };
+    const first = await f.store.writeOffShortfall({ ...mixed, observedAtMs: NOW, commitment: "finalized" }, await f.decide(mixed));
+    assert.deepEqual([first.lost.usdgRaw, first.inflow.quarantinedWsolRaw, first.book.quarantinedWsolRaw, first.book.wsolRaw, first.book.hwmRaw, first.book.realizedPnlUsdgRaw],
+      ["5000000", "7", "5000007", "50000000", "120000000", "-5000000"]);
+    // WSOL short only by quarantined SOL, USDG above: a deposit raising the high-water mark, and no pause (no valued asset was lost).
+    const g = await shortfallAccount(t, { ...base, buyPaused: false });
+    const aside = { slot: 1005, cashUsdg: "91000000", wsolRaw: "52000000" };
+    const second = await g.store.writeOffShortfall({ ...aside, observedAtMs: NOW, commitment: "finalized" }, await g.decide(aside));
+    assert.deepEqual([second.lost.quarantinedWsolRaw, second.lost.wsolRaw, second.inflow.usdgRaw, second.book.cashRaw, second.book.hwmRaw, second.book.buyPaused, second.book.realizedPnlUsdgRaw],
+      ["3000000", "0", "1000000", "91000000", "121000000", false, "0"]);
+    assert.deepEqual((await g.flows()).map(row => row[0]).sort(), ["deposit", "write-off"]);
+  });
+}
 
 test("live sells are bounded by the signed per-trade and rolling daily SOL sell limits", async t => {
   const f = await fixture(t), first = submission(); await f.store.recordSigned(first);
