@@ -10,14 +10,20 @@
  * exactly those limits, for this owner, vault, program and session key, with
  * nothing else in it beyond creating the vault and its token accounts and a
  * priority fee the owner pays, at most OWNER_MAX_PRIORITY_FEE_LAMPORTS.
+ * checkPreparedPermission is that whole check; SolanaServerContract.test.ts
+ * runs the server's real prepareLive bytes through it.
  */
 import { getCompiledTransactionMessageDecoder, getTransactionDecoder } from "@solana/kit";
-import { base58Encode, SOLANA_USDG_MINT } from "../../../packages/core/src/ids";
+import { base58Encode, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM } from "../../../packages/core/src/ids";
 import type { SolanaPaperLimits } from "../../../packages/core/src/solana";
 import { displaySolanaAmount, displaySolanaAmountOrNull } from "../lib/solana-amounts";
 
 const ASSOCIATED_TOKEN_PROGRAM = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL";
 const WRAPPED_SOL = "So11111111111111111111111111111111111111112";
+const SYSTEM_PROGRAM = "11111111111111111111111111111111";
+const CLASSIC_TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+/** The token program each token account the permission may open belongs to. */
+const TOKEN_PROGRAM_OF: Readonly<Record<string, string>> = { [SOLANA_USDG_MINT]: TOKEN_2022_PROGRAM, [WRAPPED_SOL]: CLASSIC_TOKEN_PROGRAM };
 // Anchor discriminators of the vault program (packages/core/src/solana-live.ts).
 const INITIALIZE = [48, 191, 163, 44, 71, 129, 63, 164];
 const CREATE_SESSION = [242, 193, 143, 179, 150, 25, 122, 227];
@@ -62,13 +68,17 @@ export function readPermissionTransaction(transactionBase64: string, expected: {
       if (data.length === 9 && data[0] === 3 && unitPrice === null) { unitPrice = view.getBigUint64(1, true); continue; }
       refuse();
     }
-    // CreateIdempotent for the owner's and the vault's USDG and wrapped SOL accounts, paid by the owner.
-    if (program === ASSOCIATED_TOKEN_PROGRAM && data.length === 1 && data[0] === 1 && accounts[0] === expected.owner
-      && (accounts[2] === expected.owner || accounts[2] === expected.vault) && (accounts[3] === SOLANA_USDG_MINT || accounts[3] === WRAPPED_SOL)) continue;
+    // CreateIdempotent for the owner's and the vault's USDG and wrapped SOL
+    // accounts, paid by the owner: funder, account, wallet, mint, the system
+    // program and that mint's token program, nothing more. The associated
+    // token program itself refuses an account not derived from those.
+    if (program === ASSOCIATED_TOKEN_PROGRAM && data.length === 1 && data[0] === 1 && accounts.length === 6 && accounts[0] === expected.owner
+      && (accounts[2] === expected.owner || accounts[2] === expected.vault) && Object.hasOwn(TOKEN_PROGRAM_OF, accounts[3] ?? "")
+      && accounts[4] === SYSTEM_PROGRAM && accounts[5] === TOKEN_PROGRAM_OF[accounts[3]!]) continue;
     if (program === expected.programId && data.length === INITIALIZE.length && startsWith(data, INITIALIZE)
-      && accounts[0] === expected.vault && accounts[1] === expected.owner) continue;
+      && accounts.length === 3 && accounts[0] === expected.vault && accounts[1] === expected.owner && accounts[2] === SYSTEM_PROGRAM) continue;
     if (program === expected.programId && !terms && data.length === SESSION_DATA_LENGTH && startsWith(data, CREATE_SESSION)
-      && accounts[0] === expected.vault && accounts[1] === expected.owner) {
+      && accounts.length === 2 && accounts[0] === expected.vault && accounts[1] === expected.owner) {
       if (base58Encode(data.slice(8, 40)) !== expected.session) refuse();
       const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
       terms = { perTradeUsdg: view.getBigUint64(40, true).toString(), dailyUsdg: view.getBigUint64(48, true).toString(),
@@ -83,6 +93,29 @@ export function readPermissionTransaction(transactionBase64: string, expected: {
   const priorityFee = unitLimit !== null && unitPrice !== null ? (unitPrice * unitLimit + 999_999n) / 1_000_000n : 0n;
   if (priorityFee > OWNER_MAX_PRIORITY_FEE_LAMPORTS) refuse();
   return { ...terms, priorityFeeLamports: priorityFee.toString() };
+}
+
+/** What the setup route's prepare answers for a permission registration. */
+export type PreparedPermission = { transactionBase64: string; programId: string; vault: string; session: string; expiresAtMs: number;
+  requiredLamports?: string; ownerLamports?: string; priorityFeeLamports?: string };
+
+/**
+ * THE PAGE'S WHOLE CHECK OF A PREPARED PERMISSION, BEFORE THE WALLET OPENS.
+ *
+ * The answer must name the session key this page generated and the vault it
+ * derived for this owner and program; the bytes must encode exactly the saved
+ * limits shown (readPermissionTransaction, permissionMatchesLimits); and a
+ * priority fee the server states must be the one the bytes carry. Returns the
+ * decoded terms to show, or throws: nothing reaches the wallet.
+ */
+export function checkPreparedPermission(setup: PreparedPermission, expected: { owner: string; programId: string; vault: string; session: string }, limits: SolanaPaperLimits): SignedPermissionTerms {
+  if (setup.session !== expected.session) throw new Error("The prepared permission names a different session. Nothing was signed.");
+  if (setup.programId !== expected.programId || setup.vault !== expected.vault) throw new Error("The prepared permission names a different vault. Nothing was signed.");
+  const terms = readPermissionTransaction(setup.transactionBase64, expected);
+  if (!permissionMatchesLimits(terms, limits)) throw new Error("The prepared permission does not match the saved limits shown on this page. Nothing was signed. Refresh and review your limits.");
+  // The fee shown is the one decoded from the bytes; a server that says otherwise is not believed.
+  if (setup.priorityFeeLamports !== undefined && setup.priorityFeeLamports !== terms.priorityFeeLamports) throw new Error("The prepared permission's fee does not match its bytes. Nothing was signed. Refresh and register again.");
+  return terms;
 }
 
 /** True only when the signed terms are exactly the saved limits the page showed. */

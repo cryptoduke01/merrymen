@@ -12,7 +12,7 @@ import { SignIn } from "./HostedControls";
 import { SolanaAutomation } from "./SolanaAutomation";
 import { outcomeAfterRefusal, refusedByServer, signatureOf, SolanaOwnerActions, type OwnerRecord, type OwnerWallet, type RecoverableSol } from "./SolanaOwnerActions";
 import { ownerKeyExportEnabled, SolanaRecovery } from "./SolanaRecovery";
-import { PermissionReview, PermissionTerms, permissionExpiry, permissionMatchesLimits, readPermissionTransaction, type SignedPermissionTerms } from "./SolanaPermission";
+import { checkPreparedPermission, PermissionReview, PermissionTerms, permissionExpiry, type PreparedPermission, type SignedPermissionTerms } from "./SolanaPermission";
 import { deriveSolanaVaultAddress } from "../../../packages/core/src/solana-live";
 import { solanaUnits as units, displaySolanaAmount as display, displaySolanaAmountOrNull } from "../lib/solana-amounts";
 import "./SolanaScreen.css";
@@ -38,8 +38,6 @@ type FeePayerLevel = "ok" | "low" | "buys-blocked" | "exits-blocked";
 /** The shared network fee payer's level, in the owner's words (the runtime's blockers and warnings say what follows from it). */
 const FEE_PAYER_LEVELS: Record<FeePayerLevel, string> = { ok: "funded", low: "low; trading continues and operators are alerted",
   "buys-blocked": "too low for buys; exits continue", "exits-blocked": "too low for any trade, exits included" };
-type Setup = { transactionBase64: string; programId: string; vault: string; session: string; expiresAtMs: number;
-  requiredLamports?: string; ownerLamports?: string; priorityFeeLamports?: string };
 /**
  * A prepared permission the owner reviews before the wallet opens. The server
  * accepts its signature for 60 seconds from prepare; the page offers to sign
@@ -260,14 +258,9 @@ function ConnectedSolana() {
       const sessionPublicKey = base58Encode(ed25519.getPublicKey(seed));
       // Timed on this clock from before the request, so latency only shortens the window.
       const started = Date.now();
-      const { setup } = await api<{ setup: Setup }>("setup", { stage: "prepare", sessionPublicKey });
-      if (setup.session !== sessionPublicKey) throw new Error("The prepared permission names a different session. Nothing was signed.");
-      if (setup.programId !== programId || setup.vault !== vault) throw new Error("The prepared permission names a different vault. Nothing was signed.");
+      const { setup } = await api<{ setup: PreparedPermission }>("setup", { stage: "prepare", sessionPublicKey });
       // The wallet only opens for bytes that encode what this page showed.
-      const terms = readPermissionTransaction(setup.transactionBase64, { owner: binding.owner, programId, vault, session: sessionPublicKey });
-      if (!permissionMatchesLimits(terms, shown)) throw new Error("The prepared permission does not match the saved limits shown on this page. Nothing was signed. Refresh and review your limits.");
-      // The fee shown is the one decoded from the bytes; a server that says otherwise is not believed.
-      if (setup.priorityFeeLamports !== undefined && setup.priorityFeeLamports !== terms.priorityFeeLamports) throw new Error("The prepared permission's fee does not match its bytes. Nothing was signed. Refresh and register again.");
+      const terms = checkPreparedPermission(setup, { owner: binding.owner, programId, vault, session: sessionPublicKey }, shown);
       reviewSeed.current = seed;
       setReview({ transactionBase64: setup.transactionBase64, limits: shown, terms, requiredLamports: setup.requiredLamports ?? null, ownerLamports: setup.ownerLamports ?? null,
         deadline: started + REVIEW_SIGN_WINDOW_MS });

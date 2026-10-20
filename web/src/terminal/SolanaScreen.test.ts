@@ -7,8 +7,9 @@ import React, { act } from "react";
 import { ed25519 } from "@noble/curves/ed25519";
 import { address, appendTransactionMessageInstructions, compileTransaction, createTransactionMessage, getBase64EncodedWireTransaction,
   setTransactionMessageFeePayer, setTransactionMessageLifetimeUsingBlockhash, type Blockhash, type Instruction } from "@solana/kit";
-import { base58Encode, CHAINS, SOLANA_USDG_MINT } from "../../../packages/core/src/ids";
-import { buildCreateSolanaSessionInstruction, buildInitializeSolanaVaultInstruction, deriveSolanaVaultAddress, SOLANA_VAULT_LOCAL_TEST_PROGRAM } from "../../../packages/core/src/solana-live";
+import { base58Encode, CHAINS, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM } from "../../../packages/core/src/ids";
+import { buildCreateSolanaSessionInstruction, buildInitializeSolanaVaultInstruction, deriveSolanaAta, deriveSolanaVaultAddress, SOLANA_ASSOCIATED_TOKEN_PROGRAM,
+  SOLANA_CLASSIC_TOKEN_PROGRAM, SOLANA_SYSTEM_PROGRAM, SOLANA_VAULT_LOCAL_TEST_PROGRAM, SOLANA_WRAPPED_SOL_MINT } from "../../../packages/core/src/solana-live";
 import { JSDOM } from "jsdom";
 
 const OWNER = "So11111111111111111111111111111111111111112";
@@ -18,10 +19,18 @@ const paper = { cashRaw: "1000000000", positions: [] };
 const PROGRAM = SOLANA_VAULT_LOCAL_TEST_PROGRAM;
 /** Saved live limits: 10 USDG a trade, 50 a day, 0.25/1 SOL sold, 7 days. */
 const liveLimits = () => ({ ...limits, perTradeWsol: "250000000", dailyWsol: "1000000000", expiresAtMs: Date.now() + 168 * 3_600_000 });
-/** The registration the server prepares from the saved limits, as real wire bytes. */
+/** CreateIdempotent for `wallet`'s token account of `mint`, paid by the owner, as prepareLive builds it. */
+async function createAta(wallet: string, mint: string): Promise<Instruction> {
+  const program = mint === SOLANA_USDG_MINT ? TOKEN_2022_PROGRAM : SOLANA_CLASSIC_TOKEN_PROGRAM;
+  return { programAddress: address(SOLANA_ASSOCIATED_TOKEN_PROGRAM), data: Uint8Array.of(1), accounts: [
+    { address: address(OWNER), role: 3 }, { address: address(await deriveSolanaAta(wallet, mint, program)), role: 1 }, { address: address(wallet), role: 0 },
+    { address: address(mint), role: 0 }, { address: address(SOLANA_SYSTEM_PROGRAM), role: 0 }, { address: address(program), role: 0 }] };
+}
+/** The registration the server prepares from the saved limits, as real wire bytes (the real builder's are in SolanaServerContract.test.ts). */
 async function permissionTransaction(session: string, signed: ReturnType<typeof liveLimits>, extra: Instruction[] = []) {
   const vault = await deriveSolanaVaultAddress(PROGRAM, OWNER);
   const instructions = [buildInitializeSolanaVaultInstruction({ programAddress: PROGRAM, vault, owner: OWNER }),
+    await createAta(vault, SOLANA_USDG_MINT), await createAta(vault, SOLANA_WRAPPED_SOL_MINT), await createAta(OWNER, SOLANA_USDG_MINT), await createAta(OWNER, SOLANA_WRAPPED_SOL_MINT),
     buildCreateSolanaSessionInstruction({ programAddress: PROGRAM, vault, owner: OWNER, session, perTrade: BigInt(signed.perTradeUsdg), daily: BigInt(signed.dailyUsdg),
       perTradeWsol: BigInt(signed.perTradeWsol), dailyWsol: BigInt(signed.dailyWsol), maxOps: signed.maxOpsPerDay, expiresAt: BigInt(Math.floor(signed.expiresAtMs / 1000)) }), ...extra];
   const message = setTransactionMessageLifetimeUsingBlockhash({ blockhash: address("11111111111111111111111111111111") as unknown as Blockhash, lastValidBlockHeight: 1n },
