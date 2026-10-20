@@ -16,10 +16,12 @@ import { SqlSolanaBindingStore } from "../../web/src/lib/solana-binding-store";
 import { wrapSqlite } from "./db";
 import { createSolanaAgent } from "./solana-agent";
 import { createSolanaAppRuntime } from "./solana-app-runtime";
-import type { SolanaSignedSubmission } from "./solana-executor";
+import { createSolanaExecutor, type SolanaSignedSubmission } from "./solana-executor";
+import { createSolanaLiveMarket } from "./solana-live-market";
 import type { SolanaLiveRead, SolanaLiveRpc } from "./solana-live-rpc";
-import { PYTH_SOL_USD_ACCOUNT, SOLANA_PYTH_FEEDS, readSolanaReferencePrice, solanaPythGeneration, type SolanaPythGeneration } from "./solana-reference-price";
-import { pythAccount } from "./solana-reference-price-fixture";
+import { PYTH_SOL_USD_ACCOUNT, SOLANA_PYTH_FEEDS, readSolanaReferencePrice, solanaPythGeneration, solanaReferenceBound, solanaReferenceNotional,
+  type SolanaPythGeneration } from "./solana-reference-price";
+import { pythAccount, pythReference } from "./solana-reference-price-fixture";
 import { SOLANA_MAINNET_GENESIS_HASH } from "./solana-rpc";
 import { ensureSolanaTradingSchema, SolanaTradingStore } from "./solana-trading-store";
 import { sealSecret } from "./store-crypto";
@@ -181,7 +183,8 @@ async function fixture(t: TestContext, opts: { cash: bigint; wsol: bigint; mark:
   const submissions = async () => (await db.prepare("SELECT request_id,notional_raw,submission_json FROM solana_runtime_submissions").all() as
     Array<{ request_id: string; notional_raw: string; submission_json: string }>).map(r => ({ ...r, submission: JSON.parse(r.submission_json) as SolanaSignedSubmission }));
   const agent = (runtime: ReturnType<typeof createSolanaAppRuntime> = app) => createSolanaAgent({ db, runtime, market, now: () => clock.now });
-  return { app, scope, sends, submissions, agent, net, runtime, served, pythReads, db };
+  // `rpc`, `env`, `clock`, `sessionKeys` and `vault` let a test build an executor of its own on this chain.
+  return { app, scope, sends, submissions, agent, net, runtime, served, pythReads, db, rpc, env, clock, sessionKeys, vault };
 }
 const manual = (inputMint: string, amountRaw: string, requestId: string) => ({ kind: "spl-swap", chain: CHAINS.solana, mode: "live", requestId, inputMint,
   outputMint: inputMint === SOLANA_USDG_MINT ? SOLANA_WRAPPED_SOL_MINT : SOLANA_USDG_MINT, amountRaw, slippageBps: 50 });
@@ -459,6 +462,45 @@ test("a retry of an admitted live trade returns it before any reference setting 
     // Unseen and inside its deadline, the recorded bytes are rebroadcast once, exactly as signed: never re-signed.
     assert.equal(f.sends.length, sendsBefore + 1, label);
     assert.ok(f.sends.every(wire => wire === admitted!.submission.signedTransactionBase64), label);
+  }
+});
+
+test("the executor checks a fresh bound against its own generation, not the one the bound names: the other generation's is refused before signing", async t => {
+  processGeneration(t, undefined);
+  // Built directly, with an assessRisk that returns a fresh, valid bound from the generation named second:
+  // only the executor's own check stands between that bound and a signature (store admission is not reached).
+  const feePayerKeyPair = await createKeyPairFromPrivateKeyBytes(new Uint8Array(32).fill(31));
+  const signs = t.mock.method(crypto.subtle, "sign");
+  const cases: Array<[configured: SolanaPythGeneration | undefined, boundFrom: SolanaPythGeneration, admitted: boolean]> = [
+    ["upgraded", "current", false], [undefined, "upgraded", false], ["current", "upgraded", false],
+    // The same evidence from the configured generation is signed, recorded and sent: the refusals above are the generation alone.
+    ["upgraded", "upgraded", true], [undefined, "current", true]];
+  for (const [configured, boundFrom, admitted] of cases) {
+    const label = `executor ${configured ?? "default"}, bound from ${boundFrom}`;
+    const f = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" } });
+    const recorded: SolanaSignedSubmission[] = [], signedBefore = signs.mock.callCount();
+    const executor = createSolanaExecutor({ programId: PROGRAM, programBinarySha256: f.env.MERRYMEN_SOLANA_VAULT_SHA256, ...(configured ? { pythGeneration: configured } : {}),
+      sessionKeyPair: f.sessionKeys, feePayerKeyPair, rpc: f.rpc, market: createSolanaLiveMarket({ env: f.env, rpc: f.rpc, now: () => f.clock.now }),
+      journal: { get: async () => null, recordSigned: async submission => { recorded.push(submission); return true; }, settle: async () => assert.fail("nothing settles") },
+      maxFeeLamports: "5000000", now: () => f.clock.now,
+      assessRisk: async ({ intent, quote }) => {
+        const reference = solanaReferenceBound(intent, pythReference(f.clock.now, 15_000_000_000n, SLOT, boundFrom), 300);
+        return { observedAtMs: f.clock.now, slot: SLOT, notionalUsdg: solanaReferenceNotional(intent, quote.outAmount, reference).toString(),
+          equityUsdg: "200000000", peakEquityUsdg: "200000000", cashUsdg: "50000000", wsolRaw: "1000000000", reference };
+      } });
+    const intent = { ...manual(SOLANA_WRAPPED_SOL_MINT, "100000000", "executor-generation"), owner: f.scope.owner, vault: f.vault };
+    if (admitted) {
+      assert.equal((await executor.execute(intent)).status, "pending", label);
+      assert.ok(signs.mock.callCount() > signedBefore, label);
+      assert.deepEqual(recorded.map(s => s.risk.reference.reference.account), [SOLANA_PYTH_FEEDS[boundFrom].account], label);
+      assert.equal(f.sends.length, 1, label);
+    } else {
+      await assert.rejects(executor.execute(intent), /refused: risk/, label);
+      // Nothing signed, recorded or sent.
+      assert.equal(signs.mock.callCount(), signedBefore, label);
+      assert.deepEqual(recorded, [], label); assert.equal(f.sends.length, 0, label);
+    }
+    assert.deepEqual(f.pythReads, [], label); // the bound came from assessRisk; the executor itself reads no reference
   }
 });
 
