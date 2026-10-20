@@ -5,7 +5,7 @@ import { CHAINS, SOLANA_USDG_MINT } from "../../packages/core/src/ids";
 import { SOLANA_WRAPPED_SOL_MINT } from "../../packages/core/src/solana-live";
 import { SqlSolanaBindingStore } from "../../web/src/lib/solana-binding-store";
 import { stopSolanaForKill } from "./solana-kill";
-import { createSolanaAppRuntime } from "./solana-app-runtime";
+import { createSolanaAppRuntime, SOLANA_STATUS_BELOW_BOOK } from "./solana-app-runtime";
 import { boundSolanaRebalanceSell, createSolanaAgent, planSolanaRebalance } from "./solana-agent";
 import { wrapSqlite } from "./db";
 import type { SolanaPaperMarket } from "./solana-paper-service";
@@ -506,4 +506,25 @@ test("the agent's SOL mark: a zero-output answer is dust planned as no position;
   }
   assert.equal(trades.length, 1, "no trade on any other mark failure");
   assert.equal(dustChecks.length, 2, "only a zero-output answer is checked for dust");
+});
+
+test("a live account whose vault holds less than its book is held, and says an [alert] with no tenant identity, once per repeat window", async t => {
+  const f = await expiryAccount(t, { maxOpsPerDay: 20, expired: 0 });
+  const below = { paper: null, live: { balances: {}, tradable: { cashUsdg: "100000000", wsolRaw: "0" }, pending: [], ready: false, canExit: false, blockers: [SOLANA_STATUS_BELOW_BOOK] } };
+  let status: unknown = below;
+  const runtime = { status: async () => status, trade: async () => { f.control.trades++; return {}; } } as unknown as Parameters<typeof createSolanaAgent>[0]["runtime"];
+  const market: SolanaPaperMarket = { readMint: async () => { throw new Error("unused"); }, quote: async () => { throw new Error("a buy needs no quote"); } };
+  const agent = createSolanaAgent({ db: f.db, runtime, market, now: () => f.clock.now, log: line => f.lines.push(line) });
+  assert.deepEqual((await agent.tick()).map(r => r.outcome), ["held"]);
+  assert.equal(f.control.trades, 0);
+  assert.equal(f.lines.length, 1);
+  assert.match(f.lines[0]!, /^\[alert\] Solana vault below its book: /);
+  assert.deepEqual(fieldsOf(f.lines[0]!), { solana: "alert", kind: "vault-below-book", account: solanaAccountRef({ tenant: TENANT, owner: OWNER }) });
+  assert.ok(!f.lines[0]!.includes(TENANT) && !f.lines[0]!.includes(OWNER));
+  f.clock.now += 60_000; await agent.tick(); assert.equal(f.lines.length, 1, "said once per repeat window");
+  f.clock.now += SOLANA_AGENT_ALERT_REPEAT_MS; await agent.tick(); assert.equal(f.lines.length, 2);
+  // Reconciled: trading resumes, and a later shortfall is said at once.
+  status = { ...below, live: { ...below.live, ready: true, canExit: true, blockers: [] } };
+  f.clock.now += 60_000; assert.deepEqual((await agent.tick()).map(r => r.outcome), ["submitted"]); assert.equal(f.lines.length, 2);
+  status = below; f.clock.now += 60_000; await agent.tick(); assert.equal(f.lines.length, 3);
 });

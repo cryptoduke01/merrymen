@@ -4,7 +4,7 @@ import { CHAINS, SOLANA_USDG_MINT } from "../../packages/core/src/ids";
 import { parseSolanaRawAmount, parseSolanaSwapIntent, validateSolanaAccountLimits, validateSolanaQuote, type SolanaPaperLimits, type SolanaQuote } from "../../packages/core/src/solana";
 import { SOLANA_WRAPPED_SOL_MINT } from "../../packages/core/src/solana-live";
 import { SqlSolanaBindingStore, validateSolanaStrategy, type SolanaStrategy } from "../../web/src/lib/solana-binding-store";
-import { getSolanaAppRuntime } from "./solana-app-runtime";
+import { getSolanaAppRuntime, SOLANA_STATUS_BELOW_BOOK } from "./solana-app-runtime";
 import type { Db } from "./db";
 import { createSolanaMarket, SolanaMarketError } from "./solana-market";
 import type { SolanaPaperMarket } from "./solana-paper-service";
@@ -146,6 +146,19 @@ export function createSolanaAgent(options: SolanaAgentOptions) {
     if (use.operations < maxOpsPerDay) report(scope, use, maxOpsPerDay, true);
     return true;
   };
+  /**
+   * A live account whose vault holds less than its book (SOLANA_STATUS_BELOW_BOOK): tokens left it outside
+   * Merrymen, and its automated trades and exits stay held until the book is reconciled with the vault, which
+   * nothing does by itself. Said as an [alert] at most once per SOLANA_AGENT_ALERT_REPEAT_MS per account
+   * while it persists, and at once again after it clears.
+   */
+  const belowBook = (scope: SolanaAccountScope, blockers: readonly string[] | undefined) => {
+    const account = solanaAccountRef(scope);
+    if (!blockers?.includes(SOLANA_STATUS_BELOW_BOOK)) { said.delete(`below-book:${account}`); return; }
+    say(`below-book:${account}`, `[alert] Solana vault below its book: an account's vault holds less USDG or SOL than its recorded trades, so its automated trades `
+      + `and exits are held: ${JSON.stringify({ solana: "alert", kind: "vault-below-book", account })} — tokens left the vault outside Merrymen (a recovery-tool or wallet `
+      + "withdrawal, say); nothing trades on that account until its book is reconciled with the vault");
+  };
   const headroom = BigInt(10_000 - (options.referenceToleranceBps ?? SOLANA_REFERENCE_DEFAULT_TOLERANCE_BPS));
   // When each tenant's strategy last found nothing to do (in band), or admission refused it
   // because expired attempts used up its daily operations, by settings revision.
@@ -206,6 +219,7 @@ export function createSolanaAgent(options: SolanaAgentOptions) {
             if (!status.paper || status.paper.positions.some(p => p.mint !== SOLANA_WRAPPED_SOL_MINT)) { results.push({ owner: row.owner, outcome: "held" }); continue; }
             cashRaw = status.paper.cashRaw; wsolRaw = status.paper.positions.find(p => p.mint === SOLANA_WRAPPED_SOL_MINT)?.amountRaw ?? "0";
           } else {
+            belowBook(scope, status.live.blockers);
             if (!status.live.balances || !status.live.tradable || status.live.pending.length || (!status.live.ready && !status.live.canExit)) { results.push({ owner: row.owner, outcome: "held" }); continue; }
             // The book's amounts, never the chain's: quarantined SOL is not the strategy's to sell.
             cashRaw = status.live.tradable.cashUsdg; wsolRaw = status.live.tradable.wsolRaw;

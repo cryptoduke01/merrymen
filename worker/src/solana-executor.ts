@@ -373,14 +373,57 @@ export async function readSolanaVaultState(rpc: SolanaLiveRpc, programId: string
   });
 }
 export async function readSolanaVaultBalances(rpc: SolanaLiveRpc, vault: string, minContextSlot = 1, commitment: "confirmed" | "finalized" = "confirmed"): Promise<{ slot: number; cashUsdg: string; wsolRaw: string }> {
+  return rpc.read(read => readSolanaVaultBalancesWith(read, vault, minContextSlot, commitment));
+}
+/** One provider's answer for the vault's USDG and WSOL balances, at or after `minContextSlot`, in one read session. */
+export async function readSolanaVaultBalancesWith(read: SolanaLiveRead, vault: string, minContextSlot = 1, commitment: "confirmed" | "finalized" = "confirmed"): Promise<{ slot: number; cashUsdg: string; wsolRaw: string }> {
   const [cash, wsol] = await Promise.all([deriveSolanaAta(vault, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM),
     deriveSolanaAta(vault, SOLANA_WRAPPED_SOL_MINT, SOLANA_CLASSIC_TOKEN_PROGRAM)]);
-  return rpc.read(async read => {
-    const result = context(await read("getMultipleAccounts", [[cash, wsol], { encoding: "base64", commitment, minContextSlot }]), minContextSlot);
-    if (!Array.isArray(result.value) || result.value.length !== 2) return fail();
-    return { slot: result.slot, cashUsdg: tokenBalance(account(result.value[0]), SOLANA_USDG_MINT, vault, TOKEN_2022_PROGRAM).toString(),
-      wsolRaw: tokenBalance(account(result.value[1]), SOLANA_WRAPPED_SOL_MINT, vault, SOLANA_CLASSIC_TOKEN_PROGRAM).toString() };
-  });
+  const result = context(await read("getMultipleAccounts", [[cash, wsol], { encoding: "base64", commitment, minContextSlot }]), minContextSlot);
+  if (!Array.isArray(result.value) || result.value.length !== 2) return fail();
+  return { slot: result.slot, cashUsdg: tokenBalance(account(result.value[0]), SOLANA_USDG_MINT, vault, TOKEN_2022_PROGRAM).toString(),
+    wsolRaw: tokenBalance(account(result.value[1]), SOLANA_WRAPPED_SOL_MINT, vault, SOLANA_CLASSIC_TOKEN_PROGRAM).toString() };
+}
+/**
+ * How far one provider's context slot may run ahead of another provider's fresh
+ * slot at the same commitment: about a minute of honest skew between two
+ * providers' banks. A slot further ahead is one provider's invention.
+ */
+export const SOLANA_PROVIDER_SLOT_SKEW = 150;
+/**
+ * The slot a reading of several providers may persist (a book's slot, an expiry
+ * proof's slot): the LOWEST context slot any of them answered at, never one
+ * provider's own. `views[i].fresh` is provider i's fresh slot at the same
+ * commitment, read after its answer in the same session: a provider whose
+ * context slot runs more than SOLANA_PROVIDER_SLOT_SKEW ahead of another's
+ * fresh slot refuses the whole reading. A persisted slot is a floor every later
+ * read and admission must reach (minContextSlot = book.slot; "moved
+ * backwards"), so one provider's inflated slot would otherwise refuse every
+ * later trade and in-app withdrawal.
+ */
+export function solanaQuorumSlot(views: readonly { slot: number; fresh?: number }[]): number {
+  if (!views.length || views.some(view => !Number.isSafeInteger(view.slot) || view.slot < 1)) return fail();
+  const fresh = views.flatMap(view => view.fresh === undefined ? [] : [integer(view.fresh)]);
+  const highest = Math.max(...views.map(view => view.slot)), lowestFresh = fresh.length ? Math.min(...fresh) : Number.MAX_SAFE_INTEGER;
+  if (highest > lowestFresh + SOLANA_PROVIDER_SLOT_SKEW) return fail();
+  return Math.min(...views.map(view => view.slot));
+}
+/**
+ * The vault's balances as EVERY provider sees them (at least two), at or after
+ * `minContextSlot`: what booking an inflow may rest on. The providers must
+ * report the same balances, or the reading is refused (invalid-state: nothing
+ * is booked, ask again later). The slot is solanaQuorumSlot's: the lowest any
+ * provider answered at, refused when one runs ahead of another's fresh slot.
+ * One provider can therefore neither book a phantom deposit nor persist an
+ * inflated book slot.
+ */
+export async function readSolanaVaultBalancesQuorum(rpc: SolanaLiveRpc, vault: string, minContextSlot = 1, commitment: "confirmed" | "finalized" = "finalized"): Promise<{ slot: number; cashUsdg: string; wsolRaw: string }> {
+  const views = (await readSolanaQuorum(rpc, async read => {
+    const balances = await readSolanaVaultBalancesWith(read, vault, minContextSlot, commitment);
+    return { ...balances, fresh: integer(await read("getSlot", [{ commitment }])) };
+  }, view => JSON.stringify([view.cashUsdg, view.wsolRaw])));
+  if (!views.agreed) return fail();
+  return { slot: solanaQuorumSlot(views.values), cashUsdg: views.value.cashUsdg, wsolRaw: views.value.wsolRaw };
 }
 /** The signed execute_swap's deadline (unix ms). From then on the program refuses these bytes. */
 function signedDeadlineMs(submission: SolanaSignedSubmission): number {
@@ -447,6 +490,20 @@ export async function observeSolanaSubmission(read: SolanaLiveRead, submission: 
     amountIn: "0", amountOut: "0", finalizedAtMs: nowMs, expiryProof: { vaultSequence: evidence.state.seq.toString(),
       sessionEpoch: evidence.state.sessionEpoch.toString(), blockHeight: blockHeight.toString(), reason: revoked ? "session-revoked" : "blockhash-expired" } } };
 }
+/**
+ * The settlement to book from providers that agree on it (observationKey). A
+ * fill or failure is identical everywhere, slot included. An expiry's slot is
+ * each provider's own finalized read, which the key leaves out and the book
+ * keeps as its slot (a floor for every later trade and read): the lowest of
+ * them is booked, never one provider's, so a provider answering far ahead
+ * cannot wedge the account. Its proof is the first (the primary's) otherwise.
+ */
+export function solanaAgreedSettlement(settlements: readonly SolanaLiveSettlement[]): SolanaLiveSettlement {
+  const [first] = settlements;
+  if (!first) return fail();
+  if (first.status !== "expired") return first;
+  return { ...first, slot: Math.min(...settlements.map(settlement => settlement.slot)) };
+}
 /** What both providers must agree on. An expiry's height is each provider's own and may differ. */
 export function observationKey(observation: SolanaObservation): string {
   const settlement = observation.settlement;
@@ -475,7 +532,7 @@ export async function reconcileSolanaSubmission(
   const nowMs = now();
   const quorum = await readSolanaQuorum(rpc, read => observeSolanaSubmission(read, submission, owner, nowMs), observationKey);
   if (quorum.agreed && quorum.value.settlement) {
-    const settlement = quorum.value.settlement;
+    const settlement = solanaAgreedSettlement(quorum.values.map(view => view.settlement!));
     await journal.settle(owner, requestId, submission.signature, settlement);
     return { submission, status: settlement.status, settlement };
   }

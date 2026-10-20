@@ -154,6 +154,17 @@ test("an expiry two providers prove is booked only while no provider has seen th
   const next = submission("after-expiry"); next.risk.slot = 1001; assert.equal(await f.store.recordSigned(next), true);
 });
 
+test("an agreed expiry books the lowest finalized slot any agreeing provider read at, never one provider's own (audit live-M3)", async t => {
+  const f = await fixture(t);
+  const views = providers({ primary: { settlement: { ...expiry(f.pending, "1201"), slot: 1_000_001_001 }, seen: false },
+    fallback: { settlement: { ...expiry(f.pending, "1250"), slot: 1002 }, seen: false } });
+  const result = await resolveSolanaPendingTrade({ db: f.db, tenant: TENANT, requestId: "stuck-1", providers: views.list, observe: views.observe, now: () => f.clock.value,
+    book: { operator: "milla", reason: "dropped" } });
+  assert.equal(result.booked, true);
+  assert.equal((await f.store.get(OWNER, "stuck-1"))!.settlement!.slot, 1002);
+  assert.equal((await f.store.liveBook())!.slot, 1002);
+});
+
 test("an expiry is not booked while a provider has a finalized status whose receipt cannot be read, until the operator sets that provider aside", async t => {
   // The primary has a finalized status but a receipt that cannot be used (observeSolanaSubmission throws):
   // the transaction landed, maybe failed with the vault sequence unchanged. The other two prove an expiry.

@@ -12,7 +12,7 @@ import { sealSecret } from "./store-crypto";
 import { SqlSolanaBindingStore } from "../../web/src/lib/solana-binding-store";
 import { wrapSqlite } from "./db";
 import { createSolanaAgent } from "./solana-agent";
-import { createSolanaAppRuntime, SOLANA_DEPLOYMENT_RECHECK_MS, SolanaAppRuntimeError, solanaOwnerComputeUnitLimit, SOLANA_STATUS_NO_FALLBACK } from "./solana-app-runtime";
+import { createSolanaAppRuntime, SOLANA_DEPLOYMENT_RECHECK_MS, SolanaAppRuntimeError, solanaOwnerComputeUnitLimit, SOLANA_STATUS_BELOW_BOOK, SOLANA_STATUS_NO_FALLBACK } from "./solana-app-runtime";
 import { SolanaRpcError, withSolanaReadDeadline } from "./solana-rpc";
 import type { SolanaLiveRead, SolanaLiveRpc } from "./solana-live-rpc";
 import type { SolanaPaperMarket } from "./solana-paper-service";
@@ -435,7 +435,58 @@ test("one raw WSOL sent to the vault no longer freezes exits or owner withdrawal
     // A balance below the book still blocks: that is never a stranger's gift.
     f.controls.wsol = 49_999_999n;
     const short = await f.app.status(f.scope);
-    assert.equal(short.live.canExit, false); assert.match(short.live.blockers.join(" "), /below recorded trades/);
+    assert.equal(short.live.canExit, false); assert.ok(short.live.blockers.includes(SOLANA_STATUS_BELOW_BOOK));
+  } finally { f.raw.close(); }
+});
+
+/** A provider that answers the vault's two-account balance read (USDG, WSOL) as `change` says, and everything else honestly. */
+function balanceRead(f: Fixture, change: (answer: { context: { slot: number }; value: unknown[] }) => unknown): SolanaLiveRead {
+  return async (method, params = []) => {
+    const answer = await f.read(method, params);
+    const keys = params[0] as string[];
+    return method === "getMultipleAccounts" && keys.length === 2 && keys[0] === f.cashAta && keys[1] === f.wsolAta
+      ? change(answer as { context: { slot: number }; value: unknown[] }) : answer;
+  };
+}
+
+test("a deposit is booked only from finalized balances both providers report, at the lowest slot either answered at (audit G3-3, live-M3)", async () => {
+  const f = await fixture();
+  try {
+    await readyLive(f);
+    const book = { hwmRaw: "100000000", cashRaw: "90000000", wsolRaw: "50000000", costBasisUsdgRaw: "10000000", realizedPnlUsdgRaw: "0",
+      networkFeesLamports: "10000", slot: 900, updatedAtMs: 999_000 };
+    await f.db.prepare("INSERT INTO solana_runtime_live_books(tenant,owner,book_json) VALUES(?,?,?)").run(TENANT, f.owner, JSON.stringify(book));
+    f.controls.cash = 90_000_000n; f.controls.wsol = 50_000_000n;
+    const booked = async () => (await new SolanaTradingStore(f.db, f.scope).liveBook())!;
+    // The primary alone shows a 10 USDG deposit (confirmed and finalized): nothing is booked, and trading is not blocked.
+    const phantom = (answer: { context: { slot: number }; value: unknown[] }) =>
+      ({ ...answer, value: [{ ...(answer.value[0] as object), data: [f.tokenAccount(SOLANA_USDG_MINT, 100_000_000n).toString("base64"), "base64"] }, answer.value[1]] });
+    f.providers.primary = balanceRead(f, phantom);
+    let status = await f.app.status(f.scope);
+    assert.equal(status.live.ready, true, status.live.blockers.join(" | "));
+    assert.deepEqual([(await booked()).cashRaw, (await booked()).hwmRaw, (await booked()).slot], ["90000000", "100000000", 900]);
+    // ... nor by a withdrawal prepare, which refuses rather than book it.
+    await assert.rejects(f.app.prepareOwnerAction(f.scope, { action: "withdraw", mint: SOLANA_USDG_MINT, amountRaw: "95000000" }), /invalid-state/);
+    assert.equal((await booked()).cashRaw, "90000000");
+    // A real deposit both providers see is booked.
+    f.providers.primary = null; f.controls.cash = 100_000_000n;
+    status = await f.app.status(f.scope);
+    assert.deepEqual([(await booked()).cashRaw, (await booked()).hwmRaw, (await booked()).slot], ["100000000", "110000000", 1000]);
+    // One provider answering far ahead of what the other has finalized (its getSlot): the reading is refused, no slot is
+    // persisted, and trading continues. A deposit that came with it waits for an honest reading.
+    f.controls.cash = 105_000_000n;
+    for (const which of ["primary", "fallback"] as const) {
+      f.providers[which] = balanceRead(f, answer => ({ ...answer, context: { slot: answer.context.slot + 1_000_000_000 } }));
+      status = await f.app.status(f.scope);
+      assert.equal(status.live.ready, true, `${which}: ${status.live.blockers.join(" | ")}`);
+      assert.deepEqual([(await booked()).cashRaw, (await booked()).slot], ["100000000", 1000], which);
+      f.providers[which] = null;
+    }
+    // Honest skew between two providers books, at the lower of their slots.
+    f.providers.primary = balanceRead(f, answer => ({ ...answer, context: { slot: answer.context.slot + 100 } }));
+    status = await f.app.status(f.scope);
+    assert.deepEqual([(await booked()).cashRaw, (await booked()).slot], ["105000000", 1000]);
+    assert.equal(status.live.ready, true, status.live.blockers.join(" | "));
   } finally { f.raw.close(); }
 });
 
@@ -947,10 +998,11 @@ function pricedMarket(f: Fixture, failQuotes = false): SolanaPaperMarket {
       contextSlot: 1000, quotedAtMs: f.clock.now, expiresAtMs: f.clock.now + 30_000 };
   } };
 }
-/** The primary provider also serves Pyth's SOL/USD account. */
-function servePyth(f: Fixture) {
-  f.providers.primary = async (method, params = []) => method === "getAccountInfo" && params[0] === PYTH_SOL_USD_ACCOUNT
-    ? f.response(pythAccount({ price: USD_PER_SOL, publishTimeMs: f.clock.now, postedSlot: 999n })) : f.read(method, params);
+/** Both providers also serve Pyth's SOL/USD account (`fallbackPrice`: what the second one serves instead, when given). */
+function servePyth(f: Fixture, fallbackPrice?: bigint) {
+  const serving = (price: bigint): SolanaLiveRead => async (method, params = []) => method === "getAccountInfo" && params[0] === PYTH_SOL_USD_ACCOUNT
+    ? f.response(pythAccount({ price, publishTimeMs: f.clock.now, postedSlot: 999n })) : f.read(method, params);
+  f.providers.primary = serving(USD_PER_SOL); f.providers.fallback = serving(fallbackPrice ?? USD_PER_SOL);
 }
 /** The audit's account: 8 USDG cash and 0.1 SOL (12 USDG at $120), high-water mark 20 USDG. */
 async function wsolCapital(f: Fixture) {
@@ -986,6 +1038,26 @@ test("withdrawing WSOL capital in the app lowers the high-water mark by its valu
     assert.notEqual(after.buyPaused, true);
     assert.equal(breakerTrips(20_000_000n, 8_000_000n), true, "without the valuation the same withdrawal pauses buying");
   } finally { f.raw.close(); }
+});
+
+test("a WSOL withdrawal is valued at the lower of both providers' Pyth bounds: one provider cannot lower the high-water mark by more than the SOL was worth", async () => {
+  for (const [label, primary, fallback] of [["fallback low", USD_PER_SOL, 10_000_000_000n], ["primary low", 10_000_000_000n, USD_PER_SOL]] as const) {
+    const f = await fixture();
+    try {
+      await wsolCapital(f); servePyth(f);
+      // servePyth serves $120 from both; serve each provider's own price instead.
+      const serving = (price: bigint): SolanaLiveRead => async (method, params = []) => method === "getAccountInfo" && params[0] === PYTH_SOL_USD_ACCOUNT
+        ? f.response(pythAccount({ price, conf: price / 10_000n, publishTimeMs: f.clock.now, postedSlot: 999n })) : f.read(method, params);
+      f.providers.primary = serving(primary); f.providers.fallback = serving(fallback);
+      // A quote above both, so the reference is what the store keeps.
+      const app = f.runtime({ market: { ...pricedMarket(f), quote: async intent => ({ ...await pricedMarket(f).quote(intent), minOutAmount: "11999999" }) } });
+      await app.prepareOwnerAction(f.scope, { action: "withdraw", mint: SOLANA_WRAPPED_SOL_MINT, amountRaw: "100000000" });
+      const saved = (await new SolanaTradingStore(f.db, f.scope).setup())!;
+      // 0.1 SOL at $100, not at $120: the lower of the two providers' bounds.
+      assert.equal(saved.withdrawValuation?.reference.referenceOut, "10000000", label);
+      assert.equal(saved.withdrawValuation?.reference.reference.price, "10000000000", label);
+    } finally { f.raw.close(); }
+  }
 });
 
 test("a WSOL withdrawal whose value cannot be read still prepares and lands, and leaves the high-water mark where it was", async () => {

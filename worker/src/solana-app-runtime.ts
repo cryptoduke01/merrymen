@@ -16,13 +16,15 @@ import {
   SOLANA_WRAPPED_SOL_MINT,
 } from "../../packages/core/src/solana-live";
 import type { Db } from "./db";
-import { createSolanaExecutor, parseSolanaLiveIntent, readSolanaOwnerRefundBlocks, type SolanaOwnerRefundBlock, readSolanaVaultBalances, readSolanaVaultState, reconcileSolanaSubmission,
-  SOLANA_DEFAULT_MAX_COMPUTE_UNIT_PRICE, solanaComputeBudgetInstructions, SolanaExecutionError, verifySolanaVaultDeployment, type SolanaLiveJournal, type SolanaLiveRecord } from "./solana-executor";
+import { createSolanaExecutor, parseSolanaLiveIntent, readSolanaOwnerRefundBlocks, type SolanaOwnerRefundBlock, readSolanaVaultBalances, readSolanaVaultBalancesQuorum, readSolanaVaultBalancesWith,
+  readSolanaVaultState, reconcileSolanaSubmission, SOLANA_DEFAULT_MAX_COMPUTE_UNIT_PRICE, solanaComputeBudgetInstructions, SolanaExecutionError, solanaQuorumSlot, verifySolanaVaultDeployment,
+  type SolanaLiveJournal, type SolanaLiveRecord } from "./solana-executor";
 import { createSolanaLiveMarket } from "./solana-live-market";
-import { createSolanaLiveRpc, readSolanaPriorityFee, readSolanaQuorum, type SolanaLiveRead, type SolanaLiveRpc } from "./solana-live-rpc";
+import { createSolanaLiveRpc, readSolanaEachProvider, readSolanaPriorityFee, readSolanaQuorum, type SolanaLiveRead, type SolanaLiveRpc } from "./solana-live-rpc";
 import { createSolanaMarket, SolanaMarketError, solanaJupiterApiKey } from "./solana-market";
 import { createSolanaPaperService, type SolanaPaperMarket } from "./solana-paper-service";
-import { readSolanaReferencePrice, requireSolanaPythGeneration, solanaMarkDust, solanaPythGeneration, solanaReferenceBound, solanaReferenceNotional, solanaReferenceToleranceBps, type SolanaPythGeneration,
+import { readSolanaReferencePrice, requireSolanaPythGeneration, solanaLowestReferenceBound, solanaMarkDust, solanaPythGeneration, solanaReferenceBound, solanaReferenceNotional, solanaReferenceToleranceBps,
+  solanaStrictestReferenceBound, type SolanaPythGeneration, type SolanaReferencePrice,
   SolanaReferencePriceError, SOLANA_REFERENCE_ALERT_REPEAT_MS, SOLANA_REFERENCE_DEFAULT_TOLERANCE_BPS, SOLANA_REFERENCE_MAX_TOLERANCE_BPS,
   SOLANA_REFERENCE_MIN_TOLERANCE_BPS } from "./solana-reference-price";
 import { SolanaRpcError } from "./solana-rpc";
@@ -92,6 +94,17 @@ function publicTrade(record: SolanaLiveRecord) {
  */
 export const SOLANA_STATUS_DAILY_OPERATIONS_USED = "This account made its maximum number of trades for the last 24 hours. Trading and automated exits resume as they leave the window.";
 export const SOLANA_STATUS_NO_FALLBACK = "Live trading needs a second, independent RPC provider; an operator must configure one.";
+/**
+ * The status blocker while the vault holds less USDG or WSOL than its book
+ * (recorded trades, deposits and in-app withdrawals). Tokens left it outside
+ * Merrymen: an owner withdrawal made with the recovery tool or the owner's own
+ * wallet, say. Trading and automated exits are held, never sized from a
+ * balance that is not there (admission refuses a shortfall too); the owner's
+ * revoke and withdrawals stay open. The agent says it to operators as an
+ * [alert] (vault-below-book). Nothing books an outflow automatically.
+ */
+export const SOLANA_STATUS_BELOW_BOOK = "Your vault holds less than its recorded trades: tokens left it outside Merrymen (for example a withdrawal made with the recovery tool or your own wallet). "
+  + "Trading and automated exits are held until the book is reconciled with the vault, so nothing trades on a balance that is not there. Revoking and withdrawing still work.";
 /**
  * A failed live status read as the owner sees it. This module's own refusals,
  * and the two RPC problems only an operator can fix (no independent fallback
@@ -666,13 +679,25 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       priorityFeeLamports: (priority?.fee ?? 0n).toString(), computeUnitLimit: priority?.units ?? null };
   }
   /**
+   * The Pyth SOL/USD price as EVERY provider serves it, each read at or after a
+   * slot of its own (minContextSlot) or, without one, its own fresh confirmed
+   * slot. A refusal from either provider refuses the whole read: a lying or
+   * broken provider can withhold a price, never choose it. Callers take the
+   * stricter or the lower of the answers, whichever is conservative for them.
+   */
+  async function referencePrices(live: SolanaLiveRpc, generation: SolanaPythGeneration, minContextSlot?: number): Promise<SolanaReferencePrice[]> {
+    return readSolanaEachProvider(live, async read =>
+      readSolanaReferencePrice(read, minContextSlot ?? integer(await read("getSlot", [{ commitment: "confirmed" }])), now(), { generation }));
+  }
+  /**
    * What withdrawing `amountRaw` of WSOL is worth now: an executable WSOL→USDG
    * exit quote (the slippage the agent marks and exits with) and the independent
-   * Pyth bound for the same amount, read at a fresh slot. The store keeps the
-   * lower of the two, so neither source alone can lower the high-water mark by
-   * more than the SOL was worth. Anything unreadable or invalid returns
-   * undefined: the withdrawal still prepares and the high-water mark stays put,
-   * the conservative direction. Never a reason to block the owner.
+   * Pyth bound for the same amount, read at a fresh slot from every provider
+   * (the lowest of their bounds is kept). The store keeps the lower of quote and
+   * bound, so no one source can lower the high-water mark by more than the SOL
+   * was worth. Anything unreadable or invalid returns undefined: the withdrawal
+   * still prepares and the high-water mark stays put, the conservative
+   * direction. Never a reason to block the owner.
    */
   async function wsolWithdrawValuation(amountRaw: string): Promise<SolanaWithdrawValuation | undefined> {
     try {
@@ -680,8 +705,8 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
         inputMint: SOLANA_WRAPPED_SOL_MINT, outputMint: SOLANA_USDG_MINT, amountRaw, slippageBps: WITHDRAW_VALUATION_SLIPPAGE_BPS });
       const toleranceBps = referenceToleranceBps(), generation = requireSolanaPythGeneration(env, now());
       const quote = await market().quote(exit); validateSolanaQuote(quote, exit, now());
-      const price = await rpc().read(async read => readSolanaReferencePrice(read, integer(await read("getSlot", [{ commitment: "confirmed" }])), now(), { generation }));
-      return { quote, reference: solanaReferenceBound(exit, price, toleranceBps) };
+      const prices = await referencePrices(rpc(), generation);
+      return { quote, reference: solanaLowestReferenceBound(prices.map(price => solanaReferenceBound(exit, price, toleranceBps))) };
     } catch { return undefined; }
   }
   async function submitOwner(scope: SolanaAccountScope, input: { signedTransactionBase64: string }, kind: "session" | "owner") {
@@ -798,12 +823,14 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
           // A USDG deposit or anyone's WSOL transfer is booked from finalized state:
           // capital-in for USDG, zero-basis quarantine for WSOL. Neither blocks exits.
           if (book && !shortOfBook(book, balances) && aboveBook(book, balances) && !(await s.pending()).length) {
-            const observedAtMs = now();
-            const finalized = await readSolanaVaultBalances(rpc(), vault, book.slot, "finalized");
-            // Unbooked excess is never traded or valued, so failing to book it now (an
-            // owner transaction is pending, say) must not block exits; it retries next read.
-            try { if (!shortOfBook(book, finalized) && aboveBook(book, finalized)) await s.reconcileExternalInflows({ ...finalized, observedAtMs, commitment: "finalized" }); }
-            catch { /* Retried on the next status read. */ }
+            // Booked only from finalized balances every provider reports, at the lowest slot any answered at
+            // (readSolanaVaultBalancesQuorum): one provider can neither invent a deposit nor persist an inflated
+            // book slot. Unbooked excess is never traded or valued, so failing to read or book it now (the
+            // providers disagree, an owner transaction is pending, say) must not block exits; it retries next read.
+            try {
+              const observedAtMs = now(), finalized = await readSolanaVaultBalancesQuorum(rpc(), vault, book.slot, "finalized");
+              if (!shortOfBook(book, finalized) && aboveBook(book, finalized)) await s.reconcileExternalInflows({ ...finalized, observedAtMs, commitment: "finalized" });
+            } catch { /* Retried on the next status read. */ }
           }
           if (!session || session.programId !== programId || session.vault !== vault || live.state.session !== session.session || live.state.sessionEpoch.toString() !== session.sessionEpoch) blockers.push("Register an owner-approved live trading permission.");
           else {
@@ -813,7 +840,7 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
           }
           const currentBook = await s.liveBook();
           if (currentBook?.buyPaused) buysOnly("The buying drawdown breaker is paused; exits remain available.");
-          if (currentBook && shortOfBook(currentBook, balances)) blockers.push("Vault balances are below recorded trades; reconcile capital transfers before trading.");
+          if (currentBook && shortOfBook(currentBook, balances)) blockers.push(SOLANA_STATUS_BELOW_BOOK);
           if (live.state.expiresAt * 1000n <= BigInt(now())) blockers.push("The on-chain trading permission has expired.");
           if (live.state.paused) buysOnly("The on-chain buying breaker is paused; exits remain available.");
           // A donation in the next swap's temporary input account goes back to the
@@ -909,7 +936,22 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
         journal, maxFeeLamports: maxFee.toString(), now, signal: input.signal,
         computeUnitPriceMicroLamports: prices.minimum, maxComputeUnitPriceMicroLamports: prices.maximum,
         assessRisk: async ({ intent: current, quote, slot }) => {
-          const observedAtMs = now(), balances = await readSolanaVaultBalances(liveRpc, vault, slot);
+          const observedAtMs = now();
+          // Every provider, each at or after the prepared slot, in one session apiece: the vault's balances,
+          // which must agree (one provider cannot show a phantom balance), the slot admission may persist
+          // (the lowest any answered at, never one provider's own: solanaQuorumSlot), and the Pyth price that
+          // bounds this trade, of which the stricter is used. Either provider's refusal refuses the trade.
+          let views: Array<{ slot: number; fresh: number; cashUsdg: string; wsolRaw: string; price: SolanaReferencePrice }>;
+          try {
+            views = await readSolanaEachProvider(liveRpc, async read => {
+              const held = await readSolanaVaultBalancesWith(read, vault, slot);
+              const price = await readSolanaReferencePrice(read, slot, now(), { generation: pythGeneration });
+              return { ...held, price, fresh: integer(await read("getSlot", [{ commitment: "confirmed" }])) };
+            });
+          }
+          catch (error) { if (error instanceof SolanaReferencePriceError) throw new SolanaExecutionError("risk"); throw error; }
+          if (views.some(view => view.cashUsdg !== views[0]!.cashUsdg || view.wsolRaw !== views[0]!.wsolRaw)) throw new SolanaExecutionError("invalid-state");
+          const balances = { slot: solanaQuorumSlot(views), cashUsdg: views[0]!.cashUsdg, wsolRaw: views[0]!.wsolRaw };
           const makeExit = (amountRaw: string, requestId: string) => parseSolanaSwapIntent({ kind: "spl-swap", chain: CHAINS.solana,
             mode: "paper", requestId, inputMint: SOLANA_WRAPPED_SOL_MINT, outputMint: SOLANA_USDG_MINT, amountRaw, slippageBps: current.slippageBps });
           // Equity is the book's: unbooked or quarantined tokens are never valued.
@@ -929,12 +971,12 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
           // against Pyth SOL/USD, and a sell is charged at least its reference value.
           let reference: ReturnType<typeof solanaReferenceBound>;
           try {
-            const price = await liveRpc.read(read => readSolanaReferencePrice(read, slot, now(), { generation: pythGeneration }));
             // A zero-output mark for SOL worth a cent or more at Pyth is not dust: valued at zero it would
             // trip the persisted drawdown breaker on one anomalous answer. Refused as an unusable mark
             // instead, like any other mark failure, for this buy only (SOLANA_MARK_DUST_MAX_USDG_RAW).
-            if (zeroMark && !solanaMarkDust(held, price)) throw new SolanaMarketError("invalid-quote");
-            reference = solanaReferenceBound(current, price, toleranceBps);
+            // Dust only at every provider's price.
+            if (zeroMark && !views.every(view => solanaMarkDust(held, view.price))) throw new SolanaMarketError("invalid-quote");
+            reference = solanaStrictestReferenceBound(views.map(view => solanaReferenceBound(current, view.price, toleranceBps)));
           }
           catch (error) { if (error instanceof SolanaReferencePriceError) throw new SolanaExecutionError("risk"); throw error; }
           const previous = await s.liveBook(), peak = previous ? BigInt(previous.hwmRaw) : equity;
@@ -1038,7 +1080,7 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
         }
         if (book) {
           const observedAtMs = now();
-          const finalized = await readSolanaVaultBalances(rpc(), vault, book.slot, "finalized");
+          const finalized = await readSolanaVaultBalancesQuorum(rpc(), vault, book.slot, "finalized");
           // Book any inflow first, so a stranger's WSOL can be withdrawn instead of blocking the owner.
           if (aboveBook(book, finalized)) await s.reconcileExternalInflows({ ...finalized, observedAtMs, commitment: "finalized" });
           book = (await s.liveBook())!;
@@ -1081,16 +1123,16 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
     /**
      * Whether `wsolRaw` of held SOL is dust a zero-output mark may value at zero
      * (solanaMarkDust): worth under SOLANA_MARK_DUST_MAX_USDG_RAW at the
-     * independent Pyth SOL/USD price, read now in this runtime's generation, as
-     * a live buy's risk check reads it. False whenever that cannot be shown (a
+     * independent Pyth SOL/USD price as every provider serves it, read now in this
+     * runtime's generation, as a live buy's risk check reads it. False whenever that cannot be shown (a
      * bad setting, a price that cannot be read or proven): the agent then stops
      * the tick as for any other mark failure, and builds no route.
      */
     async solMarkDust(wsolRaw: string): Promise<boolean> {
       try {
         const amount = parseSolanaRawAmount(wsolRaw), generation = requireSolanaPythGeneration(env, now());
-        const price = await rpc().read(async read => readSolanaReferencePrice(read, integer(await read("getSlot", [{ commitment: "confirmed" }])), now(), { generation }));
-        return solanaMarkDust(amount, price);
+        // Dust only at every provider's price: one provider's low price cannot make real SOL worthless.
+        return (await referencePrices(rpc(), generation)).every(price => solanaMarkDust(amount, price));
       } catch { return false; }
     },
   };

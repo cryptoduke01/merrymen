@@ -44,7 +44,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { CHAINS } from "../../packages/core/src/ids";
 import type { Db } from "./db";
-import { observationKey, observeSolanaSubmission, SolanaExecutionError, type SolanaLiveRecord, type SolanaLiveSettlement,
+import { observationKey, observeSolanaSubmission, solanaAgreedSettlement, SolanaExecutionError, type SolanaLiveRecord, type SolanaLiveSettlement,
   type SolanaObservation } from "./solana-executor";
 import { createSolanaLiveRpc, type SolanaLiveRead } from "./solana-live-rpc";
 import { readSolanaMainnetRpcConfig, SolanaRpcError } from "./solana-rpc";
@@ -126,7 +126,8 @@ export function solanaResolveDecision(views: readonly SolanaResolveView[]): Sola
   if (new Set(agreeing.map(view => view.hostId)).size < 2) {
     return { book: false, reason: "Only one provider reports this final outcome. Two independent providers must agree before anything is booked; consult another provider with --third-rpc." };
   }
-  const settlement = agreeing[0]!.observation.settlement!;
+  // An expiry's slot is each provider's own read: the lowest of the agreeing views is booked (solanaAgreedSettlement).
+  const settlement = solanaAgreedSettlement(agreeing.map(view => view.observation.settlement!));
   if (settlement.status === "expired") {
     // Every view counts here, an excluded one included: a provider that saw the signature may be the one telling the truth.
     if (views.some(view => "observation" in view && view.observation.seen)) {

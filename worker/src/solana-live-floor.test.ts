@@ -153,7 +153,8 @@ async function fixture(t: TestContext, opts: { cash: bigint; wsol: bigint; mark:
       default: return assert.fail(`unexpected live RPC ${method}`);
     }
   };
-  // Two agreeing providers, as the live transport always has: deployment checks and bookings need both.
+  // Two agreeing providers, as the live transport always has: deployment checks, bookings and each trade's
+  // balance and Pyth reads need both (so a trade reads each Pyth account once per provider).
   const rpc: SolanaLiveRpc = { read: fn => fn(read), readEach: async fn => [await fn(read), await fn(read)], send: async wire => { sends.push(wire); return "sent"; } };
   const quote = async (i: { inputMint: string; outputMint: string; amountRaw: string; slippageBps: number }) => {
     // "zero": no route buys SOL back (Jupiter's zero-output answer); "down": the SOL quote fails otherwise.
@@ -395,7 +396,7 @@ test("the runtime's own env picks the generation for the read, the executor's ch
   const f = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" } });
   const placed = await f.app.trade(f.scope, { mode: "live", intent: manual(SOLANA_WRAPPED_SOL_MINT, "100000000", "runtime-env-sell") });
   assert.equal("status" in placed && placed.status, "pending");
-  assert.deepEqual(f.pythReads, [CURRENT.account]);
+  assert.deepEqual(f.pythReads, [CURRENT.account, CURRENT.account]);
   const [row] = await f.submissions();
   assert.equal(row!.submission.risk.reference.reference.account, CURRENT.account); assert.equal(f.sends.length, 1);
 });
@@ -405,7 +406,7 @@ test("a WSOL withdrawal is valued from the runtime's generation, and a store kee
   const f = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" } });
   f.served.set(f.scope.owner, () => rpcAccount(Buffer.alloc(0), SYSTEM, false, 1_000_000_000)); // the owner pays for its own transaction
   await f.runtime({ MERRYMEN_SOLANA_PYTH_GENERATION: "upgraded" }).prepareOwnerAction(f.scope, { action: "withdraw", mint: SOLANA_WRAPPED_SOL_MINT, amountRaw: "100000000" });
-  assert.deepEqual(f.pythReads, [UPGRADED.account]);
+  assert.deepEqual(f.pythReads, [UPGRADED.account, UPGRADED.account]);
   const saved = (await new SolanaTradingStore(f.db, f.scope).setup())!;
   assert.equal(saved.withdrawValuation?.reference.reference.account, UPGRADED.account);
   assert.equal(saved.withdrawValuation?.reference.referenceOut, "15000000"); // 0.1 SOL at $150
@@ -440,7 +441,7 @@ test("a WSOL withdrawal still prepares while the Pyth generation setting names n
   const valued = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" } });
   valued.served.set(valued.scope.owner, () => rpcAccount(Buffer.alloc(0), SYSTEM, false, 1_000_000_000));
   await valued.runtime().prepareOwnerAction(valued.scope, { action: "withdraw", mint: SOLANA_WRAPPED_SOL_MINT, amountRaw: "100000000" });
-  assert.deepEqual(valued.pythReads, [CURRENT.account]);
+  assert.deepEqual(valued.pythReads, [CURRENT.account, CURRENT.account]);
   assert.equal((await new SolanaTradingStore(valued.db, valued.scope).setup())!.withdrawValuation?.reference.referenceOut, "15000000");
 });
 
@@ -536,7 +537,7 @@ test("with MERRYMEN_SOLANA_PYTH_GENERATION=upgraded, live trades are read, check
     assert.equal("status" in placed && placed.status, "pending", inputMint);
     // The runtime read the upgraded account and never the current one; the executor signed only
     // above that bound's floor, and the store admitted the bound as evidence from it.
-    assert.deepEqual(f.pythReads, [UPGRADED.account], inputMint);
+    assert.deepEqual(f.pythReads, [UPGRADED.account, UPGRADED.account], inputMint);
     const [row] = await f.submissions();
     assert.equal(row!.submission.risk.reference.reference.account, UPGRADED.account, inputMint);
     assert.ok(BigInt(row!.submission.minOutAmount) >= BigInt(row!.submission.risk.reference.minOutFloor), inputMint);
@@ -600,7 +601,7 @@ test("a retry of an admitted live trade returns it before any reference setting 
   assert.ok("status" in placed && placed.status === "pending");
   const [admitted] = await f.submissions();
   assert.equal(admitted!.submission.risk.reference.reference.account, CURRENT.account);
-  assert.deepEqual(f.pythReads, [CURRENT.account]);
+  assert.deepEqual(f.pythReads, [CURRENT.account, CURRENT.account]);
   const jupiter = () => f.net.urls.filter(url => url.startsWith("https://api.jup.ag/")).length, built = jupiter();
   // A setting that names no generation, the other generation, and a tolerance out of range: each would refuse a new trade.
   for (const more of [{ MERRYMEN_SOLANA_PYTH_GENERATION: "both" }, { MERRYMEN_SOLANA_PYTH_GENERATION: "upgraded" },
@@ -614,7 +615,7 @@ test("a retry of an admitted live trade returns it before any reference setting 
     assert.deepEqual([again.signature, again.status, again.requestId], [placed.signature, "pending", "admitted-then-retried"], label);
     assert.deepEqual(said, [], label);
     // No Pyth read (of either account), no Jupiter quote or build, no new submission.
-    assert.deepEqual(f.pythReads, [CURRENT.account], label);
+    assert.deepEqual(f.pythReads, [CURRENT.account, CURRENT.account], label);
     assert.equal(jupiter(), built, label);
     const rows = await f.submissions();
     assert.deepEqual(rows.map(row => row.submission.signature), [placed.signature], label);
@@ -728,5 +729,99 @@ test("a compute-unit price minimum above the default maximum still exits; the ma
     assert.equal(bad.sends.length, 0); assert.deepEqual(await bad.submissions(), []);
     const status = await bad.app.status(bad.scope);
     assert.match(status.live.blockers.join(" "), /compute-unit price settings are misconfigured/); assert.equal(status.live.canExit, false);
+  }
+});
+
+/**
+ * A transport over the fixture's chain whose primary and fallback answer through their own wrappers of the honest
+ * read: `primary` (default: honest) and `fallback` (default: honest). Each read session gets a fresh wrapped read.
+ */
+function split(f: Awaited<ReturnType<typeof fixture>>, primary: (read: SolanaLiveRead) => SolanaLiveRead = read => read,
+  fallback: (read: SolanaLiveRead) => SolanaLiveRead = read => read): SolanaLiveRpc {
+  const via = (wrap: (read: SolanaLiveRead) => SolanaLiveRead) => <T>(fn: (read: SolanaLiveRead) => Promise<T>) => f.rpc.read(read => fn(wrap(read)));
+  return { ...f.rpc, read: via(primary), readEach: async fn => [await via(primary)(fn), await via(fallback)(fn)] };
+}
+/** A provider that serves the current generation's SOL/USD account at `usdPerSol` (8 decimals), published `ageMs` ago. */
+const pythAt = (usdPerSol: bigint, ageMs = 0) => (read: SolanaLiveRead): SolanaLiveRead => async (method, params = []) =>
+  method === "getAccountInfo" && params[0] === CURRENT.account
+    ? { context: { slot: SLOT }, value: pythAccount({ price: usdPerSol, conf: usdPerSol / 10_000n, publishTimeMs: NOW - ageMs, owner: CURRENT.receiverProgram }) }
+    : read(method, params);
+
+test("one provider's Pyth price cannot lower a live trade's floor: the stricter of both providers' bounds applies, and either one's refusal refuses", async t => {
+  // Fair is $150. A sell built 10% cheap clears the floor only at a price at most about $139; a buy built to
+  // deliver 10% less SOL clears it only at a price of about $162 or more. One lying provider serves exactly that.
+  const cases = [
+    { label: "sell, primary lies low", input: SOLANA_WRAPPED_SOL_MINT, amount: "100000000", primary: pythAt(12_000_000_000n), fallback: undefined },
+    { label: "sell, fallback lies low", input: SOLANA_WRAPPED_SOL_MINT, amount: "100000000", primary: undefined, fallback: pythAt(12_000_000_000n) },
+    { label: "buy, primary lies high", input: SOLANA_USDG_MINT, amount: "25000000", primary: pythAt(17_000_000_000n), fallback: undefined },
+    { label: "buy, fallback lies high", input: SOLANA_USDG_MINT, amount: "25000000", primary: undefined, fallback: pythAt(17_000_000_000n) },
+  ];
+  for (const c of cases) {
+    const f = await fixture(t, { cash: 100_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "factor", num: 90n, den: 100n } });
+    await assert.rejects(f.runtime({}, split(f, c.primary, c.fallback)).trade(f.scope, { mode: "live", intent: manual(c.input, c.amount, "lying-pyth") }), /refused: risk/, c.label);
+    assert.deepEqual(await f.submissions(), [], c.label); assert.equal(f.sends.length, 0, c.label);
+    // The same 10%-cheap route with that price from both providers would be admitted: the honest provider's bound is what refused it.
+    const both = await fixture(t, { cash: 100_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "factor", num: 90n, den: 100n } });
+    const lie = (c.primary ?? c.fallback)!;
+    const placed = await both.runtime({}, split(both, lie, lie)).trade(both.scope, { mode: "live", intent: manual(c.input, c.amount, "lying-pyth") });
+    assert.ok("status" in placed && placed.status === "pending", c.label);
+  }
+  // A fair sell is admitted beside a provider that prices SOL low, and records (and is charged at) the stricter, honest bound.
+  const fair = await fixture(t, { cash: 100_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" } });
+  const placed = await fair.runtime({}, split(fair, pythAt(12_000_000_000n))).trade(fair.scope, { mode: "live", intent: manual(SOLANA_WRAPPED_SOL_MINT, "100000000", "beside-a-liar") });
+  assert.ok("status" in placed && placed.status === "pending");
+  const [row] = await fair.submissions();
+  assert.equal(row!.submission.risk.reference.reference.price, "15000000000"); assert.equal(row!.submission.risk.reference.minOutFloor, "14550000");
+  // A price either provider refuses (stale on the fallback alone) refuses the trade, whatever the other serves.
+  const stale = await fixture(t, { cash: 100_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" } });
+  await assert.rejects(stale.runtime({}, split(stale, undefined, pythAt(15_000_000_000n, 180_000))).trade(stale.scope, { mode: "live",
+    intent: manual(SOLANA_WRAPPED_SOL_MINT, "100000000", "stale-fallback") }), /refused: risk/);
+  assert.deepEqual(await stale.submissions(), []); assert.equal(stale.sends.length, 0);
+});
+
+test("one provider's Pyth price cannot make real SOL dust: a zero-output mark is dust only at every provider's price", async t => {
+  // 1 SOL is worth $150; a provider pricing SOL at a millionth of a cent would call it dust.
+  const f = await fixture(t, { cash: 100_000_000n, wsol: 1_000_000_000n, mark: "zero", build: { kind: "fair" } });
+  for (const [primary, fallback] of [[pythAt(1n), undefined], [undefined, pythAt(1n)]] as const) {
+    assert.equal(await f.runtime({}, split(f, primary, fallback)).solMarkDust("1000000000"), false);
+    await assert.rejects(f.runtime({}, split(f, primary, fallback)).trade(f.scope, { mode: "live", intent: manual(SOLANA_USDG_MINT, "25000000", "buy-beside-fake-dust") }),
+      (error: unknown) => error instanceof SolanaMarketError && error.code === "invalid-quote");
+  }
+  assert.equal(await f.runtime({}, split(f, pythAt(1n), pythAt(1n))).solMarkDust("1000000000"), true);
+  assert.equal(await f.app.solMarkDust("66666"), true); assert.equal(await f.app.solMarkDust("66667"), false);
+  assert.deepEqual(await f.submissions(), []); assert.equal(f.sends.length, 0);
+});
+
+test("a first live book's balances and slot come from both providers: a phantom balance is refused, and one provider's slot is never persisted", async t => {
+  const book = async (f: Awaited<ReturnType<typeof fixture>>) => JSON.parse((await f.db.prepare("SELECT book_json FROM solana_runtime_live_books").get() as { book_json: string }).book_json);
+  const fresh = async () => { const f = await fixture(t, { cash: 100_000_000n, wsol: 0n, mark: "fair", build: { kind: "fair" } });
+    await f.db.prepare("DELETE FROM solana_runtime_live_books").run(); return f; };
+  // The primary shows 900 USDG more than the chain holds, in the risk read: the first book would start from it.
+  const phantom = await fresh();
+  const cashAta = await deriveSolanaAta(phantom.vault, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM);
+  const inflate = (read: SolanaLiveRead): SolanaLiveRead => async (method, params = []) => {
+    const answer = await read(method, params) as { context: { slot: number }; value: unknown };
+    if (method !== "getMultipleAccounts" || (params[0] as string[]).length !== 2 || (params[0] as string[])[0] !== cashAta) return answer;
+    return { ...answer, value: [rpcAccount(token(SOLANA_USDG_MINT, phantom.vault, 1_000_000_000n), TOKEN_2022_PROGRAM), (answer.value as unknown[])[1]] };
+  };
+  await assert.rejects(phantom.runtime({}, split(phantom, inflate)).trade(phantom.scope, { mode: "live", intent: manual(SOLANA_USDG_MINT, "25000000", "phantom-first-book") }),
+    /refused: invalid-state/);
+  assert.deepEqual(await phantom.submissions(), []); assert.equal(phantom.sends.length, 0);
+  assert.equal(await phantom.db.prepare("SELECT book_json FROM solana_runtime_live_books").get(), undefined);
+  // One provider answering the balance read at a later slot: the book starts at the lowest slot either answered at.
+  const ahead = (by: number) => (read: SolanaLiveRead): SolanaLiveRead => async (method, params = []) => {
+    const answer = await read(method, params) as { context: { slot: number }; value: unknown };
+    return method === "getMultipleAccounts" && (params[0] as string[]).length === 2 ? { ...answer, context: { slot: answer.context.slot + by } } : answer;
+  };
+  const skewed = await fresh();
+  const placed = await skewed.runtime({}, split(skewed, ahead(100))).trade(skewed.scope, { mode: "live", intent: manual(SOLANA_USDG_MINT, "25000000", "skewed-first-book") });
+  assert.ok("status" in placed && placed.status === "pending");
+  assert.equal((await book(skewed)).slot, SLOT); assert.equal((await skewed.submissions())[0]!.submission.risk.slot, SLOT);
+  // A slot far beyond what the other provider has seen is one provider's invention: refused, and nothing is booked.
+  for (const [label, primary, fallback] of [["primary", ahead(1_000_000_000), undefined], ["fallback", undefined, ahead(1_000_000_000)]] as const) {
+    const inflated = await fresh();
+    await assert.rejects(inflated.runtime({}, split(inflated, primary, fallback)).trade(inflated.scope, { mode: "live", intent: manual(SOLANA_USDG_MINT, "25000000", "inflated") }),
+      /refused: invalid-state/, label);
+    assert.deepEqual(await inflated.submissions(), [], label); assert.equal(inflated.sends.length, 0, label);
   }
 });

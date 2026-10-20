@@ -7,7 +7,8 @@ import { CHAINS, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM } from "../../packages/cor
 import { deriveSolanaVaultAddress, deriveSolanaSwapAuthority, deriveSolanaAta, SOLANA_VAULT_LOCAL_TEST_PROGRAM,
   SOLANA_VAULT_ACCOUNT_SIZE, SOLANA_VAULT_DISCRIMINATOR, SOLANA_SWAP_EVENT_DISCRIMINATOR,
   SOLANA_CLASSIC_TOKEN_PROGRAM, SOLANA_WRAPPED_SOL_MINT } from "../../packages/core/src/solana-live";
-import { createSolanaExecutor, reconcileSolanaSubmission, SolanaExecutionError, verifySolanaVaultDeployment, type SolanaLiveRecord, type SolanaSignedSubmission, type SolanaExecutorOptions } from "./solana-executor";
+import { createSolanaExecutor, reconcileSolanaSubmission, SOLANA_PROVIDER_SLOT_SKEW, solanaAgreedSettlement, SolanaExecutionError, solanaQuorumSlot, verifySolanaVaultDeployment,
+  type SolanaLiveRecord, type SolanaSignedSubmission, type SolanaExecutorOptions } from "./solana-executor";
 import { settleSolanaReceipt, solanaVaultEvents } from "./solana-settlement";
 import { JUPITER_SWAP_PROGRAM, SolanaLiveMarketError, type JupiterCpiRoute } from "./solana-live-market";
 import type { SolanaLiveRead, SolanaLiveRpc, SolanaSendOptions } from "./solana-live-rpc";
@@ -557,6 +558,32 @@ test("an expiry is booked only when both providers prove it; their heights may d
     getAccountInfo: () => ({ context: { slot: SLOT + 2 }, value: rpcAccount(state(f.intent.owner, f.session, seq), PROGRAM) }) });
   const rpc: SolanaLiveRpc = { read: callback => callback(view(0n)), readEach: async callback => [await callback(view(0n)), await callback(view(1n))], send: async wire => wire };
   assert.equal((await reconcileSolanaSubmission(rpc, f.options.journal, f.intent.owner, f.intent.requestId, () => NOW + 1))!.status, "pending");
+});
+
+test("an expiry both providers prove books the lower of their finalized slots, never one provider's own (audit live-M3)", async () => {
+  for (const [primarySlot, fallbackSlot] of [[SLOT + 1_000_000_000, SLOT + 2], [SLOT + 2, SLOT + 1_000_000_000]] as const) {
+    const f = await fixture(); f.controls.failSend = true; const executor = createSolanaExecutor(f.options);
+    await executor.execute(f.intent);
+    const view = (slot: number) => provider(f, { getSignatureStatuses: () => ({ context: { slot: SLOT }, value: [null] }), getTransaction: () => null,
+      getEpochInfo: () => ({ absoluteSlot: SLOT + 2, blockHeight: 1201 }),
+      getAccountInfo: () => ({ context: { slot }, value: rpcAccount(state(f.intent.owner, f.session, 0n), PROGRAM) }) });
+    const rpc: SolanaLiveRpc = { read: callback => callback(view(primarySlot)), readEach: async callback => [await callback(view(primarySlot)), await callback(view(fallbackSlot))],
+      send: async wire => wire };
+    const result = await reconcileSolanaSubmission(rpc, f.options.journal, f.intent.owner, f.intent.requestId, () => NOW + 1);
+    assert.equal(result!.status, "expired"); assert.equal(result!.settlement!.slot, SLOT + 2);
+    assert.equal(f.getRecord()!.settlement!.slot, SLOT + 2);
+  }
+  // A fill or failure is booked only when every field, its slot included, agrees.
+  assert.throws(() => solanaAgreedSettlement([]));
+});
+
+test("the lowest-slot rule for readings of several providers: honest skew books the lower slot; a slot far past another provider's fresh one is refused", () => {
+  assert.equal(solanaQuorumSlot([{ slot: 1000, fresh: 1000 }, { slot: 1000 + SOLANA_PROVIDER_SLOT_SKEW, fresh: 1000 + SOLANA_PROVIDER_SLOT_SKEW }]), 1000);
+  assert.equal(solanaQuorumSlot([{ slot: 1100, fresh: 1100 }, { slot: 1000, fresh: 1000 }]), 1000);
+  assert.throws(() => solanaQuorumSlot([{ slot: 1000, fresh: 1000 }, { slot: 1001 + SOLANA_PROVIDER_SLOT_SKEW, fresh: 1001 + SOLANA_PROVIDER_SLOT_SKEW }]), SolanaExecutionError);
+  // A provider whose own fresh slot is far below its answer refuses too: it answered from a bank it says it has not reached.
+  assert.throws(() => solanaQuorumSlot([{ slot: 1_000_000, fresh: 1000 }, { slot: 1000, fresh: 1000 }]), SolanaExecutionError);
+  for (const bad of [[], [{ slot: 0 }], [{ slot: 1.5 }], [{ slot: 1000, fresh: -1 }]]) assert.throws(() => solanaQuorumSlot(bad), SolanaExecutionError, JSON.stringify(bad));
 });
 
 test("the vault program must verify as immutable and audited on both providers before anything is signed (audit G3-5)", async () => {

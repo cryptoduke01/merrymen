@@ -372,6 +372,28 @@ export function solanaReferenceBound(intent: { inputMint: string; outputMint: st
 }
 
 /**
+ * Of one trade's bounds, one per provider that served the reference (each read
+ * at or after the same slot), the stricter: the highest reference output. That
+ * is the higher floor for the guaranteed output (a buy is held to the lower SOL
+ * price, a sell to the higher) and, for a sell, the higher USDG value charged
+ * against the limits. A provider serving a fabricated price can therefore make a
+ * trade harder to admit, never easier. Ties keep the first (the primary's).
+ */
+export function solanaStrictestReferenceBound(bounds: readonly SolanaReferenceBound[]): SolanaReferenceBound {
+  if (!bounds.length) return fail("bound");
+  return bounds.reduce((best, bound) => parseSolanaRawAmount(bound.referenceOut) > parseSolanaRawAmount(best.referenceOut) ? bound : best);
+}
+/**
+ * Of several providers' bounds for one amount, the lowest reference output:
+ * what an owner withdrawal's valuation keeps, so that no one provider can lower
+ * the high-water mark by more than the SOL was worth.
+ */
+export function solanaLowestReferenceBound(bounds: readonly SolanaReferenceBound[]): SolanaReferenceBound {
+  if (!bounds.length) return fail("bound");
+  return bounds.reduce((low, bound) => parseSolanaRawAmount(bound.referenceOut) < parseSolanaRawAmount(low.referenceOut) ? bound : low);
+}
+
+/**
  * Recompute a stored bound from its own reference and the intent, and check it
  * is still fresh. Admission calls this so a bound can't be edited or replayed.
  * The reference must come from `generation`'s account (default:
