@@ -44,6 +44,7 @@
     "solana:paper": "node --env-file-if-exists=.env.solana.local --import tsx worker/src/solana-paper-cli.ts",
     "start:solana": "node --env-file-if-exists=.env.solana.local --import tsx worker/src/solana-agent-cli.ts",
     "solana:hold": "node --env-file-if-exists=.env.solana.local --import tsx worker/src/solana-hold-cli.ts",
+    "solana:resolve": "node --env-file-if-exists=.env.solana.local --import tsx worker/src/solana-resolve-cli.ts",
     "solana:recover": "node --import tsx worker/src/solana-recover-cli.ts",
     "status": "node cli/bin.mjs status",
     "export": "node cli/bin.mjs export",

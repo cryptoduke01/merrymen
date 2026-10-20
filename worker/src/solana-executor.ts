@@ -352,9 +352,12 @@ async function readFinalizedVault(read: SolanaLiveRead, submission: SolanaSigned
   if (state.owner !== owner || state.sessionEpoch < BigInt(submission.sessionEpoch)) return fail();
   return { address: submission.intent.vault, slot: evidence.slot, state };
 }
-/** One provider's view. `seen`: that provider has a status, a receipt or a moved sequence for it. */
-interface SolanaObservation { settlement: SolanaLiveSettlement | null; seen: boolean }
-async function observeSolanaSubmission(read: SolanaLiveRead, submission: SolanaSignedSubmission, owner: string, nowMs: number): Promise<SolanaObservation> {
+/**
+ * One provider's view. `seen`: that provider has a status, a receipt or a moved sequence for it.
+ * Exported for the operator's resolution tool (solana-resolve.ts), which compares the same views.
+ */
+export interface SolanaObservation { settlement: SolanaLiveSettlement | null; seen: boolean }
+export async function observeSolanaSubmission(read: SolanaLiveRead, submission: SolanaSignedSubmission, owner: string, nowMs: number): Promise<SolanaObservation> {
   const result = context(await read("getSignatureStatuses", [[submission.signature], { searchTransactionHistory: true }]), submission.minContextSlot);
   if (!Array.isArray(result.value) || result.value.length !== 1) return fail();
   const status = result.value[0];
@@ -390,7 +393,7 @@ async function observeSolanaSubmission(read: SolanaLiveRead, submission: SolanaS
       sessionEpoch: evidence.state.sessionEpoch.toString(), blockHeight: blockHeight.toString(), reason: revoked ? "session-revoked" : "blockhash-expired" } } };
 }
 /** What both providers must agree on. An expiry's height is each provider's own and may differ. */
-function observationKey(observation: SolanaObservation): string {
+export function observationKey(observation: SolanaObservation): string {
   const settlement = observation.settlement;
   if (!settlement) return "pending";
   if (settlement.status === "expired") return JSON.stringify([settlement.status, settlement.signature,
