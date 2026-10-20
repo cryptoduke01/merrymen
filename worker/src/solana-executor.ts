@@ -7,13 +7,14 @@ import {
   signTransaction, type AddressesByLookupTableAddress, type Blockhash, type Instruction,
 } from "@solana/kit";
 import { CHAINS, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM } from "../../packages/core/src/ids";
-import { parseSolanaRawAmount, parseSolanaSwapIntent, parseSolanaTradeFloor, solanaTradeFloorMet, validateSolanaQuote, type SolanaMint } from "../../packages/core/src/solana";
+import { parseSolanaRawAmount, parseSolanaSwapIntent, parseSolanaTradeFloor, SolanaPaperValidationError, solanaTradeFloorMet, validateSolanaQuote,
+  type SolanaMint, type SolanaSwapIntent } from "../../packages/core/src/solana";
 import {
   buildExecuteSolanaSwapInstruction, decodeSolanaVaultAccount, deriveSolanaAta,
   deriveSolanaSwapAuthority, deriveSolanaVaultAddress, SOLANA_CLASSIC_TOKEN_PROGRAM,
   SOLANA_WRAPPED_SOL_MINT, type SolanaVaultState,
 } from "../../packages/core/src/solana-live";
-import { validateJupiterCpi, type JupiterCpiRoute, type SolanaCpiBuildRequest } from "./solana-live-market";
+import { SolanaLiveMarketError, validateJupiterCpi, type JupiterCpiRoute, type SolanaCpiBuildRequest } from "./solana-live-market";
 import { readSolanaEachProvider, readSolanaPriorityFee, readSolanaQuorum, type SolanaLiveRead, type SolanaLiveRpc } from "./solana-live-rpc";
 import { solanaReferenceNotional, verifySolanaReferenceBound, type SolanaPythGeneration, type SolanaReferenceBound } from "./solana-reference-price";
 import { isSolanaTransactionError, settleSolanaReceipt, type SolanaVaultEvidence } from "./solana-settlement";
@@ -111,6 +112,19 @@ export class SolanaExecutionError extends Error {
   }
 }
 function fail(code: SolanaExecutionError["code"] = "invalid-state"): never { throw new SolanaExecutionError(code); }
+/**
+ * The build quote, checked again once the route is in hand and again before
+ * signing. The builder already checked it against the request, so what fails
+ * here is a quote that went stale meanwhile (a slow provider or RPC): answered
+ * as the builder's 'provider' (preview again shortly), never the owner's 400
+ * with the validator's text.
+ */
+function checkRouteQuote(quote: SolanaQuote, intent: SolanaSwapIntent, nowMs: number): void {
+  try { validateSolanaQuote(quote, intent, nowMs); } catch (error) {
+    if (error instanceof SolanaPaperValidationError) throw new SolanaLiveMarketError("provider");
+    throw error;
+  }
+}
 function object(value: unknown): value is Record<string, unknown> { return value !== null && typeof value === "object" && !Array.isArray(value); }
 function integer(value: unknown): number {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) return fail(); return value;
@@ -572,7 +586,7 @@ export function createSolanaExecutor(options: SolanaExecutorOptions) {
         destinationTokenAccount: outputTokenAccount, inputTokenProgram: inputProgram, outputTokenProgram: outputProgram };
       const route = await options.market.build(buildRequest);
       checkAbort();
-      validateSolanaQuote(route.quote, paperIntent(intent), timestamp());
+      checkRouteQuote(route.quote, paperIntent(intent), timestamp());
       // The route's guaranteed output is what gets signed (min_out): below the
       // minimum the owner previewed, the price moved and nothing goes further.
       // The refusal carries that guaranteed output (already validated with the quote) for the owner to review.
@@ -687,7 +701,7 @@ export function createSolanaExecutor(options: SolanaExecutorOptions) {
         slot: prepared.slot, observedAtMs });
       checkAbort();
       const preparedAtMs = timestamp();
-      validateSolanaQuote(route.quote, paperIntent(intent), preparedAtMs);
+      checkRouteQuote(route.quote, paperIntent(intent), preparedAtMs);
       if (preparedAtMs - safetyObservedAtMs >= 30_000) return fail("unsafe-route");
       // The guaranteed output must clear the independent price floor; a bad,
       // buggy or manipulated build quote cannot sign a sale for dust.
