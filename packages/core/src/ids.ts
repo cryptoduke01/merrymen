@@ -510,12 +510,18 @@ const SECRET_WINDOW_STARTS = 262_144;
  * The edge of a run a glued key is looked for first: windows that start within
  * this many characters of a long run's start, or of the end of a key found in
  * it, or end within it of the run's end, or of a key's start. "pk<key>",
- * "%22<key>%22", "<key>is mine" and "<K1><K2><K3>" are found there, in
- * every run of the text before any other window is read. The rest are read
- * after, in the order written, while the budget lasts: windows deeper in a
- * long run ("<sig><key><sig>", "mysecretkeyis<key>thankyoumybro") and those
- * inside a run a keypair's length (one character of glue: "2<key>"), which a
- * list of signatures is made of, so a long list cannot starve the edges.
+ * "%22<key>%22", "<key>is mine" and "<K1><K2><K3>" are found there. Edges are
+ * read before any other window, best effort too, SHORTEST RUN FIRST: a run
+ * with a few characters of glue (89 to 112 characters) before a long blob,
+ * whose edges cost about 28 keypair checks when no key is there, so about
+ * nine such blobs spend the budget, and a key at the edge of a run longer
+ * than all of them can go unread. A run a keypair's length that is not 64
+ * bytes as a whole ("secret:<key>x", an 87-character key) is read with the
+ * edges. The rest are read after, in the order written, while the budget
+ * lasts: windows deeper in a long run ("<sig><key><sig>",
+ * "mysecretkeyis<key>thankyoumybro") and those inside a run a keypair's length
+ * that is 64 bytes whole ("2<key>"), which a list of signatures is made of, so
+ * a long list cannot starve the edges.
  */
 const SECRET_GLUE = 12;
 /** Window starts one set of tables covers (windowTables): memory stays bounded however long the run. */
@@ -684,9 +690,13 @@ function secretsIn(text: string, budget: SecretScanBudget): string[] {
   /**
    * Runs whose windows are still to read, in the order written: longer than a
    * keypair (`long`: any key in one is glued; [lo, hi) is what its edges left),
-   * or a keypair's length (one character of glue at most).
+   * or a keypair's length (one character of glue at most). `edge`: read with
+   * the edges (phase 1), every long run, and a run a keypair's length that is
+   * not 64 bytes as a whole, so neither a signature nor a key ("secret:<key>x"
+   * with an 87-character key): its windows are a key's edges. A signature's
+   * windows wait for phase 2, so a list of signatures cannot starve the edges.
    */
-  const runs: Array<{ at: number; run: string; min: number; long: boolean; lo: number; hi: number }> = [];
+  const runs: Array<{ at: number; run: string; min: number; long: boolean; edge: boolean; lo: number; hi: number }> = [];
   // 64 bytes never encode shorter than 64 characters, so a shorter run (an address) costs nothing.
   for (const [at, end] of base58Runs(text, 64)) {
     const run = text.slice(at, end);
@@ -694,6 +704,7 @@ function secretsIn(text: string, budget: SecretScanBudget): string[] {
     const min = shortestKeypairIn(run);
     if (run.length < min || hexFrom(run, 0) || filler(run)) continue;
     const [shortest, longest] = keypairLengthsAfter(leadingOnes(run));
+    let whole64 = false;
     if (run.length <= longest && run.length >= shortest) {
       // EXACT: the run as it stands, as every scan before glued keys read it.
       if (budget.left-- <= 0) {
@@ -705,12 +716,21 @@ function secretsIn(text: string, budget: SecretScanBudget): string[] {
         hits.push([at, run]);
         continue;
       }
+      whole64 = bytes?.length === 64;
     }
-    runs.push({ at, run, min, long: run.length > longest, lo: 0, hi: run.length });
+    const long = run.length > longest;
+    runs.push({ at, run, min, long, edge: long || !whole64, lo: 0, hi: run.length });
   }
-  // 1. The edges of every long run, again from the end of each key found there ("<K1><K2><K3>").
-  for (const r of runs) {
-    if (!r.long) continue;
+  // 1. The edges, SHORTEST RUN FIRST (review RHS, round 2): a key behind a few characters of glue ("pk<key>",
+  // a run of 89 to 112 characters) before the edges of a long blob (a serialized transaction), which cost
+  // about 28 keypair checks each: in the order written, ten blobs spent the budget and left it unread.
+  // Again from the end of each key found there ("<K1><K2><K3>").
+  for (const r of runs.filter((x) => x.edge).sort((x, y) => x.run.length - y.run.length)) {
+    if (!r.long) {
+      const key = sweep(r.run, w, 0, r.run.length, 0, r.run.length, r.min, true);
+      if (Array.isArray(key)) found(r.at, r.run, key);
+      continue;
+    }
     const left = () => sweep(r.run, w, r.lo, r.lo + SECRET_GLUE, r.lo, r.hi, r.min);
     for (let key = left(); Array.isArray(key); key = left()) {
       found(r.at, r.run, key);
@@ -723,10 +743,11 @@ function secretsIn(text: string, budget: SecretScanBudget): string[] {
       r.hi = key[0];
     }
   }
-  // 2. The rest, in the order written: inside a run a keypair's length, a key behind or before one
-  // character ("2<key>"); inside a long run past its edges, a key glued on both sides ("<sig><key><sig>").
+  // 2. The rest, in the order written: inside a run a keypair's length that is 64 bytes whole, a key behind or
+  // before one character ("2<key>"); inside a long run past its edges, a key glued on both sides ("<sig><key><sig>").
   for (const r of runs) {
     if (!r.long) {
+      if (r.edge) continue;
       const key = sweep(r.run, w, 0, r.run.length, 0, r.run.length, r.min, true);
       if (Array.isArray(key)) found(r.at, r.run, key);
       continue;

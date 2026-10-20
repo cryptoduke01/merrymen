@@ -30,6 +30,7 @@ import { CASH } from "./tokens";
 const EVM = "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168";
 const EVM_HASH = `0x${"Ab".repeat(32)}`;
 const SYSTEM_PROGRAM = "11111111111111111111111111111111";
+const ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 
 /** A real ed25519 keypair, its base58 secret, and a real signature by it. */
 function keypair(seedByte: number) {
@@ -518,9 +519,43 @@ describe("Solana secret detection", () => {
     assert.equal(spent.windows?.checks, 0, "the list alone spends the window budget");
     assert.ok(spent.left > 0, "and not the exact one");
     assert.deepEqual(solanaSecretsIn(`${list}\npk${key}`), [key], "an edge window is read before any signature's windows");
+    // Review RHS, round 2: the edge's WIDTH. A key a few characters in from both ends of its run, after the list
+    // has spent the window budget, is found at the edges; with no edge width (SECRET_GLUE 0) it went unread.
+    assert.deepEqual(solanaSecretsIn(`${list}\npk${key}is`), [key], "two characters of glue either side");
+    assert.deepEqual(solanaSecretsIn(`${list}\n${"a".repeat(12)}${key}${"b".repeat(12)}`), [key], "twelve either side: the whole edge");
     assert.deepEqual(solanaSecretsIn(`${sig}${key}${sig}\n${list}`), [key], "a deep window written first is read");
     assert.deepEqual(solanaSecretsIn(`${list}\n${sig}${key}${sig}`), [], "written after, it goes unread: missed, and nothing is refused");
     assert.deepEqual(solanaSecretsIn(`${list}\n${key}`), [key], "a key standing alone is an exact candidate, read whatever the windows spent");
+  });
+
+  it("reads the edges of the shortest runs first, so long blobs cannot starve a key with a little glue", () => {
+    // Review RHS, round 2: the edges were read in the order written. Ten random base58 runs of 300 characters
+    // (serialized transactions in a log) spent the window budget on their own edges, about 28 checks each, and
+    // 'pk<key>' or 'secret:<key>x' after them went unread. With an 87-character key, 'secret:<key>x' is a run a
+    // keypair's length, read only after every edge: missed after a single blob.
+    let x = 0x9e3779b9;
+    const blob = () => Array.from({ length: 300 }, () => ALPHABET[((x = (Math.imul(x, 1664525) + 1013904223) >>> 0) >>> 16) % 58]).join("");
+    const blobs = Array.from({ length: 20 }, blob).join("\n");
+    const spent = secretScanBudget();
+    assert.deepEqual(solanaSecretsIn(blobs, spent), []);
+    assert.equal(spent.windows?.checks, 0, "the blobs alone spend the window budget");
+    const keys = { long: "", short: "" };
+    for (let i = 1; i < 256 && (!keys.long || !keys.short); i++) {
+      const k = keypair(i).secretB58;
+      if (k.length === 88) keys.long ||= k;
+      else if (k.length === 87 && base58Decode(`${k}x`)?.length !== 64) keys.short ||= k;
+    }
+    assert.ok(keys.long && keys.short, "an 88- and an 87-character key");
+    for (const key of [keys.long, keys.short]) {
+      for (const [text, why] of [
+        [`${blobs}\nexport PK=pk${key}`, "a prefix"],
+        [`${blobs}\nsecret:${key}x`, "one letter after it"],
+        [`${blobs}\n${"a".repeat(12)}${key}${"b".repeat(12)}`, "twelve characters of glue either side"],
+        [`pk${key}\n${blobs}`, "written first"],
+      ] as const) assert.deepEqual(solanaSecretsIn(text), [key], `${why}, ${key.length}-character key`);
+    }
+    // Still best effort: a key glued to a blob's edge, in a run longer than all twenty blobs, waits behind them.
+    assert.deepEqual(solanaSecretsIn(`${blobs}\n${blob()}${keys.long}`), [], "missed, and nothing is refused");
   });
 
   it("never refuses base64 for the base58 runs inside it", () => {
