@@ -1,5 +1,5 @@
 "use client";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Instruction } from "@solana/kit";
 import { SOLANA_USDG_MINT, TOKEN_2022_PROGRAM, base58Encode } from "../../../packages/core/src/ids";
 import { buildRevokeSolanaSessionsInstruction, buildSetSolanaBreakerInstruction, buildWithdrawSolanaNativeInstruction, buildWithdrawSolanaVaultInstruction,
@@ -117,6 +117,25 @@ export function refusedByServer(error: unknown): error is RequestError {
 export type OwnerRecord = { signature: string; status: string; kind?: string } | null;
 
 /**
+ * The status blocker the server adds when it could not read a pending owner
+ * transaction's outcome (ownerStatus threw: no provider answer, or no usable
+ * one), exactly as worker/src/solana-app-runtime.ts words it; a test pins the
+ * two together.
+ */
+export const OWNER_CONFIRMATION_UNAVAILABLE = "Owner transaction confirmation is unavailable.";
+/**
+ * How long status reads may keep reporting the same owner transaction pending
+ * before the page stops saying it usually resolves within a few minutes: well
+ * past its blockhash's lifetime (150 blocks, about a minute) and the
+ * finalization that proves its expiry. Measured between this page's own reads,
+ * since the server settles a pending record only when its status is read, so
+ * it is a lower bound on the record's age.
+ */
+export const OWNER_PENDING_STUCK_MS = 5 * 60_000;
+/** Which out-of-band recovery the page shows next to the owner controls (SolanaRecovery's step 2), if any. */
+export type RecoveryOffer = "send" | "plan" | null;
+
+/**
  * The owner's signature on signed wire bytes, which is what the server records
  * them by. Null for bytes the server could never accept: it requires exactly
  * one signature, the owner's (compact-u16 count 1, then 64 bytes).
@@ -159,12 +178,23 @@ export async function outcomeAfterRefusal(readRecord: () => Promise<OwnerRecord>
  * the server reports one pending, says why, and offers a check instead of a
  * button the server would refuse.
  *
+ * It does not always resolve within minutes. The server settles the record
+ * only on two providers' agreeing outcome, and leaves it pending when they
+ * disagree, when its expiry cannot be proven, or when its read fails
+ * (OWNER_CONFIRMATION_UNAVAILABLE). When the status says the read failed, or
+ * this page's reads have reported the same record pending for
+ * OWNER_PENDING_STUCK_MS, the page says plainly that the server cannot settle
+ * it yet, and points to the recovery card's step 2 when the page shows one.
+ * Without the card (key export is off by default) it names no tool: without
+ * an exported owner key there is nothing to sign with outside Merrymen.
+ *
  * Signed bytes this page holds with an unknown outcome do not by themselves
  * hold back a revocation: if the server never saved them, a revocation
  * replaces them and they can no longer be sent; if it did, the prepare is
  * refused and the page reads the server's record to show it.
  */
-export function SolanaOwnerActions({ available, owner, programId, api, sign, refresh, readRecord, serverTransaction = null, ownerWallet = null, recoverable = null }: {
+export function SolanaOwnerActions({ available, owner, programId, api, sign, refresh, readRecord, serverTransaction = null, ownerWallet = null, recoverable = null,
+  confirmationUnavailable = false, recovery = null }: {
   available: boolean;
   /** The bound owner wallet and the vault program the status names: what the prepared bytes must be for. */
   owner: string | null; programId: string | null;
@@ -175,6 +205,10 @@ export function SolanaOwnerActions({ available, owner, programId, api, sign, ref
   serverTransaction?: OwnerRecord;
   ownerWallet?: OwnerWallet | null;
   recoverable?: RecoverableSol | null;
+  /** The last status read could not read the pending record's outcome (OWNER_CONFIRMATION_UNAVAILABLE). */
+  confirmationUnavailable?: boolean;
+  /** The recovery card's step 2 on this page: the signing command ("send"), the read-only plan, or no card. */
+  recovery?: RecoveryOffer;
 }) {
   const [mint, setMint] = useState(SOLANA_USDG_MINT as string), [amount, setAmount] = useState("1"), [solAmount, setSolAmount] = useState("");
   // `sent`: an earlier submission of these bytes reached the server, or may have.
@@ -187,6 +221,15 @@ export function SolanaOwnerActions({ available, owner, programId, api, sign, ref
   const [cost, setCost] = useState<{ action: OwnerAction; required: string; held: string | null; fee: string | null } | null>(null);
   const inFlight = useRef(false);
   const serverPending = serverTransaction?.status === "pending" ? serverTransaction : null;
+  // When this page's status reads first and last reported the same pending record (each read is a new record object).
+  const [seen, setSeen] = useState<{ signature: string; first: number; last: number } | null>(null);
+  useEffect(() => {
+    if (serverTransaction?.status !== "pending") { setSeen(null); return; }
+    const at = Date.now(), signature = serverTransaction.signature;
+    setSeen((prior) => prior?.signature === signature ? { ...prior, last: at } : { signature, first: at, last: at });
+  }, [serverTransaction]);
+  const longPending = !!serverPending && seen?.signature === serverPending.signature && seen.last - seen.first >= OWNER_PENDING_STUCK_MS;
+  const stuck = !!serverPending && (confirmationUnavailable || longPending);
   const run = (action: OwnerAction) => {
     if (inFlight.current) return; inFlight.current = true; setBusy(true); setError(""); setCost(null);
     void (async () => {
@@ -267,7 +310,15 @@ export function SolanaOwnerActions({ available, owner, programId, api, sign, ref
     {held && revokeNeeds && withdrawNeeds && <p>Your owner wallet holds {held} SOL and pays the network fees of these transactions. To revoke it must hold at least {revokeNeeds} SOL; to withdraw, up to {withdrawNeeds} SOL, since a withdrawal may open your token account. Merrymen adds a priority fee only from SOL beyond that, and this page signs none above {sol(OWNER_MAX_PRIORITY_FEE_LAMPORTS.toString())} SOL.</p>}
     {short && <p role="alert" className="solana-warning">That is too little to revoke. Send SOL to your owner wallet now, so you can revoke or withdraw in an emergency.</p>}
     {error && <p role="alert" className="solana-error">{error}</p>}
-    {serverPending && !pendingIsServers && <p role="status">Your {kindName(serverPending.kind)} is awaiting final confirmation on Solana. Until it is final, or its blockhash expires (usually within a few minutes), the server prepares no other owner transaction, a revocation included. <a target="_blank" rel="noreferrer" href={`https://solscan.io/tx/${encodeURIComponent(serverPending.signature)}`}>View it on Solana</a></p>}
+    {serverPending && stuck ? <p role="status">{confirmationUnavailable
+      ? `Your ${kindName(serverPending.kind)} is awaiting final confirmation, and the server cannot read its outcome from Solana right now.`
+      : `Your ${kindName(serverPending.kind)} has been awaiting final confirmation for over ${OWNER_PENDING_STUCK_MS / 60_000} minutes, well past the minute or so its blockhash lasts: the server has not been able to settle its outcome.`}
+      {" "}Until it does, the server prepares no other owner transaction, a revocation included, and this may not resolve by itself.{" "}
+      {recovery === "send" ? "Step 2 of the owner key card below revokes every session and withdraws your vault with your offline owner key, without this server."
+        : recovery === "plan" ? "Step 2 of the owner key card below shows your vault and its session without this server."
+        : "Check it again later. If it stays this way, Merrymen has to fix how the server reads Solana: nothing on this page can settle it."}
+      {" "}<a target="_blank" rel="noreferrer" href={`https://solscan.io/tx/${encodeURIComponent(serverPending.signature)}`}>View it on Solana</a></p>
+      : serverPending && !pendingIsServers && <p role="status">Your {kindName(serverPending.kind)} is awaiting final confirmation on Solana. Until it is final, or its blockhash expires (usually within a few minutes), the server prepares no other owner transaction, a revocation included. <a target="_blank" rel="noreferrer" href={`https://solscan.io/tx/${encodeURIComponent(serverPending.signature)}`}>View it on Solana</a></p>}
     {serverPending && !pending && <button disabled={busy || !available} onClick={check}>Check owner transaction</button>}
     <fieldset disabled={busy || !available}><legend>Vault recovery</legend>
       <button disabled={!!serverPending} onClick={() => run("revoke")}>Revoke all Solana sessions</button>
@@ -283,7 +334,7 @@ export function SolanaOwnerActions({ available, owner, programId, api, sign, ref
     </fieldset>
     {cost && <p>The prepared {ACTION_NAMES[cost.action]} needs your owner wallet to hold at least {cost.required} SOL{cost.held ? ` (it holds ${cost.held} SOL)` : ""}: its network fee{cost.fee ? `, a priority fee of ${cost.fee} SOL so it lands under congestion` : ""}, any token account it opens, and the wallet&apos;s own minimum balance.</p>}
     {pending && <p role="status">{pendingIsServers
-      ? `A signed ${ACTION_NAMES[pending.action]} is awaiting final confirmation on Solana. Until it is final or expired, no other owner transaction can be prepared, a revocation included. Check it shortly.`
+      ? `A signed ${ACTION_NAMES[pending.action]} is awaiting final confirmation on Solana. Until it is final or expired, no other owner transaction can be prepared, a revocation included.${stuck ? "" : " Check it shortly."}`
       // Another pending record (another device or tab) holds Revoke back too: never promise it here.
       : serverPending ? `A signed ${ACTION_NAMES[pending.action]} has no confirmed outcome yet. Check it before signing another withdrawal or resume request. Revoking waits for the server's pending ${kindName(serverPending.kind)} above: it can be prepared once that is final or expired.`
       : `A signed ${ACTION_NAMES[pending.action]} has no confirmed outcome yet. Check it before signing another withdrawal or resume request. Revoking stays available: if the server never saved this ${ACTION_NAMES[pending.action]}, a revocation replaces it and it can no longer be sent; if the server saved it, a revocation can be prepared once it is final or expired.`}</p>}

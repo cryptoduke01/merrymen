@@ -10,8 +10,8 @@ import { useSolanaOwner } from "./useSolanaOwner";
 import { requestJson } from "./request-json";
 import { SignIn } from "./HostedControls";
 import { SolanaAutomation } from "./SolanaAutomation";
-import { outcomeAfterRefusal, refusedByServer, signatureOf, SolanaOwnerActions, type OwnerRecord, type OwnerWallet, type RecoverableSol } from "./SolanaOwnerActions";
-import { ownerKeyExportEnabled, SolanaRecovery } from "./SolanaRecovery";
+import { OWNER_CONFIRMATION_UNAVAILABLE, outcomeAfterRefusal, refusedByServer, signatureOf, SolanaOwnerActions, type OwnerRecord, type OwnerWallet, type RecoverableSol } from "./SolanaOwnerActions";
+import { ownerKeyExportEnabled, releasedProgramSha256, SolanaRecovery } from "./SolanaRecovery";
 import { checkPreparedPermission, PermissionReview, PermissionTerms, permissionExpiry, type PreparedPermission, type SignedPermissionTerms } from "./SolanaPermission";
 import { deriveSolanaVaultAddress } from "../../../packages/core/src/solana-live";
 import { solanaUnits as units, displaySolanaAmount as display, displaySolanaAmountOrNull } from "../lib/solana-amounts";
@@ -376,6 +376,9 @@ function ConnectedSolana() {
   // with a live book or session is an owner decision; the stricter
   // alternative hides it for every paper binding.
   const recoveryVault = !!binding && !!live?.vault && !!live.programId && (binding.requestedMode === "live" ? vaultSeen : !!live.book || !!live.session);
+  // Off by default; only the bound owner of a vault the server has read.
+  const recoveryCard = ownerKeyExportEnabled() && sameWallet && recoveryVault && signer.address && live?.programId && live.vault
+    ? { owner: signer.address, programId: live.programId, vault: live.vault } : null;
   if (!signer.authenticated) return <div className="solana-card"><p>Sign in with the same account you use for Robinhood Chain.</p><SignIn onDone={() => { void refresh().catch(() => undefined); }} /></div>;
   return <>
     {error && <p role="alert" className="solana-error">{error}</p>}
@@ -460,10 +463,11 @@ function ConnectedSolana() {
       <SolanaAutomation key={`strategy-${signer.did}`} binding={binding} api={api} refresh={refresh} workerOnline={status?.runtime?.automation?.workerOnline ?? false} />
       <SolanaOwnerActions key={`owner-${signer.did}`} available={sameWallet && !!status?.runtime?.live.programId} owner={sameWallet ? binding.owner : null} programId={live?.programId ?? null}
         api={api} sign={signer.signSetup} refresh={refresh} readRecord={readRecord}
-        serverTransaction={live?.ownerTransaction ?? null} ownerWallet={live?.ownerWallet ?? null} recoverable={live?.recoverable ?? null} />
-      {/* Off by default; only the bound owner of a vault the server has read. */}
-      {ownerKeyExportEnabled() && sameWallet && recoveryVault && signer.address && live?.programId && live.vault && <SolanaRecovery key={`recovery-${signer.did}`} owner={signer.address}
-        programId={live.programId} vault={live.vault} exportKey={signer.exportKey} />}
+        serverTransaction={live?.ownerTransaction ?? null} ownerWallet={live?.ownerWallet ?? null} recoverable={live?.recoverable ?? null}
+        confirmationUnavailable={!!live?.blockers.includes(OWNER_CONFIRMATION_UNAVAILABLE)}
+        recovery={recoveryCard ? (releasedProgramSha256(recoveryCard.programId) ? "send" : "plan") : null} />
+      {recoveryCard && <SolanaRecovery key={`recovery-${signer.did}`} owner={recoveryCard.owner}
+        programId={recoveryCard.programId} vault={recoveryCard.vault} exportKey={signer.exportKey} />}
     </>}
   </>;
 }

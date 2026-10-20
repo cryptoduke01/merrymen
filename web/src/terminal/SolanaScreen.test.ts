@@ -1427,3 +1427,52 @@ test("the recovery card waits for the status, and shows only for a live vault: n
     assert.equal(exportCount, 0);
   });
 });
+
+const UNAVAILABLE = "Owner transaction confirmation is unavailable.";
+const STUCK = /Until it does, the server prepares no other owner transaction, a revocation included, and this may not resolve by itself\./;
+const USUAL = /usually within a few minutes/;
+test("a pending owner record the server cannot settle says so plainly, never 'a few minutes', and names a recovery path only when the page shows one", async () => {
+  // The page reacts to the server's exact words.
+  const runtime = readFileSync(fileURLToPath(new URL("../../../worker/src/solana-app-runtime.ts", import.meta.url)), "utf8");
+  assert.ok(runtime.includes(`blockers.push("${UNAVAILABLE}")`), "the runtime's blocker for an unreadable owner outcome");
+  const text = () => ui.container.textContent!;
+  const pendingRecord = (signature: string) => Object.assign(state.runtime.live, { ownerTransaction: { signature, status: "pending", kind: "withdraw" } });
+  // Default build (no key export): the server could not read the outcome.
+  liveVault(); pendingRecord("stuck-sig");
+  state.runtime.live.blockers = [UNAVAILABLE, "An owner transaction is awaiting final confirmation."];
+  await render();
+  assert.match(text(), /Your withdrawal is awaiting final confirmation, and the server cannot read its outcome from Solana right now\./);
+  assert.match(text(), STUCK); assert.doesNotMatch(text(), USUAL);
+  assert.match(text(), /Check it again later\. If it stays this way, Merrymen has to fix how the server reads Solana: nothing on this page can settle it\./);
+  assert.doesNotMatch(text(), /solana-recover|owner key card|recovery tool/);
+  assert.equal(button("Revoke all Solana sessions").disabled, true);
+  assert.equal(button("Check owner transaction").disabled, false);
+  // The next read settles nothing but reads fine: the usual wording, as long as the record is young.
+  state.runtime.live.blockers = ["An owner transaction is awaiting final confirmation."];
+  await press("Check owner transaction");
+  assert.match(text(), USUAL); assert.doesNotMatch(text(), STUCK);
+  // The page's reads keep reporting the same record pending for five minutes: no more "a few minutes".
+  const now = Date.now;
+  Date.now = () => now() + 5 * 60_000;
+  try { await press("Check owner transaction"); } finally { Date.now = now; }
+  assert.match(text(), /Your withdrawal has been awaiting final confirmation for over 5 minutes, well past the minute or so its blockhash lasts: the server has not been able to settle its outcome\./);
+  assert.match(text(), STUCK); assert.doesNotMatch(text(), USUAL);
+  assert.equal(button("Revoke all Solana sessions").disabled, true);
+  // A different pending record starts its own clock.
+  pendingRecord("next-sig");
+  await press("Check owner transaction");
+  assert.match(text(), USUAL); assert.doesNotMatch(text(), STUCK);
+  await ui.close(); ui = testDom();
+  // With key export on, the page points to the recovery card's step 2: the signing command for a released program, the plan otherwise.
+  await withExportFlag("1", async () => {
+    for (const [pin, pointer] of [[[{ programId: PROGRAM, sha256: "ab".repeat(32) }], /Step 2 of the owner key card below revokes every session and withdraws your vault with your offline owner key, without this server\./],
+      [[], /Step 2 of the owner key card below shows your vault and its session without this server\./]] as const) {
+      releases = [...pin];
+      liveVault(); pendingRecord("stuck-sig"); state.runtime.live.blockers = [UNAVAILABLE];
+      await render();
+      assert.match(text(), pointer); assert.ok(exportCard());
+      assert.doesNotMatch(text(), /Merrymen has to fix/);
+      await ui.close(); ui = testDom();
+    }
+  });
+});
