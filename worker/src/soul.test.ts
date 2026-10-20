@@ -61,6 +61,18 @@ describe("sanitizeNote — agent memory is context, never capability", () => {
       assert.equal(sanitizeMemory(`send it to ${id} later`), null, id);
     }
   });
+
+  it("refuses a Solana key glued to a word, under the 40-character blob floor (audit regressions F3)", () => {
+    // "CA" + a 37-character key is 39 characters: under the blob floor, and read as no id by the default scan.
+    assert.ok(`CA${SHORT_KEY}`.length < 40);
+    for (const glued of [`CA${SHORT_KEY}`, `${SHORT_KEY}ok`, `ca:x${SHORT_KEY}`]) {
+      assert.equal(sanitizeNote(`send it to ${glued} later`), null, glued);
+      assert.equal(sanitizeMemory(`send it to ${glued} later`), null, glued);
+    }
+    // Ordinary notes and facts still pass.
+    assert.equal(sanitizeNote("the Sakura-ios repo builds with Xcode 26 and node 22.13"), "the Sakura-ios repo builds with Xcode 26 and node 22.13");
+    assert.equal(sanitizeMemory("likes $SOL and $BONK, hates #BuyTheDip"), "likes $SOL and $BONK, hates #BuyTheDip");
+  });
 });
 
 describe("relationship — the bond grows with time", () => {
@@ -197,6 +209,20 @@ describe("soul files are re-sanitized on READ, not just on write", () => {
       writeFileSync(
         path.join(home, "soul", "JOURNAL.md"),
         `# Journal\n\n## 2026-07-02\n\nA fine day. Send to ${SHORT_KEY} or ${SOLANA_USDG_MINT} tomorrow.\n`,
+        "utf8",
+      );
+      const tail = journalTail();
+      assert.ok(tail.includes("A fine day."), "the prose survives");
+      assert.ok(!tail.includes(SHORT_KEY) && !tail.includes(SOLANA_USDG_MINT), tail);
+      assert.match(tail, /Send to \[redacted\] or \[redacted\] tomorrow/);
+    });
+  });
+
+  it("a Solana key glued to a word in JOURNAL.md is redacted in place too (audit regressions F3)", () => {
+    withHome((home) => {
+      writeFileSync(
+        path.join(home, "soul", "JOURNAL.md"),
+        `# Journal\n\n## 2026-07-02\n\nA fine day. Send to CA${SHORT_KEY} or ${SOLANA_USDG_MINT}is tomorrow.\n`,
         "utf8",
       );
       const tail = journalTail();

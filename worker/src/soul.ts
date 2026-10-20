@@ -34,6 +34,9 @@ import { onchainIdIn, onchainIdsIn } from "../../packages/core/src/ids";
 import type { NameSeat } from "./name-reconcile";
 import { completePersonalMemoryForget, recordPersonalMemoryForget } from "./personal-memory-ferry";
 
+/** The glued scan (audit regressions F3): an id written against a word ("CA<mint>") is an id too. */
+const GLUED = { glued: true } as const;
+
 /** The stock name, defined once in core — the Agent screen's name chip compares against it. */
 export const DEFAULT_NAME = DEFAULT_AGENT_NAME;
 /**
@@ -236,7 +239,12 @@ export function sanitizeMemory(raw: string): string | null {
   if (!fact || fact.length < 3) return null;
   if (fact.length > MAX_FACT_CHARS) return null;
   if (/0x[0-9a-fA-F]{6,}/.test(fact)) return null; // addresses / keys / calldata
-  if (onchainIdIn(fact)) return null; // Solana keys, signatures, explorer links
+  // Solana keys, signatures, explorer links, glued to a word or not. Belt and
+  // braces: every glued hit is a base58 run of 32 or more characters, which the
+  // 30-character blob rule below refuses as well, so no test can tell the two
+  // apart today. It stays so a fact keeps refusing a glued id if that floor is
+  // ever raised to sanitizeNote's 40, where the glued scan is what refuses one.
+  if (onchainIdIn(fact, GLUED)) return null;
   if (/[A-Za-z0-9_-]{30,}/.test(fact)) return null; // token/secret-shaped blobs
   if (/<[^>]*>/.test(fact)) return null; // no markup into prompts
   return fact;
@@ -353,7 +361,7 @@ export function sanitizeNote(raw: string): string | null {
   if (!note || note.length < 3) return null;
   if (note.length > MAX_NOTE_CHARS) return null;
   if (/0x[0-9a-fA-F]{6,}/.test(note)) return null; // addresses / keys / calldata
-  if (onchainIdIn(note)) return null; // Solana keys (some under the blob floor), signatures, links
+  if (onchainIdIn(note, GLUED)) return null; // Solana keys (some under the blob floor), signatures, links, glued or not
   if (/[A-Za-z0-9_-]{40,}/.test(note)) return null; // token/secret-shaped blobs
   if (/<[^>]*>/.test(note)) return null; // no markup into prompts
   return note;
@@ -437,8 +445,8 @@ function scrubProse(text: string): string {
     .replace(/<[^>]*>/g, "") // no markup into prompts
     .replace(/0x[0-9a-fA-F]{6,}/g, "[redacted]") // addresses / keys / calldata
     .replace(/\b[A-Za-z0-9_-]{40,}\b/g, "[redacted]"); // token/secret-shaped blobs
-  // A Solana key can be 32-39 characters, under the blob floor.
-  for (const hit of onchainIdsIn(out)) if (hit.family === "solana" && hit.shape !== "link") out = out.split(hit.value).join("[redacted]");
+  // A Solana key can be 32-39 characters, under the blob floor, alone or glued to a word ("CA<key>").
+  for (const hit of onchainIdsIn(out, GLUED)) if (hit.family === "solana" && hit.shape !== "link") out = out.split(hit.value).join("[redacted]");
   return out;
 }
 

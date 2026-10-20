@@ -2553,6 +2553,22 @@ describe("buildPrompt", () => {
     }
   });
 
+  it("never carries a Solana key or signature glued to the words around it (audit regressions F3)", () => {
+    const sig = base58Encode(Uint8Array.from({ length: 64 }, (_, i) => (i * 37 + 11) & 0xff));
+    const letters = "EEuxbXvdXfvgGiFWKYyEksxzabPKjwhYTNvGXFitaqqT";
+    const said = `aped CA${SOLANA_USDG_MINT}, ${letters}is next, tx${sig}done`;
+    const solTail: SpeakCtx["tail"] = [...tail, { name: "Pine Stoat's owner", author: "owner", body: said }];
+    for (const intent of [...intents, { kind: "reply", to: "Pine Stoat's owner", toAuthor: "owner", toOwnAgent: false, text: said } as Intent]) {
+      const { system, prompt } = buildPrompt(intent, { ...ctx, tail: solTail });
+      for (const text of [system, prompt]) {
+        for (const id of [SOLANA_USDG_MINT, letters, sig]) assert.ok(!text.includes(id.slice(0, 24)), `a glued Solana id in the prompt for ${intent.kind}`);
+      }
+    }
+    // The rest of the line is still quoted.
+    const { prompt } = buildPrompt({ kind: "reply", to: "Pine Stoat's owner", toAuthor: "owner", toOwnAgent: false, text: said } as Intent, { ...ctx, tail: solTail });
+    assert.match(prompt, /aped \[address\], \[address\] next, \[address\]/);
+  });
+
   it("shows no figure outside the fence, and states the rules", () => {
     for (const intent of intents) {
       const { system, prompt } = buildPrompt(intent, ctx);

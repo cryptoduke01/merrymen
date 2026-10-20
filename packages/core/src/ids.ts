@@ -293,8 +293,13 @@ export interface OnchainIdScan {
    * and filler (one to four characters repeated: "xxxx…", "hahaha…") are never
    * read as an id glued to anything.
    *
-   * For the public and model-facing backstops (X posts, social takes, Brain's
-   * decisions and desk policy, room prompts, the soul's memory and journal).
+   * For the public and model-facing backstops. The callers, which this list
+   * must name exactly: X posts (worker/src/xpost/public-wallet.ts), social
+   * takes (worker/src/social-post.ts admitPost), Brain's decisions and the desk
+   * policy sent to it (worker/src/brain-client.ts), Brain's own validator
+   * (services/brain/brain/schemas.py `_reject_executable`), room prompts
+   * (worker/src/groupchat/voice.ts scrubIds) and the soul's memory, notes and
+   * journal (worker/src/soul.ts).
    * Off by default: the name checks that also call this detector keep reading
    * a run inside a longer word as no id. Brain's Python mirror implements both
    * scans, and services/brain/tests/data/onchain_ids.json pins both to it.
