@@ -99,8 +99,9 @@ export function createSolanaAgent(options: SolanaAgentOptions) {
    * default allowance of 0 every proven-expired attempt counts toward the
    * owner's maxOpsPerDay, so a burst of dropped packets can pause automated
    * trading, exits included, for up to 24 hours; the store has no logger).
-   * - [alert] when admission refuses the autonomous strategy because expired
-   *   attempts used up the account's daily operations;
+   * - [alert] when expired attempts used up the account's daily operations: the
+   *   agent holds the strategy before trying (dailyOperationsUsed), or admission
+   *   refused it for that reason;
    * - [warn] when the expired attempts that count use more than half of them.
    * Each at most once per SOLANA_AGENT_ALERT_REPEAT_MS per account while it
    * persists, and at once again after it clears. Logging never changes an outcome.
@@ -112,23 +113,41 @@ export function createSolanaAgent(options: SolanaAgentOptions) {
     said.set(key, at);
     try { log(line); } catch { /* Logging never changes an outcome. */ }
   };
-  const expiredUse = async (scope: SolanaAccountScope, maxOpsPerDay: number, refused: boolean) => {
+  type ExpiredUse = Awaited<ReturnType<typeof solanaExpiredAttemptUse>>;
+  const report = (scope: SolanaAccountScope, use: ExpiredUse, maxOpsPerDay: number, refused: boolean) => {
     const account = solanaAccountRef(scope);
-    try {
-      const use = await solanaExpiredAttemptUse(options.db, scope, now(), allowance);
-      const fields = JSON.stringify({ solana: refused ? "alert" : "warn", kind: refused ? "expired-attempts-exhausted" : "expired-attempts-high", account,
-        expired: use.expired, counted: use.counted, allowance, operations: use.operations, maxOpsPerDay });
-      const remedy = "MERRYMEN_SOLANA_EXPIRED_ATTEMPT_ALLOWANCE (a whole number from 0 to 96, default 0) sets how many a day do not count";
-      if (refused) return say(`exhausted:${account}`, `[alert] Solana autonomous strategy refused: proven-expired attempts used up an account's daily operations, so its automated trades and exits pause until they leave the 24 h window: ${fields} — ${remedy}`);
-      said.delete(`exhausted:${account}`);
-      if (use.counted * 2 > maxOpsPerDay) say(`high:${account}`, `[warn] Solana proven-expired attempts use more than half of an account's daily operations; at the limit its automated trades and exits pause: ${fields} — ${remedy}`);
-      else said.delete(`high:${account}`);
-    } catch {
-      if (refused) say(`exhausted:${account}`, `[alert] Solana autonomous strategy refused: proven-expired attempts used up an account's daily operations: ${JSON.stringify({ solana: "alert", kind: "expired-attempts-exhausted", account, allowance, maxOpsPerDay })}`);
+    const fields = JSON.stringify({ solana: refused ? "alert" : "warn", kind: refused ? "expired-attempts-exhausted" : "expired-attempts-high", account,
+      expired: use.expired, counted: use.counted, allowance, operations: use.operations, maxOpsPerDay });
+    const remedy = "MERRYMEN_SOLANA_EXPIRED_ATTEMPT_ALLOWANCE (a whole number from 0 to 96, default 0) sets how many a day do not count";
+    if (refused) return say(`exhausted:${account}`, `[alert] Solana autonomous strategy refused: proven-expired attempts used up an account's daily operations, so its automated trades and exits pause until they leave the 24 h window: ${fields} — ${remedy}`);
+    said.delete(`exhausted:${account}`);
+    if (use.counted * 2 > maxOpsPerDay) say(`high:${account}`, `[warn] Solana proven-expired attempts use more than half of an account's daily operations; at the limit its automated trades and exits pause: ${fields} — ${remedy}`);
+    else said.delete(`high:${account}`);
+  };
+  const expiredUse = async (scope: SolanaAccountScope, maxOpsPerDay: number, refused: boolean) => {
+    try { report(scope, await solanaExpiredAttemptUse(options.db, scope, now(), allowance), maxOpsPerDay, refused); } catch {
+      if (refused) say(`exhausted:${solanaAccountRef(scope)}`, `[alert] Solana autonomous strategy refused: proven-expired attempts used up an account's daily operations: ${
+        JSON.stringify({ solana: "alert", kind: "expired-attempts-exhausted", account: solanaAccountRef(scope), allowance, maxOpsPerDay })}`);
     }
   };
+  /**
+   * Whether admission would refuse every live trade of this account, exits
+   * included, for its daily operations, by the store's rolling 24-hour
+   * arithmetic: trades (landed, failed or pending) reached maxOpsPerDay, or
+   * with the proven-expired attempts beyond the allowance they did (said as the
+   * [alert]). Checked before the status read, so such an account costs no RPC
+   * read, quote, route or signature each tick while it waits for the window.
+   * Only provider load rides on it: admission still enforces the limit itself.
+   */
+  const dailyOperationsUsed = async (scope: SolanaAccountScope, maxOpsPerDay: number): Promise<boolean> => {
+    const use = await solanaExpiredAttemptUse(options.db, scope, now(), allowance);
+    if (use.operations + use.counted < maxOpsPerDay) return false;
+    if (use.operations < maxOpsPerDay) report(scope, use, maxOpsPerDay, true);
+    return true;
+  };
   const headroom = BigInt(10_000 - (options.referenceToleranceBps ?? SOLANA_REFERENCE_DEFAULT_TOLERANCE_BPS));
-  // When each tenant's strategy last found nothing to do (in band), by settings revision.
+  // When each tenant's strategy last found nothing to do (in band), or admission refused it
+  // because expired attempts used up its daily operations, by settings revision.
   // Only provider load rides on this: admission spacing is durable in the store.
   const checked = new Map<string, { revision: number; atMs: number }>();
   const admitted = async (scope: SolanaAccountScope, requestId: string) => !!(
@@ -178,6 +197,7 @@ export function createSolanaAgent(options: SolanaAgentOptions) {
           const last = checked.get(row.tenant);
           if (at < schedule.dueAtMs || (last && last.revision === revision && at - last.atMs < intervalMs)) { results.push({ owner: row.owner, outcome: "waiting" }); continue; }
           const inBand = () => { checked.set(row.tenant, { revision, atMs: at }); results.push({ owner: row.owner, outcome: "held" }); };
+          if (row.requested_mode === "live" && await dailyOperationsUsed(scope, limits.maxOpsPerDay)) { results.push({ owner: row.owner, outcome: "held" }); continue; }
           // A paper strategy needs only its paper book: no chain reads, no vault verification.
           const status = recovered.get(scope.tenant) ?? await options.runtime.status(scope, row.requested_mode === "paper" ? { liveReads: false } : undefined);
           let cashRaw: string, wsolRaw: string;
@@ -212,10 +232,11 @@ export function createSolanaAgent(options: SolanaAgentOptions) {
           if (await admitted(scope, intent.requestId)) { results.push({ owner: row.owner, outcome: "replayed" }); continue; }
           try { await options.runtime.trade(scope, { mode: row.requested_mode, intent, autonomousRevision: Number(row.revision), signal: options.signal }); }
           catch (error) {
-            // Held by the owner's daily operations, which expired attempts used up: said as an [alert].
+            // Held by the owner's daily operations, which expired attempts used up (counted by admission after the
+            // check above): said as an [alert], and not tried again until the interval passes, as when in band.
             if (row.requested_mode !== "live" || !(error instanceof SolanaTradingStoreError) || error.message !== SOLANA_EXPIRED_ATTEMPTS_EXHAUSTED) throw error;
             await expiredUse(scope, limits.maxOpsPerDay, true);
-            results.push({ owner: row.owner, outcome: "held" }); continue;
+            inBand(); continue;
           }
           if (row.requested_mode === "live") await expiredUse(scope, limits.maxOpsPerDay, false);
           results.push({ owner: row.owner, outcome: "submitted" });
