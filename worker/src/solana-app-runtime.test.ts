@@ -24,7 +24,7 @@ import { address as kitAddress, appendTransactionMessageInstructions, compileTra
   setTransactionMessageLifetimeUsingBlockhash, type Blockhash } from "@solana/kit";
 import { buildWithdrawSolanaVaultInstruction } from "../../packages/core/src/solana-live";
 import { SOLANA_STATUS_BELOW_BOOK, SOLANA_STATUS_REGISTERED_AFTER_REVOKE, SOLANA_WITHDRAW_BELOW_BOOK } from "./solana-app-runtime";
-import { SOLANA_REGISTERED_AFTER_REVOKE, SOLANA_REVOKE_ALREADY_LANDED, SOLANA_REVOKE_PREPARED_BESIDE, SolanaTradingStoreError } from "./solana-trading-store";
+import { SOLANA_REGISTERED_AFTER_REVOKE, SOLANA_REVOKE_ALREADY_LANDED, SOLANA_REVOKE_PREPARED_BESIDE, SOLANA_WITHDRAWAL_RECORDED_OUTSIDE, SolanaTradingStoreError } from "./solana-trading-store";
 
 const TENANT = "0x1111111111111111111111111111111111111111";
 const key = (n: number) => getBase58Decoder().decode(new Uint8Array(32).fill(n));
@@ -532,14 +532,17 @@ test("an owner transaction's prior vault state is read no earlier than the slot 
   } finally { f.raw.close(); }
 });
 
-/** An owner withdrawal signed outside Merrymen (solana-recover), and both providers' finalized receipt of it with the vault token account's balances. */
-async function outsideWithdrawal(f: Fixture, mint: string, amount: bigint, balance: [bigint, bigint]) {
+/**
+ * An owner withdrawal signed outside Merrymen (solana-recover), and both providers' finalized receipt of it with the vault token
+ * account's balances. `signed`: these signed bytes instead (a wallet that broadcast an in-app prepared withdrawal itself).
+ */
+async function outsideWithdrawal(f: Fixture, mint: string, amount: bigint, balance: [bigint, bigint], signed?: string) {
   const program = mint === SOLANA_USDG_MINT ? TOKEN_2022_PROGRAM : SOLANA_CLASSIC_TOKEN_PROGRAM, vaultToken = mint === SOLANA_USDG_MINT ? f.cashAta : f.wsolAta;
   const instruction = buildWithdrawSolanaVaultInstruction({ programAddress: PROGRAM, vault: f.vault, owner: f.owner, mint, tokenProgram: program, vaultToken,
     ownerToken: await deriveSolanaAta(f.owner, mint, program), amount });
   const unsigned = getBase64EncodedWireTransaction(compileTransaction(setTransactionMessageLifetimeUsingBlockhash({ blockhash: key(43) as unknown as Blockhash, lastValidBlockHeight: 5000n },
     setTransactionMessageFeePayer(kitAddress(f.owner), appendTransactionMessageInstructions([instruction], createTransactionMessage({ version: 0 }))))));
-  const wire = await f.sign(unsigned), decoded = getTransactionDecoder().decode(Buffer.from(wire, "base64"));
+  const wire = signed ?? await f.sign(unsigned), decoded = getTransactionDecoder().decode(Buffer.from(wire, "base64"));
   const signature = getBase58Decoder().decode(Object.values(decoded.signatures)[0]!);
   const index = getCompiledTransactionMessageDecoder().decode(decoded.messageBytes).staticAccounts.map(String).indexOf(vaultToken);
   const entry = (amountRaw: bigint) => [{ accountIndex: index, mint, owner: f.vault, programId: program, uiTokenAmount: { amount: amountRaw.toString(), decimals: 6 } }];
@@ -577,6 +580,26 @@ test("after solana-recover took the vault's USDG outside Merrymen, status holds 
     await f.app.status(f.scope);
     assert.equal((await new SolanaTradingStore(f.db, f.scope).liveBook())!.cashRaw, "5000000");
     assert.equal(f.controls.sends, 0, "nothing is ever signed or sent by recording");
+  } finally { f.raw.close(); }
+});
+
+test("an in-app withdrawal the wallet broadcast itself, recorded as made outside Merrymen first, is booked once: the page's resubmit of its bytes is refused as not saved", async () => {
+  const f = await fixture();
+  try {
+    await f.live(); f.controls.initialized = true; await f.registered(); f.controls.sequence = 3n; await cashBook(f);
+    const prepared = await f.app.prepareOwnerAction(f.scope, { action: "withdraw", mint: SOLANA_USDG_MINT, amountRaw: "1000000" });
+    const signed = await f.sign(prepared.transactionBase64);
+    // The wallet sent it itself and it landed; the page's submit never reached the server.
+    const signature = await outsideWithdrawal(f, SOLANA_USDG_MINT, 1_000_000n, [90_000_000n, 89_000_000n], signed);
+    f.controls.cash = 89_000_000n; f.controls.sequence = 4n;
+    const recorded = await f.app.recordExternalWithdrawals(f.scope, { signatures: [signature] });
+    assert.equal(recorded.book.cashRaw, "89000000");
+    await assert.rejects(f.app.submitOwnerAction(f.scope, { signedTransactionBase64: signed }),
+      (error: unknown) => error instanceof SolanaAppRuntimeError && error.code === "not-saved" && error.message === SOLANA_WITHDRAWAL_RECORDED_OUTSIDE);
+    await f.app.status(f.scope);
+    const store = new SolanaTradingStore(f.db, f.scope);
+    assert.equal((await store.liveBook())!.cashRaw, "89000000"); assert.equal((await store.setup())!.signature, undefined);
+    assert.equal(f.controls.sends, 0, "nothing was sent");
   } finally { f.raw.close(); }
 });
 

@@ -11,7 +11,7 @@ import { SqlSolanaBindingStore } from "../../web/src/lib/solana-binding-store";
 import { makePgDb, wrapSqlite, type Db } from "./db";
 import { ensureSolanaTradingSchema, SOLANA_DEFAULT_EXPIRED_ATTEMPT_ALLOWANCE, solanaAutonomousSchedule, solanaExpiredAttemptAllowance, SolanaTradingStore,
   type SolanaPreparedSetup } from "./solana-trading-store";
-import { SOLANA_REGISTERED_AFTER_REVOKE, SOLANA_REVOKE_ALREADY_LANDED, SOLANA_REVOKE_PREPARED_BESIDE } from "./solana-trading-store";
+import { SOLANA_REGISTERED_AFTER_REVOKE, SOLANA_REVOKE_ALREADY_LANDED, SOLANA_REVOKE_PREPARED_BESIDE, SOLANA_WITHDRAWAL_RECORDED_OUTSIDE } from "./solana-trading-store";
 import type { SolanaLiveSettlement, SolanaSignedSubmission } from "./solana-executor";
 import { createSolanaPaperService } from "./solana-paper-service";
 import { SolanaMarketError } from "./solana-market";
@@ -800,6 +800,37 @@ for (const dialect of ["sqlite", "postgres"] as const) {
     const flows = await f.db.prepare("SELECT evidence_id,kind,mint,amount_raw FROM solana_runtime_cashflows WHERE kind='withdraw-external' ORDER BY evidence_id").all() as Array<Record<string, string>>;
     assert.deepEqual(flows.map(r => [r.evidence_id, r.mint, r.amount_raw]), [[`external:${outsideSignature(3)}:${SOLANA_USDG_MINT}`, SOLANA_USDG_MINT, "99000000"],
       [`external:${outsideSignature(4)}:${SOLANA_WRAPPED_SOL_MINT}`, SOLANA_WRAPPED_SOL_MINT, "1980005"]].sort((a, b) => a[0]!.localeCompare(b[0]!)));
+  });
+}
+
+for (const dialect of ["sqlite", "postgres"] as const) {
+  const options = dialect === "postgres" && !process.env.MERRYMEN_TEST_PG_URL ? { skip: "Set MERRYMEN_TEST_PG_URL to an isolated PostgreSQL test database." } : {};
+  test(`${dialect}: an in-app withdrawal the wallet broadcast itself and the owner recorded as made outside Merrymen first is booked once: its bytes are refused afterwards, and never booked again`, options, async t => {
+    const f = await fixture(t, dialect), s = submission();
+    await f.store.recordSigned(s); await f.store.settle(OWNER, s.intent.requestId, s.signature, settlement(s));
+    const start = (await f.store.liveBook())!, signature = base58Encode(new Uint8Array(64).fill(9));
+    const prepared = { ...setup("withdraw"), priorVaultExisted: true, priorSequence: "1", priorSessionEpoch: "1", mint: SOLANA_USDG_MINT, amountRaw: "1000000" };
+    await f.store.saveSetup(prepared);
+    // The wallet broadcast the signed bytes itself; the owner records them under "Withdrew outside Merrymen?".
+    await f.store.reconcileExternalWithdrawals({ withdrawals: [{ signature, slot: 1003, mint: SOLANA_USDG_MINT, amountRaw: "1000000" }] });
+    // The page's resubmit of the same signed bytes, still inside the prepare window: refused before anything is saved.
+    await assert.rejects(f.store.saveSetup({ ...prepared, signature, signedTransactionBase64: "c2lnbmVk", status: "pending" }),
+      (error: unknown) => error instanceof Error && error.message === SOLANA_WITHDRAWAL_RECORDED_OUTSIDE);
+    assert.equal((await f.store.setup())!.signature, undefined);
+    await assert.rejects(f.store.finishSetup(signature, "finalized", 1003), /does not match/);
+    assert.equal(BigInt(start.cashRaw) - BigInt((await f.store.liveBook())!.cashRaw), 1_000_000n, "one 1 USDG withdrawal moves the book by 1 USDG");
+    // Already saved as the app's own when it was recorded outside (an earlier version, or a repaired row): finished without booking again.
+    const g = await fixture(t, dialect), gs = submission();
+    await g.store.recordSigned(gs); await g.store.settle(OWNER, gs.intent.requestId, gs.signature, settlement(gs));
+    const gStart = (await g.store.liveBook())!;
+    await saveSignedSetup(g.store, prepared, signature);
+    await g.db.prepare("INSERT INTO solana_runtime_cashflows(evidence_id,tenant,owner,kind,mint,amount_raw,created_at_ms) VALUES(?,?,?,'withdraw-external',?,?,?)")
+      .run(`external:${signature}:${SOLANA_USDG_MINT}`, TENANT, OWNER, SOLANA_USDG_MINT, "1000000", NOW);
+    await g.db.prepare("UPDATE solana_runtime_live_books SET book_json=? WHERE tenant=? AND owner=?").run(JSON.stringify({ ...gStart, cashRaw: (BigInt(gStart.cashRaw) - 1_000_000n).toString() }), TENANT, OWNER);
+    await g.store.finishSetup(signature, "finalized", 1003);
+    assert.equal((await g.store.setup())!.status, "finalized");
+    assert.equal(BigInt(gStart.cashRaw) - BigInt((await g.store.liveBook())!.cashRaw), 1_000_000n);
+    assert.equal(await g.db.prepare("SELECT 1 FROM solana_runtime_cashflows WHERE evidence_id=?").get(signature), undefined, "no second evidence row");
   });
 }
 

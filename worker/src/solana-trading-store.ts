@@ -142,6 +142,10 @@ export interface SolanaPreparedSetup {
  */
 /** Refused: a revocation beside a pending owner transaction once one beside it landed (REVOKE BESIDE...). */
 export const SOLANA_REVOKE_ALREADY_LANDED = "Your revocation already landed, so every session it covered is revoked. Once the pending owner transaction resolves you can revoke again; that is needed only if it was a trading permission that registered after your revocation.";
+/** Refused: signed bytes of an in-app withdrawal the owner already recorded as made outside Merrymen (OWNER WITHDRAWALS MADE OUTSIDE MERRYMEN). */
+export const SOLANA_WITHDRAWAL_RECORDED_OUTSIDE = "This withdrawal is already recorded as made outside Merrymen, so it is not submitted again. Nothing more to do.";
+/** The evidence ids a withdrawal made outside Merrymen is booked under, one per vault token. */
+function externalEvidence(signature: string): [string, string] { return [`external:${signature}:${SOLANA_USDG_MINT}`, `external:${signature}:${SOLANA_WRAPPED_SOL_MINT}`]; }
 /** Refused activation: an unsigned revocation prepared beside this registration can still be signed. */
 export const SOLANA_REVOKE_PREPARED_BESIDE = "A revocation of this permission was prepared and can still be signed in your wallet. Sign it to revoke, or let it lapse (about a minute) and finish registration then.";
 /** Refused activation: the vault's session epoch moved more than this registration's own landing since it was prepared. */
@@ -598,8 +602,11 @@ export class SolanaTradingStore implements SolanaLiveJournal {
    * its slot is after the book's last absolute balance (balancesSlot, or the
    * book's creation), so it is still in the vault's balances and not in the
    * book. Each is booked once (evidence external:<signature>:<mint>, and never a
-   * signature the app already booked as its own withdrawal). A shortfall any
-   * other way (a trade off the books) stays held: nothing here books it.
+   * signature the app already booked as its own withdrawal). An in-app prepared
+   * withdrawal whose wallet broadcast it and that the owner recorded here first
+   * is never saved as the app's own afterwards, nor booked again by it
+   * (SOLANA_WITHDRAWAL_RECORDED_OUTSIDE). A shortfall any other way (a trade
+   * off the books) stays held: nothing here books it.
    *
    * USDG out lowers cash and the high-water mark by the amount (floor 0). WSOL
    * out leaves quarantine first, then the position at its prorated basis; the
@@ -936,6 +943,8 @@ export class SolanaTradingStore implements SolanaLiveJournal {
       if (setup.signature) {
         if (!previous || previous.messageBase64 !== setup.messageBase64 || previous.preparedAtMs !== setup.preparedAtMs) refuse("The prepared owner transaction changed. Review and sign again.");
         if (clock(this.now) >= previous.expiresAtMs) refuse("The prepared owner transaction expired before submission.");
+        // The wallet broadcast these bytes itself and the owner recorded them as made outside Merrymen: booked once, there.
+        if (await tx.prepare("SELECT 1 FROM solana_runtime_cashflows WHERE evidence_id IN (?,?)").get(...externalEvidence(setup.signature))) refuse(SOLANA_WITHDRAWAL_RECORDED_OUTSIDE);
         if ((setup.kind ?? "session") === "session" && (binding.requestedMode !== "live" || JSON.stringify(binding.limits) !== JSON.stringify(setup.limits))) refuse("The live permission settings changed. Review and sign again.");
       }
       // A WSOL withdrawal's valuation is checked once, fresh, as prepared; the signed
@@ -1018,7 +1027,9 @@ export class SolanaTradingStore implements SolanaLiveJournal {
         if (!setup.mint || !setup.amountRaw || ![SOLANA_USDG_MINT, SOLANA_WRAPPED_SOL_MINT].includes(setup.mint)) refuse("Invalid finalized withdrawal accounting.");
         const amount = raw(setup.amountRaw, false), { tenant, owner } = this.scope;
         const book = rowJson<SolanaLiveBook>(await tx.prepare("SELECT book_json FROM solana_runtime_live_books WHERE tenant=? AND owner=?").get(tenant, owner), "book_json");
-        if (book) {
+        // Already booked from its own transaction as made outside Merrymen: finished, never booked a second time.
+        const recordedOutside = await tx.prepare("SELECT 1 FROM solana_runtime_cashflows WHERE evidence_id IN (?,?)").get(...externalEvidence(signature));
+        if (book && !recordedOutside) {
           // The book may already be past this withdrawal's slot. While a signed
           // withdrawal is pending nothing moves book.slot (trades and inflow booking
           // refuse), but it can be past it when the bytes are saved: they landed before
