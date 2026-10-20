@@ -265,6 +265,47 @@ test("the command shows each provider's own view through the executor's observat
   assert.equal(await runSolanaResolveCommand(["history", TENANT], deps), "No operator resolutions are recorded for that tenant.");
 });
 
+test("a booking that cannot be marked, or whose reply and re-read are both lost, never claims nothing was booked", async t => {
+  // The store books; marking the decision's record fails (the connection drops).
+  const f = await fixture(t), agreed = fill(f.pending);
+  const p = providers({ primary: { settlement: agreed, seen: true }, "operator's provider": { settlement: agreed, seen: true } });
+  const db: Db = { prepare: sql => {
+    const statement = f.db.prepare(sql);
+    return /^UPDATE solana_operator_resolutions SET booked_at_ms/.test(sql) ? { ...statement, get: statement.get.bind(statement), all: statement.all.bind(statement),
+      run: async () => { throw new Error("connection dropped"); } } : statement;
+  }, exec: sql => f.db.exec(sql), tx: fn => f.db.tx(fn) };
+  await assert.rejects(resolveSolanaPendingTrade({ db, tenant: TENANT, requestId: "stuck-1", providers: p.list, observe: p.observe, now: () => f.clock.value,
+    book: { operator: "milla", reason: "mark lost" } }), (error: unknown) => error instanceof SolanaResolveError
+    && /^Booked a finalized fill, but this decision could not be marked booked in its record\. Run the same book command again/.test(error.message));
+  assert.equal((await f.store.get(OWNER, "stuck-1"))!.status, "finalized");
+  let [row] = await resolutions(f.db); assert.equal(row!.booked_at_ms, null); assert.equal(row!.refusal, null);
+  // The same command again marks it.
+  const again = await resolveSolanaPendingTrade({ db: f.db, tenant: TENANT, requestId: "stuck-1", providers: p.list, observe: p.observe, now: () => f.clock.value,
+    book: { operator: "milla", reason: "mark lost" } });
+  assert.equal(again.booked, true); [row] = await resolutions(f.db); assert.notEqual(row!.booked_at_ms, null);
+  // The store commits, its reply is lost, and the trade cannot be read again: unknown, and no refusal is recorded.
+  const g = await fixture(t);
+  const q = providers({ primary: { settlement: fill(g.pending), seen: true }, "operator's provider": { settlement: fill(g.pending), seen: true } });
+  const settle = SolanaTradingStore.prototype.settle, get = SolanaTradingStore.prototype.get;
+  let settled = false;
+  t.mock.method(SolanaTradingStore.prototype, "settle", async function (this: SolanaTradingStore, ...args: Parameters<SolanaTradingStore["settle"]>) {
+    await settle.apply(this, args); settled = true; throw new Error("connection reset after commit");
+  });
+  t.mock.method(SolanaTradingStore.prototype, "get", async function (this: SolanaTradingStore, ...args: Parameters<SolanaTradingStore["get"]>) {
+    if (settled) throw new Error("connection reset"); return get.apply(this, args);
+  });
+  await assert.rejects(resolveSolanaPendingTrade({ db: g.db, tenant: TENANT, requestId: "stuck-1", providers: q.list, observe: q.observe, now: () => g.clock.value,
+    book: { operator: "milla", reason: "reply lost" } }), (error: unknown) => error instanceof SolanaResolveError && /may or may not be booked/.test(error.message) && !/Nothing was booked/.test(error.message));
+  t.mock.restoreAll();
+  assert.equal((await g.store.get(OWNER, "stuck-1"))!.status, "finalized");
+  [row] = await resolutions(g.db); assert.equal(row!.refusal, null, "never recorded as refused"); assert.equal(row!.booked_at_ms, null);
+  assert.equal((await resolveSolanaPendingTrade({ db: g.db, tenant: TENANT, requestId: "stuck-1", providers: q.list, observe: q.observe, now: () => g.clock.value,
+    book: { operator: "milla", reason: "reply lost" } })).booked, true, "the next run marks it");
+  // The CLI's catch-all never says nothing was booked either.
+  const cli = readFileSync(new URL("./solana-resolve-cli.ts", import.meta.url), "utf8");
+  assert.doesNotMatch(cli, /nothing was booked/i); assert.match(cli, /may or may not be booked: run show again/);
+});
+
 test("the npm script runs the resolve CLI with the Solana env file, like the hold CLI", () => {
   const scripts = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")).scripts as Record<string, string>;
   assert.equal(scripts["solana:resolve"], "node --env-file-if-exists=.env.solana.local --import tsx worker/src/solana-resolve-cli.ts");

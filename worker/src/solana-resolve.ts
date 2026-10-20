@@ -214,7 +214,13 @@ export async function resolveSolanaPendingTrade(input: SolanaResolveInput): Prom
   try { await store.settle(owner, requestId, submission.signature, decision.settlement); }
   catch (error) {
     // An error after the store committed (a lost reply) must not be recorded as a refusal: read what is booked now.
-    const after = await store.get(owner, requestId).catch(() => null);
+    // When that read fails too, the outcome is unknown: nothing is recorded, and the operator is told so.
+    let after: SolanaLiveRecord | null;
+    try { after = await store.get(owner, requestId); }
+    catch {
+      refuse("The settlement's reply was lost and the trade could not be read again, so it may or may not be booked. Run show to see its status; if it was booked, "
+        + "running the same book command again marks this decision booked (nothing is ever booked twice).");
+    }
     if (!after || after.status === "pending" || !sameSettlement(after.settlement, decision.settlement)) {
       // The store re-checks the evidence against the reservation; its refusals are fixed text.
       const refusal = error instanceof SolanaTradingStoreError ? error.message : "The settlement could not be written.";
@@ -222,7 +228,9 @@ export async function resolveSolanaPendingTrade(input: SolanaResolveInput): Prom
       refuse(`Nothing was booked: ${refusal} The decision is recorded as refused.`);
     }
   }
-  await input.db.prepare("UPDATE solana_operator_resolutions SET booked_at_ms=? WHERE id=?").run(now(), id);
+  // The outcome is booked from here on: a failure to mark the record must not read as "nothing was booked".
+  try { await input.db.prepare("UPDATE solana_operator_resolutions SET booked_at_ms=? WHERE id=?").run(now(), id); }
+  catch { refuse(`Booked ${outcome}, but this decision could not be marked booked in its record. Run the same book command again to mark it; nothing is booked twice.`); }
   lines.push(`Booked ${outcome}, recorded as decided by ${book.operator}.`);
   return { owner, record, views, decision, booked: true, lines };
 }
