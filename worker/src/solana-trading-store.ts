@@ -613,8 +613,20 @@ export class SolanaTradingStore implements SolanaLiveJournal {
    * high-water mark drops by what the position part is worth (`valuation`,
    * checked fresh here) or not at all without one. No realized P&L. Refused
    * while a trade or an owner transaction is pending.
+   *
+   * A withdrawal of more than the book records (solana-recover sweeps the whole
+   * balance) also took an inflow no status read booked yet: a deposit, or
+   * anyone's WSOL, that arrived after the last read. Its own transaction shows
+   * the vault held at least the amount just before it (`preRaw`, the token
+   * account's pre-transaction balance, read on both providers), so the part
+   * beyond the book is booked first as that inflow, at its slot and exactly as
+   * status books one (USDG as a deposit raising the high-water mark, WSOL as
+   * zero-basis quarantine; evidence external-in:<signature>:<mint>), and then
+   * the withdrawal. Only what the withdrawal needs: any rest still in the vault
+   * waits for status's own inflow read. Without a pre-transaction balance at or
+   * above the amount it stays refused. An asset short any other way stays held.
    */
-  async reconcileExternalWithdrawals(input: { withdrawals: ReadonlyArray<{ signature: string; slot: number; mint: string; amountRaw: string; valuation?: SolanaWithdrawValuation }> }):
+  async reconcileExternalWithdrawals(input: { withdrawals: ReadonlyArray<{ signature: string; slot: number; mint: string; amountRaw: string; preRaw?: string; valuation?: SolanaWithdrawValuation }> }):
     Promise<{ booked: Array<{ signature: string; mint: string; amountRaw: string }>; book: SolanaLiveBook }> {
     return this.db.tx(async tx => {
       await this.bindingIn(tx, true);
@@ -642,6 +654,19 @@ export class SolanaTradingStore implements SolanaLiveJournal {
         const amount = raw(item.amountRaw, false), evidence = `external:${item.signature}:${item.mint}`;
         if (await tx.prepare("SELECT 1 FROM solana_runtime_cashflows WHERE evidence_id IN (?,?)").get(item.signature, evidence)) refuse("That withdrawal is already recorded. Nothing was recorded.");
         if (item.slot <= since) refuse("That withdrawal is already reflected in the recorded balances. Nothing was recorded.");
+        const usdg = item.mint === SOLANA_USDG_MINT, recorded = usdg ? raw(book.cashRaw) : raw(book.wsolRaw) + solanaQuarantinedWsol(book);
+        if (amount > recorded) {
+          // The unbooked inflow it took, shown by the vault's own balance just before it.
+          let pre: bigint | null = null;
+          try { pre = typeof item.preRaw === "string" ? raw(item.preRaw) : null; } catch { refuse("Invalid finalized withdrawal evidence."); }
+          if (pre === null || pre < amount) refuse(usdg ? "That withdrawal is more than the recorded USDG. Nothing was recorded." : "That withdrawal is more than the recorded wrapped SOL. Nothing was recorded.");
+          const unbooked = amount - recorded;
+          const inflow = await tx.prepare("INSERT INTO solana_runtime_cashflows(evidence_id,tenant,owner,kind,mint,amount_raw,created_at_ms) VALUES(?,?,?,?,?,?,?) ON CONFLICT DO NOTHING")
+            .run(`external-in:${item.signature}:${item.mint}`, tenant, owner, usdg ? "deposit" : "quarantine", item.mint, unbooked.toString(), now);
+          if (inflow.changes !== 1) refuse("That withdrawal is already recorded. Nothing was recorded.");
+          if (usdg) { book.cashRaw = (raw(book.cashRaw) + unbooked).toString(); book.hwmRaw = (raw(book.hwmRaw) + unbooked).toString(); raw(book.cashRaw); raw(book.hwmRaw); }
+          else { book.quarantinedWsolRaw = (solanaQuarantinedWsol(book) + unbooked).toString(); raw(book.quarantinedWsolRaw); }
+        }
         if (item.mint === SOLANA_USDG_MINT) {
           if (amount > raw(book.cashRaw)) refuse("That withdrawal is more than the recorded USDG. Nothing was recorded.");
           book.cashRaw = (raw(book.cashRaw) - amount).toString();

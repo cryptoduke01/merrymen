@@ -41,13 +41,16 @@ const refused = (pattern: RegExp) => (error: unknown) => error instanceof Solana
 test("a solana-recover style owner withdrawal is read as the vault token account's own net decrease", async () => {
   const f = await setup();
   const usdg = await f.signed([await f.withdraw(SOLANA_USDG_MINT, 90_000_000n)], { [SOLANA_USDG_MINT]: [90_000_000n, 0n] });
-  assert.deepEqual(await readSolanaExternalWithdrawal(reading(usdg.answer), usdg.signature, f.expected), { slot: 1234, withdrawals: [{ mint: SOLANA_USDG_MINT, amountRaw: "90000000" }] });
+  assert.deepEqual(await readSolanaExternalWithdrawal(reading(usdg.answer), usdg.signature, f.expected), { slot: 1234, withdrawals: [{ mint: SOLANA_USDG_MINT, amountRaw: "90000000", preRaw: "90000000" }] });
   // Wrapped SOL after a SyncNative of native SOL sent to the vault: only the decrease of the recorded WSOL is the book's.
   const wsol = await f.signed([await f.syncNative(), await f.withdraw(SOLANA_WRAPPED_SOL_MINT, 50_000_100n)], { [SOLANA_WRAPPED_SOL_MINT]: [50_000_000n, 0n] });
-  assert.deepEqual(await readSolanaExternalWithdrawal(reading(wsol.answer), wsol.signature, f.expected), { slot: 1234, withdrawals: [{ mint: SOLANA_WRAPPED_SOL_MINT, amountRaw: "50000000" }] });
+  assert.deepEqual(await readSolanaExternalWithdrawal(reading(wsol.answer), wsol.signature, f.expected), { slot: 1234, withdrawals: [{ mint: SOLANA_WRAPPED_SOL_MINT, amountRaw: "50000000", preRaw: "50000000" }] });
+  // A partial withdrawal: the balance just before it is returned with it.
+  const partial = await f.signed([await f.withdraw(SOLANA_USDG_MINT, 30n)], { [SOLANA_USDG_MINT]: [100n, 70n] });
+  assert.deepEqual((await readSolanaExternalWithdrawal(reading(partial.answer), partial.signature, f.expected)).withdrawals, [{ mint: SOLANA_USDG_MINT, amountRaw: "30", preRaw: "100" }]);
   // A revocation in the same transaction is the owner's too.
   const both = await f.signed([buildRevokeSolanaSessionsInstruction({ programAddress: PROGRAM, vault: f.vault, owner: f.owner }), await f.withdraw(SOLANA_USDG_MINT, 5n)], { [SOLANA_USDG_MINT]: [5n, 0n] });
-  assert.deepEqual((await readSolanaExternalWithdrawal(reading(both.answer), both.signature, f.expected)).withdrawals, [{ mint: SOLANA_USDG_MINT, amountRaw: "5" }]);
+  assert.deepEqual((await readSolanaExternalWithdrawal(reading(both.answer), both.signature, f.expected)).withdrawals, [{ mint: SOLANA_USDG_MINT, amountRaw: "5", preRaw: "5" }]);
 });
 
 test("anything that is not exactly an owner withdrawal from this vault is refused, so nothing is booked", async () => {

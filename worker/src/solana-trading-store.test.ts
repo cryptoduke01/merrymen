@@ -834,6 +834,54 @@ for (const dialect of ["sqlite", "postgres"] as const) {
   });
 }
 
+for (const dialect of ["sqlite", "postgres"] as const) {
+  const options = dialect === "postgres" && !process.env.MERRYMEN_TEST_PG_URL ? { skip: "Set MERRYMEN_TEST_PG_URL to an isolated PostgreSQL test database." } : {};
+  const signatureOf = (n: number) => base58Encode(new Uint8Array(64).fill(n));
+  const flows = async (f: Awaited<ReturnType<typeof fixture>>) => (await f.db.prepare("SELECT evidence_id,kind,mint,amount_raw FROM solana_runtime_cashflows WHERE evidence_id LIKE 'external%' ORDER BY evidence_id").all() as
+    Array<Record<string, string>>).map(row => [row.evidence_id, row.kind, row.amount_raw]);
+  test(`${dialect}: a sweep outside Merrymen that also took an inflow no status read booked yet books that inflow first, then the withdrawal, and the book is free again`, options, async t => {
+    // USDG: 1 USDG deposited after the last read, then solana-recover took the whole balance.
+    {
+      const f = await fixture(t, dialect), s = submission();
+      await f.store.recordSigned(s); await f.store.settle(OWNER, s.intent.requestId, s.signature, settlement(s));
+      const before = (await f.store.liveBook())!, all = BigInt(before.cashRaw) + 1_000_000n, sweep = signatureOf(10);
+      const usdg = (preRaw?: string) => ({ signature: sweep, slot: 1003, mint: SOLANA_USDG_MINT, amountRaw: all.toString(), ...(preRaw === undefined ? {} : { preRaw }) });
+      // Without the vault's own balance just before it, or one below the amount, it stays refused, and nothing is booked.
+      for (const preRaw of [undefined, (all - 1n).toString(), "not-a-number"]) {
+        await assert.rejects(f.store.reconcileExternalWithdrawals({ withdrawals: [usdg(preRaw)] }), /more than the recorded USDG|Invalid finalized withdrawal evidence/, String(preRaw));
+      }
+      assert.deepEqual(await f.store.liveBook(), before); assert.deepEqual(await flows(f), []);
+      const { book } = await f.store.reconcileExternalWithdrawals({ withdrawals: [usdg(all.toString())] });
+      assert.equal(book.cashRaw, "0"); assert.equal(book.wsolRaw, before.wsolRaw);
+      const peak = BigInt(before.hwmRaw) + 1_000_000n - all;
+      assert.equal(book.hwmRaw, (peak > 0n ? peak : 0n).toString(), "deposit in, then everything out: as if the recorded USDG was withdrawn");
+      assert.deepEqual(await flows(f), [[`external-in:${sweep}:${SOLANA_USDG_MINT}`, "deposit", "1000000"], [`external:${sweep}:${SOLANA_USDG_MINT}`, "withdraw-external", all.toString()]]);
+      // The book matches the vault again: a finalized read books nothing and is not below it.
+      await f.store.reconcileExternalInflows({ cashUsdg: "0", wsolRaw: before.wsolRaw, slot: 1004, observedAtMs: NOW, commitment: "finalized" });
+      assert.equal((await f.store.liveBook())!.cashRaw, "0");
+      await assert.rejects(f.store.reconcileExternalWithdrawals({ withdrawals: [usdg(all.toString())] }), /already recorded/);
+    }
+    // WSOL: 5 raw sent by a stranger after the last read, then the whole balance swept; and a partial sweep leaves the rest for status.
+    {
+      const f = await fixture(t, dialect), s = submission();
+      await f.store.recordSigned(s); await f.store.settle(OWNER, s.intent.requestId, s.signature, settlement(s));
+      const before = (await f.store.liveBook())!, held = BigInt(before.wsolRaw), sweep = signatureOf(11);
+      const { book } = await f.store.reconcileExternalWithdrawals({ withdrawals: [{ signature: sweep, slot: 1003, mint: SOLANA_WRAPPED_SOL_MINT, amountRaw: (held + 5n).toString(), preRaw: (held + 5n).toString() }] });
+      assert.equal(book.wsolRaw, "0"); assert.equal(book.quarantinedWsolRaw, "0"); assert.equal(book.costBasisUsdgRaw, "0");
+      assert.equal(book.hwmRaw, before.hwmRaw, "no valuation: the mark stays put"); assert.equal(book.cashRaw, before.cashRaw);
+      assert.deepEqual(await flows(f), [[`external-in:${sweep}:${SOLANA_WRAPPED_SOL_MINT}`, "quarantine", "5"], [`external:${sweep}:${SOLANA_WRAPPED_SOL_MINT}`, "withdraw-external", (held + 5n).toString()]]);
+      await f.store.reconcileExternalInflows({ cashUsdg: before.cashRaw, wsolRaw: "0", slot: 1004, observedAtMs: NOW, commitment: "finalized" });
+      const g = await fixture(t, dialect), gs = submission();
+      await g.store.recordSigned(gs); await g.store.settle(OWNER, gs.intent.requestId, gs.signature, settlement(gs));
+      // 9 raw arrived; 4 of them went with a withdrawal of the position plus 4: only those 4 are booked now.
+      await g.store.reconcileExternalWithdrawals({ withdrawals: [{ signature: signatureOf(12), slot: 1003, mint: SOLANA_WRAPPED_SOL_MINT, amountRaw: (held + 4n).toString(), preRaw: (held + 9n).toString() }] });
+      assert.equal((await g.store.liveBook())!.quarantinedWsolRaw, "0"); assert.equal((await g.store.liveBook())!.wsolRaw, "0");
+      await g.store.reconcileExternalInflows({ cashUsdg: (await g.store.liveBook())!.cashRaw, wsolRaw: "5", slot: 1004, observedAtMs: NOW, commitment: "finalized" });
+      assert.equal((await g.store.liveBook())!.quarantinedWsolRaw, "5", "the rest is booked by the next finalized read");
+    }
+  });
+}
+
 test("withdrawals made outside Merrymen are refused while a trade or an owner transaction is pending, and without a book", async t => {
   const outside = { signature: base58Encode(new Uint8Array(64).fill(5)), slot: 1003, mint: SOLANA_USDG_MINT, amountRaw: "1" };
   const empty = await fixture(t);

@@ -1201,7 +1201,8 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       if ((await s.pending()).length || unresolved(await s.setup()) || unresolved(await s.revokeSetup())) fail("Wait for the pending trade or owner transaction to resolve, then record these withdrawals.", "pending");
       await verifyDeployment(cfg);
       const vault = await deriveSolanaVaultAddress(cfg.programId, scope.owner), live = rpc();
-      const withdrawals: Array<{ signature: string; slot: number; mint: string; amountRaw: string; valuation?: SolanaWithdrawValuation }> = [];
+      // Each with the vault token account's balance just before it (preRaw), which both providers agreed on too.
+      const withdrawals: Array<{ signature: string; slot: number; mint: string; amountRaw: string; preRaw: string; valuation?: SolanaWithdrawValuation }> = [];
       for (const signature of signatures as string[]) {
         const quorum = await readSolanaQuorum(live, read => readSolanaExternalWithdrawal(read, signature, { programId: cfg.programId, vault, owner: scope.owner }))
           .catch((error: unknown) => error instanceof SolanaExternalWithdrawalError ? fail(error.message) : Promise.reject(error));

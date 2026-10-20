@@ -15,6 +15,8 @@
  * permissionless SyncNative in the same transaction may wrap native SOL first,
  * which never was in the book). A token account the vault program did not
  * withdraw from must not change. Anything else is refused: nothing to book.
+ * With each amount it returns the account's balance just before the
+ * transaction (`preRaw`, finalized): what the vault held then, booked or not.
  */
 import { getBase58Decoder, getCompiledTransactionMessageDecoder, getTransactionDecoder } from "@solana/kit";
 import { SOLANA_USDG_MINT, TOKEN_2022_PROGRAM } from "../../packages/core/src/ids";
@@ -39,7 +41,7 @@ const OWNER_ONLY = new Set([
 ]);
 function object(value: unknown): value is Record<string, unknown> { return !!value && typeof value === "object" && !Array.isArray(value); }
 
-export interface SolanaExternalWithdrawal { slot: number; withdrawals: Array<{ mint: string; amountRaw: string }> }
+export interface SolanaExternalWithdrawal { slot: number; withdrawals: Array<{ mint: string; amountRaw: string; preRaw: string }> }
 
 export async function readSolanaExternalWithdrawal(read: SolanaLiveRead, signature: string, expected: { programId: string; vault: string; owner: string }): Promise<SolanaExternalWithdrawal> {
   const tx = await read("getTransaction", [signature, { commitment: "finalized", encoding: "base64", maxSupportedTransactionVersion: 0 }]);
@@ -101,7 +103,7 @@ export async function readSolanaExternalWithdrawal(read: SolanaLiveRead, signatu
     if (pre === null || post === null) refuse(NOT_A_WITHDRAWAL);
     const decrease = pre - post;
     if (mint === SOLANA_USDG_MINT ? decrease !== taken : decrease > taken || decrease < 0n) refuse(NOT_A_WITHDRAWAL);
-    if (decrease > 0n) withdrawals.push({ mint, amountRaw: decrease.toString() });
+    if (decrease > 0n) withdrawals.push({ mint, amountRaw: decrease.toString(), preRaw: pre!.toString() });
   }
   return { slot: tx.slot, withdrawals };
 }

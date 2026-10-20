@@ -583,6 +583,23 @@ test("after solana-recover took the vault's USDG outside Merrymen, status holds 
   } finally { f.raw.close(); }
 });
 
+test("a deposit no status read booked yet, swept with the rest by solana-recover, is booked from the sweep's own transaction: the book matches the vault again and trading resumes", async () => {
+  const f = await fixture();
+  try {
+    await f.live(); f.controls.initialized = true; await f.registered(); await cashBook(f);
+    // 5 USDG arrived and solana-recover took all 95 before any status read.
+    const signature = await outsideWithdrawal(f, SOLANA_USDG_MINT, 95_000_000n, [95_000_000n, 0n]);
+    f.controls.cash = 0n;
+    assert.ok((await f.app.status(f.scope)).live.blockers.includes(SOLANA_STATUS_BELOW_BOOK));
+    const recorded = await f.app.recordExternalWithdrawals(f.scope, { signatures: [signature] });
+    assert.deepEqual(recorded.booked, [{ signature, mint: SOLANA_USDG_MINT, amountRaw: "95000000" }]);
+    assert.equal(recorded.book.cashRaw, "0"); assert.equal(recorded.book.hwmRaw, "0");
+    const ready = await f.app.status(f.scope);
+    assert.ok(!ready.live.blockers.includes(SOLANA_STATUS_BELOW_BOOK)); assert.equal(ready.live.canExit, true, ready.live.blockers.join(" | "));
+    assert.equal(f.controls.sends, 0);
+  } finally { f.raw.close(); }
+});
+
 test("an in-app withdrawal the wallet broadcast itself, recorded as made outside Merrymen first, is booked once: the page's resubmit of its bytes is refused as not saved", async () => {
   const f = await fixture();
   try {
