@@ -12,6 +12,7 @@ import type { SolanaPaperMarket } from "./solana-paper-service";
 import { runSolanaHoldCommand } from "./solana-operator-hold";
 import { ensureSolanaTradingSchema, SOLANA_EXPIRED_ATTEMPTS_EXHAUSTED, SolanaTradingStoreError } from "./solana-trading-store";
 import { SOLANA_AGENT_ALERT_REPEAT_MS, solanaAccountRef } from "./solana-agent";
+import { SolanaMarketError } from "./solana-market";
 
 const NOW = 1_000_000;
 const limits = { perTradeUsdg: "10000000", dailyUsdg: "100000000", maxOpsPerDay: 20, maxDrawdownBps: 2000, expiresAtMs: NOW + 1000000 };
@@ -432,4 +433,30 @@ test("expired attempts that count for more than half of the day's operations say
   old.clock.now += 86_400_000;
   await old.db.prepare("UPDATE solana_wallet_bindings SET limits_json=?").run(JSON.stringify({ ...limits, maxOpsPerDay: 4, perTradeWsol: "100000000", dailyWsol: "1000000000", expiresAtMs: old.clock.now + 1_000_000 }));
   assert.deepEqual((await old.agent().tick()).map(r => r.outcome), ["submitted"]); assert.deepEqual(old.lines, []);
+});
+
+test("the agent's SOL mark: a zero-output answer is dust planned as no position; any other failure stops the tick before any trade", async t => {
+  const raw = new DatabaseSync(":memory:"), db = wrapSqlite(raw); t.after(() => raw.close());
+  const bindings = new SqlSolanaBindingStore(async () => db, "sqlite", () => NOW);
+  await bindings.bind(TENANT, "did:privy:mark", OWNER);
+  await bindings.settings(TENANT, OWNER, 0, "live", { ...limits, perTradeWsol: "100000000", dailyWsol: "1000000000", expiresAtMs: NOW + 100 * 3_600_000 });
+  await bindings.strategy(TENANT, OWNER, 1, { ...strategy, intervalSeconds: 60 });
+  await ensureSolanaTradingSchema(db);
+  const trades: Array<{ inputMint: string; amountRaw: string }> = [];
+  const runtime = {
+    status: async () => ({ paper: null, live: { balances: {}, tradable: { cashUsdg: "100000000", wsolRaw: "1000" }, pending: [], ready: true, canExit: true, blockers: [] } }),
+    trade: async (_scope: unknown, request: { intent: { inputMint: string; amountRaw: string } }) => { trades.push(request.intent); return {}; },
+  } as unknown as Parameters<typeof createSolanaAgent>[0]["runtime"];
+  let failure: Error = new SolanaMarketError("zero-output", { source: "jupiter", inputMint: SOLANA_WRAPPED_SOL_MINT, outputMint: SOLANA_USDG_MINT,
+    inAmount: "1000", outAmount: "0", minOutAmount: "0", slippageBps: 50, contextSlot: 1, quotedAtMs: NOW });
+  const market: SolanaPaperMarket = { readMint: async () => { throw new Error("unused"); }, quote: async () => { throw failure; } };
+  const clock = { now: NOW };
+  const agent = createSolanaAgent({ db, runtime, market, now: () => clock.now });
+  assert.deepEqual((await agent.tick()).map(r => r.outcome), ["submitted"]);
+  assert.deepEqual(trades.map(i => [i.inputMint, i.amountRaw]), [[SOLANA_USDG_MINT, "5000000"]], "a buy toward the target, as if no SOL were held");
+  for (const other of [new SolanaMarketError("invalid-quote"), new SolanaMarketError("stale-quote"), new Error("network")]) {
+    failure = other; clock.now += 3_600_000;
+    assert.deepEqual((await agent.tick()).map(r => r.outcome), ["unavailable"], other.message);
+  }
+  assert.equal(trades.length, 1, "no trade on any other mark failure");
 });

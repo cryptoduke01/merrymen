@@ -8,7 +8,7 @@ import {
 import { ed25519 } from "@noble/curves/ed25519";
 import { CHAINS, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM, base58Decode, canonicalId } from "../../packages/core/src/ids";
 import { parseSolanaRawAmount, parseSolanaSwapIntent, parseSolanaTradeRequest, requireSolanaLiveSellLimits, SolanaPaperValidationError, validateSolanaAccountLimits, validateSolanaQuote,
-  type SolanaPaperLimits, type SolanaSwapIntent, type SolanaTradeRequest } from "../../packages/core/src/solana";
+  type SolanaPaperLimits, type SolanaQuote, type SolanaSwapIntent, type SolanaTradeRequest } from "../../packages/core/src/solana";
 import {
   buildCreateSolanaSessionInstruction, buildInitializeSolanaVaultInstruction, buildRevokeSolanaSessionsInstruction,
   buildWithdrawSolanaNativeInstruction, buildWithdrawSolanaVaultInstruction, buildSetSolanaBreakerInstruction, decodeSolanaVaultAccount, deriveSolanaAta, deriveSolanaVaultAddress,
@@ -20,7 +20,7 @@ import { createSolanaExecutor, parseSolanaLiveIntent, readSolanaOwnerRefundBlock
   SOLANA_DEFAULT_MAX_COMPUTE_UNIT_PRICE, solanaComputeBudgetInstructions, SolanaExecutionError, verifySolanaVaultDeployment, type SolanaLiveJournal, type SolanaLiveRecord } from "./solana-executor";
 import { createSolanaLiveMarket } from "./solana-live-market";
 import { createSolanaLiveRpc, readSolanaPriorityFee, readSolanaQuorum, type SolanaLiveRead, type SolanaLiveRpc } from "./solana-live-rpc";
-import { createSolanaMarket } from "./solana-market";
+import { createSolanaMarket, SolanaMarketError } from "./solana-market";
 import { createSolanaPaperService, type SolanaPaperMarket } from "./solana-paper-service";
 import { readSolanaReferencePrice, requireSolanaPythGeneration, solanaPythGeneration, solanaReferenceBound, solanaReferenceNotional, solanaReferenceToleranceBps, type SolanaPythGeneration,
   SolanaReferencePriceError, SOLANA_REFERENCE_ALERT_REPEAT_MS, SOLANA_REFERENCE_DEFAULT_TOLERANCE_BPS, SOLANA_REFERENCE_MAX_TOLERANCE_BPS,
@@ -860,7 +860,13 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
           const evidence: Array<{ intent: SolanaSwapIntent; quote: typeof quote }> = [];
           let equity = cash;
           if (held > 0n && current.inputMint === SOLANA_USDG_MINT) { const markIntent = makeExit(tradable.wsolRaw, "live-portfolio-mark");
-            const mark = await quotes.quote(markIntent); validateSolanaQuote(mark, markIntent, now()); evidence.push({ intent: markIntent, quote: mark }); equity += BigInt(mark.minOutAmount); }
+            // SOL that no route buys back (Jupiter's zero-output answer) is valued at zero, as the
+            // paper book values it: the conservative direction for the drawdown check, and never
+            // a reason to refuse every buy as "too small". Any other failure still refuses.
+            let mark: SolanaQuote | null = null;
+            try { mark = await quotes.quote(markIntent); }
+            catch (error) { if (!(error instanceof SolanaMarketError && error.code === "zero-output")) throw error; }
+            if (mark) { validateSolanaQuote(mark, markIntent, now()); evidence.push({ intent: markIntent, quote: mark }); equity += BigInt(mark.minOutAmount); } }
           // Independent of Jupiter: the build quote's guaranteed output is checked
           // against Pyth SOL/USD, and a sell is charged at least its reference value.
           let reference: ReturnType<typeof solanaReferenceBound>;

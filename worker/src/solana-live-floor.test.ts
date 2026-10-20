@@ -23,6 +23,7 @@ import type { SolanaLiveRead, SolanaLiveRpc } from "./solana-live-rpc";
 import { PYTH_SOL_USD_ACCOUNT, SOLANA_PYTH_FEEDS, readSolanaReferencePrice, solanaPythGeneration, solanaReferenceBound, solanaReferenceNotional,
   type SolanaPythGeneration } from "./solana-reference-price";
 import { pythAccount, pythReference } from "./solana-reference-price-fixture";
+import { SolanaMarketError } from "./solana-market";
 import { SOLANA_MAINNET_GENESIS_HASH } from "./solana-rpc";
 import { ensureSolanaTradingSchema, SolanaTradingStore } from "./solana-trading-store";
 import { sealSecret } from "./store-crypto";
@@ -53,7 +54,7 @@ function mintJson(mint: string) {
       supply: "1000000000000", freezeAuthority: null, mintAuthority: null } } } } };
 }
 
-async function fixture(t: TestContext, opts: { cash: bigint; wsol: bigint; mark: "fair" | "dust"; build: Build; strategy?: Record<string, unknown>; pythAgeMs?: number;
+async function fixture(t: TestContext, opts: { cash: bigint; wsol: bigint; mark: "fair" | "dust" | "zero" | "down"; build: Build; strategy?: Record<string, unknown>; pythAgeMs?: number;
   env?: Record<string, string>; priorityFees?: number[] }) {
   const net = { lastBuild: null as null | { amount: bigint; out: bigint; min: bigint; input: string }, urls: [] as string[] };
   t.mock.method(globalThis, "fetch", async (input: unknown, init?: RequestInit) => {
@@ -155,6 +156,10 @@ async function fixture(t: TestContext, opts: { cash: bigint; wsol: bigint; mark:
   // Two agreeing providers, as the live transport always has: deployment checks and bookings need both.
   const rpc: SolanaLiveRpc = { read: fn => fn(read), readEach: async fn => [await fn(read), await fn(read)], send: async wire => { sends.push(wire); return "sent"; } };
   const quote = async (i: { inputMint: string; outputMint: string; amountRaw: string; slippageBps: number }) => {
+    // "zero": no route buys SOL back (Jupiter's zero-output answer); "down": the SOL quote fails otherwise.
+    if (opts.mark === "zero" && i.inputMint === SOLANA_WRAPPED_SOL_MINT) throw new SolanaMarketError("zero-output", { source: "jupiter", inputMint: i.inputMint,
+      outputMint: i.outputMint, inAmount: i.amountRaw, outAmount: "0", minOutAmount: "0", slippageBps: i.slippageBps, contextSlot: SLOT, quotedAtMs: clock.now });
+    if (opts.mark === "down" && i.inputMint === SOLANA_WRAPPED_SOL_MINT) throw new SolanaMarketError("invalid-quote");
     const out = opts.mark === "dust" ? 1n : fairOut(i.inputMint, BigInt(i.amountRaw));
     return { source: "jupiter" as const, inputMint: i.inputMint, outputMint: i.outputMint, inAmount: i.amountRaw, outAmount: out.toString(),
       minOutAmount: ((out * BigInt(10_000 - i.slippageBps) / 10_000n) || 1n).toString(), slippageBps: i.slippageBps, contextSlot: SLOT,
@@ -266,6 +271,37 @@ test("D: a manual buy built at 1% of fair is refused", async t => {
   const f = await fixture(t, { cash: 100_000_000n, wsol: 0n, mark: "fair", build: { kind: "factor", num: 1n, den: 100n } });
   await assert.rejects(f.app.trade(f.scope, { mode: "live", intent: manual(SOLANA_USDG_MINT, "25000000", "manual-buy-1") }), /refused: risk/);
   assert.deepEqual(await f.submissions(), []); assert.equal(f.sends.length, 0);
+});
+
+test("D2: SOL dust that no route buys back is valued at zero, and a manual buy still goes through", async t => {
+  // 1,000 lamports of SOL: Jupiter's zero-output answer, worth 0.00015 USDG at $150.
+  const f = await fixture(t, { cash: 100_000_000n, wsol: 1_000n, mark: "zero", build: { kind: "fair" } });
+  const placed = await f.app.trade(f.scope, { mode: "live", intent: manual(SOLANA_USDG_MINT, "25000000", "buy-beside-dust") });
+  assert.ok("status" in placed && placed.status === "pending");
+  const [row] = await f.submissions();
+  assert.equal(row!.submission.risk.equityUsdg, "100000000", "the dust adds nothing to equity");
+  assert.equal(f.sends.length, 1);
+});
+
+test("D3: a SOL mark that fails any other way still refuses a buy, and a position worth more than the drawdown limit that quotes to zero trips the breaker", async t => {
+  const down = await fixture(t, { cash: 100_000_000n, wsol: 1_000n, mark: "down", build: { kind: "fair" } });
+  await assert.rejects(down.app.trade(down.scope, { mode: "live", intent: manual(SOLANA_USDG_MINT, "25000000", "buy-mark-down") }), /valid quote/);
+  assert.deepEqual(await down.submissions(), []); assert.equal(down.sends.length, 0);
+  // 1 SOL bought at $150 beside 100 USDG: valued at zero, equity is 40% below the high-water mark.
+  const big = await fixture(t, { cash: 100_000_000n, wsol: 1_000_000_000n, mark: "zero", build: { kind: "fair" } });
+  await assert.rejects(big.app.trade(big.scope, { mode: "live", intent: manual(SOLANA_USDG_MINT, "25000000", "buy-zero-mark") }), /drawdown breaker/);
+  assert.deepEqual(await big.submissions(), []); assert.equal(big.sends.length, 0);
+});
+
+test("D4: the agent plans around SOL dust that no route buys back instead of stopping at it; any other mark failure still stops the tick", async t => {
+  const f = await fixture(t, { cash: 100_000_000n, wsol: 1_000n, mark: "zero", build: { kind: "fair" }, strategy: { ...rebalance, targetSolBps: 5000 } });
+  assert.deepEqual((await f.agent().tick()).map(r => r.outcome), ["submitted"]);
+  const [row] = await f.submissions();
+  assert.equal(row!.submission.intent.inputMint, SOLANA_USDG_MINT, "a buy"); assert.equal(row!.submission.intent.amountRaw, "25000000");
+  assert.equal(f.sends.length, 1);
+  const down = await fixture(t, { cash: 100_000_000n, wsol: 1_000n, mark: "down", build: { kind: "fair" }, strategy: { ...rebalance, targetSolBps: 5000 } });
+  assert.deepEqual((await down.agent().tick()).map(r => r.outcome), ["unavailable"]);
+  assert.deepEqual(await down.submissions(), []); assert.equal(down.sends.length, 0);
 });
 
 /** The reference-price [alert] lines this process said while `run` ran. */

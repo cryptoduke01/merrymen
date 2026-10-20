@@ -1,12 +1,12 @@
 /** Deterministic, opt-in USDG/SOL rebalancer. Both modes use the same admission boundary. */
 import { createHash } from "node:crypto";
 import { CHAINS, SOLANA_USDG_MINT } from "../../packages/core/src/ids";
-import { parseSolanaRawAmount, parseSolanaSwapIntent, validateSolanaAccountLimits, validateSolanaQuote, type SolanaPaperLimits } from "../../packages/core/src/solana";
+import { parseSolanaRawAmount, parseSolanaSwapIntent, validateSolanaAccountLimits, validateSolanaQuote, type SolanaPaperLimits, type SolanaQuote } from "../../packages/core/src/solana";
 import { SOLANA_WRAPPED_SOL_MINT } from "../../packages/core/src/solana-live";
 import { SqlSolanaBindingStore, validateSolanaStrategy, type SolanaStrategy } from "../../web/src/lib/solana-binding-store";
 import { getSolanaAppRuntime } from "./solana-app-runtime";
 import type { Db } from "./db";
-import { createSolanaMarket } from "./solana-market";
+import { createSolanaMarket, SolanaMarketError } from "./solana-market";
 import type { SolanaPaperMarket } from "./solana-paper-service";
 import { SOLANA_REFERENCE_DEFAULT_TOLERANCE_BPS, SOLANA_REFERENCE_MAX_TOLERANCE_BPS, solanaReferenceToleranceBps } from "./solana-reference-price";
 import { getSolanaRuntimeDb } from "./solana-runtime-db";
@@ -193,7 +193,14 @@ export function createSolanaAgent(options: SolanaAgentOptions) {
           if (BigInt(wsolRaw) > 0n) {
             const markIntent = parseSolanaSwapIntent({ kind: "spl-swap", chain: CHAINS.solana, mode: "paper", requestId: "rebalance-mark",
               inputMint: SOLANA_WRAPPED_SOL_MINT, outputMint: SOLANA_USDG_MINT, amountRaw: wsolRaw, slippageBps: 50 });
-            const mark = await options.market.quote(markIntent); validateSolanaQuote(mark, markIntent, now()); solValueUsdgRaw = mark.minOutAmount;
+            let mark: SolanaQuote | null = null;
+            try { mark = await options.market.quote(markIntent); }
+            catch (error) { if (!(error instanceof SolanaMarketError && error.code === "zero-output")) throw error; }
+            if (mark) { validateSolanaQuote(mark, markIntent, now()); solValueUsdgRaw = mark.minOutAmount; }
+            // SOL no route buys back (Jupiter's zero-output answer) is dust: nothing to sell and worth
+            // zero, as the runtime and the paper book value it at a buy. Planned as no position, so
+            // it never stops the strategy. Any other failure still makes the tick unavailable.
+            else wsolRaw = "0";
           }
           let intent = planSolanaRebalance({ cashRaw, wsolRaw, solValueUsdgRaw, limits, strategy, mode: row.requested_mode, revision, nowMs: now(), attempt: schedule.attempt });
           const cap = [BigInt(strategy.tradeUsdgRaw), BigInt(limits.perTradeUsdg)].reduce((a, b) => a < b ? a : b);
