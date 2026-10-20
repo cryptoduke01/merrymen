@@ -79,17 +79,26 @@ async function press(text: string) {
 /** True while the page says it is working: owner controls (aria-busy) or the account's own requests (Refresh account disabled). */
 const pageBusy = () => !!ui.container.querySelector('[aria-busy="true"]')
   || [...ui.container.querySelectorAll("button")].some((item) => item.textContent === "Refresh account" && item.disabled);
+/** The real clock's setTimeout, kept before any test mocks the page's timers (mock.timers). */
+const realSetTimeout = globalThis.setTimeout;
 /**
  * Lets the page finish what a click or a settled promise started (submit,
  * refresh, WebCrypto for vault and token account addresses): 20 timer turns,
  * then more while the page is still busy, up to a bound, so a slow machine
  * does not fail a test. Not while the fixture wallet is open: the page waits
- * on it, and the test decides when it answers.
+ * on it, and the test decides when it answers. Its turns are on the real
+ * clock, so it works the same while a test drives the page's own timers and
+ * Date with mock.timers: those move only when the test ticks them.
  */
 async function settle() {
-  const turn = () => act(async () => { await new Promise((resolve) => setTimeout(resolve, 1)); });
+  const turn = () => act(async () => { await new Promise((resolve) => realSetTimeout(resolve, 1)); });
   for (let i = 0; i < 20; i++) await turn();
   for (let i = 0; i < 2_000 && walletOpen === 0 && pageBusy(); i++) await turn();
+}
+/** Presses an owner action, then signs the transaction it prepared once the review shows it, as an owner does. */
+async function ownerPress(text: string) {
+  await press(text);
+  if ([...ui.container.querySelectorAll("button")].some((item) => item.textContent === "Sign with my wallet")) await press("Sign with my wallet");
 }
 /** Registers in the page's two steps: prepare and review, then sign with the wallet. */
 async function register() {
@@ -97,7 +106,7 @@ async function register() {
   if ([...ui.container.querySelectorAll("button")].some((item) => item.textContent === "Sign permission with my wallet")) await press("Sign permission with my wallet");
 }
 const field = (label: string) => [...ui.container.querySelectorAll("label")].find((item) => item.textContent?.startsWith(label))!.querySelector("input")!.value;
-let SolanaScreen: typeof import("./SolanaScreen").SolanaScreen;
+let SolanaScreen: typeof import("./SolanaScreen").SolanaScreen, screen: typeof import("./SolanaScreen");
 const recoveryPath = fileURLToPath(new URL("./SolanaRecovery.tsx", import.meta.url));
 let testDom: typeof import("./test-dom").testDom, json: typeof import("./test-dom").json, deferred: typeof import("./test-dom").deferred;
 let ui: ReturnType<typeof testDom>;
@@ -148,7 +157,7 @@ before(async () => {
     }
     return original.call(this, id, parent, isMain);
   });
-  try { SolanaScreen = createRequire(import.meta.url)(path).SolanaScreen; }
+  try { screen = createRequire(import.meta.url)(path); SolanaScreen = screen.SolanaScreen; }
   finally { intercept.mock.restore(); }
 });
 beforeEach(() => {
@@ -266,7 +275,7 @@ test("owner recovery stays available in paper mode and retries exact signed byte
     }
     throw new Error("Unexpected fixture route");
   };
-  await render(); await press("Revoke all Solana sessions");
+  await render(); await ownerPress("Revoke all Solana sessions");
   assert.equal(signCount, 1);
   await press("Check existing owner transaction");
   assert.equal(signCount, 1); assert.deepEqual(submissions, ["AQID", "AQID"]);
@@ -286,6 +295,48 @@ test("autonomous strategy is disabled by default and saves explicit bounded sett
   assert.deepEqual(saved, { revision: 0, strategy: { enabled: false, targetSolBps: 5000, rebalanceBps: 500, tradeUsdgRaw: "1000000", intervalSeconds: 60 } });
   assert.equal(signCount, 0);
 });
+test("a paced answer is a wait wherever it is read: the first status load, owner controls and the strategy, never a failure", async () => {
+  const PACED = "Your Solana account was refreshed too often. Try again in 3 seconds.";
+  const paced = () => json({ error: PACED, ownerFacing: true }, 429);
+  const alerts = () => [...ui.container.querySelectorAll('[role="alert"]')].map((item) => item.textContent);
+  const notices = () => [...ui.container.querySelectorAll('[role="status"].solana-notice')].map((item) => item.textContent);
+  const card = (heading: string) => [...ui.container.querySelectorAll(".solana-card")].find((item) => item.querySelector("h2")?.textContent === heading)!;
+  const fresh = async () => { await ui.close(); ui = testDom(); calls = []; };
+  // The first status read of the page.
+  let statusAnswer: () => Response = paced;
+  respond = async (path) => { if (path === "status") return statusAnswer(); throw new Error("Unexpected fixture route"); };
+  await render();
+  assert.deepEqual(alerts(), []); assert.deepEqual(notices(), [PACED]);
+  statusAnswer = () => json(state);
+  await ui.click("Refresh account");
+  assert.deepEqual(notices(), []); assert.match(ui.container.textContent!, /Saved preference: paper/);
+  // Checking the server's pending owner record.
+  await fresh(); state = initial("live"); state.runtime.live.programId = PROGRAM;
+  Object.assign(state.runtime.live, { ownerTransaction: { signature: "withdraw-sig", status: "pending", kind: "withdraw" } });
+  statusAnswer = () => json(state);
+  await render();
+  statusAnswer = paced;
+  await press("Check owner transaction");
+  assert.deepEqual(alerts(), []);
+  assert.equal(card("Owner controls").querySelector('[role="status"].solana-notice')?.textContent, PACED);
+  // Any other failure still reads as one.
+  statusAnswer = () => json({ error: "Solana is temporarily unavailable.", ownerFacing: true }, 503);
+  await press("Check owner transaction");
+  assert.deepEqual(alerts(), ["Solana is temporarily unavailable."]); assert.equal(card("Owner controls").querySelector(".solana-notice"), null);
+  // Preparing an owner transaction: nothing was prepared, so there is nothing to review or sign.
+  await fresh(); state = initial("live"); state.runtime.live.programId = PROGRAM;
+  respond = async (path) => { if (path === "status") return json(state); if (path === "owner") return json({ error: "Too many Solana owner requests. Try again in 5 seconds.", ownerFacing: true }, 429); throw new Error("Unexpected fixture route"); };
+  await render(); await press("Withdraw to my wallet");
+  assert.deepEqual(alerts(), []);
+  assert.equal(card("Owner controls").querySelector('[role="status"].solana-notice')?.textContent, "Too many Solana owner requests. Try again in 5 seconds.");
+  assert.doesNotMatch(ui.container.textContent!, /Review before your wallet opens/); assert.equal(signCount, 0);
+  // Saving the strategy.
+  await fresh(); state = initial();
+  respond = async (path) => { if (path === "status") return json(state); if (path === "strategy") return json({ error: "Too many Solana strategy changes. Try again in 9 seconds.", ownerFacing: true }, 429); throw new Error("Unexpected fixture route"); };
+  await render(); await press("Save autonomous strategy");
+  assert.deepEqual(alerts(), []);
+  assert.equal(card("Autonomous rebalancing").querySelector('[role="status"].solana-notice')?.textContent, "Too many Solana strategy changes. Try again in 9 seconds.");
+});
 test("resuming buys requires a separate owner signature without changing trading limits", async () => {
   state.runtime.live.programId = PROGRAM;
   respond = async (path, body) => {
@@ -297,7 +348,7 @@ test("resuming buys requires a separate owner signature without changing trading
     if (path === "owner" && body?.stage === "submit") return json({ result: { signature: "resume-proof", status: "finalized" } });
     throw new Error("Unexpected fixture route");
   };
-  await render(); await press("Ask wallet to resume buys");
+  await render(); await ownerPress("Ask wallet to resume buys");
   assert.equal(signCount, 1);
   assert.equal(calls.some((call) => call.path === "settings"), false);
   assert.match(ui.container.textContent!, /drawdown still exceeds your limit/);
@@ -429,6 +480,10 @@ test("a prepared permission that encodes anything but the shown limits never rea
 });
 
 const refusal = (error: string, status = 409) => json({ error, ownerFacing: true }, status);
+/** A refusal the server marks as having saved and sent nothing for this request (solanaResponse's notSaved). */
+const unsaved = (error: string, status = 409) => json({ error, ownerFacing: true, notSaved: true }, status);
+/** Signed wire bytes the server records by their owner signature (signatureOf), and that signature. */
+const WIRE = Uint8Array.from([1, ...new Uint8Array(64).fill(7), 9, 9, 9]), WIRE_SIGNATURE = base58Encode(new Uint8Array(64).fill(7));
 test("a refused owner submission discards the stale signed bytes and leaves Revoke usable", async () => {
   state.runtime.live.programId = PROGRAM;
   respond = async (path, body) => {
@@ -436,18 +491,18 @@ test("a refused owner submission discards the stale signed bytes and leaves Revo
     if (path === "owner" && body?.stage === "prepare") return prepareAnswer(body);
     if (path === "owner" && body?.stage === "submit") {
       const prepared = calls.filter((call) => call.path === "owner" && call.body?.stage === "prepare");
-      if (prepared.at(-1)!.body!.action === "withdraw") return refusal("The prepared owner transaction expired before submission.");
+      if (prepared.at(-1)!.body!.action === "withdraw") return unsaved("The prepared owner transaction expired before submission.");
       return json({ result: { signature: "revoke-proof", status: "finalized" } });
     }
     throw new Error("Unexpected fixture route");
   };
-  await render(); await press("Withdraw to my wallet");
+  await render(); await ownerPress("Withdraw to my wallet");
   assert.equal(signCount, 1);
   assert.match(ui.container.textContent!, /expired before submission\. This signed withdrawal was not accepted and has been discarded/);
   assert.equal([...ui.container.querySelectorAll("button")].some((item) => item.textContent === "Check existing owner transaction"), false);
   assert.equal(button("Revoke all Solana sessions").disabled, false);
   assert.equal(button("Withdraw to my wallet").disabled, false);
-  await press("Revoke all Solana sessions");
+  await ownerPress("Revoke all Solana sessions");
   assert.equal(signCount, 2);
   const owner = calls.filter((call) => call.path === "owner").map((call) => call.body!.stage === "prepare" ? `prepare:${call.body!.action}` : "submit");
   assert.deepEqual(owner, ["prepare:withdraw", "submit", "prepare:revoke", "submit"]);
@@ -471,13 +526,13 @@ test("withdrawal bytes the server never saved do not hold back Revoke: the revoc
     }
     throw new Error("Unexpected fixture route");
   };
-  await render(); await press("Withdraw to my wallet");
+  await render(); await ownerPress("Withdraw to my wallet");
   assert.equal(button("Check existing owner transaction").disabled, false);
   assert.equal(button("Withdraw to my wallet").disabled, true);
   assert.equal(button("Ask wallet to resume buys").disabled, true);
   assert.equal(button("Revoke all Solana sessions").disabled, false);
   assert.match(ui.container.textContent!, /Revoking stays available: if the server never saved this withdrawal, a revocation replaces it and it can no longer be sent; if the server saved it, a revocation can be prepared once it is final or expired/);
-  await press("Revoke all Solana sessions");
+  await ownerPress("Revoke all Solana sessions");
   // A fresh revocation was prepared and signed; the withdrawal bytes were not resent as a revoke.
   assert.equal(signCount, 2);
   assert.deepEqual(ownerCalls(), ["prepare:withdraw", "submit", "prepare:revoke", "submit"]);
@@ -495,7 +550,7 @@ test("signed bytes the server never saved, next to a different pending server re
     if (path === "owner" && body?.stage === "submit") throw new Error("Lost response");
     throw new Error("Unexpected fixture route");
   };
-  await render(); await press("Withdraw to my wallet");
+  await render(); await ownerPress("Withdraw to my wallet");
   assert.match(ui.container.textContent!, /Revoking stays available/);
   // Another device's resume request is saved and pending on the server: Revoke waits for it, and the page says so.
   ownerTransaction("other-device-sig", "pending", "resume-buys");
@@ -527,7 +582,7 @@ test("while the server holds a submitted owner transaction, every owner action w
     }
     throw new Error("Unexpected fixture route");
   };
-  await render(); await press("Withdraw to my wallet");
+  await render(); await ownerPress("Withdraw to my wallet");
   const text = () => ui.container.textContent!;
   assert.match(text(), /A signed withdrawal is awaiting final confirmation on Solana\. Until it is final or expired, no other owner transaction can be prepared, a revocation included/);
   for (const name of ["Revoke all Solana sessions", "Ask wallet to resume buys", "Withdraw to my wallet", "Withdraw native SOL"]) assert.equal(button(name).disabled, true, name);
@@ -539,7 +594,7 @@ test("while the server holds a submitted owner transaction, every owner action w
   assert.match(text(), /Owner transaction: finalized/);
   assert.doesNotMatch(text(), /awaiting final confirmation/);
   assert.equal(button("Revoke all Solana sessions").disabled, false);
-  await press("Revoke all Solana sessions");
+  await ownerPress("Revoke all Solana sessions");
   assert.equal(signCount, 2);
   assert.deepEqual(ownerCalls(), ["prepare:withdraw", "submit", "submit", "prepare:revoke", "submit"]);
 });
@@ -555,7 +610,7 @@ test("a Revoke pressed before the page knew of a pending owner transaction is re
   await render();
   // Another device submitted a permission registration after this page last read the status.
   ownerTransaction("permission-sig", "pending", "session");
-  await press("Revoke all Solana sessions");
+  await ownerPress("Revoke all Solana sessions");
   const text = () => ui.container.textContent!;
   assert.equal(signCount, 0, "the wallet never opened");
   assert.match(text(), /Refresh the pending owner transaction before preparing another\./);
@@ -591,7 +646,7 @@ test("a 4xx on a re-check of accepted withdrawal bytes keeps them and reports th
     }
     throw new Error("Unexpected fixture route");
   };
-  await render(); await press("Withdraw to my wallet");
+  await render(); await ownerPress("Withdraw to my wallet");
   assert.match(ui.container.textContent!, /Owner transaction: pending/);
   await press("Check existing owner transaction");
   const text = ui.container.textContent!;
@@ -625,7 +680,7 @@ test("a 4xx after an unknown outcome clears bytes the server holds no record of,
     throw new Error("Unexpected fixture route");
   };
   signedBytes = () => wire;
-  await render(); await press("Withdraw to my wallet");
+  await render(); await ownerPress("Withdraw to my wallet");
   assert.equal(button("Withdraw to my wallet").disabled, true);
   await press("Check existing owner transaction");
   const text = ui.container.textContent!;
@@ -650,13 +705,83 @@ test("a refused retry keeps the signed bytes when the server's record cannot be 
     }
     throw new Error("Unexpected fixture route");
   };
-  await render(); await press("Withdraw to my wallet"); await press("Check existing owner transaction");
+  await render(); await ownerPress("Withdraw to my wallet"); await press("Check existing owner transaction");
   assert.doesNotMatch(ui.container.textContent!, /not accepted|discarded|cleared/);
   assert.match(ui.container.textContent!, /An earlier submission of this signed withdrawal may already be on Solana, so it was kept\. This does not mean it failed/);
   assert.equal(button("Check existing owner transaction").disabled, false);
   assert.equal(button("Withdraw to my wallet").disabled, true);
 });
 
+test("a first owner submission refused without notSaved is decided by the server's record, never assumed unsaved", async () => {
+  state.runtime.live.programId = PROGRAM;
+  signedBytes = () => WIRE;
+  let submits = 0, record: "pending" | "unheld" | "unreadable" = "pending", statusUp = true;
+  respond = async (path, body) => {
+    if (path === "status") return statusUp ? json(state) : json({ error: "Solana is temporarily unavailable.", ownerFacing: true }, 503);
+    if (path === "owner" && body?.stage === "prepare") return prepareAnswer(body);
+    if (path === "owner" && body?.stage === "submit") {
+      submits++;
+      if (record === "pending" && submits === 1) { ownerTransaction(WIRE_SIGNATURE, "pending", "withdraw"); return refusal("This request conflicts with an owner transaction that was just recorded."); }
+      if (record === "pending") return json({ result: { signature: WIRE_SIGNATURE, status: "finalized" } });
+      if (record === "unreadable" && submits === 1) { statusUp = false; return refusal("This request conflicts with an owner transaction that was just recorded."); }
+      if (record === "unreadable") return unsaved("Another owner transaction is already saved.");
+      return refusal("This request conflicts with an owner transaction that was just recorded.");
+    }
+    throw new Error("Unexpected fixture route");
+  };
+  // The server holds these bytes as pending: they are kept, and checking them again settles them.
+  await render(); await ownerPress("Withdraw to my wallet");
+  assert.doesNotMatch(ui.container.textContent!, /not accepted|discarded|cleared/);
+  assert.match(ui.container.textContent!, /just recorded\. The server holds this signed withdrawal and still records it as awaiting confirmation, so it was kept/);
+  await press("Check existing owner transaction");
+  assert.match(ui.container.textContent!, /Owner transaction: finalized/);
+  assert.equal(signCount, 1); assert.deepEqual(ownerCalls(), ["prepare:withdraw", "submit", "submit"]);
+  // The server's record cannot be read: kept, and the next refusal is a retry.
+  await ui.close(); ui = testDom(); state = initial(); state.runtime.live.programId = PROGRAM; calls = []; submits = 0; record = "unreadable"; statusUp = true;
+  await render(); await ownerPress("Withdraw to my wallet");
+  assert.doesNotMatch(ui.container.textContent!, /not accepted|discarded|cleared/);
+  assert.match(ui.container.textContent!, /The server could not say whether it saved this signed withdrawal, so it was kept\. This does not mean it failed/);
+  assert.equal(button("Check existing owner transaction").disabled, false);
+  // It may have been saved, so the next submission is a retry: a notSaved answer to it no longer drops bytes the server holds.
+  ownerTransaction(WIRE_SIGNATURE, "pending", "withdraw"); statusUp = true;
+  await press("Check existing owner transaction");
+  assert.doesNotMatch(ui.container.textContent!, /not accepted|discarded|cleared/);
+  assert.match(ui.container.textContent!, /already saved\. The server holds this signed withdrawal and still records it as awaiting confirmation, so it was kept/);
+  // The server holds no record of them: discarded, and the owner starts again.
+  await ui.close(); ui = testDom(); state = initial(); state.runtime.live.programId = PROGRAM; calls = []; submits = 0; record = "unheld"; statusUp = true;
+  await render(); await ownerPress("Withdraw to my wallet");
+  assert.match(ui.container.textContent!, /just recorded\. The server holds no record of this signed withdrawal, so it has been discarded\. Start it again to review and sign a new one\./);
+  assert.equal([...ui.container.querySelectorAll("button")].some((item) => item.textContent === "Check existing owner transaction"), false);
+  assert.equal(button("Withdraw to my wallet").disabled, false);
+});
+test("a refused retry marked notSaved still keeps bytes the server's record holds, and never says they were not sent", async () => {
+  state.runtime.live.programId = PROGRAM;
+  signedBytes = () => WIRE;
+  let submits = 0;
+  respond = async (path, body) => {
+    if (path === "status") return json(state);
+    if (path === "owner" && body?.stage === "prepare") return prepareAnswer(body);
+    if (path === "owner" && body?.stage === "submit") {
+      // The first submission was saved and broadcast, but its answer was lost.
+      if (++submits === 1) { ownerTransaction(WIRE_SIGNATURE, "pending", "withdraw"); throw new Error("Lost response"); }
+      // This request saved nothing: it says nothing about the first one.
+      return unsaved("Another owner transaction is already saved.");
+    }
+    throw new Error("Unexpected fixture route");
+  };
+  await render(); await ownerPress("Withdraw to my wallet"); await press("Check existing owner transaction");
+  const text = ui.container.textContent!;
+  assert.doesNotMatch(text, /not accepted|discarded|cleared|nothing was sent/i);
+  assert.match(text, /already saved\. The server holds this signed withdrawal and still records it as awaiting confirmation, so it was kept/);
+  assert.equal(button("Check existing owner transaction").disabled, false);
+  assert.equal(button("Withdraw to my wallet").disabled, true);
+  // Once the server's record is someone else's, the bytes are cleared, still without "not sent", and the owner is told to check before starting again.
+  ownerTransaction("another-sig", "finalized", "revoke");
+  await press("Check existing owner transaction");
+  assert.doesNotMatch(ui.container.textContent!, /not accepted|nothing was sent/i);
+  assert.match(ui.container.textContent!, /The server holds no record of this signed withdrawal, so it was cleared and cannot be resent\. If an earlier submission reached Solana, its result shows on Solana and in your vault balances\. Check there before starting it again to review and sign a new one\./);
+  assert.equal(signCount, 1);
+});
 test("a 404 or a sign-in answer to signed owner bytes is not a refusal: the bytes are kept", async () => {
   state.runtime.live.programId = PROGRAM;
   const answers = [refusal("Solana trading is not available.", 404), refusal("Your sign-in expired.", 401), refusal("Too many requests.", 429), refusal("Your sign-in does not match this Solana account.", 403), refusal("Request timed out.", 408)];
@@ -666,7 +791,7 @@ test("a 404 or a sign-in answer to signed owner bytes is not a refusal: the byte
     if (path === "owner" && body?.stage === "submit") return answers.shift()!;
     throw new Error("Unexpected fixture route");
   };
-  await render(); await press("Withdraw to my wallet");
+  await render(); await ownerPress("Withdraw to my wallet");
   for (let i = 0; i < 4; i++) {
     assert.doesNotMatch(ui.container.textContent!, /not accepted|discarded|cleared/);
     assert.equal(button("Check existing owner transaction").disabled, false);
@@ -711,6 +836,36 @@ test("a 4xx on a re-check of an accepted permission keeps its bytes and session 
   assert.equal(base58Encode(ed25519.getPublicKey(seed)), sessionPublicKey);
 });
 
+test("a permission submit refused without notSaved, or a notSaved retry, keeps a permission the server holds and its session key", async () => {
+  state = initial("live"); state.runtime.live.programId = PROGRAM;
+  const saved = liveLimits(); state.binding.limits = saved;
+  signedBytes = () => WIRE;
+  let sessionPublicKey = "", submits = 0;
+  let activation: Record<string, unknown> | undefined;
+  respond = async (path, body) => {
+    if (path === "status") return json(state);
+    if (path === "setup" && body?.stage === "prepare") { sessionPublicKey = String(body.sessionPublicKey); return json({ setup: await permissionTransaction(sessionPublicKey, saved) }); }
+    if (path === "setup" && body?.stage === "submit") {
+      submits++;
+      // The server saved these bytes, then refused without saying it saved nothing.
+      if (submits === 1) { ownerTransaction(WIRE_SIGNATURE, "pending", "session"); return refusal("This request conflicts with an owner transaction that was just recorded."); }
+      // A retry refused as notSaved: this request saved nothing, the first one did.
+      if (submits === 2) return unsaved("Another owner transaction is already saved.");
+      return json({ registration: { signature: WIRE_SIGNATURE, status: "finalized" } });
+    }
+    if (path === "setup" && body?.stage === "activate") { activation = body; return json({ live: { registered: true } }); }
+    throw new Error("Unexpected fixture route");
+  };
+  await render(); await register();
+  assert.doesNotMatch(ui.container.textContent!, /not accepted|discarded|nothing was activated/);
+  assert.match(ui.container.textContent!, /The server holds this signed permission and still records it as awaiting final confirmation, so its session key was kept/);
+  await press("Finish permission registration");
+  assert.doesNotMatch(ui.container.textContent!, /not accepted|discarded|nothing was activated/);
+  assert.match(ui.container.textContent!, /already saved\. The server holds this signed permission and still records it as awaiting final confirmation, so its session key was kept/);
+  await press("Finish permission registration");
+  assert.equal(signCount, 1);
+  assert.equal(base58Encode(ed25519.getPublicKey(Buffer.from(String(activation!.sessionSecretKey), "base64"))), sessionPublicKey);
+});
 test("a refused permission retry the server holds no record of is cleared without claiming it was never sent", async () => {
   state = initial("live"); state.runtime.live.programId = PROGRAM;
   const saved = liveLimits(); state.binding.limits = saved;
@@ -771,7 +926,7 @@ test("a refused permission submit discards the signed bytes and the next click p
     if (path === "status") return json(state);
     if (path === "setup" && body?.stage === "prepare") { sessions.push(String(body.sessionPublicKey)); return json({ setup: await permissionTransaction(sessions.at(-1)!, saved) }); }
     if (path === "setup" && body?.stage === "submit") {
-      if (sessions.length === 1) return refusal("The prepared owner transaction expired before submission.");
+      if (sessions.length === 1) return unsaved("The prepared owner transaction expired before submission.");
       return json({ registration: { signature: "fixture-chain-signature", status: "finalized" } });
     }
     if (path === "setup" && body?.stage === "activate") { activation = body; return json({ live: { registered: true } }); }
@@ -811,22 +966,32 @@ test("a registration that later fails on chain is discarded instead of being act
 });
 
 test("a held permission that expires before activation is discarded without resubmitting it", async () => {
-  state = initial("live"); state.runtime.live.programId = PROGRAM;
-  const saved = { ...liveLimits(), expiresAtMs: Date.now() + 400 }; state.binding.limits = saved;
-  respond = async (path, body) => {
-    if (path === "status") return json(state);
-    if (path === "setup" && body?.stage === "prepare") return json({ setup: await permissionTransaction(String(body.sessionPublicKey), saved) });
-    if (path === "setup" && body?.stage === "submit") return json({ registration: { signature: "fixture-chain-signature", status: "pending" } });
-    throw new Error("Unexpected fixture route");
-  };
-  await render(); await register();
-  assert.match(ui.container.textContent!, /awaiting final confirmation/);
-  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 500)); });
-  await press("Finish permission registration");
-  assert.match(ui.container.textContent!, /This permission expired at .* before it was activated, so its session key has been discarded/);
-  assert.equal(calls.filter((call) => call.path === "setup" && call.body?.stage === "submit").length, 1);
-  assert.equal(calls.some((call) => call.body?.stage === "activate"), false);
-  assert.equal([...ui.container.querySelectorAll("button")].some((item) => item.textContent === "Finish permission registration"), false);
+  // The page's clock is the test's: the permission expires when the test ticks
+  // past it, never while a loaded machine is still registering it.
+  mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"], now: Date.now() });
+  try {
+    state = initial("live"); state.runtime.live.programId = PROGRAM;
+    const saved = { ...liveLimits(), expiresAtMs: Date.now() + 400 }; state.binding.limits = saved;
+    respond = async (path, body) => {
+      if (path === "status") return json(state);
+      if (path === "setup" && body?.stage === "prepare") return json({ setup: await permissionTransaction(String(body.sessionPublicKey), saved) });
+      if (path === "setup" && body?.stage === "submit") return json({ registration: { signature: "fixture-chain-signature", status: "pending" } });
+      throw new Error("Unexpected fixture route");
+    };
+    await render(); await register();
+    assert.match(ui.container.textContent!, /awaiting final confirmation/);
+    // Still held before its expiry: finishing it submits the same bytes again.
+    await act(async () => { mock.timers.tick(399); });
+    await press("Finish permission registration");
+    assert.match(ui.container.textContent!, /awaiting final confirmation/);
+    assert.equal(calls.filter((call) => call.path === "setup" && call.body?.stage === "submit").length, 2);
+    await act(async () => { mock.timers.tick(1); });
+    await press("Finish permission registration");
+    assert.match(ui.container.textContent!, /This permission expired at .* before it was activated, so its session key has been discarded/);
+    assert.equal(calls.filter((call) => call.path === "setup" && call.body?.stage === "submit").length, 2);
+    assert.equal(calls.some((call) => call.body?.stage === "activate"), false);
+    assert.equal([...ui.container.querySelectorAll("button")].some((item) => item.textContent === "Finish permission registration"), false);
+  } finally { mock.timers.reset(); }
 });
 
 test("a confirmed permission the server no longer holds drops its session key instead of retrying", async () => {
@@ -849,28 +1014,414 @@ const quoteFor = (lifetimeMs: number, quotedAtMs = Date.now()) => ({ source: "ju
   minOutAmount: "9950000", slippageBps: 50, contextSlot: 1, quotedAtMs, expiresAtMs: quotedAtMs + lifetimeMs });
 test("a previewed minimum expires with its quote and the trade needs a new preview", async () => {
   state.runtime.paper = paper;
-  let lifetime = 200;
-  const trades: Record<string, unknown>[] = [];
+  // The page's clock and its expiry timer are the test's: the expiry is asserted
+  // at an exact instant, never against a real sleep and the machine's load.
+  mock.timers.enable({ apis: ["setTimeout", "Date"], now: Date.now() });
+  try {
+    const lifetime = 20_000;
+    const trades: Record<string, unknown>[] = [];
+    respond = async (path, body) => {
+      if (path === "status") return json(state);
+      if (path === "intent" && body?.action === "preview") return json({ preview: { quote: quoteFor(lifetime) } });
+      if (path === "intent" && body?.action === "trade") { trades.push(body); return json({ receipt: { mode: "paper", requestId: (body.intent as { requestId: string }).requestId } }); }
+      throw new Error("Unexpected fixture route");
+    };
+    await render(); await ui.click("Preview trade");
+    assert.match(ui.container.textContent!, /Minimum received: 0\.00995 wrapped SOL/);
+    assert.equal(button("Simulate trade").disabled, false);
+    // The page re-renders when the quote's lifetime has passed (its timer fires a millisecond after).
+    await act(async () => { mock.timers.tick(lifetime + 1); });
+    // Its minimum is no longer offered and nothing can be traded on it.
+    assert.ok(!ui.container.textContent!.includes("Minimum received"));
+    assert.match(ui.container.textContent!, /This quote expired\. Preview again/);
+    assert.equal([...ui.container.querySelectorAll("button")].some((item) => item.textContent === "Simulate trade"), false);
+    assert.equal(trades.length, 0);
+    await ui.click("Preview trade"); await ui.click("Simulate trade");
+    assert.equal(trades.length, 1);
+    // The trade carries exactly the minimum the owner was shown: the server refuses it, sending nothing, below that.
+    assert.equal((trades[0]!.intent as { minOutAmount?: string }).minOutAmount, "9950000");
+  } finally { mock.timers.reset(); }
+});
+test("a quote's time left is said in whole seconds, and one second is never \"1 seconds\"", () => onTestClock(async () => {
+  state.runtime.paper = paper;
+  let lifetime = 20_000;
   respond = async (path, body) => {
     if (path === "status") return json(state);
     if (path === "intent" && body?.action === "preview") return json({ preview: { quote: quoteFor(lifetime) } });
+    throw new Error("Unexpected fixture route");
+  };
+  await render(); await ui.click("Preview trade");
+  assert.match(ui.container.textContent!, /This quote is valid for about 20 seconds\. The trade is quoted again/);
+  lifetime = 1_000;
+  await ui.click("Preview trade");
+  assert.match(ui.container.textContent!, /This quote is valid for about 1 second\. The trade is quoted again/);
+}));
+test("a trade carries the minimum of its own preview, and nothing is sent without a current preview of exactly that trade", async () => {
+  state.runtime.paper = paper;
+  const trades: Record<string, unknown>[] = [];
+  let minimum = "9950000";
+  respond = async (path, body) => {
+    if (path === "status") return json(state);
+    if (path === "intent" && body?.action === "preview") {
+      const intent = body.intent as { amountRaw: string };
+      return json({ preview: { quote: { ...quoteFor(20_000), inAmount: intent.amountRaw, minOutAmount: minimum } } });
+    }
     if (path === "intent" && body?.action === "trade") { trades.push(body); return json({ receipt: { mode: "paper", requestId: (body.intent as { requestId: string }).requestId } }); }
     throw new Error("Unexpected fixture route");
   };
   await render(); await ui.click("Preview trade");
-  assert.match(ui.container.textContent!, /Minimum received: 0\.00995 wrapped SOL/);
   assert.equal(button("Simulate trade").disabled, false);
-  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 300)); });
-  // The quote's lifetime has passed: its minimum is no longer offered and nothing can be traded on it.
-  assert.ok(!ui.container.textContent!.includes("Minimum received"));
-  assert.match(ui.container.textContent!, /This quote expired\. Preview again/);
+  // A different amount drops the preview: its minimum belonged to another trade.
+  await type("USDG to spend", "2");
   assert.equal([...ui.container.querySelectorAll("button")].some((item) => item.textContent === "Simulate trade"), false);
+  assert.doesNotMatch(ui.container.textContent!, /Minimum received/);
   assert.equal(trades.length, 0);
-  lifetime = 20_000;
+  // The new amount's own preview, and its own minimum, travel with its trade.
+  minimum = "19900000";
   await ui.click("Preview trade"); await ui.click("Simulate trade");
   assert.equal(trades.length, 1);
+  const intent = trades[0]!.intent as { amountRaw: string; minOutAmount?: string };
+  assert.equal(intent.amountRaw, "2000000"); assert.equal(intent.minOutAmount, "19900000");
 });
 
+test("the Solana fetch keeps a refusal's validated notSaved and freshMinOutAmount, and otherwise answers as requestJson does", async () => {
+  const { SolanaRequestError, refusedByServer } = await import("./SolanaOwnerActions");
+  const { RequestError, UNREACHABLE } = await import("./request-json");
+  const answer = (response: () => Response) => { globalThis.fetch = async () => response(); return screen.solanaRequestJson<unknown>("/api/solana/intent", { method: "POST", body: "{}" }).then(() => null, (e: unknown) => e); };
+  const moved = await answer(() => json({ error: "The price moved. Preview again; nothing was sent.", ownerFacing: true, freshMinOutAmount: "9000000" }, 409)) as InstanceType<typeof SolanaRequestError>;
+  assert.ok(moved instanceof SolanaRequestError); assert.ok(moved instanceof RequestError); assert.ok(refusedByServer(moved));
+  assert.equal(moved.status, 409); assert.equal(moved.message, "The price moved. Preview again; nothing was sent."); assert.equal(moved.freshMinOutAmount, "9000000"); assert.equal(moved.notSaved, false);
+  const unsaved = await answer(() => json({ error: "Nothing prepared.", ownerFacing: true, notSaved: true }, 409)) as InstanceType<typeof SolanaRequestError>;
+  assert.equal(unsaved.notSaved, true); assert.equal(unsaved.freshMinOutAmount, null);
+  // Anything but the exact shapes reads as absent.
+  for (const [notSaved, fresh] of [["true", "0"], [1, "09000000"], [null, 9000000], [{}, "9e6"], [false, "9000000.0"], [[true], " 9000000"], [undefined, "1".repeat(40)], [undefined, "-1"]] as const) {
+    const odd = await answer(() => json({ error: "Refused.", ownerFacing: true, notSaved, freshMinOutAmount: fresh }, 409)) as InstanceType<typeof SolanaRequestError>;
+    assert.equal(odd.notSaved, false, JSON.stringify(notSaved)); assert.equal(odd.freshMinOutAmount, null, JSON.stringify(fresh));
+  }
+  // No answer, an answer that is not JSON, an unexplained 5xx, and success: requestJson's sentences.
+  const none = await answer(() => { throw new TypeError("network down"); }) as InstanceType<typeof SolanaRequestError>;
+  assert.equal(none.status, 0); assert.equal(none.message, UNREACHABLE);
+  const proxy = await answer(() => new Response("<html>bad gateway</html>", { status: 502, headers: { "content-type": "text/html" } })) as Error & { status: number };
+  assert.equal(proxy.status, 502); assert.equal(proxy.message, "merrymen answered with an error (502). Try again in a moment.");
+  const warn = mock.method(console, "warn", () => undefined);
+  try {
+    const hidden = await answer(() => json({ error: "internal detail" }, 503)) as Error & { status: number };
+    assert.equal(hidden.message, "merrymen answered with an error (503). Try again in a moment."); assert.equal(warn.mock.callCount(), 1);
+  } finally { warn.mock.restore(); }
+  const owned = await answer(() => json({ error: "Solana is temporarily unavailable.", ownerFacing: true }, 503)) as Error;
+  assert.equal(owned.message, "Solana is temporarily unavailable.");
+  const text = await answer(() => new Response("ok", { status: 200 })) as Error & { status: number };
+  assert.equal(text.message, "merrymen sent back something that isn't data. Try again in a moment.");
+  globalThis.fetch = async () => json({ preview: 1 });
+  assert.deepEqual(await screen.solanaRequestJson("/api/solana/intent"), { preview: 1 });
+  // A caller's cancellation reaches the request.
+  const abort = new AbortController(); let seen: AbortSignal | undefined;
+  globalThis.fetch = async (_url, init) => { seen = init?.signal ?? undefined; abort.abort(); throw new DOMException("aborted", "AbortError"); };
+  const cancelled = await screen.solanaRequestJson("/api/solana/status", { signal: abort.signal }).then(() => null, (e: unknown) => e as Error & { status: number });
+  assert.equal(seen?.aborted, true); assert.equal(cancelled!.status, 0);
+});
+test("a paced preview or trade (429) is a wait, not a failure: nothing more is sent and the preview stays", async () => {
+  state.runtime.paper = paper;
+  const trades: Record<string, unknown>[] = [];
+  let pacePreview = true, paceTrade = true;
+  respond = async (path, body) => {
+    if (path === "status") return json(state);
+    if (path === "intent" && body?.action === "preview") return pacePreview ? json({ error: "Too many Solana previews. Try again in 3 seconds.", ownerFacing: true }, 429) : json({ preview: { quote: quoteFor(20_000) } });
+    if (path === "intent" && body?.action === "trade") {
+      trades.push(body);
+      if (paceTrade) return json({ error: "Too many Solana trade requests. This request was not processed; a trade you already placed is unaffected. Refresh to check it, then try again in 2 seconds.", ownerFacing: true }, 429);
+      return json({ receipt: { mode: "paper", requestId: (body.intent as { requestId: string }).requestId } });
+    }
+    throw new Error("Unexpected fixture route");
+  };
+  // Text, never the node: a failed assertion must not inspect a whole DOM.
+  const alert = () => ui.container.querySelector('[role="alert"]')?.textContent ?? null;
+  await render(); await ui.click("Preview trade");
+  assert.equal(alert(), null);
+  assert.equal(ui.container.querySelector(".solana-notice[role=status]")?.textContent, "Too many Solana previews. Try again in 3 seconds.");
+  assert.equal(calls.filter((call) => call.path === "intent").length, 1);
+  pacePreview = false;
+  await ui.click("Preview trade");
+  assert.equal(ui.container.querySelector(".solana-notice")?.textContent ?? null, null, "the next request clears the wait");
+  await ui.click("Simulate trade");
+  assert.equal(alert(), null);
+  assert.match(ui.container.querySelector(".solana-notice[role=status]")!.textContent!, /^Too many Solana trade requests\. This request was not processed/);
+  assert.equal(trades.length, 1);
+  // The preview the owner saw is still there, to try again with the same request and minimum.
+  assert.match(ui.container.textContent!, /Minimum received: 0\.00995 wrapped SOL/);
+  assert.equal(button("Simulate trade").disabled, false);
+  paceTrade = false;
+  await ui.click("Simulate trade");
+  assert.equal(trades.length, 2); assert.deepEqual(trades[1], trades[0]);
+  assert.match(ui.container.textContent!, /Simulated trade recorded/);
+});
+const PRICE_MOVED = "The price moved. Preview again; nothing was sent.";
+test("the page's price-moved and too-small sentences, and its write-off slippage, are the server's own", async () => {
+  const api = readFileSync(fileURLToPath(new URL("../lib/solana-api.ts", import.meta.url)), "utf8");
+  assert.equal(screen.SOLANA_PRICE_MOVED, PRICE_MOVED);
+  assert.ok(api.includes(`const PRICE_MOVED = "${screen.SOLANA_PRICE_MOVED}";`), "solana-api.ts's PRICE_MOVED");
+  assert.ok(api.includes(`const TOO_SMALL = "${screen.SOLANA_TOO_SMALL}";`), "solana-api.ts's TOO_SMALL");
+  const { SOLANA_PAPER_WRITE_OFF_SLIPPAGE_BPS } = await import("../../../worker/src/solana-paper-store");
+  assert.equal(screen.SOLANA_WRITE_OFF_SLIPPAGE_BPS, SOLANA_PAPER_WRITE_OFF_SLIPPAGE_BPS);
+});
+test("a price-moved refusal drops the stale preview and offers the fresh minimum only for the owner's own click, as the same request", async () => {
+  state.runtime.paper = paper;
+  const trades: Record<string, unknown>[] = [];
+  let answers: Array<() => Response> = [];
+  respond = async (path, body) => {
+    if (path === "status") return json(state);
+    if (path === "intent" && body?.action === "preview") return json({ preview: { quote: quoteFor(20_000) } });
+    if (path === "intent" && body?.action === "trade") { trades.push(body); return answers.shift()!(); }
+    throw new Error("Unexpected fixture route");
+  };
+  const moved = (fresh?: unknown) => () => json({ error: PRICE_MOVED, ownerFacing: true, ...(fresh === undefined ? {} : { freshMinOutAmount: fresh }) }, 409);
+  const alert = () => ui.container.querySelector('[role="alert"]')?.textContent ?? null;
+  const offer = () => [...ui.container.querySelectorAll("button")].find((item) => item.textContent === "Simulate trade at the new minimum");
+  answers = [moved("9000000")];
+  await render(); await ui.click("Preview trade"); await ui.click("Simulate trade");
+  assert.equal(trades.length, 1); assert.equal((trades[0]!.intent as { minOutAmount: string }).minOutAmount, "9950000");
+  // Nothing went wrong and nothing was sent: no alert, and the refused minimum is never offered again.
+  assert.equal(alert(), null);
+  assert.equal([...ui.container.querySelectorAll("button")].some((item) => item.textContent === "Simulate trade"), false);
+  assert.match(ui.container.textContent!, /The price moved, so nothing was sent\. The current quote guarantees at least 0\.009 wrapped SOL, below the 0\.00995 wrapped SOL you previewed\./);
+  assert.doesNotMatch(ui.container.textContent!, /Minimum received/);
+  // Nothing more is sent until the owner clicks.
+  await settle();
+  assert.equal(trades.length, 1);
+  assert.equal(offer()!.disabled, false);
+  // The click sends exactly the fresh minimum, as the same trade: same request ID, same amount.
+  answers = [() => json({ receipt: { mode: "paper", requestId: (trades[0]!.intent as { requestId: string }).requestId } })];
+  await ui.click("Simulate trade at the new minimum");
+  assert.equal(trades.length, 2);
+  const [first, second] = trades.map((trade) => trade.intent as Record<string, unknown>);
+  assert.equal(second!.minOutAmount, "9000000");
+  assert.deepEqual({ ...second, minOutAmount: undefined }, { ...first, minOutAmount: undefined });
+  assert.match(ui.container.textContent!, /Simulated trade recorded/);
+  // If it moves again, the server refuses again, and the next fresh minimum is offered against the one just refused.
+  await ui.click("Start a new trade"); await ui.click("Preview trade");
+  answers = [moved("9500000"), moved("9400000")];
+  await ui.click("Simulate trade"); await ui.click("Simulate trade at the new minimum");
+  assert.equal(trades.length, 4);
+  assert.equal((trades[3]!.intent as { minOutAmount: string }).minOutAmount, "9500000");
+  assert.match(ui.container.textContent!, /guarantees at least 0\.0094 wrapped SOL, below the 0\.0095 wrapped SOL you previewed/);
+  assert.equal(trades.length, 4);
+});
+test("a price-moved refusal without a usable fresh minimum offers nothing to trade: preview again", async () => {
+  state.runtime.paper = paper;
+  const trades: Record<string, unknown>[] = [];
+  let fresh: unknown;
+  respond = async (path, body) => {
+    if (path === "status") return json(state);
+    if (path === "intent" && body?.action === "preview") return json({ preview: { quote: quoteFor(20_000) } });
+    if (path === "intent" && body?.action === "trade") { trades.push(body); return json({ error: PRICE_MOVED, ownerFacing: true, freshMinOutAmount: fresh }, 409); }
+    throw new Error("Unexpected fixture route");
+  };
+  await render();
+  // Missing, malformed, not canonical, or not below the refused minimum of 9950000: never offered.
+  for (const value of [undefined, "0", "09000000", "-9000000", "9e6", "9000000.0", " 9000000", 9_000_000, "1".repeat(40), "9950000", "9950001"]) {
+    fresh = value;
+    await ui.click("Preview trade"); await ui.click("Simulate trade");
+    const buttons = [...ui.container.querySelectorAll("button")].map((item) => item.textContent);
+    assert.ok(!buttons.some((text) => text?.startsWith("Simulate trade")), JSON.stringify(value));
+    assert.doesNotMatch(ui.container.textContent!, /Minimum received|new minimum|guarantees at least/);
+    assert.equal(ui.container.querySelector('[role="alert"]')?.textContent ?? null, null);
+    assert.equal(ui.container.querySelector(".solana-notice")?.textContent, PRICE_MOVED);
+  }
+  assert.equal(trades.length, 11);
+});
+test("a fresh minimum expires like a preview, and is then never sent", async () => {
+  state.runtime.paper = paper;
+  mock.timers.enable({ apis: ["setTimeout", "Date"], now: Date.now() });
+  try {
+    const trades: Record<string, unknown>[] = [];
+    respond = async (path, body) => {
+      if (path === "status") return json(state);
+      if (path === "intent" && body?.action === "preview") return json({ preview: { quote: quoteFor(20_000) } });
+      if (path === "intent" && body?.action === "trade") { trades.push(body); return json({ error: PRICE_MOVED, ownerFacing: true, freshMinOutAmount: "9000000" }, 409); }
+      throw new Error("Unexpected fixture route");
+    };
+    await render(); await ui.click("Preview trade"); await ui.click("Simulate trade");
+    assert.ok([...ui.container.querySelectorAll("button")].some((item) => item.textContent === "Simulate trade at the new minimum"));
+    await act(async () => { mock.timers.tick(20_001); });
+    assert.equal([...ui.container.querySelectorAll("button")].some((item) => item.textContent?.startsWith("Simulate trade")), false);
+    assert.match(ui.container.textContent!, /This quote expired\. Preview again/);
+    assert.equal(trades.length, 1);
+  } finally { mock.timers.reset(); }
+});
+const TOO_SMALL = "This amount is too small to trade: no route returns anything for it. Nothing was sent or recorded. Try a larger amount.";
+const BONK = "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263";
+const hasButton = (text: string) => [...ui.container.querySelectorAll("button")].some((item) => item.textContent === text);
+test("a paper lot is offered for write-off only after the market answers its whole sale with zero output, and only once confirmed", async () => {
+  // An ordinary wrapped SOL lot, a wrapped SOL dust lot is what the form sells; another token's lot the form cannot sell.
+  state.runtime.paper = { ...paper, positions: [{ mint: OWNER, decimals: 9, amountRaw: "5", costBasisUsdgRaw: "1" }, { mint: BONK, decimals: 5, amountRaw: "1200", costBasisUsdgRaw: "2" }] } as never;
+  const writeOffs: unknown[] = [];
+  let writeOff: () => Response = () => json({ error: "A route still buys this position back, so it cannot be written off. Sell it instead. Nothing was changed.", ownerFacing: true }, 409);
+  respond = async (path, body) => {
+    if (path === "status") return json(state);
+    if (path === "intent" && body?.action === "preview") {
+      const intent = body.intent as { inputMint: string; amountRaw: string };
+      // The whole wrapped SOL lot and the whole token lot are dust; any other amount is quoted.
+      if ((intent.inputMint === OWNER && intent.amountRaw === "5") || (intent.inputMint === BONK && intent.amountRaw === "1200")) return json({ error: TOO_SMALL, ownerFacing: true }, 400);
+      if (intent.inputMint === OWNER && intent.amountRaw === "4") return json({ error: TOO_SMALL, ownerFacing: true }, 400);
+      return json({ preview: { quote: { ...quoteFor(20_000), inputMint: intent.inputMint, outputMint: SOLANA_USDG_MINT, inAmount: intent.amountRaw } } });
+    }
+    if (path === "paper/write-off") { writeOffs.push(body); return writeOff(); }
+    throw new Error("Unexpected fixture route");
+  };
+  const text = () => ui.container.textContent!;
+  await render();
+  // No write-off for either lot yet; the token lot the form cannot sell can be checked.
+  assert.equal(hasButton("Write off…"), false); assert.equal(hasButton("Write off at zero"), false);
+  assert.equal(hasButton("Check for write-off"), true);
+  assert.equal([...ui.container.querySelectorAll("button")].filter((item) => item.textContent === "Check for write-off").length, 1, "never for the wrapped SOL lot the form sells");
+  // Selling part of the wrapped SOL lot is just too small: no offer.
+  const direction = [...ui.container.querySelectorAll("label")].find((item) => item.textContent?.startsWith("Direction"))!.querySelector("select")!;
+  await act(async () => { direction.value = "sell"; direction.dispatchEvent(new ui.dom.window.Event("change", { bubbles: true })); });
+  await type("Wrapped SOL to sell", "0.000000004");
+  await ui.click("Preview trade");
+  assert.equal(ui.container.querySelector('[role="alert"]')?.textContent, TOO_SMALL);
+  assert.equal(hasButton("Write off…"), false);
+  // Selling all of it: the market quotes nothing, so the lot is offered for write-off instead of "try a larger amount".
+  await type("Wrapped SOL to sell", "0.000000005");
+  await ui.click("Preview trade");
+  assert.equal(ui.container.querySelector('[role="alert"]')?.textContent ?? null, null);
+  assert.match(ui.container.querySelector(".solana-notice")!.textContent!, /No route buys back this whole lot, so it cannot be sold\. Nothing was sent or recorded/);
+  assert.match(text(), /Wrapped SOL: 0\.000000005No route buys back this whole lot: the market quotes nothing for it, so it cannot be sold\./);
+  // Nothing is sent until the owner confirms, and "Keep it" sends nothing.
+  await ui.click("Write off…");
+  assert.match(text(), /Write off this whole lot of 0\.000000005 wrapped SOL\? It is booked at zero: removed from your paper portfolio at no value, which frees its position slot\. This cannot be undone\./);
+  assert.equal(writeOffs.length, 0);
+  await ui.click("Keep it");
+  assert.equal(hasButton("Write off at zero"), false); assert.equal(hasButton("Write off…"), false);
+  assert.equal(writeOffs.length, 0);
+  // Confirmed: exactly the lot's mint, nothing else. The server's refusal is shown in its own words and ends the offer.
+  await ui.click("Preview trade"); await ui.click("Write off…"); await ui.click("Write off at zero");
+  assert.deepEqual(writeOffs, [{ mint: OWNER }]);
+  assert.equal(ui.container.querySelector('[role="alert"]')?.textContent, "A route still buys this position back, so it cannot be written off. Sell it instead. Nothing was changed.");
+  assert.equal(hasButton("Write off at zero"), false); assert.equal(hasButton("Write off…"), false);
+  // The token lot: its check previews selling all of it at the write-off's slippage, records nothing, and offers it.
+  await ui.click("Check for write-off");
+  const check = calls.filter((call) => call.path === "intent").at(-1)!.body!;
+  assert.equal(check.action, "preview"); assert.equal(check.mode, "paper");
+  assert.deepEqual({ ...(check.intent as Record<string, unknown>), requestId: "id" }, { kind: "spl-swap", chain: CHAINS.solana, mode: "paper", requestId: "id", inputMint: BONK,
+    outputMint: SOLANA_USDG_MINT, amountRaw: "1200", slippageBps: 100 });
+  assert.equal(calls.some((call) => call.body?.action === "trade"), false);
+  // A paced write-off is a wait: the offer stays to try again.
+  writeOff = () => json({ error: "Too many Solana paper requests. Nothing was changed. Try again in 4 seconds.", ownerFacing: true }, 429);
+  await ui.click("Write off…"); await ui.click("Write off at zero");
+  assert.equal(ui.container.querySelector('[role="alert"]')?.textContent ?? null, null);
+  assert.equal(ui.container.querySelector(".solana-notice")!.textContent, "Too many Solana paper requests. Nothing was changed. Try again in 4 seconds.");
+  assert.equal(hasButton("Write off at zero"), true);
+  // Written off: the portfolio is read again, and the lot is gone.
+  writeOff = () => { state.runtime.paper = { ...paper, positions: [{ mint: OWNER, decimals: 9, amountRaw: "5", costBasisUsdgRaw: "1" }] } as never; return json({ paper: state.runtime.paper, writtenOff: { mint: BONK } }); };
+  await ui.click("Write off at zero");
+  assert.deepEqual(writeOffs.at(-1), { mint: BONK });
+  assert.doesNotMatch(text(), new RegExp(BONK));
+  assert.match(ui.container.querySelector(".solana-notice")!.textContent!, /written off at zero/);
+});
+test("the write-off offer holds only for the exact lot the market answered: a changed lot is offered nothing until checked again", async () => {
+  state.runtime.paper = { ...paper, positions: [{ mint: BONK, decimals: 5, amountRaw: "1200", costBasisUsdgRaw: "2" }] } as never;
+  respond = async (path, body) => {
+    if (path === "status") return json(state);
+    if (path === "intent" && body?.action === "preview") return json({ error: TOO_SMALL, ownerFacing: true }, 400);
+    throw new Error("Unexpected fixture route");
+  };
+  const grow = async (amountRaw: string) => {
+    state.runtime.paper = { ...paper, positions: [{ mint: BONK, decimals: 5, amountRaw, costBasisUsdgRaw: "2" }] } as never;
+    await ui.click("Refresh account");
+  };
+  await render(); await ui.click("Check for write-off");
+  assert.equal(hasButton("Write off…"), true);
+  // The lot changed after the market's answer: that answer was about another amount, so nothing is offered.
+  await grow("1300");
+  assert.equal(hasButton("Write off…"), false); assert.equal(hasButton("Write off at zero"), false);
+  assert.equal(hasButton("Check for write-off"), true);
+  // The same holds while the owner is confirming.
+  await ui.click("Check for write-off"); await ui.click("Write off…");
+  assert.equal(hasButton("Write off at zero"), true);
+  await grow("1400");
+  assert.equal(hasButton("Write off…"), false); assert.equal(hasButton("Write off at zero"), false);
+  assert.doesNotMatch(ui.container.textContent!, /Write off this whole lot/);
+  assert.equal(calls.some((call) => call.path === "paper/write-off"), false);
+});
+test("a booked write-off says so and shows the lot gone, even when the status read after it is paced or never arrives", async () => {
+  const lot = { mint: BONK, decimals: 5, amountRaw: "1200", costBasisUsdgRaw: "2" };
+  const PACED = "Your Solana account was refreshed too often. Try again in 3 seconds.";
+  // How the status read after the write-off answers, and what the write-off's 200 carries.
+  let after: "paced" | "unreachable" = "paced";
+  let answer: () => unknown = () => ({ paper: { ...paper, version: 4, positions: [] }, writtenOff: { mint: BONK } });
+  let booked = false;
+  respond = async (path, body) => {
+    if (path === "status") {
+      if (!booked) return json(state);
+      if (after === "paced") return json({ error: PACED, ownerFacing: true }, 429);
+      throw new Error("offline");
+    }
+    if (path === "intent" && body?.action === "preview") return json({ error: TOO_SMALL, ownerFacing: true }, 400);
+    if (path === "paper/write-off") { booked = true; return json(answer()); }
+    throw new Error("Unexpected fixture route");
+  };
+  const writeOff = async () => {
+    await ui.click("Check for write-off"); await ui.click("Write off…"); await ui.click("Write off at zero");
+  };
+  for (const [scenario, failure, carries] of [
+    ["paced", PACED, "its book"], ["unreachable", "Can't reach merrymen right now.", "its book"],
+    // An answer without a usable book (none, or one still listing the lot): the shown book drops exactly that lot.
+    ["paced", PACED, "no book"], ["paced", PACED, "the lot"],
+    // A book older than the one shown never replaces it: only the lot is dropped.
+    ["paced", PACED, "an older book"],
+  ] as const) {
+    const label = `${scenario}, ${carries}`;
+    await ui.close(); ui = testDom(); calls = []; booked = false; after = scenario;
+    state.runtime.paper = { ...paper, version: 3, positions: [lot] } as never;
+    answer = carries === "its book" ? () => ({ paper: { ...paper, version: 4, positions: [] }, writtenOff: { mint: BONK } })
+      : carries === "no book" ? () => ({ writtenOff: { mint: BONK } })
+      : carries === "an older book" ? () => ({ paper: { ...paper, cashRaw: "5000000", version: 2, positions: [] }, writtenOff: { mint: BONK } })
+      : () => ({ paper: { ...paper, version: 4, positions: [lot] }, writtenOff: { mint: BONK } });
+    await render(); await writeOff();
+    assert.equal(calls.filter((call) => call.path === "paper/write-off").length, 1, label);
+    assert.equal(calls.at(-1)!.path, "status", label);
+    // The success is said first, the failed read after it, and nothing reads as a failure.
+    assert.equal(ui.container.querySelector('[role="alert"]')?.textContent ?? null, null, label);
+    assert.equal(ui.container.querySelector(".solana-notice")!.textContent,
+      `The lot was written off at zero and removed from your paper portfolio. Your account could not be read again just now: ${failure}`, label);
+    // The lot is gone from the portfolio, with nothing left to check or write off.
+    assert.doesNotMatch(ui.container.textContent!, new RegExp(BONK), label);
+    assert.match(ui.container.textContent!, /Paper portfolio1000 USDGSimulated cash\. 0 open position\(s\)\./, label);
+    assert.equal(hasButton("Check for write-off"), false, label);
+    assert.equal(hasButton("Write off…"), false, label); assert.equal(hasButton("Write off at zero"), false, label);
+  }
+});
+test("with expired saved limits the paper card says a lot can be checked for write-off only after saving new ones", async () => {
+  const expired = Date.UTC(2025, 0, 2, 9, 30, 0);
+  state.runtime.paper = { ...paper, positions: [{ mint: BONK, decimals: 5, amountRaw: "1200", costBasisUsdgRaw: "2" }] } as never;
+  const NOTE = "Your saved limits expired at 2025-01-02 09:30:00 UTC. Checking a lot for write-off previews selling all of it, which needs current limits: save new limits above, then check it.";
+  const notes = () => [...ui.container.querySelectorAll('[role="status"]')].map((item) => item.textContent).filter((text) => /expired|write-off/.test(text ?? ""));
+  // Current limits: no note.
+  await render();
+  assert.deepEqual(notes(), []);
+  // Expired: said once, next to the lots, and the check stays available (the server decides).
+  state.binding.limits = { ...limits, expiresAtMs: expired }; state.runtime.limits = state.binding.limits;
+  await ui.click("Refresh account");
+  assert.deepEqual(notes(), [NOTE]);
+  assert.equal(hasButton("Check for write-off"), true);
+  // No lot held: nothing to check, so no note.
+  state.runtime.paper = { ...paper, positions: [] } as never;
+  await ui.click("Refresh account");
+  assert.deepEqual(notes(), []);
+});
+test("a lot a route still buys is never offered for write-off", async () => {
+  state.runtime.paper = { ...paper, positions: [{ mint: BONK, decimals: 5, amountRaw: "1200", costBasisUsdgRaw: "2" }] } as never;
+  respond = async (path, body) => {
+    if (path === "status") return json(state);
+    if (path === "intent" && body?.action === "preview") return json({ preview: { quote: { ...quoteFor(20_000), inputMint: BONK, outputMint: SOLANA_USDG_MINT, inAmount: "1200" } } });
+    throw new Error("Unexpected fixture route");
+  };
+  await render(); await ui.click("Check for write-off");
+  assert.equal(hasButton("Write off…"), false);
+  assert.equal(ui.container.querySelector(".solana-notice")!.textContent, "A route still buys this whole lot back, so it is not dust and cannot be written off.");
+  assert.equal(calls.some((call) => call.path === "paper/write-off"), false);
+});
 test("a quote that is already past its expiry never offers a trade, whatever the device clock says", async () => {
   state.runtime.paper = paper;
   respond = async (path, body) => {
@@ -1024,10 +1575,10 @@ test("Withdraw native SOL prepares the runtime's withdraw-sol in lamports, and s
   };
   await render();
   await type("Native SOL to withdraw", "1.5");
-  // Shown while the wallet is open on these bytes.
+  // Shown in the review before the wallet opens, and still while it is open on these bytes.
   const wallet = deferred<Uint8Array>();
   signedBytes = () => wallet.promise;
-  await press("Withdraw native SOL");
+  await ownerPress("Withdraw native SOL");
   assert.equal(signCount, 1);
   assert.match(ui.container.textContent!, /The prepared native SOL withdrawal needs your owner wallet to hold at least 0\.00090588 SOL \(it holds 0\.01 SOL\): its network fee, a priority fee of 0\.00001 SOL so it lands under congestion/);
   wallet.resolve(Uint8Array.from([1, 2, 3])); await settle();
@@ -1048,7 +1599,7 @@ test("the owner-controls cost line describes only the action in flight: gone onc
   await render();
   const wallet = deferred<Uint8Array>();
   signedBytes = () => wallet.promise;
-  await press("Revoke all Solana sessions");
+  await ownerPress("Revoke all Solana sessions");
   assert.match(ui.container.textContent!, /The prepared revocation needs your owner wallet to hold at least 0\.00090588 SOL \(it holds 0\.01 SOL\)/);
   // The revocation completes: the line no longer describes anything the server is asking for.
   wallet.resolve(Uint8Array.from([1, 2, 3])); await settle();
@@ -1056,17 +1607,119 @@ test("the owner-controls cost line describes only the action in flight: gone onc
   assert.doesNotMatch(ui.container.textContent!, COST);
   // A withdrawal the server refuses to prepare never shows the revocation's cost again.
   prepare = async () => refusal("Refresh the pending owner transaction before preparing another.");
-  await press("Withdraw to my wallet");
+  await ownerPress("Withdraw to my wallet");
   assert.match(ui.container.textContent!, /Refresh the pending owner transaction before preparing another/);
   assert.doesNotMatch(ui.container.textContent!, COST);
-  // Nor after the wallet is closed on a withdrawal it showed: those bytes are gone, and the next press prepares fresh ones.
+  // A wallet closed on a reviewed withdrawal leaves its review to sign again while its window lasts; discarding it ends the line.
   prepare = async (body) => json({ prepared: { transactionBase64: await ownerBytes(body), requiredLamports: "2934280" } });
   signedBytes = () => Promise.reject(new Error("The owner closed the wallet."));
-  await press("Withdraw to my wallet");
+  await ownerPress("Withdraw to my wallet");
   assert.match(ui.container.textContent!, /The owner closed the wallet\./);
-  assert.doesNotMatch(ui.container.textContent!, COST);
+  assert.match(ui.container.textContent!, /The prepared withdrawal needs your owner wallet to hold at least 0\.00293428 SOL/);
   assert.equal(signCount, 2);
+  await press("Discard");
+  assert.doesNotMatch(ui.container.textContent!, COST);
+  assert.equal(calls.filter((call) => call.path === "owner" && call.body?.stage === "submit").length, 1, "only the revocation was ever submitted");
 });
+test("every owner action is reviewed before the wallet opens: what it does, its fee and what the wallet must hold", async () => {
+  state.runtime.live.programId = PROGRAM;
+  respond = async (path, body) => {
+    if (path === "status") return json(state);
+    if (path === "owner" && body?.stage === "prepare") {
+      // 0.00001 SOL of priority fee, on at least each instruction's default compute budget; none for the resume request.
+      const fee = body.action === "resume-buys" ? [] : body.action === "withdraw" ? priorityFee(400_000, 25_000n) : priorityFee(200_000, 50_000n);
+      return json({ prepared: { transactionBase64: await ownerBytes(body, fee), requiredLamports: "905880", ownerLamports: "10000000",
+        priorityFeeLamports: body.action === "resume-buys" ? "0" : "10000" } });
+    }
+    if (path === "owner" && body?.stage === "submit") return json({ result: { signature: "owner-proof", status: "finalized" } });
+    throw new Error("Unexpected fixture route");
+  };
+  const text = () => ui.container.textContent!;
+  const submits = () => calls.filter((call) => call.path === "owner" && call.body?.stage === "submit").length;
+  await render();
+  await type("Amount to withdraw", "2.5"); await type("Native SOL to withdraw", "0.75");
+  for (const [label, effect] of [
+    ["Revoke all Solana sessions", /the prepared revocation revokes every trading session of your vault, and nothing else\./],
+    ["Ask wallet to resume buys", /the prepared request to resume buys turns your vault's buying back on, with its existing limits, and nothing else\./],
+    ["Withdraw to my wallet", /the prepared withdrawal withdraws 2\.5 USDG from your vault to your own USDG token account, and nothing else\./],
+    ["Withdraw native SOL", /the prepared native SOL withdrawal withdraws 0\.75 SOL from your vault to your owner wallet, and nothing else\./],
+  ] as const) {
+    const before = submits();
+    await press(label);
+    // Prepared and checked, nothing signed: the owner sees what it does and costs first. A revocation too: one extra click.
+    assert.equal(signCount, 0, label); assert.equal(submits(), before, label);
+    assert.match(text(), /Review before your wallet opens/, label);
+    assert.match(text(), effect, label);
+    if (label === "Ask wallet to resume buys") assert.match(text(), /It carries no priority fee: your owner wallet pays only the network fee\./);
+    else assert.match(text(), /It carries a priority fee of 0\.00001 SOL \(at most 0\.001 SOL\), paid by your owner wallet with the network fee so it lands under congestion\./, label);
+    assert.match(text(), /needs your owner wallet to hold at least 0\.00090588 SOL \(it holds 0\.01 SOL\)/, label);
+    assert.match(text(), /Nothing has been signed yet\. Sign within about 45 seconds/, label);
+    // Discard sends nothing and signs nothing.
+    await press("Discard");
+    assert.doesNotMatch(text(), /Review before your wallet opens/, label);
+    assert.equal(signCount, 0, label); assert.equal(submits(), before, label);
+  }
+  // Signing the reviewed bytes opens the wallet once and submits them.
+  await press("Revoke all Solana sessions");
+  await press("Sign with my wallet");
+  assert.equal(signCount, 1); assert.equal(submits(), 1);
+  assert.match(text(), /Owner transaction: finalized/);
+  assert.doesNotMatch(text(), /Review before your wallet opens/);
+});
+test("a reviewed owner transaction not signed in time is discarded without opening the wallet", async () => {
+  state.runtime.live.programId = PROGRAM;
+  mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"], now: Date.now() });
+  try {
+    respond = async (path, body) => {
+      if (path === "status") return json(state);
+      if (path === "owner" && body?.stage === "prepare") return prepareAnswer(body);
+      throw new Error("Unexpected fixture route");
+    };
+    await render(); await ui.click("Withdraw to my wallet");
+    for (let i = 0; i < 20 && !ui.container.textContent!.includes("Review before your wallet opens"); i++) await act(async () => { await Promise.resolve(); });
+    assert.match(ui.container.textContent!, /Review before your wallet opens/);
+    await act(async () => { mock.timers.tick(30_000); });
+    assert.match(ui.container.textContent!, /Sign within about 15 seconds/);
+    // At the very end it says one second, never "1 seconds".
+    await act(async () => { mock.timers.tick(14_000); });
+    assert.match(ui.container.textContent!, /Sign within about 1 second, or start it again/);
+    await act(async () => { mock.timers.tick(1_000); });
+    assert.doesNotMatch(ui.container.textContent!, /Review before your wallet opens/);
+    assert.match(ui.container.textContent!, /The prepared withdrawal was not signed in time, so it was discarded\. Nothing was signed\./);
+    assert.equal([...ui.container.querySelectorAll("button")].some((item) => item.textContent === "Sign with my wallet"), false);
+    assert.equal(signCount, 0);
+    assert.equal(calls.some((call) => call.body?.stage === "submit"), false);
+  } finally { mock.timers.reset(); }
+});
+
+test("a click on Sign with my wallet after the review's deadline, before its timer has run, opens no wallet and sends nothing", () => onTestClock(async () => {
+  state.runtime.live.programId = PROGRAM;
+  respond = async (path, body) => {
+    if (path === "status") return json(state);
+    if (path === "owner" && body?.stage === "prepare") return prepareAnswer(body);
+    if (path === "owner" && body?.stage === "submit") return json({ result: { signature: "owner-proof", status: "finalized" } });
+    throw new Error("Unexpected fixture route");
+  };
+  await render(); await press("Withdraw to my wallet");
+  assert.match(ui.container.textContent!, /Review before your wallet opens/);
+  // One millisecond before the deadline the review can still be signed: the check is the deadline itself.
+  const shownAt = Date.now();
+  mock.timers.setTime(shownAt + 44_999);
+  signedBytes = () => Promise.reject(new Error("The owner closed the wallet."));
+  await press("Sign with my wallet");
+  assert.equal(signCount, 1);
+  assert.match(ui.container.textContent!, /Review before your wallet opens/);
+  // At the deadline the clock has passed it but the review's timer has not run (setTime fires no timer), so the button is still there.
+  mock.timers.setTime(shownAt + 45_000);
+  signedBytes = () => Uint8Array.from([1, 2, 3]);
+  await press("Sign with my wallet");
+  assert.equal(signCount, 1, "the wallet never opened");
+  assert.equal(calls.some((call) => call.body?.stage === "submit"), false);
+  assert.match(ui.container.querySelector('[role="alert"]')!.textContent!, /^This prepared withdrawal was not signed in time, so it was discarded\. Nothing was signed\. Start it again to prepare a new one\.$/);
+  assert.doesNotMatch(ui.container.textContent!, /Review before your wallet opens/);
+  assert.match(ui.container.textContent!, /The prepared withdrawal was not signed in time, so it was discarded\. Nothing was signed\./);
+  assert.equal([...ui.container.querySelectorAll("button")].some((item) => item.textContent === "Sign with my wallet"), false);
+}));
 
 test("owner transaction bytes that do anything but what the owner asked never reach the wallet, and the fee shown is the one they carry", async () => {
   state.runtime.live.programId = PROGRAM;
@@ -1138,7 +1791,7 @@ test("owner transaction bytes that do anything but what the owner asked never re
   answer = async (body) => ({ transactionBase64: await ownerBytes(body, priorityFee(200_000, 50_000n)), requiredLamports: "905880" });
   const wallet = deferred<Uint8Array>();
   signedBytes = () => wallet.promise;
-  await press("Revoke all Solana sessions");
+  await ownerPress("Revoke all Solana sessions");
   assert.equal(signCount, 1);
   assert.match(text(), /The prepared revocation needs your owner wallet to hold at least 0\.00090588 SOL: its network fee, a priority fee of 0\.00001 SOL so it lands under congestion/);
   wallet.resolve(Uint8Array.from([1, 2, 3])); await settle();
@@ -1147,13 +1800,13 @@ test("owner transaction bytes that do anything but what the owner asked never re
   const mint = [...ui.container.querySelectorAll("label")].find((item) => item.textContent?.startsWith("Asset"))!.querySelector("select")!;
   await act(async () => { mint.value = SOLANA_WRAPPED_SOL_MINT; mint.dispatchEvent(new ui.dom.window.Event("change", { bubbles: true })); });
   answer = async (body) => ({ transactionBase64: await ownerBytes(body, [await syncNative(vault)]) });
-  await press("Withdraw to my wallet");
+  await ownerPress("Withdraw to my wallet");
   assert.equal(signCount, 2);
   assert.deepEqual(calls.filter((call) => call.path === "owner" && call.body?.stage === "prepare").at(-1)!.body, { stage: "prepare", action: "withdraw", mint: SOLANA_WRAPPED_SOL_MINT, amountRaw: "1000000000" });
   // But never a SyncNative of someone else's account, or under another token program.
   for (const before of [[await syncNative(stranger)], [await syncNative(vault, TOKEN_2022_PROGRAM)]]) {
     answer = async (body) => ({ transactionBase64: await ownerBytes(body, before) });
-    await press("Withdraw to my wallet");
+    await ownerPress("Withdraw to my wallet");
     assert.match(text(), /The prepared withdrawal does not match what you asked for/);
   }
   assert.equal(signCount, 2);
@@ -1233,54 +1886,57 @@ test("the review's time left to sign counts down while it is open", async () => 
     if (path === "setup" && body?.stage === "prepare") return json({ setup: await permissionTransaction(String(body.sessionPublicKey), saved) });
     throw new Error("Unexpected fixture route");
   };
-  await render(); await press("Register bounded trading permission");
-  assert.match(ui.container.textContent!, /Sign within about 4[45] seconds/);
-  // Ten seconds on, the page says so without anyone touching it (the next one-second tick re-renders it).
-  const now = Date.now;
-  Date.now = () => now() + 10_000;
-  try { await act(async () => { await new Promise((resolve) => setTimeout(resolve, 1_100)); }); }
-  finally { Date.now = now; }
-  assert.match(ui.container.textContent!, /Sign within about 3[345] seconds/);
-  // At the very end it says one second, never "1 seconds" (the deadline itself is the review timer's, on the real clock).
-  Date.now = () => now() + 44_900;
-  try { await act(async () => { await new Promise((resolve) => setTimeout(resolve, 1_100)); }); }
-  finally { Date.now = now; }
-  assert.match(ui.container.textContent!, /Sign within about 1 second, or register again/);
-  assert.equal(signCount, 0);
+  // The page's clock and its one-second re-render are the test's: each step is an exact instant.
+  mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"], now: Date.now() });
+  try {
+    await render(); await press("Register bounded trading permission");
+    assert.match(ui.container.textContent!, /Sign within about 45 seconds/);
+    // Ten seconds on, the page says so without anyone touching it (each one-second tick re-renders it).
+    await act(async () => { mock.timers.tick(10_000); });
+    assert.match(ui.container.textContent!, /Sign within about 35 seconds/);
+    // At the very end it says one second, never "1 seconds".
+    await act(async () => { mock.timers.tick(34_000); });
+    assert.match(ui.container.textContent!, /Sign within about 1 second, or register again/);
+    assert.equal(signCount, 0);
+  } finally { mock.timers.reset(); }
 });
 
 /**
- * A live owner whose review is prepared with `leftMs` to sign: the review's
- * clock is read before the prepare request (shifted here) and its timer after
- * it (the real clock), so the review window ends `leftMs` from now.
+ * A live owner whose prepared permission is under review with `leftMs` left
+ * to sign. The page's clock and timers are the test's (the caller enables
+ * mock.timers): the window passes only when the test ticks it, never while a
+ * loaded machine is still rendering.
  */
 async function reviewEndingIn(leftMs: number) {
   state = initial("live"); state.runtime.live.programId = PROGRAM;
   const saved = liveLimits(); state.binding.limits = saved;
-  const now = Date.now;
   const progress = { submits: 0, activated: false };
   respond = async (path, body) => {
     if (path === "status") return json(state);
-    if (path === "setup" && body?.stage === "prepare") { Date.now = now; return json({ setup: await permissionTransaction(String(body.sessionPublicKey), saved) }); }
+    if (path === "setup" && body?.stage === "prepare") return json({ setup: await permissionTransaction(String(body.sessionPublicKey), saved) });
     if (path === "setup" && body?.stage === "submit") { progress.submits++; return json({ registration: { signature: "fixture-chain-signature", status: "finalized" } }); }
     if (path === "setup" && body?.stage === "activate") { progress.activated = true; state.runtime.live.ready = true; return json({ live: { registered: true } }); }
     throw new Error("Unexpected fixture route");
   };
-  await render();
-  Date.now = () => now() - (45_000 - leftMs);
-  try { await press("Register bounded trading permission"); } finally { Date.now = now; }
+  await render(); await press("Register bounded trading permission");
+  await act(async () => { mock.timers.tick(45_000 - leftMs); });
   assert.match(ui.container.textContent!, /Nothing has been signed yet/);
   return progress;
 }
+/** Runs `body` with the page's setTimeout, setInterval and Date on the test's clock. */
+async function onTestClock(body: () => Promise<void>) {
+  mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"], now: Date.now() });
+  try { await body(); } finally { mock.timers.reset(); }
+}
 const LAPSED = /not signed in time|Nothing was signed/;
-test("a review whose deadline passes while the wallet is open never says nothing was signed, and the signed permission is submitted", async () => {
+test("a review whose deadline passes while the wallet is open never says nothing was signed, and the signed permission is submitted", () => onTestClock(async () => {
   const progress = await reviewEndingIn(300);
   const wallet = deferred<Uint8Array>();
   signedBytes = () => wallet.promise;
   await press("Sign permission with my wallet");
   assert.equal(signCount, 1, "the wallet is open");
-  // The deadline passes with the wallet still open.
-  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 600)); });
+  // The deadline passes with the wallet still open: the review's timer fires and leaves it alone.
+  await act(async () => { mock.timers.tick(600); });
   assert.doesNotMatch(ui.container.textContent!, LAPSED);
   // The owner signs: the bytes are submitted (the server's window decides) and activated.
   wallet.resolve(Uint8Array.from([1, 2, 3]));
@@ -1288,13 +1944,13 @@ test("a review whose deadline passes while the wallet is open never says nothing
   assert.equal(progress.submits, 1); assert.equal(progress.activated, true);
   assert.match(ui.container.textContent!, /Registered permission ready/);
   assert.doesNotMatch(ui.container.textContent!, LAPSED);
-});
-test("a wallet that refuses after the review's deadline leaves the review lapsed; before it, the review stays to sign again", async () => {
+}));
+test("a wallet that refuses after the review's deadline leaves the review lapsed; before it, the review stays to sign again", () => onTestClock(async () => {
   let progress = await reviewEndingIn(300);
   let refuse!: (error: Error) => void;
   signedBytes = () => new Promise<Uint8Array>((_, reject) => { refuse = reject; });
   await press("Sign permission with my wallet");
-  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 600)); });
+  await act(async () => { mock.timers.tick(600); });
   assert.doesNotMatch(ui.container.textContent!, LAPSED);
   refuse(new Error("The owner closed the wallet."));
   await settle();
@@ -1312,7 +1968,7 @@ test("a wallet that refuses after the review's deadline leaves the review lapsed
   signedBytes = () => Uint8Array.from([1, 2, 3]);
   await press("Sign permission with my wallet");
   assert.equal(signCount, 2); assert.equal(progress.submits, 1); assert.equal(progress.activated, true);
-});
+}));
 /** The `merrymen solana-recover` command the card shows, as the arguments a shell passes, with an RPC in place of <https-url>. */
 function cardCommand(text: string): string[] {
   const shown = text.match(/merrymen solana-recover (--program \S+ --rpc <https-url> [^\n]*?)(?=The key goes|Nothing is signed|$)/)?.[1];
@@ -1390,13 +2046,12 @@ test("for a program no release lists, step 2 offers only the read-only plan, whi
 });
 test("the card's release pin is the one the recovery tool trusts by default", async () => {
   const recovery = createRequire(import.meta.url)(recoveryPath) as typeof import("./SolanaRecovery");
-  // The card reads SOLANA_VAULT_RELEASES from core by name (solanaVaultReleases). Once the pin lives in
-  // core (solana-glue-cli), the tool must trust that very array; until then the tool defines its own. A
-  // pin renamed or moved anywhere else fails here, even while it lists no release.
-  const core = createRequire(import.meta.url)("../../../packages/core/src/solana-live") as Record<string, unknown>;
-  const toolSource = readFileSync(fileURLToPath(new URL("../../../worker/src/solana-recover.ts", import.meta.url)), "utf8");
-  if (Object.hasOwn(core, "SOLANA_VAULT_RELEASES")) assert.equal(TOOL_RELEASES, core.SOLANA_VAULT_RELEASES, "the tool trusts core's pin, the one the card reads");
-  else assert.match(toolSource, /^export const SOLANA_VAULT_RELEASES\b/m, "the pin is neither in core, where the card reads it, nor the tool's own");
+  // The card imports SOLANA_VAULT_RELEASES from core by type (solanaVaultReleases): a renamed pin fails
+  // to compile. The tool must trust that very array, not a copy of its own.
+  const core = createRequire(import.meta.url)("../../../packages/core/src/solana-live") as typeof import("../../../packages/core/src/solana-live");
+  assert.equal(TOOL_RELEASES, core.SOLANA_VAULT_RELEASES, "the tool trusts core's pin, the one the card reads");
+  assert.match(readFileSync(recoveryPath, "utf8"), /^import \{ SOLANA_VAULT_RELEASES \} from "\.\.\/\.\.\/\.\.\/packages\/core\/src\/solana-live";$/m,
+    "the card reads the pin by a typed import, never by name");
   // The real pin (no test override): what the page offers to sign for is exactly what the tool signs for.
   assert.deepEqual(recovery.solanaVaultReleases(), TOOL_RELEASES);
   for (const release of TOOL_RELEASES) assert.equal(recovery.releasedProgramSha256(release.programId), release.sha256);
@@ -1493,9 +2148,12 @@ test("a pending owner record the server cannot settle says so plainly, never 'a 
     for (const [pin, pointer] of [[[{ programId: PROGRAM, sha256: "ab".repeat(32) }], /Step 2 of the owner key card below revokes every session and withdraws your vault with your offline owner key, without this server\./],
       [[], /Step 2 of the owner key card below shows your vault and its session without this server\./]] as const) {
       releases = [...pin];
+      // A hash in the status answer never turns the plan into the signing command: only the pin decides.
       liveVault(); pendingRecord("stuck-sig"); state.runtime.live.blockers = [UNAVAILABLE];
+      Object.assign(state.runtime.live, { programSha256: "ab".repeat(32) });
       await render();
       assert.match(text(), pointer); assert.ok(exportCard());
+      if (!pin.length) assert.doesNotMatch(text(), /SHA-256|--send|--key-file|offline owner key/);
       assert.doesNotMatch(text(), /Merrymen has to fix/);
       await ui.close(); ui = testDom();
     }

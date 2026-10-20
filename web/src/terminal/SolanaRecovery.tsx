@@ -34,7 +34,7 @@
  * stop if anyone asks them to use them for the official program.
  */
 import { useRef, useState } from "react";
-import * as solanaLive from "../../../packages/core/src/solana-live";
+import { SOLANA_VAULT_RELEASES } from "../../../packages/core/src/solana-live";
 
 /** Inlined at build time; anything but "1" leaves key export off. */
 export function ownerKeyExportEnabled(): boolean {
@@ -51,17 +51,20 @@ const SHA256 = /^[0-9a-f]{64}$/;
  *
  * SOLANA_VAULT_RELEASES in packages/core/src/solana-live.ts is the list
  * `merrymen solana-recover` trusts by default (solanaRecoveryProgramTrust).
- * It is read by name because the pin moves there with the command-line
- * tool's branch: until it is exported, and for any entry that is not a
- * program ID and a SHA-256, no program counts as released, so the card
- * offers only the plan. Never the status answer: a server-reported hash
- * could be copied into the tool's escape hatch. Once that branch is merged,
- * this reads it by a typed import instead (`import { SOLANA_VAULT_RELEASES }`),
- * so a rename fails to compile. Until then SolanaScreen.test.ts fails if the
- * pin is renamed or moved anywhere but core, even while it lists nothing.
+ * It is a typed import, so renaming or moving the pin fails to compile
+ * instead of silently making every program "plan only". An entry that is not
+ * a program ID and a SHA-256 does not count as released, so the card offers
+ * only the plan for it.
+ *
+ * OWNER DECISION: the released hash, and the choice between the signing
+ * command and the plan, come from this pin alone, never from the server's
+ * status answer (no `?? live.programSha256` fallback): a compromised or
+ * misconfigured server could otherwise put an arbitrary hash on the owner's
+ * recovery card, next to a signing command, and the hash could be copied into
+ * the tool's escape hatch. A program the pin does not list gets the plan.
  */
 export function solanaVaultReleases(): readonly SolanaVaultRelease[] {
-  const pinned: unknown = Reflect.get(solanaLive, "SOLANA_VAULT_RELEASES");
+  const pinned: unknown = SOLANA_VAULT_RELEASES;
   if (!Array.isArray(pinned)) return [];
   return pinned.filter((entry: unknown): entry is SolanaVaultRelease => typeof entry === "object" && entry !== null
     && typeof (entry as SolanaVaultRelease).programId === "string" && typeof (entry as SolanaVaultRelease).sha256 === "string"

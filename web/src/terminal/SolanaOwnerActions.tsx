@@ -4,10 +4,10 @@ import type { Instruction } from "@solana/kit";
 import { SOLANA_USDG_MINT, TOKEN_2022_PROGRAM, base58Encode } from "../../../packages/core/src/ids";
 import { buildRevokeSolanaSessionsInstruction, buildSetSolanaBreakerInstruction, buildWithdrawSolanaNativeInstruction, buildWithdrawSolanaVaultInstruction,
   deriveSolanaAta, deriveSolanaVaultAddress, SOLANA_ASSOCIATED_TOKEN_PROGRAM, SOLANA_CLASSIC_TOKEN_PROGRAM, SOLANA_SYSTEM_PROGRAM, SOLANA_WRAPPED_SOL_MINT } from "../../../packages/core/src/solana-live";
-import { displaySolanaAmountOrNull, solanaUnits } from "../lib/solana-amounts";
+import { displaySolanaAmount, displaySolanaAmountOrNull, solanaUnits } from "../lib/solana-amounts";
 import { RequestError } from "./request-json";
 import type { SolanaApi } from "./SolanaAutomation";
-import { OWNER_MAX_PRIORITY_FEE_LAMPORTS, readOwnerPaidTransaction, type OwnerPaidInstruction } from "./SolanaPermission";
+import { OWNER_MAX_PRIORITY_FEE_LAMPORTS, readOwnerPaidTransaction, secondsUntil, type OwnerPaidInstruction } from "./SolanaPermission";
 
 const WSOL = "So11111111111111111111111111111111111111112";
 type ActionResult = { signature: string; status: "pending" | "finalized" | "failed" };
@@ -25,6 +25,28 @@ export type RecoverableSol = { nativeLamports: string; unsyncedWsolLamports: str
 export type PreparedOwnerTransaction = { transactionBase64: string; requiredLamports?: string; ownerLamports?: string; priorityFeeLamports?: string };
 /** What the owner asked the server to prepare: the owner route's prepare body, without its stage. */
 export type OwnerRequest = { action: "revoke" } | { action: "resume-buys" } | { action: "withdraw"; mint: string; amountRaw: string } | { action: "withdraw-sol"; amountRaw: string };
+/**
+ * How long the page offers a prepared owner transaction for signing, timed
+ * from before the prepare request. The server accepts its signature for 60
+ * seconds from prepare (prepareOwner), so signed bytes still reach it in time;
+ * the same window as a prepared permission's review.
+ */
+export const OWNER_REVIEW_SIGN_WINDOW_MS = 45_000;
+/**
+ * A prepared owner transaction the owner reviews before the wallet opens:
+ * what it does and its priority fee, both checked against its bytes
+ * (checkPreparedOwnerTransaction), and what the server says the owner wallet
+ * must hold. Amounts are display strings, or null when unknown.
+ */
+type OwnerReview = { action: OwnerAction; request: OwnerRequest; transactionBase64: string; fee: string | null; required: string | null; held: string | null; deadline: number };
+/** What the reviewed transaction does, in the owner's words: exactly what checkPreparedOwnerTransaction matched the bytes against. */
+function reviewedEffect(request: OwnerRequest): string {
+  if (request.action === "revoke") return "revokes every trading session of your vault";
+  if (request.action === "resume-buys") return "turns your vault's buying back on, with its existing limits";
+  if (request.action === "withdraw-sol") return `withdraws ${displaySolanaAmount(request.amountRaw, 9)} SOL from your vault to your owner wallet`;
+  return request.mint === SOLANA_USDG_MINT ? `withdraws ${displaySolanaAmount(request.amountRaw, 6)} USDG from your vault to your own USDG token account`
+    : `withdraws ${displaySolanaAmount(request.amountRaw, 9)} wrapped SOL from your vault to your own wrapped SOL token account`;
+}
 
 function plain(instruction: Instruction): OwnerPaidInstruction {
   return { program: String(instruction.programAddress), data: Uint8Array.from(instruction.data ?? []), accounts: (instruction.accounts ?? []).map((meta) => String(meta.address)) };
@@ -100,17 +122,69 @@ export async function checkPreparedOwnerTransaction(prepared: PreparedOwnerTrans
  * Not a refusal: a sign-in or rate-limit answer (401, 403, 408, 429) or Solana
  * being switched off (404) says nothing about the bytes.
  *
- * The server checks all of that before it saves or broadcasts, so a refusal
- * of the FIRST submission proves these bytes were never saved and dropping
- * them can never lose or duplicate a transaction. A later submission is a
- * retry of bytes the server may already have saved and broadcast, and the
- * server answers a retry from its record of them (ownerStatus, finishSetup):
- * a 4xx there can follow a broadcast that later finalizes. So a refused
- * retry never says "not accepted": only the server's record decides
- * (outcomeAfterRefusal).
+ * A refusal of the FIRST submission that says this request saved nothing
+ * (notSaved, savedNothing) proves these bytes were never saved, so dropping
+ * them can never lose or duplicate a transaction. Any other refusal is
+ * decided by the server's record of the bytes (outcomeAfterRefusal), not
+ * assumed: a route that refuses without saying so may have saved them. A
+ * later submission is a retry of bytes the server may already have saved and
+ * broadcast, and the server answers a retry from its record of them
+ * (ownerStatus, finishSetup): a 4xx there, notSaved included, can follow a
+ * broadcast that later finalizes. So a refused retry never says "not
+ * accepted": only the server's record decides.
  */
 export function refusedByServer(error: unknown): error is RequestError {
   return error instanceof RequestError && error.status >= 400 && error.status < 500 && ![401, 403, 404, 408, 429].includes(error.status);
+}
+
+/**
+ * A PACED ANSWER IS A WAIT, NOT A FAILURE.
+ *
+ * Solana routes answer 429 when an account asks too often (the status route
+ * after a burst of reads, say), before anything runs, in words that say how
+ * long to wait. The page shows that as a notice (role=status), never as a
+ * failure (role=alert), wherever the request was made, and keeps what it holds
+ * for the next try. Returns the server's words, or null for anything else.
+ */
+export function pacedAnswer(error: unknown): string | null {
+  return error instanceof RequestError && error.status === 429 ? error.message : null;
+}
+
+/** A canonical positive integer of base units, as solanaResponse sends freshMinOutAmount. */
+const FRESH_MINIMUM = /^[1-9][0-9]{0,38}$/;
+/**
+ * A SOLANA ROUTE'S ANSWER, WITH WHAT ITS BODY SAYS BEYOND THE SENTENCE.
+ *
+ * requestJson keeps only a refusal's sentence and status. solanaResponse
+ * (web/src/lib/solana-api.ts) adds two fields the page acts on, kept here
+ * only after validation; anything else reads as absent:
+ * - notSaved: THIS request saved and sent nothing. It says nothing about an
+ *   earlier submission of the same bytes (savedNothing).
+ * - freshMinOutAmount: on a price-moved 409, what the fresh quote guarantees,
+ *   in the output token's base units: a canonical positive integer.
+ * SolanaScreen's solanaRequestJson throws it for every Solana route.
+ */
+export class SolanaRequestError extends RequestError {
+  readonly notSaved: boolean;
+  readonly freshMinOutAmount: string | null;
+  constructor(message: string, status: number, body?: unknown) {
+    super(message, status);
+    const fields: { notSaved?: unknown; freshMinOutAmount?: unknown } = body !== null && typeof body === "object" ? body : {};
+    this.notSaved = fields.notSaved === true;
+    this.freshMinOutAmount = typeof fields.freshMinOutAmount === "string" && FRESH_MINIMUM.test(fields.freshMinOutAmount) ? fields.freshMinOutAmount : null;
+  }
+}
+
+/**
+ * notSaved: THIS refused request saved and sent nothing (solanaResponse).
+ * Only for the first submission of signed bytes does that prove the bytes
+ * were never saved, so they can be dropped. On a retry it says nothing about
+ * the earlier submission, which the server may have saved and broadcast: the
+ * server's record still decides (outcomeAfterRefusal), and no message says
+ * the bytes were not sent from it. It only words the prompt to prepare again.
+ */
+export function savedNothing(error: unknown): boolean {
+  return refusedByServer(error) && error instanceof SolanaRequestError && error.notSaved;
 }
 
 /** The server's saved owner transaction, as the status route reports it. */
@@ -188,6 +262,16 @@ export async function outcomeAfterRefusal(readRecord: () => Promise<OwnerRecord>
  * Without the card (key export is off by default) it names no tool: without
  * an exported owner key there is nothing to sign with outside Merrymen.
  *
+ * REVIEWED BEFORE THE WALLET OPENS. A press prepares the transaction and the
+ * page checks its bytes; nothing is signed until the owner has seen what it
+ * does, its priority fee and what the owner wallet must hold, and chosen
+ * "Sign with my wallet" within OWNER_REVIEW_SIGN_WINDOW_MS. OWNER DECISION:
+ * a revocation is reviewed too, one extra click in an emergency, so its fee
+ * is never seen only in the wallet's own window. (The alternative signs a
+ * revocation straight after the check, with the fee shown while the wallet
+ * is open: drop `revoke` from the review in run().) Pressing another action
+ * replaces the review, as its prepare replaces the server's prepared bytes.
+ *
  * Signed bytes this page holds with an unknown outcome do not by themselves
  * hold back a revocation: if the server never saved them, a revocation
  * replaces them and they can no longer be sent; if it did, the prepare is
@@ -214,11 +298,14 @@ export function SolanaOwnerActions({ available, owner, programId, api, sign, ref
   // `sent`: an earlier submission of these bytes reached the server, or may have.
   const [pending, setPending] = useState<{ action: OwnerAction; signedTransactionBase64: string; signature: string | null; sent: boolean } | null>(null);
   const [result, setResult] = useState<ActionResult | null>(null), [busy, setBusy] = useState(false), [error, setError] = useState("");
+  // A paced answer (pacedAnswer): a wait, not a failure.
+  const [notice, setNotice] = useState("");
   // Bytes cleared without a known outcome, linked so the owner can check Solana itself.
   const [cleared, setCleared] = useState<{ action: OwnerAction; signature: string } | null>(null);
-  // What the server said the prepared transaction in flight needs from the owner wallet: shown from
-  // the page's check until that run ends (signed and answered, refused or abandoned), never after.
-  const [cost, setCost] = useState<{ action: OwnerAction; required: string; held: string | null; fee: string | null } | null>(null);
+  const [review, setReview] = useState<OwnerReview | null>(null), [lapsed, setLapsed] = useState<OwnerAction | null>(null);
+  const [, setReviewClock] = useState(0);
+  // True while the owner's wallet is open on the reviewed bytes (signReview).
+  const signingReview = useRef(false);
   const inFlight = useRef(false);
   const serverPending = serverTransaction?.status === "pending" ? serverTransaction : null;
   // When this page's status reads first and last reported the same pending record (each read is a new record object).
@@ -230,75 +317,128 @@ export function SolanaOwnerActions({ available, owner, programId, api, sign, ref
   }, [serverTransaction]);
   const longPending = !!serverPending && seen?.signature === serverPending.signature && seen.last - seen.first >= OWNER_PENDING_STUCK_MS;
   const stuck = !!serverPending && (confirmationUnavailable || longPending);
-  const run = (action: OwnerAction) => {
-    if (inFlight.current) return; inFlight.current = true; setBusy(true); setError(""); setCost(null);
-    void (async () => {
-      // Saved bytes are only ever resubmitted for their own action. Any other
-      // action prepares fresh bytes; the server refuses that while the earlier
-      // transaction is saved and unresolved, and otherwise the earlier one can
-      // no longer be submitted once this one is prepared.
-      let saved = pending?.action === action ? pending : null;
-      if (!saved) {
-        if (!owner || !programId) throw new Error("Connect the Solana wallet bound to this account and wait for the vault program to be verified.");
-        const request: OwnerRequest = action === "withdraw" ? { action, mint, amountRaw: solanaUnits(amount, mint === SOLANA_USDG_MINT ? 6 : 9) }
-          // Native lamports held by the vault account above its rent reserve (withdraw_sol).
-          : action === "withdraw-sol" ? { action, amountRaw: solanaUnits(solAmount, 9) }
-          : { action };
-        let prepared: PreparedOwnerTransaction;
-        try { ({ prepared } = await api<{ prepared: PreparedOwnerTransaction }>("owner", { stage: "prepare", ...request })); }
-        catch (e) {
-          // Refused before anything was signed (another owner transaction is
-          // still pending, say): show the server's record of why.
-          if (refusedByServer(e)) await refresh().catch(() => undefined);
-          throw e;
-        }
-        // The wallet only opens for bytes that do exactly what the owner asked; the fee shown is the one they carry.
-        const fee = await checkPreparedOwnerTransaction(prepared, request, { owner, programId });
-        const required = sol(prepared.requiredLamports);
-        setCost(required ? { action, required, held: sol(prepared.ownerLamports), fee: fee !== "0" ? sol(fee) : null } : null);
-        const signed = await sign(Uint8Array.from(atob(prepared.transactionBase64), (c) => c.charCodeAt(0)));
-        const signedTransactionBase64 = btoa(String.fromCharCode(...signed));
-        saved = { action, signedTransactionBase64, signature: signatureOf(signedTransactionBase64), sent: false };
-        setPending(saved); setResult(null); setCleared(null);
-      }
-      const name = ACTION_NAMES[saved.action];
-      let next: ActionResult, recorded = false;
-      try { ({ result: next } = await api<{ result: ActionResult }>("owner", { stage: "submit", signedTransactionBase64: saved.signedTransactionBase64 })); }
-      catch (e) {
-        if (!refusedByServer(e)) { setPending({ ...saved, sent: true }); throw e; }
-        if (!saved.sent) {
-          // The first submission of these bytes: the server refused them before saving anything.
-          setPending(null); void refresh().catch(() => undefined);
-          throw new Error(`${e.message} This signed ${name} was not accepted and has been discarded. Start it again to review and sign a new one.`);
-        }
-        const outcome = await outcomeAfterRefusal(readRecord, saved.signature);
-        if (outcome === "unknown") throw new Error(`${e.message} An earlier submission of this signed ${name} may already be on Solana, so it was kept. This does not mean it failed. Check it again shortly.`);
-        if (outcome === "pending") {
-          if (saved.signature) setResult({ signature: saved.signature, status: "pending" });
-          throw new Error(`${e.message} The server holds this signed ${name} and still records it as awaiting confirmation, so it was kept. It may already have completed on Solana. Check it again shortly.`);
-        }
-        if (outcome === "unheld") {
-          setPending(null); setResult(null);
-          if (saved.signature) setCleared({ action: saved.action, signature: saved.signature });
-          throw new Error(`${e.message} The server holds no record of this signed ${name}, so it was cleared and cannot be resent. If an earlier submission reached Solana, its result shows on Solana and in your vault balances. Check before starting another.`);
-        }
-        // The server's record settles it: reading it already refreshed the screen.
-        next = { signature: saved.signature!, status: outcome }; recorded = true;
-      }
-      // The server returned its record of these bytes: they were accepted.
-      const accepted = { ...saved, signature: next.signature, sent: true };
-      setResult(next);
-      // Pending or not, the server's record changed: read it, so the page shows
-      // what the server will now refuse (see SolanaOwnerActions above).
-      if (next.status !== "pending") { setPending(null); if (!recorded) await refresh(); }
-      else { setPending(accepted); await refresh().catch(() => undefined); }
-    })().catch((e: unknown) => setError(e instanceof Error ? e.message : "The owner action did not finish. Retry the existing transaction."))
-      .finally(() => { inFlight.current = false; setBusy(false); setCost(null); });
+  // A review not signed in time is discarded: its bytes would reach the server too late. Not while the
+  // wallet is open on it: the owner may be signing, and the server's own window decides those bytes.
+  useEffect(() => {
+    if (!review) return;
+    const timer = setTimeout(() => { if (signingReview.current) return; setReview(null); setLapsed(review.action); }, Math.max(0, review.deadline - Date.now()));
+    return () => clearTimeout(timer);
+  }, [review]);
+  // The review says how long is left to sign: re-render it every second while it is open, so it counts down.
+  useEffect(() => {
+    if (!review) return;
+    const timer = setInterval(() => setReviewClock((tick) => tick + 1), 1000);
+    return () => clearInterval(timer);
+  }, [review]);
+  /** Shows why a request did not finish: a paced answer as a wait, anything else as a failure. */
+  const fail = (e: unknown, fallback: string) => {
+    const paced = pacedAnswer(e);
+    if (paced !== null) setNotice(paced); else setError(e instanceof Error ? e.message : fallback);
   };
+  const begin = (work: () => Promise<void>) => {
+    if (inFlight.current) return; inFlight.current = true; setBusy(true); setError(""); setNotice(""); setLapsed(null);
+    void work().catch((e: unknown) => fail(e, "The owner action did not finish. Retry the existing transaction."))
+      .finally(() => { inFlight.current = false; setBusy(false); });
+  };
+  /** Submits signed bytes (again): the server answers a resubmission from its record of them. */
+  const submit = async (saved: NonNullable<typeof pending>) => {
+    const name = ACTION_NAMES[saved.action];
+    let next: ActionResult, recorded = false;
+    try { ({ result: next } = await api<{ result: ActionResult }>("owner", { stage: "submit", signedTransactionBase64: saved.signedTransactionBase64 })); }
+    catch (e) {
+      if (!refusedByServer(e)) { setPending({ ...saved, sent: true }); throw e; }
+      if (!saved.sent && savedNothing(e)) {
+        // The first submission of these bytes, and the server says this request saved nothing: they were never saved.
+        setPending(null); void refresh().catch(() => undefined);
+        throw new Error(`${e.message} This signed ${name} was not accepted and has been discarded. Start it again to review and sign a new one.`);
+      }
+      // A retry, or a refusal that does not say it saved nothing: the server's record decides.
+      const outcome = await outcomeAfterRefusal(readRecord, saved.signature);
+      if (outcome === "unknown") {
+        setPending({ ...saved, sent: true });
+        throw new Error(`${e.message} ${saved.sent ? `An earlier submission of this signed ${name} may already be on Solana` : `The server could not say whether it saved this signed ${name}`}, so it was kept. This does not mean it failed. Check it again shortly.`);
+      }
+      if (outcome === "pending") {
+        setPending({ ...saved, sent: true });
+        if (saved.signature) setResult({ signature: saved.signature, status: "pending" });
+        throw new Error(`${e.message} The server holds this signed ${name} and still records it as awaiting confirmation, so it was kept. It may already have completed on Solana. Check it again shortly.`);
+      }
+      if (outcome === "unheld") {
+        setPending(null); setResult(null);
+        if (!saved.sent) throw new Error(`${e.message} The server holds no record of this signed ${name}, so it has been discarded. Start it again to review and sign a new one.`);
+        if (saved.signature) setCleared({ action: saved.action, signature: saved.signature });
+        throw new Error(`${e.message} The server holds no record of this signed ${name}, so it was cleared and cannot be resent. If an earlier submission reached Solana, its result shows on Solana and in your vault balances. ${savedNothing(e) ? "Check there before starting it again to review and sign a new one." : "Check before starting another."}`);
+      }
+      // The server's record settles it: reading it already refreshed the screen.
+      next = { signature: saved.signature!, status: outcome }; recorded = true;
+    }
+    // The server returned its record of these bytes: they were accepted.
+    const accepted = { ...saved, signature: next.signature, sent: true };
+    setResult(next);
+    // Pending or not, the server's record changed: read it, so the page shows
+    // what the server will now refuse (see SolanaOwnerActions above).
+    if (next.status !== "pending") { setPending(null); if (!recorded) await refresh(); }
+    else { setPending(accepted); await refresh().catch(() => undefined); }
+  };
+  const run = (action: OwnerAction) => begin(async () => {
+    // Saved bytes are only ever resubmitted for their own action. Any other
+    // action prepares fresh bytes; the server refuses that while the earlier
+    // transaction is saved and unresolved, and otherwise the earlier one can
+    // no longer be submitted once this one is prepared.
+    if (pending?.action === action) return submit(pending);
+    // A new prepare replaces whatever the server prepared for an open review.
+    setReview(null);
+    if (!owner || !programId) throw new Error("Connect the Solana wallet bound to this account and wait for the vault program to be verified.");
+    const request: OwnerRequest = action === "withdraw" ? { action, mint, amountRaw: solanaUnits(amount, mint === SOLANA_USDG_MINT ? 6 : 9) }
+      // Native lamports held by the vault account above its rent reserve (withdraw_sol).
+      : action === "withdraw-sol" ? { action, amountRaw: solanaUnits(solAmount, 9) }
+      : { action };
+    // Timed on this clock from before the request, so latency only shortens the window to sign.
+    const started = Date.now();
+    let prepared: PreparedOwnerTransaction;
+    try { ({ prepared } = await api<{ prepared: PreparedOwnerTransaction }>("owner", { stage: "prepare", ...request })); }
+    catch (e) {
+      // Refused before anything was signed (another owner transaction is
+      // still pending, say): show the server's record of why.
+      if (refusedByServer(e)) await refresh().catch(() => undefined);
+      throw e;
+    }
+    // The wallet only opens for bytes that do exactly what the owner asked; the fee shown is the one they carry.
+    const fee = await checkPreparedOwnerTransaction(prepared, request, { owner, programId });
+    // Nothing is signed yet: the owner reviews what the bytes do and cost first.
+    setReview({ action, request, transactionBase64: prepared.transactionBase64, fee: fee !== "0" ? sol(fee) : null,
+      required: sol(prepared.requiredLamports), held: sol(prepared.ownerLamports), deadline: started + OWNER_REVIEW_SIGN_WINDOW_MS });
+  });
+  /** The owner signs exactly the reviewed bytes, then they are submitted. */
+  const signReview = () => begin(async () => {
+    const shown = review;
+    if (!shown) throw new Error("Start the owner action again to prepare a transaction to review.");
+    if (Date.now() >= shown.deadline) {
+      setReview(null); setLapsed(shown.action);
+      throw new Error(`This prepared ${ACTION_NAMES[shown.action]} was not signed in time, so it was discarded. Nothing was signed. Start it again to prepare a new one.`);
+    }
+    // While the wallet is open the review timer leaves the review alone. A
+    // wallet that refuses or closes leaves the review to sign again, unless
+    // its deadline passed meanwhile: then it lapses now. Signed bytes are
+    // submitted even if the deadline passed meanwhile: the server's window
+    // decides, and its notSaved refusal of a first submission discards them.
+    signingReview.current = true;
+    let signed: Uint8Array;
+    try { signed = await sign(Uint8Array.from(atob(shown.transactionBase64), (c) => c.charCodeAt(0))); }
+    catch (e) {
+      if (Date.now() >= shown.deadline) { setReview(null); setLapsed(shown.action); }
+      throw e;
+    } finally { signingReview.current = false; }
+    const signedTransactionBase64 = btoa(String.fromCharCode(...signed));
+    const saved = { action: shown.action, signedTransactionBase64, signature: signatureOf(signedTransactionBase64), sent: false };
+    // Kept before submit: a lost answer resubmits these exact bytes, never signs a second transaction.
+    setPending(saved); setResult(null); setCleared(null); setReview(null);
+    await submit(saved);
+  });
   /** The server's pending record when this page does not hold its bytes (another device, a reload, a permission). */
   const check = () => {
-    if (inFlight.current) return; inFlight.current = true; setBusy(true); setError("");
-    void refresh().catch((e: unknown) => setError(e instanceof Error ? e.message : "The owner transaction could not be checked. Try again shortly."))
+    if (inFlight.current) return; inFlight.current = true; setBusy(true); setError(""); setNotice("");
+    void refresh().catch((e: unknown) => fail(e, "The owner transaction could not be checked. Try again shortly."))
       .finally(() => { inFlight.current = false; setBusy(false); });
   };
   const held = sol(ownerWallet?.lamports), revokeNeeds = sol(ownerWallet?.revokeLamports), withdrawNeeds = sol(ownerWallet?.withdrawLamports);
@@ -310,6 +450,7 @@ export function SolanaOwnerActions({ available, owner, programId, api, sign, ref
     {held && revokeNeeds && withdrawNeeds && <p>Your owner wallet holds {held} SOL and pays the network fees of these transactions. To revoke it must hold at least {revokeNeeds} SOL; to withdraw, up to {withdrawNeeds} SOL, since a withdrawal may open your token account. Merrymen adds a priority fee only from SOL beyond that, and this page signs none above {sol(OWNER_MAX_PRIORITY_FEE_LAMPORTS.toString())} SOL.</p>}
     {short && <p role="alert" className="solana-warning">That is too little to revoke. Send SOL to your owner wallet now, so you can revoke or withdraw in an emergency.</p>}
     {error && <p role="alert" className="solana-error">{error}</p>}
+    {notice && <p role="status" className="solana-notice">{notice}</p>}
     {serverPending && stuck ? <p role="status">{confirmationUnavailable
       ? `Your ${kindName(serverPending.kind)} is awaiting final confirmation, and the server cannot read its outcome from Solana right now.`
       : `Your ${kindName(serverPending.kind)} has been awaiting final confirmation for over ${OWNER_PENDING_STUCK_MS / 60_000} minutes, well past the minute or so its blockhash lasts: the server has not been able to settle its outcome.`}
@@ -332,7 +473,16 @@ export function SolanaOwnerActions({ available, owner, programId, api, sign, ref
       <label>Native SOL to withdraw<input inputMode="decimal" value={solAmount} onChange={(e) => setSolAmount(e.target.value)} /></label>
       <button disabled={!!pending || !!serverPending} onClick={() => run("withdraw-sol")}>Withdraw native SOL</button>
     </fieldset>
-    {cost && <p>The prepared {ACTION_NAMES[cost.action]} needs your owner wallet to hold at least {cost.required} SOL{cost.held ? ` (it holds ${cost.held} SOL)` : ""}: its network fee{cost.fee ? `, a priority fee of ${cost.fee} SOL so it lands under congestion` : ""}, any token account it opens, and the wallet&apos;s own minimum balance.</p>}
+    {review && <div className="solana-review" role="group" aria-label={`Review the prepared ${ACTION_NAMES[review.action]}`}>
+      <p>Review before your wallet opens: the prepared {ACTION_NAMES[review.action]} {reviewedEffect(review.request)}, and nothing else.</p>
+      <p>{review.fee ? `It carries a priority fee of ${review.fee} SOL (at most ${sol(OWNER_MAX_PRIORITY_FEE_LAMPORTS.toString())} SOL), paid by your owner wallet with the network fee so it lands under congestion.`
+        : "It carries no priority fee: your owner wallet pays only the network fee."}</p>
+      {review.required && <p>The prepared {ACTION_NAMES[review.action]} needs your owner wallet to hold at least {review.required} SOL{review.held ? ` (it holds ${review.held} SOL)` : ""}: its network fee{review.fee ? `, a priority fee of ${review.fee} SOL so it lands under congestion` : ""}, any token account it opens, and the wallet&apos;s own minimum balance.</p>}
+      <p>Nothing has been signed yet. Sign within about {secondsUntil(review.deadline)}, or start it again to prepare a new one.</p>
+      <button disabled={busy || !available || !!serverPending} onClick={signReview}>Sign with my wallet</button>
+      <button className="solana-secondary" disabled={busy} onClick={() => setReview(null)}>Discard</button>
+    </div>}
+    {!review && lapsed && <p role="status">The prepared {ACTION_NAMES[lapsed]} was not signed in time, so it was discarded. Nothing was signed. Start it again to prepare a new one.</p>}
     {pending && <p role="status">{pendingIsServers
       ? `A signed ${ACTION_NAMES[pending.action]} is awaiting final confirmation on Solana. Until it is final or expired, no other owner transaction can be prepared, a revocation included.${stuck ? "" : " Check it shortly."}`
       // Another pending record (another device or tab) holds Revoke back too: never promise it here.

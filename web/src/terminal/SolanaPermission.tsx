@@ -166,6 +166,12 @@ export function permissionMatchesLimits(terms: SignedPermissionTerms, limits: So
     && terms.maxOpsPerDay === limits.maxOpsPerDay && terms.expiresAtSeconds === String(Math.floor(limits.expiresAtMs / 1000));
 }
 
+/** The whole seconds left until `deadline`, never fewer than one, in words: "1 second", never "1 seconds". */
+export function secondsUntil(deadline: number): string {
+  const seconds = Math.max(1, Math.round((deadline - Date.now()) / 1000));
+  return `${seconds} second${seconds === 1 ? "" : "s"}`;
+}
+
 /** The on-chain expiry is whole seconds; show exactly that instant, in UTC. */
 export function permissionExpiry(expiresAtMs: number): string {
   return `${new Date(Math.floor(expiresAtMs / 1000) * 1000).toISOString().slice(0, 19).replace("T", " ")} UTC`;

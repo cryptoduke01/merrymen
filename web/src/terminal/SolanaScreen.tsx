@@ -7,12 +7,12 @@ import type { SolanaPaperSnapshot } from "../../../worker/src/solana-paper-store
 import type { SolanaBinding } from "@/lib/solana-binding-store";
 import { privyEnabled } from "@/lib/privy-client";
 import { useSolanaOwner } from "./useSolanaOwner";
-import { requestJson } from "./request-json";
+import { RequestError, UNREACHABLE } from "./request-json";
 import { SignIn } from "./HostedControls";
 import { SolanaAutomation } from "./SolanaAutomation";
-import { OWNER_CONFIRMATION_UNAVAILABLE, outcomeAfterRefusal, refusedByServer, signatureOf, SolanaOwnerActions, type OwnerRecord, type OwnerWallet, type RecoverableSol } from "./SolanaOwnerActions";
+import { OWNER_CONFIRMATION_UNAVAILABLE, outcomeAfterRefusal, pacedAnswer, refusedByServer, savedNothing, signatureOf, SolanaOwnerActions, SolanaRequestError, type OwnerRecord, type OwnerWallet, type RecoverableSol } from "./SolanaOwnerActions";
 import { ownerKeyExportEnabled, releasedProgramSha256, SolanaRecovery } from "./SolanaRecovery";
-import { checkPreparedPermission, PermissionReview, PermissionTerms, permissionExpiry, type PreparedPermission, type SignedPermissionTerms } from "./SolanaPermission";
+import { checkPreparedPermission, PermissionReview, PermissionTerms, permissionExpiry, secondsUntil, type PreparedPermission, type SignedPermissionTerms } from "./SolanaPermission";
 import { deriveSolanaVaultAddress } from "../../../packages/core/src/solana-live";
 import { solanaUnits as units, displaySolanaAmount as display, displaySolanaAmountOrNull } from "../lib/solana-amounts";
 import "./SolanaScreen.css";
@@ -45,15 +45,107 @@ type Review = { transactionBase64: string; limits: SolanaPaperLimits; terms: Sig
 const REVIEW_SIGN_WINDOW_MS = 45_000;
 type Receipt = { mode?: string; requestId?: string; signature?: string; status?: string; state?: string;
   intent?: { outputMint?: string }; minOutAmount?: string; quotedOutAmount?: string; quote?: { minOutAmount?: string }; outputAmountRaw?: string };
-/** A preview is only good for its quote's lifetime, and only for the exact trade it quoted. */
-type Preview = { quote: SolanaQuote; key: string; deadline: number };
+/**
+ * A preview is only good for its quote's lifetime, and only for the exact
+ * trade it quoted. `movedFrom`: this is the fresh minimum a price-moved
+ * refusal of that trade offered (quote.minOutAmount), below the minimum the
+ * refused request carried (movedFrom). It is placed only on the owner's own
+ * click, as the same trade with the same request ID and amount.
+ */
+type Preview = { quote: SolanaQuote; key: string; deadline: number; lifetime: number; movedFrom?: string };
+/** The intent route's price-moved refusal, word for word (PRICE_MOVED in web/src/lib/solana-api.ts; a test pins the two together). */
+export const SOLANA_PRICE_MOVED = "The price moved. Preview again; nothing was sent.";
+/** The market's zero-output answer: no route buys this amount (TOO_SMALL in web/src/lib/solana-api.ts; pinned the same way). */
+export const SOLANA_TOO_SMALL = "This amount is too small to trade: no route returns anything for it. Nothing was sent or recorded. Try a larger amount.";
+/** The slippage the server's write-off quotes a lot back with (SOLANA_PAPER_WRITE_OFF_SLIPPAGE_BPS; a test keeps the two equal). */
+export const SOLANA_WRITE_OFF_SLIPPAGE_BPS = 100;
+/**
+ * A HOSTED PAPER LOT THE OWNER MAY WRITE OFF, AND ONLY AFTER THE MARKET SAID IT IS DUST.
+ *
+ * A dust lot (no route buys it back) keeps its position slot, and while any
+ * lot but wrapped SOL is held the paper strategy holds, so the owner can write
+ * it off: POST /api/solana/paper/write-off books the whole lot at zero, only
+ * on the market's own zero-output answer, and cannot be undone. The page
+ * offers it only for a lot whose whole sale was just answered 400 TOO_SMALL:
+ * selling the whole wrapped SOL lot in the trade form, or, for a lot the form
+ * cannot sell, "Check for write-off" (a preview of selling the whole lot,
+ * which records nothing). An ordinary lot never shows the offer, and nothing
+ * is sent until the owner confirms. The offer holds only while the portfolio
+ * still shows that exact lot. The status has no dust marker to offer it from
+ * (a cross-track request asks for one); the server refuses anything that is
+ * not dust (409, shown verbatim) either way.
+ *
+ * The check is stricter than the write-off: a paper preview is refused once
+ * the book's limits (the saved ones) have expired, and while the mints'
+ * safety reads are unavailable, though the write-off itself needs neither.
+ * OWNER DECISION (the conservative option): the offer still needs the
+ * market's zero-output answer to a check, so with expired limits the page
+ * says to save new limits first. The alternative offers the write-off from a
+ * status dust marker, once the status carries one.
+ */
+type DustLot = { mint: string; amountRaw: string; confirming: boolean };
 const RAW = /^(0|[1-9][0-9]*)$/;
+type WrittenOffBook = Partial<SolanaPaperSnapshot> & Pick<SolanaPaperSnapshot, "cashRaw" | "positions">;
+/**
+ * The paper book in a write-off's 200 answer ({ paper, writtenOff }), if it
+ * can be shown as is: its cash and every lot in base units, and no lot of
+ * `mint`, which the write-off removed whole. Null for anything else.
+ */
+function writtenOffBook(answered: unknown, mint: string): WrittenOffBook | null {
+  if (answered === null || typeof answered !== "object") return null;
+  const book = answered as { cashRaw?: unknown; positions?: unknown; version?: unknown };
+  if (typeof book.cashRaw !== "string" || !RAW.test(book.cashRaw) || !Array.isArray(book.positions)) return null;
+  const lots = book.positions as unknown[];
+  for (const lot of lots) {
+    const fields: { mint?: unknown; amountRaw?: unknown; decimals?: unknown } = lot !== null && typeof lot === "object" ? lot : {};
+    if (typeof fields.mint !== "string" || fields.mint === mint || typeof fields.amountRaw !== "string" || !RAW.test(fields.amountRaw) || !Number.isInteger(fields.decimals)) return null;
+  }
+  if (book.version !== undefined && !Number.isSafeInteger(book.version)) return null;
+  return answered as WrittenOffBook;
+}
 function base64(bytes: Uint8Array): string { return btoa(String.fromCharCode(...bytes)); }
 function fromBase64(value: string): Uint8Array { return Uint8Array.from(atob(value), (byte) => byte.charCodeAt(0)); }
 /** The saved expiry is absolute; the form shows the whole hours left, so an untouched form matches it. */
 function hoursLeft(expiresAtMs: number): string {
   const remaining = expiresAtMs - Date.now();
   return remaining > 0 ? String(Math.min(168, Math.max(1, Math.ceil(remaining / 3_600_000)))) : "24";
+}
+
+/**
+ * THE SOLANA ROUTES' FETCH: requestJson, KEEPING THE BODY'S FIELDS.
+ *
+ * The same deadline, cancellation, sentences and status 0 for no answer as
+ * requestJson (request-json.ts), except that a refusal is a
+ * SolanaRequestError carrying the answer's validated notSaved and
+ * freshMinOutAmount, which requestJson drops. (A cross-track request asks for
+ * RequestError to keep the body, so this can go back to requestJson.)
+ */
+export async function solanaRequestJson<T>(url: string, init: RequestInit = {}): Promise<T> {
+  const deadline = AbortSignal.timeout(20_000), caller = init.signal, controller = new AbortController();
+  const cancel = () => controller.abort(caller?.reason), expire = () => controller.abort(deadline.reason);
+  if (caller?.aborted) cancel(); else caller?.addEventListener("abort", cancel, { once: true });
+  deadline.addEventListener("abort", expire, { once: true });
+  try {
+    let response: Response;
+    try { response = await fetch(url, { ...init, cache: "no-store", signal: controller.signal }); }
+    catch { throw new SolanaRequestError(UNREACHABLE, 0); }
+    const isJson = /\bjson\b/i.test(response.headers.get("content-type") ?? "");
+    // A body that promised JSON and broke off half way is the same as no body.
+    const data: unknown = isJson ? await response.json().catch(() => undefined) : undefined;
+    if (!response.ok) {
+      // The server's sentence for a 4xx or an explicitly owner-facing 5xx, as requestJson reads it.
+      const d: { error?: unknown; errors?: unknown; why?: unknown; ownerFacing?: unknown } = data !== null && typeof data === "object" ? data : {};
+      const owned = response.status >= 500 && d.ownerFacing !== true ? null
+        : typeof d.error === "string" && d.error ? d.error : Array.isArray(d.errors) && d.errors.length ? d.errors.join(" ") : typeof d.why === "string" && d.why ? d.why : null;
+      if (response.status >= 500 && owned === null && data !== undefined) console.warn(`[merrymen] ${url} answered ${response.status}:`, data);
+      throw new SolanaRequestError(owned ?? `merrymen answered with an error (${response.status}). Try again in a moment.`, response.status, data);
+    }
+    if (data === undefined) throw new SolanaRequestError("merrymen sent back something that isn't data. Try again in a moment.", response.status);
+    return data as T;
+  } finally {
+    caller?.removeEventListener("abort", cancel);
+    deadline.removeEventListener("abort", expire);
+  }
 }
 
 export function SolanaScreen() {
@@ -67,6 +159,10 @@ function ConnectedSolana() {
   const signer = useSolanaOwner();
   const [status, setStatus] = useState<Status | null>(null);
   const [busy, setBusy] = useState(false), [error, setError] = useState("");
+  // What the owner should read that is not a failure (role=status): a pacing answer (429: wait and try
+  // again), a price move with no usable fresh minimum, a lot the market quotes nothing for, a write-off done.
+  const [notice, setNotice] = useState("");
+  const [dust, setDust] = useState<DustLot | null>(null);
   const [mode, setMode] = useState<"paper" | "live">("paper"), [consent, setConsent] = useState(false);
   const [perTrade, setPerTrade] = useState("10"), [daily, setDaily] = useState("50");
   const [perTradeSol, setPerTradeSol] = useState("0.1"), [dailySol, setDailySol] = useState("0.5");
@@ -98,7 +194,7 @@ function ConnectedSolana() {
     const token = await tokenSource.current();
     if (requestedIdentity !== identity.current || requestedEpoch !== accountEpoch.current) throw new Error("Your signing account changed. Refresh before continuing.");
     if (!token) throw new Error("Your sign-in expired. Sign in again.");
-    const result = await requestJson<T>(`/api/solana/${path}`, { signal,
+    const result = await solanaRequestJson<T>(`/api/solana/${path}`, { signal,
       headers: { Authorization: `Bearer ${token}`, "X-Merrymen-Privy-Did": requestedIdentity, ...(body === undefined ? {} : { "Content-Type": "application/json" }) },
       ...(body === undefined ? {} : { method: "POST", body: JSON.stringify(body) }),
     });
@@ -136,18 +232,30 @@ function ConnectedSolana() {
   }, [load]);
   useEffect(() => {
     accountEpoch.current++;
-    setStatus(null); setError(""); setConsent(false); setPreview(null); setReceipt(null); setRegistration(null); request.current = null; statusRevision.current = null;
+    setStatus(null); setError(""); setNotice(""); setDust(null); setConsent(false); setPreview(null); setReceipt(null); setRegistration(null); request.current = null; statusRevision.current = null;
     discardReview(); setReviewLapsed(false);
     if (!signer.authenticated) return;
     const abort = new AbortController();
-    void refresh(abort.signal).catch((e: unknown) => { if (!abort.signal.aborted) setError(e instanceof Error ? e.message : "Could not load your Solana account."); });
+    // The first read can be paced too (the status route allows a burst, then one read every few seconds): a wait, not a failure.
+    void refresh(abort.signal).catch((e: unknown) => {
+      if (abort.signal.aborted) return;
+      const paced = pacedAnswer(e);
+      if (paced !== null) setNotice(paced); else setError(e instanceof Error ? e.message : "Could not load your Solana account.");
+    });
     return () => { accountEpoch.current++; abort.abort(); };
   }, [signer.did, signer.authenticated, refresh, discardReview]);
   const act = async (fn: () => Promise<void>) => {
     if (inFlight.current) return;
-    inFlight.current = true; setBusy(true); setError("");
+    inFlight.current = true; setBusy(true); setError(""); setNotice("");
     const epoch = accountEpoch.current;
-    try { await fn(); } catch (e) { if (epoch === accountEpoch.current) setError(e instanceof Error ? e.message : "The Solana request did not finish. Refresh before retrying."); }
+    try { await fn(); } catch (e) {
+      if (epoch !== accountEpoch.current) return;
+      // Paced before anything ran: the server's own words say to wait. The page
+      // keeps what it holds (a preview, signed bytes) for the next try.
+      const paced = pacedAnswer(e);
+      if (paced !== null) setNotice(paced);
+      else setError(e instanceof Error ? e.message : "The Solana request did not finish. Refresh before retrying.");
+    }
     finally { inFlight.current = false; setBusy(false); }
   };
   const binding = status?.binding;
@@ -210,11 +318,13 @@ function ConnectedSolana() {
     // Timed on this clock from before the request, so a skewed device clock
     // cannot stretch the quote's lifetime and latency only shortens it.
     const started = Date.now();
-    const result = await api<{ preview: SolanaQuote | { quote: SolanaQuote } }>("intent", { action: "preview", mode, intent });
+    let result: { preview: SolanaQuote | { quote: SolanaQuote } };
+    try { result = await api<{ preview: SolanaQuote | { quote: SolanaQuote } }>("intent", { action: "preview", mode, intent }); }
+    catch (e) { if (offerWholeLot(e, intent)) return; throw e; }
     const quote = "quote" in result.preview ? result.preview.quote : result.preview;
     if (quote.inputMint !== intent.inputMint || quote.outputMint !== intent.outputMint || quote.inAmount !== intent.amountRaw || !RAW.test(quote.minOutAmount)) throw new Error("The preview does not match this trade. Preview again.");
     const lifetime = Math.min(SOLANA_QUOTE_MAX_AGE_MS, Math.max(0, quote.expiresAtMs - quote.quotedAtMs));
-    setPreview({ quote, key, deadline: started + lifetime }); setReceipt(null);
+    setPreview({ quote, key, deadline: started + lifetime, lifetime }); setReceipt(null);
   };
   const placeTrade = async () => {
     const intent = tradeIntent();
@@ -223,11 +333,96 @@ function ConnectedSolana() {
     if (!preview || Date.now() >= preview.deadline || preview.key !== request.current?.key) {
       setPreview(null); throw new Error("This quote expired. Preview the trade again to see a current minimum before placing it.");
     }
+    // Timed from before the request, as a preview is: latency only shortens a fresh minimum's window.
+    const started = Date.now();
+    let result: { receipt: Receipt };
     // The previewed minimum travels with the trade: the server refuses it, sending
     // nothing, when the fresh quote it would be placed at guarantees less.
-    const result = await api<{ receipt: Receipt }>("intent", { action: "trade", mode, intent: { ...intent, minOutAmount: preview.quote.minOutAmount } }); setReceipt(result.receipt); await refresh();
+    try { result = await api<{ receipt: Receipt }>("intent", { action: "trade", mode, intent: { ...intent, minOutAmount: preview.quote.minOutAmount } }); }
+    catch (e) {
+      if (offerWholeLot(e, intent)) { setPreview(null); return; }
+      if (!(e instanceof RequestError) || e.status !== 409 || e.message !== SOLANA_PRICE_MOVED) throw e;
+      // Refused before anything was signed, sent or recorded, and this minimum can
+      // no longer be met: the stale preview goes, so it is never sent again. What
+      // the fresh quote guaranteed (only a canonical amount below the refused
+      // minimum) is offered for exactly this trade, for the preview's lifetime,
+      // and placed only on the owner's click; if the price moves again, the
+      // server refuses again. The floor stays exact: nothing is applied by itself.
+      const fresh = e instanceof SolanaRequestError ? e.freshMinOutAmount : null;
+      const offered = fresh !== null && BigInt(fresh) < BigInt(preview.quote.minOutAmount);
+      setPreview(offered ? { quote: { ...preview.quote, minOutAmount: fresh }, key: preview.key, lifetime: preview.lifetime, deadline: started + preview.lifetime, movedFrom: preview.quote.minOutAmount } : null);
+      if (!offered) setNotice(e.message);
+      return;
+    }
+    setReceipt(result.receipt); await refresh();
   };
   const tokenLabel = (mint: string) => mint === SOLANA_USDG_MINT ? "USDG" : "wrapped SOL";
+  const paperLots = status?.binding?.requestedMode === "paper" ? status.runtime?.paper?.positions ?? [] : [];
+  /** The market's zero-output answer to selling exactly a whole paper lot: that lot is dust. */
+  const zeroOutputFor = (e: unknown, sale: { mode: string; inputMint: string; outputMint: string; amountRaw: string }) => e instanceof RequestError && e.status === 400 && e.message === SOLANA_TOO_SMALL
+    && sale.mode === "paper" && sale.outputMint === SOLANA_USDG_MINT ? paperLots.find((lot) => lot.mint === sale.inputMint && lot.amountRaw === sale.amountRaw) ?? null : null;
+  /** A whole-lot sale the market answered with zero output: offer the lot for write-off instead of a "try a larger amount" it cannot follow. */
+  const offerWholeLot = (e: unknown, sale: { mode: string; inputMint: string; outputMint: string; amountRaw: string }): boolean => {
+    const lot = zeroOutputFor(e, sale);
+    if (!lot) return false;
+    setDust({ mint: lot.mint, amountRaw: lot.amountRaw, confirming: false });
+    setNotice("No route buys back this whole lot, so it cannot be sold. Nothing was sent or recorded. You can write it off in your paper portfolio.");
+    return true;
+  };
+  /** For a lot the trade form cannot sell: a preview of selling all of it, which records nothing. Only its zero-output answer offers the write-off. */
+  const checkDust = async (lot: { mint: string; amountRaw: string }) => {
+    const sale = { kind: "spl-swap", chain: CHAINS.solana, mode: "paper", requestId: crypto.randomUUID(), inputMint: lot.mint, outputMint: SOLANA_USDG_MINT,
+      amountRaw: lot.amountRaw, slippageBps: SOLANA_WRITE_OFF_SLIPPAGE_BPS };
+    try { await api("intent", { action: "preview", mode: "paper", intent: sale }); }
+    catch (e) { if (offerWholeLot(e, sale)) return; throw e; }
+    setDust(null); setNotice("A route still buys this whole lot back, so it is not dust and cannot be written off.");
+  };
+  /**
+   * Books the confirmed dust lot at zero: the server checks the market's zero-output answer again first.
+   *
+   * Its 200 is final: the lot is gone and cannot come back. So the page says so,
+   * and shows the book the answer carries, before it reads the status again. A
+   * read that is paced (the status route answers 429 after a burst) or does not
+   * arrive is reported after the success, never instead of it: the owner is
+   * never told the write-off failed, nor shown the lot as still held.
+   */
+  const writeOffDust = async () => {
+    const lot = dust;
+    if (!lot?.confirming) throw new Error("Check the lot again before writing it off.");
+    let answer: { paper?: unknown };
+    try { answer = await api<{ paper?: unknown }>("paper/write-off", { mint: lot.mint }); }
+    catch (e) {
+      // A refusal ends the offer (the lot may not be dust, or changed); a paced request keeps it to try again.
+      if (!(e instanceof RequestError && e.status === 429)) setDust(null);
+      throw e;
+    }
+    const epoch = accountEpoch.current;
+    setDust(null); showWrittenOff(answer.paper, lot.mint);
+    const done = "The lot was written off at zero and removed from your paper portfolio.";
+    setNotice(done);
+    try { await refresh(); }
+    catch (e) {
+      if (epoch !== accountEpoch.current) return;
+      setNotice(`${done} Your account could not be read again just now: ${e instanceof Error ? e.message : "the status did not load."}`);
+    }
+  };
+  /**
+   * Shows the paper book a write-off answered with: well formed, without the
+   * lot, and no older than the book shown. Otherwise the shown book drops just
+   * that lot, which is what the server's 200 says it removed (a write-off never
+   * splits a lot); the next status read shows the server's book either way.
+   */
+  const showWrittenOff = (answered: unknown, mint: string) => {
+    const book = writtenOffBook(answered, mint);
+    setStatus((shown) => {
+      const current = shown?.runtime?.paper;
+      if (!shown?.runtime || !current) return shown;
+      const fresh = !!book && !(typeof book.version === "number" && typeof current.version === "number" && book.version < current.version);
+      const paper = fresh ? { ...current, ...book, trades: Array.isArray(book.trades) ? book.trades : current.trades }
+        : { ...current, positions: current.positions.filter((position) => position.mint !== mint) };
+      return { ...shown, runtime: { ...shown.runtime, paper: paper as SolanaPaperSnapshot } };
+    });
+  };
   /** What the recorded trade itself guaranteed, not the earlier preview. */
   const receiptAmounts = (trade: Receipt): string | null => {
     const out = trade.intent?.outputMint ?? (side === "buy" ? WSOL : SOLANA_USDG_MINT), decimals = out === SOLANA_USDG_MINT ? 6 : 9, label = tokenLabel(out);
@@ -325,25 +520,33 @@ function ConnectedSolana() {
     let pending = signedRegistration;
     // Submitting the saved bytes again is idempotent: the server reports the
     // outcome of the transaction it saved. A refusal of the first submission
-    // proves the server never saved them, so they and their seed are dropped.
-    // A refused retry is decided by the server's record, never assumed to be
-    // "not accepted": the bytes may already be broadcast (refusedByServer).
+    // that says this request saved nothing (savedNothing) proves the server
+    // never saved them, so they and their seed are dropped. Any other refusal,
+    // and every refused retry, is decided by the server's record, never
+    // assumed to be "not accepted": the bytes may already be broadcast.
     let submitted: { signature: string; status: string };
     try {
       ({ registration: submitted } = await api<{ registration: { signature: string; status: string } }>("setup", { stage: "submit", signedTransactionBase64: pending.signedTransactionBase64 }));
     } catch (e) {
       if (!refusedByServer(e)) { setRegistration({ ...pending, sent: true }); throw e; }
-      if (!pending.sent) {
+      if (!pending.sent && savedNothing(e)) {
         setRegistration(null);
         throw new Error(`${e.message} The signed permission was not accepted, so it has been discarded and nothing was activated. Register again to review and sign a new permission.`);
       }
       const outcome = await outcomeAfterRefusal(readRecord, pending.signature);
-      if (outcome === "unknown") throw new Error(`${e.message} An earlier submission of this signed permission may already be on Solana, so it and its session key were kept. Finish permission registration again shortly.`);
-      if (outcome === "pending") throw new Error(`${e.message} The server holds this signed permission and still records it as awaiting final confirmation, so its session key was kept. Finish permission registration again shortly.`);
+      if (outcome === "unknown") {
+        setRegistration({ ...pending, sent: true });
+        throw new Error(`${e.message} ${pending.sent ? "An earlier submission of this signed permission may already be on Solana" : "The server could not say whether it saved this signed permission"}, so it and its session key were kept. Finish permission registration again shortly.`);
+      }
+      if (outcome === "pending") {
+        setRegistration({ ...pending, sent: true });
+        throw new Error(`${e.message} The server holds this signed permission and still records it as awaiting final confirmation, so its session key was kept. Finish permission registration again shortly.`);
+      }
       if (outcome === "unheld") {
         // Resubmitting can never be checked or sent again; whether an earlier
         // submission landed is the server's status to show, not this page's guess.
         setRegistration(null);
+        if (!pending.sent) throw new Error(`${e.message} The server holds no record of this signed permission, so it and its session key have been discarded. Register again to review and sign a new permission.`);
         throw new Error(`${e.message} The server holds no record of this signed permission, so it and its session key were cleared from this page. Refresh to check whether a permission is active, then register again if needed.`);
       }
       submitted = { signature: pending.signature!, status: outcome };
@@ -395,6 +598,7 @@ function ConnectedSolana() {
   if (!signer.authenticated) return <div className="solana-card"><p>Sign in with the same account you use for Robinhood Chain.</p><SignIn onDone={() => { void refresh().catch(() => undefined); }} /></div>;
   return <>
     {error && <p role="alert" className="solana-error">{error}</p>}
+    {notice && <p role="status" className="solana-notice">{notice}</p>}
     <div className="solana-card"><h2>Wallet ownership</h2>
       {binding ? <><p className="solana-address">{binding.owner}</p><p>{sameWallet ? "Verified wallet connected." : "Connect the exact embedded wallet shown above before signing a permission."}</p></>
         : <><p>{signer.address ?? (signer.ready ? "Create your protected Solana wallet, then verify that it belongs to this account." : "Connecting your protected wallet…")}</p>
@@ -427,7 +631,21 @@ function ConnectedSolana() {
       </form>
       {binding.requestedMode === "paper" ? <div className="solana-card"><h2>Paper portfolio</h2>
         {status?.runtime?.paper ? <><p className="solana-value">{display(status.runtime.paper.cashRaw)} USDG</p><p>Simulated cash. {status.runtime.paper.positions.length} open position(s).</p>
-          {status.runtime.paper.positions.map((position) => <p key={position.mint}>{position.mint === WSOL ? "Wrapped SOL" : position.mint}: {display(position.amountRaw, position.decimals)}</p>)}
+          {status.runtime.paper.positions.map((position) => {
+            const label = position.mint === WSOL ? "Wrapped SOL" : position.mint, amountShown = display(position.amountRaw, position.decimals);
+            const offered = dust && dust.mint === position.mint && dust.amountRaw === position.amountRaw ? dust : null;
+            return <div key={position.mint}><p>{label}: {amountShown}
+              {/* The trade form sells only wrapped SOL; any other lot can be checked for dust here. */}
+              {position.mint !== WSOL && !offered && <> <button type="button" className="solana-secondary" disabled={busy} onClick={() => void act(() => checkDust(position))}>Check for write-off</button></>}</p>
+              {offered && (offered.confirming
+                ? <div className="solana-warning" role="group" aria-label="Confirm the write-off"><p>Write off this whole lot of {amountShown} {position.mint === WSOL ? "wrapped SOL" : "tokens"}? It is booked at zero: removed from your paper portfolio at no value, which frees its position slot. This cannot be undone.</p>
+                  <button type="button" disabled={busy} onClick={() => void act(writeOffDust)}>Write off at zero</button>
+                  <button type="button" className="solana-secondary" disabled={busy} onClick={() => setDust(null)}>Keep it</button></div>
+                : <p>No route buys back this whole lot: the market quotes nothing for it, so it cannot be sold. <button type="button" disabled={busy} onClick={() => setDust({ ...offered, confirming: true })}>Write off…</button></p>)}</div>;
+          })}
+          {/* The check is a paper preview, which the server refuses once the book's limits (the saved ones) have expired; its write-off does not need them. */}
+          {status.runtime.paper.positions.length > 0 && binding.limits && binding.limits.expiresAtMs <= Date.now()
+            && <p role="status">Your saved limits expired at {permissionExpiry(binding.limits.expiresAtMs)}. Checking a lot for write-off previews selling all of it, which needs current limits: save new limits above, then check it.</p>}
           <p>Network fees and account rent are excluded from paper results.</p>
           {!!status.runtime.paper.trades?.length && <details><summary>Recent simulated trades</summary><ul>{status.runtime.paper.trades.slice(0, 20).map((trade) => <li key={trade.requestId}>{trade.side === "buy" ? "Buy" : "Sell"} · {trade.requestId} · simulated</li>)}</ul></details>}
           </> : <><label>Starting simulated USDG<input inputMode="decimal" value={initialCash} onChange={(e) => setInitialCash(e.target.value)} /></label>
@@ -465,9 +683,11 @@ function ConnectedSolana() {
         <label>{side === "buy" ? "USDG to spend" : "Wrapped SOL to sell"}<input disabled={busy} inputMode="decimal" value={amount} onChange={(e) => { setAmount(e.target.value); invalidate(); }} /></label>
         <p>Slippage limit: 0.5%. Saved mode: {binding.requestedMode}.</p>
         <button disabled={busy || !!receipt || mode !== binding.requestedMode || !binding.limits || (mode === "live" && !(side === "sell" ? status?.runtime?.live.canExit : status?.runtime?.live.ready))}>Preview trade</button>
-        {preview && (receipt || quoteFresh ? <><p>Minimum received: {display(preview.quote.minOutAmount, preview.quote.outputMint === SOLANA_USDG_MINT ? 6 : 9)} {tokenLabel(preview.quote.outputMint)}.</p>
-          {!receipt && <p>This quote is valid for about {Math.max(1, Math.round((preview.deadline - Date.now()) / 1000))} seconds. The trade is quoted again when placed, with the same 0.5% slippage limit; the receipt shows the minimum actually enforced.</p>}
-          <button type="button" disabled={busy || !!receipt || !quoteFresh || mode !== binding.requestedMode} onClick={() => void act(placeTrade)}>{mode === "paper" ? "Simulate trade" : "Place live trade"}</button></>
+        {preview && (receipt || quoteFresh ? <>{preview.movedFrom && !receipt
+          ? <p role="status">The price moved, so nothing was sent. The current quote guarantees at least {display(preview.quote.minOutAmount, preview.quote.outputMint === SOLANA_USDG_MINT ? 6 : 9)} {tokenLabel(preview.quote.outputMint)}, below the {display(preview.movedFrom, preview.quote.outputMint === SOLANA_USDG_MINT ? 6 : 9)} {tokenLabel(preview.quote.outputMint)} you previewed. Place the same trade at this new minimum, or preview again.</p>
+          : <p>Minimum received: {display(preview.quote.minOutAmount, preview.quote.outputMint === SOLANA_USDG_MINT ? 6 : 9)} {tokenLabel(preview.quote.outputMint)}.</p>}
+          {!receipt && <p>This {preview.movedFrom ? "minimum" : "quote"} is valid for about {secondsUntil(preview.deadline)}. The trade is quoted again when placed, with the same 0.5% slippage limit; the receipt shows the minimum actually enforced.</p>}
+          <button type="button" disabled={busy || !!receipt || !quoteFresh || mode !== binding.requestedMode} onClick={() => void act(placeTrade)}>{mode === "paper" ? "Simulate trade" : "Place live trade"}{preview.movedFrom ? " at the new minimum" : ""}</button></>
           : <p role="status">This quote expired. Preview again to see a current minimum before trading.</p>)}
         {receipt && <p role="status">{receipt.mode === "paper" ? "Simulated trade recorded." : `Live request recorded${receipt.status ? `: ${receipt.status}` : ""}.`} {receipt.signature && <a target="_blank" rel="noreferrer" href={`https://solscan.io/tx/${encodeURIComponent(receipt.signature)}`}>View transaction</a>}</p>}
         {receipt && receiptAmounts(receipt) && <p>{receiptAmounts(receipt)}</p>}
