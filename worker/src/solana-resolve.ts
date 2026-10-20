@@ -9,13 +9,21 @@
  *
  * - It shows each provider's view, as the executor derives it from finalized
  *   on-chain evidence (observeSolanaSubmission), and can consult a third
- *   provider the operator supplies (--third-rpc). Every provider must be on its
- *   own hostname.
+ *   provider the operator supplies (--third-rpc, whose URL is read from
+ *   MERRYMEN_SOLANA_RESOLVE_THIRD_RPC, never the command line: a URL can carry
+ *   an API key, and arguments show in ps listings and shell history). Every
+ *   provider must be on its own hostname.
  * - It books only when two of them agree on the same final outcome (a fill, an
  *   on-chain failure, or a proven expiry) and no provider reports a different
  *   final outcome. An expiry is not booked while any provider has seen the
  *   signature. A provider that cannot answer, or answers with a receipt that
  *   cannot be read, simply does not count.
+ * - When one provider keeps reporting a final outcome the others contradict,
+ *   the operator can set it aside by name (--exclude primary|fallback|third).
+ *   Its view is still read, shown and recorded with the decision as excluded;
+ *   two OTHER providers on their own hostnames must still agree, no other
+ *   provider may disagree, and an expiry is still refused while any provider,
+ *   the excluded one included, has seen the signature.
  * - Before booking it records the operator, their reason, the outcome and
  *   every provider's view in solana_operator_resolutions, then books through
  *   the trading store's own settle, which re-checks the evidence against the
@@ -40,10 +48,17 @@ export class SolanaResolveError extends Error {
 }
 function refuse(message: string): never { throw new SolanaResolveError(message); }
 
+/** The environment variable holding the third provider's HTTPS URL for --third-rpc. */
+export const SOLANA_RESOLVE_THIRD_RPC_ENV = "MERRYMEN_SOLANA_RESOLVE_THIRD_RPC";
+/** --exclude names, and the provider label each one sets aside. */
+const EXCLUDABLE: Readonly<Record<string, string>> = { primary: "primary", fallback: "fallback", third: "operator's provider" };
 export const SOLANA_RESOLVE_USAGE = [
-  "Usage: npm run solana:resolve -- show <tenant> <request-id> [--third-rpc HTTPS_URL]",
-  "       npm run solana:resolve -- book <tenant> <request-id> --operator NAME --reason \"why\" [--third-rpc HTTPS_URL]",
+  "Usage: npm run solana:resolve -- show <tenant> <request-id> [--third-rpc] [--exclude primary|fallback|third]",
+  "       npm run solana:resolve -- book <tenant> <request-id> --operator NAME --reason \"why\" [--third-rpc] [--exclude primary|fallback|third]",
   "       npm run solana:resolve -- history <tenant> [<request-id>]",
+  `--third-rpc also asks the provider whose HTTPS URL is in ${SOLANA_RESOLVE_THIRD_RPC_ENV} (set it in .env.solana.local or the environment, never on the command line).`,
+  "--exclude sets aside one provider that reports a conflicting final outcome: its view is still shown and recorded, two other providers on their own hostnames must agree,",
+  "and an expiry is still refused while any provider has seen the signature.",
 ].join("\n");
 
 const SCHEMA = `CREATE TABLE IF NOT EXISTS solana_operator_resolutions (
@@ -71,8 +86,11 @@ export interface SolanaResolveProvider {
   host: string;
   read<T>(operation: (read: SolanaLiveRead) => Promise<T>): Promise<T>;
 }
-/** A provider's view: the executor's own observation, or why it could not be read (fixed text only). */
-export type SolanaResolveView = { label: string; hostId: string } & ({ observation: SolanaObservation } | { error: string });
+/**
+ * A provider's view: the executor's own observation, or why it could not be
+ * read (fixed text only). `excluded`: set aside by the operator (--exclude).
+ */
+export type SolanaResolveView = { label: string; hostId: string; excluded?: true } & ({ observation: SolanaObservation } | { error: string });
 export type SolanaResolveDecision =
   | { book: true; settlement: SolanaLiveSettlement; agreed: string[] }
   | { book: false; reason: string };
@@ -84,20 +102,23 @@ function normalizedHost(url: string): string { return new URL(url).hostname.toLo
 /**
  * What may be booked from these views. Two providers on different hostnames
  * must derive the same final outcome, and no provider may report a different
- * one; an expiry also needs that no provider has seen the signature. Anything
- * else books nothing.
+ * one; an expiry also needs that no provider has seen the signature. A view
+ * the operator excluded neither agrees nor disagrees, but its having seen the
+ * signature still refuses an expiry. Anything else books nothing.
  */
 export function solanaResolveDecision(views: readonly SolanaResolveView[]): SolanaResolveDecision {
-  const settled = views.filter((view): view is SolanaResolveView & { observation: SolanaObservation } => "observation" in view && view.observation.settlement !== null);
+  const settled = views.filter((view): view is SolanaResolveView & { observation: SolanaObservation } => !view.excluded && "observation" in view && view.observation.settlement !== null);
   const outcomes = new Map<string, typeof settled>();
   for (const view of settled) outcomes.set(observationKey(view.observation), [...(outcomes.get(observationKey(view.observation)) ?? []), view]);
-  if (outcomes.size > 1) return { book: false, reason: "Providers report different final outcomes for this transaction. Nothing is booked: find out which provider is wrong before going further." };
+  if (outcomes.size > 1) return { book: false, reason: "Providers report different final outcomes for this transaction. Nothing is booked: find out which provider is wrong before going further. "
+    + "Once you know, set it aside with --exclude (and --third-rpc for another provider): two other providers must still agree." };
   const [agreeing] = [...outcomes.values()];
   if (!agreeing) return { book: false, reason: "No provider reports a final outcome yet. Nothing is booked; the reservation stays held. Try again later, or consult another provider with --third-rpc." };
   if (new Set(agreeing.map(view => view.hostId)).size < 2) {
     return { book: false, reason: "Only one provider reports this final outcome. Two independent providers must agree before anything is booked; consult another provider with --third-rpc." };
   }
   const settlement = agreeing[0]!.observation.settlement!;
+  // Every view counts here, an excluded one included: a provider that saw the signature may be the one telling the truth.
   if (settlement.status === "expired" && views.some(view => "observation" in view && view.observation.seen)) {
     return { book: false, reason: "A provider has seen this signature, so its expiry is not booked: the transaction may have landed. Nothing is booked." };
   }
@@ -110,6 +131,10 @@ function viewError(error: unknown): string {
   return "Its answer could not be read.";
 }
 function describe(view: SolanaResolveView): string {
+  const text = describeObservation(view);
+  return view.excluded ? `${text} (excluded by the operator: shown and recorded, not counted)` : text;
+}
+function describeObservation(view: SolanaResolveView): string {
   if ("error" in view) return `could not be used: ${view.error}`;
   const { settlement, seen } = view.observation;
   if (!settlement) return seen ? "pending: seen, not finalized" : "pending: not seen, and its blockhash may still land";
@@ -128,6 +153,8 @@ export interface SolanaResolveInput {
   now?: () => number;
   /** Book the agreed outcome, recording who decided and why. Without it nothing is written. */
   book?: { operator: string; reason: string };
+  /** The label of one provider the operator sets aside (--exclude): read, shown and recorded, never counted. */
+  exclude?: string;
   /** The executor's per-provider observation; injectable for tests only. */
   observe?: typeof observeSolanaSubmission;
 }
@@ -170,6 +197,7 @@ export async function resolveSolanaPendingTrade(input: SolanaResolveInput): Prom
   const book = input.book ? { operator: lineOf(input.book.operator, "the operator's name", 80), reason: lineOf(input.book.reason, "a reason", 200) } : undefined;
   const hosts = input.providers.map(provider => provider.host);
   if (new Set(hosts).size !== hosts.length) refuse("Every provider must be on its own hostname.");
+  if (input.exclude !== undefined && !input.providers.some(provider => provider.label === input.exclude)) refuse("The excluded provider is not one of the providers consulted.");
   await ensureSolanaResolutionSchema(input.db, postgres);
   const owner = await ownerOf(input.db, tenant);
   const store = new SolanaTradingStore(input.db, { tenant, owner }, now);
@@ -194,8 +222,9 @@ export async function resolveSolanaPendingTrade(input: SolanaResolveInput): Prom
   const nowMs = now();
   const views: SolanaResolveView[] = [];
   for (const provider of input.providers) {
-    try { views.push({ label: provider.label, hostId: hostId(provider.host), observation: await provider.read(read => observe(read, submission, owner, nowMs)) }); }
-    catch (error) { views.push({ label: provider.label, hostId: hostId(provider.host), error: viewError(error) }); }
+    const base = { label: provider.label, hostId: hostId(provider.host), ...(provider.label === input.exclude ? { excluded: true as const } : {}) };
+    try { views.push({ ...base, observation: await provider.read(read => observe(read, submission, owner, nowMs)) }); }
+    catch (error) { views.push({ ...base, error: viewError(error) }); }
   }
   for (const view of views) lines.push(`  ${view.label}: ${describe(view)}`);
   const decision = solanaResolveDecision(views);
@@ -205,8 +234,10 @@ export async function resolveSolanaPendingTrade(input: SolanaResolveInput): Prom
   if (!book) { lines.push("Nothing was written. To book it, run book with --operator and --reason."); return { owner, record, views, decision, booked: false, lines }; }
   // The record comes first: nothing is ever booked without who decided it, why and on what evidence.
   const id = randomUUID();
+  // An excluded provider's dissent is part of the evidence: who set it aside, and what it said.
   const evidence = { signature: submission.signature, vaultSequence: submission.vaultSequence, lastValidBlockHeight: submission.lastValidBlockHeight,
-    agreed: decision.agreed, providers: views.map(view => ({ label: view.label, hostId: view.hostId,
+    agreed: decision.agreed, ...(input.exclude !== undefined ? { excluded: input.exclude } : {}), providers: views.map(view => ({ label: view.label, hostId: view.hostId,
+      ...(view.excluded ? { excluded: true } : {}),
       ...("error" in view ? { error: view.error } : { seen: view.observation.seen, settlement: view.observation.settlement }) })) };
   await input.db.prepare(`INSERT INTO solana_operator_resolutions(id,tenant,owner,request_id,signature,outcome,operator,reason,settlement_json,evidence_json,approved_at_ms)
     VALUES(?,?,?,?,?,?,?,?,?,?,?)`).run(id, tenant, owner, requestId, submission.signature, decision.settlement.status, book.operator, book.reason,
@@ -249,19 +280,27 @@ export interface SolanaResolveDeps {
   db: Db; postgres?: boolean; env?: Readonly<Record<string, string | undefined>>;
   fetch?: typeof globalThis.fetch; now?: () => number; timeoutMs?: number;
 }
-/** The configured providers (primary, and the fallback when set) plus the operator's, each a single-endpoint read session. */
-export function solanaResolveProviders(env: Readonly<Record<string, string | undefined>>, thirdRpc: string | undefined,
+/**
+ * The configured providers (primary, and the fallback when set) plus, with
+ * `third`, the operator's from MERRYMEN_SOLANA_RESOLVE_THIRD_RPC, each a
+ * single-endpoint read session.
+ */
+export function solanaResolveProviders(env: Readonly<Record<string, string | undefined>>, third: boolean,
   options: { fetch?: typeof globalThis.fetch; timeoutMs?: number } = {}): SolanaResolveProvider[] {
   const config = readSolanaMainnetRpcConfig(env);
   const urls: Array<[string, string]> = [["primary", config.url]];
   if (config.fallbackUrl) urls.push(["fallback", config.fallbackUrl]);
-  if (thirdRpc !== undefined) urls.push(["operator's provider", readSolanaMainnetRpcConfig({ MERRYMEN_SOLANA_RPC_MAINNET: thirdRpc }).url]);
+  if (third) {
+    const thirdRpc = env[SOLANA_RESOLVE_THIRD_RPC_ENV];
+    if (!thirdRpc) refuse(`--third-rpc reads the third provider's HTTPS URL from ${SOLANA_RESOLVE_THIRD_RPC_ENV}. Set it in .env.solana.local or the environment, then run this again.`);
+    urls.push([EXCLUDABLE.third!, readSolanaMainnetRpcConfig({ MERRYMEN_SOLANA_RPC_MAINNET: thirdRpc }).url]);
+  }
   const providers = urls.map(([label, url]) => {
     const transport = createSolanaLiveRpc({ env: { MERRYMEN_SOLANA_RPC_MAINNET: url }, singleEndpoint: true, fetch: options.fetch, timeoutMs: options.timeoutMs ?? 15_000 });
     return { label, host: normalizedHost(url), read: <T>(operation: (read: SolanaLiveRead) => Promise<T>) => transport.read(operation) };
   });
   if (new Set(providers.map(provider => provider.host)).size !== providers.length) {
-    refuse(thirdRpc === undefined ? "The configured providers share a hostname." : "The third provider must be on a different hostname from the configured providers.");
+    refuse(!third ? "The configured providers share a hostname." : "The third provider must be on a different hostname from the configured providers.");
   }
   return providers;
 }
@@ -270,13 +309,22 @@ export function solanaResolveProviders(env: Readonly<Record<string, string | und
 export async function runSolanaResolveCommand(argv: readonly string[], deps: SolanaResolveDeps): Promise<string> {
   const [command, ...rest] = argv;
   const positional: string[] = [], flags = new Map<string, string>();
+  // A URL is never taken from the command line (it can carry an API key, and
+  // arguments show in ps and shell history). It is refused without being echoed.
+  if (rest.some(item => /^[a-z][a-z0-9+.-]*:\/\//i.test(item))) {
+    refuse(`Do not pass provider URLs on the command line. Put the third provider's HTTPS URL in ${SOLANA_RESOLVE_THIRD_RPC_ENV} and pass --third-rpc alone.`);
+  }
   for (let index = 0; index < rest.length; index++) {
     const item = rest[index]!;
     if (!item.startsWith("--")) { positional.push(item); continue; }
-    const name = item.slice(2), value = rest[++index];
-    if (!["third-rpc", "operator", "reason"].includes(name) || value === undefined || flags.has(name)) refuse(SOLANA_RESOLVE_USAGE);
+    const name = item.slice(2);
+    if (name === "third-rpc") { if (flags.has(name)) refuse(SOLANA_RESOLVE_USAGE); flags.set(name, ""); continue; }
+    const value = rest[++index];
+    if (!["operator", "reason", "exclude"].includes(name) || value === undefined || flags.has(name)) refuse(SOLANA_RESOLVE_USAGE);
     flags.set(name, value);
   }
+  const excluded = flags.get("exclude");
+  if (excluded !== undefined && !Object.hasOwn(EXCLUDABLE, excluded)) refuse(SOLANA_RESOLVE_USAGE);
   const postgres = deps.postgres ?? false;
   if (command === "history" && (positional.length === 1 || positional.length === 2) && flags.size === 0) {
     const rows = await listSolanaResolutions(deps.db, positional[0]!, positional[1], postgres);
@@ -288,8 +336,9 @@ export async function runSolanaResolveCommand(argv: readonly string[], deps: Sol
   if ((command !== "show" && !booking) || positional.length !== 2 || (booking ? !flags.has("operator") || !flags.has("reason") : flags.has("operator") || flags.has("reason"))) {
     refuse(SOLANA_RESOLVE_USAGE);
   }
-  const providers = solanaResolveProviders(deps.env ?? process.env, flags.get("third-rpc"), { fetch: deps.fetch, timeoutMs: deps.timeoutMs });
+  const providers = solanaResolveProviders(deps.env ?? process.env, flags.has("third-rpc"), { fetch: deps.fetch, timeoutMs: deps.timeoutMs });
   const result = await resolveSolanaPendingTrade({ db: deps.db, postgres, tenant: positional[0]!, requestId: positional[1]!, providers, now: deps.now,
+    ...(excluded !== undefined ? { exclude: EXCLUDABLE[excluded] } : {}),
     ...(booking ? { book: { operator: flags.get("operator")!, reason: flags.get("reason")! } } : {}) });
   // A book that booked nothing is a failure the operator must see (exit status 1).
   if (booking && !result.booked) refuse(result.lines.join("\n"));

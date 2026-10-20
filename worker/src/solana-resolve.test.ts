@@ -245,8 +245,8 @@ test("the command shows each provider's own view through the executor's observat
   const confirmed = { status: { confirmationStatus: "confirmed", slot: 1001, err: null }, receipt: null };
   // The primary says finalized but its receipt cannot be read; the others have only seen it.
   const net = network({ "primary.example": { status: { confirmationStatus: "finalized", slot: 1001, err: null }, receipt: {} }, "fallback.example": confirmed, "third.example": confirmed });
-  const deps = { db: f.db, env, fetch: net.fetch, now: () => f.clock.value };
-  const shown = await runSolanaResolveCommand(["show", TENANT, "stuck-1", "--third-rpc", "https://third.example/secret-path"], deps);
+  const deps = { db: f.db, env: { ...env, MERRYMEN_SOLANA_RESOLVE_THIRD_RPC: "https://third.example/secret-path" }, fetch: net.fetch, now: () => f.clock.value };
+  const shown = await runSolanaResolveCommand(["show", TENANT, "stuck-1", "--third-rpc"], deps);
   assert.match(shown, /primary: could not be used: Finalized Solana evidence disagrees with the recorded submission\./);
   assert.match(shown, /fallback: pending: seen, not finalized\n {2}operator's provider: pending: seen, not finalized\nNo provider reports a final outcome yet/);
   for (const secret of ["api-key", "key-two", "secret-path", "https:", ".example"]) assert.ok(!shown.includes(secret), secret);
@@ -256,13 +256,80 @@ test("the command shows each provider's own view through the executor's observat
     (error: unknown) => error instanceof SolanaResolveError && /No provider reports a final outcome yet/.test(error.message));
   assert.deepEqual(await resolutions(f.db), []);
   // The operator's provider must be its own host, and an HTTPS URL.
-  await assert.rejects(runSolanaResolveCommand(["show", TENANT, "stuck-1", "--third-rpc", "https://PRIMARY.example./other"], deps), /different hostname/);
-  await assert.rejects(runSolanaResolveCommand(["show", TENANT, "stuck-1", "--third-rpc", "http://third.example/"], deps), (error: unknown) => error instanceof SolanaRpcError && error.code === "invalid-config");
+  const third = (url: string) => ({ ...deps, env: { ...env, MERRYMEN_SOLANA_RESOLVE_THIRD_RPC: url } });
+  await assert.rejects(runSolanaResolveCommand(["show", TENANT, "stuck-1", "--third-rpc"], third("https://PRIMARY.example./other")), /different hostname/);
+  await assert.rejects(runSolanaResolveCommand(["show", TENANT, "stuck-1", "--third-rpc"], third("http://third.example/")), (error: unknown) => error instanceof SolanaRpcError && error.code === "invalid-config");
   for (const argv of [[], ["show", TENANT], ["book", TENANT, "stuck-1", "--operator", "milla"], ["show", TENANT, "stuck-1", "--operator", "milla"],
-    ["show", TENANT, "stuck-1", "--force", "yes"], ["resolve", TENANT, "stuck-1"], ["show", TENANT, "stuck-1", "--third-rpc"]]) {
+    ["show", TENANT, "stuck-1", "--force", "yes"], ["resolve", TENANT, "stuck-1"], ["show", TENANT, "stuck-1", "--third-rpc", "--third-rpc"],
+    ["show", TENANT, "stuck-1", "--exclude"], ["show", TENANT, "stuck-1", "--exclude", "operator's provider"], ["show", TENANT, "stuck-1", "--exclude", "primary", "--exclude", "fallback"]]) {
     await assert.rejects(runSolanaResolveCommand(argv, deps), (error: unknown) => error instanceof SolanaResolveError && /^Usage: npm run solana:resolve/.test(error.message), argv.join(" "));
   }
   assert.equal(await runSolanaResolveCommand(["history", TENANT], deps), "No operator resolutions are recorded for that tenant.");
+});
+
+test("the third provider's URL comes from the environment, never the command line, which is refused without echoing it", async t => {
+  const f = await fixture(t);
+  const confirmed = { status: { confirmationStatus: "confirmed", slot: 1001, err: null }, receipt: null };
+  const net = network({ "primary.example": confirmed, "fallback.example": confirmed, "third.example": confirmed });
+  const deps = { db: f.db, env, fetch: net.fetch, now: () => f.clock.value };
+  for (const argv of [["show", TENANT, "stuck-1", "--third-rpc", "https://third.example/?api-key=secret"], ["show", TENANT, "stuck-1", "https://third.example/secret"]]) {
+    await assert.rejects(runSolanaResolveCommand(argv, deps), (error: unknown) => error instanceof SolanaResolveError
+      && /^Do not pass provider URLs on the command line\. Put the third provider's HTTPS URL in MERRYMEN_SOLANA_RESOLVE_THIRD_RPC/.test(error.message) && !/secret|third\.example/.test(error.message), argv.join(" "));
+  }
+  // The switch without the variable names the variable to set.
+  await assert.rejects(runSolanaResolveCommand(["show", TENANT, "stuck-1", "--third-rpc"], deps), /reads the third provider's HTTPS URL from MERRYMEN_SOLANA_RESOLVE_THIRD_RPC/);
+  assert.deepEqual(net.asked, [], "refused before any provider is asked");
+  // The usage names the variable and the --exclude names.
+  await assert.rejects(runSolanaResolveCommand([], deps), (error: unknown) => error instanceof Error
+    && /\[--third-rpc\] \[--exclude primary\|fallback\|third\]/.test(error.message) && /MERRYMEN_SOLANA_RESOLVE_THIRD_RPC/.test(error.message));
+});
+
+test("an excluded provider's conflicting outcome is shown and recorded, never counted; two others must still agree", async t => {
+  const f = await fixture(t), agreed = fill(f.pending);
+  // The fallback keeps reporting an expiry the primary and a third provider contradict.
+  const views = { primary: { settlement: agreed, seen: true }, fallback: { settlement: expiry(f.pending), seen: false }, "operator's provider": { settlement: agreed, seen: true } };
+  const run = (p: ReturnType<typeof providers>, exclude?: string) => resolveSolanaPendingTrade({ db: f.db, tenant: TENANT, requestId: "stuck-1", providers: p.list, observe: p.observe,
+    now: () => f.clock.value, book: { operator: "milla", reason: "fallback serves a stale fork" }, ...(exclude ? { exclude } : {}) });
+  const refused = await run(providers(views));
+  assert.equal(refused.booked, false); assert.match(refused.lines.at(-1)!, /different final outcomes.*--exclude/s);
+  // Excluding it leaves only one provider when no third one is consulted: nothing is booked.
+  const pair = await run(providers({ primary: views.primary, fallback: views.fallback }), "fallback");
+  assert.equal(pair.booked, false); assert.match(pair.lines.at(-1)!, /Only one provider reports this final outcome/);
+  // A provider that was not consulted cannot be excluded.
+  await assert.rejects(run(providers({ primary: views.primary, fallback: views.fallback }), "operator's provider"), /not one of the providers consulted/);
+  assert.deepEqual(await resolutions(f.db), []); assert.equal((await f.store.get(OWNER, "stuck-1"))!.status, "pending");
+  // With a third provider: booked, and the excluded dissent is in the record.
+  const booked = await run(providers(views), "fallback");
+  assert.equal(booked.booked, true);
+  assert.match(booked.lines.join("\n"), /fallback: never ran: blockhash expired .* \(excluded by the operator: shown and recorded, not counted\)/);
+  assert.equal((await f.store.get(OWNER, "stuck-1"))!.status, "finalized");
+  const evidence = JSON.parse((await resolutions(f.db))[0]!.evidence_json as string);
+  assert.equal(evidence.excluded, "fallback"); assert.deepEqual(evidence.agreed, ["primary", "operator's provider"]);
+  const dissent = evidence.providers.find((p: { label: string }) => p.label === "fallback");
+  assert.equal(dissent.excluded, true); assert.equal(dissent.settlement.status, "expired");
+  assert.ok(evidence.providers.filter((p: { excluded?: boolean }) => p.excluded).length === 1);
+});
+
+test("an expiry is still refused while an excluded provider has seen the signature", async t => {
+  const f = await fixture(t);
+  const p = providers({ primary: { settlement: expiry(f.pending, "1201"), seen: false }, fallback: { settlement: fill(f.pending), seen: true },
+    "operator's provider": { settlement: expiry(f.pending, "1250"), seen: false } });
+  const result = await resolveSolanaPendingTrade({ db: f.db, tenant: TENANT, requestId: "stuck-1", providers: p.list, observe: p.observe, now: () => f.clock.value,
+    book: { operator: "milla", reason: "dropped" }, exclude: "fallback" });
+  assert.equal(result.booked, false); assert.match(result.lines.at(-1)!, /has seen this signature/);
+  assert.equal((await f.store.get(OWNER, "stuck-1"))!.status, "pending"); assert.deepEqual(await resolutions(f.db), []);
+});
+
+test("the command maps --exclude names to providers, the third one included", async t => {
+  const f = await fixture(t);
+  const confirmed = { status: { confirmationStatus: "confirmed", slot: 1001, err: null }, receipt: null };
+  const net = network({ "primary.example": confirmed, "fallback.example": confirmed, "third.example": confirmed });
+  const deps = { db: f.db, env: { ...env, MERRYMEN_SOLANA_RESOLVE_THIRD_RPC: "https://third.example/" }, fetch: net.fetch, now: () => f.clock.value };
+  for (const [name, label] of [["primary", "primary"], ["fallback", "fallback"], ["third", "operator's provider"]]) {
+    const shown = await runSolanaResolveCommand(["show", TENANT, "stuck-1", "--third-rpc", "--exclude", name!], deps);
+    const marked = shown.split("\n").filter(line => line.includes("(excluded by the operator"));
+    assert.deepEqual(marked, [`  ${label}: pending: seen, not finalized (excluded by the operator: shown and recorded, not counted)`], name);
+  }
 });
 
 test("a booking that cannot be marked, or whose reply and re-read are both lost, never claims nothing was booked", async t => {
