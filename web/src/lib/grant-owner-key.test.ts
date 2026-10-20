@@ -103,6 +103,9 @@ describe("a real grant carrying a Solana secret key is refused", () => {
     assert.equal(carriesOwnerKey({ ...g, caps: { ...g.caps, backup: SOL.bytes } }), true);
     assert.equal(carriesOwnerKey({ ...g, binding: { ...g.binding!, nonce: SOL.b58 } }), true);
     assert.equal(carriesOwnerKey({ ...g, demoSessionPrivateKey: SOL.b58 as `0x${string}` }), true);
+    // Glued to the text around it (audit: 'pk<K>' was read as no secret, 'pk <K>' as one).
+    assert.equal(carriesOwnerKey({ ...g, label: `pk${SOL.b58}` }), true);
+    assert.equal(carriesOwnerKey({ ...g, label: `%22${SOL.b58}%22` }), true);
   });
 
   it("inside the ZeroDev blob, or in place of it", async () => {

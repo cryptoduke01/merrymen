@@ -435,16 +435,56 @@ describe("Solana secret detection", () => {
     const distinct = Array.from({ length: 150 }, (_, i) => keypair(i).sig);
     const sigs = [...distinct, ...distinct];
     const { secretB58 } = keypair(29);
+    // A candidate is a window that decodes to 64 bytes: an 88-character signature holds about three
+    // (itself and two 87-character windows, any of which could be a key glued to one character).
+    const budget = secretScanBudget();
+    let read = 0;
+    while (read < sigs.length && !solanaSecretIn(sigs[read], budget)) read++;
+    assert.ok(read >= 80 && read < 256, `read ${read} signatures before the cap`);
+    assert.equal(solanaSecretIn(sigs[read + 1], budget), true, "scans sharing a budget are capped together");
+    assert.deepEqual(solanaSecretsIn(sigs.slice(0, read).join(" ")), [], "up to the cap, signatures stay signatures");
     const found = solanaSecretsIn([...sigs, secretB58].join(" "));
-    assert.equal(found.length, 300 - 256 + 1, "the first 256 are read; the rest, the key included, are refused unread");
-    assert.equal(found.at(-1), secretB58, "a key past the cap is never let through");
-    assert.deepEqual(solanaSecretsIn(sigs.slice(0, 256).join(" ")), [], "up to the cap, signatures stay signatures");
+    assert.deepEqual(found, [...sigs.slice(read), secretB58], "the rest, the key included, are refused unread, each whole");
     const addresses = Array.from({ length: 1_000 }, (_, i) => keypair(i % 150).pub).join(" ");
     assert.deepEqual(solanaSecretsIn(`${addresses} ${secretB58}`), [secretB58], "an address is too short to be a candidate");
+  });
 
-    const budget = secretScanBudget();
-    for (const sig of sigs.slice(0, 256)) assert.equal(solanaSecretIn(sig, budget), false);
-    assert.equal(solanaSecretIn(sigs[256], budget), true, "scans sharing a budget are capped together");
+  it("finds a key glued to letters or digits, and returns only the key, as written", () => {
+    // audit: 'pk<K>', '%22<K>%22', '<K>is mine' and 'secret:<K>x' were each read as no secret.
+    const { secretB58: key } = keypair(31);
+    const { secretB58: other, sig } = keypair(37);
+    const fromSeed = (seed: Uint8Array) => base58Encode(Uint8Array.from([...seed, ...ed25519.getPublicKey(seed)]));
+    // A seed with a leading zero byte encodes one character shorter, after a "1"; an all-zero seed, after 32.
+    const oneZero = fromSeed(Uint8Array.from({ length: 32 }, (_, i) => i));
+    const allZero = fromSeed(new Uint8Array(32));
+    assert.ok(oneZero.startsWith("1") && !oneZero.startsWith("11") && oneZero.length < 87 && allZero.startsWith("1".repeat(32)));
+    for (const [text, keys, why] of [
+      [`pk${key}`, [key], "a prefix"],
+      [`%22${key}%22`, [key], "URL-encoded JSON quotes"],
+      [`${key}is mine`, [key], "a word after it"],
+      [`secret:${key}x`, [key], "one letter after it"],
+      [`0${key}`, [key], "a digit outside base58 before it (the old scan read no id against it)"],
+      [`l${key}O`, [key], "letters outside base58 either side"],
+      [`thekeyforthisaccountwas${key}`, [key], "glue of any length on one side"],
+      [`${key}${other}`, [key, other], "two keys written together"],
+      [`pk${oneZero}x`, [oneZero], "a key that begins with a zero byte"],
+      [`ab${allZero}cd`, [allZero], "a key of 32 zero bytes and its public key"],
+      [`${"a".repeat(12)}${key}${"b".repeat(12)}`, [key], "twelve characters of glue either side"],
+    ] as const) {
+      assert.deepEqual(solanaSecretsIn(text), keys, why);
+      for (const k of keys) assert.ok(text.includes(k));
+    }
+    // A key behind one base58 digit can decode, whole, to 64 bytes that are no keypair: the window still is one.
+    let glued = "";
+    for (let i = 1; i < 256 && !glued; i++) {
+      const k = keypair(i).secretB58;
+      if (k.length === 87 && base58Decode(`2${k}`)?.length === 64) glued = k;
+    }
+    assert.ok(glued, "a key whose '2<key>' decodes to 64 bytes");
+    assert.deepEqual(solanaSecretsIn(`2${glued}`), [glued]);
+    // A signature glued to words stays a signature, and so does ordinary text.
+    assert.deepEqual(solanaSecretsIn(`landed tx${sig}done`), []);
+    assert.deepEqual(solanaSecretsIn(`#${"ToTheMoonAndBackAgainAndAgainForeverAndEverFam".repeat(4)}`), []);
   });
 
   it("reads a megabyte of key-shaped text in bounded time", () => {
