@@ -976,6 +976,96 @@ test("a paced preview or trade (429) is a wait, not a failure: nothing more is s
   assert.equal(trades.length, 2); assert.deepEqual(trades[1], trades[0]);
   assert.match(ui.container.textContent!, /Simulated trade recorded/);
 });
+const PRICE_MOVED = "The price moved. Preview again; nothing was sent.";
+test("the page's price-moved sentence is the intent route's own", () => {
+  const api = readFileSync(fileURLToPath(new URL("../lib/solana-api.ts", import.meta.url)), "utf8");
+  assert.equal(screen.SOLANA_PRICE_MOVED, PRICE_MOVED);
+  assert.ok(api.includes(`const PRICE_MOVED = "${screen.SOLANA_PRICE_MOVED}";`), "solana-api.ts's PRICE_MOVED");
+});
+test("a price-moved refusal drops the stale preview and offers the fresh minimum only for the owner's own click, as the same request", async () => {
+  state.runtime.paper = paper;
+  const trades: Record<string, unknown>[] = [];
+  let answers: Array<() => Response> = [];
+  respond = async (path, body) => {
+    if (path === "status") return json(state);
+    if (path === "intent" && body?.action === "preview") return json({ preview: { quote: quoteFor(20_000) } });
+    if (path === "intent" && body?.action === "trade") { trades.push(body); return answers.shift()!(); }
+    throw new Error("Unexpected fixture route");
+  };
+  const moved = (fresh?: unknown) => () => json({ error: PRICE_MOVED, ownerFacing: true, ...(fresh === undefined ? {} : { freshMinOutAmount: fresh }) }, 409);
+  const alert = () => ui.container.querySelector('[role="alert"]')?.textContent ?? null;
+  const offer = () => [...ui.container.querySelectorAll("button")].find((item) => item.textContent === "Simulate trade at the new minimum");
+  answers = [moved("9000000")];
+  await render(); await ui.click("Preview trade"); await ui.click("Simulate trade");
+  assert.equal(trades.length, 1); assert.equal((trades[0]!.intent as { minOutAmount: string }).minOutAmount, "9950000");
+  // Nothing went wrong and nothing was sent: no alert, and the refused minimum is never offered again.
+  assert.equal(alert(), null);
+  assert.equal([...ui.container.querySelectorAll("button")].some((item) => item.textContent === "Simulate trade"), false);
+  assert.match(ui.container.textContent!, /The price moved, so nothing was sent\. The current quote guarantees at least 0\.009 wrapped SOL, below the 0\.00995 wrapped SOL you previewed\./);
+  assert.doesNotMatch(ui.container.textContent!, /Minimum received/);
+  // Nothing more is sent until the owner clicks.
+  await settle();
+  assert.equal(trades.length, 1);
+  assert.equal(offer()!.disabled, false);
+  // The click sends exactly the fresh minimum, as the same trade: same request ID, same amount.
+  answers = [() => json({ receipt: { mode: "paper", requestId: (trades[0]!.intent as { requestId: string }).requestId } })];
+  await ui.click("Simulate trade at the new minimum");
+  assert.equal(trades.length, 2);
+  const [first, second] = trades.map((trade) => trade.intent as Record<string, unknown>);
+  assert.equal(second!.minOutAmount, "9000000");
+  assert.deepEqual({ ...second, minOutAmount: undefined }, { ...first, minOutAmount: undefined });
+  assert.match(ui.container.textContent!, /Simulated trade recorded/);
+  // If it moves again, the server refuses again, and the next fresh minimum is offered against the one just refused.
+  await ui.click("Start a new trade"); await ui.click("Preview trade");
+  answers = [moved("9500000"), moved("9400000")];
+  await ui.click("Simulate trade"); await ui.click("Simulate trade at the new minimum");
+  assert.equal(trades.length, 4);
+  assert.equal((trades[3]!.intent as { minOutAmount: string }).minOutAmount, "9500000");
+  assert.match(ui.container.textContent!, /guarantees at least 0\.0094 wrapped SOL, below the 0\.0095 wrapped SOL you previewed/);
+  assert.equal(trades.length, 4);
+});
+test("a price-moved refusal without a usable fresh minimum offers nothing to trade: preview again", async () => {
+  state.runtime.paper = paper;
+  const trades: Record<string, unknown>[] = [];
+  let fresh: unknown;
+  respond = async (path, body) => {
+    if (path === "status") return json(state);
+    if (path === "intent" && body?.action === "preview") return json({ preview: { quote: quoteFor(20_000) } });
+    if (path === "intent" && body?.action === "trade") { trades.push(body); return json({ error: PRICE_MOVED, ownerFacing: true, freshMinOutAmount: fresh }, 409); }
+    throw new Error("Unexpected fixture route");
+  };
+  await render();
+  // Missing, malformed, not canonical, or not below the refused minimum of 9950000: never offered.
+  for (const value of [undefined, "0", "09000000", "-9000000", "9e6", "9000000.0", " 9000000", 9_000_000, "1".repeat(40), "9950000", "9950001"]) {
+    fresh = value;
+    await ui.click("Preview trade"); await ui.click("Simulate trade");
+    const buttons = [...ui.container.querySelectorAll("button")].map((item) => item.textContent);
+    assert.ok(!buttons.some((text) => text?.startsWith("Simulate trade")), JSON.stringify(value));
+    assert.doesNotMatch(ui.container.textContent!, /Minimum received|new minimum|guarantees at least/);
+    assert.equal(ui.container.querySelector('[role="alert"]')?.textContent ?? null, null);
+    assert.equal(ui.container.querySelector(".solana-notice")?.textContent, PRICE_MOVED);
+  }
+  assert.equal(trades.length, 11);
+});
+test("a fresh minimum expires like a preview, and is then never sent", async () => {
+  state.runtime.paper = paper;
+  mock.timers.enable({ apis: ["setTimeout", "Date"], now: Date.now() });
+  try {
+    const trades: Record<string, unknown>[] = [];
+    respond = async (path, body) => {
+      if (path === "status") return json(state);
+      if (path === "intent" && body?.action === "preview") return json({ preview: { quote: quoteFor(20_000) } });
+      if (path === "intent" && body?.action === "trade") { trades.push(body); return json({ error: PRICE_MOVED, ownerFacing: true, freshMinOutAmount: "9000000" }, 409); }
+      throw new Error("Unexpected fixture route");
+    };
+    await render(); await ui.click("Preview trade"); await ui.click("Simulate trade");
+    assert.ok([...ui.container.querySelectorAll("button")].some((item) => item.textContent === "Simulate trade at the new minimum"));
+    await act(async () => { mock.timers.tick(20_001); });
+    assert.equal([...ui.container.querySelectorAll("button")].some((item) => item.textContent?.startsWith("Simulate trade")), false);
+    assert.match(ui.container.textContent!, /This quote expired\. Preview again/);
+    assert.equal(trades.length, 1);
+  } finally { mock.timers.reset(); }
+});
 test("a quote that is already past its expiry never offers a trade, whatever the device clock says", async () => {
   state.runtime.paper = paper;
   respond = async (path, body) => {

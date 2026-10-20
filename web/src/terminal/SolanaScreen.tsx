@@ -45,8 +45,16 @@ type Review = { transactionBase64: string; limits: SolanaPaperLimits; terms: Sig
 const REVIEW_SIGN_WINDOW_MS = 45_000;
 type Receipt = { mode?: string; requestId?: string; signature?: string; status?: string; state?: string;
   intent?: { outputMint?: string }; minOutAmount?: string; quotedOutAmount?: string; quote?: { minOutAmount?: string }; outputAmountRaw?: string };
-/** A preview is only good for its quote's lifetime, and only for the exact trade it quoted. */
-type Preview = { quote: SolanaQuote; key: string; deadline: number };
+/**
+ * A preview is only good for its quote's lifetime, and only for the exact
+ * trade it quoted. `movedFrom`: this is the fresh minimum a price-moved
+ * refusal of that trade offered (quote.minOutAmount), below the minimum the
+ * refused request carried (movedFrom). It is placed only on the owner's own
+ * click, as the same trade with the same request ID and amount.
+ */
+type Preview = { quote: SolanaQuote; key: string; deadline: number; lifetime: number; movedFrom?: string };
+/** The intent route's price-moved refusal, word for word (PRICE_MOVED in web/src/lib/solana-api.ts; a test pins the two together). */
+export const SOLANA_PRICE_MOVED = "The price moved. Preview again; nothing was sent.";
 const RAW = /^(0|[1-9][0-9]*)$/;
 function base64(bytes: Uint8Array): string { return btoa(String.fromCharCode(...bytes)); }
 function fromBase64(value: string): Uint8Array { return Uint8Array.from(atob(value), (byte) => byte.charCodeAt(0)); }
@@ -259,7 +267,7 @@ function ConnectedSolana() {
     const quote = "quote" in result.preview ? result.preview.quote : result.preview;
     if (quote.inputMint !== intent.inputMint || quote.outputMint !== intent.outputMint || quote.inAmount !== intent.amountRaw || !RAW.test(quote.minOutAmount)) throw new Error("The preview does not match this trade. Preview again.");
     const lifetime = Math.min(SOLANA_QUOTE_MAX_AGE_MS, Math.max(0, quote.expiresAtMs - quote.quotedAtMs));
-    setPreview({ quote, key, deadline: started + lifetime }); setReceipt(null);
+    setPreview({ quote, key, deadline: started + lifetime, lifetime }); setReceipt(null);
   };
   const placeTrade = async () => {
     const intent = tradeIntent();
@@ -268,9 +276,27 @@ function ConnectedSolana() {
     if (!preview || Date.now() >= preview.deadline || preview.key !== request.current?.key) {
       setPreview(null); throw new Error("This quote expired. Preview the trade again to see a current minimum before placing it.");
     }
+    // Timed from before the request, as a preview is: latency only shortens a fresh minimum's window.
+    const started = Date.now();
+    let result: { receipt: Receipt };
     // The previewed minimum travels with the trade: the server refuses it, sending
     // nothing, when the fresh quote it would be placed at guarantees less.
-    const result = await api<{ receipt: Receipt }>("intent", { action: "trade", mode, intent: { ...intent, minOutAmount: preview.quote.minOutAmount } }); setReceipt(result.receipt); await refresh();
+    try { result = await api<{ receipt: Receipt }>("intent", { action: "trade", mode, intent: { ...intent, minOutAmount: preview.quote.minOutAmount } }); }
+    catch (e) {
+      if (!(e instanceof RequestError) || e.status !== 409 || e.message !== SOLANA_PRICE_MOVED) throw e;
+      // Refused before anything was signed, sent or recorded, and this minimum can
+      // no longer be met: the stale preview goes, so it is never sent again. What
+      // the fresh quote guaranteed (only a canonical amount below the refused
+      // minimum) is offered for exactly this trade, for the preview's lifetime,
+      // and placed only on the owner's click; if the price moves again, the
+      // server refuses again. The floor stays exact: nothing is applied by itself.
+      const fresh = e instanceof SolanaRequestError ? e.freshMinOutAmount : null;
+      const offered = fresh !== null && BigInt(fresh) < BigInt(preview.quote.minOutAmount);
+      setPreview(offered ? { quote: { ...preview.quote, minOutAmount: fresh }, key: preview.key, lifetime: preview.lifetime, deadline: started + preview.lifetime, movedFrom: preview.quote.minOutAmount } : null);
+      if (!offered) setNotice(e.message);
+      return;
+    }
+    setReceipt(result.receipt); await refresh();
   };
   const tokenLabel = (mint: string) => mint === SOLANA_USDG_MINT ? "USDG" : "wrapped SOL";
   /** What the recorded trade itself guaranteed, not the earlier preview. */
@@ -511,9 +537,11 @@ function ConnectedSolana() {
         <label>{side === "buy" ? "USDG to spend" : "Wrapped SOL to sell"}<input disabled={busy} inputMode="decimal" value={amount} onChange={(e) => { setAmount(e.target.value); invalidate(); }} /></label>
         <p>Slippage limit: 0.5%. Saved mode: {binding.requestedMode}.</p>
         <button disabled={busy || !!receipt || mode !== binding.requestedMode || !binding.limits || (mode === "live" && !(side === "sell" ? status?.runtime?.live.canExit : status?.runtime?.live.ready))}>Preview trade</button>
-        {preview && (receipt || quoteFresh ? <><p>Minimum received: {display(preview.quote.minOutAmount, preview.quote.outputMint === SOLANA_USDG_MINT ? 6 : 9)} {tokenLabel(preview.quote.outputMint)}.</p>
-          {!receipt && <p>This quote is valid for about {Math.max(1, Math.round((preview.deadline - Date.now()) / 1000))} seconds. The trade is quoted again when placed, with the same 0.5% slippage limit; the receipt shows the minimum actually enforced.</p>}
-          <button type="button" disabled={busy || !!receipt || !quoteFresh || mode !== binding.requestedMode} onClick={() => void act(placeTrade)}>{mode === "paper" ? "Simulate trade" : "Place live trade"}</button></>
+        {preview && (receipt || quoteFresh ? <>{preview.movedFrom && !receipt
+          ? <p role="status">The price moved, so nothing was sent. The current quote guarantees at least {display(preview.quote.minOutAmount, preview.quote.outputMint === SOLANA_USDG_MINT ? 6 : 9)} {tokenLabel(preview.quote.outputMint)}, below the {display(preview.movedFrom, preview.quote.outputMint === SOLANA_USDG_MINT ? 6 : 9)} {tokenLabel(preview.quote.outputMint)} you previewed. Place the same trade at this new minimum, or preview again.</p>
+          : <p>Minimum received: {display(preview.quote.minOutAmount, preview.quote.outputMint === SOLANA_USDG_MINT ? 6 : 9)} {tokenLabel(preview.quote.outputMint)}.</p>}
+          {!receipt && <p>This {preview.movedFrom ? "minimum" : "quote"} is valid for about {Math.max(1, Math.round((preview.deadline - Date.now()) / 1000))} seconds. The trade is quoted again when placed, with the same 0.5% slippage limit; the receipt shows the minimum actually enforced.</p>}
+          <button type="button" disabled={busy || !!receipt || !quoteFresh || mode !== binding.requestedMode} onClick={() => void act(placeTrade)}>{mode === "paper" ? "Simulate trade" : "Place live trade"}{preview.movedFrom ? " at the new minimum" : ""}</button></>
           : <p role="status">This quote expired. Preview again to see a current minimum before trading.</p>)}
         {receipt && <p role="status">{receipt.mode === "paper" ? "Simulated trade recorded." : `Live request recorded${receipt.status ? `: ${receipt.status}` : ""}.`} {receipt.signature && <a target="_blank" rel="noreferrer" href={`https://solscan.io/tx/${encodeURIComponent(receipt.signature)}`}>View transaction</a>}</p>}
         {receipt && receiptAmounts(receipt) && <p>{receiptAmounts(receipt)}</p>}
