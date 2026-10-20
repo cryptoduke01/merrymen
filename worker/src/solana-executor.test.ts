@@ -7,7 +7,7 @@ import { CHAINS, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM } from "../../packages/cor
 import { deriveSolanaVaultAddress, deriveSolanaSwapAuthority, deriveSolanaAta, SOLANA_VAULT_LOCAL_TEST_PROGRAM,
   SOLANA_VAULT_ACCOUNT_SIZE, SOLANA_VAULT_DISCRIMINATOR, SOLANA_SWAP_EVENT_DISCRIMINATOR,
   SOLANA_CLASSIC_TOKEN_PROGRAM, SOLANA_WRAPPED_SOL_MINT } from "../../packages/core/src/solana-live";
-import { createSolanaExecutor, observeSolanaSubmission, reconcileSolanaSubmission, SOLANA_PROVIDER_SLOT_SKEW, solanaAgreedSettlement, solanaDebitWindowStart, SolanaExecutionError,
+import { createSolanaExecutor, observationKey, observeSolanaSubmission, reconcileSolanaSubmission, SOLANA_PROVIDER_SLOT_SKEW, solanaAgreedSettlement, solanaDebitWindowStart, SolanaExecutionError,
   solanaQuorumSlot, verifySolanaVaultDeployment, type SolanaLiveRecord, type SolanaSignedSubmission, type SolanaExecutorOptions } from "./solana-executor";
 import { settleSolanaReceipt, solanaVaultEvents } from "./solana-settlement";
 import { JUPITER_SWAP_PROGRAM, SolanaLiveMarketError, type JupiterCpiRoute } from "./solana-live-market";
@@ -316,14 +316,17 @@ function vaultWithDebits(owner: string, session: string, seq: bigint, timestamps
 
 test("a sequence another transaction consumed is proven expired only from the vault's debit log, and only when the operator's tool asks (audit live-M1)", async () => {
   // The fixture's swap is signed with a deadline of NOW + 30 s (unix 1030): it could only have run at a cluster time from 1000 to 1029.
-  const cases: Array<{ label: string; seq: bigint; debits: bigint[]; height?: number; ask?: boolean; proven: boolean }> = [
+  // `unproven`: why a pending view says it cannot prove the bytes never ran (sequenceMoved.reason), for the operator.
+  // `signedAt`: the sequence the observed bytes claim to be signed at (default: the fixture's own, 0).
+  const cases: Array<{ label: string; seq: bigint; debits: bigint[]; height?: number; ask?: boolean; proven: boolean; unproven?: string; signedAt?: bigint }> = [
+    { label: "the provider's vault is before the signed sequence", seq: 1n, debits: [], signedAt: 5n, proven: false, unproven: "behind" },
     { label: "an owner withdrawal moved it and no swap ran", seq: 1n, debits: [], proven: true },
     { label: "only older swaps are in the log", seq: 3n, debits: [100n, 999n], proven: true },
-    { label: "a debit at the earliest moment it could have run", seq: 1n, debits: [1000n], proven: false },
-    { label: "a debit inside its window", seq: 1n, debits: [999n, 1029n], proven: false },
-    { label: "a later swap's debit: it may have pruned this one's", seq: 2n, debits: [90_000n], proven: false },
-    { label: "its blockhash could still land", seq: 1n, debits: [], height: 1200, proven: false },
-    { label: "the worker's own reconciliation never asks", seq: 1n, debits: [], ask: false, proven: false },
+    { label: "a debit at the earliest moment it could have run", seq: 1n, debits: [1000n], proven: false, unproven: "debit-in-window" },
+    { label: "a debit inside its window", seq: 1n, debits: [999n, 1029n], proven: false, unproven: "debit-in-window" },
+    { label: "a later swap's debit: it may have pruned this one's", seq: 2n, debits: [90_000n], proven: false, unproven: "debit-in-window" },
+    { label: "its blockhash could still land", seq: 1n, debits: [], height: 1200, proven: false, unproven: "blockhash-live" },
+    { label: "the worker's own reconciliation never asks", seq: 1n, debits: [], ask: false, proven: false, unproven: "not-asked" },
   ];
   for (const c of cases) {
     const f = await fixture(); f.controls.failSend = true;
@@ -339,12 +342,18 @@ test("a sequence another transaction consumed is proven expired only from the va
       }
       return assert.fail(`Unexpected proof read ${method}`);
     };
-    const view = await observeSolanaSubmission(read, submission, f.intent.owner, NOW + 1, c.ask === false ? {} : { proveSequenceConsumed: true });
+    const observed = c.signedAt === undefined ? submission : { ...submission, vaultSequence: c.signedAt.toString() };
+    const view = await observeSolanaSubmission(read, observed, f.intent.owner, NOW + 1, c.ask === false ? {} : { proveSequenceConsumed: true });
     if (c.proven) {
       assert.equal(view.seen, false, c.label);
       assert.deepEqual(view.settlement, { status: "expired", signature: submission.signature, slot: SLOT + 2, feeLamports: null, amountIn: "0", amountOut: "0",
         finalizedAtMs: NOW + 1, expiryProof: { vaultSequence: c.seq.toString(), sessionEpoch: "1", blockHeight: "1201", reason: "sequence-consumed", debitWindowStart: "1000" } }, c.label);
-    } else assert.deepEqual(view, { settlement: null, seen: true }, c.label);
+    } else {
+      assert.deepEqual(view, { settlement: null, seen: true, sequenceMoved: { vaultSequence: c.seq.toString(), blockHeight: String(c.height ?? 1201), reason: c.unproven,
+        ...(c.unproven === "debit-in-window" ? { debitWindowStart: "1000" } : {}) } }, c.label);
+      // What providers must agree on is unchanged: still pending.
+      assert.equal(observationKey(view), "pending", c.label);
+    }
     // Automatic reconciliation books nothing for a moved sequence, and never rebroadcasts bytes that can no longer run.
     const resent: string[] = [];
     const rpc: SolanaLiveRpc = { read: callback => callback(read), readEach: async callback => [await callback(read), await callback(read)],

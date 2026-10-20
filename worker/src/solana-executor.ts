@@ -488,7 +488,21 @@ async function readFinalizedVault(read: SolanaLiveRead, submission: SolanaSigned
  * One provider's view. `seen`: that provider has a status, a receipt or a moved sequence for it.
  * Exported for the operator's resolution tool (solana-resolve.ts), which compares the same views.
  */
-export interface SolanaObservation { settlement: SolanaLiveSettlement | null; seen: boolean }
+export interface SolanaObservation {
+  settlement: SolanaLiveSettlement | null; seen: boolean;
+  /**
+   * Pending views only: no status or receipt, but this provider's finalized vault
+   * (at `blockHeight`) shows a sequence other than the signed one, which counts
+   * as seen because the move may be these bytes. `reason` says why that is not a
+   * proof they never ran (proveSequenceConsumed): "not-asked" (the worker never
+   * asks), "behind" (the vault is before the signed sequence), "blockhash-live"
+   * (the bank is not past lastValidBlockHeight yet), or "debit-in-window" (the
+   * debit log holds a swap at or after `debitWindowStart`, the earliest moment
+   * they could have run: they may have). Shown to the operator; never part of
+   * what providers must agree on (observationKey).
+   */
+  sequenceMoved?: { vaultSequence: string; blockHeight: string; reason: "not-asked" | "behind" | "blockhash-live" | "debit-in-window"; debitWindowStart?: string };
+}
 export interface SolanaObservationOptions {
   /**
    * The operator's resolution tool only (solana-resolve.ts): when the vault's
@@ -549,7 +563,13 @@ export async function observeSolanaSubmission(read: SolanaLiveRead, submission: 
   const evidence = await readFinalizedVault(read, submission, owner, proofSlot);
   if (evidence.state.seq !== BigInt(submission.vaultSequence)) {
     // A moved sequence may be these bytes landing; only the debit log can say they did not.
-    if (!options.proveSequenceConsumed || !sequenceConsumed(submission, evidence.state, blockHeight)) return { settlement: null, seen: true };
+    if (!options.proveSequenceConsumed || !sequenceConsumed(submission, evidence.state, blockHeight)) {
+      const moved = { vaultSequence: evidence.state.seq.toString(), blockHeight: blockHeight.toString() };
+      return { settlement: null, seen: true, sequenceMoved: !options.proveSequenceConsumed ? { ...moved, reason: "not-asked" }
+        : evidence.state.seq < BigInt(submission.vaultSequence) ? { ...moved, reason: "behind" }
+        : BigInt(blockHeight) <= BigInt(submission.lastValidBlockHeight) ? { ...moved, reason: "blockhash-live" }
+        : { ...moved, reason: "debit-in-window", debitWindowStart: solanaDebitWindowStart(submission).toString() } };
+    }
     if (!Number.isSafeInteger(nowMs) || nowMs < submission.preparedAtMs) return fail();
     return { seen: false, settlement: { status: "expired", signature: submission.signature, slot: evidence.slot, feeLamports: null,
       amountIn: "0", amountOut: "0", finalizedAtMs: nowMs, expiryProof: { vaultSequence: evidence.state.seq.toString(),

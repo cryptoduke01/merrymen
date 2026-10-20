@@ -30,7 +30,10 @@
  *   same terms as any other: two providers on their own hostnames agree, none
  *   has seen the signature and none could not be read. The worker's automatic
  *   reconciliation never books it, and the store refuses it from anything but
- *   a recorded operator decision.
+ *   a recorded operator decision. A provider that cannot prove it says why
+ *   (the blockhash had not expired, or its debit log holds a swap inside the
+ *   trade's window, which may be this trade's: then nothing is booked however
+ *   many others prove it, and the operator looks for its fill).
  * - When one provider keeps reporting a final outcome the others contradict,
  *   or cannot be read at all, the operator can set it aside by name (--exclude
  *   primary|fallback|third). Its view is still read, shown and recorded with
@@ -136,6 +139,12 @@ export function solanaResolveDecision(views: readonly SolanaResolveView[]): Sola
     + "Once you know, set it aside with --exclude (and --third-rpc for another provider): two other providers must still agree." };
   const [agreeing] = [...outcomes.values()];
   if (!agreeing) return { book: false, reason: "No provider reports a final outcome yet. Nothing is booked; the reservation stays held. Try again later, or consult another provider with --third-rpc." };
+  // A vault whose sequence moved and whose debit log holds a swap inside the trade's window: it may have run. No
+  // number of providers proving an expiry elsewhere outweighs that (an excluded provider's view included).
+  if (agreeing[0]!.observation.settlement!.status === "expired" && views.some(view => "observation" in view && view.observation.sequenceMoved?.reason === "debit-in-window")) {
+    return { book: false, reason: "A provider's vault shows its sequence moved and its debit log holds a swap inside this trade's window (shown above): the trade may have run. "
+      + "Nothing is booked: look for its fill before going further." };
+  }
   if (new Set(agreeing.map(view => view.hostId)).size < 2) {
     return { book: false, reason: "Only one provider reports this final outcome. Two independent providers must agree before anything is booked; consult another provider with --third-rpc." };
   }
@@ -143,9 +152,12 @@ export function solanaResolveDecision(views: readonly SolanaResolveView[]): Sola
   const settlement = solanaAgreedSettlement(agreeing.map(view => view.observation.settlement!));
   if (settlement.status === "expired") {
     // Every view counts here, an excluded one included: a provider that saw the signature may be the one telling the truth.
-    if (views.some(view => "observation" in view && view.observation.seen)) {
+    const seen = views.filter((view): view is SolanaResolveView & { observation: SolanaObservation } => "observation" in view && view.observation.seen);
+    if (seen.some(view => !view.observation.sequenceMoved)) {
       return { book: false, reason: "A provider has seen this signature, so its expiry is not booked: the transaction may have landed. Nothing is booked." };
     }
+    // Only moved sequences that cannot be proven yet (shown above with why): the trade has not been seen, but its expiry is not proven everywhere.
+    if (seen.length) return { book: false, reason: "A provider's vault cannot prove yet that this trade never ran (shown above), so its expiry is not booked. Nothing is booked; ask again later." };
     // An unreadable answer may be the proof it landed: a finalized status whose
     // receipt cannot be used throws rather than reading as unseen. A transaction
     // that landed and failed leaves the vault sequence unchanged, so the others'
@@ -170,6 +182,19 @@ function describe(view: SolanaResolveView): string {
 function describeObservation(view: SolanaResolveView): string {
   if ("error" in view) return `could not be used: ${view.error}`;
   const { settlement, seen } = view.observation;
+  const moved = view.observation.sequenceMoved;
+  if (!settlement && moved) {
+    const outside = `pending: not seen, but the vault sequence moved to ${moved.vaultSequence} outside this trade`;
+    switch (moved.reason) {
+      case "behind": return `pending: not seen, and this provider's finalized vault is at sequence ${moved.vaultSequence}, before the one this trade was signed at`;
+      case "blockhash-live": return `${outside}; its blockhash had not expired at finalized height ${moved.blockHeight}, so whether it ran is not settled yet: ask again`;
+      case "debit-in-window": {
+        const start = Number(moved.debitWindowStart), from = Number.isSafeInteger(start) && start >= 0 ? new Date(start * 1000).toISOString() : "the start of its signed deadline window";
+        return `${outside}, and the vault's debit log holds a swap at or after ${from}, inside this trade's window: it may have run. Look for its fill`;
+      }
+      default: return `${outside}; whether it ran was not checked`;
+    }
+  }
   if (!settlement) return seen ? "pending: seen, not finalized" : "pending: not seen, and its blockhash may still land";
   if (settlement.status !== "expired") {
     return settlement.status === "finalized" ? `finalized fill at slot ${settlement.slot}: ${settlement.amountIn} in, ${settlement.amountOut} out, fee ${settlement.feeLamports} lamports`
@@ -282,7 +307,8 @@ export async function resolveSolanaPendingTrade(input: SolanaResolveInput): Prom
   const evidence = { signature: submission.signature, vaultSequence: submission.vaultSequence, lastValidBlockHeight: submission.lastValidBlockHeight,
     agreed: decision.agreed, ...(input.exclude !== undefined ? { excluded: input.exclude } : {}), providers: views.map(view => ({ label: view.label, hostId: view.hostId,
       ...(view.excluded ? { excluded: true } : {}),
-      ...("error" in view ? { error: view.error } : { seen: view.observation.seen, settlement: view.observation.settlement }) })) };
+      ...("error" in view ? { error: view.error } : { seen: view.observation.seen, settlement: view.observation.settlement,
+        ...(view.observation.sequenceMoved ? { sequenceMoved: view.observation.sequenceMoved } : {}) }) })) };
   await input.db.prepare(`INSERT INTO solana_operator_resolutions(id,tenant,owner,request_id,signature,outcome,operator,reason,settlement_json,evidence_json,approved_at_ms)
     VALUES(?,?,?,?,?,?,?,?,?,?,?)`).run(id, tenant, owner, requestId, submission.signature, decision.settlement.status, book.operator, book.reason,
     JSON.stringify(decision.settlement), JSON.stringify(evidence), now());

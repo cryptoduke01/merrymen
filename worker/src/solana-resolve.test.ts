@@ -199,8 +199,15 @@ test("a trade whose vault sequence moved for another reason is booked expired by
   // One provider's log holds a debit inside the window: it may have run. Nothing is booked.
   const disputed = await resolveSolanaPendingTrade({ db: f.db, tenant: TENANT, requestId: "stuck-1", now: () => f.clock.value,
     providers: [chainProvider("primary", moved), chainProvider("fallback", vaultAt(1n, [1010n]))], book: { operator: "milla", reason: "recovery-tool withdrawal" } });
-  assert.equal(disputed.booked, false); assert.match(disputed.lines.join("\n"), /fallback: pending: seen, not finalized/);
-  assert.match(disputed.lines.at(-1)!, /Only one provider reports this final outcome/);
+  assert.equal(disputed.booked, false);
+  // The operator is told what that provider's vault shows, not that it saw the signature.
+  assert.match(disputed.lines.join("\n"), /fallback: pending: not seen, but the vault sequence moved to 1 outside this trade, and the vault's debit log holds a swap at or after 1970-01-01T00:16:40\.000Z, inside this trade's window: it may have run\. Look for its fill/);
+  assert.doesNotMatch(disputed.lines.join("\n"), /seen, not finalized/);
+  assert.match(disputed.lines.at(-1)!, /^A provider's vault shows its sequence moved and its debit log holds a swap inside this trade's window \(shown above\): the trade may have run\. Nothing is booked/);
+  // A third provider proving the expiry too changes nothing while that debit stands.
+  const outvoted = await resolveSolanaPendingTrade({ db: f.db, tenant: TENANT, requestId: "stuck-1", now: () => f.clock.value,
+    providers: [chainProvider("primary", moved), chainProvider("fallback", vaultAt(1n, [1010n])), chainProvider("operator's provider", moved)], book: { operator: "milla", reason: "outvote" } });
+  assert.equal(outvoted.booked, false); assert.match(outvoted.lines.at(-1)!, /the trade may have run/);
   assert.equal((await f.store.get(OWNER, "stuck-1"))!.status, "pending"); assert.deepEqual(await resolutions(f.db), []);
   // Both providers prove it: shown, then booked on the operator's record.
   const both = [chainProvider("primary", moved), chainProvider("fallback", moved)];
@@ -552,6 +559,33 @@ test("the npm script runs the resolve CLI with the Solana env file, like the hol
   assert.equal(scripts["solana:resolve"], "node --env-file-if-exists=.env.solana.local --import tsx worker/src/solana-resolve-cli.ts");
   const cli = readFileSync(new URL("./solana-resolve-cli.ts", import.meta.url), "utf8");
   assert.match(cli, /runSolanaResolveCommand\(process\.argv\.slice\(2\)/);
+});
+
+test("a moved-sequence view that cannot prove its expiry yet says why, and refuses the expiry without claiming the signature was seen", async t => {
+  const f = await fixture(t);
+  // Synthetic views: the trade signed at sequence 4; two providers prove from the debit log that it never ran.
+  await f.db.prepare("UPDATE solana_runtime_submissions SET submission_json=? WHERE request_id='stuck-1'").run(JSON.stringify({ ...f.pending, vaultSequence: "4" }));
+  const consumed = { ...expiry(f.pending), expiryProof: { vaultSequence: "5", sessionEpoch: "1", blockHeight: "1250", reason: "sequence-consumed", debitWindowStart: "1000" } } as SolanaLiveSettlement;
+  const cases: Array<[SolanaObservation, RegExp]> = [
+    [{ settlement: null, seen: true, sequenceMoved: { vaultSequence: "5", blockHeight: "1190", reason: "blockhash-live" } },
+      /fallback: pending: not seen, but the vault sequence moved to 5 outside this trade; its blockhash had not expired at finalized height 1190, so whether it ran is not settled yet: ask again/],
+    [{ settlement: null, seen: true, sequenceMoved: { vaultSequence: "3", blockHeight: "1250", reason: "behind" } },
+      /fallback: pending: not seen, and this provider's finalized vault is at sequence 3, before the one this trade was signed at/],
+    [{ settlement: null, seen: true, sequenceMoved: { vaultSequence: "5", blockHeight: "1250", reason: "not-asked" } },
+      /fallback: pending: not seen, but the vault sequence moved to 5 outside this trade; whether it ran was not checked/],
+  ];
+  for (const [view, text] of cases) {
+    const p = providers({ primary: { settlement: consumed, seen: false }, fallback: view, "operator's provider": { settlement: consumed, seen: false } });
+    const shown = await resolveSolanaPendingTrade({ db: f.db, tenant: TENANT, requestId: "stuck-1", providers: p.list, observe: p.observe, now: () => f.clock.value });
+    assert.match(shown.lines.join("\n"), text);
+    assert.equal(shown.decision?.book, false);
+    assert.match(shown.lines.at(-1)!, /^A provider's vault cannot prove yet that this trade never ran \(shown above\), so its expiry is not booked\. Nothing is booked; ask again later\.$/);
+  }
+  // A provider that saw the signature itself is still said to have seen it.
+  const p = providers({ primary: { settlement: consumed, seen: false }, fallback: seen, "operator's provider": { settlement: consumed, seen: false } });
+  const shown = await resolveSolanaPendingTrade({ db: f.db, tenant: TENANT, requestId: "stuck-1", providers: p.list, observe: p.observe, now: () => f.clock.value });
+  assert.match(shown.lines.join("\n"), /fallback: pending: seen, not finalized/); assert.match(shown.lines.at(-1)!, /^A provider has seen this signature/);
+  assert.equal((await f.store.get(OWNER, "stuck-1"))!.status, "pending");
 });
 
 test("pending names every trade and signed owner transaction the pending-stuck alert counts, oldest first, from the database alone", async t => {
