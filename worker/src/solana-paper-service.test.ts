@@ -511,3 +511,14 @@ describe("Solana paper command", () => {
     assert.match(String(text), /network fees and rent are excluded/i);
   });
 });
+
+describe("a ledger without a write-off", () => {
+  it("is refused as a service error the web answers as unavailable, before any quote", async () => {
+    let quotes = 0;
+    const ledger = { get: async () => null, findTrade: async () => null, commit: async () => assert.fail("never commits") };
+    const market: SolanaPaperMarket = { readMint: async () => assert.fail("never reads"), quote: async () => { quotes++; return assert.fail("never quotes"); } };
+    await assert.rejects(createSolanaPaperService(ledger, market, () => NOW, { owner: OWNER }).writeOff(OWNER, SOL),
+      (error: unknown) => error instanceof SolanaPaperServiceError && error.message === "This Solana paper ledger has no owner write-off.");
+    assert.equal(quotes, 0);
+  });
+});

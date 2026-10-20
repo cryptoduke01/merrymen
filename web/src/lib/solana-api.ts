@@ -184,7 +184,27 @@ const OUTCOME_UNKNOWN = "Solana's answer about your owner transaction could not 
 const PAPER_SETUP = new Set([
   "Solana paper trading is local-only until hosted tenant binding is implemented.",
   "The USDG mint does not match the configured cash asset.",
+  "This Solana paper ledger has no owner write-off.",
 ]);
+/**
+ * PAPER BOOK RULES THE OWNER CAN ACT ON, BY CODE: 409 WITH FIXED TEXT.
+ *
+ * The write-off route (POST /api/solana/paper/write-off) answers its refusals
+ * this way: not_dust (a route still buys the lot), no_position, invalid_quote
+ * and stale_safety (the zero-output answer is unusable or too old). The same
+ * codes from a paper trade's commit (a quote or safety read that went stale
+ * under the lock) read the same. Every other book code keeps 400 with the
+ * store's own fixed message.
+ */
+const PAPER_BOOK_REFUSALS: Partial<Record<SolanaPaperStoreError["code"], string>> = {
+  not_dust: "A route still buys this position back, so it cannot be written off. Sell it instead. Nothing was changed.",
+  no_position: "Your paper portfolio holds no position in that token. Nothing was changed.",
+  invalid_quote: "The market's answer for this request could not be used. Nothing was recorded. Try again shortly.",
+  stale_safety: "The market data for this request was too old by the time it could be recorded. Nothing was recorded. Try again.",
+  remainder_unquoted: "This sale would leave a remainder that no route buys back. Sell the whole position, or less of it. Nothing was recorded.",
+  book_missing: "Create your paper portfolio first.",
+  version_conflict: "Your paper portfolio changed while this request was prepared. Refresh and try again. Nothing was recorded.",
+};
 
 /**
  * Every /api/solana route answers through this. With Solana off for this
@@ -200,6 +220,7 @@ export async function solanaResponse(action: () => Promise<unknown>) {
     if (setupError(error)) message = NOT_AVAILABLE;
     else if (error instanceof SolanaWebError) { status = error.status; message = error.message; }
     else if (error instanceof SolanaBindingError) { status = error.code === "invalid" ? 400 : 409; message = error.message; }
+    else if (error instanceof SolanaPaperStoreError && Object.hasOwn(PAPER_BOOK_REFUSALS, error.code)) { status = 409; message = PAPER_BOOK_REFUSALS[error.code]!; }
     else if (error instanceof SolanaPaperValidationError || error instanceof SolanaPaperStoreError) { status = 400; message = error.message; }
     // Before the unknown-outcome check: nothing was saved, whatever the message says.
     else if (error instanceof SolanaAppRuntimeError && error.code === "not-saved") { status = NOT_SAVED_MALFORMED.has(error.message) ? 400 : 409; message = error.message; notSaved = true; }

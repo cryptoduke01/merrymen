@@ -16,6 +16,7 @@ import { createSolanaAppRuntime, SOLANA_DEPLOYMENT_RECHECK_MS, SolanaAppRuntimeE
 import { SolanaRpcError, withSolanaReadDeadline } from "./solana-rpc";
 import type { SolanaLiveRead, SolanaLiveRpc } from "./solana-live-rpc";
 import type { SolanaPaperMarket } from "./solana-paper-service";
+import { SolanaMarketError } from "./solana-market";
 import { ensureSolanaTradingSchema, SolanaTradingStore } from "./solana-trading-store";
 import { PYTH_SOL_USD_ACCOUNT } from "./solana-reference-price";
 import { pythAccount } from "./solana-reference-price-fixture";
@@ -152,6 +153,32 @@ test("authenticated paper execution is durable and never calls transaction submi
     assert.equal(f.controls.sends, 0);
     await assert.rejects(f.app.trade({ ...f.scope, tenant: "0x2222222222222222222222222222222222222222" }, { mode: "paper", intent: f.trade }), /binding/);
     await assert.rejects(f.app.trade(f.scope, { mode: "paper", intent: { ...f.trade, owner: f.owner } }), /Invalid/);
+  } finally { f.raw.close(); }
+});
+
+test("a hosted owner writes off a paper dust lot through the runtime: the answer is the book and the record, and only for a canonical mint", async () => {
+  const f = await fixture();
+  try {
+    await f.app.setupPaper(f.scope, { initialCashRaw: "100000000", limits });
+    const buy = await f.app.trade(f.scope, { mode: "paper", intent: f.trade }) as { outputAmountRaw: string };
+    // Now nothing buys the lot back: the market's zero-output answer for exactly that lot.
+    const dust: SolanaPaperMarket = { readMint: f.market.readMint, quote: async intent => {
+      if (intent.outputMint !== SOLANA_USDG_MINT) return f.market.quote(intent);
+      throw new SolanaMarketError("zero-output", { source: "jupiter", inputMint: intent.inputMint, outputMint: intent.outputMint, inAmount: intent.amountRaw,
+        outAmount: "0", minOutAmount: "0", slippageBps: intent.slippageBps, contextSlot: 1000, quotedAtMs: f.clock.now });
+    } };
+    const app = f.runtime({ market: dust });
+    for (const mint of ["", " " + SOLANA_WRAPPED_SOL_MINT, "not-a-mint", 7]) {
+      await assert.rejects(app.writeOffPaper(f.scope, { mint } as { mint: string }), (error: unknown) => error instanceof SolanaAppRuntimeError && error.code === "invalid", String(mint));
+    }
+    await assert.rejects(app.writeOffPaper({ ...f.scope, tenant: "0x2222222222222222222222222222222222222222" }, { mint: SOLANA_WRAPPED_SOL_MINT }), /binding/);
+    const result = await app.writeOffPaper(f.scope, { mint: SOLANA_WRAPPED_SOL_MINT });
+    assert.deepEqual(Object.keys(result).sort(), ["paper", "writtenOff"]);
+    assert.equal(Object.hasOwn(result.paper, "writtenOff"), false);
+    assert.equal(result.writtenOff.amountRaw, buy.outputAmountRaw); assert.equal(result.writtenOff.realizedPnlRaw, "-1000000");
+    assert.deepEqual(result.paper.positions, []); assert.deepEqual(result.paper.writeOffs, [result.writtenOff]);
+    assert.deepEqual(await new SolanaTradingStore(f.db, f.scope).paper().get(f.owner), result.paper);
+    assert.equal(f.controls.sends, 0);
   } finally { f.raw.close(); }
 });
 

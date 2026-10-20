@@ -5,8 +5,8 @@ import { SOLANA_MAX_OPS_PER_DAY, parseSolanaRawAmount, parseSolanaSwapIntent, re
 import { SOLANA_SYSTEM_PROGRAM, SOLANA_WRAPPED_SOL_MINT } from "../../packages/core/src/solana-live";
 import type { Db } from "./db";
 import { openSecret, sealSecret } from "./store-crypto";
-import { applySolanaPaperCommit, solanaPaperIntentFingerprint, type SolanaPaperBook,
-  type SolanaPaperCommit, type SolanaPaperReceipt, type SolanaPaperSnapshot } from "./solana-paper-store";
+import { applySolanaPaperCommit, applySolanaPaperWriteOff, solanaPaperIntentFingerprint, type SolanaPaperBook,
+  type SolanaPaperCommit, type SolanaPaperReceipt, type SolanaPaperSnapshot, type SolanaPaperWriteOffRecord } from "./solana-paper-store";
 import type { SolanaPaperLedger } from "./solana-paper-service";
 import type { SolanaLiveJournal, SolanaLiveRecord, SolanaLiveSettlement, SolanaSignedSubmission } from "./solana-executor";
 import { solanaReferenceNotional, verifySolanaReferenceBound, type SolanaPythGeneration, type SolanaReferenceBound } from "./solana-reference-price";
@@ -336,16 +336,20 @@ export class SolanaTradingStore implements SolanaLiveJournal {
       return { ...book, trades: [] };
     });
   }
+  /** The tenant's paper book with its latest trades, read in one statement on `db` (a transaction's, to read its own write). */
+  private async paperSnapshotIn(db: Db, binding: SolanaTradingBinding): Promise<SolanaPaperSnapshot | null> {
+    const rows = await db.prepare(`SELECT b.book_json,t.receipt_json FROM solana_runtime_paper_books b
+      LEFT JOIN solana_runtime_paper_trades t ON t.tenant=b.tenant AND t.owner=b.owner
+      WHERE b.tenant=? AND b.owner=? ORDER BY t.created_at_ms DESC,t.request_id DESC LIMIT 100`).all(this.scope.tenant, this.scope.owner) as Array<{ book_json: string; receipt_json: string | null }>;
+    if (!rows.length) return null;
+    return { ...JSON.parse(rows[0]!.book_json), ...(binding.limits ? { limits: binding.limits } : {}), trades: rows.filter(r => r.receipt_json !== null).map(r => JSON.parse(r.receipt_json!)) } as SolanaPaperSnapshot;
+  }
   paper(): SolanaPaperLedger {
     const { tenant, owner } = this.scope;
     return {
       get: async requested => {
-        this.owner(requested); const binding = await this.binding();
-        const rows = await this.db.prepare(`SELECT b.book_json,t.receipt_json FROM solana_runtime_paper_books b
-          LEFT JOIN solana_runtime_paper_trades t ON t.tenant=b.tenant AND t.owner=b.owner
-          WHERE b.tenant=? AND b.owner=? ORDER BY t.created_at_ms DESC,t.request_id DESC LIMIT 100`).all(tenant, owner) as Array<{ book_json: string; receipt_json: string | null }>;
-        if (!rows.length) return null;
-        return { ...JSON.parse(rows[0]!.book_json), ...(binding.limits ? { limits: binding.limits } : {}), trades: rows.filter(r => r.receipt_json !== null).map(r => JSON.parse(r.receipt_json!)) } as SolanaPaperSnapshot;
+        this.owner(requested);
+        return this.paperSnapshotIn(this.db, await this.binding());
       },
       findTrade: async (requested, id) => {
         this.owner(requested); await this.binding();
@@ -376,6 +380,36 @@ export class SolanaTradingStore implements SolanaLiveJournal {
           await this.recordAttemptIn(tx, input.intent.requestId, now);
           await tx.prepare("UPDATE solana_runtime_paper_books SET book_json=? WHERE tenant=? AND owner=?").run(JSON.stringify(result.book), tenant, owner);
           return result.receipt;
+        });
+      },
+      /**
+       * The owner's write-off of one dust lot in the tenant's book, under the
+       * same transaction and binding row lock as commit, with a post-lock clock.
+       * applySolanaPaperWriteOff checks the owner, the expected version, the
+       * whole lot and the market's zero-output evidence (fresh at this clock);
+       * the update is compare-and-set on the book row read under the lock. A
+       * retry after it committed finds a new version (or no lot) and is
+       * refused, so a write-off never applies twice. Owner-only: a store
+       * admitting for the autonomous strategy refuses before it locks. An
+       * operator hold does not stop it: it is no trade, and moves no cash.
+       */
+      writeOff: async input => {
+        this.owner(input.owner);
+        if (this.admission) refuse("The autonomous Solana strategy cannot write off paper positions.");
+        return this.db.tx(async tx => {
+          const binding = await this.bindingIn(tx, true);
+          if (binding.requestedMode !== "paper") refuse("Paper trading is not the selected Solana mode.");
+          const now = clock(this.now);
+          const row = await tx.prepare("SELECT book_json FROM solana_runtime_paper_books WHERE tenant=? AND owner=?").get(tenant, owner) as { book_json: string } | undefined;
+          const book = rowJson<SolanaPaperBook>(row, "book_json");
+          if (!row || !book) refuse("Create a Solana paper book first.");
+          const result: { book: SolanaPaperBook; record: SolanaPaperWriteOffRecord } = applySolanaPaperWriteOff(book, input, now);
+          const updated = await tx.prepare("UPDATE solana_runtime_paper_books SET book_json=? WHERE tenant=? AND owner=? AND book_json=?")
+            .run(JSON.stringify(result.book), tenant, owner, row.book_json);
+          if (updated.changes !== 1) refuse("The Solana paper book changed during the write-off. Refresh and try again.");
+          const snapshot = await this.paperSnapshotIn(tx, binding);
+          if (!snapshot) refuse("Create a Solana paper book first.");
+          return { ...snapshot, writtenOff: result.record };
         });
       },
     };

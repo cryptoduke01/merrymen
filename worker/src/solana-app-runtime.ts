@@ -6,7 +6,7 @@ import {
   setTransactionMessageLifetimeUsingBlockhash, type Blockhash, type Instruction,
 } from "@solana/kit";
 import { ed25519 } from "@noble/curves/ed25519";
-import { CHAINS, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM, base58Decode } from "../../packages/core/src/ids";
+import { CHAINS, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM, base58Decode, canonicalId } from "../../packages/core/src/ids";
 import { parseSolanaRawAmount, parseSolanaSwapIntent, parseSolanaTradeRequest, requireSolanaLiveSellLimits, SolanaPaperValidationError, validateSolanaAccountLimits, validateSolanaQuote,
   type SolanaPaperLimits, type SolanaSwapIntent, type SolanaTradeRequest } from "../../packages/core/src/solana";
 import {
@@ -761,6 +761,19 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       const s = await store(scope), binding = await s.binding();
       if (binding.requestedMode !== "paper" || !binding.limits || JSON.stringify(binding.limits) !== JSON.stringify(input.limits)) fail("Save paper mode and its limits before creating the book.", "permission");
       return s.createPaper(input.initialCashRaw, input.limits);
+    },
+    /**
+     * The owner's write-off of one dust lot in the hosted paper book: the whole
+     * lot is quoted back to USDG first, and only the market's zero-output answer
+     * qualifies it (createSolanaPaperService.writeOff). The trading store then
+     * applies it under the tenant book lock. Answers the book after it and the
+     * write-off record.
+     */
+    async writeOffPaper(scope: SolanaAccountScope, input: { mint: string }) {
+      if (!object(input) || typeof input.mint !== "string" || canonicalId(CHAINS.solana, "token", input.mint) !== input.mint) fail("Invalid Solana token mint.");
+      const s = await store(scope);
+      const { writtenOff, ...paper } = await paperService(s).writeOff(scope.owner, input.mint);
+      return { paper, writtenOff };
     },
     async preview(scope: SolanaAccountScope, input: { mode: "paper" | "live"; intent: unknown }) {
       const s = await store(scope), parsed = intent(input.intent, input.mode);

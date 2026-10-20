@@ -10,6 +10,7 @@ import { LIMITS_NO_LONGER_VALID, SolanaAppRuntimeError } from "../../../worker/s
 import { SolanaMarketError } from "../../../worker/src/solana-market";
 import { SolanaRpcError } from "../../../worker/src/solana-rpc";
 import { SolanaTradingStoreError } from "../../../worker/src/solana-trading-store";
+import { SolanaPaperStoreError } from "../../../worker/src/solana-paper-store";
 import { OWNER_OUTCOME_UNKNOWN, solanaRequestBody, solanaResponse } from "./solana-api";
 import { SolanaWebError } from "./solana-auth";
 
@@ -231,4 +232,32 @@ test("a paced intent answers 429 in its own words, never as an outage", async ()
   const response = await solanaResponse(async () => { throw new SolanaWebError(429, "Too many Solana trade requests. This request was not processed; a trade you already placed is unaffected. Refresh to check it, then try again in 6 seconds."); });
   assert.equal(response.status, 429);
   assert.deepEqual(await response.json(), { error: "Too many Solana trade requests. This request was not processed; a trade you already placed is unaffected. Refresh to check it, then try again in 6 seconds.", ownerFacing: true });
+});
+
+test("paper write-off refusals are 409s in fixed owner words; other book rules keep the store's 400", async () => {
+  // The write-off contract: not_dust, no_position, invalid_quote and stale_safety answer 409 with fixed text.
+  const fixed: Array<[SolanaPaperStoreError["code"], RegExp]> = [
+    ["not_dust", /^A route still buys this position back, so it cannot be written off\. Sell it instead\. Nothing was changed\.$/],
+    ["no_position", /^Your paper portfolio holds no position in that token\. Nothing was changed\.$/],
+    ["invalid_quote", /could not be used\. Nothing was recorded\./], ["stale_safety", /too old .* Nothing was recorded\./],
+    ["remainder_unquoted", /remainder that no route buys back\. Sell the whole position, or less of it\./],
+    ["book_missing", /^Create your paper portfolio first\.$/], ["version_conflict", /changed while this request was prepared\. Refresh and try again\./],
+  ];
+  for (const [code, text] of fixed) {
+    const response = await solanaResponse(async () => { throw new SolanaPaperStoreError(code); });
+    const body = await response.json() as Record<string, unknown>;
+    assert.equal(response.status, 409, code);
+    assert.match(String(body.error), text, code);
+    assert.notEqual(body.error, new SolanaPaperStoreError(code).message, `${code}: the owner's words, not the store's`);
+    assert.deepEqual(Object.keys(body).sort(), ["error", "ownerFacing"], code);
+    ownerSafe(String(body.error));
+  }
+  for (const code of ["invalid_input", "per_trade_limit", "daily_limit", "drawdown_limit", "insufficient_balance", "position_limit"] as const) {
+    const response = await solanaResponse(async () => { throw new SolanaPaperStoreError(code); });
+    assert.equal(response.status, 400, code);
+    assert.equal((await response.json()).error, new SolanaPaperStoreError(code).message, code);
+  }
+  // A ledger without a write-off is this deployment's shape: unavailable, never an outage or a refusal.
+  const missing = await solanaResponse(async () => { throw new SolanaPaperServiceError("This Solana paper ledger has no owner write-off."); });
+  assert.equal(missing.status, 503); assert.equal((await missing.json()).error, "Solana trading is not available.");
 });

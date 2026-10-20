@@ -13,6 +13,8 @@ import { ensureSolanaTradingSchema, SOLANA_DEFAULT_EXPIRED_ATTEMPT_ALLOWANCE, so
   type SolanaPreparedSetup } from "./solana-trading-store";
 import type { SolanaLiveSettlement, SolanaSignedSubmission } from "./solana-executor";
 import { createSolanaPaperService } from "./solana-paper-service";
+import { SolanaMarketError } from "./solana-market";
+import { SolanaPaperStoreError, type SolanaPaperWriteOff } from "./solana-paper-store";
 import { pythBound } from "./solana-reference-price-fixture";
 import { releaseSolanaOperatorHold, setSolanaOperatorHold } from "./solana-operator-hold";
 
@@ -698,3 +700,106 @@ for (const dialect of ["sqlite", "postgres"] as const) {
     assert.equal(book.costBasisUsdgRaw, (600000n - 600000n * 2n / 1980000n).toString()); assert.equal(book.hwmRaw, (BigInt(before.hwmRaw) + 10_000_000n).toString());
   });
 }
+
+/**
+ * A paper market at the fixture's clock: a buy fills 2 WSOL per USDG; while `dust.on`, every sale
+ * back to USDG is Jupiter's zero-output answer for exactly that amount, answered at `dust.atMs` (default: now).
+ */
+function dustMarket(clock: { value: number }, dust: { on: boolean; atMs?: number }): Parameters<typeof createSolanaPaperService>[1] {
+  return {
+    async readMint(mint) { return { address: mint, program: mint === SOLANA_USDG_MINT ? TOKEN_2022_PROGRAM : SOLANA_CLASSIC_TOKEN_PROGRAM,
+      decimals: mint === SOLANA_USDG_MINT ? 6 : 9, slot: 1000, observedAtMs: clock.value, buyBlockedReasons: [] }; },
+    async quote(intent) {
+      if (dust.on && intent.outputMint === SOLANA_USDG_MINT) throw new SolanaMarketError("zero-output", { source: "jupiter", inputMint: intent.inputMint,
+        outputMint: intent.outputMint, inAmount: intent.amountRaw, outAmount: "0", minOutAmount: "0", slippageBps: intent.slippageBps, contextSlot: 1000, quotedAtMs: dust.atMs ?? clock.value });
+      const out = intent.inputMint === SOLANA_USDG_MINT ? BigInt(intent.amountRaw) * 2n : BigInt(intent.amountRaw) / 2n;
+      return { source: "jupiter", inputMint: intent.inputMint, outputMint: intent.outputMint, inAmount: intent.amountRaw, outAmount: out.toString(),
+        minOutAmount: (out * 99n / 100n).toString(), slippageBps: intent.slippageBps, contextSlot: 1000, quotedAtMs: clock.value, expiresAtMs: clock.value + 30_000 };
+    },
+  };
+}
+/** A paper-mode account holding one WSOL lot bought for 1 USDG, and the write-off that lot qualifies for (dust from now on). */
+async function dustBook(f: Awaited<ReturnType<typeof fixture>>) {
+  await f.binding.settings(TENANT, OWNER, 1, "paper", limits);
+  await f.store.createPaper(CASH.toString(), limits);
+  const dust = { on: false } as { on: boolean; atMs?: number };
+  const service = createSolanaPaperService(f.store.paper(), dustMarket(f.clock, dust), () => f.clock.value, { owner: OWNER });
+  const buy = await service.trade(OWNER, { kind: "spl-swap", chain: CHAINS.solana, mode: "paper", requestId: "dust-buy", inputMint: SOLANA_USDG_MINT,
+    outputMint: SOLANA_WRAPPED_SOL_MINT, amountRaw: "1000000", slippageBps: 100 });
+  dust.on = true;
+  const before = (await f.store.paper().get(OWNER))!;
+  const input: SolanaPaperWriteOff = { owner: OWNER, mint: SOLANA_WRAPPED_SOL_MINT, amountRaw: buy.outputAmountRaw, expectedVersion: before.version,
+    zeroOutputQuote: { source: "jupiter", inputMint: SOLANA_WRAPPED_SOL_MINT, outputMint: SOLANA_USDG_MINT, inAmount: buy.outputAmountRaw, outAmount: "0",
+      minOutAmount: "0", slippageBps: 100, contextSlot: 1000, quotedAtMs: f.clock.value } };
+  return { service, dust, buy, before, input };
+}
+const bookCode = (code: SolanaPaperStoreError["code"]) => (error: unknown) => error instanceof SolanaPaperStoreError && error.code === code;
+for (const dialect of ["sqlite", "postgres"] as const) {
+  const options = dialect === "postgres" && !process.env.MERRYMEN_TEST_PG_URL ? { skip: "Set MERRYMEN_TEST_PG_URL to an isolated PostgreSQL test database." } : {};
+  test(`${dialect}: a hosted owner writes off a dust lot under the book lock, once; the book keeps the record and another tenant cannot touch it`, options, async t => {
+    const f = await fixture(t, dialect), d = await dustBook(f);
+    assert.equal(d.before.positions.length, 1); assert.equal(d.before.version, 1);
+    f.clock.value += 1_000;
+    const result = await d.service.writeOff(OWNER, SOLANA_WRAPPED_SOL_MINT);
+    assert.deepEqual(result.writtenOff, { mint: SOLANA_WRAPPED_SOL_MINT, decimals: 9, amountRaw: d.buy.outputAmountRaw, costBasisUsdgRaw: "1000000",
+      realizedPnlRaw: "-1000000", zeroOutputObservedAtMs: f.clock.value, zeroOutputQuote: { ...d.input.zeroOutputQuote, quotedAtMs: f.clock.value },
+      writtenOffAtMs: f.clock.value, version: 2 });
+    assert.deepEqual(result.positions, []); assert.equal(result.version, 2); assert.equal(result.realizedPnlRaw, "-1000000");
+    assert.equal(result.cashRaw, d.before.cashRaw, "cash does not move"); assert.equal(result.hwmRaw, d.before.hwmRaw, "nor does the peak");
+    assert.equal(result.trades.length, 1, "no trade is added"); assert.deepEqual(result.writeOffs, [result.writtenOff]);
+    assert.equal(result.updatedAtMs, f.clock.value);
+    // Durable: the book read afterwards is the one returned.
+    const { writtenOff: _record, ...snapshot } = result;
+    assert.deepEqual(await f.store.paper().get(OWNER), snapshot);
+    // Never twice: the lot is gone, and the same input again is a version conflict that changes nothing.
+    await assert.rejects(d.service.writeOff(OWNER, SOLANA_WRAPPED_SOL_MINT), bookCode("no_position"));
+    await assert.rejects(Promise.resolve(f.store.paper().writeOff!(d.input)), bookCode("version_conflict"));
+    assert.deepEqual(await f.store.paper().get(OWNER), snapshot);
+    // Tenant isolation: the same owner under another tenant has no binding, so nothing is read or written.
+    await assert.rejects(Promise.resolve(new SolanaTradingStore(f.db, { tenant: OTHER, owner: OWNER }, () => f.clock.value).paper().writeOff!({ ...d.input, expectedVersion: 2 })), /binding is missing/);
+    await assert.rejects(Promise.resolve(f.store.paper().writeOff!({ ...d.input, owner: key(90) })), /owner does not match/);
+    assert.deepEqual(await f.store.paper().get(OWNER), snapshot);
+  });
+  test(`${dialect}: two write-offs of the same lot at once apply exactly one`, options, async t => {
+    const f = await fixture(t, dialect), d = await dustBook(f);
+    const results = await Promise.allSettled([f.store.paper().writeOff!(d.input), f.store.paper().writeOff!(d.input)]);
+    assert.equal(results.filter(r => r.status === "fulfilled").length, 1);
+    const refused = results.find(r => r.status === "rejected") as PromiseRejectedResult;
+    assert.ok(bookCode("version_conflict")(refused.reason), String(refused.reason));
+    const after = (await f.store.paper().get(OWNER))!;
+    assert.equal(after.version, 2); assert.equal(after.writeOffs!.length, 1); assert.equal(after.realizedPnlRaw, "-1000000");
+  });
+}
+test("a hosted write-off reads its clock after the book lock: evidence that went stale while it waited writes off nothing", async t => {
+  const f = await fixture(t), d = await dustBook(f);
+  let unlock!: () => void, entered!: () => void;
+  const acquired = new Promise<void>(resolve => { entered = resolve; });
+  const blocked = new Promise<void>(resolve => { unlock = resolve; });
+  const held = f.db.tx(async () => { entered(); await blocked; }); await acquired;
+  const attempt = Promise.resolve(f.store.paper().writeOff!(d.input));
+  // Fresh when asked; 30 s old by the time the lock is free.
+  f.clock.value += 30_000; unlock(); await held;
+  await assert.rejects(attempt, bookCode("stale_safety"));
+  assert.deepEqual(await f.store.paper().get(OWNER), d.before);
+});
+test("a hosted write-off is the owner's alone, in paper mode, and only for a whole lot no route buys back", async t => {
+  const f = await fixture(t), d = await dustBook(f);
+  // The autonomous strategy never writes a lot off.
+  const binding = await f.binding.strategy(TENANT, OWNER, 2, strategy);
+  const automatic = new SolanaTradingStore(f.db, f.store.scope, () => f.clock.value, { autonomousRevision: binding.revision });
+  await assert.rejects(Promise.resolve(automatic.paper().writeOff!(d.input)), /autonomous Solana strategy cannot write off/);
+  // Part of the lot, or an answer with real output, is not dust.
+  await assert.rejects(Promise.resolve(f.store.paper().writeOff!({ ...d.input, amountRaw: "1" })), bookCode("not_dust"));
+  await assert.rejects(Promise.resolve(f.store.paper().writeOff!({ ...d.input, zeroOutputQuote: { ...d.input.zeroOutputQuote, outAmount: "1000" } })), bookCode("not_dust"));
+  await assert.rejects(Promise.resolve(f.store.paper().writeOff!({ ...d.input, zeroOutputQuote: { ...d.input.zeroOutputQuote, minOutAmount: "1" as "0" } })), bookCode("invalid_quote"));
+  // Live mode: the paper book is not the one in use.
+  await f.binding.settings(TENANT, OWNER, 3, "live", limits);
+  await assert.rejects(Promise.resolve(f.store.paper().writeOff!(d.input)), /Paper trading is not the selected Solana mode/);
+  assert.deepEqual((await f.store.paper().get(OWNER))!.positions, d.before.positions);
+  assert.equal((await f.store.paper().get(OWNER))!.version, 1);
+  // An operator hold stops trades, not this owner bookkeeping: back in paper mode, the write-off goes through.
+  await f.binding.settings(TENANT, OWNER, 4, "paper", limits);
+  await setSolanaOperatorHold(f.db, TENANT, "Reviewing this account.", f.clock.value);
+  const done = await f.store.paper().writeOff!(d.input);
+  assert.deepEqual(done.positions, []);
+});

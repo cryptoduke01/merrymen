@@ -230,15 +230,15 @@ export function createSolanaPaperService(
      * errors or finds no route) raises a different error and can never be
      * written off, so its lot keeps its position slot. The alternative is an
      * explicit no-route write-off that needs repeated no-route answers spread
-     * over time; it is not built. Hosted tenant books (the trading store's
-     * paper ledger) offer no write-off yet; applySolanaPaperWriteOff is the
-     * shared accounting such a ledger would call under its own book lock.
+     * over time; it is not built. Both ledgers offer it: the local CLI book and
+     * the hosted tenant book (SolanaTradingStore.paper()), each running
+     * applySolanaPaperWriteOff under its own book lock with a post-lock clock.
      */
     async writeOff(owner: string, mint: string) {
       assertScope(owner);
       solanaPaperAgentId(owner);
-      // Only the local book offers it; hosted tenant books do not (yet).
-      if (!store.writeOff) throw new Error("This Solana paper ledger has no owner write-off.");
+      // A ledger without one offers none: this deployment's shape, not the owner's request.
+      if (!store.writeOff) throw new SolanaPaperServiceError("This Solana paper ledger has no owner write-off.");
       const book = await store.get(owner);
       if (!book) throw new SolanaPaperStoreError("book_missing");
       const position = book.positions.find((p) => p.mint === mint);
