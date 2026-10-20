@@ -76,6 +76,18 @@ export function releasedProgramSha256(programId: string, releases: readonly Sola
   return releases.find((release) => release.programId === programId)?.sha256 ?? null;
 }
 
+/**
+ * The recovery tool reads its RPC from MERRYMEN_SOLANA_RECOVER_RPC (worker/src/solana-recover-command.ts):
+ * a provider's URL carries its API key, and a command line stays in shell history and ps. So the card's
+ * commands carry no --rpc, and say how to set the variable without typing the URL into a command.
+ */
+function RecoverRpcFirst() {
+  return <p>First put a Solana mainnet HTTPS RPC endpoint you trust in <code>MERRYMEN_SOLANA_RECOVER_RPC</code>, without typing it into a command (a provider&apos;s URL carries its API key, and command lines stay in your shell history): in bash or zsh run <code>read -rs MERRYMEN_SOLANA_RECOVER_RPC; export MERRYMEN_SOLANA_RECOVER_RPC</code>, paste the URL and press Enter. Then run:</p>;
+}
+function RecoverRpcPublicOnly() {
+  return <>Use <code>--rpc &lt;https-url&gt;</code> instead only for a public URL with no API key in it.</>;
+}
+
 export function SolanaRecovery({ owner, programId, vault, exportKey }: {
   owner: string; programId: string; vault: string;
   exportKey: () => Promise<void>;
@@ -106,15 +118,17 @@ export function SolanaRecovery({ owner, programId, vault, exportKey }: {
     <p>This export only works while this site is up, so keep the offline copy before you need it.</p>
     {sha ? <>
       <h3>Step 2: recover without Merrymen</h3>
-      <p>If Merrymen or this site is unavailable, the Merrymen command-line tool on your own computer revokes every trading session, waits until that is final, then withdraws your vault&apos;s USDG, wrapped SOL and spare SOL to your owner wallet:</p>
-      <p><code className="solana-address">merrymen solana-recover --program {programId} --rpc &lt;https-url&gt; --key-file - --send</code></p>
-      <p>The key goes in on standard input (<code>--key-file -</code>), for example <code>pbpaste | merrymen solana-recover …</code> on a Mac, or from a file you delete afterwards. Never type the key into the command itself: command lines are kept in your shell history. Replace <code>&lt;https-url&gt;</code> with a Solana mainnet HTTPS RPC endpoint you trust; your owner wallet pays the network fees.</p>
+      <p>If Merrymen or this site is unavailable, the Merrymen command-line tool on your own computer revokes every trading session, waits until that is final, then withdraws your vault&apos;s USDG, wrapped SOL and spare SOL to your owner wallet.</p>
+      <RecoverRpcFirst />
+      <p><code className="solana-address">merrymen solana-recover --program {programId} --key-file - --send</code></p>
+      <p>The key goes in on standard input (<code>--key-file -</code>), for example <code>pbpaste | merrymen solana-recover …</code> on a Mac, or from a file you delete afterwards. Never type the key into the command itself: command lines are kept in your shell history. <RecoverRpcPublicOnly /> Your owner wallet pays the network fees.</p>
       <p>To see the plan first, run it with <code>--owner {owner}</code> in place of <code>--key-file - --send</code>: nothing is signed or sent. With <code>--send</code> it signs only for a released Merrymen vault program, after checking that program&apos;s deployed binary against its released hash, built into the tool. If the tool says this program is not released, install the current Merrymen command-line tool and run the same command again.</p>
     </> : <>
       <h3>Step 2: check your vault without Merrymen</h3>
-      <p>This vault program is not a released Merrymen vault program yet, so the Merrymen command-line tool does not sign for it. Until a release lists it, the tool on your own computer can show your vault, its balances and the transactions recovery would send, without your key:</p>
-      <p><code className="solana-address">merrymen solana-recover --program {programId} --rpc &lt;https-url&gt; --owner {owner}</code></p>
-      <p>Nothing is signed or sent. Replace <code>&lt;https-url&gt;</code> with a Solana mainnet HTTPS RPC endpoint you trust. Once this program is released, this card shows the command that signs with your key and recovers your vault.</p>
+      <p>This vault program is not a released Merrymen vault program yet, so the Merrymen command-line tool does not sign for it. Until a release lists it, the tool on your own computer can show your vault, its balances and the transactions recovery would send, without your key.</p>
+      <RecoverRpcFirst />
+      <p><code className="solana-address">merrymen solana-recover --program {programId} --owner {owner}</code></p>
+      <p>Nothing is signed or sent. <RecoverRpcPublicOnly /> Once this program is released, this card shows the command that signs with your key and recovers your vault.</p>
     </>}
   </div>;
 }

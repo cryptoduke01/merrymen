@@ -2086,23 +2086,29 @@ test("a wallet that refuses after the review's deadline leaves the review lapsed
   await press("Sign permission with my wallet");
   assert.equal(signCount, 2); assert.equal(progress.submits, 1); assert.equal(progress.activated, true);
 }));
-/** The `merrymen solana-recover` command the card shows, as the arguments a shell passes, with an RPC in place of <https-url>. */
+/** The `merrymen solana-recover` command the card shows, as the arguments a shell passes. */
 function cardCommand(text: string): string[] {
-  const shown = text.match(/merrymen solana-recover (--program \S+ --rpc <https-url> [^\n]*?)(?=The key goes|Nothing is signed|$)/)?.[1];
+  const shown = text.match(/merrymen solana-recover (--program \S+ [^\n]*?)(?=The key goes|Nothing is signed|Use --rpc|$)/)?.[1];
   assert.ok(shown, text);
-  return shown.trim().split(/\s+/).map((arg) => arg === "<https-url>" ? "https://rpc.example.test" : arg);
+  return shown.trim().split(/\s+/);
 }
+/** What the card tells the owner to run first: the RPC goes in the environment, never on a command line. */
+const RECOVER_RPC_READ = "read -rs MERRYMEN_SOLANA_RECOVER_RPC; export MERRYMEN_SOLANA_RECOVER_RPC";
+const RECOVER_RPC_PUBLIC_ONLY = "Use --rpc <https-url> instead only for a public URL with no API key in it.";
 /**
  * Runs the real tool on `args` offline: no answer ever comes from the RPC,
  * so it stops at its first chain read, or refuses before it. A generated
- * test key stands in on standard input.
+ * test key stands in on standard input. The environment is always explicit
+ * (by default the RPC as the card's read -rs line leaves it), so a
+ * MERRYMEN_SOLANA_RECOVER_RPC in the developer's own shell changes nothing.
  */
-async function runTool(args: string[], list: readonly { programId: string; sha256: string }[]) {
+async function runTool(args: string[], list: readonly { programId: string; sha256: string }[],
+  env: Record<string, string | undefined> = { MERRYMEN_SOLANA_RECOVER_RPC: "https://rpc.example.test" }) {
   const reads: string[] = [];
   const fetch = (async (url: unknown) => { reads.push(String(url)); throw new Error("offline"); }) as typeof globalThis.fetch;
   const key = base58Encode(crypto.getRandomValues(new Uint8Array(32)));
   const stdin = Object.assign((async function* () { yield key; })(), { isTTY: false });
-  const error = await runSolanaRecoverCommand(args, { releases: list, fetch, stdin, sleep: async () => {}, log: () => {}, warn: () => {} })
+  const error = await runSolanaRecoverCommand(args, { releases: list, fetch, stdin, env, sleep: async () => {}, log: () => {}, warn: () => {} })
     .then(() => null, (e: unknown) => e as Error);
   return { reads: reads.length, error };
 }
@@ -2116,7 +2122,11 @@ test("for a released program, step 2 names the signing command with the key on s
     await render();
     const text = exportCard()!.textContent!;
     assert.ok(text.includes(`Step 2: recover without Merrymen`));
-    assert.ok(text.includes(`merrymen solana-recover --program ${PROGRAM} --rpc <https-url> --key-file - --send`), text);
+    assert.ok(text.includes(RECOVER_RPC_READ), text);
+    assert.ok(text.includes(`merrymen solana-recover --program ${PROGRAM} --key-file - --send`), text);
+    assert.ok(text.includes(RECOVER_RPC_PUBLIC_ONLY), text);
+    // No provider URL on a command line: it would stay in shell history and ps.
+    assert.doesNotMatch(text, /solana-recover --program \S+ --rpc|Replace <https-url>/);
     assert.match(text, /The key goes in on standard input \(--key-file -\), for example pbpaste \| merrymen solana-recover … on a Mac/);
     assert.match(text, /Never type the key into the command itself/);
     assert.ok(text.includes(`--owner ${OWNER} in place of --key-file - --send: nothing is signed or sent`));
@@ -2128,11 +2138,14 @@ test("for a released program, step 2 names the signing command with the key on s
     assert.doesNotMatch(text, /unlisted-program|program-sha256/);
     // The tool's own program check passes on exactly these arguments, with the same pin: it goes on to read the chain.
     const args = cardCommand(text);
-    assert.deepEqual(args, ["--program", PROGRAM, "--rpc", "https://rpc.example.test", "--key-file", "-", "--send"]);
+    assert.deepEqual(args, ["--program", PROGRAM, "--key-file", "-", "--send"]);
     assert.deepEqual(solanaRecoveryProgramTrust({ programId: PROGRAM, send: true, releases: pin }), { listed: true, sha256: "ab".repeat(32) });
     const run = await runTool(args, pin);
     assert.ok(run.reads > 0, "past the program check, at its first RPC read");
     assert.doesNotMatch(run.error?.message ?? "", NOT_RELEASED);
+    // The RPC comes from the environment the read -rs line sets: without it the tool asks for it and reads nothing.
+    const unset = await runTool(args, pin, {});
+    assert.equal(unset.reads, 0); assert.match(unset.error!.message, /^Set MERRYMEN_SOLANA_RECOVER_RPC /);
     // The same command against a tool with no release refuses before reading anything: why it is shown only for a listed program.
     const unreleased = await runTool(args, []);
     assert.equal(unreleased.reads, 0); assert.match(unreleased.error!.message, NOT_RELEASED);
@@ -2148,12 +2161,15 @@ test("for a program no release lists, step 2 offers only the read-only plan, whi
       const text = exportCard()!.textContent!;
       assert.ok(text.includes("Step 2: check your vault without Merrymen"), JSON.stringify(pin));
       assert.match(text, /This vault program is not a released Merrymen vault program yet, so the Merrymen command-line tool does not sign for it/);
-      assert.ok(text.includes(`merrymen solana-recover --program ${PROGRAM} --rpc <https-url> --owner ${OWNER}`), text);
+      assert.ok(text.includes(RECOVER_RPC_READ), text);
+      assert.ok(text.includes(`merrymen solana-recover --program ${PROGRAM} --owner ${OWNER}`), text);
+      assert.ok(text.includes(`Nothing is signed or sent. ${RECOVER_RPC_PUBLIC_ONLY}`), text);
+      assert.doesNotMatch(text, /solana-recover --program \S+ --rpc|Replace <https-url>/);
       assert.doesNotMatch(text, /--send|--key-file|SHA-256|released hash|unlisted-program|program-sha256/);
       // Step 1 still keeps the owner's offline copy of the key.
       assert.ok(button("Export owner key with Privy"));
       const args = cardCommand(text);
-      assert.deepEqual(args, ["--program", PROGRAM, "--rpc", "https://rpc.example.test", "--owner", OWNER]);
+      assert.deepEqual(args, ["--program", PROGRAM, "--owner", OWNER]);
       const run = await runTool(args, TOOL_RELEASES);
       assert.ok(run.reads > 0, "the plan is accepted and reads the chain");
       assert.doesNotMatch(run.error?.message ?? "", NOT_RELEASED);
