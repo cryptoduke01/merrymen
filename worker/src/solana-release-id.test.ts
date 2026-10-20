@@ -54,9 +54,10 @@ test("a build whose declare_id is the deploy key and which holds its 32 bytes pa
 test("another deploy key, or a build that does not hold the key's bytes, is refused: do not record or deploy it", async () => {
   const { checkReleaseId, ReleaseIdError } = await load();
   const source = readFileSync(LIB_RS, "utf8");
-  // The deploy key is not what the source declares.
+  // The deploy key is not what the source declares. The argument is not echoed: only the declared id is named.
   assert.throws(() => checkReleaseId({ publicKey: OTHER, source, binary: built(OTHER) }), (error: unknown) =>
-    error instanceof ReleaseIdError && /declare_id in the program source is EUzY.*not the deploy key So111.*Do not record or deploy/.test(error.message));
+    error instanceof ReleaseIdError && /declare_id in the program source is EUzY.*not the public key you passed\..*Do not record or deploy/.test(error.message)
+      && !error.message.includes(OTHER));
   // The source is right but the .so was built for another id (or from other source).
   for (const binary of [built(), built(OTHER), Buffer.alloc(0)]) {
     assert.throws(() => checkReleaseId({ publicKey: ID, source, binary }), ReleaseIdError);
@@ -91,6 +92,14 @@ test("it takes the public key only: a keypair file, its contents or a secret key
     assert.match(run.err, why, argument.slice(0, 20));
     assert.ok(!run.err.includes(secret) && !run.err.includes(secretBase58) && !run.out.includes(secretBase58), "never echoed");
   }
+  // A 32-byte secret seed pasted in base58 looks like a public key: about half of all seeds pass the
+  // on-curve test, and the script cannot tell. When it is not the declared id it is refused unechoed.
+  let seed = BigInt(`0x${Buffer.alloc(32, 0x5a).toString("hex")}`), seedBase58 = "";
+  while (seed > 0n) { seedBase58 = ALPHABET[Number(seed % 58n)] + seedBase58; seed /= 58n; }
+  const anySo = path.join(dir, "seed-check.so"); writeFileSync(anySo, built(seedBase58));
+  const seeded = cli([seedBase58, "--so", anySo]);
+  assert.equal(seeded.code, 1); assert.match(seeded.err, /not the public key you passed/);
+  assert.ok(!seeded.err.includes(seedBase58) && !seeded.out.includes(seedBase58), "a pasted seed is never echoed");
   for (const args of [[], [ID, OTHER], [ID, "--so"], [ID, "--keypair", keypair]]) assert.equal(cli(args).code, 2, JSON.stringify(args));
   // A good key with a build that is not there: told to build first.
   const run = cli([ID, "--so", missing]);

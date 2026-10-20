@@ -78,12 +78,15 @@ export function declaredProgramId(source) {
 export function checkReleaseId({ publicKey, source, binary }) {
   const key = releasePublicKey(publicKey);
   const declared = declaredProgramId(source);
+  // The argument is never echoed: a pasted 32-byte secret seed in base58 looks like a public
+  // key. Only the declared id, which comes from the public source, is named; once it equals
+  // the argument, naming it names nothing new.
   if (declared !== publicKey) {
-    throw new ReleaseIdError(`declare_id in the program source is ${declared}, not the deploy key ${publicKey}. Set declare_id! (and Anchor.toml) to the deploy key, rebuild with build.sh, and check again. Do not record or deploy this build.`);
+    throw new ReleaseIdError(`declare_id in the program source is ${declared}, not the public key you passed. Set declare_id! (and Anchor.toml) to the deploy key, rebuild with build.sh, and check again. Do not record or deploy this build.`);
   }
   if (!Buffer.isBuffer(binary) || !binary.length) throw new ReleaseIdError("The built program is empty or missing; build it with build.sh first.");
   if (binary.indexOf(key) < 0) {
-    throw new ReleaseIdError(`The built program does not hold ${publicKey}'s 32 bytes, so it was not built from this source's declare_id. Rebuild with build.sh, and check again. Do not record or deploy this build.`);
+    throw new ReleaseIdError(`The built program does not hold ${declared}'s 32 bytes, so it was not built from this source's declare_id. Rebuild with build.sh, and check again. Do not record or deploy this build.`);
   }
   return { programId: publicKey, bytes: binary.length, sha256: createHash("sha256").update(binary).digest("hex") };
 }
