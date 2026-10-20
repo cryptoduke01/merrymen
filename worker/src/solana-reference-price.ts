@@ -101,9 +101,11 @@ export const PYTH_SPONSORED_SHARD = 0;
 export const PYTH_SOL_USD_FEED_ID = "ef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d";
 /**
  * Sponsored feeds post on a heartbeat and on price moves; older than this is unproven.
- * Pyth documents a 55 s heartbeat or 0.5% move for SOL/USD; the 2026-10-19 sample (not
- * preserved; see the module comment) saw the current account post every 52-53 s, so this
- * allows about two heartbeats. The upgraded account posted more often.
+ * One limit for both generations, and the [alert] says only this number: how many
+ * posts it spans depends on the generation. Pyth documents a 55 s heartbeat or 0.5%
+ * move for SOL/USD; the 2026-10-19 sample (not preserved; see the module comment) saw
+ * the current account post every 52-53 s (about two posts in this window) and the
+ * upgraded one every 10-15 s (about eight to twelve).
  */
 export const SOLANA_REFERENCE_MAX_AGE_MS = 120_000;
 export const SOLANA_REFERENCE_MAX_FUTURE_MS = 5_000;
@@ -274,8 +276,8 @@ export function createSolanaReferenceAlerts(sink: SolanaReferenceAlertSink = {
       const remedy = error.reason === "config"
         ? `MERRYMEN_SOLANA_PYTH_GENERATION must be current or upgraded (unset is ${SOLANA_PYTH_DEFAULT_GENERATION}); ` +
           "no live Solana trade is admitted until the setting is fixed"
-        : `no live Solana trade is admitted until a fresh, fully verified SOL/USD price is read (max age ${SOLANA_REFERENCE_MAX_AGE_MS / 1000} s, ` +
-          "about two missed Pyth heartbeats)";
+        // The age limit alone: how many Pyth posts it spans differs by generation (see SOLANA_REFERENCE_MAX_AGE_MS).
+        : `no live Solana trade is admitted until a fresh, fully verified SOL/USD price is read (max age ${SOLANA_REFERENCE_MAX_AGE_MS / 1000} s)`;
       say("alert", `[alert] solana-reference-price refused: ${fields.join(" ")} — ${remedy}`);
     },
     read({ generation, nowMs }) {

@@ -4,7 +4,7 @@ import { address, getBase58Decoder } from "@solana/kit";
 import { SOLANA_USDG_MINT } from "../../packages/core/src/ids";
 import { SOLANA_WRAPPED_SOL_MINT } from "../../packages/core/src/solana-live";
 import { PYTH_PUSH_ORACLE_PROGRAM, PYTH_RECEIVER_PROGRAM, PYTH_SOL_USD_ACCOUNT, PYTH_SOL_USD_FEED_ID, PYTH_SPONSORED_SHARD,
-  SOLANA_PYTH_DEFAULT_GENERATION, SOLANA_PYTH_FEEDS, SOLANA_REFERENCE_ALERT_REPEAT_MS, createSolanaReferenceAlerts, derivePythPriceFeedAccount,
+  SOLANA_PYTH_DEFAULT_GENERATION, SOLANA_PYTH_FEEDS, SOLANA_REFERENCE_ALERT_REPEAT_MS, SOLANA_REFERENCE_MAX_AGE_MS, createSolanaReferenceAlerts, derivePythPriceFeedAccount,
   parsePythSolUsd, readSolanaReferencePrice, requireSolanaPythGeneration, solanaPythFeed, solanaPythGeneration, solanaReferenceBound, solanaReferenceNotional,
   solanaReferenceToleranceBps, verifySolanaReferenceBound, SolanaReferencePriceError, type SolanaPythGeneration,
   type SolanaReferenceRefusal } from "./solana-reference-price";
@@ -288,14 +288,15 @@ test("the tolerance setting defaults to 3% and refuses out-of-range or malformed
   }
 });
 
-// The operator alert: about two missed heartbeats (Pyth documents 55 s for SOL/USD)
-// stop every live trade, so a refused read has to be said where an operator can alert on it.
+// The operator alert: a price older than 120 s stops every live trade, so a refused read
+// has to be said where an operator can alert on it.
 function recorder() {
   const lines: Array<[kind: "alert" | "info", line: string]> = [];
   return { lines, sink: { alert: (line: string) => { lines.push(["alert", line]); }, info: (line: string) => { lines.push(["info", line]); } } };
 }
 const served = (value: unknown, slot = 1001) => async () => ({ context: { slot }, value });
-const TAIL = " — no live Solana trade is admitted until a fresh, fully verified SOL/USD price is read (max age 120 s, about two missed Pyth heartbeats)";
+/** Every refusal but `config`: the age limit alone, which spans a different number of Pyth posts in each generation. */
+const TAIL = " — no live Solana trade is admitted until a fresh, fully verified SOL/USD price is read (max age 120 s)";
 /** A setting that names no generation is not a Pyth outage: the line says what to fix, and never echoes the value. */
 const CONFIG_TAIL = " — MERRYMEN_SOLANA_PYTH_GENERATION must be current or upgraded (unset is current); no live Solana trade is admitted until the setting is fixed";
 const CURRENT = SOLANA_PYTH_FEEDS.current.account;
@@ -375,6 +376,20 @@ test("every kind of refused read is said with its reason, the generation and the
   const forged = recorder();
   await refusal(readSolanaReferencePrice(async () => ({}), 1000, NOW, { generation: "evil\n" as SolanaPythGeneration, alerts: createSolanaReferenceAlerts(forged.sink) }), "config");
   assert.deepEqual(forged.lines, rec.lines);
+});
+
+test("a stale refusal states the 120 s limit alone in either generation, never a count of missed Pyth posts", async () => {
+  // The current account posted every 52-53 s and the upgraded one every 10-15 s, so "two missed
+  // heartbeats" would be wrong for one of them: an operator is told the limit, not a guess at the silence.
+  for (const generation of ["current", "upgraded"] as const) {
+    const rec = recorder();
+    await refusal(readSolanaReferencePrice(served(pythAccount({ publishTimeMs: NOW - 121_000, owner: SOLANA_PYTH_FEEDS[generation].receiverProgram })), 1000, NOW,
+      { generation, alerts: createSolanaReferenceAlerts(rec.sink) }), "stale");
+    assert.equal(rec.lines.length, 1, generation);
+    const [, line] = rec.lines[0]!, remedy = line.split(" — ")[1]!;
+    assert.equal(remedy, `no live Solana trade is admitted until a fresh, fully verified SOL/USD price is read (max age ${SOLANA_REFERENCE_MAX_AGE_MS / 1000} s)`, generation);
+    assert.doesNotMatch(line, /heartbeat|missed/i, generation);
+  }
 });
 
 test("the alert tracker names only pinned generations and finite numbers, whoever calls it", () => {
