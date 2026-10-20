@@ -66,6 +66,7 @@ test("live refusals the owner can act on are clear 4xx answers, not an outage", 
   const cases: Array<[SolanaExecutionError["code"], number, RegExp]> = [
     ["risk", 409, /outside your trading limits/], ["fee-cap", 409, /fees are above/], ["simulation", 409, /pre-flight check/],
     ["unsafe-route", 409, /No safe route/], ["conflict", 409, /Refresh before trying again/], ["invalid-intent", 400, /not supported/],
+    ["price-moved", 409, /^The price moved\. Preview again; nothing was sent\.$/],
   ];
   for (const [code, status, text] of cases) {
     const response = await solanaResponse(async () => { throw new SolanaExecutionError(code); });
@@ -111,6 +112,8 @@ test("every paper refusal the worker raises has a fixed owner answer, and the fi
     assert.equal(answers.get(message)?.status, 409, message);
   }
   assert.match(answers.get("The Solana paper book's limits have expired.")!.error, /limits have expired\. Save new limits/);
+  // A paper trade below the minimum the owner previewed reads as the live one does.
+  assert.deepEqual(answers.get("The fresh quote's minimum output is below the previewed minimum."), { status: 409, error: "The price moved. Preview again; nothing was sent." });
   assert.deepEqual(answers.get("The USDG mint does not match the configured cash asset."), { status: 503, error: "Solana trading is not available." });
   // An unlisted message is never reflected.
   const unknown = await solanaResponse(async () => { throw new SolanaPaperServiceError("constructor"); });

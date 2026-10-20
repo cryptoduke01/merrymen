@@ -66,7 +66,14 @@ function setupError(error: unknown): boolean {
  * is signed or recorded, which is why each one can say nothing was sent.
  * Unknown codes (invalid-state, cancelled) keep the cautious 503 answer.
  */
+/**
+ * The trade carried the minimum the owner previewed, and the fresh quote it
+ * would be placed at guarantees less: live price-moved, or the paper service's
+ * fixed message. Refused before anything was signed, sent or recorded.
+ */
+const PRICE_MOVED = "The price moved. Preview again; nothing was sent.";
 const EXECUTION_REFUSALS: Partial<Record<SolanaExecutionError["code"], readonly [number, string]>> = {
+  "price-moved": [409, PRICE_MOVED],
   "invalid-intent": [400, "This trade request is not supported. Nothing was sent."],
   risk: [409, "This trade is outside your trading limits, or the independent SOL price check could not confirm it. Nothing was sent. Try a smaller amount, or try again shortly."],
   "fee-cap": [409, "Solana network fees are above this account's fee limit right now. Nothing was sent. Try again later."],
@@ -84,6 +91,7 @@ const PAPER_REFUSALS: ReadonlyMap<string, readonly [number, string]> = new Map(O
   "Insufficient simulated token balance for this sell.": [409, "Your paper portfolio does not hold enough of this token for this sale."],
   "Buying is blocked by the current token safety checks.": [409, "Buying is blocked by this token's current safety checks."],
   "This request ID already belongs to a different paper trade.": [409, "This request was already used for a different trade. Start a new trade."],
+  "The fresh quote's minimum output is below the previewed minimum.": [409, PRICE_MOVED],
   "The Solana paper owner does not match this authenticated account.": [403, "Your sign-in does not match this Solana account."],
   "Solana mint evidence is missing, stale or inconsistent.": [503, "Token safety data is temporarily unavailable. Nothing was recorded. Try again shortly."],
 } satisfies Record<string, readonly [number, string]>));

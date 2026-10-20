@@ -218,6 +218,20 @@ test("C: a manual sell previewed fairly but built at dust is refused", async t =
   assert.deepEqual(await f.submissions(), []); assert.equal(f.sends.length, 0);
 });
 
+test("C2: a manual sell built 1% below its preview, inside the independent price tolerance, is refused when it carries the previewed minimum", async t => {
+  const f = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "factor", num: 99n, den: 100n } });
+  const intent = manual(SOLANA_WRAPPED_SOL_MINT, "100000000", "owner-floor-sell");
+  const preview = await f.app.preview(f.scope, { mode: "live", intent }) as { quote: { minOutAmount: string } };
+  assert.equal(preview.quote.minOutAmount, "14925000");
+  // The route is built at 14,850,000 with a 14,775,750 minimum: above the Pyth floor, below what the owner saw.
+  await assert.rejects(f.app.trade(f.scope, { mode: "live", intent: { ...intent, minOutAmount: preview.quote.minOutAmount } }), /refused: price-moved/);
+  assert.deepEqual(await f.submissions(), []); assert.equal(f.sends.length, 0);
+  // Nothing was recorded: after a new preview the same request goes through at the new minimum.
+  const placed = await f.app.trade(f.scope, { mode: "live", intent: { ...intent, minOutAmount: "14775750" } });
+  assert.ok("status" in placed && placed.status === "pending" && placed.minOutAmount === "14775750");
+  assert.equal((await f.submissions()).length, 1); assert.equal(f.sends.length, 1);
+});
+
 test("D: a manual buy built at 1% of fair is refused", async t => {
   const f = await fixture(t, { cash: 100_000_000n, wsol: 0n, mark: "fair", build: { kind: "factor", num: 1n, den: 100n } });
   await assert.rejects(f.app.trade(f.scope, { mode: "live", intent: manual(SOLANA_USDG_MINT, "25000000", "manual-buy-1") }), /refused: risk/);

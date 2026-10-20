@@ -751,3 +751,31 @@ test("a fee payer that can fund a swap only at a lower priority price pays that 
     assert.ok(!f.calls.includes("persist"));
   }
 });
+
+test("the owner's previewed minimum: a route guaranteeing less is refused before signing, and a recorded request is returned whatever floor a retry carries", async () => {
+  // The fixture's route guarantees 1,980,000 (its quote's minOutAmount), which is what min_out signs.
+  const f = await fixture(), executor = createSolanaExecutor(f.options);
+  const priceMoved = (error: unknown) => error instanceof Error && /refused: price-moved\.$/.test(error.message);
+  await assert.rejects(executor.execute(f.intent, { minOutAmount: "1980001" }), priceMoved);
+  assert.equal(f.getRecord(), null);
+  for (const step of ["simulateTransaction", "persist", "send"]) assert.ok(!f.calls.includes(step), `refused before ${step}`);
+  // Nothing was recorded, so the same request id goes through after a new preview at (or below) the route's minimum.
+  const placed = await executor.execute(f.intent, { minOutAmount: "1980000" });
+  assert.equal(placed.status, "pending"); assert.equal(placed.submission.minOutAmount, "1980000");
+  assert.equal(f.calls.filter(call => call === "send").length, 1);
+  // The floor is not part of the request's identity: a retry with a higher, lower or no floor returns the recorded
+  // trade and signs or sends nothing new, so an idempotent retry after a lost response stays idempotent.
+  const count = f.calls.length;
+  for (const admission of [{ minOutAmount: "999999999999" }, { minOutAmount: "1" }, { minOutAmount: null }, {}]) {
+    assert.deepEqual(await executor.execute(f.intent, admission), placed, JSON.stringify(admission));
+  }
+  assert.equal(f.calls.length, count);
+  // A floor that is not a positive whole number is an invalid request, recorded or not.
+  for (const minOutAmount of ["0", "1.5", "-1", "01"]) {
+    await assert.rejects(executor.execute(f.intent, { minOutAmount }), /refused: invalid-intent\./, minOutAmount);
+    await assert.rejects(createSolanaExecutor((await fixture()).options).execute(f.intent, { minOutAmount }), /refused: invalid-intent\./, minOutAmount);
+  }
+  // Without a floor (the autonomous strategy) nothing changes.
+  const plain = await fixture();
+  assert.equal((await createSolanaExecutor(plain.options).execute(plain.intent)).status, "pending");
+});

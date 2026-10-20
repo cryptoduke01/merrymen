@@ -1205,3 +1205,47 @@ test("a permission is prepared only from limits within the account bounds, paper
     assert.equal(await new SolanaTradingStore(f.db, f.scope).setup(), null, "nothing prepared");
   } finally { f.raw.close(); }
 });
+
+test("a trade carries the owner's previewed minimum beside its intent: paper is held to it, a retry is not, and a preview takes none", async () => {
+  const f = await fixture();
+  try {
+    await f.app.setupPaper(f.scope, { initialCashRaw: "100000000", limits });
+    const paper = () => new SolanaTradingStore(f.db, f.scope).paper().get(f.owner);
+    // The fixture market guarantees 995,000 for this 1,000,000 buy.
+    await assert.rejects(f.app.trade(f.scope, { mode: "paper", intent: { ...f.trade, minOutAmount: "995001" } }), /below the previewed minimum/);
+    assert.equal((await paper())!.trades.length, 0);
+    const placed = await f.app.trade(f.scope, { mode: "paper", intent: { ...f.trade, minOutAmount: "995000" } });
+    for (const retry of [{ ...f.trade, minOutAmount: "999999999" }, f.trade]) assert.deepEqual(await f.app.trade(f.scope, { mode: "paper", intent: retry }), placed);
+    assert.equal((await paper())!.trades.length, 1);
+    await assert.rejects(f.app.trade(f.scope, { mode: "paper", intent: { ...f.trade, requestId: "next", minOutAmount: "0" } }), SolanaPaperValidationError);
+    // A preview is not a trade: it takes no floor.
+    await assert.rejects(f.app.preview(f.scope, { mode: "paper", intent: { ...f.trade, minOutAmount: "1" } }), /unsupported fields/);
+    assert.equal(f.controls.sends, 0);
+  } finally { f.raw.close(); }
+});
+
+test("a retry of a recorded live trade is returned whatever previewed minimum it carries; another trade under its id still conflicts", async () => {
+  const f = await fixture();
+  try {
+    await f.live(); f.controls.initialized = true; await ensureSolanaTradingSchema(f.db);
+    const intent = { kind: "spl-swap", chain: CHAINS.solana, mode: "live", requestId: "owner-retry", owner: f.owner, vault: f.vault,
+      inputMint: SOLANA_USDG_MINT, outputMint: SOLANA_WRAPPED_SOL_MINT, amountRaw: "1000000", slippageBps: 50 };
+    const submission = { intent, programId: PROGRAM, signature: "owner-retry-signature", minContextSlot: 1000, preparedAtMs: f.clock.now,
+      minOutAmount: "995000", quotedOutAmount: "1000000", vaultSequence: "0", sessionEpoch: "1" };
+    await f.db.prepare("INSERT INTO solana_runtime_submissions(tenant,owner,request_id,vault,sequence,signature,status,created_at_ms,notional_raw,submission_json) VALUES(?,?,?,?,?,?,?,?,?,?)")
+      .run(f.scope.tenant, f.owner, intent.requestId, f.vault, "0", submission.signature, "pending", f.clock.now, "1000000", JSON.stringify(submission));
+    // Both providers have seen the signature (processed), so the record stays pending and nothing is sent again.
+    const seen: SolanaLiveRead = async (method, params = []) => method === "getSignatureStatuses" ? f.response([{ confirmationStatus: "processed", slot: 1000, err: null }])
+      : method === "getTransaction" ? null : f.read(method, params);
+    f.providers.primary = seen; f.providers.fallback = seen;
+    const { owner: _owner, vault: _vault, ...asked } = intent;
+    const answers = [];
+    for (const minOutAmount of ["999999999", "1", undefined]) {
+      answers.push(await f.app.trade(f.scope, { mode: "live", intent: minOutAmount === undefined ? asked : { ...asked, minOutAmount } }));
+    }
+    for (const answer of answers) assert.deepEqual(answer, { mode: "live", requestId: "owner-retry", intent, signature: "owner-retry-signature", status: "pending",
+      preparedAtMs: f.clock.now, minOutAmount: "995000", quotedOutAmount: "1000000", settlement: null });
+    await assert.rejects(f.app.trade(f.scope, { mode: "live", intent: { ...asked, amountRaw: "2000000", minOutAmount: "1" } }), /different live trade/);
+    assert.equal(f.controls.sends, 0);
+  } finally { f.raw.close(); }
+});

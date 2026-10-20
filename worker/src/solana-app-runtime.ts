@@ -7,8 +7,8 @@ import {
 } from "@solana/kit";
 import { ed25519 } from "@noble/curves/ed25519";
 import { CHAINS, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM, base58Decode } from "../../packages/core/src/ids";
-import { parseSolanaRawAmount, parseSolanaSwapIntent, requireSolanaLiveSellLimits, validateSolanaAccountLimits, validateSolanaQuote,
-  type SolanaPaperLimits, type SolanaSwapIntent } from "../../packages/core/src/solana";
+import { parseSolanaRawAmount, parseSolanaSwapIntent, parseSolanaTradeRequest, requireSolanaLiveSellLimits, validateSolanaAccountLimits, validateSolanaQuote,
+  type SolanaPaperLimits, type SolanaSwapIntent, type SolanaTradeRequest } from "../../packages/core/src/solana";
 import {
   buildCreateSolanaSessionInstruction, buildInitializeSolanaVaultInstruction, buildRevokeSolanaSessionsInstruction,
   buildWithdrawSolanaNativeInstruction, buildWithdrawSolanaVaultInstruction, buildSetSolanaBreakerInstruction, decodeSolanaVaultAccount, deriveSolanaAta, deriveSolanaVaultAddress,
@@ -299,6 +299,11 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
   function intent(raw: unknown, mode: "paper" | "live"): SolanaSwapIntent {
     if (!object(raw) || raw.mode !== mode || Object.hasOwn(raw, "owner") || Object.hasOwn(raw, "vault")) fail("Invalid Solana trade request.");
     return parseSolanaSwapIntent({ ...raw, mode: "paper" });
+  }
+  /** A trade's intent and, optionally, the owner's floor: the previewed quote's minOutAmount (parseSolanaTradeRequest). */
+  function tradeRequest(raw: unknown, mode: "paper" | "live"): SolanaTradeRequest {
+    if (!object(raw) || raw.mode !== mode || Object.hasOwn(raw, "owner") || Object.hasOwn(raw, "vault")) fail("Invalid Solana trade request.");
+    return parseSolanaTradeRequest({ ...raw, mode: "paper" });
   }
   /** What the session may trade: the book once it exists; before that, chain cash and no SOL. */
   async function tradableIn(s: SolanaTradingStore, balances: { cashUsdg: string; wsolRaw: string } | null) {
@@ -683,8 +688,9 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       return { intent: { ...parsed, mode: "live" }, quote };
     },
     async trade(scope: SolanaAccountScope, input: { mode: "paper" | "live"; intent: unknown; autonomousRevision?: number; signal?: AbortSignal }) {
-      const s = await store(scope, input.autonomousRevision, input.signal), parsed = intent(input.intent, input.mode);
-      if (input.mode === "paper") return paperService(s).trade(scope.owner, parsed);
+      const s = await store(scope, input.autonomousRevision, input.signal), { intent: parsed, minOutAmount } = tradeRequest(input.intent, input.mode);
+      // The owner's floor gates a new admission only; a recorded request is returned whatever floor a retry carries.
+      if (input.mode === "paper") return paperService(s).trade(scope.owner, parsed, { minOutAmount });
       const prior = await s.get(scope.owner, parsed.requestId);
       if (prior) {
         const expected = parseSolanaLiveIntent({ ...parsed, mode: "live", owner: scope.owner, vault: prior.submission.intent.vault });
@@ -723,7 +729,7 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
             equityUsdg: equity.toString(), peakEquityUsdg: (peak > equity ? peak : equity).toString(), cashUsdg: balances.cashUsdg, wsolRaw: balances.wsolRaw, reference };
         },
       });
-      return publicTrade(await executor.execute({ ...parsed, mode: "live", owner: scope.owner, vault }));
+      return publicTrade(await executor.execute({ ...parsed, mode: "live", owner: scope.owner, vault }, { minOutAmount }));
     },
     async prepareLive(scope: SolanaAccountScope, input: { limits: SolanaPaperLimits; sessionPublicKey: string }) {
       const s = await store(scope), binding = await s.binding(), limits = validateSolanaAccountLimits(input.limits, now()), cfg = config();

@@ -4,7 +4,9 @@ import { isHostedMode } from "../../packages/core/src/hosted";
 import {
   SOLANA_QUOTE_MAX_AGE_MS,
   parseSolanaSwapIntent,
+  parseSolanaTradeFloor,
   solanaPaperAgentId,
+  solanaTradeFloorMet,
   validateSolanaQuote,
   type SolanaMint,
   type SolanaQuote,
@@ -137,10 +139,17 @@ export function createSolanaPaperService(
   return {
     /** A preview has no accounting effect, and is not an execution authorization. */
     preview: (owner: string, intent: unknown) => prepare(owner, intent, false),
-    async trade(owner: string, rawIntent: unknown) {
+    /**
+     * `minOutAmount`: the owner's floor, the previewed quote's guaranteed output.
+     * Not part of the request's identity: a recorded request is returned whatever
+     * floor a retry carries; a new one is refused before commit when the fresh
+     * quote guarantees less, and nothing is recorded.
+     */
+    async trade(owner: string, rawIntent: unknown, admission: { minOutAmount?: string | null } = {}) {
       assertScope(owner);
       solanaPaperAgentId(owner);
       const intent = parseSolanaSwapIntent(rawIntent);
+      const floor = admission.minOutAmount === undefined || admission.minOutAmount === null ? null : parseSolanaTradeFloor(admission.minOutAmount);
       // Recovery works even while RPC/Jupiter is down, or after limits expire.
       const existing = await store.findTrade(owner, intent.requestId);
       if (existing) {
@@ -150,6 +159,9 @@ export function createSolanaPaperService(
         return existing;
       }
       const prepared = await prepare(owner, intent, true);
+      if (!solanaTradeFloorMet(prepared.quote.minOutAmount, floor)) {
+        throw new SolanaPaperServiceError("The fresh quote's minimum output is below the previewed minimum.");
+      }
       const nowMs = now();
       // Portfolio quote reads can take time; never commit using an expired
       // safety observation just because it was fresh at preparation start.

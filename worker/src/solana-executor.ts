@@ -7,7 +7,7 @@ import {
   signTransaction, type AddressesByLookupTableAddress, type Blockhash, type Instruction,
 } from "@solana/kit";
 import { CHAINS, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM } from "../../packages/core/src/ids";
-import { parseSolanaRawAmount, parseSolanaSwapIntent, validateSolanaQuote, type SolanaMint } from "../../packages/core/src/solana";
+import { parseSolanaRawAmount, parseSolanaSwapIntent, parseSolanaTradeFloor, solanaTradeFloorMet, validateSolanaQuote, type SolanaMint } from "../../packages/core/src/solana";
 import {
   buildExecuteSolanaSwapInstruction, decodeSolanaVaultAccount, deriveSolanaAta,
   deriveSolanaSwapAuthority, deriveSolanaVaultAddress, SOLANA_CLASSIC_TOKEN_PROGRAM,
@@ -94,7 +94,8 @@ export interface SolanaLiveJournal {
 }
 
 export class SolanaExecutionError extends Error {
-  constructor(readonly code: "invalid-intent" | "invalid-state" | "unsafe-program" | "unsafe-route" | "simulation" | "fee-cap" | "risk" | "conflict" | "cancelled" | "owner-refund") {
+  /** price-moved: the fresh route guarantees less than the minimum the owner previewed; nothing was signed or recorded. */
+  constructor(readonly code: "invalid-intent" | "invalid-state" | "unsafe-program" | "unsafe-route" | "simulation" | "fee-cap" | "risk" | "conflict" | "cancelled" | "owner-refund" | "price-moved") {
     super(code === "owner-refund"
       ? "Solana live execution refused: owner-refund. Tokens were sent to this swap's temporary account; the vault returns them to the owner's own token account for that mint, which is closed or unsafe. The owner must reopen it before this swap can run."
       : `Solana live execution refused: ${code}.`);
@@ -447,9 +448,19 @@ export function createSolanaExecutor(options: SolanaExecutorOptions) {
   const timestamp = () => { const value = now(); integer(value); return value; };
   const checkAbort = () => { if (options.signal?.aborted) fail("cancelled"); };
   return {
-    async execute(rawIntent: unknown): Promise<SolanaLiveRecord> {
+    /**
+     * `minOutAmount`: the owner's floor, the guaranteed output of the quote they
+     * previewed. It is not part of the request's identity: a recorded request is
+     * returned whatever floor a retry carries; a new one whose fresh route
+     * guarantees less is refused (price-moved) before anything is signed or recorded.
+     */
+    async execute(rawIntent: unknown, admission: { minOutAmount?: string | null } = {}): Promise<SolanaLiveRecord> {
       checkAbort();
       const intent = parseSolanaLiveIntent(rawIntent);
+      let floor: string | null = null;
+      if (admission.minOutAmount !== undefined && admission.minOutAmount !== null) {
+        try { floor = parseSolanaTradeFloor(admission.minOutAmount); } catch { return fail("invalid-intent"); }
+      }
       const prior = await options.journal.get(intent.owner, intent.requestId);
       if (prior) {
         if (JSON.stringify(prior.submission.intent) !== JSON.stringify(intent)) return fail("conflict");
@@ -520,6 +531,9 @@ export function createSolanaExecutor(options: SolanaExecutorOptions) {
       const route = await options.market.build(buildRequest);
       checkAbort();
       validateSolanaQuote(route.quote, paperIntent(intent), timestamp());
+      // The route's guaranteed output is what gets signed (min_out): below the
+      // minimum the owner previewed, the price moved and nothing goes further.
+      if (!solanaTradeFloorMet(route.quote.minOutAmount, floor)) return fail("price-moved");
       validateJupiterCpi({ swapInstruction: { programId: "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4", data: route.dataBase64,
         accounts: route.accounts.map(meta => ({ pubkey: meta.address, isSigner: meta.isSigner, isWritable: meta.isWritable })) },
         addressLookupTableAddresses: route.lookupTableAddresses }, buildRequest, route.quote);

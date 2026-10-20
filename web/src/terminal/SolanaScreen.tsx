@@ -187,7 +187,9 @@ function ConnectedSolana() {
     if (!preview || Date.now() >= preview.deadline || preview.key !== request.current?.key) {
       setPreview(null); throw new Error("This quote expired. Preview the trade again to see a current minimum before placing it.");
     }
-    const result = await api<{ receipt: Receipt }>("intent", { action: "trade", mode, intent }); setReceipt(result.receipt); await refresh();
+    // The previewed minimum travels with the trade: the server refuses it, sending
+    // nothing, when the fresh quote it would be placed at guarantees less.
+    const result = await api<{ receipt: Receipt }>("intent", { action: "trade", mode, intent: { ...intent, minOutAmount: preview.quote.minOutAmount } }); setReceipt(result.receipt); await refresh();
   };
   const tokenLabel = (mint: string) => mint === SOLANA_USDG_MINT ? "USDG" : "wrapped SOL";
   /** What the recorded trade itself guaranteed, not the earlier preview. */

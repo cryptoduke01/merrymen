@@ -79,6 +79,27 @@ describe("Solana paper service", () => {
     } finally { reopened.close(); }
   });
 
+  it("refuses before commit when the fresh quote guarantees less than the previewed minimum, and returns a recorded trade whatever floor a retry carries", async () => {
+    const h = harness();
+    // The fresh quote for this buy guarantees 9,900,000.
+    await assert.rejects(h.service.trade(OWNER, h.intent(), { minOutAmount: "9900001" }), /below the previewed minimum/);
+    assert.equal(h.store.get(OWNER)!.version, 0); assert.equal(h.store.get(OWNER)!.trades.length, 0);
+    // Nothing was recorded: the same request id is placed after a new preview at the quote's minimum.
+    const placed = await h.service.trade(OWNER, h.intent(), { minOutAmount: "9900000" });
+    assert.equal(placed.quote.minOutAmount, "9900000");
+    // The floor is not part of the request's identity: retries return the recorded trade without quoting again.
+    const quotes = h.calls.length;
+    for (const admission of [{ minOutAmount: "999999999999" }, { minOutAmount: "1" }, { minOutAmount: null }, {}]) {
+      assert.deepEqual(await h.service.trade(OWNER, h.intent(), admission), placed, JSON.stringify(admission));
+    }
+    assert.equal(h.calls.length, quotes); assert.equal(h.store.get(OWNER)!.trades.length, 1);
+    // A sale is held to its floor the same way.
+    const sell = h.intent("sell-1", { inputMint: SOL, outputMint: SOLANA_USDG_MINT, amountRaw: placed.outputAmountRaw });
+    await assert.rejects(h.service.trade(OWNER, sell, { minOutAmount: "1000000" }), /below the previewed minimum/);
+    assert.equal(h.store.get(OWNER)!.positions.length, 1);
+    await assert.rejects(h.service.trade(OWNER, h.intent("buy-2"), { minOutAmount: "0" }), /previewed minimum output/);
+  });
+
   it("does not treat one owner's request as another owner's receipt", async () => {
     const h = harness();
     await h.service.trade(OWNER, h.intent());

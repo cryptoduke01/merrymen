@@ -11,7 +11,9 @@ import {
   SolanaPaperValidationError,
   parseSolanaRawAmount,
   parseSolanaSwapIntent,
+  parseSolanaTradeRequest,
   solanaPaperAgentId,
+  solanaTradeFloorMet,
   requireSolanaLiveSellLimits,
   validateSolanaAccountLimits,
   validateSolanaPaperLimits,
@@ -120,6 +122,30 @@ describe("Solana paper swap intents", () => {
     for (const amountRaw of ["0", "01", "1.1", "1e6", 1_000_000, MAX + "0"]) {
       assert.throws(() => parseSolanaSwapIntent({ ...intent(), amountRaw }));
     }
+  });
+});
+
+describe("Solana trade requests and the owner's previewed minimum", () => {
+  it("carries the previewed minimum beside the intent, never inside it, and leaves it out when absent", () => {
+    assert.deepEqual(parseSolanaTradeRequest(intent()), { intent: intent(), minOutAmount: null });
+    assert.deepEqual(parseSolanaTradeRequest({ ...intent(), minOutAmount: "122222221" }), { intent: intent(), minOutAmount: "122222221" });
+    assert.deepEqual(parseSolanaTradeRequest({ ...intent(), minOutAmount: MAX }).minOutAmount, MAX);
+    // The intent itself is still exact: any other extra field is refused.
+    assert.throws(() => parseSolanaTradeRequest({ ...intent(), minOutAmount: "1", outAmount: "2" }), SolanaPaperValidationError);
+    assert.throws(() => parseSolanaSwapIntent({ ...intent(), minOutAmount: "1" }), SolanaPaperValidationError);
+    for (const value of [null, [], "x"]) assert.throws(() => parseSolanaTradeRequest(value), SolanaPaperValidationError);
+  });
+  it("accepts only a positive canonical whole number of base units as the minimum", () => {
+    for (const minOutAmount of ["0", "01", " 1", "1.5", "-1", "1e3", "18446744073709551616", 1, 1n, null, undefined, ""]) {
+      assert.throws(() => parseSolanaTradeRequest({ ...intent(), minOutAmount }), /previewed minimum output/, String(minOutAmount));
+    }
+  });
+  it("is met exactly at the previewed minimum and above it, never below", () => {
+    assert.equal(solanaTradeFloorMet("122222221", null), true);
+    assert.equal(solanaTradeFloorMet("122222221", "122222221"), true);
+    assert.equal(solanaTradeFloorMet("122222222", "122222221"), true);
+    assert.equal(solanaTradeFloorMet("122222220", "122222221"), false);
+    assert.equal(solanaTradeFloorMet("0", "1"), false);
   });
 });
 

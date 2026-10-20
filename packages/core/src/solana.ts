@@ -198,6 +198,36 @@ export function requireSolanaLiveSellLimits(limits: SolanaPaperLimits): { perTra
   return { perTradeWsol: parseSolanaRawAmount(limits.perTradeWsol), dailyWsol: parseSolanaRawAmount(limits.dailyWsol) };
 }
 
+/**
+ * A trade request: the swap intent, plus optionally the owner's floor
+ * (`minOutAmount`): the guaranteed output of the quote the owner previewed, in
+ * the output mint's base units. A trade whose fresh quote guarantees less is
+ * refused before it is signed or recorded ("price moved"), live and paper.
+ *
+ * The floor is not part of the trade's identity (its request-id fingerprint).
+ * It gates a new admission only: a retry of a request that is already recorded
+ * returns that trade whatever floor it carries, so an idempotent retry stays
+ * idempotent, and a refusal records nothing, so the same request id may be
+ * placed again after a new preview.
+ */
+export interface SolanaTradeRequest { intent: SolanaSwapIntent; minOutAmount: string | null }
+export function parseSolanaTradeRequest(value: unknown): SolanaTradeRequest {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) throw new SolanaPaperValidationError("Solana swap intent must be an object");
+  const { minOutAmount, ...intent } = value as Record<string, unknown>;
+  const parsed = parseSolanaSwapIntent(intent);
+  if (!Object.hasOwn(value, "minOutAmount")) return { intent: parsed, minOutAmount: null };
+  return { intent: parsed, minOutAmount: parseSolanaTradeFloor(minOutAmount) };
+}
+/** The owner's floor: a positive canonical integer string (a previewed minimum is never zero). */
+export function parseSolanaTradeFloor(value: unknown): string {
+  try { parseSolanaRawAmount(value); } catch { throw new SolanaPaperValidationError("The previewed minimum output must be a positive whole number of base units"); }
+  return value as string;
+}
+/** Whether a quote's guaranteed output meets the owner's floor. No floor: always. */
+export function solanaTradeFloorMet(quoteMinOutAmount: string, floor: string | null): boolean {
+  return floor === null || parseSolanaRawAmount(quoteMinOutAmount, true) >= parseSolanaRawAmount(floor);
+}
+
 /** Revalidate even typed callers: a network response or stored JSON can lie. */
 export function validateSolanaQuote(quote: SolanaQuote, intent: SolanaSwapIntent, nowMs: number): void {
   timestamp(nowMs, "nowMs");
