@@ -947,8 +947,13 @@ export function readWhyEvidence(agentId?: string | null): { text: string; hasTra
  * exactly 64 is "[hash]" (a transaction hash, or that, or a private key; the
  * model needs none of them), any other length "[address]". The owner-facing
  * alert, /status, report and trade notices keep their addresses and hashes;
- * only what a model reads is redacted, and where it narrates the report, the
- * owner still gets the report itself, hashes included, underneath.
+ * only what a model reads is redacted, and where it narrates the daily
+ * report, the owner still gets the report itself, hashes included,
+ * underneath. NOT YET /why (review RHS, round 2): its evidence reaches the
+ * model through here, and when the model fails narrateWhy answers with that
+ * redacted evidence, so the receipt's line reads "tx: [hash]" where it showed
+ * the hash. The fix is the /why handler's (service.ts): the owner's own
+ * evidence, unredacted, when narration fails.
  *
  * A Solana key (base58, 32 bytes, found by core's onchainIdsIn) is an address
  * the same way and is replaced too, inside an explorer link as well, and glued
