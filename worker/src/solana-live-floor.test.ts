@@ -50,7 +50,9 @@ function mintJson(mint: string) {
       supply: "1000000000000", freezeAuthority: null, mintAuthority: null } } } } };
 }
 
-async function fixture(t: TestContext, opts: { cash: bigint; wsol: bigint; mark: "fair" | "dust"; build: Build; strategy?: Record<string, unknown>; pythAgeMs?: number }) {
+async function fixture(t: TestContext, opts: { cash: bigint; wsol: bigint; mark: "fair" | "dust"; build: Build; strategy?: Record<string, unknown>; pythAgeMs?: number;
+  /** Serve the chain as two agreeing providers (readEach), as reconciling a recorded trade requires. */
+  quorum?: boolean }) {
   const net = { lastBuild: null as null | { amount: bigint; out: bigint; min: bigint; input: string }, urls: [] as string[] };
   t.mock.method(globalThis, "fetch", async (input: unknown, init?: RequestInit) => {
     const url = String(input); net.urls.push(url.split("?")[0]!);
@@ -120,6 +122,7 @@ async function fixture(t: TestContext, opts: { cash: bigint; wsol: bigint; mark:
     switch (method) {
       case "getSlot": return SLOT;
       case "getBlockHeight": return 900;
+      case "getEpochInfo": return { absoluteSlot: SLOT, blockHeight: 900 };
       case "getAccountInfo": {
         const [k, cfg] = params as [string, { dataSlice?: { offset: number; length: number } }];
         if (k === PROGRAM) return response(rpcAccount(program, LOADER, true));
@@ -146,7 +149,8 @@ async function fixture(t: TestContext, opts: { cash: bigint; wsol: bigint; mark:
       default: return assert.fail(`unexpected live RPC ${method}`);
     }
   };
-  const rpc: SolanaLiveRpc = { read: fn => fn(read), send: async wire => { sends.push(wire); return "sent"; } };
+  const rpc: SolanaLiveRpc = { read: fn => fn(read), send: async wire => { sends.push(wire); return "sent"; },
+    ...(opts.quorum ? { readEach: async <T>(fn: (rpc: SolanaLiveRead) => Promise<T>) => [await fn(read), await fn(read)] } : {}) };
   const quote = async (i: { inputMint: string; outputMint: string; amountRaw: string; slippageBps: number }) => {
     const out = opts.mark === "dust" ? 1n : fairOut(i.inputMint, BigInt(i.amountRaw));
     return { source: "jupiter" as const, inputMint: i.inputMint, outputMint: i.outputMint, inAmount: i.amountRaw, outAmount: out.toString(),
@@ -423,6 +427,38 @@ test("a signed trade whose bound came from one generation is refused at admissio
     if (admitted) assert.equal(await journal.recordSigned(structuredClone(submission)), true, name);
     else await assert.rejects(journal.recordSigned(structuredClone(submission)), /independent SOL price evidence is missing, stale or altered/, name);
     assert.equal((await other.submissions()).length, admitted ? 1 : 0, name);
+  }
+});
+
+test("a retry of an admitted live trade returns it before any reference setting is checked: a bad or switched setting never blocks the replay", async t => {
+  processGeneration(t, undefined);
+  const f = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" }, quorum: true });
+  const input = { mode: "live" as const, intent: manual(SOLANA_WRAPPED_SOL_MINT, "100000000", "admitted-then-retried") };
+  const placed = await f.app.trade(f.scope, input);
+  assert.ok("status" in placed && placed.status === "pending");
+  const [admitted] = await f.submissions();
+  assert.equal(admitted!.submission.risk.reference.reference.account, CURRENT.account);
+  assert.deepEqual(f.pythReads, [CURRENT.account]);
+  const jupiter = () => f.net.urls.filter(url => url.startsWith("https://api.jup.ag/")).length, built = jupiter();
+  // A setting that names no generation, the other generation, and a tolerance out of range: each would refuse a new trade.
+  for (const more of [{ MERRYMEN_SOLANA_PYTH_GENERATION: "both" }, { MERRYMEN_SOLANA_PYTH_GENERATION: "upgraded" },
+    { MERRYMEN_SOLANA_REFERENCE_TOLERANCE_BPS: "49" }] as Array<Record<string, string>>) {
+    const label = JSON.stringify(more), sendsBefore = f.sends.length;
+    await clearReferenceAlerts();
+    let again: Awaited<ReturnType<typeof f.app.trade>> | undefined;
+    const said = await referenceAlerts(t, async () => { again = await f.runtime(more).trade(f.scope, input); });
+    // The prior trade, reconciled and returned: the setting is never consulted, so nothing is said either.
+    assert.ok(again && "signature" in again, label);
+    assert.deepEqual([again.signature, again.status, again.requestId], [placed.signature, "pending", "admitted-then-retried"], label);
+    assert.deepEqual(said, [], label);
+    // No Pyth read (of either account), no Jupiter quote or build, no new submission.
+    assert.deepEqual(f.pythReads, [CURRENT.account], label);
+    assert.equal(jupiter(), built, label);
+    const rows = await f.submissions();
+    assert.deepEqual(rows.map(row => row.submission.signature), [placed.signature], label);
+    // Unseen and inside its deadline, the recorded bytes are rebroadcast once, exactly as signed: never re-signed.
+    assert.equal(f.sends.length, sendsBefore + 1, label);
+    assert.ok(f.sends.every(wire => wire === admitted!.submission.signedTransactionBase64), label);
   }
 });
 

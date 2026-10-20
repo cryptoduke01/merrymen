@@ -611,6 +611,7 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       let toleranceBps: number;
       try { toleranceBps = solanaReferenceToleranceBps(env); } catch { return fail("The independent SOL price tolerance is misconfigured.", "configuration"); }
       // One generation, from this runtime's env, for the read, the executor's check and the store's admission check.
+      // Both settings are checked only after a recorded request was returned above: a bad one never blocks its replay.
       let pythGeneration: SolanaPythGeneration;
       try { pythGeneration = requireSolanaPythGeneration(env, now()); } catch { return fail("The independent SOL price source (Pyth generation) is misconfigured.", "configuration"); }
       const sessionKeyPair = await createKeyPairFromPrivateKeyBytes(seed(secret, "The stored trading permission cannot be opened."));
