@@ -1,8 +1,11 @@
+import { guardStdio } from "./redact-stdio";
 import { SolanaVaultValidationError } from "../../packages/core/src/solana-live";
 import { SolanaRecoverError } from "./solana-recover";
 import { runSolanaRecoverCommand } from "./solana-recover-command";
 import { SolanaRpcError } from "./solana-rpc";
 
+// First, before anything can print: a keyed RPC URL never reaches stdout or stderr (#347).
+guardStdio();
 try {
   const result = await runSolanaRecoverCommand(process.argv.slice(2));
   if (typeof result === "string") console.log(result);
