@@ -469,6 +469,33 @@ test("withdrawal bytes the server never saved do not hold back Revoke: the revoc
   assert.equal(button("Revoke all Solana sessions").disabled, true);
 });
 
+test("signed bytes the server never saved, next to a different pending server record, never promise that Revoke is available", async () => {
+  state.runtime.live.programId = PROGRAM;
+  respond = async (path, body) => {
+    if (path === "status") return json(state);
+    if (path === "owner" && body?.stage === "prepare") return ownerPrepare(body);
+    // The withdrawal's submission never reaches the server.
+    if (path === "owner" && body?.stage === "submit") throw new Error("Lost response");
+    throw new Error("Unexpected fixture route");
+  };
+  await render(); await press("Withdraw to my wallet");
+  assert.match(ui.container.textContent!, /Revoking stays available/);
+  // Another device's resume request is saved and pending on the server: Revoke waits for it, and the page says so.
+  ownerTransaction("other-device-sig", "pending", "resume-buys");
+  await ui.click("Refresh account");
+  const text = ui.container.textContent!;
+  assert.equal(button("Revoke all Solana sessions").disabled, true);
+  assert.doesNotMatch(text, /Revoking stays available/);
+  assert.match(text, /Your request to resume buys is awaiting final confirmation on Solana/);
+  assert.match(text, /A signed withdrawal has no confirmed outcome yet\. Check it before signing another withdrawal or resume request\. Revoking waits for the server's pending request to resume buys above: it can be prepared once that is final or expired\./);
+  assert.equal(button("Check existing owner transaction").disabled, false);
+  // Once that record resolves, Revoke is available again, and the page says so.
+  ownerTransaction("other-device-sig", "finalized", "resume-buys");
+  await ui.click("Refresh account");
+  assert.equal(button("Revoke all Solana sessions").disabled, false);
+  assert.match(ui.container.textContent!, /Revoking stays available/);
+});
+
 test("while the server holds a submitted owner transaction, every owner action waits for it, Revoke included, and says so", async () => {
   state.runtime.live.programId = PROGRAM;
   respond = async (path, body) => {
