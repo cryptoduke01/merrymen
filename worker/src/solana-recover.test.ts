@@ -762,7 +762,7 @@ describe("solana-recover program trust", () => {
     assert.equal("singleEndpoint" in live, false);
     assert.equal("providerKey" in live, false);
     // A hand-built transport without readEach gets none.
-    const narrow = solanaRecoveryVerificationRpc({ singleEndpoint: true, read: async (operation) => operation((async () => 3) as never),
+    const narrow = solanaRecoveryVerificationRpc({ singleEndpoint: true, read: async (operation: (read: never) => Promise<unknown>) => operation((async () => 3) as never),
       send: async () => "x" } as unknown as SolanaLiveRpc);
     assert.equal(narrow.readEach, undefined);
     assert.equal((narrow as unknown as Record<string, unknown>).singleEndpoint, true);
