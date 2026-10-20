@@ -16,6 +16,7 @@ import {
   isSolanaKeypair,
   onchainIdIn,
   onchainIdsIn,
+  redactSolanaIds,
   requireChain,
   sameId,
   secretScanBudget,
@@ -232,6 +233,20 @@ describe("glued on-chain id detection (audit regressions F3)", () => {
       "#BuyTheDipAndHoldForeverBecauseSolanaIsTheFuture", "0x11111111111111111111111111111111111111111", "",
       `0x${"Ab".repeat(30)}`, `0x${"cafe".repeat(20)}`,
     ]) assert.deepEqual(onchainIdsIn(text, glued), [], text);
+  });
+
+  it("redactSolanaIds replaces the longest value first, so a run holding a shorter hit is never split around a mint", () => {
+    const key = base58Encode(Uint8Array.from({ length: 32 }, (_, i) => (i * 29 + 7) & 0xff));
+    const text = `${key} then X${SOLANA_USDG_MINT}${key}Y`;
+    // In scan order the lone key comes first, and its value is the end of the second run.
+    const hits = onchainIdsIn(text, glued);
+    assert.deepEqual(hits.map((h) => h.value), [key, `X${SOLANA_USDG_MINT}${key}Y`]);
+    assert.equal(redactSolanaIds(text, () => "[id]"), "[id] then [id]");
+    // Each hit is named by its own shape, and a link keeps its address, losing only the id in it.
+    const { sig } = keypair(5);
+    const marked = redactSolanaIds(`${key} https://solscan.io/tx/${sig} ${EVM}`, (h) => `[${h.shape}]`);
+    assert.equal(marked, `[address] https://solscan.io/tx/[hash] ${EVM}`);
+    assert.equal(redactSolanaIds("the market is quiet today", () => "[id]"), "the market is quiet today");
   });
 
   it("reads a megabyte of long base58 runs in linear time and fails closed past its budget", () => {

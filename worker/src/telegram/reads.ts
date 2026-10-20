@@ -20,7 +20,7 @@ import { rejectRuleLabel, rejectRuleRemedy } from "../thesis-policy";
 // RELATIVE import only — the "@merrymen/core" alias exists solely in dev (see
 // the note in service.ts). isHostedMode decides whether a missing agent id may
 // fall back to the single-tenant guess, or must refuse.
-import { liveBlockerText, priceSourceNote, priceSourceTag, isHostedMode, ENERGY, idFamily, onchainIdsIn } from "../../../packages/core/src/index";
+import { liveBlockerText, priceSourceNote, priceSourceTag, isHostedMode, ENERGY, idFamily, redactSolanaIds } from "../../../packages/core/src/index";
 import type { EnergyStatus } from "../../../packages/core/src/index";
 import { count as countTokens, STILL_RUNS } from "../energy-copy";
 import type { AdmissionLevel } from "../worker-admission";
@@ -963,13 +963,10 @@ export function readWhyEvidence(agentId?: string | null): { text: string; hasTra
  */
 const ADDRESS_RUN = /\b0x[0-9a-fA-F]{20,40}(?![0-9a-fA-F])/g;
 export function redactAddresses(text: string): string {
-  let out = text.replace(ADDRESS_RUN, "[address]");
-  for (const hit of onchainIdsIn(out, { glued: true })) {
-    if (hit.family !== "solana" || hit.shape === "link") continue;
-    // A whole run that is itself a signature (idFamily: it decodes to 64 bytes) is named as one.
-    out = out.split(hit.value).join(hit.shape === "hash" && idFamily(hit.value) === "solana" ? "[signature]" : "[address]");
-  }
-  return out;
+  // Longest value first (core's redactSolanaIds): a glued run can end in a key that also stands alone.
+  // A whole run that is itself a signature (idFamily: it decodes to 64 bytes) is named as one.
+  return redactSolanaIds(text.replace(ADDRESS_RUN, "[address]"), (hit) =>
+    hit.shape === "hash" && idFamily(hit.value) === "solana" ? "[signature]" : "[address]");
 }
 
 /** Recent event-feed lines (for the LLM's context) — addresses redacted. */

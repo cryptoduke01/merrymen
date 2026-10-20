@@ -30,7 +30,7 @@ import {
   STORED_AGENT_NAME_RE,
   normalizeAgentName,
 } from "../../packages/core/src/agent-name";
-import { onchainIdIn, onchainIdsIn } from "../../packages/core/src/ids";
+import { onchainIdIn, redactSolanaIds } from "../../packages/core/src/ids";
 import type { NameSeat } from "./name-reconcile";
 import { completePersonalMemoryForget, recordPersonalMemoryForget } from "./personal-memory-ferry";
 
@@ -441,13 +441,15 @@ export function appendJournal(entry: string, nowSec?: number): void {
  * write-side strip doesn't cover anything typed in afterwards.
  */
 function scrubProse(text: string): string {
-  let out = text
+  const out = text
     .replace(/<[^>]*>/g, "") // no markup into prompts
     .replace(/0x[0-9a-fA-F]{6,}/g, "[redacted]") // addresses / keys / calldata
     .replace(/\b[A-Za-z0-9_-]{40,}\b/g, "[redacted]"); // token/secret-shaped blobs
   // A Solana key can be 32-39 characters, under the blob floor, alone or glued to a word ("CA<key>").
-  for (const hit of onchainIdsIn(out, GLUED)) if (hit.family === "solana" && hit.shape !== "link") out = out.split(hit.value).join("[redacted]");
-  return out;
+  // Longest value first (core's redactSolanaIds). With the blob rule above taking every run of 40 or
+  // more, no run left here holds a second id beside a shorter hit, so the order is not what keeps
+  // this safe today; it keeps it safe if that floor ever moves.
+  return redactSolanaIds(out, () => "[redacted]");
 }
 
 /** The last few journal entries (for prompt context). */

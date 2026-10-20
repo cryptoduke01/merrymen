@@ -2569,6 +2569,21 @@ describe("buildPrompt", () => {
     assert.match(prompt, /aped \[address\], \[address\] next, \[address\]/);
   });
 
+  it("strips a mint glued inside a run that ends in a key also standing alone (review GE)", () => {
+    // Replaced in scan order, the lone key split the second run first, and the mint in it reached the model.
+    const key = base58Encode(Uint8Array.from({ length: 32 }, (_, i) => (i * 29 + 7) & 0xff));
+    const said = `${key} then X${SOLANA_USDG_MINT}${key}Y`;
+    const solTail: SpeakCtx["tail"] = [...tail, { name: "Pine Stoat's owner", author: "owner", body: said }];
+    for (const intent of [...intents, { kind: "reply", to: "Pine Stoat's owner", toAuthor: "owner", toOwnAgent: false, text: said } as Intent]) {
+      const { system, prompt } = buildPrompt(intent, { ...ctx, tail: solTail });
+      for (const text of [system, prompt]) {
+        for (const id of [SOLANA_USDG_MINT, key]) assert.ok(!text.includes(id.slice(0, 20)), `a Solana id in the prompt for ${intent.kind}`);
+      }
+    }
+    const { prompt } = buildPrompt({ kind: "reply", to: "Pine Stoat's owner", toAuthor: "owner", toOwnAgent: false, text: said } as Intent, { ...ctx, tail: solTail });
+    assert.match(prompt, /\[address\] then \[address\]/);
+  });
+
   it("shows no figure outside the fence, and states the rules", () => {
     for (const intent of intents) {
       const { system, prompt } = buildPrompt(intent, ctx);

@@ -304,7 +304,8 @@ export interface OnchainIdScan {
    * linkOrSecret), the coin name drawn on a P&L card (worker/src/pnl-card.ts),
    * event text redacted for the Telegram chat model (worker/src/telegram/reads.ts
    * redactAddresses), room prompts (worker/src/groupchat/voice.ts scrubIds) and
-   * the soul's memory, notes and journal (worker/src/soul.ts).
+   * the soul's memory, notes and journal (worker/src/soul.ts); the last three
+   * through redactSolanaIds, which replaces the longest value first.
    * Off by default: the name checks that also call this detector keep reading
    * a run inside a longer word as no id. Brain's Python mirror implements both
    * scans, and services/brain/tests/data/onchain_ids.json pins both to it.
@@ -396,6 +397,27 @@ export function onchainIdsIn(text: unknown, scan: OnchainIdScan = {}): OnchainId
 /** Whether a text carries any on-chain id (onchainIdsIn). */
 export function onchainIdIn(text: unknown, scan: OnchainIdScan = {}): boolean {
   return onchainIdsIn(text, scan).length > 0;
+}
+
+/**
+ * `text` with every Solana key and signature the glued scan finds replaced,
+ * wherever its value occurs, by what `mark` names it. An explorer link is no
+ * replacement itself: the key or signature in it is a run of its own and is
+ * replaced. For the model-facing redactors (Telegram event text, room
+ * prompts, the soul's prose).
+ *
+ * LONGEST VALUE FIRST. A glued hit's value is its whole run, and that can hold
+ * a shorter hit's value: in "<key> then X<mint><key>Y" the second run ends in
+ * the first key. Replaced first, the key splits that run, whose value is then
+ * found nowhere, and the mint in it stays. Longest first, every run that holds
+ * a shorter value is gone before that value is replaced; a shorter value
+ * never holds a longer one, and runs never overlap, so no value is lost.
+ */
+export function redactSolanaIds(text: string, mark: (hit: OnchainIdHit) => string): string {
+  const hits = onchainIdsIn(text, { glued: true }).filter((h) => h.family === "solana" && h.shape !== "link");
+  let out = text;
+  for (const hit of hits.sort((a, b) => b.value.length - a.value.length)) out = out.split(hit.value).join(mark(hit));
+  return out;
 }
 
 /**

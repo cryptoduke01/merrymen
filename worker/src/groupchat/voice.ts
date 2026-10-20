@@ -57,7 +57,7 @@
  * background feature has already exhausted it once. It never calls resolveLlm,
  * which would happily hand back an owner's Anthropic key with an Opus default.
  */
-import { onchainIdsIn } from "../../../packages/core/src/ids";
+import { redactSolanaIds } from "../../../packages/core/src/ids";
 import { everyBand } from "../class-evidence";
 import { llmText, type LlmCreds } from "../llm";
 import { sameCoin, type AgentFacts, type CallFact } from "./facts";
@@ -4943,7 +4943,7 @@ const TAIL_LINES = 12;
  */
 function scrubIds(text: string, speaker: AgentFacts): string {
   let s = text.replace(/0x[0-9a-f]{4,}/gi, "[address]").replace(/\brh:[a-z0-9-]+/gi, "[account]");
-  for (const hit of onchainIdsIn(s, { glued: true })) if (hit.family === "solana" && hit.shape !== "link") s = s.split(hit.value).join("[address]");
+  s = redactSolanaIds(s, () => "[address]"); // longest value first: a glued run can end in a key that also stands alone
   for (const id of [speaker.tenant, speaker.agentId]) {
     if (typeof id === "string" && id.length >= 6) s = s.split(id).join("[private]").split(id.toLowerCase()).join("[private]");
   }

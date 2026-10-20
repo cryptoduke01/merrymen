@@ -161,6 +161,14 @@ describe("redactAddresses", () => {
     assert.equal(redactAddresses(plain), plain);
   });
 
+  it("strips a mint glued inside a run that ends in a key also standing alone (review GE)", () => {
+    const { SOLANA_USDG_MINT: MINT, base58Encode } = ids;
+    // Replaced in scan order, the lone key split the second run first, and the mint in it was left.
+    const key = base58Encode(Uint8Array.from({ length: 32 }, (_, i) => (i * 29 + 7) & 0xff));
+    assert.equal(redactAddresses(`${key} then X${MINT}${key}Y`), "[address] then [address]");
+    assert.equal(redactAddresses(`X${MINT}${key}Y and ${key}`), "[address] and [address]");
+  });
+
   it("replaces a signature-length run standing alone, which can be two keys or a key with a word glued on (review GE)", () => {
     const { SOLANA_USDG_MINT: MINT, base58Decode } = ids;
     // Each decodes to 64 bytes, as a signature does, with nothing alphanumeric either side.

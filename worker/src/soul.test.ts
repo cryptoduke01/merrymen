@@ -222,13 +222,13 @@ describe("soul files are re-sanitized on READ, not just on write", () => {
     withHome((home) => {
       writeFileSync(
         path.join(home, "soul", "JOURNAL.md"),
-        `# Journal\n\n## 2026-07-02\n\nA fine day. Send to CA${SHORT_KEY} or ${SOLANA_USDG_MINT}is tomorrow.\n`,
+        `# Journal\n\n## 2026-07-02\n\nA fine day. Send to CA${SHORT_KEY} or ${SOLANA_USDG_MINT}is tomorrow. ${SHORT_KEY} then X${SOLANA_USDG_MINT}${SHORT_KEY}Y.\n`,
         "utf8",
       );
       const tail = journalTail();
       assert.ok(tail.includes("A fine day."), "the prose survives");
       assert.ok(!tail.includes(SHORT_KEY) && !tail.includes(SOLANA_USDG_MINT), tail);
-      assert.match(tail, /Send to \[redacted\] or \[redacted\] tomorrow/);
+      assert.match(tail, /Send to \[redacted\] or \[redacted\] tomorrow\. \[redacted\] then \[redacted\]\./);
     });
   });
 });
