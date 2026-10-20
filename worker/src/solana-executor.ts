@@ -173,7 +173,7 @@ export interface SolanaExecutorOptions {
     slot: number; observedAtMs: number }): Promise<SolanaLiveRiskEvidence>;
   now?: () => number;
   signal?: AbortSignal;
-  /** The Pyth generation `assessRisk`'s reference must come from: the app runtime's MERRYMEN_SOLANA_PYTH_GENERATION. Default: this process's env. */
+  /** The Pyth generation `assessRisk`'s reference must come from: the app runtime's MERRYMEN_SOLANA_PYTH_GENERATION. Default: SOLANA_PYTH_DEFAULT_GENERATION. */
   pythGeneration?: SolanaPythGeneration;
 }
 const UPGRADEABLE_LOADER = "BPFLoaderUpgradeab1e11111111111111111111111";

@@ -73,7 +73,7 @@ export interface SolanaWithdrawValuation { quote: SolanaQuote; reference: Solana
  * The lower of the two: neither Jupiter nor the reference can raise it alone, so
  * the high-water mark never drops by more than the withdrawn WSOL was worth.
  * Null when either is missing, malformed, stale or for another amount, or the
- * reference is not from `generation` (default: this process's env).
+ * reference is not from `generation` (default: SOLANA_PYTH_DEFAULT_GENERATION).
  */
 export function solanaWithdrawValueUsdg(valuation: SolanaWithdrawValuation | undefined, amountRaw: string | undefined, nowMs: number,
   generation?: () => SolanaPythGeneration): bigint | null {
@@ -225,7 +225,7 @@ export async function ensureSolanaTradingSchema(db: Db, postgres = false): Promi
 export class SolanaTradingStore implements SolanaLiveJournal {
   constructor(readonly db: Db, readonly scope: SolanaAccountScope, private readonly now: () => number = Date.now,
     private readonly admission?: { autonomousRevision: number; signal?: AbortSignal },
-    /** The Pyth generation stored reference bounds must come from: the app runtime's MERRYMEN_SOLANA_PYTH_GENERATION, read at each check. Default: this process's env. */
+    /** The Pyth generation stored reference bounds must come from: the app runtime's MERRYMEN_SOLANA_PYTH_GENERATION, read at each check. Default: SOLANA_PYTH_DEFAULT_GENERATION. */
     private readonly pythGeneration?: () => SolanaPythGeneration) {
     if (!/^0x[0-9a-f]{40}$/.test(scope.tenant)) refuse("Invalid authenticated Solana tenant.");
     solanaPaperAgentId(scope.owner);

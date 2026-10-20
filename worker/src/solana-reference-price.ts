@@ -36,10 +36,12 @@
  * `SOLANA_PYTH_DEFAULT_GENERATION`) picks the one every read and every stored
  * bound must come from. It switches all three addresses together; there is no
  * fallback from one generation to the other, and configuration cannot name an
- * address of its own. The app runtime takes it from the env it was built with
- * (`requireSolanaPythGeneration`) and passes that one generation to its reads,
- * the executor's check and the store's admission check; a setting that names
- * no generation refuses live trading as a configuration error.
+ * address of its own. Only the app runtime reads it, from the env it was built
+ * with (`requireSolanaPythGeneration`), and passes that one generation to its
+ * reads, the executor's check and the store's admission check; a setting that
+ * names no generation refuses live trading as a configuration error. Nothing
+ * here reads process.env: a caller that passes no generation gets
+ * SOLANA_PYTH_DEFAULT_GENERATION.
  */
 import { createHash } from "node:crypto";
 import { address, getProgramDerivedAddress } from "@solana/kit";
@@ -78,10 +80,10 @@ export const SOLANA_PYTH_FEEDS: Readonly<Record<SolanaPythGeneration, Readonly<S
     priceFeedProgram: "pyt2F414BA6dPttK6RddPZUdHfapoBN24GL5wbrPCou", account: "7AviUf9nL62mcxNbQGKm4nKDQnPjswo6c5MX4D57HmyE" }),
 } satisfies Record<SolanaPythGeneration, SolanaPythFeed>);
 /**
- * The generation read when MERRYMEN_SOLANA_PYTH_GENERATION is unset: "current",
- * the conservative choice and the owner's to change. It is the generation this
- * module was first built and checked against, and the tests replay a recorded
- * read of it. The alternative, "upgraded", is the one Pyth recommends for new
+ * The generation read when MERRYMEN_SOLANA_PYTH_GENERATION is unset, and by
+ * any caller that passes no generation: "current", the conservative choice and
+ * the owner's to change. It is the generation this module was first built and
+ * checked against, and the tests replay a recorded read of it. The alternative, "upgraded", is the one Pyth recommends for new
  * integrations; the unpreserved 2026-10-19 sample saw it post every 10-15 s
  * against the current account's 52-53 s, and it trusts a different receiver
  * program. Switching is one setting, with no fallback either way; give every
@@ -156,11 +158,16 @@ export function solanaPythFeed(generation: SolanaPythGeneration): Readonly<Solan
   if (generation !== "current" && generation !== "upgraded") return fail("config");
   return SOLANA_PYTH_FEEDS[generation];
 }
-/**
- * Callers that pass no generation read the process's env. The app runtime
- * always passes the one from its own env, which need not be the process's.
+/*
+ * Nothing here reads process.env. MERRYMEN_SOLANA_PYTH_GENERATION is read only
+ * by `solanaPythGeneration`/`requireSolanaPythGeneration`, from the env a
+ * caller hands them: the app runtime's own, which it then passes to every
+ * read and check. A caller that passes no generation gets
+ * SOLANA_PYTH_DEFAULT_GENERATION, whatever the process's env says, so a value
+ * exported in a shell cannot silently change what an unconfigured caller (a
+ * test, a tool) reads or accepts; a bound from the other generation is still
+ * refused, never translated.
  */
-function configuredGeneration(): SolanaPythGeneration { return solanaPythGeneration(process.env); }
 
 export interface SolanaReferencePrice {
   source: "pyth"; account: string; feedId: string;
@@ -194,9 +201,11 @@ export async function derivePythPriceFeedAccount(feedIdHex: string, shard: numbe
 
 /**
  * Parse and check one PriceUpdateV2 account as returned by getAccountInfo base64:
- * owned by `generation`'s receiver, and read from that generation's account.
+ * owned by `generation`'s receiver (default: SOLANA_PYTH_DEFAULT_GENERATION),
+ * and read from that generation's account.
  */
-export function parsePythSolUsd(raw: unknown, contextSlot: number, nowMs: number, generation: SolanaPythGeneration = configuredGeneration()): SolanaReferencePrice {
+export function parsePythSolUsd(raw: unknown, contextSlot: number, nowMs: number,
+  generation: SolanaPythGeneration = SOLANA_PYTH_DEFAULT_GENERATION): SolanaReferencePrice {
   safe(contextSlot, "input"); safe(nowMs, "input");
   const feed = solanaPythFeed(generation);
   // A closed or never-created account: the RPC answers `value: null`.
@@ -296,7 +305,8 @@ export function requireSolanaPythGeneration(env: Env, nowMs: number, alerts: Sol
 
 /**
  * Read the reference at or after `minContextSlot` from `generation`'s pinned
- * account (default: MERRYMEN_SOLANA_PYTH_GENERATION). Never touches Jupiter.
+ * account (default: SOLANA_PYTH_DEFAULT_GENERATION; the app runtime passes
+ * the one its env names). Never touches Jupiter.
  * A refusal (stale, missing, foreign, unverified, misconfigured …) is
  * reported to `alerts` (default: this process's, logged as an [alert]) and
  * rethrown; an RPC transport error is rethrown untouched, since the caller
@@ -307,8 +317,8 @@ export async function readSolanaReferencePrice(read: SolanaLiveRead, minContextS
   const alerts = options.alerts ?? processReferenceAlerts;
   let generation: SolanaPythGeneration | undefined, price: SolanaReferencePrice;
   try {
-    // A setting that names no generation is refused here, and said as generation=invalid.
-    const chosen = options.generation ?? configuredGeneration(), feed = solanaPythFeed(chosen);
+    // Anything passed that is not a generation is refused here, and said as generation=invalid.
+    const chosen = options.generation ?? SOLANA_PYTH_DEFAULT_GENERATION, feed = solanaPythFeed(chosen);
     generation = chosen;
     const result = await read("getAccountInfo", [feed.account, { encoding: "base64", commitment: "confirmed", minContextSlot }]);
     if (!object(result) || !object(result.context) || !Object.hasOwn(result, "value")) return fail("response");
@@ -363,11 +373,12 @@ export function solanaReferenceBound(intent: { inputMint: string; outputMint: st
  * Recompute a stored bound from its own reference and the intent, and check it
  * is still fresh. Admission calls this so a bound can't be edited or replayed.
  * The reference must come from `generation`'s account (default:
- * MERRYMEN_SOLANA_PYTH_GENERATION): a bound read from the other generation is
- * refused, never translated.
+ * SOLANA_PYTH_DEFAULT_GENERATION; the app runtime's executor and store pass the
+ * one its env names): a bound read from the other generation is refused, never
+ * translated.
  */
 export function verifySolanaReferenceBound(bound: SolanaReferenceBound, intent: Parameters<typeof solanaReferenceBound>[0], nowMs: number,
-  generation: SolanaPythGeneration = configuredGeneration()): SolanaReferenceBound {
+  generation: SolanaPythGeneration = SOLANA_PYTH_DEFAULT_GENERATION): SolanaReferenceBound {
   const feed = solanaPythFeed(generation);
   if (!object(bound) || !object(bound.reference)) return fail("evidence");
   const r = bound.reference;
