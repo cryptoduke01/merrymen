@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { getBase58Decoder } from "@solana/kit";
 import { SOLANA_USDG_MINT, TOKEN_2022_PROGRAM } from "../../packages/core/src/ids";
 import { SOLANA_CLASSIC_TOKEN_PROGRAM, SOLANA_WRAPPED_SOL_MINT } from "../../packages/core/src/solana-live";
+import { SolanaPaperValidationError } from "../../packages/core/src/solana";
 import { createSolanaLiveMarket, JUPITER_SWAP_PROGRAM, SolanaLiveMarketError, validateJupiterCpi } from "./solana-live-market";
 const key = (n: number) => getBase58Decoder().decode(new Uint8Array(32).fill(n));
 function fixture() {
@@ -168,4 +169,37 @@ test("a quote outside the RPC's slot window, an incoherent quote graph or a fee 
       fetch: async url => Response.json(String(url).includes("/quote?") ? f.rawQuote : f.rawBuild) });
     await assert.rejects(market.build(f.request), code("provider"), problem);
   }
+});
+test("a quote the shared validators refuse is the provider's too, never the owner's 400 with validator text", async () => {
+  type Quote = ReturnType<typeof fixture>["rawQuote"] & Record<string, unknown>;
+  const answers: Record<string, (q: Quote) => void> = {
+    "non-canonical output": q => { q.outAmount = "02000000"; },
+    "zero output": q => { q.outAmount = "0"; q.otherAmountThreshold = "0"; q.routePlan[0]!.swapInfo.outAmount = "0"; },
+    "another slippage": q => { q.slippageBps = 50; },
+    "minimum above the output": q => { q.otherAmountThreshold = "2000001"; },
+    "no context slot": q => { delete (q as Record<string, unknown>).contextSlot; },
+    "another input mint": q => { q.inputMint = SOLANA_WRAPPED_SOL_MINT; },
+  };
+  for (const [problem, mutate] of Object.entries(answers)) {
+    const f = fixture(); mutate(f.rawQuote as Quote);
+    let builds = 0;
+    const market = createSolanaLiveMarket({ env: { MERRYMEN_SOLANA_RPC_MAINNET: "https://rpc.example/", MERRYMEN_JUPITER_API_KEY: "test-key" }, now: () => 100_000,
+      rpc: { read: callback => callback(async () => 1000), send: async () => assert.fail("must not submit") },
+      fetch: async url => String(url).includes("/quote?") ? Response.json(f.rawQuote) : (builds++, Response.json(f.rawBuild)) });
+    await assert.rejects(market.build(f.request), code("provider"), problem);
+    assert.equal(builds, 0, `${problem}: no swap instructions asked for`);
+  }
+  // A provider slow enough that its quote went stale before the swap instructions came back.
+  const f = fixture(); let clock = 100_000;
+  const slow = createSolanaLiveMarket({ env: { MERRYMEN_SOLANA_RPC_MAINNET: "https://rpc.example/", MERRYMEN_JUPITER_API_KEY: "test-key" }, now: () => clock,
+    rpc: { read: callback => callback(async () => 1000), send: async () => assert.fail("must not submit") },
+    fetch: async url => { if (!String(url).includes("/quote?")) clock += 31_000; return Response.json(String(url).includes("/quote?") ? f.rawQuote : f.rawBuild); } });
+  await assert.rejects(slow.build(f.request), code("provider"), "stale after a slow build");
+  // The owner's own malformed request is still refused as theirs, before anything is asked.
+  let asked = 0;
+  const owner = createSolanaLiveMarket({ env: { MERRYMEN_SOLANA_RPC_MAINNET: "https://rpc.example/", MERRYMEN_JUPITER_API_KEY: "test-key" }, now: () => 100_000,
+    rpc: { read: callback => callback(async () => 1000), send: async () => assert.fail("must not submit") },
+    fetch: async () => { asked++; return Response.json(f.rawQuote); } });
+  await assert.rejects(owner.build({ ...f.request, amountRaw: "01" }), (error: unknown) => error instanceof SolanaPaperValidationError);
+  assert.equal(asked, 0);
 });

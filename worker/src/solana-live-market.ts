@@ -7,7 +7,7 @@
 import { address } from "@solana/kit";
 import { CHAINS } from "../../packages/core/src/ids";
 import { SOLANA_JUPITER_SHARED_ROUTE_DISCRIMINATOR } from "../../packages/core/src/solana-live";
-import { parseSolanaRawAmount, parseSolanaSwapIntent, validateSolanaQuote, type SolanaQuote } from "../../packages/core/src/solana";
+import { parseSolanaRawAmount, parseSolanaSwapIntent, SolanaPaperValidationError, validateSolanaQuote, type SolanaQuote } from "../../packages/core/src/solana";
 import { createSolanaMarket, validSolanaJupiterRoute } from "./solana-market";
 import { readSolanaJson, requireSolanaSlot, SolanaRpcError, withSolanaReadDeadline } from "./solana-rpc";
 import type { SolanaLiveRpc } from "./solana-live-rpc";
@@ -70,6 +70,18 @@ function object(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 function fail(code: SolanaLiveMarketErrorCode): never { throw new SolanaLiveMarketError(code); }
+/**
+ * The shared quote validators applied to Jupiter's answer. build() parses the
+ * owner's request before asking Jupiter anything, so a validation error here is
+ * about the answer (malformed, inconsistent with the request, or stale because
+ * the provider was slow): 'provider', never the owner's 400 with validator text.
+ */
+function providerChecked<T>(check: () => T): T {
+  try { return check(); } catch (error) {
+    if (error instanceof SolanaPaperValidationError) return fail("provider");
+    throw error;
+  }
+}
 function key(value: unknown): string {
   try { if (typeof value === "string" && address(value) === value) return value; } catch { /* Safe error below. */ }
   return fail("provider");
@@ -149,16 +161,22 @@ export function createSolanaLiveMarket(options: {
       const quotedAtMs = now();
       const raw = await json(`https://api.jup.ag/swap/v1/quote?${params}`);
       if (!object(raw) || raw.swapMode !== "ExactIn" || typeof raw.outAmount !== "string") return fail("provider");
-      parseSolanaRawAmount(raw.outAmount);
-      if (
-          !validSolanaJupiterRoute(raw.routePlan, intent, raw.outAmount) ||
-          !(raw.platformFee === undefined || raw.platformFee === null ||
-            (object(raw.platformFee) && raw.platformFee.amount === "0" && raw.platformFee.feeBps === 0))) return fail("provider");
-      const quote: SolanaQuote = { source: "jupiter", inputMint: raw.inputMint as string,
-        outputMint: raw.outputMint as string, inAmount: raw.inAmount as string, outAmount: raw.outAmount,
-        minOutAmount: raw.otherAmountThreshold as string, slippageBps: raw.slippageBps as number,
-        contextSlot: raw.contextSlot as number, quotedAtMs, expiresAtMs: quotedAtMs + 30_000 };
-      validateSolanaQuote(quote, intent, now());
+      const outAmount = raw.outAmount;
+      const quote: SolanaQuote = providerChecked(() => {
+        // A zero output too: the preview (the market's quote) answers a dust amount
+        // as too small first; here it is an answer the vault cannot use.
+        parseSolanaRawAmount(outAmount);
+        if (
+            !validSolanaJupiterRoute(raw.routePlan, intent, outAmount) ||
+            !(raw.platformFee === undefined || raw.platformFee === null ||
+              (object(raw.platformFee) && raw.platformFee.amount === "0" && raw.platformFee.feeBps === 0))) return fail("provider");
+        const parsed: SolanaQuote = { source: "jupiter", inputMint: raw.inputMint as string,
+          outputMint: raw.outputMint as string, inAmount: raw.inAmount as string, outAmount,
+          minOutAmount: raw.otherAmountThreshold as string, slippageBps: raw.slippageBps as number,
+          contextSlot: raw.contextSlot as number, quotedAtMs, expiresAtMs: quotedAtMs + 30_000 };
+        validateSolanaQuote(parsed, intent, now());
+        return parsed;
+      });
       const built = await json("https://api.jup.ag/swap/v1/swap-instructions", {
         userPublicKey: request.swapAuthority, quoteResponse: raw,
         destinationTokenAccount: request.destinationTokenAccount, wrapAndUnwrapSol: false,
@@ -168,7 +186,8 @@ export function createSolanaLiveMarket(options: {
       const slot = await options.rpc.read(async rpc => requireSolanaSlot(await rpc("getSlot", [{ commitment: "confirmed" }])));
       // Outside the RPC's slot window: a provider (or RPC) lagging, never a route the vault refuses.
       if (quote.contextSlot < slot - 75 || quote.contextSlot > slot + 32) return fail("provider");
-      validateSolanaQuote(quote, intent, now());
+      // A provider slow enough for its quote to go stale meanwhile.
+      providerChecked(() => validateSolanaQuote(quote, intent, now()));
       return { quote, ...validateJupiterCpi(built, request, quote) };
     },
   };
