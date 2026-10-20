@@ -78,9 +78,15 @@ export const SOLANA_PYTH_FEEDS: Readonly<Record<SolanaPythGeneration, Readonly<S
     priceFeedProgram: "pyt2F414BA6dPttK6RddPZUdHfapoBN24GL5wbrPCou", account: "7AviUf9nL62mcxNbQGKm4nKDQnPjswo6c5MX4D57HmyE" }),
 } satisfies Record<SolanaPythGeneration, SolanaPythFeed>);
 /**
- * The generation read when MERRYMEN_SOLANA_PYTH_GENERATION is unset. Which one
- * should be the default is the owner's decision; until it is made, the
- * generation this module was first checked against.
+ * The generation read when MERRYMEN_SOLANA_PYTH_GENERATION is unset: "current",
+ * the conservative choice and the owner's to change. It is the generation this
+ * module was first built and checked against, and the tests replay a recorded
+ * read of it. The alternative, "upgraded", is the one Pyth recommends for new
+ * integrations; the unpreserved 2026-10-19 sample saw it post every 10-15 s
+ * against the current account's 52-53 s, and it trusts a different receiver
+ * program. Switching is one setting, with no fallback either way; give every
+ * service that runs the Solana runtime (web and worker) the same value, so all
+ * live trades are bounded by one oracle.
  */
 export const SOLANA_PYTH_DEFAULT_GENERATION: SolanaPythGeneration = "current";
 /** The default generation's receiver, price feed program and SOL/USD account. */
