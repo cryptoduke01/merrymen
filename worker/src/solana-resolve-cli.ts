@@ -11,7 +11,7 @@ try {
   // Fixed messages only: no connection strings, endpoint URLs, provider text or stack traces.
   const known = error instanceof SolanaResolveError || error instanceof SolanaRpcError;
   // The failure may come after the store booked the outcome (a lost reply), so this text never says it is unbooked.
-  console.error(known ? error.message : "The pending Solana trade could not be read or resolved. Check the shared database and the RPC settings. "
-    + "The outcome may or may not be booked: run show again to see the trade's status before anything else.");
+  console.error(known ? error.message : "The pending Solana trade or owner transaction could not be read or resolved. Check the shared database and the RPC settings. "
+    + "The outcome may or may not be booked: run show again (owner show for an owner transaction) to see its status before anything else.");
   process.exitCode = 1;
 }

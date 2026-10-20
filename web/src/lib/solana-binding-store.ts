@@ -34,6 +34,11 @@ export class SolanaBindingError extends Error {
 export interface SolanaBindingStore {
   get(tenant: `0x${string}`): Promise<SolanaBinding | null>;
   bind(tenant: `0x${string}`, did: string, owner: string): Promise<SolanaBinding>;
+  /**
+   * RE-BIND after the tenant's verified identity changed (SOLANA OWNER KEY RECOVERY below).
+   * Only after the route verified a fresh owner-key proof naming `tenant`, `did` and `owner`.
+   */
+  rebind(tenant: `0x${string}`, did: string, owner: string, previousDid: string): Promise<SolanaBinding>;
   settings(tenant: `0x${string}`, owner: string, revision: number, mode: SolanaRequestedMode, limits: SolanaPaperLimits): Promise<SolanaBinding>;
   strategy(tenant: `0x${string}`, owner: string, revision: number, value: SolanaStrategy): Promise<SolanaBinding>;
   /** Kill switch: turn the tenant's autonomous strategy off. True when it was on. */
@@ -45,7 +50,74 @@ const SCHEMA = `CREATE TABLE IF NOT EXISTS solana_wallet_bindings (
   tenant TEXT PRIMARY KEY, did TEXT NOT NULL, chain TEXT NOT NULL,
   owner TEXT NOT NULL UNIQUE, requested_mode TEXT NOT NULL CHECK (requested_mode IN ('paper', 'live')),
   limits_json TEXT, strategy_json TEXT, revision BIGINT NOT NULL, created_at_ms BIGINT NOT NULL, updated_at_ms BIGINT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS solana_wallet_binding_rebinds (
+  tenant TEXT NOT NULL, owner TEXT NOT NULL, previous_did TEXT NOT NULL, did TEXT NOT NULL,
+  revision BIGINT NOT NULL, rebound_at_ms BIGINT NOT NULL, PRIMARY KEY (tenant, revision)
 );`;
+/**
+ * SOLANA OWNER KEY RECOVERY: RE-BINDING AFTER THE TENANT'S IDENTITY CHANGED.
+ *
+ * A binding names the tenant, the Privy DID that verified it and the Solana
+ * owner key. Every Solana route admits only that DID for that tenant
+ * (solanaContext, the status route). Robinhood sign-in can re-point a tenant
+ * at a new DID: a wallet-signed login with a DID never seen before claims the
+ * tenant whose wallet signed (identity-store resolveOrClaimDid), and the old
+ * DID then maps to no tenant. The binding's DID no longer signs in, the new
+ * one does not match it, and status, revoke and withdrawal were all refused.
+ *
+ * The Solana owner key is the authority here, not the sign-in. A principal
+ * whose verified DID now maps to the tenant (authenticateSolana: cookie and
+ * DID agree) may re-bind the tenant's EXISTING binding to its DID by signing a
+ * fresh RE-BIND challenge with the SAME owner key (bind/rebind-proof.ts): the
+ * signed message says it moves the account's controls (mode, limits, the
+ * registered permission, the strategy, owner actions) to the new sign-in, and
+ * names the tenant, the previous and the new DID, the owner and the origin; its
+ * nonce is single-use, and the bind route verifies and consumes it before
+ * calling rebind. The ordinary binding message, which says it grants no
+ * authority, is never accepted for a re-bind. Holding
+ * that key already means holding the vault (every owner transaction needs its
+ * signature and pays only to its own accounts), so a re-bind grants nothing
+ * the key does not already have, and without the key a remapped DID stays
+ * refused exactly as before.
+ *
+ * What it never does:
+ * - change Robinhood sign-in, the identity store or any tenant mapping;
+ * - change the owner key: another wallet is still a conflict, and the owner
+ *   stays UNIQUE, so no other tenant can take or lose a binding here;
+ * - touch any tenant but the authenticated one: the update is keyed by tenant,
+ *   owner and the DID it replaces (compare-and-set), in one transaction.
+ *
+ * What it changes, and records: the DID, a revision bump (which fences any
+ * autonomous admission or settings form in flight), and the autonomous
+ * strategy turned off, as the kill switch does (owner decision: automation
+ * the previous identity enabled waits for the new one to turn it back on;
+ * mode, limits and the registered session stay). Each re-bind is kept in
+ * solana_wallet_binding_rebinds with both DIDs.
+ *
+ * Simply signing in again with the original identity also works: it re-points
+ * the tenant back at the binding's DID, and nothing here is needed.
+ *
+ * WHO CAN USE WHICH (said plainly, since the page can only do one of them):
+ * - Owners the app created (a Privy embedded wallet, the only owner the page
+ *   offers): sign in again with the original login. That is the recovery.
+ *   An embedded key belongs to the Privy user that created it, and the page
+ *   signs only with an embedded wallet linked to the signed-in Privy user
+ *   (useSolanaOwner), so a second Privy user's page can never produce the
+ *   bound key's signature. It offers that user's own wallet, which the bind
+ *   route refuses with SOLANA_OTHER_SIGN_IN, as every other route does.
+ * - A re-bind needs a signature from the bound owner key itself: an exported
+ *   key imported into the new identity's embedded wallet, or an external
+ *   signer outside the page. solana-rebind.test.ts proves the server side by
+ *   signing outside the page's wallet selection.
+ */
+/**
+ * The answer while the tenant's Solana wallet was verified by another sign-in
+ * (its binding's DID is not the signed-in one): the bind route's 409 and, as a
+ * cross-track change, the 403 of solanaContext and the status route. The
+ * remedy for an app-created owner is the original login (SOLANA OWNER KEY RECOVERY).
+ */
+export const SOLANA_OTHER_SIGN_IN = "This account's Solana wallet was verified with a different sign-in. Sign in with the login you used when you verified it.";
 type Row = { tenant: string; did: string; chain: string; owner: string; requested_mode: SolanaRequestedMode;
   limits_json: string | null; strategy_json: string | null; revision: number | string; created_at_ms: number | string; updated_at_ms: number | string };
 export function validateSolanaStrategy(value: unknown): SolanaStrategy {
@@ -109,6 +181,42 @@ export class SqlSolanaBindingStore implements SolanaBindingStore {
     const existing = await this.get(tenant);
     if (!existing || existing.owner !== owner || existing.did !== did) throw new SolanaBindingError("conflict");
     return existing;
+  }
+  /** See SOLANA OWNER KEY RECOVERY above. The caller verified and consumed a fresh owner-key proof naming `did`. */
+  async rebind(tenant: `0x${string}`, did: string, owner: string, previousDid: string): Promise<SolanaBinding> {
+    tenantKey(tenant);
+    if (!/^did:privy:[A-Za-z0-9_-]{1,160}$/.test(did) || !/^did:privy:[A-Za-z0-9_-]{1,160}$/.test(previousDid)) throw new SolanaBindingError("invalid");
+    try { solanaPaperAgentId(owner); } catch { throw new SolanaBindingError("invalid"); }
+    const nowMs = this.now();
+    if (!Number.isSafeInteger(nowMs) || nowMs < 0) throw new SolanaBindingError("invalid");
+    const db = await this.database();
+    await db.tx(async (tx) => {
+      // The same row lock trade admission and the kill switch take.
+      const locked = await tx.prepare("UPDATE solana_wallet_bindings SET revision = revision WHERE tenant = ? AND owner = ? AND did = ?").run(tenant, owner, previousDid);
+      if (locked.changes !== 1) {
+        const current = await tx.prepare("SELECT owner, did FROM solana_wallet_bindings WHERE tenant = ?").get(tenant) as { owner: string; did: string } | undefined;
+        // Already re-bound to this DID (a retry): nothing to do. Anything else is not this binding.
+        if (current?.owner === owner && current.did === did) return;
+        throw new SolanaBindingError(current ? "conflict" : "missing");
+      }
+      if (previousDid === did) return;
+      const row = await tx.prepare("SELECT strategy_json, revision FROM solana_wallet_bindings WHERE tenant = ?").get(tenant) as { strategy_json: string | null; revision: number | string };
+      let strategy: SolanaStrategy | null = null;
+      try { strategy = row.strategy_json ? validateSolanaStrategy(JSON.parse(row.strategy_json)) : null; } catch { /* Unreadable: cleared below. */ }
+      const revision = Number(row.revision) + 1;
+      await tx.prepare("UPDATE solana_wallet_bindings SET did = ?, strategy_json = ?, revision = ?, updated_at_ms = ? WHERE tenant = ? AND owner = ? AND did = ?")
+        .run(did, strategy ? JSON.stringify({ ...strategy, enabled: false }) : null, revision, nowMs, tenant, owner, previousDid);
+      await tx.prepare("INSERT INTO solana_wallet_binding_rebinds (tenant, owner, previous_did, did, revision, rebound_at_ms) VALUES (?,?,?,?,?,?)")
+        .run(tenant, owner, previousDid, did, revision, nowMs);
+    });
+    return (await this.get(tenant))!;
+  }
+  /** The tenant's re-binds, oldest first (SOLANA OWNER KEY RECOVERY). */
+  async rebinds(tenant: `0x${string}`): Promise<Array<{ owner: string; previousDid: string; did: string; revision: number; reboundAtMs: number }>> {
+    tenantKey(tenant);
+    const rows = await (await this.database()).prepare("SELECT owner, previous_did, did, revision, rebound_at_ms FROM solana_wallet_binding_rebinds WHERE tenant = ? ORDER BY revision")
+      .all(tenant) as Array<{ owner: string; previous_did: string; did: string; revision: number | string; rebound_at_ms: number | string }>;
+    return rows.map((row) => ({ owner: row.owner, previousDid: row.previous_did, did: row.did, revision: Number(row.revision), reboundAtMs: Number(row.rebound_at_ms) }));
   }
   async settings(tenant: `0x${string}`, owner: string, revision: number, mode: SolanaRequestedMode, limits: SolanaPaperLimits): Promise<SolanaBinding> {
     tenantKey(tenant);

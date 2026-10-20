@@ -33,6 +33,9 @@ import { getSolanaRuntimeDb } from "./solana-runtime-db";
 import { isSolanaTransactionError } from "./solana-settlement";
 import { ensureSolanaTradingSchema, OPERATOR_HOLD, SOLANA_EXPIRED_ATTEMPTS_EXHAUSTED, solanaExpiredAttemptAllowance, solanaExpiredAttemptUse, solanaOwnerExpiryProven, solanaQuarantinedWsol, SolanaTradingStore, SolanaTradingStoreError, type SolanaAccountScope,
   type SolanaLiveBook, type SolanaOwnerExpiryProof, type SolanaPreparedSetup, type SolanaWithdrawValuation } from "./solana-trading-store";
+import { SOLANA_REGISTERED_AFTER_REVOKE, SOLANA_RESUMED_AFTER_REVOKE, SOLANA_REVOKE_ALREADY_LANDED, solanaLandedBeside, solanaLiveAfterRevoke, solanaOwnerEpochOffset, solanaRegisteredEpoch,
+  solanaRevokedBesideResume } from "./solana-trading-store";
+import { readSolanaExternalWithdrawal, SolanaExternalWithdrawalError } from "./solana-external-withdrawal";
 
 /**
  * Codes:
@@ -148,6 +151,14 @@ function refundBlocker({ mint, problem }: SolanaOwnerRefundBlock): string {
  * transaction (recordExternalWithdrawals); anything else stays held.
  */
 export const SOLANA_STATUS_BELOW_BOOK = "Vault balances are below recorded trades. If you withdrew from the vault outside Merrymen, with your owner key in another wallet or tool, record those withdrawals under Owner controls; until the records match the vault, trading and automated exits stay held.";
+/** A withdrawal prepare refused because the vault holds less of the asset than the book. */
+export const SOLANA_WITHDRAW_BELOW_BOOK = "Your vault holds less of this asset than Merrymen's records, so this withdrawal could fail on Solana. If you withdrew from the vault outside Merrymen, record those withdrawals under Owner controls first, or withdraw at most what the vault holds. Nothing was prepared.";
+/**
+ * A permission the owner signed whose registration landed after a revocation (one beside it, or one made
+ * outside Merrymen): Merrymen never activates it (activateLive), but its session stays live on Solana until
+ * it expires, so the owner is told to revoke again.
+ */
+export const SOLANA_STATUS_REGISTERED_AFTER_REVOKE = "A trading permission that landed on Solana after your revocation is still active there until it expires. Merrymen never uses it; revoke again under Owner controls to end it.";
 /** Chain balances at or above the book: an excess waits to be booked, a shortfall stops trading. */
 function shortOfBook(book: SolanaLiveBook, chain: { cashUsdg: string; wsolRaw: string }): boolean {
   return BigInt(chain.cashUsdg) < BigInt(book.cashRaw) || BigInt(chain.wsolRaw) < BigInt(book.wsolRaw) + solanaQuarantinedWsol(book);
@@ -535,18 +546,24 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       await reconcileSolanaSubmission(rpc(), s, s.scope.owner, pending.submission.intent.requestId, now);
     }
   }
+  /**
+   * `evidence` (pending only): the blockhash expired at this finalized height and
+   * the vault was read at this slot, but its state does not prove the transaction
+   * never ran (it moved for another reason). Shown to an operator (solana-resolve
+   * owner); never booked from by the app.
+   */
   type OwnerView =
-    | { outcome: "pending"; seen: boolean; canLand: boolean }
+    | { outcome: "pending"; seen: boolean; canLand: boolean; evidence?: Omit<SolanaOwnerExpiryProof, "reason"> }
     | { outcome: "finalized" | "failed"; slot: number; err: string }
     | { outcome: "expired"; proof: SolanaOwnerExpiryProof };
   /** A successful owner transaction always leaves this mark on the vault. Without it the receipt is not believed. */
-  async function requireOwnerEffect(read: SolanaLiveRead, s: SolanaTradingStore, setup: SolanaPreparedSetup, slot: number) {
+  async function requireOwnerEffect(read: SolanaLiveRead, owner: string, setup: SolanaPreparedSetup, slot: number) {
     const mismatch = (): never => fail("Owner confirmation does not match the vault state.");
     const found = await read("getAccountInfo", [setup.vault, { encoding: "base64", commitment: "finalized", minContextSlot: slot }]);
     if (!object(found) || !object(found.context) || integer(found.context.slot) < slot || !object(found.value) || found.value.owner !== setup.programId
       || found.value.executable !== false || !Array.isArray(found.value.data) || found.value.data[1] !== "base64" || typeof found.value.data[0] !== "string") return mismatch();
     const current = decodeSolanaVaultAccount(encoded(found.value.data[0], SOLANA_VAULT_ACCOUNT_SIZE));
-    if (current.owner !== s.scope.owner) return mismatch();
+    if (current.owner !== owner) return mismatch();
     const kind = setup.kind ?? "session";
     // A session or revoke always moves the epoch; either withdrawal always moves the sequence.
     if ((kind === "session" || kind === "revoke") && (setup.priorSessionEpoch === undefined || current.sessionEpoch <= BigInt(setup.priorSessionEpoch))) mismatch();
@@ -560,7 +577,7 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
    * one URL and pair a current height with a stale slot, whose vault snapshot
    * predates a transaction that did run.
    */
-  async function ownerExpiry(read: SolanaLiveRead, s: SolanaTradingStore, setup: SolanaPreparedSetup, seen: boolean): Promise<OwnerView> {
+  async function ownerExpiry(read: SolanaLiveRead, owner: string, setup: SolanaPreparedSetup, seen: boolean, epochOffset = 0): Promise<OwnerView> {
     const info = await read("getEpochInfo", [{ commitment: "finalized" }]);
     if (!object(info)) fail("Invalid owner expiry evidence.");
     const proofSlot = integer(info.absoluteSlot), blockHeight = integer(info.blockHeight);
@@ -575,23 +592,25 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       if (!object(snapshot.value) || snapshot.value.owner !== setup.programId || snapshot.value.executable !== false || !Array.isArray(snapshot.value.data)
         || snapshot.value.data[1] !== "base64" || typeof snapshot.value.data[0] !== "string") return pending;
       const current = decodeSolanaVaultAccount(encoded(snapshot.value.data[0], SOLANA_VAULT_ACCOUNT_SIZE));
-      if (current.owner !== s.scope.owner) return pending;
+      if (current.owner !== owner) return pending;
       sequence = current.seq.toString(); epoch = current.sessionEpoch.toString();
     } else if (setup.priorVaultExisted) return pending;
+    const evidence = { blockHeight: String(blockHeight), vaultSequence: sequence, sessionEpoch: epoch, slot: integer(snapshot.context.slot) };
     // Only state this kind of transaction must have changed proves it never ran.
     // Trades advance the sequence independently, so a revoke or session is
     // proven by its epoch alone, never wedged by a trade that landed meanwhile.
-    if (!solanaOwnerExpiryProven(setup, sequence, epoch)) return pending;
-    return { outcome: "expired", proof: { reason: "blockhash-expired", blockHeight: String(blockHeight), vaultSequence: sequence, sessionEpoch: epoch, slot: integer(snapshot.context.slot) } };
+    // A linked record in the other slot that ran moved the epoch once (solanaOwnerEpochOffset).
+    if (!solanaOwnerExpiryProven(setup, sequence, epoch, epochOffset)) return { ...pending, evidence };
+    return { outcome: "expired", proof: { reason: "blockhash-expired", ...evidence } };
   }
   /** One provider's view of a submitted owner transaction. */
-  async function observeOwner(read: SolanaLiveRead, s: SolanaTradingStore, setup: SolanaPreparedSetup, signature: string): Promise<OwnerView> {
+  async function observeOwner(read: SolanaLiveRead, owner: string, setup: SolanaPreparedSetup, signature: string, epochOffset = 0): Promise<OwnerView> {
     const statuses = await read("getSignatureStatuses", [[signature], { searchTransactionHistory: true }]);
     if (!object(statuses) || !Array.isArray(statuses.value) || statuses.value.length !== 1) fail("Invalid owner transaction confirmation.");
     const state = statuses.value[0];
     if (state !== null && !object(state)) fail("Invalid owner transaction confirmation.");
     const tx = await read("getTransaction", [signature, { commitment: "finalized", encoding: "base64", maxSupportedTransactionVersion: 0 }]);
-    if (!object(state) || state.confirmationStatus !== "finalized") return tx !== null ? { outcome: "pending", seen: true, canLand: false } : ownerExpiry(read, s, setup, state !== null);
+    if (!object(state) || state.confirmationStatus !== "finalized") return tx !== null ? { outcome: "pending", seen: true, canLand: false } : ownerExpiry(read, owner, setup, state !== null, epochOffset);
     if (tx === null) return { outcome: "pending", seen: true, canLand: false };
     if (!object(tx) || tx.version !== 0 || !object(tx.meta) || !Object.hasOwn(tx.meta, "err") || !Object.hasOwn(state, "err")
       || !isSolanaTransactionError(tx.meta.err) || !isSolanaTransactionError(state.err)
@@ -601,7 +620,7 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
     // A failed receipt is terminal too; neither path may mint a new signature.
     if ((tx.meta.err === null) !== (state.err === null)) fail("Owner transaction confirmations disagree.");
     const slot = integer(tx.slot);
-    if (tx.meta.err === null) await requireOwnerEffect(read, s, setup, slot);
+    if (tx.meta.err === null) await requireOwnerEffect(read, owner, setup, slot);
     return { outcome: tx.meta.err === null ? "finalized" : "failed", slot, err: JSON.stringify(tx.meta.err) };
   }
   /** What both providers must agree on. Each provider's own expiry height and slot may differ. */
@@ -628,7 +647,11 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       if ((error instanceof SolanaAppRuntimeError && error.code === "invalid") || error instanceof SolanaTradingStoreError) throw new SolanaAppRuntimeError("outcome-unknown", error.message);
       throw error;
     };
-    const quorum = await readSolanaQuorum(live, read => observeOwner(read, s, setup, signature), ownerViewKey).catch(unknown);
+    // The record in the other slot (REVOKE BESIDE A PENDING OWNER TRANSACTION): a linked registration or
+    // revocation of it that finalized moved the epoch this record's expiry proof starts from.
+    const partner = await (setup.beside !== undefined ? s.setup() : s.revokeSetup()).catch(unknown);
+    const epochOffset = solanaOwnerEpochOffset(setup, partner);
+    const quorum = await readSolanaQuorum(live, read => observeOwner(read, s.scope.owner, setup, signature, epochOffset), ownerViewKey).catch(unknown);
     if (quorum.agreed && quorum.value.outcome !== "pending") {
       const view = quorum.value;
       if (view.outcome === "expired") { await s.finishSetup(signature, "failed", view.proof.slot, view.proof).catch(unknown); return { signature, status: "failed" }; }
@@ -701,18 +724,34 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
     } catch { return null; }
     finally { abandoned = true; clearTimeout(timer); }
   }
+  /**
+   * The earliest slot an owner transaction's prior vault state may be read at: the
+   * latest the app has booked (the live book's slot, the last owner transaction's
+   * finalized or expiry slot, in either slot). Undefined when nothing is booked.
+   */
+  async function ownerReadFloor(s: SolanaTradingStore): Promise<number | undefined> {
+    const revoking = await s.revokeSetup();
+    const slots = [(await s.liveBook())?.slot, ...[await s.setup(), revoking, ...(revoking?.landed ?? [])].flatMap(item => [item?.finalizedSlot, item?.expiryProof?.slot])]
+      .filter((slot): slot is number => Number.isSafeInteger(slot) && slot! > 0);
+    return slots.length ? Math.max(...slots) : undefined;
+  }
   async function prepareOwner(s: SolanaTradingStore, instructions: Instruction[], details: Omit<SolanaPreparedSetup,
     "transactionBase64" | "messageBase64" | "blockhash" | "lastValidBlockHeight" | "preparedAtMs" | "expiresAtMs">, creates: readonly OwnerCreate[] = []) {
-    const previous = await s.setup();
-    // One owner transaction at a time, a revocation included (owner decision, 2026-10-20): the
-    // saved record is what its outcome is booked from, so it is never replaced while it may
-    // still land. A revoke waits for it to finalize or provably expire. When the record stays
-    // pending (providers disagree, its reads fail), the page says the server cannot settle it
-    // and, where it shows the recovery card, points to `merrymen solana-recover`, which revokes
-    // with the owner's own key (SolanaOwnerActions). Trading is held meanwhile (status blocker).
-    // The alternative, a second slot or a setup history so a revoke can be prepared beside
-    // it, is not built.
-    if (previous?.signature && previous.status !== "failed" && previous.status !== "finalized") fail("Refresh the pending owner transaction before preparing another.", "pending");
+    const previous = await s.setup(), revoking = await s.revokeSetup();
+    // The saved record is what its outcome is booked from, so it is never replaced while it
+    // may still land. A revocation can always be prepared beside a pending NON-revoke owner
+    // transaction (owner decision 2026-10-20, option A): it goes in the revoke slot, marked
+    // `beside` it, and the pending record stays as it is (REVOKE BESIDE A PENDING OWNER
+    // TRANSACTION in solana-trading-store.ts). Anything else waits while either slot holds a
+    // pending transaction: another withdrawal, resume-buys or permission, and a second
+    // revocation. Trading is held meanwhile (status blocker).
+    const unresolved = (item: SolanaPreparedSetup | null) => !!item?.signature && item.status !== "failed" && item.status !== "finalized";
+    const beside = details.kind === "revoke" && unresolved(previous) && (previous!.kind ?? "session") !== "revoke" && !unresolved(revoking) ? previous!.signature : undefined;
+    if ((unresolved(previous) || unresolved(revoking)) && beside === undefined) fail("Refresh the pending owner transaction before preparing another.", "pending");
+    // A revocation beside this same pending record already landed: its record is kept, and another is prepared only once the
+    // vault (read at or after that landing: ownerReadFloor) shows a session registered since (the store refuses too).
+    const landed = beside !== undefined ? solanaLandedBeside(previous, revoking) : null;
+    if (landed && !solanaLiveAfterRevoke(landed, { session: details.session, sessionEpoch: details.priorSessionEpoch })) fail(SOLANA_REVOKE_ALREADY_LANDED, "pending");
     const owner = s.scope.owner, live = rpc();
     const { block, cost } = await live.read(async read => {
       const result = await read("getLatestBlockhash", [{ commitment: "confirmed" }]);
@@ -733,7 +772,8 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
     const transactionBase64 = getBase64EncodedWireTransaction(tx); encoded(transactionBase64);
     const preparedAtMs = now();
     const setup: SolanaPreparedSetup = { ...details, transactionBase64, messageBase64: Buffer.from(tx.messageBytes).toString("base64"),
-      blockhash: block.blockhash, lastValidBlockHeight: block.lastValidBlockHeight.toString(), preparedAtMs, expiresAtMs: preparedAtMs + 60_000 };
+      blockhash: block.blockhash, lastValidBlockHeight: block.lastValidBlockHeight.toString(), preparedAtMs, expiresAtMs: preparedAtMs + 60_000,
+      ...(beside !== undefined ? { beside } : {}) };
     await s.saveSetup(setup);
     return { transactionBase64, blockhash: setup.blockhash, lastValidBlockHeight: setup.lastValidBlockHeight,
       programId: setup.programId, vault: setup.vault, session: setup.session, expiresAtMs: setup.expiresAtMs,
@@ -773,14 +813,20 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
     } catch { return undefined; }
   }
   async function submitOwner(scope: SolanaAccountScope, input: { signedTransactionBase64: string }, kind: "session" | "owner") {
-    const s = await store(scope), setup = await s.setup();
+    const s = await store(scope), revoking = kind === "owner" ? await s.revokeSetup() : null;
     // Until saveSetup succeeds this request records and sends nothing: every refusal
     // is "not-saved". Bytes an earlier request saved and sent, whose setup a later
     // prepare replaced, are refused this way too (see SolanaAppRuntimeError).
     const notSaved: (message: string) => never = message => fail(message, "not-saved");
-    if (!setup || (kind === "session" ? (setup.kind ?? "session") !== "session" : setup.kind === "session" || !setup.kind)) notSaved("Prepare this owner transaction before signing it.");
+    const fits = (item: SolanaPreparedSetup | null): item is SolanaPreparedSetup => !!item && (kind === "session" ? (item.kind ?? "session") === "session" : item.kind !== "session" && !!item.kind);
+    if (!fits(await s.setup()) && !fits(revoking)) notSaved("Prepare this owner transaction before signing it.");
     let transaction: ReturnType<ReturnType<typeof getTransactionDecoder>["decode"]>;
     try { transaction = getTransactionDecoder().decode(encoded(input.signedTransactionBase64)); } catch { return notSaved("Invalid encoded Solana transaction."); }
+    // A revocation prepared beside a pending owner transaction is in the revoke slot: these are its
+    // bytes when they are its reviewed message. Anything else is checked against the main slot.
+    const revokeSlot = fits(revoking) && Buffer.from(transaction.messageBytes).toString("base64") === revoking.messageBase64;
+    const setup = revokeSlot ? await s.revokeSetup() : await s.setup();
+    if (!fits(setup)) return notSaved("Prepare this owner transaction before signing it.");
     const signatureBytes = transaction.signatures[address(scope.owner)];
     if (Object.keys(transaction.signatures).length !== 1 || !signatureBytes ||
       Buffer.from(transaction.messageBytes).toString("base64") !== setup.messageBase64 ||
@@ -837,14 +883,21 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       // Blockers that stop buying but leave exits open.
       const exitSafe = new Set<string>();
       const buysOnly = (message: string) => { blockers.push(message); exitSafe.add(message); };
+      // A session registered on Solana after a revocation that landed beside the pending owner transaction: Revoke works again (REVOKE BESIDE...).
+      let revokeAgain = false;
       const liveReads = statusOptions.liveReads ?? (binding.requestedMode === "live" || !!(await s.session()) || !!(await s.liveBook())
         || !!(await s.setup()) || (await s.pending()).length > 0);
       if (liveReads) {
         try { await reconcile(s); } catch { blockers.push("Pending trade confirmation is unavailable; its reservation remains held."); }
-        const setup = await s.setup();
-        if (setup?.signature && setup.status !== "finalized" && setup.status !== "failed") {
-          try { await ownerStatus(s, setup); } catch { blockers.push("Owner transaction confirmation is unavailable."); }
+        // Both slots: the main owner transaction, then a revocation prepared beside it.
+        let unreadable = false;
+        for (const slot of ["main", "revoke"] as const) {
+          const setup = slot === "main" ? await s.setup() : await s.revokeSetup();
+          if (setup?.signature && setup.status !== "finalized" && setup.status !== "failed") {
+            try { await ownerStatus(s, setup); } catch { unreadable = true; }
+          }
         }
+        if (unreadable) blockers.push("Owner transaction confirmation is unavailable.");
       }
       const session = await s.session();
       let programId: string | null = null, vault: string | null = null, cashTokenAccount: string | null = null;
@@ -919,6 +972,18 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
             if (!storedSeed || await getAddressFromPublicKey((await createKeyPairFromPrivateKeyBytes(seed(storedSeed, "The session cannot be opened."))).publicKey) !== session.session)
               fail("The saved trading permission cannot be opened.", "configuration");
           }
+          // A finalized registration activateLive never activates (the epoch moved more than its own landing: a
+          // revocation landed before it, beside it or outside Merrymen) whose session is still live on Solana.
+          const registering = await s.setup();
+          if (registering && (registering.kind ?? "session") === "session" && registering.status === "finalized" && registering.session === live.state.session
+            && live.state.expiresAt * 1000n > BigInt(now()) && session?.registrationSignature !== registering.signature
+            && live.state.sessionEpoch !== solanaRegisteredEpoch(registering.priorSessionEpoch)) blockers.push(SOLANA_STATUS_REGISTERED_AFTER_REVOKE);
+          // Still pending (the providers keep disagreeing about it), with a revocation beside it that landed, while a session
+          // registered after that landing is live: its own landing, or one made outside Merrymen. Never activated; revoke again.
+          const landedBeside = solanaLandedBeside(registering, await s.revokeSetup());
+          if (landedBeside && live.state.expiresAt * 1000n > BigInt(now()) && solanaLiveAfterRevoke(landedBeside, live.state)) {
+            revokeAgain = true; blockers.push(SOLANA_STATUS_REGISTERED_AFTER_REVOKE);
+          }
           const currentBook = await s.liveBook();
           if (currentBook?.buyPaused) buysOnly("The buying drawdown breaker is paused; exits remain available.");
           // Below the book only once nothing of the app's own is still settling: a trade or owner withdrawal that
@@ -958,8 +1023,9 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       }
       const pending = (await s.pending()).map(publicTrade);
       if (pending.length) blockers.push("A live trade is awaiting final confirmation.");
-      const ownerTransaction = await s.setup();
-      if (ownerTransaction?.signature && ownerTransaction.status === "pending") blockers.push("An owner transaction is awaiting final confirmation.");
+      const ownerTransaction = await s.setup(), revocation = await s.revokeSetup();
+      if ((ownerTransaction?.signature && ownerTransaction.status === "pending") || (revocation?.signature && revocation.status === "pending")) blockers.push("An owner transaction is awaiting final confirmation.");
+      if (ownerTransaction?.status === "finalized" && solanaRevokedBesideResume(ownerTransaction, revocation, now()) && (await s.liveBook())?.buyPaused) warnings.push(SOLANA_RESUMED_AFTER_REVOKE);
       const heartbeat = await s.db.prepare("SELECT last_seen_at_ms FROM solana_runtime_worker_heartbeat WHERE worker='solana'").get() as { last_seen_at_ms: number | string } | undefined;
       const lastSeenAtMs = heartbeat ? Number(heartbeat.last_seen_at_ms) : null;
       return { chain: CHAINS.solana, owner: scope.owner, requestedMode: binding.requestedMode,
@@ -967,7 +1033,9 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
         paper: await s.paper().get(scope.owner), limits: binding.limits,
         live: { ready: blockers.length === 0, canExit: blockers.every(item => exitSafe.has(item)), blockers, warnings, feePayer: feePayerView, ownerWallet, recoverable, programId, vault, cashTokenAccount, session: session?.session ?? null,
           balances, tradable: await tradableIn(s, balances), book: await s.liveBook(), pending, history: (await s.history()).map(publicTrade),
-          ownerTransaction: ownerTransaction?.signature ? { signature: ownerTransaction.signature, status: ownerTransaction.status, kind: ownerTransaction.kind } : null } };
+          // `revoke`: a revocation signed beside it (the revoke slot), with its own signature and outcome.
+          ownerTransaction: ownerTransaction?.signature ? { signature: ownerTransaction.signature, status: ownerTransaction.status, kind: ownerTransaction.kind,
+            ...(revocation?.signature ? { revoke: { signature: revocation.signature, status: revocation.status, kind: "revoke" as const, ...(revokeAgain ? { revokeAgain: true } : {}) } } : {}) } : null } };
     },
     async setupPaper(scope: SolanaAccountScope, input: { initialCashRaw: string; limits: SolanaPaperLimits }) {
       const s = await store(scope), binding = await s.binding();
@@ -1098,8 +1166,10 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       try { sell = requireSolanaLiveSellLimits(limits); } catch { return fail("Save per-trade and daily SOL sell limits before registering live trading.", "permission"); }
       if (new Set([scope.owner, session, vault, feePayer]).size !== 4) fail("Owner, session, vault and fee payer must be separate accounts.");
       await verifyDeployment(cfg);
+      const floor = await ownerReadFloor(s);
       const prior = await rpc().read(async read => {
-        const slot = integer(await read("getSlot", [{ commitment: "confirmed" }]));
+        // Never earlier than anything already booked (ownerReadFloor), nor than this provider's own current slot.
+        const slot = Math.max(integer(await read("getSlot", [{ commitment: "confirmed" }])), floor ?? 1);
         const found = await read("getAccountInfo", [vault, { encoding: "base64", commitment: "confirmed", minContextSlot: slot }]);
         if (!object(found) || !object(found.context) || integer(found.context.slot) < slot || !Object.hasOwn(found, "value")) fail("The vault account could not be read.");
         if (found.value === null) return null;
@@ -1138,6 +1208,10 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       // read as before.
       const registeredAt = (await s.setup())?.finalizedSlot;
       const live = await readSolanaVaultState(rpc(), cfg.programId, scope.owner, registeredAt);
+      // Its landing moved the epoch once from what it was prepared at. Any other move since (a revocation
+      // that landed before it, beside it or outside Merrymen) means the owner's later word was to revoke.
+      const expectedEpoch = solanaRegisteredEpoch(setup.priorSessionEpoch);
+      if (expectedEpoch === null || live.state.sessionEpoch !== expectedEpoch) fail(SOLANA_REGISTERED_AFTER_REVOKE, "permission");
       if (live.vault !== setup.vault || live.state.session !== session || live.state.perTrade !== BigInt(setup.limits.perTradeUsdg)
         || live.state.daily !== BigInt(setup.limits.dailyUsdg) || live.state.maxOps !== setup.limits.maxOpsPerDay
         || live.state.perTradeWsol !== BigInt(setup.limits.perTradeWsol ?? "0") || live.state.dailyWsol !== BigInt(setup.limits.dailyWsol ?? "0")
@@ -1161,7 +1235,11 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       const s = await store(scope), cfg = config();
       if (input.action !== "revoke") await reconcile(s);
       await verifyDeployment(cfg);
-      const { vault, state } = await readSolanaVaultState(rpc(), cfg.programId, scope.owner), instructions: Instruction[] = [], creates: OwnerCreate[] = [];
+      // The prior state this transaction's expiry is proven against, read no earlier than
+      // anything the app already booked: a lagging provider's stale vault would make a
+      // dropped transaction unprovable (live-M2).
+      const floor = await ownerReadFloor(s);
+      const { vault, state } = await readSolanaVaultState(rpc(), cfg.programId, scope.owner, floor), instructions: Instruction[] = [], creates: OwnerCreate[] = [];
       const details: { syncedWsolRaw?: string; withdrawValuation?: SolanaWithdrawValuation } = {};
       if (input.action === "revoke") instructions.push(buildRevokeSolanaSessionsInstruction({ programAddress: cfg.programId, vault, owner: scope.owner }));
       else if (input.action === "resume-buys") instructions.push(buildSetSolanaBreakerInstruction({ programAddress: cfg.programId, vault, authority: scope.owner, paused: false }));
@@ -1183,11 +1261,24 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
         if (book) {
           const observedAtMs = now();
           const finalized = await readSolanaVaultBalances(rpc(), vault, book.slot, "finalized");
-          // Book any inflow first, so a stranger's WSOL can be withdrawn instead of blocking the owner.
-          if (aboveBook(book, finalized)) await s.reconcileExternalInflows({ ...finalized, observedAtMs, commitment: "finalized" });
+          // Book any inflow first, so a stranger's WSOL can be withdrawn instead of blocking the owner:
+          // only when nothing is short (as status books it), and only what both providers agree on.
+          // Best effort, as in status: anyone can send the vault one raw token, so a provider that is
+          // down or behind, or an inflow that cannot be booked now, never fails the withdrawal. The book
+          // stays as it was and the cap below (the lower of book and vault) still bounds the amount.
+          if (!shortOfBook(book, finalized) && aboveBook(book, finalized)) {
+            try {
+              const agreed = await readSolanaVaultBalancesQuorum(rpc(), vault, book.slot, "finalized");
+              if (!shortOfBook(book, agreed) && aboveBook(book, agreed)) await s.reconcileExternalInflows({ ...agreed, observedAtMs, commitment: "finalized" });
+            } catch { /* Booked by a later read. */ }
+          }
           book = (await s.liveBook())!;
-          const available = input.mint === SOLANA_USDG_MINT ? BigInt(book.cashRaw) : BigInt(book.wsolRaw) + solanaQuarantinedWsol(book) + synced;
-          if (amount > available) fail("The withdrawal exceeds the reconciled vault balance.");
+          // Never more than the book records, nor than the vault holds: a vault below its book
+          // (a withdrawal made outside Merrymen) is held with a clear message, never offered.
+          const recorded = input.mint === SOLANA_USDG_MINT ? BigInt(book.cashRaw) : BigInt(book.wsolRaw) + solanaQuarantinedWsol(book);
+          const held = BigInt(input.mint === SOLANA_USDG_MINT ? finalized.cashUsdg : finalized.wsolRaw);
+          if (amount > recorded + synced) fail("The withdrawal exceeds the reconciled vault balance.");
+          if (amount > (held < recorded ? held : recorded) + synced) fail(SOLANA_WITHDRAW_BELOW_BOOK);
           // Capital out: what the withdrawn WSOL is worth lowers the high-water mark
           // when it lands, as a USDG withdrawal does, so withdrawing is never a
           // drawdown. Only the booked position can move it: quarantine leaves first, at no value.
@@ -1222,6 +1313,55 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
         ...(input.action === "withdraw" ? { mint: input.mint, amountRaw: input.amountRaw, ...details } : input.action === "withdraw-sol" ? { amountRaw: input.amountRaw } : {}) }, creates);
     },
     submitOwnerAction: (scope: SolanaAccountScope, input: { signedTransactionBase64: string }) => submitOwner(scope, input, "owner"),
+    /**
+     * Operator tooling only (npm run solana:resolve -- owner): one provider's view of
+     * a saved, signed owner transaction, derived exactly as ownerStatus derives it
+     * (receipt, vault effect, expiry proof), plus the evidence a pending one carries
+     * once its blockhash expired. `owner` is the binding's owner key. It reads only
+     * through `read`, writes nothing and sends nothing.
+     */
+    observeOwnerTransaction(read: SolanaLiveRead, owner: string, setup: SolanaPreparedSetup, epochOffset = 0) {
+      if (!setup.signature || !setup.signedTransactionBase64) return fail("The owner transaction has not been submitted.");
+      return observeOwner(read, owner, setup, setup.signature, epochOffset);
+    },
+    /**
+     * Records the owner's withdrawals made outside Merrymen (solana-recover, another
+     * wallet) by their transaction signatures, so a vault left below its book can
+     * trade and exit again (OWNER WITHDRAWALS MADE OUTSIDE MERRYMEN in
+     * solana-trading-store.ts). Each transaction is read on both providers and
+     * booked only when they derive the same withdrawal from it
+     * (readSolanaExternalWithdrawal). The withdrawn position part of wrapped SOL
+     * lowers the high-water mark by the lower of what it is worth now and its cost
+     * basis: it is valued when recorded, not when it happened. Nothing is signed or sent.
+     */
+    async recordExternalWithdrawals(scope: SolanaAccountScope, input: { signatures: unknown }) {
+      const signatures = input?.signatures;
+      if (!Array.isArray(signatures) || signatures.length < 1 || signatures.length > 8 || new Set(signatures).size !== signatures.length
+        || signatures.some(item => typeof item !== "string" || !/^[1-9A-HJ-NP-Za-km-z]{64,90}$/.test(item))) fail("Give the signatures of up to eight withdrawal transactions you made outside Merrymen.");
+      const s = await store(scope), cfg = config();
+      // The cheap refusals first: no book, or something still pending, reads nothing.
+      if (!(await s.liveBook())) fail("There is no live trading record to reconcile yet.", "permission");
+      const unresolved = (item: SolanaPreparedSetup | null) => !!item?.signature && item.status !== "finalized" && item.status !== "failed";
+      if ((await s.pending()).length || unresolved(await s.setup()) || unresolved(await s.revokeSetup())) fail("Wait for the pending trade or owner transaction to resolve, then record these withdrawals.", "pending");
+      await verifyDeployment(cfg);
+      const vault = await deriveSolanaVaultAddress(cfg.programId, scope.owner), live = rpc();
+      // Each with the vault token account's balance just before it (preRaw), which both providers agreed on too.
+      const withdrawals: Array<{ signature: string; slot: number; mint: string; amountRaw: string; preRaw: string; valuation?: SolanaWithdrawValuation }> = [];
+      for (const signature of signatures as string[]) {
+        const quorum = await readSolanaQuorum(live, read => readSolanaExternalWithdrawal(read, signature, { programId: cfg.programId, vault, owner: scope.owner }))
+          .catch((error: unknown) => error instanceof SolanaExternalWithdrawalError ? fail(error.message) : Promise.reject(error));
+        if (!quorum.agreed) fail("The two providers do not agree on that transaction yet. Nothing was recorded. Try again shortly.", "pending");
+        for (const item of quorum.value.withdrawals) withdrawals.push({ signature, slot: quorum.value.slot, ...item });
+      }
+      if (!withdrawals.length) fail("Those transactions took nothing from your vault's token accounts. Nothing was recorded.");
+      for (const item of withdrawals) {
+        if (item.mint !== SOLANA_WRAPPED_SOL_MINT) continue;
+        const valuation = await wsolWithdrawValuation(item.amountRaw);
+        if (valuation) item.valuation = valuation;
+      }
+      try { return await s.reconcileExternalWithdrawals({ withdrawals }); }
+      catch (error) { if (error instanceof SolanaTradingStoreError) fail(error.message, "permission"); throw error; }
+    },
     /**
      * Whether `wsolRaw` of held SOL is dust a zero-output mark may value at zero
      * (solanaMarkDust): worth under SOLANA_MARK_DUST_MAX_USDG_RAW at the

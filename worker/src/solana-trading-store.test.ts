@@ -13,6 +13,9 @@ import { SqlSolanaBindingStore } from "../../web/src/lib/solana-binding-store";
 import { makePgDb, wrapSqlite, type Db } from "./db";
 import { ensureSolanaTradingSchema, SOLANA_DEFAULT_EXPIRED_ATTEMPT_ALLOWANCE, solanaAutonomousSchedule, solanaExpiredAttemptAllowance, SolanaTradingStore,
   type SolanaPreparedSetup } from "./solana-trading-store";
+import { SOLANA_REGISTERED_AFTER_REVOKE, SOLANA_REVOKE_ALREADY_LANDED, SOLANA_REVOKE_PREPARED_BESIDE, SOLANA_WITHDRAWAL_RECORDED_OUTSIDE, solanaOwnerEpochOffset, solanaPendingOwnerScopes,
+  solanaPendingOwnerTransactions } from "./solana-trading-store";
+import { SOLANA_SYSTEM_PROGRAM } from "../../packages/core/src/solana-live";
 import type { SolanaLiveSettlement, SolanaSignedSubmission } from "./solana-executor";
 import { createSolanaPaperService } from "./solana-paper-service";
 import { SolanaMarketError } from "./solana-market";
@@ -722,6 +725,412 @@ test("each owner transaction kind is proven expired only by state it must change
   await saveSignedSetup(f.store, { ...setup("session"), priorVaultExisted: false, priorSequence: "0", priorSessionEpoch: "0" }, "first-session");
   await assert.rejects(f.store.finishSetup("first-session", "failed", 1002, proof("0", "1")), /expiry evidence/);
   await f.store.finishSetup("first-session", "failed", 1002, proof(null, null));
+});
+
+// REVOKE BESIDE A PENDING OWNER TRANSACTION (solana-trading-store.ts): the revoke slot, on both dialects.
+for (const dialect of ["sqlite", "postgres"] as const) {
+  const options = dialect === "postgres" && !process.env.MERRYMEN_TEST_PG_URL ? { skip: "Set MERRYMEN_TEST_PG_URL to an isolated PostgreSQL test database." } : {};
+  const prior = { priorVaultExisted: true, priorSequence: "1", priorSessionEpoch: "1" };
+  const expiry = (vaultSequence: string, sessionEpoch: string) => ({ reason: "blockhash-expired" as const, blockHeight: "1201", vaultSequence, sessionEpoch, slot: 1002 });
+  const revokeBeside = (beside: string) => ({ ...setup("revoke"), ...prior, beside, messageBase64: "cmV2b2tl", transactionBase64: "cmV2b2tl" });
+  const signedRevoke = (beside: string, signature = "revoke-beside") => ({ ...revokeBeside(beside), signature, signedTransactionBase64: "c2lnbmVkLXJldm9rZQ==", status: "pending" as const });
+  const withdrawals = async (f: Awaited<ReturnType<typeof fixture>>) => (await f.db.prepare("SELECT evidence_id,kind,amount_raw FROM solana_runtime_cashflows WHERE kind='withdraw'").all() as
+    Array<{ evidence_id: string; kind: string; amount_raw: string }>).map(row => ({ evidence_id: row.evidence_id, kind: row.kind, amount_raw: row.amount_raw }));
+  test(`${dialect}: a revocation is saved beside a pending withdrawal in its own slot, and each is finished once by its own signature`, options, async t => {
+    const f = await fixture(t, dialect), s = submission();
+    await f.store.recordSigned(s); await f.store.settle(OWNER, s.intent.requestId, s.signature, settlement(s));
+    await saveSignedSetup(f.store, { ...setup("withdraw"), ...prior, mint: SOLANA_USDG_MINT, amountRaw: "1000000" }, "withdraw-pending");
+    const main = await f.store.setup();
+    // Nothing else goes in the main slot, and only a revocation beside the pending record it names.
+    await assert.rejects(f.store.saveSetup(setup("resume-buys")), /Resolve the previously submitted/);
+    await assert.rejects(f.store.saveSetup({ ...setup("resume-buys"), beside: "withdraw-pending" }), /Only a revocation/);
+    await assert.rejects(f.store.saveSetup(revokeBeside("another-transaction")), /prepared beside changed/);
+    assert.equal(await f.store.saveSetup(revokeBeside("withdraw-pending")), true);
+    await assert.rejects(f.store.saveSetup({ ...signedRevoke("withdraw-pending"), preparedAtMs: NOW + 1 }), /changed/, "only the reviewed revocation is signed");
+    assert.equal(await f.store.saveSetup(signedRevoke("withdraw-pending")), true);
+    assert.equal(await f.store.saveSetup(signedRevoke("withdraw-pending")), false, "the same signed bytes again are already saved");
+    await assert.rejects(f.store.saveSetup({ ...revokeBeside("withdraw-pending"), preparedAtMs: NOW + 1 }), /Resolve the previously submitted/, "never a second pending revocation beside it");
+    await assert.rejects(f.store.saveSetup({ ...setup("revoke"), ...prior }), /Resolve the previously submitted/, "nor one in the main slot");
+    assert.deepEqual(await f.store.setup(), main, "the pending withdrawal's record is kept as it was");
+    // The revocation is finished by its own signature while the withdrawal stays pending: trading stays refused.
+    await f.store.finishSetup("revoke-beside", "finalized", 1003); await f.store.finishSetup("revoke-beside", "finalized", 1003);
+    await assert.rejects(f.store.finishSetup("revoke-beside", "failed"), /cannot be changed/);
+    assert.equal((await f.store.revokeSetup())!.status, "finalized"); assert.deepEqual(await f.store.setup(), main);
+    await assert.rejects(f.store.recordSigned(submission("during", "1")), /pending owner transaction/);
+    // The withdrawal lands: its capital out is booked once, by its signature, whatever is retried.
+    const cash = BigInt((await f.store.liveBook())!.cashRaw);
+    await f.store.finishSetup("withdraw-pending", "finalized", 1004); await f.store.finishSetup("withdraw-pending", "finalized", 1004);
+    assert.equal((await f.store.liveBook())!.cashRaw, (cash - 1_000_000n).toString());
+    assert.deepEqual(await withdrawals(f), [{ evidence_id: "withdraw-pending", kind: "withdraw", amount_raw: "1000000" }]);
+    await assert.rejects(f.store.finishSetup("unknown-signature", "finalized", 1004), /does not match/);
+    // A new main-slot prepare clears the resolved revocation that belonged beside the old record.
+    assert.equal(await f.store.saveSetup(setup("resume-buys")), true);
+    assert.equal(await f.store.revokeSetup(), null);
+  });
+  test(`${dialect}: a pending revocation in its own slot holds trades and every other owner transaction until it is finished`, options, async t => {
+    const f = await fixture(t, dialect);
+    await saveSignedSetup(f.store, { ...setup("withdraw"), ...prior, mint: SOLANA_USDG_MINT, amountRaw: "1" }, "withdraw-dropped");
+    await f.store.saveSetup(revokeBeside("withdraw-dropped")); await f.store.saveSetup(signedRevoke("withdraw-dropped"));
+    // The withdrawal provably never ran (its sequence unchanged): the pending revocation still holds everything else.
+    await f.store.finishSetup("withdraw-dropped", "failed", 1002, expiry("1", "1"));
+    for (const next of [setup("resume-buys"), { ...setup("withdraw"), ...prior, mint: SOLANA_USDG_MINT, amountRaw: "1" }, { ...setup("revoke"), ...prior }]) {
+      await assert.rejects(f.store.saveSetup(next), /Resolve the previously submitted/, next.kind);
+    }
+    await assert.rejects(f.store.recordSigned(submission()), /pending owner transaction/);
+    // The revocation is proven by its epoch alone, then the owner may act again.
+    await assert.rejects(f.store.finishSetup("revoke-beside", "failed", 1002, expiry("1", "2")), /expiry evidence/);
+    await f.store.finishSetup("revoke-beside", "failed", 1002, expiry("2", "1"));
+    assert.equal(await f.store.saveSetup(setup("resume-buys")), true);
+    assert.equal(await f.store.recordSigned(submission()), true);
+  });
+  test(`${dialect}: a registration and a revocation beside it each prove "never ran" by counting the other's landing once, and the registration is never activated after it`, options, async t => {
+    for (const lands of ["revoke", "session", "neither"] as const) {
+      const f = await fixture(t, dialect), registration = "registration-pending";
+      await saveSignedSetup(f.store, { ...setup("session"), ...prior }, registration);
+      await f.store.saveSetup(revokeBeside(registration)); await f.store.saveSetup(signedRevoke(registration));
+      if (lands === "revoke") {
+        // Before the revocation is known to have run, the moved epoch proves nothing about the registration.
+        await assert.rejects(f.store.finishSetup(registration, "failed", 1002, expiry("1", "2")), /expiry evidence/);
+        await f.store.finishSetup("revoke-beside", "finalized", 1003);
+        await assert.rejects(f.store.finishSetup(registration, "failed", 1002, expiry("1", "1")), /expiry evidence/, "the epoch moved once: an unchanged one is no proof now");
+        await f.store.finishSetup(registration, "failed", 1002, expiry("1", "2"));
+      } else if (lands === "session") {
+        await f.store.finishSetup(registration, "finalized", 1003);
+        await assert.rejects(f.store.finishSetup("revoke-beside", "failed", 1002, expiry("1", "1")), /expiry evidence/);
+        await f.store.finishSetup("revoke-beside", "failed", 1002, expiry("1", "2"));
+        // The revocation never ran, so the registration may be activated (its landing moved the epoch 1 -> 2).
+        await f.store.registerSession({ ...f.registered, registrationSignature: registration, sessionEpoch: "2" }, sessionSeed, dek);
+        assert.equal(await f.store.revokeSetup(), null, "activation clears the resolved revocation with the registration");
+      } else {
+        await f.store.finishSetup(registration, "failed", 1002, expiry("1", "1"));
+        await f.store.finishSetup("revoke-beside", "failed", 1002, expiry("1", "1"));
+      }
+    }
+    // Both landed (registration first): the owner's later word was to revoke, so the registration is never activated.
+    const f = await fixture(t, dialect);
+    await saveSignedSetup(f.store, { ...setup("session"), ...prior }, "registration-landed");
+    await f.store.saveSetup(revokeBeside("registration-landed")); await f.store.saveSetup(signedRevoke("registration-landed"));
+    await f.store.finishSetup("registration-landed", "finalized", 1003);
+    await assert.rejects(f.store.registerSession({ ...f.registered, registrationSignature: "registration-landed", sessionEpoch: "2" }, sessionSeed, dek), /revocation was signed after this permission/);
+    await f.store.finishSetup("revoke-beside", "finalized", 1004);
+    await assert.rejects(f.store.registerSession({ ...f.registered, registrationSignature: "registration-landed", sessionEpoch: "2" }, sessionSeed, dek), /revocation was signed after this permission/);
+  });
+  test(`${dialect}: a revocation that landed beside a pending owner transaction is kept: another beside it is refused, a registration landing after it is never activated, and a dropped one is still proven never run`, options, async t => {
+    const landedRefusal = (error: unknown) => error instanceof Error && error.message === SOLANA_REVOKE_ALREADY_LANDED;
+    for (const after of ["lands", "dropped"] as const) {
+      const f = await fixture(t, dialect), registration = `registration-${after}`;
+      await saveSignedSetup(f.store, { ...setup("session"), ...prior }, registration);
+      await f.store.saveSetup(revokeBeside(registration)); await f.store.saveSetup(signedRevoke(registration));
+      await f.store.finishSetup("revoke-beside", "finalized", 1003);
+      const landed = await f.store.revokeSetup();
+      // The owner presses Revoke again (read after the first landed, so at epoch 2): refused, and the landed record is kept as it was.
+      await assert.rejects(f.store.saveSetup({ ...revokeBeside(registration), priorSessionEpoch: "2", messageBase64: "c2Vjb25k", transactionBase64: "c2Vjb25k", preparedAtMs: NOW + 5 }), landedRefusal);
+      assert.deepEqual(await f.store.revokeSetup(), landed);
+      if (after === "lands") {
+        // The registration lands after the revocation (epoch 1 -> 2 -> 3): never activated, by the epoch and by the record.
+        await f.store.finishSetup(registration, "finalized", 1004);
+        await assert.rejects(f.store.registerSession({ ...f.registered, registrationSignature: registration, sessionEpoch: "3" }, sessionSeed, dek), (error: unknown) => error instanceof Error && error.message === SOLANA_REGISTERED_AFTER_REVOKE);
+        await assert.rejects(f.store.registerSession({ ...f.registered, registrationSignature: registration, sessionEpoch: "2" }, sessionSeed, dek), /revocation was signed after this permission/);
+        assert.equal(await f.store.session().then(item => item?.registrationSignature), "owner-registration", "the earlier session record is untouched");
+      } else {
+        // The registration never ran: the epoch moved once, by the kept revocation, which is the proof.
+        await f.store.finishSetup(registration, "failed", 1002, expiry("1", "2"));
+        assert.equal((await f.store.setup())!.status, "failed");
+      }
+    }
+    // Beside a pending withdrawal too: the landed revocation is kept until the withdrawal resolves, then a revocation is prepared as usual.
+    const f = await fixture(t, dialect);
+    await saveSignedSetup(f.store, { ...setup("withdraw"), ...prior, mint: SOLANA_USDG_MINT, amountRaw: "1" }, "withdraw-pending");
+    await f.store.saveSetup(revokeBeside("withdraw-pending")); await f.store.saveSetup(signedRevoke("withdraw-pending"));
+    await f.store.finishSetup("revoke-beside", "finalized", 1003);
+    await assert.rejects(f.store.saveSetup({ ...revokeBeside("withdraw-pending"), priorSessionEpoch: "2", preparedAtMs: NOW + 5 }), landedRefusal);
+    await f.store.finishSetup("withdraw-pending", "failed", 1002, expiry("1", "2"));
+    assert.equal(await f.store.saveSetup({ ...setup("revoke"), ...prior, priorSessionEpoch: "2" }), true);
+    assert.equal(await f.store.revokeSetup(), null, "the main-slot revocation clears the resolved one beside the old record");
+  });
+  test(`${dialect}: once a session registered after the landed revocation is live, Revoke beside the same pending record works again, and every landed one is kept as history that still fences and counts`, options, async t => {
+    const landedRefusal = (error: unknown) => error instanceof Error && error.message === SOLANA_REVOKE_ALREADY_LANDED;
+    const f = await fixture(t, dialect), registration = "registration-disputed";
+    await saveSignedSetup(f.store, { ...setup("session"), ...prior }, registration);
+    await f.store.saveSetup(revokeBeside(registration)); await f.store.saveSetup(signedRevoke(registration));
+    await f.store.finishSetup("revoke-beside", "finalized", 1003);
+    const { landed: _none, ...first } = (await f.store.revokeSetup())!;
+    const again = { ...revokeBeside(registration), messageBase64: "c2Vjb25k", transactionBase64: "c2Vjb25k", preparedAtMs: NOW + 5, expiresAtMs: NOW + 35_000 };
+    // Nothing registered since it landed (the epoch it left, or a cleared session): refused, the landed record kept.
+    for (const read of [{ priorSessionEpoch: "2" }, { priorSessionEpoch: "3", session: SOLANA_SYSTEM_PROGRAM }]) {
+      await assert.rejects(f.store.saveSetup({ ...again, ...read }), landedRefusal, JSON.stringify(read));
+      assert.deepEqual(await f.store.revokeSetup(), first);
+    }
+    // The registration landed after it (epoch 3, a session set): prepared beside the same record, the landed one kept as history
+    // (whatever history the caller offers), still counted by the registration's "never ran" proof.
+    assert.equal(await f.store.saveSetup({ ...again, priorSessionEpoch: "3", landed: [] }), true);
+    assert.deepEqual((await f.store.revokeSetup())!.landed, [first]);
+    assert.equal(solanaOwnerEpochOffset((await f.store.setup())!, await f.store.revokeSetup()), 1);
+    // Bytes identical to the landed one are never saved; the reviewed ones are, with the store's history.
+    await assert.rejects(f.store.saveSetup({ ...again, priorSessionEpoch: "3", signature: "revoke-beside", signedTransactionBase64: "c2lnbmVkLWFnYWlu", status: "pending" }), /already landed/);
+    assert.equal(await f.store.saveSetup({ ...again, priorSessionEpoch: "3", signature: "revoke-again", signedTransactionBase64: "c2lnbmVkLWFnYWlu", status: "pending", landed: [] }), true);
+    assert.deepEqual((await f.store.revokeSetup())!.landed, [first]);
+    await f.store.finishSetup("revoke-again", "finalized", 1005);
+    // Nothing registered since this one either: refused. A session registered after it (outside Merrymen, epoch 5): prepared, both kept.
+    await assert.rejects(f.store.saveSetup({ ...again, priorSessionEpoch: "4", preparedAtMs: NOW + 6 }), landedRefusal);
+    assert.equal(await f.store.saveSetup({ ...again, priorSessionEpoch: "5", preparedAtMs: NOW + 6 }), true);
+    assert.deepEqual((await f.store.revokeSetup())!.landed!.map(item => [item.signature, item.landed]), [["revoke-beside", undefined], ["revoke-again", undefined]]);
+    // The registration is finally agreed to have landed, and that last revocation lapses unsigned: the kept history still
+    // fences it, whatever epoch its activation names.
+    await f.store.finishSetup(registration, "finalized", 1004);
+    f.clock.value = NOW + 35_000;
+    await assert.rejects(f.store.registerSession({ ...f.registered, registrationSignature: registration, sessionEpoch: "2" }, sessionSeed, dek), /revocation was signed after this permission/);
+    assert.equal((await f.store.session())!.registrationSignature, "owner-registration");
+  });
+  test(`${dialect}: a revocation prepared beside a registration and still signable is never deleted by activating it: activation waits, and the signed revocation then fences it`, options, async t => {
+    for (const owner of ["signs", "lets-it-lapse"] as const) {
+      const f = await fixture(t, dialect), registration = `registration-${owner}`;
+      await saveSignedSetup(f.store, { ...setup("session"), ...prior }, registration);
+      await f.store.saveSetup(revokeBeside(registration));
+      await f.store.finishSetup(registration, "finalized", 1003);
+      const prepared = await f.store.revokeSetup();
+      const activate = () => f.store.registerSession({ ...f.registered, registrationSignature: registration, sessionEpoch: "2" }, sessionSeed, dek);
+      await assert.rejects(activate(), (error: unknown) => error instanceof Error && error.message === SOLANA_REVOKE_PREPARED_BESIDE);
+      assert.deepEqual(await f.store.revokeSetup(), prepared, "the revocation the owner may be signing is kept");
+      if (owner === "signs") {
+        // Signed within its window beside the now-finalized registration: saved, and the registration is never activated.
+        assert.equal(await f.store.saveSetup(signedRevoke(registration)), true);
+        await assert.rejects(activate(), /revocation was signed after this permission/);
+      } else {
+        // Past its window it can no longer be signed and saved: activation goes ahead and clears it.
+        f.clock.value = prepared!.expiresAtMs;
+        await activate();
+        assert.equal(await f.store.revokeSetup(), null);
+        assert.equal((await f.store.session())!.registrationSignature, registration);
+      }
+    }
+  });
+  test(`${dialect}: a resume-buys with a revocation beside it never re-arms buying, whichever lands first; only one that never ran or lapsed unsigned leaves it to the resume`, options, async t => {
+    for (const revocation of ["landed-first", "landed-after", "pending", "never-ran", "signable", "lapsed"] as const) {
+      const f = await fixture(t, dialect), s = submission();
+      await f.store.recordSigned(s); await f.store.settle(OWNER, s.intent.requestId, s.signature, settlement(s));
+      // revoke_all left the vault paused on chain; the off-chain breaker is not (nothing tripped it).
+      await saveSignedSetup(f.store, { ...setup("resume-buys"), ...prior }, "resume-pending");
+      await f.store.saveSetup(revokeBeside("resume-pending"));
+      if (revocation !== "signable" && revocation !== "lapsed") await f.store.saveSetup(signedRevoke("resume-pending"));
+      if (revocation === "landed-first") await f.store.finishSetup("revoke-beside", "finalized", 1003);
+      if (revocation === "never-ran") await f.store.finishSetup("revoke-beside", "failed", 1002, expiry("1", "1"));
+      if (revocation === "lapsed") f.clock.value = NOW + 30_000;
+      await f.store.finishSetup("resume-pending", "finalized", 1004);
+      if (revocation === "landed-after") await f.store.finishSetup("revoke-beside", "finalized", 1005);
+      const paused = !["never-ran", "lapsed"].includes(revocation);
+      assert.equal((await f.store.liveBook())!.buyPaused, paused, revocation);
+      if (paused && revocation !== "pending" && revocation !== "signable") {
+        const buy = submission("buy-after", "1"); buy.risk.slot = 1001; buy.risk.cashUsdg = "99400000"; buy.risk.wsolRaw = "1980000";
+        await assert.rejects(f.store.recordSigned(buy), /drawdown breaker/, `${revocation}: no buy is admitted`);
+        // A new resume-buys, with nothing beside it, resumes buying as usual.
+        await saveSignedSetup(f.store, { ...setup("resume-buys"), ...prior, preparedAtMs: f.clock.value, expiresAtMs: f.clock.value + 30_000 }, "resume-again");
+        assert.equal(await f.store.revokeSetup(), null);
+        await f.store.finishSetup("resume-again", "finalized", 1006);
+        assert.equal((await f.store.liveBook())!.buyPaused, false, revocation);
+      }
+    }
+  });
+  test(`${dialect}: receipt recovery finds every account with a pending owner transaction in either slot, a revocation that outlived the record beside it included`, options, async t => {
+    const f = await fixture(t, dialect), scope = { tenant: TENANT, owner: OWNER };
+    assert.deepEqual(await solanaPendingOwnerScopes(f.db), [], "the fixture's registration is finished and activated");
+    await saveSignedSetup(f.store, { ...setup("withdraw"), ...prior, mint: SOLANA_USDG_MINT, amountRaw: "1" }, "withdraw-pending");
+    assert.deepEqual(await solanaPendingOwnerScopes(f.db), [scope]);
+    await f.store.saveSetup(revokeBeside("withdraw-pending"));
+    assert.deepEqual(await solanaPendingOwnerScopes(f.db), [scope], "an unsigned revocation is nothing to recover, and the account is listed once");
+    await f.store.saveSetup(signedRevoke("withdraw-pending"));
+    assert.deepEqual(await solanaPendingOwnerScopes(f.db), [scope]);
+    assert.deepEqual((await solanaPendingOwnerTransactions(f.db)).map(item => [item.slot, item.signature, item.kind, item.preparedAtMs, item.priorSequence]),
+      [["main", "withdraw-pending", "withdraw", NOW, "1"], ["revoke", "revoke-beside", "revoke", NOW, "1"]], "both slots, for the operator's stuck alert and list");
+    // The withdrawal resolves; the revocation beside it is still pending: the account is still recovered.
+    await f.store.finishSetup("withdraw-pending", "failed", 1002, expiry("1", "1"));
+    assert.equal((await f.store.setup())!.status, "failed");
+    assert.deepEqual(await solanaPendingOwnerScopes(f.db), [scope]);
+    assert.deepEqual((await solanaPendingOwnerTransactions(f.db)).map(item => [item.tenant, item.owner, item.slot, item.signature]), [[TENANT, OWNER, "revoke", "revoke-beside"]]);
+    await f.store.finishSetup("revoke-beside", "finalized", 1003);
+    assert.deepEqual(await solanaPendingOwnerScopes(f.db), []);
+  });
+  test(`${dialect}: a registration whose landing did not move the session epoch exactly once is never activated, whatever the records say`, options, async t => {
+    const f = await fixture(t, dialect);
+    await saveSignedSetup(f.store, { ...setup("session"), ...prior }, "registration-moved");
+    await f.store.finishSetup("registration-moved", "finalized", 1003);
+    // A revocation outside Merrymen landed first (epoch 1 -> 2), then the registration (-> 3).
+    for (const sessionEpoch of ["3", "1", "0"]) {
+      await assert.rejects(f.store.registerSession({ ...f.registered, registrationSignature: "registration-moved", sessionEpoch }, sessionSeed, dek),
+        (error: unknown) => error instanceof Error && error.message === SOLANA_REGISTERED_AFTER_REVOKE, sessionEpoch);
+    }
+    await f.store.registerSession({ ...f.registered, registrationSignature: "registration-moved", sessionEpoch: "2" }, sessionSeed, dek);
+    assert.equal((await f.store.session())!.registrationSignature, "registration-moved");
+  });
+  // OWNER WITHDRAWALS MADE OUTSIDE MERRYMEN (solana-trading-store.ts).
+  const outsideSignature = (n: number) => base58Encode(new Uint8Array(64).fill(n));
+  test(`${dialect}: wrapped SOL withdrawn outside Merrymen lowers the high-water mark by the lower of its value now and its cost basis`, options, async t => {
+    for (const [label, cost, usdPerSol] of [["SOL fell since it was bought", 2_000_000n, 500n], ["SOL rose since it was bought", 500_000n, 500n], ["SOL rose after it left", 600_000n, 1_000n]] as const) {
+      const f = await fixture(t, dialect);
+      // 0.004 SOL held at the given cost; the book's peak 20 USDG.
+      await f.db.prepare("INSERT INTO solana_runtime_live_books(tenant,owner,book_json) VALUES(?,?,?)").run(TENANT, OWNER, JSON.stringify({ hwmRaw: "20000000",
+        cashRaw: "8000000", wsolRaw: "4000000", costBasisUsdgRaw: cost.toString(), realizedPnlUsdgRaw: "0", networkFeesLamports: "0", slot: 1001, updatedAtMs: NOW }));
+      const valuation = withdrawValuation("4000000", NOW, (4_000_000n * usdPerSol / 1_000n).toString(), usdPerSol * 100_000_000n);
+      const worth = (() => { const q = BigInt(valuation.quote.minOutAmount), r = BigInt(valuation.reference.referenceOut); return q < r ? q : r; })();
+      const { book } = await f.store.reconcileExternalWithdrawals({ withdrawals: [{ signature: outsideSignature(7), slot: 1002, mint: SOLANA_WRAPPED_SOL_MINT, amountRaw: "4000000", valuation } as never] });
+      const out = worth < cost ? worth : cost;
+      assert.equal(book.hwmRaw, (20_000_000n - out).toString(), `${label}: worth ${worth}, cost ${cost}`);
+      assert.equal(book.wsolRaw, "0"); assert.equal(book.costBasisUsdgRaw, "0");
+    }
+  });
+  test(`${dialect}: a withdrawal made outside Merrymen is booked once from its own evidence, only after the book's last balances, and never one the app booked`, options, async t => {
+    const f = await fixture(t, dialect), s = submission();
+    await f.store.recordSigned(s); await f.store.settle(OWNER, s.intent.requestId, s.signature, settlement(s));
+    // An in-app withdrawal, booked by its signature.
+    await saveSignedSetup(f.store, { ...setup("withdraw"), priorVaultExisted: true, priorSequence: "1", priorSessionEpoch: "1", mint: SOLANA_USDG_MINT, amountRaw: "400000" }, outsideSignature(2));
+    await f.store.finishSetup(outsideSignature(2), "finalized", 1002);
+    const before = (await f.store.liveBook())!;
+    assert.equal(before.cashRaw, "99000000");
+    const usdg = (signature: string, slot: number, amountRaw: string) => ({ signature, slot, mint: SOLANA_USDG_MINT, amountRaw });
+    // Never what the book already reflects: the app's own withdrawal, or anything at or before the book's creation.
+    await assert.rejects(f.store.reconcileExternalWithdrawals({ withdrawals: [usdg(outsideSignature(2), 1003, "400000")] }), /already recorded/);
+    await assert.rejects(f.store.reconcileExternalWithdrawals({ withdrawals: [usdg(outsideSignature(3), 1000, "1")] }), /already reflected/);
+    await assert.rejects(f.store.reconcileExternalWithdrawals({ withdrawals: [usdg(outsideSignature(3), 1003, "99000001")] }), /more than the recorded USDG/);
+    await assert.rejects(f.store.reconcileExternalWithdrawals({ withdrawals: [usdg("not-a-signature", 1003, "1")] }), /Invalid finalized withdrawal evidence/);
+    assert.deepEqual(await f.store.liveBook(), before, "a refusal books nothing");
+    // solana-recover took all the USDG: capital out, as an in-app withdrawal.
+    const { booked, book } = await f.store.reconcileExternalWithdrawals({ withdrawals: [usdg(outsideSignature(3), 1003, "99000000")] });
+    assert.deepEqual(booked, [{ signature: outsideSignature(3), mint: SOLANA_USDG_MINT, amountRaw: "99000000" }]);
+    assert.equal(book.cashRaw, "0"); assert.equal(book.hwmRaw, (BigInt(before.hwmRaw) - 99_000_000n).toString()); assert.equal(book.slot, 1003);
+    assert.deepEqual(await f.store.liveBook(), book);
+    await assert.rejects(f.store.reconcileExternalWithdrawals({ withdrawals: [usdg(outsideSignature(3), 1003, "1")] }), /already recorded/);
+    // Stranger's WSOL is booked into quarantine by an absolute finalized read, which moves the book's balances point.
+    await f.store.reconcileExternalInflows({ cashUsdg: "0", wsolRaw: "1980005", slot: 1004, observedAtMs: NOW, commitment: "finalized" });
+    assert.equal((await f.store.liveBook())!.balancesSlot, 1004);
+    const wsol = (slot: number, amountRaw: string, valuation?: object) => ({ signature: outsideSignature(4), slot, mint: SOLANA_WRAPPED_SOL_MINT, amountRaw, ...(valuation ? { valuation } : {}) }) as never;
+    await assert.rejects(f.store.reconcileExternalWithdrawals({ withdrawals: [wsol(1004, "1980005")] }), /already reflected/);
+    // All the WSOL out: quarantine first, then the position at its basis; the mark drops by the lower of what the position
+    // part is worth now and its basis. Here SOL is worth more than it cost (0.985 USDG now against 0.6 paid): recorded later
+    // than it happened, its value now may exceed what left, so the mark drops by the 0.6 USDG of capital that bought it.
+    const valuation = withdrawValuation("1980005");
+    const value = (() => { const q = BigInt(valuation.quote.minOutAmount), r = BigInt(valuation.reference.referenceOut); return q < r ? q : r; })();
+    const peak = BigInt((await f.store.liveBook())!.hwmRaw), basis = BigInt((await f.store.liveBook())!.costBasisUsdgRaw);
+    assert.equal(basis, 600_000n); assert.ok(value * 1_980_000n / 1_980_005n > basis);
+    const after = (await f.store.reconcileExternalWithdrawals({ withdrawals: [wsol(1005, "1980005", valuation)] })).book;
+    assert.equal(after.wsolRaw, "0"); assert.equal(after.quarantinedWsolRaw, "0"); assert.equal(after.costBasisUsdgRaw, "0"); assert.equal(after.realizedPnlUsdgRaw, book.realizedPnlUsdgRaw);
+    assert.equal(after.hwmRaw, (peak > basis ? peak - basis : 0n).toString());
+    const flows = await f.db.prepare("SELECT evidence_id,kind,mint,amount_raw FROM solana_runtime_cashflows WHERE kind='withdraw-external' ORDER BY evidence_id").all() as Array<Record<string, string>>;
+    assert.deepEqual(flows.map(r => [r.evidence_id, r.mint, r.amount_raw]), [[`external:${outsideSignature(3)}:${SOLANA_USDG_MINT}`, SOLANA_USDG_MINT, "99000000"],
+      [`external:${outsideSignature(4)}:${SOLANA_WRAPPED_SOL_MINT}`, SOLANA_WRAPPED_SOL_MINT, "1980005"]].sort((a, b) => a[0]!.localeCompare(b[0]!)));
+  });
+}
+
+for (const dialect of ["sqlite", "postgres"] as const) {
+  const options = dialect === "postgres" && !process.env.MERRYMEN_TEST_PG_URL ? { skip: "Set MERRYMEN_TEST_PG_URL to an isolated PostgreSQL test database." } : {};
+  test(`${dialect}: an in-app withdrawal the wallet broadcast itself and the owner recorded as made outside Merrymen first is booked once: its bytes are refused afterwards, and never booked again`, options, async t => {
+    const f = await fixture(t, dialect), s = submission();
+    await f.store.recordSigned(s); await f.store.settle(OWNER, s.intent.requestId, s.signature, settlement(s));
+    const start = (await f.store.liveBook())!, signature = base58Encode(new Uint8Array(64).fill(9));
+    const prepared = { ...setup("withdraw"), priorVaultExisted: true, priorSequence: "1", priorSessionEpoch: "1", mint: SOLANA_USDG_MINT, amountRaw: "1000000" };
+    await f.store.saveSetup(prepared);
+    // The wallet broadcast the signed bytes itself; the owner records them under "Withdrew outside Merrymen?".
+    await f.store.reconcileExternalWithdrawals({ withdrawals: [{ signature, slot: 1003, mint: SOLANA_USDG_MINT, amountRaw: "1000000" }] });
+    // The page's resubmit of the same signed bytes, still inside the prepare window: refused before anything is saved.
+    await assert.rejects(f.store.saveSetup({ ...prepared, signature, signedTransactionBase64: "c2lnbmVk", status: "pending" }),
+      (error: unknown) => error instanceof Error && error.message === SOLANA_WITHDRAWAL_RECORDED_OUTSIDE);
+    assert.equal((await f.store.setup())!.signature, undefined);
+    await assert.rejects(f.store.finishSetup(signature, "finalized", 1003), /does not match/);
+    assert.equal(BigInt(start.cashRaw) - BigInt((await f.store.liveBook())!.cashRaw), 1_000_000n, "one 1 USDG withdrawal moves the book by 1 USDG");
+    // Already saved as the app's own when it was recorded outside (an earlier version, or a repaired row): finished without booking again.
+    const g = await fixture(t, dialect), gs = submission();
+    await g.store.recordSigned(gs); await g.store.settle(OWNER, gs.intent.requestId, gs.signature, settlement(gs));
+    const gStart = (await g.store.liveBook())!;
+    await saveSignedSetup(g.store, prepared, signature);
+    await g.db.prepare("INSERT INTO solana_runtime_cashflows(evidence_id,tenant,owner,kind,mint,amount_raw,created_at_ms) VALUES(?,?,?,'withdraw-external',?,?,?)")
+      .run(`external:${signature}:${SOLANA_USDG_MINT}`, TENANT, OWNER, SOLANA_USDG_MINT, "1000000", NOW);
+    await g.db.prepare("UPDATE solana_runtime_live_books SET book_json=? WHERE tenant=? AND owner=?").run(JSON.stringify({ ...gStart, cashRaw: (BigInt(gStart.cashRaw) - 1_000_000n).toString() }), TENANT, OWNER);
+    await g.store.finishSetup(signature, "finalized", 1003);
+    assert.equal((await g.store.setup())!.status, "finalized");
+    assert.equal(BigInt(gStart.cashRaw) - BigInt((await g.store.liveBook())!.cashRaw), 1_000_000n);
+    assert.equal(await g.db.prepare("SELECT 1 FROM solana_runtime_cashflows WHERE evidence_id=?").get(signature), undefined, "no second evidence row");
+  });
+}
+
+for (const dialect of ["sqlite", "postgres"] as const) {
+  const options = dialect === "postgres" && !process.env.MERRYMEN_TEST_PG_URL ? { skip: "Set MERRYMEN_TEST_PG_URL to an isolated PostgreSQL test database." } : {};
+  const signatureOf = (n: number) => base58Encode(new Uint8Array(64).fill(n));
+  const flows = async (f: Awaited<ReturnType<typeof fixture>>) => (await f.db.prepare("SELECT evidence_id,kind,mint,amount_raw FROM solana_runtime_cashflows WHERE evidence_id LIKE 'external%' ORDER BY evidence_id").all() as
+    Array<Record<string, string>>).map(row => [row.evidence_id, row.kind, row.amount_raw]);
+  test(`${dialect}: inflows are booked from balances: a sweep's unbooked inflow is booked as a status read just before it would, so it leaves the same high-water mark as the in-app path (owner decision)`, options, async t => {
+    // Book 100 USDG, peak 100. Off the books 40 USDG left the vault (a leaked session), then the owner deposited 50: the vault holds 110.
+    const results: Array<{ path: string; hwmRaw: string; cashRaw: string }> = [];
+    for (const path of ["in-app", "outside"] as const) {
+      const f = await fixture(t, dialect);
+      await f.db.prepare("INSERT INTO solana_runtime_live_books(tenant,owner,book_json) VALUES(?,?,?)").run(TENANT, OWNER, JSON.stringify({ hwmRaw: "100000000",
+        cashRaw: "100000000", wsolRaw: "0", costBasisUsdgRaw: "0", realizedPnlUsdgRaw: "0", networkFeesLamports: "0", slot: 1001, updatedAtMs: NOW, balancesSlot: 1001 }));
+      if (path === "in-app") {
+        // A status read (or the withdrawal prepare's) books the 10 above the book, then the owner withdraws all 110 in the app.
+        await f.store.reconcileExternalInflows({ cashUsdg: "110000000", wsolRaw: "0", slot: 1002, observedAtMs: NOW, commitment: "finalized" });
+        await saveSignedSetup(f.store, { ...setup("withdraw"), priorVaultExisted: true, priorSequence: "5", priorSessionEpoch: "1", mint: SOLANA_USDG_MINT, amountRaw: "110000000" }, signatureOf(20));
+        await f.store.finishSetup(signatureOf(20), "finalized", 1003);
+      } else {
+        // solana-recover sweeps all 110 before any read: its pre-transaction balance books the same 10, then the withdrawal.
+        await f.store.reconcileExternalWithdrawals({ withdrawals: [{ signature: signatureOf(21), slot: 1003, mint: SOLANA_USDG_MINT, amountRaw: "110000000", preRaw: "110000000" }] });
+      }
+      const book = (await f.store.liveBook())!;
+      results.push({ path, hwmRaw: book.hwmRaw, cashRaw: book.cashRaw });
+    }
+    assert.deepEqual(results, [{ path: "in-app", hwmRaw: "0", cashRaw: "0" }, { path: "outside", hwmRaw: "0", cashRaw: "0" }],
+      "both net the 40 lost against the 50 deposited; neither path keeps the loss in the peak");
+  });
+  test(`${dialect}: a sweep outside Merrymen that also took an inflow no status read booked yet books that inflow first, then the withdrawal, and the book is free again`, options, async t => {
+    // USDG: 1 USDG deposited after the last read, then solana-recover took the whole balance.
+    {
+      const f = await fixture(t, dialect), s = submission();
+      await f.store.recordSigned(s); await f.store.settle(OWNER, s.intent.requestId, s.signature, settlement(s));
+      const before = (await f.store.liveBook())!, all = BigInt(before.cashRaw) + 1_000_000n, sweep = signatureOf(10);
+      const usdg = (preRaw?: string) => ({ signature: sweep, slot: 1003, mint: SOLANA_USDG_MINT, amountRaw: all.toString(), ...(preRaw === undefined ? {} : { preRaw }) });
+      // Without the vault's own balance just before it, or one below the amount, it stays refused, and nothing is booked.
+      for (const preRaw of [undefined, (all - 1n).toString(), "not-a-number"]) {
+        await assert.rejects(f.store.reconcileExternalWithdrawals({ withdrawals: [usdg(preRaw)] }), /more than the recorded USDG|Invalid finalized withdrawal evidence/, String(preRaw));
+      }
+      assert.deepEqual(await f.store.liveBook(), before); assert.deepEqual(await flows(f), []);
+      const { book } = await f.store.reconcileExternalWithdrawals({ withdrawals: [usdg(all.toString())] });
+      assert.equal(book.cashRaw, "0"); assert.equal(book.wsolRaw, before.wsolRaw);
+      const peak = BigInt(before.hwmRaw) + 1_000_000n - all;
+      assert.equal(book.hwmRaw, (peak > 0n ? peak : 0n).toString(), "deposit in, then everything out: as if the recorded USDG was withdrawn");
+      assert.deepEqual(await flows(f), [[`external-in:${sweep}:${SOLANA_USDG_MINT}`, "deposit", "1000000"], [`external:${sweep}:${SOLANA_USDG_MINT}`, "withdraw-external", all.toString()]]);
+      // The book matches the vault again: a finalized read books nothing and is not below it.
+      await f.store.reconcileExternalInflows({ cashUsdg: "0", wsolRaw: before.wsolRaw, slot: 1004, observedAtMs: NOW, commitment: "finalized" });
+      assert.equal((await f.store.liveBook())!.cashRaw, "0");
+      await assert.rejects(f.store.reconcileExternalWithdrawals({ withdrawals: [usdg(all.toString())] }), /already recorded/);
+    }
+    // WSOL: 5 raw sent by a stranger after the last read, then the whole balance swept; and a partial sweep leaves the rest for status.
+    {
+      const f = await fixture(t, dialect), s = submission();
+      await f.store.recordSigned(s); await f.store.settle(OWNER, s.intent.requestId, s.signature, settlement(s));
+      const before = (await f.store.liveBook())!, held = BigInt(before.wsolRaw), sweep = signatureOf(11);
+      const { book } = await f.store.reconcileExternalWithdrawals({ withdrawals: [{ signature: sweep, slot: 1003, mint: SOLANA_WRAPPED_SOL_MINT, amountRaw: (held + 5n).toString(), preRaw: (held + 5n).toString() }] });
+      assert.equal(book.wsolRaw, "0"); assert.equal(book.quarantinedWsolRaw, "0"); assert.equal(book.costBasisUsdgRaw, "0");
+      assert.equal(book.hwmRaw, before.hwmRaw, "no valuation: the mark stays put"); assert.equal(book.cashRaw, before.cashRaw);
+      assert.deepEqual(await flows(f), [[`external-in:${sweep}:${SOLANA_WRAPPED_SOL_MINT}`, "quarantine", "5"], [`external:${sweep}:${SOLANA_WRAPPED_SOL_MINT}`, "withdraw-external", (held + 5n).toString()]]);
+      await f.store.reconcileExternalInflows({ cashUsdg: before.cashRaw, wsolRaw: "0", slot: 1004, observedAtMs: NOW, commitment: "finalized" });
+      const g = await fixture(t, dialect), gs = submission();
+      await g.store.recordSigned(gs); await g.store.settle(OWNER, gs.intent.requestId, gs.signature, settlement(gs));
+      // 9 raw arrived; 4 of them went with a withdrawal of the position plus 4: only those 4 are booked now.
+      await g.store.reconcileExternalWithdrawals({ withdrawals: [{ signature: signatureOf(12), slot: 1003, mint: SOLANA_WRAPPED_SOL_MINT, amountRaw: (held + 4n).toString(), preRaw: (held + 9n).toString() }] });
+      assert.equal((await g.store.liveBook())!.quarantinedWsolRaw, "0"); assert.equal((await g.store.liveBook())!.wsolRaw, "0");
+      await g.store.reconcileExternalInflows({ cashUsdg: (await g.store.liveBook())!.cashRaw, wsolRaw: "5", slot: 1004, observedAtMs: NOW, commitment: "finalized" });
+      assert.equal((await g.store.liveBook())!.quarantinedWsolRaw, "5", "the rest is booked by the next finalized read");
+    }
+  });
+}
+
+test("withdrawals made outside Merrymen are refused while a trade or an owner transaction is pending, and without a book", async t => {
+  const outside = { signature: base58Encode(new Uint8Array(64).fill(5)), slot: 1003, mint: SOLANA_USDG_MINT, amountRaw: "1" };
+  const empty = await fixture(t);
+  await assert.rejects(empty.store.reconcileExternalWithdrawals({ withdrawals: [outside] }), /no live trading record/);
+  const f = await fixture(t), s = submission(); await f.store.recordSigned(s);
+  await assert.rejects(f.store.reconcileExternalWithdrawals({ withdrawals: [outside] }), /pending Solana trades/);
+  await f.store.settle(OWNER, s.intent.requestId, s.signature, settlement(s));
+  await saveSignedSetup(f.store, setup("revoke"), "revoke-pending");
+  await assert.rejects(f.store.reconcileExternalWithdrawals({ withdrawals: [outside] }), /pending owner transaction/);
+  await assert.rejects(f.store.reconcileExternalWithdrawals({ withdrawals: [] }), /between one and sixteen/);
 });
 
 

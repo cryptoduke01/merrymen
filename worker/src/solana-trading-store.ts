@@ -34,11 +34,29 @@ export interface SolanaLiveBook {
    * high-water mark. The owner can withdraw it; withdrawals spend it first.
    */
   quarantinedWsolRaw?: string;
+  /**
+   * The slot of the last finalized balance snapshot the book was set from
+   * (inflows booked): every vault change at or before it is in the book. A
+   * withdrawal made outside Merrymen is recorded only after it (OWNER
+   * WITHDRAWALS MADE OUTSIDE MERRYMEN). Absent: the book's creation is that point.
+   */
+  balancesSlot?: number;
 }
 /** The WSOL the session may trade: the recorded position, never quarantined WSOL. */
 export function solanaQuarantinedWsol(book: Pick<SolanaLiveBook, "quarantinedWsolRaw">): bigint { return BigInt(book.quarantinedWsolRaw ?? "0"); }
+/**
+ * Why a submitted owner transaction is recorded as never having run.
+ * - blockhash-expired: both providers' finalized banks are past its last valid
+ *   height and the vault still shows the state it must have changed.
+ * - operator-no-receipt: an operator's recorded decision (npm run solana:resolve
+ *   -- owner book), only through finishSetupResolution: two providers on their
+ *   own hostnames are past its last valid height and neither, nor any other
+ *   consulted, has seen its signature, while the vault state moved for another
+ *   reason. `resolution` is that decision's id.
+ */
 export interface SolanaOwnerExpiryProof {
-  reason: "blockhash-expired"; blockHeight: string; vaultSequence: string | null; sessionEpoch: string | null; slot: number;
+  reason: "blockhash-expired" | "operator-no-receipt"; blockHeight: string; vaultSequence: string | null; sessionEpoch: string | null; slot: number;
+  resolution?: string;
 }
 export interface SolanaPreparedSetup {
   transactionBase64: string; messageBase64: string; blockhash: string; lastValidBlockHeight: string;
@@ -69,6 +87,138 @@ export interface SolanaPreparedSetup {
   finalizedSlot?: number;
   expiryProof?: SolanaOwnerExpiryProof;
   priorSequence?: string; priorSessionEpoch?: string; priorVaultExisted?: boolean;
+  /**
+   * Revoke slot only (REVOKE BESIDE A PENDING OWNER TRANSACTION, below): the
+   * signature of the pending main-slot owner transaction this revocation was
+   * prepared beside. Never set on a main-slot record.
+   */
+  beside?: string;
+  /**
+   * Revoke slot only: the revocations beside the same pending record that landed
+   * before this one was prepared, oldest first, kept as history instead of
+   * overwritten (REVOKE BESIDE...). Set by the store alone.
+   */
+  landed?: SolanaPreparedSetup[];
+}
+/**
+ * REVOKE BESIDE A PENDING OWNER TRANSACTION (owner decision 2026-10-20, option A).
+ *
+ * The main slot (solana_runtime_setups) holds one owner transaction per account:
+ * a permission registration, a withdrawal, a native SOL withdrawal, a
+ * resume-buys or a revocation. Its record is what its outcome is booked from,
+ * so it is never replaced while it may still land. A revocation used to wait
+ * for it, so a pending record that never resolved (providers that keep
+ * disagreeing, an expiry that cannot be proven) blocked the emergency revoke.
+ *
+ * Now a revocation can always be prepared and submitted while a NON-revoke
+ * main-slot transaction is pending: it goes in its own slot
+ * (solana_runtime_owner_revokes), marked `beside` that transaction's
+ * signature, and the main record stays exactly as it was. Each record is
+ * observed, rebroadcast and finished by its own signature (finishSetup finds
+ * it in either slot) and booked once: a revocation books nothing but its
+ * status, and a withdrawal's capital out is keyed by its signature.
+ *
+ * Still refused: a second pending revocation (in either slot), and any other
+ * owner transaction while one is pending in either slot. Trades stay refused
+ * while either is pending. A main-slot prepare clears a revoke-slot record
+ * that is not pending (it belonged beside the record being replaced); a
+ * pending one blocks that prepare.
+ *
+ * A revocation that landed beside the pending record is the partner that
+ * record's "never ran" proof counts and what keeps a registration from being
+ * activated, so it is kept, never overwritten, until the pending record
+ * resolves. Another revocation beside the same record is refused
+ * (SOLANA_REVOKE_ALREADY_LANDED) while nothing is left to revoke, and prepared
+ * once a session registered on Solana after that landing is live (the pending
+ * registration itself, landing after the revocation while the providers keep
+ * disagreeing about it, or one made outside Merrymen: solanaLiveAfterRevoke).
+ * The landed revocations then go with it as history (`landed`), still counted
+ * by the proof (solanaOwnerEpochOffset) and still fencing the registration.
+ *
+ * Proofs stay independent: a revocation moves only the session epoch, and a
+ * withdrawal or resume-buys never does, so neither can wedge the other's
+ * expiry proof. A permission registration moves the epoch too: while a
+ * revocation prepared beside it at the same prior epoch is finalized, "never
+ * ran" for either one means the epoch moved exactly once
+ * (solanaOwnerEpochOffset); while the other is unresolved, its move is not
+ * counted and the proof waits. A registration with a signed revocation beside
+ * it is never activated: the owner's later word was to revoke. Nor is one
+ * whose landing did not move the epoch exactly once from what it was prepared
+ * at (registerSession): something else moved it, a revocation among them.
+ * While a revocation prepared beside it can still be signed, activation waits
+ * (SOLANA_REVOKE_PREPARED_BESIDE) rather than delete it from under the owner's
+ * wallet; signed and saved, it then fences the registration as above.
+ */
+/** Refused: a revocation beside a pending owner transaction once one beside it landed (REVOKE BESIDE...). */
+export const SOLANA_REVOKE_ALREADY_LANDED = "Your revocation already landed, and no trading permission has registered on Solana since, so nothing is left to revoke. If one registers later, Revoke works again.";
+/** Refused: signed bytes of an in-app withdrawal the owner already recorded as made outside Merrymen (OWNER WITHDRAWALS MADE OUTSIDE MERRYMEN). */
+export const SOLANA_WITHDRAWAL_RECORDED_OUTSIDE = "This withdrawal is already recorded as made outside Merrymen, so it is not submitted again. Nothing more to do.";
+/** The evidence ids a withdrawal made outside Merrymen is booked under, one per vault token. */
+function externalEvidence(signature: string): [string, string] { return [`external:${signature}:${SOLANA_USDG_MINT}`, `external:${signature}:${SOLANA_WRAPPED_SOL_MINT}`]; }
+/** Refused activation: an unsigned revocation prepared beside this registration can still be signed. */
+export const SOLANA_REVOKE_PREPARED_BESIDE = "A revocation of this permission was prepared and can still be signed in your wallet. Sign it to revoke, or let it lapse (about a minute) and finish registration then.";
+/** Refused activation: the vault's session epoch moved more than this registration's own landing since it was prepared. */
+export const SOLANA_REGISTERED_AFTER_REVOKE = "A revocation or another permission landed on Solana after this permission was prepared, so it is not activated. If it is still active on Solana, revoke again, then prepare a new permission.";
+/** The session epoch a registration prepared at `priorSessionEpoch` leaves when it lands with nothing else moving it; null when unreadable. */
+export function solanaRegisteredEpoch(priorSessionEpoch: string | undefined): bigint | null {
+  return priorSessionEpoch !== undefined && /^(0|[1-9][0-9]{0,19})$/.test(priorSessionEpoch) ? BigInt(priorSessionEpoch) + 1n : null;
+}
+/**
+ * How many times `partner`, the record in the other slot, moved the session
+ * epoch that `setup`'s "never ran" proof starts from: 1 when the two are linked
+ * (one was prepared beside the other), both move the epoch (a registration or
+ * a revocation), they read the same prior epoch, and the partner is finalized
+ * (it ran). Otherwise 0: an unresolved partner's move is never assumed.
+ */
+export function solanaOwnerEpochOffset(setup: Pick<SolanaPreparedSetup, "kind" | "signature" | "beside" | "priorSessionEpoch">,
+  partner: (Pick<SolanaPreparedSetup, "kind" | "signature" | "beside" | "status" | "priorSessionEpoch"> & { landed?: ReadonlyArray<Pick<SolanaPreparedSetup, "kind" | "signature" | "beside" | "status" | "priorSessionEpoch">> }) | null | undefined): number {
+  // A revocation kept as history in the partner's slot (`landed`) counts as the partner it was.
+  return [partner, ...(partner?.landed ?? [])].some(item => linkedEpochMove(setup, item)) ? 1 : 0;
+}
+function linkedEpochMove(setup: Pick<SolanaPreparedSetup, "kind" | "signature" | "beside" | "priorSessionEpoch">,
+  partner: Pick<SolanaPreparedSetup, "kind" | "signature" | "beside" | "status" | "priorSessionEpoch"> | null | undefined): boolean {
+  if (!partner?.signature || partner.status !== "finalized" || setup.priorSessionEpoch === undefined || partner.priorSessionEpoch !== setup.priorSessionEpoch) return false;
+  const linked = setup.beside !== undefined ? setup.beside === partner.signature : !!setup.signature && partner.beside === setup.signature;
+  const epochKind = (kind: SolanaPreparedSetup["kind"]) => (kind ?? "session") === "session" || kind === "revoke";
+  return linked && epochKind(setup.kind) && epochKind(partner.kind);
+}
+/**
+ * The latest revocation that landed beside the pending main record `main`: the revoke slot's own record, or the
+ * last kept as history in it, while no revocation beside it is pending. Null otherwise.
+ */
+export function solanaLandedBeside(main: SolanaPreparedSetup | null | undefined, revoke: SolanaPreparedSetup | null | undefined): SolanaPreparedSetup | null {
+  if (!ownerPending(main) || !revoke || revoke.beside !== main!.signature || ownerPending(revoke)) return null;
+  return revoke.signature && revoke.status === "finalized" ? revoke : revoke.landed?.at(-1) ?? null;
+}
+/**
+ * Whether a vault read after `landed`, a revocation that landed beside a pending record, shows a session
+ * registered on Solana since: one is set (revoke_all clears it to the default key) at an epoch past the one that
+ * revocation left. Revoke then works again beside the same record (REVOKE BESIDE...).
+ */
+export function solanaLiveAfterRevoke(landed: Pick<SolanaPreparedSetup, "priorSessionEpoch">, vault: { session: string | undefined; sessionEpoch: string | bigint | undefined }): boolean {
+  const left = solanaRegisteredEpoch(landed.priorSessionEpoch), epoch = typeof vault.sessionEpoch === "bigint" ? vault.sessionEpoch
+    : vault.sessionEpoch !== undefined && /^(0|[1-9][0-9]{0,19})$/.test(vault.sessionEpoch) ? BigInt(vault.sessionEpoch) : null;
+  return left !== null && epoch !== null && epoch > left && !!vault.session && vault.session !== SOLANA_SYSTEM_PROGRAM;
+}
+/**
+ * RESUME-BUYS BESIDE A REVOCATION. revoke_all pauses buying on chain and set_breaker(false) unpauses it, each
+ * with its own blockhash, so a revocation prepared beside a pending resume-buys that lands FIRST leaves the
+ * resume-buys landing after it unpausing the vault: the reverse of the owner's later word. True while such a
+ * revocation may be that word: signed and not known to have failed, or still signable. A resume-buys that
+ * finalizes meanwhile then leaves the off-chain breaker paused (finishSetup), whichever landed first, and
+ * status says so; a new resume-buys clears it as usual. A revocation that turns out never to have run only
+ * leaves buying paused, the conservative direction.
+ */
+export function solanaRevokedBesideResume(resume: Pick<SolanaPreparedSetup, "kind" | "signature">,
+  revoke: Pick<SolanaPreparedSetup, "kind" | "beside" | "signature" | "status" | "expiresAtMs"> | null | undefined, nowMs: number): boolean {
+  return resume.kind === "resume-buys" && !!resume.signature && revoke?.kind === "revoke" && revoke.beside === resume.signature
+    && revoke.status !== "failed" && (!!revoke.signature || nowMs < revoke.expiresAtMs);
+}
+/** The status warning while a finalized resume-buys left buying paused for a revocation beside it (RESUME-BUYS BESIDE A REVOCATION). */
+export const SOLANA_RESUMED_AFTER_REVOKE = "Buying stays paused: you revoked beside a resume of buying, and the revocation is your later word, even if Solana shows buying resumed because the revocation landed first. Resume buying again under Owner controls when you want buys to restart.";
+/** A signed owner transaction whose outcome is not yet recorded. */
+function ownerPending(setup: SolanaPreparedSetup | null | undefined): boolean {
+  return !!setup?.signature && setup.status !== "finalized" && setup.status !== "failed";
 }
 /**
  * An executable WSOL→USDG exit quote for the withdrawal amount and the
@@ -112,15 +262,20 @@ const DAY = 86_400_000;
  *   session trades while one is prepared or pending, so nothing else can advance it;
  * - resume-buys changes neither; a wrong "failed" only leaves the off-chain
  *   breaker paused, which is the conservative direction.
+ * `epochOffset`: the epoch moves the linked record in the other slot is known
+ * to have made (solanaOwnerEpochOffset), 0 or 1; only epoch kinds use it.
  */
 export function solanaOwnerExpiryProven(setup: Pick<SolanaPreparedSetup, "kind" | "priorVaultExisted" | "priorSequence" | "priorSessionEpoch">,
-  vaultSequence: string | null, sessionEpoch: string | null): boolean {
+  vaultSequence: string | null, sessionEpoch: string | null, epochOffset = 0): boolean {
   if (setup.priorVaultExisted === undefined || setup.priorSequence === undefined || setup.priorSessionEpoch === undefined) return false;
   if (setup.priorVaultExisted && (vaultSequence === null || sessionEpoch === null)) return false;
   if ((vaultSequence === null) !== (sessionEpoch === null)) return false;
+  if (epochOffset !== 0 && epochOffset !== 1) return false;
+  let expectedEpoch = setup.priorSessionEpoch;
+  if (epochOffset) { try { expectedEpoch = (BigInt(setup.priorSessionEpoch) + 1n).toString(); } catch { return false; } }
   switch (setup.kind ?? "session") {
-    case "revoke": return setup.priorVaultExisted && sessionEpoch === setup.priorSessionEpoch;
-    case "session": return (sessionEpoch ?? "0") === setup.priorSessionEpoch;
+    case "revoke": return setup.priorVaultExisted && sessionEpoch === expectedEpoch;
+    case "session": return (sessionEpoch ?? "0") === expectedEpoch;
     case "withdraw": case "withdraw-sol": return setup.priorVaultExisted && vaultSequence === setup.priorSequence;
     case "resume-buys": return setup.priorVaultExisted;
     default: return false;
@@ -144,6 +299,9 @@ CREATE TABLE IF NOT EXISTS solana_runtime_sessions (
  PRIMARY KEY(tenant,owner)
 );
 CREATE TABLE IF NOT EXISTS solana_runtime_setups (
+ tenant TEXT NOT NULL, owner TEXT NOT NULL, setup_json TEXT NOT NULL, PRIMARY KEY(tenant,owner)
+);
+CREATE TABLE IF NOT EXISTS solana_runtime_owner_revokes (
  tenant TEXT NOT NULL, owner TEXT NOT NULL, setup_json TEXT NOT NULL, PRIMARY KEY(tenant,owner)
 );
 CREATE TABLE IF NOT EXISTS solana_runtime_live_books (
@@ -328,6 +486,45 @@ export async function ensureSolanaTradingSchema(db: Db, postgres = false): Promi
   return promise;
 }
 
+/** A submitted owner transaction awaiting its outcome, in either slot (solanaPendingOwnerTransactions). */
+export interface SolanaPendingOwnerTransaction extends SolanaAccountScope {
+  /** `signature`: null only on a malformed record, still listed so recovery reads it as it always did. */
+  slot: "main" | "revoke"; signature: string | null; kind: NonNullable<SolanaPreparedSetup["kind"]>;
+  /** When it was prepared; null when the stored record does not say. */
+  preparedAtMs: number | null;
+  /** The vault sequence it was prepared at, when recorded. */
+  priorSequence: string | null;
+}
+/**
+ * Every submitted owner transaction awaiting its outcome, in both slots: the main record, and a revocation saved
+ * beside it (REVOKE BESIDE A PENDING OWNER TRANSACTION), which often outlives the record it was prepared beside.
+ * Main slot first. Read from the database alone, nothing secret (no signed bytes). Receipt recovery reads it
+ * through solanaPendingOwnerScopes; the operator's stuck-pending alert and list must count the revoke slot too.
+ */
+export async function solanaPendingOwnerTransactions(db: Db): Promise<SolanaPendingOwnerTransaction[]> {
+  const pending: SolanaPendingOwnerTransaction[] = [];
+  for (const [slot, table] of [["main", "solana_runtime_setups"], ["revoke", "solana_runtime_owner_revokes"]] as const) {
+    for (const row of await db.prepare(`SELECT tenant,owner,setup_json FROM ${table}`).all() as Array<SolanaAccountScope & { setup_json: string }>) {
+      let setup: SolanaPreparedSetup | null = null;
+      try { setup = JSON.parse(row.setup_json) as SolanaPreparedSetup; } catch { continue; }
+      // Saved signed bytes are "pending" until finished (exactly what the worker recovered before the revoke slot).
+      if (setup?.status !== "pending") continue;
+      pending.push({ tenant: row.tenant, owner: row.owner, slot, signature: typeof setup.signature === "string" ? setup.signature : null, kind: setup.kind ?? "session",
+        preparedAtMs: Number.isSafeInteger(setup.preparedAtMs) ? setup.preparedAtMs : null, priorSequence: typeof setup.priorSequence === "string" ? setup.priorSequence : null });
+    }
+  }
+  return pending;
+}
+/**
+ * Every account with a submitted owner transaction awaiting its outcome, in either slot (solanaPendingOwnerTransactions).
+ * Receipt recovery (the worker's tick) reads status for each, which rebroadcasts the saved bytes while they can land
+ * and settles both slots, with the page closed. Each account once, main slot first.
+ */
+export async function solanaPendingOwnerScopes(db: Db): Promise<SolanaAccountScope[]> {
+  const scopes = new Map<string, SolanaAccountScope>();
+  for (const item of await solanaPendingOwnerTransactions(db)) scopes.set(JSON.stringify([item.tenant, item.owner]), { tenant: item.tenant, owner: item.owner });
+  return [...scopes.values()];
+}
 /** The scope comes from an authenticated wallet binding, never request owner fields. */
 export class SolanaTradingStore implements SolanaLiveJournal {
   constructor(readonly db: Db, readonly scope: SolanaAccountScope, private readonly now: () => number = Date.now,
@@ -581,8 +778,146 @@ export class SolanaTradingStore implements SolanaLiveJournal {
         await flow(`quarantine:${owner}:${snapshot.slot}:${snapshot.wsolRaw}`, "quarantine", SOLANA_WRAPPED_SOL_MINT, donated);
         book.quarantinedWsolRaw = (solanaQuarantinedWsol(book) + donated).toString(); raw(book.quarantinedWsolRaw);
       }
-      book.slot = snapshot.slot; book.updatedAtMs = now;
+      book.slot = snapshot.slot; book.updatedAtMs = now; book.balancesSlot = snapshot.slot;
       await tx.prepare("UPDATE solana_runtime_live_books SET book_json=? WHERE tenant=? AND owner=?").run(JSON.stringify(book), tenant, owner);
+    });
+  }
+  /**
+   * OWNER WITHDRAWALS MADE OUTSIDE MERRYMEN (solana-recover, another wallet).
+   *
+   * The documented emergency path withdraws with the owner's own key, outside
+   * the app, so the book kept the old balances: a vault below its book holds
+   * every trade, exit and in-app withdrawal of that asset. This books such
+   * withdrawals as capital out, each from a finalized, successful transaction
+   * the runtime read on both providers (recordExternalWithdrawals): a top-level
+   * withdraw by the vault program, signed by this owner, for this vault, and the
+   * vault token account's own net decrease in it (`amountRaw`).
+   *
+   * What keeps it from hiding a loss: every withdrawal booked is an owner-signed
+   * one, never a shortfall, and only one the book cannot already reflect: its
+   * slot is after the book's last absolute balance (balancesSlot, or the book's
+   * creation), so it is still in the vault's balances and not in the book. The
+   * one balance difference it books is a sweep's unbooked inflow (below), and
+   * only as status books inflows. Each is booked once (evidence external:<signature>:<mint>, and never a
+   * signature the app already booked as its own withdrawal). An in-app prepared
+   * withdrawal whose wallet broadcast it and that the owner recorded here first
+   * is never saved as the app's own afterwards, nor booked again by it
+   * (SOLANA_WITHDRAWAL_RECORDED_OUTSIDE). A shortfall any other way (a trade
+   * off the books) stays held: nothing here books it.
+   *
+   * USDG out lowers cash and the high-water mark by the amount (floor 0). WSOL
+   * out leaves quarantine first, then the position at its prorated basis; the
+   * high-water mark drops by the lower of what the position part is worth now
+   * (`valuation`, checked fresh here) and that prorated cost basis, or not at
+   * all without a valuation. It is recorded when the owner records it, possibly
+   * days after it happened: had SOL risen since, its value now would lower the
+   * mark by more than the capital that left (understating later drawdown), so
+   * the capital the owner put into that SOL bounds it. An in-app withdrawal is
+   * valued when prepared, about a minute before it lands, and is not bounded
+   * this way. No realized P&L. Refused while a trade or an owner transaction is pending.
+   *
+   * A withdrawal of more than the book records (solana-recover sweeps the whole
+   * balance) also took an inflow no status read booked yet: a deposit, or
+   * anyone's WSOL, that arrived after the last read. Its own transaction shows
+   * the vault held at least the amount just before it (`preRaw`, the token
+   * account's pre-transaction balance, read on both providers), so the part
+   * beyond the book is booked first as that inflow, at its slot and exactly as
+   * status books one (USDG as a deposit raising the high-water mark, WSOL as
+   * zero-basis quarantine; evidence external-in:<signature>:<mint>), and then
+   * the withdrawal. Only what the withdrawal needs: any rest still in the vault
+   * waits for status's own inflow read. Without a pre-transaction balance at or
+   * above the amount it stays refused. An asset short any other way stays held.
+   *
+   * INFLOWS ARE BOOKED FROM BALANCES (owner decision, recorded 2026-10-20). A
+   * deposit is a plain token transfer with no vault instruction to attribute it,
+   * so every inflow is booked as a balance above the book: status's finalized
+   * read, a withdrawal prepare's, and this sweep's pre-transaction balance. An
+   * off-book loss (a leaked session's trade, say) and a deposit that both fall
+   * between two such reads therefore net: book 100 USDG, 40 lost off the books,
+   * 50 deposited, then any of those reads books a deposit of 10, and the loss
+   * leaves the drawdown baseline. The sweep is no different from a status read
+   * just before it (it books what that read would have, then the withdrawal),
+   * and the in-app path gives the same high-water mark (solana-trading-store
+   * test "inflows are booked from balances"). Refusing only the sweep would
+   * change the outcome by whether a page happened to read status in between,
+   * and leave the owner held. The fence that would close it for every path is a
+   * vault-sequence anchor: the sequence the book has accounted for, kept by
+   * trade settlement, owner withdrawals and recorded external ones (native SOL
+   * included), so that a balance is booked as an inflow only when no sequence
+   * the book does not know of moved since. That spans the trade and owner paths
+   * and is not built here; until then a loss off the books shows as a vault
+   * below its book only while no deposit has covered it.
+   */
+  async reconcileExternalWithdrawals(input: { withdrawals: ReadonlyArray<{ signature: string; slot: number; mint: string; amountRaw: string; preRaw?: string; valuation?: SolanaWithdrawValuation }> }):
+    Promise<{ booked: Array<{ signature: string; mint: string; amountRaw: string }>; book: SolanaLiveBook }> {
+    return this.db.tx(async tx => {
+      await this.bindingIn(tx, true);
+      const { tenant, owner } = this.scope, now = clock(this.now);
+      const withdrawals = input?.withdrawals;
+      if (!Array.isArray(withdrawals) || withdrawals.length < 1 || withdrawals.length > 16) refuse("Give between one and sixteen finalized withdrawals.");
+      if (await tx.prepare("SELECT 1 FROM solana_runtime_submissions WHERE vault IN (SELECT vault FROM solana_runtime_submissions WHERE tenant=? AND owner=?) AND status='pending'").get(tenant, owner)) refuse("Resolve pending Solana trades before recording withdrawals made outside Merrymen.");
+      const main = rowJson<SolanaPreparedSetup>(await tx.prepare("SELECT setup_json FROM solana_runtime_setups WHERE tenant=? AND owner=?").get(tenant, owner), "setup_json");
+      if (ownerPending(main) || ownerPending(await this.revokeIn(tx))) refuse("Resolve the pending owner transaction before recording withdrawals made outside Merrymen.");
+      const book = rowJson<SolanaLiveBook>(await tx.prepare("SELECT book_json FROM solana_runtime_live_books WHERE tenant=? AND owner=?").get(tenant, owner), "book_json");
+      if (!book) refuse("There is no live trading record to reconcile yet.");
+      if (now < book.updatedAtMs) refuse("Solana portfolio evidence moved backwards.");
+      // Every vault change at or before this slot is already in the book.
+      let since = book.balancesSlot;
+      if (since === undefined) {
+        const first = await tx.prepare("SELECT submission_json FROM solana_runtime_submissions WHERE tenant=? AND owner=? ORDER BY created_at_ms,request_id LIMIT 1").get(tenant, owner) as { submission_json: string } | undefined;
+        const created = first ? (JSON.parse(first.submission_json) as { risk?: { slot?: unknown } }).risk?.slot : undefined;
+        since = typeof created === "number" && Number.isSafeInteger(created) ? created : book.slot;
+      }
+      const booked: Array<{ signature: string; mint: string; amountRaw: string }> = [];
+      let latest = book.slot;
+      for (const item of [...withdrawals].sort((a, b) => a.slot - b.slot)) {
+        if (!item || typeof item.signature !== "string" || !/^[1-9A-HJ-NP-Za-km-z]{64,90}$/.test(item.signature) || !Number.isSafeInteger(item.slot) || item.slot < 1
+          || (item.mint !== SOLANA_USDG_MINT && item.mint !== SOLANA_WRAPPED_SOL_MINT)) refuse("Invalid finalized withdrawal evidence.");
+        const amount = raw(item.amountRaw, false), evidence = `external:${item.signature}:${item.mint}`;
+        if (await tx.prepare("SELECT 1 FROM solana_runtime_cashflows WHERE evidence_id IN (?,?)").get(item.signature, evidence)) refuse("That withdrawal is already recorded. Nothing was recorded.");
+        if (item.slot <= since) refuse("That withdrawal is already reflected in the recorded balances. Nothing was recorded.");
+        const usdg = item.mint === SOLANA_USDG_MINT, recorded = usdg ? raw(book.cashRaw) : raw(book.wsolRaw) + solanaQuarantinedWsol(book);
+        if (amount > recorded) {
+          // The unbooked inflow it took, shown by the vault's own balance just before it.
+          let pre: bigint | null = null;
+          try { pre = typeof item.preRaw === "string" ? raw(item.preRaw) : null; } catch { refuse("Invalid finalized withdrawal evidence."); }
+          if (pre === null || pre < amount) refuse(usdg ? "That withdrawal is more than the recorded USDG. Nothing was recorded." : "That withdrawal is more than the recorded wrapped SOL. Nothing was recorded.");
+          const unbooked = amount - recorded;
+          const inflow = await tx.prepare("INSERT INTO solana_runtime_cashflows(evidence_id,tenant,owner,kind,mint,amount_raw,created_at_ms) VALUES(?,?,?,?,?,?,?) ON CONFLICT DO NOTHING")
+            .run(`external-in:${item.signature}:${item.mint}`, tenant, owner, usdg ? "deposit" : "quarantine", item.mint, unbooked.toString(), now);
+          if (inflow.changes !== 1) refuse("That withdrawal is already recorded. Nothing was recorded.");
+          if (usdg) { book.cashRaw = (raw(book.cashRaw) + unbooked).toString(); book.hwmRaw = (raw(book.hwmRaw) + unbooked).toString(); raw(book.cashRaw); raw(book.hwmRaw); }
+          else { book.quarantinedWsolRaw = (solanaQuarantinedWsol(book) + unbooked).toString(); raw(book.quarantinedWsolRaw); }
+        }
+        if (item.mint === SOLANA_USDG_MINT) {
+          if (amount > raw(book.cashRaw)) refuse("That withdrawal is more than the recorded USDG. Nothing was recorded.");
+          book.cashRaw = (raw(book.cashRaw) - amount).toString();
+          const peak = raw(book.hwmRaw); book.hwmRaw = (peak > amount ? peak - amount : 0n).toString();
+        } else {
+          const held = raw(book.wsolRaw), aside = solanaQuarantinedWsol(book);
+          if (amount > held + aside) refuse("That withdrawal is more than the recorded wrapped SOL. Nothing was recorded.");
+          // Quarantined WSOL leaves first: zero basis, no effect on the position or the high-water mark.
+          const fromAside = amount < aside ? amount : aside, fromPosition = amount - fromAside;
+          if (aside > 0n) book.quarantinedWsolRaw = (aside - fromAside).toString();
+          if (fromPosition > 0n) {
+            const basis = fromPosition === held ? BigInt(book.costBasisUsdgRaw) : BigInt(book.costBasisUsdgRaw) * fromPosition / held;
+            book.wsolRaw = (held - fromPosition).toString(); book.costBasisUsdgRaw = (BigInt(book.costBasisUsdgRaw) - basis).toString();
+            const value = solanaWithdrawValueUsdg(item.valuation, item.amountRaw, now, this.pythGeneration);
+            if (value !== null) {
+              const worth = value * fromPosition / amount, out = worth < basis ? worth : basis < 0n ? 0n : basis, peak = raw(book.hwmRaw);
+              book.hwmRaw = (peak > out ? peak - out : 0n).toString();
+            }
+          }
+        }
+        const inserted = await tx.prepare("INSERT INTO solana_runtime_cashflows(evidence_id,tenant,owner,kind,mint,amount_raw,created_at_ms) VALUES(?,?,?,'withdraw-external',?,?,?) ON CONFLICT DO NOTHING")
+          .run(evidence, tenant, owner, item.mint, amount.toString(), now);
+        if (inserted.changes !== 1) refuse("That withdrawal is already recorded. Nothing was recorded.");
+        booked.push({ signature: item.signature, mint: item.mint, amountRaw: amount.toString() });
+        latest = Math.max(latest, item.slot);
+      }
+      book.slot = latest; book.updatedAtMs = now;
+      await tx.prepare("UPDATE solana_runtime_live_books SET book_json=? WHERE tenant=? AND owner=?").run(JSON.stringify(book), tenant, owner);
+      return { booked, book };
     });
   }
   async session(): Promise<SolanaRegisteredSession | null> {
@@ -610,6 +945,14 @@ export class SolanaTradingStore implements SolanaLiveJournal {
           setup.signature !== session.registrationSignature || setup.programId !== session.programId ||
           setup.vault !== session.vault || setup.session !== session.session) refuse("Register only the exact finalized owner-approved session.");
       if (await tx.prepare("SELECT 1 FROM solana_runtime_submissions WHERE tenant=? AND owner=? AND status='pending'").get(this.scope.tenant, this.scope.owner)) refuse("Resolve the pending Solana trade before replacing its session.");
+      // A registration moves the epoch once: any other move since it was prepared (a revocation, say) was not the owner's word for this session.
+      if (setup.priorSessionEpoch !== undefined && session.sessionEpoch !== solanaRegisteredEpoch(setup.priorSessionEpoch)?.toString()) refuse(SOLANA_REGISTERED_AFTER_REVOKE);
+      // A revocation the owner signed beside this registration, landed or not yet resolved, was the later word.
+      const revoke = await this.revokeIn(tx);
+      if (revoke?.beside === setup.signature && ((revoke.signature && revoke.status !== "failed") || revoke.landed?.length)) refuse("A revocation was signed after this permission. Prepare a new permission.");
+      // One prepared beside it and still signable may be open in the owner's wallet: never deleted from under it.
+      if (revoke && !revoke.signature && revoke.beside === setup.signature && clock(this.now) < revoke.expiresAtMs) refuse(SOLANA_REVOKE_PREPARED_BESIDE);
+      await tx.prepare("DELETE FROM solana_runtime_owner_revokes WHERE tenant=? AND owner=?").run(this.scope.tenant, this.scope.owner);
       await tx.prepare(`INSERT INTO solana_runtime_sessions(tenant,owner,record_json,sealed_seed) VALUES(?,?,?,?)
         ON CONFLICT(tenant,owner) DO UPDATE SET record_json=excluded.record_json,sealed_seed=excluded.sealed_seed`)
         .run(this.scope.tenant, this.scope.owner, JSON.stringify(session), sealSecret(this.seedPrefix(session) + seed, dek));
@@ -651,7 +994,7 @@ export class SolanaTradingStore implements SolanaLiveJournal {
       const strategyCap = await this.autonomousIn(tx, binding);
       if (binding.requestedMode !== "live" || !binding.limits) refuse("Live Solana trading has not been enabled for this account.");
       const ownerSetup = rowJson<SolanaPreparedSetup>(await tx.prepare("SELECT setup_json FROM solana_runtime_setups WHERE tenant=? AND owner=?").get(tenant, owner), "setup_json");
-      if (ownerSetup?.signature && ownerSetup.status !== "finalized" && ownerSetup.status !== "failed") refuse("Resolve the pending owner transaction before trading.");
+      if (ownerPending(ownerSetup) || ownerPending(await this.revokeIn(tx))) refuse("Resolve the pending owner transaction before trading.");
       const now = clock(this.now), limits = validateSolanaAccountLimits(binding.limits, now);
       // A prepared withdrawal's expiry is proven by an unchanged sequence, so no
       // trade may advance it between preparing and signing either.
@@ -817,10 +1160,56 @@ export class SolanaTradingStore implements SolanaLiveJournal {
     await this.binding();
     return rowJson(await this.db.prepare("SELECT setup_json FROM solana_runtime_setups WHERE tenant=? AND owner=?").get(this.scope.tenant, this.scope.owner), "setup_json");
   }
+  /** The revoke slot: a revocation prepared beside a pending main-slot owner transaction (REVOKE BESIDE...). */
+  async revokeSetup(): Promise<SolanaPreparedSetup | null> {
+    await this.binding();
+    return this.revokeIn(this.db);
+  }
+  private async revokeIn(db: Db): Promise<SolanaPreparedSetup | null> {
+    return rowJson(await db.prepare("SELECT setup_json FROM solana_runtime_owner_revokes WHERE tenant=? AND owner=?").get(this.scope.tenant, this.scope.owner), "setup_json");
+  }
   async saveSetup(setup: SolanaPreparedSetup): Promise<boolean> {
     return this.db.tx(async tx => {
       const binding = await this.bindingIn(tx, true);
-      const previous = rowJson<SolanaPreparedSetup>(await tx.prepare("SELECT setup_json FROM solana_runtime_setups WHERE tenant=? AND owner=?").get(this.scope.tenant, this.scope.owner), "setup_json");
+      const main = rowJson<SolanaPreparedSetup>(await tx.prepare("SELECT setup_json FROM solana_runtime_setups WHERE tenant=? AND owner=?").get(this.scope.tenant, this.scope.owner), "setup_json");
+      const revoke = await this.revokeIn(tx);
+      // REVOKE BESIDE A PENDING OWNER TRANSACTION: the revoke slot.
+      if (setup.beside !== undefined) {
+        if (setup.kind !== "revoke") refuse("Only a revocation can be prepared beside a pending owner transaction.");
+        if (setup.signature) {
+          if (revoke?.signature) {
+            if (revoke.signature === setup.signature && revoke.signedTransactionBase64 === setup.signedTransactionBase64) return false;
+            refuse("Resolve the previously submitted Solana setup before creating another.");
+          }
+          if (!revoke || revoke.messageBase64 !== setup.messageBase64 || revoke.preparedAtMs !== setup.preparedAtMs || revoke.beside !== setup.beside) refuse("The prepared owner transaction changed. Review and sign again.");
+          if (clock(this.now) >= revoke.expiresAtMs) refuse("The prepared owner transaction expired before submission.");
+          // Identical bytes to one that already landed (a prepare in the same slot reads the same blockhash) can never land again:
+          // saved, they would sit pending with that one's receipt and hold every owner action and trade.
+          if (revoke.landed?.some(item => item.signature === setup.signature)) refuse("That revocation already landed. Prepare the revocation again.");
+          // The history it was prepared with is the store's, whatever the signed copy carries.
+          const { landed: _offered, ...signed } = setup;
+          setup = { ...signed, ...(revoke.landed?.length ? { landed: revoke.landed } : {}) };
+        } else {
+          // Only beside the main record it names, while that is a pending non-revoke, and never beside another pending revocation.
+          if (!ownerPending(main) || main!.signature !== setup.beside || main!.kind === "revoke") refuse("Prepare the revocation again: the pending owner transaction it was prepared beside changed.");
+          if (ownerPending(revoke)) refuse("Resolve the previously submitted Solana setup before creating another.");
+          // A landed revocation beside this same record is kept: its proof partner and the registration's fence. Another
+          // is prepared beside it only once the vault read for this one shows a session registered since that landing.
+          const latest = solanaLandedBeside(main, revoke);
+          if (latest && !solanaLiveAfterRevoke(latest, { session: setup.session, sessionEpoch: setup.priorSessionEpoch })) refuse(SOLANA_REVOKE_ALREADY_LANDED);
+          // Every revocation that landed beside this record so far goes with it, oldest first.
+          const { landed: _offered, ...prepared } = setup;
+          const history = revoke?.beside === setup.beside ? [...(revoke.landed ?? []), ...(revoke.signature && revoke.status === "finalized" ? [(({ landed: _kept, ...item }) => item)(revoke)] : [])] : [];
+          if (history.length > 8) refuse(SOLANA_REVOKE_ALREADY_LANDED);
+          setup = { ...prepared, ...(history.length ? { landed: history } : {}) };
+        }
+        await tx.prepare(`INSERT INTO solana_runtime_owner_revokes(tenant,owner,setup_json) VALUES(?,?,?)
+          ON CONFLICT(tenant,owner) DO UPDATE SET setup_json=excluded.setup_json`).run(this.scope.tenant, this.scope.owner, JSON.stringify(setup));
+        return true;
+      }
+      // A pending revocation in the revoke slot holds every other owner transaction, another revocation included.
+      if (!setup.signature && ownerPending(revoke)) refuse("Resolve the previously submitted Solana setup before creating another.");
+      const previous = main;
       if (previous?.signature && previous.status !== "finalized" && previous.status !== "failed") {
         if (previous.signature === setup.signature && previous.signedTransactionBase64 === setup.signedTransactionBase64) return false;
         refuse("Resolve the previously submitted Solana setup before creating another.");
@@ -828,6 +1217,8 @@ export class SolanaTradingStore implements SolanaLiveJournal {
       if (setup.signature) {
         if (!previous || previous.messageBase64 !== setup.messageBase64 || previous.preparedAtMs !== setup.preparedAtMs) refuse("The prepared owner transaction changed. Review and sign again.");
         if (clock(this.now) >= previous.expiresAtMs) refuse("The prepared owner transaction expired before submission.");
+        // The wallet broadcast these bytes itself and the owner recorded them as made outside Merrymen: booked once, there.
+        if (await tx.prepare("SELECT 1 FROM solana_runtime_cashflows WHERE evidence_id IN (?,?)").get(...externalEvidence(setup.signature))) refuse(SOLANA_WITHDRAWAL_RECORDED_OUTSIDE);
         if ((setup.kind ?? "session") === "session" && (binding.requestedMode !== "live" || JSON.stringify(binding.limits) !== JSON.stringify(setup.limits))) refuse("The live permission settings changed. Review and sign again.");
       }
       // A WSOL withdrawal's valuation is checked once, fresh, as prepared; the signed
@@ -850,30 +1241,59 @@ export class SolanaTradingStore implements SolanaLiveJournal {
       }
       await tx.prepare(`INSERT INTO solana_runtime_setups(tenant,owner,setup_json) VALUES(?,?,?)
         ON CONFLICT(tenant,owner) DO UPDATE SET setup_json=excluded.setup_json`).run(this.scope.tenant, this.scope.owner, JSON.stringify(setup));
+      // A new main-slot prepare replaces the record a revoke-slot revocation was prepared beside: one
+      // not pending (unsigned or resolved) goes with it, so it can never be signed beside the new one.
+      if (!setup.signature && revoke && !ownerPending(revoke)) await tx.prepare("DELETE FROM solana_runtime_owner_revokes WHERE tenant=? AND owner=?").run(this.scope.tenant, this.scope.owner);
       return true;
     });
   }
   async finishSetup(signature: string, status: "finalized" | "failed", finalizedSlot?: number, expiryProof?: SolanaOwnerExpiryProof): Promise<void> {
-    await this.db.tx(async tx => {
+    await this.finishSetupWith(signature, status, finalizedSlot, expiryProof, null);
+  }
+  /**
+   * finishSetup, for an operator's recorded decision (solana-resolve.ts owner book):
+   * the same checks and booking, and in the same transaction the decision
+   * `resolutionId` (a row of solana_operator_owner_resolutions, still open) is
+   * marked booked. A decision is therefore marked booked if and only if it
+   * finished the owner transaction. Returns false, marking nothing, when the
+   * transaction is already finished with the same outcome (by the app or another
+   * run). Only this path accepts an operator-no-receipt expiry proof.
+   */
+  async finishSetupResolution(signature: string, status: "finalized" | "failed", finalizedSlot: number, expiryProof: SolanaOwnerExpiryProof | undefined, resolutionId: string): Promise<boolean> {
+    if (!resolutionId) refuse("The operator resolution to finish this owner transaction is not open.");
+    return this.finishSetupWith(signature, status, finalizedSlot, expiryProof, resolutionId);
+  }
+  private async finishSetupWith(signature: string, status: "finalized" | "failed", finalizedSlot: number | undefined, expiryProof: SolanaOwnerExpiryProof | undefined,
+    resolutionId: string | null): Promise<boolean> {
+    return this.db.tx(async tx => {
       await this.bindingIn(tx, true);
-      const setup = rowJson<SolanaPreparedSetup>(await tx.prepare("SELECT setup_json FROM solana_runtime_setups WHERE tenant=? AND owner=?").get(this.scope.tenant, this.scope.owner), "setup_json");
+      const main = rowJson<SolanaPreparedSetup>(await tx.prepare("SELECT setup_json FROM solana_runtime_setups WHERE tenant=? AND owner=?").get(this.scope.tenant, this.scope.owner), "setup_json");
+      const revoke = await this.revokeIn(tx);
+      // Each record is finished by its own signature, in whichever slot it is; its partner is the other slot's.
+      const inRevokeSlot = !!revoke?.signature && revoke.signature === signature && main?.signature !== signature;
+      const setup = inRevokeSlot ? revoke : main, partner = inRevokeSlot ? main : revoke;
       if (!setup || setup.signature !== signature) refuse("Owner confirmation does not match the saved transaction.");
       if (setup.status === "finalized" || setup.status === "failed") {
         if (setup.status !== status) refuse("Finalized owner transaction outcomes cannot be changed.");
+        // An operator's decision never changes a recorded outcome: same outcome, nothing to book.
+        if (resolutionId !== null) return false;
         if (JSON.stringify(setup.expiryProof ?? null) !== JSON.stringify(expiryProof ?? null)) refuse("Finalized owner expiry evidence cannot be changed.");
-        return;
+        return false;
       }
       if (expiryProof) {
-        if (status !== "failed" || expiryProof.reason !== "blockhash-expired" || raw(expiryProof.blockHeight) <= raw(setup.lastValidBlockHeight) ||
-            !Number.isSafeInteger(expiryProof.slot) || expiryProof.slot < 1 || finalizedSlot !== expiryProof.slot ||
-            !solanaOwnerExpiryProven(setup, expiryProof.vaultSequence, expiryProof.sessionEpoch)) refuse("Invalid owner transaction expiry evidence.");
+        // An operator's no-receipt decision replaces the vault-state proof, and only with its own record (marked below).
+        const operator = expiryProof.reason === "operator-no-receipt";
+        if (status !== "failed" || (operator ? resolutionId === null || expiryProof.resolution !== resolutionId : expiryProof.reason !== "blockhash-expired")
+            || raw(expiryProof.blockHeight) <= raw(setup.lastValidBlockHeight) || !Number.isSafeInteger(expiryProof.slot) || expiryProof.slot < 1 || finalizedSlot !== expiryProof.slot
+            || (!operator && !solanaOwnerExpiryProven(setup, expiryProof.vaultSequence, expiryProof.sessionEpoch, solanaOwnerEpochOffset(setup, partner)))) refuse("Invalid owner transaction expiry evidence.");
         setup.expiryProof = structuredClone(expiryProof);
       }
       if (status === "finalized" && setup.kind === "resume-buys") {
         const book = rowJson<SolanaLiveBook>(await tx.prepare("SELECT book_json FROM solana_runtime_live_books WHERE tenant=? AND owner=?")
           .get(this.scope.tenant, this.scope.owner), "book_json");
         if (book) {
-          book.buyPaused = false;
+          // A revocation beside it may have landed first and been undone by it (RESUME-BUYS BESIDE A REVOCATION): buying stays paused.
+          book.buyPaused = solanaRevokedBesideResume(setup, partner, clock(this.now));
           await tx.prepare("UPDATE solana_runtime_live_books SET book_json=? WHERE tenant=? AND owner=?")
             .run(JSON.stringify(book), this.scope.tenant, this.scope.owner);
         }
@@ -882,7 +1302,9 @@ export class SolanaTradingStore implements SolanaLiveJournal {
         if (!setup.mint || !setup.amountRaw || ![SOLANA_USDG_MINT, SOLANA_WRAPPED_SOL_MINT].includes(setup.mint)) refuse("Invalid finalized withdrawal accounting.");
         const amount = raw(setup.amountRaw, false), { tenant, owner } = this.scope;
         const book = rowJson<SolanaLiveBook>(await tx.prepare("SELECT book_json FROM solana_runtime_live_books WHERE tenant=? AND owner=?").get(tenant, owner), "book_json");
-        if (book) {
+        // Already booked from its own transaction as made outside Merrymen: finished, never booked a second time.
+        const recordedOutside = await tx.prepare("SELECT 1 FROM solana_runtime_cashflows WHERE evidence_id IN (?,?)").get(...externalEvidence(signature));
+        if (book && !recordedOutside) {
           // The book may already be past this withdrawal's slot. While a signed
           // withdrawal is pending nothing moves book.slot (trades and inflow booking
           // refuse), but it can be past it when the bytes are saved: they landed before
@@ -946,7 +1368,14 @@ export class SolanaTradingStore implements SolanaLiveJournal {
       }
       setup.status = status;
       if (status === "finalized" && Number.isSafeInteger(finalizedSlot) && finalizedSlot! > 0) setup.finalizedSlot = finalizedSlot;
-      await tx.prepare("UPDATE solana_runtime_setups SET setup_json=? WHERE tenant=? AND owner=?").run(JSON.stringify(setup), this.scope.tenant, this.scope.owner);
+      await tx.prepare(`UPDATE ${inRevokeSlot ? "solana_runtime_owner_revokes" : "solana_runtime_setups"} SET setup_json=? WHERE tenant=? AND owner=?`).run(JSON.stringify(setup), this.scope.tenant, this.scope.owner);
+      if (resolutionId !== null) {
+        // Who finished it is part of finishing it: no mark, nothing finished (the transaction rolls back).
+        const marked = await tx.prepare(`UPDATE solana_operator_owner_resolutions SET booked_at_ms=? WHERE id=? AND tenant=? AND owner=? AND signature=? AND outcome=?
+          AND booked_at_ms IS NULL AND refusal IS NULL`).run(clock(this.now), resolutionId, this.scope.tenant, this.scope.owner, signature, status);
+        if (marked.changes !== 1) refuse("The operator resolution to finish this owner transaction is not open.");
+      }
+      return true;
     });
   }
 }

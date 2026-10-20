@@ -21,7 +21,7 @@ before(() => {
       if (id === "@/lib/solana-auth") return auth;
       if (id === "@/lib/solana-binding-store") return bindings;
       if (id === "@/lib/solana-api") return { ...api, solanaContext: async () => ({ principal: { tenant, did: "did:privy:owner" }, binding: {}, scope, store: {} }) };
-      if (id.endsWith("worker/src/solana-app-runtime")) return { getSolanaAppRuntime: () => Object.fromEntries(["prepareOwnerAction", "submitOwnerAction"].map(method =>
+      if (id.endsWith("worker/src/solana-app-runtime")) return { getSolanaAppRuntime: () => Object.fromEntries(["prepareOwnerAction", "submitOwnerAction", "recordExternalWithdrawals"].map(method =>
         [method, async (...args: unknown[]) => { calls.push({ method, args }); return { fixture: true }; }])) };
     }
     return original.call(this, id, parent, isMain);
@@ -43,6 +43,20 @@ test("the owner route prepares a native SOL withdrawal for the authenticated own
 test("a native SOL withdrawal takes a lamport amount and no token mint", async () => {
   for (const body of [{ stage: "prepare", action: "withdraw-sol" }, { stage: "prepare", action: "withdraw-sol", amountRaw: 100 },
     { stage: "prepare", action: "withdraw-sol", mint: owner, amountRaw: "100" }, { stage: "prepare", action: "withdraw-sol", amountRaw: "100", owner }]) {
+    assert.equal((await post(body)).status, 400, JSON.stringify(body));
+  }
+  assert.deepEqual(calls, []);
+});
+
+test("withdrawals made outside Merrymen are recorded for the authenticated owner by their signatures alone", async () => {
+  const response = await post({ stage: "record", action: "external-withdrawals", signatures: ["a", "b"] });
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { recorded: { fixture: true } });
+  assert.deepEqual(calls, [{ method: "recordExternalWithdrawals", args: [scope, { signatures: ["a", "b"] }] }]);
+  calls = [];
+  for (const body of [{ stage: "record", action: "external-withdrawals" }, { stage: "record", action: "external-withdrawals", signatures: "a" },
+    { stage: "record", action: "external-withdrawals", signatures: ["a"], mint: owner }, { stage: "record", action: "withdraw", signatures: ["a"] },
+    { stage: "record", action: "external-withdrawals", signatures: ["a"], owner }]) {
     assert.equal((await post(body)).status, 400, JSON.stringify(body));
   }
   assert.deepEqual(calls, []);

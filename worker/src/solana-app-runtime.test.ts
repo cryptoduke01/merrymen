@@ -24,6 +24,11 @@ import { SolanaMarketError } from "./solana-market";
 import { ensureSolanaTradingSchema, SolanaTradingStore } from "./solana-trading-store";
 import { PYTH_SOL_USD_ACCOUNT } from "./solana-reference-price";
 import { pythAccount } from "./solana-reference-price-fixture";
+import { address as kitAddress, appendTransactionMessageInstructions, compileTransaction, createTransactionMessage, setTransactionMessageFeePayer,
+  setTransactionMessageLifetimeUsingBlockhash, type Blockhash } from "@solana/kit";
+import { buildWithdrawSolanaVaultInstruction } from "../../packages/core/src/solana-live";
+import { SOLANA_STATUS_BELOW_BOOK, SOLANA_STATUS_REGISTERED_AFTER_REVOKE, SOLANA_WITHDRAW_BELOW_BOOK } from "./solana-app-runtime";
+import { SOLANA_REGISTERED_AFTER_REVOKE, SOLANA_RESUMED_AFTER_REVOKE, SOLANA_REVOKE_ALREADY_LANDED, SOLANA_REVOKE_PREPARED_BESIDE, SOLANA_WITHDRAWAL_RECORDED_OUTSIDE, SolanaTradingStoreError } from "./solana-trading-store";
 
 const TENANT = "0x1111111111111111111111111111111111111111";
 const key = (n: number) => getBase58Decoder().decode(new Uint8Array(32).fill(n));
@@ -115,7 +120,9 @@ async function fixture(options: { declared?: string } = {}) {
   const sent: string[] = [];
   const rpc: SolanaLiveRpc = { read: fn => fn(providers.primary ?? read), readEach: async fn => [await fn(providers.primary ?? read), await fn(providers.fallback ?? read)], send: async wire => {
     controls.sends++; sent.push(wire);
-    const saved = await new SolanaTradingStore(db, scope, () => clock.now).setup();
+    // Either slot: the main owner transaction, or a revocation prepared beside it.
+    const ledger = new SolanaTradingStore(db, scope, () => clock.now), revoking = await ledger.revokeSetup();
+    const saved = revoking?.signedTransactionBase64 === wire ? revoking : await ledger.setup();
     assert.equal(saved?.signedTransactionBase64, wire, "exact bytes committed before RPC send");
     controls.signed = wire; controls.signature = saved!.signature!;
     if (controls.failSend) throw new Error("lost send response");
@@ -346,9 +353,9 @@ test("a revoke that did run is never booked failed, even with no receipt", async
   } finally { f.raw.close(); }
 });
 
-test("one owner transaction at a time, a revocation included: while one is pending a new revoke is refused and the saved record is kept", async () => {
-  // Owner decision (W round 1): no second slot for an emergency revoke. Replacing the pending record would
-  // lose the transaction its outcome is booked from; the page points a stuck owner to the recovery tool.
+test("one pending revocation at a time: while one is pending a new revoke is refused and the saved record is kept", async () => {
+  // A revocation goes beside a pending NON-revoke owner transaction (tests below); beside a pending
+  // revocation there is nothing to add, and replacing it would lose the record its outcome is booked from.
   const f = await fixture();
   try {
     await f.live(); f.controls.initialized = true;
@@ -360,6 +367,484 @@ test("one owner transaction at a time, a revocation included: while one is pendi
       (error: unknown) => error instanceof SolanaAppRuntimeError && error.code === "pending" && error.message === "Refresh the pending owner transaction before preparing another.");
     assert.deepEqual(await new SolanaTradingStore(f.db, f.scope).setup(), before, "the pending record is not replaced");
     assert.deepEqual(f.sent, [signedTransactionBase64]);
+  } finally { f.raw.close(); }
+});
+
+/**
+ * Owner transactions that land by signature on both providers, as a pending
+ * main record and a revocation beside it need (the base fixture answers for
+ * whatever bytes were sent last). `observe` may throw for a signature once.
+ */
+function ownerChain(f: Fixture) {
+  const landed = new Map<string, string>(), failOnce = new Set<string>();
+  const read: SolanaLiveRead = async (method, params = []) => {
+    if (method === "getSignatureStatuses") {
+      const signature = (params[0] as string[])[0]!;
+      if (failOnce.delete(signature)) throw new Error("provider unavailable");
+      return f.response([landed.has(signature) ? { confirmationStatus: "finalized", slot: 1000, err: null } : null]);
+    }
+    if (method === "getTransaction") { const signature = params[0] as string; return landed.has(signature) ? { version: 0, slot: 1000, transaction: [landed.get(signature), "base64"], meta: { err: null } } : null; }
+    return f.read(method, params);
+  };
+  f.providers.primary = read; f.providers.fallback = read;
+  return { land: (signature: string, bytes: string) => { landed.set(signature, bytes); }, failOnce: (signature: string) => { failOnce.add(signature); } };
+}
+/** A live book holding 90 USDG at the vault's current balances. */
+async function cashBook(f: Fixture) {
+  await f.db.prepare("INSERT INTO solana_runtime_live_books(tenant,owner,book_json) VALUES(?,?,?)").run(TENANT, f.owner, JSON.stringify({ hwmRaw: "90000000", cashRaw: "90000000",
+    wsolRaw: "0", costBasisUsdgRaw: "0", realizedPnlUsdgRaw: "0", networkFeesLamports: "0", slot: 900, updatedAtMs: 999_000 }));
+  f.controls.cash = 90_000_000n;
+}
+const PENDING_OWNER = (error: unknown) => error instanceof SolanaAppRuntimeError && error.code === "pending" && error.message === "Refresh the pending owner transaction before preparing another.";
+const withdrawals = async (f: Fixture) => (await f.db.prepare("SELECT evidence_id FROM solana_runtime_cashflows WHERE kind='withdraw'").all() as Array<{ evidence_id: string }>).map(row => row.evidence_id);
+
+test("a revocation is prepared and submitted while a withdrawal is pending, beside it: each lands and is booked once by its own signature, and nothing else is prepared meanwhile (owner decision option A)", async () => {
+  const f = await fixture();
+  try {
+    await f.live(); f.controls.initialized = true; await f.registered(); f.controls.sequence = 3n; await cashBook(f);
+    const chain = ownerChain(f), store = new SolanaTradingStore(f.db, f.scope);
+    const withdraw = await f.app.prepareOwnerAction(f.scope, { action: "withdraw", mint: SOLANA_USDG_MINT, amountRaw: "1000000" });
+    const withdrawSigned = await f.sign(withdraw.transactionBase64);
+    const pendingWithdraw = await f.app.submitOwnerAction(f.scope, { signedTransactionBase64: withdrawSigned });
+    assert.equal(pendingWithdraw.status, "pending");
+    const main = (await store.setup()) as NonNullable<Awaited<ReturnType<SolanaTradingStore["setup"]>>> & { signature: string };
+    // Another withdrawal, resume-buys or native withdrawal still waits for it.
+    f.controls.vaultNativeLamports = 1_000;
+    for (const input of [{ action: "resume-buys" }, { action: "withdraw-sol", amountRaw: "1" }, { action: "withdraw", mint: SOLANA_USDG_MINT, amountRaw: "1" }] as const) {
+      await assert.rejects(f.app.prepareOwnerAction(f.scope, input), PENDING_OWNER, input.action);
+    }
+    // The revocation does not: it goes beside the withdrawal, whose record stays as it was.
+    const revoke = await f.app.prepareOwnerAction(f.scope, { action: "revoke" });
+    assert.equal((await store.revokeSetup())!.beside, main.signature);
+    const revokeSigned = await f.sign(revoke.transactionBase64);
+    const pendingRevoke = await f.app.submitOwnerAction(f.scope, { signedTransactionBase64: revokeSigned });
+    assert.equal(pendingRevoke.status, "pending"); assert.notEqual(pendingRevoke.signature, main.signature);
+    assert.deepEqual(await store.setup(), main, "the pending withdrawal's record is kept");
+    await assert.rejects(f.app.prepareOwnerAction(f.scope, { action: "revoke" }), PENDING_OWNER, "never a second pending revocation");
+    const status = await f.app.status(f.scope);
+    assert.deepEqual(status.live.ownerTransaction, { signature: main.signature, status: "pending", kind: "withdraw", revoke: { signature: pendingRevoke.signature, status: "pending", kind: "revoke" } });
+    assert.ok(status.live.blockers.includes("An owner transaction is awaiting final confirmation."));
+    // Both land: the revocation moves the epoch, the withdrawal the sequence and the cash.
+    chain.land(pendingRevoke.signature, revokeSigned); f.controls.epoch = 2n;
+    chain.land(main.signature, withdrawSigned); f.controls.sequence = 4n; f.controls.cash = 89_000_000n;
+    const settled = (await f.app.status(f.scope)).live.ownerTransaction;
+    assert.deepEqual(settled, { signature: main.signature, status: "finalized", kind: "withdraw", revoke: { signature: pendingRevoke.signature, status: "finalized", kind: "revoke" } });
+    // Retries, here and after a restart, book nothing again.
+    assert.equal((await f.app.submitOwnerAction(f.scope, { signedTransactionBase64: withdrawSigned })).status, "finalized");
+    assert.equal((await f.runtime().submitOwnerAction(f.scope, { signedTransactionBase64: revokeSigned })).status, "finalized");
+    await f.runtime().status(f.scope);
+    assert.equal((await store.liveBook())!.cashRaw, "89000000");
+    assert.deepEqual(await withdrawals(f), [main.signature]);
+    assert.deepEqual(new Set(f.sent), new Set([withdrawSigned, revokeSigned]), "only the two signed transactions ever went out");
+    // The owner can act again.
+    await f.app.prepareOwnerAction(f.scope, { action: "resume-buys" });
+    assert.equal(await store.revokeSetup(), null, "a new owner transaction clears the resolved revocation");
+  } finally { f.raw.close(); }
+});
+
+test("the emergency revoke while a dropped withdrawal can never be proven expired (its sequence moved off-server) still lands and is booked, and trades stay held", async () => {
+  const f = await fixture();
+  try {
+    await f.live(); f.controls.initialized = true; await f.registered(); f.controls.sequence = 3n; await cashBook(f);
+    const chain = ownerChain(f), store = new SolanaTradingStore(f.db, f.scope);
+    const withdraw = await f.app.prepareOwnerAction(f.scope, { action: "withdraw", mint: SOLANA_USDG_MINT, amountRaw: "1000000" });
+    const withdrawSigned = await f.sign(withdraw.transactionBase64);
+    await f.app.submitOwnerAction(f.scope, { signedTransactionBase64: withdrawSigned });
+    // The withdrawal never landed, its blockhash expired, and a leaked session key traded off-server: the sequence moved.
+    f.controls.height = 5001; f.controls.sequence = 4n;
+    assert.equal((await f.app.submitOwnerAction(f.scope, { signedTransactionBase64: withdrawSigned })).status, "pending", "its expiry cannot be proven");
+    const revoke = await f.app.prepareOwnerAction(f.scope, { action: "revoke" });
+    const revokeSigned = await f.sign(revoke.transactionBase64);
+    const pendingRevoke = await f.app.submitOwnerAction(f.scope, { signedTransactionBase64: revokeSigned });
+    chain.land(pendingRevoke.signature, revokeSigned); f.controls.epoch = 2n;
+    const status = await f.app.status(f.scope);
+    assert.equal(status.live.ownerTransaction?.revoke?.status, "finalized");
+    assert.equal(status.live.ownerTransaction?.status, "pending", "the withdrawal's record is kept for the operator (solana:resolve owner)");
+    await assert.rejects(store.recordSigned({ intent: { owner: f.owner, requestId: "after-revoke" } } as never), /pending owner transaction/);
+    assert.deepEqual(await withdrawals(f), []);
+  } finally { f.raw.close(); }
+});
+
+test("nothing is replayed after a crash between steps: a revocation saved beside a pending withdrawal is resent only as its own bytes, and a crash between booking the two books each once", async () => {
+  const f = await fixture();
+  try {
+    await f.live(); f.controls.initialized = true; await f.registered(); f.controls.sequence = 3n; await cashBook(f);
+    const chain = ownerChain(f), store = new SolanaTradingStore(f.db, f.scope);
+    const withdraw = await f.app.prepareOwnerAction(f.scope, { action: "withdraw", mint: SOLANA_USDG_MINT, amountRaw: "1000000" });
+    const withdrawSigned = await f.sign(withdraw.transactionBase64);
+    const main = await f.app.submitOwnerAction(f.scope, { signedTransactionBase64: withdrawSigned });
+    const revoke = await f.app.prepareOwnerAction(f.scope, { action: "revoke" });
+    const revokeSigned = await f.sign(revoke.transactionBase64);
+    // Saved, and its only send was lost (the fixture's send fails): the process stops here.
+    const first = await f.app.submitOwnerAction(f.scope, { signedTransactionBase64: revokeSigned });
+    const saved = (await store.revokeSetup())!;
+    assert.equal(saved.signedTransactionBase64, revokeSigned); assert.equal(saved.status, "pending");
+    // A restarted runtime resends the same bytes while they can land, and saves nothing new.
+    const restarted = f.runtime();
+    assert.deepEqual(await restarted.submitOwnerAction(f.scope, { signedTransactionBase64: revokeSigned }), first);
+    assert.deepEqual(await store.revokeSetup(), saved);
+    await assert.rejects(restarted.prepareOwnerAction(f.scope, { action: "revoke" }), PENDING_OWNER);
+    // Both land; the first read books the withdrawal, then the revocation's read fails (the process "stops" again).
+    chain.land(first.signature, revokeSigned); f.controls.epoch = 2n;
+    chain.land(main.signature, withdrawSigned); f.controls.sequence = 4n; f.controls.cash = 89_000_000n;
+    chain.failOnce(first.signature);
+    const partial = await restarted.status(f.scope);
+    assert.equal(partial.live.ownerTransaction?.status, "finalized"); assert.equal(partial.live.ownerTransaction?.revoke?.status, "pending");
+    assert.ok(partial.live.blockers.includes("Owner transaction confirmation is unavailable."));
+    const done = await f.runtime().status(f.scope);
+    assert.equal(done.live.ownerTransaction?.revoke?.status, "finalized");
+    assert.equal((await store.liveBook())!.cashRaw, "89000000"); assert.deepEqual(await withdrawals(f), [main.signature]);
+    assert.deepEqual(new Set(f.sent), new Set([withdrawSigned, revokeSigned]), "never a replacement transaction");
+  } finally { f.raw.close(); }
+});
+
+test("a dropped withdrawal whose sequence moved off-server stays pending in the app, and the runtime's own observation carries the expiry evidence an operator books from (live-M2)", async () => {
+  const f = await fixture();
+  try {
+    await f.live(); f.controls.initialized = true; await f.registered(); f.controls.sequence = 3n; await cashBook(f);
+    const withdraw = await f.app.prepareOwnerAction(f.scope, { action: "withdraw", mint: SOLANA_USDG_MINT, amountRaw: "1000000" });
+    await f.app.submitOwnerAction(f.scope, { signedTransactionBase64: await f.sign(withdraw.transactionBase64) });
+    f.controls.height = 5001; f.controls.sequence = 4n;
+    assert.equal((await f.app.status(f.scope)).live.ownerTransaction?.status, "pending");
+    const setup = (await new SolanaTradingStore(f.db, f.scope).setup())!;
+    assert.deepEqual(await f.app.observeOwnerTransaction(f.read, f.owner, setup),
+      { outcome: "pending", seen: false, canLand: false, evidence: { blockHeight: "5001", vaultSequence: "4", sessionEpoch: "1", slot: 1000 } });
+    // With the sequence unchanged it is the app's own proof, as before.
+    f.controls.sequence = 3n;
+    assert.deepEqual(await f.app.observeOwnerTransaction(f.read, f.owner, setup),
+      { outcome: "expired", proof: { reason: "blockhash-expired", blockHeight: "5001", vaultSequence: "3", sessionEpoch: "1", slot: 1000 } });
+  } finally { f.raw.close(); }
+});
+
+test("an owner transaction's prior vault state is read no earlier than the slot the app last booked, so a lagging provider cannot make a dropped one unprovable (live-M2)", async () => {
+  const f = await fixture();
+  try {
+    await f.live(); f.controls.initialized = true; await f.registered(); await cashBook(f);
+    const reads: Array<{ method: string; minContextSlot?: number }> = [];
+    f.providers.primary = async (method, params = []) => {
+      if (method === "getAccountInfo" && params[0] === f.vault) reads.push({ method, minContextSlot: (params[1] as { minContextSlot?: number }).minContextSlot });
+      return f.read(method, params);
+    };
+    await f.db.prepare("UPDATE solana_runtime_live_books SET book_json=? WHERE tenant=?").run(JSON.stringify({ ...JSON.parse((await f.db.prepare("SELECT book_json FROM solana_runtime_live_books").get() as { book_json: string }).book_json), slot: 990 }), TENANT);
+    await f.app.prepareOwnerAction(f.scope, { action: "revoke" });
+    assert.deepEqual(reads.at(-1), { method: "getAccountInfo", minContextSlot: 990 });
+    // A provider still behind what the app booked is refused, never trusted as the prior state.
+    await f.db.prepare("UPDATE solana_runtime_live_books SET book_json=? WHERE tenant=?").run(JSON.stringify({ ...JSON.parse((await f.db.prepare("SELECT book_json FROM solana_runtime_live_books").get() as { book_json: string }).book_json), slot: 1005 }), TENANT);
+    await assert.rejects(f.app.prepareOwnerAction(f.scope, { action: "resume-buys" }));
+    await assert.rejects(f.app.prepareLive(f.scope, { limits, sessionPublicKey: f.session }), /could not be read/);
+    assert.deepEqual(reads.at(-1), { method: "getAccountInfo", minContextSlot: 1005 });
+  } finally { f.raw.close(); }
+});
+
+/**
+ * An owner withdrawal signed outside Merrymen (solana-recover), and both providers' finalized receipt of it with the vault token
+ * account's balances. `signed`: these signed bytes instead (a wallet that broadcast an in-app prepared withdrawal itself).
+ */
+async function outsideWithdrawal(f: Fixture, mint: string, amount: bigint, balance: [bigint, bigint], signed?: string) {
+  const program = mint === SOLANA_USDG_MINT ? TOKEN_2022_PROGRAM : SOLANA_CLASSIC_TOKEN_PROGRAM, vaultToken = mint === SOLANA_USDG_MINT ? f.cashAta : f.wsolAta;
+  const instruction = buildWithdrawSolanaVaultInstruction({ programAddress: PROGRAM, vault: f.vault, owner: f.owner, mint, tokenProgram: program, vaultToken,
+    ownerToken: await deriveSolanaAta(f.owner, mint, program), amount });
+  const unsigned = getBase64EncodedWireTransaction(compileTransaction(setTransactionMessageLifetimeUsingBlockhash({ blockhash: key(43) as unknown as Blockhash, lastValidBlockHeight: 5000n },
+    setTransactionMessageFeePayer(kitAddress(f.owner), appendTransactionMessageInstructions([instruction], createTransactionMessage({ version: 0 }))))));
+  const wire = signed ?? await f.sign(unsigned), decoded = getTransactionDecoder().decode(Buffer.from(wire, "base64"));
+  const signature = getBase58Decoder().decode(Object.values(decoded.signatures)[0]!);
+  const index = getCompiledTransactionMessageDecoder().decode(decoded.messageBytes).staticAccounts.map(String).indexOf(vaultToken);
+  const entry = (amountRaw: bigint) => [{ accountIndex: index, mint, owner: f.vault, programId: program, uiTokenAmount: { amount: amountRaw.toString(), decimals: 6 } }];
+  const receipt = { slot: 1000, version: 0, transaction: [wire, "base64"], meta: { err: null, fee: 5000, preTokenBalances: entry(balance[0]), postTokenBalances: entry(balance[1]), innerInstructions: [] } };
+  const read: SolanaLiveRead = async (method, params = []) => method === "getTransaction" && params[0] === signature ? receipt : f.read(method, params);
+  f.providers.primary = read; f.providers.fallback = read;
+  return signature;
+}
+
+test("after solana-recover took the vault's USDG outside Merrymen, status holds with a clear message, a withdrawal of what the vault no longer holds is refused before signing, and recording that withdrawal from its own transaction restores trading and exits", async () => {
+  const f = await fixture();
+  try {
+    await f.live(); f.controls.initialized = true; await f.registered(); await cashBook(f);
+    // The owner's own key withdrew all 90 USDG; the book still records it.
+    f.controls.cash = 0n;
+    const held = await f.app.status(f.scope);
+    assert.ok(held.live.blockers.includes(SOLANA_STATUS_BELOW_BOOK), held.live.blockers.join(" | ")); assert.equal(held.live.canExit, false);
+    await assert.rejects(f.app.prepareOwnerAction(f.scope, { action: "withdraw", mint: SOLANA_USDG_MINT, amountRaw: "1000000" }),
+      (error: unknown) => error instanceof SolanaAppRuntimeError && error.message === SOLANA_WITHDRAW_BELOW_BOOK);
+    assert.equal(await new SolanaTradingStore(f.db, f.scope).setup(), null, "nothing was prepared");
+    const signature = await outsideWithdrawal(f, SOLANA_USDG_MINT, 90_000_000n, [90_000_000n, 0n]);
+    // A malformed list is refused before any read.
+    for (const signatures of [[], ["short"], [signature, signature], Array(9).fill(signature)]) {
+      await assert.rejects(f.app.recordExternalWithdrawals(f.scope, { signatures }), (error: unknown) => error instanceof SolanaAppRuntimeError && error.code === "invalid");
+    }
+    const recorded = await f.app.recordExternalWithdrawals(f.scope, { signatures: [signature] });
+    assert.deepEqual(recorded.booked, [{ signature, mint: SOLANA_USDG_MINT, amountRaw: "90000000" }]);
+    assert.equal(recorded.book.cashRaw, "0"); assert.equal(recorded.book.hwmRaw, "0");
+    const ready = await f.app.status(f.scope);
+    assert.ok(!ready.live.blockers.includes(SOLANA_STATUS_BELOW_BOOK)); assert.equal(ready.live.canExit, true, ready.live.blockers.join(" | "));
+    // Recorded once.
+    await assert.rejects(f.app.recordExternalWithdrawals(f.scope, { signatures: [signature] }), /already recorded/);
+    // A deposit after it is booked from both providers' agreeing read, as before.
+    f.controls.cash = 5_000_000n;
+    await f.app.status(f.scope);
+    assert.equal((await new SolanaTradingStore(f.db, f.scope).liveBook())!.cashRaw, "5000000");
+    assert.equal(f.controls.sends, 0, "nothing is ever signed or sent by recording");
+  } finally { f.raw.close(); }
+});
+
+test("a deposit no status read booked yet, swept with the rest by solana-recover, is booked from the sweep's own transaction: the book matches the vault again and trading resumes", async () => {
+  const f = await fixture();
+  try {
+    await f.live(); f.controls.initialized = true; await f.registered(); await cashBook(f);
+    // 5 USDG arrived and solana-recover took all 95 before any status read.
+    const signature = await outsideWithdrawal(f, SOLANA_USDG_MINT, 95_000_000n, [95_000_000n, 0n]);
+    f.controls.cash = 0n;
+    assert.ok((await f.app.status(f.scope)).live.blockers.includes(SOLANA_STATUS_BELOW_BOOK));
+    const recorded = await f.app.recordExternalWithdrawals(f.scope, { signatures: [signature] });
+    assert.deepEqual(recorded.booked, [{ signature, mint: SOLANA_USDG_MINT, amountRaw: "95000000" }]);
+    assert.equal(recorded.book.cashRaw, "0"); assert.equal(recorded.book.hwmRaw, "0");
+    const ready = await f.app.status(f.scope);
+    assert.ok(!ready.live.blockers.includes(SOLANA_STATUS_BELOW_BOOK)); assert.equal(ready.live.canExit, true, ready.live.blockers.join(" | "));
+    assert.equal(f.controls.sends, 0);
+  } finally { f.raw.close(); }
+});
+
+test("an in-app withdrawal the wallet broadcast itself, recorded as made outside Merrymen first, is booked once: the page's resubmit of its bytes is refused as not saved", async () => {
+  const f = await fixture();
+  try {
+    await f.live(); f.controls.initialized = true; await f.registered(); f.controls.sequence = 3n; await cashBook(f);
+    const prepared = await f.app.prepareOwnerAction(f.scope, { action: "withdraw", mint: SOLANA_USDG_MINT, amountRaw: "1000000" });
+    const signed = await f.sign(prepared.transactionBase64);
+    // The wallet sent it itself and it landed; the page's submit never reached the server.
+    const signature = await outsideWithdrawal(f, SOLANA_USDG_MINT, 1_000_000n, [90_000_000n, 89_000_000n], signed);
+    f.controls.cash = 89_000_000n; f.controls.sequence = 4n;
+    const recorded = await f.app.recordExternalWithdrawals(f.scope, { signatures: [signature] });
+    assert.equal(recorded.book.cashRaw, "89000000");
+    await assert.rejects(f.app.submitOwnerAction(f.scope, { signedTransactionBase64: signed }),
+      (error: unknown) => error instanceof SolanaAppRuntimeError && error.code === "not-saved" && error.message === SOLANA_WITHDRAWAL_RECORDED_OUTSIDE);
+    await f.app.status(f.scope);
+    const store = new SolanaTradingStore(f.db, f.scope);
+    assert.equal((await store.liveBook())!.cashRaw, "89000000"); assert.equal((await store.setup())!.signature, undefined);
+    assert.equal(f.controls.sends, 0, "nothing was sent");
+  } finally { f.raw.close(); }
+});
+
+test("one asset above its book and the other below: a withdrawal prepare books no inflow, offers only what the vault holds, and never fails on the store's below-book refusal", async () => {
+  const f = await fixture();
+  try {
+    await f.live(); f.controls.initialized = true; await f.registered();
+    await f.db.prepare("INSERT INTO solana_runtime_live_books(tenant,owner,book_json) VALUES(?,?,?)").run(TENANT, f.owner, JSON.stringify({ hwmRaw: "100000000", cashRaw: "90000000",
+      wsolRaw: "50000000", costBasisUsdgRaw: "10000000", realizedPnlUsdgRaw: "0", networkFeesLamports: "0", slot: 900, updatedAtMs: 999_000 }));
+    f.controls.cash = 89_000_000n; f.controls.wsol = 50_000_007n;
+    await f.app.prepareOwnerAction(f.scope, { action: "withdraw", mint: SOLANA_WRAPPED_SOL_MINT, amountRaw: "50000000" });
+    await assert.rejects(f.app.prepareOwnerAction(f.scope, { action: "withdraw", mint: SOLANA_USDG_MINT, amountRaw: "90000000" }),
+      (error: unknown) => error instanceof SolanaAppRuntimeError && error.message === SOLANA_WITHDRAW_BELOW_BOOK);
+    await f.app.prepareOwnerAction(f.scope, { action: "withdraw", mint: SOLANA_USDG_MINT, amountRaw: "89000000" });
+    const book = (await new SolanaTradingStore(f.db, f.scope).liveBook())!;
+    assert.equal(book.quarantinedWsolRaw, undefined, "nothing is booked while an asset is short"); assert.equal(book.cashRaw, "90000000");
+  } finally { f.raw.close(); }
+});
+
+test("a withdrawal prepare never fails on the inflow read: one raw token above the book while a provider is down still prepares what the book covers", async () => {
+  const f = await fixture();
+  try {
+    await f.live(); f.controls.initialized = true; await f.registered(); await cashBook(f);
+    // Anyone sent the vault one raw USDG; the fallback cannot answer the finalized balance read.
+    f.controls.cash = 90_000_001n;
+    f.providers.fallback = async (method, params = []) => { if (method === "getMultipleAccounts") throw new SolanaRpcError("network"); return f.read(method, params); };
+    const prepared = await f.app.prepareOwnerAction(f.scope, { action: "withdraw", mint: SOLANA_USDG_MINT, amountRaw: "1000000" });
+    assert.ok(prepared.transactionBase64);
+    const store = new SolanaTradingStore(f.db, f.scope);
+    assert.equal((await store.liveBook())!.cashRaw, "90000000", "the unagreed excess is not booked");
+    // Never more than the book while the excess is unbooked.
+    await assert.rejects(f.app.prepareOwnerAction(f.scope, { action: "withdraw", mint: SOLANA_USDG_MINT, amountRaw: "90000001" }), /exceeds the reconciled vault balance/);
+    // Once both providers answer, the inflow is booked and can be withdrawn too.
+    f.providers.fallback = null;
+    await f.app.prepareOwnerAction(f.scope, { action: "withdraw", mint: SOLANA_USDG_MINT, amountRaw: "90000001" });
+    assert.equal((await store.liveBook())!.cashRaw, "90000001");
+  } finally { f.raw.close(); }
+});
+
+test("an inflow is booked only when both providers agree on the finalized balances: one provider's phantom deposit never raises the book", async () => {
+  const f = await fixture();
+  try {
+    await f.live(); f.controls.initialized = true; await f.registered(); await cashBook(f);
+    // The primary reports 5 USDG more than the fallback.
+    f.controls.cash = 95_000_000n;
+    f.providers.fallback = async (method, params = []) => {
+      if (method !== "getMultipleAccounts") return f.read(method, params);
+      const saved = f.controls.cash; f.controls.cash = 90_000_000n;
+      try { return await f.read(method, params); } finally { f.controls.cash = saved; }
+    };
+    await f.app.status(f.scope);
+    const store = new SolanaTradingStore(f.db, f.scope);
+    assert.equal((await store.liveBook())!.cashRaw, "90000000"); assert.equal((await store.liveBook())!.hwmRaw, "90000000");
+    // Once both agree, it is a deposit.
+    f.providers.fallback = null;
+    await f.app.status(f.scope);
+    assert.equal((await store.liveBook())!.cashRaw, "95000000"); assert.equal((await store.liveBook())!.hwmRaw, "95000000");
+  } finally { f.raw.close(); }
+});
+
+test("a revocation beside a pending permission registration: whichever lands, both resolve, and a registration with a landed revocation is never activated", async () => {
+  for (const lands of ["revoke", "registration"] as const) {
+    const f = await fixture();
+    try {
+      await f.live(); f.controls.initialized = true;
+      const chain = ownerChain(f), store = new SolanaTradingStore(f.db, f.scope);
+      const setup = await f.app.prepareLive(f.scope, { limits, sessionPublicKey: f.session });
+      const setupSigned = await f.sign(setup.transactionBase64);
+      const registration = await f.app.submitSetup(f.scope, { signedTransactionBase64: setupSigned });
+      const revoke = await f.app.prepareOwnerAction(f.scope, { action: "revoke" });
+      assert.equal((await store.revokeSetup())!.beside, registration.signature);
+      const revokeSigned = await f.sign(revoke.transactionBase64);
+      const pendingRevoke = await f.app.submitOwnerAction(f.scope, { signedTransactionBase64: revokeSigned });
+      // One of them lands (the epoch moves once); both blockhashes then expire.
+      if (lands === "revoke") chain.land(pendingRevoke.signature, revokeSigned); else chain.land(registration.signature, setupSigned);
+      f.controls.epoch = 2n; f.controls.height = 5001;
+      await f.app.status(f.scope); const after = (await f.app.status(f.scope)).live.ownerTransaction;
+      assert.deepEqual([after?.status, after?.revoke?.status], lands === "revoke" ? ["failed", "finalized"] : ["finalized", "failed"], lands);
+      const activation = f.app.activateLive(f.scope, { signature: registration.signature, sessionSecretKey: f.sessionSeed.toString("base64") });
+      if (lands === "revoke") await assert.rejects(activation, /failed/);
+      else assert.equal((await activation).registered, true);
+    } finally { f.raw.close(); }
+  }
+});
+
+test("Revoke pressed again after the revocation beside a pending registration landed is refused and the landed record kept: the registration landing later is never activated, and a dropped one still resolves", async () => {
+  for (const then of ["registration-lands", "registration-dropped"] as const) {
+    const f = await fixture();
+    try {
+      await f.live(); f.controls.initialized = true;
+      const chain = ownerChain(f), store = new SolanaTradingStore(f.db, f.scope);
+      const setup = await f.app.prepareLive(f.scope, { limits, sessionPublicKey: f.session });
+      const setupSigned = await f.sign(setup.transactionBase64);
+      const registration = await f.app.submitSetup(f.scope, { signedTransactionBase64: setupSigned });
+      const revoke = await f.app.prepareOwnerAction(f.scope, { action: "revoke" });
+      const revokeSigned = await f.sign(revoke.transactionBase64);
+      const pendingRevoke = await f.app.submitOwnerAction(f.scope, { signedTransactionBase64: revokeSigned });
+      chain.land(pendingRevoke.signature, revokeSigned); f.controls.epoch = 2n;
+      const landed = (await f.app.status(f.scope)).live.ownerTransaction;
+      assert.deepEqual([landed?.status, landed?.revoke?.status], ["pending", "finalized"]);
+      const kept = await store.revokeSetup();
+      // The second press is refused before anything is read or saved; the landed revocation's record stays.
+      await assert.rejects(f.app.prepareOwnerAction(f.scope, { action: "revoke" }),
+        (error: unknown) => error instanceof SolanaAppRuntimeError && error.code === "pending" && error.message === SOLANA_REVOKE_ALREADY_LANDED);
+      assert.deepEqual(await store.revokeSetup(), kept);
+      if (then === "registration-lands") {
+        chain.land(registration.signature, setupSigned); f.controls.epoch = 3n;
+        assert.equal((await f.app.status(f.scope)).live.ownerTransaction?.status, "finalized");
+        await assert.rejects(f.app.activateLive(f.scope, { signature: registration.signature, sessionSecretKey: f.sessionSeed.toString("base64") }),
+          (error: unknown) => error instanceof SolanaAppRuntimeError && error.code === "permission" && error.message === SOLANA_REGISTERED_AFTER_REVOKE);
+        assert.equal(await store.session(), null, "no session key is stored after the owner's landed revocation");
+        // Its session is live on Solana until it expires: the owner is told, and Revoke prepares again, in the main slot.
+        const told = await f.app.status(f.scope);
+        assert.ok(told.live.blockers.includes(SOLANA_STATUS_REGISTERED_AFTER_REVOKE), told.live.blockers.join(" | "));
+        await f.app.prepareOwnerAction(f.scope, { action: "revoke" });
+        assert.equal((await store.setup())!.kind, "revoke"); assert.equal(await store.revokeSetup(), null);
+        assert.ok(!(await f.app.status(f.scope)).live.blockers.includes(SOLANA_STATUS_REGISTERED_AFTER_REVOKE));
+      } else {
+        // Dropped: its blockhash expired with the epoch moved once, by the kept revocation.
+        f.controls.height = 5001;
+        assert.equal((await f.app.status(f.scope)).live.ownerTransaction?.status, "failed");
+      }
+    } finally { f.raw.close(); }
+  }
+});
+
+test("a registration that landed after the revocation beside it while the providers keep disagreeing about it is revoked in the app again: status says it is live, Revoke prepares beside it, and the landed revocation is kept", async () => {
+  const f = await fixture();
+  try {
+    await f.live(); f.controls.initialized = true;
+    const chain = ownerChain(f), store = new SolanaTradingStore(f.db, f.scope);
+    const setup = await f.app.prepareLive(f.scope, { limits, sessionPublicKey: f.session });
+    const setupSigned = await f.sign(setup.transactionBase64);
+    const registration = await f.app.submitSetup(f.scope, { signedTransactionBase64: setupSigned });
+    const revoke = await f.app.prepareOwnerAction(f.scope, { action: "revoke" });
+    const revokeSigned = await f.sign(revoke.transactionBase64);
+    const first = await f.app.submitOwnerAction(f.scope, { signedTransactionBase64: revokeSigned });
+    chain.land(first.signature, revokeSigned); f.controls.epoch = 2n;
+    await f.app.status(f.scope);
+    const landed = (await store.revokeSetup())!;
+    assert.equal(landed.status, "finalized");
+    // The registration lands after it (epoch 3, its session set on the vault), but one provider never sees it: it stays pending.
+    chain.land(registration.signature, setupSigned); f.controls.epoch = 3n;
+    const both = f.providers.primary!;
+    f.providers.fallback = async (method, params = []) => method === "getSignatureStatuses" && (params[0] as string[])[0] === registration.signature ? f.response([null])
+      : method === "getTransaction" && params[0] === registration.signature ? null : both(method, params);
+    const live = await f.app.status(f.scope);
+    assert.equal(live.live.ownerTransaction?.status, "pending");
+    assert.deepEqual(live.live.ownerTransaction?.revoke, { signature: first.signature, status: "finalized", kind: "revoke", revokeAgain: true });
+    assert.ok(live.live.blockers.includes(SOLANA_STATUS_REGISTERED_AFTER_REVOKE), live.live.blockers.join(" | "));
+    // Revoke is prepared beside it again; the landed revocation goes with it as history. (A later slot's blockhash: the
+    // same bytes as the landed one are never accepted.)
+    const sameBytes = await f.app.prepareOwnerAction(f.scope, { action: "revoke" });
+    await assert.rejects(f.app.submitOwnerAction(f.scope, { signedTransactionBase64: await f.sign(sameBytes.transactionBase64) }),
+      (error: unknown) => error instanceof SolanaAppRuntimeError && error.code === "not-saved" && /already landed/.test(error.message));
+    f.providers.primary = async (method, params = []) => method === "getLatestBlockhash" ? f.response({ blockhash: key(44), lastValidBlockHeight: 5000 }) : both(method, params);
+    const again = await f.app.prepareOwnerAction(f.scope, { action: "revoke" });
+    const prepared = (await store.revokeSetup())!;
+    assert.equal(prepared.beside, registration.signature); assert.equal(prepared.priorSessionEpoch, "3");
+    assert.deepEqual(prepared.landed?.map(item => [item.signature, item.status]), [[first.signature, "finalized"]]);
+    const againSigned = await f.sign(again.transactionBase64);
+    const second = await f.app.submitOwnerAction(f.scope, { signedTransactionBase64: againSigned });
+    assert.notEqual(second.signature, first.signature);
+    // It lands: the vault's session is cleared (revoke_all) at epoch 4. Nothing is live, so nothing more to revoke.
+    chain.land(second.signature, againSigned);
+    const cleared = Buffer.from(f.state(4n)); cleared.fill(0, 42, 74);
+    f.extra.set(f.vault, account(cleared, PROGRAM, false, rentExempt(SOLANA_VAULT_ACCOUNT_SIZE)));
+    const revoked = await f.app.status(f.scope);
+    assert.deepEqual([revoked.live.ownerTransaction?.status, revoked.live.ownerTransaction?.revoke?.status, revoked.live.ownerTransaction?.revoke?.revokeAgain], ["pending", "finalized", undefined]);
+    assert.ok(!revoked.live.blockers.includes(SOLANA_STATUS_REGISTERED_AFTER_REVOKE), revoked.live.blockers.join(" | "));
+    await assert.rejects(f.app.prepareOwnerAction(f.scope, { action: "revoke" }),
+      (error: unknown) => error instanceof SolanaAppRuntimeError && error.code === "pending" && error.message === SOLANA_REVOKE_ALREADY_LANDED);
+    assert.deepEqual((await store.revokeSetup())!.landed?.map(item => item.signature), [first.signature], "both landed revocations are on record");
+    // The providers finally agree it landed: it is never activated.
+    f.providers.fallback = both; f.providers.primary = both;
+    assert.equal((await f.app.status(f.scope)).live.ownerTransaction?.status, "finalized");
+    await assert.rejects(f.app.activateLive(f.scope, { signature: registration.signature, sessionSecretKey: f.sessionSeed.toString("base64") }),
+      (error: unknown) => error instanceof SolanaAppRuntimeError && error.message === SOLANA_REGISTERED_AFTER_REVOKE);
+    assert.deepEqual(new Set(f.sent), new Set([setupSigned, revokeSigned, againSigned]), "only the three signed transactions ever went out");
+  } finally { f.raw.close(); }
+});
+
+test("activating a permission never deletes a revocation the owner is still signing beside it: activation waits, and once that revocation is submitted the permission is never activated", async () => {
+  const f = await fixture();
+  try {
+    await f.live(); f.controls.initialized = true;
+    const chain = ownerChain(f), store = new SolanaTradingStore(f.db, f.scope);
+    const setup = await f.app.prepareLive(f.scope, { limits, sessionPublicKey: f.session });
+    const setupSigned = await f.sign(setup.transactionBase64);
+    const registration = await f.app.submitSetup(f.scope, { signedTransactionBase64: setupSigned });
+    // The owner prepares a revocation beside it and opens the wallet; meanwhile the registration lands.
+    const revoke = await f.app.prepareOwnerAction(f.scope, { action: "revoke" });
+    chain.land(registration.signature, setupSigned); f.controls.epoch = 2n;
+    const activate = () => f.app.activateLive(f.scope, { signature: registration.signature, sessionSecretKey: f.sessionSeed.toString("base64") });
+    await assert.rejects(activate(), (error: unknown) => error instanceof SolanaTradingStoreError && error.message === SOLANA_REVOKE_PREPARED_BESIDE);
+    assert.equal(await store.session(), null);
+    // The owner's signed revocation is still accepted, and from then on the permission is never activated.
+    const submitted = await f.app.submitOwnerAction(f.scope, { signedTransactionBase64: await f.sign(revoke.transactionBase64) });
+    assert.equal(submitted.status, "pending");
+    assert.equal((await store.revokeSetup())!.signature, submitted.signature);
+    await assert.rejects(activate(), /revocation was signed after this permission/);
+    assert.equal(await store.session(), null);
+  } finally { f.raw.close(); }
+});
+
+test("a registration that landed after a revocation made outside Merrymen is never activated: the epoch moved twice since it was prepared", async () => {
+  const f = await fixture();
+  try {
+    await f.live(); f.controls.initialized = true;
+    const setup = await f.app.prepareLive(f.scope, { limits, sessionPublicKey: f.session });
+    const setupSigned = await f.sign(setup.transactionBase64);
+    const registration = await f.app.submitSetup(f.scope, { signedTransactionBase64: setupSigned });
+    // revoke_all from another wallet (epoch 1 -> 2), then the registration lands (-> 3), its session buy-paused.
+    f.controls.finalized = true; f.controls.epoch = 3n;
+    const told = await f.app.status(f.scope);
+    assert.equal(told.live.ownerTransaction?.status, "finalized");
+    assert.ok(told.live.blockers.includes(SOLANA_STATUS_REGISTERED_AFTER_REVOKE), told.live.blockers.join(" | "));
+    await assert.rejects(f.app.activateLive(f.scope, { signature: registration.signature, sessionSecretKey: f.sessionSeed.toString("base64") }),
+      (error: unknown) => error instanceof SolanaAppRuntimeError && error.code === "permission" && error.message === SOLANA_REGISTERED_AFTER_REVOKE);
+    assert.equal(await new SolanaTradingStore(f.db, f.scope).session(), null);
+    // Only its own landing moved the epoch: nothing to tell, and it is activated.
+    f.controls.epoch = 2n;
+    assert.ok(!(await f.app.status(f.scope)).live.blockers.includes(SOLANA_STATUS_REGISTERED_AFTER_REVOKE));
+    assert.equal((await f.app.activateLive(f.scope, { signature: registration.signature, sessionSecretKey: f.sessionSeed.toString("base64") })).registered, true);
   } finally { f.raw.close(); }
 });
 
@@ -415,6 +900,43 @@ test("a dropped resume-buys resolves after expiry and leaves the off-chain break
     assert.equal((await f.app.submitOwnerAction(f.scope, { signedTransactionBase64 })).status, "failed");
     await f.app.prepareOwnerAction(f.scope, { action: "revoke" });
   } finally { f.raw.close(); }
+});
+
+test("a resume-buys that lands after a revocation prepared beside it never re-arms buying: the breaker stays paused, status says why, and a new resume restarts buys", async () => {
+  for (const lands of ["revoke-first", "resume-first"] as const) {
+    const f = await fixture();
+    try {
+      await f.live(); f.controls.initialized = true; await f.registered(); await cashBook(f);
+      const store = new SolanaTradingStore(f.db, f.scope), chain = ownerChain(f);
+      const book = (await store.liveBook())!; book.buyPaused = true;
+      await f.db.prepare("UPDATE solana_runtime_live_books SET book_json=? WHERE tenant=? AND owner=?").run(JSON.stringify(book), TENANT, f.owner);
+      const resume = await f.app.prepareOwnerAction(f.scope, { action: "resume-buys" });
+      const resumeSigned = await f.sign(resume.transactionBase64);
+      const pendingResume = await f.app.submitOwnerAction(f.scope, { signedTransactionBase64: resumeSigned });
+      const revoke = await f.app.prepareOwnerAction(f.scope, { action: "revoke" });
+      assert.equal((await store.revokeSetup())!.beside, pendingResume.signature);
+      const revokeSigned = await f.sign(revoke.transactionBase64);
+      const pendingRevoke = await f.app.submitOwnerAction(f.scope, { signedTransactionBase64: revokeSigned });
+      const order = lands === "revoke-first" ? [[pendingRevoke.signature, revokeSigned], [pendingResume.signature, resumeSigned]] : [[pendingResume.signature, resumeSigned], [pendingRevoke.signature, revokeSigned]];
+      for (const [signature, bytes] of order) {
+        chain.land(signature!, bytes!); if (signature === pendingRevoke.signature) f.controls.epoch = 2n;
+        await f.app.status(f.scope);
+      }
+      const after = await f.app.status(f.scope);
+      assert.deepEqual([after.live.ownerTransaction?.status, after.live.ownerTransaction?.revoke?.status], ["finalized", "finalized"], lands);
+      assert.equal((await store.liveBook())!.buyPaused, true, `${lands}: the revocation was the owner's later word`);
+      assert.ok(after.live.warnings.includes(SOLANA_RESUMED_AFTER_REVOKE), after.live.warnings.join(" | "));
+      assert.ok(after.live.blockers.includes("The buying drawdown breaker is paused; exits remain available."));
+      // A new resume-buys restarts buys.
+      const again = await f.app.prepareOwnerAction(f.scope, { action: "resume-buys" });
+      const againSigned = await f.sign(again.transactionBase64);
+      const pendingAgain = await f.app.submitOwnerAction(f.scope, { signedTransactionBase64: againSigned });
+      chain.land(pendingAgain.signature, againSigned);
+      const resumed = await f.app.status(f.scope);
+      assert.equal((await store.liveBook())!.buyPaused, false);
+      assert.ok(!resumed.live.warnings.includes(SOLANA_RESUMED_AFTER_REVOKE));
+    } finally { f.raw.close(); }
+  }
 });
 
 test("one raw WSOL sent to the vault no longer freezes exits or owner withdrawals (audit dust)", async () => {
