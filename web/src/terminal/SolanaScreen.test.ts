@@ -1263,6 +1263,31 @@ test("a paper lot is offered for write-off only after the market answers its who
   assert.doesNotMatch(text(), new RegExp(BONK));
   assert.match(ui.container.querySelector(".solana-notice")!.textContent!, /written off at zero/);
 });
+test("the write-off offer holds only for the exact lot the market answered: a changed lot is offered nothing until checked again", async () => {
+  state.runtime.paper = { ...paper, positions: [{ mint: BONK, decimals: 5, amountRaw: "1200", costBasisUsdgRaw: "2" }] } as never;
+  respond = async (path, body) => {
+    if (path === "status") return json(state);
+    if (path === "intent" && body?.action === "preview") return json({ error: TOO_SMALL, ownerFacing: true }, 400);
+    throw new Error("Unexpected fixture route");
+  };
+  const grow = async (amountRaw: string) => {
+    state.runtime.paper = { ...paper, positions: [{ mint: BONK, decimals: 5, amountRaw, costBasisUsdgRaw: "2" }] } as never;
+    await ui.click("Refresh account");
+  };
+  await render(); await ui.click("Check for write-off");
+  assert.equal(hasButton("Write off…"), true);
+  // The lot changed after the market's answer: that answer was about another amount, so nothing is offered.
+  await grow("1300");
+  assert.equal(hasButton("Write off…"), false); assert.equal(hasButton("Write off at zero"), false);
+  assert.equal(hasButton("Check for write-off"), true);
+  // The same holds while the owner is confirming.
+  await ui.click("Check for write-off"); await ui.click("Write off…");
+  assert.equal(hasButton("Write off at zero"), true);
+  await grow("1400");
+  assert.equal(hasButton("Write off…"), false); assert.equal(hasButton("Write off at zero"), false);
+  assert.doesNotMatch(ui.container.textContent!, /Write off this whole lot/);
+  assert.equal(calls.some((call) => call.path === "paper/write-off"), false);
+});
 test("a booked write-off says so and shows the lot gone, even when the status read after it is paced or never arrives", async () => {
   const lot = { mint: BONK, decimals: 5, amountRaw: "1200", costBasisUsdgRaw: "2" };
   const PACED = "Your Solana account was refreshed too often. Try again in 3 seconds.";
