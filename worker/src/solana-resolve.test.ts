@@ -597,6 +597,12 @@ for (const dialect of ["sqlite", "postgres"] as const) {
     await f.db.prepare("INSERT INTO solana_runtime_setups(tenant,owner,setup_json) VALUES(?,?,?)").run(OTHER, key(40), JSON.stringify({ kind: "withdraw-sol", signature: "owner-sig-1",
       signedTransactionBase64: "b3duZXItYnl0ZXM=", status: "pending", preparedAtMs: NOW - 60_000, priorSequence: "7" }));
     await f.db.prepare("INSERT INTO solana_runtime_setups(tenant,owner,setup_json) VALUES(?,?,?)").run(THIRD, key(41), JSON.stringify({ kind: "revoke", preparedAtMs: NOW - 60_000 }));
+    // A revocation saved beside a record that already resolved: the revoke slot is named too.
+    const FOURTH = `0x${"44".repeat(20)}`;
+    await f.db.prepare("INSERT INTO solana_runtime_setups(tenant,owner,setup_json) VALUES(?,?,?)").run(FOURTH, key(43), JSON.stringify({ kind: "withdraw", signature: "main-sig-4",
+      status: "failed", preparedAtMs: NOW - 90_000, priorSequence: "8" }));
+    await f.db.prepare("INSERT INTO solana_runtime_owner_revokes(tenant,owner,setup_json) VALUES(?,?,?)").run(FOURTH, key(43), JSON.stringify({ kind: "revoke", signature: "revoke-sig-4",
+      signedTransactionBase64: "cmV2b2tlLWJ5dGVz", status: "pending", beside: "main-sig-4", preparedAtMs: NOW - 30_000, priorSequence: "8" }));
     await f.db.prepare(`INSERT INTO solana_runtime_submissions(tenant,owner,request_id,vault,sequence,signature,status,created_at_ms,notional_raw,submission_json)
       VALUES(?,?,?,?,?,?,'pending',?,?,?)`).run(THIRD, key(41), "young-1", key(42), "3", "signature-young-1", NOW + 4 * 60_000, "1000000", "{}");
     // No provider is configured, and none may be asked.
@@ -606,14 +612,15 @@ for (const dialect of ["sqlite", "postgres"] as const) {
     assert.deepEqual(listed.split("\n"), [
       "Pending for over 3 minutes, oldest first (tenant, what, id, age, vault sequence):",
       `  ${OTHER}\towner withdraw-sol transaction\towner-sig-1\tpending 6 min\tvault sequence 7\tnpm run solana:resolve -- owner show ${OTHER} owner-sig-1`,
+      `  ${FOURTH}\towner revoke transaction (beside another)\trevoke-sig-4\tpending 5 min\tvault sequence 8\tnpm run solana:resolve -- owner show ${FOURTH} revoke-sig-4`,
       `  ${TENANT}\tlive trade\tstuck-1\tpending 5 min\tvault sequence 0\tnpm run solana:resolve -- show ${TENANT} stuck-1`,
     ]);
-    for (const secret of ["b3duZXItYnl0ZXM=", f.pending.signedTransactionBase64, f.pending.messageBase64]) assert.ok(!listed.includes(secret), secret);
+    for (const secret of ["b3duZXItYnl0ZXM=", "cmV2b2tlLWJ5dGVz", f.pending.signedTransactionBase64, f.pending.messageBase64]) assert.ok(!listed.includes(secret), secret);
     // An hour on, the young trade is listed too, and ages read in hours.
     assert.match(await runSolanaResolveCommand(["pending"], deps(NOW + 65 * 60_000)), /\tlive trade\tyoung-1\tpending 1 h 1 min\tvault sequence 3\t/);
     // Booked trades and finished owner transactions are not listed.
     await f.db.prepare("UPDATE solana_runtime_submissions SET status='expired'").run();
-    await f.db.prepare("DELETE FROM solana_runtime_setups WHERE tenant=?").run(OTHER);
+    await f.db.prepare("DELETE FROM solana_runtime_setups WHERE tenant=?").run(OTHER); await f.db.prepare("DELETE FROM solana_runtime_owner_revokes").run();
     assert.equal(await runSolanaResolveCommand(["pending"], deps(NOW + 65 * 60_000)), "Nothing has been pending for over 3 minutes.");
     // It takes no tenant, id or flag.
     for (const argv of [["pending", TENANT], ["pending", "--third-rpc"], ["pending", "--operator", "milla"]]) {

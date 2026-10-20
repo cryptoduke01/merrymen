@@ -111,6 +111,21 @@ test("pending confirmation recovery runs even with no enabled strategies", async
   } finally { raw.close(); }
 });
 
+test("receipt recovery reads status for a revocation still pending beside an owner transaction that already resolved, with the page closed", async () => {
+  const raw = new DatabaseSync(":memory:"), db = wrapSqlite(raw), seen: string[] = [];
+  try {
+    await new SqlSolanaBindingStore(async () => db, "sqlite", () => NOW).get("0x0000000000000000000000000000000000000000");
+    await ensureSolanaTradingSchema(db);
+    // The withdrawal resolved; the revocation saved beside it is still pending (its first send was lost).
+    await db.prepare("INSERT INTO solana_runtime_setups(tenant,owner,setup_json) VALUES(?,?,?)").run("tenant", "owner", JSON.stringify({ kind: "withdraw", signature: "w", status: "finalized" }));
+    await db.prepare("INSERT INTO solana_runtime_owner_revokes(tenant,owner,setup_json) VALUES(?,?,?)").run("tenant", "owner", JSON.stringify({ kind: "revoke", signature: "r", status: "pending", beside: "w" }));
+    const actual = createSolanaAppRuntime({ db, env: {} });
+    const agent = createSolanaAgent({ db, runtime: { ...actual, status: async scope => { seen.push(scope.owner); throw new Error("provider temporarily unavailable"); } },
+      market: { readMint: async () => { throw new Error(); }, quote: async () => { throw new Error(); } } });
+    assert.deepEqual(await agent.tick(), []); assert.deepEqual(seen, ["owner"], "status (which rebroadcasts and settles it) was read once for that account");
+  } finally { raw.close(); }
+});
+
 test("process shutdown during an in-flight status or market read never admits a following trade", async t => {
   for (const stage of ["status", "quote"] as const) await t.test(stage, async () => {
     const raw = new DatabaseSync(":memory:"), db = wrapSqlite(raw);
@@ -577,17 +592,23 @@ test("trades and owner transactions still pending three minutes on say one [aler
     JSON.stringify({ signature: "owner-sig", status: "pending", preparedAtMs: clock.now - SOLANA_PENDING_STUCK_MS - 5_000 }));
   await db.prepare("INSERT INTO solana_runtime_setups(tenant,owner,setup_json) VALUES(?,?,?)").run(`0x${"33".repeat(20)}`, OWNER,
     JSON.stringify({ status: undefined, preparedAtMs: 0 }));
+  // And a revocation saved beside a record that already resolved (a third tenant): the revoke slot counts too.
+  await db.prepare("INSERT INTO solana_runtime_setups(tenant,owner,setup_json) VALUES(?,?,?)").run(`0x${"44".repeat(20)}`, OWNER,
+    JSON.stringify({ kind: "withdraw", signature: "main-sig", status: "failed", preparedAtMs: clock.now - SOLANA_PENDING_STUCK_MS - 9_000 }));
+  await db.prepare("INSERT INTO solana_runtime_owner_revokes(tenant,owner,setup_json) VALUES(?,?,?)").run(`0x${"44".repeat(20)}`, OWNER,
+    JSON.stringify({ kind: "revoke", signature: "revoke-sig", status: "pending", beside: "main-sig", preparedAtMs: clock.now - SOLANA_PENDING_STUCK_MS - 4_000 }));
   await agent.tick();
+  assert.equal(recovered, 4, "recovery read the account whose only pending record is in the revoke slot");
   assert.equal(lines.length, 1); assert.match(lines[0]!, /^\[alert\] Solana transactions stuck pending: /);
   // The line carries counts only; the operator gets the names from the resolve tool's pending listing.
   assert.match(lines[0]!, /npm run solana:resolve -- pending names each one \(tenant, id, age, vault sequence\)/);
-  assert.deepEqual(fieldsOf(lines[0]!), { solana: "alert", kind: "pending-stuck", trades: 1, ownerTransactions: 1, oldestAgeMs: SOLANA_PENDING_STUCK_MS + 60_000 });
-  for (const secret of [TENANT, OWNER, "sig-young", "owner-sig", "vault-young"]) assert.ok(!lines[0]!.includes(secret), secret);
+  assert.deepEqual(fieldsOf(lines[0]!), { solana: "alert", kind: "pending-stuck", trades: 1, ownerTransactions: 2, oldestAgeMs: SOLANA_PENDING_STUCK_MS + 60_000 });
+  for (const secret of [TENANT, OWNER, "sig-young", "owner-sig", "revoke-sig", "vault-young"]) assert.ok(!lines[0]!.includes(secret), secret);
   clock.now += 15_000; await agent.tick(); assert.equal(lines.length, 1, "said once per repeat window");
   clock.now += SOLANA_AGENT_ALERT_REPEAT_MS; await agent.tick(); assert.equal(lines.length, 2);
   // Booked at last: nothing more is said, and a later stuck one is said at once.
   await db.prepare("UPDATE solana_runtime_submissions SET status='expired'").run();
-  await db.prepare("DELETE FROM solana_runtime_setups").run();
+  await db.prepare("DELETE FROM solana_runtime_setups").run(); await db.prepare("DELETE FROM solana_runtime_owner_revokes").run();
   clock.now += 15_000; await agent.tick(); assert.equal(lines.length, 2);
   await pending("later", clock.now - SOLANA_PENDING_STUCK_MS);
   clock.now += 15_000; await agent.tick(); assert.equal(lines.length, 3);

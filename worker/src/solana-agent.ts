@@ -11,7 +11,7 @@ import type { SolanaPaperMarket } from "./solana-paper-service";
 import { SOLANA_REFERENCE_DEFAULT_TOLERANCE_BPS, SOLANA_REFERENCE_MAX_TOLERANCE_BPS, solanaReferenceToleranceBps } from "./solana-reference-price";
 import { getSolanaRuntimeDb } from "./solana-runtime-db";
 import { ensureSolanaTradingSchema, SOLANA_AUTONOMOUS_REQUEST_PREFIX, SOLANA_DEFAULT_EXPIRED_ATTEMPT_ALLOWANCE, SOLANA_EXPIRED_ATTEMPTS_EXHAUSTED,
-  SOLANA_OPERATOR_HOLD_ALL, solanaAutonomousSchedule, solanaExpiredAttemptAllowance, solanaExpiredAttemptUse, SolanaTradingStoreError,
+  SOLANA_OPERATOR_HOLD_ALL, solanaAutonomousSchedule, solanaExpiredAttemptAllowance, solanaExpiredAttemptUse, solanaPendingOwnerScopes, solanaPendingOwnerTransactions, SolanaTradingStoreError,
   type SolanaAccountScope } from "./solana-trading-store";
 
 export interface SolanaRebalanceInput {
@@ -187,10 +187,9 @@ export function createSolanaAgent(options: SolanaAgentOptions) {
     const at = now(), cutoff = at - SOLANA_PENDING_STUCK_MS;
     const trades = await options.db.prepare("SELECT COUNT(*) AS n, MIN(created_at_ms) AS oldest FROM solana_runtime_submissions WHERE status='pending' AND created_at_ms<=?")
       .get(cutoff) as { n: number | string; oldest: number | string | null } | undefined;
-    const owners = (await options.db.prepare("SELECT setup_json FROM solana_runtime_setups").all() as Array<{ setup_json: string }>).flatMap(row => {
-      try { const setup = JSON.parse(row.setup_json); return setup.signature && setup.status === "pending" && Number.isSafeInteger(setup.preparedAtMs) && setup.preparedAtMs <= cutoff ? [setup.preparedAtMs as number] : []; }
-      catch { return []; }
-    });
+    // Both owner slots: a revocation saved beside a record (REVOKE BESIDE A PENDING OWNER TRANSACTION) can be stuck too.
+    const owners = (await solanaPendingOwnerTransactions(options.db)).flatMap(item =>
+      item.signature && item.preparedAtMs !== null && item.preparedAtMs <= cutoff ? [item.preparedAtMs] : []);
     const tradeCount = Number(trades?.n ?? 0), oldest = [...(trades?.oldest == null ? [] : [Number(trades.oldest)]), ...owners];
     if (!tradeCount && !owners.length) { said.delete("pending-stuck"); return; }
     say("pending-stuck", `[alert] Solana transactions stuck pending: ${JSON.stringify({ solana: "alert", kind: "pending-stuck", trades: tradeCount,
@@ -240,9 +239,10 @@ export function createSolanaAgent(options: SolanaAgentOptions) {
       // Disabling a strategy never disables receipt recovery. Confirmation is
       // read-only and must keep working after mode changes or key rotation.
       const unsettled = await options.db.prepare("SELECT DISTINCT tenant,owner FROM solana_runtime_submissions WHERE status='pending'").all() as SolanaAccountScope[];
-      const setups = await options.db.prepare("SELECT tenant,owner,setup_json FROM solana_runtime_setups").all() as Array<SolanaAccountScope & { setup_json: string }>;
+      // A pending owner transaction in either slot: the main record, or a revocation saved beside it, which often
+      // outlives the record it was prepared beside (REVOKE BESIDE A PENDING OWNER TRANSACTION in solana-trading-store.ts).
       const recovered = new Map<string, Awaited<ReturnType<Runtime["status"]>>>();
-      for (const scope of [...unsettled, ...setups.filter(item => { try { return JSON.parse(item.setup_json).status === "pending"; } catch { return false; } })]) {
+      for (const scope of [...unsettled, ...await solanaPendingOwnerScopes(options.db)]) {
         if (options.signal?.aborted) break;
         if (recovered.has(scope.tenant)) continue;
         try { recovered.set(scope.tenant, await options.runtime.status({ tenant: scope.tenant, owner: scope.owner })); } catch { /* Retry next tick; no replacement transaction. */ }

@@ -64,7 +64,7 @@ import { createSolanaLiveRpc, type SolanaLiveRead } from "./solana-live-rpc";
 import { readSolanaMainnetRpcConfig, SolanaRpcError } from "./solana-rpc";
 import { SolanaSettlementError } from "./solana-settlement";
 import { ensureSolanaTradingSchema, SolanaTradingStore, SolanaTradingStoreError } from "./solana-trading-store";
-import { solanaOwnerEpochOffset, type SolanaOwnerExpiryProof, type SolanaPreparedSetup } from "./solana-trading-store";
+import { solanaOwnerEpochOffset, solanaPendingOwnerTransactions, type SolanaOwnerExpiryProof, type SolanaPreparedSetup } from "./solana-trading-store";
 
 export class SolanaResolveError extends Error {
   constructor(message: string) { super(message); this.name = "SolanaResolveError"; }
@@ -376,14 +376,10 @@ export async function listSolanaStuckPending(db: Db, nowMs: number, postgres = f
   const trades = (await db.prepare("SELECT tenant,request_id,sequence,created_at_ms FROM solana_runtime_submissions WHERE status='pending' AND created_at_ms<=?").all(cutoff) as
     Array<{ tenant: string; request_id: string; sequence: string | number; created_at_ms: number | string }>)
     .map(row => ({ kind: "trade" as const, tenant: row.tenant, id: row.request_id, what: "live trade", atMs: Number(row.created_at_ms), vaultSequence: String(row.sequence) }));
-  const owners = (await db.prepare("SELECT tenant,setup_json FROM solana_runtime_setups").all() as Array<{ tenant: string; setup_json: string }>).flatMap(row => {
-    try {
-      const setup = JSON.parse(row.setup_json);
-      if (!setup.signature || setup.status !== "pending" || !Number.isSafeInteger(setup.preparedAtMs) || setup.preparedAtMs > cutoff) return [];
-      return [{ kind: "owner" as const, tenant: row.tenant, id: String(setup.signature), what: `owner ${typeof setup.kind === "string" ? setup.kind : "session"} transaction`,
-        atMs: setup.preparedAtMs as number, vaultSequence: typeof setup.priorSequence === "string" ? setup.priorSequence : null }];
-    } catch { return []; }
-  });
+  // Both owner slots: a revocation saved beside a record (REVOKE BESIDE A PENDING OWNER TRANSACTION) can be stuck too.
+  const owners = (await solanaPendingOwnerTransactions(db)).flatMap(item => !item.signature || item.preparedAtMs === null || item.preparedAtMs > cutoff ? []
+    : [{ kind: "owner" as const, tenant: item.tenant, id: item.signature, what: `owner ${item.kind} transaction${item.slot === "revoke" ? " (beside another)" : ""}`,
+      atMs: item.preparedAtMs, vaultSequence: item.priorSequence }]);
   return [...trades, ...owners].sort((a, b) => a.atMs - b.atMs || a.tenant.localeCompare(b.tenant) || a.id.localeCompare(b.id))
     .map(({ atMs, ...item }) => ({ ...item, ageMs: nowMs - atMs }));
 }
