@@ -14,7 +14,7 @@
  */
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import { base58Encode, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM } from "../../packages/core/src/ids";
 import { SOLANA_VAULT_USDG_MINT_EXTENSIONS, solanaVaultUsdgMintRefusal } from "../../packages/core/src/solana-live";
@@ -33,6 +33,29 @@ const agave = JSON.parse(readFileSync(new URL("../../contracts/solana/runtime-te
   ledgerToolOutput: { accounts: { pubkey: string; account: Record<string, unknown> & { data: unknown } }[] };
 };
 const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
+/**
+ * The production RPC provider's own jsonParsed answer for the USDG mint, when one is
+ * committed (contracts/solana/scripts/usdg-rpc-jsonparsed.mjs, one read-only call, run
+ * only with the owner's OK). Agave 2.3.13's decoder above runs offline; a provider may
+ * run a newer one, and the worker refuses a field shape it does not expect.
+ */
+const RPC_ANSWER = new URL("../../contracts/solana/runtime-tests/fixtures/usdg-mainnet-mint.rpc-jsonparsed.json", import.meta.url);
+type RpcScript = {
+  OUTPUT: string; USDG_MINT: string; requestBody(): string;
+  parseArgs(argv: string[]): { provider: string; rpc: string };
+  rpcRecord(body: string, head: { provider: string; readAtUtc: string }): string;
+};
+const rpcScript = () => import(new URL("../../contracts/solana/scripts/usdg-rpc-jsonparsed.mjs", import.meta.url).href) as Promise<RpcScript>;
+/** Field names, in sorted order, with each leaf's JSON type: what a decoder change would alter. */
+function shapeOf(value: unknown): unknown {
+  if (value === null) return "null";
+  if (Array.isArray(value)) return value.map(shapeOf);
+  if (typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return Object.fromEntries(Object.keys(record).sort().map((key) => [key, shapeOf(record[key])]));
+  }
+  return typeof value;
+}
 
 /** The account Agave's decoder printed for a variant, as getAccountInfo's value. */
 function agaveAccount(variant: Variant) {
@@ -184,6 +207,55 @@ describe("the mainnet USDG mint, as the worker and the vault see it", () => {
       assert.equal(typeof rentEpoch, "number", variant.name);
       assert.deepEqual(decoded, jsonParsedMint(bytes, fixture.slot).value, variant.name);
     }
+  });
+  /**
+   * An RPC provider's jsonParsed answer for the mint, checked against Agave 2.3.13's
+   * decoding of the committed bytes: the same fields, types and extensions in the same
+   * order; the vault's check_mint accepts it and so does the worker. A mismatch means the
+   * provider's decoder differs (fix the worker's reader first) or the mint changed (read
+   * its bytes again, with usdg-mainnet-mint.json).
+   */
+  async function checkRpcAnswer(record: { address: string; response: { result: { value: { data: { parsed: { info: unknown } } } } } }) {
+    assert.equal(record.address, SOLANA_USDG_MINT);
+    const value = record.response.result.value;
+    assert.deepEqual(shapeOf(value), shapeOf(agaveAccount(fixture.variants[0]!)), "the provider's jsonParsed form differs from Agave 2.3.13's");
+    assert.equal(solanaVaultUsdgMintRefusal(value.data.parsed.info), null);
+    assert.equal(await workerVerdict(value), "accepts");
+  }
+  it("checks a recorded RPC answer for the mint against Agave 2.3.13's decoding, and catches a renamed field", async () => {
+    const script = await rpcScript();
+    assert.equal(script.USDG_MINT, SOLANA_USDG_MINT);
+    assert.equal(new URL(script.OUTPUT, RPC_ANSWER).href, RPC_ANSWER.href);
+    assert.deepEqual(JSON.parse(script.requestBody()), { jsonrpc: "2.0", id: 1, method: "getAccountInfo",
+      params: [SOLANA_USDG_MINT, { encoding: "jsonParsed", commitment: "finalized" }] });
+    // An answer exactly as Agave 2.3.13 decodes the read bytes passes, through the script's own record.
+    const answer = (account: unknown) => `{"jsonrpc":"2.0","result":{"context":{"apiVersion":"2.3.13","slot":${fixture.slot}},"value":${JSON.stringify(account)}},"id":1}`;
+    const asRead = agaveAccount(fixture.variants[0]!);
+    const record = JSON.parse(script.rpcRecord(answer(asRead), { provider: "test", readAtUtc: "2026-10-20T00:00:00Z" }));
+    assert.deepEqual([record.provider, record.slot, record.apiVersion, record.method, record.encoding, record.commitment],
+      ["test", fixture.slot, "2.3.13", "getAccountInfo", "jsonParsed", "finalized"]);
+    assert.ok(!JSON.stringify(record).includes("://rpc"), "no URL is recorded");
+    await checkRpcAnswer(record);
+    // A decoder that renames one fee field is caught here; the worker would refuse USDG (no trading).
+    const renamed = JSON.parse(JSON.stringify(asRead).replaceAll("transferFeeBasisPoints", "basisPoints"));
+    await assert.rejects(checkRpcAnswer(JSON.parse(script.rpcRecord(answer(renamed), { provider: "test", readAtUtc: "x" }))), /differs from Agave 2\.3\.13/);
+    assert.equal(await workerVerdict(renamed), "refuses");
+    // The script records only a jsonParsed Token-2022 mint answer to its own request, never a URL as the provider.
+    assert.throws(() => script.rpcRecord(answer({ ...asRead, owner: "11111111111111111111111111111111" }), { provider: "test", readAtUtc: "x" }), /not the USDG mint/);
+    assert.throws(() => script.rpcRecord('{"jsonrpc":"2.0","error":{"code":-32602},"id":1}', { provider: "test", readAtUtc: "x" }), /returned an error/);
+    assert.throws(() => script.rpcRecord(answer(asRead).replace('"id":1', '"id":2'), { provider: "test", readAtUtc: "x" }), /not a JSON-RPC 2\.0 response/);
+    assert.deepEqual(script.parseArgs(["--provider", "Helius", "--rpc", "https://rpc.example.test/?api-key=k"]),
+      { provider: "Helius", rpc: "https://rpc.example.test/?api-key=k" });
+    for (const argv of [["--provider", "https://rpc.example.test/", "--rpc", "https://rpc.example.test/"], ["--provider", "x", "--rpc", "http://rpc.example.test/"],
+      ["--rpc", "https://rpc.example.test/"], ["--provider", "x", "--rpc", "https://a.test/", "--rpc", "https://b.test/"], ["--provider", "x", "--key", "y"]]) {
+      assert.throws(() => script.parseArgs(argv), /usage|--provider|--rpc/, argv.join(" "));
+    }
+  });
+  const committed = existsSync(RPC_ANSWER);
+  it("is read by the production RPC provider in the form Agave 2.3.13 decodes it", {
+    skip: committed ? false : "no production RPC answer is committed yet: with the owner's OK, run contracts/solana/scripts/usdg-rpc-jsonparsed.mjs once",
+  }, async () => {
+    await checkRpcAnswer(JSON.parse(readFileSync(RPC_ANSWER, "utf8")));
   });
   for (const variant of fixture.variants) {
     const today = WORKER_GAPS.get(variant.name);
