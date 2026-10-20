@@ -1091,3 +1091,21 @@ test("status tells the owner to reopen a token account a waiting donation needs,
     } finally { f.raw.close(); }
   }
 });
+
+test("misconfigured swap prices block trading and exits but still show the vault, fee payer, owner wallet and recoverable SOL", async () => {
+  for (const env of [{ MERRYMEN_SOLANA_COMPUTE_UNIT_PRICE_MICROLAMPORTS: "2000", MERRYMEN_SOLANA_MAX_COMPUTE_UNIT_PRICE_MICROLAMPORTS: "1000" },
+    { MERRYMEN_SOLANA_MAX_COMPUTE_UNIT_PRICE_MICROLAMPORTS: "lots" }]) {
+    const f = await fixture();
+    try {
+      await readyLive(f); f.controls.cash = 5_000_000n; f.controls.vaultNativeLamports = 1234;
+      const status = await f.runtime({ env: { ...f.env, ...env } }).status(f.scope);
+      const text = status.live.blockers.join(" | ");
+      assert.match(text, /compute-unit price settings are misconfigured/, JSON.stringify(env));
+      assert.equal(status.live.ready, false); assert.equal(status.live.canExit, false, "exits are refused too");
+      assert.doesNotMatch(text, /could not be verified/);
+      assert.equal(status.live.vault, f.vault); assert.equal(status.live.balances?.cashUsdg, "5000000");
+      assert.equal(status.live.feePayer?.level, "ok"); assert.notEqual(status.live.ownerWallet, null);
+      assert.equal(status.live.recoverable?.nativeLamports, "1234");
+    } finally { f.raw.close(); }
+  }
+});

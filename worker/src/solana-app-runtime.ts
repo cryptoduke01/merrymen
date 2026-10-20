@@ -557,7 +557,9 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       let recoverable: { nativeLamports: string; unsyncedWsolLamports: string } | null = null;
       try {
         const cfg = config(); programId = cfg.programId; vault = await deriveSolanaVaultAddress(programId, scope.owner);
-        computeUnitPrices();
+        // Misconfigured swap prices refuse trading and exits (a full blocker), but the
+        // vault, fee payer, owner wallet and recoverable SOL are still read and shown.
+        try { computeUnitPrices(); } catch (error) { blockers.push(statusBlocker(error)); }
         if (!liveReads) { if (binding.requestedMode === "live") blockers.push("Live vault state was not read."); }
         else {
           dek(); const feePayer = await getAddressFromPublicKey((await payer()).publicKey);
