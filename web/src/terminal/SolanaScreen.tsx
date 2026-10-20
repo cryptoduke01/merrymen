@@ -380,6 +380,14 @@ function ConnectedSolana() {
   // and update the test that pins it.
   const recoveryVault = !!binding && !!live?.vault && !!live.programId && binding.requestedMode === "live" && vaultSeen;
   // Off by default; only the bound owner of a vault the server has read.
+  // OWNER DECISION: the whole card stays behind the key export flag, step 2's
+  // `merrymen solana-recover` commands included, even the read-only plan.
+  // Without an exported owner key there is nothing to sign with outside
+  // Merrymen, so a default build names no recovery tool (owner controls say
+  // so when a pending owner record cannot be settled). The alternative shows
+  // step 2's read-only plan to every live owner and keeps only the Privy
+  // export button (and the signing command) behind the flag. A hosted build
+  // needs the flag as a Docker build argument (solana-glue-build's Dockerfile).
   const recoveryCard = ownerKeyExportEnabled() && sameWallet && recoveryVault && signer.address && live?.programId && live.vault
     ? { owner: signer.address, programId: live.programId, vault: live.vault } : null;
   if (!signer.authenticated) return <div className="solana-card"><p>Sign in with the same account you use for Robinhood Chain.</p><SignIn onDone={() => { void refresh().catch(() => undefined); }} /></div>;
