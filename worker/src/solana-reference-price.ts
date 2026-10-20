@@ -4,14 +4,30 @@
  * live trade whose guaranteed output is far below what SOL is worth is refused,
  * whatever Jupiter quoted, and a sell is charged at least what it is worth.
  *
- * The account, owner program, feed id and PriceUpdateV2 layout were checked
- * against Solana mainnet on 2026-10-19 with read-only RPC reads (slot
- * 458681200 and later): the receiver and push-oracle programs exist and are
- * executable, the account is the push oracle's shard-0 address for the SOL/USD
- * feed id, is owned by the receiver, carries the PriceUpdateV2 discriminator,
- * is fully verified, and decodes here to a fresh price with exponent -8.
- * `PYTH_SOL_USD_MAINNET_SNAPSHOT` in the fixture file holds those bytes.
- * Any mismatch, stale or missing price still fails closed.
+ * Evidence, and what is left of it. On 2026-10-19 between about 03:19 and
+ * 03:25 UTC, an earlier pass on this code made read-only calls to the public
+ * endpoint https://api.mainnet-beta.solana.com (getSlot, getMultipleAccounts,
+ * getAccountInfo; no key, no transaction), from slot 458681198, and reported:
+ * - both generations' receiver and price feed programs exist, are executable,
+ *   belong to the upgradeable loader and share one upgrade authority;
+ * - each generation's SOL/USD account is its price feed program's shard-0
+ *   address for the feed id, is owned by that generation's receiver, is not
+ *   executable, is 134 bytes, carries the PriceUpdateV2 discriminator, is its
+ *   own write authority, is fully verified and has exponent -8;
+ * - over a 21-round sample of about 3.5 minutes, the current account posted
+ *   every 52-53 s (oldest seen 50.3 s) and the upgraded one every 10-15 s, and
+ *   the two agreed to within 12.4 bp.
+ * Only the two getAccountInfo answers in the fixture file were kept
+ * (`PYTH_SOL_USD_MAINNET_SNAPSHOT`, `PYTH_SOL_USD_UPGRADED_MAINNET_SNAPSHOT`,
+ * fetched 03:21:05 UTC at slots 458681624-5). The other raw captures (program
+ * and ProgramData reads, the freshness sample, the Pyth pages read) were not
+ * preserved. From the committed bytes alone, tests re-prove the layout, the
+ * discriminator, the feed id, the Full level, the write authority, the decoded
+ * values and both PDA derivations. The program facts, the owner and
+ * executable fields beyond what those two answers record, and the heartbeat
+ * and agreement figures rest on that unpreserved check: re-run it read-only,
+ * and keep its output, before trusting them for live trading. Whatever was
+ * observed, any mismatch, stale or missing price fails closed.
  *
  * Pyth's 2026-08-26 Core upgrade added a second generation of programs on
  * Solana with their own feed accounts, and Pyth recommends it for new
@@ -74,8 +90,9 @@ export const PYTH_SPONSORED_SHARD = 0;
 export const PYTH_SOL_USD_FEED_ID = "ef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d";
 /**
  * Sponsored feeds post on a heartbeat and on price moves; older than this is unproven.
- * Pyth documents a 55 s heartbeat or 0.5% move for SOL/USD; mainnet showed a post every
- * 52-53 s, so this allows about two heartbeats.
+ * Pyth documents a 55 s heartbeat or 0.5% move for SOL/USD; the 2026-10-19 sample (not
+ * preserved; see the module comment) saw the current account post every 52-53 s, so this
+ * allows about two heartbeats. The upgraded account posted more often.
  */
 export const SOLANA_REFERENCE_MAX_AGE_MS = 120_000;
 export const SOLANA_REFERENCE_MAX_FUTURE_MS = 5_000;
@@ -152,8 +169,9 @@ export interface SolanaReferenceBound {
 
 /**
  * A push-oracle price feed account: the PDA of `program` for seeds
- * [shard as u16 little-endian, 32-byte feed id]. This reproduces Pyth's published
- * shard-0 address for SOL/USD and every SOL/USD feed account read on mainnet.
+ * [shard as u16 little-endian, 32-byte feed id]. For shard 0 and the SOL/USD feed id
+ * it gives each generation's pinned account, the ones the fixture file's two
+ * recorded reads came from (tests check both).
  */
 export async function derivePythPriceFeedAccount(feedIdHex: string, shard: number = PYTH_SPONSORED_SHARD,
   program: string = PYTH_PUSH_ORACLE_PROGRAM): Promise<string> {

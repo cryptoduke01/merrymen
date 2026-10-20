@@ -21,14 +21,18 @@ test("the pinned Pyth identities are canonical public keys", () => {
   for (const value of [PYTH_RECEIVER_PROGRAM, PYTH_PUSH_ORACLE_PROGRAM, PYTH_SOL_USD_ACCOUNT]) assert.equal(address(value), value);
 });
 
-// Pyth's upgraded (2026-08-26) push oracle. Not used by the module; a second real derivation to check against.
+// Pyth's upgraded (2026-08-26) price feed program, written out apart from SOLANA_PYTH_FEEDS.upgraded (which a
+// test below checks against it), so the derivations here do not merely repeat the module's own constant.
 const UPGRADED_PUSH_ORACLE = "pyt2F414BA6dPttK6RddPZUdHfapoBN24GL5wbrPCou";
 
 test("the pinned account is the push oracle's sponsored shard-0 PDA for the SOL/USD feed id", async () => {
   assert.equal(PYTH_SPONSORED_SHARD, 0);
   assert.equal(await derivePythPriceFeedAccount(PYTH_SOL_USD_FEED_ID), PYTH_SOL_USD_ACCOUNT);
   assert.equal(await derivePythPriceFeedAccount(PYTH_SOL_USD_FEED_ID, PYTH_SPONSORED_SHARD, PYTH_PUSH_ORACLE_PROGRAM), PYTH_SOL_USD_ACCOUNT);
-  // Each of these was read on mainnet on 2026-10-19: a SOL/USD PriceUpdateV2 owned by its generation's receiver.
+  // Fixed outputs of the PDA rule for other shards and programs. Of these, only the upgraded shard-0 read was
+  // kept (PYTH_SOL_USD_UPGRADED_MAINNET_SNAPSHOT). The 2026-10-19 check reported both shard-1 accounts as
+  // existing, owned by their generation's receiver and stale (unusable), but kept no capture of them: here they
+  // are derivations only, not evidence that the accounts exist.
   assert.equal(await derivePythPriceFeedAccount(PYTH_SOL_USD_FEED_ID, 1), "6bWEn5B8eJCRAek5acd3R7d4Sx3e7JWvt84srqqfYgt");
   assert.equal(await derivePythPriceFeedAccount(PYTH_SOL_USD_FEED_ID, 0, UPGRADED_PUSH_ORACLE), PYTH_SOL_USD_UPGRADED_MAINNET_SNAPSHOT.account);
   assert.equal(await derivePythPriceFeedAccount(PYTH_SOL_USD_FEED_ID, 1, UPGRADED_PUSH_ORACLE), "GGdMnioYUC8qFWrWXJP2n3YHAns49MJW87CeuT7sgvrf");
@@ -75,7 +79,11 @@ test("a real upgraded-generation account shares the layout but is refused while 
   assert.deepEqual([decoded.price, decoded.exponent, decoded.publishTimeMs, decoded.postedSlot], ["10516352961", -8, 1_792_380_063_000, 458_681_625]);
 });
 
-// Pyth's 2026-08-26 Core upgrade, as derived on-chain (not from Pyth's contradictory upgrade table).
+// Pyth's 2026-08-26 Core upgrade, written out apart from SOLANA_PYTH_FEEDS.upgraded. Offline, the account is
+// checked as the price feed program's shard-0 PDA and the receiver as the owner recorded in
+// PYTH_SOL_USD_UPGRADED_MAINNET_SNAPSHOT; no read of the programs themselves was kept (see the module comment).
+// The pin follows that derivation: the 2026-10-19 pass reported that Pyth's published table still listed
+// 7UVim… as the upgraded SOL/USD address.
 const UPGRADED = { receiverProgram: "rec2HHDDnjLfj4kE7VyEtFA1HPGQLK33259532cRyHp", priceFeedProgram: "pyt2F414BA6dPttK6RddPZUdHfapoBN24GL5wbrPCou",
   account: "7AviUf9nL62mcxNbQGKm4nKDQnPjswo6c5MX4D57HmyE" };
 
@@ -277,8 +285,8 @@ test("the tolerance setting defaults to 3% and refuses out-of-range or malformed
   }
 });
 
-// The operator alert: two missed ~53 s heartbeats stop every live trade, so a
-// refused read has to be said where an operator can alert on it.
+// The operator alert: about two missed heartbeats (Pyth documents 55 s for SOL/USD)
+// stop every live trade, so a refused read has to be said where an operator can alert on it.
 function recorder() {
   const lines: Array<[kind: "alert" | "info", line: string]> = [];
   return { lines, sink: { alert: (line: string) => { lines.push(["alert", line]); }, info: (line: string) => { lines.push(["info", line]); } } };

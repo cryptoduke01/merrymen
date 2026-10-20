@@ -1,6 +1,6 @@
 /**
- * Pyth SOL/USD accounts for tests: synthetic builders, and two real mainnet
- * reads recorded once (below). Tests never touch the network.
+ * Pyth SOL/USD accounts for tests: synthetic builders, and two mainnet reads
+ * recorded once (below). Tests never touch the network.
  */
 import { createHash } from "node:crypto";
 import { PYTH_RECEIVER_PROGRAM, PYTH_SOL_USD_FEED_ID, SOLANA_PYTH_DEFAULT_GENERATION, SOLANA_PYTH_FEEDS, solanaReferenceBound,
@@ -39,12 +39,19 @@ export function pythBound(intent: Parameters<typeof solanaReferenceBound>[0], no
 }
 
 /**
- * Real Solana mainnet reads, recorded read-only on 2026-10-19 from the public
- * endpoint https://api.mainnet-beta.solana.com (no API key, no transaction).
+ * Solana mainnet reads, recorded read-only on 2026-10-19 at about 03:21 UTC from
+ * the public endpoint https://api.mainnet-beta.solana.com (no API key, no
+ * transaction) by an earlier pass on this code, as it reported them.
  * `minContextSlot` came from getSlot (commitment confirmed) sent at
  * `requestedAtMs`; `request` is the getAccountInfo call that followed, the same
- * call `readSolanaReferencePrice` makes; `response` is the RPC's JSON answer,
- * verbatim; `fetchedAtMs` is the local clock when it arrived.
+ * call `readSolanaReferencePrice` makes; `response` is the RPC's JSON answer as
+ * recorded; `fetchedAtMs` is the local clock when it arrived.
+ *
+ * These two answers are the only raw evidence kept from that check; its other
+ * captures were not preserved. Their bytes are internally consistent (layout,
+ * discriminator, feed id, write authority, PDA), which tests prove, but nothing
+ * offline can prove they came from mainnet rather than being typed in: a fresh
+ * read-only read of the same accounts is the way to confirm them.
  */
 export interface PythMainnetSnapshot {
   rpc: string; account: string; requestedAtMs: number; fetchedAtMs: number; minContextSlot: number;
