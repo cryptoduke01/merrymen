@@ -60,6 +60,7 @@ import { createSolanaLiveRpc, type SolanaLiveRead } from "./solana-live-rpc";
 import { readSolanaMainnetRpcConfig, SolanaRpcError } from "./solana-rpc";
 import { SolanaSettlementError } from "./solana-settlement";
 import { ensureSolanaTradingSchema, SolanaTradingStore, SolanaTradingStoreError } from "./solana-trading-store";
+import { SOLANA_PENDING_STUCK_MS } from "./solana-agent";
 
 export class SolanaResolveError extends Error {
   constructor(message: string) { super(message); this.name = "SolanaResolveError"; }
@@ -77,6 +78,8 @@ export const SOLANA_RESOLVE_USAGE = [
   `--third-rpc also asks the provider whose HTTPS URL is in ${SOLANA_RESOLVE_THIRD_RPC_ENV} (set it in .env.solana.local or the environment, never on the command line).`,
   "--exclude sets aside one provider that reports a conflicting final outcome or cannot be read: its view is still shown and recorded, two other providers on their own",
   "hostnames must agree, and an expiry is still refused while any provider has seen the signature.",
+  "npm run solana:resolve -- pending lists every live trade and signed owner transaction pending over three minutes (the pending-stuck alert's): tenant, id, age and",
+  "vault sequence, from the database alone (no RPC).",
 ].join("\n");
 
 const SCHEMA = `CREATE TABLE IF NOT EXISTS solana_operator_resolutions (
@@ -317,6 +320,38 @@ export async function resolveSolanaPendingTrade(input: SolanaResolveInput): Prom
   return { owner, record, views, decision, booked: true, lines };
 }
 
+/**
+ * What the agent's pending-stuck [alert] counts, by name: every live trade
+ * admitted, and every signed owner transaction prepared, at least
+ * `olderThanMs` before `nowMs` (SOLANA_PENDING_STUCK_MS) and still pending,
+ * oldest first. Read from the database alone: no RPC, and nothing secret (no
+ * signed bytes, sealed seeds or settings). `id` is a trade's request id (what
+ * show and book take) or an owner transaction's signature; `vaultSequence` is
+ * the sequence a trade was signed against, or the one an owner transaction was
+ * prepared at.
+ */
+export async function listSolanaStuckPending(db: Db, nowMs: number, postgres = false, olderThanMs = SOLANA_PENDING_STUCK_MS) {
+  await ensureSolanaResolutionSchema(db, postgres);
+  const cutoff = nowMs - olderThanMs;
+  const trades = (await db.prepare("SELECT tenant,request_id,sequence,created_at_ms FROM solana_runtime_submissions WHERE status='pending' AND created_at_ms<=?").all(cutoff) as
+    Array<{ tenant: string; request_id: string; sequence: string | number; created_at_ms: number | string }>)
+    .map(row => ({ kind: "trade" as const, tenant: row.tenant, id: row.request_id, what: "live trade", atMs: Number(row.created_at_ms), vaultSequence: String(row.sequence) }));
+  const owners = (await db.prepare("SELECT tenant,setup_json FROM solana_runtime_setups").all() as Array<{ tenant: string; setup_json: string }>).flatMap(row => {
+    try {
+      const setup = JSON.parse(row.setup_json);
+      if (!setup.signature || setup.status !== "pending" || !Number.isSafeInteger(setup.preparedAtMs) || setup.preparedAtMs > cutoff) return [];
+      return [{ kind: "owner" as const, tenant: row.tenant, id: String(setup.signature), what: `owner ${typeof setup.kind === "string" ? setup.kind : "session"} transaction`,
+        atMs: setup.preparedAtMs as number, vaultSequence: typeof setup.priorSequence === "string" ? setup.priorSequence : null }];
+    } catch { return []; }
+  });
+  return [...trades, ...owners].sort((a, b) => a.atMs - b.atMs || a.tenant.localeCompare(b.tenant) || a.id.localeCompare(b.id))
+    .map(({ atMs, ...item }) => ({ ...item, ageMs: nowMs - atMs }));
+}
+function age(ms: number): string {
+  const minutes = Math.floor(ms / 60_000);
+  return minutes < 60 ? `${minutes} min` : `${Math.floor(minutes / 60)} h ${minutes % 60} min`;
+}
+
 /** The recorded operator resolutions for a tenant, newest first. */
 export async function listSolanaResolutions(db: Db, tenant: string, requestId?: string, postgres = false) {
   await ensureSolanaResolutionSchema(db, postgres);
@@ -382,6 +417,12 @@ export async function runSolanaResolveCommand(argv: readonly string[], deps: Sol
     if (!rows.length) return "No operator resolutions are recorded for that tenant.";
     return rows.map(row => [new Date(row.approvedAtMs).toISOString(), row.requestId, row.outcome, row.bookedAtMs !== null ? "booked" : row.refusal ? `refused: ${row.refusal}` : "not booked",
       `by ${row.operator}`, row.reason].join("\t")).join("\n");
+  }
+  if (command === "pending" && positional.length === 0 && flags.size === 0) {
+    const items = await listSolanaStuckPending(deps.db, (deps.now ?? Date.now)(), postgres);
+    if (!items.length) return `Nothing has been pending for over ${SOLANA_PENDING_STUCK_MS / 60_000} minutes.`;
+    return [`Pending for over ${SOLANA_PENDING_STUCK_MS / 60_000} minutes, oldest first (tenant, what, id, age, vault sequence):`, ...items.map(item => [`  ${item.tenant}`, item.what, item.id,
+      `pending ${age(item.ageMs)}`, `vault sequence ${item.vaultSequence ?? "unknown"}`, ...(item.kind === "trade" ? [`npm run solana:resolve -- show ${item.tenant} ${item.id}`] : [])].join("\t"))].join("\n");
   }
   const booking = command === "book";
   if ((command !== "show" && !booking) || positional.length !== 2 || (booking ? !flags.has("operator") || !flags.has("reason") : flags.has("operator") || flags.has("reason"))) {

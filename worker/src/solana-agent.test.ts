@@ -552,6 +552,8 @@ test("trades and owner transactions still pending three minutes on say one [aler
     JSON.stringify({ status: undefined, preparedAtMs: 0 }));
   await agent.tick();
   assert.equal(lines.length, 1); assert.match(lines[0]!, /^\[alert\] Solana transactions stuck pending: /);
+  // The line carries counts only; the operator gets the names from the resolve tool's pending listing.
+  assert.match(lines[0]!, /npm run solana:resolve -- pending names each one \(tenant, id, age, vault sequence\)/);
   assert.deepEqual(fieldsOf(lines[0]!), { solana: "alert", kind: "pending-stuck", trades: 1, ownerTransactions: 1, oldestAgeMs: SOLANA_PENDING_STUCK_MS + 60_000 });
   for (const secret of [TENANT, OWNER, "sig-young", "owner-sig", "vault-young"]) assert.ok(!lines[0]!.includes(secret), secret);
   clock.now += 15_000; await agent.tick(); assert.equal(lines.length, 1, "said once per repeat window");

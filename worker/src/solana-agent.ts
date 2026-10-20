@@ -176,7 +176,8 @@ export function createSolanaAgent(options: SolanaAgentOptions) {
    * prepared, more than SOLANA_PENDING_STUCK_MS ago and still pending: both providers could not read or agree on
    * its outcome. Each holds its account's reservation (no new trade, no in-app owner transaction but a revoke).
    * One [alert] with counts and the oldest age only (no tenant, owner, signature or bytes), at most once per
-   * SOLANA_AGENT_ALERT_REPEAT_MS while any is stuck, and at once again after none was.
+   * SOLANA_AGENT_ALERT_REPEAT_MS while any is stuck, and at once again after none was. The operator finds which
+   * with `npm run solana:resolve -- pending` (listSolanaStuckPending), which reads the same rows by name.
    */
   const stuck = async () => {
     const at = now(), cutoff = at - SOLANA_PENDING_STUCK_MS;
@@ -191,7 +192,7 @@ export function createSolanaAgent(options: SolanaAgentOptions) {
     say("pending-stuck", `[alert] Solana transactions stuck pending: ${JSON.stringify({ solana: "alert", kind: "pending-stuck", trades: tradeCount,
       ownerTransactions: owners.length, oldestAgeMs: at - Math.min(...oldest) })} — both RPC providers could not read or agree on their outcome for over `
       + `${SOLANA_PENDING_STUCK_MS / 60_000} minutes; each holds its account's reservation (no new trade, no in-app owner transaction but a revoke). Check both `
-      + "providers; npm run solana:resolve -- show <tenant> <request-id> shows a trade's evidence");
+      + "providers; npm run solana:resolve -- pending names each one (tenant, id, age, vault sequence), and show <tenant> <request-id> shows a trade's evidence");
   };
   /**
    * The shared fee payer, read by the agent itself every SOLANA_AGENT_FEE_PAYER_CHECK_MS while any live
