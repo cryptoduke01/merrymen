@@ -20,6 +20,15 @@ const TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 export class SolanaPaperServiceError extends Error {
   constructor(message: string) { super(message); this.name = "SolanaPaperServiceError"; }
 }
+/** The fixed refusal of a paper trade whose fresh quote guarantees less than the owner's previewed minimum. */
+export const SOLANA_PAPER_PRICE_MOVED = "The fresh quote's minimum output is below the previewed minimum.";
+/**
+ * That refusal, carrying the fresh quote's guaranteed output so the owner can
+ * see it and choose to trade at it with a new request. Nothing was recorded.
+ */
+export class SolanaPaperPriceMovedError extends SolanaPaperServiceError {
+  constructor(readonly freshMinOutAmount: string) { super(SOLANA_PAPER_PRICE_MOVED); }
+}
 
 export function assertSolanaPaperLocalMode(): void {
   if (isHostedMode()) {
@@ -160,7 +169,7 @@ export function createSolanaPaperService(
       }
       const prepared = await prepare(owner, intent, true);
       if (!solanaTradeFloorMet(prepared.quote.minOutAmount, floor)) {
-        throw new SolanaPaperServiceError("The fresh quote's minimum output is below the previewed minimum.");
+        throw new SolanaPaperPriceMovedError(prepared.quote.minOutAmount);
       }
       const nowMs = now();
       // Portfolio quote reads can take time; never commit using an expired

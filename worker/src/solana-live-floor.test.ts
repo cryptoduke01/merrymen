@@ -224,9 +224,11 @@ test("C2: a manual sell built 1% below its preview, inside the independent price
   const preview = await f.app.preview(f.scope, { mode: "live", intent }) as { quote: { minOutAmount: string } };
   assert.equal(preview.quote.minOutAmount, "14925000");
   // The route is built at 14,850,000 with a 14,775,750 minimum: above the Pyth floor, below what the owner saw.
-  await assert.rejects(f.app.trade(f.scope, { mode: "live", intent: { ...intent, minOutAmount: preview.quote.minOutAmount } }), /refused: price-moved/);
+  // The refusal carries the minimum the fresh route guarantees, for the owner to review.
+  await assert.rejects(f.app.trade(f.scope, { mode: "live", intent: { ...intent, minOutAmount: preview.quote.minOutAmount } }),
+    (error: unknown) => error instanceof Error && /refused: price-moved/.test(error.message) && (error as { freshMinOutAmount?: string }).freshMinOutAmount === "14775750");
   assert.deepEqual(await f.submissions(), []); assert.equal(f.sends.length, 0);
-  // Nothing was recorded: after a new preview the same request goes through at the new minimum.
+  // Nothing was recorded: once the owner accepts that minimum, the same request goes through at it.
   const placed = await f.app.trade(f.scope, { mode: "live", intent: { ...intent, minOutAmount: "14775750" } });
   assert.ok("status" in placed && placed.status === "pending" && placed.minOutAmount === "14775750");
   assert.equal((await f.submissions()).length, 1); assert.equal(f.sends.length, 1);

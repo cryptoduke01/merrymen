@@ -94,12 +94,20 @@ export interface SolanaLiveJournal {
 }
 
 export class SolanaExecutionError extends Error {
-  /** price-moved: the fresh route guarantees less than the minimum the owner previewed; nothing was signed or recorded. */
-  constructor(readonly code: "invalid-intent" | "invalid-state" | "unsafe-program" | "unsafe-route" | "simulation" | "fee-cap" | "risk" | "conflict" | "cancelled" | "owner-refund" | "price-moved") {
+  /**
+   * price-moved: the fresh route guarantees less than the minimum the owner
+   * previewed; nothing was signed or recorded. `freshMinOutAmount` is what that
+   * route guarantees, so the owner can see it and choose to trade at it (a new
+   * request carrying it as its floor). It is shown, never applied by itself.
+   */
+  readonly freshMinOutAmount?: string;
+  constructor(readonly code: "invalid-intent" | "invalid-state" | "unsafe-program" | "unsafe-route" | "simulation" | "fee-cap" | "risk" | "conflict" | "cancelled" | "owner-refund" | "price-moved",
+    detail: { freshMinOutAmount?: string } = {}) {
     super(code === "owner-refund"
       ? "Solana live execution refused: owner-refund. Tokens were sent to this swap's temporary account; the vault returns them to the owner's own token account for that mint, which is closed or unsafe. The owner must reopen it before this swap can run."
       : `Solana live execution refused: ${code}.`);
     this.name = "SolanaExecutionError";
+    if (code === "price-moved" && detail.freshMinOutAmount !== undefined) this.freshMinOutAmount = detail.freshMinOutAmount;
   }
 }
 function fail(code: SolanaExecutionError["code"] = "invalid-state"): never { throw new SolanaExecutionError(code); }
@@ -536,7 +544,8 @@ export function createSolanaExecutor(options: SolanaExecutorOptions) {
       validateSolanaQuote(route.quote, paperIntent(intent), timestamp());
       // The route's guaranteed output is what gets signed (min_out): below the
       // minimum the owner previewed, the price moved and nothing goes further.
-      if (!solanaTradeFloorMet(route.quote.minOutAmount, floor)) return fail("price-moved");
+      // The refusal carries that guaranteed output (already validated with the quote) for the owner to review.
+      if (!solanaTradeFloorMet(route.quote.minOutAmount, floor)) throw new SolanaExecutionError("price-moved", { freshMinOutAmount: route.quote.minOutAmount });
       validateJupiterCpi({ swapInstruction: { programId: "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4", data: route.dataBase64,
         accounts: route.accounts.map(meta => ({ pubkey: meta.address, isSigner: meta.isSigner, isWritable: meta.isWritable })) },
         addressLookupTableAddresses: route.lookupTableAddresses }, buildRequest, route.quote);

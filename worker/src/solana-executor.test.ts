@@ -7,7 +7,7 @@ import { CHAINS, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM } from "../../packages/cor
 import { deriveSolanaVaultAddress, deriveSolanaSwapAuthority, deriveSolanaAta, SOLANA_VAULT_LOCAL_TEST_PROGRAM,
   SOLANA_VAULT_ACCOUNT_SIZE, SOLANA_VAULT_DISCRIMINATOR, SOLANA_SWAP_EVENT_DISCRIMINATOR,
   SOLANA_CLASSIC_TOKEN_PROGRAM, SOLANA_WRAPPED_SOL_MINT } from "../../packages/core/src/solana-live";
-import { createSolanaExecutor, reconcileSolanaSubmission, verifySolanaVaultDeployment, type SolanaLiveRecord, type SolanaSignedSubmission, type SolanaExecutorOptions } from "./solana-executor";
+import { createSolanaExecutor, reconcileSolanaSubmission, SolanaExecutionError, verifySolanaVaultDeployment, type SolanaLiveRecord, type SolanaSignedSubmission, type SolanaExecutorOptions } from "./solana-executor";
 import { settleSolanaReceipt, solanaVaultEvents } from "./solana-settlement";
 import { JUPITER_SWAP_PROGRAM, type JupiterCpiRoute } from "./solana-live-market";
 import type { SolanaLiveRead, SolanaLiveRpc, SolanaSendOptions } from "./solana-live-rpc";
@@ -757,6 +757,10 @@ test("the owner's previewed minimum: a route guaranteeing less is refused before
   const f = await fixture(), executor = createSolanaExecutor(f.options);
   const priceMoved = (error: unknown) => error instanceof Error && /refused: price-moved\.$/.test(error.message);
   await assert.rejects(executor.execute(f.intent, { minOutAmount: "1980001" }), priceMoved);
+  // The refusal carries what the fresh route guarantees, for the owner to review; its text stays fixed.
+  await assert.rejects(executor.execute(f.intent, { minOutAmount: "1980001" }),
+    (error: unknown) => error instanceof SolanaExecutionError && error.code === "price-moved" && error.freshMinOutAmount === "1980000");
+  assert.equal(new SolanaExecutionError("risk", { freshMinOutAmount: "1" }).freshMinOutAmount, undefined, "only price-moved carries one");
   assert.equal(f.getRecord(), null);
   for (const step of ["simulateTransaction", "persist", "send"]) assert.ok(!f.calls.includes(step), `refused before ${step}`);
   // Nothing was recorded, so the same request id goes through after a new preview at (or below) the route's minimum.

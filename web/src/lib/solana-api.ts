@@ -7,7 +7,7 @@ import { SolanaAppRuntimeError } from "../../../worker/src/solana-app-runtime";
 import { SolanaTradingStoreError } from "../../../worker/src/solana-trading-store";
 import { SolanaExecutionError } from "../../../worker/src/solana-executor";
 import { SolanaLiveMarketError } from "../../../worker/src/solana-live-market";
-import { SolanaPaperServiceError } from "../../../worker/src/solana-paper-service";
+import { SolanaPaperPriceMovedError, SolanaPaperServiceError } from "../../../worker/src/solana-paper-service";
 import { SolanaSettlementError } from "../../../worker/src/solana-settlement";
 import { authenticateSolana, SolanaWebError } from "./solana-auth";
 import { getSolanaBindingStore, SolanaBindingError } from "./solana-binding-store";
@@ -73,6 +73,19 @@ function setupError(error: unknown): boolean {
  * fixed message. Refused before anything was signed, sent or recorded.
  */
 const PRICE_MOVED = "The price moved. Preview again; nothing was sent.";
+/**
+ * What the fresh route or quote guarantees, carried with a price-moved 409 as
+ * freshMinOutAmount (base units of the output token), so the page can show it
+ * and let the owner place the same trade at it after reviewing it: a new
+ * request whose floor is that amount. The server never applies it by itself,
+ * and the owner's floor stays exact (no tolerance). Only a canonical positive
+ * integer is passed on.
+ */
+function freshMinimum(error: unknown): string | undefined {
+  const value = error instanceof SolanaExecutionError && error.code === "price-moved" ? error.freshMinOutAmount
+    : error instanceof SolanaPaperPriceMovedError ? error.freshMinOutAmount : undefined;
+  return typeof value === "string" && /^[1-9][0-9]{0,38}$/.test(value) ? value : undefined;
+}
 const EXECUTION_REFUSALS: Partial<Record<SolanaExecutionError["code"], readonly [number, string]>> = {
   "price-moved": [409, PRICE_MOVED],
   "invalid-intent": [400, "This trade request is not supported. Nothing was sent."],
@@ -201,6 +214,7 @@ export async function solanaResponse(action: () => Promise<unknown>) {
     else if (error instanceof SolanaMarketError || error instanceof SolanaRpcError) message = error.message;
     // Unknown provider/storage errors are never reflected: they may contain
     // endpoints, API keys, sealed session keys, SQL values or wallet material.
-    return NextResponse.json({ error: message, ownerFacing: true, ...(notSaved ? { notSaved: true } : {}) }, { status, headers });
+    const fresh = status === 409 && message === PRICE_MOVED ? freshMinimum(error) : undefined;
+    return NextResponse.json({ error: message, ownerFacing: true, ...(notSaved ? { notSaved: true } : {}), ...(fresh ? { freshMinOutAmount: fresh } : {}) }, { status, headers });
   }
 }

@@ -6,7 +6,7 @@ import path from "node:path";
 import { CHAINS, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM, base58Encode } from "../../packages/core/src/ids";
 import type { SolanaMint, SolanaQuote, SolanaSwapIntent } from "../../packages/core/src/solana";
 import { SolanaPaperStore } from "./solana-paper-store";
-import { createSolanaPaperService, type SolanaPaperMarket } from "./solana-paper-service";
+import { createSolanaPaperService, SolanaPaperPriceMovedError, SolanaPaperServiceError, type SolanaPaperMarket } from "./solana-paper-service";
 import { createSolanaMarket, SolanaMarketError } from "./solana-market";
 import { SOLANA_MAINNET_GENESIS_HASH } from "./solana-rpc";
 import { paperUsdgRaw, runSolanaPaperCommand } from "./solana-paper-command";
@@ -83,6 +83,9 @@ describe("Solana paper service", () => {
     const h = harness();
     // The fresh quote for this buy guarantees 9,900,000.
     await assert.rejects(h.service.trade(OWNER, h.intent(), { minOutAmount: "9900001" }), /below the previewed minimum/);
+    // The refusal carries the fresh quote's guaranteed output for the owner to review.
+    await assert.rejects(h.service.trade(OWNER, h.intent(), { minOutAmount: "9900001" }),
+      (error: unknown) => error instanceof SolanaPaperPriceMovedError && error instanceof SolanaPaperServiceError && error.freshMinOutAmount === "9900000");
     assert.equal(h.store.get(OWNER)!.version, 0); assert.equal(h.store.get(OWNER)!.trades.length, 0);
     // Nothing was recorded: the same request id is placed after a new preview at the quote's minimum.
     const placed = await h.service.trade(OWNER, h.intent(), { minOutAmount: "9900000" });

@@ -4,7 +4,7 @@ import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { SolanaExecutionError } from "../../../worker/src/solana-executor";
 import { SolanaLiveMarketError } from "../../../worker/src/solana-live-market";
-import { SolanaPaperServiceError } from "../../../worker/src/solana-paper-service";
+import { SOLANA_PAPER_PRICE_MOVED, SolanaPaperPriceMovedError, SolanaPaperServiceError } from "../../../worker/src/solana-paper-service";
 import { SolanaSettlementError } from "../../../worker/src/solana-settlement";
 import { LIMITS_NO_LONGER_VALID, SolanaAppRuntimeError } from "../../../worker/src/solana-app-runtime";
 import { SolanaMarketError } from "../../../worker/src/solana-market";
@@ -108,8 +108,13 @@ test("every paper refusal the worker raises has a fixed owner answer, and the fi
     assert.equal(answers.get(message)?.status, 409, message);
   }
   assert.match(answers.get("The Solana paper book's limits have expired.")!.error, /limits have expired\. Save new limits/);
-  // A paper trade below the minimum the owner previewed reads as the live one does.
-  assert.deepEqual(answers.get("The fresh quote's minimum output is below the previewed minimum."), { status: 409, error: "The price moved. Preview again; nothing was sent." });
+  // A paper trade below the minimum the owner previewed reads as the live one does, with the fresh minimum to review.
+  assert.ok(source.includes("new SolanaPaperPriceMovedError(prepared.quote.minOutAmount)"), "the paper floor still raises its own refusal");
+  const paperMoved = await solanaResponse(async () => { throw new SolanaPaperPriceMovedError("9900000"); });
+  assert.equal(paperMoved.status, 409);
+  assert.deepEqual(await paperMoved.json(), { error: "The price moved. Preview again; nothing was sent.", ownerFacing: true, freshMinOutAmount: "9900000" });
+  assert.deepEqual(await (await solanaResponse(async () => { throw new SolanaPaperServiceError(SOLANA_PAPER_PRICE_MOVED); })).json(),
+    { error: "The price moved. Preview again; nothing was sent.", ownerFacing: true });
   assert.deepEqual(answers.get("The USDG mint does not match the configured cash asset."), { status: 503, error: "Solana trading is not available." });
   // An unlisted message is never reflected.
   const unknown = await solanaResponse(async () => { throw new SolanaPaperServiceError("constructor"); });
@@ -200,6 +205,20 @@ test("owner bytes refused before anything was saved answer notSaved, and nothing
     const body = await (await solanaResponse(async () => { throw error; })).json() as Record<string, unknown>;
     assert.equal(Object.hasOwn(body, "notSaved"), false, error.message);
   }
+});
+
+test("a price-moved refusal carries the fresh guaranteed minimum for the owner to review, and nothing else does", async () => {
+  const moved = await solanaResponse(async () => { throw new SolanaExecutionError("price-moved", { freshMinOutAmount: "14775750" }); });
+  assert.equal(moved.status, 409);
+  assert.deepEqual(await moved.json(), { error: "The price moved. Preview again; nothing was sent.", ownerFacing: true, freshMinOutAmount: "14775750" });
+  // Without one, or with anything but a canonical positive integer, the answer carries none.
+  for (const freshMinOutAmount of [undefined, "0", "01", "1.5", "-1", "1e9", "1".repeat(40)]) {
+    const body = await (await solanaResponse(async () => { throw new SolanaExecutionError("price-moved", { freshMinOutAmount }); })).json() as Record<string, unknown>;
+    assert.equal(Object.hasOwn(body, "freshMinOutAmount"), false, String(freshMinOutAmount));
+    assert.equal(body.error, "The price moved. Preview again; nothing was sent.");
+  }
+  const risk = await (await solanaResponse(async () => { throw new SolanaExecutionError("risk", { freshMinOutAmount: "1" }); })).json() as Record<string, unknown>;
+  assert.equal(Object.hasOwn(risk, "freshMinOutAmount"), false);
 });
 
 test("a paced intent answers 429 in its own words, never as an outage", async () => {
