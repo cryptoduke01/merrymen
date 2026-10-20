@@ -258,6 +258,27 @@ const BASE58_RUN = /[1-9A-HJ-NP-Za-km-z]{32,}/g;
 function hexDigit(code: number): boolean {
   return (code >= 48 && code <= 57) || (code >= 65 && code <= 70) || (code >= 97 && code <= 102);
 }
+/** `s` from `from` on is hex digits alone. */
+function hexFrom(s: string, from: number): boolean {
+  for (let i = from; i < s.length; i++) if (!hexDigit(s.charCodeAt(i))) return false;
+  return true;
+}
+/** An ASCII letter or digit: what the default scan will not read an id against. */
+function alnumAt(text: string, i: number): boolean {
+  const code = i >= 0 && i < text.length ? text.charCodeAt(i) : 0;
+  return (code >= 48 && code <= 57) || (code >= 65 && code <= 90) || (code >= 97 && code <= 122);
+}
+/** The longest pattern filler repeats: "xxxx…", "haha…", "abcabc…", "wxyzwxyz…". */
+const FILLER_PERIOD = 4;
+/** `s` repeats a pattern of FILLER_PERIOD characters or fewer from end to end: filler, never an id. */
+function filler(s: string): boolean {
+  for (let k = 1; k <= FILLER_PERIOD; k++) {
+    let i = 0;
+    while (i + k < s.length && s[i] === s[i + k]) i++;
+    if (i + k >= s.length) return true;
+  }
+  return false;
+}
 /**
  * Base58 decodes one glued scan may spend. Each costs up to about 88 × 64
  * steps; past the cap every further candidate run counts as an id unread: a
@@ -267,12 +288,36 @@ const GLUED_DECODES = 4_096;
 
 export interface OnchainIdScan {
   /**
-   * Also find an id glued to the text around it ("CA<mint>", "<mint>is"): any
-   * window of a longer base58 run that decodes to exactly 32 or 64 bytes. The
-   * hit's value is the whole run, so a redactor strips all of it. Windows of
-   * hex digits alone (hashes, long numbers) are never ids. Off by default:
-   * services/brain/tests/data/onchain_ids.json pins the default to Brain's
-   * Python mirror, which treats a run inside a longer word as no id.
+   * Also find an id glued to the text around it ("CA<mint>", "<mint>is"),
+   * audit regressions F3. Every maximal base58 run is read. A run with nothing
+   * alphanumeric on either side is read exactly as the default reads it; any
+   * other run, or a standalone one that is not itself a key or signature, is a
+   * hit when the whole run or any window of it decodes to exactly 32 or 64
+   * bytes. The hit's value is the whole run, so a redactor strips all of it.
+   * Hex digits alone (digests, long numbers, an 0x string split at its zeros,
+   * with the x of its "0x") and filler (one to four characters repeated:
+   * "xxxx…", "hahaha…") are never read as an id glued to anything; an x after
+   * a 0 with anything but hex behind it is read as part of the run.
+   *
+   * For the public and model-facing backstops. The callers, which this list
+   * must name exactly: X posts (worker/src/xpost/public-wallet.ts), social
+   * takes (worker/src/social-post.ts admitPost), published theses and their
+   * model posts (worker/src/thesis-policy.ts addressy), Brain's decisions and
+   * the desk policy sent to it (worker/src/brain-client.ts), Brain's own validator
+   * (services/brain/brain/schemas.py `_reject_executable`) and the worker's
+   * re-check of its desk answer (worker/src/desk/brain-desk.ts), tags and
+   * comments on X before a model reads them (worker/src/xpost/replies.ts
+   * linkOrSecret), the coin name drawn on a P&L card (worker/src/pnl-card.ts),
+   * event text redacted for the Telegram chat model (worker/src/telegram/reads.ts
+   * redactAddresses), room prompts (worker/src/groupchat/voice.ts scrubIds) and
+   * the soul's memory, notes and journal (worker/src/soul.ts). Telegram event
+   * text, room prompts and the soul's journal (scrubProse) go through
+   * redactSolanaIds, which replaces the longest value first, before any 0x rule;
+   * the soul's memory and notes (sanitizeMemory, sanitizeNote) refuse the whole
+   * text, as every other caller here refuses.
+   * Off by default: the name checks that also call this detector keep reading
+   * a run inside a longer word as no id. Brain's Python mirror implements both
+   * scans, and services/brain/tests/data/onchain_ids.json pins both to it.
    */
   glued?: boolean;
 }
@@ -292,11 +337,18 @@ function gluedShape(run: string, budget: { left: number }): "address" | "hash" |
   // nonHex[i]: characters before i that are not hex digits, so a window of hex alone is skipped in O(1).
   const nonHex = new Uint32Array(run.length + 1);
   for (let i = 0; i < run.length; i++) nonHex[i + 1] = nonHex[i]! + (hexDigit(run.charCodeAt(i)) ? 0 : 1);
+  // breaks[k - 1][i]: positions p < i where run[p] differs from run[p + k], so a window of filler is skipped in O(1).
+  const breaks = Array.from({ length: FILLER_PERIOD }, (_, j) => {
+    const b = new Uint32Array(run.length + 1);
+    for (let i = 0; i < run.length; i++) b[i + 1] = b[i]! + (i + j + 1 < run.length && run[i] !== run[i + j + 1] ? 1 : 0);
+    return b;
+  });
+  const repeats = (start: number, end: number): boolean => breaks.some((b, j) => b[end - j - 1] === b[start]);
   for (const [min, max, full, shape] of [[86, 88, 87, 64], [32, 44, 43, 32]] as const) {
     for (let start = 0; start + min <= run.length; start++) {
       for (let length = min; length <= max && start + length <= run.length; length++) {
         if (length < full && run[start] !== "1") continue;
-        if (nonHex[start + length] === nonHex[start]) continue;
+        if (nonHex[start + length] === nonHex[start] || repeats(start, start + length)) continue;
         if (budget.left-- <= 0) return "unread";
         if (base58Decode(run.slice(start, start + length))?.length === shape) return shape === 64 ? "hash" : "address";
       }
@@ -320,11 +372,20 @@ export function onchainIdsIn(text: unknown, scan: OnchainIdScan = {}): OnchainId
   if (scan.glued) {
     const budget = { left: GLUED_DECODES };
     for (const m of text.matchAll(BASE58_RUN)) {
-      // "0x" opens hex: its x is the prefix's, never part of a base58 id.
-      const s = m[0][0] === "x" && m.index! > 0 && text[m.index! - 1] === "0" ? m[0].slice(1) : m[0];
-      if (s.length < 32) continue;
-      // A whole run that is a key or signature, as below, wherever it sits; else look inside it.
-      const whole = s.length <= 88 ? base58Shape(s) : null;
+      const s = m[0];
+      const start = m.index!;
+      // "0x" then hex alone is that hex (an EVM id, or one split at its zeros), never a base58 id
+      // glued to anything. With anything else after it the x is the run's own: a key can begin
+      // with one ("10x<key>", "CA0x<key>"), and dropping it hid such a key from every window.
+      if (s[0] === "x" && start > 0 && text[start - 1] === "0" && hexFrom(s, 1)) continue;
+      let whole: "address" | "hash" | null = null;
+      if (!alnumAt(text, start - 1) && !alnumAt(text, start + s.length)) {
+        // Nothing alphanumeric either side: the run the default scan reads, read the same way.
+        whole = s.length <= 88 ? base58Shape(s) : null;
+      } else if (s.length <= 88) {
+        // Glued: the whole run counts only when it is neither hex alone nor filler.
+        whole = hexFrom(s, 0) || filler(s) ? null : base58Shape(s);
+      }
       const inside = whole ?? (s.length > 32 ? gluedShape(s, budget) : null);
       if (inside) hits.push({ family: "solana", shape: inside === "hash" ? "hash" : "address", value: s });
     }
@@ -344,6 +405,27 @@ export function onchainIdsIn(text: unknown, scan: OnchainIdScan = {}): OnchainId
 /** Whether a text carries any on-chain id (onchainIdsIn). */
 export function onchainIdIn(text: unknown, scan: OnchainIdScan = {}): boolean {
   return onchainIdsIn(text, scan).length > 0;
+}
+
+/**
+ * `text` with every Solana key and signature the glued scan finds replaced,
+ * wherever its value occurs, by what `mark` names it. An explorer link is no
+ * replacement itself: the key or signature in it is a run of its own and is
+ * replaced. For the model-facing redactors (Telegram event text, room
+ * prompts, the soul's prose).
+ *
+ * LONGEST VALUE FIRST. A glued hit's value is its whole run, and that can hold
+ * a shorter hit's value: in "<key> then X<mint><key>Y" the second run ends in
+ * the first key. Replaced first, the key splits that run, whose value is then
+ * found nowhere, and the mint in it stays. Longest first, every run that holds
+ * a shorter value is gone before that value is replaced; a shorter value
+ * never holds a longer one, and runs never overlap, so no value is lost.
+ */
+export function redactSolanaIds(text: string, mark: (hit: OnchainIdHit) => string): string {
+  const hits = onchainIdsIn(text, { glued: true }).filter((h) => h.family === "solana" && h.shape !== "link");
+  let out = text;
+  for (const hit of hits.sort((a, b) => b.value.length - a.value.length)) out = out.split(hit.value).join(mark(hit));
+  return out;
 }
 
 /**

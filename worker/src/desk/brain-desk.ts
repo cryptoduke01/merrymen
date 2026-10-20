@@ -43,9 +43,16 @@ async function readBounded(res: Response, max: number): Promise<string> {
   return Buffer.concat(chunks).toString("utf8");
 }
 
-/** FORBIDDEN, plus a Solana key or signature (core's onchainIdIn), which has no 0x for it to see. */
+/**
+ * FORBIDDEN, plus a Solana key or signature (core's onchainIdIn), which has no
+ * 0x for it to see. The glued scan, as Brain's DeskAnalysis validator reads it
+ * (services/brain/brain/schemas.py `_reject_executable`, glued=True): "CA<mint>"
+ * or "<mint>is" is an id too (audit regressions F3), so a read an older or a
+ * different Brain build lets through is refused here in the same place.
+ */
+const GLUED = { glued: true } as const;
 const text = (v: unknown, max: number): string | null =>
-  typeof v === "string" && v.trim().length <= max && !FORBIDDEN.test(v) && !onchainIdIn(v) ? v.replace(/\s+/g, " ").trim() : null;
+  typeof v === "string" && v.trim().length <= max && !FORBIDDEN.test(v) && !onchainIdIn(v, GLUED) ? v.replace(/\s+/g, " ").trim() : null;
 
 /** Brain's analysis, shape-checked. Null for anything that is not one. */
 export function parseDeskAnalysis(raw: unknown): TgDeskThought | null {

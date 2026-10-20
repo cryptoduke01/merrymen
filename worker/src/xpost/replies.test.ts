@@ -438,6 +438,18 @@ describe("tags an active agent may answer", () => {
     // The comment path already refused any digit; still refused.
     assert.equal(replyCandidate(comment(`Why did you pick ${SOLANA_USDG_MINT} here?`), CTX).ok, false);
   });
+  it("a Solana id glued to the words around it is refused the same way, before any model reads it (audit regressions F3)", () => {
+    const sig = base58Encode(Uint8Array.from({ length: 64 }, (_, i) => (i * 37 + 11) & 0xff));
+    const letters = "EEuxbXvdXfvgGiFWKYyEksxzabPKjwhYTNvGXFitaqqT";
+    for (const research of [true, false]) {
+      for (const text of [`@Pine what is CA${SOLANA_USDG_MINT}?`, `@Pine did you buy ${SOLANA_USDG_MINT}is it good?`, `@Pine what was tx${sig}done about?`, `@Pine thoughts on ca${letters}...`]) {
+        assert.deepEqual(tagCandidate(tag(text), { ...ON, research }), { ok: false, reason: "link-or-secret" }, text);
+      }
+    }
+    // The comment path refuses any digit first, so only a letters-only key reaches its scan.
+    assert.deepEqual(replyCandidate(comment(`Why did you pick ca${letters} here, what was the reason?`), CTX), { ok: false, reason: "link-or-secret" });
+    assert.equal(replyCandidate(comment("Why did you pick this coin here, what was the reason?"), CTX).ok, true);
+  });
 });
 
 describe("a tag that is only a greeting (2026-10-12)", () => {

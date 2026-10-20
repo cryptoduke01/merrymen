@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { after, before, describe, it } from "node:test";
@@ -27,6 +28,30 @@ describe("Brain's desk answer", () => {
       assert.equal(parseDeskAnalysis({ read, stance: "cautious", watch: `flows into ${id}`, invalidation: "" }), null, id);
       assert.equal(parseDeskAnalysis({ read, stance: "cautious", watch: "", invalidation: `a dump from ${id}` }), null, id);
     }
+  });
+  it("refuses every Solana id Brain's DeskAnalysis validator refuses, glued to the words around it too (audit regressions F3)", () => {
+    const sig = base58Encode(Uint8Array.from({ length: 64 }, (_, i) => (i * 37 + 11) & 0xff));
+    const read = "rsi 37.5 is weak and sellers lead.";
+    for (const id of [`CA${SOLANA_USDG_MINT}`, `${SOLANA_USDG_MINT}is`, `caEEuxbXvdXfvgGiFWKYyEksxzabPKjwhYTNvGXFitaqqT`, `tx${sig}done`]) {
+      assert.equal(parseDeskAnalysis({ read: `${read} see ${id}`, stance: "cautious", watch: "", invalidation: "" }), null, id);
+      assert.equal(parseDeskAnalysis({ read, stance: "cautious", watch: `flows into ${id}`, invalidation: "" }), null, id);
+      assert.equal(parseDeskAnalysis({ read, stance: "cautious", watch: "", invalidation: `a dump from ${id}` }), null, id);
+    }
+    // The shared cases Brain's validator is pinned to (services/brain/tests/data/onchain_ids.json):
+    // refused here exactly when Brain's glued scan finds a Solana id, or FORBIDDEN does; a hex
+    // digest, a long number or prose is still a read.
+    type Hit = { family: string; shape: string; value: string };
+    const fixture = JSON.parse(readFileSync(new URL("../../../services/brain/tests/data/onchain_ids.json", import.meta.url), "utf8")) as
+      { cases: { text: string; hits: Hit[]; glued?: Hit[] }[] };
+    let glued = 0;
+    for (const c of fixture.cases) {
+      const solana = (c.glued ?? c.hits).some((h) => h.family === "solana");
+      const forbidden = /0x[0-9a-fA-F]{16,}|https?:\/\/|www\.|t\.me\//i.test(c.text);
+      const got = parseDeskAnalysis({ read: `${read} ${c.text}`, stance: "cautious", watch: "", invalidation: "" });
+      assert.equal(got === null, solana || forbidden, c.text);
+      if (c.glued?.some((h) => h.family === "solana")) glued++;
+    }
+    assert.ok(glued >= 10, "the fixture's glued cases are among them");
   });
 });
 

@@ -20,7 +20,7 @@ import { rejectRuleLabel, rejectRuleRemedy } from "../thesis-policy";
 // RELATIVE import only — the "@merrymen/core" alias exists solely in dev (see
 // the note in service.ts). isHostedMode decides whether a missing agent id may
 // fall back to the single-tenant guess, or must refuse.
-import { liveBlockerText, priceSourceNote, priceSourceTag, isHostedMode, ENERGY, onchainIdsIn } from "../../../packages/core/src/index";
+import { liveBlockerText, priceSourceNote, priceSourceTag, isHostedMode, ENERGY, idFamily, redactSolanaIds } from "../../../packages/core/src/index";
 import type { EnergyStatus } from "../../../packages/core/src/index";
 import { count as countTokens, STILL_RUNS } from "../energy-copy";
 import type { AdmissionLevel } from "../worker-admission";
@@ -947,17 +947,30 @@ export function readWhyEvidence(agentId?: string | null): { text: string; hasTra
  * addresses; only what a model reads is redacted.
  *
  * A Solana key (base58, 32 bytes, found by core's onchainIdsIn) is an address
- * the same way and is replaced too, inside an explorer link as well. A 64-byte
- * signature is left, as a tx hash is. A base58 key cut short does not decode,
- * so unlike a cut 0x run it is not caught.
+ * the same way and is replaced too, inside an explorer link as well, and glued
+ * to the words around it ("CA<mint>", "<mint>is": core's glued scan, audit
+ * regressions F3). Redaction takes the glued scan because its one cost, an
+ * unbroken base58 run of 43 or more characters (a long camelCase hashtag, or a
+ * long number glued to a word as in "<digits>tokens") read as an id, is a word
+ * shown to a model as "[address]", never text withheld.
+ * A Solana signature, standing alone or in a link, is replaced too, by
+ * "[signature]", where a 0x tx hash is left: a base58 run that decodes to 64
+ * bytes cannot be told apart from two keys written together ("<mint><mint>")
+ * or a key with a word glued on ("CA<mint><41 characters>"), and the model
+ * needs no signature (the owner's own report keeps it). A glued run the scan
+ * reads as a signature is replaced by "[address]", as any glued run is. A
+ * base58 key cut short does not decode, so unlike a cut 0x run it is not
+ * caught.
  */
 const ADDRESS_RUN = /\b0x[0-9a-fA-F]{20,40}(?![0-9a-fA-F])/g;
 export function redactAddresses(text: string): string {
-  let out = text.replace(ADDRESS_RUN, "[address]");
-  for (const hit of onchainIdsIn(out)) {
-    if (hit.family === "solana" && hit.shape === "address") out = out.split(hit.value).join("[address]");
-  }
-  return out;
+  // Longest value first (core's redactSolanaIds): a glued run can end in a key that also stands alone.
+  // A whole run that is itself a signature (idFamily: it decodes to 64 bytes) is named as one.
+  // Solana first, on the text as written: ADDRESS_RUN takes "0x" and 20-40 hex, so run first on
+  // "0x<hex><key>" it ate the key's leading hex and left a tail too short to decode (review GE,
+  // round 2). The glued scan skips a run that is "0x" then hex alone, so an address is still ADDRESS_RUN's.
+  const solana = redactSolanaIds(text, (hit) => (hit.shape === "hash" && idFamily(hit.value) === "solana" ? "[signature]" : "[address]"));
+  return solana.replace(ADDRESS_RUN, "[address]");
 }
 
 /** Recent event-feed lines (for the LLM's context) — addresses redacted. */

@@ -218,4 +218,23 @@ describe("the address backstop knows Solana ids (Solana P0)", () => {
     }
     assert.equal(publishableThesis(row({ reason: null, post }))!.post, post);
   });
+
+  it("knows a Solana id glued to the words around it (audit regressions F3)", () => {
+    const letters = "EEuxbXvdXfvgGiFWKYyEksxzabPKjwhYTNvGXFitaqqT";
+    const glued = [`CA${SOLANA_USDG_MINT}`, `ca${letters}`, `${letters}is the one`, `tx${SIG}done`, `${SOLANA_USDG_MINT}l`];
+    for (const id of glued) {
+      // A glued mint costs the post, and a post was all this row had.
+      assert.equal(publishableThesis(row({ reason: null, post: `${post} ${id}` })), null, id);
+      const kept = publishableThesis(row({ post: `${post} ${id}` }))!;
+      assert.ok(kept, id);
+      assert.equal(kept.post, null, id);
+      assert.match(kept.reason!, /early on the curve/);
+      // The final backstop drops the row wherever it sits.
+      assert.equal(publishableThesis(row({ source: "strategist", reason: `rotating into ${id}` })), null, id);
+      assert.equal(publishableThesis(row({ name: `${id}` })), null, id);
+    }
+    // Prose, tickers, URLs and a short hashtag still publish.
+    const plain = `${post} $SOL $BONK #BuyTheDip https://merrymen.xyz/t/0123456789abcdef`;
+    assert.equal(publishableThesis(row({ reason: null, post: plain }))!.post, plain);
+  });
 });

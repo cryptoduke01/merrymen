@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { ed25519 } from "@noble/curves/ed25519";
 import {
@@ -16,6 +17,7 @@ import {
   isSolanaKeypair,
   onchainIdIn,
   onchainIdsIn,
+  redactSolanaIds,
   requireChain,
   sameId,
   secretScanBudget,
@@ -164,7 +166,8 @@ describe("glued on-chain id detection (audit regressions F3)", () => {
       // 89 characters: long enough to hide a signature, so that is the shape reported.
       [`${SOLANA_USDG_MINT}${SOLANA_USDG_MINT}a`, `${SOLANA_USDG_MINT}${SOLANA_USDG_MINT}a`, "hash"],
       [`tx${SIG}done`, `tx${SIG}done`, "hash"],
-      [`0x${SOLANA_USDG_MINT}`, SOLANA_USDG_MINT, "address"],
+      // After a 0, an x with more than hex behind it is the run's own, so the whole run is the hit.
+      [`0x${SOLANA_USDG_MINT}`, `x${SOLANA_USDG_MINT}`, "address"],
     ] as const) {
       // The default scan, pinned to Brain's mirror, misses each of these.
       assert.deepEqual(onchainIdsIn(text).filter((h) => h.family === "solana"), [], text);
@@ -184,16 +187,60 @@ describe("glued on-chain id detection (audit regressions F3)", () => {
     }
   });
 
-  it("differs from the default scan Brain mirrors only on the shared fixture's glued cases", () => {
+  it("answers every shared case as Brain's Python mirror does, in both scans", () => {
     const fixture = JSON.parse(readFileSync(new URL("../../../services/brain/tests/data/onchain_ids.json", import.meta.url), "utf8")) as
-      { cases: { text: string; hits: { family: string; shape: string; value: string }[] }[] };
+      { cases: { text: string; hits: { family: string; shape: string; value: string }[]; glued?: { family: string; shape: string; value: string }[] }[] };
     const changed: string[] = [];
     for (const c of fixture.cases) {
       const strict = onchainIdsIn(c.text, glued);
+      assert.deepEqual(onchainIdsIn(c.text), c.hits, c.text);
+      assert.deepEqual(strict, c.glued ?? c.hits, c.text);
       for (const hit of c.hits) assert.ok(strict.some((h) => h.value === hit.value && h.shape === hit.shape), `${c.text}: ${hit.value}`);
-      if (JSON.stringify(strict) !== JSON.stringify(c.hits)) changed.push(c.text);
+      if (c.glued) changed.push(c.text);
     }
-    assert.deepEqual(changed, [`0${SOLANA_USDG_MINT}`, `${SOLANA_USDG_MINT}l`, `${SOLANA_USDG_MINT}${SOLANA_USDG_MINT}a`]);
+    // The glued cases the default misses, among them the three it pinned as no id before.
+    for (const t of [`0${SOLANA_USDG_MINT}`, `${SOLANA_USDG_MINT}l`, `${SOLANA_USDG_MINT}${SOLANA_USDG_MINT}a`, `grab it CA${SOLANA_USDG_MINT} now`]) assert.ok(changed.includes(t), t);
+  });
+
+  it("reads a key that begins with an x written after a 0 (\"10x<key>\", \"CA0x<key>\")", () => {
+    // A real 32-byte key whose first character is x: dropped as the x of an "0x", the 42 left decoded to nothing.
+    const xKey = "xD8ndgHckqX4TKpPgeRJ8o8Mmp8qE4bZ9USpRzQN4Uj";
+    assert.equal(base58Decode(xKey)?.length, 32);
+    for (const text of [`0${xKey}`, `price 10${xKey} today`, `grab it CA0${xKey} now`, `0${xKey}is the one`]) {
+      const hits = onchainIdsIn(text, glued);
+      assert.equal(hits.length, 1, text);
+      assert.ok(hits[0]!.value.includes(xKey), text);
+      assert.ok(!redactSolanaIds(text, () => "[id]").includes(xKey.slice(1, 21)), text);
+    }
+    // "0x" then hex alone is still that hex, whichever letters it holds.
+    for (const text of [`0x${"ab".repeat(20)}`, `0x${"cafe".repeat(20)}`, `0x${"1".repeat(41)}`, "0x177286bb17374e1f47a767a43d99c674b38c4f54c8e"]) {
+      assert.deepEqual(onchainIdsIn(text, glued).filter((h) => h.family === "solana"), [], text);
+    }
+  });
+
+  it("never reads hex split at its zeros, a long number standing alone or filler as an id glued to anything", () => {
+    // A long number glued to a word ("<digits>tokens") is not in this list: the digits after its last zero
+    // and the word are one run that can be read (worker/src/xpost/public-wallet.ts states that cost).
+    // Each run between zeros is hex alone, and some are 43 or 44 characters that decode to 32 bytes:
+    // read as glued ids, every digest, EVM hash and long number like these was withheld.
+    for (const text of [
+      "6fde6ce70efd0bc3e0c60538ccf57431cf76c354a617bd6c5a1f8198d4342cfa",
+      "| `MERRYMEN_ADOPT_HOME_HALT_SHA256` | `6fde6ce70efd0bc3e0c60538ccf57431cf76c354a617bd6c5a1f8198d4342cfa` |",
+      "02D20BBD7E394AD5999A4CEBABAC9619732C343A4CAC99470C03E23BA2BDC2BC",
+      "supply 63971511409728546707420640415976470808777281049430980144558505433936508649475518010444363585908687133263558897911835323323191563463575735092780586118530448 ok",
+    ]) assert.deepEqual(onchainIdsIn(text, glued), [], text);
+    const tx = "0x177286bb17374e1f47a767a43d99c674b38c4f54c8e00bb2042998a8fd1b4a4c";
+    assert.deepEqual(onchainIdsIn(`tx ${tx}`, glued), [{ family: "evm", shape: "hash", value: tx }]);
+    // Filler, one to four characters repeated (a length test's padding, "hahaha"): 87 x's decode to 64 bytes.
+    for (const text of ["x".repeat(220), `${"x".repeat(2_500)}`, "ha".repeat(60), `${"abc".repeat(40)}!`, "wxyz".repeat(30)]) {
+      assert.deepEqual(onchainIdsIn(text, glued), [], text.slice(0, 12));
+    }
+    // ...but a letters-only signature glued to a letter is still one.
+    assert.deepEqual(onchainIdsIn(`${"A".repeat(87)}h`, glued), [{ family: "solana", shape: "hash", value: `${"A".repeat(87)}h` }]);
+    // A standalone run is read exactly as the default reads it, hex alone or not.
+    const hexKey = "abcdef123456789abcdef123456789abcdef1234567";
+    assert.deepEqual(onchainIdsIn(`digest ${hexKey} ok`, glued), onchainIdsIn(`digest ${hexKey} ok`));
+    assert.deepEqual(onchainIdsIn(`digest ${hexKey} ok`, glued), [{ family: "solana", shape: "address", value: hexKey }]);
   });
 
   it("leaves prose, tickers, hex digests, long numbers and other base58 alone", () => {
@@ -208,19 +255,99 @@ describe("glued on-chain id detection (audit regressions F3)", () => {
     ]) assert.deepEqual(onchainIdsIn(text, glued), [], text);
   });
 
-  it("reads a megabyte of long base58 runs in bounded time and fails closed past its budget", () => {
-    // Runs that hold no 43- or 44-character key window: short of one, or hex alone.
-    const noKey = Array.from({ length: 30_000 }, (_, i) => (i % 3 ? "1" + "z".repeat(31 + (i % 10)) : "abcdef12345".repeat(9))).join(" ");
+  it("redactSolanaIds replaces the longest value first, so a run holding a shorter hit is never split around a mint", () => {
+    const key = base58Encode(Uint8Array.from({ length: 32 }, (_, i) => (i * 29 + 7) & 0xff));
+    const text = `${key} then X${SOLANA_USDG_MINT}${key}Y`;
+    // In scan order the lone key comes first, and its value is the end of the second run.
+    const hits = onchainIdsIn(text, glued);
+    assert.deepEqual(hits.map((h) => h.value), [key, `X${SOLANA_USDG_MINT}${key}Y`]);
+    assert.equal(redactSolanaIds(text, () => "[id]"), "[id] then [id]");
+    // Each hit is named by its own shape, and a link keeps its address, losing only the id in it.
+    const { sig } = keypair(5);
+    const marked = redactSolanaIds(`${key} https://solscan.io/tx/${sig} ${EVM}`, (h) => `[${h.shape}]`);
+    assert.equal(marked, `[address] https://solscan.io/tx/[hash] ${EVM}`);
+    assert.equal(redactSolanaIds("the market is quiet today", () => "[id]"), "the market is quiet today");
+  });
+
+  /**
+   * A RUNAWAY SCAN FAILS BY NAME (review GE, round 2). node:test cannot stop synchronous code: an `it`
+   * timeout fires only when the test yields, and a synchronous test past its timeout even passes. So a
+   * scan that never returns, run in this process, hangs the suite until CI's job timeout and names no
+   * test. This runs the glued scan over `texts` in a child the runner can stop, limited to
+   * RUNAWAY_CPU_SECONDS of CPU time (ulimit -t: what the child spent, never what a loaded machine took
+   * from it, so a slow runner does not fail it), with a wall-clock backstop well past that. The linear
+   * test asks it first, before any scan of its own. Measured: about 1.5 s of CPU, tsx startup included.
+   */
+  const RUNAWAY_CPU_SECONDS = 60;
+  function gluedScanFinishes(texts: string[]): { ok: boolean; how: string } {
+    const script = [
+      'import { readFileSync } from "node:fs";',
+      `const { onchainIdsIn } = await import(${JSON.stringify(new URL("./ids.ts", import.meta.url).href)});`,
+      'for (const text of JSON.parse(readFileSync(0, "utf8"))) onchainIdsIn(text, { glued: true });',
+      'process.stdout.write("scanned");',
+    ].join("\n");
+    const node = [process.execPath, "--import", import.meta.resolve("tsx"), "--input-type=module", "-e", script];
+    const [file, ...args] = process.platform === "win32" ? node : ["/bin/sh", "-c", `ulimit -t ${RUNAWAY_CPU_SECONDS} && exec "$@"`, "sh", ...node];
+    const child = spawnSync(file!, args, { input: JSON.stringify(texts), encoding: "utf8", timeout: 20 * RUNAWAY_CPU_SECONDS * 1_000 });
+    if (child.status === 0 && child.stdout === "scanned") return { ok: true, how: "scanned" };
+    const how = child.error ? String(child.error) : child.signal ? `stopped by ${child.signal}` : `exit ${child.status}: ${child.stderr.slice(-400)}`;
+    return { ok: false, how };
+  }
+
+  it("reads a megabyte of long base58 runs in linear time and fails closed past its budget", () => {
+    // Runs that hold no 43- or 44-character key window (short of one, or hex alone), and runs that hold a signature.
+    const noKeyRun = (i: number) => (i % 3 ? "1" + "z".repeat(31 + (i % 10)) : "abcdef12345".repeat(9));
+    const keyLikeRun = (i: number) => `${base58Encode(Uint8Array.from({ length: 64 }, (_, j) => (i * 7 + j * 13 + 1) % 256))}x${i}`;
+    const textOf = (count: number, run: (i: number) => string) => Array.from({ length: count }, (_, i) => run(i)).join(" ");
+    const noKey = textOf(30_000, noKeyRun);
     assert.ok(noKey.length > 1_000_000);
-    assert.deepEqual(onchainIdsIn(noKey.slice(0, 5_000), glued), [], "none of these runs holds an id");
-    let started = performance.now();
-    assert.ok(onchainIdsIn(noKey, glued).length > 0, "past the decode budget, the remaining runs are refused unread");
-    assert.ok(performance.now() - started < 2_000, `took ${Math.round(performance.now() - started)} ms`);
-    const keyLike = Array.from({ length: 12_000 }, (_, i) => `${base58Encode(Uint8Array.from({ length: 64 }, (_, j) => (i * 7 + j * 13 + 1) % 256))}x${i}`).join(" ");
+    const keyLike = textOf(12_000, keyLikeRun);
     assert.ok(keyLike.length > 1_000_000);
-    started = performance.now();
+    // First, in a child the runner can stop: a scan that never returns fails here, by name, not by hanging.
+    const runaway = gluedScanFinishes([noKey, keyLike]);
+    assert.ok(runaway.ok, `the glued scan did not finish two megabytes within ${RUNAWAY_CPU_SECONDS} s of CPU time (${runaway.how})`);
+    assert.deepEqual(onchainIdsIn(noKey.slice(0, 5_000), glued), [], "none of these runs holds an id");
+    assert.ok(onchainIdsIn(noKey, glued).length > 0, "past the decode budget, the remaining runs are refused unread");
     assert.equal(onchainIdIn(keyLike, glued), true);
-    assert.ok(performance.now() - started < 2_000, `took ${Math.round(performance.now() - started)} ms`);
+
+    // BOUNDED TIME, AGAINST THIS MACHINE IN THIS RUN, never a wall clock. A fixed 2-second budget failed
+    // at 4.8 s on a runner with a load average near 100, and a wall-clock ratio against a 3 ms scan of
+    // 1/32 of the text failed too (225x against 128x, with 40 busy loops): a short scan can still land
+    // in a quiet slice of a loaded machine, a long one cannot. So every figure here is CPU time
+    // (process.cpuUsage, user + system: what this process spent, not what others took from it), each
+    // compared figure covers the same characters, and they are taken in alternation, best of three.
+    // - Linear: the text scanned whole costs at most 4 times the same runs scanned as 32 chunks
+    //   (measured 0.5-0.6x: the whole text spends one decode budget, the chunks one each). A scan
+    //   whose work for each run grows with the text before it costs up to 32 times as much whole
+    //   once that work outweighs its own: a mutant reading every 4th character before each run
+    //   measured 16x and fails, one reading every 32nd measured 3.4x and passes. So the bound
+    //   catches a superlinear scan once its extra work at a megabyte is about 8 times a linear
+    //   scan's (whole measures 0.5-0.6x split, the bound is 4x split); a cheaper one passes. An
+    //   exponential scan never returns, and fails above, in the child (gluedScanFinishes).
+    // - A constant of the default scan over the same text, which decodes every standalone run with
+    //   no budget (measured 4.5-7x): a glued scan that grew a large constant fails here too.
+    const cpuMs = (scan: () => unknown): number => {
+      const started = process.cpuUsage();
+      scan();
+      const spent = process.cpuUsage(started);
+      return (spent.user + spent.system) / 1_000;
+    };
+    for (const [name, big, run, count] of [["no key", noKey, noKeyRun, 30_000], ["key-like", keyLike, keyLikeRun, 12_000]] as const) {
+      const per = Math.ceil(count / 32);
+      const chunks = Array.from({ length: 32 }, (_, k) => textOf(Math.min(per, count - k * per), (i) => run(k * per + i)));
+      assert.equal(chunks.join(" "), big, "the chunks hold exactly the text's runs");
+      let whole = Infinity;
+      let split = Infinity;
+      let byDefault = Infinity;
+      for (let round = 0; round < 3; round++) {
+        whole = Math.min(whole, cpuMs(() => onchainIdsIn(big, glued)));
+        split = Math.min(split, cpuMs(() => chunks.map((chunk) => onchainIdsIn(chunk, glued))));
+        byDefault = Math.min(byDefault, cpuMs(() => onchainIdsIn(big)));
+      }
+      const took = `${name}, CPU time over ${big.length} characters: ${whole.toFixed(1)} ms whole, ${split.toFixed(1)} ms in 32 chunks, default scan ${byDefault.toFixed(1)} ms`;
+      assert.ok(whole < 4 * split, `not linear in the text: ${took}`);
+      assert.ok(whole < 50 * byDefault, `far slower than the default scan: ${took}`);
+    }
   });
 });
 

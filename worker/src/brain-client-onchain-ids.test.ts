@@ -2,10 +2,11 @@
  * A SOLANA ID IS REFUSED AT THE CLIENT WHEREVER AN 0x ONE IS.
  *
  * Three groups. The shared detector (packages/core/src/ids.ts) gives the
- * answers Brain's Python mirror gives, case for case, from the fixture both
- * read. A decision carrying a base58 key, signature or explorer link in any
- * screened field is refused whole, and every 0x refusal keeps its old words.
- * And a desk policy carrying one is withheld rather than sent into a 422.
+ * answers Brain's Python mirror gives, case for case and in both scans, from
+ * the fixture both read. A decision carrying a base58 key, signature or
+ * explorer link in any screened field, glued to the text around it or not, is
+ * refused whole, and every 0x refusal keeps its old words. And a desk policy
+ * carrying one is withheld rather than sent into a 422.
  */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -29,9 +30,12 @@ describe("the detector Brain mirrors", () => {
   it("answers every shared case as services/brain/brain/onchain_ids.py does", () => {
     const fixture = JSON.parse(
       readFileSync(new URL("../../services/brain/tests/data/onchain_ids.json", import.meta.url), "utf8"),
-    ) as { cases: { text: string; hits: unknown[] }[] };
+    ) as { cases: { text: string; hits: unknown[]; glued?: unknown[] }[] };
     assert.ok(fixture.cases.length >= 20);
     for (const c of fixture.cases) assert.deepEqual(onchainIdsIn(c.text), c.hits, JSON.stringify(c.text));
+    // The glued scan Brain's backstop and this client both use (audit regressions F3).
+    assert.ok(fixture.cases.filter((c) => c.glued && c.glued.length > 0 && c.hits.length === 0).length >= 8);
+    for (const c of fixture.cases) assert.deepEqual(onchainIdsIn(c.text, { glued: true }), c.glued ?? c.hits, JSON.stringify(c.text));
   });
 
   // This file checks only the ids.ts half. The Python half runs in CI's brain
@@ -109,6 +113,12 @@ describe("a decision carrying a Solana id", () => {
       [{ evidence: [{ source: "s", ref: SIG, claim: "c" }] }, "evidence[0].ref carries a Solana signature or secret key"],
       [{ thesis: `owned by ${LETTERS_32}` }, "thesis carries a Solana address"],
       [{ evidence: [{ source: "s", ref: LETTERS_64, claim: "c" }] }, "evidence[0].ref carries a Solana signature or secret key"],
+      // Glued to the text around it (audit regressions F3): the default scan read none of these.
+      [{ thesis: `grab it CA${MINT} now` }, "thesis carries a Solana address"],
+      [{ bear_case: `${MINT}is the one` }, "bear_case carries a Solana address"],
+      [{ thesis: `owned by CA${LETTERS_32}` }, "thesis carries a Solana address"],
+      [{ risks: [`tx${SIG}done`] }, "risks[0] carries a Solana signature or secret key"],
+      [{ evidence: [{ source: "s", ref: `ref:0x${MINT}`, claim: "c" }] }, "evidence[0].ref carries a Solana address"],
     ];
     for (const [decision, why] of cases) {
       const r = await answered(decision);
@@ -130,7 +140,10 @@ describe("a decision carrying a Solana id", () => {
     const r = await answered({
       thesis: "PEPE pumped 40% on the week; 41 buys / 22 sells.",
       evidence: [{ source: "trader-flow", ref: "[ref:d3fa91cr2c1]", claim: "two tracked wallets added" }],
-      risks: ["e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"],
+      risks: ["e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        // Hex split at its zeros, and a long number: never an id glued to anything.
+        "6fde6ce70efd0bc3e0c60538ccf57431cf76c354a617bd6c5a1f8198d4342cfa",
+        "supply 63971511409728546707420640415976470808777281049430980144558505433936508649475518010444363585908687133263558897911835323323191563463575735092780586118530448"],
     });
     assert.ok(r.ok, JSON.stringify(r));
   });
@@ -149,7 +162,9 @@ describe("a desk policy carrying a Solana id", () => {
       },
       invalidate: () => {},
     };
-    for (const forged of [forge(`Route via ${MINT}.`), forge("terms", "1".repeat(32)), forge(`see solscan.io/tx/${SIG}`), forge(`Route via ${LETTERS_32}.`), forge(`Replay ${LETTERS_64}.`)]) {
+    for (const forged of [forge(`Route via ${MINT}.`), forge("terms", "1".repeat(32)), forge(`see solscan.io/tx/${SIG}`), forge(`Route via ${LETTERS_32}.`), forge(`Replay ${LETTERS_64}.`),
+      // Glued: Brain's bounds refuse these too, so sending them would cost the review a 422.
+      forge(`Route via CA${MINT}.`), forge(`Replay tx${SIG}.`)]) {
       const r = await decide({ url, token: "t" }, args({ strategyTerms: forged }), { capabilities });
       assert.ok(r.ok);
       assert.equal(r.strategyTerms, "withheld");
@@ -164,7 +179,7 @@ describe("a desk policy carrying a Solana id", () => {
 
   it("never withholds the terms the worker renders today", () => {
     const fast = trencherStrategyTerms(TRENCHER_FAST)!;
-    assert.equal(onchainIdIn(fast.terms), false);
-    assert.equal(onchainIdIn(fast.horizon), false);
+    assert.equal(onchainIdIn(fast.terms, { glued: true }), false);
+    assert.equal(onchainIdIn(fast.horizon, { glued: true }), false);
   });
 });

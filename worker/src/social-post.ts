@@ -311,7 +311,10 @@ export function admitPost(raw: string, c: WriterContext): PostVerdict {
    * "has-digits" in the operator log — a refusal that says the wrong thing
    * about why, on the one case where knowing why matters most.
    */
-  if (ADDRESSY.test(body) || onchainIdIn(body)) return { ok: false, refusal: "has-address" };
+  // Glued too: "CA<mint>" or "<mint>is" is an address (audit regressions F3).
+  // Its cost is the one X accepts (xpost/public-wallet.ts idInText): an unbroken
+  // base58 run of 43 or more characters may read as an id and cost the take.
+  if (ADDRESSY.test(body) || onchainIdIn(body, { glued: true })) return { ok: false, refusal: "has-address" };
   if (HANDLEY.test(body)) return { ok: false, refusal: "has-handle" };
 
   /**

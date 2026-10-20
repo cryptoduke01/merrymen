@@ -151,7 +151,9 @@ def _reject_executable(text: str, field: str) -> str:
         raise ValueError(f"{field} contains a hex blob that could be calldata")
     # SOLANA IDS ARE BASE58, which the two patterns above never see. Checked
     # after them, so a text they refuse is refused in the same words as before.
-    for hit in onchain_ids_in(text):
+    # The glued scan (audit regressions F3): "CA<mint>" or "<mint>is" is an id
+    # too, as the worker's re-check reads it.
+    for hit in onchain_ids_in(text, glued=True):
         if hit.family != "solana":
             continue
         if hit.shape == "address":

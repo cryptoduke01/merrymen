@@ -237,8 +237,9 @@ export function pnlCardFromFill(row: ClosedFillRow, coin?: string | null): PnlCa
   // Neither may be address-shaped: a resolver that could not name the coin
   // falls back to a short address, and that is exactly what must never be drawn.
   // A Solana key or program id has no 0x: core's detector catches a whole one,
-  // and a whole 0x address inside a longer name too.
-  const addressy = (s: string): boolean => /^0x/i.test(s) || onchainIdIn(s);
+  // and a whole 0x address inside a longer name too. Glued to the words around
+  // it as well (CARD_ID_SCAN).
+  const addressy = (s: string): boolean => /^0x/i.test(s) || onchainIdIn(s, CARD_ID_SCAN);
   const symbol = (addressy(named) ? "" : named) || (addressy(fromTarget) ? "" : fromTarget);
   if (!symbol) return null;
 
@@ -271,13 +272,25 @@ export interface LiveSellRow extends ClosedFillRow {
 export type LiveSellCard = { kind: "card"; card: PnlCardData } | { kind: "ineligible"; reason: string };
 
 /**
+ * THE CARD'S ID SCANS ARE GLUED (audit regressions F3). A token names itself:
+ * one called "buy<mint>now" or "CA<mint>" would be drawn with the mint in it,
+ * and the card is an image, which no text backstop on X reads
+ * (xpost/public-wallet.ts sees only the words). The glued scan also finds a
+ * key or signature written against neighbouring letters or digits. Its one
+ * cost, an unbroken base58 run of 43 or more characters read as an id, is a
+ * name no coin has inside this 64-character ceiling; such a name is not
+ * printed, and the card falls back to the target or is not drawn.
+ */
+const CARD_ID_SCAN = { glued: true } as const;
+
+/**
  * A coin's name fit to print: plain characters, not a contract address, not an
- * autonomous token id, and carrying no whole address (0x or Solana) anywhere
- * in it. Null otherwise.
+ * autonomous token id, and carrying no address (0x or Solana) anywhere in it,
+ * glued to its neighbours or not (CARD_ID_SCAN). Null otherwise.
  */
 export function printableCoinName(value: string | null | undefined): string | null {
   const name = (value ?? "").trim();
-  return name && name.length <= 64 && /^[\x20-\x7e]+$/.test(name) && !/^0x/i.test(name) && !onchainIdIn(name) && !/^T[0-9A-F]{11}$/i.test(name) ? name : null;
+  return name && name.length <= 64 && /^[\x20-\x7e]+$/.test(name) && !/^0x/i.test(name) && !onchainIdIn(name, CARD_ID_SCAN) && !/^T[0-9A-F]{11}$/i.test(name) ? name : null;
 }
 
 /**
