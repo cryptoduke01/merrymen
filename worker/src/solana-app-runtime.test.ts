@@ -9,10 +9,13 @@ import { SolanaPaperValidationError } from "../../packages/core/src/solana";
 import { SOLANA_CLASSIC_TOKEN_PROGRAM, SOLANA_VAULT_ACCOUNT_SIZE, SOLANA_VAULT_DISCRIMINATOR,
   SOLANA_VAULT_LOCAL_TEST_PROGRAM, SOLANA_WRAPPED_SOL_MINT, deriveSolanaAta, deriveSolanaSwapAuthority, deriveSolanaVaultAddress } from "../../packages/core/src/solana-live";
 import { sealSecret } from "./store-crypto";
+// Aliased: the owner track imports the same constant by its own name.
+import { SOLANA_STATUS_BELOW_BOOK as STATUS_BELOW_BOOK } from "./solana-app-runtime";
+import { ensureSolanaShortfallSchema } from "./solana-resolve-shortfall";
 import { SqlSolanaBindingStore } from "../../web/src/lib/solana-binding-store";
 import { wrapSqlite } from "./db";
 import { createSolanaAgent } from "./solana-agent";
-import { createSolanaAppRuntime, SOLANA_DEPLOYMENT_RECHECK_MS, SolanaAppRuntimeError, solanaOwnerComputeUnitLimit, SOLANA_STATUS_BEHIND_BOOK, SOLANA_STATUS_BELOW_BOOK, SOLANA_STATUS_FEE_PAYER_THRESHOLD_MISCONFIGURED,
+import { createSolanaAppRuntime, SOLANA_DEPLOYMENT_RECHECK_MS, SolanaAppRuntimeError, solanaOwnerComputeUnitLimit, SOLANA_STATUS_BEHIND_BOOK, SOLANA_STATUS_FEE_PAYER_THRESHOLD_MISCONFIGURED,
   SOLANA_STATUS_NO_FALLBACK } from "./solana-app-runtime";
 import { SolanaRpcError, withSolanaReadDeadline } from "./solana-rpc";
 import type { SolanaLiveRead, SolanaLiveRpc } from "./solana-live-rpc";
@@ -436,7 +439,7 @@ test("one raw WSOL sent to the vault no longer freezes exits or owner withdrawal
     // A balance below the book still blocks: that is never a stranger's gift.
     f.controls.wsol = 49_999_999n;
     const short = await f.app.status(f.scope);
-    assert.equal(short.live.canExit, false); assert.ok(short.live.blockers.includes(SOLANA_STATUS_BELOW_BOOK));
+    assert.equal(short.live.canExit, false); assert.ok(short.live.blockers.includes(STATUS_BELOW_BOOK));
   } finally { f.raw.close(); }
 });
 
@@ -456,7 +459,7 @@ test("below its book with a stranger's WSOL above it, status says so and books n
       return f.read(method, params);
     };
     const status = await f.app.status(f.scope);
-    assert.ok(status.live.blockers.includes(SOLANA_STATUS_BELOW_BOOK)); assert.equal(status.live.canExit, false);
+    assert.ok(status.live.blockers.includes(STATUS_BELOW_BOOK)); assert.equal(status.live.canExit, false);
     assert.deepEqual((await new SolanaTradingStore(f.db, f.scope).liveBook())!, book, "nothing is booked while a balance is short");
     assert.equal(bookingReads, 0, "no two-provider read to book an inflow while a balance is short");
   } finally { f.raw.close(); }
@@ -475,22 +478,43 @@ test("an in-app withdrawal that landed is not called a vault below its book whil
     f.controls.cash = 89_000_000n;
     const settling = await f.app.status(f.scope);
     assert.ok(settling.live.blockers.includes("An owner transaction is awaiting final confirmation."), settling.live.blockers.join(" | "));
-    assert.ok(!settling.live.blockers.includes(SOLANA_STATUS_BELOW_BOOK), "its own landing is not tokens leaving outside Merrymen");
+    assert.ok(!settling.live.blockers.includes(STATUS_BELOW_BOOK), "its own landing is not tokens leaving outside Merrymen");
     assert.equal(settling.live.canExit, false, "trading and exits still wait for it");
     // Finalized on both providers: booked, and the vault matches its book.
     f.providers.primary = withholding(f); f.providers.fallback = withholding(f);
     assert.equal((await f.app.submitOwnerAction(f.scope, { signedTransactionBase64 })).status, "finalized");
     f.providers.primary = null; f.providers.fallback = null; f.controls.sequence = 4n;
-    assert.ok(!(await f.app.status(f.scope)).live.blockers.some(item => item === SOLANA_STATUS_BELOW_BOOK || item === SOLANA_STATUS_BEHIND_BOOK));
+    assert.ok(!(await f.app.status(f.scope)).live.blockers.some(item => item === STATUS_BELOW_BOOK || item === SOLANA_STATUS_BEHIND_BOOK));
     // Nothing settling, and the vault really short of its book: said as such.
     f.controls.cash = 88_000_000n;
-    assert.ok((await f.app.status(f.scope)).live.blockers.includes(SOLANA_STATUS_BELOW_BOOK));
+    assert.ok((await f.app.status(f.scope)).live.blockers.includes(STATUS_BELOW_BOOK));
     // A book recorded at a later slot than the balances read (a lagging provider): no shortfall can be shown, and trading still waits.
     const later = (await new SolanaTradingStore(f.db, f.scope).liveBook())!;
     await f.db.prepare("UPDATE solana_runtime_live_books SET book_json=? WHERE tenant=? AND owner=?").run(JSON.stringify({ ...later, slot: 1001 }), TENANT, f.owner);
     const behind = await f.app.status(f.scope);
-    assert.ok(behind.live.blockers.includes(SOLANA_STATUS_BEHIND_BOOK)); assert.ok(!behind.live.blockers.includes(SOLANA_STATUS_BELOW_BOOK));
+    assert.ok(behind.live.blockers.includes(SOLANA_STATUS_BEHIND_BOOK)); assert.ok(!behind.live.blockers.includes(STATUS_BELOW_BOOK));
     assert.equal(behind.live.ready, false);
+  } finally { f.raw.close(); }
+});
+
+test("a shortfall an operator wrote off frees automated exits again, with buying paused for the owner's review (audit G3-3)", async () => {
+  const f = await fixture();
+  try {
+    await readyLive(f); f.controls.cash = 70_000_000n; f.controls.wsol = 50_000_000n;
+    const book = { hwmRaw: "100000000", cashRaw: "90000000", wsolRaw: "50000000", costBasisUsdgRaw: "10000000", realizedPnlUsdgRaw: "0", networkFeesLamports: "0", slot: 900, updatedAtMs: 999_000 };
+    await f.db.prepare("INSERT INTO solana_runtime_live_books(tenant,owner,book_json) VALUES(?,?,?)").run(TENANT, f.owner, JSON.stringify(book));
+    const held = await f.app.status(f.scope);
+    assert.ok(held.live.blockers.includes(STATUS_BELOW_BOOK)); assert.equal(held.live.canExit, false);
+    // The operator's decision, recorded first by the resolve tool, then the write-off on two providers' reading.
+    await ensureSolanaShortfallSchema(f.db, false);
+    await f.db.prepare("INSERT INTO solana_operator_shortfalls(id,tenant,owner,slot,cash_usdg,wsol_raw,operator,reason,evidence_json,approved_at_ms) VALUES(?,?,?,?,?,?,?,?,?,?)")
+      .run("decision-1", TENANT, f.owner, 1000, "70000000", "50000000", "milla", "issuer seized 20 USDG", "{}", f.clock.now);
+    await new SolanaTradingStore(f.db, f.scope, () => f.clock.now).writeOffShortfall({ slot: 1000, cashUsdg: "70000000", wsolRaw: "50000000", observedAtMs: f.clock.now, commitment: "finalized" }, "decision-1");
+    const freed = await f.app.status(f.scope);
+    assert.ok(!freed.live.blockers.includes(STATUS_BELOW_BOOK), freed.live.blockers.join(" | "));
+    assert.equal(freed.live.canExit, true, freed.live.blockers.join(" | ")); assert.equal(freed.live.ready, false, "buying waits for the owner");
+    assert.ok(freed.live.blockers.includes("The buying drawdown breaker is paused; exits remain available."));
+    assert.deepEqual([freed.live.book!.cashRaw, freed.live.book!.hwmRaw, freed.live.book!.realizedPnlUsdgRaw], ["70000000", "100000000", "-20000000"]);
   } finally { f.raw.close(); }
 });
 

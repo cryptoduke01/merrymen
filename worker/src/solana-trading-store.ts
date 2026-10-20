@@ -261,6 +261,48 @@ export async function solanaExpiredAttemptUse(db: Db, scope: SolanaAccountScope,
 function solanaDebitWindowStartOf(submission: SolanaSignedSubmission): string | null {
   try { return solanaDebitWindowStart(submission).toString(); } catch { return null; }
 }
+/**
+ * What writing off a vault shortfall does to `book`, given finalized balances
+ * two providers agree on (SolanaTradingStore.writeOffShortfall, the only caller
+ * that persists it; the operator tool shows it first). A shortfall is a LOSS,
+ * never capital out: cash falls to the USDG the vault holds and realized P&L by
+ * the same amount; WSOL leaves quarantine first (zero basis, no P&L), then the
+ * position at its prorated cost basis, which leaves realized P&L too. The
+ * high-water mark stays where it was, so the drawdown breaker sees the loss,
+ * and buying is paused when cash or the position fell. An asset above its book
+ * in the same reading is booked as status books an inflow: USDG as a deposit
+ * raising the high-water mark, WSOL as zero-basis quarantine. Throws when
+ * nothing is short.
+ */
+export function solanaShortfallWriteOff(bookInput: SolanaLiveBook, chain: { cashUsdg: string; wsolRaw: string }) {
+  const book = structuredClone(bookInput), cash = raw(chain.cashUsdg), wsol = raw(chain.wsolRaw);
+  const bookCash = raw(book.cashRaw), held = raw(book.wsolRaw), aside = solanaQuarantinedWsol(book);
+  if (cash >= bookCash && wsol >= held + aside) refuse("Nothing is short: the vault holds at least its recorded balances.");
+  const lost = { usdgRaw: 0n, quarantinedWsolRaw: 0n, wsolRaw: 0n, costBasisUsdgRaw: 0n }, inflow = { usdgRaw: 0n, quarantinedWsolRaw: 0n };
+  if (cash < bookCash) {
+    lost.usdgRaw = bookCash - cash;
+    book.cashRaw = cash.toString(); book.realizedPnlUsdgRaw = (BigInt(book.realizedPnlUsdgRaw) - lost.usdgRaw).toString();
+  } else if (cash > bookCash) {
+    inflow.usdgRaw = cash - bookCash;
+    book.cashRaw = cash.toString(); book.hwmRaw = (raw(book.hwmRaw) + inflow.usdgRaw).toString(); raw(book.hwmRaw);
+  }
+  if (wsol < held + aside) {
+    const gone = held + aside - wsol;
+    lost.quarantinedWsolRaw = gone < aside ? gone : aside; lost.wsolRaw = gone - lost.quarantinedWsolRaw;
+    if (aside > 0n) book.quarantinedWsolRaw = (aside - lost.quarantinedWsolRaw).toString();
+    if (lost.wsolRaw > 0n) {
+      lost.costBasisUsdgRaw = lost.wsolRaw === held ? BigInt(book.costBasisUsdgRaw) : BigInt(book.costBasisUsdgRaw) * lost.wsolRaw / held;
+      book.wsolRaw = (held - lost.wsolRaw).toString(); book.costBasisUsdgRaw = (BigInt(book.costBasisUsdgRaw) - lost.costBasisUsdgRaw).toString();
+      book.realizedPnlUsdgRaw = (BigInt(book.realizedPnlUsdgRaw) - lost.costBasisUsdgRaw).toString();
+    }
+  } else if (wsol > held + aside) {
+    inflow.quarantinedWsolRaw = wsol - held - aside;
+    book.quarantinedWsolRaw = (aside + inflow.quarantinedWsolRaw).toString(); raw(book.quarantinedWsolRaw);
+  }
+  // Tokens the book traded on are gone and nobody has said why: buying waits for the owner's review (resume-buys).
+  if (lost.usdgRaw > 0n || lost.wsolRaw > 0n) book.buyPaused = true;
+  return { book, lost, inflow };
+}
 function clock(now: () => number): number { const n = now(); if (!Number.isSafeInteger(n) || n < 0) refuse("Invalid Solana runtime clock."); return n; }
 function key(value: string): void { if (canonicalId(CHAINS.solana, "account", value) !== value) refuse("Invalid Solana account key."); }
 function raw(value: string, zero = true): bigint { return parseSolanaRawAmount(value, zero); }
@@ -438,6 +480,69 @@ export class SolanaTradingStore implements SolanaLiveJournal {
   async liveBook(): Promise<SolanaLiveBook | null> {
     await this.binding();
     return rowJson(await this.db.prepare("SELECT book_json FROM solana_runtime_live_books WHERE tenant=? AND owner=?").get(this.scope.tenant, this.scope.owner), "book_json");
+  }
+  /**
+   * A VAULT SHORTFALL NO OWNER WITHDRAWAL EXPLAINS, WRITTEN OFF BY AN OPERATOR
+   * (npm run solana:resolve -- shortfall, solana-resolve-shortfall.ts).
+   *
+   * A vault below its book holds every trade and automated exit (status's
+   * SOLANA_STATUS_BELOW_BOOK; admission refuses a shortfall too). A withdrawal
+   * the owner made outside Merrymen is recorded by the owner from its own
+   * transaction, as capital out. Anything else (an issuer's action on a token
+   * account, a booking error) stays held until an operator who found what moved
+   * the tokens books it here as a loss (solanaShortfallWriteOff): never capital
+   * out, so the high-water mark stays and the drawdown breaker sees it, and
+   * buying is paused for the owner's review.
+   *
+   * `snapshot`: finalized balances two providers on their own hostnames agree
+   * on, at the lowest slot either answered at, read at or after the book's slot.
+   * `decisionId`: the operator's decision, recorded first with that same
+   * snapshot in solana_operator_shortfalls and still open; it is marked booked
+   * in this transaction (no mark, no booking). Afterwards the book matches the
+   * vault at `snapshot.slot`, recorded as its balancesSlot: every vault change at
+   * or before it is in the book, so none can be recorded again later. Refused
+   * while a trade or a signed owner transaction is pending or a withdrawal is
+   * prepared, when nothing is short, and when the book moved since the snapshot.
+   */
+  async writeOffShortfall(snapshot: { cashUsdg: string; wsolRaw: string; slot: number; observedAtMs: number; commitment: "finalized" }, decisionId: string) {
+    return this.db.tx(async tx => {
+      await this.bindingIn(tx, true);
+      const { tenant, owner } = this.scope, now = clock(this.now);
+      if (snapshot.commitment !== "finalized" || !Number.isSafeInteger(snapshot.slot) || snapshot.slot < 1 || !Number.isSafeInteger(snapshot.observedAtMs)
+        || snapshot.observedAtMs > now || now - snapshot.observedAtMs >= 60_000) refuse("A fresh finalized Solana balance snapshot is required.");
+      raw(snapshot.cashUsdg); raw(snapshot.wsolRaw);
+      if (await tx.prepare("SELECT 1 FROM solana_runtime_submissions WHERE vault IN (SELECT vault FROM solana_runtime_submissions WHERE tenant=? AND owner=?) AND status='pending'").get(tenant, owner)) {
+        refuse("Resolve the pending Solana trade before writing off a shortfall.");
+      }
+      const setup = rowJson<SolanaPreparedSetup>(await tx.prepare("SELECT setup_json FROM solana_runtime_setups WHERE tenant=? AND owner=?").get(tenant, owner), "setup_json");
+      if (setup?.signature && setup.status !== "finalized" && setup.status !== "failed") refuse("Resolve the pending owner transaction before writing off a shortfall.");
+      // A prepared withdrawal sized against the old book could land after this and exceed the new one.
+      if ((setup?.kind === "withdraw" || setup?.kind === "withdraw-sol") && !setup.signature && now < setup.expiresAtMs) refuse("Let the prepared owner withdrawal lapse before writing off a shortfall.");
+      const before = rowJson<SolanaLiveBook>(await tx.prepare("SELECT book_json FROM solana_runtime_live_books WHERE tenant=? AND owner=?").get(tenant, owner), "book_json");
+      if (!before) refuse("There is no live trading record to write off against.");
+      if (snapshot.slot < before.slot || now < before.updatedAtMs) refuse("The recorded book moved after these balances were read. Read them again.");
+      const { book, lost, inflow } = solanaShortfallWriteOff(before, snapshot);
+      const flow = async (evidenceId: string, kind: "write-off" | "deposit" | "quarantine", mint: string, amount: bigint) => {
+        if (amount === 0n) return;
+        const inserted = await tx.prepare("INSERT INTO solana_runtime_cashflows(evidence_id,tenant,owner,kind,mint,amount_raw,created_at_ms) VALUES(?,?,?,?,?,?,?) ON CONFLICT DO NOTHING")
+          .run(evidenceId, tenant, owner, kind, mint, amount.toString(), now);
+        if (inserted.changes !== 1) refuse("This shortfall evidence was already used.");
+      };
+      await flow(`write-off:${owner}:${snapshot.slot}:${SOLANA_USDG_MINT}:${snapshot.cashUsdg}`, "write-off", SOLANA_USDG_MINT, lost.usdgRaw);
+      await flow(`write-off:${owner}:${snapshot.slot}:${SOLANA_WRAPPED_SOL_MINT}:${snapshot.wsolRaw}`, "write-off", SOLANA_WRAPPED_SOL_MINT, lost.wsolRaw + lost.quarantinedWsolRaw);
+      // The same evidence ids status books an inflow with at this slot: never booked twice.
+      await flow(`deposit:${owner}:${snapshot.slot}:${snapshot.cashUsdg}`, "deposit", SOLANA_USDG_MINT, inflow.usdgRaw);
+      await flow(`quarantine:${owner}:${snapshot.slot}:${snapshot.wsolRaw}`, "quarantine", SOLANA_WRAPPED_SOL_MINT, inflow.quarantinedWsolRaw);
+      const written: SolanaLiveBook & { balancesSlot?: number } = { ...book, slot: snapshot.slot, updatedAtMs: now };
+      written.balancesSlot = snapshot.slot;
+      await tx.prepare("UPDATE solana_runtime_live_books SET book_json=? WHERE tenant=? AND owner=?").run(JSON.stringify(written), tenant, owner);
+      // Who wrote it off, and on what reading, is part of the booking: no mark, no booking (the transaction rolls back).
+      const marked = await tx.prepare(`UPDATE solana_operator_shortfalls SET booked_at_ms=? WHERE id=? AND tenant=? AND owner=? AND slot=? AND cash_usdg=? AND wsol_raw=?
+        AND booked_at_ms IS NULL AND refusal IS NULL`).run(now, decisionId, tenant, owner, snapshot.slot, snapshot.cashUsdg, snapshot.wsolRaw);
+      if (marked.changes !== 1) refuse("The operator decision to write off this shortfall is not open.");
+      return { book: written as SolanaLiveBook, lost: { usdgRaw: lost.usdgRaw.toString(), wsolRaw: lost.wsolRaw.toString(), quarantinedWsolRaw: lost.quarantinedWsolRaw.toString(),
+        costBasisUsdgRaw: lost.costBasisUsdgRaw.toString() }, inflow: { usdgRaw: inflow.usdgRaw.toString(), quarantinedWsolRaw: inflow.quarantinedWsolRaw.toString() } };
+    });
   }
   /**
    * Book inflows that arrived outside recorded trades, from a fresh finalized

@@ -83,6 +83,9 @@ export const SOLANA_RESOLVE_USAGE = [
   "hostnames must agree, and an expiry is still refused while any provider has seen the signature.",
   "npm run solana:resolve -- pending lists every live trade and signed owner transaction pending over three minutes (the pending-stuck alert's): tenant, id, age,",
   "vault sequence and the show command for its evidence (owner show for an owner transaction), from the database alone (no RPC).",
+  "npm run solana:resolve -- shortfall show <tenant|account> [--third-rpc] [--exclude primary|fallback|third] shows a vault below its book (the vault-below-book alert's",
+  "account), and shortfall book <tenant|account> --operator NAME --reason \"why\" [--third-rpc] [--exclude ...] writes off what no owner withdrawal explains, as a loss;",
+  "shortfall history <tenant> lists those decisions. A withdrawal the owner made outside Merrymen is not a loss: the owner records it under Owner controls.",
 ].join("\n");
 
 const SCHEMA = `CREATE TABLE IF NOT EXISTS solana_operator_resolutions (
@@ -120,7 +123,7 @@ export type SolanaResolveDecision =
   | { book: false; reason: string };
 
 /** A stable short id for a hostname: enough to tell providers apart in the record, never the URL. */
-function hostId(host: string): string { return createHash("sha256").update(host).digest("hex").slice(0, 16); }
+export function hostId(host: string): string { return createHash("sha256").update(host).digest("hex").slice(0, 16); }
 function normalizedHost(url: string): string { return new URL(url).hostname.toLowerCase().replace(/\.$/, ""); }
 
 /**
@@ -229,7 +232,7 @@ export interface SolanaResolveResult {
 /** The refusal recorded on a decision that did not book the trade because something else booked it first. */
 export const SOLANA_RESOLUTION_SUPERSEDED = "Already booked by another path when this decision was settled or rerun; this decision did not book it.";
 
-function tenantOf(value: string | undefined): string {
+export function tenantOf(value: string | undefined): string {
   if (!value || !/^0x[0-9a-f]{40}$/.test(value)) refuse("Name the tenant as a lowercase 0x address.");
   return value;
 }
@@ -237,11 +240,11 @@ function requestIdOf(value: string | undefined): string {
   if (!value || value.length > 128 || !/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(value)) refuse("Name the live trade's request id.");
   return value;
 }
-function lineOf(value: string | undefined, label: string, max: number): string {
+export function lineOf(value: string | undefined, label: string, max: number): string {
   if (!value || value.trim() !== value || value.length > max || /[\u0000-\u001f\u007f]/.test(value)) refuse(`Give ${label} on one line, at most ${max} characters.`);
   return value;
 }
-async function ownerOf(db: Db, tenant: string): Promise<string> {
+export async function ownerOf(db: Db, tenant: string): Promise<string> {
   let row: { owner: string } | undefined;
   try { row = await db.prepare("SELECT owner FROM solana_wallet_bindings WHERE tenant=? AND chain=?").get(tenant, CHAINS.solana) as { owner: string } | undefined; }
   catch { row = undefined; }
@@ -444,6 +447,10 @@ export async function runSolanaResolveCommand(argv: readonly string[], deps: Sol
     if (!rows.length) return "No operator resolutions are recorded for that tenant.";
     return rows.map(row => [new Date(row.approvedAtMs).toISOString(), row.requestId, row.outcome, row.bookedAtMs !== null ? "booked" : row.refusal ? `refused: ${row.refusal}` : "not booked",
       `by ${row.operator}`, row.reason].join("\t")).join("\n");
+  }
+  // An operator's write-off of a vault shortfall no owner withdrawal explains (solana-resolve-shortfall.ts).
+  if (command === "shortfall") {
+    return (await import("./solana-resolve-shortfall")).runSolanaShortfallCommand(positional, flags, deps, excluded === undefined ? undefined : EXCLUDABLE[excluded]);
   }
   if (command === "pending" && positional.length === 0 && flags.size === 0) {
     const items = await listSolanaStuckPending(deps.db, (deps.now ?? Date.now)(), postgres);
