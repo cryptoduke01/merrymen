@@ -207,6 +207,22 @@ const MAX_COMPUTE_UNITS = 1_400_000;
 const WITHDRAW_VALUATION_SLIPPAGE_BPS = 50;
 /** An unchanged fee payer alert is logged again after this long. */
 const FEE_PAYER_ALERT_REPEAT_MS = 10 * 60_000;
+/**
+ * A trade's reads at the prepared slot reach every provider, and the prepared
+ * slot is the primary's (or the quote's): a provider a slot or two behind
+ * answers that minimum context slot as an RPC error rather than with older
+ * state. It is asked again this many times, this far apart, inside its read
+ * session, before its answer counts as unavailable (and the trade is refused).
+ */
+const SLOT_CATCH_UP_ATTEMPTS = 5, SLOT_CATCH_UP_MS = 400;
+async function caughtUp<T>(operation: () => Promise<T>): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    try { return await operation(); } catch (error) {
+      if (attempt >= SLOT_CATCH_UP_ATTEMPTS || !(error instanceof SolanaRpcError && error.code === "rpc")) throw error;
+      await new Promise(resolve => setTimeout(resolve, SLOT_CATCH_UP_MS));
+    }
+  }
+}
 /** Lamports as SOL, exact, for owner- and operator-facing text. */
 function sol(lamports: bigint): string {
   const fraction = (lamports % 1_000_000_000n).toString().padStart(9, "0").replace(/0+$/, "");
@@ -986,11 +1002,11 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
           // bounds this trade, of which the stricter is used. Either provider's refusal refuses the trade.
           let views: Array<{ slot: number; fresh: number; cashUsdg: string; wsolRaw: string; price: SolanaReferencePrice }>;
           try {
-            views = await readSolanaEachProvider(liveRpc, async read => {
+            views = await readSolanaEachProvider(liveRpc, read => caughtUp(async () => {
               const held = await readSolanaVaultBalancesWith(read, vault, slot);
               const price = await readSolanaReferencePrice(read, slot, now(), { generation: pythGeneration });
               return { ...held, price, fresh: integer(await read("getSlot", [{ commitment: "confirmed" }])) };
-            });
+            }));
           }
           catch (error) { if (error instanceof SolanaReferencePriceError) throw new SolanaExecutionError("risk"); throw error; }
           if (views.some(view => view.cashUsdg !== views[0]!.cashUsdg || view.wsolRaw !== views[0]!.wsolRaw)) throw new SolanaExecutionError("invalid-state");

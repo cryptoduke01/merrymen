@@ -925,3 +925,22 @@ test("a live trade whose send fails after it is recorded survives a restart: a n
   assert.deepEqual(await book(), once);
   assert.equal(chain.sends.length, sendsBefore); assert.equal(signs.mock.callCount(), signed);
 });
+
+test("a provider a slot behind the prepared slot is asked again briefly at a trade's two-provider read before the trade is refused", async t => {
+  const { SolanaRpcError } = await import("./solana-rpc");
+  // The fallback answers "minimum context slot not reached" (a JSON-RPC error) `behind` times at the trade's balance read.
+  const lagging = (behind: number) => { let left = behind; return (read: SolanaLiveRead): SolanaLiveRead => async (method, params = []) => {
+    if (method === "getMultipleAccounts" && (params[0] as string[]).length === 2 && left > 0) { left--; throw new SolanaRpcError("rpc"); }
+    return read(method, params);
+  }; };
+  const caught = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" } });
+  const wrap = lagging(2);
+  const placed = await caught.runtime({}, split(caught, undefined, read => wrap(read))).trade(caught.scope, { mode: "live", intent: manual(SOLANA_WRAPPED_SOL_MINT, "100000000", "caught-up") });
+  assert.ok("status" in placed && placed.status === "pending"); assert.equal(caught.sends.length, 1);
+  // Still behind after every attempt: refused, nothing signed or sent.
+  const behind = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" } });
+  const stuck = lagging(100);
+  await assert.rejects(behind.runtime({}, split(behind, undefined, read => stuck(read))).trade(behind.scope, { mode: "live", intent: manual(SOLANA_WRAPPED_SOL_MINT, "100000000", "never-caught-up") }),
+    (error: unknown) => error instanceof SolanaRpcError && error.code === "rpc");
+  assert.deepEqual(await behind.submissions(), []); assert.equal(behind.sends.length, 0);
+});
