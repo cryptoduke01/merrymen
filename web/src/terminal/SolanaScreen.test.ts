@@ -849,26 +849,60 @@ const quoteFor = (lifetimeMs: number, quotedAtMs = Date.now()) => ({ source: "ju
   minOutAmount: "9950000", slippageBps: 50, contextSlot: 1, quotedAtMs, expiresAtMs: quotedAtMs + lifetimeMs });
 test("a previewed minimum expires with its quote and the trade needs a new preview", async () => {
   state.runtime.paper = paper;
-  let lifetime = 200;
+  // The page's clock and its expiry timer are the test's: the expiry is asserted
+  // at an exact instant, never against a real sleep and the machine's load.
+  mock.timers.enable({ apis: ["setTimeout", "Date"], now: Date.now() });
+  try {
+    const lifetime = 20_000;
+    const trades: Record<string, unknown>[] = [];
+    respond = async (path, body) => {
+      if (path === "status") return json(state);
+      if (path === "intent" && body?.action === "preview") return json({ preview: { quote: quoteFor(lifetime) } });
+      if (path === "intent" && body?.action === "trade") { trades.push(body); return json({ receipt: { mode: "paper", requestId: (body.intent as { requestId: string }).requestId } }); }
+      throw new Error("Unexpected fixture route");
+    };
+    await render(); await ui.click("Preview trade");
+    assert.match(ui.container.textContent!, /Minimum received: 0\.00995 wrapped SOL/);
+    assert.equal(button("Simulate trade").disabled, false);
+    // The page re-renders when the quote's lifetime has passed (its timer fires a millisecond after).
+    await act(async () => { mock.timers.tick(lifetime + 1); });
+    // Its minimum is no longer offered and nothing can be traded on it.
+    assert.ok(!ui.container.textContent!.includes("Minimum received"));
+    assert.match(ui.container.textContent!, /This quote expired\. Preview again/);
+    assert.equal([...ui.container.querySelectorAll("button")].some((item) => item.textContent === "Simulate trade"), false);
+    assert.equal(trades.length, 0);
+    await ui.click("Preview trade"); await ui.click("Simulate trade");
+    assert.equal(trades.length, 1);
+    // The trade carries exactly the minimum the owner was shown: the server refuses it, sending nothing, below that.
+    assert.equal((trades[0]!.intent as { minOutAmount?: string }).minOutAmount, "9950000");
+  } finally { mock.timers.reset(); }
+});
+test("a trade carries the minimum of its own preview, and nothing is sent without a current preview of exactly that trade", async () => {
+  state.runtime.paper = paper;
   const trades: Record<string, unknown>[] = [];
+  let minimum = "9950000";
   respond = async (path, body) => {
     if (path === "status") return json(state);
-    if (path === "intent" && body?.action === "preview") return json({ preview: { quote: quoteFor(lifetime) } });
+    if (path === "intent" && body?.action === "preview") {
+      const intent = body.intent as { amountRaw: string };
+      return json({ preview: { quote: { ...quoteFor(20_000), inAmount: intent.amountRaw, minOutAmount: minimum } } });
+    }
     if (path === "intent" && body?.action === "trade") { trades.push(body); return json({ receipt: { mode: "paper", requestId: (body.intent as { requestId: string }).requestId } }); }
     throw new Error("Unexpected fixture route");
   };
   await render(); await ui.click("Preview trade");
-  assert.match(ui.container.textContent!, /Minimum received: 0\.00995 wrapped SOL/);
   assert.equal(button("Simulate trade").disabled, false);
-  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 300)); });
-  // The quote's lifetime has passed: its minimum is no longer offered and nothing can be traded on it.
-  assert.ok(!ui.container.textContent!.includes("Minimum received"));
-  assert.match(ui.container.textContent!, /This quote expired\. Preview again/);
+  // A different amount drops the preview: its minimum belonged to another trade.
+  await type("USDG to spend", "2");
   assert.equal([...ui.container.querySelectorAll("button")].some((item) => item.textContent === "Simulate trade"), false);
+  assert.doesNotMatch(ui.container.textContent!, /Minimum received/);
   assert.equal(trades.length, 0);
-  lifetime = 20_000;
+  // The new amount's own preview, and its own minimum, travel with its trade.
+  minimum = "19900000";
   await ui.click("Preview trade"); await ui.click("Simulate trade");
   assert.equal(trades.length, 1);
+  const intent = trades[0]!.intent as { amountRaw: string; minOutAmount?: string };
+  assert.equal(intent.amountRaw, "2000000"); assert.equal(intent.minOutAmount, "19900000");
 });
 
 test("a quote that is already past its expiry never offers a trade, whatever the device clock says", async () => {
