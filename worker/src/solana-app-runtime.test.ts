@@ -1061,6 +1061,24 @@ test("a slow priority-fee read leaves the owner transaction without a fee instea
       const prepared = await g.runtime({ rpc: { ...g.rpc, read: fn => fn(refusing) } }).prepareOwnerAction(g.scope, { action: "revoke" });
       assert.equal(prepared.priorityFeeLamports, "0");
     } finally { g.raw.close(); }
+    // A simulation that answers after the deadline: once it passed nothing more is asked, the fee estimate included.
+    const h = await fixture();
+    try {
+      await readyLive(h); h.controls.simulatedUnits = 20_000; h.controls.priorityFees = [50_000];
+      let feeReads = 0, answered: () => void = () => undefined;
+      const lateAnswer = new Promise<void>(resolve => { answered = resolve; });
+      const late: SolanaLiveRead = async (method, params) => {
+        if (method === "getRecentPrioritizationFees") feeReads++;
+        if (method !== "simulateTransaction") return h.read(method, params);
+        await new Promise(resolve => setTimeout(resolve, 80));
+        try { return await h.read(method, params); } finally { setTimeout(answered, 0); }
+      };
+      const prepared = await h.runtime({ rpc: { ...h.rpc, read: fn => fn(late) }, ownerFeeReadMs: 20 }).prepareOwnerAction(h.scope, { action: "revoke" });
+      assert.equal(prepared.priorityFeeLamports, "0");
+      assert.equal(feeReads, 0, "the deadline passed before the simulation answered");
+      await lateAnswer; await new Promise(resolve => setTimeout(resolve, 20));
+      assert.equal(feeReads, 0, "the late simulation's answer asks the provider nothing more");
+    } finally { h.raw.close(); }
   } finally { f.raw.close(); }
 });
 
