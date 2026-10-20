@@ -263,6 +263,9 @@ function processGeneration(t: TestContext, value: string | undefined) {
 const clearReferenceAlerts = () => readSolanaReferencePrice(async () => ({ context: { slot: SLOT }, value: pythAccount({ publishTimeMs: NOW }) }), SLOT, NOW,
   { generation: "current" });
 const CURRENT = SOLANA_PYTH_FEEDS.current, UPGRADED = SOLANA_PYTH_FEEDS.upgraded;
+/** What a Pyth generation setting that names no generation says, first time, in full. */
+const CONFIG_ALERT = "[alert] solana-reference-price refused: reason=config generation=invalid failingForMs=0 refused=1 suppressed=0 — " +
+  "MERRYMEN_SOLANA_PYTH_GENERATION must be current or upgraded (unset is current); no live Solana trade is admitted until the setting is fixed";
 
 test("a Pyth generation setting that names neither generation is a configuration refusal before any quote or read, and says the [alert]", async t => {
   processGeneration(t, undefined);
@@ -273,9 +276,10 @@ test("a Pyth generation setting that names neither generation is a configuration
       f.runtime({ MERRYMEN_SOLANA_PYTH_GENERATION: value }).trade(f.scope, { mode: "live", intent: manual(SOLANA_WRAPPED_SOL_MINT, "100000000", "misconfigured") }),
       (error: unknown) => error instanceof Error && error.name === "SolanaAppRuntimeError" && (error as Error & { code: string }).code === "configuration" &&
         /independent SOL price source \(Pyth generation\) is misconfigured/.test(error.message), value));
-    // Said once, as the line an operator pages on, and never with the value itself.
-    assert.deepEqual(said.map(line => line.split(" — ")[0]), ["[alert] solana-reference-price refused: reason=config generation=invalid failingForMs=0 refused=1 suppressed=0"], value);
-    assert.ok(!said.some(line => line.includes(value)), value);
+    // Said once, as the line an operator pages on, with the setting to fix rather than a Pyth outage to chase,
+    // and never with the value itself: the whole line is fixed text.
+    assert.deepEqual(said, [CONFIG_ALERT], value);
+    assert.ok(!said.some(line => line.split(" — ")[0]!.includes(value.trim())), value);
     assert.deepEqual(f.pythReads, [], value); assert.ok(!f.net.urls.some(url => url.startsWith("https://api.jup.ag/")), value);
     assert.deepEqual(await f.submissions(), []); assert.equal(f.sends.length, 0);
   }

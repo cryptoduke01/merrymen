@@ -233,7 +233,8 @@ export interface SolanaReferenceAlerts {
 export const SOLANA_REFERENCE_ALERT_REPEAT_MS = 60_000;
 /**
  * The first refused read says one `[alert] solana-reference-price refused:`
- * line at once; later refusals for the same reason are counted and said again
+ * line at once, ending in what clears it: a fresh price, or for `config` (a
+ * Pyth generation setting that names no generation) a corrected setting; later refusals for the same reason are counted and said again
  * at most every `repeatMs`, and a new reason is said at once. The next good
  * read says one recovery line and clears the count. Every field is a constant
  * or a number, so nothing the RPC served is ever echoed into the log.
@@ -259,8 +260,14 @@ export function createSolanaReferenceAlerts(sink: SolanaReferenceAlertSink = {
         ...(known ? [`account=${SOLANA_PYTH_FEEDS[generation].account}`] : []),
         ...Object.entries(error.detail).filter(([, v]) => typeof v === "number" && Number.isFinite(v)).map(([k, v]) => `${k}=${v}`),
         `failingForMs=${forMs(at)}`, `refused=${failing.refused}`, `suppressed=${suppressed}`];
-      say("alert", `[alert] solana-reference-price refused: ${fields.join(" ")} — no live Solana trade is admitted until a fresh, fully verified ` +
-        `SOL/USD price is read (max age ${SOLANA_REFERENCE_MAX_AGE_MS / 1000} s, about two missed Pyth heartbeats)`);
+      // The remedy fits the reason: a refused read clears with the next good price, a
+      // setting that names no generation only when an operator corrects it.
+      const remedy = error.reason === "config"
+        ? `MERRYMEN_SOLANA_PYTH_GENERATION must be current or upgraded (unset is ${SOLANA_PYTH_DEFAULT_GENERATION}); ` +
+          "no live Solana trade is admitted until the setting is fixed"
+        : `no live Solana trade is admitted until a fresh, fully verified SOL/USD price is read (max age ${SOLANA_REFERENCE_MAX_AGE_MS / 1000} s, ` +
+          "about two missed Pyth heartbeats)";
+      say("alert", `[alert] solana-reference-price refused: ${fields.join(" ")} — ${remedy}`);
     },
     read({ generation, nowMs }) {
       if (!failing) return;

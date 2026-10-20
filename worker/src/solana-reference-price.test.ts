@@ -293,6 +293,8 @@ function recorder() {
 }
 const served = (value: unknown, slot = 1001) => async () => ({ context: { slot }, value });
 const TAIL = " — no live Solana trade is admitted until a fresh, fully verified SOL/USD price is read (max age 120 s, about two missed Pyth heartbeats)";
+/** A setting that names no generation is not a Pyth outage: the line says what to fix, and never echoes the value. */
+const CONFIG_TAIL = " — MERRYMEN_SOLANA_PYTH_GENERATION must be current or upgraded (unset is current); no live Solana trade is admitted until the setting is fixed";
 const CURRENT = SOLANA_PYTH_FEEDS.current.account;
 async function refusal(promise: Promise<unknown>, reason: SolanaReferenceRefusal): Promise<SolanaReferencePriceError> {
   let caught: unknown;
@@ -368,7 +370,7 @@ test("every kind of refused read is said with its reason, the generation and the
   const rec = recorder(); let reads = 0;
   await refusal(readSolanaReferencePrice(async () => { reads++; return {}; }, 1000, NOW, { alerts: createSolanaReferenceAlerts(rec.sink) }), "config");
   assert.equal(reads, 0);
-  assert.deepEqual(rec.lines, [["alert", `[alert] solana-reference-price refused: reason=config generation=invalid failingForMs=0 refused=1 suppressed=0${TAIL}`]]);
+  assert.deepEqual(rec.lines, [["alert", `[alert] solana-reference-price refused: reason=config generation=invalid failingForMs=0 refused=1 suppressed=0${CONFIG_TAIL}`]]);
   const forged = recorder();
   await refusal(readSolanaReferencePrice(async () => ({}), 1000, NOW, { generation: "evil\n" as SolanaPythGeneration, alerts: createSolanaReferenceAlerts(forged.sink) }), "config");
   assert.deepEqual(forged.lines, rec.lines);
@@ -430,7 +432,7 @@ test("requireSolanaPythGeneration reads only the env it is given, and says a set
   assert.deepEqual(rec.lines.slice(), []);
   assert.throws(() => requireSolanaPythGeneration({ MERRYMEN_SOLANA_PYTH_GENERATION: "upgraded\n[alert] forged" }, NOW, alerts),
     (error: unknown) => error instanceof SolanaReferencePriceError && error.reason === "config");
-  assert.deepEqual(rec.lines, [["alert", `[alert] solana-reference-price refused: reason=config generation=invalid failingForMs=0 refused=1 suppressed=0${TAIL}`]]);
+  assert.deepEqual(rec.lines, [["alert", `[alert] solana-reference-price refused: reason=config generation=invalid failingForMs=0 refused=1 suppressed=0${CONFIG_TAIL}`]]);
   // A log or tracker that throws never turns the refusal into an answer.
   const broken = createSolanaReferenceAlerts({ alert: () => { throw new Error("log down"); }, info: () => {} });
   const throwing = { refused: () => { throw new Error("tracker down"); }, read: () => {} };
