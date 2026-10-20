@@ -28,6 +28,9 @@ import { ensureSolanaShortfallSchema } from "./solana-resolve-shortfall";
 
 const key = (n: number) => base58Encode(new Uint8Array(32).fill(n));
 const TENANT = `0x${"11".repeat(20)}` as const, OTHER = `0x${"22".repeat(20)}` as const;
+/** Code-unit order, so evidence ids sort the same under every database collation
+ * (production Postgres compares text by en_US.UTF-8, which ignores punctuation first). */
+const byEvidence = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
 const OWNER = key(20), VAULT = key(21), SESSION = key(22), PROGRAM = SOLANA_VAULT_LOCAL_TEST_PROGRAM;
 const NOW = 1_000_000, CASH = 100_000_000n;
 const limits = { perTradeUsdg: "10000000", dailyUsdg: "50000000", maxOpsPerDay: 20, maxDrawdownBps: 2000, expiresAtMs: NOW + 3_600_000,
@@ -599,8 +602,8 @@ for (const dialect of ["sqlite", "postgres"] as const) {
         .run(id, TENANT, OWNER, snapshot.slot, snapshot.cashUsdg, snapshot.wsolRaw, "milla", "issuer seized 20 USDG", "{}", f.clock.value);
       return id;
     };
-    const flows = async () => (await f.db.prepare("SELECT kind,mint,amount_raw FROM solana_runtime_cashflows ORDER BY evidence_id").all() as Array<{ kind: string; mint: string; amount_raw: string }>)
-      .map(row => [row.kind, row.mint, row.amount_raw]);
+    const flows = async () => (await f.db.prepare("SELECT evidence_id,kind,mint,amount_raw FROM solana_runtime_cashflows").all() as Array<{ evidence_id: string; kind: string; mint: string; amount_raw: string }>)
+      .sort((a, b) => byEvidence(a.evidence_id, b.evidence_id)).map(row => [row.kind, row.mint, row.amount_raw]);
     const booked = async (id: string) => (await f.db.prepare("SELECT booked_at_ms FROM solana_operator_shortfalls WHERE id=?").get(id) as { booked_at_ms: number | string | null }).booked_at_ms;
     return { ...f, decide, flows, booked };
   };
@@ -1070,9 +1073,10 @@ for (const dialect of ["sqlite", "postgres"] as const) {
     const after = (await f.store.reconcileExternalWithdrawals({ withdrawals: [wsol(1005, "1980005", valuation)] })).book;
     assert.equal(after.wsolRaw, "0"); assert.equal(after.quarantinedWsolRaw, "0"); assert.equal(after.costBasisUsdgRaw, "0"); assert.equal(after.realizedPnlUsdgRaw, book.realizedPnlUsdgRaw);
     assert.equal(after.hwmRaw, (peak > basis ? peak - basis : 0n).toString());
-    const flows = await f.db.prepare("SELECT evidence_id,kind,mint,amount_raw FROM solana_runtime_cashflows WHERE kind='withdraw-external' ORDER BY evidence_id").all() as Array<Record<string, string>>;
+    const flows = (await f.db.prepare("SELECT evidence_id,kind,mint,amount_raw FROM solana_runtime_cashflows WHERE kind='withdraw-external'").all() as Array<Record<string, string>>)
+      .sort((a, b) => byEvidence(a.evidence_id!, b.evidence_id!));
     assert.deepEqual(flows.map(r => [r.evidence_id, r.mint, r.amount_raw]), [[`external:${outsideSignature(3)}:${SOLANA_USDG_MINT}`, SOLANA_USDG_MINT, "99000000"],
-      [`external:${outsideSignature(4)}:${SOLANA_WRAPPED_SOL_MINT}`, SOLANA_WRAPPED_SOL_MINT, "1980005"]].sort((a, b) => a[0]!.localeCompare(b[0]!)));
+      [`external:${outsideSignature(4)}:${SOLANA_WRAPPED_SOL_MINT}`, SOLANA_WRAPPED_SOL_MINT, "1980005"]].sort((a, b) => byEvidence(a[0]!, b[0]!)));
   });
 }
 
@@ -1133,8 +1137,8 @@ for (const dialect of ["sqlite", "postgres"] as const) {
 for (const dialect of ["sqlite", "postgres"] as const) {
   const options = dialect === "postgres" && !process.env.MERRYMEN_TEST_PG_URL ? { skip: "Set MERRYMEN_TEST_PG_URL to an isolated PostgreSQL test database." } : {};
   const signatureOf = (n: number) => base58Encode(new Uint8Array(64).fill(n));
-  const flows = async (f: Awaited<ReturnType<typeof fixture>>) => (await f.db.prepare("SELECT evidence_id,kind,mint,amount_raw FROM solana_runtime_cashflows WHERE evidence_id LIKE 'external%' ORDER BY evidence_id").all() as
-    Array<Record<string, string>>).map(row => [row.evidence_id, row.kind, row.amount_raw]);
+  const flows = async (f: Awaited<ReturnType<typeof fixture>>) => (await f.db.prepare("SELECT evidence_id,kind,mint,amount_raw FROM solana_runtime_cashflows WHERE evidence_id LIKE 'external%'").all() as
+    Array<Record<string, string>>).sort((a, b) => byEvidence(a.evidence_id!, b.evidence_id!)).map(row => [row.evidence_id, row.kind, row.amount_raw]);
   test(`${dialect}: inflows are booked from balances: a sweep's unbooked inflow is booked as a status read just before it would, so it leaves the same high-water mark as the in-app path (owner decision)`, options, async t => {
     // Book 100 USDG, peak 100. Off the books 40 USDG left the vault (a leaked session), then the owner deposited 50: the vault holds 110.
     const results: Array<{ path: string; hwmRaw: string; cashRaw: string }> = [];
