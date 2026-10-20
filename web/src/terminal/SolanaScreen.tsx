@@ -434,7 +434,7 @@ function ConnectedSolana() {
       </form>
       <SolanaAutomation key={`strategy-${signer.did}`} binding={binding} api={api} refresh={refresh} workerOnline={status?.runtime?.automation?.workerOnline ?? false} />
       <SolanaOwnerActions key={`owner-${signer.did}`} available={sameWallet && !!status?.runtime?.live.programId} api={api} sign={signer.signSetup} refresh={refresh} readRecord={readRecord}
-        ownerWallet={live?.ownerWallet ?? null} recoverable={live?.recoverable ?? null} />
+        serverTransaction={live?.ownerTransaction ?? null} ownerWallet={live?.ownerWallet ?? null} recoverable={live?.recoverable ?? null} />
       {/* Off by default; only the bound owner of a vault the server has read. */}
       {ownerKeyExportEnabled() && sameWallet && recoveryVault && signer.address && live?.programId && live.vault && <SolanaRecovery key={`recovery-${signer.did}`} owner={signer.address}
         programId={live.programId} vault={live.vault} programSha256={live.programSha256 ?? null} exportKey={signer.exportKey} />}

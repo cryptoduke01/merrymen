@@ -399,15 +399,20 @@ test("a refused owner submission discards the stale signed bytes and leaves Revo
   assert.match(ui.container.textContent!, /Owner transaction: finalized/);
 });
 
-test("an unknown withdrawal outcome keeps its bytes for checking but never holds back Revoke", async () => {
+/** The owner route's prepare, as prepareOwner answers it: nothing new while a saved owner transaction is pending (pinned in SolanaServerContract.test.ts). */
+const ownerPrepare = () => (state.runtime.live as { ownerTransaction?: { status: string } | null }).ownerTransaction?.status === "pending"
+  ? refusal("Refresh the pending owner transaction before preparing another.") : json({ prepared: { transactionBase64: "AQID" } });
+const ownerTransaction = (signature: string, status: string, kind: string) => Object.assign(state.runtime.live, { ownerTransaction: { signature, status, kind } });
+test("withdrawal bytes the server never saved do not hold back Revoke: the revocation replaces them", async () => {
   state.runtime.live.programId = OWNER;
-  let lost = true;
   respond = async (path, body) => {
     if (path === "status") return json(state);
-    if (path === "owner" && body?.stage === "prepare") return json({ prepared: { transactionBase64: "AQID" } });
+    if (path === "owner" && body?.stage === "prepare") return ownerPrepare();
     if (path === "owner" && body?.stage === "submit") {
-      if (lost) { lost = false; throw new Error("Lost response"); }
-      return json({ result: { signature: "revoke-proof", status: "pending" } });
+      // The withdrawal's submission never reached the server; the revocation's is saved and broadcast.
+      if (ownerCalls().filter((call) => call === "submit").length === 1) throw new Error("Lost response");
+      ownerTransaction("revoke-sig", "pending", "revoke");
+      return json({ result: { signature: "revoke-sig", status: "pending" } });
     }
     throw new Error("Unexpected fixture route");
   };
@@ -416,12 +421,74 @@ test("an unknown withdrawal outcome keeps its bytes for checking but never holds
   assert.equal(button("Withdraw to my wallet").disabled, true);
   assert.equal(button("Ask wallet to resume buys").disabled, true);
   assert.equal(button("Revoke all Solana sessions").disabled, false);
+  assert.match(ui.container.textContent!, /Revoking stays available: if the server never saved this withdrawal, a revocation replaces it and it can no longer be sent; if the server saved it, a revocation can be prepared once it is final or expired/);
   await ui.click("Revoke all Solana sessions");
   // A fresh revocation was prepared and signed; the withdrawal bytes were not resent as a revoke.
   assert.equal(signCount, 2);
-  assert.deepEqual(calls.filter((call) => call.path === "owner").map((call) => call.body!.stage === "prepare" ? `prepare:${call.body!.action}` : "submit"),
-    ["prepare:withdraw", "submit", "prepare:revoke", "submit"]);
-  assert.match(ui.container.textContent!, /A signed revocation has no confirmed outcome yet/);
+  assert.deepEqual(ownerCalls(), ["prepare:withdraw", "submit", "prepare:revoke", "submit"]);
+  // Now the server holds the revocation: nothing else, another revocation included, until it resolves.
+  assert.match(ui.container.textContent!, /A signed revocation is awaiting final confirmation on Solana\. Until it is final or expired, no other owner transaction can be prepared, a revocation included/);
+  assert.equal(button("Revoke all Solana sessions").disabled, true);
+});
+
+test("while the server holds a submitted owner transaction, every owner action waits for it, Revoke included, and says so", async () => {
+  state.runtime.live.programId = OWNER;
+  respond = async (path, body) => {
+    if (path === "status") return json(state);
+    if (path === "owner" && body?.stage === "prepare") return ownerPrepare();
+    if (path === "owner" && body?.stage === "submit") {
+      const withdrawal = ownerCalls().filter((call) => call.startsWith("prepare:")).at(-1) === "prepare:withdraw";
+      if (!withdrawal) return json({ result: { signature: "revoke-sig", status: "finalized" } });
+      const record = (state.runtime.live as { ownerTransaction?: { status: string } | null }).ownerTransaction;
+      if (!record) ownerTransaction("withdraw-sig", "pending", "withdraw");
+      return json({ result: { signature: "withdraw-sig", status: record?.status ?? "pending" } });
+    }
+    throw new Error("Unexpected fixture route");
+  };
+  await render(); await ui.click("Withdraw to my wallet");
+  const text = () => ui.container.textContent!;
+  assert.match(text(), /A signed withdrawal is awaiting final confirmation on Solana\. Until it is final or expired, no other owner transaction can be prepared, a revocation included/);
+  for (const name of ["Revoke all Solana sessions", "Ask wallet to resume buys", "Withdraw to my wallet", "Withdraw native SOL"]) assert.equal(button(name).disabled, true, name);
+  assert.equal(button("Check existing owner transaction").disabled, false);
+  assert.deepEqual(ownerCalls(), ["prepare:withdraw", "submit"]);
+  // It finalizes; the check reads that, and the actions come back.
+  ownerTransaction("withdraw-sig", "finalized", "withdraw");
+  await ui.click("Check existing owner transaction");
+  assert.match(text(), /Owner transaction: finalized/);
+  assert.doesNotMatch(text(), /awaiting final confirmation/);
+  assert.equal(button("Revoke all Solana sessions").disabled, false);
+  await ui.click("Revoke all Solana sessions");
+  assert.equal(signCount, 2);
+  assert.deepEqual(ownerCalls(), ["prepare:withdraw", "submit", "submit", "prepare:revoke", "submit"]);
+});
+
+test("a Revoke pressed before the page knew of a pending owner transaction is refused before the wallet opens, and the page shows why", async () => {
+  state = initial("live"); state.runtime.live.programId = PROGRAM;
+  respond = async (path, body) => {
+    if (path === "status") return json(state);
+    if (path === "owner" && body?.stage === "prepare") return ownerPrepare();
+    if (path === "owner" && body?.stage === "submit") return json({ result: { signature: "revoke-sig", status: "pending" } });
+    throw new Error("Unexpected fixture route");
+  };
+  await render();
+  // Another device submitted a permission registration after this page last read the status.
+  ownerTransaction("permission-sig", "pending", "session");
+  await ui.click("Revoke all Solana sessions");
+  const text = () => ui.container.textContent!;
+  assert.equal(signCount, 0, "the wallet never opened");
+  assert.match(text(), /Refresh the pending owner transaction before preparing another\./);
+  assert.match(text(), /Your trading permission is awaiting final confirmation on Solana\. Until it is final, or its blockhash expires \(usually within a few minutes\), the server prepares no other owner transaction, a revocation included/);
+  assert.equal(button("Revoke all Solana sessions").disabled, true);
+  // A record this page has no bytes for is checked by reading the server's status.
+  ownerTransaction("permission-sig", "failed", "session");
+  await ui.click("Check owner transaction");
+  assert.doesNotMatch(text(), /awaiting final confirmation on Solana/);
+  assert.equal(button("Revoke all Solana sessions").disabled, false);
+  // An unknown kind from the server is named plainly, never looked up on the prototype.
+  ownerTransaction("odd-sig", "pending", "constructor");
+  await ui.click("Refresh account");
+  assert.match(text(), /Your owner transaction is awaiting final confirmation on Solana/);
+  assert.deepEqual(ownerCalls(), ["prepare:revoke"]);
 });
 
 const ownerCalls = () => calls.filter((call) => call.path === "owner").map((call) => call.body!.stage === "prepare" ? `prepare:${call.body!.action}` : "submit");

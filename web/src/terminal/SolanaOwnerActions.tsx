@@ -10,6 +10,9 @@ const WSOL = "So11111111111111111111111111111111111111112";
 type ActionResult = { signature: string; status: "pending" | "finalized" | "failed" };
 type OwnerAction = "revoke" | "withdraw" | "withdraw-sol" | "resume-buys";
 const ACTION_NAMES: Record<OwnerAction, string> = { revoke: "revocation", withdraw: "withdrawal", "withdraw-sol": "native SOL withdrawal", "resume-buys": "request to resume buys" };
+/** The server's saved owner transaction by its kind; "session" is a trading permission registration. */
+const KIND_NAMES: Readonly<Record<string, string>> = { ...ACTION_NAMES, session: "trading permission" };
+const kindName = (kind: string | undefined) => kind !== undefined && Object.hasOwn(KIND_NAMES, kind) ? KIND_NAMES[kind]! : "owner transaction";
 const sol = (raw: unknown) => displaySolanaAmountOrNull(raw, 9);
 /** What the owner wallet holds and must hold to send an owner transaction (status.live.ownerWallet). */
 export type OwnerWallet = { lamports: string; revokeLamports: string; withdrawLamports: string };
@@ -73,10 +76,31 @@ export async function outcomeAfterRefusal(readRecord: () => Promise<OwnerRecord>
   return record.status === "finalized" || record.status === "failed" ? record.status : "pending";
 }
 
-export function SolanaOwnerActions({ available, api, sign, refresh, readRecord, ownerWallet = null, recoverable = null }: {
+/**
+ * ONE SUBMITTED OWNER TRANSACTION AT A TIME, A REVOCATION INCLUDED.
+ *
+ * The server keeps one owner transaction per account. While one it saved is
+ * awaiting final confirmation (status ownerTransaction "pending": a
+ * withdrawal, a resume request, a revocation or a permission registration),
+ * prepareOwner refuses to prepare another, a revocation too, with 409
+ * "Refresh the pending owner transaction before preparing another.", until it
+ * is final or provably expired (its blockhash's last valid height passed),
+ * usually within a few minutes. Replacing it would lose the record its
+ * outcome is booked from. So the page holds every owner action back while
+ * the server reports one pending, says why, and offers a check instead of a
+ * button the server would refuse.
+ *
+ * Signed bytes this page holds with an unknown outcome do not by themselves
+ * hold back a revocation: if the server never saved them, a revocation
+ * replaces them and they can no longer be sent; if it did, the prepare is
+ * refused and the page reads the server's record to show it.
+ */
+export function SolanaOwnerActions({ available, api, sign, refresh, readRecord, serverTransaction = null, ownerWallet = null, recoverable = null }: {
   available: boolean; api: SolanaApi; sign: (bytes: Uint8Array) => Promise<Uint8Array>; refresh: () => Promise<void>;
   /** Reads the server's saved owner transaction afresh (and updates the screen). */
   readRecord: () => Promise<OwnerRecord>;
+  /** The server's saved owner transaction from the last status read. */
+  serverTransaction?: OwnerRecord;
   ownerWallet?: OwnerWallet | null;
   recoverable?: RecoverableSol | null;
 }) {
@@ -89,20 +113,28 @@ export function SolanaOwnerActions({ available, api, sign, refresh, readRecord, 
   // What the server said the last prepared transaction needs from the owner wallet.
   const [cost, setCost] = useState<{ action: OwnerAction; required: string; held: string | null; fee: string | null } | null>(null);
   const inFlight = useRef(false);
+  const serverPending = serverTransaction?.status === "pending" ? serverTransaction : null;
   const run = (action: OwnerAction) => {
     if (inFlight.current) return; inFlight.current = true; setBusy(true); setError("");
     void (async () => {
-      // Saved bytes are only ever resubmitted for their own action. Revoking
-      // prepares a fresh revocation; the server refuses it while the earlier
-      // transaction is saved and unresolved, and otherwise that one can no
-      // longer be submitted once this one is prepared.
+      // Saved bytes are only ever resubmitted for their own action. Any other
+      // action prepares fresh bytes; the server refuses that while the earlier
+      // transaction is saved and unresolved, and otherwise the earlier one can
+      // no longer be submitted once this one is prepared.
       let saved = pending?.action === action ? pending : null;
       if (!saved) {
         const body = action === "withdraw" ? { stage: "prepare", action, mint, amountRaw: solanaUnits(amount, mint === SOLANA_USDG_MINT ? 6 : 9) }
           // Native lamports held by the vault account above its rent reserve (withdraw_sol).
           : action === "withdraw-sol" ? { stage: "prepare", action, amountRaw: solanaUnits(solAmount, 9) }
           : { stage: "prepare", action };
-        const { prepared } = await api<{ prepared: PreparedOwnerTransaction }>("owner", body);
+        let prepared: PreparedOwnerTransaction;
+        try { ({ prepared } = await api<{ prepared: PreparedOwnerTransaction }>("owner", body)); }
+        catch (e) {
+          // Refused before anything was signed (another owner transaction is
+          // still pending, say): show the server's record of why.
+          if (refusedByServer(e)) await refresh().catch(() => undefined);
+          throw e;
+        }
         const required = sol(prepared.requiredLamports);
         setCost(required ? { action, required, held: sol(prepared.ownerLamports), fee: prepared.priorityFeeLamports && prepared.priorityFeeLamports !== "0" ? sol(prepared.priorityFeeLamports) : null } : null);
         const signed = await sign(Uint8Array.from(atob(prepared.transactionBase64), (c) => c.charCodeAt(0)));
@@ -137,33 +169,46 @@ export function SolanaOwnerActions({ available, api, sign, refresh, readRecord, 
       // The server returned its record of these bytes: they were accepted.
       const accepted = { ...saved, signature: next.signature, sent: true };
       setResult(next);
-      if (next.status !== "pending") { setPending(null); if (!recorded) await refresh(); } else setPending(accepted);
+      // Pending or not, the server's record changed: read it, so the page shows
+      // what the server will now refuse (see SolanaOwnerActions above).
+      if (next.status !== "pending") { setPending(null); if (!recorded) await refresh(); }
+      else { setPending(accepted); await refresh().catch(() => undefined); }
     })().catch((e: unknown) => setError(e instanceof Error ? e.message : "The owner action did not finish. Retry the existing transaction."))
+      .finally(() => { inFlight.current = false; setBusy(false); });
+  };
+  /** The server's pending record when this page does not hold its bytes (another device, a reload, a permission). */
+  const check = () => {
+    if (inFlight.current) return; inFlight.current = true; setBusy(true); setError("");
+    void refresh().catch((e: unknown) => setError(e instanceof Error ? e.message : "The owner transaction could not be checked. Try again shortly."))
       .finally(() => { inFlight.current = false; setBusy(false); });
   };
   const held = sol(ownerWallet?.lamports), revokeNeeds = sol(ownerWallet?.revokeLamports), withdrawNeeds = sol(ownerWallet?.withdrawLamports);
   const short = !!ownerWallet && !!held && !!revokeNeeds && !!withdrawNeeds && BigInt(ownerWallet.lamports) < BigInt(ownerWallet.revokeLamports);
   const native = sol(recoverable?.nativeLamports), unsynced = sol(recoverable?.unsyncedWsolLamports);
+  const pendingIsServers = !!pending && !!serverPending && pending.signature === serverPending.signature;
   return <div className="solana-card"><h2>Owner controls</h2>
     <p>Your wallet must sign every revocation and withdrawal. Token withdrawals return to your own token accounts; native SOL returns to your owner wallet.</p>
     {held && revokeNeeds && withdrawNeeds && <p>Your owner wallet holds {held} SOL and pays the network fees of these transactions. To revoke it must hold at least {revokeNeeds} SOL; to withdraw, up to {withdrawNeeds} SOL, since a withdrawal may open your token account. A priority fee of at most {sol(OWNER_MAX_PRIORITY_FEE_LAMPORTS.toString())} SOL is added only from SOL beyond that.</p>}
     {short && <p role="alert" className="solana-warning">That is too little to revoke. Send SOL to your owner wallet now, so you can revoke or withdraw in an emergency.</p>}
     {error && <p role="alert" className="solana-error">{error}</p>}
+    {serverPending && !pendingIsServers && <p role="status">Your {kindName(serverPending.kind)} is awaiting final confirmation on Solana. Until it is final, or its blockhash expires (usually within a few minutes), the server prepares no other owner transaction, a revocation included. <a target="_blank" rel="noreferrer" href={`https://solscan.io/tx/${encodeURIComponent(serverPending.signature)}`}>View it on Solana</a></p>}
+    {serverPending && !pending && <button disabled={busy || !available} onClick={check}>Check owner transaction</button>}
     <fieldset disabled={busy || !available}><legend>Vault recovery</legend>
-      {/* Revoking is never held back by a withdrawal whose outcome is unknown. */}
-      <button onClick={() => run("revoke")}>Revoke all Solana sessions</button>
-      <button disabled={!!pending} onClick={() => run("resume-buys")}>Ask wallet to resume buys</button>
+      <button disabled={!!serverPending} onClick={() => run("revoke")}>Revoke all Solana sessions</button>
+      <button disabled={!!pending || !!serverPending} onClick={() => run("resume-buys")}>Ask wallet to resume buys</button>
       <p>Resuming buys keeps the existing risk limits and portfolio high-water mark. If the drawdown still exceeds your limit, buying pauses again.</p>
       <label>Asset<select value={mint} onChange={(e) => setMint(e.target.value)}><option value={SOLANA_USDG_MINT}>USDG</option><option value={WSOL}>Wrapped SOL</option></select></label>
       <label>Amount to withdraw<input inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} /></label>
-      <button disabled={!!pending} onClick={() => run("withdraw")}>Withdraw to my wallet</button>
+      <button disabled={!!pending || !!serverPending} onClick={() => run("withdraw")}>Withdraw to my wallet</button>
       {unsynced && unsynced !== "0" && <p>{unsynced} SOL was sent to the vault&apos;s wrapped SOL account without being wrapped. A wrapped SOL withdrawal wraps it first and can include it.</p>}
       {native && <p>The vault account holds {native} SOL above its rent reserve. It is never traded or counted in performance; withdraw it to your owner wallet here.</p>}
       <label>Native SOL to withdraw<input inputMode="decimal" value={solAmount} onChange={(e) => setSolAmount(e.target.value)} /></label>
-      <button disabled={!!pending} onClick={() => run("withdraw-sol")}>Withdraw native SOL</button>
+      <button disabled={!!pending || !!serverPending} onClick={() => run("withdraw-sol")}>Withdraw native SOL</button>
     </fieldset>
     {cost && <p>The prepared {ACTION_NAMES[cost.action]} needs your owner wallet to hold at least {cost.required} SOL{cost.held ? ` (it holds ${cost.held} SOL)` : ""}: its network fee{cost.fee ? `, a priority fee of ${cost.fee} SOL so it lands under congestion` : ""}, any token account it opens, and the wallet&apos;s own minimum balance.</p>}
-    {pending && <p role="status">A signed {ACTION_NAMES[pending.action]} has no confirmed outcome yet. Check it before signing another withdrawal or resume request.</p>}
+    {pending && <p role="status">{pendingIsServers
+      ? `A signed ${ACTION_NAMES[pending.action]} is awaiting final confirmation on Solana. Until it is final or expired, no other owner transaction can be prepared, a revocation included. Check it shortly.`
+      : `A signed ${ACTION_NAMES[pending.action]} has no confirmed outcome yet. Check it before signing another withdrawal or resume request. Revoking stays available: if the server never saved this ${ACTION_NAMES[pending.action]}, a revocation replaces it and it can no longer be sent; if the server saved it, a revocation can be prepared once it is final or expired.`}</p>}
     {pending && <button disabled={busy || !available} onClick={() => run(pending.action)}>Check existing owner transaction</button>}
     {cleared && !pending && <p role="status"><a target="_blank" rel="noreferrer" href={`https://solscan.io/tx/${encodeURIComponent(cleared.signature)}`}>Check this {ACTION_NAMES[cleared.action]} on Solana</a></p>}
     {result && <p role="status">Owner transaction: {result.status}. <a target="_blank" rel="noreferrer" href={`https://solscan.io/tx/${encodeURIComponent(result.signature)}`}>View transaction</a></p>}
