@@ -136,9 +136,14 @@ export interface SolanaPreparedSetup {
  * it is never activated: the owner's later word was to revoke. Nor is one
  * whose landing did not move the epoch exactly once from what it was prepared
  * at (registerSession): something else moved it, a revocation among them.
+ * While a revocation prepared beside it can still be signed, activation waits
+ * (SOLANA_REVOKE_PREPARED_BESIDE) rather than delete it from under the owner's
+ * wallet; signed and saved, it then fences the registration as above.
  */
 /** Refused: a revocation beside a pending owner transaction once one beside it landed (REVOKE BESIDE...). */
 export const SOLANA_REVOKE_ALREADY_LANDED = "Your revocation already landed, so every session it covered is revoked. Once the pending owner transaction resolves you can revoke again; that is needed only if it was a trading permission that registered after your revocation.";
+/** Refused activation: an unsigned revocation prepared beside this registration can still be signed. */
+export const SOLANA_REVOKE_PREPARED_BESIDE = "A revocation of this permission was prepared and can still be signed in your wallet. Sign it to revoke, or let it lapse (about a minute) and finish registration then.";
 /** Refused activation: the vault's session epoch moved more than this registration's own landing since it was prepared. */
 export const SOLANA_REGISTERED_AFTER_REVOKE = "A revocation or another permission landed on Solana after this permission was prepared, so it is not activated. If it is still active on Solana, revoke again, then prepare a new permission.";
 /** The session epoch a registration prepared at `priorSessionEpoch` leaves when it lands with nothing else moving it; null when unreadable. */
@@ -688,6 +693,8 @@ export class SolanaTradingStore implements SolanaLiveJournal {
       // A revocation the owner signed beside this registration, landed or not yet resolved, was the later word.
       const revoke = await this.revokeIn(tx);
       if (revoke?.signature && revoke.beside === setup.signature && revoke.status !== "failed") refuse("A revocation was signed after this permission. Prepare a new permission.");
+      // One prepared beside it and still signable may be open in the owner's wallet: never deleted from under it.
+      if (revoke && !revoke.signature && revoke.beside === setup.signature && clock(this.now) < revoke.expiresAtMs) refuse(SOLANA_REVOKE_PREPARED_BESIDE);
       await tx.prepare("DELETE FROM solana_runtime_owner_revokes WHERE tenant=? AND owner=?").run(this.scope.tenant, this.scope.owner);
       await tx.prepare(`INSERT INTO solana_runtime_sessions(tenant,owner,record_json,sealed_seed) VALUES(?,?,?,?)
         ON CONFLICT(tenant,owner) DO UPDATE SET record_json=excluded.record_json,sealed_seed=excluded.sealed_seed`)

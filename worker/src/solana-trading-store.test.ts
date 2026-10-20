@@ -11,7 +11,7 @@ import { SqlSolanaBindingStore } from "../../web/src/lib/solana-binding-store";
 import { makePgDb, wrapSqlite, type Db } from "./db";
 import { ensureSolanaTradingSchema, SOLANA_DEFAULT_EXPIRED_ATTEMPT_ALLOWANCE, solanaAutonomousSchedule, solanaExpiredAttemptAllowance, SolanaTradingStore,
   type SolanaPreparedSetup } from "./solana-trading-store";
-import { SOLANA_REGISTERED_AFTER_REVOKE, SOLANA_REVOKE_ALREADY_LANDED } from "./solana-trading-store";
+import { SOLANA_REGISTERED_AFTER_REVOKE, SOLANA_REVOKE_ALREADY_LANDED, SOLANA_REVOKE_PREPARED_BESIDE } from "./solana-trading-store";
 import type { SolanaLiveSettlement, SolanaSignedSubmission } from "./solana-executor";
 import { createSolanaPaperService } from "./solana-paper-service";
 import { SolanaMarketError } from "./solana-market";
@@ -725,6 +725,29 @@ for (const dialect of ["sqlite", "postgres"] as const) {
     await f.store.finishSetup("withdraw-pending", "failed", 1002, expiry("1", "2"));
     assert.equal(await f.store.saveSetup({ ...setup("revoke"), ...prior, priorSessionEpoch: "2" }), true);
     assert.equal(await f.store.revokeSetup(), null, "the main-slot revocation clears the resolved one beside the old record");
+  });
+  test(`${dialect}: a revocation prepared beside a registration and still signable is never deleted by activating it: activation waits, and the signed revocation then fences it`, options, async t => {
+    for (const owner of ["signs", "lets-it-lapse"] as const) {
+      const f = await fixture(t, dialect), registration = `registration-${owner}`;
+      await saveSignedSetup(f.store, { ...setup("session"), ...prior }, registration);
+      await f.store.saveSetup(revokeBeside(registration));
+      await f.store.finishSetup(registration, "finalized", 1003);
+      const prepared = await f.store.revokeSetup();
+      const activate = () => f.store.registerSession({ ...f.registered, registrationSignature: registration, sessionEpoch: "2" }, sessionSeed, dek);
+      await assert.rejects(activate(), (error: unknown) => error instanceof Error && error.message === SOLANA_REVOKE_PREPARED_BESIDE);
+      assert.deepEqual(await f.store.revokeSetup(), prepared, "the revocation the owner may be signing is kept");
+      if (owner === "signs") {
+        // Signed within its window beside the now-finalized registration: saved, and the registration is never activated.
+        assert.equal(await f.store.saveSetup(signedRevoke(registration)), true);
+        await assert.rejects(activate(), /revocation was signed after this permission/);
+      } else {
+        // Past its window it can no longer be signed and saved: activation goes ahead and clears it.
+        f.clock.value = prepared!.expiresAtMs;
+        await activate();
+        assert.equal(await f.store.revokeSetup(), null);
+        assert.equal((await f.store.session())!.registrationSignature, registration);
+      }
+    }
   });
   test(`${dialect}: a registration whose landing did not move the session epoch exactly once is never activated, whatever the records say`, options, async t => {
     const f = await fixture(t, dialect);

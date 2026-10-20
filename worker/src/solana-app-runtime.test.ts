@@ -24,7 +24,7 @@ import { address as kitAddress, appendTransactionMessageInstructions, compileTra
   setTransactionMessageLifetimeUsingBlockhash, type Blockhash } from "@solana/kit";
 import { buildWithdrawSolanaVaultInstruction } from "../../packages/core/src/solana-live";
 import { SOLANA_STATUS_BELOW_BOOK, SOLANA_WITHDRAW_BELOW_BOOK } from "./solana-app-runtime";
-import { SOLANA_REGISTERED_AFTER_REVOKE, SOLANA_REVOKE_ALREADY_LANDED } from "./solana-trading-store";
+import { SOLANA_REGISTERED_AFTER_REVOKE, SOLANA_REVOKE_ALREADY_LANDED, SOLANA_REVOKE_PREPARED_BESIDE, SolanaTradingStoreError } from "./solana-trading-store";
 
 const TENANT = "0x1111111111111111111111111111111111111111";
 const key = (n: number) => getBase58Decoder().decode(new Uint8Array(32).fill(n));
@@ -675,6 +675,29 @@ test("Revoke pressed again after the revocation beside a pending registration la
       }
     } finally { f.raw.close(); }
   }
+});
+
+test("activating a permission never deletes a revocation the owner is still signing beside it: activation waits, and once that revocation is submitted the permission is never activated", async () => {
+  const f = await fixture();
+  try {
+    await f.live(); f.controls.initialized = true;
+    const chain = ownerChain(f), store = new SolanaTradingStore(f.db, f.scope);
+    const setup = await f.app.prepareLive(f.scope, { limits, sessionPublicKey: f.session });
+    const setupSigned = await f.sign(setup.transactionBase64);
+    const registration = await f.app.submitSetup(f.scope, { signedTransactionBase64: setupSigned });
+    // The owner prepares a revocation beside it and opens the wallet; meanwhile the registration lands.
+    const revoke = await f.app.prepareOwnerAction(f.scope, { action: "revoke" });
+    chain.land(registration.signature, setupSigned); f.controls.epoch = 2n;
+    const activate = () => f.app.activateLive(f.scope, { signature: registration.signature, sessionSecretKey: f.sessionSeed.toString("base64") });
+    await assert.rejects(activate(), (error: unknown) => error instanceof SolanaTradingStoreError && error.message === SOLANA_REVOKE_PREPARED_BESIDE);
+    assert.equal(await store.session(), null);
+    // The owner's signed revocation is still accepted, and from then on the permission is never activated.
+    const submitted = await f.app.submitOwnerAction(f.scope, { signedTransactionBase64: await f.sign(revoke.transactionBase64) });
+    assert.equal(submitted.status, "pending");
+    assert.equal((await store.revokeSetup())!.signature, submitted.signature);
+    await assert.rejects(activate(), /revocation was signed after this permission/);
+    assert.equal(await store.session(), null);
+  } finally { f.raw.close(); }
 });
 
 test("a registration that landed after a revocation made outside Merrymen is never activated: the epoch moved twice since it was prepared", async () => {
