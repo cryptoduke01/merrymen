@@ -588,33 +588,36 @@ test("a moved-sequence view that cannot prove its expiry yet says why, and refus
   assert.equal((await f.store.get(OWNER, "stuck-1"))!.status, "pending");
 });
 
-test("pending names every trade and signed owner transaction the pending-stuck alert counts, oldest first, from the database alone", async t => {
-  const f = await fixture(t);
-  const OTHER = `0x${"22".repeat(20)}`, THIRD = `0x${"33".repeat(20)}`;
-  // A signed owner withdrawal pending since a minute before the trade (another tenant), one prepared but never signed, and a trade admitted later.
-  await f.db.prepare("INSERT INTO solana_runtime_setups(tenant,owner,setup_json) VALUES(?,?,?)").run(OTHER, key(40), JSON.stringify({ kind: "withdraw-sol", signature: "owner-sig-1",
-    signedTransactionBase64: "b3duZXItYnl0ZXM=", status: "pending", preparedAtMs: NOW - 60_000, priorSequence: "7" }));
-  await f.db.prepare("INSERT INTO solana_runtime_setups(tenant,owner,setup_json) VALUES(?,?,?)").run(THIRD, key(41), JSON.stringify({ kind: "revoke", preparedAtMs: NOW - 60_000 }));
-  await f.db.prepare(`INSERT INTO solana_runtime_submissions(tenant,owner,request_id,vault,sequence,signature,status,created_at_ms,notional_raw,submission_json)
-    VALUES(?,?,?,?,?,?,'pending',?,?,?)`).run(THIRD, key(41), "young-1", key(42), "3", "signature-young-1", NOW + 4 * 60_000, "1000000", "{}");
-  // No provider is configured, and none may be asked.
-  const deps = (at: number) => ({ db: f.db, env: {}, now: () => at, fetch: (async () => assert.fail("pending reads no provider")) as typeof fetch });
-  assert.equal(await runSolanaResolveCommand(["pending"], deps(NOW + 90_000)), "Nothing has been pending for over 3 minutes.");
-  const listed = await runSolanaResolveCommand(["pending"], deps(NOW + 5 * 60_000));
-  assert.deepEqual(listed.split("\n"), [
-    "Pending for over 3 minutes, oldest first (tenant, what, id, age, vault sequence):",
-    `  ${OTHER}\towner withdraw-sol transaction\towner-sig-1\tpending 6 min\tvault sequence 7`,
-    `  ${TENANT}\tlive trade\tstuck-1\tpending 5 min\tvault sequence 0\tnpm run solana:resolve -- show ${TENANT} stuck-1`,
-  ]);
-  for (const secret of ["b3duZXItYnl0ZXM=", f.pending.signedTransactionBase64, f.pending.messageBase64]) assert.ok(!listed.includes(secret), secret);
-  // An hour on, the young trade is listed too, and ages read in hours.
-  assert.match(await runSolanaResolveCommand(["pending"], deps(NOW + 65 * 60_000)), /\tlive trade\tyoung-1\tpending 1 h 1 min\tvault sequence 3\t/);
-  // Booked trades and finished owner transactions are not listed.
-  await f.db.prepare("UPDATE solana_runtime_submissions SET status='expired'").run();
-  await f.db.prepare("DELETE FROM solana_runtime_setups WHERE tenant=?").run(OTHER);
-  assert.equal(await runSolanaResolveCommand(["pending"], deps(NOW + 65 * 60_000)), "Nothing has been pending for over 3 minutes.");
-  // It takes no tenant, id or flag.
-  for (const argv of [["pending", TENANT], ["pending", "--third-rpc"], ["pending", "--operator", "milla"]]) {
-    await assert.rejects(runSolanaResolveCommand(argv, deps(NOW)), (error: unknown) => error instanceof SolanaResolveError && error.message.startsWith("Usage:"), argv.join(" "));
-  }
-});
+for (const dialect of ["sqlite", "postgres"] as const) {
+  const options = dialect === "postgres" && !process.env.MERRYMEN_TEST_PG_URL ? { skip: "Set MERRYMEN_TEST_PG_URL to an isolated PostgreSQL test database." } : {};
+  test(`${dialect}: pending names every trade and signed owner transaction the pending-stuck alert counts, oldest first, from the database alone`, options, async t => {
+    const f = await fixture(t, dialect);
+    const OTHER = `0x${"22".repeat(20)}`, THIRD = `0x${"33".repeat(20)}`;
+    // A signed owner withdrawal pending since a minute before the trade (another tenant), one prepared but never signed, and a trade admitted later.
+    await f.db.prepare("INSERT INTO solana_runtime_setups(tenant,owner,setup_json) VALUES(?,?,?)").run(OTHER, key(40), JSON.stringify({ kind: "withdraw-sol", signature: "owner-sig-1",
+      signedTransactionBase64: "b3duZXItYnl0ZXM=", status: "pending", preparedAtMs: NOW - 60_000, priorSequence: "7" }));
+    await f.db.prepare("INSERT INTO solana_runtime_setups(tenant,owner,setup_json) VALUES(?,?,?)").run(THIRD, key(41), JSON.stringify({ kind: "revoke", preparedAtMs: NOW - 60_000 }));
+    await f.db.prepare(`INSERT INTO solana_runtime_submissions(tenant,owner,request_id,vault,sequence,signature,status,created_at_ms,notional_raw,submission_json)
+      VALUES(?,?,?,?,?,?,'pending',?,?,?)`).run(THIRD, key(41), "young-1", key(42), "3", "signature-young-1", NOW + 4 * 60_000, "1000000", "{}");
+    // No provider is configured, and none may be asked.
+    const deps = (at: number) => ({ db: f.db, postgres: f.postgres, env: {}, now: () => at, fetch: (async () => assert.fail("pending reads no provider")) as typeof fetch });
+    assert.equal(await runSolanaResolveCommand(["pending"], deps(NOW + 90_000)), "Nothing has been pending for over 3 minutes.");
+    const listed = await runSolanaResolveCommand(["pending"], deps(NOW + 5 * 60_000));
+    assert.deepEqual(listed.split("\n"), [
+      "Pending for over 3 minutes, oldest first (tenant, what, id, age, vault sequence):",
+      `  ${OTHER}\towner withdraw-sol transaction\towner-sig-1\tpending 6 min\tvault sequence 7`,
+      `  ${TENANT}\tlive trade\tstuck-1\tpending 5 min\tvault sequence 0\tnpm run solana:resolve -- show ${TENANT} stuck-1`,
+    ]);
+    for (const secret of ["b3duZXItYnl0ZXM=", f.pending.signedTransactionBase64, f.pending.messageBase64]) assert.ok(!listed.includes(secret), secret);
+    // An hour on, the young trade is listed too, and ages read in hours.
+    assert.match(await runSolanaResolveCommand(["pending"], deps(NOW + 65 * 60_000)), /\tlive trade\tyoung-1\tpending 1 h 1 min\tvault sequence 3\t/);
+    // Booked trades and finished owner transactions are not listed.
+    await f.db.prepare("UPDATE solana_runtime_submissions SET status='expired'").run();
+    await f.db.prepare("DELETE FROM solana_runtime_setups WHERE tenant=?").run(OTHER);
+    assert.equal(await runSolanaResolveCommand(["pending"], deps(NOW + 65 * 60_000)), "Nothing has been pending for over 3 minutes.");
+    // It takes no tenant, id or flag.
+    for (const argv of [["pending", TENANT], ["pending", "--third-rpc"], ["pending", "--operator", "milla"]]) {
+      await assert.rejects(runSolanaResolveCommand(argv, deps(NOW)), (error: unknown) => error instanceof SolanaResolveError && error.message.startsWith("Usage:"), argv.join(" "));
+    }
+  });
+}
