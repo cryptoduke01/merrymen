@@ -264,7 +264,11 @@ test("Solana CLI write-off dispatches to the owner write-off: a zero-output lot 
         minOutAmount: (out * 99n / 100n).toString(), slippageBps: intent.slippageBps, contextSlot: 100, quotedAtMs: NOW, expiresAtMs: NOW + 30_000 };
     },
   };
-  const noRoute = { readMint: routed.readMint, quote: async (intent) => { quotes.push(intent); throw new SolanaMarketError("zero-output"); } };
+  // Jupiter's zero-output answer, as the real market reports it: the evidence the write-off keeps.
+  const zeroAnswer = (intent) => ({ source: "jupiter", inputMint: intent.inputMint, outputMint: intent.outputMint, inAmount: intent.amountRaw,
+    outAmount: "0", minOutAmount: "0", slippageBps: intent.slippageBps, contextSlot: 100, quotedAtMs: NOW });
+  const noRoute = { readMint: routed.readMint, quote: async (intent) => { quotes.push(intent); throw new SolanaMarketError("zero-output", zeroAnswer(intent)); } };
+  const bareZero = { readMint: routed.readMint, quote: async () => { throw new SolanaMarketError("zero-output"); } };
   // A book holding one lot, bought through the real paper service.
   const setup = new SolanaPaperStore(file, { now: () => NOW });
   try {
@@ -284,13 +288,18 @@ test("Solana CLI write-off dispatches to the owner write-off: a zero-output lot 
   assert.deepEqual(quotes.map((q) => [q.inputMint, q.outputMint, q.amountRaw]), [[OTHER_OWNER, SOLANA_USDG_MINT, lot.amountRaw]], "the whole lot was quoted back to USDG");
   assert.deepEqual(read(), before);
 
-  // Jupiter quotes no output for the whole lot: it is written off.
+  // A market that says "zero" without its answer gives no evidence: nothing is written off.
+  await assert.rejects(runSolanaPaperCommand(["write-off", "--owner", OWNER, "--mint", OTHER_OWNER], deps(bareZero)), /quote is invalid/);
+  assert.deepEqual(read(), before);
+
+  // Jupiter quotes no output for the whole lot: it is written off, with that answer kept.
   quotes.length = 0;
   const result = await runSolanaPaperCommand(["write-off", "--owner", OWNER, "--mint", OTHER_OWNER], deps(noRoute));
   assert.deepEqual(quotes.map((q) => [q.inputMint, q.outputMint, q.amountRaw]), [[OTHER_OWNER, SOLANA_USDG_MINT, lot.amountRaw]]);
   assert.equal(result.writtenOff.mint, OTHER_OWNER);
   assert.equal(result.writtenOff.amountRaw, lot.amountRaw);
   assert.equal(result.writtenOff.realizedPnlRaw, (-BigInt(lot.costBasisUsdgRaw)).toString());
+  assert.deepEqual(result.writtenOff.zeroOutputQuote, zeroAnswer({ inputMint: OTHER_OWNER, outputMint: SOLANA_USDG_MINT, amountRaw: lot.amountRaw, slippageBps: 100 }));
   assert.deepEqual(result.positions, []);
   assert.equal(result.cashRaw, before.cashRaw, "cash does not move");
   assert.deepEqual(result.trades, before.trades, "nothing is added to the trades");

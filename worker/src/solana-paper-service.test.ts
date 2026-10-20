@@ -240,7 +240,7 @@ describe("Solana paper dust", () => {
       moved.clear();
       assert.deepEqual(store.get(OWNER)!.positions.map((p) => p.amountRaw), ["901"]);
     };
-    return { store, service, order, quotes, down, CHEAP, legacyDust, market };
+    return { store, service, order, quotes, down, CHEAP, SLOT, legacyDust, market };
   }
 
   it("refuses a partial sell that would leave dust, and allows one that leaves a sellable amount", async () => {
@@ -321,7 +321,10 @@ describe("Solana paper dust", () => {
     const result = await h.service.writeOff(OWNER, h.CHEAP);
     assert.ok(h.quotes.includes("sell:901"), "the whole lot was quoted first");
     assert.deepEqual(result.writtenOff, { mint: h.CHEAP, decimals: 6, amountRaw: "901", costBasisUsdgRaw: lot.costBasisUsdgRaw,
-      realizedPnlRaw: (-BigInt(lot.costBasisUsdgRaw)).toString(), zeroOutputObservedAtMs: NOW, writtenOffAtMs: NOW, version: before.version + 1 });
+      realizedPnlRaw: (-BigInt(lot.costBasisUsdgRaw)).toString(), zeroOutputObservedAtMs: NOW, writtenOffAtMs: NOW, version: before.version + 1,
+      // Jupiter's answer itself is kept as the evidence: the whole lot, back to USDG, buys back nothing.
+      zeroOutputQuote: { source: "jupiter", inputMint: h.CHEAP, outputMint: SOLANA_USDG_MINT, inAmount: "901", outAmount: "0", minOutAmount: "0",
+        slippageBps: 100, contextSlot: h.SLOT, quotedAtMs: NOW } });
     const after = h.store.get(OWNER)!;
     assert.deepEqual(after.positions, [], "the slot is free");
     assert.equal(after.realizedPnlRaw, (BigInt(before.realizedPnlRaw) - BigInt(lot.costBasisUsdgRaw)).toString(), "its cost is a realized loss");
@@ -347,19 +350,44 @@ describe("Solana paper dust", () => {
     assert.deepEqual(h.store.get(OWNER), before);
   });
 
-  it("the store writes off only a whole lot, on fresh zero-output evidence, at the book's version", async () => {
+  it("the store writes off only a whole lot, on fresh zero-output evidence for exactly that lot, at the book's version", async () => {
     const h = dustHarness();
     await h.legacyDust();
     const before = h.store.get(OWNER)!;
-    const input = { owner: OWNER, mint: h.CHEAP, amountRaw: "901", zeroOutputObservedAtMs: NOW, expectedVersion: before.version };
+    const evidence = { source: "jupiter" as const, inputMint: h.CHEAP, outputMint: SOLANA_USDG_MINT, inAmount: "901", outAmount: "0", minOutAmount: "0" as const,
+      slippageBps: 100, contextSlot: h.SLOT, quotedAtMs: NOW };
+    const input = { owner: OWNER, mint: h.CHEAP, amountRaw: "901", zeroOutputQuote: evidence, expectedVersion: before.version };
+    const quote = (change: Record<string, unknown>) => ({ zeroOutputQuote: { ...evidence, ...change } as never });
     for (const [change, code] of [
-      [{ amountRaw: "900" }, "not_dust"], [{ mint: OTHER }, "not_dust"], [{ zeroOutputObservedAtMs: NOW - 30_000 }, "stale_safety"],
-      [{ zeroOutputObservedAtMs: NOW + 1 }, "stale_safety"], [{ expectedVersion: before.version - 1 }, "version_conflict"],
+      [{ amountRaw: "900" }, "not_dust"], [{ mint: OTHER }, "not_dust"], [{ expectedVersion: before.version - 1 }, "version_conflict"],
+      [quote({ quotedAtMs: NOW - 30_000 }), "stale_safety"], [quote({ quotedAtMs: NOW + 1 }), "stale_safety"],
+      // The answer must be about this whole lot, back to USDG, and buy back nothing.
+      [quote({ inAmount: "900" }), "not_dust"], [quote({ inputMint: OTHER }), "not_dust"], [quote({ outputMint: OTHER }), "not_dust"],
+      [quote({ outAmount: "2" }), "not_dust"], [quote({ outAmount: "1000" }), "not_dust"],
+      // And well formed: no evidence, a minimum above zero, a slippage that would hide real output, no context slot.
+      [{ zeroOutputQuote: undefined as never }, "invalid_quote"], [quote({ minOutAmount: "1" }), "invalid_quote"],
+      [quote({ slippageBps: 101 }), "invalid_quote"], [quote({ slippageBps: 9_999, outAmount: "9999" }), "invalid_quote"],
+      [quote({ contextSlot: null }), "invalid_quote"], [quote({ contextSlot: 0 }), "invalid_quote"], [quote({ source: "other" }), "invalid_quote"],
+      [quote({ inAmount: "0" }), "invalid_quote"], [quote({ outAmount: "-1" }), "invalid_quote"], [quote({ quotedAtMs: "1" }), "invalid_quote"],
     ] as const) {
       assert.throws(() => h.store.writeOff({ ...input, ...change }), (error: unknown) => error instanceof SolanaPaperStoreError && error.code === code, JSON.stringify(change));
       assert.deepEqual(h.store.get(OWNER), before);
     }
-    assert.equal(h.store.writeOff(input).positions.length, 0);
+    // An output of one raw unit at 1% still floors to zero; only the named fields are kept.
+    const done = h.store.writeOff({ ...input, ...quote({ outAmount: "1", extra: "dropped" }) });
+    assert.equal(done.positions.length, 0);
+    assert.deepEqual(done.writtenOff.zeroOutputQuote, { ...evidence, outAmount: "1" });
+    assert.equal(done.writtenOff.zeroOutputObservedAtMs, NOW);
+  });
+
+  it("a market that answers 'zero' without the answer itself writes off nothing", async () => {
+    const h = dustHarness();
+    await h.legacyDust();
+    const before = h.store.get(OWNER)!;
+    const bare: SolanaPaperMarket = { readMint: h.market.readMint, quote: async () => { throw new SolanaMarketError("zero-output"); } };
+    await assert.rejects(createSolanaPaperService(h.store, bare, () => NOW).writeOff(OWNER, h.CHEAP),
+      (error: unknown) => error instanceof SolanaPaperStoreError && error.code === "invalid_quote");
+    assert.deepEqual(h.store.get(OWNER), before);
   });
 
   it("an entry whose exit would be dust is still refused as a one-way buy", async () => {

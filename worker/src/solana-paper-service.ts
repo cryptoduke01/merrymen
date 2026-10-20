@@ -10,10 +10,10 @@ import {
   type SolanaQuote,
   type SolanaSwapIntent,
 } from "../../packages/core/src/solana";
-import { SolanaMarketError } from "./solana-market";
+import { SolanaMarketError, type SolanaZeroOutputQuote } from "./solana-market";
 import {
-  solanaPaperIntentFingerprint, SolanaPaperStoreError, type SolanaPaperCommit, type SolanaPaperReceipt, type SolanaPaperSnapshot, type SolanaPaperWriteOff,
-  type SolanaPaperWriteOffRecord,
+  SOLANA_PAPER_WRITE_OFF_SLIPPAGE_BPS, solanaPaperIntentFingerprint, SolanaPaperStoreError, type SolanaPaperCommit, type SolanaPaperReceipt,
+  type SolanaPaperSnapshot, type SolanaPaperWriteOff, type SolanaPaperWriteOffRecord,
 } from "./solana-paper-store";
 
 const TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
@@ -41,8 +41,8 @@ export interface SolanaPaperLedger {
   writeOff?(input: SolanaPaperWriteOff): (SolanaPaperSnapshot & { writtenOff: SolanaPaperWriteOffRecord }) | Promise<SolanaPaperSnapshot & { writtenOff: SolanaPaperWriteOffRecord }>;
 }
 
-/** Slippage for the write-off's full-size exit quote: the paper commands' default. */
-export const SOLANA_PAPER_WRITE_OFF_SLIPPAGE_BPS = 100;
+/** Slippage for the write-off's full-size exit quote (the store's ceiling for its evidence). */
+export { SOLANA_PAPER_WRITE_OFF_SLIPPAGE_BPS };
 
 function requireFreshMint(mint: SolanaMint, expected: string, nowMs: number): void {
   if (!mint || mint.address !== expected || canonicalId(CHAINS.solana, "token", mint.address) !== expected
@@ -227,7 +227,10 @@ export function createSolanaPaperService(
           inputMint: mint, outputMint: SOLANA_USDG_MINT, amountRaw: position.amountRaw, slippageBps: SOLANA_PAPER_WRITE_OFF_SLIPPAGE_BPS }));
       } catch (error) {
         if (!(error instanceof SolanaMarketError && error.code === "zero-output")) throw error;
-        return store.writeOff({ owner, mint, amountRaw: position.amountRaw, zeroOutputObservedAtMs: now(), expectedVersion: book.version });
+        // The answer itself is the evidence, checked again by the ledger and kept
+        // with the write-off. A market that only says "zero" (no answer attached)
+        // gives none: the ledger refuses that as invalid_quote and writes off nothing.
+        return store.writeOff({ owner, mint, amountRaw: position.amountRaw, zeroOutputQuote: error.zeroOutput as SolanaZeroOutputQuote, expectedVersion: book.version });
       }
       // A route still buys it back: not dust, so it is sold, not written off.
       throw new SolanaPaperStoreError("not_dust");

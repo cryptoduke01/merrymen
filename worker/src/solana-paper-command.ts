@@ -45,8 +45,8 @@ would leave dust is refused (sell the whole position, or less of it). A
 position no route buys back at all (dust) can be written off: write-off
 quotes the whole position first and goes ahead only when Jupiter quotes no
 output for it. The lot leaves the book with its cost basis realized as a
-loss, cash and the peak stay as they are, and the book keeps the record in
-writeOffs.
+loss, cash and the peak stay as they are, and the book keeps the record,
+with Jupiter's zero-output answer as its evidence, in writeOffs.
 
 Quotes require MERRYMEN_SOLANA_RPC_MAINNET and MERRYMEN_JUPITER_API_KEY.
 An optional MERRYMEN_SOLANA_RPC_MAINNET_FALLBACK provides independent RPC

@@ -261,6 +261,20 @@ describe("Jupiter paper quotes", () => {
     for (const outAmount of ["0", "1"]) {
       await assert.rejects(fixture({ quote: rawQuote({ outAmount, otherAmountThreshold: "0", routePlan: [] }) }).market.quote(INTENT), marketError("zero-output"));
     }
+    // The error carries the validated answer, the evidence a write-off keeps, and nothing else of the reply.
+    const zero = await fixture({ quote: rawQuote({ outAmount: "1", otherAmountThreshold: "0", routePlan: [], extra: SECRET }) }).market.quote(INTENT)
+      .then(() => null, (error: unknown) => error);
+    assert.ok(zero instanceof SolanaMarketError && zero.code === "zero-output");
+    assert.deepEqual(zero.zeroOutput, { source: "jupiter", inputMint: INTENT.inputMint, outputMint: INTENT.outputMint, inAmount: INTENT.amountRaw,
+      outAmount: "1", minOutAmount: "0", slippageBps: 100, contextSlot: SLOT, quotedAtMs: NOW });
+    assert.ok(Object.isFrozen(zero.zeroOutput));
+    const noSlot = await fixture({ quote: rawQuote({ outAmount: "0", otherAmountThreshold: "0", contextSlot: "x" }) }).market.quote(INTENT)
+      .then(() => null, (error: unknown) => error as SolanaMarketError);
+    assert.equal(noSlot?.zeroOutput?.contextSlot, null, "a missing or invalid context slot is recorded as such, never invented");
+    // Every other market error carries no answer.
+    const invalid = await fixture({ quote: rawQuote({ outAmount: "2", otherAmountThreshold: "0" }) }).market.quote(INTENT).then(() => null, (error: unknown) => error as SolanaMarketError);
+    assert.equal(invalid?.code, "invalid-quote");
+    assert.equal(invalid?.zeroOutput, undefined);
     // Anything else about the answer wrong, or an output whose floor is not
     // zero, stays an invalid quote: dust is never inferred from a bad reply.
     for (const override of [

@@ -12,6 +12,7 @@ import {
   validateSolanaPaperLimits, validateSolanaQuote,
   type SolanaPaperLimits, type SolanaQuote, type SolanaSwapIntent,
 } from "../../packages/core/src/solana";
+import type { SolanaZeroOutputQuote } from "./solana-market";
 
 const APPLICATION_ID = 0x4d535031; // MSP1: refuses existing unrelated databases.
 const DAY_MS = 86_400_000;
@@ -144,8 +145,10 @@ export interface SolanaPaperWriteOffRecord {
   costBasisUsdgRaw: string;
   /** Minus the cost basis. */
   realizedPnlRaw: string;
-  /** When the market answered that no route buys the whole lot back. */
+  /** When the market answered that no route buys the whole lot back (zeroOutputQuote.quotedAtMs). */
   zeroOutputObservedAtMs: number;
+  /** That answer itself, as the market validated it: the write-off's evidence. */
+  zeroOutputQuote: SolanaZeroOutputQuote;
   writtenOffAtMs: number;
   /** The book version the write-off produced. */
   version: number;
@@ -156,9 +159,19 @@ export interface SolanaPaperWriteOff {
   mint: string;
   /** The whole lot: a write-off never splits a position. */
   amountRaw: string;
-  zeroOutputObservedAtMs: number;
+  /**
+   * The market's zero-output answer for exactly this lot back to USDG
+   * (SolanaMarketError("zero-output").zeroOutput), checked again here and kept.
+   */
+  zeroOutputQuote: SolanaZeroOutputQuote;
   expectedVersion: number;
 }
+/**
+ * The most slippage a write-off's zero-output quote may use. Its floor must
+ * round to zero, and a larger slippage would let a quote with real output
+ * pass as "zero": at 1% only an output of 0 or 1 raw unit qualifies.
+ */
+export const SOLANA_PAPER_WRITE_OFF_SLIPPAGE_BPS = 100;
 
 /** What a renewal changed, for the owner to read: each changed limit's old and new value. */
 export interface SolanaPaperRenewalReport {
@@ -436,11 +449,15 @@ export class SolanaPaperStore {
 /**
  * Pure write-off accounting, shared like applySolanaPaperCommit. Call under the
  * book's write lock with a post-lock clock. Only a whole lot that the market
- * just answered no route buys back (zero output, observed within the quote
- * freshness window) can go: a failed or missing quote never qualifies, and the
- * owner asks for each one. The lot leaves the positions (freeing its slot)
- * with its whole cost basis realized as a loss; cash, the peak and the rolling
- * trade caps do not move, and nothing is added to the trades.
+ * just answered no route buys back can go: the answer itself is the evidence
+ * (a Jupiter ExactIn quote of exactly this lot to USDG, at most
+ * SOLANA_PAPER_WRITE_OFF_SLIPPAGE_BPS, a minimum output of 0 and an output
+ * whose slippage floor is 0, with a context slot, quoted within the freshness
+ * window), checked here again and kept in the record. A failed or missing
+ * quote never qualifies, and the owner asks for each one. The lot leaves the
+ * positions (freeing its slot) with its whole cost basis realized as a loss;
+ * cash, the peak and the rolling trade caps do not move, and nothing is added
+ * to the trades.
  */
 export function applySolanaPaperWriteOff(bookInput: SolanaPaperBook, input: SolanaPaperWriteOff,
   nowMs: number): { book: SolanaPaperBook; record: SolanaPaperWriteOffRecord } {
@@ -450,10 +467,13 @@ export function applySolanaPaperWriteOff(bookInput: SolanaPaperBook, input: Sola
   if (input.owner !== book.owner) fail("invalid_input");
   if (!Number.isSafeInteger(input.expectedVersion) || input.expectedVersion !== book.version || book.version === Number.MAX_SAFE_INTEGER) fail("version_conflict");
   if (nowMs < book.updatedAtMs) fail("clock_rollback");
-  if (!Number.isSafeInteger(input.zeroOutputObservedAtMs) || input.zeroOutputObservedAtMs < 0 || input.zeroOutputObservedAtMs > nowMs
-    || nowMs - input.zeroOutputObservedAtMs >= SOLANA_QUOTE_MAX_AGE_MS) fail("stale_safety");
+  const evidence = zeroOutputEvidence(input.zeroOutputQuote);
+  if (evidence.quotedAtMs > nowMs || nowMs - evidence.quotedAtMs >= SOLANA_QUOTE_MAX_AGE_MS) fail("stale_safety");
   const position = book.positions.find((item) => item.mint === input.mint);
   if (!position || typeof input.amountRaw !== "string" || input.amountRaw !== position.amountRaw) fail("not_dust");
+  // The answer is about exactly this lot, back to cash, and buys back nothing.
+  if (evidence.inputMint !== position.mint || evidence.outputMint !== SOLANA_USDG_MINT || evidence.inAmount !== position.amountRaw
+    || BigInt(evidence.outAmount) * BigInt(10_000 - evidence.slippageBps) >= 10_000n) fail("not_dust");
   const basis = BigInt(position.costBasisUsdgRaw);
   book.positions = book.positions.filter((item) => item.mint !== input.mint);
   book.realizedPnlRaw = (BigInt(book.realizedPnlRaw) - basis).toString();
@@ -461,10 +481,25 @@ export function applySolanaPaperWriteOff(bookInput: SolanaPaperBook, input: Sola
   book.updatedAtMs = nowMs;
   const record: SolanaPaperWriteOffRecord = {
     mint: position.mint, decimals: position.decimals, amountRaw: position.amountRaw, costBasisUsdgRaw: position.costBasisUsdgRaw,
-    realizedPnlRaw: (-basis).toString(), zeroOutputObservedAtMs: input.zeroOutputObservedAtMs, writtenOffAtMs: nowMs, version: book.version,
+    realizedPnlRaw: (-basis).toString(), zeroOutputObservedAtMs: evidence.quotedAtMs, zeroOutputQuote: evidence, writtenOffAtMs: nowMs, version: book.version,
   };
   book.writeOffs = [...(book.writeOffs ?? []), record];
   return { book, record };
+}
+
+/** A well-formed zero-output answer, copied field by field (nothing else is kept), or invalid_quote. */
+function zeroOutputEvidence(value: unknown): SolanaZeroOutputQuote {
+  if (!value || typeof value !== "object" || Array.isArray(value)) fail("invalid_quote");
+  const raw = value as Record<string, unknown>;
+  const amount = (field: unknown) => typeof field === "string" && /^(0|[1-9][0-9]{0,19})$/.test(field) && BigInt(field) < 2n ** 64n;
+  if (raw.source !== "jupiter" || typeof raw.inputMint !== "string" || typeof raw.outputMint !== "string"
+    || !amount(raw.inAmount) || BigInt(raw.inAmount as string) === 0n || !amount(raw.outAmount) || raw.minOutAmount !== "0"
+    || !Number.isSafeInteger(raw.slippageBps) || (raw.slippageBps as number) < 0 || (raw.slippageBps as number) > SOLANA_PAPER_WRITE_OFF_SLIPPAGE_BPS
+    || !Number.isSafeInteger(raw.contextSlot) || (raw.contextSlot as number) < 1
+    || !Number.isSafeInteger(raw.quotedAtMs) || (raw.quotedAtMs as number) < 0) fail("invalid_quote");
+  return { source: "jupiter", inputMint: raw.inputMint as string, outputMint: raw.outputMint as string, inAmount: raw.inAmount as string,
+    outAmount: raw.outAmount as string, minOutAmount: "0", slippageBps: raw.slippageBps as number, contextSlot: raw.contextSlot as number,
+    quotedAtMs: raw.quotedAtMs as number };
 }
 
 /** Pure fill accounting shared by local CLI and tenant-bound SQLite/Postgres books.
