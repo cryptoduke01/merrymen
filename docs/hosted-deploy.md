@@ -718,7 +718,9 @@ none of the RH roles starts it. Its hosted guard requires
 the configured RH `MERRYMEN_FLEET_SERVICE_ID`, and requires `DATABASE_URL` plus
 the image's `MERRYMEN_IMAGE=dockerfile-v1` marker. The web and Solana worker must
 share their Solana authority/accounting database and encryption configuration.
-The direct CLI applies the same hosted checks; `--help` only prints usage.
+The direct CLI applies the same hosted checks, and starts only with
+`MERRYMEN_SOLANA=1` on its own service (exit 78 otherwise, before any storage);
+`--help` only prints usage.
 Local development can use `npm run start:solana`, which reads an optional
 ignored `.env.solana.local`. Selecting this role does not deploy the vault
 program or authorize trading: each account must explicitly enable its strategy,
