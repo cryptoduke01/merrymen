@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { ed25519 } from "@noble/curves/ed25519";
 import {
@@ -268,6 +269,31 @@ describe("glued on-chain id detection (audit regressions F3)", () => {
     assert.equal(redactSolanaIds("the market is quiet today", () => "[id]"), "the market is quiet today");
   });
 
+  /**
+   * A RUNAWAY SCAN FAILS BY NAME (review GE, round 2). node:test cannot stop synchronous code: an `it`
+   * timeout fires only when the test yields, and a synchronous test past its timeout even passes. So a
+   * scan that never returns, run in this process, hangs the suite until CI's job timeout and names no
+   * test. This runs the glued scan over `texts` in a child the runner can stop, limited to
+   * RUNAWAY_CPU_SECONDS of CPU time (ulimit -t: what the child spent, never what a loaded machine took
+   * from it, so a slow runner does not fail it), with a wall-clock backstop well past that. The linear
+   * test asks it first, before any scan of its own. Measured: about 1.5 s of CPU, tsx startup included.
+   */
+  const RUNAWAY_CPU_SECONDS = 60;
+  function gluedScanFinishes(texts: string[]): { ok: boolean; how: string } {
+    const script = [
+      'import { readFileSync } from "node:fs";',
+      `const { onchainIdsIn } = await import(${JSON.stringify(new URL("./ids.ts", import.meta.url).href)});`,
+      'for (const text of JSON.parse(readFileSync(0, "utf8"))) onchainIdsIn(text, { glued: true });',
+      'process.stdout.write("scanned");',
+    ].join("\n");
+    const node = [process.execPath, "--import", import.meta.resolve("tsx"), "--input-type=module", "-e", script];
+    const [file, ...args] = process.platform === "win32" ? node : ["/bin/sh", "-c", `ulimit -t ${RUNAWAY_CPU_SECONDS} && exec "$@"`, "sh", ...node];
+    const child = spawnSync(file!, args, { input: JSON.stringify(texts), encoding: "utf8", timeout: 20 * RUNAWAY_CPU_SECONDS * 1_000 });
+    if (child.status === 0 && child.stdout === "scanned") return { ok: true, how: "scanned" };
+    const how = child.error ? String(child.error) : child.signal ? `stopped by ${child.signal}` : `exit ${child.status}: ${child.stderr.slice(-400)}`;
+    return { ok: false, how };
+  }
+
   it("reads a megabyte of long base58 runs in linear time and fails closed past its budget", () => {
     // Runs that hold no 43- or 44-character key window (short of one, or hex alone), and runs that hold a signature.
     const noKeyRun = (i: number) => (i % 3 ? "1" + "z".repeat(31 + (i % 10)) : "abcdef12345".repeat(9));
@@ -275,10 +301,13 @@ describe("glued on-chain id detection (audit regressions F3)", () => {
     const textOf = (count: number, run: (i: number) => string) => Array.from({ length: count }, (_, i) => run(i)).join(" ");
     const noKey = textOf(30_000, noKeyRun);
     assert.ok(noKey.length > 1_000_000);
-    assert.deepEqual(onchainIdsIn(noKey.slice(0, 5_000), glued), [], "none of these runs holds an id");
-    assert.ok(onchainIdsIn(noKey, glued).length > 0, "past the decode budget, the remaining runs are refused unread");
     const keyLike = textOf(12_000, keyLikeRun);
     assert.ok(keyLike.length > 1_000_000);
+    // First, in a child the runner can stop: a scan that never returns fails here, by name, not by hanging.
+    const runaway = gluedScanFinishes([noKey, keyLike]);
+    assert.ok(runaway.ok, `the glued scan did not finish two megabytes within ${RUNAWAY_CPU_SECONDS} s of CPU time (${runaway.how})`);
+    assert.deepEqual(onchainIdsIn(noKey.slice(0, 5_000), glued), [], "none of these runs holds an id");
+    assert.ok(onchainIdsIn(noKey, glued).length > 0, "past the decode budget, the remaining runs are refused unread");
     assert.equal(onchainIdIn(keyLike, glued), true);
 
     // BOUNDED TIME, AGAINST THIS MACHINE IN THIS RUN, never a wall clock. A fixed 2-second budget failed
@@ -291,8 +320,10 @@ describe("glued on-chain id detection (audit regressions F3)", () => {
     //   (measured 0.5-0.6x: the whole text spends one decode budget, the chunks one each). A scan
     //   whose work for each run grows with the text before it costs up to 32 times as much whole
     //   once that work outweighs its own: a mutant reading every 4th character before each run
-    //   measured 16x and fails, one reading every 32nd measured 3.4x and passes. An exponential
-    //   scan never returns.
+    //   measured 16x and fails, one reading every 32nd measured 3.4x and passes. So the bound
+    //   catches a superlinear scan once its extra work at a megabyte is about 8 times a linear
+    //   scan's (whole measures 0.5-0.6x split, the bound is 4x split); a cheaper one passes. An
+    //   exponential scan never returns, and fails above, in the child (gluedScanFinishes).
     // - A constant of the default scan over the same text, which decodes every standalone run with
     //   no budget (measured 4.5-7x): a glued scan that grew a large constant fails here too.
     const cpuMs = (scan: () => unknown): number => {

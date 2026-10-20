@@ -14,7 +14,9 @@ No model is called and nothing leaves the process.
 
 from __future__ import annotations
 
+import contextlib
 import json
+import signal
 import time
 from pathlib import Path
 
@@ -88,6 +90,38 @@ def _cpu_ms(scan) -> float:
     return (time.process_time() - started) * 1000
 
 
+#: CPU seconds the linear test may spend before it fails by name; it spends about 2 (review GE, round 2).
+RUNAWAY_CPU_SECONDS = 60
+
+
+@contextlib.contextmanager
+def _cpu_limited(cpu_seconds: int, what: str):
+    """A scan that never returns fails the test by name, instead of hanging the job.
+
+    pytest sets no timeout of its own and CI installs no pytest-timeout, so a runaway scan
+    hung the brain job until the job's own timeout and named no test. ITIMER_PROF counts this
+    process's CPU time, user and system, never what a loaded machine takes from it, so a slow
+    runner does not fail it. Its SIGPROF handler raises in the main thread between bytecodes,
+    which a pure-Python scan always reaches. Without interval timers (Windows) it only runs.
+    As a decorator (contextlib's context managers are ones), it covers the whole test.
+    """
+    if not hasattr(signal, "setitimer"):
+        yield
+        return
+
+    def stop(signum, frame):
+        pytest.fail(f"{what} did not finish within {cpu_seconds} s of CPU time")
+
+    previous = signal.signal(signal.SIGPROF, stop)
+    signal.setitimer(signal.ITIMER_PROF, cpu_seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_PROF, 0)
+        signal.signal(signal.SIGPROF, previous)
+
+
+@_cpu_limited(RUNAWAY_CPU_SECONDS, "the glued scan's linear test")
 def test_the_glued_scan_is_linear_and_fails_closed_past_its_budget():
     # ids.test.ts builds the same runs, 30,000 and 12,000 of them, for its megabyte; Brain scans a
     # quarter of each, which still spends the decode budget many times over, so its suite stays
@@ -118,7 +152,9 @@ def test_the_glued_scan_is_linear_and_fails_closed_past_its_budget():
     #   whose work for each run grows with the text before it costs up to 16 times as much whole
     #   once that work outweighs its own: a mutant counting every 32nd position before each run
     #   measured 5.6x and fails; a C-speed copy of the text before each run is too cheap at this
-    #   size (about 3x) and passes.
+    #   size (about 3x) and passes. So the bound catches a superlinear scan once its extra work
+    #   here is about 4 to 8 times a linear scan's (whole measures 0.5-1.0x split, the bound is 4x
+    #   split). An exponential scan never returns, and fails by the CPU limit on this test.
     # - Within 100x of the default scan over the same text, which decodes every standalone run with
     #   no budget (measured 5-18x).
     for name, big in (("no key", no_key), ("key-like", key_like)):
