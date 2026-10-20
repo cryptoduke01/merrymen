@@ -48,6 +48,7 @@ const NOT_AVAILABLE = "Solana trading is not available.";
  */
 function setupError(error: unknown): boolean {
   if (error instanceof SolanaMarketError) return error.code === "missing-jupiter-key" || error.code === "invalid-jupiter-key";
+  if (error instanceof SolanaLiveMarketError) return liveMarketKeyUnusable();
   if (error instanceof SolanaRpcError) return ["missing-config", "invalid-config", "invalid-fallback", "invalid-timeout"].includes(error.code);
   // The deployed program does not match the audited binary hash this deployment pins.
   if (error instanceof SolanaExecutionError) return error.code === "unsafe-program";
@@ -80,8 +81,36 @@ const EXECUTION_REFUSALS: Partial<Record<SolanaExecutionError["code"], readonly 
   simulation: [409, "This trade failed its pre-flight check on Solana. Nothing was sent. Preview again or try a smaller amount."],
   "unsafe-route": [409, "No safe route is available for this trade right now. Nothing was sent. Preview again or try another amount."],
   conflict: [409, "This request conflicts with a trade or setting that was just recorded. Nothing new was sent. Refresh before trying again."],
+  "owner-refund": [409, "Tokens someone sent to your vault are waiting to be returned to your own token account for this asset, which is closed or not safe to use. Nothing was sent. Reopen that token account in your wallet, then try again."],
 };
-const NO_LIVE_ROUTE = "No supported route is available for this trade right now. Nothing was sent. Preview again or try another amount.";
+/**
+ * The live route builder (solana-live-market) raises one codeless error for
+ * everything: a missing or invalid Jupiter key (this deployment's setup), an
+ * unusable Jupiter answer, a quote outside the RPC's slot window, or a route
+ * shape the vault does not take. The key is checked here as the builder checks
+ * it, so setup answers as unavailable (setupError); everything else gets a
+ * neutral answer that neither claims there is no route nor asks for another
+ * amount. The route is built before anything is signed, so nothing was sent.
+ */
+function liveMarketKeyUnusable(): boolean {
+  const apiKey = process.env.MERRYMEN_JUPITER_API_KEY?.trim();
+  return !apiKey || apiKey.length > 1024 || /[^\x21-\x7e]/.test(apiKey);
+}
+const NO_LIVE_ROUTE = "A route for this trade could not be prepared right now. Nothing was sent. Preview again shortly.";
+/** SolanaMarketError zero-output: no route returns anything for this amount (dust). */
+const TOO_SMALL = "This amount is too small to trade: no route returns anything for it. Nothing was sent or recorded. Try a larger amount.";
+/**
+ * GA1's 'not-saved': owner or permission bytes refused before anything was
+ * saved or sent. The answer carries notSaved: true so the page can discard
+ * them (resubmitting the same bytes cannot help) and prepare again. Bytes that
+ * are malformed or not the reviewed transaction are a 400; refusals because of
+ * the server's state (nothing prepared, another transaction saved, the prepare
+ * window expired, settings changed) are a 409.
+ */
+const NOT_SAVED_MALFORMED: ReadonlySet<string> = new Set([
+  "Invalid encoded Solana transaction.",
+  "The owner signature or reviewed transaction does not match.",
+]);
 const SETTLEMENT_MISMATCH = "The on-chain result of a recorded trade does not match its record. That trade stays held for review and nothing new was sent.";
 /** Paper refusals by the worker's fixed message; the test pins that every message thrown is listed. */
 const PAPER_REFUSALS: ReadonlyMap<string, readonly [number, string]> = new Map(Object.entries({
@@ -140,21 +169,24 @@ export async function solanaResponse(action: () => Promise<unknown>) {
   if (!solanaEnabled()) return NextResponse.json({ error: NOT_AVAILABLE, ownerFacing: true }, { status: 404, headers });
   try { return NextResponse.json(await action(), { headers }); }
   catch (error) {
-    let status = 503, message = "Solana is temporarily unavailable. Nothing was confirmed; refresh to check existing requests before retrying.";
+    let status = 503, message = "Solana is temporarily unavailable. Nothing was confirmed; refresh to check existing requests before retrying.", notSaved = false;
     if (setupError(error)) message = NOT_AVAILABLE;
     else if (error instanceof SolanaWebError) { status = error.status; message = error.message; }
     else if (error instanceof SolanaBindingError) { status = error.code === "invalid" ? 400 : 409; message = error.message; }
     else if (error instanceof SolanaPaperValidationError || error instanceof SolanaPaperStoreError) { status = 400; message = error.message; }
+    // Before the unknown-outcome check: nothing was saved, whatever the message says.
+    else if (error instanceof SolanaAppRuntimeError && error.code === "not-saved") { status = NOT_SAVED_MALFORMED.has(error.message) ? 400 : 409; message = error.message; notSaved = true; }
     else if ((error instanceof SolanaAppRuntimeError || error instanceof SolanaTradingStoreError) && OWNER_OUTCOME_UNKNOWN.has(error.message)) message = OUTCOME_UNKNOWN;
     else if (error instanceof SolanaAppRuntimeError) { status = error.code === "invalid" ? 400 : 409; message = error.message; }
     else if (error instanceof SolanaTradingStoreError) { status = 409; message = error.message; }
     else if (error instanceof SolanaExecutionError && Object.hasOwn(EXECUTION_REFUSALS, error.code)) [status, message] = EXECUTION_REFUSALS[error.code]!;
-    else if (error instanceof SolanaLiveMarketError) { status = 409; message = NO_LIVE_ROUTE; }
+    else if (error instanceof SolanaLiveMarketError) message = NO_LIVE_ROUTE;
     else if (error instanceof SolanaSettlementError) { status = 409; message = SETTLEMENT_MISMATCH; }
     else if (error instanceof SolanaPaperServiceError && PAPER_REFUSALS.has(error.message)) [status, message] = PAPER_REFUSALS.get(error.message)!;
+    else if (error instanceof SolanaMarketError && error.code === "zero-output") { status = 400; message = TOO_SMALL; }
     else if (error instanceof SolanaMarketError || error instanceof SolanaRpcError) message = error.message;
     // Unknown provider/storage errors are never reflected: they may contain
     // endpoints, API keys, sealed session keys, SQL values or wallet material.
-    return NextResponse.json({ error: message, ownerFacing: true }, { status, headers });
+    return NextResponse.json({ error: message, ownerFacing: true, ...(notSaved ? { notSaved: true } : {}) }, { status, headers });
   }
 }

@@ -66,7 +66,7 @@ test("live refusals the owner can act on are clear 4xx answers, not an outage", 
   const cases: Array<[SolanaExecutionError["code"], number, RegExp]> = [
     ["risk", 409, /outside your trading limits/], ["fee-cap", 409, /fees are above/], ["simulation", 409, /pre-flight check/],
     ["unsafe-route", 409, /No safe route/], ["conflict", 409, /Refresh before trying again/], ["invalid-intent", 400, /not supported/],
-    ["price-moved", 409, /^The price moved\. Preview again; nothing was sent\.$/],
+    ["price-moved", 409, /^The price moved\. Preview again; nothing was sent\.$/], ["owner-refund", 409, /Reopen that token account in your wallet/],
   ];
   for (const [code, status, text] of cases) {
     const response = await solanaResponse(async () => { throw new SolanaExecutionError(code); });
@@ -76,13 +76,9 @@ test("live refusals the owner can act on are clear 4xx answers, not an outage", 
     assert.equal(body.ownerFacing, true);
     ownerSafe(body.error);
   }
-  for (const [error, text] of [[new SolanaLiveMarketError(), /No supported route/], [new SolanaSettlementError(), /stays held for review/]] as const) {
-    const response = await solanaResponse(async () => { throw error; });
-    const body = await response.json() as { error: string };
-    assert.equal(response.status, 409, error.name);
-    assert.match(body.error, text);
-    ownerSafe(body.error);
-  }
+  const settlement = await solanaResponse(async () => { throw new SolanaSettlementError(); });
+  assert.equal(settlement.status, 409); const held = (await settlement.json() as { error: string }).error;
+  assert.match(held, /stays held for review/); ownerSafe(held);
   // Outcomes nobody can vouch for keep the cautious answer; a program that is
   // not the audited binary is this deployment's problem, not the owner's.
   for (const code of ["invalid-state", "cancelled"] as const) {
@@ -140,4 +136,61 @@ test("failures to use Solana's answer about a saved owner transaction are an unk
   assert.equal(expired.status, 409); assert.equal((await expired.json()).error, "The prepared owner transaction expired before submission.");
   const signature = await solanaResponse(async () => { throw new SolanaAppRuntimeError("invalid", "The owner signature or reviewed transaction does not match."); });
   assert.equal(signature.status, 400);
+});
+
+test("a live route that cannot be built is not 'no supported route': setup is unavailable, anything else is a neutral retry", async () => {
+  const key = process.env.MERRYMEN_JUPITER_API_KEY;
+  try {
+    // The builder raises the same codeless error for a missing or invalid key and for a bad answer.
+    for (const value of [undefined, "", "   ", "bad key", "x".repeat(1025)]) {
+      if (value === undefined) delete process.env.MERRYMEN_JUPITER_API_KEY; else process.env.MERRYMEN_JUPITER_API_KEY = value;
+      const response = await solanaResponse(async () => { throw new SolanaLiveMarketError(); });
+      assert.equal(response.status, 503, JSON.stringify(value));
+      assert.deepEqual(await response.json(), { error: "Solana trading is not available.", ownerFacing: true }, JSON.stringify(value));
+    }
+    process.env.MERRYMEN_JUPITER_API_KEY = "configured-key";
+    const response = await solanaResponse(async () => { throw new SolanaLiveMarketError(); });
+    const body = await response.json() as { error: string };
+    assert.equal(response.status, 503);
+    assert.equal(body.error, "A route for this trade could not be prepared right now. Nothing was sent. Preview again shortly.");
+    assert.doesNotMatch(body.error, /no supported route|another amount/i); ownerSafe(body.error);
+  } finally { if (key === undefined) delete process.env.MERRYMEN_JUPITER_API_KEY; else process.env.MERRYMEN_JUPITER_API_KEY = key; }
+});
+
+test("an amount that quotes to nothing is a 400 the owner can fix, in fixed words", async () => {
+  const response = await solanaResponse(async () => { throw new SolanaMarketError("zero-output"); });
+  const body = await response.json() as { error: string; ownerFacing: boolean };
+  assert.equal(response.status, 400);
+  assert.equal(body.error, "This amount is too small to trade: no route returns anything for it. Nothing was sent or recorded. Try a larger amount.");
+  ownerSafe(body.error);
+  // Other quote problems keep their answer.
+  assert.equal((await solanaResponse(async () => { throw new SolanaMarketError("invalid-quote"); })).status, 503);
+});
+
+test("owner bytes refused before anything was saved answer notSaved, and nothing else does", async () => {
+  // The worker still raises the two malformed-bytes refusals as not-saved.
+  const runtime = readFileSync(fileURLToPath(new URL("../../../worker/src/solana-app-runtime.ts", import.meta.url)), "utf8");
+  for (const message of ["Invalid encoded Solana transaction.", "The owner signature or reviewed transaction does not match."]) {
+    assert.ok(runtime.includes(`notSaved(${JSON.stringify(message)})`), message);
+  }
+  for (const [message, status] of [["Invalid encoded Solana transaction.", 400], ["The owner signature or reviewed transaction does not match.", 400],
+    ["Prepare this owner transaction before signing it.", 409], ["Another owner transaction is already saved.", 409],
+    ["The prepared owner transaction expired before submission.", 409], ["The live permission settings changed. Review and sign again.", 409],
+    // Even a message that, from saved bytes, would be an unknown outcome: these bytes were never saved.
+    ["Invalid Solana confirmation data.", 409]] as const) {
+    const response = await solanaResponse(async () => { throw new SolanaAppRuntimeError("not-saved", message); });
+    assert.equal(response.status, status, message);
+    assert.deepEqual(await response.json(), { error: message, ownerFacing: true, notSaved: true }, message);
+  }
+  for (const error of [new SolanaAppRuntimeError("pending", "Invalid owner transaction confirmation."), new SolanaAppRuntimeError("invalid", "The owner signature or reviewed transaction does not match."),
+    new SolanaTradingStoreError("The prepared owner transaction expired before submission."), new SolanaExecutionError("price-moved"), new Error("boom")]) {
+    const body = await (await solanaResponse(async () => { throw error; })).json() as Record<string, unknown>;
+    assert.equal(Object.hasOwn(body, "notSaved"), false, error.message);
+  }
+});
+
+test("a paced intent answers 429 in its own words, never as an outage", async () => {
+  const response = await solanaResponse(async () => { throw new SolanaWebError(429, "Too many Solana trade requests. Nothing was sent. Try again in 6 seconds."); });
+  assert.equal(response.status, 429);
+  assert.deepEqual(await response.json(), { error: "Too many Solana trade requests. Nothing was sent. Try again in 6 seconds.", ownerFacing: true });
 });
