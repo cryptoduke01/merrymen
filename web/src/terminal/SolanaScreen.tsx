@@ -12,7 +12,7 @@ import { SignIn } from "./HostedControls";
 import { SolanaAutomation } from "./SolanaAutomation";
 import { OWNER_CONFIRMATION_UNAVAILABLE, outcomeAfterRefusal, pacedAnswer, refusedByServer, savedNothing, signatureOf, SolanaOwnerActions, SolanaRequestError, type OwnerRecord, type OwnerWallet, type RecoverableSol } from "./SolanaOwnerActions";
 import { ownerKeyExportEnabled, releasedProgramSha256, SolanaRecovery } from "./SolanaRecovery";
-import { checkPreparedPermission, PermissionReview, PermissionTerms, permissionExpiry, type PreparedPermission, type SignedPermissionTerms } from "./SolanaPermission";
+import { checkPreparedPermission, PermissionReview, PermissionTerms, permissionExpiry, secondsUntil, type PreparedPermission, type SignedPermissionTerms } from "./SolanaPermission";
 import { deriveSolanaVaultAddress } from "../../../packages/core/src/solana-live";
 import { solanaUnits as units, displaySolanaAmount as display, displaySolanaAmountOrNull } from "../lib/solana-amounts";
 import "./SolanaScreen.css";
@@ -675,7 +675,7 @@ function ConnectedSolana() {
         {preview && (receipt || quoteFresh ? <>{preview.movedFrom && !receipt
           ? <p role="status">The price moved, so nothing was sent. The current quote guarantees at least {display(preview.quote.minOutAmount, preview.quote.outputMint === SOLANA_USDG_MINT ? 6 : 9)} {tokenLabel(preview.quote.outputMint)}, below the {display(preview.movedFrom, preview.quote.outputMint === SOLANA_USDG_MINT ? 6 : 9)} {tokenLabel(preview.quote.outputMint)} you previewed. Place the same trade at this new minimum, or preview again.</p>
           : <p>Minimum received: {display(preview.quote.minOutAmount, preview.quote.outputMint === SOLANA_USDG_MINT ? 6 : 9)} {tokenLabel(preview.quote.outputMint)}.</p>}
-          {!receipt && <p>This {preview.movedFrom ? "minimum" : "quote"} is valid for about {Math.max(1, Math.round((preview.deadline - Date.now()) / 1000))} seconds. The trade is quoted again when placed, with the same 0.5% slippage limit; the receipt shows the minimum actually enforced.</p>}
+          {!receipt && <p>This {preview.movedFrom ? "minimum" : "quote"} is valid for about {secondsUntil(preview.deadline)}. The trade is quoted again when placed, with the same 0.5% slippage limit; the receipt shows the minimum actually enforced.</p>}
           <button type="button" disabled={busy || !!receipt || !quoteFresh || mode !== binding.requestedMode} onClick={() => void act(placeTrade)}>{mode === "paper" ? "Simulate trade" : "Place live trade"}{preview.movedFrom ? " at the new minimum" : ""}</button></>
           : <p role="status">This quote expired. Preview again to see a current minimum before trading.</p>)}
         {receipt && <p role="status">{receipt.mode === "paper" ? "Simulated trade recorded." : `Live request recorded${receipt.status ? `: ${receipt.status}` : ""}.`} {receipt.signature && <a target="_blank" rel="noreferrer" href={`https://solscan.io/tx/${encodeURIComponent(receipt.signature)}`}>View transaction</a>}</p>}

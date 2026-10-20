@@ -1042,6 +1042,20 @@ test("a previewed minimum expires with its quote and the trade needs a new previ
     assert.equal((trades[0]!.intent as { minOutAmount?: string }).minOutAmount, "9950000");
   } finally { mock.timers.reset(); }
 });
+test("a quote's time left is said in whole seconds, and one second is never \"1 seconds\"", () => onTestClock(async () => {
+  state.runtime.paper = paper;
+  let lifetime = 20_000;
+  respond = async (path, body) => {
+    if (path === "status") return json(state);
+    if (path === "intent" && body?.action === "preview") return json({ preview: { quote: quoteFor(lifetime) } });
+    throw new Error("Unexpected fixture route");
+  };
+  await render(); await ui.click("Preview trade");
+  assert.match(ui.container.textContent!, /This quote is valid for about 20 seconds\. The trade is quoted again/);
+  lifetime = 1_000;
+  await ui.click("Preview trade");
+  assert.match(ui.container.textContent!, /This quote is valid for about 1 second\. The trade is quoted again/);
+}));
 test("a trade carries the minimum of its own preview, and nothing is sent without a current preview of exactly that trade", async () => {
   state.runtime.paper = paper;
   const trades: Record<string, unknown>[] = [];
@@ -1648,7 +1662,10 @@ test("a reviewed owner transaction not signed in time is discarded without openi
     assert.match(ui.container.textContent!, /Review before your wallet opens/);
     await act(async () => { mock.timers.tick(30_000); });
     assert.match(ui.container.textContent!, /Sign within about 15 seconds/);
-    await act(async () => { mock.timers.tick(15_000); });
+    // At the very end it says one second, never "1 seconds".
+    await act(async () => { mock.timers.tick(14_000); });
+    assert.match(ui.container.textContent!, /Sign within about 1 second, or start it again/);
+    await act(async () => { mock.timers.tick(1_000); });
     assert.doesNotMatch(ui.container.textContent!, /Review before your wallet opens/);
     assert.match(ui.container.textContent!, /The prepared withdrawal was not signed in time, so it was discarded\. Nothing was signed\./);
     assert.equal([...ui.container.querySelectorAll("button")].some((item) => item.textContent === "Sign with my wallet"), false);

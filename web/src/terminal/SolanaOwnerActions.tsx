@@ -7,7 +7,7 @@ import { buildRevokeSolanaSessionsInstruction, buildSetSolanaBreakerInstruction,
 import { displaySolanaAmount, displaySolanaAmountOrNull, solanaUnits } from "../lib/solana-amounts";
 import { RequestError } from "./request-json";
 import type { SolanaApi } from "./SolanaAutomation";
-import { OWNER_MAX_PRIORITY_FEE_LAMPORTS, readOwnerPaidTransaction, type OwnerPaidInstruction } from "./SolanaPermission";
+import { OWNER_MAX_PRIORITY_FEE_LAMPORTS, readOwnerPaidTransaction, secondsUntil, type OwnerPaidInstruction } from "./SolanaPermission";
 
 const WSOL = "So11111111111111111111111111111111111111112";
 type ActionResult = { signature: string; status: "pending" | "finalized" | "failed" };
@@ -478,7 +478,7 @@ export function SolanaOwnerActions({ available, owner, programId, api, sign, ref
       <p>{review.fee ? `It carries a priority fee of ${review.fee} SOL (at most ${sol(OWNER_MAX_PRIORITY_FEE_LAMPORTS.toString())} SOL), paid by your owner wallet with the network fee so it lands under congestion.`
         : "It carries no priority fee: your owner wallet pays only the network fee."}</p>
       {review.required && <p>The prepared {ACTION_NAMES[review.action]} needs your owner wallet to hold at least {review.required} SOL{review.held ? ` (it holds ${review.held} SOL)` : ""}: its network fee{review.fee ? `, a priority fee of ${review.fee} SOL so it lands under congestion` : ""}, any token account it opens, and the wallet&apos;s own minimum balance.</p>}
-      <p>Nothing has been signed yet. Sign within about {Math.max(1, Math.round((review.deadline - Date.now()) / 1000))} seconds, or start it again to prepare a new one.</p>
+      <p>Nothing has been signed yet. Sign within about {secondsUntil(review.deadline)}, or start it again to prepare a new one.</p>
       <button disabled={busy || !available || !!serverPending} onClick={signReview}>Sign with my wallet</button>
       <button className="solana-secondary" disabled={busy} onClick={() => setReview(null)}>Discard</button>
     </div>}
