@@ -133,7 +133,8 @@ function ConnectedSolana() {
   const signer = useSolanaOwner();
   const [status, setStatus] = useState<Status | null>(null);
   const [busy, setBusy] = useState(false), [error, setError] = useState("");
-  // A pacing answer (429): this request was not processed; the owner waits and tries again. Not a failure.
+  // What the owner should read that is not a failure (role=status): a pacing answer (429: wait and try
+  // again), a price move with no usable fresh minimum, a lot the market quotes nothing for, a write-off done.
   const [notice, setNotice] = useState("");
   const [dust, setDust] = useState<DustLot | null>(null);
   const [mode, setMode] = useState<"paper" | "live">("paper"), [consent, setConsent] = useState(false);
