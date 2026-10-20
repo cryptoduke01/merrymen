@@ -135,6 +135,12 @@ function refundBlocker({ mint, problem }: SolanaOwnerRefundBlock): string {
 export const SOLANA_STATUS_BELOW_BOOK = "Vault balances are below recorded trades. If you withdrew from the vault outside Merrymen, with your owner key in another wallet or tool, record those withdrawals under Owner controls; until the records match the vault, trading and automated exits stay held.";
 /** A withdrawal prepare refused because the vault holds less of the asset than the book. */
 export const SOLANA_WITHDRAW_BELOW_BOOK = "Your vault holds less of this asset than Merrymen's records, so this withdrawal could fail on Solana. If you withdrew from the vault outside Merrymen, record those withdrawals under Owner controls first, or withdraw at most what the vault holds. Nothing was prepared.";
+/**
+ * A permission the owner signed whose registration landed after a revocation (one beside it, or one made
+ * outside Merrymen): Merrymen never activates it (activateLive), but its session stays live on Solana until
+ * it expires, so the owner is told to revoke again.
+ */
+export const SOLANA_STATUS_REGISTERED_AFTER_REVOKE = "A trading permission that landed on Solana after your revocation is still active there until it expires. Merrymen never uses it; revoke again under Owner controls to end it.";
 /** Chain balances at or above the book: an excess waits to be booked, a shortfall stops trading. */
 function shortOfBook(book: SolanaLiveBook, chain: { cashUsdg: string; wsolRaw: string }): boolean {
   return BigInt(chain.cashUsdg) < BigInt(book.cashRaw) || BigInt(chain.wsolRaw) < BigInt(book.wsolRaw) + solanaQuarantinedWsol(book);
@@ -871,6 +877,12 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
             if (!storedSeed || await getAddressFromPublicKey((await createKeyPairFromPrivateKeyBytes(seed(storedSeed, "The session cannot be opened."))).publicKey) !== session.session)
               fail("The saved trading permission cannot be opened.", "configuration");
           }
+          // A finalized registration activateLive never activates (the epoch moved more than its own landing: a
+          // revocation landed before it, beside it or outside Merrymen) whose session is still live on Solana.
+          const registering = await s.setup();
+          if (registering && (registering.kind ?? "session") === "session" && registering.status === "finalized" && registering.session === live.state.session
+            && live.state.expiresAt * 1000n > BigInt(now()) && session?.registrationSignature !== registering.signature
+            && live.state.sessionEpoch !== solanaRegisteredEpoch(registering.priorSessionEpoch)) blockers.push(SOLANA_STATUS_REGISTERED_AFTER_REVOKE);
           const currentBook = await s.liveBook();
           if (currentBook?.buyPaused) buysOnly("The buying drawdown breaker is paused; exits remain available.");
           if (currentBook && shortOfBook(currentBook, balances)) blockers.push(SOLANA_STATUS_BELOW_BOOK);

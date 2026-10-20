@@ -23,7 +23,7 @@ import { pythAccount } from "./solana-reference-price-fixture";
 import { address as kitAddress, appendTransactionMessageInstructions, compileTransaction, createTransactionMessage, setTransactionMessageFeePayer,
   setTransactionMessageLifetimeUsingBlockhash, type Blockhash } from "@solana/kit";
 import { buildWithdrawSolanaVaultInstruction } from "../../packages/core/src/solana-live";
-import { SOLANA_STATUS_BELOW_BOOK, SOLANA_WITHDRAW_BELOW_BOOK } from "./solana-app-runtime";
+import { SOLANA_STATUS_BELOW_BOOK, SOLANA_STATUS_REGISTERED_AFTER_REVOKE, SOLANA_WITHDRAW_BELOW_BOOK } from "./solana-app-runtime";
 import { SOLANA_REGISTERED_AFTER_REVOKE, SOLANA_REVOKE_ALREADY_LANDED, SOLANA_REVOKE_PREPARED_BESIDE, SolanaTradingStoreError } from "./solana-trading-store";
 
 const TENANT = "0x1111111111111111111111111111111111111111";
@@ -668,6 +668,12 @@ test("Revoke pressed again after the revocation beside a pending registration la
         await assert.rejects(f.app.activateLive(f.scope, { signature: registration.signature, sessionSecretKey: f.sessionSeed.toString("base64") }),
           (error: unknown) => error instanceof SolanaAppRuntimeError && error.code === "permission" && error.message === SOLANA_REGISTERED_AFTER_REVOKE);
         assert.equal(await store.session(), null, "no session key is stored after the owner's landed revocation");
+        // Its session is live on Solana until it expires: the owner is told, and Revoke prepares again, in the main slot.
+        const told = await f.app.status(f.scope);
+        assert.ok(told.live.blockers.includes(SOLANA_STATUS_REGISTERED_AFTER_REVOKE), told.live.blockers.join(" | "));
+        await f.app.prepareOwnerAction(f.scope, { action: "revoke" });
+        assert.equal((await store.setup())!.kind, "revoke"); assert.equal(await store.revokeSetup(), null);
+        assert.ok(!(await f.app.status(f.scope)).live.blockers.includes(SOLANA_STATUS_REGISTERED_AFTER_REVOKE));
       } else {
         // Dropped: its blockhash expired with the epoch moved once, by the kept revocation.
         f.controls.height = 5001;
@@ -709,12 +715,15 @@ test("a registration that landed after a revocation made outside Merrymen is nev
     const registration = await f.app.submitSetup(f.scope, { signedTransactionBase64: setupSigned });
     // revoke_all from another wallet (epoch 1 -> 2), then the registration lands (-> 3), its session buy-paused.
     f.controls.finalized = true; f.controls.epoch = 3n;
-    assert.equal((await f.app.status(f.scope)).live.ownerTransaction?.status, "finalized");
+    const told = await f.app.status(f.scope);
+    assert.equal(told.live.ownerTransaction?.status, "finalized");
+    assert.ok(told.live.blockers.includes(SOLANA_STATUS_REGISTERED_AFTER_REVOKE), told.live.blockers.join(" | "));
     await assert.rejects(f.app.activateLive(f.scope, { signature: registration.signature, sessionSecretKey: f.sessionSeed.toString("base64") }),
       (error: unknown) => error instanceof SolanaAppRuntimeError && error.code === "permission" && error.message === SOLANA_REGISTERED_AFTER_REVOKE);
     assert.equal(await new SolanaTradingStore(f.db, f.scope).session(), null);
-    // Only its own landing moved the epoch: activated.
+    // Only its own landing moved the epoch: nothing to tell, and it is activated.
     f.controls.epoch = 2n;
+    assert.ok(!(await f.app.status(f.scope)).live.blockers.includes(SOLANA_STATUS_REGISTERED_AFTER_REVOKE));
     assert.equal((await f.app.activateLive(f.scope, { signature: registration.signature, sessionSecretKey: f.sessionSeed.toString("base64") })).registered, true);
   } finally { f.raw.close(); }
 });
