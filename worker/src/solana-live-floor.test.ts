@@ -8,6 +8,9 @@ import test, { type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import { createHash } from "node:crypto";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { createKeyPairFromPrivateKeyBytes, getAddressFromPublicKey, getBase58Decoder, getBase58Encoder, getCompiledTransactionMessageDecoder,
   getTransactionDecoder } from "@solana/kit";
 import { CHAINS, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM } from "../../packages/core/src/ids";
@@ -55,7 +58,7 @@ function mintJson(mint: string) {
 }
 
 async function fixture(t: TestContext, opts: { cash: bigint; wsol: bigint; mark: "fair" | "dust" | "zero" | "down"; build: Build; strategy?: Record<string, unknown>; pythAgeMs?: number;
-  env?: Record<string, string>; priorityFees?: number[] }) {
+  env?: Record<string, string>; priorityFees?: number[]; dbFile?: string }) {
   const net = { lastBuild: null as null | { amount: bigint; out: bigint; min: bigint; input: string }, urls: [] as string[] };
   t.mock.method(globalThis, "fetch", async (input: unknown, init?: RequestInit) => {
     const url = String(input); net.urls.push(url.split("?")[0]!);
@@ -88,7 +91,9 @@ async function fixture(t: TestContext, opts: { cash: bigint; wsol: bigint; mark:
     }
     return assert.fail(`unexpected network call ${url}`);
   });
-  const raw = new DatabaseSync(":memory:"), db = wrapSqlite(raw), clock = { now: NOW };
+  // `dbFile`: a database file a test can close and open again (reopen), as a restarted process would.
+  let raw = new DatabaseSync(opts.dbFile ?? ":memory:"), db = wrapSqlite(raw);
+  const clock = { now: NOW };
   t.after(() => raw.close());
   const sessionSeed = Buffer.alloc(32, 22), sessionKeys = await createKeyPairFromPrivateKeyBytes(sessionSeed);
   const owner = await getAddressFromPublicKey((await createKeyPairFromPrivateKeyBytes(new Uint8Array(32).fill(21))).publicKey);
@@ -193,7 +198,9 @@ async function fixture(t: TestContext, opts: { cash: bigint; wsol: bigint; mark:
     Array<{ request_id: string; notional_raw: string; submission_json: string }>).map(r => ({ ...r, submission: JSON.parse(r.submission_json) as SolanaSignedSubmission }));
   const agent = (runtime: ReturnType<typeof createSolanaAppRuntime> = app) => createSolanaAgent({ db, runtime, market, now: () => clock.now });
   // `rpc`, `env`, `clock`, `sessionKeys` and `vault` let a test build an executor of its own on this chain.
-  return { app, scope, sends, submissions, agent, net, runtime, served, pythReads, db, rpc, env, clock, sessionKeys, vault };
+  /** Close the database file and open it again: everything held in memory by earlier runtimes is gone. */
+  const reopen = () => { if (!opts.dbFile) assert.fail("reopen needs a database file"); raw.close(); raw = new DatabaseSync(opts.dbFile); db = wrapSqlite(raw); return db; };
+  return { app, scope, sends, submissions, agent, net, runtime, served, pythReads, get db() { return db; }, rpc, env, clock, sessionKeys, vault, vaultState, read, reopen, feePayer, cashAta, wsolAta };
 }
 /** The compute-unit limit and price a signed swap carries (ComputeBudget instructions 2 and 3). */
 function computeBudget(submission: SolanaSignedSubmission): { units: number; price: bigint } {
@@ -846,4 +853,75 @@ test("a live trade reads the vault no earlier than the book and the latest final
   await ahead.db.prepare("UPDATE solana_runtime_live_books SET book_json=?").run(JSON.stringify({ ...JSON.parse(row.book_json), slot: SLOT + 1 }));
   await assert.rejects(ahead.app.trade(ahead.scope, { mode: "live", intent: manual(SOLANA_WRAPPED_SOL_MINT, "100000000", "behind-the-book") }), /refused: invalid-state/);
   assert.deepEqual(await ahead.submissions(), []); assert.equal(ahead.sends.length, 0);
+});
+
+test("a live trade whose send fails after it is recorded survives a restart: a new runtime rebroadcasts the same bytes, signs nothing, and books the fill once (audit risk 44/49)", async t => {
+  const dir = mkdtempSync(path.join(tmpdir(), "solana-live-crash-")); t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const f = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" }, dbFile: path.join(dir, "runtime.sqlite") });
+  const signs = t.mock.method(crypto.subtle, "sign");
+  // The chain as both providers see it, from the moment the swap is signed.
+  const chain = { landed: false, sends: [] as string[], failSends: true };
+  const receiptOf = (submission: SolanaSignedSubmission) => {
+    const message = getCompiledTransactionMessageDecoder().decode(getTransactionDecoder().decode(Buffer.from(submission.signedTransactionBase64, "base64")).messageBytes);
+    const keys = [...message.staticAccounts] as string[];
+    const swap = message.instructions.find(ix => keys[ix.programAddressIndex] === PROGRAM)!;
+    const temp = swap.accountIndices![8]!, out = BigInt(submission.minOutAmount) + 1n, rent = 2_039_280;
+    const balances = keys.map((_, index) => index === 0 ? 100_000_000 : index === temp ? rent : 1_000_000);
+    const row = (account: string, mint: string, programId: string, amount: bigint) => ({ accountIndex: keys.indexOf(account), mint, owner: f.vault, programId,
+      uiTokenAmount: { amount: amount.toString(), decimals: mint === SOLANA_USDG_MINT ? 6 : 9 } });
+    return { version: 0, slot: SLOT + 1, transaction: [submission.signedTransactionBase64, "base64"], meta: { err: null, fee: 10_000, loadedAddresses: { writable: [], readonly: [] },
+      // The temporary account's rent goes back to the fee payer; the logs were not recorded, so the vault's finalized sequence books it.
+      preBalances: balances, postBalances: balances.map((n, index) => index === 0 ? n - 10_000 + rent : index === temp ? 0 : n),
+      preTokenBalances: [row(f.wsolAta, SOLANA_WRAPPED_SOL_MINT, SOLANA_CLASSIC_TOKEN_PROGRAM, 1_000_000_000n), row(f.cashAta, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM, 50_000_000n)],
+      postTokenBalances: [row(f.wsolAta, SOLANA_WRAPPED_SOL_MINT, SOLANA_CLASSIC_TOKEN_PROGRAM, 1_000_000_000n - BigInt(submission.intent.amountRaw)),
+        row(f.cashAta, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM, 50_000_000n + out)], logMessages: null } };
+  };
+  const recorded = async () => (await f.submissions())[0]?.submission;
+  const read: SolanaLiveRead = async (method, params = []) => {
+    const submission = await recorded();
+    if (method === "getEpochInfo") return { absoluteSlot: SLOT + 2, blockHeight: 900 };
+    if (method === "getSignatureStatuses") return { context: { slot: SLOT + 2 }, value: [chain.landed ? { confirmationStatus: "finalized", slot: SLOT + 1, err: null } : null] };
+    if (method === "getTransaction") return chain.landed ? receiptOf(submission!) : null;
+    const [key, config] = params as [string, { commitment?: string }];
+    if (method === "getAccountInfo" && key === f.vault && config?.commitment === "finalized") {
+      return { context: { slot: SLOT + 2 }, value: rpcAccount(f.vaultState(chain.landed ? 1n : 0n), PROGRAM) };
+    }
+    return f.read(method, params);
+  };
+  const transport: SolanaLiveRpc = { read: fn => fn(read), readEach: async fn => [await fn(read), await fn(read)],
+    send: async wire => { chain.sends.push(wire); if (chain.failSends) throw new Error("the process died before the send was answered"); return "sent"; } };
+  // The first process records and signs the swap, and its send fails.
+  const placed = await f.runtime({}, transport).trade(f.scope, { mode: "live", intent: manual(SOLANA_WRAPPED_SOL_MINT, "100000000", "crash-sell") });
+  assert.ok("status" in placed && placed.status === "pending");
+  const submission = (await recorded())!, signed = signs.mock.callCount();
+  assert.equal(signed, 2, "fee payer and session signed once each");
+  assert.deepEqual(chain.sends, [submission.signedTransactionBase64]);
+  // It restarts: the database file is opened again and a new runtime reads it. Unseen by both providers and inside its
+  // signed deadline, the recorded bytes are sent again exactly as signed; nothing is signed or recorded anew.
+  f.reopen(); chain.failSends = false;
+  const restarted = f.runtime({}, transport);
+  const status = await restarted.status(f.scope);
+  assert.deepEqual(status.live.pending.map(trade => [trade.requestId, trade.signature, trade.status]), [["crash-sell", submission.signature, "pending"]]);
+  assert.deepEqual(chain.sends, [submission.signedTransactionBase64, submission.signedTransactionBase64]);
+  assert.equal(signs.mock.callCount(), signed); assert.equal((await f.submissions()).length, 1);
+  // A retry of the same request returns the recorded trade: never a second signature.
+  const retried = await restarted.trade(f.scope, { mode: "live", intent: manual(SOLANA_WRAPPED_SOL_MINT, "100000000", "crash-sell") });
+  assert.ok("signature" in retried && retried.signature === submission.signature);
+  assert.equal(signs.mock.callCount(), signed);
+  // It landed. The worker's next tick (receipt recovery) books it on both providers' agreement, once.
+  chain.landed = true;
+  const sendsBefore = chain.sends.length;
+  await f.agent(restarted).tick();
+  const [row] = await f.submissions();
+  assert.equal(row!.submission.signature, submission.signature);
+  const booked = JSON.parse((await f.db.prepare("SELECT status,settlement_json FROM solana_runtime_submissions").get() as { settlement_json: string }).settlement_json);
+  assert.deepEqual([booked.status, booked.amountIn, booked.amountOut, booked.feeLamports, booked.slot], ["finalized", "100000000", (BigInt(submission.minOutAmount) + 1n).toString(), "10000", SLOT + 1]);
+  const book = async () => JSON.parse((await f.db.prepare("SELECT book_json FROM solana_runtime_live_books").get() as { book_json: string }).book_json);
+  const once = await book();
+  assert.deepEqual([once.wsolRaw, once.cashRaw, once.networkFeesLamports, once.slot], ["900000000", (50_000_000n + BigInt(submission.minOutAmount) + 1n).toString(), "10000", SLOT + 1]);
+  // Another restart, status read and tick change nothing: the fill is booked once, nothing more is sent or signed.
+  f.reopen();
+  await f.runtime({}, transport).status(f.scope); await f.agent(f.runtime({}, transport)).tick();
+  assert.deepEqual(await book(), once);
+  assert.equal(chain.sends.length, sendsBefore); assert.equal(signs.mock.callCount(), signed);
 });
