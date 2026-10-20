@@ -919,13 +919,14 @@ test("withdrawing WSOL capital in the app lowers the high-water mark by its valu
 });
 
 test("a WSOL withdrawal whose value cannot be read still prepares and lands, and leaves the high-water mark where it was", async () => {
-  for (const unreadable of ["no quote", "no reference price", "a misconfigured reference tolerance"] as const) {
+  for (const unreadable of ["no quote", "no reference price", "a misconfigured reference tolerance", "a misconfigured Pyth generation"] as const) {
     const f = await fixture();
     try {
       await wsolCapital(f);
       if (unreadable !== "no reference price") servePyth(f);
       const app = f.runtime({ market: pricedMarket(f, unreadable === "no quote"),
-        ...(unreadable === "a misconfigured reference tolerance" ? { env: { ...f.env, MERRYMEN_SOLANA_REFERENCE_TOLERANCE_BPS: "nonsense" } } : {}) });
+        ...(unreadable === "a misconfigured reference tolerance" ? { env: { ...f.env, MERRYMEN_SOLANA_REFERENCE_TOLERANCE_BPS: "nonsense" } } : {}),
+        ...(unreadable === "a misconfigured Pyth generation" ? { env: { ...f.env, MERRYMEN_SOLANA_PYTH_GENERATION: "both" } } : {}) });
       const prepared = await app.prepareOwnerAction(f.scope, { action: "withdraw", mint: SOLANA_WRAPPED_SOL_MINT, amountRaw: "40000000" });
       assert.equal((await new SolanaTradingStore(f.db, f.scope).setup())!.withdrawValuation, undefined, unreadable);
       const signedTransactionBase64 = await f.sign(prepared.transactionBase64);
