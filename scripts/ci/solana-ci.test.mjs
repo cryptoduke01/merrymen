@@ -30,7 +30,7 @@ import {
   RUNNER_IMAGE_NOTE, runnerImage, runnerImageLine, runnerImageSection,
 } from "./solana-program-record.mjs";
 import { releaseArtifactName, releaseRecord, releaseSource } from "./solana-release.mjs";
-import { checkRuntimeTests, countTests, parseResults, runtimeTargets } from "./solana-runtime-tests.mjs";
+import { checkRuntimeTests, countTests, OPTIONAL_TARGETS, parseResults, runtimeTargets, skippedTargets } from "./solana-runtime-tests.mjs";
 import { decide, solanaPaths } from "./solana-paths.mjs";
 import {
   ARTIFACT, assess, compareCommitted, differences, LINUX_HOST, LINUX_MANIFEST, MANIFEST_TRAILER, manifestTrailer, verifyRecorded,
@@ -685,6 +685,14 @@ describe("test.sh, the one vault test recipe", () => {
     // custody and the owner recovery transactions, and --include-ignored rather
     // than --ignored: a test whose #[ignore] is dropped still runs.
     assert.match(line, / --test custody --test recovery -- --include-ignored$/);
+    // The Jupiter fork test runs on its own line after them, against the same artifact,
+    // when its third-party program copies are supplied; otherwise test.sh prints the one
+    // skip line solana-runtime-tests.mjs accepts in its place (the run below checks when).
+    const fork = commands.findIndex(l => l.includes('--manifest-path "$script_dir/runtime-tests/Cargo.toml"') && / --test jupiter_fork -- --include-ignored$/.test(l));
+    assert.ok(fork > runtime, commands.join("\n"));
+    assert.ok(commands[fork].trim().startsWith('BPF_OUT_DIR="$script_dir/target/deploy" CARGO_TARGET_DIR="$script_dir/target" cargo test --locked '), commands[fork]);
+    assert.equal(commands[fork + 1], "else");
+    assert.equal(commands[fork + 2].trim(), `echo "${OPTIONAL_TARGETS.jupiter_fork}"`);
     assert.doesNotMatch(testSh, /-- --ignored\b/);
     assert.match(testSh, /^set -euo pipefail$/m);
   });
@@ -706,6 +714,51 @@ describe("test.sh, the one vault test recipe", () => {
     assert.deepEqual(rebuilt.filter(f => !f.startsWith('"$')), built.filter(f => !f.startsWith('"$')));
     assert.deepEqual(rebuilt.slice(0, 4), built.slice(0, 4));
     assert.doesNotMatch(buildSh + rebuildSh + testSh, /--force-tools-install|cargo-test-sbf/);
+  });
+
+  it("runs the Jupiter fork target only with its program copies, and otherwise says so in one line and still runs every other target", () => {
+    // A scratch contracts/solana with this test.sh, a build.sh that builds nothing and a
+    // cargo that only records how it was called.
+    const root = fresh("test-sh"), dir = join(root, "contracts/solana"), fixtures = join(dir, "runtime-tests/fixtures/jupiter");
+    mkdirSync(fixtures, { recursive: true });
+    writeFileSync(join(dir, "test.sh"), testSh); chmodSync(join(dir, "test.sh"), 0o755);
+    stub(dir, "build.sh", "exit 0");
+    const calls = join(root, "cargo-calls"), bin = stub(join(root, "bin"), "cargo",
+      `printf '%s | %s\\n' "$*" "\${MERRYMEN_JUPITER_FORK_PROGRAMS-unset}" >> "${calls}"`);
+    const testShRun = (extra = {}) => {
+      rmSync(calls, { force: true });
+      const base = Object.fromEntries(Object.entries(env()).filter(([k]) => k !== "MERRYMEN_JUPITER_FORK_PROGRAMS"));
+      const r = spawnSync(join(dir, "test.sh"), [], { cwd: root, encoding: "utf8",
+        env: { ...base, PATH: `${bin}:${process.env.PATH}`, CARGO_HOME: join(root, "cargo-home"), ...extra } });
+      const lines = existsSync(calls) ? readFileSync(calls, "utf8").trim().split("\n") : [];
+      return { ...r, calls: lines, skips: r.stdout.split("\n").filter(l => l === OPTIONAL_TARGETS.jupiter_fork).length };
+    };
+    const forkCall = c => / --test jupiter_fork -- --include-ignored \|/.test(c);
+    const skippedRun = (r, label) => {
+      assert.equal(r.status, 0, `${label}: ${r.stderr}`);
+      assert.equal(r.skips, 1, `${label}: ${r.stdout}`);
+      assert.equal(r.calls.length, 2, `${label}: ${r.calls.join("\n")}`);
+      assert.match(r.calls[1], / --test custody --test recovery -- --include-ignored \|/, label);
+      assert.ok(!r.calls.some(forkCall), label);
+    };
+    skippedRun(testShRun(), "nothing supplied");
+    skippedRun(testShRun({ MERRYMEN_JUPITER_FORK_PROGRAMS: "" }), "an empty setting");
+    writeFileSync(join(fixtures, "jupiter_v6.so"), "elf");
+    skippedRun(testShRun(), "only one of the two copies here");
+    // The setting: made absolute (the test runs from runtime-tests/) and passed to cargo.
+    const supplied = join(root, "programs"); mkdirSync(supplied);
+    const viaSetting = testShRun({ MERRYMEN_JUPITER_FORK_PROGRAMS: "programs" });
+    assert.equal(viaSetting.status, 0, viaSetting.stderr); assert.equal(viaSetting.skips, 0);
+    assert.equal(viaSetting.calls.length, 3); assert.ok(forkCall(viaSetting.calls[2]), viaSetting.calls[2]);
+    assert.ok(viaSetting.calls[2].endsWith(` | ${supplied}`), viaSetting.calls[2]);
+    // A setting that names no directory fails; it never turns into a skip.
+    const missing = testShRun({ MERRYMEN_JUPITER_FORK_PROGRAMS: join(root, "nowhere") });
+    assert.notEqual(missing.status, 0); assert.equal(missing.skips, 0); assert.ok(!missing.calls.some(forkCall));
+    // Both copies in the fixture directory: it runs from there, with no setting.
+    writeFileSync(join(fixtures, "whirlpool.so"), "elf");
+    const local = testShRun();
+    assert.equal(local.status, 0, local.stderr); assert.equal(local.skips, 0);
+    assert.equal(local.calls.length, 3); assert.ok(forkCall(local.calls[2]) && local.calls[2].endsWith(" | unset"), local.calls[2]);
   });
 });
 
@@ -844,11 +897,17 @@ describe("solana-runtime-tests.mjs", () => {
   it("finds the committed runtime targets: custody.rs and every tests/*.rs", () => {
     const testFiles = readdirSync(join(runtimeDir, "tests")).filter(f => f.endsWith(".rs")).sort();
     const found = runtimeTargets(readFileSync(join(runtimeDir, "Cargo.toml"), "utf8"), testFiles);
-    assert.deepEqual(found.slice(0, 2), targets);
+    // custody.rs, then every tests/*.rs in name order: a new test file adds a target
+    // without moving the others, and the known ones are each present.
+    assert.deepEqual(found, [targets[0], ...testFiles.map(f => ({ name: f.replace(/\.rs$/, ""), path: `tests/${f}` }))]);
+    for (const t of [...targets, { name: "jupiter_fork", path: "tests/jupiter_fork.rs" }]) {
+      assert.ok(found.some(f => f.name === t.name && f.path === t.path), t.path);
+    }
     assert.equal(found.length, 1 + testFiles.length);
     assert.deepEqual(runtimeTargets("[package]\nautotests = false\n", ["x.rs"]), []);
     assert.ok(countTests(readFileSync(join(runtimeDir, "custody.rs"), "utf8")) >= 25);
     assert.ok(countTests(readFileSync(join(runtimeDir, "tests/recovery.rs"), "utf8")) >= 1);
+    assert.ok(countTests(readFileSync(join(runtimeDir, "tests/jupiter_fork.rs"), "utf8")) >= 4);
     assert.equal(countTests("#[test]\nfn a() {}\n#[tokio::test(flavor = \"multi_thread\")]\nasync fn b() {}\n// #[test] in a comment\n"), 2);
   });
 
@@ -875,6 +934,35 @@ describe("solana-runtime-tests.mjs", () => {
     assert.throws(() => checkRuntimeTests({ log: good, targets, sources: { ...sources, "tests/recovery.rs": "fn c() {}\n" } }), /no #\[test\]/);
   });
 
+  it("accepts test.sh's skip line in place of the Jupiter fork target alone, and still counts every other target", () => {
+    const fork = { name: "jupiter_fork", path: "tests/jupiter_fork.rs" }, all = [...targets, fork];
+    const withFork = { ...sources, "tests/jupiter_fork.rs": "#[test]\nfn e() {}\n#[tokio::test]\nasync fn f() {}\n" };
+    const skip = OPTIONAL_TARGETS.jupiter_fork;
+    assert.equal(skip, "jupiter_fork: skipped, set MERRYMEN_JUPITER_FORK_PROGRAMS (release gate)");
+    assert.deepEqual(Object.keys(OPTIONAL_TARGETS), ["jupiter_fork"], "custody and recovery are never optional");
+    const skipped = checkRuntimeTests({ log: `${good}\n${skip}\n`, targets: all, sources: withFork });
+    assert.deepEqual(skipped.map(c => [c.name, c.passed, c.skipped]), [["custody", 2, false], ["recovery", 1, false], ["jupiter_fork", 0, true]]);
+    // Run, it is counted like any other target.
+    const ran = `${good}\n${target("tests/jupiter_fork.rs", "running 2 tests\n" + result(2))}`;
+    assert.deepEqual(checkRuntimeTests({ log: ran, targets: all, sources: withFork }).map(c => [c.name, c.passed, c.skipped]),
+      [["custody", 2, false], ["recovery", 1, false], ["jupiter_fork", 2, false]]);
+    const cases = {
+      "neither run nor skipped": [good, /jupiter_fork \(tests\/jupiter_fork\.rs\) never ran/],
+      "run short of its tests": [`${good}\n${target("tests/jupiter_fork.rs", result(1))}`, /jupiter_fork: 1 passed, but tests\/jupiter_fork\.rs has 2/],
+      "both run and skipped": [`${ran}\n${skip}`, /both ran and printed its skip line/],
+      "the skip line inside another line": [`${good}\nnote: ${skip}`, /jupiter_fork \(tests\/jupiter_fork\.rs\) never ran/],
+      "custody missing, the fork skipped": [[...lib, target("tests/recovery.rs", result(1)), skip].join("\n"), /custody \(custody\.rs\) never ran/],
+      "recovery short, the fork skipped": [[...lib, target("custody.rs", result(2)), target("tests/recovery.rs", result(0, { filtered: 1 })), skip].join("\n"), /1 filtered out/],
+      "a skip line for custody": [[...lib, "custody: skipped, set MERRYMEN_JUPITER_FORK_PROGRAMS (release gate)", target("tests/recovery.rs", result(1)), skip].join("\n"),
+        /custody \(custody\.rs\) never ran/],
+    };
+    for (const [label, [log, error]] of Object.entries(cases)) {
+      assert.throws(() => checkRuntimeTests({ log, targets: all, sources: withFork }), error, label);
+    }
+    assert.deepEqual([...skippedTargets(`${skip}\r\n`)], ["jupiter_fork"]);
+    assert.deepEqual([...skippedTargets(` ${skip}`)], []);
+  });
+
   it("as a command: reads the log and the runtime-tests directory, exit 1 on a gap", () => {
     const dir = fresh("runtime");
     mkdirSync(join(dir, "tests"));
@@ -892,6 +980,16 @@ describe("solana-runtime-tests.mjs", () => {
     assert.equal(missing.status, 1);
     assert.match(missing.stderr, /::error::runtime test target withdrawals \(tests\/withdrawals\.rs\) never ran; test\.sh must pass --test withdrawals/);
     assert.equal(run(process.execPath, [script, log]).status, 2);
+    // The Jupiter fork target: its skip line passes, with a ::warning::, beside custody's and recovery's full counts.
+    rmSync(join(dir, "tests/withdrawals.rs"));
+    writeFileSync(join(dir, "tests/jupiter_fork.rs"), "#[test]\nfn e() {}\n");
+    assert.equal(run(process.execPath, [script, log, dir]).status, 1);
+    writeFileSync(log, `${good}\n${OPTIONAL_TARGETS.jupiter_fork}\n`);
+    const skipped = run(process.execPath, [script, log, dir]);
+    assert.equal(skipped.status, 0, skipped.stderr);
+    assert.match(skipped.stdout, /^custody: all 2 runtime tests in custody\.rs ran and passed$/m);
+    assert.match(skipped.stdout, /^recovery: all 1 runtime tests in tests\/recovery\.rs ran and passed$/m);
+    assert.match(skipped.stdout, /^::warning::jupiter_fork: not run here, its 1 runtime tests in tests\/jupiter_fork\.rs are a release gate \(jupiter_fork: skipped, set MERRYMEN_JUPITER_FORK_PROGRAMS \(release gate\)\)$/m);
   });
 });
 

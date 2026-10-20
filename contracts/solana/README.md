@@ -97,7 +97,13 @@ node --import tsx --test packages/core/src/solana-live.test.ts
 ```
 
 `test.sh` runs the native unit tests, then `build.sh`, then the runtime tests against the
-artifact it just built. `build.sh` is the only supported build recipe:
+artifact it just built. The Jupiter fork test (`runtime-tests/tests/jupiter_fork.rs`) also
+needs copies of the Jupiter v6 and Orca Whirlpool programs, which this repository does not
+publish: set `MERRYMEN_JUPITER_FORK_PROGRAMS` to a directory holding them (with the SPL
+copies) to run it. Without them `test.sh` prints `jupiter_fork: skipped, set
+MERRYMEN_JUPITER_FORK_PROGRAMS (release gate)` and runs every other target, and CI accepts
+that line for this target alone. Run it before a vault release
+(`runtime-tests/fixtures/jupiter/NOTICE.md`). `build.sh` is the only supported build recipe:
 
 - It requires `cargo-build-sbf` 2.3.13 and platform-tools v1.48 (rustc 1.84.1-dev, LLVM
   19.1.7, anza-xyz/rust `293a1b6c`) and always passes `--tools-version v1.48 --arch v0`

@@ -25,3 +25,5 @@ contracts/artifacts
 contracts/cache
 contracts/solana/target
 contracts/solana/runtime-tests/target
+# Test-only mainnet fixtures, third-party program copies among them (fixtures/jupiter/NOTICE.md).
+contracts/solana/runtime-tests/fixtures
