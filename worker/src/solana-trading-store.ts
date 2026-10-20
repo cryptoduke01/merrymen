@@ -217,8 +217,15 @@ export const OPERATOR_HOLD = "An operator hold stops Solana trading for this acc
  *   and revoke never count and stay available.
  * - N > 0: up to N dropped attempts a day are retried without using up the
  *   owner's operations, so at most maxOpsPerDay + N signed a day, and at most
- *   maxOpsPerDay of them can land. N = 96 (the program's daily maximum) covers
- *   the old behaviour of a separate budget the size of maxOpsPerDay.
+ *   maxOpsPerDay of them can land. N is one setting for every account.
+ *
+ * The old rule gave each account a separate budget of expired attempts the
+ * size of its own maxOpsPerDay: about 2 x maxOpsPerDay signed a day. No single
+ * N reproduces that for every account. N equal to one account's maxOpsPerDay
+ * approximates it for that account only, and is looser for accounts with
+ * fewer operations. N = 96 (the program's daily maximum) is the MOST
+ * permissive setting, not the old behaviour: with maxOpsPerDay 10 it lets
+ * over 100 transactions be signed a day, against about 20 under the old rule.
  *
  * Set with MERRYMEN_SOLANA_EXPIRED_ATTEMPT_ALLOWANCE: a whole number from 0 to 96.
  */
