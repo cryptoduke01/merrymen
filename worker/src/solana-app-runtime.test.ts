@@ -12,7 +12,8 @@ import { sealSecret } from "./store-crypto";
 import { SqlSolanaBindingStore } from "../../web/src/lib/solana-binding-store";
 import { wrapSqlite } from "./db";
 import { createSolanaAgent } from "./solana-agent";
-import { createSolanaAppRuntime, SOLANA_DEPLOYMENT_RECHECK_MS, SolanaAppRuntimeError, solanaOwnerComputeUnitLimit, SOLANA_STATUS_BELOW_BOOK, SOLANA_STATUS_NO_FALLBACK } from "./solana-app-runtime";
+import { createSolanaAppRuntime, SOLANA_DEPLOYMENT_RECHECK_MS, SolanaAppRuntimeError, solanaOwnerComputeUnitLimit, SOLANA_STATUS_BELOW_BOOK, SOLANA_STATUS_FEE_PAYER_THRESHOLD_MISCONFIGURED,
+  SOLANA_STATUS_NO_FALLBACK } from "./solana-app-runtime";
 import { SolanaRpcError, withSolanaReadDeadline } from "./solana-rpc";
 import type { SolanaLiveRead, SolanaLiveRpc } from "./solana-live-rpc";
 import type { SolanaPaperMarket } from "./solana-paper-service";
@@ -663,6 +664,34 @@ test("the fee payer gates buys and exits only on what one swap actually needs (a
   } finally { f.raw.close(); }
 });
 
+test("the worker's own fee payer check judges and says what status judges and says, through the same alert state (audit G2-4)", async () => {
+  const f = await fixture(), lines: string[] = [];
+  try {
+    await readyLive(f);
+    const app = f.runtime({ log: line => lines.push(line) });
+    assert.equal(await app.feePayerCheck({ vault: f.vault }), "ok"); assert.equal(lines.length, 0);
+    f.controls.feePayerLamports = 3_000_000;
+    assert.equal(await app.feePayerCheck({ vault: f.vault }), "low");
+    assert.equal(lines.length, 1); assert.match(lines[0]!, /^\[alert\] Solana fee payer is low: /);
+    // Status finds the same level: nothing more is said within the window.
+    assert.equal((await app.status(f.scope)).live.feePayer?.level, "low"); assert.equal(lines.length, 1);
+    // Exactly what a buy needs, with the vault's USDG account sizing it as status does; without a vault, the upper bound.
+    f.controls.feePayerLamports = rentExempt(170) + 10_000;
+    assert.equal(await app.feePayerCheck({ vault: f.vault }), "low"); assert.equal(await app.feePayerCheck(), "buys-blocked");
+    f.controls.feePayerLamports = rentExempt(165) + 9_999;
+    assert.equal(await app.feePayerCheck({ vault: f.vault }), "exits-blocked");
+    assert.match(lines.at(-1)!, /^\[alert\] Solana fee payer cannot fund exits: every tenant's exits are blocked: /);
+    assert.ok(lines.every(line => !line.includes(f.owner) && !line.includes(TENANT)), "no tenant identity");
+    // An unreadable threshold is evaluated in its own try here too: the fallback level, and its own [alert].
+    f.controls.feePayerLamports = 3_000_000;
+    const broken = f.runtime({ env: { ...f.env, MERRYMEN_SOLANA_FEE_PAYER_LOW_LAMPORTS: "lots" }, log: line => lines.push(line) });
+    assert.equal(await broken.feePayerCheck({ vault: f.vault }), "low");
+    assert.ok(lines.some(line => line.startsWith("[alert] solana fee-payer-threshold misconfigured")));
+    // Live trading not configured: there is nothing to check.
+    await assert.rejects(f.runtime({ env: { ...f.env, MERRYMEN_SOLANA_FEE_PAYER_SEED: "" } }).feePayerCheck(), /fee payer/);
+  } finally { f.raw.close(); }
+});
+
 test("the fee payer warning threshold is explicit configuration (audit G2-4)", async () => {
   const f = await fixture();
   try {
@@ -671,7 +700,8 @@ test("the fee payer warning threshold is explicit configuration (audit G2-4)", a
     const status = await quiet.status(f.scope);
     assert.equal(status.live.feePayer?.level, "ok"); assert.deepEqual(status.live.warnings, []); assert.equal(status.live.feePayer?.lowLamports, "2500000");
     const broken = f.runtime({ env: { ...f.env, MERRYMEN_SOLANA_FEE_PAYER_LOW_LAMPORTS: "lots" }, log: () => {} });
-    assert.match((await broken.status(f.scope)).live.blockers.join(" "), /warning threshold is misconfigured/);
+    const warned = await broken.status(f.scope);
+    assert.deepEqual(warned.live.blockers, []); assert.ok(warned.live.warnings.includes(SOLANA_STATUS_FEE_PAYER_THRESHOLD_MISCONFIGURED));
   } finally { f.raw.close(); }
 });
 
@@ -681,8 +711,8 @@ test("a misconfigured fee setting is a status blocker that still shows the vault
     await readyLive(f); f.controls.cash = 8_000_000n; f.controls.feePayerLamports = 3_000_000;
     const good = await f.app.status(f.scope);
     assert.equal(good.live.ready, true, good.live.blockers.join(" | "));
-    for (const [setting, value, blocker] of [["MERRYMEN_SOLANA_FEE_PAYER_LOW_LAMPORTS", "lots", /fee payer warning threshold is misconfigured/],
-      ["MERRYMEN_SOLANA_MAX_FEE_LAMPORTS", "lots", /network fee limit setting is misconfigured/], ["MERRYMEN_SOLANA_MAX_FEE_LAMPORTS", "0", /network fee limit setting is misconfigured/]] as const) {
+    for (const [setting, value, blocker] of [["MERRYMEN_SOLANA_MAX_FEE_LAMPORTS", "lots", /network fee limit setting is misconfigured/],
+      ["MERRYMEN_SOLANA_MAX_FEE_LAMPORTS", "0", /network fee limit setting is misconfigured/]] as const) {
       const app = f.runtime({ env: { ...f.env, [setting]: value }, log: () => {} });
       const status = await app.status(f.scope);
       assert.deepEqual(status.live.blockers.length, 1, status.live.blockers.join(" | "));
@@ -695,11 +725,38 @@ test("a misconfigured fee setting is a status blocker that still shows the vault
       assert.deepEqual({ ...status.live.feePayer, lowLamports: null }, { ...good.live.feePayer, lowLamports: null }, setting);
       assert.equal(good.live.feePayer?.level, "low"); assert.equal(status.live.feePayer?.lowLamports, null, "no configured threshold to show");
       assert.deepEqual(status.live.warnings, good.live.warnings, setting);
-      if (setting === "MERRYMEN_SOLANA_MAX_FEE_LAMPORTS") {
-        await rejectsWith(app.trade(f.scope, { mode: "live", intent: { ...f.trade, mode: "live", requestId: `fee-cap-${value}` } }), "configuration", blocker, value);
-      }
+      await rejectsWith(app.trade(f.scope, { mode: "live", intent: { ...f.trade, mode: "live", requestId: `fee-cap-${value}` } }), "configuration", blocker, value);
     }
     assert.equal((await new SolanaTradingStore(f.db, f.scope).pending()).length, 0); assert.equal(f.controls.sends, 0);
+  } finally { f.raw.close(); }
+});
+
+test("a misconfigured fee payer warning threshold refuses nothing: trading and exits continue, the owner sees a warning and operators an [alert] (audit live-M6)", async () => {
+  const f = await fixture(), lines: string[] = [];
+  try {
+    await readyLive(f); f.controls.cash = 8_000_000n; f.controls.feePayerLamports = 3_000_000;
+    const good = await f.app.status(f.scope);
+    for (const [label, more] of [["unreadable", { MERRYMEN_SOLANA_FEE_PAYER_LOW_LAMPORTS: "lots" }], ["zero", { MERRYMEN_SOLANA_FEE_PAYER_LOW_LAMPORTS: "0" }],
+      ["unreadable, with an unreadable fee cap", { MERRYMEN_SOLANA_FEE_PAYER_LOW_LAMPORTS: "lots", MERRYMEN_SOLANA_MAX_FEE_LAMPORTS: "lots" }]] as const) {
+      lines.length = 0;
+      const app = f.runtime({ env: { ...f.env, ...more }, log: line => lines.push(line) });
+      const status = await app.status(f.scope);
+      const capBroken = "MERRYMEN_SOLANA_MAX_FEE_LAMPORTS" in more;
+      // Only the fee cap (which trade() refuses) blocks; the threshold never does.
+      assert.deepEqual(status.live.blockers.map(b => /network fee limit/.test(b)), capBroken ? [true] : [], label);
+      assert.equal(status.live.ready, !capBroken, label); assert.equal(status.live.canExit, !capBroken, label);
+      assert.deepEqual(status.live.warnings, [SOLANA_STATUS_FEE_PAYER_THRESHOLD_MISCONFIGURED, ...good.live.warnings], label);
+      // The fee payer, vault, balances and owner wallet are read and shown; called low below four times the (default) fee cap.
+      assert.deepEqual(status.live.balances, good.live.balances, label); assert.deepEqual(status.live.ownerWallet, good.live.ownerWallet, label);
+      assert.deepEqual({ ...status.live.feePayer, lowLamports: null }, { ...good.live.feePayer, lowLamports: null }, label);
+      assert.equal(status.live.feePayer?.level, "low", label); assert.equal(status.live.feePayer?.lowLamports, null, label);
+      const alerts = lines.filter(line => line.startsWith("[alert] solana fee-payer-threshold misconfigured"));
+      assert.equal(alerts.length, 1, label); assert.ok(!alerts[0]!.includes("lots"), "the value is never echoed");
+      // Said at most once per ten minutes per process.
+      await app.status(f.scope); assert.equal(lines.filter(line => line.startsWith("[alert] solana fee-payer-threshold")).length, 1, label);
+      f.clock.now += 10 * 60_000; await app.status(f.scope);
+      assert.equal(lines.filter(line => line.startsWith("[alert] solana fee-payer-threshold")).length, 2, label);
+    }
   } finally { f.raw.close(); }
 });
 

@@ -62,8 +62,11 @@ export async function boundSolanaRebalanceSell(
   }
   return null;
 }
-/** solMarkDust is optional for test runtimes; without it no zero-output mark of live SOL is taken for dust. */
-type Runtime = Pick<ReturnType<typeof getSolanaAppRuntime>, "status" | "trade"> & Partial<Pick<ReturnType<typeof getSolanaAppRuntime>, "solMarkDust">>;
+/**
+ * solMarkDust is optional for test runtimes; without it no zero-output mark of live SOL is taken for dust.
+ * feePayerCheck is optional too; without it the agent checks no fee payer of its own.
+ */
+type Runtime = Pick<ReturnType<typeof getSolanaAppRuntime>, "status" | "trade"> & Partial<Pick<ReturnType<typeof getSolanaAppRuntime>, "solMarkDust" | "feePayerCheck">>;
 export interface SolanaAgentOptions {
   db: Db; runtime: Runtime; market: SolanaPaperMarket; now?: () => number; postgres?: boolean; signal?: AbortSignal;
   /** Live sells are charged at up to this much above their quote by the reference price; size below the cap by it. */
@@ -83,6 +86,13 @@ export const SOLANA_AGENT_ALERT_REPEAT_MS = 10 * 60_000;
 export function solanaAccountRef(scope: SolanaAccountScope): string {
   return createHash("sha256").update(`merrymen-solana-account/v1 ${scope.tenant} ${scope.owner}`).digest("hex").slice(0, 16);
 }
+/**
+ * A live trade, or a signed owner transaction, still pending this long after it was admitted or prepared is
+ * stuck: its blockhash expired a minute or two ago, so both providers should have agreed on its outcome by now.
+ */
+export const SOLANA_PENDING_STUCK_MS = 3 * 60_000;
+/** How often the agent reads the shared fee payer itself, beside the reads status makes. */
+export const SOLANA_AGENT_FEE_PAYER_CHECK_MS = 10 * 60_000;
 /** The heartbeat is written at least this often during a tick; the UI shows the worker offline after 90 s. */
 const HEARTBEAT_REFRESH_MS = 30_000;
 /**
@@ -159,6 +169,46 @@ export function createSolanaAgent(options: SolanaAgentOptions) {
       + `and exits are held: ${JSON.stringify({ solana: "alert", kind: "vault-below-book", account })} — tokens left the vault outside Merrymen (a recovery-tool or wallet `
       + "withdrawal, say); nothing trades on that account until its book is reconciled with the vault");
   };
+  /**
+   * STUCK, SAID TO THE OPERATOR. After receipt recovery, any live trade admitted, or signed owner transaction
+   * prepared, more than SOLANA_PENDING_STUCK_MS ago and still pending: both providers could not read or agree on
+   * its outcome. Each holds its account's reservation (no new trade, no in-app owner transaction but a revoke).
+   * One [alert] with counts and the oldest age only (no tenant, owner, signature or bytes), at most once per
+   * SOLANA_AGENT_ALERT_REPEAT_MS while any is stuck, and at once again after none was.
+   */
+  const stuck = async () => {
+    const at = now(), cutoff = at - SOLANA_PENDING_STUCK_MS;
+    const trades = await options.db.prepare("SELECT COUNT(*) AS n, MIN(created_at_ms) AS oldest FROM solana_runtime_submissions WHERE status='pending' AND created_at_ms<=?")
+      .get(cutoff) as { n: number | string; oldest: number | string | null } | undefined;
+    const owners = (await options.db.prepare("SELECT setup_json FROM solana_runtime_setups").all() as Array<{ setup_json: string }>).flatMap(row => {
+      try { const setup = JSON.parse(row.setup_json); return setup.signature && setup.status === "pending" && Number.isSafeInteger(setup.preparedAtMs) && setup.preparedAtMs <= cutoff ? [setup.preparedAtMs as number] : []; }
+      catch { return []; }
+    });
+    const tradeCount = Number(trades?.n ?? 0), oldest = [...(trades?.oldest == null ? [] : [Number(trades.oldest)]), ...owners];
+    if (!tradeCount && !owners.length) { said.delete("pending-stuck"); return; }
+    say("pending-stuck", `[alert] Solana transactions stuck pending: ${JSON.stringify({ solana: "alert", kind: "pending-stuck", trades: tradeCount,
+      ownerTransactions: owners.length, oldestAgeMs: at - Math.min(...oldest) })} — both RPC providers could not read or agree on their outcome for over `
+      + `${SOLANA_PENDING_STUCK_MS / 60_000} minutes; each holds its account's reservation (no new trade, no in-app owner transaction but a revoke). Check both `
+      + "providers; npm run solana:resolve -- show <tenant> <request-id> shows a trade's evidence");
+  };
+  /**
+   * The shared fee payer, read by the agent itself every SOLANA_AGENT_FEE_PAYER_CHECK_MS while any live
+   * permission is registered (runtime.feePayerCheck, which says the [alert]s status says, through the same
+   * state): a payer that cannot fund exits pages the operator even when no status is read. A check that
+   * cannot be made is tried again after the interval and never changes an outcome.
+   */
+  let feePayerCheckedAtMs: number | undefined;
+  const feePayer = async () => {
+    const at = now();
+    if (!options.runtime.feePayerCheck || (feePayerCheckedAtMs !== undefined && at >= feePayerCheckedAtMs && at - feePayerCheckedAtMs < SOLANA_AGENT_FEE_PAYER_CHECK_MS)) return;
+    const registered = await options.db.prepare("SELECT record_json FROM solana_runtime_sessions ORDER BY tenant,owner LIMIT 1").get() as { record_json: string } | undefined;
+    if (!registered) return;
+    let vault: string | undefined;
+    try { const record = JSON.parse(registered.record_json); if (typeof record.vault === "string") vault = record.vault; } catch { /* Sized by the upper bound. */ }
+    // At most one check per interval, failed ones included: a provider that is down is not asked every tick.
+    feePayerCheckedAtMs = at;
+    await options.runtime.feePayerCheck(vault === undefined ? {} : { vault });
+  };
   const headroom = BigInt(10_000 - (options.referenceToleranceBps ?? SOLANA_REFERENCE_DEFAULT_TOLERANCE_BPS));
   // When each tenant's strategy last found nothing to do (in band), or admission refused it
   // because expired attempts used up its daily operations, by settings revision.
@@ -191,6 +241,9 @@ export function createSolanaAgent(options: SolanaAgentOptions) {
         try { recovered.set(scope.tenant, await options.runtime.status({ tenant: scope.tenant, owner: scope.owner })); } catch { /* Retry next tick; no replacement transaction. */ }
         await beat();
       }
+      // What recovery could not settle, and the fee payer, are said to the operator; neither ever changes an outcome.
+      try { await stuck(); } catch { /* Said next tick. */ }
+      try { await feePayer(); } catch { /* Checked again after the interval. */ }
       const rows = await options.db.prepare("SELECT tenant,owner,requested_mode,limits_json,strategy_json,revision FROM solana_wallet_bindings WHERE chain=? AND strategy_json IS NOT NULL ORDER BY tenant")
         .all(CHAINS.solana) as Array<{ tenant: string; owner: string; requested_mode: "paper" | "live"; limits_json: string | null; strategy_json: string; revision: number }>;
       // Operator holds are read after receipt recovery, which they never stop.
