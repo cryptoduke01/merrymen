@@ -198,7 +198,7 @@ export function PermissionReview({ limits, terms, requiredLamports, ownerLamport
     <p>{terms.priorityFeeLamports === "0" || !fee ? "It carries no priority fee: your owner wallet pays only the network signature fee."
       : `It carries a priority fee of ${fee} SOL (at most ${displaySolanaAmount(OWNER_MAX_PRIORITY_FEE_LAMPORTS.toString(), 9)} SOL), paid by your owner wallet with the signature fee so it lands under congestion.`}</p>
     {required && <p>To send it your owner wallet must hold at least {required} SOL{held ? ` (it holds ${held} SOL)` : ""}, including rent for any vault and token accounts it opens.</p>}
-    <p>Nothing has been signed yet. Sign within about {secondsLeft} seconds, or register again to prepare a new one.</p>
+    <p>Nothing has been signed yet. Sign within about {secondsLeft} second{secondsLeft === 1 ? "" : "s"}, or register again to prepare a new one.</p>
   </div>;
 }
 

@@ -1211,6 +1211,30 @@ test("a reviewed permission not signed in time is discarded without opening the 
   assert.equal(button("Register bounded trading permission").disabled, false);
 });
 
+test("the review's time left to sign counts down while it is open", async () => {
+  state = initial("live"); state.runtime.live.programId = PROGRAM;
+  const saved = liveLimits(); state.binding.limits = saved;
+  respond = async (path, body) => {
+    if (path === "status") return json(state);
+    if (path === "setup" && body?.stage === "prepare") return json({ setup: await permissionTransaction(String(body.sessionPublicKey), saved) });
+    throw new Error("Unexpected fixture route");
+  };
+  await render(); await press("Register bounded trading permission");
+  assert.match(ui.container.textContent!, /Sign within about 4[45] seconds/);
+  // Ten seconds on, the page says so without anyone touching it (the next one-second tick re-renders it).
+  const now = Date.now;
+  Date.now = () => now() + 10_000;
+  try { await act(async () => { await new Promise((resolve) => setTimeout(resolve, 1_100)); }); }
+  finally { Date.now = now; }
+  assert.match(ui.container.textContent!, /Sign within about 3[345] seconds/);
+  // At the very end it says one second, never "1 seconds" (the deadline itself is the review timer's, on the real clock).
+  Date.now = () => now() + 44_900;
+  try { await act(async () => { await new Promise((resolve) => setTimeout(resolve, 1_100)); }); }
+  finally { Date.now = now; }
+  assert.match(ui.container.textContent!, /Sign within about 1 second, or register again/);
+  assert.equal(signCount, 0);
+});
+
 /**
  * A live owner whose review is prepared with `leftMs` to sign: the review's
  * clock is read before the prepare request (shifted here) and its timer after

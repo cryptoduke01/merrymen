@@ -78,6 +78,7 @@ function ConnectedSolana() {
   const [registration, setRegistration] = useState<{ signature: string | null; sent: boolean; secret: string; signedTransactionBase64: string; limits: SolanaPaperLimits } | null>(null);
   const [savedDuration, setSavedDuration] = useState<string | null>(null);
   const [review, setReview] = useState<Review | null>(null), [reviewLapsed, setReviewLapsed] = useState(false);
+  const [, setReviewClock] = useState(0);
   // The reviewed permission's session seed: kept out of React state and zeroed when the review ends.
   const reviewSeed = useRef<Uint8Array | null>(null);
   // True while the owner's wallet is open on the reviewed bytes (signRegistration).
@@ -198,6 +199,12 @@ function ConnectedSolana() {
     const timer = setTimeout(() => { if (signingReview.current) return; discardReview(); setReviewLapsed(true); }, Math.max(0, review.deadline - Date.now()));
     return () => clearTimeout(timer);
   }, [review, discardReview]);
+  // The review says how long is left to sign: re-render it every second while it is open, so it counts down.
+  useEffect(() => {
+    if (!review) return;
+    const timer = setInterval(() => setReviewClock((tick) => tick + 1), 1000);
+    return () => clearInterval(timer);
+  }, [review]);
   const previewTrade = async () => {
     const intent = tradeIntent(), key = request.current!.key;
     // Timed on this clock from before the request, so a skewed device clock
