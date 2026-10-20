@@ -80,6 +80,8 @@ function ConnectedSolana() {
   const [review, setReview] = useState<Review | null>(null), [reviewLapsed, setReviewLapsed] = useState(false);
   // The reviewed permission's session seed: kept out of React state and zeroed when the review ends.
   const reviewSeed = useRef<Uint8Array | null>(null);
+  // True while the owner's wallet is open on the reviewed bytes (signRegistration).
+  const signingReview = useRef(false);
   const discardReview = useCallback(() => { reviewSeed.current?.fill(0); reviewSeed.current = null; setReview(null); }, []);
   const request = useRef<{ key: string; id: string } | null>(null);
   const accountEpoch = useRef(0), inFlight = useRef(false);
@@ -189,9 +191,11 @@ function ConnectedSolana() {
   }, [preview]);
   const quoteFresh = !!preview && Date.now() < preview.deadline;
   // A reviewed permission not signed in time is discarded: its bytes would reach the server too late.
+  // Not while the wallet is open on it: the owner may be signing, and the
+  // server's own 60-second window decides those bytes (signRegistration).
   useEffect(() => {
     if (!review) return;
-    const timer = setTimeout(() => { discardReview(); setReviewLapsed(true); }, Math.max(0, review.deadline - Date.now()));
+    const timer = setTimeout(() => { if (signingReview.current) return; discardReview(); setReviewLapsed(true); }, Math.max(0, review.deadline - Date.now()));
     return () => clearTimeout(timer);
   }, [review, discardReview]);
   const previewTrade = async () => {
@@ -272,15 +276,28 @@ function ConnectedSolana() {
       discardReview(); setReviewLapsed(true);
       throw new Error("This prepared permission was not signed in time, so it was discarded. Nothing was signed. Register again to prepare a new one.");
     }
-    // Copied before the wallet opens: the review can lapse (and its seed be
-    // zeroed) while the owner is still signing. A wallet that refuses or
-    // closes leaves the review in place to sign again.
+    // Copied before the wallet opens, so a change of account that ends the
+    // review (and zeroes its seed) cannot change the key being registered.
     const secret = base64(seed);
-    const signed = base64(await signer.signSetup(fromBase64(shown.transactionBase64)));
+    // While the wallet is open the review timer leaves the review alone: the
+    // page never says "nothing was signed" while the owner may be signing.
+    // Signed bytes are submitted even if the deadline passed meanwhile: the
+    // server's 60-second window decides, and its refusal of a first
+    // submission discards them with an accurate message (submitRegistration).
+    // A wallet that refuses or closes leaves the review in place to sign
+    // again, unless its deadline passed meanwhile: then it lapses now.
+    signingReview.current = true;
+    let signature: Uint8Array;
+    try { signature = await signer.signSetup(fromBase64(shown.transactionBase64)); }
+    catch (e) {
+      if (Date.now() >= shown.deadline) { discardReview(); setReviewLapsed(true); }
+      throw e;
+    } finally { signingReview.current = false; }
+    const signed = base64(signature);
     const pending = { secret, signedTransactionBase64: signed, signature: signatureOf(signed), sent: false, limits: shown.limits };
     // Keep the bounded session seed and exact signed bytes before submit:
     // a lost response must retry this registration, never create a new one.
-    setRegistration(pending); discardReview();
+    setRegistration(pending); discardReview(); setReviewLapsed(false);
     await submitRegistration(pending);
   };
   /** Retries the signed registration this page holds. */

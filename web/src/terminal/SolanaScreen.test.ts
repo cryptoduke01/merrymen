@@ -63,8 +63,8 @@ let ui: ReturnType<typeof testDom>;
 let state: ReturnType<typeof initial>;
 let calls: Array<{ path: string; body: Record<string, unknown> | undefined }>;
 let signCount: number, exportCount = 0;
-/** What the fixture wallet returns for a signature request. */
-let signedBytes: () => Uint8Array;
+/** What the fixture wallet returns for a signature request (a promise: the wallet stays open until it settles). */
+let signedBytes: () => Uint8Array | Promise<Uint8Array>;
 let signerDid = "did:privy:alice";
 /** The release pin SolanaRecovery reads (SOLANA_VAULT_RELEASES); undefined reads the real one. */
 let releases: Array<{ programId: string; sha256: string }> | undefined;
@@ -1025,6 +1025,70 @@ test("a reviewed permission not signed in time is discarded without opening the 
   assert.equal(button("Register bounded trading permission").disabled, false);
 });
 
+/**
+ * A live owner whose review is prepared with `leftMs` to sign: the review's
+ * clock is read before the prepare request (shifted here) and its timer after
+ * it (the real clock), so the review window ends `leftMs` from now.
+ */
+async function reviewEndingIn(leftMs: number) {
+  state = initial("live"); state.runtime.live.programId = PROGRAM;
+  const saved = liveLimits(); state.binding.limits = saved;
+  const now = Date.now;
+  const progress = { submits: 0, activated: false };
+  respond = async (path, body) => {
+    if (path === "status") return json(state);
+    if (path === "setup" && body?.stage === "prepare") { Date.now = now; return json({ setup: await permissionTransaction(String(body.sessionPublicKey), saved) }); }
+    if (path === "setup" && body?.stage === "submit") { progress.submits++; return json({ registration: { signature: "fixture-chain-signature", status: "finalized" } }); }
+    if (path === "setup" && body?.stage === "activate") { progress.activated = true; state.runtime.live.ready = true; return json({ live: { registered: true } }); }
+    throw new Error("Unexpected fixture route");
+  };
+  await render();
+  Date.now = () => now() - (45_000 - leftMs);
+  try { await press("Register bounded trading permission"); } finally { Date.now = now; }
+  assert.match(ui.container.textContent!, /Nothing has been signed yet/);
+  return progress;
+}
+const LAPSED = /not signed in time|Nothing was signed/;
+test("a review whose deadline passes while the wallet is open never says nothing was signed, and the signed permission is submitted", async () => {
+  const progress = await reviewEndingIn(300);
+  const wallet = deferred<Uint8Array>();
+  signedBytes = () => wallet.promise;
+  await press("Sign permission with my wallet");
+  assert.equal(signCount, 1, "the wallet is open");
+  // The deadline passes with the wallet still open.
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 600)); });
+  assert.doesNotMatch(ui.container.textContent!, LAPSED);
+  // The owner signs: the bytes are submitted (the server's window decides) and activated.
+  wallet.resolve(Uint8Array.from([1, 2, 3]));
+  for (let i = 0; i < 20; i++) await act(async () => { await new Promise((resolve) => setTimeout(resolve, 1)); });
+  assert.equal(progress.submits, 1); assert.equal(progress.activated, true);
+  assert.match(ui.container.textContent!, /Registered permission ready/);
+  assert.doesNotMatch(ui.container.textContent!, LAPSED);
+});
+test("a wallet that refuses after the review's deadline leaves the review lapsed; before it, the review stays to sign again", async () => {
+  let progress = await reviewEndingIn(300);
+  let refuse!: (error: Error) => void;
+  signedBytes = () => new Promise<Uint8Array>((_, reject) => { refuse = reject; });
+  await press("Sign permission with my wallet");
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 600)); });
+  assert.doesNotMatch(ui.container.textContent!, LAPSED);
+  refuse(new Error("The owner closed the wallet."));
+  for (let i = 0; i < 20; i++) await act(async () => { await new Promise((resolve) => setTimeout(resolve, 1)); });
+  assert.match(ui.container.textContent!, /The owner closed the wallet\./);
+  assert.match(ui.container.textContent!, /The prepared permission was not signed in time, so it was discarded\. Nothing was signed/);
+  assert.equal([...ui.container.querySelectorAll("button")].some((item) => item.textContent === "Sign permission with my wallet"), false);
+  assert.equal(progress.submits, 0);
+  // Refused well before the deadline: the same review stays, and signing it again submits once.
+  await ui.close(); ui = testDom(); signCount = 0;
+  progress = await reviewEndingIn(30_000);
+  signedBytes = () => Promise.reject(new Error("The owner closed the wallet."));
+  await press("Sign permission with my wallet");
+  assert.doesNotMatch(ui.container.textContent!, LAPSED);
+  assert.match(ui.container.textContent!, /Nothing has been signed yet/);
+  signedBytes = () => Uint8Array.from([1, 2, 3]);
+  await press("Sign permission with my wallet");
+  assert.equal(signCount, 2); assert.equal(progress.submits, 1); assert.equal(progress.activated, true);
+});
 /** The `merrymen solana-recover` command the card shows, as the arguments a shell passes, with an RPC in place of <https-url>. */
 function cardCommand(text: string): string[] {
   const shown = text.match(/merrymen solana-recover (--program \S+ --rpc <https-url> [^\n]*?)(?=The key goes|Nothing is signed|$)/)?.[1];
