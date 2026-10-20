@@ -9,7 +9,7 @@ import { applySolanaPaperCommit, solanaPaperIntentFingerprint, type SolanaPaperB
   type SolanaPaperCommit, type SolanaPaperReceipt, type SolanaPaperSnapshot } from "./solana-paper-store";
 import type { SolanaPaperLedger } from "./solana-paper-service";
 import type { SolanaLiveJournal, SolanaLiveRecord, SolanaLiveSettlement, SolanaSignedSubmission } from "./solana-executor";
-import { solanaReferenceNotional, verifySolanaReferenceBound, type SolanaReferenceBound } from "./solana-reference-price";
+import { solanaReferenceNotional, verifySolanaReferenceBound, type SolanaPythGeneration, type SolanaReferenceBound } from "./solana-reference-price";
 
 export interface SolanaAccountScope { tenant: string; owner: string }
 export class SolanaTradingStoreError extends Error {
@@ -72,15 +72,17 @@ export interface SolanaWithdrawValuation { quote: SolanaQuote; reference: Solana
 /**
  * The lower of the two: neither Jupiter nor the reference can raise it alone, so
  * the high-water mark never drops by more than the withdrawn WSOL was worth.
- * Null when either is missing, malformed, stale or for another amount.
+ * Null when either is missing, malformed, stale or for another amount, or the
+ * reference is not from `generation` (default: this process's env).
  */
-export function solanaWithdrawValueUsdg(valuation: SolanaWithdrawValuation | undefined, amountRaw: string | undefined, nowMs: number): bigint | null {
+export function solanaWithdrawValueUsdg(valuation: SolanaWithdrawValuation | undefined, amountRaw: string | undefined, nowMs: number,
+  generation?: () => SolanaPythGeneration): bigint | null {
   if (!valuation || typeof valuation !== "object") return null;
   try {
     const intent = parseSolanaSwapIntent({ kind: "spl-swap", chain: CHAINS.solana, mode: "paper", requestId: "withdraw-valuation",
       inputMint: SOLANA_WRAPPED_SOL_MINT, outputMint: SOLANA_USDG_MINT, amountRaw, slippageBps: valuation.quote?.slippageBps });
     validateSolanaQuote(valuation.quote, intent, nowMs);
-    const bound = verifySolanaReferenceBound(valuation.reference, intent, nowMs);
+    const bound = verifySolanaReferenceBound(valuation.reference, intent, nowMs, generation?.());
     const quoted = parseSolanaRawAmount(valuation.quote.minOutAmount), reference = parseSolanaRawAmount(bound.referenceOut);
     return quoted < reference ? quoted : reference;
   } catch { return null; }
@@ -222,7 +224,9 @@ export async function ensureSolanaTradingSchema(db: Db, postgres = false): Promi
 /** The scope comes from an authenticated wallet binding, never request owner fields. */
 export class SolanaTradingStore implements SolanaLiveJournal {
   constructor(readonly db: Db, readonly scope: SolanaAccountScope, private readonly now: () => number = Date.now,
-    private readonly admission?: { autonomousRevision: number; signal?: AbortSignal }) {
+    private readonly admission?: { autonomousRevision: number; signal?: AbortSignal },
+    /** The Pyth generation stored reference bounds must come from: the app runtime's MERRYMEN_SOLANA_PYTH_GENERATION, read at each check. Default: this process's env. */
+    private readonly pythGeneration?: () => SolanaPythGeneration) {
     if (!/^0x[0-9a-f]{40}$/.test(scope.tenant)) refuse("Invalid authenticated Solana tenant.");
     solanaPaperAgentId(scope.owner);
   }
@@ -454,7 +458,7 @@ export class SolanaTradingStore implements SolanaLiveJournal {
       // signed minimum may not be below its floor, and a sell is charged at least
       // its reference value however low it was quoted.
       let reference: SolanaReferenceBound;
-      try { reference = verifySolanaReferenceBound(s.risk.reference, s.intent, now); } catch { refuse("The independent SOL price evidence is missing, stale or altered."); }
+      try { reference = verifySolanaReferenceBound(s.risk.reference, s.intent, now, this.pythGeneration?.()); } catch { refuse("The independent SOL price evidence is missing, stale or altered."); }
       if (reference.reference.slot < s.minContextSlot || s.minOutAmount !== s.quote.minOutAmount ||
           raw(s.minOutAmount, false) < raw(reference.minOutFloor, false)) refuse("The guaranteed output is below the independent SOL price floor.");
       const notional = solanaReferenceNotional(s.intent, s.quote.outAmount, reference);
@@ -588,7 +592,7 @@ export class SolanaTradingStore implements SolanaLiveJournal {
       const { withdrawValuation: offered, ...plain } = setup;
       const valuation = setup.kind !== "withdraw" || setup.mint !== SOLANA_WRAPPED_SOL_MINT ? undefined
         : setup.signature ? previous?.withdrawValuation
-        : solanaWithdrawValueUsdg(offered, setup.amountRaw, clock(this.now)) !== null ? offered : undefined;
+        : solanaWithdrawValueUsdg(offered, setup.amountRaw, clock(this.now), this.pythGeneration) !== null ? offered : undefined;
       setup = valuation ? { ...plain, withdrawValuation: structuredClone(valuation) } : plain;
       // A session's limits become the on-chain permission: never more operations than
       // the program allows, never a permission longer than Merrymen grants.

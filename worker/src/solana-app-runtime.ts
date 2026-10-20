@@ -24,7 +24,7 @@ import { createSolanaLiveRpc, readSolanaQuorum, type SolanaLiveRead, type Solana
 import { createSolanaMarket } from "./solana-market";
 import { createSolanaPaperService, type SolanaPaperMarket } from "./solana-paper-service";
 import { readSolanaReferencePrice, solanaReferenceBound, solanaReferenceNotional, solanaReferenceToleranceBps,
-  SolanaReferencePriceError } from "./solana-reference-price";
+  SolanaReferencePriceError, requireSolanaPythGeneration, solanaPythGeneration, type SolanaPythGeneration } from "./solana-reference-price";
 import { getSolanaRuntimeDb } from "./solana-runtime-db";
 import { isSolanaTransactionError } from "./solana-settlement";
 import { ensureSolanaTradingSchema, OPERATOR_HOLD, solanaOwnerExpiryProven, solanaQuarantinedWsol, SolanaTradingStore, type SolanaAccountScope,
@@ -199,7 +199,8 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
   async function store(scope: SolanaAccountScope, autonomousRevision?: number, signal?: AbortSignal) {
     const db = options.db ?? await getSolanaRuntimeDb();
     await ensureSolanaTradingSchema(db, !!env.DATABASE_URL);
-    const result = new SolanaTradingStore(db, scope, now, autonomousRevision === undefined ? undefined : { autonomousRevision, signal }); await result.binding(); return result;
+    const result = new SolanaTradingStore(db, scope, now, autonomousRevision === undefined ? undefined : { autonomousRevision, signal },
+      () => solanaPythGeneration(env)); await result.binding(); return result;
   }
   function config() {
     const programId = env.MERRYMEN_SOLANA_VAULT_PROGRAM, hash = env.MERRYMEN_SOLANA_VAULT_SHA256;
@@ -443,9 +444,9 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
     try {
       const exit = parseSolanaSwapIntent({ kind: "spl-swap", chain: CHAINS.solana, mode: "paper", requestId: "withdraw-valuation",
         inputMint: SOLANA_WRAPPED_SOL_MINT, outputMint: SOLANA_USDG_MINT, amountRaw, slippageBps: WITHDRAW_VALUATION_SLIPPAGE_BPS });
-      const toleranceBps = solanaReferenceToleranceBps(env);
+      const toleranceBps = solanaReferenceToleranceBps(env), generation = requireSolanaPythGeneration(env, now());
       const quote = await market().quote(exit); validateSolanaQuote(quote, exit, now());
-      const price = await rpc().read(async read => readSolanaReferencePrice(read, integer(await read("getSlot", [{ commitment: "confirmed" }])), now()));
+      const price = await rpc().read(async read => readSolanaReferencePrice(read, integer(await read("getSlot", [{ commitment: "confirmed" }])), now(), { generation }));
       return { quote, reference: solanaReferenceBound(exit, price, toleranceBps) };
     } catch { return undefined; }
   }
@@ -605,9 +606,12 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       if (!secret) fail("Register an owner-approved live trading permission first.", "permission");
       let toleranceBps: number;
       try { toleranceBps = solanaReferenceToleranceBps(env); } catch { return fail("The independent SOL price tolerance is misconfigured.", "configuration"); }
+      // One generation, from this runtime's env, for the read, the executor's check and the store's admission check.
+      let pythGeneration: SolanaPythGeneration;
+      try { pythGeneration = requireSolanaPythGeneration(env, now()); } catch { return fail("The independent SOL price source (Pyth generation) is misconfigured.", "configuration"); }
       const sessionKeyPair = await createKeyPairFromPrivateKeyBytes(seed(secret, "The stored trading permission cannot be opened."));
       const vault = await deriveSolanaVaultAddress(cfg.programId, scope.owner), liveRpc = rpc(), quotes = market();
-      const executor = createSolanaExecutor({ programId: cfg.programId, programBinarySha256: cfg.hash,
+      const executor = createSolanaExecutor({ programId: cfg.programId, programBinarySha256: cfg.hash, pythGeneration,
         sessionKeyPair, feePayerKeyPair: await payer(), rpc: liveRpc, market: createSolanaLiveMarket({ env, rpc: liveRpc, now }),
         journal: s, maxFeeLamports: env.MERRYMEN_SOLANA_MAX_FEE_LAMPORTS ?? "5000000", now, signal: input.signal,
         computeUnitPriceMicroLamports: env.MERRYMEN_SOLANA_COMPUTE_UNIT_PRICE_MICROLAMPORTS ?? "0",
@@ -625,7 +629,7 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
           // Independent of Jupiter: the build quote's guaranteed output is checked
           // against Pyth SOL/USD, and a sell is charged at least its reference value.
           let reference: ReturnType<typeof solanaReferenceBound>;
-          try { reference = solanaReferenceBound(current, await liveRpc.read(read => readSolanaReferencePrice(read, slot, now())), toleranceBps); }
+          try { reference = solanaReferenceBound(current, await liveRpc.read(read => readSolanaReferencePrice(read, slot, now(), { generation: pythGeneration })), toleranceBps); }
           catch (error) { if (error instanceof SolanaReferencePriceError) throw new SolanaExecutionError("risk"); throw error; }
           const previous = await s.liveBook(), peak = previous ? BigInt(previous.hwmRaw) : equity;
           for (const item of evidence) validateSolanaQuote(item.quote, item.intent, now());

@@ -5,7 +5,7 @@ import { SOLANA_USDG_MINT } from "../../packages/core/src/ids";
 import { SOLANA_WRAPPED_SOL_MINT } from "../../packages/core/src/solana-live";
 import { PYTH_PUSH_ORACLE_PROGRAM, PYTH_RECEIVER_PROGRAM, PYTH_SOL_USD_ACCOUNT, PYTH_SOL_USD_FEED_ID, PYTH_SPONSORED_SHARD,
   SOLANA_PYTH_DEFAULT_GENERATION, SOLANA_PYTH_FEEDS, SOLANA_REFERENCE_ALERT_REPEAT_MS, createSolanaReferenceAlerts, derivePythPriceFeedAccount,
-  parsePythSolUsd, readSolanaReferencePrice, solanaPythFeed, solanaPythGeneration, solanaReferenceBound, solanaReferenceNotional,
+  parsePythSolUsd, readSolanaReferencePrice, requireSolanaPythGeneration, solanaPythFeed, solanaPythGeneration, solanaReferenceBound, solanaReferenceNotional,
   solanaReferenceToleranceBps, verifySolanaReferenceBound, SolanaReferencePriceError, type SolanaPythGeneration,
   type SolanaReferenceRefusal } from "./solana-reference-price";
 import { PYTH_SOL_USD_MAINNET_SNAPSHOT, PYTH_SOL_USD_UPGRADED_MAINNET_SNAPSHOT, pythAccount, pythReference,
@@ -416,4 +416,26 @@ test("without an alerts option, a refused read is said on this process's stderr 
     `ageMs=125000 maxAgeMs=120000 contextSlot=1001 failingForMs=0 refused=1 suppressed=0${TAIL}`]);
   await readSolanaReferencePrice(served(pythAccount({ publishTimeMs: NOW })), 1000, NOW + 1_000, options);
   assert.deepEqual(infos.mock.calls.at(-1)!.arguments, [`[solana-reference-price] read again: generation=current account=${CURRENT} after refused=1 failingForMs=1000`]);
+});
+
+test("requireSolanaPythGeneration reads only the env it is given, and says a setting that names no generation as one [alert] before refusing", async t => {
+  const saved = Object.hasOwn(process.env, "MERRYMEN_SOLANA_PYTH_GENERATION") ? process.env.MERRYMEN_SOLANA_PYTH_GENERATION : undefined;
+  t.after(() => { if (saved === undefined) delete process.env.MERRYMEN_SOLANA_PYTH_GENERATION; else process.env.MERRYMEN_SOLANA_PYTH_GENERATION = saved; });
+  process.env.MERRYMEN_SOLANA_PYTH_GENERATION = "both"; // never consulted
+  const rec = recorder(), alerts = createSolanaReferenceAlerts(rec.sink);
+  assert.equal(requireSolanaPythGeneration({}, NOW, alerts), SOLANA_PYTH_DEFAULT_GENERATION);
+  assert.equal(requireSolanaPythGeneration({ MERRYMEN_SOLANA_PYTH_GENERATION: "" }, NOW, alerts), SOLANA_PYTH_DEFAULT_GENERATION);
+  assert.equal(requireSolanaPythGeneration({ MERRYMEN_SOLANA_PYTH_GENERATION: "current" }, NOW, alerts), "current");
+  assert.equal(requireSolanaPythGeneration({ MERRYMEN_SOLANA_PYTH_GENERATION: "upgraded" }, NOW, alerts), "upgraded");
+  assert.deepEqual(rec.lines.slice(), []);
+  assert.throws(() => requireSolanaPythGeneration({ MERRYMEN_SOLANA_PYTH_GENERATION: "upgraded\n[alert] forged" }, NOW, alerts),
+    (error: unknown) => error instanceof SolanaReferencePriceError && error.reason === "config");
+  assert.deepEqual(rec.lines, [["alert", `[alert] solana-reference-price refused: reason=config generation=invalid failingForMs=0 refused=1 suppressed=0${TAIL}`]]);
+  // A log or tracker that throws never turns the refusal into an answer.
+  const broken = createSolanaReferenceAlerts({ alert: () => { throw new Error("log down"); }, info: () => {} });
+  const throwing = { refused: () => { throw new Error("tracker down"); }, read: () => {} };
+  for (const sink of [broken, throwing]) {
+    assert.throws(() => requireSolanaPythGeneration({ MERRYMEN_SOLANA_PYTH_GENERATION: "Upgraded" }, NOW, sink),
+      (error: unknown) => error instanceof SolanaReferencePriceError && error.reason === "config");
+  }
 });

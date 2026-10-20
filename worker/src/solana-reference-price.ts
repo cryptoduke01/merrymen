@@ -36,7 +36,10 @@
  * `SOLANA_PYTH_DEFAULT_GENERATION`) picks the one every read and every stored
  * bound must come from. It switches all three addresses together; there is no
  * fallback from one generation to the other, and configuration cannot name an
- * address of its own.
+ * address of its own. The app runtime takes it from the env it was built with
+ * (`requireSolanaPythGeneration`) and passes that one generation to its reads,
+ * the executor's check and the store's admission check; a setting that names
+ * no generation refuses live trading as a configuration error.
  */
 import { createHash } from "node:crypto";
 import { address, getProgramDerivedAddress } from "@solana/kit";
@@ -147,7 +150,10 @@ export function solanaPythFeed(generation: SolanaPythGeneration): Readonly<Solan
   if (generation !== "current" && generation !== "upgraded") return fail("config");
   return SOLANA_PYTH_FEEDS[generation];
 }
-/** Callers that hold no env of their own read the process's, as the runtime does by default. */
+/**
+ * Callers that pass no generation read the process's env. The app runtime
+ * always passes the one from its own env, which need not be the process's.
+ */
 function configuredGeneration(): SolanaPythGeneration { return solanaPythGeneration(process.env); }
 
 export interface SolanaReferencePrice {
@@ -260,6 +266,20 @@ export function createSolanaReferenceAlerts(sink: SolanaReferenceAlertSink = {
 }
 /** This process's alerts: what the runtime's reads report to unless a caller passes its own. */
 const processReferenceAlerts = createSolanaReferenceAlerts();
+
+/**
+ * The generation `env` selects, for a caller that checks it before reading
+ * anything: the app runtime, next to the tolerance, with the env it was built
+ * with. A setting that names no generation is said as the same [alert] a
+ * refused read gives (reason=config generation=invalid, never the value) and
+ * rethrown, so the caller can refuse it as configuration.
+ */
+export function requireSolanaPythGeneration(env: Env, nowMs: number, alerts: SolanaReferenceAlerts = processReferenceAlerts): SolanaPythGeneration {
+  try { return solanaPythGeneration(env); } catch (error) {
+    if (error instanceof SolanaReferencePriceError) { try { alerts.refused({ error, generation: "invalid", nowMs }); } catch { /* Still refused. */ } }
+    throw error;
+  }
+}
 
 /**
  * Read the reference at or after `minContextSlot` from `generation`'s pinned
