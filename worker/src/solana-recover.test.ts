@@ -27,7 +27,7 @@ import {
   solanaRecoveryRevokeInstructions, solanaRecoveryVerificationRpc, solanaRecoveryWithdrawLegs, type SolanaRecoveryResult,
 } from "./solana-recover";
 import { createSolanaLiveRpc, type SolanaLiveRpc } from "./solana-live-rpc";
-import { runSolanaRecoverCommand, type SolanaRecoverCommandDeps } from "./solana-recover-command";
+import { runSolanaRecoverCommand, SOLANA_RECOVER_RPC_ARG_WARNING, type SolanaRecoverCommandDeps } from "./solana-recover-command";
 import { SOLANA_MAINNET_GENESIS_HASH, SolanaRpcError } from "./solana-rpc";
 
 const RPC = "https://rpc.example.test/?api-key=fixture-rpc-secret";
@@ -489,7 +489,8 @@ describe("solana-recover", () => {
     assert.match(out, /One transaction per asset \(SOL, then USDG, then WSOL\)/);
     assert.match(out, /Left in the vault: 0 USDG, 0 WSOL, 0 SOL above rent/);
     assert.match(out, /Delete the exported key file now/);
-    assert.equal(warnings, "");
+    // RPC carries a fixture key and comes by --rpc: the one warning is about that, and does not repeat it.
+    assert.equal(warnings, SOLANA_RECOVER_RPC_ARG_WARNING);
     noSecrets(out, warnings);
 
     // Running again finds nothing to do and sends nothing.

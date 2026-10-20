@@ -45,9 +45,9 @@ syncBuiltinESMExports();
 `);
   const env = { MERRYMEN_HOME: home, NODE_OPTIONS: `--import=${pathToFileURL(guard).href}`, NO_COLOR: "1" };
   for (const key of ["PATH", "SystemRoot", "WINDIR", "TEMP", "TMP", "TMPDIR"]) if (process.env[key] !== undefined) env[key] = process.env[key];
-  function run(args, input) {
+  function run(args, input, extraEnv = {}) {
     const result = spawnSync(process.execPath, [BIN, "solana-recover", ...args], {
-      cwd: directory, env, encoding: "utf8", shell: false, timeout: 30_000, maxBuffer: 1024 * 1024, input,
+      cwd: directory, env: { ...env, ...extraEnv }, encoding: "utf8", shell: false, timeout: 30_000, maxBuffer: 1024 * 1024, input,
     });
     assert.equal(result.error, undefined, result.error?.message);
     assert.equal(result.signal, null);
@@ -110,7 +110,9 @@ test("a send for a program that is not released is refused before any request", 
 
 test("with the network down, a send stops on a fixed message and only the supplied RPC is tried", t => {
   const { run, attempts } = fixture(t);
-  const result = run(["--program", PROGRAM, "--rpc", RPC, "--key-file", "-", "--send", "--program-sha256", "a".repeat(64), "--unlisted-program"], `${SECRET}\n`);
+  // The documented path: the keyed URL from MERRYMEN_SOLANA_RECOVER_RPC, not the command line.
+  const result = run(["--program", PROGRAM, "--key-file", "-", "--send", "--program-sha256", "a".repeat(64), "--unlisted-program"], `${SECRET}\n`,
+    { MERRYMEN_SOLANA_RECOVER_RPC: RPC });
   assert.equal(result.status, 1);
   assert.match(result.stderr, /^Solana read failed; check connectivity and endpoint configuration\.\n$/);
   const tried = attempts();
@@ -120,4 +122,12 @@ test("with the network down, a send stops on a fixed message and only the suppli
     assert.doesNotMatch(line, /sendTransaction/, "nothing was submitted");
     assert.ok(!line.includes(SECRET), "the key never leaves the process");
   }
+});
+
+test("a keyed URL given with --rpc still works, with a warning that does not repeat it", t => {
+  const { run, attempts } = fixture(t);
+  const result = run(["--program", PROGRAM, "--rpc", RPC, "--owner", OWNER]);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /^Warning: the --rpc URL looks like it carries an API key\. It is not printed.*MERRYMEN_SOLANA_RECOVER_RPC instead.*\nSolana read failed; check connectivity and endpoint configuration\.\n$/);
+  assert.ok(attempts().length > 0 && attempts().every((line) => line.startsWith(`fetch ${RPC} `)));
 });
