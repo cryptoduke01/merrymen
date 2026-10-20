@@ -14,6 +14,10 @@
 // Then it writes the record (ID, size, SHA-256, toolchain, the run that built
 // it, and whether that run can be a release) to <record.json>, adds it to the
 // GitHub step summary when there is one, and prints the SHA-256 on stdout.
+// The record also names the local test program id (SOLANA_VAULT_LOCAL_TEST_PROGRAM
+// in packages/core/src/solana-live.ts, read from this script's own checkout)
+// and whether the build declares it: the live runtime refuses that id, so such
+// a build is never a release, whatever its manifest says.
 //
 // A release artifact comes only from a CI run on refs/heads/main of
 // millw14/merrymen (a push to main or a manual run on main) whose pinned
@@ -55,6 +59,24 @@ export function declaredProgramId(libRs) {
     throw new Error(`lib.rs must declare exactly one program ID with declare_id!("..."); found ${mentions} mention(s)`);
   }
   return found[0][1];
+}
+
+/** Where SOLANA_VAULT_LOCAL_TEST_PROGRAM is declared, relative to the repository root. */
+export const LOCAL_TEST_SOURCE = "packages/core/src/solana-live.ts";
+/** The local test program id: the one string SOLANA_VAULT_LOCAL_TEST_PROGRAM is assigned in LOCAL_TEST_SOURCE. */
+export function localTestProgramId(solanaLiveTs) {
+  const assigned = (solanaLiveTs.match(/\bSOLANA_VAULT_LOCAL_TEST_PROGRAM\s*=/g) ?? []).length;
+  const found = [...solanaLiveTs.matchAll(/^export const SOLANA_VAULT_LOCAL_TEST_PROGRAM\s*=\s*"([^"]*)"\s*;/gm)];
+  if (assigned !== 1 || found.length !== 1) {
+    throw new Error(`${LOCAL_TEST_SOURCE} must assign SOLANA_VAULT_LOCAL_TEST_PROGRAM exactly once, to a string; found ${assigned} assignment(s)`);
+  }
+  const id = found[0][1];
+  if (base58Decode(id).length !== 32) throw new Error(`SOLANA_VAULT_LOCAL_TEST_PROGRAM ${id} is not a 32-byte key`);
+  return id;
+}
+/** The local test program id from the repository at `root` (default: this script's own checkout). */
+export function readLocalTestProgramId(root = join(dirname(fileURLToPath(import.meta.url)), "..", "..")) {
+  return localTestProgramId(readFileSync(join(root, LOCAL_TEST_SOURCE), "utf8"));
 }
 
 export function anchorProgramIds(anchorToml, program) {
@@ -123,6 +145,8 @@ export const RELEASE_RULE = `A release artifact comes only from a CI run on ${RE
   + `solana · test uploads such a run's bytes as merrymen-vault-sbf-${CANDIDATE_LABEL}-<commit>-run<id>.<attempt>, before app has decided; `
   + "solana · release, which runs only after app passed, confirms them with merrymen-vault-release-<commit>-run<id>.<attempt>, "
   + "a record naming that artifact and its SHA-256. Without that record the run is not a release. "
+  + "A build whose lib.rs declares the local test program id (SOLANA_VAULT_LOCAL_TEST_PROGRAM in packages/core/src/solana-live.ts) is never a release: "
+  + "the live runtime refuses that id, so its Linux manifest is a reproducibility baseline only. "
   + "CI never runs on a tag push, and a manual run on a tag or another branch is not a release candidate. "
   + "Every other artifact, every pull request run's included, is not a release artifact. "
   + "Confirm the run on GitHub itself (event, branch, commit, and that app passed): this record and the artifact names are written by the run and prove nothing alone.";
@@ -156,6 +180,13 @@ const RELEASE_REASONS = {
   removed: "the committed Linux build manifest was deleted",
 };
 
+/** Whether a build record's program declares the local test id: true, false, or null when either id is missing. */
+export function declaresLocalTestId(program) {
+  const id = typeof program?.programId === "string" && program.programId ? program.programId : null;
+  const local = typeof program?.localTestId === "string" && program.localTestId ? program.localTestId : null;
+  return id === null || local === null ? null : id === local;
+}
+
 /** A push or manual run on refs/heads/main of RELEASE_REPOSITORY. */
 export function fromMain(p) {
   return p?.repository === RELEASE_REPOSITORY
@@ -166,20 +197,27 @@ export function fromMain(p) {
 /**
  * Whether a run's artifact is a release candidate (RELEASE_RULE): a push or
  * manual run on refs/heads/main of RELEASE_REPOSITORY, and `linuxManifest`,
- * the outcome of solana-linux-manifest.mjs's comparison, is "matches". Any
- * other outcome, or none yet (null), is not-a-release. ci.yml names the
- * uploaded artifact with `label`, which is never more than
- * candidate-unconfirmed: whether the run is a release is decided after app
- * passed (solana-release.mjs).
+ * the outcome of solana-linux-manifest.mjs's comparison, is "matches", and
+ * `program` (the build record: programId, localTestId) declares another id
+ * than the local test program. Any other outcome, or none yet (null), a build
+ * of the local test id, and a record that does not name both ids, are
+ * not-a-release. ci.yml names the uploaded artifact with `label`, which is
+ * never more than candidate-unconfirmed: whether the run is a release is
+ * decided after app passed (solana-release.mjs).
  */
-export function releaseStatus(p, linuxManifest = null) {
+export function releaseStatus(p, linuxManifest = null, program = null) {
   const main = fromMain(p);
-  const candidate = main && linuxManifest === "matches";
+  const local = declaresLocalTestId(program);
+  const candidate = main && local === false && linuxManifest === "matches";
   const reason = !main
     ? `not a push or manual run on ${RELEASE_REF} of ${RELEASE_REPOSITORY}`
-    : linuxManifest === null
-      ? "its Linux build manifest has not been compared yet"
-      : RELEASE_REASONS[linuxManifest] ?? `an unknown Linux manifest outcome ${JSON.stringify(linuxManifest)}`;
+    : local === true
+      ? "it declares the local test program id, which the live runtime refuses"
+      : local === null
+        ? "its program id was not compared with the local test program id"
+        : linuxManifest === null
+          ? "its Linux build manifest has not been compared yet"
+          : RELEASE_REASONS[linuxManifest] ?? `an unknown Linux manifest outcome ${JSON.stringify(linuxManifest)}`;
   return { candidate, label: candidate ? CANDIDATE_LABEL : NOT_A_RELEASE_LABEL, reason, rule: RELEASE_RULE };
 }
 
@@ -191,7 +229,7 @@ export function releaseLine(release) {
   return `- release: ${verdict} (${release.reason}). ${release.rule}`;
 }
 
-export function programRecord({ libRs, anchorToml, so, toolchain = null, commit = null, run = null }) {
+export function programRecord({ libRs, anchorToml, so, localTestId = null, toolchain = null, commit = null, run = null }) {
   const programId = declaredProgramId(libRs);
   const key = base58Decode(programId);
   if (key.length !== 32) throw new Error(`declared program ID ${programId} is ${key.length} bytes, not 32`);
@@ -206,10 +244,16 @@ export function programRecord({ libRs, anchorToml, so, toolchain = null, commit 
   const programIdOccurrences = countOccurrences(so, key);
   if (programIdOccurrences === 0) throw new Error(`the artifact does not contain the declared program ID ${programId}`);
 
+  if (localTestId !== null && (typeof localTestId !== "string" || base58Decode(localTestId).length !== 32)) {
+    throw new Error(`the local test program ID ${JSON.stringify(localTestId)} is not a 32-byte key`);
+  }
   return {
     program: "merrymen_vault",
     programId,
     programIdOccurrences,
+    // SOLANA_VAULT_LOCAL_TEST_PROGRAM: a build that declares it is never a release.
+    localTestId,
+    declaresLocalTestId: declaresLocalTestId({ programId, localTestId }),
     bytes: so.length,
     sha256: createHash("sha256").update(so).digest("hex"),
     // The deployed ProgramData region is the artifact followed by zero
@@ -221,7 +265,7 @@ export function programRecord({ libRs, anchorToml, so, toolchain = null, commit 
     // GITHUB_SHA: the pushed commit, or a pull request's test merge commit.
     commit,
     provenance: run,
-    release: releaseStatus(run),
+    release: releaseStatus(run, null, { programId, localTestId }),
   };
 }
 
@@ -237,6 +281,7 @@ function main(argv) {
     libRs: readFileSync(join(programRoot, "programs/merrymen-vault/src/lib.rs"), "utf8"),
     anchorToml: readFileSync(join(programRoot, "Anchor.toml"), "utf8"),
     so: readFileSync(soPath),
+    localTestId: readLocalTestProgramId(join(here, "..", "..")),
     toolchain: readToolchain(readFileSync(join(here, "solana-toolchain.env"), "utf8")),
     commit: run.commit,
     run,
@@ -248,6 +293,9 @@ function main(argv) {
       "### merrymen_vault SBF artifact",
       "",
       `- program ID: \`${record.programId}\` (its 32 bytes appear ${record.programIdOccurrences} time(s) in the binary)`,
+      record.declaresLocalTestId
+        ? "- **the local test program ID** (SOLANA_VAULT_LOCAL_TEST_PROGRAM), which the live runtime refuses: never a release; its Linux manifest is a reproducibility baseline only"
+        : `- not the local test program ID \`${record.localTestId}\``,
       `- size: ${record.bytes} bytes`,
       `- SHA-256: \`${record.sha256}\``,
       `- toolchain: agave ${t.agave}, platform-tools ${t.platformTools} (rustc ${t.platformToolsRustc}), arch ${t.arch}`,

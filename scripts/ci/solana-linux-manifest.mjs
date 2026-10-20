@@ -23,7 +23,8 @@
 // outcome and the release decision into <record.json> (the build record
 // solana-program-record.mjs wrote), adds both to the step summary, and prints
 // the artifact's release label on stdout for the upload's name. Only a run on
-// main whose build matches the committed manifest is candidate-unconfirmed
+// main whose build matches the committed manifest, and whose record says it
+// does not declare the local test program id, is candidate-unconfirmed
 // (solana-program-record.mjs releaseStatus); every other artifact, one whose
 // manifest differs, was deleted or was never committed included, is uploaded
 // as not-a-release. So bytes that fail the comparison still reach the owner,
@@ -194,7 +195,8 @@ export function outcomeLine({ status, manifest, problem = null }) {
   if (status === "uncommitted") {
     return `No ${LINUX_MANIFEST} is committed, so nothing was compared. This run recorded ${built}; `
       + "the manifest is in the uploaded vault artifact. Review it and commit it from a run whose app check passed: "
-      + "from then on CI fails whenever the pinned Linux build differs from it, and a run on main that matches it and passes app is a release.";
+      + "from then on CI fails whenever the pinned Linux build differs from it, and a run on main that matches it and passes app is a release, "
+      + "unless its program declares the local test program id: that build's manifest is a reproducibility baseline only.";
   }
   return `${problem} This run recorded ${built}.`;
 }
@@ -214,7 +216,8 @@ function report(dir, recorded, recordPath) {
   if (record?.sha256 !== result.manifest.artifact.sha256) {
     throw new Error(`the build record ${recordPath} is for artifact ${JSON.stringify(record?.sha256)}, the Linux manifest for ${result.manifest.artifact.sha256}`);
   }
-  const release = releaseStatus(provenance(process.env), result.status);
+  // The record names the program and the local test id: a build of that id is never a candidate.
+  const release = releaseStatus(provenance(process.env), result.status, record);
   record.linuxManifest = { file: LINUX_MANIFEST, status: result.status, problem: result.problem };
   record.release = release;
   writeFileSync(recordPath, `${JSON.stringify(record, null, 2)}\n`);

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // The release verdict for the vault artifact, made after `app` passed.
 //
-//   node scripts/ci/solana-release.mjs <release.json>
+//   node scripts/ci/solana-release.mjs <release.json> [<repository root>]
 //
 // `solana · test` uploads the vault before `app` has compared its hash with
 // `solana · rebuild`'s, before app · tests and the Postgres suites have
@@ -28,12 +28,18 @@
 // included: a re-run of app keeps solana · test's upload), and the two hashes
 // are equal SHA-256s. app has already checked the hashes; checking them again
 // here keeps a record from naming bytes nobody reproduced if the jobs ever
-// change.
-import { appendFileSync, realpathSync, writeFileSync } from "node:fs";
+// change. It also refuses a source whose lib.rs declares the local test
+// program id (SOLANA_VAULT_LOCAL_TEST_PROGRAM in packages/core/src/solana-live.ts),
+// read from the checkout of this same commit (by default this script's own
+// repository): the live runtime refuses that id, so its build is never a
+// release, even if a run on main labelled it a candidate.
+import { appendFileSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
-  CANDIDATE_LABEL, candidateArtifactName, fromMain, provenance, RELEASE_REF, RELEASE_REPOSITORY, RELEASE_RULE, releaseLine,
+  CANDIDATE_LABEL, candidateArtifactName, declaredProgramId, fromMain, provenance, readLocalTestProgramId, RELEASE_REF, RELEASE_REPOSITORY,
+  RELEASE_RULE, releaseLine,
 } from "./solana-program-record.mjs";
 
 const HEX64 = /^[0-9a-f]{64}$/;
@@ -44,17 +50,32 @@ export function releaseArtifactName({ commit, runId, runAttempt }) {
   return `merrymen-vault-release-${commit}-run${runId}.${runAttempt}`;
 }
 
+/** The program a checkout declares and the local test program id, from the repository at `root`. */
+export function releaseSource(root = join(dirname(fileURLToPath(import.meta.url)), "..", "..")) {
+  return {
+    programId: declaredProgramId(readFileSync(join(root, "contracts/solana/programs/merrymen-vault/src/lib.rs"), "utf8")),
+    localTestId: readLocalTestProgramId(root),
+  };
+}
+
 /**
  * The release record for a run whose app check passed. Throws, saying why,
- * for a run that is not a release. `env` is the job's environment.
+ * for a run that is not a release. `env` is the job's environment; `source`
+ * is releaseSource() of the commit the run built.
  */
-export function releaseRecord(env) {
+export function releaseRecord(env, source) {
   const run = provenance(env);
   if (!fromMain(run)) {
     throw new Error(`not a push or manual run on ${RELEASE_REF} of ${RELEASE_REPOSITORY} (${run.event ?? "no event"} on ${run.ref ?? "no ref"} of ${run.repository ?? "no repository"})`);
   }
   if (!/^[0-9a-f]{40}$/.test(run.commit ?? "") || !POSITIVE.test(run.runId ?? "") || !POSITIVE.test(run.runAttempt ?? "")) {
     throw new Error("the run has no commit, run id or attempt");
+  }
+  const programId = typeof source?.programId === "string" ? source.programId : "";
+  const localTestId = typeof source?.localTestId === "string" ? source.localTestId : "";
+  if (!programId || !localTestId) throw new Error("the program ID was not compared with the local test program ID");
+  if (programId === localTestId) {
+    throw new Error(`lib.rs declares the local test program ID ${programId} (SOLANA_VAULT_LOCAL_TEST_PROGRAM), which the live runtime refuses: its build is never a release`);
   }
   const label = env.VAULT_RELEASE_LABEL ?? "";
   if (label !== CANDIDATE_LABEL) {
@@ -71,6 +92,8 @@ export function releaseRecord(env) {
   if (tested !== rebuilt) throw new Error(`the rebuilt vault artifact ${JSON.stringify(rebuilt)} differs from the tested one ${tested}`);
   return {
     program: "merrymen_vault",
+    // lib.rs's declare_id! at this commit: not the local test program ID.
+    programId,
     sha256: tested,
     // The bytes are in this artifact of the same run, at
     // target/deploy/merrymen_vault.so beside their build record and the
@@ -89,11 +112,11 @@ export function releaseRecord(env) {
 }
 
 function main(argv) {
-  if (argv.length !== 1) {
-    console.error("usage: solana-release.mjs <release.json>");
+  if (argv.length !== 1 && argv.length !== 2) {
+    console.error("usage: solana-release.mjs <release.json> [<repository root>]");
     process.exit(2);
   }
-  const record = releaseRecord(process.env);
+  const record = releaseRecord(process.env, releaseSource(...argv.slice(1)));
   writeFileSync(argv[0], `${JSON.stringify(record, null, 2)}\n`);
   const name = releaseArtifactName(record.provenance);
   if (process.env.GITHUB_STEP_SUMMARY) {
@@ -101,6 +124,7 @@ function main(argv) {
       "### merrymen_vault release",
       "",
       `- record: \`${name}\``,
+      `- program ID: \`${record.programId}\` (not the local test program ID)`,
       `- bytes: \`${record.artifact}\` (target/deploy/merrymen_vault.so)`,
       `- SHA-256: \`${record.sha256}\` (tested and rebuilt)`,
       releaseLine(record.release),
