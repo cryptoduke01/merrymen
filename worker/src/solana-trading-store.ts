@@ -442,7 +442,8 @@ export async function ensureSolanaTradingSchema(db: Db, postgres = false): Promi
 
 /** A submitted owner transaction awaiting its outcome, in either slot (solanaPendingOwnerTransactions). */
 export interface SolanaPendingOwnerTransaction extends SolanaAccountScope {
-  slot: "main" | "revoke"; signature: string; kind: NonNullable<SolanaPreparedSetup["kind"]>;
+  /** `signature`: null only on a malformed record, still listed so recovery reads it as it always did. */
+  slot: "main" | "revoke"; signature: string | null; kind: NonNullable<SolanaPreparedSetup["kind"]>;
   /** When it was prepared; null when the stored record does not say. */
   preparedAtMs: number | null;
   /** The vault sequence it was prepared at, when recorded. */
@@ -461,8 +462,8 @@ export async function solanaPendingOwnerTransactions(db: Db): Promise<SolanaPend
       let setup: SolanaPreparedSetup | null = null;
       try { setup = JSON.parse(row.setup_json) as SolanaPreparedSetup; } catch { continue; }
       // Saved signed bytes are "pending" until finished (exactly what the worker recovered before the revoke slot).
-      if (setup?.status !== "pending" || typeof setup.signature !== "string") continue;
-      pending.push({ tenant: row.tenant, owner: row.owner, slot, signature: setup.signature, kind: setup.kind ?? "session",
+      if (setup?.status !== "pending") continue;
+      pending.push({ tenant: row.tenant, owner: row.owner, slot, signature: typeof setup.signature === "string" ? setup.signature : null, kind: setup.kind ?? "session",
         preparedAtMs: Number.isSafeInteger(setup.preparedAtMs) ? setup.preparedAtMs : null, priorSequence: typeof setup.priorSequence === "string" ? setup.priorSequence : null });
     }
   }
