@@ -5,11 +5,13 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { CHAINS, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM, base58Encode } from "../../packages/core/src/ids";
 import type { SolanaMint, SolanaQuote, SolanaSwapIntent } from "../../packages/core/src/solana";
-import { SolanaPaperStore, SolanaPaperStoreError } from "./solana-paper-store";
+import { SolanaPaperStore } from "./solana-paper-store";
 import { createSolanaPaperService, type SolanaPaperMarket } from "./solana-paper-service";
 import { createSolanaMarket, SolanaMarketError } from "./solana-market";
 import { SOLANA_MAINNET_GENESIS_HASH } from "./solana-rpc";
 import { paperUsdgRaw, runSolanaPaperCommand } from "./solana-paper-command";
+// Its own line, apart from the imports above, so it merges cleanly with branches that change those.
+import { SolanaPaperStoreError } from "./solana-paper-store";
 
 const OWNER = base58Encode(new Uint8Array(32).fill(7));
 const OTHER = base58Encode(new Uint8Array(32).fill(8));
