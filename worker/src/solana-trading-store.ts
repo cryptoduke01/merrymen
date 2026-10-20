@@ -248,7 +248,8 @@ export const SOLANA_EXPIRED_ATTEMPTS_EXHAUSTED = "Too many Solana transactions e
  * the same rolling 24-hour window and arithmetic recordSigned admits by:
  * `counted` of the `expired` attempts count toward maxOpsPerDay (those beyond
  * the allowance), next to `operations` that landed, failed or are pending.
- * For operator alerting only; admission never reads it.
+ * For status blockers and operator alerts; admission never reads it, and counts
+ * the same rows itself under its lock.
  */
 export async function solanaExpiredAttemptUse(db: Db, scope: SolanaAccountScope, nowMs: number, allowance: number): Promise<{ expired: number; counted: number; operations: number }> {
   if (!Number.isSafeInteger(nowMs) || nowMs < 0 || !Number.isSafeInteger(allowance) || allowance < 0) refuse("Invalid Solana expired-attempt query.");

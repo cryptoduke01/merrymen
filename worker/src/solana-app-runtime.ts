@@ -28,7 +28,7 @@ import { readSolanaReferencePrice, requireSolanaPythGeneration, solanaPythGenera
 import { SolanaRpcError } from "./solana-rpc";
 import { getSolanaRuntimeDb } from "./solana-runtime-db";
 import { isSolanaTransactionError } from "./solana-settlement";
-import { ensureSolanaTradingSchema, OPERATOR_HOLD, solanaExpiredAttemptAllowance, solanaOwnerExpiryProven, solanaQuarantinedWsol, SolanaTradingStore, SolanaTradingStoreError, type SolanaAccountScope,
+import { ensureSolanaTradingSchema, OPERATOR_HOLD, SOLANA_EXPIRED_ATTEMPTS_EXHAUSTED, solanaExpiredAttemptAllowance, solanaExpiredAttemptUse, solanaOwnerExpiryProven, solanaQuarantinedWsol, SolanaTradingStore, SolanaTradingStoreError, type SolanaAccountScope,
   type SolanaLiveBook, type SolanaOwnerExpiryProof, type SolanaPreparedSetup, type SolanaWithdrawValuation } from "./solana-trading-store";
 
 /**
@@ -83,6 +83,14 @@ function publicTrade(record: SolanaLiveRecord) {
  * setting: SolanaRpcError("invalid-fallback") names the deployment variable,
  * which stays in operator tools (check:solana-rpc, the worker's own errors).
  */
+/**
+ * The status blocker while the account's trades in the last 24 hours (landed,
+ * failed or pending) reached its maxOpsPerDay: admission refuses every live
+ * trade, exits included, until the oldest leaves the window.
+ * SOLANA_EXPIRED_ATTEMPTS_EXHAUSTED is the blocker when proven-expired attempts
+ * beyond the allowance are what used the day's operations up.
+ */
+export const SOLANA_STATUS_DAILY_OPERATIONS_USED = "This account made its maximum number of trades for the last 24 hours. Trading and automated exits resume as they leave the window.";
 export const SOLANA_STATUS_NO_FALLBACK = "Live trading needs a second, independent RPC provider; an operator must configure one.";
 /**
  * A failed live status read as the owner sees it. This module's own refusals,
@@ -349,6 +357,20 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       }
       return fail("The independent SOL price tolerance is misconfigured.", "configuration");
     }
+  }
+  /**
+   * Why admission (recordSigned) would refuse every live trade, exits included,
+   * for the account's daily operations, by its own rolling 24-hour arithmetic:
+   * operations that landed, failed or are pending reached maxOpsPerDay, or with
+   * the proven-expired attempts beyond the allowance they did. Null when neither.
+   * An unreadable allowance is already a configuration blocker, so it adds nothing.
+   */
+  async function dailyOperationsUsed(s: SolanaTradingStore, maxOpsPerDay: number): Promise<string | null> {
+    let allowance: number;
+    try { allowance = solanaExpiredAttemptAllowance(env); } catch { return null; }
+    const use = await solanaExpiredAttemptUse(s.db, s.scope, now(), allowance);
+    if (use.operations >= maxOpsPerDay) return SOLANA_STATUS_DAILY_OPERATIONS_USED;
+    return use.operations + use.counted >= maxOpsPerDay ? SOLANA_EXPIRED_ATTEMPTS_EXHAUSTED : null;
   }
   /**
    * Whether MERRYMEN_JUPITER_API_KEY is one every Jupiter request accepts
@@ -814,6 +836,10 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       if (binding.requestedMode !== "live") blockers.push("Live mode is not selected.");
       if (!binding.limits || binding.limits.expiresAtMs <= now()) blockers.push("Save current Solana trading limits.");
       else if (binding.requestedMode === "live" && (binding.limits.perTradeWsol === undefined || binding.limits.dailyWsol === undefined)) blockers.push("Save per-trade and daily SOL sell limits for live trading.");
+      if (binding.requestedMode === "live" && binding.limits && binding.limits.expiresAtMs > now()) {
+        const used = await dailyOperationsUsed(s, binding.limits.maxOpsPerDay);
+        if (used) blockers.push(used);
+      }
       const pending = (await s.pending()).map(publicTrade);
       if (pending.length) blockers.push("A live trade is awaiting final confirmation.");
       const ownerTransaction = await s.setup();

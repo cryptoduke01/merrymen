@@ -16,7 +16,7 @@ import { SOLANA_CLASSIC_TOKEN_PROGRAM, SOLANA_JUPITER_SHARED_ROUTE_DISCRIMINATOR
 import { SqlSolanaBindingStore } from "../../web/src/lib/solana-binding-store";
 import { wrapSqlite } from "./db";
 import { createSolanaAgent } from "./solana-agent";
-import { createSolanaAppRuntime } from "./solana-app-runtime";
+import { createSolanaAppRuntime, SOLANA_STATUS_DAILY_OPERATIONS_USED } from "./solana-app-runtime";
 import { createSolanaExecutor, type SolanaSignedSubmission } from "./solana-executor";
 import { createSolanaLiveMarket, SolanaLiveMarketError } from "./solana-live-market";
 import type { SolanaLiveRead, SolanaLiveRpc } from "./solana-live-rpc";
@@ -25,7 +25,7 @@ import { PYTH_SOL_USD_ACCOUNT, SOLANA_PYTH_FEEDS, readSolanaReferencePrice, sola
 import { pythAccount, pythReference } from "./solana-reference-price-fixture";
 import { SolanaMarketError } from "./solana-market";
 import { SOLANA_MAINNET_GENESIS_HASH } from "./solana-rpc";
-import { ensureSolanaTradingSchema, SolanaTradingStore } from "./solana-trading-store";
+import { ensureSolanaTradingSchema, SOLANA_EXPIRED_ATTEMPT_ALLOWANCE_MISCONFIGURED, SOLANA_EXPIRED_ATTEMPTS_EXHAUSTED, SolanaTradingStore } from "./solana-trading-store";
 import { sealSecret } from "./store-crypto";
 
 const TENANT = "0x1111111111111111111111111111111111111111";
@@ -474,6 +474,38 @@ test("status blocks trades and exits on a Jupiter key every live route refuses, 
       assert.deepEqual(await f.submissions(), []); assert.equal(f.sends.length, 0);
     }
   }
+});
+
+test("status blocks trades and exits once the day's operations are used, by expired attempts beyond the allowance or by trades, as admission refuses them", async t => {
+  const f = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" } });
+  // The fixture's limits allow 20 operations a day. Rows inside the last 24 hours, and one just outside it.
+  const row = async (requestId: string, status: string, createdAtMs: number) => f.db.prepare(`INSERT INTO solana_runtime_submissions(tenant,owner,request_id,vault,sequence,signature,status,created_at_ms,notional_raw,submission_json)
+    VALUES(?,?,?,?,?,?,?,?,?,?)`).run(TENANT, f.scope.owner, requestId, f.vault, "0", `sig-${requestId}`, status, createdAtMs, "0", JSON.stringify({ intent: { requestId }, signature: `sig-${requestId}` }));
+  await row("old-expired", "expired", NOW - 86_400_000);
+  for (let i = 0; i < 19; i++) await row(`dropped-${i}`, "expired", NOW - 1000 - i);
+  const view = async (more: Record<string, string> = {}) => { const s = await f.runtime(more).status(f.scope); return [s.live.ready, s.live.canExit, s.live.blockers]; };
+  assert.deepEqual(await view(), [true, true, []], "19 of 20 counted: one operation left");
+  await row("dropped-19", "expired", NOW - 1);
+  assert.deepEqual(await view(), [false, false, [SOLANA_EXPIRED_ATTEMPTS_EXHAUSTED]], "20 of 20 counted");
+  // The blocker says what admission does: the exit is refused with the same words, before anything is sent.
+  await assert.rejects(f.app.trade(f.scope, { mode: "live", intent: manual(SOLANA_WRAPPED_SOL_MINT, "100000000", "exit-exhausted") }),
+    (error: unknown) => error instanceof Error && error.message === SOLANA_EXPIRED_ATTEMPTS_EXHAUSTED);
+  assert.equal(f.sends.length, 0);
+  // An allowance of 1 leaves one operation.
+  assert.deepEqual(await view({ MERRYMEN_SOLANA_EXPIRED_ATTEMPT_ALLOWANCE: "1" }), [true, true, []]);
+  // An unreadable allowance is its own configuration blocker, not this one.
+  assert.deepEqual((await view({ MERRYMEN_SOLANA_EXPIRED_ATTEMPT_ALLOWANCE: "97" }))[2], [SOLANA_EXPIRED_ATTEMPT_ALLOWANCE_MISCONFIGURED]);
+  // Trades that landed or failed use operations whatever the allowance.
+  await f.db.prepare("UPDATE solana_runtime_submissions SET status='failed' WHERE request_id LIKE 'dropped-%'").run();
+  assert.deepEqual(await view({ MERRYMEN_SOLANA_EXPIRED_ATTEMPT_ALLOWANCE: "96" }), [false, false, [SOLANA_STATUS_DAILY_OPERATIONS_USED]]);
+  await assert.rejects(f.runtime({ MERRYMEN_SOLANA_EXPIRED_ATTEMPT_ALLOWANCE: "96" }).trade(f.scope, { mode: "live", intent: manual(SOLANA_WRAPPED_SOL_MINT, "100000000", "exit-used") }),
+    /rolling daily limit/);
+  assert.equal(f.sends.length, 0);
+  // As they leave the window, neither blocker stays (the fixture's on-chain permission has expired by then).
+  f.clock.now = NOW - 2 + 86_400_000;
+  await f.db.prepare("UPDATE solana_wallet_bindings SET limits_json=?").run(JSON.stringify({ ...limits, expiresAtMs: f.clock.now + 3_600_000 }));
+  const later = (await view())[2] as string[];
+  assert.ok(!later.includes(SOLANA_STATUS_DAILY_OPERATIONS_USED) && !later.includes(SOLANA_EXPIRED_ATTEMPTS_EXHAUSTED), JSON.stringify(later));
 });
 
 test("with MERRYMEN_SOLANA_PYTH_GENERATION=upgraded, live trades are read, checked by the executor and admitted by the store on the upgraded account alone", async t => {
