@@ -7,7 +7,7 @@ import {
 } from "@solana/kit";
 import { ed25519 } from "@noble/curves/ed25519";
 import { CHAINS, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM, base58Decode } from "../../packages/core/src/ids";
-import { parseSolanaRawAmount, parseSolanaSwapIntent, parseSolanaTradeRequest, requireSolanaLiveSellLimits, validateSolanaAccountLimits, validateSolanaQuote,
+import { parseSolanaRawAmount, parseSolanaSwapIntent, parseSolanaTradeRequest, requireSolanaLiveSellLimits, SolanaPaperValidationError, validateSolanaAccountLimits, validateSolanaQuote,
   type SolanaPaperLimits, type SolanaSwapIntent, type SolanaTradeRequest } from "../../packages/core/src/solana";
 import {
   buildCreateSolanaSessionInstruction, buildInitializeSolanaVaultInstruction, buildRevokeSolanaSessionsInstruction,
@@ -54,6 +54,8 @@ export class SolanaAppRuntimeError extends Error {
   }
 }
 function fail(message: string, code: SolanaAppRuntimeError["code"] = "invalid"): never { throw new SolanaAppRuntimeError(code, message); }
+/** A signed permission whose saved limits stopped validating after it was prepared (they expired inside the prepare window). */
+export const LIMITS_NO_LONGER_VALID = "The saved trading limits are no longer valid: they expired or changed before this permission was submitted. Nothing was saved or sent. Save current limits, then prepare the permission again.";
 function object(value: unknown): value is Record<string, unknown> { return !!value && typeof value === "object" && !Array.isArray(value); }
 function integer(value: unknown): number {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) return fail("Invalid Solana confirmation data."); return value;
@@ -596,7 +598,11 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
     }
     const signed: SolanaPreparedSetup = { ...setup, signature, signedTransactionBase64: input.signedTransactionBase64, status: "pending" };
     // The store refuses (expired, changed settings, a pending trade) before it writes anything.
-    const first = await s.saveSetup(signed).catch((error: unknown) => error instanceof SolanaTradingStoreError ? notSaved(error.message) : Promise.reject(error));
+    // Its limit check (validateSolanaAccountLimits) refuses the same way, before the
+    // write: saved limits that expired inside the prepare window, say. A database
+    // error is neither: the write may have committed, so it is never "not-saved".
+    const first = await s.saveSetup(signed).catch((error: unknown) => error instanceof SolanaTradingStoreError ? notSaved(error.message)
+      : error instanceof SolanaPaperValidationError ? notSaved(LIMITS_NO_LONGER_VALID) : Promise.reject(error));
     if (first) { try { await rpc().send(input.signedTransactionBase64, 1); } catch { /* Durable pending; retry only reconciles. */ } }
     return { signature, status: "pending" as const };
   }

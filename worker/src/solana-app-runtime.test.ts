@@ -1237,6 +1237,22 @@ test("not-saved speaks only for this request: bytes an earlier request saved, se
   } finally { f.raw.close(); }
 });
 
+test("a permission whose saved limits expire inside the prepare window is refused as not-saved, and nothing is saved or sent", async () => {
+  const f = await fixture();
+  try {
+    // The limits expire 30 seconds after the permission is prepared; the prepare window is 60 seconds.
+    f.clock.now = limits.expiresAtMs - 30_000;
+    await f.live();
+    const setup = await f.app.prepareLive(f.scope, { limits, sessionPublicKey: f.session });
+    const signedTransactionBase64 = await f.sign(setup.transactionBase64);
+    f.clock.now = limits.expiresAtMs + 1_000;
+    assert.ok(f.clock.now < setup.expiresAtMs, "still inside the prepare window");
+    await rejectsWith(f.app.submitSetup(f.scope, { signedTransactionBase64 }), "not-saved", /^The saved trading limits are no longer valid/, "expired limits");
+    assert.equal((await new SolanaTradingStore(f.db, f.scope).setup())!.signature, undefined, "nothing saved");
+    assert.equal(f.controls.sends, 0, "nothing sent");
+  } finally { f.raw.close(); }
+});
+
 test("a permission is prepared only from limits within the account bounds, paper-shaped ones included, before any chain read", async () => {
   const f = await fixture();
   try {

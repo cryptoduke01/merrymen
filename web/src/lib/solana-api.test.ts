@@ -6,7 +6,7 @@ import { SolanaExecutionError } from "../../../worker/src/solana-executor";
 import { SolanaLiveMarketError } from "../../../worker/src/solana-live-market";
 import { SolanaPaperServiceError } from "../../../worker/src/solana-paper-service";
 import { SolanaSettlementError } from "../../../worker/src/solana-settlement";
-import { SolanaAppRuntimeError } from "../../../worker/src/solana-app-runtime";
+import { LIMITS_NO_LONGER_VALID, SolanaAppRuntimeError } from "../../../worker/src/solana-app-runtime";
 import { SolanaMarketError } from "../../../worker/src/solana-market";
 import { SolanaRpcError } from "../../../worker/src/solana-rpc";
 import { SolanaTradingStoreError } from "../../../worker/src/solana-trading-store";
@@ -183,9 +183,12 @@ test("owner bytes refused before anything was saved answer notSaved, and nothing
   for (const message of ["Invalid encoded Solana transaction.", "The owner signature or reviewed transaction does not match."]) {
     assert.ok(runtime.includes(`notSaved(${JSON.stringify(message)})`), message);
   }
+  // Saved limits that expired inside the prepare window are refused the same way, before anything is written.
+  assert.ok(runtime.includes("notSaved(LIMITS_NO_LONGER_VALID)"));
   for (const [message, status] of [["Invalid encoded Solana transaction.", 400], ["The owner signature or reviewed transaction does not match.", 400],
     ["Prepare this owner transaction before signing it.", 409], ["Another owner transaction is already saved.", 409],
     ["The prepared owner transaction expired before submission.", 409], ["The live permission settings changed. Review and sign again.", 409],
+    [LIMITS_NO_LONGER_VALID, 409],
     // Even a message that, from saved bytes, would be an unknown outcome: these bytes were never saved.
     ["Invalid Solana confirmation data.", 409]] as const) {
     const response = await solanaResponse(async () => { throw new SolanaAppRuntimeError("not-saved", message); });
