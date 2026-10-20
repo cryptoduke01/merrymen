@@ -368,14 +368,17 @@ function ConnectedSolana() {
   const liveBook = status?.runtime?.live.book;
   // A vault the server has read, funded or registered: what an owner key backup protects.
   const live = status?.runtime?.live, vaultSeen = !!live && (!!live.balances || !!live.book || !!live.session);
-  // The recovery card: a live binding whose vault the server has read, or any
-  // binding whose account still has a live book or session (switching back to
-  // paper leaves the vault and its funds). Never paper-only (a paper binding
-  // whose vault balances were read but that has no book or session gets no
-  // card), never before the status has loaded. Showing it for a paper binding
-  // with a live book or session is an owner decision; the stricter
-  // alternative hides it for every paper binding.
-  const recoveryVault = !!binding && !!live?.vault && !!live.programId && (binding.requestedMode === "live" ? vaultSeen : !!live.book || !!live.session);
+  // The recovery card: only a live binding whose vault the server has read,
+  // never a paper binding, never before the status has loaded.
+  // OWNER DECISION (the stricter option, as briefed): a paper binding gets no
+  // card even when its account still has a live book or session from trading
+  // live before. Its owner controls (revoke and withdraw) stay on this page
+  // in paper mode. The alternative shows the card for a paper binding with a
+  // live book or session (a vault funded while live keeps its funds after the
+  // switch back): replace `binding.requestedMode === "live" && vaultSeen` with
+  // `(binding.requestedMode === "live" ? vaultSeen : !!live.book || !!live.session)`
+  // and update the test that pins it.
+  const recoveryVault = !!binding && !!live?.vault && !!live.programId && binding.requestedMode === "live" && vaultSeen;
   // Off by default; only the bound owner of a vault the server has read.
   const recoveryCard = ownerKeyExportEnabled() && sameWallet && recoveryVault && signer.address && live?.programId && live.vault
     ? { owner: signer.address, programId: live.programId, vault: live.vault } : null;

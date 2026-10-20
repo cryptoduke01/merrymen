@@ -1385,7 +1385,7 @@ test("the card's release pin is the one the recovery tool trusts by default", as
   assert.equal(recovery.releasedProgramSha256(PROGRAM), null);
 });
 
-test("the recovery card waits for the status, and shows only for a live vault: never paper-only, unbound or a vault not read", async () => {
+test("the recovery card waits for the status, and shows only for a live binding's read vault: never paper, unbound or a vault not read", async () => {
   await withExportFlag("1", async () => {
     // Loading: nothing is known about a vault yet.
     liveVault();
@@ -1408,13 +1408,17 @@ test("the recovery card waits for the status, and shows only for a live vault: n
     Object.assign(state.runtime.live, { balances: { slot: 9, cashUsdg: "5000000", wsolRaw: "0" } });
     await ui.click("Refresh account");
     assert.equal(!!exportCard(), false);
-    // Paper with a live session still registered: the vault and its session outlive the switch back to paper.
+    // Paper with a live session still registered, or back to paper after trading live (a live book): no card
+    // either, the stricter owner decision (SolanaScreen's recoveryVault). Revoke and withdraw stay in owner controls.
     Object.assign(state.runtime.live, { session: "Sess1onKey111111111111111111111111111111111" });
     await ui.click("Refresh account");
-    assert.ok(exportCard());
-    Object.assign(state.runtime.live, { session: null, balances: null });
-    // Back to paper after trading live: the funded vault still needs a recovery path.
-    Object.assign(state.runtime.live, { book: { realizedPnlUsdgRaw: "0", networkFeesLamports: "0" } });
+    assert.equal(!!exportCard(), false);
+    assert.equal(button("Revoke all Solana sessions").disabled, false);
+    Object.assign(state.runtime.live, { session: null, balances: null, book: { realizedPnlUsdgRaw: "0", networkFeesLamports: "0" } });
+    await ui.click("Refresh account");
+    assert.equal(!!exportCard(), false);
+    // The same vault on a live binding does get the card.
+    state.binding.requestedMode = "live"; state.runtime.requestedMode = "live";
     await ui.click("Refresh account");
     assert.ok(exportCard());
     // The server cannot name the program (its configuration failed): no command to give, so no card.

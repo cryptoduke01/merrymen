@@ -11,8 +11,11 @@
  *
  * Handling a raw key is a phishing and loss risk, so the card is shown only
  * when NEXT_PUBLIC_MERRYMEN_SOLANA_OWNER_KEY_EXPORT=1, only to the bound owner
- * wallet, and only when the server has read a live vault for that owner (a
- * paper-only owner has nothing to recover): never while the status loads.
+ * wallet, and only for a live binding whose vault the server has read: never
+ * for a paper binding (an owner decision, SolanaScreen's recoveryVault), never
+ * while the status loads. The whole card, step 2's commands included, stays
+ * behind the flag (another owner decision): without an exported key there is
+ * nothing to sign with outside Merrymen.
  * Turn the flag on only after export is enabled for the Privy app in its
  * dashboard, and only once the deployed program's release entry ships in the
  * published command-line tool. Next inlines the flag when the web app is
