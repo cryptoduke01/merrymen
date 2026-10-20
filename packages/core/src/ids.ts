@@ -298,9 +298,13 @@ export interface OnchainIdScan {
    * takes (worker/src/social-post.ts admitPost), published theses and their
    * model posts (worker/src/thesis-policy.ts addressy), Brain's decisions and
    * the desk policy sent to it (worker/src/brain-client.ts), Brain's own validator
-   * (services/brain/brain/schemas.py `_reject_executable`), room prompts
-   * (worker/src/groupchat/voice.ts scrubIds) and the soul's memory, notes and
-   * journal (worker/src/soul.ts).
+   * (services/brain/brain/schemas.py `_reject_executable`) and the worker's
+   * re-check of its desk answer (worker/src/desk/brain-desk.ts), tags and
+   * comments on X before a model reads them (worker/src/xpost/replies.ts
+   * linkOrSecret), the coin name drawn on a P&L card (worker/src/pnl-card.ts),
+   * event text redacted for the Telegram chat model (worker/src/telegram/reads.ts
+   * redactAddresses), room prompts (worker/src/groupchat/voice.ts scrubIds) and
+   * the soul's memory, notes and journal (worker/src/soul.ts).
    * Off by default: the name checks that also call this detector keep reading
    * a run inside a longer word as no id. Brain's Python mirror implements both
    * scans, and services/brain/tests/data/onchain_ids.json pins both to it.

@@ -145,6 +145,22 @@ describe("redactAddresses", () => {
     assert.equal(redactAddresses("Bought PEPE, the curve looked early."), "Bought PEPE, the curve looked early.");
   });
 
+  it("replaces a Solana key glued to the words around it, and a glued run that may hold one (audit regressions F3)", () => {
+    const { SOLANA_USDG_MINT, base58Encode } = ids;
+    const sig = base58Encode(Uint8Array.from({ length: 64 }, (_, i) => (i * 37 + 11) & 0xff));
+    assert.equal(redactAddresses(`send to CA${SOLANA_USDG_MINT}.`), "send to [address].");
+    assert.equal(redactAddresses(`${SOLANA_USDG_MINT}is the one`), "[address] the one");
+    assert.equal(redactAddresses("owner caEEuxbXvdXfvgGiFWKYyEksxzabPKjwhYTNvGXFitaqqT, ok"), "owner [address], ok");
+    assert.equal(redactAddresses(`${SOLANA_USDG_MINT}${SOLANA_USDG_MINT}a and ${SOLANA_USDG_MINT}`), "[address] and [address]");
+    assert.equal(redactAddresses(`landed tx${sig}done`), "landed [address]");
+    // A whole signature is still left, as a tx hash is, in a link as well.
+    assert.equal(redactAddresses(`sig ${sig}`), `sig ${sig}`);
+    assert.equal(redactAddresses(`https://solscan.io/tx/${sig}`), `https://solscan.io/tx/${sig}`);
+    // Prose, tickers, URLs, hex digests and short hashtags are untouched.
+    const plain = "Bought $BONK at https://merrymen.xyz/t/0123456789abcdef #BuyTheDip, digest e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    assert.equal(redactAddresses(plain), plain);
+  });
+
   it("is applied wherever event text is handed to a model — the why narration and the daily journal/digest", () => {
     const service = readFileSync(new URL("./service.ts", import.meta.url), "utf8");
     const why = service.slice(service.indexOf("why: async () => {"), service.indexOf("narrateWhy(plain, llm)"));

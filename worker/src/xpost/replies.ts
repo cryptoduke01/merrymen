@@ -127,8 +127,17 @@ export type ReplyCandidate =
   | { ok: false; reason: string };
 
 const LINK_OR_SECRET = /https?:|www\.|\b[a-z0-9-]+\.(?:com|net|org|io|dev|app|xyz|gg|co|me|ai)\b|0x[a-f0-9]{8,}|\b(?:sk-|gsk_|api[ _-]?key|seed phrase|private key|password|secret)\b/i;
-/** LINK_OR_SECRET, or a Solana key or signature (core's onchainIdIn): base58 has no 0x for the hex arm to see. */
-const linkOrSecret = (text: string): boolean => LINK_OR_SECRET.test(text) || onchainIdIn(text);
+/**
+ * LINK_OR_SECRET, or a Solana key or signature (core's onchainIdIn): base58 has
+ * no 0x for the hex arm to see. The glued scan (audit regressions F3): a tag or
+ * a comment carrying "CA<mint>" or "<key>is" is refused before any model reads
+ * it, as one with a bare id is; the reply is checked again at send
+ * (public-wallet.ts). The scan's one cost elsewhere, an unbroken base58 run of
+ * 43 or more characters such as a long camelCase hashtag, hardly reaches here:
+ * both paths refuse "#" as unsafe-text first, and the comment path any digit.
+ */
+const GLUED = { glued: true } as const;
+const linkOrSecret = (text: string): boolean => LINK_OR_SECRET.test(text) || onchainIdIn(text, GLUED);
 const ABUSE_OR_SENSITIVE = /\b(?:fuck\w*|shit\w*|bitch\w*|idiot\w*|moron\w*|retard\w*|kill\w*|suicid\w*|rape\w*|porn\w*|sex\w*|nude\w*|terror\w*|nazi\w*|racis\w*|politic\w*|election\w*|president\w*|democrat\w*|republican\w*|religio\w*|christian\w*|muslim\w*|jew\w*|medical\w*|diagnos\w*|cancer|medication\w*|depress\w*)\b/i;
 /**
  * DISTRESS, HOWEVER IT IS PUT (red-team review, 2026-10-12): "i lost my life

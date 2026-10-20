@@ -20,7 +20,7 @@ import { rejectRuleLabel, rejectRuleRemedy } from "../thesis-policy";
 // RELATIVE import only — the "@merrymen/core" alias exists solely in dev (see
 // the note in service.ts). isHostedMode decides whether a missing agent id may
 // fall back to the single-tenant guess, or must refuse.
-import { liveBlockerText, priceSourceNote, priceSourceTag, isHostedMode, ENERGY, onchainIdsIn } from "../../../packages/core/src/index";
+import { liveBlockerText, priceSourceNote, priceSourceTag, isHostedMode, ENERGY, idFamily, onchainIdsIn } from "../../../packages/core/src/index";
 import type { EnergyStatus } from "../../../packages/core/src/index";
 import { count as countTokens, STILL_RUNS } from "../energy-copy";
 import type { AdmissionLevel } from "../worker-admission";
@@ -947,15 +947,23 @@ export function readWhyEvidence(agentId?: string | null): { text: string; hasTra
  * addresses; only what a model reads is redacted.
  *
  * A Solana key (base58, 32 bytes, found by core's onchainIdsIn) is an address
- * the same way and is replaced too, inside an explorer link as well. A 64-byte
- * signature is left, as a tx hash is. A base58 key cut short does not decode,
- * so unlike a cut 0x run it is not caught.
+ * the same way and is replaced too, inside an explorer link as well, and glued
+ * to the words around it ("CA<mint>", "<mint>is": core's glued scan, audit
+ * regressions F3). Redaction takes the glued scan because its one cost, an
+ * unbroken base58 run of 43 or more characters (a long camelCase hashtag) read
+ * as an id, is a word shown to a model as "[address]", never text withheld.
+ * A 64-byte signature that is one whole run is left, as a tx hash is; a glued
+ * run the scan reads as a signature is replaced, since a run that long can
+ * hold a key beside it. A base58 key cut short does not decode, so unlike a
+ * cut 0x run it is not caught.
  */
 const ADDRESS_RUN = /\b0x[0-9a-fA-F]{20,40}(?![0-9a-fA-F])/g;
 export function redactAddresses(text: string): string {
   let out = text.replace(ADDRESS_RUN, "[address]");
-  for (const hit of onchainIdsIn(out)) {
-    if (hit.family === "solana" && hit.shape === "address") out = out.split(hit.value).join("[address]");
+  for (const hit of onchainIdsIn(out, { glued: true })) {
+    if (hit.family !== "solana" || hit.shape === "link") continue;
+    if (hit.shape === "hash" && idFamily(hit.value) === "solana") continue;
+    out = out.split(hit.value).join("[address]");
   }
   return out;
 }
