@@ -15,6 +15,20 @@ import type { SolanaLiveRpc } from "./solana-live-rpc";
 export const JUPITER_SWAP_PROGRAM = "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4";
 // Anchor sha256("global:shared_accounts_route")[0..8].
 const ROUTE_DISCRIMINATOR = Buffer.from(SOLANA_JUPITER_SHARED_ROUTE_DISCRIMINATOR);
+/**
+ * The other V1 Jupiter route instructions, as Anchor sha256("global:<name>")[0..8].
+ * Jupiter answering one of these is a route the vault does not take. Anything
+ * else (random bytes, a V2 instruction we did not ask for) is the provider's.
+ */
+const OTHER_ROUTE_DISCRIMINATORS = [
+  [229, 23, 203, 151, 122, 227, 173, 42], // route
+  [150, 86, 71, 116, 167, 93, 14, 104], // route_with_token_ledger
+  [208, 51, 239, 151, 123, 43, 237, 92], // exact_out_route
+  [176, 209, 105, 168, 154, 125, 69, 62], // shared_accounts_exact_out_route
+  [230, 121, 143, 80, 119, 159, 106, 170], // shared_accounts_route_with_token_ledger
+].map(bytes => Buffer.from(bytes));
+/** The largest route the vault takes. */
+const MAX_ROUTE_DATA_BYTES = 900, MAX_ROUTE_ACCOUNTS = 64, MAX_ROUTE_STEPS = 64, MAX_LOOKUP_TABLES = 8;
 export interface JupiterCpiAccount { address: string; isSigner: boolean; isWritable: boolean }
 export interface JupiterCpiRoute {
   quote: SolanaQuote;
@@ -31,13 +45,16 @@ export interface SolanaCpiBuildRequest {
  * Why no bounded vault swap was built, so the web can answer each precisely:
  * - configuration: this deployment's Jupiter key is missing or unusable. The
  *   owner can do nothing about it (answered as unavailable).
- * - route: Jupiter answered with a route shape the vault does not take: another
- *   route instruction than sharedAccountsRoute, or one too large for the vault
+ * - route: Jupiter answered with a well-formed route the vault does not take:
+ *   another pinned V1 Jupiter route instruction than sharedAccountsRoute, or a
+ *   sharedAccountsRoute consistent with the request but too large for the vault
  *   (more than 64 hops or accounts, more than 8 lookup tables, oversized data).
  *   Another amount, or a later preview, may route differently.
- * - provider: an answer that cannot be used (malformed, inconsistent with the
- *   request or the quote, a quote outside the RPC's slot window), and anything
- *   else not attributable to the route itself. Never "no supported route".
+ * - provider: an answer that cannot be used (malformed, an unknown instruction,
+ *   inconsistent with the request or the quote, a quote outside the RPC's slot
+ *   window), and anything else not attributable to the route itself. Never
+ *   "no supported route". "route" is answered only once everything else about
+ *   the answer has been checked.
  * The message names no setting or provider content; the web never reflects it.
  */
 export type SolanaLiveMarketErrorCode = "configuration" | "route" | "provider";
@@ -63,23 +80,27 @@ export function validateJupiterCpi(raw: unknown, expected: SolanaCpiBuildRequest
   if (!object(raw) || !object(raw.swapInstruction)) return fail("provider");
   const ix = raw.swapInstruction;
   if (ix.programId !== JUPITER_SWAP_PROGRAM || typeof ix.data !== "string" || !Array.isArray(ix.accounts) || ix.accounts.length < 11) return fail("provider");
-  // A well-formed answer the vault cannot take: too large for it.
-  if (ix.data.length > 1200 || ix.accounts.length > 64) return fail("route");
+  // Everything is decoded and checked before anything is counted: a malformed
+  // answer is the provider's, whatever its size or instruction.
   const data = Buffer.from(ix.data, "base64");
-  if (data.toString("base64") !== ix.data || data.length < 36) return fail("provider");
-  // Another Jupiter route instruction (route, exactOutRoute, a token-ledger variant): a shape the vault does not take.
-  if (!data.subarray(0, 8).equals(ROUTE_DISCRIMINATOR)) return fail("route");
+  if (data.toString("base64") !== ix.data || data.length < 8) return fail("provider");
+  const accounts = ix.accounts.map((rawAccount): JupiterCpiAccount => {
+    if (!object(rawAccount) || typeof rawAccount.isSigner !== "boolean" || typeof rawAccount.isWritable !== "boolean") return fail("provider");
+    return { address: key(rawAccount.pubkey), isSigner: rawAccount.isSigner, isWritable: rawAccount.isWritable };
+  });
+  if (!Array.isArray(raw.addressLookupTableAddresses)) return fail("provider");
+  const lookupTableAddresses = raw.addressLookupTableAddresses.map(key);
+  if (new Set(lookupTableAddresses).size !== lookupTableAddresses.length) return fail("provider");
+  // Another pinned Jupiter route instruction: a well-formed shape the vault does not take.
+  const discriminator = data.subarray(0, 8);
+  if (!discriminator.equals(ROUTE_DISCRIMINATOR)) return fail(OTHER_ROUTE_DISCRIMINATORS.some(other => discriminator.equals(other)) ? "route" : "provider");
+  if (data.length < 36) return fail("provider");
   const tail = data.length - 19;
   if (data.readBigUInt64LE(tail).toString() !== expected.amountRaw ||
       data.readBigUInt64LE(tail + 8).toString() !== quote.outAmount ||
       data.readUInt16LE(tail + 16) !== expected.slippageBps || data[tail + 18] !== 0) return fail("provider");
   const routeCount = data.readUInt32LE(9);
-  if (routeCount > 64) return fail("route");
   if (routeCount < 1 || tail < 13 + routeCount * 4) return fail("provider");
-  const accounts = ix.accounts.map((rawAccount): JupiterCpiAccount => {
-    if (!object(rawAccount) || typeof rawAccount.isSigner !== "boolean" || typeof rawAccount.isWritable !== "boolean") return fail("provider");
-    return { address: key(rawAccount.pubkey), isSigner: rawAccount.isSigner, isWritable: rawAccount.isWritable };
-  });
   if (accounts[2]!.address !== expected.swapAuthority || !accounts[2]!.isSigner ||
       accounts[3]!.address !== expected.sourceTokenAccount || !accounts[3]!.isWritable ||
       accounts[6]!.address !== expected.destinationTokenAccount || !accounts[6]!.isWritable ||
@@ -89,10 +110,9 @@ export function validateJupiterCpi(raw: unknown, expected: SolanaCpiBuildRequest
   // SPL Token is always account 0; Token-2022 is optional account 10.
   if (accounts[0]!.address !== "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" ||
       accounts[10]!.address !== "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb") return fail("provider");
-  if (!Array.isArray(raw.addressLookupTableAddresses)) return fail("provider");
-  if (raw.addressLookupTableAddresses.length > 8) return fail("route");
-  const lookupTableAddresses = raw.addressLookupTableAddresses.map(key);
-  if (new Set(lookupTableAddresses).size !== lookupTableAddresses.length) return fail("provider");
+  // A well-formed answer consistent with the request: only its size can still refuse it.
+  if (data.length > MAX_ROUTE_DATA_BYTES || accounts.length > MAX_ROUTE_ACCOUNTS || routeCount > MAX_ROUTE_STEPS ||
+      lookupTableAddresses.length > MAX_LOOKUP_TABLES) return fail("route");
   // No provider setup/cleanup/compute/tip/other instructions are consumed.
   // The vault creates and closes its temporary input ATA itself.
   return { dataBase64: ix.data, accounts, lookupTableAddresses };

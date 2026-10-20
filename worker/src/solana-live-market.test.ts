@@ -86,18 +86,43 @@ test("every refusal says why: a missing or unusable key is configuration, and no
     assert.equal(requests, 0, JSON.stringify(apiKey));
   }
 });
+/** A sharedAccountsRoute of `length` bytes and `steps` route steps, consistent with the fixture's request and quote. */
+function sharedRoute(length: number, steps: number) {
+  const data = Buffer.alloc(length); createHash("sha256").update("global:shared_accounts_route").digest().subarray(0, 8).copy(data);
+  data.writeUInt32LE(steps, 9); const tail = length - 19;
+  data.writeBigUInt64LE(1_000_000n, tail); data.writeBigUInt64LE(2_000_000n, tail + 8); data.writeUInt16LE(100, tail + 16);
+  return data.toString("base64");
+}
+const otherRoute = (name: string) => (f: ReturnType<typeof fixture>) => {
+  createHash("sha256").update(`global:${name}`).digest().subarray(0, 8).copy(f.data); f.rawBuild.swapInstruction.data = f.data.toString("base64");
+};
+const extraAccounts = (count: number) => Array.from({ length: count }, (_, i) => ({ pubkey: key(100 + i), isSigner: false, isWritable: false }));
 test("a route shape the vault does not take is 'route'; an unusable or inconsistent answer is 'provider'", () => {
   const route: Array<(f: ReturnType<typeof fixture>) => void> = [
-    // Another Jupiter route instruction.
-    f => { createHash("sha256").update("global:route").digest().subarray(0, 8).copy(f.data); f.rawBuild.swapInstruction.data = f.data.toString("base64"); },
-    f => { createHash("sha256").update("global:exact_out_route").digest().subarray(0, 8).copy(f.data); f.rawBuild.swapInstruction.data = f.data.toString("base64"); },
-    // Too large for the vault.
-    f => { f.rawBuild.swapInstruction.accounts.push(...Array.from({ length: 54 }, (_, i) => ({ pubkey: key(100 + i), isSigner: false, isWritable: false }))); },
+    // Another pinned V1 Jupiter route instruction.
+    otherRoute("route"), otherRoute("route_with_token_ledger"), otherRoute("exact_out_route"),
+    otherRoute("shared_accounts_exact_out_route"), otherRoute("shared_accounts_route_with_token_ledger"),
+    // A well-formed route consistent with the request, too large for the vault.
+    f => { f.rawBuild.swapInstruction.accounts.push(...extraAccounts(54)); },
     f => { f.rawBuild.addressLookupTableAddresses = Array.from({ length: 9 }, (_, i) => key(60 + i)); },
-    f => { f.data.writeUInt32LE(65, 9); f.rawBuild.swapInstruction.data = f.data.toString("base64"); },
-    f => { f.rawBuild.swapInstruction.data = Buffer.alloc(901, 1).toString("base64"); },
+    f => { f.rawBuild.swapInstruction.data = sharedRoute(13 + 65 * 4 + 19, 65); },
+    f => { f.rawBuild.swapInstruction.data = sharedRoute(901, 1); },
   ];
   const provider: Array<(f: ReturnType<typeof fixture>) => void> = [
+    // Malformed answers whatever their size or instruction: never "no supported route".
+    f => { Buffer.alloc(8, 0xab).copy(f.data); f.rawBuild.swapInstruction.data = f.data.toString("base64"); },
+    f => { f.rawBuild.swapInstruction.data = Buffer.alloc(901, 0xff).toString("base64"); },
+    f => { f.rawBuild.swapInstruction.data = Buffer.alloc(901, 1).toString("base64"); },
+    f => { f.rawBuild.swapInstruction.data = Buffer.alloc(7).toString("base64"); },
+    f => { (f.rawBuild.swapInstruction as Record<string, unknown>).accounts = Array.from({ length: 65 }, () => ({ pubkey: "garbage", isSigner: "x" })); },
+    f => { f.rawBuild.swapInstruction.accounts.push(...extraAccounts(53), { pubkey: "garbage", isSigner: false, isWritable: false }); },
+    f => { f.rawBuild.addressLookupTableAddresses = [...Array.from({ length: 8 }, (_, i) => key(60 + i)), "garbage"]; },
+    f => { otherRoute("route")(f); f.rawBuild.swapInstruction.accounts[5]!.pubkey = "not a key"; },
+    f => { otherRoute("exact_out_route")(f); f.rawBuild.addressLookupTableAddresses = [key(30), "garbage"]; },
+    // Oversized, but also inconsistent with the request or malformed inside.
+    f => { f.rawBuild.swapInstruction.data = sharedRoute(901, 1); f.rawBuild.swapInstruction.accounts[2]!.pubkey = key(40); },
+    f => { f.rawBuild.swapInstruction.accounts.push(...extraAccounts(54)); f.data.writeBigUInt64LE(1n, 17); f.rawBuild.swapInstruction.data = f.data.toString("base64"); },
+    f => { f.data.writeUInt32LE(65, 9); f.rawBuild.swapInstruction.data = f.data.toString("base64"); },
     f => { (f.rawBuild as Record<string, unknown>).swapInstruction = null; },
     f => { f.rawBuild.swapInstruction.programId = key(40); },
     f => { f.rawBuild.swapInstruction.accounts.length = 10; },
@@ -122,6 +147,15 @@ test("a route shape the vault does not take is 'route'; an unusable or inconsist
       assert.throws(() => validateJupiterCpi(f.rawBuild, f.request, f.quote), code(expected), `${expected} ${index}`);
     });
   }
+});
+test("the largest route the vault takes is still built: 900 bytes, 64 steps, 64 accounts and 8 lookup tables", () => {
+  const f = fixture();
+  f.rawBuild.swapInstruction.data = sharedRoute(900, 64);
+  f.rawBuild.swapInstruction.accounts.push(...extraAccounts(53));
+  f.rawBuild.addressLookupTableAddresses = Array.from({ length: 8 }, (_, i) => key(60 + i));
+  const built = validateJupiterCpi(f.rawBuild, f.request, f.quote);
+  assert.equal(built.accounts.length, 64); assert.equal(built.lookupTableAddresses.length, 8);
+  assert.equal(Buffer.from(built.dataBase64, "base64").length, 900);
 });
 test("a quote outside the RPC's slot window, an incoherent quote graph or a fee are 'provider', never 'route'", async () => {
   for (const problem of ["stale", "graph", "fee", "exact-out"] as const) {
