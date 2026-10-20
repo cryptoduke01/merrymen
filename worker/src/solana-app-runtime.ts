@@ -23,7 +23,8 @@ import { createSolanaLiveRpc, readSolanaPriorityFee, readSolanaQuorum, type Sola
 import { createSolanaMarket } from "./solana-market";
 import { createSolanaPaperService, type SolanaPaperMarket } from "./solana-paper-service";
 import { readSolanaReferencePrice, requireSolanaPythGeneration, solanaPythGeneration, solanaReferenceBound, solanaReferenceNotional, solanaReferenceToleranceBps, type SolanaPythGeneration,
-  SolanaReferencePriceError } from "./solana-reference-price";
+  SolanaReferencePriceError, SOLANA_REFERENCE_ALERT_REPEAT_MS, SOLANA_REFERENCE_DEFAULT_TOLERANCE_BPS, SOLANA_REFERENCE_MAX_TOLERANCE_BPS,
+  SOLANA_REFERENCE_MIN_TOLERANCE_BPS } from "./solana-reference-price";
 import { SolanaRpcError } from "./solana-rpc";
 import { getSolanaRuntimeDb } from "./solana-runtime-db";
 import { isSolanaTransactionError } from "./solana-settlement";
@@ -328,6 +329,27 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
     return createKeyPairFromPrivateKeyBytes(seed(env.MERRYMEN_SOLANA_FEE_PAYER_SEED, "Configure the separate Solana network fee payer before live trading."));
   }
   const log = options.log ?? ((line: string) => { process.stderr.write(`${line}\n`); });
+  /**
+   * MERRYMEN_SOLANA_REFERENCE_TOLERANCE_BPS, or a configuration refusal that
+   * also says an [alert] to the operator, at most once a minute per process: an
+   * unreadable tolerance refuses every live trade, exits included, as a bad
+   * Pyth generation does (which requireSolanaPythGeneration alerts on). The
+   * line names the setting and its range, never the value.
+   */
+  let toleranceAlertAtMs: number | undefined;
+  function referenceToleranceBps(): number {
+    try { return solanaReferenceToleranceBps(env); } catch {
+      const at = now();
+      if (toleranceAlertAtMs === undefined || at < toleranceAlertAtMs || at - toleranceAlertAtMs >= SOLANA_REFERENCE_ALERT_REPEAT_MS) {
+        toleranceAlertAtMs = at;
+        try {
+          log(`[alert] solana-reference-tolerance misconfigured: MERRYMEN_SOLANA_REFERENCE_TOLERANCE_BPS must be a whole number from ${SOLANA_REFERENCE_MIN_TOLERANCE_BPS} `
+            + `to ${SOLANA_REFERENCE_MAX_TOLERANCE_BPS} (unset is ${SOLANA_REFERENCE_DEFAULT_TOLERANCE_BPS}); no live Solana trade, exits included, is admitted until it is fixed`);
+        } catch { /* Logging never changes an outcome. */ }
+      }
+      return fail("The independent SOL price tolerance is misconfigured.", "configuration");
+    }
+  }
   // Rent-exempt minimums by account size. They change only by feature activation; reread every window.
   const rents = new Map<number, { lamports: bigint; atMs: number }>();
   async function rentFor(read: SolanaLiveRead, size: number): Promise<bigint> {
@@ -605,7 +627,7 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
     try {
       const exit = parseSolanaSwapIntent({ kind: "spl-swap", chain: CHAINS.solana, mode: "paper", requestId: "withdraw-valuation",
         inputMint: SOLANA_WRAPPED_SOL_MINT, outputMint: SOLANA_USDG_MINT, amountRaw, slippageBps: WITHDRAW_VALUATION_SLIPPAGE_BPS });
-      const toleranceBps = solanaReferenceToleranceBps(env), generation = requireSolanaPythGeneration(env, now());
+      const toleranceBps = referenceToleranceBps(), generation = requireSolanaPythGeneration(env, now());
       const quote = await market().quote(exit); validateSolanaQuote(quote, exit, now());
       const price = await rpc().read(async read => readSolanaReferencePrice(read, integer(await read("getSlot", [{ commitment: "confirmed" }])), now(), { generation }));
       return { quote, reference: solanaReferenceBound(exit, price, toleranceBps) };
@@ -756,7 +778,7 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       if (await s.operatorHeld()) blockers.push(OPERATOR_HOLD);
       // trade() refuses every live trade, exits too, while either reference setting is invalid. The generation
       // check also says the [alert], so an agent held by this blocker still pages the operator.
-      try { solanaReferenceToleranceBps(env); } catch { blockers.push("The independent SOL price tolerance is misconfigured."); }
+      try { referenceToleranceBps(); } catch { blockers.push("The independent SOL price tolerance is misconfigured."); }
       try { requireSolanaPythGeneration(env, now()); } catch { blockers.push("The independent SOL price source (Pyth generation) is misconfigured."); }
       if (binding.requestedMode !== "live") blockers.push("Live mode is not selected.");
       if (!binding.limits || binding.limits.expiresAtMs <= now()) blockers.push("Save current Solana trading limits.");
@@ -815,8 +837,7 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       const expiredAllowance = expiredAttemptAllowance();
       const journal: SolanaLiveJournal = { get: (owner, requestId) => s.get(owner, requestId), settle: (...args) => s.settle(...args),
         recordSigned: submission => s.recordSigned(submission, { expiredAttemptAllowance: expiredAllowance }) };
-      let toleranceBps: number;
-      try { toleranceBps = solanaReferenceToleranceBps(env); } catch { return fail("The independent SOL price tolerance is misconfigured.", "configuration"); }
+      const toleranceBps = referenceToleranceBps();
       // One generation, from this runtime's env, for the read, the executor's check and the store's admission check.
       // Both settings are checked only after a recorded request was returned above: a bad one never blocks its replay.
       let pythGeneration: SolanaPythGeneration;

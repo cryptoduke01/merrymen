@@ -1412,6 +1412,33 @@ test("a retry of a recorded live trade is returned whatever previewed minimum it
   } finally { f.raw.close(); }
 });
 
+test("a misconfigured reference tolerance pages the operator: one [alert] a minute per process, naming the setting and never the value", async () => {
+  const f = await fixture();
+  try {
+    await readyLive(f);
+    const quiet: string[] = [];
+    assert.equal((await f.runtime({ log: line => quiet.push(line) }).status(f.scope)).live.ready, true);
+    assert.deepEqual(quiet.filter(line => line.startsWith("[alert] solana-reference-tolerance")), [], "a good setting says nothing");
+    const lines: string[] = [];
+    const app = f.runtime({ env: { ...f.env, MERRYMEN_SOLANA_REFERENCE_TOLERANCE_BPS: "nonsense-9999" }, log: line => lines.push(line) });
+    const said = () => lines.filter(line => line.startsWith("[alert] solana-reference-tolerance"));
+    const status = await app.status(f.scope);
+    assert.ok(status.live.blockers.includes("The independent SOL price tolerance is misconfigured."));
+    assert.equal(status.live.canExit, false);
+    assert.deepEqual(said(), ["[alert] solana-reference-tolerance misconfigured: MERRYMEN_SOLANA_REFERENCE_TOLERANCE_BPS must be a whole number from 50 to 1000 (unset is 300); "
+      + "no live Solana trade, exits included, is admitted until it is fixed"]);
+    assert.ok(!lines.join("\n").includes("nonsense-9999"), "the value is never echoed");
+    // Within the minute: refused again as configuration, not said again.
+    f.clock.now += 30_000;
+    await rejectsWith(app.trade(f.scope, { mode: "live", intent: { ...f.trade, mode: "live", requestId: "tolerance-1" } }), "configuration", /tolerance is misconfigured/);
+    assert.equal(said().length, 1);
+    f.clock.now += 30_000;
+    await app.status(f.scope);
+    assert.equal(said().length, 2, "said again once a minute has passed");
+    assert.equal(f.controls.sends, 0);
+  } finally { f.raw.close(); }
+});
+
 test("a malformed expired-attempt allowance is a status blocker and refuses a live trade as configuration, before anything is signed", async () => {
   const f = await fixture();
   try {
