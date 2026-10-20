@@ -24,13 +24,20 @@ import { SolanaMarketError } from "./solana-market";
 import { ensureSolanaTradingSchema, SolanaTradingStore } from "./solana-trading-store";
 import { PYTH_SOL_USD_ACCOUNT } from "./solana-reference-price";
 import { pythAccount } from "./solana-reference-price-fixture";
-import { address as kitAddress, appendTransactionMessageInstructions, compileTransaction, createTransactionMessage, setTransactionMessageFeePayer,
+import { address as kitAddress, getProgramDerivedAddress, appendTransactionMessageInstructions, compileTransaction, createTransactionMessage, setTransactionMessageFeePayer,
   setTransactionMessageLifetimeUsingBlockhash, type Blockhash } from "@solana/kit";
 import { buildWithdrawSolanaVaultInstruction } from "../../packages/core/src/solana-live";
 import { SOLANA_STATUS_BELOW_BOOK, SOLANA_STATUS_REGISTERED_AFTER_REVOKE, SOLANA_STATUS_USDG_MINT_REFUSED, SOLANA_WITHDRAW_BELOW_BOOK } from "./solana-app-runtime";
 import { SOLANA_REGISTERED_AFTER_REVOKE, SOLANA_RESUMED_AFTER_REVOKE, SOLANA_REVOKE_ALREADY_LANDED, SOLANA_REVOKE_PREPARED_BESIDE, SOLANA_WITHDRAWAL_RECORDED_OUTSIDE, SolanaTradingStoreError } from "./solana-trading-store";
 
 const TENANT = "0x1111111111111111111111111111111111111111";
+/** A Token-2022 USDG mint carrying the TransferHook extension (type 14): the issuer holds its authority, `hook` names the program or none. */
+function usdgMint(hook: string | null): Buffer {
+  const b = Buffer.alloc(234); b.writeUInt32LE(0, 0); b.writeBigUInt64LE(1_000_000n, 36); b[44] = 6; b[45] = 1;
+  b[165] = 1; b.writeUInt16LE(14, 166); b.writeUInt16LE(64, 168); b.fill(9, 170, 202);
+  if (hook) keyBytes(hook).copy(b, 202);
+  return b;
+}
 const key = (n: number) => getBase58Decoder().decode(new Uint8Array(32).fill(n));
 // A production-style program id: the runtimes below run every live deployment check.
 const PROGRAM = key(77), LOADER = "BPFLoaderUpgradeab1e11111111111111111111111";
@@ -58,7 +65,9 @@ async function fixture(options: { declared?: string } = {}) {
   const controls = { initialized: false, finalized: false, failed: false, malformed: false, sends: 0, signed: "", signature: "", failSend: true, height: 4900, sequence: 0n, epoch: 1n,
     cash: 0n, wsol: 0n, feePayerLamports: 100_000_000, ownerLamports: 100_000_000, ownerAtas: false, vaultNativeLamports: 0, unsyncedWsolLamports: 0,
     // Owner-transaction simulation and recent priority fees; null: the provider cannot answer.
-    simulatedUnits: null as number | null, simulationFails: false, priorityFees: null as number[] | null };
+    simulatedUnits: null as number | null, simulationFails: false, priorityFees: null as number[] | null,
+    // The USDG mint's TransferHook program: unset, as on mainnet today.
+    hookProgram: null as string | null };
   const cashAta = await deriveSolanaAta(vault, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM), wsolAta = await deriveSolanaAta(vault, SOLANA_WRAPPED_SOL_MINT, SOLANA_CLASSIC_TOKEN_PROGRAM);
   const ownerCashAta = await deriveSolanaAta(owner, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM), ownerWsolAta = await deriveSolanaAta(owner, SOLANA_WRAPPED_SOL_MINT, SOLANA_CLASSIC_TOKEN_PROGRAM);
   const feePayer = await getAddressFromPublicKey((await createKeyPairFromPrivateKeyBytes(new Uint8Array(32).fill(31))).publicKey);
@@ -81,7 +90,8 @@ async function fixture(options: { declared?: string } = {}) {
   const calls: Array<{ method: string; key: unknown }> = [];
   // Accounts a test places at other addresses (a swap's temporary input account, say).
   const extra = new Map<string, unknown>();
-  const accountFor = (k: unknown) => typeof k === "string" && extra.has(k) ? extra.get(k) : k === vault ? (controls.initialized ? account(state(), PROGRAM, false, rentExempt(SOLANA_VAULT_ACCOUNT_SIZE) + controls.vaultNativeLamports) : null)
+  const accountFor = (k: unknown) => typeof k === "string" && extra.has(k) ? extra.get(k) : k === SOLANA_USDG_MINT ? account(usdgMint(controls.hookProgram), TOKEN_2022_PROGRAM, false, rentExempt(234))
+    : k === vault ? (controls.initialized ? account(state(), PROGRAM, false, rentExempt(SOLANA_VAULT_ACCOUNT_SIZE) + controls.vaultNativeLamports) : null)
     : k === cashAta ? account(tokenAccount(SOLANA_USDG_MINT, controls.cash), TOKEN_2022_PROGRAM, false, rentExempt(170))
     : k === wsolAta ? account(tokenAccount(SOLANA_WRAPPED_SOL_MINT, controls.wsol), SOLANA_CLASSIC_TOKEN_PROGRAM, false, rentExempt(165) + Number(controls.wsol) + controls.unsyncedWsolLamports)
     : k === feePayer ? (controls.feePayerLamports ? account(Buffer.alloc(0), SYSTEM, false, controls.feePayerLamports) : null)
@@ -1567,6 +1577,52 @@ const WITHDRAW_SOL = Buffer.from([145, 131, 74, 136, 65, 137, 42, 38]);
 const rows = async (f: Fixture, sql: string) => (await f.db.prepare(sql).all() as object[]).map(row => ({ ...row }));
 /** Both providers see the owner transaction finalized and the vault's sequence moved. */
 const landOwner = (f: Fixture) => { f.controls.finalized = true; f.controls.sequence += 1n; };
+
+/** An ExtraAccountMetaList for Execute: `fixed`, then PDA ["merrymen", account 2 (the destination)] of the hook; `signer` marks the second as a signer. */
+function hookMetaList(fixed: string, signer = false): Buffer {
+  const fixedMeta = Buffer.concat([Buffer.of(0), keyBytes(fixed), Buffer.of(0, 0)]);
+  const config = Buffer.alloc(32); config[0] = 1; config[1] = 8; Buffer.from("merrymen").copy(config, 2); config[10] = 3; config[11] = 2;
+  const pdaMeta = Buffer.concat([Buffer.of(1), config, Buffer.of(signer ? 1 : 0, 1)]);
+  const header = Buffer.alloc(16); Buffer.from([105, 37, 101, 197, 75, 251, 102, 26]).copy(header); header.writeUInt32LE(4 + 70, 8); header.writeUInt32LE(2, 12);
+  return Buffer.concat([header, fixedMeta, pdaMeta]);
+}
+
+test("once the USDG issuer sets a transfer hook, an owner withdrawal carries the hook's accounts, so USDG never locks in the vault", async () => {
+  const f = await fixture();
+  try {
+    await readyLive(f); f.controls.sequence = 2n; f.controls.cash = 90_000_000n;
+    const book = { hwmRaw: "90000000", cashRaw: "90000000", wsolRaw: "0", costBasisUsdgRaw: "0", realizedPnlUsdgRaw: "0", networkFeesLamports: "0", slot: 900, updatedAtMs: 999_000 };
+    await f.db.prepare("INSERT INTO solana_runtime_live_books(tenant,owner,book_json) VALUES(?,?,?)").run(TENANT, f.owner, JSON.stringify(book));
+    // Today: the extension is there, no program is set, and the withdrawal is the plain six accounts.
+    const plain = instructionsOf((await f.app.prepareOwnerAction(f.scope, { action: "withdraw", mint: SOLANA_USDG_MINT, amountRaw: "1000000" })).transactionBase64);
+    assert.equal(plain.find(ix => ix.program === PROGRAM)!.accounts.length, 6);
+  } finally { f.raw.close(); }
+  const g = await fixture();
+  try {
+    await readyLive(g); g.controls.sequence = 2n; g.controls.cash = 90_000_000n;
+    const book = { hwmRaw: "90000000", cashRaw: "90000000", wsolRaw: "0", costBasisUsdgRaw: "0", realizedPnlUsdgRaw: "0", networkFeesLamports: "0", slot: 900, updatedAtMs: 999_000 };
+    await g.db.prepare("INSERT INTO solana_runtime_live_books(tenant,owner,book_json) VALUES(?,?,?)").run(TENANT, g.owner, JSON.stringify(book));
+    const hook = key(88), fixed = key(89);
+    const [validation] = await getProgramDerivedAddress({ programAddress: kitAddress(hook), seeds: [new TextEncoder().encode("extra-account-metas"), keyBytes(SOLANA_USDG_MINT)] });
+    const [pda] = await getProgramDerivedAddress({ programAddress: kitAddress(hook), seeds: [new TextEncoder().encode("merrymen"), keyBytes(g.ownerCashAta)] });
+    g.controls.hookProgram = hook;
+    // A hook that asks for a signer is refused before anything is signed: the program refuses it too.
+    g.extra.set(validation, account(hookMetaList(fixed, true), hook));
+    await assert.rejects(g.app.prepareOwnerAction(g.scope, { action: "withdraw", mint: SOLANA_USDG_MINT, amountRaw: "1000000" }), /transfer hook cannot be resolved: it asks for a signer/);
+    assert.equal(await new SolanaTradingStore(g.db, g.scope).setup(), null);
+    // A mint that cannot be read refuses the withdrawal rather than sign one that cannot pass.
+    g.extra.set(SOLANA_USDG_MINT, null);
+    await assert.rejects(g.app.prepareOwnerAction(g.scope, { action: "withdraw", mint: SOLANA_USDG_MINT, amountRaw: "1000000" }), /mint could not be read/);
+    g.extra.delete(SOLANA_USDG_MINT);
+    g.extra.set(validation, account(hookMetaList(fixed), hook));
+    const prepared = await g.app.prepareOwnerAction(g.scope, { action: "withdraw", mint: SOLANA_USDG_MINT, amountRaw: "1000000" });
+    const withdraw = instructionsOf(prepared.transactionBase64).find(ix => ix.program === PROGRAM)!;
+    assert.deepEqual(withdraw.accounts, [g.vault, g.owner, SOLANA_USDG_MINT, g.cashAta, g.ownerCashAta, TOKEN_2022_PROGRAM, fixed, pda, validation, hook]);
+    // The extra accounts never sign: only the owner signs the withdrawal.
+    const message = getCompiledTransactionMessageDecoder().decode(getTransactionDecoder().decode(Buffer.from(prepared.transactionBase64, "base64")).messageBytes);
+    assert.equal(message.header.numSignerAccounts, 1);
+  } finally { g.raw.close(); }
+});
 
 test("the owner can withdraw native SOL held by the vault account itself (audit G1-4)", async () => {
   const f = await fixture();

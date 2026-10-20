@@ -15,7 +15,7 @@ import {
   SOLANA_ASSOCIATED_TOKEN_PROGRAM, SOLANA_CLASSIC_TOKEN_PROGRAM, SOLANA_SYSTEM_PROGRAM, SOLANA_VAULT_ACCOUNT_SIZE, SOLANA_VAULT_LOCAL_TEST_PROGRAM,
   SOLANA_WRAPPED_SOL_MINT,
 } from "../../packages/core/src/solana-live";
-import { solanaVaultReleaseRefusal } from "../../packages/core/src/solana-live";
+import { solanaVaultReleaseRefusal, SolanaVaultValidationError, type SolanaTransferHookAccount } from "../../packages/core/src/solana-live";
 import type { Db } from "./db";
 import { createSolanaExecutor, parseSolanaLiveIntent, readSolanaOwnerRefundBlocks, type SolanaOwnerRefundBlock, readSolanaVaultBalances, readSolanaVaultBalancesQuorum, readSolanaVaultBalancesWith,
   readSolanaVaultState, readSolanaVaultStateWith, reconcileSolanaSubmission, SOLANA_DEFAULT_MAX_COMPUTE_UNIT_PRICE, solanaComputeBudgetInstructions, SolanaExecutionError, solanaCaughtUp, solanaQuorumSlot, verifySolanaVaultDeployment,
@@ -36,6 +36,7 @@ import { ensureSolanaTradingSchema, OPERATOR_HOLD, SOLANA_EXPIRED_ATTEMPTS_EXHAU
 import { SOLANA_REGISTERED_AFTER_REVOKE, SOLANA_RESUMED_AFTER_REVOKE, SOLANA_REVOKE_ALREADY_LANDED, solanaLandedBeside, solanaLiveAfterRevoke, solanaOwnerEpochOffset, solanaRegisteredEpoch,
   solanaRevokedBesideResume } from "./solana-trading-store";
 import { readSolanaExternalWithdrawal, SolanaExternalWithdrawalError } from "./solana-external-withdrawal";
+import { readSolanaWithdrawHookAccounts, SolanaTransferHookReadError } from "./solana-transfer-hook";
 
 /**
  * Codes:
@@ -1301,10 +1302,21 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
             if (valuation) details.withdrawValuation = valuation;
           }
         }
-        const ownerToken = await deriveSolanaAta(scope.owner, input.mint, program);
+        const ownerToken = await deriveSolanaAta(scope.owner, input.mint, program), vaultToken = await deriveSolanaAta(vault, input.mint, program);
         creates.push({ address: ownerToken, size: input.mint === SOLANA_USDG_MINT ? "usdg" : CLASSIC_TOKEN_ACCOUNT_SIZE });
+        // A transfer-hook program the issuer sets on USDG needs its accounts in the transfer;
+        // the program forwards them, so a hook never locks the owner's USDG.
+        let hookAccounts: SolanaTransferHookAccount[];
+        try {
+          hookAccounts = await rpc().read(read => readSolanaWithdrawHookAccounts(read, { mint: input.mint!, tokenProgram: program, vault, vaultToken, ownerToken, amount,
+            commitment: "finalized", minContextSlot: floor }));
+        } catch (error) {
+          if (error instanceof SolanaVaultValidationError) fail(`USDG cannot be withdrawn here: ${error.message}`);
+          if (error instanceof SolanaTransferHookReadError) fail(error.message);
+          throw error;
+        }
         instructions.push(await createAta(scope.owner, scope.owner, input.mint), buildWithdrawSolanaVaultInstruction({ programAddress: cfg.programId, vault, owner: scope.owner,
-          mint: input.mint, tokenProgram: program, vaultToken: await deriveSolanaAta(vault, input.mint, program), ownerToken, amount }));
+          mint: input.mint, tokenProgram: program, vaultToken, ownerToken, amount, hookAccounts }));
       } else if (input.action === "withdraw-sol" && input.mint === undefined && input.amountRaw) {
         const amount = parseSolanaRawAmount(input.amountRaw);
         // Native SOL is never booked; the program allows anything above the vault account's own rent reserve.

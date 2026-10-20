@@ -104,24 +104,34 @@ pub mod merrymen_vault {
         v.paused = paused;
         Ok(())
     }
-    pub fn withdraw(ctx: Context<Withdraw>, amount: u64) -> Result<()> {
+    /// Remaining accounts are a transfer hook's: when the mint's issuer sets a TransferHook
+    /// program, Token-2022 calls it inside the transfer and it needs its program, its
+    /// extra-account-metas validation account and the extra accounts that lists. They are
+    /// forwarded to the transfer, so a hook can never lock custody in this immutable program.
+    /// None of them may sign: the owner's signature never reaches a hook, and Token-2022
+    /// passes the vault to the hook as a non-signer.
+    pub fn withdraw<'info>(
+        ctx: Context<'_, '_, '_, 'info, Withdraw<'info>>,
+        amount: u64,
+    ) -> Result<()> {
         require!(amount > 0, VaultError::Amount);
+        require!(
+            ctx.remaining_accounts.iter().all(|info| !info.is_signer),
+            VaultError::Authority
+        );
         let v = &ctx.accounts.vault;
         let bump = [v.bump];
         let seeds: &[&[u8]] = &[b"vault", v.owner.as_ref(), &bump];
-        token_interface::transfer_checked(
-            CpiContext::new_with_signer(
-                ctx.accounts.token_program.to_account_info(),
-                TransferChecked {
-                    from: ctx.accounts.vault_token.to_account_info(),
-                    mint: ctx.accounts.mint.to_account_info(),
-                    to: ctx.accounts.owner_token.to_account_info(),
-                    authority: v.to_account_info(),
-                },
-                &[seeds],
-            ),
+        spl_token_2022::onchain::invoke_transfer_checked(
+            ctx.accounts.token_program.key,
+            ctx.accounts.vault_token.to_account_info(),
+            ctx.accounts.mint.to_account_info(),
+            ctx.accounts.owner_token.to_account_info(),
+            v.to_account_info(),
+            ctx.remaining_accounts,
             amount,
             ctx.accounts.mint.decimals,
+            &[seeds],
         )?;
         // Withdrawals remain available while expired/revoked/paused and invalidate prepared swaps.
         let seq = ctx.accounts.vault.seq;
@@ -405,6 +415,8 @@ fn check_mint(mint: &InterfaceAccount<Mint>, program: &Interface<TokenInterface>
                     VaultError::Mint
                 );
             }
+            // Swaps refuse a set hook: the route's transfers could not carry its accounts.
+            // Withdrawals forward them (see withdraw), so a hook never locks custody.
             ExtensionType::TransferHook => {
                 let hook = state.get_extension::<TransferHook>()?;
                 require!(

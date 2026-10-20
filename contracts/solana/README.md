@@ -103,7 +103,12 @@ PermanentDelegate, TransferFeeConfig (zero fee now and scheduled), ConfidentialT
 ConfidentialTransferFeeConfig, TransferHook (no program), MetadataPointer and
 TokenMetadata. An active or scheduled nonzero transfer fee, a hook program or any
 other extension fails every swap, exits included (`Mint`, 6005); withdraw does not
-check the mint. This assumption does not extend to other token issuers.
+check the mint. Withdraw forwards its remaining accounts to Token-2022's transfer
+(`spl_token_2022::onchain::invoke_transfer_checked`), so once the issuer sets a hook
+program, a withdrawal that carries the hook program, its `extra-account-metas`
+validation account and the extra accounts it lists still releases custody. A remaining
+account that signs is refused (`Authority`), so the owner's signature never reaches a
+hook. This assumption does not extend to other token issuers.
 Custody/source/output accounts must be unfrozen and have no delegate or close
 authority. The mainnet mint's bytes, read on 2026-10-20 at slot 459,259,885, are
 `runtime-tests/fixtures/usdg-mainnet-mint.json`; `custody.rs` runs `check_mint` on
@@ -161,10 +166,11 @@ gate)` and runs every other target, and CI accepts that line for this target alo
   the program source, `Cargo.toml`, `Cargo.lock` or `build.sh` needs a reviewed
   re-record.
 
-The committed `build-manifests/Darwin-arm64.json` (artifact `562f0849…`, 364,744 bytes,
-source digest `354b183a…`, the local test ID) is for local verification only. On
-2026-10-20 a cold rebuild with a fresh `CARGO_HOME` at another path reproduced it, and
-the runtime tests passed against it. No Linux manifest is committed yet.
+The committed `build-manifests/Darwin-arm64.json` (artifact `ce7d2544…`, 410,472 bytes,
+source digest `1d02ff3e…`, the local test ID) is for local verification only. It was
+re-recorded on 2026-10-20 after `withdraw` began forwarding transfer-hook accounts; the
+record's second build from a copy in another directory gave identical bytes, and the
+runtime tests (custody, recovery and the Jupiter fork test) passed against it. No Linux manifest is committed yet.
 
 The TypeScript suite writes `runtime-tests/fixtures/ts-instructions.json` from the
 shared ABI builders (`MERRYMEN_WRITE_SOLANA_ABI_FIXTURE=1 npx tsx --test

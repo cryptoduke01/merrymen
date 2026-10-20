@@ -14,7 +14,7 @@ import { Readable } from "node:stream";
 import { afterEach, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { ed25519 } from "@noble/curves/ed25519";
-import { getCompiledTransactionMessageDecoder, getTransactionDecoder } from "@solana/kit";
+import { address as kitAddress, getCompiledTransactionMessageDecoder, getProgramDerivedAddress, getTransactionDecoder } from "@solana/kit";
 import { base58Decode, base58Encode, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM } from "../../packages/core/src/ids";
 import {
   buildRevokeSolanaSessionsInstruction, buildWithdrawSolanaNativeInstruction, buildWithdrawSolanaVaultInstruction,
@@ -92,6 +92,21 @@ function tokenData(mint: string, authority: string, amount: bigint, options: { n
   return data;
 }
 
+/** The USDG mint with the TransferHook extension (type 14) mainnet carries: the issuer's authority, `hook` or no program. */
+function usdgMintData(hook: string | null): Buffer {
+  const data = Buffer.alloc(234); data.writeBigUInt64LE(1_000_000n, 36); data[44] = 6; data[45] = 1;
+  data[165] = 1; data.writeUInt16LE(14, 166); data.writeUInt16LE(64, 168); data.fill(9, 170, 202);
+  if (hook) Buffer.from(base58Decode(hook)!).copy(data, 202);
+  return data;
+}
+/** ExtraAccountMetaList for Execute with one extra account, `fixed`, which `signer` marks as a signer. */
+function hookMetaList(fixed: string, signer = false): Buffer {
+  const header = Buffer.alloc(16);
+  Buffer.from(createHash("sha256").update("spl-transfer-hook-interface:execute").digest().subarray(0, 8)).copy(header);
+  header.writeUInt32LE(4 + 35, 8); header.writeUInt32LE(1, 12);
+  return Buffer.concat([header, Buffer.of(0), Buffer.from(base58Decode(fixed)!), Buffer.of(signer ? 1 : 0, 1)]);
+}
+
 /** A fake mainnet that executes recovery transactions with the program's constraints. */
 /** Blocks the finalized commitment trails the tip by. */
 const FINALITY_LAG = 32;
@@ -130,14 +145,19 @@ class FakeChain {
   /** Never report "finalized". */
   holdFinality = false;
   vault = "";
+  usdgHook: string | null = null;
   constructor(readonly program: string = PROGRAM) {}
 
   async setup(options: { session?: string; usdg?: bigint; wsol?: bigint; unsynced?: bigint; solExcess?: bigint; ownerLamports?: bigint;
     frozenUsdg?: boolean; noWsolAccount?: boolean; ownerAtas?: boolean;
+    /** A transfer-hook program the issuer set on USDG; its validation account is placed by the test. */
+    usdgHook?: string;
     /** The program account: an immutable deployment (default), an upgradeable one, or none at all. */
     deployment?: "immutable" | "upgradeable" | "none"; binary?: Buffer } = {}) {
     if ((options.deployment ?? "immutable") !== "none") this.deploy(options.deployment === "upgradeable", options.binary ?? BINARY);
     this.vault = await deriveSolanaVaultAddress(this.program, OWNER);
+    this.usdgHook = options.usdgHook ?? null;
+    this.accounts.set(SOLANA_USDG_MINT, { owner: TOKEN_2022_PROGRAM, lamports: rent(234), data: usdgMintData(this.usdgHook) });
     this.accounts.set(this.vault, { owner: this.program, lamports: rent(SOLANA_VAULT_ACCOUNT_SIZE) + (options.solExcess ?? 3_000_000n), data: vaultData(OWNER, options.session ?? SESSION) });
     const usdgAta = await deriveSolanaAta(this.vault, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM);
     this.accounts.set(usdgAta, { owner: TOKEN_2022_PROGRAM, lamports: rent(170), data: tokenData(SOLANA_USDG_MINT, this.vault, options.usdg ?? 12_345_678n, { size: 170, frozen: options.frozenUsdg }) });
@@ -341,8 +361,12 @@ class FakeChain {
       vault.lamports -= amount; this.accounts.get(owner)!.lamports += amount; bumpSeq();
       return;
     }
-    need(disc.join() === DISC.withdraw.join() && ix.accounts.length === 6, "withdraw");
+    need(disc.join() === DISC.withdraw.join() && ix.accounts.length >= 6, "withdraw");
     const mint = acct(2), vaultTokenKey = acct(3, true), ownerTokenKey = acct(4, true), program = acct(5);
+    // The program refuses a signing remaining account; Token-2022 needs a set hook's program among them.
+    const remaining = ix.accounts.slice(6);
+    need(remaining.every((a) => !a.signer), "no signing remaining account");
+    need(mint !== SOLANA_USDG_MINT || this.usdgHook === null || remaining.some((a) => a.address === this.usdgHook), "the hook program is passed");
     need(atas.get(`${vaultKey}:${mint}:${program}`) === vaultTokenKey, "vault_token is the vault ATA");
     need(atas.get(`${owner}:${mint}:${program}`) === ownerTokenKey, "owner_token is the owner ATA");
     const from = this.accounts.get(vaultTokenKey), to = this.accounts.get(ownerTokenKey);
@@ -793,6 +817,34 @@ describe("solana-recover", () => {
     assert.equal(fake.sent.length, 1);
     assert.deepEqual(fake.sent[0]!.instructions.map((ix) => ix.program), [PROGRAM], "only withdraw_sol");
     assert.equal(fake.accounts.get(fake.vault)!.lamports, rent(SOLANA_VAULT_ACCOUNT_SIZE));
+  });
+});
+
+describe("solana-recover with a USDG transfer hook", () => {
+  const HOOK = key(81), FIXED = key(83);
+  const validation = async () => (await getProgramDerivedAddress({ programAddress: kitAddress(HOOK),
+    seeds: [new TextEncoder().encode("extra-account-metas"), base58Decode(SOLANA_USDG_MINT)!] }))[0];
+  it("passes the hook's accounts to the USDG withdrawal once the issuer sets a hook program, so USDG is still recovered", async () => {
+    const fake = await chain({ session: SOLANA_SYSTEM_PROGRAM, usdgHook: HOOK });
+    fake.accounts.set(await validation(), { owner: HOOK, lamports: rent(51), data: hookMetaList(FIXED) });
+    const vaultUsdg = await deriveSolanaAta(fake.vault, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM);
+    const { error } = await run(fake, [...base, "--key-file", keyFile(SECRET_BASE58), "--send"]);
+    assert.equal(error, null, String(error));
+    const usdg = fake.sent.find((tx) => tx.instructions.some((ix) => ix.program === PROGRAM && ix.accounts[2]?.address === SOLANA_USDG_MINT))!;
+    const withdraw = usdg.instructions.find((ix) => ix.program === PROGRAM)!;
+    assert.deepEqual(withdraw.accounts.slice(6).map((a) => [a.address, a.writable, a.signer]),
+      [[FIXED, true, false], [await validation(), false, false], [HOOK, false, false]]);
+    assert.equal(fake.token(vaultUsdg), 0n, "every USDG unit reached the owner");
+  });
+  it("skips only USDG when the hook asks for a signer, and still recovers WSOL and SOL", async () => {
+    const fake = await chain({ session: SOLANA_SYSTEM_PROGRAM, usdgHook: HOOK });
+    fake.accounts.set(await validation(), { owner: HOOK, lamports: rent(51), data: hookMetaList(FIXED, true) });
+    const vaultUsdg = await deriveSolanaAta(fake.vault, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM);
+    const { error, out } = await run(fake, [...base, "--key-file", keyFile(SECRET_BASE58), "--send"]);
+    assert.equal(error, null, String(error));
+    assert.match(out, /Note: USDG: The token's transfer hook cannot be resolved: it asks for a signer/);
+    assert.equal(fake.token(vaultUsdg), 12_345_678n, "USDG stays in the vault");
+    assert.equal(fake.sent.length, 2, "SOL and WSOL only");
   });
 });
 

@@ -19,7 +19,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import { createHash } from "node:crypto";
-import { address, appendTransactionMessageInstructions, compileTransaction, createKeyPairFromPrivateKeyBytes, createTransactionMessage,
+import { address, getProgramDerivedAddress, appendTransactionMessageInstructions, compileTransaction, createKeyPairFromPrivateKeyBytes, createTransactionMessage,
   decompileTransactionMessage, getAddressFromPublicKey, getBase58Decoder, getBase58Encoder, getBase64EncodedWireTransaction,
   getCompiledTransactionMessageDecoder, getTransactionDecoder, setTransactionMessageFeePayer, setTransactionMessageLifetimeUsingBlockhash,
   signTransaction, type Blockhash, type Instruction } from "@solana/kit";
@@ -59,7 +59,16 @@ async function fixture() {
   await bindings.settings(TENANT, owner, 0, "live", limits);
   const dataAddress = key(41), binary = Buffer.from("runtime-tested-binary"), program = Buffer.alloc(36), programData = Buffer.alloc(45 + binary.length);
   program.writeUInt32LE(2); keyBytes(dataAddress).copy(program, 4); programData.writeUInt32LE(3); binary.copy(programData, 45);
-  const controls = { initialized: false, sends: 0, height: 4900, simulatedUnits: null as number | null, priorityFees: null as number[] | null, unsyncedWsol: false };
+  const controls = { initialized: false, sends: 0, height: 4900, simulatedUnits: null as number | null, priorityFees: null as number[] | null, unsyncedWsol: false,
+    // A transfer-hook program the USDG issuer set, and its ExtraAccountMetaList; none, as on mainnet today.
+    hookProgram: null as string | null, hookList: null as Buffer | null };
+  const usdgMint = () => {
+    const b = Buffer.alloc(234); b.writeBigUInt64LE(1_000_000n, 36); b[44] = 6; b[45] = 1; b[165] = 1; b.writeUInt16LE(14, 166); b.writeUInt16LE(64, 168);
+    if (controls.hookProgram) keyBytes(controls.hookProgram).copy(b, 202);
+    return b;
+  };
+  const hookValidation = async () => controls.hookProgram ? (await getProgramDerivedAddress({ programAddress: address(controls.hookProgram),
+    seeds: [new TextEncoder().encode("extra-account-metas"), keyBytes(SOLANA_USDG_MINT)] }))[0] : null;
   // The vault's wrapped SOL account, holding native SOL above its rent reserve and its 0 WSOL when unsyncedWsol is set.
   const vaultWsol = await deriveSolanaAta(vault, SOLANA_WRAPPED_SOL_MINT, SOLANA_CLASSIC_TOKEN_PROGRAM);
   const wsolAccount = () => {
@@ -77,8 +86,11 @@ async function fixture() {
   const response = (value: unknown) => ({ context: { slot: 1000 }, value });
   // The vault (once initialized) and the owner wallet, a plain system account; every token account is missing, so its rent is counted.
   const accountFor = (k: unknown) => k === vault ? (controls.initialized ? account(state()) : null) : k === owner ? account(Buffer.alloc(0), SOLANA_SYSTEM_PROGRAM)
-    : k === vaultWsol && controls.unsyncedWsol ? account(wsolAccount(), SOLANA_CLASSIC_TOKEN_PROGRAM) : null;
+    : k === vaultWsol && controls.unsyncedWsol ? account(wsolAccount(), SOLANA_CLASSIC_TOKEN_PROGRAM) : k === SOLANA_USDG_MINT ? account(usdgMint(), TOKEN_2022_PROGRAM)
+    : k === validationAddress && controls.hookList ? account(controls.hookList, controls.hookProgram!) : null;
+  let validationAddress: string | null = null;
   const read: SolanaLiveRead = async (method, params = []) => {
+    validationAddress = await hookValidation();
     if (method === "getSlot") return 1000;
     if (method === "getEpochInfo") return { absoluteSlot: 1000, blockHeight: controls.height, epoch: 2, slotIndex: 1000, slotsInEpoch: 432_000 };
     if (method === "getMinimumBalanceForRentExemption") return (128 + (params[0] as number)) * 6960;
@@ -271,6 +283,39 @@ test("the server's real owner transactions pass the page's check, with and witho
     }
     assert.equal(f.controls.sends, 0, "preparing sends nothing");
   } finally { f.raw.close(); }
+});
+
+test("once the USDG issuer sets a transfer hook, the server's withdrawal carries the hook's accounts and passes the page's check; the owner among them does not", async () => {
+  const f = await fixture();
+  try {
+    f.controls.initialized = true;
+    const expected = { owner: f.owner, programId: PROGRAM }, request: OwnerRequest = { action: "withdraw", mint: SOLANA_USDG_MINT, amountRaw: "1000000" };
+    const hook = key(88), fixed = key(89);
+    f.controls.hookProgram = hook;
+    const header = Buffer.alloc(16); Buffer.from(createHash("sha256").update("spl-transfer-hook-interface:execute").digest().subarray(0, 8)).copy(header);
+    header.writeUInt32LE(4 + 35, 8); header.writeUInt32LE(1, 12);
+    f.controls.hookList = Buffer.concat([header, Buffer.of(0), keyBytes(fixed), Buffer.of(0, 1)]);
+    const setup = await f.app.prepareOwnerAction(f.scope, request);
+    const instructions = instructionsOf(setup.transactionBase64), at = instructions.findIndex(ix => ix.programAddress === PROGRAM);
+    const withdraw = instructions[at]!;
+    assert.deepEqual(withdraw.accounts!.slice(6).map(a => String(a.address)), [fixed, (await getProgramDerivedAddress({ programAddress: address(hook),
+      seeds: [new TextEncoder().encode("extra-account-metas"), keyBytes(SOLANA_USDG_MINT)] }))[0], hook]);
+    const prepared = JSON.parse(JSON.stringify(setup)) as { transactionBase64: string; priorityFeeLamports?: string };
+    assert.equal(await checkPreparedOwnerTransaction(prepared, request, expected), setup.priorityFeeLamports);
+    // Extra accounts on anything but the USDG withdrawal, or the owner's wallet among them, are refused before the wallet opens.
+    const withTail = (tail: string[]) => instructions.map((ix, i) => i === at ? { ...ix, accounts: [...ix.accounts!, ...tail.map(a => ({ address: address(a), role: 0 as const }))] } as Instruction : ix);
+    await assert.rejects(checkPreparedOwnerTransaction({ transactionBase64: rebuilt(f.owner, withTail([f.owner])) }, request, expected), /does not match what you asked for/);
+    await assert.rejects(checkPreparedOwnerTransaction({ transactionBase64: rebuilt(f.owner, withTail(Array.from({ length: 30 }, (_, i) => key(100 + i)))) }, request, expected), /does not match what you asked for/);
+  } finally { f.raw.close(); }
+  const g = await fixture();
+  try {
+    g.controls.initialized = true;
+    const expected = { owner: g.owner, programId: PROGRAM }, request: OwnerRequest = { action: "withdraw", mint: SOLANA_WRAPPED_SOL_MINT, amountRaw: "1000000" };
+    const setup = await g.app.prepareOwnerAction(g.scope, request);
+    const instructions = instructionsOf(setup.transactionBase64), at = instructions.findIndex(ix => ix.programAddress === PROGRAM);
+    const tailed = instructions.map((ix, i) => i === at ? { ...ix, accounts: [...ix.accounts!, { address: address(key(89)), role: 0 as const }] } as Instruction : ix);
+    await assert.rejects(checkPreparedOwnerTransaction({ transactionBase64: rebuilt(g.owner, tailed) }, request, expected), /does not match what you asked for/);
+  } finally { g.raw.close(); }
 });
 
 test("the server's bytes from an under-reported simulation reach the wallet only with at least the runtime's default compute budget", async () => {

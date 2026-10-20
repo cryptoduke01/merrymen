@@ -258,8 +258,19 @@ adds an extension, the vault refuses every USDG swap, exits included (error
 `packages/core/src/solana-live.ts`): such a mint is `invalid-mint` for paper and
 live alike, and live status shows "The USDG mint carries a fee, hook or
 extension the vault refuses; trading and exits are paused." Withdrawals do not
-check the mint, so they stay available (but a hook program would likely need
-extra accounts the vault's withdraw does not pass; untested). The worker reads
+check the mint, so they stay available. Once a hook program is set, Token-2022
+calls it inside every transfer and it needs its program, its
+`extra-account-metas` validation account and the extra accounts that lists:
+the vault's `withdraw` forwards its remaining accounts to the transfer
+(`spl_token_2022::onchain::invoke_transfer_checked`) and refuses any that
+signs, so the owner's signature never reaches a hook and Token-2022 hands the
+vault to the hook as a non-signer. The app's withdrawal, `solana-recover` and
+the page's check all carry those accounts (`resolveSolanaTransferHookAccounts`
+in `packages/core/src/solana-live.ts`, read by
+`worker/src/solana-transfer-hook.ts`); a hook whose list asks for a signer, or
+cannot be resolved, refuses the USDG withdrawal before signing, and
+`solana-recover` skips only its USDG leg (`custody.rs`
+`a_usdg_transfer_hook_never_locks_owner_withdrawals_and_never_gets_a_signer`). The worker reads
 the mint in RPC `jsonParsed` form; its test runs on Agave 2.3.13's own decoder
 output for the committed bytes and six variants
 (`usdg-mainnet-mint.jsonparsed.json`, written offline by
@@ -1014,8 +1025,9 @@ Full procedure: [contracts/solana/README.md](../contracts/solana/README.md).
   gives identical bytes. `test.sh` runs the native tests, the build and every
   runtime test (`--offline` without network).
 - **Artifacts.** macOS and Linux artifacts differ (platform-tools embeds its
-  build paths). The committed `Darwin-arm64.json` (562f0849…, 364,744 bytes, the
-  local test id) is for local verification only. The release artifact and
+  build paths). The committed `Darwin-arm64.json` (ce7d2544…, 410,472 bytes, the
+  local test id; re-recorded after `withdraw` began forwarding transfer-hook
+  accounts) is for local verification only. The release artifact and
   `MERRYMEN_SOLANA_VAULT_SHA256` come from the pinned Linux CI build and its
   manifest. Earlier artifact hashes describe binaries that will never ship:
   `9bb352ad`, `53c9a7ba`, `ee04ea0e` and `dfb7617c` (before account layout
@@ -1310,7 +1322,8 @@ merged into this one; they are listed by round, and the counts overlap.
   kill and ledger suites pass on PostgreSQL 17; a mobile `expo export` for iOS
   and Android (Hermes) built with the new core barrel.
 - 2026-10-20 cold rebuild with a fresh `CARGO_HOME` at another path reproduced
-  the Darwin artifact `562f0849…` (364,744 bytes); this is not the release hash.
+  the Darwin artifact `562f0849…` (364,744 bytes), since superseded by `ce7d2544…`
+  when `withdraw` began forwarding transfer-hook accounts; neither is the release hash.
 
 **2026-10-20, integration and finishing rounds.** Worker, web, CLI, CI-script,
 Pyth and identity suites per track, PostgreSQL subsets on throwaway clusters,
@@ -1337,7 +1350,8 @@ the platform-tools pin, no Node 22 run of the Solana code); no devnet or mainnet
 deployment; no live fill, latency, slippage or fee measurement; no production
 web build of this tree outside CI; the production provider's `jsonParsed` USDG
 form; the Hermes cross-check; multi-hop Jupiter routes; mainnet behaviour of a
-USDG hook program on withdraw; a real browser session with Privy's Solana
+USDG hook program on withdraw (custody.rs runs a mock hook on program-test's
+Token-2022); a real browser session with Privy's Solana
 wallets.
 
 ## Release gates

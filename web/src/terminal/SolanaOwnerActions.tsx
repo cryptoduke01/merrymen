@@ -3,7 +3,8 @@ import { useEffect, useRef, useState } from "react";
 import type { Instruction } from "@solana/kit";
 import { SOLANA_USDG_MINT, TOKEN_2022_PROGRAM, base58Encode } from "../../../packages/core/src/ids";
 import { buildRevokeSolanaSessionsInstruction, buildSetSolanaBreakerInstruction, buildWithdrawSolanaNativeInstruction, buildWithdrawSolanaVaultInstruction,
-  deriveSolanaAta, deriveSolanaVaultAddress, SOLANA_ASSOCIATED_TOKEN_PROGRAM, SOLANA_CLASSIC_TOKEN_PROGRAM, SOLANA_SYSTEM_PROGRAM, SOLANA_WRAPPED_SOL_MINT } from "../../../packages/core/src/solana-live";
+  deriveSolanaAta, deriveSolanaVaultAddress, SOLANA_ASSOCIATED_TOKEN_PROGRAM, SOLANA_CLASSIC_TOKEN_PROGRAM, SOLANA_SYSTEM_PROGRAM, SOLANA_TRANSFER_HOOK_MAX_ACCOUNTS,
+  SOLANA_WRAPPED_SOL_MINT } from "../../../packages/core/src/solana-live";
 import { displaySolanaAmount, displaySolanaAmountOrNull, solanaUnits } from "../lib/solana-amounts";
 import { RequestError } from "./request-json";
 import type { SolanaApi } from "./SolanaAutomation";
@@ -51,9 +52,20 @@ function reviewedEffect(request: OwnerRequest): string {
 function plain(instruction: Instruction): OwnerPaidInstruction {
   return { program: String(instruction.programAddress), data: Uint8Array.from(instruction.data ?? []), accounts: (instruction.accounts ?? []).map((meta) => String(meta.address)) };
 }
-function sameInstruction(a: OwnerPaidInstruction, b: OwnerPaidInstruction): boolean {
+/**
+ * True when `a` is exactly `b`. With `hookTailOwner`, `a` may also carry up to
+ * SOLANA_TRANSFER_HOOK_MAX_ACCOUNTS accounts after `b`'s, none of them the
+ * owner: a USDG transfer hook's accounts, which the vault forwards to the
+ * transfer. They cannot change what moves: the vault transfers exactly the
+ * amount from its token account to the owner's, refuses a signing extra
+ * account, and the owner is the transaction's only signer.
+ */
+function sameInstruction(a: OwnerPaidInstruction, b: OwnerPaidInstruction, hookTailOwner: string | null = null): boolean {
+  const extra = a.accounts.length - b.accounts.length;
   return a.program === b.program && a.data.length === b.data.length && a.data.every((byte, index) => byte === b.data[index])
-    && a.accounts.length === b.accounts.length && a.accounts.every((account, index) => account === b.accounts[index]);
+    && (extra === 0 || (hookTailOwner !== null && extra > 0 && extra <= SOLANA_TRANSFER_HOOK_MAX_ACCOUNTS
+      && a.accounts.slice(b.accounts.length).every((account) => account !== hookTailOwner)))
+    && b.accounts.every((account, index) => account === a.accounts[index]);
 }
 /**
  * The instructions the server builds for `request` (prepareOwnerAction in
@@ -104,7 +116,10 @@ export async function checkPreparedOwnerTransaction(prepared: PreparedOwnerTrans
   try { wanted = await expectedOwnerInstructions(request, expected.owner, expected.programId); } catch { return refuse(); }
   const [first] = decoded.instructions;
   const rest = wanted.sync && first && sameInstruction(first, wanted.sync) ? decoded.instructions.slice(1) : decoded.instructions;
-  if (rest.length !== wanted.required.length || !rest.every((instruction, index) => sameInstruction(instruction, wanted.required[index]!))) refuse();
+  // Only a USDG withdrawal's last instruction, the vault's withdraw, may carry a transfer hook's accounts.
+  const hookTail = request.action === "withdraw" && request.mint === SOLANA_USDG_MINT ? expected.owner : null;
+  if (rest.length !== wanted.required.length || !rest.every((instruction, index) =>
+    sameInstruction(instruction, wanted.required[index]!, index === wanted.required.length - 1 ? hookTail : null))) refuse();
   const fee = decoded.priorityFeeLamports.toString();
   if (prepared.priorityFeeLamports !== undefined && prepared.priorityFeeLamports !== fee) {
     throw new Error(`The prepared ${name}'s priority fee does not match its bytes. Nothing was signed. Refresh and try again.`);

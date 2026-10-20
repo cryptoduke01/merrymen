@@ -67,6 +67,8 @@ async function fixture() {
     : k === cashAta ? account(tokenAccount(SOLANA_USDG_MINT, controls.cash), TOKEN_2022_PROGRAM)
     : k === wsolAta ? account(tokenAccount(SOLANA_WRAPPED_SOL_MINT, controls.wsol), SOLANA_CLASSIC_TOKEN_PROGRAM)
     : k === owner ? account(Buffer.alloc(0), SYSTEM)
+    // The USDG mint, with no transfer hook: a withdrawal reads it for one.
+    : k === SOLANA_USDG_MINT ? account(Buffer.alloc(82), TOKEN_2022_PROGRAM)
     : null;
   const read: SolanaLiveRead = async (method, params = []) => {
     if (method === "getSlot") return 1000;

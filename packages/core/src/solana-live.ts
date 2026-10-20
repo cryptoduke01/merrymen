@@ -82,7 +82,8 @@ export const SOLANA_VAULT_USDG_MINT_EXTENSIONS: readonly string[] = Object.freez
  * it needs and cannot read is a refusal. The caller checks the mint's address
  * (USDG) and owner (Token-2022). On a mint it refuses, the program fails every
  * swap, buys and exits alike, with VaultError::Mint (6005), so the worker
- * must sign none; the owner's withdraw never checks the mint.
+ * must sign none. The owner's withdraw never checks the mint: once a hook
+ * program is set it forwards the hook's accounts (resolveSolanaTransferHookAccounts).
  */
 export function solanaVaultUsdgMintRefusal(info: unknown): string | null {
   const record = (value: unknown): value is Record<string, unknown> =>
@@ -458,7 +459,16 @@ export function buildWithdrawSolanaVaultInstruction(p: {
   ownerToken: string;
   tokenProgram: string;
   amount: bigint;
+  /**
+   * The mint's transfer-hook accounts (resolveSolanaTransferHookAccounts), appended as
+   * the instruction's remaining accounts; empty or absent while the mint names no hook
+   * program. None may sign or be the owner: the program refuses a signing extra account.
+   */
+  hookAccounts?: readonly SolanaTransferHookAccount[];
 }): Instruction {
+  const hook = p.hookAccounts ?? [];
+  if (hook.length > SOLANA_TRANSFER_HOOK_MAX_ACCOUNTS || hook.some((a) => (a.role !== 0 && a.role !== 1) || a.address === p.owner))
+    throw new SolanaVaultValidationError("Invalid Solana transfer hook accounts");
   return instruction(
     p.programAddress,
     DISCRIMINATORS.withdraw,
@@ -469,9 +479,164 @@ export function buildWithdrawSolanaVaultInstruction(p: {
       meta(p.vaultToken, 1),
       meta(p.ownerToken, 1),
       meta(p.tokenProgram, 0),
+      ...hook.map((a) => meta(a.address, a.role)),
     ],
     int(p.amount),
   );
+}
+
+/** Token-2022's ExtensionType::TransferHook, and spl-transfer-hook-interface's Execute discriminator. */
+const TOKEN_2022_TRANSFER_HOOK_EXTENSION = 14;
+const TRANSFER_HOOK_EXECUTE = Uint8Array.from([105, 37, 101, 197, 75, 251, 102, 26]);
+/** More than a withdrawal transaction could carry next to its own accounts. */
+export const SOLANA_TRANSFER_HOOK_MAX_ACCOUNTS = 24;
+/** An account a mint's transfer hook needs in a transfer: read-only (0) or writable (1), never a signer. */
+export interface SolanaTransferHookAccount {
+  address: string;
+  role: 0 | 1;
+}
+/**
+ * The transfer-hook program a Token-2022 mint's TransferHook extension names,
+ * or null when the mint has no such extension or names no program (USDG
+ * today: the extension is there, the issuer holds its authority, the program
+ * is unset). Throws on bytes that are not a Token-2022 mint.
+ */
+export function solanaMintTransferHookProgram(data: Uint8Array): string | null {
+  const bad = () => new SolanaVaultValidationError("Invalid Solana mint data");
+  if (data.length === 82) return null;
+  if (data.length <= 166 || data[165] !== 1) throw bad();
+  const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+  for (let at = 166; at + 4 <= data.length; ) {
+    const type = view.getUint16(at, true), length = view.getUint16(at + 2, true);
+    if (type === 0) break;
+    if (at + 4 + length > data.length) throw bad();
+    if (type === TOKEN_2022_TRANSFER_HOOK_EXTENSION) {
+      if (length !== 64) throw bad();
+      const program = data.subarray(at + 4 + 32, at + 4 + 64);
+      return program.every((b) => b === 0) ? null : base58Encode(program);
+    }
+    at += 4 + length;
+  }
+  return null;
+}
+/** The hook's ExtraAccountMetaList account for `mint`: PDA ["extra-account-metas", mint] of the hook program. */
+export async function deriveSolanaTransferHookValidation(hookProgram: string, mint: string): Promise<string> {
+  return (
+    await getProgramDerivedAddress({
+      programAddress: address(hookProgram),
+      seeds: [new TextEncoder().encode("extra-account-metas"), pubkey(mint)],
+    })
+  )[0];
+}
+/**
+ * The remaining accounts a vault withdrawal of a hooked mint carries, resolved
+ * as spl-token's addExtraAccountMetasForExecute and Token-2022's on-chain
+ * helper resolve them: every extra account the hook's ExtraAccountMetaList
+ * (`validationData`, null when that account does not exist) names for
+ * Execute, in order, then the validation account and the hook program. The
+ * on-chain helper finds each by address, so the order is only for reading.
+ * `accountData` reads an account's data for a seed taken from it. A list this
+ * cannot resolve, or one that asks for a signer, throws: the vault's withdraw
+ * refuses a signing extra account, so the owner's signature never reaches a hook.
+ */
+export async function resolveSolanaTransferHookAccounts(p: {
+  hookProgram: string;
+  mint: string;
+  source: string;
+  destination: string;
+  authority: string;
+  amount: bigint;
+  validationData: Uint8Array | null;
+  accountData: (address: string) => Promise<Uint8Array | null>;
+}): Promise<SolanaTransferHookAccount[]> {
+  const bad = (why: string) => new SolanaVaultValidationError(`The token's transfer hook cannot be resolved: ${why}`);
+  const validation = await deriveSolanaTransferHookValidation(p.hookProgram, p.mint);
+  const tail: SolanaTransferHookAccount[] = [{ address: validation, role: 0 }, { address: p.hookProgram, role: 0 }];
+  if (p.validationData === null) return [{ address: p.hookProgram, role: 0 }];
+  const data = p.validationData, view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+  let metas: Uint8Array | null = null;
+  for (let at = 0; at + 12 <= data.length; ) {
+    const type = data.subarray(at, at + 8), length = view.getUint32(at + 8, true);
+    if (type.every((b) => b === 0)) break;
+    if (at + 12 + length > data.length) throw bad("malformed list");
+    if (type.every((b, i) => b === TRANSFER_HOOK_EXECUTE[i])) {
+      metas = data.subarray(at + 12, at + 12 + length);
+      break;
+    }
+    at += 12 + length;
+  }
+  if (metas === null) return tail;
+  if (metas.length < 4) throw bad("malformed list");
+  const count = new DataView(metas.buffer, metas.byteOffset, metas.byteLength).getUint32(0, true);
+  if (count > SOLANA_TRANSFER_HOOK_MAX_ACCOUNTS - 2 || metas.length < 4 + 35 * count) throw bad("too many accounts");
+  const ixData = concat(TRANSFER_HOOK_EXECUTE, int(p.amount));
+  const keys = [p.source, p.mint, p.destination, p.authority, validation];
+  const dataOf = async (index: number): Promise<Uint8Array> => {
+    const key = keys[index];
+    if (key === undefined) throw bad("unknown account index");
+    const found = await p.accountData(key);
+    if (!found) throw bad("missing account data");
+    return found;
+  };
+  const resolved: SolanaTransferHookAccount[] = [];
+  for (let i = 0; i < count; i++) {
+    const entry = metas.subarray(4 + 35 * i, 4 + 35 * (i + 1));
+    const discriminator = entry[0]!, config = entry.subarray(1, 33), signer = entry[33]!, writable = entry[34]!;
+    if (signer !== 0) throw bad("it asks for a signer");
+    if (writable > 1) throw bad("malformed list");
+    let key: string;
+    if (discriminator === 0) key = base58Encode(config);
+    else if (discriminator === 1 || discriminator >= 128) {
+      const program = discriminator === 1 ? p.hookProgram : keys[discriminator - 128];
+      if (program === undefined) throw bad("unknown program index");
+      const seeds: Uint8Array[] = [];
+      for (let at = 0; at < 32; ) {
+        const kind = config[at]!;
+        if (kind === 0) break;
+        if (kind === 1) {
+          const length = config[at + 1] ?? 0;
+          if (at + 2 + length > 32) throw bad("malformed seed");
+          seeds.push(config.slice(at + 2, at + 2 + length));
+          at += 2 + length;
+        } else if (kind === 2) {
+          const index = config[at + 1] ?? 0, length = config[at + 2] ?? 0;
+          if (at + 3 > 32 || index + length > ixData.length) throw bad("malformed seed");
+          seeds.push(ixData.slice(index, index + length));
+          at += 3;
+        } else if (kind === 3) {
+          const key = keys[config[at + 1] ?? 255];
+          if (at + 2 > 32 || key === undefined) throw bad("unknown account index");
+          seeds.push(pubkey(key));
+          at += 2;
+        } else if (kind === 4) {
+          const index = config[at + 1] ?? 255, start = config[at + 2] ?? 0, length = config[at + 3] ?? 0;
+          if (at + 4 > 32) throw bad("malformed seed");
+          const from = await dataOf(index);
+          if (from.length < start + length) throw bad("account data too small");
+          seeds.push(from.slice(start, start + length));
+          at += 4;
+        } else throw bad("unknown seed");
+      }
+      try {
+        key = (await getProgramDerivedAddress({ programAddress: address(program), seeds }))[0];
+      } catch {
+        throw bad("unusable seeds");
+      }
+    } else if (discriminator === 2) {
+      if (config[0] === 1) {
+        const index = config[1]!;
+        if (index + 32 > ixData.length) throw bad("instruction data too small");
+        key = base58Encode(ixData.subarray(index, index + 32));
+      } else if (config[0] === 2) {
+        const from = await dataOf(config[1]!), start = config[2]!;
+        if (from.length < start + 32) throw bad("account data too small");
+        key = base58Encode(from.subarray(start, start + 32));
+      } else throw bad("unknown key data");
+    } else throw bad("unknown account kind");
+    keys.push(key);
+    resolved.push({ address: key, role: writable === 1 ? 1 : 0 });
+  }
+  return [...resolved, ...tail];
 }
 export interface ExecuteSolanaSwapParameters {
   programAddress: string;

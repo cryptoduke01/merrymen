@@ -13,7 +13,8 @@ use anchor_spl::{
             interest_bearing_mint::InterestBearingConfig, metadata_pointer::MetadataPointer,
             mint_close_authority::MintCloseAuthority, non_transferable::NonTransferable,
             pausable::PausableConfig, permanent_delegate::PermanentDelegate,
-            transfer_fee::TransferFeeConfig, transfer_hook::TransferHook,
+            transfer_fee::TransferFeeConfig,
+            transfer_hook::{TransferHook, TransferHookAccount},
             BaseStateWithExtensionsMut, ExtensionType, StateWithExtensionsMut,
         },
     },
@@ -90,6 +91,52 @@ fn mock_jupiter(_program: &Pubkey, a: &[AccountInfo], data: &[u8]) -> ProgramRes
         ],
         &[&[b"authority", &[0], &[bump]]],
     )
+}
+/// A transfer-hook program the USDG issuer could set: interface-style, it needs its
+/// extra-account-metas validation account at index 4 and the two extra accounts that
+/// list names (a fixed account and a PDA of the destination), and it is never handed a signer.
+const HOOK: Pubkey = Pubkey::new_from_array([0x51; 32]);
+const HOOK_FIXED: Pubkey = Pubkey::new_from_array([0x53; 32]);
+fn hook_validation() -> Pubkey {
+    Pubkey::find_program_address(&[b"extra-account-metas", USDG.as_ref()], &HOOK).0
+}
+fn hook_pda(destination: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(&[b"merrymen", destination.as_ref()], &HOOK).0
+}
+fn mock_hook(_program: &Pubkey, a: &[AccountInfo], _data: &[u8]) -> ProgramResult {
+    use anchor_lang::solana_program::program_error::ProgramError;
+    if a.len() < 7 {
+        return Err(ProgramError::NotEnoughAccountKeys);
+    }
+    if *a[4].key != hook_validation() || *a[5].key != HOOK_FIXED || *a[6].key != hook_pda(a[2].key)
+    {
+        return Err(ProgramError::InvalidSeeds);
+    }
+    if a.iter().any(|x| x.is_signer) {
+        return Err(ProgramError::IllegalOwner);
+    }
+    Ok(())
+}
+/// The hook's ExtraAccountMetaList for Execute: HOOK_FIXED, then the PDA of
+/// [literal "merrymen", account key 2 (the destination)] under the hook program.
+fn hook_meta_list() -> Vec<u8> {
+    let mut fixed = vec![0u8];
+    fixed.extend_from_slice(HOOK_FIXED.as_ref());
+    fixed.extend_from_slice(&[0, 0]);
+    let mut pda = vec![1u8];
+    let mut config = vec![1u8, 8];
+    config.extend_from_slice(b"merrymen");
+    config.extend_from_slice(&[3, 2]);
+    config.resize(32, 0);
+    pda.extend_from_slice(&config);
+    pda.extend_from_slice(&[0, 0]);
+    let disc = solana_sdk::hash::hash(b"spl-transfer-hook-interface:execute");
+    let mut d = disc.to_bytes()[..8].to_vec();
+    d.extend_from_slice(&(4u32 + 35 * 2).to_le_bytes());
+    d.extend_from_slice(&2u32.to_le_bytes());
+    d.extend_from_slice(&fixed);
+    d.extend_from_slice(&pda);
+    d
 }
 fn account(owner: Pubkey, data: Vec<u8>, extra: u64) -> Account {
     Account {
@@ -237,6 +284,8 @@ impl Fixture {
         pt.prefer_bpf(false); // Mock Jupiter stays native; custody and bundled token programs use SBF.
                               // Use ProgramTest’s bundled real SBF Token, Token-2022 and ATA programs.
         pt.add_program("mock_jupiter", JUPITER, processor!(mock_jupiter));
+        // Runs only for a mint whose TransferHook program names it.
+        pt.add_program("mock_hook", HOOK, processor!(mock_hook));
         pt.add_account(
             owner.pubkey(),
             account(anchor_lang::system_program::ID, vec![], 100_000_000),
@@ -1272,6 +1321,107 @@ async fn the_route_never_reaches_the_owners_token_accounts_whether_or_not_refund
     }
     assert_eq!(f.balance(f.input).await, 1000);
     assert_eq!(f.state().await.seq, 0);
+}
+
+/// A USDG token account as the ATA program creates it for a mint carrying TransferHook.
+fn hooked_token(owner: Pubkey, amount: u64) -> Account {
+    type RawAccount = spl_token_2022::state::Account;
+    let len =
+        ExtensionType::try_calculate_account_len::<RawAccount>(&[ExtensionType::TransferHookAccount])
+            .unwrap();
+    let mut d = vec![0; len];
+    {
+        let mut s = StateWithExtensionsMut::<RawAccount>::unpack_uninitialized(&mut d).unwrap();
+        s.init_extension::<TransferHookAccount>(true).unwrap();
+        s.base = RawAccount {
+            mint: USDG,
+            owner,
+            amount,
+            delegate: COption::None,
+            state: spl_token_2022::state::AccountState::Initialized,
+            is_native: COption::None,
+            delegated_amount: 0,
+            close_authority: COption::None,
+        };
+        s.pack_base();
+        s.init_account_type().unwrap();
+    }
+    account(spl_token_2022::ID, d, 0)
+}
+
+#[tokio::test]
+#[ignore = "requires the compiled custody SBF artifact; run contracts/solana/test.sh"]
+async fn a_usdg_transfer_hook_never_locks_owner_withdrawals_and_never_gets_a_signer() {
+    let mut f = Fixture::new().await;
+    // The issuer sets a hook program on today's mint (it holds the hook authority).
+    let issuer = Pubkey::new_unique();
+    let hooked = extended_mint(6, &[ExtensionType::TransferHook], |m| {
+        let hook = m.init_extension::<TransferHook>(true).unwrap();
+        *hook = some_key(issuer);
+        hook.program_id = Some(HOOK).try_into().unwrap();
+    });
+    f.ctx.set_account(&USDG, &hooked.into());
+    let destination = ata(&f.owner.pubkey(), &USDG, &spl_token_2022::ID);
+    f.ctx
+        .set_account(&f.input, &hooked_token(f.vault, 1000).into());
+    f.ctx
+        .set_account(&destination, &hooked_token(f.owner.pubkey(), 0).into());
+    f.ctx
+        .set_account(&hook_validation(), &account(HOOK, hook_meta_list(), 0).into());
+    let withdraw = |f: &Fixture, amount: u64, extra: &[AccountMeta]| {
+        let mut accounts = vault::accounts::Withdraw {
+            vault: f.vault,
+            owner: f.owner.pubkey(),
+            mint: USDG,
+            vault_token: f.input,
+            owner_token: destination,
+            token_program: spl_token_2022::ID,
+        }
+        .to_account_metas(None);
+        accounts.extend_from_slice(extra);
+        Instruction {
+            program_id: vault::ID,
+            accounts,
+            data: vault::instruction::Withdraw { amount }.data(),
+        }
+    };
+    let hook_accounts = [
+        AccountMeta::new_readonly(HOOK_FIXED, false),
+        AccountMeta::new_readonly(hook_pda(&destination), false),
+        AccountMeta::new_readonly(hook_validation(), false),
+        AccountMeta::new_readonly(HOOK, false),
+    ];
+    // Swaps still refuse a hooked mint; withdrawal is the owner's way out.
+    let buy = f.swap_ix(0, 1, 0).await;
+    f.donate(&buy, 0);
+    assert!(vault_error(f.swap(buy).await, vault::VaultError::Mint));
+    // Without the hook's accounts Token-2022 cannot call the hook, and nothing moves.
+    let plain = withdraw(&f, 400, &[]);
+    assert!(f.owner_send(vec![plain]).await.is_err());
+    assert_eq!(f.balance(f.input).await, 1000);
+    assert_eq!(f.state().await.seq, 0);
+    // The owner's wallet among them is refused: its signature never reaches a hook.
+    let mut smuggled = hook_accounts.to_vec();
+    smuggled.push(AccountMeta::new_readonly(f.owner.pubkey(), false));
+    let smuggled = withdraw(&f, 400, &smuggled);
+    assert!(vault_error(
+        f.owner_send(vec![smuggled]).await,
+        vault::VaultError::Authority
+    ));
+    assert_eq!(f.balance(f.input).await, 1000);
+    // With them, in any order, the vault releases exactly the amount to the owner.
+    let good = withdraw(&f, 400, &hook_accounts);
+    f.owner_send(vec![good]).await.unwrap();
+    assert_eq!(f.balance(f.input).await, 600);
+    assert_eq!(f.balance(destination).await, 400);
+    assert_eq!(f.state().await.seq, 1);
+    let mut reversed = hook_accounts.to_vec();
+    reversed.reverse();
+    let rest = withdraw(&f, 600, &reversed);
+    f.owner_send(vec![rest]).await.unwrap();
+    assert_eq!(f.balance(f.input).await, 0);
+    assert_eq!(f.balance(destination).await, 1000);
+    assert_eq!(f.state().await.seq, 2);
 }
 
 // ---- Custody invariants (audit VAULT-3). Each case runs the compiled program. ----

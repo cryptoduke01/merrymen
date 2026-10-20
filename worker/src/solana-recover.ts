@@ -36,8 +36,10 @@ import { base58Decode, base58Encode, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM } from
 import {
   buildRevokeSolanaSessionsInstruction, buildWithdrawSolanaNativeInstruction, buildWithdrawSolanaVaultInstruction,
   decodeSolanaVaultAccount, deriveSolanaAta, deriveSolanaVaultAddress, SOLANA_ASSOCIATED_TOKEN_PROGRAM,
-  SOLANA_CLASSIC_TOKEN_PROGRAM, SOLANA_SYSTEM_PROGRAM, SOLANA_VAULT_RELEASES, SOLANA_WRAPPED_SOL_MINT, type SolanaVaultState,
+  SOLANA_CLASSIC_TOKEN_PROGRAM, SOLANA_SYSTEM_PROGRAM, SOLANA_VAULT_RELEASES, SOLANA_WRAPPED_SOL_MINT, SolanaVaultValidationError,
+  type SolanaTransferHookAccount, type SolanaVaultState,
 } from "../../packages/core/src/solana-live";
+import { readSolanaWithdrawHookAccounts, SolanaTransferHookReadError } from "./solana-transfer-hook";
 import { verifySolanaVaultDeployment } from "./solana-executor";
 import type { SolanaLiveRead, SolanaLiveRpc } from "./solana-live-rpc";
 import { SolanaRpcError } from "./solana-rpc";
@@ -196,7 +198,12 @@ export interface SolanaRecoveryState {
   vaultState: SolanaVaultState;
   /** True while a session key is set: it can still trade until revoked. */
   sessionActive: boolean;
-  usdg: { vaultAccount: string; ownerAccount: string; exists: boolean; frozen: boolean; amountRaw: bigint; ownerAccountExists: boolean; ownerAccountFrozen: boolean };
+  usdg: { vaultAccount: string; ownerAccount: string; exists: boolean; frozen: boolean; amountRaw: bigint; ownerAccountExists: boolean; ownerAccountFrozen: boolean;
+    /**
+     * The accounts a transfer-hook program the issuer set on USDG needs in the withdrawal (none
+     * while no program is set), or why they cannot be resolved: then the USDG leg is skipped.
+     */
+    hookAccounts: SolanaTransferHookAccount[]; hookRefusal: string | null };
   /** WSOL withdrawable after SyncNative: account lamports above its rent-exempt reserve. */
   wsol: { vaultAccount: string; ownerAccount: string; exists: boolean; frozen: boolean; amountRaw: bigint; unsyncedRaw: bigint; ownerAccountExists: boolean;
     ownerAccountFrozen: boolean };
@@ -235,11 +242,24 @@ export async function readSolanaRecoveryState(rpc: SolanaLiveRpc, programId: str
     if (wsol && wsol.nativeReserve === null) fail("The vault's WSOL account is not a native SOL account.");
     const wsolWithdrawable = wsol && wsolRaw!.lamports > wsol.nativeReserve! ? wsolRaw!.lamports - wsol.nativeReserve! : 0n;
     if (wsol && wsolWithdrawable < wsol.amount) fail("The vault's WSOL account is malformed.");
+    // Once the issuer sets a transfer hook on USDG, the withdrawal carries its accounts (the program
+    // forwards them), resolved at this same slot for the amount step 2 withdraws.
+    let hookAccounts: SolanaTransferHookAccount[] = [], hookRefusal: string | null = null;
+    if (usdg && usdg.amount > 0n && !usdg.frozen) {
+      try {
+        hookAccounts = await readSolanaWithdrawHookAccounts(read, { mint: SOLANA_USDG_MINT, tokenProgram: TOKEN_2022_PROGRAM, vault, vaultToken: vaultUsdg,
+          ownerToken: ownerUsdg, amount: usdg.amount, commitment, minContextSlot: slot });
+      } catch (error) {
+        if (error instanceof SolanaVaultValidationError) hookRefusal = error.message;
+        else if (error instanceof SolanaTransferHookReadError) fail("The Solana RPC returned malformed account data.");
+        else throw error;
+      }
+    }
     return {
       owner, programId, vault, slot: integer(result.context.slot), commitment, vaultState,
       sessionActive: vaultState.session !== NO_SESSION,
       usdg: { vaultAccount: vaultUsdg, ownerAccount: ownerUsdg, exists: !!usdg, frozen: !!usdg?.frozen, amountRaw: usdg?.amount ?? 0n, ownerAccountExists: !!ownerUsdgRaw,
-        ownerAccountFrozen: ownerAccountFrozen(ownerUsdgRaw, TOKEN_2022_PROGRAM) },
+        ownerAccountFrozen: ownerAccountFrozen(ownerUsdgRaw, TOKEN_2022_PROGRAM), hookAccounts, hookRefusal },
       wsol: { vaultAccount: vaultWsol, ownerAccount: ownerWsol, exists: !!wsol, frozen: !!wsol?.frozen, amountRaw: wsolWithdrawable,
         unsyncedRaw: wsol ? wsolWithdrawable - wsol.amount : 0n, ownerAccountExists: !!ownerWsolRaw,
         ownerAccountFrozen: ownerAccountFrozen(ownerWsolRaw, SOLANA_CLASSIC_TOKEN_PROGRAM) },
@@ -269,10 +289,11 @@ export function solanaRecoveryWithdrawal(state: SolanaRecoveryState): SolanaReco
   // withdrawal in the same transaction: skip that asset, recover the rest.
   if (state.usdg.frozen) skipped.push("USDG: the vault's USDG account is frozen by the issuer, so it cannot be withdrawn.");
   else if (state.usdg.ownerAccountFrozen && state.usdg.amountRaw > 0n) skipped.push(`USDG: your USDG account ${state.usdg.ownerAccount} is frozen by the issuer, so USDG cannot be withdrawn to it.`);
+  else if (state.usdg.hookRefusal !== null && state.usdg.amountRaw > 0n) skipped.push(`USDG: ${state.usdg.hookRefusal}`);
   if (state.wsol.frozen) skipped.push("WSOL: the vault's WSOL account is frozen, so it cannot be withdrawn.");
   else if (state.wsol.ownerAccountFrozen && state.wsol.amountRaw > 0n) skipped.push(`WSOL: your WSOL account ${state.wsol.ownerAccount} is frozen, so WSOL cannot be withdrawn to it.`);
   return {
-    usdgRaw: state.usdg.frozen || state.usdg.ownerAccountFrozen ? 0n : state.usdg.amountRaw,
+    usdgRaw: state.usdg.frozen || state.usdg.ownerAccountFrozen || state.usdg.hookRefusal !== null ? 0n : state.usdg.amountRaw,
     wsolRaw: state.wsol.frozen || state.wsol.ownerAccountFrozen ? 0n : state.wsol.amountRaw,
     solLamports: state.sol.excess, skipped,
   };
@@ -302,7 +323,8 @@ export function solanaRecoveryWithdrawLegs(state: SolanaRecoveryState): SolanaRe
     legs.push({ asset: "USDG", amountRaw: plan.usdgRaw, instructions: [
       createOwnerAta(owner, state.usdg.ownerAccount, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM),
       buildWithdrawSolanaVaultInstruction({ programAddress: programId, vault, owner, mint: SOLANA_USDG_MINT,
-        vaultToken: state.usdg.vaultAccount, ownerToken: state.usdg.ownerAccount, tokenProgram: TOKEN_2022_PROGRAM, amount: plan.usdgRaw }),
+        vaultToken: state.usdg.vaultAccount, ownerToken: state.usdg.ownerAccount, tokenProgram: TOKEN_2022_PROGRAM, amount: plan.usdgRaw,
+        hookAccounts: state.usdg.hookAccounts }),
     ] });
   }
   if (plan.wsolRaw > 0n) {

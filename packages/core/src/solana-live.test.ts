@@ -1020,3 +1020,110 @@ describe("Solana vault release pin", () => {
     );
   });
 });
+
+describe("Solana vault withdrawal through a USDG transfer hook", () => {
+  const fixture = JSON.parse(contractFile("runtime-tests/fixtures/usdg-mainnet-mint.json")) as {
+    dataBase64: string;
+    variants: { name: string; ops: { op: string; at?: number; hex: string }[] }[];
+  };
+  const variant = (name: string) => {
+    const data = Buffer.from(fixture.dataBase64, "base64");
+    for (const op of fixture.variants.find((v) => v.name === name)!.ops) {
+      const bytes = Buffer.from(op.hex, "hex");
+      if (op.op === "set") bytes.copy(data, op.at!);
+      else return new Uint8Array(Buffer.concat([data, bytes]));
+    }
+    return new Uint8Array(data);
+  };
+  it("reads the hook program from the mainnet mint: none as read, the program once the issuer sets one", () => {
+    assert.equal(live.solanaMintTransferHookProgram(variant("as read")), null);
+    assert.equal(
+      live.solanaMintTransferHookProgram(variant("a transfer hook program (the Memo program)")),
+      "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr",
+    );
+    // A classic mint has no extensions; anything else that is not a mint is refused.
+    assert.equal(live.solanaMintTransferHookProgram(new Uint8Array(82)), null);
+    assert.throws(() => live.solanaMintTransferHookProgram(new Uint8Array(120)), live.SolanaVaultValidationError);
+    const truncated = variant("as read").slice(0, 600);
+    assert.throws(() => live.solanaMintTransferHookProgram(truncated), live.SolanaVaultValidationError);
+  });
+
+  const hook = base58Encode(new Uint8Array(32).fill(81));
+  const fixed = base58Encode(new Uint8Array(32).fill(83));
+  const source = base58Encode(new Uint8Array(32).fill(84));
+  const destination = base58Encode(new Uint8Array(32).fill(85));
+  const authority = base58Encode(new Uint8Array(32).fill(86));
+  /** ExtraAccountMetaList TLV for Execute holding `metas` (35 bytes each). */
+  const list = (...metas: Uint8Array[]) => {
+    const header = new Uint8Array(16);
+    header.set(disc("spl-transfer-hook-interface:execute"));
+    new DataView(header.buffer).setUint32(8, 4 + 35 * metas.length, true);
+    new DataView(header.buffer).setUint32(12, metas.length, true);
+    return join(header, ...metas);
+  };
+  const entry = (kind: number, config: number[] | Uint8Array, signer = 0, writable = 0) => {
+    const c = new Uint8Array(32);
+    c.set(config);
+    return join(Uint8Array.of(kind), c, Uint8Array.of(signer, writable));
+  };
+  const resolve = (validationData: Uint8Array | null, amount = 7n, data: Record<string, Uint8Array> = {}) =>
+    live.resolveSolanaTransferHookAccounts({
+      hookProgram: hook, mint: SOLANA_USDG_MINT, source, destination, authority, amount, validationData,
+      accountData: async (a) => data[a] ?? null,
+    });
+  const pda = async (program: string, ...seeds: Uint8Array[]) =>
+    (await getProgramDerivedAddress({ programAddress: address(program), seeds }))[0];
+
+  it("resolves every kind of extra account the way Token-2022's on-chain helper does, then the validation account and the hook", async () => {
+    const validation = await live.deriveSolanaTransferHookValidation(hook, SOLANA_USDG_MINT);
+    assert.equal(validation, await pda(hook, new TextEncoder().encode("extra-account-metas"), key(SOLANA_USDG_MINT)));
+    // No validation account: only the hook program, as the on-chain helper then needs.
+    assert.deepEqual(await resolve(null), [{ address: hook, role: 0 }]);
+    const sourceData = new Uint8Array(64).fill(9);
+    sourceData.set(key(fixed), 32);
+    const resolved = await resolve(
+      list(
+        entry(0, key(fixed), 0, 1),
+        // PDA of the hook: literal "m", the destination's key, the amount from the Execute data.
+        entry(1, [1, 1, 109, 3, 2, 2, 8, 8]),
+        // PDA of the program at account index 5 (the fixed account): account 0's data bytes 0..4.
+        entry(128 + 5, [4, 0, 0, 4]),
+        // A key read from account 0's data at byte 32.
+        entry(2, [2, 0, 32]),
+      ),
+      7n,
+      { [source]: sourceData },
+    );
+    assert.deepEqual(resolved, [
+      { address: fixed, role: 1 },
+      { address: await pda(hook, Uint8Array.of(109), key(destination), u64(7n)), role: 0 },
+      { address: await pda(fixed, sourceData.slice(0, 4)), role: 0 },
+      { address: fixed, role: 0 },
+      { address: validation, role: 0 },
+      { address: hook, role: 0 },
+    ]);
+  });
+
+  it("refuses a list that asks for a signer, cannot be resolved or is malformed", async () => {
+    await assert.rejects(resolve(list(entry(0, key(fixed), 1))), /asks for a signer/);
+    await assert.rejects(resolve(list(entry(1, [4, 0, 0, 4]))), /missing account data/);
+    await assert.rejects(resolve(list(entry(1, [3, 9]))), /unknown account index/);
+    await assert.rejects(resolve(list(entry(1, [9]))), /unknown seed/);
+    await assert.rejects(resolve(list(entry(7, []))), /unknown account kind/);
+    await assert.rejects(resolve(list(entry(0, key(fixed))).slice(0, 40)), /malformed list/);
+  });
+
+  it("appends the hook accounts to the withdrawal and refuses the owner or a signer among them", () => {
+    const base = {
+      programAddress, vault: authority, owner, mint: SOLANA_USDG_MINT, vaultToken: source, ownerToken: destination,
+      tokenProgram: TOKEN_2022_PROGRAM, amount: 7n,
+    };
+    const plain = live.buildWithdrawSolanaVaultInstruction(base);
+    assert.equal(plain.accounts!.length, 6);
+    const hooked = live.buildWithdrawSolanaVaultInstruction({ ...base, hookAccounts: [{ address: fixed, role: 1 }, { address: hook, role: 0 }] });
+    assert.deepEqual(hooked.accounts!.slice(6).map((a) => [String(a.address), a.role]), [[fixed, 1], [hook, 0]]);
+    assert.deepEqual(hooked.data, plain.data);
+    assert.throws(() => live.buildWithdrawSolanaVaultInstruction({ ...base, hookAccounts: [{ address: owner, role: 0 }] }), live.SolanaVaultValidationError);
+    assert.throws(() => live.buildWithdrawSolanaVaultInstruction({ ...base, hookAccounts: [{ address: fixed, role: 2 as 1 }] }), live.SolanaVaultValidationError);
+  });
+});

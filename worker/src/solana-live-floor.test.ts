@@ -124,6 +124,8 @@ async function fixture(t: TestContext, opts: { cash: bigint; wsol: bigint; mark:
     : k === feePayer ? rpcAccount(Buffer.alloc(0), SYSTEM)
     : k === ownerUsdg ? rpcAccount(token(SOLANA_USDG_MINT, owner, 0n), TOKEN_2022_PROGRAM)
     : k === ownerWsol ? rpcAccount(token(SOLANA_WRAPPED_SOL_MINT, owner, 0n), SOLANA_CLASSIC_TOKEN_PROGRAM)
+    // The USDG mint, with no transfer hook: a withdrawal reads it for one.
+    : k === SOLANA_USDG_MINT ? rpcAccount(Buffer.alloc(82), TOKEN_2022_PROGRAM)
     : extra(k);
   const response = (value: unknown) => ({ context: { slot: SLOT }, value });
   const sends: string[] = [];
