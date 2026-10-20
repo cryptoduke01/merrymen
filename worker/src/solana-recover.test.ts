@@ -49,7 +49,12 @@ const DISC = {
 };
 type Account = { owner: string; lamports: bigint; data: Buffer; executable?: boolean };
 const LOADER = "BPFLoaderUpgradeab1e11111111111111111111111";
-const BINARY = Buffer.from("merrymen-vault-fixture-binary".repeat(10));
+/**
+ * The deployed fixture binary. Like a real build it embeds its program id's 32 bytes (declare_id!): here
+ * both ids the tests release, PROGRAM and the contract's own (VAULT_PROGRAM_ID, written out here because it is declared below).
+ */
+const BINARY = Buffer.concat([Buffer.from("merrymen-vault-fixture-binary".repeat(10)), Buffer.from(base58Decode(PROGRAM)!),
+  Buffer.from(base58Decode("EUzYVniKtgNNgFweMtRA9vciTWtE8MDTRfh6ai6VvXoU")!)]);
 const BINARY_SHA = createHash("sha256").update(BINARY).digest("hex");
 /** Tests run as if PROGRAM were a released program with BINARY deployed, unless they say otherwise. */
 const RELEASED = [{ programId: PROGRAM, sha256: BINARY_SHA }];
@@ -840,6 +845,27 @@ describe("solana-recover program trust", () => {
       assert.equal(swapped.sent.length, 0);
       assert.ok(!swapped.calls.includes("getLatestBlockhash"));
     }
+  });
+
+  it("refuses a released program whose binary is not built for its own id, and checks an unlisted one by its hash alone, as before", async () => {
+    // Hash-pinned and immutable, but declare_id names another program: every instruction would fail.
+    const foreign = Buffer.concat([Buffer.from("merrymen-vault-fixture-binary".repeat(10)), Buffer.from(base58Decode(key(76))!)]);
+    const foreignSha = createHash("sha256").update(foreign).digest("hex");
+    for (const mode of ["send", "plan"] as const) {
+      const fake = await chain({ binary: foreign });
+      const { error, out } = await run(fake, mode === "send" ? send() : [...base, "--owner", OWNER], { releases: [{ programId: PROGRAM, sha256: foreignSha }] });
+      assert.match((error as Error).message, /not built for this program id \(its declare_id differs\).*Nothing was signed or sent/, mode);
+      assert.doesNotMatch(out, /Program binary verified/, mode);
+      assert.equal(fake.sent.length, 0, mode); assert.ok(!fake.calls.includes("getLatestBlockhash"), mode);
+      assert.ok(!fake.calls.includes("getMultipleAccounts"), `${mode}: refused before the plan is read`);
+    }
+    // The same binary named by the owner as an unlisted program: --unlisted-program behaviour is unchanged.
+    const unlisted = await chain({ binary: foreign });
+    const { error, out } = await run(unlisted, [...send(), "--program-sha256", foreignSha, "--unlisted-program"], { releases: [] });
+    assert.equal(error, null, String(error));
+    assert.match(out, /Program binary verified against the given SHA-256 \(immutable\)\. It is NOT a released Merrymen vault program\./);
+    assert.match(out, /WARNING: .* is not a released Merrymen vault program/);
+    assert.ok(unlisted.sent.length > 0);
   });
 
   it("verifies the binary afresh on every run, even after a success through the same RPC in this process", async () => {

@@ -524,11 +524,20 @@ export async function runSolanaRecovery(options: SolanaRecoveryOptions, io: Sola
   if (trust.sha256 !== undefined) {
     // Immutable (no upgrade authority) and hash-matched, so it cannot change
     // before the sends. Read fresh on every run (see solanaRecoveryVerificationRpc).
-    try { await verifySolanaVaultDeployment(solanaRecoveryVerificationRpc(rpc), programId, trust.sha256); }
+    let deployment: { declaresProgramId: boolean };
+    try { deployment = await verifySolanaVaultDeployment(solanaRecoveryVerificationRpc(rpc), programId, trust.sha256); }
     catch (error) {
       if (error instanceof SolanaRpcError) throw error;
       fail(trust.listed ? "The program at that address is not the immutable released binary. Nothing was signed or sent."
         : "The program at that address is not the immutable binary with the given SHA-256. Nothing was signed or sent.");
+    }
+    // A released program must also be built for its own address, as the app's
+    // executor requires (requireDeclaredProgramId): the hashed bytes hold the
+    // program id's 32 bytes (declare_id!). A release pinned to a build for
+    // another id would fail every instruction. An unlisted program the owner
+    // vouches for with --program-sha256 is checked by its hash alone, as before.
+    if (trust.listed && !deployment.declaresProgramId) {
+      fail("The released binary at that address is not built for this program id (its declare_id differs), so it cannot run any instruction. Nothing was signed or sent.");
     }
     io.log(trust.listed ? "Program binary verified: the released Merrymen vault program, immutable, SHA-256 matches."
       : "Program binary verified against the given SHA-256 (immutable). It is NOT a released Merrymen vault program.");
