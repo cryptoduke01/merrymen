@@ -72,9 +72,15 @@ export function declaredProgramId(libRs) {
 
 /** Where SOLANA_VAULT_LOCAL_TEST_PROGRAM is declared, relative to the repository root. */
 export const LOCAL_TEST_SOURCE = "packages/core/src/solana-live.ts";
+/**
+ * An assignment to SOLANA_VAULT_LOCAL_TEST_PROGRAM, compound ones (+=, ??=, ...) included,
+ * never a comparison (==, ===, !=, !==, <=, >=) or an arrow (=>): code that only reads the
+ * id is not a second assignment.
+ */
+const LOCAL_TEST_ASSIGNMENT = /\bSOLANA_VAULT_LOCAL_TEST_PROGRAM\s*(?:\*\*|<<|>>>|>>|&&|\|\||\?\?|[-+*/%&|^])?=(?![=>])/g;
 /** The local test program id: the one string SOLANA_VAULT_LOCAL_TEST_PROGRAM is assigned in LOCAL_TEST_SOURCE. */
 export function localTestProgramId(solanaLiveTs) {
-  const assigned = (solanaLiveTs.match(/\bSOLANA_VAULT_LOCAL_TEST_PROGRAM\s*=/g) ?? []).length;
+  const assigned = (solanaLiveTs.match(LOCAL_TEST_ASSIGNMENT) ?? []).length;
   const found = [...solanaLiveTs.matchAll(/^export const SOLANA_VAULT_LOCAL_TEST_PROGRAM\s*=\s*"([^"]*)"\s*;/gm)];
   if (assigned !== 1 || found.length !== 1) {
     throw new Error(`${LOCAL_TEST_SOURCE} must assign SOLANA_VAULT_LOCAL_TEST_PROGRAM exactly once, to a string; found ${assigned} assignment(s)`);

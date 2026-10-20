@@ -1148,6 +1148,19 @@ describe("solana-program-record.mjs", () => {
       "absent": "export const SOLANA_VAULT_RELEASES = [];\n",
     };
     for (const [label, text] of Object.entries(refused)) assert.throws(() => localTestProgramId(text), /must assign SOLANA_VAULT_LOCAL_TEST_PROGRAM exactly once/, label);
+    // Code that only reads the id (a comparison on either side, an arrow) is not a second assignment.
+    const reads = [
+      "export const isLocal = (id: string) => SOLANA_VAULT_LOCAL_TEST_PROGRAM === id;",
+      "export const isLocal = (id: string) => id === SOLANA_VAULT_LOCAL_TEST_PROGRAM;",
+      "if (SOLANA_VAULT_LOCAL_TEST_PROGRAM == id || SOLANA_VAULT_LOCAL_TEST_PROGRAM != id || SOLANA_VAULT_LOCAL_TEST_PROGRAM !== id) {}",
+      "const ordered = SOLANA_VAULT_LOCAL_TEST_PROGRAM <= id || SOLANA_VAULT_LOCAL_TEST_PROGRAM >= id;",
+      "const same = SOLANA_VAULT_LOCAL_TEST_PROGRAM => SOLANA_VAULT_LOCAL_TEST_PROGRAM;",
+    ];
+    for (const line of reads) assert.equal(localTestProgramId(`${solanaLive(TOKEN_PROGRAM)}${line}\n`), TOKEN_PROGRAM, line);
+    // A compound assignment is still a second assignment.
+    for (const op of ["+=", "??=", "||=", ">>="]) {
+      assert.throws(() => localTestProgramId(`${solanaLive(TOKEN_PROGRAM)}SOLANA_VAULT_LOCAL_TEST_PROGRAM ${op} "x";\n`), /found 2 assignment/, op);
+    }
     assert.throws(() => localTestProgramId(solanaLive("1111")), /not a 32-byte key/);
     assert.deepEqual([undefined, null, {}, { programId: LOCAL }, { localTestId: LOCAL }, { programId: "", localTestId: "" }].map(declaresLocalTestId),
       [null, null, null, null, null, null]);
