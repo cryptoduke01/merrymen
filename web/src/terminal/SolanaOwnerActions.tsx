@@ -305,7 +305,7 @@ export function SolanaOwnerActions({ available, owner, programId, api, sign, ref
   const short = !!ownerWallet && !!held && !!revokeNeeds && !!withdrawNeeds && BigInt(ownerWallet.lamports) < BigInt(ownerWallet.revokeLamports);
   const native = sol(recoverable?.nativeLamports), unsynced = sol(recoverable?.unsyncedWsolLamports);
   const pendingIsServers = !!pending && !!serverPending && pending.signature === serverPending.signature;
-  return <div className="solana-card"><h2>Owner controls</h2>
+  return <div className="solana-card" aria-busy={busy}><h2>Owner controls</h2>
     <p>Your wallet must sign every revocation and withdrawal. Token withdrawals return to your own token accounts; native SOL returns to your owner wallet.</p>
     {held && revokeNeeds && withdrawNeeds && <p>Your owner wallet holds {held} SOL and pays the network fees of these transactions. To revoke it must hold at least {revokeNeeds} SOL; to withdraw, up to {withdrawNeeds} SOL, since a withdrawal may open your token account. Merrymen adds a priority fee only from SOL beyond that, and this page signs none above {sol(OWNER_MAX_PRIORITY_FEE_LAMPORTS.toString())} SOL.</p>}
     {short && <p role="alert" className="solana-warning">That is too little to revoke. Send SOL to your owner wallet now, so you can revoke or withdraw in an emergency.</p>}

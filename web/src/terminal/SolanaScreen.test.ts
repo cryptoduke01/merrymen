@@ -74,7 +74,22 @@ async function type(label: string, value: string) {
 /** Clicks, then lets work outside React's microtasks (WebCrypto for the vault address) finish. */
 async function press(text: string) {
   await ui.click(text);
-  for (let i = 0; i < 20; i++) await act(async () => { await new Promise((resolve) => setTimeout(resolve, 1)); });
+  await settle();
+}
+/** True while the page says it is working: owner controls (aria-busy) or the account's own requests (Refresh account disabled). */
+const pageBusy = () => !!ui.container.querySelector('[aria-busy="true"]')
+  || [...ui.container.querySelectorAll("button")].some((item) => item.textContent === "Refresh account" && item.disabled);
+/**
+ * Lets the page finish what a click or a settled promise started (submit,
+ * refresh, WebCrypto for vault and token account addresses): 20 timer turns,
+ * then more while the page is still busy, up to a bound, so a slow machine
+ * does not fail a test. Not while the fixture wallet is open: the page waits
+ * on it, and the test decides when it answers.
+ */
+async function settle() {
+  const turn = () => act(async () => { await new Promise((resolve) => setTimeout(resolve, 1)); });
+  for (let i = 0; i < 20; i++) await turn();
+  for (let i = 0; i < 2_000 && walletOpen === 0 && pageBusy(); i++) await turn();
 }
 /** Registers in the page's two steps: prepare and review, then sign with the wallet. */
 async function register() {
@@ -89,6 +104,8 @@ let ui: ReturnType<typeof testDom>;
 let state: ReturnType<typeof initial>;
 let calls: Array<{ path: string; body: Record<string, unknown> | undefined }>;
 let signCount: number, exportCount = 0;
+/** Wallet signature requests the fixture has not answered yet. */
+let walletOpen = 0;
 /** What the fixture wallet returns for a signature request (a promise: the wallet stays open until it settles). */
 let signedBytes: () => Uint8Array | Promise<Uint8Array>;
 let signerDid = "did:privy:alice";
@@ -125,7 +142,7 @@ before(async () => {
       if (id === "./useSolanaOwner") return { useSolanaOwner: () => ({
         ready: true, authenticated: true, did: signerDid, address: OWNER, ambiguous: false,
         getAccessToken: async () => "fixture-token", create: async () => {}, signBinding: async () => "fixture-signature",
-        signSetup: async () => { signCount++; return signedBytes(); },
+        signSetup: async () => { signCount++; walletOpen++; try { return await signedBytes(); } finally { walletOpen--; } },
         exportKey: async () => { exportCount++; },
       }) };
     }
@@ -135,7 +152,7 @@ before(async () => {
   finally { intercept.mock.restore(); }
 });
 beforeEach(() => {
-  ui = testDom(); signerDid = "did:privy:alice"; state = initial(); calls = []; signCount = 0; exportCount = 0; signedBytes = () => Uint8Array.from([1, 2, 3]); releases = undefined;
+  ui = testDom(); signerDid = "did:privy:alice"; state = initial(); calls = []; signCount = 0; exportCount = 0; walletOpen = 0; signedBytes = () => Uint8Array.from([1, 2, 3]); releases = undefined;
   respond = async (path) => { if (path === "status") return json(state); throw new Error("Unexpected fixture route"); };
   globalThis.fetch = async (url, init) => {
     assert.equal(new Headers(init?.headers).get("authorization"), "Bearer fixture-token");
@@ -1017,9 +1034,6 @@ test("Withdraw native SOL prepares the runtime's withdraw-sol in lamports, and s
   assert.match(ui.container.textContent!, /Owner transaction: finalized/);
   assert.deepEqual(calls.filter((call) => call.path === "owner").map((call) => call.body!.stage), ["prepare", "submit"]);
 });
-
-/** Lets the page finish what a settled promise started (submit, refresh). */
-async function settle() { for (let i = 0; i < 20; i++) await act(async () => { await new Promise((resolve) => setTimeout(resolve, 1)); }); }
 const COST = /needs your owner wallet to hold at least/;
 test("the owner-controls cost line describes only the action in flight: gone once it finishes, and after a refused prepare", async () => {
   state.runtime.live.programId = PROGRAM;
@@ -1270,7 +1284,7 @@ test("a review whose deadline passes while the wallet is open never says nothing
   assert.doesNotMatch(ui.container.textContent!, LAPSED);
   // The owner signs: the bytes are submitted (the server's window decides) and activated.
   wallet.resolve(Uint8Array.from([1, 2, 3]));
-  for (let i = 0; i < 20; i++) await act(async () => { await new Promise((resolve) => setTimeout(resolve, 1)); });
+  await settle();
   assert.equal(progress.submits, 1); assert.equal(progress.activated, true);
   assert.match(ui.container.textContent!, /Registered permission ready/);
   assert.doesNotMatch(ui.container.textContent!, LAPSED);
@@ -1283,7 +1297,7 @@ test("a wallet that refuses after the review's deadline leaves the review lapsed
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 600)); });
   assert.doesNotMatch(ui.container.textContent!, LAPSED);
   refuse(new Error("The owner closed the wallet."));
-  for (let i = 0; i < 20; i++) await act(async () => { await new Promise((resolve) => setTimeout(resolve, 1)); });
+  await settle();
   assert.match(ui.container.textContent!, /The owner closed the wallet\./);
   assert.match(ui.container.textContent!, /The prepared permission was not signed in time, so it was discarded\. Nothing was signed/);
   assert.equal([...ui.container.querySelectorAll("button")].some((item) => item.textContent === "Sign permission with my wallet"), false);
