@@ -89,7 +89,7 @@ describe("model-facing reads of it", () => {
     assert.match(got, /to my account \[address\]/);
     assert.match(got, /your own wallet \[address\]/);
     assert.ok(!got.toLowerCase().includes(HOLDER.toLowerCase()) && !got.toLowerCase().includes(ACCOUNT.toLowerCase()));
-    assert.ok(got.includes(TX), "a transaction hash is not an address: nothing can be sent to it");
+    assert.ok(!got.includes(TX) && got.includes("landed, tx [hash]"), "a 64-digit run can carry an address: the model gets none");
   });
 
   it("readLlmState — the chat prompt's state pack — carries neither address", async () => {
@@ -97,7 +97,7 @@ describe("model-facing reads of it", () => {
     assert.match(got, /RECENT EVENTS:/);
     assert.ok(!got.toLowerCase().includes(HOLDER.toLowerCase()), "the owner's own wallet never reaches the provider");
     assert.ok(!got.toLowerCase().includes(ACCOUNT.toLowerCase()));
-    for (const m of got.match(/0x[0-9a-fA-F]+/g) ?? []) assert.ok(m.length < 22 || m.length === 66, `left behind: ${m}`);
+    for (const m of got.match(/0x[0-9a-fA-F]+/g) ?? []) assert.ok(m.length < 22, `left behind: ${m}`);
   });
 
   it("the recent_activity tool answers the model without them too", async () => {
@@ -127,12 +127,22 @@ describe("model-facing reads of it", () => {
 });
 
 describe("redactAddresses", () => {
-  it("replaces an address, and a run cut off by a length cap, but never a longer hash", () => {
+  it("replaces an address, a run cut off by a length cap, and any longer run that can carry one", () => {
     assert.equal(redactAddresses(`to ${ACCOUNT}.`), "to [address].");
     assert.equal(redactAddresses(`cut ${HOLDER.slice(0, 30)}`), "cut [address]");
-    assert.equal(redactAddresses(`tx ${TX}`), `tx ${TX}`);
     assert.equal(redactAddresses("tx 0xa11ce, 12 0x-prefixed"), "tx 0xa11ce, 12 0x-prefixed", "short ids are not addresses");
-    assert.equal(redactAddresses(`${ACCOUNT}${ACCOUNT.slice(2)}`), `${ACCOUNT}${ACCOUNT.slice(2)}`, "an 80-digit run is not an address");
+    // An address with hex glued after it rode to the model whole: 64 digits read as a tx hash, 80 as nothing.
+    const riding = `${HOLDER}${"0123456789abcdef01234567"}`;
+    assert.equal(riding.length, 66);
+    assert.equal(redactAddresses(`send to ${riding} now`), "send to [hash] now");
+    assert.equal(redactAddresses(`tx ${TX}`), "tx [hash]", "the owner's report and notices keep it; the model needs no hash");
+    assert.equal(redactAddresses(`${ACCOUNT}${ACCOUNT.slice(2)}`), "[address]", "an 80-digit run can hold an address");
+    assert.equal(redactAddresses(`${HOLDER}a`), "[address]", "41 digits");
+    assert.equal(redactAddresses(`landed tx${HOLDER} ok`), "landed tx[address] ok", "glued to the word before it");
+    assert.equal(redactAddresses(`to ${HOLDER.replace("0x", "0X")}`), "to [address]");
+    for (const out of [redactAddresses(`${riding}`), redactAddresses(`${HOLDER}${HOLDER.slice(2)}ff`)]) {
+      assert.ok(!out.toLowerCase().includes(HOLDER.slice(2, 42).toLowerCase()), out);
+    }
   });
 
   it("replaces a Solana key the same way, and a Solana signature as well (Solana P0)", () => {
@@ -177,8 +187,8 @@ describe("redactAddresses", () => {
     assert.ok(!out.includes("HPCPPVQVXSSQFNHQgUAj"), out);
     assert.equal(out, "landed 0[address] ok");
     assert.equal(redactAddresses(`aped 0x${key} now`), "aped 0[address] now");
-    // An address, a cut one and a tx hash come out as before.
-    assert.equal(redactAddresses(`to ${ACCOUNT}. tx ${TX}`), `to [address]. tx ${TX}`);
+    // An address, a cut one and a tx hash come out as before (a hash as "[hash]", since it can carry an address).
+    assert.equal(redactAddresses(`to ${ACCOUNT}. tx ${TX}`), `to [address]. tx [hash]`);
     assert.equal(redactAddresses(`cut ${HOLDER.slice(0, 30)}`), "cut [address]");
   });
 
