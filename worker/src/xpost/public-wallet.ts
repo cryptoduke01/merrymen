@@ -19,6 +19,14 @@ const TOKEN_MARKER = " CA (";
  * finds (a Solana key or signature, a Solana explorer link). Solana ids carry
  * no 0x, so the hex rule alone let one through as ordinary prose. The glued
  * scan: "CA<mint>" or "<mint>is" is an id too (audit regressions F3).
+ *
+ * ITS ACCEPTED COST, measured 2026-10-19 over a corpus of prose, tickers,
+ * URLs, hashtags, digests and numbers: prose, tickers, URLs and hashtags under
+ * 43 characters are never read as an id. An unbroken base58 run of 43 or more
+ * characters can be (about 11% of 43-59-character camelCase hashtags, 22% of
+ * longer ones, 1% of "commit<sha>" strings; a run of exactly 43 or 44 that
+ * decodes to 32 bytes already was, by the default scan). Such a post is
+ * withheld, never published with an id in it. The test pins both sides.
  */
 function idInText(text: string): boolean {
   return ADDRESS_IN_TEXT.test(text) || onchainIdIn(text, { glued: true });

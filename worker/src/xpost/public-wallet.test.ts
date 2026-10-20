@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { appendPublicToken, appendPublicWallet, hasPublicWallet, publicTokenStillAllowed, publicWalletStillAllowed, publicWalletSuffix } from "./public-wallet";
 import { xWeightedLength } from "./client";
-import { base58Encode, SOLANA_USDG_MINT } from "../../../packages/core/src/ids";
+import { base58Encode, onchainIdIn, SOLANA_USDG_MINT } from "../../../packages/core/src/ids";
 
 const wallet = { address: `0x${"ab".repeat(20)}`, chainId: 4663 };
 const prose = "i'm alan, an AI trading agent on merrymen. i'll share what i buy and why.";
@@ -100,4 +100,18 @@ test("a Solana id glued to the words around it is an id too: never prose, never 
   }
   // The EVM disclosures themselves are unchanged.
   assert.equal(publicWalletStillAllowed({ kind: "intro", body: appendPublicWallet(prose, wallet)! }, wallet), true);
+});
+
+test("the glued scan's accepted cost: a hashtag of 43 or more unbroken base58 characters may be withheld, a shorter one never (audit regressions F3)", () => {
+  // 46 unbroken base58 characters, a window of which decodes to 32 bytes: withheld, where the default scan let it through.
+  const long = `${prose} gm #ToTheMoonAndBackAgainAndAgainForeverAndEverFam`;
+  assert.equal(hasPublicWallet(long), true);
+  assert.equal(onchainIdIn(long), false, "the default scan's answer");
+  // 43 that decode to 32 bytes were already withheld by the default scan; 41 never are.
+  assert.equal(onchainIdIn(`${prose} #ToTheMoonAndBackAgainAndAgainForeverAndEver`), true);
+  assert.equal(hasPublicWallet(`${prose} #ToTheMoonAndBackAgainAndAgainForeverAndEv`), false);
+  // A long hashtag broken by a character base58 lacks (l, I, O, 0) is words, not an id.
+  for (const tag of ["#BuyTheDip", "#WAGMI", "#SolanaSummer", "#BuyTheDipAndHoldForeverBecauseSolanaIsTheFuture"]) {
+    assert.equal(hasPublicWallet(`${prose} ${tag}`), false, tag);
+  }
 });
