@@ -13,7 +13,7 @@ import { settleSolanaReceipt, solanaVaultEvents } from "./solana-settlement";
 import { JUPITER_SWAP_PROGRAM, SolanaLiveMarketError, type JupiterCpiRoute } from "./solana-live-market";
 import type { SolanaLiveRead, SolanaLiveRpc, SolanaSendOptions } from "./solana-live-rpc";
 import { createSolanaLiveRpc } from "./solana-live-rpc";
-import { SOLANA_MAINNET_GENESIS_HASH } from "./solana-rpc";
+import { SOLANA_MAINNET_GENESIS_HASH, SolanaRpcError } from "./solana-rpc";
 import { pythBound } from "./solana-reference-price-fixture";
 
 const key = (n: number) => getBase58Decoder().decode(new Uint8Array(32).fill(n));
@@ -460,6 +460,45 @@ test("a donation with the owner's ATA closed, delegated or foreign fails closed 
     assert.ok(!f.calls.includes("persist"), mode); assert.ok(!f.calls.includes("send"), mode);
     assert.ok(!f.calls.includes("simulateTransaction"), mode);
   }
+});
+
+test("the exact message to be signed is simulated on every provider: one provider's passing simulation cannot vouch for a route alone", async () => {
+  const sims = (f: Awaited<ReturnType<typeof fixture>>) => f.calls.filter(call => call === "simulateTransaction").length;
+  // The primary's simulation passes; the honest fallback's shows the swap failing, or delivering less than the signed minimum.
+  const failing = (f: Awaited<ReturnType<typeof fixture>>) => provider(f, { simulateTransaction: () => ({ context: { slot: SLOT }, value: { err: { InstructionError: [2, { Custom: 6005 }] },
+    unitsConsumed: 200_000, accounts: null } }) });
+  const short = (f: Awaited<ReturnType<typeof fixture>>) => provider(f, { simulateTransaction: async params => {
+    const answer = await f.read("simulateTransaction", params) as { context: unknown; value: { accounts: Array<{ data: [string, string] }> } };
+    const data = Buffer.from(answer.value.accounts[2]!.data[0], "base64"); data.writeBigUInt64LE(1_979_999n, 64);
+    answer.value.accounts[2] = { ...answer.value.accounts[2]!, data: [data.toString("base64"), "base64"] };
+    return answer;
+  } });
+  for (const [name, fallback] of [["failing", failing], ["below the minimum", short]] as const) {
+    const f = await fixture(); f.controls.fallback = fallback(f);
+    await assert.rejects(createSolanaExecutor(f.options).execute(f.intent), /refused: simulation/, name);
+    assert.ok(!f.calls.includes("persist") && !f.calls.includes("send"), name);
+    assert.equal(f.getRecord(), null, name);
+  }
+  // A fallback a slot behind the blockhash's bank is asked again briefly, at that bank; then the trade goes on, signed once.
+  const f = await fixture(); let behind = 2; const asked: unknown[] = [];
+  // The blockhash, and both providers' simulations, come from a bank three slots past the prepared slot.
+  const ahead = (read: SolanaLiveRead): SolanaLiveRead => async (method, params = []) => {
+    const answer = await read(method, params);
+    return method === "getLatestBlockhash" || method === "simulateTransaction" ? { ...(answer as object), context: { slot: SLOT + 3 } } : answer;
+  };
+  const lagging: SolanaLiveRead = async (method, params = []) => {
+    if (method === "simulateTransaction") {
+      asked.push((params[1] as { minContextSlot: number }).minContextSlot);
+      if (behind-- > 0) throw new SolanaRpcError("rpc");
+    }
+    return ahead(f.read)(method, params);
+  };
+  f.options.rpc = { ...f.options.rpc, read: operation => operation(ahead(f.read)), readEach: async operation => [await operation(ahead(f.read)), await operation(lagging)] };
+  const pending = await createSolanaExecutor(f.options).execute(f.intent);
+  assert.equal(pending.status, "pending");
+  assert.deepEqual(asked, [SLOT + 3, SLOT + 3, SLOT + 3], "at or after the bank the blockhash came from, and asked again while behind");
+  assert.equal(sims(f), 3, "the primary's estimate, its own recheck and the fallback's answer");
+  assert.equal(f.calls.filter(call => call === "send").length, 1);
 });
 
 test("refuses unsafe authority, mutation, simulation, fees, stale safety and risk evidence before persistence or send", async () => {

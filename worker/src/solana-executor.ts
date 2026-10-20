@@ -18,6 +18,7 @@ import { SolanaLiveMarketError, validateJupiterCpi, type JupiterCpiRoute, type S
 import { readSolanaEachProvider, readSolanaPriorityFee, readSolanaQuorum, type SolanaLiveRead, type SolanaLiveRpc } from "./solana-live-rpc";
 import { SOLANA_REFERENCE_DEFAULT_TOLERANCE_BPS, solanaReferenceNotional, verifySolanaReferenceBound, type SolanaPythGeneration, type SolanaReferenceBound } from "./solana-reference-price";
 import { isSolanaTransactionError, settleSolanaReceipt, type SolanaVaultEvidence } from "./solana-settlement";
+import { SolanaRpcError } from "./solana-rpc";
 
 export interface SolanaLiveIntent {
   kind: "spl-swap"; chain: typeof CHAINS.solana; mode: "live";
@@ -449,6 +450,22 @@ export async function readSolanaVaultBalancesQuorum(rpc: SolanaLiveRpc, vault: s
   if (!views.agreed) return fail();
   return { slot: solanaQuorumSlot(views.values), cashUsdg: views.value.cashUsdg, wsolRaw: views.value.wsolRaw };
 }
+/**
+ * A read at a minimum context slot another provider chose (the primary's
+ * prepared slot, say): a provider a slot or two behind answers it as an RPC
+ * error rather than with older state, so it is asked again this many times,
+ * this far apart, inside its own read session, before its answer counts as
+ * unavailable. Any other error is thrown at once.
+ */
+export const SOLANA_CATCH_UP_ATTEMPTS = 5, SOLANA_CATCH_UP_MS = 400;
+export async function solanaCaughtUp<T>(operation: () => Promise<T>): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    try { return await operation(); } catch (error) {
+      if (attempt >= SOLANA_CATCH_UP_ATTEMPTS || !(error instanceof SolanaRpcError && error.code === "rpc")) throw error;
+      await new Promise(resolve => setTimeout(resolve, SOLANA_CATCH_UP_MS));
+    }
+  }
+}
 /** execute_swap runs only while the cluster clock is in [deadline - this, deadline): `deadline <= now + 30` (lib.rs). */
 export const SOLANA_SWAP_DEADLINE_WINDOW_SECONDS = 30n;
 /**
@@ -775,6 +792,8 @@ export function createSolanaExecutor(options: SolanaExecutorOptions) {
         }
         const blockhash = context(await rpc("getLatestBlockhash", [{ commitment: "confirmed", minContextSlot: slot }]), slot);
         if (!object(blockhash.value) || typeof blockhash.value.blockhash !== "string") return fail();
+        // Every provider simulates the signed message at or after the bank its blockhash came from (below).
+        const simulationSlot = Math.max(slot, blockhash.slot);
         let recentBlockhash: Blockhash;
         try { recentBlockhash = address(blockhash.value.blockhash) as unknown as Blockhash; } catch { return fail(); }
         const lastValidBlockHeight = BigInt(integer(blockhash.value.lastValidBlockHeight));
@@ -793,11 +812,12 @@ export function createSolanaExecutor(options: SolanaExecutorOptions) {
           if (Buffer.from(getBase64EncodedWireTransaction(transaction), "base64").length > 1232) return fail("unsafe-route");
           return transaction;
         };
-        const simulate = async (transaction: ReturnType<typeof compile>) => {
-          const sim = context(await rpc("simulateTransaction", [getBase64EncodedWireTransaction(transaction), {
-            encoding: "base64", commitment: "confirmed", minContextSlot: slot, sigVerify: false, replaceRecentBlockhash: false,
+        // `read`: the provider asked (this session's by default), at or after `at`.
+        const simulate = async (transaction: ReturnType<typeof compile>, read: SolanaLiveRead = rpc, at = slot) => {
+          const sim = context(await read("simulateTransaction", [getBase64EncodedWireTransaction(transaction), {
+            encoding: "base64", commitment: "confirmed", minContextSlot: at, sigVerify: false, replaceRecentBlockhash: false,
             accounts: { encoding: "base64", addresses: [intent.vault, inputTokenAccount, outputTokenAccount, feePayer] },
-          }]), slot);
+          }]), at);
           if (!object(sim.value) || sim.value.err !== null || !Array.isArray(sim.value.accounts) || sim.value.accounts.length !== 4) return fail("simulation");
           const [vault, input, output, payer] = sim.value.accounts.map(account) as [Account, Account, Account, Account];
           const state = decodeSolanaVaultAccount(vault.data);
@@ -840,7 +860,6 @@ export function createSolanaExecutor(options: SolanaExecutorOptions) {
         const charged = SIGNATURE_FEES + (unitPrice * BigInt(units) + 999_999n) / 1_000_000n;
         const fee = quoted > charged ? quoted : charged;
         if (quoted < 10_000n || fee + snapshot.rent > cap || snapshot.payerBalance < fee + snapshot.rent) return fail("fee-cap");
-        await simulate(transaction); // Recheck the exact message that will be signed.
         const compiled = getCompiledTransactionMessageDecoder().decode(transaction.messageBytes);
         if (compiled.version !== 0) return fail();
         const loadedAddresses: SolanaSignedSubmission["loadedAddresses"] = { writable: [], readonly: [] };
@@ -849,8 +868,15 @@ export function createSolanaExecutor(options: SolanaExecutorOptions) {
             const value = alts[lookup.lookupTableAddress]?.[index]; if (!value) return fail("unsafe-route"); return value;
           }));
         }
-        return { transaction, fee, recentBlockhash, lastValidBlockHeight, slot, loadedAddresses, deadline };
+        return { transaction, fee, recentBlockhash, lastValidBlockHeight, slot, loadedAddresses, deadline,
+          recheck: (read: SolanaLiveRead) => simulate(transaction, read, simulationSlot) };
       });
+      checkAbort();
+      // The exact message that will be signed, simulated again on EVERY provider, each in its own session: the
+      // sequence it consumes, what leaves the vault's input and reaches its output, and what the fee payer pays
+      // must pass the same checks on each, so one provider cannot vouch for a route alone. A provider a slot or
+      // two behind the blockhash's bank is asked again briefly (solanaCaughtUp); any refusal refuses the trade.
+      await readSolanaEachProvider(options.rpc, read => solanaCaughtUp(() => prepared.recheck(read)));
       checkAbort();
       const risk = await options.assessRisk({ intent, quote: route.quote, vaultState: snapshot.state,
         slot: prepared.slot, observedAtMs });

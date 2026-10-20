@@ -17,7 +17,7 @@ import {
 } from "../../packages/core/src/solana-live";
 import type { Db } from "./db";
 import { createSolanaExecutor, parseSolanaLiveIntent, readSolanaOwnerRefundBlocks, type SolanaOwnerRefundBlock, readSolanaVaultBalances, readSolanaVaultBalancesQuorum, readSolanaVaultBalancesWith,
-  readSolanaVaultState, readSolanaVaultStateWith, reconcileSolanaSubmission, SOLANA_DEFAULT_MAX_COMPUTE_UNIT_PRICE, solanaComputeBudgetInstructions, SolanaExecutionError, solanaQuorumSlot, verifySolanaVaultDeployment,
+  readSolanaVaultState, readSolanaVaultStateWith, reconcileSolanaSubmission, SOLANA_DEFAULT_MAX_COMPUTE_UNIT_PRICE, solanaComputeBudgetInstructions, SolanaExecutionError, solanaCaughtUp, solanaQuorumSlot, verifySolanaVaultDeployment,
   type SolanaLiveJournal, type SolanaLiveRecord } from "./solana-executor";
 import { createSolanaLiveMarket } from "./solana-live-market";
 import { createSolanaLiveRpc, readSolanaEachProvider, readSolanaPriorityFee, readSolanaQuorum, type SolanaLiveRead, type SolanaLiveRpc } from "./solana-live-rpc";
@@ -209,22 +209,6 @@ const MAX_COMPUTE_UNITS = 1_400_000;
 const WITHDRAW_VALUATION_SLIPPAGE_BPS = 50;
 /** An unchanged fee payer alert is logged again after this long. */
 const FEE_PAYER_ALERT_REPEAT_MS = 10 * 60_000;
-/**
- * A trade's reads at the prepared slot reach every provider, and the prepared
- * slot is the primary's (or the quote's): a provider a slot or two behind
- * answers that minimum context slot as an RPC error rather than with older
- * state. It is asked again this many times, this far apart, inside its read
- * session, before its answer counts as unavailable (and the trade is refused).
- */
-const SLOT_CATCH_UP_ATTEMPTS = 5, SLOT_CATCH_UP_MS = 400;
-async function caughtUp<T>(operation: () => Promise<T>): Promise<T> {
-  for (let attempt = 1; ; attempt++) {
-    try { return await operation(); } catch (error) {
-      if (attempt >= SLOT_CATCH_UP_ATTEMPTS || !(error instanceof SolanaRpcError && error.code === "rpc")) throw error;
-      await new Promise(resolve => setTimeout(resolve, SLOT_CATCH_UP_MS));
-    }
-  }
-}
 /** Lamports as SOL, exact, for owner- and operator-facing text. */
 function sol(lamports: bigint): string {
   const fraction = (lamports % 1_000_000_000n).toString().padStart(9, "0").replace(/0+$/, "");
@@ -1039,7 +1023,8 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
           // bounds this trade, of which the stricter is used. Either provider's refusal refuses the trade.
           let views: Array<{ slot: number; fresh: number; cashUsdg: string; wsolRaw: string; price: SolanaReferencePrice; seq: bigint; sessionEpoch: bigint }>;
           try {
-            views = await readSolanaEachProvider(liveRpc, read => caughtUp(async () => {
+            // The prepared slot is the primary's (or the quote's): a provider a slot or two behind is asked again briefly.
+            views = await readSolanaEachProvider(liveRpc, read => solanaCaughtUp(async () => {
               const held = await readSolanaVaultBalancesWith(read, vault, slot);
               const { seq, sessionEpoch } = await readSolanaVaultStateWith(read, cfg.programId, vault, scope.owner, slot);
               const price = await readSolanaReferencePrice(read, slot, now(), { generation: pythGeneration });
