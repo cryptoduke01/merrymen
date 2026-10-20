@@ -1424,13 +1424,12 @@ test("for a program no release lists, step 2 offers only the read-only plan, whi
 });
 test("the card's release pin is the one the recovery tool trusts by default", async () => {
   const recovery = createRequire(import.meta.url)(recoveryPath) as typeof import("./SolanaRecovery");
-  // The card reads SOLANA_VAULT_RELEASES from core by name (solanaVaultReleases). Once the pin lives in
-  // core (solana-glue-cli), the tool must trust that very array; until then the tool defines its own. A
-  // pin renamed or moved anywhere else fails here, even while it lists no release.
-  const core = createRequire(import.meta.url)("../../../packages/core/src/solana-live") as Record<string, unknown>;
-  const toolSource = readFileSync(fileURLToPath(new URL("../../../worker/src/solana-recover.ts", import.meta.url)), "utf8");
-  if (Object.hasOwn(core, "SOLANA_VAULT_RELEASES")) assert.equal(TOOL_RELEASES, core.SOLANA_VAULT_RELEASES, "the tool trusts core's pin, the one the card reads");
-  else assert.match(toolSource, /^export const SOLANA_VAULT_RELEASES\b/m, "the pin is neither in core, where the card reads it, nor the tool's own");
+  // The card imports SOLANA_VAULT_RELEASES from core by type (solanaVaultReleases): a renamed pin fails
+  // to compile. The tool must trust that very array, not a copy of its own.
+  const core = createRequire(import.meta.url)("../../../packages/core/src/solana-live") as typeof import("../../../packages/core/src/solana-live");
+  assert.equal(TOOL_RELEASES, core.SOLANA_VAULT_RELEASES, "the tool trusts core's pin, the one the card reads");
+  assert.match(readFileSync(recoveryPath, "utf8"), /^import \{ SOLANA_VAULT_RELEASES \} from "\.\.\/\.\.\/\.\.\/packages\/core\/src\/solana-live";$/m,
+    "the card reads the pin by a typed import, never by name");
   // The real pin (no test override): what the page offers to sign for is exactly what the tool signs for.
   assert.deepEqual(recovery.solanaVaultReleases(), TOOL_RELEASES);
   for (const release of TOOL_RELEASES) assert.equal(recovery.releasedProgramSha256(release.programId), release.sha256);
@@ -1527,9 +1526,12 @@ test("a pending owner record the server cannot settle says so plainly, never 'a 
     for (const [pin, pointer] of [[[{ programId: PROGRAM, sha256: "ab".repeat(32) }], /Step 2 of the owner key card below revokes every session and withdraws your vault with your offline owner key, without this server\./],
       [[], /Step 2 of the owner key card below shows your vault and its session without this server\./]] as const) {
       releases = [...pin];
+      // A hash in the status answer never turns the plan into the signing command: only the pin decides.
       liveVault(); pendingRecord("stuck-sig"); state.runtime.live.blockers = [UNAVAILABLE];
+      Object.assign(state.runtime.live, { programSha256: "ab".repeat(32) });
       await render();
       assert.match(text(), pointer); assert.ok(exportCard());
+      if (!pin.length) assert.doesNotMatch(text(), /SHA-256|--send|--key-file|offline owner key/);
       assert.doesNotMatch(text(), /Merrymen has to fix/);
       await ui.close(); ui = testDom();
     }
