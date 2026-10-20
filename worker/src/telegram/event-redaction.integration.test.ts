@@ -24,7 +24,7 @@ process.env.MERRYMEN_HOME = HOME;
 process.env.MERRYMEN_HOSTED = "1";
 
 const { closeStoreForTest, initStore, addEvent } = await import("../store");
-const { readLlmState, readRecentEvents, readReport, redactAddresses } = await import("./reads");
+const { readLlmState, readRecentEvents, readReport, redactAddresses, redactHexRuns } = await import("./reads");
 const { toolByName } = await import("./chat-tools");
 const { energyNotice } = await import("../energy-copy");
 const ids = await import("../../../packages/core/src/ids");
@@ -220,5 +220,21 @@ describe("redactAddresses", () => {
     const notifier = readFileSync(new URL("./notifier.ts", import.meta.url), "utf8");
     assert.match(notifier, /redactAddresses\(report\.replace\(\/<\[\^>\]\+>\/g, ""\)\)/, "the digest's narration evidence");
     assert.match(notifier, /hasGrant \? redactAddresses\(plainReport\)/, "the journal's narration evidence");
+  });
+
+  it("redacts 0x runs exactly as the old /0[xX]([0-9a-fA-F]{20,})/g did, in linear time, and never throws on a multi-megabyte run (review finalise)", () => {
+    const old = (text: string) => text.replace(/0[xX]([0-9a-fA-F]{20,})(?![0-9a-fA-F])/g, (_run, hex: string) => (hex.length === 64 ? "[hash]" : "[address]"));
+    const pieces = ["0x", "0X", "00x", "0", "x", "a", "F", "g", " ", "1", "-", "0x".padEnd(21, "a"), `0x${"b".repeat(64)}`, `0x${"c".repeat(19)}`, "zz"];
+    let seed = 7;
+    const next = () => (seed = (seed * 1103515245 + 12345) % 2 ** 31) % pieces.length;
+    for (let round = 0; round < 3000; round++) {
+      const text = Array.from({ length: 1 + (round % 9) }, () => pieces[next()]).join("");
+      assert.equal(redactHexRuns(text), old(text), JSON.stringify(text));
+    }
+    // The regex overflowed V8's stack on this; the pass reads it once.
+    const huge = "0x" + "a1".repeat(3_500_000);
+    let out = "";
+    assert.doesNotThrow(() => { out = redactAddresses(`report ${huge} end`); });
+    assert.equal(out, "report [address] end");
   });
 });

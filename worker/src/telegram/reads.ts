@@ -969,15 +969,39 @@ export function readWhyEvidence(agentId?: string | null): { text: string; hasTra
  * base58 key cut short does not decode, so unlike a cut 0x run it is not
  * caught.
  */
-const HEX_RUN = /0[xX]([0-9a-fA-F]{20,})(?![0-9a-fA-F])/g;
+/** An ASCII hex digit. */
+function hexDigit(code: number): boolean {
+  return (code >= 48 && code <= 57) || (code >= 65 && code <= 70) || (code >= 97 && code <= 102);
+}
+/**
+ * Every "0x" or "0X" followed by 20 or more hex digits, the whole run, as
+ * "[hash]" (64 digits) or "[address]": what /0[xX]([0-9a-fA-F]{20,})/g
+ * matched, found by one linear pass. EVERY QUANTIFIER IS BOUNDED
+ * (telegram/agent.ts): the unbounded regex overflowed V8's backtracking stack
+ * on a run of a few million hex digits, and a throw here skips the daily
+ * digest and every event read the model is given.
+ */
+export function redactHexRuns(text: string): string {
+  let out = "", last = 0;
+  for (let i = 0; i + 1 < text.length; i++) {
+    if (text.charCodeAt(i) !== 48 || (text.charCodeAt(i + 1) | 32) !== 120) continue;
+    let end = i + 2;
+    while (end < text.length && hexDigit(text.charCodeAt(end))) end++;
+    if (end - i - 2 < 20) continue;
+    out += text.slice(last, i) + (end - i - 2 === 64 ? "[hash]" : "[address]");
+    last = end;
+    i = end - 1;
+  }
+  return last === 0 ? text : out + text.slice(last);
+}
 export function redactAddresses(text: string): string {
   // Longest value first (core's redactSolanaIds): a glued run can end in a key that also stands alone.
   // A whole run that is itself a signature (idFamily: it decodes to 64 bytes) is named as one.
-  // Solana first, on the text as written: HEX_RUN takes "0x" and its hex, so run first on
+  // Solana first, on the text as written: redactHexRuns takes "0x" and its hex, so run first on
   // "0x<hex><key>" it ate the key's leading hex and left a tail too short to decode (review GE,
-  // round 2). The glued scan skips a run that is "0x" then hex alone, so an address is still HEX_RUN's.
+  // round 2). The glued scan skips a run that is "0x" then hex alone, so an address is still redactHexRuns's.
   const solana = redactSolanaIds(text, (hit) => (hit.shape === "hash" && idFamily(hit.value) === "solana" ? "[signature]" : "[address]"));
-  return solana.replace(HEX_RUN, (_run, hex: string) => (hex.length === 64 ? "[hash]" : "[address]"));
+  return redactHexRuns(solana);
 }
 
 /** Recent event-feed lines (for the LLM's context) — addresses redacted. */
