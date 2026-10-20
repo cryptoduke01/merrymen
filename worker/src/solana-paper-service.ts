@@ -203,6 +203,15 @@ export function createSolanaPaperService(
      * USDG first: only the market's zero-output answer qualifies it. A lot a
      * route still buys must be sold instead, and a failed quote (an outage)
      * writes off nothing.
+     *
+     * Owner decision (2026-10-20, conservative default): only that positive
+     * evidence counts. A token with no route at all (delisted, rugged: Jupiter
+     * errors or finds no route) raises a different error and can never be
+     * written off, so its lot keeps its position slot. The alternative is an
+     * explicit no-route write-off that needs repeated no-route answers spread
+     * over time; it is not built. Hosted tenant books (the trading store's
+     * paper ledger) offer no write-off yet; applySolanaPaperWriteOff is the
+     * shared accounting such a ledger would call under its own book lock.
      */
     async writeOff(owner: string, mint: string) {
       assertScope(owner);
