@@ -558,6 +558,46 @@ describe("Solana secret detection", () => {
     assert.deepEqual(solanaSecretsIn(`${blobs}\n${blob()}${keys.long}`), [], "missed, and nothing is refused");
   });
 
+  it("remembers a fresh scan of a short text, never a scan handed a budget, and answers as before", () => {
+    // Review RHS, round 2: the group chat quotes the same stored lines in every prompt it builds, and the windows
+    // of a 400-character line of random base58 cost about 256 keypair checks every time.
+    let x = 0x7f4a7c15;
+    const random = (n: number) => Array.from({ length: n }, () => ALPHABET[((x = (Math.imul(x, 1664525) + 1013904223) >>> 0) >>> 16) % 58]).join("");
+    const line = random(400);
+    const first = cpuMsOf(() => assert.deepEqual(solanaSecretsIn(line), []));
+    let again = Infinity;
+    for (let round = 0; round < 3; round++) again = Math.min(again, cpuMsOf(() => assert.deepEqual(solanaSecretsIn(line), [])));
+    assert.ok(again < 5 && again < first / 4, `first scan ${first.toFixed(2)} ms, again ${again.toFixed(2)} ms of CPU time`);
+    // A scan handed a budget reads the text itself, and spends that budget, remembered or not.
+    const budget = secretScanBudget();
+    assert.deepEqual(solanaSecretsIn(line, budget), []);
+    assert.ok(budget.windows!.checks < secretScanBudget().windows!.checks, "the windows were read and counted");
+    // A remembered answer is the same answer: each secret as written, in a fresh array every time.
+    const { secretB58: key } = keypair(79);
+    const { secretB58: other } = keypair(83);
+    const array = `[${[...keypair(89).secret].join(",")}]`;
+    const text = `${random(30)} pk${key}is ${other} ${array}`;
+    const answer = solanaSecretsIn(text);
+    assert.deepEqual(answer, [key, other, array]);
+    answer.push("changed by a caller");
+    assert.deepEqual(solanaSecretsIn(text), [key, other, array]);
+    assert.equal(solanaSecretIn(text), true);
+    assert.deepEqual(solanaSecretsIn(`${text} `), [key, other, array], "a different text is its own scan");
+  });
+
+  it("reads exact candidates only when asked, for a caller that replaces every glued run itself", () => {
+    const { secretB58: key, secret } = keypair(97);
+    const exact = () => secretScanBudget({ windows: false });
+    assert.deepEqual(solanaSecretsIn(`key ${key}`, exact()), [key]);
+    assert.deepEqual(solanaSecretsIn(`[${[...secret].join(",")}]`, exact()).length, 1);
+    assert.deepEqual(solanaSecretsIn(`pk${key}`, exact()), [], "no window is read");
+    assert.deepEqual(solanaSecretsIn(`pk${key}`), [key], "as the default scan does");
+    let x = 0x3c6ef372;
+    const lines = Array.from({ length: 30 }, () => Array.from({ length: 400 }, () => ALPHABET[((x = (Math.imul(x, 1664525) + 1013904223) >>> 0) >>> 16) % 58]).join(""));
+    const spent = cpuMsOf(() => { for (const l of lines) assert.deepEqual(solanaSecretsIn(l, exact()), []); });
+    assert.ok(spent < 50, `30 fresh 400-character lines, exact only: ${spent.toFixed(1)} ms of CPU time`);
+  });
+
   it("never refuses base64 for the base58 runs inside it", () => {
     // Review RHS, round 1: with every window refused past the budget, random bytes as base64 in an .ipynb were
     // refused from about 800 KB (1 in 10) and always from 2 MB, so send_file refused notebooks and images.

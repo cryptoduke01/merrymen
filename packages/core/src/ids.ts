@@ -22,6 +22,7 @@
  * browser-safe (web imports it).
  */
 import { ed25519 } from "@noble/curves/ed25519";
+import { sha256 } from "@noble/hashes/sha256";
 
 /** The chain families Merrymen can name. */
 export type ChainFamily = "evm" | "solana";
@@ -536,9 +537,39 @@ export type SecretScanBudget = {
 };
 type WindowBudget = NonNullable<SecretScanBudget["windows"]>;
 
-/** A fresh budget: SECRET_CANDIDATES exact candidates and the SECRET_WINDOW_* window reads. */
-export function secretScanBudget(): SecretScanBudget {
-  return { left: SECRET_CANDIDATES, windows: { checks: SECRET_WINDOW_CHECKS, decodes: SECRET_WINDOW_DECODES, starts: SECRET_WINDOW_STARTS } };
+/**
+ * A fresh budget: SECRET_CANDIDATES exact candidates and the SECRET_WINDOW_*
+ * window reads. `{ windows: false }`: exact candidates only, no window read,
+ * for a caller that already replaces every run a glued key could hide in (the
+ * group-chat prompt quoting, whose encodedRuns turns any such run into "(a
+ * code)"): a 400-character line of random base58 then costs microseconds, not
+ * the window budget's tens of milliseconds.
+ */
+export function secretScanBudget(opts: { windows?: boolean } = {}): SecretScanBudget {
+  return { left: SECRET_CANDIDATES, windows: opts.windows === false ? { checks: 0, decodes: 0, starts: 0 }
+    : { checks: SECRET_WINDOW_CHECKS, decodes: SECRET_WINDOW_DECODES, starts: SECRET_WINDOW_STARTS } };
+}
+
+/**
+ * SCANS ARE REMEMBERED (review RHS, round 2). A scan with a fresh budget is a
+ * pure function of its text, and the windows can cost tens of milliseconds a
+ * text (about 256 keypair checks for a 400-character line of random base58),
+ * while the group chat quotes the same stored lines in every prompt it builds
+ * (30 in voice.ts alone): 1.2 s of CPU a prompt, in the worker that also
+ * trades. So the answer for a text of up to SECRET_MEMO_CHARS, scanned with no
+ * budget handed in, is kept for the next scan of the same text: where its
+ * secrets are, as offsets, under the SHA-256 of its UTF-16 code units, so the
+ * memo holds neither the text nor any secret in it. A scan handed a budget is
+ * never remembered (its answer depends on what the budget had left), nor is
+ * a scan that threw. The oldest of SECRET_MEMO_ENTRIES goes first.
+ */
+const SECRET_MEMO_CHARS = 4_096;
+const SECRET_MEMO_ENTRIES = 1_024;
+const secretMemo = new Map<string, ReadonlyArray<readonly [number, number]>>();
+function secretMemoKey(text: string): string {
+  const units = new Uint16Array(text.length);
+  for (let i = 0; i < text.length; i++) units[i] = text.charCodeAt(i);
+  return String.fromCharCode(...sha256(new Uint8Array(units.buffer)));
 }
 
 /**
@@ -674,19 +705,33 @@ function shortestKeypairIn(run: string): number {
  * the Telegram agent's send_file once swallowed a throw here and sent the file
  * unscanned (review RHS, round 1).
  */
-export function solanaSecretsIn(text: unknown, budget: SecretScanBudget = secretScanBudget()): string[] {
+export function solanaSecretsIn(text: unknown, budget?: SecretScanBudget): string[] {
   if (typeof text !== "string" || text.length < 64) return [];
   try {
-    return secretsIn(text, budget);
+    // A fresh scan of a short text is remembered (SECRET_MEMO_CHARS): the same answer, without the work.
+    const key = budget === undefined && text.length <= SECRET_MEMO_CHARS ? secretMemoKey(text) : null;
+    let spans = key === null ? undefined : secretMemo.get(key);
+    if (spans) {
+      secretMemo.delete(key!);
+      secretMemo.set(key!, spans);
+    } else {
+      spans = secretsIn(text, budget ?? secretScanBudget());
+      if (key !== null) {
+        secretMemo.set(key, spans);
+        if (secretMemo.size > SECRET_MEMO_ENTRIES) secretMemo.delete(secretMemo.keys().next().value!);
+      }
+    }
+    return spans.map(([start, end]) => text.slice(start, end));
   } catch {
     return [text];
   }
 }
 
-function secretsIn(text: string, budget: SecretScanBudget): string[] {
+/** Where each secret is in `text`, [start, end), in the order solanaSecretsIn returns them. */
+function secretsIn(text: string, budget: SecretScanBudget): Array<[number, number]> {
   const w = (budget.windows ??= { checks: SECRET_WINDOW_CHECKS, decodes: SECRET_WINDOW_DECODES, starts: SECRET_WINDOW_STARTS });
-  const hits: Array<[at: number, value: string]> = [];
-  const found = (at: number, run: string, key: [number, number]) => hits.push([at + key[0], run.slice(key[0], key[1])]);
+  const hits: Array<[start: number, end: number]> = [];
+  const found = (at: number, _run: string, key: [number, number]) => hits.push([at + key[0], at + key[1]]);
   /**
    * Runs whose windows are still to read, in the order written: longer than a
    * keypair (`long`: any key in one is glued; [lo, hi) is what its edges left),
@@ -708,12 +753,12 @@ function secretsIn(text: string, budget: SecretScanBudget): string[] {
     if (run.length <= longest && run.length >= shortest) {
       // EXACT: the run as it stands, as every scan before glued keys read it.
       if (budget.left-- <= 0) {
-        hits.push([at, run]);
+        hits.push([at, end]);
         continue;
       }
       const bytes = base58Decode(run);
       if (bytes?.length === 64 && isSolanaKeypair(bytes)) {
-        hits.push([at, run]);
+        hits.push([at, end]);
         continue;
       }
       whole64 = bytes?.length === 64;
@@ -755,12 +800,13 @@ function secretsIn(text: string, budget: SecretScanBudget): string[] {
     const inside = (from: number) => sweep(r.run, w, from, r.hi, 0, r.hi - SECRET_GLUE - 1, r.min);
     for (let key = inside(r.lo + SECRET_GLUE + 1); Array.isArray(key); key = inside(key[1])) found(r.at, r.run, key);
   }
-  const secrets = hits.sort((x, y) => x[0] - y[0]).map(([, value]) => value);
+  const secrets = hits.sort((x, y) => x[0] - y[0]);
   for (const m of text.matchAll(BYTE_ARRAY_64)) {
-    if (budget.left-- <= 0) secrets.push(m[0]);
+    const span: [number, number] = [m.index, m.index + m[0].length];
+    if (budget.left-- <= 0) secrets.push(span);
     else {
       const nums = m[0].slice(1, -1).split(",").map((x) => Number(x.trim()));
-      if (nums.length === 64 && isSolanaKeypair(Uint8Array.from(nums))) secrets.push(m[0]);
+      if (nums.length === 64 && isSolanaKeypair(Uint8Array.from(nums))) secrets.push(span);
     }
   }
   return secrets;
