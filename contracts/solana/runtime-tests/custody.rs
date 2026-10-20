@@ -1424,6 +1424,172 @@ async fn usdg_with_a_fee_hook_or_unknown_extension_is_refused_as_input_and_outpu
     }
 }
 
+/// The mainnet USDG mint (fixtures/usdg-mainnet-mint.json): the bytes one read-only
+/// getAccountInfo returned at the recorded slot, and variants of them, each with the
+/// verdict the vault must give.
+fn usdg_mainnet_fixture() -> serde_json::Value {
+    serde_json::from_str(include_str!("fixtures/usdg-mainnet-mint.json")).unwrap()
+}
+fn hex_bytes(text: &str) -> Vec<u8> {
+    assert!(text.len() % 2 == 0, "odd hex {text}");
+    (0..text.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&text[i..i + 2], 16).unwrap())
+        .collect()
+}
+fn hex_string(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+/// The fixture's mint account changed by one variant's ops, in order ("set" writes hex at
+/// byte offset "at", "append" adds it at the end), and checked against the variant's SHA-256.
+fn usdg_mainnet_variant(f: &serde_json::Value, variant: &serde_json::Value) -> Account {
+    let mut data = base64::engine::general_purpose::STANDARD
+        .decode(f["dataBase64"].as_str().unwrap())
+        .unwrap();
+    for op in variant["ops"].as_array().unwrap() {
+        let bytes = hex_bytes(op["hex"].as_str().unwrap());
+        match op["op"].as_str().unwrap() {
+            "set" => {
+                let at = usize::try_from(op["at"].as_u64().unwrap()).unwrap();
+                data[at..at + bytes.len()].copy_from_slice(&bytes);
+            }
+            "append" => data.extend_from_slice(&bytes),
+            other => panic!("unknown op {other}"),
+        }
+    }
+    assert_eq!(
+        hex_string(&solana_sdk::hash::hash(&data).to_bytes()),
+        variant["sha256"].as_str().unwrap(),
+        "{}",
+        variant["name"]
+    );
+    Account {
+        lamports: f["lamports"].as_u64().unwrap(),
+        data,
+        owner: f["owner"].as_str().unwrap().parse().unwrap(),
+        executable: false,
+        rent_epoch: 0,
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires the compiled custody SBF artifact; run contracts/solana/test.sh"]
+async fn the_mainnet_usdg_mint_as_read_carries_only_extensions_the_vault_accepts_and_trades_both_ways(
+) {
+    use spl_token_2022::extension::{BaseStateWithExtensions, StateWithExtensions};
+    let f = usdg_mainnet_fixture();
+    assert_eq!(f["address"].as_str().unwrap(), USDG.to_string());
+    assert_eq!(f["owner"].as_str().unwrap(), spl_token_2022::ID.to_string());
+    let read = &f["variants"][0];
+    assert_eq!(read["name"].as_str(), Some("as read"));
+    assert_eq!(read["vault"].as_str(), Some("accepts"));
+    assert!(read["ops"].as_array().unwrap().is_empty());
+    let usdg = usdg_mainnet_variant(&f, read);
+    assert_eq!(
+        hex_string(&solana_sdk::hash::hash(&usdg.data).to_bytes()),
+        f["dataSha256"].as_str().unwrap()
+    );
+    // The program's own spl-token-2022 parses the account, and finds exactly the extensions
+    // the fixture lists (all in check_mint's allowlist, which the trade below exercises).
+    let state = StateWithExtensions::<RawMint>::unpack(&usdg.data).unwrap();
+    let found: Vec<String> = state
+        .get_extension_types()
+        .unwrap()
+        .iter()
+        .map(|t| format!("{t:?}"))
+        .collect();
+    let listed: Vec<String> = f["decoded"]["extensions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(found, listed);
+    assert_eq!((state.base.decimals, state.base.is_initialized), (6, true));
+    let fee = state.get_extension::<TransferFeeConfig>().unwrap();
+    assert_eq!(
+        (
+            u16::from(fee.older_transfer_fee.transfer_fee_basis_points),
+            u16::from(fee.newer_transfer_fee.transfer_fee_basis_points)
+        ),
+        (0, 0)
+    );
+    let hook = state.get_extension::<TransferHook>().unwrap();
+    assert!(Option::<Pubkey>::from(hook.program_id).is_none());
+
+    let mut fx = Fixture::new().await;
+    fx.ctx.set_account(&USDG, &usdg.into());
+    let buy = fx.swap_ix(0, 1, 0).await;
+    fx.swap(buy).await.unwrap();
+    assert_eq!(
+        (fx.balance(fx.input).await, fx.balance(fx.output).await),
+        (900, 200)
+    );
+    let caps = fx.session_ix(100, 500);
+    fx.owner_send(vec![caps]).await.unwrap();
+    let sell = fx.swap_ix(1, 2, 3).await;
+    fx.swap(sell).await.unwrap();
+    assert_eq!(
+        (fx.balance(fx.input).await, fx.balance(fx.output).await),
+        (1000, 100)
+    );
+    assert_eq!(fx.state().await.seq, 2);
+}
+
+#[tokio::test]
+#[ignore = "requires the compiled custody SBF artifact; run contracts/solana/test.sh"]
+async fn every_mainnet_usdg_mint_variant_gets_the_vault_verdict_the_fixture_gives_both_ways() {
+    let f = usdg_mainnet_fixture();
+    let variants = f["variants"].as_array().unwrap();
+    assert!(variants.iter().any(|v| v["vault"] == "refuses"));
+    for variant in variants {
+        let name = variant["name"].as_str().unwrap();
+        let usdg = usdg_mainnet_variant(&f, variant);
+        let mut fx = Fixture::new().await;
+        fx.ctx.set_account(&USDG, &usdg.into());
+        match variant["vault"].as_str().unwrap() {
+            "accepts" => {
+                let buy = fx.swap_ix(0, 1, 0).await;
+                fx.swap(buy).await.unwrap();
+                let caps = fx.session_ix(100, 500);
+                fx.owner_send(vec![caps]).await.unwrap();
+                let sell = fx.swap_ix(1, 2, 3).await;
+                fx.swap(sell).await.unwrap();
+                assert_eq!(
+                    (fx.balance(fx.input).await, fx.balance(fx.output).await),
+                    (1000, 100),
+                    "{name}"
+                );
+                assert_eq!(fx.state().await.seq, 2, "{name}");
+            }
+            "refuses" => {
+                // The temporary account exists, so only the program's own screen can refuse.
+                let buy = fx.swap_ix(0, 1, 0).await;
+                fx.donate(&buy, 0);
+                assert!(
+                    vault_error(fx.swap(buy).await, vault::VaultError::Mint),
+                    "{name}: buy"
+                );
+                fx.untouched().await;
+                fx.hold_wsol(200).await;
+                let sell = fx.swap_ix(0, 1, 3).await;
+                fx.donate(&sell, 0);
+                assert!(
+                    vault_error(fx.swap(sell).await, vault::VaultError::Mint),
+                    "{name}: sell"
+                );
+                assert_eq!(
+                    (fx.balance(fx.input).await, fx.balance(fx.output).await),
+                    (1000, 200),
+                    "{name}"
+                );
+                assert_eq!(fx.state().await.seq, 0, "{name}");
+            }
+            other => panic!("{name}: unknown vault verdict {other}"),
+        }
+    }
+}
+
 #[tokio::test]
 #[ignore = "requires the compiled custody SBF artifact; run contracts/solana/test.sh"]
 async fn substitute_mints_decimals_and_token_programs_are_refused() {

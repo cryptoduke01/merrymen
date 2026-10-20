@@ -53,6 +53,25 @@ export const SOLANA_CLASSIC_TOKEN_PROGRAM =
   "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 export const SOLANA_WRAPPED_SOL_MINT =
   "So11111111111111111111111111111111111111112";
+/**
+ * The Token-2022 mint extensions the vault program's check_mint (lib.rs)
+ * accepts on the USDG mint, named as Agave's jsonParsed account reads name
+ * them. On a USDG mint with any other extension, a transfer fee above 0 bps
+ * (older or newer) or a transfer hook program, the program fails every swap,
+ * buys and exits alike, with VaultError::Mint (6005). The mainnet mint read on
+ * 2026-10-20 carries exactly these eight
+ * (contracts/solana/runtime-tests/fixtures/usdg-mainnet-mint.json).
+ */
+export const SOLANA_VAULT_USDG_MINT_EXTENSIONS: readonly string[] = Object.freeze([
+  "transferFeeConfig",
+  "transferHook",
+  "mintCloseAuthority",
+  "confidentialTransferMint",
+  "permanentDelegate",
+  "confidentialTransferFeeConfig",
+  "metadataPointer",
+  "tokenMetadata",
+]);
 export const SOLANA_JUPITER_SHARED_ROUTE_DISCRIMINATOR = Uint8Array.from([
   193, 32, 155, 51, 65, 214, 156, 129,
 ]);

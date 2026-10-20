@@ -867,6 +867,35 @@ describe("Solana custody build manifest", () => {
   });
 });
 
+describe("Solana vault USDG mint screen", () => {
+  it("names exactly the extensions lib.rs check_mint accepts, and every one the mainnet mint carries", () => {
+    const lib = contractFile("programs/merrymen-vault/src/lib.rs");
+    const start = lib.indexOf("fn check_mint(");
+    const end = lib.indexOf("\nfn ", start + 1);
+    assert.ok(start >= 0 && end > start, "check_mint not found in lib.rs");
+    const accepted = [
+      ...new Set(
+        [...lib.slice(start, end).matchAll(/ExtensionType::([A-Za-z]+)/g)].map(
+          (m) => m[1]![0]!.toLowerCase() + m[1]!.slice(1),
+        ),
+      ),
+    ].sort();
+    assert.deepEqual(accepted, [...live.SOLANA_VAULT_USDG_MINT_EXTENSIONS].sort());
+    assert.ok(Object.isFrozen(live.SOLANA_VAULT_USDG_MINT_EXTENSIONS));
+    const mainnet = JSON.parse(
+      contractFile("runtime-tests/fixtures/usdg-mainnet-mint.json"),
+    ) as { address: string; decoded: { extensions: string[] } };
+    assert.equal(mainnet.address, SOLANA_USDG_MINT);
+    for (const name of mainnet.decoded.extensions)
+      assert.ok(
+        live.SOLANA_VAULT_USDG_MINT_EXTENSIONS.includes(
+          name[0]!.toLowerCase() + name.slice(1),
+        ),
+        name,
+      );
+  });
+});
+
 describe("Solana vault release pin", () => {
   it("lists only well-formed releases, one per program, never the local test program", () => {
     assert.ok(Object.isFrozen(live.SOLANA_VAULT_RELEASES));
