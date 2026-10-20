@@ -79,15 +79,19 @@ async function press(text: string) {
 /** True while the page says it is working: owner controls (aria-busy) or the account's own requests (Refresh account disabled). */
 const pageBusy = () => !!ui.container.querySelector('[aria-busy="true"]')
   || [...ui.container.querySelectorAll("button")].some((item) => item.textContent === "Refresh account" && item.disabled);
+/** The real clock's setTimeout, kept before any test mocks the page's timers (mock.timers). */
+const realSetTimeout = globalThis.setTimeout;
 /**
  * Lets the page finish what a click or a settled promise started (submit,
  * refresh, WebCrypto for vault and token account addresses): 20 timer turns,
  * then more while the page is still busy, up to a bound, so a slow machine
  * does not fail a test. Not while the fixture wallet is open: the page waits
- * on it, and the test decides when it answers.
+ * on it, and the test decides when it answers. Its turns are on the real
+ * clock, so it works the same while a test drives the page's own timers and
+ * Date with mock.timers: those move only when the test ticks them.
  */
 async function settle() {
-  const turn = () => act(async () => { await new Promise((resolve) => setTimeout(resolve, 1)); });
+  const turn = () => act(async () => { await new Promise((resolve) => realSetTimeout(resolve, 1)); });
   for (let i = 0; i < 20; i++) await turn();
   for (let i = 0; i < 2_000 && walletOpen === 0 && pageBusy(); i++) await turn();
 }
@@ -920,22 +924,32 @@ test("a registration that later fails on chain is discarded instead of being act
 });
 
 test("a held permission that expires before activation is discarded without resubmitting it", async () => {
-  state = initial("live"); state.runtime.live.programId = PROGRAM;
-  const saved = { ...liveLimits(), expiresAtMs: Date.now() + 400 }; state.binding.limits = saved;
-  respond = async (path, body) => {
-    if (path === "status") return json(state);
-    if (path === "setup" && body?.stage === "prepare") return json({ setup: await permissionTransaction(String(body.sessionPublicKey), saved) });
-    if (path === "setup" && body?.stage === "submit") return json({ registration: { signature: "fixture-chain-signature", status: "pending" } });
-    throw new Error("Unexpected fixture route");
-  };
-  await render(); await register();
-  assert.match(ui.container.textContent!, /awaiting final confirmation/);
-  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 500)); });
-  await press("Finish permission registration");
-  assert.match(ui.container.textContent!, /This permission expired at .* before it was activated, so its session key has been discarded/);
-  assert.equal(calls.filter((call) => call.path === "setup" && call.body?.stage === "submit").length, 1);
-  assert.equal(calls.some((call) => call.body?.stage === "activate"), false);
-  assert.equal([...ui.container.querySelectorAll("button")].some((item) => item.textContent === "Finish permission registration"), false);
+  // The page's clock is the test's: the permission expires when the test ticks
+  // past it, never while a loaded machine is still registering it.
+  mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"], now: Date.now() });
+  try {
+    state = initial("live"); state.runtime.live.programId = PROGRAM;
+    const saved = { ...liveLimits(), expiresAtMs: Date.now() + 400 }; state.binding.limits = saved;
+    respond = async (path, body) => {
+      if (path === "status") return json(state);
+      if (path === "setup" && body?.stage === "prepare") return json({ setup: await permissionTransaction(String(body.sessionPublicKey), saved) });
+      if (path === "setup" && body?.stage === "submit") return json({ registration: { signature: "fixture-chain-signature", status: "pending" } });
+      throw new Error("Unexpected fixture route");
+    };
+    await render(); await register();
+    assert.match(ui.container.textContent!, /awaiting final confirmation/);
+    // Still held before its expiry: finishing it submits the same bytes again.
+    await act(async () => { mock.timers.tick(399); });
+    await press("Finish permission registration");
+    assert.match(ui.container.textContent!, /awaiting final confirmation/);
+    assert.equal(calls.filter((call) => call.path === "setup" && call.body?.stage === "submit").length, 2);
+    await act(async () => { mock.timers.tick(1); });
+    await press("Finish permission registration");
+    assert.match(ui.container.textContent!, /This permission expired at .* before it was activated, so its session key has been discarded/);
+    assert.equal(calls.filter((call) => call.path === "setup" && call.body?.stage === "submit").length, 2);
+    assert.equal(calls.some((call) => call.body?.stage === "activate"), false);
+    assert.equal([...ui.container.querySelectorAll("button")].some((item) => item.textContent === "Finish permission registration"), false);
+  } finally { mock.timers.reset(); }
 });
 
 test("a confirmed permission the server no longer holds drops its session key instead of retrying", async () => {
@@ -1741,54 +1755,57 @@ test("the review's time left to sign counts down while it is open", async () => 
     if (path === "setup" && body?.stage === "prepare") return json({ setup: await permissionTransaction(String(body.sessionPublicKey), saved) });
     throw new Error("Unexpected fixture route");
   };
-  await render(); await press("Register bounded trading permission");
-  assert.match(ui.container.textContent!, /Sign within about 4[45] seconds/);
-  // Ten seconds on, the page says so without anyone touching it (the next one-second tick re-renders it).
-  const now = Date.now;
-  Date.now = () => now() + 10_000;
-  try { await act(async () => { await new Promise((resolve) => setTimeout(resolve, 1_100)); }); }
-  finally { Date.now = now; }
-  assert.match(ui.container.textContent!, /Sign within about 3[345] seconds/);
-  // At the very end it says one second, never "1 seconds" (the deadline itself is the review timer's, on the real clock).
-  Date.now = () => now() + 44_900;
-  try { await act(async () => { await new Promise((resolve) => setTimeout(resolve, 1_100)); }); }
-  finally { Date.now = now; }
-  assert.match(ui.container.textContent!, /Sign within about 1 second, or register again/);
-  assert.equal(signCount, 0);
+  // The page's clock and its one-second re-render are the test's: each step is an exact instant.
+  mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"], now: Date.now() });
+  try {
+    await render(); await press("Register bounded trading permission");
+    assert.match(ui.container.textContent!, /Sign within about 45 seconds/);
+    // Ten seconds on, the page says so without anyone touching it (each one-second tick re-renders it).
+    await act(async () => { mock.timers.tick(10_000); });
+    assert.match(ui.container.textContent!, /Sign within about 35 seconds/);
+    // At the very end it says one second, never "1 seconds".
+    await act(async () => { mock.timers.tick(34_000); });
+    assert.match(ui.container.textContent!, /Sign within about 1 second, or register again/);
+    assert.equal(signCount, 0);
+  } finally { mock.timers.reset(); }
 });
 
 /**
- * A live owner whose review is prepared with `leftMs` to sign: the review's
- * clock is read before the prepare request (shifted here) and its timer after
- * it (the real clock), so the review window ends `leftMs` from now.
+ * A live owner whose prepared permission is under review with `leftMs` left
+ * to sign. The page's clock and timers are the test's (the caller enables
+ * mock.timers): the window passes only when the test ticks it, never while a
+ * loaded machine is still rendering.
  */
 async function reviewEndingIn(leftMs: number) {
   state = initial("live"); state.runtime.live.programId = PROGRAM;
   const saved = liveLimits(); state.binding.limits = saved;
-  const now = Date.now;
   const progress = { submits: 0, activated: false };
   respond = async (path, body) => {
     if (path === "status") return json(state);
-    if (path === "setup" && body?.stage === "prepare") { Date.now = now; return json({ setup: await permissionTransaction(String(body.sessionPublicKey), saved) }); }
+    if (path === "setup" && body?.stage === "prepare") return json({ setup: await permissionTransaction(String(body.sessionPublicKey), saved) });
     if (path === "setup" && body?.stage === "submit") { progress.submits++; return json({ registration: { signature: "fixture-chain-signature", status: "finalized" } }); }
     if (path === "setup" && body?.stage === "activate") { progress.activated = true; state.runtime.live.ready = true; return json({ live: { registered: true } }); }
     throw new Error("Unexpected fixture route");
   };
-  await render();
-  Date.now = () => now() - (45_000 - leftMs);
-  try { await press("Register bounded trading permission"); } finally { Date.now = now; }
+  await render(); await press("Register bounded trading permission");
+  await act(async () => { mock.timers.tick(45_000 - leftMs); });
   assert.match(ui.container.textContent!, /Nothing has been signed yet/);
   return progress;
 }
+/** Runs `body` with the page's setTimeout, setInterval and Date on the test's clock. */
+async function onTestClock(body: () => Promise<void>) {
+  mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"], now: Date.now() });
+  try { await body(); } finally { mock.timers.reset(); }
+}
 const LAPSED = /not signed in time|Nothing was signed/;
-test("a review whose deadline passes while the wallet is open never says nothing was signed, and the signed permission is submitted", async () => {
+test("a review whose deadline passes while the wallet is open never says nothing was signed, and the signed permission is submitted", () => onTestClock(async () => {
   const progress = await reviewEndingIn(300);
   const wallet = deferred<Uint8Array>();
   signedBytes = () => wallet.promise;
   await press("Sign permission with my wallet");
   assert.equal(signCount, 1, "the wallet is open");
-  // The deadline passes with the wallet still open.
-  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 600)); });
+  // The deadline passes with the wallet still open: the review's timer fires and leaves it alone.
+  await act(async () => { mock.timers.tick(600); });
   assert.doesNotMatch(ui.container.textContent!, LAPSED);
   // The owner signs: the bytes are submitted (the server's window decides) and activated.
   wallet.resolve(Uint8Array.from([1, 2, 3]));
@@ -1796,13 +1813,13 @@ test("a review whose deadline passes while the wallet is open never says nothing
   assert.equal(progress.submits, 1); assert.equal(progress.activated, true);
   assert.match(ui.container.textContent!, /Registered permission ready/);
   assert.doesNotMatch(ui.container.textContent!, LAPSED);
-});
-test("a wallet that refuses after the review's deadline leaves the review lapsed; before it, the review stays to sign again", async () => {
+}));
+test("a wallet that refuses after the review's deadline leaves the review lapsed; before it, the review stays to sign again", () => onTestClock(async () => {
   let progress = await reviewEndingIn(300);
   let refuse!: (error: Error) => void;
   signedBytes = () => new Promise<Uint8Array>((_, reject) => { refuse = reject; });
   await press("Sign permission with my wallet");
-  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 600)); });
+  await act(async () => { mock.timers.tick(600); });
   assert.doesNotMatch(ui.container.textContent!, LAPSED);
   refuse(new Error("The owner closed the wallet."));
   await settle();
@@ -1820,7 +1837,7 @@ test("a wallet that refuses after the review's deadline leaves the review lapsed
   signedBytes = () => Uint8Array.from([1, 2, 3]);
   await press("Sign permission with my wallet");
   assert.equal(signCount, 2); assert.equal(progress.submits, 1); assert.equal(progress.activated, true);
-});
+}));
 /** The `merrymen solana-recover` command the card shows, as the arguments a shell passes, with an RPC in place of <https-url>. */
 function cardCommand(text: string): string[] {
   const shown = text.match(/merrymen solana-recover (--program \S+ --rpc <https-url> [^\n]*?)(?=The key goes|Nothing is signed|$)/)?.[1];
