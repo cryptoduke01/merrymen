@@ -42,7 +42,7 @@ test("the pinned account is the push oracle's sponsored shard-0 PDA for the SOL/
   }
 });
 
-test("decodes a real mainnet SOL/USD account read with this module's own call", async () => {
+test("decodes the recorded mainnet SOL/USD account read with this module's own call", async () => {
   const snap = PYTH_SOL_USD_MAINNET_SNAPSHOT, result = pythSnapshotResult(snap);
   assert.equal(snap.account, PYTH_SOL_USD_ACCOUNT);
   const calls: unknown[] = [];
@@ -62,14 +62,14 @@ test("decodes a real mainnet SOL/USD account read with this module's own call", 
   const sell1 = solanaReferenceBound(sell, price, 300), buy25 = solanaReferenceBound(buy, price, 300);
   assert.deepEqual([sell1.referenceOut, sell1.minOutFloor], ["105163397", "102008495"]);
   assert.deepEqual([buy25.referenceOut, buy25.minOutFloor], ["237725297", "230593538"]);
-  // The same real bytes go stale 120 s after publication.
+  // The same recorded bytes go stale 120 s after publication.
   assert.doesNotThrow(() => parsePythSolUsd(result.value, result.context.slot, price.publishTimeMs + 120_000));
   assert.throws(() => parsePythSolUsd(result.value, result.context.slot, price.publishTimeMs + 120_001), SolanaReferencePriceError);
   // And a context slot before the post is refused.
   assert.throws(() => parsePythSolUsd(result.value, 458_681_623, snap.fetchedAtMs), SolanaReferencePriceError);
 });
 
-test("a real upgraded-generation account shares the layout but is refused while the current generation is selected", () => {
+test("the recorded upgraded-generation account read shares the layout but is refused while the current generation is selected", () => {
   const snap = PYTH_SOL_USD_UPGRADED_MAINNET_SNAPSHOT, result = pythSnapshotResult(snap);
   assert.notEqual(snap.account, SOLANA_PYTH_FEEDS.current.account);
   assert.equal(result.value.owner, "rec2HHDDnjLfj4kE7VyEtFA1HPGQLK33259532cRyHp");
@@ -127,7 +127,7 @@ test("the generation setting defaults to the default generation and accepts only
   }
 });
 
-test("with the upgraded generation selected, the real upgraded account is read and bounded and the current one is refused", async () => {
+test("with the upgraded generation selected, the recorded upgraded account answer is read and bounded and the current one is refused", async () => {
   const snap = PYTH_SOL_USD_UPGRADED_MAINNET_SNAPSHOT, result = pythSnapshotResult(snap);
   const calls: unknown[] = [];
   const price = await readSolanaReferencePrice(async (method, params) => { calls.push([method, params]); return result; }, snap.minContextSlot, snap.fetchedAtMs,
@@ -151,7 +151,7 @@ test("with the upgraded generation selected, the real upgraded account is read a
   assert.throws(() => verifySolanaReferenceBound(currentBound, sell, snap.fetchedAtMs, "upgraded"), SolanaReferencePriceError);
   assert.throws(() => verifySolanaReferenceBound({ ...currentBound, reference: { ...currentBound.reference, account: UPGRADED.account } }, sell,
     snap.fetchedAtMs, "current"), SolanaReferencePriceError);
-  // The current account's real bytes are refused under "upgraded", even when served for the upgraded address,
+  // The current account's recorded bytes are refused under "upgraded", even when served for the upgraded address,
   // and so are the upgraded bytes relabelled to the current receiver.
   assert.throws(() => parsePythSolUsd(current.value, current.context.slot, snap.fetchedAtMs, "upgraded"), SolanaReferencePriceError);
   await assert.rejects(readSolanaReferencePrice(async () => current, snap.minContextSlot, snap.fetchedAtMs, { generation: "upgraded", alerts: quiet }),
@@ -239,10 +239,10 @@ test("refuses a receiver account of another type and an executable account, each
   }
   const missing: Record<string, unknown> = pythAccount(good); delete missing.executable;
   assert.throws(() => parsePythSolUsd(missing, 1000, NOW), SolanaReferencePriceError);
-  // The real mainnet bytes are refused the same way once marked executable.
-  const real = pythSnapshotResult(PYTH_SOL_USD_MAINNET_SNAPSHOT);
-  assert.doesNotThrow(() => parsePythSolUsd(real.value, real.context.slot, PYTH_SOL_USD_MAINNET_SNAPSHOT.fetchedAtMs));
-  assert.throws(() => parsePythSolUsd({ ...real.value, executable: true }, real.context.slot, PYTH_SOL_USD_MAINNET_SNAPSHOT.fetchedAtMs), SolanaReferencePriceError);
+  // The recorded mainnet bytes are refused the same way once marked executable.
+  const recorded = pythSnapshotResult(PYTH_SOL_USD_MAINNET_SNAPSHOT);
+  assert.doesNotThrow(() => parsePythSolUsd(recorded.value, recorded.context.slot, PYTH_SOL_USD_MAINNET_SNAPSHOT.fetchedAtMs));
+  assert.throws(() => parsePythSolUsd({ ...recorded.value, executable: true }, recorded.context.slot, PYTH_SOL_USD_MAINNET_SNAPSHOT.fetchedAtMs), SolanaReferencePriceError);
 });
 
 test("values both directions at the reference and floors guaranteed output by the tolerance", () => {

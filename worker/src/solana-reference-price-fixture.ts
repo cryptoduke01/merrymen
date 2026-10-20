@@ -1,6 +1,7 @@
 /**
- * Pyth SOL/USD accounts for tests: synthetic builders, and two mainnet reads
- * recorded once (below). Tests never touch the network.
+ * Pyth SOL/USD accounts for tests: synthetic builders, and two recorded
+ * mainnet reads (below, with what they can and cannot prove). Tests never
+ * touch the network.
  */
 import { createHash } from "node:crypto";
 import { PYTH_RECEIVER_PROGRAM, PYTH_SOL_USD_FEED_ID, SOLANA_PYTH_DEFAULT_GENERATION, SOLANA_PYTH_FEEDS, solanaReferenceBound,
