@@ -17,10 +17,15 @@
 // untouched. Only then does the job upload the artifact and the manifest.
 //
 // compare runs last, after the upload, so a run whose manifest differs still
-// hands it to the owner. It fails (exit 1) only when a Linux manifest is
-// committed at HEAD and differs from the recorded one in any field (a stale
-// one included: packages/core's manifest test fails on it too). With none
-// committed it passes, and says (a notice and the step summary) that the
+// hands it to the owner. It fails (exit 1) when a Linux manifest is committed
+// at HEAD and differs from the recorded one in any field (a stale one
+// included: packages/core's manifest test fails on it too), and when HEAD has
+// none but its first parent (a pull request's base, or the commit before a
+// push) has one: once committed, the manifest is replaced by the next
+// reviewed one, never deleted, so deleting it cannot turn the comparison off.
+// The job checks out with fetch-depth: 2 for that parent, and a checkout that
+// lacks it fails rather than skipping the check. With none committed on
+// either side it passes, and says (a notice and the step summary) that the
 // uploaded artifact carries the manifest for the owner to review and commit.
 // Committing it is what turns the comparison on.
 import { execFileSync } from "node:child_process";
@@ -62,27 +67,54 @@ export function verifyRecorded({ recorded, testedSha256, artifact }) {
 }
 
 /**
- * The recorded manifest against the committed one (null when none is committed).
- * @returns {{ status: "matches" | "uncommitted", manifest: any }}
+ * The recorded manifest against the committed one: `committed` is HEAD's,
+ * `parent` HEAD's first parent's (each null when that commit has none).
+ * Never throws for what it finds, only for a recorded manifest that is not
+ * this host's build; `problem` says why any outcome but matches or
+ * uncommitted fails the job.
+ * @returns {{ status: "matches" | "uncommitted" | "differs" | "removed", manifest: any, problem: string | null }}
  */
-export function compareCommitted({ recorded, committed }) {
+export function assess({ recorded, committed, parent = null }) {
   const manifest = parseRecorded(recorded);
-  if (committed === null) return { status: "uncommitted", manifest };
+  if (committed === null) {
+    if (parent === null) return { status: "uncommitted", manifest, problem: null };
+    return {
+      status: "removed",
+      manifest,
+      problem: `HEAD has no ${LINUX_MANIFEST}, but its first parent (a pull request's base, or the commit before a push) has one. `
+        + "A committed Linux manifest is replaced by the next reviewed one, never deleted: restore it, "
+        + "or review the manifest this run uploaded and commit it unchanged.",
+    };
+  }
   let ours;
   try {
     ours = JSON.parse(committed);
   } catch {
-    throw new Error(`the committed ${LINUX_MANIFEST} is not JSON`);
+    return { status: "differs", manifest, problem: `the committed ${LINUX_MANIFEST} is not JSON` };
   }
   const diff = differences(ours, manifest);
   if (diff.length > 0) {
     const shown = diff.slice(0, 12);
     if (diff.length > shown.length) shown.push(`and ${diff.length - shown.length} more`);
-    throw new Error(`this pinned Linux build differs from the committed ${LINUX_MANIFEST}: ${shown.join("; ")}. `
-      + "If the program or its toolchain changed on purpose, review the manifest this run uploaded and commit it unchanged; "
-      + "the next run must then reproduce it.");
+    return {
+      status: "differs",
+      manifest,
+      problem: `this pinned Linux build differs from the committed ${LINUX_MANIFEST}: ${shown.join("; ")}. `
+        + "If the program or its toolchain changed on purpose, review the manifest this run uploaded and commit it unchanged; "
+        + "the next run must then reproduce it.",
+    };
   }
-  return { status: "matches", manifest };
+  return { status: "matches", manifest, problem: null };
+}
+
+/**
+ * assess, failing on any outcome but matches or uncommitted.
+ * @returns {{ status: "matches" | "uncommitted", manifest: any }}
+ */
+export function compareCommitted(input) {
+  const { status, manifest, problem } = assess(input);
+  if (problem !== null) throw new Error(problem);
+  return { status, manifest };
 }
 
 function parseRecorded(recorded) {
@@ -103,13 +135,29 @@ function parseRecorded(recorded) {
   return manifest;
 }
 
-/** The committed manifest at HEAD, or null when HEAD has none. Fails outside a git checkout. */
-function committedAtHead(dir) {
+/**
+ * The manifest committed at HEAD and at HEAD's first parent, each null when
+ * that commit has none (parent also when HEAD has no parent). Fails outside
+ * a git checkout, and when HEAD names a parent the checkout does not have (a
+ * depth-1 clone): without it a deletion would pass unseen.
+ */
+export function committedManifests(dir) {
   const git = args => execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 16 * 1024 * 1024 });
-  git(["rev-parse", "--verify", "--quiet", "HEAD^{commit}"]);
-  // Paths starting with ./ are relative to -C's directory.
-  const listed = git(["ls-tree", "--name-only", "HEAD", "--", LINUX_MANIFEST]).trim();
-  return listed ? git(["show", `HEAD:./${LINUX_MANIFEST}`]) : null;
+  const head = git(["rev-parse", "--verify", "--quiet", "HEAD^{commit}"]).trim();
+  // ls-tree and ./ paths are relative to -C's directory.
+  const at = commit => (git(["ls-tree", "--name-only", commit, "--", LINUX_MANIFEST]).trim()
+    ? git(["show", `${commit}:./${LINUX_MANIFEST}`])
+    : null);
+  // The commit object names its parents even where a shallow clone left them out.
+  const headers = git(["cat-file", "commit", head]).split("\n\n")[0];
+  const first = /^parent ([0-9a-f]{40,64})$/m.exec(headers)?.[1] ?? null;
+  if (first === null) return { committed: at(head), parent: null };
+  try {
+    git(["cat-file", "-e", `${first}^{commit}`]);
+  } catch {
+    throw new Error(`HEAD's first parent ${first} is not in this checkout, so a deleted ${LINUX_MANIFEST} would go unseen; check out with fetch-depth: 2`);
+  }
+  return { committed: at(head), parent: at(first) };
 }
 
 const USAGE = "usage: solana-linux-manifest.mjs verify <contracts/solana dir> <tested sha256> | compare <contracts/solana dir>";
@@ -128,7 +176,7 @@ function main(argv) {
     console.log(`${LINUX_MANIFEST} is for the tested artifact: source digest ${m.source.digest}, artifact ${m.artifact.sha256} (${m.artifact.bytes} bytes).`);
     return;
   }
-  const result = compareCommitted({ recorded, committed: committedAtHead(dir) });
+  const result = compareCommitted({ recorded, ...committedManifests(dir) });
   const { digest } = result.manifest.source;
   const { sha256, bytes } = result.manifest.artifact;
   const line = result.status === "matches"

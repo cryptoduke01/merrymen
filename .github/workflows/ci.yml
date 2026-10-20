@@ -251,8 +251,13 @@ jobs:
         if: needs.solana-paths.outputs.run != 'true'
         run: echo "solana · paths found no Solana-relevant change, so the vault is not built or tested in this run."
 
+      # HEAD and its first parent (a pull request's base, or the commit before
+      # a push): the Linux manifest comparison below fails when HEAD deleted a
+      # manifest the parent has, and refuses a checkout without the parent.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         if: needs.solana-paths.outputs.run == 'true'
+        with:
+          fetch-depth: 2
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         if: needs.solana-paths.outputs.run == 'true'
@@ -367,10 +372,11 @@ jobs:
           if-no-files-found: error
 
       # Last, so a run whose manifest differs has still uploaded it for the
-      # owner. Fails only when a committed Linux manifest exists and differs
-      # from this pinned Linux build. With none committed it passes and says
-      # so: the owner reviews the uploaded manifest and commits it, which
-      # turns this comparison on.
+      # owner. Fails when a committed Linux manifest exists and differs from
+      # this pinned Linux build, and when HEAD deleted the manifest its first
+      # parent has. With none committed on either side it passes and says so:
+      # the owner reviews the uploaded manifest and commits it, which turns
+      # this comparison on.
       - name: Linux manifest matches the committed one
         if: needs.solana-paths.outputs.run == 'true'
         run: node scripts/ci/solana-linux-manifest.mjs compare contracts/solana

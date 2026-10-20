@@ -29,7 +29,7 @@ import {
 } from "./solana-program-record.mjs";
 import { checkRuntimeTests, countTests, parseResults, runtimeTargets } from "./solana-runtime-tests.mjs";
 import { decide, solanaPaths } from "./solana-paths.mjs";
-import { ARTIFACT, compareCommitted, differences, LINUX_HOST, LINUX_MANIFEST, verifyRecorded } from "./solana-linux-manifest.mjs";
+import { ARTIFACT, assess, compareCommitted, differences, LINUX_HOST, LINUX_MANIFEST, verifyRecorded } from "./solana-linux-manifest.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = join(here, "..", "..");
@@ -136,6 +136,11 @@ describe("the CI jobs", () => {
     for (const [s, at] of order) assert.ok(at >= 0, `solana-test lacks ${s}`);
     for (let i = 1; i < order.length; i++) assert.ok(order[i - 1][1] < order[i][1], `${order[i - 1][0]} must come before ${order[i][0]}`);
     assert.match(test, /^ {4}outputs:\n {6}sha256: \$\{\{ steps\.record\.outputs\.sha256 \}\}$/m);
+    // HEAD and its first parent: the comparison fails when HEAD deleted a
+    // Linux manifest its parent had, and refuses a checkout without the parent.
+    const checkout = steps(test).find(s => s.includes("uses: actions/checkout@")) ?? "";
+    assert.match(checkout, /uses: actions\/checkout@\S+.*\n {8}if: needs\.solana-paths\.outputs\.run == 'true'\n {8}with:\n {10}fetch-depth: 2$/);
+    assert.doesNotMatch(checkout, /ref:/);
     assert.match(test, /CARGO_HOME=\$\(realpath /);
     // Without pipefail the step would take tee's status, and a failing test.sh would pass.
     assert.match(test, /run: \|\n {10}set -o pipefail\n {10}contracts\/solana\/test\.sh 2>&1 \| tee "\$RUNNER_TEMP\/solana-test\.log"\n/);
@@ -1232,5 +1237,65 @@ describe("solana-linux-manifest.mjs", () => {
     for (const args of [[], ["verify", dir], ["compare"], ["compare", dir, soSha], ["check", dir, soSha]]) {
       assert.equal(call(args).status, 2, args.join(" "));
     }
+  });
+
+  it("assess: a manifest HEAD deleted while its first parent has one is removed, and fails the comparison", () => {
+    const recorded = text(linux());
+    assert.equal(assess({ recorded, committed: null, parent: recorded }).status, "removed");
+    assert.equal(assess({ recorded, committed: null, parent: null }).status, "uncommitted");
+    assert.equal(assess({ recorded, committed: null }).status, "uncommitted");
+    assert.throws(() => compareCommitted({ recorded, committed: null, parent: recorded }),
+      /^Error: HEAD has no build-manifests\/Linux-x86_64\.json, but its first parent \(a pull request's base, or the commit before a push\) has one\./);
+    // What counts is that one was committed, whatever it said.
+    assert.equal(assess({ recorded, committed: null, parent: "{ not json" }).status, "removed");
+    // Kept, replaced or added: compared as before.
+    assert.equal(assess({ recorded, committed: recorded, parent: recorded }).status, "matches");
+    assert.equal(assess({ recorded, committed: recorded, parent: null }).status, "matches");
+    assert.equal(assess({ recorded, committed: text(linux({ "artifact.sha256": "e".repeat(64) })), parent: recorded }).status, "differs");
+    // Outcomes come back, not as exceptions: only a recorded manifest that is not this build's throws.
+    assert.deepEqual(assess({ recorded, committed: "{ not json" }).status, "differs");
+    assert.equal(assess({ recorded, committed: recorded }).problem, null);
+    assert.throws(() => assess({ recorded: text(linux({ "toolchain.host": "Darwin-arm64" })), committed: null, parent: recorded }), /not Linux-x86_64/);
+  });
+
+  it("as a command: compare fails when HEAD deleted the Linux manifest its first parent had, and on a checkout without that parent", () => {
+    const origin = fresh("deleted-manifest");
+    const gitIn = (cwd, ...args) => {
+      const r = run("git", ["-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main", ...args], {
+        GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.invalid", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.invalid",
+      }, cwd);
+      assert.equal(r.status, 0, `git ${args.join(" ")}: ${r.stderr}`);
+    };
+    const recordInto = root => {
+      // build.sh --record writes this build's manifest into the working tree.
+      mkdirSync(join(root, "contracts/solana/build-manifests"), { recursive: true });
+      writeFileSync(join(root, "contracts/solana", LINUX_MANIFEST), text(linux()));
+      return join(root, "contracts/solana");
+    };
+    const compare = dir => run(process.execPath, [script, "compare", dir]);
+    recordInto(origin);
+    gitIn(origin, "init", "-q");
+    gitIn(origin, "add", "-A");
+    gitIn(origin, "commit", "-q", "-m", "the reviewed Linux manifest");
+    assert.equal(compare(join(origin, "contracts/solana")).status, 0);
+    gitIn(origin, "rm", "-q", `contracts/solana/${LINUX_MANIFEST}`);
+    gitIn(origin, "commit", "-q", "-m", "a change that drops it");
+    const dropped = compare(recordInto(origin));
+    assert.equal(dropped.status, 1, dropped.stdout);
+    assert.match(dropped.stderr, /^::error::HEAD has no build-manifests\/Linux-x86_64\.json, but its first parent .* has one\. .*restore it, or review the manifest this run uploaded and commit it unchanged\.$/m);
+    // As the job checks it out, at depth 2: the same answer.
+    const two = fresh("depth-2");
+    gitIn(two, "clone", "-q", "--depth", "2", `file://${origin}`, ".");
+    assert.equal(compare(recordInto(two)).status, 1);
+    // At depth 1 the parent is missing: fail, rather than pass on "none committed".
+    const one = fresh("depth-1");
+    gitIn(one, "clone", "-q", "--depth", "1", `file://${origin}`, ".");
+    const shallow = compare(recordInto(one));
+    assert.equal(shallow.status, 1, shallow.stdout);
+    assert.match(shallow.stderr, /^::error::HEAD's first parent [0-9a-f]{40} is not in this checkout, so a deleted build-manifests\/Linux-x86_64\.json would go unseen; check out with fetch-depth: 2$/m);
+    // Restored in a later commit: compared as before.
+    gitIn(origin, "add", "-A");
+    gitIn(origin, "commit", "-q", "-m", "restore it");
+    assert.equal(compare(join(origin, "contracts/solana")).status, 0);
   });
 });

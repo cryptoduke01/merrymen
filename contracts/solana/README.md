@@ -139,8 +139,10 @@ a pull request changes a Solana-relevant path; pushes to main and manual runs al
 `solana · test` then runs `build.sh --record`, checks that the manifest it writes,
 `build-manifests/Linux-x86_64.json`, is for the artifact the runtime tests ran against, and
 uploads it with the artifact. Its last step fails when a committed Linux manifest exists
-and differs from that pinned Linux build; while none is committed it only reports the
-recorded values. To commit the first one, take the artifact from a run whose `app` check
+and differs from that pinned Linux build, and when the commit under test deleted the
+manifest its first parent has (a pull request's base, or the commit before a push): once
+committed, it is replaced by the next reviewed one, never deleted. While none is committed
+on either side it only reports the recorded values. To commit the first one, take the artifact from a run whose `app` check
 passed, check that the manifest's `source.digest` equals `build.sh --source-digest` at that
 commit and its `artifact.sha256` equals the tested and rebuilt hashes in `app`'s log, and
 commit the file unchanged. `app` prints both hashes before it checks any result, so they
