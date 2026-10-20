@@ -749,6 +749,32 @@ for (const dialect of ["sqlite", "postgres"] as const) {
       }
     }
   });
+  test(`${dialect}: a resume-buys with a revocation beside it never re-arms buying, whichever lands first; only one that never ran or lapsed unsigned leaves it to the resume`, options, async t => {
+    for (const revocation of ["landed-first", "landed-after", "pending", "never-ran", "signable", "lapsed"] as const) {
+      const f = await fixture(t, dialect), s = submission();
+      await f.store.recordSigned(s); await f.store.settle(OWNER, s.intent.requestId, s.signature, settlement(s));
+      // revoke_all left the vault paused on chain; the off-chain breaker is not (nothing tripped it).
+      await saveSignedSetup(f.store, { ...setup("resume-buys"), ...prior }, "resume-pending");
+      await f.store.saveSetup(revokeBeside("resume-pending"));
+      if (revocation !== "signable" && revocation !== "lapsed") await f.store.saveSetup(signedRevoke("resume-pending"));
+      if (revocation === "landed-first") await f.store.finishSetup("revoke-beside", "finalized", 1003);
+      if (revocation === "never-ran") await f.store.finishSetup("revoke-beside", "failed", 1002, expiry("1", "1"));
+      if (revocation === "lapsed") f.clock.value = NOW + 30_000;
+      await f.store.finishSetup("resume-pending", "finalized", 1004);
+      if (revocation === "landed-after") await f.store.finishSetup("revoke-beside", "finalized", 1005);
+      const paused = !["never-ran", "lapsed"].includes(revocation);
+      assert.equal((await f.store.liveBook())!.buyPaused, paused, revocation);
+      if (paused && revocation !== "pending" && revocation !== "signable") {
+        const buy = submission("buy-after", "1"); buy.risk.slot = 1001; buy.risk.cashUsdg = "99400000"; buy.risk.wsolRaw = "1980000";
+        await assert.rejects(f.store.recordSigned(buy), /drawdown breaker/, `${revocation}: no buy is admitted`);
+        // A new resume-buys, with nothing beside it, resumes buying as usual.
+        await saveSignedSetup(f.store, { ...setup("resume-buys"), ...prior, preparedAtMs: f.clock.value, expiresAtMs: f.clock.value + 30_000 }, "resume-again");
+        assert.equal(await f.store.revokeSetup(), null);
+        await f.store.finishSetup("resume-again", "finalized", 1006);
+        assert.equal((await f.store.liveBook())!.buyPaused, false, revocation);
+      }
+    }
+  });
   test(`${dialect}: receipt recovery finds every account with a pending owner transaction in either slot, a revocation that outlived the record beside it included`, options, async t => {
     const f = await fixture(t, dialect), scope = { tenant: TENANT, owner: OWNER };
     assert.deepEqual(await solanaPendingOwnerScopes(f.db), [], "the fixture's registration is finished and activated");

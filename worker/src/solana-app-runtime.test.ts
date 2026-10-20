@@ -24,7 +24,7 @@ import { address as kitAddress, appendTransactionMessageInstructions, compileTra
   setTransactionMessageLifetimeUsingBlockhash, type Blockhash } from "@solana/kit";
 import { buildWithdrawSolanaVaultInstruction } from "../../packages/core/src/solana-live";
 import { SOLANA_STATUS_BELOW_BOOK, SOLANA_STATUS_REGISTERED_AFTER_REVOKE, SOLANA_WITHDRAW_BELOW_BOOK } from "./solana-app-runtime";
-import { SOLANA_REGISTERED_AFTER_REVOKE, SOLANA_REVOKE_ALREADY_LANDED, SOLANA_REVOKE_PREPARED_BESIDE, SOLANA_WITHDRAWAL_RECORDED_OUTSIDE, SolanaTradingStoreError } from "./solana-trading-store";
+import { SOLANA_REGISTERED_AFTER_REVOKE, SOLANA_RESUMED_AFTER_REVOKE, SOLANA_REVOKE_ALREADY_LANDED, SOLANA_REVOKE_PREPARED_BESIDE, SOLANA_WITHDRAWAL_RECORDED_OUTSIDE, SolanaTradingStoreError } from "./solana-trading-store";
 
 const TENANT = "0x1111111111111111111111111111111111111111";
 const key = (n: number) => getBase58Decoder().decode(new Uint8Array(32).fill(n));
@@ -840,6 +840,43 @@ test("a dropped resume-buys resolves after expiry and leaves the off-chain break
     assert.equal((await f.app.submitOwnerAction(f.scope, { signedTransactionBase64 })).status, "failed");
     await f.app.prepareOwnerAction(f.scope, { action: "revoke" });
   } finally { f.raw.close(); }
+});
+
+test("a resume-buys that lands after a revocation prepared beside it never re-arms buying: the breaker stays paused, status says why, and a new resume restarts buys", async () => {
+  for (const lands of ["revoke-first", "resume-first"] as const) {
+    const f = await fixture();
+    try {
+      await f.live(); f.controls.initialized = true; await f.registered(); await cashBook(f);
+      const store = new SolanaTradingStore(f.db, f.scope), chain = ownerChain(f);
+      const book = (await store.liveBook())!; book.buyPaused = true;
+      await f.db.prepare("UPDATE solana_runtime_live_books SET book_json=? WHERE tenant=? AND owner=?").run(JSON.stringify(book), TENANT, f.owner);
+      const resume = await f.app.prepareOwnerAction(f.scope, { action: "resume-buys" });
+      const resumeSigned = await f.sign(resume.transactionBase64);
+      const pendingResume = await f.app.submitOwnerAction(f.scope, { signedTransactionBase64: resumeSigned });
+      const revoke = await f.app.prepareOwnerAction(f.scope, { action: "revoke" });
+      assert.equal((await store.revokeSetup())!.beside, pendingResume.signature);
+      const revokeSigned = await f.sign(revoke.transactionBase64);
+      const pendingRevoke = await f.app.submitOwnerAction(f.scope, { signedTransactionBase64: revokeSigned });
+      const order = lands === "revoke-first" ? [[pendingRevoke.signature, revokeSigned], [pendingResume.signature, resumeSigned]] : [[pendingResume.signature, resumeSigned], [pendingRevoke.signature, revokeSigned]];
+      for (const [signature, bytes] of order) {
+        chain.land(signature!, bytes!); if (signature === pendingRevoke.signature) f.controls.epoch = 2n;
+        await f.app.status(f.scope);
+      }
+      const after = await f.app.status(f.scope);
+      assert.deepEqual([after.live.ownerTransaction?.status, after.live.ownerTransaction?.revoke?.status], ["finalized", "finalized"], lands);
+      assert.equal((await store.liveBook())!.buyPaused, true, `${lands}: the revocation was the owner's later word`);
+      assert.ok(after.live.warnings.includes(SOLANA_RESUMED_AFTER_REVOKE), after.live.warnings.join(" | "));
+      assert.ok(after.live.blockers.includes("The buying drawdown breaker is paused; exits remain available."));
+      // A new resume-buys restarts buys.
+      const again = await f.app.prepareOwnerAction(f.scope, { action: "resume-buys" });
+      const againSigned = await f.sign(again.transactionBase64);
+      const pendingAgain = await f.app.submitOwnerAction(f.scope, { signedTransactionBase64: againSigned });
+      chain.land(pendingAgain.signature, againSigned);
+      const resumed = await f.app.status(f.scope);
+      assert.equal((await store.liveBook())!.buyPaused, false);
+      assert.ok(!resumed.live.warnings.includes(SOLANA_RESUMED_AFTER_REVOKE));
+    } finally { f.raw.close(); }
+  }
 });
 
 test("one raw WSOL sent to the vault no longer freezes exits or owner withdrawals (audit dust)", async () => {

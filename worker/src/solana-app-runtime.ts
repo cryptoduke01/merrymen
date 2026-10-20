@@ -30,7 +30,7 @@ import { getSolanaRuntimeDb } from "./solana-runtime-db";
 import { isSolanaTransactionError } from "./solana-settlement";
 import { ensureSolanaTradingSchema, OPERATOR_HOLD, SOLANA_EXPIRED_ATTEMPTS_EXHAUSTED, solanaExpiredAttemptAllowance, solanaExpiredAttemptUse, solanaOwnerExpiryProven, solanaQuarantinedWsol, SolanaTradingStore, SolanaTradingStoreError, type SolanaAccountScope,
   type SolanaLiveBook, type SolanaOwnerExpiryProof, type SolanaPreparedSetup, type SolanaWithdrawValuation } from "./solana-trading-store";
-import { SOLANA_REGISTERED_AFTER_REVOKE, SOLANA_REVOKE_ALREADY_LANDED, solanaOwnerEpochOffset, solanaRegisteredEpoch } from "./solana-trading-store";
+import { SOLANA_REGISTERED_AFTER_REVOKE, SOLANA_RESUMED_AFTER_REVOKE, SOLANA_REVOKE_ALREADY_LANDED, solanaOwnerEpochOffset, solanaRegisteredEpoch, solanaRevokedBesideResume } from "./solana-trading-store";
 import { readSolanaExternalWithdrawal, SolanaExternalWithdrawalError } from "./solana-external-withdrawal";
 
 /**
@@ -916,6 +916,7 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       if (pending.length) blockers.push("A live trade is awaiting final confirmation.");
       const ownerTransaction = await s.setup(), revocation = await s.revokeSetup();
       if ((ownerTransaction?.signature && ownerTransaction.status === "pending") || (revocation?.signature && revocation.status === "pending")) blockers.push("An owner transaction is awaiting final confirmation.");
+      if (ownerTransaction?.status === "finalized" && solanaRevokedBesideResume(ownerTransaction, revocation, now()) && (await s.liveBook())?.buyPaused) warnings.push(SOLANA_RESUMED_AFTER_REVOKE);
       const heartbeat = await s.db.prepare("SELECT last_seen_at_ms FROM solana_runtime_worker_heartbeat WHERE worker='solana'").get() as { last_seen_at_ms: number | string } | undefined;
       const lastSeenAtMs = heartbeat ? Number(heartbeat.last_seen_at_ms) : null;
       return { chain: CHAINS.solana, owner: scope.owner, requestedMode: binding.requestedMode,

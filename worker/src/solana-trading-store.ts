@@ -168,6 +168,22 @@ export function solanaOwnerEpochOffset(setup: Pick<SolanaPreparedSetup, "kind" |
   const epochKind = (kind: SolanaPreparedSetup["kind"]) => (kind ?? "session") === "session" || kind === "revoke";
   return linked && epochKind(setup.kind) && epochKind(partner.kind) ? 1 : 0;
 }
+/**
+ * RESUME-BUYS BESIDE A REVOCATION. revoke_all pauses buying on chain and set_breaker(false) unpauses it, each
+ * with its own blockhash, so a revocation prepared beside a pending resume-buys that lands FIRST leaves the
+ * resume-buys landing after it unpausing the vault: the reverse of the owner's later word. True while such a
+ * revocation may be that word: signed and not known to have failed, or still signable. A resume-buys that
+ * finalizes meanwhile then leaves the off-chain breaker paused (finishSetup), whichever landed first, and
+ * status says so; a new resume-buys clears it as usual. A revocation that turns out never to have run only
+ * leaves buying paused, the conservative direction.
+ */
+export function solanaRevokedBesideResume(resume: Pick<SolanaPreparedSetup, "kind" | "signature">,
+  revoke: Pick<SolanaPreparedSetup, "kind" | "beside" | "signature" | "status" | "expiresAtMs"> | null | undefined, nowMs: number): boolean {
+  return resume.kind === "resume-buys" && !!resume.signature && revoke?.kind === "revoke" && revoke.beside === resume.signature
+    && revoke.status !== "failed" && (!!revoke.signature || nowMs < revoke.expiresAtMs);
+}
+/** The status warning while a finalized resume-buys left buying paused for a revocation beside it (RESUME-BUYS BESIDE A REVOCATION). */
+export const SOLANA_RESUMED_AFTER_REVOKE = "Buying stays paused: you revoked beside a resume of buying, and the revocation is your later word, even if Solana shows buying resumed because the revocation landed first. Resume buying again under Owner controls when you want buys to restart.";
 /** A signed owner transaction whose outcome is not yet recorded. */
 function ownerPending(setup: SolanaPreparedSetup | null | undefined): boolean {
   return !!setup?.signature && setup.status !== "finalized" && setup.status !== "failed";
@@ -1061,7 +1077,8 @@ export class SolanaTradingStore implements SolanaLiveJournal {
         const book = rowJson<SolanaLiveBook>(await tx.prepare("SELECT book_json FROM solana_runtime_live_books WHERE tenant=? AND owner=?")
           .get(this.scope.tenant, this.scope.owner), "book_json");
         if (book) {
-          book.buyPaused = false;
+          // A revocation beside it may have landed first and been undone by it (RESUME-BUYS BESIDE A REVOCATION): buying stays paused.
+          book.buyPaused = solanaRevokedBesideResume(setup, partner, clock(this.now));
           await tx.prepare("UPDATE solana_runtime_live_books SET book_json=? WHERE tenant=? AND owner=?")
             .run(JSON.stringify(book), this.scope.tenant, this.scope.owner);
         }
