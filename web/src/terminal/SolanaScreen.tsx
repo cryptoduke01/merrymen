@@ -10,11 +10,11 @@ import { useSolanaOwner } from "./useSolanaOwner";
 import { requestJson } from "./request-json";
 import { SignIn } from "./HostedControls";
 import { SolanaAutomation } from "./SolanaAutomation";
-import { outcomeAfterRefusal, refusedByServer, signatureOf, SolanaOwnerActions, type OwnerRecord } from "./SolanaOwnerActions";
+import { outcomeAfterRefusal, refusedByServer, signatureOf, SolanaOwnerActions, type OwnerRecord, type OwnerWallet, type RecoverableSol } from "./SolanaOwnerActions";
 import { ownerKeyExportEnabled, SolanaRecovery } from "./SolanaRecovery";
-import { PermissionTerms, permissionExpiry, permissionMatchesLimits, readPermissionTransaction } from "./SolanaPermission";
+import { PermissionReview, PermissionTerms, permissionExpiry, permissionMatchesLimits, readPermissionTransaction, type SignedPermissionTerms } from "./SolanaPermission";
 import { deriveSolanaVaultAddress } from "../../../packages/core/src/solana-live";
-import { solanaUnits as units, displaySolanaAmount as display } from "../lib/solana-amounts";
+import { solanaUnits as units, displaySolanaAmount as display, displaySolanaAmountOrNull } from "../lib/solana-amounts";
 import "./SolanaScreen.css";
 
 const WSOL = "So11111111111111111111111111111111111111112";
@@ -23,12 +23,28 @@ type RuntimeStatus = {
   live: { ready: boolean; canExit?: boolean; cashTokenAccount?: string | null; blockers: string[]; programId: string | null; vault: string | null; session: string | null; pending: Receipt[];
     balances?: { slot: number; cashUsdg: string; wsolRaw: string } | null;
     book?: { realizedPnlUsdgRaw: string; networkFeesLamports: string; unresolvedFeeCount?: number; reservedUnknownFeeLamports?: string; quarantinedWsolRaw?: string } | null;
-    history?: Receipt[]; ownerTransaction?: { signature: string; status: string; kind?: string } | null };
+    history?: Receipt[]; ownerTransaction?: { signature: string; status: string; kind?: string } | null;
+    /** Not blockers: a low shared fee payer, an owner wallet short of SOL for revoke or withdraw. */
+    warnings?: string[];
+    feePayer?: { lamports: string; level: FeePayerLevel } | null;
+    ownerWallet?: OwnerWallet | null; recoverable?: RecoverableSol | null };
   limits: SolanaPaperLimits | null;
   automation?: { workerOnline: boolean; lastSeenAtMs: number | null };
 };
 type Status = { binding: SolanaBinding | null; runtime: RuntimeStatus | null };
-type Setup = { transactionBase64: string; programId: string; vault: string; session: string; expiresAtMs: number };
+type FeePayerLevel = "ok" | "low" | "buys-blocked" | "exits-blocked";
+/** The shared network fee payer's level, in the owner's words (the runtime's blockers and warnings say what follows from it). */
+const FEE_PAYER_LEVELS: Record<FeePayerLevel, string> = { ok: "funded", low: "low; trading continues and operators are alerted",
+  "buys-blocked": "too low for buys; exits continue", "exits-blocked": "too low for any trade, exits included" };
+type Setup = { transactionBase64: string; programId: string; vault: string; session: string; expiresAtMs: number;
+  requiredLamports?: string; ownerLamports?: string; priorityFeeLamports?: string };
+/**
+ * A prepared permission the owner reviews before the wallet opens. The server
+ * accepts its signature for 60 seconds from prepare; the page offers to sign
+ * it for less, so the signed bytes still reach the server in time.
+ */
+type Review = { transactionBase64: string; limits: SolanaPaperLimits; terms: SignedPermissionTerms; requiredLamports: string | null; ownerLamports: string | null; deadline: number };
+const REVIEW_SIGN_WINDOW_MS = 45_000;
 type Receipt = { mode?: string; requestId?: string; signature?: string; status?: string; state?: string;
   intent?: { outputMint?: string }; minOutAmount?: string; quotedOutAmount?: string; quote?: { minOutAmount?: string }; outputAmountRaw?: string };
 /** A preview is only good for its quote's lifetime, and only for the exact trade it quoted. */
@@ -63,6 +79,10 @@ function ConnectedSolana() {
   // `signature` is what the server records these bytes by; `sent`: an earlier submission reached the server, or may have.
   const [registration, setRegistration] = useState<{ signature: string | null; sent: boolean; secret: string; signedTransactionBase64: string; limits: SolanaPaperLimits } | null>(null);
   const [savedDuration, setSavedDuration] = useState<string | null>(null);
+  const [review, setReview] = useState<Review | null>(null), [reviewLapsed, setReviewLapsed] = useState(false);
+  // The reviewed permission's session seed: kept out of React state and zeroed when the review ends.
+  const reviewSeed = useRef<Uint8Array | null>(null);
+  const discardReview = useCallback(() => { reviewSeed.current?.fill(0); reviewSeed.current = null; setReview(null); }, []);
   const request = useRef<{ key: string; id: string } | null>(null);
   const accountEpoch = useRef(0), inFlight = useRef(false);
   const statusRevision = useRef<number | null>(null);
@@ -89,7 +109,7 @@ function ConnectedSolana() {
     const epoch = accountEpoch.current;
     const next = await api<Status>("status", undefined, signal);
     if (epoch !== accountEpoch.current || signal?.aborted) return null;
-    if (statusRevision.current !== null && statusRevision.current !== next.binding?.revision) setPreview(null);
+    if (statusRevision.current !== null && statusRevision.current !== next.binding?.revision) { setPreview(null); discardReview(); }
     statusRevision.current = next.binding?.revision ?? null;
     setStatus(next);
     if (next.binding) {
@@ -105,7 +125,7 @@ function ConnectedSolana() {
       } else setSavedDuration(null);
     }
     return next;
-  }, [api]);
+  }, [api, discardReview]);
   const refresh = useCallback(async (signal?: AbortSignal) => { await load(signal); }, [load]);
   /** The server's saved owner transaction, read afresh: which signed bytes it holds, and their outcome. */
   const readRecord = useCallback(async (): Promise<OwnerRecord> => {
@@ -116,11 +136,12 @@ function ConnectedSolana() {
   useEffect(() => {
     accountEpoch.current++;
     setStatus(null); setError(""); setConsent(false); setPreview(null); setReceipt(null); setRegistration(null); request.current = null; statusRevision.current = null;
+    discardReview(); setReviewLapsed(false);
     if (!signer.authenticated) return;
     const abort = new AbortController();
     void refresh(abort.signal).catch((e: unknown) => { if (!abort.signal.aborted) setError(e instanceof Error ? e.message : "Could not load your Solana account."); });
     return () => { accountEpoch.current++; abort.abort(); };
-  }, [signer.did, signer.authenticated, refresh]);
+  }, [signer.did, signer.authenticated, refresh, discardReview]);
   const act = async (fn: () => Promise<void>) => {
     if (inFlight.current) return;
     inFlight.current = true; setBusy(true); setError("");
@@ -169,6 +190,12 @@ function ConnectedSolana() {
     return () => clearTimeout(timer);
   }, [preview]);
   const quoteFresh = !!preview && Date.now() < preview.deadline;
+  // A reviewed permission not signed in time is discarded: its bytes would reach the server too late.
+  useEffect(() => {
+    if (!review) return;
+    const timer = setTimeout(() => { discardReview(); setReviewLapsed(true); }, Math.max(0, review.deadline - Date.now()));
+    return () => clearTimeout(timer);
+  }, [review, discardReview]);
   const previewTrade = async () => {
     const intent = tradeIntent(), key = request.current!.key;
     // Timed on this clock from before the request, so a skewed device clock
@@ -214,35 +241,69 @@ function ConnectedSolana() {
     const signature = await signer.signBinding(challenge.message);
     await api("bind", { owner, nonce: challenge.nonce, signature }); await refresh();
   };
+  /**
+   * Step 1 of registering: the server prepares the permission for a fresh
+   * session key, and the page decodes the bytes. Nothing is signed: the owner
+   * reviews the limits and the priority fee they encode first (PermissionReview).
+   */
+  const prepareRegistration = async () => {
+    if (!sameWallet || !binding) throw new Error("Connect the Solana wallet bound to this account.");
+    // Exactly the saved limits shown in the live card; the server encodes the saved ones.
+    const shown = binding.limits, programId = status?.runtime?.live.programId, blocked = registerBlock();
+    if (blocked || !shown || !programId) throw new Error(blocked ?? "Wait for the vault program to be verified before registering.");
+    discardReview(); setReviewLapsed(false);
+    const vault = await deriveSolanaVaultAddress(programId, binding.owner);
+    const seed = crypto.getRandomValues(new Uint8Array(32));
+    try {
+      const sessionPublicKey = base58Encode(ed25519.getPublicKey(seed));
+      // Timed on this clock from before the request, so latency only shortens the window.
+      const started = Date.now();
+      const { setup } = await api<{ setup: Setup }>("setup", { stage: "prepare", sessionPublicKey });
+      if (setup.session !== sessionPublicKey) throw new Error("The prepared permission names a different session. Nothing was signed.");
+      if (setup.programId !== programId || setup.vault !== vault) throw new Error("The prepared permission names a different vault. Nothing was signed.");
+      // The wallet only opens for bytes that encode what this page showed.
+      const terms = readPermissionTransaction(setup.transactionBase64, { owner: binding.owner, programId, vault, session: sessionPublicKey });
+      if (!permissionMatchesLimits(terms, shown)) throw new Error("The prepared permission does not match the saved limits shown on this page. Nothing was signed. Refresh and review your limits.");
+      // The fee shown is the one decoded from the bytes; a server that says otherwise is not believed.
+      if (setup.priorityFeeLamports !== undefined && setup.priorityFeeLamports !== terms.priorityFeeLamports) throw new Error("The prepared permission's fee does not match its bytes. Nothing was signed. Refresh and register again.");
+      reviewSeed.current = seed;
+      setReview({ transactionBase64: setup.transactionBase64, limits: shown, terms, requiredLamports: setup.requiredLamports ?? null, ownerLamports: setup.ownerLamports ?? null,
+        deadline: started + REVIEW_SIGN_WINDOW_MS });
+    } finally { if (reviewSeed.current !== seed) seed.fill(0); }
+  };
+  /** Step 2: the owner signs exactly the reviewed bytes, then they are submitted and activated. */
+  const signRegistration = async () => {
+    const shown = review, seed = reviewSeed.current;
+    if (!shown || !seed) throw new Error("Register again to prepare a permission to review.");
+    if (Date.now() >= shown.deadline) {
+      discardReview(); setReviewLapsed(true);
+      throw new Error("This prepared permission was not signed in time, so it was discarded. Nothing was signed. Register again to prepare a new one.");
+    }
+    // Copied before the wallet opens: the review can lapse (and its seed be
+    // zeroed) while the owner is still signing. A wallet that refuses or
+    // closes leaves the review in place to sign again.
+    const secret = base64(seed);
+    const signed = base64(await signer.signSetup(fromBase64(shown.transactionBase64)));
+    const pending = { secret, signedTransactionBase64: signed, signature: signatureOf(signed), sent: false, limits: shown.limits };
+    // Keep the bounded session seed and exact signed bytes before submit:
+    // a lost response must retry this registration, never create a new one.
+    setRegistration(pending); discardReview();
+    await submitRegistration(pending);
+  };
+  /** Retries the signed registration this page holds. */
   const setupLive = async () => {
     if (!sameWallet || !binding) throw new Error("Connect the Solana wallet bound to this account.");
-    let pending = registration;
-    if (pending && pending.limits.expiresAtMs <= Date.now()) {
+    const pending = registration;
+    if (!pending) throw new Error("Register again to prepare a permission to review.");
+    if (pending.limits.expiresAtMs <= Date.now()) {
       // The vault refuses to activate an expired permission, so its key can never be used.
       setRegistration(null);
       throw new Error(`This permission expired at ${permissionExpiry(pending.limits.expiresAtMs)} before it was activated, so its session key has been discarded. Register again to sign a new permission.`);
     }
-    if (!pending) {
-      // Exactly the saved limits shown in the live card; the server encodes the saved ones.
-      const shown = binding.limits, programId = status?.runtime?.live.programId, blocked = registerBlock();
-      if (blocked || !shown || !programId) throw new Error(blocked ?? "Wait for the vault program to be verified before registering.");
-      const vault = await deriveSolanaVaultAddress(programId, binding.owner);
-      const seed = crypto.getRandomValues(new Uint8Array(32));
-      try {
-        const sessionPublicKey = base58Encode(ed25519.getPublicKey(seed));
-        const { setup } = await api<{ setup: Setup }>("setup", { stage: "prepare", sessionPublicKey });
-        if (setup.session !== sessionPublicKey) throw new Error("The prepared permission names a different session. Nothing was signed.");
-        if (setup.programId !== programId || setup.vault !== vault) throw new Error("The prepared permission names a different vault. Nothing was signed.");
-        // The wallet only opens for bytes that encode what this page showed.
-        const terms = readPermissionTransaction(setup.transactionBase64, { owner: binding.owner, programId, vault, session: sessionPublicKey });
-        if (!permissionMatchesLimits(terms, shown)) throw new Error("The prepared permission does not match the saved limits shown on this page. Nothing was signed. Refresh and review your limits.");
-        const signed = base64(await signer.signSetup(fromBase64(setup.transactionBase64)));
-        pending = { secret: base64(seed), signedTransactionBase64: signed, signature: signatureOf(signed), sent: false, limits: shown };
-        // Keep the bounded session seed and exact signed bytes before submit:
-        // a lost response must retry this registration, never create a new one.
-        setRegistration(pending);
-      } finally { seed.fill(0); }
-    }
+    await submitRegistration(pending);
+  };
+  const submitRegistration = async (signedRegistration: NonNullable<typeof registration>) => {
+    let pending = signedRegistration;
     // Submitting the saved bytes again is idempotent: the server reports the
     // outcome of the transaction it saved. A refusal of the first submission
     // proves the server never saved them, so they and their seed are dropped.
@@ -333,7 +394,9 @@ function ConnectedSolana() {
       </div> : <div className="solana-card"><h2>Live permission</h2>
         <p>{status?.runtime?.live.ready ? "Registered permission ready." : "Live trading is not active yet."}</p>
         {binding.limits?.perTradeWsol && binding.limits.dailyWsol && <p>Sales are limited to {display(binding.limits.perTradeWsol, 9)} SOL per trade and {display(binding.limits.dailyWsol, 9)} SOL per 24 hours, whatever the price.</p>}
-        {!!status?.runtime?.live.blockers.length && <ul>{status.runtime.live.blockers.map((blocker) => <li key={blocker}>{blocker}</li>)}</ul>}
+        {!!status?.runtime?.live.blockers.length && <ul aria-label="What stops live trading">{status.runtime.live.blockers.map((blocker) => <li key={blocker}>{blocker}</li>)}</ul>}
+        {!!live?.warnings?.length && <ul role="status" aria-label="Warnings" className="solana-warning">{live.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul>}
+        {live?.feePayer && Object.hasOwn(FEE_PAYER_LEVELS, live.feePayer.level) && <p>Shared network fee payer: {FEE_PAYER_LEVELS[live.feePayer.level]}{displaySolanaAmountOrNull(live.feePayer.lamports, 9) !== null && ` (${displaySolanaAmountOrNull(live.feePayer.lamports, 9)} SOL)`}. Merrymen pays your trades&apos; network fees from it; your owner wallet pays only for owner transactions.</p>}
         {status?.runtime?.live.vault && <p>Vault: <span className="solana-address">{status.runtime.live.vault}</span>{status.runtime.live.programId && <> · Program: <span className="solana-address">{status.runtime.live.programId}</span></>}</p>}
         {status?.runtime?.live.cashTokenAccount && (status.runtime.live.ready || status.runtime.live.canExit) && <div><h3>Fund the Solana vault</h3><p>Send USDG on Solana to this verified USDG token account:</p><p className="solana-address">{status.runtime.live.cashTokenAccount}</p><p>Deposit USDG only. Direct wrapped SOL deposits have no recorded cost basis and cannot be traded by this session.</p></div>}
         {status?.runtime?.live.balances && <><p className="solana-value">{display(status.runtime.live.balances.cashUsdg)} USDG</p><p>{display(status.runtime.live.balances.wsolRaw, 9)} wrapped SOL · observed at slot {status.runtime.live.balances.slot}</p></>}
@@ -345,10 +408,16 @@ function ConnectedSolana() {
         {!!status?.runtime?.live.history?.length && <details><summary>Recent live requests</summary><ul>{status.runtime.live.history.slice(0, 20).map((trade) => <li key={trade.requestId}>{trade.requestId}: {trade.status}{trade.signature && <> · <a target="_blank" rel="noreferrer" href={`https://solscan.io/tx/${encodeURIComponent(trade.signature)}`}>Transaction</a></>}</li>)}</ul></details>}
         <p>The initial live market is USDG ↔ wrapped SOL. Deposit only after the program and vault have been verified.</p>
         {registration ? <PermissionTerms heading="The permission you signed" limits={registration.limits} />
+          : review ? <PermissionReview limits={review.limits} terms={review.terms} requiredLamports={review.requiredLamports} ownerLamports={review.ownerLamports}
+            secondsLeft={Math.max(1, Math.round((review.deadline - Date.now()) / 1000))} />
           : binding.limits && <PermissionTerms heading="Your wallet will be asked to sign these saved limits" limits={binding.limits} />}
         {registration && <p>Keep this page open while finalization completes. Retry activation with the existing registration.</p>}
+        {!registration && !review && reviewLapsed && <p role="status">The prepared permission was not signed in time, so it was discarded. Nothing was signed. Register again to prepare a new one.</p>}
         {!registration && binding.limits && registerBlock() && <p role="status">{registerBlock()}</p>}
-        <button disabled={busy || !sameWallet || !binding.limits || !status?.runtime?.live.programId || (!registration && !!registerBlock())} onClick={() => void act(setupLive)}>{registration ? "Finish permission registration" : "Register bounded trading permission"}</button>
+        {!registration && review ? <>
+          <button disabled={busy || !sameWallet || !!registerBlock()} onClick={() => void act(signRegistration)}>Sign permission with my wallet</button>
+          <button className="solana-secondary" disabled={busy} onClick={discardReview}>Discard prepared permission</button></>
+          : <button disabled={busy || !sameWallet || !binding.limits || !status?.runtime?.live.programId || (!registration && !!registerBlock())} onClick={() => void act(registration ? setupLive : prepareRegistration)}>{registration ? "Finish permission registration" : "Register bounded trading permission"}</button>}
       </div>}
       <form className="solana-card" onSubmit={(event) => { event.preventDefault(); void act(previewTrade); }}><h2>USDG ↔ wrapped SOL</h2>
         <label>Direction<select disabled={busy} value={side} onChange={(e) => { setSide(e.target.value as "buy" | "sell"); invalidate(); }}><option value="buy">Buy wrapped SOL</option><option value="sell">Sell wrapped SOL</option></select></label>
@@ -364,7 +433,8 @@ function ConnectedSolana() {
         {receipt && <button type="button" className="solana-secondary" disabled={busy} onClick={invalidate}>Start a new trade</button>}
       </form>
       <SolanaAutomation key={`strategy-${signer.did}`} binding={binding} api={api} refresh={refresh} workerOnline={status?.runtime?.automation?.workerOnline ?? false} />
-      <SolanaOwnerActions key={`owner-${signer.did}`} available={sameWallet && !!status?.runtime?.live.programId} api={api} sign={signer.signSetup} refresh={refresh} readRecord={readRecord} />
+      <SolanaOwnerActions key={`owner-${signer.did}`} available={sameWallet && !!status?.runtime?.live.programId} api={api} sign={signer.signSetup} refresh={refresh} readRecord={readRecord}
+        ownerWallet={live?.ownerWallet ?? null} recoverable={live?.recoverable ?? null} />
       {/* Off by default; only the bound owner of a vault the server has read. */}
       {ownerKeyExportEnabled() && sameWallet && vaultSeen && signer.address && <SolanaRecovery key={`recovery-${signer.did}`} owner={signer.address}
         programId={live?.programId ?? null} vault={live?.vault ?? null} exportKey={signer.exportKey} />}

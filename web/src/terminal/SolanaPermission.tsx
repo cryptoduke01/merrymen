@@ -14,7 +14,7 @@
 import { getCompiledTransactionMessageDecoder, getTransactionDecoder } from "@solana/kit";
 import { base58Encode, SOLANA_USDG_MINT } from "../../../packages/core/src/ids";
 import type { SolanaPaperLimits } from "../../../packages/core/src/solana";
-import { displaySolanaAmount } from "../lib/solana-amounts";
+import { displaySolanaAmount, displaySolanaAmountOrNull } from "../lib/solana-amounts";
 
 const ASSOCIATED_TOKEN_PROGRAM = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL";
 const WRAPPED_SOL = "So11111111111111111111111111111111111111112";
@@ -106,3 +106,25 @@ export function PermissionTerms({ limits, heading }: { limits: SolanaPaperLimits
     <li>Expires {permissionExpiry(limits.expiresAtMs)}{hours > 0 ? ` (in about ${hours < 1 ? "less than an hour" : `${Math.round(hours)} hour${Math.round(hours) === 1 ? "" : "s"}`})` : " (expired)"}</li>
   </ul><p>The {limits.maxDrawdownBps / 100}% maximum drawdown is enforced by the Merrymen trading service, not by the on-chain permission.</p></div>;
 }
+
+/**
+ * THE PREPARED PERMISSION, AS ITS BYTES SAY, BEFORE THE WALLET OPENS.
+ *
+ * Shown between prepare and signing: the limits decoded from the bytes (they
+ * equal the saved limits, or nothing reaches this point), the priority fee the
+ * bytes carry (decoded, never the server's claim) and what the server says the
+ * owner wallet must hold to send it, rent for the accounts it opens included.
+ */
+export function PermissionReview({ limits, terms, requiredLamports, ownerLamports, secondsLeft }: {
+  limits: SolanaPaperLimits; terms: SignedPermissionTerms; requiredLamports: string | null; ownerLamports: string | null; secondsLeft: number;
+}) {
+  const fee = displaySolanaAmountOrNull(terms.priorityFeeLamports, 9), required = displaySolanaAmountOrNull(requiredLamports, 9), held = displaySolanaAmountOrNull(ownerLamports, 9);
+  return <div className="solana-review">
+    <PermissionTerms heading="Review before your wallet opens: the prepared permission encodes these limits" limits={limits} />
+    <p>{terms.priorityFeeLamports === "0" || !fee ? "It carries no priority fee: your owner wallet pays only the network signature fee."
+      : `It carries a priority fee of ${fee} SOL (at most ${displaySolanaAmount(OWNER_MAX_PRIORITY_FEE_LAMPORTS.toString(), 9)} SOL), paid by your owner wallet with the signature fee so it lands under congestion.`}</p>
+    {required && <p>To send it your owner wallet must hold at least {required} SOL{held ? ` (it holds ${held} SOL)` : ""}, including rent for any vault and token accounts it opens.</p>}
+    <p>Nothing has been signed yet. Sign within about {secondsLeft} seconds, or register again to prepare a new one.</p>
+  </div>;
+}
+

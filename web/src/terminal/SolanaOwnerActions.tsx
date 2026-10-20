@@ -1,14 +1,22 @@
 "use client";
 import { useRef, useState } from "react";
 import { SOLANA_USDG_MINT, base58Encode } from "../../../packages/core/src/ids";
-import { solanaUnits } from "../lib/solana-amounts";
+import { displaySolanaAmountOrNull, solanaUnits } from "../lib/solana-amounts";
 import { RequestError } from "./request-json";
 import type { SolanaApi } from "./SolanaAutomation";
+import { OWNER_MAX_PRIORITY_FEE_LAMPORTS } from "./SolanaPermission";
 
 const WSOL = "So11111111111111111111111111111111111111112";
 type ActionResult = { signature: string; status: "pending" | "finalized" | "failed" };
-type OwnerAction = "revoke" | "withdraw" | "resume-buys";
-const ACTION_NAMES: Record<OwnerAction, string> = { revoke: "revocation", withdraw: "withdrawal", "resume-buys": "request to resume buys" };
+type OwnerAction = "revoke" | "withdraw" | "withdraw-sol" | "resume-buys";
+const ACTION_NAMES: Record<OwnerAction, string> = { revoke: "revocation", withdraw: "withdrawal", "withdraw-sol": "native SOL withdrawal", "resume-buys": "request to resume buys" };
+const sol = (raw: unknown) => displaySolanaAmountOrNull(raw, 9);
+/** What the owner wallet holds and must hold to send an owner transaction (status.live.ownerWallet). */
+export type OwnerWallet = { lamports: string; revokeLamports: string; withdrawLamports: string };
+/** Owner-recoverable SOL outside the book (status.live.recoverable). */
+export type RecoverableSol = { nativeLamports: string; unsyncedWsolLamports: string };
+/** What the owner route's prepare answers, beyond the bytes to sign. */
+type PreparedOwnerTransaction = { transactionBase64: string; requiredLamports?: string; ownerLamports?: string; priorityFeeLamports?: string };
 
 /**
  * A 4XX REFUSES THE REQUEST IT ANSWERS, NOT NECESSARILY THE SIGNED BYTES.
@@ -34,7 +42,7 @@ export function refusedByServer(error: unknown): error is RequestError {
 }
 
 /** The server's saved owner transaction, as the status route reports it. */
-export type OwnerRecord = { signature: string; status: string } | null;
+export type OwnerRecord = { signature: string; status: string; kind?: string } | null;
 
 /**
  * The owner's signature on signed wire bytes, which is what the server records
@@ -65,17 +73,21 @@ export async function outcomeAfterRefusal(readRecord: () => Promise<OwnerRecord>
   return record.status === "finalized" || record.status === "failed" ? record.status : "pending";
 }
 
-export function SolanaOwnerActions({ available, api, sign, refresh, readRecord }: {
+export function SolanaOwnerActions({ available, api, sign, refresh, readRecord, ownerWallet = null, recoverable = null }: {
   available: boolean; api: SolanaApi; sign: (bytes: Uint8Array) => Promise<Uint8Array>; refresh: () => Promise<void>;
   /** Reads the server's saved owner transaction afresh (and updates the screen). */
   readRecord: () => Promise<OwnerRecord>;
+  ownerWallet?: OwnerWallet | null;
+  recoverable?: RecoverableSol | null;
 }) {
-  const [mint, setMint] = useState(SOLANA_USDG_MINT as string), [amount, setAmount] = useState("1");
+  const [mint, setMint] = useState(SOLANA_USDG_MINT as string), [amount, setAmount] = useState("1"), [solAmount, setSolAmount] = useState("");
   // `sent`: an earlier submission of these bytes reached the server, or may have.
   const [pending, setPending] = useState<{ action: OwnerAction; signedTransactionBase64: string; signature: string | null; sent: boolean } | null>(null);
   const [result, setResult] = useState<ActionResult | null>(null), [busy, setBusy] = useState(false), [error, setError] = useState("");
   // Bytes cleared without a known outcome, linked so the owner can check Solana itself.
   const [cleared, setCleared] = useState<{ action: OwnerAction; signature: string } | null>(null);
+  // What the server said the last prepared transaction needs from the owner wallet.
+  const [cost, setCost] = useState<{ action: OwnerAction; required: string; held: string | null; fee: string | null } | null>(null);
   const inFlight = useRef(false);
   const run = (action: OwnerAction) => {
     if (inFlight.current) return; inFlight.current = true; setBusy(true); setError("");
@@ -86,8 +98,13 @@ export function SolanaOwnerActions({ available, api, sign, refresh, readRecord }
       // longer be submitted once this one is prepared.
       let saved = pending?.action === action ? pending : null;
       if (!saved) {
-        const body = action === "withdraw" ? { stage: "prepare", action, mint, amountRaw: solanaUnits(amount, mint === SOLANA_USDG_MINT ? 6 : 9) } : { stage: "prepare", action };
-        const { prepared } = await api<{ prepared: { transactionBase64: string } }>("owner", body);
+        const body = action === "withdraw" ? { stage: "prepare", action, mint, amountRaw: solanaUnits(amount, mint === SOLANA_USDG_MINT ? 6 : 9) }
+          // Native lamports held by the vault account above its rent reserve (withdraw_sol).
+          : action === "withdraw-sol" ? { stage: "prepare", action, amountRaw: solanaUnits(solAmount, 9) }
+          : { stage: "prepare", action };
+        const { prepared } = await api<{ prepared: PreparedOwnerTransaction }>("owner", body);
+        const required = sol(prepared.requiredLamports);
+        setCost(required ? { action, required, held: sol(prepared.ownerLamports), fee: prepared.priorityFeeLamports && prepared.priorityFeeLamports !== "0" ? sol(prepared.priorityFeeLamports) : null } : null);
         const signed = await sign(Uint8Array.from(atob(prepared.transactionBase64), (c) => c.charCodeAt(0)));
         const signedTransactionBase64 = btoa(String.fromCharCode(...signed));
         saved = { action, signedTransactionBase64, signature: signatureOf(signedTransactionBase64), sent: false };
@@ -124,8 +141,13 @@ export function SolanaOwnerActions({ available, api, sign, refresh, readRecord }
     })().catch((e: unknown) => setError(e instanceof Error ? e.message : "The owner action did not finish. Retry the existing transaction."))
       .finally(() => { inFlight.current = false; setBusy(false); });
   };
+  const held = sol(ownerWallet?.lamports), revokeNeeds = sol(ownerWallet?.revokeLamports), withdrawNeeds = sol(ownerWallet?.withdrawLamports);
+  const short = !!ownerWallet && !!held && !!revokeNeeds && !!withdrawNeeds && BigInt(ownerWallet.lamports) < BigInt(ownerWallet.revokeLamports);
+  const native = sol(recoverable?.nativeLamports), unsynced = sol(recoverable?.unsyncedWsolLamports);
   return <div className="solana-card"><h2>Owner controls</h2>
-    <p>Your wallet must sign every revocation and withdrawal. Withdrawals return to your own token account.</p>
+    <p>Your wallet must sign every revocation and withdrawal. Token withdrawals return to your own token accounts; native SOL returns to your owner wallet.</p>
+    {held && revokeNeeds && withdrawNeeds && <p>Your owner wallet holds {held} SOL and pays the network fees of these transactions. To revoke it must hold at least {revokeNeeds} SOL; to withdraw, up to {withdrawNeeds} SOL, since a withdrawal may open your token account. A priority fee of at most {sol(OWNER_MAX_PRIORITY_FEE_LAMPORTS.toString())} SOL is added only from SOL beyond that.</p>}
+    {short && <p role="alert" className="solana-warning">That is too little to revoke. Send SOL to your owner wallet now, so you can revoke or withdraw in an emergency.</p>}
     {error && <p role="alert" className="solana-error">{error}</p>}
     <fieldset disabled={busy || !available}><legend>Vault recovery</legend>
       {/* Revoking is never held back by a withdrawal whose outcome is unknown. */}
@@ -135,7 +157,12 @@ export function SolanaOwnerActions({ available, api, sign, refresh, readRecord }
       <label>Asset<select value={mint} onChange={(e) => setMint(e.target.value)}><option value={SOLANA_USDG_MINT}>USDG</option><option value={WSOL}>Wrapped SOL</option></select></label>
       <label>Amount to withdraw<input inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} /></label>
       <button disabled={!!pending} onClick={() => run("withdraw")}>Withdraw to my wallet</button>
+      {unsynced && unsynced !== "0" && <p>{unsynced} SOL was sent to the vault&apos;s wrapped SOL account without being wrapped. A wrapped SOL withdrawal wraps it first and can include it.</p>}
+      {native && <p>The vault account holds {native} SOL above its rent reserve. It is never traded or counted in performance; withdraw it to your owner wallet here.</p>}
+      <label>Native SOL to withdraw<input inputMode="decimal" value={solAmount} onChange={(e) => setSolAmount(e.target.value)} /></label>
+      <button disabled={!!pending} onClick={() => run("withdraw-sol")}>Withdraw native SOL</button>
     </fieldset>
+    {cost && <p>The prepared {ACTION_NAMES[cost.action]} needs your owner wallet to hold at least {cost.required} SOL{cost.held ? ` (it holds ${cost.held} SOL)` : ""}: its network fee{cost.fee ? `, a priority fee of ${cost.fee} SOL so it lands under congestion` : ""}, any token account it opens, and the wallet&apos;s own minimum balance.</p>}
     {pending && <p role="status">A signed {ACTION_NAMES[pending.action]} has no confirmed outcome yet. Check it before signing another withdrawal or resume request.</p>}
     {pending && <button disabled={busy || !available} onClick={() => run(pending.action)}>Check existing owner transaction</button>}
     {cleared && !pending && <p role="status"><a target="_blank" rel="noreferrer" href={`https://solscan.io/tx/${encodeURIComponent(cleared.signature)}`}>Check this {ACTION_NAMES[cleared.action]} on Solana</a></p>}

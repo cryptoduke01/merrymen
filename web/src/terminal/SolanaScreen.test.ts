@@ -39,6 +39,11 @@ async function press(text: string) {
   await ui.click(text);
   for (let i = 0; i < 20; i++) await act(async () => { await new Promise((resolve) => setTimeout(resolve, 1)); });
 }
+/** Registers in the page's two steps: prepare and review, then sign with the wallet. */
+async function register() {
+  await press("Register bounded trading permission");
+  if ([...ui.container.querySelectorAll("button")].some((item) => item.textContent === "Sign permission with my wallet")) await press("Sign permission with my wallet");
+}
 const field = (label: string) => [...ui.container.querySelectorAll("label")].find((item) => item.textContent?.startsWith(label))!.querySelector("input")!.value;
 let SolanaScreen: typeof import("./SolanaScreen").SolanaScreen;
 let testDom: typeof import("./test-dom").testDom, json: typeof import("./test-dom").json, deferred: typeof import("./test-dom").deferred;
@@ -160,7 +165,7 @@ test("registration retries the same signed bytes and bounded seed after an unkno
     if (path === "setup" && body?.stage === "activate") { activation = body; state.runtime.live.ready = true; return json({ live: { ready: true } }); }
     throw new Error("Unexpected fixture route");
   };
-  await render(); await press("Register bounded trading permission");
+  await render(); await register();
   assert.equal(signCount, 1); assert.equal(activation, undefined);
   await press("Finish permission registration");
   assert.equal(signCount, 1); assert.deepEqual(submissions, ["AQID", "AQID"]);
@@ -532,7 +537,7 @@ test("a 4xx on a re-check of an accepted permission keeps its bytes and session 
     if (path === "setup" && body?.stage === "activate") { activation = body; return json({ live: { registered: true } }); }
     throw new Error("Unexpected fixture route");
   };
-  await render(); await press("Register bounded trading permission");
+  await render(); await register();
   assert.match(ui.container.textContent!, /awaiting final confirmation/);
   await press("Finish permission registration");
   const text = ui.container.textContent!;
@@ -561,7 +566,7 @@ test("a refused permission retry the server holds no record of is cleared withou
     }
     throw new Error("Unexpected fixture route");
   };
-  await render(); await press("Register bounded trading permission");
+  await render(); await register();
   assert.ok(button("Finish permission registration"));
   await press("Finish permission registration");
   const text = ui.container.textContent!;
@@ -590,7 +595,7 @@ test("a confirmed permission whose activation is refused keeps its session key w
     }
     throw new Error("Unexpected fixture route");
   };
-  await render(); await press("Register bounded trading permission");
+  await render(); await register();
   assert.doesNotMatch(ui.container.textContent!, /discarded/);
   assert.match(ui.container.textContent!, /does not match the signed limits\. This permission is confirmed on Solana but is not active yet, so its session key was kept/);
   await press("Finish permission registration");
@@ -614,11 +619,11 @@ test("a refused permission submit discards the signed bytes and the next click p
     if (path === "setup" && body?.stage === "activate") { activation = body; return json({ live: { registered: true } }); }
     throw new Error("Unexpected fixture route");
   };
-  await render(); await press("Register bounded trading permission");
+  await render(); await register();
   assert.equal(signCount, 1);
   assert.match(ui.container.textContent!, /expired before submission\. The signed permission was not accepted, so it has been discarded/);
   // Not "Finish permission registration": retrying the refused bytes could never succeed.
-  await press("Register bounded trading permission");
+  await register();
   assert.equal(signCount, 2); assert.equal(sessions.length, 2);
   assert.equal(calls.filter((call) => call.path === "setup" && call.body?.stage === "submit").length, 2);
   const seed = Buffer.from(String(activation!.sessionSecretKey), "base64");
@@ -636,7 +641,7 @@ test("a registration that later fails on chain is discarded instead of being act
     if (path === "setup" && body?.stage === "activate") return refusal("The permission transaction failed. Prepare a new permission.");
     throw new Error("Unexpected fixture route");
   };
-  await render(); await press("Register bounded trading permission");
+  await render(); await register();
   assert.match(ui.container.textContent!, /awaiting final confirmation/);
   assert.equal(calls.some((call) => call.body?.stage === "activate"), false);
   outcome = "failed";
@@ -656,7 +661,7 @@ test("a held permission that expires before activation is discarded without resu
     if (path === "setup" && body?.stage === "submit") return json({ registration: { signature: "fixture-chain-signature", status: "pending" } });
     throw new Error("Unexpected fixture route");
   };
-  await render(); await press("Register bounded trading permission");
+  await render(); await register();
   assert.match(ui.container.textContent!, /awaiting final confirmation/);
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 500)); });
   await press("Finish permission registration");
@@ -677,7 +682,7 @@ test("a confirmed permission the server no longer holds drops its session key in
     if (path === "setup" && body?.stage === "activate") return refusal("The signed permission does not match this session key.", 400);
     throw new Error("Unexpected fixture route");
   };
-  await render(); await press("Register bounded trading permission");
+  await render(); await register();
   assert.match(ui.container.textContent!, /does not match this session key\. The server no longer holds this permission, so it cannot be activated and its session key has been discarded/);
   assert.equal(button("Register bounded trading permission").disabled, false);
 });
@@ -806,4 +811,128 @@ test("the export card never names a merrymen command that cli/bin.mjs does not r
     const text = exportCard()!.textContent!;
     for (const [, command] of text.matchAll(/merrymen ([a-z][a-z0-9-]*)/g)) assert.ok(cli.includes(`case "${command}"`), `merrymen ${command} is not a registered command`);
   });
+});
+
+test("the live card shows warnings, the fee payer's level and the runtime's setup and refund blockers", async () => {
+  state = initial("live");
+  const refund = "Someone sent USDG to your vault's next swap account. The vault returns it to your own USDG token account, which is closed or not safe to use (it has a delegate or close authority, or is frozen). Reopen your USDG token account in your wallet, or withdraw a little USDG here, which opens it. Buying is paused until then; exits remain available.";
+  Object.assign(state.runtime.live, { programId: PROGRAM, blockers: ["Live Solana trading needs the same answer from two independent RPC providers.", "The fee payer warning threshold is misconfigured.", refund],
+    warnings: ["The shared network fee payer is low (0.01 SOL; operators are alerted below 0.02 SOL). Trading continues."],
+    feePayer: { lamports: "10000000", exitMinimumLamports: "2044280", buyMinimumLamports: "2084280", lowLamports: "20000000", level: "low" } });
+  await render();
+  const text = ui.container.textContent!;
+  assert.ok(text.includes("Live Solana trading needs the same answer from two independent RPC providers."));
+  assert.ok(text.includes("The fee payer warning threshold is misconfigured."));
+  assert.ok(text.includes(refund));
+  assert.match(text, /The shared network fee payer is low \(0\.01 SOL; operators are alerted below 0\.02 SOL\)\. Trading continues\./);
+  assert.match(text, /Shared network fee payer: low; trading continues and operators are alerted \(0\.01 SOL\)/);
+  assert.ok(ui.container.querySelector("[aria-label=Warnings]"));
+  // A malformed or unknown fee payer answer hides that line; it never blanks the screen.
+  Object.assign(state.runtime.live, { feePayer: { lamports: "-5", level: "drained" }, warnings: [] });
+  await ui.click("Refresh account");
+  assert.doesNotMatch(ui.container.textContent!, /Shared network fee payer/);
+  assert.match(ui.container.textContent!, /Owner controls/);
+});
+
+test("owner controls show the owner wallet's SOL against what revoke and withdraw need, and the recoverable SOL", async () => {
+  state.runtime.live.programId = OWNER;
+  Object.assign(state.runtime.live, { ownerWallet: { lamports: "500000", revokeLamports: "895880", withdrawLamports: "2934280" },
+    recoverable: { nativeLamports: "1500000000", unsyncedWsolLamports: "250000000" } });
+  await render();
+  const text = () => ui.container.textContent!;
+  assert.match(text(), /Your owner wallet holds 0\.0005 SOL and pays the network fees of these transactions\. To revoke it must hold at least 0\.00089588 SOL; to withdraw, up to 0\.00293428 SOL/);
+  assert.match(text(), /A priority fee of at most 0\.001 SOL is added only from SOL beyond that/);
+  assert.match(text(), /That is too little to revoke\. Send SOL to your owner wallet now/);
+  assert.match(text(), /The vault account holds 1\.5 SOL above its rent reserve/);
+  assert.match(text(), /0\.25 SOL was sent to the vault's wrapped SOL account without being wrapped/);
+  Object.assign(state.runtime.live, { ownerWallet: { lamports: "900000", revokeLamports: "895880", withdrawLamports: "2934280" }, recoverable: { nativeLamports: "0", unsyncedWsolLamports: "0" } });
+  await ui.click("Refresh account");
+  assert.doesNotMatch(text(), /too little to revoke/);
+  assert.doesNotMatch(text(), /without being wrapped/);
+  assert.match(text(), /The vault account holds 0 SOL above its rent reserve/);
+});
+
+test("Withdraw native SOL prepares the runtime's withdraw-sol in lamports, and shows what the owner wallet must hold", async () => {
+  state.runtime.live.programId = OWNER;
+  respond = async (path, body) => {
+    if (path === "status") return json(state);
+    if (path === "owner" && body?.stage === "prepare") {
+      assert.deepEqual(body, { stage: "prepare", action: "withdraw-sol", amountRaw: "1500000000" });
+      return json({ prepared: { transactionBase64: "AQID", requiredLamports: "905880", ownerLamports: "10000000", priorityFeeLamports: "10000" } });
+    }
+    if (path === "owner" && body?.stage === "submit") return json({ result: { signature: "native-proof", status: "finalized" } });
+    throw new Error("Unexpected fixture route");
+  };
+  await render();
+  await type("Native SOL to withdraw", "1.5");
+  await ui.click("Withdraw native SOL");
+  assert.equal(signCount, 1);
+  assert.match(ui.container.textContent!, /The prepared native SOL withdrawal needs your owner wallet to hold at least 0\.00090588 SOL \(it holds 0\.01 SOL\): its network fee, a priority fee of 0\.00001 SOL so it lands under congestion/);
+  assert.match(ui.container.textContent!, /Owner transaction: finalized/);
+  assert.deepEqual(calls.filter((call) => call.path === "owner").map((call) => call.body!.stage), ["prepare", "submit"]);
+});
+
+/** SetComputeUnitLimit and SetComputeUnitPrice, as the runtime adds them to an owner transaction. */
+function priorityFee(units: number, microLamports: bigint): Instruction[] {
+  const limit = new Uint8Array(5), price = new Uint8Array(9);
+  limit[0] = 2; new DataView(limit.buffer).setUint32(1, units, true);
+  price[0] = 3; new DataView(price.buffer).setBigUint64(1, microLamports, true);
+  const program = address("ComputeBudget111111111111111111111111111111");
+  return [{ programAddress: program, data: limit }, { programAddress: program, data: price }];
+}
+test("a permission's priority fee is shown from its bytes, with what the owner wallet must hold, before the wallet opens", async () => {
+  state = initial("live"); state.runtime.live.programId = PROGRAM;
+  const saved = liveLimits(); state.binding.limits = saved;
+  let claimed = "10000";
+  respond = async (path, body) => {
+    if (path === "status") return json(state);
+    // 200,000 units at 50,000 micro-lamports: a 0.00001 SOL priority fee.
+    if (path === "setup" && body?.stage === "prepare") return json({ setup: { ...await permissionTransaction(String(body.sessionPublicKey), saved, priorityFee(200_000, 50_000n)),
+      requiredLamports: "9915880", ownerLamports: "50000000", priorityFeeLamports: claimed } });
+    if (path === "setup" && body?.stage === "submit") return json({ registration: { signature: "fixture-chain-signature", status: "pending" } });
+    throw new Error("Unexpected fixture route");
+  };
+  await render(); await press("Register bounded trading permission");
+  const text = () => ui.container.textContent!;
+  assert.equal(signCount, 0, "the wallet has not opened");
+  assert.match(text(), /Review before your wallet opens/);
+  assert.match(text(), /It carries a priority fee of 0\.00001 SOL \(at most 0\.001 SOL\), paid by your owner wallet/);
+  assert.match(text(), /your owner wallet must hold at least 0\.00991588 SOL \(it holds 0\.05 SOL\), including rent for any vault and token accounts it opens/);
+  assert.match(text(), /10 USDG per trade and 50 USDG per 24 hours/);
+  assert.match(text(), /Nothing has been signed yet/);
+  assert.equal(calls.some((call) => call.body?.stage === "submit"), false);
+  await press("Sign permission with my wallet");
+  assert.equal(signCount, 1);
+  assert.equal(calls.filter((call) => call.body?.stage === "submit").length, 1);
+  assert.match(text(), /awaiting final confirmation/);
+  // Discarding a review signs nothing; a server that states another fee than its bytes never reaches the wallet.
+  state = initial("live"); state.runtime.live.programId = PROGRAM; state.binding.limits = saved;
+  await ui.close(); ui = testDom(); signCount = 0; calls = [];
+  await render(); await press("Register bounded trading permission");
+  await ui.click("Discard prepared permission");
+  assert.ok(button("Register bounded trading permission")); assert.equal(signCount, 0);
+  claimed = "0";
+  await press("Register bounded trading permission");
+  assert.match(text(), /The prepared permission's fee does not match its bytes\. Nothing was signed/);
+  assert.equal([...ui.container.querySelectorAll("button")].some((item) => item.textContent === "Sign permission with my wallet"), false);
+  assert.equal(signCount, 0);
+});
+
+test("a reviewed permission not signed in time is discarded without opening the wallet", async () => {
+  state = initial("live"); state.runtime.live.programId = PROGRAM;
+  const saved = liveLimits(); state.binding.limits = saved;
+  respond = async (path, body) => {
+    if (path === "status") return json(state);
+    if (path === "setup" && body?.stage === "prepare") return json({ setup: await permissionTransaction(String(body.sessionPublicKey), saved) });
+    throw new Error("Unexpected fixture route");
+  };
+  await render(); await press("Register bounded trading permission");
+  assert.match(ui.container.textContent!, /It carries no priority fee/);
+  const now = Date.now;
+  Date.now = () => now() + 46_000;
+  try { await press("Sign permission with my wallet"); } finally { Date.now = now; }
+  assert.match(ui.container.textContent!, /was not signed in time, so it was discarded\. Nothing was signed/);
+  assert.equal(signCount, 0);
+  assert.equal(calls.some((call) => call.body?.stage === "submit"), false);
+  assert.equal(button("Register bounded trading permission").disabled, false);
 });
