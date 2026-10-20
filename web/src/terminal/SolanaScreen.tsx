@@ -15,6 +15,7 @@ import { ownerKeyExportEnabled, releasedProgramSha256, SolanaRecovery } from "./
 import { checkPreparedPermission, PermissionReview, PermissionTerms, permissionExpiry, secondsUntil, type PreparedPermission, type SignedPermissionTerms } from "./SolanaPermission";
 import { deriveSolanaVaultAddress } from "../../../packages/core/src/solana-live";
 import { solanaUnits as units, displaySolanaAmount as display, displaySolanaAmountOrNull } from "../lib/solana-amounts";
+import { SOLANA_OTHER_SIGN_IN } from "../lib/solana-sign-in";
 import "./SolanaScreen.css";
 
 const WSOL = "So11111111111111111111111111111111111111112";
@@ -23,7 +24,9 @@ type RuntimeStatus = {
   live: { ready: boolean; canExit?: boolean; cashTokenAccount?: string | null; blockers: string[]; programId: string | null; vault: string | null; session: string | null; pending: Receipt[];
     balances?: { slot: number; cashUsdg: string; wsolRaw: string } | null;
     book?: { realizedPnlUsdgRaw: string; networkFeesLamports: string; unresolvedFeeCount?: number; reservedUnknownFeeLamports?: string; quarantinedWsolRaw?: string } | null;
-    history?: Receipt[]; ownerTransaction?: { signature: string; status: string; kind?: string } | null;
+    history?: Receipt[]; ownerTransaction?: { signature: string; status: string; kind?: string;
+      /** A revocation signed beside it (the revoke slot), with its own signature and outcome. */
+      revoke?: { signature: string; status: string; kind?: string; revokeAgain?: boolean } | null } | null;
     /** Not blockers: a low shared fee payer, an owner wallet short of SOL for revoke or withdraw. */
     warnings?: string[];
     feePayer?: { lamports: string; level: FeePayerLevel } | null;
@@ -55,6 +58,14 @@ type Receipt = { mode?: string; requestId?: string; signature?: string; status?:
 type Preview = { quote: SolanaQuote; key: string; deadline: number; lifetime: number; movedFrom?: string };
 /** The intent route's price-moved refusal, word for word (PRICE_MOVED in web/src/lib/solana-api.ts; a test pins the two together). */
 export const SOLANA_PRICE_MOVED = "The price moved. Preview again; nothing was sent.";
+/**
+ * The server's answer while this account's Solana wallet was verified with another sign-in: the
+ * status route's and every account route's 403, the bind route's 409. Creating or verifying a wallet
+ * cannot help then (a new wallet is an orphan, a verify is refused), so the page says the way back.
+ */
+function otherSignIn(error: unknown): boolean {
+  return error instanceof RequestError && (error.status === 403 || error.status === 409) && error.message === SOLANA_OTHER_SIGN_IN;
+}
 /** The market's zero-output answer: no route buys this amount (TOO_SMALL in web/src/lib/solana-api.ts; pinned the same way). */
 export const SOLANA_TOO_SMALL = "This amount is too small to trade: no route returns anything for it. Nothing was sent or recorded. Try a larger amount.";
 /** The slippage the server's write-off quotes a lot back with (SOLANA_PAPER_WRITE_OFF_SLIPPAGE_BPS; a test keeps the two equal). */
@@ -162,6 +173,8 @@ function ConnectedSolana() {
   // What the owner should read that is not a failure (role=status): a pacing answer (429: wait and try
   // again), a price move with no usable fresh minimum, a lot the market quotes nothing for, a write-off done.
   const [notice, setNotice] = useState("");
+  // The account's wallet was verified with another sign-in (otherSignIn): no wallet to create or verify here.
+  const [otherLogin, setOtherLogin] = useState(false);
   const [dust, setDust] = useState<DustLot | null>(null);
   const [mode, setMode] = useState<"paper" | "live">("paper"), [consent, setConsent] = useState(false);
   const [perTrade, setPerTrade] = useState("10"), [daily, setDaily] = useState("50");
@@ -208,7 +221,7 @@ function ConnectedSolana() {
     if (epoch !== accountEpoch.current || signal?.aborted) return null;
     if (statusRevision.current !== null && statusRevision.current !== next.binding?.revision) { setPreview(null); discardReview(); }
     statusRevision.current = next.binding?.revision ?? null;
-    setStatus(next);
+    setStatus(next); setOtherLogin(false);
     if (next.binding) {
       setMode(next.binding.requestedMode);
       if (next.binding.limits) {
@@ -232,13 +245,14 @@ function ConnectedSolana() {
   }, [load]);
   useEffect(() => {
     accountEpoch.current++;
-    setStatus(null); setError(""); setNotice(""); setDust(null); setConsent(false); setPreview(null); setReceipt(null); setRegistration(null); request.current = null; statusRevision.current = null;
+    setStatus(null); setError(""); setNotice(""); setOtherLogin(false); setDust(null); setConsent(false); setPreview(null); setReceipt(null); setRegistration(null); request.current = null; statusRevision.current = null;
     discardReview(); setReviewLapsed(false);
     if (!signer.authenticated) return;
     const abort = new AbortController();
     // The first read can be paced too (the status route allows a burst, then one read every few seconds): a wait, not a failure.
     void refresh(abort.signal).catch((e: unknown) => {
       if (abort.signal.aborted) return;
+      if (otherSignIn(e)) { setOtherLogin(true); return; }
       const paced = pacedAnswer(e);
       if (paced !== null) setNotice(paced); else setError(e instanceof Error ? e.message : "Could not load your Solana account.");
     });
@@ -250,6 +264,8 @@ function ConnectedSolana() {
     const epoch = accountEpoch.current;
     try { await fn(); } catch (e) {
       if (epoch !== accountEpoch.current) return;
+      // Said once, in the wallet card, which then offers no wallet to create or verify.
+      if (otherSignIn(e)) { setOtherLogin(true); return; }
       // Paced before anything ran: the server's own words say to wait. The page
       // keeps what it holds (a preview, signed bytes) for the next try.
       const paced = pacedAnswer(e);
@@ -600,8 +616,9 @@ function ConnectedSolana() {
     {error && <p role="alert" className="solana-error">{error}</p>}
     {notice && <p role="status" className="solana-notice">{notice}</p>}
     <div className="solana-card"><h2>Wallet ownership</h2>
+      {otherLogin && <p role="alert" className="solana-error">{SOLANA_OTHER_SIGN_IN}</p>}
       {binding ? <><p className="solana-address">{binding.owner}</p><p>{sameWallet ? "Verified wallet connected." : "Connect the exact embedded wallet shown above before signing a permission."}</p></>
-        : <><p>{signer.address ?? (signer.ready ? "Create your protected Solana wallet, then verify that it belongs to this account." : "Connecting your protected wallet…")}</p>
+        : !otherLogin && <><p>{signer.address ?? (signer.ready ? "Create your protected Solana wallet, then verify that it belongs to this account." : "Connecting your protected wallet…")}</p>
           <button disabled={busy || !signer.ready || signer.ambiguous} onClick={() => void act(signer.address ? bind : signer.create)}>{signer.address ? "Verify Solana wallet" : "Create Solana wallet"}</button>
           {signer.ambiguous && <p role="alert">Multiple embedded Solana wallets are connected. Select the intended owner before continuing.</p>}</>}
       <button className="solana-secondary" disabled={busy} onClick={() => void act(() => refresh())}>Refresh account</button>
@@ -662,7 +679,8 @@ function ConnectedSolana() {
         {liveBook && <p>Recorded realized P&amp;L: {display(liveBook.realizedPnlUsdgRaw)} USDG. Network fees: {display(liveBook.networkFeesLamports, 9)} SOL.</p>}
         {liveBook?.quarantinedWsolRaw && liveBook.quarantinedWsolRaw !== "0" && <p role="status">{display(liveBook.quarantinedWsolRaw, 9)} wrapped SOL arrived outside your recorded trades. It is held aside: never traded, never counted in performance, and you can withdraw it.</p>}
         {liveBook && (liveBook.unresolvedFeeCount ?? 0) > 0 && <p role="status">Network fees are incomplete for {liveBook.unresolvedFeeCount} expired submission(s). Their swaps are proven not executed; the recorded fee total excludes unknown fees. Reserved fee allowance: {display(liveBook.reservedUnknownFeeLamports ?? "0", 9)} SOL.</p>}
-        {status?.runtime?.live.ownerTransaction && <p>Owner transaction: {status.runtime.live.ownerTransaction.status}. <a target="_blank" rel="noreferrer" href={`https://solscan.io/tx/${encodeURIComponent(status.runtime.live.ownerTransaction.signature)}`}>View owner transaction</a></p>}
+        {status?.runtime?.live.ownerTransaction && <p>Owner transaction: {status.runtime.live.ownerTransaction.status}. <a target="_blank" rel="noreferrer" href={`https://solscan.io/tx/${encodeURIComponent(status.runtime.live.ownerTransaction.signature)}`}>View owner transaction</a>
+          {status.runtime.live.ownerTransaction.revoke && <> Revocation signed beside it: {status.runtime.live.ownerTransaction.revoke.status}. <a target="_blank" rel="noreferrer" href={`https://solscan.io/tx/${encodeURIComponent(status.runtime.live.ownerTransaction.revoke.signature)}`}>View revocation</a></>}</p>}
         {!!status?.runtime?.live.pending.length && <p role="status">{status.runtime.live.pending.length} trade(s) awaiting final confirmation. Refresh to reconcile the saved request.</p>}
         {!!status?.runtime?.live.history?.length && <details><summary>Recent live requests</summary><ul>{status.runtime.live.history.slice(0, 20).map((trade) => <li key={trade.requestId}>{trade.requestId}: {trade.status}{trade.signature && <> · <a target="_blank" rel="noreferrer" href={`https://solscan.io/tx/${encodeURIComponent(trade.signature)}`}>Transaction</a></>}</li>)}</ul></details>}
         <p>The initial live market is USDG ↔ wrapped SOL. Deposit only after the program and vault have been verified.</p>

@@ -10,6 +10,7 @@ import { mock } from "node:test";
 import { ed25519 } from "@noble/curves/ed25519";
 import { base58Encode } from "../../../packages/core/src/ids";
 import { wrapSqlite } from "../../../worker/src/db";
+import { SOLANA_OTHER_SIGN_IN } from "./solana-sign-in";
 
 /**
  * THE DID GUARD, THROUGH THE REAL ROUTES.
@@ -178,7 +179,8 @@ test("a DID remapped onto the tenant cannot read, change or trade the binding an
     if (route === "bind") continue; // binding a wallet is covered below
     const response = await request(route, method, { token: "token-bob", tenant: W, body, query });
     assert.equal(response.status, 403, `${method} ${route}`);
-    assert.match((await response.json()).error, /does not match this Solana account/, `${method} ${route}`);
+    // The way back for an app-created owner: the login that verified the wallet.
+    assert.equal((await response.json()).error, SOLANA_OTHER_SIGN_IN, `${method} ${route}`);
   }
   assert.deepEqual(runtimeCalls, []);
   assert.deepEqual(await store.get(W), binding);

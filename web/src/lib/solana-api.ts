@@ -11,6 +11,7 @@ import { SolanaPaperPriceMovedError, SolanaPaperServiceError } from "../../../wo
 import { SolanaSettlementError } from "../../../worker/src/solana-settlement";
 import { authenticateSolana, SolanaWebError } from "./solana-auth";
 import { getSolanaBindingStore, SolanaBindingError } from "./solana-binding-store";
+import { SOLANA_OTHER_SIGN_IN } from "./solana-sign-in";
 import { solanaEnabled } from "./solana-enabled";
 
 export async function solanaRequestBody(req: Request, allowed: readonly string[]): Promise<Record<string, unknown>> {
@@ -35,7 +36,7 @@ export async function solanaContext(req: Request) {
   const store = getSolanaBindingStore();
   const binding = await store.get(principal.tenant);
   if (!binding) throw new SolanaWebError(409, "Connect and verify a Solana wallet first.");
-  if (binding.did !== principal.did) throw new SolanaWebError(403, "Your sign-in does not match this Solana account.");
+  if (binding.did !== principal.did) throw new SolanaWebError(403, SOLANA_OTHER_SIGN_IN);
   return { principal, store, binding, scope: { tenant: principal.tenant, owner: binding.owner } };
 }
 const NOT_AVAILABLE = "Solana trading is not available.";

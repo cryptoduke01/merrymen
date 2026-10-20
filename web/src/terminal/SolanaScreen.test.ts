@@ -14,6 +14,7 @@ import { buildCreateSolanaSessionInstruction, buildInitializeSolanaVaultInstruct
 import { JSDOM } from "jsdom";
 import { runSolanaRecoverCommand } from "../../../worker/src/solana-recover-command";
 import { SOLANA_VAULT_RELEASES as TOOL_RELEASES, solanaRecoveryProgramTrust } from "../../../worker/src/solana-recover";
+import { SOLANA_OTHER_SIGN_IN } from "../lib/solana-sign-in";
 
 const OWNER = "So11111111111111111111111111111111111111112";
 const TENANT = `0x${"11".repeat(20)}`;
@@ -259,6 +260,54 @@ test("a delayed response from the previous identity never populates a new accoun
   assert.match(ui.container.textContent!, /Verify Solana wallet/);
 });
 
+/** How many times the page says `text`. */
+const timesSaid = (text: string) => ui.container.textContent!.split(text).length - 1;
+test("a status answer that another sign-in verified this account's wallet offers no wallet to create or verify, and names the way back", async () => {
+  respond = async (path) => { if (path === "status") return json({ error: SOLANA_OTHER_SIGN_IN }, 403); throw new Error("Unexpected fixture route"); };
+  await render(); await settle();
+  assert.equal(timesSaid(SOLANA_OTHER_SIGN_IN), 1, "said once, in the wallet card");
+  assert.equal(button("Verify Solana wallet"), undefined); assert.equal(button("Create Solana wallet"), undefined);
+  assert.ok(button("Refresh account"), "a refresh is still offered");
+  // Still that answer on a refresh: still no wallet offered.
+  await press("Refresh account");
+  assert.equal(timesSaid(SOLANA_OTHER_SIGN_IN), 1); assert.equal(button("Verify Solana wallet"), undefined);
+  // The login that verified it: the account shows, and the message goes.
+  respond = async (path) => { if (path === "status") return json(state); throw new Error("Unexpected fixture route"); };
+  signerDid = "did:privy:bob"; await render(); await settle();
+  assert.equal(timesSaid(SOLANA_OTHER_SIGN_IN), 0);
+  assert.ok(ui.container.textContent!.includes(OWNER) && /Verified wallet connected/.test(ui.container.textContent!));
+});
+test("a verify the bind route refuses as another sign-in's stops offering create and verify, and names the way back", async () => {
+  respond = async (path) => {
+    if (path === "status") return json({ binding: null, runtime: null });
+    if (path.startsWith("bind?owner=")) return json({ error: SOLANA_OTHER_SIGN_IN }, 409);
+    throw new Error("Unexpected fixture route");
+  };
+  await render();
+  assert.ok(button("Verify Solana wallet"));
+  await press("Verify Solana wallet");
+  assert.equal(timesSaid(SOLANA_OTHER_SIGN_IN), 1);
+  assert.equal(button("Verify Solana wallet"), undefined); assert.equal(button("Create Solana wallet"), undefined);
+  assert.equal(calls.filter((call) => call.path === "bind").length, 0, "nothing was signed or posted");
+  // Any other refusal of a verify is shown as before, and the button stays.
+  ui = (await ui.close(), testDom());
+  respond = async (path) => {
+    if (path === "status") return json({ binding: null, runtime: null });
+    if (path.startsWith("bind?owner=")) return json({ error: "That Solana wallet is already bound to another account." }, 409);
+    throw new Error("Unexpected fixture route");
+  };
+  await render(); await press("Verify Solana wallet");
+  assert.match(ui.container.textContent!, /already bound to another account/);
+  assert.ok(button("Verify Solana wallet"));
+});
+test("the live permission card names a revocation signed beside the owner transaction", async () => {
+  state = initial("live"); state.runtime.live.programId = PROGRAM;
+  ownerTransaction("withdraw-sig", "pending", "withdraw"); revokeBeside("revoke-sig", "pending");
+  await render();
+  assert.match(ui.container.textContent!, /Owner transaction: pending\. View owner transaction Revocation signed beside it: pending\. View revocation/);
+  const link = [...ui.container.querySelectorAll("a")].find((item) => item.textContent === "View revocation")!;
+  assert.equal(link.getAttribute("href"), "https://solscan.io/tx/revoke-sig");
+});
 test("owner recovery stays available in paper mode and retries exact signed bytes", async () => {
   state.runtime.live.programId = PROGRAM;
   const submissions: unknown[] = [];
@@ -901,7 +950,7 @@ test("a refused retry marked notSaved still keeps bytes the server's record hold
 });
 test("a 404 or a sign-in answer to signed owner bytes is not a refusal: the bytes are kept", async () => {
   state.runtime.live.programId = PROGRAM;
-  const answers = [refusal("Solana trading is not available.", 404), refusal("Your sign-in expired.", 401), refusal("Too many requests.", 429), refusal("Your sign-in does not match this Solana account.", 403), refusal("Request timed out.", 408)];
+  const answers = [refusal("Solana trading is not available.", 404), refusal("Your sign-in expired.", 401), refusal("Too many requests.", 429), refusal(SOLANA_OTHER_SIGN_IN, 403), refusal("Request timed out.", 408)];
   respond = async (path, body) => {
     if (path === "status") return json(state);
     if (path === "owner" && body?.stage === "prepare") return prepareAnswer(body);
