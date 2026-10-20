@@ -266,6 +266,42 @@ test("finalized deposits adjust cashflow/HWM once; owner withdrawals remove actu
   assert.equal(book.realizedPnlUsdgRaw, "0"); assert.equal(book.hwmRaw, "109000000");
   const rows = await f.db.prepare("SELECT * FROM solana_runtime_cashflows").all(); assert.equal(rows.length, 3);
 });
+for (const dialect of ["sqlite", "postgres"] as const) {
+  const options = dialect === "postgres" && !process.env.MERRYMEN_TEST_PG_URL ? { skip: "Set MERRYMEN_TEST_PG_URL to an isolated PostgreSQL test database." } : {};
+  test(`${dialect}: a finalized withdrawal is booked even when the book already moved past its slot, once, and the book's slot never moves back`, options, async t => {
+    const f = await fixture(t, dialect), s = submission(); await f.store.recordSigned(s);
+    await f.store.settle(OWNER, s.intent.requestId, s.signature, settlement(s));
+    // The withdrawal landed at slot 1003 before its signed bytes were saved; meanwhile a
+    // 5 USDG deposit landed and a finalized read at slot 2000 booked the net of both.
+    const before = (await f.store.liveBook())!;
+    await f.store.reconcileExternalInflows({ cashUsdg: (BigInt(before.cashRaw) + 4_000_000n).toString(), wsolRaw: before.wsolRaw, slot: 2000, observedAtMs: NOW, commitment: "finalized" });
+    assert.equal((await f.store.liveBook())!.slot, 2000);
+    await saveSignedSetup(f.store, { ...setup("withdraw"), priorVaultExisted: true, priorSequence: "1", priorSessionEpoch: "1", mint: SOLANA_USDG_MINT, amountRaw: "1000000" }, "withdraw-late");
+    // Nothing can move the book while it is pending.
+    await assert.rejects(f.store.reconcileExternalInflows({ cashUsdg: "200000000", wsolRaw: before.wsolRaw, slot: 2001, observedAtMs: NOW, commitment: "finalized" }), /pending owner transaction/);
+    await assert.rejects(f.store.recordSigned(submission("trade-2", "2")), /pending owner transaction/);
+    await f.store.finishSetup("withdraw-late", "finalized", 1003);
+    let book = (await f.store.liveBook())!;
+    assert.equal(book.cashRaw, (BigInt(before.cashRaw) + 3_000_000n).toString(), "the withdrawal is booked");
+    assert.equal(book.hwmRaw, (BigInt(before.hwmRaw) + 3_000_000n).toString());
+    assert.equal(book.slot, 2000, "the book's slot never moves back");
+    assert.equal((await f.store.setup())!.status, "finalized");
+    // Booked once: a retry is a no-op, and its evidence row is unique.
+    await f.store.finishSetup("withdraw-late", "finalized", 1003);
+    assert.deepEqual(await f.store.liveBook(), book);
+    assert.equal((await f.db.prepare("SELECT COUNT(*) AS n FROM solana_runtime_cashflows WHERE evidence_id='withdraw-late'").get() as { n: number | string }).n.toString(), "1");
+    // The read at 2000 had already seen the withdrawal: the chain holds the book plus 1 USDG,
+    // which the next finalized read books back, so the book meets the chain again.
+    await f.store.reconcileExternalInflows({ cashUsdg: (BigInt(before.cashRaw) + 4_000_000n).toString(), wsolRaw: before.wsolRaw, slot: 2001, observedAtMs: NOW, commitment: "finalized" });
+    book = (await f.store.liveBook())!;
+    assert.equal(book.cashRaw, (BigInt(before.cashRaw) + 4_000_000n).toString());
+    assert.equal(book.hwmRaw, (BigInt(before.hwmRaw) + 4_000_000n).toString(), "deposit 5, withdraw 1: the peak rose by 4");
+    // A finalized withdrawal still needs a real slot.
+    await saveSignedSetup(f.store, { ...setup("withdraw"), priorVaultExisted: true, priorSequence: "1", priorSessionEpoch: "1", mint: SOLANA_USDG_MINT, amountRaw: "1000000" }, "withdraw-no-slot");
+    await assert.rejects(f.store.finishSetup("withdraw-no-slot", "finalized"), /slot/);
+    await assert.rejects(f.store.finishSetup("withdraw-no-slot", "finalized", 0), /slot/);
+  });
+}
 /** An executable WSOL→USDG exit quote and the $500 Pyth bound for a withdrawal of `amountRaw`, read at `at`. */
 function withdrawValuation(amountRaw: string, at = NOW, outAmount = (BigInt(amountRaw) / 2n).toString(), usdPerSol?: bigint) {
   const intent = { inputMint: SOLANA_WRAPPED_SOL_MINT, outputMint: SOLANA_USDG_MINT, amountRaw, slippageBps: 50 };

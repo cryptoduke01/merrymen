@@ -641,7 +641,18 @@ export class SolanaTradingStore implements SolanaLiveJournal {
         const amount = raw(setup.amountRaw, false), { tenant, owner } = this.scope;
         const book = rowJson<SolanaLiveBook>(await tx.prepare("SELECT book_json FROM solana_runtime_live_books WHERE tenant=? AND owner=?").get(tenant, owner), "book_json");
         if (book) {
-          if (!Number.isSafeInteger(finalizedSlot) || finalizedSlot! < book.slot) refuse("Finalized withdrawal slot is required for durable accounting.");
+          // The book may already be past this withdrawal's slot. While a signed
+          // withdrawal is pending nothing moves book.slot (trades and inflow booking
+          // refuse), but it can be past it when the bytes are saved: they landed before
+          // the server saved them (a wallet that also broadcasts) while a finalized
+          // inflow read after them was booked, or one provider answered that read with
+          // an inflated slot. Refusing then wedged the setup pending forever, blocking
+          // trading and every owner transaction. The withdrawal is real (both
+          // providers agreed on its receipt and its vault effect) and its evidence id
+          // books it once, so it is booked anyway and book.slot never moves back. If
+          // that inflow read already saw it, the book now sits below the chain by the
+          // amount, and the next finalized inflow read books that back.
+          if (!Number.isSafeInteger(finalizedSlot) || finalizedSlot! < 1) refuse("Finalized withdrawal slot is required for durable accounting.");
           if (setup.mint === SOLANA_USDG_MINT) {
             if (amount > raw(book.cashRaw)) refuse("Finalized withdrawal exceeds the recorded cash balance.");
             book.cashRaw = (raw(book.cashRaw) - amount).toString();
@@ -677,7 +688,7 @@ export class SolanaTradingStore implements SolanaLiveJournal {
             }
             // No fabricated sale proceeds or P&L.
           }
-          book.updatedAtMs = clock(this.now); book.slot = finalizedSlot!;
+          book.updatedAtMs = clock(this.now); book.slot = Math.max(book.slot, finalizedSlot!);
           const inserted = await tx.prepare("INSERT INTO solana_runtime_cashflows(evidence_id,tenant,owner,kind,mint,amount_raw,created_at_ms) VALUES(?,?,?,'withdraw',?,?,?) ON CONFLICT DO NOTHING")
             .run(signature, tenant, owner, setup.mint, amount.toString(), book.updatedAtMs);
           if (inserted.changes !== 1) refuse("Withdrawal evidence was already accounted.");

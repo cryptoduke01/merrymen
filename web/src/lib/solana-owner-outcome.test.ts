@@ -159,25 +159,47 @@ test("a saved and broadcast permission whose confirmation data is unusable is an
   } finally { f.raw.close(); }
 });
 
+/** A live account holding 90 USDG on its book and on chain, with a signed 1 USDG withdrawal saved and broadcast. */
+async function savedWithdrawal(f: Awaited<ReturnType<typeof fixture>>) {
+  await f.live(); f.controls.initialized = true; await f.registered();
+  const book = { hwmRaw: "100000000", cashRaw: "90000000", wsolRaw: "0", costBasisUsdgRaw: "0", realizedPnlUsdgRaw: "0",
+    networkFeesLamports: "0", slot: 900, updatedAtMs: 999_000 };
+  await f.db.prepare("INSERT INTO solana_runtime_live_books(tenant,owner,book_json) VALUES(?,?,?)").run(TENANT, f.owner, JSON.stringify(book));
+  f.controls.cash = 90_000_000n;
+  const prepared = await f.app.prepareOwnerAction(f.scope, { action: "withdraw", mint: SOLANA_USDG_MINT, amountRaw: "1000000" });
+  const signedTransactionBase64 = await f.sign(prepared.transactionBase64);
+  assert.equal((await asPage(() => f.app.submitOwnerAction(f.scope, { signedTransactionBase64 }))).status, 200);
+  // It finalized at slot 1000, and the finalized vault shows its mark (a withdrawal always advances the sequence).
+  f.controls.finalized = true; f.controls.sequence = 1n;
+  const setBook = (changes: object) => f.db.prepare("UPDATE solana_runtime_live_books SET book_json=? WHERE tenant=? AND owner=?").run(JSON.stringify({ ...book, ...changes }), TENANT, f.owner);
+  return { book, signedTransactionBase64, setBook };
+}
+
 test("a finalized withdrawal the book cannot record yet is an unknown outcome on retry, not a refusal", async () => {
   const f = await fixture();
   try {
-    await f.live(); f.controls.initialized = true; await f.registered();
-    const book = { hwmRaw: "100000000", cashRaw: "90000000", wsolRaw: "0", costBasisUsdgRaw: "0", realizedPnlUsdgRaw: "0",
-      networkFeesLamports: "0", slot: 900, updatedAtMs: 999_000 };
-    await f.db.prepare("INSERT INTO solana_runtime_live_books(tenant,owner,book_json) VALUES(?,?,?)").run(TENANT, f.owner, JSON.stringify(book));
-    f.controls.cash = 90_000_000n;
-    const prepared = await f.app.prepareOwnerAction(f.scope, { action: "withdraw", mint: SOLANA_USDG_MINT, amountRaw: "1000000" });
-    const signedTransactionBase64 = await f.sign(prepared.transactionBase64);
-    assert.equal((await asPage(() => f.app.submitOwnerAction(f.scope, { signedTransactionBase64 }))).status, 200);
-    // The book moved past the withdrawal's slot before its outcome was read; the withdrawal itself
-    // finalized, and the finalized vault shows its mark (a withdrawal always advances the sequence).
-    await f.db.prepare("UPDATE solana_runtime_live_books SET book_json=? WHERE tenant=? AND owner=?").run(JSON.stringify({ ...book, slot: 1001 }), TENANT, f.owner);
-    f.controls.finalized = true; f.controls.sequence = 1n;
+    const { signedTransactionBase64, setBook } = await savedWithdrawal(f);
+    // The book holds less cash than the finalized withdrawal took: it cannot record it yet.
+    await setBook({ cashRaw: "500000" });
     const retry = await asPage(() => f.app.submitOwnerAction(f.scope, { signedTransactionBase64 }));
     assert.equal(retry.status, 503); assert.match(retry.error!, UNKNOWN);
     assert.equal(retry.refusal, false);
     assert.equal((await new SolanaTradingStore(f.db, f.scope).setup())!.status, "pending", "the server still holds the broadcast withdrawal");
+  } finally { f.raw.close(); }
+});
+
+test("a finalized withdrawal is booked on retry even when the book already moved past its slot, never wedged pending", async () => {
+  const f = await fixture();
+  try {
+    const { signedTransactionBase64, setBook } = await savedWithdrawal(f);
+    await setBook({ slot: 1001 });
+    const retry = await asPage(() => f.app.submitOwnerAction(f.scope, { signedTransactionBase64 }));
+    assert.equal(retry.status, 200, retry.error);
+    const store = new SolanaTradingStore(f.db, f.scope);
+    assert.equal((await store.setup())!.status, "finalized");
+    const booked = (await store.liveBook())!;
+    assert.equal(booked.cashRaw, "89000000"); assert.equal(booked.hwmRaw, "99000000"); assert.equal(booked.slot, 1001);
+    assert.equal(f.controls.sends, 1, "nothing is sent again");
   } finally { f.raw.close(); }
 });
 
