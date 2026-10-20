@@ -20,7 +20,7 @@ import { createSolanaExecutor, parseSolanaLiveIntent, readSolanaOwnerRefundBlock
   SOLANA_DEFAULT_MAX_COMPUTE_UNIT_PRICE, solanaComputeBudgetInstructions, SolanaExecutionError, verifySolanaVaultDeployment, type SolanaLiveJournal, type SolanaLiveRecord } from "./solana-executor";
 import { createSolanaLiveMarket } from "./solana-live-market";
 import { createSolanaLiveRpc, readSolanaPriorityFee, readSolanaQuorum, type SolanaLiveRead, type SolanaLiveRpc } from "./solana-live-rpc";
-import { createSolanaMarket, SolanaMarketError } from "./solana-market";
+import { createSolanaMarket, SolanaMarketError, solanaJupiterApiKey } from "./solana-market";
 import { createSolanaPaperService, type SolanaPaperMarket } from "./solana-paper-service";
 import { readSolanaReferencePrice, requireSolanaPythGeneration, solanaPythGeneration, solanaReferenceBound, solanaReferenceNotional, solanaReferenceToleranceBps, type SolanaPythGeneration,
   SolanaReferencePriceError, SOLANA_REFERENCE_ALERT_REPEAT_MS, SOLANA_REFERENCE_DEFAULT_TOLERANCE_BPS, SOLANA_REFERENCE_MAX_TOLERANCE_BPS,
@@ -348,6 +348,27 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
         } catch { /* Logging never changes an outcome. */ }
       }
       return fail("The independent SOL price tolerance is misconfigured.", "configuration");
+    }
+  }
+  /**
+   * Whether MERRYMEN_JUPITER_API_KEY is one every Jupiter request accepts
+   * (solanaJupiterApiKey). A key that is set but unusable also says an [alert]
+   * to the operator, at most once a minute per process: every quote and live
+   * route, exits included, is refused as configuration until it is fixed. The line names the
+   * setting and its rule, never the value. An unset or empty key is not configured yet.
+   */
+  let jupiterKeyAlertAtMs: number | undefined;
+  function jupiterKeyUsable(): boolean {
+    try { solanaJupiterApiKey(env); return true; } catch {
+      const at = now();
+      if (env.MERRYMEN_JUPITER_API_KEY && (jupiterKeyAlertAtMs === undefined || at < jupiterKeyAlertAtMs || at - jupiterKeyAlertAtMs >= SOLANA_REFERENCE_ALERT_REPEAT_MS)) {
+        jupiterKeyAlertAtMs = at;
+        try {
+          log("[alert] solana-jupiter-key misconfigured: MERRYMEN_JUPITER_API_KEY must be 1 to 1024 printable ASCII characters with no spaces; "
+            + "no Solana quote or live route, exits included, is made until it is fixed");
+        } catch { /* Logging never changes an outcome. */ }
+      }
+      return false;
     }
   }
   // Rent-exempt minimums by account size. They change only by feature activation; reread every window.
@@ -782,7 +803,9 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
           }
         }
       } catch (error) { blockers.push(statusBlocker(error)); }
-      if (!env.MERRYMEN_JUPITER_API_KEY) blockers.push("Configure Jupiter quote access.");
+      // The builder's own key rule: a key every live route would refuse (blank, too long,
+      // unprintable) blocks trades and exits as a missing one does, and pages the operator.
+      if (!jupiterKeyUsable()) blockers.push("Configure Jupiter quote access.");
       if (await s.operatorHeld()) blockers.push(OPERATOR_HOLD);
       // trade() refuses every live trade, exits too, while either reference setting is invalid. The generation
       // check also says the [alert], so an agent held by this blocker still pages the operator.

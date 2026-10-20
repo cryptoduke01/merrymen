@@ -8,7 +8,7 @@ import { address } from "@solana/kit";
 import { CHAINS } from "../../packages/core/src/ids";
 import { SOLANA_JUPITER_SHARED_ROUTE_DISCRIMINATOR } from "../../packages/core/src/solana-live";
 import { parseSolanaRawAmount, parseSolanaSwapIntent, SolanaPaperValidationError, validateSolanaQuote, type SolanaQuote } from "../../packages/core/src/solana";
-import { createSolanaMarket, validSolanaJupiterRoute } from "./solana-market";
+import { createSolanaMarket, solanaJupiterApiKey, validSolanaJupiterRoute } from "./solana-market";
 import { readSolanaJson, requireSolanaSlot, SolanaRpcError, withSolanaReadDeadline } from "./solana-rpc";
 import type { SolanaLiveRpc } from "./solana-live-rpc";
 
@@ -145,8 +145,8 @@ export function createSolanaLiveMarket(options: {
         amountRaw: request.amountRaw, slippageBps: request.slippageBps });
       for (const value of [request.swapAuthority, request.sourceTokenAccount, request.destinationTokenAccount,
         request.inputTokenProgram, request.outputTokenProgram]) key(value);
-      const apiKey = env.MERRYMEN_JUPITER_API_KEY?.trim();
-      if (!apiKey || apiKey.length > 1024 || /[^\x21-\x7e]/.test(apiKey)) return fail("configuration");
+      let apiKey: string;
+      try { apiKey = solanaJupiterApiKey(env); } catch { return fail("configuration"); }
       const json = (url: string, body?: unknown) => withSolanaReadDeadline(async signal => {
         let response: Response;
         try { response = await fetch(url, { method: body === undefined ? "GET" : "POST",

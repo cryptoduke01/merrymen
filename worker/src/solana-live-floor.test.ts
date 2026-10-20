@@ -18,7 +18,7 @@ import { wrapSqlite } from "./db";
 import { createSolanaAgent } from "./solana-agent";
 import { createSolanaAppRuntime } from "./solana-app-runtime";
 import { createSolanaExecutor, type SolanaSignedSubmission } from "./solana-executor";
-import { createSolanaLiveMarket } from "./solana-live-market";
+import { createSolanaLiveMarket, SolanaLiveMarketError } from "./solana-live-market";
 import type { SolanaLiveRead, SolanaLiveRpc } from "./solana-live-rpc";
 import { PYTH_SOL_USD_ACCOUNT, SOLANA_PYTH_FEEDS, readSolanaReferencePrice, solanaPythGeneration, solanaReferenceBound, solanaReferenceNotional,
   type SolanaPythGeneration } from "./solana-reference-price";
@@ -185,7 +185,9 @@ async function fixture(t: TestContext, opts: { cash: bigint; wsol: bigint; mark:
     realizedPnlUsdgRaw: "0", networkFeesLamports: "0", slot: 900, updatedAtMs: NOW - 5000 }));
   if (opts.strategy) { const b = (await bindings.get(TENANT))!; await bindings.strategy(TENANT, owner, b.revision, opts.strategy as never); }
   // `runtime(more, via)`: an app runtime on the same database, chain and clock whose env adds `more`, reading through `via` (default: the chain itself).
-  const runtime = (more: Record<string, string> = {}, via: SolanaLiveRpc = rpc) => createSolanaAppRuntime({ db, rpc: via, market, env: { ...env, ...more }, now: () => clock.now }), app = runtime();
+  // `log` receives the runtime's operator lines (default: stderr).
+  const runtime = (more: Record<string, string> = {}, via: SolanaLiveRpc = rpc, log?: (line: string) => void) =>
+    createSolanaAppRuntime({ db, rpc: via, market, env: { ...env, ...more }, now: () => clock.now, ...(log ? { log } : {}) }), app = runtime();
   const submissions = async () => (await db.prepare("SELECT request_id,notional_raw,submission_json FROM solana_runtime_submissions").all() as
     Array<{ request_id: string; notional_raw: string; submission_json: string }>).map(r => ({ ...r, submission: JSON.parse(r.submission_json) as SolanaSignedSubmission }));
   const agent = (runtime: ReturnType<typeof createSolanaAppRuntime> = app) => createSolanaAgent({ db, runtime, market, now: () => clock.now });
@@ -446,6 +448,32 @@ test("status names a misconfigured reference setting as a blocker of every trade
   assert.deepEqual(outcomes, ["held"]);
   assert.deepEqual(said, [CONFIG_ALERT]);
   assert.deepEqual(f.pythReads, []); assert.deepEqual(await f.submissions(), []); assert.equal(f.sends.length, 0);
+});
+
+test("status blocks trades and exits on a Jupiter key every live route refuses, as on a missing one, and a set but unusable key says the [alert]", async t => {
+  const JUPITER = "Configure Jupiter quote access.";
+  const f = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" } });
+  const good = await f.app.status(f.scope);
+  assert.deepEqual([good.live.ready, good.live.canExit, good.live.blockers], [true, true, []]);
+  for (const [apiKey, alerted] of [["bad key", true], ["   ", true], ["x".repeat(1025), true], ["caf\u00e9", true], ["", false]] as const) {
+    const lines: string[] = [], app = f.runtime({ MERRYMEN_JUPITER_API_KEY: apiKey }, f.rpc, line => lines.push(line));
+    const status = await app.status(f.scope);
+    // Not ready, and no exit either: the live route builder refuses a sell's route as configuration too.
+    assert.deepEqual([status.live.ready, status.live.canExit, status.live.blockers], [false, false, [JUPITER]], JSON.stringify(apiKey));
+    const alerts = lines.filter(line => line.startsWith("[alert] solana-jupiter-key misconfigured"));
+    assert.equal(alerts.length, alerted ? 1 : 0, JSON.stringify(apiKey));
+    // Once a minute while it persists; the value itself is never logged.
+    await app.status(f.scope); assert.equal(lines.filter(line => line.startsWith("[alert] solana-jupiter-key")).length, alerted ? 1 : 0);
+    if (apiKey === "bad key") {
+      assert.ok(lines.every(line => !line.includes(apiKey)));
+      f.clock.now += 60_000; await app.status(f.scope); f.clock.now -= 60_000;
+      assert.equal(lines.filter(line => line.startsWith("[alert] solana-jupiter-key")).length, 2);
+      // The trade the blocker stands for: refused as configuration before anything is signed or sent.
+      await assert.rejects(app.trade(f.scope, { mode: "live", intent: manual(SOLANA_WRAPPED_SOL_MINT, "100000000", "bad-key-exit") }),
+        (error: unknown) => error instanceof SolanaLiveMarketError && error.code === "configuration");
+      assert.deepEqual(await f.submissions(), []); assert.equal(f.sends.length, 0);
+    }
+  }
 });
 
 test("with MERRYMEN_SOLANA_PYTH_GENERATION=upgraded, live trades are read, checked by the executor and admitted by the store on the upgraded account alone", async t => {
