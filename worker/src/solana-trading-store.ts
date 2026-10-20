@@ -1362,9 +1362,19 @@ export class SolanaTradingStore implements SolanaLiveJournal {
       if (status === "finalized" && setup.kind === "withdraw-sol") {
         // Native SOL in the vault account is never part of the book; keep the evidence once.
         if (!setup.amountRaw || setup.mint !== undefined) refuse("Invalid finalized withdrawal accounting.");
+        const { tenant, owner } = this.scope;
+        const book = rowJson<SolanaLiveBook>(await tx.prepare("SELECT book_json FROM solana_runtime_live_books WHERE tenant=? AND owner=?").get(tenant, owner), "book_json");
+        // It moved the vault's sequence, so a live trade must read the vault no earlier than its slot (the
+        // executor's snapshot floor). The setup row keeps that slot only until the owner's next prepare replaces
+        // it; the book's slot is durable, and never moves back.
+        if (book && (!Number.isSafeInteger(finalizedSlot) || finalizedSlot! < 1)) refuse("Finalized withdrawal slot is required for durable accounting.");
         const inserted = await tx.prepare("INSERT INTO solana_runtime_cashflows(evidence_id,tenant,owner,kind,mint,amount_raw,created_at_ms) VALUES(?,?,?,'withdraw-sol',?,?,?) ON CONFLICT DO NOTHING")
-          .run(signature, this.scope.tenant, this.scope.owner, SOLANA_SYSTEM_PROGRAM, raw(setup.amountRaw, false).toString(), clock(this.now));
+          .run(signature, tenant, owner, SOLANA_SYSTEM_PROGRAM, raw(setup.amountRaw, false).toString(), clock(this.now));
         if (inserted.changes !== 1) refuse("Withdrawal evidence was already accounted.");
+        if (book && finalizedSlot! > book.slot) {
+          book.updatedAtMs = clock(this.now); book.slot = finalizedSlot!;
+          await tx.prepare("UPDATE solana_runtime_live_books SET book_json=? WHERE tenant=? AND owner=?").run(JSON.stringify(book), tenant, owner);
+        }
       }
       setup.status = status;
       if (status === "finalized" && Number.isSafeInteger(finalizedSlot) && finalizedSlot! > 0) setup.finalizedSlot = finalizedSlot;

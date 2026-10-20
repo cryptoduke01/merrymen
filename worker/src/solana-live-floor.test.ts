@@ -834,7 +834,8 @@ test("a first live book's balances and slot come from both providers: a phantom 
 });
 
 test("a live trade reads the vault no earlier than the book and the latest finalized owner transaction, and every provider must show its sequence, so a lagging provider signs nothing", async t => {
-  // The fixture's providers answer at SLOT. A native SOL withdrawal finalized past it (withdraw-sol moves no book slot).
+  // The fixture's providers answer at SLOT. A native SOL withdrawal finalized past it, written as finalized directly, so
+  // only its setup row carries its slot (the store's finishSetup also raises the book's slot: the next test).
   for (const [finalizedSlot, admitted] of [[SLOT + 500, false], [SLOT - 1, true]] as const) {
     const f = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" } });
     const vault = f.vault;
@@ -877,6 +878,24 @@ test("a live trade reads the vault no earlier than the book and the latest final
   await ahead.db.prepare("UPDATE solana_runtime_live_books SET book_json=?").run(JSON.stringify({ ...JSON.parse(row.book_json), slot: SLOT + 1 }));
   await assert.rejects(ahead.app.trade(ahead.scope, { mode: "live", intent: manual(SOLANA_WRAPPED_SOL_MINT, "100000000", "behind-the-book") }), /refused: invalid-state/);
   assert.deepEqual(await ahead.submissions(), []); assert.equal(ahead.sends.length, 0);
+});
+
+test("a native SOL withdrawal finalized past the providers' slot keeps the trade floor after the owner's next prepare replaces its record: both providers lagging sign nothing", async t => {
+  const f = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" } });
+  // Signed and pending, then finished as finalized at SLOT + 500 through the store, as status does once both providers agree.
+  await f.db.prepare("INSERT INTO solana_runtime_setups(tenant,owner,setup_json) VALUES(?,?,?)").run(TENANT, f.scope.owner, JSON.stringify({
+    kind: "withdraw-sol", amountRaw: "1000", transactionBase64: "dGVzdA==", messageBase64: "dGVzdA==", blockhash: "11111111111111111111111111111111", lastValidBlockHeight: "800",
+    programId: PROGRAM, vault: f.vault, session: "11111111111111111111111111111111", limits, preparedAtMs: NOW - 60_000, expiresAtMs: NOW - 1, signature: "owner-withdraw-sol",
+    signedTransactionBase64: "c2lnbmVk", status: "pending", priorVaultExisted: true, priorSequence: "0", priorSessionEpoch: "1" }));
+  await new SolanaTradingStore(f.db, f.scope, () => f.clock.now).finishSetup("owner-withdraw-sol", "finalized", SLOT + 500);
+  // The owner prepares another owner transaction and abandons it: the setup row, with the withdrawal's finalized slot, is replaced.
+  await f.db.prepare("UPDATE solana_runtime_setups SET setup_json=? WHERE tenant=? AND owner=?").run(JSON.stringify({ kind: "resume-buys", transactionBase64: "dGVzdA==",
+    messageBase64: "dGVzdA==", blockhash: "11111111111111111111111111111111", lastValidBlockHeight: "800", programId: PROGRAM, vault: f.vault,
+    session: "11111111111111111111111111111111", limits, preparedAtMs: NOW - 1_000, expiresAtMs: NOW + 59_000, priorVaultExisted: true, priorSequence: "1", priorSessionEpoch: "1" }),
+    TENANT, f.scope.owner);
+  // Both providers still answer at SLOT, from before the withdrawal (vault sequence 0): they agree, so only the floor can refuse.
+  await assert.rejects(f.app.trade(f.scope, { mode: "live", intent: manual(SOLANA_WRAPPED_SOL_MINT, "100000000", "after-replaced-withdraw-sol") }), /refused: invalid-state/);
+  assert.deepEqual(await f.submissions(), []); assert.equal(f.sends.length, 0);
 });
 
 test("a live trade whose send fails after it is recorded survives a restart: a new runtime rebroadcasts the same bytes, signs nothing, and books the fill once (audit risk 44/49)", async t => {

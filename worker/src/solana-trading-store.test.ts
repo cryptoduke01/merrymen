@@ -312,6 +312,33 @@ for (const dialect of ["sqlite", "postgres"] as const) {
     await assert.rejects(f.store.finishSetup("withdraw-no-slot", "finalized", 0), /slot/);
   });
 }
+for (const dialect of ["sqlite", "postgres"] as const) {
+  const options = dialect === "postgres" && !process.env.MERRYMEN_TEST_PG_URL ? { skip: "Set MERRYMEN_TEST_PG_URL to an isolated PostgreSQL test database." } : {};
+  test(`${dialect}: a finalized native SOL withdrawal raises the live book's slot (the trade snapshot floor) once the next prepare replaces its record, and never lowers it`, options, async t => {
+    const f = await fixture(t, dialect), s = submission(); await f.store.recordSigned(s);
+    await f.store.settle(OWNER, s.intent.requestId, s.signature, settlement(s));
+    const before = (await f.store.liveBook())!; assert.equal(before.slot, 1001);
+    const nativeSol = (priorSequence: string) => ({ ...setup("withdraw"), kind: "withdraw-sol" as const, priorVaultExisted: true, priorSequence, priorSessionEpoch: "1", amountRaw: "1000" });
+    await saveSignedSetup(f.store, nativeSol("1"), "native-sol-1");
+    // With a live book, the slot is required, as for a token withdrawal: nothing is finished without it.
+    await assert.rejects(f.store.finishSetup("native-sol-1", "finalized"), /slot/);
+    await assert.rejects(f.store.finishSetup("native-sol-1", "finalized", 0), /slot/);
+    assert.equal((await f.store.setup())!.status, "pending");
+    await f.store.finishSetup("native-sol-1", "finalized", 1500);
+    let book = (await f.store.liveBook())!;
+    assert.equal(book.slot, 1500, "the book's slot is now at least the withdrawal's");
+    assert.deepEqual({ ...book, slot: before.slot, updatedAtMs: before.updatedAtMs }, before, "no balance, basis or peak moved: native SOL is never part of the book");
+    assert.equal((await f.db.prepare("SELECT COUNT(*) AS n FROM solana_runtime_cashflows WHERE evidence_id='native-sol-1'").get() as { n: number | string }).n.toString(), "1");
+    // The owner prepares another owner transaction and abandons it: the setup row, with its finalized slot, is gone; the book keeps it.
+    await f.store.saveSetup({ ...setup("resume-buys"), priorVaultExisted: true, priorSequence: "2", priorSessionEpoch: "1" });
+    assert.equal((await f.store.setup())!.finalizedSlot, undefined);
+    assert.equal((await f.store.liveBook())!.slot, 1500);
+    // A later one finalized at an earlier slot (one provider's lower answer) never moves the book's slot back.
+    await saveSignedSetup(f.store, nativeSol("2"), "native-sol-2");
+    await f.store.finishSetup("native-sol-2", "finalized", 1200);
+    book = (await f.store.liveBook())!; assert.equal(book.slot, 1500);
+  });
+}
 /** An executable WSOL→USDG exit quote and the $500 Pyth bound for a withdrawal of `amountRaw`, read at `at`. */
 function withdrawValuation(amountRaw: string, at = NOW, outAmount = (BigInt(amountRaw) / 2n).toString(), usdPerSol?: bigint) {
   const intent = { inputMint: SOLANA_WRAPPED_SOL_MINT, outputMint: SOLANA_USDG_MINT, amountRaw, slippageBps: 50 };
