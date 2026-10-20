@@ -91,6 +91,11 @@ async function settle() {
   for (let i = 0; i < 20; i++) await turn();
   for (let i = 0; i < 2_000 && walletOpen === 0 && pageBusy(); i++) await turn();
 }
+/** Presses an owner action, then signs the transaction it prepared once the review shows it, as an owner does. */
+async function ownerPress(text: string) {
+  await press(text);
+  if ([...ui.container.querySelectorAll("button")].some((item) => item.textContent === "Sign with my wallet")) await press("Sign with my wallet");
+}
 /** Registers in the page's two steps: prepare and review, then sign with the wallet. */
 async function register() {
   await press("Register bounded trading permission");
@@ -266,7 +271,7 @@ test("owner recovery stays available in paper mode and retries exact signed byte
     }
     throw new Error("Unexpected fixture route");
   };
-  await render(); await press("Revoke all Solana sessions");
+  await render(); await ownerPress("Revoke all Solana sessions");
   assert.equal(signCount, 1);
   await press("Check existing owner transaction");
   assert.equal(signCount, 1); assert.deepEqual(submissions, ["AQID", "AQID"]);
@@ -297,7 +302,7 @@ test("resuming buys requires a separate owner signature without changing trading
     if (path === "owner" && body?.stage === "submit") return json({ result: { signature: "resume-proof", status: "finalized" } });
     throw new Error("Unexpected fixture route");
   };
-  await render(); await press("Ask wallet to resume buys");
+  await render(); await ownerPress("Ask wallet to resume buys");
   assert.equal(signCount, 1);
   assert.equal(calls.some((call) => call.path === "settings"), false);
   assert.match(ui.container.textContent!, /drawdown still exceeds your limit/);
@@ -445,13 +450,13 @@ test("a refused owner submission discards the stale signed bytes and leaves Revo
     }
     throw new Error("Unexpected fixture route");
   };
-  await render(); await press("Withdraw to my wallet");
+  await render(); await ownerPress("Withdraw to my wallet");
   assert.equal(signCount, 1);
   assert.match(ui.container.textContent!, /expired before submission\. This signed withdrawal was not accepted and has been discarded/);
   assert.equal([...ui.container.querySelectorAll("button")].some((item) => item.textContent === "Check existing owner transaction"), false);
   assert.equal(button("Revoke all Solana sessions").disabled, false);
   assert.equal(button("Withdraw to my wallet").disabled, false);
-  await press("Revoke all Solana sessions");
+  await ownerPress("Revoke all Solana sessions");
   assert.equal(signCount, 2);
   const owner = calls.filter((call) => call.path === "owner").map((call) => call.body!.stage === "prepare" ? `prepare:${call.body!.action}` : "submit");
   assert.deepEqual(owner, ["prepare:withdraw", "submit", "prepare:revoke", "submit"]);
@@ -475,13 +480,13 @@ test("withdrawal bytes the server never saved do not hold back Revoke: the revoc
     }
     throw new Error("Unexpected fixture route");
   };
-  await render(); await press("Withdraw to my wallet");
+  await render(); await ownerPress("Withdraw to my wallet");
   assert.equal(button("Check existing owner transaction").disabled, false);
   assert.equal(button("Withdraw to my wallet").disabled, true);
   assert.equal(button("Ask wallet to resume buys").disabled, true);
   assert.equal(button("Revoke all Solana sessions").disabled, false);
   assert.match(ui.container.textContent!, /Revoking stays available: if the server never saved this withdrawal, a revocation replaces it and it can no longer be sent; if the server saved it, a revocation can be prepared once it is final or expired/);
-  await press("Revoke all Solana sessions");
+  await ownerPress("Revoke all Solana sessions");
   // A fresh revocation was prepared and signed; the withdrawal bytes were not resent as a revoke.
   assert.equal(signCount, 2);
   assert.deepEqual(ownerCalls(), ["prepare:withdraw", "submit", "prepare:revoke", "submit"]);
@@ -499,7 +504,7 @@ test("signed bytes the server never saved, next to a different pending server re
     if (path === "owner" && body?.stage === "submit") throw new Error("Lost response");
     throw new Error("Unexpected fixture route");
   };
-  await render(); await press("Withdraw to my wallet");
+  await render(); await ownerPress("Withdraw to my wallet");
   assert.match(ui.container.textContent!, /Revoking stays available/);
   // Another device's resume request is saved and pending on the server: Revoke waits for it, and the page says so.
   ownerTransaction("other-device-sig", "pending", "resume-buys");
@@ -531,7 +536,7 @@ test("while the server holds a submitted owner transaction, every owner action w
     }
     throw new Error("Unexpected fixture route");
   };
-  await render(); await press("Withdraw to my wallet");
+  await render(); await ownerPress("Withdraw to my wallet");
   const text = () => ui.container.textContent!;
   assert.match(text(), /A signed withdrawal is awaiting final confirmation on Solana\. Until it is final or expired, no other owner transaction can be prepared, a revocation included/);
   for (const name of ["Revoke all Solana sessions", "Ask wallet to resume buys", "Withdraw to my wallet", "Withdraw native SOL"]) assert.equal(button(name).disabled, true, name);
@@ -543,7 +548,7 @@ test("while the server holds a submitted owner transaction, every owner action w
   assert.match(text(), /Owner transaction: finalized/);
   assert.doesNotMatch(text(), /awaiting final confirmation/);
   assert.equal(button("Revoke all Solana sessions").disabled, false);
-  await press("Revoke all Solana sessions");
+  await ownerPress("Revoke all Solana sessions");
   assert.equal(signCount, 2);
   assert.deepEqual(ownerCalls(), ["prepare:withdraw", "submit", "submit", "prepare:revoke", "submit"]);
 });
@@ -559,7 +564,7 @@ test("a Revoke pressed before the page knew of a pending owner transaction is re
   await render();
   // Another device submitted a permission registration after this page last read the status.
   ownerTransaction("permission-sig", "pending", "session");
-  await press("Revoke all Solana sessions");
+  await ownerPress("Revoke all Solana sessions");
   const text = () => ui.container.textContent!;
   assert.equal(signCount, 0, "the wallet never opened");
   assert.match(text(), /Refresh the pending owner transaction before preparing another\./);
@@ -595,7 +600,7 @@ test("a 4xx on a re-check of accepted withdrawal bytes keeps them and reports th
     }
     throw new Error("Unexpected fixture route");
   };
-  await render(); await press("Withdraw to my wallet");
+  await render(); await ownerPress("Withdraw to my wallet");
   assert.match(ui.container.textContent!, /Owner transaction: pending/);
   await press("Check existing owner transaction");
   const text = ui.container.textContent!;
@@ -629,7 +634,7 @@ test("a 4xx after an unknown outcome clears bytes the server holds no record of,
     throw new Error("Unexpected fixture route");
   };
   signedBytes = () => wire;
-  await render(); await press("Withdraw to my wallet");
+  await render(); await ownerPress("Withdraw to my wallet");
   assert.equal(button("Withdraw to my wallet").disabled, true);
   await press("Check existing owner transaction");
   const text = ui.container.textContent!;
@@ -654,7 +659,7 @@ test("a refused retry keeps the signed bytes when the server's record cannot be 
     }
     throw new Error("Unexpected fixture route");
   };
-  await render(); await press("Withdraw to my wallet"); await press("Check existing owner transaction");
+  await render(); await ownerPress("Withdraw to my wallet"); await press("Check existing owner transaction");
   assert.doesNotMatch(ui.container.textContent!, /not accepted|discarded|cleared/);
   assert.match(ui.container.textContent!, /An earlier submission of this signed withdrawal may already be on Solana, so it was kept\. This does not mean it failed/);
   assert.equal(button("Check existing owner transaction").disabled, false);
@@ -679,7 +684,7 @@ test("a first owner submission refused without notSaved is decided by the server
     throw new Error("Unexpected fixture route");
   };
   // The server holds these bytes as pending: they are kept, and checking them again settles them.
-  await render(); await press("Withdraw to my wallet");
+  await render(); await ownerPress("Withdraw to my wallet");
   assert.doesNotMatch(ui.container.textContent!, /not accepted|discarded|cleared/);
   assert.match(ui.container.textContent!, /just recorded\. The server holds this signed withdrawal and still records it as awaiting confirmation, so it was kept/);
   await press("Check existing owner transaction");
@@ -687,7 +692,7 @@ test("a first owner submission refused without notSaved is decided by the server
   assert.equal(signCount, 1); assert.deepEqual(ownerCalls(), ["prepare:withdraw", "submit", "submit"]);
   // The server's record cannot be read: kept, and the next refusal is a retry.
   await ui.close(); ui = testDom(); state = initial(); state.runtime.live.programId = PROGRAM; calls = []; submits = 0; record = "unreadable"; statusUp = true;
-  await render(); await press("Withdraw to my wallet");
+  await render(); await ownerPress("Withdraw to my wallet");
   assert.doesNotMatch(ui.container.textContent!, /not accepted|discarded|cleared/);
   assert.match(ui.container.textContent!, /The server could not say whether it saved this signed withdrawal, so it was kept\. This does not mean it failed/);
   assert.equal(button("Check existing owner transaction").disabled, false);
@@ -698,7 +703,7 @@ test("a first owner submission refused without notSaved is decided by the server
   assert.match(ui.container.textContent!, /already saved\. The server holds this signed withdrawal and still records it as awaiting confirmation, so it was kept/);
   // The server holds no record of them: discarded, and the owner starts again.
   await ui.close(); ui = testDom(); state = initial(); state.runtime.live.programId = PROGRAM; calls = []; submits = 0; record = "unheld"; statusUp = true;
-  await render(); await press("Withdraw to my wallet");
+  await render(); await ownerPress("Withdraw to my wallet");
   assert.match(ui.container.textContent!, /just recorded\. The server holds no record of this signed withdrawal, so it has been discarded\. Start it again to review and sign a new one\./);
   assert.equal([...ui.container.querySelectorAll("button")].some((item) => item.textContent === "Check existing owner transaction"), false);
   assert.equal(button("Withdraw to my wallet").disabled, false);
@@ -718,7 +723,7 @@ test("a refused retry marked notSaved still keeps bytes the server's record hold
     }
     throw new Error("Unexpected fixture route");
   };
-  await render(); await press("Withdraw to my wallet"); await press("Check existing owner transaction");
+  await render(); await ownerPress("Withdraw to my wallet"); await press("Check existing owner transaction");
   const text = ui.container.textContent!;
   assert.doesNotMatch(text, /not accepted|discarded|cleared|nothing was sent/i);
   assert.match(text, /already saved\. The server holds this signed withdrawal and still records it as awaiting confirmation, so it was kept/);
@@ -740,7 +745,7 @@ test("a 404 or a sign-in answer to signed owner bytes is not a refusal: the byte
     if (path === "owner" && body?.stage === "submit") return answers.shift()!;
     throw new Error("Unexpected fixture route");
   };
-  await render(); await press("Withdraw to my wallet");
+  await render(); await ownerPress("Withdraw to my wallet");
   for (let i = 0; i < 4; i++) {
     assert.doesNotMatch(ui.container.textContent!, /not accepted|discarded|cleared/);
     assert.equal(button("Check existing owner transaction").disabled, false);
@@ -1323,10 +1328,10 @@ test("Withdraw native SOL prepares the runtime's withdraw-sol in lamports, and s
   };
   await render();
   await type("Native SOL to withdraw", "1.5");
-  // Shown while the wallet is open on these bytes.
+  // Shown in the review before the wallet opens, and still while it is open on these bytes.
   const wallet = deferred<Uint8Array>();
   signedBytes = () => wallet.promise;
-  await press("Withdraw native SOL");
+  await ownerPress("Withdraw native SOL");
   assert.equal(signCount, 1);
   assert.match(ui.container.textContent!, /The prepared native SOL withdrawal needs your owner wallet to hold at least 0\.00090588 SOL \(it holds 0\.01 SOL\): its network fee, a priority fee of 0\.00001 SOL so it lands under congestion/);
   wallet.resolve(Uint8Array.from([1, 2, 3])); await settle();
@@ -1347,7 +1352,7 @@ test("the owner-controls cost line describes only the action in flight: gone onc
   await render();
   const wallet = deferred<Uint8Array>();
   signedBytes = () => wallet.promise;
-  await press("Revoke all Solana sessions");
+  await ownerPress("Revoke all Solana sessions");
   assert.match(ui.container.textContent!, /The prepared revocation needs your owner wallet to hold at least 0\.00090588 SOL \(it holds 0\.01 SOL\)/);
   // The revocation completes: the line no longer describes anything the server is asking for.
   wallet.resolve(Uint8Array.from([1, 2, 3])); await settle();
@@ -1355,16 +1360,86 @@ test("the owner-controls cost line describes only the action in flight: gone onc
   assert.doesNotMatch(ui.container.textContent!, COST);
   // A withdrawal the server refuses to prepare never shows the revocation's cost again.
   prepare = async () => refusal("Refresh the pending owner transaction before preparing another.");
-  await press("Withdraw to my wallet");
+  await ownerPress("Withdraw to my wallet");
   assert.match(ui.container.textContent!, /Refresh the pending owner transaction before preparing another/);
   assert.doesNotMatch(ui.container.textContent!, COST);
-  // Nor after the wallet is closed on a withdrawal it showed: those bytes are gone, and the next press prepares fresh ones.
+  // A wallet closed on a reviewed withdrawal leaves its review to sign again while its window lasts; discarding it ends the line.
   prepare = async (body) => json({ prepared: { transactionBase64: await ownerBytes(body), requiredLamports: "2934280" } });
   signedBytes = () => Promise.reject(new Error("The owner closed the wallet."));
-  await press("Withdraw to my wallet");
+  await ownerPress("Withdraw to my wallet");
   assert.match(ui.container.textContent!, /The owner closed the wallet\./);
-  assert.doesNotMatch(ui.container.textContent!, COST);
+  assert.match(ui.container.textContent!, /The prepared withdrawal needs your owner wallet to hold at least 0\.00293428 SOL/);
   assert.equal(signCount, 2);
+  await press("Discard");
+  assert.doesNotMatch(ui.container.textContent!, COST);
+  assert.equal(calls.filter((call) => call.path === "owner" && call.body?.stage === "submit").length, 1, "only the revocation was ever submitted");
+});
+test("every owner action is reviewed before the wallet opens: what it does, its fee and what the wallet must hold", async () => {
+  state.runtime.live.programId = PROGRAM;
+  respond = async (path, body) => {
+    if (path === "status") return json(state);
+    if (path === "owner" && body?.stage === "prepare") {
+      // 0.00001 SOL of priority fee, on at least each instruction's default compute budget; none for the resume request.
+      const fee = body.action === "resume-buys" ? [] : body.action === "withdraw" ? priorityFee(400_000, 25_000n) : priorityFee(200_000, 50_000n);
+      return json({ prepared: { transactionBase64: await ownerBytes(body, fee), requiredLamports: "905880", ownerLamports: "10000000",
+        priorityFeeLamports: body.action === "resume-buys" ? "0" : "10000" } });
+    }
+    if (path === "owner" && body?.stage === "submit") return json({ result: { signature: "owner-proof", status: "finalized" } });
+    throw new Error("Unexpected fixture route");
+  };
+  const text = () => ui.container.textContent!;
+  const submits = () => calls.filter((call) => call.path === "owner" && call.body?.stage === "submit").length;
+  await render();
+  await type("Amount to withdraw", "2.5"); await type("Native SOL to withdraw", "0.75");
+  for (const [label, effect] of [
+    ["Revoke all Solana sessions", /the prepared revocation revokes every trading session of your vault, and nothing else\./],
+    ["Ask wallet to resume buys", /the prepared request to resume buys turns your vault's buying back on, with its existing limits, and nothing else\./],
+    ["Withdraw to my wallet", /the prepared withdrawal withdraws 2\.5 USDG from your vault to your own USDG token account, and nothing else\./],
+    ["Withdraw native SOL", /the prepared native SOL withdrawal withdraws 0\.75 SOL from your vault to your owner wallet, and nothing else\./],
+  ] as const) {
+    const before = submits();
+    await press(label);
+    // Prepared and checked, nothing signed: the owner sees what it does and costs first. A revocation too: one extra click.
+    assert.equal(signCount, 0, label); assert.equal(submits(), before, label);
+    assert.match(text(), /Review before your wallet opens/, label);
+    assert.match(text(), effect, label);
+    if (label === "Ask wallet to resume buys") assert.match(text(), /It carries no priority fee: your owner wallet pays only the network fee\./);
+    else assert.match(text(), /It carries a priority fee of 0\.00001 SOL \(at most 0\.001 SOL\), paid by your owner wallet with the network fee so it lands under congestion\./, label);
+    assert.match(text(), /needs your owner wallet to hold at least 0\.00090588 SOL \(it holds 0\.01 SOL\)/, label);
+    assert.match(text(), /Nothing has been signed yet\. Sign within about 45 seconds/, label);
+    // Discard sends nothing and signs nothing.
+    await press("Discard");
+    assert.doesNotMatch(text(), /Review before your wallet opens/, label);
+    assert.equal(signCount, 0, label); assert.equal(submits(), before, label);
+  }
+  // Signing the reviewed bytes opens the wallet once and submits them.
+  await press("Revoke all Solana sessions");
+  await press("Sign with my wallet");
+  assert.equal(signCount, 1); assert.equal(submits(), 1);
+  assert.match(text(), /Owner transaction: finalized/);
+  assert.doesNotMatch(text(), /Review before your wallet opens/);
+});
+test("a reviewed owner transaction not signed in time is discarded without opening the wallet", async () => {
+  state.runtime.live.programId = PROGRAM;
+  mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"], now: Date.now() });
+  try {
+    respond = async (path, body) => {
+      if (path === "status") return json(state);
+      if (path === "owner" && body?.stage === "prepare") return prepareAnswer(body);
+      throw new Error("Unexpected fixture route");
+    };
+    await render(); await ui.click("Withdraw to my wallet");
+    for (let i = 0; i < 20 && !ui.container.textContent!.includes("Review before your wallet opens"); i++) await act(async () => { await Promise.resolve(); });
+    assert.match(ui.container.textContent!, /Review before your wallet opens/);
+    await act(async () => { mock.timers.tick(30_000); });
+    assert.match(ui.container.textContent!, /Sign within about 15 seconds/);
+    await act(async () => { mock.timers.tick(15_000); });
+    assert.doesNotMatch(ui.container.textContent!, /Review before your wallet opens/);
+    assert.match(ui.container.textContent!, /The prepared withdrawal was not signed in time, so it was discarded\. Nothing was signed\./);
+    assert.equal([...ui.container.querySelectorAll("button")].some((item) => item.textContent === "Sign with my wallet"), false);
+    assert.equal(signCount, 0);
+    assert.equal(calls.some((call) => call.body?.stage === "submit"), false);
+  } finally { mock.timers.reset(); }
 });
 
 test("owner transaction bytes that do anything but what the owner asked never reach the wallet, and the fee shown is the one they carry", async () => {
@@ -1437,7 +1512,7 @@ test("owner transaction bytes that do anything but what the owner asked never re
   answer = async (body) => ({ transactionBase64: await ownerBytes(body, priorityFee(200_000, 50_000n)), requiredLamports: "905880" });
   const wallet = deferred<Uint8Array>();
   signedBytes = () => wallet.promise;
-  await press("Revoke all Solana sessions");
+  await ownerPress("Revoke all Solana sessions");
   assert.equal(signCount, 1);
   assert.match(text(), /The prepared revocation needs your owner wallet to hold at least 0\.00090588 SOL: its network fee, a priority fee of 0\.00001 SOL so it lands under congestion/);
   wallet.resolve(Uint8Array.from([1, 2, 3])); await settle();
@@ -1446,13 +1521,13 @@ test("owner transaction bytes that do anything but what the owner asked never re
   const mint = [...ui.container.querySelectorAll("label")].find((item) => item.textContent?.startsWith("Asset"))!.querySelector("select")!;
   await act(async () => { mint.value = SOLANA_WRAPPED_SOL_MINT; mint.dispatchEvent(new ui.dom.window.Event("change", { bubbles: true })); });
   answer = async (body) => ({ transactionBase64: await ownerBytes(body, [await syncNative(vault)]) });
-  await press("Withdraw to my wallet");
+  await ownerPress("Withdraw to my wallet");
   assert.equal(signCount, 2);
   assert.deepEqual(calls.filter((call) => call.path === "owner" && call.body?.stage === "prepare").at(-1)!.body, { stage: "prepare", action: "withdraw", mint: SOLANA_WRAPPED_SOL_MINT, amountRaw: "1000000000" });
   // But never a SyncNative of someone else's account, or under another token program.
   for (const before of [[await syncNative(stranger)], [await syncNative(vault, TOKEN_2022_PROGRAM)]]) {
     answer = async (body) => ({ transactionBase64: await ownerBytes(body, before) });
-    await press("Withdraw to my wallet");
+    await ownerPress("Withdraw to my wallet");
     assert.match(text(), /The prepared withdrawal does not match what you asked for/);
   }
   assert.equal(signCount, 2);
