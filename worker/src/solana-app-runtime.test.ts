@@ -12,6 +12,7 @@ import { SqlSolanaBindingStore } from "../../web/src/lib/solana-binding-store";
 import { wrapSqlite } from "./db";
 import { createSolanaAgent } from "./solana-agent";
 import { createSolanaAppRuntime, SOLANA_DEPLOYMENT_RECHECK_MS } from "./solana-app-runtime";
+import { withSolanaReadDeadline } from "./solana-rpc";
 import type { SolanaLiveRead, SolanaLiveRpc } from "./solana-live-rpc";
 import type { SolanaPaperMarket } from "./solana-paper-service";
 import { ensureSolanaTradingSchema, SolanaTradingStore } from "./solana-trading-store";
@@ -44,7 +45,9 @@ async function fixture(options: { declared?: string } = {}) {
   const dataAddress = key(41), binary = Buffer.concat([Buffer.from("runtime-tested-binary"), keyBytes(options.declared ?? PROGRAM)]), program = Buffer.alloc(36), programData = Buffer.alloc(45 + binary.length);
   program.writeUInt32LE(2); keyBytes(dataAddress).copy(program, 4); programData.writeUInt32LE(3); binary.copy(programData, 45);
   const controls = { initialized: false, finalized: false, failed: false, malformed: false, sends: 0, signed: "", signature: "", failSend: true, height: 4900, sequence: 0n, epoch: 1n,
-    cash: 0n, wsol: 0n, feePayerLamports: 100_000_000, ownerLamports: 100_000_000, ownerAtas: false, vaultNativeLamports: 0, unsyncedWsolLamports: 0 };
+    cash: 0n, wsol: 0n, feePayerLamports: 100_000_000, ownerLamports: 100_000_000, ownerAtas: false, vaultNativeLamports: 0, unsyncedWsolLamports: 0,
+    // Owner-transaction simulation and recent priority fees; null: the provider cannot answer.
+    simulatedUnits: null as number | null, simulationFails: false, priorityFees: null as number[] | null };
   const cashAta = await deriveSolanaAta(vault, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM), wsolAta = await deriveSolanaAta(vault, SOLANA_WRAPPED_SOL_MINT, SOLANA_CLASSIC_TOKEN_PROGRAM);
   const ownerCashAta = await deriveSolanaAta(owner, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM), ownerWsolAta = await deriveSolanaAta(owner, SOLANA_WRAPPED_SOL_MINT, SOLANA_CLASSIC_TOKEN_PROGRAM);
   const feePayer = await getAddressFromPublicKey((await createKeyPairFromPrivateKeyBytes(new Uint8Array(32).fill(31))).publicKey);
@@ -92,6 +95,11 @@ async function fixture(options: { declared?: string } = {}) {
     if (method === "getLatestBlockhash") return response({ blockhash: key(42), lastValidBlockHeight: 5000 });
     if (method === "getSignatureStatuses") return response([controls.finalized ? { confirmationStatus: "finalized", slot: 1000, ...(controls.malformed ? {} : { err: controls.failed ? { InstructionError: [0, "InvalidArgument"] } : null }) } : null]);
     if (method === "getTransaction") return controls.finalized ? { version: 0, slot: 1000, transaction: [controls.signed, "base64"], meta: controls.malformed ? {} : { err: controls.failed ? { InstructionError: [0, "InvalidArgument"] } : null } } : null;
+    if (method === "simulateTransaction" && controls.simulatedUnits !== null) {
+      assert.deepEqual(params[1], { encoding: "base64", commitment: "confirmed", sigVerify: false, replaceRecentBlockhash: false });
+      return response({ err: controls.simulationFails ? { InstructionError: [0, { Custom: 6000 }] } : null, unitsConsumed: controls.simulatedUnits, logs: [], accounts: null });
+    }
+    if (method === "getRecentPrioritizationFees" && controls.priorityFees) return controls.priorityFees.map((prioritizationFee, index) => ({ slot: 1000 - index, prioritizationFee }));
     throw new Error(`Unexpected test RPC ${method}`);
   };
   // Two independent providers. Both answer honestly unless a test replaces one.
@@ -923,4 +931,105 @@ test("a WSOL withdrawal of quarantine alone asks no one for a price", async () =
       }
     } finally { f.raw.close(); }
   }
+});
+
+/** The ComputeBudget limit and price an owner transaction carries, or null without them. */
+function ownerBudget(transactionBase64: string): { units: number; price: bigint } | null {
+  const message = getCompiledTransactionMessageDecoder().decode(getTransactionDecoder().decode(Buffer.from(transactionBase64, "base64")).messageBytes);
+  const budget = message.instructions.filter(ix => message.staticAccounts[ix.programAddressIndex] === "ComputeBudget111111111111111111111111111111").map(ix => Buffer.from(ix.data!));
+  if (!budget.length) return null;
+  assert.deepEqual(budget.map(d => d[0]), [2, 3], "one unit limit, then one price");
+  return { units: budget[0]!.readUInt32LE(1), price: budget[1]!.readBigUInt64LE(1) };
+}
+
+test("owner transactions carry a bounded priority fee the owner can afford, and still prepare without one (audit G2-1, owner half)", async () => {
+  const f = await fixture();
+  try {
+    await readyLive(f);
+    // Simulated at 20,000 units; recent fees on the accounts it writes put the 75th percentile at 50,000 micro-lamports.
+    f.controls.simulatedUnits = 20_000; f.controls.priorityFees = [1_000, 2_000, 50_000, 100_000];
+    const revoke = await f.app.prepareOwnerAction(f.scope, { action: "revoke" });
+    assert.deepEqual(ownerBudget(revoke.transactionBase64), { units: 20_000 * 1.2 + 40_000, price: 50_000n });
+    assert.equal(revoke.priorityFeeLamports, "3200"); assert.equal(revoke.computeUnitLimit, 64_000);
+    assert.equal(revoke.requiredLamports, String(OWNER_BASE + 3200), "the fee is part of what the owner must hold");
+    // The signed bytes are exactly the reviewed message, priority fee included.
+    const signedTransactionBase64 = await f.sign(revoke.transactionBase64);
+    assert.equal((await f.app.submitOwnerAction(f.scope, { signedTransactionBase64 })).status, "pending");
+    assert.equal(f.controls.sends, 1); assert.equal(f.sent[0], signedTransactionBase64);
+  } finally { f.raw.close(); }
+  for (const [ownerLamports, fees, expected] of [
+    // Never more than 0.001 SOL in priority fees, however high recent fees are.
+    [100_000_000, [1_000_000_000], 1_000_000n],
+    // Never more than the owner holds beyond the transaction's own needs: a smaller fee, never a refusal.
+    [OWNER_BASE + 640, [1_000_000_000], 640n],
+    // Nothing to spare, no estimate, or a failing simulation: no priority fee, exactly as before.
+    [OWNER_BASE, [50_000], 0n],
+    [100_000_000, null, 0n],
+    [100_000_000, "simulation", 0n],
+  ] as const) {
+    const g = await fixture();
+    try {
+      await readyLive(g);
+      g.controls.ownerLamports = ownerLamports; g.controls.simulatedUnits = 20_000;
+      g.controls.priorityFees = Array.isArray(fees) ? [...fees] : null; g.controls.simulationFails = fees === "simulation";
+      const prepared = await g.app.prepareOwnerAction(g.scope, { action: "revoke" });
+      assert.equal(prepared.priorityFeeLamports, expected.toString(), `${ownerLamports} ${String(fees)}`);
+      assert.equal(prepared.requiredLamports, String(OWNER_BASE + Number(expected)));
+      const budget = ownerBudget(prepared.transactionBase64);
+      if (expected === 0n) assert.equal(budget, null);
+      else assert.equal((budget!.price * BigInt(budget!.units) + 999_999n) / 1_000_000n, expected);
+    } finally { g.raw.close(); }
+  }
+  // A withdrawal's fee estimate covers the accounts it writes: the vault, its token account and the owner's.
+  const h = await fixture();
+  try {
+    await readyLive(h); h.controls.cash = 5_000_000n; h.controls.simulatedUnits = 30_000; h.controls.priorityFees = [10_000];
+    const prepared = await h.app.prepareOwnerAction(h.scope, { action: "withdraw", mint: SOLANA_USDG_MINT, amountRaw: "1000000" });
+    assert.equal(ownerBudget(prepared.transactionBase64)!.price, 10_000n);
+    const estimate = h.calls.filter(call => call.method === "getRecentPrioritizationFees").at(-1)!.key as string[];
+    for (const account of [h.owner, h.vault, h.cashAta, h.ownerCashAta]) assert.ok(estimate.includes(account), account);
+  } finally { h.raw.close(); }
+});
+
+test("a slow priority-fee read leaves the owner transaction without a fee instead of failing it (audit G2-1, owner half)", { timeout: 30_000 }, async () => {
+  const f = await fixture();
+  try {
+    await readyLive(f);
+    f.controls.simulatedUnits = 20_000; f.controls.priorityFees = [50_000];
+    // Every read session has a hard deadline, as the live transport does. The
+    // simulation never answers: inside the blockhash and cost session it would
+    // fail the whole revoke at that deadline.
+    let simulations = 0;
+    const slow: SolanaLiveRead = (method, params) => {
+      if (method === "simulateTransaction") { simulations++; return new Promise(() => undefined); }
+      return f.read(method, params);
+    };
+    const rpc: SolanaLiveRpc = { ...f.rpc, read: fn => withSolanaReadDeadline(() => fn(slow), 2_000),
+      readEach: async fn => [await withSolanaReadDeadline(() => fn(slow), 2_000), await withSolanaReadDeadline(() => fn(slow), 2_000)] };
+    const app = f.runtime({ rpc, ownerFeeReadMs: 20 });
+    const revoke = await app.prepareOwnerAction(f.scope, { action: "revoke" });
+    assert.equal(simulations, 1, "the fee was attempted");
+    assert.equal(revoke.priorityFeeLamports, "0"); assert.equal(revoke.computeUnitLimit, null);
+    assert.equal(ownerBudget(revoke.transactionBase64), null, "no priority fee, exactly as before");
+    assert.equal(revoke.requiredLamports, String(OWNER_BASE));
+    // The prepared revoke is saved and signs normally.
+    const signedTransactionBase64 = await f.sign(revoke.transactionBase64);
+    assert.equal((await app.submitOwnerAction(f.scope, { signedTransactionBase64 })).status, "pending");
+    // A provider session that never ends: only the fee reads' own short deadline lets the revoke prepare.
+    const e = await fixture();
+    try {
+      await readyLive(e); e.controls.simulatedUnits = 20_000; e.controls.priorityFees = [50_000];
+      const hang: SolanaLiveRead = (method, params) => method === "simulateTransaction" ? new Promise(() => undefined) : e.read(method, params);
+      const prepared = await e.runtime({ rpc: { ...e.rpc, read: fn => fn(hang) }, ownerFeeReadMs: 20 }).prepareOwnerAction(e.scope, { action: "revoke" });
+      assert.equal(prepared.priorityFeeLamports, "0");
+    } finally { e.raw.close(); }
+    // A fee read that throws (the provider refuses simulation) is no fee either.
+    const g = await fixture();
+    try {
+      await readyLive(g); g.controls.priorityFees = [50_000];
+      const refusing: SolanaLiveRead = (method, params) => method === "simulateTransaction" ? Promise.reject(new Error("refused")) : g.read(method, params);
+      const prepared = await g.runtime({ rpc: { ...g.rpc, read: fn => fn(refusing) } }).prepareOwnerAction(g.scope, { action: "revoke" });
+      assert.equal(prepared.priorityFeeLamports, "0");
+    } finally { g.raw.close(); }
+  } finally { f.raw.close(); }
 });

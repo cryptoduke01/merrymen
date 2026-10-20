@@ -45,7 +45,7 @@ async function fixture() {
   const dataAddress = key(41), binary = Buffer.from("runtime-tested-binary"), program = Buffer.alloc(36), programData = Buffer.alloc(45 + binary.length);
   program.writeUInt32LE(2); keyBytes(dataAddress).copy(program, 4); programData.writeUInt32LE(3); binary.copy(programData, 45);
   const controls = { initialized: false, finalized: false, failed: false, malformed: false, sends: 0, signed: "", signature: "", failSend: true, height: 4900, sequence: 0n, epoch: 1n,
-    cash: 0n, wsol: 0n };
+    cash: 0n, wsol: 0n, simulatedUnits: null as number | null, priorityFees: null as number[] | null };
   const cashAta = await deriveSolanaAta(vault, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM), wsolAta = await deriveSolanaAta(vault, SOLANA_WRAPPED_SOL_MINT, SOLANA_CLASSIC_TOKEN_PROGRAM);
   const tokenAccount = (mint: string, amount: bigint) => {
     const b = Buffer.alloc(165); keyBytes(mint).copy(b, 0); keyBytes(vault).copy(b, 32); b.writeBigUInt64LE(amount, 64); b[108] = 1; return b;
@@ -85,6 +85,8 @@ async function fixture() {
     if (method === "getLatestBlockhash") return response({ blockhash: key(42), lastValidBlockHeight: 5000 });
     if (method === "getSignatureStatuses") return response([controls.finalized ? { confirmationStatus: "finalized", slot: 1000, ...(controls.malformed ? {} : { err: controls.failed ? { InstructionError: [0, "InvalidArgument"] } : null }) } : null]);
     if (method === "getTransaction") return controls.finalized ? { version: 0, slot: 1000, transaction: [controls.signed, "base64"], meta: controls.malformed ? {} : { err: controls.failed ? { InstructionError: [0, "InvalidArgument"] } : null } } : null;
+    if (method === "simulateTransaction" && controls.simulatedUnits !== null) return response({ err: null, unitsConsumed: controls.simulatedUnits, logs: [], accounts: null });
+    if (method === "getRecentPrioritizationFees" && controls.priorityFees) return controls.priorityFees.map((prioritizationFee, i) => ({ slot: 1000 - i, prioritizationFee }));
     throw new Error(`Unexpected test RPC ${method}`);
   };
   // Two independent providers that agree: owner outcomes are booked only on both.
@@ -122,7 +124,12 @@ async function fixture() {
 
 import { solanaResponse } from "./solana-api";
 import { refusedByServer } from "../terminal/SolanaOwnerActions";
+import { OWNER_MAX_PRIORITY_FEE_LAMPORTS, permissionMatchesLimits, readPermissionTransaction } from "../terminal/SolanaPermission";
 import { RequestError } from "../terminal/request-json";
+import { SOLANA_OWNER_MAX_PRIORITY_FEE_LAMPORTS } from "../../../worker/src/solana-app-runtime";
+import { solanaComputeBudgetInstructions } from "../../../worker/src/solana-executor";
+import { address, appendTransactionMessageInstructions, compileTransaction, createTransactionMessage, decompileTransactionMessage,
+  getCompiledTransactionMessageDecoder, setTransactionMessageFeePayer, setTransactionMessageLifetimeUsingBlockhash, type Blockhash, type Instruction } from "@solana/kit";
 
 const flag = process.env.MERRYMEN_SOLANA;
 test.before(() => { process.env.MERRYMEN_SOLANA = "1"; });
@@ -184,5 +191,45 @@ test("bytes refused before anything is saved are still a 4xx refusal", async () 
     assert.equal(first.status, 409); assert.match(first.error!, /expired before submission/);
     assert.equal(first.refusal, true);
     assert.equal(f.controls.sends, 0); assert.equal((await new SolanaTradingStore(f.db, f.scope).setup())!.signature, undefined);
+  } finally { f.raw.close(); }
+});
+
+test("the browser signs the real permission with its bounded priority fee, and refuses a larger, partial or extra one", async () => {
+  const f = await fixture();
+  try {
+    await f.live();
+    // Without a simulation or a fee estimate the permission carries no priority fee, as before.
+    const plain = await f.app.prepareLive(f.scope, { limits, sessionPublicKey: f.session });
+    const expected = { owner: f.owner, programId: PROGRAM, vault: plain.vault, session: f.session };
+    assert.equal(plain.priorityFeeLamports, "0"); assert.equal(readPermissionTransaction(plain.transactionBase64, expected).priorityFeeLamports, "0");
+    f.controls.simulatedUnits = 150_000; f.controls.priorityFees = [200_000];
+    const setup = await f.app.prepareLive(f.scope, { limits, sessionPublicKey: f.session });
+    assert.notEqual(setup.priorityFeeLamports, "0");
+    const terms = readPermissionTransaction(setup.transactionBase64, expected);
+    assert.equal(terms.priorityFeeLamports, setup.priorityFeeLamports, "the page sees the fee the server set");
+    assert.ok(permissionMatchesLimits(terms, limits));
+    assert.equal(OWNER_MAX_PRIORITY_FEE_LAMPORTS, SOLANA_OWNER_MAX_PRIORITY_FEE_LAMPORTS, "browser and server share one cap");
+    // Rebuild the same permission with a different priority fee.
+    const compiled = getCompiledTransactionMessageDecoder().decode(getTransactionDecoder().decode(Buffer.from(setup.transactionBase64, "base64")).messageBytes);
+    const message = decompileTransactionMessage(compiled, { lastValidBlockHeight: BigInt(setup.lastValidBlockHeight) });
+    const body = message.instructions.filter(ix => ix.programAddress !== "ComputeBudget111111111111111111111111111111") as Instruction[];
+    const [limit] = solanaComputeBudgetInstructions(setup.computeUnitLimit!, 0n);
+    // getBase64EncodedWireTransaction already returns base64 wire bytes.
+    const rebuilt = (instructions: Instruction[]) => String(getBase64EncodedWireTransaction(compileTransaction(setTransactionMessageLifetimeUsingBlockhash(
+      { blockhash: setup.blockhash as Blockhash, lastValidBlockHeight: BigInt(setup.lastValidBlockHeight) },
+      setTransactionMessageFeePayer(address(f.owner), appendTransactionMessageInstructions(instructions, createTransactionMessage({ version: 0 })))))));
+    const units = BigInt(setup.computeUnitLimit!), atCap = OWNER_MAX_PRIORITY_FEE_LAMPORTS * 1_000_000n / units;
+    assert.equal(readPermissionTransaction(rebuilt([...solanaComputeBudgetInstructions(Number(units), atCap), ...body]), expected).priorityFeeLamports,
+      ((atCap * units + 999_999n) / 1_000_000n).toString(), "up to the cap is signed");
+    const refused = [
+      [...solanaComputeBudgetInstructions(Number(units), atCap + 1_000_000n), ...body],
+      [...solanaComputeBudgetInstructions(Number(units), 1n).slice(1), ...body],
+      [limit!, ...body],
+      [...solanaComputeBudgetInstructions(Number(units), 1n), ...solanaComputeBudgetInstructions(Number(units), 1n).slice(1), ...body],
+      [{ ...limit!, accounts: [{ address: address(f.owner), role: 1 }] }, ...solanaComputeBudgetInstructions(Number(units), 1n).slice(1), ...body],
+    ] as Instruction[][];
+    for (const [index, instructions] of refused.entries()) {
+      assert.throws(() => readPermissionTransaction(rebuilt(instructions), expected), /does not match what this page shows/, String(index));
+    }
   } finally { f.raw.close(); }
 });

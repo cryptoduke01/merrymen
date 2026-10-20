@@ -384,7 +384,8 @@ export async function reconcileSolanaSubmission(
   }
   return record;
 }
-function computeInstructions(units: number, price: bigint): Instruction[] {
+/** ComputeBudget SetComputeUnitLimit (2, u32) then SetComputeUnitPrice (3, u64 micro-lamports per unit). */
+export function solanaComputeBudgetInstructions(units: number, price: bigint): Instruction[] {
   const limit = Buffer.alloc(5); limit[0] = 2; limit.writeUInt32LE(units, 1);
   const fee = Buffer.alloc(9); fee[0] = 3; fee.writeBigUInt64LE(price, 1);
   return [{ programAddress: address(COMPUTE_PROGRAM), accounts: [], data: limit },
@@ -523,7 +524,7 @@ export function createSolanaExecutor(options: SolanaExecutorOptions) {
           routeAccounts: route.accounts.map(meta => ({ address: meta.address, role: meta.isWritable ? 1 : 0 })) });
         const compile = (units: number, unitPrice: bigint) => {
           const msg = setTransactionMessageLifetimeUsingBlockhash({ blockhash: recentBlockhash, lastValidBlockHeight },
-            setTransactionMessageFeePayer(feePayer, appendTransactionMessageInstructions([...computeInstructions(units, unitPrice), swap], createTransactionMessage({ version: 0 }))));
+            setTransactionMessageFeePayer(feePayer, appendTransactionMessageInstructions([...solanaComputeBudgetInstructions(units, unitPrice), swap], createTransactionMessage({ version: 0 }))));
           const transaction = compileTransaction(compressTransactionMessageUsingAddressLookupTables(msg, alts));
           if (Buffer.from(getBase64EncodedWireTransaction(transaction), "base64").length > 1232) return fail("unsafe-route");
           return transaction;

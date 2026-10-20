@@ -16,10 +16,10 @@ import {
   SOLANA_WRAPPED_SOL_MINT,
 } from "../../packages/core/src/solana-live";
 import type { Db } from "./db";
-import { createSolanaExecutor, parseSolanaLiveIntent, readSolanaVaultBalances, readSolanaVaultState,
-  reconcileSolanaSubmission, SOLANA_DEFAULT_MAX_COMPUTE_UNIT_PRICE, SolanaExecutionError, verifySolanaVaultDeployment, type SolanaLiveRecord } from "./solana-executor";
+import { createSolanaExecutor, parseSolanaLiveIntent, readSolanaVaultBalances, readSolanaVaultState, reconcileSolanaSubmission,
+  SOLANA_DEFAULT_MAX_COMPUTE_UNIT_PRICE, solanaComputeBudgetInstructions, SolanaExecutionError, verifySolanaVaultDeployment, type SolanaLiveRecord } from "./solana-executor";
 import { createSolanaLiveMarket } from "./solana-live-market";
-import { createSolanaLiveRpc, readSolanaQuorum, type SolanaLiveRead, type SolanaLiveRpc } from "./solana-live-rpc";
+import { createSolanaLiveRpc, readSolanaPriorityFee, readSolanaQuorum, type SolanaLiveRead, type SolanaLiveRpc } from "./solana-live-rpc";
 import { createSolanaMarket } from "./solana-market";
 import { createSolanaPaperService, type SolanaPaperMarket } from "./solana-paper-service";
 import { readSolanaReferencePrice, solanaReferenceBound, solanaReferenceNotional, solanaReferenceToleranceBps,
@@ -73,8 +73,23 @@ const SWAP_SIGNATURE_FEES = 10_000n;
 const CLASSIC_TOKEN_ACCOUNT_SIZE = 165;
 /** Upper bound for a Token-2022 USDG token account whose size cannot be read yet (before the vault's own exists). */
 const TOKEN_2022_ACCOUNT_SIZE_BOUND = 300;
-/** The signature fee per signer. Owner transactions carry one signature and no priority fee. */
+/** The signature fee per signer. Owner transactions carry one signature, plus a bounded priority fee when one can be set. */
 const LAMPORTS_PER_SIGNATURE = 5_000n;
+/**
+ * The most priority fee an owner transaction (revoke, withdrawal, permission)
+ * ever carries: 0.001 SOL. The owner pays it, so it is also bounded by what the
+ * owner wallet holds beyond the transaction's own needs. The browser's
+ * permission check (web/src/terminal/SolanaPermission.tsx) enforces the same cap.
+ */
+export const SOLANA_OWNER_MAX_PRIORITY_FEE_LAMPORTS = 1_000_000n;
+/** Compute units an owner transaction reserves above its simulation: room to open one more token account meanwhile. */
+const OWNER_COMPUTE_HEADROOM = 40_000;
+/**
+ * How long preparing an owner transaction waits for its priority-fee reads
+ * (simulation and recent fees) before sending it without a priority fee.
+ */
+export const SOLANA_OWNER_FEE_READ_MS = 3_000;
+const MAX_COMPUTE_UNITS = 1_400_000;
 /** A WSOL withdrawal is valued as the agent marks and exits SOL: an exit quote at this slippage. */
 const WITHDRAW_VALUATION_SLIPPAGE_BPS = 50;
 /** An unchanged fee payer alert is logged again after this long. */
@@ -142,10 +157,13 @@ export interface SolanaAppRuntimeOptions {
    * getSolanaAppRuntime() always runs the full checks.
    */
   localTestDeployment?: boolean;
+  /** How long an owner transaction waits for its best-effort priority-fee reads. Default SOLANA_OWNER_FEE_READ_MS. */
+  ownerFeeReadMs?: number;
 }
 export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
   const env = options.env ?? process.env, now = options.now ?? Date.now;
   const localTest = options.localTestDeployment ?? options.rpc !== undefined;
+  const ownerFeeReadMs = options.ownerFeeReadMs ?? SOLANA_OWNER_FEE_READ_MS;
   const rpc = () => options.rpc ?? createSolanaLiveRpc({ env });
   const market = () => options.market ?? createSolanaMarket({ env, now });
   async function store(scope: SolanaAccountScope, autonomousRevision?: number, signal?: AbortSignal) {
@@ -381,22 +399,68 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
     for (const [index, item] of creates.entries()) rents.push(accounts[3 + index] === null ? await rentFor(read, item.size === "usdg" ? usdgSize : item.size) : 0n);
     return { held: payable(accounts[0]!), base, rents };
   }
+  /**
+   * A bounded priority fee for an owner transaction, so a revoke or withdrawal
+   * still lands under congestion: the compute units its simulation used (plus
+   * headroom), priced at recent fees on the accounts it writes, never above
+   * SOLANA_OWNER_MAX_PRIORITY_FEE_LAMPORTS in total nor above what the owner
+   * holds beyond the transaction's own needs (`spare`). Best effort: when the
+   * simulation or the fee estimate cannot be read, the owner has nothing to
+   * spare, or the reads take longer than ownerFeeReadMs, the transaction goes
+   * without one, exactly as before. Never a refusal.
+   *
+   * These reads run in their own read session, after the blockhash and cost
+   * session, and under their own short deadline: inside that session a slow
+   * simulation would hit its hard deadline (withSolanaReadDeadline) and fail
+   * the owner's revoke or withdrawal itself.
+   */
+  async function ownerPriority(live: SolanaLiveRpc, compile: (instructions: Instruction[]) => ReturnType<typeof compileTransaction>,
+    owner: string, instructions: Instruction[], spare: bigint): Promise<{ units: number; price: bigint; fee: bigint } | null> {
+    const fundable = spare < SOLANA_OWNER_MAX_PRIORITY_FEE_LAMPORTS ? spare : SOLANA_OWNER_MAX_PRIORITY_FEE_LAMPORTS;
+    if (fundable < 1n) return null;
+    let abandoned = false, timer: ReturnType<typeof setTimeout> | undefined;
+    const estimate = (async () => live.read(async read => {
+      // Once the deadline passed nothing more is asked (a failover session included).
+      const bounded: SolanaLiveRead = (method, params) => { if (abandoned) throw new Error("abandoned"); return read(method, params); };
+      const probe = getBase64EncodedWireTransaction(compile([...solanaComputeBudgetInstructions(MAX_COMPUTE_UNITS, 0n), ...instructions]));
+      if (Buffer.from(probe, "base64").length > 1232) return null;
+      const sim = await bounded("simulateTransaction", [probe, { encoding: "base64", commitment: "confirmed", sigVerify: false, replaceRecentBlockhash: false }]);
+      if (!object(sim) || !object(sim.value) || sim.value.err !== null) return null;
+      const consumed = sim.value.unitsConsumed;
+      if (typeof consumed !== "number" || !Number.isSafeInteger(consumed) || consumed < 1 || consumed > MAX_COMPUTE_UNITS) return null;
+      const units = Math.min(MAX_COMPUTE_UNITS, Math.ceil(consumed * 1.2) + OWNER_COMPUTE_HEADROOM);
+      const writable = [...new Set([owner, ...instructions.flatMap(ix => (ix.accounts ?? []).filter(meta => (meta.role & 1) === 1).map(meta => String(meta.address)))])];
+      const price = await readSolanaPriorityFee(bounded, writable, { minimum: 0n, maximum: fundable * 1_000_000n / BigInt(units) });
+      if (price < 1n) return null;
+      return { units, price, fee: (price * BigInt(units) + 999_999n) / 1_000_000n };
+    }))();
+    estimate.catch(() => undefined);
+    try {
+      return await Promise.race([estimate, new Promise<null>(resolve => { timer = setTimeout(resolve, ownerFeeReadMs, null); })]);
+    } catch { return null; }
+    finally { abandoned = true; clearTimeout(timer); }
+  }
   async function prepareOwner(s: SolanaTradingStore, instructions: Instruction[], details: Omit<SolanaPreparedSetup,
     "transactionBase64" | "messageBase64" | "blockhash" | "lastValidBlockHeight" | "preparedAtMs" | "expiresAtMs">, creates: readonly OwnerCreate[] = []) {
     const previous = await s.setup();
     if (previous?.signature && previous.status !== "failed" && previous.status !== "finalized") fail("Refresh the pending owner transaction before preparing another.", "pending");
-    const { block, cost } = await rpc().read(async read => {
+    const owner = s.scope.owner, live = rpc();
+    const { block, cost } = await live.read(async read => {
       const result = await read("getLatestBlockhash", [{ commitment: "confirmed" }]);
       if (!object(result) || !object(result.value) || typeof result.value.blockhash !== "string") fail("Invalid Solana blockhash response.");
       return { block: { blockhash: address(result.value.blockhash) as unknown as Blockhash, lastValidBlockHeight: BigInt(integer(result.value.lastValidBlockHeight)) },
-        cost: await ownerCost(read, s.scope.owner, details.vault, creates) };
+        cost: await ownerCost(read, owner, details.vault, creates) };
     });
+    const compile = (list: Instruction[]) => compileTransaction(setTransactionMessageLifetimeUsingBlockhash(block,
+      setTransactionMessageFeePayer(address(owner), appendTransactionMessageInstructions(list, createTransactionMessage({ version: 0 })))));
+    const required = cost.rents.reduce((sum, item) => sum + item, cost.base);
     // The owner pays: refuse before anything is saved or signed rather than let
     // a transaction that cannot pay its fee sit pending until its blockhash expires.
-    const required = cost.rents.reduce((sum, item) => sum + item, cost.base);
+    // The priority fee never causes a refusal: it fits in what the owner can spare.
     if (cost.held < required) fail(`Your owner wallet holds ${sol(cost.held)} SOL. This transaction needs at least ${sol(required)} SOL: its network fee${cost.rents.some(item => item > 0n) ? ", rent for the token accounts it opens" : ""} and the wallet's own minimum balance. Send SOL to your owner wallet, then prepare it again.`);
-    const tx = compileTransaction(setTransactionMessageLifetimeUsingBlockhash(block,
-      setTransactionMessageFeePayer(address(s.scope.owner), appendTransactionMessageInstructions(instructions, createTransactionMessage({ version: 0 })))));
+    let priority = cost.held > required ? await ownerPriority(live, compile, owner, instructions, cost.held - required) : null;
+    let tx = compile(priority ? [...solanaComputeBudgetInstructions(priority.units, priority.price), ...instructions] : instructions);
+    if (priority && Buffer.from(getBase64EncodedWireTransaction(tx), "base64").length > 1232) { tx = compile(instructions); priority = null; }
     const transactionBase64 = getBase64EncodedWireTransaction(tx); encoded(transactionBase64);
     const preparedAtMs = now();
     const setup: SolanaPreparedSetup = { ...details, transactionBase64, messageBase64: Buffer.from(tx.messageBytes).toString("base64"),
@@ -404,7 +468,8 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
     await s.saveSetup(setup);
     return { transactionBase64, blockhash: setup.blockhash, lastValidBlockHeight: setup.lastValidBlockHeight,
       programId: setup.programId, vault: setup.vault, session: setup.session, expiresAtMs: setup.expiresAtMs,
-      ownerLamports: cost.held.toString(), requiredLamports: required.toString() };
+      ownerLamports: cost.held.toString(), requiredLamports: (required + (priority?.fee ?? 0n)).toString(),
+      priorityFeeLamports: (priority?.fee ?? 0n).toString(), computeUnitLimit: priority?.units ?? null };
   }
   /**
    * What withdrawing `amountRaw` of WSOL is worth now: an executable WSOL→USDG

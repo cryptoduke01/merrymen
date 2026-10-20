@@ -8,7 +8,8 @@
  * the live card shows the saved limits with their absolute expiry, and before
  * the wallet opens, the prepared transaction is decoded here and must encode
  * exactly those limits, for this owner, vault, program and session key, with
- * nothing else in it beyond creating the vault and its token accounts.
+ * nothing else in it beyond creating the vault and its token accounts and a
+ * priority fee the owner pays, at most OWNER_MAX_PRIORITY_FEE_LAMPORTS.
  */
 import { getCompiledTransactionMessageDecoder, getTransactionDecoder } from "@solana/kit";
 import { base58Encode, SOLANA_USDG_MINT } from "../../../packages/core/src/ids";
@@ -21,9 +22,18 @@ const WRAPPED_SOL = "So11111111111111111111111111111111111111112";
 const INITIALIZE = [48, 191, 163, 44, 71, 129, 63, 164];
 const CREATE_SESSION = [242, 193, 143, 179, 150, 25, 122, 227];
 const SESSION_DATA_LENGTH = 8 + 32 + 8 * 4 + 2 + 8;
+const COMPUTE_BUDGET_PROGRAM = "ComputeBudget111111111111111111111111111111";
+/**
+ * The most priority fee the server may put on an owner transaction: 0.001 SOL.
+ * The same cap as SOLANA_OWNER_MAX_PRIORITY_FEE_LAMPORTS in
+ * worker/src/solana-app-runtime.ts (a test keeps the two equal).
+ */
+export const OWNER_MAX_PRIORITY_FEE_LAMPORTS = 1_000_000n;
 
 export type SignedPermissionTerms = {
   perTradeUsdg: string; dailyUsdg: string; perTradeWsol: string; dailyWsol: string; maxOpsPerDay: number; expiresAtSeconds: string;
+  /** The priority fee the owner pays on top of the signature fee, in lamports ("0" without one). */
+  priorityFeeLamports: string;
 };
 const NOT_SIGNED = "The prepared permission does not match what this page shows. Nothing was signed. Refresh and review your saved limits.";
 function refuse(): never { throw new Error(NOT_SIGNED); }
@@ -39,11 +49,19 @@ export function readPermissionTransaction(transactionBase64: string, expected: {
   const keys = message.staticAccounts.map(String);
   // The owner pays and is the only signer; nothing is loaded from lookup tables.
   if (message.version !== 0 || message.addressTableLookups?.length || keys[0] !== expected.owner || message.header.numSignerAccounts !== 1) refuse();
-  let terms: SignedPermissionTerms | null = null;
+  let terms: Omit<SignedPermissionTerms, "priorityFeeLamports"> | null = null;
+  let unitLimit: bigint | null = null, unitPrice: bigint | null = null;
   for (const instruction of message.instructions) {
     const program = keys[instruction.programAddressIndex];
     const data = Uint8Array.from(instruction.data ?? []);
     const accounts = (instruction.accountIndices ?? []).map((index) => keys[index]);
+    // A priority fee: one SetComputeUnitLimit and one SetComputeUnitPrice, touching no account.
+    if (program === COMPUTE_BUDGET_PROGRAM && accounts.length === 0) {
+      const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+      if (data.length === 5 && data[0] === 2 && unitLimit === null) { unitLimit = BigInt(view.getUint32(1, true)); continue; }
+      if (data.length === 9 && data[0] === 3 && unitPrice === null) { unitPrice = view.getBigUint64(1, true); continue; }
+      refuse();
+    }
     // CreateIdempotent for the owner's and the vault's USDG and wrapped SOL accounts, paid by the owner.
     if (program === ASSOCIATED_TOKEN_PROGRAM && data.length === 1 && data[0] === 1 && accounts[0] === expected.owner
       && (accounts[2] === expected.owner || accounts[2] === expected.vault) && (accounts[3] === SOLANA_USDG_MINT || accounts[3] === WRAPPED_SOL)) continue;
@@ -60,7 +78,11 @@ export function readPermissionTransaction(transactionBase64: string, expected: {
     }
     refuse();
   }
-  return terms ?? refuse();
+  if (!terms || (unitLimit === null) !== (unitPrice === null)) return refuse();
+  // What the runtime charges: ceil(price × limit / 1e6) lamports, never above the cap.
+  const priorityFee = unitLimit !== null && unitPrice !== null ? (unitPrice * unitLimit + 999_999n) / 1_000_000n : 0n;
+  if (priorityFee > OWNER_MAX_PRIORITY_FEE_LAMPORTS) refuse();
+  return { ...terms, priorityFeeLamports: priorityFee.toString() };
 }
 
 /** True only when the signed terms are exactly the saved limits the page showed. */
