@@ -133,19 +133,21 @@ async function workerVerdict(account: unknown): Promise<Verdict> {
 
 /**
  * Variants the vault refuses but the worker's screen (worker/src/solana-market.ts
- * mintFromRpc) does not yet refuse for every swap, so the worker would sign an exit, or
- * a buy, that fails on chain with VaultError::Mint. The fix is a cross-track change to
- * solana-market.ts: refuse a USDG mint carrying any extension outside
- * SOLANA_VAULT_USDG_MINT_EXTENSIONS, a transfer fee above 0 bps or a transfer hook
- * program. Each test below runs and reports, but does not fail, until it lands; then
- * empty this list.
+ * mintFromRpc) does not yet refuse for every swap, with what the worker does today:
+ * it would sign an exit, or a buy, that fails on chain with VaultError::Mint. The fix
+ * is a cross-track change to solana-market.ts: refuse a USDG mint carrying any
+ * extension outside SOLANA_VAULT_USDG_MINT_EXTENSIONS, a transfer fee above 0 bps or a
+ * transfer hook program. Each gap's test pins today's verdict, so it fails the moment
+ * the worker's screen changes either way: when the fix lands, delete the entry (the
+ * test then requires the vault's verdict); a regression elsewhere fails too. Nothing
+ * here is todo or skipped.
  */
-const WORKER_GAPS = new Set([
-  "a newer transfer fee of 25 bps with no maximum",
-  "a newer transfer fee of 25 bps with the largest maximum",
-  "a transfer hook program (the Memo program)",
-  "DefaultAccountState Initialized appended",
-  "GroupPointer appended (the issuer as authority, the mint as group)",
+const WORKER_GAPS = new Map<string, Verdict>([
+  ["a newer transfer fee of 25 bps with no maximum", "accepts"],
+  ["a newer transfer fee of 25 bps with the largest maximum", "refuses buys only"],
+  ["a transfer hook program (the Memo program)", "refuses buys only"],
+  ["DefaultAccountState Initialized appended", "accepts"],
+  ["GroupPointer appended (the issuer as authority, the mint as group)", "accepts"],
 ]);
 
 describe("the mainnet USDG mint, as the worker and the vault see it", () => {
@@ -160,7 +162,10 @@ describe("the mainnet USDG mint, as the worker and the vault see it", () => {
       fixture.decoded.extensions.map((name) => name[0]!.toLowerCase() + name.slice(1)));
     for (const { extension } of parsed.extensions as { extension: string }[]) assert.ok(SOLANA_VAULT_USDG_MINT_EXTENSIONS.includes(extension), extension);
     assert.ok(fixture.variants.some((v) => v.vault === "refuses"));
-    for (const name of WORKER_GAPS) assert.ok(fixture.variants.some((v) => v.name === name && v.vault === "refuses"), name);
+    for (const [name, today] of WORKER_GAPS) {
+      assert.ok(fixture.variants.some((v) => v.name === name && v.vault === "refuses"), name);
+      assert.notEqual(today, "refuses", `${name}: a gap the worker already closes`);
+    }
   });
   it("is decoded by Agave's own jsonParsed decoder, and this file decodes every variant exactly as Agave does", () => {
     assert.equal(agave.source, "usdg-mainnet-mint.json");
@@ -175,11 +180,12 @@ describe("the mainnet USDG mint, as the worker and the vault see it", () => {
     }
   });
   for (const variant of fixture.variants) {
-    const gap = WORKER_GAPS.has(variant.name);
-    it(`${variant.name}: the vault ${variant.vault === "accepts" ? "trades it both ways, and so does the worker" : "refuses every swap, and so must the worker, before signing"}`,
-      gap ? { todo: "cross-track: worker/src/solana-market.ts must refuse this USDG mint for every swap (see WORKER_GAPS)" } : {},
-      async () => {
-        assert.equal(await workerVerdict(agaveAccount(variant)), variant.vault);
-      });
+    const today = WORKER_GAPS.get(variant.name);
+    const vault = variant.vault === "accepts" ? "trades it both ways, and so does the worker" : "refuses every swap, and so must the worker, before signing";
+    it(`${variant.name}: the vault ${vault}${today ? ` (gap: the worker ${today}, until solana-market.ts refuses it)` : ""}`, async () => {
+      const verdict = await workerVerdict(agaveAccount(variant));
+      if (today === undefined) assert.equal(verdict, variant.vault);
+      else assert.equal(verdict, today, `the worker's screen changed for "${variant.name}": if it now refuses, as the vault does, delete it from WORKER_GAPS`);
+    });
   }
 });
