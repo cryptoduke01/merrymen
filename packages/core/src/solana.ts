@@ -7,6 +7,13 @@ import { CHAINS, SOLANA_USDG_MINT, canonicalId } from "./ids";
 
 export const SOLANA_SLIPPAGE_BPS_MAX = 100;
 export const SOLANA_QUOTE_MAX_AGE_MS = 30_000;
+/**
+ * Refused activation, for good: the vault's session epoch moved more than this registration's own
+ * landing since it was prepared (a revocation landed before it, beside it or outside Merrymen). Epochs
+ * only rise, so it is never activated: the page drops its session key. Here, not in the worker's trading
+ * store (which says it), so the page can recognise it without importing the store.
+ */
+export const SOLANA_REGISTERED_AFTER_REVOKE = "A revocation or another permission landed on Solana after this permission was prepared, so it is not activated. If it is still active on Solana, revoke again, then prepare a new permission.";
 const U64_MAX = 18_446_744_073_709_551_615n;
 
 /** Safe to show at a CLI boundary; messages never interpolate caller values. */

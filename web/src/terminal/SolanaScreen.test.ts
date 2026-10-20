@@ -15,6 +15,7 @@ import { JSDOM } from "jsdom";
 import { runSolanaRecoverCommand } from "../../../worker/src/solana-recover-command";
 import { SOLANA_VAULT_RELEASES as TOOL_RELEASES, solanaRecoveryProgramTrust } from "../../../worker/src/solana-recover";
 import { SOLANA_OTHER_SIGN_IN } from "../lib/solana-sign-in";
+import { SOLANA_REGISTERED_AFTER_REVOKE } from "../../../packages/core/src/solana";
 
 const OWNER = "So11111111111111111111111111111111111111112";
 const TENANT = `0x${"11".repeat(20)}`;
@@ -1081,6 +1082,28 @@ test("a confirmed permission whose activation is refused keeps its session key w
   assert.equal(signCount, 1); assert.equal(activations, 2);
   const seed = Buffer.from(String(activation!.sessionSecretKey), "base64");
   assert.equal(base58Encode(ed25519.getPublicKey(seed)), sessionPublicKey);
+});
+
+test("an activation refused because a revocation landed after the permission was prepared drops its session key instead of offering a retry", async () => {
+  state = initial("live"); state.runtime.live.programId = PROGRAM;
+  const saved = liveLimits(); state.binding.limits = saved;
+  let activations = 0;
+  respond = async (path, body) => {
+    if (path === "status") return json(state);
+    if (path === "setup" && body?.stage === "prepare") return json({ setup: await permissionTransaction(String(body.sessionPublicKey), saved) });
+    if (path === "setup" && body?.stage === "submit") {
+      Object.assign(state.runtime.live, { ownerTransaction: { signature: "fixture-chain-signature", status: "finalized", kind: "session" } });
+      return json({ registration: { signature: "fixture-chain-signature", status: "finalized" } });
+    }
+    if (path === "setup" && body?.stage === "activate") { activations++; return refusal(SOLANA_REGISTERED_AFTER_REVOKE); }
+    throw new Error("Unexpected fixture route");
+  };
+  await render(); await register();
+  assert.equal(activations, 1);
+  assert.ok(ui.container.textContent!.includes(`${SOLANA_REGISTERED_AFTER_REVOKE} Its session key has been discarded from this page.`), ui.container.textContent!);
+  assert.doesNotMatch(ui.container.textContent!, /session key was kept|Finish permission registration again shortly/);
+  assert.equal(button("Finish permission registration"), undefined, "no retry that cannot succeed");
+  assert.equal(signCount, 1);
 });
 
 test("a refused permission submit discards the signed bytes and the next click prepares a fresh one", async () => {

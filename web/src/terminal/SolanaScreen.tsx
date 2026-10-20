@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ed25519 } from "@noble/curves/ed25519";
 import { CHAINS, SOLANA_USDG_MINT, base58Encode } from "../../../packages/core/src/ids";
-import { SOLANA_QUOTE_MAX_AGE_MS, type SolanaPaperLimits, type SolanaQuote } from "../../../packages/core/src/solana";
+import { SOLANA_QUOTE_MAX_AGE_MS, SOLANA_REGISTERED_AFTER_REVOKE, type SolanaPaperLimits, type SolanaQuote } from "../../../packages/core/src/solana";
 import type { SolanaPaperSnapshot } from "../../../worker/src/solana-paper-store";
 import type { SolanaBinding } from "@/lib/solana-binding-store";
 import { privyEnabled } from "@/lib/privy-client";
@@ -573,6 +573,12 @@ function ConnectedSolana() {
     try { await api("setup", { stage: "activate", signature: pending.signature, sessionSecretKey: pending.secret }); }
     catch (e) {
       if (!refusedByServer(e)) throw e;
+      // For good: a revocation landed after this permission was prepared, and epochs only rise, so it is
+      // never activated. Keeping its session key would only offer a retry that cannot succeed.
+      if (e instanceof RequestError && e.message === SOLANA_REGISTERED_AFTER_REVOKE) {
+        setRegistration(null);
+        throw new Error(`${e.message} Its session key has been discarded from this page.`);
+      }
       // The server answers activation from its record of this permission and
       // the vault as its RPC sees it, which can lag the finalized permission.
       // The key is dropped only when the server no longer holds the permission.

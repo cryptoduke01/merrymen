@@ -1,5 +1,6 @@
 /** Tenant-bound Solana paper books and live broadcast journal, on SQLite or Postgres. */
 import { CHAINS, SOLANA_USDG_MINT, canonicalId } from "../../packages/core/src/ids";
+import { SOLANA_REGISTERED_AFTER_REVOKE } from "../../packages/core/src/solana";
 import { SOLANA_MAX_OPS_PER_DAY, parseSolanaRawAmount, parseSolanaSwapIntent, requireSolanaLiveSellLimits, solanaPaperAgentId, validateSolanaAccountLimits, validateSolanaQuote,
   type SolanaPaperLimits, type SolanaQuote } from "../../packages/core/src/solana";
 import { SOLANA_SYSTEM_PROGRAM, SOLANA_WRAPPED_SOL_MINT } from "../../packages/core/src/solana-live";
@@ -157,8 +158,8 @@ export const SOLANA_WITHDRAWAL_RECORDED_OUTSIDE = "This withdrawal is already re
 function externalEvidence(signature: string): [string, string] { return [`external:${signature}:${SOLANA_USDG_MINT}`, `external:${signature}:${SOLANA_WRAPPED_SOL_MINT}`]; }
 /** Refused activation: an unsigned revocation prepared beside this registration can still be signed. */
 export const SOLANA_REVOKE_PREPARED_BESIDE = "A revocation of this permission was prepared and can still be signed in your wallet. Sign it to revoke, or let it lapse (about a minute) and finish registration then.";
-/** Refused activation: the vault's session epoch moved more than this registration's own landing since it was prepared. */
-export const SOLANA_REGISTERED_AFTER_REVOKE = "A revocation or another permission landed on Solana after this permission was prepared, so it is not activated. If it is still active on Solana, revoke again, then prepare a new permission.";
+/** Refused activation: the vault's session epoch moved more than this registration's own landing since it was prepared (core, so the page can read it). */
+export { SOLANA_REGISTERED_AFTER_REVOKE };
 /** The session epoch a registration prepared at `priorSessionEpoch` leaves when it lands with nothing else moving it; null when unreadable. */
 export function solanaRegisteredEpoch(priorSessionEpoch: string | undefined): bigint | null {
   return priorSessionEpoch !== undefined && /^(0|[1-9][0-9]{0,19})$/.test(priorSessionEpoch) ? BigInt(priorSessionEpoch) + 1n : null;
