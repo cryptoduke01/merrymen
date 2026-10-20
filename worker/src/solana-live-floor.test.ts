@@ -18,7 +18,7 @@ import { createSolanaAgent } from "./solana-agent";
 import { createSolanaAppRuntime } from "./solana-app-runtime";
 import type { SolanaSignedSubmission } from "./solana-executor";
 import type { SolanaLiveRead, SolanaLiveRpc } from "./solana-live-rpc";
-import { PYTH_SOL_USD_ACCOUNT, SOLANA_PYTH_FEEDS, readSolanaReferencePrice } from "./solana-reference-price";
+import { PYTH_SOL_USD_ACCOUNT, SOLANA_PYTH_FEEDS, readSolanaReferencePrice, solanaPythGeneration, type SolanaPythGeneration } from "./solana-reference-price";
 import { pythAccount } from "./solana-reference-price-fixture";
 import { SOLANA_MAINNET_GENESIS_HASH } from "./solana-rpc";
 import { ensureSolanaTradingSchema, SolanaTradingStore } from "./solana-trading-store";
@@ -310,6 +310,68 @@ test("a WSOL withdrawal is valued from the runtime's generation, and a store kee
   const same = new SolanaTradingStore(f.db, f.scope, () => NOW, undefined, () => "upgraded");
   assert.equal(await same.saveSetup(saved), true);
   assert.equal((await same.setup())!.withdrawValuation?.reference.reference.account, UPGRADED.account);
+});
+
+test("with MERRYMEN_SOLANA_PYTH_GENERATION=upgraded, live trades are read, checked by the executor and admitted by the store on the upgraded account alone", async t => {
+  // The process names the other generation: a read or check that consulted it would refuse these trades.
+  processGeneration(t, "current");
+  for (const [inputMint, amountRaw, cash, wsol, notional] of [[SOLANA_WRAPPED_SOL_MINT, "100000000", 50_000_000n, 1_000_000_000n, "15000000"],
+    [SOLANA_USDG_MINT, "25000000", 100_000_000n, 0n, "25000000"]] as const) {
+    const f = await fixture(t, { cash, wsol, mark: "fair", build: { kind: "fair" } });
+    const placed = await f.runtime({ MERRYMEN_SOLANA_PYTH_GENERATION: "upgraded" }).trade(f.scope, { mode: "live", intent: manual(inputMint, amountRaw, "upgraded-trade") });
+    assert.equal("status" in placed && placed.status, "pending", inputMint);
+    // The runtime read the upgraded account and never the current one; the executor signed only
+    // above that bound's floor, and the store admitted the bound as evidence from it.
+    assert.deepEqual(f.pythReads, [UPGRADED.account], inputMint);
+    const [row] = await f.submissions();
+    assert.equal(row!.submission.risk.reference.reference.account, UPGRADED.account, inputMint);
+    assert.ok(BigInt(row!.submission.minOutAmount) >= BigInt(row!.submission.risk.reference.minOutFloor), inputMint);
+    assert.equal(row!.notional_raw, notional, inputMint); assert.equal(f.sends.length, 1, inputMint);
+  }
+});
+
+test("a generation mismatch refuses: the other generation's account at the configured address, or the configured account gone, with no fallback", async t => {
+  processGeneration(t, undefined);
+  const sell = manual(SOLANA_WRAPPED_SOL_MINT, "100000000", "mismatch-sell");
+  // Set to upgraded, and the RPC serves, at the upgraded address, an account the current receiver owns.
+  const swapped = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" } });
+  swapped.served.set(UPGRADED.account, () => pythAccount({ price: 15_000_000_000n, conf: 1_500_000n, publishTimeMs: NOW, owner: CURRENT.receiverProgram }));
+  await clearReferenceAlerts();
+  let said = await referenceAlerts(t, () => assert.rejects(swapped.runtime({ MERRYMEN_SOLANA_PYTH_GENERATION: "upgraded" }).trade(swapped.scope, { mode: "live", intent: sell }),
+    /refused: risk/));
+  assert.deepEqual(said.map(line => line.split(" — ")[0]), [`[alert] solana-reference-price refused: reason=foreign generation=upgraded account=${UPGRADED.account} ` +
+    "failingForMs=0 refused=1 suppressed=0"]);
+  assert.deepEqual(swapped.pythReads, [UPGRADED.account]);
+  assert.deepEqual(await swapped.submissions(), []); assert.equal(swapped.sends.length, 0);
+  // Set to current, whose account is gone while the upgraded one is fresh: refused, and the upgraded account is never read.
+  const closed = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" } });
+  closed.served.set(CURRENT.account, () => null);
+  await clearReferenceAlerts();
+  said = await referenceAlerts(t, () => assert.rejects(closed.runtime({ MERRYMEN_SOLANA_PYTH_GENERATION: "current" }).trade(closed.scope, { mode: "live", intent: sell }),
+    /refused: risk/));
+  assert.deepEqual(said.map(line => line.split(" — ")[0]), [`[alert] solana-reference-price refused: reason=missing generation=current account=${CURRENT.account} ` +
+    "failingForMs=0 refused=1 suppressed=0"]);
+  assert.deepEqual(closed.pythReads, [CURRENT.account]);
+  assert.deepEqual(await closed.submissions(), []); assert.equal(closed.sends.length, 0);
+});
+
+test("a signed trade whose bound came from one generation is refused at admission by a store that checks the other, or whose setting names none", async t => {
+  processGeneration(t, undefined);
+  // Signed and recorded by a runtime set to upgraded ...
+  const signer = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" } });
+  await signer.runtime({ MERRYMEN_SOLANA_PYTH_GENERATION: "upgraded" }).trade(signer.scope, { mode: "live", intent: manual(SOLANA_WRAPPED_SOL_MINT, "100000000", "carried") });
+  const submission = (await signer.submissions())[0]!.submission;
+  assert.equal(submission.risk.reference.reference.account, UPGRADED.account);
+  // ... then offered for admission to the same account's journal on a fresh database, checked as each store is set.
+  const checks: Array<[string, () => SolanaPythGeneration, boolean]> = [["current", () => "current", false],
+    ["a setting that names none", () => solanaPythGeneration({ MERRYMEN_SOLANA_PYTH_GENERATION: "both" }), false], ["upgraded", () => "upgraded", true]];
+  for (const [name, generation, admitted] of checks) {
+    const other = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" } });
+    const journal = new SolanaTradingStore(other.db, other.scope, () => NOW, undefined, generation);
+    if (admitted) assert.equal(await journal.recordSigned(structuredClone(submission)), true, name);
+    else await assert.rejects(journal.recordSigned(structuredClone(submission)), /independent SOL price evidence is missing, stale or altered/, name);
+    assert.equal((await other.submissions()).length, admitted ? 1 : 0, name);
+  }
 });
 
 test("a stale independent price refuses even a fair live trade, and says the [alert] an operator pages on", async t => {
