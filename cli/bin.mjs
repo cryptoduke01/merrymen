@@ -1666,7 +1666,10 @@ switch (cmd) {
       cwd: ROOT,
       // The worker's IPC channel closes when this process dies for any reason,
       // SIGKILL and the OOM killer included, so the worker never trades as an orphan.
+      // The variable tells the worker to expect that channel: one that is
+      // already closed when the worker starts means this command is gone.
       stdio: agent ? ["inherit", "inherit", "inherit", "ipc"] : "inherit",
+      ...(agent ? { env: { ...process.env, MERRYMEN_SOLANA_WORKER_IPC: "1" } } : {}),
       shell: false,
     });
     const running = () => child.exitCode === null && child.signalCode === null;
@@ -1675,23 +1678,32 @@ switch (cmd) {
     // signals: its console delivers Ctrl+C to the child directly, while
     // child.kill there would terminate the child abruptly instead.
     if (process.platform !== "win32") {
-      let presses = 0;
+      // Signals closer together than this are one press delivered twice: the
+      // terminal's copy and a launcher's (npx, npm run) forwarded copy.
+      // Matches SOLANA_WORKER_REPEAT_MS in worker/src/solana-agent-cli.ts.
+      const REPEAT_MS = 500;
+      let presses = 0, lastPressAt = 0;
       for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
         process.on(signal, () => {
           if (!running()) return;
-          presses++;
           if (!agent) { child.kill(signal); return; }
-          // One message per signal this command received, instead of a second
+          const at = Date.now();
+          if (presses > 0 && at - lastPressAt < REPEAT_MS) return;
+          presses++; lastPressAt = at;
+          // One message per press this command received, instead of a second
           // signal: a terminal Ctrl+C already reached the worker itself, so a
           // forwarded copy would look like a second press. The second press
-          // forces the stop; a worker too wedged to read it is killed. A
-          // closed channel means the worker already finished and is exiting.
-          const force = presses >= 2;
-          if (child.connected) {
+          // forces the stop; a worker too wedged to act on it is killed.
+          const force = presses >= 2, connected = child.connected;
+          if (connected) {
             try { child.send({ type: "merrymen-solana-worker-stop", force, signal }, () => {}); } catch { /* exiting */ }
+          } else {
+            // The worker closes the channel only once its run has finished, so
+            // nothing is in flight: it exits at once with its own exit code.
+            child.kill(signal);
           }
           if (force) {
-            bad("Forcing the Solana worker to stop.");
+            if (connected) bad("Forcing the Solana worker to stop.");
             setTimeout(() => { if (running()) child.kill("SIGKILL"); }, 3_000).unref();
           }
         });
@@ -1744,7 +1756,7 @@ switch (cmd) {
   ${bold("merrymen selftest")}       fire one arrow through the whole pipeline
   ${bold("merrymen preflight")}      can it actually trade? balances, chain, caps, sizing
   ${bold("merrymen solana-paper")}   local Solana paper book and quotes (--help)
-  ${bold("merrymen solana-agent")}   run explicitly enabled Solana strategies
+  ${bold("merrymen solana-agent")}   run explicitly enabled Solana strategies; Ctrl+C twice forces a stop (--help)
   ${bold("merrymen solana-recover")} withdraw your Solana vault with your own key (--help)
   ${bold("merrymen export")}         write the hash-chained audit journal (stdout)
   ${bold("merrymen verify")}         check an export — reads only the file you hand it
