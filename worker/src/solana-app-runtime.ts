@@ -38,8 +38,15 @@ import { ensureSolanaTradingSchema, OPERATOR_HOLD, solanaExpiredAttemptAllowance
  *   transaction that is already saved (and was broadcast). Its outcome is
  *   unknown, never refused: the web answers it as the unknown-outcome 503
  *   whatever the message (vault effect missing, unreadable account data...).
- * - not-saved: submitted owner bytes refused before anything was saved or
- *   sent. The page may discard them; resubmitting the same bytes cannot help.
+ * - not-saved: THIS request saved and sent nothing: the submitted owner bytes
+ *   were refused before anything was written, and resubmitting them cannot
+ *   help. It says nothing about earlier requests. The same bytes may have been
+ *   saved, broadcast and even finalized by an earlier submission, after which
+ *   a new prepare replaced that setup, so they no longer match it and are
+ *   refused here. The page must keep deciding retries from whether it sent the
+ *   bytes itself and from the server's record (outcomeAfterRefusal), never
+ *   from notSaved alone, and must never tell the owner that bytes it already
+ *   sent were not sent.
  */
 export class SolanaAppRuntimeError extends Error {
   constructor(readonly code: "configuration" | "permission" | "invalid" | "pending" | "outcome-unknown" | "not-saved", message: string) {
@@ -571,7 +578,9 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
   }
   async function submitOwner(scope: SolanaAccountScope, input: { signedTransactionBase64: string }, kind: "session" | "owner") {
     const s = await store(scope), setup = await s.setup();
-    // Until saveSetup succeeds nothing is recorded or sent: every refusal is "not-saved".
+    // Until saveSetup succeeds this request records and sends nothing: every refusal
+    // is "not-saved". Bytes an earlier request saved and sent, whose setup a later
+    // prepare replaced, are refused this way too (see SolanaAppRuntimeError).
     const notSaved: (message: string) => never = message => fail(message, "not-saved");
     if (!setup || (kind === "session" ? (setup.kind ?? "session") !== "session" : setup.kind === "session" || !setup.kind)) notSaved("Prepare this owner transaction before signing it.");
     let transaction: ReturnType<ReturnType<typeof getTransactionDecoder>["decode"]>;

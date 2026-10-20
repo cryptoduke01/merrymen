@@ -100,12 +100,19 @@ const NO_LIVE_ROUTE = "A route for this trade could not be prepared right now. N
 /** SolanaMarketError zero-output: no route returns anything for this amount (dust). */
 const TOO_SMALL = "This amount is too small to trade: no route returns anything for it. Nothing was sent or recorded. Try a larger amount.";
 /**
- * GA1's 'not-saved': owner or permission bytes refused before anything was
- * saved or sent. The answer carries notSaved: true so the page can discard
- * them (resubmitting the same bytes cannot help) and prepare again. Bytes that
- * are malformed or not the reviewed transaction are a 400; refusals because of
- * the server's state (nothing prepared, another transaction saved, the prepare
- * window expired, settings changed) are a 409.
+ * GA1's 'not-saved': THIS request saved and sent nothing; the owner or
+ * permission bytes were refused before anything was written. The answer
+ * carries notSaved: true so the page can stop resubmitting them (that cannot
+ * help) and prepare again. Bytes that are malformed or not the reviewed
+ * transaction are a 400; refusals because of the server's state (nothing
+ * prepared, another transaction saved, the prepare window expired, settings
+ * changed) are a 409.
+ *
+ * notSaved says nothing about earlier requests. Bytes an earlier request saved,
+ * broadcast and even finalized are refused this way once a later prepare has
+ * replaced their setup. The page must keep deciding retries from whether it
+ * sent the bytes itself plus the server's record (outcomeAfterRefusal), and
+ * must never tell the owner that nothing was sent on notSaved alone.
  */
 const NOT_SAVED_MALFORMED: ReadonlySet<string> = new Set([
   "Invalid encoded Solana transaction.",

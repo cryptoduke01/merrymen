@@ -1218,6 +1218,25 @@ test("owner bytes refused before anything is saved are 'not-saved'; trouble with
   } finally { f.raw.close(); }
 });
 
+test("not-saved speaks only for this request: bytes an earlier request saved, sent and finalized are refused that way once replaced", async () => {
+  const f = await fixture();
+  try {
+    await readyLive(f); f.controls.vaultNativeLamports = 100;
+    const first = await f.app.prepareOwnerAction(f.scope, { action: "withdraw-sol", amountRaw: "50" });
+    const signedTransactionBase64 = await f.sign(first.transactionBase64);
+    const { signature } = await f.app.submitOwnerAction(f.scope, { signedTransactionBase64 });
+    assert.equal(f.controls.sends, 1);
+    landOwner(f);
+    assert.equal((await f.app.submitOwnerAction(f.scope, { signedTransactionBase64 })).status, "finalized");
+    // A new prepare replaces the setup; the old bytes no longer match it.
+    await f.app.prepareOwnerAction(f.scope, { action: "withdraw-sol", amountRaw: "10" });
+    await rejectsWith(f.app.submitOwnerAction(f.scope, { signedTransactionBase64 }), "not-saved", /does not match/, "landed earlier");
+    // This request saved and sent nothing, but the bytes did land: the server's record still shows it.
+    assert.equal(f.controls.sends, 1);
+    assert.deepEqual(await rows(f, `SELECT evidence_id,kind FROM solana_runtime_cashflows WHERE kind='withdraw-sol'`), [{ evidence_id: signature, kind: "withdraw-sol" }]);
+  } finally { f.raw.close(); }
+});
+
 test("a permission is prepared only from limits within the account bounds, paper-shaped ones included, before any chain read", async () => {
   const f = await fixture();
   try {
