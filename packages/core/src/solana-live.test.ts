@@ -4,6 +4,7 @@ import { createHash, createPrivateKey, createPublicKey } from "node:crypto";
 import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join as pathJoin } from "node:path";
+import { pathToFileURL } from "node:url";
 import { address, getProgramDerivedAddress } from "@solana/kit";
 import {
   base58Decode,
@@ -378,6 +379,21 @@ const CONTRACT = pathJoin(
   "solana",
 );
 const contractFile = (p: string) => readFileSync(pathJoin(CONTRACT, p), "utf8");
+/**
+ * The program id lib.rs declares (declare_id!), parsed by CI's own build
+ * record (scripts/ci/solana-program-record.mjs declaredProgramId). The
+ * runtime fixtures below name it, so a reviewed declare_id change (the
+ * production id) only needs them rewritten, never this code changed.
+ * SOLANA_VAULT_LOCAL_TEST_PROGRAM stays the id the TS-only tests above use and
+ * the one the live runtime refuses.
+ */
+async function declaredVaultProgram(): Promise<string> {
+  const script = pathJoin(CONTRACT, "..", "..", "scripts", "ci", "solana-program-record.mjs");
+  const { declaredProgramId } = (await import(pathToFileURL(script).href)) as {
+    declaredProgramId(libRs: string): string;
+  };
+  return declaredProgramId(contractFile("programs/merrymen-vault/src/lib.rs"));
+}
 /** Active `key = value` lines of one TOML table, comments dropped. */
 function tomlTable(text: string, table: string): Map<string, string> {
   const out = new Map<string, string>();
@@ -458,7 +474,7 @@ function fixtureRoute(
   return data;
 }
 async function buildAbiFixture(): Promise<string> {
-  const program = programAddress;
+  const program = await declaredVaultProgram();
   const usdg = SOLANA_USDG_MINT;
   const wsol = live.SOLANA_WRAPPED_SOL_MINT;
   const classic = live.SOLANA_CLASSIC_TOKEN_PROGRAM;
@@ -686,6 +702,23 @@ describe("Solana custody instruction fixture", () => {
       expected,
       "stale: rerun with MERRYMEN_WRITE_SOLANA_ABI_FIXTURE=1, then contracts/solana/test.sh",
     );
+  });
+  it("names the program lib.rs declares, as the recovery transactions do", async () => {
+    // custody.rs and tests/recovery.rs run both fixtures against the compiled program and
+    // require its declare_id. A reviewed declare_id change (the production id) rewrites
+    // both: MERRYMEN_WRITE_SOLANA_ABI_FIXTURE=1 here and MERRYMEN_WRITE_SOLANA_RECOVERY_FIXTURE=1
+    // in worker/src/solana-recover.test.ts, then contracts/solana/test.sh and build.sh --record.
+    const declared = await declaredVaultProgram();
+    const abi = JSON.parse(readFileSync(ABI_FIXTURE, "utf8")) as {
+      program: string;
+      steps: { programId: string }[];
+    };
+    assert.equal(abi.program, declared);
+    for (const step of abi.steps) assert.equal(step.programId, declared);
+    const recovery = contractFile(
+      "runtime-tests/fixtures/recovery-transactions.txt",
+    );
+    assert.deepEqual(recovery.match(/^program \S+$/gm), [`program ${declared}`]);
   });
   it("derives the seeded identities like ed25519", () => {
     // RFC 8032 test 1 secret key gives its public key; ours use the same derivation.
